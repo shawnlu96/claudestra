@@ -35,6 +35,12 @@ const owner = (t: number) => ({ actor: "owner", now: t });
 const walk = (id: string, ...steps: [string, string, number][]) => steps.forEach(([from, to, t]) => moveStage(db, owner(t), { taskId: id, from: from as never, to: to as never }));
 const board = (): DagBoard => db.transaction(() => dagBoard(db, P, NOW)).deferred();
 const node = (b: DagBoard, key: string, f = F): BoardNode => b.features.find((x) => x.id === f)!.nodes.find((n) => n.key === key)!;
+/** 绕过 planRewrite 直接写一版并设为当前版（模拟手改库 / L2 之前的历史） */
+function handVersion(version: number, createdAt: number, nodes: unknown) {
+  db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes, cancels, scopeChange, askId) "
+    + "VALUES (?, ?, 'new_issue', '手改', 'hand', 'hand', ?, ?, '[]', 0, NULL)").run(F, version, createdAt, J(nodes));
+  db.prepare("UPDATE features SET currentVersion = ? WHERE id = ?").run(version, F);
+}
 const rewrite = (nodes: unknown, ...more: string[]) => run(PM, "dag-rewrite", "i28", "--rev", rev(), "--nodes", J(nodes), "--reason-kind", "new_issue", "--reason", "审查发现新问题", ...more);
 
 /** v1：T1 已完成 → T2 进行中（agent-exec）→ T3 没开始；T4 进行中、卡上只记了 assignee；L / Z 计划节点，W 依赖 Z */
@@ -198,15 +204,41 @@ describe("版本与对比", () => {
 
   test("绕过 planRewrite 改写已完成节点：投影用快照的 oneLine 不拿卡标题顶，diff 进 rewrittenDone", () => {
     const v1 = getDagVersion(db, F, 1)!;
-    const nodes = v1.nodes.map((n) => (n.key === "T1" ? { ...n, oneLine: "被手改的一句话" } : n));
-    db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes, cancels, scopeChange, askId) "
-      + "VALUES (?, 2, 'new_issue', '手改', 'hand', 'hand', 5000, ?, '[]', 0, NULL)").run(F, J(nodes));
-    db.prepare("UPDATE features SET currentVersion = 2 WHERE id = ?").run(F);
+    handVersion(2, 5000, v1.nodes.map((n) => (n.key === "T1" ? { ...n, oneLine: "被手改的一句话" } : n)));
     const b = board();
     expect(node(b, "T1")).toMatchObject({ oneLine: "被手改的一句话", title: "任务 T1", phase: "done" });
     const d = featureDiff(db, getFeature(db, F)!, undefined, undefined, NOW);
     expect(d).toMatchObject({ from: 1, to: 2, rewrittenDone: ["T1"] });
     expect(d.diff.carried.filter((c) => c.changed).map((c) => c.key)).toEqual(["T1"]);
+  });
+
+  test("跨多版：完成前合法改过、之后原样带入的不算；完成后又被改的才算——逐次重写按那一刻核对", () => {
+    const v1 = getDagVersion(db, F, 1)!.nodes;
+    const t2 = (oneLine: string, status: string) => v1.map((n) => (n.key === "T2" ? { ...n, oneLine, status } : n));
+    handVersion(2, 850, t2("T2 改过一次", "build"));
+    db.prepare("UPDATE tasks SET stage = 'done' WHERE id = 'T2'").run();
+    db.prepare("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (950, 'owner', ?, 'T2', 'stage', '', ?)").run(P, J({ from: "build", to: "done" }));
+    handVersion(3, 1200, [...t2("T2 改过一次", "done"), { key: "P", taskId: null, oneLine: "新计划", deps: [], estimate: "", inheritedFrom: null, status: "planned" }]);
+    const f = () => getFeature(db, F)!;
+    expect(featureDiff(db, f(), 1, 2, NOW).rewrittenDone).toEqual([]);
+    expect(featureDiff(db, f(), 1, 3, NOW).rewrittenDone).toEqual([]);
+    expect(featureDiff(db, f(), 1, 3, NOW).diff.carried.find((c) => c.key === "T2")!.changed).toBe(true);
+    handVersion(4, 1300, t2("T2 完成后又被改", "done"));
+    expect(featureDiff(db, f(), 1, 4, NOW).rewrittenDone).toEqual(["T2"]);
+    expect(featureDiff(db, f(), 2, 4, NOW).rewrittenDone).toEqual(["T2"]);
+  });
+
+  test("快照里已经写着别的项目的卡（库被手改）：statusAtVersion 也清空，rewrittenDone 不拿它的快照状态说话", () => {
+    const v1 = getDagVersion(db, F, 1)!.nodes;
+    const withX = (oneLine: string) => v1.map((n) => (n.key === "Z" ? { ...n, taskId: "X1", oneLine, status: "done" } : n));
+    handVersion(2, 5000, withX("绑了别的项目"));
+    handVersion(3, 6000, withX("又改了一次"));
+    expect(node(board(), "Z")).toMatchObject({ missing: true, status: null, statusAtVersion: null, title: null });
+    const d = db.transaction(() => featureDetail(db, getFeature(db, F)!, 2, NOW)).deferred();
+    expect(d.snapshot!.nodes.find((n) => n.key === "Z")).toMatchObject({ missing: true, statusAtVersion: null });
+    const diff = featureDiff(db, getFeature(db, F)!, 2, 3, NOW);
+    expect(diff.diff.carried.find((c) => c.key === "Z")!.changed).toBe(true);
+    expect(diff.rewrittenDone).toEqual([]);
   });
 
   test("越界与非法：from ≥ to → invalid；不存在的版本 / 没有 pending → not_found", () => {

@@ -1,7 +1,7 @@
 /**
  * 子 DAG 看板的只读投影（i28-L4，docs/design/feature-dag.md「看板读接口」）：DAG 图与进度图共用一份快照。
  * 节点 = dagSnapshot 的 NodeView 再叠上卡的三态 / 谁在做 / 节点内进度条；agent 行从同一批节点反推，两张图因此对得上。
- * 只出本项目的卡：projectNodes 按 taskId 现读不核项目，这里把别的项目的卡和找不到的卡一律当 missing，字段全空。
+ * 只出本项目的卡：projectNodes 按 taskId 现读不核项目，这里把别的项目的卡和找不到的卡一律当 missing，字段全空（含快照里的 statusAtVersion）。
  * 调用方负责在一个 deferred 读事务里调（schedulerProjectView 嵌套进去是 SAVEPOINT，读的是同一份快照）。只读库，不写。
  */
 import type { Database } from "bun:sqlite";
@@ -24,7 +24,12 @@ interface BoardHandler {
   since: number;
 }
 
-export interface BoardNode extends NodeView {
+export interface BoardNode extends Omit<NodeView, "statusAtVersion">, BoardNodeExtra {
+  /** 快照里记的状态；missing 节点为 null——别的项目的卡在快照里的阶段也不出（库被手改过才会有） */
+  statusAtVersion: NodeView["statusAtVersion"] | null;
+}
+
+interface BoardNodeExtra {
   phase: NodePhase;
   round: number | null;
   /** 只有进行中、卡在本项目里的节点有；agent 为空时（审查员是子 agent 等）用当前那一步的执行人补 */
@@ -131,7 +136,8 @@ export function boardNodes(ctx: BoardCtx, views: readonly NodeView[]): BoardNode
     const task = ownTask(ctx, v.taskId);
     const phase = nodePhase(v.taskId, task?.stage ?? null);
     const lost = foreign.has(v.key);
-    const base: NodeView = lost ? { ...v, status: null, title: null, satisfied: false, ready: false, missing: true }
+    const base: Omit<BoardNode, keyof BoardNodeExtra> = lost
+      ? { ...v, status: null, statusAtVersion: null, title: null, satisfied: false, ready: false, missing: true }
       : { ...v, ready: v.ready && !v.deps.some((d) => foreign.has(d)) };
     if (!task) return { ...base, phase, round: null, handler: null, stepLine: null, since: null, pr: null, branch: null };
     const info = lineOf(ctx, task);
