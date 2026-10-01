@@ -127,7 +127,7 @@ describe("T68 durable scheduler facts", () => {
     } finally { f.close(); }
   });
 
-  test("dispatch file and worker slot leases survive receipt and review until the card reaches live", () => {
+  test("dispatch leases survive receipts; file leases last until the card reaches live", () => {
     const f = fixture();
     try {
       const a = f.workflow("T1"), b = f.workflow("T2");

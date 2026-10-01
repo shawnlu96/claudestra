@@ -75,8 +75,8 @@ describe("claim", () => {
       bindNode(db, { actor: PM, now: now++ }, { id: FID, rev: getFeature(db, FID)!.rev, key: "a", taskId: "i28-a" });
     }],
     ["车道变了（项目里新开了重叠的卡）", () => createTask(db, { actor: PM, now: now++ }, { project: P, id: "T9", title: "x", kind: "code", extra: { fileGlobs: ["src/lib/a.ts"] } })],
-    ["容量满了", () => {
-      for (const id of ["T1", "T2", "T3"]) {
+    ["总在途达到 maxActiveWorkers × 3", () => {
+      for (const id of ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"]) {
         createTask(db, { actor: PM, now: now++ }, { project: P, id, title: id, kind: "code" });
         db.query(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
           VALUES (?, ?, 'code', 3, 'auto', 'claude', 'x', 1, 1, 1)`).run(id, P);

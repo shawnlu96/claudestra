@@ -11,6 +11,8 @@ import type { RemotePolicy } from "./scheduler-config.js";
 import { placeFor, PEER_PLACEMENT } from "./scheduler-placement.js";
 import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers, localReviewerCount, localWriterCount } from "./scheduler-pool-facts.js";
+import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
+import { newLocalWriteRoom } from "./scheduler-slot-hold.js";
 
 export type StartPlacement = { where: "local"; reason: string } | { where: "peer"; peer: string; repo: string; reason: string } | { where: "refused"; reason: string };
 
@@ -32,10 +34,10 @@ export function parseStartPlacement(raw: unknown): "auto" | "local" | `peer:${st
   return typeof raw === "string" && raw.startsWith(PEER_PLACEMENT) && PEER_NAME.test(raw.slice(PEER_PLACEMENT.length)) ? raw as `peer:${string}` : null;
 }
 
-/** Load counts working executors (as the planner does); room is the worker-slot cap, which a card in review still holds. */
+/** Review sessions affect placement load independently; only local writing consumes the worker-slot cap. */
 function localLoad(db: Database, project: string, maxWorkers: number) {
-  const slots = db.query("SELECT DISTINCT taskId FROM scheduler_resources WHERE project = ? AND resource LIKE 'slot:%'").all(project).length;
-  return { running: localWriterCount(db, project, null) + localReviewerCount(db, project, null), room: slots < maxWorkers };
+  const slots = writeSlotFacts(db, project);
+  return { running: localWriterCount(db, project, null) + localReviewerCount(db, project, null), room: newLocalWriteRoom(slots.workerCount, maxWorkers, slots.waitingFix) };
 }
 
 function locksFree(db: Database, project: string, globs: readonly string[]): boolean {
