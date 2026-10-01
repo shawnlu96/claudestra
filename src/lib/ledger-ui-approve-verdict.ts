@@ -8,6 +8,8 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
+import { wireFindings } from "./order-findings.js";
+import { sanitizeForeign } from "./order-wire-render.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 
 export const UI_APPROVED = "ui_approved", UI_REJECTED = "ui_rejected";
@@ -46,10 +48,22 @@ export function uiRejectFixFor(db: Database, task: LedgerTask, events: readonly 
 }
 
 /**
+ * ui-reject's cap on a note as the peer exit measures it (folded + masked, sanitizeForeign). The note goes whole into a lent
+ * fix order's report input, one line; 8000 bytes keeps that line far below the input's split room (WIRE_LIMITS.input − headroom,
+ * order-wire-chunks.ts), which a 2000-character note of NFKC-expanding characters would otherwise pass and get the order refused.
+ */
+export const UI_NOTE_MAX_BYTES = 8000;
+export const uiNoteBytes = (note: string): number => Buffer.byteLength(sanitizeForeign(note));
+
+/**
  * The same rejection as a lend fix order's material (ledger-lend.ts findings, lend-write-materials.ts report): the peer cannot read
- * this machine's ledger, so PM's words go inline as the report text. Null = no PM rejection sent this round to fix.
+ * this machine's ledger, so PM's words go inline as the report text, whole. The probe goes through wireFindings' byte cap on the
+ * form the peer exit measures (order-wire-render.ts), else a long Chinese note (6000 bytes) refuses the pooled order.
+ * Null = no PM rejection sent this round to fix.
  */
 export function uiRejectLend(db: Database, task: LedgerTask): { findings: ReviewFinding[]; report: string } | null {
   const fix = uiRejectFixFor(db, task, listEvents(db, { project: task.project, target: task.id }), getWorkflow(db, task.id)?.template);
-  return fix && { findings: fix.findings, report: `# PM 截图验收未通过\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}` };
+  if (!fix) return null;
+  return { findings: wireFindings(fix.findings.map((f) => ({ ...f, probe: sanitizeForeign(f.probe) }))),
+    report: `# PM 截图验收未通过\n\n来源：${fix.reportPath}\n\n${fix.findings[0].probe}` };
 }

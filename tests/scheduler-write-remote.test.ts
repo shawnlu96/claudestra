@@ -187,7 +187,11 @@ describe("the fix of a remote-written card", () => {
     } finally { p.f.close(); }
   });
 
-  test("a UI card PM rejected after a clean review: the lent fix order carries PM's words, not the passed report (i28-U1)", async () => {
+  // The longest note ui-reject takes: 2000 Chinese characters, 6000 bytes. The order's probe is clipped to the wire cap on the
+  // form the peer exit measures, the inline report still carries it whole, and renderOrderWire renders the pooled order.
+  const longest = "按钮看不清，请调整颜色。".repeat(167).slice(0, 2000);
+  for (const [what, note] of [["a short note", "深色模式下按钮看不清"], ["the longest note", longest]]) {
+  test(`a UI card PM rejected after a clean review (${what}): the lent fix order carries PM's words, not the passed report (i28-U1)`, async () => {
     const p = await ready({ template: "ui" });
     try {
       await toRemoteReview(p);
@@ -197,20 +201,27 @@ describe("the fix of a remote-written card", () => {
       expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0",
         "--head", H2, "--session", "s-rv", "--family", "claude", "--findings", none, "--path", passed)).toMatchObject({ ok: true });
       expect(await p.tick()).toMatchObject({ step: "ask", detail: expect.stringContaining("pm_notice") });
-      expect(await p.cli("pm", "ui-reject", "T1", "--text", "深色模式下按钮看不清")).toMatchObject({ ok: true });
+      expect(await p.cli("pm", "ui-reject", "T1", "--text", note)).toMatchObject({ ok: true });
       expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
       p.hello("mate");
       expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 mate") });
       const fix = p.orders().at(-1)!;
       expect(fix).toMatchObject({ step: "fix", peer: "mate" });
-      expect(fix.wire.findings).toEqual([expect.objectContaining({ severity: "P1", family: "ui_screenshot", probe: "深色模式下按钮看不清" })]);
+      const folded = note.normalize("NFKC");
+      expect(fix.wire.findings).toEqual([expect.objectContaining({ severity: "P1", family: "ui_screenshot" })]);
+      const probe = fix.wire.findings[0].probe;
+      expect(Buffer.byteLength(probe)).toBeLessThanOrEqual(4000);
+      expect(Buffer.byteLength(folded) > 4000 ? folded.startsWith(probe.slice(0, -3)) && probe.endsWith("...") : probe === folded).toBe(true);
       const inputs = fix.wire.inputs.join("\n");
       expect(inputs).toContain("PM 截图验收未通过");
       expect(inputs).toMatch(/台账事件 #\d+/);
-      expect(inputs).toContain("深色模式下按钮看不清");
+      expect(inputs.replace(/\n/g, "")).toContain(folded);
       expect(inputs).not.toContain("All code checks pass");
+      expect(fix.text).toContain("PM 截图验收未通过");
+      expect(fix.text).toContain(folded.slice(0, 200));
     } finally { p.f.close(); }
   });
+  }
 
   test("the lease holder's fix could not go out (no report to inline): the card stops for PM, it does not wait silently", async () => {
     const p = await ready();

@@ -119,6 +119,8 @@ describe("default ui card: PM accepts the screenshots", () => {
     try {
       await f.tick();
       expect(await f.cli("pm", "ui-reject", "T1")).toMatchObject({ ok: false, code: "invalid" });
+      // 2000 characters that NFKC spreads to 24000 bytes: refused at the door, a lent fix order could not carry it (uiRejectLend).
+      expect(await f.cli("pm", "ui-reject", "T1", "--text", "㌀".repeat(2000))).toMatchObject({ ok: false, code: "invalid" });
       expect(await f.cli("pm", "ui-reject", "T1", "--text", "深色模式下按钮看不清")).toMatchObject({ ok: true });
       expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
       const fix = uiRejectFix(autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2 }));

@@ -12,7 +12,7 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
-import { UI_APPROVED, UI_REJECTED } from "./ledger-ui-approve-verdict.js";
+import { UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
 
 const NOTE_MAX = 2000;
@@ -52,6 +52,7 @@ export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInp
   const note = input.text?.trim() ?? "";
   if (input.verdict === "reject" && !note) throw new LedgerError("invalid", "ui-reject 要带 --text <意见>：它会进下一轮的修复单");
   if (note.length > NOTE_MAX) throw new LedgerError("invalid", `意见不超过 ${NOTE_MAX} 字`);
+  if (uiNoteBytes(note) > UI_NOTE_MAX_BYTES) throw new LedgerError("invalid", `意见按外发口径（NFKC 展开 + 脱敏）超过 ${UI_NOTE_MAX_BYTES} 字节，远端修复单装不下，请精简`);
   const data = { op: input.verdict === "approve" ? UI_APPROVED : UI_REJECTED, head: task.headSHA, specRev: task.specRev, round: task.round,
     screenshotsDigest: digest, ...(note ? { note } : {}) };
   const text = input.verdict === "approve" ? "PM 通过前后截图" : "PM 未通过前后截图，退回修复";
