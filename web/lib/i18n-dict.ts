@@ -24,6 +24,7 @@ import { UPDATE_DICT } from "./i18n-dict-update";
 import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
 import { RELAY_DICT } from "./i18n-dict-relay";
+import { BORROW_DICT } from "./i18n-dict-borrow";
 
 export const DICT: Record<string, string> = {
   ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT,
@@ -34,6 +35,7 @@ export const DICT: Record<string, string> = {
   ...SESSIONS_DICT, // 未纳管会话 / 归档（lib/i18n-dict-sessions.ts）
   ...SKILLS_DICT, // 技能库与按会话启停（lib/i18n-dict-skills.ts）
   ...RELAY_DICT, // Peer 面板的中继卡（lib/i18n-dict-relay.ts）
+  ...BORROW_DICT, // Peer 页的借入面板（lib/i18n-dict-borrow.ts）
   // ── 通用 ─────────────────────────────────────────────
   "关闭": "Close",
   "斜杠命令只有 owner 能用，请直接发文字": "Slash commands are owner-only — send it as plain text", // bridge/api-slash.ts 的 slash_owner_only
