@@ -284,7 +284,7 @@ describe("未领单报警没送到 PM：记着没送到，稍后照原文重发�
 
 describe("结论再长，修复单也领得到（单子整体不超 WIRE_MAX_BYTES）", () => {
   const big = (n: number, severity: "P1" | "P2" = "P1", size = 3950) =>
-    Array.from({ length: n }, (_, i) => ({ findingId: `large-${severity}-${i}`, family: "concurrency", severity, probe: "x".repeat(size) }));
+    Array.from({ length: n }, (_, i) => ({ findingId: `large-${severity}-${i}`, family: "concurrency", severity, probe: "[回归]" + "x".repeat(size - 8) }));
 
   test("8 条满长 P1（VerdictWire 合法）→ review→fix 后照发唤醒，take_order 拿到装得下的单，注明全文在报告", async () => {
     const f = autoFixture();
