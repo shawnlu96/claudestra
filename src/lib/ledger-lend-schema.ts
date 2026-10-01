@@ -65,10 +65,27 @@ export function LEND_WRITE_SCHEMA(db: Database): void {
   run(LEASES_SQL);
 }
 
-export const LEND_TABLES = ["lend_orders", "lend_write_leases"] as const;
+/**
+ * 借算力 v2（i28-W2）：lend_peers 记每个出借方最近一次 hello（协议版本、启动号 + 序号、授权、各家族名额、暂停）；没有行的 peer 一律按
+ * proto 1（只轮询）。lend_orders 加 beatAt / beat：最近一次批量心跳的时间和摘要（JSON）。只做加法，可重跑。
+ */
+const PEERS_SQL = `CREATE TABLE IF NOT EXISTS lend_peers (
+    peer TEXT PRIMARY KEY, fp TEXT, proto INTEGER NOT NULL, boot TEXT NOT NULL, seq INTEGER NOT NULL,
+    grant TEXT, slots TEXT NOT NULL, paused TEXT, helloAt INTEGER NOT NULL)`;
+
+export function LEND_PEERS_SCHEMA(db: Database): void {
+  db.prepare(PEERS_SQL).run();
+  const cols = new Set((db.query("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name));
+  if (!cols.has("beatAt")) db.prepare("ALTER TABLE lend_orders ADD COLUMN beatAt INTEGER").run();
+  if (!cols.has("beat")) db.prepare("ALTER TABLE lend_orders ADD COLUMN beat TEXT").run();
+}
+
+export const LEND_TABLES = ["lend_orders", "lend_write_leases", "lend_peers"] as const;
 export const LEND_COLUMNS: Record<string, readonly string[]> = {
   lend_orders: ["orderId", "taskId", "project", "peer", "family", "step", "specRev", "round", "head", "repo", "pr", "wire", "text", "sha256", "status",
-    "worker", "leaseGen", "leaseMs", "leaseUntil", "resultSha", "receipt", "eventSeq", "reason", "supersedes", "createdBy", "branch", "base", "seenAt"],
+    "worker", "leaseGen", "leaseMs", "leaseUntil", "resultSha", "receipt", "eventSeq", "reason", "supersedes", "createdBy", "branch", "base", "seenAt",
+    "beatAt", "beat"],
   lend_write_leases: ["taskId", "peer", "fp", "branch", "repo", "prevAssignee", "prevAssigneeKind", "state", "reason"],
+  lend_peers: ["peer", "fp", "proto", "boot", "seq", "grant", "slots", "paused", "helloAt"],
 };
 export const LEND_INDEXES: Record<string, readonly string[]> = { lend_orders: ["lend_orders_peer_status", "lend_orders_live"] };
