@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.ts";
 import { setMeta } from "../src/lib/ledger-write.ts";
 import { deliverOrder, type RemoteHead } from "../src/lib/order-deliver.ts";
-import { deliverPrPatch, findPrRows, fullPrUrl, parseGhPrList, pickPr, prConflict, type PrRow, type PrRows } from "../src/lib/order-deliver-pr.ts";
+import { deliverPrPatch, findPrRows, fullPrUrl, parseGhPrList, parseOriginRepo, pickPr, prConflict, prInRepo, type PrRow, type PrRows } from "../src/lib/order-deliver-pr.ts";
 import type { LedgerRun } from "../src/lib/order-ledger-exit.ts";
 import type { VerifiedCall } from "../src/lib/order-tool-route.ts";
 import type { BoundedResult } from "../src/lib/run-bounded.ts";
@@ -42,22 +42,109 @@ describe("parseGhPrList：严格解析", () => {
   });
 });
 
+type RunOpts = { cwd?: string; env?: Record<string, string | undefined>; timeoutMs: number };
+const fail = (code: number | null, timedOut = false): BoundedResult => ({ code, stdout: "", stderr: "fatal: x", timedOut });
+/** 注入的 runner：git 给 origin，gh 给 PR 列表；记下每次调用 */
+function fakeRun(origin: BoundedResult | string, gh: BoundedResult | string = "[]") {
+  const seen: { argv: string[]; o: RunOpts }[] = [];
+  const run = async (argv: string[], o: RunOpts): Promise<BoundedResult> => {
+    seen.push({ argv, o });
+    const r = argv[0] === "git" ? origin : gh;
+    return typeof r === "string" ? ok(r) : r;
+  };
+  return { run, seen };
+}
+
 describe("findPrRows：argv 与参数注入", () => {
-  test("在 cwd 跑 gh pr list --head <branch> --state open，关交互、15 秒超时", async () => {
-    const seen: { argv: string[]; o: { cwd?: string; env?: Record<string, string | undefined>; timeoutMs: number } }[] = [];
-    const r = await findPrRows("/w", "feat/x", async (argv, o) => (seen.push({ argv, o }), ok("[]")));
+  test("先在 cwd 认 origin，再在 cwd 跑 gh pr list --repo <origin> --head <branch> --state open，关交互、15 秒超时", async () => {
+    const { run, seen } = fakeRun("https://github.com/o/r.git\n");
+    const r = await findPrRows("/w", "feat/x", run);
     expect(r).toEqual({ ok: true, rows: [] });
-    expect(seen[0].argv).toEqual(["gh", "pr", "list", "--head", "feat/x", "--state", "open", "--json", "url,headRefOid,baseRefName,isCrossRepository"]);
+    expect(seen.length).toBe(2);
+    expect(seen[0].argv).toEqual(["git", "remote", "get-url", "origin"]);
     expect(seen[0].o).toMatchObject({ cwd: "/w", timeoutMs: 15_000 });
-    expect(seen[0].o.env?.GH_PROMPT_DISABLED).toBe("1");
+    expect(seen[1].argv).toEqual(["gh", "pr", "list", "--repo", "o/r", "--head", "feat/x", "--state", "open", "--json", "url,headRefOid,baseRefName,isCrossRepository"]);
+    expect(seen[1].o).toMatchObject({ cwd: "/w", timeoutMs: 15_000 });
+    expect(seen[1].o.env?.GH_PROMPT_DISABLED).toBe("1");
   });
 
-  test("没有 cwd、分支名像选项 / 带 .. / 带空白或 shell 字符 → 拒，不跑 gh", async () => {
+  test("没有 cwd、分支名像选项 / 带 .. / 带空白或 shell 字符 → 拒，git 和 gh 都不跑", async () => {
     let ran = 0;
     const run = async () => (ran++, ok("[]"));
     expect((await findPrRows(undefined, "feat/x", run)).ok).toBe(false);
     for (const b of ["--repo=evil/x", "-x", "a..b", "a b", "a;rm", "$(x)", ""]) expect((await findPrRows("/w", b, run)).ok).toBe(false);
     expect(ran).toBe(0);
+  });
+});
+
+describe("findPrRows：只认 origin 仓（i28-M8b）", () => {
+  test("parseOriginRepo：https / ssh、带不带 .git 都认；别的写法一律 null", () => {
+    expect(parseOriginRepo("https://github.com/o/r")).toBe("o/r");
+    expect(parseOriginRepo("https://github.com/Shawn-Lu96/Claude.Stra.git\n")).toBe("Shawn-Lu96/Claude.Stra");
+    expect(parseOriginRepo("git@github.com:o/r.git")).toBe("o/r");
+    expect(parseOriginRepo("git@github.com:O/My-Repo")).toBe("O/My-Repo");
+    const bad = [
+      "", "https://gitlab.com/o/r.git", "git@gitlab.com:o/r.git", "https://github.com.evil.com/o/r", "https://evil.com/github.com/o/r",
+      "ssh://git@github.com/o/r.git", "https://user@github.com/o/r", "http://github.com/o/r", "https://github.com/o", "https://github.com/o/r/x",
+      "https://github.com/-o/r", "https://github.com/o/..", "https://github.com/o/.", "git@github.com:o", "/local/path/r.git", "https://github.com/o/r\nhttps://github.com/a/b",
+    ];
+    for (const u of bad) expect(parseOriginRepo(u)).toBeNull();
+  });
+
+  test("ssh 写法的 origin 同样带 --repo；origin 与 PR URL 大小写不同照常通过", async () => {
+    const rows = [row({ url: "https://github.com/O/R/pull/7" })];
+    const { run, seen } = fakeRun("git@github.com:o/r.git", JSON.stringify(rows));
+    expect(await findPrRows("/w", "feat/x", run)).toEqual({ ok: true, rows });
+    expect(seen[1].argv.slice(3, 5)).toEqual(["--repo", "o/r"]);
+  });
+
+  test("GH_REPO=other/repo 继承下来也被去掉，只用显式 --repo <origin>", async () => {
+    const prev = process.env.GH_REPO;
+    process.env.GH_REPO = "other/repo";
+    try {
+      const { run, seen } = fakeRun("https://github.com/o/r");
+      expect((await findPrRows("/w", "feat/x", run)).ok).toBe(true);
+      const gh = seen.find((c) => c.argv[0] === "gh")!;
+      expect(gh.o.env).toBeDefined();
+      expect("GH_REPO" in gh.o.env!).toBe(false);
+      expect(gh.argv[gh.argv.indexOf("--repo") + 1]).toBe("o/r");
+      expect(gh.argv).not.toContain("other/repo");
+    } finally {
+      if (prev === undefined) delete process.env.GH_REPO;
+      else process.env.GH_REPO = prev;
+    }
+  });
+
+  test("origin 认不出（非 GitHub / 格式坏 / git 失败 / 超时）→ ok:false 带原因，不跑 gh", async () => {
+    for (const origin of ["https://gitlab.com/o/r.git", "not a url", "", fail(128), fail(null, true)]) {
+      const { run, seen } = fakeRun(origin);
+      const r = await findPrRows("/w", "feat/x", run);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/origin/);
+      expect(seen.map((c) => c.argv[0])).toEqual(["git"]);
+    }
+  });
+
+  test("gh 返回别仓的 PR → 整次拒「PR 不在 origin 仓」；混着一行 origin 的也拒", async () => {
+    const other = row({ url: "https://github.com/other/repo/pull/7" });
+    for (const rows of [[other], [row(), other], [row({ url: "https://github.com/o/r2/pull/7" })], [row({ url: "https://github.com/o/r/issues/7" })]]) {
+      const { run } = fakeRun("https://github.com/o/r.git", JSON.stringify(rows));
+      const r = await findPrRows("/w", "feat/x", run);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("PR 不在 origin 仓 o/r");
+    }
+  });
+
+  test("gh 失败照旧 ok:false（origin 校验不吞掉 gh 的错误）", async () => {
+    const { run } = fakeRun("https://github.com/o/r", fail(1));
+    expect((await findPrRows("/w", "feat/x", run)).ok).toBe(false);
+  });
+
+  test("prInRepo：只认完整 PR URL，owner/repo 不分大小写", () => {
+    expect(prInRepo("https://github.com/o/r/pull/7/", "O/R")).toBe(true);
+    expect(prInRepo("https://github.com/o/r/pull/7", "o/r2")).toBe(false);
+    expect(prInRepo("https://github.com/o/r/pull/0", "o/r")).toBe(false);
+    expect(prInRepo("306", "o/r")).toBe(false);
   });
 });
 
