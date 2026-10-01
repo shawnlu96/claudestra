@@ -112,12 +112,12 @@ describe("i28-M9 updating: a moved head keeps its review only when it merely mer
     expect(f.row.reason).toContain("旧审查失效");
     expect(f.calls).not.toContain("journal:await_ci");
   });
-  test("carried head still waiting on GitHub (UNKNOWN / BEHIND / draft) journals nothing and re-checks next round", async () => {
+  test("carried head waiting on GitHub persists only the UNKNOWN clock and re-checks next round", async () => {
     for (const p of [{ mergeState: "UNKNOWN" }, { mergeState: "BEHIND" }, { draft: true }]) {
       const f = fixture("updating", { snaps: [pr({ head: N, ...p })] });
       await f.drive();
       expect(f.row.phase).toBe("updating");
-      expect(f.calls).toEqual(["inspect", "carry:a>d"]);
+      expect(f.calls).toEqual(["inspect", "carry:a>d", ...(p.mergeState === "UNKNOWN" ? ["journal:updating"] : [])]);
     }
   });
   test("carried head with a failed check or odd mergeState is unknown, not a merge", async () => {

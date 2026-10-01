@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBgTasks, fetchLastSeen, markLastSeen } from "@/lib/api/ledger";
+import { metaOf } from "@/lib/ledger-meta-guard";
 import type { LedgerEventView, LedgerOverview } from "./collab-model";
 import type { ReviewTarget } from "./collab-reviewer-parse";
 import { isPlaceholderStart, pmSet, reduceReviewer, seedReviewers, type BgEvent, type ReviewerMap } from "./collab-reviewers";
@@ -175,7 +176,7 @@ const PLACEHOLDER_RESEED_MS = 8000;
  */
 export function useReviewers(ov: LedgerOverview | null): { map: ReviewerMap; onEvent: (e: BridgeEvent) => void; reseed: () => void } {
   const [map, setMap] = useState<ReviewerMap>(() => new Map());
-  const pmsKey = (ov?.meta.pms ?? []).join("\n");
+  const pmsKey = metaOf(ov).pms.join("\n");
   const targetsKey = JSON.stringify((ov?.tasks ?? []).map((t) => [t.id, t.pr ?? null]));
   const ctx = useRef({ pms: pmSet([]), targets: [] as ReviewTarget[], names: [] as string[] });
   const gen = useRef(0);

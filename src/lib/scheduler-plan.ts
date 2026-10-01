@@ -8,7 +8,7 @@ import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
-import { uiMergeBlock, uiPassStep, uiRejectFix } from "./scheduler-ui-gate.js";
+import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 
 export interface WorkerRef {
   agent: string;
@@ -152,7 +152,7 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const away = remoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
   if (away && "wait" in away) return wait(away.code ?? "placement", away.wait);
   if (away && "escalate" in away) return escalate("placement_lease", away.escalate);
-  const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? uiRejectFix(s) ?? fixPackage(s) : null;
+  const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? uiFixPackage(s, () => fixPackage(s)) : null;
   if (fix && "kind" in fix) return fix;
   const scope = fileResources(s); // no scope: the local path below escalates it, a peer never writes unlocked
   if (away && scope) return makeIntent(s, node, "dispatch", away.reason, [taskResource(s), ...scope],

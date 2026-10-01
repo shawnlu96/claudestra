@@ -26,6 +26,7 @@ export const EXCLUDE: RegExp[] = [/^web\/\.packages\//, /^web\/lib\/build-info\.
 
 /** 双份文件：去注释后必须逐行一致；dup 规则跳过第二份。web 与 src 共用逻辑只能以 twin 的形式存在。 */
 export const TWINS: [string, string][] = [
+  ["src/lib/ask-audience.ts", "web/features/asks/ask-audience.ts"],
   ["src/lib/inline-buttons.ts", "web/lib/chat/inline-buttons.ts"],
   ["src/lib/attachment-name.ts", "web/lib/chat/attachment-name.ts"],
   ["src/lib/mention-name.ts", "web/lib/chat/mention-name.ts"],
