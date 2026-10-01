@@ -81,7 +81,7 @@ import { listSessionJsonls, readyTimeoutHint } from "./lib/runtimes/claude-code.
 import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
-import { piEnvPreset, piEnvPresetNames } from "./lib/pi-presets.js";
+import { applyPiEnvPreset, parsePiEnvSetFlags, resolveCreatePiEnv } from "./manager/pi-env-preset.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
@@ -482,19 +482,9 @@ async function cmdCreate(
     output({ ok: false, error: `--runtime ${adapter.id} 建不出能用的 agent：${avail.hint}` });
     return;
   }
-  // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
-  let piEnv: PiEnvProfile | undefined;
-  if (piPresetFlag) {
-    const preset = piEnvPreset(piPresetFlag);
-    if (!preset) {
-      const names = piEnvPresetNames().join(", ");
-      output({ ok: false, error: `未知的 --pi-preset: "${piPresetFlag}"。可用: ${names}（先建再改: manager pi-env-set）` });
-      return;
-    }
-    piEnv = { ...preset };
-  }
-  // 显式 --pi-base 覆盖预设里的 base（预设是默认，不是锁）
-  if (piBaseFlag) piEnv = { ...(piEnv ?? {}), base: piBaseFlag as PiEnvProfile["base"] };
+  const presetRes = resolveCreatePiEnv(piBaseFlag, piPresetFlag); // --pi-preset 展开 + --pi-base 覆盖
+  if ("error" in presetRes) return output({ ok: false, error: presetRes.error });
+  const piEnv = presetRes.piEnv;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
   const team = await (await import("./manager/team.js")).teamFieldsForCreate(tmuxName, teamFlags); // 派发者校验在建频道 / 拉起之前
@@ -2277,19 +2267,8 @@ async function cmdPiEnvSet(
   }
 
   const next: PiEnvProfile = opts.reset ? {} : normalizePiEnvProfile(info.piEnv);
-  // 预设先铺基底，后面的显式 --base/--add-ext 覆盖它（先给默认、再让人改）
-  if (opts.preset) {
-    const preset = piEnvPreset(opts.preset);
-    if (!preset) {
-      const names = piEnvPresetNames().join(", ");
-      output({ ok: false, error: `未知的 --preset: "${opts.preset}"。可用: ${names}` });
-      return;
-    }
-    if (preset.base) next.base = preset.base;
-    if (preset.extensions?.length) {
-      next.extensions = [...new Set([...(next.extensions ?? []), ...preset.extensions])];
-    }
-  }
+  const presetErr = applyPiEnvPreset(next, opts.preset).error; // 预设铺基底，显式 flag 随后覆盖
+  if (presetErr) return output({ ok: false, error: presetErr });
   if (opts.base) {
     if (opts.base === "inherit") delete next.base;
     else next.base = "minimal";
@@ -2330,16 +2309,8 @@ switch (cmd) {
     break;
   }
   case "pi-env-set": {
-    const { rest: pz, value: preset } = extractStringFlag(args, "--preset");
-    const { rest: a1, value: base } = extractStringFlag(pz, "--base");
-    const { rest: a2, value: mcpConfig } = extractStringFlag(a1, "--mcp-config");
-    const { rest: a3, values: addExt } = extractMultiFlag(a2, "--add-ext");
-    const { rest: a4, values: addSkill } = extractMultiFlag(a3, "--add-skill");
-    const { rest: a5, values: excludeTool } = extractMultiFlag(a4, "--exclude-tool");
-    const { rest: a6, value: noTrust } = extractBoolFlag(a5, "--no-trust");
-    const { rest: a7, value: trust } = extractBoolFlag(a6, "--trust");
-    const { rest: posArgs, value: reset } = extractBoolFlag(a7, "--reset");
-    const [name] = posArgs;
+    const p = parsePiEnvSetFlags(args);
+    const [name] = p.rest;
     if (!name) {
       output({
         ok: false,
@@ -2348,14 +2319,14 @@ switch (cmd) {
       break;
     }
     await cmdPiEnvSet(name, {
-      base,
-      preset,
-      addExt,
-      addSkill,
-      excludeTool,
-      mcpConfig,
-      trust: noTrust ? false : trust ? true : undefined,
-      reset,
+      base: p.base,
+      preset: p.preset,
+      addExt: p.addExt,
+      addSkill: p.addSkill,
+      excludeTool: p.excludeTool,
+      mcpConfig: p.mcpConfig,
+      trust: p.trust,
+      reset: p.reset,
     });
     break;
   }
