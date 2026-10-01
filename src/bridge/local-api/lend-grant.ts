@@ -1,11 +1,8 @@
 /**
- * 出借方管理面（i28-R7a）：网页上给 peer 一次授权、一键收回、看借出中的单。
- *   GET  /api/v1/lend/grants         → {writeOpen, maxDays, shellSentence, grants, peers, orders}
- *   POST /api/v1/lend/grants         → manager `lend grant`（W1 的 CLI 定规则：until / 名额 / 仓库都由它判）
- *   POST /api/v1/lend/grants/revoke  → manager `lend revoke [--peer=名]`，回包带这个 peer 在跑的单
- * 授权规则只在 W1（lib/lend-grant-rules.ts、lend-policy.ts、manager/lend.ts）：这里只做类型整形、拒 write、拼 argv。
- * 值一律 `--flag=value`、peer 放 `--` 之后，请求体里的 `--xx` 进不了旗标位（tests/web-lend-api.test.ts 的注入反例）。
- * 门 = owner 本人 + 全权凭据（与 asks.ts 开 ask 同一道），三条都在起进程 / 读盘之前判。
+ * 出借方管理面：GET /lend/grants 列授权、peer、借出单；POST /lend/grants → manager `lend grant`；POST /lend/grants/revoke → `lend revoke [--peer=]`。
+ * 规则只在 W1 的 CLI（until / 名额 / 仓库由它判）：这里只做类型整形、拒 write、拼 argv。改成自己判，网页和 CLI 的规则就会分叉。
+ * 值一律 `--flag=value`、peer 放 `--` 之后，请求体里的 `--xx` 进不了旗标位（tests/web-lend-api.test.ts 注入反例）。
+ * 门 = owner 本人 + 全权凭据，三条都在起进程 / 读盘之前判。
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -52,6 +49,8 @@ interface GrantView {
 interface OrderView {
   orderId: string; peer: string; family: string; state: string; repo: string | null; pr: number | null; taskId: string | null; step: string | null;
   agent: string | null; startedAt: number | null; updatedAt: number; reason: string | null; notices: NoticesView | null;
+  /** 按 W1 的 LIVE_STATES 判好再给网页：网页不另抄一份状态表，W1 加在跑状态时界面不会提前显示已停 */
+  live: boolean;
 }
 type NoticesView = { start?: number; end?: { kind: string; why: string | null; sentAt: number | null } };
 
@@ -103,6 +102,7 @@ function orderView(r: Record<string, unknown>): OrderView {
     orderId: String(r.orderId), peer: String(r.peer), family: String(r.family), state: String(r.state),
     repo: str(p.repo), pr: num(p.pr), taskId: str(p.taskId), step: str(p.step),
     agent: str(r.agent), startedAt: num(r.startedAt), updatedAt: Number(r.updatedAt), reason: str(r.reason), notices: noticesOf(r.notices),
+    live: (LIVE_STATES as readonly string[]).includes(String(r.state)),
   };
 }
 

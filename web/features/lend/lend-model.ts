@@ -12,6 +12,8 @@ export interface NoticesView { start?: number; end?: { kind: string; why: string
 export interface OrderView {
   orderId: string; peer: string; family: string; state: string; repo: string | null; pr: number | null; taskId: string | null; step: string | null;
   agent: string | null; startedAt: number | null; updatedAt: number; reason: string | null; notices: NoticesView | null;
+  /** bridge 按 W1 的 LIVE_STATES 判好的；这里不再抄一份状态表 */
+  live: boolean;
 }
 export interface LendData {
   writeOpen: boolean; maxDays: number; shellSentence: string; grants: GrantView[]; peers: { name: string; fp: string }[]; orders: OrderView[];
@@ -24,8 +26,7 @@ export const DAY_CHOICES = [1, 3, 7] as const;
 export const STUCK_MS = 70_000;
 export const STOPPING_POLL_MS = 2_000;
 
-const LIVE = new Set(["asked", "claimed", "cloned", "started", "result_pending"]);
-export const isLive = (o: Pick<OrderView, "state">): boolean => LIVE.has(o.state);
+export const isLive = (o: Pick<OrderView, "live">): boolean => o.live;
 
 export interface GrantForm { peer: string; repos: string[]; codex: number; ordersPerDay: number; days: number }
 
@@ -81,7 +82,7 @@ export function splitRemaining(ms: number): { d: number; h: number; m: number } 
 export type OrderPhase = "waiting" | "running" | "stopping" | "stuck" | "stopped" | "done";
 
 /**
- * stopping：orderId → 点下收回（拿到成功回包）的时刻。journal 进了终态才算停；还 live 的按时长分「停止中」与告警。
+ * stopping：orderId → 点下收回的时刻。journal 进了终态才算停；还 live 的按时长分「停止中」与告警。
  * acked 是正常交付；其余终态（stopped / released / declined / cancelled）都显示「已停」。
  */
 export function orderPhase(o: OrderView, stopping: ReadonlyMap<string, number>, now: number): OrderPhase {
@@ -91,7 +92,7 @@ export function orderPhase(o: OrderView, stopping: ReadonlyMap<string, number>, 
   return o.state === "asked" ? "waiting" : "running";
 }
 
-/** 收回成功：回包快照里的单和当前列表里这个 peer 的在跑单，全部从此刻起算停止中（已在停的保留原起点） */
+/** 点下收回就调（快照为空）、成功回包后带快照再调一次：这个 peer 的在跑单从此刻起算停止中（已在停的保留原起点） */
 export function markStopping(stopping: ReadonlyMap<string, number>, peer: string | null, snapshot: readonly OrderView[],
   current: readonly OrderView[], now: number): Map<string, number> {
   const next = new Map(stopping);
@@ -99,6 +100,13 @@ export function markStopping(stopping: ReadonlyMap<string, number>, peer: string
     if (!isLive(o) || (peer !== null && o.peer !== peer) || next.has(o.orderId)) continue;
     next.set(o.orderId, now);
   }
+  return next;
+}
+
+/** bridge 明确说没收回：撤掉这次点击加上的停止标记（别的收回加的不动） */
+export function unmarkStopping(stopping: ReadonlyMap<string, number>, ids: Iterable<string>): Map<string, number> {
+  const next = new Map(stopping);
+  for (const id of ids) next.delete(id);
   return next;
 }
 

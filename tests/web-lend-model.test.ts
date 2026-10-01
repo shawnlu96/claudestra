@@ -5,15 +5,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   addRepos, canSubmit, dayChoices, formDefaults, grantBody, grantStatus, markStopping, mergeOrders, needsFastPoll, orderPhase, orderTitle,
-  remainingMs, splitRemaining, STUCK_MS, timeline, withSnapshot, type GrantView, type OrderView,
+  remainingMs, splitRemaining, STUCK_MS, timeline, unmarkStopping, withSnapshot, type GrantView, type OrderView,
 } from "../web/features/lend/lend-model";
 
 const T = Date.parse("2026-10-01T00:00:00Z");
 const DAY = 86_400_000;
 const g = (over: Partial<GrantView> = {}): GrantView => ({ peer: "team-a", repos: ["o/r"], roles: ["review"], families: { codex: 3 }, ordersPerDay: 50,
   until: new Date(T + 2 * DAY).toISOString(), grantedAt: new Date(T - DAY).toISOString(), paused: null, problem: null, ...over });
+/** live 在线上由 bridge 按 W1 LIVE_STATES 判；这里的 fixture 按同一组状态造 */
+const LIVE_FIXTURE = new Set(["asked", "claimed", "cloned", "started", "result_pending"]);
 const o = (id: string, state: string, over: Partial<OrderView> = {}): OrderView => ({ orderId: id, peer: "team-a", family: "codex", state, repo: "o/r", pr: 7,
-  taskId: "T1", step: "review", agent: "lend-w", startedAt: T, updatedAt: T, reason: null, notices: null, ...over });
+  taskId: "T1", step: "review", agent: "lend-w", startedAt: T, updatedAt: T, reason: null, notices: null, live: LIVE_FIXTURE.has(state), ...over });
 
 describe("表单", () => {
   test("缺省：codex 5、每日 200、到期取最长一档（7 天），peer 取第一个", () => {
@@ -82,6 +84,21 @@ describe("借出单状态", () => {
     expect(orderPhase(cur[2], st, T)).toBe("running");
     expect(orderPhase(o("a", "stopped"), st, T + 1000)).toBe("stopped");
     expect(needsFastPoll(st)).toBe(true);
+  });
+
+  test("live 只认 bridge 给的标志：状态名不认识也按标志走", () => {
+    expect(orderPhase(o("a", "warming_up", { live: true }), new Map(), T)).toBe("running");
+    expect(orderPhase(o("a", "started", { live: false }), new Map(), T)).toBe("stopped");
+  });
+
+  test("点下即标停止中；bridge 明确拒了只撤这次加的标记", () => {
+    const prev = new Map([["c", T - 5000]]);
+    const cur = [o("a", "started"), o("b", "asked"), o("c", "started", { peer: "team-b" })];
+    const st = markStopping(prev, "team-a", [], cur, T);
+    const added = [...st.keys()].filter((k) => !prev.has(k));
+    expect(added.sort()).toEqual(["a", "b"]);
+    const back = unmarkStopping(st, added);
+    expect([...back.entries()]).toEqual([["c", T - 5000]]);
   });
 
   test("全部收回（peer=null）标所有在跑单；已在停的保留原起点", () => {

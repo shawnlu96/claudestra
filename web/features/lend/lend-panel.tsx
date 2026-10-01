@@ -2,24 +2,18 @@
 /**
  * 出借方管理面（设置 → Peer 协作）：授权列表 + 授权表单 + 借出中的单。数据来自 bridge GET /lend/grants，
  * 403 / 404（非 owner 本人全权凭据、或 bridge 太旧）整个面板不渲染。
- * 一键收回点一下就发、不二次确认；只在 bridge 回成功后才淡出这条授权、把这个 peer 的在跑单转成「停止中」，失败界面不动。
- * 有停止中的单就每 2 秒拉一次，单子在 journal 进终态才显示已停（lend-model.mergeOrders / orderPhase）。渲染里不读时钟：now 由计时器推进。
+ * 一键收回点一下就发、不二次确认，这个 peer 的在跑单当场转「停止中」；数据、轮询与收回在 lend-state.useLendState。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useChatStoreApi } from "../chat/chat-store";
 import { GrantForm } from "./grant-form";
-import { fetchLend, postRevoke } from "./lend-api";
 import { useLendT, useRemainingText } from "./lend-i18n";
 import { LendIcon, type LendIconName } from "./lend-icons";
-import {
-  formDefaults, grantStatus, markStopping, mergeOrders, needsFastPoll, remainingMs, splitRemaining, STOPPING_POLL_MS, withSnapshot,
-  type GrantForm as Form, type GrantStatus, type GrantView, type LendData, type OrderView,
-} from "./lend-model";
+import { formDefaults, grantStatus, remainingMs, splitRemaining, type GrantForm as Form, type GrantStatus, type GrantView } from "./lend-model";
+import { useLendState } from "./lend-state";
 import { LentOrders } from "./lent-orders";
 import css from "./lend.module.css";
 
-const IDLE_POLL_MS = 30_000;
-const FADE_MS = 300;
 const STATUS_ICON: Partial<Record<GrantStatus, { icon: LendIconName; cls: string }>> = {
   paused: { icon: "pause", cls: "text-warning" },
   expired: { icon: "clockAlert", cls: "text-error" },
@@ -41,7 +35,7 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
     <div key={err?.n ?? 0} className={`rounded-lg bg-base-100 px-3 py-2 ${err ? css.shake : ""}`}>
       <div className="flex items-center gap-2">
         {mark && (
-          <span className={`flex shrink-0 ${mark.cls}`} title={g.paused ?? g.problem ?? ""} aria-label={g.paused ?? g.problem ?? ""}>
+          <span className={`flex shrink-0 ${mark.cls}`} title={g.problem ?? g.paused ?? ""} aria-label={g.problem ?? g.paused ?? ""}>
             <LendIcon name={mark.icon} size={14} />
           </span>
         )}
@@ -69,63 +63,9 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
 export function LendPanel() {
   const t = useLendT();
   const store = useChatStoreApi();
-  const [data, setData] = useState<LendData | null | undefined>(undefined);
-  const [loadErr, setLoadErr] = useState("");
-  const [view, setView] = useState<{ orders: OrderView[]; stopping: Map<string, number> }>({ orders: [], stopping: new Map() });
-  const { orders, stopping } = view;
-  const [now, setNow] = useState(0);
+  const { data, loadErr, orders, stopping, now, leaving, busy, revokeErr, load, revoke } = useLendState();
   const [form, setForm] = useState<Form | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
-  const [leaving, setLeaving] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState<string | null>(null);
-  const [revokeErr, setRevokeErr] = useState<{ peer: string; msg: string; n: number } | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const d = await fetchLend();
-      setData(d);
-      setLoadErr("");
-      if (!d) return;
-      setView((v) => mergeOrders(v.orders, d.orders, v.stopping));
-    } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : String(e)); // 拉失败保持上一份数据：停止中的单不会被误显示成已停
-    }
-  }, []);
-
-  const fast = needsFastPoll(stopping);
-  useEffect(() => {
-    void load();
-    const iv = setInterval(() => void load(), fast ? STOPPING_POLL_MS : IDLE_POLL_MS);
-    return () => clearInterval(iv);
-  }, [load, fast]);
-  useEffect(() => {
-    setNow(Date.now());
-    const iv = setInterval(() => setNow(Date.now()), fast ? 1_000 : IDLE_POLL_MS);
-    return () => clearInterval(iv);
-  }, [fast]);
-
-  const revoke = async (peer: string) => {
-    setBusy(peer);
-    try {
-      const r = await postRevoke(peer);
-      const at = Date.now();
-      const snap = r.orders ?? [];
-      setRevokeErr(null);
-      setView((v) => ({ orders: withSnapshot(v.orders, snap), stopping: markStopping(v.stopping, peer, snap, v.orders, at) }));
-      setNow(at);
-      setLeaving((s) => new Set(s).add(peer));
-      setTimeout(() => {
-        setData((d) => (d ? { ...d, grants: d.grants.filter((g) => g.peer !== peer) } : d));
-        setLeaving((s) => { const n = new Set(s); n.delete(peer); return n; });
-        void load();
-      }, FADE_MS);
-    } catch (e) {
-      setRevokeErr((x) => ({ peer, msg: e instanceof Error ? e.message : String(e), n: (x?.n ?? 0) + 1 })); // 收回没成：授权和单子都保持原样
-      void load(); // 请求本身断了（网页超时）时 bridge 可能已收回：以重拉的列表为准
-    } finally {
-      setBusy(null);
-    }
-  };
 
   if (!data) return loadErr && data === undefined ? <div className="px-1 text-xs text-error">{t("加载失败")}</div> : null;
   const openForm = (from?: GrantView) => setForm(formDefaults(data.maxDays, data.peers, from));

@@ -174,9 +174,10 @@ describe("GET：字段白名单、journal 不存在、grants 与 effectiveLend �
     const j = JSON.parse(text);
     expect(Object.keys(j).sort()).toEqual(["grants", "maxDays", "ok", "orders", "peers", "shellSentence", "writeOpen"]);
     expect(j).toMatchObject({ writeOpen: false, maxDays: GRANT_MAX_DAYS, shellSentence: SHELL_SENTENCE });
-    const KEYS = ["agent", "family", "notices", "orderId", "peer", "pr", "reason", "repo", "startedAt", "state", "step", "taskId", "updatedAt"];
+    const KEYS = ["agent", "family", "live", "notices", "orderId", "peer", "pr", "reason", "repo", "startedAt", "state", "step", "taskId", "updatedAt"];
     for (const o of j.orders) expect(Object.keys(o).sort()).toEqual(KEYS);
     expect(j.orders.map((o: { orderId: string }) => o.orderId)).toEqual(["o-b", "o-live", "o-done"]); // 在跑在前，8 天前结束的不列
+    expect(j.orders.map((o: { live: boolean }) => o.live)).toEqual([true, true, false]); // live 由 bridge 按 W1 LIVE_STATES 判
     expect(j.orders[1]).toMatchObject({ repo: "o/r", pr: 7, step: "review", agent: "lend-w1", notices: { start: T - 710 } });
     expect(j.orders[2].notices).toEqual({ start: T - 2 * DAY, end: { kind: "stopped", why: "收回", sentAt: null } });
     expect(j.peers).toEqual([{ name: "team-a", fp: FP }, { name: "team-b", fp: "1111-2222-3333-4444" }]);
