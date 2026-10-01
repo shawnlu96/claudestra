@@ -24,6 +24,7 @@ import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "
 import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
 import { callerRegisterFields, takeCallerCred, WHOAMI_TOOL, whoamiTool } from "./lib/whoami-tool.js";
 import { isOrderTool, ORDER_TOOLS, orderTool } from "./lib/order-tools.js";
+import { profileRefusal, profileTools } from "./lib/lend-mcp-profile.js";
 import { REPLY_ASK_PROPERTY, replyResultText } from "./lib/reply-ask-schema.js";
 
 // 进程级异常兜底。**故意不退出**：本进程没有任何守护者（Claude Code 不 respawn
@@ -449,7 +450,7 @@ const visibleTools = <T extends { name: string }>(tools: T[]): T[] =>
   IS_CODEX ? tools.filter((t) => t.name !== "ask_codex") : tools;
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => INERT ? { tools: [] } : ({
-  tools: visibleTools([
+  tools: profileTools(visibleTools([
     {
       name: "reply",
       description:
@@ -631,7 +632,7 @@ Good for: a second opinion from a different model family, cross-review of a desi
         required: ["prompt"],
       },
     },
-  ]),
+  ])),
 }));
 
 // 处理工具调用
@@ -640,6 +641,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (INERT) {
     return { content: [{ type: "text", text: "这个会话不是 Claudestra 启动的，没有频道可用" }], isError: true };
   }
+  const denied = profileRefusal(name); // 出借 worker 的 lend 档：白名单外的工具一律拒（lib/lend-mcp-profile.ts）
+  if (denied) return denied;
 
   switch (name) {
     case "reply": {

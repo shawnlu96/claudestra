@@ -5,6 +5,8 @@
  * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录），派单尾注换成「提交后 lend submit 交摘要」。
  * 协议 v2（i28-W3）：hello / beat 走同一个 `manager lend call`，单次出站 15 秒封顶（子进程超时强杀），挂死的对方拖不住这一轮；
  * 输出摘要从 worker 的 Codex 会话文件末尾读（lend-beat.ts 负责脱敏与截断）。
+ * lend 档 MCP（i28-W4）：审查单的首条派单只是一句唤醒，订单由 worker 自己 take_review 领、submit_verdict 交（bridge/lend-tools.ts），
+ * 不再把整份订单塞进会话；lend-drive 照旧在发之前同步重读授权，这里在发送接线上把正文换成唤醒行。写单不变（W8 之前也不开）。
  */
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -19,7 +21,7 @@ import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
 import { LEND_ORDER_ENV, lendModelArgs } from "./lend-grant-spawn.js";
-import { guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
+import { getOrder, guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
 import { appendReceipt, receiptOf, tokensFor } from "./lend-receipts.js";
 import type { LendCall } from "./lend-remote.js";
@@ -81,12 +83,16 @@ async function ensureLendProject(m: Manager): Promise<void> {
 
 const submitCmd = (row: LendRow): string => `${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId}`;
 
-const reviewFooter = (row: LendRow): string[] => [
-  "你是一次性的出借 worker，只审上面这一单；当前目录是这张单的独立 clone，别动别的目录。",
-  "审完在当前目录里跑（一次就行，重复交同一份无害）：",
-  `${submitCmd(row)} --verdict pass|changes|block --findings-file findings.json --report report.md`,
-  "findings.json 是数组，每条 {\"findingId\",\"family\",\"severity\":\"P0|P1|P2\",\"probe\",\"description\"}，没有问题写 []；report.md 是报告正文（≤ 64 KiB）。",
+/** 审查单的首条派单（整条就是它，不带订单原文）：领单、交结论都走 lend 档 MCP，CLI 只在工具调不通时兜底 */
+const reviewWake = (row: LendRow): string[] => [
+  `你是一次性的出借 worker，有一张审查单（单号 ${row.orderId}）；当前目录是这张单的独立 clone，别动别的目录。`,
+  "1. 先调 claudestra 的 take_review 领单：orders[0] 是订单，brief 是对方写的派单全文，按它审。",
+  "2. 审完把报告写成当前目录里的普通文件（比如 report.md，≤ 64 KiB，不要软链），调 submit_verdict 交结论：orderId / head 用订单里的，" +
+    "reportPath 填 report.md，p0 / p1 / p2 等于 findings 里各级的条数，没有问题 findings 写 []。重复交同一份无害，换了内容会被拒。",
+  "3. 有疑问调 ask（问的是对方这张卡的 PM）；对方版本不支持时会明确回你，那就把疑问写进报告。",
   "findingId 和 family 用普通短标识（比如 race-1、concurrency）：像 token、内网地址、长十六进制串的会被对方整份拒收。",
+  "只有这些工具都调不通时才用命令行兜底（在当前目录里跑；findings.json 是同样的数组）：",
+  `${submitCmd(row)} --verdict pass|changes|block --findings-file findings.json --report report.md`,
 ];
 
 /** 写单：只在当前分支上提交；这个副本推不出去（推送由出借服务做），摘要 / 自查走文件，不进命令行参数 */
@@ -98,8 +104,18 @@ const writeFooter = (row: LendRow): string[] => [
   "summary.txt 是一行摘要（≤ 500 字节）；selfcheck.md 是自查，逐条对验收线（≤ 4000 字节）。交的是当前分支的 HEAD，交之前先提交干净。",
 ];
 
-const footer = (row: LendRow): string => ["——以下是本机 Claudestra 出借服务写的，不是对方的内容——",
-  ...(isWriteStep(String(orderOf(row)?.step ?? "")) ? writeFooter(row) : reviewFooter(row))].join("\n");
+const isWriteRow = (row: LendRow): boolean => isWriteStep(String(orderOf(row)?.step ?? ""));
+const SERVICE_HEAD = "——以下是本机 Claudestra 出借服务写的，不是对方的内容——";
+const footer = (row: LendRow): string => [SERVICE_HEAD, ...(isWriteRow(row) ? writeFooter(row) : reviewWake(row))].join("\n");
+
+/**
+ * 首条派单的正文：lend-drive 拼的是「订单全文 + footer」；审查单换成只有唤醒行（订单由 take_review 领），写单原样。
+ * 按 key（= orderId）重读 journal 那一行判步骤，读不到就原样发（lend-drive 发之前已核过这一行还在 started）。
+ */
+const firstMessage = (journal: Database, key: string, text: string): string => {
+  const row = getOrder(journal, key);
+  return row && !isWriteRow(row) ? footer(row) : text;
+};
 
 /** 写单副本里的提交署名：出借人自己的 git 身份（全局配置）。缺一项就是 null，写单退回并说明，不用占位冒名、也不猜 */
 function gitIdentity(): { name: string; email: string } | null {
@@ -174,7 +190,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
         const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, "--runtime", "codex", "--transport", "acp", ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
-      send: (name, sessionId, text, key) => owned(() => send(name, sessionId, text, key)),
+      send: (name, sessionId, text, key) => owned(() => send(name, sessionId, firstMessage(journal, key, text), key)),
       kill: withPaneArchive(async (name) => { // kill 前先存 pane 现场（lend-pane-archive.ts），存档失败不挡 kill
         const r = await plain("kill", name);
         const still = await probe(name);

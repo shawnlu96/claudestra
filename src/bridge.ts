@@ -206,7 +206,7 @@ import {
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
 import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
-import { answerOrderTool } from "./bridge/order-tools.js";
+import { answerOrderTool, lendFrameDenied } from "./bridge/order-tools.js";
 
 // ============================================================
 // 类型定义
@@ -1628,8 +1628,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     return;
   }
 
-  // v2.13.1+ 任何来自这条连接的消息都是"它还活着"的证据（keepalive ping 也走这里）。
-  // case "register" 的冲突判定靠它区分活连接与僵尸连接。
+  // 任何来自这条连接的消息都是"它还活着"的证据（keepalive ping 也走这里）；case "register" 的冲突判定靠它区分活连接与僵尸连接。
   for (const info of clients.values()) {
     if (info.ws === ws) {
       info.lastSeen = Date.now();
@@ -1637,6 +1636,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
   }
 
+  if (lendFrameDenied(ws, msg)) return; // 出借 worker 的连接只开派单工具与 whoami，频道类原生帧回 lend_forbidden（bridge/lend-tools.ts）
   switch (msg.type) {
     case "ping": {
       // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong 让 channel-server 那侧的 idle 也重置，无需其它处理。
