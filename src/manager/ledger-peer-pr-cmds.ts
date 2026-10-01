@@ -43,7 +43,8 @@ function writeSpec(n: number, text: string): string {
 export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   "peer-pr-intake": {
     valued: ["project", "number", "url", "head", "branch", "base", "login", "title", "body", "surface", "reasons"], bools: [],
-    usage: "peer-pr-intake --project <id> --number <n> --url <PR> --head <sha> --branch <b> --base <b> --login <gh> --title <t> --body <t> --surface security|plain --reasons <json>（调度器收 peer PR 成自动卡）",
+    usage: "peer-pr-intake --project <id> --number <n> --url <PR> --head <sha> --branch <b> --base <b> --login <gh> --title <t> --body <t> "
+      + "--surface security|plain --reasons <json>（调度器收 peer PR 成自动卡）",
     run(c) {
       const project = c.project();
       allow(c, project, "收 peer PR ");

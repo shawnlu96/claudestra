@@ -32,7 +32,7 @@ export type PeerPrConfigRead = { kind: "off" } | { kind: "error"; error: string 
 
 const PEER_NAME = /^[\w.-]{1,64}$/;
 const LOGIN = /^[a-z0-9](?:[a-z0-9-]{0,38})$/;
-const ONE_LINE = /^[^\p{Cc}\p{Cf}  ]{1,200}$/u;
+const ONE_LINE = /^[^\p{Cc}\p{Cf}\u2028\u2029]{1,200}$/u;
 const GLOB = /^[\w./*{},?[\]-]{1,200}$/;
 
 function int(r: Record<string, unknown>, key: string, min: number, max: number, dflt?: number): number {
