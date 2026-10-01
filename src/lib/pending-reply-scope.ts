@@ -74,6 +74,13 @@ export function pendingKeysOwedBy<T extends OwedEntry>(
   return keys;
 }
 
+/** reply 一到就销「这个 agent 欠这个地址」的账（bridge.ts ws reply 分支，投递之前），返回销掉几条 */
+export function settleOwedReplies<T extends OwedEntry>(book: Map<string, T>, debtorWs: unknown, replyChannel: string): number {
+  const keys = pendingKeysOwedBy(book.entries(), debtorWs, replyChannel);
+  for (const key of keys) book.delete(key);
+  return keys.length;
+}
+
 /**
  * Stop 的「补 reply」拦截追不追这条欠账：agent 来源（from.kind=local，含 master）不追——它们的答复走
  * send_to_agent / 回程簿推回，看门狗兜底；逼它 reply 到对方频道只会多出一次 forward（第三条路）。
