@@ -1,6 +1,6 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
 import { carryReceipt, type MergeRun, type MergePhase } from "./scheduler-merge.js";
-import { bounceStep, cancelOrUnknown, updateOrBounce } from "./scheduler-merge-conflict.js";
+import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 export interface PrSnapshot {
@@ -159,6 +159,6 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // Shutdown or lost ownership leaves the journal for the new controller to reconcile.
     if (["unknown", "merged", "resolved"].includes(current.phase)) throw e;
-    return cancelOrUnknown(current.phase, step, `外部步骤失败：${(e as Error).message.replace(/\s+/g, " ").slice(0, 450)}`, stopped);
+    return step("unknown", `外部步骤失败：${(e as Error).message.replace(/\s+/g, " ").slice(0, 450)}`);
   }
 }

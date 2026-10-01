@@ -295,6 +295,21 @@ describe("i28-M12 PM switches the card to manual mid-merge", () => {
       expect(stateOf(f)).toEqual({ run: "resolved", intent: "cancelled", stage: "merge", frozen: false, held: 0, mode: "manual" });
     });
   });
+  for (const phase of ["ready", "updating", "await_ci"] as const) {
+    test(`${phase}: manual during inspect + a red optional check (the driver writes unknown itself, r2) → cancelled, no freeze`, async () => {
+      await with_(phase, async (f) => {
+        f.external.inspect = async () => {
+          const t = getTask(f.db, "T1")!, w = getWorkflow(f.db, "T1")!;
+          setWorkflow(f.db, { actor: "owner", now: 250 }, { taskId: "T1", taskRev: t.rev, workflowRev: w.rev, template: "code", templateVersion: 2,
+            mode: "manual", authorFamily: "claude", fallback: "缩小范围", reason: "PM 接管" });
+          return pr({ mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "pass" }, { name: "lint", bucket: "fail" }] });
+        };
+        await f.tick();
+        expect(stateOf(f)).toEqual({ run: "resolved", intent: "cancelled", stage: "merge", frozen: false, held: 0, mode: "manual" });
+        expect(f.calls).toEqual([]); // inspect is replaced above; no update-branch, no merge
+      });
+    });
+  }
   test("await_ci: a refused merging claim that is not a manual switch (head moved on the card) is still unknown", async () => {
     await with_("await_ci", async (f) => {
       f.external.freshness = async () => {

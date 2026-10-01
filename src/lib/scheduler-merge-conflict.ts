@@ -105,23 +105,7 @@ export async function updateOrBounce(run: MergeRun, external: MergeExternal, ste
   }
 }
 
-/**
- * A step refused mid-run (e.g. the PM switched to manual while CI ran, so the merging claim was refused): no merge was sent
- * from these phases, so the ledger is asked to end the run as cancelled; it refuses unless the card is manual, and the run
- * then becomes unknown exactly as before.
- */
-export async function cancelOrUnknown(phase: MergePhase, step: Step, why: string, isStop: (e: unknown) => boolean): Promise<MergeRun> {
-  if (BOUNCE_PHASES.includes(phase)) {
-    try {
-      return await step("resolved", why);
-    } catch (e) {
-      if (isStop(e)) throw e; // Refused = not a manual switch (or a lost race): unknown below is the old, safe answer.
-    }
-  }
-  return step("unknown", why);
-}
-
-/** PM switched the card to manual while no merge was in flight (service drift branch). */
+/** PM switched the card to manual while no merge was in flight: advanceMergeRun ends such a run as cancelled whatever was asked. */
 export const manualCancel = (db: Database, run: MergeRun): boolean =>
   BOUNCE_PHASES.includes(run.phase) && getWorkflow(db, run.taskId)?.mode === "manual";
 
@@ -133,6 +117,16 @@ function endRun(db: Database, ctx: WriteCtx, row: MergeRun, reason: string, inte
   const intent = getIntent(db, row.intentId);
   if (intent?.status === "submitted") settleIntent(db, { ...ctx, now }, { id: row.intentId, from: "submitted", to: "cancelled", receipt: intentReceipt });
   db.prepare("DELETE FROM scheduler_resources WHERE intentId=?").run(row.intentId);
+}
+
+/** The PM's switch to manual ends a run no merge was sent for: intent cancelled, slot freed, task untouched, no freeze (spec 9). */
+export function cancelMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string): void {
+  const now = ctx.now ?? Date.now();
+  endRun(db, ctx, row, `cancelled: PM 切手动，未发出 merge（${receipt}）`, `merge cancelled（PM 切手动，未发出 merge）：${receipt.slice(0, 500)}`, now);
+  insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:cancelled` }, {
+    project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：PM 切手动，撤销未发出的合并（${receipt}）`,
+    data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: "resolved", outcome: "cancelled", receipt },
+  }, true);
 }
 
 /**
@@ -147,12 +141,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
   const b = parseBounceReceipt(receipt);
   if (!b) {
     if (!manualCancel(db, row)) throw new LedgerError("conflict", "只有 PM 切手动、且还没发出合并的运行能直接结束；退回 fix 要带冲突 / CI 失败回执");
-    endRun(db, ctx, row, `cancelled: PM 切手动，未发出 merge（${receipt}）`, `merge cancelled（PM 切手动，未发出 merge）：${receipt.slice(0, 500)}`, now);
-    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:cancelled` }, {
-      project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：PM 切手动，撤销未发出的合并（${receipt}）`,
-      data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: "resolved", outcome: "cancelled", receipt },
-    }, true);
-    return;
+    return cancelMergeRun(db, ctx, row, receipt);
   }
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
   if (!sameSha(b.prHead, row.reviewedHead) || (b.cause === "conflict" && !SHA.test(b.mainHead ?? "")) ||

@@ -49,8 +49,6 @@ function fixture(phase: MergeRun["phase"], o: { snaps: PrSnapshot[]; fresh?: Fre
   const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
     expect([from, rev]).toEqual([row.phase, row.rev]);
     if (to === o.refuse) throw new Error("等 CI 期间 main 已前进 3 次，不再自动更新"); // what the journal says on the 4th refresh
-    // The journal ends a run without a bounce receipt only after a PM switch to manual, which this fake never models.
-    if (to === "resolved" && !receipt?.startsWith("退回 fix")) throw new Error("只有 PM 切手动、且还没发出合并的运行能直接结束");
     calls.push(`journal:${to}`);
     heads.push(newHead);
     // Mirrors the journal: a carried await_ci re-pins the run on the new head.

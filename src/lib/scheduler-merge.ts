@@ -13,7 +13,7 @@ import { currentPooledReviewer } from "./scheduler-pool-facts.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
-import { closeMergeRun } from "./scheduler-merge-conflict.js";
+import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -165,6 +165,12 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     }
     if (input.to === "resolved") { // before any merge was sent: a conflict / red CI goes back to fix, a manual switch ends it; no freeze
       closeMergeRun(db, ctx, row, input.receipt, mergeRunDrift(db, row));
+      return getMergeRun(db, row.intentId) as MergeRun;
+    }
+    // Every road to unknown passes here: once the PM took the card over and no merge was sent, whatever made the driver
+    // give up (a refused claim, a red optional check, a drift) ends the run as cancelled instead of freezing the queue.
+    if (input.to === "unknown" && manualCancel(db, row)) {
+      cancelMergeRun(db, ctx, row, text(input.receipt, "回执"));
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     const drift = mergeRunDrift(db, row);
