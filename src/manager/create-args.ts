@@ -26,7 +26,7 @@ export interface CreateArgs {
   /** T60：--transport acp（只有 codex 支持，缺省 tmux） */
   transportFlag?: string;
   piBaseFlag?: string;
-  /** --pi-preset <name>：能力档案预设（如 codemode），比手拼 base+extensions 省事 */
+  /** --pi-preset <name>：能力档案预设（如 codemode） */
   piPresetFlag?: string;
   teamFlags: TeamFlags;
 }
@@ -59,6 +59,10 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   if (flagLike) return { error: flagLike };
   if (!name || !dir) return { error: CREATE_USAGE };
   return {
-    name, dir, purpose: purposeFlag ?? purposeParts.join(" "), perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, transportFlag, piBaseFlag, piPresetFlag, teamFlags,
+    name,
+    dir,
+    purpose: purposeFlag ?? purposeParts.join(" "),
+    perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, transportFlag,
+    piBaseFlag, piPresetFlag, teamFlags,
   };
 }

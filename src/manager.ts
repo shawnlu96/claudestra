@@ -81,7 +81,8 @@ import { listSessionJsonls, readyTimeoutHint } from "./lib/runtimes/claude-code.
 import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
-import { describePiEnvProfile, normalizePiEnvProfile, piEnvPreset, piEnvPresetNames, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
+import { piEnvPreset, piEnvPresetNames } from "./lib/pi-presets.js";
+import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { REPO_ROOT, SRC_DIR } from "./lib/repo-root.js";
@@ -486,11 +487,8 @@ async function cmdCreate(
   if (piPresetFlag) {
     const preset = piEnvPreset(piPresetFlag);
     if (!preset) {
-      output({
-        ok: false,
-        error: `未知的 --pi-preset: "${piPresetFlag}"。可用: ${piEnvPresetNames().join(", ")}。` +
-          `也可以先建再改: manager pi-env-set <agent> --preset <name>`,
-      });
+      const names = piEnvPresetNames().join(", ");
+      output({ ok: false, error: `未知的 --pi-preset: "${piPresetFlag}"。可用: ${names}（先建再改: manager pi-env-set）` });
       return;
     }
     piEnv = { ...preset };
@@ -2283,7 +2281,8 @@ async function cmdPiEnvSet(
   if (opts.preset) {
     const preset = piEnvPreset(opts.preset);
     if (!preset) {
-      output({ ok: false, error: `未知的 --preset: "${opts.preset}"。可用: ${piEnvPresetNames().join(", ")}` });
+      const names = piEnvPresetNames().join(", ");
+      output({ ok: false, error: `未知的 --preset: "${opts.preset}"。可用: ${names}` });
       return;
     }
     if (preset.base) next.base = preset.base;
@@ -2344,7 +2343,7 @@ switch (cmd) {
     if (!name) {
       output({
         ok: false,
-        error: 'usage: pi-env-set <agent> [--preset <name>] [--base inherit|minimal] [--add-ext <src>]... [--add-skill <path>]... [--exclude-tool <name>]... [--mcp-config <path>] [--no-trust|--trust] [--reset]',
+        error: 'usage: pi-env-set <agent> [--preset N] [--base inherit|minimal] [--add-ext <src>] [--add-skill <path>] [--exclude-tool <t>] [--mcp-config <path>] [--no-trust|--trust] [--reset]'
       });
       break;
     }

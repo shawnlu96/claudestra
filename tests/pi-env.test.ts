@@ -246,3 +246,10 @@ test("piActivateTools：只有 codemode / tool_search 需要在会话里激活",
   expect(piActivateTools({ extensions: ["builtin:mcp", "builtin:llama.cpp", "/x/y.ts", "npm:z"] })).toEqual([]);
   expect(piActivateTools(undefined)).toEqual([]);
 });
+
+test("预设不接受原型链上的键（__proto__ / constructor 会绕过未知预设检查，PR349-r1）", () => {
+  for (const bad of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    expect(piEnvPreset(bad)).toBeUndefined();
+  }
+  expect(piEnvPreset("codemode")).toEqual({ base: "minimal", extensions: ["builtin:codemode"] });
+});
