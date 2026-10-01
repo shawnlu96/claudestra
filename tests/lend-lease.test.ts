@@ -1,6 +1,7 @@
 /**
  * T94 合 main 后的租约缺口（T94-r4-merge.md），都用真子进程：
- * - P1：`ledger lend-ask` 在 BEGIN IMMEDIATE 上等别的连接放写锁时，调度服务的 singleton / 维护租约丢了，拿到锁后不写 ask
+ * - P1：`ledger lend-ask --retire`（关升级前遗留的逐单确认 ask）在 BEGIN IMMEDIATE 上等别的连接放写锁时，调度服务的 singleton / 维护租约丢了，
+ *   拿到锁后不关、报 lease-lost
  * - P2：lend 这一步的本地效果（journal、收据、摘要）每次都先核 active，失租时一条都不写
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -8,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock, lockOwnedBy } from "../src/lib/file-lock.js";
+import { getAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { advance, getMeta, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
@@ -33,22 +35,21 @@ function managerKid(pid: number): boolean {
   return ps.split("\n").some((l) => { const m = l.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/); return !!m && Number(m[1]) === pid && m[3].includes("manager.ts"); });
 }
 
-const PARAMS = { orderId: "o-lease", peer: "team-a", fp: null, family: "codex", repo: "o/r", pr: 1, head: "a".repeat(40), taskId: "T1", step: "review", quota: "今天 1 单" };
-
-describe("P1：lend-ask 等 SQLite 写锁期间失租", () => {
+describe("P1：lend-ask --retire 等 SQLite 写锁期间失租", () => {
   for (const stop of ["singleton", "maintenance", "none"] as const) {
-    test(`${stop === "none" ? "对照：租约一直在，放锁后照常开一张 ask" : `等锁时丢了 ${stop}：拿到锁后不写，报 lease-lost`}`, async () => {
+    test(`${stop === "none" ? "对照：租约一直在，放锁后照常关掉旧确认卡" : `等锁时丢了 ${stop}：拿到锁后不关，报 lease-lost`}`, async () => {
       const { r, state, env } = box();
       writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents: {} }));
       const ledger = join(state, "ledger.sqlite");
-      openLedger(ledger);
+      const askId = openAsk(openLedger(ledger), { project: "master", source: "system", kind: "authorize", fromAgent: "scheduler", title: "出借确认（升级前）",
+        bind: { action: "lend_claim", params: {}, approve: ["lend_claim_approve"], paramsHash: "x" } }).id;
       closeLedger(ledger);
       const sp = join(state, "scheduler.pid"), mp = join(state, "maintenance.lock");
       const a = (await acquireLock(sp, 0))!, b = (await acquireLock(mp, 0))!;
       const lease = { singleton: { path: sp, token: a.token }, maintenance: { path: mp, token: b.token } };
       const script = join(r, "ask-child.ts");
       writeFileSync(script, `import { schedulerManagerWith } from ${JSON.stringify(join(REPO_ROOT, "src/lib/scheduler-service.ts"))};
-console.log(JSON.stringify(await schedulerManagerWith(${JSON.stringify(lease)})("ledger", "lend-ask", "--params", ${JSON.stringify(JSON.stringify(PARAMS))})));\n`);
+console.log(JSON.stringify(await schedulerManagerWith(${JSON.stringify(lease)})("ledger", "lend-ask", "--retire", ${JSON.stringify(askId)})));\n`);
       const gate = openLedger(ledger);
       gate.exec("BEGIN IMMEDIATE"); // 另一个连接占着写锁：子进程核完租约后卡在自己的 BEGIN IMMEDIATE 上
       const kid = spawnIn(r, env(), script);
@@ -61,14 +62,14 @@ console.log(JSON.stringify(await schedulerManagerWith(${JSON.stringify(lease)})(
       const out = JSON.parse((await new Response(kid.stdout).text()).trim().split("\n").at(-1) || "{}");
       await kid.exited;
       const db = openLedger(ledger);
-      const asks = (db.query("SELECT COUNT(*) AS n FROM asks").get() as { n: number }).n;
+      const askState = getAsk(db, askId)!.state;
       closeLedger(ledger);
       if (stop === "none") {
         expect(out).toMatchObject({ ok: true });
-        expect(asks).toBe(1);
+        expect(askState).toBe("cancelled");
       } else {
         expect(out).toMatchObject({ ok: false, code: "lease-lost" });
-        expect(asks).toBe(0);
+        expect(askState).toBe("open");
       }
       if (lockOwnedBy(sp, a.token)) a.release();
       if (lockOwnedBy(mp, b.token)) b.release();
@@ -88,7 +89,7 @@ describe("P2：lend 这一步失租时不写本地状态", () => {
       advance(db, "o-local", "asked", "claimed");
       advance(db, "o-local", "claimed", "released", { settle: { notify: null, removeDir: false } });
       db.close();
-      writeFileSync(join(state, "lend.json"), JSON.stringify({ version: 1, enabled: false, lend: [], borrow: [] }));
+      writeFileSync(join(state, "lend.json"), JSON.stringify({ version: 2, enabled: false, lend: [], borrow: [] }));
       const script = join(r, "step-child.ts");
       writeFileSync(script, `import { lendStep } from ${JSON.stringify(join(REPO_ROOT, "src/lib/lend-deps.ts"))};
 import { LedgerReader } from ${JSON.stringify(join(REPO_ROOT, "src/lib/ledger-read.ts"))};

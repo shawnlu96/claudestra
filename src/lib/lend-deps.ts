@@ -100,7 +100,8 @@ async function verifyReceipt(peer: string, r: { orderId: string; sha256: string;
   return verifyPurpose(rec.publicKey, "claudestra-lend-receipt-v1", [r.orderId, r.sha256, String(r.eventSeq), r.taskId], r.sig);
 }
 
-function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined): LoopDeps {
+/** 生产依赖。不设 writeOpen：写单在 W8 之前只认 lend-grant-rules.ts WRITE_ROLE_OPEN（tests/lend-grant.test.ts 钉住） */
+export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined): LoopDeps {
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* 核不过 = 不能证明仍在持有：什么都不发 */ }
   };

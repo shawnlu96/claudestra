@@ -3,7 +3,7 @@
  * 暂停 / 缺到期时间 / 过期 / 超 7 天 / 含 write 都整条不生效；v1 条目一律迁成暂停，任何边界都不放宽，迁移可以重跑。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lendFileProblem, migrateV1, readLend, readLendSync, updateLend, V1_PAUSED_REASON, type LendEntry } from "../src/lib/lend-config.js";
@@ -104,5 +104,36 @@ describe("P1-5 v1 → v2 迁移", () => {
     const p = tmp();
     writeFileSync(p, JSON.stringify({ version: 2, enabled: true, borrow: [], lend: [{ ...G, confirm: "auto" }] }));
     expect(await readLend(p)).toMatchObject({ status: "invalid" });
+  });
+});
+
+describe("P1-3 生产依赖打不开 write（writeOpen 只能由测试注入）", () => {
+  test("lendDeps 不设 writeOpen；按真实状态目录里写了 write 的授权现读，结论仍是不生效", async () => {
+    const { lendDeps } = await import("../src/lib/lend-deps.js");
+    const { openLendJournal } = await import("../src/lib/lend-journal.js");
+    const { LedgerReader } = await import("../src/lib/ledger-read.js");
+    const { liveGrant } = await import("../src/lib/lend-grant.js");
+    const { LEND_PATH } = await import("../src/lib/lend-config.js");
+    const { statePath } = await import("../src/lib/paths.js");
+    const files = [LEND_PATH, statePath("peers.json")];
+    const before = files.map((f) => (existsSync(f) ? readFileSync(f, "utf8") : null)); // 测试共用一个临时状态目录：用完原样放回
+    const reader = new LedgerReader();
+    const db = openLendJournal(":memory:");
+    try {
+      const d = lendDeps(db, reader, () => {}, undefined);
+      expect(d.writeOpen).toBeUndefined();
+      const now = Date.now();
+      writeFileSync(statePath("peers.json"), JSON.stringify({ httpPeers: [{ name: "team-a", fp: FP, addedAt: "" }], pendingInvites: [] }));
+      writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: true, borrow: [],
+        lend: [{ ...G, roles: ["review", "write"], grantedAt: iso(now), until: iso(now + DAY) }] }));
+      const g = await liveGrant({ peer: "team-a", fp: FP }, d);
+      expect(g).toMatchObject({ ok: false, problem: expect.stringContaining("write") });
+      writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: true, borrow: [], lend: [{ ...G, grantedAt: iso(now), until: iso(now + DAY) }] }));
+      expect(await liveGrant({ peer: "team-a", fp: FP }, d)).toMatchObject({ ok: true });
+    } finally {
+      db.close();
+      reader.close();
+      files.forEach((f, i) => (before[i] === null ? rmSync(f, { force: true }) : writeFileSync(f, before[i]!)));
+    }
   });
 });
