@@ -15,7 +15,7 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import { TEMPLATE_VERSION } from "../src/lib/scheduler-autostart.js";
-import { autostartSpecPath } from "../src/lib/scheduler-autostart-deps.js";
+import { autostartSpecPath, specPathIn } from "../src/lib/scheduler-autostart-deps.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator", PM = "agent-pm", FID = "ab12-i28", ARM = "0123456789abcdef", ARM2 = "fedcba9876543210";
@@ -112,6 +112,7 @@ describe("step：授权只到本 claim 的那张卡", () => {
     const spec = getTask(db, "i28-a")!.spec!;
     expect(isAbsolute(spec)).toBe(true);
     expect(spec).toBe(autostartSpecPath("i28-a"));
+    expect(specPathIn("relative-state/ledger", "i28-a")).toBe(resolve("relative-state/ledger/docs/tasks/i28-a.md")); // 相对状态目录也落绝对路径
     const root = resolve(import.meta.dir, "../src/lib");
     const deps = readFileSync(join(root, "scheduler-autostart-deps.ts"), "utf8");
     expect(deps).toContain("readSpec(autostartSpecPath(taskId))");

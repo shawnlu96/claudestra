@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync, symlinkSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { readInventoryQuota } from "./ai-quota.js";
 import { resolveBunPath } from "./bun-path.js";
 import { statePath } from "./paths.js";
@@ -41,8 +41,12 @@ const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
 /** 跨轮的去重表：额度窗口、被核心拒绝的交付（重启后各最多再发一次） */
 const MEMO = new Set<string>();
 
-/** 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它（绝对路径，挂给远端审查才找得到原文） */
-export const autostartSpecPath = (taskId: string) => join(statePath("ledger"), "docs", "tasks", `${taskId}.md`);
+/**
+ * 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它。用 resolve 而非 join：CLAUDESTRA_STATE_DIR 可以是相对值，
+ * 卡上记了相对路径，挂给远端审查就找不到规格原文（task-spec.ts 只认绝对 task.spec）。tests/ledger-autostart-claim.test.ts。
+ */
+export const specPathIn = (ledgerDir: string, taskId: string) => resolve(ledgerDir, "docs", "tasks", `${taskId}.md`);
+export const autostartSpecPath = (taskId: string) => specPathIn(statePath("ledger"), taskId);
 
 function readSpec(path: string): SpecFile | null {
   try {
