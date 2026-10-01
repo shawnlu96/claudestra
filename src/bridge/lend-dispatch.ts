@@ -40,6 +40,8 @@ const loop = createPushLoop({
     if (!peer?.baseUrl || !peer.outToken) throw new Error(`peer ${name} 握手不完整`);
     const url = `${peer.baseUrl.replace(/\/+$/, "")}/api/v1/lend/offer`;
     const body = JSON.stringify(offer);
+    const started = await manager(["ledger", "lend-pushing", "--", name, body]);
+    if (!started?.ok) throw new Error(`重推起点没入账：${started?.error ?? "无输出"}`);
     const res = await peerFetch(url, {
       method: "POST", headers: { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json", ...signedFor("POST", url, body) },
       body, signal: AbortSignal.timeout(SEND_TIMEOUT_MS),

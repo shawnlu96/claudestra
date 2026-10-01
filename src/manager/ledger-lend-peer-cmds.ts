@@ -6,6 +6,7 @@
  * - lend-peers [--peer <name>]: read-only, each borrow peer's protocol, hello age and placeable slots per family (scheduler / PM).
  * Built by ledger-lend-cmds.ts with its deps / notice helpers passed in (no runtime import back). tests/ledger-lend-peers.test.ts.
  */
+import { startQueuedPush } from "../lib/ledger-lend-queue.js";
 import { lendRepoUrl } from "../lib/lend-git.js";
 import { parseV2Request, parseV2Response, helloAnswer, V2_BODY_VERSION, type BeatRequest } from "../lib/lend-wire-v2.js";
 import { refuse, sweepLend, type LendNotice } from "../lib/ledger-lend.js";
@@ -88,6 +89,14 @@ async function pushed(c: LedgerCli, h: Helpers): Promise<Result> {
   return { ok: true, acked, withdrawn, notified: await h.tell(c, notices) };
 }
 
+async function pushing(c: LedgerCli): Promise<Result> {
+  const { peer, body } = bridgeArgs(c, "lend-pushing");
+  const parsed = parseV2Request("offer", body);
+  if (!parsed.ok) return refuse("invalid", parsed.error);
+  startQueuedPush(c.db, peer, parsed.value.orders.map((o) => o.orderId), c.deps.now());
+  return { ok: true };
+}
+
 async function peers(c: LedgerCli, h: Helpers): Promise<Result> {
   const only = c.p.flags.peer;
   const now = c.deps.now();
@@ -100,6 +109,7 @@ export function lendPeerCmds(h: Helpers): Record<string, CommandSpec> {
     "lend-hello": { valued: [], usage: "lend-hello -- <peer> <json>（bridge 专用：出借方报容量和授权）", run: (c) => hello(c, h) },
     "lend-beat": { valued: [], usage: "lend-beat -- <peer> <json>（bridge 专用：出借方批量心跳兼续租）", run: (c) => beat(c, h) },
     "lend-pushed": { valued: [], usage: "lend-pushed -- <peer> <json>（bridge 专用：推送的应答，接收的记确认，拒收的撤回）", run: (c) => pushed(c, h) },
+    "lend-pushing": { valued: [], usage: "lend-pushing -- <peer> <json>（bridge 专用：重推前开始计时）", run: pushing },
     "lend-peers": { valued: ["peer"], usage: "lend-peers [--peer <名>]（各出借方的协议版本、hello 新鲜度和可放的单数）", run: (c) => peers(c, h) },
   };
 }
