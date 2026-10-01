@@ -10,6 +10,7 @@ import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-sched
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { PEER_PLACEMENT, peerFamily, placeFor, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-placement.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
+import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
@@ -76,7 +77,7 @@ export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away
 
 function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Away, { escalate: string }> {
   if (!p.remote.roles.includes("review")) return null;
-  if (!s.workflow || s.workflow.template === "security" || s.reviewer || !s.task.headSHA) return null;
+  if (!s.workflow || s.workflow.template === "security" || keepsReviewer(s) || !s.task.headSHA) return null;
   const family = otherFamily(s.workflow.authorFamily);
   const placed = placeFor(snapshotPlacementFacts(s, since, "review"), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };

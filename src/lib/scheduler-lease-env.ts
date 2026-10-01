@@ -50,6 +50,11 @@ export function adoptSchedulerLease(env: Record<string, string | undefined> = pr
 
 export const leasedRun = (): boolean => adopted !== null;
 
+/** Explicit lifecycle children only; never restore the lease into process.env or an agent's inherited environment. */
+export function forwardSchedulerLease(): string | undefined {
+  return adopted === null ? undefined : adopted.length === 0 ? "" : encodeLease({ singleton: adopted[0], maintenance: adopted[1] });
+}
+
 /** Synchronous: call it with no await between it and the write it guards. */
 export function assertSchedulerLease(): void {
   if (adopted === null) return;
