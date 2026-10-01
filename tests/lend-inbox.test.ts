@@ -51,9 +51,10 @@ describe("逐单核对：每项一正一反", () => {
     expect(refusedCode(await one(h, {}, { peer: "team-a", fp: null as unknown as string }))).toEqual(["no_grant"]);
   });
 
-  test("家族：codex 收；claude 一律拒（family）", async () => {
+  test("家族：codex 收；未授权的 claude 拒；未知家族拒", async () => {
     expect((await one(fresh(harness({ entry: { families: { codex: 2, claude: 2 } } })))).accepted).toEqual(["o1"]);
-    expect(refusedCode(await one(fresh(harness({ entry: { families: { codex: 2, claude: 2 } } })), { family: "claude" }))).toEqual(["family"]);
+    expect(refusedCode(await one(fresh(harness()), { family: "claude" }))).toEqual(["no_slot"]);
+    expect(refusedCode(await one(fresh(harness()), { family: "pi" }))).toEqual(["family"]);
   });
 
   test("角色：审查收；授权里没写 write 的开工 / 修复单、不认识的阶段 → role；写了 write 才收；写单开关关着：写单 write_closed、含 write 的授权整条不生效", async () => {

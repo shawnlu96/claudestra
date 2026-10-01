@@ -60,10 +60,8 @@ const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC")
 export const sanitizeForeign = (s: string): string => redactForPeer(fold(s)).text;
 
 /**
- * Gate for both peer exits. The head field is the only value not scanned, and only because it must be a full SHA equal to
- * the ledger's head; every other field is scanned with no exemption, so the head value written anywhere else refuses too
- * (a heading that shows head is built by the renderer from the field). Ids must reach the peer unchanged (a deliver cites
- * them), so an address in one refuses as well.
+ * Gate for both peer exits. Head must equal the ledger's full SHA; free text can quote that exact whole value.
+ * Ids have no head exemption and must reach the peer unchanged (a deliver cites them), so an address in one refuses too.
  */
 function gatePeer(o: OrderWire, ledgerHead: string | null): void {
   if (o.head !== null && !isFullSha(o.head)) throw new OrderRenderError("head 不是完整 40 / 64 位 SHA，拒绝外发");
@@ -76,7 +74,7 @@ function gatePeer(o: OrderWire, ledgerHead: string | null): void {
   for (const [name, v] of [...ids, ...free]) {
     if (v === null) continue;
     const folded = fold(v);
-    const rule = peerSecretHit(folded);
+    const rule = peerSecretHit(folded, free.some(([n]) => n === name) ? ledgerHead : null);
     if (rule) throw new OrderRenderError(`${name} 疑似含密钥（${rule}），peer 外发拒绝优先，留在本机审`);
     if (ids.some(([n]) => n === name) && redactForPeer(folded).count > 0) throw new OrderRenderError(`${name} 含疑似敏感内容，编号不能改写，拒绝外发`);
   }

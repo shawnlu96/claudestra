@@ -1,9 +1,9 @@
 "use client";
 /**
  * 协作视图 v4（docs/team/collab-view-v4.md）：顶上指标条；左大纲（待你处理、筛选、事项 → 任务）；中间三个标签——
- * 「子 DAG」「进度」（同一份 i28-L4 快照，接线全在 dag/use-dag-panes.tsx；没有图时第一个标签退回 v4 因果线画布）和「团队」（T55）；
+ * 「子 DAG」「谁在干活」（接线在 dag/use-dag-panes.tsx；没有图时第一个标签退回 v4 因果线画布）和「团队」（T55）；
  * 右属性（没选中 = 项目概览，任务 = 任务详情 + 它的因果线，边 / 折叠组 / 待你处理 / DAG 节点 / 版本 / 差异各一页）。
- * 手机没有画布：分段「子 DAG / 进度」列表，点开是全屏详情。
+ * 手机没有画布：分段「子 DAG / 谁在干活」列表，点开是全屏详情。
  * 底部时间轴放第二期。数据只用总览（tasks / items / deps）和任务详情，没有来源的指标标「暂无」。
  */
 import { useMemo, useState } from "react";
@@ -205,12 +205,12 @@ export function CollabView({ project }: { project: string }) {
       </div>}
       {narrow ? (
         <>
-          {dag.mobile(<MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
+          {dag.mobile(<MobileList project={project} ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
           {pane === "detail" && detail}
           {pane !== "detail" && page && <div className={v.sheet}>{page}</div>}
         </>
       ) : (
-        <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline ov={o} lines={lines} filter={filter}
+        <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline project={project} ov={o} lines={lines} filter={filter}
           onFilter={setFilter} waits={waits} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} tr={tr} />}>
           {dag.center(<CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
             selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />, team)}

@@ -13,7 +13,9 @@ import type { OfferSummary } from "./lend-wire.js";
 import { HELLO_FRESH_MS, type BeatAnswer, type BeatOrder, type BeatRequest, type Grant, type HelloRequest, type OfferResponse, type Paused, type Slots } from "./lend-wire-v2.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getLendOrder, leaseLend, withdrawPooledLend, type LendNotice, type LendOrder } from "./ledger-lend.js";
+import { queueRefusal, queuedPushReady } from "./ledger-lend-queue.js";
 import { ackPushed } from "./ledger-lend-peers-ttl.js";
+import { phaseSince } from "./lend-pr-takeover.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { LEND_LIVE } from "./ledger-lend-schema.js";
 import { tx } from "./ledger-tx.js";
@@ -123,7 +125,8 @@ function endOrder(db: Database, ctx: WriteCtx, o: LendOrder, b: BeatOrder, check
 
 /**
  * One batched heartbeat: each line renews the lease of an order this peer holds under that gen, or says why not; an `ended`
- * line releases it (see endOrder). The phase / excerpt land in lend_orders.beat (excerpt masked again here). One transaction.
+ * line releases it (see endOrder). The phase / excerpt land in lend_orders.beat (excerpt masked again here), with since = when this phase
+ * began (kept while the phase stays the same). One transaction.
  */
 export function beatLend(db: Database, ctx: WriteCtx, peer: string, req: BeatRequest, checks: Map<string, CleanCheck>): { orders: BeatAnswer[]; notices: LendNotice[] } {
   return tx(db, () => {
@@ -132,7 +135,9 @@ export function beatLend(db: Database, ctx: WriteCtx, peer: string, req: BeatReq
     const orders = req.orders.map((b): BeatAnswer => {
       const o = heldOrder(db, peer, b, now);
       if (typeof o === "string") return { orderId: b.orderId, verdict: o, lease: null };
-      const beat = JSON.stringify({ gen: b.gen, phase: b.phase, lastActivityAt: b.lastActivityAt, excerpt: sanitizeForeign(b.excerpt), at: now });
+      const prev = (db.query("SELECT beat FROM lend_orders WHERE orderId = ?").get(o.orderId) as { beat: string | null } | null)?.beat ?? null;
+      const since = phaseSince(prev, b.phase, now); // 这个 phase 从哪一刻起：A 侧 publishing 卡住的接管按它算（lend-pr-takeover.ts）
+      const beat = JSON.stringify({ gen: b.gen, phase: b.phase, lastActivityAt: b.lastActivityAt, excerpt: sanitizeForeign(b.excerpt), at: now, since });
       db.prepare("UPDATE lend_orders SET beatAt = ?, beat = ? WHERE orderId = ?").run(now, beat, o.orderId);
       if (b.ended) {
         notices.push(...endOrder(db, ctx, o, b, checks));
@@ -175,7 +180,7 @@ export function pushCandidates(db: Database, now: number): PushCandidate[] {
   };
   const rows = db.query(`SELECT orderId, taskId, step, family, repo, pr, head, round, specRev, createdAt, peer FROM lend_orders
     WHERE status = 'pooled' AND peer IN (SELECT peer FROM lend_peers WHERE proto >= 2) ORDER BY createdAt`).all() as (Omit<OfferSummary, "offeredAt"> & { createdAt: number; peer: string })[];
-  return rows.filter((r) => ok(r.peer)).map(({ peer, createdAt, ...s }) => ({ peer, summary: { ...s, offeredAt: createdAt } }));
+  return rows.filter((r) => ok(r.peer) && queuedPushReady(db, r, getLendPeer(db, r.peer)!, now)).map(({ peer, createdAt, ...s }) => ({ peer, summary: { ...s, offeredAt: createdAt } }));
 }
 
 /**
@@ -188,7 +193,10 @@ export function answerPush(db: Database, ctx: WriteCtx, peer: string, a: OfferRe
     const out = { acked: ackPushed(db, peer, a.accepted, ctx.now ?? Date.now()), withdrawn: [] as string[], notices: [] as LendNotice[] };
     for (const f of a.refused) {
       const o = getLendOrder(db, f.orderId);
-      if (!o || o.peer !== peer || !withdrawPooledLend(db, ctx, { orderId: o.orderId, reason: `推送被 ${peer} 拒收（${f.code}）` }).withdrawn) continue;
+      if (!o || o.peer !== peer) continue;
+      const queued = queueRefusal(db, o, f.code, ctx.now ?? Date.now());
+      if (queued) { out.notices.push(...queued.notices); continue; }
+      if (!withdrawPooledLend(db, ctx, { orderId: o.orderId, reason: `推送被 ${peer} 拒收（${f.code}）` }).withdrawn) continue;
       out.withdrawn.push(o.orderId);
       if (getWorkflow(db, o.taskId)?.mode === "auto") continue;
       out.notices.push({ project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId}）被 ${peer} 拒收（${f.code}），已撤回；要再借就 ledger lend-offer ${o.taskId}` });

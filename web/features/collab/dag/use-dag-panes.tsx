@@ -14,7 +14,7 @@ import { compareOverlay } from "./dag-diff";
 import { drawable, layoutDag, nodeId, type DNode } from "./dag-layout";
 import { MobileDag } from "./dag-mobile";
 import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
-import { ProgressView } from "./dag-progress-view";
+import { WorkBoardView } from "../work/work-board-view";
 import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, FeatureCard } from "./dag-types";
 import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
@@ -22,7 +22,7 @@ import { useDagUi, type DagTab } from "./use-dag-ui";
 import d from "./dag.module.css";
 
 const NO_FEATURES: readonly FeatureCard[] = [];
-const TAB_LABEL: Record<DagTab, string> = { dag: "子 DAG", progress: "进度", team: "团队" };
+const TAB_LABEL: Record<DagTab, string> = { dag: "子 DAG", progress: "谁在干活", team: "团队" };
 
 export interface DagPanesArgs {
   project: string;
@@ -94,7 +94,7 @@ export function useDagPanes(a: DagPanesArgs) {
   )) || (!a.narrow && diffPage) || null;
 
   const progress = (
-    <ProgressView rows={rows} features={features} actOf={actOf} now={a.now} flash={ui.flash} onWork={(w) => ui.jumpNode(w.featureId, w.nodeKey)} onTask={a.pickTask} tr={tr} />
+    <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
   );
   const shelf = drawable(features).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (

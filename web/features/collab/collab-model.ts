@@ -6,6 +6,7 @@
  */
 import { fillParams, type I18nParams } from "@/lib/i18n-fill";
 import { metaOf } from "@/lib/ledger-meta-guard";
+import type { DoneRest } from "@/lib/api/ledger-done";
 
 export type Tr = (s: string, p?: I18nParams) => string;
 const zh: Tr = fillParams;
@@ -92,6 +93,9 @@ export interface LedgerOverview {
   tasks: LedgerTaskView[];
   /** 老 bridge 没有 = 没有依赖边（因果线画布只画分组框） */
   deps?: LedgerDepView[];
+  /** 已完成卡只带窗口时（i28-V1p）更早的从这里翻，null = 没有更早的；窗口外的计数在 doneRest。老 bridge 没有 = tasks 是全量 */
+  doneCursor?: string | null;
+  doneRest?: DoneRest;
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */

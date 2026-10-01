@@ -13,6 +13,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
 import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
+import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
 import { writeDeps } from "./ledger-lend-cmds.js";
@@ -20,6 +21,7 @@ import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
 import { parseRemotePolicy, type RemotePolicy } from "../lib/scheduler-config.js";
 import { reviewSwapStep } from "../lib/scheduler-review-swap-runtime.js";
+import { familyWaitCommand } from "../lib/scheduler-family-pick-notice.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -54,6 +56,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
     run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
+  "scheduler-family-wait": familyWaitCommand,
   "workflow-set": {
     valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
     usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
@@ -126,9 +129,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-pool": {
-    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first", "local-priority", "repo"], bools: [],
+    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first", "local-priority", "repo", "write-families"], bools: [],
     usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|write|review,write|none --timeout-min N [--review-first a,b]" +
-      " [--local-priority first|balance|low|off] [--repo owner/name]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+      " [--local-priority first|balance|low|off] [--repo owner/name] [--write-families claude,codex]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
     async run(c) {
       const roles = c.need("roles");
       const minutes = integer(c, "timeout-min");
@@ -141,9 +144,11 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       try {
         remote = parseRemotePolicy({ mode: c.need("mode"), roles: roles === "none" ? [] : roles.split(","), poolTimeoutMin: minutes,
           ...(reviewFirst.length ? { reviewFirst } : {}), ...(c.p.flags["local-priority"] ? { localPriority: c.p.flags["local-priority"] } : {}),
+          ...(c.p.flags["write-families"] !== undefined ? { writeFamilies: c.p.flags["write-families"].split(",") } : {}),
           ...(c.p.flags.repo ? { repo: c.p.flags.repo } : {}) }, "--remote");
       } catch (e) { throw new LedgerError("invalid", `--mode / --roles / --local-priority / --repo 不认识：${(e as Error).message}`); }
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
+      await ensureReviewScope(c.db, getIntent(c.db, intent)?.taskId); // 规格外文件在挂池事务外先登记（i28-ASK2）
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
         intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec: specOf(c, intent), write: await poolWrite(c, intent, remote),
       }) };

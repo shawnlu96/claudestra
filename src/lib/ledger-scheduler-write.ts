@@ -21,6 +21,7 @@ import { templateFor } from "./scheduler-template.js";
 import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -190,6 +191,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")
       .get(task.id) as { id: string } | null;
     if (live) throw new LedgerError("conflict", `任务已有未结调度意图 ${live.id}`);
+    releaseIdleWriteSlots(db, task.project);
     const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
     const slots = new Set([...cardWorkerSlots(held, task.id), ...resources.filter((r) => r?.startsWith("slot:"))]);
     if (slots.size > 1) throw new LedgerError("conflict", "一张卡最多持有一个 worker 槽；后续派单须沿用已持有的槽");

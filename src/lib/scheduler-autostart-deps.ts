@@ -3,6 +3,8 @@
  * 台账写走传进来的调度身份 CLI（已套租约守卫）；create / kill 走不带调度身份、带服务租约的 manager（同 scheduler-auto-deps.ts 建审查员）；
  * git 每次调用都包在 whileOwned 里，服务停了或丢了租约，排着的 git 什么都不做。进程内去重表跨轮保留（模块级），重启清空。
  */
+import { startPlacement } from "./scheduler-placement-start.js";
+import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync, symlinkSync, unlinkSync } from "node:fs";
@@ -79,6 +81,14 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
       projectDirs: async (id) => (await readProjects()).projects.find((p) => p.id === id)?.dirs ?? [],
       branchExists: async (repo, branch) => (await git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).ok,
       autoReady: (project) => (config.enabled && config.autoDispatch && Object.hasOwn(config.projects, project) ? null : `调度服务没对项目 ${project} 开自动派单`),
+      placement: (db, q) => startPlacement(db, {
+        policy: (project) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; },
+        borrow: readEffectiveBorrow, now: Date.now,
+        originRepo: async (dir) => {
+          const r = await git(dir, ["remote", "get-url", "origin"]);
+          return r.ok ? r.out.match(/github\.com[:/]([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}?)(?:\.git)?$/)?.[1] ?? null : null;
+        },
+      }, q),
       template: () => (existsSync(execTemplate) ? readFileSync(execTemplate, "utf8") : null),
     }),
     stepIO: () => ({

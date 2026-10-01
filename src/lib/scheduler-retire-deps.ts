@@ -14,6 +14,7 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { readLiveAgents, schedulerRetireTick, type RetireDeps } from "./scheduler-retire.js";
+import { nodeTmpCleaner } from "./scheduler-retire-tmp.js";
 import { git } from "./scheduler-review-worktree.js";
 import type { TickPace } from "./scheduler-yield.js";
 
@@ -29,9 +30,10 @@ function retireDeps(db: Database, ledger: Manager, active: () => void, lease: Sc
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* a failed liveness check means "not provably ours": send nothing */ }
   };
+  const tmp = nodeTmpCleaner();
   return {
     ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => whileOwned(active, () => readLiveAgents()),
-    git: (args) => whileOwned(active, () => git(args)),
+    git: (args) => whileOwned(active, () => git(args)), tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) },
     notifyPm: (task, text) => whileOwned(active, () => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive })),
   };
 }
