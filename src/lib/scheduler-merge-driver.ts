@@ -89,19 +89,6 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   return pr.mergeState === "DIRTY" ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }
 
-/** update-branch refused while GitHub is still computing: wait in `updating` (bounded) so a conflict it reports next tick bounces. */
-async function updateOrWait(claimed: MergeRun, external: MergeExternal, step: Step): Promise<MergeRun> {
-  let reread: PrSnapshot | null = null;
-  const watched: MergeExternal = { ...external, inspect: async (prRef) => (reread = await external.inspect(prRef)) };
-  try {
-    return await updateOrBounce(claimed, watched, step, stopped);
-  } catch (e) {
-    const pr = reread as PrSnapshot | null;
-    if (stopped(e) || !pr || !samePr(claimed, pr) || pr.mergeState !== "UNKNOWN") throw e;
-    return unknownWait(claimed, step);
-  }
-}
-
 /** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict
  * still bounces; after the claim only the head-pinned merge API runs (GitHub refuses a moved head, so nothing merges early). */
 async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void): Promise<MergeRun> {
@@ -149,7 +136,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (fresh.behindBy > 0 || pr.mergeState === "BEHIND") {
         const claimed = await step("updating");
         assertActive();
-        return await updateOrWait(claimed, external, step);
+        return await updateOrBounce(claimed, external, step, stopped);
       }
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
@@ -180,7 +167,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       const refresh = async (why: string) => {
         const claimed = await step("updating", `${why}，重新更新分支`);
         assertActive();
-        return await updateOrWait(claimed, external, step);
+        return await updateOrBounce(claimed, external, step, stopped);
       };
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;

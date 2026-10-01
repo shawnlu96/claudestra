@@ -6,13 +6,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
-import { closeLedger, getMeta, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { beginMergeRun, getMergeRun, type MergePhase } from "../src/lib/scheduler-merge.js";
 import { MERGE_STATE_UNKNOWN_LIMIT_MS, UNKNOWN_LIMIT_REASON, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
+import { bounceReceipt, bounceReviewLine, bounceWork, fixBounce, parseBounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
+import { renderBouncePush } from "../src/lib/peer-pr-message.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import type { runBounded } from "../src/lib/run-bounded.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -48,10 +50,14 @@ function fixture(phase: MergePhase) {
     VALUES (?,'reviewer','agent-review','rs','codex','acp','active','rc',100,100)`).run(ID);
   beginMergeRun(db, { actor: "scheduler", now: 101 }, INTENT, ["check"]);
   if (phase !== "ready") db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, INTENT);
-  let snaps: PrSnapshot[] = [pr()];
+  let snaps: (PrSnapshot | Error)[] = [pr()];
   const calls: string[] = [], gh = { behindBy: 0, carry: false };
   const external: MergeExternal = {
-    inspect: async () => snaps.length > 1 ? snaps.shift()! : snaps[0]!,
+    inspect: async () => {
+      const next = snaps.length > 1 ? snaps.shift()! : snaps[0]!;
+      if (next instanceof Error) throw next;
+      return next;
+    },
     freshness: async () => ({ behindBy: gh.behindBy, mainHead: MAIN }),
     carryReview: async () => gh.carry ? { ok: true, reason: "净 diff 一致", mainParent: X, mainHead: MAIN, diffHash: "9".repeat(64) }
       : { ok: false, reason: "不沿用" },
@@ -61,7 +67,7 @@ function fixture(phase: MergePhase) {
   const manager = async (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: ["p"],
     loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => 300 }) as Promise<Record<string, unknown>>;
   /** One scheduler tick at wall clock `at`, with GitHub answering `next`. */
-  const tick = async (next: PrSnapshot[], at?: number) => {
+  const tick = async (next: (PrSnapshot | Error)[], at?: number) => {
     snaps = next;
     if (at !== undefined) setSystemTime(new Date(at));
     await schedulerMergeTick(db, config, manager, () => external);
@@ -72,7 +78,7 @@ function fixture(phase: MergePhase) {
     frozen: getMeta(db, "p").queueFrozen.frozen,
   });
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, tick, state, close, calls, gh };
+  return { db, tick, state, close, calls, gh, external };
 }
 type F = ReturnType<typeof fixture>;
 const with_ = async (phase: MergePhase, body: (f: F) => Promise<void>) => {
@@ -141,29 +147,79 @@ describe("i28-M12b r1: UNKNOWN is waited out before any irreversible step", () =
   });
 });
 
-describe("i28-M12b r2: UNKNOWN after a refused update-branch, and on a carried head", () => {
+describe("i28-M12b r3 (PM 10-02 02:4x): a refused update-branch re-reads once and goes back to fix, never waits", () => {
+  const REFUSED = "branch cannot be updated due to conflicts";
+  const lastBounce = (f: F) => {
+    const stage = f.db.query("SELECT data FROM events WHERE target=? AND kind='stage' ORDER BY seq DESC LIMIT 1").get(ID) as { data: string };
+    return JSON.parse(stage.data).mergeBounce as Record<string, unknown>;
+  };
+  const rereads: [string, () => PrSnapshot | Error][] = [
+    ["UNKNOWN", computing], ["BEHIND", () => pr({ mergeState: "BEHIND" })], ["CLEAN", () => pr()],
+    ["a moved head (UNKNOWN)", () => pr({ head: N, mergeState: "UNKNOWN", checks: [] })],
+    ["a moved head (DIRTY)", () => pr({ head: N, mergeState: "DIRTY", checks: [] })], ["a failed read", () => new Error("gh pr view 超时")],
+  ];
   for (const phase of ["ready", "await_ci"] as const) {
-    test(`${phase}: green, behind main, update-branch refused, re-read UNKNOWN → waits in updating; next tick DIRTY → bounce (unknown-ready-1)`, async () => {
+    test(`${phase}: re-read DIRTY on the reviewed head → the M12 conflict bounce with the conflict evidence`, async () => {
       await with_(phase, async (f) => {
         f.gh.behindBy = 1;
-        await f.tick([pr(), computing()], T0);
-        expect(f.state()).toEqual(WAITING("updating"));
-        expect(f.calls).toEqual(["update"]);
-        await f.tick([pr({ mergeState: "DIRTY", checks: [] })], T0 + 30_000);
+        await f.tick([pr(), pr({ mergeState: "DIRTY", checks: [] })], T0);
         expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+        expect(lastBounce(f)).toMatchObject({ cause: "conflict", prHead: H, mainHead: MAIN });
         expect(f.calls).toEqual(["update"]);
       });
     });
+    for (const [label, reread] of rereads) {
+      test(`${phase}: re-read ${label} → back to fix as update_fail with GitHub's error, not frozen, no second update`, async () => {
+        await with_(phase, async (f) => {
+          f.gh.behindBy = 1;
+          f.gh.carry = true; // even a head that could carry the review is not followed after a refused update
+          await f.tick([pr(), reread()], T0);
+          expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+          expect(lastBounce(f)).toEqual({ cause: "update_fail", prHead: H, mainHead: null, checks: [], error: REFUSED });
+          expect(getMergeRun(f.db, INTENT)?.reason).toBe(`update_fail: 退回 fix（update_fail）：PR head ${H}，更新分支失败：${REFUSED}；请合入 main 后重新交付`);
+          await f.tick([pr({ mergeState: "BEHIND" })], T0 + MERGE_STATE_UNKNOWN_LIMIT_MS + 1);
+          expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+          expect(f.calls).toEqual(["update"]);
+        });
+      });
+    }
   }
-  test("update-branch refused and the re-read is UNKNOWN for too long → unknown with the limit reason", async () => {
+  test("the fix order, the targeted re-review and the bounce count read update_fail like the other bounces", async () => {
     await with_("ready", async (f) => {
       f.gh.behindBy = 1;
       await f.tick([pr(), computing()], T0);
-      await f.tick([computing()], T0 + MERGE_STATE_UNKNOWN_LIMIT_MS + 1);
-      expect(f.state()).toEqual({ run: "unknown", stage: "merge", frozen: true });
-      expect(getMergeRun(f.db, INTENT)?.reason).toContain(UNKNOWN_LIMIT_REASON);
+      const b = fixBounce(listEvents(f.db, { project: "p", target: ID }), "fix")!;
+      expect(b).toMatchObject({ cause: "update_fail", prHead: H, error: REFUSED });
+      expect(bounceWork(b).inputs[0]).toContain(`更新分支失败：PR head ${H}`);
+      expect(bounceWork(b).acceptance[0]).toContain("合入最新 origin/main");
+      expect(bounceReviewLine(b)).toContain("只看合入 main 的合并提交");
+      const counted = f.db.query("SELECT data FROM events WHERE target=? AND kind='scheduler' AND json_extract(data,'$.op')='merge_conflict'").get(ID) as { data: string };
+      expect(JSON.parse(counted.data)).toMatchObject({ cause: "update_fail", prHead: H, count: 1, escalated: false });
     });
   });
+  test("a long multi-line error is flattened and cut so the receipt stays one line ≤ 600 and still parses", async () => {
+    await with_("ready", async (f) => {
+      f.gh.behindBy = 1;
+      f.external.updateBranch = async () => { throw new Error(`HTTP 422\n\t${"冲突😀".repeat(300)}`); };
+      await f.tick([pr(), computing()], T0);
+      expect(f.state()).toEqual({ run: "resolved", stage: "fix", frozen: false });
+      const receipt = bounceReceipt({ cause: "update_fail", prHead: H, mainHead: null, checks: [], error: `HTTP 422\n\t${"冲突😀".repeat(300)}` });
+      expect(receipt.length).toBeLessThanOrEqual(600);
+      expect(receipt).not.toMatch(/[\n\t]/);
+      expect(() => encodeURIComponent(receipt)).not.toThrow(); // throws on a lone surrogate: no emoji was cut in half
+      expect(parseBounceReceipt(receipt)).toMatchObject({ cause: "update_fail", prHead: H, error: expect.stringMatching(/^HTTP 422 冲突/) });
+      expect(getMergeRun(f.db, INTENT)?.reason).toBe(`update_fail: ${receipt}`);
+    });
+  });
+  test("a peer PR author is told the update failed, not that CI failed", () => {
+    const text = renderBouncePush(42, { cause: "update_fail", prHead: H, checks: [] }, "reply-here");
+    expect(text).toContain("更新分支失败");
+    expect(text).toContain("请合入最新 main 后推送");
+    expect(text).not.toContain("CI 失败");
+  });
+});
+
+describe("i28-M12b r2: UNKNOWN on a carried head", () => {
   test("carried head (pure merge of main) UNKNOWN → waits; then DIRTY → carry journaled, conflict bounce on the new head (unknown-carried-1)", async () => {
     await with_("updating", async (f) => {
       f.gh.carry = true;
