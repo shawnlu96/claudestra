@@ -6,6 +6,7 @@
  *   bun run sandbox manager <子命令…>                            在沙箱里跑 manager（create / kill / list / token-add …）
  *   bun run sandbox status | down | clean                        看状态 / 停掉 bridge 与沙箱 tmux / 停掉并删沙箱目录
  *   bun run sandbox env                                          打印沙箱环境（export 行，手动调试用）
+ *   bun run sandbox pi-auth <provider>                           把一家 provider 的 API key 拷进沙箱的 Pi（scripts/sandbox-pi-auth.ts）
  *   … --lab [--pair] [--as a|b]                                  lab 模式：回环中继 + 两实例 peer + 假推送（scripts/sandbox-lab.ts），不支持代理
  *   bun run sandbox lab-push --lab [--as a|b]                    lab：给实例登记一个假 Web Push 订阅和一台假 APNs 设备
  *
@@ -348,10 +349,6 @@ async function cmdStatus(o: Opts, layout: SandboxLayout): Promise<void> {
   if (pid) runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, "list"]);
 }
 
-function cmdEnv(o: Opts, layout: SandboxLayout): void {
-  for (const [k, v] of Object.entries(envFor(o, layout))) console.log(`export ${k}='${v.replace(/'/g, "'\\''")}'`);
-}
-
 /** 沙箱环境里执行的内部步骤：此时 lib/paths 已按沙箱目录求值，tmux 走沙箱 socket */
 async function inner(op: string, layout: SandboxLayout): Promise<void> {
   if (process.env[SANDBOX_FLAG] !== "1") fail("内部命令只能由沙箱脚本在沙箱环境里调用");
@@ -384,7 +381,8 @@ async function main(): Promise<void> {
     case "down": return cmdDown(o, layout);
     case "clean": return cmdClean(o, layout);
     case "status": return cmdStatus(o, layout);
-    case "env": return cmdEnv(o, layout);
+    case "env": return void Object.entries(envFor(o, layout)).forEach(([k, v]) => console.log(`export ${k}='${v.replace(/'/g, "'\\''")}'`));
+    case "pi-auth": return (await import("./sandbox-pi-auth.ts")).cmdPiAuth(o.rest, layout.root, markerProblem(layout), fail);
     case "manager": {
       const refusal = sandboxManagerRefusal(o.rest, !!o.lab);
       if (refusal) fail(refusal);
@@ -392,7 +390,7 @@ async function main(): Promise<void> {
     }
     case INNER: return inner(o.rest[0] ?? "", layout);
     default:
-      console.log("用法：bun run sandbox up|status|down|clean|env|manager <子命令…>|lab-push [--port N] [--root DIR] [--static DIR] [--lab [--pair] [--as a|b]]");
+      console.log("用法：bun run sandbox up|status|down|clean|env|manager <子命令…>|pi-auth <provider>|lab-push [--port N] [--root DIR] [--static DIR] [--lab [--pair] [--as a|b]]");
       process.exit(cmd ? 1 : 0);
   }
 }

@@ -18,7 +18,7 @@ const spec = (piEnv?: PiEnvProfile): LaunchSpec => ({
 
 /** manager 拼出的参数交给适配器、再交给 pi：pi 会不会留下 server 的 reply（名字按 pi 自己的规则算） */
 function piKeepsReply(piEnv: PiEnvProfile | undefined, server: string): boolean {
-  const parsed = parseArgs(piRpcArgs("s", piAcpArgs(spec(piEnv), "agent-pa", "/repo", server)));
+  const parsed = parseArgs(piRpcArgs("s", piAcpArgs(spec(piEnv), "agent-pa", "/repo", false, server)));
   return piKeepsTool(parsed, createMcpToolName(server, "reply"));
 }
 

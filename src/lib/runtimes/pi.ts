@@ -18,6 +18,7 @@ import {
   piLineToClaudeShape,
   piSessionIdFromFilename,
   piSessionPath,
+  piSessionPathAllowed,
 } from "../pi-session.js";
 import { ACP_CONTROL } from "./acp-control.js";
 import { lastUserTextOf } from "./shared.js";
@@ -83,6 +84,7 @@ export const piAdapter: ManagedRuntimeAdapter = {
         const sessionId = piSessionIdFromFilename(file);
         if (!sessionId) continue;
         const filePath = join(dirPath, file);
+        if (!piSessionPathAllowed(filePath)) continue; // 沙箱：链接到根外的会话不扫
         const fileStat = await stat(filePath).catch(() => null);
         if (!fileStat) continue;
 

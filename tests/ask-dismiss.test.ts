@@ -2,7 +2,7 @@
  * 「待你处理」删除（T61，bridge/ask-dismiss.ts）与运行时卡的指纹（lib/ask-fingerprint.ts、bridge/ask-runtime.ts）：
  * 三类卡删掉的效果、删过的重启后不再冒出来、同一个弹框重启沿用原卡、Codex 额度卡按「try again at」到点收起。库都是临时的。
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { dismissFromCard } from "../src/bridge/ask-dismiss.js";
 import { sweepExpired } from "../src/bridge/ask-expire.js";
 import { noteRuntimeDialogs, openRuntimeAsk, resetRuntimeAsksForTest, staleAuqCard } from "../src/bridge/ask-runtime.js";
@@ -268,6 +268,11 @@ describe("AUQ 按下标作答：只在同一个进程里按身份精确沿用，
 });
 
 describe("Codex 额度卡按重置时间收起", () => {
+  // tick() 走产品代码里的 Date.now()：本地 08:41–08:46 内「8:41 AM」落进解析宽限、成了已过的今天，正文就变「额度用完」。
+  // 钉在 20:00 远离这段窗口；afterEach 失败路径也跑，后面的测试拿回真实时间（见文件末尾那条）。
+  beforeEach(() => setSystemTime(new Date(2026, 8, 29, 20, 0)));
+  afterEach(() => setSystemTime());
+
   test("解析「try again at」：只有时刻的取将来最近那次；带日期的照日期；认不出的交给默认有效期", () => {
     const now = new Date(2026, 8, 29, 20, 0).getTime();
     expect(new Date(codexExpiry(limitLine("8:41 PM"), now)!).getHours()).toBe(20);
@@ -305,4 +310,8 @@ describe("Codex 额度卡按重置时间收起", () => {
     await tick(codexPane(limitLine("8:41 AM")));
     expect(codexRows().map((a) => a.state)).toEqual(["expired"]);
   });
+});
+
+test("额度卡那组跑完系统时间已恢复：Date.now() 跟不受 setSystemTime 影响的单调时钟对得上", () => {
+  expect(Math.abs(Date.now() - (performance.timeOrigin + performance.now()))).toBeLessThan(60_000);
 });
