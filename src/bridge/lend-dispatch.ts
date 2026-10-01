@@ -9,6 +9,7 @@ import { readJsonCapped } from "../lib/body-reader.js";
 import { signedFor } from "../lib/instance-key.js";
 import { createPushLoop, PUSH_TICK_MS } from "../lib/lend-dispatch.js";
 import { peerLendProblem, proxyVarsIn } from "../lib/lend-remote.js";
+import { queueNoticeDue } from "../lib/ledger-lend-queue.js";
 import { pushCandidates } from "../lib/ledger-lend-peers.js";
 import { pushTtlDue } from "../lib/ledger-lend-peers-ttl.js";
 import { isE2eResponse } from "../lib/peer-e2e-client.js";
@@ -40,6 +41,8 @@ const loop = createPushLoop({
     if (!peer?.baseUrl || !peer.outToken) throw new Error(`peer ${name} 握手不完整`);
     const url = `${peer.baseUrl.replace(/\/+$/, "")}/api/v1/lend/offer`;
     const body = JSON.stringify(offer);
+    const started = await manager(["ledger", "lend-pushing", "--", name, body]);
+    if (!started?.ok) throw new Error(`重推起点没入账：${started?.error ?? "无输出"}`);
     const res = await peerFetch(url, {
       method: "POST", headers: { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json", ...signedFor("POST", url, body) },
       body, signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
@@ -53,7 +56,7 @@ const loop = createPushLoop({
   },
   ttlDue: (now) => {
     const db = ledgerDb();
-    return !!db && pushTtlDue(db, now).length > 0;
+    return !!db && (pushTtlDue(db, now).length > 0 || queueNoticeDue(db, now));
   },
   sweep: async () => {
     const r = await manager(["ledger", "lend-sweep"]);

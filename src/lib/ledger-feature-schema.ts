@@ -93,12 +93,13 @@ export function DAG_REWRITE_SCHEMA(db: Database): void {
   if (!have.has("askId")) db.prepare("ALTER TABLE dag_versions ADD COLUMN askId TEXT").run();
 }
 
-export const FEATURE_TABLES = ["ledger_instance", "features", "dag_versions", "dag_proposals", "dag_bindings"] as const;
+export const FEATURE_TABLES = ["ledger_instance", "features", "dag_versions", "dag_proposals", "dag_bindings", "feature_deps"] as const;
 export const FEATURE_COLUMNS: Record<string, readonly string[]> = {
   features: ["id", "project", "title", "ownerWords", "status", "currentVersion", "rev"],
   dag_versions: ["featureId", "version", "reasonKind", "reasonText", "proposedBy", "approvedBy", "nodes", "cancels", "scopeChange", "askId"],
   dag_proposals: [...PROPOSAL_COLS, ...STATUS_KEYS],
   dag_bindings: ["featureId", "version", "nodeKey", "taskId", "boundBy", "boundAt"],
+  feature_deps: ["project", "fromFeature", "toFeature", "note", "createdBy", "createdAt"],
   events: ["origin", "originSeq"],
 };
 export const FEATURE_INDEXES: Record<string, readonly string[]> = {
@@ -107,3 +108,11 @@ export const FEATURE_INDEXES: Record<string, readonly string[]> = {
   events: ["events_origin_seq"],
   dag_proposals: ["dag_proposals_pending"],
 };
+
+/** Idempotent tail migration: feature dependencies point from prerequisite to successor. */
+export function FEATURE_DEPS_SCHEMA(db: Database): void {
+  db.prepare(`CREATE TABLE IF NOT EXISTS feature_deps (
+    project TEXT NOT NULL, fromFeature TEXT NOT NULL REFERENCES features(id), toFeature TEXT NOT NULL REFERENCES features(id),
+    note TEXT NOT NULL DEFAULT '', createdBy TEXT NOT NULL, createdAt INTEGER NOT NULL,
+    PRIMARY KEY (fromFeature, toFeature))`).run();
+}

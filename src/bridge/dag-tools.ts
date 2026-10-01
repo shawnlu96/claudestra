@@ -1,3 +1,4 @@
+import { setFeatureDeps } from "../lib/ledger-feature-deps-tool.js";
 /**
  * 子 DAG 与开卡的 MCP 工具（i28-L5，docs/architecture/dag-tools.md），挂进 bridge/order-tools.ts 的 HANDLERS。
  * 身份门（requireVerified）已在 routeOrderTool 过了；写类工具（plan_feature / rewrite_dag / start_node）再按台账角色拒：只有该项目 PM 名单里的 agent
@@ -291,6 +292,7 @@ function liveDeps(): DagToolDeps {
 
 export function dagToolHandlers(deps: DagToolDeps = liveDeps()): Record<string, OrderToolHandler> {
   return {
+    set_feature_deps: (call, args) => setFeatureDeps(deps, call, args),
     plan_feature: (call, args) => planFeature(deps, call, args),
     rewrite_dag: (call, args) => rewriteDag(deps, call, args),
     start_node: (call, args) => startNode(deps, call, args),

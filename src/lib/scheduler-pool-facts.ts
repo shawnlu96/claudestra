@@ -5,6 +5,7 @@
  * The claim's own note (written by claimLend in its transaction) is the dispatch receipt: it always precedes the verdict,
  * whereas the intent's `submitted` settle only happens on the next scheduler pass. tests/scheduler-pool.test.ts.
  */
+import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
 import { heldLease } from "./ledger-lend-lease.js";
@@ -98,10 +99,9 @@ export function localReviewerCount(db: Database, project: string, exceptTask: st
     AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(project, exceptTask ?? "") as { n: number }).n;
 }
 
-/** The project's other cards whose executor is working locally now: holding a worker slot in a writing stage (review idles it). */
+/** The project's other cards whose executor is working locally now: holding a writing slot, including authors still in spec/restate and reserved local starts. */
 export function localWriterCount(db: Database, project: string, exceptTask: string | null): number {
-  return (db.query(`SELECT COUNT(DISTINCT r.taskId) AS n FROM scheduler_resources AS r JOIN tasks AS t ON t.id = r.taskId WHERE r.project = ?
-    AND r.resource LIKE 'slot:%' AND r.taskId != ? AND t.stage IN ('spec','restate','build','fix')`).get(project, exceptTask ?? "") as { n: number }).n;
+  return [...writeSlotFacts(db, project).writers].filter((id) => id !== exceptTask).length;
 }
 
 /** The project's borrow entries in lend.json order, each with A's live orders there and its lend-v2 view. */
