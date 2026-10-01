@@ -80,6 +80,8 @@ interface RuntimeAskInput {
   instance?: string;
   /** ACP 回合失败（不是额度 / 登录）：落在 extra.failure，调度器按它认出是哪类失败（scheduler-auto-ports.ts codexFailure） */
   failure?: "error";
+  /** 监护在处置、恢复次数还没用完（lib/agent-supervisor-bridge.ts failureCardQuiet）：卡照开、留在看板上，但不卡活、不推 owner */
+  quiet?: true;
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
@@ -104,7 +106,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
     const now = Date.now();
     const expiresAt = r.source === "codex" ? codexExpiry(r.context, now) : undefined;
     const a = openAsk(askDb(), {
-      project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: true,
+      project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: !r.quiet,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
       chatId: r.channelId, expiresAt, extra: {
         ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}), ...(r.failure ? { failure: r.failure } : {}),
