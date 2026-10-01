@@ -4,7 +4,6 @@
  */
 import { api, ApiError } from "@/lib/api/client";
 import { machines, type MachineRef } from "@/lib/machines";
-import { peerSaver, type PeerSaver } from "./borrow-model";
 
 export type Family = "codex" | "claude";
 export type RemoteModeView = "balance" | "off";
@@ -54,9 +53,10 @@ export async function fetchBorrow(signal?: AbortSignal): Promise<BorrowView | nu
   }
 }
 
+type BorrowBody = { projects: string[]; maxOpen: number };
 const peerPath = (peer: string) => `/borrow/peers/${encodeURIComponent(peer)}`;
 
-/** CLI 准入不过也会抛（409 refused）：调用方按失败回弹。machine 缺省 = 发请求时的当前机器 */
+/** CLI 准入不过也会抛（409 refused）：调用方按失败回弹。machine 由调用方在点击那一刻用 machineNow() 取 */
 export async function saveBorrowPeer(peer: string, body: BorrowBody, machine?: MachineRef): Promise<void> {
   await api(peerPath(peer), { method: "PUT", json: body, timeoutMs: 40_000 }, machine);
 }
@@ -65,21 +65,10 @@ export async function removeBorrowPeer(peer: string, machine?: MachineRef): Prom
   await api(peerPath(peer), { method: "DELETE", timeoutMs: 40_000 }, machine);
 }
 
-type BorrowBody = { projects: string[]; maxOpen: number };
-/** 写给哪台机器的哪个 peer：在提交那一刻定下，停手计时、排队中的写和删后记号都跟着来源机器，切机器后不写到另一台、也不串删除状态 */
-interface Aim { machine?: MachineRef; peer: string }
-const lanes = peerSaver<Aim, BorrowBody>(
-  { put: (a, v) => saveBorrowPeer(a.peer, v, a.machine), del: (a) => removeBorrowPeer(a.peer, a.machine) },
-  (a) => JSON.stringify([a.machine?.fp ?? null, a.peer]),
-);
-const aim = (peer: string): Aim => {
+/** 发起那一刻的机器：请求绑定它，切机器后在途请求照旧打到原机器（直托管只有本机 → undefined） */
+export function machineNow(): MachineRef | undefined {
   const fp = machines.currentFp();
-  return fp ? { machine: { fp }, peer } : { peer };
-};
-
-/** 借入 peer 的写入一律经它：按（机器，peer）串行、最后提交的赢，删掉的不复活（borrow-model.ts peerSaver）。模块级，卡片换几次都是这一份 */
-export const borrowSaver: PeerSaver<string, BorrowBody> = {
-  save: (peer, v, after, delayMs) => lanes.save(aim(peer), v, after, delayMs),
-  remove: (peer) => lanes.remove(aim(peer)),
-  create: (peer, v) => lanes.create(aim(peer), v),
-};
+  return fp ? { fp } : undefined;
+}
+/** 请求回来时界面是不是还在那台机器上：不在就不刷新、不放动效，结果不写进新机器的界面 */
+export const stillOn = (at: MachineRef | undefined): boolean => (machines.currentFp() ?? undefined) === at?.fp;

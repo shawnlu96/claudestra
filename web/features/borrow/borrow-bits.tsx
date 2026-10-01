@@ -71,14 +71,11 @@ export function LimitLine(props: { name: string; n: number; children: ReactNode;
   );
 }
 
-/** −/+ 停手多久才存（peer 卡每存一次就是一次写 lend.json）；计时在模块级的 borrowSaver 里，卡片卸载不丢 */
-export const STEP_SETTLE_MS = 600;
-
 /**
  * 上限的数字框：点数字变输入框（数字键盘），回车 / 失焦交一次；空或非数字退回原值，越界夹到边界并抖一下。
- * −/+ 每点一下都交给 onCommit（stepped = true），由调用方决定立刻存还是等停手；onCommit 只在值真的变了时调。
+ * −/+ 每点一下交一次。onCommit 只在值真的变了时调；peer 卡每交一次就存一次、存的期间 disabled，新增表单只改本地值。
  */
-export function Stepper(props: { value: number; limit: number; disabled: boolean; onCommit: (n: number, el: HTMLElement | null, stepped: boolean) => void }) {
+export function Stepper(props: { value: number; limit: number; disabled: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
   const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -89,10 +86,10 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
   }, [editing]);
   const v = props.value;
 
-  const commit = (n: number, stepped: boolean) => {
-    if (n !== v) props.onCommit(n, box.current, stepped);
+  const commit = (n: number) => {
+    if (n !== v) props.onCommit(n, box.current);
   };
-  const step = (d: 1 | -1) => commit(clampMaxOpen(v + d, props.limit), true);
+  const step = (d: 1 | -1) => commit(clampMaxOpen(v + d, props.limit));
   const startEdit = () => {
     done.current = false;
     setEditing(true);
@@ -104,7 +101,7 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
     if (raw === null) return;
     const p = parseMaxOpen(raw, props.limit);
     if (!p || p.clamped) shake(box.current);
-    if (p) commit(p.value, false);
+    if (p) commit(p.value);
   };
 
   return (
@@ -119,6 +116,7 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
           inputMode="numeric"
           pattern="[0-9]*"
           enterKeyHint="done"
+          disabled={props.disabled}
           defaultValue={String(v)}
           aria-label={t("同时最多跑几单")}
           onFocus={(e) => e.currentTarget.select()}

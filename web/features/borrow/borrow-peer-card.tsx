@@ -1,14 +1,14 @@
 "use client";
 /**
  * 一个借入 peer 的卡片：协议徽章、hello 年龄、各家族「可放 / 上报空闲」、在跑 / 上限、不可用原因原文，
- * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。写入经 borrowSaver（−/+ 停手再存，其余立刻存）：
- * 成功整卡一闪，失败回到原值并抖一下被点的按钮。
+ * 以及按钮改设置（项目逐个开关、同时最多跑几单、两下删除）。每次点击立刻存一次，存的期间整张卡禁用，返回后用服务端的值刷新（不留本地草稿）：
+ * 成功整卡一闪，失败抖一下被点的按钮。请求在点击那一刻绑定机器，切了机器就不再动这张卡。
  */
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import { borrowSaver, type DroppedView, type Family, type PeerView } from "./borrow-api";
-import { afterSave, canToggleOff, lenderCap, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
-import { AgeTag, LimitLine, ProjectChips, STEP_SETTLE_MS, Stepper } from "./borrow-bits";
+import { machineNow, removeBorrowPeer, saveBorrowPeer, stillOn, type DroppedView, type Family, type PeerView } from "./borrow-api";
+import { canToggleOff, lenderCap, oneAtATime, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
+import { AgeTag, LimitLine, ProjectChips, Stepper } from "./borrow-bits";
 import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
 import { fadeIn, fadeOut, flash, shake } from "./motion";
 
@@ -70,18 +70,20 @@ function LenderCapBadge({ peer, maxOpen }: { peer: PeerView; maxOpen: number }) 
   );
 }
 
-/** 删一条借入：成功整行淡出再刷新，失败抖被点的按钮（卡片与失效行共用）。经 borrowSaver：没发出的微调先作废，删后不再写 */
+/** 删一条借入：成功整行淡出再刷新（卡片随之卸载），失败抖被点的按钮（卡片与失效行共用）。请求绑定点击那一刻的机器 */
 export async function dropPeer(peer: string, row: HTMLElement | null, el: HTMLElement, onChanged: () => Promise<void>): Promise<void> {
+  const at = machineNow();
   try {
-    await borrowSaver.remove(peer);
+    await removeBorrowPeer(peer, at);
+    if (!stillOn(at)) return;
     await fadeOut(row);
     await onChanged();
   } catch {
-    shake(el);
+    if (stillOn(at)) shake(el);
   }
 }
 
-type Draft = { projects: string[]; maxOpen: number };
+type PeerSettings = { projects: string[]; maxOpen: number };
 
 export function BorrowPeerCard(props: {
   peer: PeerView;
@@ -97,11 +99,10 @@ export function BorrowPeerCard(props: {
   const { peer, options, limit, dropped, serverNow, receivedAt, tick, onChanged } = props;
   const t = useT();
   const card = useRef<HTMLDivElement>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
   const [armed, setArmed] = useState(false);
   const state = peerState(peer);
-  const cur: Draft = draft ?? { projects: peer.projects, maxOpen: peer.maxOpen };
+  const cur: PeerSettings = { projects: peer.projects, maxOpen: peer.maxOpen };
 
   useEffect(() => fadeIn(card.current), []);
   useEffect(() => {
@@ -110,30 +111,26 @@ export function BorrowPeerCard(props: {
     return () => clearTimeout(id);
   }, [armed]);
 
-  // 写入交给模块级的 borrowSaver：同一 peer 跨卡片串行、最后提交的赢；−/+ 等停手再存，计时不随卡片卸载丢掉。
-  // after 只在这次仍是最后一次提交时来，刷新回来仍是才收 draft / busy（afterSave）；旧卡的 after 落在已卸载的组件上，setState 无害
-  const save = (next: Draft, el: HTMLElement | null, delayMs = 0) => {
-    setDraft(next);
-    if (!delayMs) setBusy(true);
-    const after = afterSave({
-      reload: onChanged,
-      ok: () => flash(card.current),
-      fail: () => shake(el), // 回弹：draft 清掉就是服务端的原值
-      settle: () => {
-        setDraft(null);
-        setBusy(false);
-      },
+  // 一张卡同时只做一件写；在途时 busy 禁用 −、+、输入框、项目开关和删除，返回后 onChanged 拿服务端的值
+  const gate = useRef<ReturnType<typeof oneAtATime> | null>(null);
+  const write = (job: () => Promise<void>) => void (gate.current ??= oneAtATime(setBusy))(job);
+  const save = (next: PeerSettings, el: HTMLElement | null) =>
+    write(async () => {
+      const at = machineNow();
+      try {
+        await saveBorrowPeer(peer.peer, next, at);
+        if (!stillOn(at)) return;
+        await onChanged();
+        flash(card.current);
+      } catch {
+        if (stillOn(at)) shake(el);
+      }
     });
-    borrowSaver.save(peer.peer, next, after, delayMs);
-  };
-  const remove = async (e: MouseEvent<HTMLButtonElement>) => {
+  const remove = (e: MouseEvent<HTMLButtonElement>) => {
     const el = e.currentTarget;
     if (!armed) return setArmed(true);
     setArmed(false);
-    setBusy(true);
-    await dropPeer(peer.peer, card.current, el, onChanged);
-    setDraft(null); // 停手前的微调已被删除作废，删失败时显示回服务端的值
-    setBusy(false);
+    write(() => dropPeer(peer.peer, card.current, el, onChanged));
   };
 
   return (
@@ -147,7 +144,7 @@ export function BorrowPeerCard(props: {
             className={`btn btn-ghost btn-xs ml-auto btn-square ${armed ? "text-error" : "text-base-content/45"}`}
             disabled={busy}
             aria-label={t("移除")}
-            onClick={(e) => void remove(e)}
+            onClick={remove}
           >
             <TrashIcon className="size-3.5" />
           </button>
@@ -170,7 +167,7 @@ export function BorrowPeerCard(props: {
         />
       </div>
       <LimitLine name={peer.peer} n={cur.maxOpen} badge={<LenderCapBadge peer={peer} maxOpen={cur.maxOpen} />}>
-        <Stepper value={cur.maxOpen} limit={limit} disabled={busy || !props.canWrite} onCommit={(n, el, stepped) => save({ ...cur, maxOpen: n }, el, stepped ? STEP_SETTLE_MS : 0)} />
+        <Stepper value={cur.maxOpen} limit={limit} disabled={busy || !props.canWrite} onCommit={(n, el) => save({ ...cur, maxOpen: n }, el)} />
       </LimitLine>
     </div>
   );

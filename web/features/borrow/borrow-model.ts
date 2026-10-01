@@ -96,104 +96,23 @@ export function lenderCap(p: Pick<PeerView, "reported">, maxOpen: number): numbe
   return m !== null && m < maxOpen ? m : null;
 }
 
-type TimerId = ReturnType<typeof setTimeout>;
-export interface Timers { set: (fn: () => void, ms: number) => TimerId; clear: (id: TimerId) => void }
-const REAL_TIMERS: Timers = { set: (fn, ms) => setTimeout(fn, ms), clear: (id) => clearTimeout(id) };
-
-export interface PeerSaver<K, T> {
-  /**
-   * 存一次；delayMs > 0 先等停手，期间同 peer 再存就重新计时、只留新的。after(ok, isLatest) 只在写完时仍是最后一次提交才调；
-   * after 里有 await（刷新）的，回来后要再问 isLatest()：期间又有新提交就别收 draft / busy，否则新的增量被旧值冲掉
-   */
-  save: (peer: K, v: T, after?: (ok: boolean, isLatest: () => boolean) => void | Promise<void>, delayMs?: number) => void;
-  /** 删除：丢掉还没发出的值、等在途的写完再 DELETE；成功后这个 peer 的保存一律丢掉，直到 create。失败照抛 */
-  remove: (peer: K) => Promise<void>;
-  /** 新加（或删后重加）：恢复这个 peer 的保存并写入。失败照抛 */
-  create: (peer: K, v: T) => Promise<void>;
-}
-
 /**
- * 按 peer 的保存器，模块级一份（borrow-api.ts 的 borrowSaver，K = 机器 + peer）：卡片卸载、重挂载都用它，停手计时和在途请求不跟卡片走。
- * 同一 peer 同时只在飞一个请求，排队中被更新的值顶掉的直接跳过，所以落下的一定是最后提交的值；
- * 删除排在同一条队里，删掉之后旧卡的保存不会把 peer 建回来。tests/web-borrow-limit.test.ts 用假 io、假时钟覆盖这些交错。
+ * 一张卡同时只做一件写（存 / 删）：在途时再来的直接忽略（返回 false），不排队、不合并，返回后由调用方用服务端的值刷新。
+ * 按钮在 busy 时已禁用，这里再挡一次同一帧里的连击。tests/web-borrow-machine.test.ts
  */
-export function peerSaver<K, T>(
-  io: { put: (peer: K, v: T) => Promise<void>; del: (peer: K) => Promise<void> },
-  keyOf: (peer: K) => string,
-  timers: Timers = REAL_TIMERS,
-): PeerSaver<K, T> {
-  type Lane = { tail: Promise<void>; seq: number; gone: boolean; timer: TimerId | null };
-  const lanes = new Map<string, Lane>();
-  const laneOf = (peer: K): Lane => {
-    const key = keyOf(peer);
-    let l = lanes.get(key);
-    if (!l) lanes.set(key, (l = { tail: Promise.resolve(), seq: 0, gone: false, timer: null }));
-    return l;
-  };
-  /** 新的一次提交：作废排队和计时中的旧值 */
-  const supersede = (l: Lane): number => {
-    if (l.timer !== null) timers.clear(l.timer);
-    l.timer = null;
-    return ++l.seq;
-  };
-  // 队尾不能断：put 失败已交给 after，这里只剩 after 自己抛错，丢了只少一次动效
-  const chain = (l: Lane, step: () => Promise<void>) => void (l.tail = l.tail.then(step).catch((e) => console.warn("[borrow] 保存收尾失败", e)));
-  return {
-    save(peer, v, after, delayMs = 0) {
-      const l = laneOf(peer);
-      if (l.gone) return;
-      const my = supersede(l);
-      const run = async () => {
-        if (l.gone || my !== l.seq) return;
-        let ok = true;
-        try {
-          await io.put(peer, v);
-        } catch (e) {
-          ok = false;
-          console.warn("[borrow] 保存失败", e);
-        }
-        const isLatest = () => my === l.seq;
-        if (isLatest()) await after?.(ok, isLatest);
-      };
-      if (delayMs <= 0) return chain(l, run);
-      l.timer = timers.set(() => {
-        l.timer = null;
-        chain(l, run);
-      }, delayMs);
-    },
-    remove(peer) {
-      const l = laneOf(peer);
-      supersede(l);
-      const done = l.tail.then(() => io.del(peer)).then(() => void (l.gone = true));
-      chain(l, () => done.catch((e) => console.warn("[borrow] 删除失败（调用方抖按钮）", e)));
-      return done;
-    },
-    create(peer, v) {
-      const l = laneOf(peer);
-      supersede(l);
-      const done = l.tail.then(() => {
-        l.gone = false;
-        return io.put(peer, v);
-      });
-      chain(l, () => done.catch((e) => console.warn("[borrow] 添加失败（调用方抖按钮）", e)));
-      return done;
-    },
-  };
-}
-
-/**
- * 卡片一次保存的收尾（PeerSaver.save 的 after）：失败抖一下；成功先刷新再一闪；最后收 draft / busy。
- * 收之前再问一次 isLatest()：刷新期间又点了 −/+，draft 归那次新提交，这里清掉会让后面的点按从旧值重新累计（少加一档）
- */
-export function afterSave(h: { reload: () => Promise<void>; ok: () => void; fail: () => void; settle: () => void }) {
-  return async (ok: boolean, isLatest: () => boolean): Promise<void> => {
+export function oneAtATime(onBusy: (busy: boolean) => void): (job: () => Promise<void>) => Promise<boolean> {
+  let busy = false;
+  return async (job) => {
+    if (busy) return false;
+    busy = true;
+    onBusy(true);
     try {
-      if (!ok) return h.fail();
-      await h.reload();
-      h.ok();
+      await job();
     } finally {
-      if (isLatest()) h.settle();
+      busy = false;
+      onBusy(false);
     }
+    return true;
   };
 }
 

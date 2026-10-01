@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
-import { borrowSaver, fetchBorrow, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
+import { fetchBorrow, machineNow, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
 import { addableContacts, canSubmitNew, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
 import { LimitLine, ProjectChips, Stepper } from "./borrow-bits";
 import { BorrowPeerCard, dropPeer } from "./borrow-peer-card";
@@ -134,7 +134,7 @@ function NewPeer({ peer, view, onCancel, onChanged }: { peer: string; view: Borr
   const submit = async (el: HTMLElement) => {
     setBusy(true);
     try {
-      await borrowSaver.create(peer, { projects, maxOpen }); // 删后重加：恢复这个 peer 的保存
+      await saveBorrowPeer(peer, { projects, maxOpen }, machineNow());
       await onChanged();
       onCancel();
     } catch {
