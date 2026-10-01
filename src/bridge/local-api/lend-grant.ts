@@ -1,6 +1,6 @@
 /**
  * 出借方管理面：GET /lend/grants 列授权、peer、借出单；POST /lend/grants → manager `lend grant`；POST /lend/grants/revoke → `lend revoke [--peer=]`。
- * 规则只在 W1 的 CLI（until / 名额 / 仓库 / 角色由它判）：这里只做类型整形、按现有条目补齐没带的字段、拼 argv。改成自己判，网页和 CLI 的规则就会分叉。
+ * 规则只在 W1 的 CLI（until / 名额 / 仓库 / 角色由它判）：这里只做类型整形、把缺失字段交给 CLI 在写锁内沿用、拼 argv。改成自己判，网页和 CLI 的规则就会分叉。
  * 值一律 `--flag=value`、peer 放 `--` 之后，请求体里的 `--xx` 进不了旗标位（tests/web-lend-api.test.ts 注入反例）。
  * 门 = owner 本人 + 全权凭据，三条都在起进程 / 读盘之前判。
  */
@@ -10,7 +10,7 @@ import { canReadLedger } from "../../lib/devices.js";
 import { LEND_PATH, readLend, type LendEntry } from "../../lib/lend-config.js";
 import { GRANT_MAX_DAYS, SHELL_SENTENCE, WRITE_ROLE_OPEN } from "../../lib/lend-grant-rules.js";
 import { LEND_JOURNAL_PATH, LIVE_STATES } from "../../lib/lend-journal.js";
-import { effectiveLend, readLendContext, resolveContact } from "../../lib/lend-policy.js";
+import { effectiveLend, readLendContext } from "../../lib/lend-policy.js";
 import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { runManagerProcess } from "../../lib/run-manager.js";
 import { apiJson, forbidden } from "../api-respond.js";
@@ -144,32 +144,28 @@ const numText = (v: unknown): string | null | undefined =>
 const hasNul = (s: string) => s.includes("\0");
 
 const ROLES = ["review", "write"];
-/** 重授要沿用的字段：请求体没带的就从这个 peer 现有的条目里补（null = 没有条目，按 CLI 缺省） */
-export type GrantCarry = Pick<LendEntry, "roles" | "codexModel" | "codexEffort"> | null;
-const CARRIED = ["roles", "codexModel", "codexEffort"] as const;
+const CARRIED = { roles: "roles", codexModel: "codex-model", codexEffort: "codex-effort" };
 
-/** roles：非空、只含 review / write，去重后原样传；不带 → 沿用现有条目，没有条目 = review（CLI 缺省） */
-function rolesArg(v: unknown, cur: GrantCarry): string {
-  if (v === undefined) return (cur?.roles.length ? cur.roles : ["review"]).join(",");
+/** roles：非空、只含 review / write，去重后原样传；不带交给 CLI 沿用，没有条目 = CLI 缺省 */
+function rolesArg(v: unknown): string | undefined {
+  if (v === undefined) return undefined;
   if (!Array.isArray(v) || !v.length || v.some((r) => !ROLES.includes(r as string))) return "";
   return [...new Set(v as string[])].join(",");
 }
 
-/** codexModel / codexEffort：字符串 = 新值（合法性 CLI 判）；null = 不传（CLI 规则即清掉）；不带 = 沿用现有条目的值 */
-function codexArg(v: unknown, kept: string | undefined, flag: string): string[] | null {
-  if (v === undefined) return kept ? [`--${flag}=${kept}`] : [];
-  if (v === null) return [];
+/** null 不传值、也不列入 keep-unset（清掉）；undefined 不传值，由 keep-unset 告诉 CLI 沿用。 */
+function codexArg(v: unknown, flag: string): string[] | null {
+  if (v === undefined || v === null) return [];
   return typeof v === "string" && v && !hasNul(v) ? [`--${flag}=${v}`] : null;
 }
 
 /**
- * 请求体 + 这个 peer 现有的条目 → `lend grant` 的 argv。CLI 的规则是重授不带 --roles / --codex-model / --codex-effort 就回缺省，
- * 网页表单不发这几个字段，所以没带的在这里按现有条目补齐，否则点一次「重新授权」就悄悄收掉 write、清掉模型（tests/web-lend-api.test.ts「沿用」）。
- * 只补参数、整形类型；until / 名额 / 仓库 / 角色开没开都交给 CLI 判。
+ * 请求体 → `lend grant` 的 argv；只传缺失字段名，不在 bridge 读旧值，否则锁外快照会覆盖并发 CLI 刚收窄的授权。
+ * keep-unset 只列请求没带的字段，显式 null 保留 CLI 的清空语义；until / 名额 / 仓库 / 角色开没开都交给 CLI 判。
  */
-export function grantArgv(b: Record<string, unknown>, cur: GrantCarry = null): string[] | string {
-  const roles = rolesArg(b.roles, cur);
-  if (!roles) return "roles 要是非空数组，只能含 \"review\"、\"write\"";
+export function grantArgv(b: Record<string, unknown>): string[] | string {
+  const roles = rolesArg(b.roles);
+  if (roles === "") return "roles 要是非空数组，只能含 \"review\"、\"write\"";
   const peer = b.peer;
   if (typeof peer !== "string" || !peer.trim() || hasNul(peer)) return "peer 要是非空字符串";
   const repos = b.repos;
@@ -181,34 +177,20 @@ export function grantArgv(b: Record<string, unknown>, cur: GrantCarry = null): s
   const perDay = numText(b.ordersPerDay);
   if (codex === null) return "codex 要是数字";
   if (perDay === null) return "ordersPerDay 要是数字";
-  const model = codexArg(b.codexModel, cur?.codexModel, "codex-model");
-  const effort = codexArg(b.codexEffort, cur?.codexEffort, "codex-effort");
+  const model = codexArg(b.codexModel, "codex-model");
+  const effort = codexArg(b.codexEffort, "codex-effort");
   if (!model) return "codexModel 要是非空字符串，或 null（清掉）";
   if (!effort) return "codexEffort 要是非空字符串，或 null（清掉）";
+  const keep = Object.entries(CARRIED).filter(([key]) => b[key] === undefined).map(([, flag]) => flag);
   return [
     "lend", "grant", `--repos=${(repos as string[]).join(",")}`, `--until=${b.until.trim()}`,
     ...(codex === undefined ? [] : [`--codex=${codex}`]), ...(perDay === undefined ? [] : [`--orders-per-day=${perDay}`]),
-    ...model, ...effort, `--roles=${roles}`, "--", peer,
+    ...model, ...effort, ...(roles === undefined ? [] : [`--roles=${roles}`]), ...(keep.length ? [`--keep-unset=${keep.join(",")}`] : []), "--", peer,
   ];
 }
 
-/**
- * 这个 peer 现有的授权条目（按 CLI 同一个 resolveContact 认名字 / 指纹）。请求体把要沿用的字段都带齐了就不读盘；
- * lend.json 无效时沿用不了，回错误而不是按缺省授权——那样会静默清掉模型或收掉 write。
- */
-async function carryOf(d: LendGrantDeps, b: Record<string, unknown>): Promise<GrantCarry | string> {
-  if (CARRIED.every((k) => b[k] !== undefined) || typeof b.peer !== "string") return null;
-  const read = await readLend(d.lendPath);
-  if (read.status === "invalid") return `lend.json 无效（${read.error}），没法沿用现有授权：请求里带齐 roles / codexModel / codexEffort`;
-  const who = resolveContact((await d.context()).contacts, b.peer);
-  const e = who.ok ? read.file.lend.find((x) => x.peer === who.entry.peer) : undefined;
-  return e ? { roles: e.roles, codexModel: e.codexModel, codexEffort: e.codexEffort } : null;
-}
-
 async function grant(d: LendGrantDeps, b: Record<string, unknown>): Promise<Response> {
-  const cur = await carryOf(d, b);
-  if (typeof cur === "string") return bad(cur);
-  const argv = grantArgv(b, cur);
+  const argv = grantArgv(b);
   return typeof argv === "string" ? bad(argv) : cliReply(await runCli(d, argv));
 }
 

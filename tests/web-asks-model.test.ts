@@ -7,6 +7,8 @@ import {
 import type { WebComponentRow } from "@/lib/chat/events";
 import { translate } from "@/lib/chat/stream-shape";
 import { fillParams } from "@/lib/i18n-fill";
+import { machines } from "@/lib/machines";
+import { withFade } from "@/features/asks/ask-fade";
 
 const rows: WebComponentRow[] = [
   { type: "buttons", buttons: [{ id: "go", label: "发" }, { id: "no", label: "不发" }] },
@@ -20,6 +22,34 @@ const ask = (over: Partial<WebAsk>): WebAsk => ({
 const zh = (s: string, p?: Record<string, string | number>) => fillParams(s, p);
 
 describe("分组与计数", () => {
+  test("PM / 别的收件人不进 owner 任何分组、角标或淡出快照；owner 和未指派保持", () => {
+    const pm = ask({ fromAgent: "agent-lend-x@Sekai", assignee: "agent-claudestra", canAnswer: true });
+    const hidden = [pm, ask({ ...pm, id: "pm-accept", kind: "accept" }), ask({ ...pm, id: "pm-recent", state: "answered" }),
+      ask({ id: "guest", assignee: "local:guest:abc" })];
+    const owner = ask({ id: "owner", assignee: "local:owner:self" });
+    const unassigned = ask({ id: "unassigned", createdAt: 2_000_000 });
+    expect(groupAsks(hidden)).toEqual({ waiting: [], accept: [], recent: [] });
+    expect(askCounts(hidden)).toEqual({ waiting: 0, accept: 0 });
+    expect(waitsOnOwner(pm)).toBe(false);
+    expect(groupAsks([...hidden, owner, unassigned]).waiting).toEqual([owner, unassigned]);
+    expect(askCounts([...hidden, owner, unassigned])).toEqual({ waiting: 2, accept: 0 });
+    expect(withFade(groupAsks(hidden), { card: pm, section: "waiting", index: 0 }).waiting).toEqual([]);
+  });
+
+  test("guest 保留自己的和 bridge 已确认的合并身份，不能看到 PM 或 owner 的 ask", () => {
+    const current = machines.current;
+    machines.current = () => ({ fp: "guest-machine", name: "guest", principalId: "guest:abc", addedAt: 0, lastUsedAt: 0 });
+    try {
+      const own = ask({ id: "own", assignee: "local:guest:abc" });
+      const alias = ask({ id: "alias", assignee: "local:guest:old", canAnswer: true });
+      const others = [ask({}), ask({ assignee: "local:owner:self" }), ask({ assignee: "agent-claudestra" }), ask({ assignee: "local:guest:other" })];
+      expect(groupAsks([...others, own, alias]).waiting).toEqual([own, alias]);
+      expect(askCounts([...others, own, alias])).toEqual({ waiting: 2, accept: 0 });
+    } finally {
+      machines.current = current;
+    }
+  });
+
   test("开着的按等待时长排、验收单列；已结案的新的在前；入口数字不含验收", () => {
     const list = [
       ask({ id: "b", createdAt: 2 }), ask({ id: "a", createdAt: 1 }), ask({ id: "v", kind: "accept" }),

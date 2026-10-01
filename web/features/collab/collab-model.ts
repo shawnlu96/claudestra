@@ -5,6 +5,7 @@
  * 文案函数收一个 tr（组件传 useT() 的 t，测试用默认的 fillParams = 中文原文），中文原文即字典 key。
  */
 import { fillParams, type I18nParams } from "@/lib/i18n-fill";
+import { metaOf } from "@/lib/ledger-meta-guard";
 
 export type Tr = (s: string, p?: I18nParams) => string;
 const zh: Tr = fillParams;
@@ -310,7 +311,7 @@ export function lineOf(
   tr: Tr = zh,
   wait: OwnerWait | null = null,
 ): LineView {
-  const frozen = frozenReason(ov.meta, tr);
+  const frozen = frozenReason(metaOf(ov), tr);
   const base = attentionOf(t, now);
   // 出问题仍排最前；其余只要在等 owner，就归「等你」
   const att: Attention = wait && base !== "problem" ? "owner" : base;
@@ -356,7 +357,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
   const open = ov.tasks.filter((t) => !isClosed(t.stage) && !(t.stage === "spec" && unassigned(t)));
   const lines = sortLines(open.map((t) => lineOf(t, ov, items, now, tr, waitFor(t, waits))));
   const midnight = localMidnight(now);
-  const pm = ov.meta.pms[0] ?? open.find((t) => t.pm)?.pm ?? null;
+  const pm = metaOf(ov).pms[0] ?? open.find((t) => t.pm)?.pm ?? null;
   return {
     lines,
     headline: {
@@ -374,7 +375,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       managing: open.filter((t) => !pm || t.pm === pm).length,
       reviewing: open.filter((t) => t.stage === "review").length,
       queued: ov.tasks.filter((t) => t.stage === "spec" && unassigned(t)).map((t) => t.id),
-      frozen: frozenReason(ov.meta, tr),
+      frozen: frozenReason(metaOf(ov), tr),
     },
   };
 }

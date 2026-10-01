@@ -238,6 +238,12 @@
       "key": "guard:scripts/guard/config.ts",
       "from": 0,
       "to": 0,
+      "why": "i28-ASK3 按规格注册 ask-audience twin：收件范围在 src 与 web 两端一致；只添加一致性校验，不放宽任何上限"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
       "why": "PUBLIC_ROUTES 加 web/app/api/auth/resume/route.ts：原生壳冷启动丢 cookie 后用续期凭证换会话，此时恰恰没有 cookie，只能是公开路由（凭证 ≈256bit + 限流 + 一次一换）"
     },
     {

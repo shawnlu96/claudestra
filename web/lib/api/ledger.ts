@@ -7,12 +7,15 @@ import type { TaskDetail } from "@/features/collab/collab-detail-model";
 import type { DagBoard, DagDiffResponse, FeatureDetail } from "@/features/collab/dag/dag-types";
 import { drainFrames, type BridgeEvent } from "@/lib/chat/stream-shape";
 import { apiAgentName } from "@/lib/chat/agents";
+import { assertLedgerOverview } from "@/lib/ledger-meta-guard";
 import { api, apiStream } from "./client";
 
 const enc = encodeURIComponent;
 
-export function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
-  return api(`/ledger/${enc(project)}`, { timeoutMs: 10_000, signal });
+export async function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
+  const ov = await api<LedgerOverview & { ok: boolean }>(`/ledger/${enc(project)}`, { timeoutMs: 10_000, signal });
+  assertLedgerOverview(ov);
+  return ov;
 }
 
 /** 子 DAG 两张图共用的快照（bridge i28-L4，同一道 canReadLedger 门）；老 bridge 没有这条路由 = 404，调用方回落到因果线画布 */
