@@ -3,14 +3,18 @@
  * one fresh `gh pr view` must still show the card's head. cardsTick, once per poll: a closed / externally merged / re-based /
  * cross-repo PR goes back to PM; a fix card at maxRounds goes back to PM; a new head, once stable, is fetched and handed to
  * `ledger peer-pr-observe` (fix, or review after the verdict) — in merge it only tells PM and the author, the queue owns the rest.
+ * A fix the merge queue bounced into (CI red / conflict, i28-M12) is told to the author once and never counts against maxRounds:
+ * the bounce adds no round, so the last allowed round's pass followed by red CI must still re-review the new head.
  */
 import type { LedgerTask } from "./ledger-stages.js";
+import { getEventByDedup, listEvents } from "./ledger-store.js";
 import type { OpenPr } from "./peer-pr-github.js";
 import { headChecked, markHeadChecked } from "./peer-pr-hold.js";
 import { headStable } from "./peer-pr-intake.js";
-import { hasRoundVerdict, inFlightPeerCards, peerPrOf, type PeerPrMeta } from "./peer-pr-ledger.js";
-import { renderDriftPush } from "./peer-pr-message.js";
+import { hasRoundVerdict, inFlightPeerCards, peerPrOf, pushDedupKey, type PeerPrMeta } from "./peer-pr-ledger.js";
+import { renderBouncePush, renderDriftPush } from "./peer-pr-message.js";
 import { fallbackOnce, logUnlessStopped, noticeOnce, record, type PeerPrCtx } from "./peer-pr-notice.js";
+import { fixBounce } from "./scheduler-merge-conflict.js";
 
 const VERIFY_RETRY_MS = 15_000;
 
@@ -53,11 +57,32 @@ async function mergeDrift(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, head
   return "合并途中漂移：已通知";
 }
 
-async function newHead(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, head: string): Promise<string> {
+/**
+ * The card sits in a fix the merge queue bounced it into: queue one push to the author for M12's merge_conflict event (keyed by
+ * its seq, so a re-run never queues it twice) and report true. Only the bounce that made this very fix is pushed; an escalated
+ * one never moved the card. False for every other card, which keeps the P1 fix's maxRounds rule.
+ */
+async function bounceFix(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta): Promise<boolean> {
+  if (card.stage !== "fix") return false;
+  const events = listEvents(c.db, { project: card.project, target: card.id });
+  if (!fixBounce(events, "fix")) return false;
+  const e = events.findLast((x) => x.kind === "scheduler" && x.data.op === "merge_conflict" && x.data.escalated !== true);
+  if (!e) return true;
+  const key = `bounce:${e.seq}`;
+  if (getEventByDedup(c.db, pushDedupKey(card.id, key, "queued")!)) return true;
+  const rows = (Array.isArray(e.data.checks) ? e.data.checks : []) as Record<string, unknown>[];
+  const checks = rows.filter((x) => x && typeof x.name === "string").map((x) => ({ name: x.name as string, link: typeof x.link === "string" ? x.link : "" }));
+  const text = renderBouncePush(meta.number, { cause: String(e.data.cause), prHead: String(e.data.prHead ?? card.headSHA ?? ""), checks }, c.cfg.replyTo);
+  const q = await record(c, card.id, key, "queued", "合并队列退回 fix，排队告诉对方", { message: text });
+  if (q.ok !== true) console.error(`⚠️ [peer-pr] ${card.id} 合并退回的说明没排上队（下一轮再试）：${String(q.error)}`);
+  return true;
+}
+
+async function newHead(c: PeerPrCtx, card: LedgerTask, meta: PeerPrMeta, head: string, bounced: boolean): Promise<string> {
   if (card.stage === "merge") return mergeDrift(c, card, meta, head);
   if (card.stage === "review" && !hasRoundVerdict(c.db, card)) return "本轮结论还没出：先审完旧 head";
   if (card.stage !== "review" && card.stage !== "fix") return `卡在 ${card.stage}，不处理漂移`;
-  if (card.round >= c.cfg.maxRounds) {
+  if (!bounced && card.round >= c.cfg.maxRounds) {
     await fallbackOnce(c, card.id, "rounds-drift", `第 ${card.round} 轮结论后 PR head 又变了，复验轮次已到顶（maxRounds ${c.cfg.maxRounds}）`);
     return "退回人工";
   }
@@ -71,13 +96,14 @@ async function checkCard(c: PeerPrCtx, repo: string, card: LedgerTask, meta: Pee
   if (!pr) return closedPr(c, repo, card, meta);
   if (pr.base !== "main") return (await fallbackOnce(c, card.id, "base", `PR #${meta.number} 的 base 改成了 ${pr.base.slice(0, 80)}`), "退回人工");
   if (!sameOwner(pr, repo)) return (await fallbackOnce(c, card.id, "cross", `PR #${meta.number} 改成了跨仓 / head 仓库 owner 不对`), "退回人工");
-  if (card.stage === "fix" && card.round >= c.cfg.maxRounds) {
+  const bounced = await bounceFix(c, card, meta);
+  if (card.stage === "fix" && !bounced && card.round >= c.cfg.maxRounds) {
     await fallbackOnce(c, card.id, "rounds", `第 ${card.round} 轮审查后仍有 P1，复验轮次到顶（maxRounds ${c.cfg.maxRounds}）`);
     return "退回人工";
   }
   if (pr.head === card.headSHA) return "";
   if (!headStable(c.state, meta.number, pr.head, c.deps.now(), c.cfg.headSettleSec)) return "新 head 还没稳";
-  return newHead(c, card, meta, pr.head);
+  return newHead(c, card, meta, pr.head, bounced);
 }
 
 /** Once per poll over this project's in-flight peer cards; one card's failure never stops the others. */
