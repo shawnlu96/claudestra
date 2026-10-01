@@ -7,6 +7,7 @@ import { AttachmentStrip } from "@/features/chat/components/attachments";
 import { agentLabel, answerSummary, askAttachments, closedText, spanText, type WebAsk } from "../asks-model";
 import { activeAnswered, clearAnswered, markAnswered } from "../answer-cooldown";
 import { asksStore, useAsks } from "../asks-store";
+import { isAskForViewer } from "../ask-viewer";
 import { AskActions } from "./ask-actions";
 import { AnswerImages } from "./assigned-choices";
 import { ChatIcon, ClockIcon, TrashIcon } from "./ask-icons";
@@ -21,6 +22,7 @@ export function AskCard(props: { ask: WebAsk; now: number; focused: boolean; onO
   const t = useT();
   const [showBody, setShowBody] = useState(false);
   const { notes, full } = useAsks();
+  if (!isAskForViewer(ask)) return null;
   const note = notes[ask.id];
   const open = ask.state === "open";
   const agent = agentLabel(ask.fromAgent, t, ask.kind);
