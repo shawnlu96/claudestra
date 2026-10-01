@@ -51,9 +51,9 @@ export function startQueuedPush(db: Database, peer: string, ids: string[], now: 
 }
 
 /** Apply to the existing timeout queries: preserve createdAt, but bound an order's age by its latest resumed push. */
-export function queueTimeoutDue(db: Database, orderId: string, cutoff: number): boolean {
+export function queueTimeoutDue(db: Database, orderId: string, cutoff: number, inclusive = false): boolean {
   const q = queueRow(db, orderId);
-  return !q || (q.queuedAt === null && (q.pushedAt === null || q.pushedAt < cutoff));
+  return !q || (q.queuedAt === null && (q.pushedAt === null || (inclusive ? q.pushedAt <= cutoff : q.pushedAt < cutoff)));
 }
 
 function overdueQueue(db: Database, now: number): Pick<LendOrder, "orderId" | "project" | "taskId" | "peer">[] {
