@@ -6,7 +6,7 @@
  * lend set / off 是 grant / revoke 的旧名；逐单确认（--confirm）已退役。
  */
 import { CODEX_EFFORT_LEVELS } from "../lib/codex-launch.js";
-import { isCodexEffort, isCodexModel, LEND_PATH, readLend, updateLend, type LendEntry, type LendFile } from "../lib/lend-config.js";
+import { isCodexEffort, isCodexModel, isPriority, LEND_PATH, PRIORITIES, readLend, updateLend, type BorrowEntry, type LendEntry, type LendFile } from "../lib/lend-config.js";
 import { SHELL_SENTENCE } from "../lib/lend-grant-rules.js";
 import { buildBorrowEntry, buildGrant, effectiveLend, readLendContext, type Built } from "../lib/lend-policy.js";
 import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
@@ -21,12 +21,13 @@ import { requireOwnerOrMaster } from "./project-guard.js";
 const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
   "[--roles review] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
-const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] | borrow off [--peer <名>]";
+const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
+  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） | borrow off [--peer <名>]";
 
 /** confirm 留在表里只为认出旧写法、报「已退役」，不当未知参数 */
 const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort"];
 const CONFIRM_RETIRED = "逐单确认 / 限时预先授权（--confirm）已退役：改用一次授权 lend grant <peer> --repos … --until <到期时间>，到期前来单直接领，随时 lend revoke 收回";
-const BORROW_FLAGS = ["projects", "roles", "max-open"];
+const BORROW_FLAGS = ["projects", "roles", "max-open", "priority"];
 
 /** 授权里写的 Codex 模型 / 推理档（lend-config.ts 同一套校验，写盘前 updateLend 还会整份再核）；都没写返回原条目 */
 function withCodexChoice(b: Built<LendEntry>, model: string | undefined, effort: string | undefined): Built<LendEntry> {
@@ -34,6 +35,13 @@ function withCodexChoice(b: Built<LendEntry>, model: string | undefined, effort:
   if (model !== undefined && !isCodexModel(model)) return { ok: false, error: `--codex-model 只能是小写字母、数字、点、横线（首字符不能是 -，最长 64）：${JSON.stringify(model)}` };
   if (effort !== undefined && !isCodexEffort(effort)) return { ok: false, error: `--codex-effort 只能是 ${CODEX_EFFORT_LEVELS.join(" / ")}：${JSON.stringify(effort)}` };
   return { ok: true, entry: { ...b.entry, ...(model !== undefined ? { codexModel: model } : {}), ...(effort !== undefined ? { codexEffort: effort } : {}) } };
+}
+
+/** 借入条目的槽池档位（i28-W9）；不写 = 条目不带 priority（读作 balance） */
+function withPriority(b: Built<BorrowEntry>, priority: string | undefined): Built<BorrowEntry> {
+  if (!b.ok || priority === undefined) return b;
+  if (!isPriority(priority)) return { ok: false, error: `--priority 只能是 ${PRIORITIES.join(" / ")}：${JSON.stringify(priority)}` };
+  return { ok: true, entry: { ...b.entry, priority } };
 }
 
 /** 「（codex 模型 x · 推理档 y）」；都没写 = 空串 */
@@ -53,7 +61,7 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
     return output({ ...base, enabled: read.file.enabled, lending: eff.lending, declared: read.file.lend, effective: eff.lend, message });
   }
   const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
-    : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}）`).join("；")}` : "什么都不外借";
+    : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}${e.priority ? `，档位 ${e.priority}` : ""}）`).join("；")}` : "什么都不外借";
   output({ ...base, declared: read.file.borrow, effective: eff.borrow, message });
 }
 
@@ -105,7 +113,8 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyE
   const stop = kind === "lend" ? await stopNow() : undefined; // 重授可能收窄仓库 / 角色 / 家族：不再覆盖的在跑单同样当场停
   if ("projects" in entry) {
     return output({ ok: true, [kind]: entry, message: `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审` +
-      "（代码、规格与验收原文都会到对方那边）" + (entry.roles.includes("write") ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") });
+      "（代码、规格与验收原文都会到对方那边）" + (entry.roles.includes("write") ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") +
+      (entry.priority && entry.priority !== "balance" ? `；槽池档位 ${entry.priority}` : "") });
   }
   const slots = Object.entries(entry.families).map(([f, n]) => `${f} ${n} 个位`).join("、");
   output({ ok: true, [kind]: entry, warning: SHELL_SENTENCE, message: `${SHELL_SENTENCE}。已授权 ${entry.peer} 到 ${entry.until}：仓库 ${entry.repos.join("、")}，` +
@@ -158,7 +167,7 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
     await setEntry(kind, (ctx) => kind === "lend"
       ? withCodexChoice(buildGrant({ ref: p.pos[0], families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
         ordersPerDay: f["orders-per-day"], until: f.until }, ctx.contacts), f["codex-model"], f["codex-effort"])
-      : buildBorrowEntry({ ref: p.pos[0], projects: f.projects, roles: f.roles, maxOpen: f["max-open"] }, ctx.contacts, ctx.projects));
+      : withPriority(buildBorrowEntry({ ref: p.pos[0], projects: f.projects, roles: f.roles, maxOpen: f["max-open"] }, ctx.contacts, ctx.projects), f.priority));
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   }

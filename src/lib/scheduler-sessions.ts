@@ -6,6 +6,7 @@ import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
+import { remoteHeadFamily } from "./scheduler-pool-facts.js";
 
 export type SessionRole = "author" | "reviewer";
 export type SessionTransport = "acp" | "tmux" | "peer";
@@ -91,7 +92,8 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     }
     const intent = getIntent(db, input.intentId);
     const reviewer = input.role === "reviewer";
-    const expectedFamily = reviewer ? (workflow.authorFamily === "claude" ? "codex" : "claude") : workflow.authorFamily;
+    const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily; // a peer-delivered head: review across from its family
+    const expectedFamily = reviewer ? (wrote === "claude" ? "codex" : "claude") : workflow.authorFamily;
     if (!intent || intent.taskId !== task.id || intent.action !== "ensure_session" || !["submitted", "unknown"].includes(intent.status) ||
       (intent.recipient !== null && intent.recipient !== agent) ||
       (reviewer ? intent.node !== "adversarial_review" : intent.node === "adversarial_review")) {

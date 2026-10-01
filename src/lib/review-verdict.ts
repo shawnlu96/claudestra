@@ -19,6 +19,7 @@ import { reviewCallerOf, reviewsDir, slotByOrderId, type ReviewCaller, type Revi
 import { autoReviewWriter, runtimeFamily } from "./scheduler-auto-review.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { remoteHeadFamily } from "./scheduler-pool-facts.js";
 
 export type VerdictResult =
   | { ok: true; duplicate: boolean; taskId: string; eventSeq: number; sameFamily: boolean | null }
@@ -79,7 +80,7 @@ function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<strin
 
 /** 作者的模型家族：自动卡按绑定的作者 session / 工作流，其它按作者 agent 的 registry runtime；查不出 null */
 function authorFamily(db: Database, slot: ReviewSlot, steps: TaskStep[], registry: VerdictDeps["registry"]): AuthorFamily | null {
-  if (slot.auto) return getSchedulerSession(db, slot.task.id, "author")?.family ?? getWorkflow(db, slot.task.id)?.authorFamily ?? null;
+  if (slot.auto) return remoteHeadFamily(db, { id: slot.task.id, headSHA: slot.head }) ?? getSchedulerSession(db, slot.task.id, "author")?.family ?? getWorkflow(db, slot.task.id)?.authorFamily ?? null;
   const author = authorOf(steps, slot.head) ?? steps.filter((s) => s.step === "write" || s.step === "fix").at(-1) ?? null;
   if (!author || author.executorKind !== "agent") return null;
   const row = registry.find((a) => a.name === author.executor);

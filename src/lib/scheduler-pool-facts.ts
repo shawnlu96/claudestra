@@ -7,6 +7,8 @@
  */
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
+import { heldLease } from "./ledger-lend-lease.js";
+import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
@@ -37,12 +39,12 @@ export function poolAckSeq(db: Database, intentId: string): number | null {
   return r?.seq ?? null;
 }
 
-interface ScheduledOrder { intentId: string; orderId: string; peer: string; family: "claude" | "codex"; status: string; round: number; head: string }
+interface ScheduledOrder { intentId: string; orderId: string; peer: string; family: "claude" | "codex"; step: string; status: string; round: number; head: string }
 
 /** Orders the scheduler offered for this card (joined through the pool link event), newest first. */
 function scheduledOrders(db: Database, taskId: string): ScheduledOrder[] {
   if (!hasLendTable(db)) return [];
-  return db.query(`SELECT json_extract(e.data, '$.id') AS intentId, o.orderId, o.peer, o.family, o.status, o.round, o.head
+  return db.query(`SELECT json_extract(e.data, '$.id') AS intentId, o.orderId, o.peer, o.family, o.step, o.status, o.round, o.head
     FROM lend_orders AS o JOIN events AS e ON e.target = o.taskId AND e.kind = 'scheduler' AND e.dedupKey = 'scheduler:' || json_extract(e.data, '$.id') || ':pool'
     AND json_extract(e.data, '$.orderId') = o.orderId WHERE o.taskId = ? ORDER BY o.createdAt DESC`).all(taskId) as ScheduledOrder[];
 }
@@ -69,7 +71,7 @@ export function poolReviewerOf(db: Database, intentId: string, taskId: string): 
 
 /** The pooled reviewer of the card's current round and head, when that round's verdict came from the pool. */
 export function currentPooledReviewer(db: Database, task: LedgerTask): WorkerRef | null {
-  const o = scheduledOrders(db, task.id).find((x) => x.status === "done" && x.round === task.round && x.head === task.headSHA);
+  const o = scheduledOrders(db, task.id).find((x) => x.step === "review" && x.status === "done" && x.round === task.round && x.head === task.headSHA);
   return o ? reviewerRef(o, task.id) : null;
 }
 
@@ -87,12 +89,20 @@ function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
   return { why: cap.why, slots: cap.slots, roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
 }
 
-/** The card's newest claimed / answered write or fix order: that peer holds the branch, so its fix goes back there first. */
-function writeLeasePeer(db: Database, taskId: string): string | null {
-  if (!hasLendTable(db)) return null;
-  const r = db.query(`SELECT peer FROM lend_orders WHERE taskId = ? AND step IN ('write','fix') AND status IN ('claimed','done')
-    ORDER BY createdAt DESC LIMIT 1`).get(taskId) as { peer: string } | null;
-  return r?.peer ?? null;
+/** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
+const writeLeasePeer = (db: Database, task: LedgerTask): string | null => hasLendTable(db) ? heldLease(db, task)?.peer ?? null : null;
+
+/**
+ * Family that wrote the card's current head when a peer did (i28-W9): the newest answered write / fix order whose delivery
+ * recorded exactly this head. null = the head is not a lend delivery, and the workflow's authorFamily stands. Cross-family
+ * review, the reviewer session bind and the merge gates all read it (one rule, so a Codex-written card is never Codex-reviewed).
+ */
+export function remoteHeadFamily(db: Database, task: Pick<LedgerTask, "id" | "headSHA">): AuthorFamily | null {
+  if (!task.headSHA || !hasLendTable(db)) return null;
+  const r = db.query(`SELECT o.family FROM lend_orders AS o JOIN events AS e ON e.seq = o.eventSeq WHERE o.taskId = ? AND o.step IN ('write','fix')
+    AND o.status = 'done' AND e.kind = 'deliver' AND json_extract(e.data, '$.headSHA') = ? ORDER BY o.createdAt DESC LIMIT 1`).get(task.id, task.headSHA) as
+    { family: AuthorFamily } | null;
+  return r?.family ?? null;
 }
 
 /** Active local reviewer sessions on the project's other cards (review holds no worker slot, so this is its load). */
@@ -113,14 +123,15 @@ export function borrowPeers(db: Database, project: string, borrow: readonly Borr
   const live = (peer: string): number => hasLendTable(db)
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
   return borrow.filter((b) => b.projects.includes(project))
-    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now) }));
+    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now), ...(b.priority ? { priority: b.priority } : {}) }));
 }
 
 export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
-  const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done")?.peer ?? null;
+  const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done" && o.step === "review")?.peer ?? null;
+  // A review needs the PR; writing before one exists goes against the configured repo (set only with remote.roles write).
+  const repo = prCoordinates(task.pr)?.repo ?? (task.stage === "review" ? null : cfg.remote.repo ?? null);
   return { remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), localWriters: localWriterCount(db, task.project, task.id),
-    peers: borrowPeers(db, task.project, cfg.borrow, cfg.now),
-    repo: prCoordinates(task.pr)?.repo ?? null, lastPeer, writeLeasePeer: writeLeasePeer(db, task.id) };
+    peers: borrowPeers(db, task.project, cfg.borrow, cfg.now), repo, lastPeer, writeLeasePeer: writeLeasePeer(db, task) };
 }
 
 export interface PoolCounts { pooled: number; claimed: number; done: number; timedOut: number; unknown: number }

@@ -12,6 +12,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { canTransition, nextTaskState } from "./ledger-stages.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
+import { remoteHeadFamily } from "./scheduler-pool-facts.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -89,7 +90,7 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     const reviewer = getSchedulerSession(db, task.id, "reviewer");
     if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
       review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
-      review.facts.reviewerFamily === workflow.authorFamily ||
+      review.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) ||
       !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) {
       throw new LedgerError("conflict", "当前 head 缺同卡跨模型审查通过结论或仍有 P0/P1");

@@ -1,13 +1,14 @@
 /**
- * The planner's two placement hooks (i28-W5): a review node goes to the slot pool's pick, a card pinned to a peer never
- * starts writing anywhere else. Facts come from the snapshot; the decision itself is placeFor (scheduler-placement.ts).
+ * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
+ * card pinned to a peer never starts writing anywhere else. Facts come from the snapshot; the decision is placeFor
+ * (scheduler-placement.ts). Each hook answers a peer, a wait (pin / write lease / local tier off), or null = local as before.
  * Proto-1 peers keep the i28-R9 rule unchanged (poolTarget in overflow mode: only when local reviewers are full, Codex
  * only, one attempt per round), with its exact intent text, so a machine with no v2 peer plans as it did before W5.
  * tests/scheduler-placement-plan.test.ts, tests/scheduler-no-peer-parity.test.ts.
  */
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { lendRoleOf, PEER_PLACEMENT, placeFor, type PlaceRole, type PlacementFacts } from "./scheduler-placement.js";
+import { PEER_PLACEMENT, peerFamily, placeFor, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-placement.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
@@ -25,6 +26,9 @@ function locksFree(s: PlannerSnapshot): boolean {
     mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
 }
 
+const peerFacts = (x: PoolFacts["peers"][number]): PeerFacts =>
+  ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null, ...(x.priority ? { priority: x.priority } : {}) });
+
 function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFacts {
   const p = s.pool ?? null;
   const own = cardWorkerSlots(s.heldResources, s.task.id).length ? 1 : 0;
@@ -33,7 +37,7 @@ function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFac
   const repo = p?.repo ?? (typeof s.task.extra?.repo === "string" ? s.task.extra.repo : null);
   return {
     remote: p?.remote ?? null, repo, pin: cardPin(s.task.extra), lastPeer: p?.lastPeer ?? null, writeLeasePeer: p?.writeLeasePeer ?? null,
-    peers: (p?.peers ?? []).map((x) => ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null })),
+    peers: (p?.peers ?? []).map(peerFacts),
     local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers, room: reviewers < s.maxWorkers },
     tried: s.intents.filter((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === s.task.headSHA).map((i) => i.recipient!.slice(POOL_RECIPIENT.length)),
     locksFree: locksFree(s),
@@ -47,8 +51,11 @@ function legacyPool(s: PlannerSnapshot, p: PoolFacts, since: number): { peer: st
   return t && { peer: t.peer, reason: `挂池：对抗式跨模型审查挂给 ${t.peer} 的 ${t.family} worker${t.rereview ? "（复验，同一 peer）" : ""}` };
 }
 
-/** Where this round's review goes when it is not local: `{peer, reason}` becomes a `peer:<name>` pool intent; null = local. */
-export function reviewPlacement(s: PlannerSnapshot, since: number): { peer: string; reason: string } | null {
+/** Not local: a peer (becomes a `peer:<name>` pool intent) or a wait; null = this machine, as before W5. */
+export type Away = { peer: string; reason: string } | { wait: string; code?: string } | null;
+
+/** Where this round's review goes when it is not local. */
+export function reviewPlacement(s: PlannerSnapshot, since: number): Away {
   const p = s.pool;
   if (!p || p.remote.mode === "off" || !p.remote.roles.includes("review")) return null;
   if (!s.workflow || s.workflow.template === "security" || s.reviewer || !s.task.headSHA) return null;
@@ -56,16 +63,31 @@ export function reviewPlacement(s: PlannerSnapshot, since: number): { peer: stri
   const placed = placeFor(snapshotPlacementFacts(s, since), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
   const legacy = legacyPool(s, p, since);
+  if (placed.kind === "wait") return legacy ?? { wait: placed.reason };
   return legacy && p.remote.reviewFirst?.length ? { ...legacy, reason: `${legacy.reason}（${placed.reason}）` } : legacy;
 }
 
-/** A card pinned to a peer never gets a local author session or work order; until the peer can take it, it waits. */
-export function pinnedWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): PlannerDecision | null {
-  if (!cardPin(s.task.extra) || !s.workflow) return null;
+/**
+ * Where a build / fix order goes when it is not local (i28-W9). A pinned card never gets a local author session or work
+ * order: until its peer can take it, it waits (spec stage included: restate is skipped for it, start_node is the approval).
+ */
+export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
+  if (!s.workflow) return null;
+  const pinned = cardPin(s.task.extra);
+  if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
   const placed = placeFor(snapshotPlacementFacts(s, since), role, s.workflow.authorFamily);
-  // Handing writing to a peer is W8's lend-dispatch path; until it exists a placeable pin waits rather than going local.
-  const why = placed.kind === "peer" ? `${lendRoleOf(role)} 单还不能派给 peer（远端写代码等 W8）` : placed.reason;
-  return { kind: "wait", code: "placement_pinned", reason: why };
+  const code = pinned ? "placement_pinned" : "placement";
+  if (pinned && s.task.stage === "spec") return { code, wait: placed.kind === "peer" ? "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" : placed.reason };
+  if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：${role === "fix" ? "修复" : "开工"}单派给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` };
+  return placed.kind === "wait" ? { code, wait: placed.reason } : null;
+}
+
+/** The family a pool intent's order runs in: review = across from the head's writer, writing = the peer's first free family. */
+export function orderFamily(s: PlannerSnapshot, peer: string, role: PlaceRole): AuthorFamily | null {
+  if (!s.workflow) return null;
+  if (role === "review") return otherFamily(s.workflow.authorFamily);
+  const p = s.pool?.peers.find((x) => x.peer === peer);
+  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily) : null;
 }
 
 /**
@@ -82,15 +104,19 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
       const where = isPoolIntent(live) ? live.recipient! : "local";
       return { role: "review", where, reason: `已派给 ${live.recipient}，等台账结果（${live.status}）` };
     }
-    const peer = reviewPlacement(s, since);
-    if (peer) return { role: "review", where: `${POOL_RECIPIENT}${peer.peer}`, reason: peer.reason };
+    const away = reviewPlacement(s, since);
+    if (away && "peer" in away) return { role: "review", where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
+    if (away) return { role: "review", where: "-", reason: `等：${away.wait}` };
     const why = !s.pool ? "没有借入信息" : s.reviewer ? "本卡已有审查 session，复审沿用" : s.workflow.template === "security" ? "安全卡只在本机审"
       : placeFor(snapshotPlacementFacts(s, since), "review", otherFamily(s.workflow.authorFamily)).reason;
     return { role: "review", where: "local", reason: why };
   }
   if (!["spec", "build", "fix"].includes(s.task.stage)) return { role: null, where: "-", reason: `${s.task.stage} 阶段不放置` };
   const role = s.task.stage === "fix" ? "fix" : "write";
-  const pinned = pinnedWork(s, since, role);
-  if (pinned && pinned.kind === "wait") return { role, where: cardPin(s.task.extra) as string, reason: `等：${pinned.reason}` };
+  const sent = s.intents.filter((i) => i.action === "dispatch" && i.causalSeq >= since).at(-1);
+  if (sent && sent.status !== "cancelled" && isPoolIntent(sent)) return { role, where: sent.recipient!, reason: `已派给 ${sent.recipient}，等台账结果（${sent.status}）` };
+  const away = remoteWork(s, since, role);
+  if (away && "peer" in away) return { role, where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
+  if (away) return { role, where: cardPin(s.task.extra) ?? "-", reason: `等：${away.wait}` };
   return { role, where: "local", reason: placeFor(snapshotPlacementFacts(s, since), role, s.workflow.authorFamily).reason };
 }

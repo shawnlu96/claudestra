@@ -11,10 +11,14 @@ import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
-import { schedulerPoolStep } from "../lib/ledger-scheduler-pool.js";
+import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
+import { writeMaterials } from "../lib/lend-write-materials.js";
+import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
+import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
+import { writeDeps } from "./ledger-lend-cmds.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
-import { isLegacyRemoteMode, type RemoteMode } from "../lib/scheduler-config.js";
+import { parseRemotePolicy, type RemotePolicy } from "../lib/scheduler-config.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -26,6 +30,24 @@ const integer = (c: LedgerCli, flag: string): number => {
 function specOf(c: LedgerCli, intentId: string): string | null {
   const task = getTask(c.db, getIntent(c.db, intentId)?.taskId ?? "");
   return task ? readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir)) : null;
+}
+
+/**
+ * A build / fix pool intent's first step needs the write materials (fingerprint, base head, last report), fetched here
+ * outside the transaction; a failed probe becomes the offer's refusal reason (the round moves on), never a stuck intent.
+ */
+async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): Promise<PoolStepInput["write"]> {
+  const intent = getIntent(c.db, intentId);
+  const task = intent && getTask(c.db, intent.taskId);
+  if (!intent || !task || intent.action !== "dispatch" || intent.status !== "pending" || !isPoolIntent(intent) || poolOrderId(c.db, intentId)) return null;
+  const repo = prCoordinates(task.pr)?.repo ?? remote.repo;
+  if (!repo) return { error: "没有仓库坐标（scheduler.json remote.repo）" };
+  try {
+    return await writeMaterials(c.db, task, { peer: (intent.recipient as string).slice(POOL_RECIPIENT.length), repo, base: "main" }, writeDeps(c));
+  } catch (e) {
+    if (e instanceof LedgerError) return { error: e.message };
+    throw e;
+  }
 }
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
@@ -101,23 +123,26 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-pool": {
-    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first"], bools: [],
-    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|none --timeout-min N [--review-first a,b]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first", "local-priority", "repo"], bools: [],
+    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|write|review,write|none --timeout-min N [--review-first a,b]" +
+      " [--local-priority first|balance|low|off] [--repo owner/name]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
     async run(c) {
-      const raw = c.need("mode"), roles = c.need("roles");
-      // A scheduler daemon still on R9 code passes overflow / prefer until it restarts: same meaning as the config reads them.
-      const mode = isLegacyRemoteMode(raw) ? "balance" : raw;
-      if (!["off", "balance"].includes(mode) || !["review", "none"].includes(roles)) throw new LedgerError("invalid", "--mode / --roles 不认识");
+      const roles = c.need("roles");
       const minutes = integer(c, "timeout-min");
       if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
       const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");
       if (maxWorkers > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32");
       const reviewFirst = (c.p.flags["review-first"] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+      // The daemon's policy goes through the config's own parser: the offer re-plans with exactly what scheduler.json says.
+      let remote: RemotePolicy;
+      try {
+        remote = parseRemotePolicy({ mode: c.need("mode"), roles: roles === "none" ? [] : roles.split(","), poolTimeoutMin: minutes,
+          ...(reviewFirst.length ? { reviewFirst } : {}), ...(c.p.flags["local-priority"] ? { localPriority: c.p.flags["local-priority"] } : {}),
+          ...(c.p.flags.repo ? { repo: c.p.flags.repo } : {}) }, "--remote");
+      } catch (e) { throw new LedgerError("invalid", `--mode / --roles / --local-priority / --repo 不认识：${(e as Error).message}`); }
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
-        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow,
-        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes, ...(reviewFirst.length ? { reviewFirst } : {}) },
-        spec: specOf(c, intent),
+        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec: specOf(c, intent), write: await poolWrite(c, intent, remote),
       }) };
     },
   },
