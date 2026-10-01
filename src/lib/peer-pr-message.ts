@@ -54,10 +54,14 @@ export const renderDriftPush = (n: number, from: string, to: string, replyTo: st
 /** What M12's merge_conflict event says about one bounce; checks only for ci_fail (link may be "" when GitHub gave none). */
 export interface BounceFacts { cause: string; prHead: string; checks: readonly { name: string; link: string }[] }
 
-/** The merge queue sent the card back to fix (CI red on the PR head, or a conflict with main): the peer fixes and pushes. */
+/** The merge queue sent the card back to fix (CI red on the PR head, a conflict with main, or a refused update-branch): the peer
+ * fixes and pushes. GitHub's update error stays in the ledger; the peer only needs the action. */
 export function renderBouncePush(n: number, b: BounceFacts, replyTo: string): string {
   const head = b.prHead.slice(0, 12);
-  const body = b.cause === "conflict"
+  const body = b.cause === "update_fail"
+    ? [`[Claudestra 调度器 · PR #${n}] 合并前更新分支失败，没能自动合入 main，请合入最新 main 后推送（head ${head}）`,
+      "推到本 PR 的分支后，调度器会派审查会话定向复验，只看合入 main 的合并提交。"]
+    : b.cause === "conflict"
     ? [`[Claudestra 调度器 · PR #${n}] 和 main 冲突，请合入最新 main 后推送（head ${head}）`,
       "推到本 PR 的分支后，调度器会派审查会话定向复验，只看解冲突的合并提交。"]
     : [`[Claudestra 调度器 · PR #${n}] 合并前 PR 头 CI 失败（head ${head}），请看日志修好后推送`,

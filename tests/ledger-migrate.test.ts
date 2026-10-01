@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { LedgerReader, projectView } from "../src/lib/ledger-read.js";
+import { SCHEDULER_MERGE_WAIT_SCHEMA } from "../src/lib/ledger-scheduler-schema.js";
 import { closeLedger, getTask, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, listDeps, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
+
+const BEFORE_MERGE_WAIT = LEDGER_MIGRATIONS.indexOf(SCHEDULER_MERGE_WAIT_SCHEMA);
 
 function tmp(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "ledger-mig-"));
@@ -24,6 +27,57 @@ function makeV1(path: string): void {
   ins.run("T3", "空串", "spec", "");
   raw.close();
 }
+
+/** The schema immediately before UNKNOWN waits were persisted, including an in-flight merge row. */
+function makeBeforeMergeWait(path: string): void {
+  makeV1(path);
+  const db = new Database(path);
+  for (const step of LEDGER_MIGRATIONS.slice(1, BEFORE_MERGE_WAIT)) {
+    if (typeof step === "function") step(db);
+    else for (const sql of step) db.prepare(sql).run();
+  }
+  db.prepare(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,taskRev,specRev,templateVersion,status,reason,createdAt,updatedAt)
+    VALUES ('merge-old','T1','p','merge_deploy','merge',1,1,1,2,'submitted','r',0,0)`).run();
+  db.prepare(`INSERT INTO scheduler_merges (intentId,taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,phase,createdAt,updatedAt)
+    VALUES ('merge-old','T1','p','https://github.com/a/b/pull/1','task/T1',?,'check','await_ci',0,0)`).run("a".repeat(40));
+  db.exec(`PRAGMA user_version = ${BEFORE_MERGE_WAIT}`);
+  db.close();
+}
+
+describe("UNKNOWN wait migration", () => {
+  test("old schema upgrades existing merge rows to a nullable unknownSince, also repairing a version collision", () => {
+    for (const version of [BEFORE_MERGE_WAIT, LEDGER_SCHEMA_VERSION]) {
+      const { dir, path } = tmp();
+      try {
+        makeBeforeMergeWait(path);
+        const raw = new Database(path);
+        expect((raw.query("PRAGMA table_info(scheduler_merges)").all() as { name: string }[]).some((c) => c.name === "unknownSince")).toBe(false);
+        raw.exec(`PRAGMA user_version = ${version}`);
+        raw.close();
+        const db = openLedger(path);
+        expect(schemaVersion(db)).toBe(LEDGER_SCHEMA_VERSION);
+        expect(db.query("SELECT phase,rev,unknownSince FROM scheduler_merges WHERE intentId='merge-old'").get())
+          .toEqual({ phase: "await_ci", rev: 1, unknownSince: null });
+      } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+  test("repeated migration and reopening preserve an existing wait timestamp", () => {
+    const { dir, path } = tmp();
+    try {
+      makeBeforeMergeWait(path);
+      const db = openLedger(path);
+      db.prepare("UPDATE scheduler_merges SET unknownSince=123456 WHERE intentId='merge-old'").run();
+      for (let round = 0; round < 2; round++) {
+        openLedger(path).exec(`PRAGMA user_version = ${BEFORE_MERGE_WAIT}`);
+        closeLedger(path);
+        const again = openLedger(path);
+        expect(schemaVersion(again)).toBe(LEDGER_SCHEMA_VERSION);
+        expect(again.query("SELECT unknownSince FROM scheduler_merges WHERE intentId='merge-old'").get()).toEqual({ unknownSince: 123456 });
+        expect((again.query("PRAGMA table_info(scheduler_merges)").all() as { name: string }[]).filter((c) => c.name === "unknownSince")).toHaveLength(1);
+      }
+    } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
 
 /** 子进程：同一时刻打开旧库（触发迁移），T2 → T1 各加一条不同的边 */
 function openerScript(path: string, startAt: number, i: number): string {
@@ -294,6 +348,7 @@ describe("写事件的底座只给写入模块", () => {
     expect(tx.sort()).toEqual(["lib/ledger-autostart-resume.ts", "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
+      "lib/lend-pr-takeover-ledger.ts",
       "lib/order-mark.ts", "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
       "lib/scheduler-sessions.ts"]);

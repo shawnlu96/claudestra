@@ -5,6 +5,7 @@
  * 单测 tests/web-answer-cooldown.test.ts。
  */
 import { groupAsks, type AskGroups, type WebAsk } from "./asks-model";
+import { isAskForViewer } from "./ask-viewer";
 
 export interface FadeSlot {
   card: WebAsk;
@@ -24,7 +25,7 @@ export function fadeSlot(asks: readonly WebAsk[], card: WebAsk): FadeSlot {
 
 /** 实时分组里拿掉这张，再把快照插回当时的位置 */
 export function withFade(g: AskGroups, slot: FadeSlot | null): AskGroups {
-  if (!slot) return g;
+  if (!slot || !isAskForViewer(slot.card)) return g;
   const strip = (l: WebAsk[]) => l.filter((a) => a.id !== slot.card.id);
   const out: AskGroups = { waiting: strip(g.waiting), accept: strip(g.accept), recent: strip(g.recent) };
   const list = out[slot.section];

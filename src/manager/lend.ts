@@ -20,12 +20,13 @@ import { requireOwnerOrMaster } from "./project-guard.js";
 
 const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
-  "[--roles review[,write]] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
+  "[--roles review[,write]] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
+  "[--keep-unset roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
 const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
   "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]";
 
 /** confirm 留在表里只为认出旧写法、报「已退役」，不当未知参数 */
-const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort"];
+const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort", "keep-unset"];
 const CONFIRM_RETIRED = "逐单确认 / 限时预先授权（--confirm）已退役：改用一次授权 lend grant <peer> --repos … --until <到期时间>，到期前来单直接领，随时 lend revoke 收回";
 export const BORROW_FLAGS = ["projects", "roles", "max-open", "priority"];
 export const BORROW_BOOLS = ["keep-unset"];
@@ -36,6 +37,22 @@ function withCodexChoice(b: Built<LendEntry>, model: string | undefined, effort:
   if (model !== undefined && !isCodexModel(model)) return { ok: false, error: `--codex-model 只能是小写字母、数字、点、横线（首字符不能是 -，最长 64）：${JSON.stringify(model)}` };
   if (effort !== undefined && !isCodexEffort(effort)) return { ok: false, error: `--codex-effort 只能是 ${CODEX_EFFORT_LEVELS.join(" / ")}：${JSON.stringify(effort)}` };
   return { ok: true, entry: { ...b.entry, ...(model !== undefined ? { codexModel: model } : {}), ...(effort !== undefined ? { codexEffort: effort } : {}) } };
+}
+
+/** 只在 setEntry 的写锁内调用：网页省略的字段按最新条目补；未列入的仍按 CLI 缺省（模型 / 档位清掉）。 */
+function buildLendGrant(ref: string, flags: Record<string, string>, file: LendFile, ctx: Ctx): Built<LendEntry> {
+  const keep = flags["keep-unset"]?.split(",") ?? [];
+  if (keep.some((k) => !["roles", "codex-model", "codex-effort"].includes(k))) {
+    return { ok: false, error: "--keep-unset 只能列 roles,codex-model,codex-effort（逗号分隔、非空）" };
+  }
+  const who = resolveContact(ctx.contacts, ref);
+  if (!who.ok) return who;
+  const old = file.lend.find((e) => e.peer === who.entry.peer);
+  const kept: Record<string, string | undefined> = { roles: old?.roles.join(","), "codex-model": old?.codexModel, "codex-effort": old?.codexEffort };
+  const f = { ...flags };
+  for (const k of keep) if (f[k] === undefined && kept[k] !== undefined) f[k] = kept[k];
+  return withCodexChoice(buildGrant({ ref, families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
+    ordersPerDay: f["orders-per-day"], until: f.until }, ctx.contacts), f["codex-model"], f["codex-effort"]);
 }
 
 /** 借入条目的槽池档位（i28-W9）；不写 = 条目不带 priority（读作 balance） */
@@ -187,10 +204,7 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
     const f = p.flags;
     if (kind === "lend" && f.confirm !== undefined) return output({ ok: false, error: CONFIRM_RETIRED });
     await setEntry(kind, (ctx, file) => {
-      if (kind === "lend") {
-        return withCodexChoice(buildGrant({ ref: p.pos[0], families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
-          ordersPerDay: f["orders-per-day"], until: f.until }, ctx.contacts), f["codex-model"], f["codex-effort"]);
-      }
+      if (kind === "lend") return buildLendGrant(p.pos[0], f, file, ctx);
       return buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
     });
   } catch (e) {

@@ -198,14 +198,17 @@ function resolveTarget(path: string): string {
   try { return realpathSync(path); } catch { return path; }
 }
 
-/** 原子写 JSON（tmp + rename，同目录保证同文件系统）。 */
-export async function writeJsonAtomic(path: string, data: unknown, opts: WriteOpts = {}): Promise<void> {
+/**
+ * 原子写 JSON（tmp + rename，同目录保证同文件系统）。
+ * noFollow：目录可能被别人放了软链（归档区）时用——不解析软链、tmp 排他创建（wx 不跟随已有链接），rename 替换的是链接本身。
+ */
+export async function writeJsonAtomic(path: string, data: unknown, opts: WriteOpts & { noFollow?: boolean } = {}): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const target = resolveTarget(path);
+  const target = opts.noFollow ? path : resolveTarget(path);
   const mode = await resolveMode(target, opts);
   const tmp = tmpName(target);
   try {
-    await writeFile(tmp, serialize(data, opts), mode !== undefined ? { mode } : undefined);
+    await writeFile(tmp, serialize(data, opts), { flag: opts.noFollow ? "wx" : "w", ...(mode !== undefined ? { mode } : {}) });
     if (mode !== undefined) await chmod(tmp, mode);
     await rename(tmp, target);
   } catch (e) {

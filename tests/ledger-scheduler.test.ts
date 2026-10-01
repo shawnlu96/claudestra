@@ -7,7 +7,6 @@ import { activationSeq, getIntent, getWorkflow, schedulerProjectView } from "../
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { addDep } from "../src/lib/ledger-deps-write.js";
-import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage } from "../src/lib/ledger-write.js";
 
@@ -277,7 +276,7 @@ describe("T68 durable scheduler facts", () => {
       const row = view.tasks.find((x) => x.taskId === "T1");
       expect([row?.latestIntent?.status, row?.resources, row?.waitReason]).toEqual(["unknown", ["reviewer:codex"], "外部结果不明：跨模型审查"]);
       expect(view.asOfSeq).toBe(f.seq());
-      expect(projectView(f.db, "p", 100).scheduler.tasks.find((x) => x.taskId === "T1")?.waitReason).toBe("外部结果不明：跨模型审查");
+      expect(schedulerProjectView(f.db, "p").tasks.find((x) => x.taskId === "T1")?.waitReason).toBe("外部结果不明：跨模型审查");
       settleIntent(f.db, f.owner, { id, from: "unknown", to: "done", receipt: "台账 review seq 9" });
       expect(schedulerProjectView(f.db, "p").tasks.find((x) => x.taskId === "T1")?.resources).toEqual([]);
     } finally { f.close(); }

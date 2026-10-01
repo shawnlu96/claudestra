@@ -23,8 +23,9 @@ export interface UnmanagedArchiveMeta {
 
 /**
  * 快照进 archive/archived/<sid>/，旁边写 .meta.json（恢复要知道原路径：cwd 编码不可逆），再删原文件。
- * 用复制不用 rename：副本的 mtime 是归档时刻，归档区按 mtime 算保留期（archive-sweeper pruneArchives）——
- * rename 保留原 mtime，几个月前的子线程一挪进来就会被当成超期清掉。
+ * 归档区按 mtime 算保留期（archive-sweeper pruneArchives），所以副本 mtime 必须是归档时刻：rename 保留原 mtime，
+ * Bun 在 macOS 上 copyFile 大文件走 clonefile 也保留原 mtime（小文件不会，测试要用大文件）——复制后显式 utimes 成现在，
+ * 不然几个月前的子线程一挪进来就会被当成超期清掉。
  * sessionId 会拼进目录名，而 Codex 的 id 来自文件内容：先过会话 id 白名单，建好目录再核对真实路径仍在归档根下一层
  * （防 `../` 和预先放好的软链把副本写到归档区外面）。
  */
@@ -34,7 +35,10 @@ export async function archiveUnmanagedFile(file: string, meta: UnmanagedArchiveM
   await mkdir(dest, { recursive: true });
   const [realRoot, realDest] = await Promise.all([realpath(root), realpath(dest)]);
   if (dirname(realDest) !== realRoot) throw new Error(`归档目录不在归档根下，拒绝写入: ${realDest}`);
-  await copyFile(file, join(dest, file.split("/").pop()!));
+  const copy = join(dest, file.split("/").pop()!);
+  await copyFile(file, copy);
+  const now = new Date();
+  await utimes(copy, now, now);
   const record = {
     kind: "unmanaged", originalPath: file, runtime: meta.runtime ?? null, cwd: meta.cwd ?? null, sessionId: meta.sessionId,
     ...(meta.reason ? { reason: meta.reason } : {}),
