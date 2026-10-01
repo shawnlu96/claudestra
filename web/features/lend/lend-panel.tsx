@@ -82,7 +82,7 @@ export function LendPanel() {
       </div>
       <LendClaudeLogin />
       {form && (
-        <GrantForm key={JSON.stringify(form)} peers={data.peers} maxDays={data.maxDays} shellSentence={data.shellSentence} initial={form}
+        <GrantForm key={JSON.stringify(form)} peers={data.peers} grants={data.grants} maxDays={data.maxDays} shellSentence={data.shellSentence} initial={form}
           onCancel={() => setForm(null)} onFail={() => void load()} onDone={(peer) => { setForm(null); setFresh(peer); void load(); }} />
       )}
       <div className="space-y-1.5">

@@ -171,3 +171,11 @@ export function withSnapshot(orders: readonly OrderView[], snapshot: readonly Or
   const fresh = snapshot.filter((o) => !orders.some((x) => x.orderId === o.orderId));
   return [...fresh, ...rest];
 }
+
+/** Switching peers resets slots and the comparison baseline; new peers send explicit defaults. */
+export function switchClaudeGrantPeer(form: GrantForm, peer: string, grants: readonly GrantView[], maxDays: number) {
+  const grant = grants.find((g) => g.peer === peer);
+  const defaults = formDefaults(maxDays, [{ name: peer }], grant);
+  const next = { ...form, peer, codex: defaults.codex, claude: defaults.claude ?? 0 };
+  return { form: next, baseline: grant ? next : undefined };
+}

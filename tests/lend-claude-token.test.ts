@@ -1,11 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, statSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { claudeTokenPath, claudeTokenStatus, readClaudeLendToken, saveClaudeToken } from "../src/lib/lend-claude-token.js";
 import { claudeLendSlots } from "../src/lib/lend-claude-worker-capacity.js";
 import type { LendEntry } from "../src/lib/lend-config.js";
-const root = mkdtempSync(join(tmpdir(), "cl3-token-"));
+const root = mkdtempSync("/tmp/c3t-");
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 test("file-first hot reload, clear suppresses legacy env, private modes and status", async () => {
   const env = { CLAUDESTRA_STATE_DIR: root, CLAUDE_CODE_OAUTH_TOKEN: "fake-legacy" };

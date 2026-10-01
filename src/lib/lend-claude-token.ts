@@ -35,9 +35,9 @@ export function readClaudeLendToken(env: Record<string, string | undefined> = pr
   return r === undefined ? env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || undefined : r.token?.trim() || undefined;
 }
 
-export function claudeTokenStatus(path = claudeTokenPath()): ClaudeTokenStatus {
+export function claudeTokenStatus(path = claudeTokenPath(), env: Record<string, string | undefined> = process.env): ClaudeTokenStatus {
   const r = readRecord(path);
-  return { configured: !!r?.token, savedAt: r?.token ? r.savedAt : null };
+  return { configured: !!(r === undefined ? env.CLAUDE_CODE_OAUTH_TOKEN?.trim() : r.token), savedAt: r?.token ? r.savedAt : null };
 }
 
 export async function saveClaudeToken(token: string | null, path = claudeTokenPath()): Promise<ClaudeTokenStatus> {

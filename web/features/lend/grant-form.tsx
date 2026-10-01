@@ -9,11 +9,12 @@ import { ApiError } from "@/lib/api/client";
 import { postGrant } from "./lend-api";
 import { useLendT } from "./lend-i18n";
 import { LendIcon } from "./lend-icons";
-import { addRepos, canSubmit, dayChoices, grantBody, type GrantForm as Form } from "./lend-model";
+import { switchClaudeGrantPeer, addRepos, canSubmit, dayChoices, grantBody, type GrantForm as Form, type GrantView } from "./lend-model";
 import css from "./lend.module.css";
 
 interface Props {
   peers: { name: string }[];
+  grants: readonly GrantView[];
   maxDays: number;
   shellSentence: string;
   initial: Form;
@@ -73,9 +74,11 @@ function RoleField() {
   );
 }
 
-export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFail, onCancel }: Props) {
+export function GrantForm({ peers, grants, maxDays, shellSentence, initial, onDone, onFail, onCancel }: Props) {
   const t = useLendT();
-  const [f, setF] = useState<Form>(initial);
+  const start = switchClaudeGrantPeer(initial, initial.peer, grants, maxDays);
+  const [f, setF] = useState<Form>(start.form);
+  const [baseline, setBaseline] = useState<Form | undefined>(start.baseline);
   const [repoText, setRepoText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -93,7 +96,7 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFa
     setBusy(true);
     setErr("");
     try {
-      await postGrant(grantBody(form, maxDays, initial));
+      await postGrant(grantBody(form, maxDays, baseline));
       onDone(form.peer);
     } catch (e) {
       setErr(e instanceof ApiError || e instanceof Error ? e.message : String(e));
@@ -110,7 +113,7 @@ export function GrantForm({ peers, maxDays, shellSentence, initial, onDone, onFa
       <label className="flex items-center gap-2 text-xs">
         <span className="w-20 shrink-0 text-base-content/60">{t("对象")}</span>
         <select className="select select-sm min-w-0 flex-1" value={f.peer} disabled={!peerNames.length}
-          onChange={(e) => setF({ ...f, peer: e.target.value })}>
+          onChange={(e) => { const next = switchClaudeGrantPeer(f, e.target.value, grants, maxDays); setF(next.form); setBaseline(next.baseline); }}>
           {!peerNames.length && <option value="">{t("没有可授权的 peer")}</option>}
           {peerNames.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>

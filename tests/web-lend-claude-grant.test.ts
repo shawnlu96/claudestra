@@ -50,3 +50,22 @@ test("real CLI retains Codex/roles/model/effort while changing Claude; legacy CL
   expect(entry()).not.toHaveProperty("codexModel");
   expect(entry()).not.toHaveProperty("codexEffort");
 }, 60_000);
+
+test("peer switch resets displayed slots and baseline; new peer submits explicit defaults", async () => {
+  const { switchClaudeGrantPeer } = await import("../web/features/lend/lend-model");
+  const b = { ...g, peer: "B", families: { codex: 1, claude: 1 } };
+  const initial = formDefaults(7, [{ name: g.peer }], g);
+  const next = switchClaudeGrantPeer(initial, "B", [g, b], 7);
+  expect(next.form).toMatchObject({ peer: "B", codex: 1, claude: 1 });
+  expect(next.baseline).toMatchObject({ peer: "B", codex: 1, claude: 1 });
+  const unchanged = grantBody(next.form, 7, next.baseline);
+  expect(unchanged).not.toHaveProperty("codex");
+  expect(unchanged).not.toHaveProperty("claude");
+  const changed = grantBody({ ...next.form, codex: 3, claude: 2 }, 7, next.baseline);
+  expect(changed).toMatchObject({ peer: "B", codex: 3, claude: 2 });
+  expect(grantArgv(changed)).toEqual(expect.arrayContaining(["--codex=3", "--claude=2"]));
+  const fresh = switchClaudeGrantPeer(next.form, "C", [g, b], 7);
+  expect(fresh.form).toMatchObject({ peer: "C", codex: 5, claude: 0 });
+  expect(fresh.baseline).toBeUndefined();
+  expect(grantBody(fresh.form, 7, fresh.baseline)).toMatchObject({ peer: "C", codex: 5, claude: 0 });
+});

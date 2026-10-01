@@ -61,3 +61,26 @@ test("real persistence does not mutate lend config/journal or expose credentials
     expect(readFileSync(file, "utf8")).not.toContain(secret);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("legacy environment is visible and clearable through API, then a new token restores slots", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { claudeTokenPath, claudeTokenStatus, saveClaudeToken } = await import("../src/lib/lend-claude-token.js");
+  const { claudeLendSlots } = await import("../src/lib/lend-claude-worker-capacity.js");
+  const root = mkdtempSync("/tmp/c3l-");
+  const env = { CLAUDESTRA_STATE_DIR: root, CLAUDE_CODE_OAUTH_TOKEN: "fake-legacy-only" };
+  const file = claudeTokenPath(env);
+  const entry = { families: { claude: 2 } } as import("../src/lib/lend-config.js").LendEntry;
+  const api = makeLendClaudeTokenApi({ status: () => claudeTokenStatus(file, env), save: (token) => saveClaudeToken(token, file) });
+  const status = async () => (await api(new Request("http://test"), path, device(true)))!.json();
+  try {
+    expect(await status()).toEqual({ configured: true, savedAt: null });
+    expect(claudeLendSlots(entry, env)).toBe(2);
+    expect((await api(new Request("http://test", { method: "DELETE" }), path, device(true)))?.status).toBe(200);
+    expect(await status()).toEqual({ configured: false, savedAt: null });
+    expect(claudeLendSlots(entry, env, () => undefined)).toBe(0);
+    const saved = await api(new Request("http://test", { method: "POST", body: JSON.stringify({ token: "fake-new-setup" }) }), path, device(true));
+    expect(saved?.status).toBe(200);
+    expect(await status()).toEqual({ configured: true, savedAt: expect.any(String) });
+    expect(claudeLendSlots(entry, env)).toBe(2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
