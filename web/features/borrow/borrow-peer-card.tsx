@@ -21,7 +21,7 @@ function ProtoBadge({ state }: { state: PeerState }) {
   return state === "poll" ? (
     <span className="badge badge-ghost badge-sm shrink-0 gap-1 whitespace-nowrap text-base-content/60"><RepeatIcon className="size-3" />{t("只轮询")}</span>
   ) : (
-    <span className="badge badge-sm shrink-0 gap-1 whitespace-nowrap border-success/30 bg-success/10 text-success"><ZapIcon className="size-3" />{t("推送")}</span>
+    <span className="badge badge-sm shrink-0 gap-1 whitespace-nowrap border-success/30 bg-success/10 text-success"><ZapIcon className="size-3" />{t("推送派单")}</span>
   );
 }
 

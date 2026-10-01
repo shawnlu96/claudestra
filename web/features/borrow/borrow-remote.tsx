@@ -11,7 +11,7 @@ const STATUS: Record<string, [string, string]> = {
   unknown: ["待 PM", "border-warning/30 bg-warning/10 text-warning"],
 };
 const PHASE: Record<string, string> = { cloning: "克隆中", starting: "启动中", working: "工作中", publishing: "推送中", result_pending: "交结果" };
-const STEP: Record<string, string> = { review: "审查", write: "开工", fix: "修复" };
+const STEP: Record<string, string> = { review: "审查单", write: "开工单", fix: "修复单" };
 
 export function RemoteRows({ rows, serverNow, receivedAt, tick }: { rows: RemoteRow[]; serverNow: number; receivedAt: number; tick: number }) {
   const t = useT();
