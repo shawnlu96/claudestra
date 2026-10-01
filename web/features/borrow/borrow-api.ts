@@ -3,7 +3,8 @@
  * 读回 403（不是 owner 的全权设备）或 404（老 bridge 没这个端点）→ null，面板整块不渲染。形状与 bridge 一致（web 与 src 互不 import）。
  */
 import { api, ApiError } from "@/lib/api/client";
-import { peerSaver } from "./borrow-model";
+import { machines, type MachineRef } from "@/lib/machines";
+import { peerSaver, type PeerSaver } from "./borrow-model";
 
 export type Family = "codex" | "claude";
 export type RemoteModeView = "balance" | "off";
@@ -55,14 +56,30 @@ export async function fetchBorrow(signal?: AbortSignal): Promise<BorrowView | nu
 
 const peerPath = (peer: string) => `/borrow/peers/${encodeURIComponent(peer)}`;
 
-/** CLI 准入不过也会抛（409 refused）：调用方按失败回弹 */
-export async function saveBorrowPeer(peer: string, body: { projects: string[]; maxOpen: number }): Promise<void> {
-  await api(peerPath(peer), { method: "PUT", json: body, timeoutMs: 40_000 });
+/** CLI 准入不过也会抛（409 refused）：调用方按失败回弹。machine 缺省 = 发请求时的当前机器 */
+export async function saveBorrowPeer(peer: string, body: BorrowBody, machine?: MachineRef): Promise<void> {
+  await api(peerPath(peer), { method: "PUT", json: body, timeoutMs: 40_000 }, machine);
 }
 
-export async function removeBorrowPeer(peer: string): Promise<void> {
-  await api(peerPath(peer), { method: "DELETE", timeoutMs: 40_000 });
+export async function removeBorrowPeer(peer: string, machine?: MachineRef): Promise<void> {
+  await api(peerPath(peer), { method: "DELETE", timeoutMs: 40_000 }, machine);
 }
 
-/** 借入 peer 的写入一律经它：按 peer 串行、最后提交的赢，删掉的不复活（borrow-model.ts peerSaver）。模块级，卡片换几次都是这一份 */
-export const borrowSaver = peerSaver<{ projects: string[]; maxOpen: number }>({ put: saveBorrowPeer, del: removeBorrowPeer });
+type BorrowBody = { projects: string[]; maxOpen: number };
+/** 写给哪台机器的哪个 peer：在提交那一刻定下，停手计时、排队中的写和删后记号都跟着来源机器，切机器后不写到另一台、也不串删除状态 */
+interface Aim { machine?: MachineRef; peer: string }
+const lanes = peerSaver<Aim, BorrowBody>(
+  { put: (a, v) => saveBorrowPeer(a.peer, v, a.machine), del: (a) => removeBorrowPeer(a.peer, a.machine) },
+  (a) => JSON.stringify([a.machine?.fp ?? null, a.peer]),
+);
+const aim = (peer: string): Aim => {
+  const fp = machines.currentFp();
+  return fp ? { machine: { fp }, peer } : { peer };
+};
+
+/** 借入 peer 的写入一律经它：按（机器，peer）串行、最后提交的赢，删掉的不复活（borrow-model.ts peerSaver）。模块级，卡片换几次都是这一份 */
+export const borrowSaver: PeerSaver<string, BorrowBody> = {
+  save: (peer, v, after, delayMs) => lanes.save(aim(peer), v, after, delayMs),
+  remove: (peer) => lanes.remove(aim(peer)),
+  create: (peer, v) => lanes.create(aim(peer), v),
+};

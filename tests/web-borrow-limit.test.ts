@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import type { PeerView } from "@/features/borrow/borrow-api";
-import { BOX, grantedSlots, lenderCap, parseMaxOpen, peerSaver, splitAtBox, type Timers } from "@/features/borrow/borrow-model";
+import { afterSave, BOX, grantedSlots, lenderCap, parseMaxOpen, peerSaver, splitAtBox, type Timers } from "@/features/borrow/borrow-model";
 import { fillParams } from "@/lib/i18n-fill";
 import { BORROW_DICT } from "@/lib/i18n-dict-borrow";
 
@@ -76,7 +76,7 @@ function fakeBridge() {
 function rig() {
   const { timers, advance } = fakeTimers();
   const b = fakeBridge();
-  const saver = peerSaver<number>(b.io, timers);
+  const saver = peerSaver<string, number>(b.io, (peer) => peer, timers);
   /** 一张卡：after 记下它收尾时拿到的结果（只有最后一次提交才收尾） */
   const card = () => {
     const ends: boolean[] = [];
@@ -188,6 +188,46 @@ describe("同一 peer 跨卡片串行、最后提交的赢", () => {
     r.saver.save("b", 2);
     await ticks();
     expect(r.ops.map((o) => o.peer)).toEqual(["a", "b"]);
+  });
+});
+
+describe("上一次的刷新还没回来就又点了（卡片收尾 afterSave）", () => {
+  test("12 → + 存 13，刷新挂起时再快点 + 五下：旧收尾不清新 draft，最后存 18 不是 17", async () => {
+    const r = rig();
+    const card = { draft: null as number | null };
+    const reloads: (() => void)[] = [];
+    let shown = 12; // 卡片显示 = draft ?? 刷新拿到的服务端值
+    const after = afterSave({
+      reload: () => new Promise<void>((done) => reloads.push(() => ((shown = r.store.get("lab-box")!), done()))),
+      ok: () => undefined,
+      fail: () => undefined,
+      settle: () => void (card.draft = null),
+    });
+    const plus = () => {
+      card.draft = (card.draft ?? shown) + 1;
+      r.saver.save("lab-box", card.draft, after, 600);
+    };
+    plus();
+    await r.advance(600);
+    await r.settle(0); // PUT 13 写完，刷新还挂着
+    plus(); // 14
+    reloads.shift()!(); // 旧刷新回来（服务端 13）
+    await ticks();
+    expect(card.draft).toBe(14); // 旧收尾已不是最新，不清 draft
+    for (let k = 0; k < 4; k++) plus();
+    await r.advance(600);
+    await r.settle(1);
+    reloads.shift()!();
+    await ticks();
+    expect(puts(r.ops)).toEqual([13, 18]);
+    expect(card.draft).toBeNull(); // 最后一次收尾
+  });
+  test("失败只抖、最新才收尾", async () => {
+    const calls: string[] = [];
+    const after = afterSave({ reload: async () => void calls.push("reload"), ok: () => void calls.push("ok"), fail: () => void calls.push("fail"), settle: () => void calls.push("settle") });
+    await after(false, () => true);
+    await after(true, () => false);
+    expect(calls).toEqual(["fail", "settle", "reload", "ok"]);
   });
 });
 

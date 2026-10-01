@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { borrowSaver, type DroppedView, type Family, type PeerView } from "./borrow-api";
-import { canToggleOff, lenderCap, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
+import { afterSave, canToggleOff, lenderCap, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
 import { AgeTag, LimitLine, ProjectChips, STEP_SETTLE_MS, Stepper } from "./borrow-bits";
 import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
 import { fadeIn, fadeOut, flash, shake } from "./motion";
@@ -111,20 +111,19 @@ export function BorrowPeerCard(props: {
   }, [armed]);
 
   // 写入交给模块级的 borrowSaver：同一 peer 跨卡片串行、最后提交的赢；−/+ 等停手再存，计时不随卡片卸载丢掉。
-  // after 只在这次仍是最后一次提交时来，才收 draft / busy；旧卡的 after 落在已卸载的组件上，setState 无害
+  // after 只在这次仍是最后一次提交时来，刷新回来仍是才收 draft / busy（afterSave）；旧卡的 after 落在已卸载的组件上，setState 无害
   const save = (next: Draft, el: HTMLElement | null, delayMs = 0) => {
     setDraft(next);
     if (!delayMs) setBusy(true);
-    const after = async (ok: boolean) => {
-      try {
-        if (!ok) return shake(el); // 回弹：draft 清掉就是服务端的原值
-        await onChanged();
-        flash(card.current);
-      } finally {
+    const after = afterSave({
+      reload: onChanged,
+      ok: () => flash(card.current),
+      fail: () => shake(el), // 回弹：draft 清掉就是服务端的原值
+      settle: () => {
         setDraft(null);
         setBusy(false);
-      }
-    };
+      },
+    });
     borrowSaver.save(peer.peer, next, after, delayMs);
   };
   const remove = async (e: MouseEvent<HTMLButtonElement>) => {
