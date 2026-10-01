@@ -77,8 +77,9 @@ async function paneSettled(channelId: string): Promise<boolean> {
 /**
  * 押在叫停之前、叫停之后才投出去的（忙时作答的 ask 答复、agent 请求）：加一行抬头「停之前发的，先别照做，问用户还要不要」——
  * 不加的话 agent 看到的顺序是「停之后 owner 又批准了」，会照做（wf2 classify-merge-1）。bridge 自己的通知不加（收尾提醒另有作废规则）。
+ * check_inbox 领取时同样要加（bridge/inbox.ts）。
  */
-function markIfHeldAcrossStop(item: HeldItem, stopAt: number | undefined): void {
+export function markIfHeldAcrossStop(item: HeldItem, stopAt: number | undefined): void {
   const m = item.env.meta;
   if (stopAt && item.heldAt < stopAt && item.env.from.kind !== "bridge" && !m.interruptNote) m.interruptNote = heldAcrossStopNote(item.heldAt, stopAt);
 }

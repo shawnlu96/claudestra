@@ -48,7 +48,7 @@ describe("takeInbox", () => {
     const q = held.get("c-me")!;
     expect(q.map((i) => i.env.content)).toEqual(["复核意见 1", "人类补充", "复核意见 2"]); // 还在队里
     expect(q.filter((i) => leaseActive(i, 5 * 60_000)).length).toBe(3);
-    expect(mirrored).toEqual(["人类补充", "复核意见 1", "复核意见 2"]);
+    expect(mirrored).toEqual(["复核意见 1", "复核意见 2"]); // 人发的走 event-bus 的入站负载（inbox-all-kinds.test.ts）
     expect(calls.slot("c-me", "c-codex")!.requests![0]!.deliveredAt).toBeGreaterThan(1); // 失效钟记在这条请求上
   });
 

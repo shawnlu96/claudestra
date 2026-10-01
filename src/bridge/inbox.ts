@@ -11,6 +11,9 @@
 import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { AgentCallBook } from "./agent-calls.js";
+import { emitEvent } from "./event-bus.js";
+import { markIfHeldAcrossStop } from "./held-flush.js";
+import { inboundEventData } from "./inbound-event.js";
 import { heldKindOf, INBOX_LEASE_MS, inboxTakeable, leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
 
@@ -20,8 +23,10 @@ export interface InboxDeps {
   calls: AgentCallBook;
   /** 和正常投递同一个渲染（「[🤖 来自 X]」抬头等） */
   render: (env: Envelope) => Promise<string>;
-  /** 网页镜像：和正常投递一样画成一条入站气泡 */
+  /** 网页镜像（本机 agent 消息）：和正常投递一样画成一条入站气泡；人 / peer 的见 mirrorIn */
   emitIn: (channelId: string, env: Envelope) => void;
+  /** owner 最近一次叫停的时刻（turnCuts.stoppedAt）；不给 = 按需加载 bridge/turn-cuts.ts 的单例（它读状态文件、挂 event-bus，单测注入） */
+  stoppedAt?: (channelId: string) => number | undefined;
 }
 let deps: InboxDeps | null = null;
 export function initInbox(d: InboxDeps): void {
@@ -65,7 +70,28 @@ async function fitEntry(d: InboxDeps, it: HeldItem, now: number): Promise<{ text
 async function entryText(d: InboxDeps, it: HeldItem, now: number): Promise<string> {
   const from = senderLabel(it.env);
   const mins = Math.max(0, Math.round((now - it.heldAt) / 60_000));
-  return `── 来自 ${from} · message_id=${it.env.meta.messageId} · 排队 ${mins} 分钟 ──\n${await d.render(it.env)}`;
+  // 和押后补投同一个叫停抬头（held-flush.ts）：停之前押下的批准，领到时也要知道先别照做
+  markIfHeldAcrossStop(it, d.stoppedAt ? d.stoppedAt(it.to.channelId) : (await import("./turn-cuts.js")).turnCuts.stoppedAt(it.to.channelId));
+  const back = it.env.from.kind === "local" ? "" : ` · 回复用 reply，chat_id=${replyBackOf(it.env)}`;
+  return `── 来自 ${from} · message_id=${it.env.meta.messageId} · 排队 ${mins} 分钟${back} ──\n${await d.render(it.env)}`;
+}
+
+/** 回程地址：和正常投递给 agent 的 chat_id 同一规则（bridge.ts resolveReplyBackChannel）——这条从哪个会话来，reply 就发回哪里 */
+function replyBackOf(env: Envelope): string {
+  const f = env.from;
+  return f.kind === "api" ? `api:${f.tokenId}` : f.kind === "user" || f.kind === "local" ? f.channelId : "";
+}
+
+/**
+ * 网页镜像：本机 agent 消息照旧走注入的 emitIn。人 / peer 的用正常投递同一份负载（inboundEventData：卡片答复的 askId / wire、附件），
+ * 挂在和「排队中」标记同一个 agent 名下（bridge/held-web.ts），网页才能对上那条排队气泡摘掉标记
+ */
+function mirrorIn(d: InboxDeps, channelId: string, it: HeldItem): void {
+  const f = it.env.from;
+  if (f.kind === "local") return d.emitIn(channelId, it.env);
+  const who: Record<string, string> = f.kind === "api" ? { user: f.name, user_id: `api:${f.tokenId}` } : f.kind === "user" ? { user: f.username ?? "", user_id: f.userId } : {};
+  const agent = it.to.agentName || (channelId === process.env.CONTROL_CHANNEL_ID ? "master" : "");
+  if (agent) emitEvent({ agent, chatId: channelId, type: "chat_message", data: inboundEventData(it.env, who) });
 }
 
 function senderLabel(env: Envelope): string {
@@ -79,7 +105,7 @@ function senderLabel(env: Envelope): string {
 
 function batchText(batchId: string, texts: string[], note: string, left: number): string {
   const head = `[📬 收件箱 ${batchId}：${texts.length} 条${left > 0 ? `，还有 ${left} 条` : ""}。${note}`
-    + `处理完调 check_inbox({ ack: "${batchId}" }) 确认（会顺带领下一批）；${INBOX_LEASE_MS / 60_000} 分钟内不确认，这批会在你回合结束时按普通消息重新送达（message_id 不变）。答复别的 agent 用 send_to_agent，答复 owner / peer 照抬头里的 chat_id 用 reply。]`;
+    + `处理完调 check_inbox({ ack: "${batchId}" }) 确认（会顺带领下一批）；${INBOX_LEASE_MS / 60_000} 分钟内不确认，这批会在你回合结束时按普通消息重新送达（message_id 不变）。答复别的 agent 用 send_to_agent，答复 owner / peer 用各条抬头里给的 chat_id 调 reply。]`;
   return [head, ...texts.map((t, k) => t.replace("── 来自", `── ${k + 1}/${texts.length} · 来自`))].join("\n\n");
 }
 
@@ -166,7 +192,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     for (const { it } of picked) d.calls.touchDelivered(channelId, it.env); // 这些请求这会儿才真正到它手上
     for (const { it } of picked) {
       it.lease = { batchId, at: now };
-      d.emitIn(channelId, it.env);
+      mirrorIn(d, channelId, it);
     }
     d.held.persist();
     const left = free.length - picked.length - previews.length;

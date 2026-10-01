@@ -4,10 +4,12 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
+import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, INBOX_LEASE_MS, onHeldSettled, type HeldItem } from "../src/bridge/held-queue.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
+import { withInterruptNote } from "../src/lib/turn-cuts.js";
 
 const me = { tag: "claudestra-ws" } as never;
 const to = { kind: "local", agentName: "agent-claudestra", channelId: "c-me", ws: me } as LocalEndpoint;
@@ -25,15 +27,17 @@ const bridgeNote = (c: string) => mk(c, { kind: "bridge", label: "ledger" }, { t
 const guest = (c: string) => mk(c, { kind: "api", tokenId: "tok-g", name: "guest" });
 
 const settled: string[] = [];
-let off: () => void = () => {};
+const events: BridgeEvent[] = [];
+let off: (() => void)[] = [];
 beforeEach(() => {
   settled.length = 0;
-  off = onHeldSettled((env, outcome) => settled.push(`${env.content}:${outcome}`));
+  events.length = 0;
+  off = [onHeldSettled((env, outcome) => settled.push(`${env.content}:${outcome}`)), subscribeEvents({}, (e) => e.chatId === "c-me" && events.push(e))];
   clearOpenedBy();
 });
-afterEach(() => off());
+afterEach(() => off.forEach((f) => f()));
 
-function setup(items: HeldItem[]) {
+function setup(items: HeldItem[], stoppedAt: (c: string) => number | undefined = () => undefined) {
   const held = new HeldQueue(null);
   held.set("c-me", items);
   const mirrored: string[] = [];
@@ -41,8 +45,10 @@ function setup(items: HeldItem[]) {
     clients: new Map([["c-me", { ws: me }]]),
     held,
     calls: new AgentCallBook(null),
-    render: async (env) => `[来自 ${env.from.kind}]\n${env.content}`,
+    // 和 bridge.ts renderContentForLocal 一样：叫停抬头（interruptNote）放在正文前
+    render: async (env) => (env.meta.interruptNote ? withInterruptNote : (t: string) => t)(`[来自 ${env.from.kind}]\n${env.content}`, env.meta.interruptNote!),
     emitIn: (_c, env) => mirrored.push(String(env.content)),
+    stoppedAt,
   });
   return { held, mirrored, contents: () => (held.get("c-me") ?? []).map((i) => String(i.env.content)) };
 }
@@ -64,9 +70,48 @@ describe("check_inbox 领全部押后消息", () => {
     expect(r.text).toContain("来自 owner · message_id=m-o1");
     expect(r.text).toContain("来自 peer He · message_id=m-p1");
     expect(r.text).toContain("[来自 api]\nask1"); // 正文走和正常投递同一个 render
-    expect(s.mirrored).toEqual(["ask1", "o1", "a1", "p1", "a2"]);
+    expect(s.mirrored).toEqual(["a1", "a2"]); // 本机 agent 的照旧走 emitIn
+    expect(events.map((e) => [e.type, e.agent, (e.data as { text: string }).text])).toEqual([
+      ["chat_message", "agent-claudestra", "ask1"], ["chat_message", "agent-claudestra", "o1"], ["chat_message", "agent-claudestra", "p1"],
+    ]);
     expect(s.contents()).toEqual(["a1", "p1", "n1", "ask1", "g1", "o1", "a2"]); // 领取不出队
     expect(settled).toEqual([]);
+  });
+
+  test("inbox-reply-route：owner / 卡片答复 / peer 每条带正常投递同一规则的回程 chat_id；agent 的抬头不变", async () => {
+    setup([agent("a1"), peer("p1"), ask("ask1"), owner("o1")]);
+    const r = await take(60_000);
+    expect(r.text).toContain("来自 peer He · message_id=m-p1 · 排队 1 分钟 · 回复用 reply，chat_id=api:tok-p ──");
+    expect(r.text).toContain("message_id=m-ask1 · 排队 1 分钟 · 回复用 reply，chat_id=api:owner:self ──");
+    expect(r.text).toContain("message_id=m-o1 · 排队 1 分钟 · 回复用 reply，chat_id=c-me ──");
+    expect(r.text).toContain("来自 agent-codex · message_id=m-a1 · 排队 1 分钟 ──");
+    const id = "m-long-peer";
+    setup([mk("y".repeat(20_000), { kind: "api", tokenId: "tok-p", name: "He", peer: "He" }, { messageId: id })]);
+    expect((await take(1_000, { read: id })).text).toContain("chat_id=api:tok-p"); // 分页读第 1 页带着抬头
+  });
+
+  test("inbox-stop-note：叫停之前押下的 owner 卡片答复 / agent 请求，领取时和补投一样加「先别照做」抬头；叫停之后押的不加", async () => {
+    const before = { ...ask("ask-before"), heldAt: 1_000 };
+    const after = { ...ask("ask-after"), heldAt: 3_000 };
+    const req = { ...agent("a-before"), heldAt: 1_000 };
+    const s = setup([before, after, req], (c) => (c === "c-me" ? 2_000 : undefined));
+    const r = await take(4_000);
+    const part = (id: string) => r.text.split("── ").find((x) => x.includes(`message_id=m-${id} `))!;
+    expect(part("ask-before")).toContain("先别照做");
+    expect(part("a-before")).toContain("先别照做");
+    expect(part("ask-after")).not.toContain("先别照做");
+    expect(s.held.get("c-me")!.find((i) => i.env.content === "ask-before")!.env.meta.interruptNote).toBeTruthy(); // 之后再补投也不重复加
+  });
+
+  test("inbox-web-echo：卡片答复领取后的入站镜像带 askId / wire 回声和附件，和「排队中」标记同一 agent 名", async () => {
+    const a = ask("[owner 回复了你的「待你处理」] 选择：部署");
+    a.env.meta.askEcho = { askId: "ask_review", echo: "部署", wire: "[button:deploy]" } as never;
+    a.env.meta.attachments = ["/tmp/a.png"];
+    setup([a]);
+    await take(1_000);
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({ agent: "agent-claudestra", type: "chat_message" });
+    expect(events[0].data).toMatchObject({ direction: "in", from: "owner", fromId: "api:owner:self", srcKind: "api", askId: "ask_review", wire: "[button:deploy]", attachments: ["/tmp/a.png"] });
   });
 
   test("ack 才出队并报送达；不 ack 再调原样重给；租约过期后可重领", async () => {
