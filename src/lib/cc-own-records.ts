@@ -23,8 +23,12 @@ const isCcRuntime = (runtime: string | undefined): boolean => runtime === undefi
 export function plainUserText(rec: { isMeta?: unknown }, text: string, runtime: string | undefined): string | undefined {
   if (isCcRuntime(runtime)) return undefined;
   if (rec.isMeta !== true) return text;
-  return /^\s*<channel\s[^>]*>\r?\n?([\s\S]*?)\r?\n?<\/channel>\s*$/.exec(text)?.[1] ?? text;
+  const body = /^\s*<channel\s[^>]*>\r?\n?([\s\S]*?)\r?\n?<\/channel>\s*$/.exec(text)?.[1];
+  return body === undefined ? text : body.replace(BATCH_SEAM_RE, "\n\n");
 }
+
+/** ACP 把排队的几条各自包好、空行拼成一轮（lib/acp/turn.ts next）：拼缝处的闭 / 开标签也去掉，正文一字不少，属性照旧不认 */
+const BATCH_SEAM_RE = /\r?\n<\/channel>\r?\n\r?\n<channel\s[^>]*>\r?\n/g;
 
 export function ccOwnRecord(trimmed: string, runtime: string | undefined): CcOwnRecord {
   if (!isCcRuntime(runtime)) return null;

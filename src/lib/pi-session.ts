@@ -228,7 +228,7 @@ export function wrapPiInboundAsChannel(text: string): string {
   return `<channel source="claudestra"${from ? ` user="${from}"` : ""}${mark}>\n${text}\n</channel>`;
 }
 
-/** 已是完整 <channel …>…</channel>（ACP 下的入站）：wrapPiInboundAsChannel 不认它的头（不以 [ 开头），原样返回、不双包 */
+/** 已是 <channel …>…</channel>（ACP 下的入站；排队几条拼成的一串也算，拼缝由 cc-own-records.plainUserText 去）：wrapPiInboundAsChannel 原样返回、不双包 */
 const CHANNEL_WRAPPED_RE = /^\s*<channel\s[^>]*>[\s\S]*<\/channel>\s*$/;
 
 /** 把 content（字符串或块数组）转成"可包 channel 的正文" */
