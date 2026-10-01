@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lendFileProblem, type LendEntry } from "../src/lib/lend-config.js";
 import { CHOICE_CHANGED, LEND_ORDER_ENV, lendCreateDenied, lendModelArgs } from "../src/lib/lend-grant-spawn.js";
-import { advance, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
+import { advance, getOrder, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
+import { harness } from "./lend-harness.js";
 
 const FP = "abcd-ef01-2345-6789";
 const GRANT: LendEntry = { peer: "a", fp: FP, families: { codex: 1 }, roles: ["review"], repos: ["o/r"], ordersPerDay: 5,
@@ -118,7 +119,7 @@ describe("manager create 最终闸口：父进程组好参数之后授权里的�
     ["有字段改无字段", { codexModel: "gpt-6-astra", codexEffort: "xhigh" }, {}],
   ];
   for (const [label, before, after] of cases) {
-    test(`${label}：拒起；下一轮按新授权重建参数就放行`, () => {
+    test(`${label}：拒起；重派后按新授权组参数就放行`, () => {
       const { grant, args, gate } = fixture();
       grant([{ ...GRANT, ...before }]);
       const argv = args(); // 出借服务（父进程）组参数
@@ -138,6 +139,23 @@ describe("manager create 最终闸口：父进程组好参数之后授权里的�
     const argv = args();
     grant([]);
     expect(gate(argv)).toMatch(/已收回/);
+  });
+});
+
+describe("CHOICE_CHANGED 拒起后的实际去向（真实 lendTick）：退回发起方，不原地重试", () => {
+  test("授权仍有效、create 被最终闸口按 CHOICE_CHANGED 拒：单子 released，向 A 报 release / not_started，原因是这句文案", async () => {
+    const h = harness();
+    let gateOk: string | null = "没调";
+    h.d.worker.create = async (_n, _dir, _purpose, gate) => ((gateOk = await gate()), { ok: false, error: CHOICE_CHANGED });
+    for (let i = 0; i < 5; i++) await h.tick();
+    expect(gateOk).toBeNull(); // 授权仍然有效：不是按收回收尾
+    const row = getOrder(h.db, "o1")!;
+    expect(row.state).toBe("released");
+    expect(row.reason).toBe(`起 worker 失败：${CHOICE_CHANGED}`);
+    expect(h.calls.filter((c) => c.op === "lease").map((c) => c.body)).toEqual([expect.objectContaining({ action: "release", reason: "not_started" })]);
+    expect(h.log.created).toEqual([]);
+    expect(CHOICE_CHANGED).toContain("单子退回发起方重派，下次领单按新授权起");
+    expect(CHOICE_CHANGED).not.toMatch(/下一轮|重建|重试/);
   });
 });
 
