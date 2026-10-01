@@ -1,6 +1,8 @@
 # i28-W7 实测证据：推送版双实例 + 版本混搭
 
-- 代码：main `82c1a00a`（W1–W5、W1c、W4 都已合入）上的分支 `feat/i28-w7`；执行日期 2026-10-01。
+- 代码与日期（2026-10-01）：
+  - 真机 lab 跑在 main `82c1a00a`（W1–W5、W1c、W4 都已合入）上；
+  - 进程内测试在合入 main `e88131f0`（含 i28-N10、i28-W1d）之后又全部重跑了一遍，下文贴的进程内输出都是重跑后的。
 - 两套环境：
   - **进程内双实例**（自动化，`tests/lend-lab*.test.ts` + 夹具 `tests/lend-lab-kit.ts`）：
     - A 用真台账 + 真调度 tick（scheduler.json 带 `remote.reviewFirst`）+ 真推送循环 + 真 `ledger lend-*` CLI；
@@ -145,10 +147,10 @@
 - **预期**：闸口拒起，单退回 A，下一次按新授权起。
 - **实际（进程内）**：
   ```
-  A#27 note T1 owner：出借：mate 报 not_started：起 worker 失败：出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，下一轮按新授权重建参数
+  A#27 note T1 owner：出借：mate 报 not_started：起 worker 失败：出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，单子退回发起方重派，下次领单按新授权起
   A#37 scheduler T1 scheduler：派对抗式跨模型审查给 agent-rv-t1        ← 自动卡改放本机
   A 单 lend:T1:s1:r1:a0 released（not_started：…）
-  B 收据 {"orderId":"lend:T1:s1:r1:a0","outcome":"released","reason":"起 worker 失败：出借 worker 不起：授权里的模型或推理档在起之前改了，…","acked":false}
+  B 收据 {"orderId":"lend:T1:s1:r1:a0","outcome":"released","reason":"起 worker 失败：出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，单子退回发起方重派，…","acked":false}
   下一张 T2：create 参数 ["--model","gpt-5.1-codex","--effort","xhigh"]，started
   线上：… claim:200 → beat:200 → lease:release:200 → hello:200 ×2 → claim:200 → beat:200
   ```
@@ -273,7 +275,9 @@
 
 ## 发现的问题（交 PM 开节点）
 
-### 问题 1（W5c，影响「审查全交给 B」）：reviewFirst 的 peer 比本机忙时，reviewFirst 失效
+### 问题 1（W5c）：reviewFirst 的 peer 比本机忙时 reviewFirst 失效——已由 i28-N10（`0bd9dbc0`）修复
+
+W7 实测时独立撞到。同一时段 i28-N10 已经修好并合进 main；W7 合并 main 后复测通过，原来钉住 bug 的测试改成了回归测试。
 
 - **场景**：A 的 `remote.reviewFirst` 是 `[B]`。B 已经在跑 1 张、还有空位，A 本机空闲。
 - **现象**：
@@ -284,8 +288,9 @@
   - `ledger scheduler-pool` 投递前在事务里重算放置（`ledger-scheduler-pool.ts offer`），但 remote 是从 `--mode / --roles / --timeout-min` 重新拼出来的（`src/manager/ledger-scheduler-cmds.ts` 的 `scheduler-pool`），丢了 `reviewFirst`；
   - 重算就退化成「在跑最少」，B 比本机多跑一张就选本机，和计划对不上。
   - B 和本机都空闲时不会暴露：平手按「peer 先于本机」，碰巧一致。
-- **复现**：`bun test tests/lend-lab.test.ts -t "reviewFirst 在 peer 比本机忙时失效"`。这条用 `test.failing` 钉住；产品修好后它会变红，届时去掉 failing。
-- **影响**：owner 定的「审查全交给 B」在 B 有活的时候实际不生效。
+- **复现 / 回归**：`bun test tests/lend-lab.test.ts -t "reviewFirst 的 peer 比本机忙"`。
+  - 在 `82c1a00a` 上：计划挂给 mate，投递时被撤；
+  - 在 `e88131f0` 上：挂给 mate 并被领走，本机不起审查 session。
 
 ### 问题 2（W1c × R7a）：网页「重新授权」会清掉授权里的 Codex 模型 / 推理档
 
@@ -300,7 +305,7 @@
   3. `lend status` 显示 `codexModel: None, codexEffort: None`；之后的 L5 worker 果然不带模型起。
 - **建议**：表单加两项，且重授时保留原值。
 
-### 问题 3（W1，小）：授权 / 收回的提示把早就停掉的 worker 也算成「已当场停掉」
+### 问题 3（W1，小）：授权 / 收回的提示把早就停掉的 worker 也算成「已当场停掉」——i28-W1d（`9f067dc8`）已改文案，lab 没复测
 
 - **现象**：真机 lab 里每次 `lend grant` / `lend revoke`，都报「已当场停掉 agent-lend-f37661fadf、…」，其中 L1 的 worker 几分钟前就已经 acked、停掉了。
 - **原因**：registry 里留着 stopped 的一次性 worker 条目（R5 记过不会自动清），`stopRevokedWorkers` 每次都把它们重新停一遍，再报出来。

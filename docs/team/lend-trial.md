@@ -66,7 +66,7 @@
 | 步骤 | 现在只能这样 | 谁来补按钮 |
 |---|---|---|
 | 授权里指定 Codex 模型 / 推理档 | `manager lend grant <A> --repos … --until … --codex-model <模型> --codex-effort <档位>`（网页表单没有这两项，网页重授还会清掉，见证据「问题 2」） | 新节点：网页授权表单加两项，重授保留原值 |
-| A 的 `remote.reviewFirst` / `remote.mode` | 改 `scheduler.json`（借入面板只读）。由 PM 改，不是本人；而且 reviewFirst 现在有个 bug：B 比本机忙时会失效（证据「问题 1」） | 新节点：修 bug，加写入口 |
+| A 的 `remote.reviewFirst` / `remote.mode` | 改 `scheduler.json`（借入面板只读）。由 PM 改，不是本人 | 新节点：借入面板加写入口 |
 | Codex 登录 | B 在终端里跑 `codex login`（网页只有适配器更新按钮） | 待定 |
 | `CONTROL_CHANNEL_ID` 为空的手装机器 | 编辑 `.env` 补上，再重启服务 | 待定 |
 | 查第四服务、代理变量 | `manager doctor`（只读） | 网页体检页 |

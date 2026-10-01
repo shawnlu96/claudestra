@@ -126,12 +126,11 @@ describe("场景 3 一键收回", () => {
 });
 
 /**
- * 实测发现的问题（docs/team/lend-trial-evidence.md「问题 1」）：`ledger scheduler-pool` 投递前重算放置时，remote 由 --mode / --roles / --timeout-min
- * 重新拼出来，不带 reviewFirst；reviewFirst 的 peer 比本机忙时，计划挂给它、投递时重算成「放本机」→ 意图 cancelled → 这一轮按「已试过」回本机。
- * test.failing：产品修好后这条会变红，届时把 failing 去掉。
+ * W7 实测时独立撞到、i28-N10 已修的回归（docs/team/lend-trial-evidence.md「问题 1」）：`ledger scheduler-pool` 投递前重算放置曾丢了 reviewFirst，
+ * reviewFirst 的 peer 比本机忙时计划挂给它、投递时重算成「放本机」→ 意图 cancelled → 这一轮回本机。两边都空闲时平手按「peer 先于本机」碰巧一致，场景 1 测不出。
  */
-describe("发现的问题：reviewFirst 在 peer 比本机忙时失效", () => {
-  test.failing("mate 已在跑 1 张（还有 1 个空位），本机空闲：reviewFirst 应照样挂给 mate", async () => {
+describe("回归：reviewFirst 的 peer 比本机忙也照样给它（N10）", () => {
+  test("mate 已在跑 1 张（还有 1 个空位），本机空闲：T1 的审查挂给 mate 并被领走", async () => {
     L = await lab({ slots: 2, maxOpen: 3 });
     await L.pass({ a: false });
     const t2 = await L.handOffer("T2");
@@ -139,7 +138,12 @@ describe("发现的问题：reviewFirst 在 peer 比本机忙时失效", () => {
     expect(L.bState(t2)).toBe("started");
     await L.toReview();
     await L.pass();
-    expect(planText(L).some((t) => t.includes("reviewFirst 指定先给 mate"))).toBe(true); // 计划确实挂给了 mate
-    expect(L.orders("T1")).toEqual([expect.objectContaining({ peer: MATE })]); // 现状：投递时被重算撤掉，T1 没有出借单
+    expect(planText(L).at(-1)).toBe("挂池：对抗式跨模型审查挂给 mate 的 codex worker（scheduler.json remote.reviewFirst 指定先给 mate）");
+    expect(intents(L).filter((i) => i.startsWith("review:peer:mate"))).toEqual(["review:peer:mate:pending"]);
+    expect(L.orders("T1")).toEqual([expect.objectContaining({ peer: MATE, status: "pooled" })]);
+    await L.passes(4);
+    expect(L.orders("T1")[0].status).toBe("claimed");
+    expect(L.spawned).toHaveLength(2);
+    expect(planText(L)).not.toContain("为 reviewer 建本卡独立 session"); // 本机没起审查 session
   });
 });
