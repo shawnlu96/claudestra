@@ -19,6 +19,7 @@ import { handleLastSeen } from "./last-seen.js";
 import { handleTalkApi } from "./talk.js";
 import { handleTeamApi } from "./team.js";
 import { handleLedgerApi } from "./ledger.js";
+import { handleLedgerDagApi } from "./ledger-dag.js";
 import { handleLendApi } from "./lend.js";
 import { handleMedia } from "./media.js";
 import { handleMissionApi } from "./mission.js";
@@ -34,14 +35,14 @@ import { versionResponse } from "./version.js";
 export const LOCAL_API_FEATURES = [
   "version", "settings", "profile", "agent-settings", "hidden-messages", "skill-prefs", "transcribe", "client-log", "host-open", "attachments",
   "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "asks", "fleet", "agent-skill-settings", "media", "talk",
-  "peer-ledger", "ai-inventory", "lend", "usage",
+  "peer-ledger", "ai-inventory", "lend", "usage", "ledger-dag",
 ];
 
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
-  handleTalkApi, handlePeerLedgerApi, handleLendApi, handleTeamApi, handleAiInventoryApi, handleUsageApi,
+  handleTalkApi, handlePeerLedgerApi, handleLendApi, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {
