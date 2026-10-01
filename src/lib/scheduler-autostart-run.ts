@@ -186,12 +186,13 @@ async function fail(env: StartTickEnv, c: AutostartClaim, x: Failure, failed: Fa
 async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<void> {
   const { cand } = pick;
   if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
-  const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: projectPm(env.db, cand.f.project) ?? "" },
+  const pm = projectPm(env.db, cand.f.project) ?? "";
+  const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
     { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
   if (!pre.ok && pre.code === "placement") return; // Destination has no room: leave the arm unclaimed for the next tick.
   const selected = pre.ok && "plan" in pre ? pre.plan.peer : null;
   const r = await env.ledger("ledger", "scheduler-autostart", "claim", cand.f.id, cand.key, "--arm", cand.arm, "--template", templateLabel(cand.head.template),
-    "--max-workers", String(pick.maxWorkers), ...(selected ? ["--peer", JSON.stringify(selected)] : []), ...(cand.head.ownerVisual ? ["--owner-visual"] : []));
+    "--max-workers", String(pick.maxWorkers), "--pm", pm, ...(selected ? ["--peer", JSON.stringify(selected)] : []), ...(cand.head.ownerVisual ? ["--owner-visual"] : []));
   // 选完到 claim 之间门变了（conflict），或并发的另一方先 claim（duplicate）：下一轮重算，不出声；别的拒绝进服务的失败日志
   if (r.ok !== true && r.code !== "conflict") failed.push({ taskId: `${cand.f.id}/${cand.key}`, error: `claim 被拒：${short(r.error ?? r.code)}` });
   if (r.ok !== true || r.duplicate === true) return;

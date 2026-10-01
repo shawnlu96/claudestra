@@ -29,7 +29,10 @@ const requireScheduler = (ctx: WriteCtx, what: string): void => {
 };
 
 /** ownerVisual: the spec head says「owner 看截图：是」; the card is born with extra.ownerVisual (scheduler-ui-gate.ts) */
-export interface ClaimInput { featureId: string; key: string; arm: string; template: AutostartTemplate | null; svc: ServiceFacts; ownerVisual?: boolean; peer?: AutostartClaim["peer"] }
+export interface ClaimInput {
+  featureId: string; key: string; arm: string; template: AutostartTemplate | null; svc: ServiceFacts;
+  ownerVisual?: boolean; peer?: AutostartClaim["peer"]; expectedPm?: string;
+}
 
 export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { claim: AutostartClaim; duplicate: boolean } {
   return tx(db, () => {
@@ -38,6 +41,9 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const f = mustFeature(db, input.featureId);
     const prior = getEventByDedup(db, claimDedup(f.id, input.key, input.arm));
     if (prior) return { claim: getClaim(db, prior.seq) as AutostartClaim, duplicate: true };
+    const pm = projectPm(db, f.project);
+    // Async preflight may outlive a PM reassignment. Reject before recording the arm so the next tick can retry.
+    if (input.expectedPm !== undefined && input.expectedPm !== pm) throw new LedgerError("conflict", "项目 PM 在预检后变了，下轮重新预检");
     const blocked = ledgerGate(db, f, input.key, input.svc);
     if (blocked) throw new LedgerError("conflict", `${input.key} 现在不能自动开卡（${blocked.gate}）：${blocked.why}`);
     const placementWhy = autostartPlacementGate(db, f.project, input.svc.maxWorkers(f.project), input.peer,
@@ -47,7 +53,7 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const names = cardNames(db, f, input.key);
     const version = input.template ? TEMPLATE_VERSION[input.template] : null;
     const data = {
-      op: "autostart_claim", key: input.key, taskId: names.taskId, agent: names.agent, pm: projectPm(db, f.project), branch: names.branch,
+      op: "autostart_claim", key: input.key, taskId: names.taskId, agent: names.agent, pm, branch: names.branch,
       item: getItem(db, f.project, names.slug) ? names.slug : null, title: node?.oneLine ?? input.key, template: input.template, version, arm: input.arm,
       ...(input.peer ? { peer: input.peer } : {}),
       ...(input.ownerVisual ? { ownerVisual: true } : {}),

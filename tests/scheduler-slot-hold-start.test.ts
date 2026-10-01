@@ -43,7 +43,7 @@ function env(): StartTickEnv {
         try {
           return { ok: true, ...claimNode(db, { actor: "scheduler", now: NOW }, {
             featureId, key: "next", arm: args[args.indexOf("--arm") + 1], template: "code", svc: svc(),
-            peer: peerAt < 0 ? null : JSON.parse(args[peerAt + 1]),
+            expectedPm: args[args.indexOf("--pm") + 1], peer: peerAt < 0 ? null : JSON.parse(args[peerAt + 1]),
           }) };
         } catch (e) { return { ok: false, code: "conflict", error: String(e) }; }
       }
@@ -129,4 +129,33 @@ test("peer capacity lost after placement does not authorize a claim or local fal
     peer: { name: "mate", repo: "o/r", reason: "selected" },
   })).toThrow("peer 写单名额已满");
   expect(getTask(db, "slots-next")).toBeNull();
+});
+
+test("PM changed after preflight: no claim or failed arm, then next tick opens with the new PM", async () => {
+  pool.remote!.localPriority = "off";
+  const first = env();
+  const original = first.startEnv;
+  first.startEnv = () => ({ ...original(), branchExists: async () => {
+    setMeta(db, ctx, { project: "p", key: "pms", value: ["new-pm"] });
+    return false;
+  } });
+  expect(await autostartTick(first)).toEqual([]);
+  expect(getTask(db, "slots-next")).toBeNull();
+  const claims = () => db.query("SELECT seq FROM events WHERE json_extract(data, '$.op') = 'autostart_claim'").all();
+  expect(claims()).toEqual([]);
+  expect(db.query("SELECT seq FROM events WHERE json_extract(data, '$.op') = 'autostart_settle'").all()).toEqual([]);
+  expect(creates).toBe(0); expect(gitCalls).toBe(0);
+  expect(await autostartTick(env())).toEqual([]);
+  expect(getTask(db, "slots-next")).toMatchObject({ pm: "new-pm", stage: "restate", extra: { placement: "peer:mate" } });
+  expect(claims()).toHaveLength(1);
+});
+
+test("claim CLI compares the preflight PM snapshot before consuming the arm", async () => {
+  pool = { remote: null, borrow: [] };
+  const deps = { db, actor: "scheduler", projectIds: ["p"], loadRegistry: async () => ({}) as never,
+    saveRegistry: async () => {}, now: () => NOW, autoDispatch: () => true, autoProjects: () => ["p"] };
+  const args = ["scheduler-autostart", "claim", featureId, "next", "--arm", "0123456789abcdef", "--template", "code", "--max-workers", "2", "--pm"];
+  expect(await runLedger([...args, "old-pm"], deps)).toMatchObject({ ok: false, code: "conflict" });
+  expect(writeSlotFacts(db, "p").workerCount).toBe(0);
+  expect(await runLedger([...args, "pm"], deps)).toMatchObject({ ok: true, duplicate: false, claim: { pm: "pm" } });
 });

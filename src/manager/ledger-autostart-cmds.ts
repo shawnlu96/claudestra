@@ -43,7 +43,7 @@ function claim(c: LedgerCli): Result {
   if (t !== "invalid" && !Object.hasOwn(TEMPLATE_VERSION, t)) throw new LedgerError("invalid", "--template 只能是 code / ui / security / invalid");
   const max = int(c, "max-workers");
   const r = claimNode(c.db, c.ctx(), { featureId, key, arm: c.need("arm"), template: t === "invalid" ? null : (t as AutostartTemplate), svc: svcOf(c, () => max),
-    peer: c.p.flags.peer ? JSON.parse(c.p.flags.peer) : null, ownerVisual: c.p.bools.has("owner-visual") });
+    expectedPm: c.p.flags.pm, peer: c.p.flags.peer ? JSON.parse(c.p.flags.peer) : null, ownerVisual: c.p.bools.has("owner-visual") });
   return { ok: true, ...r };
 }
 
