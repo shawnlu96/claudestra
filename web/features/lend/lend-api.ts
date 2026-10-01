@@ -15,10 +15,12 @@ export async function fetchLend(): Promise<LendData | null> {
 export interface CliResult { ok: boolean; error?: string; warning?: string; message?: string }
 
 /** 授权：CLI 的原话在 ApiError.message（失败）或 warning / message（成功）里 */
-export function postGrant(body: { peer: string; repos: string[]; codex: number; ordersPerDay: number; until: string }): Promise<CliResult> {
+export function postGrant(body: { peer: string; repos: string[]; codex?: number; claude?: number; ordersPerDay: number; until: string }): Promise<CliResult> {
   return api<CliResult>("/lend/grants", { method: "POST", json: body });
 }
 
 export function postRevoke(peer: string): Promise<CliResult & { orders: OrderView[] }> {
   return api<CliResult & { orders: OrderView[] }>("/lend/grants/revoke", { method: "POST", json: { peer } });
 }
+export const claudeTokenApi = (method = "GET", token?: string) =>
+  api<{ configured: boolean; savedAt: string | null }>("/lend/claude-token", { method, ...(token === undefined ? {} : { json: { token } }) });

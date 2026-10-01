@@ -26,7 +26,7 @@ const snapshot = (stage: Stage = "spec", round = 0, template: TaskWorkflow["temp
 });
 const delivery = (seq: number, round: number): LedgerEvent => event(seq, "deliver", { round, headSHA: HEAD });
 const finding = (family: string, severity: "P0" | "P1" | "P2" = "P1") =>
-  ({ findingId: `${family}-${severity}`, family, severity, probe: `probe for ${family}` });
+  ({ findingId: `${family}-${severity}`, family, severity, probe: `[验收线 1] probe for ${family}` });
 const review = (seq: number, round: number, findings: ReturnType<typeof finding>[], verdict: string = "changes"): LedgerEvent =>
   event(seq, "review", { round, head: HEAD, reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId,
     reviewerFamily: reviewer.family, path: `reviews/T1-r${round}/report.md`, verdict, findings,
@@ -122,18 +122,18 @@ describe("T68 data workflow planner", () => {
     s.events = [...s.events, entry("review", 2), delivery(29, 2), review(30, 2, [finding("delivery")])];
     s.intents = [...s.intents, sentReview(2, 25)];
     s.reviewDispatches = [...s.reviewDispatches, proof(2, 25)];
-    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: "再不行退到：收窄为只报错" } });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: "同一条 P1 已连续 2 轮：第 3 轮还在就退到：收窄为只报错" } });
     s.task = task("fix", 2);
     s.events = [...s.events, entry("fix", 2)];
     expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "dispatch",
-      workOrder: { reportPath: "reviews/T1-r2/report.md", fallbackWarning: "再不行退到：收窄为只报错" } });
+      workOrder: { reportPath: "reviews/T1-r2/report.md", fallbackWarning: "同一条 P1 已连续 2 轮：第 3 轮还在就退到：收窄为只报错" } });
     s.task = task("review", 3);
     s.events = [...s.events, entry("review", 3), delivery(39, 3), review(40, 3, [finding("delivery")])];
     s.intents = [...s.intents, sentReview(3, 35)];
     s.reviewDispatches = [...s.reviewDispatches, proof(3, 35)];
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "three_p1_rounds", reviewSeq: 40 });
     s.events = s.events.map((e) => e.kind === "review" && e.data.round === 2 ? review(30, 2, [finding("different")]) : e);
-    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: "再不行退到：收窄为只报错" } });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: null } });
   });
 
   test("P2-only review proceeds without re-review; UI approval is bound to head and spec", () => {
@@ -208,7 +208,7 @@ describe("T68 data workflow planner", () => {
     expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "queue_frozen" });
   });
 
-  test("renaming every P1 family cannot evade the fourth-round hard stop", () => {
+  test("different P1s keep fixing beyond the former fourth-round stop", () => {
     const s = snapshot("review", 1);
     s.events = [event(1, "task", { op: "new" })];
     const names = ["auth", "Auth", "auth-gate", "permission"];
@@ -220,9 +220,21 @@ describe("T68 data workflow planner", () => {
       s.intents = [...s.intents, sentReview(round, base + 5)];
       s.reviewDispatches = [...s.reviewDispatches, proof(round, base + 5)];
       const result = planScheduler(s);
-      expect(result.kind).toBe(round === 4 ? "escalate" : "intent");
-      if (round === 4) expect(result).toMatchObject({ kind: "escalate", code: "four_p1_rounds" });
+      expect(result.kind).toBe("intent");
     }
+  });
+
+  test("the round-eight safety valve takes precedence over the temporary same-finding escalation", () => {
+    const s = snapshot("review", 8);
+    s.events = [event(1, "task", { op: "new" })];
+    for (let round = 1; round <= 8; round++) {
+      const base = round * 100;
+      s.events = [...s.events, event(base, "stage", { to: "review", round }), delivery(base + 9, round),
+        review(base + 20, round, [finding("persistent")])];
+      s.intents = [...s.intents, sentReview(round, base + 5)];
+      s.reviewDispatches = [...s.reviewDispatches, proof(round, base + 5)];
+    }
+    expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "review_round_cap" });
   });
 
   test("a persistent findingId reaches the third-round gate even when family names change", () => {

@@ -195,12 +195,12 @@ describe("UI fix orders share their rejection source and combined evidence", () 
         // PM can push the rejected card to fix even when automatic review progression would escalate.
         expect(await f.cli("pm", "stage", "T1", "--from", "review", "--to", "fix")).toMatchObject({ ok: true });
         const plan = planScheduler(snapshot(f));
-        if (round === limit) {
+        if (sameFinding && round === limit) {
           expect(plan).toMatchObject({ kind: "escalate", code: "fix_history" });
           break;
         }
         const { planned } = await localOrder(f);
-        expect(planned.workOrder!.fallbackWarning).toBe(round === limit - 1 ? "再不行退到：只报错不修" : null);
+        expect(planned.workOrder!.fallbackWarning).toBe(sameFinding && round === limit - 1 ? "同一条 P1 已连续 2 轮：第 3 轮还在就退到：只报错不修" : null);
         const head = String(round + 3).repeat(40);
         expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", head)).toMatchObject({ ok: true });
         await f.tick();

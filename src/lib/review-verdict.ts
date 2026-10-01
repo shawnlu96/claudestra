@@ -18,6 +18,7 @@ import { agentRuntime, type RegistryAgent } from "./registry.js";
 import { reviewCallerOf, reviewsDir, slotByOrderId, type ReviewCaller, type ReviewSlot } from "./review-order.js";
 import { autoReviewWriter, runtimeFamily } from "./scheduler-auto-review.js";
 import type { ReviewFinding } from "./scheduler-review.js";
+import { storedBasis } from "./review-converge-report.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 
@@ -42,7 +43,8 @@ const refuse = (error: string, message: string): VerdictResult => ({ ok: false, 
 export const verdictKey = (w: Pick<VerdictWire, "orderId" | "head">): string => `verdict:${w.orderId}@${w.head}`;
 
 /** 事件里存的逐项结论：四个字段，与 PM 用 `ledger review --findings` 代记的同构（说明文字在报告里） */
-const storedFindings = (w: VerdictWire): ReviewFinding[] => w.findings.map(({ findingId, family, severity, probe }) => ({ findingId, family, severity, probe }));
+const storedFindings = (w: VerdictWire): ReviewFinding[] => w.findings.map((f) => ({ findingId: f.findingId, family: f.family, severity: f.severity,
+  probe: f.probe, ...storedBasis(f, w.reportPath, true) }));
 
 /** 重试是不是同一个结论：结论、计数、逐项、报告路径都一样 */
 function sameVerdict(prev: LedgerEvent, w: VerdictWire): boolean {
