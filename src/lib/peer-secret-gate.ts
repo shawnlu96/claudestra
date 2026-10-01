@@ -1,7 +1,7 @@
 /**
  * Refuse secrets before peer dispatch; address / personal-info masking belongs to dispatch-redact.ts.
  * Prefixes, Bearer, PEM and hex still ignore whitespace; only a whole, exact ledger head in free text is exempt.
- * Random values are checked per token, joining only adjacent mixed random fragments, never English sentences or ids.
+ * Random values are checked per token, joining adjacent non-word fragments, including single characters, never English sentences or ids.
  * Flattening prose for that rule again would strand peer repair orders containing review reports. Tests: peer-secret-gate*.
  */
 import { redactFields } from "./redact-fields.js";
@@ -17,26 +17,28 @@ const SENTINEL = "\u0000";
 
 /** Word-shaped segments keep camelCase, snake_case and lend/card ids out of the random-value heuristic. */
 function identifier(token: string): boolean {
-  const camel = (part: string) => /^(?:[a-z]+\d*|[A-Z][a-z]+\d*)(?:[A-Z][a-z]+\d*|[A-Z]+\d+)+$/.test(part)
+  const camel = (part: string) => /^(?:[a-z]+\d*|[A-Z][a-z]+\d*)(?:[A-Z][a-z]+\d*|[A-Z]+\d*)+$/.test(part)
     && (part.match(/[A-Za-z][a-z]{2,}/g)?.length ?? 0) >= 2;
   const word = /^(?:[a-z]+|[A-Z][a-z]+|[A-Z]+)(?:\d+[a-z]?)?$|^\d+$/;
-  return camel(token) || (/[_-]/.test(token) && token.split(/[_-]/).every((part) => word.test(part) || camel(part)));
+  const acronym = (part: string) => /^[A-Za-z][a-z]{2,}(?:[A-Z][a-z]{2,})*[A-Z]{2,}\d*$/.test(part);
+  return camel(token) || acronym(token) || (/[_-]/.test(token) && token.split(/[_-]/).every((part) => word.test(part) || camel(part) || acronym(part)));
 }
 
-function randomFragment(token: string): boolean {
-  return token.length >= 8 && /\d/.test(token) && /[A-Z]/.test(token) && /[a-z]/.test(token) && !identifier(token);
+/** Ordinary words and identifiers stop joins; short random fragments must not reset a split secret. */
+function randomBarrier(token: string): boolean {
+  return /^(?:[a-z]{2,}|[A-Z][a-z]+|\d{2,})$/.test(token) || identifier(token);
 }
 
-/** Punctuation breaks a join; whitespace joins only fragments that each independently look random. */
+/** Punctuation breaks a join; whitespace joins non-word fragments before testing the combined value. */
 function randomHit(text: string): boolean {
   let end = 0;
-  let length = 0;
+  let run = "";
   for (const match of text.matchAll(/[\w-]+/g)) {
     const token = match[0];
-    if (randomFragment(token)) {
-      length = length && /^\s+$/.test(text.slice(end, match.index)) ? length + token.length : token.length;
-      if (length >= 32) return true;
-    } else length = 0;
+    if (!randomBarrier(token)) {
+      run = run && /^\s+$/.test(text.slice(end, match.index)) ? run + token : token;
+      if (run.length >= 32 && /\d/.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run)) return true;
+    } else run = "";
     end = match.index + token.length;
   }
   return false;
