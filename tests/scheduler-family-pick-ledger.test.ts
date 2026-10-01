@@ -102,7 +102,7 @@ describe("daemon → CLI → actual lend order", () => {
       const review = p.orders().at(-1)!;
       expect(review).toMatchObject({ step: "review", family: cross });
       expect(await p.call("lend-claim", review.peer, { v: 1, orderId: review.orderId, worker: "reviewer" })).toMatchObject({ ok: true });
-      const finding = { findingId: "edge-case", family: "logic", severity: "P1", probe: "empty input", description: "handle empty input" };
+      const finding = { findingId: "edge-case", family: "logic", severity: "P1", basis: "acceptance:1", probe: "empty input", description: "handle empty input" };
       expect(await p.call("lend-write", review.peer, { v: 1, orderId: review.orderId, gen: 1, report: "P1: handle empty input",
         session: { id: "review-session", family: cross },
         verdict: { v: 1, orderId: review.orderId, head: H2, verdict: "changes", p0: 0, p1: 1, p2: 0, findings: [finding], reportPath: "report.md" },

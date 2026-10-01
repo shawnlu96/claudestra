@@ -10,6 +10,7 @@ import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type
 import { reviewSwapPlan, reviewsAfterSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
+import { escalationDowngrade, convergeReview, fixWarning, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 
 export interface WorkerRef {
@@ -59,6 +60,8 @@ export interface PlannerSnapshot {
   pool?: PoolFacts | null;
   /** Live pool orders of this card no live intent accounts for (scheduler-pool-facts strayPoolOrders); absent = none. */
   strayPoolOrders?: readonly string[];
+  /** Last reviewed head → this round's head, from SCOPE_ROUND on (review-converge-scope.ts); absent = no scope demotion. */
+  fixDiff?: FixDiff | null;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -79,9 +82,10 @@ interface PlannedIntent {
   pmNotice?: { task: string; specRev: number; head: string; screenshotsDigest: string; round: number };
   pmDiffNotice?: boolean;
   reviewMode?: "adversarial";
+  downgrade?: Downgrade;
 }
 export type PlannerDecision = PlannedIntent | { kind: "wait"; code: string; reason: string } |
-  { kind: "escalate"; code: string; reason: string; reviewSeq?: number; history?: ReviewFinding[][] };
+  { kind: "escalate"; code: string; reason: string; reviewSeq?: number; history?: ReviewFinding[][]; downgrade?: Downgrade };
 
 const wait = (code: string, reason: string): PlannerDecision => ({ kind: "wait", code, reason });
 const escalate = (code: string, reason: string, reviewSeq?: number): PlannerDecision => ({ kind: "escalate", code, reason, ...(reviewSeq ? { reviewSeq } : {}) });
@@ -184,16 +188,17 @@ const bouncePackage = (bounce: MergeBounce | null): WorkOrderFacts | null => bou
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
   const read = currentReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return escalate("fix_report", "修复阶段缺上一轮完整审查报告");
-  const p1 = read.facts.findings.filter((f) => f.severity === "P1");
+  const facts = convergeReview(s.events, read.facts, s.fixDiff).facts;
+  const p1 = facts.findings.filter((f) => f.severity === "P1");
   if (!p1.length) return escalate("fix_report", "修复阶段没有 P1，需 PM 核对为什么退回");
   const minRound = reviewStartRound(s);
-  const streaks = p1.map((f) => p1FindingStreak(s.events, f, read.facts.round, minRound));
-  const total = p1AnyStreak(s.events, read.facts.round, minRound);
-  if (total === null || streaks.includes(null) || total >= 4 || streaks.some((n) => (n as number) >= 3)) {
-    return escalate("fix_history", "P1 轮次无法自动续派", read.facts.eventSeq);
+  const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
+  const total = p1AnyStreak(s.events, facts.round, minRound);
+  if (total === null || streaks.includes(null) || streaks.some((n) => (n as number) >= 3)) {
+    return escalate("fix_history", "P1 轮次无法自动续派", facts.eventSeq);
   }
-  return { reportPath: read.facts.reportPath, findings: read.facts.findings,
-    fallbackWarning: total === 3 || streaks.some((n) => n === 2) ? `再不行退到：${s.workflow!.fallback}` : null };
+  return { reportPath: facts.reportPath, findings: facts.findings,
+    fallbackWarning: fixWarning(Math.max(...(streaks as number[])), facts.round, s.workflow!.fallback) };
 }
 
 function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
@@ -226,24 +231,25 @@ function reviewHistory(s: PlannerSnapshot, facts: ReviewFacts): ReviewFinding[][
   return [...byRound.entries()].sort(([a], [b]) => a - b).slice(-4).map(([, rows]) => rows);
 }
 
-function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): PlannerDecision {
+function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, downgrade: Downgrade | null): PlannerDecision {
+  const cap = roundCap(s.events, facts);
+  if (cap) return wait(cap.code, cap.reason);
   const p1 = facts.findings.filter((f) => f.severity === "P1");
   const minRound = reviewStartRound(s);
   const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
   const total = p1AnyStreak(s.events, facts.round, minRound);
   if (total === null || streaks.includes(null)) return escalate("review_history", "历轮结构化结论不完整，无法判断 P1 连续轮次", facts.eventSeq);
-  if (total >= 4 || streaks.some((n) => (n as number) >= 3)) return {
-    kind: "escalate", code: total >= 4 ? "four_p1_rounds" : "three_p1_rounds",
-    reason: `P1 连续轮次达到升级上限；按规格退到：${s.workflow!.fallback}`,
+  if (streaks.some((n) => (n as number) >= 3)) return {
+    kind: "escalate", code: "three_p1_rounds", reason: `同一条 P1 连续 3 轮；按规格退到：${s.workflow!.fallback}`,
     reviewSeq: facts.eventSeq, history: reviewHistory(s, facts),
   };
-  const warning = total === 3 || streaks.some((n) => n === 2) ? `再不行退到：${s.workflow!.fallback}` : null;
+  const warning = fixWarning(Math.max(...(streaks as number[])), facts.round, s.workflow!.fallback);
   return makeIntent(s, node, "stage", `P1 ${p1.length} 项，自动进入 fix`, [taskResource(s)], {
-    targetStage: "fix", workOrder: { reportPath: facts.reportPath, findings: facts.findings, fallbackWarning: warning },
+    targetStage: "fix", workOrder: { reportPath: facts.reportPath, findings: facts.findings, fallbackWarning: warning }, ...(downgrade ? { downgrade } : {}),
   });
 }
 
-function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): PlannerDecision {
+function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, downgrade: Downgrade | null): PlannerDecision {
   if (s.workflow?.template === "ui") {
     const ui = uiPassStep(s, node.id, facts.eventSeq);
     const bind = { task: s.task.id, specRev: s.task.specRev, head: s.task.headSHA as string, screenshotsDigest: s.screenshotsDigest as string };
@@ -252,11 +258,11 @@ function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts): Pla
     if (ui.kind === "ask_owner") return makeIntent(s, node, "ask", "请 owner 看前后截图", [taskResource(s)], { askBind: bind });
     if (ui.kind === "notify_pm") return makeIntent(s, node, "ask", "请 PM 看前后截图", [taskResource(s)], { pmNotice: { ...bind, round: s.task.round } });
     if (ui.kind === "fix") {
-      return makeIntent(s, node, "stage", "PM 未通过前后截图，进入 fix", [taskResource(s)], { targetStage: "fix" });
+      return makeIntent(s, node, "stage", "PM 未通过前后截图，进入 fix", [taskResource(s)], { targetStage: "fix", ...(downgrade ? { downgrade } : {}) });
     }
   }
-  return makeIntent(s, node, "stage", "审查通过，进入合并队列", [taskResource(s)], {
-    targetStage: "merge", pmDiffNotice: facts.findings.some((f) => f.severity === "P2"),
+  return makeIntent(s, node, "stage", downgrade ? `审查通过（${downgrade.items.length} 项 P1 降为 P2），进入合并队列` : "审查通过，进入合并队列", [taskResource(s)], {
+    targetStage: "merge", pmDiffNotice: facts.findings.some((f) => f.severity === "P2"), ...(downgrade ? { downgrade } : {}),
   });
 }
 
@@ -279,7 +285,7 @@ function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
 function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
   const found = currentReviewFacts(s.task, s.events);
   if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
-  const facts = found.facts;
+  const facts = convergeReview(s.events, found.facts, s.fixDiff).facts;
   if (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts)) {
     return escalate("merge_review_unproven", "合并前缺本轮跨模型审查 session 与派单回执", facts.eventSeq);
   }
@@ -296,7 +302,7 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const found = currentReviewFacts(s.task, s.events);
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
-  const f = found.facts;
+  const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);
   if (!hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
     i.action === "stage").at(-1);
@@ -306,9 +312,9 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   }
   if (f.findings.some((x) => x.severity === "P0") || f.verdict === "block") return escalate("review_block", "P0 或审查阻塞，交 PM", f.eventSeq);
   if (f.verdict === "pass" && f.findings.some((x) => x.severity === "P1")) return escalate("review_inconsistent", "pass 与 P1 逐项结论矛盾", f.eventSeq);
-  if (f.findings.some((x) => x.severity === "P1")) return fixDecision(s, node, f);
+  if (f.findings.some((x) => x.severity === "P1")) return fixDecision(s, node, f, downgrade);
   if (f.verdict === "changes" && !f.findings.some((x) => x.severity === "P2")) return escalate("review_inconsistent", "changes 却无 P1/P2", f.eventSeq);
-  return reviewPass(s, node, f);
+  return reviewPass(s, node, f, downgrade);
 }
 
 function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
@@ -359,5 +365,5 @@ export function planScheduler(s: PlannerSnapshot): PlannerDecision {
   const decision = task.stage === "spec" || task.stage === "build" || task.stage === "fix" ? dispatchWork(s, node)
     : task.stage === "review" ? reviewStep(s, node) : stageStep(s, node);
   const active = s.intents.find((i) => i.status === "pending" || i.status === "submitted" || i.status === "unknown");
-  return decision.kind === "intent" && active ? wait("intent_in_flight", `先结清调度意图 ${active.id}（${active.status}）`) : decision;
+  return escalationDowngrade(decision.kind === "intent" && active ? wait("intent_in_flight", `先结清调度意图 ${active.id}（${active.status}）`) : decision, task, s.events, s.fixDiff);
 }

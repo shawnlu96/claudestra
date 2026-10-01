@@ -20,7 +20,7 @@ const P = "claude-orchestrator";
 const H1 = "a".repeat(40), H2 = "b".repeat(40);
 const CI: MergeBounce = { cause: "ci_fail", prHead: H1, mainHead: null, checks: [{ name: "check", link: "https://github.com/o/r/actions/runs/7" }] };
 const CONFLICT: MergeBounce = { cause: "conflict", prHead: H1, mainHead: "e".repeat(40), checks: [] };
-const F1 = { findingId: "F1", family: "rounds", severity: "P1" as const, probe: "第 2 轮通过后 CI 失败会被误判成轮次到顶" };
+const F1 = { findingId: "F1", family: "rounds", severity: "P1" as const, probe: "[验收线 1] 第 2 轮通过后 CI 失败会被误判成轮次到顶" };
 const dir = mkdtempSync(join(tmpdir(), "review-order-bounce-"));
 let db: Database;
 

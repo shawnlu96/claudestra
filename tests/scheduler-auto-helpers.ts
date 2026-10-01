@@ -18,7 +18,7 @@ import type { Registry } from "../src/manager/core.js";
 
 export const H1 = "1".repeat(40), H2 = "2".repeat(40);
 export const DIGEST = "d".repeat(64);
-export const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
+export const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "[验收线 1] two ticks claim the same intent" };
 export const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
 /** Each agent's own runtime session, as its shell environment would report it. */
