@@ -1,10 +1,10 @@
 /** T94 `lend submit`：只收这张单的 worker 交的结论（src/lib/lend-submit.ts） */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
-import { ancestorsIn, submitLendResult, type SubmitterDeps } from "../src/lib/lend-submit.js";
+import { ancestorsIn, commitLendResult, readReportIn, submitLendResult, type SubmitterDeps } from "../src/lib/lend-submit.js";
 
 const HEAD = "a".repeat(40);
 const root = mkdtempSync(join(tmpdir(), "lend-sub-"));
@@ -69,5 +69,52 @@ describe("T94 lend submit 绑定", () => {
     expect(ancestorsIn(ps, 500)).toEqual([400, 300, 100]);
     expect(ancestorsIn(ps, 7)).toEqual([8, 7]);
     expect(ancestorsIn(ps, 999)).toEqual([]);
+  });
+});
+
+describe("i28-W4 公共提交核心与报告读取", () => {
+  test("commitLendResult：首交落 result_pending；同正文重交幂等、不再写；换了正文拒", () => {
+    const db = started();
+    const first = commitLendResult(db, getOrder(db, "o1")!, input);
+    expect(first).toMatchObject({ ok: true, duplicate: false });
+    const at = getOrder(db, "o1")!.updatedAt;
+    expect(commitLendResult(db, getOrder(db, "o1")!, input, at + 10)).toEqual({ ok: true, duplicate: true, sha: (first as { sha: string }).sha });
+    expect(getOrder(db, "o1")!.updatedAt).toBe(at); // 幂等那次没写 journal
+    expect(commitLendResult(db, getOrder(db, "o1")!, { ...input, report: "别的" })).toMatchObject({ ok: false });
+  });
+
+  test("commitLendResult：拿着旧的 started 行、另一边已经交了（CAS 输了）→ 按重读的行判，同正文幂等、不写两次", () => {
+    const db = started();
+    const stale = getOrder(db, "o1")!;
+    commitLendResult(db, stale, input);
+    expect(commitLendResult(db, stale, input)).toMatchObject({ ok: true, duplicate: true });
+    expect(commitLendResult(db, stale, { ...input, report: "别的" })).toMatchObject({ ok: false });
+  });
+
+  const copy = join(root, "work", "rp");
+  mkdirSync(join(copy, "sub"), { recursive: true });
+  const outside = join(root, "secret.txt");
+  writeFileSync(outside, "SECRET");
+  writeFileSync(join(copy, "report.md"), "# 报告");
+  writeFileSync(join(copy, "sub", "r2.md"), "二");
+  symlinkSync(outside, join(copy, "link.md"));
+  symlinkSync(join(copy, "report.md"), join(copy, "inner-link.md"));
+  symlinkSync(root, join(copy, "dirlink"));
+  linkSync(outside, join(copy, "hard.md"));
+  writeFileSync(join(copy, "big.md"), "x".repeat(64 * 1024 + 1));
+  writeFileSync(join(copy, "edge.md"), "x".repeat(64 * 1024));
+
+  test("readReportIn：副本里的普通文件读得到（相对路径 / 副本内绝对路径 / 子目录）", () => {
+    expect(readReportIn(copy, "report.md")).toEqual({ ok: true, text: "# 报告" });
+    expect(readReportIn(copy, join(copy, "sub", "r2.md"))).toEqual({ ok: true, text: "二" });
+    expect(readReportIn(copy, "edge.md")).toMatchObject({ ok: true });
+  });
+
+  test("readReportIn：软链（指出去 / 指回副本里都不收）、经软链目录出副本、硬链、..、副本外绝对路径、目录、超过 64 KiB 一律拒", () => {
+    for (const p of ["link.md", "inner-link.md", "dirlink/secret.txt", "hard.md", "../../secret.txt", outside, "sub", "big.md", "nope.md", ""]) {
+      const r = readReportIn(copy, p);
+      expect(r.ok).toBe(false);
+      expect(JSON.stringify(r)).not.toContain("SECRET");
+    }
   });
 });

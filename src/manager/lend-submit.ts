@@ -3,11 +3,13 @@
  * 写单（i28-R6）是 `lend submit <orderId> --summary-file <f> --self-check-file <f>`：交工作副本当前的 HEAD 与一行摘要、自查。
  * 逻辑与绑定规则在 lib/lend-submit.ts；这里只接真实依赖（registry、tmux 窗口、ps）。不过认主守卫：调用方是出借 worker 自己，
  * 它的环境是白名单（lib/runtimes/clean-env.ts），没有频道号可认；能不能交由 journal + 会话 + 进程祖先判。
+ * 挂了 lend 档 MCP 的 worker 用 submit_verdict（bridge/lend-tools.ts），这里是没挂上时的兜底：两边走同一个提交核心与报告读取
+ * （commitLendResult / readReportIn），报告必须是工作副本里的普通文件。
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { LEND_JOURNAL_PATH, openLendJournal } from "../lib/lend-journal.js";
-import { ancestorsIn, submitLendResult, submitLendWork, type SubmitterDeps } from "../lib/lend-submit.js";
+import { getOrder, LEND_JOURNAL_PATH, openLendJournal } from "../lib/lend-journal.js";
+import { ancestorsIn, readReportIn, submitLendResult, submitLendWork, type SubmitterDeps } from "../lib/lend-submit.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { output } from "./core.js";
@@ -73,16 +75,18 @@ export async function cmdLendSubmit(args: string[]): Promise<void> {
   }
   if (!existsSync(LEND_JOURNAL_PATH)) return output({ ok: false, error: "本机没有出借 journal：这台机器没在出借" });
   let findings: unknown;
-  let report: string;
   try {
     findings = JSON.parse(f.findings ?? readFileSync(resolve(f["findings-file"]!), "utf8"));
-    report = readFileSync(resolve(f.report), "utf8");
   } catch (e) {
     return output({ ok: false, error: `读结论失败：${(e as Error).message}；${USAGE}` });
   }
   const db = openLendJournal();
   try {
-    const r = await submitLendResult(db, orderId, { verdict: f.verdict, findings, report }, realDeps);
+    const row = getOrder(db, orderId);
+    if (!row?.dir) return output({ ok: false, error: row ? `${orderId} 还没起 worker（journal 状态 ${row.state}）` : `本机没有出借单 ${orderId}` });
+    const report = readReportIn(row.dir, resolve(f.report));
+    if (!report.ok) return output({ ok: false, error: `${report.error}；${USAGE}` });
+    const r = await submitLendResult(db, orderId, { verdict: f.verdict, findings, report: report.text }, realDeps);
     output(r.ok ? { ok: true, duplicate: r.duplicate, sha256: r.sha, message: r.duplicate ? "这份结论已经交过，不用再交" : "结论已记下，调度服务会转给对方" } : r);
   } catch (e) {
     output({ ok: false, error: (e as Error).message });

@@ -7,12 +7,15 @@
  *   CODEX_CONFIG 把 claudestra 的 channel-server 以 mcp_servers.<MCP_NAME>.* 深合并进去（同名 server 走 ACP 的 mcpServers
  *   会被适配器静默丢掉，config.toml 里就有 claudestra），它的 BRIDGE_URL 指到宿主的回环工具代理（带 token）。
  *   TMUX / TMUX_PANE 不给：channel-server 拿到它们会自己去标窗口就绪、往窗口里打字，acp 下这两件事都归宿主。
+ * - 出借 worker（clean）：照样挂 channel-server，但设 lend 档（lib/lend-mcp-profile.ts，只有派单工具 + whoami），bun 不读 clone 里的
+ *   .env* / bunfig.toml（channel-server 在外来 clone 里起）；代理在 clean 下也只转这几样（tool-proxy.ts），bridge 再按单核（bridge/lend-tools.ts）。
  * tests/acp-adapter-proc.test.ts。
  */
 import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
+import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
@@ -20,6 +23,8 @@ import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.
 
 /** 给 channel-server 的环境白名单：去掉只有 tmux 模式才用得上的（窗口就绪 / 打字投递 / 重启前言） */
 const ACP_MCP_ENV_VARS = CODEX_MCP_ENV_VARS.filter((k) => k !== "TMUX" && k !== "TMUX_PANE" && k !== "CLAUDESTRA_CODEX_PREAMBLE");
+/** 出借 worker 的 channel-server 另带档位变量（丢了也不怕：channel-server 按 agent 名前缀照样开 lend 档） */
+const LEND_MCP_ENV_VARS = [...ACP_MCP_ENV_VARS, MCP_PROFILE_ENV];
 
 /** clean = 出借 worker：适配器在外来 clone 里起，bun 不自动加载 cwd 的 .env* 与 bunfig.toml（runtimes/clean-env.ts BUN_NO_AUTOLOAD），也不认手工覆盖 */
 export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string, clean = false): { cmd: string[]; stub: boolean } | { error: string } {
@@ -54,7 +59,7 @@ export interface AdapterEnvSpec {
   /** 有 = 宿主模式：channel-server 挂上、指向回环代理；没有 = create 的引导（不挂 claudestra，频道相关变量全清掉） */
   channel?: { channelId: string; proxyUrl: string; agentName: string; sessionId: string };
   developerInstructions?: string;
-  /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量，不挂 claudestra MCP（channel 忽略），不给回环代理的地址与 token */
+  /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量；channel-server 挂 lend 档（只有派单工具 + whoami） */
   clean?: boolean;
 }
 
@@ -78,9 +83,12 @@ export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
   const env = hostEnvBase(s);
   const config: Record<string, unknown> = { check_for_update_on_startup: false };
   if (s.developerInstructions) config.developer_instructions = s.developerInstructions;
-  if (s.channel && !s.clean) {
-    config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args: [s.channelServer], env_vars: ACP_MCP_ENV_VARS } };
-    Object.assign(env, channelServerEnv(s.channel, s.mcpName, "codex"));
+  if (s.channel) {
+    const args = s.clean ? [...BUN_NO_AUTOLOAD, s.channelServer] : [s.channelServer];
+    config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args, env_vars: s.clean ? LEND_MCP_ENV_VARS : ACP_MCP_ENV_VARS } };
+    Object.assign(env, channelServerEnv(s.channel, s.mcpName, "codex"), s.clean ? { [MCP_PROFILE_ENV]: LEND_PROFILE } : {});
+    // 沙箱 clean 带进来的宿主 BRIDGE_PORT 和代理地址的端口对不上，worker 里任何 bun 进程过沙箱总闸都会被拒（lib/sandbox.ts）
+    if (s.clean) delete env.BRIDGE_PORT;
   }
   if (s.codexPath) env.CODEX_PATH = s.codexPath;
   if (isSandbox(s.base)) Object.assign(env, sandboxAcpHome(s.base[SANDBOX_ROOT_ENV])); // 沙箱：适配器和它起的 channel-server 碰不到 owner 的家目录

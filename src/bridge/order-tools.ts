@@ -2,9 +2,11 @@
  * bridge 侧的派单工具（M2 执行者 / M3 审查员）：`order_tool {tool, args}` 帧 → 认身份（bridge/caller-identity.ts callerOf）→
  * lib/order-tool-route.ts 过 requireVerified 门 → 按工具名登记的 handler。加工具只在 HANDLERS 里加一项（channel-server 那边在
  * lib/order-tools.ts ORDER_TOOLS 加定义），bridge.ts 与 ACP 回环代理都不用动。写台账一律经 lib/order-ledger-exit.ts（runManager）。
+ * 出借 worker（agent-lend-*）在 HANDLERS 之前整条分走（bridge/lend-tools.ts）：本机的台账 / 审查 / DAG 工具它一个都到不了。
  */
 import type { ServerWebSocket } from "bun";
 import { openAskFull, patchAsk } from "../lib/ledger-asks.js";
+import { isLendCaller } from "../lib/lend-tools.js";
 import { askOrder } from "../lib/order-ask.js";
 import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
 import { findPrRows } from "../lib/order-deliver-pr.js";
@@ -18,6 +20,7 @@ import { runManagerProcess } from "../lib/run-manager.js";
 import { askDb } from "./asks.js";
 import { callerOf } from "./caller-identity.js";
 import { dagToolHandlers } from "./dag-tools.js";
+import { answerLendTool } from "./lend-tools.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { reviewToolHandlers } from "./review-tools.js";
@@ -64,7 +67,7 @@ export async function answerOrderTool(ws: ServerWebSocket<unknown>, msg: Record<
   const { identity, channelId } = callerOf(ws, msg);
   let result: OrderToolResult;
   try {
-    result = await routeOrderTool(msg.tool, identity, channelId, msg.args, HANDLERS);
+    result = isLendCaller(identity) ? await answerLendTool(msg.tool, identity, msg.args) : await routeOrderTool(msg.tool, identity, channelId, msg.args, HANDLERS);
   } catch (e) {
     console.error(`⚠ 派单工具 ${String(msg.tool)}（${identity.agent ?? "?"}）出错：${(e as Error).message}`);
     result = refuse("internal", `bridge 处理出错：${(e as Error).message}`);
