@@ -56,12 +56,15 @@ describe("逐单核对：每项一正一反", () => {
     expect(refusedCode(await one(fresh(harness({ entry: { families: { codex: 2, claude: 2 } } })), { family: "claude" }))).toEqual(["family"]);
   });
 
-  test("角色：审查收；W8 前开工 / 修复单一律 write_closed；不认识的阶段、授权没开的角色 → role", async () => {
-    expect(refusedCode(await one(fresh(harness()), { step: "write" }))).toEqual(["write_closed"]);
-    expect(refusedCode(await one(fresh(harness()), { step: "fix" }))).toEqual(["write_closed"]);
+  test("角色：审查收；授权里没写 write 的开工 / 修复单、不认识的阶段 → role；写了 write 才收；写单开关关着：写单 write_closed、含 write 的授权整条不生效", async () => {
+    expect(refusedCode(await one(fresh(harness()), { step: "write" }))).toEqual(["role"]); // 生产缺省（开关开着）也要授权里写了 write
+    expect(refusedCode(await one(fresh(harness()), { step: "fix" }))).toEqual(["role"]);
     expect(refusedCode(await one(fresh(harness()), { step: "deploy" }))).toEqual(["role"]);
-    expect(refusedCode(await one(fresh(harness({ writeOpen: true })), { step: "write" }))).toEqual(["role"]); // W8 之后也要授权里写了 write
-    expect((await one(fresh(harness({ writeOpen: true, entry: { roles: ["review", "write"] } })), { step: "write" })).accepted).toEqual(["o1"]);
+    const w = { entry: { roles: ["review", "write"] as ("review" | "write")[] } };
+    expect((await one(fresh(harness(w)), { step: "write" })).accepted).toEqual(["o1"]);
+    expect((await one(fresh(harness(w)), { step: "fix" })).accepted).toEqual(["o1"]);
+    expect(refusedCode(await one(fresh(harness({ ...w, writeOpen: false })), { step: "write" }))).toEqual(["no_grant"]);
+    expect(refusedCode(await one(fresh(harness({ writeOpen: false })), { step: "fix" }))).toEqual(["write_closed"]);
   });
 
   test("仓库白名单：在 → 收；不在 → repo", async () => {

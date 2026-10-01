@@ -89,13 +89,13 @@ describe("校验", () => {
     expect(bad((f) => { f.borrow[0].maxOpen = 0; })).toContain("maxOpen");
     expect(bad((f) => { f.borrow[0].fp = "not-a-fp"; })).toContain("fp");
   });
-  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、只认 review（write 在 W8 前拒）、到期时间必填且 ≤ 7 天、对方要有指纹", () => {
+  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、roles 只认 review / write（缺省 review）、到期时间必填且 ≤ 7 天、对方要有指纹", () => {
     expect(lendOk({ families: { codex: "0" } })).toMatchObject({ ok: false });
     expect(lendOk({ families: { codex: "2x" } })).toMatchObject({ ok: false });
     expect(lendOk({ repos: undefined })).toMatchObject({ ok: false });
     expect(lendOk({ repos: "https://github.com/a/b" })).toMatchObject({ ok: false });
-    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: false, error: expect.stringContaining("W8") });
-    expect(lendOk({ roles: "write" })).toMatchObject({ ok: false });
+    expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } });
+    expect(lendOk({ roles: "write" })).toMatchObject({ ok: true, entry: { roles: ["write"] } });
     expect(lendOk({ roles: undefined })).toMatchObject({ ok: true, entry: { roles: ["review"] } });
     expect(lendOk({ roles: "review,admin" })).toMatchObject({ ok: false });
     expect(lendOk({ until: undefined })).toMatchObject({ ok: false, error: expect.stringContaining("到期时间") });

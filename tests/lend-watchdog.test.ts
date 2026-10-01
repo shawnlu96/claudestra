@@ -86,8 +86,10 @@ describe("i28-R5a 读不了 journal 不再一次就停", () => {
 });
 
 describe("i28-W1 授权没了宿主也自停（调度服务停着时收回授权靠这一处）", () => {
-  test("授权在就接着跑；收回、总开关关、暂停、过期、超 7 天、含 write、指纹变了、文件不在或坏了：都立即该停", () => {
+  test("授权在就接着跑（含 write 的授权也是）；收回、总开关关、暂停、过期、超 7 天、指纹变了、文件不在或坏了：都立即该停", () => {
     const { path } = journal(9e15);
+    expect(lendStopReason("agent-lend-x", path, 1)).toBeNull();
+    writeLend(path, [{ ...GRANT, roles: ["review", "write"] }], true);
     expect(lendStopReason("agent-lend-x", path, 1)).toBeNull();
     const cases: [unknown[], boolean, number, RegExp][] = [
       [[], true, 1, /已收回/],
@@ -95,7 +97,6 @@ describe("i28-W1 授权没了宿主也自停（调度服务停着时收回授权
       [[{ ...GRANT, paused: { reason: "旧条目" } }], true, 1, /暂停/],
       [[GRANT], true, 6 * DAY + 1, /到期/],
       [[{ ...GRANT, until: new Date(30 * DAY).toISOString() }], true, 1, /7 天/],
-      [[{ ...GRANT, roles: ["review", "write"] }], true, 1, /write/],
       [[{ ...GRANT, fp: "1111-2222-3333-4444" }], true, 1, /指纹/],
       [[{ ...GRANT, peer: "b" }], true, 1, /已收回/],
     ];

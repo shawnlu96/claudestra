@@ -24,7 +24,7 @@ describe("manager lend / borrow 接线", () => {
   };
   const file = () => JSON.parse(readFileSync(join(state, "lend.json"), "utf8"));
 
-  test("缺省关；grant 只认联系人、钉指纹、执行者被拒、到期时间必填且 ≤7 天、write 拒、--confirm 已退役；revoke 删条目", () => {
+  test("缺省关；grant 只认联系人、钉指纹、执行者被拒、到期时间必填且 ≤7 天、roles 不认得的值拒、--confirm 已退役；revoke 删条目", () => {
     const g = (...extra: string[]) => ["lend", "grant", "team-a", "--repos", "shawnlu96/claudestra", ...extra];
     expect(run(["lend", "status"])).toMatchObject({ ok: true, file: "missing", enabled: false, lending: false });
     expect(run(["lend", "grant", "stranger", "--repos", "shawnlu96/claudestra", "--until", "3d"])).toMatchObject({ ok: false, error: expect.stringContaining("不在联系人里") });
@@ -33,7 +33,7 @@ describe("manager lend / borrow 接线", () => {
     expect(run(g())).toMatchObject({ ok: false, error: expect.stringContaining("到期时间") });
     expect(run(g("--until", "8d"))).toMatchObject({ ok: false, error: expect.stringContaining("最长 7 天") });
     expect(run(g("--until", "2999-01-01T00:00:00Z"))).toMatchObject({ ok: false, error: expect.stringContaining("最长 7 天") });
-    expect(run(g("--until", "3d", "--roles", "review,write"))).toMatchObject({ ok: false, error: expect.stringContaining("write") });
+    expect(run(g("--until", "3d", "--roles", "review,admin"))).toMatchObject({ ok: false, error: expect.stringContaining("admin") });
     expect(run(["lend", "set", "team-a", "--repos", "shawnlu96/claudestra", "--until", "3d", "--confirm", "auto"])).toMatchObject({ ok: false, error: expect.stringContaining("已退役") });
     expect(existsSync(join(state, "lend.json"))).toBe(false);
     const ok = run(["lend", "grant", "aaaa-bbbb-cccc-dddd", "--repos", "shawnlu96/claudestra", "--until", "3d"]);

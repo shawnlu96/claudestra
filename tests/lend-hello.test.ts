@@ -1,5 +1,5 @@
 /**
- * i28-W3 出借方 hello（src/lib/lend-hello.ts，经 lend-loop.ts 每轮调）：正文构造与自检（W8 前没有 write、claude 0 槽、busy 含没领的单）、
+ * i28-W3 出借方 hello（src/lib/lend-hello.ts，经 lend-loop.ts 每轮调）：正文构造与自检（没授权 write 或写单开关关着就没有 write、claude 0 槽、busy 含没领的单）、
  * 触发（启动第一轮、正文变了当轮发、保活、失败退避、收回立刻发 grant:null）、404 / 403 / 超时的回退与恢复、seq 跨重启只增、全部收回时 lendWanted。
  * A 是假的（hello / beat 按表回），时钟手拨（tests/lend-harness.ts）。
  */
@@ -43,9 +43,11 @@ describe("正文", () => {
     expect(parseV2Request("hello", { v: 1, ...b, boot: "boot-aaaa-0001", seq: 1 }).ok).toBe(true);
   });
 
-  test("W8 前就算条目里写了 write，正文 roles 也不会有 write；没有授权 = grant:null、0 槽", () => {
+  test("条目里写了 write 正文 roles 才有 write；写单开关关着就算写了也不带；没有授权 = grant:null、0 槽", () => {
     const h = harness();
-    expect(helloBody(h.db, { ...h.lend.lend[0], roles: ["review", "write"] }, h.d.now()).grant!.roles).toEqual(["review"]);
+    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).grant!.roles).toEqual(["review"]);
+    expect(helloBody(h.db, { ...h.lend.lend[0], roles: ["review", "write"] }, h.d.now()).grant!.roles).toEqual(["review", "write"]);
+    expect(helloBody(h.db, { ...h.lend.lend[0], roles: ["review", "write"] }, h.d.now(), false).grant!.roles).toEqual(["review"]);
     expect(helloBody(h.db, undefined, h.d.now())).toMatchObject({ grant: null, slots: { codex: { total: 0, busy: 0 }, claude: { total: 0, busy: 0 } } });
   });
 
