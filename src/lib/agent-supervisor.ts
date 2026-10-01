@@ -222,11 +222,11 @@ class AgentRound {
    */
   private async overloads(): Promise<Step> {
     const since = this.deps.now() - EVENT_LOOKBACK_MS;
+    let n = this.events.filter((x) => x.fault === "overload" && x.step === "resume" && x.workKey === this.workKey).length;
     for (const e of (this.deps.overload()[this.s.channelId]?.events ?? []).filter((x) => x.at >= since)) {
       const key = `overload:${this.s.agent}:${e.at}`;
       if (e.act === "track" && !stepState(this.events, key, "resume").done) {
-        const n = this.events.filter((x) => x.fault === "overload" && x.step === "resume" && x.workKey === this.workKey).length + 1;
-        const rec = this.base("overload", key, "resume", n, SUPERVISE_RULES.overload.limit);
+        const rec = this.base("overload", key, "resume", ++n, SUPERVISE_RULES.overload.limit);
         await this.done(rec, "ok", `bridge 60 秒后同会话续跑：${e.error}`);
       } else if (e.act === "escalate" && !this.tried(key, "report")) {
         const d = { attempts: SUPERVISE_RULES.overload.limit, limit: SUPERVISE_RULES.overload.limit };

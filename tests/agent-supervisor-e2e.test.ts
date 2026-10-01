@@ -302,3 +302,34 @@ describe("越权与开关", () => {
     }
   });
 });
+
+describe("满载 / 限流：并进 bridge 的 60 秒续跑，不跑出两套", () => {
+  test("bridge 每次续跑补进台账；bridge 说续跑用完了 → 报派活方一次", async () => {
+    const f = autoFixture();
+    cleanup.push(() => f.close());
+    await toBuild(f);
+    await f.tick();
+    const h = harness(f);
+    const t = h.now();
+    h.overload["ch-one"] = { agent: "agent-task-one", events: [{ at: t, error: "server_overloaded", act: "track" }, { at: t + 1, error: "server_overloaded", act: "track" }] };
+    await h.tick();
+    expect(h.events("agent-task-one").map((e) => `${e.step}/${e.phase}/${e.attempt}`)).toEqual(["resume/done/1", "resume/done/2"]);
+    expect(h.log.sends).toEqual([]); // 续跑是 bridge 发的，监护不另发
+    h.overload["ch-one"].events.push({ at: t + 2, error: "server_overloaded", act: "escalate" });
+    expect((await h.tick()).outcomes[0]).toMatchObject({ step: "report" });
+    await h.tick();
+    expect(h.log.escalations).toEqual([expect.stringContaining("模型满载 / 限流")]);
+  });
+
+  test("cyber 卡开出时 bridge 已在续跑（适配器没给结构化失败）：只认领、不再发恢复消息", async () => {
+    const f = autoFixture();
+    cleanup.push(() => f.close());
+    await reviewCut(f);
+    const h = harness(f);
+    const card = f.db.query("SELECT createdAt FROM asks WHERE fromAgent = 'agent-rv-t1'").get() as { createdAt: number };
+    h.overload["ch-rv"] = { agent: "agent-rv-t1", events: [{ at: card.createdAt + 50, error: "API Error", act: "track" }] };
+    expect((await h.tick()).outcomes.find((o) => o.agent === "agent-rv-t1")).toMatchObject({ step: "recover", detail: "bridge 续跑接手" });
+    expect(h.log.sends).toEqual([]);
+    expect(await autoWithHold(f)).toMatchObject({ step: "waiting" });
+  });
+});
