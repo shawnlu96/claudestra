@@ -136,14 +136,17 @@ export function BorrowPeerCard(props: {
 
   return (
     <div ref={card} className="space-y-2 rounded-lg bg-base-100 px-3 py-2.5">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <ServerIcon className="size-3.5 shrink-0 text-base-content/50" />
-        <span className="max-w-full truncate font-mono text-[12.5px] font-semibold">{peer.peer}</span>
-        <ProtoBadge state={state} />
-        {props.reviewFirst && <ReviewFirstBadge />}
+      <div className="flex min-w-0 items-start gap-2">
+        {/* 名字和徽章一起换行，删除钮固定在右上：窄屏不会单独掉到第二行 */}
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+          <ServerIcon className="size-3.5 shrink-0 text-base-content/50" />
+          <span className="max-w-full truncate font-mono text-[12.5px] font-semibold">{peer.peer}</span>
+          <ProtoBadge state={state} />
+          {props.reviewFirst && <ReviewFirstBadge />}
+        </div>
         {props.canWrite && (
           <button
-            className={`btn btn-ghost btn-xs ml-auto btn-square ${armed ? "text-error" : "text-base-content/45"}`}
+            className={`btn btn-ghost btn-xs shrink-0 btn-square ${armed ? "text-error" : "text-base-content/45"}`}
             disabled={locked}
             aria-label={t("移除")}
             onClick={remove}
