@@ -84,8 +84,12 @@ const markRevoked = (db: Database, peer: string): void => void db.prepare("UPDAT
 
 export type CleanCheck = "clean" | "dirty" | "unknown";
 
+/** Only a peer whose hello on file says proto 2 gets the revoke-and-requeue path; no row = proto 1 (design doc §8.3). */
+const speaksV2 = (db: Database, peer: string): boolean => (getLendPeer(db, peer)?.proto ?? 1) >= 2;
+
 /** The write orders a beat reports as cleanly ended that this peer holds under the stated gen: A checks their branches before the transaction. */
 export function cleanEndedWrites(db: Database, peer: string, req: BeatRequest): LendOrder[] {
+  if (!speaksV2(db, peer)) return [];
   return req.orders.flatMap((b) => {
     const o = b.ended?.clean ? getLendOrder(db, b.orderId) : null;
     return o && o.peer === peer && o.status === "claimed" && o.leaseGen === b.gen && isWriteStep(o.step) && o.branch ? [o] : [];
@@ -105,10 +109,13 @@ function heldOrder(db: Database, peer: string, b: Pick<BeatOrder, "orderId" | "g
   return o.leaseGen === b.gen ? o : "stale_gen";
 }
 
+/** Revoked: clean only for a proto-2 peer (checked inside the transaction) that said clean, and for a write order whose branch A checked. */
 function endOrder(db: Database, ctx: WriteCtx, o: LendOrder, b: BeatOrder, checks: Map<string, CleanCheck>): LendNotice[] {
+  const v2 = speaksV2(db, o.peer);
   const writeClean = !isWriteStep(o.step) || checks.get(o.orderId) === "clean";
-  const clean = b.ended!.clean && writeClean;
+  const clean = v2 && b.ended!.clean && writeClean;
   const detail = clean ? "出借方收回授权，worker 干净停下（没有外部副作用），自动重排"
+    : !v2 ? "出借方收回授权；对方没有 v2 hello（proto 1），不自动重排"
     : b.ended!.clean ? "出借方收回授权；写单分支在远端核对不了或已有推送，不自动重排" : "出借方收回授权，worker 停下时不干净";
   markRevoked(db, o.peer);
   return leaseLend(db, ctx, o.peer, { v: 1, orderId: o.orderId, gen: o.leaseGen, action: "release", reason: clean ? "not_started" : "stopped", detail }).notices;

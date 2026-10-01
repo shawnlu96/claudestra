@@ -234,6 +234,20 @@ describe("收回授权（PM 已定：只对 proto 2）", () => {
     expect(notices.join("\n")).toContain("结果不明");
   });
 
+  test("proto 1（没有 hello 记录）报 clean:true 收回：不自动重排，按 stopped 交 PM；写单也不去查远端", async () => {
+    const id = await held();
+    expect(getLendPeer(db, "mate")).toBeNull();
+    await beat([line(id, { ended: { reason: "revoked", clean: true } })]);
+    expect(getLendOrder(db, id)).toMatchObject({ status: "unknown", reason: expect.stringContaining("proto 1") });
+    expect(listSteps(db, "T9").length).toBe(1);
+    card("B1", "build");
+    const w = await held("B1");
+    await beat([line(w, { ended: { reason: "revoked", clean: true } })]);
+    expect(getLendOrder(db, w)!.status).toBe("unknown");
+    expect(getWriteLease(db, "B1")).toMatchObject({ state: "held" });
+    expect(branchAsked).toEqual([]);
+  });
+
   test("别家的单、代数不对的单报收回：拒，什么都不动（授权也不动）", async () => {
     await hello();
     const id = await held();
@@ -244,7 +258,10 @@ describe("收回授权（PM 已定：只对 proto 2）", () => {
   });
 
   describe("写单", () => {
-    beforeEach(() => card("B1", "build"));
+    beforeEach(async () => {
+      card("B1", "build");
+      await hello();
+    });
 
     test("分支在远端不存在（没推过）→ 按 not_started 记 released、退回本机（sendBack：写租约结束，交 PM）", async () => {
       const id = await held("B1");

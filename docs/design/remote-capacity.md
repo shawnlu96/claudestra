@@ -314,7 +314,8 @@ POST /api/v1/lend/beat    (B→A，每 15 秒，按 peer 批量，≤50 单)
   按 not_started 的路子：`released`、解绑步骤，auto 卡由池同步重排；写单走现有 sendBack，写租约结束、卡退回本机。
   - 审查单信 `clean:true`（审查本来没有外部副作用）。
   - 写单：A 自己 `git ls-remote` 订单分支，分支不存在（开工单）或还停在起点 head 才算干净；核对不了或已有推送 → 照旧 `unknown` 交 PM。
-  - `clean:false`、proto 1 的 `stopped`、单子不归这个 peer 或代数不对 → 行为不变。
+  - `clean:false`、proto 1 的 `stopped`、单子不归这个 peer 或代数不对 → 行为不变。proto 在 beat 的事务里按 `lend_peers` 核：
+    没有 hello 记录的 peer 一律当 proto 1，带 `clean:true` 也按 `stopped` 交 PM。
   - 收到收回的 beat，A 把这个 peer 的授权当作没了（可用槽立刻 0），直到它下一次带授权的 hello：撤回的单不会重排回同一个 peer。
 
 ### 8.4 远端 worker 提问
