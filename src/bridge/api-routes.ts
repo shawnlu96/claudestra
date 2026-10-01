@@ -1256,7 +1256,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const runtime = String((agent as any).runtime || "") || "claude-code";
     // 斜杠直通只给 owner（api-slash.ts）：别人拿到命令表也用不了，给空表，网页就不显示候选 / 技能按钮
     if (!isOwnerPrincipal(principal)) return apiJson(200, { ok: true, agent: agent.name, runtime, commands: [], slash: false });
-    const commands = runtimeCommandsFor(runtime, agent.name) ?? commandsForAgent(agent.name === "master" ? null : agent.name);
+    const commands = runtimeCommandsFor(runtime, agent.name, await isConfiguredAcpChannel(agent.channelId)) ?? commandsForAgent(agent.name === "master" ? null : agent.name);
     return apiJson(200, { ok: true, agent: agent.name, runtime, commands });
   }
 

@@ -2760,7 +2760,7 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0]); break;
+  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0], args.slice(1)); break;
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）

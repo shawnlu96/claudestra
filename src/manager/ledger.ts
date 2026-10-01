@@ -39,6 +39,7 @@ import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
 import { SUPERVISE_CMDS } from "./ledger-supervise-cmds.js";
+import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
 import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
 import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
@@ -52,7 +53,8 @@ const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
-  "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "scheduler-autostart", "scheduler-auto-resume",
+  "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
+  "scheduler-autostart", "scheduler-auto-resume",
 ]);
 
 const COMMANDS: Record<string, CommandSpec> = {
@@ -75,7 +77,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS,
   ...VERDICT_CMDS,
-  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS,
+  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 

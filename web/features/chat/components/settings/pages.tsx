@@ -4,6 +4,7 @@ import { isNativeShell } from "@/lib/native";
 import { RemoteAccessSection } from "../remote-access-section";
 import { AccessPathsSection } from "../access-paths";
 import { PeersPanel } from "../peers-modal";
+import { LendPanel } from "../../../lend/lend-panel";
 import { BorrowPanel } from "@/features/borrow/borrow-panel";
 import { Section, GroupLabel } from "./section";
 import { DevicesSection, MachinesSection, SelfDeviceSection } from "./devices-section";
@@ -133,6 +134,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
       return (
         <>
           <PeersPanel />
+          <LendPanel />
           <BorrowPanel />
         </>
       );

@@ -26,8 +26,9 @@ import { assertCreatable, loadRegistry, output, patchRegistryAgent, saveRegistry
 
 const RESTART_TIMEOUT_MS = 240_000;
 
-/** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。 */
+/** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。Pi 缺省 tmux，沙箱里只有 acp 一条路（tmux 版照旧拒） */
 export async function chooseCreateTransport(runtime?: string, requested?: string): Promise<{ transport: Transport; acpPending?: true; manualTmux?: true }> {
+  if (runtime === "pi") return { transport: isSandbox() && requested !== "tmux" ? "acp" : "tmux" };
   if (runtime !== "codex") return { transport: "tmux" };
   if (requested === "tmux") return { transport: "tmux", manualTmux: true };
   const ready = await checkAcpReady(true);
@@ -133,7 +134,7 @@ export async function cmdAcp(cmd: string, args: string[]): Promise<void> {
     const r = await reconcileCodexAcp({ codexVersion: async () => (await probeCodexInstall())?.version });
     return output(r.ok ? { ok: true, version: r.version, codexRange: r.codexRange, path: r.path, reused: r.reused } : { ok: false, error: r.error });
   }
-  return switchTransport(args[0] ?? "", args[1] ?? "");
+  output(await switchTransport(args[0] ?? "", args[1] ?? ""));
 }
 
 /** 改 registry 前的检查：拒绝就返回原因 */
@@ -145,6 +146,7 @@ export function transportRefusal(
   const runtime = info.runtime || "claude-code";
   if (!transportsOf(runtime).includes(to)) return `runtime "${runtime}" 不支持 transport=${to}（目前只有 codex / pi 能走 acp）`;
   if (runtime === "codex" && to === "tmux" && isSandbox(env)) return "沙箱 Codex 只许 ACP stub，不起真实 TUI";
+  if (runtime === "pi" && to === "tmux" && isSandbox(env)) return "沙箱里的 Pi 只走 ACP，不起 TUI 版（docs/architecture/pi-acp-sandbox.md）"; // migrate --pi --to tmux 不经 manager 白名单
   if (to === "acp" && isSandbox(env) && env[ACP_AGENT_ENV]?.trim()) return "沙箱里不认 CLAUDESTRA_ACP_AGENT：acp 固定起本仓 stub";
   if (to === "acp" && runtime === "pi") return piAcpClash(info.cwd, env, info.piEnv); // 适配器在仓库里不用装；只拦会静默丢掉 reply 的配置
   if (to === "acp" && !isSandbox(env) && !env[ACP_AGENT_ENV]?.trim()) { // 沙箱里适配器固定是本仓 stub，不用装
@@ -165,13 +167,14 @@ export function persistManualTmux(info: { transport?: string; acpPending?: boole
   return true;
 }
 
-async function switchTransport(name: string, mode: string): Promise<void> {
-  if (!name || (mode !== "tmux" && mode !== "acp")) return output({ ok: false, error: "transport <agent> tmux|acp" });
+/** 切 transport 并 restart，返回结果（cmdAcp 原样输出，Pi 的迁移命令据此决定要不要退回 tmux）。没改 registry 的拒绝不带 restarted */
+export async function switchTransport(name: string, mode: string): Promise<Record<string, unknown>> {
+  if (!name || (mode !== "tmux" && mode !== "acp")) return { ok: false, error: "transport <agent> tmux|acp" };
   const bare = name.replace(/^agent-/, "");
   if (mode === "acp") { // 锁外探就绪（Codex 可能要装适配器）；按运行时分派，先不加锁读一眼它是谁
     const pre = (await loadRegistry()).agents;
     const ready = await checkAcpReadyFor((pre[`agent-${bare}`] ?? pre[bare])?.runtime, true);
-    if (!ready.ok) return output({ ok: false, error: ready.reason });
+    if (!ready.ok) return { ok: false, error: ready.reason };
   }
   const lock = await acquireLock(statePath(".manager-write.lock"));
   let key = "";
@@ -181,11 +184,11 @@ async function switchTransport(name: string, mode: string): Promise<void> {
     key = reg.agents[`agent-${bare}`] ? `agent-${bare}` : reg.agents[bare] ? bare : "";
     const info = key ? reg.agents[key] : undefined;
     const refusal = transportRefusal(info as { runtime?: string; cwd?: string; piEnv?: unknown } | undefined, bare, mode);
-    if (refusal) return output({ ok: false, error: refusal });
+    if (refusal) return { ok: false, error: refusal };
     from = normalizeTransport((info as { transport?: string }).transport);
     if (from === mode) {
       if (mode === "tmux" && persistManualTmux(info as { transport?: string })) await saveRegistry(reg);
-      return output({ ok: true, agent: key, transport: mode, unchanged: true });
+      return { ok: true, agent: key, transport: mode, unchanged: true };
     }
     (info as { transport?: string; acpPending?: boolean; acpRestartPending?: boolean; acpRestartFrom?: string }).transport = mode;
     (info as { acpRestartPending?: boolean; acpRestartFrom?: string }).acpRestartPending = true;
@@ -206,7 +209,7 @@ async function switchTransport(name: string, mode: string): Promise<void> {
     if (actual === mode) { delete state.acpRestartPending; delete state.acpRestartFrom; }
   });
   const ok = restarted && actual === mode;
-  output({
+  return {
     ok,
     agent: key,
     from,
@@ -214,5 +217,5 @@ async function switchTransport(name: string, mode: string): Promise<void> {
     restarted,
     ...(restarted && actual !== mode ? { fellBack: true, error: `${mode} 启动失败，已恢复 ${actual ?? "原 transport"}；运行 doctor 查看待迁移状态` } : {}),
     ...(!restarted ? { error: `registry 已切到 ${mode}，但重启失败：${failed?.error ?? r?.error ?? "未知原因"}（手动 restart ${key}；要回退就 transport ${bare} ${from}）` } : {}),
-  });
+  };
 }

@@ -63,7 +63,7 @@ describe("acpRuntime 表", () => {
     expect([pi.label, pi.logLabel]).toEqual(["Pi", "pi-acp"]);
   });
 
-  test("Pi 的适配器命令：宿主自己的 bun 跑仓库里的 main.ts，启动命令给的参数原样接上；出借 worker / 沙箱 / 参数坏了都拒", () => {
+  test("Pi 的适配器命令：宿主自己的 bun 跑仓库里的 main.ts，启动命令给的参数原样接上；出借 worker / 沙箱目录没钉住 / 参数坏了都拒", () => {
     const pi = acpRuntime("pi");
     expect(pi.agentCommand({ [PI_ARGS_ENV]: JSON.stringify(["--approve", "--no-extensions"]) }, "/opt/bun", false))
       .toEqual({ cmd: ["/opt/bun", PI_ACP_ADAPTER_MAIN, "--approve", "--no-extensions"], stub: false });

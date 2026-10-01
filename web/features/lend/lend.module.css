@@ -1,0 +1,39 @@
+/* 出借面板的动效：反馈用动作不用文字（失败抖、锁闪、新条目淡入、收回淡出、停止中转、停不下来闪） */
+@keyframes lend-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+@keyframes lend-lock {
+  0%, 100% { color: inherit; }
+  30%, 70% { color: var(--color-warning); }
+}
+@keyframes lend-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes lend-out {
+  to { opacity: 0; transform: scale(0.97); }
+}
+@keyframes lend-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes lend-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.shake { animation: lend-shake 0.35s ease-in-out; }
+.lockFlash { animation: lend-lock 0.6s ease-in-out, lend-shake 0.35s ease-in-out; }
+.fadeIn { animation: lend-in 0.3s ease-out; }
+.fadeOut { animation: lend-out 0.3s ease-in forwards; }
+.spin { animation: lend-spin 1s linear infinite; }
+.blink { animation: lend-blink 1s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .shake, .fadeIn { animation: none; }
+  .lockFlash { animation: lend-lock 0.6s ease-in-out; }
+  .fadeOut { animation: lend-in 0.3s ease-in reverse forwards; }
+  .spin { animation-duration: 3s; }
+  .blink { animation: none; opacity: 0.7; }
+}

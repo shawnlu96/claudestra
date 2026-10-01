@@ -72,7 +72,8 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
   // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；Pi 照旧回落到 CC 注册表
   const rt = String(agent.runtime || "");
-  if (rt === "codex" && slashM[1] === "clear" && await isConfiguredAcpChannel(agent.channelId)) {
+  const acp = await isConfiguredAcpChannel(agent.channelId);
+  if ((rt === "codex" || rt === "pi") && slashM[1] === "clear" && acp) { // 宿主轮换会话；当 prompt 交过去，pi 只会把它当普通文字
     if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
     if (r.hasAttachments) return apiJson(409, { ok: false, error: "ACP /clear 不接收附件；会话未改动" });
     const cleared = await acpClear(agent.channelId);
@@ -82,7 +83,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   }
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
-  const nativeHit = runtimeCommandsFor(rt, agent.name)?.find((c) => c.name === slashM[1]);
+  const nativeHit = runtimeCommandsFor(rt, agent.name, acp)?.find((c) => c.name === slashM[1]);
   const resolved = nativeHit
     ? { ok: true as const, ccText: `/${nativeHit.invokeName}${args ? ` ${args}` : ""}`, scope: nativeHit.scope }
     : rt === "codex" ? { ok: false as const, reason: "not a Codex command" } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
@@ -93,7 +94,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     return apiJson(409, { ok: false, error: `/${slashM[1]} 是 ${other.replace(/^agent-/, "")} 的项目技能，当前 agent 不可用` });
   }
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
-  if (await isConfiguredAcpChannel(agent.channelId)) return acpSlashPassthrough(agent, slashM[1], resolved.ccText, deps);
+  if (acp) return acpSlashPassthrough(agent, slashM[1], resolved.ccText, deps);
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
   // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）
   const wall = await (deps.wallWait ?? ((w: string) => windowWallWait(w, rt || undefined)))(win); // Codex 窗口还认选择菜单（T63）
