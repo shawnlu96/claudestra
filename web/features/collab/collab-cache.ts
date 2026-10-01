@@ -7,6 +7,7 @@
  */
 import { useSyncExternalStore } from "react";
 import { machines } from "@/lib/machines";
+import { assertLedgerOverview, isLedgerOverview } from "@/lib/ledger-meta-guard";
 import type { LedgerOverview } from "./collab-model";
 
 export type Access = "unknown" | "yes" | "no";
@@ -36,10 +37,20 @@ export function useLedgerAccess(project: string): Access {
 }
 
 export function cachedOverview(project: string): { ov: LedgerOverview; offset: number } | undefined {
-  return overview.get(keyOf(project));
+  const cached = overview.get(keyOf(project));
+  if (cached && !isLedgerOverview(cached.ov)) {
+    clearOverview(project);
+    return undefined;
+  }
+  return cached;
+}
+
+export function clearOverview(project: string): void {
+  overview.delete(keyOf(project));
 }
 
 export function cacheOverview(project: string, ov: LedgerOverview, offset: number): void {
+  assertLedgerOverview(ov);
   overview.set(keyOf(project), { ov, offset });
   setLedgerAccess(project, "yes");
 }

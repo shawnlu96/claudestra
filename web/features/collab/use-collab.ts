@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api/client";
 import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { reduceAction, type ActionMap } from "./collab-action";
-import { cachedOverview, cacheOverview, setLedgerAccess } from "./collab-cache";
+import { cachedOverview, cacheOverview, clearOverview, setLedgerAccess } from "./collab-cache";
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
@@ -98,7 +98,12 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
   }, [refetch, reseed]);
   const connected = useCollabStream(project, onOpen, refetch, onAction);
 
-  return { load, now: clock + offset, actions, connected, rev, advance, refetch, reviewers: rv.map };
+  const retry = useCallback(() => {
+    clearOverview(project);
+    setLoad({ status: "loading" });
+    return refetch();
+  }, [project, refetch]);
+  return { load, now: clock + offset, actions, connected, rev, advance, refetch: retry, reviewers: rv.map };
 }
 
 /**
