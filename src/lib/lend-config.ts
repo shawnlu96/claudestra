@@ -1,46 +1,49 @@
 /**
- * 出借 / 借入声明 lend.json（docs/design/remote-capacity.md §1）：`lend` = 本机借给谁、出几个位；`borrow` = 本机哪些项目的单子可以给谁。
- * 只管读写与校验，领单循环不在这里。安全取向是 fail-closed：文件缺失 = 缺省（不出借、不借入）；文件无效（JSON 坏、版本不认识、
- * 任一条目不合法）= 按「关」处理并由 doctor 报出来，绝不退回「上次好的值」（readJsonLenient 那样会让坏文件继续生效）。
- * 写入只经 updateLend：独占锁（拿不到就拒写，不降级）+ 锁内重读 + tmp/rename 原子写 + 坏文件拒写。tests/lend-config.test.ts。
+ * 出借 / 借入声明 lend.json（docs/design/remote-capacity.md §1）：`lend` = 一次授权（借给谁、哪些仓库和角色、各家族几个位、每天几单、到哪天）；
+ * `borrow` = 本机哪些项目的单子可以给谁。只管读写与形状校验；授权此刻算不算数（暂停、到期、write、期限上限）在 lend-grant-rules.ts。
+ * 安全取向是 fail-closed：文件缺失 = 缺省（不出借、不借入）；文件无效（JSON 坏、版本不认识、任一条目不合法）= 按「关」处理并由 doctor 报出来，
+ * 绝不退回「上次好的值」。v1 文件照读，但出借条目一律迁成暂停（逐单确认已退役，要出借方本人重新授权）；写一律写 v2。
+ * 写入只经 updateLend：独占锁（拿不到就拒写，不降级）+ 锁内重读 + tmp/rename 原子写 + 坏文件拒写。tests/lend-config.test.ts、tests/lend-grant.test.ts。
  */
 import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { FP_RE } from "./relay-protocol.js";
-import { assertWritable, readJsonState, writeJsonAtomicSync } from "./state-file.js";
+import { assertWritable, readJsonState, readJsonStateSync, writeJsonAtomicSync, type StateRead } from "./state-file.js";
 
 export const LEND_PATH = statePath("lend.json");
-const LEND_VERSION = 1;
+const LEND_VERSION = 2;
 
 export const LEND_FAMILIES = ["codex", "claude"] as const;
 export type LendFamily = (typeof LEND_FAMILIES)[number];
 const LEND_ROLES = ["review", "write"] as const;
 export type LendRole = (typeof LEND_ROLES)[number];
-export type LendConfirm = "per-order" | "auto";
 
 /** 上限：写错一位数（30 写成 300）要被拦下，不是真实容量的约束 */
 export const MAX_FAMILY_SLOTS = 16;
 export const MAX_ORDERS_PER_DAY = 200;
 export const MAX_OPEN = 20;
 export const MAX_REPOS = 50;
-export const DEFAULT_ORDERS_PER_DAY = 5;
+/** He 10-01 拍板的一次授权缺省：每天 200 单、codex 5 个位 */
+export const DEFAULT_ORDERS_PER_DAY = 200;
 export const DEFAULT_MAX_OPEN = 3;
 
+/** 一次授权。没暂停的条目 fp / until / grantedAt 必填；v1 迁来的暂停条目可能缺 */
 export interface LendEntry {
   /** peers.json 里已握手的 peer 名 */
   peer: string;
-  /** 写入时对方的实例指纹：peer 名以后被换成别的实例（删了重加、同名）时对不上 → 这条失效 */
+  /** 授权时对方的实例指纹：peer 名以后被换成别的实例（删了重加、同名）时对不上 → 这条失效 */
   fp?: string;
   /** 每个模型家族同时在跑的上限 */
   families: Partial<Record<LendFamily, number>>;
   roles: LendRole[];
   /** GitHub owner/repo 白名单 */
   repos: string[];
-  /** tokensPerDay 预留，v1 不执行 */
-  quota: { ordersPerDay: number; tokensPerDay: null };
-  confirm: LendConfirm;
-  /** 可选：到期自动停（ISO） */
+  ordersPerDay: number;
+  /** 到期时间（ISO），距 grantedAt 不超过 7 天 */
   until?: string;
+  grantedAt?: string;
+  /** 暂停 = 整条不生效（v1 迁移来的条目、待出借方本人重新授权） */
+  paused?: { reason: string };
 }
 
 export interface BorrowEntry {
@@ -65,7 +68,8 @@ export const defaultLendFile = (): LendFile => ({ version: LEND_VERSION, enabled
 export type LendRead =
   | { status: "missing"; file: LendFile }
   | { status: "invalid"; error: string; file: LendFile }
-  | { status: "ok"; file: LendFile };
+  /** migrated = 磁盘上还是 v1，读出来的是迁移结果（下一次写盘落 v2） */
+  | { status: "ok"; file: LendFile; migrated?: true };
 
 /** 与 manager/peers.ts validPeerName 同口径：peer 名要进 `x@peer` 寻址 */
 const PEER_NAME_RE = /^[\w-]{1,32}$/;
@@ -86,10 +90,7 @@ function peerProblem(e: Record<string, unknown>): string | null {
   return null;
 }
 
-function lendEntryProblem(e: unknown): string | null {
-  if (!isObj(e)) return "不是对象";
-  const p = peerProblem(e);
-  if (p) return p;
+function slotsProblem(e: Record<string, unknown>): string | null {
   const fam = e.families;
   if (!isObj(fam) || Object.keys(fam).length === 0) return "families 必须是非空对象";
   for (const [k, n] of Object.entries(fam)) {
@@ -98,11 +99,36 @@ function lendEntryProblem(e: unknown): string | null {
   }
   if (!isRoles(e.roles)) return "roles 必须是 review / write 的非空、不重复列表";
   if (!isStrList(e.repos, REPO_RE, MAX_REPOS)) return "repos 必须是 GitHub owner/repo 的非空、不重复列表";
+  return null;
+}
+
+/** v1 条目（逐单确认 / 限时预先授权）：只为读旧文件、迁移用 */
+function lendEntryProblemV1(e: unknown): string | null {
+  if (!isObj(e)) return "不是对象";
+  const p = peerProblem(e) ?? slotsProblem(e);
+  if (p) return p;
   const q = e.quota;
   if (!isObj(q) || !isInt(q.ordersPerDay, 1, MAX_ORDERS_PER_DAY)) return `quota.ordersPerDay 必须是 1..${MAX_ORDERS_PER_DAY} 的整数`;
   if (q.tokensPerDay !== null && q.tokensPerDay !== undefined) return "quota.tokensPerDay 在 v1 必须是 null（按 token 限额还没实现）";
   if (e.confirm !== "per-order" && e.confirm !== "auto") return "confirm 只能是 per-order / auto";
   if (e.until !== undefined && !isIso(e.until)) return "until 必须是 ISO 时间";
+  return null;
+}
+
+function lendEntryProblem(e: unknown): string | null {
+  if (!isObj(e)) return "不是对象";
+  const p = peerProblem(e) ?? slotsProblem(e);
+  if (p) return p;
+  if (!isInt(e.ordersPerDay, 1, MAX_ORDERS_PER_DAY)) return `ordersPerDay 必须是 1..${MAX_ORDERS_PER_DAY} 的整数`;
+  for (const k of ["until", "grantedAt"] as const) if (e[k] !== undefined && !isIso(e[k])) return `${k} 必须是 ISO 时间`;
+  const known = ["peer", "fp", "families", "roles", "repos", "ordersPerDay", "until", "grantedAt", "paused"];
+  const extra = Object.keys(e).find((k) => !known.includes(k));
+  if (extra) return `不认识的字段 ${extra}（逐单确认 confirm / quota 是 v1 的写法，已退役）`;
+  if (e.paused !== undefined) {
+    const r = isObj(e.paused) ? e.paused.reason : undefined;
+    return typeof r === "string" && r.length > 0 && r.length <= 300 ? null : "paused 必须是 { reason: 300 字以内的说明 }";
+  }
+  if (!e.fp || e.until === undefined || e.grantedAt === undefined) return "授权必须写明 fp（对方实例指纹）、until（到期时间）和 grantedAt";
   return null;
 }
 
@@ -116,14 +142,15 @@ function borrowEntryProblem(e: unknown): string | null {
   return null;
 }
 
-/** 整个文件的结构问题；null = 合法。任何一处不合法都算整份无效（不挑着用：半截声明比没有声明更危险） */
+/** 整个文件的结构问题；null = 合法。v1 / v2 都认（v1 按旧规则核，读时迁移）。任何一处不合法都算整份无效（不挑着用：半截声明比没有声明更危险） */
 export function lendFileProblem(d: unknown): string | null {
   if (!isObj(d)) return "顶层不是对象";
-  if (d.version !== LEND_VERSION) return `version 必须是 ${LEND_VERSION}（缺失或不认识的版本按无效处理）`;
+  if (d.version !== LEND_VERSION && d.version !== 1) return `version 必须是 ${LEND_VERSION}（或待迁移的 1；缺失或不认识的版本按无效处理）`;
   if (typeof d.enabled !== "boolean") return "enabled 必须是 true / false";
   if (!Array.isArray(d.lend)) return "lend 必须是数组";
   if (!Array.isArray(d.borrow)) return "borrow 必须是数组";
-  for (const [key, list, check] of [["lend", d.lend, lendEntryProblem], ["borrow", d.borrow, borrowEntryProblem]] as const) {
+  const lendCheck = d.version === 1 ? lendEntryProblemV1 : lendEntryProblem;
+  for (const [key, list, check] of [["lend", d.lend, lendCheck], ["borrow", d.borrow, borrowEntryProblem]] as const) {
     const seen = new Set<string>();
     for (let i = 0; i < list.length; i++) {
       const p = check(list[i]);
@@ -136,14 +163,38 @@ export function lendFileProblem(d: unknown): string | null {
   return null;
 }
 
-/** 读：缺失 → 缺省；无效 → 缺省（= 关）并带原因；不抛。每次都读磁盘，不缓存（改完马上生效，坏了马上按关） */
-export async function readLend(path = LEND_PATH): Promise<LendRead> {
-  const r = await readJsonState(path);
+export const V1_PAUSED_REASON = "升级前的旧条目（逐单确认已退役）：请出借方本人用 lend grant 重新授权";
+
+/**
+ * v1 → v2：出借条目一律迁成暂停（逐单确认、限时预先授权都一样，按 He 10-01 拍板），字段原样搬、不补 until / grantedAt，
+ * 所以迁移本身放宽不了任何边界；借入条目原样保留。纯函数，对同一份 v1 跑几次结果都一样。
+ */
+export function migrateV1(d: Record<string, unknown>): LendFile {
+  const lend = (d.lend as Record<string, unknown>[]).map((e): LendEntry => ({
+    peer: e.peer as string, ...(e.fp ? { fp: e.fp as string } : {}), families: e.families as LendEntry["families"], roles: e.roles as LendRole[],
+    repos: e.repos as string[], ordersPerDay: (e.quota as { ordersPerDay: number }).ordersPerDay, ...(e.until ? { until: e.until as string } : {}),
+    paused: { reason: V1_PAUSED_REASON },
+  }));
+  return { version: LEND_VERSION, enabled: d.enabled as boolean, lend, borrow: d.borrow as BorrowEntry[] };
+}
+
+function toRead(r: StateRead): LendRead {
   if (r.status === "missing") return { status: "missing", file: defaultLendFile() };
   if (r.status === "corrupt") return { status: "invalid", error: r.error, file: defaultLendFile() };
   const problem = lendFileProblem(r.data);
   if (problem) return { status: "invalid", error: problem, file: defaultLendFile() };
-  return { status: "ok", file: r.data as LendFile };
+  const d = r.data as Record<string, unknown>;
+  return d.version === 1 ? { status: "ok", file: migrateV1(d), migrated: true } : { status: "ok", file: d as unknown as LendFile };
+}
+
+/** 读：缺失 → 缺省；无效 → 缺省（= 关）并带原因；不抛。每次都读磁盘，不缓存（改完马上生效，坏了马上按关） */
+export async function readLend(path = LEND_PATH): Promise<LendRead> {
+  return toRead(await readJsonState(path));
+}
+
+/** 同步版：出借 worker 的宿主看门狗用（lend-watchdog.ts 是同步检查） */
+export function readLendSync(path = LEND_PATH): LendRead {
+  return toRead(readJsonStateSync(path));
 }
 
 /**

@@ -58,6 +58,13 @@ describe("manager 写命令分类", () => {
     expect(isWriteInvocation("codex-sub-archive", ["off"])).toBe(true);
   });
 
+  test("i28-W1 出借一次授权：lend grant / revoke 是写（过认主守卫与写锁），lend status 仍是读", () => {
+    expect(isWriteInvocation("lend", ["grant", "team-a", "--repos", "o/r", "--until", "3d"])).toBe(true);
+    expect(isWriteInvocation("lend", ["revoke", "--peer", "team-a"])).toBe(true);
+    expect(isWriteInvocation("lend", ["revoke"])).toBe(true);
+    expect(isWriteInvocation("lend", ["status"])).toBe(false);
+  });
+
   test("读命令放行（备机排障要能看）", () => {
     for (const c of ["list", "sessions", "cost", "metrics", "doctor", "version", "token-list", "cron-list",
       "cron-history", "project-list", "peer-http-list", "pi-env", "tmux-capture"]) {

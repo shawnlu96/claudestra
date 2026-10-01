@@ -3,7 +3,9 @@
  * 自动卡的生命周期归调度器：执行者按调度派单做，不给 PM 发进度 / 交付 / 收到——这一节总是附上，模板覆盖不掉；
  * 去掉它，执行者会照手动卡的习惯去找 PM，PM 和调度器两头推同一张卡。
  * 项目要换正文：放一份 ledger/prompts/exec-template.md（占位符同 DEFAULT_TEMPLATE），不改代码。tests/dag-tools-start.test.ts。
+ * ui 卡另附截图交付一节（同样覆盖不掉）：缺截图时调度器在审查通过后把卡交回 PM，执行者得先知道要交什么。
  */
+import type { WorkflowTemplate } from "./ledger-scheduler.js";
 
 export interface PromptVars {
   task: string;
@@ -16,6 +18,8 @@ export interface PromptVars {
   spec: string;
   /** 台账目录（reviews/ 在它下面） */
   ledgerDir: string;
+  /** 流程模板；缺省 code。只有 ui 多一节，code / security 的说明逐字不变 */
+  template?: WorkflowTemplate;
 }
 
 const DEFAULT_TEMPLATE = `你是 {TASK}「{TITLE}」的执行者。PM 是 {PM}。审查由调度器另派一个跨模型的审查会话做，你不用自己找审查员。
@@ -39,10 +43,17 @@ const AUTO_SECTION = `
 - 只有这三种情况才找 PM：要改的文件超出卡上的文件范围；规格有歧义、必须有人拍板；环境坏了、自己修不了。找的时候一条消息说清楚，首行写「[需 PM 定 {TASK}]」。
 `;
 
+const UI_SECTION = `
+## ui 卡：合并前 owner 要看前后截图
+- 交付前登记截图：\`extra.screenshots\` 至少 2 个图片的绝对路径（改前 / 改后；深浅色或桌面 / 手机按规格），\`extra.screenshotsDigest\` 写这组图片的 sha256（64 位十六进制）。
+- 用 \`ledger task-set {TASK} --rev <rev> --extra '<json>'\` 写，它整份替换 extra，原有字段（fileGlobs 等）要带上；截图用 headless 脚本拍，不用 Playwright MCP 工具。
+- 缺截图或摘要，审查通过了也合不了，调度器会把卡交回 PM；代码再改过就重拍、重算摘要。
+`;
+
 export function renderExecPrompt(v: PromptVars, template: string = DEFAULT_TEMPLATE): string {
   const map: Record<string, string> = {
     "{TASK}": v.task, "{TITLE}": v.title, "{PM}": v.pm, "{BRANCH}": v.branch, "{BASE}": v.base, "{WORKTREE}": v.worktree, "{SPEC}": v.spec, "{LEDGER}": v.ledgerDir,
   };
   // 一次替换：值里恰好有 {TASK} 这类字样也不会被二次展开
-  return (template.trimEnd() + "\n" + AUTO_SECTION).replace(/\{(TASK|TITLE|PM|BRANCH|BASE|WORKTREE|SPEC|LEDGER)\}/g, (m) => map[m] ?? m);
+  return (template.trimEnd() + "\n" + AUTO_SECTION + (v.template === "ui" ? UI_SECTION : "")).replace(/\{(TASK|TITLE|PM|BRANCH|BASE|WORKTREE|SPEC|LEDGER)\}/g, (m) => map[m] ?? m);
 }
