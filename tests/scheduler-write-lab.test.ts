@@ -1,37 +1,28 @@
 /**
  * i28-W9 across both instances (tests/lend-lab-kit.ts): A's real ledger, scheduler tick, pool CLI and push loop; B's real lend
- * loop (hello, admit, claim, clone, push probe, worker start, push + PR, result with the receipt verified). B's write path is
- * opened with the lend-policy test switch `writeOpen` (production opens it with i28-R7e). A build order goes to B's Codex,
- * B delivers the lend/ branch, the card moves to review and its review is placed across, on a local Claude reviewer, never
- * back at B (which only lends Codex). With write closed at B, its hello grants no write and A builds locally.
+ * loop (hello, admit, claim, clone, push probe, worker start through manager create's last gate, push + PR, result with the
+ * receipt verified). Lending writes is open in production since i28-R7e (WRITE_ROLE_OPEN); what decides is B's grant. A build
+ * order goes to B's Codex, B delivers the lend/ branch, the card moves to review and its review is placed across, on a local
+ * Claude reviewer, never back at B (which only lends Codex). A grant without write: B's hello says so and A builds locally.
  * The worker's own `lend submit` is covered by tests/lend-write.test.ts; here it is the journal row it writes.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { lendBranch } from "../src/lib/lend-git.js";
 import { advance } from "../src/lib/lend-journal.js";
+import type { LendRole } from "../src/lib/lend-config.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { H2, toBuild } from "./scheduler-auto-helpers.js";
 import { FP } from "./lend-harness.js";
-import { H1, lab, MATE, type Lab } from "./lend-lab-kit.js";
+import { H1, lab, MATE, MODEL, type Lab } from "./lend-lab-kit.js";
 
 const WRITE: RemotePolicy = { mode: "balance", roles: ["review", "write"], repo: "o/r", poolTimeoutMin: 15 };
 
-/** A borrows writing from B at `first`; B grants review + write; `open` = B's lend-policy writeOpen (R7e's switch). */
-async function writeLab(open: boolean): Promise<Lab & { heads: Record<string, string> }> {
+/** A borrows writing from B at `first`; B's grant carries `roles` (the lab's default is review only). */
+async function writeLab(roles: LendRole[]): Promise<Lab & { heads: Record<string, string> }> {
   const heads: Record<string, string> = {};
   const L = await lab({ remote: WRITE, remoteHead: (branch) => heads[branch] ?? H1 });
-  L.b.writeOpen = open;
-  // manager create's last gate (lendCreateDenied) reads the production WRITE_ROLE_OPEN with no test seam; R7e opens it.
-  // Until then this worker keeps the loop's own gate (which honours writeOpen) and stands in for that last check.
-  L.b.worker = { ...L.b.worker, create: async (name, cwd, _purpose, gate, order) => {
-    const denied = await gate();
-    if (denied) return { ok: false, error: denied };
-    L.spawned.push({ name, order, args: [] });
-    L.registry.set(name, { sessionId: `thr-${name}`, cwd });
-    return { ok: true };
-  } };
-  L.grant([{ ...L.entry, roles: ["review", "write"] }]);
+  L.grant([{ ...L.entry, roles }]);
   L.borrow[0] = { ...L.borrow[0], roles: ["review", "write"], priority: "first" };
   // The fixture's reviewer is an ACP Codex session; the review of a Codex-written head is a Claude one, driven over tmux.
   const reg = JSON.parse(readFileSync(L.f.registryPath, "utf8"));
@@ -50,12 +41,13 @@ async function until(L: Lab, done: () => boolean, max = 12) {
 
 describe("a build order across two instances", () => {
   test("A pools the build at B → B claims, clones, starts its Codex, pushes the lend/ branch → review placed across, on Claude", async () => {
-    const L = await writeLab(true);
+    const L = await writeLab(["review", "write"]);
     try {
       await until(L, () => bOrders(L)[0]?.state === "started");
       const [a] = L.orders();
       expect(a).toMatchObject({ step: "write", peer: MATE, family: "codex", status: "claimed", head: H1, branch: lendBranch("T1", FP) });
-      expect(L.spawned).toMatchObject([{ order: a.orderId }]);
+      expect(L.spawned).toMatchObject([{ order: a.orderId, args: expect.arrayContaining([MODEL]) }]);
+      expect(L.refusedSpawns).toEqual([]);
       expect(L.f.sent.filter((s) => s.text.includes("开工"))).toEqual([]); // A's local author got no work order
       // The worker commits H2 on the lend/ branch (main stays at H1, the order's start) and the push lands it there.
       L.heads[lendBranch("T1", FP)!] = H2;
@@ -74,11 +66,13 @@ describe("a build order across two instances", () => {
     } finally { L.f.close(); }
   });
 
-  test("write still closed at B (before R7e): a grant with write is void there, A never offers it a build and writes locally", async () => {
-    const L = await writeLab(false);
+  test("B's grant without write: its hello grants review only, A never offers it a build and writes locally", async () => {
+    const L = await writeLab(["review"]);
     try {
       await L.passes(4);
-      expect(L.wire.filter((w) => JSON.stringify(w.body).includes("\"write\""))).toEqual([]);
+      const hellos = L.wire.filter((w) => w.op === "hello");
+      expect(hellos.length).toBeGreaterThan(0);
+      for (const h of hellos) expect(h.body).toMatchObject({ grant: { roles: ["review"] } });
       expect(L.orders()).toEqual([]);
       expect(bOrders(L)).toEqual([]);
       expect(L.f.intents().at(-1)).toMatchObject({ action: "dispatch", recipient: "agent-task-one" });
