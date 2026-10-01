@@ -45,7 +45,10 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
 type AnyEntry = LendFile["lend"][number] | LendFile["borrow"][number];
 type Ctx = Awaited<ReturnType<typeof readLendContext>>;
 
-/** lend.json 写完之后调（先写自己的、再读对方的）：registry 里授权已不覆盖的出借 worker 当场停，返回前确认窗口已关 */
+/**
+ * lend.json 写完之后调（先写自己的、再读对方的）：registry 里授权已不覆盖的出借 worker 当场停，返回前确认窗口已关。
+ * 出错不往外抛：lend.json 已经写成，报成命令失败会让人以为没收回；记进 unconfirmed，调度服务下一轮和宿主看门狗照样会停。
+ */
 const stopNow = (): Promise<StopReport> => stopRevokedWorkers({
   workers: async () => Object.entries((await loadRegistry()).agents).filter(([n]) => isLendWorkerName(n))
     .map(([name, a]) => ({ name, createPid: a.pending?.op === "create" ? a.pending.pid : undefined })),
@@ -62,7 +65,7 @@ const stopNow = (): Promise<StopReport> => stopRevokedWorkers({
     if (a?.status === "active" && !a.pending) await saveRegistry({ ...reg, agents: { ...reg.agents, [name]: { ...a, status: "stopped" } } });
   },
   sleep: (ms) => Bun.sleep(ms),
-});
+}).catch((e) => ({ stopped: [], unconfirmed: [{ name: "出借 worker", why: `当场停出错：${(e as Error).message}` }] }));
 
 const stopText = (r: StopReport): string => (r.stopped.length ? `；已当场停掉 ${r.stopped.join("、")}` : "") +
   (r.unconfirmed.length ? `；没能确认停掉：${r.unconfirmed.map((u) => `${u.name}（${u.why}）`).join("、")}` : "");
