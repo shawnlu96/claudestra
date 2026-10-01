@@ -35,7 +35,7 @@ const AUTO_SECTION = `
 ## 本卡是自动卡：生命周期归调度器，不找 PM
 - 派单全部来自调度服务（take_order 取单）。**不要给 {PM} 发任何进度、交付或「收到」消息**，PM 不在这条链上。
 - 「复述」单：把复述（≤ 40 行）写进 {LEDGER}/reviews/{TASK}-restate.md，再把阶段推到 restate（\`ledger stage {TASK} --from spec --to restate --text "复述见 reviews/{TASK}-restate.md"\`），然后停下等开工单。
-- 「开工 / 修复」单：做完 push，用 deliver 工具（或 \`ledger deliver {TASK} --from build|fix --head <完整 sha>\`）交付，就结束这一轮。调度器会自己派审、转修复、排合并。
+- 「开工 / 修复」单：做完 push，**开好 PR（base main，已开过的不用重开）**，再用 deliver 工具（或 \`ledger deliver {TASK} --from build|fix --head <完整 sha> --pr <完整 PR 链接>\`）交付，就结束这一轮。PR 链接由 deliver 自动登记，没开 PR 会被拒。调度器会自己派审、转修复、排合并。
 - 只有这三种情况才找 PM：要改的文件超出卡上的文件范围；规格有歧义、必须有人拍板；环境坏了、自己修不了。找的时候一条消息说清楚，首行写「[需 PM 定 {TASK}]」。
 `;
 
