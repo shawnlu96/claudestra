@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseRemotePolicy, type RemotePolicy } from "../src/lib/scheduler-config.js";
-import { peerFamily, placeFor, type PeerFacts, type PlacementFacts } from "../src/lib/scheduler-family-pick.js";
+import { allowLegacyReview, peerFamily, placeFor, type PeerFacts, type PlacementFacts } from "../src/lib/scheduler-family-pick.js";
 
 const policy: RemotePolicy = { mode: "balance", roles: ["write", "review"], repo: "o/r", poolTimeoutMin: 15, localPriority: "off" };
 const peer = (name: string, claude: number, codex: number, priority: PeerFacts["priority"] = "balance"): PeerFacts => ({
@@ -31,6 +31,10 @@ describe("writeFamilies configuration", () => {
 
 describe("available family under the existing placement rules", () => {
   const preferClaude: RemotePolicy = { ...policy, writeFamilies: ["claude", "codex"] };
+  test("legacy lenders offer only Codex review; Claude review requires hello capacity", () => {
+    expect(allowLegacyReview("codex")).toBe(true);
+    expect(allowLegacyReview("claude")).toBe(false);
+  });
   test.each([[2, 2, "claude"], [0, 2, "codex"], [2, 0, "claude"]] as const)("Claude %d / Codex %d → %s", (claude, codex, family) => {
     const p = peer("writer", claude, codex);
     const f = facts([p], preferClaude), original = JSON.stringify(f);

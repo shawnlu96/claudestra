@@ -13,6 +13,7 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { type RemotePolicy } from "../src/lib/scheduler-config.js";
 import { orderFamily, remoteWork } from "../src/lib/scheduler-placement-plan.js";
+import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { startPlacement } from "../src/lib/scheduler-placement-start.js";
 import { autoFixture, H1, H2, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -31,7 +32,8 @@ async function setup(writeFamilies?: AuthorFamily[]) {
   const lend = { borrow: async () => borrow, schedulerPolicy: () => policy, notifyPm: async () => {}, result: {
     sign: (fields: string[]) => signPurpose(RECEIPT_PURPOSE, fields, key), peerFp: async () => "abcd-ef01-2345-6789",
     remoteHead: async (_repo: string, branch: string) => ({ ok: true as const, head: branch === "main" ? H1 : H2 }),
-    reportDir: () => f.dir, writeReport: (path: string, text: string) => writeFileSync(path, text),
+    // Keep the fixture report transferable: the order carries its full head in a separate field.
+    reportDir: () => f.dir, writeReport: (path: string, text: string) => writeFileSync(path, text.replace(`head：${H2}`, `head：${H2.slice(0, 12)}`)),
   } };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args);
   const deps = { ...f.tickDeps, borrow: async () => borrow, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)) };
@@ -113,10 +115,14 @@ describe("daemon → CLI → actual lend order", () => {
       expect(orderFamily(full, "writer", "fix")).toBeNull();
       expect(await p.tick()).toMatchObject({ step: "waiting" });
       p.hello("writer", 1, 1);
-      // The base revision's remote report embeds a SHA that its outbound gate refuses; test the fix decision independently of that formatter.
       const ready = p.snapshot();
       expect(remoteWork(ready, Number.MAX_SAFE_INTEGER, "fix")).toMatchObject({ peer: "writer", reason: expect.stringContaining(`的 ${family} worker`) });
       expect(orderFamily(ready, "writer", "fix")).toBe(family);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      expect(p.orders()).toHaveLength(3);
+      expect(p.orders().at(-1)).toMatchObject({ step: "fix", status: "pooled", peer: "writer", family, head: H2, branch: p.orders()[0].branch });
+      expect(p.orders().at(-1)?.text).toContain("P1: handle empty input");
+      expect(p.f.ensured.filter((s) => s.role === "reviewer")).toEqual([]);
     } finally { p.close(); }
   });
   test("start_node filters the same write families before pinning a peer", async () => {
@@ -134,6 +140,45 @@ describe("daemon → CLI → actual lend order", () => {
 });
 
 describe("locally disabled cross-family review waits automatically", () => {
+  for (const mode of ["balance", "overflow"] as const) {
+    test.each(["claude", "codex"] as const)(`${mode}: %s author can use a legacy peer only for Codex review`, async (family) => {
+      const p = await setup([family]);
+      try {
+        p.hello("writer", 1, 1);
+        await deliverRemote(p, family);
+        p.remote.mode = mode;
+        p.remote.roles = ["review"];
+        delete p.remote.repo;
+        if (mode === "overflow") p.remote.reviewFirst = ["old"];
+        p.borrow.splice(0, p.borrow.length, { peer: "old", projects: ["p"], roles: ["review"], maxOpen: 1 });
+        expect(p.snapshot().pool?.peers).toMatchObject([{ peer: "old", open: 0, maxOpen: 1, v2: null }]);
+        if (family === "claude") {
+          expect(planScheduler(p.snapshot())).toMatchObject({ kind: "intent", action: "review", recipient: "peer:old" });
+          expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+          expect(p.orders().at(-1)).toMatchObject({ peer: "old", family: "codex", step: "review" });
+          expect(p.f.notices).toEqual([]);
+          expect(p.f.ensured.filter((s) => s.role === "reviewer")).toEqual([]);
+          return;
+        }
+        expect(planScheduler(p.snapshot())).toMatchObject({ kind: "wait", code: "placement" });
+        expect(await p.tick()).toMatchObject({ step: "waiting" });
+        p.reader.close();
+        await p.tick();
+        await p.tick();
+        expect(p.orders()).toHaveLength(1);
+        expect(p.f.notices).toHaveLength(1);
+        expect(p.f.notices[0]).toContain("跨家族 peer");
+        expect(getWorkflow(p.f.db, "T1")?.mode).toBe("auto");
+        expect(p.f.ensured.filter((s) => s.role === "reviewer")).toEqual([]);
+        p.hello("old", 0, 1);
+        expect(await p.tick()).toMatchObject({ step: "waiting" });
+        expect(p.f.notices).toHaveLength(1);
+        p.hello("old", 1, 0);
+        expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+        expect(p.orders().at(-1)).toMatchObject({ peer: "old", family: "claude", step: "review" });
+      } finally { p.close(); }
+    });
+  }
   test("scheduler may record this notice, while commands outside the service allowlist remain forbidden", async () => {
     const p = await setup();
     try {

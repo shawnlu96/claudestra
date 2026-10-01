@@ -6,6 +6,9 @@ export { PEER_PLACEMENT, type PeerFacts, type PlaceRole, type PlacementFacts } f
 
 const DEFAULT_WRITE_FAMILIES: readonly AuthorFamily[] = ["codex"];
 
+/** Proto-1 lenders hard-code Codex and reject Claude orders; a Claude reviewer requires a hello advertising its slot. */
+export const allowLegacyReview = (family: AuthorFamily): boolean => family === "codex";
+
 /** Omission preserves the old config shape; the picker supplies Codex as the default. */
 export function parseWriteFamilies(raw: unknown, where: string): { writeFamilies?: AuthorFamily[] } {
   if (raw === undefined) return {};

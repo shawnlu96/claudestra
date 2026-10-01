@@ -8,7 +8,7 @@
  */
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { PEER_PLACEMENT, peerFamily, placeFor, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-family-pick.js";
+import { PEER_PLACEMENT, peerFamily, placeFor, allowLegacyReview, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-family-pick.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 
@@ -80,7 +80,7 @@ function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Aw
   const family = otherFamily(s.workflow.authorFamily);
   const placed = placeFor(snapshotPlacementFacts(s, since, "review"), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
-  const legacy = legacyPool(s, p, since);
+  const legacy = allowLegacyReview(family) ? legacyPool(s, p, since) : null;
   if (placed.kind === "wait") return legacy ?? { wait: placed.reason };
   return legacy && p.remote.reviewFirst?.length ? { ...legacy, reason: `${legacy.reason}（${placed.reason}）` } : legacy;
 }
