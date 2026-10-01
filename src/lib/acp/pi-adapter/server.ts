@@ -33,18 +33,28 @@ export interface PiServerDeps {
 type Settled = { outcome: TurnOutcome; cancelled: boolean };
 type Waiter = { resolve: (s: Settled) => void; reject: (e: Error) => void };
 
+/**
+ * 一代 = 一次 session/new|resume 起的一个 pi 和挂在它上面的全部在途状态。/clear、resume、宿主断开时整代作废（closePi）：
+ * 在途请求 await 回来先核对自己那一代还是不是当前的，不是就以错误收尾，绝不把等待、用量、配置记到新会话头上。
+ */
+interface Gen {
+  readonly link: PiLink;
+  readonly sessionId: string;
+  readonly mapper: ReturnType<typeof createPiEventMapper>;
+  readonly waiters: Waiter[];
+  options: Rec[];
+  running: boolean;
+  inflight: number;
+  cancelRequested: boolean;
+}
+
+const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断开），这一轮作废";
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export class PiAcpServer {
   private readonly acp: RpcPeer;
-  private pi: PiLink | null = null;
-  private sessionId = "";
-  private mapper = createPiEventMapper();
-  private options: Rec[] = [];
-  private running = false;
-  private inflight = 0;
-  private cancelRequested = false;
-  private waiters: Waiter[] = [];
+  private gen: Gen | null = null;
+  private opening: Promise<unknown> = Promise.resolve();
 
   constructor(wire: RpcWire, private readonly deps: PiServerDeps) {
     const acp = (this.acp = createRpcPeer(wire, { log: deps.log }));
@@ -57,13 +67,12 @@ export class PiAcpServer {
     }));
     acp.onRequest("session/new", async (p: Rec) => {
       const id = deps.newSessionId();
-      await this.open(id, p);
-      return { sessionId: id, configOptions: this.options };
+      const g = await this.open(id, p);
+      return { sessionId: id, configOptions: g.options };
     });
     acp.onRequest("session/resume", async (p: Rec) => {
       if (typeof p?.sessionId !== "string" || !p.sessionId) throw new RpcError(INVALID_PARAMS, "session/resume 缺 sessionId");
-      await this.open(p.sessionId, p);
-      return { configOptions: this.options };
+      return { configOptions: (await this.open(p.sessionId, p)).options };
     });
     acp.onRequest("session/prompt", (p: Rec) => this.prompt(p));
     acp.onRequest("_session/steering", (p: Rec) => this.steer(p));
@@ -72,105 +81,119 @@ export class PiAcpServer {
     acp.onClosed(() => void this.closePi().finally(() => deps.exit(0)));
   }
 
-  private update(u: Rec): void {
-    this.acp.notify("session/update", { sessionId: this.sessionId, update: u });
+  /** 只发当前这一代的；被换下的那一代迟到的输出（用量、收尾事件）直接丢 */
+  private update(g: Gen, u: Rec): void {
+    if (g === this.gen) this.acp.notify("session/update", { sessionId: g.sessionId, update: u });
   }
 
-  /** 当前 pi；请求带的 sessionId 对不上就拒（宿主只会问自己接上的那个会话） */
-  private live(p: Rec): PiLink {
-    if (!this.pi) throw new RpcError(INVALID_PARAMS, "还没有会话：先 session/new 或 session/resume");
-    if (p?.sessionId !== this.sessionId) throw new RpcError(INVALID_PARAMS, `不认识的 sessionId：${p?.sessionId}`);
-    return this.pi;
+  /** 当前这一代；请求带的 sessionId 对不上就拒（宿主只会问自己接上的那个会话） */
+  private live(p: Rec): Gen {
+    const g = this.gen;
+    if (!g) throw new RpcError(INVALID_PARAMS, "还没有会话：先 session/new 或 session/resume");
+    if (p?.sessionId !== g.sessionId) throw new RpcError(INVALID_PARAMS, `不认识的 sessionId：${p?.sessionId}`);
+    return g;
   }
 
-  private async open(id: string, p: Rec): Promise<void> {
+  /** await 回来先调：这期间 g 被换下了就以错误收尾（tests/pi-acp-generation.test.ts） */
+  private stillLive(g: Gen): void {
+    if (g !== this.gen) throw new RpcError(INTERNAL_ERROR, STALE);
+  }
+
+  /** 串行起会话：两个 session/new 交错时后一个等前一个起完，不会各起一个 pi、漏停其中一个 */
+  private open(id: string, p: Rec): Promise<Gen> {
+    const run = this.opening.then(() => this.openNow(id, p));
+    this.opening = run.catch(() => undefined); // 失败已经交给发起它的那个请求；这里只是让下一次照常排队
+    return run;
+  }
+
+  private async openNow(id: string, p: Rec): Promise<Gen> {
     const mcp = mcpServersForPi(p?.mcpServers);
     if ("error" in mcp) throw new RpcError(INVALID_PARAMS, mcp.error);
     await this.closePi();
     const env: Record<string, string> = Object.keys(mcp.servers).length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
     const link = this.deps.openPi({ sessionId: id, cwd: typeof p?.cwd === "string" && p.cwd ? p.cwd : process.cwd(), env });
-    this.pi = link;
-    this.sessionId = id;
-    this.mapper = createPiEventMapper();
+    const g: Gen = { link, sessionId: id, mapper: createPiEventMapper(), waiters: [], options: [], running: false, inflight: 0, cancelRequested: false };
+    this.gen = g;
     link.onRecord((rec) => {
-      if (link === this.pi) this.onRecord(link, rec); // 被 /clear 换下的旧 pi 收尾时的输出不算
+      if (g === this.gen) this.onRecord(g, rec); // 被 /clear 换下的旧 pi 收尾时的输出不算
     });
     link.onExit((why) => {
-      if (link !== this.pi) return;
+      if (g !== this.gen) return;
       this.deps.log(`pi 意外退出（${why}），适配器随之退出`);
-      for (const w of this.waiters.splice(0)) w.reject(new RpcError(INTERNAL_ERROR, `pi 退出了（${why}）`));
+      for (const w of g.waiters.splice(0)) w.reject(new RpcError(INTERNAL_ERROR, `pi 退出了（${why}）`));
       this.deps.exit(1);
     });
-    await this.refreshOptions(link, STARTUP_TIMEOUT_MS);
+    await this.refreshOptions(g, STARTUP_TIMEOUT_MS);
+    return g;
   }
 
-  /** 换下 / 关掉当前 pi：它的退出不再算意外（onExit 认 this.pi），所以还在等它 settle 的回合在这里就失败，不能悬着 */
+  /** 换下 / 关掉当前这一代：它的退出不再算意外（onExit 认当前代），还在等它 settle 的回合在这里就失败，不能悬着 */
   private async closePi(): Promise<void> {
-    const old = this.pi;
-    this.pi = null;
+    const old = this.gen;
+    this.gen = null;
     if (!old) return;
-    for (const w of this.waiters.splice(0)) w.reject(new RpcError(INTERNAL_ERROR, "会话被换掉或关闭了（session/new、resume 或宿主断开），这一轮作废"));
-    this.running = false;
-    this.cancelRequested = false;
-    old.stop();
-    await old.exited;
+    for (const w of old.waiters.splice(0)) w.reject(new RpcError(INTERNAL_ERROR, STALE));
+    old.link.stop();
+    await old.link.exited;
   }
 
-  private async refreshOptions(link: PiLink, timeoutMs: number): Promise<void> {
+  private async refreshOptions(g: Gen, timeoutMs: number): Promise<void> {
     const [state, models, levels] = await Promise.all([
-      link.command({ type: "get_state" }, timeoutMs),
-      link.command({ type: "get_available_models" }, timeoutMs),
-      link.command({ type: "get_available_thinking_levels" }, timeoutMs),
+      g.link.command({ type: "get_state" }, timeoutMs),
+      g.link.command({ type: "get_available_models" }, timeoutMs),
+      g.link.command({ type: "get_available_thinking_levels" }, timeoutMs),
     ]);
-    this.options = configOptions(state, models?.models, levels?.levels);
+    this.stillLive(g);
+    g.options = configOptions(state, models?.models, levels?.levels);
   }
 
-  private onRecord(link: PiLink, rec: Rec): void {
+  private onRecord(g: Gen, rec: Rec): void {
     if (rec.type === "extension_ui_request") {
       const reply = dialogCancel(rec);
       if (!reply) return;
       this.deps.log(`扩展弹框（${rec.method}：${rec.title ?? ""}）按规矩回了取消`);
-      return link.send(reply);
+      return g.link.send(reply);
     }
     if (rec.type === "extension_error") return this.deps.log(`pi 扩展出错（${rec.extensionPath} / ${rec.event}）：${rec.error}`);
-    for (const u of this.mapper.push(rec)) this.update(u);
-    if (rec.type === "agent_start" && !this.running) {
-      this.running = true;
-      this.update(threadStatus("active"));
+    for (const u of g.mapper.push(rec)) this.update(g, u);
+    if (rec.type === "agent_start" && !g.running) {
+      g.running = true;
+      this.update(g, threadStatus("active"));
     }
-    if (rec.type === "agent_settled") this.settle(link);
+    if (rec.type === "agent_settled") this.settle(g);
   }
 
-  private settle(link: PiLink): void {
-    this.running = false;
-    this.update(threadStatus("idle"));
-    const s: Settled = { outcome: this.mapper.takeOutcome(), cancelled: this.cancelRequested };
-    this.cancelRequested = false;
-    for (const w of this.waiters.splice(0)) w.resolve(s);
-    void this.reportUsage(link);
+  private settle(g: Gen): void {
+    g.running = false;
+    this.update(g, threadStatus("idle"));
+    const s: Settled = { outcome: g.mapper.takeOutcome(), cancelled: g.cancelRequested };
+    g.cancelRequested = false;
+    for (const w of g.waiters.splice(0)) w.resolve(s);
+    void this.reportUsage(g);
   }
 
-  private async reportUsage(link: PiLink): Promise<void> {
+  private async reportUsage(g: Gen): Promise<void> {
     try {
-      const u = usageUpdate(await link.command({ type: "get_session_stats" }, COMMAND_TIMEOUT_MS));
-      if (u) this.update(u);
+      const u = usageUpdate(await g.link.command({ type: "get_session_stats" }, COMMAND_TIMEOUT_MS));
+      if (u) this.update(g, u);
     } catch (e) {
       this.deps.log(`取用量失败（本回合不报 usage_update）：${errText(e)}`);
     }
   }
 
   private async prompt(p: Rec): Promise<Rec> {
-    const link = this.live(p);
+    const g = this.live(p);
     let wait: Promise<Settled> | null = null;
-    this.inflight++;
+    g.inflight++;
     try {
-      const r = await link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
-      if (r?.disposition !== "handled") wait = new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
+      const r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
+      this.stillLive(g); // 确认回来前被 /clear 换下了：等待既不该挂到新会话上，也不会再有人兑现
+      if (r?.disposition !== "handled") wait = new Promise((resolve, reject) => g.waiters.push({ resolve, reject }));
     } finally {
-      this.inflight--;
+      g.inflight--;
     }
     if (!wait) {
-      if (!this.running && !this.waiters.length) this.cancelRequested = false; // 扩展命令当场处理完，没有回合可打断
+      if (!g.running && !g.waiters.length) g.cancelRequested = false; // 扩展命令当场处理完，没有回合可打断
       return { stopReason: "end_turn" };
     }
     const { outcome, cancelled } = await wait;
@@ -181,29 +204,32 @@ export class PiAcpServer {
   }
 
   private async steer(p: Rec): Promise<Rec> {
-    const r = await this.live(p).command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS);
+    const g = this.live(p);
+    const r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS);
+    this.stillLive(g);
     return { outcome: r?.disposition === "started" ? "startedNewTurn" : "injected" };
   }
 
   private async setOption(p: Rec): Promise<Rec> {
-    const link = this.live(p);
-    const opt = this.options.find((o) => o.id === p.configId);
+    const g = this.live(p);
+    const opt = g.options.find((o) => o.id === p.configId);
     if (!opt || !opt.options.some((c: Rec) => c.value === p.value)) throw new RpcError(INVALID_PARAMS, `配置项 ${p.configId} 没有 ${p.value} 这个值`);
     if (p.configId === "model") {
       const m = splitModelValue(String(p.value));
       if (!m) throw new RpcError(INVALID_PARAMS, `模型要写成 provider/model：${p.value}`);
-      await link.command({ type: "set_model", ...m }, COMMAND_TIMEOUT_MS);
+      await g.link.command({ type: "set_model", ...m }, COMMAND_TIMEOUT_MS);
     } else {
-      await link.command({ type: "set_thinking_level", level: p.value }, COMMAND_TIMEOUT_MS);
+      await g.link.command({ type: "set_thinking_level", level: p.value }, COMMAND_TIMEOUT_MS);
     }
-    await this.refreshOptions(link, COMMAND_TIMEOUT_MS); // 思考档会按模型收敛（deepseek 设 low 实际是 high），以 pi 回报的为准
-    return { configOptions: this.options };
+    await this.refreshOptions(g, COMMAND_TIMEOUT_MS); // 思考档会按模型收敛（deepseek 设 low 实际是 high），以 pi 回报的为准
+    return { configOptions: g.options };
   }
 
   /** 只有真有回合（在跑 / 在等 / 正在提交）才记「被打断」，否则会错记到下一回合头上；abort 本身空闲时发也无害 */
   private cancel(p: Rec): void {
-    if (!this.pi || p?.sessionId !== this.sessionId) return;
-    if (this.running || this.waiters.length || this.inflight) this.cancelRequested = true;
-    this.pi.command({ type: "abort" }, COMMAND_TIMEOUT_MS).catch((e) => this.deps.log(`abort 失败：${errText(e)}`));
+    const g = this.gen;
+    if (!g || p?.sessionId !== g.sessionId) return;
+    if (g.running || g.waiters.length || g.inflight) g.cancelRequested = true;
+    g.link.command({ type: "abort" }, COMMAND_TIMEOUT_MS).catch((e) => this.deps.log(`abort 失败：${errText(e)}`));
   }
 }
