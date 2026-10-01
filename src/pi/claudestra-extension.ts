@@ -421,6 +421,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     connect();
   });
 
+  // 回合开始再写一次：激活（codemode）发生在别的扩展的 session_start 里，首份快照会少一个工具
+  pi.on("agent_start", (_event, ctx) => void writeEnvSnapshot(ctx));
+
   // 模型换了就重写快照（档案里钉的模型/用户手动切换都走这里）
   pi.on("model_select", (_event, ctx) => writeEnvSnapshot(ctx));
 

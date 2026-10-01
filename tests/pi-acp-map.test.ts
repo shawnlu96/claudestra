@@ -120,3 +120,22 @@ describe("Pi 适配器 · 配置、用量、弹框、结局", () => {
     expect(stopReasonOf({}, false)).toBe("end_turn");
   });
 });
+
+describe("Pi 适配器 · 嵌套工具调用", () => {
+  test("带 parentToolCallId 的嵌套调用标成「↳ 」并在 _meta 留下父 id（网页才看得出脚本跑了什么）", () => {
+    const m = createPiEventMapper();
+    const [nested] = m.push({
+      type: "tool_execution_start", toolCallId: "c1/1", toolName: "bash", args: { command: "ls" }, parentToolCallId: "c1",
+    });
+    expect(nested.sessionUpdate).toBe("tool_call");
+    expect(String(nested.title).startsWith("↳ ")).toBe(true);
+    expect((nested._meta as Record<string, unknown>).parentToolCallId).toBe("c1");
+  });
+
+  test("顶层调用不加标记（不污染平时的工具流）", () => {
+    const m = createPiEventMapper();
+    const [top] = m.push({ type: "tool_execution_start", toolCallId: "c2", toolName: "bash", args: { command: "ls" } });
+    expect(String(top.title).startsWith("↳ ")).toBe(false);
+    expect((top._meta as Record<string, unknown> | undefined)?.parentToolCallId).toBeUndefined();
+  });
+});
