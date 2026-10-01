@@ -84,10 +84,10 @@ export function parseMaxOpen(raw: string, limit: number): { value: number; clamp
   return { value, clamped: value !== n };
 }
 
-/** 对方授权给出的名额：各家族上报的 total 取最大（peer 卡不分家族，出借方现在只报 codex）；没上报 → null */
+/** 对方能同时接的总单数：各家族上报的 total 相加（我方上限管派给这个 peer 的总单数，不分家族）；没上报 → null */
 export function grantedSlots(p: Pick<PeerView, "reported">): number | null {
   const r = p.reported;
-  return r ? Math.max(...Object.values(r).map((s) => s.total)) : null;
+  return r ? Object.values(r).reduce((sum, s) => sum + s.total, 0) : null;
 }
 
 /** 「对方只开了 M 个」：对方名额小于我方上限才给 M；不小于或没上报 → null（不显示） */

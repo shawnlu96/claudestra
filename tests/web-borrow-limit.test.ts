@@ -91,18 +91,21 @@ describe("−/+ 连点合并成一次保存", () => {
 const reported = (codex: number, claude = 0): Pick<PeerView, "reported"> => ({ reported: { codex: { total: codex, busy: 0 }, claude: { total: claude, busy: 0 } } });
 
 describe("对方只开了 M 个", () => {
-  test("对方名额 = 各家族 total 取最大；没上报 → null", () => {
+  test("对方名额 = 各家族 total 相加；没上报 → null", () => {
     expect(grantedSlots(reported(3))).toBe(3);
-    expect(grantedSlots(reported(2, 5))).toBe(5);
+    expect(grantedSlots(reported(2, 5))).toBe(7);
     expect(grantedSlots({ reported: null })).toBeNull();
   });
   test("名额小于上限才显示 M", () => {
     expect(lenderCap(reported(3), 12)).toBe(3);
     expect(lenderCap(reported(0), 2)).toBe(0);
+    expect(lenderCap(reported(3, 4), 12)).toBe(7);
   });
   test("名额不小于上限、或没上报 → 不显示", () => {
     expect(lenderCap(reported(12), 12)).toBeNull();
     expect(lenderCap(reported(20), 12)).toBeNull();
+    expect(lenderCap(reported(6, 6), 12)).toBeNull(); // 单看哪家都不够，加起来够
+
     expect(lenderCap({ reported: null }, 12)).toBeNull();
   });
 });
