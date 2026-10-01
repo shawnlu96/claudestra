@@ -20,6 +20,7 @@ import { handleLastSeen } from "./last-seen.js";
 import { handleTalkApi } from "./talk.js";
 import { handleTeamApi } from "./team.js";
 import { handleLedgerApi } from "./ledger.js";
+import { handleWorkBoardApi } from "./work-board.js";
 import { handleLedgerDagApi } from "./ledger-dag.js";
 import { handleLendApi } from "./lend.js";
 import { handleLendGrantApi } from "./lend-grant.js";
@@ -48,7 +49,7 @@ const FAMILIES: Family[] = [
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
-  handleLendGrantApi, handleBorrowApi, handleProductBoardApi,
+  handleLendGrantApi, handleBorrowApi, handleWorkBoardApi, handleProductBoardApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {
