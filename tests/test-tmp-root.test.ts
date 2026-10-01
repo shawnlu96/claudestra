@@ -149,6 +149,20 @@ test("startup reaps only old prefixed directories of dead owners, never symlinks
   expect(warnings).toContain("not a real directory");
 });
 
+test("a short bun test run finishes the background stale sweep before it exits", () => {
+  const f = fixture();
+  // Enough unrelated entries that listing them outlasts an empty test file (the review probe used 40k).
+  for (let i = 0; i < 40_000; i++) writeFileSync(join(f.parent, `unrelated-${i}`), "");
+  const stale = join(f.parent, `cstra-test-run-${Bun.spawnSync(["true"]).pid}-left`);
+  mkdirSync(stale);
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1_000);
+  utimesSync(stale, old, old);
+  const result = Bun.spawnSync([process.execPath, "test", testFile(f.dir, "void 0")], { cwd: f.dir, env: f.env });
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  expect(existsSync(stale)).toBe(false);
+  expect(readdirSync(f.parent)).toHaveLength(40_000);
+}, SPAWN_TIMEOUT);
+
 test("the stale sweep does not block root creation", async () => {
   const f = fixture();
   const root = createTestTmpRoot(f.parent);

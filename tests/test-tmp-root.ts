@@ -48,7 +48,7 @@ function ownerAlive(name: string): boolean {
 /**
  * Only this prefix belongs to the preload; old per-test prefixes and other applications' temp files are never swept.
  * Asynchronous: listing a tmpdir with ~10^6 leftovers takes 10–100 s, which must not delay every test start.
- * A short run may exit before the listing finishes; any later long run reaps the leftovers.
+ * Never rejects. bun test does not wait for pending promises, so the preload's afterAll awaits it before exiting.
  */
 async function sweepStaleRoots(parent: string): Promise<void> {
   try {
@@ -79,8 +79,8 @@ function inheritEnv<T extends (...args: any[]) => any>(spawn: T): T {
   }) as T;
 }
 
-export function installTestTmpRoot(): () => void {
-  const { path, cleanup } = createTestTmpRoot();
+export function installTestTmpRoot(): { cleanup: () => void; swept: Promise<void> } {
+  const { path, cleanup, swept } = createTestTmpRoot();
   // Synchronous exit cleanup also covers failing tests and uncaught errors without swallowing the failure.
   process.once("exit", cleanup);
   process.once("SIGINT", () => process.exit(130));
@@ -91,5 +91,5 @@ export function installTestTmpRoot(): () => void {
   // Supply the current environment for both overloads; explicit env options retain their existing semantics.
   Bun.spawn = inheritEnv(Bun.spawn);
   Bun.spawnSync = inheritEnv(Bun.spawnSync);
-  return cleanup;
+  return { cleanup, swept };
 }
