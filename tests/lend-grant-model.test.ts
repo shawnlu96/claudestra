@@ -106,7 +106,7 @@ describe("起出借 worker 时的 create 参数（lendModelArgs）", () => {
 
   test("出借服务起 worker 那一行把现读的参数接在 create 后面（lend-deps.ts）", () => {
     const src = readFileSync(join(import.meta.dir, "../src/lib/lend-deps.ts"), "utf8");
-    expect(src).toContain(`"--runtime", "codex", "--transport", "acp", ...lendModelArgs(journal, order));`);
+    expect(src).toContain(`...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));`);
   });
 });
 

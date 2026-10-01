@@ -27,6 +27,7 @@ import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { drivePool } from "./scheduler-pool-tick.js";
+import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -263,9 +264,9 @@ class Card {
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     return sent && deadUiAsk(this.db, sent.id, this.deps.now()) ? sent : null;
   }
-
   /** A sent order is only a receipt: watch its session for a quota / auth failure, which is PM's call, never a resend. */
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
+    await informFamilyWait(this.db, this.task, wait, this.opts.pool?.remote, this.deps);
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);

@@ -33,7 +33,7 @@ import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-w
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { prevReview } from "./review-order.js";
-import { bounceReviewLine, reviewAfterBounce } from "./scheduler-merge-conflict.js";
+import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./scheduler-merge-conflict.js";
 
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
@@ -149,8 +149,12 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
   const head = step === "write" ? input.write.baseSha as string : task.headSHA as string;
-  const findings = step === "fix" ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : []; // 与本机修复单共用截图 / 代码合成
-  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr };
+  const b = step === "fix" ? fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage) : null;
+  // Peer free text cannot carry full SHAs (the secret gate rejects them); keep refs short, as in bounceReviewLine.
+  const shortRef = (sha: string): string => sha.slice(0, 12);
+  const bounce = b ? bounceWork({ ...b, prHead: shortRef(b.prHead), mainHead: b.mainHead ? shortRef(b.mainHead) : null }) : null;
+  const findings = step === "fix" && !bounce ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : [];
+  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce };
   return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
 }
 

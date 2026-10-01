@@ -5,6 +5,7 @@ import { useChatStore, useChatStoreApi } from "../chat-store";
 import { closeAgentInfo, fetchAgentInfo, setAgentExternal, setAgentLabel, useAgentInfoTarget, type AgentInfo } from "../agent-info";
 import { fmtTs } from "../fmt-time";
 import { AgentSkillsSection } from "./agent-skills-section";
+import { AgentUsageSection } from "./agent-usage-section";
 import { CenteredModal } from "./centered-modal";
 
 /**
@@ -113,7 +114,6 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只按 name 重拉
   }, [name]);
-
   const apply = async (on: boolean, typed?: string) => {
     setBusy(true);
     setErr("");
@@ -186,6 +186,7 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
           {warn && <div className="mt-2 text-[12px] text-warning">{warn}</div>}
         </div>
         <AgentSkillsSection name={name} />
+        <AgentUsageSection name={name} projects={[...(project ? [project.id] : []), ...projects.map((p) => p.id)]} onClose={onClose} />
       </div>
       {confirm && (
         <ConfirmOff name={name} peers={confirm} busy={busy} onCancel={() => setConfirm(null)} onConfirm={(typed) => void apply(false, typed)} />
