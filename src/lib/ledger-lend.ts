@@ -19,7 +19,7 @@ import { endWriteLease, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrd
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
 import { sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
-import { LedgerError, type LedgerErrorCode } from "./ledger-store.js";
+import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
 import { assignStep } from "./ledger-steps-write.js";
 import { setTask } from "./ledger-write.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -28,6 +28,9 @@ import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.
 import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
 import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
+import { fitFindings } from "./order-findings.js";
+import { prevReview } from "./review-order.js";
+import { bounceReviewLine, reviewAfterBounce } from "./scheduler-merge-conflict.js";
 
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
@@ -115,15 +118,22 @@ export interface OfferInput {
   write?: WriteOffer;
 }
 
-function reviewOrder(task: LedgerTask, orderId: string, input: OfferInput, split: InputSplit = chunkInputs): OrderWire {
+/**
+ * The pool's review order, built from the same ledger facts as the local one (review-order.ts): from round 2 the previous round's
+ * findings (fitted, report path when cut) so the reviewer can re-check them by id, and after a merge bounce the targeted line.
+ */
+function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: OfferInput, split: InputSplit = chunkInputs): OrderWire {
   const head = task.headSHA as string;
-  return orderWireOf({
+  const events = listEvents(db, { project: task.project, target: task.id });
+  const prev = prevReview(events, task.round);
+  const bounce = reviewAfterBounce(events);
+  return fitFindings(orderWireOf({
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
-    inputs: split([[`规格原文（specRev ${task.specRev}）`, input.spec]]),
+    inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : [])],
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
     acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送"],
-    writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题",
-  }, { repo: input.repo, pr: input.pr });
+    writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题", findings: prev.findings,
+  }, { repo: input.repo, pr: input.pr }), prev.report);
 }
 
 /**
@@ -132,7 +142,7 @@ function reviewOrder(task: LedgerTask, orderId: string, input: OfferInput, split
  */
 function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput):
   { wire: OrderWire; whole: OrderWire; branch: string | null; base: string | null } {
-  if (step === "review") return { wire: reviewOrder(task, orderId, input), whole: reviewOrder(task, orderId, input, wholeInputs), branch: null, base: null };
+  if (step === "review") return { wire: reviewOrder(db, task, orderId, input), whole: reviewOrder(db, task, orderId, input, wholeInputs), branch: null, base: null };
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
   const head = step === "write" ? input.write.baseSha as string : task.headSHA as string;

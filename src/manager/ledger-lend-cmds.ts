@@ -20,6 +20,7 @@ import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, 
   type OfferInput } from "../lib/ledger-lend.js";
 
 import { heldLease } from "../lib/ledger-lend-lease.js";
+import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
 import { readPeers } from "../lib/peers.js";
@@ -29,9 +30,7 @@ import { appendEvent } from "../lib/ledger-write.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { statePath } from "../lib/paths.js";
 import { notifyProjectPm } from "../lib/pm-notify.js";
-import { autoSnapshot } from "../lib/scheduler-auto-snapshot.js";
 import { readSchedulerConfig, type RemotePolicy } from "../lib/scheduler-config.js";
-import { explainPlacement } from "../lib/scheduler-placement-plan.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { writeTextAtomicSync } from "../lib/state-file.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
@@ -169,8 +168,7 @@ async function orders(c: LedgerCli): Promise<Result> {
     const policy = (c.deps.lend?.schedulerPolicy ?? ((p: string) => readSchedulerConfig().projects[p] ?? null))(task.project);
     const remote = policy?.remote;
     const borrow = remote && remote.mode !== "off" ? await (c.deps.lend?.borrow() ?? readEffectiveBorrow()) : [];
-    const snap = autoSnapshot(c.db, task, { registry: [], maxWorkers: policy?.maxActiveWorkers ?? 0, now: c.deps.now(), ...(remote ? { pool: { remote, borrow } } : {}) });
-    placement = explainPlacement(snap);
+    placement = placementOf(c.db, task, policy, borrow, c.deps.now());
   } catch (e) {
     placement = { error: `算不出放置：${(e as Error).message}` };
   }

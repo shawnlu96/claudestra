@@ -2,7 +2,7 @@
  * 借入面板的纯函数（tests/web-borrow-model.test.ts）：hello 年龄与分档、peer 三态、排序、按钮能不能点。
  * 年龄由调用方传入的 tick 算，渲染里不读时钟；服务端与本机的时钟差靠「服务端 now + 拿到之后过了多久」抵掉。
  */
-import type { BorrowView, PeerView, RemoteRow } from "./borrow-api";
+import type { BorrowView, DroppedCode, PeerView, PlacementView, RemoteRow } from "./borrow-api";
 
 /** 与 bridge 的 HELLO_FRESH_MS 同值：超过它 peerCapacity 就按 0 位算 */
 export const HELLO_FRESH_SEC = 180;
@@ -64,6 +64,32 @@ export function toggleProject(cur: readonly string[], id: string, order: readonl
 export const canToggleOff = (cur: readonly string[], id: string): boolean => !cur.includes(id) || cur.length > 1;
 
 export const clampMaxOpen = (n: number, limit: number): number => Math.min(limit, Math.max(1, Math.round(n)));
+
+/** 失效原因：整条的（联系人删了 / 禁用 / 换实例）沿用 bridge 的码；联系人还在、声明的项目全失效 = projects_gone */
+export type StaleReason = Exclude<DroppedCode, "project_gone" | "personal"> | "projects_gone";
+export interface StalePeer { peer: string; reason: StaleReason; maxOpen: number; canRepick: boolean }
+
+/**
+ * 声明了、但没有生效的借入：一条不漏（effective 里没有它就算），每条都能删；联系人仍有效的还能重选项目。
+ * 按声明顺序；tests/web-borrow-model.test.ts 覆盖「全部项目失效」
+ */
+export function stalePeers(v: Pick<BorrowView, "borrow">): StalePeer[] {
+  const live = new Set(v.borrow.effective.map((e) => e.peer));
+  return v.borrow.declared.filter((e) => !live.has(e.peer)).map((e) => {
+    const whole = v.borrow.dropped.find((d) => d.peer === e.peer && !d.project);
+    const reason: StaleReason = whole ? (whole.code as StaleReason) : "projects_gone";
+    return { peer: e.peer, reason, maxOpen: e.maxOpen, canRepick: !whole && v.borrow.contacts.includes(e.peer) };
+  });
+}
+
+/** 放置结果的形态：local 本机 / peer 挂给对方 / wait 等着 / none 这一阶段不放置；算不出或老 bridge → null（不显示） */
+export type PlacementKind = "local" | "peer" | "wait" | "none";
+export function placementKind(p: PlacementView | undefined): PlacementKind | null {
+  if (!p || "error" in p) return null;
+  if (p.where === "-") return "none";
+  if (p.reason.startsWith("等：")) return "wait";
+  return p.where === "local" ? "local" : "peer";
+}
 
 /** 还没借入、可以加的联系人 */
 export function addableContacts(v: Pick<BorrowView, "borrow">): string[] {

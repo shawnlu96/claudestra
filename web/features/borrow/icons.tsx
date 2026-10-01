@@ -71,3 +71,30 @@ export const PauseIcon = ({ className }: IconProps) => (
     <rect x="6" y="4" width="4" height="16" rx="1" />
   </Svg>
 );
+
+/** lucide pencil：重选项目 */
+export const PencilIcon = ({ className }: IconProps) => (
+  <Svg className={className}>
+    <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+    <path d="m15 5 4 4" />
+  </Svg>
+);
+
+/** lucide monitor：放本机 */
+export const MonitorIcon = ({ className }: IconProps) => (
+  <Svg className={className}>
+    <rect width="20" height="14" x="2" y="3" rx="2" />
+    <line x1="8" x2="16" y1="21" y2="21" />
+    <line x1="12" x2="12" y1="17" y2="21" />
+  </Svg>
+);
+
+/** lucide hourglass：等着放 */
+export const HourglassIcon = ({ className }: IconProps) => (
+  <Svg className={className}>
+    <path d="M5 22h14" />
+    <path d="M5 2h14" />
+    <path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22" />
+    <path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
+  </Svg>
+);

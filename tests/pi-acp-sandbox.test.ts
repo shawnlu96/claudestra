@@ -252,3 +252,22 @@ describe("凭据：只能显式拷一家 API key", () => {
     expect(() => cmdPiAuth(["deepseek"], root, null, fail)).toThrow("沙箱外");
   });
 });
+
+describe("Pi ACP 宿主命令 · 内建工具激活", () => {
+  test("能力档带 builtin:codemode 时注入 CLAUDESTRA_PI_ACTIVATE（光 -e 加载不激活）", () => {
+    const spec = {
+      agentName: "agent-x", settingsName: "agent-x", channelId: "c1", bridgeUrl: "ws://x",
+      sessionId: "sid-1", extras: { piEnv: { base: "minimal", extensions: ["builtin:codemode"] } },
+    } as never;
+    const cmd = buildPiAcpHostCommand(spec, { bunBin: "bun", repoRoot: "/repo" });
+    expect(cmd).toContain("CLAUDESTRA_PI_ACTIVATE=codemode");
+  });
+
+  test("普通能力档不注入（不给每个 Pi agent 加噪声）", () => {
+    const spec = {
+      agentName: "agent-y", settingsName: "agent-y", channelId: "c1", bridgeUrl: "ws://x",
+      sessionId: "sid-2", extras: { piEnv: { base: "minimal" } },
+    } as never;
+    expect(buildPiAcpHostCommand(spec, { bunBin: "bun", repoRoot: "/repo" })).not.toContain("CLAUDESTRA_PI_ACTIVATE");
+  });
+});

@@ -1,6 +1,6 @@
 /**
  * 借入方管理面（i28-R7b，方案 ledger/docs/remote-pool-v2-plan.md §2.3、§2.6）：A 侧 owner 在网页看「借谁的机器」并用按钮改。
- *   GET    /api/v1/borrow              canReadLedger：项目的 remote.mode、borrow 声明 / 生效 / 失效、各 peer 容量、远端在跑的单
+ *   GET    /api/v1/borrow              canReadLedger：项目的 remote.mode、borrow 声明 / 生效 / 失效、各 peer 容量、远端在跑的单与放置结果
  *   PUT    /api/v1/borrow/peers/:peer  canRunFleet：`borrow set --projects … --roles review --max-open N -- <peer>`
  *   DELETE /api/v1/borrow/peers/:peer  canRunFleet：`borrow off --peer <peer>`
  * 写只经 manager CLI（准入以 buildBorrowEntry 为准，bridge 只查形状），回包只带固定错误码：CLI 原文里有命令提示，不给网页。
@@ -9,13 +9,15 @@
 import type { Database } from "bun:sqlite";
 import { canReadLedger } from "../../lib/devices.js";
 import { LEND_LIVE } from "../../lib/ledger-lend-schema.js";
+import { getTask } from "../../lib/ledger-store.js";
 import { getLendPeer, peerCapacity, type PeerCapacity } from "../../lib/ledger-lend-peers.js";
 import { LEND_PATH, MAX_OPEN, readLend, type BorrowEntry } from "../../lib/lend-config.js";
+import { placementOf } from "../../lib/lend-placement-view.js";
 import { effectiveLend, isPersonalProject, readLendContext, type LendContact } from "../../lib/lend-policy.js";
 import { canRunFleet, type Principal } from "../../lib/principals.js";
 import type { ProjectDef } from "../../lib/projects.js";
 import { runManagerProcess } from "../../lib/run-manager.js";
-import { readSchedulerConfig, SCHEDULER_CONFIG_PATH } from "../../lib/scheduler-config.js";
+import { readSchedulerConfig, SCHEDULER_CONFIG_PATH, type SchedulerConfig } from "../../lib/scheduler-config.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "../config.js";
 import { ledgerDb } from "../ledger-feed.js";
@@ -64,23 +66,38 @@ export interface PeerView {
   paused: { reason: string; until: number } | null;
   grant: { roles: string[]; repos: string[]; until: number; ordersLeftToday: number } | null;
 }
+/** explainPlacement 原样；算不出（卡没了 / scheduler.json 坏 / 快照抛错）只给固定码，原文进日志 */
+export type PlacementView = { role: string | null; where: string; reason: string } | { error: "unavailable" };
 export interface RemoteRowView {
   orderId: string; taskId: string; title: string | null; project: string; peer: string; family: string; step: string; status: string;
-  leaseUntil: number | null; beatAt: number | null; phase: string | null;
+  leaseUntil: number | null; beatAt: number | null; phase: string | null; placement: PlacementView;
 }
 
 /** W5 前的 overflow / prefer 都按 balance 显示（平均分配，满了堆本机）；只有 off 是总开关关 */
 const modeView = (mode: string | undefined): RemoteModeView => (mode === "off" ? "off" : "balance");
 
-function projectsView(): { projects: BorrowProjectView[]; schedulerOk: boolean } {
+function projectsView(): { projects: BorrowProjectView[]; cfg: SchedulerConfig | null } {
   try {
     const cfg = readSchedulerConfig(deps.schedulerPath);
     const projects = Object.entries(cfg.projects).map(([id, p]) => ({ id, mode: modeView(p.remote?.mode), maxActiveWorkers: p.maxActiveWorkers }));
-    return { projects, schedulerOk: true };
+    return { projects, cfg };
   } catch (e) {
-    // scheduler.json 坏了：调度服务自己也不跑，这里只是不列项目，网页照常显示 borrow 与 peer
+    // scheduler.json 坏了：调度服务自己也不跑，这里只是不列项目、远端行的放置给 unavailable，网页照常显示 borrow 与 peer
     console.warn(`⚠️ [borrow] 读 scheduler.json 失败：${(e as Error).message}`);
-    return { projects: [], schedulerOk: false };
+    return { projects: [], cfg: null };
+  }
+}
+
+/** 卡此刻放哪、为什么：与 `ledger lend-orders` 调同一个 placementOf，不另算；borrow 是同一个 now 的 effectiveLend */
+function placementView(db: Database, taskId: string, cfg: SchedulerConfig | null, borrow: BorrowEntry[], now: number): PlacementView {
+  try {
+    const task = getTask(db, taskId);
+    if (!task || !cfg) return { error: "unavailable" };
+    return placementOf(db, task, cfg.projects[task.project] ?? null, borrow, now);
+  } catch (e) {
+    // 只读视图：这张卡的放置这一栏不显示，远端行与其余面板照常
+    console.warn(`⚠️ [borrow] ${taskId} 算不出放置：${(e as Error).message}`);
+    return { error: "unavailable" };
   }
 }
 
@@ -127,14 +144,17 @@ function peerView(db: Database | null, b: BorrowEntry, now: number): PeerView {
 }
 
 /** 远端行 = lend_orders 里还没结的单（LEND_LIVE）；beat 只取 phase，excerpt 是对方写的摘要，不出这里 */
-function remoteRows(db: Database | null): RemoteRowView[] {
+function remoteRows(db: Database | null, place: (db: Database, taskId: string) => PlacementView): RemoteRowView[] {
   if (!db || !hasTable(db, "lend_orders")) return [];
   const cols = new Set((db.query("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name));
   const beat = cols.has("beat") ? "o.beat, o.beatAt" : "NULL AS beat, NULL AS beatAt";
   const rows = db.query(`SELECT o.orderId, o.taskId, t.title, o.project, o.peer, o.family, o.step, o.status, o.leaseUntil, ${beat}
     FROM lend_orders o LEFT JOIN tasks t ON t.id = o.taskId WHERE o.status IN (${LEND_LIVE.map(() => "?").join(",")})
-    ORDER BY o.createdAt, o.orderId`).all(...LEND_LIVE) as (Omit<RemoteRowView, "phase"> & { beat: string | null })[];
-  return rows.map(({ beat: raw, ...r }) => ({ ...r, title: r.title ?? null, leaseUntil: r.leaseUntil ?? null, beatAt: r.beatAt ?? null, phase: phaseOf(raw) }));
+    ORDER BY o.createdAt, o.orderId`).all(...LEND_LIVE) as (Omit<RemoteRowView, "phase" | "placement"> & { beat: string | null })[];
+  const placed = new Map<string, PlacementView>();
+  const placementFor = (id: string) => placed.get(id) ?? placed.set(id, place(db, id)).get(id)!;
+  return rows.map(({ beat: raw, ...r }) => ({ ...r, title: r.title ?? null, leaseUntil: r.leaseUntil ?? null, beatAt: r.beatAt ?? null, phase: phaseOf(raw),
+    placement: placementFor(r.taskId) }));
 }
 
 function phaseOf(raw: string | null): string | null {
@@ -152,9 +172,9 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
   const [read, ctx] = await Promise.all([readLend(deps.lendPath), deps.context()]);
   const eff = effectiveLend(read, ctx.contacts, ctx.projects, now);
   const db = openDb();
-  const { projects, schedulerOk } = projectsView();
+  const { projects, cfg } = projectsView();
   return {
-    ok: true, now, schedulerOk, projects,
+    ok: true, now, schedulerOk: cfg !== null, projects,
     borrow: {
       file: read.status, invalid: read.status === "invalid", declared: read.file.borrow, effective: eff.borrow,
       dropped: droppedOf(read.file.borrow, eff.borrow, ctx.contacts, ctx.projects),
@@ -164,7 +184,7 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
     },
     ledger: !!db && hasTable(db, "lend_orders"),
     peers: eff.borrow.map((b) => peerView(db, b, now)),
-    remote: remoteRows(db),
+    remote: remoteRows(db, (d, id) => placementView(d, id, cfg, eff.borrow, now)),
   };
 }
 

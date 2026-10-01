@@ -11,7 +11,7 @@ import { acpCallerCredAssignment } from "../caller-cred-launch.js";
 import { shellEscape } from "../claude-launch.js";
 import { codexDeveloperInstructions } from "../codex-launch.js";
 import { pathOverrideAssignments } from "../paths.js";
-import { normalizePiEnvProfile, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
+import { normalizePiEnvProfile, piActivateTools, piBinName, piEnvFlags, type PiEnvProfile } from "../pi-env.js";
 import { isPiThinkingLevel } from "../pi-launch.js";
 import { piAgentDirOf } from "../pi-path.js";
 import { assertSandboxRuntime, isSandbox } from "../sandbox.js";
@@ -55,6 +55,14 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     ["CLAUDESTRA_AGENT", agent],
     ["CLAUDESTRA_SESSION_ID", spec.sessionId],
     ["MCP_NAME", mcpName(env)],
+    // 0.99 的 codemode / tool_search 注册但不激活，光 -e 加载是空操作 ⇒ 把要激活的工具名
+    // 交给 activate-tools 扩展（它在 session_start 里 setActiveTools）
+    [
+      "CLAUDESTRA_PI_ACTIVATE",
+      piActivateTools(
+        keepReplyTool(sandbox ? undefined : (spec.extras?.piEnv as PiEnvProfile | undefined), mcpName(env)),
+      ).join(",") || undefined,
+    ],
     [ACP_RUNTIME_ENV, "pi"],
     // 与 piAvailable() 的探测同源：窗口不继承 manager 的 env，PI_BIN 不带过去就会预检通过、窗口里找不到 pi
     ["PI_BIN", piBinName()],

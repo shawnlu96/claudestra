@@ -81,6 +81,7 @@ import { listSessionJsonls, readyTimeoutHint } from "./lib/runtimes/claude-code.
 import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
+import { applyPiEnvPreset, parsePiEnvSetFlags, resolveCreatePiEnv } from "./manager/pi-env-preset.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
@@ -464,6 +465,7 @@ async function cmdCreate(
   projectFlag?: string,
   runtimeFlag?: string, transportFlag?: string,
   piBaseFlag?: string,
+  piPresetFlag?: string,
   teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
   const selected = await (await import("./manager/acp-lifecycle.js")).prepareCreateRuntime(name, dir, runtimeFlag, transportFlag);
@@ -480,8 +482,9 @@ async function cmdCreate(
     output({ ok: false, error: `--runtime ${adapter.id} 建不出能用的 agent：${avail.hint}` });
     return;
   }
-  // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
-  const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
+  const presetRes = resolveCreatePiEnv(piBaseFlag, piPresetFlag); // --pi-preset 展开 + --pi-base 覆盖
+  if ("error" in presetRes) return output({ ok: false, error: presetRes.error });
+  const piEnv = presetRes.piEnv;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
   const team = await (await import("./manager/team.js")).teamFieldsForCreate(tmuxName, teamFlags); // 派发者校验在建频道 / 拉起之前
@@ -2238,6 +2241,7 @@ async function cmdPiEnvSet(
   name: string,
   opts: {
     base?: string;
+    preset?: string;
     addExt?: string[];
     addSkill?: string[];
     excludeTool?: string[];
@@ -2263,6 +2267,8 @@ async function cmdPiEnvSet(
   }
 
   const next: PiEnvProfile = opts.reset ? {} : normalizePiEnvProfile(info.piEnv);
+  const presetErr = applyPiEnvPreset(next, opts.preset).error; // 预设铺基底，显式 flag 随后覆盖
+  if (presetErr) return output({ ok: false, error: presetErr });
   if (opts.base) {
     if (opts.base === "inherit") delete next.base;
     else next.base = "minimal";
@@ -2303,30 +2309,24 @@ switch (cmd) {
     break;
   }
   case "pi-env-set": {
-    const { rest: a1, value: base } = extractStringFlag(args, "--base");
-    const { rest: a2, value: mcpConfig } = extractStringFlag(a1, "--mcp-config");
-    const { rest: a3, values: addExt } = extractMultiFlag(a2, "--add-ext");
-    const { rest: a4, values: addSkill } = extractMultiFlag(a3, "--add-skill");
-    const { rest: a5, values: excludeTool } = extractMultiFlag(a4, "--exclude-tool");
-    const { rest: a6, value: noTrust } = extractBoolFlag(a5, "--no-trust");
-    const { rest: a7, value: trust } = extractBoolFlag(a6, "--trust");
-    const { rest: posArgs, value: reset } = extractBoolFlag(a7, "--reset");
-    const [name] = posArgs;
+    const p = parsePiEnvSetFlags(args);
+    const [name] = p.rest;
     if (!name) {
       output({
         ok: false,
-        error: 'usage: pi-env-set <agent> [--base inherit|minimal] [--add-ext <src>]... [--add-skill <path>]... [--exclude-tool <name>]... [--mcp-config <path>] [--no-trust|--trust] [--reset]',
+        error: 'usage: pi-env-set <agent> [--preset N] [--base inherit|minimal] [--add-ext <src>] [--add-skill <path>] [--exclude-tool <t>] [--mcp-config <path>] [--no-trust|--trust] [--reset]'
       });
       break;
     }
     await cmdPiEnvSet(name, {
-      base,
-      addExt,
-      addSkill,
-      excludeTool,
-      mcpConfig,
-      trust: noTrust ? false : trust ? true : undefined,
-      reset,
+      base: p.base,
+      preset: p.preset,
+      addExt: p.addExt,
+      addSkill: p.addSkill,
+      excludeTool: p.excludeTool,
+      mcpConfig: p.mcpConfig,
+      trust: p.trust,
+      reset: p.reset,
     });
     break;
   }
@@ -2334,7 +2334,7 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.teamFlags);
+    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags);
     break;
   }
 

@@ -142,7 +142,11 @@ test("channel-server 经 mcpServers 交给 pi，token 只在挂载配置里；�
   expect(h.link().registerFrame()).toMatchObject({ runtime: "pi", transport: "acp", sessionId: SID });
 
   const [run] = h.runs();
-  expect(run.argv).toEqual(["--mode", "rpc", "--approve", "-e", "builtin:mcp", "-e", expect.stringContaining("mcp-mount.ts"), "--session-id", SID]);
+  expect(run.argv).toEqual([
+    "--mode", "rpc", "--approve",
+    "-e", "builtin:mcp", "-e", expect.stringContaining("mcp-mount.ts"), "-e", expect.stringContaining("activate-tools.ts"),
+    "--session-id", SID,
+  ]);
   const mounted = JSON.parse(run.mcp).claudestra;
   expect(mounted.command).toBe(process.execPath);
   expect(mounted.args).toEqual([join(REPO, "src/channel-server.ts")]);
