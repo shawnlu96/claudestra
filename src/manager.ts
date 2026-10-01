@@ -110,7 +110,7 @@ import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
-import { expectArg, expectSkip } from "./manager/restart-expect.js";
+import { expectArg, expectMissing, expectSkip, markExpectSkips } from "./manager/restart-expect.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
@@ -1232,7 +1232,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     const tmuxName = normalizeName(name);
     const inReg = !!reg.agents[tmuxName];
     if (!liveWindows.includes(tmuxName) && !inReg) {
-      output({ ok: false, error: `${tmuxName} 不存在` });
+      output({ ok: false, error: `${tmuxName} 不存在`, ...expectMissing(tmuxName, opts.expect) });
       return;
     }
     targets = [tmuxName];
@@ -1459,7 +1459,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
 
   output({
     ok: results.every((r) => r.ok),
-    results,
+    results: markExpectSkips(results, opts.expect),
     message: results
       .map((r) => `${r.name}: ${r.ok ? `✅${r.note ? ` ${r.note}` : ""}` : `❌ ${r.error}`}`)
       .join("\n"),

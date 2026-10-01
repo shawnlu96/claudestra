@@ -70,9 +70,7 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
       const wire = encodeExpect({ agent, sessionId: expect.sessionId, down: expect.down, workKey: expect.workKey });
       const r = await plain("restart", "--expect", wire, "--", agent);
       if (r.code === "lease-lost") throw new SchedulerStopped(`manager restart: ${String(r.error)}`);
-      const one = (r.results as { name: string; ok: boolean; error?: string; skipped?: unknown }[] | undefined)?.find((x) => x.name === agent);
-      if (one && !one.ok && typeof one.skipped === "string") return { ok: false, skipped: one.skipped };
-      return one?.ok ? { ok: true } : { ok: false, error: String(one?.error ?? r.error ?? "restart 没有结果") };
+      return restartOutcome(r, agent);
     },
     async escalate(taskId, intentId, reason) {
       const r = await owned(() => ledger("ledger", "scheduler-fallback-manual", taskId, "--reason", reason.slice(0, 560), "--intent", intentId));
@@ -93,6 +91,13 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
     now: () => Date.now(),
     log: (m) => console.log(`[supervise] ${m}`),
   };
+}
+
+/** manager restart 的输出 → 监护的结果：该目标的条目带 skipped（--expect 复核下来没动窗口）= skipped，不算失败、不占重启额度 */
+export function restartOutcome(r: Record<string, unknown>, agent: string): { ok: boolean; error?: string; skipped?: string } {
+  const one = (r.results as { name: string; ok: boolean; error?: string; skipped?: unknown }[] | undefined)?.find((x) => x.name === agent);
+  if (one && !one.ok && typeof one.skipped === "string") return { ok: false, skipped: one.skipped };
+  return one?.ok ? { ok: true } : { ok: false, error: String(one?.error ?? r.error ?? "restart 没有结果") };
 }
 
 /** 调度 pass 的一步（scheduler-pass.ts 一行调用）：开关关着时根本不会走到这里 */

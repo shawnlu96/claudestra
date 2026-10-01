@@ -29,6 +29,9 @@ export interface RecheckDeps extends LookIo {
 
 interface ExpectSkip { name: string; ok: false; skipped: string; error: string }
 
+/** 这个进程里按 --expect 复核通过、真的往下走去碰窗口的目标（manager 子进程一条命令一个进程） */
+const passed = new Set<string>();
+
 /** `--` 之前的 `--expect <json>`：没带 = undefined（restart 行为不变）；带了却没有值、或者没有用 `--` 指定一个名字 = ""（解析时整条拒） */
 export function expectArg(args: string[]): string | undefined {
   const dd = args.indexOf("--");
@@ -84,7 +87,20 @@ export async function expectSkip(target: string, raw: string | undefined, deps?:
   } finally {
     d.close();
   }
-  if (!why) return null;
+  if (!why) return passed.add(target), null;
   console.error(`[restart] ${target} 按 --expect 复核不重启：${why}`);
   return { name: target, ok: false, skipped: why, error: `已跳过（--expect 复核）：${why}` };
 }
+
+/**
+ * 带 --expect 时，复核通过之前就被拒的结果都没碰窗口（做到一半的 create / rename / kill、registry 缺字段、另一个 restart 拿着锁、
+ * 拿锁后复核前的异常）：一律改记 skipped，监护照 skipped 记账、不占重启额度。复核通过之后的失败照旧是失败；不带 --expect 原样返回。
+ */
+export function markExpectSkips<T extends { name: string; ok: boolean; error?: string; skipped?: string }>(results: T[], raw: string | undefined): T[] {
+  if (raw === undefined) return results;
+  return results.map((r) => (r.ok || r.skipped !== undefined || passed.has(r.name) ? r : { ...r, skipped: `复核前已拒：${r.error ?? "没有结果"}` }));
+}
+
+/** 带 --expect 时目标已经不在（registry 和窗口里都没有）：补一条该目标的 skipped 结果，不带就什么都不加（输出原样） */
+export const expectMissing = (target: string, raw: string | undefined): { results?: ExpectSkip[] } =>
+  raw === undefined ? {} : { results: [{ name: target, ok: false, skipped: `${target} 不存在`, error: `${target} 不存在` }] };

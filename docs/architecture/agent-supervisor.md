@@ -88,6 +88,9 @@ After taking the lock and before touching any window, the child (`src/manager/re
 3. the scope once more after the probe, since the probe waits.
 
 Any failed condition, and any read failure (scheduler.json, registry, ledger, probe `unknown` or throwing), releases the
-lock without touching the window and returns `{ name, ok: false, skipped: <reason> }`. The supervisor books that exactly like
+lock without touching the window and returns `{ name, ok: false, skipped: <reason> }`. With `--expect`, refusals that happen before the
+re-check passes are skipped too, since none of them touched a window: a create / rename / kill still in progress, a registry
+entry missing its session or channel, the agent gone, another restart holding the lock (`markExpectSkips` / `expectMissing`).
+A failure after the re-check passed stays a failure. The supervisor books that exactly like
 its own failed re-check: `restart/done/skipped`, no restart-limit use, no report. Without `--expect`, restart reads none of
 this and behaves as before. Tests: `tests/restart-expect.test.ts`.

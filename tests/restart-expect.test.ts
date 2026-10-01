@@ -12,7 +12,7 @@ import { supervisedAgents } from "../src/lib/agent-supervisor-scope.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
-import { expectArg, expectSkip, type RecheckDeps } from "../src/manager/restart-expect.js";
+import { expectArg, expectSkip, markExpectSkips, type RecheckDeps } from "../src/manager/restart-expect.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
@@ -65,6 +65,13 @@ describe("拿锁前状态变了：子进程不重启", () => {
       expect(skip!.error).toContain("已跳过");
     });
   }
+
+  test("复核通过之后的失败照旧是失败（不改记 skipped）", async () => {
+    const x = await world();
+    const r = raw(x.workKey());
+    expect(await expectSkip(AGENT, r, x.recheck)).toBeNull();
+    expect(markExpectSkips([{ name: AGENT, ok: false, error: "启动超时" }], r)).toEqual([{ name: AGENT, ok: false, error: "启动超时" }]);
+  });
 
   test("监护开关关了也算不在名单", async () => {
     const x = await world();
