@@ -168,7 +168,8 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
+import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, settleOwedReplies, takeApiPending } from "./lib/pending-reply-scope.js";
+import { checkApiTarget, orphanReplyReason } from "./lib/api-reply-target.js";
 import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { sessionGone } from "./lib/route-session.js";
 import { onCodexTypeInFailed } from "./bridge/codex-menu-hold.js";
@@ -685,11 +686,15 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
+  const target = await checkApiTarget(to.tokenId); // 后面没人收得到的地址回 dropped，reply 工具据此报错（lib/api-reply-target.ts）
+  if (!target.ok) return { envelope: env, outcome: { kind: "dropped", reason: target.reason } };
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key);
   const pending = queue ? takeApiPending(queue, env.meta.inReplyTo) : undefined; // 作废回显只对它自己那条请求
   if (queue && queue.length === 0) pendingApiRequests.delete(key);
+  const orphan = orphanReplyReason(target, !!pending, to.tokenId);
+  if (orphan) return { envelope: env, outcome: { kind: "dropped", reason: orphan } };
 
   // 附件登记 → 下载 URL（属主 = 该 token，GET /api/v1/files/:id 校验）
   const files = (env.meta.files || []).map((p) => {
@@ -1766,9 +1771,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       //   自己频道回一句，就把别的 agent 欠这个用户的债一起销了；那个 agent 的 Stop
       //   不再被 reply-nudge 拦，它「只打字不 reply」无人纠正 ⇒ 用户看到整条回复全是
       //   灰字旁白、没有正文（2026-09-22 实测：mm-pm 的 1267 字答复就是这么灰的）。
-      for (const key of pendingKeysOwedBy(pendingReplies.entries(), ws, msg.chatId)) {
-        pendingReplies.delete(key);
-      }
+      // 投递结果出来之前就销：地址失效、reply 报错的那条也算了结，Stop 不会逼它对着死地址反复补发（tests/api-reply-target.test.ts）
+      settleOwedReplies(pendingReplies, ws, msg.chatId);
 
       try {
         const text = msg.text?.replace(/\s*\[DONE\]\s*$/, "") || msg.text || "";
