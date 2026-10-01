@@ -8,7 +8,7 @@ import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useLang, useT } from "@/lib/i18n";
 import { machineNow, PRIORITIES, stillOn, type Family, type LocalProjectView, type Priority, type QuotaReport, type Role } from "./borrow-api";
 import { cardLocked, saveThenRefresh, type Feed } from "./borrow-feed";
-import { LOCAL_MAX, oneAtATime, resetIn, weekUsed } from "./borrow-model";
+import { LOCAL_MAX, localTierDisabled, oneAtATime, resetIn, weekUsed } from "./borrow-model";
 import { LimitLine, Stepper } from "./borrow-bits";
 import { CheckIcon, MonitorIcon, PauseIcon } from "./icons";
 import { fadeIn, flash, shake } from "./motion";
@@ -151,7 +151,7 @@ export function LocalRow(props: {
         </span>
       </div>
       <QuotaLine quota={props.quota?.quota} walled={props.quota?.walled} now={props.serverNow} />
-      <AllocStrip tier={p.localPriority ?? "balance"} roles={asRoles(p.roles)} rolesReadOnly disabled={disabled}
+      <AllocStrip tier={p.localPriority ?? "balance"} roles={asRoles(p.roles)} rolesReadOnly disabled={localTierDisabled(disabled, p)}
         onTier={(tier, el) => save({ priority: tier }, el)} />
       <LimitLine name="" local n={p.maxActiveWorkers}>
         <Stepper value={p.maxActiveWorkers} limit={LOCAL_MAX} min={0} disabled={disabled} onCommit={(n, el) => save({ maxActiveWorkers: n }, el)} />

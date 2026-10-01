@@ -2,7 +2,7 @@
  * 借入面板的纯函数（tests/web-borrow-model.test.ts）：hello 年龄与分档、peer 三态、排序、按钮能不能点。
  * 年龄由调用方传入的 tick 算，渲染里不读时钟；服务端与本机的时钟差靠「服务端 now + 拿到之后过了多久」抵掉。
  */
-import type { BorrowView, DroppedCode, Family, PeerView, PlacementView, Priority, QuotaReport, RemoteRow, Role } from "./borrow-api";
+import type { BorrowView, DroppedCode, Family, LocalProjectView, PeerView, PlacementView, Priority, QuotaReport, RemoteRow, Role } from "./borrow-api";
 
 /** 与 bridge 的 HELLO_FRESH_MS 同值：超过它 peerCapacity 就按 0 位算 */
 export const HELLO_FRESH_SEC = 180;
@@ -153,6 +153,8 @@ export function splitAtBox(text: string): [string, string] {
 
 /** 本机项目上限的范围（scheduler.json maxActiveWorkers 0..32；0 = 本机不接） */
 export const LOCAL_MAX = 32;
+/** 本机档位能不能点：卡片锁着、没写权限都不行；remote.mode=off 时调度器不看本机档位（W9：只用本机），点了也不生效 */
+export const localTierDisabled = (cardDisabled: boolean, p: Pick<LocalProjectView, "mode">): boolean => cardDisabled || p.mode === "off";
 
 /** 老 bridge 没有 priority / roles：按缺省（平分、只审查）显示 */
 export const peerPriority = (p: Pick<PeerView, "priority">): Priority => p.priority ?? "balance";

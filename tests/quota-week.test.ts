@@ -28,6 +28,10 @@ describe("weekOf / reportOf", () => {
     expect(weekOf(q([win("weekly", 130, NOW + DAY)]), NOW)!.weekUsedPct).toBe(100);
     expect(weekOf(q([win("weekly", -3, NOW + DAY)]), NOW)!.weekUsedPct).toBe(0);
   });
+  test("缓存文件坏了读进来的非数 / 非有限 / 超出 Date 范围的值 → null，不会变成 NaN 发出去", () => {
+    for (const r of ["invalid", NaN, Infinity, 9e15, "123"] as unknown as number[]) expect([r, weekOf(q([win("weekly", 20, r)]), NOW)]).toEqual([r, null]);
+    for (const u of ["20", NaN, Infinity] as unknown as number[]) expect([u, weekOf(q([win("weekly", u, NOW + DAY)]), NOW)]).toEqual([u, null]);
+  });
   test("报告里只有两个字段（不带 plan / source / 账户）；读不到的那家不出现", () => {
     const r = reportOf({ codex: q([win("weekly", 18, NOW + DAY)]), claude: { ...q([]), status: "unknown", reason: "没有" } }, NOW);
     expect(r).toEqual({ codex: { weekUsedPct: 18, resetAt: NOW + DAY } });

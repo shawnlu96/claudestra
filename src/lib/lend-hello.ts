@@ -130,40 +130,61 @@ function setProto(db: Database, peer: string, proto: 1 | 2, round: LendRound): v
   setMeta(db, protoKey(peer), String(proto));
 }
 
+type HelloWire = Omit<HelloRequest, "v">;
+interface Composed { body: ReturnType<typeof helloBody>; hash: string; now: number; send: HelloWire }
+
+/**
+ * 现读授权、拼一份待发的 hello（seq 取下一个号，占号由调用方在发前做）。读完授权到返回之间没有 await，调用方拿到后要直接发。
+ * 额度只是参考：带着它过不了自检就去掉再验，不能让坏的额度拖住授权和容量（验收线 2）；去掉还过不了才算自检失败。
+ */
+async function compose(d: HelloDeps, peer: string, quota: HelloQuota | undefined): Promise<Composed | { selfCheck: string; now: number; hash: string }> {
+  const g = await liveGrant({ peer, fp: null }, d);
+  const now = d.now();
+  const body = helloBody(d.db, g.ok ? g.entry : undefined, now, d.writeOpen);
+  const hash = hashOf(body);
+  const seq = Number(getMeta(d.db, SEQ_KEY) ?? 0) + 1;
+  const bare: HelloRequest = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused };
+  let full: HelloRequest = quota && body.grant ? { ...bare, quota } : bare;
+  let check = parseV2Request("hello", full);
+  if (!check.ok && full.quota) {
+    d.log(`给 ${peer} 的 hello 带额度自检没过，去掉额度再发：${check.error}`);
+    check = parseV2Request("hello", (full = bare));
+  }
+  if (!check.ok) return { selfCheck: check.error, now, hash };
+  const { v: _v, ...send } = full;
+  return { body, hash, now, send };
+}
+
 /** 对一个 peer：到点（或状态变了）就发一次 hello，按结果记协议版本与下次时刻。授权现读，读不到 / 失效 = grant:null */
 export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): Promise<void> {
-  const quota = await quotaFor(d, peer); // 在现读授权之前等：读授权到发出之间不能有 await；没授权时下面不带
-  const g = await liveGrant({ peer, fp: null }, d);
-  const entry = g.ok ? g.entry : undefined;
-  const now = d.now();
+  const quota = await quotaFor(d, peer); // 在现读授权之前等：读授权到发出之间不能有 await；没授权时 compose 不带
+  let c = await compose(d, peer, quota);
   const st = helloState(d.db, peer);
-  const body = helloBody(d.db, entry, now, d.writeOpen);
-  const hash = hashOf(body);
-  if (st && st.boot === d.v2.boot && st.hash === hash && now < st.nextAt) return;
-  const seq = Number(getMeta(d.db, SEQ_KEY) ?? 0) + 1;
-  const full = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused, ...(quota && body.grant ? { quota } : {}) };
-  const base: HelloState = { ok: false, okAt: null, grant: false, error: null, selfCheck: null, tries: 0, helloMs: null, beatMs: null, ...st, boot: d.v2.boot, at: now, hash, nextAt: now };
-  const check = parseV2Request("hello", full);
-  if (!check.ok) {
-    d.log(`给 ${peer} 的 hello 自检没过，不发：${check.error}`);
-    return save(d.db, peer, { ...base, ok: false, error: "自检没过", selfCheck: check.error, nextAt: now + KEEP_MS.fallback });
-  }
-  setMeta(d.db, SEQ_KEY, String(seq)); // 先占号再发：发出去的每个 seq 都比之前的大，进程在中间退出也不会重用
-  const { v: _v, ...send } = full;
-  let r = await lendRequest(d.v2.call, peer, "hello", send);
-  if ("quota" in send && quotaRefused(r)) {
+  if (st && st.boot === d.v2.boot && st.hash === c.hash && c.now < st.nextAt) return;
+  const stateOf = (x: { now: number; hash: string }): HelloState => ({ ok: false, okAt: null, grant: false, error: null, selfCheck: null, tries: 0, helloMs: null,
+    beatMs: null, ...st, boot: d.v2.boot, at: x.now, hash: x.hash, nextAt: x.now });
+  const selfFail = (x: { selfCheck: string; now: number; hash: string }): void => {
+    d.log(`给 ${peer} 的 hello 自检没过，不发：${x.selfCheck}`);
+    save(d.db, peer, { ...stateOf(x), ok: false, error: "自检没过", selfCheck: x.selfCheck, nextAt: x.now + KEEP_MS.fallback });
+  };
+  if ("selfCheck" in c) return selfFail(c);
+  setMeta(d.db, SEQ_KEY, String(c.send.seq)); // 先占号再发：发出去的每个 seq 都比之前的大，进程在中间退出也不会重用
+  let r = await lendRequest(d.v2.call, peer, "hello", c.send);
+  if (c.send.quota && quotaRefused(r)) {
     d.log(`${peer} 是旧版，不收 hello 里的 quota：去掉重发，${NO_QUOTA_MS / 3_600_000} 小时内（或本机重启前）不再带`);
     setMeta(d.db, noQuotaKey(peer), JSON.stringify({ boot: d.v2.boot, until: d.now() + NO_QUOTA_MS }));
-    const again = seq + 1;
-    setMeta(d.db, SEQ_KEY, String(again));
-    const { quota: _q, ...bare } = send;
-    r = await lendRequest(d.v2.call, peer, "hello", { ...bare, seq: again });
+    // 等第一次回应期间授权可能被收回或收窄：重发前重新现读、重新拼（seq 自然 +1），不复用第一次的正文
+    c = await compose(d, peer, undefined);
+    if ("selfCheck" in c) return selfFail(c);
+    setMeta(d.db, SEQ_KEY, String(c.send.seq));
+    r = await lendRequest(d.v2.call, peer, "hello", c.send);
   }
+  const base = stateOf(c);
   const at = d.now();
   if (r.ok) {
     setProto(d.db, peer, r.value.proto >= LEND_PROTO ? 2 : 1, round);
     const keep = clamp(r.value.helloMs, KEEP_MS.min, KEEP_MS.max, KEEP_MS.fallback);
-    return save(d.db, peer, { ...base, ok: true, okAt: at, grant: body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
+    return save(d.db, peer, { ...base, ok: true, okAt: at, grant: c.body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
       beatMs: r.value.beatMs, nextAt: at + keep });
   }
   if (notV2(r)) {

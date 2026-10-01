@@ -13,11 +13,17 @@ export interface WeekQuota { weekUsedPct: number; resetAt: number }
 export type QuotaReport = Partial<Record<"codex" | "claude", WeekQuota>>;
 const QUOTA_FAMILIES = ["codex", "claude"] as const;
 
-/** 周窗口的整数百分比（0..100 夹住）与重置时刻；没有周窗口、百分比未知、重置时刻没有或已过 → null */
+/** Date 能表示的最大毫秒数，也是 hello 解析器给 resetAt 的上限（lend-wire-v2 MAX_TS） */
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * 周窗口的整数百分比（0..100 夹住）与重置时刻；没有周窗口、百分比或重置时刻不是有限数（缓存文件坏了也会读进来）、
+ * 重置时刻已过或超出 Date 范围 → null。坏值必须在这里挡掉：它会随 hello 发出去，过不了对方解析器整份 hello 就发不成。
+ */
 export function weekOf(q: InventoryQuota, now: number): WeekQuota | null {
   const w = q.windows.find((x) => x.kind === "weekly");
-  if (!w || w.usedPct === null || !Number.isFinite(w.usedPct) || w.resetsAtMs === null || w.resetsAtMs <= now) return null;
-  return { weekUsedPct: Math.min(100, Math.max(0, Math.round(w.usedPct))), resetAt: Math.round(w.resetsAtMs) };
+  if (!w || !Number.isFinite(w.usedPct) || !Number.isFinite(w.resetsAtMs) || w.resetsAtMs! <= now || w.resetsAtMs! > MAX_DATE_MS) return null;
+  return { weekUsedPct: Math.min(100, Math.max(0, Math.round(w.usedPct!))), resetAt: Math.round(w.resetsAtMs!) };
 }
 
 export function reportOf(all: Record<"codex" | "claude", InventoryQuota>, now: number): QuotaReport {

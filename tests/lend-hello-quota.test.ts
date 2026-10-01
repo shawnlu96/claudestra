@@ -69,6 +69,15 @@ describe("出借方 hello 带 quota", () => {
     expect(helloState(s.h.db, "team-a")!.ok).toBe(true);
   });
 
+  test("额度里混进坏值（NaN 重置时刻）：hello 照发、去掉 quota，授权和容量不受拖累（验收线 2）", async () => {
+    const s = setup({ quota: async () => ({ codex: { weekUsedPct: 20, resetAt: NaN } }) });
+    await s.h.tick();
+    expect(s.hellos).toHaveLength(1);
+    expect(s.hellos[0]).not.toHaveProperty("quota");
+    expect(s.hellos[0]!.grant).not.toBeNull();
+    expect(helloState(s.h.db, "team-a")).toMatchObject({ ok: true, selfCheck: null, grant: true });
+  });
+
   test("百分比变了不算正文变了：保活时间之前不多发", async () => {
     let pct = 10;
     const s = setup({ quota: async () => ({ codex: { weekUsedPct: pct, resetAt: 9_000_000_000_000 } }) });
@@ -97,6 +106,23 @@ describe("旧版 A 的回退", () => {
     await s.h.tick();
     expect(s.hellos).toHaveLength(3);
     expect(s.hellos[2]).not.toHaveProperty("quota");
+  });
+
+  test("等旧版 A 回 400 期间授权被收回：重发前重新现读，第二次是 grant:null、0 槽，记成没授权", async () => {
+    const s = setup();
+    s.setA((b) => {
+      if ("quota" in b) {
+        s.h.lend.lend = []; // owner 在第一次请求还没回时收回
+        return oldA(b);
+      }
+      return newA(b);
+    });
+    await s.h.tick();
+    expect(s.hellos).toHaveLength(2);
+    expect(s.hellos[0]!.grant).not.toBeNull();
+    expect(s.hellos[1]).toMatchObject({ grant: null, slots: { codex: { total: 0 } } });
+    expect(s.hellos[1]!.seq as number).toBeGreaterThan(s.hellos[0]!.seq as number);
+    expect(helloState(s.h.db, "team-a")).toMatchObject({ ok: true, grant: false });
   });
 
   test("「不收」会过期：过 6 小时，或本机重启换了 boot，再带一次试试", async () => {

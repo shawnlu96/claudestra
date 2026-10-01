@@ -23,7 +23,7 @@ import { LedgerCli } from "../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
 import { schedulerRemoteCmds } from "../src/manager/ledger-scheduler-remote-cmds.js";
 import { BORROW_BOOLS, BORROW_FLAGS, buildBorrowSet } from "../src/manager/lend.js";
-import { reviewFirstFor, toggleRole, weekUsed, resetIn, clampMaxOpen, parseMaxOpen } from "@/features/borrow/borrow-model";
+import { reviewFirstFor, toggleRole, weekUsed, resetIn, clampMaxOpen, parseMaxOpen, localTierDisabled } from "@/features/borrow/borrow-model";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const at = "2026-09-29T00:00:00Z";
@@ -212,5 +212,14 @@ describe("网页纯函数", () => {
     expect(clampMaxOpen(-3, 32, 0)).toBe(0);
     expect(parseMaxOpen("0", 32, 0)).toEqual({ value: 0, clamped: false });
     expect(parseMaxOpen("0", 20)).toEqual({ value: 1, clamped: true });
+  });
+
+  test("本机档位：mode=off（只用本机）时禁用，与锁 / 写权限无关；balance 时只看卡片本身；本机行用的就是它、上限步进器不受影响", () => {
+    expect(localTierDisabled(false, { mode: "off" })).toBe(true);
+    expect(localTierDisabled(false, { mode: "balance" })).toBe(false);
+    expect(localTierDisabled(true, { mode: "balance" })).toBe(true);
+    const src = readFileSync(join(import.meta.dir, "../web/features/borrow/borrow-alloc.tsx"), "utf8");
+    expect(src).toContain("rolesReadOnly disabled={localTierDisabled(disabled, p)}");
+    expect(src).toMatch(/<Stepper value=\{p\.maxActiveWorkers\}[^>]*disabled=\{disabled\}/);
   });
 });
