@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findPiSessionBySessionId, listPiSessionJsonls, piSessionPath, piSessionsDir } from "../src/lib/pi-session.ts";
 import { piAdapter } from "../src/lib/runtimes/pi.ts";
+import { piMountProblem } from "../src/lib/acp/pi-adapter/main.ts";
+import { SANDBOX_PI_FLAGS, sandboxPiProblem } from "../src/lib/acp/pi-adapter/sandbox-policy.ts";
 import { sandboxPiAgentDirProblem } from "../src/lib/sandbox.ts";
 import { assertSandboxSession } from "../src/lib/sandbox-sessions.ts";
 import { copyPiCredential } from "../scripts/sandbox-pi-auth.ts";
@@ -49,6 +51,29 @@ describe("读侧：会话目录 / 文件经链接指到根外的当不存在", (
     expect(sandboxPiAgentDirProblem(w2.env)).toBeNull(); // 还不存在：pi 会在根下新建
     mkdirSync(w2.piDir);
     expect(sandboxPiAgentDirProblem(w2.env)).toBeNull();
+  });
+
+  test("Pi 目录是真实目录、里面的全局文件 / sessions 是指向根外的链接：起 pi 前三处闸都拒；根内链接与不存在的放行", () => {
+    const cases: [string, (w: ReturnType<typeof world>) => void][] = [
+      ["auth.json", (w) => (writeFileSync(join(w.outside, "auth.json"), "{}"), symlinkSync(join(w.outside, "auth.json"), join(w.piDir, "auth.json")))],
+      ["settings.json", (w) => (writeFileSync(join(w.outside, "s.json"), "{}"), symlinkSync(join(w.outside, "s.json"), join(w.piDir, "settings.json")))],
+      ["sessions", (w) => symlinkSync(w.outside, join(w.piDir, "sessions"))],
+      ["mcp.json", (w) => symlinkSync(join(w.outside, "nope.json"), join(w.piDir, "mcp.json"))], // 悬空链接：pi 写它会落到根外
+    ];
+    for (const [name, plant] of cases) {
+      const w = world();
+      mkdirSync(w.piDir);
+      plant(w);
+      expect({ name, v: sandboxPiAgentDirProblem(w.env) }).toEqual({ name, v: expect.stringContaining(join(w.piDir, name)) });
+      expect({ name, v: sandboxPiProblem(w.env, [...SANDBOX_PI_FLAGS]) }).toEqual({ name, v: expect.stringContaining(name) }); // 宿主起适配器前
+      expect({ name, v: piMountProblem(["claudestra"], w.root, [], w.env) }).toEqual({ name, v: expect.stringContaining(name) }); // 适配器每次起 pi（含 /clear）
+    }
+    const ok = world();
+    mkdirSync(join(ok.piDir, "sessions"), { recursive: true });
+    writeFileSync(join(ok.root, "real-settings.json"), "{}");
+    symlinkSync(join(ok.root, "real-settings.json"), join(ok.piDir, "settings.json")); // 指向根内：放行
+    expect(sandboxPiAgentDirProblem(ok.env)).toBeNull();
+    expect(piMountProblem(["claudestra"], ok.root, [], ok.env)).toBeNull();
   });
 
   test("会话项目目录是链接、会话文件是链接：查找 / 列表 / 扫描都看不见，set-session 拒；根内的真会话照常", async () => {
@@ -96,7 +121,7 @@ describe("写侧：pi-auth 不跟链接写到根外", () => {
     mkdirSync(w.piDir);
     writeFileSync(join(w.outside, "victim.json"), "{}");
     symlinkSync(join(w.outside, "victim.json"), join(w.piDir, "auth.json"));
-    expect(copyPiCredential("deepseek", src, w.piDir, w.root)).toEqual({ error: expect.stringContaining("不是普通文件") });
+    expect(copyPiCredential("deepseek", src, w.piDir, w.root)).toEqual({ error: expect.stringContaining(join(w.piDir, "auth.json")) }); // 目录闸先拦
     expect(readFileSync(join(w.outside, "victim.json"), "utf8")).toBe("{}");
   });
 
