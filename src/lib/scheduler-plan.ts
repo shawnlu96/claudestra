@@ -6,6 +6,7 @@ import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from 
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
+import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 
 export interface WorkerRef {
   agent: string;
@@ -52,7 +53,7 @@ export interface PlannerSnapshot {
   strayPoolOrders?: readonly string[];
 }
 
-interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null }
+interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
 interface PlannedIntent {
   kind: "intent";
   id: string;
@@ -144,7 +145,7 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const away = remoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
   if (away && "wait" in away) return wait(away.code ?? "placement", away.wait);
   if (away && "escalate" in away) return escalate("placement_lease", away.escalate);
-  const fix = node.stage === "fix" ? fixPackage(s) : null;
+  const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? fixPackage(s) : null;
   if (fix && "kind" in fix) return fix;
   const scope = fileResources(s); // no scope: the local path below escalates it, a peer never writes unlocked
   if (away && scope) return makeIntent(s, node, "dispatch", away.reason, [taskResource(s), ...scope],
@@ -166,6 +167,9 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   return makeIntent(s, node, "dispatch", `派 ${node.step} 给 ${s.author!.agent}`, resources as string[],
     { recipient: s.author!.agent, ...(fix ? { workOrder: fix } : {}) });
 }
+
+/** A merge bounce (conflict / red CI) is not a P1 fix: no review report, no P1 streak (scheduler-merge-conflict.ts). */
+const bouncePackage = (bounce: MergeBounce | null): WorkOrderFacts | null => bounce && { reportPath: "", findings: [], fallbackWarning: null, bounce };
 
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
   const read = currentReviewFacts(s.task, s.events);
@@ -198,8 +202,9 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (resources.includes(null)) return escalate("resource_name", "审查 session 的资源名不合法");
   const busy = resourceGate(s, resources as string[]);
   if (busy) return busy;
+  const bounce = bouncePackage(reviewAfterBounce(s.events));
   return makeIntent(s, node, "review", `派对抗式跨模型审查给 ${reviewer.agent}`, resources as string[],
-    { recipient: reviewer.agent, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
+    { recipient: reviewer.agent, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode, ...(bounce ? { workOrder: bounce } : {}) });
 }
 
 function reviewHistory(s: PlannerSnapshot, facts: ReviewFacts): ReviewFinding[][] {
@@ -317,6 +322,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
+    if (cancelled && bounceLimitHit(s.events, cancelled.id)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
     if (cancelled) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;

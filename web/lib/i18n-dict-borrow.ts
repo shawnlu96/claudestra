@@ -1,6 +1,12 @@
 /** Peer 页的借入面板（web/features/borrow）的字典条目，规则同 lib/i18n-dict.ts */
 export const BORROW_DICT: Record<string, string> = {
-  "借入": "Borrow",
+  "借别人的电脑跑我的活": "Borrow others' machines",
+  "借用这台电脑": "Borrow this machine",
+  "{name} 的电脑：同时最多跑 {box} 单": "On {name}'s machine, run up to {box} order at a time|On {name}'s machine, run up to {box} orders at a time",
+  "同时最多跑几单": "Max orders at a time",
+  "同时少跑一单": "One fewer at a time",
+  "同时多跑一单": "One more at a time",
+  "对方只开了 {n} 个": "Lender allows only {n}",
   "远端在跑": "Running remotely",
   "本机 {n} 位": "{n} local slot|{n} local slots",
   "平均分配": "Balanced",
@@ -9,9 +15,6 @@ export const BORROW_DICT: Record<string, string> = {
   "只轮询": "Poll only",
   "在跑": "Running",
   "今日余 {n} 单": "{n} order left today|{n} orders left today",
-  "上限": "Max",
-  "减少上限": "Lower the limit",
-  "增加上限": "Raise the limit",
   "无 hello": "No hello",
   "{n} 秒前": "{n}s ago",
   "{n} 分钟前": "{n}m ago",

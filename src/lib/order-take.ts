@@ -17,6 +17,7 @@ import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
 
 type WorkStage = "build" | "fix";
 export interface CurrentOrder {
@@ -82,9 +83,12 @@ const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
  * 修复单要带上这一轮审查的逐项结论与报告路径（和调度器 fixPackage 同一口径：currentReviewFacts 取本轮、本 head 的结论）；
  * 唤醒派单时执行者只看得到 take_order 的单，缺了它就只知道「要修」不知道修什么。写单 / 结论不完整时不带。
  */
-function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null } {
+function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
   if (step !== "fix") return { findings: [], report: null };
-  const read = currentReviewFacts(t, listEvents(db, { project: t.project, target: t.id }));
+  const events = listEvents(db, { project: t.project, target: t.id });
+  const bounce = fixBounce(events, t.stage); // 合并退回（冲突 / CI 红）不是修 P1：不带审查报告（scheduler-merge-conflict.ts）
+  if (bounce) return { findings: [], report: null, bounce: bounceWork(bounce) };
+  const read = currentReviewFacts(t, events);
   return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
 }
 
@@ -98,9 +102,9 @@ export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: 
     v: 1, orderId: o.orderId, taskId: t.id, specRev: t.specRev, dagVersion: dagVersionOf(db, t), node: o.intent?.node ?? o.step, step: o.step, round: t.round,
     head, repo: null, pr: null,
     inputs: [`规格与验收：${CLI} show ${t.id}`, ...(t.spec ? [`规格卡：${t.spec}`] : []), ...(t.branch ? [`分支：${t.branch}`] : []),
-      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : [])],
+      ...(fix.report ? [`上一轮审查报告：${fix.report}`] : []), ...(fix.bounce?.inputs ?? [])],
     outputs: ["分支上的提交，已推到 origin（完整 head SHA）", "证据报告路径"],
-    acceptance: ["规格里的验收线逐条自查"],
+    acceptance: fix.bounce?.acceptance ?? ["规格里的验收线逐条自查"],
     writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
     findings: fix.findings, fallback: fallback ? clipWire(`再不行退到：${fallback}`, WIRE_LIMITS.fallback) : null,
   };

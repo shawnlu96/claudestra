@@ -4,45 +4,32 @@
  * 开着时每 15 秒拉一次，页面切到后台就停；读接口 403 / 404（不是 owner 全权设备 / 老 bridge）整块不渲染。
  * 改设置的按钮只给 canRunFleet 的设备（与 bridge 写门同一来源）。remote.mode 还没有写入口，这里只读显示。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
-import { fetchBorrow, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
-import { addableContacts, canSubmitNew, clampMaxOpen, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
-import { ProjectChips, Stepper } from "./borrow-bits";
-import { BorrowPeerCard, dropPeer } from "./borrow-peer-card";
+import { machineNow, saveBorrowPeer, type BorrowView, type DroppedCode, type DroppedView } from "./borrow-api";
+import { addableContacts, canSubmitNew, POLL_MS, sortPeers, toggleProject } from "./borrow-model";
+import { LimitLine, ProjectChips, Stepper } from "./borrow-bits";
+import { BorrowPeerCard } from "./borrow-peer-card";
+import { borrowFeed, dropPeer, EMPTY_FEED, visiblePeers, type Feed, type FeedState } from "./borrow-feed";
 import { RemoteRows } from "./borrow-remote";
 import { ActivityIcon, CheckIcon, PlusIcon, ServerIcon, TrashIcon, XIcon } from "./icons";
-import { fadeIn, shake } from "./motion";
-
-type Loaded = { view: BorrowView | null; receivedAt: number; hidden: boolean };
+import { fadeIn, fadeOut, shake } from "./motion";
 
 function useBorrowView() {
-  const [s, setS] = useState<Loaded>({ view: null, receivedAt: 0, hidden: false });
-  const ctrl = useRef<AbortController | null>(null);
-  const load = useCallback(async () => {
-    ctrl.current?.abort();
-    const ac = new AbortController();
-    ctrl.current = ac;
-    try {
-      const view = await fetchBorrow(ac.signal);
-      if (!ac.signal.aborted) setS(view ? { view, receivedAt: Date.now(), hidden: false } : { view: null, receivedAt: 0, hidden: true });
-    } catch (e) {
-      // 断网 / 超时：保留上一次的数据，下一轮再拉；面板不因为一次失败消失
-      if (!ac.signal.aborted) console.warn("[borrow] 拉取失败", e);
-    }
-  }, []);
+  const [s, setS] = useState<FeedState>(EMPTY_FEED);
+  const [feed] = useState(() => borrowFeed(setS));
   useEffect(() => {
     let iv: ReturnType<typeof setInterval> | null = null;
     const start = () => {
-      void load();
-      iv ??= setInterval(() => void load(), POLL_MS);
+      void feed.load();
+      iv ??= setInterval(() => void feed.load(), POLL_MS);
     };
     const stop = () => {
       if (iv) clearInterval(iv);
       iv = null;
-      ctrl.current?.abort();
+      feed.stop();
     };
     const onVis = () => (document.visibilityState === "hidden" ? stop() : start());
     start();
@@ -51,8 +38,8 @@ function useBorrowView() {
       document.removeEventListener("visibilitychange", onVis);
       stop();
     };
-  }, [load]);
-  return { ...s, reload: load };
+  }, [feed]);
+  return { ...s, feed };
 }
 
 /** 年龄的时钟：tick 从 0 开始（= 按服务端 now 算），之后每 5 秒走一次 */
@@ -99,13 +86,13 @@ function ProjectModes({ view }: { view: BorrowView }) {
 }
 
 /** 声明了、但整条已失效的借入（联系人删了 / 禁用 / 换实例）：只给删除 */
-function DeadEntry({ d, canWrite, onChanged }: { d: DroppedView; canWrite: boolean; onChanged: () => Promise<void> }) {
+function DeadEntry({ d, canWrite, feed }: { d: DroppedView; canWrite: boolean; feed: Feed }) {
   const t = useT();
   const row = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const drop = async (el: HTMLElement) => {
     setBusy(true);
-    await dropPeer(d.peer, row.current, el, onChanged);
+    await dropPeer(d.peer, feed, { fade: () => fadeOut(row.current), fail: () => shake(el) });
     setBusy(false);
   };
   return (
@@ -134,7 +121,7 @@ function NewPeer({ peer, view, onCancel, onChanged }: { peer: string; view: Borr
   const submit = async (el: HTMLElement) => {
     setBusy(true);
     try {
-      await saveBorrowPeer(peer, { projects, maxOpen });
+      await saveBorrowPeer(peer, { projects, maxOpen }, machineNow());
       await onChanged();
       onCancel();
     } catch {
@@ -153,42 +140,42 @@ function NewPeer({ peer, view, onCancel, onChanged }: { peer: string; view: Borr
         <button
           className="btn btn-primary btn-xs btn-square"
           disabled={busy || !canSubmitNew(projects, maxOpen, limit)}
-          aria-label={t("借入")}
+          aria-label={t("借用这台电脑")}
           onClick={(e) => void submit(e.currentTarget)}
         >
           {busy ? <span className="loading loading-spinner loading-xs" /> : <CheckIcon className="size-3.5" />}
         </button>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy}
-          onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
-        <Stepper value={maxOpen} limit={limit} disabled={busy} onStep={(d) => setMaxOpen((n) => clampMaxOpen(n + d, limit))} />
-      </div>
+      <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy} onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
+      <LimitLine name={peer} n={maxOpen}>
+        <Stepper value={maxOpen} limit={limit} disabled={busy} onCommit={setMaxOpen} />
+      </LimitLine>
     </div>
   );
 }
 
 export function BorrowPanel() {
   const t = useT();
-  const { view, receivedAt, hidden, reload } = useBorrowView();
+  const { view, receivedAt, hidden, seq, gone, feed } = useBorrowView();
+  const reload = feed.load;
   const tick = useTick(5000);
   const canWrite = useCanWrite();
   const [adding, setAdding] = useState<string | null>(null);
   if (hidden || !view) return null;
   const options = view.borrow.projects;
-  const deadPeers = view.borrow.dropped.filter((d) => !d.project);
+  const deadPeers = view.borrow.dropped.filter((d) => !d.project && !gone.has(d.peer));
   const addable = addableContacts(view).filter((c) => c !== adding);
   const stamp = { serverNow: view.now, receivedAt, tick };
   return (
     <div className="mt-3 space-y-3">
-      <Section title={t("借入")}>
+      <Section title={t("借别人的电脑跑我的活")}>
         <div className="space-y-2">
           <ProjectModes view={view} />
-          {sortPeers(view.peers).map((p) => (
-            <BorrowPeerCard key={p.peer} peer={p} options={options} limit={view.borrow.maxOpenLimit} canWrite={canWrite} onChanged={reload}
+          {sortPeers(visiblePeers({ view, gone })).map((p) => (
+            <BorrowPeerCard key={p.peer} peer={p} options={options} limit={view.borrow.maxOpenLimit} canWrite={canWrite} seq={seq} feed={feed}
               dropped={view.borrow.dropped.filter((d) => d.peer === p.peer)} {...stamp} />
           ))}
-          {deadPeers.map((d) => <DeadEntry key={d.peer} d={d} canWrite={canWrite} onChanged={reload} />)}
+          {deadPeers.map((d) => <DeadEntry key={d.peer} d={d} canWrite={canWrite} feed={feed} />)}
           {adding && <NewPeer key={adding} peer={adding} view={view} onCancel={() => setAdding(null)} onChanged={reload} />}
           {canWrite && addable.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
