@@ -2,11 +2,12 @@
  * pi 的 mcp.json 里有同名 server（`-` 与 `_` 算同名）时，它静默顶掉扩展挂的 channel-server：模型没有 reply、也不报错
  * （pi 0.99 extensions/mcp：配置项优先于 registerMcpServer）。所以起 pi 前查用户级 <agent-dir>/mcp.json 与项目 <cwd>/.pi/mcp.json，
  * 撞名就拒起并点名文件。不改名：reply 的识别 / 隐藏、回复提示、bridge 的工具过滤都按 MCP_NAME 认。
- * 比 pi 略严：项目文件不看信任、禁用的条目也算（改一行配置就成了真覆盖）。tests/pi-acp-mcp-clash.test.ts。
+ * 比 pi 略严：项目文件不看信任、禁用的条目也算（改一行配置就成了真覆盖）。agent 目录按 Pi 的规则算（lib/pi-path.ts）。
+ * 只依赖 node 内置模块和 pi-path：pi 里的挂载扩展也调它。tests/pi-acp-mcp-clash.test.ts、tests/pi-acp-agent-dir.test.ts。
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { piAgentDir } from "../../pi-session.js";
+import { piAgentDirOf } from "../../pi-path.js";
 
 const namespace = (name: string) => name.replace(/-/g, "_");
 
@@ -22,8 +23,8 @@ function serverNames(path: string): string[] {
   }
 }
 
-/** 要挂的 server 名与 pi 配置撞了就返回给人看的原因，不撞返回 null；cwd 为空只查用户级 */
-export function piMcpClash(names: readonly string[], cwd: string, agentDir: string = piAgentDir()): string | null {
+/** 要挂的 server 名与 pi 配置撞了就返回给人看的原因，不撞返回 null；cwd 为空只查用户级。agentDir 缺省按本进程的环境算 */
+export function piMcpClash(names: readonly string[], cwd: string, agentDir: string = piAgentDirOf(process.env, cwd || undefined)): string | null {
   const files = [join(agentDir, "mcp.json"), ...(cwd ? [join(cwd, ".pi", "mcp.json")] : [])];
   for (const file of files) {
     const hit = serverNames(file).find((n) => names.some((m) => namespace(m) === namespace(n)));

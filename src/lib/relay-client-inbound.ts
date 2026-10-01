@@ -8,12 +8,14 @@ import { LIMITS, RELAY_FROM, type DataFrame, type EndFrame, type ReqFrame } from
 import { b64, pumpBody, streamSink, type StreamSink } from "./relay-stream.js";
 import { RelayError, type InboundHandler, type InboundResponse } from "./relay-client-types.js";
 import type { SendFrame } from "./relay-client-outbound.js";
+import { RelayTraffic, type TrafficRecord } from "./relay-traffic.js";
 
 interface Inbound {
   from: string;
   to: string | undefined;
   ctrl: AbortController;
   body: StreamSink;
+  rec: TrafficRecord;
 }
 
 export type Logger = (level: "info" | "warn" | "error", msg: string) => void;
@@ -26,6 +28,7 @@ export class InboundRouter {
     private readonly handler: InboundHandler | undefined,
     private readonly log: Logger,
     private readonly maxChunk: number = LIMITS.maxChunkBytes,
+    private readonly traffic: RelayTraffic = new RelayTraffic(),
   ) {}
 
   get size(): number {
@@ -49,16 +52,17 @@ export class InboundRouter {
     const body = streamSink();
     if (f.body) body.push(b64.dec(f.body));
     if (!f.more) body.end();
-    const entry: Inbound = { from, to, ctrl, body };
+    const entry: Inbound = { from, to, ctrl, body, rec: this.traffic.open(f.method, f.path) };
     this.table.set(k, entry);
     void this.run(f, entry).finally(() => {
+      entry.rec.end("broken"); // 兜底：run 的每条出口都已记过（只认第一次），这里只防意外抛错把它永远留在「在途」
       if (this.table.get(k) === entry) this.table.delete(k);
     });
   }
 
   private async run(f: ReqFrame, entry: Inbound): Promise<void> {
     const { id } = f;
-    const { from, to, ctrl } = entry;
+    const { from, to, ctrl, rec } = entry;
     let res: InboundResponse;
     try {
       if (!this.handler) throw new RelayError("local_unreachable", "peer", "no inbound handler");
@@ -67,6 +71,7 @@ export class InboundRouter {
       if (ctrl.signal.aborted) return; // 发起方已经不要了：回什么都没人收
       const err = e instanceof RelayError ? e : new RelayError("local_unreachable", "peer", (e as Error).message);
       this.log("warn", `入站 ${from} ${f.method} ${f.path} 失败: ${err.code} ${err.message}`);
+      rec.end("failed");
       if (to) return void this.send({ t: "error", id, to, code: err.code, message: err.message, origin: "peer" });
       // 隧道请求没有 error 帧可回（发起方是中继 front）：给浏览器一个 502，正文说明是本机哪一步没通
       const body = b64.enc(new TextEncoder().encode(JSON.stringify({ ok: false, error: err.code, message: err.message })));
@@ -77,15 +82,20 @@ export class InboundRouter {
     const body = res.body ?? null;
     const inline = body instanceof Uint8Array && body.length <= this.maxChunk;
     const head = { t: "res", id, ...(to ? { to } : {}), status: res.status, headers: res.headers, ...(inline ? { body: b64.enc(body) } : {}), more: !inline && body !== null };
-    if (!this.send(head) || inline || body === null) return;
+    if (!this.send(head)) return rec.end("lost", res.status);
+    if (inline && body instanceof Uint8Array) rec.sent(body.length);
+    if (inline || body === null) return rec.end("ok", res.status);
     try {
       await pumpBody(body, (chunk) => {
         if (ctrl.signal.aborted) throw new Error("cancelled");
         this.send(chunk ? { t: "data", id, ...(to ? { to } : {}), b64: b64.enc(chunk) } : { t: "end", id, ...(to ? { to } : {}) });
+        if (chunk) rec.sent(chunk.length);
       }, ctrl.signal, this.maxChunk);
+      rec.end("ok", res.status);
     } catch (e) {
       // 响应流半途断了（本机 Web 掐了 SSE、或发起方已取消）：让对方别等剩下的
       if (!ctrl.signal.aborted) this.send({ t: "cancel", id, ...(to ? { to } : {}) });
+      rec.end("broken", res.status); // 已被取消的话 onCancel 先记了 cancelled，这次不算
       this.log("info", `入站 ${from} ${f.path} 响应流中断: ${(e as Error).message}`);
     }
   }
@@ -111,6 +121,7 @@ export class InboundRouter {
     const e = this.table.get(k);
     if (!e) return false;
     this.table.delete(k);
+    e.rec.end("cancelled");
     e.ctrl.abort();
     e.body.fail(new RelayError("cancelled", "relay", "request cancelled by originator"));
     return true;
@@ -120,6 +131,7 @@ export class InboundRouter {
   abortAll(): void {
     for (const [k, e] of this.table) {
       this.table.delete(k);
+      e.rec.end("lost");
       e.ctrl.abort();
       e.body.fail(new RelayError("connection_lost", "client", "relay connection lost"));
     }

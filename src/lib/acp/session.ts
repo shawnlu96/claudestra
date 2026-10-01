@@ -5,14 +5,15 @@
  *   steer 答 startedNewTurn 时，在回包那一行处理的**同一刻**（rpc 的 onResult 同步钩子）记下当前序号，那一轮的结束 =
  *   这个序号之后的第一个 idle。已经来过就立刻兑现——不会「先完成、后挂监听」；序号只增，也不会拿上一轮的 idle 充数。
  * - 适配器退出（rpc 断流）：在途请求由 rpc 全部 reject，挂着的外部回合等待在这里一律以失败兑现，没有永远等不到的调用。
+ * - idle 带了这一轮的结局（Pi 适配器的 _meta.claudestra.turn）就按它兑现：steering 另起的回合失败了也得出卡、报 StopFailure。
  * 规矩与形状见 docs/runtimes/codex-acp.md；tests/acp-session.test.ts。
  */
 import { configRefusal, parseConfigOptions, resolveConfigValue, type ConfigOption } from "./config.js";
-import { airFailureOf, classifyAirFailure, classifyPromptError } from "./failures.js";
+import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError } from "./failures.js";
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
 import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
 import type { PromptOutcome, SteerResult } from "./turn.js";
-import { threadStatusOf } from "./updates.js";
+import { threadStatusOf, turnEndOf } from "./updates.js";
 
 /** initialize 时声明的客户端能力：AIR 的 sessionFailure（结构化失败）+ 终端输出增量（声明了 AIR 不声明它，命令输出就收不到） */
 export const CLIENT_CAPABILITIES = {
@@ -32,6 +33,7 @@ export interface SessionDeps {
 }
 
 type Waiter = { after: number; resolve: (o: PromptOutcome) => void; cancelled: boolean };
+type TurnEnd = ReturnType<typeof turnEndOf>;
 
 export class AcpSession {
   readonly rpc: RpcPeer;
@@ -39,7 +41,7 @@ export class AcpSession {
   configOptions: ConfigOption[] = [];
   steering = false;
   private statusSeq = 0;
-  private lastEnd: { seq: number; status: string } | null = null;
+  private lastEnd: { seq: number; status: string; end: TurnEnd } | null = null;
   private waiters: Waiter[] = [];
   private turnSeq = 0;
 
@@ -50,7 +52,7 @@ export class AcpSession {
       if (!p || (this.sessionId && p.sessionId !== this.sessionId)) return; // 子会话（我们没声明 subagents）等别的会话不管
       const u = p.update ?? {};
       const st = threadStatusOf(u);
-      if (st) this.noteStatus(st);
+      if (st) this.noteStatus(st, turnEndOf(u));
       this.deps.onUpdate(u);
     });
     this.rpc.onRequest("session/request_permission", async (params) => {
@@ -146,22 +148,28 @@ export class AcpSession {
 
   /** 序号 after 之后的第一个回合结束（idle / systemError）；已经来过就立刻兑现 */
   private waitEndAfter(after: number): Promise<PromptOutcome> {
-    if (this.lastEnd && this.lastEnd.seq > after) return Promise.resolve(this.endOutcome(this.lastEnd.status, false));
+    if (this.lastEnd && this.lastEnd.seq > after) return Promise.resolve(this.endOutcome(this.lastEnd, false));
     return new Promise((resolve) => this.waiters.push({ after, resolve, cancelled: false }));
   }
 
-  private noteStatus(status: string): void {
+  private noteStatus(status: string, end: TurnEnd): void {
     const seq = ++this.statusSeq;
     if (status !== "idle" && status !== "systemError") return;
-    this.lastEnd = { seq, status };
+    const last = (this.lastEnd = { seq, status, end });
     const due = this.waiters.filter((w) => seq > w.after);
     this.waiters = this.waiters.filter((w) => seq <= w.after);
-    for (const w of due) w.resolve(this.endOutcome(status, w.cancelled));
+    for (const w of due) w.resolve(this.endOutcome(last, w.cancelled));
   }
 
-  private endOutcome(status: string, cancelled: boolean): PromptOutcome {
-    if (status === "systemError") return { kind: "failed", failure: { kind: "error", key: `status:${this.sessionId}#${this.statusSeq}`, message: `${this.label} 线程出错（systemError）` } };
-    return cancelled ? { kind: "cancelled" } : { kind: "done" };
+  private endOutcome(e: { seq: number; status: string; end: TurnEnd }, cancelled: boolean): PromptOutcome {
+    const key = `status:${this.sessionId}#${e.seq}`;
+    if (e.status === "systemError") return { kind: "failed", failure: { kind: "error", key, message: `${this.label} 线程出错（systemError）` } };
+    const f = e.end?.failure;
+    if (f) {
+      const message = typeof f.message === "string" && f.message ? f.message : `${this.label} 回合失败`;
+      return { kind: "failed", failure: classifyNeutralFailure(f.kind, key, message) ?? { kind: "error", key, message } };
+    }
+    return cancelled || e.end?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
   }
 
   /** 适配器退出：挂着的等待一律以失败兑现（在途请求由 rpc 自己 reject） */

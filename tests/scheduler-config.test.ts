@@ -73,3 +73,22 @@ describe("T68 scheduler service configuration", () => {
     }
   });
 });
+
+describe("i28-S1 supervise switch", () => {
+  const base = { enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: "/tmp/project" } } };
+  test("absent = on with a 20-minute stuck threshold; boolean and object forms; per-project off", () => {
+    expect(parseSchedulerConfig(base).supervise).toEqual({ enabled: true, stuckMin: 20 });
+    expect(parseSchedulerConfig({ ...base, supervise: false }).supervise).toEqual({ enabled: false, stuckMin: 20 });
+    expect(parseSchedulerConfig({ ...base, supervise: { stuckMin: 30 } }).supervise).toEqual({ enabled: true, stuckMin: 30 });
+    expect(parseSchedulerConfig({ ...base, supervise: { enabled: false } }).supervise?.enabled).toBe(false);
+    const off = parseSchedulerConfig({ ...base, projects: { p: { ...base.projects.p, supervise: false } } });
+    expect(off.projects.p.supervise).toBe(false);
+    expect(parseSchedulerConfig(base).projects.p.supervise).toBeUndefined();
+  });
+  test("invalid values fail closed", () => {
+    expect(() => parseSchedulerConfig({ ...base, supervise: "yes" })).toThrow("supervise");
+    expect(() => parseSchedulerConfig({ ...base, supervise: { stuckMin: 1 } })).toThrow("stuckMin");
+    expect(() => parseSchedulerConfig({ ...base, supervise: { enabled: "no" } })).toThrow("supervise.enabled");
+    expect(() => parseSchedulerConfig({ ...base, projects: { p: { ...base.projects.p, supervise: 1 } } })).toThrow("supervise must be boolean");
+  });
+});

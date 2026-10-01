@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { spawnAdapter } from "../src/lib/acp/adapter-proc.ts";
 import { MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
 import { PI_ACP_ADAPTER_MAIN } from "../src/lib/acp/pi-adapter/main.ts";
-import { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
+import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -21,6 +21,9 @@ const FAKE_PI = `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 const log = (o) => appendFileSync(process.env.FAKE_PI_LOG, JSON.stringify(o) + "\\n");
 log({ argv: process.argv.slice(2), mcp: process.env.${PI_MCP_SERVERS_ENV} ?? null, cwd: process.cwd() });
+// 挂了 server 时真 pi 里的挂载扩展会在读命令之前报状态（mcp-mount.ts）
+const status = { type: "extension_ui_request", id: "m", method: "setStatus", statusKey: "${MOUNT_STATUS_KEY}", statusText: "${MOUNT_OK}" };
+if (process.env.${PI_MCP_SERVERS_ENV}) process.stdout.write(JSON.stringify(status) + "\\n");
 const DATA = {
   get_state: { model: { provider: "ds", id: "v4", name: "V4" }, thinkingLevel: "off" },
   get_available_models: { models: [{ provider: "ds", id: "v4", name: "V4" }] },

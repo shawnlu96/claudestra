@@ -20,6 +20,7 @@ import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
 import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
+import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
 
 type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
@@ -144,13 +145,15 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     });
   } else if (f?.kind === "auth") {
     authCards.add(channelId);
-    const context = "在这台机器的终端里跑一次 `codex login`（或设好 API key）。登好之后宿主每分钟自动重试，接上线程后这张卡自己结掉。";
+    const context = label === "Pi"
+      ? "在这台机器上给 Pi 配好这个模型 provider 的凭据（终端里开一次 `pi` 用 /login，或设好对应的 API key），再重发消息。"
+      : "在这台机器的终端里跑一次 `codex login`（或设好 API key）。登好之后宿主每分钟自动重试，接上线程后这张卡自己结掉。";
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 需要 owner 登录`, context, options: [] });
   } else if (f?.kind === "error" && f.retry !== true) {
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
-      failure: "error", instance: f.key });
+      failure: "error", instance: f.key, ...(failureCardQuiet(agentName, f.message, Date.now()) ? { quiet: true as const } : {}) }); // 监护在处置：不推 owner
   }
 }
 
