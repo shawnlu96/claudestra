@@ -48,10 +48,14 @@ describe("peerPrGithub", () => {
     expect(await fake({ fetch: "", "rev-parse": `${"b".repeat(40)}\n` }).gh.fetchHead(401, H)).toContain("不是卡上的");
   });
 
-  test("view：状态只认三种", async () => {
-    const v = { state: "MERGED", headRefOid: H, baseRefName: "main", headRefName: "fix/x", isCrossRepository: false, headRepositoryOwner: { login: "o" } };
-    expect(await fake({ "pr view": JSON.stringify(v) }).gh.view("o/r", 401)).toMatchObject({ state: "MERGED", head: H });
+  test("view：状态只认三种；作者 / draft 缺一个就整轮不动", async () => {
+    const v = { state: "MERGED", url: ROW.url, author: { login: "He" }, title: "t", headRefOid: H, baseRefName: "main", headRefName: "fix/x",
+      isCrossRepository: false, headRepositoryOwner: { login: "o" }, isDraft: false };
+    expect(await fake({ "pr view": JSON.stringify(v) }).gh.view("o/r", 401)).toEqual({ state: "MERGED", url: ROW.url, login: "He", title: "t", head: H,
+      base: "main", branch: "fix/x", crossRepo: false, headOwner: "o", draft: false });
     await expect(fake({ "pr view": JSON.stringify({ ...v, state: "DRAFT" }) }).gh.view("o/r", 401)).rejects.toThrow();
+    await expect(fake({ "pr view": JSON.stringify({ ...v, isDraft: undefined }) }).gh.view("o/r", 401)).rejects.toThrow();
+    await expect(fake({ "pr view": JSON.stringify({ ...v, author: null }) }).gh.view("o/r", 401)).rejects.toThrow();
   });
 
   test("ghEnv 清掉 agent 频道和调度身份", () => {

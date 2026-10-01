@@ -9,7 +9,7 @@ import type { bridgeSend } from "./bridge-client.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { PeerPrConfig } from "./peer-pr-config.js";
 import type { PeerPrGithub } from "./peer-pr-github.js";
-import { pushDedupKey, type PushResult } from "./peer-pr-ledger.js";
+import { pushDedupKey, unsentNotices, type PushResult } from "./peer-pr-ledger.js";
 import type { LocalIdentity } from "./peer-pr-redact.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -86,6 +86,16 @@ export async function noticeOnce(c: PeerPrCtx, target: string, key: string, text
   c.state.noticeFailAt.delete(memo);
   const done = await record(c, target, key, "notice_sent", "已通知 PM");
   if (done.ok !== true) console.error(`⚠️ [peer-pr] 通知已发出但送达没记上（可能再发一次）：${String(done.error)}`);
+}
+
+/** One more try for every notice still unsent, whatever wrote it; each keeps its own NOTICE_RETRY_MS spacing. */
+export async function retryNotices(c: PeerPrCtx): Promise<string[]> {
+  const out: string[] = [];
+  for (const n of unsentNotices(c.db, c.cfg.project)) {
+    await noticeOnce(c, n.target, n.key, n.text);
+    if (getEventByDedup(c.db, pushDedupKey(n.target || `-${c.cfg.project}`, n.key, "notice_sent")!)) out.push(`通知 ${n.target || "-"} ${n.key} 补发了`);
+  }
+  return out;
 }
 
 /** Give the card to PM through the existing fallback, then tell PM once. */

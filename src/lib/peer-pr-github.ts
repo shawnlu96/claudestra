@@ -13,7 +13,10 @@ export interface OpenPr {
   number: number; url: string; title: string; login: string; branch: string; head: string; base: string;
   crossRepo: boolean; headOwner: string | null; draft: boolean;
 }
-export interface PrState { state: "OPEN" | "MERGED" | "CLOSED"; head: string; base: string; branch: string; crossRepo: boolean; headOwner: string | null }
+export interface PrState {
+  state: "OPEN" | "MERGED" | "CLOSED"; url: string; login: string; title: string; head: string; base: string; branch: string;
+  crossRepo: boolean; headOwner: string | null; draft: boolean;
+}
 
 const TIMEOUT_MS = 30_000;
 const SHA = /^[0-9a-f]{40}$/;
@@ -102,12 +105,14 @@ export function peerPrGithub(repoDir: string, command: Command = runBounded): Pe
     },
     async view(repo, n) {
       const r = json(await gh("pr", "view", String(n), "--repo", repo, "--json",
-        "state,headRefOid,baseRefName,headRefName,isCrossRepository,headRepositoryOwner"), "gh pr view") as Record<string, unknown>;
+        "state,url,author,title,headRefOid,baseRefName,headRefName,isCrossRepository,headRepositoryOwner,isDraft"), "gh pr view") as Record<string, unknown>;
       const state = str(r?.state, "gh pr view state");
       const head = str(r?.headRefOid, "gh pr view head");
       if (!["OPEN", "MERGED", "CLOSED"].includes(state) || !SHA.test(head)) return fail("gh pr view");
-      return { state: state as PrState["state"], head, base: str(r.baseRefName, "gh pr view base"), branch: str(r.headRefName, "gh pr view branch"),
-        crossRepo: bool(r.isCrossRepository, "gh pr view cross"), headOwner: owner(r.headRepositoryOwner, "gh pr view owner") };
+      return { state: state as PrState["state"], url: str(r.url, "gh pr view url"), login: owner(r.author, "gh pr view author") ?? fail("gh pr view author"),
+        title: str(r.title, "gh pr view title"), head, base: str(r.baseRefName, "gh pr view base"), branch: str(r.headRefName, "gh pr view branch"),
+        crossRepo: bool(r.isCrossRepository, "gh pr view cross"), headOwner: owner(r.headRepositoryOwner, "gh pr view owner"),
+        draft: bool(r.isDraft, "gh pr view draft") };
     },
     async fetchHead(n, head) {
       const ref = `refs/claudestra/peer-pr/${n}`;

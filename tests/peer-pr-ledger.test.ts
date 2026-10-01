@@ -5,6 +5,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { PEER_PR_CONFIG_PATH } from "../src/lib/peer-pr-config.ts";
+import type { PeerPrGithub, PrState } from "../src/lib/peer-pr-github.ts";
+import { intakeGithub } from "../src/manager/ledger-peer-pr-cmds.ts";
 import { peerPrHeadMissing, peerPrHold, peerPrRepoDir } from "../src/lib/peer-pr-hold.ts";
 import { getWorkflow } from "../src/lib/ledger-scheduler.ts";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.ts";
@@ -19,22 +21,29 @@ import { autoFixture } from "./scheduler-auto-helpers.ts";
 const H1 = "a1".repeat(20), H2 = "b2".repeat(20);
 const FP = "0a1b-2c3d-4e5f-6a7b";
 
+/** GitHub as the intake CLI reads it: per-PR overrides on an open, same-repo, non-draft PR by a configured author. */
+const views = new Map<number, Partial<PrState>>();
+const gh: PeerPrGithub = {
+  repo: async () => "o/r", listOpen: async () => [], files: async () => [{ path: "src/bridge.ts" }], body: async () => "b", fetchHead: async () => null,
+  view: async (_r, n) => ({ state: "OPEN", url: `https://github.com/o/r/pull/${n}`, login: "He-Dev", title: "t", head: H1, base: "main",
+    branch: "fix/x", crossRepo: false, headOwner: "o", draft: false, ...views.get(n) }),
+};
+const realGithub = intakeGithub.make;
+
 beforeAll(() => {
+  intakeGithub.make = () => gh;
   writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, autoDispatch: true,
     projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: statePath() } } }));
   writeFileSync(PEER_PR_CONFIG_PATH, JSON.stringify({ enabled: true, project: "p", fromNumber: 400, maxOpen: 2, replyTo: "agent-pm@me",
     peers: [{ peer: "he", fp: FP, agent: "agent-x", githubLogins: ["he-dev"], authorFamily: "codex" }] }));
 });
 afterAll(() => {
+  intakeGithub.make = realGithub;
   rmSync(SCHEDULER_CONFIG_PATH, { force: true });
   rmSync(PEER_PR_CONFIG_PATH, { force: true });
 });
 
-const intakeArgs = (n: number, over: Record<string, string> = {}) => {
-  const a: Record<string, string> = { project: "p", number: String(n), url: `https://github.com/o/r/pull/${n}`, head: H1, branch: "fix/x", base: "main",
-    login: "He-Dev", title: "t", body: "b", surface: "security", reasons: JSON.stringify(["文件 src/bridge.ts：src/bridge.ts"]), ...over };
-  return ["peer-pr-intake", ...Object.entries(a).flatMap(([k, v]) => [`--${k}`, v])];
-};
+const intakeArgs = (n: number, head = H1) => ["peer-pr-intake", "--project", "p", "--number", String(n), "--head", head];
 
 describe("peer-pr-intake", () => {
   test("一个事务：security v2 auto、spec→restate→build→review、assignee 是 peer agent、执行者推成 delegate", async () => {
@@ -52,15 +61,33 @@ describe("peer-pr-intake", () => {
   test("拒：别的身份、作者不在配置、base 不是 main、小于 fromNumber、maxOpen 满了；拒了不留半张卡", async () => {
     const f = autoFixture();
     expect(await f.cli("agent-task-one", ...intakeArgs(401))).toMatchObject({ ok: false, code: "forbidden" });
-    expect(await f.cli("scheduler", ...intakeArgs(401, { login: "stranger" }))).toMatchObject({ ok: false, code: "forbidden" });
-    expect(await f.cli("scheduler", ...intakeArgs(401, { base: "feat/x" }))).toMatchObject({ ok: false, code: "invalid" });
+    for (const over of [{ login: "stranger" }, { base: "feat/x" }, { url: "https://github.com/o/r/pull/402" }]) {
+      views.set(401, over);
+      expect(await f.cli("scheduler", ...intakeArgs(401))).toMatchObject({ ok: false, code: "invalid" });
+    }
+    views.clear();
     expect(await f.cli("scheduler", ...intakeArgs(399))).toMatchObject({ ok: false, code: "invalid" });
-    expect(await f.cli("scheduler", ...intakeArgs(401, { url: "https://github.com/o/r/pull/402" }))).toMatchObject({ ok: false, code: "invalid" });
     expect(getTask(f.db, "PR401")).toBeNull();
     await f.cli("scheduler", ...intakeArgs(401));
     await f.cli("scheduler", ...intakeArgs(402));
     expect(await f.cli("scheduler", ...intakeArgs(403))).toMatchObject({ ok: false, code: "conflict" });
     expect(listTasks(f.db, "p").map((t) => t.id).sort()).toEqual(["PR401", "PR402", "T1"]);
+    f.close();
+  });
+
+  test("事实只认 GitHub：别的仓库、fork / 别人的 head 仓库、draft、已关、head 已变一律拒，不留卡也不留工作流", async () => {
+    const f = autoFixture();
+    const cases: Partial<PrState>[] = [{ url: "https://github.com/foreign/unrelated/pull/401" }, { crossRepo: true, headOwner: "fork" },
+      { headOwner: "someone" }, { headOwner: null }, { draft: true }, { state: "CLOSED" }, { state: "MERGED" }, { head: H2 }];
+    for (const over of cases) {
+      views.set(401, over);
+      expect(await f.cli("scheduler", ...intakeArgs(401))).toMatchObject({ ok: false, code: "invalid" });
+      expect(await f.cli("pm", ...intakeArgs(401))).toMatchObject({ ok: false, code: "invalid" });
+    }
+    views.clear();
+    expect(getTask(f.db, "PR401")).toBeNull();
+    expect(getWorkflow(f.db, "PR401")).toBeNull();
+    expect(await f.cli("scheduler", ...intakeArgs(401))).toMatchObject({ ok: true, surface: "security", task: { id: "PR401" } });
     f.close();
   });
 

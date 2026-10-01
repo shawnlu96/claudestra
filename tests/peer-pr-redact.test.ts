@@ -55,6 +55,24 @@ describe("peerPrSecretHit", () => {
     expect(peerPrSecretHit("sk-" + "a1".repeat(10), new Set())).toBe("密钥前缀");
   });
 
+  test("前缀自己被拆开（每个位置插空白 / 零宽 / 组合符 / 填充符）也拦；单词中间仍不算", () => {
+    const blanks = [" ", "  ", "\n", "\t", "\u3000", "\u200b", "\u2060", "\ufeff", "\u034f", "\u3164", "\u2800", " \u200b "];
+    for (const [key, value] of [["sk-", "abcdefghijklmnopqrstuvwx"], ["tok_", "abcdefgh12"]] as const) {
+      const raw = key + value;
+      for (let i = 1; i <= key.length; i++) {
+        for (const b of blanks) {
+          const split = `报告：${raw.slice(0, i)}${b}${raw.slice(i)} 完`;
+          expect([split, peerPrSecretHit(split, new Set())]).toEqual([split, "密钥前缀"]);
+          const out = redactPeerPr(split, ID, new Set()).text; // after masking: either the value is gone or the gate still refuses
+          expect([split, out.includes(value) ? peerPrSecretHit(out, new Set()) : "已遮"]).not.toEqual([split, null]);
+        }
+      }
+    }
+    expect(peerPrSecretHit("s k - a b c d e f g h i j k l m n o p q r s t u v w x", new Set())).toBe("密钥前缀");
+    expect(peerPrSecretHit("ta s k - scheduler", new Set())).toBeNull(); // too short to be a key
+    expect(peerPrSecretHit("task-scheduler-pass-tick-review-merge", new Set())).toBeNull();
+  });
+
   test("敏感字段名", () => {
     expect(peerPrSecretHit('{"password": "hunter2hunter2"}', new Set())).toBe("敏感字段名");
   });

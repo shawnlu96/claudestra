@@ -1,6 +1,6 @@
 /**
  * The peer PR step of a scheduler pass (i28-A2 §8), run before the merge and auto ticks: pushes first (a verdict recorded since
- * the last pass goes out now), then the hold checks, then — once per pollSec — the cards' PR state and the intake of new PRs.
+ * the last pass goes out now), then PM notices still unsent, then the hold checks, then — once per pollSec — the cards' PR state and the intake of new PRs.
  * peer-prs.json missing or off = nothing at all is called; unreadable = the step is skipped and reported to the service log.
  * Every gh / git / bridge / ledger child runs under the pass's liveness guard. tests/peer-pr-tick.test.ts drives it end to end.
  */
@@ -14,7 +14,7 @@ import { readPeerPrConfig, type PeerPrConfig, type PeerPrConfigRead } from "./pe
 import { knownCommits, peerPrGithub } from "./peer-pr-github.js";
 import { intakeTick } from "./peer-pr-intake.js";
 import { REPORT_MAX_BYTES } from "./peer-pr-message.js";
-import { stateFor, type Manager, type PeerPrCtx, type PeerPrDeps, type PeerPrState } from "./peer-pr-notice.js";
+import { retryNotices, stateFor, type Manager, type PeerPrCtx, type PeerPrDeps, type PeerPrState } from "./peer-pr-notice.js";
 import { cardsTick, verifyHolds } from "./peer-pr-observe.js";
 import { pushPending } from "./peer-pr-push.js";
 import { localIdentity } from "./peer-pr-redact.js";
@@ -54,6 +54,7 @@ export async function peerPrTick(db: Database, opts: { readConfig?: () => PeerPr
   };
   const repo = async () => (c.state.repo ??= await c.deps.github.repo());
   await step("push", async () => (await pushPending(c)).filter((r) => r.outcome !== "backoff").map((r) => `${r.key} ${r.outcome}`));
+  await step("notice", () => retryNotices(c));
   await step("verify", () => verifyHolds(c, repo));
   if (c.deps.now() - c.state.lastPoll < c.cfg.pollSec * 1000) return out;
   c.state.lastPoll = c.deps.now();

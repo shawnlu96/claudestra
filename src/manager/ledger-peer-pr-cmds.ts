@@ -1,13 +1,16 @@
 /**
  * The ledger side of peer PR auto review (i28-A2): intake a PR as an auto card, hand a new stable head to the card, record one
- * push / notice row. Only the scheduler service (or a real PM by hand) runs them; peer-prs.json is re-read here, never trusted
- * from the caller, and every check is repeated inside the write (lib/peer-pr-ledger.ts). tests/peer-pr-intake.test.ts.
+ * push / notice row. Only the scheduler service (or a real PM by hand) runs them; peer-prs.json is re-read here and the PR's
+ * facts are read from GitHub here, never trusted from the caller; every check is repeated inside the write
+ * (lib/peer-pr-ledger.ts). tests/peer-pr-ledger.test.ts.
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { readPeerPrConfig, type PeerPrConfig } from "../lib/peer-pr-config.js";
+import { peerPrGithub, type PeerPrGithub } from "../lib/peer-pr-github.js";
+import { verifiedIntake } from "../lib/peer-pr-intake.js";
 import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, type PushResult } from "../lib/peer-pr-ledger.js";
 import { peerPrSpec } from "../lib/peer-pr-spec.js";
 import { intFlag, jsonObjectFlag } from "./ledger-identity.js";
@@ -25,12 +28,8 @@ function configFor(project: string): PeerPrConfig {
   return read.config;
 }
 
-function reasonsFlag(raw: string | undefined): string[] {
-  let v: unknown;
-  try { v = JSON.parse(raw ?? "[]"); } catch (e) { throw new LedgerError("invalid", `--reasons 不是 JSON：${(e as Error).message}`); }
-  if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || x.length > 300)) throw new LedgerError("invalid", "--reasons 要是字符串数组");
-  return v as string[];
-}
+/** GitHub reads of the intake command; tests swap `make` (there the ledger CLI runs in-process). */
+export const intakeGithub = { make: (repoDir: string): PeerPrGithub => peerPrGithub(repoDir) };
 
 /** The spec card is written once, before the card exists (mode 0600); a duplicate intake keeps the first one. */
 function writeSpec(n: number, text: string): string {
@@ -42,24 +41,20 @@ function writeSpec(n: number, text: string): string {
 
 export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   "peer-pr-intake": {
-    valued: ["project", "number", "url", "head", "branch", "base", "login", "title", "body", "surface", "reasons"], bools: [],
-    usage: "peer-pr-intake --project <id> --number <n> --url <PR> --head <sha> --branch <b> --base <b> --login <gh> --title <t> --body <t> "
-      + "--surface security|plain --reasons <json>（调度器收 peer PR 成自动卡）",
-    run(c) {
+    valued: ["project", "number", "head"], bools: [],
+    usage: "peer-pr-intake --project <id> --number <n> --head <sha>（调度器收 peer PR 成自动卡；PR 的事实现读 GitHub）",
+    async run(c) {
       const project = c.project();
       allow(c, project, "收 peer PR ");
       const cfg = configFor(project);
       const number = intFlag(c.p, "number");
       if (number === undefined) throw new LedgerError("invalid", "缺 --number");
-      const surface = c.need("surface");
-      if (surface !== "security" && surface !== "plain") throw new LedgerError("invalid", "--surface 只能是 security / plain");
-      const facts = { number, url: c.need("url"), login: c.need("login"), head: c.need("head"), base: c.need("base"), branch: c.need("branch"),
-        title: c.need("title"), body: c.p.flags.body ?? "", surface, reasons: reasonsFlag(c.p.flags.reasons) } as const;
+      const facts = await verifiedIntake(intakeGithub.make(cfg.repoDir), cfg, number, c.need("head"));
       const known = statePath("ledger", "peer-prs", `${peerTaskId(number)}.md`);
       const spec = getTask(c.db, peerTaskId(number)) && existsSync(known) ? known : writeSpec(number, peerPrSpec(facts));
       c.deps.assertLease?.();
-      const r = intakeWrite(c.db, c.ctx(), { ...facts, project, spec, reasons: [...facts.reasons] }, cfg);
-      return { ok: true, task: { id: r.task.id, stage: r.task.stage, round: r.task.round }, duplicate: r.duplicate };
+      const r = intakeWrite(c.db, c.ctx(), { ...facts, project, spec }, cfg);
+      return { ok: true, task: { id: r.task.id, stage: r.task.stage, round: r.task.round }, duplicate: r.duplicate, surface: facts.surface };
     },
   },
   "peer-pr-observe": {

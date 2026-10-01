@@ -34,8 +34,8 @@ never a partial guess. It is read fresh by every reader (the tick, the intake CL
 |---|---|---|
 | Poll | `peer-pr-tick.ts` | once per `pollSec`: `gh pr list` in `repoDir` (GH_REPO dropped, prompts off, 30 s cap) |
 | Classify | `peer-pr-intake.ts` `classifyPr` | unconfigured author → skip; fork / other head owner, base ≠ main, odd branch → tell PM once; draft, `maxOpen` reached, head moved within `headSettleSec` → wait |
-| Surface | `peer-pr-surface.ts` | the PR's file list → `security` / `plain` (rules are data; unreadable / >300 files = security) |
-| Intake | `ledger peer-pr-intake` | one transaction: card `PR<n>` (assignee = the peer agent, `extra.peerPr`, `extra.delegate`), spec written to `ledger/peer-prs/PR<n>.md`, workflow **security v2 auto**, spec→restate→build as PM, build→review delivered as the peer at the PR head |
+| Intake | `ledger peer-pr-intake --number --head` | the caller names only the number and the head it fetched; the command reads the PR from GitHub itself (`verifiedIntake`: this repo's URL, open, same head, configured author, same head owner / not a fork, base main, branch, not draft) and refuses with nothing written on any miss. Then one transaction: card `PR<n>` (assignee = the peer agent, `extra.peerPr`, `extra.delegate`), spec written to `ledger/peer-prs/PR<n>.md`, workflow **security v2 auto**, spec→restate→build as PM, build→review delivered as the peer at the PR head |
+| Surface | `peer-pr-surface.ts` (inside intake) | the PR's file list → `security` / `plain` (rules are data; unreadable / >300 files = security) |
 | Review | existing auto tick | reviewer session of the other family; the head must already be a local commit (`refs/claudestra/peer-pr/<n>`, fetched by the peer tick) |
 | Push | `peer-pr-push.ts` → bridge `peer_pr_push` → `bridge/peer-pr-send.ts` | every verdict, every `merged` merge phase, every queued drift note |
 | Hold | `peer-pr-hold.ts` (auto tick hook) | after a verdict the planner waits until the peer tick re-read the PR and saw the same head; a card in `fix` always waits for the peer |
@@ -48,7 +48,8 @@ A new head while the card is in `merge` only tells PM and the peer (the merge qu
 
 `redactPeerPr` (`peer-pr-redact.ts`): `sanitizeForeign` first, then temp paths, `-Users-<name>-` project dirs, this host's
 name and user, and every 32+ hex value that is not a commit of `repoDir`. `peerPrSecretHit` then runs on the masked text
-(placeholders never count); a hit refuses the push. The bridge repeats every check on the exact text before its one signed
+(placeholders never count; invisible characters dropped, blanks read through — inside a key prefix too, `s k - …`); a hit
+refuses the push. The bridge repeats every check on the exact text before its one signed
 POST: peer-prs.json re-read, (peer, fp, agent) must be configured, peers.json must have that peer enabled, fully
 handshaken and on the same fp, size ≤ 64 KiB, the gate again with commits re-checked in `repoDir`. Any miss = a typed
 `rejected` and zero bytes out. A report over the size cap is not truncated: PM gets one notice with the local path.
@@ -58,7 +59,9 @@ handshaken and on the same fp, size ≤ 64 KiB, the gate again with commits re-c
 Each push is one ledger `note` (`data.op = "peer_pr_push"`, invisible to peers) per state: `claimed` → `sent` (2xx only) /
 `failed` (retried 30 s → 10 min) / `refused` (gate, terminal) / `abandoned` (24 h after the first claim, terminal).
 Terminal results share one dedup key, so a key is never delivered twice by the scheduler. PM hears once at 15 min, once on
-giving up, once per refusal. PM notices are written first, then sent, then marked sent (`noticeOnce`).
+giving up, once per refusal. PM notices are written first, then sent, then marked sent (`noticeOnce`); every pass rescans the
+notices without a sent mark (`retryNotices`), so a notice whose push is already terminal or whose card went back to manual is
+still delivered after an outage.
 
 ## Hooks in existing files
 

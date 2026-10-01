@@ -43,6 +43,7 @@ describe("handlePeerPrPush", () => {
     ["peers.json 指纹对不上", {}, { peers: async () => [{ ...PEER, fp: "ffff-ffff-ffff-ffff" }] }, "peer_pr_peer"],
     ["握手不全", {}, { peers: async () => [{ ...PEER, outToken: undefined }] }, "peer_pr_peer"],
     ["门：不是仓库 commit 的长十六进制", {}, { commits: async () => new Set() }, GATE_REJECTED],
+    ["门：前缀被空白拆开的密钥", { text: `审查结论，head ${HEAD}\ns k - abcdefghijklmnopqrstuvwx` }, {}, GATE_REJECTED],
   ];
   for (const [why, frame, over, code] of refusals) {
     test(`拒：${why}`, async () => {

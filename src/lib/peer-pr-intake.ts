@@ -1,13 +1,14 @@
 /**
  * Taking open peer PRs in as auto cards (i28-A2 §2). classifyPr is pure: an unconfigured author is skipped silently, a
  * configured author's PR the path cannot take (fork / other head owner, base not main, odd branch name) tells PM once per PR,
- * a draft / a full queue / a head still moving waits. A taken PR: file list → surface, head fetched into its local ref and
- * checked, then `ledger peer-pr-intake`, which re-reads peer-prs.json itself and owns every check again in its transaction.
+ * a draft / a full queue / a head still moving waits. A taken PR: head fetched into its local ref and checked, then
+ * `ledger peer-pr-intake <n> --head`, which re-reads peer-prs.json and takes every fact from GitHub itself (verifiedIntake).
  */
+import { LedgerError } from "./ledger-store.js";
 import { BRANCH } from "./order-deliver-pr.js";
 import { peerOfLogin, type PeerPrConfig, type PeerPrPeer } from "./peer-pr-config.js";
-import type { OpenPr } from "./peer-pr-github.js";
-import { cardForPr, inFlightPeerCards } from "./peer-pr-ledger.js";
+import type { OpenPr, PeerPrGithub } from "./peer-pr-github.js";
+import { cardForPr, inFlightPeerCards, type IntakeInput } from "./peer-pr-ledger.js";
 import { logUnlessStopped, noticeOnce, oneLine, type PeerPrCtx, type PeerPrState } from "./peer-pr-notice.js";
 import { peerPrSurface } from "./peer-pr-surface.js";
 
@@ -44,16 +45,32 @@ export function headStable(state: PeerPrState, n: number, head: string, now: num
   return seen.seen >= 2 && now - seen.since >= settleSec * 1000;
 }
 
-async function intakeOne(c: PeerPrCtx, repo: string, pr: OpenPr): Promise<string> {
-  const files = await c.deps.github.files(repo, pr.number);
-  const surface = peerPrSurface(files, c.cfg.extraSecurityGlobs);
+/**
+ * The intake facts as GitHub reports them for repoDir's own repository — never as a caller claims them. The caller only names
+ * the number and the head it expects; anything the tick would not take (other repo, fork / other head owner, base, branch,
+ * author, draft, not open, head moved) refuses with nothing written. The surface is computed here from the file list.
+ */
+export async function verifiedIntake(gh: PeerPrGithub, cfg: PeerPrConfig, number: number, head: string): Promise<Omit<IntakeInput, "project" | "spec"> & { body: string }> {
+  const repo = await gh.repo();
+  const v = await gh.view(repo, number);
+  const refuse = (why: string): never => { throw new LedgerError("invalid", `GitHub 上的 PR #${number} ${why}，不收`); };
+  if (v.url !== `https://github.com/${repo}/pull/${number}`) refuse(`不在本仓库 ${repo}`);
+  if (v.state !== "OPEN") refuse(`状态是 ${v.state}`);
+  if (v.head !== head) refuse(`head 已是 ${v.head.slice(0, 12)}（不是 ${head.slice(0, 12)}）`);
+  const pr: OpenPr = { number, url: v.url, title: v.title, login: v.login, branch: v.branch, head: v.head, base: v.base, crossRepo: v.crossRepo,
+    headOwner: v.headOwner, draft: v.draft };
+  const d = classifyPr(pr, cfg, { repoOwner: repo.split("/")[0]!, hasCard: false, inFlight: 0, stable: true });
+  if (d.kind !== "intake") refuse(d.kind === "skip" ? "作者不在 peer-prs.json 或编号小于 fromNumber" : d.kind === "wait" ? `还不能收（${d.why}）` : d.text);
+  const surface = peerPrSurface(await gh.files(repo, number), cfg.extraSecurityGlobs);
+  return { number, url: v.url, head, branch: v.branch, base: v.base, login: v.login, title: oneLine(v.title, 300),
+    body: (await gh.body(repo, number)).slice(0, 4000), surface: surface.surface, reasons: surface.reasons };
+}
+
+async function intakeOne(c: PeerPrCtx, pr: OpenPr): Promise<string> {
   const fetched = await c.deps.github.fetchHead(pr.number, pr.head);
   if (fetched) return `取 PR head 没对上，下一轮再收：${fetched}`;
-  const body = (await c.deps.github.body(repo, pr.number)).slice(0, 4000);
-  const r = await c.deps.manager("ledger", "peer-pr-intake", "--project", c.cfg.project, "--number", String(pr.number), "--url", pr.url,
-    "--head", pr.head, "--branch", pr.branch, "--base", pr.base, "--login", pr.login, "--title", oneLine(pr.title, 300), "--body", body,
-    "--surface", surface.surface, "--reasons", JSON.stringify(surface.reasons));
-  return r.ok === true ? `收卡 ${String((r.task as { id?: string } | undefined)?.id ?? "")}（${surface.surface}）` : `收卡没写进台账：${String(r.error)}`;
+  const r = await c.deps.manager("ledger", "peer-pr-intake", "--project", c.cfg.project, "--number", String(pr.number), "--head", pr.head);
+  return r.ok === true ? `收卡 ${String((r.task as { id?: string } | undefined)?.id ?? "")}（${String(r.surface)}）` : `收卡没写进台账：${String(r.error)}`;
 }
 
 /** One poll over the open PRs; returns what happened per PR worth logging. */
@@ -68,7 +85,7 @@ export async function intakeTick(c: PeerPrCtx, repo: string, open: OpenPr[]): Pr
     const d = classifyPr(pr, c.cfg, facts);
     try {
       if (d.kind === "notice") await noticeOnce(c, "", d.key, d.text);
-      if (d.kind === "intake") out.push(`#${pr.number} ${await intakeOne(c, repo, pr)}`);
+      if (d.kind === "intake") out.push(`#${pr.number} ${await intakeOne(c, pr)}`);
     } catch (e) {
       logUnlessStopped(`收 PR #${pr.number} 出错（下一轮再试）`, e);
     }

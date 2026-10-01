@@ -140,6 +140,20 @@ export function pushDedupKey(scope: string, key: string, result: PushResult): st
   return result === "notice_sent" ? `peerpr:notice:${scope}:${key}:sent` : undefined;
 }
 
+/**
+ * PM notices written but never marked sent, oldest first: the retry scan for these runs on its own, so a notice whose source
+ * already left the path (a terminal push, a card back in manual) is still delivered. Range on the unique dedupKey index.
+ */
+export function unsentNotices(db: Database, project: string): { target: string; key: string; text: string }[] {
+  const rows = db.query(`SELECT n.target, n.text, n.data FROM events n WHERE n.dedupKey >= 'peerpr:notice:' AND n.dedupKey < 'peerpr:notice;'
+    AND n.project = ? AND n.kind = 'note' AND NOT EXISTS (SELECT 1 FROM events s WHERE s.dedupKey = n.dedupKey || ':sent') ORDER BY n.seq`)
+    .all(project) as { target: string; text: string; data: string }[];
+  return rows.flatMap((r) => {
+    const d = JSON.parse(r.data) as Record<string, unknown>;
+    return d.op === "peer_pr_push" && d.result === "notice" && typeof d.key === "string" ? [{ target: r.target, key: d.key, text: r.text }] : [];
+  });
+}
+
 /** target "" = project-level (a PR that never became a card); notes are invisible to peers (peer-ledger.ts peerEventView). */
 export function recordPeerPrNote(db: Database, ctx: WriteCtx, input: {
   project: string; target: string; key: string; result: PushResult; text: string; data?: Record<string, unknown>;

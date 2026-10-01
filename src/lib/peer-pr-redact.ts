@@ -53,12 +53,29 @@ export function redactPeerPr(text: string, id: LocalIdentity, commits: ReadonlyS
   return { text: out, count: Math.max(0, placeholders(out) - placeholders(text)) };
 }
 
-const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "");
-/** Prefixes that cannot start inside a word ("task-…" is not a key): matched only at a token start, then read past blanks. */
-const ANCHORED = /(?<![A-Za-z0-9])(?:sk-|tok_)/g;
+/** Invisible in a rendered report: format chars, combining marks and the blank-looking fillers (Hangul, braille). */
+const INVISIBLE = /[\p{Cf}\p{Mn}\p{Me}\u115F\u1160\u3164\uFFA0\u2800]+/gu;
+const fold = (s: string): string => s.replace(INVISIBLE, "").normalize("NFKC").replace(INVISIBLE, "");
+/**
+ * Prefixes that cannot start inside a word ("task-…" is not a key): matched only at a token start, blanks allowed between the
+ * prefix's own characters too ("s k - …" is the same key), then the value is read past blanks.
+ */
+const ANCHORED = /(?<![A-Za-z0-9])(?:s\s*k\s*-|t\s*o\s*k\s*_)/g;
 const ANCHORED_FULL = /^(?:sk-[A-Za-z0-9_-]{16,}|tok_[A-Za-z0-9]{8,})/;
 const DISTINCT = /gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN[A-Z]*PRIVATEKEY-----/;
 const RANDOM = /(?=[\w-]*\d)(?=[\w-]*[A-Z])(?=[\w-]*[a-z])[\w-]{32,}/;
+
+/** `text` with blanks removed, and for every index of `text` where it lands in that string (any run of blanks reads as none). */
+function flatten(text: string): { flat: string; at: Int32Array } {
+  const at = new Int32Array(text.length + 1);
+  const kept: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    at[i] = kept.length;
+    if (!/\s/.test(text[i]!)) kept.push(text[i]!);
+  }
+  at[text.length] = kept.length;
+  return { flat: kept.join(""), at };
+}
 
 /**
  * The first rule the (already masked) text trips, or null. Blank-split keys: prefix / Bearer / PEM rules read the text with
@@ -69,9 +86,9 @@ export function peerPrSecretHit(text: string, commits: ReadonlySet<string>): str
   const t = fold(text).replace(PLACEHOLDER, REDACTED.secret);
   if (redactFields(t, REDACTED.secret).count > 0) return "敏感字段名";
   const bare = t.replaceAll(REDACTED.secret, "\u0000");
-  const flat = bare.replace(/\s+/g, "");
+  const { flat, at } = flatten(bare);
   if (DISTINCT.test(flat)) return "密钥前缀";
-  for (const m of bare.matchAll(ANCHORED)) if (ANCHORED_FULL.test(bare.slice(m.index, m.index + 240).replace(/\s+/g, ""))) return "密钥前缀";
+  for (const m of bare.matchAll(ANCHORED)) if (ANCHORED_FULL.test(flat.slice(at[m.index]!, at[m.index]! + 48))) return "密钥前缀";
   for (const m of flat.matchAll(/Bearer([A-Za-z0-9._~+/=-]{8,})/gi)) if (/\d/.test(m[1]!)) return "Bearer";
   for (const raw of bare.split(/\s+/)) {
     let token = raw;
