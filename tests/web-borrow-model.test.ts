@@ -6,8 +6,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import type { BorrowView, PeerView, RemoteRow } from "@/features/borrow/borrow-api";
 import {
-  addableContacts, ageBand, ageParts, canSubmitNew, canToggleOff, clampMaxOpen, helloAgeSec, HELLO_FRESH_SEC, peerState, reportedFree,
-  sortPeers, sortRemote, toggleProject,
+  addableContacts, ageBand, ageParts, canSubmitNew, canToggleOff, clampMaxOpen, helloAgeSec, HELLO_FRESH_SEC, peerState, placementKind, reportedFree,
+  sortPeers, sortRemote, stalePeers, toggleProject,
 } from "@/features/borrow/borrow-model";
 import { BORROW_DICT } from "@/lib/i18n-dict-borrow";
 
@@ -74,6 +74,31 @@ describe("按钮", () => {
   test("可加的联系人 = 联系人里还没声明过的", () => {
     const v = { borrow: { contacts: ["a", "b", "c"], declared: [{ peer: "b" }] } } as unknown as BorrowView;
     expect(addableContacts(v)).toEqual(["a", "c"]);
+  });
+});
+
+describe("失效的借入与放置形态", () => {
+  const e = (peer: string, projects = ["a"]) => ({ peer, projects, roles: ["review"], maxOpen: 3 });
+  test("全部项目失效 → projects_gone 可重选；部分失效还生效 → 不进失效行；联系人失效 → 只能删", () => {
+    const v = { borrow: {
+      declared: [e("all", ["gone", "diary"]), e("part", ["a", "gone"]), e("off"), e("nobody")],
+      effective: [e("part", ["a"])],
+      dropped: [{ peer: "all", project: "gone", code: "project_gone" }, { peer: "all", project: "diary", code: "personal" }, { peer: "part", project: "gone", code: "project_gone" },
+        { peer: "off", code: "contact_disabled" }, { peer: "nobody", code: "contact_gone" }],
+      contacts: ["all", "part"],
+    } } as unknown as BorrowView;
+    expect(stalePeers(v)).toEqual([
+      { peer: "all", reason: "projects_gone", maxOpen: 3, canRepick: true },
+      { peer: "off", reason: "contact_disabled", maxOpen: 3, canRepick: false },
+      { peer: "nobody", reason: "contact_gone", maxOpen: 3, canRepick: false },
+    ]);
+  });
+  test("放置形态：本机 / peer / 等着 / 不放置；算不出或老 bridge 不显示", () => {
+    expect(placementKind({ role: "review", where: "local", reason: "x" })).toBe("local");
+    expect(placementKind({ role: "review", where: "peer:mate", reason: "挂池" })).toBe("peer");
+    expect(placementKind({ role: "write", where: "peer:mate", reason: "等：远端写代码等 W8" })).toBe("wait");
+    expect(placementKind({ role: null, where: "-", reason: "merge 阶段不放置" })).toBe("none");
+    expect([placementKind({ error: "unavailable" }), placementKind(undefined)]).toEqual([null, null]);
   });
 });
 

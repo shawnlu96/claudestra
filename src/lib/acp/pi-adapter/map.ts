@@ -55,7 +55,23 @@ export const textOf = (content: unknown): string =>
 const MCP_TOOL = /^mcp__([A-Za-z0-9_-]+?)__(.+)$/;
 const KINDS: Record<string, string> = { bash: "execute", read: "read", edit: "edit", write: "edit", grep: "search", find: "search" };
 
+/**
+ * 工具调用 → ACP tool_call。带 parentToolCallId 的是**嵌套调用**（codemode 脚本里的
+ * `tools.x()`、扩展的 ctx.executeTool()）：pi 只把它们记在父结果的 nestedCalls 里，
+ * 不进 transcript，但事件是发的 —— 标上「↳ 」和 _meta 才能让网页看出"脚本到底跑了什么"。
+ */
 function toolCall(ev: Rec): Rec {
+  const out = toolCallFields(ev);
+  const parent = str(ev.parentToolCallId);
+  if (!parent) return out;
+  return {
+    ...out,
+    title: `↳ ${str(out.title).trim()}`,
+    _meta: { ...obj(out._meta), parentToolCallId: parent },
+  };
+}
+
+function toolCallFields(ev: Rec): Rec {
   const name = str(ev.toolName) || "tool";
   const args = obj(ev.args);
   const base = { sessionUpdate: "tool_call", toolCallId: str(ev.toolCallId), status: "in_progress" };

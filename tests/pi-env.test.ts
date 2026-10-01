@@ -14,9 +14,13 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   describePiEnvProfile,
+  isBuiltinExtension,
   isPackageSource,
   normalizePiEnvProfile,
+  piActivateTools,
   piEnvFlags,
+  piEnvPreset,
+  piEnvPresetNames,
   piEnvSnapshotPath,
   readPiGlobalEnv,
   readPiProjectEnv,
@@ -199,4 +203,53 @@ describe("运行时快照", () => {
     expect(snapshotIsFresh({ at: "2026-01-01T00:00:00.000Z" } as any, now)).toBe(false);
     expect(snapshotIsFresh({ at: "垃圾" } as any, now)).toBe(false);
   });
+});
+
+// ── 0.99 内建扩展（builtin:）与能力档预设（2026-09-15）───────────────────────
+
+test("builtin: 排在路径之前（顺序坑：排在路径后的会被静默忽略）", () => {
+  const flags = piEnvFlags({
+    base: "minimal",
+    extensions: ["/tmp/probe.ts", "npm:@ff-labs/pi-fff", "builtin:codemode"],
+  });
+  const at = (src: string) => flags.indexOf(src);
+  expect(at("npm:@ff-labs/pi-fff")).toBeGreaterThanOrEqual(0);
+  expect(at("builtin:codemode")).toBeGreaterThan(at("npm:@ff-labs/pi-fff")); // 同为声明式资源，包源优先
+  expect(at("/tmp/probe.ts")).toBeGreaterThan(at("builtin:codemode")); // 路径永远最后
+  expect(flags.slice(0, 3)).toEqual(["--no-extensions", "--no-skills", "--no-prompt-templates"]);
+});
+
+test("isBuiltinExtension 只认 builtin:<name>", () => {
+  expect(isBuiltinExtension("builtin:codemode")).toBe(true);
+  expect(isBuiltinExtension(" builtin:llama.cpp ")).toBe(true);
+  expect(isBuiltinExtension("builtin:")).toBe(false);
+  expect(isBuiltinExtension("/x/builtin:y")).toBe(false);
+  expect(isBuiltinExtension("npm:builtin:x")).toBe(false);
+});
+
+test("codemode 预设 = minimal + 显式 builtin:codemode（--no-extensions 会关掉内建，必须显式给）", () => {
+  const preset = piEnvPreset("codemode");
+  expect(preset).toEqual({ base: "minimal", extensions: ["builtin:codemode"] });
+  expect(piEnvPreset("  CoDeMoDe ")).toEqual(preset); // 大小写/空白不敏感
+  expect(piEnvPreset("nope")).toBeUndefined();
+  expect(piEnvPresetNames()).toContain("codemode");
+  const flags = piEnvFlags(preset);
+  const i = flags.indexOf("--extension");
+  expect(i).toBeGreaterThan(0);
+  expect(flags[i + 1]).toBe("builtin:codemode");
+});
+
+test("piActivateTools：只有 codemode / tool_search 需要在会话里激活", () => {
+  expect(piActivateTools({ base: "minimal", extensions: ["builtin:codemode"] })).toEqual(["codemode"]);
+  expect(piActivateTools({ extensions: ["builtin:tool-search", "builtin:codemode"] })).toEqual(["codemode", "tool_search"]);
+  // mcp（声明即激活，ACP 另有 mcp-mount）/ llama.cpp（provider）/ 普通扩展 都不该出现在这里
+  expect(piActivateTools({ extensions: ["builtin:mcp", "builtin:llama.cpp", "/x/y.ts", "npm:z"] })).toEqual([]);
+  expect(piActivateTools(undefined)).toEqual([]);
+});
+
+test("预设不接受原型链上的键（__proto__ / constructor 会绕过未知预设检查，PR349-r1）", () => {
+  for (const bad of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    expect(piEnvPreset(bad)).toBeUndefined();
+  }
+  expect(piEnvPreset("codemode")).toEqual({ base: "minimal", extensions: ["builtin:codemode"] });
 });

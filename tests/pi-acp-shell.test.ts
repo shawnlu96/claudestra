@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnAdapter } from "../src/lib/acp/adapter-proc.ts";
-import { MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
+import { ACTIVATE_TOOLS_EXTENSION, MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
 import { PI_ACP_ADAPTER_MAIN } from "../src/lib/acp/pi-adapter/main.ts";
 import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
@@ -59,7 +59,11 @@ test("起 pi 的命令行带 -e builtin:mcp；/clear 换新 pi；resume 用给�
     const first = await session.rpc.request("session/new", { cwd: root, mcpServers: servers }, { timeoutMs: 20_000 });
     expect(first.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(piRuns()[0]).toEqual({
-      argv: ["--mode", "rpc", "--no-extensions", "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "--session-id", first.sessionId],
+      argv: [
+        "--mode", "rpc", "--no-extensions",
+        "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION,
+        "--session-id", first.sessionId,
+      ],
       mcp: JSON.stringify({ claudestra: { command: "/bin/echo", args: ["x"], env: { A: "1" } } }),
       cwd: realpathSync(root),
     });

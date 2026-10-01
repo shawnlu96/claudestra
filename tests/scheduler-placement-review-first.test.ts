@@ -60,7 +60,7 @@ describe("absent or empty reviewFirst: placement and reason unchanged", () => {
 describe("reviewFirst [a]", () => {
   test("a can take it: a, even when it runs more than this machine and b", () => {
     const f = base({ remote: first(["a"]), peers: [mk("a", 5), mk("b", 0)], local: { running: 0, room: true } });
-    expect(placeFor(f, "review", "codex")).toEqual({ kind: "peer", peer: "a", reason: "scheduler.json remote.reviewFirst 指定先给 a" });
+    expect(placeFor(f, "review", "codex")).toEqual({ kind: "peer", peer: "a", family: "codex", reason: "scheduler.json remote.reviewFirst 指定先给 a" });
     expect(placeFor({ ...f, local: { running: 9, room: false } }, "review", "codex")).toMatchObject({ kind: "peer", peer: "a" });
   });
 
@@ -68,7 +68,7 @@ describe("reviewFirst [a]", () => {
     const full = mk("a", 0, { v2: grant({ slots: { codex: 0, claude: 2 } }) });
     expect(placeFor(base({ remote: first(["b", "a"]) }), "review", "codex")).toMatchObject({ peer: "b" });
     expect(placeFor(base({ remote: first(["a", "b"]), peers: [full, mk("b", 4)] }), "review", "codex"))
-      .toEqual({ kind: "peer", peer: "b", reason: "scheduler.json remote.reviewFirst 指定先给 b" });
+      .toEqual({ kind: "peer", peer: "b", family: "codex", reason: "scheduler.json remote.reviewFirst 指定先给 b" });
   });
 
   const cannot: [string, Partial<PlacementFacts>, string][] = [

@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { isPiThinkingLevel, PI_THINKING_LEVELS } from "../../pi-launch.js";
 
 export const MCP_MOUNT_EXTENSION = fileURLToPath(new URL("./mcp-mount.ts", import.meta.url));
+/** 内建工具的激活扩展：0.99 的 codemode / tool_search 注册但不激活，光 -e 加载不够（见该文件头注） */
+export const ACTIVATE_TOOLS_EXTENSION = fileURLToPath(new URL("./activate-tools.ts", import.meta.url));
 
 /** value：后面跟一个值；repeat：可出现多次（开关重复给和给一次一样）；plain：pi 不认它（扩展的选项），值以 - 或 @ 开头时 pi 不吞值，后一个参数会被当成选项 */
 type FlagSpec = { value: boolean; repeat?: boolean; plain?: boolean };
@@ -83,5 +85,9 @@ export function piToolLists(baseArgs: readonly string[]): { tools?: string[]; ex
 export function piRpcArgs(sessionId: string, baseArgs: readonly string[] = []): string[] {
   if (!sessionId) throw new Error("起 pi 缺会话 id");
   const base = parsePiBaseArgs(baseArgs).flatMap((a) => (a.value === undefined ? [a.flag] : [a.flag, a.value]));
-  return ["--mode", "rpc", ...base, "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "--session-id", sessionId];
+  return [
+    "--mode", "rpc", ...base,
+    "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION,
+    "--session-id", sessionId,
+  ];
 }

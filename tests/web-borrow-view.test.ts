@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
 import { borrowView, setBorrowViewDepsForTest, type PeerView, type RemoteRowView } from "../src/bridge/local-api/lend-peers-view.js";
+import type { BorrowView } from "@/features/borrow/borrow-api";
+import { stalePeers } from "@/features/borrow/borrow-model";
 import { effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import { peerCapacity, recordHello } from "../src/lib/ledger-lend-peers.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
@@ -270,7 +272,39 @@ describe("远端行", () => {
     expect(rows.map((x) => x.status)).toEqual(["pooled", "claimed", "unknown"]);
     expect(rows[1]).toMatchObject({ taskId: "T-live", title: "活的卡", phase: "working", peer: "mate", family: "codex", step: "review", beatAt: NOW - 5000 });
     expect(rows[0]).toMatchObject({ title: null, phase: null, beatAt: null });
-    expect(Object.keys(rows[0]!).sort()).toEqual(["beatAt", "family", "leaseUntil", "orderId", "peer", "phase", "project", "status", "step", "taskId", "title"]);
+    expect(Object.keys(rows[0]!).sort()).toEqual(["beatAt", "family", "leaseUntil", "orderId", "peer", "phase", "placement", "project", "status", "step", "taskId", "title"]);
+    // 卡不在台账里：放置只给固定码，不抛、不带原文
+    expect(rows[0]!.placement).toEqual({ error: "unavailable" });
+  });
+});
+
+describe("声明了但没生效的借入：一条不漏，能删，联系人还在的能重选项目", () => {
+  /** 网页实际渲染的两组：生效卡片 + 失效行（stalePeers） */
+  const rendered = (v: Record<string, any>) => ({ cards: v.peers.map((p: PeerView) => p.peer), stale: stalePeers(v as BorrowView) });
+  test("全部项目失效（删掉 + 个人项目）：失效行里有它，原因 projects_gone，可重选；删除与重选都走 CLI", async () => {
+    writeLend([entry("mate", 2, ["gone", "diary"])]);
+    const v = await view();
+    expect(effectiveLend(await readLend(lendPath), contacts, PROJECTS).borrow).toEqual([]);
+    expect(rendered(v)).toEqual({ cards: [], stale: [{ peer: "mate", reason: "projects_gone", maxOpen: 2, canRepick: true }] });
+    expect((await call(OWNER, "/borrow/peers/mate", put({ projects: ["side"], maxOpen: 2 })))?.status).toBe(200);
+    expect(rendered(await view())).toEqual({ cards: ["mate"], stale: [] });
+    writeLend([entry("mate", 2, ["gone"])]);
+    expect((await call(OWNER, "/borrow/peers/mate", { method: "DELETE" }))?.status).toBe(200);
+    expect(calls.at(-1)).toEqual(["borrow", "off", "--peer", "mate"]);
+    expect(rendered(await view())).toEqual({ cards: [], stale: [] });
+  });
+  test("所有组合：每条声明要么是生效卡片、要么是失效行；联系人失效的只能删", async () => {
+    contacts = [{ name: "mate" }, { name: "part" }, { name: "off", disabled: true }, { name: "moved", fp: "aaaa-bbbb-cccc-dddd" }, { name: "allgone" }];
+    writeLend([entry("mate"), entry("part", 3, ["side", "gone"]), entry("off"), { ...entry("moved"), fp: "1111-2222-3333-4444" }, entry("nobody"),
+      entry("allgone", 4, ["diary"])]);
+    const v = await view();
+    const r = rendered(v);
+    expect([...r.cards, ...r.stale.map((s) => s.peer)].sort()).toEqual(v.borrow.declared.map((e: { peer: string }) => e.peer).sort());
+    expect(r.stale.map((s) => [s.peer, s.reason, s.canRepick])).toEqual([
+      ["off", "contact_disabled", false], ["moved", "fp_changed", false], ["nobody", "contact_gone", false], ["allgone", "projects_gone", true],
+    ]);
+    for (const s of r.stale) expect((await call(OWNER, `/borrow/peers/${s.peer}`, { method: "DELETE" }))?.status).toBe(200);
+    expect(rendered(await view()).stale).toEqual([]);
   });
 });
 

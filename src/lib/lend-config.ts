@@ -18,6 +18,13 @@ export const LEND_FAMILIES = ["codex", "claude"] as const;
 export type LendFamily = (typeof LEND_FAMILIES)[number];
 const LEND_ROLES = ["review", "write"] as const;
 export type LendRole = (typeof LEND_ROLES)[number];
+/**
+ * 一台机器在槽池里的档位（i28-W9，scheduler-placement.ts）：先在 first 里按在跑最少挑，first 都接不了再看 balance，最后才看 low；off 一律不派。
+ * 借入条目的 priority 与 scheduler.json 的 remote.localPriority 用同一套；不写 = balance。
+ */
+export const PRIORITIES = ["first", "balance", "low", "off"] as const;
+export type Priority = (typeof PRIORITIES)[number];
+export const isPriority = (v: unknown): v is Priority => (PRIORITIES as readonly unknown[]).includes(v);
 
 /** 上限：写错一位数（30 写成 300）要被拦下，不是真实容量的约束 */
 export const MAX_FAMILY_SLOTS = 16;
@@ -57,6 +64,8 @@ export interface BorrowEntry {
   projects: string[];
   roles: LendRole[];
   maxOpen: number;
+  /** 槽池里的档位；不写 = balance */
+  priority?: Priority;
 }
 
 export interface LendFile {
@@ -151,6 +160,7 @@ function borrowEntryProblem(e: unknown): string | null {
   if (!isStrList(e.projects, PROJECT_ID_RE, 100)) return "projects 必须是项目 id 的非空、不重复列表";
   if (!isRoles(e.roles)) return "roles 必须是 review / write 的非空、不重复列表";
   if (!isInt(e.maxOpen, 1, MAX_OPEN)) return `maxOpen 必须是 1..${MAX_OPEN} 的整数`;
+  if (e.priority !== undefined && !isPriority(e.priority)) return `priority 只能是 ${PRIORITIES.join(" / ")}`;
   return null;
 }
 
