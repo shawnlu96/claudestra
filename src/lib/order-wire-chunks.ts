@@ -39,9 +39,19 @@ export function chunkInput(label: string, text: string, cap: number = WIRE_LIMIT
   }
 }
 
+type InputSources = readonly (readonly [label: string, text: string])[];
+/** How an order builder turns its sources into inputs: chunkInputs for the wire, wholeInputs for the peer gate's scan. */
+export type InputSplit = (sources: InputSources) => string[];
+
+/**
+ * One unsplit input per source. The peer gate scans each input on its own, so a key wrapped across a part boundary would slip
+ * past it; offerLendCore gates this whole form too before the split one goes out (tests/lend-order-chunks.test.ts).
+ */
+export const wholeInputs: InputSplit = (sources) => sources.map(([label, text]) => `${label}：\n${text}`);
+
 /** Every input of one order, in order; more than WIRE_LIMITS.items in total refuses rather than dropping the tail. */
-export function chunkInputs(sources: readonly (readonly [label: string, text: string])[]): string[] {
+export const chunkInputs: InputSplit = (sources) => {
   const inputs = sources.flatMap(([label, text]) => chunkInput(label, text));
   if (inputs.length > WIRE_LIMITS.items) throw new LedgerError("invalid", `规格分段后超过 ${WIRE_LIMITS.items} 段（共 ${inputs.length} 段），不截断、拒绝出单`);
   return inputs;
-}
+};

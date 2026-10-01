@@ -26,7 +26,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.js";
 import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
-import { chunkInputs } from "./order-wire-chunks.js";
+import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 
 export interface LendOrder {
@@ -115,26 +115,30 @@ export interface OfferInput {
   write?: WriteOffer;
 }
 
-function reviewOrder(task: LedgerTask, orderId: string, input: OfferInput): OrderWire {
+function reviewOrder(task: LedgerTask, orderId: string, input: OfferInput, split: InputSplit = chunkInputs): OrderWire {
   const head = task.headSHA as string;
   return orderWireOf({
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
-    inputs: chunkInputs([[`规格原文（specRev ${task.specRev}）`, input.spec]]),
+    inputs: split([[`规格原文（specRev ${task.specRev}）`, input.spec]]),
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
     acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送"],
     writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题",
   }, { repo: input.repo, pr: input.pr });
 }
 
-/** The order for the card's current step: the review round as before, a build / fix round as a write order on the lend branch. */
-function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput): { wire: OrderWire; branch: string | null; base: string | null } {
-  if (step === "review") return { wire: reviewOrder(task, orderId, input), branch: null, base: null };
+/**
+ * The order for the card's current step: the review round as before, a build / fix round as a write order on the lend branch.
+ * `whole` is the same order with every source unsplit, only for the peer gate's secret scan (never stored or sent).
+ */
+function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput):
+  { wire: OrderWire; whole: OrderWire; branch: string | null; base: string | null } {
+  if (step === "review") return { wire: reviewOrder(task, orderId, input), whole: reviewOrder(task, orderId, input, wholeInputs), branch: null, base: null };
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
   const head = step === "write" ? input.write.baseSha as string : task.headSHA as string;
   const findings = step === "fix" ? lastReviewOf(db, task).findings : [];
-  const wire = writeOrderWire(task, { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr });
-  return { wire, branch, base: input.write.base };
+  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr };
+  return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
 }
 
 /** PM puts the card's current round in the pool for one peer; the order text is fixed here and never rebuilt. */
@@ -171,6 +175,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     let wire: OrderWire;
     let text: string;
     try {
+      redactOrderForPeer(made.whole, head); // secrets are judged on the unsplit sources: a key wrapped across two parts still refuses
       wire = redactOrderForPeer(made.wire, head).order;
       text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
     } catch (e) {

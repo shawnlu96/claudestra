@@ -8,13 +8,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { listLendOrders, offerLendCore } from "../src/lib/ledger-lend.js";
-import { writeOrderWire, type WriteOrderInput } from "../src/lib/ledger-lend-lease.js";
+import { holdWriteLease, writeOrderWire, type WriteOrderInput } from "../src/lib/ledger-lend-lease.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
+import { lendBranch } from "../src/lib/lend-git.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "../src/lib/order-wire.js";
 import { CHUNK_HEADROOM, chunkInput, chunkInputs } from "../src/lib/order-wire-chunks.js";
 import { redactOrderForPeer, renderOrderWire } from "../src/lib/order-wire-render.js";
+import { peerSecretHit } from "../src/lib/peer-secret-gate.js";
 
 const CAP = WIRE_LIMITS.input;
 const bytes = (s: string) => Buffer.byteLength(s);
@@ -129,14 +131,39 @@ describe("写单 / 修复单", () => {
   });
 });
 
-describe("审查单经 offerLendCore 挂进池", () => {
+/**
+ * r1 P1 反例：一个十六进制串折成两行、正好落在两段交界（第 1 段以前半行结尾），每段单独扫都不命中「长十六进制」，整份原文扫命中。
+ * 返回原文，并先确认分段真把它劈开了，免得反例在边界挪动后悄悄失效。
+ */
+function straddling(label: string, tail = "z\n".repeat(1000)): string {
+  const room = CAP - CHUNK_HEADROOM - bytes(`${label}（第 2/2 段）：\n`);
+  const pad = room - 17;
+  const text = "z\n".repeat(Math.floor(pad / 2)) + (pad % 2 ? "\n" : "") + "1234567890abcdef\n1234567890abcdef\n" + tail;
+  const parts = chunkInput(label, text);
+  expect(parts.length).toBe(2);
+  expect(parts[0]!.endsWith("\n1234567890abcdef\n")).toBe(true);
+  expect(parts[1]!.slice(parts[1]!.indexOf("\n") + 1).startsWith("1234567890abcdef\n")).toBe(true);
+  expect(parts.map(peerSecretHit)).toEqual([null, null]);
+  expect(peerSecretHit(text)).toBe("长十六进制");
+  return text;
+}
+
+describe("经 offerLendCore 挂进池", () => {
   const P = "claude-orchestrator";
   const H = "a".repeat(40);
+  const FP = "abcd-ef01-2345-6789";
   const dir = mkdtempSync(join(tmpdir(), "lend-chunks-test-"));
   let db: Database;
-  const borrow = { peer: "mate", projects: [P], roles: ["review" as const], maxOpen: 1 };
-  const offer = (spec: string) => offerLendCore(db, { actor: "scheduler", now: 1_000 },
-    { taskId: "T9", peer: "mate", family: "codex", repo: "shawnlu96/claudestra", pr: 12, spec, borrow });
+  const borrow = { peer: "mate", projects: [P], roles: ["review" as const, "write" as const], maxOpen: 1 };
+  const offer = (spec: string, write?: { report: string }) => offerLendCore(db, { actor: "scheduler", now: 1_000 },
+    { taskId: "T9", peer: "mate", family: "codex", repo: "shawnlu96/claudestra", pr: 12, spec, borrow,
+      ...(write ? { write: { fp: FP, base: "main", baseSha: null, report: write.report } } : {}) });
+  /** 卡进 fix：开工单借给了 mate（写租约在它名下、卡上是出借分支） */
+  function toFix(): void {
+    const branch = lendBranch("T9", FP) as string;
+    db.run(`UPDATE tasks SET stage = 'fix', branch = '${branch}', round = 2 WHERE id = 'T9'`);
+    holdWriteLease(db, getTask(db, "T9") as LedgerTask, { peer: "mate", fp: FP, branch, repo: "shawnlu96/claudestra" }, 1_000);
+  }
 
   beforeEach(() => {
     db = openLedger(":memory:");
@@ -146,7 +173,6 @@ describe("审查单经 offerLendCore 挂进池", () => {
     db.run(`UPDATE tasks SET stage = 'review', headSHA = '${H}', round = 1 WHERE id = 'T9'`);
   });
   afterEach(() => closeLedger(":memory:"));
-
   test("26653 字节量级的规格能出单：存下的 wire 分两段、每段 ≤16384、拼回逐字相同", () => {
     const spec = fakeSpec(26653);
     offer(spec);
@@ -163,5 +189,21 @@ describe("审查单经 offerLendCore 挂进池", () => {
     expect(() => offer(fakeSpec(CAP * 21))).toThrow(/规格分段后超过 20 段/);
     expect(() => offer(fakeSpec(40000))).toThrow(/整单超过 32768 字节/);
     expect(listLendOrders(db, "T9")).toEqual([]);
+  });
+
+  test("r1 P1：密钥折在审查单规格的两段交界，整份原文照样被外发闸拒绝，不进池", () => {
+    expect(() => offer(straddling("规格原文（specRev 1）"))).toThrow(/疑似含密钥（长十六进制）/);
+    expect(listLendOrders(db, "T9")).toEqual([]);
+  });
+
+  test("r1 P1：密钥折在修复单上一轮审查报告的两段交界，同样拒绝；不折在交界的大报告照常出单", () => {
+    toFix();
+    expect(() => offer("规格", { report: straddling("上一轮审查报告原文") })).toThrow(/疑似含密钥（长十六进制）/);
+    expect(listLendOrders(db, "T9")).toEqual([]);
+    const report = fakeSpec(20000);
+    offer("规格", { report });
+    const [o] = listLendOrders(db, "T9");
+    expect(o).toMatchObject({ status: "pooled", step: "fix" });
+    expect(joined(o!.wire.inputs.slice(1))).toBe(report);
   });
 });
