@@ -52,9 +52,11 @@ function connectorApi(pi: MountApi): MountApi {
   });
 }
 
+const PI_PKG: string = "@earendil-works/pi-coding-agent";
+
 const connectInPi: Connect = async (pi, servers) => {
-  // pi 把自己的包作为虚拟模块提供给扩展；`as string` 绕开 tsc 解析（本仓不装 pi）
-  const { createMcpExtension } = await import("@earendil-works/pi-coding-agent" as string);
+  // pi 把自己的包作为虚拟模块提供给扩展。包名放变量里：字面量会让 bun build 去解析它，本仓不装 pi，bridge 入口打包就挂
+  const { createMcpExtension } = await import(PI_PKG);
   // scope=extension：/mcp 里改设置只作用于本会话，不往任何 mcp.json 写（我们也没注册 /mcp）
   const entries = Object.entries(servers).map(([name, config]) => ({ name, config, source: "claudestra", scope: "extension" }));
   createMcpExtension({ loadConfig: () => ({ servers: entries, errors: [] }) })(connectorApi(pi));
