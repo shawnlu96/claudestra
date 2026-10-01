@@ -5,7 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
-import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
@@ -110,9 +110,44 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
   ready: ["updating", "await_ci", "unknown"], updating: ["await_review", "await_ci", "unknown"],
-  await_review: [], await_ci: ["merging", "unknown"], merging: ["merged", "unknown"],
+  await_review: [], await_ci: ["merging", "updating", "unknown"], merging: ["merged", "unknown"],
   merged: [], unknown: [], resolved: [],
 };
+/** main moving during CI sends the run back to update-branch; past this many times it is someone else's race to settle. */
+export const MAX_CI_REFRESHES = 3;
+
+/** update-branch only merged main in, so the review stays valid; the receipt is the single place the evidence is spelled out. */
+export interface CarryEvidence { oldHead: string; newHead: string; mainParent: string; mainHead: string; diffHash: string }
+export const carryReceipt = (e: CarryEvidence): string => `沿用审查：原 head ${e.oldHead} → 新 head ${e.newHead}，main 父提交 ${e.mainParent}，` +
+  `main 头 ${e.mainHead}，净 diff 一致 sha256=${e.diffHash}，等待 CI`;
+const CARRY_RECEIPT = /^沿用审查：原 head ([a-f0-9]{40}) → 新 head ([a-f0-9]{40})，main 父提交 ([a-f0-9]{40})，main 头 ([a-f0-9]{40})，净 diff 一致 sha256=([a-f0-9]{64})，等待 CI$/;
+export function parseCarryReceipt(receipt: string): CarryEvidence | null {
+  const m = CARRY_RECEIPT.exec(receipt);
+  return m ? { oldHead: m[1]!, newHead: m[2]!, mainParent: m[3]!, mainHead: m[4]!, diffHash: m[5]! } : null;
+}
+
+/**
+ * Re-pin run and task on the carried head in the merge step's own transaction; scheduler-review.ts only honours carries
+ * written here (actor scheduler, merge_phase right after), so a PM / peer / executor note can never launder a head.
+ */
+function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string, receipt: string, now: number): number {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "沿用审查只许调度服务身份写");
+  const ev = parseCarryReceipt(receipt);
+  if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
+  const task = mustTask(db, row.taskId);
+  if (task.stage !== "merge" || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
+  db.prepare("UPDATE tasks SET headSHA=?, rev=rev+1, updatedAt=? WHERE id=?").run(newHead, now, task.id);
+  db.prepare("UPDATE scheduler_merges SET reviewedHead=? WHERE intentId=?").run(newHead, row.intentId);
+  return insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
+    project: row.project, target: row.taskId, kind: "scheduler", text: `沿用审查到新 head ${newHead.slice(0, 12)}`,
+    data: { op: "review_carry", intentId: row.intentId, from: row.reviewedHead, to: newHead, round: task.round, specRev: task.specRev,
+      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash },
+  }, true).seq;
+}
+
+const ciRefreshes = (db: Database, row: MergeRun): number => (db.query(`SELECT COUNT(*) AS n FROM events WHERE target=? AND kind='scheduler'
+  AND json_extract(data,'$.op')='merge_phase' AND json_extract(data,'$.intentId')=? AND json_extract(data,'$.from')='await_ci'
+  AND json_extract(data,'$.to')='updating'`).get(row.taskId, row.intentId) as { n: number }).n;
 
 /** A phase claim is committed before the corresponding external call; receipts move it forward after observing reality. */
 export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
@@ -132,10 +167,14 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       throw new LedgerError("invalid", `${input.to} 需要可核对回执或原因`);
     }
     if (input.to === "merged" && !sha(input.mergeSha)) throw new LedgerError("invalid", "合并提交必须是完整 SHA");
-    if (input.to === "await_review" && (!sha(input.newHead) || input.newHead === row.reviewedHead)) {
+    if ((input.to === "await_review" || (input.to === "await_ci" && input.newHead)) && (!sha(input.newHead) || input.newHead === row.reviewedHead)) {
       throw new LedgerError("invalid", "更新分支后必须提供不同的完整 head");
     }
+    if (input.from === "await_ci" && input.to === "updating" && ciRefreshes(db, row) >= MAX_CI_REFRESHES) {
+      throw new LedgerError("conflict", `等 CI 期间 main 已前进 ${MAX_CI_REFRESHES} 次，不再自动更新`);
+    }
     const now = ctx.now ?? Date.now();
+    const carrySeq = input.to === "await_ci" && input.newHead ? carryReview(db, ctx, row, input.newHead, receipt as string, now) : null;
     if (input.to === "await_review") {
       const task = mustTask(db, row.taskId);
       if (task.stage !== "merge" || task.headSHA !== row.reviewedHead || !canTransition(task, "review", "pm").ok) {
@@ -154,10 +193,12 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       .run(input.to, input.to === "merged" ? input.mergeSha ?? null : null, ["unknown", "await_review"].includes(input.to) ? receipt : null, now, row.intentId);
     if (input.to === "unknown") db.prepare("INSERT INTO meta (project,key,value) VALUES (?, 'queueFrozen', ?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value")
       .run(row.project, JSON.stringify({ frozen: true, reason: `合并结果不明：${receipt}`, since: now }));
-    insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:${input.to}` }, {
+    // updating / await_ci can recur in one run (main moved during CI); later visits are keyed by the run revision.
+    const key = `scheduler:${row.intentId}:merge:${input.to}`;
+    insertEvent(db, { actor: ctx.actor, now, dedupKey: getEventByDedup(db, key) ? `${key}:${row.rev}` : key }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${input.to}${receipt ? `（${receipt}）` : ""}`,
       data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: input.to, receipt,
-        mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha },
+        mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha, ...(carrySeq ? { carrySeq } : {}) },
     }, true);
     return getMergeRun(db, row.intentId) as MergeRun;
   });

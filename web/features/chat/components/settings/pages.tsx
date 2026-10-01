@@ -5,6 +5,7 @@ import { RemoteAccessSection } from "../remote-access-section";
 import { AccessPathsSection } from "../access-paths";
 import { PeersPanel } from "../peers-modal";
 import { LendPanel } from "../../../lend/lend-panel";
+import { BorrowPanel } from "@/features/borrow/borrow-panel";
 import { Section, GroupLabel } from "./section";
 import { DevicesSection, MachinesSection, SelfDeviceSection } from "./devices-section";
 import { ShellServerSection } from "./shell-server-section";
@@ -134,6 +135,7 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         <>
           <PeersPanel />
           <LendPanel />
+          <BorrowPanel />
         </>
       );
     case "security":

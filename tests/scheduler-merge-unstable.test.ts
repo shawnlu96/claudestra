@@ -17,6 +17,8 @@ function fixture(phase: MergeRun["phase"], ...snapshots: PrSnapshot[]) {
   const calls: string[] = [];
   const ops: MergeExternal = {
     inspect: async () => { calls.push("inspect"); return queue.length > 1 ? queue.shift()! : queue[0]!; },
+    freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }), // i28-M9: never behind main here
+    carryReview: async () => ({ ok: false, reason: "不沿用" }),
     updateBranch: async () => { calls.push("update"); },
     merge: async (_, expectedHead) => {
       expect(expectedHead).toBe(H);
