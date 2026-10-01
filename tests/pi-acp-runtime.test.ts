@@ -95,7 +95,7 @@ describe("acp 版的选择与启动命令", () => {
     expect(cmd).not.toContain("CLAUDESTRA_CODEX_PREAMBLE"); // 系统提示每次起 pi 都带，不要重启前言
   });
 
-  test("档位只放 pi 认的；不信任项目 → --no-approve；缺 agent 名 / 会话 id 报错；沙箱里拒（沙箱策略另行设计）", () => {
+  test("档位只放 pi 认的；不信任项目 → --no-approve；缺 agent 名 / 会话 id 报错；沙箱里目录没钉住就拒（细则 tests/pi-acp-sandbox.test.ts）", () => {
     expect(buildPiAcpHostCommand({ ...SPEC, effort: "ultracode", model: undefined }, O)).not.toMatch(/CLAUDESTRA_ACP_(EFFORT|MODEL)/);
     expect(piAcpArgs({ ...SPEC, extras: { piEnv: { trustProject: false } } }, "agent-pa", "/repo")[0]).toBe("--no-approve");
     expect(() => buildPiAcpHostCommand({ ...SPEC, agentName: undefined }, O)).toThrow("agent 名");

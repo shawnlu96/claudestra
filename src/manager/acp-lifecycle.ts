@@ -26,8 +26,9 @@ import { assertCreatable, loadRegistry, output, patchRegistryAgent, saveRegistry
 
 const RESTART_TIMEOUT_MS = 240_000;
 
-/** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。 */
+/** 新建 / resume 的 Codex 缺省 ACP；前置条件不齐时给明确原因并沿用可工作的 tmux。Pi 缺省 tmux，沙箱里只有 acp 一条路（tmux 版照旧拒） */
 export async function chooseCreateTransport(runtime?: string, requested?: string): Promise<{ transport: Transport; acpPending?: true; manualTmux?: true }> {
+  if (runtime === "pi") return { transport: isSandbox() && requested !== "tmux" ? "acp" : "tmux" };
   if (runtime !== "codex") return { transport: "tmux" };
   if (requested === "tmux") return { transport: "tmux", manualTmux: true };
   const ready = await checkAcpReady(true);

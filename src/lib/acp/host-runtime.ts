@@ -4,9 +4,9 @@
  * 宿主命令不带 CLAUDESTRA_ACP_RUNTIME = codex（老命令照旧）；认不出的值直接抛，不猜。tests/acp-host-runtime.test.ts。
  */
 import { BOOTSTRAP_PROMPT } from "../codex-launch.js";
-import { isSandbox } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, channelServerEnv, hostEnvBase, type AdapterEnvSpec } from "./adapter-proc.js";
 import { PI_ACP_ADAPTER_MAIN } from "./pi-adapter/main.js";
+import { sandboxPiEnv, sandboxPiProblem } from "./pi-adapter/sandbox-policy.js";
 
 export const ACP_RUNTIME_ENV = "CLAUDESTRA_ACP_RUNTIME";
 /** Pi 的能力档等参数（JSON 字符串数组），由 runtimes/pi-acp.ts 的启动命令给，原样排在适配器的 pi 参数前面 */
@@ -38,7 +38,6 @@ export interface AcpRuntime {
 
 function piAgentCommand(env: Record<string, string | undefined>, bunBin: string, clean: boolean): AgentCommand {
   if (clean) return { error: "出借 worker 只支持 Codex，不起 Pi 的 ACP 适配器" };
-  if (isSandbox(env)) return { error: "沙箱里还不能起 Pi 的 ACP 适配器（沙箱策略另行设计）" };
   let args: unknown = null;
   try {
     args = JSON.parse(env[PI_ARGS_ENV] || "[]");
@@ -46,7 +45,8 @@ function piAgentCommand(env: Record<string, string | undefined>, bunBin: string,
     /* 不是 JSON：落到下面报错 */
   }
   if (!Array.isArray(args) || !args.every((a) => typeof a === "string")) return { error: `${PI_ARGS_ENV} 要是 JSON 字符串数组` };
-  return { cmd: [bunBin, PI_ACP_ADAPTER_MAIN, ...args], stub: false };
+  const refused = sandboxPiProblem(env, args); // 沙箱：目录钉在沙箱根、只用最小发现集（manager 那头已按同一规则拼过，这里再查一遍）
+  return refused ? { error: refused } : { cmd: [bunBin, PI_ACP_ADAPTER_MAIN, ...args], stub: false };
 }
 
 /** Pi 只认 mcpServers：回环代理的地址和 token 只在这里（适配器转给 pi 的挂载扩展，读完即删），不进适配器的环境 */
@@ -64,7 +64,7 @@ const RUNTIMES: Record<string, AcpRuntime> = {
     // channel-server 已在 CODEX_CONFIG 里；codex-acp 会丢掉和 config 同名的 mcpServers 项，传了也白传
     mcpServers: () => [],
   },
-  pi: { id: "pi", label: "Pi", logLabel: "pi-acp", agentCommand: piAgentCommand, adapterEnv: hostEnvBase, mcpServers: piMcpServers },
+  pi: { id: "pi", label: "Pi", logLabel: "pi-acp", agentCommand: piAgentCommand, adapterEnv: (s) => sandboxPiEnv(hostEnvBase(s), s.base), mcpServers: piMcpServers },
 };
 
 export function acpRuntime(id?: string): AcpRuntime {
