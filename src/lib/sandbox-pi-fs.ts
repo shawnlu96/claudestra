@@ -7,7 +7,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, unlinkSync, writeSync } from "node:fs";
-import { dirname, isAbsolute, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 
 const realOrNull = (p: string): string | null => {
   try {
@@ -34,13 +34,21 @@ export function realInside(root: string, p: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
-/** 沙箱的 Pi 目录：是链接、存在却不是目录、真实路径不在真实沙箱根下，都返回原因；还不存在算合格（pi / pi-auth 会在根下新建） */
+/** pi 0.99.2 直接按 getAgentDir() 读写的全局项（auth-storage、settings-manager、MCP 配置、项目信任、会话目录） */
+const PI_STATE_ENTRIES = ["auth.json", "models.json", "settings.json", "mcp.json", "trust.json", "sessions"];
+
+/**
+ * 沙箱的 Pi 目录：是链接、存在却不是目录、真实路径不在真实沙箱根下，都返回原因；还不存在算合格（pi / pi-auth 会在根下新建）。
+ * 目录本身合格还要逐个看 PI_STATE_ENTRIES：存在的（含悬空链接）真实路径必须在真实沙箱根下，不存在的放行。
+ */
 export function piStateDirProblem(root: string, dir: string): string | null {
   const st = lstatOrNull(dir);
   if (!st) return realOrNull(dirname(dir)) === realOrNull(root) ? null : `${dir} 的上级不是沙箱根`;
   if (st.isSymbolicLink()) return `${dir} 是符号链接：沙箱的 Pi 目录必须是根下的真实目录（链接会把会话 / 凭据带到根外）`;
   if (!st.isDirectory()) return `${dir} 不是目录`;
-  return realInside(root, dir) ? null : `${dir} 的真实路径不在沙箱根 ${root} 下`;
+  if (!realInside(root, dir)) return `${dir} 的真实路径不在沙箱根 ${root} 下`;
+  const out = PI_STATE_ENTRIES.map((n) => join(dir, n)).find((p) => lstatOrNull(p) && !realInside(root, p));
+  return out ? `${out} 的真实路径不在沙箱根 ${root} 下（链接指到根外或悬空）：pi 会直接读写它` : null;
 }
 
 /** 建 / 修正一个只给自己的目录：不许是链接，已存在也强制 0700，最后核对 */
