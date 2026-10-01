@@ -123,15 +123,18 @@ export async function updateOrBounce(run: MergeRun, external: MergeExternal, ste
     return run;
   } catch (e) {
     if (isStop(e)) throw e;
-    let pr: PrSnapshot | null = null;
+    let receipt: string | null = null;
     try {
-      pr = await external.inspect(run.prRef);
+      const pr = await external.inspect(run.prRef);
+      if (bounceOf(run, pr, "conflict") === "conflict") {
+        const { mainHead } = await external.freshness(run.prRef, pr.head);
+        receipt = bounceReceipt({ cause: "conflict", prHead: pr.head, mainHead, checks: [] });
+      }
     } catch (reread) {
       if (isStop(reread)) throw reread;
-      console.error(`⚠️ [merge] ${run.taskId} 更新分支失败后重读出错，按更新失败退回：${(reread as Error).message}`);
+      console.error(`⚠️ [merge] ${run.taskId} 更新分支失败后核对冲突出错，按更新失败退回：${(reread as Error).message}`);
     }
-    const bounced = pr && await bounceStep(run, pr, external, step, "conflict");
-    if (bounced) return bounced;
+    if (receipt) return step("resolved", receipt);
     return step("resolved", bounceReceipt({ cause: "update_fail", prHead: run.reviewedHead, mainHead: null, checks: [], error: (e as Error).message }));
   }
 }
@@ -144,7 +147,7 @@ const bounceCount = (db: Database, taskId: string): number => (db.query(`SELECT 
   AND json_extract(data,'$.op')='merge_conflict'`).get(taskId) as { n: number }).n;
 
 function endRun(db: Database, ctx: WriteCtx, row: MergeRun, reason: string, intentReceipt: string, now: number): void {
-  db.prepare("UPDATE scheduler_merges SET phase='resolved', rev=rev+1, reason=?, updatedAt=? WHERE intentId=?").run(reason, now, row.intentId);
+  db.prepare("UPDATE scheduler_merges SET phase='resolved', rev=rev+1, reason=?, unknownSince=NULL, updatedAt=? WHERE intentId=?").run(reason, now, row.intentId);
   const intent = getIntent(db, row.intentId);
   if (intent?.status === "submitted") settleIntent(db, { ...ctx, now }, { id: row.intentId, from: "submitted", to: "cancelled", receipt: intentReceipt });
   db.prepare("DELETE FROM scheduler_resources WHERE intentId=?").run(row.intentId);
