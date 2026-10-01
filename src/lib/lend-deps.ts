@@ -147,8 +147,10 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     },
     worker: {
       find: (name) => { const r = registryRow(name); return r ? { sessionId: r.sessionId, cwd: r.cwd } : undefined; },
-      create: async (name, dir, purpose) => {
+      create: async (name, dir, purpose, gate) => {
         await ensureLendProject(plain);
+        const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起
+        if (denied) return { ok: false, error: denied };
         const r = await plain("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, "--runtime", "codex", "--transport", "acp");
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },

@@ -23,7 +23,7 @@ function journal(leaseUntil: number) {
   const path = join(mkdtempSync(join(tmpdir(), "lend-wd-")), "journal.sqlite");
   writeLend(path, [GRANT]);
   const db = openLendJournal(path);
-  recordAsked(db, { orderId: "o1", peer: "a", fp: FP, family: "codex", preview: {} }, 0);
+  recordAsked(db, { orderId: "o1", peer: "a", fp: FP, family: "codex", preview: { repo: "o/r", step: "review" } }, 0);
   advance(db, "o1", "asked", "claimed", { leaseUntil, leaseGen: 1 });
   advance(db, "o1", "claimed", "cloned", { dir: "/w" });
   patchOrder(db, "o1", ["cloned"], { agent: "agent-lend-x" });
@@ -118,6 +118,16 @@ describe("i28-W1 授权没了宿主也自停（调度服务停着时收回授权
     expect(tick(1 + WATCHDOG_EVERY_MS)).toMatch(/已收回/);
     expect(WATCHDOG_EVERY_MS).toBeLessThanOrEqual(30_000);
     expect(lines).toEqual([]);
+  });
+
+  test("重授时拿掉了这张单的仓库 / 家族：宿主也停（W8 之前角色只能是 review，收窄角色就整条失效）", () => {
+    const { path } = journal(9e15);
+    for (const [narrow, why] of [[{ repos: ["x/y"] }, /仓库/], [{ families: { claude: 1 } }, /codex 位/]] as const) {
+      writeLend(path, [{ ...GRANT, ...narrow }]);
+      expect(lendStopReason("agent-lend-x", path, 1)).toMatch(why);
+    }
+    writeLend(path, [GRANT]);
+    expect(lendStopReason("agent-lend-x", path, 1)).toBeNull();
   });
 
   test("v1 的 lend.json（升级前的条目）：迁成暂停，宿主照样停", () => {

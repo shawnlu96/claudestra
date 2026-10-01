@@ -68,10 +68,11 @@ export async function ensureStartNotice(row: LendRow, entry: LendEntry, d: LendD
   return patchOrder(d.db, row.orderId, [row.state], { notices: { ...row.notices, start: d.now() } }, d.now());
 }
 
-/** 终态那次写入要带的 notices：发过开跑通知、走到 acked / stopped 的单记一条待发的交付 / 停止通知 */
+/** 终态那次写入要带的 notices：发过开跑通知、走到 acked / stopped / released 的单记一条待发的交付 / 停止通知（开跑之后没起成也要告诉一声） */
 export function endNotice(row: LendRow, to: string, why: string | null): Pick<LendRow, "notices"> | Record<string, never> {
-  if (!row.notices?.start || (to !== "acked" && to !== "stopped")) return {};
-  return { notices: { ...row.notices, end: { kind: to, why, sentAt: null } } };
+  const kind = to === "acked" ? "acked" : to === "stopped" || to === "released" ? "stopped" : null;
+  if (!row.notices?.start || !kind) return {};
+  return { notices: { ...row.notices, end: { kind, why, sentAt: null } } };
 }
 
 /** settle 里调：有待发的交付 / 停止通知就发；发不出去返回 null（保留 settle，下一轮再发），发了或没有要发的返回最新的行 */

@@ -237,7 +237,9 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
     verifyReceipt: async () => true, writeReceipt: async () => {},
     worker: {
       find: (n) => registry.get(n),
-      create: async (n, dir, purpose) => { log.created.push(`${n} ${dir} ${purpose}`); registry.set(n, { sessionId: "thr-1", cwd: dir }); return { ok: true }; },
+      create: async (n, dir, purpose, gate) => {
+        if (await gate()) return { ok: false, error: "gate" };
+        log.created.push(`${n} ${dir} ${purpose}`); registry.set(n, { sessionId: "thr-1", cwd: dir }); return { ok: true }; },
       send: async (_n, _s, text) => { log.sent.push(text); return { ok: true, messageId: "m1" }; },
       kill: async (n) => { registry.delete(n); return { ok: true }; },
       alive: async (n) => liveness.get(n) ?? (registry.has(n) ? "running" : "no_window"),

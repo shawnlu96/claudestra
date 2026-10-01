@@ -7,6 +7,7 @@ import type { LendEntry } from "./lend-config.js";
 import type { LendDeps } from "./lend-drive.js";
 import type { LendRow } from "./lend-journal.js";
 import { effectiveLend } from "./lend-policy.js";
+import { scopeProblem } from "./lend-grant-rules.js";
 
 export type LiveGrant = { ok: true; entry: LendEntry } | { ok: false; problem: string };
 
@@ -15,9 +16,14 @@ export const REVOKED = "出借授权已收回或失效";
 
 export const isRevoked = (row: Pick<LendRow, "reason">): boolean => (row.reason ?? "").startsWith(REVOKED);
 
-export async function liveGrant(row: Pick<LendRow, "peer" | "fp">, d: Pick<LendDeps, "readLend" | "context" | "now" | "writeOpen">): Promise<LiveGrant> {
-  const read = await d.readLend();
+/**
+ * row 带了挂单摘要（preview）就连这张单的仓库 / 角色 / 家族一起核（scopeProblem）；收单入口只有 peer，只核整条。
+ * 先读联系人、最后读 lend.json：读完到调用方发出效果（claim、起 worker、派单）之间不再有别的 I/O，收回落在任何一次 await 里都看得见。
+ */
+export async function liveGrant(row: Pick<LendRow, "peer" | "fp"> & Partial<Pick<LendRow, "preview" | "family">>,
+  d: Pick<LendDeps, "readLend" | "context" | "now" | "writeOpen">): Promise<LiveGrant> {
   const ctx = await d.context();
+  const read = await d.readLend();
   const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now(), d.writeOpen);
   if (eff.invalid) return { ok: false, problem: `lend.json 无效：${eff.invalid}` };
   const entry = eff.lend.find((e) => e.peer === row.peer);
@@ -26,5 +32,6 @@ export async function liveGrant(row: Pick<LendRow, "peer" | "fp">, d: Pick<LendD
     return { ok: false, problem: why ?? (read.file.enabled ? `没有给 ${row.peer} 的授权` : "出借已关") };
   }
   if (row.fp && entry.fp !== row.fp) return { ok: false, problem: `${row.peer} 的实例指纹和领单时的不一样` };
-  return { ok: true, entry };
+  const out = row.preview && row.family ? scopeProblem(entry, { repo: String(row.preview.repo ?? ""), step: String(row.preview.step ?? ""), family: row.family }) : null;
+  return out ? { ok: false, problem: out } : { ok: true, entry };
 }

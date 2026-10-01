@@ -82,7 +82,10 @@ export function harness(opts: { entry?: Partial<LendEntry>; peer?: Partial<HttpP
     writeReceipt: async (row) => void log.receipts.push(row),
     worker: {
       find: (n) => registry.get(n),
-      create: async (n, dir) => { log.created.push(n); registry.set(n, { sessionId: "thr-1", cwd: dir }); return { ok: true }; },
+      create: async (n, dir, _purpose, gate) => { // 同生产：真正起进程前最后过一次闸门
+        const denied = await gate();
+        if (denied) return { ok: false, error: denied };
+        log.created.push(n); registry.set(n, { sessionId: "thr-1", cwd: dir }); return { ok: true }; },
       send: async (_n, _s, text) => { log.sent.push(text); return { ok: true, messageId: "m1" }; },
       kill: async (n) => { log.killed.push(n); registry.delete(n); return { ok: true }; },
       alive: async (n) => liveness.get(n) ?? (registry.has(n) ? "running" : "no_window"),

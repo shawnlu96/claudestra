@@ -35,7 +35,8 @@ const BODY_MAX_BYTES = 96 * 1024;
 interface WorkerPort {
   /** registry 里这个名字的 agent（会话 id、工作目录）；没有 = undefined */
   find(name: string): { sessionId?: string; cwd?: string } | undefined;
-  create(name: string, dir: string, purpose: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** gate 在真正起进程之前最后调一次（前面的准备工作也要时间）：返回原因 = 授权没了，不起，原样作为 error 返回 */
+  create(name: string, dir: string, purpose: string, gate: () => Promise<string | null>): Promise<{ ok: true } | { ok: false; error: string }>;
   send(name: string, sessionId: string, text: string, key: string): Promise<SendResult>;
   /** 结束 worker 并确认窗口已不在；ok:false = 没确认退出（调用方保留现场） */
   kill(name: string): Promise<{ ok: boolean; reason?: string }>;
@@ -140,7 +141,7 @@ function writeMismatch(step: string, taskId: string, w: { branch: string } | nul
 
 /** 没起过 worker 就退回：记 released（连同要补做的收尾），再告诉 A（not_started）、删目录、写收据 */
 async function release(row: LendRow, from: LendState, why: string, d: LendDeps): Promise<void> {
-  await settleOrder(advance(d.db, row.orderId, from, "released", { reason: why, settle: { notify: "not_started", removeDir: true } }, d.now()), d);
+  await settleOrder(advance(d.db, row.orderId, from, "released", { reason: why, settle: { notify: "not_started", removeDir: true }, ...endNotice(row, "released", why) }, d.now()), d);
 }
 
 /**
@@ -193,8 +194,11 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const told = await ensureStartNotice(row, entry, d);
     if (!told || !(await stillGranted(told, d))) return; // 通知要先交出去；通知那一下的工夫里收回了也不起
     const o = orderOf(row);
-    const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`);
+    let denied: string | null = null;
+    const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate);
     found = d.worker.find(name);
+    if (denied && !made.ok) return void (await revoke(told, denied, d));
     if (!found && !made.ok) return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
   }
   if (!found?.sessionId) return d.log(`${name} 已在 registry，还没有会话 id，下轮再看`);
@@ -306,11 +310,14 @@ async function stopForResult(row: LendRow, why: string, d: LendDeps): Promise<Le
 }
 
 /**
- * 授权没了（收回 / 过期 / 失效，§2.5 的表）：没起 worker 的退回 not_started；在跑的 kill 并确认退出记 stopped（没确认就下一轮再停）；
+ * 授权没了（收回 / 过期 / 失效 / 范围收窄，§2.5 的表）：没起 worker 的退回 not_started；在跑的 kill 并确认退出记 stopped（没确认就下一轮再停）；
  * 结论已落成交付正文的只停 worker，返回行让调用方照常转交。写单的提交还没推送也按停处理：收回之后远端不能再多出副作用。
  */
 async function revoke(row: LendRow, problem: string, d: LendDeps): Promise<LendRow | null> {
   const why = `${REVOKED}：${problem}`;
+  // cloned 已记了 agent：上次可能建出了 worker 才中断（还没记 started），按在跑的停，确认退出才收尾
+  const made = row.state === "cloned" && row.agent && (d.worker.find(row.agent) || (await d.worker.alive(row.agent)) !== "no_window");
+  if (made) return (await finish(row, "stopped", why, d, true), null);
   if (row.state === "claimed" || row.state === "cloned") return (await release(row, row.state, why, d), null);
   if (row.state === "started" || !row.payload) return (await finish(row, "stopped", why, d, true), null);
   return stopForResult(row, why, d);

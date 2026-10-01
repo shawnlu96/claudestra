@@ -81,12 +81,12 @@ describe("P1-1 收回后的窗口：claim 与起 worker 之间、通知那一下
     expect(h.log.created).toEqual([]);
   });
 
-  test("开跑通知发出去的那一下收回：通知照发了也不起 worker", async () => {
+  test("开跑通知发出去的那一下收回：通知照发了也不起 worker，随后补一条停止通知", async () => {
     const h = harness();
     for (let i = 0; i < 3; i++) await h.tick();
     h.inform.onSend = () => revoke(h);
     await h.tick();
-    expect(h.noticeKinds()).toEqual(["start:o1"]);
+    expect(h.noticeKinds()).toEqual(["start:o1", "stopped:o1"]);
     expect(h.log.created).toEqual([]);
     expect(getOrder(h.db, "o1")!.state).toBe("released");
   });
@@ -165,5 +165,64 @@ describe("P1-2 收回即停：在跑的 worker 两个 pass 内全停（kill 并�
     h.A.lease = (b) => ({ status: 200, body: { ok: true, v: 1, lease: b.action === "renew" ? { gen: 1, expiresAt: 0, ms: 600_000 } : null } });
     await h.tick();
     expect(getOrder(h.db, "o1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("到期") });
+  });
+});
+
+describe("r1 审查：核对与效果之间的空档、建出 worker 后中断、授权范围收窄", () => {
+  test("liveGrant 读联系人那一下收回：最后读的 lend.json 看得见，不 claim", async () => {
+    const h = harness();
+    await h.tick();
+    let n = 0;
+    const ctx = h.d.context;
+    h.d.context = async () => { if (++n === 2) revoke(h); return ctx(); }; // 第 2 次是 claim 前的 liveGrant
+    await h.tick();
+    expect(h.ops()).not.toContain("claim");
+    expect(getOrder(h.db, "o1")!.state).toBe("asked");
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("declined");
+  });
+
+  test("起 worker 的准备工作（建项目、拿写锁）期间收回：真正起进程前的闸门拦下，不起，退回并补停止通知", async () => {
+    const h = harness();
+    for (let i = 0; i < 3; i++) await h.tick();
+    const create = h.d.worker.create;
+    h.d.worker.create = async (n, dir, p, gate) => { revoke(h); return create(n, dir, p, gate); };
+    await h.tick();
+    expect(h.log.created).toEqual([]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "released", reason: expect.stringContaining("授权") });
+    expect(releases(h)).toEqual(["not_started"]);
+    expect(h.noticeKinds()).toEqual(["start:o1", "stopped:o1"]);
+  });
+
+  test("worker 已建出、还没记 started 时调度中断，之后收回：下一个 pass 就 kill 确认退出，记 stopped 并通知", async () => {
+    const h = harness();
+    for (let i = 0; i < 3; i++) await h.tick();
+    const create = h.d.worker.create;
+    h.d.worker.create = async (...a) => { await create(...a); throw new Error("scheduler interrupted after create"); };
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("cloned");
+    expect(h.registry.has(W)).toBe(true);
+    revoke(h);
+    await h.tick();
+    expect(h.log.killed).toEqual([W]);
+    expect(h.registry.size).toBe(0);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("收回") });
+    expect(releases(h)).toEqual(["stopped"]);
+    expect(h.noticeKinds()).toEqual(["start:o1", "stopped:o1"]);
+  });
+
+  test("重授时拿掉了这张单的仓库 / 家族：cloned 不起 worker、退回；started 的停掉", async () => {
+    const h = harness();
+    for (let i = 0; i < 3; i++) await h.tick();
+    h.lend.lend[0].repos = ["other/repo"];
+    await h.tick();
+    expect(h.log.created).toEqual([]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "released", reason: expect.stringContaining("仓库") });
+    const s = harness();
+    await toStarted(s);
+    s.lend.lend[0].families = { claude: 1 };
+    await s.tick();
+    expect(s.log.killed).toEqual([W]);
+    expect(getOrder(s.db, "o1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("codex 位") });
   });
 });
