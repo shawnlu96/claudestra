@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import type { PeerView } from "@/features/borrow/borrow-api";
-import { BOX, coalescer, grantedSlots, lenderCap, parseMaxOpen, splitAtBox, type Timers } from "@/features/borrow/borrow-model";
+import { BOX, coalescer, grantedSlots, lenderCap, parseMaxOpen, serialLatest, splitAtBox, type Timers } from "@/features/borrow/borrow-model";
 import { fillParams } from "@/lib/i18n-fill";
 import { BORROW_DICT } from "@/lib/i18n-dict-borrow";
 
@@ -85,6 +85,81 @@ describe("−/+ 连点合并成一次保存", () => {
     c.cancel();
     advance(1000);
     expect(saved).toEqual([8]);
+  });
+});
+
+const ticks = async () => {
+  for (let k = 0; k < 10; k++) await Promise.resolve();
+};
+
+/** 可控的「写 lend.json」：每次写返回一个手动 resolve / reject 的 Promise，按完成顺序落盘 */
+function fakeStore(initial: number) {
+  const state = { value: initial, started: [] as number[], latestDone: [] as number[] };
+  const gates: { v: number; ok: () => void; fail: () => void }[] = [];
+  const submit = serialLatest<number>(async (v, isLatest) => {
+    state.started.push(v);
+    await new Promise<void>((ok, fail) => gates.push({ v, ok, fail: () => fail(new Error("409")) }));
+    state.value = v;
+    if (isLatest()) state.latestDone.push(v);
+  });
+  const settle = async (i: number, ok = true) => {
+    await ticks();
+    (ok ? gates[i]!.ok : gates[i]!.fail)();
+    await ticks();
+  };
+  return { state, submit, settle, gates };
+}
+
+describe("同一 peer 的保存串行、最后提交的赢", () => {
+  test("微调 flush 出 13 在飞时又输入 20：20 等 13 写完才写，最后是 20（不会被 13 盖掉）", async () => {
+    const { state, submit, settle } = fakeStore(12);
+    const a = submit(13);
+    await ticks(); // 13 已经发出去了，用户这才输完 20 回车
+    const b = submit(20);
+    await ticks();
+    expect(state.started).toEqual([13]); // 不并发：20 还没开始
+    await settle(0);
+    expect(state.value).toBe(13);
+    expect(state.started).toEqual([13, 20]);
+    await settle(1);
+    await Promise.all([a, b]);
+    expect(state.value).toBe(20);
+    expect(state.latestDone).toEqual([20]); // 只有最后一次收尾（清 draft / busy）
+  });
+  test("还没发出就被更新的值顶掉：只写最后那个", async () => {
+    const { state, submit, settle } = fakeStore(5);
+    void submit(6);
+    void submit(7);
+    await settle(0);
+    expect(state.started).toEqual([7]);
+    expect(state.value).toBe(7);
+  });
+  test("在飞时又连着提交两次：中间那个被顶掉不写", async () => {
+    const { state, submit, settle } = fakeStore(5);
+    void submit(6);
+    await ticks();
+    void submit(7);
+    void submit(8);
+    await settle(0);
+    await settle(1);
+    expect(state.started).toEqual([6, 8]);
+    expect(state.value).toBe(8);
+  });
+  test("前一个失败不卡住队列，后一个照写", async () => {
+    const { state, submit, settle } = fakeStore(5);
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      void submit(9);
+      await ticks();
+      const last = submit(10);
+      await settle(0, false);
+      await settle(1);
+      await last;
+      expect(state.value).toBe(10);
+    } finally {
+      console.warn = warn;
+    }
   });
 });
 

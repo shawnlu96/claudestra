@@ -78,7 +78,7 @@ export const STEP_SETTLE_MS = 600;
  * −/+ 做微调：deferred 时连点只先改显示，停手 STEP_SETTLE_MS 后存一次（peer 卡每存一次就是一次写 lend.json）；
  * 新增表单不 deferred，直接改本地值，免得点完马上提交时拿到旧数。onCommit 只在值真的变了时调。
  */
-export function Stepper(props: { value: number; limit: number; disabled: boolean; deferred?: boolean; onCommit: (n: number, el: HTMLElement) => void }) {
+export function Stepper(props: { value: number; limit: number; disabled: boolean; deferred?: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
   const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -90,14 +90,15 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
   useEffect(() => {
     latest.current = { value: props.value, onCommit: props.onCommit };
   });
-  useEffect(() => () => settle.current?.flush(), []); // 停手前就关了设置：照样存掉
+  // 停手前就关了设置：照样存掉。卸载时 DOM ref 已经清空，所以存值不看 box.current（el 为 null 只是没有抖动可放）
+  useEffect(() => () => settle.current?.flush(), []);
   useEffect(() => {
     if (editing) input.current?.focus();
   }, [editing]);
   const v = shown ?? props.value;
 
   const commit = (n: number) => {
-    if (n !== props.value && box.current) props.onCommit(n, box.current);
+    if (n !== props.value) props.onCommit(n, box.current);
   };
   const step = (d: 1 | -1) => {
     const next = clampMaxOpen(v + d, props.limit);
@@ -105,7 +106,7 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
     setShown(next);
     settle.current ??= coalescer<number>(STEP_SETTLE_MS, (n) => {
       setShown(null);
-      if (n !== latest.current.value && box.current) latest.current.onCommit(n, box.current);
+      if (n !== latest.current.value) latest.current.onCommit(n, box.current);
     });
     settle.current.push(next);
   };

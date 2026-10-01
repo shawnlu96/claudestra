@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { removeBorrowPeer, saveBorrowPeer, type DroppedView, type Family, type PeerView } from "./borrow-api";
-import { canToggleOff, lenderCap, peerState, reportedFree, toggleProject, type PeerState } from "./borrow-model";
+import { canToggleOff, lenderCap, peerState, reportedFree, serialLatest, toggleProject, type PeerState } from "./borrow-model";
 import { AgeTag, LimitLine, ProjectChips, Stepper } from "./borrow-bits";
 import { CircleAlertIcon, PauseIcon, RepeatIcon, ServerIcon, TrashIcon, ZapIcon } from "./icons";
 import { fadeIn, fadeOut, flash, shake } from "./motion";
@@ -82,6 +82,7 @@ export async function dropPeer(peer: string, row: HTMLElement | null, el: HTMLEl
 }
 
 type Draft = { projects: string[]; maxOpen: number };
+type SaveJob = { peer: string; next: Draft; el: HTMLElement | null; reload: () => Promise<void> };
 
 export function BorrowPeerCard(props: {
   peer: PeerView;
@@ -110,19 +111,26 @@ export function BorrowPeerCard(props: {
     return () => clearTimeout(id);
   }, [armed]);
 
-  const save = async (next: Draft, el: HTMLElement) => {
+  // 本卡的保存排成一队（serialLatest）：微调 flush 出的值和随后输入的值不并发，最后落下的是最后提交的
+  const queue = useRef<((job: SaveJob) => Promise<void>) | null>(null);
+  const save = (next: Draft, el: HTMLElement | null) => {
     setDraft(next);
     setBusy(true);
-    try {
-      await saveBorrowPeer(peer.peer, next);
-      await onChanged();
-      flash(card.current);
-    } catch {
-      shake(el); // 回弹：draft 清掉就是服务端的原值
-    } finally {
-      setDraft(null);
-      setBusy(false);
-    }
+    queue.current ??= serialLatest<SaveJob>(async (job, isLatest) => {
+      try {
+        await saveBorrowPeer(job.peer, job.next);
+        await job.reload();
+        flash(card.current);
+      } catch {
+        shake(job.el); // 回弹：draft 清掉就是服务端的原值
+      } finally {
+        if (isLatest()) {
+          setDraft(null);
+          setBusy(false);
+        }
+      }
+    });
+    void queue.current({ peer: peer.peer, next, el, reload: onChanged });
   };
   const remove = async (e: MouseEvent<HTMLButtonElement>) => {
     const el = e.currentTarget;

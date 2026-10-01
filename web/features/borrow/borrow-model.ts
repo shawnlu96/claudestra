@@ -132,6 +132,23 @@ export function coalescer<T>(ms: number, fire: (v: T) => void, timers: Timers = 
   };
 }
 
+/**
+ * 同一 peer 的保存串行：一次只在飞一个，后提交的等前一个写完再写；还在排队就被更新的值顶掉的直接跳过。
+ * 所以 lend.json 里最后落下的一定是最后提交的值（微调 flush 出的旧值不会盖掉随后输入的新值）。
+ * write 自己处理失败；isLatest() 告诉它此刻是否仍是最后一次提交（只有最后一次收尾时清 draft / busy）。
+ */
+export function serialLatest<T>(write: (v: T, isLatest: () => boolean) => Promise<void>): (v: T) => Promise<void> {
+  let tail: Promise<void> = Promise.resolve();
+  let seq = 0;
+  return (v) => {
+    const my = ++seq;
+    const isLatest = () => my === seq;
+    // write 抛出也不能让队列断掉，否则之后的保存永远不跑；失败反馈由 write 自己做（抖动 + 回弹）
+    tail = tail.then(() => (isLatest() ? write(v, isLatest) : undefined)).catch((e) => console.warn("[borrow] 保存失败", e));
+    return tail;
+  };
+}
+
 /** 把带 {box} 的整句拆成框前、框后两段：数字框嵌在句中，语序随语言变（英文的框在句中间） */
 export const BOX = "\u0000";
 export function splitAtBox(text: string): [string, string] {
