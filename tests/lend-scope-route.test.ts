@@ -39,9 +39,12 @@ let n = 0;
 
 const fileOf = (f: string) => (f.startsWith("/") ? f : join(STATE_DIR, f));
 
-function lendFile(enabled: boolean): void {
-  const entry = { peer: PEER, fp: FP, families: { codex: 1 }, roles: ["review"], repos: ["shawnlu96/claudestra"], quota: { ordersPerDay: 5, tokensPerDay: null }, confirm: "per-order" };
-  writeFileSync(LEND_PATH, JSON.stringify({ version: 1, enabled, lend: [entry], borrow: [] }));
+/** true = W1 一次授权（v2，到期 1 天后）；false = `lend revoke` 全部收回后落盘的样子。v1 条目读时迁成暂停、不生效，不能用在这里 */
+function lendFile(granted: boolean): void {
+  const now = Date.now();
+  const entry = { peer: PEER, fp: FP, families: { codex: 1 }, roles: ["review"], repos: ["shawnlu96/claudestra"], ordersPerDay: 5,
+    grantedAt: new Date(now).toISOString(), until: new Date(now + 86_400_000).toISOString() };
+  writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: granted, lend: granted ? [entry] : [], borrow: [] }));
 }
 
 beforeAll(async () => {
