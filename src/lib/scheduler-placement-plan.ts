@@ -14,7 +14,7 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
 /** The card's pin as start_node wrote it (`extra.placement`); anything but a `peer:<name>` string is no pin. */
-export function cardPin(extra: Record<string, unknown> | undefined): string | null {
+function cardPin(extra: Record<string, unknown> | undefined): string | null {
   const v = extra?.placement;
   return typeof v === "string" && v.startsWith(PEER_PLACEMENT) && v.length > PEER_PLACEMENT.length ? v : null;
 }
@@ -25,7 +25,7 @@ function locksFree(s: PlannerSnapshot): boolean {
     mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
 }
 
-export function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFacts {
+function snapshotPlacementFacts(s: PlannerSnapshot, since: number): PlacementFacts {
   const p = s.pool ?? null;
   const own = cardWorkerSlots(s.heldResources, s.task.id).length ? 1 : 0;
   const reviewers = p?.localReviewers ?? 0;
