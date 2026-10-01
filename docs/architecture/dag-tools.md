@@ -86,7 +86,7 @@ CLI equivalents: `ledger feature-dep-add <from> <to> [--note <≤60 chars>]`, `f
 `GET /api/v1/ledger/:project/product` uses the DAG endpoint's owner gate and one deferred read transaction.
 Features use `version` and `counts.completed` to match the shared-ledger DTO; counts additionally include
 active, ready, blocked and deferred. The six counts partition current effective nodes. Missing/foreign cards
-count as blocked. Nodes starting with `（远期）` or `(远期)` count only as deferred. Without a DAG, counts use feature cards
+count as blocked. Nodes starting with `（远期）` or `(远期)` (allowing leading whitespace) count only as deferred. Without a DAG, counts use feature cards
 (total/completed/active), and ETA is null. Responses contain no node arrays.
 
 ETA accepts S=1h, 半天=4h, N小时, N分钟 (including 设计稿), N天=8N hours and ranges taking their upper bound.

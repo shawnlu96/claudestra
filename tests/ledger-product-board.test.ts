@@ -118,3 +118,16 @@ for (const prefix of ["（远期）", "(远期)"]) {
     expect(featureEta([future], pace, 0, events, now)).toMatchObject({ at: null, done: true, basis: { remaining: 0, cpHours: 0 } });
   });
 }
+
+for (const [label, whitespace] of [["leading ASCII space", " "], ["leading full-width space", "　"]]) {
+  test(`${label} before either deferred prefix excludes remaining, critical path and ETA`, () => {
+    for (const prefix of ["（远期）", "(远期)"]) {
+      const baseline = [node("a", null, [], "S")];
+      const future = node("future", "blocked", [], "99 天", `${whitespace}${prefix}future`);
+      expect(nodeCounts([future])).toMatchObject({ total: 1, deferred: 1, blocked: 0 });
+      expect(featureEta([...baseline, future], pace, 0, events, now)).toEqual(featureEta(baseline, pace, 0, events, now));
+      expect(projectPace([...baseline, future], [], events, now).fallback).toBe(1);
+      expect(featureEta([future], pace, 0, events, now)).toMatchObject({ at: null, done: true, basis: { remaining: 0, cpHours: 0 } });
+    }
+  });
+}
