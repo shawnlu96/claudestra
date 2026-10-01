@@ -1,7 +1,7 @@
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES, getIntent } from "../lib/ledger-scheduler.js";
 import { settleIntent } from "../lib/ledger-scheduler-settle.js";
-import { planIntent, setWorkflow } from "../lib/ledger-scheduler-write.js";
+import { planIntent, recordPlanRejected, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
 import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
@@ -79,6 +79,13 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         resources: c.p.flags.resources?.split(",").map((v) => v.trim()),
       });
       return { ok: true, ...r };
+    },
+  },
+  "scheduler-plan-rejected": {
+    valued: ["code", "text"], bools: [],
+    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因>（调度服务专用：同一原因连续被台账拒收，记一次报警；按卡 + 原因去重）",
+    run(c) {
+      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), { taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text") }) };
     },
   },
   "scheduler-settle": {
