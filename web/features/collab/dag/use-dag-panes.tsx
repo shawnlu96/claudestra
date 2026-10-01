@@ -1,0 +1,132 @@
+"use client";
+/**
+ * 协作视图里子 DAG 那一块的接线（collab-view.tsx 只调这一个 hook）：同一份 L4 快照出两张图（子 DAG / 进度），中区三个标签，
+ * 右区的节点 / 版本 / 差异页，以及手机的分段列表和底部抽屉。快照不可用（老 bridge 404、读失败）或本项目没有任何建了图的 feature
+ * 时，第一个标签退回调用方给的因果线画布，手机退回原来的分组列表。
+ */
+import { useMemo } from "react";
+import type { Tr } from "../collab-model";
+import { actionLine, type ActionMap } from "../collab-action";
+import type { Selection } from "../v4/v4-selection";
+import v from "../v4/v4.module.css";
+import { DagCanvasView } from "./dag-canvas";
+import { compareOverlay } from "./dag-diff";
+import { drawable, layoutDag, nodeId, type DNode } from "./dag-layout";
+import { MobileDag } from "./dag-mobile";
+import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
+import { ProgressView } from "./dag-progress-view";
+import { DiffPage, NodePage, VersionsPage } from "./dag-props";
+import type { BoardNode, FeatureCard } from "./dag-types";
+import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
+import { useDagUi, type DagTab } from "./use-dag-ui";
+import d from "./dag.module.css";
+
+const NO_FEATURES: readonly FeatureCard[] = [];
+const TAB_LABEL: Record<DagTab, string> = { dag: "子 DAG", progress: "进度", team: "团队" };
+
+export interface DagPanesArgs {
+  project: string;
+  rev: number;
+  now: number;
+  narrow: boolean;
+  agents: readonly AgentLite[];
+  actions: ActionMap;
+  busy: ReadonlyMap<string, boolean | undefined>;
+  /** 刚推进的任务 id：全屏唯一的品牌色 */
+  hot: string | null;
+  sel: Selection;
+  select: (s: Selection) => void;
+  pickTask: (id: string) => void;
+  close: () => void;
+  tr: Tr;
+}
+
+export function useDagPanes(a: DagPanesArgs) {
+  const { tr } = a;
+  const load = useDagBoard(a.project, a.rev);
+  const board = load.status === "ok" ? load.board : null;
+  const features = board?.features ?? NO_FEATURES;
+  const graph = drawable(features).length > 0;
+  const ui = useDagUi(features);
+  const rows = useMemo(() => progressRows(board?.agents ?? [], a.agents, a.project), [board, a.agents, a.project]);
+  const cmp = useDagCompare(a.project, ui.compare, board, a.rev);
+  const overlay = useMemo(() => (ui.compare && cmp ? compareOverlay(ui.compare.featureId, cmp.toNodes, cmp.fromNodes, cmp.diff) : null), [ui.compare, cmp]);
+  const canvas = useMemo(() => layoutDag(features, ui.open, ui.doneOpen, overlay), [features, ui.open, ui.doneOpen, overlay]);
+  const detail = useDagVersions(a.project, a.sel?.kind === "dver" ? a.sel.f : null, a.rev);
+
+  const featureOf = (id: string) => features.find((f) => f.id === id);
+  const selNode = a.sel?.kind === "dnode" ? nodeId(a.sel.f, a.sel.key) : null;
+  const actOf = (agent: string) => actionLine(a.actions.get(agent), a.busy.get(agent), null).text;
+  const lookOf = (f: string, n: BoardNode) => {
+    const owner = ownerOf(rows, f, n);
+    const id = nodeId(f, n.key);
+    return { owner, act: owner ? actOf(owner.agent) : "", now: a.now, hot: !!a.hot && n.taskId === a.hot, selected: selNode === id, flash: ui.flash?.id === id ? ui.flash.seq : null };
+  };
+  /** 选中的节点：对比时先在叠图里找（幽灵节点只在那里），再在快照里找 */
+  const findNode = (f: string, key: string) =>
+    (overlay?.featureId === f ? [...overlay.nodes, ...overlay.ghosts] : featureOf(f)?.nodes ?? []).find((n) => n.key === key) ?? null;
+  const onNode = (f: string, key: string) => a.select({ kind: "dnode", f, key });
+  // 正在对比的那个框：版本条点开的是差异页（关掉差异页 = 退出对比），否则是版本列表
+  const onVersions = (f: string) => a.select(ui.compare?.featureId === f && !a.narrow ? { kind: "ddiff", f } : { kind: "dver", f });
+
+  const s = a.sel;
+  const sf = s && (s.kind === "dnode" || s.kind === "dver" || s.kind === "ddiff") ? featureOf(s.f) : undefined;
+  const sn = s?.kind === "dnode" && sf ? findNode(sf.id, s.key) : null;
+  const diffPage = s?.kind === "ddiff" && sf && ui.compare?.featureId === sf.id && (
+    <DiffPage feature={sf} compare={ui.compare} data={cmp} onVersions={() => a.select({ kind: "dver", f: sf.id })} tr={tr} onClose={() => {
+      ui.setCompare(null);
+      a.close();
+    }} />
+  );
+  const page = (sn && sf && (
+    <NodePage feature={sf} node={sn} owner={ownerOf(rows, sf.id, sn)} mark={overlay?.featureId === sf.id ? overlay.marks.get(sn.key) ?? null : null} now={a.now}
+      onTask={a.pickTask} onOwner={ui.jumpRow} onNode={(k) => onNode(sf.id, k)} onClose={a.close} tr={tr} />
+  )) || (s?.kind === "dver" && sf && (
+    <VersionsPage key={sf.id} feature={sf} detail={detail} compare={ui.compare} onClose={a.close} tr={tr} onCompare={(c) => {
+      ui.setCompare(c);
+      a.select({ kind: "ddiff", f: c.featureId });
+    }} />
+  )) || (!a.narrow && diffPage) || null;
+
+  const progress = (
+    <ProgressView rows={rows} features={features} actOf={actOf} now={a.now} flash={ui.flash} onWork={(w) => ui.jumpNode(w.featureId, w.nodeKey)} onTask={a.pickTask} tr={tr} />
+  );
+  const shelf = drawable(features).filter((f) => !ui.open.includes(f.id));
+  const dagCanvas = (
+    <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}
+      onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
+  );
+
+  /** 桌面中区：三个标签；没有图时第一个标签是因果线画布，快照还在读时先空着（不闪一下因果线） */
+  const center = (causal: React.ReactNode, team: React.ReactNode) => (
+    <div className={v.center}>
+      <div className={v.tabs} role="tablist">
+        {(["dag", "progress", "team"] as const).map((k) => (
+          <button key={k} type="button" role="tab" aria-selected={ui.tab === k} className={`${v.tab} ${ui.tab === k ? v.tabOn : ""}`} onClick={() => ui.setTab(k)}>
+            {tr(k === "dag" && !graph ? "因果线" : TAB_LABEL[k])}
+          </button>
+        ))}
+      </div>
+      {ui.tab === "team" ? <div className={v.teamPane}>{team}</div> : ui.tab === "progress" ? progress : graph ? dagCanvas : load.status === "loading" ? <div className={v.canvas} /> : causal}
+    </div>
+  );
+
+  /** 手机：分段「子 DAG / 进度」；没有图时第一段是原来的分组列表；对比走底部抽屉 */
+  const mobile = (fallback: React.ReactNode) => (
+    <>
+      <div className={d.mseg} role="tablist">
+        {(["dag", "progress"] as const).map((k) => (
+          <button key={k} type="button" role="tab" aria-selected={(ui.tab === "progress") === (k === "progress")} onClick={() => ui.setTab(k)}
+            className={`${d.msegBtn} ${(ui.tab === "progress") === (k === "progress") ? d.msegOn : ""}`}>{tr(k === "dag" && !graph ? "因果线" : TAB_LABEL[k])}</button>
+        ))}
+      </div>
+      {ui.tab === "progress" ? progress : graph ? (
+        <MobileDag features={drawable(features)} open={ui.open} doneOpen={ui.doneOpen} look={(f, n) => lookOf(f.id, n)} onFeature={ui.toggleFeature} onFold={ui.toggleDone}
+          onVersions={onVersions} onNode={onNode} onOwner={ui.jumpRow} tr={tr} />
+      ) : fallback}
+      {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
+    </>
+  );
+
+  return { center, mobile, page };
+}

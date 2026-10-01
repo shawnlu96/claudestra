@@ -1,11 +1,13 @@
 "use client";
 /**
- * 协作视图 v4（docs/team/collab-view-v4.md）：顶上指标条；左大纲（待你处理、筛选、事项 → 任务）；中间画布两个标签——
- * 「因果线」（v4/causal-canvas.tsx，布局在 v4/causal-model.ts）和「团队」（T55 的组件，合并前是占位）；右属性（没选中 = 项目概览，
- * 任务 = 任务详情 + 它的因果线，边 / 折叠组 / 待你处理各一页）。手机没有画布：分组卡片，点开是全屏详情。
+ * 协作视图 v4（docs/team/collab-view-v4.md）：顶上指标条；左大纲（待你处理、筛选、事项 → 任务）；中间三个标签——
+ * 「子 DAG」「进度」（同一份 i28-L4 快照，接线全在 dag/use-dag-panes.tsx；没有图时第一个标签退回 v4 因果线画布）和「团队」（T55）；
+ * 右属性（没选中 = 项目概览，任务 = 任务详情 + 它的因果线，边 / 折叠组 / 待你处理 / DAG 节点 / 版本 / 差异各一页）。
+ * 手机没有画布：分段「子 DAG / 进度」列表，点开是全屏详情。
  * 底部时间轴放第二期。数据只用总览（tasks / items / deps）和任务详情，没有来源的指标标「暂无」。
  */
 import { useMemo, useState } from "react";
+import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
@@ -92,24 +94,6 @@ function LoadState({ load, refetch, tr }: { load: ReturnType<typeof useCollab>["
   return <div className={`${s.tokens} ${s.root}`}><div className={s.home}>{body}</div></div>;
 }
 
-/** 中区：「因果线」画布和「团队」（T55 的 TeamPanel，嵌入模式：选中成员交给右侧属性页）两个标签 */
-function CenterPane({ team, ...props }: React.ComponentProps<typeof CausalCanvas> & { team: React.ReactNode }) {
-  const [tab, setTab] = useState<"causal" | "team">("causal");
-  const { tr } = props;
-  return (
-    <div className={v.center}>
-      <div className={v.tabs} role="tablist">
-        {(["causal", "team"] as const).map((k) => (
-          <button key={k} type="button" role="tab" aria-selected={tab === k} className={`${v.tab} ${tab === k ? v.tabOn : ""}`} onClick={() => setTab(k)}>
-            {tr(k === "causal" ? "因果线" : "团队")}
-          </button>
-        ))}
-      </div>
-      {tab === "causal" ? <CausalCanvas {...props} /> : <div className={v.teamPane}>{team}</div>}
-    </div>
-  );
-}
-
 /**
  * 选中与居中：任务走 openCollabTask（右侧 / 全屏详情），其余存稳定键（v4-selection.ts）；只有明确点了任务才发 Focus 让画布居中。
  * 从任务详情点进边 / 折叠组的，关掉回到那个任务（手机上不然就直接掉回列表）；从团队整屏点进成员的，关掉回到团队
@@ -171,6 +155,7 @@ export function CollabView({ project }: { project: string }) {
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>("all");
   const { sel, setSel, focus, pickTask, select, close } = useSelection(openTask);
+  const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr });
   const projectName = projects.find((p) => p.id === project)?.name || project;
 
   const lineAction = (l: LineView) => {
@@ -196,7 +181,7 @@ export function CollabView({ project }: { project: string }) {
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
       extra={<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} />} />
   );
-  const page = (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
+  const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "waits" && <WaitsPage waits={waits} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "member" && <MemberPage m={resolved} project={project} onClose={close} tr={tr} />)
@@ -218,15 +203,15 @@ export function CollabView({ project }: { project: string }) {
       </div>
       {narrow ? (
         <>
-          <MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />
+          {dag.mobile(<MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
           {pane === "detail" && detail}
           {pane !== "detail" && page && <div className={v.sheet}>{page}</div>}
         </>
       ) : (
         <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline ov={o} lines={lines} filter={filter}
           onFilter={setFilter} waits={waits} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} tr={tr} />}>
-          <CenterPane team={team} canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
-            selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />
+          {dag.center(<CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
+            selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />, team)}
         </PaneLayout>
       )}
     </div>

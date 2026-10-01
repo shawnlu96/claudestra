@@ -135,6 +135,8 @@
 @media (max-width: 639.98px) {
   .top { padding: max(env(safe-area-inset-top), 10px) 12px 10px; }
   .back { display: inline-flex; }
+  /* 手机上顶栏的三个入口都要够 44×44 好点 */
+  .back, .teamM, .waitsM { min-height: 44px; min-width: 44px; justify-content: center; }
 }
 @media (prefers-reduced-motion: reduce) { .eFlow .eLine { animation: none; } .paneBody { transition: none; } .glide { transition: none; } .bump, .beckon { animation: none; } }
 .depItem + .depItem { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
