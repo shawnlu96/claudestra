@@ -226,3 +226,18 @@ describe("r1 审查：核对与效果之间的空档、建出 worker 后中断�
     expect(getOrder(s.db, "o1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("codex 位") });
   });
 });
+
+describe("r2 审查：调度这边的闸门过了之后才收回", () => {
+  test("闸门之后、宿主起来之前收回：调度这边已记 started，下一个 pass 就 kill 确认退出、记 stopped（外来任务不起，见 lend-watchdog「效果边界」）", async () => {
+    const h = harness();
+    for (let i = 0; i < 3; i++) await h.tick();
+    const create = h.d.worker.create;
+    h.d.worker.create = async (n, dir, p, gate) => create(n, dir, p, async () => { const no = await gate(); revoke(h); return no; });
+    await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("started");
+    await h.tick();
+    expect(h.log.killed).toEqual([W]);
+    expect(h.log.sent).toEqual([]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("收回") });
+  });
+});

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LendEntry } from "../src/lib/lend-config.js";
 import { advance, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
-import { lendStopReason as stopReason, lendWatchdog as watchdog, UNREADABLE_LIMIT, WATCHDOG_EVERY_MS, WATCHDOG_GRACE_MS } from "../src/lib/lend-watchdog.js";
+import { lendGatedSpawn, lendStopReason as stopReason, lendWatchdog as watchdog, UNREADABLE_LIMIT, WATCHDOG_EVERY_MS, WATCHDOG_GRACE_MS } from "../src/lib/lend-watchdog.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
 
 const FP = "abcd-ef01-2345-6789";
@@ -135,5 +135,38 @@ describe("i28-W1 授权没了宿主也自停（调度服务停着时收回授权
     writeFileSync(lendOf(path), JSON.stringify({ version: 1, enabled: true, borrow: [], lend: [{ peer: "a", fp: FP, families: { codex: 1 }, roles: ["review"],
       repos: ["o/r"], quota: { ordersPerDay: 5, tokensPerDay: null }, confirm: "auto", until: new Date(DAY).toISOString() }] }));
     expect(lendStopReason("agent-lend-x", path, 1)).toMatch(/暂停/);
+  });
+});
+
+describe("i28-W1 r2 宿主起适配器前同步核授权（效果边界）", () => {
+  const gated = (path: string, spawned: string[]) => lendGatedSpawn("agent-lend-x", (cmd: string) => (spawned.push(cmd), cmd),
+    (why: string): never => { throw new Error(`blocked: ${why}`); }, path, lendOf(path), () => 1);
+
+  test("授权在：照常起；收回 / 范围被拿掉之后：不调真正的 spawn，交给 onBlocked（宿主退出）", () => {
+    const { path } = journal(9e15);
+    const spawned: string[] = [];
+    const spawn = gated(path, spawned);
+    expect(spawn("codex-acp")).toBe("codex-acp");
+    writeLend(path, []);
+    expect(() => spawn("codex-acp")).toThrow(/blocked: 对 a 的出借授权已收回/);
+    writeLend(path, [{ ...GRANT, repos: ["x/y"] }]);
+    expect(() => spawn("codex-acp")).toThrow(/仓库/);
+    expect(spawned).toEqual(["codex-acp"]);
+  });
+
+  test("还没记 started（manager create 还在跑，单在 cloned）也按同一套判定：授权在就起，收回就不起", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "lend-wd-")), "journal.sqlite");
+    writeLend(path, [GRANT]);
+    const db = openLendJournal(path);
+    recordAsked(db, { orderId: "o1", peer: "a", fp: FP, family: "codex", preview: { repo: "o/r", step: "review" } }, 0);
+    advance(db, "o1", "asked", "claimed", { leaseUntil: 9e15, leaseGen: 1 });
+    advance(db, "o1", "claimed", "cloned", { dir: "/w" });
+    patchOrder(db, "o1", ["cloned"], { agent: "agent-lend-x" });
+    const spawned: string[] = [];
+    const spawn = gated(path, spawned);
+    expect(spawn("a1")).toBe("a1");
+    writeLend(path, [GRANT], false);
+    expect(() => spawn("a2")).toThrow(/已收回/);
+    expect(spawned).toEqual(["a1"]);
   });
 });
