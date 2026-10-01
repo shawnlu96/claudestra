@@ -1,6 +1,7 @@
 "use client";
 /** v4 手机：没有画布。按「可执行 / 在跑 → 在等 → 今日完成」分组列卡片，卡上带挡着它的那条因果线；点卡片进全屏详情（collab-detail.tsx） */
 import { dwellText, lineOf, type LedgerOverview, type LineView, type Tr } from "../collab-model";
+import { MobileEarlierDone } from "../collab-done";
 import { StepDots } from "../collab-step-line";
 import { stepLineView } from "../collab-step-line-model";
 import { StageBar } from "./stage-bar";
@@ -10,6 +11,7 @@ import v from "./v4.module.css";
 const TITLE = { running: "可执行 / 在跑", waiting: "在等", done: "今日完成" } as const;
 
 export function MobileList(props: {
+  project: string;
   ov: LedgerOverview;
   lines: ReadonlyMap<string, LineView>;
   todayDone: readonly string[];
@@ -53,6 +55,7 @@ export function MobileList(props: {
           })}
         </section>
       ))}
+      <MobileEarlierDone project={props.project} ov={ov} todayDone={props.todayDone} onPick={props.onPick} tr={tr} />
     </div>
   );
 }

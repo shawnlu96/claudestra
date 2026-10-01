@@ -4,7 +4,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { closeLedger, LEDGER_SCHEMA_VERSION, listItems, openLedger } from "../src/lib/ledger-store";
+import { closeLedger, LEDGER_SCHEMA_VERSION, listItems, listTasks, openLedger } from "../src/lib/ledger-store";
 import { appendEvent, createItem, importTask } from "../src/lib/ledger-write";
 import { addDep } from "../src/lib/ledger-deps-write";
 import { PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../src/lib/ledger-read";
@@ -94,17 +94,18 @@ const dots = (line: unknown, stage: string) => {
 };
 const plain = ({ stepLine, ...rest }: LineView) => ({ ...rest, dots: dots(stepLine, rest.stage) });
 
-test("生产结构的 218 张卡：总览 ≤150KB（改前 >600KB），scheduler 段与网页不读的字段都不发", () => {
+test("生产结构的 218 张卡：总览 ≤150KB（改前 >600KB），scheduler 段与网页不读的字段都不发；已完成卡只带窗口（i28-V1p）", () => {
   const db = fixture();
   const view = projectView(db, "p", NOW);
   const before = {
     ...view, scheduler: schedulerProjectView(db, "p"), items: listItems(db, "p"),
-    tasks: view.tasks.map((t) => ({ ...taskDetail(db, "p", t.id, NOW)!.task, stepLine: taskDetail(db, "p", t.id, NOW)!.stepLine })),
+    tasks: listTasks(db, "p").map((t) => ({ ...taskDetail(db, "p", t.id, NOW)!.task, stepLine: taskDetail(db, "p", t.id, NOW)!.stepLine })),
   };
   console.log(`${LIVE + DONE} cards: before=${bytes(before)} after=${bytes(view)} bytes`);
   expect(bytes(before)).toBeGreaterThan(600_000);
   expect(bytes(view)).toBeLessThanOrEqual(150_000);
   expect("scheduler" in view).toBe(false);
+  expect(view.tasks.length + view.doneRest.n).toBe(LIVE + DONE);
   expect(view.items.every((i) => Object.keys(i).sort().join() === "id,oneLine,title")).toBe(true);
   for (const t of view.tasks) {
     const done = DONE_STAGES.includes(t.stage as (typeof DONE_STAGES)[number]);
