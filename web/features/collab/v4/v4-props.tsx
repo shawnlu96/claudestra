@@ -17,11 +17,12 @@ import type { CFold } from "./causal-model";
 import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
 import v from "./v4.module.css";
 
-const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+export const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
-function Shell({ title, sub, onClose, children, tr }: { title: string; sub?: string; onClose?: () => void; children: React.ReactNode; tr: Tr }) {
+/** 右区一页的外框（子 DAG 的节点 / 版本 / 差异页也用，dag/dag-props.tsx） */
+export function Shell({ title, sub, onClose, children, tr, className }: { title: string; sub?: string; onClose?: () => void; children: React.ReactNode; tr: Tr; className?: string }) {
   return (
-    <aside className={`${s.tokens} ${s.panel}`}>
+    <aside className={`${s.tokens} ${s.panel} ${className ?? ""}`}>
       <div className={s.ph}>
         <div className={s.tt}>
           <div className={s.a}>{title}</div>
@@ -38,7 +39,7 @@ function Shell({ title, sub, onClose, children, tr }: { title: string; sub?: str
   );
 }
 
-function Sec({ title, children }: { title: string; children: React.ReactNode }) {
+export function Sec({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className={s.sec}>
       <h5>{title}</h5>
