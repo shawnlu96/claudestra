@@ -56,9 +56,10 @@ export function ProjectChips(props: {
 }
 
 /** 同时最多跑几单的整句：「<名字> 的电脑：同时最多跑 [框] 单」，框（Stepper）嵌在句中、和框后的字不拆行，徽章跟在句末 */
-export function LimitLine(props: { name: string; n: number; children: ReactNode; badge?: ReactNode }) {
+export function LimitLine(props: { name: string; n: number; children: ReactNode; badge?: ReactNode; local?: boolean }) {
   const t = useT();
-  const [before, after] = splitAtBox(t("{name} 的电脑：同时最多跑 {box} 单", { name: props.name, n: props.n, box: BOX }));
+  const text = props.local ? t("本机：同时最多跑 {box} 单", { n: props.n, box: BOX }) : t("{name} 的电脑：同时最多跑 {box} 单", { name: props.name, n: props.n, box: BOX });
+  const [before, after] = splitAtBox(text);
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-base-content/70">
       <span className="min-w-0 break-all">{before}</span>
@@ -75,7 +76,7 @@ export function LimitLine(props: { name: string; n: number; children: ReactNode;
  * 上限的数字框：点数字变输入框（数字键盘），回车 / 失焦交一次；空或非数字退回原值，越界夹到边界并抖一下。
  * −/+ 每点一下交一次。onCommit 只在值真的变了时调；peer 卡每交一次就存一次、存的期间 disabled，新增表单只改本地值。
  */
-export function Stepper(props: { value: number; limit: number; disabled: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
+export function Stepper(props: { value: number; limit: number; min?: number; disabled: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
   const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -85,11 +86,12 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
     if (editing) input.current?.focus();
   }, [editing]);
   const v = props.value;
+  const min = props.min ?? 1;
 
   const commit = (n: number) => {
     if (n !== v) props.onCommit(n, box.current);
   };
-  const step = (d: 1 | -1) => commit(clampMaxOpen(v + d, props.limit));
+  const step = (d: 1 | -1) => commit(clampMaxOpen(v + d, props.limit, min));
   const startEdit = () => {
     done.current = false;
     setEditing(true);
@@ -99,14 +101,14 @@ export function Stepper(props: { value: number; limit: number; disabled: boolean
     done.current = true;
     setEditing(false);
     if (raw === null) return;
-    const p = parseMaxOpen(raw, props.limit);
+    const p = parseMaxOpen(raw, props.limit, min);
     if (!p || p.clamped) shake(box.current);
     if (p) commit(p.value);
   };
 
   return (
     <div ref={box} className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-base-200 px-1 text-[12px] tabular-nums text-base-content">
-      <button className="btn btn-ghost btn-xs btn-circle" aria-label={t("同时少跑一单")} disabled={props.disabled || editing || v <= 1} onClick={() => step(-1)}>
+      <button className="btn btn-ghost btn-xs btn-circle" aria-label={t("同时少跑一单")} disabled={props.disabled || editing || v <= min} onClick={() => step(-1)}>
         <MinusIcon className="size-3" />
       </button>
       {editing ? (

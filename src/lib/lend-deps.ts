@@ -42,6 +42,7 @@ import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
 import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
+import { readWeekQuota } from "./quota-week.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -153,7 +154,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const send = sendVia(registryRow, alive);
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
-    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row) },
+    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() },
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: (m) => console.error(`[lend] ${m}`),
     notify: async (p) => {
