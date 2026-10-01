@@ -4,7 +4,7 @@
  * 撞墙原文 → 进闸；闸内任何 API 错误 → 记进续跑名单、出闸再续；其余照旧 60 秒续跑一次、再撞升级到频道。
  */
 import { existsSync, unlinkSync } from "fs";
-import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
+import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, noteOverload, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
 import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
 import { windowWallWait } from "../lib/wall-screen.js";
 import { noticeOncePerState } from "../lib/quota-wall-notice.js";
@@ -245,6 +245,7 @@ export function startQuotaWall(b: WallBridgeDeps): QuotaWall {
         const act = model ? "model_limit" : r;
         console.log(`⚠️ 回合以 API 错误结束: ${evt.agent}（${err || "API Error"}）→ ${act === "track" ? "60s 后自动续跑" : act === "model_limit" ? "模型额度，不续跑" : "续跑后再撞，升级到频道"}`);
         recordMetric("api_error_turn", { agent: evt.agent, meta: { error: err, action: act } });
+        noteOverload(evt.chatId, evt.agent, err, act, ts); // 监护对象的撞错与处理留给调度服务记台账、到上限报派活方（lib/agent-supervisor-bridge.ts）
         const why = model
           ? `撞了单个模型的额度（${String(data.text ?? "").split("\n")[0].slice(0, 120)}），bridge 不自动续跑。在它的窗口里用 /model 换个模型（或 /usage-credits）后发一句继续。`
           : `连续两次因 API 错误中断（自动续跑一次已用完，不再续）：${err || "API Error"}。需要人看一眼网络/代理后手动发一句继续。`;
