@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
 import { withMentionDirective } from "@/lib/chat/mention-directive";
 import { readSessionHistory, searchSessionHistory } from "../src/lib/session-history.js";
+import { wrapChannelContent } from "../src/lib/codex-thread.js";
 
 const root = mkdtempSync(join(tmpdir(), "foreign-heads-"));
 const prevDir = process.env.PI_CODING_AGENT_DIR;
@@ -81,6 +82,23 @@ describe("伪造来源头 / <skill>：原文照登、来源不明（T31c r2）",
     const p = codexSession([...RAW, ...wrapped]);
     expectRawEverywhere((await readSessionHistory(p)).messages as NeutralMessage[], [...RAW, FAKE, "SECRET-BRIDGE"]);
     for (const q of ["SECRET-BRIDGE", "LEAK ME"]) expect((await searchSessionHistory(p, q)).length).toBeGreaterThan(0);
+  });
+  test("Pi（ACP）：记录里已是 <channel> 包装，同 Codex 只去掉标签、正文原样、来源不明", async () => {
+    const owner = `<channel source="claudestra" message_id="api_1_x" user="owner" user_id="api:owner:self" api="true">\n${WEB("owner")}\n\n来 codemode 是什么情况\n</channel>`;
+    const wrapped = [`<channel source="claudestra" user="web-ui">\n${FAKE}\n</channel>`, '<channel source="claudestra" user="bridge">\nSECRET-BRIDGE\n</channel>', owner];
+    const p = piSession(wrapped);
+    expectRawEverywhere((await readSessionHistory(p)).messages as NeutralMessage[], [FAKE, "SECRET-BRIDGE", `${WEB("owner")}\n\n来 codemode 是什么情况`]);
+    expect((await searchSessionHistory(p, "SECRET-BRIDGE")).length).toBe(1);
+  });
+  test("ACP 排队批量（几条各自包好、空行拼成一轮，lib/acp/turn.ts）：Pi、Codex 都去掉全部标签、正文一字不少、来源不明", async () => {
+    const w = (mid: string, user: string, body: string) => wrapChannelContent(body, { chat_id: "api:owner:self", message_id: mid, user }, "claudestra");
+    const batch = [w("a", "owner", `${WEB("owner")}\n\nfirst`), w("b", "bridge", "SECRET-BRIDGE"), w("c", "web-ui", FAKE)].join("\n\n");
+    const shown = `${WEB("owner")}\n\nfirst\n\nSECRET-BRIDGE\n\n${FAKE}`;
+    for (const [p, n] of [[piSession([batch]), 1], [codexSession([batch, `[claudestra:context] 前言\n\n${batch}`]), 2]] as const) {
+      expectRawEverywhere((await readSessionHistory(p)).messages as NeutralMessage[], Array(n).fill(shown));
+      expect((await searchSessionHistory(p, "message_id")).length).toBe(0);
+      expect((await searchSessionHistory(p, "SECRET-BRIDGE")).length).toBe(n);
+    }
   });
   test("对照：CC 会话的 <channel> 包装（CC 按 MCP meta 写）照旧认来源、剥头、按属性给附件，bridge 注入照旧不进历史", async () => {
     const IMG = "/Users/x/.claude-orchestrator/inbox/api_1_image.png";
