@@ -3,9 +3,12 @@
  * worker 经 `manager create / kill`（agent-lend-* 名字 → runtimes/clean-env.ts 的白名单环境），首条派单经 bridge 的 route_to_agent（带会话核对）。
  * 每个外部效果都套 whileOwned：发起前、结束后各核一次服务是否仍持有单实例锁与维护租约（同 E2a），bridge 帧在发出的同一段同步代码里再核一次。
  * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录），派单尾注换成「提交后 lend submit 交摘要」。
+ * 协议 v2（i28-W3）：hello / beat 走同一个 `manager lend call`，单次出站 15 秒封顶（子进程超时强杀），挂死的对方拖不住这一轮；
+ * 输出摘要从 worker 的 Codex 会话文件末尾读（lend-beat.ts 负责脱敏与截断）。
  */
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { open, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
@@ -34,6 +37,8 @@ import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { probeAcpWorker } from "./worker-liveness.js";
 import { readInventoryQuota } from "./ai-quota.js";
+import { newBoot, owedPeers } from "./lend-hello.js";
+import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
 import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -43,18 +48,28 @@ const plainManager = (lease: SchedulerLease | undefined, extra: Record<string, s
   bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, env: { ...process.env, DISCORD_CHANNEL_ID: "", [SCHEDULER_LEASE_ENV]: encodeLease(lease), ...extra },
   timeoutMs: 180_000 });
 
+/** 对 A 的单次出站上限：超时就强杀 `manager lend call`，按传输失败处理（本轮跳过这个 peer 的其余出站） */
+const OUTBOUND_MS = 15_000;
+const outboundManager = (lease: SchedulerLease | undefined): Manager => (...args) => runManagerProcess(args, {
+  bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs: OUTBOUND_MS,
+  env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1", [SCHEDULER_LEASE_ENV]: encodeLease(lease) } });
+
+/** 本进程的 hello 启动号：调度服务重启就换一个（A 按 boot + seq 防回滚） */
+const BOOT = newBoot();
+
 const LEND_PROJECT = "lend";
 
 /**
  * 要不要进 pass 跑 lend 这一步：出借开着，或 journal 里还有没跑完的单、没做完的收尾（lend off 之后在跑的单也要跑完、续租、自停，
- * 终态之后没写成的收据 / 没发出的通知也要补上：收尾不看出借开关）
+ * 终态之后没写成的收据 / 没发出的通知也要补上：收尾不看出借开关），或者还欠哪个 A 一句收回的 hello
  */
 export async function lendWanted(journal = LEND_JOURNAL_PATH, lendPath?: string): Promise<boolean> {
   const read = await readLend(lendPath);
   if (read.status === "ok" && read.file.enabled) return true;
   if (!existsSync(journal)) return false;
   const db = openLendJournal(journal);
-  try { return liveOrders(db).length > 0 || unsettledOrders(db).length > 0; } finally { db.close(); }
+  // 收回之后还欠 A 一句 grant:null（最近一次成功的 hello 带着授权、没过 180 秒）：总开关关了也要跑到说完
+  try { return liveOrders(db).length > 0 || unsettledOrders(db).length > 0 || owedPeers(db, Date.now()).length > 0; } finally { db.close(); }
 }
 
 /** 出借 worker 固定归到 lend 项目：不按目录落进别的项目，项目上下文里也就不会带上 B 自己的项目花名册 */
@@ -110,8 +125,9 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const owned = <T>(fn: () => Promise<T>) => whileOwned(active, fn);
   const svc: Manager = (...a) => owned(() => schedulerManagerWith(lease)(...a));
   const plain: Manager = (...a) => owned(() => plainManager(lease)(...a));
-  const call: LendCall = async (peer, op, body) => {
-    const r = await svc("lend", "call", peer, op, "--body", JSON.stringify(body));
+  const out: Manager = (...a) => owned(() => outboundManager(lease)(...a));
+  const call = async (peer: string, op: string, body: Record<string, unknown>) => {
+    const r = await out("lend", "call", peer, op, "--body", JSON.stringify(body));
     if (r.ok !== true) throw new Error(String(r.error ?? "manager lend call 失败"));
     return { status: Number(r.status), body: r.body };
   };
@@ -120,7 +136,8 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const registryRow = (name: string) => readRegistryAgentsSync().find((a) => a.name === name);
   const send = sendVia(registryRow, alive);
   return {
-    db: journal, now: () => Date.now(), call, env: process.env, footer, verifyReceipt,
+    db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
+    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row) },
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: (m) => console.error(`[lend] ${m}`),
     notify: async (p) => {
@@ -167,6 +184,33 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
       alive: probe,
     },
   };
+}
+
+const TAIL_BYTES = 64 * 1024;
+const sessionFiles = new Map<string, string>();
+
+/** worker 最近一段 assistant 文字（Codex 会话文件末尾 64 KiB 里的最后一条）与文件 mtime；还没有会话 / 找不到文件 = null（摘要用空串） */
+async function workerExcerpt(row: LendRow): Promise<{ text: string; at: number } | null> {
+  if (!row.sessionId) return null;
+  const path = sessionFiles.get(row.sessionId) ?? findSessionJsonlBySessionId("codex", row.sessionId);
+  if (!path) return null;
+  sessionFiles.set(row.sessionId, path);
+  const st = await stat(path);
+  const fh = await open(path, "r");
+  try {
+    const len = Math.min(st.size, TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, st.size - len);
+    const lines = buf.toString("utf8").split("\n");
+    if (st.size > len) lines.shift(); // 第一行多半被截断
+    for (const line of lines.reverse()) {
+      const rec = translateSessionLine("codex", line);
+      const content = rec?.type === "assistant" ? rec.message?.content : null;
+      const text = Array.isArray(content) ? content.filter((c) => c?.type === "text").map((c) => String(c.text ?? "")).join("\n") : "";
+      if (text.trim()) return { text, at: st.mtimeMs };
+    }
+    return { text: "", at: st.mtimeMs };
+  } finally { await fh.close(); }
 }
 
 /** bridge 为这个 worker 开的 Codex 额度 / 登录卡（同 scheduler-auto-ports codexFailure）；台账读不了 = 不知道，当没有（存活探测照常兜底） */

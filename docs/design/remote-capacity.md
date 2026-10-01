@@ -32,7 +32,7 @@
 - **凭据**：B 用 A 已经签给它的 peer token，外加 B 的实例钥匙签名（`instance-key.pem`，A 的 bridge 按 `docs/relay/protocol.md` §4.1 强制验签、
   钉钥、防重放）。经中继时走 T21a 的 peer 端到端加密，中继看不到订单正文。
   **不产生新凭据**：这枚 token 是 A 在握手时签给 B、只能访问 A 的一枚，本来就在 B 手里；lend 不要求 A 交出任何密钥或 GitHub 凭据。
-- **方向**：B → A 用 A 签给 B 的 token；A → B 的推送用 B 签给 A 的 token（只单向配对时 A 推不了，B 靠兜底轮询照样能领）。
+- **方向**：B → A 用 A 签给 B 的 token；A → B 的推送用 B 签给 A 的 token（只单向配对时 A 推不了：B 10 分钟内没收到过这个 A 的推送就按 30 秒轮询，赶在 A 的 2 分钟推送 TTL 之前领到）。
   A 对 B 暴露的只有 `lend/*`：v1 的 poll / claim / lease / result 加 v2 的 hello / beat / ask；B 对 A 暴露的只有 `lend/offer`。
 - **端口**：两边都只有出站到中继的一条 WebSocket（直连 peer 也可以，但不是前提）。
 - **中继不改**：`presence` 帧是中继自己生成的，不带自定义数据，所以容量不走 presence，而是走 hello（§8.1）。在线状态照旧用 `peer-presence`。
@@ -123,7 +123,8 @@ interface OrderWire extends WorkOrder {              // taskId / specRev / head 
 返回 null，此时拒绝借单，不退回明文）。每一步先写 B 的本地 journal（§6）再做外部效果。
 
 1. 单子从哪来：proto 2 的 A 推送（§8.2，B 的收单入口同步核授权、名额、日额度、仓库白名单、写角色后记 journal `asked`）；
-   兜底每 5 分钟 `poll` 一次（B 重启或 hello 失败后立刻一次）。对方是旧版 A（hello 回 404）时退回 v1：每 30 秒 `poll`。
+   兜底轮询：proto 2、hello 新鲜、且 10 分钟内收到过这个 A 的推送时每 5 分钟 `poll` 一次，否则每 30 秒（推不过来的 A 也赶得上它 2 分钟的推送 TTL）；
+   B 重启、hello 失败、刚从 proto 2 掉回 1 时立刻一次。对方是旧版 A（hello 回 404）时退回 v1：每 30 秒 `poll`。
 2. ~~逐单确认~~（已退役，§9）：授权内直接下一步；claim 前、clone 后起 worker 前、首条派单前各同步重读一次授权，收回即停。
 3. `claim` → 拿到完整订单与租约。
 4. 起一次性 worker：`manager create agent-lend-<orderId 短码> <工作副本> --runtime codex --transport acp`（Claude 走缺省 runtime），标 `kind: worker`（T69），
@@ -344,8 +345,8 @@ POST /api/v1/lend/ask     (B→A，worker 经 B 的 bridge 转来)
 
 ## 9. 已退役
 
-- **轮询为主的拉单**：v1 里 B 每 30 秒 poll 是唯一的单子来源；v2 起主路径是推送（§8.2），poll 只剩两种用途：proto 2 时 5 分钟一次的兜底，
-  以及对方是旧版 A 时的回退。
+- **轮询为主的拉单**：v1 里 B 每 30 秒 poll 是唯一的单子来源；v2 起主路径是推送（§8.2），poll 只剩两种用途：推送正常到达时 5 分钟一次的兜底
+  （10 分钟没收到这个 A 的推送就回到 30 秒），以及对方是旧版 A 时的回退。
 - **逐单确认**（`confirm: per-order` 的 authorize ask、`ledger lend-ask`）：改为一次授权（§1.1）。`ledger lend-ask` 先改成回「已退役」的空壳（W1）。
 - **`lend-seen.json` 的容量快照**：换成台账 `lend_peers`（§1.2、§8.1）。
 - v1 设计稿末尾的「给 owner 的待确认」已由 i28 远端池 v2 方案逐条定掉，不再列在这里。
