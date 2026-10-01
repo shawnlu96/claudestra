@@ -18,7 +18,7 @@ export function estimateHours(text: string): number | null {
   const n = Number(m[2] ?? m[1]) * (m[3] === "天" ? 8 : m[3] === "分钟" ? 1 / 60 : 1);
   return n > 0 && Number.isFinite(n) ? n : null;
 }
-export const deferredNode = (n: Pick<DagNode, "oneLine">): boolean => n.oneLine.startsWith("（远期）");
+export const deferredNode = (n: Pick<DagNode, "oneLine">): boolean => /^(?:（远期）|\(远期\))/.test(n.oneLine);
 export interface EtaNode extends DagNode { task: LedgerTask | null }
 export const phase = (n: EtaNode) => nodePhase(n.taskId, n.task?.stage ?? null);
 interface EtaBasis { perHour: number; samples: number; k: number; cpHours: number; remaining: number; share: number }

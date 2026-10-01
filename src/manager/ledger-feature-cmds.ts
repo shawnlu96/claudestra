@@ -7,7 +7,7 @@ import { featureDeps } from "../lib/ledger-feature-deps.js";
  */
 import type { FeatureStatus } from "../lib/ledger-feature-schema.js";
 import { effectiveNodes, getDagVersion, getPendingProposal, projectNodes, resolveFeature } from "../lib/ledger-feature.js";
-import { createFeature, initDag, setFeature, type FeaturePatch } from "../lib/ledger-feature-write.js";
+import { createFeature, initDag, requireManager, setFeature, type FeaturePatch } from "../lib/ledger-feature-write.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { autostartShow } from "./ledger-autostart-cmds.js";
@@ -73,11 +73,17 @@ function featureDep(c: LedgerCli): Result {
   return changeFeatureDep(c.db, c.ctx(), from.id, to.id, c.p.pos[0] === "feature-dep-rm", c.p.flags.note);
 }
 
+function listFeatureDeps(c: LedgerCli): Result {
+  const f = c.p.pos[1] ? feature(c) : null;
+  const project = f?.project ?? c.project();
+  requireManager(c.db, c.ctx().actor, project);
+  return { ok: true, deps: featureDeps(c.db, project, f?.id) };
+}
+
 export const FEATURE_CMDS: Record<string, CommandSpec> = {
   "feature-dep-add": { valued: ["note", "project"], usage: "feature-dep-add <from> <to> [--note <≤60 字>]（from 是前置）", run: featureDep },
   "feature-dep-rm": { valued: ["project"], usage: "feature-dep-rm <from> <to>", run: featureDep },
-  "feature-deps": { valued: ["project"], usage: "feature-deps [<feature>]", run: (c) => ({ ok: true,
-    deps: c.p.pos[1] ? featureDeps(c.db, feature(c).project, feature(c).id) : featureDeps(c.db, c.project()) }) },
+  "feature-deps": { valued: ["project"], usage: "feature-deps [<feature>]", run: listFeatureDeps },
   "feature-new": {
     valued: ["title", "words", "status", "project", "dedup"],
     usage: "feature-new <id> --title <名字> [--words <owner 原话>] [--status active|paused|done|dropped]",

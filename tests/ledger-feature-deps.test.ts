@@ -58,3 +58,14 @@ test("MCP batches via CLI with verified channel; PM succeeds and executor writes
     loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} });
   expect(listed).toMatchObject({ ok: true, deps: [{ from: ids[0], to: ids[1] }] });
 });
+
+test("feature-deps reads require PM / master / owner for project and feature forms", async () => {
+  changeFeatureDep(db, ctx, ids[0], ids[1]);
+  for (const actor of ["agent-exec", ctx.actor, "master", "owner"]) {
+    for (const suffix of [[], ["a"]]) {
+      const result = await runLedger(["feature-deps", ...suffix], { db, actor, actorProject: "p", projectIds: ["p"], now: () => 1000,
+        loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} });
+      expect(result).toMatchObject(actor === "agent-exec" ? { ok: false, code: "forbidden" } : { ok: true, deps: [{ from: ids[0], to: ids[1] }] });
+    }
+  }
+});

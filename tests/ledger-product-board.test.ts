@@ -107,3 +107,14 @@ test("API gates before IO, unknown project 404, absent DB exists:false, read-onl
     expect(r.status).toBe(200); expect(await r.json()).toMatchObject({ exists: true, features: [], deps: [] });
   } finally { closeLedger(":memory:"); }
 });
+
+for (const prefix of ["（远期）", "(远期)"]) {
+  test(`${prefix} nodes count as deferred and contribute no remaining work or ETA`, () => {
+    const baseline = [node("a", null, [], "S")];
+    const future = node("future", "blocked", [], "99 天", `${prefix}future`);
+    expect(nodeCounts([...baseline, future])).toEqual({ total: 2, completed: 0, active: 0, ready: 1, blocked: 0, deferred: 1 });
+    expect(featureEta([...baseline, future], pace, 0, events, now)).toEqual(featureEta(baseline, pace, 0, events, now));
+    expect(projectPace([...baseline, future], [], events, now).fallback).toBe(1);
+    expect(featureEta([future], pace, 0, events, now)).toMatchObject({ at: null, done: true, basis: { remaining: 0, cpHours: 0 } });
+  });
+}
