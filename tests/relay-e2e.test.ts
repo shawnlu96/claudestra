@@ -17,6 +17,7 @@ import { collectBody } from "../src/lib/relay-stream.ts";
 const ALLOW_ALL = async () => null;
 
 const BASE = "relay.test";
+const BIG_ROWS = Array.from({ length: 400 }, (_, i) => ({ seq: i, text: `历史里的一条回复 ${i}` }));
 const quiet = () => {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -99,7 +100,9 @@ beforeAll(async () => {
   keyB = instanceKeySync(mkdtempSync(join(tmpdir(), "relay-e2e-b-")))!;
   fpA = keyFingerprint(keyA.publicKey);
   fpB = keyFingerprint(keyB.publicKey);
-  const deps = { webBase: `http://127.0.0.1:${web.port}`, ingressBase: () => `http://127.0.0.1:${ingress.port}`, refusePeer: ALLOW_ALL };
+  const handleApi = async (req: Request) =>
+    new URL(req.url).pathname === "/api/v1/big" ? Response.json({ rows: BIG_ROWS }) : Response.json({ ok: false }, { status: 404 });
+  const deps = { webBase: `http://127.0.0.1:${web.port}`, ingressBase: () => `http://127.0.0.1:${ingress.port}`, refusePeer: ALLOW_ALL, handleApi };
   const relayUrl = `ws://127.0.0.1:${relay.port}/v1/ws`;
   a = connect({ relayUrl, key: keyA, name: "Mini", slug: "mini", onInbound: makeInboundHandler(deps), log: quiet });
   b = connect({ relayUrl, key: keyB, name: "Alex 的 MBP", slug: "alex", onInbound: makeInboundHandler(deps), log: quiet });
@@ -155,6 +158,13 @@ describe("隧道：浏览器 → front → 实例 → 本机 Web", () => {
     expect(r.status).toBe(200);
     expect(r.headers.get("content-encoding")).toBe("gzip");
     expect(await r.text()).toBe("gzipped-body-".repeat(64));
+  });
+
+  test("路径模式的 JSON 响应在实例侧 gzip 后上中继，浏览器侧解出原文", async () => {
+    const r = await front(BASE, `/m/${fpA}/api/v1/big`, { headers: { "accept-encoding": "gzip" } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-encoding")).toBe("gzip");
+    expect(((await r.json()) as { rows: unknown[] }).rows).toEqual(BIG_ROWS);
   });
 
   test("两条 Set-Cookie 原样到达浏览器（登录同时下发会话 cookie 与 cstra_home）", async () => {
