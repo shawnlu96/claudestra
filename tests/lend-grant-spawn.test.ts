@@ -9,6 +9,7 @@ import { join } from "node:path";
 import type { LendEntry } from "../src/lib/lend-config.js";
 import { isCreateProcess, LEND_ORDER_ENV, lendCreateDenied, stopRevokedWorkers, type StopIo } from "../src/lib/lend-grant-spawn.js";
 import { advance, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
+import { lendStopReason } from "../src/lib/lend-watchdog.js";
 import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 
 const W = "agent-lend-x";
@@ -62,7 +63,7 @@ function world(opts: { createGate: boolean; revokeStop: boolean }) {
   const proc = { pid: 4242, alive: true, committed: false, denied: null as string | null };
   const io: StopIo = {
     workers: async () => [...registry].map(([name, a]) => ({ name, createPid: a.pid })),
-    stopReason: (name) => fixtureStop(name),
+    stopReason: (name) => lendStopReason(name, f.journal, f.now, f.lendPath), // 同生产（manager/lend.ts），不借 create 那道核对
     isCreate: (pid, name) => pid === proc.pid && proc.alive && name === W,
     signal: () => {
       if (!proc.committed) { registry.delete(W); windows.delete(W); }
@@ -73,7 +74,6 @@ function world(opts: { createGate: boolean; revokeStop: boolean }) {
     markStopped: async (name) => { const a = registry.get(name); if (a?.status === "active") a.status = "stopped"; },
     sleep: async () => {},
   };
-  const fixtureStop = (name: string) => gate({ [LEND_ORDER_ENV]: "o1" }, name);
   const steps: Record<string, () => Promise<void>> = {
     W1: async () => void registry.set(W, { status: "creating", pid: proc.pid }),
     R1: async () => {
