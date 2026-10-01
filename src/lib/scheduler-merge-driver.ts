@@ -25,6 +25,9 @@ const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
 const short = (s: string) => s.slice(0, 12);
+const failed = (checks: PrSnapshot["checks"]): boolean => checks.some((c) => c.bucket === "fail" || c.bucket === "cancel");
+/** UNSTABLE = mergeable but some check isn't green yet (CI still running); a failed/cancelled check is a real anomaly. */
+const unstableWait = (pr: PrSnapshot): "wait" | "failed" | null => pr.mergeState !== "UNSTABLE" ? null : failed(pr.checks) ? "failed" : "wait";
 
 /** A changed head always returns to review; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, external: MergeExternal, advance: MergeAdvance,
@@ -50,7 +53,8 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
         return claimed;
       }
       if (pr.mergeState === "UNKNOWN") return run; // GitHub 尚未算出 mergeability，下一轮只读重查
-      if (pr.mergeState !== "CLEAN") return step("unknown", `PR mergeState=${pr.mergeState}`);
+      if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
+      if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
       return step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`);
     }
     if (run.phase === "updating") {
@@ -60,15 +64,21 @@ export async function driveMerge(run: MergeRun, external: MergeExternal, advance
       if (pr.draft) return run;
       if (pr.mergeState === "BEHIND") return run; // GitHub 更新仍在进行，下一轮只读检查
       if (pr.mergeState === "UNKNOWN") return run;
-      if (pr.mergeState !== "CLEAN") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
+      if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
+      if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
       return step("await_ci", `head ${short(pr.head)} 未变，等待 CI`);
     }
     if (run.phase === "await_ci") {
       const pr = await external.inspect(run.prRef);
+      // ready never journals await_ci for a draft, so a draft here is a change; UNSTABLE must not hide it behind the draft wait.
+      if (pr.draft && pr.mergeState === "UNSTABLE") return step("unknown", "等 CI 时 PR 变成了 draft");
       if (pr.draft && sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
       if (pr.mergeState === "UNKNOWN" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
         pr.base === "main" && pr.branch === run.expectedBranch) return run;
+      const unstable = unstableWait(pr); // The final pre-merge check below still demands CLEAN, so waiting here never merges early.
+      if (unstable && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
+        pr.base === "main" && pr.branch === run.expectedBranch) return unstable === "wait" ? run : step("unknown", "CI 失败或取消");
       if (!sameHead(run, pr) || pr.state !== "OPEN" || pr.draft || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || pr.mergeState !== "CLEAN") {
         return step("unknown", "CI 前 PR/head/base/mergeability 变了");
       }
