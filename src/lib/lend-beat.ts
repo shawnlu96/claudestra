@@ -9,7 +9,7 @@
 import { redactForPeer } from "./dispatch-redact.js";
 import { roleOfStep } from "./lend-git.js";
 import { isRevoked } from "./lend-grant.js";
-import { helloState, metaJson, type HelloDeps } from "./lend-hello.js";
+import { helloState, metaJson, notV2, type HelloDeps } from "./lend-hello.js";
 import { liveOrders, orderOf, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type Lease, type LendRes } from "./lend-remote.js";
 import { parseV2Request, type BeatAnswer, type BeatOrder } from "./lend-wire-v2.js";
@@ -99,7 +99,7 @@ async function sendBatch(d: HelloDeps, peer: string, items: Item[], lines: Recor
     r = await lendRequest(d.v2.call, peer, "beat", { orders: blank(lines) });
   }
   const at = d.now();
-  if (!r.ok) return r.code === LEND_OLD_PEER ? { error: LEND_OLD_PEER, old: true } : { error: `${r.code} ${r.error}`.slice(0, 200) };
+  if (!r.ok) return notV2(r) ? { error: LEND_OLD_PEER, old: true } : { error: `${r.code} ${r.error}`.slice(0, 200) };
   const sent = new Map(items.map((it) => [it.row.orderId, it]));
   const ids = r.value.map((a) => a.orderId);
   if (new Set(ids).size !== ids.length || ids.some((id) => !sent.has(id))) return { error: "应答里有没发过的或重复的单号，整批当没收到" };
@@ -114,7 +114,7 @@ async function sendBatch(d: HelloDeps, peer: string, items: Item[], lines: Recor
   return { error: null };
 }
 
-/** 一个 proto 2 peer 这一轮的 beat；对方回 404（旧版）返回 "old_peer"，调用方当轮切回 v1 逐单续租 */
+/** 一个 proto 2 peer 这一轮的 beat；对方回 404（旧版）/ 403 messages_only 返回 "old_peer"，调用方当轮切回 v1 逐单续租、补 poll */
 export async function beatPeer(d: HelloDeps, peer: string, renewals: Map<string, Renewal>): Promise<"old_peer" | null> {
   const now = d.now();
   const leased = liveOrders(d.db).filter((r) => r.peer === peer && LEASED_STATES.includes(r.state) && (r.leaseGen ?? 0) >= 1);

@@ -2,18 +2,21 @@
  * 出借方 B 的 hello（docs/design/remote-capacity.md §8.1）：调度服务按节奏向每个 A 报授权与容量，顺带协商协议版本（meta proto:<peer>）。
  * 发给谁：lend.json 里有生效授权的 peer，加上「最近一次成功的 hello 带着授权、且 ≤180 秒」的 peer（要把 grant:null 告诉它）；
  * peer 记录过不了 peerLendProblem、环境里有代理变量就不发（调用方筛）。什么时候发：本进程第一轮、正文哈希变了（含收回）当轮就发，
- * 其余按 A 回的 helloMs 保活（夹在 30–120 秒），失败第一次下个 pass 重试、之后 5 / 15 / 30 / 60 秒退避（变了不等退避）。
+ * 其余按 A 回的 helloMs 保活（夹在 30–60 秒：A 降级要 ≤60 秒发现），失败第一次下个 pass 重试、之后 5 / 15 / 30 / 60 秒退避（变了不等退避）。
+ * 授权在组包前现读（liveGrant），读完到发出之间没有 await：本轮开头的快照、别的 peer 拖掉的时间都可能已过了收回。
  * seq 存在 journal meta，跨重启只增不减：同一个 boot 里迟到的旧 hello 翻不回已收回的授权。发之前用 A 的解析器自检，过不了不发、原因给 doctor。
- * 结果：成功 → proto 2；404（old_peer）→ proto 1；别的失败 → 这一轮按 proto 1 处理并立刻补一次 poll。tests/lend-hello.test.ts。
+ * 结果：成功 → proto 2；404 / 403 messages_only（不讲 v2）→ proto 1；别的失败 → 这一轮按 proto 1 处理并立刻补一次 poll。tests/lend-hello.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import type { LendEntry } from "./lend-config.js";
 import { WRITE_ROLE_OPEN } from "./lend-grant-rules.js";
+import { liveGrant } from "./lend-grant.js";
+import type { LendDeps } from "./lend-drive.js";
 import { pausedUntil } from "./lend-health.js";
 import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
-import { LEND_OLD_PEER, lendRequest, type LendCall } from "./lend-remote.js";
+import { LEND_OLD_PEER, lendRequest, type LendCall, type LendRes } from "./lend-remote.js";
 import { HELLO_FRESH_MS, LEND_PROTO, parseV2Request, type HelloRequest } from "./lend-wire-v2.js";
 
 /** 协议 v2 的出站与摘要端口（LoopDeps.v2）：不设 = 只讲 v1 */
@@ -35,16 +38,18 @@ export interface LendRound {
   pollNow: Set<string>;
 }
 
-export interface HelloDeps { db: Database; now(): number; log(msg: string): void; writeOpen?: boolean; v2: V2Port }
+export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "writeOpen" | "readLend" | "context"> { v2: V2Port }
 
 export const newBoot = (): string => randomBytes(12).toString("base64url");
 export const protoKey = (peer: string): string => `proto:${peer}`;
 const helloKey = (peer: string): string => `hello:${peer}`;
 const SEQ_KEY = "helloSeq";
 const BACKOFF_MS = [0, 5_000, 15_000, 30_000, 60_000];
-const KEEP_MS = { min: 30_000, max: 120_000, fallback: 60_000 };
-/** 对方是旧版（404）：隔这么久再问一次，它升级了就自动切回推送 */
+const KEEP_MS = { min: 30_000, max: 60_000, fallback: 60_000 };
+/** 对方不讲 v2（404 / 403 messages_only）：隔这么久再问一次，它升级了就自动切回推送 */
 const OLD_PEER_RETRY_MS = 60_000;
+/** hello / beat 的这几种失败 = 对方不讲 v2：旧版没有这条路由（404），或 A 那边只许这个 peer 投消息（403 messages_only） */
+export const notV2 = (r: LendRes<unknown>): boolean => !r.ok && (r.code === LEND_OLD_PEER || (r.status === 403 && r.code === "messages_only"));
 const clamp = (v: number | null | undefined, lo: number, hi: number, dflt: number): number => Math.min(hi, Math.max(lo, v ?? dflt));
 
 export interface HelloState {
@@ -107,8 +112,10 @@ function setProto(db: Database, peer: string, proto: 1 | 2, round: LendRound): v
   setMeta(db, protoKey(peer), String(proto));
 }
 
-/** 对一个 peer：到点（或状态变了）就发一次 hello，按结果记协议版本与下次时刻 */
-export async function helloPeer(d: HelloDeps, peer: string, entry: LendEntry | undefined, round: LendRound): Promise<void> {
+/** 对一个 peer：到点（或状态变了）就发一次 hello，按结果记协议版本与下次时刻。授权现读，读不到 / 失效 = grant:null */
+export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): Promise<void> {
+  const g = await liveGrant({ peer, fp: null }, d);
+  const entry = g.ok ? g.entry : undefined;
   const now = d.now();
   const st = helloState(d.db, peer);
   const body = helloBody(d.db, entry, now, d.writeOpen);
@@ -132,9 +139,9 @@ export async function helloPeer(d: HelloDeps, peer: string, entry: LendEntry | u
     return save(d.db, peer, { ...base, ok: true, okAt: at, grant: body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
       beatMs: r.value.beatMs, nextAt: at + keep });
   }
-  if (r.code === LEND_OLD_PEER) {
+  if (notV2(r)) {
     setProto(d.db, peer, 1, round);
-    return save(d.db, peer, { ...base, ok: false, error: LEND_OLD_PEER, selfCheck: null, tries: 0, nextAt: at + OLD_PEER_RETRY_MS });
+    return save(d.db, peer, { ...base, ok: false, error: r.code, selfCheck: null, tries: 0, nextAt: at + OLD_PEER_RETRY_MS });
   }
   const tries = (st && !st.ok ? st.tries : 0) + 1;
   d.log(`给 ${peer} 的 hello 没成（${r.code}），这一轮按 v1 轮询：${r.error}`);
@@ -142,11 +149,9 @@ export async function helloPeer(d: HelloDeps, peer: string, entry: LendEntry | u
   save(d.db, peer, { ...base, ok: false, error: `${r.code} ${r.error}`.slice(0, 200), selfCheck: null, tries, nextAt: at + BACKOFF_MS[Math.min(tries, BACKOFF_MS.length) - 1] });
 }
 
-/** 这一轮要 hello 的 peer：有生效授权的，加欠一句 grant:null 的 */
-export function helloTargets(db: Database, entries: readonly LendEntry[], now: number): { peer: string; entry: LendEntry | undefined }[] {
-  const out: { peer: string; entry: LendEntry | undefined }[] = entries.map((e) => ({ peer: e.peer, entry: e }));
-  for (const p of owedPeers(db, now)) if (!entries.some((e) => e.peer === p)) out.push({ peer: p, entry: undefined });
-  return out;
+/** 这一轮要 hello 的 peer：有生效授权的，加欠一句 grant:null 的（正文里的授权由 helloPeer 发前现读） */
+export function helloTargets(db: Database, entries: readonly LendEntry[], now: number): string[] {
+  return [...new Set([...entries.map((e) => e.peer), ...owedPeers(db, now)])];
 }
 
 /** doctor 用：对方协议、最近一次 hello（时刻或失败原因）、自检错误 */

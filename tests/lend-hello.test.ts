@@ -60,7 +60,7 @@ describe("正文", () => {
 });
 
 describe("什么时候发", () => {
-  test("启动第一轮就发；不到保活时间不再发；到了（helloMs 夹在 30–120 秒）再发；正文变了当轮就发", async () => {
+  test("启动第一轮就发；不到保活时间不再发；到了（helloMs 夹在 30–60 秒）再发；正文变了当轮就发", async () => {
     const h = harness();
     const v = withV2(h);
     await h.tick();

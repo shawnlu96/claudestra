@@ -1,8 +1,8 @@
 /**
  * 出借方 B 的 lend 循环一轮（docs/design/remote-capacity.md §2.3）：scheduler 服务的 pass 里、维护租约之内跑。
  * 顺序固定：① 不联网的收回——授权已失效的在跑单先按收回表停掉（该 kill 的 kill 并确认退出），这之前任何出站都不发，挂死的传输挡不住停止；
- * ② 协议 v2（LoopDeps.v2，没设 = 只讲 v1）：hello（lend-hello.ts）、按 peer 批量 beat（lend-beat.ts）；③ 推进 journal 里已有的单（重启恢复就是这一步）；
- * ④ 按 lend.json 对每个出借条目 poll（proto 1 / 未协商 / hello 不新鲜每 30 秒；proto 2 且 10 分钟内收到过这个 A 的推送才降到 5 分钟兜底）。
+ * 之后各 peer 并发、各自按序：② 协议 v2（LoopDeps.v2，没设 = 只讲 v1）：hello（lend-hello.ts）、按 peer 批量 beat（lend-beat.ts）；
+ * ③ 推进 journal 里这个 peer 的单（重启恢复就是这一步）；④ poll（proto 1 / 未协商 / hello 不新鲜每 30 秒；proto 2 且 10 分钟内收到过推送才 5 分钟兜底）。
  * 只认此刻有效的一次授权（lend-grant.ts liveGrant）；收单闸只有 lend-inbox.ts admitOrders 一处（推送与轮询共用）。前提不满足（代理变量、peer 没钉钥 / 没 E2E）不发。
  * 某个 peer 本轮出站失败一次（没拿到应答）就跳过它本轮其余出站，跳过不算发过。每张单、每个 peer 一个 try：除了服务停止 / 失租（SchedulerStopped）
  * 什么错都不抛出 lendTick。tests/lend-loop.test.ts、tests/lend-hello.test.ts、tests/lend-beat.test.ts、tests/lend-compat.test.ts。
@@ -18,7 +18,7 @@ import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import type { HttpPeer } from "./peers.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { refreshPause } from "./lend-health.js";
+import { pausedUntil, refreshPause } from "./lend-health.js";
 
 export const POLL_MS = 30_000;
 /** proto 2、hello 新鲜、而且 PUSH_SEEN_MS 内真收到过这个 A 的推送：轮询只剩兜底 */
@@ -154,24 +154,15 @@ async function revokeOffline(d: LoopDeps, failed: TickResult["failed"]): Promise
   return done;
 }
 
-/** ② hello 每个该说的 peer，再给 v2 的 peer 发 beat；beat 回 404 = 对方降级，当轮切回 v1（逐单续租、立刻 poll） */
-async function v2Step(d: LoopDeps & { v2: V2Port }, entries: LendEntry[], problemOf: (peer: string) => string | null, r: Round): Promise<void> {
-  if (getMeta(d.db, BOOT_KEY) !== d.v2.boot) {
-    setMeta(d.db, BOOT_KEY, d.v2.boot); // 调度服务刚启动：每个 peer 当轮立刻 poll 一次
-    for (const e of entries) r.pollNow.add(e.peer);
-  }
-  for (const t of helloTargets(d.db, entries, d.now())) {
-    if (!problemOf(t.peer)) await perPeer(d, t.peer, "hello", () => helloPeer(d, t.peer, t.entry, r));
-  }
-  const holders = new Set([...liveOrders(d.db), ...unsettledOrders(d.db)].map((x) => x.peer));
-  for (const peer of holders) {
-    if (!speaksV2(d.db, peer)) continue;
-    await perPeer(d, peer, "beat", async () => {
-      if ((await beatPeer(d, peer, r.renewals)) !== "old_peer") return;
-      setMeta(d.db, protoKey(peer), "1");
-      r.pollNow.add(peer);
-    });
-  }
+/** ② 对一个 peer：该 hello 就 hello，讲 v2 且手上有单就 beat；beat 回 404 / 403 messages_only = 对方不讲 v2，当轮切回 v1（逐单续租、立刻 poll） */
+async function v2Peer(d: LoopDeps & { v2: V2Port }, peer: string, hello: boolean, r: Round): Promise<void> {
+  if (hello) await perPeer(d, peer, "hello", () => helloPeer(d, peer, r));
+  if (!speaksV2(d.db, peer) || ![...liveOrders(d.db), ...unsettledOrders(d.db)].some((x) => x.peer === peer)) return;
+  await perPeer(d, peer, "beat", async () => {
+    if ((await beatPeer(d, peer, r.renewals)) !== "old_peer") return;
+    setMeta(d.db, protoKey(peer), "1");
+    r.pollNow.add(peer);
+  });
 }
 
 /** 这个 peer 现在该不该 poll；doctor 也看这一刻的间隔 */
@@ -180,6 +171,57 @@ function pollDue(d: LoopDeps, peer: string, now: number, r: Round): { due: boole
   if (r.pollNow.has(peer)) return { due: true, every: fallback ? FALLBACK_POLL_MS : POLL_MS };
   if (!fallback) return { due: now >= Number(getMeta(d.db, `nextPoll:${peer}`) ?? 0), every: POLL_MS };
   return { due: now >= (metaJson<{ at?: number }>(d.db, `lastPoll:${peer}`)?.at ?? 0) + FALLBACK_POLL_MS, every: FALLBACK_POLL_MS };
+}
+
+/** 一轮里各 peer 共用的只读部分（lendTick 建） */
+interface Pass {
+  d: LoopDeps; rd: LoopDeps; r: Round; now: number; done: Set<string>; failed: TickResult["failed"]; status: LendStatus;
+  hello: Set<string>; entryOf(peer: string): LendEntry | undefined; problemOf(peer: string): string | null;
+  /** invalid / 没开 / 代理变量：整体不 poll；Codex 暂停在 poll 前现查（这一轮推进单子时可能刚撞额度） */
+  blocked: string | null;
+}
+
+/** ④ poll 一个出借条目（被节流跳过的轮次沿用上一次 poll 的时间与错误，doctor 才看得到「最近一次 poll 失败在哪」） */
+async function pollStep(p: Pass, entry: LendEntry): Promise<void> {
+  const { d, r } = p;
+  if (p.blocked || pausedUntil(d.db, d.now()) !== null) return;
+  const last = metaJson<{ at?: number; error?: string | null }>(d.db, `lastPoll:${entry.peer}`) ?? {};
+  const s: LendStatus["peers"][string] = { problem: p.problemOf(entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
+  p.status.peers[entry.peer] = s;
+  const due = pollDue(d, entry.peer, p.now, r);
+  if (d.v2) {
+    const h = helloView(d.db, entry.peer);
+    Object.assign(s, { proto: h.proto, hello: h.hello, selfCheck: h.selfCheck, beat: beatView(d, entry.peer), pushAt: Number(getMeta(d.db, pushKey(entry.peer))) || null,
+      pollMs: due.every });
+  }
+  if (s.problem || !due.due || r.failed.has(entry.peer)) return;
+  try {
+    await pollPeer(entry, p.rd, s);
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    s.lastError = (e as Error).message.slice(0, 200);
+  }
+}
+
+/**
+ * 一个 peer 这一轮的 ②③④：hello、beat → 推进它的单（上次没做完的收尾 / 领单 / 维护租约）→ poll。各 peer 并发跑：
+ * 一个 peer 挂满单次出站上限（15 秒），别的 peer 这一轮照常 claim、续租、poll，不用等它（每个 peer 自己的单仍按顺序一张张推进）。
+ */
+async function peerPass(p: Pass, peer: string): Promise<void> {
+  const { d, rd, r } = p;
+  if (r.v2) await v2Peer(rd as LoopDeps & { v2: V2Port }, peer, p.hello.has(peer) && !p.problemOf(peer), r);
+  for (const row of [...unsettledOrders(d.db), ...liveOrders(d.db).filter((x) => !p.done.has(x.orderId))].filter((x) => x.peer === peer)) {
+    try {
+      if (row.settle) await settleOrder(row, rd); // 上次终态之后没做完的收尾（通知 A、删目录、收据）
+      else if (row.state === "asked") await driveAsked(row, p.entryOf(row.peer), rd);
+      else await driveLeased(row, rd);
+    } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      p.failed.push({ orderId: row.orderId, error: (e as Error).message.slice(0, 300) });
+    }
+  }
+  const entry = p.entryOf(peer);
+  if (entry) await pollStep(p, entry);
 }
 
 export async function lendTick(d: LoopDeps): Promise<TickResult> {
@@ -193,45 +235,26 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const read = await d.readLend();
   const ctx = await d.context();
   const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now(), d.writeOpen);
-  const entryOf = (peer: string) => eff.lend.find((e) => e.peer === peer);
   const proxies = proxyVarsIn(d.env);
   const peers = await d.peers();
-  const problemOf = (peer: string) => peerLendProblem(peers.find((p) => p.name === peer), peer);
   r.v2 = !!rd.v2 && !proxies.length;
-  if (r.v2) await v2Step(rd as LoopDeps & { v2: V2Port }, eff.lend, problemOf, r);
-  for (const row of [...unsettledOrders(d.db), ...liveOrders(d.db).filter((x) => !done.has(x.orderId))]) {
-    try {
-      if (row.settle) await settleOrder(row, rd); // 上次终态之后没做完的收尾（通知 A、删目录、收据）
-      else if (row.state === "asked") await driveAsked(row, entryOf(row.peer), rd);
-      else await driveLeased(row, rd);
-    } catch (e) {
-      if (e instanceof SchedulerStopped) throw e;
-      failed.push({ orderId: row.orderId, error: (e as Error).message.slice(0, 300) });
-    }
+  if (r.v2 && getMeta(d.db, BOOT_KEY) !== d.v2!.boot) {
+    setMeta(d.db, BOOT_KEY, d.v2!.boot); // 调度服务刚启动：每个 peer 当轮立刻 poll 一次
+    for (const e of eff.lend) r.pollNow.add(e.peer);
   }
-  const paused = await refreshPause(d.db, d.codexQuota, d.now(), d.log); // 本机 worker 撞了 Codex 额度：到重置时刻前不领新单（lend-health.ts）
-  const blocked = eff.invalid ? `lend.json 无效：${eff.invalid}` : !eff.lending ? "没有生效的出借条目" : proxies.length ? `环境里有代理变量 ${proxies.join(", ")}，不 poll`
-    : paused !== null ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null;
-  const status: LendStatus = { at: now, lending: eff.lending, blocked, peers: {} };
-  for (const entry of blocked ? [] : eff.lend) {
-    // 被节流跳过的轮次沿用上一次 poll 的时间与错误（meta lastPoll:<peer>），doctor 才看得到「最近一次 poll 失败在哪」
-    const last = metaJson<{ at?: number; error?: string | null }>(d.db, `lastPoll:${entry.peer}`) ?? {};
-    const s: LendStatus["peers"][string] = { problem: problemOf(entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
-    status.peers[entry.peer] = s;
-    const due = pollDue(d, entry.peer, now, r);
-    if (d.v2) {
-      const h = helloView(d.db, entry.peer);
-      Object.assign(s, { proto: h.proto, hello: h.hello, selfCheck: h.selfCheck, beat: beatView(d, entry.peer), pushAt: Number(getMeta(d.db, pushKey(entry.peer))) || null,
-        pollMs: due.every });
-    }
-    if (s.problem || !due.due || r.failed.has(entry.peer)) continue;
-    try {
-      await pollPeer(entry, rd, s);
-    } catch (e) {
-      if (e instanceof SchedulerStopped) throw e;
-      s.lastError = (e as Error).message.slice(0, 200);
-    }
-  }
-  setMeta(d.db, "status", JSON.stringify(status));
+  await refreshPause(d.db, d.codexQuota, d.now(), d.log); // 本机 worker 撞了 Codex 额度：到重置时刻前不领新单（lend-health.ts）
+  const hello = new Set(r.v2 ? helloTargets(d.db, eff.lend, d.now()) : []);
+  const p: Pass = { d, rd, r, now, done, failed, hello, status: { at: now, lending: eff.lending, blocked: null, peers: {} },
+    entryOf: (peer) => eff.lend.find((e) => e.peer === peer), problemOf: (peer) => peerLendProblem(peers.find((x) => x.name === peer), peer),
+    blocked: eff.invalid ? `lend.json 无效：${eff.invalid}` : !eff.lending ? "没有生效的出借条目" : proxies.length ? `环境里有代理变量 ${proxies.join(", ")}，不 poll` : null };
+  const names = new Set([...eff.lend.map((e) => e.peer), ...hello, ...[...unsettledOrders(d.db), ...liveOrders(d.db)].map((x) => x.peer)]);
+  // 全部等完再收（journal 在 lendTick 返回后就关）；服务停止 / 失租（SchedulerStopped）等别的 peer 也停下后再原样抛出
+  const out = await Promise.allSettled([...names].map((peer) => peerPass(p, peer)));
+  const bad = out.find((x): x is PromiseRejectedResult => x.status === "rejected");
+  if (bad) throw bad.reason;
+  const paused = pausedUntil(d.db, d.now());
+  p.status.blocked = p.blocked ?? (paused !== null ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null);
+  if (p.status.blocked) p.status.peers = {};
+  setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };
 }
