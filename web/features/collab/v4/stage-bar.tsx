@@ -3,7 +3,7 @@
 import { COLUMNS, columnOf, skippedColumns, type Stage } from "../collab-model";
 import v from "./v4.module.css";
 
-export function StageBar({ stage, before, kind }: { stage: Stage; before: Stage | null; kind: string }) {
+export function StageBar({ stage, before, kind }: { stage: Stage; before?: Stage | null; kind: string }) {
   const at = columnOf(stage, before);
   const skip = new Set(skippedColumns(kind));
   const done = stage === "done" || stage === "verified";

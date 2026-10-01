@@ -75,6 +75,12 @@ export function SCHEDULER_MERGES_SCHEMA(db: Database): void {
   db.prepare("CREATE INDEX IF NOT EXISTS scheduler_merges_project_phase ON scheduler_merges(project, phase)").run();
 }
 
+/** Inspect the column so both version upgrades and schema repair can safely replay this migration. */
+export function SCHEDULER_MERGE_WAIT_SCHEMA(db: Database): void {
+  const columns = db.prepare("PRAGMA table_info(scheduler_merges)").all() as { name: string }[];
+  if (!columns.some((c) => c.name === "unknownSince")) db.prepare("ALTER TABLE scheduler_merges ADD COLUMN unknownSince INTEGER").run();
+}
+
 export const SCHEDULER_TABLES = ["scheduler_meta", "task_workflows", "scheduler_intents", "scheduler_resources", "scheduler_sessions", "scheduler_merges"] as const;
 export const SCHEDULER_COLUMNS = {
   scheduler_meta: ["key", "value"],
@@ -82,7 +88,7 @@ export const SCHEDULER_COLUMNS = {
   scheduler_intents: ["id", "taskId", "project", "node", "action", "causalSeq", "eventSeq", "taskRev", "specRev", "status", "reason", "receipt"],
   scheduler_resources: ["project", "resource", "taskId", "intentId", "acquiredAt", "scope"],
   scheduler_sessions: ["taskId", "role", "agent", "sessionId", "family", "transport", "state", "createIntentId", "retireIntentId", "archiveReceipt", "killReceipt"],
-  scheduler_merges: ["intentId", "taskId", "project", "prRef", "expectedBranch", "reviewedHead", "requiredChecks", "phase", "rev", "mergeSha", "reason"],
+  scheduler_merges: ["intentId", "taskId", "project", "prRef", "expectedBranch", "reviewedHead", "requiredChecks", "phase", "rev", "mergeSha", "reason", "unknownSince"],
 } as const;
 export const SCHEDULER_INDEXES = {
   task_workflows: ["task_workflows_project"],

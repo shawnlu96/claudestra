@@ -11,6 +11,7 @@ import { fillParams } from "@/lib/i18n-fill";
 import type { Tr } from "./collab-model";
 
 const COLLAB_WORDS: Record<string, string> = {
+  "没取到，正在重试": "Could not load, retrying",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
   "：": ": ",
   "、": ", ",

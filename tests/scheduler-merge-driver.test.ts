@@ -114,7 +114,7 @@ describe("T68 merge driver", () => {
     f.snapshot = pr({ mergeState: "UNKNOWN" });
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("ready");
-    expect(f.calls).toEqual(["inspect"]);
+    expect(f.calls).toEqual(["inspect", "journal:ready"]);
   });
   test("restart in merging reconciles; an open PR freezes without retry", async () => {
     const f = fixture({ ...base, phase: "merging", rev: 3 });
