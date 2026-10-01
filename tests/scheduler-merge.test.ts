@@ -145,6 +145,8 @@ describe("T68 durable merge queue", () => {
         mergeState: "CLEAN", mergeSha: null, checks: names.map((name) => ({ name, bucket: "pass" as const })) };
       const external: MergeExternal = {
         inspect: async () => snapshot,
+        freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }), // i28-M9: never behind main here
+        carryReview: async () => ({ ok: false, reason: "不沿用" }),
         updateBranch: async () => { throw new Error("clean PR must not be updated"); },
         merge: async () => { snapshot = { ...snapshot, state: "MERGED", mergeSha: M }; return M; },
       };
