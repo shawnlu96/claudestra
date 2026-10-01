@@ -23,6 +23,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "PM": "PM",
   "上线": "Live",
   "今日完成": "Done today",
+  "更早完成": "Earlier",
   "参与者": "People",
   "受阻": "Blocked",
   "合并": "Merge",

@@ -6,6 +6,7 @@
  * 只看第一个 pane / 直接子进程时，分屏或包一层 wrapper 就会把活宿主当成 no_host 杀掉（i28-R5a r1 P1-1）。窗口在、树里没有宿主 = no_host。
  * tests/lend-health.test.ts。
  */
+import { CLAUDE_LEND_HOST } from "./lend-claude-worker.js";
 import { MASTER_SESSION, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
 
 export type WorkerLiveness = "running" | "unknown" | "no_window" | "no_host";
@@ -38,7 +39,7 @@ export function acpHostVerdict(panePids: number[], psOut: string): "running" | "
     const pid = queue.pop()!;
     if (seen.has(pid)) continue;
     seen.add(pid);
-    if (cmd.get(pid)?.includes(HOST_SCRIPT)) return "running";
+    if ([HOST_SCRIPT, CLAUDE_LEND_HOST].some((script) => cmd.get(pid)?.includes(script))) return "running";
     queue.push(...(kids.get(pid) ?? []));
   }
   return roots.length && roots.length === panePids.length ? "no_host" : "unknown";

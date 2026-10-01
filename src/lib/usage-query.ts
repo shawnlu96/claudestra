@@ -34,6 +34,8 @@ interface TurnAttr {
 
 export interface TurnRow extends TokenSums {
   turnId: string;
+  /** Pagination key without a session identity. */
+  rowId: number;
   agent: string;
   sessionId: string;
   sidechain: boolean;
@@ -60,14 +62,23 @@ function withTotal<T extends Omit<TokenSums, "totalTokens">>(r: T): T & TokenSum
 }
 
 /** 某 agent 在 sinceMs 之后开始的轮（按开始时间），只列有调用的轮 */
-export function turnsFor(db: Database, agent: string, sinceMs = 0, limit = 500): TurnRow[] {
-  const rows = db.prepare(`SELECT t.turn_id AS turnId, t.agent, t.session_id AS sessionId, t.sidechain, t.runtime, t.kind, t.trigger, t.started_at AS startedAt,
+export function turnsFor(db: Database, agent: string, sinceMs = 0, limit = 500, before?: { at: number; row: number }): TurnRow[] {
+  // Bound heads before calls/tools: a page must not materialize a month's tool history.
+  const heads = db.prepare(`SELECT t.turn_id FROM turns t WHERE t.agent = ? AND t.started_at >= ?
+    AND (? IS NULL OR t.started_at < ? OR (t.started_at = ? AND t.rowid < ?))
+    AND EXISTS (SELECT 1 FROM calls c WHERE c.turn_id = t.turn_id)
+    ORDER BY t.started_at DESC, t.rowid DESC LIMIT ?`)
+    .all(agent, sinceMs, before?.at ?? null, before?.at ?? null, before?.at ?? null, before?.row ?? null, limit) as { turn_id: string }[];
+  if (!heads.length) return [];
+  const ids = heads.map((r) => r.turn_id), qs = ids.map(() => "?").join(",");
+  const rows = db.prepare(`SELECT t.rowid AS rowId, t.turn_id AS turnId, t.agent, t.session_id AS sessionId,
+      t.sidechain, t.runtime, t.kind, t.trigger, t.started_at AS startedAt,
       t.attr_task, t.attr_step, t.attr_round, t.attr_feature, t.attr_item, t.attr_basis,
       MAX(c.ts) AS endedAt, ${SUMS}, MAX(c.input + c.cache_creation + c.cache_read) AS contextSeen, GROUP_CONCAT(DISTINCT c.model) AS models
     FROM turns t JOIN calls c ON c.turn_id = t.turn_id
-    WHERE t.agent = ? AND t.started_at >= ? GROUP BY t.turn_id ORDER BY t.started_at DESC LIMIT ?`).all(agent, sinceMs, limit) as any[];
-  const tools = db.prepare(`SELECT tl.turn_id AS turnId, tl.name, COUNT(*) AS n FROM tools tl JOIN turns t ON t.turn_id = tl.turn_id
-    WHERE t.agent = ? AND t.started_at >= ? GROUP BY tl.turn_id, tl.name`).all(agent, sinceMs) as { turnId: string; name: string; n: number }[];
+    WHERE t.turn_id IN (${qs}) GROUP BY t.turn_id ORDER BY t.started_at DESC, t.rowid DESC`).all(...ids) as any[];
+  const tools = db.prepare(`SELECT turn_id AS turnId, name, COUNT(*) AS n FROM tools
+    WHERE turn_id IN (${qs}) GROUP BY turn_id, name`).all(...ids) as { turnId: string; name: string; n: number }[];
   const byTurn = new Map<string, Record<string, number>>();
   for (const t of tools) (byTurn.get(t.turnId) ?? byTurn.set(t.turnId, {}).get(t.turnId)!)[t.name] = t.n;
   return rows.reverse().map(({ attr_task, attr_step, attr_round, attr_feature, attr_item, attr_basis, ...r }) => {
@@ -93,15 +104,17 @@ export interface SummaryRow extends TokenSums {
  * 按 agent × 运行时 × 模型汇总（同名模型在两个运行时里含义不同：Claude 是应答模型、Codex 是请求模型）。sinceMs 给了就从明细按调用时间算（与 cost --today 同口径，只能看保留期内）；
  * 不给就读 daily（全部时段，含已清掉明细的日子）。
  */
-export function usageSummary(db: Database, sinceMs?: number): SummaryRow[] {
+export function usageSummary(db: Database, sinceMs?: number, agent?: string): SummaryRow[] {
   if (sinceMs === undefined) {
     const rows = db.prepare(`SELECT agent, runtime, model, SUM(input) AS input, SUM(cache_creation) AS cacheCreation,
-      SUM(cache_read) AS cacheRead, SUM(output) AS output, SUM(reasoning) AS reasoning, SUM(calls) AS calls FROM daily GROUP BY agent, runtime, model`).all() as any[];
+      SUM(cache_read) AS cacheRead, SUM(output) AS output, SUM(reasoning) AS reasoning, SUM(calls) AS calls FROM daily
+      WHERE (? IS NULL OR agent = ?) GROUP BY agent, runtime, model`).all(agent ?? null, agent ?? null) as any[];
     return rows.map(summaryRow).sort((a, b) => b.totalTokens - a.totalTokens);
   }
   const rows = db.prepare(`SELECT t.agent, t.runtime, c.model, ${SUMS},
       SUM(CASE WHEN t.sidechain = 1 THEN c.input + c.cache_creation + c.cache_read + c.output + c.reasoning ELSE 0 END) AS sidechainTokens
-    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.ts >= ? GROUP BY t.agent, t.runtime, c.model`).all(sinceMs) as any[];
+    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.ts >= ? AND (? IS NULL OR t.agent = ?)
+    GROUP BY t.agent, t.runtime, c.model`).all(sinceMs, agent ?? null, agent ?? null) as any[];
   return rows.map(summaryRow).sort((a, b) => b.totalTokens - a.totalTokens);
 }
 

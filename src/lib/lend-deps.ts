@@ -20,6 +20,10 @@ import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
+import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
+import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
+import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
+import { lendRuntimeArgs, removeClaudeOrderConfig } from "./lend-claude-worker-routing.js";
 import { LEND_ORDER_ENV, lendModelArgs } from "./lend-grant-spawn.js";
 import { getOrder, guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
 import { readLendContext } from "./lend-policy.js";
@@ -172,7 +176,9 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     },
     codexQuota: async () => quotaViewOf((await readInventoryQuota()).codex),
     clone: (input) => owned(() => prepareClone(input)),
-    removeDir: (orderId) => { active(); removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push"); },
+    removeDir: (orderId) => {
+      active(); removeClaudeOrderConfig(journal, orderId); removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push");
+    },
     selfFp: () => { const k = instanceKeySync(); return k ? keyFingerprint(k.publicKey) : null; },
     identity: gitIdentity,
     push: { probe: (t) => owned(() => probePush(t)), work: (t) => owned(() => pushWork(t)), pr: (p) => owned(() => ensurePr(p)) },
@@ -188,14 +194,15 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
         const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
         const create: Manager = (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a));
-        const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, "--runtime", "codex", "--transport", "acp", ...lendModelArgs(journal, order));
+        const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, ...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
       send: (name, sessionId, text, key) => owned(() => send(name, sessionId, firstMessage(journal, key, text), key)),
       kill: withPaneArchive(async (name) => { // kill 前先存 pane 现场（lend-pane-archive.ts），存档失败不挡 kill
+        await archiveClaudeWorkerName(name);
         const r = await plain("kill", name);
         const still = await probe(name);
-        if (still === "no_window") return { ok: true };
+        if (still === "no_window") { removeClaudeWorkerConfig(name); return { ok: true }; }
         return { ok: false, reason: still === "unknown" ? "读不到 tmux 窗口 / 进程，没法确认已退出" : `kill 后窗口还在（${String(r.error ?? "")}）` };
       }),
       alive: probe,
@@ -209,7 +216,8 @@ const sessionFiles = new Map<string, string>();
 /** worker 最近一段 assistant 文字（Codex 会话文件末尾 64 KiB 里的最后一条）与文件 mtime；还没有会话 / 找不到文件 = null（摘要用空串） */
 async function workerExcerpt(row: LendRow): Promise<{ text: string; at: number } | null> {
   if (!row.sessionId) return null;
-  const path = sessionFiles.get(row.sessionId) ?? findSessionJsonlBySessionId("codex", row.sessionId);
+  const path = sessionFiles.get(row.sessionId) ?? (row.family === "claude"
+    ? claudeWorkerSessionPath(row.sessionId, row.agent ?? undefined) : findSessionJsonlBySessionId("codex", row.sessionId));
   if (!path) return null;
   sessionFiles.set(row.sessionId, path);
   const st = await stat(path);
@@ -221,7 +229,7 @@ async function workerExcerpt(row: LendRow): Promise<{ text: string; at: number }
     const lines = buf.toString("utf8").split("\n");
     if (st.size > len) lines.shift(); // 第一行多半被截断
     for (const line of lines.reverse()) {
-      const rec = translateSessionLine("codex", line);
+      const rec = translateSessionLine(row.family === "claude" ? "claude-code" : "codex", line);
       const content = rec?.type === "assistant" ? rec.message?.content : null;
       const text = Array.isArray(content) ? content.filter((c) => c?.type === "text").map((c) => String(c.text ?? "")).join("\n") : "";
       if (text.trim()) return { text, at: st.mtimeMs };

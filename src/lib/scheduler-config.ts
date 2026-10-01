@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { isPriority, PRIORITIES, REPO_RE, type Priority } from "./lend-config.js";
 import { statePath } from "./paths.js";
+import { parseWriteFamilies } from "./scheduler-family-pick.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 /**
@@ -17,7 +18,7 @@ type RemoteMode = "balance" | "off" | "overflow" | "prefer";
 type RemoteRole = "review" | "write";
 /** reviewFirst: peers that get every review they can take, in order, before the tiers (i28-W5c); absent = none. */
 export interface RemotePolicy {
-  mode: RemoteMode; roles: RemoteRole[]; poolTimeoutMin: number; reviewFirst?: string[];
+  mode: RemoteMode; roles: RemoteRole[]; poolTimeoutMin: number; reviewFirst?: string[]; writeFamilies?: ("claude" | "codex")[];
   /** This machine's tier; absent = balance. */
   localPriority?: Priority;
   /** Set exactly when roles holds "write". */
@@ -135,7 +136,7 @@ export function parseRemotePolicy(raw: unknown, where = "remote"): RemotePolicy 
   const note = isLegacyRemoteMode(rawMode) ? `remote.mode "${rawMode}" 是旧写法，按 balance 处理（i28-W5）` : undefined;
   return { mode, roles: (["review", "write"] as const).filter((x) => roles.includes(x)), poolTimeoutMin: timeout as number,
     ...(first.length ? { reviewFirst: first as string[] } : {}), ...(r.localPriority !== undefined ? { localPriority: r.localPriority as Priority } : {}),
-    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}) };
+    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}), ...parseWriteFamilies(r.writeFamilies, where) };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&

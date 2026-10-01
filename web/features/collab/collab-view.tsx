@@ -205,12 +205,12 @@ export function CollabView({ project }: { project: string }) {
       </div>}
       {narrow ? (
         <>
-          {dag.mobile(<MobileList ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
+          {dag.mobile(<MobileList project={project} ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
           {pane === "detail" && detail}
           {pane !== "detail" && page && <div className={v.sheet}>{page}</div>}
         </>
       ) : (
-        <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline ov={o} lines={lines} filter={filter}
+        <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline project={project} ov={o} lines={lines} filter={filter}
           onFilter={setFilter} waits={waits} onWaits={() => select({ kind: "waits" })} selected={openTask} onPick={pickTask} tr={tr} />}>
           {dag.center(<CausalCanvas canvas={canvas} lines={lines} actionText={actionText} hot={advance?.id ?? null}
             selection={openTask ? { kind: "task", id: openTask } : sel} focus={focus} onSelect={select} tr={tr} />, team)}
