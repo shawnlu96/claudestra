@@ -16,8 +16,8 @@
  */
 
 import { LOG_DIR as STATE_LOG_DIR } from "./paths.js";
-import { existsSync, statSync, copyFileSync, truncateSync, mkdirSync } from "fs";
-import { join } from "path";
+import { appendFileSync, existsSync, statSync, copyFileSync, truncateSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 
 export const LOG_DIR = STATE_LOG_DIR;
 
@@ -42,6 +42,36 @@ export function resolveLogPath(stem: string, kind: LogKind): string {
   if (existsSync(p)) return p;
   const legacy = legacyLogPath(stem, kind);
   return existsSync(legacy) ? legacy : p;
+}
+
+/** ACP 宿主与它起的适配器共用的按 agent 日志目录：app-server.log（适配器）和 host.log（宿主）都在这 */
+export function acpLogDir(agent: string): string {
+  return join(LOG_DIR, "acp", agent);
+}
+
+/** 每个路径自本进程上次查大小以来写了多少字节；没有记录 = 本进程还没查过 */
+const bytesSinceCheck = new Map<string, number>();
+
+/**
+ * 追加一行（目录缺了就建，文件新建时 0600），超过 maxBytes 就 copytruncate 到 .1（只留一代，copy 带着 0600）；返回是否写成，从不抛。
+ * 不每行 stat：本进程第一次写某路径时查一次（接住上次运行 / 反复重启留下的大文件），之后每写满 maxBytes/64 字节再查一次，
+ * 所以当前文件最多超出上限 1/64 加一行，连同 .1 不到约 2×maxBytes。每次按路径重开追加、不持 fd，运行中轮转是安全的（daemon 日志只在启动时转，是因为 launchd 持着 fd）。
+ */
+export function appendLogLine(path: string, line: string, maxBytes = LOG_ROTATE_BYTES): boolean {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const since = bytesSinceCheck.get(path);
+    if (since === undefined || since >= maxBytes / 64) {
+      rotateIfLarge(path, maxBytes);
+      bytesSinceCheck.set(path, 0);
+    }
+    const text = `${line}\n`;
+    appendFileSync(path, text, { mode: 0o600 });
+    bytesSinceCheck.set(path, (bytesSinceCheck.get(path) ?? 0) + Buffer.byteLength(text));
+    return true;
+  } catch {
+    return false; // 落盘只是副本：调用方屏幕上那行还在，写不进去不能拖垮调用方
+  }
 }
 
 export function ensureLogDir(): void {

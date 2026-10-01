@@ -1,7 +1,7 @@
 /**
  * Pi 适配器的进程外壳：真起 `bun main.ts`，pi 换成临时目录里的假可执行文件（PI_BIN），它把自己的 argv / 挂 MCP 的环境变量 / cwd
  * 记进日志、对启动三问给固定回包。钉住：实际起 pi 的命令行里有 `-e builtin:mcp`；/clear（再来一次 session/new）停掉旧 pi 换新 id；
- * resume 用给定 id；宿主关 stdin 时适配器带走 pi、以 0 退出。
+ * resume 用给定 id；宿主关 stdin 时适配器带走 pi、以 0 退出。PI_CODING_AGENT_DIR 指到临时目录：挂 MCP 前的撞名闸不读真 ~/.pi。
  */
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { spawnAdapter } from "../src/lib/acp/adapter-proc.ts";
 import { MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
 import { PI_ACP_ADAPTER_MAIN } from "../src/lib/acp/pi-adapter/main.ts";
-import { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
+import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -21,6 +21,9 @@ const FAKE_PI = `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 const log = (o) => appendFileSync(process.env.FAKE_PI_LOG, JSON.stringify(o) + "\\n");
 log({ argv: process.argv.slice(2), mcp: process.env.${PI_MCP_SERVERS_ENV} ?? null, cwd: process.cwd() });
+// 挂了 server 时真 pi 里的挂载扩展会在读命令之前报状态（mcp-mount.ts）
+const status = { type: "extension_ui_request", id: "m", method: "setStatus", statusKey: "${MOUNT_STATUS_KEY}", statusText: "${MOUNT_OK}" };
+if (process.env.${PI_MCP_SERVERS_ENV}) process.stdout.write(JSON.stringify(status) + "\\n");
 const DATA = {
   get_state: { model: { provider: "ds", id: "v4", name: "V4" }, thinkingLevel: "off" },
   get_available_models: { models: [{ provider: "ds", id: "v4", name: "V4" }] },
@@ -46,7 +49,8 @@ test("起 pi 的命令行带 -e builtin:mcp；/clear 换新 pi；resume 用给�
   chmodSync(fake, 0o755);
   const logFile = join(root, "pi.log");
   const logs: string[] = [];
-  const proc = spawnAdapter([process.execPath, PI_ACP_ADAPTER_MAIN, "--no-extensions"], testChildEnv({ PI_BIN: fake, FAKE_PI_LOG: logFile }), root, (l) => logs.push(l), "pi-acp");
+  const env = testChildEnv({ PI_BIN: fake, FAKE_PI_LOG: logFile, PI_CODING_AGENT_DIR: root });
+  const proc = spawnAdapter([process.execPath, PI_ACP_ADAPTER_MAIN, "--no-extensions"], env, root, (l) => logs.push(l), "pi-acp");
   const session = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: (l) => logs.push(l) });
   const piRuns = () => readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   try {

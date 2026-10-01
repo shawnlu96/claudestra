@@ -19,6 +19,7 @@ import {
   piSessionIdFromFilename,
   piSessionPath,
 } from "../pi-session.js";
+import { ACP_CONTROL } from "./acp-control.js";
 import { lastUserTextOf } from "./shared.js";
 import type {
   AnyRecord,
@@ -63,6 +64,8 @@ export const piAdapter: ManagedRuntimeAdapter = {
   label: "Pi",
   manageable: true,
   control: PI_CONTROL,
+  // 声明了才能 `manager transport <agent> acp`（runtimes/pi-acp.ts）；缺省仍是 tmux，tmux 下的策略还是 PI_CONTROL
+  acp: { control: ACP_CONTROL },
   inbound: "pi-extension",
   turnEnd: "pi-extension",
   exitCommand: "/quit",

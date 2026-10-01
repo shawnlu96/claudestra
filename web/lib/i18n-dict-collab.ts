@@ -214,4 +214,9 @@ export const COLLAB_DICT: Record<string, string> = {
   "暂无数据来源": "No data source yet",
   "PM 定为「{s}」（推导值「{d}」）": "Set by PM to “{s}” (derived: “{d}”)",
   "按前置任务的阶段推导：{d}": "Derived from the prerequisite's stage: {d}",
+  "没有展开的 feature": "No feature expanded",
+  "找不到这张卡": "Card not found",
+  "发现新问题": "New issue found",
+  "P1 退路": "P1 fallback",
+  "已完成被改写": "Done node rewritten",
 };
