@@ -40,6 +40,8 @@ function fixture() {
   });
   const calls: string[][] = [], gitCalls: string[][] = [], notices: string[] = [];
   const replies: Record<string, (args: string[]) => Reply> = {};
+  const windows = new Set<string>();
+  let tmuxDown = false;
   const setAgent = (name: string, fields: Record<string, unknown> | null) => {
     const reg = JSON.parse(readFileSync(registryPath, "utf8")) as { agents: Record<string, unknown> };
     if (fields) reg.agents[name] = { ...(reg.agents[name] as object | undefined), ...fields }; else delete reg.agents[name];
@@ -49,14 +51,14 @@ function fixture() {
     calls.push(args);
     const own = replies[`${args[0]} ${args[1]}`];
     if (own) return own(args);
-    if (args[0] === "kill") setAgent(args[1], { status: "stopped", pending: undefined });
+    if (args[0] === "kill") { setAgent(args[1], { status: "stopped", pending: undefined }); windows.delete(args[1]); }
     return args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: `${args[1]} 已销毁。` };
   };
   const retireDeps: RetireDeps = {
     ledger: async (...args) => runLedger(args.slice(1), deps("scheduler")), agent,
     git: async (args) => { gitCalls.push(args); return git(args); },
     exists: existsSync, worktreeRoot: root, notifyPm: async (_t, text) => { notices.push(text); },
-    agents: () => readLiveAgents(registryPath),
+    agents: () => readLiveAgents(registryPath, async () => (tmuxDown ? null : [...windows])),
   };
   const sh = (cwd: string, ...args: string[]) => {
     const r = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -79,7 +81,7 @@ function fixture() {
         VALUES (?, ?, ?, 'restate', 'ensure_session', 0, 1, 1, 2, 'done', 'test', 0, 0)`).run(ens, id, opts.project ?? "p");
       db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 0, 0)`).run(id, role, name, `s-${id}-${role}`, role === "author" ? "claude" : "codex", transport, ens);
-      if (transport !== "peer") setAgent(name, { status: "active", sessionId: `s-${id}-${role}`, cwd: role === "author" ? mine : rv });
+      if (transport !== "peer") { setAgent(name, { status: "active", sessionId: `s-${id}-${role}`, cwd: role === "author" ? mine : rv }); windows.add(name); }
     };
     bind("author", author, opts.transport ?? "tmux");
     if (opts.reviewer !== null) bind("reviewer", opts.reviewer ?? `agent-rv-${id.toLowerCase()}`, opts.transport === "peer" ? "peer" : "acp");
@@ -95,7 +97,10 @@ function fixture() {
   };
   const row = (id: string, role: "author" | "reviewer") => getSchedulerSession(db, id, role) as SchedulerSession;
   cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
-  return { db, dir, root, repo, card, tick, row, calls, gitCalls, notices, replies, retireDeps, setAgent, cli: (actor: string, ...a: string[]) => runLedger(a, deps(actor)) };
+  return {
+    db, dir, root, repo, card, tick, row, calls, gitCalls, notices, replies, retireDeps, setAgent, windows,
+    tmux: (up: boolean) => { tmuxDown = !up; }, cli: (actor: string, ...a: string[]) => runLedger(a, deps(actor)),
+  };
 }
 
 describe("i28-S2 card retirement", () => {
@@ -193,10 +198,12 @@ describe("i28-S2 card retirement", () => {
     const f = fixture();
     f.card("T1", "verified", { reviewer: null, worktrees: false });
     f.setAgent("agent-task-t1", null);
+    f.windows.delete("agent-task-t1");
     f.replies["archive agent-task-t1"] = () => ({ ok: false, error: "agent-task-t1 不在 registry 或无 sessionId" });
     expect((await f.tick())[0].step).toBe("retired");
     expect(f.calls).toEqual([["archive", "agent-task-t1"]]);
-    expect(f.row("T1", "author")).toMatchObject({ state: "retired", archiveReceipt: "agent 已不在 registry，无可归档", killReceipt: "agent 已不在 registry（先前已清）" });
+    expect(f.row("T1", "author")).toMatchObject({ state: "retired", archiveReceipt: "agent 已不在 registry，无可归档",
+      killReceipt: "agent 已不在（registry 没有条目，tmux 没有窗口）" });
   });
 
   test("busy kill resumes next tick without archiving again; repeated ticks and a fresh service never kill twice", async () => {
@@ -352,13 +359,14 @@ describe("i28-S2 round 1 findings", () => {
   test("retire-budget: retirement gets its own floor after a slow autostart spent the pass budget", async () => {
     const f = fixture();
     f.card("T1", "verified", { reviewer: null, worktrees: false });
-    await schedulerPass(f.db, passConfig(f.repo, true), {
-      assertOwner: () => {}, budgetMs: 6, manager: f.retireDeps.ledger, peerPr: async () => ({ failed: [] }),
+    const res = await schedulerPass(f.db, passConfig(f.repo, true), {
+      assertOwner: () => {}, budgetMs: 300, manager: f.retireDeps.ledger, peerPr: async () => ({ failed: [] }),
       maintenance: { path: join(f.root, "m.lock"), marker: join(f.root, "u.marker"), request: join(f.root, "u.request") },
       autoDeps: () => ({}) as never,
-      autostart: () => ({ resume: async () => [], start: async () => { await Bun.sleep(12); return []; } }),
+      autostart: () => ({ resume: async () => [], start: async () => { await Bun.sleep(400); return []; } }),
       retire: async (db, _c, _m, _a, _l, pace) => (await schedulerRetireTick(db, ["p"], f.retireDeps, pace)).failed,
     });
+    expect(res.failed).toEqual([]);
     expect(f.row("T1", "author").state).toBe("retired");
   });
 });
@@ -386,10 +394,30 @@ describe("i28-S2 round 2 findings", () => {
     expect(existsSync(worktreeDirs(f.root, "T1")[0])).toBe(true);
   });
 
+  test("kill-retry: stopped with no pending but a window still open is not taken as stopped: kill runs", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null });
+    f.setAgent("agent-task-t1", { status: "stopped" });
+    expect((await f.tick())[0].step).toBe("retired");
+    expect(f.calls.filter((c) => c[0] === "kill")).toEqual([["kill", "agent-task-t1"]]);
+  });
+
+  test("kill-retry: tmux that cannot be read stops the card before any kill or removal", async () => {
+    const f = fixture();
+    f.card("T1", "verified", { reviewer: null });
+    f.setAgent("agent-task-t1", { status: "stopped" });
+    f.tmux(false);
+    const r = await schedulerRetireTick(f.db, ["p"], f.retireDeps);
+    expect(r.failed[0].error).toContain("tmux 列不出窗口");
+    expect(f.calls.filter((c) => c[0] === "kill")).toEqual([]);
+    expect(f.row("T1", "author").killReceipt).toBeNull();
+    expect(existsSync(worktreeDirs(f.root, "T1")[0])).toBe(true);
+  });
+
   test("kill-retry: an unreadable registry stops the card before any kill or removal", async () => {
     const f = fixture();
     f.card("T1", "verified", { reviewer: null });
-    const r = await schedulerRetireTick(f.db, ["p"], { ...f.retireDeps, agents: () => readLiveAgents(join(f.dir, "missing.json")) });
+    const r = await schedulerRetireTick(f.db, ["p"], { ...f.retireDeps, agents: () => readLiveAgents(join(f.dir, "missing.json"), async () => []) });
     expect(r.failed[0].error).toContain("registry 读不出来");
     expect(f.calls.filter((c) => c[0] === "kill")).toEqual([]);
     expect(existsSync(worktreeDirs(f.root, "T1")[0])).toBe(true);

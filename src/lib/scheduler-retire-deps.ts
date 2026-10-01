@@ -30,7 +30,7 @@ function retireDeps(db: Database, ledger: Manager, active: () => void, lease: Sc
     try { active(); return true; } catch { return false; /* a failed liveness check means "not provably ours": send nothing */ }
   };
   return {
-    ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => readLiveAgents(),
+    ledger, agent, worktreeRoot: statePath("worktrees"), exists: existsSync, agents: () => whileOwned(active, () => readLiveAgents()),
     git: (args) => whileOwned(active, () => git(args)),
     notifyPm: (task, text) => whileOwned(active, () => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive })),
   };

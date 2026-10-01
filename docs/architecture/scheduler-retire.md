@@ -30,11 +30,13 @@ One `retire` intent per card (`retire:<task>`, opened already claimed by `ledger
 1. **Sessions** (author, then reviewer). Each effect's receipt is on the ledger before the next runs
    (`ledger scheduler-session-retire`): `active → retiring` (archive) `→ retired` (kill).
    - tmux / acp: `manager archive <agent>`, then `manager kill <agent>`. A failed archive is recorded and kill still runs —
-     kill never deletes the session jsonl — and PM is told. Before kill the registry is read: an agent already gone, or
-     `stopped` with no `pending`, is not killed again (that is how a kill whose receipt never reached the ledger looks next
-     pass). `stopped` *with* `pending` is a kill cut off half way (`runKill` writes both before it closes the window), so kill
-     runs again to finish it — or answers busy while it is still running. A name now running a different session than the
-     bound one is left alone and handed to PM. An unreadable registry fails the card for this pass; nothing is killed or removed.
+     kill never deletes the session jsonl — and PM is told. Before kill the registry and the tmux window list
+     (`agentWindowsOrNull`, the list `runKill` itself checks) are read. Only an agent with no entry and no window, or
+     `stopped` with no `pending` and no window, counts as stopped and is not killed again (that is how a kill whose receipt
+     never reached the ledger looks next pass). `stopped` with `pending` or with a window still open is a kill cut off half
+     way (`runKill` writes `stopped` + pending before it closes the window), so kill runs again to finish it — or answers busy
+     while it is still running. A name now running a different session than the bound one is left alone and handed to PM.
+     A registry or tmux that cannot be read fails the card for this pass; nothing is killed, marked or removed.
    - peer: the worker is on the lender's machine — no command is sent, both receipts just say so.
    - an agent still named / bound on an unfinished card is not killed (receipt says which card).
 2. **Worktrees**: `<worktreeRoot>/<task lowercased>` (the executor's, from dag-tools-start) and `<worktreeRoot>/rv-<task>`

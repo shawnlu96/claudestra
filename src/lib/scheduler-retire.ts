@@ -18,6 +18,7 @@ import type { Git } from "./scheduler-review-worktree.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
 import { readJsonLenient } from "./state-file.js";
+import { agentWindowsOrNull } from "./agent-windows.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -34,16 +35,29 @@ export interface RetireDeps {
   agents(): Promise<LiveAgent[]>;
 }
 
-/** A registry entry as retirement reads it; `pending` = an operation (a kill half done, a create) has not finished on it. */
-type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean };
-/** Finished stopping: runKill writes `stopped` + pending *before* it closes the window, and clears pending only at the end. */
-const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending;
+/**
+ * An agent as retirement reads it: its registry entry (absent = only a window by that name is left) and whether a tmux window by
+ * that name is still open. `pending` = an operation on it (a kill cut off half way, a create) has not finished.
+ */
+type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean; window: boolean };
+/** Stopped for good: runKill writes `stopped` + pending *before* it closes the window, so neither alone proves the stop. */
+const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending && !a.window;
 
-/** The registry with each entry's pending flag. Unreadable throws: an empty answer would read as "every agent is gone". */
-export async function readLiveAgents(path = REGISTRY_PATH): Promise<LiveAgent[]> {
+const agentWindowNames = async (): Promise<string[] | null> => (await agentWindowsOrNull())?.map((w) => w.name) ?? null;
+
+/**
+ * The registry with each entry's pending flag, plus the agent windows tmux has open (`windows` null = tmux could not be read).
+ * Either unreadable throws, failing the card for this pass: an empty answer would read as "every agent is gone".
+ */
+export async function readLiveAgents(path = REGISTRY_PATH, windows: () => Promise<string[] | null> = agentWindowNames): Promise<LiveAgent[]> {
   const raw = await readJsonLenient<{ agents?: Record<string, { pending?: unknown }> } | null>(path, null, { who: "registry", writersGuarded: false });
   if (!raw?.agents || typeof raw.agents !== "object") throw new Error(`registry 读不出来（${path}），这轮不收`);
-  return normalizeRegistryAgents(raw).map((a) => ({ name: a.name, status: a.status, sessionId: a.sessionId, cwd: a.cwd, pending: !!raw.agents?.[a.name]?.pending }));
+  const open = await windows();
+  if (!open) throw new Error("tmux 列不出窗口，判断不了 agent 停没停，这轮不收");
+  const listed = normalizeRegistryAgents(raw).map((a) => ({ name: a.name, status: a.status, sessionId: a.sessionId, cwd: a.cwd,
+    pending: !!raw.agents?.[a.name]?.pending, window: open.includes(a.name) }));
+  const orphans = open.filter((w) => !listed.some((a) => a.name === w)).map((name) => ({ name, pending: false, window: true }));
+  return [...listed, ...orphans];
 }
 
 interface RetireOutcome { taskId: string; step: "retired" | "handoff" | "held" | "unknown"; detail: string }
@@ -147,8 +161,8 @@ class RetireCard {
     const user = agentStillInUse(this.db, row.agent, this.task.id);
     if (user) return { effect: "kill", receipt: `agent 仍被未收尾的 ${user} 使用：不 kill，只标退役` };
     const live = (await this.deps.agents()).find((a) => a.name === row.agent);
-    if (!live) return { effect: "kill", receipt: "agent 已不在 registry（先前已清）" };
-    if (stopped(live)) return { effect: "kill", receipt: "agent 早已停止，不再 kill" }; // stopped + pending = a kill to finish: kill again
+    if (!live) return { effect: "kill", receipt: "agent 已不在（registry 没有条目，tmux 没有窗口）" };
+    if (stopped(live)) return { effect: "kill", receipt: "agent 早已停止，不再 kill" }; // pending or a window left = a kill to finish
     if (live.sessionId && live.sessionId !== row.sessionId) {
       return { effect: "kill", receipt: oneLine(`agent 现在跑的是会话 ${live.sessionId}，不是本卡绑定的 ${row.sessionId}：不 kill，${FOR_PM}`) };
     }
