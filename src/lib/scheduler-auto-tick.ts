@@ -25,6 +25,8 @@ import { peerPrHold } from "./peer-pr-hold.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
+import { ROUND_CAP_CODE } from "./review-converge.js";
+import { roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 
@@ -266,6 +268,7 @@ class Card {
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
+    if (wait.code === ROUND_CAP_CODE) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);

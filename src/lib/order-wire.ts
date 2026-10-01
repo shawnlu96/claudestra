@@ -6,6 +6,7 @@
  * Rendering and redaction live in order-wire-render.ts. tests/order-wire.test.ts.
  */
 import type { ReviewFinding } from "./scheduler-review.js";
+import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
 
 const ORDER_WIRE_VERSION = 1;
@@ -196,8 +197,9 @@ export function parseVerdictWire(raw: unknown): WireResult<VerdictWire> {
   return guarded(raw, () => {
     const r = record(raw, "$", ["v", "orderId", "head", "verdict", "p0", "p1", "p2", "findings", "reportPath"]);
     if (!["pass", "changes", "block"].includes(r.verdict as string)) fail("verdict", "只认 pass / changes / block");
-    const findings = findingList<VerdictFinding>(r.findings, "findings", [...FINDING_KEYS, "description"],
-      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true) }));
+    const rows = Array.isArray(r.findings) ? r.findings.map((f) => (f && typeof f === "object" && !("basis" in f) ? { ...f, basis: null } : f)) : r.findings; // basis 可省（旧远端）
+    const findings = findingList<VerdictFinding>(rows, "findings", [...FINDING_KEYS, "description", "basis"],
+      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true), ...wireBasis(f.basis, (why) => fail(`${p}.basis`, why)) }));
     const counts = { p0: int(r.p0, "p0", 0, WIRE_LIMITS.findings), p1: int(r.p1, "p1", 0, WIRE_LIMITS.findings), p2: int(r.p2, "p2", 0, WIRE_LIMITS.findings) };
     for (const sev of ["P0", "P1", "P2"] as const) {
       const key = sev.toLowerCase() as "p0" | "p1" | "p2";

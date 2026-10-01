@@ -2,9 +2,11 @@
 import type { LedgerEvent, LedgerTask, ReviewVerdict } from "./ledger-stages.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
+import { basisField, findingBasis, type FindingBasis } from "./review-converge-basis.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
-export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string }
+/** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
+export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string; basis?: FindingBasis }
 export interface ReviewFacts {
   eventSeq: number;
   round: number;
@@ -32,8 +34,10 @@ function findingsOf(value: unknown): ReviewFinding[] | null {
     const findingId = str(r.findingId);
     if (!findingId || !/^[\w.-]{1,80}$/.test(findingId) || ids.has(findingId) || !familyName(r.family) ||
       !["P0", "P1", "P2"].includes(String(r.severity)) || !str(r.probe) || (r.probe as string).length > 4000) return null;
+    if (r.basis !== undefined && r.basis !== null && !basisField(r.basis)) return null;
     ids.add(findingId);
-    rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string });
+    const basis = basisField(r.basis);
+    rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string, ...(basis ? { basis } : {}) });
   }
   return rows;
 }
@@ -111,7 +115,18 @@ export function currentReviewFacts(task: ReviewTask, events: readonly LedgerEven
   };
 }
 
-const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
+export const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
+
+/** The planner's record of P1s it treated as P2 in a round (review-converge-followup.ts writes it with the stage move). */
+export const DOWNGRADE_OP = "review_downgrade";
+export function downgradedIds(events: readonly LedgerEvent[], round: number): Set<string> {
+  const ids = events.filter((e) => e.kind === "scheduler" && e.data.op === DOWNGRADE_OP && e.data.round === round)
+    .flatMap((e) => Array.isArray(e.data.findingIds) ? e.data.findingIds.filter((x): x is string => typeof x === "string") : []);
+  return new Set(ids);
+}
+/** A P1 that still blocks in its own round: it names a basis and the planner did not downgrade it then (review-converge.ts). */
+export const countsAsP1 = (events: readonly LedgerEvent[], round: number, f: ReviewFinding): boolean =>
+  f.severity === "P1" && findingBasis(f) !== null && !downgradedIds(events, round).has(f.findingId);
 
 function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null> {
   const byRound = new Map<number, LedgerEvent>();
@@ -140,7 +155,7 @@ function consecutiveP1(events: readonly LedgerEvent[], currentRound: number, min
   for (let round = currentRound; round >= minRound; round--) {
     const rows = byRound.get(round);
     if (!rows) return null;
-    if (!rows.some((f) => f.severity === "P1" && match(f))) break;
+    if (!rows.some((f) => countsAsP1(events, round, f) && match(f))) break;
     streak++;
   }
   return streak;
@@ -154,7 +169,7 @@ export function p1FindingStreak(events: readonly LedgerEvent[], finding: Pick<Re
     (row) => row.findingId === finding.findingId || normalizedFamily(row.family) === family);
 }
 
-/** Any P1 across four consecutive rounds is a hard stop even if every label is renamed. */
+/** Consecutive rounds with any blocking P1; the planner only uses it to prove every round's evidence is intact (null = not). */
 export function p1AnyStreak(events: readonly LedgerEvent[], currentRound: number, minRound = 1): number | null {
   return consecutiveP1(events, currentRound, minRound, () => true);
 }
