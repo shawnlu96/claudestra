@@ -106,24 +106,33 @@ export function swappedSession(db: Database, intentId: string): SchedulerSession
   return row;
 }
 
-/** Persist each external receipt before the next effect. A replay never retires a newer replacement session. */
-export function applyReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill", receipt: string, write: SwapEvent): void {
+/** archiveReceipt also holds an explicit reuse marker, so author preservation needs no schema migration or fake kill receipt. */
+export function applyReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill" | "reuse", receipt: string, write: SwapEvent): void {
   const intent = swapIntent(db, ctx, id), row = swappedSession(db, id);
-  const col = effect === "archive" ? "archiveReceipt" : "killReceipt";
+  const col = effect === "kill" ? "killReceipt" : "archiveReceipt";
+  const reused = `reused_by_author:${row.agent}`;
+  if (effect === "reuse" && (mustTask(db, intent.taskId).agent !== row.agent || receipt !== reused)) {
+    throw new LedgerError("conflict", "沿用回执必须匹配本卡当前作者");
+  }
   if (row[col]) {
     if (row[col] !== receipt) throw new LedgerError("dedup_mismatch", "换人效果已有不同回执");
     return;
   }
-  if (intent.status !== "submitted" || (effect === "kill" && !row.archiveReceipt)) throw new LedgerError("conflict", "换人必须先归档再停止");
+  if (intent.status !== "submitted" || (effect === "kill" && (!row.archiveReceipt || row.archiveReceipt === reused))) {
+    throw new LedgerError("conflict", "换人必须先归档再停止");
+  }
   if (!receipt.trim() || receipt.length > 600) throw new LedgerError("invalid", "换人回执为空或太长");
   db.query(`UPDATE scheduler_sessions SET ${col} = ?, updatedAt = ? WHERE sessionId = ?`).run(receipt, ctx.now ?? Date.now(), row.sessionId);
   write({ ...ctx, dedupKey: `${swapKey(id)}:${effect}` }, { project: intent.project, target: intent.taskId, kind: "scheduler",
-    text: `旧审查会话 ${effect} 已确认`, data: { op: "reviewer_swap_effect", intentId: id, effect, receipt, sessionId: row.sessionId } });
+    text: effect === "reuse" ? "旧审查会话由本卡作者沿用，未停用" : `旧审查会话 ${effect} 已确认`,
+    data: { op: "reviewer_swap_effect", intentId: id, effect, receipt, sessionId: row.sessionId } });
 }
 
 /** Only a completed, explicitly recorded swap permits a new binding for the same role. */
 export function mayRebindReviewer(db: Database, prior: SchedulerSession, intentId: string): boolean {
-  if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId || !prior.killReceipt) return false;
+  if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId) return false;
+  const reused = prior.archiveReceipt === `reused_by_author:${prior.agent}` && mustTask(db, prior.taskId).agent === prior.agent;
+  if (!prior.killReceipt && !reused) return false;
   const swap = getEventByDedup(db, swapKey(prior.retireIntentId));
   const intent = getIntent(db, intentId);
   return !!swap && swap.data.sessionId === prior.sessionId && !!intent && intent.eventSeq > swap.seq &&

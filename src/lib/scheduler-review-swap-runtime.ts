@@ -94,7 +94,10 @@ async function stopOld(db: Database, ctx: WriteCtx, intent: SchedulerIntent, dep
     .get(row.agent, excludedTask, row.agent, excludedTask);
   if (shared) return "旧审查 agent 仍被作者或另一张卡使用，等绑定解除后再停止";
   // The current author owns this live session; retiring its review binding must not stop the author's work.
-  if (reusedByAuthor) return null;
+  if (reusedByAuthor) {
+    recordReviewerSwapEffect(db, ctx, intent.id, "reuse", `reused_by_author:${row.agent}`);
+    return null;
+  }
   const live = (await deps.agents()).find((a) => a.name === row.agent);
   deps.active();
   if (live && live.sessionId !== row.sessionId) return "旧审查 agent 当前已是其他会话，不能归档或停止它";

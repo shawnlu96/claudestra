@@ -218,6 +218,6 @@ export function beginReviewerSwap(db: Database, ctx: WriteCtx, id: string): Sche
     () => preserveSessionHistory(db), (c, e) => { insertEvent(db, c, e, true); }));
 }
 
-export function recordReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill", receipt: string): void {
+export function recordReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill" | "reuse", receipt: string): void {
   tx(db, () => applyReviewerSwapEffect(db, ctx, id, effect, receipt, (c, e) => { insertEvent(db, c, e, true); }));
 }
