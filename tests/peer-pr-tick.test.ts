@@ -16,6 +16,9 @@ import type { LedgerTask } from "../src/lib/ledger-stages.ts";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.ts";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.ts";
 import { statePath } from "../src/lib/paths.ts";
+import { parseSchedulerConfig } from "../src/lib/scheduler-config.ts";
+import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.ts";
+import { schedulerMergeTick } from "../src/lib/scheduler-service.ts";
 import { autoFixture, P1, P2 } from "./scheduler-auto-helpers.ts";
 
 const H1 = "a1".repeat(20), H2 = "b2".repeat(20);
@@ -231,6 +234,107 @@ describe("peer PR 全链路", () => {
     const results = listEvents(w.f.db, { project: "p", target: "PR401" }).filter((e) => e.data.op === "peer_pr_push").map((e) => e.data.result);
     expect(results).toEqual(["claimed", "failed", "claimed", "refused", "notice", "notice_sent"]);
     expect(w.notices.filter((n) => n.includes("没发给对方"))).toHaveLength(1);
+    w.f.close();
+  });
+});
+
+const RUN = "https://github.com/o/r/actions/runs/7";
+/** The real M12 merge pass over the card's merge intent, GitHub answering `snap` for the reviewed head. */
+async function mergeBounce(w: ReturnType<typeof world>, snap: Partial<PrSnapshot>) {
+  for (let i = 0; i < 3 && !w.f.db.query("SELECT 1 FROM scheduler_intents WHERE taskId='PR401' AND action='merge'").get(); i++) await w.autoTick();
+  const head = w.card()!.headSHA!;
+  const external: MergeExternal = {
+    inspect: async () => ({ state: "OPEN", head, branch: "fix/small", base: "main", draft: false, crossRepository: false, mergeState: "CLEAN",
+      mergeSha: null, checks: [{ name: "check", bucket: "pass" }], ...snap }),
+    freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }),
+    carryReview: async () => ({ ok: false, reason: "不沿用" }),
+    updateBranch: async () => { throw new Error("不该更新分支"); },
+    merge: async () => { throw new Error("不该合并"); },
+  };
+  const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: statePath() } } });
+  await schedulerMergeTick(w.f.db, config, w.deps.manager, () => external);
+  expect(w.card()!.stage).toBe("fix");
+}
+const bouncePushes = (w: ReturnType<typeof world>) => w.frames.filter((fr) => String(fr.key).startsWith("PR401:bounce:"));
+
+describe("合并退回 fix（i28-A2b）", () => {
+  test("最后一轮通过后 CI 失败：对方收到一次说明（检查名 + run 链接），不退人工，新 head 照常复验", async () => {
+    const w = world();
+    await firstRound(w, "changes");
+    await pushHead(w, H2);
+    await w.autoTick();
+    await w.autoTick();
+    await w.review("pass", H2, []);
+    await w.peerTick();
+    await until(w, "merge");
+    expect(w.card()!.round).toBe(2); // = maxRounds
+    await mergeBounce(w, { mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "fail", link: RUN }] });
+    for (let i = 0; i < 3; i++) { w.poll(); await w.peerTick(); }
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("auto");
+    expect(w.notices.some((n) => n.includes("复验轮次到顶"))).toBe(false);
+    const sent = bouncePushes(w);
+    expect(sent).toHaveLength(1);
+    const text = String(sent[0]!.text);
+    expect(text.split("\n")[0]).toBe(`[Claudestra 调度器 · PR #401] 合并前 PR 头 CI 失败（head ${H2.slice(0, 12)}），请看日志修好后推送`);
+    expect(text).toContain(`失败的检查：check（${RUN}）`);
+    const H3 = "d4".repeat(20);
+    await pushHead(w, H3);
+    expect(w.card()).toMatchObject({ stage: "review", round: 3, headSHA: H3 });
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("auto");
+    w.poll();
+    await w.peerTick();
+    expect(bouncePushes(w)).toHaveLength(1); // the same bounce is never pushed again
+    w.f.close();
+  });
+
+  test("和 main 冲突：说明写「合入最新 main 后推送」，只推一次", async () => {
+    const w = world();
+    await firstRound(w, "pass");
+    await mergeBounce(w, { mergeState: "DIRTY", checks: [] });
+    for (let i = 0; i < 3; i++) { w.poll(); await w.peerTick(); }
+    const sent = bouncePushes(w);
+    expect(sent).toHaveLength(1);
+    expect(String(sent[0]!.text)).toContain("和 main 冲突，请合入最新 main 后推送");
+    expect(listEvents(w.f.db, { project: "p", target: "PR401" }).filter((e) => e.data.op === "peer_pr_push" && e.data.result === "queued")).toHaveLength(1);
+    w.f.close();
+  });
+
+  test("r1 P1：说明入队失败时不收新 head，恢复后补排一次并送达，再收新 head", async () => {
+    const w = world();
+    await firstRound(w, "pass");
+    await mergeBounce(w, { mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "fail", link: RUN }] });
+    const manager = w.deps.manager;
+    let attempts = 0;
+    w.deps.manager = async (...args) => {
+      if (args[1] === "peer-pr-push-record" && args.includes("queued")) return (attempts++, { ok: false, error: "暂时写不进" });
+      return manager(...args);
+    };
+    await pushHead(w, H2);
+    w.poll();
+    await w.peerTick();
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(w.card()).toMatchObject({ stage: "fix", headSHA: H1 }); // the new head waits for the bounce to be queued
+    w.deps.manager = manager;
+    for (let i = 0; i < 3; i++) { w.poll(); await w.peerTick(); }
+    expect(w.card()).toMatchObject({ stage: "review", round: 2, headSHA: H2 });
+    expect(bouncePushes(w)).toHaveLength(1);
+    expect(listEvents(w.f.db, { project: "p", target: "PR401" }).filter((e) => e.data.op === "peer_pr_push" && e.data.result === "queued")).toHaveLength(1);
+    w.f.close();
+  });
+
+  test("P1 进的 fix 到顶照旧退人工，也不推合并退回说明", async () => {
+    const w = world();
+    await firstRound(w, "changes");
+    await pushHead(w, H2);
+    await w.autoTick();
+    await w.autoTick();
+    await w.review("changes", H2, [P1]);
+    await w.peerTick();
+    await until(w, "fix");
+    w.poll();
+    await w.peerTick();
+    expect(getWorkflow(w.f.db, "PR401")?.mode).toBe("manual");
+    expect(bouncePushes(w)).toHaveLength(0);
     w.f.close();
   });
 });
