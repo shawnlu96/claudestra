@@ -7,6 +7,8 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
+import type { PoolFacts } from "../src/lib/scheduler-pool-plan.js";
+import { explainPlacement } from "../src/lib/scheduler-placement-plan.js";
 import { placeFor, type PeerFacts, type PlacementFacts, type PlaceRole } from "../src/lib/scheduler-placement.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
 
@@ -108,7 +110,7 @@ describe("reviewFirst [a]", () => {
 describe("the planner keeps its own gates", () => {
   const author: WorkerRef = { agent: "w", sessionId: "s-w", taskId: "T1", family: "claude", source: "local" };
   const peers = [{ peer: "mate", open: 4, maxOpen: 9, roles: ["review" as const], v2: { why: null, slots: { codex: 1, claude: 1 }, roles: ["review" as const], repos: ["o/r"] } }];
-  const reviewSnap = (template: "code" | "security", reviewer: WorkerRef | null = null): PlannerSnapshot => {
+  const reviewSnap = (template: "code" | "security", reviewer: WorkerRef | null = null, pool: Partial<PoolFacts> = {}): PlannerSnapshot => {
     const task = { id: "T1", project: "p", kind: "code", stage: "review", round: 1, agent: "w", assignee: "w", assigneeKind: "agent", pm: "pm",
       pr: "https://github.com/o/r/pull/7", headSHA: "f".repeat(40), specRev: 1, rev: 1, extra: {}, createdAt: 1, updatedAt: 1 } as unknown as LedgerTask;
     const e = (seq: number, kind: LedgerEvent["kind"], data: Record<string, unknown>) => ({ seq, kind, data, ts: seq, actor: "x", project: "p", target: "T1", text: "", dedupKey: null });
@@ -116,12 +118,21 @@ describe("the planner keeps its own gates", () => {
       workflow: { taskId: "T1", project: "p", template, templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "x", specRev: 1, rev: 1, createdAt: 1, updatedAt: 1 },
       intents: [], blockedBy: [], queueFrozen: false, fileGlobs: ["src/x.ts"], heldResources: [], workerCount: 0, maxWorkers: 2, freeWorkerSlot: "slot:p:0",
       reviewDispatches: [], uiGate: { state: "none" }, screenshotsDigest: null,
-      pool: { remote: first(["mate"]), localReviewers: 0, repo: "o/r", lastPeer: null, peers } };
+      pool: { remote: first(["mate"]), localReviewers: 0, repo: "o/r", lastPeer: null, peers, ...pool } };
   };
 
   test("a code card's review goes to the listed peer over an idle local machine", () => {
     expect(planScheduler(reviewSnap("code"))).toMatchObject({ kind: "intent", action: "review", recipient: "peer:mate",
       reason: "挂池：对抗式跨模型审查挂给 mate 的 codex worker（scheduler.json remote.reviewFirst 指定先给 mate）" });
+  });
+
+  test("a proto-1 listed peer with this machine full: R9 may still pool it, and the reason carries both causes", () => {
+    const s = reviewSnap("code", null, { remote: first(["old"]), localReviewers: 2, peers: [{ peer: "old", open: 0, maxOpen: 1 }] });
+    const reason = "挂池：对抗式跨模型审查挂给 old 的 codex worker（reviewFirst 里的 peer 都不能接（old：没有 hello（proto 1，只按老规则在本机满时接审查））；"
+      + "本机满且没有可用的 peer：本机照常排队）";
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "review", recipient: "peer:old", reason });
+    expect(explainPlacement(s)).toEqual({ role: "review", where: "peer:old", reason });
+    expect(planScheduler({ ...s, pool: { ...s.pool!, remote: BASE } })).toMatchObject({ recipient: "peer:old", reason: "挂池：对抗式跨模型审查挂给 old 的 codex worker" });
   });
 
   test("a security card stays local; a same-family or non-local reviewer is still escalated", () => {
