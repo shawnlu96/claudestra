@@ -24,6 +24,7 @@ import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { remoteHeadFamily } from "../src/lib/scheduler-head-family.js";
 import { advanceMergeRun, beginMergeRun } from "../src/lib/scheduler-merge.js";
+import { bounceReceipt, bounceWork, type MergeBounce } from "../src/lib/scheduler-merge-conflict.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -233,6 +234,50 @@ describe("the fix of a remote-written card", () => {
       expect(p.orders().filter((o) => o.step === "fix")).toEqual([]);
     } finally { p.f.close(); }
   });
+});
+
+/** toRemoteReview, a pass (report at `report`), then the merge queue bounces it with `b` → the card is in fix. */
+async function toRemoteBounce(p: Awaited<ReturnType<typeof ready>>, b: MergeBounce, report: string) {
+  await toRemoteReview(p);
+  const none = join(p.f.dir, "none.json");
+  writeFileSync(none, "[]");
+  expect(await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0",
+    "--head", H2, "--session", "s-rv", "--family", "claude", "--findings", none, "--path", report)).toMatchObject({ ok: true });
+  await p.tick(); // → merge
+  await p.tick(); // merge intent
+  const intent = p.f.intents().at(-1)!;
+  const ctx = { actor: "scheduler", now: p.f.tickDeps.now() + 1 };
+  if (intent.status === "pending") settleIntent(p.f.db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "merge claimed" });
+  const run = beginMergeRun(p.f.db, ctx, intent.id, ["check"]).run;
+  advanceMergeRun(p.f.db, ctx, { intentId: intent.id, from: "ready", to: "resolved", rev: run.rev, receipt: bounceReceipt(b) });
+  expect(p.f.task()).toMatchObject({ stage: "fix", headSHA: H2 });
+}
+
+describe("a merge bounce of a remote-written card (i28-W9b)", () => {
+  const RUN = "https://github.com/o/r/actions/runs/42";
+  const bounces: MergeBounce[] = [{ cause: "conflict", prHead: H2, mainHead: BASE_SHA, checks: [] },
+    { cause: "ci_fail", prHead: H2, mainHead: null, checks: [{ name: "check", link: RUN }] }];
+  for (const b of bounces) {
+    test(`${b.cause}: the lent fix order carries the bounce package, not the passed report, even with that report gone`, async () => {
+      const p = await ready();
+      try {
+        await toRemoteBounce(p, b, join(p.f.dir, "gone.md")); // a bounce fix never inlines the report, so a missing one does not block it
+        expect(planScheduler(snapshot(p))).toMatchObject({ kind: "intent", recipient: "peer:mate", workOrder: { bounce: b, reportPath: "", findings: [] } });
+        p.hello("mate");
+        expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 mate") });
+        const fix = p.orders().at(-1)!;
+        expect(fix).toMatchObject({ step: "fix", peer: "mate", head: H2, branch: BRANCH });
+        // The local package's own text: the SHAs cut for the peer gate, then folded (NFKC) as every peer order is.
+        const local = bounceWork(b), fold = (s: string) => s.normalize("NFKC");
+        const cut = (s: string) => fold(s.replaceAll(H2, H2.slice(0, 12)).replaceAll(BASE_SHA, BASE_SHA.slice(0, 12)));
+        expect(fix.wire.inputs).toEqual(expect.arrayContaining(local.inputs.map(cut)));
+        expect(fix.wire.acceptance.slice(2)).toEqual(local.acceptance.map(fold));
+        expect(fix.wire.findings).toEqual([]);
+        expect(fix.wire.inputs.join("\n")).not.toContain("上一轮审查报告原文");
+        expect(fix.text).toContain(b.cause === "conflict" ? "合入最新 origin/main" : fold(`check（${RUN}）`));
+      } finally { p.f.close(); }
+    });
+  }
 });
 
 describe("tiers on the real path (the pool step re-plans with the same tiers)", () => {
