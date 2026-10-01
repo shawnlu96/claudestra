@@ -16,7 +16,8 @@ import { acpCallerCredAssignment } from "../caller-cred-launch.js";
 import { BOOTSTRAP_PROMPT, codexContextPreamble, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
 import { recordCodexRunning } from "../codex-version.js";
-import { pathOverrideAssignments, statePath } from "../paths.js";
+import { pathOverrideAssignments } from "../paths.js";
+import { acpLogDir } from "../log-paths.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
@@ -78,7 +79,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   });
   const env = adapterEnv({
     base: process.env, bunBin: deps.bunBin, channelServer: join(deps.repoRoot, "src/channel-server.ts"), mcpName: mcpName(),
-    codexPath, logsDir: statePath("logs", "acp", "bootstrap"), developerInstructions, clean: isLendWorkerName(spec.agentName),
+    codexPath, logsDir: acpLogDir("bootstrap"), developerInstructions, clean: isLendWorkerName(spec.agentName),
   });
   const logs: string[] = [];
   const proc = spawnAdapter(agent.cmd, env, spec.cwd, (m) => logs.push(m));

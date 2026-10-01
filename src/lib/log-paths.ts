@@ -16,8 +16,8 @@
  */
 
 import { LOG_DIR as STATE_LOG_DIR } from "./paths.js";
-import { existsSync, statSync, copyFileSync, truncateSync, mkdirSync } from "fs";
-import { join } from "path";
+import { appendFileSync, existsSync, statSync, copyFileSync, truncateSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 
 export const LOG_DIR = STATE_LOG_DIR;
 
@@ -42,6 +42,22 @@ export function resolveLogPath(stem: string, kind: LogKind): string {
   if (existsSync(p)) return p;
   const legacy = legacyLogPath(stem, kind);
   return existsSync(legacy) ? legacy : p;
+}
+
+/** ACP 宿主与它起的适配器共用的按 agent 日志目录：app-server.log（适配器）和 host.log（宿主）都在这 */
+export function acpLogDir(agent: string): string {
+  return join(LOG_DIR, "acp", agent);
+}
+
+/** 追加一行（目录缺了就建，文件新建时 0600）；返回是否写成，从不抛 */
+export function appendLogLine(path: string, line: string): boolean {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${line}\n`, { mode: 0o600 });
+    return true;
+  } catch {
+    return false; // 落盘只是副本：调用方屏幕上那行还在，写不进去不能拖垮调用方
+  }
 }
 
 export function ensureLogDir(): void {
