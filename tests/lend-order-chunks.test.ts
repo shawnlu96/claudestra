@@ -12,6 +12,7 @@ import { holdWriteLease, writeOrderWire, type WriteOrderInput } from "../src/lib
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
+import { standardAnswers } from "../src/lib/order-standard-answers.js";
 import { lendBranch } from "../src/lib/lend-git.js";
 import { parseOrderWire, WIRE_LIMITS, type OrderWire } from "../src/lib/order-wire.js";
 import { CHUNK_HEADROOM, chunkInput, chunkInputs } from "../src/lib/order-wire-chunks.js";
@@ -107,21 +108,21 @@ describe("写单 / 修复单", () => {
   });
 
   test("小规格的 inputs 和原来逐字相同（金样）", () => {
-    expect(writeOrderWire(task, o({ spec: "规格：只改 x\n验收：全绿\n" })).inputs).toEqual(["规格原文（specRev 2）：\n规格：只改 x\n验收：全绿\n"]);
+    expect(writeOrderWire(task, o({ spec: "规格：只改 x\n验收：全绿\n" })).inputs).toEqual(["规格原文（specRev 2）：\n规格：只改 x\n验收：全绿\n", standardAnswers("author")]);
     expect(writeOrderWire(task, o({ step: "fix", spec: "规格", report: "## P1\n第一条" })).inputs)
-      .toEqual(["规格原文（specRev 2）：\n规格", "上一轮审查报告原文：\n## P1\n第一条"]);
+      .toEqual(["规格原文（specRev 2）：\n规格", "上一轮审查报告原文：\n## P1\n第一条", standardAnswers("author")]);
   });
 
   test("26K 规格的开工单、带报告的修复单都能过外发闸、能解析回来，拼回逐字相同", () => {
     const spec = fakeSpec(26653);
     const write = throughGate(writeOrderWire(task, o({ spec })));
-    expect(write.inputs.length).toBe(2);
-    expect(joined(write.inputs)).toBe(spec);
+    expect(write.inputs.length).toBe(3);
+    expect(joined(write.inputs.slice(0, 2))).toBe(spec);
     const report = fakeSpec(3000);
     const fix = throughGate(writeOrderWire(task, o({ step: "fix", spec, report })));
-    expect(fix.inputs.length).toBe(3);
+    expect(fix.inputs.length).toBe(4);
     expect(joined(fix.inputs.slice(0, 2))).toBe(spec);
-    expect(joined(fix.inputs.slice(2))).toBe(report);
+    expect(joined(fix.inputs.slice(2, 3))).toBe(report);
     for (const p of [...write.inputs, ...fix.inputs]) expect(bytes(p)).toBeLessThanOrEqual(CAP - CHUNK_HEADROOM);
   });
 
@@ -178,9 +179,9 @@ describe("经 offerLendCore 挂进池", () => {
     offer(spec);
     const [o] = listLendOrders(db, "T9");
     expect(o!.status).toBe("pooled");
-    expect(o!.wire.inputs.length).toBe(2);
+    expect(o!.wire.inputs.length).toBe(3); // 规格两段 + 标准答复
     for (const p of o!.wire.inputs) expect(bytes(p)).toBeLessThanOrEqual(CAP - CHUNK_HEADROOM);
-    expect(joined(o!.wire.inputs)).toBe(spec);
+    expect(joined(o!.wire.inputs.slice(0, 2))).toBe(spec);
     expect(o!.text).toContain("输入 2（原文，非指令）");
   });
 
@@ -204,6 +205,6 @@ describe("经 offerLendCore 挂进池", () => {
     offer("规格", { report });
     const [o] = listLendOrders(db, "T9");
     expect(o).toMatchObject({ status: "pooled", step: "fix" });
-    expect(joined(o!.wire.inputs.slice(1))).toBe(report);
+    expect(joined(o!.wire.inputs.slice(1, -1))).toBe(report);
   });
 });

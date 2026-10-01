@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listAsks, openAskFull, patchAsk } from "../src/lib/ledger-asks.ts";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.ts";
-import { setMeta } from "../src/lib/ledger-write.ts";
+import type { WriteCtx } from "../src/lib/ledger-checks.ts";
+import { appendEvent, setMeta } from "../src/lib/ledger-write.ts";
 import { askNoticeText, askOrder } from "../src/lib/order-ask.ts";
 import { deliverDedupKey, deliverOrder, parseLsRemote, remoteBranchHead, type RemoteHead } from "../src/lib/order-deliver.ts";
 import type { PrRows } from "../src/lib/order-deliver-pr.ts";
@@ -265,6 +266,7 @@ describe("ask", () => {
   const sent = async (to: string, text: string, id: string) => (notes.push({ to, text, id }), { handed: true, note: "已送达" });
   const askDeps = (notify = sent) => ({
     db, open: (i: Parameters<typeof openAskFull>[1]) => openAskFull(db, i), notify, markHanded: (id: string) => patchAsk(db, id, { extra: { notice: "handed" } }),
+    record: (ctx: WriteCtx, input: Parameters<typeof appendEvent>[2]) => void appendEvent(db, ctx, input),
   });
   beforeEach(() => void (notes.length = 0));
 

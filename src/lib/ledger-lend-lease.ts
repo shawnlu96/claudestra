@@ -12,6 +12,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { lendBranch, type LendStep } from "./lend-git.js";
 import { orderWireOf, WIRE_LIMITS, type OrderWire } from "./order-wire.js";
 import { chunkInputs, type InputSplit } from "./order-wire-chunks.js";
+import { standardAnswers } from "./order-standard-answers.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 
 export interface WriteLease {
@@ -99,7 +100,7 @@ export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: Inpu
   // head 只放在 head 字段里：外发闸扫全部自由文本，别处再写一遍 40 位十六进制会被当成疑似密钥整单拒掉
   const start = o.step === "write" ? `从基线 ${o.base} 切出分支 ${o.branch}（起点是标题里的 head）` : `在分支 ${o.branch} 上接着改（起点是标题里的 head）`;
   return orderWireOf({
-    taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId, inputs,
+    taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId, inputs: [...inputs, standardAnswers("author")],
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
     acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交`, `只动这一个分支：推送由出借服务做，只推 ${o.branch}，不推 ${o.base}、不改别的分支`,
       o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"],
