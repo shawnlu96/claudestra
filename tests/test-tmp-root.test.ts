@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -6,7 +6,6 @@ import { testChildEnv } from "./test-env.ts";
 import { createTestTmpRoot } from "./test-tmp-root.ts";
 
 const preload = join(import.meta.dir, "preload.ts");
-const tmpRootModule = join(import.meta.dir, "test-tmp-root.ts");
 // Every case spawns nested bun processes; a loaded machine easily exceeds the default 5 s.
 const SPAWN_TIMEOUT = 60_000;
 const fixtures: string[] = [];
@@ -111,7 +110,7 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
   }, SPAWN_TIMEOUT);
 }
 
-test("startup reaps only old prefixed directories of dead owners, never symlinks, recent roots or other prefixes", () => {
+test("startup reaps only old prefixed directories of dead owners, never symlinks, recent roots or other prefixes", async () => {
   const f = fixture();
   const old = join(f.parent, "cstra-test-run-old");
   const dead = Bun.spawnSync(["true"]).pid;
@@ -131,17 +130,24 @@ test("startup reaps only old prefixed directories of dead owners, never symlinks
   writeFileSync(join(f.parent, "cstra-test-run-file"), "keep");
   const stale = new Date(Date.now() - 3 * 60 * 60 * 1_000);
   for (const dir of [old, deadOwner, liveOwner, unrelated, outside]) utimesSync(dir, stale, stale);
-  // The sweep runs in the background; the probe waits for it so the assertion below is deterministic.
-  const probe = testFile(f.dir, `await (await import(${JSON.stringify(tmpRootModule)})).staleRootSweep;`);
-  const result = Bun.spawnSync([process.execPath, "test", probe], { cwd: f.dir, env: f.env });
-  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  // The sweep runs in the background; awaiting it makes the assertion below deterministic.
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const root = createTestTmpRoot(f.parent);
+  let warnings: string;
+  try {
+    await root.swept;
+  } finally {
+    warnings = warn.mock.calls.map(String).join("\n");
+    warn.mockRestore();
+  }
+  root.cleanup();
   expect(readdirSync(f.parent).sort()).toEqual([
     "cstra-test-run-dangling", "cstra-test-run-file", "cstra-test-run-link", "cstra-test-run-local-link", "cstra-test-run-recent",
     basename(liveOwner), "ledger-read-old",
   ].sort());
   expect(readFileSync(join(outside, "keep"), "utf8")).toBe("untouched");
-  expect(result.stderr.toString()).toContain("not a real directory");
-}, SPAWN_TIMEOUT);
+  expect(warnings).toContain("not a real directory");
+});
 
 test("the stale sweep does not block root creation", async () => {
   const f = fixture();

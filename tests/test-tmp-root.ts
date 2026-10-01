@@ -71,9 +71,6 @@ export function createTestTmpRoot(originalTmpDir = tmpdir()): { path: string; cl
   return { path, cleanup: () => removeRoot(path, parent, identity), swept: sweepStaleRoots(parent) };
 }
 
-/** Settles when the preload's stale-root sweep has finished; tests await it instead of sleeping. */
-export let staleRootSweep: Promise<void> = Promise.resolve();
-
 function inheritEnv<T extends (...args: any[]) => any>(spawn: T): T {
   return ((command: string[] | { env?: NodeJS.ProcessEnv }, options?: { env?: NodeJS.ProcessEnv }) => {
     const config = Array.isArray(command) ? options : command;
@@ -83,8 +80,7 @@ function inheritEnv<T extends (...args: any[]) => any>(spawn: T): T {
 }
 
 export function installTestTmpRoot(): () => void {
-  const { path, cleanup, swept } = createTestTmpRoot();
-  staleRootSweep = swept;
+  const { path, cleanup } = createTestTmpRoot();
   // Synchronous exit cleanup also covers failing tests and uncaught errors without swallowing the failure.
   process.once("exit", cleanup);
   process.once("SIGINT", () => process.exit(130));
