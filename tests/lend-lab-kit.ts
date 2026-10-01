@@ -58,6 +58,8 @@ export interface LabOpts {
   oldB?: boolean;
   /** scheduler.json 的 remote（缺省 balance + reviewFirst [mate]） */
   remote?: RemotePolicy | null;
+  /** A 查到的远端分支 head（缺省一律 H1）；写单要交一个不同于起点的 head（i28-W9） */
+  remoteHead?: (branch: string) => string;
 }
 
 export async function lab(o: LabOpts = {}) {
@@ -80,7 +82,7 @@ export async function lab(o: LabOpts = {}) {
   const lendDeps = {
     borrow: async () => borrow, notifyPm: async (_p: string, text: string) => void pmNotices.push(text), schedulerPolicy: () => policy,
     result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, aKey),
-      peerFp: async () => FP, remoteHead: async () => ({ ok: true as const, head: H1 }) },
+      peerFp: async () => FP, remoteHead: async (_repo: string, branch: string) => ({ ok: true as const, head: o.remoteHead?.(branch) ?? H1 }) },
   };
   const aCli = (actor: string, ...args: string[]) => f.cliWith({ lend: lendDeps }, actor, ...args) as Promise<Record<string, any>>;
   const aTickDeps = { ...f.tickDeps, manager: (...a: string[]) => aCli("scheduler", ...a.slice(1)), borrow: async () => borrow };

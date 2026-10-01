@@ -9,6 +9,7 @@ import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { currentPooledReviewer, poolAckSeq, poolFacts, poolReviewerOf, strayPoolOrders } from "./scheduler-pool-facts.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
@@ -41,6 +42,9 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
   const intents = base.intents.filter((i) => !i.id.startsWith("pm-dispatch:") && i.id !== exclude);
   // The current round's verdict came from the pool: that order's peer worker is the reviewer the verdict is checked against.
   const reviewer = currentPooledReviewer(db, task) ?? bound.reviewer;
-  return { ...base, author: bound.author, reviewer, intents, reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
+  // A head a peer delivered was written in that order's family: review placement, reviewer session and gates go across from it.
+  const wrote = remoteHeadFamily(db, task);
+  const workflow = wrote && base.workflow ? { ...base.workflow, authorFamily: wrote } : base.workflow;
+  return { ...base, workflow, author: bound.author, reviewer, intents, reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
     pool: opts.pool ? poolFacts(db, task, { ...opts.pool, now: opts.now ?? Date.now() }) : null, strayPoolOrders: strayPoolOrders(db, task.id).map((o) => o.orderId) };
 }

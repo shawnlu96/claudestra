@@ -350,3 +350,73 @@ POST /api/v1/lend/ask     (B→A，worker 经 B 的 bridge 转来)
 - **逐单确认**（`confirm: per-order` 的 authorize ask、`ledger lend-ask`）：改为一次授权（§1.1）。`ledger lend-ask` 先改成回「已退役」的空壳（W1）。
 - **`lend-seen.json` 的容量快照**：换成台账 `lend_peers`（§1.2、§8.1）。
 - v1 设计稿末尾的「给 owner 的待确认」已由 i28 远端池 v2 方案逐条定掉，不再列在这里。
+
+## 10. 写代码派远端与机器档位（i28-W9）
+
+到 W9 为止调度器只把**审查**挂给出借方。W9 打通开工单和修复单（build / fix）：调度器像派审查一样把它们挂进池子，出借方的
+worker 按 R6 的写单路子做（从基线切 `lend/<卡>-<指纹前 4 位>` 分支、推到本仓库、开 PR、`deliver` 交付）。交付后卡进 review，
+审查跨家族派出。分到哪台机器不做按额度全自动，每台机器给一个档位，调起来方便（owner 10-01 22:22）。
+
+### 10.1 开关与配置项
+
+| 在哪 | 字段 | 取值 | 缺省 | 作用 |
+|---|---|---|---|---|
+| scheduler.json `projects.<id>.remote` | `roles` | `review` / `write`（write = build + fix） | `["review"]` | 写单要显式写 `write` 才派远端；不写行为与 W9 之前完全一样 |
+| 同上 | `repo` | GitHub `owner/name` | — | 有 `write` 时必填、没有时不许写：开工单还没有 PR，出借方按它 clone / 推分支 |
+| 同上 | `localPriority` | `first` / `balance` / `low` / `off` | `balance` | 本机的档位 |
+| 同上 | `reviewFirst` | peer 名列表 | — | 照旧（W5c）：审查先给列表里第一个能接的；对写单不起作用 |
+| lend.json `borrow[]` | `priority` | 同上四档 | `balance` | 这个 peer 的档位；`manager borrow set <peer> … --priority <档>` 写（重设不带就回到 balance） |
+| lend.json `borrow[]` | `roles` | 加上 `write` | — | 借入方允许把写单给这个 peer |
+| 出借方 lend.json `lend[]` | `roles` | 加上 `write` | review | 出借方授权里也要有 write（`lend grant … --roles review,write`），hello 里报给借入方 |
+
+三处（scheduler.json、借入条目、出借方授权）都含 write，写单才会派过去；少一处就留在本机，原因写在计划事件里（`ledger lend-orders` 也看得到）。
+
+### 10.2 放置顺序（`lib/scheduler-placement.ts`）
+
+1. **硬约束先过滤**：remote.mode、三处 roles、对方 hello 新鲜且授权在、仓库在授权里、对方有空闲槽、文件锁没被别的卡占、`off` 的 peer 一律出局。
+2. **修复单只派回写租约方**（R6）：这张卡的分支就是那台出借方推的 `lend/` 分支，换人等于重写。它暂时接不了（满、掉线）就等，原因写明；
+   这一轮已经派过它却没成（撤回、退回、拒挂）就交 PM（`placement_lease`），由 PM `ledger lend-reclaim` 收回或 `lend-reoffer` 重挂。
+   没有写租约（本机写的卡）的修复单不派远端。
+3. **审查的 reviewFirst**：照旧，先给列表里第一个能接的 peer，不看负载。
+4. **逐档**：能接的机器里，先在 `first` 档挑，档内按在跑数最少（平手规则照 W5：写租约方 > 复审回上次的 peer > peer 先于本机 > 借入顺序）；
+   `first` 档没有能接的，再看 `balance`（本机和 peer 一起平分，就是 W5 的规则）；最后才看 `low`。`off` 永远不派。
+5. 一台 peer 都接不了：本机照常排队（本机 `off` 时改成等，不在本机跑）。
+
+本机能不能接按角色算：审查看本项目在跑的 reviewer 数没到上限；写单看这张卡已持有的 worker 槽，或者还有空槽（与本机派单的闸口同一口径）。
+`off` 在每条路径上都是不派：没有 hello 的老 peer（R9 的溢出规则）设成 off 一样出局；本机 off 时，原本会留在本机的审查
+（已绑了 reviewer session 的复审、安全卡、没开 review 外借）也改成等，session 保留，本机改回来就照常派。本机 off 时老 peer 的溢出按「本机已满」算。
+只有 `remote.mode = off` 例外：那是整个关掉外借，一律本机，localPriority 不看。
+
+所有机器都是 balance（或者都没写档位）时，放置结果和理由文字与 W5 逐字相同。挂池复核（`ledger scheduler-pool` 出单前在事务里重算）
+用的是同一份策略：调度服务把 roles / reviewFirst / localPriority / repo 原样传过去，由 `parseRemotePolicy` 解析（和读 scheduler.json 同一个函数），
+peer 的档位随借入名单一起读，所以复核不会丢档位。
+
+### 10.3 写单派出去之后
+
+- **本机名额**：写单派到 peer 时（`planIntent` 出 `peer:` 的 dispatch），这张卡复述起占的本机 worker 槽当场释放，计划事件记 `releasedSlots`；
+  之后回本机写（拒挂、没有写租约的修复单）再按空槽重新占。
+- **出单**：开工单的起点是 `main` 在远端的 head，修复单带上一轮审查报告原文（出借方读不到本机文件）；材料在事务外备好
+  （`lib/lend-write-materials.ts`，PM 手挂的 `ledger lend-offer` 用同一份）。查不到就这一轮不挂，换下一台或回本机。
+- **家族**：写单用出借方有空槽的家族，先 Codex 再 Claude（owner：先用孟总的 Codex）。
+- **交付**：出借方 `deliver` 时 A 核远端分支 head，卡记 head / 分支 / PR 并推到 review（R6 `writeLendDeliver`），下一轮调度把挂池意图记 done。
+- **审查跨家族**：卡的作者家族开卡时写在 `task_workflows.authorFamily`（自动开卡写 claude）。卡最近一次带 head 的交付若来自某张远端写单，作者家族就按那张单的家族算
+  （`lib/scheduler-head-family.ts` 的 `remoteHeadFamily`），不改 workflow 那一行。看的是交付、不是 head：合并队列 update-branch 换了 head
+  但没有新交付（合 main 不算写代码），作者家族不变；之后本机又交付一次，就回到 workflow 的家族。审查放置、建 reviewer session、绑定校验、结论记账、
+  两道合并闸读的都是这一个函数：Codex 写的卡交 Claude 审（本机，或有 Claude 槽的 peer），Codex 的结论记不进去。
+  本机 Claude 写的卡照旧交 Codex 审（优先 reviewFirst）。
+- **已知边界**：远端写过、之后某一轮又回本机写的卡，复审要换家族时原来的 reviewer session 对不上，交 PM（不自动换人）。
+  `start_node` 的 `auto` 放置也走这套档位（与规划器共用 `peerFacts`，档位不丢；off 的 peer 不会被选成 pin）：有 write 时新卡可能直接固定给 peer（W5 的设计，跳过复述）。
+
+### 10.4 上线清单（PM 照着带人做）
+
+1. **出借方（孟总机器）升级**：升到包含 i28-R7e 的版本（R7e 打开出借方的 write 角色；在那之前出借方一律拒 write，授权里写了也不生效）。
+2. **出借方重新授权**，带上 write（网页出借页重新授权，或命令行）：
+   `manager lend grant <借入方 peer 名> --repos shawnlu96/claudestra --until 7d --roles review,write --codex <N> [--codex-model gpt-6-astra --codex-effort xhigh]`
+   N 是同时在跑的 Codex 数（审查和写代码共用）。授权最长 7 天，到期前续。
+3. **借入方升级**到含 i28-W9 的版本，重启四个服务（bridge / cron / launcher / scheduler）。
+4. **借入方 lend.json**：`manager borrow set <出借方 peer 名> --projects claude-orchestrator --roles review,write --priority first`
+   （要先用对方的 Codex 就设 first；只想留着兜底设 low）。`manager borrow status` 核对档位和 roles。
+5. **借入方 scheduler.json**，项目 `claude-orchestrator` 的 `remote` 改成：
+   `{ "mode": "balance", "roles": ["review", "write"], "repo": "shawnlu96/claudestra", "reviewFirst": ["<出借方 peer 名>"] }`
+   （本机想少用就加 `"localPriority": "low"`）。调度服务每轮重读，下一轮生效；改坏了整个调度停，`bun src/manager.ts doctor` 会报。
+6. **核对**：下一张进 build 的自动卡，`ledger lend-orders <卡>` 应显示挂给出借方的开工单；出借方领单、交付后卡进 review，审查员应是本机 Claude session。
