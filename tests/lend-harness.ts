@@ -16,7 +16,7 @@ import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 export const HEAD = "e".repeat(40);
 export const FP = "abcd-ef01-2345-6789";
 /** harness 的时钟从 T0 开始；授权 6 天后到期（上限 7 天） */
-export const T0 = 1_000_000;
+const T0 = 1_000_000;
 export const ENTRY: LendEntry = { peer: "team-a", fp: FP, families: { codex: 2 }, roles: ["review"], repos: ["shawnlu96/claudestra"],
   ordersPerDay: 5, grantedAt: new Date(T0).toISOString(), until: new Date(T0 + 6 * 86_400_000).toISOString() };
 const PEER = { name: "team-a", addedAt: "x", fp: FP, baseUrl: "relay://abcd", outToken: "t", publicKey: "k", e2e: { idk: "i", ek: {} } } as unknown as HttpPeer;

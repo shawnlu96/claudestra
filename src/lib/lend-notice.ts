@@ -11,7 +11,7 @@ import { openSlots, orderOf, ordersToday, patchOrder, type LendRow } from "./len
 import { SHELL_SENTENCE } from "./lend-grant-rules.js";
 
 const KINDS = ["start", "acked", "stopped"] as const;
-export type LendNoticeKind = (typeof KINDS)[number];
+type LendNoticeKind = (typeof KINDS)[number];
 export interface LendNoticeParams extends LendAskParams { kind: LendNoticeKind; why: string | null }
 
 export function lendNoticeProblem(p: unknown): string | null {

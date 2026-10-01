@@ -16,8 +16,8 @@ describe("manager lend / borrow 接线", () => {
     { id: "diary", name: "diary", dirs: [join(state, "diary")], createdAt: "" },
   ] }));
   const manager = join(import.meta.dir, "../src/manager.ts");
-  const run = (args: string[], channel?: string) => {
-    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, DISCORD_CHANNEL_ID: channel };
+  const run = (args: string[], channel?: string, extra: Record<string, string> = {}) => {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, DISCORD_CHANNEL_ID: channel, ...extra };
     if (!channel) delete env.DISCORD_CHANNEL_ID;
     const r = Bun.spawnSync([process.execPath, manager, ...args], { env, stdout: "pipe", stderr: "pipe" });
     return JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!) as Record<string, any>;
@@ -45,6 +45,10 @@ describe("manager lend / borrow 接线", () => {
     expect(Date.parse(e.until) - Date.parse(e.grantedAt)).toBe(3 * 86_400_000);
     expect(run(["lend", "status"])).toMatchObject({ ok: true, lending: true });
     expect(run(["lend", "revoke", "--peer", "team-a"], "222")).toMatchObject({ ok: false, code: "forbidden" });
+    // P1-6 出借 worker 自己（没有频道号、带出借 worker 标记）也不能改授权：延长、扩大、收回都拒
+    const worker = { CLAUDESTRA_LEND_WORKER: "1" };
+    expect(run(g("--until", "7d", "--codex", "16"), undefined, worker)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(run(["lend", "revoke"], undefined, worker)).toMatchObject({ ok: false, code: "forbidden" });
     expect(file().lend).toHaveLength(1);
     expect(run(["lend", "revoke", "--peer", "team-a"])).toMatchObject({ ok: true, message: expect.stringContaining("已收回") });
     expect(file().lend).toEqual([]);
