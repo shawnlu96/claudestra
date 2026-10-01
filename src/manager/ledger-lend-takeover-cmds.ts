@@ -26,7 +26,9 @@ export const LEND_TAKEOVER_CMDS: Record<string, CommandSpec> = {
       const pr = intFlag(c.p, "pr");
       if (pr === undefined) throw new LedgerError("invalid", "缺 --pr");
       c.deps.assertLease?.();
-      const r = await takeoverLend(c.db, c.ctx(), { orderId, head: c.need("head"), pr }, takeoverDeps.make());
+      // 查远端要等：租约截止按实时钟核，调度服务租约在事务里紧贴第一笔写再核（失租就不写）
+      const deps = { ...takeoverDeps.make(), now: () => c.deps.now(), beforeWrite: () => c.deps.assertLease?.() };
+      const r = await takeoverLend(c.db, c.ctx(), { orderId, head: c.need("head"), pr }, deps);
       return { ok: true, ...r };
     },
   },

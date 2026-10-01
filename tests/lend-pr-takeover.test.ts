@@ -23,6 +23,7 @@ import { lendReviewDir } from "../src/lib/lend-pr-takeover-review.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { remoteHeadFamily } from "../src/lib/scheduler-head-family.js";
+import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { takeoverDeps } from "../src/manager/ledger-lend-takeover-cmds.js";
 
@@ -254,6 +255,45 @@ describe("接管：反例（不开 PR、不接管）", () => {
     for (let i = 0; i < 3; i++) await step(gh);
     untouched(id, log);
     expect(await run(["lend-takeover", id, "--head", H2, "--pr", "7"], "scheduler")).toMatchObject({ ok: false, code: "invalid" });
+  });
+
+  test("查 GitHub 期间 PM 撤了单 → 不代开 PR（开 PR 前重读台账）", async () => {
+    const id = await stuck();
+    const { gh, log } = fakeGh();
+    await step(gh);
+    gh.openPr = async () => {
+      expect(await run(["lend-cancel", "T9", "--reason", "PM 撤"])).toMatchObject({ ok: true });
+      return { ok: true, value: null };
+    };
+    expect((await step(gh)).failed).toEqual([]);
+    expect(log.created).toEqual([]);
+    expect(getLendOrder(db, id)!.status).toBe("cancelled");
+    expect(getTask(db, "T9")!.stage).toBe("build");
+  });
+
+  test("CLI 查远端期间出借单租约到期 → 按实时钟拒，不记交付", async () => {
+    const id = await stuck();
+    const until = getLendOrder(db, id)!.leaseUntil!;
+    takeoverDeps.make = () => ({ remoteHead: async (r, b) => ((now = until + 1), remoteHead(r, b)) });
+    expect(await run(["lend-takeover", id, "--head", H2, "--pr", "5"], "scheduler")).toMatchObject({ ok: false, code: "conflict" });
+    expect(getLendOrder(db, id)!.status).toBe("claimed");
+    expect(getTask(db, "T9")!.stage).toBe("build");
+    expect(listEvents(db, { target: "T9" }).filter((e) => e.kind === "deliver")).toEqual([]);
+  });
+
+  test("CLI 查远端期间调度服务失租 → 事务里写之前再核，lease-lost、什么都不写", async () => {
+    const id = await stuck();
+    let owned = true;
+    takeoverDeps.make = () => ({ remoteHead: async (r, b) => ((owned = false), remoteHead(r, b)) });
+    const assertLease = () => {
+      if (!owned) throw new SchedulerLeaseLost("服务租约已被接走");
+    };
+    const before = listEvents(db, { target: "T9" }).length;
+    const out = (await runLedger(["lend-takeover", id, "--head", H2, "--pr", "5"], { ...deps("scheduler"), assertLease })) as Record<string, unknown>;
+    expect(out).toMatchObject({ ok: false, code: "lease-lost" });
+    expect(getLendOrder(db, id)!.status).toBe("claimed");
+    expect(getTask(db, "T9")).toMatchObject({ stage: "build", branch: null });
+    expect(listEvents(db, { target: "T9" })).toHaveLength(before);
   });
 
   test("CLI 自己核远端：调用方给的 head 和远端对不上就拒；非调度身份要真 PM", async () => {
