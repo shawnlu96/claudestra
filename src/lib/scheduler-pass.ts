@@ -26,6 +26,8 @@ import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
 import { peerPrStep } from "./peer-pr-tick.js";
 import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
+import { lendTakeoverStep } from "./lend-pr-takeover.js";
+import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -122,6 +124,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
       }
+      failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
       // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
       failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
     }
