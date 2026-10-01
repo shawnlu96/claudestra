@@ -1,7 +1,9 @@
 /**
  * 内置台账的读接口（docs 10-ledger §4）；写只走 CLI（bun src/manager.ts ledger …），这里一律 GET：
- *   GET /api/v1/ledger/:project              事项 + 任务（每个带最近一条事件、指标、blockedBy / runnable）+ 依赖边 + 最近的项目级事件 + meta
+ *   GET /api/v1/ledger/:project[?dayStart=<ms>]  事项 + 任务（每个带最近一条事件、指标、blockedBy / runnable）+ 依赖边 + 最近的项目级事件 + meta；
+ *                                            已完成卡只带窗口，dayStart = 网页的当地零点（定「今日完成」带不带小圆点，lib/ledger-read-done.ts）
  *   GET /api/v1/ledger/:project/tasks/:id    任务 + 全部事件 + 阶段时间线 + 指标 + 进出依赖边 + 审查分叉
+ *   GET /api/v1/ledger/:project/done?before=<游标>&limit=<n>   总览窗口外的已完成卡，按完成时刻倒序一页（lib/ledger-read-done.ts）
  *   GET /api/v1/ledger/:project/docs/<path>  meta.docsDir 下的 .md / .png / .jpg / .jpeg 原文件（规格卡、报告、截图）
  * 门是 canReadLedger（全 scope、非 peer 的 manage 凭据）；project 必须在 projects.json。库还不存在时总览回空台账（exists:false）。
  * 实时靠 SSE ledger 事件（bridge/ledger-feed.ts），网页连上 / 重连都全量重拉这里。
@@ -10,6 +12,7 @@ import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, resolve, sep } from "node:path";
 import { canReadLedger } from "../../lib/devices.js";
 import { PROJECT_EVENTS_LIMIT, projectView, taskDetail } from "../../lib/ledger-read.js";
+import { DONE_PAGE_DEFAULT, DONE_PAGE_MAX, donePage, parseDoneCursor } from "../../lib/ledger-read-done.js";
 import { LEDGER_SCHEMA_VERSION, getMeta, schemaVersion } from "../../lib/ledger-store.js";
 import type { Principal } from "../../lib/principals.js";
 import { isUmbrellaDir, normalizeDir, PROJECTS_PATH, readProjects } from "../../lib/projects.js";
@@ -44,7 +47,7 @@ function decode(s: string): string | null {
 }
 
 export async function handleLedgerApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
-  const m = path.match(/^\/ledger\/([^/]+)(?:\/tasks\/([^/]+)|\/docs\/(.+))?$/);
+  const m = path.match(/^\/ledger\/([^/]+)(?:\/tasks\/([^/]+)|\/docs\/(.+)|\/(done))?$/);
   if (!m) return null;
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
   if (!canReadLedger(principal)) return forbidden("ledger requires a full-scope owner credential");
@@ -60,6 +63,7 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
   }
   const now = Date.now();
   if (m[3] !== undefined) return db ? serveDoc(getMeta(db, project).docsDir, m[3]) : notFound("ledger has no docsDir");
+  if (m[4] !== undefined) return serveDonePage(req, db, project, now);
   if (taskId !== undefined) {
     const detail = db ? taskDetail(db, project, taskId, now) : null;
     return detail ? apiJson(200, { ok: true, project, ...detail, now }) : notFound(`task "${taskId}" not found in "${project}"`);
@@ -69,7 +73,26 @@ export async function handleLedgerApi(req: Request, path: string, principal: Pri
     return apiJson(200, { ok: true, project, exists: false, schema: LEDGER_SCHEMA_VERSION, meta, items: [], tasks: [], deps: [], projectEvents: [], audit: [], now });
   }
   // schema 报库里实际的版本：CLI 先升级、bridge 还没重启时它会比代码常量新（LedgerReader 打开时已记一次日志）
-  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now), now });
+  return apiJson(200, { ok: true, project, exists: true, schema: schemaVersion(db), projectEventsLimit: PROJECT_EVENTS_LIMIT, ...projectView(db, project, now, clientDayStart(req)), now });
+}
+
+/** ?dayStart= 是整数毫秒才用；格式不对当没传（总览不因为这个参数失败，按服务器零点） */
+function clientDayStart(req: Request): number | null {
+  const raw = new URL(req.url).searchParams.get("dayStart");
+  return raw !== null && /^\d{1,16}$/.test(raw) ? Number(raw) : null;
+}
+
+/** 已完成分页：before 缺省 = 从最新一张起；limit 缺省 DONE_PAGE_DEFAULT、封顶 DONE_PAGE_MAX；库不存在 = 空页 */
+function serveDonePage(req: Request, db: ReturnType<typeof ledgerDb>, project: string, now: number): Response {
+  const q = new URL(req.url).searchParams;
+  const rawBefore = q.get("before");
+  const before = rawBefore === null || rawBefore === "" ? null : parseDoneCursor(rawBefore);
+  if (rawBefore && !before) return apiJson(400, { ok: false, error: "bad cursor" });
+  const rawLimit = q.get("limit");
+  const limit = rawLimit === null ? DONE_PAGE_DEFAULT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1) return apiJson(400, { ok: false, error: "bad limit" });
+  const page = db ? donePage(db, project, before, Math.min(limit, DONE_PAGE_MAX), now) : { tasks: [], nextCursor: null };
+  return apiJson(200, { ok: true, project, ...page, now });
 }
 
 /**

@@ -7,14 +7,18 @@
  */
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
-import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
-import { currentStageMark, stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
-import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
+import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
+import { compactStage, doneCard, eventsByTarget, liveCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
+import { dayStartOf, doneWindow, type DoneRest } from "./ledger-read-done.js";
+import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
 import { taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
+
+export { clipFirstLine } from "./ledger-read-cards.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
 const READ_BUSY_TIMEOUT_MS = 200;
@@ -90,106 +94,6 @@ function changedProjects(db: Database, afterSeq: number): { projects: string[]; 
   return { projects: rows.map((r) => r.project), lastSeq: rows.reduce((m, r) => Math.max(m, r.m), afterSeq) };
 }
 
-/** 最近一轮审查的摘要：首页「返工原因」只要这一条，不必为每条线再拉详情 */
-interface ReviewSummary {
-  round: number | null;
-  verdict: string | null;
-  p0: number | null;
-  p1: number | null;
-  p2: number | null;
-  text: string;
-  ts: number;
-}
-interface TaskView extends LedgerTask {
-  lastEvent: LedgerEvent | null;
-  /** 进入当前阶段的时刻（时间线最后一段的 from）；没有建任务事件的残缺数据为 null */
-  stageSince: number | null;
-  /** stageSince 是导入时推断的近似时间：网页不拿它判「卡住」，时长前面标 ≈ */
-  stageSinceApprox: boolean;
-  lastReview: ReviewSummary | null;
-  metrics: TaskMetrics;
-  /** 挡着它的前置任务 id（ledger-deps.ts blockedBy）；空 = 依赖上不挡 */
-  blockedBy: string[];
-  /** 不是终态且依赖上不挡（runnableTasks 的口径） */
-  runnable: boolean;
-}
-/**
- * 总览只带网页协作视图读到的字段（web/features/collab/collab-model.ts 的 LedgerOverview）；全量在 taskDetail。
- * 总览经中继上行、每次事件都整份重拉，体积随已完成卡线性涨：加字段前先看网页真的读不读（tests/ledger-read-compact.test.ts 量体积）。
- */
-type OverviewItem = Pick<LedgerItem, "id" | "title" | "oneLine">;
-/** 首页指标条、今日完成、p0 筛选用的几个计数；0 / null 不发（网页按缺省 0 / null 读） */
-type MetricsSummary = Partial<Pick<TaskMetrics, "endTs" | "reviewRounds" | "p0" | "p1" | "reviewWaitPendingMs">>;
-/** 列表小圆点（collab-step-line-model.ts stepLineView）读的几样；head、结论、核验 / 自报只在详情的步骤线里 */
-type DotStep = Pick<TaskStep, "step" | "round" | "executor" | "executorKind" | "state"> & { derived?: true };
-type DotLine = Omit<StepLineInfo, "steps"> & { steps: DotStep[] };
-type OverviewEvent = Pick<LedgerEvent, "seq" | "ts" | "actor" | "target" | "kind" | "text" | "data">;
-type OverviewTask = Partial<Omit<TaskView, "metrics" | "lastEvent">> & Pick<TaskView, "id" | "title" | "kind" | "stage" | "round" | "updatedAt" | "stageSince" | "blockedBy" | "runnable"> & {
-  lastEvent?: OverviewEvent | null;
-  metrics: MetricsSummary;
-  stepLine?: DotLine;
-};
-const compactStage = (stage: Stage) => stage === "verified" || TERMINAL_STAGES.includes(stage);
-
-function metricsSummary(m: TaskMetrics): MetricsSummary {
-  const out: MetricsSummary = {};
-  if (m.endTs !== null) out.endTs = m.endTs; // 完成时刻：之后补的 note 会改 updatedAt，「今日完成」不能跟着漂
-  if (m.reviewWaitPendingMs !== null) out.reviewWaitPendingMs = m.reviewWaitPendingMs;
-  for (const k of ["reviewRounds", "p0", "p1"] as const) if (m[k]) out[k] = m[k];
-  return out;
-}
-
-const dotLine = (l: StepLineInfo): DotLine => ({
-  ...l,
-  steps: l.steps.map((s) => ({ step: s.step, round: s.round, executor: s.executor, executorKind: s.executorKind, state: s.state, ...(s.derived ? { derived: true as const } : {}) })),
-});
-
-/** 网页只读 extra 的目标句与委托对象（collab-model goalOf / delegateOf）；fileGlobs、备注这些留在详情 */
-function extraSummary(e: Record<string, unknown>): Record<string, unknown> | undefined {
-  const out = Object.fromEntries(["goal", "delegate"].filter((k) => e[k] !== undefined).map((k) => [k, e[k]]));
-  return Object.keys(out).length ? out : undefined;
-}
-
-/**
- * 最近一条事件：网页拿它判红色（rollback / verify 没过）、写一句原因（首行）；stage 的 to 留给网页没有 stageSince 时的兜底。
- * 正文只留首行、data 只留 to / result；全文在详情的 events 里
- */
-function eventSummary(e: LedgerEvent | null): OverviewEvent | null {
-  if (!e) return null;
-  const data = Object.fromEntries(["to", "result"].filter((k) => e.data[k] !== undefined).map((k) => [k, e.data[k]]));
-  return { seq: e.seq, ts: e.ts, actor: e.actor, target: e.target, kind: e.kind, text: clipFirstLine(e.text, Infinity), data };
-}
-
-/** 在跑的卡：首页的线、因果画布、详情打开前的头部都从这里算 */
-function liveCard(v: TaskView, line: StepLineInfo): OverviewTask {
-  return {
-    id: v.id, itemId: v.itemId, title: v.title, kind: v.kind, stage: v.stage, stageBefore: v.stageBefore, round: v.round,
-    agent: v.agent, pm: v.pm, pr: v.pr, assignee: v.assignee, assigneeKind: v.assigneeKind, updatedAt: v.updatedAt, extra: extraSummary(v.extra),
-    lastEvent: eventSummary(v.lastEvent), stageSince: v.stageSince, stageSinceApprox: v.stageSinceApprox, lastReview: v.lastReview,
-    metrics: metricsSummary(v.metrics), blockedBy: v.blockedBy, runnable: v.runnable, stepLine: dotLine(line),
-  };
-}
-
-/**
- * 已完成的卡：大纲 / 计数 / 成员 / PR 对审查员只要这些，空字段不发。今天（本机零点后）完成的另带手机「今日完成」卡片
- * 要的最近事件（红 / 黄色调）和小圆点；网页按它自己的零点算今日，时区不同时多出来的卡只是不画小点。
- */
-function doneCard(v: TaskView, today: StepLineInfo | null): OverviewTask {
-  const card: OverviewTask = {
-    id: v.id, title: v.title, kind: v.kind, stage: v.stage, round: v.round, updatedAt: v.updatedAt, stageSince: v.stageSince,
-    blockedBy: v.blockedBy, runnable: v.runnable, metrics: metricsSummary(v.metrics),
-  };
-  for (const k of ["itemId", "agent", "pm", "pr"] as const) if (v[k]) card[k] = v[k];
-  if (!today) return card;
-  return { ...card, stageSinceApprox: v.stageSinceApprox, lastEvent: eventSummary(v.lastEvent), stepLine: dotLine(today) };
-}
-
-function localMidnight(now: number): number {
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
 export interface ProjectView {
   meta: LedgerMeta;
   items: OverviewItem[];
@@ -200,53 +104,19 @@ export interface ProjectView {
   projectEvents: LedgerEvent[];
   /** 巡检发现、还没解决的「可能漏了」（lib/ledger-audit.ts）；库还没有 audit_findings 表 = 空 */
   audit: StoredFinding[];
-}
-
-const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
-
-/** 总览只要一句原因：首行、按码点截到 120（全文在详情接口里） */
-const REVIEW_TEXT_MAX = 120;
-
-/** 首个非空行，按码点截到 max（超出补 …）：总览只给一句，全文留给详情接口 */
-export function clipFirstLine(text: string, max: number = REVIEW_TEXT_MAX): string {
-  const first = [...(text.split("\n").find((l) => l.trim()) ?? "").trim()];
-  return first.length > max ? `${first.slice(0, max).join("")}…` : first.join("");
-}
-
-function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
-  if (!e) return null;
-  const d = e.data;
-  const text = clipFirstLine(e.text);
-  return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text, ts: e.ts };
-}
-
-function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number, deps: readonly DepView[]): TaskView {
-  const blockers = blockedBy(task.id, deps).map((d) => d.from);
-  return {
-    ...task,
-    // dep 事件是关系变更不是进展、ask 族有自己的卡片：算进来会把回滚 / 验证失败这类「出问题」信号和最近一条进展盖掉（web collab-model 看 lastEvent）
-    lastEvent: own.findLast((e) => !isAskEvent(e) && e.kind !== "dep") ?? null,
-    stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
-    stageSinceApprox: currentStageMark(own)?.data.approxTime === true,
-    lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
-    metrics: taskMetrics(task, own, now),
-    blockedBy: blockers,
-    runnable: !TERMINAL_STAGES.includes(task.stage) && blockers.length === 0,
-  };
+  /** 已完成卡只带窗口（ledger-read-done.ts）：更早的从这个游标起翻 GET /ledger/:project/done；null = 没有更早的 */
+  doneCursor: string | null;
+  /** 窗口外已完成卡的聚合计数 */
+  doneRest: DoneRest;
 }
 
 /** GET /ledger/:project：事项 + 任务（每个带最近一条事件与指标）+ 最近的项目级事件；整个项目的事件只查一次 */
-export function projectView(db: Database, project: string, now: number): ProjectView {
-  return db.transaction(() => projectViewSnapshot(db, project, now)).deferred();
+export function projectView(db: Database, project: string, now: number, clientDayStart: number | null = null): ProjectView {
+  return db.transaction(() => projectViewSnapshot(db, project, now, dayStartOf(now, clientDayStart))).deferred();
 }
 
-function projectViewSnapshot(db: Database, project: string, now: number): ProjectView {
-  const byTarget = new Map<string, LedgerEvent[]>();
-  for (const e of listEvents(db, { project })) {
-    const list = byTarget.get(e.target);
-    if (list) list.push(e);
-    else byTarget.set(e.target, [e]);
-  }
+function projectViewSnapshot(db: Database, project: string, now: number, dayStart: number): ProjectView {
+  const byTarget = eventsByTarget(listEvents(db, { project }));
   // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
   const recent = db
     .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel', 'ask_reopen')
@@ -255,17 +125,15 @@ function projectViewSnapshot(db: Database, project: string, now: number): Projec
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
   const rows = stepsByTask(db);
-  const midnight = localMidnight(now);
+  const views = tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps));
+  const win = doneWindow(views.filter((v) => compactStage(v.stage)), deps, dayStart);
+  const line = (v: TaskView) => stepLineInfo(v, rows.get(v.id) ?? [], byTarget.get(v.id) ?? []);
   return {
     meta: getMeta(db, project),
     items: listItems(db, project).map((i) => ({ id: i.id, title: i.title, oneLine: i.oneLine })),
-    tasks: tasks.map((t) => {
-      const own = byTarget.get(t.id) ?? [];
-      const view = taskView(t, own, now, deps);
-      const line = () => stepLineInfo(t, rows.get(t.id) ?? [], own);
-      if (!compactStage(t.stage)) return liveCard(view, line());
-      return doneCard(view, (view.metrics.endTs ?? view.updatedAt) >= midnight ? line() : null);
-    }),
+    tasks: views.flatMap((v) => (!compactStage(v.stage) ? [liveCard(v, line(v))] : win.keep.has(v.id) ? [doneCard(v, win.today.has(v.id) ? line(v) : null)] : [])),
+    doneCursor: win.cursor,
+    doneRest: win.rest,
     deps,
     projectEvents: recent.reverse().map(toEvent),
     audit: openFindings(db, project),
