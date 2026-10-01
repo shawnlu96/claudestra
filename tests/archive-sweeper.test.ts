@@ -3,7 +3,7 @@
  * 根之外的自动快照一个字节都不碰；days=0 不清理；空目录顺手删。
  */
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, existsSync, readFileSync, readdirSync, symlinkSync, lstatSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { pruneArchives } from "../src/bridge/archive-sweeper.ts";
@@ -75,5 +75,49 @@ describe("pruneArchives", () => {
     expect(existsSync(metaPath)).toBe(true);
     expect(existsSync(unmanaged)).toBe(false);
     expect(existsSync(t.freshManual)).toBe(true);
+  });
+});
+
+describe("markAgentArchived：只写在归档根下一层，不跟随软链", () => {
+  const setup = () => {
+    const base = mkdtempSync(join(tmpdir(), "marker-"));
+    const root = join(base, "archived");
+    const outside = join(base, "outside");
+    mkdirSync(root, { recursive: true });
+    mkdirSync(outside);
+    const reg = join(base, "registry.json");
+    writeFileSync(reg, JSON.stringify({ agents: {} }));
+    return { base, root, outside, reg };
+  };
+
+  test("agent-.. / agent-. / agent- 归一成 .. / . / 空：拒绝，归档根的父目录什么都没写", async () => {
+    const t = setup();
+    for (const n of ["agent-..", "agent-.", "agent-", "agent-a/b"]) {
+      await expect(markAgentArchived(n, t.root, t.reg)).rejects.toThrow("不合法");
+    }
+    expect(existsSync(join(t.base, ".meta.json"))).toBe(false);
+    expect(existsSync(join(t.root, ".meta.json"))).toBe(false);
+    expect(readdirSync(t.root)).toEqual([]);
+  });
+
+  test("归档根下同名目录是指向外面的软链：拒绝，外面没有 .meta.json", async () => {
+    const t = setup();
+    symlinkSync(t.outside, join(t.root, "foo"));
+    await expect(markAgentArchived("agent-foo", t.root, t.reg)).rejects.toThrow("不合法");
+    expect(readdirSync(t.outside)).toEqual([]);
+  });
+
+  test(".meta.json 是指向外面文件的软链：不覆盖外面的文件，换成标记目录里的普通文件", async () => {
+    const t = setup();
+    const victim = join(t.outside, "victim.json");
+    writeFileSync(victim, "keep");
+    mkdirSync(join(t.root, "bar"));
+    symlinkSync(victim, join(t.root, "bar", ".meta.json"));
+    await markAgentArchived("agent-bar", t.root, t.reg);
+    expect(readFileSync(victim, "utf8")).toBe("keep");
+    const meta = join(t.root, "bar", ".meta.json");
+    expect(lstatSync(meta).isSymbolicLink()).toBe(false);
+    expect(JSON.parse(readFileSync(meta, "utf8"))).toMatchObject({ kind: "agent", name: "bar" });
+    expect(readdirSync(join(t.root, "bar"))).toEqual([".meta.json"]); // tmp 已 rename 掉
   });
 });
