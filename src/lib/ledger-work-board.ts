@@ -5,7 +5,7 @@ import type { Database } from 'bun:sqlite';
 import { boardContext, featureCard, hasFeatureSchema, type BoardCtx, type BoardNode } from './ledger-dag-board.js';
 import type { Feature } from './ledger-feature.js';
 import { autoSnapshot } from './scheduler-auto-snapshot.js';
-import { cardNames } from './scheduler-autostart.js';
+import { cardNames } from './ledger-card-names.js';
 import { planScheduler } from './scheduler-plan.js';
 import type { SnapshotOpts } from './scheduler-snapshot.js';
 import { taskWorkerRefs } from './scheduler-sessions.js';

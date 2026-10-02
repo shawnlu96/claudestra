@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { cardNames } from "./ledger-card-names.js";
 import { openClaims } from "./ledger-autostart-grant.js";
 import { findPath } from "./ledger-deps.js";
 import { featureDeps } from "./ledger-feature-deps.js";
@@ -77,7 +78,7 @@ function splitNodes(db: Database, source: Feature, groups: SplitGroup[], rejecte
       else dropped.push(dep);
     }
     g.nodes.push({ ...n, deps: n.deps.filter((d) => !dropped.includes(d)),
-      ...(g !== kept ? { movedFrom: { featureId: source.id, version: source.currentVersion } } : {}),
+      ...(g !== kept ? { cardSlug: n.cardSlug ?? cardNames(db, source, n.key).slug, movedFrom: { featureId: source.id, version: source.currentVersion } } : {}),
       ...(dropped.length ? { droppedDeps: [...new Set([...(n.droppedDeps ?? []), ...dropped])] } : {}) });
   }
   for (const g of groups) {

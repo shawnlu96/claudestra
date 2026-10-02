@@ -9,7 +9,8 @@ import type { InventoryQuota } from "./ai-quota.js";
 import { featureLanes, type Lanes } from "./dag-tools-lanes.js";
 import { claimDedup, openClaims } from "./ledger-autostart-grant.js";
 import { effectiveNodes, getDagVersion, getFeature, getPendingProposal, projectNodes, type Feature, type NodeView } from "./ledger-feature.js";
-import { storedOrigin } from "./ledger-origin.js";
+import { cardNames } from "./ledger-card-names.js";
+export { cardNames } from "./ledger-card-names.js";
 import { getEventByDedup, getMeta } from "./ledger-store.js";
 import { FLOW_TEMPLATES, templateFor } from "./scheduler-template.js";
 import { autostartCapacity, type SlotPool } from "./scheduler-slot-hold-autostart.js";
@@ -93,15 +94,6 @@ export function specGate(spec: SpecFile | null, now: number): { why: string } | 
   if (now - spec.mtimeMs < SPEC_SETTLE_MS) return { why: "规格卡刚改过，静置满 60 秒再开" };
   const head = parseSpecHead(spec.text);
   return head.off ? { why: "规格卡卡首写了「自动开卡：关」" } : { head };
-}
-
-/** 卡号 / agent / 分支的派生规则与 start_node 的缺省一致（dag-tools-start.ts）：两边开同一个节点会撞同一个卡号，由台账的唯一性裁决 */
-export function cardNames(db: Database, f: Feature, key: string): { slug: string; taskId: string; agent: string; branch: string } {
-  const origin = storedOrigin(db);
-  const slug = origin && f.id.startsWith(`${origin}-`) ? f.id.slice(origin.length + 1) : f.id;
-  const taskId = `${slug}-${key}`;
-  const agent = `agent-${`task-${taskId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48)}`;
-  return { slug, taskId, agent, branch: `feat/${taskId.toLowerCase()}` };
 }
 
 /** Claude 周窗口（weekly / weekly_scoped）里已用到线的那一个；读不到、用量未知为 null（不拦，下游撞额度另有报警） */
