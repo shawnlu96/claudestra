@@ -57,15 +57,19 @@ const SECRET_WORD = /credential|secret|token|passw(?:or)?d|api[\s_-]*key|auth|be
 
 /** Private-use, so neither NFKC nor the gate's folding touches it; stands for one cut SHA when checking what the gate would see. */
 const MARK = "\uE000";
-/** The hex the gate would join onto a cut SHA once whitespace is removed; 8+ chars (the gate's own joinable fragment size) refuse. */
-const HEX_AROUND = new RegExp(`([0-9a-f]*)(${MARK}+)([0-9a-f]*)`, "gi");
+/** One unbroken hex run the gate would read once whitespace is removed, holding at least one cut SHA. */
+const HEX_RUN = new RegExp(`[0-9a-f${MARK}]*${MARK}[0-9a-f${MARK}]*`, "gi");
+/** A cut SHA's run is safe only alone with < 8 hex (the gate's own joinable fragment size) on each side. */
+const joinsHex = (run: string): boolean => run.split(MARK).length > 2 || run.split(MARK).some((part) => part.length >= 8);
+/** COMMIT_SHA's boundary, checked again on the folded view: zero-width chars dropped and NFKC `／` `＼` `．` can make a path or file name. */
+const TOUCHES = new RegExp(`[\\w/\\\\-]${MARK}|(?<!\\.)\\.${MARK}|${MARK}(?:[\\w/\\\\-]|\\.\\w)`);
 /** Same letter / digit shape as the SHA but not hex: the gate's other rules (prefix, field name, random) see the same text. */
 const unhex = (m: string): string => m.replace(/[a-fA-F]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 16));
 
 /**
  * Card heads (GATE2), then commit-shaped SHAs → 12-char prefixes; `cut` counts both. Judged on the gate's folded view (NFKC,
- * zero-width dropped, blanks joined): if a SHA sits on a line naming a secret, touches a word char, joins 8+ hex (or another SHA)
- * once whitespace is removed, or the text with the SHAs made non-hex would still trip the gate (`sk- ` / `ghp_` before it, a field
+ * zero-width dropped, blanks joined): if a SHA sits on a line naming a secret, touches a word char or a path / file-name boundary,
+ * shares one hex run with 8+ hex or another SHA once whitespace is removed, or the text with the SHAs made non-hex would still trip the gate (`sk- ` / `ghp_` before it, a field
  * name…), nothing in this text is cut and the gate gets it unchanged. Any other hex stays for the gate.
  */
 export function shortenShas(text: string, heads: ReadonlySet<string>, ledgerHead: string | null = null): { text: string; cut: number } {
@@ -75,8 +79,8 @@ export function shortenShas(text: string, heads: ReadonlySet<string>, ledgerHead
   if (!cut) return { text, cut };
   const marked = fold(each(() => MARK));
   const unsafe = marked.split("\n").some((line) => line.includes(MARK) && SECRET_WORD.test(line))
-    || new RegExp(`[\\w-]${MARK}|${MARK}[\\w-]`).test(marked)
-    || [...marked.replace(/\s+/g, "").matchAll(HEX_AROUND)].some(([, l, m, r]) => m!.length > 1 || l!.length >= 8 || r!.length >= 8)
+    || TOUCHES.test(marked)
+    || (marked.replace(/\s+/g, "").match(HEX_RUN) ?? []).some(joinsHex)
     || peerSecretHit(fold(each(unhex)), ledgerHead) !== null;
   return unsafe ? { text, cut: 0 } : { text: out, cut };
 }

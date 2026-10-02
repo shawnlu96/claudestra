@@ -140,9 +140,9 @@ describe("peer orders", () => {
   test("复现测试 (gate-context-1): a SHA the gate reads as part of a secret after its folding is not cut, so the order still refuses", () => {
     const h = "0123456789abcdef".repeat(2) + "01234567"; // fixture, not a real SHA; this card's head is a different random value
     const reports = [`sk- ${h}`, `ghp_\n${h}`, `${h}\n${"89abcdef".repeat(2)}`, `cred\u200bential ${h}`, `api key   ${h}`, `ＡＰＩ key ${h}`,
-      `x\u200b${h}`, `${h}\n${sha()}`];
+      `x\u200b${h}`, `${h}\n${sha()}`, `${h}\n1234567\n${h}`, `${h} 89abcd ${h}`];
     for (const report of reports) {
-      // The gate refused these before the cut existed; the round-1 head cut each SHA to 12 chars first and they went out pooled.
+      // Once folded and joined these read as a secret to the gate, so the text must reach it whole and refuse.
       expect(peerSecretHit(shortenHeads(report, new Set([H])).normalize("NFKC").replace(/\u200b/g, ""))).not.toBeNull();
       expect(shortenShas(report, new Set([H]), H)).toEqual({ text: report, cut: 0 });
       expect(refusal(`# Review\n${report}`).message).toContain(REFUSED);
@@ -160,6 +160,17 @@ describe("peer orders", () => {
 
   test("acceptance 3: a foreign 40-hex inside a path is not cut, so it still refuses", () => {
     expect(refusal(`# Review\n产物在 reviews/${sha()}/report.md`).message).toContain(`${REFUSED}（长十六进制）`);
+  });
+
+  test("复现测试 (path-context-1): a 40-hex that is a path segment or file name once folded (zero-width, NFKC slash / dot) is not cut", () => {
+    const h = "0123456789abcdef".repeat(2) + "01234567"; // fixture, not a real SHA
+    for (const s of [`reviews/\u200b${h}\u200b/report.md`, `reviews\uff0f${h}\uff0freport.md`, `C:\uff3c${h}\uff3cx`,
+      `\u200b${h}\uff0emd`, `x\uff0e${h}`, `\u200b-${h}`]) {
+      expect(shortenShas(`见 ${s} 处`, new Set([H]), H)).toEqual({ text: `见 ${s} 处`, cut: 0 });
+      expect(refusal(`# Review\n产物在 ${s}`).message).toContain(`${REFUSED}（长十六进制）`);
+    }
+    expect(listLendOrders(db, "T1")).toEqual([]);
+    expect(cutNotes()).toEqual([]);
   });
 
   test("复现测试 (acceptance 4): TV1 round-1 report shape → refused before the fix, offered after", () => {
