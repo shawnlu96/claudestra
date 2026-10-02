@@ -1,14 +1,9 @@
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
 /**
- * The lending instance A's side of remote capacity (docs/design/remote-capacity.md §2.2, §6; table in ledger-lend-schema.ts):
- * PM offers a card's current step to one peer — the review round, or (i28-R6) the build / fix round as a write order — the peer
- * polls / claims it under a lease, renews, releases or lets it expire. Write orders also keep the card's write lease with that
- * peer until merge or PM reclaim (ledger-lend-lease.ts); one that cannot go back to it (authorization gone, unclaimed past
- * WRITE_POOL_TTL_MS) ends the lease and the card returns to local work, PM told.
- * Every transition is a CAS under BEGIN IMMEDIATE. An expired lease only ever becomes `unknown` for PM (never re-offered by
- * itself); `released` (worker never started) and PM cancels free the card. The order a peer sees is built once, at offer
- * time, through T87's refuse-first peer gate with the ledger head. Result intake is ledger-lend-result.ts (reviews and
- * write orders). tests/ledger-lend.test.ts, tests/ledger-lend-write.test.ts.
+ * Lending-side CAS transitions under BEGIN IMMEDIATE; expired delivery becomes unknown, never automatically re-offered.
+ * Write leases stay with the peer until merge/reclaim; authorization loss or pool timeout returns the card to local work.
+ * Orders pass the refuse-first peer gate once at offer; result intake lives in ledger-lend-result.ts.
+ * See docs/design/remote-capacity.md and tests/ledger-lend{,-write}.test.ts.
  */
 import { clearPeerCooldown, cooldownReleaseNotices } from "./lend-peer-cooldown.js"; import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -18,6 +13,7 @@ import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type Lea
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { endWriteLease, forPeer, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrderWire, type WriteLease as WriteLeaseRow, type WriteOffer } from "./ledger-lend-lease.js";
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
+import { markRelayBaseline, restateFacts } from "./ledger-lend-relay.js";
 import { queueTimeoutDue, sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
@@ -155,7 +151,10 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const shortRef = (sha: string): string => sha.slice(0, 12);
   const bounce = b ? bounceWork({ ...b, prHead: shortRef(b.prHead), mainHead: b.mainHead ? shortRef(b.mainHead) : null }) : null;
   const findings = step === "fix" && !bounce ? (uiRejectLend(db, task)?.findings ?? lastReviewOf(db, task).findings) : [];
-  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce };
+  const events = step === "write" ? listEvents(db, { project: task.project, target: task.id }) : [];
+  const facts = step === "write" ? restateFacts(events, task.specRev) : null;
+  const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
+  const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce, restate };
   return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
 }
 
@@ -209,6 +208,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
       text, sha256(text), LEASE_MS_DEFAULT, input.supersedes ?? null, ctx.actor, now, now, made.branch, made.base,
     );
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
+    markRelayBaseline(db, task, { orderId, taskId: task.id, project: task.project, peer: input.peer, step, specRev: task.specRev }, input.spec, now);
     note(db, ctx, { project: task.project, taskId: task.id, orderId, peer: input.peer }, `出借：${LABEL[step]}挂给 ${input.peer}（${input.family}）`,
       { op: "offer", step, ...(made.branch ? { branch: made.branch } : {}) });
     return getLendOrder(db, orderId) as LendOrder;
