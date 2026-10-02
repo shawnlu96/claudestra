@@ -91,6 +91,12 @@ export function adoptStrandedTransfers(held: HeldQueue): Set<HeldItem> {
   return unresolved;
 }
 
+/** Inbox reads, acknowledgements and reply tallies must use the same ownership recovery as flush, including leased entries. */
+export function ownedHeldItems(held: HeldQueue, channelId: string): HeldItem[] {
+  const unresolved = adoptStrandedTransfers(held);
+  return (held.get(channelId) ?? []).filter((item) => !unresolved.has(item));
+}
+
 /** Missing / conflicting original queue addresses are not recoverable from body headers. Never fabricate a deleted original. */
 function unresolvedDirectTransfers(held: HeldQueue): Set<HeldItem> {
   const rows = [...held.entries()].flatMap(([channelId, q]) => q.map((item) => ({ channelId, item })));
