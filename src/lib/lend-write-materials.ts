@@ -15,6 +15,8 @@ import { readTextSoft } from "./task-spec.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
 import { lendFixMaterials } from "./lend-fix-env.js";
 
+const PR_BASE = "main";
+
 export interface WriteProbe {
   /** Fingerprint of the peer's pinned instance key; null = not paired end to end. */
   peerFp(peer: string): Promise<string | null>;
@@ -31,7 +33,7 @@ export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: 
   if (step === "write") {
     const r = await probe.remoteHead(q.repo, q.base);
     if (!r.ok) throw new LedgerError("invalid", `查不到 ${q.repo} 的 ${q.base}：${r.error}`);
-    return { fp, base: q.base, baseSha: r.head, report: null };
+    return { fp, base: PR_BASE, baseSha: r.head, report: null }; // --base 只定起点；PR 的 base 固定是 main（i28-RA1：开在起点分支上会冻住合并队列）
   }
   if (fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage)) return lendFixMaterials(fp, q, probe, { db, task });
   const ui = uiRejectLend(db, task); // 同一合成函数决定截图意见与代码 P1 的来源；有代码问题时报告原文也必须内联
