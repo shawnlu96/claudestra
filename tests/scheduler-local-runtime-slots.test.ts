@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
+import { moveStage } from "../src/lib/ledger-write.js";
 import { workingCodexAgents } from "../src/lib/scheduler-local-runtime-slots-ledger.js";
 import { withCodexSlot } from "../src/lib/scheduler-local-runtime-slots.js";
 
@@ -96,13 +97,21 @@ test("R1 old manual review step cannot hide the current scheduler reviewer", asy
   f.db.query("UPDATE tasks SET headSHA = 'head' WHERE id = 'review'").run();
   f.db.query(`INSERT INTO events (ts, actor, project, target, kind, data) VALUES (0,'owner','p','review','stage','{"to":"review","round":2}')`).run();
   f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
-    VALUES ('dispatch','review','p','review','review','current',1,2,1,1,'head',1,'submitted','test',0,0)`).run();
+    VALUES ('t68:s1:r2:review:a0','review','p','review','review','current',1,2,1,1,'head',1,'submitted','test',0,0)`).run();
   f.registry();
   expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(true);
   expect(workingCodexAgents(f.ledgerPath).has("old")).toBe(false);
   expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
+  moveStage(f.db, { actor: "owner" }, { taskId: "review", from: "review", to: "blocked", text: "temporary review interruption" });
+  moveStage(f.db, { actor: "owner" }, { taskId: "review", from: "blocked", to: "review" });
+  expect(workingCodexAgents(f.ledgerPath).size).toBe(6);
+  expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
   f.db.query("UPDATE tasks SET round = 3 WHERE id = 'review'").run();
   expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(false);
+  f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
+    VALUES ('review-swap:s1:r3','review','p','reviewer','ensure_session','current',1,2,1,1,'head',1,'done','test',0,0)`).run();
+  f.db.query("UPDATE scheduler_sessions SET createIntentId = 'review-swap:s1:r3' WHERE taskId = 'review'").run();
+  expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(true);
 });
 
 test("R1 real manual start and reviewer ensure use the current custom ledger before side effects", async () => {

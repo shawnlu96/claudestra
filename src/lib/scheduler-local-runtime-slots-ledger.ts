@@ -23,16 +23,15 @@ export function workingCodexAgents(path = LEDGER_PATH): Set<string> {
           if (task.agent) agents.add(task.agent);
           continue;
         }
-        // Review sessions survive fix rounds; only this round’s dispatched work makes the binding busy.
+        // Intent ids encode the round; blocked recovery keeps that round and cannot invalidate its work.
         const session = db.query(`SELECT agent FROM scheduler_sessions WHERE taskId = ? AND role = 'reviewer'
           AND state = 'active' AND transport != 'peer' AND EXISTS (
-            SELECT 1 FROM scheduler_intents i JOIN events e ON e.target = i.taskId
-            WHERE i.taskId = scheduler_sessions.taskId AND i.recipient = scheduler_sessions.agent
-              AND i.action = 'review' AND i.status IN ('submitted','done','unknown') AND i.head = ?
-              AND e.kind = 'stage' AND json_extract(e.data, '$.to') = 'review'
-              AND json_extract(e.data, '$.round') = ? AND i.eventSeq > e.seq
-              AND e.seq = (SELECT MAX(seq) FROM events WHERE target = i.taskId AND kind = 'stage'
-                AND json_extract(data, '$.to') = 'review')) ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(task.id, task.headSHA, task.round) as { agent: string } | null;
+            SELECT 1 FROM scheduler_intents i WHERE i.taskId = scheduler_sessions.taskId
+              AND instr(i.id || ':', ':r' || ? || ':') > 0 AND (
+                i.id = scheduler_sessions.createIntentId OR (
+                  i.recipient = scheduler_sessions.agent AND i.action = 'review'
+                  AND i.status IN ('submitted','done','unknown') AND i.head = ?)))
+          ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(task.id, task.round, task.headSHA) as { agent: string } | null;
         if (session) agents.add(session.agent);
       }
       return agents;
