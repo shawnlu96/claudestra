@@ -49,6 +49,8 @@ bun src/manager.ts create <name> <dir> [purpose] --runtime pi [--model provider/
 bun src/manager.ts resume <name> <sessionId> [dir] --runtime pi   # id may be non-UUID
 ```
 
+New / resumed Pi agents run over ACP when the checks pass and fall back to the tmux TUI described below otherwise (`--transport tmux|acp` overrides): [pi-acp-migration.md](./pi-acp-migration.md).
+
 **How the channel works.** Claude Code gets messages pushed into its context by the official channel protocol over an stdio MCP server (`channel-server.ts`). Pi has no such thing — its core ships no MCP and an MCP child process cannot see the session identity. So the Pi side is a **Pi extension** (`src/pi/claudestra-extension.ts`) loaded with `--extension` by the launcher. It speaks the *same* bridge WebSocket protocol as `channel-server` (register / registered / response / message / replaced + ping), so `bridge.ts` needed no changes for the round trip. Differences, all inside the extension:
 
 - inbound message → `pi.sendUserMessage()` (idle) or with `deliverAs: "steer"` (mid-turn), instead of an MCP channel notification;
