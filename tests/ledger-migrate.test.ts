@@ -326,6 +326,7 @@ describe("写事件的底座只给写入模块", () => {
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
   // scheduler-deploy.ts：部署 journal（T68g），只有调度身份推进，deployed 才把本卡 merge→live，结清只 PM / master / owner
   // ledger-lend-peers.ts：借算力 v2（i28-W2）的 hello 入账、beat 续租 / 收回、推送应答，CAS 在它的事务里，写事件只经 ledger-lend.ts 的 leaseLend / withdrawPooledLend
+  // ledger-lend-relay.ts：出借写单持单期间的规格追加 / 复述答复转发队列（i28-RS1），只写自己的两张表和一条 lend relay note，不推阶段
   // order-mark.ts：只写两种按意图去重的 scheduler 事件（领单留痕 = 收件人本人本会话、未领单报警 = 调度身份），不推阶段（i28-M4b）
   // ledger-autostart*.ts：自动开卡的 claim / step / settle 与开关（i28-A1）：调度身份的写权只由活着的 claim 授予，step 先核 claim 再调 lib 写函数；
   //   step 回滚取消本 claim 建的卡时按 pm 推 cancelled（applyMove asRole）；自动交回在事务里重判后走 PM 交回的同一核心
@@ -350,7 +351,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
-      "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts",
+      "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts", "lib/ledger-lend-relay.ts",
       "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",

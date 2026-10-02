@@ -21,6 +21,8 @@ import { currentReviewFacts } from "./scheduler-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
 import { standardAnswers } from "./order-standard-answers.js";
+import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
+import { lentAwayText } from "./ledger-lend-relay.js";
 
 type WorkStage = "build" | "fix";
 export interface CurrentOrder {
@@ -58,9 +60,20 @@ function bindingAllows(db: Database, taskId: string, call: VerifiedCall): boolea
   return s.agent === call.agent && !!call.sessionId && s.sessionId === call.sessionId;
 }
 
-export function currentOrders(db: Database, call: VerifiedCall): CurrentOrder[] {
+/** 这张卡这一轮的代码在出借方写（i28-RS1）：有未结的写 / 修出借单，或这一阶段的派单意图挂给了 peer（挂池了、还没出单也算） */
+export interface LentAway { taskId: string; peer: string; orderId: string; note: string }
+
+function lentAway(db: Database, task: LedgerTask, intent: SchedulerIntent | null): LentAway | null {
+  const live = hasTable(db, "lend_orders") ? db.query(`SELECT orderId, peer FROM lend_orders WHERE taskId = ? AND step IN ('write','fix')
+    AND status IN ('pooled','claimed','unknown') ORDER BY createdAt DESC LIMIT 1`).get(task.id) as { orderId: string; peer: string } | null : null;
+  const away = live ?? (intent && isPoolIntent(intent) ? { orderId: intent.id, peer: (intent.recipient as string).slice(POOL_RECIPIENT.length) } : null);
+  return away && { taskId: task.id, ...away, note: lentAwayText(away.peer, away.orderId, task.id) };
+}
+
+function scanOrders(db: Database, call: VerifiedCall): { orders: CurrentOrder[]; away: LentAway[] } {
   const ids = db.query("SELECT id FROM tasks WHERE stage IN ('build', 'fix') ORDER BY updatedAt DESC, id").all() as { id: string }[];
   const out: CurrentOrder[] = [];
+  const away: LentAway[] = [];
   for (const { id } of ids) {
     const task = getTask(db, id);
     if (!task || (task.stage !== "build" && task.stage !== "fix")) continue;
@@ -69,9 +82,31 @@ export function currentOrders(db: Database, call: VerifiedCall): CurrentOrder[] 
     if (!bindingAllows(db, task.id, call)) continue;
     const step = task.stage === "fix" ? "fix" : "write";
     const intent = currentIntent(db, task, step);
+    // 写单挂给了 peer（或已被 peer 领走）：本机会话只做复述，不把这张单发给它，换成说明（i28-RS1）
+    const lent = lentAway(db, task, intent);
+    if (lent) {
+      away.push(lent);
+      continue;
+    }
     out.push({ task, stage: task.stage, step, orderId: intent?.id ?? manualOrderId(task.id, step, task.round), intent });
   }
-  return out;
+  return { orders: out, away };
+}
+
+export const currentOrders = (db: Database, call: VerifiedCall): CurrentOrder[] => scanOrders(db, call).orders;
+
+/**
+ * take_order 的结果（bridge/order-tools.ts）：当前的单，多张时取最近动过的一张、其余单号一并给；没有单但有借出去的卡时，order 为空、
+ * note 是固定说明（「本卡代码由 <peer> 写…」），不是一张空单。
+ */
+export function takeOrderResult(db: Database | null, call: VerifiedCall):
+  { ok: true; order: OrderWire | null; otherOrderIds?: string[]; note?: string } | { ok: false; error: string } {
+  if (!db) return { ok: true, order: null };
+  const { orders, away } = scanOrders(db, call);
+  if (!orders.length) return { ok: true, order: null, ...(away.length ? { note: away.map((a) => a.note).join("\n") } : {}) };
+  const w = orderWireFor(db, orders[0]);
+  if (!w.ok) return w;
+  return { ok: true, order: w.order, ...(orders.length > 1 ? { otherOrderIds: orders.slice(1).map((o) => o.orderId) } : {}) };
 }
 
 function dagVersionOf(db: Database, task: LedgerTask): number | null {
