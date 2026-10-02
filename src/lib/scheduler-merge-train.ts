@@ -365,7 +365,7 @@ export async function stepTrain(s: TrainState, deps: TrainDeps): Promise<TrainSt
 /**
  * Asked by the merge driver at ready and at await_ci, before any update-branch or merge (scheduler-merge-driver.ts): wait while this
  * card's train is testing, bounce the card the bisect pinned, clear a verified member to skip update-branch only while every
- * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path (an outsider voids the train first).
+ * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path (an outsider waits; it voids only a train past the hold limit).
  */
 export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & Pick<TrainDeps, "gh">): Promise<TrainGate> {
   if (!s || (s.phase !== "testing" && s.phase !== "settling")) return null;
@@ -374,7 +374,7 @@ export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & 
   const bounce = s.bounced.find((b) => b.taskId === m.taskId && sameSha(b.head, m.head));
   if (bounce) return { bounce: bounce.receipt };
   if (s.phase === "testing") return "wait";
-  if (!s.cleared.includes(m.taskId)) return releaseOutsider(s, run, deps, voidTrain); // i28-MT1f2: it holds the slot the members need
+  if (!s.cleared.includes(m.taskId)) return releaseOutsider(s, run, deps, voidTrain); // i28-MT1f2f2: it waits, the merge pass lends its slot to the members
   const why = await verdictNow(s, deps.gh);
   if (!why) return "cleared";
   await voidTrain(s, deps, `合并前核对：${why}`);
