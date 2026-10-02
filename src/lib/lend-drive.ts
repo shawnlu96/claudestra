@@ -28,6 +28,7 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
 import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
+import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -86,6 +87,8 @@ export interface LendDeps {
   failure(agent: string): CodexFailureSeen | undefined;
   /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
   closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 结单收尾全做完后把 worker 的会话收进 archived/（lend-session-archive.ts，自己兜错只记日志）；不设 = 不归档 */
+  archiveSessions?(row: LendRow): Promise<void>;
   /** 本机 Codex 额度（撞额度暂停借单用）；读不到 = null */
   codexQuota(): Promise<QuotaView | null>;
   log(msg: string): void;
@@ -184,6 +187,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
+  await d.archiveSessions?.(told);
 }
 
 /**
@@ -274,7 +278,8 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
 
 async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   if (row.work && !row.payload) {
-    const published = await publishWork(row, d);
+    const pre = await preflightDelivery(row, d); if (typeof pre !== "object") return pre ? finish(row, "stopped", pre, d, true) : undefined;
+    const published = await publishWork(pre, d);
     if (!published) return;
     row = published;
   }
@@ -284,8 +289,9 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   const r = await lendRequest(d.call, row.peer, "result", body);
   if (!r.ok) {
     if (r.code === "transport" || r.code === "bad_response" || r.code === "unavailable") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
-    const gone = GONE[r.code];
-    return finish(row, gone ?? "stopped", `A 不收结论：${r.code} ${r.error}`, d, !gone);
+    const gone = GONE[r.code], note = r.code === DELIVERY_NOTE ? await amendDelivery(row, r.error, d) : undefined; // 说明不全：补写重交
+    if (note === null) return;
+    return finish(row, gone ?? "stopped", note ?? `A 不收结论：${r.code} ${r.error}`, d, !gone);
   }
   const rc = r.value;
   const o = orderOf(row);

@@ -75,6 +75,7 @@ export interface ApiUserEndpoint {
   kind: "api";
   /** token 短 id（"tok_xxx"），虚拟 chat_id 的 id 部分 */
   tokenId: string;
+  credential?: string; // Recheck a device grant after PM redirection, rather than its broader principal.
   /** token 的人类名，渲染进 agent 看到的 header */
   name: string;
   /** v2.11+ HTTP peer 标记(principal.peer 透传):入站注入头渲染成 peer 请求 */

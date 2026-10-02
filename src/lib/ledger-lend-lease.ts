@@ -17,6 +17,8 @@ import type { ReviewFinding } from "./scheduler-review.js";
 import type { bounceWork } from "./scheduler-merge-conflict.js";
 import { lendFixEnv } from "./lend-fix-env.js";
 import { relayTarget } from "./lend-fix-reassign-event.js";
+/** i28-GATE2：出借单外发前把本卡历史 head 截短、敏感问题编号换别名（逻辑在 order-gate-heads.ts） */
+export { forPeer } from "./order-gate-heads.js";
 
 export interface WriteLease {
   taskId: string; project: string; peer: string; fp: string; branch: string; repo: string;

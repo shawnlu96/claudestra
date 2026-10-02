@@ -21,6 +21,7 @@ import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
 import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
+import { archiveEndedWorker } from "./lend-session-archive.js";
 import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
 import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
 import { lendRuntimeArgs, removeClaudeOrderConfig } from "./lend-claude-worker-routing.js";
@@ -172,6 +173,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-ask --retire 失败") };
     },
     failure: (agent) => lendWorkerFailureOf(journal, agent, () => failureOf(ledger, agent)),
+    archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`))),
     closeAsks: async (agent) => {
       const r = await svc("ledger", "lend-close-asks", "--agent", agent);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };
@@ -258,5 +260,5 @@ export const lendStep = (ledger: LedgerReader) => async (active: () => void, lea
   active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
   const journal = openLendJournal();
   guardJournalWrites(journal, active);
-  try { return await (await import("./lend-loop.js")).lendTick(lendDeps(journal, ledger, active, lease)); } finally { journal.close(); }
+  try { return await (await import("./lend-work-retention.js")).lendTickWithRetention(lendDeps(journal, ledger, active, lease), active); } finally { journal.close(); }
 };

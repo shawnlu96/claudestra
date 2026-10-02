@@ -354,7 +354,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts", "lib/lend-fix-reassign-tick.ts",
-      "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts", "lib/order-mark.ts",
+      "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",

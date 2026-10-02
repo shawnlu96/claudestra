@@ -9,6 +9,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { statePath } from "./paths.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { prevReviewedHead, SCOPE_ROUND, type FixDiff } from "./review-converge.js";
+import { rebaseFixDiff } from "./scheduler-review-rebase.js";
 
 export type DiffRunner = (dir: string, from: string, to: string) => string[] | null;
 
@@ -33,6 +34,8 @@ export function fixDiffOf(task: Pick<LedgerTask, "id" | "round">, events: readon
   const to = events.findLast((e) => e.kind === "review" && e.data.round === task.round)?.data.head;
   const from = prevReviewedHead(events, task.round);
   if (typeof to !== "string" || !from || !SHA.test(to) || !SHA.test(from)) return null;
+  const rebase = rebaseFixDiff(task.round, events, from, to); // merge-driver re-review: the PR's files against main (i28-RH1)
+  if (rebase !== undefined) return rebase;
   const key = `${from}..${to}`;
   const hit = cache.get(key);
   if (hit) return { from, to, files: hit };
