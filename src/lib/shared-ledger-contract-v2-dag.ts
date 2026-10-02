@@ -2,7 +2,7 @@ import { validateDag } from "./shared-ledger-contract-validation.js";
 import { SharedLedgerError } from "./shared-ledger-contract.js";
 import {
   array, boolean, choice, digest, distinct, id, integer, nullable, object, positive, refine,
-  revisions, scope, text, timestamp, relativePath, fail, type Infer, type Schema,
+  revisions, scope, text, timestamp, relativeGlob, fail, type Infer, type Schema,
 } from "./shared-ledger-contract-v2-validation.js";
 
 function v1Schema<T>(schema: Schema<T>): Schema<T> {
@@ -11,7 +11,7 @@ function v1Schema<T>(schema: Schema<T>): Schema<T> {
     catch (e) { if (e instanceof SharedLedgerError) return fail(); throw e; }
   };
 }
-export const parseNode = object({ key: id, oneLine: text(2000, 1), deps: array(id), fileGlobs: array(relativePath), estimate: text(200) });
+export const parseNode = object({ key: id, oneLine: text(2000, 1), deps: array(id), fileGlobs: array(relativeGlob), estimate: text(200) });
 const dagSchema = object({ version: integer, nodes: array(parseNode), bindings: array(object({ nodeKey: id, taskId: id })) });
 export const parseDag = v1Schema((value: unknown) => { const dag = dagSchema(value); validateDag(dag); return dag; });
 export const parseFeature = refine(object({
