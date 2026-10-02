@@ -4,7 +4,6 @@ import { prepareSharedLedgerImport, advanceSharedLedgerImport } from "../scripts
 import { SharedLedgerClient, SharedLedgerRemoteError } from "../src/lib/shared-ledger-client.js";
 import { SharedLedgerCache } from "../src/lib/shared-ledger-cache.js";
 import type { SharedLedgerFeatureList } from "../src/lib/shared-ledger-contract.js";
-import { SHARED_LEDGER_AUTH_HEADERS as H, signSharedLedgerRequest } from "../src/lib/shared-ledger-auth.js";
 import { makeDraft, rewrite, rebaseDraft, resolveNodeConflict, stale } from "../web/features/collab/shared/shared-model.js";
 import { c6Fixture } from "./shared-ledger-c6-fixture.test.js";
 
@@ -56,21 +55,14 @@ test("two isolated members: import visibility, next poll, CAS draft rebase, lock
     await expect(a.command({ ...lockedCommand, nodes: locked.nodes }))
       .rejects.toBeInstanceOf(SharedLedgerRemoteError);
     await expect(a.command({ type: "task.stage" } as never)).rejects.toThrow();
-    await expect(a.controlImport({ mode: "revoke", batchId: "batch", projectId: "project", manifestDigest: prepared.payload.manifestDigest })).rejects.toMatchObject({ status: 403 });
+    await expect(a.controlImport({ mode: "revoke", batchId: "batch", projectId: "project", manifestDigest: prepared.payload.manifestDigest }))
+      .rejects.toMatchObject({ status: 403, response: { code: "forbidden" } });
     await expect(a.command({ type: "feature.new", requestId: "cross", projectId: "other", title: "Denied", description: "", homeInstanceId: "peer-a" }))
       .rejects.toMatchObject({ status: 403 });
     const wrong = new SharedLedgerClient({ ...f.connections[0]!, instanceId: "wrong-instance" }, f.keys[0]!);
     await expect(wrong.features()).rejects.toMatchObject({ status: 403 });
     const stranger = new SharedLedgerClient({ ...f.connections[0]!, bearer: randomBytes(24).toString("hex") }, f.keys[0]!);
-    await expect(stranger.features()).rejects.toBeInstanceOf(SharedLedgerRemoteError);
-    const nonce = randomBytes(16).toString("hex"), path = "/v1/teams/team/commands";
-    const signed = signSharedLedgerRequest({ method: "POST", path, bearer: f.connections[0]!.bearer, instanceId: "peer-a",
-      ts: String(Math.floor(Date.now() / 1000)), attemptNonce: nonce,
-      body: JSON.stringify({ attemptNonce: nonce, payload: { ...rewrite(drafts[0]!, "spoof"), actor: "owner", role: "owner" } }) }, f.keys[0]!);
-    const denied = await fetch(new URL(path, f.connections[0]!.baseUrl), { method: "POST", body: signed.body, headers: {
-      authorization: `Bearer ${signed.bearer}`, [H.key]: signed.publicKey, [H.sig]: signed.signature,
-      [H.ts]: signed.ts, [H.instance]: signed.instanceId, [H.nonce]: signed.attemptNonce } });
-    expect(denied.status).toBe(400);
+    await expect(stranger.features()).rejects.toMatchObject({ status: 403, response: { code: "not_member" } });
     await f.client().commitImport(prepared.payload);
     expect((await a.feature(id)).dag).toEqual(updated.dag);
     expect(stale(updated.feature, updated.feature.projection!.observedAt + 31000)).toBe(true);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { prepareSharedLedgerImport, advanceSharedLedgerImport } from "../scripts/shared-ledger-import.js";
+import { prepareSharedLedgerImport, advanceSharedLedgerImport, revokeUncommittedSharedLedgerImport } from "../scripts/shared-ledger-import.js";
 import { readSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { readSharedLedgerBindings } from "../src/lib/shared-ledger-gate-bindings.js";
 import { c6Fixture } from "./shared-ledger-c6-fixture.test.js";
@@ -98,6 +98,45 @@ test("a center rollback or missing previously confirmed receipt cannot reopen or
     await expect(advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", client, payload.manifestDigest, "commit"))
       .rejects.toThrow("receipt rollback");
     expect(methods).toEqual(["GET"]);
+    expect(readSharedLedgerMode(f.options.featureIds[0]!, f.dirs[0]).sharedPlanning).toBe(true);
+  } finally { f.close(); }
+});
+
+test("prepared batch aborts locally while offline and a new selection can prepare under a new batch", async () => {
+  const f = await c6Fixture();
+  try {
+    const { payload } = await prepareSharedLedgerImport(f.db, f.options);
+    const offline = f.client((async () => { throw new Error("center must not be contacted"); }) as unknown as typeof fetch);
+    await expect(advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", offline, "bad", "revoke"))
+      .rejects.toThrow("reviewed manifest digest required");
+    expect(readSharedLedgerMode(f.options.featureIds[0]!, f.dirs[0]).sharedPlanning).toBe(true);
+    expect((await advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", offline, payload.manifestDigest, "revoke")).status).toBe("aborted");
+    expect(readSharedLedgerMode(f.options.featureIds[0]!, f.dirs[0]).sharedPlanning).toBe(false);
+    expect(JSON.parse(readFileSync(join(f.dirs[0]!, "shared-ledger-migrations", "batch.json"), "utf8")).phase).toBe("aborted");
+    expect(await revokeUncommittedSharedLedgerImport(f.db, f.dirs[0]!, "batch")).toEqual({ status: "aborted", batchId: "batch" });
+    await expect(advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", offline, payload.manifestDigest, "commit"))
+      .rejects.toThrow("migration aborted");
+    await expect(prepareSharedLedgerImport(f.db, f.options)).rejects.toThrow("batch revoked");
+    await prepareSharedLedgerImport(f.db, { ...f.options, batchId: "other",
+      summaries: { [f.options.featureIds[0]!]: { summary: "revised", digest: null } } });
+  } finally { f.close(); }
+});
+
+test("gating crash aborts without payload or center credential; committing cannot abort locally", async () => {
+  const f = await c6Fixture();
+  try {
+    const { payload } = await prepareSharedLedgerImport(f.db, f.options);
+    const path = join(f.dirs[0]!, "shared-ledger-migrations", "batch.json");
+    const record = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...record, phase: "gating", payload: undefined }));
+    expect(await revokeUncommittedSharedLedgerImport(f.db, f.dirs[0]!, "batch")).toEqual({ status: "aborted", batchId: "batch" });
+    expect(JSON.parse(readFileSync(path, "utf8")).phase).toBe("aborted");
+    expect(readSharedLedgerMode(f.options.featureIds[0]!, f.dirs[0]).sharedPlanning).toBe(false);
+    await prepareSharedLedgerImport(f.db, { ...f.options, batchId: "next" });
+    const nextPath = join(f.dirs[0]!, "shared-ledger-migrations", "next.json");
+    const next = JSON.parse(readFileSync(nextPath, "utf8"));
+    writeFileSync(nextPath, JSON.stringify({ ...next, phase: "committing" }));
+    expect(await revokeUncommittedSharedLedgerImport(f.db, f.dirs[0]!, "next", payload.manifestDigest)).toBeNull();
     expect(readSharedLedgerMode(f.options.featureIds[0]!, f.dirs[0]).sharedPlanning).toBe(true);
   } finally { f.close(); }
 });

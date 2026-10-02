@@ -369,8 +369,9 @@ CLAUDESTRA_STATE_DIR="<本机状态目录>" bun scripts/shared-ledger-import.ts 
 # 人工逐项检查输出的白名单包，保留其 manifestDigest；改动集合或摘要要重新预览。
 CLAUDESTRA_STATE_DIR="<本机状态目录>" bun scripts/shared-ledger-import.ts commit local-plan.json "<已预览的manifestDigest>"
 CLAUDESTRA_STATE_DIR="<本机状态目录>" bun scripts/shared-ledger-import.ts activate local-plan.json "<同一manifestDigest>"
-# 仅在尚未 activate 时可撤销试迁：
+# prepare 后、commit 前可本机撤销；commit 后仅在中心确认尚未 activate 时可撤销：
 CLAUDESTRA_STATE_DIR="<本机状态目录>" bun scripts/shared-ledger-import.ts revoke local-plan.json "<同一manifestDigest>"
+# 若 prepare 在 gating 阶段中断，没有 manifestDigest，可省略最后一个参数。
 ```
 
 - `prepare` 生成一致性备份并安装写门，输出 C3 白名单预览；备份和恢复日志位于状态目录的 `shared-ledger-migrations/`，权限 0600。
@@ -378,6 +379,8 @@ CLAUDESTRA_STATE_DIR="<本机状态目录>" bun scripts/shared-ledger-import.ts 
   此时仍是 source，成员不能改写，也未切本机路由。
 - `activate` 再核对本机快照和中心回执，中心原子开放 planning 后才装本机 planning 模式和中心项目路由。
   任一回包丢失均保留写门，重跑原命令先查回执；不换 batchId，不以超时作为回滚依据。
-- `revoke` 只在中心确认 staged 批次已撤销后恢复本机写门；保留撤销回执，旧批次重跑不影响后续新批次。
-  已开放共享规划不能通过此命令迁回。模式日志尚未完成的批次会保留所选 feature，须先恢复该批次才能发起新迁移。
+- `revoke` 对尚未进入 `committing` 的 `gating` / `prepared` 批次在本机台账写锁内恢复 source 模式，并将日志记为 `aborted`；
+  此路径不请求中心，也不需要中心凭据。`prepared` 必须提供人工预览的 digest；`gating` 可不提供。
+  此后用新 batchId 可重新选择集合并 `prepare`。进入 `committing` 后必须先查询同批中心回执，只有中心确认 staged 已撤销才恢复写门。
+  已开放共享规划不能通过此命令迁回；旧批次重跑不会影响后续新批次。
 - 中心 schema 只追加导入生命周期表；升级前已有而缺生命周期回执的批次会拒绝自动启用或撤销，需人工核对历史权威。
