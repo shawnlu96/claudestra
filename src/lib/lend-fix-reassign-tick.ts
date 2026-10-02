@@ -94,6 +94,7 @@ export async function relayPrSweep(db: Database, projects: readonly string[], ma
   const rows = db.query(`SELECT DISTINCT r.target FROM events AS r WHERE r.dedupKey >= 'scheduler:fix-relay:' AND r.dedupKey < 'scheduler:fix-relay;'
     AND r.project IN (${projects.map(() => "?").join(",")}) AND NOT EXISTS (SELECT 1 FROM events AS c WHERE c.dedupKey = 'scheduler:fix-relay-closed:' || r.seq)
     ORDER BY r.target`).all(...projects) as { target: string }[];
+  if (!rows.length) return; // nothing owed: no clock read, no manager call
   const tries = retryAt.get(db), now = clock(), at = (id: string) => tries?.get(id) ?? 0;
   const due = rows.map(({ target }) => getTask(db, target)).filter((t): t is LedgerTask => !!t && at(t.id) <= now && !!relayPrPending(db, t));
   const next = due.sort((a, b) => at(a.id) - at(b.id))[0];
