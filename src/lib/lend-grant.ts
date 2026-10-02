@@ -17,14 +17,14 @@ export const REVOKED = "出借授权已收回或失效";
 export const isRevoked = (row: Pick<LendRow, "reason">): boolean => (row.reason ?? "").startsWith(REVOKED);
 
 /**
- * row 带了挂单摘要（preview）就连这张单的仓库 / 角色 / 家族一起核（scopeProblem）；收单入口只有 peer，只核整条。
+ * row 带了挂单摘要（preview）就连这张单的仓库 / 阶段 / 家族一起核（scopeProblem）；收单入口只有 peer，只核整条。
  * 先读联系人、最后读 lend.json：读完到调用方发出效果（claim、起 worker、派单）之间不再有别的 I/O，收回落在任何一次 await 里都看得见。
  */
 export async function liveGrant(row: Pick<LendRow, "peer" | "fp"> & Partial<Pick<LendRow, "preview" | "family">>,
-  d: Pick<LendDeps, "readLend" | "context" | "now" | "writeOpen">): Promise<LiveGrant> {
+  d: Pick<LendDeps, "readLend" | "context" | "now">): Promise<LiveGrant> {
   const ctx = await d.context();
   const read = await d.readLend();
-  const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now(), d.writeOpen);
+  const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now());
   if (eff.invalid) return { ok: false, problem: `lend.json 无效：${eff.invalid}` };
   const entry = eff.lend.find((e) => e.peer === row.peer);
   if (!entry) {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runClaudeWorker } from "../src/lib/lend-claude-worker-host.js";
 import { archiveClaudeWorker } from "../src/lib/lend-claude-worker-archive.js";
-import { CLAUDE_LEND_ROOT, claudeWorkerSessionPath } from "../src/lib/lend-claude-worker-session.js";
+import { CLAUDE_LEND_ROOT, claudeWorkerSessionPath, RUN_RECORD_FILE } from "../src/lib/lend-claude-worker-session.js";
 import { ARCHIVE_ROOT } from "../src/lib/paths.js";
 import { projectsSlug } from "../src/lib/jsonl-cost.js";
 import { claudeCodeAdapter } from "../src/lib/runtimes/claude-code.js";
@@ -36,7 +36,7 @@ function fixture() {
   advance(db, "o1", "claimed", "cloned", { dir: root }, now);
   patchOrder(db, "o1", ["cloned"], { agent }, now);
   const plan = claudeWorkerPlan({ mode: "new", cwd: root, agentName: agent, channelId: "test", bridgeUrl: "ws://localhost:9", sessionId: randomUUID(), callerCredFile: "/cred" },
-    dir, "/test-auth", {}, "/fake/claude");
+    dir, {}, "/fake/claude");
   return { root, agent, dir, journal, lendPath, now, grant, db, plan };
 }
 
@@ -77,9 +77,8 @@ for (const reason of ["revoke", "expired", "terminal"] as const) test(`Claude �
   const exited = new Promise<number>((r) => { resolveExit = r; });
   const order: string[] = [];
   const why = lendWatchdog(f.agent, () => {}, f.journal, f.lendPath);
-  const result = await runClaudeWorker(f.plan, { receive: async () => "fake-token", intervalMs: 5, reason: () => why(now), log: () => {},
-    spawn: (p, token) => {
-      expect(token).toBe("fake-token");
+  const result = await runClaudeWorker(f.plan, { intervalMs: 5, reason: () => why(now), log: () => {},
+    spawn: (p) => {
       expect(p.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
       order.push("spawn");
       if (reason === "revoke") f.grant(false);
@@ -95,28 +94,52 @@ for (const reason of ["revoke", "expired", "terminal"] as const) test(`Claude �
   expect(existsSync(f.dir)).toBe(false);
 });
 
-test("凭据交接期间收回授权：再核一次，不起 Claude，删除目录", async () => {
+test("起之前授权已收回：不起 Claude，删除目录", async () => {
   const f = fixture();
+  f.grant(false);
   const spawned: string[] = [];
-  await runClaudeWorker(f.plan, { receive: async () => { f.grant(false); return "fake"; },
-    reason: () => lendStopReason(f.agent, f.journal, f.now, f.lendPath),
+  expect(await runClaudeWorker(f.plan, { reason: () => lendStopReason(f.agent, f.journal, f.now, f.lendPath),
     spawn: () => { spawned.push("bad"); return { pid: 123, exited: Promise.resolve(0) }; }, stop: async () => {}, log: () => {},
-    cleanup: () => rmSync(f.dir, { recursive: true }) });
+    cleanup: () => rmSync(f.dir, { recursive: true }) })).toBe(1);
   expect(spawned).toEqual([]);
   expect(existsSync(f.dir)).toBe(false);
 });
 
-test("CLI 启动失败或凭据交接失败，也清理目录", async () => {
-  for (const phase of ["auth", "spawn"]) {
-    const f = fixture();
-    await expect(runClaudeWorker(f.plan, { reason: () => null, log: () => {},
-      receive: async () => { if (phase === "auth") throw new Error("auth failed"); return "fake"; },
-      spawn: () => { throw new Error("spawn failed"); }, stop: async () => {}, cleanup: () => rmSync(f.dir, { recursive: true }) })).rejects.toThrow("failed");
-    expect(existsSync(f.dir)).toBe(false);
-  }
+test("CLI 启动失败也清理目录", async () => {
+  const f = fixture();
+  await expect(runClaudeWorker(f.plan, { reason: () => null, log: () => {},
+    spawn: () => { throw new Error("spawn failed"); }, stop: async () => {}, cleanup: () => rmSync(f.dir, { recursive: true }) })).rejects.toThrow("failed");
+  expect(existsSync(f.dir)).toBe(false);
 });
 
-test("隔离会话接回现有读取/归档路径，清理后会话和子会话快照仍在", async () => {
+test("本机登录口径：会话在出借方默认 projects 目录，按代次记录接回读取 / 归档；清理代次后会话仍在、快照也在", async () => {
+  const f = fixture();
+  const home = mkdtempSync(join(tmpdir(), "cc-life-home-")); // 出借方的 HOME（假的，不写真实 ~/.claude）
+  cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const session = randomUUID();
+  const project = join(home, ".claude", "projects", projectsSlug(f.root));
+  writeFileSync(join(f.dir, RUN_RECORD_FILE), JSON.stringify({ cwd: f.root, sessions: project }));
+  mkdirSync(join(project, session, "subagents"), { recursive: true });
+  const file = join(project, `${session}.jsonl`);
+  writeFileSync(file, '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n');
+  writeFileSync(join(project, session, "subagents", "agent-a.jsonl"), '{"type":"assistant"}\n');
+  const archive = join(ARCHIVE_ROOT, f.agent);
+  cleanup.push(() => rmSync(archive, { recursive: true, force: true }));
+  expect(claudeWorkerSessionPath(session, f.agent)).toBe(file);
+  expect(claudeWorkerSessionPath(session)).toBe(file);
+  expect(claudeCodeAdapter.sessionPath(f.root, session)).toBe(file);
+  await archiveClaudeWorker(f.plan, () => {});
+  rmSync(f.dir, { recursive: true });
+  expect(existsSync(file)).toBe(true);
+  expect(readFileSync(join(archive, `${session}.jsonl`), "utf8")).toContain("done");
+  expect(existsSync(join(archive, session, "subagents", "agent-a.jsonl"))).toBe(true);
+  writeFileSync(join(CLAUDE_LEND_ROOT, f.agent, "run-file"), ""); // 代次目录旁的杂项文件不当代次
+  mkdirSync(join(CLAUDE_LEND_ROOT, f.agent, "run-broken"), { recursive: true });
+  writeFileSync(join(CLAUDE_LEND_ROOT, f.agent, "run-broken", RUN_RECORD_FILE), "{broken");
+  expect(claudeWorkerSessionPath(randomUUID())).toBeNull(); // 坏记录不让普通会话查询抛错
+});
+
+test("旧版独立配置目录的会话（升级前起的 worker）照样接回读取 / 归档", async () => {
   const f = fixture();
   const session = randomUUID();
   const project = join(f.dir, "config", "projects", projectsSlug(f.root));

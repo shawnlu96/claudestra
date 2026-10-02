@@ -202,7 +202,7 @@ export function beginRetire(db: Database, ctx: WriteCtx, taskId: string): { inte
 }
 
 /** Lazily widen the original per-role key at the first swap; all bindings, FKs and uniqueness survive the transaction. */
-function preserveSessionHistory(db: Database): void {
+export function preserveSessionHistory(db: Database): void {
   const columns = db.query("PRAGMA table_info(scheduler_sessions)").all() as { name: string; pk: number }[];
   if (columns.some((c) => c.name === "sessionId" && c.pk)) return;
   const schema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get() as { sql: string };
