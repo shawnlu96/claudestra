@@ -164,18 +164,30 @@ describe("pi-settings 分流", () => {
     expect(await settingsRoute("pi", ch)).toBe("pi");
   });
 
-  test("registry 配的是 ACP、宿主正在重连：仍走 acp，且回 409 宿主没连上，不退回往 tmux 打字、不写 registry", async () => {
-    const ch = "local-pi-settings-reconnect";
+  test("registry 配的是 ACP、宿主没连上：在跑 → 409 不写；停着 → 只写 registry、回 200 下次启动生效（Codex / Pi 同一条）", async () => {
+    const [chP, chC] = ["local-pi-settings-reconnect", "local-codex-settings-stopped"];
     const saved = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
-    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: { "agent-pr": { runtime: "pi", channelId: ch, transport: "acp" } } }));
+    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {
+      "agent-pr": { runtime: "pi", channelId: chP, transport: "acp" }, "agent-cr": { runtime: "codex", channelId: chC, transport: "acp" },
+    } }));
     try {
-      noteAcpChannel(ch, undefined);
-      expect(await settingsRoute("pi", ch)).toBe("acp");
+      noteAcpChannel(chP, undefined);
+      expect(await settingsRoute("pi", chP)).toBe("acp");
+      expect(await settingsRoute("codex", chC)).toBe("acp");
       const calls: string[][] = [];
-      const res = await acpSettings("agent-pr", ch, "flash", "", async (...a: string[]) => (calls.push(a), { ok: true }));
-      expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ ok: false, code: "acp_host_offline" });
+      const rm = async (...a: string[]) => (calls.push(a), { ok: true });
+      const running = await acpSettings("agent-pr", chP, "flash", "", rm, async () => true);
+      expect(running.status).toBe(409);
+      expect(await running.json()).toMatchObject({ ok: false, code: "acp_host_offline" });
       expect(calls).toEqual([]);
+      for (const [agent, ch] of [["agent-pr", chP], ["agent-cr", chC]]) {
+        const stopped = await acpSettings(agent, ch, "m-1", "high", rm, async () => false);
+        expect(stopped.status).toBe(200);
+        expect(await stopped.json()).toMatchObject({ ok: true, live: false, nextStart: true, message: expect.stringContaining("下次启动生效") });
+        expect(calls.at(-1)).toEqual(["set-claude", agent, "--model", "m-1", "--effort", "high"]);
+      }
+      expect((await acpSettings("agent-pr", chP, "--effort", "", rm, async () => false)).status).toBe(400); // 不让值变成 manager 的开关
+      expect(calls).toHaveLength(2);
     } finally {
       if (saved === null) rmSync(REGISTRY_PATH, { force: true });
       else writeFileSync(REGISTRY_PATH, saved);

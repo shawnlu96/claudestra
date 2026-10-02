@@ -5,6 +5,7 @@ import { handleSlashPassthrough } from "../src/bridge/api-slash.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
 import { drainChannelWatcher, pushEntries, startWatching, stopWatching, stopWatchingByChannel } from "../src/bridge/jsonl-watcher.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
+import { acpSettings } from "../src/bridge/runtime-settings-routes.ts";
 
 // bridge 这一头：只认当前登记的那条连接；流式条目进 watcher 的推送模式；额度卡 / 权限卡的答案经宿主落地（不发键）
 
@@ -146,6 +147,26 @@ test("ACP 版 Pi 的 /model、/thinking：经宿主 set_config_option 切，切�
     }
     expect(s.sent.some((f) => f.op === "slash")).toBe(false);
     expect(sent).toEqual([]);
+  } finally {
+    noteAcpChannel(ch, "tmux");
+  }
+});
+
+test("网页切换器：宿主在线 → 直接 set_config_option，不看 agent 在不在跑，切成了再写 registry", async () => {
+  const ch = "local-acp-settings-live";
+  const s = sock(ch);
+  noteAcpChannel(ch, "acp");
+  const managed: string[][] = [];
+  let probed = false;
+  try {
+    const pending = acpSettings("agent-live", ch, "", "high", async (...a) => (managed.push(a), { ok: true }), async () => (probed = true));
+    await Bun.sleep(0);
+    const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+    expect(call).toMatchObject({ op: "set_config", configId: "reasoning_effort", value: "high" });
+    await onAcpFrame({ type: "acp_call_result", channelId: ch, id: call.id, ok: true }, s, discord);
+    expect(await (await pending).json()).toMatchObject({ ok: true, live: true });
+    expect(managed).toEqual([["set-claude", "agent-live", "--effort", "high"]]);
+    expect(probed).toBe(false);
   } finally {
     noteAcpChannel(ch, "tmux");
   }
