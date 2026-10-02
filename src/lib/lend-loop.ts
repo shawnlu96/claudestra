@@ -12,7 +12,7 @@ import type { LendEntry } from "./lend-config.js";
 import { advance, getMeta, liveOrders, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
-import { claudeLendSlots, lendPollCapacity } from "./lend-claude-worker-capacity.js";
+import { claudeLendSlots, lendBlockedReason, lendPollCapacity } from "./lend-claude-worker-capacity.js";
 import { admitOrders, pushKey, TICK_KEY } from "./lend-inbox.js";
 import { helloPeer, helloTargets, helloView, metaJson, protoKey, speaksV2, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
 import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
@@ -241,7 +241,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const bad = out.find((x): x is PromiseRejectedResult => x.status === "rejected");
   if (bad) throw bad.reason;
   const paused = pausedUntil(d.db, d.now());
-  p.status.blocked = p.blocked ?? (paused !== null && !eff.lend.some((e) => claudeLendSlots(e) > 0) ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null);
+  p.status.blocked = p.blocked ?? lendBlockedReason(paused, eff.lend);
   if (p.status.blocked) p.status.peers = {};
   setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };
