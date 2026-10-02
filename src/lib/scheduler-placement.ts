@@ -107,7 +107,10 @@ export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamil
     const why = peerRefusal(f, f.peers.find((p) => p.peer === name), role, family);
     return why ? { kind: "wait", reason: `固定放在 ${f.pin}，它现在不能接：${why}` } : toPeer(f, name, role, family, `start_node 固定放在 ${f.pin}`);
   }
-  if (!f.remote || f.remote.mode === "off") return { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
+  if (!f.remote || f.remote.mode === "off") {
+    const refusal = localFamilyRefusal(f, role, family);
+    return refusal ? { kind: "wait", reason: refusal } : { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
+  }
   const lease = role === "fix" && f.remote.roles.includes("write") ? f.writeLeasePeer : null;
   if (lease) {
     // The lender's branch is the card's branch now: anyone else would have to start over (`ledger lend-reclaim` hands it back).
