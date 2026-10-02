@@ -118,12 +118,12 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
   const facts = snapshotPlacementFacts(s, since, role);
   const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
+  const placed = placeFor(facts, role, s.workflow.authorFamily);
+  const relay = lease && !pinned && placed.kind === "wait" ? relayAway(s, since, facts, lease, placed.reason) : null; // i28-RA1：先于 tried 升级
+  if (relay) return relay;
   if (lease && facts.tried.includes(lease)) {
     return { escalate: `修复单派回写租约方 ${lease} 这一轮没成（撤回 / 退回 / 拒挂），写租约还在它那里：PM 核对后 ledger lend-reclaim ${s.task.id} 或 lend-reoffer` };
   }
-  const placed = placeFor(facts, role, s.workflow.authorFamily);
-  const relay = lease && !pinned && placed.kind === "wait" ? relayAway(s, since, facts, lease, placed.reason) : null; // i28-RA1
-  if (relay) return relay;
   const code = pinned ? "placement_pinned" : "placement";
   if (pinned && s.task.stage === "spec") return { code, wait: placed.kind === "peer" ? "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" : placed.reason };
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：${role === "fix" ? "修复" : "开工"}单派给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` };

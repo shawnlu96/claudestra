@@ -1,12 +1,9 @@
 /**
- * Automatic fix reassignment (i28-RA1), the pool step's half: inside the offer's transaction, when the planned peer is not the
- * write-lease holder, re-check the relay rules on the ledger, end the old lease, record one relay event (why, from, to, start
- * head) and put out the fix order through the ordinary order core in the same savepoint: a refused order rolls the relay back.
- * Stage entry reused: the card stays in fix and the order is an ordinary fix order (no protocol change, any v2 lender takes it),
- * only on the new lender's own lend/ branch, from the PR's current head, with no PR number, so the lender opens a new PR
- * against the order's base, which is main (lend-write-materials.ts). tests/lend-fix-reassign.test.ts.
- */
-import type { Database } from "bun:sqlite";
+ * Automatic fix reassignment, the pool step's half: inside the offer's transaction, when the planned peer is not the lease holder,
+ * re-check the rules, end the old lease, record the relay event and put out an ordinary fix order (reused stage entry, no protocol
+ * change) on the new lender's own lend/ branch, from the old PR branch's remote head, which must equal the ledger head. pr = null,
+ * so the lender opens a new PR on the order's base, main. A refused order rolls the relay back. tests/lend-fix-reassign.test.ts.
+ */import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { endWriteLease, heldLease, type WriteOffer } from "./ledger-lend-lease.js";
 import { LEND_LIVE } from "./ledger-lend-schema.js";
@@ -15,7 +12,19 @@ import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { lendBranch } from "./lend-git.js";
 import { prCoordinates } from "./scheduler-pool-facts.js";
-import { FIX_RELAY_OP, FIX_RELAY_WINDOW_MS, fixRelays } from "./lend-fix-reassign-event.js";
+import { FIX_RELAY_OP, FIX_RELAY_WINDOW_MS, fixRelays, RELAY_DRIFT } from "./lend-fix-reassign-event.js";
+import type { RemoteHead } from "./order-deliver.js";
+
+/** The write materials of a relay also carry the old PR branch's remote head, probed outside the transaction. */
+type RelayWrite = WriteOffer & { leaseHead?: RemoteHead };
+
+/** Adds the old lease branch's remote head when this fix would be a relay (the planned peer is not the holder). */
+export async function withLeaseHead<W extends WriteOffer | null>(db: Database, task: LedgerTask, peer: string, write: W,
+  probe: { remoteHead(repo: string, branch: string): Promise<RemoteHead> }): Promise<W> {
+  const lease = write && task.stage === "fix" ? heldLease(db, task) : null;
+  if (!lease || lease.peer === peer) return write;
+  return { ...write, leaseHead: await probe.remoteHead(lease.repo, lease.branch) } as W;
+}
 
 type LiveOrder = { orderId: string; peer: string; status: string };
 
@@ -29,10 +38,15 @@ function startRelay(db: Database, ctx: WriteCtx, task: LedgerTask, peer: string,
   const toBranch = lendBranch(task.id, write.fp);
   if (!toBranch || toBranch === lease.branch) throw new LedgerError("conflict", `不自动改派：${peer} 的出借分支与原分支 ${lease.branch} 撞名`);
   if (!task.headSHA || !/^[0-9a-f]{40}$/.test(task.headSHA)) throw new LedgerError("invalid", "卡上没有完整的 40 位 head，接力没有起点");
+  const remote = (write as RelayWrite).leaseHead;
+  if (!remote?.ok) throw new LedgerError("conflict", `不自动改派：查不到旧 PR 分支 ${lease.branch} 的远端 head（${remote?.error ?? "没查"}）`);
+  if (remote.head !== task.headSHA) {
+    throw new LedgerError("conflict", `不自动改派：${RELAY_DRIFT}（远端 ${remote.head.slice(0, 12)}，台账 ${task.headSHA.slice(0, 12)}），从旧提交接力会丢提交`);
+  }
   const reason = `修复单等写租约方 ${lease.peer} 超过阈值，自动改派给 ${peer}`;
   endWriteLease(db, task.id, `自动改派：${lease.peer} → ${peer}`, now);
   insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:fix-relay:${task.id}:s${task.specRev}:r${task.round}:${peer}` }, {
-    project: task.project, target: task.id, kind: "scheduler", text: `${reason}：从 PR 当前 head ${task.headSHA.slice(0, 12)} 在 ${toBranch} 接力`,
+    project: task.project, target: task.id, kind: "scheduler", text: `${reason}：从 PR 当前 head ${task.headSHA.slice(0, 12)}（已核对远端）在 ${toBranch} 接力`,
     data: { op: FIX_RELAY_OP, from: lease.peer, to: peer, head: task.headSHA, round: task.round, specRev: task.specRev, fromBranch: lease.branch,
       toBranch, repo: lease.repo, oldPr: prCoordinates(task.pr)?.pr ?? null, reason },
   }, true);

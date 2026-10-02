@@ -16,7 +16,8 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
 import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
-import { closeRelayedPr } from "../lib/lend-fix-reassign-pr.js";
+import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
+import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
@@ -50,7 +51,8 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
   const repo = prCoordinates(task.pr)?.repo ?? remote.repo;
   if (!repo) return { error: "没有仓库坐标（scheduler.json remote.repo）" };
   try {
-    return await writeMaterials(c.db, task, { peer: (intent.recipient as string).slice(POOL_RECIPIENT.length), repo, base: "main" }, writeDeps(c));
+    const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);
+    return await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe), probe); // i28-RA1：接力先核对旧 PR 的远端 head
   } catch (e) {
     if (e instanceof LedgerError) return { error: e.message };
     throw e;
@@ -62,6 +64,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
     run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
   "scheduler-family-wait": familyWaitCommand,
+  "scheduler-fix-relay": fixRelayCommand,
   "workflow-set": {
     valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
     usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
@@ -156,11 +159,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       remote = poolRemotePolicy(project, remote, c.deps.lend?.schedulerPolicy?.(project));
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       await ensureReviewScope(c.db, getIntent(c.db, intent)?.taskId); // 规格外文件在挂池事务外先登记（i28-ASK2）
-      const step = schedulerPoolStep(c.db, c.ctx(), {
+      return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
         intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec: specOf(c, intent), write: await poolWrite(c, intent, remote),
-      });
-      const relayPr = step.outcome === "done" ? await closeRelayedPr(c.db, c.ctx(), step.intent.taskId, c.deps.relayGh) : null; // i28-RA1
-      return { ok: true, ...step, ...(relayPr ? { relayPr } : {}) };
+      }) };
     },
   },
   "scheduler-session-bind": {

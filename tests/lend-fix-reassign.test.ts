@@ -27,7 +27,7 @@ import { ensurePr } from "../src/lib/lend-push.js";
 import { writeMaterials } from "../src/lib/lend-write-materials.js";
 import { orderDir } from "../src/lib/lend-clone.js";
 import { relayCandidate } from "../src/lib/lend-fix-reassign.js";
-import { FIX_RELAY_OP, FIX_RELAY_CLOSED_OP } from "../src/lib/lend-fix-reassign-event.js";
+import { FIX_LEASE_WAIT_OP, FIX_RELAY_OP, FIX_RELAY_CLOSED_OP, RELAY_DRIFT } from "../src/lib/lend-fix-reassign-event.js";
 import type { Gh } from "../src/lib/lend-fix-reassign-pr.js";
 import type { PlacementFacts } from "../src/lib/scheduler-placement.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
@@ -60,7 +60,11 @@ async function ready(remote: RemotePolicy = WRITE) {
   const policy = { maxActiveWorkers: 2, remote };
   const heads: Record<string, RemoteHead> = { main: { ok: true, head: "b".repeat(40) } };
   const gh: string[][] = [];
-  const relayGh: Gh = async (args) => { gh.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; };
+  const ghFail = { left: 0 };
+  const relayGh: Gh = async (args) => {
+    gh.push(args);
+    return ghFail.left-- > 0 ? { code: 1, stdout: "", stderr: "gh: 502", timedOut: false } : { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
   const lend = {
     borrow: async () => borrow, notifyPm: async () => {}, schedulerPolicy: () => policy,
     result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
@@ -80,7 +84,7 @@ async function ready(remote: RemotePolicy = WRITE) {
   const lendCall = (op: string, peer: string, body: unknown) => cli("owner", op, "--", peer, JSON.stringify(body));
   const events = () => listEvents(f.db, { project: "p", target: "T1" });
   await toBuild(f);
-  return { f, cli, tick, hello, lendCall, heads, gh, policy, borrow, events, orders: () => listLendOrders(f.db, "T1") };
+  return { f, cli, tick, hello, lendCall, heads, gh, ghFail, policy, borrow, events, orders: () => listLendOrders(f.db, "T1") };
 }
 type P = Awaited<ReturnType<typeof ready>>;
 
@@ -162,6 +166,9 @@ describe("automatic fix reassignment (i28-RA1)", () => {
     const p = await ready();
     try {
       await toFix(p);
+      p.hello("mate", FULL);
+      p.hello("other");
+      await p.tick(); // the holder-wait clock starts here
       p.f.advance(19 * MIN);
       p.hello("mate", FULL);
       p.hello("other");
@@ -176,6 +183,8 @@ describe("automatic fix reassignment (i28-RA1)", () => {
     const p = await ready({ ...WRITE, fixReassignMin: 5 });
     try {
       await toFix(p);
+      p.hello("mate", FULL);
+      await p.tick();
       p.f.advance(6 * MIN);
       p.hello("mate", FULL);
       p.hello("other");
@@ -218,6 +227,8 @@ describe("automatic fix reassignment (i28-RA1)", () => {
     const p = await ready();
     try {
       await toFix(p);
+      p.hello("mate", FULL);
+      await p.tick();
       p.f.advance(21 * MIN);
       p.hello("mate", FULL);
       p.hello("other");
@@ -227,6 +238,9 @@ describe("automatic fix reassignment (i28-RA1)", () => {
       await deliverAs(p, "other", order.orderId, RELAY_BRANCH, H3, 9);
       await reviewToFix(p, H3);
       // Now the holder is other, busy; mate is free again. 21 more minutes: still within the hour of the first relay.
+      p.hello("other", FULL);
+      p.hello("mate");
+      await p.tick();
       p.f.advance(21 * MIN);
       p.hello("other", FULL);
       p.hello("mate");
@@ -289,5 +303,118 @@ describe("pure pieces", () => {
         { peerFp: async () => FPS.other, remoteHead: async (_r, b) => b === "feat/i28-T1-base" ? { ok: true, head: H3 } : { ok: false, error: "no" } });
       expect(w).toMatchObject({ base: "main", baseSha: H3 });
     } finally { f.close(); }
+  }, E2E_MS);
+});
+
+describe("relay review fixes (i28-RA1 round 1)", () => {
+  const leaseWaits = (p: P) => p.events().filter((e) => e.kind === "scheduler" && e.data.op === FIX_LEASE_WAIT_OP);
+  const both = (p: P, mate: Slots, other: Slots = FREE) => { p.hello("mate", mate); p.hello("other", other); };
+
+  test("a wait on a file lock does not count: the clock starts only when the holder itself cannot take the fix", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      const globs = (p.f.db.query("SELECT json_extract(extra, '$.fileGlobs') AS g FROM tasks WHERE id = 'T1'").get() as { g: string }).g;
+      p.f.db.run(`UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json('["bad path"]')) WHERE id = 'T1'`); // a lock nobody can take
+      both(p, FREE);
+      expect(await p.tick()).toMatchObject({ detail: expect.stringContaining("文件锁") });
+      p.f.advance(21 * MIN);
+      both(p, FREE);
+      expect(await p.tick()).toMatchObject({ detail: expect.stringContaining("文件锁") });
+      expect(leaseWaits(p)).toEqual([]);
+      // Lock released and the holder only now becomes busy: 21 minutes of lock wait are not a holder wait.
+      p.f.db.run("UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json(?)) WHERE id = 'T1'", [globs]);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("写租约在 mate") });
+      expect(relays(p)).toEqual([]);
+      expect(leaseWaits(p).map((e) => e.data.state)).toEqual(["start"]);
+      p.f.advance(19 * MIN);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      p.f.advance(2 * MIN);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 other") });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  /** The holder's fix intent is refused at the offer (its fingerprint vanished): the holder is tried, the lease stays with it. */
+  async function holderTried(p: P, other: Slots) {
+    await toFix(p);
+    const fp = FPS.mate;
+    delete FPS.mate;
+    try {
+      both(p, FREE, other);
+      expect(await p.tick()).toMatchObject({ step: "pool_refused", detail: expect.stringContaining("写单材料没备好") });
+    } finally { FPS.mate = fp; }
+    expect(getWriteLease(p.f.db, "T1")).toMatchObject({ peer: "mate", state: "held" });
+  }
+
+  test("the holder was tried this round and the lease is still its: past the threshold the relay happens, no PM escalation", async () => {
+    const p = await ready();
+    try {
+      await holderTried(p, FULL);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("写租约在 mate") });
+      p.f.advance(21 * MIN);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 other") });
+      expect(relays(p).map((e) => e.data)).toEqual([expect.objectContaining({ from: "mate", to: "other", head: H2 })]);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("tried holder and no other free peer: PM escalation as before", async () => {
+    const p = await ready();
+    try {
+      await holderTried(p, FULL);
+      both(p, FULL, FULL);
+      expect(await p.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("这一轮没成") });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("the old PR branch moved past the ledger head: no relay from the stale commit, the card goes to PM", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      both(p, FULL);
+      await p.tick();
+      p.heads[BRANCH] = { ok: true, head: H3 }; // pushed after delivery, ledger still at H2
+      p.f.advance(21 * MIN);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "pool_refused", detail: expect.stringContaining(RELAY_DRIFT) });
+      expect(relays(p)).toEqual([]);
+      expect(p.orders().filter((o) => o.step === "fix")).toEqual([]);
+      expect(getWriteLease(p.f.db, "T1")).toMatchObject({ peer: "mate", state: "held" });
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining(RELAY_DRIFT) });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("closing the old PR failed once: later passes retry it until it is closed with the link", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      both(p, FULL);
+      await p.tick();
+      p.f.advance(21 * MIN);
+      both(p, FULL);
+      await p.tick();
+      const order = p.orders().at(-1)!;
+      expect(order).toMatchObject({ peer: "other", branch: RELAY_BRANCH });
+      await deliverAs(p, "other", order.orderId, RELAY_BRANCH, H3, 9);
+      p.ghFail.left = 2; // gh pr close and the state check both fail
+      await p.tick();
+      expect(p.gh.map((a) => a.slice(0, 2))).toEqual([["pr", "close"], ["pr", "view"]]);
+      const closed = () => p.events().filter((e) => e.data.op === FIX_RELAY_CLOSED_OP);
+      expect(closed()).toEqual([]);
+      await p.tick();
+      expect(p.gh).toHaveLength(2); // backoff: not every pass
+      p.f.advance(61_000);
+      await p.tick();
+      expect(p.gh.at(-1)).toEqual(["pr", "close", "7", "--repo", "o/r", "--comment", expect.stringContaining("接力 PR：#9（base main）")]);
+      expect(closed().map((e) => e.data)).toEqual([expect.objectContaining({ oldPr: 7, newPr: 9 })]);
+      p.f.advance(61_000);
+      await p.tick();
+      expect(p.gh).toHaveLength(3);
+    } finally { p.f.close(); }
   }, E2E_MS);
 });

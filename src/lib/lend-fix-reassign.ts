@@ -1,23 +1,18 @@
 /**
- * Automatic fix reassignment (i28-RA1), the planner's half, pure. A fix only goes back to the write-lease holder (i28-R6); when
- * that holder cannot take it, the card used to wait until PM ran workflow-set manual → lend-reclaim → stage fix→…→build →
- * lend-offer --base by hand. Now, when all three hold, the fix is placed on another peer instead:
- * - the card has waited on the holder longer than scheduler.json remote.fixReassignMin (default 20) since it entered fix;
- * - another peer has a free slot of the card's writing family (same family as the head's writer, so the review family,
- *   its opposite, does not change: cross-family review holds) and passes every other hard constraint of a fix;
- * - the holder has nothing running on this card (no live dispatch intent, no stray pool order).
- * At most one automatic reassignment per card per hour: the second time it is needed, the card goes to PM (escalate).
- * The relay itself (end the lease, record the event, a fix order on the new peer's own lend/ branch from the PR's current head,
- * PR base = main) is lend-fix-reassign-start.ts; closing the old PR is lend-fix-reassign-pr.ts. tests/lend-fix-reassign.test.ts.
+ * Automatic fix reassignment, the planner's half (pure). The fix goes to another peer when the write-lease holder has been unable
+ * to take it for remote.fixReassignMin (default 20) of continuous holder-wait, another peer has a free slot of the card's writing
+ * family (so the review family, its opposite, is unchanged), and the holder runs nothing on the card. The clock is the
+ * fix_lease_wait stretch the tick records (lend-fix-reassign-tick.ts), so waits on file locks never count. A second relay
+ * within the hour goes to PM. tests/lend-fix-reassign.test.ts.
  */
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 import { peerFamily } from "./scheduler-family-pick.js";
 import { peerRefusal, type PeerFacts, type PlacementFacts } from "./scheduler-placement.js";
-import { FIX_RELAY_OP, FIX_RELAY_WINDOW_MS } from "./lend-fix-reassign-event.js";
+import { FIX_LEASE_WAIT_CODE, FIX_RELAY_OP, FIX_RELAY_WINDOW_MS, leaseWaitOpen, RELAY_DRIFT } from "./lend-fix-reassign-event.js";
 import { FIX_REASSIGN_DEFAULT_MIN } from "./lend-fix-reassign-config.js";
 
-export type RelayAway = { peer: string; reason: string } | { escalate: string } | null;
+export type RelayAway = { peer: string; reason: string } | { escalate: string } | { code: string; wait: string } | null;
 
 const LIVE = ["pending", "submitted", "unknown"];
 
@@ -29,25 +24,31 @@ export function relayCandidate(facts: PlacementFacts, lease: string, family: Aut
 }
 
 /**
- * Called by remoteWork when the fix waits on the lease holder. null = keep waiting (under the threshold, the holder still runs
- * something here, or no other peer can take it); a peer = reassign there; escalate = second reassignment within the hour.
+ * Called by remoteWork when the fix cannot go to the lease holder. null = not a holder wait (the caller's own wait / escalation
+ * stands); the fix_lease_wait code = keep waiting with the clock running; a peer = reassign there; escalate = PM decides
+ * (second relay within the hour, or the old PR branch moved past the ledger head).
  */
 export function relayAway(s: PlannerSnapshot, since: number, facts: PlacementFacts, lease: string, waitReason: string): RelayAway {
   const now = s.pool?.now;
   if (!s.workflow || !s.pool || now === undefined || s.pool.remote.agents || s.task.stage !== "fix" || !s.task.headSHA || !s.task.pr) return null;
-  const entered = s.events.find((e) => e.seq === since)?.ts;
-  const min = s.pool.remote.fixReassignMin ?? FIX_REASSIGN_DEFAULT_MIN;
-  if (entered === undefined || now - entered < min * 60_000) return null;
-  if (s.strayPoolOrders?.length || s.intents.some((i) => i.action === "dispatch" && i.causalSeq >= since && LIVE.includes(i.status))) return null;
-  const family = s.workflow.authorFamily;
+  const family = s.workflow.authorFamily, tried = facts.tried.includes(lease);
+  // A file lock blocks every peer alike: only the holder's own refusal, or its finished attempt this round, is a holder wait.
+  if (!tried && !peerRefusal({ ...facts, locksFree: true }, facts.peers.find((p) => p.peer === lease), "fix", family)) return null;
+  const drift = s.intents.findLast((i) => i.causalSeq >= since && i.head === s.task.headSHA && i.receipt?.includes(RELAY_DRIFT));
+  if (drift) return { escalate: `自动改派停下：${drift.receipt}。PM 核对 PR 分支后更新台账 head，或 ledger lend-reclaim ${s.task.id}` };
   const pick = relayCandidate(facts, lease, family);
-  if (!pick) return null;
-  const waited = Math.floor((now - entered) / 60_000);
+  if (tried && !pick) return null;
+  const hold = { code: FIX_LEASE_WAIT_CODE, wait: waitReason };
+  const open = leaseWaitOpen(s.events, since);
+  const min = s.pool.remote.fixReassignMin ?? FIX_REASSIGN_DEFAULT_MIN;
+  if (!pick || !open || now - open.ts < min * 60_000) return hold;
+  if (s.strayPoolOrders?.length || s.intents.some((i) => i.action === "dispatch" && i.causalSeq >= since && LIVE.includes(i.status))) return hold;
+  const waited = Math.floor((now - open.ts) / 60_000);
   const last = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === FIX_RELAY_OP && now - e.ts < FIX_RELAY_WINDOW_MS);
   if (last) {
     return { escalate: `修复单等写租约方 ${lease} 已 ${waited} 分钟（${waitReason}），本卡一小时内已自动改派过一次（${String(last.data.from)} → ` +
       `${String(last.data.to)}），不再来回改派：PM 核对后 ledger lend-reclaim ${s.task.id} 或 lend-reoffer` };
   }
-  return { peer: pick.peer, reason: `自动改派：写租约在 ${lease}，等了 ${waited} 分钟（阈值 ${min}）它仍不能接（${waitReason}）；` +
+  return { peer: pick.peer, reason: `自动改派：写租约在 ${lease}，它连续 ${waited} 分钟不能接（阈值 ${min}；${waitReason}）；` +
     `改派给 ${pick.peer} 的 ${family}，从 PR 当前 head 在它自己的出借分支上接力，新 PR 的 base 是 main` };
 }
