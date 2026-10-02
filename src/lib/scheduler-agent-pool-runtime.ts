@@ -7,6 +7,9 @@ import { readInventoryQuota, type InventoryQuota } from "./ai-quota.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { CodexSlotOptions, SlotWait } from "./scheduler-local-runtime-slots.js";
+import { readLendSync } from "./lend-config.js";
+import { poolStartFacts } from "./scheduler-agent-pool-start.js";
+import { reserveFinishing } from "./scheduler-agent-pool-reserve.js";
 
 export function configuredAgentLimits(opts: CodexSlotOptions): AgentLimits | null {
   return opts.project ? readSchedulerConfig(opts.configPath ?? SCHEDULER_CONFIG_PATH).projects[opts.project]?.agents ?? null : null;
@@ -24,7 +27,9 @@ export function runtimePoolWait(opts: CodexSlotOptions, limits: AgentLimits): Sl
 export function poolAuthorRuntime(project: string, limits: AgentLimits, ledgerPath = LEDGER_PATH): AuthorFamily {
   const db = new Database(ledgerPath, { readonly: true });
   try {
-    const load = localAgentPool(db, project, limits);
+    const policy = readSchedulerConfig().projects[project]?.remote ?? { mode: "off", roles: [], poolTimeoutMin: 15 };
+    const facts = poolStartFacts(db, project, { ...policy, agents: limits }, readLendSync().file.borrow, Date.now());
+    const load = reserveFinishing(db, project, facts).local.pool!;
     return load.running.claude < load.totals.claude ? "claude" : "codex";
   } finally { db.close(); }
 }
