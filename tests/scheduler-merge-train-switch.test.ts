@@ -22,6 +22,7 @@ import type { Registry } from "../src/manager/core.js";
 import { LedgerCli, type LedgerDeps } from "../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
 import { mergeTrainSwitchCmds } from "../src/manager/ledger-merge-train-switch.js";
+import { isWriteInvocation } from "../src/manager/write-commands.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const REPO = "example/repo";
@@ -97,6 +98,50 @@ describe("off: as before MT1", () => {
     expect(await ext.train!(env.run(0))).toBeNull();
     await ext.merge(env.cards[0]!.prRef, env.cards[0]!.head);
     expect([merged, env.hub.calls]).toEqual([[env.cards[0]!.prRef], []]); // the plain serial merge, no match-head override
+  });
+});
+
+describe("off / observe never depend on the train file", () => {
+  for (const to of ["off", "observe"] as const) {
+    test(`${to} + corrupt train file: the driver hook answers serial without reading it`, async () => {
+      const project = `bad-${to}`;
+      modes[project] = to;
+      const dir = mkdtempSync(join(tmpdir(), "mt-switch-bad-"));
+      writeFileSync(join(dir, `${project}.json`), "{not json");
+      const store = fileTrainStore(dir);
+      expect(() => store.load(project)).toThrow(/损坏/);
+      const env = setup(project, 3, Object.assign(store, { events: [] as TrainEvent[], saves: 0 }));
+      const merged: string[] = [];
+      const base = { merge: async (pr: string) => { merged.push(pr); return "sha"; } } as unknown as MergeExternal;
+      const ext = withMergeTrain(base, { gh: env.gh, store });
+      expect(await ext.train!(env.run(0))).toBeNull();
+      await ext.merge(env.cards[0]!.prRef, env.cards[0]!.head);
+      expect([merged, env.hub.calls]).toEqual([[env.cards[0]!.prRef], []]);
+      modes[project] = "on"; // on still refuses to read a corrupt file as "no train"
+      await expect(ext.train!(env.run(0))).rejects.toThrow(/损坏/);
+    });
+  }
+
+  test("switched to off while files are listed: no observe event, nothing written", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mt-switch-race-"));
+    const store = fileTrainStore(dir);
+    const env = setup("race1", 2, Object.assign(store, { events: [] as TrainEvent[], saves: 0 }));
+    const files = async (c: { prRef: string }) => { modes.race1 = "off"; return env.hub.files.get(c.prRef)!; };
+    expect(await formTrain("race1", env.cards, env.deps, files)).toBeNull();
+    expect(env.hub.calls).toEqual([]);
+    expect(() => statSync(join(dir, "race1.json"))).toThrow(); // the train file was never created
+    expect(observeSummary("race1", 20, dir).count).toBe(0);
+    modes.race2 = "on";
+    const obs = setup("race2", 2);
+    const toObserve = async (c: { prRef: string }) => { modes.race2 = "observe"; return obs.hub.files.get(c.prRef)!; };
+    expect(await formTrain("race2", obs.cards, obs.deps, toObserve)).toBeNull();
+    expect([obs.store.saves, obs.store.events.map((e) => e.kind), obs.hub.calls]).toEqual([0, ["observe"], []]);
+  });
+
+  test("merge-train-observe is a read for the CLI guard; the switch is a write", () => {
+    expect(isWriteInvocation("ledger", ["merge-train-observe", "p"])).toBe(false);
+    expect(isWriteInvocation("ledger", ["merge-train-observe", "p", "--last", "5"])).toBe(false);
+    expect(isWriteInvocation("ledger", ["scheduler-merge-train", "p", "off", "--reason", "r"])).toBe(true);
   });
 });
 

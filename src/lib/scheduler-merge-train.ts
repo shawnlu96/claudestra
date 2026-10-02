@@ -134,8 +134,8 @@ export async function formTrain(project: string, all: readonly TrainCandidate[],
     const f = await files(c);
     if (f) listed.push({ ...c, files: [...new Set(f)].sort() });
   }
-  const batch = pickBatch(listed);
-  if (!batch.length || trainMode(project) !== "on") return batch.length ? observeBatch(project, batch, deps) : null;
+  const batch = pickBatch(listed), mode = trainMode(project); // re-read: the switch may have moved while files were listed
+  if (!batch.length || mode !== "on") return batch.length && mode === "observe" ? observeBatch(project, batch, deps) : null; // off: nothing written
   const base = await deps.gh.mainHead(repo), now = deps.now(), seq = deps.store.nextSeq(project);
   const id = `${seq.toString(36)}-${now.toString(36).slice(-5)}`;
   const s: TrainState = { v: 1, id, seq, project, repo, base, phase: "testing", outcome: null, reason: null, members: batch, cars: [],

@@ -18,6 +18,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { trainGh } from "./scheduler-merge-train-gh.js";
+import { trainMode } from "./scheduler-merge-train-switch.js";
 import { runBounded } from "./run-bounded.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import {
@@ -178,7 +179,7 @@ export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = d
   const io = { ...ctx, now: Date.now, notify: async () => {} };
   return {
     ...base,
-    train: (run: MergeRun) => trainGate(ctx.store.load(run.project), run, io),
+    train: async (run: MergeRun) => trainMode(run.project) === "on" ? trainGate(ctx.store.load(run.project), run, io) : null, // off / observe never read the train file
     async merge(prRef, head) {
       const s = clearedMember(ctx.store.all(), prRef, head);
       if (!s) return base.merge(prRef, head);
