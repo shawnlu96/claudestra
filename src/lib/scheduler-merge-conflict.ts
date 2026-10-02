@@ -173,7 +173,7 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
   const now = ctx.now ?? Date.now();
   const receipt = rawReceipt?.trim() ?? "";
   if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt)) throw new LedgerError("invalid", "回执要是单行且不超过 600 字");
-  const own = ciRerunClaim(db, ctx, row, receipt, drift, bounceReceipt); // null: a CI re-run was claimed, the run keeps its phase
+  const own = ciRerunClaim(db, ctx, row, receipt, drift, bounceReceipt, insertEvent); // null: a CI re-run was claimed, the run keeps its phase
   if (own === null) return;
   const b = parseBounceReceipt(own);
   if (!b) {

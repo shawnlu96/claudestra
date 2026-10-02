@@ -7,7 +7,7 @@
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
+import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
@@ -153,6 +153,9 @@ export function parseRerunReceipt(receipt: string): { prHead: string; link: stri
   }
 }
 
+type WriteEvent = (db: Database, ctx: WriteCtx, e: { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> },
+  primary: boolean) => unknown;
+
 /** How long after a claim GitHub may still show the old attempt of the same run; past it the rerun evidently never started. */
 export const RERUN_SETTLE_MS = 10 * 60_000;
 
@@ -161,8 +164,10 @@ export const RERUN_SETTLE_MS = 10 * 60_000;
  * the event is written, the run keeps its phase (rev+1), null. The same run claimed again within RERUN_SETTLE_MS (GitHub
  * still shows attempt 1 after the rerun call) → nothing written, rev unchanged, null: the driver keeps waiting.
  * Anything else on a head that was re-run already → the ci_fail bounce receipt.
+ * The event goes through `writeEvent`, the caller's own ledger-tx insertEvent: only the writer modules import ledger-tx.
  */
-export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, drift: string | null, toReceipt: ToReceipt): string | null {
+export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, drift: string | null, toReceipt: ToReceipt,
+  writeEvent: WriteEvent): string | null {
   const claim = parseRerunReceipt(receipt);
   if (!claim) return receipt;
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
@@ -175,7 +180,7 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   if (prior && prior.run === claim.link && now - prior.ts < RERUN_SETTLE_MS) return null;
   if (prior) return toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
   db.prepare("UPDATE scheduler_merges SET rev=rev+1, updatedAt=? WHERE intentId=?").run(now, row.intentId);
-  insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun:${claim.prHead}` }, {
+  writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun:${claim.prHead}` }, {
     project: row.project, target: row.taskId, kind: "scheduler",
     text: `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
     data: { op: "merge_ci_rerun", intentId: row.intentId, phase: row.phase, prHead: claim.prHead, run: claim.link, checks: claim.checks,
