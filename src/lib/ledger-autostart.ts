@@ -15,6 +15,7 @@ import { getFeature, type Feature } from "./ledger-feature.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, getItem, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { checkCodexLine, codexLineOf } from "./quota-codex-line.js";
 import {
   currentViews, ledgerGate, projectPm, readSwitch, TEMPLATE_VERSION, type AutostartSwitch, type AutostartTemplate, type ServiceFacts,
 } from "./scheduler-autostart.js";
@@ -117,19 +118,21 @@ export function liveClaim(db: Database, seq: number): AutostartClaim {
   return c;
 }
 
-export interface SwitchInput { project: string; on: boolean; featureId?: string; line?: number; reason: string }
+export interface SwitchInput { project: string; on: boolean; featureId?: string; line?: number; codexLine?: number; reason: string }
 
-/** `ledger autostart-set`：关项目 = 不开卡也不交回；关 feature 只影响它的节点和它们绑的卡；--line 改 Claude 周额度线 */
+/** `ledger autostart-set`：关项目 = 不开卡也不交回；关 feature 只影响它的节点和它们绑的卡；--line 改 Claude 周额度线，--codex-line 改 Codex 周额度线 */
 export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInput): AutostartSwitch {
   return tx(db, () => {
     if (!actorMayConfigure(db, ctx.actor, input.project)) throw new LedgerError("forbidden", `只有项目 ${input.project} 的 PM / master / owner 能改自动开卡开关`);
     const reason = textOneLine(input.reason, "原因", 600);
     if (input.line !== undefined && (!Number.isInteger(input.line) || input.line < 50 || input.line > 100)) throw new LedgerError("invalid", "--line 要是 50–100 的整数");
+    checkCodexLine(input.codexLine);
     if (input.featureId && mustFeature(db, input.featureId).project !== input.project) throw new LedgerError("invalid", `feature ${input.featureId} 不在项目 ${input.project}`);
     const now = ctx.now ?? Date.now();
     const stamp = { reason, by: ctx.actor, at: now };
     const cur = readSwitch(db, input.project);
-    const next: AutostartSwitch = { ...cur, ...(input.line !== undefined ? { weeklyLinePct: input.line } : {}) };
+    const next: AutostartSwitch = { ...cur, ...(input.line !== undefined ? { weeklyLinePct: input.line } : {}),
+      ...(input.codexLine !== undefined ? { codexWeeklyLinePct: input.codexLine } : {}) };
     if (input.featureId) next.features = { ...cur.features, [input.featureId]: { off: !input.on, ...stamp } };
     else if (input.on) delete next.off;
     else next.off = stamp;
@@ -137,7 +140,8 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
       .run(input.project, JSON.stringify(next));
     insertEvent(db, { ...ctx, now }, {
       project: input.project, target: "", kind: "meta", text: `自动开卡${input.on ? "开" : "关"}${input.featureId ? `（feature ${input.featureId}）` : ""}：${reason}`,
-      data: { op: "autostart", on: input.on, featureId: input.featureId ?? null, line: input.line ?? null, value: next },
+      data: { op: "autostart", on: input.on, featureId: input.featureId ?? null, line: input.line ?? null,
+        codexLine: input.codexLine === undefined ? null : { from: codexLineOf(cur), to: input.codexLine }, value: next },
     }, true);
     return next;
   });
