@@ -227,15 +227,40 @@ export interface AskWire {
   options: string[];
   default?: string;
   class?: "design" | "scope" | "blocker";
+  /** i28-ASK4 测试类扩围：申请加进本卡范围的文件（仓库相对路径）与理由；两个一起给才算，order-ask-default.ts 据此自动定 */
+  files?: string[];
+  reason?: AskScopeReason;
 }
 
-const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
+/** superseded_assertion = 被本规格替代的旧断言；new_test = 为本卡新行为补测试 */
+export const ASK_SCOPE_REASONS = ["superseded_assertion", "new_test"] as const;
+export type AskScopeReason = (typeof ASK_SCOPE_REASONS)[number];
+
+const ASK_LIMITS = { question: 2000, options: 10, option: 200, files: 20 } as const;
+
+/** files / reason：都给或都不给；files 是不带通配、不带 .. 的仓库相对路径 */
+function askScope(r: Record<string, unknown>): Pick<AskWire, "files" | "reason"> {
+  if (!("files" in r) && !("reason" in r)) return {};
+  if (!("files" in r) || !("reason" in r)) fail("files", "files 与 reason 要一起给");
+  if (!ASK_SCOPE_REASONS.includes(r.reason as AskScopeReason)) fail("reason", `只认 ${ASK_SCOPE_REASONS.join(" / ")}`);
+  if (!Array.isArray(r.files) || !r.files.length || r.files.length > ASK_LIMITS.files) fail("files", `要是 1–${ASK_LIMITS.files} 项的数组`);
+  const files = (r.files as unknown[]).map((f, i) => {
+    const s = matching(text(f, `files[${i}]`, WIRE_LIMITS.path), `files[${i}]`, PATH);
+    if (s.split("/").some((seg) => seg === ".." || seg === "." || !seg) || /[*?[\]{}]/.test(s)) fail(`files[${i}]`, "要是不带通配、不带 . / .. 的仓库相对路径");
+    return s;
+  });
+  return { files: [...new Set(files)], reason: r.reason as AskScopeReason };
+}
+
+/** order-ask.ts 存进 ask.extra 的那两项（没给 = 空） */
+export const askScopeExtra = (q: Partial<Pick<AskWire, "files" | "reason">>): Pick<AskWire, "files" | "reason"> =>
+  q.files?.length && q.reason ? { files: q.files, reason: q.reason } : {};
 
 export function parseAskWire(raw: unknown): WireResult<AskWire> {
   return guarded(raw, () => {
     const given = raw && typeof raw === "object" && !Array.isArray(raw) && !("options" in raw) ? { ...raw, options: [] } : raw;
     const r = record(given, "$", ["v", "orderId", "question", "options",
-      ...(given && typeof given === "object" ? ["default", "class"].filter((k) => k in given) : [])]);
+      ...(given && typeof given === "object" ? ["default", "class", "files", "reason"].filter((k) => k in given) : [])]);
     if ("class" in r && !["design", "scope", "blocker"].includes(r.class as string)) fail("class", "只认 design / scope / blocker");
     if ("default" in r && (typeof r.default !== "string" || !r.default.trim() || [...r.default].length > 600)) fail("default", "默认做法要非空且不超过 600 字");
     if (!Array.isArray(r.options) || r.options.length > ASK_LIMITS.options) fail("options", `要是不超过 ${ASK_LIMITS.options} 项的数组`);
@@ -244,6 +269,7 @@ export function parseAskWire(raw: unknown): WireResult<AskWire> {
       options: (r.options as unknown[]).map((o, i) => text(o, `options[${i}]`, ASK_LIMITS.option)),
       ...("default" in r ? { default: text(r.default, "default", 2400, true) } : {}),
       ...("class" in r ? { class: r.class as AskWire["class"] } : {}),
+      ...askScope(r),
     };
   });
 }

@@ -56,6 +56,8 @@ export const ORDER_TOOLS = [
         default: { type: "string", description: "我打算怎么做（design / scope 必填，≤600 字）" },
         class: { type: "string", enum: ["design", "scope", "blocker"], description: "做法选择 / 范围 / 需要人；远端出借单仍按 blocker" },
         options: { type: "array", items: { type: "string" }, description: "可选：候选答案（≤10 项，每项 ≤200 字节）" },
+        files: { type: "array", items: { type: "string" }, description: "测试类扩围：要加进本卡范围的文件（仓库相对路径，≤20 项）；全在 tests/ 下且带 reason 的，PM 15 分钟没回自动批准并追加进 fileGlobs" },
+        reason: { type: "string", enum: ["superseded_assertion", "new_test"], description: "和 files 一起给：superseded_assertion = 被本规格替代的旧断言；new_test = 为本卡新行为补测试" },
       },
       required: ["v", "orderId", "question"],
     },
