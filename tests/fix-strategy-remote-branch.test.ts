@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,11 @@ import { claimLend } from "../src/lib/ledger-lend.js";
 import { remoteOrder } from "../src/lib/fix-strategy-remote-order.js";
 import { writeLendDeliver } from "../src/lib/ledger-lend-result.js";
 import type { DeliverRequest } from "../src/lib/lend-wire.js";
-import { DEFAULT_LEND_JOURNAL_OK } from "../src/lib/test-guard.js";
 import { testChildEnv } from "./test-env.js";
+import { isolatedStateSuite } from "./isolated-state.js";
+
+// pushWork 只读默认 journal 核绑定，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { test } = isolatedStateSuite(import.meta.path);
 
 function git(cwd: string, args: string[], env: Record<string, string>): string {
   const result = Bun.spawnSync(["git", ...args], { cwd, env: testChildEnv(env), stdout: "pipe", stderr: "pipe" });
@@ -31,9 +34,6 @@ test("real git custom-branch clone and fast-forward push require journal binding
     GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@invalid" };
   expect(LEND_JOURNAL_PATH).not.toContain("/Users/shawn/.claude-orchestrator/");
   mkdirSync(repo, { recursive: true }); mkdirSync(seed);
-  // pushWork 只读默认 journal 核绑定，只能走默认路径：本用例放行 test-guard 的闸、finally 还原（i28-TJ1）
-  const okBefore = process.env[DEFAULT_LEND_JOURNAL_OK];
-  process.env[DEFAULT_LEND_JOURNAL_OK] = "1";
   const db = openLendJournal(), orderId = `lend:T1:cv:${Date.now()}`, branch = "feat/T1";
   try {
     git(repo, ["init", "--bare", "-q", "-b", "main"], env); git(seed, ["init", "-q", "-b", branch], env);
@@ -70,8 +70,6 @@ test("real git custom-branch clone and fast-forward push require journal binding
   } finally {
     db.run("DELETE FROM lend_orders WHERE orderId = ?", [orderId]);
     db.close(); rmSync(root, { recursive: true, force: true });
-    if (okBefore === undefined) delete process.env[DEFAULT_LEND_JOURNAL_OK];
-    else process.env[DEFAULT_LEND_JOURNAL_OK] = okBefore;
   }
 });
 

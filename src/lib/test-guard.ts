@@ -75,7 +75,7 @@ export function testSafeStateDir(dir: string, defaultDir: string, env: Env = pro
   return tmp;
 }
 
-/** 必须走默认出借 journal 的用例（路由 / pushWork 内部读默认路径）在用例里设成 "1"、用完还原 */
+/** 只由 tests/isolated-state.ts 设在独立状态目录的 bun test 子进程 env 里：必须走默认出借 journal 的用例（路由 / pushWork）在那里跑 */
 export const DEFAULT_LEND_JOURNAL_OK = "CLAUDESTRA_TEST_DEFAULT_LEND_JOURNAL";
 
 /** bun test 进程以默认路径打开出借 journal：preload 的状态目录全量共用，交错改写读到半个文件就 malformed（i28-TJ1）。子进程各有状态目录，不管 */

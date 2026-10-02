@@ -6,7 +6,7 @@
  * 不读线上 tmux。
  * 同一凭据打 history / interrupt / pending / bg-tasks 仍 403、事件流过滤不放行、GET /agents 不列它；源码断言例外只在消息路由那一行。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +20,10 @@ import { workerName } from "../src/lib/lend-drive.ts";
 import { advance, LEND_JOURNAL_PATH, openLendJournal, recordAsked } from "../src/lib/lend-journal.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
 import { newTokenPrincipal, readPrincipals, updatePrincipals, type Principal } from "../src/lib/principals.ts";
-import { DEFAULT_LEND_JOURNAL_OK } from "../src/lib/test-guard.ts";
+import { isolatedStateSuite } from "./isolated-state.ts";
+
+// 路由内部读默认 journal / peers / principals，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { afterAll, beforeAll, describe, test } = isolatedStateSuite(import.meta.path);
 
 const PEER = "w6mate";
 const ORDER = "w6-route:s1:r0:review:a0";
@@ -30,7 +33,6 @@ const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-key
   LEND_JOURNAL_PATH, LEND_JOURNAL_PATH + "-wal", LEND_JOURNAL_PATH + "-shm"];
 // Preserve the SQLite files byte-for-byte so restoring route state cannot poison another test's journal.
 const saved = new Map<string, Buffer | null>();
-let journalOkBefore: string | undefined;
 const dirA = mkdtempSync(join(tmpdir(), "w6-peer-a-"));
 const ENV_WITH_BUN = BRIDGE_ENV as Record<string, string | undefined>; // bridge 起 manager 子进程用的 env（runManager）
 const runtimeBefore = ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
@@ -52,9 +54,6 @@ function lendFile(granted: boolean): void {
 }
 
 beforeAll(async () => {
-  // 路由内部读默认 journal，只能走默认路径：本文件期间放行 test-guard 的默认 journal 闸，afterAll 还原（i28-TJ1）
-  journalOkBefore = process.env[DEFAULT_LEND_JOURNAL_OK];
-  process.env[DEFAULT_LEND_JOURNAL_OK] = "1";
   ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = join(dirA, "runtime"); // manager list 的 tmux socket 落到临时目录：没有服务器 = 没有窗口
   for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f)) : null);
   for (const f of ["peers.json", "principals.json", "peer-keys.json"]) rmSync(fileOf(f), { force: true });
@@ -91,8 +90,6 @@ afterAll(() => {
   for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   for (const [f, v] of saved) v === null ? rmSync(fileOf(f), { force: true }) : writeFileSync(fileOf(f), v);
   rmSync(dirA, { recursive: true, force: true });
-  if (journalOkBefore === undefined) delete process.env[DEFAULT_LEND_JOURNAL_OK];
-  else process.env[DEFAULT_LEND_JOURNAL_OK] = journalOkBefore;
 });
 
 interface Call { method?: string; path: string; body?: string; contentType?: string; e2e?: boolean; sign?: boolean }
