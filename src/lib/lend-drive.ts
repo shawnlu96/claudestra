@@ -22,7 +22,7 @@ import type { PrInput, PrResult, PushResult, PushTarget } from "./lend-push.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
+import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { createHash } from "node:crypto";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
@@ -210,7 +210,10 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
     if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
-    if (!found && !made.ok) return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
+    if (!found && !made.ok) {
+      await pauseForStartFailure(d.db, row, made.error, d.codexQuota, d.now(), d.log);
+      return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
+    }
   }
   if (!found?.sessionId) return d.log(`${name} 已在 registry，还没有会话 id，下轮再看`);
   if (found.cwd && found.cwd !== row.dir) return finish(row, "stopped", `${name} 的工作目录 ${found.cwd} 不是这张单的工作副本`, d, true);
