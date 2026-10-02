@@ -101,3 +101,6 @@ empty DAGs have a null completion time. Feature dependencies propagate maximum E
 `eta.basis` supplies perHour, samples, k, cpHours, remaining and share. All computations inject now.
 
 Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes include node/card/PM/time); bridge restart clears it, so call `start_node` again.
+UI specs need exact non-empty ## 复用对象 / ## 对照基准; no reuse or a new interface requires an owner-approved authorize ask for this project/card (src/lib/spec-lint.ts).
+New DAG writes opt into PAGEOK (src/lib/ui-acceptance.ts): all UI nodes need verified whole-page acceptance; late UI needs rewrite; changed UI resets acceptance; cancelled/spec checks can rebind.
+Autostart/start_node share the spec gate; UI reviews include 对照基准. dag-bind keeps its version; historical DAGs stay exempt. PM checks relay + owner device + production data against the baseline.

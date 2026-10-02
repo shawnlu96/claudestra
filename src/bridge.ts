@@ -475,7 +475,7 @@ async function pushBackToCaller(
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
-  if (live) return (await deliver(env)).outcome;
+  if (live || pmClientFor(pac.callerName, clients, pac.targetName)) return (await deliver(env)).outcome; // 前任 PM 离线：当班 PM 接它的答复
   heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
@@ -2248,8 +2248,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             // 握手未完成(invite 后等回执的窗口,缺 outToken/baseUrl)会落到下面的
             // 未知 peer 报错,提示里带已配置列表
             if (httpPeer && httpPeer.outToken && httpPeer.baseUrl) {
-              const { routeToHttpPeer } = await import("./bridge/http-peer.js");
-              const result = routeToHttpPeer(
+              const { routeToHttpPeer, sendLendRelay } = await import("./bridge/http-peer.js");
+              const result = msg.lendSupplement === true ? await sendLendRelay(httpPeer, peerAgentName, String(msg.text || "")) : routeToHttpPeer(
                 ws, fromChannelId, fromName, httpPeer, peerAgentName, String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
                 msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回
@@ -3046,7 +3046,7 @@ initApiRoutes({
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
-  deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
+  deliver, getClientWs: (channelId) => ((clients.get(channelId) ?? pmClientFor(channelId, clients))?.ws as any) ?? null, // 前任 PM 离线：当班 PM 的连接接住，deliverPmLocal 加转交抬头
   hold: (env) => void heldLocalMsgs.holdEnv(env),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });

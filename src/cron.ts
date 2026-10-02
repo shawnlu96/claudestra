@@ -580,7 +580,7 @@ async function main() {
     });
   }
 
-  // 调度循环
+  void import("./lib/shared-ledger-mirror-loop.js").then((m) => m.startSharedLedgerMirrorLoop()).catch(() => console.error("共享台账镜像推送没启动")); // PJ1：自带定时器与异常隔离，不进下面的调度循环 tick
   while (true) {
     try {
       await tick();

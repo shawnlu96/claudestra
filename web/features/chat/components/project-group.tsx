@@ -4,6 +4,7 @@ import type { SidebarEntry } from "../sidebar-entries";
 import { useAgentDrop } from "./agent-dnd";
 import { useProjectMenuTrigger } from "./project-menu";
 import { useHostInfo } from "../host-info";
+import { useFullScope } from "../contacts-data";
 import { CollabEntry } from "@/features/collab/collab-entry";
 
 type GroupEntry = Extract<SidebarEntry, { kind: "group" }>;
@@ -51,9 +52,9 @@ export function ProjectGroup({
   children: ReactNode;
 }) {
   const { over, handlers } = useAgentDrop({ projectId: e.id });
-  // 组头右键 / 长按 = 打开目录菜单（project-menu.tsx）；只在本机且探测到程序时挂手势
-  const host = useHostInfo();
-  const menu = useProjectMenuTrigger(() => e.meta!, Boolean(e.meta) && host.openers.length > 0);
+  // 组头右键 / 长按 = project 菜单（project-menu.tsx）；本机探测到程序或有 manage 授权（「主管 PM」）时挂手势
+  const host = useHostInfo(), manage = useFullScope() === true;
+  const menu = useProjectMenuTrigger(() => e.meta!, Boolean(e.meta) && (host.openers.length > 0 || manage));
   return (
     <li
       className={`rounded-xl p-1 transition-colors ${over ? "bg-primary/15 ring-1 ring-primary/40" : "bg-base-300/25"}`}
