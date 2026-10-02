@@ -5,7 +5,6 @@ import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
-import { peerSecretHit } from "./peer-secret-gate.js";
 
 const ENV = "远端工作副本环境：";
 const REF = "refs/remotes/origin/HEAD";
@@ -21,19 +20,16 @@ export async function lendFixMaterials(fp: string, q: { repo: string; base: stri
   const events = ctx ? listEvents(ctx.db, { project: ctx.task.project, target: ctx.task.id }) : [];
   const b = ctx ? fixBounce(events, ctx.task.stage) : null;
   const seq = events.findLast((e) => e.kind === "stage" && e.data.to === ctx?.task.stage)?.seq;
-  const omitted = b?.cause === "update_fail" && HEX40.test(b.error ?? "") ? withheldError(b.error!, seq) : null;
+  const omitted = b?.cause === "update_fail" && HEX40.test(b.error ?? "") ? withheldError(seq) : null;
   return { fp, base: q.base, baseSha: null, report: JSON.stringify({ note, omitted }) };
 }
 
 const HEX40 = /[a-f0-9]{40}/i;
 
 /** Hash-bearing errors can also contain credentials; retain the whole original locally rather than rewrite its tokens. */
-function withheldError(error: string, seq?: number): string {
-  const status = /\b(?:HTTP(?: status)?|status)\s*[:=]?\s*([1-5]\d{2})\b/i.exec(error)?.[1];
-  const code = /\b(?:GitHub (?:error )?code|code)\s*[:=]\s*([A-Za-z0-9_-]+)\b/i.exec(error)?.[1];
-  const safeCode = code && !HEX40.test(code) && /^[A-Za-z0-9_-]{1,64}$/.test(code) && !peerSecretHit(code) ? code : null;
-  return ["更新分支失败：update_fail", ...(status ? [`HTTP ${status}`] : []), ...(safeCode ? [`GitHub 错误码 ${safeCode}`] : []),
-    Number.isSafeInteger(seq) ? `本机事件 #${seq}` : "本机事件号未提供，请发起方核对台账", "原文含提交号，留在发起方台账"].join("；");
+function withheldError(seq?: number): string {
+  return ["更新分支失败：update_fail", Number.isSafeInteger(seq) ? `本机事件 #${seq}` : "本机事件号未提供，请发起方核对台账",
+    "原文含提交号，留在发起方台账"].join("；");
 }
 
 function environment(report: string | null): { note: string; omitted: string | null } | null {
@@ -53,7 +49,7 @@ export function lendFixEnv(wire: OrderWire, bounce: { inputs: string[]; acceptan
   const material = environment(report);
   const env = material?.note ?? `${ENV}用 git rev-parse ${REF} 读取 SHA；本机未提供核对值，停止并交回本机处理；${STOP}。`;
   const inputs = wire.inputs.map((s) => bounce.inputs.includes(s) && s.startsWith("更新分支失败：") && HEX40.test(s)
-    ? material?.omitted ?? withheldError("") : s);
+    ? material?.omitted ?? withheldError() : s);
   const acceptance = wire.acceptance.map((s) => s.replace("git fetch 后合入最新 origin/main", `核对基线后合入 ${REF}`)
     .replace("推送后报新 head", "提交后用 deliver 报新 head，由出借服务推送"));
   if (needsBase) {

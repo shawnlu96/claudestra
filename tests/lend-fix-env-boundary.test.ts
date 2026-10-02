@@ -64,17 +64,25 @@ test("non-hex error reaches the order byte for byte", async () => {
   } finally { f.close(); }
 });
 
-for (const code of ["missing_field", "1234", SHA, `prefix${SHA}suffix`, `sk-${"Q".repeat(20)}`]) {
-  test(`safe status/code summary ${code.slice(0, 8)} contains no original hex-bearing text`, async () => {
-    const error = `HTTP 422 GitHub code: ${code}; commit ${SHA} refused`;
-    const f = await fixture(error);
+test("callback authentication code never reaches the real offered order", async () => {
+  const code = "Az9Qv2Lm8Jp4Xc6Rt1Ne";
+  const f = await fixture(`https://login.example/callback?code=${code}&commit=${SHA}`);
+  try {
+    expect(f.wire.inputs.join("\n")).not.toContain(code);
+    const order = f.offer();
+    expect(order.status).toBe("pooled");
+    expect(order.wire.inputs.join("\n")).not.toContain(code);
+    expect(order.text).not.toContain(code);
+  } finally { f.close(); }
+});
+
+for (const text of ["HTTP 422 GitHub code: missing_field", "status=403 code=1234", "HTTP 401 GitHub error code: invalid"]) {
+  test(`no structured status: ${text} is omitted rather than parsed`, async () => {
+    const f = await fixture(`${text}; commit ${SHA} refused`);
     try {
-      const inputs = f.wire.inputs.join("\n");
-      expect(inputs).toContain("HTTP 422");
-      expect(inputs).not.toContain(error);
-      expect(inputs).not.toContain(SHA);
-      if (["missing_field", "1234"].includes(code)) expect(inputs).toContain(`GitHub 错误码 ${code}`);
-      else expect(inputs).not.toContain("GitHub 错误码");
+      const event = f.db.query("SELECT seq FROM events WHERE kind='stage'").get() as { seq: number };
+      const summary = f.wire.inputs.find((s) => s.startsWith("更新分支失败："));
+      expect(summary).toBe(`更新分支失败：update_fail；本机事件 #${event.seq}；原文含提交号，留在发起方台账`);
       expect(f.offer().status).toBe("pooled");
     } finally { f.close(); }
   });
