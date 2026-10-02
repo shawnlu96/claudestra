@@ -74,7 +74,7 @@ export const RETIRE_CARDS_PER_PASS = 5;
 const RS = RETIRE_STAGES.map((s) => `'${s}'`).join(",");
 const oneLine = (s: string, max = 560): string => s.replace(/\s+/g, " ").trim().slice(0, max) || "（空）";
 /** Receipt markers of a session that retired but left something for PM (a failed archive, a kill skipped for a changed session). */
-export const ARCHIVE_FAILED = "归档没成", FOR_PM = "交 PM";
+const ARCHIVE_FAILED = "归档没成", FOR_PM = "交 PM";
 /** On a cancelled card these open intents are closed before retiring; merge / verify belong to the merge queue and are waited for. */
 const QUEUE_ACTIONS = "('merge','verify')";
 
