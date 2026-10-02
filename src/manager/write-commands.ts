@@ -62,7 +62,7 @@ const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "sh
 /** ledger 里始终走只读连接的子命令（不经 openLedger 建库 / 迁移 / 修数据）：认主守卫按读算，ledger.ts 给只读连接 */
 export const READER_ONLY_SUBS: ReadonlySet<string> = new Set(["merge-queue"]);
 /** ledger 里带 --dry-run 就只读的子命令：认主守卫按读算，ledger.ts 给只读连接 */
-export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate", "feature-split", "pm-switch"]);
+export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate", "feature-split", "pm-switch", "memory-import"]);
 
 /**
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
