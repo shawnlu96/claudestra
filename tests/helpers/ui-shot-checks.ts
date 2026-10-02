@@ -35,7 +35,19 @@ const SCRIPT = `(({ ids, minOverlap }) => {
     r = { left: Math.max(r.left, 0), right: Math.min(r.right, innerWidth), top: Math.max(r.top, 0), bottom: Math.min(r.bottom, innerHeight) };
     if (r.right - r.left < 1 || r.bottom - r.top < 1) return null;
     const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-    return hit && (hit === el || el.contains(hit) || hit.contains(el)) ? r : null;
+    if (!hit || hit === el || el.contains(hit) || hit.contains(el)) return r;
+    // Transparent sibling text does not hide underlying glyphs. Only a fully covering opaque layer can exclude a box.
+    for (let p = hit; p && !p.contains(el); p = p.parentElement) {
+      const cs = getComputedStyle(p), cover = p.getBoundingClientRect();
+      const color = cs.backgroundColor.match(/rgba?\\(([^)]+)\\)/);
+      const parts = color ? color[1].split(",").map(Number) : [];
+      const opaque = parts.length === 3 || (parts.length === 4 && parts[3] === 1);
+      let opacity = 1;
+      for (let ancestor = p; ancestor; ancestor = ancestor.parentElement) opacity *= Number(getComputedStyle(ancestor).opacity);
+      if (opaque && opacity === 1 && cover.left <= r.left && cover.right >= r.right
+        && cover.top <= r.top && cover.bottom >= r.bottom) return null;
+    }
+    return r;
   };
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const text = (n.textContent || "").trim();

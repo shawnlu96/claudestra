@@ -1,10 +1,10 @@
 /**
- * 协作视图的数据源（i28-TV1）：use-collab.ts 只认这三样——总览、任务详情、一条「台账变了」的事件流。
+ * 协作视图的数据源（i28-TV1）：总览、任务详情、台账变更事件，以及可选的 DAG / 产品读取。
  * 缺省是本机台账（GET /ledger/:project、/ledger/:project/tasks/:id、/events），和改之前一模一样；
  * 团队视图注入中心共享台账的适配（team-source-shared.ts），界面还是同一个 CollabView。
  * 这里不碰 react：tests/ 只能 import 纯模块。
  */
-import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
+import { fetchDagBoard, fetchDagFeature, fetchDagDiff, fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import type { LedgerOverview } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
@@ -16,6 +16,13 @@ export interface FollowOpts {
 }
 
 export interface CollabSource {
+  unknownMetrics?: boolean;
+  dag?: {
+    board: typeof fetchDagBoard;
+    feature: typeof fetchDagFeature;
+    diff: typeof fetchDagDiff;
+  };
+  product?: (project: string, signal?: AbortSignal) => Promise<import("@/lib/api/product-board").ProductBoard>;
   /** 顶栏标题；缺省用项目名 */
   label?: string;
   overview(signal: AbortSignal): Promise<LedgerOverview>;

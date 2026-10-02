@@ -113,3 +113,36 @@ test("不注入数据源 = 本机台账：同样的三条接口（总览、任�
   const { followCollabEvents } = await import("@/lib/api/ledger");
   expect(src.follow).toBe(followCollabEvents);
 });
+
+test("团队 DAG 与产品读取复用共享快照：绑定用卡号，版本不编历史，指标不可用", async () => {
+  const transport: Transport = { list: async () => fx.list, detail: async id => details.get(id)!,
+    command: async () => { throw new Error("unused"); }, receipt: async id => ({ status: "unknown", requestId: id }) };
+  const identity = { center: "c", team: fx.team, person: "p", project: fx.project, machine: "m" };
+  const src = sharedCollabSource(new SharedLedgerSession(identity, transport), "team", "label");
+  await src.overview(new AbortController().signal);
+  const board = await src.dag!.board("team");
+  expect(board.features.length).toBe(fx.list.features.length);
+  for (const f of board.features) {
+    const original = details.get(f.id)!;
+    expect(f.currentVersion).toBe(original.dag.version);
+    expect(f.nodes.map(n => n.oneLine)).toEqual(original.dag.nodes.map(n => n.oneLine));
+    for (const n of f.nodes) if (n.taskId) expect(looksLikeId(n.taskId)).toBe(false);
+  }
+  const history = await src.dag!.feature("team", board.features[0]!.id);
+  expect(history.versions).toEqual([]);
+  expect(history.snapshot).toBeNull();
+  const product = await src.product!("team");
+  expect(product.features.map(f => f.version)).toEqual(fx.list.features.map(f => f.version));
+  expect(src.unknownMetrics).toBe(true);
+  expect(localCollabSource("proj").unknownMetrics).toBeUndefined();
+});
+
+test("团队导航 project 编解码保留身份与规划主场，兼容旧缓存", async () => {
+  const { sharedCollabProject, sharedIdentity } = await import("@/features/collab/team-source-key");
+  const identity = { center: "c", team: "t", person: "p", project: "proj", machine: "m", homeInstanceId: "home" };
+  const project = sharedCollabProject(identity);
+  expect(sharedIdentity(project)).toEqual(identity);
+  expect(sharedCollabProject(sharedIdentity(project)!)).toBe(project);
+  expect(sharedIdentity("shared-ledger:" + JSON.stringify(["c", "t", "p", "proj", "m"]))?.project).toBe("proj");
+  expect(sharedIdentity("shared-ledger:{broken")).toBeNull();
+});

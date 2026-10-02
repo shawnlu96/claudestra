@@ -3,6 +3,8 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import { api } from '@/lib/api/client';
 import { machines } from '@/lib/machines';
 import type { Identity } from '@/lib/api/shared-ledger';
+import { sharedCollabProject, sharedIdentity } from '../team-source-key';
+export { sharedCollabProject } from '../team-source-key';
 import { TeamSource } from '../shared/team-ops';
 import { openCollab } from '../collab-nav';
 import { useChatNav } from '../../chat/components/nav-context';
@@ -10,17 +12,6 @@ import { useChatNav } from '../../chat/components/nav-context';
 const subscribeMachines = (fn: () => void) => machines.subscribe(fn);
 const currentMachine = () => machines.currentFp();
 const noMachine = () => null;
-const PREFIX = 'shared-ledger:';
-export function sharedCollabProject(identity: Identity): string { return PREFIX + JSON.stringify(identity); }
-function sharedIdentity(project: string): Identity | null {
-  if (!project.startsWith(PREFIX)) return null;
-  try {
-    const identity = JSON.parse(project.slice(PREFIX.length)) as Identity;
-    return identity && [identity.center, identity.team, identity.person, identity.project, identity.machine]
-      .every(v => typeof v === 'string' && !!v) ? identity : null;
-  }
-  catch { return null; } // A malformed UI cache key cannot authorize a server request; render the local fallback.
-}
 interface Context { identities: (Omit<Identity, 'machine'> & { localProjectId?: string })[] }
 export function SharedEntry({ projectId }: { projectId: string }) {
   const [identity, setIdentity] = useState<Identity | null>(null);

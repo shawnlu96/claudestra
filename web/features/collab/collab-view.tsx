@@ -55,8 +55,8 @@ function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circle
 
 function MetricsBar({ m, connected, tr }: { m: Metrics; connected: boolean; tr: Tr }) {
   const cells: [string, string, string?][] = [
-    ["在场 agent", String(m.present)], ["进行中", String(m.active)], ["今日完成", String(m.todayDone)], ["审查轮次", String(m.reviewRounds)],
-    ["P0/P1 修掉", String(m.fixed)], ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
+    ["在场 agent", String(m.present)], ["进行中", String(m.active)], ["今日完成", String(m.todayDone)], ["审查轮次", m.reviewRounds === null ? tr("暂无") : String(m.reviewRounds)],
+    ["P0/P1 修掉", m.fixed === null ? tr("暂无") : String(m.fixed)], ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
     ["周额度", "—", "暂无数据来源"], ["协作消息", "—", "暂无数据来源"],
   ];
   return (
@@ -166,10 +166,11 @@ export function CollabView({ project }: { project: string }) {
     return l ? lineAction(l).text : "";
   };
 
-  if (load.status !== "ok" || !ov!.exists || (ov?.tasks?.length ?? 0) === 0) return <LoadState load={load} refetch={refetch} tr={tr} />;
+  if (load.status !== "ok" || !ov!.exists || ((ov?.tasks?.length ?? 0) === 0 && !source.ops)) return <LoadState load={load} refetch={refetch} tr={tr} />;
 
   const o = ov!, hv = view!;
   const m = metricsOf(o, hv.todayDone.length, agents.filter((a) => members.has(a.name) && a.status === "active").length);
+  if (source.unknownMetrics) { m.reviewRounds = null; m.fixed = null; }
   const resolved = resolveSelection(sel, o, canvas);
   if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
   const pane = narrowPane(openTask, resolved);

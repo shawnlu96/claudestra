@@ -5,6 +5,8 @@
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
+import { sharedProductBoard } from './dag/shared-product-model';
+import { teamDagBoard, teamDagFeature } from './team-source-dag';
 import { teamOverview, teamTaskDetail, type TeamOverview } from "./team-source-adapter";
 import type { CollabSource, FollowOpts } from "./team-source";
 
@@ -50,8 +52,19 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     return last;
   };
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
+  const board = async () => {
+    const got = last ?? await read();
+    return teamDagBoard(project, got.list, got.details, got.team);
+  };
   return {
     label,
+    unknownMetrics: true,
+    dag: {
+      board,
+      feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
+      diff: async () => { throw new Error('Shared version comparisons are unavailable'); },
+    },
+    product: async () => { const got = last ?? await read(); return sharedProductBoard(got.list, got.team.ov.now); },
     last: () => last,
     poke: () => { for (const p of pokes) p(); },
     overview: async () => (await read()).team.ov,

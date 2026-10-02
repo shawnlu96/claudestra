@@ -11,6 +11,9 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { generateTeamFixture, type TeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import type { FeatureDetail } from "@/lib/api/shared-ledger";
+import { teamOverview } from "@/features/collab/team-source-adapter";
+import { teamDagBoard } from "@/features/collab/team-source-dag";
+import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
 import { shotIssues, type ShotIssue } from "./helpers/ui-shot-checks";
 
 const out = process.env.SHARED_LEDGER_SHOTS_DIR;
@@ -23,24 +26,42 @@ function loadFixture(): TeamFixture {
 async function serve(fx: TeamFixture, bundle: string) {
   const files = readdirSync(bundle);
   let details = new Map(fx.details.map((d) => [d.feature.id, d]));
-  let conflictOnce = true, conflicts = 0;
+  let conflictOnce = true, conflicts = 0, seq = fx.list.serverSeq;
   const json = (v: unknown, status = 200) => Response.json(v, { status });
   return Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const url = new URL(req.url), path = url.pathname;
+    if (path === "/__update") {
+      const d = [...details.values()][0]!;
+      details.set(d.feature.id, { ...d, feature: { ...d.feature, rev: d.feature.rev + 1 },
+        dag: { ...d.dag, nodes: d.dag.nodes.map((n, i) => i === 0 ? { ...n, oneLine: "UPDATED REVIEW PROBE" } : n) } });
+      seq++; return json({ ok: true });
+    }
     if (path === "/__rearm") { conflictOnce = true; return json({ ok: true }); } // 每轮团队操作都要再撞一次 409
     if (path === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (path === `/api/v1/ledger/${fx.project}`) return json({ ok: true, ...fx.local });
+    if (path === `/api/v1/ledger/${fx.project}/dag`) return json(teamDagBoard(fx.project, fx.list,
+      new Map(fx.details.map(d => [d.feature.id, d])), teamOverview(fx.list, new Map(fx.details.map(d => [d.feature.id, d])), fx.now)));
+    if (path === `/api/v1/ledger/${fx.project}/product`) return json(sharedProductBoard(fx.list, fx.now));
     const task = path.match(new RegExp(`^/api/v1/ledger/${fx.project}/tasks/(.+)$`));
     if (task) {
       const t = fx.local.tasks.find((x) => x.id === decodeURIComponent(task[1]!));
       return t ? json({ ok: true, task: t, events: [], timeline: [], now: fx.now }) : json({ error: "nf" }, 404);
     }
-    if (path === "/api/v1/shared-ledger/features") return json({ ...fx.list, features: [...details.values()].map((d) => d.feature) });
+    if (path === "/api/v1/shared-ledger/features") return json({ ...fx.list, serverSeq: seq, features: [...details.values()].map((d) => d.feature) });
     const feature = path.match(/^\/api\/v1\/shared-ledger\/features\/(.+)$/);
     if (feature) return json(details.get(decodeURIComponent(feature[1]!)));
     if (path === "/api/v1/shared-ledger/commands" && req.method === "POST") {
-      const cmd = await req.json() as { featureId: string; requestId: string; nodes: FeatureDetail["dag"]["nodes"] };
+      const cmd = await req.json() as { featureId: string; requestId: string; nodes: FeatureDetail["dag"]["nodes"]; type: string; title: string };
+      if (cmd.type === "feature.new") {
+        const d = structuredClone(generateTeamFixture().details[0]!);
+        d.feature = { ...d.feature, title: cmd.title, version: 0, rev: 1 };
+        d.dag = { version: 0, nodes: [], bindings: [] }; d.tasks = [];
+        details.set(d.feature.id, d); seq++;
+        return json({ schemaVersion: 1, requestId: cmd.requestId, commandDigest: "x", serverSeq: seq, committedAt: fx.now,
+          result: { featureId: d.feature.id, rev: 1, version: 0 } });
+      }
       const d = details.get(cmd.featureId)!;
+      if (cmd.type === "dag.init") conflictOnce = false;
       if (conflictOnce) {
         // 同事先改了第一个没绑卡的节点：409 带最新图
         conflictOnce = false;
@@ -52,7 +73,7 @@ async function serve(fx: TeamFixture, bundle: string) {
       }
       const next = { ...d, serverSeq: d.serverSeq + 1, feature: { ...d.feature, rev: d.feature.rev + 1, version: d.dag.version + 1 },
         dag: { ...d.dag, version: d.dag.version + 1, nodes: cmd.nodes } };
-      details = new Map(details).set(d.feature.id, next);
+      details = new Map(details).set(d.feature.id, next); seq++;
       return json({ schemaVersion: 1, requestId: cmd.requestId, commandDigest: "x", serverSeq: next.serverSeq, committedAt: fx.now,
         result: { featureId: d.feature.id, rev: next.feature.rev, version: next.dag.version } });
     }
@@ -111,7 +132,7 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
       const errors: string[] = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.goto(`${server.url}?side=${side}&theme=${theme}&project=${fx.project}&team=${fx.team}`);
-      await page.getByText(fx.local.tasks[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
+      await page.getByText(fx.list.features[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
       await settle(page);
       const name = `${side}-${width}-${theme}`;
       const png = await page.screenshot({ path: resolve(out, `${name}.png`) });
@@ -119,12 +140,17 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
       issues[name] = await shotIssues(page);
       if (side === "team" && theme === "light") {
         // 任务详情：团队操作在复用后的位置（任务属性页）上，执行类按 capabilities 置灰
-        await page.getByText(fx.local.tasks[1]!.title, { exact: true }).first().click();
+        if (width < 700) {
+          const f = fx.details[0]!, node = f.dag.nodes[6]!;
+          await page.getByRole("button").filter({ has: page.getByText(f.feature.title, { exact: true }) }).click();
+          await page.getByText(node.oneLine, { exact: true }).first().click();
+          await page.getByRole("button", { name: new RegExp(`^${node.key} `) }).last().click();
+        } else await page.getByText(fx.local.tasks[1]!.title, { exact: true }).first().click();
         await page.getByText("团队操作", { exact: true }).waitFor();
         for (const label of ["开卡", "绑卡", "阶段", "审批"]) expect(await page.getByRole("button", { name: label, exact: true }).isDisabled()).toBe(true);
         await page.screenshot({ path: resolve(out, `${name}-task.png`) });
         await page.goto(`${server.url}?side=team&theme=${theme}&project=${fx.project}&team=${fx.team}`);
-        await page.getByText(fx.local.tasks[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
+        await page.getByText(fx.list.features[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
         await page.request.get(`${server.url}__rearm`);
         await teamActions(page, width < 700, name);
         await page.screenshot({ path: resolve(out, `${name}-ops.png`) });
@@ -150,3 +176,90 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
     for (const [name, list] of Object.entries(issues)) expect({ name, list }).toEqual({ name, list: [] });
   } finally { await browser.close(); server.stop(true); }
 }, 240_000);
+
+
+const regressions = process.env.TV1_REGRESSION === "1";
+async function regression(run: (page: Page, url: string) => Promise<void>, empty = false) {
+  const bundle = resolve(".tv1-regression-bundle"), webRoot = process.env.TV1_BASELINE_WEB ?? "web";
+  const build = Bun.spawn([process.execPath, "build", `${webRoot}/features/collab/shared/fixture-harness.tsx`, "--target", "browser",
+    "--outdir", bundle, "--tsconfig-override", `${webRoot}/tsconfig.json`], { stdout: "pipe", stderr: "pipe" });
+  if (await build.exited) throw new Error(await new Response(build.stderr).text());
+  const fx = generateTeamFixture();
+  if (empty) { fx.list.features = []; fx.details = []; }
+  const server = await serve(fx, bundle);
+  const browser = await chromium.launch({ headless: true, channel: "chrome" });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    page.setDefaultTimeout(2500);
+    await page.goto(`${server.url}?side=team&project=${fx.project}&team=${fx.team}`);
+    await run(page, String(server.url));
+  } finally { await browser.close(); server.stop(true); }
+}
+
+test.skipIf(!regressions)("refresh-key: actual team entry refreshes after polling and committed rewrite", async () => {
+  await regression(async (page, url) => {
+    await page.getByText(generateTeamFixture().local.tasks[0]!.title, { exact: true }).first().waitFor();
+    await page.request.get(`${url}__update`);
+    await page.getByText("UPDATED REVIEW PROBE", { exact: true }).first().waitFor({ timeout: 8000 });
+    await teamActions(page, false, "refresh");
+    await page.getByRole("tab", { name: "产品 DAG", exact: true }).click();
+    await page.getByRole("button").filter({ has: page.getByText(generateTeamFixture().details.at(-1)!.feature.title, { exact: true }) }).click();
+    await page.getByText("我的草稿标题 refresh", { exact: true }).first().waitFor();
+  });
+}, 30000);
+
+test.skipIf(!regressions)("empty-ops: create first feature and initialize first DAG from an empty team", async () => {
+  await regression(async (page) => {
+    await page.getByRole("tab", { name: "团队", exact: true }).click();
+    await page.getByRole("button", { name: "新建 feature", exact: true }).click();
+    await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST FEATURE");
+    await page.getByRole("button", { name: "创建", exact: true }).click();
+    await page.getByRole("button", { name: "编辑规划 FIRST FEATURE", exact: true }).click();
+    await page.getByRole("button", { name: "添加节点", exact: true }).click();
+    await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST NODE");
+    await page.getByRole("textbox", { name: "文件范围", exact: true }).fill("web/**");
+    await page.getByRole("textbox", { name: "改图原因", exact: true }).fill("initialize first DAG");
+    await page.getByRole("button", { name: "提交新版本", exact: true }).click();
+    await page.getByRole("tab", { name: "产品 DAG", exact: true }).click();
+    await page.getByRole("button").filter({ has: page.getByText("FIRST FEATURE", { exact: true }) }).click();
+    await page.getByText("FIRST NODE", { exact: true }).first().waitFor();
+  }, true);
+}, 30000);
+
+test.skipIf(!regressions)("dag-source: team renders shared nodes and versions without local ledger reads", async () => {
+  await regression(async (page) => {
+    const localReads: string[] = [];
+    page.on("request", r => { if (/\/ledger\/.*\/(dag|product)/.test(r.url())) localReads.push(r.url()); });
+    await page.reload();
+    await page.getByRole("tab", { name: "子 DAG", exact: true }).waitFor();
+    await page.getByRole("button").filter({ has: page.getByText(generateTeamFixture().details[0]!.feature.title, { exact: true }) }).click();
+    await page.getByText(generateTeamFixture().details[0]!.dag.nodes[6]!.oneLine, { exact: true }).first().waitFor();
+    await page.getByRole("button", { name: "版本", exact: true }).click();
+    await page.getByRole("button", { name: "对比", exact: true }).waitFor();
+    expect(localReads).toEqual([]);
+  });
+}, 30000);
+
+test.skipIf(!regressions)("overlap-check: fully overlapping transparent text fails while opaque masks hide text", async () => {
+  const check = process.env.TV1_BASELINE_WEB
+    ? (await import(resolve(process.env.TV1_BASELINE_WEB, "../tests/helpers/ui-shot-checks.ts"))).shotIssues as typeof shotIssues : shotIssues;
+  await regression(async (page) => {
+    for (const left of [10, 18]) {
+      await page.setContent(`<span style="position:absolute;left:10px;top:10px">ABCDEFG</span>
+        <span style="position:absolute;left:${left}px;top:10px">HIJKLMN</span>`);
+      expect((await check(page)).some(i => i.kind === "overlap")).toBe(true);
+    }
+    await page.setContent('<span style="position:absolute;left:10px;top:10px">ABCDEFG</span><div style="position:absolute;inset:0;background:white">MASK</div>');
+    expect(await check(page)).toEqual([]);
+  });
+}, 30000);
+
+
+test.skipIf(!regressions)("unknown-metrics: team review rounds and fixed findings display unavailable", async () => {
+  await regression(async page => {
+    await page.getByText("审查轮次", { exact: true }).waitFor();
+    for (const label of ["审查轮次", "P0/P1 修掉"]) {
+      expect(await page.getByText(label, { exact: true }).locator("..").innerText()).toContain("暂无");
+    }
+  });
+}, 30000);

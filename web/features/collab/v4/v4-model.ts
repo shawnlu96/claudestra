@@ -15,9 +15,9 @@ export interface Metrics {
   present: number;
   active: number;
   todayDone: number;
-  reviewRounds: number;
+  reviewRounds: number | null;
   /** 审出来、已经过了审查（合并及以后）的 P0 + P1 */
-  fixed: number;
+  fixed: number | null;
   /** 此刻在等审查的任务平均已经等了多久；没有在等的 = null */
   avgReviewWaitMs: number | null;
 }

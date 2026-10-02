@@ -6,6 +6,6 @@ import { progress, stale } from '../shared/shared-model';
 export function sharedProductBoard(list: FeatureList, now: number): ProductBoard {
   return { features: list.features.map(f => ({ id: f.id, title: f.title,
     status: f.status === 'done' && !stale(f, now) && f.counts.missing === 0 ? 'done' : 'active',
-    hasDag: true, version: f.version, counts: { total: f.counts.total, completed: progress(f, now),
+    hasDag: f.version > 0, cards: [], version: f.version, counts: { total: f.counts.total, completed: progress(f, now),
       active: 0, blocked: f.counts.blocked }, eta: null })), deps: [] };
 }

@@ -11,6 +11,7 @@ import type { Capabilities, FeatureDetail, Identity, Transport } from '@/lib/api
 import { useLang } from '@/lib/i18n';
 import { sharedLedgerTr } from '@/lib/i18n-dict-shared-ledger';
 import { CollabSourceContext } from '../team-source-context';
+import { sharedCollabProject } from '../team-source-key';
 import { sharedCollabSource } from '../team-source-shared';
 import { looksLikeId } from '../team-source-adapter';
 import { Sec } from '../v4/v4-props';
@@ -74,7 +75,7 @@ export function TeamSource({ identity, transport, children }: { identity: Identi
 function Session({ identity, transport, children }: { identity: Identity; transport?: Transport; children: ReactNode }) {
   const tr = sharedLedgerTr(useLang());
   const [session] = useState(() => new SharedLedgerSession(identity, transport ?? sharedLedgerTransport({ fp: identity.machine }, identity.project)));
-  const [source] = useState(() => sharedCollabSource(session, `shared-ledger:${identityKey(identity)}`, identity.project));
+  const [source] = useState(() => sharedCollabSource(session, sharedCollabProject(identity), identity.project));
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
   const ops = useTeamOps(identity, session, source, tr);
   const injected = useMemo(() => ({ ...source, ops: (taskId: string | null) => <TeamOps taskId={taskId} /> }), [source]);
