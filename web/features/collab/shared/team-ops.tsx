@@ -74,7 +74,7 @@ export function TeamSource({ identity, transport, children }: { identity: Identi
 function Session({ identity, transport, children }: { identity: Identity; transport?: Transport; children: ReactNode }) {
   const tr = sharedLedgerTr(useLang());
   const [session] = useState(() => new SharedLedgerSession(identity, transport ?? sharedLedgerTransport({ fp: identity.machine }, identity.project)));
-  const [source] = useState(() => sharedCollabSource(session, `shared-ledger:${identityKey(identity)}`, `${identity.project} · ${identity.team}`));
+  const [source] = useState(() => sharedCollabSource(session, `shared-ledger:${identityKey(identity)}`, identity.project));
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
   const ops = useTeamOps(identity, session, source, tr);
   const injected = useMemo(() => ({ ...source, ops: (taskId: string | null) => <TeamOps taskId={taskId} /> }), [source]);
@@ -98,7 +98,7 @@ function Notices({ ops }: { ops: Ops }) {
 }
 
 function FeatureOps({ ops }: { ops: Ops }) {
-  const { tr } = ops, last = ops.source.last(), now = Date.now();
+  const { tr } = ops, last = ops.source.last(), now = last?.team.ov.now ?? 0;
   const features = last?.list.features ?? [];
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;

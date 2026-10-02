@@ -155,7 +155,7 @@ export function CollabView({ project }: { project: string }) {
   const [filter, setFilter] = useState<Filter>("all");
   const { sel, setSel, focus, pickTask, select, close } = useSelection(openTask);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr });
-  const projectName = source.label ?? projects.find((p) => p.id === project)?.name || project;
+  const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
   const lineAction = (l: LineView) => {
     const waitLabel = l.attention === "waiting" || l.attention === "stuck" ? l.stageLabel : null;
