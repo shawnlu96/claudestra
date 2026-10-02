@@ -36,6 +36,15 @@ export class HostHeartbeat {
     this.write();
   }
 
+  /**
+   * steering 的结果：startedNewTurn = 适配器拿这条消息另起了一轮（它不走 prompt，也不走 onSelfTurn——回包先到时 session
+   * 已挂上等待，active 不再当自发的一轮），这里开心跳；injected 只是插进在跑的回合，不算新一轮。原样返回结果
+   */
+  steered<R extends { outcome: string }>(r: R): R {
+    if (r.outcome === "startedNewTurn") this.turn();
+    return r;
+  }
+
   /** 收到 session/update 或权限请求 */
   update(): void {
     this.updateAt = this.now();

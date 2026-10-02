@@ -119,7 +119,7 @@ export class AcpHost {
         if (!s) return { kind: "failed", failure: this.lastStartError ?? { kind: "error", key: `nosession#${++this.startSeq}`, message: "ACP 适配器没起来" } };
         return s.prompt(text);
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text) : Promise.resolve({ outcome: "failed" as const })),
+      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       log: deps.log,
