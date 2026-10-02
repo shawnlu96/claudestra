@@ -53,12 +53,13 @@ export function pushCardBranch(t: PushTarget): boolean {
   return journalCardBranch(t.orderId, t.branch, t.orderHead);
 }
 
-/** Refuse any competing update even if it could fast-forward; ordinary lend branches retain their existing behavior. */
-export async function checkCardPushHead(t: PushTarget, git: (args: string[]) => Promise<BoundedResult>, url: string): Promise<PushResult | null> {
+/** A verified same-head retry resumes delivery without writing; competing updates still refuse even if fast-forwardable. */
+export async function checkCardPushHead(t: PushTarget & { head: string }, git: (args: string[]) => Promise<BoundedResult>, url: string): Promise<PushResult | null> {
   if (LEND_BRANCH_RE.test(t.branch) && !/:cv:\d+$/.test(t.orderId)) return null;
   if (!pushCardBranch(t)) return { ok: false, reason: "card branch order is no longer leased", retry: false };
   const result = await git(["ls-remote", url, `refs/heads/${t.branch}`]);
   const lines = result.stdout.trim().split(/\n/);
+  if (result.code === 0 && lines.length === 1 && lines[0] === `${t.head}\trefs/heads/${t.branch}`) return { ok: true };
   const expected = `${t.orderHead}\trefs/heads/${t.branch}`;
   return result.code === 0 && lines.length === 1 && lines[0] === expected ? null
     : { ok: false, reason: "remote card branch head changed or cannot be verified", retry: result.code !== 0 };

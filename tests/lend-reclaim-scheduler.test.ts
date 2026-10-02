@@ -3,9 +3,9 @@ import { fourRoundFix, repeatedFix } from "./fix-strategy-helpers.js";
 import { remoteProbe, peerAuthor, runningOrder, resultDeps, hello } from "./fix-strategy-remote-helpers.js";
 import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { reclaimForFamilySwap } from "../src/lib/lend-reclaim-scheduler.js";
-import { getLendOrder, reclaimLend } from "../src/lib/ledger-lend.js";
+import { getLendOrder, reclaimLend, cancelLend } from "../src/lib/ledger-lend.js";
 import { heldLease } from "../src/lib/ledger-lend-lease.js";
-import { listEvents } from "../src/lib/ledger-store.js";
+import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
 import { writeLendResult } from "../src/lib/ledger-lend-result.js";
 import type { ResultRequest } from "../src/lib/lend-wire.js";
 import { beatLend } from "../src/lib/ledger-lend-peers.js";
@@ -78,5 +78,36 @@ test("old peer sees ordinary cancelled, cannot confirm clean reclaim, and PM not
     const modern = beatLend(f.db, f.at("peer:Peer"), "Peer", { v: 1, orders: [{ orderId: "old-running", gen: 1,
       phase: "working", lastActivityAt: 1, excerpt: "", ended: null }] }, new Map());
     expect(modern.orders[0].verdict).toBe("convergence_cancelled");
+  } finally { f.close(); }
+});
+
+test("PM cancellation of a previously claimed writer cannot bypass scheduler clean-exit confirmation", async () => {
+  const f = await fourRoundFix();
+  try {
+    const p = remoteProbe(f); peerAuthor(f, "claude"); runningOrder(f); const intent = p.plan();
+    cancelLend(f.db, f.at("pm"), { taskId: "T1", reason: "pause writer" });
+    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting" });
+    expect(heldLease(f.db, f.task())?.state).toBe("held");
+    expect(p.effects.some((s) => s.startsWith("create:"))).toBe(false);
+    const req: ResultRequest = { v: 1, orderId: "old-running", gen: 1, cancelAck: { clean: true, workerAbsent: true },
+      report: "named worker killed; fresh liveness probe confirms no window", session: { id: "", family: "claude" },
+      verdict: { v: 1, orderId: "old-running", head: f.task().headSHA!, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "cancel.md" } };
+    expect(() => writeLendResult(f.db, f.at("peer:Peer"), "Peer", { ...req, gen: 2 }, "wrong-gen", resultDeps)).toThrow();
+    expect(() => writeLendResult(f.db, f.at("peer:Peer"), "Peer", { ...req, session: { id: "fabricated", family: "claude" } }, "fake", resultDeps)).toThrow();
+    const receipt = writeLendResult(f.db, f.at("peer:Peer"), "Peer", req, "absent", resultDeps);
+    expect(writeLendResult(f.db, f.at("peer:Peer"), "Peer", req, "absent", resultDeps)).toEqual(receipt);
+    expect(getEventByDedup(f.db, "convergence-cancel:old-running")?.data).toMatchObject({ session: null, workerAbsent: true, clean: true });
+    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "session" });
+    expect(heldLease(f.db, f.task())).toBeNull();
+  } finally { f.close(); }
+});
+
+test("a previously claimed cancelled writer appearing during the remote-head check still prevents reclaim", async () => {
+  const f = await fourRoundFix();
+  try {
+    const p = remoteProbe(f); peerAuthor(f, "claude"); const intent = p.plan();
+    p.context.remoteHead = async () => { runningOrder(f, "cancelled"); return { ok: true, head: f.task().headSHA! }; };
+    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting" });
+    expect(heldLease(f.db, f.task())?.state).toBe("held");
   } finally { f.close(); }
 });

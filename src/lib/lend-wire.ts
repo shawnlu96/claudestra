@@ -34,7 +34,7 @@ export interface LeaseRequest {
 type LendRoleWire = "review" | "write";
 type Session = { id: string; family: LendFamily };
 export interface ResultRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; verdict: VerdictWire; report: string; session: Session }
-export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: { clean: boolean } }
+export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: { clean: boolean; workerAbsent?: true } }
 /** 开工 / 修复单的交付（i28-R6）：B 已把 head 推到订单分支（并开 / 更新了 PR），A 核对远端 head 后记 deliver */
 export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session }
 
@@ -117,12 +117,12 @@ function parseLease(raw: unknown): LeaseRequest {
 /** findingId / family are identifiers A keeps and prints as they are: one that masking would change (a token, an address) is refused, never rewritten (T93 r1 P2-3) */
 const plainId = (v: string, path: string): string => (sanitizeForeign(v) === v ? v : fail(path, "看着像凭据或地址，不收"));
 
-const session = (v: unknown): Session => {
+const session = (v: unknown, absent = false): Session => {
   const s = record(v, "session", ["id", "family"]);
-  return { id: matching(s.id, "session.id", SESSION), family: oneOf(s.family, "session.family", LEND_FAMILIES) };
+  return { id: matching(s.id, "session.id", absent ? /^$/ : SESSION), family: oneOf(s.family, "session.family", LEND_FAMILIES) };
 };
 
-function parseVerdictResult(raw: unknown): ResultRequest {
+function parseVerdictResult(raw: unknown, absent = false): ResultRequest {
   const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session"]);
   const verdict = parseVerdictWire(r.verdict);
   if (!verdict.ok) return fail("verdict", verdict.error);
@@ -130,7 +130,7 @@ function parseVerdictResult(raw: unknown): ResultRequest {
   const orderId = matching(r.orderId, "orderId", ORDER_ID);
   if (verdict.value.orderId !== orderId) fail("verdict.orderId", "与请求的 orderId 不一致");
   if (typeof r.report !== "string" || r.report.length === 0 || Buffer.byteLength(r.report) > LEND_REPORT_MAX) fail("report", `要是非空且不超过 ${LEND_REPORT_MAX} 字节`);
-  return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), verdict: verdict.value, report: r.report as string, session: session(r.session) };
+  return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), verdict: verdict.value, report: r.report as string, session: session(r.session, absent) };
 }
 
 /** head 只收小写 40 位（A 拿它与 ls-remote 的输出逐字比）；evidence 是 B 那边的位置标注，A 只当引用数据存 */

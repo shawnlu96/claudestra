@@ -28,14 +28,15 @@ function cancellationResult(db: Database, ctx: WriteCtx, o: LendOrder, req: Resu
   const cancel = listEvents(db, { project: o.project, target: o.taskId }).find((e) => e.data.op === "convergence_cancel" &&
     e.data.orderId === o.orderId && e.data.gen === req.gen);
   const proto = (db.query("SELECT proto FROM lend_peers WHERE peer = ?").get(o.peer) as { proto: number } | null)?.proto ?? 1;
-  if (!cancel || proto < 3 || o.status !== "cancelled" || !cancel.data.needsAck || req.verdict.head !== o.head || req.session.family !== o.family) {
+  if (!cancel || proto < 3 || o.status !== "cancelled" || !cancel.data.needsAck || req.verdict.head !== o.head || req.session.family !== o.family ||
+    (req.cancelAck?.workerAbsent ? !req.cancelAck.clean || req.session.id !== "" : !req.session.id)) {
     return refuse("cancelled", "取消确认不属于受限收回的绑定单");
   }
   const key = `convergence-cancel:${o.orderId}`, prior = getEventByDedup(db, key);
   if (prior && prior.data.sha !== sha) return refuse("conflict", "取消确认已有不同结论");
   const event = prior ?? insertEvent(db, { actor: "scheduler", now: ctx.now, dedupKey: key }, { project: o.project, target: o.taskId,
     kind: "scheduler", text: "出借方确认旧写 worker 已停止", data: { op: "convergence_cancel_ack", orderId: o.orderId,
-      intentId: cancel.data.intentId, gen: req.gen, clean: req.cancelAck!.clean, session: req.session.id, sha } }, true);
+      intentId: cancel.data.intentId, gen: req.gen, clean: req.cancelAck!.clean, session: req.session.id || null, workerAbsent: req.cancelAck!.workerAbsent === true, sha } }, true);
   return receipt(db, o, sha, event.seq, deps, ctx.now ?? Date.now(), false);
 }
 

@@ -25,7 +25,7 @@ import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GON
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
-import { createHash } from "node:crypto";
+import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
 
 export const BEAT_MS = 60_000;
@@ -94,7 +94,7 @@ export interface LendDeps {
   settleHold?(row: LendRow): boolean;
 }
 
-export const workerName = (orderId: string): string => `agent-lend-${createHash("sha256").update(orderId).digest("hex").slice(0, 10)}`;
+export { workerName } from "./lend-worker-name.js";
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 

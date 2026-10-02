@@ -79,14 +79,16 @@ function readArbiterResult(raw: unknown, ordinary: (raw: unknown) => ResultReque
   return { ...parsed, arbitration: r as unknown as ArbiterVerdictWire };
 }
 
-export function parseConvergenceResult(raw: unknown, ordinary: (raw: unknown) => ResultRequest,
+export function parseConvergenceResult(raw: unknown, ordinary: (raw: unknown, absent?: boolean) => ResultRequest,
   fail: (path: string, why: string) => never): ResultRequest | null {
   try {
     if (raw && typeof raw === "object" && "cancelAck" in raw) {
       const { cancelAck, ...rest } = raw as Record<string, unknown>;
-      const ack = fields(cancelAck, ["clean"]);
+      const absent = !!cancelAck && typeof cancelAck === "object" && "workerAbsent" in cancelAck;
+      const ack = fields(cancelAck, absent ? ["clean", "workerAbsent"] : ["clean"]);
+      if (absent && (ack.workerAbsent !== true || ack.clean !== true)) throw new Error("worker absence must be clean and confirmed");
       if (typeof ack.clean !== "boolean") throw new Error("cancelAck.clean must be boolean");
-      return { ...ordinary(rest), cancelAck: { clean: ack.clean } };
+      return { ...ordinary(rest, absent), cancelAck: { clean: ack.clean, ...(absent ? { workerAbsent: true as const } : {}) } };
     }
     return readArbiterResult(raw, ordinary);
   } catch (e) { return fail("convergence result", (e as Error).message); }

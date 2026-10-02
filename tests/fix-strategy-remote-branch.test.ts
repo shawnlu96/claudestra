@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareClone } from "../src/lib/lend-clone.js";
+import { runBounded } from "../src/lib/run-bounded.js";
 import { pushWork } from "../src/lib/lend-push.js";
 import { recordAsked, advance, openLendJournal, LEND_JOURNAL_PATH } from "../src/lib/lend-journal.js";
 import { orderWireOf, parseOrderWire } from "../src/lib/order-wire.js";
@@ -55,8 +56,13 @@ test("real git custom-branch clone and fast-forward push require journal binding
     expect(await pushWork(target, { root: lend, env })).toMatchObject({ ok: false, reason: "remote card branch head changed or cannot be verified" });
     expect(git(repo, ["rev-parse", branch], env)).toBe(competing);
     git(repo, ["update-ref", `refs/heads/${branch}`, head, competing], env);
-    expect(await pushWork(target, { root: lend, env })).toEqual({ ok: true });
+    expect(await pushWork(target, { root: lend, env, run: async (argv, opts) => {
+      const result = await runBounded(argv, opts);
+      return argv[1] === "push" && result.code === 0 ? { ...result, code: 1, stderr: "response lost after publication" } : result;
+    } })).toMatchObject({ ok: false, retry: true });
     expect(git(repo, ["rev-parse", branch], env)).toBe(fixed);
+    expect(await pushWork(target, { root: lend, env })).toEqual({ ok: true });
+
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
