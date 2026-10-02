@@ -38,9 +38,20 @@ export function pmProblems(error: string): string[] {
   return out.length ? out : ["操作失败"];
 }
 
-/** 二级页行数（MenuShell 定位用）：返回 + 候选（至少占一行）+ 确认 / 取消 + 问题 */
+/**
+ * 一条问题折行后约占几行菜单高（MenuShell 只拿行数算翻转）：文本区约 146px，13.5px 字号约 22 个半角 / 11 个全角一行，
+ * 每多折一行约半个 ROW_H。只是定位估算，不影响显示（问题行本身完整折行，见 project-pm.tsx PmProblemItem）。
+ */
+export function pmProblemRows(problem: string): number {
+  let units = 0;
+  for (const ch of problem) units += ch.charCodeAt(0) > 0x2e7f ? 2 : 1;
+  return 1 + (Math.max(1, Math.ceil(units / 22)) - 1) / 2;
+}
+
+/** 二级页行数（MenuShell 定位用）：返回 + 候选（至少占一行）+ 确认 / 取消 + 问题（长问题按折行估算） */
 export function pmPageRows(view: ProjectPmView | null, confirm: PmConfirm | null): number {
-  return 1 + Math.max(1, view?.candidates.length ?? 0) + (confirm ? 2 + confirm.problems.length : 0);
+  const problems = confirm ? confirm.problems.reduce((n, p) => n + pmProblemRows(p), 0) : 0;
+  return 1 + Math.max(1, view?.candidates.length ?? 0) + (confirm ? 2 + problems : 0);
 }
 
 export async function checkPm(agent: string, deps: Pick<PmFlowDeps, "post">): Promise<PmConfirm> {

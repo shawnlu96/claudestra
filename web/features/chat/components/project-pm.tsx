@@ -4,13 +4,13 @@
  * 外壳 / 行 / 返回项沿用 project-menu.tsx 的 MenuShell + MenuItem，跟「打开方式 → 终端 / IDE」二级页同一写法；
  * 逻辑在 project-pm-model.ts。只在有 manage 授权时出现；候选、体检、切换都走 /api/v1/projects/:id/pm。
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { getProjectPm, switchProjectPm, type ProjectPmView } from "@/lib/api/project-pm";
 import { useT, t as tr } from "@/lib/i18n";
 import { MenuItem } from "./menu-shell";
 import { CheckIcon, TriangleAlertIcon, XIcon } from "./line-icons";
-import { checkPm, confirmPm, pmPageRows, pmProblems, pmRows, type PmConfirm } from "./project-pm-model";
+import { checkPm, confirmPm, pmPageRows, pmProblemRows, pmProblems, pmRows, type PmConfirm } from "./project-pm-model";
 
 export interface ProjectPmMenu {
   view: ProjectPmView | null;
@@ -18,6 +18,8 @@ export interface ProjectPmMenu {
   confirm: PmConfirm | null;
   setConfirm: (c: PmConfirm | null | ((cur: PmConfirm | null) => PmConfirm | null)) => void;
   rows: number;
+  /** 本菜单实例还开着（ProjectPanel 卸载即 false）：迟到的切换结果不能去关别的菜单 / 改已关菜单的状态 */
+  alive: RefObject<boolean>;
 }
 
 /** 菜单打开时拉一次（enabled = 有 manage 授权）；关菜单即卸载，下次打开重拉 */
@@ -25,6 +27,13 @@ export function useProjectPmMenu(project: string, enabled: boolean): ProjectPmMe
   const [view, setView] = useState<ProjectPmView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<PmConfirm | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   useEffect(() => {
     if (!enabled) return;
     let live = true;
@@ -36,7 +45,8 @@ export function useProjectPmMenu(project: string, enabled: boolean): ProjectPmMe
       live = false;
     };
   }, [project, enabled]);
-  return { view, error, confirm, setConfirm, rows: pmPageRows(view, confirm) };
+  const rows = !view && error ? 1 + pmProblems(error).reduce((n, p) => n + pmProblemRows(p), 0) : pmPageRows(view, confirm);
+  return { view, error, confirm, setConfirm, rows, alive };
 }
 
 /** lucide user-cog */
@@ -67,6 +77,21 @@ function DisabledItem({ icon, label }: { icon: ReactNode; label: string }) {
   );
 }
 
+/**
+ * 问题行：MenuItem 同款字号 / 内边距 / 图标位 + 禁用的压淡，但文本完整折行（不 truncate），
+ * 后端体检原因（如「peer p1 lacks a PM agent destination in peer-prs」）在 200px 菜单里也能整句读到。
+ */
+function PmProblemItem({ text }: { text: string }) {
+  return (
+    <div role="note" className="flex w-full items-start gap-2.5 px-3.5 py-2.5 text-left text-[13.5px] leading-snug text-base-content/85 opacity-45">
+      <span className="flex h-[1lh] w-4 shrink-0 items-center justify-center opacity-70">
+        <TriangleAlertIcon size={14} />
+      </span>
+      <span className="min-w-0 flex-1 whitespace-normal break-words">{text}</span>
+    </div>
+  );
+}
+
 /** 主菜单项「主管 PM · 当前名」，点开进二级页 */
 export function PmMainItem({ pm, onClick }: { pm: ProjectPmMenu; onClick: () => void }) {
   const t = useT();
@@ -78,39 +103,53 @@ export function PmMainItem({ pm, onClick }: { pm: ProjectPmMenu; onClick: () => 
 export function ProjectPmPage({ project, pm, onClose }: { project: string; pm: ProjectPmMenu; onClose: () => void }) {
   const t = useT();
   const { view, confirm, setConfirm } = pm;
+  // 真 POST 在途时锁住：候选、取消、再次确认都不响应，不会并发出第二次切换
+  const sending = confirm?.check === "sending";
   const deps = {
     post: (agent: string, dryRun: boolean) => switchProjectPm(project, agent, dryRun),
-    close: onClose,
+    // 结果迟到时本菜单可能已被关掉 / 换成别的项目的菜单：只关自己
+    close: () => pm.alive.current && onClose(),
     flash: (agent: string) => flashProjectPm(tr("主管 PM 已切到 {name}", { name: agent })),
   };
   const pick = (agent: string) => {
+    if (sending) return;
     if (agent === view?.active) return setConfirm(null);
     setConfirm({ agent, check: "pending", problems: [] });
     void checkPm(agent, deps).then((c) => setConfirm((cur) => (cur?.agent === agent && cur.check === "pending" ? c : cur)));
   };
   const go = (agent: string) => {
+    if (sending) return;
     setConfirm({ agent, check: "sending", problems: [] });
-    void confirmPm(agent, deps).then((c) => c && setConfirm(c));
+    void confirmPm(agent, deps).then((c) => {
+      if (!c) return;
+      // 菜单已关：失败原因改用轻提示带出来，不丢
+      if (pm.alive.current) setConfirm((cur) => (cur?.agent === agent && cur.check === "sending" ? c : cur));
+      else flashProjectPm(tr("主管 PM 切换失败：{reason}", { reason: c.problems.join("; ") }));
+    });
   };
-  if (!view) return <DisabledItem icon={pm.error ? <TriangleAlertIcon size={14} /> : ""} label={pm.error ? pmProblems(pm.error)[0] : t("加载中…")} />;
+  if (!view) {
+    if (pm.error) return <>{pmProblems(pm.error).map((p) => <PmProblemItem key={p} text={t(p)} />)}</>;
+    return <DisabledItem icon="" label={t("加载中…")} />;
+  }
   return (
     <>
-      {pmRows(view).map((r) => (
-        <MenuItem
-          key={r.name}
-          icon={r.current ? <CheckIcon size={14} /> : ""}
-          label={`${r.name} · ${r.runtime} · ${t(r.status)}`}
-          onClick={() => pick(r.name)}
-        />
-      ))}
+      {pmRows(view).map((r) => {
+        const row = { icon: r.current ? <CheckIcon size={14} /> : "", label: `${r.name} · ${r.runtime} · ${t(r.status)}` };
+        return sending ? <DisabledItem key={r.name} {...row} /> : <MenuItem key={r.name} {...row} onClick={() => pick(r.name)} />;
+      })}
       {confirm &&
         (confirm.check === "ok" ? (
           <MenuItem icon="›" label={t("切到 {name}", { name: confirm.agent })} onClick={() => go(confirm.agent)} />
         ) : (
           <DisabledItem icon="›" label={confirm.check === "failed" ? t("切到 {name}", { name: confirm.agent }) : t("体检中…")} />
         ))}
-      {confirm && <MenuItem icon={<XIcon size={14} />} label={t("取消")} onClick={() => setConfirm(null)} />}
-      {confirm?.problems.map((p) => <DisabledItem key={p} icon={<TriangleAlertIcon size={14} />} label={t(p)} />)}
+      {confirm &&
+        (sending ? (
+          <DisabledItem icon={<XIcon size={14} />} label={t("取消")} />
+        ) : (
+          <MenuItem icon={<XIcon size={14} />} label={t("取消")} onClick={() => setConfirm(null)} />
+        ))}
+      {confirm?.problems.map((p) => <PmProblemItem key={p} text={t(p)} />)}
     </>
   );
 }

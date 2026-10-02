@@ -11,7 +11,7 @@ import type { PmSwitchResult, ProjectPmView } from "../web/lib/api/project-pm";
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
-interface El { textContent: string | null; click(): void; dispatchEvent(e: unknown): boolean; querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El> }
+interface El { textContent: string | null; className: string; click(): void; dispatchEvent(e: unknown): boolean; querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El> }
 interface Host extends El { remove(): void }
 interface Doc { createElement(tag: string): Host; body: El & { appendChild(c: Host): void } }
 
@@ -21,11 +21,15 @@ const state = {
   view: null as ProjectPmView | null,
   results: [] as PmSwitchResult[],
   posts: [] as { project: string; agent: string; dryRun: boolean }[],
+  /** 置 true 时真 POST（dryRun=false）挂起，等测试手动 resolve（模拟慢链路） */
+  hold: false,
+  pending: [] as ((r: PmSwitchResult) => void)[],
 };
 mock.module("@/lib/api/project-pm", () => ({
   getProjectPm: async () => state.view!,
   switchProjectPm: async (project: string, agent: string, dryRun: boolean) => {
     state.posts.push({ project, agent, dryRun });
+    if (state.hold && !dryRun) return new Promise<PmSwitchResult>((r) => state.pending.push(r));
     return state.results.shift() ?? { ok: true };
   },
 }));
@@ -72,6 +76,8 @@ beforeEach(() => {
   };
   state.results = [];
   state.posts = [];
+  state.hold = false;
+  state.pending = [];
 });
 
 const tick = () => React.act(async () => { await new Promise((r) => setTimeout(r, 0)); });
@@ -99,6 +105,7 @@ async function mount() {
     menu: () => doc.body.querySelector('[role="menu"]'),
     labels,
     click: async (text: string) => { await React.act(async () => item(text).click()); await tick(); },
+    notes: () => Array.from(doc.body.querySelectorAll('[role="note"]')),
     disabled: () => Array.from(doc.body.querySelectorAll('[aria-disabled] [role="menuitem"]')).map((b) => b.textContent ?? ""),
     body: () => doc.body.textContent ?? "",
     unmount: async () => { await React.act(async () => root.unmount()); host.remove(); },
@@ -160,7 +167,8 @@ test("体检不过：问题逐条以禁用样式列出，确认行不放行", as
   await ui.open();
   await ui.click("主管 PM");
   await ui.click("pm-b");
-  expect(ui.disabled()).toEqual(["›切到 pm-b", "pm-b is offline", "peer p1 lacks a PM agent destination in peer-prs"]);
+  expect(ui.disabled()).toEqual(["›切到 pm-b"]);
+  expect(ui.notes().map((n) => n.textContent)).toEqual(["pm-b is offline", "peer p1 lacks a PM agent destination in peer-prs"]);
   await React.act(async () => { ui.click("切到 pm-b"); });
   expect(state.posts.filter((p) => !p.dryRun)).toEqual([]);
   expect(ui.menu()).not.toBeNull();
@@ -176,7 +184,67 @@ test("确认时 403：原因留在菜单里，不关菜单、不提示", async (
   await ui.click("切到 pm-b");
   expect(state.posts.filter((p) => !p.dryRun).length).toBe(1);
   expect(ui.menu()).not.toBeNull();
-  expect(ui.disabled()).toContain("project PM requires manage authorization");
+  expect(ui.notes().map((n) => n.textContent)).toContain("project PM requires manage authorization");
   expect(ui.body()).not.toContain("已切到");
+  await ui.unmount();
+});
+
+test("长体检原因：整句折行显示，不单行省略", async () => {
+  const long = "peer p1 lacks a PM agent destination in peer-prs (set peers.p1.pmAgent in ~/.claude-orchestrator/config.json)";
+  state.results = [{ ok: false, status: 400, error: long }];
+  const ui = await mount();
+  await ui.open();
+  await ui.click("主管 PM");
+  await ui.click("pm-b");
+  const [note] = ui.notes();
+  expect(note.textContent).toBe(long);
+  const text = note.querySelector("span:last-child")!;
+  expect(text.className).not.toContain("truncate");
+  expect(text.className).toContain("whitespace-normal");
+  expect(text.className).toContain("break-words");
+  await ui.unmount();
+});
+
+test("真 POST 在途：候选 / 取消 / 再次确认都锁住，不会并发第二次切换", async () => {
+  state.hold = true;
+  const ui = await mount();
+  await ui.open();
+  await ui.click("主管 PM");
+  await ui.click("pm-b");
+  await ui.click("切到 pm-b");
+  // 锁定期间：确认 / 取消 / 候选都是禁用行，点了也不变
+  expect(ui.disabled()).toEqual(["pm-a · Claude · 在线", "pm-b · Codex · 在线", "›体检中…", "取消"]);
+  await ui.click("取消");
+  await ui.click("pm-a");
+  expect(state.posts.filter((p) => !p.dryRun).length).toBe(1);
+  expect(ui.disabled()).toContain("取消");
+  // 在途请求失败：原因留在菜单里，解锁可重选
+  await React.act(async () => state.pending.shift()!({ ok: false, status: 403, error: "second request denied" }));
+  await tick();
+  expect(ui.menu()).not.toBeNull();
+  expect(ui.notes().map((n) => n.textContent)).toEqual(["second request denied"]);
+  expect(ui.disabled()).toEqual(["›切到 pm-b"]);
+  await ui.unmount();
+});
+
+test("菜单关掉后结果才回来：不去关新开的菜单；失败原因改用轻提示带出", async () => {
+  state.hold = true;
+  const ui = await mount();
+  await ui.open();
+  await ui.click("主管 PM");
+  await ui.click("pm-b");
+  await ui.click("切到 pm-b");
+  // 点遮罩关菜单，再重新打开（新的菜单实例）
+  const MouseEv = (globalThis as unknown as { MouseEvent: new (t: string, o: object) => unknown }).MouseEvent;
+  const overlay = doc.body.querySelector(".fixed.inset-0")!;
+  await React.act(async () => { overlay.dispatchEvent(new MouseEv("pointerdown", { bubbles: true })); });
+  expect(ui.menu()).toBeNull();
+  await ui.open();
+  expect(ui.menu()).not.toBeNull();
+  await React.act(async () => state.pending.shift()!({ ok: false, status: 403, error: "late denied" }));
+  await tick();
+  expect(ui.menu()).not.toBeNull();
+  expect(ui.labels()).toEqual(["主管 PM · pm-a▸"]);
+  expect(ui.body()).toContain("主管 PM 切换失败：late denied");
   await ui.unmount();
 });

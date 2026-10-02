@@ -6,6 +6,7 @@ export const SESSIONS_DICT: Record<string, string> = {
   "切到 {name}": "Switch to {name}",
   "主管 PM 已切到 {name}": "Lead PM switched to {name}",
   "体检中…": "Checking…",
+  "主管 PM 切换失败：{reason}": "Lead PM switch failed: {reason}",
   "未纳管会话": "Unmanaged sessions",
   "没有未纳管的会话": "No unmanaged sessions",
   "会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）": "Session file written in the last 2 minutes — probably still running (heuristic)",

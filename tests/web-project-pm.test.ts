@@ -3,7 +3,7 @@
  * 菜单真实渲染（显示条件、确认 / 失败流程）见 tests/web-dom-project-pm.test.ts。
  */
 import { describe, expect, test } from "bun:test";
-import { checkPm, confirmPm, pmPageRows, pmProblems, pmRows, runtimeLabel } from "@/features/chat/components/project-pm-model";
+import { checkPm, confirmPm, pmPageRows, pmProblemRows, pmProblems, pmRows, runtimeLabel } from "@/features/chat/components/project-pm-model";
 import type { PmSwitchResult, ProjectPmView } from "@/lib/api/project-pm";
 
 // API 夹具：执行者形态的 agent 由后端排除，夹具里就没有；网页不再过滤
@@ -38,6 +38,11 @@ describe("候选列表", () => {
     expect(pmPageRows(null, null)).toBe(2);
     expect(pmPageRows(VIEW, null)).toBe(4);
     expect(pmPageRows(VIEW, { agent: "pm-b", check: "failed", problems: ["x", "y"] })).toBe(8);
+    // 长问题折行：按估算多占半行 / 折行，定位时菜单高度不会被低估
+    const long = "peer p1 lacks a PM agent destination in peer-prs";
+    expect(pmProblemRows("x")).toBe(1);
+    expect(pmProblemRows(long)).toBe(2);
+    expect(pmPageRows(VIEW, { agent: "pm-b", check: "failed", problems: [long] })).toBe(8);
   });
 });
 
