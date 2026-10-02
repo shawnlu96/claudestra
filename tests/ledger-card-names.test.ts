@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { answerAsk } from "../src/lib/ledger-asks.js";
 import { cardNames } from "../src/lib/ledger-card-names.js";
 import { cardNames as legacyCardNames } from "../src/lib/scheduler-autostart.js";
 import { preflightStart, type StartEnv } from "../src/lib/dag-tools-start.js";
 import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
-import { rewriteDag } from "../src/lib/ledger-dag-write.js";
+import { approveDag, rewriteDag } from "../src/lib/ledger-dag-write.js";
 import { applyFeatureSplit } from "../src/lib/ledger-feature-split.js";
 import { workBoard } from "../src/lib/ledger-work-board.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
@@ -71,11 +72,52 @@ test("a node added after splitting uses the destination slug", async () => {
   rewriteDag(db, ctx, { id: f.id, rev: f.rev, nodes: [...old, node("NEW")], reasonKind: "new_issue",
     reasonText: "Add a new node after split", cancel: new Map(), scopeChange: false, askFrom: { agent: "pm", channelId: null } });
   const updated = feature("shared-ledger");
+  await assertConsumers("shared-ledger");
   expect(getDagVersion(db, updated.id, updated.currentVersion)!.nodes.find(n => n.key === "NEW")!.cardSlug).toBeUndefined();
   expect(cardNames(db, updated, "NEW")).toEqual({ slug: "shared-ledger", taskId: "shared-ledger-NEW",
     agent: "agent-task-shared-ledger-new", branch: "feat/shared-ledger-new" });
   const result = await preflightStart(env(), { featureId: updated.id, key: "NEW", spec: "new specification" });
   expect(result).toMatchObject({ ok: true, plan: { taskId: "shared-ledger-NEW" } });
+  rewriteDag(db, ctx, { id: updated.id, rev: updated.rev,
+    nodes: [{ ...node("C5"), oneLine: "Updated after adding NEW" }, node("NEW")], reasonKind: "new_issue",
+    reasonText: "Update C5 after adding NEW", cancel: new Map(), scopeChange: false, askFrom: { agent: "pm", channelId: null } });
+  await assertConsumers("shared-ledger");
+  split("shared-ledger", "third");
+  await assertConsumers("third");
+});
+
+test("rewriting C5 from ordinary input preserves its identity through a later split", async () => {
+  split("i28", "shared-ledger");
+  const f = feature("shared-ledger");
+  rewriteDag(db, ctx, { id: f.id, rev: f.rev, nodes: [{ ...node("C5"), oneLine: "Updated C5" }],
+    reasonKind: "new_issue", reasonText: "Update C5 without carrying internal fields", cancel: new Map(),
+    scopeChange: false, askFrom: { agent: "pm", channelId: null } });
+  await assertConsumers("shared-ledger");
+  split("shared-ledger", "third");
+  await assertConsumers("third");
+});
+
+test("proposal and owner approval preserve the original card identity", async () => {
+  split("i28", "shared-ledger");
+  const f = feature("shared-ledger");
+  const result = rewriteDag(db, ctx, { id: f.id, rev: f.rev, nodes: [node("C5"), node("NEW")],
+    reasonKind: "new_issue", reasonText: "Expand scope after split", cancel: new Map(), scopeChange: true,
+    askFrom: { agent: "pm", channelId: null } });
+  const ask = result.row.ask!;
+  expect(result.row.proposal!.nodes.find(n => n.key === "C5")!.cardSlug).toBe("i28");
+  answerAsk(db, ask.id, { choices: ["[button:dag_rewrite_approve]"], labels: ["Approve"], text: "",
+    principal: "owner", via: "web_card", at: 101, owner: true });
+  expect(approveDag(db, { ...ctx, now: 102 }, { id: f.id }).row.applied).toBe(true);
+  await assertConsumers("shared-ledger");
+});
+
+test("provided node avoids loading the current DAG and matches the legacy API", () => {
+  split("i28", "shared-ledger");
+  const f = feature("shared-ledger"), n = getDagVersion(db, f.id, f.currentVersion)!.nodes[0];
+  const expected = cardNames(db, f, n.key);
+  db.exec("DROP TABLE dag_versions");
+  expect(cardNames(db, f, n.key, n)).toEqual(expected);
+  expect(cardNames(db, f, "NEW", {})).toMatchObject({ taskId: "shared-ledger-NEW" });
 });
 
 test("unsplit names are byte-for-byte compatible and explicit start overrides remain authoritative", async () => {

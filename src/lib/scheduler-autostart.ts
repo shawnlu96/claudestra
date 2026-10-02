@@ -182,7 +182,7 @@ export function nodeCandidate(db: Database, f: Feature, key: string, lanes: Lane
   const n = nodeGate(db, f, key, lanes, views);
   if (n) return n;
   const node = views.find((v) => v.key === key) as NodeView;
-  const { taskId } = cardNames(db, f, key);
+  const { taskId } = cardNames(db, f, key, node);
   const spec = read(taskId);
   const g = specGate(spec, now);
   if ("why" in g) return stop("spec", g.why);

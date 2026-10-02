@@ -78,7 +78,7 @@ function splitNodes(db: Database, source: Feature, groups: SplitGroup[], rejecte
       else dropped.push(dep);
     }
     g.nodes.push({ ...n, deps: n.deps.filter((d) => !dropped.includes(d)),
-      ...(g !== kept ? { cardSlug: n.cardSlug ?? cardNames(db, source, n.key).slug, movedFrom: { featureId: source.id, version: source.currentVersion } } : {}),
+      ...(g !== kept ? { cardSlug: n.cardSlug ?? cardNames(db, source, n.key, n).slug, movedFrom: { featureId: source.id, version: source.currentVersion } } : {}),
       ...(dropped.length ? { droppedDeps: [...new Set([...(n.droppedDeps ?? []), ...dropped])] } : {}) });
   }
   for (const g of groups) {
