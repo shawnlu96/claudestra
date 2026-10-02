@@ -183,11 +183,13 @@ describe("验收 4：这一轮真正发出去的 hello 和同一时刻新收单�
   for (const [label, cache, meta] of [
     ["缓存可用 / meta 新写不可用", { ready: true, reason: null }, { ready: false, reason: LOGGED_OUT }],
     ["缓存不可用 / meta 新写可用", { ready: false, reason: LOGGED_OUT }, { ready: true, reason: null }],
-  ] as const) {
-    test(`${label}：hello 发出前先认 meta 里更新的那份`, async () => {
+  ] as const) for (const tie of [false, true]) {
+    // tie：两个进程同一毫秒探完、结论相反。条件写保留库里那份，本进程也得改认它（r2：at 相等不能当作结论相同）
+    test(`${label}${tie ? "，两边 at 同一毫秒" : ""}：hello 发出前先认 meta 里的那份`, async () => {
       const { h, sent } = loopWithHello();
-      freshProcess({ ...cache, at: Date.now() - 30_000 });
-      setMeta(h.db, READY_KEY, JSON.stringify({ ...meta, at: Date.now() - RECENT }));
+      const at = Date.now() - RECENT;
+      freshProcess({ ...cache, at: tie ? at : at - 29_000 });
+      setMeta(h.db, READY_KEY, JSON.stringify({ ...meta, at }));
       await h.tick();
       expect(sent).toHaveLength(1);
       expect(sent[0]!.total).toBe(meta.ready ? 2 : 0);

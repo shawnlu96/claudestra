@@ -42,12 +42,12 @@ export function publishClaudeReadiness(db: Database, r: ClaudeReadiness): boolea
   }).immediate();
 }
 
-/** 本进程的结论条件写进 meta，再认 meta 里更新的那份（别的进程刚写的）。两边 at 一样 = 什么都不变 */
+/** 本进程的结论条件写进 meta，再认 meta 里的那份。at 相等也认：同一毫秒探出相反结论时库里那份留下，本进程不改认就和新收单进程对不上 */
 export function syncClaudeReadiness(db: Database): void {
   const mine = cachedClaudeReadiness();
   if (mine) publishClaudeReadiness(db, mine);
   const theirs = sharedClaudeReadiness(db);
-  if (theirs && (!mine || theirs.at > mine.at)) noteClaudeReadiness(theirs);
+  if (theirs && (!mine || theirs.at >= mine.at)) noteClaudeReadiness(theirs);
 }
 
 /** 限时探测：到点就给「核对超时」（记成不可用）；真跑的 auth status 再晚 1 秒被强杀，卡住的子进程拖不住进程退出 */

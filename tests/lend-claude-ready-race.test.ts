@@ -70,12 +70,15 @@ test("B 的更新结论先落库、A 才拿着旧结论去写 → A 的条件写
   close();
 });
 
-test("反向：更新的可用结论不会被旧的不可用覆盖；同一时刻的不重复写", () => {
+test("反向：更新的可用结论不会被旧的不可用覆盖；同一时刻的不重复写，本进程改认库里的", () => {
   const { a, b, close } = twoConnections();
   expect(publishClaudeReadiness(a, ready(T))).toBe(true);
   expect(publishClaudeReadiness(b, down(T - 50))).toBe(false);
   expect(publishClaudeReadiness(b, down(T))).toBe(false);
   expect(sharedClaudeReadiness(b)).toEqual(ready(T));
+  noteClaudeReadiness(down(T)); // B 进程同一毫秒探出相反结论：写不进去，对齐后改认库里那份
+  syncClaudeReadiness(b);
+  expect(cachedClaudeReadiness()).toEqual(ready(T));
   expect(getMeta(a, "other")).toBe("preserved");
   close();
 });

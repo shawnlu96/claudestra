@@ -71,7 +71,8 @@ test("整体借不出去才算 blocked：Codex 暂停 / 没授权且 Claude 不�
 test("QP1 同一路：本机没登录时 poll 上报 Claude 0 位，lend status 写原因；登录后恢复", async () => {
   const h = harness({ entry: { families: { claude: 2 }, roles: ["review", "write"], ordersPerDay: 20 } });
   try {
-    noteClaudeReadiness({ ready: false, reason: "本机 Claude Code 没登录：在出借方机器上运行 claude 完成 /login", at: Date.now() });
+    // 早 1 秒：同一毫秒的两份相反结论按 meta 里那份算（lend-claude-ready.ts syncClaudeReadiness），「登录后恢复」得严格更新
+    noteClaudeReadiness({ ready: false, reason: "本机 Claude Code 没登录：在出借方机器上运行 claude 完成 /login", at: Date.now() - 1000 });
     await h.tick();
     expect(h.calls.filter((c) => c.op === "poll").at(-1)?.body).toMatchObject({ capacity: { families: { codex: 0, claude: 0 } } });
     expect(JSON.parse(getMeta(h.db, "status")!).blocked).toContain("本机 Claude Code 没登录");
