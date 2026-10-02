@@ -53,6 +53,7 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
       <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-base-content/50">
         <span className="font-mono">{g.repos.join(", ")}</span>
         <span>{slots} · {g.ordersPerDay}/d</span>
+        {g.roles.includes("write") && <span className="badge badge-sm badge-primary gap-1"><LendIcon name="check" size={12} />{t("写代码")}</span>}
         {left !== null && <span className="tabular-nums">{left > 0 ? remainingText(splitRemaining(left)) : t("已到期")}</span>}
       </div>
       {err && <p className="mt-1 break-words text-[11px] text-error">{err.msg}</p>}
@@ -82,8 +83,9 @@ export function LendPanel() {
       </div>
       <LendClaudeLogin />
       {form && (
-        <GrantForm key={JSON.stringify(form)} peers={data.peers} grants={data.grants} maxDays={data.maxDays} shellSentence={data.shellSentence} initial={form}
-          onCancel={() => setForm(null)} onFail={() => void load()} onDone={(peer) => { setForm(null); setFresh(peer); void load(); }} />
+        <GrantForm key={JSON.stringify(form)} peers={data.peers} grants={data.grants} maxDays={data.maxDays} writeOpen={data.writeOpen}
+          shellSentence={data.shellSentence} initial={form}
+          onCancel={() => setForm(null)} onFail={() => void load()} onDone={async (peer) => { await load(); setForm(null); setFresh(peer); }} />
       )}
       <div className="space-y-1.5">
         {data.grants.map((g) => (

@@ -28,7 +28,7 @@ export const STOPPING_POLL_MS = 2_000;
 
 export const isLive = (o: Pick<OrderView, "live">): boolean => o.live;
 
-export interface GrantForm { peer: string; repos: string[]; codex: number; claude?: number; ordersPerDay: number; days: number }
+export interface GrantForm { peer: string; repos: string[]; codex: number; claude?: number; write?: boolean; ordersPerDay: number; days: number }
 
 /** 到期档位：1 / 3 / 7 天里不超过服务端 maxDays 的；maxDays 比 1 还小就只给 maxDays 一档 */
 export function dayChoices(maxDays: number): number[] {
@@ -44,6 +44,7 @@ export function formDefaults(maxDays: number, peers: readonly { name: string }[]
     repos: from ? [...from.repos] : [],
     codex: from?.families.codex ?? DEFAULT_CODEX,
     ...(from?.families.claude === undefined ? {} : { claude: from.families.claude }),
+    ...(from?.roles.includes("write") ? { write: true } : {}),
     ordersPerDay: from?.ordersPerDay ?? DEFAULT_PER_DAY,
     days: days[days.length - 1],
   };
@@ -56,10 +57,14 @@ export function addRepos(list: readonly string[], input: string): string[] {
   return out;
 }
 
-/** 请求体：角色由 CLI 沿用；有 initial 时省略未改的名额，防止锁外旧值覆盖并发授权。到期交给 CLI 的时钟算 */
-export function grantBody(f: GrantForm, maxDays: number, initial?: GrantForm): { peer: string; repos: string[]; codex?: number; claude?: number; ordersPerDay: number; until: string } {
+/** 请求体：省略未改的角色与名额，防止锁外旧值覆盖并发授权；write 未开放时角色一律沿用。到期交给 CLI 的时钟算 */
+export function grantBody(f: GrantForm, maxDays: number, initial?: GrantForm, writeOpen = true): {
+  peer: string; repos: string[]; codex?: number; claude?: number; roles?: ("review" | "write")[]; ordersPerDay: number; until: string;
+} {
   const days = Math.min(f.days, Math.max(1, Math.floor(maxDays)));
+  const roles: ("review" | "write")[] = f.write ? ["review", "write"] : ["review"];
   return { peer: f.peer, repos: [...f.repos], ...(initial?.codex === f.codex ? {} : { codex: f.codex }),
+    ...(!writeOpen || !!f.write === !!initial?.write ? {} : { roles }),
     ...(f.claude === undefined || f.claude === initial?.claude ? {} : { claude: f.claude }), ordersPerDay: f.ordersPerDay, until: `${days}d` };
 }
 
@@ -172,10 +177,10 @@ export function withSnapshot(orders: readonly OrderView[], snapshot: readonly Or
   return [...fresh, ...rest];
 }
 
-/** Switching peers resets slots and the comparison baseline; new peers send explicit defaults. */
+/** Switching peers resets slots, roles and the comparison baseline; new peers send explicit slot defaults. */
 export function switchClaudeGrantPeer(form: GrantForm, peer: string, grants: readonly GrantView[], maxDays: number) {
   const grant = grants.find((g) => g.peer === peer);
   const defaults = formDefaults(maxDays, [{ name: peer }], grant);
-  const next = { ...form, peer, codex: defaults.codex, claude: defaults.claude ?? 0 };
+  const next = { ...form, peer, codex: defaults.codex, claude: defaults.claude ?? 0, write: defaults.write ?? false };
   return { form: next, baseline: grant ? next : undefined };
 }

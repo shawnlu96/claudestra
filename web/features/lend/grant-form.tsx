@@ -1,7 +1,7 @@
 "use client";
 /**
- * 授权表单：peer、仓库（可多个）、codex 名额、每日单数、到期档位。角色固定 review：write 开关只是一把锁，点了只抖一下、锁闪一下，
- * 永远选不中，请求体里也没有 roles（lend-model.grantBody）。提交按钮上方只放 W1 的那一句 shellSentence。
+ * 授权表单：peer、仓库（可多个）、名额、每日单数、到期档位。审查常开，write 按服务端 writeOpen 开放；未开放时保留锁反馈。
+ * 角色改动才带入请求（lend-model.grantBody）。提交按钮上方只放 W1 的那一句 shellSentence。
  * 失败：整张表单抖动，下面一行显示 CLI 原话；成功交回父组件让新条目淡入。
  */
 import { useState } from "react";
@@ -16,9 +16,10 @@ interface Props {
   peers: { name: string }[];
   grants: readonly GrantView[];
   maxDays: number;
+  writeOpen: boolean;
   shellSentence: string;
   initial: Form;
-  onDone: (peer: string) => void;
+  onDone: (peer: string) => void | Promise<void>;
   /** 失败也让父组件重拉：CLI 停 worker 超时被强杀时授权其实已写进 lend.json */
   onFail: () => void;
   onCancel: () => void;
@@ -56,25 +57,33 @@ function RepoField({ repos, text, setText, onCommit, onRemove }: {
   );
 }
 
-/** 角色固定审查；写代码是一把锁：点了只抖一下、锁闪一下，永远选不中 */
-function RoleField() {
+/** 审查常开；写代码开放时可切换，否则点锁只抖动、闪烁。 */
+function RoleField({ writeOpen, write, onChange }: { writeOpen: boolean; write: boolean; onChange: (write: boolean) => void }) {
   const t = useLendT();
   const [lockFlash, setLockFlash] = useState(false);
   return (
       <div className="flex items-center gap-2 text-xs">
         <span className="w-20 shrink-0 text-base-content/60">{t("角色")}</span>
         <span className="badge badge-sm badge-primary">{t("审查")}</span>
+        {writeOpen ? (
+          <label className="flex cursor-pointer items-center gap-1">
+            <input type="checkbox" role="switch" className="toggle toggle-primary toggle-xs" checked={write}
+              onChange={(e) => onChange(e.target.checked)} />
+            {t("写代码")}
+          </label>
+        ) : (
         <button type="button" role="switch" aria-checked="false" aria-disabled="true" aria-label={t("写代码")}
           className={`flex items-center gap-1 rounded-full bg-base-300/60 px-2 py-0.5 text-base-content/35 ${lockFlash ? css.lockFlash : ""}`}
           onClick={() => setLockFlash(true)} onAnimationEnd={(e) => { e.stopPropagation(); setLockFlash(false); }}>
           <LendIcon name="lock" size={12} />
           <span className="line-through decoration-base-content/30">{t("写代码")}</span>
         </button>
+        )}
       </div>
   );
 }
 
-export function GrantForm({ peers, grants, maxDays, shellSentence, initial, onDone, onFail, onCancel }: Props) {
+export function GrantForm({ peers, grants, maxDays, writeOpen, shellSentence, initial, onDone, onFail, onCancel }: Props) {
   const t = useLendT();
   const start = switchClaudeGrantPeer(initial, initial.peer, grants, maxDays);
   const [f, setF] = useState<Form>(start.form);
@@ -96,8 +105,8 @@ export function GrantForm({ peers, grants, maxDays, shellSentence, initial, onDo
     setBusy(true);
     setErr("");
     try {
-      await postGrant(grantBody(form, maxDays, baseline));
-      onDone(form.peer);
+      await postGrant(grantBody(form, maxDays, baseline, writeOpen === true));
+      await onDone(form.peer);
     } catch (e) {
       setErr(e instanceof ApiError || e instanceof Error ? e.message : String(e));
       setShake(true);
@@ -121,7 +130,7 @@ export function GrantForm({ peers, grants, maxDays, shellSentence, initial, onDo
 
       <RepoField repos={f.repos} text={repoText} setText={setRepoText} onCommit={commitRepos}
         onRemove={(r) => setF({ ...f, repos: f.repos.filter((x) => x !== r) })} />
-      <RoleField />
+      <RoleField writeOpen={writeOpen} write={!!f.write} onChange={(write) => setF({ ...f, write })} />
 
       <div className="grid grid-cols-2 gap-2 text-xs">
         <label className="flex items-center gap-2">
