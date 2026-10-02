@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,10 @@ import { orderWireOf } from "../src/lib/order-wire.js";
 import type { Run } from "../src/lib/lend-clone.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { testChildEnv } from "./test-env.js";
+import { isolatedStateSuite } from "./isolated-state.js";
+
+// pushWork 只读默认 journal 核绑定，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { test } = isolatedStateSuite(import.meta.path);
 
 const BASE = "1".repeat(40), HEAD = "2".repeat(40);
 const CRED = ["-c", "credential.helper=!gh auth git-credential"];

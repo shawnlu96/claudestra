@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { checkLend } from "../src/lib/doctor-lend.js";
+import { LEND_JOURNAL_PATH, openLendJournal, setMeta } from "../src/lib/lend-journal.js";
+import { TestIsolationViolation } from "../src/lib/test-guard.js";
 import { defaultLendFile, lendFileProblem, readLend, updateLend, type LendFile } from "../src/lib/lend-config.js";
 import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, resolveContact, type LendContact } from "../src/lib/lend-policy.js";
 import type { ProjectDef } from "../src/lib/projects.js";
@@ -141,16 +143,27 @@ describe("无效文件按关处理", () => {
     expect(readFileSync(p, "utf8")).toBe("{broken");
   });
   test("doctor：无效 → fail；正常 → 一行写清对谁、上限；缺省 → 关", async () => {
-    const p = tmpPath();
-    expect((await checkLend(p, { contacts, projects }))[0]).toMatchObject({ status: "ok", detail: "出借：关；借入：无" });
+    // 每个用例自己的 journal：默认路径全量共用，别的文件改写它时这里读到半个文件就 malformed（i28-TJ1）
+    const p = tmpPath(), journal = join(p, "..", "journal.sqlite");
+    expect((await checkLend(p, { contacts, projects }, Date.now(), journal))[0]).toMatchObject({ status: "ok", detail: "出借：关；借入：无" });
     await updateLend((f) => Object.assign(f, validFile()), p);
-    const ok = (await checkLend(p, { contacts, projects }))[0];
+    const ok = (await checkLend(p, { contacts, projects }, Date.now(), journal))[0];
     expect(ok.status).toBe("ok");
     expect(ok.detail).toContain("team-a（codex 2，每天 200 单，授权到 ");
     expect(ok.detail).toMatch(/还剩 (2 天|7\d 小时)，对方协议 v1（未协商）/);
     expect(ok.detail).toContain("借入：mate-b（claude-orchestrator");
     writeFileSync(p, "[]");
-    expect((await checkLend(p, { contacts, projects }))[0]).toMatchObject({ status: "fail" });
+    expect((await checkLend(p, { contacts, projects }, Date.now(), journal))[0]).toMatchObject({ status: "fail" });
+  });
+  test("doctor 的对方协议版本读传进来的 journal，不碰默认路径", async () => {
+    const p = tmpPath(), journal = join(p, "..", "journal.sqlite");
+    await updateLend((f) => Object.assign(f, validFile()), p);
+    const db = openLendJournal(journal);
+    try { setMeta(db, "proto:team-a", "3"); } finally { db.close(); }
+    expect((await checkLend(p, { contacts, projects }, Date.now(), journal))[0].detail).toContain("对方协议 v3）");
+    // 默认 journal 在场时守卫拦住测试进程以默认路径打开（lib/test-guard.ts）
+    expect(() => openLendJournal()).toThrow(TestIsolationViolation);
+    expect(() => openLendJournal(LEND_JOURNAL_PATH)).toThrow("以默认路径打开出借 journal");
   });
 });
 

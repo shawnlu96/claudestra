@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { cardNames } from "./ledger-card-names.js";
+import { cardContext, cardNames, pinNodes } from "./ledger-card-names.js";
 import { openClaims } from "./ledger-autostart-grant.js";
 import { findPath } from "./ledger-deps.js";
 import { featureDeps } from "./ledger-feature-deps.js";
@@ -69,6 +69,8 @@ function splitNodes(db: Database, source: Feature, groups: SplitGroup[], rejecte
     owners.set(key, g);
   }
   const kept: SplitGroup = { id: source.id, title: source.title, target: null, feature: source, nodes: [] };
+  // 目标原有的节点也固化：搬进来的前缀可能成为它唯一的前缀，没固化的会跟着漂
+  for (const g of groups) g.nodes = g.nodes.map((n) => (n.cardSlug !== undefined || !g.feature ? n : { ...n, cardSlug: cardNames(db, g.feature, n.key, n).slug }));
   for (const n of nodes) {
     const g = owners.get(n.key) ?? kept;
     const dropped: string[] = [];
@@ -78,7 +80,8 @@ function splitNodes(db: Database, source: Feature, groups: SplitGroup[], rejecte
       else dropped.push(dep);
     }
     g.nodes.push({ ...n, deps: n.deps.filter((d) => !dropped.includes(d)),
-      ...(g !== kept ? { cardSlug: n.cardSlug ?? cardNames(db, source, n.key, n).slug, movedFrom: { featureId: source.id, version: source.currentVersion } } : {}),
+      cardSlug: n.cardSlug ?? cardNames(db, source, n.key, n).slug,
+      ...(g !== kept ? { movedFrom: { featureId: source.id, version: source.currentVersion } } : {}),
       ...(dropped.length ? { droppedDeps: [...new Set([...(n.droppedDeps ?? []), ...dropped])] } : {}) });
   }
   for (const g of groups) {
@@ -95,6 +98,30 @@ function splitNodes(db: Database, source: Feature, groups: SplitGroup[], rejecte
   }
   for (const c of openClaims(db, source.id)) if (owners.has(c.key)) rejected.push(`节点 ${c.key} 有未结 claim ${c.seq}`);
   groups.unshift(kept);
+  siblingCheck(db, source, groups, owners, rejected);
+}
+
+/** 搬进目标的节点按写入后的样子做兄弟校验：同前缀下别的 feature（含这次拆分的其他组）已有同名 key 就拒 */
+function siblingCheck(db: Database, source: Feature, groups: SplitGroup[], owners: Map<string, SplitGroup>, rejected: string[]): void {
+  const ids = groups.map((g) => g.id), base = cardContext(db, source, ids);
+  // 被排除的 feature 名下不在任何组 DAG 里的卡（assignFeature 挂进来的）留在原 feature，照样占号
+  const inDag = new Set(groups.flatMap((g) => g.nodes.flatMap((n) => (n.taskId ? [n.taskId] : []))));
+  const loose = (db.query(`SELECT id, featureId FROM tasks WHERE featureId IN (${ids.map(() => "?").join(",")})`).all(...ids) as { id: string; featureId: string }[])
+    .filter((t) => !inDag.has(t.id));
+  for (const g of groups.slice(1)) {
+    const taken = new Map(base.taken);
+    for (const t of loose) if (t.featureId !== g.id) taken.set(t.id, t.featureId);
+    for (const o of groups) if (o !== g) for (const n of o.nodes) {
+      taken.set(`${n.cardSlug}-${n.key}`, o.id);
+      if (n.taskId) taken.set(n.taskId, o.id);
+    }
+    try {
+      pinNodes({ ...base, taken }, g.nodes, (n) => owners.get(n.key) === g);
+    } catch (e) {
+      if (!(e instanceof LedgerError)) throw e;
+      rejected.push(`目标 ${g.id}：${e.message}`);
+    }
+  }
 }
 
 function planDeps(db: Database, source: Feature, groups: SplitGroup[], map: SplitMap, rejected: string[]): SplitMap["deps"] {

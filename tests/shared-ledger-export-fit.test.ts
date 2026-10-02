@@ -44,7 +44,7 @@ export function gitRepo() {
 const prose = (n: number) => "规划说明。".repeat(Math.ceil(n / 5)).slice(0, n);
 
 test("limits come from the contract schema", () => {
-  expect(sharedLedgerExportLimits()).toEqual({ reason: 2000, title: 300, description: 16000, oneLine: 2000, estimate: 200 });
+  expect(sharedLedgerExportLimits()).toEqual({ reason: 2000, title: 300, description: 16000, oneLine: 2000, estimate: 200, events: 1000 });
   expect(fitSharedLedgerText("short", 10)).toBe("short");
   const cut = fitSharedLedgerText(prose(4500), 2000);
   expect(cut.length).toBe(2000);
