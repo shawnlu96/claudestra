@@ -3,7 +3,7 @@
  * - DeliverWire.memoryRefs：[{id, use: applied | irrelevant | wrong, note?}]，wrong 必须带 note（交付后自动转成 dispute mark）；
  * - VerdictWire.findings[].pitfall：true = 这条 P1 不只是这张卡的错、是会再犯的坑（M3 据此生成 open 坑）。
  * 解析和 order-wire.ts 一样严格：不认识的键、类型不对、超长一律拒，不丢不截。两个字段都可选——旧版对端不发，收到缺字段照常接受；
- * 发给不认这两个字段的旧版对端前用 withoutMemoryFields 去掉（旧解析器见到不认识的字段整单拒）。
+ * 发给不认这两个字段的旧版对端前用 withoutMemoryFields 去掉（旧解析器见到不认识的字段整单拒）；出借结论发往 A 一律经 lendVerdictForPeer。
  * pitfall:false 与缺省同义，解析后不保留，免得一份不带坑标的结论在旧对端那里被拒。order-wire.ts 只接线，逻辑都在这里；
  * 本文件不依赖台账，order-wire 引它不会把库拉进 wire 层。tests/memory-tools-wire.test.ts。
  */
@@ -88,3 +88,11 @@ export function withoutMemoryFields<T>(wire: T, peerSupportsMemory: boolean): T 
   }
   return rest as T;
 }
+
+/**
+ * 出借 peer 之间还没有「认记忆字段」的能力协商（hello 只协商 proto 1/2，都早于本字段）：按旧版对待，发往 A 的结论一律去掉 pitfall。
+ * lend-submit.ts buildPayload 在算 sha256、落 journal 之前调，CLI lend submit 与 submit_verdict 工具两条发送链都经它；
+ * 改成按对端能力放行要等共享台账（M8）带上能力位，否则旧 A 的严格解析整单拒收、单子停掉。tests/memory-tools-wire.test.ts。
+ */
+const LEND_PEER_MEMORY_FIELDS = false;
+export const lendVerdictForPeer = <T>(verdict: T): T => withoutMemoryFields(verdict, LEND_PEER_MEMORY_FIELDS);

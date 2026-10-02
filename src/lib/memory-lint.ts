@@ -10,7 +10,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { redactForPeer } from "./dispatch-redact.js";
-import { memoryState, memoryDigest, type MemoryInput } from "./ledger-memory.js";
+import { MEMORY_LIMITS as LIMITS, memoryState, memoryDigest, type MemoryInput } from "./ledger-memory.js";
 
 const MEMORY_LINT_RULES = {
   1: "进度 / 状态不是记忆（那是事件，台账里已有）",
@@ -36,8 +36,6 @@ export interface MemoryLintDeps {
   similar?(project: string, text: string): { id: string; cosine: number }[];
 }
 
-/** 与 ledger-memory.ts MEMORY_LIMITS 同一组数：这里先按第 8 条报，写入函数再兜一次 */
-const LIMITS = { title: 80, summary: 600, decision: 600, symptom: 300, rule: 300, sourceNote: 200, files: 20 } as const;
 const SEMANTIC_DUP = 0.92;
 
 const bytes = (s: string) => Buffer.byteLength(s, "utf8");

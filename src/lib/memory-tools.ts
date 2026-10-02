@@ -211,7 +211,10 @@ export function recordAs(db: Database, caller: MemoryCaller, args: RecordArgs, n
     visibility: w.memory.visibility, ...(w.homeReason ? { homeReason: w.homeReason } : {}), event: w.event };
 }
 
-/** mark_memory / ledger memory-mark：角色（按记忆所在项目，带 orderId 可认执行者 / 审查员）→ §4.2 权限 → markMemory。同人同内容的上一条 mark 就是这次重试 */
+/**
+ * mark_memory / ledger memory-mark：角色（按记忆所在项目，带 orderId 可认执行者 / 审查员）→ §4.2 权限 → markMemory。
+ * 重试 = 这条记忆最新的一条 mark 就是同人同内容的（中间没人动过状态）；之后有别人标过（如执行者 dispute），同一动作是新的一次，照写（PM 再 confirm 清争议）。
+ */
 export function markAs(db: Database, caller: MemoryCaller, args: MarkArgs, now: number): MemoryWriteResult {
   const memory = getMemory(db, args.memoryId);
   if (!memory) throw new LedgerError("not_found", `没有记忆 ${args.memoryId}`);
@@ -219,8 +222,8 @@ export function markAs(db: Database, caller: MemoryCaller, args: MarkArgs, now: 
   if (who.ok && who.project !== memory.project) throw new LedgerError("forbidden", `${args.orderId} 不在记忆 ${memory.id} 的项目里`);
   const denied = canMark(who.ok ? who.role : null, args.mark, { memory, actor: caller.actor, now });
   if (denied) throw new LedgerError("forbidden", denied);
-  const last = listMarks(db, memory.id).filter((m) => m.actor === caller.actor).pop();
-  if (last && last.mark === args.mark && last.taskId === (args.taskId ?? null) && last.by === (args.by ?? null) && last.reason === (args.reason ?? null)) {
+  const last = listMarks(db, memory.id).pop();
+  if (last && last.actor === caller.actor && last.mark === args.mark && last.taskId === (args.taskId ?? null) && last.by === (args.by ?? null) && last.reason === (args.reason ?? null)) {
     return { ok: true, duplicate: true, memoryId: memory.id, mark: args.mark, ...memoryState(db, memory.id) };
   }
   const w = markMemory(db, { actor: caller.actor, now }, { memoryId: memory.id, mark: args.mark, taskId: args.taskId, by: args.by, reason: args.reason });

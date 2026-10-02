@@ -25,7 +25,7 @@ import { memoryStatus, type FoldMark, type MemorySourceRef, type MemoryState } f
 const MEMORY_REDACTION_VERSION = 1;
 const MEMORY_EVENT_KIND = "memory";
 
-const MEMORY_LIMITS = { title: 80, summary: 600, decision: 600, symptom: 300, rule: 300, sourceNote: 200, reason: 300, files: 20, file: 200 } as const;
+export const MEMORY_LIMITS = { title: 80, summary: 600, decision: 600, symptom: 300, rule: 300, sourceNote: 200, reason: 300, files: 20, file: 200 } as const;
 const FAMILY_RE = /^[\w.-]{1,64}$/;
 
 type PitfallBody = { symptom: string; rule: string };

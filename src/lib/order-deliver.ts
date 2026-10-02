@@ -20,7 +20,7 @@ import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
 import { parseDeliverWire } from "./order-wire.js";
 import { deliveredScope } from "./order-deliver-scope.js";
-import { withMemoryRefs } from "./memory-tools-refs.js";
+import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -37,7 +37,7 @@ export interface DeliverDeps {
   run: LedgerRun;
 }
 
-export const deliverDedupKey = (orderId: string, head: string): string => `mcp-deliver:${orderId}:${head}`;
+export { deliverDedupKey }; // 定义在 memory-tools-refs.ts（memoryRefs 认同一个键；放那边免得两文件互相 import 成环）
 
 /** 解析 `git ls-remote origin refs/heads/<branch>` 的输出：恰好一行、ref 名完全一致才算 */
 export function parseLsRemote(r: BoundedResult, branch: string): RemoteHead {

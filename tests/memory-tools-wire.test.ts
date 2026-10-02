@@ -3,6 +3,12 @@
  * 以及新旧 peer 互通：旧版发来缺字段照收；发给不认这两个字段的旧版前去掉，旧版的严格解析照收。
  */
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
+import { commitLendResult } from "../src/lib/lend-submit.js";
+import { routeLendTool } from "../src/lib/lend-tools.js";
 import { parseLendRequest } from "../src/lib/lend-wire.js";
 import { withoutMemoryFields } from "../src/lib/memory-tools-wire.js";
 import { parseDeliverWire, parseVerdictWire } from "../src/lib/order-wire.js";
@@ -85,5 +91,41 @@ describe("新旧 peer 互通", () => {
     expect(withoutMemoryFields(d, true)).toBe(d);
     expect(d.memoryRefs.length).toBe(1);
     expect(v.findings[0]!.pitfall).toBe(true);
+  });
+});
+
+describe("新 → 旧：出借结论的真实发送链（peer-memory-wire）", () => {
+  const AGENT = "agent-lend-0123456789";
+  /** 一张 started 的出借审查单（同 tests/lend-tools.test.ts 的 addStarted 精简版） */
+  const started = () => {
+    const db = openLendJournal(":memory:"), dir = mkdtempSync(join(tmpdir(), "pmem-wire-"));
+    writeFileSync(join(dir, "r.md"), "# 报告");
+    recordAsked(db, { orderId: VERDICT.orderId, peer: "team-a", fp: null, family: "codex", preview: {} }, 0);
+    advance(db, VERDICT.orderId, "asked", "claimed", { wire: { order: { v: 1, orderId: VERDICT.orderId, taskId: "T1", step: "review", head: H }, text: "x" }, leaseGen: 7 });
+    advance(db, VERDICT.orderId, "claimed", "cloned", { dir });
+    advance(db, VERDICT.orderId, "cloned", "started", { agent: AGENT, sessionId: "thr-1" });
+    return db;
+  };
+  const pitV = { ...VERDICT, findings: [{ ...FINDING, pitfall: true }] };
+
+  test("submit_verdict 工具：带 pitfall:true 的结论照收，转给 A 的请求体里没有 pitfall，旧版严格解析照收", async () => {
+    const db = started(), sent: Record<string, unknown>[] = [];
+    const call = async (_peer: string, _op: string, body: Record<string, unknown>) => (sent.push(body), { status: 503, body: { ok: false } });
+    const r = await routeLendTool("submit_verdict", { agent: AGENT, sessionId: "thr-1", family: "codex", verified: true } as never, pitV,
+      { db, call: call as never, log: () => {}, now: () => 5_000 });
+    expect(r.ok).toBe(true);
+    expect(sent.length).toBe(1);
+    const verdict = sent[0]!.verdict as Record<string, unknown>;
+    expect(JSON.stringify(sent[0])).not.toContain("pitfall");
+    expect(oldPeerAccepts(verdict, "verdict")).toBe(true);
+    expect(parseLendRequest("result", { v: 1, ...sent[0] }).ok).toBe(true);
+  });
+
+  test("lend submit（commitLendResult）：落 journal 的 payload（调度服务原样重发的那份）也已去掉 pitfall", () => {
+    const db = started();
+    expect(commitLendResult(db, getOrder(db, VERDICT.orderId)!, { verdict: "changes", findings: pitV.findings, report: "# 报告" }, 5_000).ok).toBe(true);
+    const payload = getOrder(db, VERDICT.orderId)!.payload as { verdict: Record<string, unknown> };
+    expect(JSON.stringify(payload)).not.toContain("pitfall");
+    expect(oldPeerAccepts(payload.verdict, "verdict")).toBe(true);
   });
 });

@@ -221,3 +221,48 @@ describe("验收线 4：deliver.memoryRefs 标 wrong 自动转为争议", () => 
     expect(listMarks(db, "ab12-m1")).toEqual([]);
   });
 });
+
+describe("pmem-M2 r1 审查修复：memoryRefs 项目边界 / 重放一致 / mark 重试判断", () => {
+  const delivered = () => deliver(db, { actor: "agent-x", now: 1_400, dedupKey: `mcp-deliver:${WRITE_ORDER}:${H1}` }, { taskId: "T60", headSHA: H1, moveFrom: "build" });
+  const pit = (project: string, title = PIT.title) =>
+    recordMemory(db, { actor: "agent-pm", now: 1_000 }, { ...PIT, title, project, via: "tool", authorRole: "pm", fixable: true } as never).memory.id;
+
+  test("refs-project：引用别的项目的记忆 → 整份拒，不落 refs 事件、不标争议", async () => {
+    setMeta(db, OWNER, { project: "beta", key: "pms", value: ["agent-pm"] });
+    const foreign = pit("beta");
+    delivered();
+    const r = await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, [{ id: foreign, use: "wrong", note: "借交付标别处的记忆" }]);
+    expect(r).toMatchObject({ ok: true, memoryRefs: { ok: false } });
+    expect((r as { memoryRefs?: { error: string } }).memoryRefs?.error).toContain("不在这次交付的项目");
+    expect(memoryState(db, foreign)).toMatchObject({ disputed: false });
+    expect(listMarks(db, foreign)).toEqual([]);
+    expect(listEvents(db, { project: P, target: "T60" }).some((e) => e.kind === "memory" && e.data.op === "refs")).toBe(false);
+  });
+
+  test("refs-replay：同一次交付换一份 refs 再来 → 拒，不追加 dispute；同一份重来只按已落的那份补齐", async () => {
+    const m1 = pit(P), m2 = pit(P, "另一条坑：迁移语句逐条执行");
+    delivered();
+    const first = [{ id: m1, use: "applied" as const }];
+    expect(await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, first)).toMatchObject({ memoryRefs: { ok: true, disputed: [] } });
+    const changed = await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, [{ id: m2, use: "wrong", note: "改过的参数" }]);
+    expect(changed).toMatchObject({ memoryRefs: { ok: false } });
+    expect(listMarks(db, m2)).toEqual([]);
+    expect(await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, first)).toMatchObject({ memoryRefs: { ok: true } });
+    expect(listEvents(db, { project: P, target: "T60" }).filter((e) => e.kind === "memory" && e.data.op === "refs").length).toBe(1);
+  });
+
+  test("mark-reconfirm：PM confirm → 执行者 dispute → 同一 PM 再 confirm 清争议；紧接着的同内容重试才是 duplicate", async () => {
+    await tools().record_memory!(X, { ...PIT, orderId: WRITE_ORDER });
+    now = 2_200;
+    expect(await tools().mark_memory!(PM, { v: 1, memoryId: "ab12-m1", mark: "confirm" })).toMatchObject({ ok: true, disputed: false });
+    now = 2_300;
+    expect(await tools().mark_memory!(X, { v: 1, memoryId: "ab12-m1", mark: "dispute", reason: "规矩写反了", orderId: WRITE_ORDER }))
+      .toMatchObject({ ok: true, disputed: true });
+    now = 2_400;
+    expect(await tools().mark_memory!(PM, { v: 1, memoryId: "ab12-m1", mark: "confirm" })).toMatchObject({ ok: true, duplicate: false, disputed: false });
+    now = 2_500;
+    expect(await tools().mark_memory!(PM, { v: 1, memoryId: "ab12-m1", mark: "confirm" })).toMatchObject({ ok: true, duplicate: true, disputed: false });
+    expect(listMarks(db, "ab12-m1").map((m) => [m.actor, m.mark, m.ts])).toEqual([
+      ["agent-pm", "confirm", 2_200], ["agent-x", "dispute", 2_300], ["agent-pm", "confirm", 2_400]]);
+  });
+});
