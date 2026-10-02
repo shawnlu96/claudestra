@@ -74,3 +74,12 @@ export function testSafeStateDir(dir: string, defaultDir: string, env: Env = pro
   env.CLAUDESTRA_STATE_DIR = tmp;
   return tmp;
 }
+
+/** 必须走默认出借 journal 的用例（路由 / pushWork 内部读默认路径）在用例里设成 "1"、用完还原 */
+export const DEFAULT_LEND_JOURNAL_OK = "CLAUDESTRA_TEST_DEFAULT_LEND_JOURNAL";
+
+/** bun test 进程以默认路径打开出借 journal：preload 的状态目录全量共用，交错改写读到半个文件就 malformed（i28-TJ1）。子进程各有状态目录，不管 */
+export function guardDefaultLendJournal(path: string, defaultPath: string, env: Env = process.env): void {
+  const runner = /\.test\.[cm]?[jt]sx?$/.test((globalThis as { Bun?: { main?: string } }).Bun?.main ?? "");
+  if (runner && isTestProcess(env) && path === defaultPath && env[DEFAULT_LEND_JOURNAL_OK] !== "1") throw new TestIsolationViolation(`以默认路径打开出借 journal ${path}（全量各测试文件共用）；传独立的临时 journalPath`);
+}

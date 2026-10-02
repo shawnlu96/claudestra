@@ -15,6 +15,7 @@ import { claimLend } from "../src/lib/ledger-lend.js";
 import { remoteOrder } from "../src/lib/fix-strategy-remote-order.js";
 import { writeLendDeliver } from "../src/lib/ledger-lend-result.js";
 import type { DeliverRequest } from "../src/lib/lend-wire.js";
+import { DEFAULT_LEND_JOURNAL_OK } from "../src/lib/test-guard.js";
 import { testChildEnv } from "./test-env.js";
 
 function git(cwd: string, args: string[], env: Record<string, string>): string {
@@ -30,6 +31,9 @@ test("real git custom-branch clone and fast-forward push require journal binding
     GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@invalid" };
   expect(LEND_JOURNAL_PATH).not.toContain("/Users/shawn/.claude-orchestrator/");
   mkdirSync(repo, { recursive: true }); mkdirSync(seed);
+  // pushWork 只读默认 journal 核绑定，只能走默认路径：本用例放行 test-guard 的闸、finally 还原（i28-TJ1）
+  const okBefore = process.env[DEFAULT_LEND_JOURNAL_OK];
+  process.env[DEFAULT_LEND_JOURNAL_OK] = "1";
   const db = openLendJournal(), orderId = `lend:T1:cv:${Date.now()}`, branch = "feat/T1";
   try {
     git(repo, ["init", "--bare", "-q", "-b", "main"], env); git(seed, ["init", "-q", "-b", branch], env);
@@ -63,7 +67,12 @@ test("real git custom-branch clone and fast-forward push require journal binding
     expect(git(repo, ["rev-parse", branch], env)).toBe(fixed);
     expect(await pushWork(target, { root: lend, env })).toEqual({ ok: true });
 
-  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    db.run("DELETE FROM lend_orders WHERE orderId = ?", [orderId]);
+    db.close(); rmSync(root, { recursive: true, force: true });
+    if (okBefore === undefined) delete process.env[DEFAULT_LEND_JOURNAL_OK];
+    else process.env[DEFAULT_LEND_JOURNAL_OK] = okBefore;
+  }
 });
 
 for (const invalid of ["branch", "ended-lease", "old-proto", "lease-changes-during-head-check"] as const) {

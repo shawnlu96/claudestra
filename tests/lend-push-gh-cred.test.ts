@@ -7,6 +7,7 @@ import { advance, LEND_JOURNAL_PATH, openLendJournal, recordAsked } from "../src
 import { orderWireOf } from "../src/lib/order-wire.js";
 import type { Run } from "../src/lib/lend-clone.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
+import { DEFAULT_LEND_JOURNAL_OK } from "../src/lib/test-guard.js";
 import { testChildEnv } from "./test-env.js";
 
 const BASE = "1".repeat(40), HEAD = "2".repeat(40);
@@ -52,6 +53,9 @@ for (const lab of [false, true]) {
   test(`${lab ? "lab file" : "GitHub HTTPS"}: bound card head query shares the push credentials and rejects competing updates`, async () => {
     const f = fixture(lab);
     expect(LEND_JOURNAL_PATH).toStartWith(process.env.CLAUDESTRA_STATE_DIR!);
+    // pushWork 只读默认 journal 核绑定，只能走默认路径：本用例放行 test-guard 的闸、finally 还原（i28-TJ1）
+    const okBefore = process.env[DEFAULT_LEND_JOURNAL_OK];
+    process.env[DEFAULT_LEND_JOURNAL_OK] = "1";
     const db = openLendJournal();
     f.target.orderId = `lend:GH:cv:${Date.now()}`;
     f.target.branch = "feat/GH";
@@ -75,6 +79,8 @@ for (const lab of [false, true]) {
     } finally {
       db.run("DELETE FROM lend_orders WHERE orderId = ?", [f.target.orderId]);
       db.close(); f.close();
+      if (okBefore === undefined) delete process.env[DEFAULT_LEND_JOURNAL_OK];
+      else process.env[DEFAULT_LEND_JOURNAL_OK] = okBefore;
     }
   });
 }
