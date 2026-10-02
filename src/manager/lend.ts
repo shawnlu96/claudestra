@@ -12,6 +12,7 @@ import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, readLen
 import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
 import { lendStopReason } from "../lib/lend-watchdog.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
+import { ASK_HINT, ASK_USAGE, askGate, lendAskAction, offParams, printBind, type AskGate } from "../lib/lend-ask-auth.js";
 import { probeAcpWorker } from "../lib/worker-liveness.js";
 import { parseLedgerArgs } from "./ledger-identity.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
@@ -21,9 +22,9 @@ import { requireOwnerOrMaster } from "./project-guard.js";
 const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
   "[--roles <旧参数，忽略；审查和写代码已不区分>] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
-  "[--keep-unset codex,claude,roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
+  "[--keep-unset codex,claude,roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）" + ASK_USAGE;
 const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
-  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]";
+  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]" + ASK_USAGE;
 
 /** confirm 留在表里只为认出旧写法、报「已退役」，不当未知参数 */
 const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort", "keep-unset"];
@@ -165,8 +166,10 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx, f: LendFile) 
 }
 
 /** lend：删条目（不带 peer = 全删并关总开关），当场停掉已不覆盖的 worker，订单由调度服务下一轮按阶段退回或记停；borrow：删条目 / 清空 */
-async function off(kind: "lend" | "borrow", peer: string | undefined): Promise<void> {
+async function off(kind: "lend" | "borrow", peer: string | undefined, gate?: AskGate): Promise<void> {
   const res = await updateLend((f) => {
+    const no = gate?.check(offParams(peer)); // 非 owner 凭授权卡执行：锁内核卡（lib/lend-ask-auth.ts）
+    if (no) return no;
     const list: { peer: string }[] = kind === "lend" ? f.lend : f.borrow;
     if (peer !== undefined) {
       const i = list.findIndex((e) => e.peer === peer);
@@ -194,22 +197,22 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
   if (sub === "inbox" && kind === "lend") return (await import("./lend-inbox.js")).cmdLendInbox(rest); // bridge 收 A 推来的单（身份在里面核）
   const op = kind === "lend" ? ({ grant: "set", set: "set", revoke: "off", off: "off" } as const)[sub] : sub === "set" || sub === "off" ? sub : undefined;
   if (!op) return output({ ok: false, error: usage });
-  const p = parseLedgerArgs(rest, op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS, kind === "borrow" && op === "set" ? BORROW_BOOLS : []);
+  const p = parseLedgerArgs(rest, [...(op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS), "ask"], [...(kind === "borrow" && op === "set" ? BORROW_BOOLS : []), "print-bind"]);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${usage}` });
+  const f = p.flags, action = lendAskAction(kind, op);
+  const build = (ctx: Ctx, file: LendFile): Built<AnyEntry> => kind === "lend" ? buildLendGrant(p.pos[0], f, file, ctx) : buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
+  if (p.bools.has("print-bind")) return output(p.pos.length !== (op === "off" ? 0 : 1) ? { ok: false, error: usage } : await printBind(action, op === "off" ? { off: offParams(f.peer) } : { build }));
   const denied = await requireOwnerOrMaster(kind === "lend" ? "改出借声明" : "改借入声明");
-  if (denied) return output({ ok: false, code: "forbidden", ...denied });
+  const gate = denied && f.ask !== undefined ? askGate(f.ask, denied.params.actor, action) : undefined; // owner / master 带了 --ask 也照旧直接执行
+  if (denied && !gate) return output({ ok: false, code: "forbidden", ...denied, error: `${denied.error}；${ASK_HINT}` });
   try {
     if (op === "off") {
       if (p.pos.length) return output({ ok: false, error: usage });
-      return await off(kind, p.flags.peer);
+      return await off(kind, f.peer, gate);
     }
     if (p.pos.length !== 1) return output({ ok: false, error: usage });
-    const f = p.flags;
     if (kind === "lend" && f.confirm !== undefined) return output({ ok: false, error: CONFIRM_RETIRED });
-    await setEntry(kind, (ctx, file) => {
-      if (kind === "lend") return buildLendGrant(p.pos[0], f, file, ctx);
-      return buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
-    });
+    await setEntry(kind, gate ? gate.wrap(build) : build);
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   }

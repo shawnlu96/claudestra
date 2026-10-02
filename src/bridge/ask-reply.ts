@@ -6,6 +6,7 @@
  * `ask` 字段不合格整条 reply 退回给 agent（Delivery dropped + 原因），不猜、不静默丢。建 ask 出错不挡回复本身。
  */
 import { bindHash, missingApprove, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
+import { withBindSummary } from "../lib/ask-bind-render.js";
 import { draftFromReply, type AskRow, type ReplyAskDraft } from "../lib/ask-options.js";
 import { closeAsk, getAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type NewAsk } from "../lib/ledger-asks.js";
 import { markdownToPlain } from "../lib/plain-text.js";
@@ -53,6 +54,7 @@ function explicitColumns(x: ReplyAsk, draft: ReplyAskDraft, fromAgent: string, n
   if (x.expiresIn) cols.expiresAt = now + x.expiresIn * 1000;
   // 三句背景（docs 13 §4.2）：agent 写了 why / ifIgnored 就用它的，否则取正文
   if (x.why || x.ifIgnored) cols.context = [x.why, x.ifIgnored ? `不处理会怎样：${x.ifIgnored}` : ""].filter(Boolean).join("\n");
+  if (cols.bind) cols.context = withBindSummary(cols.bind, cols.context ?? draft.context); // 系统生成的「批准的就是这个」固定在最前（i28-OA1）
   return cols;
 }
 
