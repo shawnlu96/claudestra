@@ -13,6 +13,7 @@ import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 import { renderApiInbound, type Envelope, type LocalEndpoint } from "../src/bridge/router.js";
 import type { Ask } from "../src/lib/ledger-asks.js";
 import { readSessionHistory } from "../src/lib/session-history.js";
+import { withInterruptNote } from "../src/lib/turn-cuts.js";
 
 const me = { tag: "claudestra-ws" } as never;
 const to = { kind: "local", agentName: "agent-claudestra", channelId: "c-me", ws: me } as LocalEndpoint;
@@ -32,15 +33,16 @@ const owner = (c: string, id: string) => mk(c, id, { kind: "user", userId: "u1",
 /** 和 bridge.ts renderContentForLocal 同样的三种抬头 */
 async function render(env: Envelope): Promise<string> {
   const f = env.from;
+  if (env.meta.interruptNote) return renderWithNote(env);
   if (f.kind === "api") return renderApiInbound({ from: f, content: env.content });
   if (f.kind === "local") return `[🤖 来自 ${f.agentName} 的 inbound 消息（非 FYI）。\n判断一下。\n规则：有干货才说话；没干货别说话。]\n\n${env.content}`;
   return env.content;
 }
 
-function setup(items: HeldItem[]) {
+function setup(items: HeldItem[], stopAt?: number) {
   const held = new HeldQueue(null);
   held.set("c-me", items);
-  initInbox({ clients: new Map([["c-me", { ws: me }]]), held, calls: new AgentCallBook(null), render, emitIn: () => {}, stoppedAt: () => undefined });
+  initInbox({ clients: new Map([["c-me", { ws: me }]]), held, calls: new AgentCallBook(null), render, emitIn: () => {}, stoppedAt: () => stopAt });
   return held;
 }
 async function take(now: number, opts: Parameters<typeof takeInbox>[2] = {}): Promise<string> {
@@ -65,6 +67,11 @@ async function history(records: unknown[]) {
   const p = join(dir, `s${n++}.jsonl`);
   writeFileSync(p, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
   return (await readSessionHistory(p)).messages;
+}
+/** 和 bridge.ts renderContentForLocal 一样把叫停抬头插在来源头之后（lib/turn-cuts.ts withInterruptNote） */
+async function renderWithNote(env: Envelope): Promise<string> {
+  const note = env.meta.interruptNote;
+  return note ? withInterruptNote(await render({ ...env, meta: { ...env.meta, interruptNote: undefined } }), note) : render(env);
 }
 const users = (ms: Awaited<ReturnType<typeof history>>) => ms.filter((m) => m.role === "user");
 
@@ -151,6 +158,61 @@ describe("check_inbox 领走的消息进会话历史", () => {
     ]);
     expect(users(ms)).toEqual([]);
     expect(ms.flatMap((m) => m.tools ?? []).map((t) => t.name)).toEqual(["mcp__claudestra__check_inbox", "mcp__claudestra__check_inbox", "Bash", "mcp__claudestra__check_inbox"]);
+  });
+
+  test("长消息分页读打了租约、没 ack 再调：原样重给的那批里它是编号预览——仍只算预览，只出一次；租约过期后全文到达照常进历史", async () => {
+    const long = `长报告开头\n${"x".repeat(20_000)}\nlong-END`;
+    setup([mk(long, "agent_long_2", { kind: "local", agentName: "agent-codex", channelId: "c-codex", ws: me })]);
+    const first = await take(1000); // 无参：只给开头（批尾无编号预览）
+    expect(first).toContain("收件箱里没有可领取的消息");
+    const page = await take(2000, { read: "agent_long_2" }); // 分页读：给它单独打租约
+    expect(page).toContain("第 1/");
+    const again = await take(3000); // 无参再调：已打租约的这条在「原样重给」的批里，编号条目、仍只给开头
+    expect(again).toContain("原样重给");
+    expect(again).toContain("── 1/1 · 来自 agent-codex · message_id=agent_long_2");
+    expect(again).toContain("这里只给开头");
+    const late = 2000 + INBOX_LEASE_MS + 1;
+    const ms = await history([
+      callInbox("tu1", 1), result("tu1", first, 2),
+      callInbox("tu2", 3, { read: "agent_long_2" }), result("tu2", page, 4),
+      callInbox("tu3", 5), result("tu3", again, 6),
+      said("这轮结束", late / 1000),
+      channel("agent_long_2", `[🤖 来自 agent-codex 的 inbound 消息（非 FYI）。\n判断一下。]\n\n${long}`, 'user="agent-codex" user_id="agent" is_agent="true"', late / 1000 + 1),
+    ]);
+    const us = users(ms);
+    expect(us.filter((m) => m.text.includes("long-END")).length).toBe(1); // 全文一条，没被预览吞掉
+    expect(us.find((m) => m.text.includes("long-END"))!.from).toBe("agent-codex");
+    expect(us.filter((m) => m.text.includes("只显示开头")).length).toBe(1); // 两次预览只出一次
+    expect(us.length).toBe(2);
+  });
+
+  test("正文保真：Discord 的人自己以「[🤖 …]」开头、peer 自己以叫停样式开头，都不当 bridge 注入头剥掉", async () => {
+    setup([
+      owner("[🤖 用户实际输入的原文]", "u_emoji_1"),
+      mk("[⏹ 这条是叫停之前的文字，不是 bridge 注入]\n\nonly-visible-tail", "api_peer_stop", { kind: "api", tokenId: "tok-p", name: "He", peer: "He" }),
+    ]);
+    const text = await take(1000);
+    const us = users(await history([callInbox("tu1", 1), result("tu1", text, 2)]));
+    expect(us.map((m) => [m.from, m.text])).toEqual([
+      ["owner", "[🤖 用户实际输入的原文]"],
+      ["peer He", "[⏹ 这条是叫停之前的文字，不是 bridge 注入]\n\nonly-visible-tail"],
+    ]);
+  });
+
+  test("叫停前押下的：bridge 加的叫停抬头认不出来源，留在历史里不吞正文；卡片答复的叫停抬头剥掉、答复照常认出", async () => {
+    const stopAt = Date.parse("2026-10-03T00:00:00Z") + 60_000;
+    const items = [schedulerNote(), ownerAnswer(), owner("今晚别发版", "u_msg_9")];
+    for (const it of items) it.heldAt = stopAt - 30_000;
+    setup(items, stopAt);
+    const text = await take(stopAt + 1000);
+    expect(text).toContain("[⏹ 这条是叫停之前");
+    const us = users(await history([callInbox("tu1", 1), result("tu1", text, 2)]));
+    expect(us[0]).toMatchObject({ from: "owner", text: "方案 A\n就按 A 来", askId: "ask_7k2" });
+    expect(us.slice(1).map((m) => m.from)).toEqual(["owner", "scheduler"]);
+    expect(us[1].text.startsWith("[⏹ 这条是叫停之前")).toBe(true);
+    expect(us[1].text.endsWith("今晚别发版")).toBe(true);
+    expect(us[2].text.startsWith("[⏹ 这条是叫停之前")).toBe(true); // 来源头剥了，叫停抬头留着
+    expect(us[2].text.endsWith("i28-IBX1 已派单")).toBe(true);
   });
 
   test("Codex：结果和调用在同一条 assistant 记录里，也展开在调用之后", async () => {

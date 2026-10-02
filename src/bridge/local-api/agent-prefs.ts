@@ -66,6 +66,9 @@ function hiddenRanges(agent: string): HiddenRange[] {
   return webDb().prepare("SELECT session_id AS sessionId, seq_from AS fromSeq, seq_to AS toSeq FROM hidden_messages WHERE agent = ? ORDER BY session_id, seq_from").all(agent) as HiddenRange[];
 }
 
+/** 记录行号；收件箱拆出的消息是 行号 + 0.01·k（lib/session-history-inbox.ts，一批至多十几条，k < 50） */
+const isSeq = (x: number): boolean => Number.isFinite(x) && Math.abs(x * 100 - Math.round(x * 100)) < 1e-6 && Math.round(x * 100) % 100 < 50;
+
 async function postHidden(req: Request, agent: string): Promise<Response> {
   const body = await readJsonBody(req);
   if (body === INVALID_JSON) return invalidJsonBody();
@@ -74,7 +77,7 @@ async function postHidden(req: Request, agent: string): Promise<Response> {
   if (!SESSION_RE.test(sessionId)) return apiJson(400, { ok: false, error: "sessionId required" });
   const from = Number(b.fromSeq);
   const to = b.toSeq == null ? from : Number(b.toSeq);
-  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < from || to - from > MAX_RANGE) return apiJson(400, { ok: false, error: "bad seq range" });
+  if (!isSeq(from) || !isSeq(to) || from < 0 || to < from || to - from > MAX_RANGE) return apiJson(400, { ok: false, error: "bad seq range" });
   if (b.hide === false) webDb().prepare("DELETE FROM hidden_messages WHERE agent = ? AND session_id = ? AND seq_from = ?").run(agent, sessionId, from);
   else {
     webDb().prepare(

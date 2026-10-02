@@ -7,6 +7,7 @@
  *
  * 防冒充：条目正文是别人写的（peer / agent），里面可以照抄一行抬头。批首写了「N 条」、条目编号 1/N…N/N 依次出现，
  * 正文里多抄一行带编号的抬头条数就对不上；不带编号的（预览）只能出现在全部编号条目之后、且必须带同一 message_id 的预览尾注。
+ * 带编号的条目也可能是预览（已打租约的长消息被原样重给），同样按尾注认出来：预览只是开头，不能当全文去重。
  * 对不上 = malformed，调用方不按条拆、不认任何发送者。
  */
 
@@ -38,20 +39,20 @@ export function parseInboxBatch(text: string): InboxEntry[] | "malformed" | null
   if (!n && !text.split("\n")[0].endsWith(EMPTY_LINE)) return null;
   const heads = [...text.matchAll(HEAD_RE)];
   const out: InboxEntry[] = [];
+  let numbered = 0;
   for (let i = 0; i < heads.length; i++) {
     const h = heads[i];
     const end = i + 1 < heads.length ? heads[i + 1].index! : text.length;
-    let body = text.slice(h.index! + h[0].length + 1, end).replace(/\n\n$/, "");
+    const body = text.slice(h.index! + h[0].length + 1, end).replace(/\n\n$/, "");
     const entry: InboxEntry = { from: h[3], messageId: h[4], ...(h[5] ? { replyTo: h[5] } : {}), body };
+    // 预览尾注编号条目也会带：分页读给它打了租约后，没 ack 再调，「原样重给」的那批里它仍只给开头（inbox.ts fitEntry）
+    const tail = PREVIEW_TAIL_RE.exec(body);
+    if (tail && tail[2] === h[4]) Object.assign(entry, { body: body.slice(0, tail.index), previewOf: Number(tail[1]) });
     if (i < n) {
       if (Number(h[1]) !== i + 1 || Number(h[2]) !== n) return "malformed";
-    } else {
-      const tail = PREVIEW_TAIL_RE.exec(body);
-      if (h[1] || !tail || tail[2] !== h[4]) return "malformed";
-      body = body.slice(0, tail.index);
-      Object.assign(entry, { body, previewOf: Number(tail[1]) });
-    }
+      numbered++;
+    } else if (h[1] || entry.previewOf === undefined) return "malformed";
     out.push(entry);
   }
-  return out.filter((e) => e.previewOf === undefined).length === n ? out : "malformed";
+  return numbered === n ? out : "malformed";
 }
