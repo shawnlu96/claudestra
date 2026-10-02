@@ -11,8 +11,8 @@
  * （src/lib/update-hints.ts 的 readPiRuntimeSnapshot），ACP 不写 ⇒ 重启后横幅永不消失。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { STATE_DIR } from "./paths.js";
 
 /** 只用得到这几个查询方法（Pi 的扩展 API 子集，便于测试替身） */
 interface PiSnapshotApi {
@@ -71,7 +71,8 @@ export function writePiEnvSnapshot(o: PiSnapshotOptions): void {
         }
       })(),
     };
-    const dir = join(o.stateDir?.trim() || process.env.CLAUDESTRA_STATE_DIR?.trim() || join(homedir(), ".claude-orchestrator"), "pi-env");
+    // 状态目录一律走 lib/paths.ts（路径字面量守门：只允许出现在那里与白名单文件）
+    const dir = join(o.stateDir?.trim() || STATE_DIR, "pi-env");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(join(dir, `${agent}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
   } catch {
