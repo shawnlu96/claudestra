@@ -118,6 +118,15 @@ describe("测试类扩围自动定", () => {
     expect(told).toEqual([]);
   });
 
+  test("同一问题文字申请不同文件是两条 ask，各自批准；同文件重试仍是同一条", async () => {
+    const first = await remoteAsk({ question: "申请扩围", files: ["tests/a.test.ts"], reason: "new_test" });
+    expect((await remoteAsk({ question: "申请扩围", files: ["tests/a.test.ts"], reason: "new_test" })).id).toBe(first.id);
+    const second = await remoteAsk({ question: "申请扩围", files: ["tests/c.test.ts"], reason: "new_test" });
+    expect(second.id).not.toBe(first.id);
+    await sweepAskDefaults(db, due, { tell });
+    expect(globs()).toEqual(["src/lib/x*.ts", "tests/b.test.ts", "tests/a.test.ts", "tests/c.test.ts"]);
+  });
+
   test("结论没发出去下次扫描重发，连续 10 次失败停下并在卡上记 note", async () => {
     tellOk = false;
     const a = await remoteAsk();

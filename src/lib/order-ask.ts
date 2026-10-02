@@ -73,8 +73,9 @@ export type OpenedOrderAsk = { askId: string; askee: string; duplicate: boolean;
 /** 审查单上的提问：没开 ask、没发通知，answer 是当场回给审查员的规则原文 */
 export type AnsweredReviewAsk = { answered: string };
 
-const askDigest = (q: Question): string =>
-  createHash("sha256").update(JSON.stringify([q.question, q.options, ...(q.default || q.class ? [q.default, q.class] : [])])).digest("hex").slice(0, 16);
+const askDigest = (q: Question, scope = askScopeExtra(q as Partial<AskWire>)): string => // 申请的文件 / 理由也算问题本身；没给的旧报文摘要不变
+  createHash("sha256").update(JSON.stringify([q.question, q.options,
+    ...(q.default || q.class ? [q.default, q.class] : []), ...(scope.files ? [scope.files, scope.reason] : [])])).digest("hex").slice(0, 16);
 
 /** 出借池里这一单的步骤；本机的单（调度器 intent / 手动单号）不在 lend_orders 里 = null */
 function lendStepOf(db: Database, orderId: string): string | null {
