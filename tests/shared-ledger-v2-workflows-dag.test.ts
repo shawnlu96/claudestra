@@ -129,3 +129,22 @@ test("an approved version may cancel open bound nodes but never a completed one"
   expect(h.row("exec_dag_bindings").map(r => r.taskId)).toEqual(["task"]);
   expect(h.tx(ctx => readTask(ctx, "task")).stage).toBe("done");
 });
+
+test("historical DAG bindings survive later additions, cancellations and rebindings", () => {
+  const h = harness();
+  init(h); h.run(bind());
+  const v1 = h.tx(ctx => readDag(ctx, "feature", 1));
+  const nextNodes = [...nodes, { key: "d", oneLine: "new", deps: [], fileGlobs: [], estimate: "" }];
+  rewrite(h, nextNodes, v1.bindings);
+  h.run(bind({ nodeKey: "d", taskId: "task-two", baseVersion: 2, expectedRev: 4 }, "bind-d"));
+  expect(h.tx(ctx => readDag(ctx, "feature", 0))).toEqual({ version: 0, nodes: [], bindings: [] });
+  expect(h.tx(ctx => readDag(ctx, "feature", 1))).toEqual(v1);
+  const v2 = h.tx(ctx => readDag(ctx, "feature", 2));
+  h.tx(ctx => applyDagVersion(ctx, h.deps, h.deps.feature(ctx, "feature"), nextNodes, ["d"]));
+  h.run(bind({ nodeKey: "d", taskId: "task-three", baseVersion: 3, expectedRev: 6 }, "rebind-d"));
+  expect(h.tx(ctx => readDag(ctx, "feature", 1))).toEqual(v1);
+  expect(h.tx(ctx => readDag(ctx, "feature", 2))).toEqual(v2);
+  expect(h.tx(ctx => readDag(ctx, "feature", 3)).bindings).toEqual([
+    { nodeKey: "a", taskId: "task" }, { nodeKey: "d", taskId: "task-three" },
+  ]);
+});

@@ -37,20 +37,28 @@ for (const [table, { columns, keys }] of Object.entries(tables)) {
 workflowStatements["xw.task_steps.list"] = { mode: "read", sql: `SELECT * FROM task_steps WHERE ${scopeWhere} AND taskId=$taskId
   ORDER BY round, step` };
 
-// DAG node sets are immutable per version; bindings are server-owned rows, unique per node and per task.
+// Active bindings enforce uniqueness; version snapshots retain cancelled and subsequently rebound nodes.
 workflowSchema["xw.dags"] = `CREATE TABLE IF NOT EXISTS exec_dag_versions (teamId TEXT,projectId TEXT,featureId TEXT,
   version INTEGER,nodes TEXT,createdBy TEXT,createdAt INTEGER, PRIMARY KEY(teamId,projectId,featureId,version))`;
 workflowSchema["xw.bindings"] = `CREATE TABLE IF NOT EXISTS exec_dag_bindings (teamId TEXT,projectId TEXT,featureId TEXT,
   nodeKey TEXT,taskId TEXT,boundVersion INTEGER,boundBy TEXT,boundAt INTEGER,
   PRIMARY KEY(teamId,projectId,featureId,nodeKey), UNIQUE(teamId,projectId,taskId))`;
+workflowSchema["xw.bindingVersions"] = `CREATE TABLE IF NOT EXISTS exec_dag_binding_versions (
+  teamId TEXT,projectId TEXT,featureId TEXT,version INTEGER,nodeKey TEXT,taskId TEXT,
+  PRIMARY KEY(teamId,projectId,featureId,version,nodeKey), UNIQUE(teamId,projectId,featureId,version,taskId))`;
+for (const action of ["UPDATE", "DELETE"]) workflowSchema[`xw.bindingVersions.${action}`] =
+  `CREATE TRIGGER IF NOT EXISTS exec_dag_binding_versions_${action} BEFORE ${action} ON exec_dag_binding_versions
+  BEGIN SELECT RAISE(ABORT, 'immutable'); END`;
+workflowStatements["xw.binding.snapshot"] = { mode: "write", sql: `INSERT INTO exec_dag_binding_versions
+  VALUES ($teamId,$projectId,$featureId,$version,$nodeKey,$taskId)` };
 workflowSchema["xw.bindings.UPDATE"] = `CREATE TRIGGER IF NOT EXISTS exec_dag_bindings_UPDATE BEFORE UPDATE ON exec_dag_bindings
   BEGIN SELECT RAISE(ABORT, 'immutable'); END`;
 workflowStatements["xw.dag.get"] = { mode: "read", sql: `SELECT nodes FROM exec_dag_versions WHERE ${scopeWhere}
   AND featureId=$featureId AND version=$version` };
 workflowStatements["xw.dag.insert"] = { mode: "write", sql: `INSERT INTO exec_dag_versions
   VALUES ($teamId,$projectId,$featureId,$version,$nodes,$personId,$now)` };
-workflowStatements["xw.binding.list"] = { mode: "read", sql: `SELECT nodeKey,taskId FROM exec_dag_bindings WHERE ${scopeWhere}
-  AND featureId=$featureId ORDER BY nodeKey` };
+workflowStatements["xw.binding.list"] = { mode: "read", sql: `SELECT nodeKey,taskId FROM exec_dag_binding_versions WHERE ${scopeWhere}
+  AND featureId=$featureId AND version=$version ORDER BY nodeKey` };
 workflowStatements["xw.binding.byTask"] = { mode: "read", sql: `SELECT featureId,nodeKey FROM exec_dag_bindings WHERE ${scopeWhere}
   AND taskId=$taskId` };
 workflowStatements["xw.binding.insert"] = { mode: "write", sql: `INSERT INTO exec_dag_bindings

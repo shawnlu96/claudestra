@@ -78,7 +78,7 @@ export function harness() {
   const row = (table: string, where = "1") => db.query(`SELECT * FROM ${table} WHERE ${where}`).all() as Record<string, any>[];
   const featureRow = () => JSON.parse(row("fixture_feature")[0].data);
   const snapshot = () => Object.fromEntries(["fixture_feature", "tasks", "exec_task_versions", "task_workflows", "task_steps",
-    "exec_dag_versions", "exec_dag_bindings", "exec_source_events", "exec_events", "exec_command_receipts"]
+    "exec_dag_versions", "exec_dag_bindings", "exec_dag_binding_versions", "exec_source_events", "exec_events", "exec_command_receipts"]
     .map(table => [table, db.query(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
   return { db, scope, deps, domain, tx, run, runTask, row, featureRow, putFeature, snapshot, denied, calls, faults };
 }

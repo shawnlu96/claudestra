@@ -8,7 +8,7 @@ type DagNode = Dag["nodes"][number];
 type Binding = Dag["bindings"][number];
 
 export function readDag(ctx: V2TransactionContext, featureId: string, version: number): Dag {
-  const bindings = ctx.all("xw.binding.list", { featureId }) as Binding[];
+  const bindings = ctx.all("xw.binding.list", { featureId, version }) as Binding[];
   if (version === 0) return parseDag({ version, nodes: [], bindings });
   const row = ctx.all("xw.dag.get", { featureId, version })[0] as { nodes: string } | undefined;
   return parseDag({ version, nodes: row ? JSON.parse(row.nodes) : fail("not_found"), bindings });
@@ -42,6 +42,7 @@ export function applyDagVersion(
   }
   const dag = parseDag({ version: feature.currentVersion + 1, nodes, bindings: kept });
   ctx.run("xw.dag.insert", { featureId: feature.id, version: dag.version, nodes: JSON.stringify(dag.nodes) });
+  for (const binding of kept) ctx.run("xw.binding.snapshot", { featureId: feature.id, version: dag.version, ...binding });
   const saved = nextFeature(ctx, feature, { currentVersion: dag.version });
   deps.saveFeature(ctx, saved, feature.rev);
   return { feature: saved, dag };
@@ -62,6 +63,7 @@ function bindNode(ctx: V2TransactionContext, deps: WorkflowsDependencies, comman
   deps.saveFeature(ctx, saved, feature.rev);
   deps.saveTask(ctx, { ...task, rev: task.rev + 1, updatedAt: ctx.scope.now }, task.rev);
   ctx.run("xw.binding.insert", { featureId: feature.id, nodeKey: p.nodeKey, taskId: task.id, boundVersion: dag.version });
+  ctx.run("xw.binding.snapshot", { featureId: feature.id, version: dag.version, nodeKey: p.nodeKey, taskId: task.id });
   return { feature: saved, version: dag.version };
 }
 export function applyDag(ctx: V2TransactionContext, deps: WorkflowsDependencies, command: DagCommand): { feature: V2Feature; version: number } {
