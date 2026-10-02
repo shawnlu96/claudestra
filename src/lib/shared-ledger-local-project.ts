@@ -43,3 +43,12 @@ export function sharedLedgerOfferProjectId(centerId: string, bindings: SharedLed
   const matches = bindings.filter(b => b.centerId === centerId);
   return matches.length === 1 ? matches[0]!.projectId : undefined;
 }
+
+
+/** Filter before the three-choice cap so a known pin conflict cannot displace a usable local project. */
+export function sharedLedgerEligibleProjects(projects: SharedLedgerLocalProject[], bindings: SharedLedgerBinding[],
+  target?: { centerId: string; projectId: string; teamId?: string }): SharedLedgerLocalProject[] {
+  return projects.filter(p => !bindings.some(b => (b.localProjectId ?? b.projectId) === p.id
+    && (!target || b.centerId !== target.centerId || b.projectId !== target.projectId
+      || (target.teamId !== undefined && b.teamId !== target.teamId))));
+}

@@ -72,6 +72,8 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
         }
         run = r.run as MergeRun;
       }
+      const settle = async (r: MergeRun) => requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
+        "--receipt", `merge:${r.mergeSha}; 待 PM 部署`), "settle merge intent");
       const drift = ["merged", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
       if (drift) {
         requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
@@ -81,8 +83,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
         // `deploy` was taken out of the config meanwhile (the journal, not the config, says a job may still be running).
       } else if (run.phase === "merged") {
         // Settling frees the project merge slot; the task stays in `merge` until the PM deploys and moves it to live by hand.
-        requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
-          "--receipt", `merge:${run.mergeSha}; 待 PM 部署`), "settle merge intent");
+        await settle(run);
       } else if (!["unknown", "resolved", "await_review"].includes(run.phase)) {
         const advance = async (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
           const args = ["ledger", "scheduler-merge-step", intent.id, "--from", from, "--to", to, "--rev", String(rev)];
@@ -92,7 +93,8 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
           const result = requireOk(await manager(...args), "advance merge run");
           return result.run as MergeRun;
         };
-        await driveMerge(run, externalFactory(policy), advance, assertActive);
+        const after = await driveMerge(run, externalFactory(policy), advance, assertActive);
+        if (after.phase === "merged" && !policy.deploy) await settle(after); // i28-MT1f2: free the slot before this pass's auto tick plans the next merge
       }
       handled++;
     }

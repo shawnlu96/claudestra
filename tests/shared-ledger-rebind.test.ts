@@ -1,13 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openLedger } from "../src/lib/ledger-store.js";
-import { answerAsk, getAsk, listAsks, openAsk, patchAsk, type Ask } from "../src/lib/ledger-asks.js";
+import { answerAsk, closeAsk, getAsk, listAsks, openAsk, patchAsk, type Ask } from "../src/lib/ledger-asks.js";
 import { readSharedLedgerBindings, setSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
 import { rebindSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings-rebind.js";
 import { writeSharedLedgerCredential, type SharedLedgerLocalCredential } from "../src/lib/shared-ledger-mode.js";
 import { sharedLedgerGateProxy } from "../src/lib/shared-ledger-gate-proxy.js";
+import { joinOfferLiveDeps, sweepJoinOfferMaintenance } from "../src/bridge/shared-ledger-join-offer.js";
 import { onSharedLedgerRebindAnswered, sweepSharedLedgerRebinds, type SharedLedgerRebindDeps } from "../src/bridge/shared-ledger-rebind.js";
 
 const roots: string[] = [];
@@ -68,9 +69,9 @@ test("missing local project: one durable card, rebind preserves credentials and 
 
 test("pins conflict refuses rebind, explains why and leaves bindings and credentials unchanged", async () => {
   const w = await world();
+  await sweepSharedLedgerRebinds(w.d);
   await setSharedLedgerBinding({ centerId: "other", teamId: "other", projectId: "other", localProjectId: "local" }, w.dir);
   const before = readFileSync(join(w.dir, "shared-ledger-bindings.json"));
-  await sweepSharedLedgerRebinds(w.d);
   await onSharedLedgerRebindAnswered(w.answer(), w.d);
   expect(readFileSync(join(w.dir, "shared-ledger-bindings.json"))).toEqual(before);
   expect(w.messages[0]).toContain("pins");
@@ -185,4 +186,48 @@ test("bridge startup sweep and real owner card answer run the live rebind path i
   const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
   expect(stdout).toContain("live-rebind-passed");
+});
+
+
+test("owner-dismissed rebind card stays dismissed across sweeps and restart", async () => {
+  const w = await world(), db = openLedger(join(w.dir, "dismiss.sqlite"));
+  const d = { ...w.d, asks: () => listAsks(db), openAsk: (input: Parameters<typeof w.d.openAsk>[0]) => openAsk(db, input, w.d.now()) };
+  try {
+    await sweepSharedLedgerRebinds(d);
+    const a = listAsks(db)[0]!;
+    closeAsk(db, a.id, "cancelled", "owner dismissed", w.d.now(), { dismissed: true, hidden: true });
+    await sweepSharedLedgerRebinds({ ...d });
+    await sweepSharedLedgerRebinds({ ...d });
+    w.advance();
+    await sweepSharedLedgerRebinds({ ...d });
+    expect(listAsks(db)).toHaveLength(1);
+    expect(listAsks(db)[0]!.state).toBe("cancelled");
+    expect(w.messages).toEqual([]);
+    expect(readSharedLedgerBindings(w.dir)[0]!.localProjectId).toBe("missing");
+  } finally { db.close(); }
+});
+
+
+test("no bindings avoids project/session IO and a failed join sweep does not block rebind maintenance", async () => {
+  const w = await world();
+  const none = { ...w.d, bindings: () => [], projects: async () => { throw new Error("unexpected session IO"); } };
+  await sweepSharedLedgerRebinds(none);
+  expect(w.asks).toHaveLength(0);
+  const errors: string[] = [], spy = spyOn(console, "error").mockImplementation((...args) => { errors.push(args.join(" ")); });
+  try {
+    await sweepJoinOfferMaintenance({ ...joinOfferLiveDeps, stateDir: () => { throw new Error("private pending data"); } }, w.d);
+    expect(w.asks).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).not.toContain("private pending data");
+  } finally { spy.mockRestore(); }
+});
+
+test("rebind offers free projects instead of choices already pinned to other shared projects", async () => {
+  const w = await world();
+  w.projects.push({ id: "free", name: "Free", lastActivityAt: 0 });
+  await setSharedLedgerBinding({ centerId: "other", teamId: "team", projectId: "other", localProjectId: "local" }, w.dir);
+  await sweepSharedLedgerRebinds(w.d);
+  expect((w.asks[0]!.options[0] as { buttons: { label: string }[] }).buttons.map(b => b.label)).toEqual(["改绑到 Free", "暂不改绑"]);
+  await onSharedLedgerRebindAnswered(w.answer(), w.d);
+  expect(readSharedLedgerBindings(w.dir).find(b => b.centerId === "center")!.localProjectId).toBe("free");
 });

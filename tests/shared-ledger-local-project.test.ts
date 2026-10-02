@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { sharedLedgerOfferProjectId, sharedLedgerProjectChoices } from "../src/lib/shared-ledger-local-project.js";
+import { sharedLedgerEligibleProjects, sharedLedgerOfferProjectId, sharedLedgerProjectChoices } from "../src/lib/shared-ledger-local-project.js";
 
 const projects = [
   { id: "old", name: "Older", lastActivityAt: 1 }, { id: "shared", name: "Same ID", lastActivityAt: 0 },
@@ -28,4 +28,16 @@ test("shared project hint requires exactly one binding at the offered center", (
   expect(sharedLedgerOfferProjectId("b", [a])).toBeUndefined();
   expect(sharedLedgerOfferProjectId("a", [a, { ...a, projectId: "other" }])).toBeUndefined();
   expect(sharedLedgerOfferProjectId("a", [a, { ...a, localProjectId: "duplicate" }])).toBeUndefined();
+});
+
+
+test("conflicting bound projects are excluded before the three-choice cap", () => {
+  const list = ["busy", "a", "b", "c"].map((id, i) => ({ id, name: id, lastActivityAt: 100 - i }));
+  const binding = { centerId: "center", teamId: "team", projectId: "shared", localProjectId: "busy" };
+  const target = { centerId: "center", teamId: "team", projectId: "other" };
+  expect(sharedLedgerProjectChoices(sharedLedgerEligibleProjects(list, [binding], target), undefined, "join")
+    .map(c => c.localProjectId)).toEqual(["a", "b", "c"]);
+  expect(sharedLedgerEligibleProjects(list, [binding], binding).map(p => p.id)).toContain("busy");
+  expect(sharedLedgerEligibleProjects(list, [binding]).map(p => p.id)).not.toContain("busy");
+  expect(sharedLedgerEligibleProjects(list, [binding], { ...binding, teamId: "other" }).map(p => p.id)).not.toContain("busy");
 });

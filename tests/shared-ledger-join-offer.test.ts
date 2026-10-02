@@ -396,3 +396,32 @@ describe("local project selection (JN4)", () => {
     }
   });
 });
+
+
+test("legacy pending accept reports failed with reinvite advice, while explicit decline remains declined", async () => {
+  for (const button of [JOIN_BUTTON, DECLINE_BUTTON]) {
+    const w = world(`peer-legacy-${button}`), body = offerBody(markedCode());
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    const p = readPendingOffer(w.dir, body.offerId)!;
+    await savePendingOffer(w.dir, { ...p, projectChoices: undefined, sharedProjectId: undefined }, { replace: true });
+    await onJoinOfferAnswered(answer(w.asks[0]!, button), w.deps);
+    expect(receiptStatus(w)).toEqual([button === JOIN_BUTTON ? "failed" : "declined"]);
+    if (button === JOIN_BUTTON) expect(w.informs[0]).toContain("重新发码");
+    expect(w.joins).toEqual([]);
+  }
+});
+
+test("known conflicting binding does not consume an intake choice and invalid binding state gives a fixed refusal", async () => {
+  const w = world("peer-bound-options");
+  w.deps.sharedProject = undefined;
+  w.deps.projects = async () => ["bound", "a", "b", "c"].map((id, i) => ({ id, name: id, lastActivityAt: 10 - i }));
+  w.deps.bindings = () => [{ centerId: "other", teamId: "other", projectId: "other", localProjectId: "bound" }];
+  expect((await post(w, "in-peer", offerBody(markedCode()))).status).toBe(202);
+  expect((w.asks[0]!.options[0] as { buttons: { label: string }[] }).buttons.map(b => b.label))
+    .toEqual(["加入并绑到 a", "加入并绑到 b", "加入并绑到 c", "不加入"]);
+  w.deps.bindings = () => { throw new Error(MARK); };
+  const response = await post(w, "in-peer", offerBody(markedCode()));
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: "local_project_state_unavailable" });
+  expect(logs.join("\n")).not.toContain(MARK);
+});

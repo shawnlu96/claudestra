@@ -5,7 +5,7 @@ import { STATE_DIR } from "../lib/paths.js";
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
 import { rebindSharedLedgerBinding } from "../lib/shared-ledger-gate-bindings-rebind.js";
 import {
-  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, type SharedLedgerLocalProject, type SharedLedgerProjectChoice,
+  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, sharedLedgerEligibleProjects, type SharedLedgerLocalProject, type SharedLedgerProjectChoice,
 } from "../lib/shared-ledger-local-project.js";
 import { askDb, askReadDb, createAsk, type CreateAskInput } from "./asks.js";
 
@@ -30,6 +30,7 @@ const inFlight = new Set<string>();
 
 /** Pending and answered cards survive bridge restarts in the ask ledger. Only an expired unanswered card is offered again. */
 export async function sweepSharedLedgerRebinds(d: SharedLedgerRebindDeps): Promise<void> {
+  if (!d.bindings().length) return;
   const projects = await d.projects(), asks = d.asks();
   for (const a of asks.filter(a => a.createdBy === CREATOR && a.state === "answered" && !a.extra.rebindSettled)) {
     await onSharedLedgerRebindAnswered(a, d);
@@ -38,8 +39,9 @@ export async function sweepSharedLedgerRebinds(d: SharedLedgerRebindDeps): Promi
     if (projects.some(p => p.id === (binding.localProjectId ?? binding.projectId))) continue;
     const key = createHash("sha256").update(canonicalJson(binding)).digest("hex");
     if (d.asks().some(a => a.createdBy === CREATOR && (a.extra.sharedLedgerRebind as RebindSnapshot | undefined)?.key === key
-      && (a.state === "answered" || (a.state === "open" && a.expiresAt > d.now())))) continue;
-    const choices = sharedLedgerProjectChoices(projects, binding.projectId, "sl_rebind");
+      && (a.state !== "expired" && (a.state !== "open" || a.expiresAt > d.now())))) continue;
+    const eligible = sharedLedgerEligibleProjects(projects, d.bindings(), binding);
+    const choices = sharedLedgerProjectChoices(eligible, binding.projectId, "sl_rebind");
     if (!choices.length) continue;
     const snapshot = { binding, choices, key }, bind = bindOf(snapshot), expiresAt = d.now() + TTL;
     d.openAsk({

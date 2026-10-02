@@ -14,9 +14,9 @@ import { STATE_DIR } from "../lib/paths.js";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import {
-  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, sharedLedgerOfferProjectId, type SharedLedgerLocalProject,
+  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, sharedLedgerOfferProjectId, sharedLedgerEligibleProjects, type SharedLedgerLocalProject,
 } from "../lib/shared-ledger-local-project.js";
-import { readSharedLedgerBindings } from "../lib/shared-ledger-gate-bindings.js";
+import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
 import { sweepSharedLedgerRebinds, onSharedLedgerRebindAnswered, liveRebindDeps } from "./shared-ledger-rebind.js";
 import { joinSharedLedger, type SharedLedgerJoinResult } from "../lib/shared-ledger-join.js";
 import {
@@ -43,6 +43,7 @@ export interface JoinOfferDeps {
   closeAsk: (id: string) => void;
   projects: () => Promise<SharedLedgerLocalProject[]>;
   sharedProject?: (centerId: string) => string | undefined;
+  bindings?: () => SharedLedgerBinding[];
   join: (url: string, code: string, localProjectId: string) => Promise<SharedLedgerJoinResult>;
   /** The inform card: a notification to the owner (no buttons). */
   inform: (text: string) => Promise<void>;
@@ -75,8 +76,17 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
   if (!limiter.tryAcquire(peer.name, now)) return refuse(429, "rate_limited");
   const parsed = parseJoinOffer(body, now);
   if (!parsed.ok) return refuse(400, parsed.error);
-  const sharedProjectId = d.sharedProject?.(parsed.offer.centerId);
-  const projectChoices = sharedLedgerProjectChoices(await d.projects(), sharedProjectId, JOIN_BUTTON, JOIN_BUTTON);
+  let projects: SharedLedgerLocalProject[], bindings: SharedLedgerBinding[], sharedProjectId: string | undefined;
+  try {
+    bindings = d.bindings?.() ?? [];
+    sharedProjectId = d.sharedProject?.(parsed.offer.centerId);
+    projects = await d.projects();
+  } catch (e) {
+    console.error(`⚠️ [join-offer] 本机项目状态不可用: ${(e as Error).name}`);
+    return refuse(503, "local_project_state_unavailable");
+  }
+  const target = sharedProjectId ? { centerId: parsed.offer.centerId, projectId: sharedProjectId } : undefined;
+  const projectChoices = sharedLedgerProjectChoices(sharedLedgerEligibleProjects(projects, bindings, target), sharedProjectId, JOIN_BUTTON, JOIN_BUTTON);
   if (!projectChoices.length) return refuse(409, "no_local_projects");
   const pending: PendingJoinOffer = { ...parsed.offer, peer: peer.name, receivedAt: now, projectChoices, sharedProjectId };
   const saved = await savePendingOffer(d.stateDir(), pending);
@@ -134,7 +144,11 @@ export async function onJoinOfferAnswered(a: Ask, d: JoinOfferDeps = liveDeps): 
   if (a.state !== "answered" || !isOfferId(offerId)) return;
   const p = claimPendingOffer(d.stateDir(), offerId);
   if (!p) return;
-  const choice = p.projectChoices?.filter(c => (a.answer?.choices ?? []).includes(`[button:${c.button}]`));
+  if (!p.projectChoices) {
+    const declined = (a.answer?.choices ?? []).includes(`[button:${DECLINE_BUTTON}]`);
+    return settle(p, declined ? "declined" : "failed", d);
+  }
+  const choice = p.projectChoices.filter(c => (a.answer?.choices ?? []).includes(`[button:${c.button}]`));
   if (!choice?.length) return settle(p, "declined", d);
   if (p.expiresAt <= d.now()) return settle(p, "expired", d);
   if (choice.length !== 1 || !approved(a, p) || !(await d.projects()).some(c => c.id === choice[0]!.localProjectId)) {
@@ -197,6 +211,7 @@ const liveDeps: JoinOfferDeps = {
     if (a) publishAsk(a);
   },
   projects: () => readSharedLedgerLocalProjects(),
+  bindings: () => readSharedLedgerBindings(),
   sharedProject: centerId => sharedLedgerOfferProjectId(centerId, readSharedLedgerBindings()),
   join: (url, code, localProjectId) => {
     const key = instanceKeySync();
@@ -229,8 +244,16 @@ export const joinOfferLiveDeps = liveDeps;
 
 /** ask-entry.ts initAskWiring: sweep once now, then every minute. */
 export function initJoinOffers(): void {
-  const sweep = () => void sweepJoinOffers().then(() => sweepSharedLedgerRebinds(liveRebindDeps(liveDeps.inform)))
-    .catch((e: Error) => console.error(`⚠️ [join-offer] 扫描失败: ${e.message.slice(0, 200)}`));
+  const sweep = () => void sweepJoinOfferMaintenance();
   sweep();
   setInterval(sweep, 60_000).unref?.();
+}
+
+
+/** Each sweep must still run if the other store is unreadable; errors never include pending offer contents. */
+export async function sweepJoinOfferMaintenance(d: JoinOfferDeps = liveDeps, rebind = liveRebindDeps(d.inform)): Promise<void> {
+  const results = await Promise.allSettled([sweepJoinOffers(d), sweepSharedLedgerRebinds(rebind)]);
+  for (const r of results) if (r.status === "rejected") {
+    console.error(`⚠️ [join-offer] 扫描失败: ${(r.reason as Error).name}`);
+  }
 }
