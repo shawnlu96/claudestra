@@ -95,6 +95,11 @@ export const V2_DTO_FIXTURES = Object.fromEntries(Object.entries(legal).map(([ki
   [kind, { valid, invalid: { ...valid, unrecognized: true } }])) as {
     [K in keyof typeof V2_DTO_SCHEMAS]: { valid: unknown; invalid: unknown };
   };
+/** Ordinary business context is feature/task/expiry; only authorize may carry the sensitive content/action bind. */
+export const V2_ASK_KIND_FIXTURES = ["decide", "authorize", "owner_action", "accept"].map(kind => {
+  const valid = { ...ask, kind, bind: kind === "authorize" ? bind : null };
+  return { kind, valid, invalid: { ...valid, bind: kind === "authorize" ? null : bind } };
+});
 const taskVersion = { taskId: "task", expectedRev: 1, expectedSpecRev: 1 };
 const execution = { ...taskVersion, expectedWorkflowRev: 1 };
 const featureVersion = { featureId: "feature", expectedRev: 1 };
@@ -116,7 +121,8 @@ const payloads = {
   "dep.remove": { fromTask: "task", toTask: "task-two", expectedRev: 1 },
   "step.assign": { ...execution, step: "write", round: 0, executor },
   "workflow.set": { ...execution, template: "code", templateVersion: 1, mode: "manual", authorFamily: "codex", fallback: [], authorizationAskId: null },
-  "ask.create": { featureId: "feature", taskId: "task", kind: "authorize", blocking: true, title: "批准", context: "", options: [], allowText: true, bind },
+  "ask.create": { featureId: "feature", taskId: "task", expiresAt: bind.expiresAt,
+    kind: "authorize", blocking: true, title: "批准", context: "", options: [], allowText: true, bind },
   "ask.answer": { ...askVersion, answer: { kind: "option", optionId: "approve" }, decision: "approved" },
   "ask.cancel": { ...askVersion, reason: "撤销" }, "ask.expire": askVersion,
   "authorization.check": { ...execution, askId: "ask", bind, action: "merge" }, "artifact.put": { artifact },
@@ -135,7 +141,7 @@ const payloads = {
   "dag.propose": { ...featureVersion, baseVersion: 1, version: 2, reasonKind: "new_issue", reasonText: "原因",
     nodes: dag.nodes, cancels: [], scopeChange: true, proposalDigest: d, baseDigest: d, expiresAt: 100000 },
   "dag.decide": { ...featureVersion, proposalId: "proposal", proposalDigest: d, baseVersion: 1, askId: "ask", decision: "approved" },
-  "dag.bind": { ...featureVersion, baseVersion: 1, nodeKey: "write", taskId: "task" },
+  "dag.bind": { ...featureVersion, baseVersion: 1, nodeKey: "write", taskId: "task", expectedTaskRev: 1 },
   "dag.rewrite": { ...featureVersion, baseVersion: 0, dag, reason: "原因" },
   "home.change": { ...featureVersion, nextHomeInstanceId: "peer-b", nextEpoch: 2, authorizationAskId: "ask",
     oldHomeStopped: true, workersSettled: true, lendSettled: true, unknownReconciled: true },

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./ask-bind.js";
-import { fail, type V2Fence } from "./shared-ledger-contract-v2-validation.js";
+import { fail, parseFence, type V2Fence } from "./shared-ledger-contract-v2-validation.js";
 
 export const v2ContentDigest = (content: string): string => createHash("sha256").update(content, "utf8").digest("hex");
 export const v2ObjectDigest = (value: unknown): string => v2ContentDigest(canonicalJson(value));
@@ -11,6 +11,7 @@ export function v2ManifestDigest(manifest: { manifestDigest: string }): string {
 }
 /** Storage calls before every execution write; clients must carry the exact generation and holder incarnation. */
 export function assertFence(expected: V2Fence, supplied: V2Fence): void {
+  parseFence(expected); parseFence(supplied);
   if (supplied.serviceGeneration !== expected.serviceGeneration) fail("stale_generation");
   if (supplied.epoch !== expected.epoch || supplied.bootId !== expected.bootId) fail("stale_epoch");
 }

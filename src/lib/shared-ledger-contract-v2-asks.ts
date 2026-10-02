@@ -18,7 +18,7 @@ const askOption = object({ id, label: text(200, 1) });
 export const askContentFields = {
   kind: choice(["decide", "authorize", "owner_action", "accept"]), blocking: boolean,
   title: text(300, 1), context: text(16000), options: array(askOption, 25), allowText: boolean,
-  bind: parseAuthorizationBind,
+  bind: nullable(parseAuthorizationBind),
 };
 export const parseAskAnswer = union(
   object({ kind: literal("option"), optionId: id }), object({ kind: literal("text"), text: text(4000, 1) }),
@@ -29,8 +29,10 @@ export const parseAsk = refine(object({
   createdAt: timestamp, expiresAt: timestamp, answeredBy: nullable(id), answeredAt: nullable(timestamp),
   answer: nullable(parseAskAnswer), decision: nullable(choice(["approved", "rejected", "acknowledged"])),
   auditEventSeq: positive,
-}), a => a.expiresAt > a.createdAt && a.expiresAt === a.bind.expiresAt && a.featureId === a.bind.featureId
-  && a.taskId === a.bind.taskId && distinct(a.options, o => o.id)
+}), a => a.expiresAt > a.createdAt
+  && (a.kind === "authorize" ? a.bind !== null && a.expiresAt === a.bind.expiresAt
+    && a.featureId === a.bind.featureId && a.taskId === a.bind.taskId : a.bind === null)
+  && distinct(a.options, o => o.id)
   && (a.state === "answered" ? a.answer !== null && a.answeredBy !== null && a.answeredAt !== null
     && a.answeredAt >= a.createdAt && a.answeredAt < a.expiresAt && a.decision !== null
     : a.answer === null && a.answeredBy === null && a.answeredAt === null && a.decision === null)

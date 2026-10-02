@@ -46,6 +46,8 @@ export function optional<T>(schema: Schema<T>): Schema<T | undefined> { return v
 export function array<T>(schema: Schema<T>, max = 1000): Schema<T[]> {
   return v => {
     if (!Array.isArray(v) || v.length > max || Object.keys(v).length !== v.length) return fail();
+    if (Reflect.ownKeys(v).length !== v.length + 1 || Object.keys(v).some(k =>
+      !Object.hasOwn(Object.getOwnPropertyDescriptor(v, k)!, "value"))) return fail();
     return Array.from(v, schema);
   };
 }

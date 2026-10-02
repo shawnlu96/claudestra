@@ -33,7 +33,7 @@ const payloads = {
   "dep.remove": object({ fromTask: id, toTask: id, expectedRev: positive }),
   "step.assign": object({ ...execution, step: choice(STEPS), round: integer, executor: parseExecutor }),
   "workflow.set": object({ ...execution, ...workflowSettings, authorizationAskId: nullable(id) }),
-  "ask.create": object({ featureId: id, taskId: nullable(id), ...askContentFields }),
+  "ask.create": object({ featureId: id, taskId: nullable(id), expiresAt: timestamp, ...askContentFields }),
   "ask.answer": object({ ...askVersion, answer: parseAskAnswer, decision: choice(["approved", "rejected", "acknowledged"]) }),
   "ask.cancel": object({ ...askVersion, reason: text(2000, 1) }),
   "ask.expire": object({ ...askVersion }),
@@ -56,7 +56,7 @@ const payloads = {
   "lend.cancel": object({ ...execution, orderId: id, leaseGen: integer, reason: text(2000, 1) }),
   "dag.propose": object({ ...feature, ...proposalContentFields }),
   "dag.decide": object({ ...feature, proposalId: id, proposalDigest: digest, baseVersion: positive, askId: id, decision: choice(["approved", "rejected"]) }),
-  "dag.bind": object({ ...feature, baseVersion: positive, nodeKey: id, taskId: id }),
+  "dag.bind": object({ ...feature, baseVersion: positive, nodeKey: id, taskId: id, expectedTaskRev: positive }),
   "dag.rewrite": object({ ...feature, baseVersion: integer, dag: parseDag, reason: text(2000, 1) }),
   "home.change": object({ ...feature, nextHomeInstanceId: id, nextEpoch: positive, authorizationAskId: id,
     oldHomeStopped: literal(true), workersSettled: literal(true), lendSettled: literal(true), unknownReconciled: literal(true) }),
@@ -113,7 +113,11 @@ function assertCommandShape(c: V2Command): void {
   if ((c.type === "task.deliver" || c.type === "task.review") && (c.payload.orderId === null) !== (c.payload.leaseGen === null)) fail();
   if (c.type === "workflow.set" && c.payload.mode === "auto" && c.payload.authorizationAskId === null) fail();
   if (c.type === "lend.create" && c.payload.step !== "review" && (c.payload.branch === null || c.payload.base === null)) fail();
-  if (c.type === "ask.create" && (c.payload.featureId !== c.payload.bind.featureId || c.payload.taskId !== c.payload.bind.taskId)) fail();
+  if (c.type === "ask.create") {
+    const p = c.payload;
+    if (p.kind === "authorize" ? p.bind === null || p.featureId !== p.bind.featureId
+      || p.taskId !== p.bind.taskId || p.expiresAt !== p.bind.expiresAt : p.bind !== null) fail();
+  }
   if (c.type === "artifact.put") assertNestedScope(c, c.payload.artifact);
   if (c.type === "lend.claim") assertNestedScope(c, c.payload.claim);
   if (c.type === "lend.result" || c.type === "operation.result" || c.type === "operation.reconcile") assertNestedScope(c, c.payload.result);
