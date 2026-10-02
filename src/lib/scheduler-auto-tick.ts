@@ -4,6 +4,7 @@
  * one step: drive the card's open intent, else plan the next one and drive it. An unknown result, a lost race or a
  * stale plan ends the card's pass; nothing is resent under a new key unless the ledger itself says the old one is void.
  */
+import { poolReader } from "./scheduler-auto-tick-helpers.js";
 import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type AuthorFamily, type IntentStatus, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -154,7 +155,11 @@ class Card {
     const family = plan?.sessionFamily;
     if (!family) return this.cancelStale(intent, "计划里没有 session 家族");
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure ${role} ${family}`))) return this.out("lost_race", "认领失败");
-    const got = await this.deps.ensure(this.task,role,family); if(got.kind === "wait"){await this.settle(intent.id,"submitted","cancelled",`未建：${got.reason}`); return this.out("waiting",got.reason);}
+    const got = await this.deps.ensure(this.task, role, family);
+    if (got.kind === "wait") {
+      await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
+      return this.out("waiting", got.reason);
+    }
     if (got.kind === "unknown") {
       await this.settle(intent.id, "submitted", "unknown", `建 session 结果不明：${got.reason}`);
       return this.out("held", got.reason);
@@ -364,17 +369,6 @@ class Card {
     refusals.get(this.db)?.delete(this.task.id);
     return this.drive(intent, plan);
   }
-}
-
-/** One borrow read per pass, and only when some project may pool; an unreadable lend.json pools nothing (fail-closed). */
-function poolReader(deps: AutoTickDeps) {
-  let borrow: Promise<BorrowEntry[]> | null = null;
-  return async (remote: RemotePolicy | undefined): Promise<SnapshotOpts["pool"]> => {
-    if (!remote || !deps.borrow) return undefined;
-    if (remote.mode === "off") return { remote, borrow: [] };
-    borrow ??= deps.borrow().catch((e: unknown) => { console.error(`⚠️ [scheduler] 读 lend.json 借入名单失败，本轮不挂池：${(e as Error).message}`); return []; });
-    return { remote, borrow: await borrow };
-  };
 }
 
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
