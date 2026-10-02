@@ -46,7 +46,7 @@ test("real CLI retains Codex/roles/model/effort while changing Claude; legacy CL
   expect(entry().families.claude ?? 0).toBe(0);
   expect(run(args).ok).toBe(true);
   expect(entry().families).toEqual({ codex: 5 });
-  expect(entry().roles).toEqual(["review"]);
+  expect(entry().roles).toEqual(["review", "write"]);
   expect(entry()).not.toHaveProperty("codexModel");
   expect(entry()).not.toHaveProperty("codexEffort");
 }, 60_000);

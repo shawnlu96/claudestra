@@ -1,45 +1,26 @@
-/** Owner/full-device gate precedes body reads and credential IO. Errors never include request or filesystem contents. */
+/**
+ * 出借面板的「Claude 登录」状态：本机 Claude Code 登录能否接单 + 旧 setup-token 的残留位置。只读；setup-token 已下线，写入一律 405。
+ * owner / 全权设备闸在任何 IO 之前。`configured` 留给还没刷新的旧网页包（它按这个字段显示）。
+ */
 import { canReadLedger } from "../../lib/devices.js";
 import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
-import { claudeTokenStatus, saveClaudeToken } from "../../lib/lend-claude-token.js";
+import { legacyClaudeToken } from "../../lib/lend-claude-token.js";
+import { freshClaudeReadiness } from "../../lib/lend-claude-worker-capacity.js";
 import { apiJson, forbidden } from "../api-respond.js";
-const MAX = 16_384;
 
-async function tokenBody(req: Request): Promise<string | Response> {
-  if (Number(req.headers.get("content-length")) > MAX) return apiJson(413, { ok: false });
-  const reader = req.body?.getReader();
-  if (!reader) return apiJson(400, { ok: false });
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX) { await reader.cancel(); return apiJson(413, { ok: false }); }
-      chunks.push(value);
-    }
-    const b = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (typeof b.token === "string" && b.token.trim() && b.token.trim().length <= 8192 && !/[\s\x00-\x1f\x7f]/.test(b.token.trim())) return b.token.trim();
-  } catch {
-    // Invalid JSON or an interrupted stream is rejected without echoing sensitive input.
-  } finally { reader.releaseLock(); }
-  return apiJson(400, { ok: false, error: "invalid setup-token" });
-}
-
-export function makeLendClaudeTokenApi(deps = { status: claudeTokenStatus, save: saveClaudeToken }) {
+export function makeLendClaudeTokenApi(deps = { readiness: () => freshClaudeReadiness(), legacy: () => legacyClaudeToken() }) {
   return async (req: Request, path: string, principal: Principal): Promise<Response | null> => {
     if (path !== "/lend/claude-token") return null;
     if (!isOwnerPrincipal(principal) || !canReadLedger(principal)) return forbidden("only the owner (full-access device) can manage lending");
+    if (req.method !== "GET") return apiJson(405, { ok: false, error: "setup-token 已下线：出借 Claude 直接用本机 Claude Code 登录" });
     try {
-      if (req.method === "GET") return apiJson(200, deps.status());
-      if (req.method === "DELETE") return apiJson(200, await deps.save(null));
-      if (req.method !== "POST") return apiJson(405, { ok: false });
-      const token = await tokenBody(req);
-      return token instanceof Response ? token : apiJson(200, await deps.save(token));
-    } catch {
-      // Credential IO failures are actionable through status only; filesystem errors may expose secrets.
-      return apiJson(503, { ok: false, error: "credential storage unavailable" });
+      const r = await deps.readiness();
+      const legacy = deps.legacy();
+      return apiJson(200, { loggedIn: r.ready, reason: r.reason, legacyTokenFile: legacy.file, legacyTokenEnv: legacy.envVar,
+        configured: r.ready, savedAt: null });
+    } catch (e) {
+      console.error(`[lend] Claude 登录状态读取失败：${(e as Error).message}`);
+      return apiJson(503, { ok: false, error: "claude login status unavailable" });
     }
   };
 }

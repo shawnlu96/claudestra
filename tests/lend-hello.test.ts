@@ -1,5 +1,5 @@
 /**
- * i28-W3 出借方 hello（src/lib/lend-hello.ts，经 lend-loop.ts 每轮调）：正文构造与自检（没授权 write 或写单开关关着就没有 write、claude 0 槽、busy 含没领的单）、
+ * i28-W3 出借方 hello（src/lib/lend-hello.ts，经 lend-loop.ts 每轮调）：正文构造与自检（roles 始终报 review/write、claude 0 槽、busy 含没领的单）、
  * 触发（启动第一轮、正文变了当轮发、保活、失败退避、收回立刻发 grant:null）、404 / 403 / 超时的回退与恢复、seq 跨重启只增、全部收回时 lendWanted。
  * A 是假的（hello / beat 按表回），时钟手拨（tests/lend-harness.ts）。
  */
@@ -38,16 +38,16 @@ describe("正文", () => {
     setMeta(h.db, TICK_KEY, String(h.d.now()));
     await admitOrders(h.d, { peer: "team-a", fp: FP }, [polled("o1")], "push");
     const b = helloBody(h.db, h.lend.lend[0], h.d.now());
-    expect(b).toEqual({ proto: 2, paused: null, slots: { codex: { total: 2, busy: 1 }, claude: { total: 0, busy: 0 } },
-      grant: { until: Date.parse(h.lend.lend[0].until!), roles: ["review"], repos: ["shawnlu96/claudestra"], ordersPerDay: 5, ordersLeftToday: 4 } });
+    expect(b).toEqual({ proto: 3, paused: null, slots: { codex: { total: 2, busy: 1 }, claude: { total: 0, busy: 0 } },
+      grant: { until: Date.parse(h.lend.lend[0].until!), roles: ["review", "write"], repos: ["shawnlu96/claudestra"], ordersPerDay: 5, ordersLeftToday: 4 } });
     expect(parseV2Request("hello", { v: 1, ...b, boot: "boot-aaaa-0001", seq: 1 }).ok).toBe(true);
   });
 
-  test("条目里写了 write 正文 roles 才有 write；写单开关关着就算写了也不带；没有授权 = grant:null、0 槽", () => {
+  test("任意旧角色都报完整能力；没有授权 = grant:null、0 槽", () => {
     const h = harness();
-    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).grant!.roles).toEqual(["review"]);
+    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).grant!.roles).toEqual(["review", "write"]);
     expect(helloBody(h.db, { ...h.lend.lend[0], roles: ["review", "write"] }, h.d.now()).grant!.roles).toEqual(["review", "write"]);
-    expect(helloBody(h.db, { ...h.lend.lend[0], roles: ["review", "write"] }, h.d.now(), false).grant!.roles).toEqual(["review"]);
+    expect(helloBody(h.db, { ...h.lend.lend[0], roles: ["write"] }, h.d.now()).grant!.roles).toEqual(["review", "write"]);
     expect(helloBody(h.db, undefined, h.d.now())).toMatchObject({ grant: null, slots: { codex: { total: 0, busy: 0 }, claude: { total: 0, busy: 0 } } });
   });
 
@@ -81,7 +81,7 @@ describe("什么时候发", () => {
     expect((v.hellos()[2].slots as { codex: { busy: number } }).codex.busy).toBe(1);
   });
 
-  test("收回：当轮（不等保活）发 grant:null；A 收到之后不再给它发；正文从不带 write", async () => {
+  test("收回：当轮（不等保活）发 grant:null；A 收到之后不再给它发", async () => {
     const h = harness();
     const v = withV2(h);
     await h.tick();

@@ -22,7 +22,7 @@ const OFF: RemotePolicy = { mode: "off", roles: [], poolTimeoutMin: DEFAULT_REMO
 export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: SchedulerIntent, maxWorkers: number,
   remote: RemotePolicy | undefined): Promise<{ step: string; detail: string }> {
   const r = remote ?? OFF;
-  const res = await deps.manager("ledger", "scheduler-pool", intent.id, "--max-workers", String(maxWorkers), "--mode", r.mode,
+  const res = await deps.manager("ledger", "scheduler-pool", intent.id, "--max-workers", String(r.agents ? Math.min(32, maxWorkers) : maxWorkers), "--mode", r.mode,
     "--roles", r.roles.length ? r.roles.join(",") : "none", "--timeout-min", String(r.poolTimeoutMin),
     // The offer re-plans from these flags: a dropped reviewFirst / localPriority would pick another machine and cancel the intent.
     ...(r.reviewFirst?.length ? ["--review-first", r.reviewFirst.join(",")] : []),

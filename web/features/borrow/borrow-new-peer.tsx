@@ -1,30 +1,29 @@
 "use client";
-/** 新加一条借入 / 给失效的借入重选项目：选项目 + 上限，勾一下 PUT；失败抖提交按钮、留在表单里。 */
+/** 新加一条借入 / 给失效的借入重选项目：选项目，勾一下 PUT；失败抖提交按钮、留在表单里。 */
 import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { machineNow, saveBorrowPeer, type BorrowView } from "./borrow-api";
-import { canSubmitNew, toggleProject } from "./borrow-model";
-import { LimitLine, ProjectChips, Stepper } from "./borrow-bits";
+import { toggleProject } from "./borrow-model";
+import { ProjectChips } from "./borrow-bits";
 import { CheckIcon, ServerIcon, XIcon } from "./icons";
 import { fadeIn, shake } from "./motion";
 
-export function NewPeer(props: { peer: string; view: BorrowView; initMaxOpen?: number; onCancel: () => void; onChanged: () => Promise<void> }) {
+export function NewPeer(props: { peer: string; view: BorrowView; onCancel: () => void; onChanged: () => Promise<void> }) {
   const { peer, view, onCancel, onChanged } = props;
   const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const [projects, setProjects] = useState<string[]>([]);
-  const limit = view.borrow.maxOpenLimit;
-  const [maxOpen, setMaxOpen] = useState(() => Math.min(limit, props.initMaxOpen ?? 3));
   const [busy, setBusy] = useState(false);
   const order = view.borrow.projects.map((p) => p.id);
   useEffect(() => fadeIn(box.current), []);
   const submit = async (el: HTMLElement) => {
     setBusy(true);
     try {
-      await saveBorrowPeer(peer, { projects, maxOpen }, machineNow());
+      await saveBorrowPeer(peer, { projects }, machineNow());
       await onChanged();
       onCancel();
     } catch {
+      // The form stays open; motion reports failure without exposing CLI text.
       shake(el);
       setBusy(false);
     }
@@ -39,7 +38,7 @@ export function NewPeer(props: { peer: string; view: BorrowView; initMaxOpen?: n
         </button>
         <button
           className="btn btn-primary btn-xs btn-square"
-          disabled={busy || !canSubmitNew(projects, maxOpen, limit)}
+          disabled={busy || !projects.length}
           aria-label={t("借用这台电脑")}
           onClick={(e) => void submit(e.currentTarget)}
         >
@@ -47,9 +46,6 @@ export function NewPeer(props: { peer: string; view: BorrowView; initMaxOpen?: n
         </button>
       </div>
       <ProjectChips options={view.borrow.projects} picked={projects} disabled={busy} onToggle={(id) => setProjects((cur) => toggleProject(cur, id, order))} />
-      <LimitLine name={peer} n={maxOpen}>
-        <Stepper value={maxOpen} limit={limit} disabled={busy} onCommit={setMaxOpen} />
-      </LimitLine>
     </div>
   );
 }
