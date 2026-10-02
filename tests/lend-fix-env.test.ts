@@ -12,7 +12,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { writeMaterials } from "../src/lib/lend-write-materials.js";
 
-const H = "a".repeat(40), BASE = "b".repeat(40), ERROR_SHA = "c".repeat(40);
+const H = "a".repeat(40), BASE = "b".repeat(40), ERROR_SHA = H;
 const task = { id: "T1", specRev: 1, round: 1 } as LedgerTask;
 for (const cause of ["conflict", "update_fail"] as const) {
   test(`${cause}: verified baseline instructions replace fetch and worker push`, async () => {
@@ -36,7 +36,7 @@ for (const cause of ["conflict", "update_fail"] as const) {
       expect(text).toContain("更新分支失败");
       expect(text).toContain(`GitHub rejected commit ${ERROR_SHA.slice(0, 12)}`);
       expect(text).toContain("SHA 已缩为 12 位");
-      expect(text).not.toContain(ERROR_SHA);
+      expect(wire.inputs.join("\n")).not.toContain(ERROR_SHA);
     }
   });
 }
@@ -53,7 +53,7 @@ test("ordinary fix is unchanged; embedded secret-like tokens are still refused",
   const wire = writeOrderWire(task, { orderId: "fix:T1", step: "fix", head: H, branch: "lend/T1-abcd", base: "main", spec: "规格",
     report: "P1 原文", findings: [], repo: "o/r", pr: 7 });
   expect(lendFixEnv(wire, null, null)).toBe(wire);
-  const bounce = bounceWork({ cause: "update_fail", prHead: H.slice(0, 12), mainHead: null, checks: [], error: `token_${ERROR_SHA}_suffix` });
+  const bounce = bounceWork({ cause: "update_fail", prHead: H.slice(0, 12), mainHead: null, checks: [], error: `token_${"c".repeat(40)}_suffix` });
   const unsafe = lendFixEnv({ ...wire, inputs: bounce.inputs }, bounce, null);
   expect(() => renderOrderWire(unsafe, { audience: "peer", ledgerHead: H })).toThrow(/疑似含密钥/);
 });

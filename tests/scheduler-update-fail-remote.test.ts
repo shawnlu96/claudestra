@@ -4,16 +4,18 @@ import { join } from "node:path";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { bounceReceipt, parseBounceReceipt, updateOrBounce } from "../src/lib/scheduler-merge-conflict.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import { autoFixture, H2 } from "./scheduler-auto-helpers.js";
 
-test("GitHub update refusal with a foreign SHA reaches the lease holder and claim unchanged", async () => {
+for (const refused of [false, true]) {
+test(`GitHub update refusal: ${refused ? "unknown hex refuses, records reason and notifies once" : "known head reaches lease holder"}`, async () => {
   const f = autoFixture();
   try {
-    const base = "b".repeat(40), foreign = "c".repeat(40), branch = "lend/T1-abcd";
+    const base = "b".repeat(40), foreign = refused ? "c".repeat(40) : H2, branch = "lend/T1-abcd";
     const error = `GitHub update refused: expected commit ${foreign}, please retry`;
     const run = { taskId: "T1", reviewedHead: H2, prRef: "https://github.com/o/r/pull/7", phase: "updating" } as MergeRun;
     let receipt = "";
@@ -43,18 +45,37 @@ test("GitHub update refusal with a foreign SHA reaches the lease holder and clai
         sign: () => { throw new Error("claim does not sign verdicts"); },
         peerFp: async () => "abcd-ef01-2345-6789", remoteHead: async () => ({ ok: true as const, head: base }) } };
     const cli = (...args: string[]) => f.cliWith({ lend }, "scheduler", ...args);
-    const tick = await schedulerAutoTick(f.db, { p: policy }, { ...f.tickDeps, borrow: async () => borrow,
+    const doTick = () => schedulerAutoTick(f.db, { p: policy }, { ...f.tickDeps, borrow: async () => borrow,
       manager: (...args) => cli(...args.slice(1)) as Promise<Record<string, any>> });
+    const tick = await doTick();
     expect(tick.failed).toEqual([]);
+    if (refused) {
+      expect(tick.cards[0]).toMatchObject({ step: "pool_refused" });
+      expect(tick.cards[0].detail).toContain("疑似含密钥");
+      expect(tick.cards[0].detail).not.toContain(foreign);
+      const settled = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "settle");
+      expect(settled.at(-1)?.data.receipt).toContain("疑似含密钥");
+      expect(settled.at(-1)?.data.receipt).not.toContain(error);
+      expect((await doTick()).cards[0]).toMatchObject({ step: "manual" });
+      expect(f.notices).toHaveLength(1);
+      expect(f.notices[0]).toContain("T1");
+      expect(f.notices[0]).not.toContain(error);
+      await doTick();
+      await doTick();
+      expect(f.notices).toHaveLength(1);
+      expect(listLendOrders(f.db, "T1")).toEqual([]);
+      return;
+    }
     expect(tick.cards[0]).toMatchObject({ step: "pool_pooled" });
     const [order] = listLendOrders(f.db, "T1");
     expect(order).toMatchObject({ step: "fix", peer: "mate", head: H2, branch });
     expect(order.text).toContain("更新分支失败");
     expect(order.text).toContain(error.replace(foreign, `${foreign.slice(0, 12)}(SHA 已缩为 12 位)`));
-    expect(order.text).not.toContain(foreign);
+    expect(order.wire.inputs.join("\n")).not.toContain(foreign);
     expect(order.text).not.toContain("git fetch");
     expect(order.text).toContain("refs/remotes/origin/HEAD");
     const claim = await f.cliWith({ lend }, "owner", "lend-claim", "--", "mate", JSON.stringify({ v: 1, orderId: order.orderId, worker: "fixer" }));
     expect(claim).toMatchObject({ ok: true, order: order.wire, text: order.text });
   } finally { f.close(); }
 });
+}
