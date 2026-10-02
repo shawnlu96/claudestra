@@ -13,9 +13,9 @@ import { createHash } from "node:crypto";
 import type { WriteCtx } from "./ledger-checks.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
+import { insertEvent, tx } from "./ledger-tx.js";
 import type { OrderWire } from "./order-wire.js";
-import { sanitizeForeign } from "./order-wire-render.js";
+import { OrderRenderError, sanitizeForeign } from "./order-wire-render.js";
 import { peerSecretHit } from "./peer-secret-gate.js";
 
 const FULL = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -87,6 +87,16 @@ export function withOriginalIds<R extends { orderId: string; verdict: { findings
 
 /** Only the peer gate's refusals raise this alarm; other refused offers keep their existing paths. */
 export const isGateRefusal = (message: string): boolean => message.includes("外发闸");
+
+/** Catch outside the offer transaction so refused orders roll back before their alarm is persisted. */
+export function gateOfferTransaction<T>(db: Database, ctx: WriteCtx, task: Pick<LedgerTask, "project" | "id" | "stage">,
+  offer: () => T): T {
+  try { return tx(db, offer); }
+  catch (e) {
+    if (e instanceof OrderRenderError) tx(db, () => recordGateRefused(db, ctx, task, e.message));
+    throw e;
+  }
+}
 
 /**
  * One scheduler event per card + reason when the peer gate refused an order: PM's watch sees why the card is not moving and what

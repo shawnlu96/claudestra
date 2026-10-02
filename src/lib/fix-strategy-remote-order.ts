@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { SchedulerIntent, AuthorFamily } from "./ledger-scheduler.js";
-import { insertEvent, tx } from "./ledger-tx.js";
+import { insertEvent } from "./ledger-tx.js";
+import { gateOfferTransaction } from "./order-gate-heads.js";
 import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { getLendOrder, type LendOrder } from "./ledger-lend.js";
 import { forPeer, heldLease, holdWriteLease } from "./ledger-lend-lease.js";
@@ -24,7 +25,7 @@ export const remoteOrder = (db: Database, id: string): LendOrder | null => {
 
 export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerIntent, context: RemoteConvergenceContext,
   peer: string, family: AuthorFamily, build: (task: LedgerTask, orderId: string) => OrderWire): LendOrder {
-  return tx(db, () => {
+  return gateOfferTransaction(db, ctx, mustTask(db, intent.taskId), () => {
     const current = convergenceIntent(db, ctx, intent.id, intent.action);
     const prior = remoteOrder(db, intent.id);
     if (prior) return prior;
