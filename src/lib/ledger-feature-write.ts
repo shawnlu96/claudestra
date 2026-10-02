@@ -7,6 +7,7 @@
 import { checkAcyclic } from "./shared-ledger-gate-acyclic.js";
 import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
+import { cardContext, pinNodes } from "./ledger-card-names.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
@@ -207,6 +208,8 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     }
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     const nodes = buildNodes(db, cur, input.nodes);
+    // 只做兄弟校验，不固化：全版没前缀时推断就是 feature id，之后的 rewrite / split 写入时才会固化
+    pinNodes(cardContext(db, cur), nodes, () => true);
     const reasonText = input.reasonText === undefined ? "" : String(input.reasonText);
     const now = ctx.now ?? Date.now();
     db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes) VALUES (?, 1, ?, ?, ?, NULL, ?, ?)")
