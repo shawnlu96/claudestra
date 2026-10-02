@@ -5,7 +5,7 @@ import { getMeta, LedgerError } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { agentInScope } from "./principals.js";
 import { isPmCandidate, activeProjectPm } from "./pm-role.js";
-import { pmStatus } from "./pm-role-status.js";
+import { pmStatus, projectPeerTokens } from "./pm-role-status.js";
 import { replacePmRefs, replaceCompactPmRefs, type PmState } from "./pm-role-state.js";
 
 export interface PmSwitchDeps {
@@ -29,49 +29,65 @@ function switchPlan(db: Database, project: string, agent: string, state: PmState
     if (!online.has(agent)) errors.push(`${agent} is offline`);
   }
   if (agent === meta.team?.dispatcher) errors.push("dispatcher cannot become active PM");
-  for (const p of state.principals.filter((p) => p.peer && !p.disabled)) {
+  const former = meta.pms.filter((p) => p !== agent && p !== meta.team?.dispatcher);
+  // Tokens of other projects' peers never authorize this project's PM, so they cannot block this switch.
+  for (const p of projectPeerTokens(state, meta.pms.filter((p) => p !== meta.team?.dispatcher))) {
     if (!agentInScope(p, agent)) errors.push(`peer ${p.peer} token ${p.id} lacks ${agent}`);
   }
-  for (const peer of state.peers.filter((p) => !p.disabled)) {
-    const routes = Array.isArray(state.peerPrs?.peers) ? state.peerPrs.peers : [];
-    if (!routes.some((p) => p.peer === peer.name && typeof p.agent === "string" && p.agent)) {
-      errors.push(`peer ${peer.name} lacks a PM agent destination in peer-prs`);
-    }
-  }
-  if (errors.length) throw new LedgerError("invalid", errors.join("; "));
-  const former = meta.pms.filter((p) => p !== agent && p !== meta.team?.dispatcher);
-  const pms = meta.pms.filter((p) => p === meta.team?.dispatcher);
-  pms.push(agent, ...former);
-  const changes: PmChange[] = [{ location: "meta.activePm", before: old, after: agent }, { location: "meta.pms", before: meta.pms, after: pms }];
-  const peerPrs = structuredClone(state.peerPrs), config = structuredClone(state.config);
-  if (peerPrs?.project === project) {
-    const peers = Array.isArray(peerPrs.peers) ? peerPrs.peers : [];
-    for (const r of [peerPrs, ...peers]) {
-      const key = r === peerPrs ? "replyTo" : "agent", before = r[key];
-      const after = replacePmRefs(before, former, agent);
-      if (before !== after) {
-        changes.push({ location: r === peerPrs ? "peer-prs.replyTo" : `peer-prs.peers[${peers.indexOf(r)}].agent`, before, after });
-        r[key] = after;
+  if (state.peerPrs?.project === project) {
+    const routes = Array.isArray(state.peerPrs.peers) ? state.peerPrs.peers : [];
+    for (const peer of state.peers.filter((p) => !p.disabled)) {
+      if (!routes.some((p) => p.peer === peer.name && typeof p.agent === "string" && p.agent)) {
+        errors.push(`peer ${peer.name} lacks a PM agent destination in peer-prs`);
       }
     }
   }
-  if (config?.autoCompact) {
-    const after = replaceCompactPmRefs(config.autoCompact, former, agent);
-    if (JSON.stringify(after) !== JSON.stringify(config.autoCompact)) {
-      // Only return identity diffs: config may also contain credentials and private compact instructions.
-      collectChanges(config.autoCompact, after, "config.autoCompact", changes);
-      config.autoCompact = after;
-    }
-  }
-  return { old, pms, changes, peerPrs, config };
+  if (errors.length) throw new LedgerError("invalid", errors.join("; "));
+  const pms = meta.pms.filter((p) => p === meta.team?.dispatcher);
+  pms.push(agent, ...former);
+  const changes: PmChange[] = [{ location: "meta.activePm", before: old, after: agent }, { location: "meta.pms", before: meta.pms, after: pms }];
+  const files = pmFileEdits(project, former, agent);
+  for (const file of files) for (const d of file.diff(state)) changes.push({ location: d.location, before: d.before, after: d.after });
+  return { old, pms, changes, files };
 }
 
-function collectChanges(before: unknown, after: unknown, location: string, changes: PmChange[]): void {
-  if (JSON.stringify(before) === JSON.stringify(after)) return;
-  if (Array.isArray(before) && Array.isArray(after)) before.forEach((v, i) => collectChanges(v, after[i], `${location}[${i}]`, changes));
-  else if (before && after && typeof before === "object" && typeof after === "object") {
-    for (const k of Object.keys(before)) collectChanges((before as any)[k], (after as any)[k], `${location}.${k}`, changes);
-  } else changes.push({ location, before, after });
+type PmFile = "peerPrs" | "config";
+interface LeafDiff { path: (string | number)[]; location: string; before: unknown; after: unknown }
+interface PmFileEdit { file: PmFile; diff(state: PmState): LeafDiff[] }
+
+/** Only this machine's PM identity fields: peer-prs peers[].agent names the remote machine's agent (peer-pr-push sends there). */
+function pmFileEdits(project: string, former: string[], agent: string): PmFileEdit[] {
+  return [
+    { file: "peerPrs", diff: (s) => s.peerPrs?.project === project
+      ? leafDiffs(s.peerPrs.replyTo, replacePmRefs(s.peerPrs.replyTo, former, agent), ["replyTo"], "peer-prs") : [] },
+    // Only identity diffs are returned: config may also contain credentials and private compact instructions.
+    { file: "config", diff: (s) => s.config?.autoCompact
+      ? leafDiffs(s.config.autoCompact, replaceCompactPmRefs(s.config.autoCompact, former, agent), ["autoCompact"], "config") : [] },
+  ];
+}
+
+function leafDiffs(before: unknown, after: unknown, path: (string | number)[], root: string): LeafDiff[] {
+  if (JSON.stringify(before) === JSON.stringify(after)) return [];
+  if (Array.isArray(before) && Array.isArray(after)) return before.flatMap((v, i) => leafDiffs(v, after[i], [...path, i], root));
+  if (before && after && typeof before === "object" && typeof after === "object") {
+    return Object.keys(before).flatMap((k) => leafDiffs((before as any)[k], (after as any)[k], [...path, k], root));
+  }
+  return [{ path, location: root + path.map((k) => typeof k === "number" ? `[${k}]` : `.${k}`).join(""), before, after }];
+}
+
+const leafAt = (value: any, path: (string | number)[]) => path.reduce((v, k) => v?.[k], value);
+function setLeaf(value: any, path: (string | number)[], leaf: unknown): void {
+  const parent = leafAt(value, path.slice(0, -1));
+  if (parent && typeof parent === "object") parent[path.at(-1)!] = leaf;
+}
+
+/** Re-read under the switch lock and touch only the PM leaves, so another writer's unrelated fields survive. */
+async function patchPmFile(deps: PmSwitchDeps, file: PmFile, diffs: (fresh: PmState) => LeafDiff[], pick: (d: LeafDiff) => unknown) {
+  const fresh = await deps.read(), value = structuredClone(fresh[file]), todo = diffs(fresh);
+  if (!value || !todo.length) return null;
+  for (const d of todo) setLeaf(value, d.path, pick(d));
+  await (file === "peerPrs" ? deps.writePeerPrs(value) : deps.writeConfig(value));
+  return { value, todo };
 }
 
 /** The pointer and PM ordering have one writer and commit with the decision in a single SQLite transaction. */
@@ -96,24 +112,25 @@ export async function switchProjectPm(
     const state = await deps.read(), online = await deps.online();
     const plan = switchPlan(db, project, agent, state, online);
     if (opts.dryRun) return { ok: true, dryRun: true, project, agent, changes: plan.changes };
-    const peerChanged = plan.changes.some((c) => c.location.startsWith("peer-prs."));
-    const configChanged = plan.changes.some((c) => c.location.startsWith("config."));
-    const written: ("peer" | "config")[] = [];
+    const written: { file: PmFile; value: Record<string, unknown>; todo: LeafDiff[] }[] = [];
     let seq: number;
     try {
-      if (peerChanged) { await deps.writePeerPrs(plan.peerPrs!); written.push("peer"); }
-      if (configChanged) { await deps.writeConfig(plan.config!); written.push("config"); }
+      for (const edit of plan.files) {
+        const r = await patchPmFile(deps, edit.file, edit.diff, (d) => d.after);
+        if (r) written.push({ file: edit.file, ...r });
+      }
       seq = commitPointer(db, project, agent, plan.pms, opts.actor, opts.now ?? Date.now());
     } catch (e) {
-      for (const file of written.reverse()) {
-        try { if (file === "peer") await deps.writePeerPrs(state.peerPrs!); else await deps.writeConfig(state.config!); }
+      for (const { file, todo } of written.reverse()) {
+        // Roll back only leaves still holding our value; anything changed since belongs to its writer.
+        try { await patchPmFile(deps, file, (fresh) => todo.filter((d) => JSON.stringify(leafAt(fresh[file], d.path)) === JSON.stringify(d.after)), (d) => d.before); }
         catch (rollback) { console.error(`[pm-switch] rollback ${file} failed`, rollback); }
       }
       throw e;
     }
+    const after = { ...state, ...Object.fromEntries(written.map((w) => [w.file, w.value])) };
     result = { ok: true, dryRun: false, project, agent, changes: plan.changes, seq,
-      status: pmStatus(db, project, { ...state, peerPrs: plan.peerPrs, config: plan.config }),
-      targets: notificationTargets(state, plan.old, agent) };
+      status: pmStatus(db, project, after), targets: notificationTargets(state, project, plan.old, agent) };
   } finally { lock?.release(); }
   const notifications: { target: string; sent: boolean }[] = [];
   for (const target of result.targets) {
@@ -124,9 +141,9 @@ export async function switchProjectPm(
   return { ...out, notifications };
 }
 
-function notificationTargets(state: PmState, old: string | null, agent: string): string[] {
+function notificationTargets(state: PmState, project: string, old: string | null, agent: string): string[] {
   const targets = new Set([agent, ...(old && old !== agent ? [old] : [])]);
-  if (Array.isArray(state.peerPrs?.peers)) {
+  if (state.peerPrs?.project === project && Array.isArray(state.peerPrs.peers)) {
     for (const p of state.peerPrs.peers) if (state.peers.some((peer) => peer.name === p.peer && !peer.disabled)) targets.add(`${p.agent}@${p.peer}`);
   }
   return [...targets];

@@ -475,7 +475,7 @@ async function pushBackToCaller(
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
-  if (live) return (await deliver(env)).outcome;
+  if (live || pmClientFor(pac.callerName, clients, pac.targetName)) return (await deliver(env)).outcome; // 前任 PM 离线：当班 PM 接它的答复
   heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };

@@ -20,7 +20,7 @@ test("dry run lists each change and leaves every state file and ledger event unc
   const f = fixture(), bytes = f.bytes(), events = listEvents(f.db);
   const r = await switchTo(f, B, true);
   expect(r.changes.map((c) => c.location)).toEqual([
-    "meta.activePm", "meta.pms", "peer-prs.replyTo", "peer-prs.peers[0].agent", "config.autoCompact.policies[0].match.names[0]",
+    "meta.activePm", "meta.pms", "peer-prs.replyTo", "config.autoCompact.policies[0].match.names[0]",
   ]);
   expect(f.bytes()).toEqual(bytes);
   expect(listEvents(f.db)).toEqual(events);
@@ -44,7 +44,7 @@ test("switch writes pointer, ordering and identity references; history, other pr
   expect(status.disabledTokens).toBe(1);
   expect(JSON.stringify(status)).not.toContain("SECRET");
   expect(JSON.stringify(status)).not.toContain("DO-NOT-RETURN");
-  expect(state.peerPrs).toMatchObject({ replyTo: `${B}@remote`, peers: [{ agent: B }], extra: "preserve" });
+  expect(state.peerPrs).toMatchObject({ replyTo: `${B}@remote`, peers: [{ agent: A }], extra: "preserve" });
   expect(state.config?.groqApiKey).toBe("CONFIG-SECRET");
   expect(f.notices.map((n) => n.target)).toEqual([B, A, `${A}@remote`]);
   expect(f.notices.every((n) => n.text === `当班 PM 改为 ${B}`)).toBe(true);

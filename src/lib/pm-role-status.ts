@@ -6,6 +6,11 @@ import { agentInScope } from "./principals.js";
 import { bareCanonicalName } from "./registry.js";
 import { pmCompactRefs, type PmState } from "./pm-role-state.js";
 
+/** Peer tokens that authorize this project's PMs; a token scoped to another project's PM is not this project's concern. */
+export function projectPeerTokens(state: PmState, pms: string[]) {
+  return state.principals.filter((p) => p.peer && !p.disabled && pms.some((pm) => agentInScope(p, pm)));
+}
+
 interface PmStatusEntry { location: string; value: unknown; follows: boolean; via: "pointer" | "redirect" | "manual" | "history" }
 export function pmStatus(db: Database, project: string, state: PmState) {
   const active = activeProjectPm(db, project), meta = getMeta(db, project);
@@ -18,16 +23,13 @@ export function pmStatus(db: Database, project: string, state: PmState) {
   };
   entries.push({ location: "meta.activePm", value: pmPointer(db, project), follows: !!active, via: "pointer" });
   entries.push({ location: "meta.pms", value: meta.pms, follows: meta.pms.find((p) => p !== meta.team?.dispatcher) === active, via: "pointer" });
-  for (const p of state.principals.filter((p) => p.peer && !p.disabled)) {
+  for (const p of projectPeerTokens(state, meta.pms.filter((p) => p !== meta.team?.dispatcher))) {
     entries.push({ location: `peer-token:${p.id}`, value: { peer: p.peer, agents: p.agents },
       follows: !!active && agentInScope(p, active), via: "manual" });
   }
-  if (state.peerPrs?.project === project) {
-    if (typeof state.peerPrs.replyTo === "string") reference("peer-prs.replyTo", state.peerPrs.replyTo.split("@")[0]!, false);
-    const peers = state.peerPrs.peers;
-    if (Array.isArray(peers)) peers.forEach((p, i) => {
-      if (typeof p.agent === "string" && meta.pms.includes(`agent-${bareCanonicalName(p.agent)}`)) reference(`peer-prs.peers[${i}].agent`, p.agent, false);
-    });
+  // peers[].agent is the remote machine's agent even when it shares a local PM's name; only replyTo is this machine's PM.
+  if (state.peerPrs?.project === project && typeof state.peerPrs.replyTo === "string") {
+    reference("peer-prs.replyTo", state.peerPrs.replyTo.split("@")[0]!, false);
   }
   for (const [id, p] of Object.entries(state.proposals)) if (p.project === project) {
     const history = !["pending", "confirmed"].includes(p.status);
