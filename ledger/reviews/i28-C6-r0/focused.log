@@ -1,0 +1,176 @@
+bun test v1.3.10 (30e609e0)
+
+tests/shared-ledger-integration-fixture.test.ts:
+
+tests/shared-ledger-client.test.ts:
+(pass) shared ledger signed client with isolated fake center > lost response checks receipt; retries preserve request id and refresh nonce/signature [7.98ms]
+(pass) shared ledger signed client with isolated fake center > committed receipt recovers without another POST [0.43ms]
+(pass) shared ledger signed client with isolated fake center > offline and receipt lookup loss cannot report success or submit [0.51ms]
+(pass) shared ledger signed client with isolated fake center > timeout rejects; CAS rejection is never retried [12.71ms]
+(pass) malformed CAS response never retries or changes expectedRev [0.20ms]
+(pass) every upload goes through sensitive gate before any network request [0.63ms]
+(pass) poll stop aborts network request and cannot populate cache [1.08ms]
+(pass) valid CAS conflict returns the frozen latest DTO without auto resubmission [1.52ms]
+(pass) absolute paths after all non-path delimiters are blocked before signing [1.73ms]
+(pass) missing scrub context derives fresh local identity for all upload methods and fails closed [12.67ms]
+(pass) snapshot regression rebuilds cache and poll warns once [3.12ms]
+(pass) import upload blocks Unicode absolute paths and permits prose, URLs and relative globs [4.63ms]
+(pass) import globs use strict relative syntax and cannot carry embedded absolute paths [4.43ms]
+
+tests/shared-ledger-integration-gate.test.ts:
+(pass) planning authority rejects actual CLI, MCP and autostart while an existing card advances [26.36ms]
+(pass) bulk migration cannot assign another card into a feature whose planning gate closed [20.80ms]
+
+tests/shared-ledger-client-export.test.ts:
+(pass) read-only export is deterministic, includes historical bindings and never uploads local columns [18.11ms]
+(pass) preview v1 then local v2 rejects stale commit even while the gate remains installed [10.97ms]
+
+tests/shared-ledger-server-restart.test.ts:
+(pass) receipt remains immutable after restart, fresh nonce retries; old signature stays blocked [11.49ms]
+
+tests/shared-ledger-integration-race.test.ts:
+(pass) closing the gate after preflight blocks the write and the first start side effect [16.64ms]
+(pass) gate closes during worktree preparation: no process starts, rollback can cancel the new card [25.87ms]
+(pass) a queued start rechecks durable authority after the queue admits it [11.74ms]
+
+tests/shared-ledger-server-cas.test.ts:
+(pass) different nodes still conflict on feature CAS; snapshot and new-key retry [6.36ms]
+(pass) same title conflicts point to existing feature; no-read conflicts have no snapshot [4.81ms]
+
+tests/shared-ledger-integration-bindings.test.ts:
+(pass) only a local project PM/owner can atomically install a 0600 trusted binding; web bodies cannot [12.15ms]
+
+tests/shared-ledger-server-contract.test.ts:
+(pass) all HTTP business responses conform to frozen C1 parsers [11.69ms]
+
+tests/shared-ledger-integration-api.test.ts:
+(pass) registered shared route authenticates a member at fake center without granting local owner capabilities [17.66ms]
+
+tests/shared-ledger-server-policy.test.ts:
+(pass) bound nodes frozen; execution and arbitrary fields rejected; unbound edits allowed [8.21ms]
+(pass) HTTP size limit, streaming timeout, rate limit and loopback enforcement [20.67ms]
+(pass) HTTP transport accepts signed loopback requests and returns durable receipts [12.68ms]
+
+tests/shared-ledger-server-projection.test.ts:
+(pass) projection home/service gate, watermark gaps, individual revisions and no inferred deletion [8.79ms]
+(pass) failed later task keeps first task, steps and watermark unchanged [5.62ms]
+
+tests/shared-ledger-client-cache.test.ts:
+(pass) cache isolates all identity dimensions, drops late successes and refusals, marks stale [0.26ms]
+(pass) identity switch aborts the old request signal [0.03ms]
+
+tests/shared-ledger-gate-window.test.ts:
+(pass) ledger-dag-write: mode switch waits for the admitted write transaction [653.14ms]
+(pass) feature-migrate: mode switch waits for the admitted write transaction [541.23ms]
+(pass) feature-write: mode switch waits for the admitted write transaction [424.80ms]
+(pass) feature-split: mode switch waits for the admitted write transaction [589.36ms]
+(pass) autostart: mode switch waits for the admitted write transaction [577.79ms]
+(pass) feature-dep: mode switch waits for the admitted write transaction [601.07ms]
+(pass) dag-tools-steps: mode switch waits for the admitted write transaction [430.19ms]
+
+tests/shared-ledger-c6-start.test.ts:
+(pass) task-new carries the feature through manager and rechecks after the outer gate [36.84ms]
+
+tests/shared-ledger-contract.test.ts:
+(pass) frozen V1 fixtures > all request/response fixtures validate with matching digests and versions [0.87ms]
+(pass) frozen V1 fixtures > execution capabilities carry disabled reasons; schema and freshness are explicit
+(pass) frozen V1 fixtures > all errors have stable HTTP status, and conflicts require a coherent authorized snapshot [0.59ms]
+(pass) strict planning write whitelist > unknown commands and extra fields at every nesting level are rejected [0.23ms]
+(pass) strict planning write whitelist > execution operations and scopeChange fail with execution_not_shared [0.10ms]
+(pass) strict planning write whitelist > CAS/request identity fields are mandatory, finite integers and not coerced [0.28ms]
+(pass) strict planning write whitelist > DAG rejects missing refs, cycles, duplicate keys/deps and absolute or parent-relative file paths [0.31ms]
+(pass) strict planning write whitelist > bound node content/deps/estimate/files and bindings remain frozen; free nodes can change [0.36ms]
+(pass) strict planning write whitelist > inconsistent response versions, execution authority and extra response fields fail validation [0.23ms]
+(pass) import and read-only projection boundaries > dry-run/commit share manifest identity and reject digest tampering [0.43ms]
+(pass) import and read-only projection boundaries > pending proposals, unknown fields, discontinuous versions and missing bindings reject entire import [0.55ms]
+(pass) import and read-only projection boundaries > projection digest ignores observation time, but includes independent step revisions and source watermarks [0.17ms]
+(pass) import and read-only projection boundaries > projection whitelist rejects raw data, steps beyond watermark and rollback within a batch [0.22ms]
+
+tests/shared-ledger-server-review.test.ts:
+(pass) owner home without projecting service is rejected before import writes; new member plans remain allowed [12.25ms]
+(pass) import requires an active unexpired service credential with the project action [13.39ms]
+(pass) adding an unbound node to a completed imported DAG refreshes status and counts [8.70ms]
+
+tests/shared-ledger-server-auth.test.ts:
+(pass) membership, instance, project, claimed role and revoked credentials cannot broaden authority [9.96ms]
+(pass) valid member import and wrong registered service projection are forbidden [7.50ms]
+
+tests/shared-ledger-auth.test.ts:
+(pass) shared ledger transport > valid member yields central identity, exact grants and own receipt scope [0.54ms]
+(pass) shared ledger transport > signed method, path, body, timestamp, nonce, instance and bearer cannot be substituted [0.74ms]
+(pass) shared ledger transport > no unsigned legacy path, nor reuse of peer or other purpose signatures [0.61ms]
+(pass) shared ledger transport > signature precedes freshness, replay precedes size, size precedes membership [3.69ms]
+(pass) shared ledger transport > past/future timestamp window and durable index across verifier recreation [0.64ms]
+(pass) shared ledger transport > same nonce is rejected even after resigning with changed time; new nonce permits retry [0.39ms]
+(pass) shared ledger transport > missing or failed persistent replay storage cannot permit a write [0.28ms]
+(pass) membership, instance binding and role > absent, revoked, removed, wrong secret and expired credentials fail closed [0.83ms]
+(pass) membership, instance binding and role > credential team and project scopes are exact; local owner:self grants nothing [0.87ms]
+(pass) membership, instance binding and role > forged actor/role/owner never override credentials [0.76ms]
+(pass) membership, instance binding and role > import needs an explicit import grant; projection needs service role and registered home [1.15ms]
+(pass) membership, instance binding and role > GET supports empty body, filtered list, resolved project for detail/receipts, and isolated routes [0.82ms]
+(pass) business idempotency > same requestId/payload gives same digest across nonce, time, and object-key order
+(pass) business idempotency > wire nonce must be inside the signed POST body and match transport nonce
+
+tests/shared-ledger-integration-split.test.ts:
+(pass) CLI split rejects a shared existing target without moving its bound card or appending either DAG [21.88ms]
+(pass) split rechecks a source gate closed by the backup callback before any transaction writes [11.03ms]
+(pass) split rejects dependency changes involving a third shared feature and rolls back every target [11.72ms]
+(pass) a newly planned target with an installed shared gate is refused before its creation [12.18ms]
+
+tests/shared-ledger-integration-web.test.ts:
+(pass) shared DTO feeds PD2 without fabricating edges, ETA, or completion for stale/missing projections [0.06ms]
+(skip) real team entry opens PD2 board with twelve visible features and shared detail
+
+tests/shared-ledger-migration-prepare.test.ts:
+(pass) prepare backs up before gate, preserves the reviewed snapshot and same-batch identity [20.31ms]
+(pass) pending proposal anywhere in the selection blocks the whole group before installing gates [9.51ms]
+(pass) prepare blocks in-flight start without treating a timeout as failure [9.59ms]
+(pass) prepare blocks unknown start without treating a timeout as failure [10.36ms]
+(pass) prepare blocks failed-with-leftovers start without treating a timeout as failure [8.48ms]
+(pass) prepare blocks manual start without treating a timeout as failure [8.46ms]
+(pass) sensitive fields and missing references cannot produce a package, and retain the installed gate [15.64ms]
+(pass) group preflight runs under the ledger writer lock and failure publishes no partial mode [9.00ms]
+
+tests/shared-ledger-c6-fixture.test.ts:
+
+tests/shared-ledger-client-scrub.test.ts:
+(pass) sensitive originals and undeclared fields refuse without echoing values [2.17ms]
+(pass) short identity names use case-insensitive word boundaries [0.53ms]
+(pass) relative repository globs remain valid and empty identities fail closed [0.16ms]
+
+tests/shared-ledger-server-fixture.test.ts:
+
+tests/shared-ledger-client-proxy.test.ts:
+(pass) proxy ignores actor/role and keeps authenticated person and service identities separate [8.72ms]
+(pass) persistent planning gate survives reads and corrupt state refuses writes [3.41ms]
+
+tests/shared-ledger-server-import.test.ts:
+(pass) import dry-run is read-only; commit idempotent, digest/collision/pending/ref failures are atomic [10.20ms]
+(pass) late duplicate title rolls back entire group, source-only imports forbid planning commands [11.02ms]
+(pass) failure during second feature projection rolls back first feature, mappings and events [6.66ms]
+
+tests/shared-ledger-c6-control.test.ts:
+(pass) staged imports have persistent verified receipts, freeze members, and activate once [12.01ms]
+(pass) trial revocation is atomic, durable, cannot activate or replay the revoked batch [9.87ms]
+(pass) verification reads stored rows; drift, cross-project control and changed digest fail closed [7.40ms]
+
+tests/shared-ledger-c6-members.test.ts:
+C6 center temporary port 53950; peer A / peer B have independent credential directories
+C6 V1 1-3 and recovery: shared import, five-second polling, one CAS winner, retained/rebased draft, denials PASS
+C6 cleanup: poll timers stopped; loopback server stopped; both temporary state directories removed
+(pass) two isolated members: import visibility, next poll, CAS draft rebase, locked execution and permissions over HTTP [5131.92ms]
+
+tests/shared-ledger-c6-migration.test.ts:
+(pass) migration commit verifies before routing, restart recovers the same batch, activation preserves gates [58.74ms]
+(pass) lost commit/activation responses and offline lookup retain the gate and recover by receipt first [48.22ms]
+(pass) trial revoke reopens the local gate only after a confirmed durable central revocation [52.54ms]
+(pass) a center rollback or missing previously confirmed receipt cannot reopen or silently recommit [34.08ms]
+
+1 tests skipped:
+(skip) real team entry opens PD2 board with twelve visible features and shared detail
+
+ 102 pass
+ 1 skip
+ 0 fail
+ 846 expect() calls
+Ran 103 tests across 30 files. [10.42s]

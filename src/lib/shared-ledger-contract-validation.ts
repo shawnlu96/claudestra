@@ -1,9 +1,13 @@
 import {
   SharedLedgerError, SHARED_LEDGER_COMMANDS, SHARED_LEDGER_DISABLED_ACTIONS,
   type SharedLedgerCommand, type SharedLedgerNode, type SharedLedgerDag, type SharedLedgerFeatureDetail,
-  type SharedLedgerEnvelope,
+  type SharedLedgerEnvelope, type SharedLedgerImportControl,
 } from "./shared-ledger-contract.js";
-import { array, id, integer, invalid, nonce, object, optional, positive, record, relativeGlob, text, unique, type Schema } from "./shared-ledger-contract-schema.js";
+import { array, choice, digest, id, integer, invalid, nonce, object, optional, positive, record, relativeGlob, text, unique, type Schema } from "./shared-ledger-contract-schema.js";
+
+export const parseSharedLedgerImportControl: Schema<SharedLedgerImportControl> = object({
+  mode: choice(["activate", "revoke"]), batchId: id, projectId: id, manifestDigest: digest,
+});
 
 export const nodeSchema: Schema<SharedLedgerNode> = object({
   key: id, oneLine: text(2000, 1), deps: array(id), fileGlobs: array(relativeGlob), estimate: text(200),
