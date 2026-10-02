@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, openLedger, LEDGER_SCHEMA_VERSION } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { answerPush, pushCandidates, recordHello } from "../src/lib/ledger-lend-peers.js";
 import { claimLend, getLendOrder, offerLendCore, sweepLend, WRITE_POOL_TTL_MS } from "../src/lib/ledger-lend.js";
@@ -205,7 +205,7 @@ test("version 17 ledger upgrades to queue migration 18 without changing existing
   old.close();
   const migrated = openLedger(file);
   try {
-    expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: 18 });
+    expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
     expect(getLendOrder(migrated, id)).toEqual(getLendOrder(db, id));
     expect(getWriteLease(migrated, "T1")?.state).toBe("held");
     expect(migrated.query("SELECT * FROM lend_push_queue").all()).toEqual([]);

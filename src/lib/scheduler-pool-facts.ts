@@ -5,6 +5,7 @@
  * The claim's own note (written by claimLend in its transaction) is the dispatch receipt: it always precedes the verdict,
  * whereas the intent's `submitted` settle only happens on the next scheduler pass. tests/scheduler-pool.test.ts.
  */
+import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
@@ -86,7 +87,7 @@ function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
   const row = getLendPeer(db, b.peer);
   if (!row || row.proto < 2) return null;
   const cap = peerCapacity(db, b.peer, b.maxOpen, now);
-  return { why: cap.why, slots: cap.slots, roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
+  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
 }
 
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */

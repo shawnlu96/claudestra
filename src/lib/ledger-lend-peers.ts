@@ -6,6 +6,7 @@
  * clean write order whose branch A itself saw unpushed; anything else stops for PM as before. Every peer-supplied field
  * other than the peer name is checked against the order row, never trusted. tests/ledger-lend-peers.test.ts.
  */
+import { updatePeerCooldownHello } from "./lend-peer-cooldown.js";
 import type { Database } from "bun:sqlite";
 import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
@@ -46,6 +47,7 @@ export function recordHello(db: Database, peer: string, fp: string | null, req: 
       slots = excluded.slots, paused = excluded.paused, helloAt = excluded.helloAt`).run(
       peer, fp, req.proto, req.boot, req.seq, req.grant ? JSON.stringify(req.grant) : null, JSON.stringify(req.slots),
       req.paused ? JSON.stringify(req.paused) : null, now);
+    updatePeerCooldownHello(db, peer, req.paused, now);
     return { applied: true };
   });
 }

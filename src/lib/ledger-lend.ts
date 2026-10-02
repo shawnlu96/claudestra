@@ -9,7 +9,7 @@
  * time, through T87's refuse-first peer gate with the ledger head. Result intake is ledger-lend-result.ts (reviews and
  * write orders). tests/ledger-lend.test.ts, tests/ledger-lend-write.test.ts.
  */
-import { createHash } from "node:crypto";
+import { clearPeerCooldown, cooldownReleaseNotices } from "./lend-peer-cooldown.js"; import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry, LendFamily } from "./lend-config.js";
 import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type LeaseRequest, type LeaseState, type LendReceipt, type LendRefusal,
@@ -251,7 +251,7 @@ export function withdrawPooledLend(db: Database, ctx: WriteCtx, input: { orderId
 export function reofferLend(db: Database, ctx: WriteCtx, input: OfferInput & { reason: string }): LendOrder {
   return tx(db, () => {
     const old = cancelLend(db, ctx, { taskId: input.taskId, reason: `重挂：${input.reason}` });
-    return offerLend(db, ctx, { ...input, supersedes: old.orderId });
+    return (clearPeerCooldown(db, old.peer, old.family, input), offerLend(db, ctx, { ...input, supersedes: old.orderId }));
   });
 }
 
@@ -366,7 +366,7 @@ export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimR
       WHERE orderId = ? AND status = 'pooled'`).run(req.worker, until, now, o.orderId);
     assignStep(db, ctx, { taskId: o.taskId, step: o.step, executor: `${req.worker}@${peer}`, executorKind: "peer", round: o.round });
     note(db, ctx, o, `出借：${peer} 领了${LABEL[o.step]}（${req.worker}）`, { op: "claim", worker: req.worker, gen: o.leaseGen + 1 });
-    return claimed(getLendOrder(db, o.orderId) as LendOrder);
+    return claimed((clearPeerCooldown(db, o.peer, o.family), getLendOrder(db, o.orderId) as LendOrder));
   });
 }
 
@@ -391,10 +391,10 @@ export function leaseLend(db: Database, ctx: WriteCtx, peer: string, req: LeaseR
     if (!started) unbindStep(db, o);
     note(db, ctx, o, `出借：${peer} 报 ${req.reason}${why}`, { op: "release", reason: req.reason, gen: o.leaseGen });
     // 写单没起得来（没有推送权限、clone 不下来…）= 派不回这个出借方：写租约结束，卡退回本机
-    if (!started && isWriteStep(o.step)) return { lease: null, notices: [sendBack(db, ctx, { ...o, status: "released" }, `对方没起得来 worker${why}`, now)] };
+    if (!started && isWriteStep(o.step)) return { lease: null, notices: cooldownReleaseNotices(db, o, why, now, [sendBack(db, ctx, { ...o, status: "released" }, `对方没起得来 worker${why}`, now)]) };
     const label = LABEL[o.step];
     const text = started ? `出借单 ${o.orderId}（${o.taskId} ${label}）${peer} 报 worker 已停${why}，结果不明，交你核对：ledger lend-reoffer ${o.taskId} 或 lend-cancel`
       : `出借单 ${o.orderId}（${o.taskId} ${label}）${peer} 没起得来 worker${why}，这一单已释放；要再借就 ledger lend-offer ${o.taskId}`;
-    return { lease: null, notices: [{ project: o.project, taskId: o.taskId, text }] };
+    return { lease: null, notices: started ? [{ project: o.project, taskId: o.taskId, text }] : cooldownReleaseNotices(db, o, why, now, [{ project: o.project, taskId: o.taskId, text }]) };
   });
 }
