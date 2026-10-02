@@ -239,7 +239,7 @@ class Card {
     }
     if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
-    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice();
+    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
     return r.code === "conflict" ? this.cancelStale(intent, String(r.error)) : this.out("held", String(r.error));
   }
@@ -259,10 +259,10 @@ class Card {
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
   /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
-  async diffNotice(): Promise<void> {
+  async diffNotice(downgraded: string | null): Promise<void> {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
-      `，报告 ${String(rv?.data.path ?? "（无）")}`;
+      `，报告 ${String(rv?.data.path ?? "（无）")}${downgraded ? `；${downgraded}` : ""}`;
     await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */

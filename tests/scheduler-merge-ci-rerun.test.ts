@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { getMergeRun, advanceMergeRun } from "../src/lib/scheduler-merge.js";
 import { bounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
-import { ciRerunGh, parseRerunReceipt, RERUN_SETTLE_MS, rerunReceipt } from "../src/lib/scheduler-merge-ci-rerun.js";
+import { ciRerunGh, parseRerunReceipt, RERUN_SETTLE_MS, RERUN_WAIT, rerunReceipt } from "../src/lib/scheduler-merge-ci-rerun.js";
 import { parseFailedLog } from "../src/lib/scheduler-merge-ci-rerun-log.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
@@ -192,6 +192,116 @@ describe("i28-CIF1 merge gate re-runs CI that only timed out in tests the PR did
         carryReview: async () => ({ ok: false, reason: "" }), updateBranch: async () => {}, merge: async () => "" } as MergeExternal;
       await schedulerMergeTick(c.db, config, ledgerAs(c.db, "scheduler"), () => plain);
       expect([c.state(), c.gh.argv]).toEqual([BOUNCED, []]);
+    });
+  });
+});
+
+describe("i28-CIF1f1 after the rerun only a newer attempt counts; the old one still showing waits, up to RERUN_SETTLE_MS", () => {
+  const WAITING = { run: "await_ci", stage: "merge" };
+  const reason = (c: ReturnType<typeof card>) => getMergeRun(c.db, c.intent)?.reason ?? "";
+  const reads = (c: ReturnType<typeof card>) => c.gh.argv.filter((a) => a.includes("--log-failed") || a[1] === "pr").length;
+
+  test("rerun accepted, next tick still attempt 1 / completed / failure → waits with a readable reason; then attempt 2 green → merges", async () => {
+    await withCard({ lag: true }, async (c) => {
+      await c.tick(200);
+      expect([c.state(), c.reruns()]).toEqual([WAITING, 1]);
+      expect(reason(c)).toStartWith(`${RERUN_WAIT}：`);
+      const before = reads(c);
+      await c.tick(200 + 60_000);
+      expect([c.state(), c.reruns(), reads(c)]).toEqual([WAITING, 1, before]); // the old attempt's log is not judged again
+      expect(reason(c)).toStartWith(RERUN_WAIT);
+      expect(c.events("merge_conflict")).toEqual([]);
+      Object.assign(c.gh, { attempt: 2, status: "completed", conclusion: "success" });
+      c.setSnap({ ...red(), mergeState: "CLEAN", checks: [{ name: "ci", bucket: "pass" }] });
+      await c.tick(200 + 120_000);
+      expect(c.state().run).toBe("unknown"); // reached the merge call (the fake refuses it)
+      expect(c.reruns()).toBe(1);
+    });
+  });
+
+  test("the newer attempt ends red → ci_fail back to fix, still one rerun", async () => {
+    await withCard({ lag: true }, async (c) => {
+      await c.tick(200);
+      await c.tick(300);
+      Object.assign(c.gh, { attempt: 2, status: "completed", conclusion: "failure" });
+      await c.tick(400);
+      expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+      expect(c.events("merge_conflict")).toEqual([expect.objectContaining({ cause: "ci_fail" })]);
+      expect(c.events("merge_ci_rerun_stale")).toEqual([]);
+    });
+  });
+
+  test("no newer attempt past the limit → ci_fail back to fix, the reason says 重跑没有开始", async () => {
+    await withCard({ lag: true }, async (c) => {
+      await c.tick(200);
+      await c.tick(200 + RERUN_SETTLE_MS - 1);
+      expect(c.state()).toEqual(WAITING);
+      await c.tick(200 + RERUN_SETTLE_MS);
+      expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+      const [stale, ...more] = c.events("merge_ci_rerun_stale");
+      expect(more).toEqual([]);
+      expect(stale).toMatchObject({ reason: "重跑没有开始", prHead: HEAD, run: RUN });
+      expect(stale.text).toContain("重跑没有开始");
+      expect(c.events("merge_conflict")).toEqual([expect.objectContaining({ cause: "ci_fail" })]);
+    });
+  });
+});
+
+describe("i28-CIF1f1 the stale-attempt wait holds in every phase that can claim a rerun (ready, updating, await_ci)", () => {
+  for (const phase of ["ready", "updating", "await_ci"]) {
+    test(`${phase}: old attempt still showing and its log unreadable → waits, no log or file read; past the limit → 重跑没有开始`, async () => {
+      await withCard({ lag: true }, async (c) => {
+        c.db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, c.intent);
+        await c.tick(200);
+        expect([c.state(), c.reruns()]).toEqual([{ run: phase, stage: "merge" }, 1]);
+        c.gh.log = new Error("run 77 is still in progress; logs will be available when it is complete");
+        const before = c.gh.argv.filter((a) => a.includes("--log-failed") || a[1] === "pr").length;
+        await c.tick(300);
+        expect([c.state(), c.reruns()]).toEqual([{ run: phase, stage: "merge" }, 1]);
+        expect(getMergeRun(c.db, c.intent)?.reason ?? "").toStartWith(RERUN_WAIT);
+        expect(c.gh.argv.filter((a) => a.includes("--log-failed") || a[1] === "pr").length).toBe(before);
+        expect(c.events("merge_conflict")).toEqual([]);
+        await c.tick(200 + RERUN_SETTLE_MS);
+        expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+        expect(c.events("merge_ci_rerun_stale")).toEqual([expect.objectContaining({ reason: "重跑没有开始" })]);
+      });
+    });
+  }
+
+  for (const phase of ["ready", "updating"]) {
+    test(`${phase}: pending PR snapshot must not forget the claimed rerun`, async () => {
+      await withCard({ lag: true }, async (c) => {
+        c.db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, c.intent);
+        await c.tick(200);
+        expect(c.reruns()).toBe(1);
+        c.setSnap({ ...red(), checks: [{ name: "ci", bucket: "pending", link: `${RUN}/job/9` }] });
+        await c.tick(300);
+        expect(c.state()).toEqual({ run: "await_ci", stage: "merge" });
+        expect(getMergeRun(c.db, c.intent)?.reason).toBeNull();
+        c.setSnap(red());
+        c.gh.log = new Error("logs unavailable while rerun begins");
+        const before = c.gh.argv.filter((a) => a.includes("--log-failed")).length;
+        await c.tick(400);
+        expect(c.state()).toEqual({ run: "await_ci", stage: "merge" });
+        expect(c.reruns()).toBe(1);
+        expect(c.gh.argv.filter((a) => a.includes("--log-failed")).length).toBe(before);
+        expect(c.events("merge_conflict")).toEqual([]);
+        await c.tick(200 + RERUN_SETTLE_MS);
+        expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+        expect(c.events("merge_ci_rerun_stale")).toHaveLength(1);
+      });
+    });
+  }
+
+  test("ready: the newer attempt ends red → ci_fail back to fix, still one rerun", async () => {
+    await withCard({ lag: true }, async (c) => {
+      c.db.query("UPDATE scheduler_merges SET phase='ready' WHERE intentId=?").run(c.intent);
+      await c.tick(200);
+      await c.tick(300);
+      Object.assign(c.gh, { attempt: 2, status: "completed", conclusion: "failure" });
+      await c.tick(400);
+      expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+      expect(c.events("merge_ci_rerun_stale")).toEqual([]);
     });
   });
 });
