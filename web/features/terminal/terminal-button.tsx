@@ -28,8 +28,8 @@ const TERMINAL_HASH = "#terminal";
 const isTerminalHash = () =>
   typeof window !== "undefined" &&
   window.location.hash.split("?")[0] === TERMINAL_HASH;
-/** 与 chat.tsx 的 isNarrow 同一断点：< sm(640px) 走 hash 路由页 */
-const isNarrow = () =>
+/** 与 chat.tsx 的 isNarrow 同一断点：< sm(640px) 走 hash 路由页（宿主 shell 入口 use-shell-view.tsx 也用） */
+export const isNarrow = () =>
   typeof window !== "undefined" &&
   window.matchMedia("(max-width: 639.98px)").matches;
 
