@@ -1,3 +1,4 @@
+import { pmClientFor } from "./local-api/project-pm-delivery.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
  *
@@ -1109,7 +1110,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (!inScopeEitherName(principal, agentParam) && !(await lendScopeAllows(req, principal, agentParam))) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId); // create 还没落盘：当离线，不投递（manager list 的 creating）
+    const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId) ?? pmClientFor(agent.name, deps.clients); // creating agents cannot receive messages
     if (!client) {
       // ws 不在 ≠ agent 死了。channel-server 是独立子进程，被顶替/重启时 ws 会短暂
       // 缺席，而 tmux window 里的 Claude Code 照常跑着上一回合（2026-07-25 owner:
@@ -1166,7 +1167,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
     const env: Envelope = {
-      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}), ...(isOwnerPrincipal(principal) ? { owner: true } : {}) },
+      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}),
+        ...(isOwnerPrincipal(principal) ? { owner: true } : {}), ...(principal.credential ? { credential: principal.credential } : {}) },
       to: { kind: "local", agentName: agent.name, channelId: agent.channelId, ws: client.ws as any, cwd: client.cwd },
       intent: "request",
       content: withAttachmentLines(text, attachments), // 附件照 Discord 入口写进正文：Pi 只认正文，历史/直播靠它还原缩略图

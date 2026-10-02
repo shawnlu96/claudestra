@@ -1,3 +1,4 @@
+import { PM_SWITCH_CMDS } from "./pm-switch.js";
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
@@ -56,7 +57,7 @@ import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
-  ...SHARED_BINDINGS_CMDS,
+  ...SHARED_BINDINGS_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
@@ -121,8 +122,9 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
   // audit / feature-migrate 的 --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
-  const readOnly = DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
-  if (readOnly === null) return { error: "台账库还不存在（或正在建），--dry-run 没东西可看" };
+  const readInvocation = args[0] === "pm-status" || (DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run"));
+  const readOnly = readInvocation ? new LedgerReader().get() : undefined;
+  if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
     db: readOnly ?? openLedger(),
     actor,
