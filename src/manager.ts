@@ -559,7 +559,8 @@ async function cmdCreate(
     if (run.aborting) return; // 信号清理已接手并负责输出
     const r = await abandonCreate(tmuxName, { channelId, windowId }, realOpsDeps, run); // 占位若已被接手，只按本次的 id 收拾
     unguard();
-    output({ ok: false, error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
+    output({ ok: false, cleanedUp: (await import("./lib/scheduler-create-retry.js")).createCleanedUp(r), // 调度器据此退避重试，不交 PM
+      error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
   }
   const lendNo = (await import("./lib/lend-grant-spawn.js")).lendCreateDenied(tmuxName, { choice: { model, effort } }); if (lendNo) return cleanup(lendNo); // 出借 worker：已登记占位，起窗口前现核授权
 
