@@ -87,7 +87,7 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
     const live = leaseWriters(db, task.id, held).some((o) => o.status !== "cancelled" || (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen)));
     if (live) return "收回前仍有在跑的写单，等待取消";
     const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}`;
-    recordStoppedExits(db, ctx, task, id, leaseWriters(db, task.id, held));
+    recordStoppedExits(db, ctx, task, id, leaseWriters(db, task.id, held), insertEvent);
     endWriteLease(db, task.id, reason, ctx.now ?? Date.now());
     if (current.task.assigneeKind === "peer_agent" && current.task.assignee?.startsWith(`${held.fp}/`)) {
       const patch = { agent: held.prevAssigneeKind === "agent" ? held.prevAssignee : null,
