@@ -14,6 +14,17 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stateDir } from "./state-dir.js";
 
+/**
+ * 本进程正在跑的 Pi 版本（快照的 piVersion，网页「重启后生效」横幅读它）。Pi 把自己的包作为虚拟模块提供给扩展，
+ * 所以只在 Pi 加载的扩展里拿得到；Pi 不设 PI_VERSION 环境变量，改用它快照就缺版本、真漂移也不提示。
+ * 老版本 Pi 包名不同 ⇒ undefined（只是不提示重启）。
+ */
+export const runningPiVersion = (): Promise<string | undefined> =>
+  import("@earendil-works/pi-coding-agent" as string).then(
+    (m) => (typeof (m as { VERSION?: unknown })?.VERSION === "string" ? (m as { VERSION: string }).VERSION : undefined),
+    () => undefined,
+  );
+
 /** 只用得到这几个查询方法（Pi 的扩展 API 子集，便于测试替身） */
 interface PiSnapshotApi {
   getAllTools?(): Array<{ name?: string } | string>;

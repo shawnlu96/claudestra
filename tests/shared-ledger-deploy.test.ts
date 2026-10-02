@@ -1,12 +1,13 @@
 // deploy/shared-ledger 部署包：全程走 PATH 前面的假 ssh / rsync / systemctl / nginx / curl 桩，远端文件系统挪到临时根
 // （SHARED_LEDGER_FS_PREFIX），不连任何真实主机、不调用真实网络。
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SHARED_LEDGER_MAX_BODY_BYTES } from "../src/lib/shared-ledger-contract.ts";
+import { SHARED_LEDGER_JOIN_PATH } from "../src/shared-ledger/join.ts";
 import { importClosure } from "../deploy/shared-ledger/closure.ts";
 import { backupLedger } from "../deploy/shared-ledger/backup.ts";
 import { testChildEnv } from "./test-env.ts";
@@ -32,12 +33,17 @@ const EXISTING_SITE = `server {
 const STUBS: Record<string, string> = {
   // ssh <目标> <命令>：在本机执行命令（stdin 照传，remote.sh 就是这样喂进去的）
   ssh: `shift; exec bash -c "$*"`,
+  // GNU rsync 桩：带 --chmod 就把目标收成 755/644；不带就照搬源权限（rsync 不带 -p 时新文件的权限来自源文件）。
+  // 有 $STUB_DIR/openrsync 时模拟 macOS 自带 openrsync：遇到 --chmod 报 invalid argument
   rsync: `log rsync "$@"
-dry=0; for a in "$@"; do [ "$a" = -n ] && dry=1; done
+dry=0 chm=0; for a in "$@"; do [ "$a" = -n ] && dry=1; case $a in --chmod=*) chm=1;; esac; done
+if [ $chm = 1 ] && [ -f "$STUB_DIR/openrsync" ]; then echo "rsync: --chmod=D755,F644: invalid argument" >&2; exit 1; fi
 src=\${@: -2:1}; d=\${@: -1}; dest=$SHARED_LEDGER_FS_PREFIX\${d#*:}
 if diff -rq "$src" "$dest" >/dev/null 2>&1; then exit 0; fi
 echo ">f+++++++++ (stub) changed"
-[ $dry = 1 ] || { rm -rf "$dest"; mkdir -p "$dest"; cp -R "$src". "$dest"; }`,
+[ $dry = 1 ] || { rm -rf "$dest"; mkdir -p "$dest"; cp -R "$src". "$dest"
+  if [ $chm = 1 ]; then find "$dest" -type d -exec chmod 755 {} +; find "$dest" -type f -exec chmod 644 {} +
+  else find "$dest" -type d -exec chmod 700 {} +; find "$dest" -type f -exec chmod 600 {} +; fi; }`,
   systemctl: `log systemctl "$@"
 st=$STUB_DIR/state; mkdir -p "$st"
 unit() { for a in "$@"; do case $a in -*|enable|disable|start|stop|restart|is-active|is-enabled) ;; *) echo "$a";; esac; done | tail -n 1; }
@@ -58,7 +64,7 @@ esac`,
   curl: `log curl "$@"
 out=/dev/null; url=; while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift;; -w|--max-time|--resolve) shift;; http*) url=$1;; esac; shift; done
 [ -f "$STUB_DIR/health-fail" ] && { printf 000; exit 7; }
-case $url in *"/v1/teams/"*) printf '{"code":"bad_signature"}' > "$out"; printf 401;; *) printf 404;; esac`,
+case $url in *"/v1/teams/"*) printf '{"code":"bad_signature"}' > "$out"; printf 401;; https://*/v1/join) printf 405;; *) printf 404;; esac`,
   journalctl: `echo "stub journal tail"`,
   getent: `[ -f "$STUB_DIR/state/user" ] || exit 2; echo "claudestra-ledger:x:999:999::/var/lib/claudestra-shared-ledger:/usr/sbin/nologin"`,
   useradd: `log useradd "$@"; mkdir -p "$STUB_DIR/state"; touch "$STUB_DIR/state/user"`,
@@ -80,6 +86,9 @@ function deploy(...args: string[]) {
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
 const install = (...extra: string[]) => deploy("--host-name", HOST, "--bun", "/usr/local/bin/bun", ...extra);
+
+// 每个用例都起真实 bash 跑整套 deploy.sh（含 sleep 的自检），不少用例跑两遍；默认 5s 在负载高的机器上不够
+setDefaultTimeout(30_000);
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "sl-deploy-"));
@@ -145,10 +154,49 @@ describe("deploy.sh --dry-run", () => {
     const proxied = [...block.matchAll(/location ([^{]+)\{\n\s+(\S+)/g)].map((m) => [m[1]!.trim(), m[2]]);
     expect(proxied).toEqual([
       ['~ "^/v1/teams/[A-Za-z0-9_.:-]+/(features|commands|imports|projections)(/[A-Za-z0-9_.:-]+)?$"', "proxy_pass"],
+      ["= /v1/join", "if"],
       ["/", "return"],
     ]);
     expect(block).toMatch(/location \/ \{\n\s+return 404;/);
     expect(block).toContain("proxy_pass http://127.0.0.1:8797;");
+  });
+
+  test("nginx 块：入组路径 = /v1/join 只放行 POST、独立更严的 limit_req，body 上限沿用 1m；其他路径照旧", () => {
+    const out = deploy("--host-name", HOST, "--dry-run").out;
+    const block = out.split("\n").filter((l) => l.startsWith("      | ")).map((l) => l.slice(8)).join("\n");
+    const location = (head: string) => {
+      const start = block.indexOf(`location ${head} {`);
+      expect(start).toBeGreaterThan(-1);
+      return block.slice(start, block.indexOf("\n    }", start));
+    };
+    const join = location(`= ${SHARED_LEDGER_JOIN_PATH}`);
+    // 精确匹配、非 POST 一律 405，然后才反代
+    expect(join).toMatch(/if \(\$request_method != POST\) \{\n\s+return 405;\n\s+\}/);
+    expect(join).toContain("proxy_pass http://127.0.0.1:8797;");
+    expect(join.indexOf("return 405")).toBeLessThan(join.indexOf("proxy_pass"));
+    // 独立的限流 zone：每 IP 每分钟 10 次、burst 很小；不与 API 那档共用
+    const zone = /limit_req_zone \$binary_remote_addr zone=(claudestra_shared_ledger_join):\S+ rate=(\d+)r\/m;/.exec(block);
+    expect(zone).not.toBeNull();
+    expect(Number(zone![2])).toBeLessThanOrEqual(10);
+    const burst = /limit_req zone=claudestra_shared_ledger_join burst=(\d+) nodelay;/.exec(join);
+    expect(burst).not.toBeNull();
+    expect(Number(burst![1])).toBeLessThanOrEqual(5);
+    expect(join).not.toContain("zone=claudestra_shared_ledger ");
+    // body 上限在 server 级 1m，入组 location 不另行放大
+    expect(join).not.toContain("client_max_body_size");
+    expect(block.match(/client_max_body_size \S+;/g)).toEqual(["client_max_body_size 1m;"]);
+    // API 路径照旧反代、走原来那档限流；其余 404
+    const api = location('~ "^/v1/teams/[A-Za-z0-9_.:-]+/(features|commands|imports|projections)(/[A-Za-z0-9_.:-]+)?$"');
+    expect(api).toContain("proxy_pass http://127.0.0.1:8797;");
+    expect(api).not.toContain("limit_req");
+    expect(block).toContain("limit_req zone=claudestra_shared_ledger burst=20 nodelay;");
+    expect(location("/")).toContain("return 404;");
+    expect([...block.matchAll(/^\s+location /gm)]).toHaveLength(3);
+  });
+
+  test("nginx 的入组路径跟 JN1 的常量一致", () => {
+    expect(REMOTE).toContain(`JOIN_PATH=${SHARED_LEDGER_JOIN_PATH}\n`);
+    expect(SHARED_LEDGER_JOIN_PATH).toBe("/v1/join");
   });
 
   test("nginx 的路径正则与 body 上限跟服务端一致", () => {
@@ -343,6 +391,63 @@ if [ "$1" = -T ]; then echo "# reserved ${HOST}" >&2; fi
     expect(r.err).toContain("健康检查失败");
     expect(r.err).toContain("stub journal tail");
     expect(existsSync(at(NGINX_OURS))).toBe(false);
+  });
+
+  test("暂存清单带上入组码管理脚本及其 import 闭包，放在代码目录的 scripts/ 下", () => {
+    const r = install();
+    expect(r.code).toBe(0);
+    const { files, packages } = importClosure("scripts/shared-ledger-admin.ts");
+    expect(packages).toEqual([]);
+    expect(files).toContain("scripts/shared-ledger-admin.ts");
+    expect(files).toContain("src/shared-ledger/join.ts");
+    for (const f of files) expect(existsSync(at(`opt/claudestra-shared-ledger/${f}`))).toBe(true);
+    // 中心入口的闭包照旧都在
+    for (const f of importClosure("src/shared-ledger.ts").files) expect(existsSync(at(`opt/claudestra-shared-ledger/${f}`))).toBe(true);
+  });
+
+  const codeModes = () => {
+    const bad: string[] = [];
+    const walk = (p: string) => {
+      const mode = statSync(p).mode & 0o777;
+      if (statSync(p).isDirectory()) {
+        if (mode !== 0o755) bad.push(`${p} ${mode.toString(8)}`);
+        for (const e of readdirSync(p)) walk(join(p, e));
+      } else if (mode !== 0o644) bad.push(`${p} ${mode.toString(8)}`);
+    };
+    walk(at("opt/claudestra-shared-ledger"));
+    return bad;
+  };
+  const syncCall = () => log().split("\n").find((l) => l.startsWith("rsync ") && l.includes("--delete"))!;
+
+  test("GNU rsync：同步带 --chmod=D755,F644，远端不再补权限", () => {
+    const r = install();
+    expect(r.code).toBe(0);
+    expect(syncCall()).toContain("--chmod=D755,F644");
+    expect(r.out).not.toContain("不支持 --chmod");
+    expect(r.out).not.toMatch(/\+ find .*chmod/);
+    expect(codeModes()).toEqual([]);
+  });
+
+  test("openrsync（不认 --chmod）：去掉该参数照样走完，远端把代码目录收成 755/644；重跑幂等", () => {
+    writeFileSync(join(dir, "openrsync"), "");
+    const r = install();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("不支持 --chmod");
+    expect(syncCall()).not.toContain("--chmod");
+    expect(r.out).toMatch(/\+ find .*-type d ! -perm 755 -exec chmod 755/);
+    expect(r.out).toMatch(/\+ find .*-type f ! -perm 644 -exec chmod 644/);
+    expect(codeModes()).toEqual([]);
+    expect(r.out).toContain("✓ 完成");
+
+    const files = [UNIT, NGINX_OURS, "opt/claudestra-shared-ledger/src/shared-ledger.ts"];
+    const before = files.map((f) => statSync(at(f)).mtimeMs);
+    clearLog();
+    const again = install();
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("代码未变");
+    expect(again.out).not.toMatch(/^\s+\+ /m);
+    expect(files.map((f) => statSync(at(f)).mtimeMs)).toEqual(before);
+    expect(log()).not.toMatch(/useradd|chown|daemon-reload|systemctl (start|restart|reload|enable)/);
   });
 
   test("远端 bun 太旧就拒绝", () => {

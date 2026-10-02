@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
+import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -43,7 +44,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
     if (Buffer.byteLength(out) >= DIFF_LIMIT) throw new Error("净 diff 太大，无法逐字核对");
     return out;
   };
-  return {
+  return withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");
@@ -113,5 +114,5 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       }
       return result.sha;
     },
-  };
+  }, trainContext(command));
 }

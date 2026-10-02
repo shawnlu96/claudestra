@@ -26,6 +26,7 @@ import { sanitizeForeign } from "./order-wire-render.js";
 import { quoteExternal } from "./quote-text.js";
 import { storedBasis } from "./review-converge-report.js";
 import { convergenceResult, deliveryBranchMatches, assertConvergenceDeliveryLease, completeConvergenceDelivery } from "./lend-arbiter-result.js";
+import { withOriginalIds } from "./order-gate-heads.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -65,6 +66,7 @@ function probeOf(p: string): string {
 }
 
 export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps): LendReceipt {
+  req = withOriginalIds(db, req); // aliased finding ids back to this machine's originals (i28-GATE2)
   const convergence = convergenceResult(db, ctx, peer, req, bodySha, deps); if (convergence) return convergence;
   return tx(db, () => {
     const now = ctx.now ?? Date.now();

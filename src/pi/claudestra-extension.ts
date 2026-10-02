@@ -11,15 +11,11 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { replyResultText } from "../lib/reply-ask-schema.js";
-import { writePiEnvSnapshot } from "../lib/pi-env-snapshot.js"; // 这个文件没有任何 import，不破坏「只依赖 node: 内置模块」；历史按这句认 reply 建出的 askId
+import { runningPiVersion, writePiEnvSnapshot } from "../lib/pi-env-snapshot.js"; // 这个文件没有任何 import，不破坏「只依赖 node: 内置模块」；历史按这句认 reply 建出的 askId
 import { createAbortControl } from "./abort-control.js";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
-// 本进程加载的 Pi 版本（进快照 → 网页「重启生效」提示）。Pi 把自己的包作为虚拟模块提供给扩展；`as string` 绕开 tsc 解析。
-// 留着 promise 由写快照处 await：session_start 可能早于 import 落定。老版本 Pi 包名不同 → undefined，只是不提示重启，通道照常
-const RUNNING_PI_VERSION: Promise<string | undefined> = import("@earendil-works/pi-coding-agent" as string)
-  .then((m) => (typeof m?.VERSION === "string" ? m.VERSION : undefined), () => undefined);
 // ⚠ 本文件由 Pi 直接加载、只依赖 node: 内置模块，所以内联 lib/bridge-url.ts 的规则：兜底从 BRIDGE_PORT 推，
 //   写死 3847 会让改过端口的机器上 Pi agent 静默连不上 bridge（正常由 pi-launch 传 BRIDGE_URL）。
 const BRIDGE_URL = (
@@ -147,7 +143,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
   }
 
   async function writeEnvSnapshot(ctx?: PiContext) {
-    writePiEnvSnapshot({ pi, agent: AGENT_NAME, sessionId, ctx, piVersion: await RUNNING_PI_VERSION });
+    writePiEnvSnapshot({ pi, agent: AGENT_NAME, sessionId, ctx, piVersion: await runningPiVersion() });
   }
 
   // ── bridge 连接 ──────────────────────────────────────────

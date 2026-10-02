@@ -10,6 +10,7 @@ import type { CodexSlotOptions, SlotWait } from "./scheduler-local-runtime-slots
 import { readLendSync } from "./lend-config.js";
 import { poolStartFacts } from "./scheduler-agent-pool-start.js";
 import { reserveFinishing } from "./scheduler-agent-pool-reserve.js";
+import { codexWeeklyLineAt, DEFAULT_CODEX_LINE } from "./quota-codex-line.js";
 
 export function configuredAgentLimits(opts: CodexSlotOptions): AgentLimits | null {
   return opts.project ? readSchedulerConfig(opts.configPath ?? SCHEDULER_CONFIG_PATH).projects[opts.project]?.agents ?? null : null;
@@ -35,7 +36,7 @@ export function poolAuthorRuntime(project: string, limits: AgentLimits, ledgerPa
 }
 
 export async function poolQuotaWait(family: AuthorFamily, read = async (): Promise<InventoryQuota> => (await readInventoryQuota())[family],
-  now = Date.now()): Promise<SlotWait | null> {
+  now = Date.now(), at: { project?: string; ledgerPath?: string } = {}): Promise<SlotWait | null> {
   let q: InventoryQuota;
   try { q = await read(); }
   catch (e) {
@@ -43,7 +44,8 @@ export async function poolQuotaWait(family: AuthorFamily, read = async (): Promi
     console.error(`[scheduler-agent-pool] ${family} 额度读不到：${(e as Error).message}`); return null;
   }
   if (q.status !== "known") return null;
+  const line = family === "codex" ? codexWeeklyLineAt(at.project, at.ledgerPath) : DEFAULT_CODEX_LINE;
   const over = q.windows.find((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && !w.resetPassed &&
-    (w.resetsAtMs === null || w.resetsAtMs > now) && w.usedPct !== null && w.usedPct >= 85);
-  return over ? { kind: "wait", reason: `等 ${family} 空位（周额度已到85%）` } : null;
+    (w.resetsAtMs === null || w.resetsAtMs > now) && w.usedPct !== null && w.usedPct >= line);
+  return over ? { kind: "wait", reason: `等 ${family} 空位（周额度已到${line}%）` } : null;
 }
