@@ -214,3 +214,5 @@ HLC 模型测试候选、接收延期、发送延期、可信时间推进后重�
 另跑严格 guard 退出 0；六入口 build、节点 glob、diff --check 通过。
 原始日志为临时目录中的 `i28-sync1-r4-check.log`、`i28-sync1-r4-base-sandbox.log`；
 PR head CI 必过项仍由 PM/合并闸核对。无 disputes，未改运行代码、生产台账或凭据，未合并/部署/发布。
+
+第5轮补充：此模型未区分原安装升级和新机旧备份；bootstrap-rerun 的反例成立，恢复证明以 r5 证据为准。

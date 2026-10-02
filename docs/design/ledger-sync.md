@@ -58,7 +58,10 @@
   已被来源编号的拒收条目不准静默删除或重写：仅冻结该来源项目流的接收前缀，其他流继续同步。
   恢复需中心发新流世代、以已接受前缀快照初始化，并把未接受的本地编辑作为新写重发；旧 dot 与原文保留审计。
   stream 身份包含 kind 与 generation；世代变更不复用旧游标，不能伪装成 seq 从头开始。
-  中心通过已认证传输提供 admission 元数据（dot、内容摘要、接收时 centerNow、epoch）；副本先核同一上界再接收。
+  中心通过已认证传输提供 admission 元数据（dot、内容摘要、接收时 centerNow、epoch）；
+副本用 admission 的已认证 centerNow 核同一接收上界（含位宽安全界），不用副本当前时间重判日志合法性。
+  admission 必须绑定项目/dot/摘要/epoch，校验后才用其中 centerNow；它不改副本可信时间锚。
+  合法日志若超副本当前候选时间界，只进入持久化 clock-pending，不隔离、不冻结来源接收前缀；校时或时间推进后按标准算法观察。
   绕过中心的裸来源条目、无 admission 的快照或本机异常原文只能隔离，不能借历史重放把超界值注入时钟。
   合法且在界内的漂移条目仍按标准算法推进 HLC（不改 OS 墙钟），观察后的新写严格大于它，保持后写覆盖。
   来源分配 dot 前也核本地候选时间；离线参照最近认证中心时间加同一 boot 的单调经过时间，不直接信突然跳变的墙钟。
@@ -280,27 +283,35 @@ PM 在本机离线时执行 `stage T review→merge`（期望 `rev=9`、`from=re
 开关 `ledgerSync.mode = off | observe | on` 按项目设置，但**同步显示模式不决定执行权威**。
 另有中心持久化的 `authority=local|center` 与单调 authorityEpoch；一旦采用 center，本机任意模式都不能恢复本地定序权。
 本机把权威/epoch、项目身份和存储世代写入独立的 `<state-root>/ledger-authority/<project>.json`，不存进 ledger.sqlite。
-**存量首次升级 preflight（SY7）**：启用新检查前在升级锁内冻结旧写，生成库外 bootstrap-v1 journal 与存量项目清单。
-清单来自升级前受信任的本机项目注册/共享规划登记：明确 never-shared 的存量项目写 local 标记（项目身份、原库世代、初始化版本），
-明确已共享的项目保留已有 center 标记或在线核中心；归属不清的项目记 unknown，不因没有 marker 就推断 local。
-每个标记用 atomic JSON 写法落盘，全部项目都有 local/center/unknown 记录后，才提交库外 activation-complete 并启用检查。
-写 journal/标记失败或中途崩溃不提交 complete，新入口不运行；重试从 prepared 清单续作，已有 center 标记绝不覆盖成 local。
-因此明确从未共享的存量 local 项目不需要中心/网络，升级后阶段机照常；未完成 preflight 时不能宣称升级已可用。
-complete 一旦存在，不再走「存量首次初始化」；之后 marker 丢失仍是 unknown，不能靠重复启动或恢复旧 DB 触发 local 重建。
-采用中心时先把库外 journal/项目登记的 everCenter 置 true（单调不可清），再写 center marker，二者落盘后才允许中心解除冻结。
-本机 local 身份恢复必须同时核 complete journal、身份/世代、everCenter=false 及无 V2 共享登记；旧 bootstrap 清单不能单独证明仍是 local。
-everCenter=true 或任一记录丢失/矛盾时只能在线核中心，不能用显式初始化命令把已迁移项目改回 local。
-bootstrap journal 与 activation 标记同样在库外，ledger-backup 不包含；新建 local 项目由创建命令显式注册身份并原子写标记，
-也不把任意无标记数据库当作存量项目。已迁移项目/库外状态的恢复仍须在线核中心，不通过 bootstrap 降权。
+**存量首次升级 preflight（SY7）**：只允许原安装的受控升级，不是「缺 complete 就初始化」。
+升级锁内冻结旧写；原安装在任何备份恢复之前签发一次性 upgrade-session（绑定安装随机身份、项目身份、库世代），
+仅留在当前升级进程/其库外 prepared journal；数据库、项目登记、旧 schema 版本都不能签发或重建该凭据。
+签发入口仅由正在运行的原安装升级握手调用，不能从新进程读取旧库推断；恢复/导入/新机启动入口不调用它。
+仅见旧版本文件、旧 schema 或旧登记而没有原进程握手，来源无法确认，拒绝签发并按 unknown 处理。
+恢复命令必须在启动 ledger 入口之前进入 recovery 状态；不能先让旧库按首次升级开放写再核身份。
+清单来自该受控升级冻结的本机项目注册/共享规划登记：明确 never-shared 的存量项目写 local 标记，
+明确已共享的项目保留 center 标记或在线核中心；归属不清记 unknown，不因没有 marker 就推断 local。
+在同一 prepared journal 中消费 upgrade-session，逐项 atomic JSON 落盘，全部有记录才提交 activation-complete；
+新入口检查 complete 才运行。崩溃只允许凭原安装完整 prepared journal 续作，不能凭恢复数据库重造 prepared。
+已有 center 标记绝不覆盖成 local；完成后销毁会话能力。schema 版本只作附加检查，旧备份也有旧版本，不能作为首次升级证明。
+采用中心前先把 journal 的 everCenter 置 true（单调不可清），再写 center marker，二者落盘后中心才解除冻结。
+标记、journal、安装身份均在库外，不进 ledger-backup；新项目创建命令生成新项目身份，不接管数据库中的既有身份。
 
-采用中心前先原子落盘 center 标记，再允许中心项目启用；本地入口启动/每次定序写都检查标记，不能只检查 mode。
-完成首次升级后，标记缺失、损坏、项目或恢复世代不匹配时 authority=unknown，定序写拒绝；已迁移项目须在线核中心恢复，
-明确 never-shared 项目由显式本机身份恢复流程核登记与世代，不要求一个不存在的中心。两者都不会因缺标记默认 local。
-ledger-backup 的台账恢复不覆盖这个库外标记；已迁移项目恢复备份先冻结写并在线确认中心 epoch/重建视图后再开放命令；
-未迁移 local 项目走本机备份身份/世代校验，不能因此修改任何 center 标记。
-恢复迁移前 ledger.sqlite 即使含 authority=local，也不能覆盖库外 center；离线只能读或排队，不授予本地执行权。
-若连库外状态一起恢复或是新装机器，必须重新在线核验，不能凭备份里的 local 标记开放写。
-首次独立 local 项目显式初始化身份，存量 local 项目通过上述受控 preflight 初始化，不能由缺标记自动推断；已迁移项目的数据库文件不带可用于重建 local 权威的凭证。
+**恢复路径与可用性取舍**：完整、未回滚的原安装 journal 尚在时，never-shared 项目可离线核 complete、
+项目/世代、everCenter=false 及无 V2 共享登记，显式重建丢失 marker；不存在的中心不参与这条路径。
+已采用 center 的项目、journal 丢失/回滚、库外状态整体恢复、新机器或只恢复旧 ledger-backup，均进入 unknown；
+preflight 不运行，不签发 upgrade-session，不凭旧登记、local 标记、旧 schema 或导出的 journal 快照授予原身份执行权。
+原项目继续只读，身份可确认的中心项目可排队并在线核中心 epoch 后恢复；不能把无中心响应当作 never-shared 证明。
+never-shared 项目若也丢失完整安装证明，不能安全地离线恢复**同一项目身份**：旧备份无法证明备份之后未采用 center。
+其离线灾备出口是 owner 显式 `recover-local --fork-new-project`：生成全新项目/安装身份，初始化全新 local 标记与 journal，
+仅导入白名单备注/规格/原话作为新 merge 写；不复制阶段、租约、授权、outbox、调度意图、资源锁或执行动作。
+旧项目仍 unknown，不改旧 center epoch，不把新项目注册为旧项目别名，也不重放旧合并/部署；新执行图须重新规划并取得新授权。
+这不是原身份的自动恢复；命令展示身份改变及执行状态不继承，由 owner 确认。无中心的 local 项目仍有离线恢复工作资料的出口。
+若要求同身份、同执行状态的无损灾备，必须保存原安装的完整未回滚状态；只有旧台账备份时不承诺这一能力。
+
+本地入口启动及每次定序写检查标记与恢复状态，不只检查 mode。缺失、损坏、身份/世代不匹配均拒本地执行。
+台账恢复不覆盖库外 center 标记；已迁移项目恢复旧库先冻结、在线核 epoch/重建视图后再开放，离线只读或排队。
+新装机器与恢复整体库外状态不能复用 local 执行能力；上述新身份离线 fork 不违反原项目 center 权威不可回退。
 
 
 1. **首次 off（尚未迁移，authority=local）**：现状，本地 feature 的本机库仍是权威，共享 feature 按 V2。
@@ -433,7 +444,9 @@ fileGlobs：
 - src/shared-ledger/sync/**
 - tests/ledger-sync-server*.test.ts
 
-验收线：跨项目 [p:1,q:1,p:2] 不产生游标缺口，扩权/重授权重建；按项目鉴权、`origin` 和凭据绑定、拒收 `local`、绝对路径与越界 HLC；admission 与新世代恢复不泄露隔离原文、不影响其他来源；差量分页、序号倒退告警；撤销后返回 403；每日快照可用于新机初始化。只导出模块，挂路由由 SY7 做。
+验收线：跨项目 [p:1,q:1,p:2] 不产生游标缺口，扩权/重授权重建；按项目鉴权、`origin` 和凭据绑定、拒收 `local`、绝对路径与越界 HLC；
+副本落后中心的时间锚只使合法 admission 延期观察、不隔离或冻结来源；
+admission 与新世代恢复不泄露隔离原文、不影响其他来源；差量分页、序号倒退告警；撤销后返回 403；每日快照可用于新机初始化。只导出模块，挂路由由 SY7 做。
 
 ### SY5 · 只读命令补齐
 
@@ -494,7 +507,11 @@ fileGlobs：
 - web/features/collab/shared/shared-view.tsx
 - tests/ledger-sync-wiring*.test.ts
 
-验收线：observe 模式只写影子库、出 `sync-diff`；on 模式写命令按 §2 分流；回退两档可用并有备份，采用 center 后所有模式定序仍走中心、旧本地执行入口拒绝、单机回退不降 authorityEpoch；首次升级先原子初始化存量 never-shared local 标记，断网阶段写照常；prepared 崩溃续作、complete 后丢 marker 拒写；
+验收线：observe 模式只写影子库、出 `sync-diff`；on 模式写命令按 §2 分流；回退两档可用并有备份，采用 center 后所有模式定序仍走中心、旧本地执行入口拒绝、单机回退不降 authorityEpoch；
+原安装受控首次升级凭一次性 upgrade-session 原子初始化存量 never-shared local 标记，断网阶段写照常；
+prepared 崩溃凭完整原安装 journal 续作、complete 后丢 marker 拒写；
+新机/旧备份/库外状态全丢不重跑 preflight；
+完整未回滚 local journal 离线恢复 marker，证明全丢时显式新身份 fork 只导入 merge 资料、旧身份仍拒执行且不复制动作/授权；
 迁移函数在 ledger-store 的 LEDGER_MIGRATIONS/schema 版本/REQUIRED_COLUMNS 接线后，生产入口方可应用；
 库外 center marker 缺失/损坏拒写、恢复迁移前备份离线仍拒本地定序；热文件里只加一行接入。ledger-tx/ledger-store 的存储/读取薄接入负责 canonical key 与来源范围，避免业务 SQL 误认 merge 为 claim。
 lib 接入逻辑放 `src/lib/ledger-sync/wiring/`，仅依赖 lib；上层组合放 `src/ledger-sync/wiring/`。
@@ -633,7 +650,10 @@ git grep --no-index -nEI \
   "centerAuthoritySticky": true,
   "mergeStorageKey": "namespaced",
   "bootstrapExistingLocal": true,
-  "hlcBoundaryAction": "defer"
+  "hlcBoundaryAction": "defer",
+  "bootstrapRequiresLiveUpgrade": true,
+  "lostInstallationRecovery": "new-identity-merge-only",
+  "replicaAdmissionBound": "authenticated-centerNow"
 }
 ```
 
@@ -665,3 +685,10 @@ git grep --no-index -nEI \
 
 SY1 迁移函数/夹具与 SY7 注册的归属已拆清，SY0 提前声明新列；未修改任一运行代码或生产状态。
 第3轮证据的 HLC 手写结果构造仅为历史记录，当前界内/边界证明以第4轮收发状态机为准。
+
+### 10.5 第5轮恢复身份与 admission 复现
+
+复现测试：bootstrap-rerun、local-disaster-recovery、replica-bound-skew。
+旧 r4 Bootstrap 模型在新机恢复旧登记后确实授予 local（断言退出 1）；修订契约把首次原安装升级与恢复分成入口。
+同身份旧备份无法离线证明 never-shared，因此全丢灾备仅允许新身份 merge-only fork，不复活旧执行权。
+脚本与先红后绿结果见 [第5轮验证证据](ledger-sync-r5-evidence.md)，模型不替代 SY7 实际入口/身份保护测试。
