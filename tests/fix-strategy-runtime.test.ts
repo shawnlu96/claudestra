@@ -83,6 +83,8 @@ test("family-full waits for CONV3 without faking a write lease; a peer-written o
     const p = convergenceProbe(f);
     p.edit((r) => { for (let n = 0; n < 6; n++) r.agents[`agent-full-${n}`] = { runtime: "codex", status: "active", sessionId: `busy-${n}` }; });
     f.db.run("UPDATE tasks SET branch = 'feat/T1', pr = 'https://github.com/o/r/pull/7' WHERE id = 'T1'");
+    for (let n = 0; n < 6; n++) f.db.query(`INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt)
+      VALUES (?, 'p', 'busy', 'code', 'build', ?, 0, 0)`).run(`busy-${n}`, `agent-full-${n}`);
     recordHello(f.db, "Peer", null, { v: 1, proto: 2, boot: "peer", seq: 1, slots: { codex: { total: 2, busy: 0 }, claude: { total: 0, busy: 0 } },
       paused: null, grant: { until: f.tickDeps.now() + 3600000, roles: ["write"], repos: ["o/r"], ordersPerDay: 10, ordersLeftToday: 10 } }, f.tickDeps.now());
     const opts = { registry: [], maxWorkers: 2, now: f.tickDeps.now(), pool: {

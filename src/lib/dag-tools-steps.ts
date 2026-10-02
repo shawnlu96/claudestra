@@ -277,5 +277,5 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
   const names = done.map((s) => s.name);
   if (p.peer) return { ok: true, taskId: p.taskId, placement: `peer:${p.peer.name}`, branch: p.branch, steps: names, reconciled };
   return { ok: true, taskId: p.taskId, agent: p.agent, branch: p.branch, worktree: p.worktree, prompt: p.promptPath, steps: names, reconciled };
-  });
+  }, { ledgerPath: io.db().filename });
 }
