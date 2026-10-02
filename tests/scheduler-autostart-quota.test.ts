@@ -32,10 +32,12 @@ if (!process.env.AQ1_CHILD) {
   let cleanup: (() => void) | undefined;
   afterEach(() => { cleanup?.(); cleanup = undefined; });
 
-  async function tick(runtime: "claude" | "codex" | undefined, claude: InventoryQuota, codex: InventoryQuota, rounds = 1, slots = 0) {
+  async function tick(runtime: "claude" | "codex" | undefined, claude: InventoryQuota, codex: InventoryQuota, rounds = 1, slots = 0, drift = false, failNotice = false) {
     const root = mkdtempSync(join(STATE_DIR, "case-")), path = join(root, "ledger.sqlite");
     const db = openLedger(path), notes: string[] = [], claims: string[][] = [];
-    const mock = spyOn(quotaModule, "readInventoryQuota").mockResolvedValue({ claude, codex });
+    let reads = 0, noticeAttempts = 0;
+    const mock = spyOn(quotaModule, "readInventoryQuota").mockImplementation(async () => ({ claude,
+      codex: drift ? snapshot(90 + reads++) : codex }));
     cleanup = () => { mock.mockRestore(); closeLedger(path); rmSync(root, { recursive: true, force: true }); };
     writeFileSync(join(STATE_DIR, "scheduler.json"), JSON.stringify({ enabled: true, autoDispatch: true,
       projects: { p: { repoDir: root, requiredChecks: ["ci"], maxActiveWorkers: 3,
@@ -60,11 +62,18 @@ if (!process.env.AQ1_CHILD) {
         autoReady: () => null, template: () => null }),
       stepIO: () => { throw new Error("must not write worktrees"); },
       readSpec: () => ({ text: "# Quota gate\n\n## Goal\n", mtimeMs: Date.now() - 120_000 }),
-      quota: async () => claude, notifyPm: async (_project, text) => { notes.push(text); },
+      quota: async () => claude, notifyPm: async (_project, text) => {
+        if (noticeAttempts++ === 0 && failNotice) throw new Error("notification unavailable");
+        notes.push(text);
+      },
       memo: new Set(), now: Date.now, attempt: () => "aq1",
     };
-    for (let i = 0; i < rounds; i++) expect(await autostartTick(env)).toEqual([]);
-    return { claims, notes, quotaReads: mock.mock.calls.length };
+    for (let i = 0; i < rounds; i++) {
+      const failed = await autostartTick(env);
+      expect(failed).toEqual(failNotice && i === 0 ? [{ taskId: "autostart", error: "notification unavailable" }] : []);
+      if (failNotice && i === 0) expect(env.memo.size).toBe(0);
+    }
+    return { claims, notes, quotaReads: mock.mock.calls.length, noticeAttempts };
   }
 
   test("1: Codex 40% proceeds despite Claude 95%", async () => {
@@ -90,6 +99,21 @@ if (!process.env.AQ1_CHILD) {
         new Date(9e12).toISOString() + " 重置）。要调线用 autostart-set --line。"]);
     });
   }
+  test("same window drifting 90% to 91% sends once with the blocking snapshot", async () => {
+    const result = await tick("codex", snapshot(20), snapshot(90), 2, 0, true);
+    expect(result.claims).toEqual([]);
+    expect(result.quotaReads).toBe(2);
+    expect(result.notes).toHaveLength(1);
+    expect(result.notes[0]).toContain("90%");
+    expect(result.noticeAttempts).toBe(1);
+  });
+  test("failed notice retries next tick, then deduplicates after success", async () => {
+    const result = await tick("codex", snapshot(20), snapshot(90), 3, 0, false, true);
+    expect(result.claims).toEqual([]);
+    expect(result.noticeAttempts).toBe(2);
+    expect(result.notes).toHaveLength(1);
+    expect(result.notes[0]).toContain("90%");
+  });
   test("full slots remain silent even with Codex quota over the line", async () => {
     const result = await tick("codex", snapshot(20), snapshot(90), 2, 6);
     expect(result.claims).toEqual([]);

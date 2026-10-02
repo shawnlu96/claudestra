@@ -16,5 +16,6 @@ export async function codexQuotaWait(read: CodexQuotaReader = readCodexQuota, no
   if (q.status !== "known") return null;
   const over = q.windows.find((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && !w.resetPassed
     && (w.resetsAtMs === null || w.resetsAtMs > now) && w.usedPct !== null && Number.isFinite(w.usedPct) && w.usedPct >= 85);
-  return over ? { kind: "wait", reason: `Codex 周额度 ${over.id} 已用 ${over.usedPct}%，达到 85% 线，等待窗口重置` } : null;
+  return over ? { kind: "wait", reason: `Codex 周额度 ${over.id} 已用 ${over.usedPct}%，达到 85% 线，等待窗口重置`,
+    quota: { id: over.id, usedPct: over.usedPct!, resetsAtMs: over.resetsAtMs } } : null;
 }
