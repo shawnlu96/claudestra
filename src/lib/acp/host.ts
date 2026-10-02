@@ -8,6 +8,7 @@ import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
 import { commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
+import { HostHeartbeat } from "./host-heartbeat.js";
 import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
@@ -82,6 +83,7 @@ export class AcpHost {
   private readonly permits = new Map<string, { frame: Record<string, unknown>; resolve: (optionId: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
   private permSeq = 0;
   private translator = createAcpTranslator();
+  private readonly beat = new HostHeartbeat(() => ({ agent: this.cfg.agentName, sessionId: this.cfg.sessionId }), (m) => this.deps.log(m)); // 监护判卡住的回合心跳
   private readonly dedup = new FailureDedup();
   private readonly proxy: ToolProxy;
   private readonly link: ReturnType<HostDeps["makeLink"]>;
@@ -112,12 +114,13 @@ export class AcpHost {
     });
     this.loop = new AcpTurnLoop({
       prompt: async (text) => {
+        this.beat.turn();
         const s = await this.waitSession();
         if (!s) return { kind: "failed", failure: this.lastStartError ?? { kind: "error", key: `nosession#${++this.startSeq}`, message: "ACP 适配器没起来" } };
         return s.prompt(text);
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text) : Promise.resolve({ outcome: "failed" as const })),
-      reportStop: (r) => this.reportStop(r),
+      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
+      reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       log: deps.log,
     });
@@ -146,7 +149,8 @@ export class AcpHost {
     const spec = { ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } };
     const proc = (this.proc = this.deps.spawn(this.cfg.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
     const session = new AcpSession(proc.wire, {
-      onUpdate: (u) => this.onUpdate(u), onPermission: (card) => this.askPermission(card), onSelfTurn: (done) => this.loop.track(done), log: this.deps.log, label: this.rt.label,
+      onUpdate: (u) => (this.rotating || this.beat.update(), this.onUpdate(u)), onPermission: (card) => (this.beat.update(), this.askPermission(card)), // /clear 引导不算动静
+      onSelfTurn: (done) => (this.beat.turn(), this.loop.track(done)), log: this.deps.log, label: this.rt.label,
     }, this.rt.mcpServers(spec));
     const startedAt = Date.now();
     void proc.exited.then((code) => this.onAdapterExit(session, code, startedAt));

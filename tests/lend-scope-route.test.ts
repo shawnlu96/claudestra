@@ -6,7 +6,7 @@
  * 不读线上 tmux。
  * 同一凭据打 history / interrupt / pending / bg-tasks 仍 403、事件流过滤不放行、GET /agents 不列它；源码断言例外只在消息路由那一行。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,10 @@ import { workerName } from "../src/lib/lend-drive.ts";
 import { advance, LEND_JOURNAL_PATH, openLendJournal, recordAsked } from "../src/lib/lend-journal.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
 import { newTokenPrincipal, readPrincipals, updatePrincipals, type Principal } from "../src/lib/principals.ts";
+import { isolatedStateSuite } from "./isolated-state.ts";
+
+// 路由内部读默认 journal / peers / principals，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { afterAll, beforeAll, describe, test } = isolatedStateSuite(import.meta.path);
 
 const PEER = "w6mate";
 const ORDER = "w6-route:s1:r0:review:a0";

@@ -16,7 +16,7 @@ import type { BorrowEntry, LendFamily } from "./lend-config.js";
 import { LEASE_MS_DEFAULT, POLL_AFTER_MS, pollLimit, type ClaimRequest, type LeaseRequest, type LeaseState, type LendReceipt, type LendRefusal,
   type OfferSummary, type PollRequest } from "./lend-wire.js";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
-import { endWriteLease, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrderWire, type WriteLease as WriteLeaseRow, type WriteOffer } from "./ledger-lend-lease.js";
+import { endWriteLease, forPeer, holdWriteLease, lastReviewOf, writeOfferBranch, writeOrderWire, type WriteLease as WriteLeaseRow, type WriteOffer } from "./ledger-lend-lease.js";
 import { LEND_LIVE, type LendOrderStatus } from "./ledger-lend-schema.js";
 import { queueTimeoutDue, sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
@@ -188,7 +188,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (live) throw new LedgerError("conflict", `这张卡已有未结的出借单 ${live.orderId}（先 lend-cancel，或 lend-reoffer）`);
     const n = (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE taskId = ? AND round = ?").get(task.id, task.round) as { n: number }).n;
     const orderId = `lend:${task.id}:s${task.specRev}:r${task.round}:a${n}`;
-    const made = orderFor(db, task, step, orderId, input);
+    const made = forPeer(db, ctx, task, orderFor(db, task, step, orderId, input)); // card heads shortened, refused finding ids aliased (i28-GATE2)
     const head = made.wire.head as string;
     let wire: OrderWire;
     let text: string;

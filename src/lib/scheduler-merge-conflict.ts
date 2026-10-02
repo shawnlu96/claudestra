@@ -11,7 +11,7 @@ import { settleIntent } from "./ledger-scheduler-settle.js";
 import { canTransition, nextTaskState, type LedgerEvent } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent } from "./ledger-tx.js";
-import { ciRerunClaim, ciRerunOrBounce } from "./scheduler-merge-ci-rerun.js";
+import { ciBehindClaim, ciBehindOrRerun } from "./scheduler-merge-ci-behind.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
@@ -108,7 +108,7 @@ type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 export async function bounceStep(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, only?: BounceCause): Promise<MergeRun | null> {
   const cause = bounceOf(run, pr, only);
   if (!cause) return null;
-  if (cause === "ci_fail") return ciRerunOrBounce(run, pr, external, step, failedRequired(run, pr.checks), bounceReceipt); // i28-CIF1
+  if (cause === "ci_fail") return ciBehindOrRerun(run, pr, external, step, failedRequired(run, pr.checks), bounceReceipt); // i28-CIF1 → CIF2
   const { mainHead } = await external.freshness(run.prRef, pr.head);
   return step("resolved", bounceReceipt({ cause, prHead: pr.head, mainHead, checks: [] }));
 }
@@ -173,7 +173,8 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
   const now = ctx.now ?? Date.now();
   const receipt = rawReceipt?.trim() ?? "";
   if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt)) throw new LedgerError("invalid", "回执要是单行且不超过 600 字");
-  const own = ciRerunClaim(db, ctx, row, receipt, drift, bounceReceipt, insertEvent); // null: a CI re-run was claimed, the run keeps its phase
+  // null: a CI re-run was claimed (the run keeps its phase, i28-CIF1) or update-branch was claimed (→ updating, i28-CIF2)
+  const own = ciBehindClaim(db, ctx, row, receipt, drift, bounceReceipt, insertEvent);
   if (own === null) return;
   const b = parseBounceReceipt(own);
   if (!b) {

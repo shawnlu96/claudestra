@@ -1,5 +1,4 @@
-import { finishFirst } from "./scheduler-agent-pool.js";
-import { driveConvergence } from "./fix-strategy-tick.js";
+import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
  * `ledger scheduler-*` CLI under the scheduler identity, which re-checks inside its own transaction. Per card at most
@@ -27,12 +26,14 @@ import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
 import { peerPrHold } from "./peer-pr-hold.js";
+import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
 import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
+import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -238,7 +239,7 @@ class Card {
     }
     if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
-    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice();
+    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
     return r.code === "conflict" ? this.cancelStale(intent, String(r.error)) : this.out("held", String(r.error));
   }
@@ -258,10 +259,10 @@ class Card {
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
   /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
-  async diffNotice(): Promise<void> {
+  async diffNotice(downgraded: string | null): Promise<void> {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
-      `，报告 ${String(rv?.data.path ?? "（无）")}`;
+      `，报告 ${String(rv?.data.path ?? "（无）")}${downgraded ? `；${downgraded}` : ""}`;
     await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
@@ -366,7 +367,9 @@ class Card {
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
-    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
+    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
+      : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
+      : plan.action === "merge" ? mergeSlotHold(this.task) : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);
@@ -374,7 +377,6 @@ class Card {
     return this.drive(intent, plan);
   }
 }
-
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
