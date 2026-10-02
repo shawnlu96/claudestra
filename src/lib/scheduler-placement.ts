@@ -25,7 +25,8 @@ export interface PeerFacts {
   open: number;
   /** The borrow entry's tier; absent = balance. */
   priority?: Priority;
-  v2: { why: string | null; slots: Readonly<Record<AuthorFamily, number>>; roles: readonly LendRole[]; repos: readonly string[] } | null;
+  v2: { why: string | null; slots: Readonly<Record<AuthorFamily, number>>; roles: readonly LendRole[]; repos: readonly string[];
+    familyTotals?: Readonly<Record<AuthorFamily, number>> } | null;
 }
 
 export interface PlacementFacts {
@@ -38,7 +39,7 @@ export interface PlacementFacts {
   local: { running: number; room: boolean };
   /** `peer:<name>` that start_node pinned the card's writing to; null = not pinned. */
   pin: string | null;
-  /** Peers already offered this round and head: each is tried once, then the next one or local. */
+  /** Spent attempts this round/head exclude unpinned peers; temporary push refusals use a separate retry gate. */
   tried: readonly string[];
   lastPeer: string | null;
   /** Peer holding the card's write lease now: a fix can only go back there (it pushes the lend/ branch). */

@@ -1,8 +1,8 @@
 import { localReviewFallback } from "./scheduler-local-families-placement.js";
 /**
  * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
- * card pinned to a peer never starts writing anywhere else. Facts come from the snapshot; the decision is placeFor
- * (scheduler-placement.ts). Each hook answers a peer, a wait (pin / write lease / local tier off), or null = local as before.
+ * card pinned to a peer never starts writing anywhere else. Snapshot facts pass through placeWithRetries for temporary
+ * refusal debounce, then family/tier placement. Each hook answers a peer, a wait, or null = local as before.
  * Proto-1 peers keep the i28-R9 rule unchanged (poolTarget in overflow mode: only when local reviewers are full, Codex
  * only, one attempt per round), with its exact intent text, so a machine with no v2 peer plans as it did before W5.
  * tests/scheduler-placement-plan.test.ts, tests/scheduler-no-peer-parity.test.ts.

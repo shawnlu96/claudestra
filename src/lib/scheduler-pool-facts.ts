@@ -87,7 +87,8 @@ function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
   const row = getLendPeer(db, b.peer);
   if (!row || row.proto < 2) return null;
   const cap = peerCapacity(db, b.peer, b.maxOpen, now);
-  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
+  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [],
+    familyTotals: { claude: row.slots.claude.total, codex: row.slots.codex.total } };
 }
 
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */

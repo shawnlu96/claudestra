@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { answerPush, recordHello } from "../src/lib/ledger-lend-peers.js";
-import { listLendOrders } from "../src/lib/ledger-lend.js";
+import { claimLend, leaseLend, listLendOrders } from "../src/lib/ledger-lend.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
@@ -33,10 +33,10 @@ async function ready(stage: "build" | "review", pinned = false) {
   const cli = (...args: string[]) => f.cliWith({ lend }, "scheduler", ...args);
   const tick = () => schedulerAutoTick(f.db, { p: policy }, { ...f.tickDeps, borrow: async () => borrow, manager: (...args) => cli(...args.slice(1)) });
   let seq = 0;
-  const hello = (busy = 0, left = 50, paused = false, replay = false) => recordHello(f.db, "mate", null, {
+  const hello = (busy = 0, left = 50, paused = false, replay = false, claudeTotal = 2) => recordHello(f.db, "mate", null, {
     v: 1, proto: 2, boot: "boot-mate", seq: replay ? seq : ++seq,
     grant: { until: f.tickDeps.now() + 3_600_000, roles: ["review", "write"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: left },
-    slots: { claude: { total: 2, busy }, codex: { total: 0, busy: 0 } },
+    slots: { claude: { total: claudeTotal, busy }, codex: { total: 0, busy: 0 } },
     paused: paused ? { reason: "manual", until: f.tickDeps.now() + 60_000 } : null,
   }, f.tickDeps.now());
   const orders = () => listLendOrders(f.db, "T1");
@@ -107,3 +107,63 @@ for (const code of ["no_grant", "role", "repo"]) test(`ledger ${code} never reof
     expect(p.orders()).toHaveLength(1);
   } finally { p.f.close(); }
 });
+
+for (const stage of ["review", "build"] as const) test(`${stage}: real hello distinguishes exhausted slots from revoked family`, async () => {
+  const p = await ready(stage);
+  try {
+    await p.tick();
+    p.refuse();
+    await p.tick();
+    p.f.advance(120_000);
+    p.hello(2);
+    expect(p.plan()).toMatchObject({ kind: "wait", reason: expect.stringContaining("等 mate 空位") });
+    p.hello(0, 50, false, false, 0);
+    expect(p.plan()).toMatchObject(stage === "review" ? { action: "ensure_session" } : { action: "dispatch", recipient: "agent-task-one" });
+    expect(p.orders()).toHaveLength(1);
+  } finally { p.f.close(); }
+});
+
+for (const prior of ["timeout", "claimed_return"] as const) {
+  for (const newHello of [true, false]) test(`ADV-1/1c: pinned ${prior} then no_slot, new hello=${newHello}`, async () => {
+    const p = await ready("build", true);
+    try {
+      expect((await p.tick()).cards[0].step).toBe("pool_pooled");
+      if (prior === "timeout") {
+        p.f.advance(15 * 60_000 + 1000);
+        p.hello();
+        expect((await p.tick()).cards[0].step).toBe("pool_timeout");
+      } else {
+        const orderId = p.orders()[0].orderId;
+        const ctx = { actor: "owner", now: p.f.tickDeps.now() };
+        claimLend(p.f.db, ctx, "mate", { v: 1, orderId, worker: "w1" },
+          () => ({ peer: "mate", projects: ["p"], roles: ["write"], maxOpen: 2 }));
+        expect(p.orders()[0].status).toBe("claimed");
+        leaseLend(p.f.db, ctx, "mate", { v: 1, orderId, gen: 1, action: "release", reason: "not_started", detail: "clone failed" });
+        expect((await p.tick()).cards[0].step).toBe("pool_returned");
+      }
+      expect((await p.tick()).cards[0].step).toBe("pool_pooled");
+      expect(p.orders()).toHaveLength(2);
+      expect(p.refuse().withdrawn).toHaveLength(1);
+      expect((await p.tick()).cards[0].step).toBe("pool_returned");
+      p.f.advance(10_000);
+      if (newHello) p.hello();
+      for (let n = 0; n < 4; n++) {
+        expect(p.plan()).toMatchObject({ kind: "wait", code: "placement_pinned", reason: expect.stringContaining("2 分钟") });
+        await p.tick();
+        expect(p.orders()).toHaveLength(2);
+        p.f.advance(15_000);
+      }
+      p.f.advance(50_000);
+      if (!newHello) {
+        expect(p.plan()).toMatchObject({ kind: "wait", reason: expect.stringContaining("新 hello") });
+        await p.tick();
+        expect(p.orders()).toHaveLength(2);
+        p.hello();
+      }
+      expect(p.plan()).toMatchObject({ kind: "intent", recipient: "peer:mate" });
+      expect((await p.tick()).cards[0].step).toBe("pool_pooled");
+      expect(p.orders()).toHaveLength(3);
+      expect(getWriteLease(p.f.db, "T1")?.state).toBe("held");
+    } finally { p.f.close(); }
+  });
+}
