@@ -1,13 +1,12 @@
-# i28-V1p · specRev 2 自查
+# i28-CL5 · specRev 1 自查
 
-订单：lend:i28-V1p:s2:r1:a2。基线 625b82dd72423d05d9cb65282fd40e6a4ceb8c3d，仅修改 lend/i28-V1p-9109；不自行 push。
+订单 lend:i28-CL5:s1:r0:a5；基线 cf0eb7b25817629c934a2b30462ddce13c9a412b；仅在 lend/i28-CL5-9109 提交，推送及 PR 由出借服务执行。
 
-1. 总览体积：50/500 张已完成 + 30 张在跑分别 53,171/53,193 B，差 22 B。补充 overview-deps 场景：1 张在跑依赖 50/500 张已完成为 20,030/20,035 B，差 5 B。最近窗口 30 张，依赖窗口按完成时间另保留至多 30 张；窗口外聚合计数，deps 两端均在总览才返回；详情保留全量依赖。
-2. 分页：固定快照每页 7/50/100 张验证游标连续、同毫秒次序、不重不漏；已有窗口移动补段测试通过。分页后子 DAG 已完成节点状态正确。cursor-backfill 按 PM 仲裁不修改。
-3. **生产字节数待 PM 实测**。出借机没有该生产库；PM 已在 ask_muq0t0sq909c546cf0 答复中明确：生产库不外发，本项改为 PM 合并后经中继实测。上述数据为测试库测量，不冒充生产值。
-4. 截图：ledger/reviews/i28-V1p-shots/，浅/深色 × 手机 390px/桌面 × 首屏/翻页，共 8 张。真实 Chromium 渲染 MobileList/Outline，真实读侧函数处理夹具请求；手机首屏及分页项均有步骤点，无横向溢出、无 pageerror。真实分页请求模拟 503：保留已有行，约 2 秒后自动重试同一游标成功。
-5. 根 tsc 0 error、guard 通过；web tsc 0 error，全 web eslint 0 error（34 warnings），改动的 web 文件 eslint 0 warning。针对性 6 文件 72 测试通过，浏览器 4 测试通过。bun run check 全量结果：9875 pass、9 skip、113 fail（750 文件）；失败含 DAG 开工/放置、usage-cache-write、出借身份相关权限测试，其中两文件单独运行也复现 11 fail；未改这些模块，全量以 PR CI 三项为准。
-6. today-cap：今日完成和最近窗口同限 30；额外依赖不能绕过今日上限。当天 50/500 张 + 30 在跑为 74,097/74,102 B，差 5 B。分页查询步骤行，返回 stepLine；手机「更早完成」显示分页卡步骤点，涵盖当日溢出卡。
-7. 跨时区：服务端 Asia/Shanghai、浏览器 America/Los_Angeles；在服务端昨日、浏览器今日完成的卡，首屏和翻页均有步骤点。保留客户端 dayStart；分页步骤点不按服务器零点裁剪。
+1. 登录失效：调度桩以 loggedIn:true、未知额度启动 Claude，真实生产 failure 接线读取该 worker 自身 JSONL。下一轮停止 worker、退租 stopped 并通知，原因明确写 Claude authentication_error / OAuth 刷新失败；Claude 零位，Codex 容量及 pause:codex 不变。包含 create 返回前 bootstrap 已失败、首条派单尚未送达的回归。
+2. 额度上限：复用 quota-wall-text / autopilot-run 解析重置时间；持久化 pause:claude，hello 与收单共享暂停判定。到重置时间恢复；更新的明确不满快照可提前恢复，满快照只延长截止，未知/旧快照不解闸。重复 hello、新 auth 探测、kill 重试不缩短或滑动冷却。退单 detail 仅传固定额度分类和重置时间，借入方可识别冷却；未改变 QP3 的借入方 hello 处理。
+3. auth status：真实假子进程输出 loggedIn:true 但 exit 1，仍判不可用且说明非零退出；打印成功 JSON 后挂住，超时杀子进程并报零位。测试没有调用真实模型或登录凭据。
+4. 登录恢复：必须有失败之后新开始的成功 auth 探测，先恢复每个授权 1 个试单位；新 worker 的真实 assistant 响应确认正常后清除 auth 暂停并恢复全部位。旧探测晚返回 true 不覆盖新失败。测试实际接收并启动下一单，再确认全量恢复。
+5. 验证：最终相关回归 13 文件 120 pass / 0 fail；根 tsc 通过；GUARD_STRICT=1 guard 通过；bridge、channel-server、manager、launcher、cron、setup 六入口 build 通过；git diff --check 通过。
+   扩展 lend 回归：743 pass / 17 fail（74 文件），失败涉及管理命令权限与收单子进程等，现场有出借 worker 身份守卫拒绝。已执行 bun run check：10835 pass / 20 skip / 116 fail（868 文件），失败含管理身份/DAG、ACP stub 等，未宣称全量绿色，未修改这些范围外模块。PR head 的 CI 三项仍由合并闸核对。
 
-范围：代码与测试全部在 fileGlobs 内；没有新增范围外 web 接入口。截图与本交付文件按要求附带。
+范围：新增 lend-claude-pause*.ts；drive 仅失败查询接线净增 1 行，文件 394 行；deps 净增 1 行。PM 经 ask_muqlszhgdcbefd57a1 准许 ready.ts 最小接线，实际净增 3 行（上限 6）。不改 lend-health.ts、lend-inbox.ts、lend-quota-reset*.ts；原目标 5 / 验收线 6 已撤回，保留 CLP 回归。本摘要及自查按交付要求更新。
