@@ -20,6 +20,7 @@ import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
 import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
+import { isAcpChannel } from "./acp-state.js";
 import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
 
 type Socket = { send(data: string): void };
@@ -38,10 +39,11 @@ const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }
 const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
-type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true };
+type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean };
 const calls = new Map<string, { channelId: string; ws: Socket; op: unknown; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> }>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
+const TURN_QUERY_MS = 5_000;
 
 const QUOTA_PREFIX = "acp_quota_";
 const PERM_PREFIX = "acp_perm_";
@@ -96,7 +98,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (!c || c.channelId !== channelId || c.ws !== ws) return;
       calls.delete(id);
       clearTimeout(c.timer);
-      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId } : {
+      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, ...(typeof msg.busy === "boolean" ? { busy: msg.busy } : {}) } : {
         ok: false, error: String(msg.error ?? "宿主拒绝"),
         ...(c.op === "clear" && typeof msg.sessionId === "string" ? { uncertain: true as const, sessionId: msg.sessionId } : {}),
       });
@@ -215,6 +217,13 @@ export const acpSlash = (channelId: string, text: string) => acpCall(channelId, 
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
 export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
+
+/** 宿主此刻有没有回合在途（AcpTurnLoop.busy，含排着没开的）。不是 ACP 宿主登记的频道、宿主不答、旧宿主不认这个调用 = null（调用方当未知） */
+export async function acpHostTurnBusy(channelId: string): Promise<boolean | null> {
+  if (!isAcpChannel(channelId)) return null;
+  const r = await acpCall(channelId, { op: "turn" }, TURN_QUERY_MS);
+  return r.ok && typeof r.busy === "boolean" ? r.busy : null;
+}
 
 function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<CallResult> {
   const ws = extensionSocketOf(channelId);

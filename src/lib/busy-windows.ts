@@ -4,6 +4,8 @@ import { paneIdleVerdict, paneLooksIdle, tmuxRaw, listAgentWindows, windowTarget
 import { codexBusy } from "./runtimes/codex-exit.js";
 import { wallWaitOf } from "./wall-screen.js";
 import { bridgeRequest } from "./bridge-client.js";
+import { acpTurnGate } from "./acp-turn-gate.js";
+import { notify } from "./notify.js";
 
 /** 一个窗口此刻算不算空闲。paneLooksIdle 只认 Claude Code 的画面，套在 Pi / Codex 上恒为「忙」
  *  ⇒ 升级闸门永远等不到全员空闲（tests/busy-windows.test.ts）。hook 运行时改走 paneIdleVerdict
@@ -21,35 +23,27 @@ export interface BusyProbe {
   agents: () => Promise<{ name: string; runtime?: string; transport?: string }[]>;
   windows: () => Promise<string[]>;
   capture: (target: string) => Promise<string>;
-  /** 这些 acp agent 里 bridge 认为正在回合中的（查不到就抛） */
-  acpBusy: (names: string[]) => Promise<string[]>;
+  /** 这些 transport=acp 的 agent 里挡住升级的（lib/acp-turn-gate.ts：只有宿主明确答空闲才不挡） */
+  acp: (names: string[], key?: string) => Promise<string[]>;
 }
 
 const LIVE: BusyProbe = {
   agents: () => readRegistryAgents(),
   windows: listAgentWindows,
   capture: (target) => tmuxRaw(["capture-pane", "-t", target, "-p"]),
-  acpBusy: async (names) => ((await bridgeRequest({ type: "turn_status", agents: names }, { timeoutMs: 5_000 })) as { busy: string[] }).busy,
+  acp: acpTurnGate({
+    query: (names) => bridgeRequest({ type: "turn_status", agents: names }, { timeoutMs: 10_000 }),
+    notify: (text) => notify({ source: "launcher", chatId: process.env.CONTROL_CHANNEL_ID || "", text }),
+    log: (msg) => console.warn(msg),
+  }),
 };
 
 /**
- * transport=acp 的窗口里是宿主日志，画面判据（含撞墙菜单，ACP 撞额度是回合失败 + bridge 的卡片，窗口里没有倒计时）一律不作数：
- * 只信 bridge 的回合态（投递置 thinking、宿主上报 Stop 置 done，bridge/turn-probe.ts answerTurnStatus）。
- * 查询失败（bridge 没起、旧 bridge 不认这个请求）按 unknown 放行——挡住就是永不升级。
- * ponytail: bridge 重启后到下一条事件前不知道宿主还在跑，那段时间按空闲放行；要更准得让宿主直接报 prompt 是否在途。
+ * 此刻在忙的窗口名（空数组 = master 与全体 agent 都空闲）。返回名字而非布尔：日志要说清是谁挡住的。
+ * transport=acp 的窗口不抓屏（宿主日志；ACP 撞额度是回合失败 + bridge 的卡片，窗口里也没有撞墙倒计时），交给 probe.acp。
+ * key = 这次要升到的版本，ACP 回合态一直查不到时按它去重往 #control 报。
  */
-async function acpBusyOrNone(names: string[], probe: BusyProbe): Promise<string[]> {
-  if (!names.length) return [];
-  try {
-    return (await probe.acpBusy(names)).filter((n) => names.includes(n));
-  } catch (e) {
-    console.warn(`⚠️ 问 bridge 的 ACP 回合态失败，${names.join(", ")} 按空闲放行：${(e as Error).message}`);
-    return [];
-  }
-}
-
-/** 此刻在忙的窗口名（空数组 = master 与全体 agent 都空闲）。返回名字而非布尔：日志要说清是谁挡住的。 */
-export async function busyAgentWindows(masterWindow: string, probe: BusyProbe = LIVE): Promise<string[]> {
+export async function busyAgentWindows(masterWindow: string, key?: string, probe: BusyProbe = LIVE): Promise<string[]> {
   const regOf = new Map((await probe.agents()).map((a) => [a.name, a]));
   const busy: string[] = [];
   const acp: string[] = [];
@@ -59,5 +53,5 @@ export async function busyAgentWindows(masterWindow: string, probe: BusyProbe = 
     if (controlFor(reg?.runtime, normalizeTransport(reg?.transport)).idleSource === "acp") acp.push(name);
     else if (!windowLooksIdle(reg?.runtime, await probe.capture(windowTarget(name)))) busy.push(name);
   }
-  return [...busy, ...(await acpBusyOrNone(acp, probe))];
+  return [...busy, ...(await probe.acp(acp, key))];
 }

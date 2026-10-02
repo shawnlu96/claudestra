@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { acpClear, acpConfigOf, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
+import { acpClear, acpConfigOf, acpHostTurnBusy, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { handleSlashPassthrough } from "../src/bridge/api-slash.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
@@ -457,6 +457,27 @@ describe("权限卡：按钮带代际、排队、经宿主确认（r4 P1-1 / P2�
     const pending = answerAcp(CH, after, who);
     expect(await hostAnswers(s2, true)).toMatchObject({ permId: "d-1" });
     expect((await pending).status).toBe(200);
+  });
+
+  test("问宿主回合态：只问 ACP 宿主登记的频道；答 busy 才算数，旧宿主拒绝 / 没带 busy = 未知", async () => {
+    const ch = "local-acp-turn";
+    const s = sock(ch);
+    noteAcpChannel(ch, "tmux");
+    expect(await acpHostTurnBusy(ch)).toBeNull();
+    expect(s.sent).toEqual([]);
+    noteAcpChannel(ch, "acp");
+    const answer = async (result: Record<string, unknown>) => {
+      const pending = acpHostTurnBusy(ch);
+      await new Promise((r) => setTimeout(r, 0));
+      const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+      expect(call).toMatchObject({ op: "turn" });
+      await onAcpFrame({ type: "acp_call_result", channelId: ch, id: call.id, ...result }, s, discord);
+      return pending;
+    };
+    expect(await answer({ ok: true, busy: true })).toBe(true);
+    expect(await answer({ ok: true, busy: false })).toBe(false);
+    expect(await answer({ ok: false, error: "不认识的调用 turn" })).toBeNull();
+    expect(await answer({ ok: true })).toBeNull();
   });
 
   test("宿主不在线：改配置直接失败，不挂着", async () => {

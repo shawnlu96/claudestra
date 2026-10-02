@@ -271,6 +271,21 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(h.sent.find((f) => f.id === "c2")).toMatchObject({ ok: false });
   }, 20_000);
 
+  test("acp_call turn：答回合在不在途（升级闸的权威来源），回合跑完回到空闲", async () => {
+    const h = start();
+    await until(h.isReady);
+    const turn = async (id: string) => {
+      h.frame({ type: "acp_call", id, op: "turn" });
+      await until(() => h.sent.some((f) => f.type === "acp_call_result" && f.id === id));
+      return h.sent.find((f) => f.id === id);
+    };
+    expect(await turn("t1")).toMatchObject({ ok: true, busy: false });
+    h.inbound("[stub:pause] 停一下");
+    expect(await turn("t2")).toMatchObject({ ok: true, busy: true });
+    await until(() => h.stops.length === 1);
+    expect(await turn("t3")).toMatchObject({ ok: true, busy: false });
+  }, 20_000);
+
   test("没登录：接线程回 -32000 → 出 auth 卡（不出条目），prompt 按失败收尾", async () => {
     const h = start({ STUB_AUTH_REQUIRED: "1" });
     await until(() => h.sent.some((f) => f.type === "acp_failure"));

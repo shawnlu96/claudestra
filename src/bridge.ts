@@ -558,7 +558,7 @@ import {
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
-import { answerTurnStatus, probeTurn } from "./bridge/turn-probe.js";
+import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
@@ -2211,7 +2211,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
-    case "turn_status": answerTurnStatus(ws, msg); break; // launcher 升级闸问 acp agent 在不在回合中（bridge/turn-probe.ts）
+    case "turn_status": void (await import("./bridge/acp-turn-status.js")).answerTurnStatus(ws, msg); break; // launcher 升级闸问 ACP 宿主有没有回合在途
     case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
     case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2

@@ -2,12 +2,13 @@
  * 升级闸门按运行时判忙闲：Pi 窗口拿 Claude Code 的判据恒为「忙」，自动更新 10 天等不到全员空闲。
  * 样本同 tests/pi-idle-verdict.test.ts（真实 capture-pane 抄的）。
  */
-import { beforeEach, describe, test, expect } from "bun:test";
+import { afterEach, describe, test, expect, setSystemTime } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { paneIdleVerdict, paneLooksIdle } from "../src/lib/tmux-helper.js";
 import { busyAgentWindows, windowLooksIdle, type BusyProbe } from "../src/lib/busy-windows.js";
-import { answerTurnStatus } from "../src/bridge/turn-probe.js";
+import { acpTurnGate, parseTurns, type AcpGateDeps } from "../src/lib/acp-turn-gate.js";
+import { answerTurnStatus } from "../src/bridge/acp-turn-status.js";
 import { __resetEventBusForTest, emitEvent } from "../src/bridge/event-bus.js";
 
 const RULE = "─".repeat(52);
@@ -66,10 +67,23 @@ const ACP_HOST_LOG = [
   "[21:45:04] ✅ 就绪（manager 在等的 @claudestra_ready 已写）",
 ].join("\n");
 
-const probe = (acpBusy: BusyProbe["acpBusy"], panes: Record<string, string> = {}): BusyProbe & { asked: string[][] } => {
+/** 假 bridge：query 返回给定回包（函数可抛），记下问过谁、发过什么通知 */
+function gateWith(reply: (names: string[]) => unknown, notifyOk = true) {
   const asked: string[][] = [];
+  const notices: string[] = [];
+  const logs: string[] = [];
+  const deps: AcpGateDeps = {
+    query: async (names) => (asked.push(names), reply(names)),
+    notify: async (text) => (notices.push(text), notifyOk),
+    log: (m) => void logs.push(m),
+  };
+  return { gate: acpTurnGate(deps), asked, notices, logs };
+}
+
+const turns = (t: Record<string, string>) => () => ({ turns: t });
+
+function probeWith(acp: BusyProbe["acp"], panes: Record<string, string> = {}): BusyProbe {
   return {
-    asked,
     agents: async () => [
       { name: "agent-pi_acp", runtime: "pi", transport: "acp" },
       { name: "agent-codex_acp", runtime: "codex", transport: "acp" },
@@ -78,54 +92,114 @@ const probe = (acpBusy: BusyProbe["acpBusy"], panes: Record<string, string> = {}
     ],
     windows: async () => ["agent-pi_acp", "agent-codex_acp", "agent-pi_tmux", "agent-cc"],
     capture: async (t) => panes[t.replace(/^.*:=?/, "")] ?? (t.includes("acp") ? ACP_HOST_LOG : CC_IDLE),
-    acpBusy: async (names) => (asked.push(names), acpBusy(names)),
+    acp,
   };
-};
+}
 
-describe("busyAgentWindows：transport=acp 只信 bridge 的回合态，不看画面", () => {
-  test("Pi acp 窗口是宿主日志：旧判据判忙（10-01 起挡了 beta 自动更新 118 个提交），现在宿主没报忙就放行", async () => {
+describe("busyAgentWindows：transport=acp 只信宿主答的回合态，fail-closed", () => {
+  test("Pi acp 窗口是宿主日志：画面判据恒判忙，现在不看画面，宿主答空闲才放行", async () => {
     expect(paneIdleVerdict(ACP_HOST_LOG)).toBe("busy");
-    const p = probe(async () => []);
-    expect(await busyAgentWindows("master:0", p)).toEqual([]);
-    expect(p.asked).toEqual([["agent-pi_acp", "agent-codex_acp"]]);
+    const g = gateWith(turns({ "agent-pi_acp": "idle", "agent-codex_acp": "idle" }));
+    expect(await busyAgentWindows("master:0", "abc1234", probeWith(g.gate))).toEqual([]);
+    expect(g.asked).toEqual([["agent-pi_acp", "agent-codex_acp"]]);
   });
 
-  test("宿主报忙 → 挡（Codex acp 画面里没有 esc to interrupt 也照挡）", async () => {
-    expect(await busyAgentWindows("master:0", probe(async () => ["agent-codex_acp"]))).toEqual(["agent-codex_acp"]);
+  test("宿主答在途 → 挡（Codex acp 画面里没有 esc to interrupt 也照挡）", async () => {
+    const g = gateWith(turns({ "agent-pi_acp": "idle", "agent-codex_acp": "busy" }));
+    expect(await busyAgentWindows("master:0", "abc1234", probeWith(g.gate))).toEqual(["agent-codex_acp"]);
   });
 
-  test("查询失败（bridge 没起 / 旧 bridge 不认 turn_status）→ 放行；bridge 报了不在问题里的名字不算", async () => {
-    expect(await busyAgentWindows("master:0", probe(async () => { throw new Error("Bridge 请求超时 (5s)"); }))).toEqual([]);
-    expect(await busyAgentWindows("master:0", probe(async () => ["agent-cc"]))).toEqual([]);
+  test("查询失败 / 超时 / 旧 bridge 回 error / 回包缺字段或值认不出 → 这次问的 ACP 窗口全挡，并记日志", async () => {
+    const bad: ((names: string[]) => unknown)[] = [
+      () => { throw new Error("Bridge 请求超时 (10s)"); },
+      () => null,
+      () => ({ busy: [] }),
+      () => ({ turns: { "agent-pi_acp": "idle", "agent-codex_acp": true } }),
+    ];
+    for (const reply of bad) {
+      const g = gateWith(reply);
+      const busy = await busyAgentWindows("master:0", "abc1234", probeWith(g.gate));
+      expect(busy).toEqual(reply === bad[3] ? ["agent-codex_acp"] : ["agent-pi_acp", "agent-codex_acp"]);
+      expect(g.logs.some((m) => m.includes("按忙挡住"))).toBe(true);
+    }
+    expect(parseTurns({ turns: { "agent-x": "idle", "agent-y": "idle" } }, ["agent-x"])).toEqual({ "agent-x": "idle" }); // 没问的名字不算
   });
 
-  test("tmux 版 Pi / CC 与 master 照旧按画面判，不问 bridge", async () => {
-    const p = probe(async () => [], { "agent-pi_tmux": PI_BUSY, "agent-cc": CC_BUSY, "0": CC_BUSY });
-    expect(await busyAgentWindows("master:0", p)).toEqual(["master", "agent-pi_tmux", "agent-cc"]);
-    const idle = probe(async () => [], { "agent-pi_tmux": PI_IDLE });
-    expect(await busyAgentWindows("master:0", idle)).toEqual([]);
+  test("tmux 版 Pi / CC 与 master 照旧按画面判；没有 ACP 窗口就不问 bridge", async () => {
+    const g = gateWith(turns({}));
+    const panes = { "agent-pi_tmux": PI_BUSY, "agent-cc": CC_BUSY, "0": CC_BUSY };
+    const tmuxOnly: BusyProbe = { ...probeWith(g.gate, panes), windows: async () => ["agent-pi_tmux", "agent-cc"] };
+    expect(await busyAgentWindows("master:0", "abc1234", tmuxOnly)).toEqual(["master", "agent-pi_tmux", "agent-cc"]);
+    expect(await busyAgentWindows("master:0", "abc1234", { ...tmuxOnly, capture: async (t) => (t.endsWith("pi_tmux") ? PI_IDLE : CC_IDLE) })).toEqual([]);
+    expect(g.asked).toEqual([]);
   });
 });
 
-describe("answerTurnStatus（bridge 侧 ws turn_status）", () => {
-  const ask = (agents: unknown, now?: number) => {
-    let sent = "";
-    answerTurnStatus({ send: (d) => void (sent = d) }, { requestId: "r1", agents }, now);
-    return JSON.parse(sent) as { type: string; requestId: string; result: { busy: string[] } };
-  };
-  beforeEach(() => __resetEventBusForTest());
+describe("回合态一直未知：挡着，但要让人看得见", () => {
+  const unknownPi = () => ({ turns: { "agent-pi_acp": "unknown", "agent-codex_acp": "idle" } });
 
-  test("thinking / compacting 算忙，done 与没有事件的不算；名字带不带 agent- 都认", () => {
-    emitEvent({ agent: "agent-a", chatId: "c1", type: "agent_status", data: { status: "thinking" } });
-    emitEvent({ agent: "b", chatId: "c2", type: "agent_status", data: { status: "compacting" } });
-    emitEvent({ agent: "agent-c", chatId: "c3", type: "agent_status", data: { status: "done" } });
-    expect(ask(["agent-a", "agent-b", "agent-c", "agent-d", 42])).toEqual({ type: "response", requestId: "r1", result: { busy: ["agent-a", "agent-b"] } });
-    expect(ask(undefined).result.busy).toEqual([]);
+  test("连续第二次未知才往 #control 报，同一版本同一批只报一次；换版本再报；没送到下次再试", async () => {
+    const g = gateWith(unknownPi);
+    const run = (key?: string) => g.gate(["agent-pi_acp", "agent-codex_acp"], key);
+    expect(await run("abc1234")).toEqual(["agent-pi_acp"]);
+    expect(g.notices).toEqual([]); // 第一次：可能只是 bridge 刚重启、宿主还在重连
+    await run("abc1234");
+    expect(g.notices).toHaveLength(1);
+    expect(g.notices[0]).toContain("agent-pi_acp");
+    expect(g.notices[0]).toContain("bun src/manager.ts restart pi_acp");
+    expect(g.notices[0]).toContain("abc1234");
+    await run("abc1234");
+    expect(g.notices).toHaveLength(1);
+    await run("def5678");
+    expect(g.notices).toHaveLength(2);
+    await run(undefined); // Claude Code 升级那条路不带版本：只挡不报
+    expect(g.notices).toHaveLength(2);
+
+    const flaky = gateWith(unknownPi, false);
+    for (let i = 0; i < 3; i++) await flaky.gate(["agent-pi_acp"], "abc1234");
+    expect(flaky.notices).toHaveLength(2); // 第 2、3 次都试着发（第 2 次没送到）
   });
 
-  test("卡在 thinking 一小时没有任何事件（宿主 Stop 丢了）→ 不再报忙，免得升级闸永远等", () => {
-    emitEvent({ agent: "agent-a", chatId: "c1", type: "agent_status", data: { status: "thinking" } });
-    expect(ask(["agent-a"], Date.now() + 59 * 60_000).result.busy).toEqual(["agent-a"]);
-    expect(ask(["agent-a"], Date.now() + 61 * 60_000).result.busy).toEqual([]);
+  test("中间宿主答过一次，未知的连续计数清零", async () => {
+    let reply: unknown = unknownPi();
+    const g = gateWith(() => reply);
+    await g.gate(["agent-pi_acp"], "abc1234");
+    reply = { turns: { "agent-pi_acp": "idle" } };
+    expect(await g.gate(["agent-pi_acp"], "abc1234")).toEqual([]);
+    reply = unknownPi();
+    await g.gate(["agent-pi_acp"], "abc1234");
+    expect(g.notices).toEqual([]);
+  });
+});
+
+describe("answerTurnStatus（bridge 侧 ws turn_status）：只信宿主答的，不信事件态", () => {
+  const REGS = [{ name: "agent-a", channelId: "ch-a" }, { name: "agent-b", channelId: "ch-b" }, { name: "agent-c", channelId: "ch-c" }];
+  const HOST: Record<string, boolean | null> = { "ch-a": true, "ch-b": false, "ch-c": null };
+  const ask = async (agents: unknown, deps: Parameters<typeof answerTurnStatus>[2] = { agents: async () => REGS, hostBusy: async (ch) => HOST[ch] ?? null }) => {
+    let sent = "";
+    await answerTurnStatus({ send: (d) => void (sent = d) }, { requestId: "r1", agents }, deps);
+    return JSON.parse(sent);
+  };
+  afterEach(() => setSystemTime());
+
+  test("宿主答在途 / 空闲 → busy / idle；宿主不答、不在 registry → unknown；非字符串忽略", async () => {
+    expect(await ask(["agent-a", "agent-b", "agent-c", "agent-d", 42])).toEqual({
+      type: "response", requestId: "r1", result: { turns: { "agent-a": "busy", "agent-b": "idle", "agent-c": "unknown", "agent-d": "unknown" } },
+    });
+  });
+
+  test("bridge 重启后事件态是空的、或卡在 thinking 静默超过一小时：宿主说在途就一直挡，说空闲才放", async () => {
+    __resetEventBusForTest();
+    expect((await ask(["agent-a"])).result.turns).toEqual({ "agent-a": "busy" });
+    emitEvent({ agent: "agent-a", chatId: "ch-a", type: "agent_status", data: { status: "thinking" } });
+    setSystemTime(new Date(Date.now() + 2 * 60 * 60_000));
+    expect((await ask(["agent-a"])).result.turns).toEqual({ "agent-a": "busy" });
+    expect((await ask(["agent-b"])).result.turns).toEqual({ "agent-b": "idle" });
+  });
+
+  test("读不了 registry → 回 error（launcher 当未知照挡）；回包发不出去也不抛", async () => {
+    const broken = { agents: async () => { throw new Error("registry 坏了"); }, hostBusy: async () => true };
+    expect(await ask(["agent-a"], broken)).toMatchObject({ type: "response", requestId: "r1", error: expect.stringContaining("registry 坏了") });
+    await answerTurnStatus({ send: () => { throw new Error("socket closed"); } }, { requestId: "r2", agents: ["agent-a"] });
   });
 });

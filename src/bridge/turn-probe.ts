@@ -8,7 +8,7 @@ import { MASTER_SESSION, tmuxRawStrict, windowTarget } from "../lib/tmux-helper.
 import { controlFor, normalizeTransport, type Transport } from "../lib/runtimes/index.js";
 import { paneClearlyIdle, turnState, type TurnState } from "../lib/turn-state.js";
 import { hasActiveBgActivities } from "./bg-activity-watcher.js";
-import { emitEvent, getAgentStatus, isBusyStatus, lastActivityAt } from "./event-bus.js";
+import { emitEvent, getAgentStatus, lastActivityAt } from "./event-bus.js";
 
 const norm = (agent: string) => agent.replace(/^agent-/, "");
 /** 大总管的窗口：固定是 master 会话的 index 0（名字只是标签，见 tmux-helper MASTER_WINDOW_NAME） */
@@ -57,20 +57,6 @@ export async function resolveTurnWindow(channelId: string, controlChannelId: str
   const regs = await readRegistryAgents().catch((e) => (console.warn(`⚠️ 判忙读 registry 失败: ${(e as Error).message}`), []));
   const reg = regs.find((a) => a.channelId === channelId);
   return { win: reg ? windowTarget(reg.name) : null, runtime: reg?.runtime, transport: normalizeTransport(reg?.transport) };
-}
-
-/**
- * 事件态卡在 thinking（宿主的 Stop 没送到、宿主中途崩了）时 ACP 没有画面可对账：这么久没有任何事件就不再报忙，
- * 否则升级闸永远等下去。ponytail: 单个工具调用静默超过一小时的真回合会被当空闲放行；宿主能报回合心跳后再收紧。
- */
-const ACP_STALE_MS = 60 * 60_000;
-
-/** ws `turn_status`：launcher 升级闸问这些 agent（transport=acp）谁在回合中。只看事件态，ACP 窗口里是宿主日志，画面不作数 */
-export function answerTurnStatus(ws: { send(data: string): unknown }, msg: { requestId?: unknown; agents?: unknown }, now = Date.now()): void {
-  const names = Array.isArray(msg.agents) ? msg.agents.filter((a): a is string => typeof a === "string") : [];
-  const fresh = (a: string) => now - Math.max(...namesOf(a).map(lastActivityAt)) < ACP_STALE_MS;
-  const busy = names.filter((a) => isBusyStatus(statusOf(a)) && fresh(a));
-  ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { busy } }));
 }
 
 /** 按频道判（bridge 的投递路径） */
