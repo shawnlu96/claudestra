@@ -71,7 +71,8 @@ export function planRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase, n
   const inherit = new Map(cur.nodes.map((n) => [n.key, n]));
   const nodes = next.map((n) => {
     const old = inherit.get(n.key);
-    return old && sameNode(old, n) ? { ...n, inheritedFrom: cur.version } : { ...n, inheritedFrom: null };
+    return { ...n, ...(old?.cardSlug !== undefined ? { cardSlug: old.cardSlug } : {}),
+      inheritedFrom: old && sameNode(old, n) ? cur.version : null };
   });
   if (nodes.length === cur.nodes.length && nodes.every((n) => n.inheritedFrom !== null)) throw new LedgerError("invalid", "新版本和当前版本一模一样，不用重写");
   return { nodes, cancels, needsOwner: scopeChange ? ["声明改 feature 范围或大改机制（--scope-change）"] : [] };

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { computeLanes, laneNodes } from "./dag-tools-lanes.js";
 import { renderExecPrompt } from "./dag-tools-prompt.js";
 import { effectiveNodes, getDagVersion, projectNodes, resolveFeature, type Feature } from "./ledger-feature.js";
+import { cardNames } from "./ledger-card-names.js";
 import { storedOrigin } from "./ledger-origin.js";
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { getItem, getTask } from "./ledger-store.js";
@@ -136,7 +137,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (node.taskId) return { ok: true, already: { taskId: node.taskId, key: node.key } };
   if (wait) return no("deps_unmet", `节点 ${node.key} 的依赖还没满足：${wait.on.join(", ")}`);
   if (!node.fileGlobs?.length) return no("no_globs", `节点 ${node.key} 没有 fileGlobs：先用 rewrite_dag 的 update 补上文件范围`);
-  const taskId = args.taskId ?? `${featureSlug(f, storedOrigin(env.db))}-${node.key}`;
+  const taskId = args.taskId ?? cardNames(env.db, f, node.key).taskId;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
   // 大小写不同的卡号也算占用：worktree / agent / 分支由小写卡号派生，Case-A 与 case-a 会落到同一个目录
   const taken = getTask(env.db, taskId) ?? (env.db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(taskId) as { id: string } | null);
