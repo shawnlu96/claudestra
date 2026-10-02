@@ -123,3 +123,30 @@ test("a remaining contract misfit names the location with fixed text and no fiel
     expect((error as Error).message).not.toContain("bad key");
   } finally { f.close(); }
 });
+
+// 敏感值跨截断边界:先对原文脱敏检查,不让截断留下低于检测阈值的片段
+const straddle: [keyof FitFields, number, string][] = [
+  ["reason", 2000, "$.manifest.features[0].versions[0].reason"],
+  ["oneLine", 2000, "$.manifest.features[0].versions[0].nodes[0].oneLine"],
+  ["estimate", 200, "$.manifest.features[0].versions[0].nodes[0].estimate"],
+  ["title", 300, "$.manifest.features[0].title"],
+  ["description", 16000, "$.manifest.features[0].description"],
+];
+for (const [field, max, at] of straddle) {
+  test(`a secret straddling the ${field} cut is blocked on the original text`, async () => {
+    const fake = "ab".repeat(20), total = max + 500;
+    const marker = `...(已截断,原文 ${total} 字)`;
+    const value = ("规".repeat(max - marker.length - 31) + fake + "规".repeat(total)).slice(0, total);
+    // 构造值确实落在截断边界上:截断后只剩前 31 位
+    expect(fitSharedLedgerText(value, max)).toContain(fake.slice(0, 31));
+    expect(fitSharedLedgerText(value, max)).not.toContain(fake);
+    const f = await fitLedger({ [field]: value });
+    try {
+      let error: unknown;
+      try { previewSharedLedgerExport(f.db, f.options); } catch (e) { error = e; }
+      expect(error).toBeInstanceOf(SharedLedgerScrubError);
+      expect((error as SharedLedgerScrubError).fields).toEqual([at]);
+      expect((error as Error).message).not.toContain(fake.slice(0, 8));
+    } finally { f.close(); }
+  });
+}

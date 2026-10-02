@@ -121,10 +121,19 @@ export async function sharedLedgerScrubWithCommits(base: SharedLedgerScrubContex
   return { ...base, commits };
 }
 
+/** Shortens only the upload copy of each contract-limited text field. */
+function fitSharedLedgerManifest(manifest: SharedLedgerImportManifest): SharedLedgerImportManifest {
+  const limit = sharedLedgerExportLimits();
+  return { ...manifest, features: manifest.features.map((feature) => ({ ...feature,
+    title: fitSharedLedgerText(feature.title, limit.title), description: fitSharedLedgerText(feature.description, limit.description),
+    versions: feature.versions.map((version) => ({ ...version, reason: fitSharedLedgerText(version.reason, limit.reason),
+      nodes: version.nodes.map((n) => ({ ...n, oneLine: fitSharedLedgerText(n.oneLine, limit.oneLine),
+        estimate: fitSharedLedgerText(n.estimate, limit.estimate) })) })) })) };
+}
+
 /** One read transaction fixes the watermark and every DAG/binding/task read; no migration or old ledger writes. */
 export function previewSharedLedgerExport(db: Database, options: SharedLedgerExportOptions): { payload: SharedLedgerImport; preview: string } {
-  const limit = sharedLedgerExportLimits();
-  const manifest = db.transaction((): SharedLedgerImportManifest => {
+  const original = db.transaction((): SharedLedgerImportManifest => {
     const seq = (db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq;
     const tasks = listTasks(db, options.localProject);
     const features = [...options.featureIds].sort().map((featureId) => {
@@ -138,17 +147,17 @@ export function previewSharedLedgerExport(db: Database, options: SharedLedgerExp
         const dag = getDagVersion(db, featureId, index + 1);
         if (!dag) throw new Error("export blocked: missing DAG version");
         const nodes = effectiveNodes(db, dag);
-        return { version: dag.version, reason: fitSharedLedgerText(dag.reasonText, limit.reason),
-          nodes: nodes.map((n) => ({ key: n.key, oneLine: fitSharedLedgerText(n.oneLine, limit.oneLine), deps: n.deps,
-            fileGlobs: n.fileGlobs ?? [], estimate: fitSharedLedgerText(n.estimate, limit.estimate) })),
+        return { version: dag.version, reason: dag.reasonText,
+          nodes: nodes.map((n) => ({ key: n.key, oneLine: n.oneLine, deps: n.deps,
+            fileGlobs: n.fileGlobs ?? [], estimate: n.estimate })),
           bindings: nodes.filter((n) => n.taskId).map((n) => ({ nodeKey: n.key, taskId: n.taskId! })) };
       });
       const boundIds = new Set(versions.flatMap((v) => v.bindings.map((b) => b.taskId)));
       const own = exportedTasks(tasks, featureId, boundIds);
       // Observation time comes from the captured source state, so repeated previews have the same digest.
       const observedAt = Math.max(feature.updatedAt, ...own.map((t) => t.updatedAt));
-      return { sourceFeatureId: featureId, title: fitSharedLedgerText(feature.title, limit.title),
-        description: fitSharedLedgerText(feature.ownerWords, limit.description), rev: feature.rev,
+      return { sourceFeatureId: featureId, title: feature.title,
+        description: feature.ownerWords, rev: feature.rev,
         authorityMode: mode.authorityMode, pendingProposal: false as const, versions,
         projection: { mode: "snapshot" as const, previousSourceSeq: 0, sourceSeq: seq, observedAt,
           tasks: own.map((t) => taskProjection(db, t, seq, options)),
@@ -157,6 +166,9 @@ export function previewSharedLedgerExport(db: Database, options: SharedLedgerExp
     });
     return { projectId: options.projectId, sourceInstanceId: options.sourceInstanceId, sourceSeq: seq, features };
   }).deferred();
+  // Scrub the untruncated text first: a cut could leave a secret fragment below every detector's threshold.
+  scrubSharedLedger({ manifest: original }, (value) => value, options.scrub);
+  const manifest = fitSharedLedgerManifest(original);
   let manifestDigest: string;
   try { manifestDigest = sharedLedgerManifestDigest(manifest); }
   catch (error) {
