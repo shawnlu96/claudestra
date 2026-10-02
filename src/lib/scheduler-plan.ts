@@ -12,6 +12,7 @@ import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 import { escalationDowngrade, convergeReview, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
 import { planConvergence, strategyWarning } from "./fix-strategy-plan.js";
+import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 
 export interface WorkerRef {
@@ -250,7 +251,7 @@ function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, down
       return makeIntent(s, node, "stage", "PM 未通过前后截图，进入 fix", [taskResource(s)], { targetStage: "fix", ...(downgrade ? { downgrade } : {}) });
     }
   }
-  return makeIntent(s, node, "stage", downgrade ? `审查通过（${downgrade.items.length} 项 P1 降为 P2），进入合并队列` : "审查通过，进入合并队列", [taskResource(s)], {
+  return makeIntent(s, node, "stage", downgrade ? `审查通过（${downgrade.items.length} 项 P1 降为 P2：${downgradeBrief(downgrade)}），进入合并队列` : "审查通过，进入合并队列", [taskResource(s)], {
     targetStage: "merge", pmDiffNotice: facts.findings.some((f) => f.severity === "P2"), ...(downgrade ? { downgrade } : {}),
   });
 }
