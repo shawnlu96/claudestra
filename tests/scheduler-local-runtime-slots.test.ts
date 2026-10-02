@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
@@ -52,7 +52,7 @@ test("six working sessions block; unknown creating reservations count and Claude
   }
 });
 
-test("current explicit steps override task agent and stale reviewers; bindings fill absent review steps", () => {
+test("current explicit steps override task agent and stale reviewers; idle scheduler bindings do not reserve slots", () => {
   const f = fixture();
   for (const stage of ["spec", "restate", "build", "fix"]) {
     f.task(stage, stage, `old-${stage}`);
@@ -63,7 +63,7 @@ test("current explicit steps override task agent and stale reviewers; bindings f
   f.db.run("PRAGMA foreign_keys = OFF");
   f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
     VALUES ('binding', 'reviewer', 'bound', 's', 'codex', 'acp', 'active', 'intent', 0, 0)`).run();
-  expect([...workingCodexAgents(f.ledgerPath)].sort()).toEqual(["bound", "do-build", "do-fix", "do-restate", "do-spec"]);
+  expect([...workingCodexAgents(f.ledgerPath)].sort()).toEqual(["do-build", "do-fix", "do-restate", "do-spec"]);
 });
 
 test("unreadable registry and missing or broken ledger fail closed without creating a database", async () => {
@@ -73,4 +73,61 @@ test("unreadable registry and missing or broken ledger fail closed without creat
   expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
   writeFileSync(f.registryPath, "bad JSON");
   expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
+});
+
+test("R1 delivered write/fix rows still reserve all six authors across repeated fix rounds", async () => {
+  const f = fixture();
+  for (let i = 0; i < 6; i++) { f.task(`fix-${i}`, "fix"); f.step(`fix-${i}`, `fix-${i}`, 0, "write", "agent", "delivered"); }
+  f.registry();
+  expect(workingCodexAgents(f.ledgerPath).size).toBe(6);
+  expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
+  for (let i = 0; i < 6; i++) f.step(`fix-${i}`, `fix-${i}`, 1, "fix", "agent", "delivered");
+  expect(workingCodexAgents(f.ledgerPath).size).toBe(6);
+});
+
+test("R1 old manual review step cannot hide the current scheduler reviewer", async () => {
+  const f = fixture();
+  for (let i = 0; i < 5; i++) f.task(`author-${i}`, "build");
+  f.task("review", "review", "waiting", 2); f.step("review", "old", 1);
+  f.db.run("PRAGMA foreign_keys = OFF");
+  f.agents.current = { runtime: "codex", status: "active" };
+  f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES ('review', 'reviewer', 'current', 's', 'codex', 'acp', 'active', 'intent', 0, 0)`).run();
+  f.db.query("UPDATE tasks SET headSHA = 'head' WHERE id = 'review'").run();
+  f.db.query(`INSERT INTO events (ts, actor, project, target, kind, data) VALUES (0,'owner','p','review','stage','{"to":"review","round":2}')`).run();
+  f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
+    VALUES ('dispatch','review','p','review','review','current',1,2,1,1,'head',1,'submitted','test',0,0)`).run();
+  f.registry();
+  expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(true);
+  expect(workingCodexAgents(f.ledgerPath).has("old")).toBe(false);
+  expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
+  f.db.query("UPDATE tasks SET round = 3 WHERE id = 'review'").run();
+  expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(false);
+});
+
+test("R1 real manual start and reviewer ensure use the current custom ledger before side effects", async () => {
+  const f = fixture();
+  for (let i = 0; i < 6; i++) f.task(`author-${i}`, "build");
+  f.registry();
+  const state = join(f.lockPath, "..", "state"); mkdirSync(state);
+  writeFileSync(join(state, "registry.json"), JSON.stringify({ agents: f.agents }));
+  writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: true, autoDispatch: true,
+    projects: { p: { repoDir: state, localAuthorRuntime: "codex", maxActiveWorkers: 6, requiredChecks: ["check"] } } }));
+  const root = new URL("../", import.meta.url).pathname;
+  const script = `import { openLedger } from ${JSON.stringify(root + "src/lib/ledger-store.ts")};
+    import { runStart } from ${JSON.stringify(root + "src/lib/dag-tools-steps.ts")};
+    import { autoTickDeps } from ${JSON.stringify(root + "src/lib/scheduler-auto-deps.ts")};
+    const db = openLedger(${JSON.stringify(f.ledgerPath)});
+    const io = { db: () => db, attempt: 'probe', manager: async () => ({ok:true}) };
+    const manual = await runStart(io, {project:'p',taskId:'new',feature:{id:'F'},key:'one'});
+    const reviewer = await autoTickDeps(db, {registryPath:${JSON.stringify(f.registryPath)}})
+      .ensure({id:'new',project:'p',agent:null},'reviewer','codex');
+    console.log(JSON.stringify({manual,reviewer}));`;
+  const child = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env,
+    CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: state }, stdout: "pipe", stderr: "pipe" });
+  const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  expect(code, error).toBe(0);
+  const result = JSON.parse(output);
+  expect(result.manual).toMatchObject({ code: "queued", error: expect.stringContaining("等待空槽") });
+  expect(result.reviewer).toMatchObject({ kind: "wait", reason: expect.stringContaining("等待空槽") });
 });

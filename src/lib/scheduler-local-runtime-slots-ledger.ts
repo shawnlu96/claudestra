@@ -15,18 +15,24 @@ export function workingCodexAgents(path = LEDGER_PATH): Set<string> {
       for (const row of tasks) {
         const task = toTask(row as Record<string, unknown>);
         const step = stepAtStage(steps.get(task.id) ?? [], task);
-        if (step) {
-          if (step.executorKind === "agent" && step.state === "assigned"
-            && (task.stage !== "review" || step.round === task.round)) agents.add(step.executor);
+        if (step && (task.stage !== "review" || step.round === task.round)) {
+          if (step.executorKind === "agent") agents.add(step.executor);
           continue;
         }
         if (task.stage !== "review") {
           if (task.agent) agents.add(task.agent);
           continue;
         }
-        // A scheduler binding is authoritative when no explicit review step was assigned.
+        // Review sessions survive fix rounds; only this round’s dispatched work makes the binding busy.
         const session = db.query(`SELECT agent FROM scheduler_sessions WHERE taskId = ? AND role = 'reviewer'
-          AND state = 'active' AND transport != 'peer' ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(task.id) as { agent: string } | null;
+          AND state = 'active' AND transport != 'peer' AND EXISTS (
+            SELECT 1 FROM scheduler_intents i JOIN events e ON e.target = i.taskId
+            WHERE i.taskId = scheduler_sessions.taskId AND i.recipient = scheduler_sessions.agent
+              AND i.action = 'review' AND i.status IN ('submitted','done','unknown') AND i.head = ?
+              AND e.kind = 'stage' AND json_extract(e.data, '$.to') = 'review'
+              AND json_extract(e.data, '$.round') = ? AND i.eventSeq > e.seq
+              AND e.seq = (SELECT MAX(seq) FROM events WHERE target = i.taskId AND kind = 'stage'
+                AND json_extract(data, '$.to') = 'review')) ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(task.id, task.headSHA, task.round) as { agent: string } | null;
         if (session) agents.add(session.agent);
       }
       return agents;
