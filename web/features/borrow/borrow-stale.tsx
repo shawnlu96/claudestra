@@ -21,7 +21,7 @@ export function StaleEntry({ s, view, canWrite, feed }: { s: StalePeer; view: Bo
   const row = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [repick, setRepick] = useState(false);
-  if (repick) return <NewPeer peer={s.peer} view={view} initMaxOpen={s.maxOpen} onCancel={() => setRepick(false)} onChanged={feed.load} />;
+  if (repick) return <NewPeer peer={s.peer} view={view} onCancel={() => setRepick(false)} onChanged={feed.load} />;
   const drop = async (el: HTMLElement) => {
     setBusy(true);
     await dropPeer(s.peer, feed, { fade: () => fadeOut(row.current), fail: () => shake(el) });

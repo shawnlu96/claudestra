@@ -20,6 +20,7 @@ const ALLOW: Record<string, string> = {
   "src/lib/paths.ts": "定义处",
   "src/lib/bridge-url.ts": "DEFAULT_BRIDGE_PORT 定义处",
   "src/pi/claudestra-extension.ts": "Pi 扩展只依赖 node: 模块，内联了 paths.ts 的同一条规则",
+  "src/lib/state-dir.ts": "状态目录定义处（只依赖 node: 模块，供 Pi 扩展安全 import；paths.ts 复用）",
   "src/lib/channel-instructions.ts": "给 agent 看的说明文字（~ 路径是给人读的）",
   "src/channel-server.ts": "给 agent 看的说明文字（归 P3b）",
   "src/setup.ts": "安装完成后打印的提示文字",
