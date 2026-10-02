@@ -40,7 +40,18 @@ function setup(t: PushTarget, o: PushOpts) {
   const dir = orderDir(t.orderId, root, "push");
   const env = { ...pickWorkerEnv(o.env ?? process.env), GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1" };
   const run: Run = o.run ?? ((argv, opts) => runBounded(argv, opts));
-  return { root, dir, env, url: lendRepoUrl(t.repo, o.env ?? process.env), run, git: (args: string[]) => run(["git", ...args], { cwd: dir, env, timeoutMs: TIMEOUT_MS }) };
+  const url = lendRepoUrl(t.repo, o.env ?? process.env);
+  const git = async (args: string[]) => {
+    // Append only for GitHub traffic: existing helpers keep priority, and lab/local git never needs gh.
+    const cred = url.startsWith("https://github.com/") && args.includes(url) ? ["-c", "credential.helper=!gh auth git-credential"] : [];
+    const r = await run(["git", ...cred, ...args], { cwd: dir, env, timeoutMs: TIMEOUT_MS });
+    if (cred.length && r.code !== 0 && DENIED.test(`${r.stdout}\n${r.stderr}`)) {
+      const auth = await run(["gh", "auth", "status", "--hostname", "github.com"], { cwd: dir, env, timeoutMs: 15_000 });
+      if (!auth.timedOut && auth.code !== 0) return { ...r, stderr: `${r.stderr || r.stdout}\ngh 未登录（或不在 PATH）` };
+    }
+    return r;
+  };
+  return { root, dir, env, url, run, git };
 }
 
 /** 新建推送目录，把工作副本的订单分支取成 refs/lend/work，返回它的 head */

@@ -242,7 +242,7 @@ describe("容量与协议版本如实（同一 now 下与 peerCapacity 逐字段
     for (const p of ["revoked", "expired", "spent"]) expect(by[p]!.capacity!.why).toBeTruthy();
   });
   test("projects：overflow / prefer 显示成 balance，off 原样；maxActiveWorkers 照抄；档位缺省 balance、角色缺省 review", async () => {
-    const local = { localPriority: "balance", roles: ["review"], repo: null, reviewFirst: [] };
+    const local = { agents: null, localPriority: "balance", roles: ["review"], repo: null, reviewFirst: [] };
     expect((await view()).projects).toEqual([
       { id: "claude-orchestrator", mode: "balance", maxActiveWorkers: 4, ...local },
       { id: "side", mode: "off", maxActiveWorkers: 1, ...local },

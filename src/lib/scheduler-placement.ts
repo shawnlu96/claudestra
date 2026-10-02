@@ -1,3 +1,5 @@
+import { placeAgentPool, poolPeerRefusal } from "./scheduler-agent-pool.js";
+import type { AgentPoolLoad } from "./scheduler-agent-pool.js";
 import { localFamilyRefusal } from "./scheduler-local-families-placement.js";
 /**
  * Shared slot pool placement (i28-W5), pure: where one ready node runs — this machine, a lend-v2 peer, or nowhere yet.
@@ -25,7 +27,8 @@ export interface PeerFacts {
   open: number;
   /** The borrow entry's tier; absent = balance. */
   priority?: Priority;
-  v2: { why: string | null; slots: Readonly<Record<AuthorFamily, number>>; roles: readonly LendRole[]; repos: readonly string[] } | null;
+  v2: { why: string | null; slots: Readonly<Record<AuthorFamily, number>>; roles: readonly LendRole[]; repos: readonly string[];
+    familyTotals?: Readonly<Record<AuthorFamily, number>>; familyBusy?: Readonly<Record<AuthorFamily, number>> } | null;
 }
 
 export interface PlacementFacts {
@@ -35,10 +38,10 @@ export interface PlacementFacts {
   /** GitHub owner/repo of the card; null = no peer can take it (a peer only gets coordinates). */
   repo: string | null;
   /** Local executors + reviewer sessions of the project, the card's own excluded; room = a new one may start now. */
-  local: { running: number; room: boolean };
+  local: { running: number; room: boolean; pool?: AgentPoolLoad; family?: AuthorFamily };
   /** `peer:<name>` that start_node pinned the card's writing to; null = not pinned. */
   pin: string | null;
-  /** Peers already offered this round and head: each is tried once, then the next one or local. */
+  /** Spent attempts this round/head exclude unpinned peers; temporary push refusals use a separate retry gate. */
   tried: readonly string[];
   lastPeer: string | null;
   /** Peer holding the card's write lease now: a fix can only go back there (it pushes the lend/ branch). */
@@ -47,7 +50,7 @@ export interface PlacementFacts {
   locksFree: boolean;
 }
 
-export type Placement = { kind: "local"; reason: string } | { kind: "peer"; peer: string; family: AuthorFamily; reason: string } | { kind: "wait"; reason: string };
+export type Placement = { kind: "local"; reason: string; family?: AuthorFamily } | { kind: "peer"; peer: string; family: AuthorFamily; reason: string } | { kind: "wait"; reason: string };
 
 export const PEER_PLACEMENT = "peer:";
 const lendRoleOf = (role: PlaceRole): LendRole => role === "review" ? "review" : "write";
@@ -64,6 +67,7 @@ export function peerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFamily):
 
 /** Why this peer cannot take the role now, or null. Every constraint is checked; proto 1 never qualifies here. */
 export function peerRefusal(f: PlacementFacts, p: PeerFacts | undefined, role: PlaceRole, family: AuthorFamily): string | null {
+  if (f.remote?.agents) return poolPeerRefusal(f, p, role, family);
   const lend = lendRoleOf(role);
   if (!p) return "不在借入名单里（或借入不含本项目）";
   if (!f.remote || f.remote.mode === "off") return "scheduler.json remote.mode = off";
@@ -101,6 +105,7 @@ function toPeer(f: PlacementFacts, name: string, role: PlaceRole, family: Author
 }
 
 export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
+  if (f.remote?.agents) return placeAgentPool(f, role, family);
   // The pin is where the card is written; its review is placed like any other (cross-family, possibly elsewhere).
   if (f.pin && role !== "review") {
     const name = f.pin.slice(PEER_PLACEMENT.length);

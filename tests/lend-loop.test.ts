@@ -101,12 +101,14 @@ describe("T94 前提不满足不 poll", () => {
     expect(h.ops().filter((o) => o === "poll")).toHaveLength(2);
   });
 
-  test("白名单外的仓库、非 codex 家族、非 review 步骤的单本地就不收", async () => {
+  test("白名单外仓库、未授权家族拒收；旧 review 授权收写单", async () => {
     const h = harness();
     h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, pollAfterMs: 30_000,
       orders: [{ ...polled("x1"), repo: "evil/repo" }, { ...polled("x2"), family: "claude" }, { ...polled("x3"), step: "write" }] } });
     await h.tick();
-    expect(getOrder(h.db, "x1") ?? getOrder(h.db, "x2") ?? getOrder(h.db, "x3")).toBeNull();
+    expect(getOrder(h.db, "x1")).toBeNull();
+    expect(getOrder(h.db, "x2")).toBeNull();
+    expect(getOrder(h.db, "x3")).toMatchObject({ state: "asked", preview: { step: "write" } });
   });
 });
 

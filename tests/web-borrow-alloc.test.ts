@@ -23,7 +23,7 @@ import { LedgerCli } from "../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
 import { schedulerRemoteCmds } from "../src/manager/ledger-scheduler-remote-cmds.js";
 import { BORROW_BOOLS, BORROW_FLAGS, buildBorrowSet } from "../src/manager/lend.js";
-import { reviewFirstFor, toggleRole, weekUsed, resetIn, clampMaxOpen, parseMaxOpen, localTierDisabled } from "@/features/borrow/borrow-model";
+import { localAgentsBody, weekUsed, resetIn, clampMaxOpen, parseMaxOpen } from "@/features/borrow/borrow-model";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const at = "2026-09-29T00:00:00Z";
@@ -197,13 +197,7 @@ describe("额度（只读参考，验收线 2）", () => {
 });
 
 describe("网页纯函数", () => {
-  test("toggleRole 至少留一个、顺序固定；reviewFirstFor；weekUsed 过重置给 null；resetIn；本机上限可到 0", () => {
-    expect(toggleRole(["review"], "write")).toEqual(["review", "write"]);
-    expect(toggleRole(["write", "review"], "review")).toEqual(["write"]);
-    expect(toggleRole(["review"], "review")).toBeNull();
-    const view = { projects: [{ id: "p", mode: "balance" as const, maxActiveWorkers: 1, reviewFirst: ["Sekai"] }, { id: "q", mode: "off" as const, maxActiveWorkers: 1 }] };
-    expect(reviewFirstFor(view, "Sekai")).toBe(true);
-    expect(reviewFirstFor(view, "mate")).toBe(false);
+  test("额度过重置给 null；本机名额可到 0", () => {
     expect(weekUsed({ codex: { weekUsedPct: 5, resetAt: 100 } }, "codex", 50)).toEqual({ pct: 5, resetAt: 100 });
     expect(weekUsed({ codex: { weekUsedPct: 5, resetAt: 100 } }, "codex", 100)).toBeNull();
     expect(weekUsed(null, "claude", 0)).toBeNull();
@@ -214,12 +208,9 @@ describe("网页纯函数", () => {
     expect(parseMaxOpen("0", 20)).toEqual({ value: 1, clamped: true });
   });
 
-  test("本机档位：mode=off（只用本机）时禁用，与锁 / 写权限无关；balance 时只看卡片本身；本机行用的就是它、上限步进器不受影响", () => {
-    expect(localTierDisabled(false, { mode: "off" })).toBe(true);
-    expect(localTierDisabled(false, { mode: "balance" })).toBe(false);
-    expect(localTierDisabled(true, { mode: "balance" })).toBe(true);
-    const src = readFileSync(join(import.meta.dir, "../web/features/borrow/borrow-alloc.tsx"), "utf8");
-    expect(src).toContain("rolesReadOnly disabled={localTierDisabled(disabled, p)}");
-    expect(src).toMatch(/<Stepper value=\{p\.maxActiveWorkers\}[^>]*disabled=\{disabled\}/);
+  test("本机两格分别提交，保留另一家族的名额；没有配置时首次创建 pool", () => {
+    expect(localAgentsBody({ agents: { claude: 2, codex: 5 } }, "claude", 0)).toEqual({ agents: { claude: 0, codex: 5 } });
+    expect(localAgentsBody({ agents: { claude: 0, codex: 5 } }, "codex", 8)).toEqual({ agents: { claude: 0, codex: 8 } });
+    expect(localAgentsBody({}, "codex", 5)).toEqual({ agents: { claude: 0, codex: 5 } });
   });
 });
