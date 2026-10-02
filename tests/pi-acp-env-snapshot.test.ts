@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 describe("ACP pi-env-snapshot 扩展", () => {
-  test("注册 session_start + agent_start，并在回调里写盘（piVersion 取本进程版本）", async () => {
+  test("注册 session_start + agent_start，并在回调里写盘（piVersion 走真实探测）", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-snap-acp-"));
     process.env.CLAUDESTRA_AGENT = "agent-acp-x";
     process.env.CLAUDESTRA_STATE_DIR = dir;
@@ -23,6 +23,7 @@ describe("ACP pi-env-snapshot 扩展", () => {
     mod.default(pi as never);
     expect(Object.keys(handlers).sort()).toEqual(["agent_start", "session_start"]);
     handlers.session_start({}, { sessionManager: { getSessionId: () => "sid-acp" } });
+    await new Promise((r) => setTimeout(r, 50)); // 写快照等 runningPiVersion() 落地
     const d = JSON.parse(readFileSync(join(dir, "pi-env", "agent-acp-x.json"), "utf8"));
     expect(d.piVersion).toBe("1.0.0");
     expect(d.sessionId).toBe("sid-acp");

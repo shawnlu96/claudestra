@@ -14,6 +14,20 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+/**
+ * 本进程**正在跑的** Pi 版本（写进快照的 piVersion；网页「本会话还在 X，重启后生效」横幅读它）。
+ *
+ * 取法：Pi 把自己的包作为**虚拟模块**提供给扩展 ⇒ `import("@earendil-works/pi-coding-agent").VERSION`
+ * 就是本进程的版本。**不要**用 `process.env.PI_VERSION` —— 真机实测（2026-10-02，ACP 会话）
+ * 那个变量根本不存在 ⇒ 快照会缺版本 ⇒ 横幅虽然消失但检测不出真正的版本漂移。
+ * 老版本 Pi 包名不同 ⇒ undefined（只是不提示重启，通道照常）。
+ */
+export const runningPiVersion = (): Promise<string | undefined> =>
+  import("@earendil-works/pi-coding-agent" as string).then(
+    (m) => (typeof (m as { VERSION?: unknown })?.VERSION === "string" ? (m as { VERSION: string }).VERSION : undefined),
+    () => undefined,
+  );
+
 /** 只用得到这几个查询方法（Pi 的扩展 API 子集，便于测试替身） */
 interface PiSnapshotApi {
   getAllTools?(): Array<{ name?: string } | string>;
