@@ -8,7 +8,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api/client";
 import { collabLoader, type Visibility } from "./collab-loader";
-import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
+import { useCollabSource } from "./team-source-context";
+import type { FollowOpts } from "./team-source";
 import { reduceAction, type ActionMap } from "./collab-action";
 import { cachedOverview, cacheOverview, clearOverview, setLedgerAccess } from "./collab-cache";
 import type { LedgerOverview, Stage } from "./collab-model";
@@ -44,6 +45,7 @@ export const pageVisibility: Visibility = {
 
 /** members：本项目的 agent（前端会话名）；别的项目的 agent 在跑什么与这里无关，不进此刻动作表 */
 export function useCollab(project: string, members: ReadonlySet<string>) {
+  const source = useCollabSource(project);
   const cached = cachedOverview(project);
   const [load, setLoad] = useState<CollabLoad>(cached ? { status: "ok", ov: cached.ov } : { status: "loading" });
   const [offset, setOffset] = useState(cached?.offset ?? 0);
@@ -60,7 +62,7 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
     // 切项目会整个重挂（collab-switch.tsx 按 project 加 key），load / advance 的初值就是这个项目的，这里不再重置
     prevStages.current = seen ? new Map((seen.tasks ?? []).map((t) => [t.id, t.stage])) : null;
     const reader = collabLoader({
-      fetch: (signal) => fetchLedger(project, signal),
+      fetch: (signal) => source.overview(signal),
       success: (ov) => {
         const prev = prevStages.current;
         const moved = prev ? (ov.tasks ?? []).find((t) => prev.has(t.id) && prev.get(t.id) !== t.stage) : undefined;
@@ -88,7 +90,7 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
       clearInterval(tick);
       reader.dispose();
     };
-  }, [project]);
+  }, [project, source]);
   const membersRef = useRef(members);
   useEffect(() => {
     membersRef.current = members;
@@ -105,21 +107,21 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
     reseed();
     void refetch();
   }, [refetch, reseed]);
-  const connected = useCollabStream(project, onOpen, refetch, onAction);
+  const connected = useCollabStream(project, onOpen, refetch, onAction, source.follow);
 
   const retry = useCallback(() => {
     clearOverview(project);
     setLoad({ status: "loading" });
     return refetch();
   }, [project, refetch]);
-  return { load, now: clock + offset, actions, connected, rev, advance, refetch: retry, reviewers: rv.map };
+  return { load, now: clock + offset, actions, connected, rev, advance, refetch: retry, reviewers: rv.map, source };
 }
 
 /**
  * 协作视图自己的一条 /events：连上（含重连）→ onOpen（清旧动作 + 全量重拉）；本项目的 ledger 事件去抖后 onLedger；其余交给 onAction。
  * 卸载、页面隐藏都断开，回前台再连；断线按 2s → 30s 退避重连。返回此刻连没连着。
  */
-function useCollabStream(project: string, onOpen: () => void, onLedger: () => Promise<void>, onAction: (e: BridgeEvent) => void): boolean {
+function useCollabStream(project: string, onOpen: () => void, onLedger: () => Promise<void>, onAction: (e: BridgeEvent) => void, follow: (o: FollowOpts) => Promise<void>): boolean {
   const [connected, setConnected] = useState(false);
   useEffect(() => {
     let alive = true;
@@ -144,7 +146,7 @@ function useCollabStream(project: string, onOpen: () => void, onLedger: () => Pr
         retry = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, RETRY_MAX_MS);
       };
-      followCollabEvents({
+      follow({
         signal: mine.signal,
         onOpen: () => {
           setConnected(true);
@@ -168,7 +170,7 @@ function useCollabStream(project: string, onOpen: () => void, onLedger: () => Pr
       disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [project, onOpen, onLedger, onAction]);
+  }, [project, onOpen, onLedger, onAction, follow]);
   return connected;
 }
 
@@ -176,6 +178,7 @@ export type DetailLoad = { status: "loading" } | { status: "error"; message: str
 
 /** 详情：打开某条任务时拉一次；总览每重拉一次（rev 变）就跟着重拉，保持和首页同一时刻 */
 export function useTaskDetail(project: string, id: string | null, rev: number): DetailLoad {
+  const source = useCollabSource(project);
   const [load, setLoad] = useState<DetailLoad>({ status: "loading" });
   const shown = useRef<string | null>(null);
   useEffect(() => {
@@ -183,7 +186,7 @@ export function useTaskDetail(project: string, id: string | null, rev: number): 
     const ctrl = new AbortController();
     // 换了任务才显示加载态；同一条任务的后台重拉不闪
     if (shown.current !== id) setLoad({ status: "loading" });
-    fetchLedgerTask(project, id, ctrl.signal).then(
+    source.task(id, ctrl.signal).then(
       (d) => {
         if (ctrl.signal.aborted) return;
         shown.current = id;
@@ -194,6 +197,6 @@ export function useTaskDetail(project: string, id: string | null, rev: number): 
       },
     );
     return () => ctrl.abort();
-  }, [project, id, rev]);
+  }, [project, id, rev, source]);
   return load;
 }
