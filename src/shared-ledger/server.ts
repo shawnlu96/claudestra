@@ -1,6 +1,7 @@
 import { SHARED_LEDGER_MAX_BODY_BYTES, SharedLedgerError } from "../lib/shared-ledger-contract.js";
 import { SHARED_LEDGER_AUTH_HEADERS as H } from "../lib/shared-ledger-auth.js";
 import { LedgerService } from "./service.js";
+import { joinHandler, SHARED_LEDGER_JOIN_PATH } from "./join.js";
 
 interface Limits { readTimeoutMs: number; requestsPerMinute: number; maxBodyBytes: number }
 const defaults: Limits = { readTimeoutMs: 5000, requestsPerMinute: 120, maxBodyBytes: SHARED_LEDGER_MAX_BODY_BYTES };
@@ -33,6 +34,7 @@ export async function readBody(request: Request, limit: number, timeout: number)
 export function createHandler(service: LedgerService, overrides: Partial<Limits> = {}, clock = Date.now) {
   const limits = { ...defaults, ...overrides };
   const buckets = new Map<string, { at: number; count: number }>();
+  const join = joinHandler(service.store);
   return async (req: Request, remote = "loopback"): Promise<Response> => {
     const now = clock();
     for (const [key, value] of buckets) if (now - value.at >= 60_000) buckets.delete(key);
@@ -46,6 +48,7 @@ export function createHandler(service: LedgerService, overrides: Partial<Limits>
     try {
       const body = await readBody(req, limits.maxBodyBytes, limits.readTimeoutMs);
       const url = new URL(req.url);
+      if (url.pathname === SHARED_LEDGER_JOIN_PATH) return join(req.method, body, remote, now);
       const result = service.handle({ method: req.method, path: url.pathname + url.search, body,
         bearer: /^Bearer ([^\s]+)$/.exec(req.headers.get("authorization") ?? "")?.[1] ?? "",
         publicKey: req.headers.get(H.key) ?? "", instanceId: req.headers.get(H.instance) ?? "",
