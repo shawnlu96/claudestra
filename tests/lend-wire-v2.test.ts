@@ -66,7 +66,7 @@ describe("请求", () => {
 
 describe("应答", () => {
   test("各接口成功体只认自己那几个字段", () => {
-    expect<unknown>(parseV2Response("hello", { ok: true, v: 1, ...helloAnswer() })).toEqual({ ok: true, value: { proto: 2, helloMs: 60_000, beatMs: 15_000 } });
+    expect<unknown>(parseV2Response("hello", { ok: true, v: 1, ...helloAnswer() })).toEqual({ ok: true, value: { proto: 3, helloMs: 60_000, beatMs: 15_000 } });
     bad(parseV2Response("hello", { ok: true, v: 1, ...helloAnswer(), applied: true }), "applied");
     const answer = { orderId: "o", verdict: "stale_gen", lease: null };
     expect<unknown>(parseV2Response("beat", { ok: true, v: 1, orders: [answer] })).toEqual({ ok: true, value: [answer] });
