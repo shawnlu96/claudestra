@@ -11,6 +11,7 @@ import { SHELL_SENTENCE } from "../lib/lend-grant-rules.js";
 import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, readLendContext, resolveContact, type Built } from "../lib/lend-policy.js";
 import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
 import { lendStopReason } from "../lib/lend-watchdog.js";
+import { readStoppedWorkSummary, stoppedWorkText } from "../lib/lend-work-retention.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
 import { probeAcpWorker } from "../lib/worker-liveness.js";
 import { parseLedgerArgs } from "./ledger-identity.js";
@@ -98,7 +99,9 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
   if (kind === "lend") {
     const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
       : eff.lending ? `出借中：${eff.lend.map((e) => e.peer + codexText(e)).join("、")}` : read.file.enabled ? "总开关开着，但没有仍有效的出借条目" : "不出借（总开关关）";
-    return output({ ...base, enabled: read.file.enabled, lending: eff.lending, declared: read.file.lend, effective: eff.lend, message });
+    const stoppedWork = readStoppedWorkSummary();
+    return output({ ...base, enabled: read.file.enabled, lending: eff.lending, declared: read.file.lend, effective: eff.lend, message,
+      stoppedWork, stoppedWorkText: stoppedWorkText(stoppedWork) });
   }
   const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
     : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}${e.priority ? `，档位 ${e.priority}` : ""}）`).join("；")}` : "什么都不外借";

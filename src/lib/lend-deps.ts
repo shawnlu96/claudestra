@@ -257,5 +257,5 @@ export const lendStep = (ledger: LedgerReader) => async (active: () => void, lea
   active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
   const journal = openLendJournal();
   guardJournalWrites(journal, active);
-  try { return await (await import("./lend-loop.js")).lendTick(lendDeps(journal, ledger, active, lease)); } finally { journal.close(); }
+  try { return await (await import("./lend-work-retention.js")).lendTickWithRetention(lendDeps(journal, ledger, active, lease), active); } finally { journal.close(); }
 };
