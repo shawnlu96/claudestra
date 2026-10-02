@@ -15,8 +15,9 @@ export async function lendFixMaterials(fp: string, q: { repo: string; base: stri
   return { fp, base: q.base, baseSha: null, report };
 }
 
-/** Only isolated Git commit references are shortened; embedded tokens still reach the refusal gate intact. */
-const shortSha = (s: string): string => s.replace(/(?<![\w])[a-f0-9]{40}(?![\w])/gi, (sha) => `${sha.slice(0, 12)}（SHA 已缩为 12 位）`);
+/** Only explicit prose separators delimit a SHA; token punctuation must reach the refusal gate unchanged. */
+const SHA_IN_PROSE = /(?<=^|[\s():,;"'!?\[\]{}，。：；“”‘’（）])[a-f0-9]{40}(?=$|[\s():,;"'!?\[\]{}，。：；“”‘’（）])/gi;
+const shortSha = (s: string): string => s.replace(SHA_IN_PROSE, (sha) => `${sha.slice(0, 12)}（SHA 已缩为 12 位）`);
 
 export function lendFixEnv(wire: OrderWire, bounce: { inputs: string[]; acceptance: string[] } | null | undefined, report: string | null): OrderWire {
   if (!bounce) return wire;
