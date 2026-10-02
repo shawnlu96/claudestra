@@ -1,10 +1,12 @@
 /**
  * `manager migrate --pi <agent> [--to tmux]`（src/manager/pi-acp-migration.ts）：只动点名的 Pi agent；切换走 transport 那条路；
  * acp 起不来就退回 tmux（沙箱不退）；切换前就被拒（registry 没动）不回退；--to tmux 是回退；会话 id 不变。
- * 端到端（沙箱真 pi）见 PR3 的证据，这里钉住决策逻辑。
+ * 端到端（沙箱真 pi）见 PR3 的证据，这里钉住决策逻辑。doctor 对 ACP 版 Pi 前置条件的检查也在这里。
  */
 import { describe, expect, test } from "bun:test";
 import { migratePi, parsePiMigrateArgs, PI_MIGRATE_USAGE, type PiMigrateDeps } from "../src/manager/pi-acp-migration.ts";
+import { piAcpDoctorChecks } from "../src/lib/doctor-acp.ts";
+import type { RegistryAgent } from "../src/lib/registry.ts";
 
 type Agent = { runtime?: string; transport?: string; sessionId?: string };
 
@@ -86,5 +88,29 @@ describe("回退：--to tmux", () => {
     expect(await migratePi(["pa", "--to", "tmux"], d)).toMatchObject({ ok: true, transport: "tmux" });
     expect(calls).toEqual(["agent-pa→tmux"]);
     expect(agents["agent-pa"].transport).toBe("tmux");
+  });
+});
+
+describe("doctor 的 Pi ACP 检查（lib/doctor-acp.ts）", () => {
+  const agents = [
+    { name: "agent-pa", runtime: "pi", transport: "acp", cwd: "/w/a" },
+    { name: "agent-pb", runtime: "pi", transport: "acp", cwd: "/w/b" },
+    { name: "agent-pt", runtime: "pi", transport: "tmux", cwd: "/w/t" },
+    { name: "agent-cx", runtime: "codex", transport: "acp" },
+  ] as RegistryAgent[];
+  const noClash = () => null;
+
+  test("没有 ACP 版 Pi 就不报（tmux 版 Pi、Codex 不算）", () => {
+    expect(piAcpDoctorChecks(agents.slice(2), { ok: false, reason: "找不到 pi" }, noClash)).toEqual([]);
+  });
+
+  test("pi 太旧 → fail 带原因；同名 MCP / reply 被筛掉的点名 agent，只查 ACP 版", () => {
+    const checked: string[] = [];
+    const clash = (a: RegistryAgent) => (checked.push(a.name), a.name === "agent-pb" ? "mcp.json 里有名为「claudestra」的 MCP server" : null);
+    const [version, mount] = piAcpDoctorChecks(agents, { ok: false, reason: "pi 0.98.0 太旧" }, clash);
+    expect(version).toMatchObject({ group: "Pi ACP", status: "fail", detail: "pi 0.98.0 太旧" });
+    expect(mount).toMatchObject({ status: "fail", detail: "agent-pb：mcp.json 里有名为「claudestra」的 MCP server" });
+    expect(checked).toEqual(["agent-pa", "agent-pb"]);
+    expect(piAcpDoctorChecks(agents, { ok: true }, noClash).map((c) => c.status)).toEqual(["ok", "ok"]);
   });
 });

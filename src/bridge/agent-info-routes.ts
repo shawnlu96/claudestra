@@ -41,7 +41,7 @@ const defaultIo: AgentInfoIo = {
 };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
-export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind">) => Record<string, unknown>;
+export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "transport">) => Record<string, unknown>;
 
 /**
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
@@ -60,6 +60,7 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       external: r?.external === true,
       kind: r?.kind ?? null,
       label: r?.label ?? null,
+      ...(r?.transport === "acp" ? { transport: "acp" } : {}), // 网页终端据此提示「这里只是宿主日志」
       archived: archived(name),
       // 顶栏徽章的数字 + 悬停时的 peer 名单（owner 2026-09-28）
       ...(sharedWith ? { sharedPeers: sharedWith.length, sharedWith } : {}),
