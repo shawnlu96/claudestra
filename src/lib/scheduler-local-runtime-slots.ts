@@ -46,8 +46,8 @@ export async function withCodexSlot<T>(run: () => Promise<T>, opts: CodexSlotOpt
     } else n = count(opts.registryPath ?? REGISTRY_PATH, opts.ledgerPath); }
     catch (e) { return wait(`无法核实 Codex 全机会话数，等待：${(e as Error).message}`); }
     if (n >= LOCAL_CODEX_LIMIT) return wait(`Codex 全机会话已达 ${LOCAL_CODEX_LIMIT}，等待空槽`);
-    const quotaWait = limits ? await poolQuotaWait(opts.family ?? "codex", opts.family === "claude" ? undefined : opts.codexQuota)
-      : opts.checkQuota ? await codexQuotaWait(opts.codexQuota) : null;
+    const quotaWait = limits ? await poolQuotaWait(opts.family ?? "codex", opts.family === "claude" ? undefined : opts.codexQuota, undefined, opts)
+      : opts.checkQuota ? await codexQuotaWait(opts.codexQuota, undefined, opts) : null;
     if (quotaWait) return quotaWait;
     if (!lock.held()) return wait("Codex 全机槽锁已失租，等待重试");
     return await owned.run(lock, run);
