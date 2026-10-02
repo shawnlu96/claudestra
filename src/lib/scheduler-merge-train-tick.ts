@@ -1,6 +1,6 @@
 /**
  * Merge train wiring: the durable state file, the ledger reads (candidates, member outcomes), the per-pass tick
- * (scheduler-auto-tick.ts) and the merge-driver hook (scheduler-merge-external.ts → withMergeTrain).
+ * (scheduler-pass.ts → mergeTrainPass, before the merge driver, under the pass's lease guard) and the merge-driver hook (scheduler-merge-external.ts → withMergeTrain).
  * State lives in `<stateDir>/merge-train/<project>.json` (atomic tmp+rename): the scheduler is its only writer, and the ledger
  * stays untouched, so no migration and no new ledger command. Test processes get no default context (no real gh, no state dir).
  */
@@ -18,6 +18,8 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { trainGh } from "./scheduler-merge-train-gh.js";
+import { runBounded } from "./run-bounded.js";
+import { notifyProjectPm } from "./pm-notify.js";
 import {
   clearedMember, formTrain, nextSkip, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
@@ -92,7 +94,7 @@ export function memberStatusOf(db: Database, taskId: string, head: string): Memb
   const task = getTask(db, taskId);
   const mode = (db.query("SELECT mode FROM task_workflows WHERE taskId = ?").get(taskId) as { mode: string } | null)?.mode;
   if (!task || task.stage !== "merge") return { kind: "gone", why: `阶段 ${task?.stage ?? "缺卡"}` };
-  if (task.headSHA?.toLowerCase() !== head.toLowerCase()) return { kind: "gone", why: `head 变成 ${task.headSHA?.slice(0, 12)}` };
+  if (task.headSHA?.toLowerCase() !== head.toLowerCase()) return { kind: "gone", why: `head 变成 ${task.headSHA?.slice(0, 12)}`, moved: true };
   if (mode !== "auto") return { kind: "gone", why: `流程改为 ${mode ?? "缺流程"}` };
   return { kind: "waiting" };
 }
@@ -119,7 +121,10 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
       const train: TrainDeps = { ...ctx, now: deps.now, requiredChecks: required, memberStatus: (id, head) => memberStatusOf(db, id, head),
         notify: async (s, text) => {
           const task = s.members.map((m) => getTask(db, m.taskId)).find(Boolean);
-          if (task) await deps.notifyPm(task, text).catch((e) => console.error(`⚠️ [merge-train] PM 通知没发出去（状态文件已记）：${(e as Error).message}`));
+          if (task) await deps.notifyPm(task, text).catch((e) => {
+            if (e instanceof SchedulerStopped) throw e; // a lost lease ends the pass, it is not a lost notice
+            console.error(`⚠️ [merge-train] PM 通知没发出去（状态文件已记）：${(e as Error).message}`);
+          });
         } };
       const live = ctx.store.load(project);
       if (live && live.phase !== "done") await stepTrain(live, train);
@@ -129,6 +134,25 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
       console.error(`⚠️ [merge-train] ${project}：${(e as Error).message}`);
     }
   }
+}
+
+/** Checked right before every gh spawn and again when it settles (as scheduler-pass.ts guards the merge driver's runner). */
+export const guardedCommand = (active: () => void, command: typeof runBounded = runBounded): typeof runBounded => async (...a) => {
+  active();
+  try { return await command(...a); } finally { active(); }
+};
+
+/**
+ * The service pass's entry (scheduler-pass.ts, right before mergeTick, so a drift voids the train before any member merges):
+ * every gh call and PM notice is checked against the pass's ownership / lease, and a stop ends the pass with SchedulerStopped.
+ */
+export async function mergeTrainPass(db: Database, projects: readonly string[], active: () => void,
+  ctx: TrainContext | null = trainContext(guardedCommand(active))): Promise<void> {
+  const alive = () => { try { active(); return true; } catch { return false; } };
+  await mergeTrainTick(db, projects, { now: Date.now, notifyPm: async (task, text) => {
+    active();
+    try { await notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive }); } finally { active(); }
+  } }, ctx);
 }
 
 /** File lists per PR head: without it every pass with no formable batch would re-list every queued PR. */
@@ -153,7 +177,7 @@ export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = d
   const io = { ...ctx, now: Date.now, notify: async () => {} };
   return {
     ...base,
-    train: (run: MergeRun, mainHead: string) => trainGate(ctx.store.load(run.project), run, mainHead, io),
+    train: (run: MergeRun) => trainGate(ctx.store.load(run.project), run, io),
     async merge(prRef, head) {
       return clearedMember(ctx.store.all(), prRef, head) ? ctx.gh.mergeMatchHead(prRef, head) : base.merge(prRef, head);
     },

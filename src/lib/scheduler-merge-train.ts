@@ -20,6 +20,7 @@ export const TRAIN_BRANCH = /^train\/(?!.*\.\.)[A-Za-z0-9_-][A-Za-z0-9._-]{0,79}
 export interface TrainCandidate { taskId: string; prRef: string; head: string }
 interface TrainMember extends TrainCandidate { files: string[] }
 type CarStatus = "new" | "assemble" | "ci" | "green" | "red" | "split" | "dropped";
+/** `created` = the branch may exist on GitHub: claimed (saved) before the create call, so cleanup deletes it even after a crash. */
 interface TrainCar {
   id: string; level: number; parent: string | null; members: string[]; branch: string; created: boolean; assembled: string[];
   pr: number | null; status: CarStatus; startedAt: number; failed?: { name: string; link: string }[]; summary?: string;
@@ -66,7 +67,7 @@ export interface TrainStore {
   nextSeq(project: string): number;
 }
 /** Ledger facts the engine needs, read by scheduler-merge-train-tick.ts. */
-export type MemberStatus = { kind: "waiting" } | { kind: "merged"; sha: string } | { kind: "gone"; why: string };
+export type MemberStatus = { kind: "waiting" } | { kind: "merged"; sha: string } | { kind: "gone"; why: string; moved?: boolean };
 export interface TrainDeps {
   gh: TrainGh; store: TrainStore; now(): number; requiredChecks: readonly string[];
   memberStatus(taskId: string, head: string): MemberStatus;
@@ -175,8 +176,9 @@ async function drifted(s: TrainState, deps: TrainDeps, ids: readonly string[]): 
 async function assemble(s: TrainState, car: TrainCar, deps: TrainDeps): Promise<void> {
   if (car.status === "new") {
     if (!TRAIN_BRANCH.test(car.branch)) throw new Error(`列车分支名不合法：${car.branch}`);
+    if (!car.created) { car.created = true; save(s, deps); } // claim first: a create that landed before a crash is still cleaned up
     await deps.gh.createBranch(s.repo, car.branch, s.base);
-    car.created = true; car.status = "assemble";
+    car.status = "assemble";
     save(s, deps);
   }
   for (const id of [...car.members]) {
@@ -304,7 +306,8 @@ async function stepSettling(s: TrainState, deps: TrainDeps): Promise<void> {
     if (st.kind === "merged") {
       s.merged.push({ taskId: id, sha: st.sha });
       await emit(s, deps, "merge", `${id} 已合并 ${short(st.sha)}`, { taskId: id, sha: st.sha });
-    } else if (st.kind === "gone") s.dropped.push(id);
+    } else if (st.kind === "gone" && st.moved && s.cleared.includes(id)) return voidTrain(s, deps, `${id} ${st.why}`);
+    else if (st.kind === "gone") s.dropped.push(id);
     save(s, deps);
   }
   const left = unsettled(s).filter((id) => s.cleared.includes(id));
@@ -317,6 +320,15 @@ async function stepSettling(s: TrainState, deps: TrainDeps): Promise<void> {
   if (unsettled(s).length) return;
   s.phase = "cleanup"; s.outcome = s.merged.length ? "merged" : "void";
   save(s, deps);
+}
+
+/** Remote heads of every verified member still to merge: one moved = the train tested something else (a crash can't hide it). */
+async function headsMoved(s: TrainState, gh: TrainGh): Promise<string | null> {
+  for (const id of unsettled(s).filter((x) => s.cleared.includes(x))) {
+    const m = member(s, id), head = await gh.prHead(m.prRef);
+    if (!sameSha(head, m.head)) return `${id} head 变成 ${short(head)}`;
+  }
+  return null;
 }
 
 /** Close this train's PRs and delete only its own recorded `train/` branches. */
@@ -347,10 +359,11 @@ export async function stepTrain(s: TrainState, deps: TrainDeps): Promise<TrainSt
 }
 
 /**
- * Asked by the merge driver at ready (scheduler-merge-driver.ts): wait while this card's train is testing, bounce the card the
- * bisect pinned, clear a verified member to skip update-branch once main holds only this train's merges. null = serial path.
+ * Asked by the merge driver at ready and at await_ci, before any update-branch or merge (scheduler-merge-driver.ts): wait while this
+ * card's train is testing, bounce the card the bisect pinned, clear a verified member to skip update-branch only while every
+ * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path.
  */
-export async function trainGate(s: TrainState | null, run: MergeRun, mainHead: string, deps: Io & Pick<TrainDeps, "gh">): Promise<TrainGate> {
+export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & Pick<TrainDeps, "gh">): Promise<TrainGate> {
   if (!s || (s.phase !== "testing" && s.phase !== "settling")) return null;
   const m = s.members.find((x) => x.taskId === run.taskId && sameSha(x.head, run.reviewedHead) && x.prRef === run.prRef);
   if (!m || s.serial.includes(m.taskId) || s.dropped.includes(m.taskId) || s.merged.some((x) => x.taskId === m.taskId)) return null;
@@ -358,8 +371,9 @@ export async function trainGate(s: TrainState | null, run: MergeRun, mainHead: s
   if (bounce) return { bounce: bounce.receipt };
   if (s.phase === "testing") return "wait";
   if (!s.cleared.includes(m.taskId)) return null;
-  if (await mainOnlyMembers(s, mainHead, deps.gh)) return "cleared";
-  await voidTrain(s, deps, "合并前核对：main 自列车起点以来多了非本批的提交");
+  const moved = await headsMoved(s, deps.gh);
+  if (!moved && await mainOnlyMembers(s, await deps.gh.mainHead(s.repo), deps.gh)) return "cleared";
+  await voidTrain(s, deps, `合并前核对：${moved ?? "main 自列车起点以来多了非本批的提交"}`);
   return null;
 }
 

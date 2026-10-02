@@ -99,10 +99,10 @@ function setup(files: string[][], store: TrainStore = memStore()) {
 }
 
 /** The serial merge driver of one card over the same fake GitHub; `train` is the production hook. */
-function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE) {
+function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE, phase: MergeRun["phase"] = "ready") {
   const card = env.cards[i]!;
   let row: MergeRun = { intentId: `m-${card.taskId}`, taskId: card.taskId, project: "p", prRef: card.prRef, expectedBranch: `task/${card.taskId}`,
-    reviewedHead: card.head, requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 };
+    reviewedHead: card.head, requiredChecks: "check", phase, rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 };
   const pr = (): PrSnapshot => {
     const p = env.hub.prs.get(card.prRef)!;
     return { state: p.merged ? "MERGED" : "OPEN", head: p.head, branch: `task/${card.taskId}`, base: "main", draft: false, crossRepository: false,
@@ -124,6 +124,7 @@ function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE) {
   };
   return {
     get row() { return row; },
+    once: () => driveMerge(row, external, advance),
     drive: async (times = 4) => { for (let i = 0; i < times && !["merged", "resolved", "unknown", "updating"].includes(row.phase); i++) await driveMerge(row, external, advance); return row; },
   };
 }
@@ -323,5 +324,61 @@ describe("i28-MT1 merge train", () => {
     const moved = [{ ...env.cards[0]!, head: newSha() }, env.cards[1]!];
     expect(await formTrain("p", moved, env.deps, async () => ["x"], nextSkip(done!))).toBeNull(); // T2 still skipped: one card left
     expect(nextSkip({ ...done!, outcome: "void" })).toEqual([]);
+  });
+
+  test("review P1 head-drift: a member's remote head moves after green, a sibling is driven before any train tick: void, no match-head", async () => {
+    const env = setup([["a"], ["b"], ["c"]]);
+    await env.until("settling");
+    env.hub.prs.get(env.cards[1]!.prRef)!.head = newSha();
+    await cardRun(env, 0).drive();
+    expect(calls(env, "match-head:")).toEqual([]);
+    expect(env.store.load("p")).toMatchObject({ phase: "cleanup", outcome: "void" });
+    expect(env.store.load("p")!.reason).toContain("T2 head 变成");
+  });
+
+  test("review P1 head-drift: the ledger already reports a cleared member's head moved: the train voids instead of dropping it", async () => {
+    const env = setup([["a"], ["b"], ["c"]]);
+    await env.until("settling");
+    env.status.set("T2", { kind: "gone", why: "head 变成 abc", moved: true });
+    const s = await env.tick();
+    expect(s).toMatchObject({ phase: "cleanup", outcome: "void" });
+    expect(s!.dropped).toEqual([]);
+    await cardRun(env, 0).drive();
+    expect(calls(env, "match-head:")).toEqual([]);
+  });
+
+  test("review P1 restart-orphan: the branch lands on GitHub but the process dies before saving; recovery after main moved still deletes it", async () => {
+    const env = setup([["a"], ["b"]]);
+    const create = env.gh.createBranch;
+    let crash = true;
+    env.gh.createBranch = async (r, b, sha) => { await create(r, b, sha); if (crash) { crash = false; throw new Error("crash after create"); } };
+    await env.tick(); // formed
+    await expect(env.tick()).rejects.toThrow("crash after create");
+    expect(env.hub.branches.size).toBe(1);
+    expect(env.store.load("p")!.cars[0]).toMatchObject({ created: true, status: "new" }); // the claim was saved before the call
+    env.pushMain();
+    expect(await env.tick()).toMatchObject({ phase: "cleanup", outcome: "void" });
+    expect((await env.tick())?.phase).toBe("done");
+    expect(env.hub.branches.size).toBe(0);
+    expect(calls(env, "delete:")).toEqual([`delete:train/${env.store.load("p")!.id}`]);
+  });
+
+  test("review P1 updating-gate: a member already in updating waits for its train at await_ci, never merges or re-updates unverified", async () => {
+    for (const behind of [false, true]) {
+      const env = setup([["a"], ["b"]]);
+      env.hub.pending = true;
+      await env.tick(); await env.tick(); // formed, CI running
+      const run = cardRun(env, 0, behind ? "e".repeat(40) : BASE, "updating");
+      await run.once();
+      expect(run.row.phase).toBe("await_ci");
+      await run.drive(3);
+      expect(run.row.phase).toBe("await_ci"); // gate says wait: neither a serial merge nor another update-branch
+      expect([...calls(env, "update:"), ...calls(env, "rest-merge:"), ...calls(env, "match-head:")]).toEqual([]);
+      env.hub.pending = false;
+      expect((await env.tick())?.phase).toBe("settling");
+      expect((await run.drive()).phase).toBe("merged");
+      expect(calls(env, "match-head:")).toHaveLength(1);
+      expect(calls(env, "update:")).toEqual([]);
+    }
   });
 });

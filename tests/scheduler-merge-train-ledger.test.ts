@@ -6,7 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { memberStatusOf, mergeTrainTick, trainCandidates } from "../src/lib/scheduler-merge-train-tick.js";
+import { guardedCommand, memberStatusOf, mergeTrainPass, mergeTrainTick, trainCandidates } from "../src/lib/scheduler-merge-train-tick.js";
+import { trainGh } from "../src/lib/scheduler-merge-train-gh.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import type { TrainGh, TrainState, TrainStore } from "../src/lib/scheduler-merge-train.js";
 
 const head = (i: number) => String(i).repeat(40).slice(0, 40);
@@ -54,7 +56,7 @@ describe("i28-MT1 merge train ledger reads", () => {
       expect(memberStatusOf(f.db, "T1", head(1))).toEqual({ kind: "waiting" });
       f.intent("m1", "T1", "submitted"); f.run("m1", "T1", "merged", head(1), "d".repeat(40));
       expect(memberStatusOf(f.db, "T1", head(1))).toEqual({ kind: "merged", sha: "d".repeat(40) });
-      expect(memberStatusOf(f.db, "T2", head(9)).kind).toBe("gone");
+      expect(memberStatusOf(f.db, "T2", head(9))).toMatchObject({ kind: "gone", moved: true });
       f.db.query("UPDATE task_workflows SET mode='manual' WHERE taskId='T2'").run();
       expect(memberStatusOf(f.db, "T2", head(2))).toMatchObject({ kind: "gone" });
       f.db.query("UPDATE tasks SET stage='fix' WHERE id='T2'").run();
@@ -80,6 +82,30 @@ describe("i28-MT1 merge train ledger reads", () => {
       expect(calls).toEqual([`train/${state!.id}`]);
       expect(state!.seq).toBe(1);
       await mergeTrainTick(f.db, ["p"], deps, null, () => ["check"]); // no context (a test process default): nothing happens
+    } finally { f.close(); }
+  });
+
+  test("review P1 lease-stop: a stop raised by the PM notice ends the tick, and the pass entry's gh runner refuses after a lost lease", async () => {
+    const f = fixture([{ id: "T1" }, { id: "T2" }]);
+    try {
+      let state: TrainState | null = null;
+      const store: TrainStore = { load: () => state, all: () => (state ? [state] : []), save: (s) => { state = structuredClone(s); },
+        event: () => {}, nextSeq: () => 1 };
+      const calls: string[] = [];
+      const gh = { mainHead: async () => { calls.push("main"); return "f".repeat(40); }, prFiles: async (pr: string) => [pr] } as unknown as TrainGh;
+      const deps = { notifyPm: async () => { throw new SchedulerStopped("lease lost"); }, now: () => 1 };
+      await expect(mergeTrainTick(f.db, ["p", "q"], deps, { gh, store }, () => ["check"])).rejects.toBeInstanceOf(SchedulerStopped);
+      expect(calls).toEqual(["main"]); // no further gh call after the stop
+
+      let held = true;
+      const active = () => { if (!held) throw new SchedulerStopped("lease lost"); };
+      const spawned: string[][] = [];
+      const run = guardedCommand(active, async (argv) => { spawned.push(argv); held = false; return { code: 0, stdout: "f".repeat(40), stderr: "", timedOut: false } as never; });
+      await expect(trainGh(run).mainHead("example/repo")).rejects.toBeInstanceOf(SchedulerStopped); // lost during the call
+      await expect(trainGh(run).mainHead("example/repo")).rejects.toBeInstanceOf(SchedulerStopped); // refused before the spawn
+      expect(spawned).toHaveLength(1);
+      held = false;
+      await expect(mergeTrainPass(f.db, ["p"], active, { gh, store })).resolves.toBeUndefined(); // no required checks in a test config
     } finally { f.close(); }
   });
 });
