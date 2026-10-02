@@ -4,6 +4,7 @@
  * the pass (never a partial guess), a missing file or enabled:false means zero calls. The project's repoDir / checks / deploy
  * come from scheduler.json, so the two files cannot disagree. Every reader (tick, intake CLI, bridge send) reads it fresh.
  */
+import { writeJsonStateGuarded } from "./state-file.js";
 import { readFileSync } from "node:fs";
 import { assigneeFormatError, normalizePeerAgent } from "./ledger-checks.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
@@ -103,3 +104,6 @@ export function readPeerPrConfig(path = PEER_PR_CONFIG_PATH, scheduler?: () => S
 /** The configured peer a GitHub login belongs to (case-insensitive), or null. */
 export const peerOfLogin = (c: PeerPrConfig, login: string): PeerPrPeer | null =>
   c.peers.find((p) => p.githubLogins.includes(login.toLowerCase())) ?? null;
+
+/** Preserve all existing fields when changing PM routing references. */
+export const writePeerPrConfig = (value: Record<string, unknown>, path = PEER_PR_CONFIG_PATH): Promise<void> => writeJsonStateGuarded(path, value);

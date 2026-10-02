@@ -17,7 +17,7 @@ import {
 import { fileTrainStore, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
 import { observeSummary, setMergeTrainMode, setTrainModeSource, TRAIN_CLOSED, trainMode } from "../src/lib/scheduler-merge-train-switch.js";
 import type { MergeTrainMode } from "../src/lib/scheduler-merge-train-switch-config.js";
-import type { MergeExternal } from "../src/lib/scheduler-merge-driver.js";
+import { driveMerge, type MergeExternal } from "../src/lib/scheduler-merge-driver.js";
 import type { Registry } from "../src/manager/core.js";
 import { LedgerCli, type LedgerDeps } from "../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
@@ -302,3 +302,35 @@ describe("ledger scheduler-merge-train: audited write, PM / master / owner only"
     await expect(setMergeTrainMode(db, { actor: PM_A, now: 1 }, { project: "zz", mode: "off", reason: "r" }, { path })).rejects.toMatchObject({ code: "forbidden" });
   });
 });
+
+for (const target of ["off", "observe"] as const) {
+  test(`mainHead switch to ${target} cannot persist a train`, async () => {
+    const project = `main-race-${target}`, env = setup(project);
+    env.gh.mainHead = async () => { modes[project] = target; return BASE; };
+    expect(await env.tick()).toBeNull();
+    expect(env.store.load(project)).toBeNull();
+    expect(env.store.saves).toBe(0);
+    expect(env.store.events.map((e) => e.kind)).toEqual(target === "off" ? [] : ["observe"]);
+  });
+  test(`cleared operation switch to ${target} refuses bare REST merge after main drift`, async () => {
+    const project = `merge-race-${target}`, env = setup(project);
+    for (let i = 0; i < 10 && env.store.load(project)?.phase !== "settling"; i++) await env.tick();
+    const card = env.cards[0]!;
+    let run = { ...env.run(0), phase: "await_ci" as MergeRun["phase"] };
+    const base: MergeExternal = {
+      inspect: async () => ({ state: "OPEN", head: card.head, branch: "task/T1", base: "main", draft: false, crossRepository: false,
+        mergeState: "CLEAN", mergeSha: null, checks: [{ name: "check", bucket: "pass" }] }),
+      freshness: async () => ({ behindBy: 0, mainHead: BASE }),
+      carryReview: async () => ({ ok: false, reason: "unused" }), updateBranch: async () => {},
+      merge: async () => { env.hub.calls.push("rest-merge"); return newSha(); },
+    };
+    const external = withMergeTrain(base, { gh: env.gh, store: env.store });
+    await driveMerge(run, external, async (_from, to, _rev, reason, mergeSha) => {
+      run = { ...run, phase: to, rev: run.rev + 1, reason: reason ?? null, mergeSha: mergeSha ?? null };
+      if (to === "merging") { modes[project] = target; env.hub.main = newSha(); }
+      return run;
+    });
+    expect(run.phase).toBe("unknown");
+    expect(env.hub.calls.filter((c) => c === "rest-merge" || c.startsWith("match-head:"))).toEqual([]);
+  });
+}

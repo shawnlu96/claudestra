@@ -9,6 +9,7 @@
 import { bounceReceipt } from "./scheduler-merge-conflict.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { observeBatch, TRAIN_CLOSED, trainMode } from "./scheduler-merge-train-switch.js";
+import { releaseOutsider } from "./scheduler-merge-train-hold.js";
 
 const TRAIN_MIN = 2, TRAIN_MAX = 6;
 export const TRAIN_MAX_DEPTH = 3;
@@ -36,7 +37,7 @@ export interface TrainState {
   /** `taskId:head` an earlier train already sent serial or bounced: regrouping them would replay the same failure. */
   skip: string[];
 }
-type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done";
+type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold";
 export interface TrainEvent { at: number; train: string; seq: number; kind: TrainEventKind; text: string; data?: Record<string, unknown> }
 export interface TrainCheck { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }
 
@@ -136,7 +137,9 @@ export async function formTrain(project: string, all: readonly TrainCandidate[],
   }
   const batch = pickBatch(listed), mode = trainMode(project); // re-read: the switch may have moved while files were listed
   if (!batch.length || mode !== "on") return batch.length && mode === "observe" ? observeBatch(project, batch, deps) : null; // off: nothing written
-  const base = await deps.gh.mainHead(repo), now = deps.now(), seq = deps.store.nextSeq(project);
+  const base = await deps.gh.mainHead(repo), currentMode = trainMode(project);
+  if (currentMode !== "on") return currentMode === "observe" ? observeBatch(project, batch, deps) : null;
+  const now = deps.now(), seq = deps.store.nextSeq(project);
   const id = `${seq.toString(36)}-${now.toString(36).slice(-5)}`;
   const s: TrainState = { v: 1, id, seq, project, repo, base, phase: "testing", outcome: null, reason: null, members: batch, cars: [],
     cleared: [], merged: [], bounced: [], serial: [], dropped: [], ciRuns: 0, startedAt: now, updatedAt: now,
@@ -365,16 +368,16 @@ export async function stepTrain(s: TrainState, deps: TrainDeps): Promise<TrainSt
 /**
  * Asked by the merge driver at ready and at await_ci, before any update-branch or merge (scheduler-merge-driver.ts): wait while this
  * card's train is testing, bounce the card the bisect pinned, clear a verified member to skip update-branch only while every
- * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path.
+ * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path (an outsider voids the train first).
  */
 export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & Pick<TrainDeps, "gh">): Promise<TrainGate> {
   if (!s || (s.phase !== "testing" && s.phase !== "settling") || trainMode(s.project) !== "on") return null;
   const m = s.members.find((x) => x.taskId === run.taskId && sameSha(x.head, run.reviewedHead) && x.prRef === run.prRef);
-  if (!m || s.serial.includes(m.taskId) || s.dropped.includes(m.taskId) || s.merged.some((x) => x.taskId === m.taskId)) return null;
+  if (!m || s.serial.includes(m.taskId) || s.dropped.includes(m.taskId) || s.merged.some((x) => x.taskId === m.taskId)) return releaseOutsider(s, run, deps, voidTrain);
   const bounce = s.bounced.find((b) => b.taskId === m.taskId && sameSha(b.head, m.head));
   if (bounce) return { bounce: bounce.receipt };
   if (s.phase === "testing") return "wait";
-  if (!s.cleared.includes(m.taskId)) return null;
+  if (!s.cleared.includes(m.taskId)) return releaseOutsider(s, run, deps, voidTrain); // i28-MT1f2: it holds the slot the members need
   const why = await verdictNow(s, deps.gh);
   if (!why) return "cleared";
   await voidTrain(s, deps, `合并前核对：${why}`);
