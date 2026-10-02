@@ -9,7 +9,9 @@ import { acquireLock } from "../src/lib/file-lock.js";
 import { vacuumBackup } from "../src/lib/ledger-backup.js";
 import { getFeature, getPendingProposal } from "../src/lib/ledger-feature.js";
 import { closeLedger, getEventByDedup, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { previewSharedLedgerExport, type SharedLedgerExportOptions } from "../src/lib/shared-ledger-export.js";
+import {
+  previewSharedLedgerExport, sharedLedgerExportHeads, sharedLedgerScrubWithCommits, SharedLedgerExportContractError, type SharedLedgerExportOptions,
+} from "../src/lib/shared-ledger-export.js";
 import { readSharedLedgerMode, writeSharedLedgerModes, resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { parseSharedLedgerImport } from "../src/lib/shared-ledger-contract-transfer.js";
 import type { SharedLedgerImport, SharedLedgerImportReceipt } from "../src/lib/shared-ledger-contract.js";
@@ -18,7 +20,7 @@ import { setSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.j
 import { instanceKeySync } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { writeJsonAtomicSync } from "../src/lib/state-file.js";
-import { SharedLedgerScrubError } from "../src/lib/shared-ledger-scrub.js";
+import { SharedLedgerScrubError, type SharedLedgerScrubContext } from "../src/lib/shared-ledger-scrub.js";
 
 interface MigrationRecord {
   schemaVersion: 1;
@@ -37,7 +39,8 @@ interface MigrationRecord {
 export class MigrationError extends Error {}
 const GENERIC_STOP = "Migration stopped; retain local gate and inspect the local journal before recovery.";
 export const migrationErrorText = (error: unknown): string =>
-  error instanceof MigrationError || error instanceof SharedLedgerScrubError ? error.message : GENERIC_STOP;
+  error instanceof MigrationError || error instanceof SharedLedgerScrubError || error instanceof SharedLedgerExportContractError
+    ? error.message : GENERIC_STOP;
 
 const validId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id);
 const journalPath = (dir: string, batch: string) => join(dir, "shared-ledger-migrations", `${batch}.json`);
@@ -245,6 +248,19 @@ function checkLocalSnapshot(db: Database, payload: SharedLedgerImport, dir: stri
   }).deferred();
 }
 
+/**
+ * The one scrub context for prepare/commit/activate/revoke: local identity plus the heads of the selected tasks (and of an
+ * already reviewed payload) that are real commits in the install repo. It only lives in `scrub`, so selectionDigest is unchanged.
+ */
+export async function importScrubContext(db: Database, plan: Pick<SharedLedgerExportOptions, "localProject" | "featureIds" | "batchId">,
+  stateDir: string, identity: SharedLedgerScrubContext["identity"] = { username: userInfo().username, hostname: hostname() },
+  repoDir?: string): Promise<SharedLedgerScrubContext> {
+  const heads = sharedLedgerExportHeads(db, plan.localProject, plan.featureIds);
+  const reviewed = validId(plan.batchId) ? readRecord(journalPath(stateDir, plan.batchId))?.payload : undefined;
+  for (const feature of reviewed?.manifest.features ?? []) for (const task of feature.projection.tasks) if (task.head) heads.push(task.head);
+  return sharedLedgerScrubWithCommits({ identity }, heads, repoDir);
+}
+
 /** Import is only granted to service enrollments (JN1: `--role service` codes); member codes carry read/plan only. */
 export const resolveImportCredential = (plan: { centerId: string; teamId: string; projectId: string }, dir = STATE_DIR) =>
   resolveSharedLedgerCredential("owner:self", "service", plan.centerId, plan.teamId, plan.projectId, "import", dir);
@@ -259,7 +275,7 @@ async function main() {
   if (!existsSync(dbPath)) throw new MigrationError("existing home ledger required");
   const db = openLedger(dbPath);
   try {
-    const scrub = { identity: { username: userInfo().username, hostname: hostname() } };
+    const scrub = await importScrubContext(db, plan, STATE_DIR);
     if (command === "prepare") {
       const result = await prepareSharedLedgerImport(db, { ...plan, stateDir: STATE_DIR, scrub });
       console.log(result.preview);
