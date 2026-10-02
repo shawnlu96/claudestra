@@ -1,3 +1,5 @@
+import { pickRepo } from "./shared-ledger-gate-repo.js";
+import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
 /**
  * start_node 的预检：动手前把能查的全查了（节点、依赖、文件范围、卡号 / agent 名 / 分支 / worktree 空闲、规格卡、调度服务开没开 auto），
  * 算出一份开工计划（StartPlan）交给 dag-tools-steps.ts 逐步执行。预检不写任何东西——失败在这里的，台账、git、registry 都没动过。
@@ -95,12 +97,6 @@ function featureSlug(f: Feature, origin: string | null): string {
 /** 卡号 → agent 名：小写，点号等换成 -（agent 名不许有点号），≤ 48 */
 const agentNameFor = (taskId: string): string => `task-${taskId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48);
 
-async function pickRepo(env: StartEnv, project: string, want: string | undefined): Promise<string | null> {
-  const dirs = await env.projectDirs(project);
-  if (want) return dirs.includes(want) && env.exists(join(want, ".git")) ? want : null;
-  return dirs.find((d) => env.exists(join(d, ".git"))) ?? null;
-}
-
 function nodeReady(env: StartEnv, f: Feature, key: string) {
   const v = getDagVersion(env.db, f.id, f.currentVersion);
   if (!v) return { error: `feature ${f.id} 还没建 DAG（先 plan_feature）` } as const;
@@ -129,6 +125,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   } catch (e) {
     return no("not_found", (e as Error).message);
   }
+  const shared = sharedLedgerPlanningReason(f.id); if (shared) return no("forbidden", shared);
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
   const template = args.template ?? "code";

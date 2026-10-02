@@ -1,3 +1,6 @@
+export { LOCAL_API_FEATURES } from "../../lib/shared-ledger-gate-api-features.js";
+import { sharedLedgerGateProxy } from "../../lib/shared-ledger-gate-proxy.js";
+import { handleSharedLedgerApi } from "./shared-ledger.js";
 import { handleProductBoardApi } from "./product-board.js";
 /**
  * bridge 本地 API（docs/design-hosted-frontend.md §13.2）：原 Next BFF 里「逻辑在服务端」的那批路由搬进 bridge，
@@ -38,15 +41,9 @@ import { handleTranscribe } from "./transcribe.js";
 import { handleUsageApi } from "./usage.js";
 import { versionResponse } from "./version.js";
 
-/** GET /api/v1/capabilities 的 features 里报的名字（前端按名字判某能力在不在） */
-export const LOCAL_API_FEATURES = [
-  "version", "settings", "profile", "agent-settings", "hidden-messages", "skill-prefs", "transcribe", "client-log", "host-open", "attachments",
-  "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "asks", "fleet", "agent-skill-settings", "media", "talk",
-  "peer-ledger", "ai-inventory", "lend", "usage", "ledger-dag", "ledger-product",
-];
-
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
+  (req, path, principal) => sharedLedgerGateProxy(req, path, principal, handleSharedLedgerApi),
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,

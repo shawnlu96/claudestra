@@ -1,3 +1,6 @@
+import { switchOff } from "./shared-ledger-gate-switch.js";
+export { switchOff } from "./shared-ledger-gate-switch.js";
+import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
 /**
  * 自动开卡（i28-A1）的门：判定都是纯函数或只读台账。调度服务选候选、台账 claim 事务里重核、feature-show 列「卡在哪道门」用的是同一份，
  * 三处口径分不了叉。规格卡的文件门（落盘静置、卡首的开关行与模板行）只在调度侧看，claim 事务只重核台账里的门。
@@ -40,13 +43,6 @@ export function readSwitch(db: Database, project: string): AutostartSwitch {
   if (!row) return {};
   const v = JSON.parse(row.value) as unknown;
   return v && typeof v === "object" && !Array.isArray(v) ? (v as AutostartSwitch) : {};
-}
-
-/** 项目关了，或这个 feature 关了；featureId 为 null 的卡（不在任何 feature 下）只看项目 */
-export function switchOff(sw: AutostartSwitch, featureId: string | null): string | null {
-  if (sw.off) return `项目的自动开卡关着：${sw.off.reason}`;
-  const f = featureId ? sw.features?.[featureId] : undefined;
-  return f?.off ? `feature ${featureId} 的自动开卡关着：${f.reason}` : null;
 }
 
 export const weeklyLine = (sw: AutostartSwitch): number => sw.weeklyLinePct ?? DEFAULT_WEEKLY_LINE;
@@ -136,6 +132,7 @@ const stop = (gate: GateCode, why: string): GateStop => ({ gate, why });
 
 /** feature 级的门（对它的所有节点一样）：服务、开关、状态、提案、冻结、PM、容量 */
 export function featureGate(db: Database, f: Feature, svc: ServiceFacts): GateStop | null {
+  const shared = sharedLedgerPlanningReason(f.id); if (shared) return stop("feature", shared);
   if (!svc.autoDispatch || !svc.projects.includes(f.project)) return stop("service", `调度服务没对项目 ${f.project} 开自动派单（scheduler.json enabled + autoDispatch + 列出项目）`);
   const off = switchOff(readSwitch(db, f.project), f.id);
   if (off) return stop("switch", off);
