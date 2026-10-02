@@ -1,8 +1,9 @@
 import { readRegistryAgents } from "./registry.js";
-import { controlFor } from "./runtimes/index.js";
+import { controlFor, normalizeTransport } from "./runtimes/index.js";
 import { paneIdleVerdict, paneLooksIdle, tmuxRaw, listAgentWindows, windowTarget } from "./tmux-helper.js";
 import { codexBusy } from "./runtimes/codex-exit.js";
 import { wallWaitOf } from "./wall-screen.js";
+import { bridgeRequest } from "./bridge-client.js";
 
 /** 一个窗口此刻算不算空闲。paneLooksIdle 只认 Claude Code 的画面，套在 Pi / Codex 上恒为「忙」
  *  ⇒ 升级闸门永远等不到全员空闲（tests/busy-windows.test.ts）。hook 运行时改走 paneIdleVerdict
@@ -16,14 +17,47 @@ export function windowLooksIdle(runtime: string | undefined, pane: string): bool
   return paneLooksIdle(pane);
 }
 
-/** 此刻在忙的窗口名（空数组 = master 与全体 agent 都空闲）。返回名字而非布尔：日志要说清是谁挡住的。 */
-export async function busyAgentWindows(masterWindow: string): Promise<string[]> {
-  const runtimeOf = new Map((await readRegistryAgents()).map((a) => [a.name, a.runtime]));
-  const capture = (target: string) => tmuxRaw(["capture-pane", "-t", target, "-p"]);
-  const busy: string[] = [];
-  if (!windowLooksIdle(undefined, await capture(masterWindow))) busy.push("master"); // master 是 CC，同 agent 的判法
-  for (const name of await listAgentWindows()) {
-    if (!windowLooksIdle(runtimeOf.get(name), await capture(windowTarget(name)))) busy.push(name);
+export interface BusyProbe {
+  agents: () => Promise<{ name: string; runtime?: string; transport?: string }[]>;
+  windows: () => Promise<string[]>;
+  capture: (target: string) => Promise<string>;
+  /** 这些 acp agent 里 bridge 认为正在回合中的（查不到就抛） */
+  acpBusy: (names: string[]) => Promise<string[]>;
+}
+
+const LIVE: BusyProbe = {
+  agents: () => readRegistryAgents(),
+  windows: listAgentWindows,
+  capture: (target) => tmuxRaw(["capture-pane", "-t", target, "-p"]),
+  acpBusy: async (names) => ((await bridgeRequest({ type: "turn_status", agents: names }, { timeoutMs: 5_000 })) as { busy: string[] }).busy,
+};
+
+/**
+ * transport=acp 的窗口里是宿主日志，画面判据（含撞墙菜单，ACP 撞额度是回合失败 + bridge 的卡片，窗口里没有倒计时）一律不作数：
+ * 只信 bridge 的回合态（投递置 thinking、宿主上报 Stop 置 done，bridge/turn-probe.ts answerTurnStatus）。
+ * 查询失败（bridge 没起、旧 bridge 不认这个请求）按 unknown 放行——挡住就是永不升级。
+ * ponytail: bridge 重启后到下一条事件前不知道宿主还在跑，那段时间按空闲放行；要更准得让宿主直接报 prompt 是否在途。
+ */
+async function acpBusyOrNone(names: string[], probe: BusyProbe): Promise<string[]> {
+  if (!names.length) return [];
+  try {
+    return (await probe.acpBusy(names)).filter((n) => names.includes(n));
+  } catch (e) {
+    console.warn(`⚠️ 问 bridge 的 ACP 回合态失败，${names.join(", ")} 按空闲放行：${(e as Error).message}`);
+    return [];
   }
-  return busy;
+}
+
+/** 此刻在忙的窗口名（空数组 = master 与全体 agent 都空闲）。返回名字而非布尔：日志要说清是谁挡住的。 */
+export async function busyAgentWindows(masterWindow: string, probe: BusyProbe = LIVE): Promise<string[]> {
+  const regOf = new Map((await probe.agents()).map((a) => [a.name, a]));
+  const busy: string[] = [];
+  const acp: string[] = [];
+  if (!windowLooksIdle(undefined, await probe.capture(masterWindow))) busy.push("master"); // master 是 CC，同 agent 的判法
+  for (const name of await probe.windows()) {
+    const reg = regOf.get(name);
+    if (controlFor(reg?.runtime, normalizeTransport(reg?.transport)).idleSource === "acp") acp.push(name);
+    else if (!windowLooksIdle(reg?.runtime, await probe.capture(windowTarget(name)))) busy.push(name);
+  }
+  return [...busy, ...(await acpBusyOrNone(acp, probe))];
 }
