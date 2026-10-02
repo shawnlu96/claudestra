@@ -41,7 +41,7 @@ async function serve(fx: TeamFixture, bundle: string) {
     if (path === `/api/v1/ledger/${fx.project}`) return json({ ok: true, ...fx.local });
     if (path === `/api/v1/ledger/${fx.project}/dag`) return json(teamDagBoard(fx.project, fx.list,
       new Map(fx.details.map(d => [d.feature.id, d])), teamOverview(fx.list, new Map(fx.details.map(d => [d.feature.id, d])), fx.now)));
-    if (path === `/api/v1/ledger/${fx.project}/product`) return json(sharedProductBoard(fx.list, fx.now));
+    if (path === `/api/v1/ledger/${fx.project}/product`) return json(sharedProductBoard(fx.list, fx.now, fx.local.tasks));
     const task = path.match(new RegExp(`^/api/v1/ledger/${fx.project}/tasks/(.+)$`));
     if (task) {
       const t = fx.local.tasks.find((x) => x.id === decodeURIComponent(task[1]!));
@@ -134,6 +134,12 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
       await page.goto(`${server.url}?side=${side}&theme=${theme}&project=${fx.project}&team=${fx.team}`);
       await page.getByText(fx.list.features[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
       await settle(page);
+      const firstFeature = fx.list.features[0]!;
+      const bar = page.getByRole("progressbar", { name: firstFeature.title, exact: true });
+      await bar.waitFor();
+      const tasks = side === "local" ? fx.local.tasks : teamOverview(fx.list, new Map(fx.details.map(d => [d.feature.id, d])), fx.now).ov.tasks;
+      const completed = tasks.filter(t => t.itemId === firstFeature.id && (t.stage === "done" || t.stage === "verified")).length;
+      expect(Number(await bar.getAttribute("aria-valuenow"))).toBe(completed);
       const name = `${side}-${width}-${theme}`;
       const png = await page.screenshot({ path: resolve(out, `${name}.png`) });
       shots.push({ name, png });

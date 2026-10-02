@@ -146,3 +146,22 @@ test("团队导航 project 编解码保留身份与规划主场，兼容旧缓�
   expect(sharedIdentity("shared-ledger:" + JSON.stringify(["c", "t", "p", "proj", "m"]))?.project).toBe("proj");
   expect(sharedIdentity("shared-ledger:{broken")).toBeNull();
 });
+
+test("共享源 feature 进度计入 done 和 verified，与侧栏一致且不因镜像过期归零", async () => {
+  const snapshot = generateTeamFixture();
+  for (const d of snapshot.details) d.feature.counts.completed = 0;
+  const rows = new Map(snapshot.details.map(d => [d.feature.id, d]));
+  const transport: Transport = { list: async () => snapshot.list, detail: async id => rows.get(id)!,
+    command: async () => { throw new Error("unused"); }, receipt: async id => ({ status: "unknown", requestId: id }) };
+  const identity = { center: "c", team: snapshot.team, person: "p", project: snapshot.project, machine: "m" };
+  const src = sharedCollabSource(new SharedLedgerSession(identity, transport), "team", "label");
+  const ov = await src.overview(new AbortController().signal);
+  expect(ov.tasks.filter(t => t.itemId === snapshot.details[0]!.feature.id && t.stage === "done").length).toBe(2);
+  expect(ov.tasks.filter(t => t.itemId === snapshot.details[0]!.feature.id && t.stage === "verified").length).toBe(1);
+  const board = await src.product!("team");
+  for (const f of board.features) {
+    const completed = ov.tasks.filter(t => t.itemId === f.id && (t.stage === "done" || t.stage === "verified")).length;
+    expect(f.counts.completed).toBe(completed);
+  }
+  expect(board.features[0]!.counts.completed).toBe(3);
+});
