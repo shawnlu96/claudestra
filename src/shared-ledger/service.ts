@@ -9,10 +9,12 @@ import { Conflict, feature, detail, meta, ownReceipt } from "./reads.js";
 import { executeCommand } from "./commands.js";
 import { importManifest, importReceipt, controlImport } from "./imports.js";
 import { applyProjection } from "./projections.js";
+import { recomputeFeatureStates } from "./feature-state.js";
 
 /** All business writes share one synchronous transaction. Replay claims commit independently of rejected commands. */
 export class LedgerService {
-  constructor(readonly store: Store, readonly notify?: (serverSeq: number) => void) {}
+  // Startup repairs completion derived under older rules; idempotent, no events or serverSeq.
+  constructor(readonly store: Store, readonly notify?: (serverSeq: number) => void) { recomputeFeatureStates(store); }
   handle(req: SharedLedgerSignedRequest, now = Date.now()): { status: number; body: unknown } {
     try {
       const credential = loadCredential(this.store, req.bearer);
