@@ -1,7 +1,6 @@
 # Direct first, relay fallback
 
-Status: design proposal; no transport or deployment changes. The initial delivery order needs owner approval (§6).
-Names below are only 本机, peer A, peer B and 中继. Measurements are local lab results, not production claims.
+Status: design proposal. Order needs owner approval (§6). Names: 本机 / peer A / peer B / 中继. Results are local lab observations; no code or deployment changes.
 
 ## 1. Measurements and diagnosis
 
@@ -55,7 +54,6 @@ The actual scratch runner used `curl -w '%{json}'` and Python subprocesses under
 checked the JSON shape and computed those statistics. All requests opened a fresh HTTP connection; the bridge→relay WS was already warm.
 These are HTTP measurements corresponding to browser API calls, not browser render, cookie, CORS, TLS or iOS tests.
 For warm HTTP keepalive comparison use a single long-lived client; do not call repeated curl launches a warm connection test.
-
 For peer probes, run the following ten times on each lab side under the same clean environment and measure with a monotonic clock:
 
 ```sh
@@ -205,7 +203,8 @@ A TURN-selected candidate is a forwarded route and cannot carry the direct-only 
 
 (c) enrollment and TLS reachability are prerequisites, not automatic installer actions.
 Tailscale avoids the Claudestra relay but is not proof of a direct physical route; expose that distinction in diagnostics.
-For the strict large-file policy require proven direct UDP or independent direct HTTPS, not DERP or Funnel forwarding.
+Initially ordinary overlay HTTPS is eligible only for small operations, even after a successful direct UDP probe.
+Bulk requires a path that cannot silently switch to third-party forwarding: verified LAN, independent direct HTTPS or non-relay ICE.
 (d) public peer ingress must remain peer-only: strip device cookies/headers, reject device endpoints/non-peer tokens,
 verify the pinned sender before expensive E2E work and keep the established signed/E2E envelope on both transports.
 
@@ -226,21 +225,15 @@ Deliver (a)+(c)+(d) first, then (b). Direct selection is per machine and network
 The following timeouts are **proposed defaults, unmeasured**: candidate probe budget 1500 ms total,
 cooldown retries 5/15/60 seconds with jitter. Probe only authorized configured candidates; race their read-only checks within that budget.
 
-| State | Trigger and transition | Request ownership |
-|---|---|---|
-| START / PROBING | On boot, foreground, machine selection, network generation change or cooldown expiry: test identity and authorization. | Hold new writes until direct is selected or
-deadline expires; existing relay reads may render without blocking startup. |
-| DIRECT | Verified candidate wins within budget; preserve generation and selected transport. | Pin each issued request to this transport; cancel losing probes before dispatching writes. |
-| RELAY | No usable candidate or probe deadline expires. Keep bounded background discovery; direct success applies to future requests. | Small eligible operations use existing relay.
-Direct-only files stay queued; no alternate relay upload. |
-| RECOVERING | Direct disconnect, failed read, stalled stream, network change or resumed app. Increment generation; invalidate stale probe wins. | Stop new writes, classify in-flight
-operations, resolve ambiguous writes, then use verified direct or relay. |
-| OFFLINE | Neither authenticated transport available. | Keep bounded durable operation queue, visible progress state and cancellation; never report a queued write as delivered. |
+- **START / PROBING:** boot, foreground, selection or cooldown tests identity; hold new writes until selection/deadline. Existing relay reads may render.
+- **DIRECT:** a verified candidate wins; pin issued requests to it and cancel losing probes before sending writes.
+- **RELAY:** no candidate/deadline expired; send eligible small operations, keep files queued, and probe in the background for future requests.
+- **RECOVERING:** disconnect, stalled stream or network/resume change increments generation; stop new writes and reconcile in-flight outcomes before selecting a route.
+- **OFFLINE:** neither authenticated route works; retain bounded durable queues and cancellation without reporting delivery.
 
 New writes try verified direct first, with relay selected after the probe deadline if it is permitted.
 An already dispatched request is not migrated while its response is still arriving. A later route win is not authority to duplicate it.
 For idempotent reads retry on the alternate verified transport; validate full body/schema and discard partial responses.
-
 For writes, exactly-once execution needs server support; aborting fetch does **not** prove the server did not execute it.
 Introduce a stable operation ID scoped to principal, machine, method, canonical path and body digest.
 The receiver durably and atomically records pending/committed result with the side effect (or an application transaction/outbox).
@@ -251,7 +244,6 @@ If the receiver cannot prove non-execution or lacks dedup support, mark “outco
 Do not claim generic exactly-once delivery with only a client retry key or a process-local cache.
 Messages and lend writes require the same server-side key through the entire dispatch/accept/result chain.
 Never parallel-send a write “to whichever route wins”. Offline queues persist IDs; principal revocation invalidates queued authorization.
-
 Streams resume only with a server-supported cursor; retain last committed event ID and deduplicate replayed events.
 Without a cursor, resync a snapshot and reconnect. File transfers resume verified chunks under a stable transfer ID and final digest;
 check permissions again at resume. Partial body data cannot enter a success cache.
@@ -262,7 +254,10 @@ Route UI uses a small animated connection glyph: direct pulses point-to-point; r
 probing/recovering uses a rotating pulse; offline pauses with reduced opacity. No explanatory route prose in the ordinary flow.
 Provide accessible labels and a static equivalent under reduced motion; diagnostics can give explicit transport details.
 
-Large files with logical size over 256 KiB never use Claudestra relay, TURN or a known overlay forwarding route.
+Large files with logical size over 256 KiB never use Claudestra relay, TURN or ordinary overlay routes in phase one.
+A successful Tailscale direct probe is not a lifetime guarantee: subsequent bytes could use DERP/peer relay without an HTTP failure.
+Reject overlay bulk before sending any bytes; do not try to repair this with periodic polling or abort after forwarded bytes have escaped.
+Re-enable overlay bulk only after a separately reviewed underlay can enforce no forwarding for the entire transfer; status hints alone are insufficient.
 The protocol frame limit is not a file limit: base64/envelope overhead means even smaller payloads can exceed a frame,
 and many small frames must not be used to bypass the logical-file policy. Unknown-length files use direct only.
 When direct is unavailable, preserve transfer progress and wait for a permitted route; send only a small metadata/status request through relay.
@@ -277,7 +272,6 @@ Existing large API responses are not automatically file transfers, but new bulk 
    New ingress uses the existing source classification; no listener, TLS, DNS or proxy changes are performed by this design card.
 3. `src/lib/relay-protocol.ts` remains the sole source of relay constants/frame validation.
    (a)+(c)+(d) use existing request/response semantics and authenticated application capability discovery; no new relay frame is required.
-
 Later (b) proposes a negotiated `direct-signal-v1` capability, advertised by upgraded peers and relay, not presumed from protocol v2 alone.
 The new client offers supported signaling versions; relay returns an explicit supported version, preserving existing v2 auth/welcome fields.
 Until both endpoints and relay acknowledge the extension, send no new frame; old relay/peer combinations keep today's relay behavior.
@@ -289,59 +283,76 @@ Do not make current sessions depend on new signaling. A future incompatible sema
 
 ## 5. Implementation nodes
 
-All estimates below are **planning estimates**, at most four engineer-hours per node, excluding approvals/deployment wait.
-`oneLine` descriptions are below 60 characters. These are new implementation tasks, not changes made by this card.
+Planning estimates: each node ≤4 h, excluding approvals/deployment; oneLine ≤60 characters. These are future implementation tasks.
 
-|---|---|---|---|---|
 - **RD1 / Freeze matched transport baseline**; deps: none; 4 h.
   fileGlobs: `tests/relay-direct*.ts`, `docs/design/relay-direct.md`.
-  Acceptance: Same responder/payload cold/hot metrics; corrupt body excluded; PM WAN/lend evidence attached. No relay deployment.
+  Acceptance: Matched endpoints and PM phases; invalid body excluded.
 - **RD2 / Authenticate bounded route candidates**; deps: RD1; 4 h.
   fileGlobs: `src/lib/direct-candidates*.ts`, `src/bridge/direct-candidates*.ts`.
-  Acceptance: Expiry/identity, SSRF bounds and source restrictions tested; no credential leak to an unverified URL. No relay deployment.
-- **RD3 / Add peer write dedup contracts**; deps: RD1; 4 h.
+  Acceptance: Pinned identity, expiry and SSRF bounds; inject route queries, not hub imports.
+- **RD3 / Add durable operation contracts**; deps: RD1; 4 h.
   fileGlobs: `src/lib/operation-dedup*.ts`, `tests/operation-dedup*.ts`.
-  Acceptance: Atomic transaction contract, digest mismatch, concurrent duplicate and crash recovery vectors. No relay deployment.
-- **RD4 / Bind peer and lend operations to dedup**; deps: RD3; 4 h.
-  fileGlobs: `src/bridge/peer-operation*.ts`, `src/lib/lend-operation*.ts`.
-  Acceptance: Direct commit + lost response + relay resend executes one side effect; unknown legacy result never auto-replayed. No relay deployment.
-- **RD5 / Select direct HTTPS for peers**; deps: RD2,RD4; 4 h.
-  fileGlobs: `src/bridge/peer-fetch.ts`, `src/lib/direct-route*.ts`.
-  Acceptance: Pinned HTTPS first, timeout fallback, same E2E identity/scope, no public device auth bypass. No relay deployment.
-- **RD6 / Select browser direct with origin auth**; deps: RD2,RD3; 4 h.
-  fileGlobs: `web/features/machines/direct-route*.ts`, `web/lib/api/transport*.ts`.
-  Acceptance: Independent pairing/E2E authorization; CORS/blocked probe fallback; everViaRelay never reset. No relay deployment.
-- **RD7 / Bind browser writes and stream recovery**; deps: RD3,RD6; 4 h.
+  Acceptance: Atomic result/status contract, digest mismatch and crash vectors; no new bypass import of ledger-tx.
+- **RD4 / Bind lend admission and result transactions**; deps: RD3, CONV3 PR #413 merged; 4 h.
+  fileGlobs: `src/lib/lend-inbox.ts`, `src/lib/ledger-lend-result.ts`, `src/lib/lend-operation*.ts`.
+  Acceptance: Reuse admission BEGIN IMMEDIATE and result tx; lost result retry returns the existing signed receipt.
+- **RD4M / Bind peer message delivery outcomes**; deps: RD3; 4 h.
+  fileGlobs: `src/bridge/http-peer.ts`, `src/bridge/peer-operation*.ts`.
+  Acceptance: Persist enqueue/result ownership; ambiguous delivery reconciles by ID, never auto-resends legacy writes.
+- **RD5 / Wire bridge peer route selection**; deps: RD2,RD4,RD4M; 4 h.
+  fileGlobs: `src/bridge/relay-link.ts`, `src/lib/direct-route*.ts`.
+  Acceptance: peerFetch/rawPeerFetch delegate via one-line hooks; send_to_agent, presence and lend use verified direct/fallback.
+- **RD5M / Wire manager peer route selection**; deps: RD5; 4 h.
+  fileGlobs: `src/manager/relay.ts`, `tests/manager-direct*.ts`.
+  Acceptance: peerCliFetch and peerE2eOnlyFetch reuse RD5 selection without losing signatures or E2E-required policy.
+- **RD6 / Wire browser transport and origin auth**; deps: RD2,RD7,RD10; 4 h.
+  fileGlobs: `web/lib/api/client.ts`, `web/features/machines/direct-route*.ts`, `web/lib/api/transport*.ts`.
+  Acceptance: send/resolveTarget wire apiRaw/api/apiStream to route/write/file helpers; keep origin auth and credential history.
+- **RD7 / Implement device operation recovery**; deps: RD3; 4 h.
   fileGlobs: `src/bridge/device-operation*.ts`, `web/lib/api/operation*.ts`.
-  Acceptance: Lost response resolved by status; cursor/snapshot recovery; full-body validation. No relay deployment.
-- **RD8 / Discover LAN on native shell**; deps: RD2; 4 h.
-  fileGlobs: `ios/**/DirectDiscovery*`, `src/bridge/lan-discovery*.ts`.
-  Acceptance: Local-network denial and isolated LAN fall back; no unauthenticated address scan. No relay deployment.
-- **RD9 / Show route motion and resume safely**; deps: RD5,RD7,RD8; 4 h.
-  fileGlobs: `web/features/machines/route-status*`, `ios/**/RouteLifecycle*`.
-  Acceptance: Background/network generation changes reject stale probe wins; reduced-motion/accessibility tested. No relay deployment.
-- **RD10 / Enforce direct-only file transfers**; deps: RD5,RD7; 4 h.
+  Acceptance: Durable enqueue/status adapter and stream cursor contracts; connect via RDW/RD6, not orphan helpers.
+- **RD8 / Wire native LAN discovery**; deps: RD2; 4 h.
+  fileGlobs: `native/ios/App/App/AppDelegate.swift`, `native/ios/App/App/DirectDiscovery*.swift`.
+  Acceptance: One-line discovery hookup; consent denial and isolated LAN fall back. No subnet scanning.
+- **RD9 / Wire route motion and native resume**; deps: RD6,RD8; 4 h.
+  fileGlobs: `web/features/machines/route-status*`, `native/ios/App/App/ClaudestraViewController.swift`, `native/ios/App/App/RouteLifecycle*.swift`.
+  Acceptance: One-line lifecycle hookup; generations reject stale wins; reduced-motion/accessibility tested.
+- **RD10 / Implement strict bulk eligibility**; deps: RD5,RD7; 4 h.
   fileGlobs: `src/lib/direct-file*.ts`, `web/lib/direct-file*.ts`, `tests/direct-file*.ts`.
-  Acceptance: Oversized/unknown files never sent relay or TURN; chunk digest/resume and revocation checked. No relay deployment.
+  Acceptance: Overlay denied even after direct probe; simulated DERP fallback and unavailable/expired proof send zero bulk bytes.
+- **RDW / Wire API writes and upload gates**; deps: RD7,RD10; 4 h.
+  fileGlobs: `src/bridge/api-routes.ts`, `src/bridge/direct-api*.ts`.
+  Acceptance: One-line pre-dispatch hook covers messages multipart and device status; bind effects atomically or report unknown.
+- **RDF / Wire media download eligibility**; deps: RD10,RD6; 4 h.
+  fileGlobs: `src/bridge/local-api/media.ts`, `web/lib/api/media.ts`, `tests/direct-media*.ts`.
+  Acceptance: raw/download and media URL construction call gate; unknown/oversize files queue without relay or overlay payload.
 - **RD11 / Prove Bun RTC feasibility**; deps: RD1; 4 h.
   fileGlobs: `tests/rtc-feasibility*.ts`, `docs/design/rtc-feasibility.md`.
-  Acceptance: Browser→Bun and Bun→Bun ICE/DTLS prototype, dependency/license/resource assessment; failed spike reports blockers. No relay deployment.
-- **RD12 / Negotiate signaling frames**; deps: RD2,RD11; 4 h.
-  fileGlobs: `src/lib/relay-protocol.ts`, `src/relay/direct-signal*.ts`, `tests/relay-signal*.ts`.
-  Acceptance: Old/new negotiation matrix, signed offers, expiry/limits; no old frame changes. Relay deployment requires owner button approval.
-- **RD13 / Adapt RTC to browser and Bun**; deps: RD11,RD12; 4 h.
+  Acceptance: Browser/Bun and Bun/Bun prototype; validate binding/license/resource limits or report blockers.
+- **RD12 / Wire negotiated signaling frames**; deps: RD2,RD11; 4 h.
+  fileGlobs: `src/lib/relay-protocol.ts`, `src/relay/server.ts`, `src/lib/relay-client.ts`, `src/relay/direct-signal*.ts`, `tests/relay-signal*.ts`.
+  Acceptance: Existing parse/dispatch entrances call bounded signal handlers; old/new matrix preserves v2. Owner approval for relay deployment.
+- **RD13 / Adapt RTC request transport**; deps: RD11,RD12; 4 h.
   fileGlobs: `src/lib/rtc-transport*.ts`, `web/lib/rtc-transport*.ts`.
-  Acceptance: Authenticated small request/response and backpressure; direct ICE candidate proof. No additional relay change.
-- **RD14 / Resume RTC streams and files**; deps: RD9,RD10,RD13; 4 h.
-  fileGlobs: `src/lib/rtc-stream*.ts`, `web/lib/rtc-stream*.ts`, `ios/**/RtcLifecycle*`.
-  Acceptance: Network restart, ambiguous writes and cursor/chunk recovery; TURN candidate rejects bulk. No additional relay change.
-- **RD15 / Verify NAT and phased rollout**; deps: RD14; 4 h.
+  Acceptance: Adapter plugs into RD5/RD6 transport interface; authenticate ICE/DTLS and check backpressure.
+- **RD14 / Implement RTC stream and file adapter**; deps: RD10,RD13; 4 h.
+  fileGlobs: `src/lib/rtc-stream*.ts`, `web/lib/rtc-stream*.ts`, `native/ios/App/App/RtcLifecycle*.swift`.
+  Acceptance: Pluggable lifecycle/cursor adapter; authenticated resume and TURN rejection. Integration verified in RD15.
+- **RD15 / Verify NAT and phased rollout**; deps: RD9,RDW,RDF,RD5M,RD14; 4 h.
   fileGlobs: `tests/direct-route*.ts`, `docs/design/direct-rollout.md`.
-  Acceptance: Representative network matrix with real evidence, strict-file fallback, fleet rollback drill. Relay signaling activation needs owner button approval.
+  Acceptance: Exercise actual bridge/manager/browser/native hooks, network changes and rollback; owner approves relay activation.
 
-RD3/RD4/RD7 must be split further if existing storage cannot provide the required atomic semantics within the estimates;
-never mark retry safety complete from client tests alone. Shell paths are provisional and must be checked against its actual source tree before implementation.
-RD11 may uncover a larger RTC dependency task; halt that branch for re-estimation rather than disguising a multi-day integration as a half-day node.
+Each existing file has exactly one owning node above; dependencies do not grant another node permission to edit it.
+Bridge callers `http-peer.ts`, `peer-presence.ts`, `lend-tools.ts` and `lend-dispatch.ts` already call relay-link peerFetch;
+RD5 changes that common exit, not their call sites. Manager exits are independently wired by RD5M.
+RD6 owns client.ts for route/write/file delegation; RDW alone owns API write/upload integration.
+RD5/RD6/RD9 reserve allowlisted capability-gated lazy adapter loading; RD13/RD14 fill those adapters without editing earlier owners.
+RD4 waits for CONV3 #413, then binds operationId to peer/orderId/generation and canonical digest/bodySha within existing transactions;
+admission conflicts reject, result/deliver replays reuse stored resultSha/eventSeq/signed receipt. Do not create a second receipt ledger.
+`ledger-tx.ts` remains an internal existing primitive; reuse it through its allowed transaction owners, never export a new bypass.
+New route/dedup modules hold logic; large hubs receive one-line calls and must not grow under the ratchet.
+If atomic effect/outbox support or RTC integration exceeds four hours, split/re-estimate before starting; never weaken retry safety.
 Deploying relay signaling, STUN/TURN, TLS/ingress services, DNS or machine-wide settings always needs explicit owner approval;
 peer or PM consent is not authorization for shared machine infrastructure. This card deploys none of them.
 
@@ -352,12 +363,11 @@ The **delivery order deviates**: (a)+(c)+(d) precede WebRTC hole punching (b), i
 Reason: existing authenticated ingress and local-hop can be extended without first proving a Bun RTC runtime,
 while dedup and recovery must be solved for every transport. Local measurements do not justify emergency relay bandwidth changes.
 This is a proposal for owner decision, not a silently approved replacement of the original plan.
-
-Planning difference: RD1–RD10 sum to 40 engineer-hours; RD11–RD15 add 20 hours, subject to spike results.
+Planning difference: the fourteen first-stage nodes total 56 engineer-hours; RD11–RD15 add 20 hours, subject to spike results.
 Dependency overlap permits some concurrency, but these are not calendar promises. RTC may add more integration work after RD11.
 During this interim stage devices with no LAN/approved HTTPS/Tailscale route still use relay for eligible small traffic;
-large files remain unavailable until a proven direct route exists. State that limitation at owner review.
-
+large files remain unavailable without LAN/independent direct HTTPS; ordinary overlay is excluded even if currently direct.
+This additional first-stage bulk limitation needs owner review; RTC later permits only non-relay ICE for bulk.
 Return to the original order if the owner declines the interim scope, if required devices cannot use (a)/(c)/(d),
 or if RD11 demonstrates a supported low-cost RTC integration with materially broader direct reachability.
 Then prioritize RD11–RD13 before enabling RD5/RD6 by default, retaining shared dedup/identity groundwork.
@@ -369,7 +379,6 @@ and forwards only after direct attempts fail. No TURN deployment or order change
 Acceptance mapping: measurement provenance/method → §1; four options → §2; recovery/no duplicate writes → §3;
 relay invariants/approval → §4–§5; half-day nodes/deviation → §5–§6; privacy/guard/CI → this section.
 Only this document is in scope. No baseline loosening, production configuration edits or code changes.
-
 **Measured cleanup**, 2026-10-02: `sandbox down --lab --port 24900` stopped lab tmux and relay,
 but its immediate status reported bridges stopped while port inspection still found two lab bridge PIDs.
 The runner PATH omitted the system sbin directory containing `lsof`; cwd verification therefore could not identify a live bridge.
