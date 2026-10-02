@@ -6,14 +6,16 @@
  *   先出现的那份算数，后来的由 fresh() 挡掉。
  * - 太长没进批的只给了开头（批尾的无编号预览，或已打租约后原样重给的那批里的编号预览）：显示开头、注明全文随后单独送达，
  *   同一条的预览只出一次；预览不算「已显示」，全文按普通消息到达时照常进历史。
- * - 分页读齐了（check_inbox({ read }) 各页都在）：拼回整条，换掉那条预览（位置不动）、算已显示——读完 ack 了不会再按普通消息重投。
+ * - 分页读齐了（check_inbox({ read }) 各页都在）：拼回整条，作为新的一条排在读齐的那次调用处（新 seq，差量读取的网页拿得到），
+ *   预览改成指向它。拼接核对过（lib/inbox-batch.ts joinInboxPages）才算已显示——读完 ack 了不会再按普通消息重投；
+ *   核对不了的注明「未能核对」、不算已显示：之后按普通消息到了照常出，那条拼接的改成指向普通那份。
  * - 已显示的又按普通消息重投：不再出，但普通那份 channel 头上的可信附件并到领走的那条上（批次文本里没有附件元数据）。
  * - seq：拆出来的消息挂在工具结果那一行上，取 行号 + 0.01·k，k 按整行累计（一行可有多个工具结果），网页的 h<seq> 气泡 id 不撞、差量游标照样按大小比；
  *   网页按 h<seq> 取行号的地方（差量去重、向下翻页、隐藏）和隐藏接口都认这种两位小数。
  * - 发送者只认 bridge 写的抬头（lib/inbox-batch.ts 校验条数）；拆不对就整段原文作为一条「收件箱」消息，不认任何发送者。
  */
 import { answerEcho, stripChannelHeader } from "./inbound-body.js";
-import { parseInboxBatch, parseInboxEntry, parseInboxPage, type InboxEntry } from "./inbox-batch.js";
+import { joinInboxPages, parseInboxBatch, parseInboxEntry, parseInboxPage, type InboxEntry } from "./inbox-batch.js";
 import type { HistoryMessage } from "./session-history.js";
 
 const INBOX_TOOL_RE = /(?:^|__)check_inbox$/;
@@ -54,7 +56,7 @@ const MAX_SUB = 99; // seq 只用两位小数（网页 h<seq> 的行号协议）
 
 export function inboxHistory() {
   const shown = new Map<string, HistoryMessage>(), previewed = new Map<string, HistoryMessage>();
-  const pages = new Map<string, string[]>();
+  const pages = new Map<string, string[]>(), bodyLens = new Map<string, number>(), unchecked = new Map<string, HistoryMessage>();
   // 同一行（一条 user 记录的多个 tool_result / Codex 同一条 assistant）共用一个子序号计数：seq 唯一且递增
   let line = -1, k = 0, last: HistoryMessage | undefined;
   const out = (seq: number, ts: string | null, f: Omit<HistoryMessage, "seq" | "ts" | "role">, acc: HistoryMessage[]): HistoryMessage => {
@@ -64,20 +66,23 @@ export function inboxHistory() {
     acc.push(last);
     return last;
   };
-  /** 分页读齐了：拼回整条，换掉那条预览（位置不动）；没见过预览就排在这次调用处 */
+  /** 分页读齐了：拼回整条，排在这次调用处；预览（早先的 seq，差量读取的网页不会再取）原地改成指向这里，全量刷新时不留两份开头 */
   const paged = (pg: NonNullable<ReturnType<typeof parseInboxPage>>, seq: number, ts: string | null, acc: HistoryMessage[]) => {
-    if (shown.has(pg.messageId) || pg.page < 1 || pg.page > pg.pages) return;
+    if (shown.has(pg.messageId) || unchecked.has(pg.messageId) || pg.page < 1 || pg.page > pg.pages) return;
     const got = pages.get(pg.messageId) ?? new Array<string>(pg.pages).fill("");
     if (got.length !== pg.pages) return;
     got[pg.page - 1] = pg.chunk;
     pages.set(pg.messageId, got);
     if (got.some((c) => !c)) return;
-    const e = parseInboxEntry(got.join(""), pg.messageId);
+    const { full, ok } = joinInboxPages(got, bodyLens.get(pg.messageId));
+    const e = parseInboxEntry(full, pg.messageId);
     if (!e) return;
     const f = entryFields(e);
     if (!f.text.trim()) return;
+    if (!ok) f.text += "\n\n…（分页读取拼接，未能核对完整，个别字符可能错位；若随后按普通消息送达，以那份为准）";
+    (ok ? shown : unchecked).set(pg.messageId, out(seq, ts, f, acc));
     const prev = previewed.get(pg.messageId);
-    shown.set(pg.messageId, prev ? Object.assign(prev, f) : out(seq, ts, f, acc));
+    if (prev) prev.text = `…（来自 ${f.from} 的长消息，全文已分页读取，见后面那条）`;
   };
   return {
     /** tool_result 块 → 拆出的入站消息（不是 check_inbox 的结果、报错、空收件箱 / 只 ack → []） */
@@ -90,7 +95,8 @@ export function inboxHistory() {
       const pg = parsed ? null : parseInboxPage(text);
       if (pg) paged(pg, seq, ts, acc);
       for (const e of parsed ?? []) {
-        if (shown.has(e.messageId) || (e.previewOf !== undefined && previewed.has(e.messageId))) continue; // 预览只出一次，全文出过就不再出预览
+        if (e.bodyLen !== undefined && !bodyLens.has(e.messageId)) bodyLens.set(e.messageId, e.bodyLen);
+        if (shown.has(e.messageId) || (e.previewOf !== undefined && (previewed.has(e.messageId) || unchecked.has(e.messageId)))) continue; // 预览只出一次，全文出过就不再出预览
         const f = entryFields(e);
         if (!f.text.trim()) continue;
         (e.previewOf === undefined ? shown : previewed).set(e.messageId, out(seq, ts, f, acc));
@@ -104,6 +110,8 @@ export function inboxHistory() {
     fresh(messageId: string | null, msg?: HistoryMessage | null): boolean {
       const m = messageId ? shown.get(messageId) : undefined;
       if (m && msg?.attachments?.length && !m.attachments?.length) m.attachments = msg.attachments;
+      const u = !m && messageId ? unchecked.get(messageId) : undefined;
+      if (u) { u.text = `…（来自 ${u.from} 的长消息，分页拼接未能核对，以后面按普通消息送达的全文为准）`; unchecked.delete(messageId!); }
       return !m;
     },
   };

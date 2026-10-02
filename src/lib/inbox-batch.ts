@@ -32,6 +32,8 @@ export interface InboxEntry {
   body: string;
   /** 太长没进批、只给了开头：全文字数 */
   previewOf?: number;
+  /** 预览才有：全文去掉抬头行后的正文字数（尾注的字数含当时那行抬头，抬头里「排队 N 分钟」会变，正文不变）——分页拼接拿它核对 */
+  bodyLen?: number;
 }
 
 /** 不是批次（ack 回执 / 分页读 / 「正在投递」/ 空收件箱且没有预览）→ null；拆不对 → "malformed" */
@@ -48,7 +50,8 @@ export function parseInboxBatch(text: string): InboxEntry[] | "malformed" | null
     const entry: InboxEntry = { from: h[3], messageId: h[4], ...(h[5] ? { replyTo: h[5] } : {}), body };
     // 预览尾注编号条目也会带：分页读给它打了租约后，没 ack 再调，「原样重给」的那批里它仍只给开头（inbox.ts fitEntry）
     const tail = PREVIEW_TAIL_RE.exec(body);
-    if (tail && tail[2] === h[4]) Object.assign(entry, { body: body.slice(0, tail.index), previewOf: Number(tail[1]) });
+    const headLen = h[0].length - (h[1] ? `${h[1]}/${h[2]} · `.length : 0); // 尾注字数按不带批内编号的抬头算（batchText 后插的编号）
+    if (tail && tail[2] === h[4]) Object.assign(entry, { body: body.slice(0, tail.index), previewOf: Number(tail[1]), bodyLen: Number(tail[1]) - headLen - 1 });
     if (i < n) {
       if (Number(h[1]) !== i + 1 || Number(h[2]) !== n) return "malformed";
       numbered++;
@@ -62,6 +65,24 @@ export function parseInboxBatch(text: string): InboxEntry[] | "malformed" | null
 export function parseInboxPage(text: string): { messageId: string; page: number; pages: number; chunk: string } | null {
   const m = PAGE_RE.exec(text);
   return m ? { messageId: m[1], page: Number(m[2]), pages: Number(m[3]), chunk: text.slice(m[0].length) } : null;
+}
+
+/**
+ * 分页读的各页 → 整条（inbox.ts readPaged：每次读都重算 entryText，抬头里「排队 N 分钟」可能多一位，后面各页的切片随之前移）。
+ * bodyLen（预览给的正文字数）核对：末页的抬头长度由它反推，和第 1 页抬头一样长 = 各页同一快照；两页且末页抬头长了 d 位 =
+ * 第 2 页开头重复了第 1 页末尾 d 个字，核对重叠后去掉。核对不了（没见过预览、多页且有漂移、读页乱序）→ ok=false，调用方别当权威全文
+ */
+export function joinInboxPages(chunks: string[], bodyLen: number | undefined): { full: string; ok: boolean } {
+  const joined = chunks.join("");
+  const h1 = chunks[0].indexOf("\n");
+  if (bodyLen === undefined || h1 < 0) return { full: joined, ok: false };
+  if (chunks.length === 1) return { full: joined, ok: joined.length - h1 - 1 === bodyLen };
+  const size = chunks[0].length, last = chunks[chunks.length - 1];
+  if (chunks.slice(0, -1).some((c) => c.length !== size)) return { full: joined, ok: false };
+  const drift = last.length + (chunks.length - 1) * size - 1 - bodyLen - h1; // 末页抬头比第 1 页长几位
+  if (drift === 0) return { full: joined, ok: true };
+  if (drift < 0 || chunks.length !== 2 || drift > last.length || !chunks[0].endsWith(last.slice(0, drift))) return { full: joined, ok: false };
+  return { full: chunks[0] + last.slice(drift), ok: true };
 }
 
 /**

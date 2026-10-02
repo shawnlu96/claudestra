@@ -286,7 +286,7 @@ describe("check_inbox 领走的消息进会话历史", () => {
     expect(us[0].seq).toBeLessThan(3);
   });
 
-  test("长消息分页读完并 ack：历史里那条预览换成全文（带结尾、不再说随后送达），只出一次", async () => {
+  test("长消息分页读完并 ack：全文作为新的一条排在读齐处（带结尾、不再说随后送达），预览改成指向它，全文只出一次", async () => {
     const long = `长报告开头\n${"x".repeat(20_000)}\nlong-END`;
     const held = setup([mk(long, "agent_long_3", { kind: "local", agentName: "agent-codex", channelId: "c-codex", ws: me })]);
     const first = await take(1000);
@@ -302,12 +302,76 @@ describe("check_inbox 领走的消息进会话历史", () => {
       callInbox("tu3", 5, { read: "agent_long_3", page: 2 }), result("tu3", p2, 6),
       callInbox("tu4", 7, { ack: "x" }), result("tu4", acked, 8),
     ]));
-    expect(us.length).toBe(1);
-    expect(us[0].from).toBe("agent-codex");
-    expect(us[0].text.startsWith("长报告开头\nxxx")).toBe(true);
-    expect(us[0].text.endsWith("long-END")).toBe(true);
-    expect(us[0].text).not.toContain("随后单独送达");
-    expect(us[0].seq).toBeLessThan(3); // 位置在最初领到它的那次调用处
+    expect(us.length).toBe(2);
+    expect(us[0].text).toContain("全文已分页读取");
+    expect(us[0].text).not.toContain("xxx");
+    expect(us[0].seq).toBeLessThan(3);
+    expect(us[1].from).toBe("agent-codex");
+    expect(us[1].text).toBe(long);
+    expect(us[1].seq).toBeGreaterThan(5); // 读齐的那次调用处（第 2 页结果那一行，行号 5）
+    expect(us[1].seq).toBeLessThan(6);
+  });
+
+  const driftBody = Array.from({ length: 3500 }, (_, i) => String(i).padStart(4, "0") + "|").join("") + "END"; // 17503 字
+  const MIN = 60_000;
+  /** heldAt=0：8 分钟取预览、9 分钟读第 1 页、10 分钟读第 2 页——第 2 页的抬头「排队 10 分钟」多一位，切片前移一个字 */
+  async function driftRun(id: string) {
+    const held = setup([mk(driftBody, id, { kind: "local", agentName: "agent-codex", channelId: "c-codex", ws: me })]);
+    const first = await take(8 * MIN);
+    const p1 = await take(9 * MIN, { read: id });
+    const p2 = await take(10 * MIN, { read: id, page: 2 });
+    expect(p2).toContain("第 2/2 页");
+    const recs = [
+      callInbox("tu1", 1), result("tu1", first, 2),
+      callInbox("tu2", 3, { read: id }), result("tu2", p1, 4),
+      callInbox("tu3", 5, { read: id, page: 2 }), result("tu3", p2, 6),
+    ];
+    return { held, first, p1, p2, recs };
+  }
+  const redeliver = (id: string, s: number) =>
+    channel(id, `[🤖 来自 agent-codex 的 inbound 消息（非 FYI）。\n判断一下。]\n\n${driftBody}`, 'user="agent-codex" user_id="agent" is_agent="true"', s);
+  function jsonl(recs: unknown[]): string {
+    const p = join(mkdtempSync(join(tmpdir(), "sh-inbox-")), "staged.jsonl");
+    writeFileSync(p, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    return p;
+  }
+
+  test("页头漂移（排队 9→10 分钟）：拼回的全文逐字等于原文；随后的普通重投不再出第二份", async () => {
+    const { recs } = await driftRun("agent_drift_1");
+    const us = users(await history([...recs, redeliver("agent_drift_1", 2000)]));
+    const fulls = us.filter((m) => m.text.includes("END"));
+    expect(fulls.length).toBe(1);
+    expect(fulls[0].text).toBe(driftBody);
+    expect(fulls[0].text).not.toContain("未能核对");
+  });
+
+  test("分阶段差量：先读到预览，追加两页分页读和同 message_id 普通重投，after=预览游标 → 拿到正确全文", async () => {
+    const { first, recs } = await driftRun("agent_drift_2");
+    const head = recs.slice(0, 2);
+    const p = jsonl(head);
+    const before = (await readSessionHistory(p)).messages;
+    expect(users(before).length).toBe(1);
+    expect(users(before)[0].text).toContain("只显示开头");
+    expect(first).toContain("这里只给开头");
+    const cursor = before.at(-1)!.seq;
+    writeFileSync(p, [...recs, redeliver("agent_drift_2", 2000)].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const delta = users((await readSessionHistory(p, { after: cursor })).messages);
+    expect(delta.length).toBe(1);
+    expect(delta[0].text).toBe(driftBody);
+    expect(delta[0].seq).toBeGreaterThan(cursor);
+  });
+
+  test("拼接核对不了（会话里没有那次预览、页头又漂移）：注明未能核对、不算已显示；普通重投照常出，拼接那条改成指向它", async () => {
+    const { recs } = await driftRun("agent_drift_3");
+    const noPreview = recs.slice(2);
+    const once = users(await history(noPreview));
+    expect(once.length).toBe(1);
+    expect(once[0].text).toContain("未能核对");
+    const us = users(await history([...noPreview, redeliver("agent_drift_3", 2000)]));
+    expect(us.length).toBe(2);
+    expect(us[0].text).toContain("以后面按普通消息送达的全文为准");
+    expect(us[0].text).not.toContain("END");
+    expect(us[1].text).toBe(driftBody);
   });
 
   test("共存：check_inbox 返回给 agent 的文本逐字不变（改前快照）", async () => {
