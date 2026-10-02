@@ -25,41 +25,57 @@ async function fixture(error: string) {
     borrow: { peer: "mate", projects: ["p"], roles: ["write" as const], maxOpen: 1 }, write };
   const wire = writeOrderWire(task, { orderId: "fix:T1", step: "fix", head: H, branch, base: "main", spec: "规格",
     report: write.report, findings: [], repo: "o/r", pr: 7, bounce: bounceWork({ ...bounce, prHead: PR.slice(0, 12) }) });
-  return { wire, offer: () => offerLendCore(db, { actor: "scheduler", now: 3 }, input),
+  return { db, wire, offer: () => offerLendCore(db, { actor: "scheduler", now: 3 }, input),
     orders: () => listLendOrders(db, "T1"), close: () => closeLedger(":memory:") };
 }
 
-const tokens = [`sk-${SHA}`, `opaque-${SHA}-suffix`, `Cookie: sid=opaque!${SHA}!suffix`, `Cookie: sid=opaque:${SHA}:suffix`,
-  `sk- ${SHA}`, `sk-\t${SHA}`, ...["_", ".", "/", "+", "="].flatMap((c) => [`x${c}${SHA}`, `${SHA}${c}x`])];
-for (const token of tokens) {
-  test(`embedded token ${token.slice(0, 8)} remains intact and real offer refuses`, async () => {
-    const f = await fixture(token);
+const cases = [
+  `sk-${SHA}`, `opaque-${SHA}-suffix`, `Cookie: sid=opaque!${SHA}!suffix`, `Cookie: sid=opaque:${SHA}:suffix`,
+  `sk- ${SHA}`, `sk-\t${SHA}`, `sk-${BASE}`, `sk-g${BASE}Z`, `opaque-${BASE}-suffix`, `Cookie: sid=opaque!${BASE}!suffix`,
+  ...["_", ".", "/", "+", "="].flatMap((c) => [`x${c}${SHA}`, `${SHA}${c}x`]),
+  ...[H, BASE, PR, MAIN].flatMap((sha) => [sha, `commit ${sha} refused`, `(${sha})`, `commit:${sha}, refused`, `"${sha}"`]),
+];
+for (const error of cases) {
+  test(`hex-bearing error ${error.slice(0, 8)} is withheld whole and real offer pools`, async () => {
+    const f = await fixture(error);
     try {
-      expect(f.wire.inputs.join("\n")).toContain(token);
-      expect(f.wire.inputs.join("\n")).not.toContain("SHA 已缩为 12 位");
-      expect(f.offer).toThrow(/疑似含密钥/);
-      expect(f.orders()).toEqual([]);
+      const inputs = f.wire.inputs.join("\n");
+      expect(inputs).not.toContain(error);
+      expect(inputs).not.toContain("SHA 已缩为 12 位");
+      expect(inputs).toContain("update_fail");
+      expect(inputs).toContain("原文含提交号，留在发起方台账");
+      expect(inputs).toMatch(/本机事件 #\d+/);
+      const order = f.offer();
+      expect(order.status).toBe("pooled");
+      if (error !== H) expect(order.text).not.toContain(error);
+      const event = f.db.query("SELECT seq,data FROM events WHERE kind='stage'").get() as { seq: number; data: string };
+      expect(JSON.parse(event.data).mergeBounce.error).toBe(error);
+      expect(inputs).toContain(`本机事件 #${event.seq}`);
     } finally { f.close(); }
   });
 }
 
-test("unknown standalone hex stays unchanged and refuses a real offer", async () => {
-  const f = await fixture(`commit ${SHA} refused`);
+test("non-hex error reaches the order byte for byte", async () => {
+  const error = "HTTP 422: GitHub refused update (permission denied)";
+  const f = await fixture(error);
   try {
-    expect(f.wire.inputs.join("\n")).toContain(SHA);
-    expect(f.offer).toThrow(/疑似含密钥/);
+    expect(f.wire.inputs.join("\n")).toContain(error);
+    expect(f.offer().status).toBe("pooled");
   } finally { f.close(); }
 });
 
-for (const known of [H, BASE, PR, MAIN]) {
-for (const error of [known, `commit ${known} refused`, `(${known})`, `commit:${known}, refused`, `"${known}"`, `‘${known}’`]) {
-  test(`independent SHA in ${error.slice(0, 8)} still passes a real offer`, async () => {
+for (const code of ["missing_field", "1234", SHA, `prefix${SHA}suffix`, `sk-${"Q".repeat(20)}`]) {
+  test(`safe status/code summary ${code.slice(0, 8)} contains no original hex-bearing text`, async () => {
+    const error = `HTTP 422 GitHub code: ${code}; commit ${SHA} refused`;
     const f = await fixture(error);
     try {
-      expect(f.wire.inputs.join("\n")).not.toContain(known);
-      expect(f.wire.inputs.join("\n")).toContain(`${known.slice(0, 12)}（SHA 已缩为 12 位）`);
+      const inputs = f.wire.inputs.join("\n");
+      expect(inputs).toContain("HTTP 422");
+      expect(inputs).not.toContain(error);
+      expect(inputs).not.toContain(SHA);
+      if (["missing_field", "1234"].includes(code)) expect(inputs).toContain(`GitHub 错误码 ${code}`);
+      else expect(inputs).not.toContain("GitHub 错误码");
       expect(f.offer().status).toBe("pooled");
     } finally { f.close(); }
   });
-}
 }

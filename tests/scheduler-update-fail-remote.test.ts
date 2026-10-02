@@ -11,12 +11,13 @@ import { bounceReceipt, parseBounceReceipt, updateOrBounce } from "../src/lib/sc
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import { autoFixture, H2 } from "./scheduler-auto-helpers.js";
 
-for (const refused of [false, true]) {
-test(`GitHub update refusal: ${refused ? "unknown hex refuses, records reason and notifies once" : "known head reaches lease holder"}`, async () => {
+for (const mode of ["hex", "plain", "secret"] as const) {
+const refused = mode === "secret";
+test(`GitHub update refusal: ${mode}`, async () => {
   const f = autoFixture();
   try {
-    const base = "b".repeat(40), foreign = refused ? "c".repeat(40) : H2, branch = "lend/T1-abcd";
-    const error = `GitHub update refused: expected commit ${foreign}, please retry`;
+    const base = "b".repeat(40), foreign = refused ? `sk-${"Q".repeat(20)}` : H2, branch = "lend/T1-abcd";
+    const error = mode === "plain" ? "HTTP 422: update permission denied" : `GitHub update refused: expected commit ${foreign}, please retry`;
     const run = { taskId: "T1", reviewedHead: H2, prRef: "https://github.com/o/r/pull/7", phase: "updating" } as MergeRun;
     let receipt = "";
     await updateOrBounce(run, {
@@ -70,8 +71,12 @@ test(`GitHub update refusal: ${refused ? "unknown hex refuses, records reason an
     const [order] = listLendOrders(f.db, "T1");
     expect(order).toMatchObject({ step: "fix", peer: "mate", head: H2, branch });
     expect(order.text).toContain("更新分支失败");
-    expect(order.text).toContain(error.replace(foreign, `${foreign.slice(0, 12)}(SHA 已缩为 12 位)`));
-    expect(order.wire.inputs.join("\n")).not.toContain(foreign);
+    if (mode === "hex") {
+      expect(order.text).not.toContain("GitHub update refused");
+      expect(order.wire.inputs.join("\n")).not.toContain(foreign);
+      expect(order.text).toContain("原文含提交号,留在发起方台账");
+      expect(order.text).toMatch(/本机事件 #\d+/);
+    } else expect(order.wire.inputs.join("\n")).toContain(error);
     expect(order.text).not.toContain("git fetch");
     expect(order.text).toContain("refs/remotes/origin/HEAD");
     const claim = await f.cliWith({ lend }, "owner", "lend-claim", "--", "mate", JSON.stringify({ v: 1, orderId: order.orderId, worker: "fixer" }));
