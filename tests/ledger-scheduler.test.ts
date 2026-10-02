@@ -150,19 +150,18 @@ describe("T68 durable scheduler facts", () => {
     } finally { f.close(); }
   });
 
-  test("an unknown external effect keeps the card lease even if PM advances the stage", () => {
+  test("an orphaned unknown write is cancelled when PM advances the card to live", () => {
     const f = fixture();
     try {
       const w = f.workflow("T1");
       planIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", taskId: "T1", taskRev: 1,
         workflowRev: w.rev, causalSeq: f.seq(), node: "write", action: "dispatch", reason: "write", resources: ["src/bridge.ts"] });
       settleIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", from: "pending", to: "unknown", receipt: "投递结果不明" });
-      f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
-      moveStage(f.db, f.owner, { taskId: "T1", from: "merge", to: "live" });
-      expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'T1'").all()).toEqual([{ resource: "src/bridge.ts" }]);
       expect(() => settleIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", from: "unknown", to: "done", receipt: "x" }))
         .toThrow(/只有 PM/);
-      settleIntent(f.db, f.owner, { id: "uncertain:T1", from: "unknown", to: "done", receipt: "核对：已交付" });
+      f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
+      moveStage(f.db, f.owner, { taskId: "T1", from: "merge", to: "live" });
+      expect(getIntent(f.db, "uncertain:T1")).toMatchObject({ status: "cancelled", receipt: expect.stringContaining("卡已 live") });
       expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'T1'").get()).toEqual({ n: 0 });
     } finally { f.close(); }
   });
