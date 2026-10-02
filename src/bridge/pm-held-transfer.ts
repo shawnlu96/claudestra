@@ -1,0 +1,83 @@
+/**
+ * PM 切换后押后消息的转交（bridge/local-api/project-pm-delivery.ts 写标记、bridge/held-flush.ts 交归属）：
+ * 旧 PM A 队里的一封转给当班 PM B，B 忙时进了 B 队——这之后 A 队那条就不再是可投递归属，否则每次扫描 A 都把它再转给 B、
+ * 抬头一层层叠（tests/project-pm-held-transfer.test.ts）。
+ * 抬头只认信封上 bridge 自己记下的转交记录（和 to 并列、随押后队列落盘），不认正文里长得像的字；原正文逐字保留。
+ * 不放进 meta：meta 是消息本身的元数据，转交后要原样保留（tests/pm-role.test.ts intact reply metadata）。
+ */
+import type { Delivery, DeliveryOutcome, Envelope } from "./router.js";
+import type { HeldItem, HeldQueue } from "./held-queue.js";
+
+/** 记在 env.pmTransfer：转给了哪个频道、正文前加的抬头原样（legacy = 旧版转交过，抬头已在正文里但没有记录，不再加） */
+interface PmTransfer { from: string; to: string; header: string; legacy?: true }
+type Transferred = Envelope & { pmTransfer?: PmTransfer };
+
+const pmTransferOf = (env: Envelope): PmTransfer | undefined => (env as Transferred).pmTransfer;
+
+/** 抬头之下的原正文：只剥标记里记的那一行抬头，正文本身哪怕以同样的字开头也不动 */
+function bodyOf(env: Envelope): string {
+  const t = pmTransferOf(env);
+  return t && t.header && env.content.startsWith(`${t.header}\n`) ? env.content.slice(t.header.length + 1) : env.content;
+}
+
+/**
+ * 给转交的信封换上（不是叠上）这一次的抬头并记标记。addressed = 这次投递的原收件频道（押后条目的 item.to）：
+ * 信封的收件方已不是它、又没有标记 = 旧版代码转交过（抬头已在正文里），只补标记不再加字
+ */
+export function markPmTransfer(env: Envelope, addressed: string, target: string, header: string): void {
+  const t = env as Transferred;
+  if (!t.pmTransfer && env.to.kind === "local" && env.to.channelId !== addressed) {
+    t.pmTransfer = { from: addressed, to: target, header: "", legacy: true };
+    return;
+  }
+  env.content = `${header}\n${bodyOf(env)}`;
+  t.pmTransfer = { from: addressed, to: target, header };
+}
+
+/** 转交没能送到、也没进新 PM 的队（新 PM 离线等）：flush 按报错处理，原条目留在旧队等下次，不当成已投出摘掉 */
+const retryable = new WeakSet<DeliveryOutcome>();
+export function retryLater(d: Delivery): Delivery {
+  retryable.add(d.outcome);
+  return d;
+}
+export const shouldRetry = (d: Delivery): boolean => retryable.has(d.outcome);
+
+/** 这次投递把 channelId 队里的这一条转进了新 PM 的押后队列（同一封已在那边排着）：旧队的归属可以交出去了 */
+export function handedOver(held: HeldQueue, channelId: string, item: HeldItem, r: Delivery): boolean {
+  const to = r.envelope.to, t = pmTransferOf(item.env);
+  if (r.envelope !== item.env || to.kind !== "local" || to.channelId === channelId || t?.to !== to.channelId) return false;
+  return !!held.get(to.channelId)?.some((i) => i.env === item.env);
+}
+
+const sameLetter = (a: Envelope, b: Envelope): boolean => {
+  const who = (e: Envelope) => (e.from.kind === "local" ? `local:${e.from.channelId}` : e.from.kind === "api" ? `api:${e.from.tokenId}`
+    : e.from.kind === "user" ? `user:${e.from.userId}` : `${e.from.kind}:${e.from.label ?? ""}`);
+  return a.meta.messageId === b.meta.messageId && a.meta.threadId === b.meta.threadId && a.meta.ts === b.meta.ts
+    && a.intent === b.intent && who(a) === who(b);
+};
+
+/**
+ * 存量：旧版代码（或交接途中崩溃）留下的 A/B 双队——A 队条目的信封已转给 B（env.to=B），B 队也押着同一封。
+ * B 队有对应的一条（同一对象，或重启后读回的同一封：messageId / thread / ts / intent / 发送方都相同）就只摘 A 的这条；
+ * 一条对一条配对，同一 messageId 的两次合法点击各配各的。B 队没有对应的不摘：按新规则再转一次（不再加抬头），成功即交出。
+ * 不碰别的频道、别的项目的条目，不清整队。返回摘掉的条数
+ */
+export function adoptStrandedTransfers(held: HeldQueue, channelId: string): number {
+  const q = held.get(channelId) ?? [];
+  const used = new Set<HeldItem>(), drop = new Set<HeldItem>();
+  // 先配同一对象（进程内的同一封），再配读回后字段相同的：配对结果不随队内顺序变
+  for (const match of [(a: Envelope, b: Envelope) => a === b, sameLetter]) {
+    for (const item of q) {
+      const to = item.env.to;
+      if (drop.has(item) || item.to.channelId !== channelId || to.kind !== "local" || to.channelId === channelId) continue;
+      const twin = (held.get(to.channelId) ?? []).find((i) => !used.has(i) && i.to.channelId === to.channelId && match(i.env, item.env));
+      if (!twin) continue;
+      used.add(twin);
+      drop.add(item);
+    }
+  }
+  if (!drop.size) return 0;
+  held.set(channelId, q.filter((i) => !drop.has(i)));
+  for (const i of drop) console.log(`♻️ 押后存量：${i.env.meta.messageId} 已在 ${(i.env.to as { channelId: string }).channelId} 队里，摘掉 ${channelId} 的重复归属`);
+  return drop.size;
+}

@@ -5,6 +5,7 @@ import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } fr
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
+import { markPmTransfer, retryLater } from "../pm-held-transfer.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
 interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile> }
@@ -27,13 +28,13 @@ export async function deliverPmLocal<P extends Receipt>(
     const borrowed = agents.some((a) => a.projectId === original.projectId && a.channelId && a.channelId !== to.channelId
       && clients.get(a.channelId)?.ws === to.ws);
     if (!borrowed) return send(env, to);
-    if (!own) return { envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } };
+    if (!own) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } });
     env.to = { ...to, ws: own.ws, cwd: own.cwd };
     return send(env, env.to);
   }
   const agent = agents.find((a) => a.name === name && a.projectId === original.projectId);
   const client = agent?.channelId ? clients.get(agent.channelId) : undefined;
-  if (!agent?.channelId || !client) return { envelope: env, outcome: { kind: "dropped", reason: `active PM ${name} is offline` } };
+  if (!agent?.channelId || !client) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `active PM ${name} is offline` } });
   const target: LocalEndpoint = { kind: "local", agentName: name, channelId: agent.channelId, ws: client.ws, cwd: client.cwd };
   if (env.from.kind === "api") {
     const file = await (facts.principals ?? readPrincipalsStrict)();
@@ -41,21 +42,27 @@ export async function deliverPmLocal<P extends Receipt>(
     const stored = file.principals.find((p) => tokenIdOf(p) === from.tokenId);
     const p = stored && principalView(file, stored.id, from.credential);
     if (!p || p.peer !== from.peer || !agentInScope(p, name)) {
-      const notice: Envelope = { ...env, from: { kind: "bridge", label: "pm-scope-refusal" }, to: target, intent: "notification",
+      const { pmTransfer: _, ...plain } = env as Envelope & { pmTransfer?: unknown };
+      const notice: Envelope = { ...plain, from: { kind: "bridge", label: "pm-scope-refusal" }, to: target, intent: "notification",
         content: `前任 PM ${original.name} 的 ${from.peer ? "peer" : "API"} 消息被拒收：令牌范围未包含当班 PM ${name}。`,
         meta: { messageId: `${env.meta.messageId}:pm-refused`, threadId: `${env.meta.threadId}:pm-refused`,
           ts: env.meta.ts, triggerKind: "system", skipInterAgentWatchdog: true } };
       const delivered = await send(notice, target);
-      if (delivered.outcome.kind !== "sent") console.error("[pm-role] refusal notice delivery failed", delivered.outcome.kind);
-      return { envelope: env, outcome: { kind: "dropped", reason: `${from.peer ? "peer token" : "API credential"} scope excludes active PM ${name}` } };
+      const refused: Delivery = { envelope: env, outcome: { kind: "dropped", reason: `${from.peer ? "peer token" : "API credential"} scope excludes active PM ${name}` } };
+      if (delivered.outcome.kind === "sent") return refused;
+      // The refusal notice is the only trace of the dropped message; a held original stays queued until that notice gets through.
+      console.error("[pm-role] refusal notice delivery failed", delivered.outcome.kind);
+      return retryLater(refused);
     }
   }
   const before = to.channelId;
   // Move only this request's receipt; unrelated old-PM conversations remain with their original target.
   const caller = env.from.kind === "local" ? env.from.channelId : null;
+  let moved: { slot: Parameters<AgentCallBook["add"]>[1]; messageId?: string } | undefined;
   if (caller) {
     const slot = book.slot(before, caller), req = slot?.requests?.find((r) => r.messageId === env.meta.messageId);
     if (slot && req) {
+      moved = { slot: { ...slot, originalReplyChannel: req.originalReplyChannel, expecting: req.expecting, ts: req.ts }, messageId: req.messageId };
       book.add(target.channelId, { ...slot, targetName: name, originalReplyChannel: req.originalReplyChannel, expecting: req.expecting, ts: req.ts }, req.messageId);
       book.dropRequest(before, caller, env.meta.messageId);
     }
@@ -73,16 +80,26 @@ export async function deliverPmLocal<P extends Receipt>(
       if (!queue.length) receipts.delete(oldKey);
     }
   }
+  // Replayed held letters reach here again on every flush: the header is replaced via its trusted meta record, never stacked.
+  markPmTransfer(env, before, target.channelId, pushback ? `[系统转交：这是回复前任 PM ${original.name} 的问题；当班 PM ${name}]`
+    : `[系统转交：原收件人 ${original.name}；当班 PM ${name}]`);
   env.to = target;
-  env.content = pushback ? `[系统转交：这是回复前任 PM ${original.name} 的问题；当班 PM ${name}]\n${env.content}`
-    : `[系统转交：原收件人 ${original.name}；当班 PM ${name}]\n${env.content}`;
   // The previous recipient's session pin is not the new PM's session; pin to the live replacement instead.
   if (env.meta.expectSession) env.meta.expectSession = agent.sessionId;
   const delivery = await send(env, target);
-  if (caller && delivery.outcome.kind !== "sent") book.dropRequest(target.channelId, caller, env.meta.messageId);
-  if (movedReceipt && delivery.outcome.kind !== "sent") {
-    const key = `${movedReceipt.tokenId}|${target.channelId}`;
-    receipts.set(key, (receipts.get(key) ?? []).filter((p) => p !== movedReceipt));
+  if (delivery.outcome.kind === "sent") return delivery;
+  if (caller) book.dropRequest(target.channelId, caller, env.meta.messageId);
+  if (movedReceipt) {
+    const key = `${movedReceipt.tokenId}|${target.channelId}`, left = (receipts.get(key) ?? []).filter((p) => p !== movedReceipt);
+    if (left.length) receipts.set(key, left);
+    else receipts.delete(key);
+  }
+  // A failed send keeps the held original queued for retry: its return slot and API waiter go back to the former recipient with it.
+  if (delivery.outcome.kind !== "error") return delivery;
+  if (caller && moved) book.add(before, moved.slot, moved.messageId);
+  if (movedReceipt) {
+    Object.assign(movedReceipt, { agentChannelId: before, agentName: original.name });
+    receipts.set(`${movedReceipt.tokenId}|${before}`, [...(receipts.get(`${movedReceipt.tokenId}|${before}`) ?? []), movedReceipt]);
   }
   return delivery;
 }

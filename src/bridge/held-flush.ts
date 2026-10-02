@@ -15,6 +15,7 @@ import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { senderTrigger, turnStartedAt } from "./stop-settle.js";
 import { controlFor } from "../lib/runtimes/index.js";
+import { adoptStrandedTransfers, handedOver, shouldRetry } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
   held: HeldQueue;
@@ -141,6 +142,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
+    adoptStrandedTransfers(d.held, channelId); // 存量 A/B 双队：同一封已在新 PM 队里的，旧队不再投（bridge/pm-held-transfer.ts）
     const working = await d.working(channelId, evAgent);
     if (!working) openedBy.delete(channelId);
     let first: HeldItem | undefined;
@@ -163,7 +165,13 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
       const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item));
-      if (r.outcome.kind === "error") continue; // 留在队里(盘上一直有它),下一次触发再投
+      if (r.outcome.kind === "error" || shouldRetry(r)) continue; // 留在队里(盘上一直有它),下一次触发再投;转给离线的当班 PM 同样留着
+      // 转给忙着的当班 PM、已押进它的队:归属交给那边(它空闲时投一次),这边摘掉,否则每次扫描都再转一遍
+      if (handedOver(d.held, channelId, item, r)) {
+        d.held.remove(channelId, item);
+        console.log(`↪️ 押后消息转交(${reason}): ${fromLabel(item.env)} → ${(r.envelope.to as LocalEndpoint).agentName}（${item.env.meta.messageId}），排进对方队列`);
+        continue;
+      }
       // 目标又忙了:deliverToLocal 押回时 hold 认出原条目还在(同一封)就不另加——原条目留着,首次入队 / 已提醒时间不重置,
       // 也不会「新的已落盘、旧的还没摘」时崩溃留下两份。等下一次触发
       if (r.outcome.kind === "sent" && r.outcome.note === "queued") break;
