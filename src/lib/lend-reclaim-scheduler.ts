@@ -15,6 +15,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import type { RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
 import { updateTask } from "./fix-strategy-task-write.js";
+import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
@@ -40,7 +41,7 @@ function leaseWriters(db: Database, taskId: string, lease: WriteLease) {
 
 function cleanExit(db: Database, orderId: string, gen: number): boolean {
   const ack = getEventByDedup(db, `convergence-cancel:${orderId}`);
-  return ack?.data.clean === true && ack.data.gen === gen;
+  return (ack?.data.clean === true && ack.data.gen === gen) || stoppedReportSeq(db, orderId, gen) !== null;
 }
 
 export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext,
@@ -52,19 +53,22 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   if (!lease) throw new LedgerError("conflict", "remote author has no held write lease");
   const running = leaseWriters(db, task.id, lease).filter((o) => o.status !== "cancelled" ||
     (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen) && !getEventByDedup(db, `scheduler:${id}:cancel:${o.orderId}`)));
-  if (running.length) {
-    tx(db, () => {
+  if (running.length && tx(db, () => {
+      let waiting = false;
       reclaimAuthority(db, ctx, id);
       for (const o of running) {
+        const needsAck = (o.leaseGen > 0 || o.status !== "pooled") && !cleanExit(db, o.orderId, o.leaseGen);
+        waiting ||= needsAck || o.status === "pooled";
         if (o.status !== "cancelled") db.query("UPDATE lend_orders SET status = 'cancelled', reason = ?, updatedAt = ? WHERE orderId = ? AND status = ?")
           .run(`CONV3 family swap ${id}`, ctx.now ?? Date.now(), o.orderId, o.status);
         db.query("DELETE FROM task_steps WHERE taskId = ? AND step = ? AND round = ? AND executorKind = 'peer' AND executor = ? AND state = 'assigned'")
           .run(task.id, o.step, o.round, `${o.worker}@${o.peer}`);
         insertEvent(db, { ...ctx, dedupKey: `scheduler:${id}:cancel:${o.orderId}` }, { project: task.project, target: task.id,
-          kind: "scheduler", text: "换家族前撤旧写单，等待干净停止确认", data: { op: "convergence_cancel", intentId: id, orderId: o.orderId,
-            gen: o.leaseGen, needsAck: o.leaseGen > 0 || o.status !== "pooled", head: o.head } }, true);
+          kind: "scheduler", text: needsAck ? "换家族前撤旧写单，等待干净停止确认" : "换家族前撤旧写单；出借方撤单前已报停，按干净退出", data: { op: "convergence_cancel", intentId: id, orderId: o.orderId,
+            gen: o.leaseGen, needsAck, head: o.head } }, true);
       }
-    });
+      return waiting;
+    })) {
     return "旧写单已取消；等待干净停止确认，不主动停止远端会话";
   }
   const cancelled = listEvents(db, { project: task.project, target: task.id }).filter((e) => e.data.op === "convergence_cancel" && e.data.intentId === id);
@@ -83,6 +87,7 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
     const live = leaseWriters(db, task.id, held).some((o) => o.status !== "cancelled" || (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen)));
     if (live) return "收回前仍有在跑的写单，等待取消";
     const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}`;
+    recordStoppedExits(db, ctx, task, id, leaseWriters(db, task.id, held));
     endWriteLease(db, task.id, reason, ctx.now ?? Date.now());
     if (current.task.assigneeKind === "peer_agent" && current.task.assignee?.startsWith(`${held.fp}/`)) {
       const patch = { agent: held.prevAssigneeKind === "agent" ? held.prevAssignee : null,
