@@ -8,6 +8,7 @@ import { isAbsolute } from "node:path";
 import { isPriority, PRIORITIES, REPO_RE, type Priority } from "./lend-config.js";
 import { statePath } from "./paths.js";
 import { parseWriteFamilies } from "./scheduler-family-pick.js";
+import { mergeTrainField, type MergeTrainMode } from "./scheduler-merge-train-switch-config.js";
 import { parseFixReassign, type FixReassignPolicy } from "./lend-fix-reassign-config.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
@@ -40,6 +41,7 @@ interface ProjectSchedule extends AgentPoolPolicy {
   /** Always set by parseSchedulerConfig (default DEFAULT_REMOTE); a hand-built policy without it never pools. */
   remote?: RemotePolicy;
   requiredChecks: string[];
+  /** Merge train switch (i28-MT1sw): absent = on; observe = only record what a train would have done; off = no train at all. */ mergeTrain?: MergeTrainMode;
   /** Local clone whose `gh` context must match the PR repository; with `deploy` it is also the tree that gets deployed. */
   repoDir: string;
   /** Absent = merge only, the PM deploys (T68g). */
@@ -96,7 +98,7 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       maxActiveWorkers: agents.agents ? agentLimitSum(agents.agents) : p.maxActiveWorkers as number, requiredChecks,
       repoDir: p.repoDir, remote: { ...localFamilyPolicy(parseRemote(id, agentPoolRemote(p.remote, !!agents.agents)), p.localAuthorRuntime), ...agents },
       ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
-      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}) };
+      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}), ...mergeTrainField(id, p.mergeTrain) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise) };
