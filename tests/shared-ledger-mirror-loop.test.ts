@@ -6,7 +6,9 @@ import { REPO_ROOT } from "../src/lib/repo-root.js";
 import { moveStage } from "../src/lib/ledger-write.js";
 import { acquireLock } from "../src/lib/file-lock.js";
 import type { SharedLedgerProjection } from "../src/lib/shared-ledger-contract.js";
-import { mirrorPushLockPath, readSharedLedgerMirrors, sharedMirrorStatus } from "../src/lib/shared-ledger-mirror.js";
+import { mirrorPushLockPath, readSharedLedgerMirrors, resolveMirrorCredential, sharedMirrorStatus } from "../src/lib/shared-ledger-mirror.js";
+import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
+import { instanceKeySync } from "../src/lib/instance-key.js";
 import { runSharedLedgerMirrorPass, startSharedLedgerMirrorLoop } from "../src/lib/shared-ledger-mirror-loop.js";
 import type { MirrorClient } from "../src/lib/shared-ledger-projector.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
@@ -97,5 +99,58 @@ test("cron hosts the loop outside its tick, and off waits for an in-flight push 
     moveStage(f.db, { actor: f.actor }, { taskId: "c5-existing", from: "spec", to: "restate" });
     expect(await runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, client: () => okClient(sent), scrub: async () => SCRUB })).toEqual({});
     expect(sent).toHaveLength(0);
+  } finally { await f.close(); }
+});
+
+/** Real SharedLedgerClient (its own second scrub) in front of a fake center transport. */
+function fakeCenter() {
+  const sent: SharedLedgerProjection[] = [];
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    const { payload } = JSON.parse(String(init?.body)) as { payload: SharedLedgerProjection };
+    sent.push(payload);
+    return Response.json({ schemaVersion: 1, serverSeq: sent.length, sourceInstanceId: payload.sourceInstanceId, sourceSeq: payload.sourceSeq, digest: "b".repeat(64) });
+  }) as unknown as typeof fetch;
+  return { sent, fetcher };
+}
+const repoHead = () => Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: REPO_ROOT }).stdout.toString().trim();
+
+test("real client: a task head that is a commit in this repo passes both scrubs, the request goes out and the watermark advances", async () => {
+  const f = await mirrored();
+  try {
+    const head = repoHead();
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    f.db.prepare("UPDATE tasks SET headSHA = ? WHERE id = ?").run(head, "c5-existing");
+    moveStage(f.db, { actor: f.actor }, { taskId: "c5-existing", from: "spec", to: "restate" });
+    const before = readSharedLedgerMirrors()[f.id]!.watermark, center = fakeCenter();
+    const out = await runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, now: () => 50_000, fetch: center.fetcher });
+    expect(out[f.id]).toMatchObject({ kind: "pushed" });
+    expect(center.sent).toHaveLength(1);
+    expect(center.sent[0]!.tasks.find((t) => t.sourceTaskId === "c5-existing")?.head).toBe(head);
+    const e = readSharedLedgerMirrors()[f.id]!;
+    expect(e.watermark).toBeGreaterThan(before);
+    expect(e).toMatchObject({ lastError: null, failures: 0, lastPushSeq: center.sent[0]!.sourceSeq });
+  } finally { await f.close(); }
+});
+
+test("real client: a 40-hex head that is not a commit in this repo never reaches the center; the client scrub still blocks it", async () => {
+  const f = await mirrored();
+  try {
+    const unknown = "0123456789abcdef0123456789abcdef01234567", head = repoHead();
+    f.db.prepare("UPDATE tasks SET headSHA = ? WHERE id = ?").run(unknown, "c5-existing");
+    moveStage(f.db, { actor: f.actor }, { taskId: "c5-existing", from: "spec", to: "restate" });
+    const center = fakeCenter();
+    const out = await runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, now: () => 50_000, fetch: center.fetcher });
+    // The projector only keeps allowlisted heads: the unknown one goes out as null, never as raw hex.
+    expect(out[f.id]).toMatchObject({ kind: "pushed" });
+    expect(center.sent[0]!.tasks.find((t) => t.sourceTaskId === "c5-existing")?.head).toBeNull();
+    expect(JSON.stringify(center.sent)).not.toContain(unknown);
+    // The allowlist the real client now carries does not widen the scrub: a raw unknown head is still refused before any request.
+    const entry = readSharedLedgerMirrors()[f.id]!, scrubbing = fakeCenter();
+    const client = new SharedLedgerClient(resolveMirrorCredential(entry)!, instanceKeySync(STATE_DIR)!,
+      { scrub: { ...SCRUB, commits: new Set([head]) }, fetch: scrubbing.fetcher });
+    const raw = { ...center.sent[0]!, tasks: center.sent[0]!.tasks.map((t) => ({ ...t, head: unknown })) };
+    await expect(client.projection(raw)).rejects.toThrow("tasks[0].head");
+    expect(scrubbing.sent).toHaveLength(0);
+    await expect(client.projection({ ...raw, tasks: raw.tasks.map((t) => ({ ...t, head })) })).resolves.toMatchObject({ sourceSeq: raw.sourceSeq });
   } finally { await f.close(); }
 });

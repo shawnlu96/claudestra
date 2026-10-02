@@ -3,24 +3,15 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import { api } from '@/lib/api/client';
 import { machines } from '@/lib/machines';
 import type { Identity } from '@/lib/api/shared-ledger';
-import { SharedLedger } from '../shared/shared-ledger';
-import { closeCollab, openCollab } from '../collab-nav';
+import { sharedCollabProject, sharedIdentity } from '../team-source-key';
+export { sharedCollabProject } from '../team-source-key';
+import { TeamSource } from '../shared/team-ops';
+import { openCollab } from '../collab-nav';
 import { useChatNav } from '../../chat/components/nav-context';
 
 const subscribeMachines = (fn: () => void) => machines.subscribe(fn);
 const currentMachine = () => machines.currentFp();
 const noMachine = () => null;
-const PREFIX = 'shared-ledger:';
-export function sharedCollabProject(identity: Identity): string { return PREFIX + JSON.stringify(identity); }
-function sharedIdentity(project: string): Identity | null {
-  if (!project.startsWith(PREFIX)) return null;
-  try {
-    const identity = JSON.parse(project.slice(PREFIX.length)) as Identity;
-    return identity && [identity.center, identity.team, identity.person, identity.project, identity.machine]
-      .every(v => typeof v === 'string' && !!v) ? identity : null;
-  }
-  catch { return null; } // A malformed UI cache key cannot authorize a server request; render the local fallback.
-}
 interface Context { identities: (Omit<Identity, 'machine'> & { localProjectId?: string })[] }
 export function SharedEntry({ projectId }: { projectId: string }) {
   const [identity, setIdentity] = useState<Identity | null>(null);
@@ -45,6 +36,6 @@ export function SharedEntry({ projectId }: { projectId: string }) {
 }
 export function SharedCollabContent({ project, fallback }: { project: string; fallback: ReactNode }) {
   const identity = sharedIdentity(project);
-  return identity ? <div className="h-full w-full overflow-auto"><button type="button" className="btn btn-ghost h-10 min-h-10 px-3" onClick={closeCollab}>返回会话</button>
-    <SharedLedger key={project} identity={identity} /></div> : fallback;
+  // 团队视图就是本地 CollabView（fallback），只是数据换成中心共享台账（i28-TV1）
+  return identity ? <TeamSource identity={identity}>{fallback}</TeamSource> : fallback;
 }

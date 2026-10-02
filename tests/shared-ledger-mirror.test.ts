@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -8,10 +8,14 @@ import { preflightStart } from "../src/lib/dag-tools-start.js";
 import { featureGate } from "../src/lib/scheduler-autostart.js";
 import { readSharedLedgerMode, writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { readSharedLedgerMirrors } from "../src/lib/shared-ledger-mirror.js";
+import { acquireLock } from "../src/lib/file-lock.js";
+import type { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
+import type { SharedLedgerImport } from "../src/lib/shared-ledger-contract.js";
+import { advanceSharedLedgerImport } from "../scripts/shared-ledger-import.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 import { CENTER, cleanupMirrorState, commitJournal, serviceCredential } from "./shared-ledger-mirror-fixture.test.js";
 
-afterEach(() => cleanupMirrorState());
+afterEach(() => { cleanupMirrorState(); rmSync(join(STATE_DIR, "shared-ledger-bindings.json"), { force: true }); });
 const svc = (project: string) => ({ autoDispatch: true, projects: [project], maxWorkers: () => 3 });
 const spec = "# PJ1 spec\n模板：code\n";
 
@@ -92,5 +96,58 @@ test("only PM / owner can switch mirroring; off on a feature that is not mirrore
     expect(await f.ledger(["shared-mirror", "on", f.id], "agent-stranger")).toMatchObject({ ok: false, code: "forbidden" });
     expect(await f.ledger(["shared-mirror", "off", f.id])).toMatchObject({ ok: false, code: "invalid" });
     expect(await f.ledger(["shared-mirror", "bogus", f.id])).toMatchObject({ ok: false, code: "invalid" });
+  } finally { await f.close(); }
+});
+
+/** Just enough center for advanceSharedLedgerImport(..., "activate") on a commitJournal batch. */
+function activatingCenter(payload: SharedLedgerImport) {
+  const tasks = payload.manifest.features.flatMap((f) => f.projection.tasks);
+  const mappings = [{ kind: "feature", sourceInstanceId: CENTER.instanceId, sourceId: payload.manifest.features[0]!.sourceFeatureId, id: "center-feature-1" },
+    ...tasks.map((t, i) => ({ kind: "task", sourceInstanceId: CENTER.instanceId, sourceId: t.sourceTaskId, id: `center-task-${i}` }))];
+  const receipt = (status: "staged" | "active") => ({ status, batchId: payload.batchId, projectId: CENTER.projectId, serverSeq: 4,
+    receipt: { schemaVersion: 1, mode: "commit", batchId: payload.batchId, manifestDigest: payload.manifestDigest, serverSeq: 3, mappings },
+    verification: { features: 1, versions: payload.manifest.features[0]!.versions.length,
+      bindings: payload.manifest.features[0]!.versions.reduce((n, v) => n + v.bindings.length, 0), tasks: tasks.length,
+      sourceSeq: payload.manifest.sourceSeq, manifestDigest: payload.manifestDigest } });
+  return { connection: { centerId: CENTER.centerId, baseUrl: "https://center.example/", teamId: CENTER.teamId, personId: CENTER.personId,
+    instanceId: CENTER.instanceId, bearer: "bearer-for-tests-only" },
+  async importReceipt() { return receipt("staged"); }, async controlImport() { return receipt("active"); } } as unknown as SharedLedgerClient;
+}
+
+test("shared-mirror on that waited on the mirror state lock while activate finished refuses instead of reopening local planning", async () => {
+  const f = integrationFixture();
+  try {
+    const payload = await commitJournal(f, "batch-pj1-race");
+    await serviceCredential();
+    // Review probe: hold the mirror state lock so `on` parks after its pre-checks.
+    const held = (await acquireLock(join(STATE_DIR, "shared-ledger-mirrors.json.lock")))!;
+    let done = false;
+    const on = f.ledger(["shared-mirror", "on", f.id]).then((r) => { done = true; return r; });
+    await Bun.sleep(300);
+    expect(done).toBe(false);
+    expect((await advanceSharedLedgerImport(f.db, STATE_DIR, "batch-pj1-race", activatingCenter(payload), payload.manifestDigest, "activate")).status).toBe("active");
+    expect(readSharedLedgerMode(f.id)).toEqual({ authorityMode: "planning", sharedPlanning: true });
+    held.release();
+    expect(await on).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("activate") });
+    expect(readSharedLedgerMode(f.id)).toEqual({ authorityMode: "planning", sharedPlanning: true });
+    expect(JSON.parse(readFileSync(join(STATE_DIR, "shared-ledger-migrations", "batch-pj1-race.json"), "utf8"))).toMatchObject({ phase: "active", receipt: { status: "active" } });
+    expect(readSharedLedgerMirrors()[f.id]?.enabled).toBe(false); // the entry it wrote while waiting is not left pushing
+  } finally { await f.close(); }
+});
+
+test("shared-mirror off that waited on an in-flight push while activate finished refuses and keeps planning", async () => {
+  const f = integrationFixture();
+  try {
+    const payload = await commitJournal(f, "batch-pj1-race-off");
+    await serviceCredential();
+    expect(await f.ledger(["shared-mirror", "on", f.id])).toMatchObject({ ok: true, mirroring: true });
+    const held = (await acquireLock(join(STATE_DIR, "shared-ledger-mirrors.push.lock")))!;
+    const off = f.ledger(["shared-mirror", "off", f.id]);
+    await Bun.sleep(300);
+    await advanceSharedLedgerImport(f.db, STATE_DIR, "batch-pj1-race-off", activatingCenter(payload), payload.manifestDigest, "activate");
+    held.release();
+    expect(await off).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("activate") });
+    expect(readSharedLedgerMode(f.id)).toEqual({ authorityMode: "planning", sharedPlanning: true });
+    expect(readSharedLedgerMirrors()[f.id]?.enabled).toBe(false);
   } finally { await f.close(); }
 });
