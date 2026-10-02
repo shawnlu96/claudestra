@@ -184,23 +184,23 @@ describe("UI fix orders share their rejection source and combined evidence", () 
     } finally { f.close(); }
   });
 
-  for (const sameFinding of [true, false]) test(`PM rejection preserves code P1 fallback and streak limit (same finding=${sameFinding})`, async () => {
+  for (const sameFinding of [true, false]) test(`PM rejection preserves code P1 context replacement and continued repair (same finding=${sameFinding})`, async () => {
     const f = autoFixture({ template: "ui" });
-    const limit = sameFinding ? 3 : 4;
+    const limit = sameFinding ? 2 : 4;
     const finding = (round: number) => sameFinding ? P1 : { ...P1, findingId: `race-${round}`, family: `family${round}` };
     try {
       await toReview(f, [finding(1)]);
       for (let round = 1; round <= limit; round++) {
         await reject(f);
-        // PM can push the rejected card to fix even when automatic review progression would escalate.
+        // PM rejection retains code findings; repeated P1s replace context before the next repair dispatch.
         expect(await f.cli("pm", "stage", "T1", "--from", "review", "--to", "fix")).toMatchObject({ ok: true });
         const plan = planScheduler(snapshot(f));
-        if (round === limit) {
-          expect(plan).toMatchObject({ kind: "escalate", code: "fix_history" });
+        if (sameFinding && round === limit) {
+          expect(plan).toMatchObject({ kind: "intent", action: "fix_swap", node: "fix" });
           break;
         }
         const { planned } = await localOrder(f);
-        expect(planned.workOrder!.fallbackWarning).toBe(round === limit - 1 ? "再不行退到：只报错不修" : null);
+        expect(planned.workOrder!.fallbackWarning).toBeNull();
         const head = String(round + 3).repeat(40);
         expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", head)).toMatchObject({ ok: true });
         await f.tick();

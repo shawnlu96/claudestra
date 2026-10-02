@@ -51,6 +51,16 @@ afterEach(() => {
 });
 
 describe("正常路径", () => {
+  test("旧 verdict 从逐项说明或报告标题补 basis，结构化字段优先，无标记仍可交", () => {
+    writeFileSync(report, "## F1 [验收线 2] 报告标题\n## F2\n[回归] 第二项\n");
+    const findings = [finding("F1", "P1"), finding("F2", "P1"),
+      { ...finding("F3", "P1"), description: "[验收线 3] 说明" },
+      { ...finding("F4", "P1"), basis: "regression" }, finding("F5", "P1")];
+    expect(submitVerdict(db, me("agent-y"), wire({ p1: 5, p2: 0, findings }), deps).ok).toBe(true);
+    const rows = reviewEvents()[0]!.data.findings as { basis?: string }[];
+    expect(rows.map((f) => f.basis)).toEqual(["acceptance:2", "regression", "acceptance:3", "regression", undefined]);
+  });
+
   test("take_review 给出审查单；submit_verdict 记结构化结论（head / session / family 取身份与单子），不推阶段", () => {
     const t = takeReview(db, me("agent-y"), reviews);
     if (!t.ok) throw new Error(t.message);

@@ -74,3 +74,30 @@ The executor brief (`src/lib/dag-tools-prompt.ts`) is generic; a project can rep
 PM with progress) is always appended.
 
 Tests: `tests/dag-tools-lanes.test.ts` (pure), `tests/dag-tools-bridge.test.ts` (handlers → in-process ledger, fake git / create / kill).
+
+## Product feature dependencies and ETA
+
+`set_feature_deps({add:[{from,to,note?}],remove:[{from,to}]})` is restricted to PM / master / owner.
+`from` is the prerequisite; `to` waits for it. Removals run before additions, each via the ledger CLI
+with verified channel identity. Each successful change emits a feature event with origin. Duplicate additions
+are idempotent; missing removals and cycles fail. A failed batch reports how many operations already completed.
+CLI equivalents: `ledger feature-dep-add <from> <to> [--note <≤60 chars>]`, `feature-dep-rm`, `feature-deps [feature]`.
+
+`GET /api/v1/ledger/:project/product` uses the DAG endpoint's owner gate and one deferred read transaction.
+Features use `version` and `counts.completed` to match the shared-ledger DTO; counts additionally include
+active, ready, blocked and deferred. The six counts partition current effective nodes. Missing/foreign cards
+count as blocked. Nodes starting with `（远期）` or `(远期)` (allowing leading whitespace) count only as deferred. Without a DAG, counts use feature cards
+(total/completed/active), and ETA is null. Responses contain no node arrays.
+
+ETA accepts S=1h, 半天=4h, N小时, N分钟 (including 设计稿), N天=8N hours and ranges taking their upper bound.
+Unparsed estimates use the project's parsed current-node median, default 4h. Deferred nodes are excluded.
+Remaining nodes use full estimates when planned and half estimates when active (including blocked/missing).
+Critical path is the longest dependency path through those weights. Calibration k is the median build-to-first-verified
+hours / estimate for project nodes first verified in the last 24h, clamped to [0.25,4], default 1 with fewer than 3 samples.
+Throughput is the project's cards first verified in the last 12h (investigate uses done), divided by 12, minimum 0.25/h.
+Share is max(1, feature active nodes)/max(1, project active nodes), including blocked and excluding deferred.
+ETA is now + max(critical path × k, remaining/(throughput × share)) hours. Zero remaining uses the last card completion;
+empty DAGs have a null completion time. Feature dependencies propagate maximum ETA in topological order.
+`eta.basis` supplies perHour, samples, k, cpHours, remaining and share. All computations inject now.
+
+Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes include node/card/PM/time); bridge restart clears it, so call `start_node` again.

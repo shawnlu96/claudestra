@@ -11,6 +11,7 @@ import { useLendT, useRemainingText } from "./lend-i18n";
 import { LendIcon, type LendIconName } from "./lend-icons";
 import { formDefaults, grantStatus, remainingMs, splitRemaining, type GrantForm as Form, type GrantStatus, type GrantView } from "./lend-model";
 import { useLendState } from "./lend-state";
+import { LendClaudeLogin } from "./lend-claude-login";
 import { LentOrders } from "./lent-orders";
 import css from "./lend.module.css";
 
@@ -54,7 +55,6 @@ function GrantRow({ g, now, fresh, leaving, busy, err, onRevoke, onRegrant }: {
         <span>{slots} · {g.ordersPerDay}/d</span>
         {left !== null && <span className="tabular-nums">{left > 0 ? remainingText(splitRemaining(left)) : t("已到期")}</span>}
       </div>
-      {err && <p className="mt-1 break-words text-[11px] text-error">{err.msg}</p>}
     </div>
     </div>
   );
@@ -79,8 +79,9 @@ export function LendPanel() {
           </button>
         )}
       </div>
+      <LendClaudeLogin />
       {form && (
-        <GrantForm key={JSON.stringify(form)} peers={data.peers} maxDays={data.maxDays} shellSentence={data.shellSentence} initial={form}
+        <GrantForm key={JSON.stringify(form)} peers={data.peers} grants={data.grants} maxDays={data.maxDays} initial={form}
           onCancel={() => setForm(null)} onFail={() => void load()} onDone={(peer) => { setForm(null); setFresh(peer); void load(); }} />
       )}
       <div className="space-y-1.5">

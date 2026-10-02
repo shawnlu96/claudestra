@@ -19,6 +19,7 @@ import { ledgerWrite, type LedgerRun } from "./order-ledger-exit.js";
 import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
 import { parseDeliverWire } from "./order-wire.js";
+import { deliveredScope } from "./order-deliver-scope.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -71,7 +72,7 @@ function replayed(db: Database, call: VerifiedCall, key: string, orderId: string
 export async function deliverOrder(call: VerifiedCall, args: unknown, deps: DeliverDeps): Promise<OrderToolResult> {
   const w = parseDeliverWire(args);
   if (!w.ok) return refuse("invalid_wire", w.error);
-  const { orderId, head, evidence, summary, selfCheck } = w.value;
+  const { orderId, head, evidence, summary, selfCheck, disputes } = w.value;
   if (!SHA40.test(head)) return refuse("invalid_wire", "head 要是小写的完整 40 位 SHA");
   if (!deps.db) return refuse("no_ledger", "这台机器没有台账");
   const key = deliverDedupKey(orderId, head);
@@ -89,8 +90,9 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   const pr = pickPr(found.rows, branch, head);
   if (!pr.ok) return refuse(pr.code, pr.error);
   if (prConflict(cur.task.pr, pr.url)) return refuse("pr_mismatch", `台账里 ${cur.task.id} 的 PR 是 ${cur.task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
-  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url };
+  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url, ...(disputes ? { disputes: JSON.stringify(disputes) } : {}) };
   const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;
+  await deliveredScope(deps.db, cur.task.id, head); // 规格外文件登记：异步、不抛，失败只记事件（order-deliver-scope.ts）
   return receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null);
 }

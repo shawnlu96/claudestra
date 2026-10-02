@@ -205,7 +205,9 @@ import {
 // Discord 交互块（D5-4 从本文件搬出；import 时零副作用，下面显式注册）
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
-import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
+import { admitCaller, answerWhoami, callerOf } from "./bridge/caller-identity.js";
+import { recordDefaultPmReply } from "./lib/order-ask-default.js";
+import { askDbIfExists } from "./bridge/asks.js";
 import { answerOrderTool, lendFrameDenied } from "./bridge/order-tools.js";
 
 // ============================================================
@@ -2209,6 +2211,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "turn_status": void (await import("./bridge/acp-turn-status.js")).answerTurnStatus(ws, msg); break; // launcher 升级闸问 ACP 宿主有没有回合在途
     case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
     case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
@@ -2381,6 +2384,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
+        recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 

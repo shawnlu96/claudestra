@@ -2,8 +2,7 @@
  * i18n 字典：中文原文 → 英文。缺失回退中文（见 lib/i18n.tsx）。
  *
  * 维护规则：
- * - key 必须与源码里的原文**逐字一致**（含全角/半角标点、前后空格——拆段
- *   拼接的条目靠空格对齐语序，行尾注释标注了这类条目）。
+ * - key 必须与源码里的原文**逐字一致**（含全角/半角标点、前后空格——拆段拼接的条目靠空格对齐语序，行尾注释标注了这类条目）。
  * - 句中片段（如「重置」「已重启」）英文故意小写、无句号。
  * - 带变量的句子整句做 key，变量写 {name}（t(s, { name })）；译文保留同名占位，tests/web-i18n.test.ts 查。
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
@@ -25,9 +24,10 @@ import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
 import { RELAY_DICT } from "./i18n-dict-relay";
 import { BORROW_DICT } from "./i18n-dict-borrow";
+import { SHELL_DICT } from "./i18n-dict-shell";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT, ...SHELL_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...UPDATE_DICT, // 更新提示横幅（lib/i18n-dict-update.ts）

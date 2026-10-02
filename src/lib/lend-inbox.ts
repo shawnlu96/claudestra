@@ -1,13 +1,14 @@
 /**
  * 出借方 B 唯一的收单闸（docs/design/remote-capacity.md §2.3 第 1 步）：A 推来的单（manager lend inbox）和兜底轮询拿到的单（lend-loop.ts）都过这里，
- * 各核对项只写这一份。逐单核：生效授权（含暂停、过期、指纹变了、文件无效）、家族（claude 一律拒，等 clean 启动 + strict MCP）、角色（写单开关关着时一律拒）、
+ * 各核对项只写这一份。逐单核：生效授权（含暂停、过期、指纹变了、文件无效）、家族与可用凭据、有效阶段（写单开关关着时一律拒）、
  * 仓库白名单、今日剩余单数、空位（已接下没领的 asked 也占位）、本机 Codex 撞额度暂停。
  * 读完 lend.json（liveGrant 最后读它）之后不再 await：计数和插入在同一个 BEGIN IMMEDIATE 事务里，推送和轮询并发也不会超额，
  * lend.json 收回写盘之后才开始的请求一定看得到收回。收下只记 asked，claim 在调度服务下一个 pass 做（lend-loop.ts driveAsked）。
  * tests/lend-inbox.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import type { LendEntry } from "./lend-config.js";
+import { LEND_FAMILIES, type LendEntry, type LendFamily } from "./lend-config.js";
+import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
 import { roleOfStep } from "./lend-git.js";
 import { liveGrant } from "./lend-grant.js";
 import { WRITE_ROLE_OPEN } from "./lend-grant-rules.js";
@@ -16,7 +17,7 @@ import { getMeta, getOrder, isTerminal, openSlots, ordersToday, recordAsked, set
 import type { PolledOrder } from "./lend-remote.js";
 import type { LendDeps } from "./lend-drive.js";
 
-/** 只借 Codex：claude 位要等 worker 用 clean 启动 + strict MCP 之后再开，A 派来的 Claude 单一律拒 */
+/** 旧调用方的 Codex 家族标签；收单同时支持 LEND_FAMILIES。 */
 export const LEND_FAMILY = "codex";
 /** 调度服务的 lend 步这么久没开过一轮 = 服务没在跑：推来的单全拒，别让 A 白等推送 TTL（3 分钟） */
 export const LENDER_IDLE_MS = 90_000;
@@ -40,11 +41,10 @@ export function dailyUsed(db: Database, peer: string, now: number): number {
 
 /** 这一单在授权里吗（不含计数）；null = 范围内 */
 function scopeCode(o: OrderSummary, entry: LendEntry, writeOpen: boolean): RefuseCode | null {
-  if (o.family !== LEND_FAMILY) return "family";
+  if (!LEND_FAMILIES.includes(o.family as LendFamily)) return "family";
   const role = roleOfStep(o.step);
   if (!role) return "role";
   if (role === "write" && !writeOpen) return "write_closed";
-  if (!entry.roles.includes(role)) return "role";
   return entry.repos.includes(o.repo) ? null : "repo";
 }
 
@@ -72,19 +72,21 @@ export async function admitOrders(d: Pick<LendDeps, "db" | "now" | "readLend" | 
     const refuse = (orderId: string, code: RefuseCode) => void out.refused.push({ orderId, code });
     const paused = pausedUntil(d.db, now) !== null;
     let used = dailyUsed(d.db, caller.peer, now);
-    let busy = openSlots(d.db, caller.peer, LEND_FAMILY);
-    const slots = entry.families[LEND_FAMILY] ?? 0;
+    const busy = { codex: openSlots(d.db, caller.peer, "codex"), claude: openSlots(d.db, caller.peer, "claude") };
+    const slots = { codex: entry.families.codex ?? 0, claude: claudeLendSlots(entry) };
     for (const o of orders) {
       const cur = getOrder(d.db, o.orderId);
       if (cur && cur.peer !== caller.peer) { refuse(o.orderId, "id_conflict"); continue; }
       if (cur && isTerminal(cur.state)) { refuse(o.orderId, "closed"); continue; }
       if (cur) { out.accepted.push(o.orderId); continue; }
-      const code = scopeCode(o, entry, writeOpen) ?? (paused ? "paused" : used >= entry.ordersPerDay ? "daily" : busy >= slots ? "no_slot" : null);
+      const family = o.family as LendFamily;
+      const code = scopeCode(o, entry, writeOpen) ?? (paused && family === "codex" ? "paused"
+        : used >= entry.ordersPerDay ? "daily" : busy[family] >= slots[family] ? "no_slot" : null);
       if (code) { refuse(o.orderId, code); continue; }
       const preview = { taskId: o.taskId, step: o.step, repo: o.repo, pr: o.pr, head: o.head, round: o.round, specRev: o.specRev, source };
       recordAsked(d.db, { orderId: o.orderId, peer: caller.peer, fp: entry.fp ?? null, family: o.family, preview }, now);
       used++;
-      busy++;
+      busy[family]++;
       out.accepted.push(o.orderId);
     }
     return out;

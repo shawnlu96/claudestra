@@ -28,6 +28,7 @@ import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
 import { SidebarMediaButton } from "../../media/media-button";
+import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
 
 /**
@@ -233,11 +234,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             onPeers={() => setSettingsPage("peers")}
             onStats={() => setShowStats(true)}
           />
-          <SidebarMediaButton />
+          <SidebarShellButton /><SidebarMediaButton />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("设置")}
-            aria-label={t("设置")}
+            title={t("设置")} aria-label={t("设置")}
             onClick={() => setSettingsPage("general")}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">

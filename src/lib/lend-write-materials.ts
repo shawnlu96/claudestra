@@ -1,17 +1,19 @@
 /**
  * Write-order materials (i28-R6; shared with the scheduler's pool step since i28-W9), fetched outside any ledger
  * transaction: the lender's fingerprint (pinned public key → lend/ branch name), the base branch's remote head for a build
- * order, the last review report's text for a fix order (the lender cannot read this machine's files). A failed probe or a
- * missing report refuses the offer: half an order never goes out. tests/ledger-lend-write.test.ts, tests/scheduler-write-remote.test.ts.
+ * order, the last review report's text for a P1 fix (the lender cannot read this machine's files). A merge bounce uses its
+ * ledger evidence instead; other fixes require their report. tests/ledger-lend-write.test.ts, tests/scheduler-write-remote.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { lastReviewOf, type WriteOffer } from "./ledger-lend-lease.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
-import { LedgerError } from "./ledger-store.js";
+import { LedgerError, listEvents } from "./ledger-store.js";
 import { isBaseBranch, stepOfStage } from "./lend-git.js";
 import type { RemoteHead } from "./order-deliver.js";
 import { readTextSoft } from "./task-spec.js";
+import { fixBounce } from "./scheduler-merge-conflict.js";
+import { lendFixMaterials } from "./lend-fix-env.js";
 
 export interface WriteProbe {
   /** Fingerprint of the peer's pinned instance key; null = not paired end to end. */
@@ -31,6 +33,7 @@ export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: 
     if (!r.ok) throw new LedgerError("invalid", `查不到 ${q.repo} 的 ${q.base}：${r.error}`);
     return { fp, base: q.base, baseSha: r.head, report: null };
   }
+  if (fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage)) return lendFixMaterials(fp, q, probe, { db, task });
   const ui = uiRejectLend(db, task); // 同一合成函数决定截图意见与代码 P1 的来源；有代码问题时报告原文也必须内联
   if (ui && !ui.codeReportPath) return { fp, base: q.base, baseSha: null, report: ui.report };
   const path = ui?.codeReportPath ?? lastReviewOf(db, task).path;

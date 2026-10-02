@@ -51,19 +51,20 @@ describe("逐单核对：每项一正一反", () => {
     expect(refusedCode(await one(h, {}, { peer: "team-a", fp: null as unknown as string }))).toEqual(["no_grant"]);
   });
 
-  test("家族：codex 收；claude 一律拒（family）", async () => {
+  test("家族：codex 收；未授权的 claude 拒；未知家族拒", async () => {
     expect((await one(fresh(harness({ entry: { families: { codex: 2, claude: 2 } } })))).accepted).toEqual(["o1"]);
-    expect(refusedCode(await one(fresh(harness({ entry: { families: { codex: 2, claude: 2 } } })), { family: "claude" }))).toEqual(["family"]);
+    expect(refusedCode(await one(fresh(harness()), { family: "claude" }))).toEqual(["no_slot"]);
+    expect(refusedCode(await one(fresh(harness()), { family: "pi" }))).toEqual(["family"]);
   });
 
-  test("角色：审查收；授权里没写 write 的开工 / 修复单、不认识的阶段 → role；写了 write 才收；写单开关关着：写单 write_closed、含 write 的授权整条不生效", async () => {
-    expect(refusedCode(await one(fresh(harness()), { step: "write" }))).toEqual(["role"]); // 生产缺省（开关开着）也要授权里写了 write
-    expect(refusedCode(await one(fresh(harness()), { step: "fix" }))).toEqual(["role"]);
+  test("阶段：旧 review 授权照收开工 / 修复；未知阶段拒；测试关写单开关只拒写单", async () => {
+    expect((await one(fresh(harness()), { step: "write" })).accepted).toEqual(["o1"]);
+    expect((await one(fresh(harness()), { step: "fix" })).accepted).toEqual(["o1"]);
     expect(refusedCode(await one(fresh(harness()), { step: "deploy" }))).toEqual(["role"]);
     const w = { entry: { roles: ["review", "write"] as ("review" | "write")[] } };
     expect((await one(fresh(harness(w)), { step: "write" })).accepted).toEqual(["o1"]);
     expect((await one(fresh(harness(w)), { step: "fix" })).accepted).toEqual(["o1"]);
-    expect(refusedCode(await one(fresh(harness({ ...w, writeOpen: false })), { step: "write" }))).toEqual(["no_grant"]);
+    expect(refusedCode(await one(fresh(harness({ ...w, writeOpen: false })), { step: "write" }))).toEqual(["write_closed"]);
     expect(refusedCode(await one(fresh(harness({ writeOpen: false })), { step: "fix" }))).toEqual(["write_closed"]);
   });
 

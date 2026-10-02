@@ -9,16 +9,18 @@
  */
 import { effectiveLend } from "./lend-policy.js";
 import type { LendEntry } from "./lend-config.js";
-import { advance, getMeta, liveOrders, ordersToday, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
+import { advance, getMeta, liveOrders, patchOrder, setMeta, unsettledOrders, LEASED_STATES, type LendRow } from "./lend-journal.js";
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
-import { admitOrders, LEND_FAMILY, pushKey, TICK_KEY } from "./lend-inbox.js";
+import { claudeLendSlots, lendBlockedReason, lendPollCapacity } from "./lend-claude-worker-capacity.js";
+import { loopClaudeReadiness } from "./lend-claude-ready.js";
+import { admitOrders, pushKey, TICK_KEY } from "./lend-inbox.js";
 import { helloPeer, helloTargets, helloView, metaJson, protoKey, speaksV2, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
 import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import type { HttpPeer } from "./peers.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { pausedUntil, refreshPause } from "./lend-health.js";
+import { pausedUntil, refreshQuotaPause } from "./lend-health.js";
 
 export const POLL_MS = 30_000;
 /** proto 2、hello 新鲜、而且 PUSH_SEEN_MS 内真收到过这个 A 的推送：轮询只剩兜底 */
@@ -31,6 +33,7 @@ export interface LoopDeps extends LendDeps {
   env: Record<string, string | undefined>;
   /** 协议 v2 的出站（hello / beat）与摘要端口；不设 = 只讲 v1（逐单续租、30 秒轮询），行为和 W3 之前逐字一样 */
   v2?: V2Port;
+  claudeProbe?: () => Promise<string | null>; // 本机 Claude 就绪探测的桩（测试用）；不设 = 真跑 claude auth status
 }
 
 /** doctor 读的本轮摘要（journal meta "status"） */
@@ -81,21 +84,8 @@ async function claimIfStill(row: LendRow, d: LoopDeps): Promise<void> {
   await claimOrder(row, d);
 }
 
-const busyOf = (d: LoopDeps, peer: string): number => {
-  const r = d.db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
-    .get(peer, LEND_FAMILY, ...LEASED_STATES) as { n: number };
-  return r.n;
-};
-
-/** poll 的 capacity 正文（v1 冻结的形状，tests/lend-wire-v1-golden.test.ts）：busy 只算占着租约的单 */
-function capacityOf(entry: LendEntry, d: LoopDeps) {
-  const left = Math.max(0, entry.ordersPerDay - ordersToday(d.db, entry.peer, d.now()));
-  return { families: { [LEND_FAMILY]: entry.families[LEND_FAMILY] ?? 0 }, busy: { [LEND_FAMILY]: busyOf(d, entry.peer) }, roles: entry.roles, repos: entry.repos,
-    ordersLeftToday: left };
-}
-
 async function pollPeer(entry: LendEntry, d: LoopDeps, status: LendStatus["peers"][string]): Promise<void> {
-  const r = await lendRequest(d.call, entry.peer, "poll", { capacity: capacityOf(entry, d) });
+  const r = await lendRequest(d.call, entry.peer, "poll", { capacity: lendPollCapacity(entry, d.db, d.now()) });
   status.lastPollAt = d.now();
   status.lastError = r.ok ? null : `${r.code} ${r.error}`.slice(0, 200);
   setMeta(d.db, `lastPoll:${entry.peer}`, JSON.stringify({ at: status.lastPollAt, error: status.lastError }));
@@ -184,7 +174,7 @@ interface Pass {
 /** ④ poll 一个出借条目（被节流跳过的轮次沿用上一次 poll 的时间与错误，doctor 才看得到「最近一次 poll 失败在哪」） */
 async function pollStep(p: Pass, entry: LendEntry): Promise<void> {
   const { d, r } = p;
-  if (p.blocked || pausedUntil(d.db, d.now()) !== null) return;
+  if (p.blocked || (pausedUntil(d.db, d.now()) !== null && !claudeLendSlots(entry))) return;
   const last = metaJson<{ at?: number; error?: string | null }>(d.db, `lastPoll:${entry.peer}`) ?? {};
   const s: LendStatus["peers"][string] = { problem: p.problemOf(entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
   p.status.peers[entry.peer] = s;
@@ -234,7 +224,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   r.offline = false;
   const read = await d.readLend();
   const ctx = await d.context();
-  const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now(), d.writeOpen);
+  const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now());
   const proxies = proxyVarsIn(d.env);
   const peers = await d.peers();
   r.v2 = !!rd.v2 && !proxies.length;
@@ -242,7 +232,8 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
     setMeta(d.db, BOOT_KEY, d.v2!.boot); // 调度服务刚启动：每个 peer 当轮立刻 poll 一次
     for (const e of eff.lend) r.pollNow.add(e.peer);
   }
-  await refreshPause(d.db, d.codexQuota, d.now(), d.log); // 本机 worker 撞了 Codex 额度：到重置时刻前不领新单（lend-health.ts）
+  await refreshQuotaPause(d.db, d.codexQuota, d.now(), d.log); // 领单前已满就暂停；到点或观测不满恢复
+  await loopClaudeReadiness(d.db, eff.lend, d.claudeProbe); // 先和 meta 对齐、必要时探完写回，本轮 hello 与推送收单才是同一份 Claude 结论
   const hello = new Set(r.v2 ? helloTargets(d.db, eff.lend, d.now()) : []);
   const p: Pass = { d, rd, r, now, done, failed, hello, status: { at: now, lending: eff.lending, blocked: null, peers: {} },
     entryOf: (peer) => eff.lend.find((e) => e.peer === peer), problemOf: (peer) => peerLendProblem(peers.find((x) => x.name === peer), peer),
@@ -253,7 +244,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const bad = out.find((x): x is PromiseRejectedResult => x.status === "rejected");
   if (bad) throw bad.reason;
   const paused = pausedUntil(d.db, d.now());
-  p.status.blocked = p.blocked ?? (paused !== null ? `本机 Codex 撞了额度，暂停借单到 ${new Date(paused).toISOString()}` : null);
+  p.status.blocked = p.blocked ?? lendBlockedReason(paused, eff.lend);
   if (p.status.blocked) p.status.peers = {};
   setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };

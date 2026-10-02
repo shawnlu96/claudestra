@@ -1,3 +1,5 @@
+import { requireLocalSharedLedgerPlanning } from "../lib/shared-ledger-gate.js";
+import { liveClaim } from "../lib/ledger-autostart.js";
 /**
  * 自动开卡 / 自动交回（i28-A1，docs/architecture/scheduler-autostart.md）的 ledger 子命令：这里只解析参数，事务与权限在 lib。
  * - `scheduler-autostart claim|step|settle`、`scheduler-auto-resume`：只给调度身份（manager/ledger.ts SCHEDULER_SERVICE_COMMANDS）。
@@ -43,13 +45,14 @@ function claim(c: LedgerCli): Result {
   if (t !== "invalid" && !Object.hasOwn(TEMPLATE_VERSION, t)) throw new LedgerError("invalid", "--template 只能是 code / ui / security / invalid");
   const max = int(c, "max-workers");
   const r = claimNode(c.db, c.ctx(), { featureId, key, arm: c.need("arm"), template: t === "invalid" ? null : (t as AutostartTemplate), svc: svcOf(c, () => max),
-    ownerVisual: c.p.bools.has("owner-visual") });
+    expectedPm: c.p.flags.pm, peer: c.p.flags.peer ? JSON.parse(c.p.flags.peer) : null, ownerVisual: c.p.bools.has("owner-visual") });
   return { ok: true, ...r };
 }
 
 function step(c: LedgerCli): Result {
   const seq = Number(c.p.pos[2]);
   if (!Number.isInteger(seq) || seq <= 0) throw new LedgerError("invalid", "step <claim> <子命令> <目标> …");
+  if (c.p.pos[3] === "task-new") requireLocalSharedLedgerPlanning(liveClaim(c.db, seq).featureId);
   const flags: Record<string, string | undefined> = { ...c.p.flags };
   return autostartStep(c.db, c.ctx(), { claim: seq, sub: c.p.pos[3] ?? "", pos: c.p.pos.slice(4), flags });
 }
@@ -113,7 +116,7 @@ export function autostartShow(c: LedgerCli, f: Feature): Record<string, unknown>
 
 export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
   "scheduler-autostart": {
-    valued: [...STEP_FLAGS, "arm", "max-workers", "outcome", "code", "failed-step", "rolled-back", "leftovers"], bools: ["owner-visual"],
+    valued: [...STEP_FLAGS, "peer", "arm", "max-workers", "outcome", "code", "failed-step", "rolled-back", "leftovers"], bools: ["owner-visual"],
     usage: "scheduler-autostart claim <feature> <节点> --arm --template --max-workers [--owner-visual] | step <claim> <子命令> … | settle <claim> --outcome done|failed|unknown（调度服务专用）",
     run(c) {
       const sub = AUTOSTART_SUBS[c.p.pos[1] ?? ""];

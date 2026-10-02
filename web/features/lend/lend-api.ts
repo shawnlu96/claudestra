@@ -15,10 +15,13 @@ export async function fetchLend(): Promise<LendData | null> {
 export interface CliResult { ok: boolean; error?: string; warning?: string; message?: string }
 
 /** 授权：CLI 的原话在 ApiError.message（失败）或 warning / message（成功）里 */
-export function postGrant(body: { peer: string; repos: string[]; codex: number; ordersPerDay: number; until: string }): Promise<CliResult> {
+export function postGrant(body: { peer: string; repos: string[]; codex?: number; claude?: number; ordersPerDay: number; until: string }): Promise<CliResult> {
   return api<CliResult>("/lend/grants", { method: "POST", json: body });
 }
 
 export function postRevoke(peer: string): Promise<CliResult & { orders: OrderView[] }> {
   return api<CliResult & { orders: OrderView[] }>("/lend/grants/revoke", { method: "POST", json: { peer } });
 }
+/** 出借 Claude 用本机 Claude Code 登录：能不能接单 + 旧 setup-token 残留在哪（只读，bridge local-api/lend-claude-token.ts） */
+export interface ClaudeLogin { loggedIn: boolean; reason: string | null; legacyTokenFile: string | null; legacyTokenEnv: boolean }
+export const claudeLoginApi = () => api<ClaudeLogin>("/lend/claude-token");

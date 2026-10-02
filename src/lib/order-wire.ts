@@ -5,8 +5,11 @@
  * and a silently trimmed order is a different order. `v` lets M2 / M3 rename fields later without guessing.
  * Rendering and redaction live in order-wire-render.ts. tests/order-wire.test.ts.
  */
+import { deliverWithoutDisputes, deliverDisputeFields, type FindingDispute } from "./review-arbiter-wire.js";
 import type { ReviewFinding } from "./scheduler-review.js";
+import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
+import { convergenceFields, withoutConvergence, type ConvergenceWire } from "./lend-arbiter-wire.js";
 
 const ORDER_WIRE_VERSION = 1;
 /** Whole-wire byte cap: a spec quoted inline plus findings fits; anything larger is refused at both ends, never trimmed. */
@@ -19,6 +22,7 @@ export const WIRE_LIMITS = {
 
 type OrderStep = WorkOrder["step"];
 export interface OrderWire {
+  convergence?: ConvergenceWire;
   v: typeof ORDER_WIRE_VERSION;
   /** = scheduler intent id (the dedup key); the only handle a deliver / verdict may cite. */
   orderId: string;
@@ -43,6 +47,7 @@ export interface OrderWire {
 }
 
 export interface DeliverWire {
+  disputes?: FindingDispute[];
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
   head: string;
@@ -166,7 +171,7 @@ const STEPS: readonly OrderStep[] = ["restate", "write", "review", "fix"];
 
 export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
   return guarded(raw, () => {
-    const r = record(raw, "$", ORDER_KEYS);
+    const r = record(withoutConvergence(raw), "$", ORDER_KEYS);
     if (!STEPS.includes(r.step as OrderStep)) fail("step", "只认 restate / write / review / fix");
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), taskId: matching(r.taskId, "taskId", TASK_ID),
@@ -177,17 +182,18 @@ export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
       outputs: texts(r.outputs, "outputs", WIRE_LIMITS.line), acceptance: texts(r.acceptance, "acceptance", WIRE_LIMITS.line),
       writeBack: text(r.writeBack, "writeBack", WIRE_LIMITS.writeBack, true), findings: findingList(r.findings, "findings", FINDING_KEYS, () => ({})),
       fallback: nullable(r.fallback, (x) => text(x, "fallback", WIRE_LIMITS.fallback, true)),
+      ...convergenceFields(raw, fail),
     };
   });
 }
 
 export function parseDeliverWire(raw: unknown): WireResult<DeliverWire> {
   return guarded(raw, () => {
-    const r = record(raw, "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
+    const r = record(deliverWithoutDisputes(raw), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), head: matching(r.head, "head", FULL_SHA),
       evidence: matching(text(r.evidence, "evidence", WIRE_LIMITS.path), "evidence", PATH), summary: text(r.summary, "summary", WIRE_LIMITS.summary),
-      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true),
+      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true), ...deliverDisputeFields(raw, fail),
     };
   });
 }
@@ -196,8 +202,9 @@ export function parseVerdictWire(raw: unknown): WireResult<VerdictWire> {
   return guarded(raw, () => {
     const r = record(raw, "$", ["v", "orderId", "head", "verdict", "p0", "p1", "p2", "findings", "reportPath"]);
     if (!["pass", "changes", "block"].includes(r.verdict as string)) fail("verdict", "只认 pass / changes / block");
-    const findings = findingList<VerdictFinding>(r.findings, "findings", [...FINDING_KEYS, "description"],
-      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true) }));
+    const rows = Array.isArray(r.findings) ? r.findings.map((f) => (f && typeof f === "object" && !("basis" in f) ? { ...f, basis: null } : f)) : r.findings; // basis 可省（旧远端）
+    const findings = findingList<VerdictFinding>(rows, "findings", [...FINDING_KEYS, "description", "basis"],
+      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true), ...wireBasis(f.basis, (why) => fail(`${p}.basis`, why)) }));
     const counts = { p0: int(r.p0, "p0", 0, WIRE_LIMITS.findings), p1: int(r.p1, "p1", 0, WIRE_LIMITS.findings), p2: int(r.p2, "p2", 0, WIRE_LIMITS.findings) };
     for (const sev of ["P0", "P1", "P2"] as const) {
       const key = sev.toLowerCase() as "p0" | "p1" | "p2";
@@ -218,6 +225,8 @@ export interface AskWire {
   orderId: string;
   question: string;
   options: string[];
+  default?: string;
+  class?: "design" | "scope" | "blocker";
 }
 
 const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
@@ -225,11 +234,16 @@ const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
 export function parseAskWire(raw: unknown): WireResult<AskWire> {
   return guarded(raw, () => {
     const given = raw && typeof raw === "object" && !Array.isArray(raw) && !("options" in raw) ? { ...raw, options: [] } : raw;
-    const r = record(given, "$", ["v", "orderId", "question", "options"]);
+    const r = record(given, "$", ["v", "orderId", "question", "options",
+      ...(given && typeof given === "object" ? ["default", "class"].filter((k) => k in given) : [])]);
+    if ("class" in r && !["design", "scope", "blocker"].includes(r.class as string)) fail("class", "只认 design / scope / blocker");
+    if ("default" in r && (typeof r.default !== "string" || !r.default.trim() || [...r.default].length > 600)) fail("default", "默认做法要非空且不超过 600 字");
     if (!Array.isArray(r.options) || r.options.length > ASK_LIMITS.options) fail("options", `要是不超过 ${ASK_LIMITS.options} 项的数组`);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), question: text(r.question, "question", ASK_LIMITS.question, true),
       options: (r.options as unknown[]).map((o, i) => text(o, `options[${i}]`, ASK_LIMITS.option)),
+      ...("default" in r ? { default: text(r.default, "default", 2400, true) } : {}),
+      ...("class" in r ? { class: r.class as AskWire["class"] } : {}),
     };
   });
 }

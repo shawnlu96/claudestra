@@ -1,3 +1,5 @@
+import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
+import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
  * 身份与时间由命令推导（ledger-identity.ts），库是 statePath("ledger.sqlite")（lib/ledger-store.ts，沙箱随状态目录隔离）。
@@ -17,6 +19,7 @@ import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
 import { DAG_CMDS } from "./ledger-dag-cmds.js";
+import { FEATURE_SPLIT_CMDS } from "./ledger-feature-split-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
@@ -43,6 +46,7 @@ import { SUPERVISE_CMDS } from "./ledger-supervise-cmds.js";
 import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
 import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
 import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
+import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -50,20 +54,13 @@ import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
-const SCHEDULER_SERVICE_COMMANDS = new Set([
-  "scheduler-plan", "scheduler-plan-rejected", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
-  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
-  "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
-  "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
-  "scheduler-autostart", "scheduler-auto-resume", "scheduler-retire",
-]);
-
 const COMMANDS: Record<string, CommandSpec> = {
+  ...SHARED_BINDINGS_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
-  ...FEATURE_CMDS,
+  ...FEATURE_CMDS, ...FEATURE_SPLIT_CMDS,
   ...FEATURE_MIGRATE_CMDS,
   ...DAG_CMDS,
   ...READ_CMDS,
@@ -71,7 +68,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...AUDIT_CMDS,
   ...PEER_CMDS,
   ...LEND_ASK_CMDS,
-  ...LEND_CMDS,
+  ...LEND_CMDS, ...LEND_TAKEOVER_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
   ...SCHEDULER_DEPLOY_CMDS,

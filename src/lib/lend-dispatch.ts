@@ -7,6 +7,7 @@
  * announced once more, which the lender dedups by orderId. Never plaintext: the peer must pass peerLendProblem (E2E record,
  * pinned key) and the answer must have come back over E2E. tests/lend-dispatch.test.ts.
  */
+import { isTemporaryLendRefusal } from "./ledger-lend-queue.js";
 import type { PushCandidate } from "./ledger-lend-peers.js";
 import { offerBody, OFFER_MAX, parseV2Response, type OfferRequest } from "./lend-wire-v2.js";
 
@@ -38,14 +39,14 @@ interface SendState { tries: number; nextAt: number; done: boolean }
 export interface TickReport { pushed: string[]; acked: string[]; failed: string[]; skipped: string[]; swept: boolean }
 
 /** Did the lender answer this exact batch (every id one of ours, nothing twice)? Anything else is treated as no answer. */
-function answerFor(res: PushSend, ids: Set<string>): { accepted: string[]; refused: string[]; raw: unknown } | string {
+function answerFor(res: PushSend, ids: Set<string>): { accepted: string[]; refused: string[]; raw: unknown; retry: string[] } | string {
   if (!res.e2e) return "应答不是经端到端加密回来的";
   if (res.status !== 200) return `对方回了 ${res.status}`;
   const a = parseV2Response("offer", res.body);
   if (!a.ok) return `应答看不懂：${a.error}`;
   const answered = [...a.value.accepted, ...a.value.refused.map((r) => r.orderId)];
   if (new Set(answered).size !== answered.length || answered.some((id) => !ids.has(id))) return "应答里的单号对不上这次推送";
-  return { accepted: a.value.accepted, refused: a.value.refused.map((r) => r.orderId), raw: res.body };
+  return { accepted: a.value.accepted, refused: a.value.refused.map((r) => r.orderId), raw: res.body, retry: a.value.refused.filter((r) => isTemporaryLendRefusal(r.code)).map((r) => r.orderId) };
 }
 
 export function createPushLoop(deps: DispatchDeps): { tick(): Promise<TickReport | null>; state: Map<string, SendState> } {
@@ -83,7 +84,8 @@ export function createPushLoop(deps: DispatchDeps): { tick(): Promise<TickReport
       return fail(ids, now);
     }
     const answered = new Set([...a.accepted, ...a.refused]);
-    for (const id of answered) state.set(id, { tries: 0, nextAt: 0, done: true });
+    for (const id of answered) if (!a.retry.includes(id)) state.set(id, { tries: 0, nextAt: 0, done: true });
+    fail(a.retry, now);
     rep.acked.push(...a.accepted);
     fail(ids.filter((id) => !answered.has(id)), now);
     rep.failed.push(...ids.filter((id) => !answered.has(id)));

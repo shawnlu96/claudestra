@@ -115,7 +115,7 @@ describe("授权：argv 形状、注入反例", () => {
   test("值一律 --flag=value，缺失字段交给 CLI 沿用，peer 在 -- 之后", async () => {
     const s = setup();
     const r = await s.api(req("/lend/grants", "POST", GOOD), "/lend/grants", OWNER);
-    expect(s.calls[0]).toEqual(["lend", "grant", "--repos=o/r,o/s", "--until=7d", "--codex=5", "--orders-per-day=200", "--keep-unset=roles,codex-model,codex-effort", "--", "team-a"]);
+    expect(s.calls[0]).toEqual(["lend", "grant", "--repos=o/r,o/s", "--until=7d", "--codex=5", "--orders-per-day=200", "--keep-unset=claude,roles,codex-model,codex-effort", "--", "team-a"]);
     expect(await r!.json()).toEqual({ ok: true, message: "done", warning: SHELL_SENTENCE });
   });
 
@@ -123,7 +123,7 @@ describe("授权：argv 形状、注入反例", () => {
     const argv = grantArgv({ peer: "--peer=evil", repos: ["--roles=write"], until: "--codex=99", codex: "--x", ordersPerDay: 1, codexModel: "--roles=write",
       codexEffort: "-- x" }) as string[];
     expect(argv).toEqual(["lend", "grant", "--repos=--roles=write", "--until=--codex=99", "--codex=--x", "--orders-per-day=1", "--codex-model=--roles=write",
-      "--codex-effort=-- x", "--keep-unset=roles", "--", "--peer=evil"]);
+      "--codex-effort=-- x", "--keep-unset=claude,roles", "--", "--peer=evil"]);
     const dash = argv.indexOf("--");
     expect(argv.slice(2, dash).every((a) => /^--(repos|until|codex|orders-per-day|codex-model|codex-effort|roles|keep-unset)=/.test(a))).toBe(true);
     expect(argv.slice(dash + 1)).toEqual(["--peer=evil"]);
@@ -154,14 +154,14 @@ describe("授权：argv 形状、注入反例", () => {
     expect((await readLend(s.lendPath)).status).toBe("missing");
   });
 
-  test("类型不对：400 不起进程；claude 名额不往 CLI 带", async () => {
+  test("类型不对：400 不起进程；Claude 名额按新授权字段传给 CLI", async () => {
     const s = setup();
     for (const bad of [{ ...GOOD, peer: "" }, { ...GOOD, repos: [] }, { ...GOOD, repos: ["a/b,c/d"] }, { ...GOOD, until: 7 }, { ...GOOD, codex: {} }, [1]]) {
       expect((await s.api(req("/lend/grants", "POST", bad), "/lend/grants", OWNER))?.status).toBe(400);
     }
     expect(s.calls).toEqual([]);
     await s.api(req("/lend/grants", "POST", { ...GOOD, claude: 3 }), "/lend/grants", OWNER);
-    expect(s.calls[0].join(" ")).not.toMatch(/claude/);
+    expect(s.calls[0]).toContain("--claude=3");
   });
 
   test("CLI 拒了：原话回给前端（400），forbidden 回 403", async () => {
@@ -275,24 +275,24 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
 
   test("没带：只传继承字段名；peer 名与指纹均原样交给 CLI", async () => {
     const s = setup([KEPT]);
-    expect(tail((await post(s, GOOD)).argv)).toEqual(["--keep-unset=roles,codex-model,codex-effort", "--", "team-a"]);
-    expect(tail((await post(s, { ...GOOD, peer: FP.toUpperCase() })).argv)).toEqual(["--keep-unset=roles,codex-model,codex-effort", "--", FP.toUpperCase()]);
+    expect(tail((await post(s, GOOD)).argv)).toEqual(["--keep-unset=claude,roles,codex-model,codex-effort", "--", "team-a"]);
+    expect(tail((await post(s, { ...GOOD, peer: FP.toUpperCase() })).argv)).toEqual(["--keep-unset=claude,roles,codex-model,codex-effort", "--", FP.toUpperCase()]);
   });
 
   test("带了：用新值覆盖（roles 收窄也照传）；null：不传，CLI 规则即清掉；只清一个，另一个照旧沿用", async () => {
     const s = setup([KEPT]);
     expect(tail((await post(s, { ...GOOD, roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "high" })).argv))
-      .toEqual(["--codex-model=gpt-6-sol", "--codex-effort=high", "--roles=review", "--", "team-a"]);
-    expect(tail((await post(s, { ...GOOD, codexModel: null })).argv)).toEqual(["--keep-unset=roles,codex-effort", "--", "team-a"]);
-    expect(tail((await post(s, { ...GOOD, codexModel: null, codexEffort: null })).argv)).toEqual(["--keep-unset=roles", "--", "team-a"]);
+      .toEqual(["--codex-model=gpt-6-sol", "--codex-effort=high", "--roles=review", "--keep-unset=claude", "--", "team-a"]);
+    expect(tail((await post(s, { ...GOOD, codexModel: null })).argv)).toEqual(["--keep-unset=claude,roles,codex-effort", "--", "team-a"]);
+    expect(tail((await post(s, { ...GOOD, codexModel: null, codexEffort: null })).argv)).toEqual(["--keep-unset=claude,roles", "--", "team-a"]);
   });
 
   test("不存在 / 暂停 / 过期条目均不在 bridge 判定：只传缺失字段", async () => {
     const s = setup([KEPT, G({ peer: "team-b", fp: "1111-2222-3333-4444", roles: ["write"], codexModel: "m1", paused: { reason: "旧" }, until: iso(T - 1) })]);
-    expect(tail((await post(s, { ...GOOD, peer: "stranger" })).argv)).toEqual(["--keep-unset=roles,codex-model,codex-effort", "--", "stranger"]);
-    expect(tail((await post(s, { ...GOOD, peer: "team-b" })).argv)).toEqual(["--keep-unset=roles,codex-model,codex-effort", "--", "team-b"]);
+    expect(tail((await post(s, { ...GOOD, peer: "stranger" })).argv)).toEqual(["--keep-unset=claude,roles,codex-model,codex-effort", "--", "stranger"]);
+    expect(tail((await post(s, { ...GOOD, peer: "team-b" })).argv)).toEqual(["--keep-unset=claude,roles,codex-model,codex-effort", "--", "team-b"]);
     const fresh = setup(null);
-    expect(tail((await post(fresh, GOOD)).argv)).toEqual(["--keep-unset=roles,codex-model,codex-effort", "--", "team-a"]);
+    expect(tail((await post(fresh, GOOD)).argv)).toEqual(["--keep-unset=claude,roles,codex-model,codex-effort", "--", "team-a"]);
   });
 
   test("POST 不读 lend.json / 联系人：坏文件交 CLI 拒绝，错误原样回传", async () => {
@@ -350,9 +350,9 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
     expect(entry().codexModel).toBeUndefined();
     expect(entry()).toMatchObject({ roles: ["review", "write"], codexEffort: "xhigh" });
     expect((await web({ ...GOOD, roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high" })).status).toBe(200);
-    expect(entry()).toMatchObject({ roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high" });
+    expect(entry()).toMatchObject({ roles: ["review", "write"], codexModel: "gpt-6-sol", codexEffort: "high" });
     expect((await web({ ...GOOD, codexEffort: null })).status).toBe(200);
-    expect(entry()).toMatchObject({ roles: ["write"], codexModel: "gpt-6-sol" });
+    expect(entry()).toMatchObject({ roles: ["review", "write"], codexModel: "gpt-6-sol" });
     expect(entry().codexEffort).toBeUndefined();
     expect((await web({ ...GOOD, codexModel: null, codexEffort: null })).status).toBe(200);
     expect(entry().codexModel).toBeUndefined();
@@ -371,13 +371,13 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
     const api = apiWith();
     const web = (body: Record<string, unknown>) => api(req("/lend/grants", "POST", body), "/lend/grants", OWNER);
     expect((await web(GOOD))?.status).toBe(200);
-    expect(entry().roles).toEqual(["review"]);
+    expect(entry().roles).toEqual(["review", "write"]);
     expect(entry().codexModel).toBeUndefined();
     expect(entry().codexEffort).toBeUndefined();
     const old = { ...entry(), roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high", until: iso(0), paused: { reason: "旧授权" } };
     writeFileSync(lendPath, JSON.stringify({ version: 2, enabled: false, lend: [old], borrow: [] }));
     expect((await web({ ...GOOD, peer: FP.toUpperCase() }))?.status).toBe(200);
-    expect(entry()).toMatchObject({ peer: "team-a", roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high" });
+    expect(entry()).toMatchObject({ peer: "team-a", roles: ["review", "write"], codexModel: "gpt-6-sol", codexEffort: "high" });
     expect(entry().paused).toBeUndefined();
   }, 30_000);
 
@@ -393,7 +393,7 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
         return run(args);
       });
       expect((await api(req("/lend/grants", "POST", GOOD), "/lend/grants", OWNER))?.status).toBe(200);
-      expect(entry().roles).toEqual(["review"]);
+      expect(entry().roles).toEqual(["review", "write"]);
       expect(entry().codexModel).toBe(clear ? undefined : "gpt-6-sol");
       expect(entry().codexEffort).toBe(clear ? undefined : "low");
     }

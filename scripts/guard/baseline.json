@@ -123,8 +123,8 @@
     "deps:watcher-no-watcher: src/bridge/model-drift.ts -> src/bridge/permission-watcher.ts": 1,
     "deps:watcher-no-watcher: src/bridge/permission-watcher.ts -> src/bridge/bg-activity-watcher.ts": 1,
     "deps:web-src-split: web/scripts/tls-proxy.ts -> src/lib/tailscale.ts": 1,
-    "doc:CLAUDE.md": 24894,
-    "doc:CLAUDE.zh-CN.md": 22618,
+    "doc:CLAUDE.md": 25079,
+    "doc:CLAUDE.zh-CN.md": 22811,
     "doc:web/CLAUDE.en.md": 6532,
     "doc:web/CLAUDE.md": 5810,
     "dup:total": 1038,
@@ -359,6 +359,24 @@
       "from": 22459,
       "to": 22618,
       "why": "i28-L5 子 DAG MCP 工具按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行文档指针（→ docs/architecture/dag-tools.md），规格卡允许最多一行；细节全在 docs"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "PM approved independent shared-ledger entry registration for i28-C2; no gate relaxation."
+    },
+    {
+      "key": "doc:CLAUDE.md",
+      "from": 24894,
+      "to": 25079,
+      "why": "网页「新终端」（宿主 shell，bridge/web-shell.ts）按防腐规则 9 在 CLAUDE.md / CLAUDE.zh-CN.md 的 Features 加一行指针（→ docs/architecture/features.md），需求方明确要求只加这一行；细节全在 docs"
+    },
+    {
+      "key": "doc:CLAUDE.zh-CN.md",
+      "from": 22618,
+      "to": 22811,
+      "why": "同上（网页「新终端」）：中文版 Features 同步加一行指针（→ docs/architecture/features.zh-CN.md），细节全在 docs"
     }
   ]
 }

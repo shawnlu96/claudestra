@@ -1,3 +1,4 @@
+import { localCreatedFamily } from "./scheduler-local-runtime-start.js";
 /**
  * 自动开卡（i28-A1）的 step：runStart（dag-tools-steps.ts）发出的每条台账写，由调度服务改写成 `ledger scheduler-autostart step <claim> <子命令> …`
  * 到这里执行。每步一个事务：先核 claim 还活着、目标（卡号 / feature / 节点）和 claim 一致，再调现成的 lib 写函数。
@@ -18,7 +19,7 @@ import { setWorkflow } from "./ledger-scheduler-write.js";
 import { LedgerError } from "./ledger-store.js";
 import { STAGES, type Stage } from "./ledger-stages.js";
 import { replay, tx } from "./ledger-tx.js";
-import { applyMove, createTask } from "./ledger-write.js";
+import { appendEvent, applyMove, createTask } from "./ledger-write.js";
 
 const AUTOSTART_FALLBACK = "PM 接管，按手动流程推进（派审 + 合并队列）";
 
@@ -38,7 +39,7 @@ function owned(db: Database, c: AutostartClaim, taskId: string | undefined) {
   if (taskId !== c.taskId) deny(`目标 ${taskId ?? "（空）"} 不是 claim ${c.seq} 的卡 ${c.taskId}`);
   if (!claimOwnsCard(db, c, c.taskId)) deny(`${c.taskId} 不是 claim ${c.seq} 建的卡`);
   const task = mustTask(db, c.taskId);
-  if (task.agent !== c.agent) deny(`卡上的执行者 ${task.agent ?? "（空）"} 不是 claim 的 ${c.agent}`);
+  if (task.agent !== (c.peer ? null : c.agent)) deny(`卡上的执行者 ${task.agent ?? "（空）"} 不是 claim 的 ${c.agent}`);
   return task;
 }
 
@@ -56,7 +57,7 @@ function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInpu
   if (!globs?.length) return deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
   const r = createTask(db, ctx, {
     id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: autostartSpecPath(c.taskId), pm: c.pm,
-    agent: c.agent, extra: { fileGlobs: globs, ...(c.ownerVisual ? { ownerVisual: true } : {}) },
+    agent: c.peer ? undefined : c.agent, extra: { fileGlobs: globs, ...(c.peer ? { placement: `peer:${c.peer.name}`, repo: c.peer.repo } : {}), ...(c.ownerVisual ? { ownerVisual: true } : {}) },
   });
   return { ok: true, task: r.row, duplicate: r.duplicate };
 }
@@ -77,20 +78,21 @@ function workflow(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInp
   const r = setWorkflow(db, grant(ctx, c), {
     taskId: task.id, taskRev: int(input.flags.rev, "rev"), workflowRev: int(input.flags["workflow-rev"], "workflow-rev"),
     template: (c.template ?? cur?.template ?? "code") as never, templateVersion: c.version ?? cur?.templateVersion ?? 3,
-    mode, authorFamily: "claude", fallback: AUTOSTART_FALLBACK, reason: mode === "manual" ? (input.flags.reason ?? "自动开卡中途失败，回滚") : undefined,
+    mode, authorFamily: localCreatedFamily(c.agent), fallback: AUTOSTART_FALLBACK, reason: mode === "manual" ? (input.flags.reason ?? "自动开卡中途失败，回滚") : undefined,
   });
   return { ok: true, ...r };
 }
 
-/** 回滚：只取消本 claim 建的卡，按 pm 角色推到 cancelled（runStart 的 task-new undo） */
-function cancel(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInput) {
+/** 只推进本 claim 的卡：回滚取消，或按已经授权的 peer 放置跳过复述。 */
+function stageStep(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInput) {
   const task = owned(db, c, input.pos[0]);
-  if (input.flags.to !== "cancelled") deny("stage 只能推到 cancelled（回滚）");
   const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "stage" }, () => task);
   if (dup) return { ok: true, task: dup.row, duplicate: true };
+  const to = input.flags.to === "restate" && c.peer && task.stage === "spec" && input.flags.from === "spec" ? "restate" : "cancelled";
+  if (input.flags.to !== to) deny("stage 只能取消，或已授权 peer 的 spec→restate");
   const from = input.flags.from as Stage;
   if (!STAGES.includes(from)) throw new LedgerError("invalid", "--from 不是阶段");
-  const r = applyMove(db, ctx, task, { from, to: "cancelled" }, true, (input.flags.text ?? "自动开卡中途失败，回滚").slice(0, 600), "pm");
+  const r = applyMove(db, ctx, task, { from, to }, true, (input.flags.text ?? "自动开卡中途失败，回滚").slice(0, 600), "pm");
   return { ok: true, task: r.task, duplicate: false };
 }
 
@@ -109,7 +111,13 @@ export function autostartStep(db: Database, ctx: WriteCtx, input: StepInput): Re
     if (input.sub === "task-new") return taskNew(db, ctx, c, input);
     if (input.sub === "task-set") return taskSet(db, c, input);
     if (input.sub === "workflow-set") return workflow(db, ctx, c, input);
-    if (input.sub === "stage") return cancel(db, ctx, c, input);
+    if (input.sub === "stage") return stageStep(db, ctx, c, input);
+    if (input.sub === "decision") {
+      owned(db, c, input.pos[0]);
+      if (!c.peer) deny("只有 peer 放置能记跳过复述的 decision");
+      return { ok: true, ...appendEvent(db, ctx, { project: c.project, target: c.taskId, kind: "decision",
+        text: `自动开卡放到 peer:${c.peer.name}（${c.peer.reason}），复述跳过，调度器派开工单` }) };
+    }
     if (input.sub === "dag-bind") return bind(db, ctx, c, input);
     return deny(`不代跑 ledger ${input.sub}`);
   });

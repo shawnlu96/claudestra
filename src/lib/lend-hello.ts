@@ -11,11 +11,11 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
-import type { LendEntry } from "./lend-config.js";
-import { WRITE_ROLE_OPEN } from "./lend-grant-rules.js";
+import { LEND_ROLES, type LendEntry } from "./lend-config.js";
 import { liveGrant } from "./lend-grant.js";
 import type { LendDeps } from "./lend-drive.js";
 import { pausedUntil } from "./lend-health.js";
+import { claudeHelloSlots } from "./lend-claude-worker-capacity.js";
 import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type LendCall, type LendRes } from "./lend-remote.js";
@@ -42,7 +42,7 @@ export interface LendRound {
   pollNow: Set<string>;
 }
 
-export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "writeOpen" | "readLend" | "context"> { v2: V2Port }
+export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "readLend" | "context"> { v2: V2Port }
 
 export const newBoot = (): string => randomBytes(12).toString("base64url");
 export const protoKey = (peer: string): string => `proto:${peer}`;
@@ -108,16 +108,16 @@ export function owedPeers(db: Database, now: number): string[] {
   });
 }
 
-/** hello 正文（不含 v / boot / seq）。没有生效授权 = grant:null、0 槽；WRITE_ROLE_OPEN 关着时 roles 不会含 write；claude 永远 0 槽；busy 含已接下没领的单 */
-export function helloBody(db: Database, entry: LendEntry | undefined, now: number, writeOpen = WRITE_ROLE_OPEN): Omit<HelloRequest, "v" | "boot" | "seq"> {
+/** hello 正文（不含 v / boot / seq）。没有生效授权 = grant:null、0 槽；roles 报完整能力兼容旧借入方；claude 按授权与凭据报槽；busy 含已接下没领的单 */
+export function helloBody(db: Database, entry: LendEntry | undefined, now: number): Omit<HelloRequest, "v" | "boot" | "seq"> {
   const grant = entry ? {
-    until: Date.parse(entry.until ?? ""), roles: entry.roles.filter((r) => r !== "write" || writeOpen), repos: entry.repos, ordersPerDay: entry.ordersPerDay,
+    until: Date.parse(entry.until ?? ""), roles: [...LEND_ROLES], repos: entry.repos, ordersPerDay: entry.ordersPerDay,
     ordersLeftToday: Math.max(0, entry.ordersPerDay - dailyUsed(db, entry.peer, now)),
   } : null;
   const total = entry ? entry.families[LEND_FAMILY] ?? 0 : 0;
   const busy = entry ? openSlots(db, entry.peer, LEND_FAMILY) : 0;
   const pause = pausedUntil(db, now);
-  return { proto: LEND_PROTO, grant, slots: { codex: { total, busy: Math.min(busy, 100) }, claude: { total: 0, busy: 0 } },
+  return { proto: LEND_PROTO, grant, slots: { codex: { total, busy: Math.min(busy, 100) }, claude: claudeHelloSlots(db, entry) },
     paused: pause === null ? null : { reason: "codex_quota", until: pause } };
 }
 
@@ -140,7 +140,7 @@ interface Composed { body: ReturnType<typeof helloBody>; hash: string; now: numb
 async function compose(d: HelloDeps, peer: string, quota: HelloQuota | undefined): Promise<Composed | { selfCheck: string; now: number; hash: string }> {
   const g = await liveGrant({ peer, fp: null }, d);
   const now = d.now();
-  const body = helloBody(d.db, g.ok ? g.entry : undefined, now, d.writeOpen);
+  const body = helloBody(d.db, g.ok ? g.entry : undefined, now);
   const hash = hashOf(body);
   const seq = Number(getMeta(d.db, SEQ_KEY) ?? 0) + 1;
   const bare: HelloRequest = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused };
@@ -182,7 +182,7 @@ export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): P
   const base = stateOf(c);
   const at = d.now();
   if (r.ok) {
-    setProto(d.db, peer, r.value.proto >= LEND_PROTO ? 2 : 1, round);
+    setProto(d.db, peer, r.value.proto >= 2 ? 2 : 1, round);
     const keep = clamp(r.value.helloMs, KEEP_MS.min, KEEP_MS.max, KEEP_MS.fallback);
     return save(d.db, peer, { ...base, ok: true, okAt: at, grant: c.body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
       beatMs: r.value.beatMs, nextAt: at + keep });

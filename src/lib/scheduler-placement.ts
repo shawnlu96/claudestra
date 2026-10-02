@@ -1,3 +1,6 @@
+import { placeAgentPool, poolPeerRefusal } from "./scheduler-agent-pool.js";
+import type { AgentPoolLoad } from "./scheduler-agent-pool.js";
+import { localFamilyRefusal } from "./scheduler-local-families-placement.js";
 /**
  * Shared slot pool placement (i28-W5), pure: where one ready node runs — this machine, a lend-v2 peer, or nowhere yet.
  * Candidates are this machine plus every peer that passes all hard constraints (file locks, grant roles / repos / slots,
@@ -24,7 +27,8 @@ export interface PeerFacts {
   open: number;
   /** The borrow entry's tier; absent = balance. */
   priority?: Priority;
-  v2: { why: string | null; slots: Readonly<Record<AuthorFamily, number>>; roles: readonly LendRole[]; repos: readonly string[] } | null;
+  v2: { why: string | null; slots: Readonly<Record<AuthorFamily, number>>; roles: readonly LendRole[]; repos: readonly string[];
+    familyTotals?: Readonly<Record<AuthorFamily, number>>; familyBusy?: Readonly<Record<AuthorFamily, number>> } | null;
 }
 
 export interface PlacementFacts {
@@ -34,10 +38,10 @@ export interface PlacementFacts {
   /** GitHub owner/repo of the card; null = no peer can take it (a peer only gets coordinates). */
   repo: string | null;
   /** Local executors + reviewer sessions of the project, the card's own excluded; room = a new one may start now. */
-  local: { running: number; room: boolean };
+  local: { running: number; room: boolean; pool?: AgentPoolLoad; family?: AuthorFamily };
   /** `peer:<name>` that start_node pinned the card's writing to; null = not pinned. */
   pin: string | null;
-  /** Peers already offered this round and head: each is tried once, then the next one or local. */
+  /** Spent attempts this round/head exclude unpinned peers; temporary push refusals use a separate retry gate. */
   tried: readonly string[];
   lastPeer: string | null;
   /** Peer holding the card's write lease now: a fix can only go back there (it pushes the lend/ branch). */
@@ -46,7 +50,7 @@ export interface PlacementFacts {
   locksFree: boolean;
 }
 
-export type Placement = { kind: "local"; reason: string } | { kind: "peer"; peer: string; family: AuthorFamily; reason: string } | { kind: "wait"; reason: string };
+export type Placement = { kind: "local"; reason: string; family?: AuthorFamily } | { kind: "peer"; peer: string; family: AuthorFamily; reason: string } | { kind: "wait"; reason: string };
 
 export const PEER_PLACEMENT = "peer:";
 const lendRoleOf = (role: PlaceRole): LendRole => role === "review" ? "review" : "write";
@@ -63,6 +67,7 @@ export function peerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFamily):
 
 /** Why this peer cannot take the role now, or null. Every constraint is checked; proto 1 never qualifies here. */
 export function peerRefusal(f: PlacementFacts, p: PeerFacts | undefined, role: PlaceRole, family: AuthorFamily): string | null {
+  if (f.remote?.agents) return poolPeerRefusal(f, p, role, family);
   const lend = lendRoleOf(role);
   if (!p) return "不在借入名单里（或借入不含本项目）";
   if (!f.remote || f.remote.mode === "off") return "scheduler.json remote.mode = off";
@@ -100,13 +105,17 @@ function toPeer(f: PlacementFacts, name: string, role: PlaceRole, family: Author
 }
 
 export function placeFor(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
+  if (f.remote?.agents) return placeAgentPool(f, role, family);
   // The pin is where the card is written; its review is placed like any other (cross-family, possibly elsewhere).
   if (f.pin && role !== "review") {
     const name = f.pin.slice(PEER_PLACEMENT.length);
     const why = peerRefusal(f, f.peers.find((p) => p.peer === name), role, family);
     return why ? { kind: "wait", reason: `固定放在 ${f.pin}，它现在不能接：${why}` } : toPeer(f, name, role, family, `start_node 固定放在 ${f.pin}`);
   }
-  if (!f.remote || f.remote.mode === "off") return { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
+  if (!f.remote || f.remote.mode === "off") {
+    const refusal = localFamilyRefusal(f, role, family);
+    return refusal ? { kind: "wait", reason: refusal } : { kind: "local", reason: "scheduler.json remote.mode = off，只用本机" };
+  }
   const lease = role === "fix" && f.remote.roles.includes("write") ? f.writeLeasePeer : null;
   if (lease) {
     // The lender's branch is the card's branch now: anyone else would have to start over (`ledger lend-reclaim` hands it back).
@@ -128,11 +137,12 @@ const TIERS: readonly Priority[] = ["first", "balance", "low"];
 /** The tiers over this machine and every usable peer; with every machine on balance this is W5's even spread, word for word. */
 function tiered(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
   const usable = f.peers.map((p, order) => ({ p, order })).filter(({ p }) => !f.tried.includes(p.peer) && !peerRefusal(f, p, role, family));
-  const mine = f.remote?.localPriority ?? "balance";
+  const refusal = localFamilyRefusal(f, role, family);
+  const mine = refusal ? "off" : f.remote?.localPriority ?? "balance";
   const rows: Ranked[] = usable.map(({ p, order }) => ({ where: p.peer, local: false, load: p.open, order, tier: p.priority ?? "balance" }));
   if (f.local.room && mine !== "off") rows.push({ where: "本机", local: true, load: f.local.running, order: f.peers.length, tier: mine });
   if (!usable.length) {
-    if (mine === "off") return { kind: "wait", reason: "scheduler.json remote.localPriority = off，又没有能接的 peer：等" };
+    if (mine === "off") return { kind: "wait", reason: refusal ? `${refusal}，又没有能接的 peer：等` : "scheduler.json remote.localPriority = off，又没有能接的 peer：等" };
     return { kind: "local", reason: f.local.room ? "没有可用的 peer，放本机" : "本机满且没有可用的 peer：本机照常排队" };
   }
   const tier = TIERS.find((t) => rows.some((r) => r.tier === t)) as Priority;

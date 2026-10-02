@@ -1,3 +1,4 @@
+import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
  * registry, the author taken from the card (PM names it; the engine never invents an executor), and the per-card
@@ -20,6 +21,7 @@ import { acpPort, messagePort, type RegistryRow, type StillActive } from "./sche
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
+import { lendReviewDir } from "./lend-pr-takeover-review.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
@@ -59,7 +61,7 @@ const realOr = (p: string): string => { try { return realpathSync.native(p); } c
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd);
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? (await lendReviewDir(db, task, env.git));
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
   const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA, env.git);
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
@@ -144,11 +146,12 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
-  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: plainManager(lease) };
+  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: localCreateGuard(plainManager(lease)) };
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
-    ensure: (task, role, family) => ensure(env, task, role, family),
+    ensure: (task, role, family) => localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
+      { registryPath, ledgerPath: db.filename, project: task.project, taskId: task.id }),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
     notifyPm: (task, text) => notifyPm(env, task, text),

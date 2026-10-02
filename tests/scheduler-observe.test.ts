@@ -16,7 +16,7 @@ import type { LedgerDeps } from "../src/manager/ledger-context.js";
 import type { Registry } from "../src/manager/core.js";
 
 const H1 = "1".repeat(40), H2 = "2".repeat(40);
-const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
+const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "[验收线 1] two ticks claim the same intent" };
 const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
 const DIGEST = "d".repeat(64);
@@ -232,7 +232,7 @@ describe("T68e observe mode", () => {
     }
   });
 
-  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 is a three-P1 stop", async () => {
+  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 still plans repair", async () => {
     for (const observed of [false, true]) {
       const f = fixture();
       try {
@@ -247,7 +247,7 @@ describe("T68e observe mode", () => {
         }
         await f.observe();
         const moves = (await f.rows()).filter((r) => r.actual === "推阶段 review→fix").map((r) => [r.verdict, r.planned]);
-        expect(moves).toEqual(observed ? [["match", "推阶段到 fix"], ["match", "推阶段到 fix"], ["diff", "停下升级（three_p1_rounds）"]]
+        expect(moves).toEqual(observed ? Array(3).fill(["match", "推阶段到 fix"])
           : Array(3).fill(["unknown", "（结论后的计划没有记录）"]));
       } finally { f.close(); }
     }
@@ -328,11 +328,11 @@ describe("T68e observe mode", () => {
       await f.observe();
       f.review("changes", H1, [P1]);
       const first = await f.observe();
-      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "probe B" }]);
+      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "[验收线 1] probe B" }]);
       const second = await f.observe();
       expect(second.duplicate).toBe(false);
       expect(first.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-1" }] } });
-      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "probe B" }] } });
+      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "[验收线 1] probe B" }] } });
     } finally { f.close(); }
   });
 

@@ -159,7 +159,7 @@ describe("四格矩阵", () => {
     const a = aSide({ old: () => false });
     wire(true, a);
     await passes(1);
-    expect(getLendPeer(db, MATE)).toMatchObject({ proto: 2, grant: expect.objectContaining({ repos: [REPO] }) });
+    expect(getLendPeer(db, MATE)).toMatchObject({ proto: 3, grant: expect.objectContaining({ repos: [REPO] }) });
     const id = await offer("T1");
     expect(await pushOnce()).toEqual([id]);
     expect(getOrder(h.db, id)!.preview.source).toBe("push");

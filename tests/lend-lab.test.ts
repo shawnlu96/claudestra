@@ -19,7 +19,7 @@ describe("场景 1 推送主路径", () => {
     await L.toReview();
     L.markNow();
     await L.pass(); // B hello → A 调度按 reviewFirst 挂给 mate → A 推送 → B 收下
-    expect(getLendPeer(L.f.db, MATE)).toMatchObject({ proto: 2, grant: expect.objectContaining({ repos: ["o/r"] }), slots: { codex: { total: 2, busy: 0 } } });
+    expect(getLendPeer(L.f.db, MATE)).toMatchObject({ proto: 3, grant: expect.objectContaining({ repos: ["o/r"] }), slots: { codex: { total: 2, busy: 0 } } });
     expect(planText(L).at(-1)).toBe("挂池：对抗式跨模型审查挂给 mate 的 codex worker（scheduler.json remote.reviewFirst 指定先给 mate）");
     const [order] = L.orders();
     expect(order).toMatchObject({ status: "pooled", peer: MATE, family: "codex", step: "review" });

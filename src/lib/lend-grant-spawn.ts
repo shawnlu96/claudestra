@@ -5,6 +5,8 @@
  * - 收：lend revoke / 改授权写完 lend.json 后 stopRevokedWorkers 读 registry，授权已不覆盖的出借 worker 当场停：在途的 create 发 SIGTERM
  *   等它退出（信号清理撤占位、频道、窗口），再按名字关窗口、确认 no_window，revoke 返回前做完。tests/lend-grant-spawn.test.ts。
  */
+import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
+import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
 import { Database } from "bun:sqlite";
 import { isCodexEffort, isCodexModel, LEND_PATH, readLendSync } from "./lend-config.js";
 import { existsSync } from "node:fs";
@@ -24,11 +26,11 @@ export interface CreateGateOpts {
 export const CHOICE_CHANGED = "出借 worker 不起：授权里的模型或推理档在起之前改了，本次不起，单子退回发起方重派，下次领单按新授权起";
 
 /** 只读查这张单的 peer / 指纹（manager create 子进程里没有出借服务的 journal 连接）；读失败往外抛，由调用方按不起处理 */
-function orderPeer(journal: string, orderId: string): { peer: string; fp: string | null } | null {
+function orderPeer(journal: string, orderId: string): { peer: string; fp: string | null; family: string } | null {
   const db = new Database(journal, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 2000");
-    return (db.query("SELECT peer, fp FROM lend_orders WHERE orderId = ?").get(orderId) as { peer: string; fp: string | null } | null) ?? null;
+    return (db.query("SELECT peer, fp, family FROM lend_orders WHERE orderId = ?").get(orderId) as { peer: string; fp: string | null; family: string } | null) ?? null;
   } finally { db.close(); }
 }
 
@@ -51,7 +53,7 @@ export function lendCreateDenied(name: string, o: CreateGateOpts = {}): string |
   let row: ReturnType<typeof orderPeer>;
   try { row = orderPeer(journal, order); } catch (e) { return `出借 worker 不起：读不了出借 journal（${(e as Error).message}）`; }
   if (!row) return `出借 worker 不起：journal 里没有单 ${order}`;
-  return JSON.stringify(argsOf(o.choice?.model, o.choice?.effort)) === JSON.stringify(choiceArgs(row.peer, row.fp, lendPath)) ? null : CHOICE_CHANGED;
+  return JSON.stringify(argsOf(o.choice?.model, o.choice?.effort)) === JSON.stringify((row.family === "claude" ? [] : choiceArgs(row.peer, row.fp, lendPath))) ? null : CHOICE_CHANGED;
 }
 
 /**
@@ -62,7 +64,7 @@ export function lendCreateDenied(name: string, o: CreateGateOpts = {}): string |
  */
 export function lendModelArgs(db: Database, orderId: string, lendPath = LEND_PATH): string[] {
   const row = getOrder(db, orderId);
-  return row ? choiceArgs(row.peer, row.fp, lendPath) : [];
+  return row?.family === "codex" ? choiceArgs(row.peer, row.fp, lendPath) : [];
 }
 
 /** 这个 peer 当下授权里的模型 / 推理档参数：出借服务组 create 参数和 manager create 最终闸口用同一个算法 */
@@ -115,19 +117,28 @@ export async function stopRevokedWorkers(io: StopIo): Promise<StopReport> {
   const out: StopReport = { stopped: [], unconfirmed: [] };
   for (const w of await io.workers()) {
     if (!io.stopReason(w.name)) continue;
-    if (w.createPid && io.isCreate(w.createPid, w.name)) {
+    const before = await io.probe(w.name);
+    const creating = !!w.createPid && io.isCreate(w.createPid, w.name);
+    // create 可能在首份窗口快照之后建窗并退出；确认它已退出后再读窗口，才能静默跳过。
+    if (before === "no_window" && !creating && (await io.probe(w.name)) === "no_window") {
+      await io.markStopped(w.name);
+      continue;
+    }
+    if (w.createPid && creating) {
       io.signal(w.createPid, "SIGTERM");
       if (!(await waitExit(w.createPid, w.name, io, TERM_WAIT_MS))) {
         io.signal(w.createPid, "SIGKILL");
         await waitExit(w.createPid, w.name, io, KILL_WAIT_MS);
       }
     }
+    await archiveClaudeWorkerName(w.name);
     await io.killWindows(w.name);
     const left = await io.probe(w.name);
     if (left !== "no_window") {
       out.unconfirmed.push({ name: w.name, why: left === "unknown" ? "读不到 tmux，没法确认已退出" : "关窗口之后窗口还在" });
       continue;
     }
+    removeClaudeWorkerConfig(w.name);
     await io.markStopped(w.name);
     out.stopped.push(w.name);
   }

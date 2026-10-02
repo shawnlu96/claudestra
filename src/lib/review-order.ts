@@ -1,3 +1,4 @@
+import { convergenceOrderLines } from "./fix-strategy-order.js";
 /**
  * M3 审查单（T97）：台账当前的审查那一步 → 给审查员的 OrderWire（take_review 出，submit_verdict 按 orderId 现算再核一遍）。
  * 谁是「本步骤审查员」只有两个来源：自动卡 = 台账绑定的审查 session（agent + session 都要对上）且有派给它、同 head 的派审 intent；
@@ -22,6 +23,8 @@ import { runtimeFamily } from "./scheduler-auto-review.js";
 import { bounceReviewLine, reviewAfterBounce } from "./scheduler-merge-conflict.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
+import { convergeOrderLines } from "./review-converge-order.js";
+import { withDeliverScope } from "./order-deliver-scope.js";
 
 /** bridge 认出并验证过的调用方（requireVerified 之后）；family 是 registry 的 runtime */
 export interface ReviewCaller { agent: string; sessionId: string | null; family: string | null }
@@ -121,14 +124,16 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
     inputs: [`规格：${specPath ? clip(specPath, WIRE_LIMITS.path) : `ledger show ${task.id}`}（specRev ${task.specRev}）`, `只审 head ${slot.head}${task.branch ? `（分支 ${clip(task.branch, 200)}）` : ""}`,
       // 自动卡的审查员建在自己的审查 worktree 里，调度器派审前把它固定在这个 head（scheduler-review-worktree.ts）
       ...(slot.auto ? ["审查目录：你当前会话的工作目录（调度器已固定在这个 head；只读，不改、不提交、不推送）"] : []),
-      ...(bounce ? [bounceReviewLine(bounce)] : []), standardAnswers("review")],
-    outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；bridge 只校验路径，不读内容）`],
+      ...(bounce ? [bounceReviewLine(bounce)] : []), ...convergeOrderLines(task.round, events, slot.head), ...convergenceOrderLines(db, task), standardAnswers("review")],
+    outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；旧版逐项标记可从报告读取）`],
     acceptance: acceptanceOf(specPath),
     writeBack: `submit_verdict({v:1, orderId:"${slot.orderId}", head:"${slot.head}", …, reportPath:"${report}"})；只记结论，不推阶段`,
     findings: prev.findings,
     fallback: wf?.fallback ? clip(wf.fallback, WIRE_LIMITS.fallback) : null,
   };
-  const checked = parseOrderWire(fitFindings(order, prev.report));
+  let scoped: OrderWire;
+  try { scoped = withDeliverScope(db, task, order, (w) => fitFindings(w, prev.report)); } catch (e) { return { ok: false, error: (e as Error).message }; }
+  const checked = parseOrderWire(scoped);
   return checked.ok ? { ok: true, order: checked.value } : { ok: false, error: `审查单构造出错（${checked.error}）` };
 }
 

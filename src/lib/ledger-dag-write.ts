@@ -5,13 +5,14 @@
  * dag-approve 核对 owner 本人批准、哈希按库里的提案行重算、四条规矩按那一刻的卡状态重判，全过才写版本；否则提案作废（这一笔照常提交）。
  * 审批 ask 的 fromAgent 是发起的 PM：owner 作答后 bridge 把答复投回它，由它跑 dag-approve。
  */
+import { reasonOf } from "./shared-ledger-gate-reason.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 import { diffNodes, nodePhase, planRewrite, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
-import { DAG_REASON_KINDS, type DagReasonKind } from "./ledger-feature-schema.js";
 import {
   effectiveNodes, getDagVersion, getPendingProposal, getProposal, type DagNode, type DagProposal, type DagVersion, type Feature,
 } from "./ledger-feature.js";
@@ -25,7 +26,6 @@ const APPROVE = "dag_rewrite_approve";
 const REJECT = "dag_rewrite_reject";
 /** owner 可能隔几天才看：审批窗口给满 7 天（ask-check 从开出算，答了也不延长） */
 const ASK_TTL_MS = 7 * 24 * 3600_000;
-const REASON_MAX = 2000;
 
 const ops = (...names: string[]) => (prev: LedgerEvent) => names.includes(String(prev.data.op));
 
@@ -110,14 +110,6 @@ function closeProposal(db: Database, ctx: WriteCtx, f: Feature, p: DagProposal, 
   return insertEvent(db, ctx, { project: f.project, target: f.id, kind: "feature", text: note, data }, primary);
 }
 
-function reasonOf(kind: string, text: string): { reasonKind: DagReasonKind; reasonText: string } {
-  if (!DAG_REASON_KINDS.slice(1).includes(kind as DagReasonKind)) throw new LedgerError("invalid", `--reason-kind 只能是 ${DAG_REASON_KINDS.slice(1).join(" / ")}`);
-  const t = String(text ?? "").trim();
-  if (!t) throw new LedgerError("invalid", "重写要带 --reason（原因原文：owner 原话或审查结论）");
-  if ([...t].length > REASON_MAX) throw new LedgerError("invalid", `--reason 不超过 ${REASON_MAX} 字`);
-  return { reasonKind: kind as DagReasonKind, reasonText: t };
-}
-
 function openApproval(db: Database, f: Feature, c: ProposalContent, sha: string, why: string[], from: RewriteInput["askFrom"], now: number): Ask {
   const bind = { action: DAG_ACTION, params: { feature: f.id, version: c.version, sha }, approve: [APPROVE] };
   return openAskFull(db, {
@@ -142,6 +134,7 @@ function rewriteReplayed(db: Database, f: Feature, e: LedgerEvent): RewriteOutco
 export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): WriteResult<RewriteOutcome> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
+    requireLocalSharedLedgerPlanning(f.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     const dup = replay(db, ctx, key, () => null, ops("dag-rewrite", "dag-propose"));
     if (dup) return { ...dup, row: rewriteReplayed(db, f, dup.event) };
@@ -206,6 +199,7 @@ export interface ApproveOutcome {
 export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): WriteResult<ApproveOutcome> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
+    requireLocalSharedLedgerPlanning(f.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     // 重放按事件记下的提案还原，不取最新一份：之后可能又有新的提案
     const dup = replay(db, ctx, key, () => null, ops("dag-approve", "dag-reject", "dag-void"));
@@ -237,6 +231,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
 export function bindNode(db: Database, ctx: WriteCtx, input: { id: string; rev: number; key: string; taskId: string }): WriteResult<DagNode> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
+    requireLocalSharedLedgerPlanning(f.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     const load = () => currentDag(db, mustFeature(db, f.id)).nodes.find((n) => n.key === input.key) as DagNode;
     const dup = replay(db, ctx, key, load, ops("dag-bind"));

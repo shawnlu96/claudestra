@@ -11,10 +11,11 @@ import { defaultOpen, drawable, openWith } from "./dag-layout";
 import { jumpToNode } from "./dag-progress";
 import type { FeatureCard } from "./dag-types";
 
-export type DagTab = "dag" | "progress" | "team";
+export type DagTab = "product" | "dag" | "progress" | "team";
 
 export function useDagUi(features: readonly FeatureCard[]) {
-  const [tab, setTabRaw] = useState<DagTab>("dag");
+  const [tab, setTabRaw] = useState<DagTab>("product");
+  const [featureId, setFeatureId] = useState<string | null>(null);
   const [manual, setManual] = useState<string[] | null>(null);
   const [doneOpen, setDoneOpen] = useState<ReadonlySet<string>>(() => new Set());
   const [compare, setCompare] = useState<Compare | null>(null);
@@ -33,7 +34,12 @@ export function useDagUi(features: readonly FeatureCard[]) {
     setEvicted(o.evicted);
   };
   return {
-    tab, open, doneOpen, compare, focus, flash, evicted, ensureOpen,
+    tab, featureId, open, doneOpen, compare, focus, flash, evicted, ensureOpen,
+    selectFeature: (id: string) => {
+      setFeatureId(id); setManual([id]);
+      setCompare(null); setFocus(null);
+      setTabRaw("dag");
+    },
     setTab: (t: DagTab) => {
       setTabRaw(t);
       setFocus(null);
@@ -54,7 +60,8 @@ export function useDagUi(features: readonly FeatureCard[]) {
       if (!j) return;
       const seq = ++counter.current;
       setCompare((c) => compareAfterJump(c, features, featureId));
-      setManual(j.open);
+      setFeatureId(featureId);
+      setManual([featureId]);
       setEvicted(j.evicted);
       if (j.expandDone) setDoneOpen((s) => new Set([...s, featureId]));
       setTabRaw("dag");
