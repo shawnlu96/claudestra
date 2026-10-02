@@ -23,6 +23,7 @@ import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { lentAwayText } from "./ledger-lend-relay.js";
+import { withMemory } from "./memory-retrieve-order.js";
 
 type WorkStage = "build" | "fix";
 export interface CurrentOrder {
@@ -148,6 +149,7 @@ export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: 
     writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
     findings: fix.findings, fallback: fallback ? clipWire(`再不行退到：${fallback}`, WIRE_LIMITS.fallback) : null,
   };
-  const parsed = parseOrderWire(fitFindings(wire, fix.report));
+  // 项目记忆一节最后放、只用剩余预算（memory-retrieve-order.ts）
+  const parsed = parseOrderWire(withMemory(db, t, "write", head, fitFindings(wire, fix.report)));
   return parsed.ok ? { ok: true, order: parsed.value } : { ok: false, error: `台账里这张单的字段不合 OrderWire：${parsed.error}` };
 }

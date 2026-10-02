@@ -26,6 +26,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 import { convergeOrderLines } from "./review-converge-order.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
+import { withMemory } from "./memory-retrieve-order.js";
 
 /** bridge 认出并验证过的调用方（requireVerified 之后）；family 是 registry 的 runtime */
 export interface ReviewCaller { agent: string; sessionId: string | null; family: string | null }
@@ -133,7 +134,9 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
     fallback: wf?.fallback ? clip(wf.fallback, WIRE_LIMITS.fallback) : null,
   };
   let scoped: OrderWire;
-  try { scoped = withDeliverScope(db, task, order, (w) => fitFindings(w, prev.report)); } catch (e) { return { ok: false, error: (e as Error).message }; }
+  try {
+    scoped = withMemory(db, task, "review", slot.head, withDeliverScope(db, task, order, (w) => fitFindings(w, prev.report)));
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
   const checked = parseOrderWire(scoped);
   return checked.ok ? { ok: true, order: checked.value } : { ok: false, error: `审查单构造出错（${checked.error}）` };
 }
