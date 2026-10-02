@@ -18,6 +18,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { trainGh } from "./scheduler-merge-train-gh.js";
+import { trainMode } from "./scheduler-merge-train-switch.js";
 import { runBounded } from "./run-bounded.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import {
@@ -184,18 +185,31 @@ function configChecks(project: string): readonly string[] | null {
 export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = defaultTrainContext()): MergeExternal {
   if (!ctx) return base;
   const io = { ...ctx, now: Date.now, notify: async () => {} };
+  // A clearance skips serial preflight; retain its train across mode changes and cleanup until the merge recheck.
+  const cleared = new Map<string, TrainState>(), serial = new Set<string>();
   return {
     ...base,
-    train: (run: MergeRun) => trainGate(ctx.store.load(run.project), run, io),
+    train: async (run: MergeRun) => {
+      const key = `${run.prRef}:${run.reviewedHead}`;
+      cleared.delete(key); serial.delete(key);
+      if (trainMode(run.project) !== "on") { serial.add(key); return null; }
+      const state = ctx.store.load(run.project), gate = await trainGate(state, run, io);
+      if (gate === "cleared" && state) cleared.set(key, state);
+      return gate;
+    },
     async merge(prRef, head) {
+      if (serial.delete(`${prRef}:${head}`)) return base.merge(prRef, head);
       let states: TrainState[];
       try { states = ctx.store.all(); }
       catch (e) { // fail closed: no merge sent; the driver journals this reason instead of a plain merge pinned to the PR head only
         throw new Error(`合并列车状态读不出来，本轮不合并（不退回普通合并）：${(e as Error).message}`);
       }
-      const s = clearedMember(states, prRef, head);
+      const key = `${prRef}:${head}`, s = cleared.get(key) ?? clearedMember(states, prRef, head);
       if (!s) return base.merge(prRef, head);
+      if (trainMode(s.project) !== "on") throw new Error("列车已关闭，本轮不合并，重新走串行前置检查");
       await recheckCleared(s, io);
+      if (trainMode(s.project) !== "on") throw new Error("列车已关闭，本轮不合并，重新走串行前置检查");
+      cleared.delete(key);
       return ctx.gh.mergeMatchHead(prRef, head);
     },
   };
