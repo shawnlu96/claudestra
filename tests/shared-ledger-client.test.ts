@@ -219,3 +219,33 @@ test("import upload blocks Unicode absolute paths and permits prose, URLs and re
   }
   expect(uploads).toBe(4);
 });
+
+test("import globs use strict relative syntax and cannot carry embedded absolute paths", async () => {
+  const { SHARED_LEDGER_IMPORT_FIXTURE } = await import("../src/lib/shared-ledger-contract-fixtures.js");
+  const { createHash } = await import("node:crypto");
+  const { canonicalJson } = await import("../src/lib/ask-bind.js");
+  let uploads = 0;
+  const fetcher = (async (_url, init) => {
+    uploads++;
+    const payload = JSON.parse(init!.body as string).payload;
+    return Response.json({ schemaVersion: 1, mode: payload.mode, batchId: payload.batchId,
+      manifestDigest: payload.manifestDigest, serverSeq: 1, mappings: [] });
+  }) as typeof fetch;
+  const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher,
+    scrub: { identity: { username: "fake-user", hostname: "fake-host" } } });
+  const imported = (glob: string) => {
+    const payload = structuredClone(SHARED_LEDGER_IMPORT_FIXTURE.payload);
+    payload.manifest.features[0]!.versions[0]!.nodes[0]!.fileGlobs = [glob];
+    payload.manifestDigest = createHash("sha256").update(canonicalJson(payload.manifest)).digest("hex");
+    return payload;
+  };
+  for (const glob of ["src/**,/秘密", "src/**,/srv/x", "{/srv,src}/x", "src/../etc", "~/x", "/abs",
+    "src//x", "src/[/srv]/x", "src/{a,../etc}"]) {
+    await expect(client.import(imported(glob))).rejects.toThrow("$.manifest.features[0].versions[0].nodes[0].fileGlobs[0]");
+  }
+  expect(uploads).toBe(0);
+  for (const glob of ["src/lib/*.ts", "src/**/file.ts", "src/{a,b}/x.ts", "tests/[ab]*.test.ts"]) {
+    expect((await client.import(imported(glob))).mode).toBe("dry-run");
+  }
+  expect(uploads).toBe(4);
+});

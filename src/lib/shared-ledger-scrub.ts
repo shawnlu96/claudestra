@@ -28,6 +28,19 @@ const allowed: Record<string, readonly string[]> = {
 };
 const absolutePath = /(?<![\p{L}\p{N}._~:/-])(?:~?\/[^\s/]+|[A-Za-z]:[\\/])/u;
 const address = /\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[a-f0-9]{1,4}:){2,}[a-f0-9:]+\b/i;
+/** Globs have path syntax of their own; validate every token instead of exempting an entire field. */
+function sharedGlobAllowed(value: string): boolean {
+  if (!/^[A-Za-z0-9._\-/*?{}\[\],]+$/.test(value) || /^[~/]/.test(value) || /[,\{\[]\//.test(value)
+    || value.includes("//") || value.split(/[/,{}\[\]]/).includes("..")) return false;
+  const stack: string[] = [];
+  for (const character of value) {
+    if (character === "{" || character === "[") stack.push(character);
+    else if (character === "}" || character === "]") {
+      if (stack.pop() !== (character === "}" ? "{" : "[")) return false;
+    } else if (character === "," && !stack.includes("{")) return false;
+  }
+  return stack.length === 0;
+}
 /** Inspect originals before masking: detecting a secret must refuse upload even if a masker could hide it. */
 export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context: SharedLedgerScrubContext): T {
   const fields = new Set<string>();
@@ -50,7 +63,8 @@ export function scrubSharedLedger<T>(input: unknown, parser: Schema<T>, context:
     if (typeof value !== "string") return;
     const digest = ["manifestDigest", "specDigest"].includes(shape) && /^[a-f0-9]{64}$/.test(value);
     const head = shape === "head" && commits.has(value.toLowerCase());
-    if (names.some((name) => name.test(value)) || known.some((secret) => value.includes(secret)) || address.test(value) || (shape !== "fileGlobs" && absolutePath.test(value))) fields.add(path);
+    const pathHit = shape === "fileGlobs" ? !sharedGlobAllowed(value) : absolutePath.test(value);
+    if (names.some((name) => name.test(value)) || known.some((secret) => value.includes(secret)) || address.test(value) || pathHit) fields.add(path);
     if (!digest && !head) {
       const peer = redactForPeer(value);
       const pr = redactPeerPr(value, context.identity, commits);
