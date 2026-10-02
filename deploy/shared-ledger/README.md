@@ -15,10 +15,9 @@ nginx 新增一个只反代台账 API 的 server 块，证书复用主机上已�
 - 部署须经 owner 在部署授权卡上批准，由 PM 执行。
 - 开发机：`bun`、`git`、`rsync`、能免密 `ssh root@<主机>`。
 - 远端（systemd 发行版，如 Ubuntu 22.04+）：`nginx`（`conf.d/*.conf` 已被 `http {}` include）、`rsync`、`curl`、`journalctl`；
-  - **系统级 bun ≥ 1.3**，默认找 `/usr/local/bin/bun`（不能在 `/root`、`/home` 下：单元开了 `ProtectHome`）。没有就先装：
-    `curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash`，或用 `--bun <路径>` 指向已有的。
-  - 已有 server 块的证书要覆盖新域名：通常是 `server_name` 含 `*.<上级域>` 的通配站点（也可以是只听 80 等非 443 端口、`server_name` 精确等于 `<域名>` 且带证书的块）；
-  - `<域名>` 不能已被已有的 443 server 块占用（`server_name` 精确等于它）：同 listener 同名时 nginx 只告警并忽略其一，请求会落到先加载的块。脚本在写任何东西之前就检查，冲突即退出，请换一个未被占用的域名；
+  - **系统级 bun ≥ 1.3**，默认找 `/usr/local/bin/bun`（不能在 `/root`、`/home` 下：单元开了 `ProtectHome`）。须提前安装，或用 `--bun <路径>` 指向已有的。
+  - 已有 server 块的证书要覆盖新域名：通常复用 `server_name` 含 `*.<上级域>` 的通配站点证书；
+  - 除路径及标记头均属于本脚本的文件外，`nginx -T` 全部输出中出现完整域名 token 就拒绝安装（包括注释、非 443 块）；请换一个未占用的域名。通配名不算命中；
   - 新域名的 DNS 已指向本机（本脚本不改 DNS）。
 
 ## 用法

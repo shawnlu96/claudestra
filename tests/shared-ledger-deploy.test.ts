@@ -298,11 +298,39 @@ case $url in http://*"/v1/teams/"*) printf '{"code":"bad_signature"}' > "$out"; 
     expect(readFileSync(at("etc/nginx/conf.d/example.conf"), "utf8")).toBe(EXISTING_SITE);
   });
 
-  test("同名域名只在 80 端口的块里（如跳转站）不算冲突，证书仍从通配站点复用", () => {
-    writeFileSync(at("etc/nginx/conf.d/redirect.conf"), `server {\n    listen 80;\n    server_name ${HOST};\n    return 301 https://$host$request_uri;\n}\n`);
-    const r = install();
-    expect(r.code).toBe(0);
-    expect(readFileSync(at(NGINX_OURS), "utf8")).toContain("ssl_certificate     /etc/ssl/example/fullchain.pem;");
+  test.each([
+    ["单行 server 块", `server { listen 443 ssl; server_name ${HOST}; }`],
+    ["同一行多条指令", `server {\n listen 443 ssl; server_name ${HOST};\n}`],
+    ["注释里的域名预期误拒", `# reserved ${HOST} ;`],
+    ["80 端口也保守拒绝", `server { listen 80; server_name ${HOST}; }`],
+  ])("完整 token 撞名拒绝：%s", (_name, config) => {
+    writeFileSync(at("etc/nginx/conf.d/aaa-ledger.conf"), config + "\n");
+    const r = install("--dry-run");
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("未被占用");
+    expect(r.out).not.toContain("写入");
+    expect(log()).not.toMatch(/useradd|systemctl (start|restart|reload|enable|daemon-reload)/);
+  });
+
+  test("nginx -T 标记头之外的 stderr 也按完整 token 保守拒绝", () => {
+    writeFileSync(join(bin, "nginx"), `#!/usr/bin/env bash
+if [ "$1" = -T ]; then echo "# reserved ${HOST}" >&2; fi
+`);
+    const r = install("--dry-run");
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain("未被占用");
+  });
+
+  test("通配站点不命中完整域名 token，复用证书；带标记的自有文件重跑幂等", () => {
+    expect(install().code).toBe(0);
+    const config = readFileSync(at(NGINX_OURS), "utf8");
+    expect(config).toContain(`server_name ${HOST};`);
+    expect(config).toContain("ssl_certificate     /etc/ssl/example/fullchain.pem;");
+    const modified = statSync(at(NGINX_OURS)).mtimeMs;
+    clearLog();
+    expect(install().code).toBe(0);
+    expect(statSync(at(NGINX_OURS)).mtimeMs).toBe(modified);
+    expect(log()).not.toMatch(/systemctl (reload|restart|daemon-reload)/);
   });
 
   test("健康检查失败：退出非 0 并打印服务日志尾部，不碰 nginx", () => {

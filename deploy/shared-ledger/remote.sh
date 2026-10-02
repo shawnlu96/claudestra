@@ -6,7 +6,6 @@
 # 本脚本写的文件第一行是 MARK；同名文件已存在而第一行不是 MARK 的（别人的文件）一律拒绝覆盖或删除。
 # SHARED_LEDGER_FS_PREFIX / SHARED_LEDGER_HEALTH_TRIES：只给测试用，把所有落盘路径挪到一个临时根下（单元 / nginx 里写的仍是真实路径）；设了它不要求 root。
 set -euo pipefail
-
 MARK="# managed-by: claudestra deploy/shared-ledger — 本文件由 deploy.sh 生成，手改会在下次部署被覆盖"
 P=${SHARED_LEDGER_FS_PREFIX:-}
 SVC=claudestra-shared-ledger
@@ -24,7 +23,6 @@ MIN_BUN=1.3.0
 BODY_LIMIT=1m
 # 与 src/shared-ledger/service.ts 的路由正则一致：只有 /v1/teams/<team>/<资源>[/<id>] 会被反代
 API_RE='^/v1/teams/[A-Za-z0-9_.:-]+/(features|commands|imports|projections)(/[A-Za-z0-9_.:-]+)?$'
-
 MODE=${1:-}; shift || true
 HOST_NAME="" PORT="" BUN="" CODE_CHANGED=0 DRY=0
 while [[ $# -gt 0 ]]; do
@@ -37,16 +35,13 @@ while [[ $# -gt 0 ]]; do
     *) echo "remote.sh: 未知参数 $1" >&2; exit 2 ;;
   esac
 done
-
 say() { echo "  $*"; }
 die() { echo "✗ $*" >&2; exit 1; }
 # 远端写操作一律经 act：--dry-run 只打印
 act() {
   if [[ $DRY == 1 ]]; then echo "  [dry-run] $*"; else echo "  + $*"; "$@"; fi
 }
-
 [[ -n $P || $EUID -eq 0 ]] || die "需要 root（deploy.sh 的 ssh 目标要是 root@<主机>）"
-
 # 文件归属：不是本脚本写的（首行不是 MARK）就拒绝动它
 is_ours() { [[ "$(head -n 1 "$P$1" 2>/dev/null)" == "$MARK" ]]; }
 guard_ours() {
@@ -54,7 +49,6 @@ guard_ours() {
     die "$1 已存在且不是本脚本写的（首行没有标记头），拒绝覆盖；先人工确认这个文件归谁"
   fi
 }
-
 # 把渲染好的内容 $2 装到 $1：内容相同返回 1（未变更），否则写入（0644）返回 0
 put_file() {
   local path=$1 content=$2
@@ -71,14 +65,12 @@ put_file() {
   fi
   return 0
 }
-
 ensure_dir() { # 路径 属主 权限
   local path=$1 owner=$2 mode=$3
   if [[ ! -d $P$path ]]; then act mkdir -p "$P$path"; act chown "$owner:$owner" "$P$path"; act chmod "$mode" "$P$path"; return; fi
   [[ "$(stat -c %a "$P$path" 2>/dev/null || stat -f %Lp "$P$path")" == "${mode#0}" ]] || act chmod "$mode" "$P$path"
   [[ -n $P || "$(stat -c %U "$path")" == "$owner" ]] || act chown "$owner:$owner" "$P$path"
 }
-
 hardening() { # 两个单元共用的加固；不加 MemoryDenyWriteExecute（会打断 bun 的 JIT）
   cat <<EOF
 NoNewPrivileges=true
@@ -102,7 +94,6 @@ AmbientCapabilities=
 UMask=0077
 EOF
 }
-
 render_unit() {
   cat <<EOF
 $MARK
@@ -218,32 +209,44 @@ $v6
 EOF
 }
 
-# 从 nginx -T 的完整配置（$1）里找已有 server 块（跳过本脚本的文件）：
-# - 已有 server 在 443 上监听且 server_name 精确等于域名 → 打印 "CONFLICT <文件>"：同 listener 同名，nginx 只告警 "conflicting server name … ignored"
-#   而 nginx -t 照过，请求会落到先加载的那个块（台账不可用或劫持已有站点），必须换一个没被占用的域名；
-# - 否则找证书：server_name 精确等于域名（只在非 443 块里才可能）优先，其次 *.<上级域>；打印 "<证书> <私钥>"。
+# 只排除路径和标记头都属于本脚本的配置；其余输出连注释也检查，
+# 避免 nginx 的合法单行/多指令布局绕过撞名检查。误拒比覆盖现有入口安全。
+detect_collision() {
+  printf '%s\n' "$1" | awk -v ours="$NGINX_FILE" -v mark="$MARK" -v host="$HOST_NAME" '
+    function check(    n, a, i) {
+      if (file == ours && header == mark) return
+      n = split(tolower(content), a, /[[:space:];{}]+/)
+      for (i = 1; i <= n; i++) if (a[i] == tolower(host)) { hit = 1; print (file == "" ? "<nginx -T>" : file); exit }
+    }
+    /^# configuration file / {
+      check(); file = $0; sub(/^# configuration file /, "", file); sub(/:$/, "", file)
+      content = ""; header = ""; first = 1; next
+    }
+    { if (first) { header = $0; first = 0 }; content = content $0 "\n" }
+    END { if (!hit) check() }'
+}
+
+# 证书探测保留现有通配站点复用逻辑；撞名判据独立于指令解析。
 detect_cert() {
   printf '%s\n' "$1" | awk -v ours="$NGINX_FILE" -v exact="$(tr '[:upper:]' '[:lower:]' <<< "$HOST_NAME")" -v wild="*.$(tr '[:upper:]' '[:lower:]' <<< "${HOST_NAME#*.}")" '
     /^# configuration file / { file = $4; sub(/:$/, "", file); depth = 0; inserver = 0; next }
     file == ours { next }
     { line = $0; sub(/#.*/, "", line); sub(/^[ \t]+/, "", line) }
-    !inserver && line ~ /^server[ \t]*\{/ { inserver = 1; start = depth; names = " "; cert = ""; key = ""; tls443 = 0 }
+    !inserver && line ~ /^server[ \t]*\{/ { inserver = 1; start = depth; names = " "; cert = ""; key = "" }
     inserver && line ~ /^server_name[ \t]/ { v = tolower(line); sub(/^server_name[ \t]+/, "", v); sub(/;.*/, "", v); gsub(/[ \t]+/, " ", v); names = names v " " }
-    inserver && line ~ /^listen[ \t]+([^ \t;]*:)?443([ \t;]|$)/ { tls443 = 1 }
     inserver && line ~ /^ssl_certificate[ \t]/ { split(line, a, /[ \t;]+/); cert = a[2] }
     inserver && line ~ /^ssl_certificate_key[ \t]/ { split(line, a, /[ \t;]+/); key = a[2] }
     {
       depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
       if (inserver && depth <= start) {
         inserver = 0
-        if (tls443 && index(names, " " exact " ") && conflict == "") conflict = file
         if (cert != "" && key != "") {
           if (index(names, " " exact " ") && best == "") best = cert " " key
           else if (index(names, " " wild " ") && second == "") second = cert " " key
         }
       }
     }
-    END { if (conflict != "") print "CONFLICT " conflict; else if (best != "") print best; else if (second != "") print second }'
+    END { if (best != "") print best; else if (second != "") print second }'
 }
 
 service_state() { systemctl is-active "$1" 2>/dev/null || true; }
@@ -268,11 +271,10 @@ health() {
 CERT="" KEY="" V6=0
 probe_nginx() {
   local conf found
-  conf=$(nginx -T 2>/dev/null) || die "nginx -T 失败"
+  conf=$(nginx -T 2>&1) || die "nginx -T 失败"
+  found=$(detect_collision "$conf")
+  [[ -z $found ]] || die "nginx 配置（$found）中出现完整域名 token $HOST_NAME；请换一个未被占用的 --host-name（注释中出现也保守拒绝）"
   found=$(detect_cert "$conf")
-  if [[ $found == CONFLICT\ * ]]; then
-    die "已有 server 块（${found#CONFLICT }）在 443 上用了 server_name $HOST_NAME；同 listener 同名会被 nginx 忽略其一（请求落到先加载的块，或劫持已有站点）。本脚本不改已有 server 块：请换一个未被占用的 --host-name（证书仍可从已有 *.${HOST_NAME#*.} 站点复用）"
-  fi
   [[ -n $found ]] || die "没在已有 nginx server 块里找到覆盖 $HOST_NAME 的证书（server_name 为 $HOST_NAME 或 *.${HOST_NAME#*.}）；本脚本不申请证书、不改 DNS"
   CERT=${found% *}; KEY=${found#* }
   [[ -r $P$CERT && -r $P$KEY ]] || die "探测到的证书文件不可读：$CERT / $KEY"
