@@ -57,7 +57,7 @@ const alarms = (p: Awaited<ReturnType<typeof pooled>>) => listEvents(p.f.db, { t
 
 describe("i28-GATE2 on the pool path", () => {
   test("gate refusal → one alarm event saying what the card waits for; the same refusal again adds no second alarm (acceptance 3)", async () => {
-    const p = await pooled(`规格：只改 src/lib/x.ts\n别处粘来的 ${randomBytes(20).toString("hex")}`);
+    const p = await pooled(`规格：只改 src/lib/x.ts\n别处粘来的 ${randomBytes(32).toString("hex")}`);
     try {
       const first = await p.tick();
       expect(first.detail).toContain("外发闸");
