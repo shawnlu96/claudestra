@@ -60,6 +60,17 @@ export const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize(
 export const sanitizeForeign = (s: string): string => redactForPeer(fold(s)).text;
 
 /**
+ * Free text going to a peer outside an order (lend relays, ledger-lend-relay.ts): refuse-first like the order gate, and an address /
+ * personal info that the order path would mask refuses too (a relay is pushed as is, never rewritten). null = may go.
+ */
+export function peerTextRefusal(s: string): string | null {
+  const folded = fold(s);
+  const rule = peerSecretHit(folded, null);
+  if (rule) return `疑似含密钥（${rule}）`;
+  return redactForPeer(folded).count > 0 ? "含内网地址 / 个人信息" : null;
+}
+
+/**
  * Gate for both peer exits. Head must equal the ledger's full SHA; free text can quote that exact whole value.
  * Ids have no head exemption and must reach the peer unchanged (a deliver cites them), so an address in one refuses too.
  */

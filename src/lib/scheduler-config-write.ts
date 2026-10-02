@@ -45,7 +45,7 @@ function detectIndent(raw: string): string | number {
 }
 
 /** The raw project object to edit (and the whole doc); throws LedgerError (invalid / not_found). */
-function projectOf(raw: string, project: string): { doc: Record<string, unknown>; p: Record<string, unknown>; remote: Record<string, unknown> | undefined } {
+export function projectOf(raw: string, project: string): { doc: Record<string, unknown>; p: Record<string, unknown>; remote: Record<string, unknown> | undefined } {
   let doc: unknown;
   try { doc = JSON.parse(raw); } catch (e) { throw new LedgerError("invalid", `scheduler.json 不是合法 JSON：${(e as Error).message}`); }
   if (!isObj(doc)) throw new LedgerError("invalid", "scheduler.json 顶层不是对象");
@@ -58,7 +58,7 @@ function projectOf(raw: string, project: string): { doc: Record<string, unknown>
 }
 
 /** Validate the whole edited doc, then serialize in the file's own indent; unchanged = the input text byte for byte. */
-function finish(raw: string, doc: Record<string, unknown>, changed: boolean): { text: string; pollMs: number } {
+export function finish(raw: string, doc: Record<string, unknown>, changed: boolean): { text: string; pollMs: number } {
   let pollMs: number;
   try { pollMs = parseSchedulerConfig(doc).pollMs; }
   catch (e) { throw new LedgerError("invalid", `${changed ? "改完" : "现在"}的 scheduler.json 过不了校验，没写：${(e as Error).message}`); }
@@ -163,7 +163,7 @@ function audit(db: Database, ctx: WriteCtx, path: string, lock: LockHandle, raw:
 }
 
 /** Check → lock → read → patch → write → audit. Every refusal leaves the file untouched (bytes and mtime). */
-async function writeProject<F, T>(db: Database, ctx: WriteCtx, w: Write<F, T>, opts: { path?: string; lockMs?: number }): Promise<WriteResult<F, T>> {
+export async function writeProject<F, T>(db: Database, ctx: WriteCtx, w: Write<F, T>, opts: { path?: string; lockMs?: number }): Promise<WriteResult<F, T>> {
   const path = opts.path ?? SCHEDULER_CONFIG_PATH;
   if (!actorMayConfigure(db, ctx.actor, w.project)) {
     throw new LedgerError("forbidden", `${w.what}要项目 ${w.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
