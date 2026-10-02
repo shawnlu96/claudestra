@@ -20,18 +20,18 @@ const lines = (n: number, fill = "x;") => `${Array.from({ length: n }, () => fil
 const none = new Set<string>();
 
 describe("size", () => {
-  test("代码 400 / tests 600 / 数据文件 1000 的默认上限", () => {
+  test("代码 800 / tests 600 / 数据文件 1000 的默认上限", () => {
     const r = measureSize(
       files({
-        "src/a.ts": lines(401),
-        "src/ok.ts": lines(400),
+        "src/a.ts": lines(801),
+        "src/ok.ts": lines(800),
         "tests/a.test.ts": lines(600),
         "tests/b.test.ts": lines(601),
         "web/lib/i18n-dict.ts": lines(999),
       }),
       new Map(),
     );
-    expect(r.counts["size:src/a.ts"]).toBe(401);
+    expect(r.counts["size:src/a.ts"]).toBe(801);
     expect(r.counts["size:src/ok.ts"]).toBeUndefined();
     expect(r.counts["size:tests/a.test.ts"]).toBeUndefined();
     expect(r.counts["size:tests/b.test.ts"]).toBe(601);
@@ -324,7 +324,7 @@ describe("dead（knip 输出解析）", () => {
 describe("棘轮语义", () => {
   test("check：超 baseline 失败；没有条目的按默认上限；低于 baseline 只提示可收紧", () => {
     const limits = { "size:src/big.ts": 500, "dup:total": 10 };
-    const v = compare(limits, { "size:src/big.ts": 501, "size:src/new.ts": 401, "dup:total": 9 }, none);
+    const v = compare(limits, { "size:src/big.ts": 501, "size:src/new.ts": 801, "dup:total": 9 }, none);
     expect(v.failures.map((f) => f.key)).toEqual(["size:src/big.ts", "size:src/new.ts"]);
     expect(v.tightenable.map((f) => f.key)).toEqual(["dup:total"]);
   });
@@ -335,9 +335,9 @@ describe("棘轮语义", () => {
   });
 
   test("--update 只收紧：取 min、降到上限内删除、永不新增", () => {
-    const limits = { "size:src/big.ts": 500, "size:src/shrunk.ts": 450, "dup:total": 10, "deps:a -> b": 1 };
-    const cur = { "size:src/big.ts": 520, "size:src/shrunk.ts": 390, "dup:total": 7, "size:src/new.ts": 900 };
-    expect(tighten(limits, cur, none)).toEqual({ "dup:total": 7, "size:src/big.ts": 500 });
+    const limits = { "size:src/big.ts": 900, "size:src/shrunk.ts": 850, "dup:total": 10, "deps:a -> b": 1 };
+    const cur = { "size:src/big.ts": 920, "size:src/shrunk.ts": 790, "dup:total": 7, "size:src/new.ts": 1000 };
+    expect(tighten(limits, cur, none)).toEqual({ "dup:total": 7, "size:src/big.ts": 900 });
   });
 
   test("--update 不动被跳过规则的条目", () => {
@@ -375,12 +375,12 @@ describe("棘轮语义", () => {
   });
 
   test("--init：只记超上限的项，被跳过规则沿用旧条目；loosenings 列出变大的项", () => {
-    const limits = initLimits({ "size:src/a.ts": 380, "size:src/b.ts": 700, "dup:total": 3 }, { "dead:x#y": 1 }, new Set(["dead"]));
-    expect(limits).toEqual({ "dead:x#y": 1, "dup:total": 3, "size:src/b.ts": 700 });
-    expect(loosenings({ "size:src/b.ts": 650 }, limits)).toEqual([
+    const limits = initLimits({ "size:src/a.ts": 780, "size:src/b.ts": 900, "dup:total": 3 }, { "dead:x#y": 1 }, new Set(["dead"]));
+    expect(limits).toEqual({ "dead:x#y": 1, "dup:total": 3, "size:src/b.ts": 900 });
+    expect(loosenings({ "size:src/b.ts": 850 }, limits)).toEqual([
       { key: "dead:x#y", from: 0, to: 1, why: "" },
       { key: "dup:total", from: 0, to: 3, why: "" },
-      { key: "size:src/b.ts", from: 650, to: 700, why: "" },
+      { key: "size:src/b.ts", from: 850, to: 900, why: "" },
     ]);
   });
 
@@ -441,12 +441,12 @@ describe("explain（失败时指出新违规在哪个文件）", () => {
     const out = explainChanged(
       [
         { file: "src/old.ts", cur: `${base}try { b(); } catch {}\n`, base },
-        { file: "src/new.ts", cur: lines(410), base: null },
+        { file: "src/new.ts", cur: lines(810), base: null },
         { file: "src/same.ts", cur: base, base },
       ],
       new Set(["catch", "size"]),
       null,
     );
-    expect(out).toEqual(["src/old.ts: catch:empty-block 0 → 1", "src/new.ts: size 新文件 → 410"]);
+    expect(out).toEqual(["src/old.ts: catch:empty-block 0 → 1", "src/new.ts: size 新文件 → 810"]);
   });
 });

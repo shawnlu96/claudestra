@@ -3,7 +3,7 @@
  * 在测试进程的 STATE_DIR 里放好 peer 记录、peer token、lend.json 与 journal，经真 serveApiRequest（真鉴权：验签 + 钉钥 + E2E 上下文）打这条路由，
  * 成功路径真起 `manager lend inbox` 子进程。非 peer、invite、非 E2E、没签名 → 401 且 CLI 一次都没起（journal 里没有行）；成功回包恰好四个字段。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,10 @@ import { TICK_KEY } from "../src/lib/lend-inbox.ts";
 import { getOrder, LEND_JOURNAL_PATH, openLendJournal, setMeta } from "../src/lib/lend-journal.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
 import { newTokenPrincipal, updatePrincipals, type Principal } from "../src/lib/principals.ts";
+import { isolatedStateSuite } from "./isolated-state.ts";
+
+// 路由内部读默认 journal / peers / principals，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { afterAll, beforeAll, describe, test } = isolatedStateSuite(import.meta.path);
 
 const PEER = "w3mate";
 const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH,

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,10 @@ import { remoteOrder } from "../src/lib/fix-strategy-remote-order.js";
 import { writeLendDeliver } from "../src/lib/ledger-lend-result.js";
 import type { DeliverRequest } from "../src/lib/lend-wire.js";
 import { testChildEnv } from "./test-env.js";
+import { isolatedStateSuite } from "./isolated-state.js";
+
+// pushWork 只读默认 journal 核绑定，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { test } = isolatedStateSuite(import.meta.path);
 
 function git(cwd: string, args: string[], env: Record<string, string>): string {
   const result = Bun.spawnSync(["git", ...args], { cwd, env: testChildEnv(env), stdout: "pipe", stderr: "pipe" });
@@ -63,7 +67,10 @@ test("real git custom-branch clone and fast-forward push require journal binding
     expect(git(repo, ["rev-parse", branch], env)).toBe(fixed);
     expect(await pushWork(target, { root: lend, env })).toEqual({ ok: true });
 
-  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    db.run("DELETE FROM lend_orders WHERE orderId = ?", [orderId]);
+    db.close(); rmSync(root, { recursive: true, force: true });
+  }
 });
 
 for (const invalid of ["branch", "ended-lease", "old-proto", "lease-changes-during-head-check"] as const) {
