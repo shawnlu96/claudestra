@@ -1,3 +1,4 @@
+import { poolSnapshotSlots } from "./scheduler-agent-pool-snapshot.js";
 /**
  * Ledger → PlannerSnapshot. For an observe card the scheduler owns no intents or sessions, so its own facts are
  * replaced by what PM actually recorded before the fact: the step executors (with the registry's real session) are the
@@ -90,7 +91,7 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
   const reviewer = bound.reviewer ?? (reviewStep?.executorKind === "agent" ? localRef(opts, task.id, reviewStep.executor) : null);
   const shadow = shadowReviews(task, events, bound.reviewer, opts);
   const real = db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY eventSeq").all(task.id) as SchedulerIntent[];
-  const slots = slotFacts(db, task, events, opts.maxWorkers);
+  const slots = opts.pool?.remote.agents ? poolSnapshotSlots(db, task, opts.pool.remote.agents) : slotFacts(db, task, events, opts.maxWorkers);
   const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
   const digest = typeof task.extra.screenshotsDigest === "string" ? task.extra.screenshotsDigest : null;
   return {

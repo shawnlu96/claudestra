@@ -267,7 +267,7 @@ describe("merge-bounced remote writes (i28-W9b)", () => {
         expect(fix.wire.findings).toEqual([]);
         expect(fix.text).not.toContain("missing-pass.md");
         expect(fix.text).not.toContain("上一轮审查报告");
-        expect(fix.text).toContain(cause === "conflict" ? "合入最新 origin/main" : bounce.checks[0]!.link);
+        expect(fix.text).toContain(cause === "conflict" ? "核对基线后合入 refs/remotes/origin/HEAD" : bounce.checks[0]!.link);
         const claimed = await p.lendCall("lend-claim", "mate", { v: 1, orderId: fix.orderId, worker: "fixer" });
         expect(claimed).toMatchObject({ ok: true, order: fix.wire, text: fix.text });
       } finally { p.f.close(); }

@@ -21,6 +21,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { LEND_LIVE } from "./ledger-lend-schema.js";
 import { tx } from "./ledger-tx.js";
 import { sanitizeForeign } from "./order-wire-render.js";
+import { convergenceCancelled } from "./lend-reclaim-scheduler-ack.js";
 
 export interface LendPeer { peer: string; fp: string | null; proto: number; boot: string; seq: number; grant: Grant | null; slots: Slots; paused: Paused | null; helloAt: number }
 
@@ -108,6 +109,7 @@ const VERDICT_OF: Partial<Record<LendOrder["status"], BeatAnswer["verdict"]>> = 
 function heldOrder(db: Database, peer: string, b: Pick<BeatOrder, "orderId" | "gen">, now: number): LendOrder | BeatAnswer["verdict"] {
   const o = getLendOrder(db, b.orderId);
   if (!o || o.peer !== peer || !o.worker) return "not_found";
+  if (convergenceCancelled(db, peer, b.orderId, b.gen)) return "convergence_cancelled";
   if (o.status !== "claimed") return VERDICT_OF[o.status] ?? "not_found";
   if ((o.leaseUntil ?? 0) < now) return "lease_expired";
   return o.leaseGen === b.gen ? o : "stale_gen";

@@ -11,6 +11,7 @@ import { isBaseBranch, LEND_BRANCH_RE } from "./lend-git.js";
 import { parseOrderWire, type OrderWire } from "./order-wire.js";
 import { createHash } from "node:crypto";
 import { parseV2Response, type LendV2Endpoint } from "./lend-wire-v2.js";
+import { claimBranch } from "./lend-arbiter-wire.js";
 
 const LEND_WIRE_V = 1;
 const V2_OPS: readonly string[] = ["hello", "beat", "ask"] satisfies LendV2Endpoint[];
@@ -92,7 +93,7 @@ const PARSE = {
     const sum = str(o.sha256, HEX64, "sha256").toLowerCase();
     if (sha256(text) !== sum) bad("派单全文的 sha256 对不上");
     const w = has ? obj(o.write, ["branch", "base"], "write") : null;
-    const write = w ? { branch: str(w.branch, LEND_BRANCH_RE, "write.branch"), base: str(w.base, BASE, "write.base") } : null;
+    const write = w ? { branch: claimBranch(order, w.branch, (v) => str(v, LEND_BRANCH_RE, "write.branch")), base: str(w.base, BASE, "write.base") } : null;
     if (write && !isBaseBranch(write.base)) bad("write.base 不是能用的分支名");
     return { order: (order as { ok: true; value: OrderWire }).value, text, sha256: sum, lease: lease(o.lease), write };
   },

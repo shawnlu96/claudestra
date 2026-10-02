@@ -88,7 +88,7 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
           const r = await git(dir, ["remote", "get-url", "origin"]);
           return r.ok ? r.out.match(/github\.com[:/]([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}?)(?:\.git)?$/)?.[1] ?? null : null;
         },
-      }, q),
+      }, q, true),
       template: () => (existsSync(execTemplate) ? readFileSync(execTemplate, "utf8") : null),
     }),
     stepIO: () => ({

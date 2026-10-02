@@ -7,7 +7,7 @@ import { getIntent } from "./ledger-scheduler.js";
 import { LedgerError, getEventByDedup, listEvents } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { convergenceEvent } from "./fix-strategy-lifecycle.js";
-import { convergenceIntent, fixSwapStep } from "./fix-strategy-runtime.js";
+import { convergenceIntent, fixSwapStep, zeroSlotLifecycle } from "./fix-strategy-runtime.js";
 import { arbiterStep, recordArbitration } from "./review-arbiter-runtime.js";
 
 interface CommandContext {
@@ -29,9 +29,9 @@ export const convergenceCommands = {
     valued: ["max-workers"], bools: [], usage: "scheduler-convergence <intent> --max-workers N",
     async run(c: CommandContext) {
       const id = c.p.pos[1] ?? "", intent = getIntent(c.db, id);
-      if (intent?.action === "fix_swap") return fixSwapStep(c.db, c.ctx(), id);
+      if (intent?.action === "fix_swap") return fixSwapStep(c.db, c.ctx(), id, zeroSlotLifecycle(c.db, c.p.flags["max-workers"]));
       const max = Number(c.need("max-workers"));
-      if (!Number.isInteger(max) || max < 1 || max > 32) throw new LedgerError("invalid", "仲裁槽需在 1–32");
+      if (!Number.isInteger(max) || max < 0 || max > 32) throw new LedgerError("invalid", "仲裁槽需在 0–32");
       return arbiterStep(c.db, c.ctx(), id, max);
     },
   },
