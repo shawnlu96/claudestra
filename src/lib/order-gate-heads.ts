@@ -6,8 +6,8 @@
  * - a findingId the gate would refuse (a sensitive word, a token or address shape) goes out as an alias F1, F2…; the alias map is
  *   kept on this machine keyed by order id, and a verdict citing the alias is mapped back before it reaches the ledger.
  * - (i28-GATE3) any other whole 40-char lowercase hex in inputs (a commit SHA a report quoted, e.g. the base) also goes out as its
- *   12-char prefix, with a note counting how many were cut. Not on a line naming a secret (credential, token…), not inside a path
- *   or file name, not mixed case, not 64 long: those still reach the gate unchanged and refuse as before.
+ *   12-char prefix, with a note counting how many were cut. Not inside a path or file name, not mixed case, not 64 long; and a text
+ *   where a SHA is part of what the gate would read as a secret (see shortenShas) is not cut at all: it refuses as before.
  * A refused order on the scheduler's pool path is recorded once per card + reason (recordGateRefused) instead of the card stalling silently.
  * tests/order-gate-heads.test.ts.
  */
@@ -18,7 +18,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { OrderWire } from "./order-wire.js";
-import { OrderRenderError, sanitizeForeign } from "./order-wire-render.js";
+import { fold, OrderRenderError, sanitizeForeign } from "./order-wire-render.js";
 import { peerSecretHit } from "./peer-secret-gate.js";
 
 const FULL = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -50,21 +50,35 @@ export const shortenHeads = (text: string, heads: ReadonlySet<string>): string =
 const COMMIT_SHA = /(?<![\w/\\-])(?<!(?<!\.)\.)[0-9a-f]{40}(?![\w/\\-]|\.\w)/g;
 
 /**
- * A line naming a secret (PM 定 10-03 03:11): a 40-hex there may be an old-style access token, so it is not cut and the gate
- * judges it. Plain substring match, case-insensitive (`author` counts as `auth`: refusal first); covers `name=value` / `name: value`.
+ * A line naming a secret: a 40-hex there may be an old-style access token, so it is not cut and the gate judges it. Plain substring
+ * match, case-insensitive (`author` counts as `auth`: refusal first); covers `name=value` / `name: value`.
  */
-const SECRET_WORD = /credential|secret|token|passw(?:or)?d|api[\s_-]?key|auth|bearer|private[\s_-]?key/i;
+const SECRET_WORD = /credential|secret|token|passw(?:or)?d|api[\s_-]*key|auth|bearer|private[\s_-]*key/i;
+
+/** Private-use, so neither NFKC nor the gate's folding touches it; stands for one cut SHA when checking what the gate would see. */
+const MARK = "\uE000";
+/** The hex the gate would join onto a cut SHA once whitespace is removed; 8+ chars (the gate's own joinable fragment size) refuse. */
+const HEX_AROUND = new RegExp(`([0-9a-f]*)(${MARK}+)([0-9a-f]*)`, "gi");
+/** Same letter / digit shape as the SHA but not hex: the gate's other rules (prefix, field name, random) see the same text. */
+const unhex = (m: string): string => m.replace(/[a-fA-F]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 16));
 
 /**
- * Card heads (GATE2), then commit-shaped SHAs on lines without a secret word → 12-char prefixes; `cut` counts both. Any other
- * hex stays for the gate.
+ * Card heads (GATE2), then commit-shaped SHAs → 12-char prefixes; `cut` counts both. Judged on the gate's folded view (NFKC,
+ * zero-width dropped, blanks joined): if a SHA sits on a line naming a secret, touches a word char, joins 8+ hex (or another SHA)
+ * once whitespace is removed, or the text with the SHAs made non-hex would still trip the gate (`sk- ` / `ghp_` before it, a field
+ * name…), nothing in this text is cut and the gate gets it unchanged. Any other hex stays for the gate.
  */
-export function shortenShas(text: string, heads: ReadonlySet<string>): { text: string; cut: number } {
+export function shortenShas(text: string, heads: ReadonlySet<string>, ledgerHead: string | null = null): { text: string; cut: number } {
   let cut = 0;
-  const short = (m: string) => { cut++; return m.slice(0, 12); };
-  const out = text.replace(HEAD_RUN, (m) => (heads.has(m.toLowerCase()) ? short(m) : m))
-    .split("\n").map((line) => (SECRET_WORD.test(line) ? line : line.replace(COMMIT_SHA, short))).join("\n");
-  return { text: out, cut };
+  const each = (rep: (m: string) => string) => text.replace(HEAD_RUN, (m) => (heads.has(m.toLowerCase()) ? rep(m) : m)).replace(COMMIT_SHA, rep);
+  const out = each((m) => { cut++; return m.slice(0, 12); });
+  if (!cut) return { text, cut };
+  const marked = fold(each(() => MARK));
+  const unsafe = marked.split("\n").some((line) => line.includes(MARK) && SECRET_WORD.test(line))
+    || new RegExp(`[\\w-]${MARK}|${MARK}[\\w-]`).test(marked)
+    || [...marked.replace(/\s+/g, "").matchAll(HEX_AROUND)].some(([, l, m, r]) => m!.length > 1 || l!.length >= 8 || r!.length >= 8)
+    || peerSecretHit(fold(each(unhex)), ledgerHead) !== null;
+  return unsafe ? { text, cut: 0 } : { text: out, cut };
 }
 
 /** The gate refuses an id that masking would change or that reads as a secret (order-wire-render.ts gatePeer). */
@@ -96,7 +110,7 @@ export function forPeer<M extends { wire: OrderWire; whole?: OrderWire }>(db: Da
   const heads = cardHeads(db, task);
   const one = (w: OrderWire) => {
     const a = aliasFindings(w.findings);
-    const cuts = w.inputs.map((s) => shortenShas(s, heads));
+    const cuts = w.inputs.map((s) => shortenShas(s, heads, w.head));
     return { wire: { ...w, inputs: cuts.map((c) => c.text), findings: a.findings }, aliases: a.aliases, cut: cuts.reduce((n, c) => n + c.cut, 0) };
   };
   const out = one(made.wire);

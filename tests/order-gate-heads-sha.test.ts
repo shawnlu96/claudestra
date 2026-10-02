@@ -1,8 +1,8 @@
 /**
  * i28-GATE3: a peer order also cuts any whole 40-char lowercase commit SHA in its inputs (not only this card's heads) to 12 chars
  * before the unchanged T87 gate, and notes how many it cut; the local report file is untouched; real secret shapes, 64-hex,
- * mixed case, UUIDs, short SHAs, hex in paths and any 40-hex on a line naming a secret (PM 定 10-03 03:11) are left alone (so
- * secrets still refuse). SHAs are random per run.
+ * mixed case, UUIDs, short SHAs, hex in paths and any 40-hex on a line naming a secret are left alone (so secrets still refuse);
+ * a text where a SHA is part of what the gate reads as a secret (after its folding) is not cut at all. SHAs are random per run.
  */
 import type { Database } from "bun:sqlite";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -76,7 +76,7 @@ describe("shortenShas", () => {
   });
 });
 
-describe("secret words on the line (PM 定 10-03 03:11)", () => {
+describe("secret words on the line", () => {
   test("① a 40-hex on a head / commit / SHA line without a secret word → 12 chars", () => {
     const a = sha();
     for (const line of [`head ${a}`, `commit ${a}`, `SHA: ${a}`, `base=${a}`, `修复提交 ${a} 未覆盖`]) {
@@ -92,9 +92,9 @@ describe("secret words on the line (PM 定 10-03 03:11)", () => {
       expect(shortenShas(line, new Set())).toEqual({ text: line, cut: 0 });
       expect(peerSecretHit(line)).not.toBeNull();
     }
-    // Only that line is held back; a commit SHA on the next line is still cut.
+    // A text the gate refuses anyway is handed over whole: the commit SHA on the next line is not cut either.
     const b = sha();
-    expect(shortenShas(`token: ${a}\ncommit ${b}`, new Set())).toEqual({ text: `token: ${a}\ncommit ${b.slice(0, 12)}`, cut: 1 });
+    expect(shortenShas(`token: ${a}\ncommit ${b}`, new Set())).toEqual({ text: `token: ${a}\ncommit ${b}`, cut: 0 });
   });
 });
 
@@ -135,6 +135,27 @@ describe("peer orders", () => {
     }
     expect(listLendOrders(db, "T1")).toEqual([]);
     expect(cutNotes()).toEqual([]);
+  });
+
+  test("复现测试 (gate-context-1): a SHA the gate reads as part of a secret after its folding is not cut, so the order still refuses", () => {
+    const h = "0123456789abcdef".repeat(2) + "01234567"; // fixture, not a real SHA; this card's head is a different random value
+    const reports = [`sk- ${h}`, `ghp_\n${h}`, `${h}\n${"89abcdef".repeat(2)}`, `cred\u200bential ${h}`, `api key   ${h}`, `ＡＰＩ key ${h}`,
+      `x\u200b${h}`, `${h}\n${sha()}`];
+    for (const report of reports) {
+      // The gate refused these before the cut existed; the round-1 head cut each SHA to 12 chars first and they went out pooled.
+      expect(peerSecretHit(shortenHeads(report, new Set([H])).normalize("NFKC").replace(/\u200b/g, ""))).not.toBeNull();
+      expect(shortenShas(report, new Set([H]), H)).toEqual({ text: report, cut: 0 });
+      expect(refusal(`# Review\n${report}`).message).toContain(REFUSED);
+    }
+    expect(listLendOrders(db, "T1")).toEqual([]);
+    expect(cutNotes()).toEqual([]);
+  });
+
+  test("a SHA next to short words or punctuation across blanks is still cut (only 8+ joined hex or a word char touching it holds it back)", () => {
+    const a = sha();
+    for (const line of [`head\n${a}`, `added in ${a} . fade`, `→ ${a} ←`, `a: ${a}\n- b`]) {
+      expect(shortenShas(line, new Set(), H)).toEqual({ text: line.replace(a, a.slice(0, 12)), cut: 1 });
+    }
   });
 
   test("acceptance 3: a foreign 40-hex inside a path is not cut, so it still refuses", () => {
