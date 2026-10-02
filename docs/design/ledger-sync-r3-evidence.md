@@ -1,5 +1,7 @@
 # 台账同步第3轮验证证据
 
+历史记录：hlc_probe 中手写构造的 received/later 不作为当前界内因果证明；当前收发/边界验证见 [第4轮证据](ledger-sync-r4-evidence.md)。
+
 复现测试：hlc-bound、authority-marker、event-class-ambiguity、authority-operation-sequence。
 这是读取设计契约后执行的合成参考模型，使用内存 SQLite；不是生产实现测试。
 用 `--expect red` 在修订前运行，三项新反例必须违反不变量；已在第2轮修正的权威切模式语义应保持 GREEN。

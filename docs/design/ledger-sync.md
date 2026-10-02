@@ -63,8 +63,14 @@
   合法且在界内的漂移条目仍按标准算法推进 HLC（不改 OS 墙钟），观察后的新写严格大于它，保持后写覆盖。
   来源分配 dot 前也核本地候选时间；离线参照最近认证中心时间加同一 boot 的单调经过时间，不直接信突然跳变的墙钟。
   跨 boot 失去可靠时间锚时，编辑先保存为未编号草稿，重连校时后再提交；不能假装这些草稿已经 LWW 生效。
-  逻辑计数溢出时候选 physical 加 1、logical 归零，再核上界；超过安全上界或 48 位耗尽，拒写并告警，不回绕。
-  此拒绝发生在分配序号前，不制造新缺口；正常源的计数压力不会使其他源时钟被拉到位宽极限。
+  收和发共用标准 HLC 候选计算：先取 local/remote/可信 now 的最大 physical，再按相等分支算 logical；
+  logical 超 65535 时向 physical 进位并归零。若候选只超出当前时间上界，而未超位宽安全上界，进入 clock-pending，
+  不拒收已合法 admission、不告误警、不提交候选时钟，也不把待收内容物化为已观察值。
+  暂缓新的 HLC/dot 分配，待可信单调时间走到 `candidatePhysical-60000` 后重新计算并原子提交，严格大于 remote；
+  不能忙等，借现有事件循环定时重试。延期接收先持久化合法日志与待观察队列，传输进度和物化进度仍分开。
+  在 `centerNow+60000, logical=65535` 边界，接收/发送进位均延期至少 1ms，再用同一收发算法重试；不直接赋值造后写时间。
+  若候选超过不随时间增长的位宽安全上界，或可信时间锚失效，则拒绝分配/保持隔离并告警，不能无限等或回绕。
+  收发的硬上界耗尽处理不改变此前合法日志；时间上界延期也不提前分配 seq，因此不制造新缺口。
   HLC 不用于租约/授权过期，仍由中心墙钟及 epoch 判定。全序 = `(hlc, origin, streamSeq)`。
 - **版本向量**：`{project → stream → origin → 已连续持久化的最大 streamSeq}`；只交换获授权项目的向量。
   向量只能由本机已收到的连续条目或已验证快照推进，不能直接复制响应里的中心高水位。重复 dot 幂等。
@@ -177,7 +183,11 @@ ordered 继续保留原业务 key；拒绝业务 key 使用 merge 存储键的�
 来源 raw key 和 class 进入新增同步投影元数据；`toEvent`/导出展示 raw key，merge 的查询/去重走带 project/origin 的共享 helper。
 已迁移项目的业务 `getEventByDedup` 只查 ordered 原键，不能把 merge 记录当授权事件；
 未迁移 local 项目保持现有原键读法，但采用中心后不能再用历史 local 事件授予执行权。导入观察的读写改走 merge helper。
-SY1 在影子迁移事务生成命名空间键并保存旧 seq/dot 映射，核行数和索引后换表、重建 append-only triggers；
+SY1 只提供可调用的迁移函数及内存/影子库夹具：生成命名空间键、保存旧 seq/dot 映射、核行数/索引及重建触发器。
+真正的 `LEDGER_MIGRATIONS` 注册、schema 版本升级、`REQUIRED_COLUMNS` 接线由 SY7 在 ledger-store.ts 完成；
+SY1 不改 ledger-store.ts，也不声称函数已自动应用于运行库。SY0 契约先声明新增的 `syncClass/sourceDedupKey` 投影列，
+syncClass/sourceDedupKey 都是由已验证同步条目派生的不可变投影元数据，不是可由 PM 编辑的业务字段。
+列分类夹具兼容旧 schema 与升级后 schema；未知新列仍失败，不能以宽松忽略把迁移漏列藏掉。
 运行时不修改既有事件。不同来源同一 import hash 可各留一行；同来源同一 raw key 幂等，内容不一致报冲突。
 中心业务锁仍用原业务键，不能统一来源命名空间化而放松全局幂等。恢复 off 也不反向取消已采用的存储编码。
 
@@ -270,12 +280,27 @@ PM 在本机离线时执行 `stage T review→merge`（期望 `rev=9`、`from=re
 开关 `ledgerSync.mode = off | observe | on` 按项目设置，但**同步显示模式不决定执行权威**。
 另有中心持久化的 `authority=local|center` 与单调 authorityEpoch；一旦采用 center，本机任意模式都不能恢复本地定序权。
 本机把权威/epoch、项目身份和存储世代写入独立的 `<state-root>/ledger-authority/<project>.json`，不存进 ledger.sqlite。
+**存量首次升级 preflight（SY7）**：启用新检查前在升级锁内冻结旧写，生成库外 bootstrap-v1 journal 与存量项目清单。
+清单来自升级前受信任的本机项目注册/共享规划登记：明确 never-shared 的存量项目写 local 标记（项目身份、原库世代、初始化版本），
+明确已共享的项目保留已有 center 标记或在线核中心；归属不清的项目记 unknown，不因没有 marker 就推断 local。
+每个标记用 atomic JSON 写法落盘，全部项目都有 local/center/unknown 记录后，才提交库外 activation-complete 并启用检查。
+写 journal/标记失败或中途崩溃不提交 complete，新入口不运行；重试从 prepared 清单续作，已有 center 标记绝不覆盖成 local。
+因此明确从未共享的存量 local 项目不需要中心/网络，升级后阶段机照常；未完成 preflight 时不能宣称升级已可用。
+complete 一旦存在，不再走「存量首次初始化」；之后 marker 丢失仍是 unknown，不能靠重复启动或恢复旧 DB 触发 local 重建。
+采用中心时先把库外 journal/项目登记的 everCenter 置 true（单调不可清），再写 center marker，二者落盘后才允许中心解除冻结。
+本机 local 身份恢复必须同时核 complete journal、身份/世代、everCenter=false 及无 V2 共享登记；旧 bootstrap 清单不能单独证明仍是 local。
+everCenter=true 或任一记录丢失/矛盾时只能在线核中心，不能用显式初始化命令把已迁移项目改回 local。
+bootstrap journal 与 activation 标记同样在库外，ledger-backup 不包含；新建 local 项目由创建命令显式注册身份并原子写标记，
+也不把任意无标记数据库当作存量项目。已迁移项目/库外状态的恢复仍须在线核中心，不通过 bootstrap 降权。
+
 采用中心前先原子落盘 center 标记，再允许中心项目启用；本地入口启动/每次定序写都检查标记，不能只检查 mode。
-标记缺失、损坏、项目或恢复世代不匹配时 authority=unknown，定序写拒绝，必须在线核中心后重新落盘；不会默认 local。
-ledger-backup 的台账恢复不覆盖这个库外标记；恢复备份先冻结写并在线确认中心 epoch/重建视图后再开放命令。
+完成首次升级后，标记缺失、损坏、项目或恢复世代不匹配时 authority=unknown，定序写拒绝；已迁移项目须在线核中心恢复，
+明确 never-shared 项目由显式本机身份恢复流程核登记与世代，不要求一个不存在的中心。两者都不会因缺标记默认 local。
+ledger-backup 的台账恢复不覆盖这个库外标记；已迁移项目恢复备份先冻结写并在线确认中心 epoch/重建视图后再开放命令；
+未迁移 local 项目走本机备份身份/世代校验，不能因此修改任何 center 标记。
 恢复迁移前 ledger.sqlite 即使含 authority=local，也不能覆盖库外 center；离线只能读或排队，不授予本地执行权。
 若连库外状态一起恢复或是新装机器，必须重新在线核验，不能凭备份里的 local 标记开放写。
-首次独立 local 项目需要显式初始化身份，不能由缺标记自动推断；已迁移项目的数据库文件不带可用于重建 local 权威的凭证。
+首次独立 local 项目显式初始化身份，存量 local 项目通过上述受控 preflight 初始化，不能由缺标记自动推断；已迁移项目的数据库文件不带可用于重建 local 权威的凭证。
 
 
 1. **首次 off（尚未迁移，authority=local）**：现状，本地 feature 的本机库仍是权威，共享 feature 按 V2。
@@ -368,7 +393,7 @@ fileGlobs：
 - src/lib/ledger-sync-contract*.ts
 - tests/ledger-sync-contract*.test.ts
 
-验收线：条目 / HLC / 向量 / class / outbox / 拒绝码有类型和夹具；§2.2 字段与 §2.2.1 event op/幂等前缀分类表作为常量导出，并有测试逐列核对 27 张表的建表语句，新增列没有分类就测试失败。
+验收线：条目 / HLC / 向量 / class / outbox / 拒绝码有类型和夹具；§2.2 字段与 §2.2.1 event op/幂等前缀分类表作为常量导出，并有测试逐列核对 27 张表的建表语句，新增列没有分类就测试失败；预留 syncClass/sourceDedupKey 的旧/新 schema 夹具，SY7 接线后要求列实际存在。
 
 ### SY1 · 来源日志、HLC 与版本向量
 
@@ -378,7 +403,7 @@ fileGlobs：
 - src/lib/ledger-sync/log/**
 - tests/ledger-sync-log*.test.ts
 
-验收线：merge 存储去重键迁移后，两来源同 import hash 不撞 UNIQUE，业务锁原键仍唯一；各 `(project, stream, origin)` 的 streamSeq 连续、dot 幂等；HLC 发送和接收规则、校验中心时间+60秒与位宽安全上界、越界隔离且不推进 HLC；界内 HLC 严格推进，计数溢出先核界再分配 dot；向量差量对缺口只推进到连续处；`class=local` 不分配流序号，不出日志。
+验收线：提供迁移函数与影子库夹具，实跑后两来源同 import hash 不撞 UNIQUE、触发器仍只增；注册/升级版本/列检查属于 SY7；各 `(project, stream, origin)` 的 streamSeq 连续、dot 幂等；HLC 发送和接收规则、校验中心时间+60秒与位宽安全上界、越界隔离且不推进 HLC；界内 HLC 严格推进，收和发边界计数溢出进入延期队列，可信时间推进后重试，不误告警、不提前分配 dot；硬位宽耗尽拒写；向量差量对缺口只推进到连续处；`class=local` 不分配流序号，不出日志。
 
 ### SY2 · 物化规则
 
@@ -469,7 +494,9 @@ fileGlobs：
 - web/features/collab/shared/shared-view.tsx
 - tests/ledger-sync-wiring*.test.ts
 
-验收线：observe 模式只写影子库、出 `sync-diff`；on 模式写命令按 §2 分流；回退两档可用并有备份，采用 center 后所有模式定序仍走中心、旧本地执行入口拒绝、单机回退不降 authorityEpoch；库外 marker 缺失/损坏拒写、恢复迁移前备份离线仍拒本地定序；热文件里只加一行接入。ledger-tx/ledger-store 的存储/读取薄接入负责 canonical key 与来源范围，避免业务 SQL 误认 merge 为 claim。
+验收线：observe 模式只写影子库、出 `sync-diff`；on 模式写命令按 §2 分流；回退两档可用并有备份，采用 center 后所有模式定序仍走中心、旧本地执行入口拒绝、单机回退不降 authorityEpoch；首次升级先原子初始化存量 never-shared local 标记，断网阶段写照常；prepared 崩溃续作、complete 后丢 marker 拒写；
+迁移函数在 ledger-store 的 LEDGER_MIGRATIONS/schema 版本/REQUIRED_COLUMNS 接线后，生产入口方可应用；
+库外 center marker 缺失/损坏拒写、恢复迁移前备份离线仍拒本地定序；热文件里只加一行接入。ledger-tx/ledger-store 的存储/读取薄接入负责 canonical key 与来源范围，避免业务 SQL 误认 merge 为 claim。
 lib 接入逻辑放 `src/lib/ledger-sync/wiring/`，仅依赖 lib；上层组合放 `src/ledger-sync/wiring/`。
 lib 通过注入接口获得传输与通知，不导入 shared-ledger、bridge、manager 或上层 wiring；上层单向依赖 lib。
 仓库外 PM 规则由 PM 负责人在 SY5 命令验证完成后独立交付，交付前登记实际文件清单并与在跑卡检查冲突；
@@ -480,7 +507,7 @@ lib 通过注入接口获得传输与通知，不导入 shared-ledger、bridge�
 - SY1、SY2、SY3、SY4、SY5、SY8、SY9 彼此没有祖先关系，fileGlobs 两两不相交（下面的检查命令实测）；SY0 先行，SY6 依赖 SY1–SY4，SY7 汇合。
 - **和 V2 X 系列**：除 SY7 外，SY 卡的 fileGlobs 与 X0–X15 两两不相交。`src/shared-ledger/sync/**` 不在 X12 的文件清单里（X12 列的是 `src/shared-ledger/*.ts` 具体文件），也不在 X1–X6、X14 的子目录里。SY7 与 X12 共有 `src/manager/ledger.ts`、`src/lib/ledger-write.ts`、`src/shared-ledger/service.ts`、`src/bridge/local-api/shared-ledger.ts`、`web/features/collab/shared/shared-view.tsx`，所以 SY7 必须依赖 X12，排在它合并之后。
 - **和在跑卡（JN4、PJ1、X12S、PRJ1）**：这几张卡的 fileGlobs 不在本仓库里，本卡无法核对。规则如下：
-  1. SY0–SY6、SY8、SY9 只新建 `ledger-sync` 前缀的新文件，不改任何已有文件，和任何改已有文件的在跑卡都不会冲突。唯一可能撞上的是在跑卡也新建 `ledger-sync*` 前缀的文件；当前 tracked 文件为 0，PM 开工前按最新 DAG 跑下面的检查确认。
+  1. SY0–SY6、SY8、SY9 只新建 `ledger-sync` 前缀的新文件，不改任何已有文件；SY1 提供迁移函数，SY7 才注册到已有 ledger-store 并升级 schema，和任何改已有文件的在跑卡都不会冲突。唯一可能撞上的是在跑卡也新建 `ledger-sync*` 前缀的文件；当前 tracked 文件为 0，PM 开工前按最新 DAG 跑下面的检查确认。
   2. SY7 改热文件，开工前 PM 按最新 DAG 跑检查；与 PJ1、JN4、X12S 有交集就给 SY7 加对应依赖，排在它们之后。
   3. 本设计不阻塞 PJ1、X12S、PRJ1：它们按 V2 继续做；本稿对 V2 的改动（§4.1）通过 SY 节点落地，不要求它们改验收线。
 - **检查命令**（沿用 V2 附录的受限 glob 语法：只允许单个文件名前缀星号或目录尾 `/**`）：
@@ -604,7 +631,9 @@ git grep --no-index -nEI \
   "physicalReserveMs": 86400000,
   "markerOutsideLedger": true,
   "centerAuthoritySticky": true,
-  "mergeStorageKey": "namespaced"
+  "mergeStorageKey": "namespaced",
+  "bootstrapExistingLocal": true,
+  "hlcBoundaryAction": "defer"
 }
 ```
 
@@ -620,3 +649,19 @@ git grep --no-index -nEI \
   把路由突变成 observe/off 本地执行后同一测试红，说明能检出原反例。模型未替代未来 SY7 的实际状态机测试。
 
 第2轮证据保留当轮实际结果；其中「1 天漂移照收」模型与直接赋值的 rollback 绿灯不作为本轮通过依据，已由上述有界与操作序列模型替代。
+
+### 10.4 第4轮反例与模型范围
+
+复现测试：marker-bootstrap、hlc-edge、hlc-function-causality、bootstrap-restore。
+完整模型和确切结果见 [第4轮验证证据](ledger-sync-r4-evidence.md)，仍是设计参考模型，不是同步实现代码测试。
+
+- marker-bootstrap：旧首次升级无标记，never-shared local 项目阶段写被拒，红；新 preflight 提交 local 标记后离线写成功，绿。
+  complete 后删除 marker 再跑 preflight 不会重建 local；已有 center 标记不被覆盖，恢复旧 DB 仍不能本地执行。
+- hlc-edge：旧时间上界上的逻辑进位被拒/收路径未规定，红；新 receive/send 候选计算进位后延期，可信时间 +1ms 重试成功，绿。
+  等待时不改时钟、不物化、不分配 dot；硬位宽耗尽仍拒绝，不伪称所有拒写都能等待解决。
+- hlc-function-causality：旧契约标准 HLC 算法本来正确（绿），弱的是旧证据；新用同一 receive/send 函数验证 +30s 溢出及边界，绿。
+  把接收突变成忽略 remote 后相同因果断言红，说明证据能检出错误，而非手写构造后写更大的值。
+- bootstrap-restore：旧无首次初始化步骤导致恢复/升级流程不能完成，红；新 prepared 中禁止写、重试完成后 local 写正常且 center 保持拒绝，绿。
+
+SY1 迁移函数/夹具与 SY7 注册的归属已拆清，SY0 提前声明新列；未修改任一运行代码或生产状态。
+第3轮证据的 HLC 手写结果构造仅为历史记录，当前界内/边界证明以第4轮收发状态机为准。
