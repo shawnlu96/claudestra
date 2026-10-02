@@ -201,6 +201,7 @@ describe("deploy.sh 安装", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("代码未变");
     expect(r.out).not.toMatch(/^\s+\+ /m);
+    expect(r.out).toContain("HTTPS 入口自检");
     expect(files.map((f) => statSync(at(f)).mtimeMs)).toEqual(before);
     expect(log()).not.toMatch(/useradd|chown|daemon-reload|systemctl (start|restart|reload|enable)/);
   });
@@ -251,6 +252,57 @@ describe("deploy.sh 安装", () => {
     expect(r.code).not.toBe(0);
     expect(r.err).toContain("拒绝覆盖");
     expect(readFileSync(at(UNIT), "utf8")).toBe("[Service]\nExecStart=/bin/true\n");
+  });
+
+  test("HTTPS 入口自检失败后不修直接重跑：仍验入口、仍失败，不因 nginx 块未变就报成功", () => {
+    // curl 桩：回环 http 照常 401，经 https 的请求恒 404（入口没接到中心）
+    writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
+echo "curl $*" >> "$STUB_DIR/calls.log"
+out=/dev/null; url=; while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift;; -w|--max-time|--resolve) shift;; http*) url=$1;; esac; shift; done
+case $url in http://*"/v1/teams/"*) printf '{"code":"bad_signature"}' > "$out"; printf 401;; *) printf 404;; esac
+`);
+    const first = install();
+    expect(first.code).not.toBe(0);
+    expect(first.err).toContain("自检不符");
+    clearLog();
+    const second = install();
+    expect(second.code).not.toBe(0);
+    expect(second.err).toContain("自检不符");
+    expect(second.out).not.toContain("✓ 完成");
+    expect(log()).toContain(`https://${HOST}/v1/teams/healthcheck/features`);
+    expect(log()).not.toContain("systemctl reload nginx");
+  });
+
+  test("已有 443 server 块精确占用同名域名：写任何东西之前就拒绝，已有文件原样不动", () => {
+    const taken = `server {
+    listen 443 ssl;
+    server_name ${HOST};
+    ssl_certificate     /etc/ssl/example/fullchain.pem;
+    ssl_certificate_key /etc/ssl/example/key.pem;
+    location / { return 404; }
+}
+`;
+    writeFileSync(at("etc/nginx/conf.d/aaa-ledger.conf"), taken);
+    for (const extra of [["--dry-run"], []]) {
+      clearLog();
+      const r = install(...extra);
+      expect(r.code).not.toBe(0);
+      expect(r.err).toContain("/etc/nginx/conf.d/aaa-ledger.conf");
+      expect(r.err).toContain("未被占用");
+      expect(r.out).not.toContain("写入");
+      expect(existsSync(at(NGINX_OURS))).toBe(false);
+      expect(readdirSync(at("etc/systemd/system"))).toEqual([]);
+      expect(log()).not.toMatch(/useradd|systemctl (start|restart|reload|enable|daemon-reload)/);
+    }
+    expect(readFileSync(at("etc/nginx/conf.d/aaa-ledger.conf"), "utf8")).toBe(taken);
+    expect(readFileSync(at("etc/nginx/conf.d/example.conf"), "utf8")).toBe(EXISTING_SITE);
+  });
+
+  test("同名域名只在 80 端口的块里（如跳转站）不算冲突，证书仍从通配站点复用", () => {
+    writeFileSync(at("etc/nginx/conf.d/redirect.conf"), `server {\n    listen 80;\n    server_name ${HOST};\n    return 301 https://$host$request_uri;\n}\n`);
+    const r = install();
+    expect(r.code).toBe(0);
+    expect(readFileSync(at(NGINX_OURS), "utf8")).toContain("ssl_certificate     /etc/ssl/example/fullchain.pem;");
   });
 
   test("健康检查失败：退出非 0 并打印服务日志尾部，不碰 nginx", () => {

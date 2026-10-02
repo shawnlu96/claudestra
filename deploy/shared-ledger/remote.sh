@@ -218,27 +218,32 @@ $v6
 EOF
 }
 
-# 从 nginx -T 的完整配置（$1）里找已有 server 块的证书：server_name 精确等于域名优先，其次 *.<上级域>；跳过本脚本的文件
+# 从 nginx -T 的完整配置（$1）里找已有 server 块（跳过本脚本的文件）：
+# - 已有 server 在 443 上监听且 server_name 精确等于域名 → 打印 "CONFLICT <文件>"：同 listener 同名，nginx 只告警 "conflicting server name … ignored"
+#   而 nginx -t 照过，请求会落到先加载的那个块（台账不可用或劫持已有站点），必须换一个没被占用的域名；
+# - 否则找证书：server_name 精确等于域名（只在非 443 块里才可能）优先，其次 *.<上级域>；打印 "<证书> <私钥>"。
 detect_cert() {
-  printf '%s\n' "$1" | awk -v ours="$NGINX_FILE" -v exact="$HOST_NAME" -v wild="*.${HOST_NAME#*.}" '
+  printf '%s\n' "$1" | awk -v ours="$NGINX_FILE" -v exact="$(tr '[:upper:]' '[:lower:]' <<< "$HOST_NAME")" -v wild="*.$(tr '[:upper:]' '[:lower:]' <<< "${HOST_NAME#*.}")" '
     /^# configuration file / { file = $4; sub(/:$/, "", file); depth = 0; inserver = 0; next }
     file == ours { next }
     { line = $0; sub(/#.*/, "", line); sub(/^[ \t]+/, "", line) }
-    !inserver && line ~ /^server[ \t]*\{/ { inserver = 1; start = depth; names = " "; cert = ""; key = "" }
-    inserver && line ~ /^server_name[ \t]/ { v = line; sub(/^server_name[ \t]+/, "", v); sub(/;.*/, "", v); gsub(/[ \t]+/, " ", v); names = names v " " }
+    !inserver && line ~ /^server[ \t]*\{/ { inserver = 1; start = depth; names = " "; cert = ""; key = ""; tls443 = 0 }
+    inserver && line ~ /^server_name[ \t]/ { v = tolower(line); sub(/^server_name[ \t]+/, "", v); sub(/;.*/, "", v); gsub(/[ \t]+/, " ", v); names = names v " " }
+    inserver && line ~ /^listen[ \t]+([^ \t;]*:)?443([ \t;]|$)/ { tls443 = 1 }
     inserver && line ~ /^ssl_certificate[ \t]/ { split(line, a, /[ \t;]+/); cert = a[2] }
     inserver && line ~ /^ssl_certificate_key[ \t]/ { split(line, a, /[ \t;]+/); key = a[2] }
     {
       depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
       if (inserver && depth <= start) {
         inserver = 0
+        if (tls443 && index(names, " " exact " ") && conflict == "") conflict = file
         if (cert != "" && key != "") {
           if (index(names, " " exact " ") && best == "") best = cert " " key
           else if (index(names, " " wild " ") && second == "") second = cert " " key
         }
       }
     }
-    END { if (best != "") print best; else if (second != "") print second }'
+    END { if (conflict != "") print "CONFLICT " conflict; else if (best != "") print best; else if (second != "") print second }'
 }
 
 service_state() { systemctl is-active "$1" 2>/dev/null || true; }
@@ -259,29 +264,42 @@ health() {
   exit 1
 }
 
-install_nginx() {
-  local conf found cert key v6=0 rendered prev=""
-  guard_ours "$NGINX_FILE"
+# 只读：从现有 nginx 配置里探测要复用的证书、是否听 IPv6，并拒绝已被占用的域名。装单元 / 起服务之前就跑，冲突时远端什么都不写
+CERT="" KEY="" V6=0
+probe_nginx() {
+  local conf found
   conf=$(nginx -T 2>/dev/null) || die "nginx -T 失败"
   found=$(detect_cert "$conf")
+  if [[ $found == CONFLICT\ * ]]; then
+    die "已有 server 块（${found#CONFLICT }）在 443 上用了 server_name $HOST_NAME；同 listener 同名会被 nginx 忽略其一（请求落到先加载的块，或劫持已有站点）。本脚本不改已有 server 块：请换一个未被占用的 --host-name（证书仍可从已有 *.${HOST_NAME#*.} 站点复用）"
+  fi
   [[ -n $found ]] || die "没在已有 nginx server 块里找到覆盖 $HOST_NAME 的证书（server_name 为 $HOST_NAME 或 *.${HOST_NAME#*.}）；本脚本不申请证书、不改 DNS"
-  cert=${found% *}; key=${found#* }
-  [[ -r $P$cert && -r $P$key ]] || die "探测到的证书文件不可读：$cert / $key"
-  if command -v openssl >/dev/null && ! openssl x509 -noout -checkhost "$HOST_NAME" -in "$P$cert" | grep -q 'does match'; then
-    die "证书 $cert 不覆盖 $HOST_NAME"
+  CERT=${found% *}; KEY=${found#* }
+  [[ -r $P$CERT && -r $P$KEY ]] || die "探测到的证书文件不可读：$CERT / $KEY"
+  if command -v openssl >/dev/null && ! openssl x509 -noout -checkhost "$HOST_NAME" -in "$P$CERT" | grep -q 'does match'; then
+    die "证书 $CERT 不覆盖 $HOST_NAME"
   fi
-  say "复用证书：$cert"
-  [[ $conf =~ listen[[:space:]]+\[::\]:443 ]] && v6=1
-  rendered=$(render_nginx "$cert" "$key" "$v6")
+  [[ $conf =~ listen[[:space:]]+\[::\]:443 ]] && V6=1
+  say "复用证书：$CERT"
+}
+
+install_nginx() {
+  local rendered prev=""
+  guard_ours "$NGINX_FILE"
+  rendered=$(render_nginx "$CERT" "$KEY" "$V6")
   if [[ -f $P$NGINX_FILE ]]; then prev=$(cat "$P$NGINX_FILE"); fi
-  put_file "$NGINX_FILE" "$rendered" || return 0
-  [[ $DRY == 1 ]] && { echo "  [dry-run] nginx -t；通过则 systemctl reload nginx，失败则撤回本次写入"; return 0; }
-  if ! nginx -t; then
-    if [[ -n $prev ]]; then printf '%s\n' "$prev" > "$P$NGINX_FILE"; echo "  ↩ nginx -t 失败，已恢复 $NGINX_FILE 的上一版" >&2
-    else rm -f "$P$NGINX_FILE"; echo "  ↩ nginx -t 失败，已删除本次写入的 $NGINX_FILE" >&2; fi
-    die "nginx -t 未通过，未 reload"
+  if put_file "$NGINX_FILE" "$rendered"; then
+    [[ $DRY == 1 ]] && { echo "  [dry-run] nginx -t；通过则 systemctl reload nginx，失败则撤回本次写入"; return 0; }
+    if ! nginx -t; then
+      if [[ -n $prev ]]; then printf '%s\n' "$prev" > "$P$NGINX_FILE"; echo "  ↩ nginx -t 失败，已恢复 $NGINX_FILE 的上一版" >&2
+      else rm -f "$P$NGINX_FILE"; echo "  ↩ nginx -t 失败，已删除本次写入的 $NGINX_FILE" >&2; fi
+      die "nginx -t 未通过，未 reload"
+    fi
+    act systemctl reload nginx
+  elif [[ $DRY == 1 ]]; then
+    echo "  [dry-run] 经 https://$HOST_NAME 做入口自检（期望 API 401、其他 404）"; return 0
   fi
-  act systemctl reload nginx
+  # 块没变也照样验：幂等只省掉 reload，不能把上次失败的入口当成功（上次自检失败后不修就重跑，这里仍会失败）
   verify_https
 }
 
@@ -309,6 +327,8 @@ do_install() {
   say "bun $v @ $BUN"
   [[ -f $P$APP_DIR/src/shared-ledger.ts ]] || [[ $DRY == 1 ]] || die "$APP_DIR/src/shared-ledger.ts 不存在：代码没同步上来"
   nginx -t >/dev/null 2>&1 || die "现有 nginx 配置 nginx -t 就不通过；先修好现有配置，本脚本不在坏配置上叠加"
+  guard_ours "$NGINX_FILE"
+  probe_nginx
   if [[ $(service_state "$SVC") != active ]] && command -v ss >/dev/null && [[ -n $(ss -ltnH "sport = :$PORT" 2>/dev/null) ]]; then
     die "127.0.0.1:$PORT 已被别的进程占用；换 --port"
   fi

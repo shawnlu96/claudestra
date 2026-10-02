@@ -17,7 +17,8 @@ nginx 新增一个只反代台账 API 的 server 块，证书复用主机上已�
 - 远端（systemd 发行版，如 Ubuntu 22.04+）：`nginx`（`conf.d/*.conf` 已被 `http {}` include）、`rsync`、`curl`、`journalctl`；
   - **系统级 bun ≥ 1.3**，默认找 `/usr/local/bin/bun`（不能在 `/root`、`/home` 下：单元开了 `ProtectHome`）。没有就先装：
     `curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash`，或用 `--bun <路径>` 指向已有的。
-  - 已有 server 块的证书要覆盖新域名：`server_name` 精确等于 `<域名>`，或是 `*.<上级域>` 通配符；
+  - 已有 server 块的证书要覆盖新域名：通常是 `server_name` 含 `*.<上级域>` 的通配站点（也可以是只听 80 等非 443 端口、`server_name` 精确等于 `<域名>` 且带证书的块）；
+  - `<域名>` 不能已被已有的 443 server 块占用（`server_name` 精确等于它）：同 listener 同名时 nginx 只告警并忽略其一，请求会落到先加载的块。脚本在写任何东西之前就检查，冲突即退出，请换一个未被占用的域名；
   - 新域名的 DNS 已指向本机（本脚本不改 DNS）。
 
 ## 用法
@@ -26,7 +27,7 @@ nginx 新增一个只反代台账 API 的 server 块，证书复用主机上已�
 # 先看要做什么：只读远端（rsync -n、nginx -T），打印每一步与将写入的单元 / nginx 块
 deploy/shared-ledger/deploy.sh root@<主机> --host-name ledger.example.test --dry-run
 
-# 安装或升级（可重跑：代码和渲染结果都没变就不写文件、不 reload、不重启）
+# 安装或升级（可重跑：代码和渲染结果都没变就不写文件、不 reload、不重启；但每次都会经 https://<域名> 验一遍入口，入口不通就退出非 0）
 deploy/shared-ledger/deploy.sh root@<主机> --host-name ledger.example.test [--port 8797] [--bun /usr/local/bin/bun]
 
 # 主机上看
