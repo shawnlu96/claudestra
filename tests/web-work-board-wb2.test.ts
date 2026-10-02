@@ -4,7 +4,8 @@ import { chromium } from 'playwright-core';
 import { mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { WorkBoard, WorkRow } from '../web/features/collab/work/work-types';
-const out = '/Users/shawn/.claude-orchestrator/ledger/reviews/i28-WB2-shots';
+const out = process.env.WORK_BOARD_SHOTS_DIR;
+const enabled = process.env.WORK_BOARD_BROWSER === '1' && !!out;
 const row = (id: string): WorkRow => ({ taskId: id, featureId: null, nodeKey: null, title: '手动执行者推进协作任务',
   who: `agent-${id}`, machine: 'local', step: 'write', round: 1, since: 0, normalMinutes: 60, remainingMinutes: 90,
   overMinutes: 0, reason: null, code: null, estimate: '' });
@@ -14,8 +15,9 @@ const common = { now: 60000, asOfSeq: 1, availableSlots: 6, todo: { ready: [], b
 const before: WorkBoard = { ...common, working: old, waiting: workers.map(r => ({ ...r, code: 'manual', reason: '退回人工（manual）：PM 人工推进' })),
   machines: { local: 8 }, completionHours: 4 };
 const after: WorkBoard = { ...common, working: workers, waiting: [], machines: { local: 6 }, completionHours: 2,
-  legacy: old.map(r => ({ taskId: r.taskId!, title: r.title, stage: 'build' })) };
-test.skipIf(process.env.WORK_BOARD_BROWSER !== '1')('WB2 before/after 390/1400, legacy collapsed and interactive, task navigation', async () => {
+  legacyTotal: 8, legacy: old.map(r => ({ taskId: r.taskId!, title: r.title, stage: 'build' })) };
+test.skipIf(!enabled)('WB2 before/after 390/1400, legacy collapsed and interactive, task navigation', async () => {
+  if (!out) return;
   mkdirSync(out, { recursive: true });
   const fixture = resolve('web/features/collab/work/.wb2-shot.tsx');
   const oldView = resolve('web/features/collab/work/.wb2-before.tsx');

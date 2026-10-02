@@ -1,5 +1,5 @@
 /** A stale cached registry must not vouch for a manual worker after a failed read. */
-import { REGISTRY_PATH, readRegistryAgentsSync, type RegistryAgent } from './registry.js';
+import { REGISTRY_PATH, normalizeRegistryAgents, type RegistryAgent } from './registry.js';
 import { readJsonStateSync } from './state-file.js';
 export function workBoardRegistry(path = REGISTRY_PATH): readonly RegistryAgent[] {
   try {
@@ -8,9 +8,13 @@ export function workBoardRegistry(path = REGISTRY_PATH): readonly RegistryAgent[
       console.error('[work-board] registry unavailable', state.status === 'corrupt' ? state.error : 'missing');
       return [];
     }
-    return readRegistryAgentsSync(path);
+    return normalizeRegistryAgents(state.data);
   } catch (error) {
     console.error('[work-board] registry read failed', error);
     return [];
   }
+}
+
+export function workBoardWorkerAlive(agent: RegistryAgent): boolean {
+  return agent.status === 'active' || agent.status === 'creating';
 }

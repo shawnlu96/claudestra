@@ -7,6 +7,7 @@ import { workBoard } from '../src/lib/ledger-work-board.js';
 import { mkdtempSync, writeFileSync, unlinkSync, rmdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as stateFile from '../src/lib/state-file.js';
 import { workBoardRegistry } from '../src/lib/ledger-work-board-registry.js';
 import type { RegistryAgent } from '../src/lib/registry.js';
 let db: Database;
@@ -37,14 +38,21 @@ test('08:15 shape: eight frozen legacy cards and six manual local workers, with 
   expect(Buffer.byteLength(JSON.stringify(b))).toBeLessThan(30 * 1024);
   expect(db.query('SELECT total_changes() AS n').get()).toEqual(changes);
 });
-test('missing/dead workers wait; missing status is alive; manual does not imply fallback', () => {
+test('only active and creating workers are alive; stopped/dead/missing/unknown status do not occupy local slots', () => {
   card('missing'); registry = [];
-  card('dead', 'fix', true, 'dead'); card('alive', 'restate', true); registry.at(-1)!.status = undefined;
-  fallback('alive');
+  for (const status of ['stopped', 'dead', 'unknown', 'active', 'creating']) card(status, 'build', true, status);
+  card('unset'); registry.at(-1)!.status = undefined;
   const b = board();
-  expect(b.working.map(r => r.taskId)).toEqual(['alive']);
-  expect(b.waiting.map(r => r.reason)).toEqual(['执行者不在了', '执行者不在了']);
-  expect(b.waiting.every(r => r.code === 'executor_missing')).toBe(true);
+  expect(b.working.map(r => r.taskId).sort()).toEqual(['active', 'creating']);
+  for (const id of ['missing', 'stopped', 'dead', 'unknown', 'unset']) {
+    expect(b.working.some(r => r.taskId === id)).toBe(false);
+    expect(b.waiting.find(r => r.taskId === id)).toMatchObject({ code: 'executor_missing', reason: '执行者不在了' });
+  }
+  expect(b.machines).toEqual({ local: 2 });
+});
+test('a fallback event does not hide an active manual executor', () => {
+  card('alive', 'restate'); fallback('alive');
+  expect(board().working[0]?.taskId).toBe('alive');
 });
 test('only real fallback without a living worker says manual intervention', () => {
   card('fallback', 'build', true, 'dead'); fallback('fallback');
@@ -92,4 +100,29 @@ test('claimed legacy writers do not add machine capacity', () => {
     leaseMs,createdBy,createdAt,updatedAt) VALUES ('o','old','p','Sekai','codex','write',1,0,'h','a/b','{}','','s','claimed',1000,'owner',0,0)`).run();
   expect(workBoardSlots(db, 'p', 2, [], undefined, 60000)).toBe(2);
   expect(board().machines).toEqual({}); expect(board().completionHours).toBe(0);
+});
+
+test('150 legacy cards expose the first 50 sorted IDs and total while keeping the response below 30KB', () => {
+  for (let i = 149; i >= 0; i--) {
+    const id = `old-${String(i).padStart(3, '0')}`; card(id, 'spec', false);
+    db.query('UPDATE tasks SET title=? WHERE id=?').run('冻结老卡'.repeat(45), id);
+  }
+  card('worker');
+  const b = board();
+  expect(b.legacyTotal).toBe(150); expect(b.legacy).toHaveLength(50);
+  expect(b.legacy.map(r => r.taskId)).toEqual(Array.from({ length: 50 }, (_, i) => `old-${String(i).padStart(3, '0')}`));
+  expect(b.todo.ready).toEqual([]); expect(b.todo.blocked).toEqual([]);
+  expect(b.machines).toEqual({ local: 1 });
+  const bytes = Buffer.byteLength(JSON.stringify({ ok: true, ...b }));
+  console.log(`[work-board legacy scale] 150 cards / 50 returned: ${bytes} bytes`);
+  expect(bytes).toBeLessThanOrEqual(30 * 1024);
+});
+
+test('registry normalizes the one successfully read snapshot without reopening the file', () => {
+  const read = spyOn(stateFile, 'readJsonStateSync').mockReturnValue({ status: 'ok',
+    data: { agents: { 'agent-first': { status: 'active' } } } });
+  try {
+    expect(workBoardRegistry('fixture-registry').map(a => a.name)).toEqual(['agent-first']);
+    expect(read).toHaveBeenCalledTimes(1);
+  } finally { read.mockRestore(); }
 });

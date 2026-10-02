@@ -1,6 +1,6 @@
 /** Compact, read-only work projection. The caller owns the deferred transaction and supplies machine policy. */
 import type { RegistryAgent } from './registry.js';
-import { workBoardRegistry } from './ledger-work-board-registry.js';
+import { workBoardRegistry, workBoardWorkerAlive } from './ledger-work-board-registry.js';
 import type { Database } from 'bun:sqlite';
 import { boardContext, featureCard, hasFeatureSchema, type BoardCtx, type BoardNode } from './ledger-dag-board.js';
 import type { Feature } from './ledger-feature.js';
@@ -22,6 +22,7 @@ interface WorkRow {
 }
 export interface WorkBoard {
   now: number; asOfSeq: number; working: WorkRow[]; waiting: WorkRow[]; todo: { ready: WorkRow[]; blocked: WorkRow[] };
+  legacyTotal: number;
   legacy: { taskId: string; title: string; stage: string }[];
   machines: Record<string, number>; completionHours: number | null; availableSlots: number;
 }
@@ -81,7 +82,7 @@ function waiting(ctx: BoardCtx, task: LedgerTask, row: WorkRow, opts: WorkBoardO
   if (order?.status === 'claimed') return false;
   if (view.workflow?.mode === 'manual') {
     if (task.stage === 'review') return set('reviewer', '等审查员领单');
-    const alive = opts.manualRegistry?.some(a => a.name === task.agent && a.status !== 'dead');
+    const alive = opts.manualRegistry?.some(a => a.name === task.agent && workBoardWorkerAlive(a));
     const writing = ['restate', 'build', 'fix'].includes(task.stage) || row.step === 'restate';
     if (alive && writing) { row.who = task.agent; return false; }
     if (fallback && !alive) return set(/额度|quota/.test(manualReason) ? 'quota' : 'manual',
@@ -91,7 +92,7 @@ function waiting(ctx: BoardCtx, task: LedgerTask, row: WorkRow, opts: WorkBoardO
   if (view.workflow?.mode === 'auto') {
     const decision = planScheduler(autoSnapshot(ctx.db, task, opts));
     if (decision.kind === 'escalate') return set(decision.code,
-      fallback && !opts.manualRegistry?.some(a => a.name === task.agent && a.status !== 'dead') ?
+      fallback && !opts.manualRegistry?.some(a => a.name === task.agent && workBoardWorkerAlive(a)) ?
         `退回人工（${decision.code}）：${decision.reason}` : `等 PM：${decision.reason}`);
     if (decision.kind === 'wait' && !['in_flight', 'intent_in_flight', 'terminal'].includes(decision.code)) {
       return set(decision.code, decision.code === 'capacity' ? '本机名额满' : decision.code === 'resource_busy' ? `文件锁：${decision.reason}` : decision.reason);
@@ -114,7 +115,7 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
   const asks = rows<Ask>(db, 'asks', project, `AND state='open' AND blocking=1 AND expiresAt>${now}`);
   const merges = rows<Merge>(db, 'scheduler_merges', project);
   const samples = stepSamples(ctx.events, now);
-  const board: WorkBoard = { now, asOfSeq: ctx.asOfSeq, working: [], waiting: [], legacy: [], todo: { ready: [], blocked: [] }, machines: {},
+  const board: WorkBoard = { now, asOfSeq: ctx.asOfSeq, working: [], waiting: [], legacy: [], legacyTotal: 0, todo: { ready: [], blocked: [] }, machines: {},
     completionHours: null, availableSlots: opts.availableSlots ?? opts.maxWorkers };
   for (const task of ctx.tasks.values()) {
     if (!ctx.sched.get(task.id)?.workflow && !['verified', 'done', 'cancelled'].includes(task.stage)) {
@@ -164,5 +165,7 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     deps: deps.filter(d => d.to === r.taskId).map(d => taskKey(d.from)), minutes: r.remainingMinutes }));
   board.completionHours = completionHours([...graph, ...offGraph], board.availableSlots);
   board.working.sort((a, b) => (now - b.since) / Math.max(1, b.normalMinutes) - (now - a.since) / Math.max(1, a.normalMinutes));
+  board.legacyTotal = board.legacy.length;
+  board.legacy = board.legacy.sort((a, b) => a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0).slice(0, 50);
   return board;
 }

@@ -67,7 +67,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask }: Omit<P
         board[key as 'working' | 'waiting'].map(row => rowView(row, key)) : <div className={s.empty}>{t('暂无')}</div>}
     </section>)}</div>
     {!!board?.legacy?.length && <details className={s.legacy}>
-      <summary className={s.group}><Icon kind="chevron" />{t('老卡')} · {board.legacy.length}</summary>
+      <summary className={s.group}><Icon kind="chevron" />{t('老卡')} · {board.legacyTotal ?? board.legacy.length}</summary>
       {board.legacy.map(row => <button type="button" className={s.row} key={row.taskId} onClick={() => onTask(row.taskId)}>
         <div className={s.title}><span className={s.key}>{row.taskId}</span>{row.title}</div>
         <div className={s.meta}>{t(STAGES[row.stage] ?? row.stage)}</div>
