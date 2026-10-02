@@ -9,7 +9,8 @@ import { localReviewFallback } from "./scheduler-local-families-placement.js";
  */
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { PEER_PLACEMENT, peerFamily, placeFor, allowLegacyReview, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-family-pick.js";
+import { PEER_PLACEMENT, peerFamily, allowLegacyReview, type PeerFacts, type PlaceRole } from "./scheduler-family-pick.js";
+import { placementHistory, placeWithRetries as placeFor, type RetryPlacementFacts as PlacementFacts } from "./scheduler-placement-tried.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
@@ -44,7 +45,7 @@ function snapshotPlacementFacts(s: PlannerSnapshot, since: number, role: PlaceRo
     peers: (p?.peers ?? []).map(peerFacts),
     local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers,
       room: role === "review" ? reviewers < s.maxWorkers : !!own || (s.workerCount < s.maxWorkers && !!s.freeWorkerSlot) },
-    tried: s.intents.filter((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === s.task.headSHA).map((i) => i.recipient!.slice(POOL_RECIPIENT.length)),
+    ...placementHistory(s, since),
     locksFree: locksFree(s),
   };
 }
