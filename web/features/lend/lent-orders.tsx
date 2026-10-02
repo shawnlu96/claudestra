@@ -1,7 +1,7 @@
 "use client";
 /**
  * 借出中的单和日志：在跑的排前，近期已结束的在后。每行 peer、repo#pr、step、家族、状态图标，右侧是 notices 画的时间线
- * （开跑 play / 交付 check / 停止 square，待补发 clock）。有 agent 的行点一下打开出借 worker 的会话——那就是这张单的日志。
+ * （开跑 play / 交付 check / 停止 square，待补发 clock）。有 agent 的行打开 worker 会话；没起过的 released 单只展示失败原因。
  * 状态只按 lend-model.orderPhase：收回后 live 的转圈，70 秒还 live 闪告警，journal 进终态才是已停。
  */
 import { useLendT } from "./lend-i18n";
@@ -49,6 +49,7 @@ function Timeline({ order }: { order: OrderView }) {
 function OrderRow({ order, phase, onOpen }: { order: OrderView; phase: OrderPhase; onOpen: (agent: string) => void }) {
   const t = useLendT();
   const p = PHASE[phase];
+  const notStarted = order.state === "released" && order.startedAt === null;
   const body = (
     <>
       <span className={`flex shrink-0 ${p.cls}`} title={[t(p.label), order.reason].filter(Boolean).join(" · ")} aria-label={t(p.label)}>
@@ -59,12 +60,15 @@ function OrderRow({ order, phase, onOpen }: { order: OrderView; phase: OrderPhas
         <span className="block truncate text-[11px] text-base-content/50">
           {order.peer} · {order.step ?? "—"} · {order.family}
         </span>
+        {notStarted && <span className="block text-[11px] text-base-content/50 break-words">
+          {t("没起来")}{order.reason ? ` · ${Array.from(order.reason).slice(0, 60).join("")}` : ""}
+        </span>}
       </span>
       <Timeline order={order} />
     </>
   );
   const cls = "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left";
-  if (!order.agent) return <div className={cls}>{body}</div>;
+  if (!order.agent || notStarted) return <div className={cls}>{body}</div>;
   const agent = order.agent;
   return (
     <button type="button" className={`${cls} hover:bg-base-300/50`} title={t("打开会话")} onClick={() => onOpen(agent)}>
