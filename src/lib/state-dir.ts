@@ -4,7 +4,7 @@
  * ⚠️ 这个文件**只许依赖 node: 内置模块**，而且**每次调用现算**、不要在这里缓存模块级常量。
  * 两个理由（都是踩出来的）：
  *   1. Pi 的扩展在 **Node/Jiti** 里加载（不是 Bun）⇒ 只要 import 任何 app 模块，就会把
- *      repo-root.ts 的 `import.meta.dir`（Bun 专有）带进来 ⇒ 加载期直接抛 ERR_INVALID_ARG_TYPE，
+ *      repo-root.ts 里 Bun 专有的模块目录写法带进来 ⇒ 加载期直接抛 ERR_INVALID_ARG_TYPE，
  *      扩展的生命周期 handler 都注册不上（PR #430 第 2 轮 P1 回归，审查用 Node v26 + Jiti 复现）。
  *   2. 测试会在运行中途改 `CLAUDESTRA_STATE_DIR` ⇒ 缓存过目录常量的模块会把快照写到旧目录
  *      （同轮 P2：组合运行 ENOENT）。
