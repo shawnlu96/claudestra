@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnAdapter } from "../src/lib/acp/adapter-proc.ts";
-import { ACTIVATE_TOOLS_EXTENSION, MCP_MOUNT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
+import { ACTIVATE_TOOLS_EXTENSION, MCP_MOUNT_EXTENSION, PI_ENV_SNAPSHOT_EXTENSION } from "../src/lib/acp/pi-adapter/args.ts";
 import { PI_ACP_ADAPTER_MAIN } from "../src/lib/acp/pi-adapter/main.ts";
 import { MOUNT_OK, MOUNT_STATUS_KEY, PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
@@ -61,7 +61,7 @@ test("起 pi 的命令行带 -e builtin:mcp；/clear 换新 pi；resume 用给�
     expect(piRuns()[0]).toEqual({
       argv: [
         "--mode", "rpc", "--no-extensions",
-        "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION,
+        "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION, "-e", PI_ENV_SNAPSHOT_EXTENSION,
         "--session-id", first.sessionId,
       ],
       mcp: JSON.stringify({ claudestra: { command: "/bin/echo", args: ["x"], env: { A: "1" } } }),
