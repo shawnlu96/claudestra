@@ -96,7 +96,10 @@ export async function writeSharedLedgerCredential(credential: SharedLedgerLocalC
   await updateState(join(dir, "shared-ledger-credentials.json"), credentialFile, { credentials: [] }, (state) => {
     const same = (c: SharedLedgerLocalCredential) => c.localSubject === credential.localSubject && c.kind === credential.kind
       && c.centerId === credential.centerId && c.teamId === credential.teamId;
-    state.credentials = [...state.credentials.filter((c) => !same(c)), structuredClone(credential)];
+    const projectIds = new Set(credential.projects.map((p) => p.projectId));
+    state.credentials = state.credentials.map((c) => same(c)
+      ? { ...c, projects: c.projects.filter((p) => !projectIds.has(p.projectId)) } : c).filter((c) => c.projects.length > 0);
+    state.credentials.push(...credential.projects.map((project) => structuredClone({ ...credential, projects: [project] })));
   });
 }
 /** Subject/kind come from authenticated transport, never JSON body or caller-supplied actor/role. */
