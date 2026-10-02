@@ -1,9 +1,9 @@
 /**
  * i28-W9 across both instances (tests/lend-lab-kit.ts): A's real ledger, scheduler tick, pool CLI and push loop; B's real lend
  * loop (hello, admit, claim, clone, push probe, worker start through manager create's last gate, push + PR, result with the
- * receipt verified). Lending writes is open in production since i28-R7e (WRITE_ROLE_OPEN); what decides is B's grant. A build
+ * receipt verified). A build
  * order goes to B's Codex, B delivers the lend/ branch, the card moves to review and its review is placed across, on a local
- * Claude reviewer, never back at B (which only lends Codex). A grant without write: B's hello says so and A builds locally.
+ * Claude reviewer, never back at B (which only lends Codex). Old review-only grants also receive builds.
  * The worker's own `lend submit` is covered by tests/lend-write.test.ts; here it is the journal row it writes.
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -18,7 +18,7 @@ import { H1, lab, MATE, MODEL, type Lab } from "./lend-lab-kit.js";
 
 const WRITE: RemotePolicy = { mode: "balance", roles: ["review", "write"], repo: "o/r", poolTimeoutMin: 15 };
 
-/** A borrows writing from B at `first`; B's grant carries `roles` (the lab's default is review only). */
+/** A borrows writing from B at `first`; vary the legacy roles in B's grant. */
 async function writeLab(roles: LendRole[]): Promise<Lab & { heads: Record<string, string> }> {
   const heads: Record<string, string> = {};
   const L = await lab({ remote: WRITE, remoteHead: (branch) => heads[branch] ?? H1 });
@@ -66,16 +66,17 @@ describe("a build order across two instances", () => {
     } finally { L.f.close(); }
   });
 
-  test("B's grant without write: its hello grants review only, A never offers it a build and writes locally", async () => {
+  test("B's old review-only grant reports both roles and runs the build remotely", async () => {
     const L = await writeLab(["review"]);
     try {
-      await L.passes(4);
+      await until(L, () => bOrders(L)[0]?.state === "started");
       const hellos = L.wire.filter((w) => w.op === "hello");
       expect(hellos.length).toBeGreaterThan(0);
-      for (const h of hellos) expect(h.body).toMatchObject({ grant: { roles: ["review"] } });
-      expect(L.orders()).toEqual([]);
-      expect(bOrders(L)).toEqual([]);
-      expect(L.f.intents().at(-1)).toMatchObject({ action: "dispatch", recipient: "agent-task-one" });
+      for (const h of hellos) expect(h.body).toMatchObject({ grant: { roles: ["review", "write"] } });
+      expect(L.orders()).toMatchObject([{ step: "write", peer: MATE, family: "codex", status: "claimed" }]);
+      expect(L.spawned).toHaveLength(1);
+      expect(L.refusedSpawns).toEqual([]);
+      expect(L.f.sent.filter((s) => s.text.includes("开工"))).toEqual([]);
     } finally { L.f.close(); }
   });
 });

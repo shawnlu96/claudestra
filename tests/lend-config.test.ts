@@ -53,11 +53,11 @@ describe("缺省值", () => {
     const eff = effectiveLend(r, contacts, projects);
     expect(eff).toMatchObject({ lending: false, lend: [], borrow: [] });
   });
-  test("lend grant 的缺省（He 10-01）：只 review、只 codex 5 个位、每天 200 单、记下授权时刻；borrow maxOpen 3", () => {
+  test("lend grant 的缺省（He 10-01）：审查和开发通用、只 codex 5 个位、每天 200 单、记下授权时刻；borrow maxOpen 3", () => {
     const now = Date.parse("2026-10-01T00:00:00Z");
     const l = lendOk({ families: {}, until: "2d" }, now);
     expect(l.ok && l.entry).toEqual({
-      peer: "team-a", fp: FP_A, families: { codex: 5 }, roles: ["review"], repos: ["shawnlu96/claudestra"], ordersPerDay: 200,
+      peer: "team-a", fp: FP_A, families: { codex: 5 }, roles: ["review", "write"], repos: ["shawnlu96/claudestra"], ordersPerDay: 200,
       grantedAt: "2026-10-01T00:00:00.000Z", until: "2026-10-03T00:00:00.000Z",
     });
     const b = buildBorrowEntry({ ref: "mate-b", projects: "claude-orchestrator" }, contacts, projects);
@@ -89,15 +89,15 @@ describe("校验", () => {
     expect(bad((f) => { f.borrow[0].maxOpen = 0; })).toContain("maxOpen");
     expect(bad((f) => { f.borrow[0].fp = "not-a-fp"; })).toContain("fp");
   });
-  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、roles 只认 review / write（缺省 review）、到期时间必填且 ≤ 7 天、对方要有指纹", () => {
+  test("CLI 输入：至少一个家族出位、仓库要是 owner/repo、roles 参数忽略、到期时间必填且 ≤ 7 天、对方要有指纹", () => {
     expect(lendOk({ families: { codex: "0" } })).toMatchObject({ ok: false });
     expect(lendOk({ families: { codex: "2x" } })).toMatchObject({ ok: false });
     expect(lendOk({ repos: undefined })).toMatchObject({ ok: false });
     expect(lendOk({ repos: "https://github.com/a/b" })).toMatchObject({ ok: false });
     expect(lendOk({ roles: "review,write" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } });
-    expect(lendOk({ roles: "write" })).toMatchObject({ ok: true, entry: { roles: ["write"] } });
-    expect(lendOk({ roles: undefined })).toMatchObject({ ok: true, entry: { roles: ["review"] } });
-    expect(lendOk({ roles: "review,admin" })).toMatchObject({ ok: false });
+    expect(lendOk({ roles: "write" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } });
+    expect(lendOk({ roles: undefined })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } });
+    expect(lendOk({ roles: "review,admin" })).toMatchObject({ ok: true, entry: { roles: ["review", "write"] } });
     expect(lendOk({ until: undefined })).toMatchObject({ ok: false, error: expect.stringContaining("到期时间") });
     for (const until of ["8d", "169h", "2100-01-01T00:00:00Z", "2020-01-01T00:00:00Z", "0d", "soon"]) expect(lendOk({ until }), until).toMatchObject({ ok: false });
     for (const until of ["7d", "168h", "1h"]) expect(lendOk({ until }), until).toMatchObject({ ok: true });
@@ -146,7 +146,7 @@ describe("无效文件按关处理", () => {
     await updateLend((f) => Object.assign(f, validFile()), p);
     const ok = (await checkLend(p, { contacts, projects }))[0];
     expect(ok.status).toBe("ok");
-    expect(ok.detail).toContain("team-a（review，codex 2，每天 200 单，授权到 ");
+    expect(ok.detail).toContain("team-a（codex 2，每天 200 单，授权到 ");
     expect(ok.detail).toMatch(/还剩 (2 天|7\d 小时)，对方协议 v1（未协商）/);
     expect(ok.detail).toContain("借入：mate-b（claude-orchestrator");
     writeFileSync(p, "[]");

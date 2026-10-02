@@ -24,13 +24,11 @@ describe("授权判定（grantProblem）", () => {
     expect(grantProblem(G, T + DAY)).toBeNull();
   });
 
-  test("写单开关：生产缺省开着，含 write 的授权生效；开关关上（writeOpen=false）则含 write 的整条不生效", () => {
+  test("授权生效不再依赖 roles；生产写单收单开关开着", () => {
     expect(WRITE_ROLE_OPEN).toBe(true);
     expect(grantProblem({ ...G, roles: ["review", "write"] }, T)).toBeNull();
     expect(grantProblem({ ...G, roles: ["write"] }, T)).toBeNull();
-    expect(grantProblem({ ...G, roles: ["review", "write"] }, T, false)).toMatch(/write/);
-    expect(grantProblem({ ...G, roles: ["write"] }, T, false)).toMatch(/write/);
-    expect(grantProblem(G, T, false)).toBeNull();
+    expect(grantProblem(G, T)).toBeNull();
   });
 
   test("P1-3 没写到期时间 / 授权时间 / 指纹，期限超过 7 天（按授权时刻和按现在都算），授权时间在未来：都不生效", () => {
@@ -53,9 +51,6 @@ describe("授权判定（grantProblem）", () => {
   test("effectiveLend 用同一套判定：不生效的列进 dropped，指纹对不上的联系人也剔", () => {
     const file = { version: 2 as const, enabled: true, borrow: [], lend: [G, { ...G, peer: "team-b", fp: "1111-2222-3333-4444", roles: ["review", "write"] as LendEntry["roles"] }] };
     expect(effectiveLend({ status: "ok", file }, contacts, [], T + DAY).lend.map((e) => e.peer)).toEqual(["team-a", "team-b"]);
-    const eff = effectiveLend({ status: "ok", file }, contacts, [], T + DAY, false);
-    expect(eff.lend.map((e) => e.peer)).toEqual(["team-a"]);
-    expect(eff.dropped.join()).toContain("team-b");
     expect(effectiveLend({ status: "ok", file }, [{ name: "team-a", fp: "9999-9999-9999-9999" }], [], T + DAY).lending).toBe(false);
   });
 });
@@ -65,7 +60,7 @@ const v1Entry = (over: Record<string, unknown> = {}) => ({ peer: "team-a", fp: F
 const v1File = (lend: unknown[]) => ({ version: 1, enabled: true, borrow: [{ peer: "team-b", projects: ["p"], roles: ["review"], maxOpen: 2 }], lend });
 
 describe("P1-5 v1 → v2 迁移", () => {
-  test("逐单确认、限时预先授权（还没到期）、含 write 的都迁成暂停；字段原样搬，不补到期 / 授权时刻；借入原样", () => {
+  test("逐单确认、限时预先授权（还没到期）、含 write 的都迁成暂停；roles 归一，不补到期 / 授权时刻；借入原样", () => {
     const v1 = v1File([
       v1Entry(),
       v1Entry({ peer: "team-b", fp: "1111-2222-3333-4444", confirm: "auto", until: iso(T + DAY) }),
@@ -74,7 +69,7 @@ describe("P1-5 v1 → v2 迁移", () => {
     const m = migrateV1(JSON.parse(JSON.stringify(v1)));
     expect(m.version).toBe(2);
     expect(m.borrow).toEqual(v1.borrow as never);
-    expect(m.lend[0]).toEqual({ peer: "team-a", fp: FP, families: { codex: 2 }, roles: ["review"], repos: ["o/r"], ordersPerDay: 5, paused: { reason: V1_PAUSED_REASON } });
+    expect(m.lend[0]).toEqual({ peer: "team-a", fp: FP, families: { codex: 2 }, roles: ["review", "write"], repos: ["o/r"], ordersPerDay: 5, paused: { reason: V1_PAUSED_REASON } });
     expect(m.lend[1]).toMatchObject({ until: iso(T + DAY), paused: { reason: V1_PAUSED_REASON } });
     expect(m.lend[2]).toMatchObject({ roles: ["review", "write"], paused: { reason: V1_PAUSED_REASON } });
     for (const e of m.lend) expect(e.grantedAt).toBeUndefined();
@@ -112,7 +107,7 @@ describe("P1-5 v1 → v2 迁移", () => {
 });
 
 describe("P1 生产依赖的写单开关只认 WRITE_ROLE_OPEN（writeOpen 只能由测试注入）", () => {
-  test("lendDeps 不设 writeOpen；按真实状态目录现读：写了 write 的授权接写单，没写的只接审查单", async () => {
+  test("lendDeps 不设 writeOpen；按真实状态目录现读：旧 review 授权也接写单", async () => {
     const { lendDeps } = await import("../src/lib/lend-deps.js");
     const { openLendJournal } = await import("../src/lib/lend-journal.js");
     const { LedgerReader } = await import("../src/lib/ledger-read.js");
@@ -135,7 +130,7 @@ describe("P1 生产依赖的写单开关只认 WRITE_ROLE_OPEN（writeOpen 只�
       expect(await liveGrant(write, d)).toMatchObject({ ok: true });
       expect(await liveGrant(review, d)).toMatchObject({ ok: true });
       writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: true, borrow: [], lend: [{ ...G, grantedAt: iso(now), until: iso(now + DAY) }] }));
-      expect(await liveGrant(write, d)).toMatchObject({ ok: false, problem: expect.stringContaining("write") });
+      expect(await liveGrant(write, d)).toMatchObject({ ok: true });
       expect(await liveGrant(review, d)).toMatchObject({ ok: true });
     } finally {
       db.close();
