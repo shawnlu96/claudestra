@@ -1,3 +1,4 @@
+import { convergenceOrderLines } from "./fix-strategy-order.js";
 /**
  * What an auto card's worker is told, and how the ledger proves it answered. The order names the exact write-back
  * command (the reviewer's includes its own session and family, which the ledger checks), and a result counts only when
@@ -41,14 +42,14 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
     const report = `${statePath("ledger", "reviews", `${task.id}-r${task.round}`)}/report.md`;
     const where = checkout ? [`审查目录：${checkout}（已固定在这个 head；只读，不改、不提交、不推送）`] : [];
     const targeted = w?.bounce ? [bounceReviewLine(w.bounce)] : [];
-    return withDeliverScope(db, task, { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...targeted, ...where, standardAnswers("review")],
+    return withDeliverScope(db, task, { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...targeted, ...where, ...convergenceOrderLines(db, task), standardAnswers("review")],
       outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
       acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId", REVIEW_CI_RULE],
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +
         ` --session ${ref.sessionId} --family ${ref.family} --findings <逐项结论.json> --path ${report}（不要带 --to，阶段由调度器推）` });
   }
   const bounce = w?.bounce ? bounceWork(w.bounce) : null;
-  return { ...base, inputs: [spec, ...(bounce ? bounce.inputs : w?.reportPath ? [`上一轮审查报告：${w.reportPath}`] : []), standardAnswers("author")],
+  return { ...base, inputs: [spec, ...(bounce ? bounce.inputs : w?.reportPath ? [`上一轮审查报告：${w.reportPath}`] : []), ...convergenceOrderLines(db, task), standardAnswers("author")],
     outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: [...(bounce?.acceptance ?? []), ...AUTHOR_ACCEPTANCE],
     writeBack: `${CLI} deliver ${task.id} --from ${step === "fix" ? "fix" : "build"} --head <完整 SHA> --evidence <报告路径>` };
 }

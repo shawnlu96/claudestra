@@ -1,3 +1,4 @@
+import { FIX_STRATEGY_RULE } from "../src/lib/fix-strategy.js";
 import { describe, expect, test } from "bun:test";
 import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 import type { SchedulerIntent, TaskWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -110,7 +111,7 @@ describe("T68 data workflow planner", () => {
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "reviewer_replaced" });
   });
 
-  test("P1 auto-fixes with original probes; second same family warns, third stops with history", () => {
+  test("P1 auto-fixes with original probes; second same family changes context without third-round manual fallback", () => {
     const s = snapshot("review", 1);
     s.events = [...s.events, delivery(19, 1), review(20, 1, [finding("delivery")])];
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
@@ -122,16 +123,15 @@ describe("T68 data workflow planner", () => {
     s.events = [...s.events, entry("review", 2), delivery(29, 2), review(30, 2, [finding("delivery")])];
     s.intents = [...s.intents, sentReview(2, 25)];
     s.reviewDispatches = [...s.reviewDispatches, proof(2, 25)];
-    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: "同一条 P1 已连续 2 轮：第 3 轮还在就退到：收窄为只报错" } });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: FIX_STRATEGY_RULE } });
     s.task = task("fix", 2);
     s.events = [...s.events, entry("fix", 2)];
-    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "dispatch",
-      workOrder: { reportPath: "reviews/T1-r2/report.md", fallbackWarning: "同一条 P1 已连续 2 轮：第 3 轮还在就退到：收窄为只报错" } });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "fix_swap" });
     s.task = task("review", 3);
     s.events = [...s.events, entry("review", 3), delivery(39, 3), review(40, 3, [finding("delivery")])];
     s.intents = [...s.intents, sentReview(3, 35)];
     s.reviewDispatches = [...s.reviewDispatches, proof(3, 35)];
-    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "three_p1_rounds", reviewSeq: 40 });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix" });
     s.events = s.events.map((e) => e.kind === "review" && e.data.round === 2 ? review(30, 2, [finding("different")]) : e);
     expect(planScheduler(s)).toMatchObject({ kind: "intent", workOrder: { fallbackWarning: null } });
   });
@@ -237,7 +237,7 @@ describe("T68 data workflow planner", () => {
     expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "review_round_cap" });
   });
 
-  test("a persistent findingId reaches the third-round gate even when family names change", () => {
+  test("a persistent findingId keeps its identity without the old third-round fallback", () => {
     const s = snapshot("review", 1);
     s.events = [event(1, "task", { op: "new" })];
     for (let round = 1; round <= 3; round++) {
@@ -248,7 +248,7 @@ describe("T68 data workflow planner", () => {
       s.intents = [...s.intents, sentReview(round, base + 5)];
       s.reviewDispatches = [...s.reviewDispatches, proof(round, base + 5)];
     }
-    expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "three_p1_rounds" });
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix" });
   });
 
   test("a new spec revision starts a fresh P1 escalation count", () => {

@@ -1,3 +1,4 @@
+import { DISPUTE_RULE, FIX_STRATEGY_RULE } from "../src/lib/fix-strategy.js";
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { offerLendCore, listLendOrders } from "../src/lib/ledger-lend.js";
@@ -52,7 +53,11 @@ describe("lent merge-bounce fix orders", () => {
         workOrder: { reportPath: "", findings: [], fallbackWarning: null, bounce: b } };
       const local = workOrderFor(task(), { id: "fix-order", node: "fix", head: H, specRev: 1 } as SchedulerIntent, plan,
         { agent: "author", sessionId: "s1", taskId: "T1", family: "codex", role: "author", transport: "tmux" })!;
-      expect(o.wire.inputs.slice(1)).toEqual(local.inputs.slice(1).map(peerText));
+      // CONV3 owns remote convergence; this comparison continues to prove the shared merge-bounce package.
+      expect(local.inputs).toContain(DISPUTE_RULE);
+      expect(local.inputs).toContain(FIX_STRATEGY_RULE);
+      const bounceInputs = local.inputs.slice(1).filter((line) => line !== DISPUTE_RULE && line !== FIX_STRATEGY_RULE);
+      expect(o.wire.inputs.slice(1)).toEqual(bounceInputs.map(peerText));
       expect(local.acceptance.slice(0, o.wire.acceptance.length - 2).map(peerText)).toEqual(o.wire.acceptance.slice(2));
       expect(o.wire.findings).toEqual([]);
       expect(o.wire.head).toBe(H);

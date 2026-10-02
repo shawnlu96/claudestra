@@ -35,6 +35,8 @@ export const ORDER_TOOLS = [
         head: { type: "string", description: "完整 40 位 commit SHA，等于 origin 上本卡分支的当前 head" },
         evidence: { type: "string", description: "证据报告的文件路径（只收路径）" },
         summary: { type: "string", description: "一句话交付说明（≤500 字节）" },
+        disputes: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false,
+          properties: { findingId: { type: "string" }, reason: { type: "string", maxLength: 1000 } }, required: ["findingId", "reason"] } },
         selfCheck: { type: "string", description: "按验收线逐条自查的结果（≤4000 字节）" },
       },
       required: ["v", "orderId", "head", "evidence", "summary", "selfCheck"],

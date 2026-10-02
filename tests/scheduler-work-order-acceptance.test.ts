@@ -1,3 +1,4 @@
+import { DISPUTE_RULE, FIX_STRATEGY_RULE } from "../src/lib/fix-strategy.js";
 import { describe, expect, test } from "bun:test";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
@@ -8,8 +9,7 @@ import type { ReviewFinding } from "../src/lib/scheduler-review.js";
 import { workOrderFor } from "../src/lib/scheduler-work-order.js";
 import type { SessionRef, WorkOrder } from "../src/lib/worker-session.js";
 
-// Every field except acceptance is the pre-i28-N6 output written out literally, so a wording change to acceptance can
-// not silently move inputs / outputs / writeBack / dedupKey.
+// Literal order fields keep acceptance changes from silently moving outputs / writeBack / dedupKey; convergence adds input rules.
 const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 const SPEC = `规格与验收：${CLI} show T1`;
 const H = "a".repeat(40);
@@ -29,14 +29,14 @@ const AUTHOR = [
 
 describe("workOrderFor acceptance (i28-N6)", () => {
   test("build: three acceptance lines, everything else unchanged", () => {
-    expect(workOrderFor(task, intent("write"), null, ref)).toEqual({ ...head("write", "write"), inputs: [SPEC, standardAnswers("author")],
+    expect(workOrderFor(task, intent("write"), null, ref)).toEqual({ ...head("write", "write"), inputs: [SPEC, DISPUTE_RULE, FIX_STRATEGY_RULE, standardAnswers("author")],
       outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: AUTHOR,
       writeBack: `${CLI} deliver T1 --from build --head <完整 SHA> --evidence <报告路径>` });
   });
 
   test("fix: same three lines; findings and the last report still carried", () => {
     expect(workOrderFor(task, intent("fix"), fixPlan, ref)).toEqual({ ...head("fix", "fix"), findings: [P2], fallbackWarning: "warn",
-      inputs: [SPEC, "上一轮审查报告：/r/report.md", standardAnswers("author")], outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: AUTHOR,
+      inputs: [SPEC, "上一轮审查报告：/r/report.md", DISPUTE_RULE, FIX_STRATEGY_RULE, standardAnswers("author")], outputs: ["分支上的提交（完整 head SHA）", "证据报告路径"], acceptance: AUTHOR,
       writeBack: `${CLI} deliver T1 --from fix --head <完整 SHA> --evidence <报告路径>` });
   });
 
@@ -44,7 +44,7 @@ describe("workOrderFor acceptance (i28-N6)", () => {
     const report = `${statePath("ledger", "reviews", "T1-r2")}/report.md`;
     expect(workOrderFor(task, intent("adversarial_review"), null, { ...ref, role: "reviewer" }, "/wt")).toEqual({
       ...head("adversarial_review", "review"), inputs: [SPEC, `只审 head ${H}`, "审查目录：/wt（已固定在这个 head；只读，不改、不提交、不推送）",
-        standardAnswers("review")],
+        DISPUTE_RULE, FIX_STRATEGY_RULE, standardAnswers("review")],
       outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
       acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId", "全量测试只看 PR head 的 CI；不跑全量，本机超时不判 P1"],
       writeBack: `${CLI} review T1 --reviewer agent-t1 --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${H}` +

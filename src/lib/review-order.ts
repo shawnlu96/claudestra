@@ -1,3 +1,4 @@
+import { convergenceOrderLines } from "./fix-strategy-order.js";
 /**
  * M3 审查单（T97）：台账当前的审查那一步 → 给审查员的 OrderWire（take_review 出，submit_verdict 按 orderId 现算再核一遍）。
  * 谁是「本步骤审查员」只有两个来源：自动卡 = 台账绑定的审查 session（agent + session 都要对上）且有派给它、同 head 的派审 intent；
@@ -123,7 +124,7 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
     inputs: [`规格：${specPath ? clip(specPath, WIRE_LIMITS.path) : `ledger show ${task.id}`}（specRev ${task.specRev}）`, `只审 head ${slot.head}${task.branch ? `（分支 ${clip(task.branch, 200)}）` : ""}`,
       // 自动卡的审查员建在自己的审查 worktree 里，调度器派审前把它固定在这个 head（scheduler-review-worktree.ts）
       ...(slot.auto ? ["审查目录：你当前会话的工作目录（调度器已固定在这个 head；只读，不改、不提交、不推送）"] : []),
-      ...(bounce ? [bounceReviewLine(bounce)] : []), ...convergeOrderLines(task.round, events, slot.head), standardAnswers("review")],
+      ...(bounce ? [bounceReviewLine(bounce)] : []), ...convergeOrderLines(task.round, events, slot.head), ...convergenceOrderLines(db, task), standardAnswers("review")],
     outputs: ["结论：submit_verdict（VerdictWire：verdict、p0/p1/p2 计数与逐项 findings 一致）", `报告：${report}（非空；旧版逐项标记可从报告读取）`],
     acceptance: acceptanceOf(specPath),
     writeBack: `submit_verdict({v:1, orderId:"${slot.orderId}", head:"${slot.head}", …, reportPath:"${report}"})；只记结论，不推阶段`,

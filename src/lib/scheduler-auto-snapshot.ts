@@ -1,3 +1,4 @@
+import { convergenceSnapshot } from "./fix-strategy-plan.js";
 /**
  * Auto cards: the planner sees only the engine's own facts. Sessions are the ledger bindings (never a registry guess),
  * intents are the real scheduler_intents rows (PM's manual dispatches are not engine proof), and a review dispatch counts
@@ -46,7 +47,7 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
   // A head a peer delivered was written in that order's family: review placement, reviewer session and gates go across from it.
   const wrote = remoteHeadFamily(db, task);
   const workflow = wrote && base.workflow ? { ...base.workflow, authorFamily: wrote } : base.workflow;
-  return { ...base, workflow, author: bound.author, reviewer, intents, reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
+  return convergenceSnapshot({ ...base, workflow, author: bound.author, reviewer, intents, reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
     pool: opts.pool ? poolFacts(db, task, { ...opts.pool, now: opts.now ?? Date.now() }) : null, strayPoolOrders: strayPoolOrders(db, task.id).map((o) => o.orderId),
-    fixDiff: fixDiffOf(task, base.events) }; // 第 3 轮起的修复 diff（review-converge-scope.ts）
+    fixDiff: fixDiffOf(task, base.events) }); // 第 3 轮起的修复 diff（review-converge-scope.ts）
 }

@@ -1,3 +1,5 @@
+import { convergenceSpec } from "../lib/fix-strategy-order.js";
+import { convergenceCommands } from "../lib/review-arbiter-commands.js";
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES, getIntent } from "../lib/ledger-scheduler.js";
 import { settleIntent } from "../lib/ledger-scheduler-settle.js";
@@ -32,7 +34,7 @@ const integer = (c: LedgerCli, flag: string): number => {
 /** The spec text travels inside the order (the peer cannot read this machine's files); read outside the transaction. */
 function specOf(c: LedgerCli, intentId: string): string | null {
   const task = getTask(c.db, getIntent(c.db, intentId)?.taskId ?? "");
-  return task ? readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir)) : null;
+  return task ? convergenceSpec(c.db, task, readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir))) : null;
 }
 
 /**
@@ -54,6 +56,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
 }
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
+  ...convergenceCommands,
   "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
     run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
   "scheduler-family-wait": familyWaitCommand,

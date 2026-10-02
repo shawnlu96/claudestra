@@ -10,7 +10,8 @@ import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type
 import { reviewSwapPlan, reviewsAfterSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
-import { escalationDowngrade, convergeReview, fixWarning, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
+import { escalationDowngrade, convergeReview, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
+import { planConvergence, strategyWarning } from "./fix-strategy-plan.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 
 export interface WorkerRef {
@@ -69,7 +70,7 @@ interface PlannedIntent {
   kind: "intent";
   id: string;
   node: string;
-  action: "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire" | "ensure_session" | "review_swap";
+  action: "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire" | "ensure_session" | "review_swap" | "fix_swap" | "arbitrate";
   recipient: string | null;
   resources: string[];
   reason: string;
@@ -194,11 +195,11 @@ function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
   const minRound = reviewStartRound(s);
   const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
   const total = p1AnyStreak(s.events, facts.round, minRound);
-  if (total === null || streaks.includes(null) || streaks.some((n) => (n as number) >= 3)) {
+  if (total === null || streaks.includes(null)) {
     return escalate("fix_history", "P1 轮次无法自动续派", facts.eventSeq);
   }
   return { reportPath: facts.reportPath, findings: facts.findings,
-    fallbackWarning: fixWarning(Math.max(...(streaks as number[])), facts.round, s.workflow!.fallback) };
+    fallbackWarning: strategyWarning(Math.max(...(streaks as number[])), facts.round) };
 }
 
 function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
@@ -223,14 +224,6 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     { recipient: reviewer.agent, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode, ...(bounce ? { workOrder: bounce } : {}) });
 }
 
-function reviewHistory(s: PlannerSnapshot, facts: ReviewFacts): ReviewFinding[][] {
-  const byRound = new Map<number, ReviewFinding[]>();
-  for (const e of s.events) if (e.kind === "review" && typeof e.data.round === "number" && e.data.round <= facts.round) {
-    byRound.set(e.data.round, Array.isArray(e.data.findings) ? e.data.findings as ReviewFinding[] : []);
-  }
-  return [...byRound.entries()].sort(([a], [b]) => a - b).slice(-4).map(([, rows]) => rows);
-}
-
 function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, downgrade: Downgrade | null): PlannerDecision {
   const cap = roundCap(s.events, facts);
   if (cap) return wait(cap.code, cap.reason);
@@ -239,11 +232,7 @@ function fixDecision(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, dow
   const streaks = p1.map((f) => p1FindingStreak(s.events, f, facts.round, minRound));
   const total = p1AnyStreak(s.events, facts.round, minRound);
   if (total === null || streaks.includes(null)) return escalate("review_history", "历轮结构化结论不完整，无法判断 P1 连续轮次", facts.eventSeq);
-  if (streaks.some((n) => (n as number) >= 3)) return {
-    kind: "escalate", code: "three_p1_rounds", reason: `同一条 P1 连续 3 轮；按规格退到：${s.workflow!.fallback}`,
-    reviewSeq: facts.eventSeq, history: reviewHistory(s, facts),
-  };
-  const warning = fixWarning(Math.max(...(streaks as number[])), facts.round, s.workflow!.fallback);
+  const warning = strategyWarning(Math.max(...(streaks as number[])), facts.round);
   return makeIntent(s, node, "stage", `P1 ${p1.length} 项，自动进入 fix`, [taskResource(s)], {
     targetStage: "fix", workOrder: { reportPath: facts.reportPath, findings: facts.findings, fallbackWarning: warning }, ...(downgrade ? { downgrade } : {}),
   });
@@ -345,7 +334,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 }
 
 /** A blocked or ambiguous snapshot never emits work; every emitted action has a stable dedup key and explicit cause. */
-export function planScheduler(s: PlannerSnapshot): PlannerDecision {
+function planSchedulerBase(s: PlannerSnapshot): PlannerDecision {
   const { task, workflow } = s;
   if (!workflow || workflow.mode === "manual") return wait("manual", "任务由 PM 人工推进");
   if (task.kind !== "code" || !templateFor(workflow.template, workflow.templateVersion) || workflow.taskId !== task.id || workflow.specRev !== task.specRev) {
@@ -367,3 +356,5 @@ export function planScheduler(s: PlannerSnapshot): PlannerDecision {
   const active = s.intents.find((i) => i.status === "pending" || i.status === "submitted" || i.status === "unknown");
   return escalationDowngrade(decision.kind === "intent" && active ? wait("intent_in_flight", `先结清调度意图 ${active.id}（${active.status}）`) : decision, task, s.events, s.fixDiff);
 }
+
+export const planScheduler = (s: PlannerSnapshot): PlannerDecision => planConvergence(s, planSchedulerBase);

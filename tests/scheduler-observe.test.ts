@@ -232,7 +232,7 @@ describe("T68e observe mode", () => {
     }
   });
 
-  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 is a three-P1 stop", async () => {
+  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 still plans repair", async () => {
     for (const observed of [false, true]) {
       const f = fixture();
       try {
@@ -247,7 +247,7 @@ describe("T68e observe mode", () => {
         }
         await f.observe();
         const moves = (await f.rows()).filter((r) => r.actual === "推阶段 review→fix").map((r) => [r.verdict, r.planned]);
-        expect(moves).toEqual(observed ? [["match", "推阶段到 fix"], ["match", "推阶段到 fix"], ["diff", "停下升级（three_p1_rounds）"]]
+        expect(moves).toEqual(observed ? Array(3).fill(["match", "推阶段到 fix"])
           : Array(3).fill(["unknown", "（结论后的计划没有记录）"]));
       } finally { f.close(); }
     }
