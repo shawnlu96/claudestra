@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareSharedLedgerImport } from "../scripts/shared-ledger-import.js";
-import { settleDagStart, type StartSettleEnv } from "../src/lib/dag-start-settle.js";
+import { parseRegistryForSettle, settleDagStart, type StartSettleEnv } from "../src/lib/dag-start-settle.js";
 import { closeLedger, getEventByDedup, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage } from "../src/lib/ledger-write.js";
 import { readSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
-import { ledgerUsage } from "../src/manager/ledger.js";
+import { ledgerUsage, runLedger } from "../src/manager/ledger.js";
 
 const card = "c601-card", attempt = "a1b2c3d4";
 const key = (step: string) => `dag-start:${card}:${attempt}:${step}`;
@@ -97,5 +97,79 @@ test("only project managers settle, only a recorded unbound attempt can be settl
     await expect(settleDagStart(f.db, { actor: "owner" }, f.env, { taskId: card, attempt, reason: " " })).rejects.toThrow("--reason");
     expect(getEventByDedup(f.db, key("settled"))).toBeNull();
     expect(ledgerUsage()).toContain("start-settle <卡号> --attempt <attemptId> --reason <原因>");
+  } finally { f.close(); }
+});
+
+test("unreadable registry or a partially readable repo set refuses instead of counting as absent", async () => {
+  const f = fixture();
+  try {
+    f.cancel();
+    f.env.agents = async () => { throw new Error("registry.json 读不出来：坏 JSON"); };
+    await expect(f.settle()).rejects.toThrow("会话仍在运行（读不出本机 registry，核实不了执行者会话：registry.json 读不出来：坏 JSON）");
+    f.env.agents = async () => [];
+    const other = join(f.dir, "other");
+    f.env.projectDirs = () => [join(f.dir, "repo"), other];
+    f.env.worktrees = async (d) => (d === other ? null : []);
+    await expect(f.settle()).rejects.toThrow(`worktree 还在（仓库目录列不出 git worktree，核实不了：${other}）`);
+    expect(getEventByDedup(f.db, key("settled"))).toBeNull();
+    f.env.worktrees = async (d) => (d === other ? "not-git" : []);
+    expect((await f.settle()).checks?.worktree.ok).toBe(true);
+  } finally { f.close(); }
+});
+
+test("strict registry parse rejects dirty entries that the lenient reader would turn into an empty list", () => {
+  expect(parseRegistryForSettle({ agents: { a: { status: "active", dir: "/w" } } })).toEqual([{ name: "a", status: "active", cwd: "/w" }]);
+  expect(parseRegistryForSettle({})).toEqual([]);
+  expect(() => parseRegistryForSettle({ agents: { a: { status: "active" }, unrelated: null } })).toThrow("条目 unrelated 不是对象");
+  expect(() => parseRegistryForSettle({ agents: [] })).toThrow("agents 不是对象");
+  expect(() => parseRegistryForSettle({ agents: { a: { status: 1 } } })).toThrow("a 的 status 不是字符串");
+  expect(() => parseRegistryForSettle(null)).toThrow("顶层不是对象");
+});
+
+/** 真实命令适配层：runLedger + 真 registry 文件 + 真 git；卡的 worktree 记在 extra.worktree（缺省目录在状态目录，测试不碰） */
+function cliFixture() {
+  const f = fixture();
+  const git = (cwd: string, ...a: string[]) => {
+    const r = Bun.spawnSync(["git", "-C", cwd, ...a], { stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`git ${a.join(" ")}: ${r.stderr.toString()}`);
+  };
+  const repoA = join(f.dir, "repo-a"), repoB = join(f.dir, "repo-b"), wt = join(f.dir, "wt", card), registryPath = join(f.dir, "registry.json");
+  for (const r of [repoA, repoB]) { mkdirSync(r); git(r, "init", "-q"); git(r, "-c", "user.name=t", "-c", "user.email=t@local", "commit", "-q", "--allow-empty", "-m", "init"); }
+  f.db.prepare("UPDATE tasks SET extra = ? WHERE id = ?").run(JSON.stringify({ worktree: wt }), card);
+  f.cancel();
+  const dirs = [repoA, repoB];
+  const run = () => runLedger(["start-settle", card, "--attempt", attempt, "--reason", "probe"], {
+    db: f.db, actor: "owner", projectIds: ["project-a"], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {},
+    now: () => 3, registryPath, projects: () => [{ id: "project-a", name: "project-a", dirs, createdAt: "2026-10-02T00:00:00Z" }],
+  });
+  return { ...f, git, repoA, repoB, wt, registryPath, dirs, run };
+}
+
+test("CLI start-settle refuses a registry with a dirty entry next to the live executor, and writes nothing", async () => {
+  const f = cliFixture();
+  try {
+    writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-task-c601-card": { status: "active" }, unrelated: null } }));
+    expect(await f.run()).toMatchObject({ ok: false, error: expect.stringContaining("会话仍在运行（读不出本机 registry") });
+    writeFileSync(f.registryPath, "{broken");
+    expect(await f.run()).toMatchObject({ ok: false, error: expect.stringContaining("registry.json 读不出来") });
+    expect(getEventByDedup(f.db, key("settled"))).toBeNull();
+    writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-task-c601-card": { status: "stopped" } } }));
+    expect(await f.run()).toMatchObject({ ok: true, duplicate: false });
+  } finally { f.close(); }
+});
+
+test("CLI start-settle refuses when the repo still holding the worktree is unreadable but another repo is healthy", async () => {
+  const f = cliFixture();
+  try {
+    f.git(f.repoB, "worktree", "add", "-q", "--detach", f.wt);
+    rmSync(f.wt, { recursive: true, force: true });
+    const moved = join(f.dir, "repo-b-moved");
+    renameSync(f.repoB, moved);
+    expect(await f.run()).toMatchObject({ ok: false, error: expect.stringContaining(`仓库目录列不出 git worktree，核实不了：${f.repoB}`) });
+    expect(getEventByDedup(f.db, key("settled"))).toBeNull();
+    renameSync(moved, f.repoB);
+    expect(await f.run()).toMatchObject({ ok: false, error: expect.stringContaining("git worktree list 里还有") });
+    f.git(f.repoB, "worktree", "prune");
+    expect(await f.run()).toMatchObject({ ok: true, duplicate: false, checks: { worktree: { ok: true } } });
   } finally { f.close(); }
 });
