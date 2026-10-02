@@ -24,6 +24,7 @@ export interface MergeExternal {
   carryReview(pr: string, oldHead: string, newHead: string): Promise<ReviewCarry>;
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
+  train?(run: MergeRun, mainHead: string): Promise<"cleared" | "wait" | { bounce: string } | null>; // scheduler-merge-train.ts trainGate
 }
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
@@ -130,7 +131,9 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
       // GitHub reports CLEAN for a stale branch unless "require up to date" is on, so staleness is asked directly.
       const fresh = await external.freshness(run.prRef, pr.head);
-      if (fresh.behindBy > 0 || pr.mergeState === "BEHIND") {
+      const train = await external.train?.(run, fresh.mainHead); // merge train: wait while it tests, bounce its culprit, skip update-branch once verified
+      if (train && train !== "cleared") return train === "wait" ? run : step("resolved", train.bounce);
+      if ((fresh.behindBy > 0 || pr.mergeState === "BEHIND") && train !== "cleared") {
         const claimed = await step("updating");
         assertActive();
         return await updateOrBounce(claimed, external, step, stopped);
@@ -179,7 +182,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.checks.some((c) => c.bucket === "fail" || c.bucket === "cancel")) return step("unknown", "CI 失败或取消");
       if (!green(run, pr.checks)) return run;
       const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch
-      if (stale.behindBy > 0) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
+      if (stale.behindBy > 0 && (await external.train?.(run, stale.mainHead)) !== "cleared") return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
       return await claimAndMerge(run, external, step, assertActive);
     }
     if (run.phase === "merging") {

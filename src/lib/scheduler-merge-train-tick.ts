@@ -1,0 +1,161 @@
+/**
+ * Merge train wiring: the durable state file, the ledger reads (candidates, member outcomes), the per-pass tick
+ * (scheduler-auto-tick.ts) and the merge-driver hook (scheduler-merge-external.ts → withMergeTrain).
+ * State lives in `<stateDir>/merge-train/<project>.json` (atomic tmp+rename): the scheduler is its only writer, and the ledger
+ * stays untouched, so no migration and no new ledger command. Test processes get no default context (no real gh, no state dir).
+ */
+import type { Database } from "bun:sqlite";
+import { mkdirSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { getTask, getMeta, listEvents } from "./ledger-store.js";
+import type { LedgerTask } from "./ledger-stages.js";
+import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
+import { stateDir } from "./state-dir.js";
+import { isTestProcess } from "./test-guard.js";
+import { readSchedulerConfig } from "./scheduler-config.js";
+import { currentReviewFacts } from "./scheduler-review.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
+import type { MergeExternal } from "./scheduler-merge-driver.js";
+import type { MergeRun } from "./scheduler-merge.js";
+import { trainGh } from "./scheduler-merge-train-gh.js";
+import {
+  clearedMember, formTrain, nextSkip, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
+  type TrainGh, type TrainState, type TrainStore,
+} from "./scheduler-merge-train.js";
+
+const EVENTS_KEPT = 200;
+interface TrainFile { v: 1; seq: number; state: TrainState | null; view: string; events: TrainEvent[] }
+const fileName = (project: string) => `${project.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
+
+/** One JSON file per project; a corrupt file throws (never read as "no train", which would orphan its branches). */
+export function fileTrainStore(dir = join(stateDir(), "merge-train")): TrainStore {
+  const path = (project: string) => join(dir, fileName(project));
+  const read = (project: string): TrainFile => {
+    const r = readJsonStateSync(path(project));
+    if (r.status === "missing") return { v: 1, seq: 0, state: null, view: "", events: [] };
+    if (r.status === "corrupt") throw new Error(`合并列车状态文件损坏：${path(project)}（${r.error}）`);
+    return r.data as TrainFile;
+  };
+  const write = (project: string, f: TrainFile) => { mkdirSync(dir, { recursive: true }); writeJsonAtomicSync(path(project), f); };
+  return {
+    load: (project) => read(project).state,
+    all() {
+      let names: string[] = [];
+      try { names = readdirSync(dir).filter((n) => n.endsWith(".json")); }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; } // no directory yet = no train ever formed
+      return names.map((n) => (readJsonStateSync(join(dir, n)) as { data?: TrainFile }).data?.state ?? null).filter((s): s is TrainState => !!s);
+    },
+    save(state) {
+      const f = read(state.project);
+      write(state.project, { ...f, seq: Math.max(f.seq, state.seq), state, view: trainView(state) });
+    },
+    event(project, ev) {
+      const f = read(project);
+      write(project, { ...f, events: [...f.events, ev].slice(-EVENTS_KEPT) });
+      console.log(`🚂 [merge-train] ${project} ${ev.train} ${ev.kind}：${ev.text}`);
+    },
+    nextSeq: (project) => read(project).seq + 1,
+  };
+}
+
+const SHA = /^[a-f0-9]{40}$/i;
+const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/;
+
+/**
+ * Auto, non-ui code cards in `merge` that either wait for the project merge slot or hold it in ready / updating, with a
+ * passing review on the current head. A frozen queue, a manual / observe card (PM hold) or an unknown merge intent is never a candidate.
+ */
+export function trainCandidates(db: Database, project: string): TrainCandidate[] {
+  if (getMeta(db, project).queueFrozen.frozen) return [];
+  const rows = db.query(`SELECT t.id FROM tasks t JOIN task_workflows w ON w.taskId = t.id WHERE t.project = ? AND t.stage = 'merge'
+    AND t.kind = 'code' AND w.mode = 'auto' AND w.template != 'ui' AND w.specRev = t.specRev ORDER BY t.updatedAt, t.id`).all(project) as { id: string }[];
+  const out: TrainCandidate[] = [];
+  for (const { id } of rows) {
+    const task = getTask(db, id);
+    if (!task || !SHA.test(task.headSHA ?? "") || !PR_URL.test(task.pr ?? "") || !task.branch) continue;
+    const open = db.query(`SELECT i.id, i.status, m.phase FROM scheduler_intents i LEFT JOIN scheduler_merges m ON m.intentId = i.id
+      WHERE i.taskId = ? AND i.action = 'merge' AND i.status IN ('pending','submitted','unknown')`).all(id) as { status: string; phase: string | null }[];
+    if (open.some((i) => i.status === "unknown" || (i.phase && !["ready", "updating"].includes(i.phase)))) continue;
+    const review = currentReviewFacts(task, listEvents(db, { project, target: id }));
+    if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
+      review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) continue;
+    out.push({ taskId: id, prRef: task.pr!, head: task.headSHA! });
+  }
+  return out;
+}
+
+/** merged = its own merge run recorded the merge at this head; gone = it left the train's reach (head, stage, PM hold). */
+export function memberStatusOf(db: Database, taskId: string, head: string): MemberStatus {
+  const merged = db.query(`SELECT mergeSha FROM scheduler_merges WHERE taskId = ? AND lower(reviewedHead) = lower(?) AND phase = 'merged'
+    AND mergeSha IS NOT NULL ORDER BY updatedAt DESC LIMIT 1`).get(taskId, head) as { mergeSha: string } | null;
+  if (merged) return { kind: "merged", sha: merged.mergeSha };
+  const task = getTask(db, taskId);
+  const mode = (db.query("SELECT mode FROM task_workflows WHERE taskId = ?").get(taskId) as { mode: string } | null)?.mode;
+  if (!task || task.stage !== "merge") return { kind: "gone", why: `阶段 ${task?.stage ?? "缺卡"}` };
+  if (task.headSHA?.toLowerCase() !== head.toLowerCase()) return { kind: "gone", why: `head 变成 ${task.headSHA?.slice(0, 12)}` };
+  if (mode !== "auto") return { kind: "gone", why: `流程改为 ${mode ?? "缺流程"}` };
+  return { kind: "waiting" };
+}
+
+export interface TrainContext { gh: TrainGh; store: TrainStore }
+/** The production context; null in a test process so no test ever reaches GitHub or the real state dir through a default. */
+const defaultTrainContext = (gh: () => TrainGh = () => trainGh()): TrainContext | null =>
+  isTestProcess() ? null : { gh: gh(), store: fileTrainStore() };
+
+/** The context the merge driver's external uses: its gh calls go through the same (guarded) command as every other merge call. */
+export const trainContext = (command: Parameters<typeof trainGh>[0]): TrainContext | null => defaultTrainContext(() => trainGh(command));
+
+type Notify = (task: LedgerTask, text: string) => Promise<void>;
+export interface TrainTickDeps { notifyPm: Notify; now(): number }
+
+/** One train step per project per pass; a GitHub hiccup is logged and retried next pass, a stop still ends the pass. */
+export async function mergeTrainTick(db: Database, projects: readonly string[], deps: TrainTickDeps,
+  ctx: TrainContext | null = defaultTrainContext(), requiredChecks: (project: string) => readonly string[] | null = configChecks): Promise<void> {
+  if (!ctx || !db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return;
+  for (const project of projects) {
+    try {
+      const required = requiredChecks(project);
+      if (!required?.length) continue;
+      const train: TrainDeps = { ...ctx, now: deps.now, requiredChecks: required, memberStatus: (id, head) => memberStatusOf(db, id, head),
+        notify: async (s, text) => {
+          const task = s.members.map((m) => getTask(db, m.taskId)).find(Boolean);
+          if (task) await deps.notifyPm(task, text).catch((e) => console.error(`⚠️ [merge-train] PM 通知没发出去（状态文件已记）：${(e as Error).message}`));
+        } };
+      const live = ctx.store.load(project);
+      if (live && live.phase !== "done") await stepTrain(live, train);
+      else await formTrain(project, trainCandidates(db, project), train, (c) => cachedFiles(ctx.gh, c), nextSkip(live));
+    } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      console.error(`⚠️ [merge-train] ${project}：${(e as Error).message}`);
+    }
+  }
+}
+
+/** File lists per PR head: without it every pass with no formable batch would re-list every queued PR. */
+const filesSeen = new Map<string, string[] | null>();
+async function cachedFiles(gh: TrainGh, c: TrainCandidate): Promise<string[] | null> {
+  const key = `${c.prRef} ${skipKey(c)}`;
+  if (filesSeen.has(key)) return filesSeen.get(key)!;
+  const files = await gh.prFiles(c.prRef);
+  if (filesSeen.size >= 500) filesSeen.clear();
+  filesSeen.set(key, files);
+  return files;
+}
+
+function configChecks(project: string): readonly string[] | null {
+  const config = readSchedulerConfig();
+  return config.enabled ? config.projects[project]?.requiredChecks ?? null : null;
+}
+
+/** The driver-facing hook: `train` answers trainGate, `merge` uses `--match-head-commit` for a member the train verified. */
+export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = defaultTrainContext()): MergeExternal {
+  if (!ctx) return base;
+  const io = { ...ctx, now: Date.now, notify: async () => {} };
+  return {
+    ...base,
+    train: (run: MergeRun, mainHead: string) => trainGate(ctx.store.load(run.project), run, mainHead, io),
+    async merge(prRef, head) {
+      return clearedMember(ctx.store.all(), prRef, head) ? ctx.gh.mergeMatchHead(prRef, head) : base.merge(prRef, head);
+    },
+  };
+}
