@@ -7,13 +7,13 @@ nginx 新增一个只反代台账 API 的 server 块，证书复用主机上已�
 |---|---|
 | `deploy.sh` | **开发机上跑**的入口：暂存源码 → rsync → 远端跑 `remote.sh` |
 | `remote.sh` | 远端安装 / 卸载步骤；经 `ssh <主机> bash -s` 从 stdin 传过去，远端不留副本 |
-| `closure.ts` | 用 bun 解析 `src/shared-ledger.ts` 的 import 闭包，得出要同步的源码清单（不手写清单） |
+| `closure.ts` | 用 bun 解析 `src/shared-ledger.ts` 与 `scripts/shared-ledger-admin.ts` 的 import 闭包，得出要同步的源码清单（不手写清单） |
 | `backup.ts` | 每日备份：`VACUUM INTO` 出一致性副本，保留 7 天 |
 
 ## 前置条件
 
 - 部署须经 owner 在部署授权卡上批准，由 PM 执行。
-- 开发机：`bun`、`git`、`rsync`、能免密 `ssh root@<主机>`。
+- 开发机：`bun`、`git`、`rsync`（GNU rsync 或 macOS 自带的 openrsync 都行：openrsync 不认 `--chmod`，`deploy.sh` 会探测后不带它，由远端把代码目录收成 755/644）、能免密 `ssh root@<主机>`。
 - 远端（systemd 发行版，如 Ubuntu 22.04+）：`nginx`（`conf.d/*.conf` 已被 `http {}` include）、`rsync`、`curl`、`journalctl`；
   - **系统级 bun ≥ 1.3**，默认找 `/usr/local/bin/bun`（不能在 `/root`、`/home` 下：单元开了 `ProtectHome`）。须提前安装，或用 `--bun <路径>` 指向已有的。
   - 已有 server 块的证书要覆盖新域名：通常复用 `server_name` 含 `*.<上级域>` 的通配站点证书；
@@ -38,13 +38,15 @@ systemctl list-timers claudestra-shared-ledger-backup.timer
 
 安装时依次：检查 bun 版本与现有 `nginx -t` → 建 `claudestra-ledger` 系统账号与目录 → 写三个 systemd 单元 → 启动 / 必要时重启 →
 回环健康检查（未签名请求应得 `401 bad_signature`；失败退出非 0 并打印日志尾部）→ 探测证书、写 nginx 块、`nginx -t`，通过才 reload
-（不通过就删掉本次新写的文件、或恢复本脚本的上一版，退出非 0）→ 经本机 443 自检新入口（API 路径 401、其他 404）。
+（不通过就删掉本次新写的文件、或恢复本脚本的上一版，退出非 0）→ 经本机 443 自检新入口（API 路径 401、`GET /v1/join` 405、其他 404）。
 
 ## 装到哪里
 
 | 路径 | 内容 | 属主 / 权限 |
 |---|---|---|
 | `/opt/claudestra-shared-ledger/` | 中心源码（import 闭包）+ `backup.ts` + `.shared-ledger-commit` | root，755 / 644（服务只读） |
+| `/opt/claudestra-shared-ledger/scripts/shared-ledger-admin.ts` | 离线入组码管理脚本（其 import 闭包一并同步）；见下文「在中心主机上发入组码」 | 同上 |
+| `https://<域名>/v1/join` | 成员入组接口（`POST`，入组码换凭据）；nginx 单独放行、单独限流 | — |
 | `/var/lib/claudestra-shared-ledger/db/shared-ledger.sqlite` | 中心独立库（不与中继共用路径） | claudestra-ledger，目录 0700，库文件 0600（`UMask=0077`） |
 | `/var/backups/claudestra-shared-ledger/` | 每日备份 `shared-ledger-<UTC 时间>.sqlite` | claudestra-ledger，0700 / 0600 |
 | `/etc/systemd/system/claudestra-shared-ledger{.service,-backup.service,-backup.timer}` | 服务与备份 | root，644 |
@@ -54,10 +56,29 @@ systemctl list-timers claudestra-shared-ledger-backup.timer
 
 - 服务：只在 `127.0.0.1:<端口>` 监听（服务端本身只接受回环地址，单元再加 `IPAddressAllow=localhost`），`Restart=on-failure`，
   `MemoryMax` / `TasksMax` / `CPUQuota` 上限，`ProtectSystem=strict` 等加固，只有库目录可写。
-- nginx：只反代 `^/v1/teams/<team>/(features|commands|imports|projections)[/<id>]$`，其余 404；`client_max_body_size 1m`
-  （与服务端 1 MiB 上限一致）、`proxy_read_timeout 15s`、每客户端 IP `limit_req`。
+- nginx：只反代 `^/v1/teams/<team>/(features|commands|imports|projections)[/<id>]$` 和入组路径 `location = /v1/join`，其余 404；
+  `client_max_body_size 1m`（与服务端 1 MiB 上限一致，入组路径同样）、`proxy_read_timeout 15s`、每客户端 IP `limit_req`（API 每秒 2 次、burst 20）。
+  `/v1/join` 只放行 `POST`（其他方法 405），并用独立的、更严的 `limit_req`：每 IP 每分钟 10 次、burst 3，防爆破入组码。
+  路径与 JN1 的 `SHARED_LEDGER_JOIN_PATH`（`src/lib/shared-ledger-join.ts`）一致，测试核对。
 - 已知限制：服务端自己的限流按来源地址分桶，经 nginx 反代后来源都是 127.0.0.1，等于全体客户端共用一桶（每分钟 120 次）。
   每客户端限流目前靠 nginx 的 `limit_req`；团队请求量接近这个数时要先改服务端（按 `X-Forwarded-For` 分桶）。
+  入组接口同理：服务端每来源每分钟 10 次的入组限流经反代后是全体共用一桶，每 IP 的入组限流靠 nginx 那档。
+
+## 在中心主机上发入组码
+
+入组码离线发放：在中心主机上以服务账号直接打开中心库（不经 HTTP），码只显示一次，库里只存哈希。
+
+```sh
+sudo -u claudestra-ledger /usr/local/bin/bun /opt/claudestra-shared-ledger/scripts/shared-ledger-admin.ts invite \
+  --db /var/lib/claudestra-shared-ledger/db/shared-ledger.sqlite \
+  --team <团队> --project <项目> --person <成员> --code <成员代号> --role member --actions read,plan --ttl 24h [--credential-ttl 90d]
+
+# 查看 / 撤销
+sudo -u claudestra-ledger /usr/local/bin/bun /opt/claudestra-shared-ledger/scripts/shared-ledger-admin.ts list --db /var/lib/claudestra-shared-ledger/db/shared-ledger.sqlite
+sudo -u claudestra-ledger /usr/local/bin/bun /opt/claudestra-shared-ledger/scripts/shared-ledger-admin.ts revoke --db /var/lib/claudestra-shared-ledger/db/shared-ledger.sqlite <入组码 id>
+```
+
+成员拿到入组码后经 `https://<域名>/v1/join` 入组。脚本随每次部署同步（`rsync --delete`），不要手工往代码目录里拷文件，下次部署会被删掉。
 
 ## 回滚
 
@@ -80,4 +101,4 @@ systemctl list-timers claudestra-shared-ledger-backup.timer
 ## 测试
 
 `bun test tests/shared-ledger-deploy.test.ts`：假 ssh / rsync / systemctl / nginx / curl 桩放在 PATH 最前，远端文件系统挪到临时目录
-（`SHARED_LEDGER_FS_PREFIX`，仅测试用），不连任何主机。
+（`SHARED_LEDGER_FS_PREFIX`，仅测试用），不连任何主机。rsync 桩可模拟 GNU rsync 或 openrsync（遇到 `--chmod` 报 invalid argument）。
