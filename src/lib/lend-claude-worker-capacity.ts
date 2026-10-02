@@ -2,6 +2,7 @@
  * 出借 Claude 位：worker 用出借方本机已有的 Claude Code 登录（和本机新开 worker 一样），不要 setup-token。
  * 本机没登录 / 额度满时报 0 位并说原因——与 QP1 的 Codex 撞额度同一路：容量报 0，借入方就不派，lend status 写原因。
  * 判定缓存在进程里，过期后后台刷新，读的一方永远同步拿缓存；还没探过 = 先报 0（下一轮就有结果）。tests/lend-claude-capacity.test.ts。
+ * 跨进程（常驻出借循环 ↔ 一次性的推送收单进程）经 journal meta 共享同一份结论：lend-claude-ready.ts。
  */
 import type { Database } from "bun:sqlite";
 import type { LendEntry } from "./lend-config.js";
@@ -17,16 +18,18 @@ const CHECKING = "正在核对本机 Claude 登录";
 let cached: ClaudeReadiness | null = null;
 let inflight: Promise<ClaudeReadiness> | null = null;
 let warned: string | null = null;
+/** 一次性进程（推送收单）关掉：进程收完单就退，后台探的结果没人用，只会白跑一次 auth status、拖住退出 */
+let background = true;
 
-const claudeQuota = async (): Promise<QuotaView> => quotaViewOf((await readInventoryQuota()).claude);
+export const claudeQuota = async (): Promise<QuotaView> => quotaViewOf((await readInventoryQuota()).claude);
 
-/** 用 worker 同一份环境跑 `claude auth status --json`，返回原样输出；测试进程不跑真 CLI（结果随机器变） */
-export async function claudeAuthStatus(env: Record<string, string | undefined> = process.env): Promise<string> {
+/** 用 worker 同一份环境跑 `claude auth status --json`，返回原样输出；到 timeoutMs 强杀。测试进程不跑真 CLI（结果随机器变） */
+export async function claudeAuthStatus(env: Record<string, string | undefined> = process.env, timeoutMs = 15_000): Promise<string> {
   if (isTestProcess()) throw new Error("测试进程不探本机 Claude 登录");
   const bin = Bun.which("claude", { PATH: env.PATH ?? "" });
   if (!bin) throw new Error("找不到 Claude Code CLI");
   const childEnv = { ...pickWorkerEnv(env), ...(env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR } : {}) };
-  const proc = Bun.spawn([bin, "auth", "status", "--json"], { env: childEnv, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+  const proc = Bun.spawn([bin, "auth", "status", "--json"], { env: childEnv, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: timeoutMs });
   const [text] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
   return text;
 }
@@ -57,17 +60,23 @@ export function refreshClaudeReadiness(probe: () => Promise<string | null> = () 
 
 /** 同步读缓存；过期就在后台刷新。null = 还没探过 */
 export function claudeReadiness(now = Date.now()): ClaudeReadiness | null {
-  if (!cached || now - cached.at >= CLAUDE_READY_FRESH_MS) void refreshClaudeReadiness();
+  if (background && (!cached || now - cached.at >= CLAUDE_READY_FRESH_MS)) void refreshClaudeReadiness();
   return cached;
 }
 
-/** 等到一份新鲜结果（bridge 面板接口用）；缓存新鲜就直接给 */
-export async function freshClaudeReadiness(now = Date.now()): Promise<ClaudeReadiness> {
-  return cached && now - cached.at < CLAUDE_READY_FRESH_MS ? cached : refreshClaudeReadiness();
+/** 等到一份新鲜结果（bridge 面板接口、推送收单用）；缓存新鲜就直接给 */
+export async function freshClaudeReadiness(now = Date.now(), probe?: () => Promise<string | null>): Promise<ClaudeReadiness> {
+  return cached && now - cached.at < CLAUDE_READY_FRESH_MS ? cached : refreshClaudeReadiness(probe);
 }
 
-/** 外部已有的判定（测试桩 / 刚探过）直接记进缓存 */
+/** 外部已有的判定（测试桩 / 刚探过 / 别的进程写进 meta 的）直接记进缓存 */
 export function noteClaudeReadiness(r: ClaudeReadiness | null): void { cached = r; }
+
+/** 只读缓存，不触发刷新（跨进程同步用：没 Claude 授权的出借方不该因为同步就开始探） */
+export const cachedClaudeReadiness = (): ClaudeReadiness | null => cached;
+
+/** 本进程是一次性的：claudeReadiness 不再后台刷新，要结论的调用方自己 await freshClaudeReadiness。测试传 false 复原 */
+export function claudeReadinessOneShot(on = true): void { background = !on; }
 
 export function claudeLendSlots(entry: LendEntry | undefined, log: (s: string) => void = console.error): number {
   const slots = entry?.families.claude ?? 0;

@@ -13,6 +13,7 @@ import { advance, getMeta, liveOrders, patchOrder, setMeta, unsettledOrders, LEA
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
 import { claudeLendSlots, lendBlockedReason, lendPollCapacity } from "./lend-claude-worker-capacity.js";
+import { syncClaudeReadiness } from "./lend-claude-ready.js";
 import { admitOrders, pushKey, TICK_KEY } from "./lend-inbox.js";
 import { helloPeer, helloTargets, helloView, metaJson, protoKey, speaksV2, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
 import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
@@ -242,6 +243,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   if (bad) throw bad.reason;
   const paused = pausedUntil(d.db, d.now());
   p.status.blocked = p.blocked ?? lendBlockedReason(paused, eff.lend);
+  syncClaudeReadiness(d.db); // 推送收单在新进程里判 Claude 名额，靠 meta 拿到和本轮 hello 同一份结论（lend-claude-ready.ts）
   if (p.status.blocked) p.status.peers = {};
   setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };

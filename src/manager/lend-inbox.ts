@@ -6,6 +6,7 @@
  * 核对不过、没有授权、位满了一律回 ok + refused 码（A 立刻撤回重排），收单闸在 lib/lend-inbox.ts。tests/lend-inbox-cli.test.ts。
  */
 import { keyFingerprint } from "../lib/instance-key.js";
+import { primeInboxClaude, type InboxClaude } from "../lib/lend-claude-ready.js";
 import { admitOrders, type Admitted } from "../lib/lend-inbox.js";
 import { readLend } from "../lib/lend-config.js";
 import type { LendDeps } from "../lib/lend-drive.js";
@@ -31,6 +32,7 @@ export interface InboxDeps {
   journalPath?: string;
   readLend: LendDeps["readLend"];
   context: LendDeps["context"];
+  claude?: InboxClaude; // 当场探本机 Claude 的桩与时限（测试用）
 }
 
 const realDeps: InboxDeps = { env: process.env, findPeer: findHttpPeer, readLend: () => readLend(), context: () => readLendContext() };
@@ -55,7 +57,9 @@ export async function lendInbox(args: string[], deps: InboxDeps = realDeps): Pro
   try {
     const caller = { peer, fp: peerLendProblem(rec ?? undefined, peer) || !rec?.publicKey || keyFingerprint(rec.publicKey) !== fp ? null : fp };
     // 记录对不上（没钉钥、禁用、指纹不是钉住的那把）按「没有授权」整批拒：admitOrders 对 fp 为 null 的调用方一单不收
-    const r = await admitOrders({ db, now: () => Date.now(), readLend: deps.readLend, context: deps.context }, caller, req.value.orders, "push");
+    const d = { db, now: () => Date.now(), readLend: deps.readLend, context: deps.context };
+    await primeInboxClaude(d, caller, req.value.orders, deps.claude); // 本进程刚起、Claude 缓存是空的：先对齐常驻循环的结论，否则 Claude 单恒 no_slot
+    const r = await admitOrders(d, caller, req.value.orders, "push");
     return { ok: true, ...r };
   } finally { db.close(); }
 }
