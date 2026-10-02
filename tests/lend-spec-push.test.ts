@@ -176,7 +176,7 @@ describe("验收 2：推送内容带密钥 / 内网地址：不推，PM 收到�
     expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused"]);
     expect(notices.filter((n) => n.includes(orderId) && n.includes("没推给对方"))).toHaveLength(1);
     // 拒过的这段不再推；之后干净的追加照常推
-    appendFileSync(spec, "\n- 干净的一条\n");
+    appendFileSync(spec, "\n# 干净章节\n- 干净的一条\n");
     await relay();
     expect(toWorker()).toHaveLength(1);
     expect(toWorker()[0]!.text).toContain("干净的一条");
@@ -293,5 +293,48 @@ test.each(["  ", ""])("relay-sensitive-context: repeated blank continuations kee
     await relay();
   }
   expect(toWorker()).toEqual([]);
+  expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused", "refused", "refused"]);
+});
+
+test.each([
+  ["password:\n", "\n- x\n"],
+  ["api_key:\n", "\n- placeholder-value\n"],
+  ["password:", "\n\n- x\n"],
+])("relay-sensitive-context-r2: refused section blocks YAML sequence (%j)", async (field, value) => {
+  const orderId = await claimed();
+  appendFileSync(spec, field);
+  await relay();
+  const before = notices.length;
+  appendFileSync(spec, value);
+  await relay();
+  expect(toWorker()).toEqual([]);
+  expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused", "refused"]);
+  expect(notices.length).toBe(before + 1);
+});
+
+test("relay-sensitive-context-r2: only new heading releases refused section", async () => {
+  const orderId = await claimed();
+  appendFileSync(spec, "password:\n");
+  await relay();
+  appendFileSync(spec, "\n# 新标题\n普通说明\n");
+  await relay();
+  expect(toWorker()).toHaveLength(1);
+  expect(toWorker()[0]!.text).toContain("普通说明");
+  expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused", "sent"]);
+});
+
+test("relay-sensitive-context-r2: persisted refusal blocks changed text and whitespace until heading", async () => {
+  const orderId = await claimed();
+  appendFileSync(spec, "password:\n");
+  await relay();
+  writeFileSync(spec, (await Bun.file(spec).text()).replace("password:", "ordinary:"));
+  const before = notices.length;
+  appendFileSync(spec, "\n");
+  await relay();
+  appendFileSync(spec, "- plain placeholder\n");
+  await relay();
+  await relay();
+  expect(toWorker()).toEqual([]);
+  expect(notices.length).toBe(before + 2);
   expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused", "refused", "refused"]);
 });

@@ -95,7 +95,7 @@ registerDevSection("composer-tune", ({ gui, onTick }) => {
 
 - **dev-only 代码只能在 `web/features/devtools/`**，或在业务代码里以一行 `devCount("x")`（开着才计数）/ `if (isDevMode())` 接入。不引新的调试库；stats.js 与 lil-gui 已经在了。
 - 大文件（chat.tsx / chat-store.ts / message-list.tsx）被 guard 锁成只能变短：往里加接入点要同时省出等量的行；能从已有的全局信号拿到的（`cstra:commit-burst` 事件、`__cstraProduceTrail`）就别加计数点。
-- 仓库根的 `scripts/guard` 同样管这里：新文件 ≤400 行、函数 ≤100 行（useEffect 回调也算函数）、`catch` 必须写清为什么丢了没事。面板本体因此拆成 dev-meters / dev-panel-sections / dev-overlay 三块。
+- 仓库根的 `scripts/guard` 同样管这里：新文件 ≤800 行、函数 ≤100 行（useEffect 回调也算函数）、`catch` 必须写清为什么丢了没事。面板本体因此拆成 dev-meters / dev-panel-sections / dev-overlay 三块。
 - 面板 portal 到 `document.body`，任何浮层都不要塞进 `chat.tsx` 的横滑 transform 容器（容器规则 5b）。
 - 分区里不要写 localStorage；调参是一次性的，定稿进代码。
 - `PerformanceObserver` / `visualViewport` / `navigator.standalone` 在 Safari 上缺哪些已在内置分区标出 n/a，注册新读数时同样做能力检测，别让面板在 iOS 上抛错。

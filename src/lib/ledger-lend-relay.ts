@@ -99,10 +99,10 @@ function relayText(o: ClaimedRow, kind: "spec" | "answer", part: string): string
 }
 
 /** 一段新内容：过闸（拒了记 refused + 告诉 PM），太长按行分段，每段一个 key */
-function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey: string, label: string, body: string, now: number, out: Notice[], context = body): void {
+function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey: string, label: string, body: string, now: number, out: Notice[], context = body, blocked = false): void {
   const tell = (why: string) => out.push({ project: o.project, taskId: o.taskId,
     text: `出借单 ${o.orderId}（${o.taskId}，${o.peer}）的${label}没推给对方：${why}。要转就脱敏后手动 send_to_agent ${workerAddr(o)}` });
-  const bad = peerTextRefusal(context);
+  const bad = blocked ? "同一章节已有追加被拒，等新的 # 标题后才恢复外发" : peerTextRefusal(context);
   if (bad) {
     if (enqueue(db, { key: baseKey, orderId: o.orderId, taskId: o.taskId, project: o.project, kind, target: workerAddr(o), text: "" }, "refused", bad, now)) tell(`外发闸拒了（${bad}）`);
     return;
@@ -118,15 +118,22 @@ function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey:
     kind, target: workerAddr(o), text: relayText(o, kind, p.slice(p.indexOf("\n") + 1)) }, "pending", null, now));
 }
 
-/** Only an explicit new heading, list item or field closes context; blank lines alone can be part of a value. */
-function specContext(spec: string, offset: number): string {
+/** Persisted refused ranges taint their whole section; only a new # heading releases it, never YAML list syntax. */
+function specContext(db: Database, orderId: string, spec: string, offset: number): { text: string; blocked: boolean } {
   const prior = Buffer.from(spec, "utf8").subarray(0, offset).toString("utf8");
   let start = 0;
-  for (const match of spec.matchAll(/\n[ \t]*\n(?=(?:#{1,6} |[-*+] |[A-Za-z_][\w.-]*[ \t]*:))/g)) {
-    if (match.index > prior.length) break;
-    start = match.index + match[0].length;
+  for (const match of spec.matchAll(/^#.*$/gm)) {
+    if (match.index > prior.length && spec.slice(prior.length, match.index).trim()) break;
+    start = match.index;
+    if (match.index >= prior.length) break;
   }
-  return spec.slice(start);
+  const sectionBytes = Buffer.byteLength(spec.slice(0, start));
+  const refused = db.query("SELECT key FROM lend_relays WHERE orderId = ? AND kind = 'spec' AND state = 'refused'").all(orderId) as { key: string }[];
+  const blocked = refused.some(({ key }) => {
+    const range = /:spec:(\d+)-(\d+)$/.exec(key);
+    return range !== null && Number(range[2]) > sectionBytes && Number(range[2]) <= offset;
+  });
+  return { text: spec.slice(start), blocked };
 }
 
 /**
@@ -149,8 +156,9 @@ export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerT
         const bytes = Buffer.from(spec, "utf8");
         if (bytes.length > o.specBytes) {
           const added = bytes.subarray(o.specBytes).toString("utf8");
-          if (added.trim()) addPiece(db, o, "spec", `${o.orderId}:spec:${o.specBytes}-${bytes.length}`, "规格追加",
-            added.replace(/^\n+|\s+$/g, ""), now, out, specContext(spec, o.specBytes));
+          const context = specContext(db, o.orderId, spec, o.specBytes);
+          if (added.trim() || context.blocked) addPiece(db, o, "spec", `${o.orderId}:spec:${o.specBytes}-${bytes.length}`, "规格追加",
+            added.replace(/^\n+|\s+$/g, ""), now, out, context.text, context.blocked);
         } else if (bytes.length < o.specBytes) {
           out.push({ project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId}）持单期间规格文件变短了（${o.specBytes} → ${bytes.length} 字节）：只有追加会自动推，改过的地方请手动转给 ${workerAddr(o)}` });
         }
