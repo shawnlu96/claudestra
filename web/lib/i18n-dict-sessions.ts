@@ -2,6 +2,10 @@
  * 侧栏「未纳管会话」与归档的 i18n 词条，由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
  */
 export const SESSIONS_DICT: Record<string, string> = {
+  "主管 PM": "Lead PM",
+  "切到 {name}": "Switch to {name}",
+  "主管 PM 已切到 {name}": "Lead PM switched to {name}",
+  "体检中…": "Checking…",
   "未纳管会话": "Unmanaged sessions",
   "没有未纳管的会话": "No unmanaged sessions",
   "会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）": "Session file written in the last 2 minutes — probably still running (heuristic)",
