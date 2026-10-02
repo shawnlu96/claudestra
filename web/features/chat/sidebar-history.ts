@@ -13,17 +13,20 @@ import type { AgentSession } from "./type";
 export const HISTORY_MS = 24 * 3600_000;
 /** 审查 / 执行会话的名字前缀(派单工具起的名) */
 export const DISPATCHED_PREFIXES = ["review-", "rv-", "agent-task-", "agent-lend-"] as const;
+/** 前端会话名去掉了 bridge 的 `agent-`(lib/chat/agents.ts uiAgentName)：agent-task-f00d 到这里是 task-f00d。
+ *  去前缀后只认「task- / lend- + 十六进制单号」，免得把用户自建的 lend-pm 之类算进来 */
+const STRIPPED_SESSION = /^(task|lend)-[0-9a-f]+$/;
 
 /** 列表里谁派了人(= 是别人的 parent)：这些是 PM / 调度器，不按「派出的会话」判 */
 export function dispatcherNames(list: AgentSession[]): Set<string> {
   return new Set(list.map((a) => a.parent).filter((p): p is string => !!p));
 }
 
-/** 派出的会话：名字带审查 / 执行前缀，或有派发者但自己没再派人 */
+/** 派出的会话：名字带审查 / 执行前缀，或有派发者；自己又派了人的(PM / 调度器)不算 */
 export function isDispatchedSession(a: AgentSession, dispatchers: ReadonlySet<string> = new Set()): boolean {
-  if (a.pinnedMaster) return false;
-  if (DISPATCHED_PREFIXES.some((p) => a.name.startsWith(p))) return true;
-  return !!a.parent && !dispatchers.has(a.name);
+  if (a.pinnedMaster || dispatchers.has(a.name)) return false;
+  if (DISPATCHED_PREFIXES.some((p) => a.name.startsWith(p)) || STRIPPED_SESSION.test(a.name)) return true;
+  return !!a.parent;
 }
 
 export function isHistoryAgent(a: AgentSession, now: number = Date.now(), dispatchers?: ReadonlySet<string>): boolean {

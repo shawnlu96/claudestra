@@ -45,6 +45,10 @@ describe("isHistoryAgent（判定）", () => {
     for (const n of ["review-cc-1", "rv-2", "review-cx-3", "agent-task-4", "agent-lend-5"]) {
       expect(isHistoryAgent(ag(n, old), NOW)).toBe(true);
     }
+    // 前端去掉了 agent- 前缀的执行会话名(lib/chat/agents.ts)：task-f00d / lend-85a0d64ad2 也算；用户起的 lend-pm 不算
+    expect(isHistoryAgent(ag("task-f00d", old), NOW)).toBe(true);
+    expect(isHistoryAgent(ag("lend-85a0d64ad2", old), NOW)).toBe(true);
+    expect(isHistoryAgent(ag("lend-pm", old), NOW)).toBe(false);
     // 活着、23 小时：还不是
     expect(isHistoryAgent(ag("review-1", { lastActivityTs: NOW - 23 * H }), NOW)).toBe(false);
     // 活着、刚建还没说话：不是
