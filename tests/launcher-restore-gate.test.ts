@@ -55,7 +55,7 @@ describe("launcher restore gate", () => {
       await gate.restart(broken, failed);
     }
     expect(await make().select([broken, healthy])).toEqual([healthy]);
-    expect(alerts).toHaveLength(1);
+    expect(alerts).toHaveLength(2);
   });
 
   test("three failures of different kinds stop the fourth round across restarts", async () => {
@@ -67,8 +67,8 @@ describe("launcher restore gate", () => {
       expect(await gate.restart(agent, run)).toBeTruthy();
     }
     for (let i = 0; i < 4; i++) expect(await make().select([agent])).toEqual([]);
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toContain(agent.name);
+    expect(alerts).toHaveLength(2);
+    expect(alerts[1]).toContain(agent.name);
     expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(3);
   });
 
@@ -81,15 +81,15 @@ describe("launcher restore gate", () => {
     await make().restart(agent, failed);
     expect(await make().select([agent])).toEqual([agent]);
     expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(1);
-    expect(alerts).toHaveLength(0);
+    expect(alerts).toHaveLength(2);
   });
 
-  test.each(["active", "created", "sessionId"])("observed %s change unlocks an agent", async (change) => {
+  test.each(["ready", "created", "sessionId"])("observed %s change unlocks an agent", async (change) => {
     const agent = dead(), gate = make();
     for (let i = 0; i < 3; i++) await gate.restart(agent, failed);
     expect(await make().select([agent])).toEqual([]);
-    const next = change === "active" ? agent : { ...agent, [change]: "new-generation" };
-    if (change === "active") expect(await make().select([{ ...agent, status: "active" }])).toEqual([]);
+    const next = change === "ready" ? agent : { ...agent, [change]: "new-generation" };
+    if (change === "ready") expect(await make().select([{ ...agent, status: "active", runtime: "claude-code", idle: true }])).toEqual([]);
     expect(await make().select([next])).toEqual([next]);
     await make().restart(next, failed);
     expect(await make().select([next])).toEqual([next]);
@@ -128,16 +128,112 @@ describe("launcher restore gate", () => {
   });
 
   test("corrupt state fails closed without overwriting its evidence", async () => {
-    for (const raw of ["broken-json", '{"version":1,"agents":{"x":{"failures":-1}}}']) {
+    const invalidCount = { generation: "same", failures: 4, missingAlert: false, failureAlert: false };
+    for (const raw of ["broken-json", '{"version":1,"agents":{"x":{"failures":-1}}}', JSON.stringify({ version: 1, agents: { x: invalidCount } })]) {
       writeFileSync(path, raw);
-      await expect(make().select([dead()])).rejects.toThrow("launcher restore gate");
+      expect(await make().select([dead()])).toEqual([]);
+      expect(await make().select([dead()])).toEqual([]);
+      expect(alerts).toHaveLength(1);
       expect(readFileSync(path, "utf8")).toBe(raw);
     }
   });
 
   test("state-lock contention skips restores instead of writing unlocked", async () => {
     const lock = await acquireLock(`${path}.lock`);
-    try { await expect(make().select([dead()])).rejects.toThrow("state lock unavailable"); }
+    try {
+      expect(await make().select([dead()])).toEqual([]);
+      expect(await make().select([dead()])).toEqual([]);
+      expect(alerts).toHaveLength(1);
+    }
     finally { lock?.release(); }
+    expect(await make().select([dead()])).toEqual([dead()]);
+  });
+
+  test.each([undefined, false])("transient active with idle=%s never erases failed attempts", async (idle) => {
+    const agent = dead();
+    let runs = 0;
+    for (let round = 0; round < 5; round++) {
+      const gate = make();
+      for (const a of await gate.select([agent])) {
+        await gate.restart(a, async () => { runs++; return failed(); });
+      }
+      await gate.select([{ ...agent, status: "active", runtime: "claude-code", idle }]);
+    }
+    expect(runs).toBe(3);
+    expect(await make().select([agent])).toEqual([]);
+    expect(alerts).toHaveLength(2); // First failure and the third-failure stop, once each.
+  });
+
+  test.each(["pi", "codex", undefined])("%s synthetic idle does not prove a successful recovery", async (runtime) => {
+    const agent = dead(), gate = make();
+    for (let i = 0; i < 3; i++) await gate.restart(agent, failed);
+    await gate.select([{ ...agent, status: "active", idle: true, runtime }]);
+    expect(await make().select([agent])).toEqual([]);
+  });
+
+  test.each(["dead", "active"])("a repaired cwd re-arms its missing alert while %s across launcher restarts", async (status) => {
+    const agent = { ...dead(), cwd: join(root, "repaired") };
+    expect(await make().select([agent])).toEqual([]);
+    mkdirSync(agent.cwd);
+    const repaired = { ...agent, status };
+    expect(await make().select([repaired])).toEqual(status === "dead" ? [repaired] : []);
+    rmSync(agent.cwd, { recursive: true });
+    expect(await make().select([agent])).toEqual([]);
+    expect(await make().select([agent])).toEqual([]);
+    expect(alerts).toHaveLength(2);
+  });
+
+  test("storage failure after restart keeps the attempt and does not abort the remaining wave", async () => {
+    const first = dead(), second = dead("agent-second");
+    let lock: Awaited<ReturnType<typeof acquireLock>>;
+    const gate = make(async (text) => { alerts.push(text); lock?.release(); return true; });
+    const results: (string | null)[] = [];
+    for (const a of await gate.select([first, second])) {
+      results.push(await gate.restart(a, async () => {
+        if (a.name === first.name) { lock = await acquireLock(`${path}.lock`); return failed(); }
+        return success();
+      }));
+    }
+    expect(results[0]).toBeTruthy();
+    expect(results[1]).toBeNull();
+    expect(alerts).toHaveLength(1);
+    expect(JSON.parse(readFileSync(path, "utf8")).agents[first.name].failures).toBe(1);
+    await gate.restart(first, failed);
+    await gate.restart(first, failed);
+    expect(await make().select([first, second])).toEqual([second]);
+  });
+
+  test("post-run corrupt state is reported without throwing or overwriting the evidence", async () => {
+    const gate = make();
+    expect(await gate.restart(dead(), async () => {
+      writeFileSync(path, "broken");
+      return failed();
+    })).toBeTruthy();
+    expect(await make().select([dead()])).toEqual([]);
+    expect(alerts).toHaveLength(1);
+    expect(readFileSync(path, "utf8")).toBe("broken");
+  });
+
+  test("state corruption re-arms its alert only after repair", async () => {
+    writeFileSync(path, "broken");
+    expect(await make().select([dead()])).toEqual([]);
+    writeFileSync(path, JSON.stringify({ version: 1, agents: {} }));
+    expect(await make().select([dead()])).toEqual([dead()]);
+    writeFileSync(path, "broken again");
+    expect(await make().select([dead()])).toEqual([]);
+    expect(alerts).toHaveLength(2);
+  });
+
+  test("first-failure alerts retain their 30-minute cooldown across launcher restarts", async () => {
+    const agent = dead();
+    await make().restart(agent, failed);
+    expect(alerts).toHaveLength(1);
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    state.agents[agent.name].lastFailureAlert = Date.now() - 31 * 60_000;
+    writeFileSync(path, JSON.stringify(state));
+    await make().restart(agent, failed);
+    expect(alerts).toHaveLength(2);
+    await make().restart(agent, failed);
+    expect(alerts).toHaveLength(3); // The stop alert is independent of the per-failure cooldown.
   });
 });

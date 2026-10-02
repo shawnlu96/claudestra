@@ -1,13 +1,16 @@
-# i28-V1p · specRev 2 自查
+验收线自查：
+1. cwd 缺失：不 restart；日志和控制频道告警持久去重；目录恢复后再次缺失可重新告警。覆盖多轮、重建 launcher、并发检查及通知失败。
+2. 连续失败 3 次停止：启动前在文件锁内持久登记尝试，成功清零；失败后只报 active 不再清零。created/sessionId 等换代或 Claude Code 的 active+真实 idle 就绪可解除；Pi/Codex 恒真 idle 不作为就绪证据。回归循环 5 轮仅 restart 3 次；第 4 轮起不再调用。
+3. 正常 dead 恢复保持；launcher.ts 本轮零修改（1157 行），开机波租约与收尾冷却逻辑未改。
+4. 相关测试 53 pass / 0 fail；根 tsc --noEmit 通过；GUARD_STRICT=1 guard 通过；bridge/channel-server/manager/launcher/cron/setup 六入口 build 通过。全量 check 结果见下方，PR head 三项 CI 由合并闸核对。
 
-订单：lend:i28-V1p:s2:r1:a2。基线 625b82dd72423d05d9cb65282fd40e6a4ceb8c3d，仅修改 lend/i28-V1p-9109；不自行 push。
+上一轮问题逐条：
+- P1 reset-on-active：要求真实就绪或换代，残留进程仅 active 不解除；增加 active→dead 和 hook runtime 假 idle 测试。
+- P2 fail-closed-all：坏 JSON/非法结构/锁超时保持拒写并跳过恢复，另用原子目录标记持久去重控制频道故障告警；写明文件、修复文件/锁、巡检会重试。故障修复后自动恢复并重置该告警。保留坏文件证据，不盲目清空熔断计数。
+- P2 restart-throw-aborts-wave：提前登记尝试；运行后事务失败在 gate 内捕获并告警，返回实际结果，不抛到外层打断恢复波。测试覆盖运行后持锁超时、下一 agent 继续、计数不丢，以及运行后状态损坏。
+- P2 per-failure-alert-removed：恢复首次失败告警，30 分钟按 agent 冷却且持久化；三次熔断告警独立于冷却。
+- P2 missing-alert-sticky：检测到目录恢复就重新允许下一次缺失告警，跨 launcher 重建回归通过。
 
-1. 总览体积：50/500 张已完成 + 30 张在跑分别 53,171/53,193 B，差 22 B。补充 overview-deps 场景：1 张在跑依赖 50/500 张已完成为 20,030/20,035 B，差 5 B。最近窗口 30 张，依赖窗口按完成时间另保留至多 30 张；窗口外聚合计数，deps 两端均在总览才返回；详情保留全量依赖。
-2. 分页：固定快照每页 7/50/100 张验证游标连续、同毫秒次序、不重不漏；已有窗口移动补段测试通过。分页后子 DAG 已完成节点状态正确。cursor-backfill 按 PM 仲裁不修改。
-3. **生产字节数待 PM 实测**。出借机没有该生产库；PM 已在 ask_muq0t0sq909c546cf0 答复中明确：生产库不外发，本项改为 PM 合并后经中继实测。上述数据为测试库测量，不冒充生产值。
-4. 截图：ledger/reviews/i28-V1p-shots/，浅/深色 × 手机 390px/桌面 × 首屏/翻页，共 8 张。真实 Chromium 渲染 MobileList/Outline，真实读侧函数处理夹具请求；手机首屏及分页项均有步骤点，无横向溢出、无 pageerror。真实分页请求模拟 503：保留已有行，约 2 秒后自动重试同一游标成功。
-5. 根 tsc 0 error、guard 通过；web tsc 0 error，全 web eslint 0 error（34 warnings），改动的 web 文件 eslint 0 warning。针对性 6 文件 72 测试通过，浏览器 4 测试通过。bun run check 全量结果：9875 pass、9 skip、113 fail（750 文件）；失败含 DAG 开工/放置、usage-cache-write、出借身份相关权限测试，其中两文件单独运行也复现 11 fail；未改这些模块，全量以 PR CI 三项为准。
-6. today-cap：今日完成和最近窗口同限 30；额外依赖不能绕过今日上限。当天 50/500 张 + 30 在跑为 74,097/74,102 B，差 5 B。分页查询步骤行，返回 stepLine；手机「更早完成」显示分页卡步骤点，涵盖当日溢出卡。
-7. 跨时区：服务端 Asia/Shanghai、浏览器 America/Los_Angeles；在服务端昨日、浏览器今日完成的卡，首屏和翻页均有步骤点。保留客户端 dayStart；分页步骤点不按服务器零点裁剪。
+边界：状态不可读/不可加锁时仍暂停自动恢复并告警，修复后重试；若启动成功但结果落盘失败，保留预登记尝试，等待后续明确就绪/换代，避免失去熔断保护。未修改范围外源码，未 push。
 
-范围：代码与测试全部在 fileGlobs 内；没有新增范围外 web 接入口。截图与本交付文件按要求附带。
+全量本机检查：已跑 bun run check，根 tsc 通过，测试 10678 pass / 20 skip / 114 fail，未全绿；失败涉及 dag-tools、lend/权限身份、usage-cache-write、acp-host、peer-e2e-gates 等未改模块，未逐项定因。本机 Bun 1.3.10，CI 配置 1.3.14。check 因测试失败未到 guard，另跑严格 guard 通过。最终改动另跑相关 53 项测试、根 tsc、严格 guard、六入口 build 均通过；不替代 PR head CI。
