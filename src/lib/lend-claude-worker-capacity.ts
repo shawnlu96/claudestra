@@ -5,7 +5,7 @@
  * 跨进程（常驻出借循环 ↔ 一次性的推送收单进程）经 journal meta 共享同一份结论：lend-claude-ready.ts。
  */
 import type { Database } from "bun:sqlite";
-import type { LendEntry } from "./lend-config.js";
+import { LEND_ROLES, type LendEntry } from "./lend-config.js";
 import { LEASED_STATES, openSlots, ordersToday } from "./lend-journal.js";
 import { pausedUntil, quotaViewOf, type QuotaView } from "./lend-health.js";
 import { readInventoryQuota } from "./ai-quota.js";
@@ -123,6 +123,6 @@ export function lendPollCapacity(e: LendEntry, db: Database, now: number) {
   const busy = (family: string) => (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ?
     AND state IN (${LEASED_STATES.map(() => "?").join(",")})`).get(e.peer, family, ...LEASED_STATES) as { n: number }).n;
   return { families: { codex: pausedUntil(db, now) === null ? e.families.codex ?? 0 : 0, claude: claudeLendSlots(e) },
-    busy: { codex: busy("codex"), claude: busy("claude") }, roles: e.roles, repos: e.repos,
+    busy: { codex: busy("codex"), claude: busy("claude") }, roles: [...LEND_ROLES], repos: e.repos,
     ordersLeftToday: Math.max(0, e.ordersPerDay - ordersToday(db, e.peer, now)) };
 }

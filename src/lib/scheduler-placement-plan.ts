@@ -1,3 +1,5 @@
+import { peerFacts } from "./scheduler-agent-pool-peer.js";
+import { agentPoolReview, agentPoolWork } from "./scheduler-agent-pool-plan.js";
 import { localReviewFallback } from "./scheduler-local-families-placement.js";
 /**
  * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
@@ -29,9 +31,7 @@ function locksFree(s: PlannerSnapshot): boolean {
     mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
 }
 
-/** borrowPeers' row as placeFor reads it; start_node uses it too, so neither entry can drop a field (the tier) the other keeps. */
-export const peerFacts = (x: PoolFacts["peers"][number]): PeerFacts =>
-  ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null, ...(x.priority ? { priority: x.priority } : {}) });
+export { peerFacts } from "./scheduler-agent-pool-peer.js";
 
 /** room per role: a review needs a reviewer under the cap; writing needs the card's own worker slot or a free one (dispatchWork's gate). */
 function snapshotPlacementFacts(s: PlannerSnapshot, since: number, role: PlaceRole): PlacementFacts {
@@ -73,6 +73,7 @@ const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审�
  */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
   const p = s.pool;
+  if (p?.remote.agents) return agentPoolReview(s, since);
   if (!p || p.remote.mode === "off") return localReviewFallback(s);
   return poolReview(s, p, since) ?? (p.remote.localPriority === "off" && s.workflow ? { wait: LOCAL_OFF } : null);
 }
@@ -108,6 +109,7 @@ const LOCAL_OFF_RESTATE = "scheduler.json remote.localPriority = off：本机不
  */
 export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
   if (!s.workflow) return null;
+  if (s.pool?.remote.agents) return agentPoolWork(s, since, role, locksFree(s));
   const pinned = cardPin(s.task.extra);
   if (!pinned && s.task.stage === "spec") {
     return s.pool?.remote.localPriority === "off" ? offRestate(snapshotPlacementFacts(s, since, "write"), s.workflow.authorFamily) : null;
@@ -130,7 +132,7 @@ export function orderFamily(s: PlannerSnapshot, peer: string, role: PlaceRole): 
   if (!s.workflow) return null;
   if (role === "review") return otherFamily(s.workflow.authorFamily);
   const p = s.pool?.peers.find((x) => x.peer === peer);
-  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies) : null;
+  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies, !!s.pool?.remote.agents) : null;
 }
 
 /**

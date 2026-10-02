@@ -24,7 +24,7 @@ describe("manager lend / borrow 接线", () => {
   };
   const file = () => JSON.parse(readFileSync(join(state, "lend.json"), "utf8"));
 
-  test("缺省关；grant 只认联系人、钉指纹、执行者被拒、到期时间必填且 ≤7 天、roles 不认得的值拒、--confirm 已退役；revoke 删条目", () => {
+  test("缺省关；grant 只认联系人、钉指纹、执行者被拒、到期时间必填且 ≤7 天、roles 忽略、--confirm 已退役；revoke 删条目", () => {
     const g = (...extra: string[]) => ["lend", "grant", "team-a", "--repos", "shawnlu96/claudestra", ...extra];
     expect(run(["lend", "status"])).toMatchObject({ ok: true, file: "missing", enabled: false, lending: false });
     expect(run(["lend", "grant", "stranger", "--repos", "shawnlu96/claudestra", "--until", "3d"])).toMatchObject({ ok: false, error: expect.stringContaining("不在联系人里") });
@@ -33,17 +33,27 @@ describe("manager lend / borrow 接线", () => {
     expect(run(g())).toMatchObject({ ok: false, error: expect.stringContaining("到期时间") });
     expect(run(g("--until", "8d"))).toMatchObject({ ok: false, error: expect.stringContaining("最长 7 天") });
     expect(run(g("--until", "2999-01-01T00:00:00Z"))).toMatchObject({ ok: false, error: expect.stringContaining("最长 7 天") });
-    expect(run(g("--until", "3d", "--roles", "review,admin"))).toMatchObject({ ok: false, error: expect.stringContaining("admin") });
     expect(run(["lend", "set", "team-a", "--repos", "shawnlu96/claudestra", "--until", "3d", "--confirm", "auto"])).toMatchObject({ ok: false, error: expect.stringContaining("已退役") });
     expect(existsSync(join(state, "lend.json"))).toBe(false);
     const ok = run(["lend", "grant", "aaaa-bbbb-cccc-dddd", "--repos", "shawnlu96/claudestra", "--until", "3d"]);
     expect(ok).toMatchObject({ ok: true, warning: "这会让发起方的任务在你的用户下随时起 shell", lend: { peer: "team-a" } });
     expect(ok.message).toContain("这会让发起方的任务在你的用户下随时起 shell");
+    expect(ok.message).toContain("审查和写代码已不区分");
+    expect(ok.lend).not.toHaveProperty("roles");
     expect(file()).toMatchObject({ version: 2, enabled: true, borrow: [],
-      lend: [{ peer: "team-a", fp: "aaaa-bbbb-cccc-dddd", roles: ["review"], families: { codex: 5 }, ordersPerDay: 200 }] });
+      lend: [{ peer: "team-a", fp: "aaaa-bbbb-cccc-dddd", roles: ["review", "write"], families: { codex: 5 }, ordersPerDay: 200 }] });
+    for (const roles of ["review", "write", "review,admin", ""]) {
+      const ignored = run(g("--until", "3d", `--roles=${roles}`));
+      expect(ignored).toMatchObject({ ok: true, message: expect.stringContaining("审查和写代码已不区分") });
+      expect(ignored.lend).not.toHaveProperty("roles");
+      expect(file().lend[0].roles).toEqual(["review", "write"]);
+    }
     const e = file().lend[0];
     expect(Date.parse(e.until) - Date.parse(e.grantedAt)).toBe(3 * 86_400_000);
-    expect(run(["lend", "status"])).toMatchObject({ ok: true, lending: true });
+    const status = run(["lend", "status"]);
+    expect(status).toMatchObject({ ok: true, lending: true });
+    expect(status.declared[0]).not.toHaveProperty("roles");
+    expect(status.effective[0]).not.toHaveProperty("roles");
     expect(run(["lend", "revoke", "--peer", "team-a"], "222")).toMatchObject({ ok: false, code: "forbidden" });
     // P1-6 出借 worker 自己（没有频道号、带出借 worker 标记）也不能改授权：延长、扩大、收回都拒
     const worker = { CLAUDESTRA_LEND_WORKER: "1" };
@@ -57,31 +67,30 @@ describe("manager lend / borrow 接线", () => {
     expect(file()).toMatchObject({ enabled: false, lend: [] });
   }, 60_000);
 
-  test("lend grant --keep-unset 只继承列出的缺失字段；显式值优先，坏字段 / 空 roles 拒写，旧 CLI 语义不变", () => {
+  test("lend grant --keep-unset 只继承列出的缺失字段；显式值优先，坏字段拒写，roles 参数忽略", () => {
     const g = ["lend", "grant", "team-a", "--repos=o/r", "--until=3d"];
     const keep = "--keep-unset=roles,codex-model,codex-effort";
     expect(run([...g, "--roles=review,write", "--codex-model=gpt-6-astra", "--codex-effort=xhigh"])).toMatchObject({ ok: true });
-    expect(run([...g, keep])).toMatchObject({ ok: true, lend: { roles: ["review", "write"], codexModel: "gpt-6-astra", codexEffort: "xhigh" } });
+    expect(run([...g, keep])).toMatchObject({ ok: true, lend: { codexModel: "gpt-6-astra", codexEffort: "xhigh" } });
     expect(run([...g, keep, "--roles=review", "--codex-model=gpt-6-sol", "--codex-effort=low"]))
-      .toMatchObject({ ok: true, lend: { roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "low" } });
+      .toMatchObject({ ok: true, lend: { codexModel: "gpt-6-sol", codexEffort: "low" } });
     const before = readFileSync(join(state, "lend.json"), "utf8");
     for (const bad of ["", "repos", "roles,bogus", "codexModel", "roles,"]) {
       expect(run([...g, `--keep-unset=${bad}`])).toMatchObject({ ok: false, error: expect.stringContaining("--keep-unset") });
     }
-    expect(run([...g, keep, "--roles="])).toMatchObject({ ok: false, error: expect.stringContaining("--roles") });
     expect(run([...g, keep, "--codex-effort=nope"])).toMatchObject({ ok: false });
     expect(readFileSync(join(state, "lend.json"), "utf8")).toBe(before);
     expect(run([...g, "--keep-unset=roles,codex-effort"])).toMatchObject({ ok: true });
-    expect(file().lend[0]).toMatchObject({ roles: ["review"], codexEffort: "low" });
+    expect(file().lend[0]).toMatchObject({ roles: ["review", "write"], codexEffort: "low" });
     expect(file().lend[0].codexModel).toBeUndefined();
     expect(run([...g, "--roles=write", "--codex-model=gpt-6-astra", "--codex-effort=high"])).toMatchObject({ ok: true });
     expect(run(g)).toMatchObject({ ok: true });
-    expect(file().lend[0].roles).toEqual(["review"]);
+    expect(file().lend[0].roles).toEqual(["review", "write"]);
     expect(file().lend[0].codexModel).toBeUndefined();
     expect(file().lend[0].codexEffort).toBeUndefined();
   }, 60_000);
 
-  test("P1 沿用只读锁内最新值：等锁期间 roles / 模型 / 推理档改变，不覆盖成锁外旧值", async () => {
+  test("P1 沿用只读锁内最新值：等锁期间模型 / 推理档改变，不覆盖成锁外旧值", async () => {
     const g = ["lend", "grant", "team-a", "--repos=o/r", "--until=3d"];
     expect(run([...g, "--roles=review,write", "--codex-model=gpt-6-astra", "--codex-effort=xhigh"])).toMatchObject({ ok: true });
     const path = join(state, "lend.json");
@@ -102,7 +111,7 @@ describe("manager lend / borrow 接线", () => {
     expect(await child.exited).toBe(0);
     const out = JSON.parse((await new Response(child.stdout).text()).trim().split("\n").at(-1)!);
     expect(out).toMatchObject({ ok: true });
-    expect(file().lend[0]).toMatchObject({ roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "low" });
+    expect(file().lend[0]).toMatchObject({ roles: ["review", "write"], codexModel: "gpt-6-sol", codexEffort: "low" });
   }, 60_000);
 
   test("v1 文件：照读、出借条目一律暂停（不生效）；再授权一次落成 v2，别的旧条目仍暂停", () => {

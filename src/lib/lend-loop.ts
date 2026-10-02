@@ -224,7 +224,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   r.offline = false;
   const read = await d.readLend();
   const ctx = await d.context();
-  const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now(), d.writeOpen);
+  const eff = effectiveLend(read, ctx.contacts, ctx.projects, d.now());
   const proxies = proxyVarsIn(d.env);
   const peers = await d.peers();
   r.v2 = !!rd.v2 && !proxies.length;

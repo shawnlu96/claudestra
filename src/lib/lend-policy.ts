@@ -5,10 +5,10 @@
  * 除 readLendContext 外都是纯函数：peers 与 projects 由调用方读好传进来。tests/lend-config.test.ts。
  */
 import {
-  DEFAULT_MAX_OPEN, DEFAULT_ORDERS_PER_DAY, LEND_FAMILIES, MAX_FAMILY_SLOTS, MAX_OPEN, MAX_ORDERS_PER_DAY, MAX_REPOS, REPO_RE,
+  DEFAULT_MAX_OPEN, DEFAULT_ORDERS_PER_DAY, LEND_FAMILIES, LEND_ROLES, MAX_FAMILY_SLOTS, MAX_OPEN, MAX_ORDERS_PER_DAY, MAX_REPOS, REPO_RE,
   type BorrowEntry, type LendEntry, type LendFamily, type LendRead, type LendRole,
 } from "./lend-config.js";
-import { GRANT_MAX_DAYS, GRANT_MAX_MS, grantProblem, WRITE_ROLE_OPEN } from "./lend-grant-rules.js";
+import { GRANT_MAX_DAYS, GRANT_MAX_MS, grantProblem } from "./lend-grant-rules.js";
 import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { readPeers } from "./peers.js";
@@ -80,18 +80,17 @@ function parseCount(raw: string | undefined, label: string, min: number, max: nu
 }
 
 /**
- * review = 审查单；write = 开工 / 修复单（i28-R6）。缺省只开 review；lend-grant-rules.ts WRITE_ROLE_OPEN 关着时 write 一律拒。
- * borrow 侧不受这条限制：那是本机的单子给别人写，隔离在对方机器上。
+ * 借入条目的角色解析；出借不再区分角色，旧 --roles 输入由 buildGrant 忽略。
  */
-function parseRoles(raw: string | undefined, writeOpen = true): LendRole[] | string {
+function parseRoles(raw: string | undefined): LendRole[] | string {
   const roles = raw === undefined ? ["review"] : splitList(raw);
   if (roles.length === 0) return "--roles 不能为空";
   const bad = roles.find((r) => r !== "review" && r !== "write");
   if (bad) return `--roles 只认 review / write（不认识 ${bad}）`;
-  return !writeOpen && roles.includes("write") ? "本机关着写代码的单（WRITE_ROLE_OPEN）：出借只能授权 review" : (roles as LendRole[]);
+  return roles as LendRole[];
 }
 
-/** 一次授权的缺省（He 10-01 拍板）：只开 review、只出 codex 5 个位、每天 200 单；到期时间必填、最长 7 天 */
+/** 一次授权的缺省（He 10-01 拍板）：只出 codex 5 个位、每天 200 单；到期时间必填、最长 7 天 */
 const DEFAULT_GRANT_FAMILIES: Partial<Record<LendFamily, number>> = { codex: 5 };
 
 export interface LendGrantInput {
@@ -124,8 +123,6 @@ export function buildGrant(input: LendGrantInput, contacts: readonly LendContact
     families[f] = n;
   }
   if (!Object.values(families).some((n) => n! > 0)) return { ok: false, error: "至少给一个家族出位：--codex N 或 --claude N（N ≥ 1）" };
-  const roles = parseRoles(input.roles, WRITE_ROLE_OPEN);
-  if (typeof roles === "string") return { ok: false, error: roles };
   const repos = splitList(input.repos);
   if (repos.length === 0) return { ok: false, error: "要列出仓库白名单：--repos owner/repo[,owner/repo]" };
   if (repos.length > MAX_REPOS) return { ok: false, error: `仓库最多 ${MAX_REPOS} 个` };
@@ -137,7 +134,7 @@ export function buildGrant(input: LendGrantInput, contacts: readonly LendContact
   if (typeof until === "string") return { ok: false, error: until };
   return {
     ok: true,
-    entry: { ...who.entry, families, roles, repos, ordersPerDay: perDay, until: new Date(until).toISOString(), grantedAt: new Date(now).toISOString() },
+    entry: { ...who.entry, families, roles: [...LEND_ROLES], repos, ordersPerDay: perDay, until: new Date(until).toISOString(), grantedAt: new Date(now).toISOString() },
   };
 }
 
@@ -174,12 +171,11 @@ export interface EffectiveLend {
 }
 
 /**
- * 实际生效的声明：文件无效 = 全关；enabled=false = 不出借；每条授权再按当下的联系人（指纹）与 grantProblem（暂停 / 到期 / write / 期限）过滤，
- * 借入按个人项目过滤。writeOpen 只给测试切换写单开关，生产调用一律不传（= WRITE_ROLE_OPEN）。
+ * 实际生效的声明：文件无效 = 全关；enabled=false = 不出借；每条授权再按当下的联系人（指纹）与 grantProblem（暂停 / 到期 / 期限）过滤，
+ * 借入按个人项目过滤。
  */
 export function effectiveLend(
   read: LendRead, contacts: readonly LendContact[], projects: readonly (ProjectDef & { personal?: boolean })[], now = Date.now(),
-  writeOpen = WRITE_ROLE_OPEN,
 ): EffectiveLend {
   if (read.status === "invalid") return { lending: false, lend: [], borrow: [], invalid: read.error, dropped: [] };
   const f = read.file;
@@ -187,7 +183,7 @@ export function effectiveLend(
   const lend: LendEntry[] = [];
   if (f.enabled === true) {
     for (const e of f.lend) {
-      const bad = grantProblem(e, now, writeOpen) ?? contactProblem(contacts, e);
+      const bad = grantProblem(e, now) ?? contactProblem(contacts, e);
       if (bad) dropped.push(`lend ${e.peer}：${bad}`);
       else lend.push(e);
     }

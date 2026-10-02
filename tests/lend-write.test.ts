@@ -1,6 +1,6 @@
 /**
  * i28-R6 B 侧：写单副本上锁推不出去、推送只推订单分支（不 force、不推 main / 别的分支、不改写历史）、lab 地址换成本地 bare 仓库（真 git）；
- * lend 循环的写单流程（没开 write 不领、订单分支必须按本机指纹算、试推没权限就退回、交活后推送 + 开 PR 再转交付、推送失败的两种收尾），
+ * lend 循环的写单流程（旧 review 授权也领写单、订单分支必须按本机指纹算、试推没权限就退回、交活后推送 + 开 PR 再转交付、推送失败的两种收尾），
  * 外来原文只进 worker 的派单、不进任何命令行 / 名字；lend submit 的写单形态。A 与 worker 是假的。
  */
 import { describe, expect, test } from "bun:test";
@@ -252,12 +252,12 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
 }
 
 describe("lend 循环：写单", () => {
-  test("P1 反例：出借声明没开 write，写单不落 journal、不 claim", async () => {
+  test("旧 review 声明照样收写单、claim", async () => {
     const h = harness({ roles: ["review"] });
     await h.tick();
     await h.tick();
-    expect(getOrder(h.db, "w1")).toBeNull();
-    expect(h.ops()).not.toContain("claim");
+    expect(getOrder(h.db, "w1")!.state).toBe("claimed");
+    expect(h.ops()).toContain("claim");
   });
 
   test("P1 反例：授权过期，写单不落 journal、不 claim", async () => {
@@ -268,11 +268,12 @@ describe("lend 循环：写单", () => {
     expect(h.log.clones).toEqual([]);
   });
 
-  test("P1 反例（i28-W1）：写单开关关着（writeOpen=false）时授权里写了 write，整条不生效：不 poll、不 claim、不起 worker", async () => {
+  test("测试关闭写单收单开关：仍 poll，但不 claim、不起 worker", async () => {
     const h = harness({ writeOpen: false });
     for (let i = 0; i < 4; i++) await h.tick();
     expect(getOrder(h.db, "w1")).toBeNull();
-    expect(h.ops()).toEqual([]);
+    expect(h.ops()).toContain("poll");
+    expect(h.ops()).not.toContain("claim");
     expect(h.log.created).toEqual([]);
   });
 
