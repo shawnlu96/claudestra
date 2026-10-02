@@ -349,7 +349,6 @@ class Card {
   }
 
   async step(): Promise<CardOutcome> { await (await import("./review-converge-notice.js")).followUpFailureNotice(this.db, this.task, this.deps.notifyPm);
-    await (await import("./lend-fix-reassign-tick.js")).relayPrFollowUp(this.db, this.task, this.deps.manager, this.deps.now()); // i28-RA1
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
@@ -382,6 +381,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
+  await (await import("./lend-fix-reassign-tick.js")).relayPrSweep(db, Object.keys(projects), deps.manager, deps.now()); // i28-RA1：旧 PR 收尾不随卡离场
   for (const { project, policy, taskId } of finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? "")) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;

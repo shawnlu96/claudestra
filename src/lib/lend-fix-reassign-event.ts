@@ -10,13 +10,12 @@ export const FIX_RELAY_CLOSED_OP = "fix_relay_closed";
 export const FIX_LEASE_WAIT_OP = "fix_lease_wait";
 /** The planner's wait code while that stretch lasts; any other decision ends it. */
 export const FIX_LEASE_WAIT_CODE = "fix_lease_wait";
-/** Marks a relay refused because the old PR branch moved past the ledger head; the planner hands such a card to PM. */
-export const RELAY_DRIFT = "旧 PR 分支的远端 head 与台账不符";
 /** At most one automatic reassignment per card in this window; the second goes to PM. */
 export const FIX_RELAY_WINDOW_MS = 60 * 60_000;
 
 export interface FixRelay {
-  seq: number; ts: number; from: string; to: string; head: string; round: number; specRev: number;
+  /** head = the relay's start (the old PR branch's verified remote head); ledgerHead = the card's head before, when they differed. */
+  seq: number; ts: number; from: string; to: string; head: string; ledgerHead?: string; round: number; specRev: number;
   fromBranch: string; toBranch: string; repo: string; oldPr: number | null; reason: string;
 }
 

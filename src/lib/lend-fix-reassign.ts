@@ -9,12 +9,16 @@ import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 import { peerFamily } from "./scheduler-family-pick.js";
 import { peerRefusal, type PeerFacts, type PlacementFacts } from "./scheduler-placement.js";
-import { FIX_LEASE_WAIT_CODE, FIX_RELAY_OP, FIX_RELAY_WINDOW_MS, leaseWaitOpen, RELAY_DRIFT } from "./lend-fix-reassign-event.js";
+import { FIX_LEASE_WAIT_CODE, FIX_RELAY_OP, FIX_RELAY_WINDOW_MS, leaseWaitOpen } from "./lend-fix-reassign-event.js";
 import { FIX_REASSIGN_DEFAULT_MIN } from "./lend-fix-reassign-config.js";
 
 export type RelayAway = { peer: string; reason: string } | { escalate: string } | { code: string; wait: string } | null;
 
 const LIVE = ["pending", "submitted", "unknown"];
+
+/** As if every peer had a free slot of the card's family: some other peer could take the fix once a slot frees up. */
+const withRoom = (facts: PlacementFacts, family: AuthorFamily): PlacementFacts => ({ ...facts, peers: facts.peers.map((p) => p.v2
+  ? { ...p, v2: { ...p.v2, slots: { ...p.v2.slots, [family]: Math.max(1, p.v2.slots[family] ?? 0) } } } : p) });
 
 /** The peer the fix would be reassigned to now, or null (no other peer can take it in the card's family). */
 export function relayCandidate(facts: PlacementFacts, lease: string, family: AuthorFamily): PeerFacts | null {
@@ -26,7 +30,7 @@ export function relayCandidate(facts: PlacementFacts, lease: string, family: Aut
 /**
  * Called by remoteWork when the fix cannot go to the lease holder. null = not a holder wait (the caller's own wait / escalation
  * stands); the fix_lease_wait code = keep waiting with the clock running; a peer = reassign there; escalate = PM decides
- * (second relay within the hour, or the old PR branch moved past the ledger head).
+ * (second relay within the hour).
  */
 export function relayAway(s: PlannerSnapshot, since: number, facts: PlacementFacts, lease: string, waitReason: string): RelayAway {
   const now = s.pool?.now;
@@ -34,10 +38,9 @@ export function relayAway(s: PlannerSnapshot, since: number, facts: PlacementFac
   const family = s.workflow.authorFamily, tried = facts.tried.includes(lease);
   // A file lock blocks every peer alike: only the holder's own refusal, or its finished attempt this round, is a holder wait.
   if (!tried && !peerRefusal({ ...facts, locksFree: true }, facts.peers.find((p) => p.peer === lease), "fix", family)) return null;
-  const drift = s.intents.findLast((i) => i.causalSeq >= since && i.head === s.task.headSHA && i.receipt?.includes(RELAY_DRIFT));
-  if (drift) return { escalate: `自动改派停下：${drift.receipt}。PM 核对 PR 分支后更新台账 head，或 ledger lend-reclaim ${s.task.id}` };
   const pick = relayCandidate(facts, lease, family);
-  if (tried && !pick) return null;
+  // A tried holder waits like a busy one while another peer could relay once its slot frees; with none at all PM decides.
+  if (tried && !pick && !relayCandidate(withRoom(facts, family), lease, family)) return null;
   const hold = { code: FIX_LEASE_WAIT_CODE, wait: waitReason };
   const open = leaseWaitOpen(s.events, since);
   const min = s.pool.remote.fixReassignMin ?? FIX_REASSIGN_DEFAULT_MIN;

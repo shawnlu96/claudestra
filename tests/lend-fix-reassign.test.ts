@@ -27,7 +27,7 @@ import { ensurePr } from "../src/lib/lend-push.js";
 import { writeMaterials } from "../src/lib/lend-write-materials.js";
 import { orderDir } from "../src/lib/lend-clone.js";
 import { relayCandidate } from "../src/lib/lend-fix-reassign.js";
-import { FIX_LEASE_WAIT_OP, FIX_RELAY_OP, FIX_RELAY_CLOSED_OP, RELAY_DRIFT } from "../src/lib/lend-fix-reassign-event.js";
+import { FIX_LEASE_WAIT_OP, FIX_RELAY_OP, FIX_RELAY_CLOSED_OP } from "../src/lib/lend-fix-reassign-event.js";
 import type { Gh } from "../src/lib/lend-fix-reassign-pr.js";
 import type { PlacementFacts } from "../src/lib/scheduler-placement.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
@@ -362,16 +362,31 @@ describe("relay review fixes (i28-RA1 round 1)", () => {
     } finally { p.f.close(); }
   }, E2E_MS);
 
-  test("tried holder and no other free peer: PM escalation as before", async () => {
+  test("tried holder and no other free peer: keeps waiting, then relays once a peer frees a slot", async () => {
     const p = await ready();
     try {
       await holderTried(p, FULL);
       both(p, FULL, FULL);
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("写租约在 mate") });
+      p.f.advance(21 * MIN);
+      both(p, FULL, FULL);
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("写租约在 mate") });
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 other") });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("tried holder and no other peer could ever take the fix: PM escalation as before", async () => {
+    const p = await ready();
+    try {
+      await holderTried(p, FULL);
+      p.hello("mate", FULL);
+      p.hello("other", FREE, { roles: ["review"] });
       expect(await p.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("这一轮没成") });
     } finally { p.f.close(); }
   }, E2E_MS);
 
-  test("the old PR branch moved past the ledger head: no relay from the stale commit, the card goes to PM", async () => {
+  test("the old PR branch moved past the ledger head: the relay starts from the verified remote head", async () => {
     const p = await ready();
     try {
       await toFix(p);
@@ -380,12 +395,13 @@ describe("relay review fixes (i28-RA1 round 1)", () => {
       p.heads[BRANCH] = { ok: true, head: H3 }; // pushed after delivery, ledger still at H2
       p.f.advance(21 * MIN);
       both(p, FULL);
-      expect(await p.tick()).toMatchObject({ step: "pool_refused", detail: expect.stringContaining(RELAY_DRIFT) });
-      expect(relays(p)).toEqual([]);
-      expect(p.orders().filter((o) => o.step === "fix")).toEqual([]);
-      expect(getWriteLease(p.f.db, "T1")).toMatchObject({ peer: "mate", state: "held" });
-      both(p, FULL);
-      expect(await p.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining(RELAY_DRIFT) });
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 other") });
+      expect(relays(p).map((e) => e.data)).toEqual([expect.objectContaining({ from: "mate", to: "other", head: H3, ledgerHead: H2 })]);
+      expect(p.f.task()).toMatchObject({ stage: "fix", headSHA: H3 });
+      const order = p.orders().filter((o) => o.step === "fix").at(-1)!;
+      expect(order).toMatchObject({ peer: "other", head: H3, branch: RELAY_BRANCH, pr: null });
+      await deliverAs(p, "other", order.orderId, RELAY_BRANCH, "4".repeat(40), 9);
+      expect(p.f.task()).toMatchObject({ stage: "review", headSHA: "4".repeat(40), branch: RELAY_BRANCH });
     } finally { p.f.close(); }
   }, E2E_MS);
 
@@ -417,4 +433,59 @@ describe("relay review fixes (i28-RA1 round 1)", () => {
       expect(p.gh).toHaveLength(3);
     } finally { p.f.close(); }
   }, E2E_MS);
+});
+
+describe("relay review fixes (i28-RA1 round 2)", () => {
+  const leaseWaits = (p: P) => p.events().filter((e) => e.kind === "scheduler" && e.data.op === FIX_LEASE_WAIT_OP);
+  const both = (p: P, mate: Slots, other: Slots = FREE) => { p.hello("mate", mate); p.hello("other", other); };
+
+  test("a second holder-wait stretch in the same fix stage starts a fresh clock", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      const globs = (p.f.db.query("SELECT json_extract(extra, '$.fileGlobs') AS g FROM tasks WHERE id = 'T1'").get() as { g: string }).g;
+      both(p, FULL);
+      await p.tick(); // stretch 1 starts
+      p.f.db.run(`UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json('["bad path"]')) WHERE id = 'T1'`);
+      both(p, FREE);
+      expect(await p.tick()).toMatchObject({ detail: expect.stringContaining("文件锁") }); // stretch 1 ends
+      p.f.db.run("UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json(?)) WHERE id = 'T1'", [globs]);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("写租约在 mate") }); // stretch 2 starts
+      expect(leaseWaits(p).map((e) => e.data.state)).toEqual(["start", "end", "start"]);
+      p.f.advance(21 * MIN);
+      both(p, FULL);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 other") });
+      const rev = String(p.f.task().rev);
+      expect(await p.cli("scheduler", "scheduler-fix-relay", "T1", "--op", "wait-start", "--rev", rev)).toMatchObject({ ok: true, changed: false });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  for (const end of ["done", "manual"] as const) {
+    test(`the old PR close keeps retrying after the card left the auto pass (${end})`, async () => {
+      const p = await ready();
+      try {
+        await toFix(p);
+        both(p, FULL);
+        await p.tick();
+        p.f.advance(21 * MIN);
+        both(p, FULL);
+        await p.tick();
+        const order = p.orders().at(-1)!;
+        await deliverAs(p, "other", order.orderId, RELAY_BRANCH, H3, 9);
+        p.ghFail.left = 2;
+        await p.tick();
+        expect(p.gh).toHaveLength(2);
+        if (end === "done") p.f.db.run("UPDATE tasks SET stage = 'done' WHERE id = 'T1'");
+        else p.f.db.run("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T1'");
+        p.f.advance(61_000);
+        await p.tick();
+        expect(p.gh.at(-1)).toEqual(["pr", "close", "7", "--repo", "o/r", "--comment", expect.stringContaining("接力 PR：#9（base main）")]);
+        expect(p.events().filter((e) => e.data.op === FIX_RELAY_CLOSED_OP).map((e) => e.data)).toEqual([expect.objectContaining({ oldPr: 7, newPr: 9 })]);
+        p.f.advance(61_000);
+        await p.tick();
+        expect(p.gh).toHaveLength(3);
+      } finally { p.f.close(); }
+    }, E2E_MS);
+  }
 });

@@ -9,7 +9,7 @@ import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { LedgerError, listEvents } from "./ledger-store.js";
+import { getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { heldLease } from "./ledger-lend-lease.js";
@@ -48,7 +48,9 @@ export const fixRelayCommand = {
       const open = leaseWaitOpen(events, since);
       if ((op === "wait-start") === !!open) return { ok: true, changed: false };
       const state = op === "wait-start" ? "start" : "end";
-      const e = insertEvent(c.db, { actor: ctx.actor, now: ctx.now, dedupKey: `scheduler:fix-lease-wait:${task.id}:${open?.seq ?? since}:${state}` }, {
+      // Keyed on the previous clock event (an end, for a second stretch): each stretch's start / end is unique, a repeat stays idempotent.
+      const prev = events.findLast((e) => e.seq > since && e.kind === "scheduler" && e.data.op === FIX_LEASE_WAIT_OP)?.seq ?? since;
+      const e = insertEvent(c.db, { actor: ctx.actor, now: ctx.now, dedupKey: `scheduler:fix-lease-wait:${task.id}:${prev}:${state}` }, {
         project: task.project, target: task.id, kind: "scheduler", text: state === "start" ? "修复单开始等写租约方（自动改派计时起点）" : "修复单不再等写租约方（计时清零）",
         data: { op: FIX_LEASE_WAIT_OP, state, round: task.round, head: task.headSHA },
       }, true);
@@ -57,8 +59,8 @@ export const fixRelayCommand = {
   },
 };
 
-/** Start of a card's pass: retry the old PR's close while a delivered relay still owes it. */
-export async function relayPrFollowUp(db: Database, task: LedgerTask, manager: Manager, now: number): Promise<void> {
+/** Retry the old PR's close while a delivered relay still owes it. */
+async function relayPrFollowUp(db: Database, task: LedgerTask, manager: Manager, now: number): Promise<void> {
   const tries = retryAt.get(db) ?? new Map<string, number>();
   retryAt.set(db, tries);
   if (!relayPrPending(db, task) || (tries.get(task.id) ?? 0) > now) return;
@@ -80,4 +82,19 @@ export async function trackLeaseWait(db: Database, task: LedgerTask, plan: Plann
   if (waiting === !!leaseWaitOpen(events, fixSince(events))) return;
   const r = await manager("ledger", "scheduler-fix-relay", task.id, "--op", waiting ? "wait-start" : "wait-end", "--rev", String(task.rev));
   if (r.ok !== true) console.error(`⚠️ [scheduler] ${task.id} 等写租约方计时没记上，下轮重试：${String(r.error)}`);
+}
+
+/**
+ * Start of every auto pass: the close is owed by the relay event, not by the card, so a card already done / cancelled / manual
+ * still gets it. The dedupKey range scan (unique index) finds relays without a closed event; relayPrPending decides the rest.
+ */
+export async function relayPrSweep(db: Database, projects: readonly string[], manager: Manager, now: number): Promise<void> {
+  if (!projects.length) return;
+  const rows = db.query(`SELECT DISTINCT r.target FROM events AS r WHERE r.dedupKey >= 'scheduler:fix-relay:' AND r.dedupKey < 'scheduler:fix-relay;'
+    AND r.project IN (${projects.map(() => "?").join(",")}) AND NOT EXISTS (SELECT 1 FROM events AS c WHERE c.dedupKey = 'scheduler:fix-relay-closed:' || r.seq)`)
+    .all(...projects) as { target: string }[];
+  for (const { target } of rows) {
+    const task = getTask(db, target);
+    if (task) await relayPrFollowUp(db, task, manager, now);
+  }
 }
