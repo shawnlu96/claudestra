@@ -42,6 +42,62 @@ function closeAll(names: string[]): StopIo {
 const report = async (names: string[], path: string) => stopReportText(await stopRevokedWorkers(closeAll(names)), (n) => workerOrderLive(n, path));
 
 describe("重新授权 / 收回时关掉的窗口：在跑的停掉和已结束单的残留分开说", () => {
+  test("3 条 stopped 无窗口加 1 条有窗口：只报本次关闭的窗口，再授权不重复报告", async () => {
+    const gone = ["agent-lend-gone1", "agent-lend-gone2", "agent-lend-gone3"];
+    const active = "agent-lend-left";
+    const registry = new Map([...gone.map((n) => [n, "stopped"] as const), [active, "active"]]);
+    const path = journal([...registry.keys()].map((agent, i) => ({ orderId: `o${i}`, agent, ended: true })));
+    const io = closeAll([active]);
+    const marked: string[] = [];
+    const killed: string[] = [];
+    const kill = io.killWindows;
+    io.workers = async () => [...registry.keys()].map((name) => ({ name }));
+    io.killWindows = async (name) => { killed.push(name); await kill(name); };
+    io.markStopped = async (name) => { marked.push(name); registry.set(name, "stopped"); };
+    const first = await stopRevokedWorkers(io);
+    expect(first).toEqual({ stopped: [active], unconfirmed: [] });
+    expect(stopReportText(first, (n) => workerOrderLive(n, path)))
+      .toBe("；清理了 1 个已结束单的残留窗口：agent-lend-left");
+    expect(marked).toEqual([...registry.keys()]);
+    expect([...registry.values()]).toEqual(["stopped", "stopped", "stopped", "stopped"]);
+    const second = await stopRevokedWorkers(io);
+    expect(second).toEqual({ stopped: [], unconfirmed: [] });
+    expect(stopReportText(second, (n) => workerOrderLive(n, path))).toBe("");
+    expect(killed).toEqual([active]);
+    expect(marked).toEqual([...registry.keys(), ...registry.keys()]);
+  });
+
+  test("初始无窗口但 create 在途：SIGTERM 停掉后仍报告已停掉在跑的", async () => {
+    const name = "agent-lend-creating";
+    const path = journal([{ orderId: "creating", agent: name, ended: false }]);
+    const io = closeAll([]);
+    let creating = true;
+    const signals: string[] = [];
+    const marked: string[] = [];
+    io.workers = async () => [{ name, createPid: 7 }];
+    io.isCreate = (pid, worker) => pid === 7 && worker === name && creating;
+    io.signal = (pid, sig) => { signals.push(`${sig} ${pid}`); creating = false; };
+    io.markStopped = async (n) => void marked.push(n);
+    const result = await stopRevokedWorkers(io);
+    expect(signals).toEqual(["SIGTERM 7"]);
+    expect(marked).toEqual([name]);
+    expect(result).toEqual({ stopped: [name], unconfirmed: [] });
+    expect(stopReportText(result, (n) => workerOrderLive(n, path)))
+      .toBe("；已停掉在跑的 1 个：agent-lend-creating");
+  });
+
+  test("初始及最终 probe unknown：照旧尝试关窗口并报 unconfirmed", async () => {
+    const name = "agent-lend-unknown";
+    const io = closeAll([name]);
+    const calls: string[] = [];
+    io.probe = async () => { calls.push("probe"); return "unknown"; };
+    io.killWindows = async () => void calls.push("kill");
+    io.markStopped = async () => void calls.push("markStopped");
+    expect(await stopRevokedWorkers(io)).toEqual({ stopped: [],
+      unconfirmed: [{ name, why: "读不到 tmux，没法确认已退出" }] });
+    expect(calls).toEqual(["probe", "kill", "probe"]);
+  });
+
   test("只有已结束单的残留窗口：输出里不出现「停掉」", async () => {
     const path = journal([{ orderId: "o1", agent: "agent-lend-9b7d", ended: true }, { orderId: "o2", agent: "agent-lend-ab1e", ended: true }]);
     const text = await report(["agent-lend-9b7d", "agent-lend-ab1e", "agent-lend-none"], path); // none = journal 里没有它的单
