@@ -89,7 +89,7 @@ export async function deliverPmLocal<P extends Receipt>(
 
 // Answers pushed back to the agent that asked: local send_to_agent replies / drains / expiries, and HTTP peer replies.
 const PUSHBACK_ID = /^(?:agent_(?:reply|drain|withheld|expired|apierr)|reply_fwd)_/;
-export function isCallerPushback(env: Envelope): boolean {
+function isCallerPushback(env: Envelope): boolean {
   if (env.meta.triggerKind === "peer_http") return true;
   return env.from.kind === "local" && env.meta.triggerKind === "agent_tool" && PUSHBACK_ID.test(env.meta.messageId)
     && (env.intent === "response" || !env.meta.messageId.startsWith("reply_fwd_"));
