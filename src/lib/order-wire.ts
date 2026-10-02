@@ -9,6 +9,7 @@ import { deliverWithoutDisputes, deliverDisputeFields, type FindingDispute } fro
 import type { ReviewFinding } from "./scheduler-review.js";
 import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
+import { convergenceFields, withoutConvergence, type ConvergenceWire } from "./lend-arbiter-wire.js";
 
 const ORDER_WIRE_VERSION = 1;
 /** Whole-wire byte cap: a spec quoted inline plus findings fits; anything larger is refused at both ends, never trimmed. */
@@ -21,6 +22,7 @@ export const WIRE_LIMITS = {
 
 type OrderStep = WorkOrder["step"];
 export interface OrderWire {
+  convergence?: ConvergenceWire;
   v: typeof ORDER_WIRE_VERSION;
   /** = scheduler intent id (the dedup key); the only handle a deliver / verdict may cite. */
   orderId: string;
@@ -169,7 +171,7 @@ const STEPS: readonly OrderStep[] = ["restate", "write", "review", "fix"];
 
 export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
   return guarded(raw, () => {
-    const r = record(raw, "$", ORDER_KEYS);
+    const r = record(withoutConvergence(raw), "$", ORDER_KEYS);
     if (!STEPS.includes(r.step as OrderStep)) fail("step", "只认 restate / write / review / fix");
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), taskId: matching(r.taskId, "taskId", TASK_ID),
@@ -180,6 +182,7 @@ export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
       outputs: texts(r.outputs, "outputs", WIRE_LIMITS.line), acceptance: texts(r.acceptance, "acceptance", WIRE_LIMITS.line),
       writeBack: text(r.writeBack, "writeBack", WIRE_LIMITS.writeBack, true), findings: findingList(r.findings, "findings", FINDING_KEYS, () => ({})),
       fallback: nullable(r.fallback, (x) => text(x, "fallback", WIRE_LIMITS.fallback, true)),
+      ...convergenceFields(raw, fail),
     };
   });
 }

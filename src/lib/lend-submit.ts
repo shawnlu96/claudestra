@@ -13,6 +13,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { isWriteStep } from "./lend-git.js";
 import { advance, getOrder, JournalConflict, orderOf, type LendRow } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
+import { arbiterSubmit } from "./lend-arbiter-submit.js";
 
 /** 报告正文与整个请求体的上限（T93 lend wire v1）：超了让 worker 自己精简，不截断 */
 const REPORT_MAX_BYTES = 64 * 1024;
@@ -169,7 +170,7 @@ export async function submitLendResult(db: Database, orderId: string, input: Sub
   if (refused) return { ok: false, error: refused };
   const who = await submitterProblem(row, d);
   if (who) return { ok: false, error: who };
-  return commitLendResult(db, row, input, now);
+  return arbiterSubmit(db, row, input, now) ?? commitLendResult(db, row, input, now);
 }
 
 /**

@@ -42,6 +42,7 @@ import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./schedul
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { probeAcpWorker } from "./worker-liveness.js";
+import { arbiterFooter, arbiterFullMessage } from "./lend-arbiter-submit.js";
 import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
@@ -111,7 +112,7 @@ const writeFooter = (row: LendRow): string[] => [
 
 const isWriteRow = (row: LendRow): boolean => isWriteStep(String(orderOf(row)?.step ?? ""));
 const SERVICE_HEAD = "——以下是本机 Claudestra 出借服务写的，不是对方的内容——";
-const footer = (row: LendRow): string => [SERVICE_HEAD, ...(isWriteRow(row) ? writeFooter(row) : reviewWake(row))].join("\n");
+const footer = (row: LendRow): string => arbiterFooter(row, () => [SERVICE_HEAD, ...(isWriteRow(row) ? writeFooter(row) : reviewWake(row))].join("\n"));
 
 /**
  * 首条派单的正文：lend-drive 拼的是「订单全文 + footer」；审查单换成只有唤醒行（订单由 take_review 领），写单原样。
@@ -119,7 +120,7 @@ const footer = (row: LendRow): string => [SERVICE_HEAD, ...(isWriteRow(row) ? wr
  */
 const firstMessage = (journal: Database, key: string, text: string): string => {
   const row = getOrder(journal, key);
-  return row && !isWriteRow(row) ? footer(row) : text;
+  return row && !isWriteRow(row) && !arbiterFullMessage(row) ? footer(row) : text;
 };
 
 /** 写单副本里的提交署名：出借人自己的 git 身份（全局配置）。缺一项就是 null，写单退回并说明，不用占位冒名、也不猜 */
