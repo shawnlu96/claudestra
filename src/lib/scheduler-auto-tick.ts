@@ -1,5 +1,4 @@
-import { finishFirst } from "./scheduler-agent-pool.js";
-import { driveConvergence } from "./fix-strategy-tick.js";
+import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
  * `ledger scheduler-*` CLI under the scheduler identity, which re-checks inside its own transaction. Per card at most
@@ -369,16 +368,15 @@ class Card {
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
-      : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now()) : null;
+      : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
+      : plan.action === "merge" ? mergeSlotHold(this.task) : null;
     if (backoff) return this.out("held", backoff);
-    const trainHold = plan.action === "merge" ? mergeSlotHold(this.task) : null; if (trainHold) return this.out("held", trainHold); // i28-MT1f2 让路列车
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);
     refusals.get(this.db)?.delete(this.task.id);
     return this.drive(intent, plan);
   }
 }
-
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
