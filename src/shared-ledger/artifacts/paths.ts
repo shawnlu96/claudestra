@@ -1,15 +1,32 @@
 import { fail, type V2Artifact } from "../../lib/shared-ledger-contract-v2.js";
+import { withoutPublicWebLinks } from "./urls.js";
+
+function escapesRepository(value: string): boolean {
+  for (const match of value.matchAll(/(?:^|[^\w./\\])((?:[\w.-]+[\\/])+[\w.-]*)/gu)) {
+    let depth = 0;
+    for (const part of match[1]!.split(/[\\/]/)) {
+      if (part === "..") { if (--depth < 0) return true; }
+      else if (part && part !== ".") depth++;
+    }
+  }
+  return false;
+}
 
 // The V1 scrubber requires private machine identity and V1 field shapes. This check is identity-free
 // and rejects machine references without logging content or interpreting a path as a remote URL.
 function checkText(value: string): void {
   const normalized = value.normalize("NFKC").replace(/\p{Cf}/gu, "");
-  const withoutWebLinks = normalized.replace(/\bhttps?:\/\/[^\s<>"'`]+/gi, "");
+  const withoutWebLinks = withoutPublicWebLinks(normalized);
+  // Explicit command prose and standalone code escapes are exempt; bare rooted names remain blocked.
+  const prose = withoutWebLinks.replace(/\b(run|invoke|execute)\s+\/[a-z]+(?:-[a-z]+)*(?=\s|$)/gi, "$1")
+    .replace(/\\[nrtbfv0](?=$|[\s`"'])/g, "");
   if (/(?:^|[^\w])(?:file|ssh|sftp|smb|vscode(?:-remote)?)\s*:/i.test(normalized)
     || /(?:^|[^\w])[A-Za-z]:[\\/]|\\\\|(?:^|[^\w.])~[\w.-]*[\\/]/u.test(normalized)
-    || /(?:^|[^\w./])(?:[\w.-]+@)?[\w.-]+:(?!\/\/)[^\s]+[\\/]/u.test(normalized)
-    || /(?:^|[^\w./])[\w.-]+@[\w.-]+:\S|(?:^|[^\w./])[\w.-]+:[^\s:]+\.[A-Za-z][^\s:]*/u.test(withoutWebLinks)
-    || /(?:^|[^\w./~-])[\\/](?!\s|$)/u.test(withoutWebLinks)
+    || /(?:^|[^\w./])(?:[\w.-]+@)?[\w.-]+:(?!\/\/)[^\s]+[\\/]/u.test(withoutWebLinks)
+    || /(?:^|[^\w./])[\w.-]+@[\w.-]+:\S|(?:^|[^\w./])[\w]+[.-][\w.-]+:[^\s:]+\.[A-Za-z][^\s:]*/u.test(withoutWebLinks)
+    || /\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})[\\/]|%[A-Za-z_]\w*%[\\/]/u.test(normalized)
+    || escapesRepository(withoutWebLinks)
+    || /(?:^|[^\w./~])[\\/](?!\s|$)/u.test(prose)
     || /^\s*\/\s*$|["'`=]\/(?:\s|$|["'`])/u.test(normalized)) fail();
 }
 function decodeText(value: string): string {

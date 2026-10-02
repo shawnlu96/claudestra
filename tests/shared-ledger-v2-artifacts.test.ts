@@ -166,6 +166,16 @@ for (const content of [
   "user@peer-a:report", "peer-a:report.md", "\\private\\report",
   "%2ftmp%2fprivate", "%252ftmp%252fprivate", "&#47;tmp/private", "&#x2f;tmp/private", "&sol;tmp/private",
   '{"path":"\\u002ftmp/private"}', '{"path":"\\/tmp\\/private"}', "fi\u200ble:///tmp/private", "／tmp／private",
+  "-/tmp/private", "--output=/tmp/private", "/private-dir", "/tmp", "$HOME/private/report", "$TMPDIR/foo", "${HOME}/private/report",
+  "%USERPROFILE%\\private\\report", "../../../../../../Users/local/.ssh/id_rsa", "../private", "src/../../private",
+  "..\\..\\private", "./../../private", "%2e%2e%2fprivate", "-&#47;tmp/private", "/code-review/private",
+  "see `\\n/private` path", "http://localhost:8080/Users/local/x", "http://127.0.0.1/Users/local/secret",
+  "https://LOCALHOST./private", "http://127.1/private", "http://2130706433/private", "http://0x7f000001/private",
+  "http://10.0.0.1/private", "http://172.16.0.1/private", "http://172.31.255.255/private", "http://192.168.1.1/private",
+  "http://169.254.1.1/private", "http://100.64.0.1/private", "http://0.0.0.0/private", "http://[::1]/private",
+  "http://[::ffff:127.0.0.1]/private", "http://[::ffff:192.168.1.1]/private", "http://[fc00::1]/private",
+  "http://[fe80::1]/private", "http://peer-a/private", "http://peer-a.local/private", "http://a.localhost/private",
+  "[reference](http://%6cocalhost/private)", "https://localhost@example.invalid/private",
 ]) {
   test(`reject machine path ${JSON.stringify(content)}`, () => {
     const copy = artifact({ content }), s = setup(copy);
@@ -173,7 +183,12 @@ for (const content of [
     expect(() => s.get()).toThrow("not_found");
   });
 }
-for (const content of ["规格获准共享副本，全文仅在主场", "relative src/example.ts", "原文 / 共享副本哈希分列", "**报告**\n\n本机、peer A、peer B"]) {
+for (const content of [
+  "规格获准共享副本，全文仅在主场", "relative src/example.ts", "原文 / 共享副本哈希分列", "**报告**\n\n本机、peer A、peer B",
+  "run /code-review on PR", "invoke /review on PR", "TODO:fix.this", "see `\\n` escape", "escapes `\\r` and `\\t`", "src/../docs/report.md",
+  "[public](https://example.invalid/docs/report.md)", "http://172.32.0.1/docs", "https://192.169.1.1/docs",
+  "https://[2001:db8::1]/docs", "https://localhost.example.invalid/docs",
+]) {
   test(`approved path-free text remains copy: ${content}`, () => {
     const s = setup(artifact({ content }));
     expect(s.put().artifact.visibility).toBe("approved_copy");
@@ -187,6 +202,9 @@ test("foreign project/team and missing artifact ids are indistinguishable", () =
   }
   const noAccess = { ...s.scope, actor: { ...s.scope.actor, projects: [] } };
   for (const id of ["artifact", "absent"]) expect(() => s.get(id, noAccess)).toThrow("forbidden");
+  for (const id of ["task", "absent"]) {
+    expect(() => s.run(context => s.domain.readSpecInTransaction(context, id), noAccess)).toThrow("forbidden");
+  }
 });
 test("scope, action grants, actor home and fences come from transaction context", () => {
   const s = setup();
@@ -287,4 +305,20 @@ test("an already used approval id cannot acquire a new semantic bind even if its
     expect(() => s.put(copy)).toThrow("authorization_mismatch");
   }
   expect(s.get()).toEqual(artifact());
+});
+
+for (const kind of ["review", "report", "evidence"] as const) {
+  test(`an approval used for spec cannot be reused for ${kind}`, () => {
+    const s = setup(); s.put();
+    const copy = artifact({ artifactId: "copy-two", kind });
+    expect(() => s.put(copy)).toThrow("authorization_mismatch");
+    expect(() => s.get(copy.artifactId)).toThrow("not_found");
+    const newlyApproved = { ...copy, approvalAskId: "ask-two" };
+    s.putRow("ask", "ask-two", approved(newlyApproved));
+    expect(s.put(newlyApproved).inserted).toBe(true);
+  });
+}
+test("one approval can still bind another id with identical content and kind", () => {
+  const s = setup(); s.put();
+  expect(s.put(artifact({ artifactId: "copy-two" })).inserted).toBe(true);
 });

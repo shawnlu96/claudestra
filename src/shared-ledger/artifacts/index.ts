@@ -17,10 +17,9 @@ function findArtifact(context: V2TransactionContext, artifactId: string): V2Arti
   const rows = context.all("artifacts.get", { artifactId: id(artifactId) });
   return rows.length ? parseArtifact(rows[0]) : null;
 }
-/** Both foreign ids and missing ids yield only not_found. Scope comes from authenticated X12 identity. */
+/** Within an authorized project, foreign and missing ids yield not_found; the transaction owner rejects nonmembers first. */
 function readInTransaction(context: V2TransactionContext, artifactId: string): V2Artifact {
   assertTransactionContext(context);
-  if (!context.scope.actor.projects.includes(context.scope.projectId)) fail("not_found");
   return findArtifact(context, artifactId) ?? fail("not_found");
 }
 export function createArtifactDomain(readers: ArtifactReaders): ArtifactDomain {
@@ -47,10 +46,10 @@ export function createArtifactDomain(readers: ArtifactReaders): ArtifactDomain {
         return { artifact: existing, inserted: false };
       }
       assertArtifactApproval(context, artifact, readers);
-      const { approvalAskId, originalDigest, sharedDigest, redactionVersion, taskId, specRev, head, approvedBy } = artifact;
+      const { approvalAskId, originalDigest, sharedDigest, redactionVersion, kind, taskId, specRev, head, approvedBy } = artifact;
       // Even a faulty upstream replacement of an answered ask cannot rebind a previously used approval.
       if (context.all("artifacts.approvalConflict", {
-        approvalAskId, originalDigest, sharedDigest, redactionVersion, taskId, specRev, head, approvedBy,
+        approvalAskId, originalDigest, sharedDigest, redactionVersion, kind, taskId, specRev, head, approvedBy,
       }).length) fail("authorization_mismatch");
       const { teamId: _team, projectId: _project, ...bindings } = artifact;
       context.run("artifacts.put", bindings);

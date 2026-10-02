@@ -27,7 +27,7 @@ export const artifactStatements = {
   "artifacts.approvalConflict": { mode: "read", sql: `SELECT artifactId FROM v2_artifacts
     WHERE teamId = $teamId AND projectId = $projectId AND approvalAskId = $approvalAskId
       AND (originalDigest != $originalDigest OR sharedDigest != $sharedDigest OR redactionVersion != $redactionVersion
-        OR taskId != $taskId OR specRev IS NOT $specRev OR head IS NOT $head OR approvedBy != $approvedBy) LIMIT 1` },
+        OR kind != $kind OR taskId != $taskId OR specRev IS NOT $specRev OR head IS NOT $head OR approvedBy != $approvedBy) LIMIT 1` },
   "artifacts.put": { mode: "write", sql: `INSERT INTO v2_artifacts
     (teamId, projectId, artifactId, kind, taskId, specRev, head, digest, originalDigest, sharedDigest,
       redactionVersion, approvalAskId, approvedBy, createdAt, mediaType, bytes, content, visibility)

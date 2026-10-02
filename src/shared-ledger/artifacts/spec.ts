@@ -11,7 +11,6 @@ export function readArtifactSpec(
   readArtifact: (context: V2TransactionContext, artifactId: string) => V2Artifact,
 ): SpecView {
   assertTransactionContext(context);
-  if (!context.scope.actor.projects.includes(context.scope.projectId)) fail("not_found");
   const row = readers.readTask(context, id(taskId));
   if (!row || row.id !== taskId || row.teamId !== context.scope.teamId || row.projectId !== context.scope.projectId) fail("not_found");
   const task = parseTask(row), spec = task.spec;
