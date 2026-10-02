@@ -23,8 +23,10 @@ export const isPoolIntent = (i: Pick<SchedulerIntent, "action" | "recipient">): 
 const LENDABLE_FAMILIES: readonly AuthorFamily[] = ["codex"];
 
 /** `roles` absent = review only (how R9 built the list); `v2` absent or null = proto 1 (no hello on file), i28-W5. */
-interface PoolPeer { peer: string; open: number; maxOpen: number; roles?: readonly LendRole[]; v2?: PeerFacts["v2"]; priority?: Priority }
+interface PoolPeer { peer: string; open: number; maxOpen: number; roles?: readonly LendRole[]; v2?: PeerFacts["v2"]; priority?: Priority; helloAt?: number }
 export interface PoolFacts {
+  /** Snapshot clock for refusal backoff; absent on older snapshots, which never retry. */
+  now?: number;
   remote: RemotePolicy;
   /** Active local reviewer sessions on the project's other cards; review holds no worker slot, so this is its capacity. */
   localReviewers: number;

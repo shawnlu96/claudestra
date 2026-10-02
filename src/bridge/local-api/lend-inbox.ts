@@ -9,7 +9,7 @@ import { keyFingerprint, SIG_HEADERS } from "../../lib/instance-key.js";
 import { LEND_BODY_MAX } from "../../lib/lend-wire.js";
 import { LEND_V2_STATUS, parseV2Response, V2_BODY_VERSION } from "../../lib/lend-wire-v2.js";
 import type { Principal } from "../../lib/principals.js";
-import { runManagerProcess } from "../../lib/run-manager.js";
+import { runManagerProcess, stderrTail } from "../../lib/run-manager.js";
 import { apiJson } from "../api-respond.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "../config.js";
 import { lendCallerRefusal } from "./lend.js";
@@ -19,6 +19,8 @@ const ENV = { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: "" };
 /** A 的推送发送超时是 20 秒：这里留出余量 */
 const CLI_TIMEOUT_MS = 15_000;
 
+/** 收单子进程成功时 stderr 没人读：尾行转进 bridge 日志（Claude 位为什么报 0 位这类原因只打在那里） */
+export const relayInboxStderr = (err: string): void => { const tail = stderrTail(err); if (tail) console.error(`[lend inbox] ${tail}`); };
 const refused = (code: keyof typeof LEND_V2_STATUS, error: string) => apiJson(LEND_V2_STATUS[code], { ok: false, code, error });
 
 export async function handleLendInbox(req: Request, path: string, principal: Principal): Promise<Response | null> {
@@ -30,7 +32,8 @@ export async function handleLendInbox(req: Request, path: string, principal: Pri
   const body = await req.text();
   if (Buffer.byteLength(body) > LEND_BODY_MAX) return refused("invalid", `请求体超过 ${LEND_BODY_MAX} 字节`);
   const fp = keyFingerprint(req.headers.get(SIG_HEADERS.key) as string); // lendCallerRefusal 已核过：这就是钉住的那把
-  const r = await runManagerProcess(["lend", "inbox", "--", principal.peer as string, fp, body], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: CLI_TIMEOUT_MS });
+  const r = await runManagerProcess(["lend", "inbox", "--", principal.peer as string, fp, body],
+    { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: CLI_TIMEOUT_MS, onStderr: relayInboxStderr });
   if (r?.ok !== true) {
     if (r?.code === "invalid") return refused("invalid", String(r.error ?? "请求体不合格"));
     return refused("unavailable", String(r?.error ?? "收单失败")); // 超时 / 起不来：A 按推送失败退避重推，推不到的由它的推送 TTL 收走
