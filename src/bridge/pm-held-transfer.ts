@@ -26,12 +26,28 @@ function bodyOf(env: Envelope): string {
  */
 export function markPmTransfer(env: Envelope, addressed: string, target: string, header: string): void {
   const t = env as Transferred;
-  if (!t.pmTransfer && env.to.kind === "local" && env.to.channelId !== addressed) {
+  // 记成 legacy 的一直按 legacy：正文里那层旧抬头没有可信记录，不剥也不再叠（报错重试、重启读回、再换一任 PM 都一样）
+  if (t.pmTransfer?.legacy || (!t.pmTransfer && env.to.kind === "local" && env.to.channelId !== addressed)) {
     t.pmTransfer = { from: addressed, to: target, header: "", legacy: true };
     return;
   }
   env.content = `${header}\n${bodyOf(env)}`;
   t.pmTransfer = { from: addressed, to: target, header };
+}
+
+/**
+ * 这一封不转交、投给原收件人（人类直聊、前任自己的回程）：之前被转过（押后重投、旧版原地改过 env.to）就把收件方改回来——
+ * 目标忙时 deliverToLocal 按 env.to 押队，不改回去就押进了新 PM 的队。记录过的抬头一并摘掉（只摘记录里那一行）；
+ * legacy 的抬头在正文里、没有可信记录，正文不动、标记留着，免得以后再转时又叠一层
+ */
+export function undoPmTransfer(env: Envelope, to: Envelope["to"]): void {
+  if (env.to.kind !== "local" || to.kind !== "local" || env.to.channelId === to.channelId) return;
+  const t = env as Transferred;
+  if (t.pmTransfer && !t.pmTransfer.legacy) {
+    env.content = bodyOf(env);
+    delete t.pmTransfer;
+  }
+  env.to = to;
 }
 
 /** 转交没能送到、也没进新 PM 的队（新 PM 离线等）：flush 按报错处理，原条目留在旧队等下次，不当成已投出摘掉 */
@@ -60,9 +76,16 @@ const sameLetter = (a: Envelope, b: Envelope): boolean => {
  * 存量：旧版代码（或交接途中崩溃）留下的 A/B 双队——A 队条目的信封已转给 B（env.to=B），B 队也押着同一封。
  * B 队有对应的一条（同一对象，或重启后读回的同一封：messageId / thread / ts / intent / 发送方都相同）就只摘 A 的这条；
  * 一条对一条配对，同一 messageId 的两次合法点击各配各的。B 队没有对应的不摘：按新规则再转一次（不再加抬头），成功即交出。
- * 不碰别的频道、别的项目的条目，不清整队。返回摘掉的条数
+ * 任何一个频道 flush 之前都把所有频道对一遍（不只扫到的这个）：B 先投掉自己那份之后 A 再扫就找不到 twin 了，
+ * 只扫 A 的话结果随扫描先后变（B 先投 → A 那份又转给 B 一次）。不碰配不上的条目、别的项目，不清整队。返回摘掉的条数
  */
-export function adoptStrandedTransfers(held: HeldQueue, channelId: string): number {
+export function adoptStrandedTransfers(held: HeldQueue): number {
+  let total = 0;
+  for (const channelId of [...held.keys()]) total += adoptIn(held, channelId);
+  return total;
+}
+
+function adoptIn(held: HeldQueue, channelId: string): number {
   const q = held.get(channelId) ?? [];
   const used = new Set<HeldItem>(), drop = new Set<HeldItem>();
   // 先配同一对象（进程内的同一封），再配读回后字段相同的：配对结果不随队内顺序变
@@ -77,7 +100,7 @@ export function adoptStrandedTransfers(held: HeldQueue, channelId: string): numb
     }
   }
   if (!drop.size) return 0;
-  held.set(channelId, q.filter((i) => !drop.has(i)));
+  held.set(channelId, (held.get(channelId) ?? []).filter((i) => !drop.has(i)));
   for (const i of drop) console.log(`♻️ 押后存量：${i.env.meta.messageId} 已在 ${(i.env.to as { channelId: string }).channelId} 队里，摘掉 ${channelId} 的重复归属`);
   return drop.size;
 }

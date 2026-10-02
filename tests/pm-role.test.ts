@@ -37,11 +37,10 @@ test("no activePm preserves projectPm, routing envelope and first non-dispatcher
   expect(r.sent[0]?.to).toBe(env.to);
 });
 
-for (const source of ["scheduler", "lend", "peer", "executor", "owner"]) test(`${source} reaches active PM with original-recipient header and intact reply metadata`, async () => {
+for (const source of ["scheduler", "lend", "peer", "executor"]) test(`${source} reaches active PM with original-recipient header and intact reply metadata`, async () => {
   const f = fixture(), r = await routing(f);
   const from: Envelope["from"] = source === "peer" ? { kind: "api", tokenId: "tok_peer", peer: "remote", name: "remote" }
-    : source === "owner" ? { kind: "user", userId: "owner", channelId: "channel-a" }
-      : endpoint(source === "executor" ? "agent-task-1" : source, "sender");
+    : endpoint(source === "executor" ? "agent-task-1" : source, "sender");
   const env = envelope(from), meta = { ...env.meta };
   await r.deliver(env);
   expect(env.to).toMatchObject({ agentName: B, channelId: "channel-b" });
@@ -138,6 +137,34 @@ test("owner device scope is recomputed from its exact credential instead of the 
   r.state.principals.push({ id: "owner:self", role: "owner", agents: ["*"], createdAt: "2026-01-01", credentials: [{
     id: "dev-limited", expiresAt: "2050-01-01T00:00:00Z", grant: { agents: [A], terminal: false, manage: false },
   }] } as any);
-  const result = await r.deliver(envelope({ kind: "api", tokenId: "owner:self", name: "owner", owner: true, credential: "dev-limited" } as any));
-  expect(result.outcome.kind).toBe("dropped");
+  // Direct chat stays with A, so the device grant is checked against A: [A] passes, a grant without A is refused with no recipient.
+  r.clients.set("channel-a", { ws: socket() });
+  const ok = envelope({ kind: "api", tokenId: "owner:self", name: "owner", owner: true, credential: "dev-limited" } as any);
+  expect((await r.deliver(ok)).outcome.kind).toBe("sent");
+  expect(r.sent.map((e) => (e.to as LocalEndpoint).channelId)).toEqual(["channel-a"]);
+  // The same grant [A] chatting directly with the active PM B is refused: no redirect involved, still the exact credential decides.
+  const toB = envelope({ kind: "api", tokenId: "owner:self", name: "owner", owner: true, credential: "dev-limited" } as any, endpoint(B, "channel-b"));
+  expect((await r.deliver(toB)).outcome).toMatchObject({ kind: "dropped", reason: `API credential scope excludes ${B}` });
+  // Revoked, expired, a grant without A, or a disabled principal: A refuses too, never falling back to the owner's broad "*".
+  const intact = JSON.stringify(r.state.principals.at(-1));
+  const breaks: ((p: any) => void)[] = [(p) => { p.credentials[0].disabled = true; }, (p) => { p.credentials[0].expiresAt = "2020-01-01T00:00:00Z"; },
+    (p) => { p.credentials[0].grant.agents = [B]; }, (p) => { p.disabled = true; }];
+  for (const breakIt of breaks) {
+    const p = JSON.parse(intact);
+    breakIt(p);
+    r.state.principals.splice(-1, 1, p);
+    const result = await r.deliver(envelope({ kind: "api", tokenId: "owner:self", name: "owner", owner: true, credential: "dev-limited" } as any));
+    expect(result.outcome).toMatchObject({ kind: "dropped", reason: `API credential scope excludes ${A}` });
+  }
+  expect(r.sent).toHaveLength(1);
+});
+
+test("owner direct chat with a retired PM stays with it: no header, no receipt move, active PM gets nothing", async () => {
+  const f = fixture(), r = await routing(f);
+  r.clients.set("channel-a", { ws: socket() });
+  const env = envelope({ kind: "user", userId: "owner", channelId: "channel-a" } as Envelope["from"]), original = env.to;
+  await r.deliver(env);
+  expect(env.to).toBe(original);
+  expect(env.content).toBe("question");
+  expect(r.sent.map((e) => (e.to as LocalEndpoint).channelId)).toEqual(["channel-a"]);
 });

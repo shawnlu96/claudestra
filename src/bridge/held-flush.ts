@@ -142,7 +142,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
-    adoptStrandedTransfers(d.held, channelId); // 存量 A/B 双队：同一封已在新 PM 队里的，旧队不再投（bridge/pm-held-transfer.ts）
+    adoptStrandedTransfers(d.held); // 存量 A/B 双队：同一封已在新 PM 队里的，旧队不再投；每次 flush 前对全部频道，不靠扫描先后（bridge/pm-held-transfer.ts）
     const working = await d.working(channelId, evAgent);
     if (!working) openedBy.delete(channelId);
     let first: HeldItem | undefined;

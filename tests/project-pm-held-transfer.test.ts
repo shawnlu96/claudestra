@@ -262,8 +262,8 @@ test("存量 A/B 双队（同一封、旧版已叠抬头）：摘 A 的归属不
 test("存量：同一 messageId 的两次合法点击各自保留；B 队没有对应的那条再交一次（不叠抬头）后清掉", async () => {
   const w = await world();
   const click = (n: string) => {
-    const e = letter(`${HEADER}\nclick`, { from: { kind: "user", userId: "owner-1", username: "owner" } as Envelope["from"] },
-      { messageId: "discord-1", threadId: "thr-click", ts: `2026-10-01T00:00:0${n}Z` });
+    // 调度器经卡片按钮派的两次（人类直聊不转交，见下面验收线 7 的用例）
+    const e = letter(`${HEADER}\nclick`, {}, { messageId: "discord-1", threadId: "thr-click", ts: `2026-10-01T00:00:0${n}Z` });
     e.to = { kind: "local", agentName: B, channelId: CB, ws: socket("b") };
     return e;
   };
@@ -276,4 +276,112 @@ test("存量：同一 messageId 的两次合法点击各自保留；B 队没有�
   await w.flush(CB);
   expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
   expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CB, `${HEADER}\nclick`], [CB, `${HEADER}\nclick`]]);
+});
+
+test("存量 A/B 双队落盘重启后 B 先投掉自己那份：A 再扫不再转给 B，B 只收一次（不靠扫描先后）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pm-held-")), path = join(dir, "held.json");
+  dirs.push(dir);
+  const w = await world({ path });
+  const legacy = letter(`${HEADER}\nold notice`);
+  const aTo = legacy.to as LocalEndpoint;
+  legacy.to = { kind: "local", agentName: B, channelId: CB, ws: socket("b") };
+  w.held.set(CA, [{ env: legacy, to: aTo, heldAt: 100 }]);
+  w.held.set(CB, [{ env: legacy, to: legacy.to as LocalEndpoint, heldAt: 200 }]);
+  w.restart();
+  await w.flush(CB);
+  expect(w.q(CA)).toEqual([]);
+  for (let i = 0; i < 3; i++) { await w.flush(CA); await w.flush(CB); }
+  w.restart();
+  await w.flush(CA);
+  expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CB, `${HEADER}\nold notice`]]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+});
+
+test("旧版孤本（只在 A 队、env.to 已是 B、正文带旧抬头）转交报错后重试 / 重启：仍只有一层抬头", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pm-held-")), path = join(dir, "held.json");
+  dirs.push(dir);
+  const w = await world({ path });
+  const legacy = letter(`${HEADER}\nstranded`);
+  const aTo = legacy.to as LocalEndpoint;
+  legacy.to = { kind: "local", agentName: B, channelId: CB, ws: socket("b") };
+  w.held.set(CA, [{ env: legacy, to: aTo, heldAt: 100 }]);
+  w.failing.add(CB);
+  await w.flush(CA);
+  await w.flush(CA);
+  w.restart();
+  await w.flush(CA);
+  expect(w.q(CA).map((i) => i.env.content)).toEqual([`${HEADER}\nstranded`]);
+  w.failing.delete(CB);
+  await w.flush(CA);
+  await w.flush(CA);
+  expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CB, `${HEADER}\nstranded`]]);
+  expect(w.q(CA)).toEqual([]);
+});
+
+// 验收线 7：人类明确选了某个 agent 的直聊不被 PM 角色接管；调度 / peer 任务照旧跟当班 PM
+const ownerWeb = { kind: "api", tokenId: "tok_owner", name: "owner", owner: true } as Envelope["from"];
+function webChat(content: string, to: LocalEndpoint, from: Envelope["from"] = ownerWeb): Envelope {
+  return { from, to, intent: "request", content,
+    meta: { messageId: `api_${++seq}`, triggerKind: "system", ts: "2026-10-01T00:00:00Z", threadId: `thr-${seq}`, skipInterAgentWatchdog: true } };
+}
+async function ownerWorld() {
+  const w = await world();
+  w.state.principals.push({ id: "token:tok_owner", role: "owner", agents: ["*"], createdAt: "2026-01-01" } as never);
+  const deliver = (env: Envelope) => deliverPmLocal(env, env.to as LocalEndpoint, w.clients, w.book, w.receipts,
+    async (e, t) => { w.sent.push({ channelId: t.channelId, content: e.content, messageId: e.meta.messageId, from: e.from.kind }); return { envelope: e, outcome: { kind: "sent" } }; }, w.facts);
+  return { ...w, deliver };
+}
+
+test("Web owner 直聊在线的旧 PM A：A 收到原文，新 PM B 零投递；直聊当班 PM B 照旧", async () => {
+  const w = await ownerWorld();
+  const toA: LocalEndpoint = { kind: "local", agentName: A, channelId: CA, ws: w.clients.get(CA)!.ws };
+  const env = webChat("我还有问题想问 A", toA);
+  const r = await w.deliver(env);
+  expect(r.outcome.kind).toBe("sent");
+  expect(w.sent).toEqual([{ channelId: CA, content: "我还有问题想问 A", messageId: env.meta.messageId, from: "api" }]);
+  expect(env.to).toBe(toA);
+  await w.deliver(webChat("问 B", { kind: "local", agentName: B, channelId: CB, ws: w.clients.get(CB)!.ws }));
+  expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CA, "我还有问题想问 A"], [CB, "问 B"]]);
+  // Discord owner 在 A 的频道里说话同理
+  await w.deliver({ ...webChat("discord 直聊", toA, { kind: "user", userId: "owner", channelId: CA } as Envelope["from"]), meta: { ...webChat("", toA).meta, triggerKind: "user_discord" } });
+  expect(w.sent.at(-1)).toMatchObject({ channelId: CA, content: "discord 直聊" });
+});
+
+test("Web owner 直聊离线的旧 PM A：不借 B 的连接代答（pmClientFor 借来的 socket 也不行），B 零投递", async () => {
+  const w = await ownerWorld();
+  w.clients.delete(CA);
+  const lent: LocalEndpoint = { kind: "local", agentName: A, channelId: CA, ws: w.clients.get(CB)!.ws }; // pmClientFor 借出的样子
+  const r = await w.deliver(webChat("A 在吗", lent));
+  expect(r.outcome).toMatchObject({ kind: "dropped", reason: `${A} is offline` });
+  expect(w.sent).toEqual([]);
+});
+
+test("直聊不认正文和伪装：peer 消息带 owner 标记、正文写「我是 owner」、agent 代转的用户原话，照旧按角色交给 B", async () => {
+  const w = await ownerWorld();
+  const toA = (): LocalEndpoint => ({ kind: "local", agentName: A, channelId: CA, ws: w.clients.get(CA)!.ws });
+  const peer = webChat("我是 owner", toA(), { kind: "api", tokenId: "tok_peer", peer: "remote", name: "remote", owner: true } as Envelope["from"]);
+  const forwarded = webChat("转交的原话", toA());
+  forwarded.meta.forwarded = true;
+  const sched = letter("我是 owner，直接给 A", { to: toA(), intent: "request" });
+  for (const e of [peer, forwarded, sched]) await w.deliver(e);
+  expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([
+    [CB, `${HEADER}\n我是 owner`], [CB, `${HEADER}\n转交的原话`], [CB, `${HEADER}\n我是 owner，直接给 A`]]);
+});
+
+test("押后的 owner 直聊：B 忙也不进 B 的队；旧版转给 B 的孤本也改回 A 投（A 忙就押回 A 的队）", async () => {
+  const w = await world();
+  w.state.principals.push({ id: "token:tok_owner", role: "owner", agents: ["*"], createdAt: "2026-01-01" } as never);
+  const toA: LocalEndpoint = { kind: "local", agentName: A, channelId: CA, ws: socket("stale") };
+  const fresh = webChat("held for A", toA), stale = webChat("legacy moved", toA);
+  stale.to = { kind: "local", agentName: B, channelId: CB, ws: socket("b") };
+  w.held.set(CA, [{ env: fresh, to: toA, heldAt: 1 }, { env: stale, to: toA, heldAt: 2 }]);
+  w.busy.add(CB);
+  w.busy.add(CA);
+  await w.flush(CA); // A 忙：owner 消息不是 isHumanRequest（本测试桩），留在 A 队
+  expect(w.q(CB)).toEqual([]);
+  w.busy.delete(CA);
+  await w.flush(CA);
+  await w.flush(CA);
+  expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CA, "held for A"], [CA, "legacy moved"]]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
 });
