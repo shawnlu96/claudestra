@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { getMergeRun, advanceMergeRun } from "../src/lib/scheduler-merge.js";
 import { bounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
-import { ciRerunGh, parseRerunReceipt, rerunReceipt } from "../src/lib/scheduler-merge-ci-rerun.js";
+import { ciRerunGh, parseRerunReceipt, RERUN_SETTLE_MS, rerunReceipt } from "../src/lib/scheduler-merge-ci-rerun.js";
 import { parseFailedLog } from "../src/lib/scheduler-merge-ci-rerun-log.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
@@ -29,20 +29,26 @@ const WITH_ASSERT = ciLog([at(`##[group]${SLOW}:`), at("(fail) 本机 API last-s
   at("  ^ this test timed out after 5000ms."), at("##[endgroup]"), at("##[group]tests/b.test.ts:"), at("error: expect(received).toBe(expected)"),
   at("(fail) b > 断言 [0.40ms]"), at("##[endgroup]")], 2);
 
-interface Gh { attempt: number; status: string; log: string | Error; files: string[]; rerun: Error | null; argv: string[][] }
+/** `lag`: the rerun call succeeds but run view keeps showing the old attempt (GitHub's eventual consistency). */
+interface Gh { attempt: number; status: string; conclusion: string; log: string | Error; files: string[]; rerun: Error | null; lag: boolean;
+  argv: string[][] }
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
 const no = (stderr: string): BoundedResult => ({ code: 1, stdout: "", stderr, timedOut: false });
 /** Answers gh argv like the real CLI would for run 77 / PR 7. */
 const fakeGh = (gh: Gh) => async (argv: string[]): Promise<BoundedResult> => {
   gh.argv.push(argv);
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status") return ok(JSON.stringify({ attempt: gh.attempt, status: gh.status }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") {
+    return ok(JSON.stringify({ attempt: gh.attempt, status: gh.status, conclusion: gh.conclusion }));
+  }
   if (cmd === "run view 77 --repo example/repo --log-failed") return gh.log instanceof Error ? no(gh.log.message) : ok(gh.log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: gh.files.map((path) => ({ path, additions: 1, deletions: 0 })) }));
   if (cmd === "run rerun 77 --failed --repo example/repo") {
     if (gh.rerun) return no(gh.rerun.message);
+    if (gh.lag) return ok("");
     gh.attempt++;
     gh.status = "queued";
+    gh.conclusion = "";
     return ok("");
   }
   return no(`unexpected gh ${cmd}`);
@@ -55,12 +61,13 @@ const red = (): PrSnapshot => ({ state: "OPEN", head: HEAD, branch: "feat/t9", b
 function card(over: Partial<Gh> = {}) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(c.intent);
-  const gh: Gh = { attempt: 1, status: "completed", log: TIMEOUT_ONLY, files: ["src/lib/x.ts", "tests/x.test.ts"], rerun: null, argv: [], ...over };
+  const gh: Gh = { attempt: 1, status: "completed", conclusion: "failure", log: TIMEOUT_ONLY, files: ["src/lib/x.ts", "tests/x.test.ts"],
+    rerun: null, lag: false, argv: [], ...over };
   let snap = red();
   const external = { inspect: async () => snap, freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }),
     carryReview: async () => ({ ok: false, reason: "不沿用" }), updateBranch: async () => {}, merge: async () => { throw new Error("不该合并"); },
     ciRerun: ciRerunGh(fakeGh(gh) as never) } as MergeExternal;
-  const tick = () => schedulerMergeTick(c.db, config, ledgerAs(c.db, "scheduler"), () => external);
+  const tick = (now = 200) => schedulerMergeTick(c.db, config, ledgerAs(c.db, "scheduler", () => now), () => external);
   const state = () => ({ run: getMergeRun(c.db, c.intent)?.phase as string | undefined, stage: (c.db.query("SELECT stage FROM tasks WHERE id='T9'").get() as { stage: string }).stage });
   const events = (op: string) => (c.db.query(`SELECT text, data FROM events WHERE target='T9' AND kind='scheduler' AND json_extract(data,'$.op')=?
     ORDER BY seq`).all(op) as { text: string; data: string }[]).map((e) => ({ text: e.text, ...JSON.parse(e.data) }));
@@ -119,13 +126,47 @@ describe("i28-CIF1 merge gate re-runs CI that only timed out in tests the PR did
     });
   });
 
+  test("rerun accepted but GitHub still shows attempt 1 completed → keep waiting, no second rerun; green run with stale red checks waits too", async () => {
+    await withCard({ lag: true }, async (c) => {
+      await c.tick();
+      for (let i = 0; i < 2; i++) {
+        await c.tick();
+        expect([c.state(), c.reruns()]).toEqual([{ run: "await_ci", stage: "merge" }, 1]);
+      }
+      expect(c.events("merge_ci_rerun")).toHaveLength(1);
+      expect(c.events("merge_conflict")).toEqual([]);
+      // The second attempt ended green while the PR still shows the old red: wait for the checks, do not bounce.
+      Object.assign(c.gh, { attempt: 2, status: "completed", conclusion: "success" });
+      await c.tick();
+      expect([c.state(), c.reruns()]).toEqual([{ run: "await_ci", stage: "merge" }, 1]);
+      // It ended red instead: that is the second red on this head.
+      c.gh.conclusion = "failure";
+      await c.tick();
+      expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+    });
+  });
+
+  test("a claimed rerun that never shows up on GitHub within the settle window → back to fix, still one rerun", async () => {
+    await withCard({ lag: true }, async (c) => {
+      const t0 = 200;
+      await c.tick(t0);
+      await c.tick(t0 + RERUN_SETTLE_MS - 1);
+      expect(c.state()).toEqual({ run: "await_ci", stage: "merge" });
+      await c.tick(t0 + RERUN_SETTLE_MS);
+      expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+    });
+  });
+
   test("ledger: a second rerun claim on the same head becomes the ci_fail bounce, whatever the driver read", async () => {
     await withCard({}, async (c) => {
       const receipt = rerunReceipt(HEAD, { link: RUN, checks: ["ci"], cases: ["tests/x.test.ts > slow"] });
       const sch = { actor: "scheduler", now: 500 };
       const first = advanceMergeRun(c.db, sch, { intentId: c.intent, from: "await_ci", to: "resolved", rev: 4, receipt });
       expect([first.phase, first.rev]).toEqual(["await_ci", 5]);
-      const again = advanceMergeRun(c.db, sch, { intentId: c.intent, from: "await_ci", to: "resolved", rev: 5, receipt });
+      const settling = advanceMergeRun(c.db, { ...sch, now: 600 }, { intentId: c.intent, from: "await_ci", to: "resolved", rev: 5, receipt });
+      expect([settling.phase, settling.rev]).toEqual(["await_ci", 5]);
+      const other = rerunReceipt(HEAD, { link: "https://github.com/example/repo/actions/runs/78", checks: ["ci"], cases: [] });
+      const again = advanceMergeRun(c.db, sch, { intentId: c.intent, from: "await_ci", to: "resolved", rev: 5, receipt: other });
       expect(again.phase).toBe("resolved");
       expect(c.state()).toEqual(BOUNCED);
       expect(c.events("merge_ci_rerun")).toHaveLength(1);
@@ -163,9 +204,16 @@ describe("bun test failed-log parsing", () => {
   });
   test("refuses what it cannot account for", () => {
     for (const log of ["", ciLog([], 0), ciLog([at("(fail) loose [1.00ms]")]), TIMEOUT_ONLY.replace(" 1 fail", " 3 fail"),
-      `${TIMEOUT_ONLY}\nci\tGuard\t2026-10-02T11:05:00Z ##[error]guard red`, TIMEOUT_ONLY.replace("##[endgroup]", "# Unhandled error between tests")]) {
+      `${TIMEOUT_ONLY}\nci\tGuard\t2026-10-02T11:05:00Z ##[error]guard red`, TIMEOUT_ONLY.replace("##[endgroup]", "# Unhandled error between tests"),
+      TIMEOUT_ONLY.replace("##[endgroup]", "##[endgroup]\n" + at("error: failed to write coverage report")),
+      TIMEOUT_ONLY.replace("##[endgroup]", "##[endgroup]\n" + at("##[error]coverage threshold not met")),
+      TIMEOUT_ONLY.replace("(pass) fine [1.00ms]", "(pass) fine [1.00ms]\n" + at("error: stray failure"))]) {
       expect(parseFailedLog(log)).toBeNull();
     }
+  });
+  test("an error printed for a (fail) makes it a non-timeout even with the timeout marker", () => {
+    const log = TIMEOUT_ONLY.replace(at("(fail) 本机"), `${at("error: write EPIPE")}\n${at("(fail) 本机")}`);
+    expect(parseFailedLog(log)).toEqual([{ file: SLOW, name: "本机 API last-seen > 过滤在 LIMIT 之前", timedOut: false }]);
   });
   test("rerun receipt round-trips and stays inside the ledger's 600-unit gate", () => {
     const cases = Array.from({ length: 30 }, (_, i) => `tests/t${i}.test.ts > ${"很长的用例名".repeat(30)}`);

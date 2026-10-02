@@ -17,8 +17,8 @@ import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
 /** The GitHub calls this needs; a test (or another host) puts its own on the external as `ciRerun`. */
 export interface CiRerunGh {
-  /** `attempt` > 1 means the run was already re-run; `status` is "completed" once that attempt ended. */
-  runAttempt(repo: string, runId: string): Promise<{ attempt: number; status: string }>;
+  /** `attempt` > 1 means the run was already re-run; `status` is "completed" once that attempt ended, with its `conclusion`. */
+  runAttempt(repo: string, runId: string): Promise<{ attempt: number; status: string; conclusion: string }>;
   failedLog(repo: string, runId: string): Promise<string>;
   prFiles(prRef: string): Promise<string[]>;
   rerunFailed(repo: string, runId: string): Promise<void>;
@@ -43,9 +43,10 @@ export function ciRerunGh(command: typeof runBounded = runBounded): CiRerunGh {
   };
   return {
     async runAttempt(repo, runId) {
-      const raw = JSON.parse(await gh("run", "view", runId, "--repo", repo, "--json", "attempt,status")) as { attempt?: unknown; status?: unknown };
+      const raw = JSON.parse(await gh("run", "view", runId, "--repo", repo, "--json", "attempt,status,conclusion")) as
+        { attempt?: unknown; status?: unknown; conclusion?: unknown };
       if (!Number.isSafeInteger(raw.attempt) || typeof raw.status !== "string") throw new Error("gh run view 没给出 attempt / status");
-      return { attempt: raw.attempt as number, status: raw.status };
+      return { attempt: raw.attempt as number, status: raw.status, conclusion: typeof raw.conclusion === "string" ? raw.conclusion : "" };
     },
     async failedLog(repo, runId) {
       const log = await gh("run", "view", runId, "--repo", repo, "--log-failed");
@@ -77,7 +78,9 @@ async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Prom
   const ids = new Set(runs.map((m) => `${m![1]}/${m![2]}`));
   if (ids.size !== 1) return { kind: "bounce", why: "失败检查分属多个 run" };
   const [repo, runId] = [runs[0]![1]!, runs[0]![2]!];
-  const { attempt, status } = await gh.runAttempt(repo, runId);
+  const { attempt, status, conclusion } = await gh.runAttempt(repo, runId);
+  // The run went green but the PR checks still show the old red for a moment: wait for them to catch up.
+  if (status === "completed" && conclusion === "success") return { kind: "wait" };
   // A re-run that is still going can leave the old red on the PR for a moment; once it ends red, that is the second red.
   if (attempt > 1) return status === "completed" ? { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` } : { kind: "wait" };
   const failures = parseFailedLog(await gh.failedLog(repo, runId));
@@ -112,8 +115,10 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：${decision.why}`);
     return bounce();
   }
+  const rev = run.rev;
   const claimed = await step("resolved", rerunReceipt(pr.head, decision.plan));
   if (claimed.phase === "resolved") return claimed; // this head was already re-run once: the ledger bounced it
+  if (claimed.rev === rev) return claimed; // claimed moments ago, GitHub still shows the old attempt: keep waiting, no second rerun
   try {
     await gh.rerunFailed(decision.plan.repo, decision.plan.runId);
     return claimed;
@@ -148,9 +153,14 @@ export function parseRerunReceipt(receipt: string): { prHead: string; link: stri
   }
 }
 
+/** How long after a claim GitHub may still show the old attempt of the same run; past it the rerun evidently never started. */
+export const RERUN_SETTLE_MS = 10 * 60_000;
+
 /**
  * Ledger side, inside closeMergeRun's transaction. Not a rerun claim → the receipt unchanged. A first claim for this head →
- * the event is written, the run keeps its phase (rev+1), null. A head that was re-run already → the ci_fail bounce receipt.
+ * the event is written, the run keeps its phase (rev+1), null. The same run claimed again within RERUN_SETTLE_MS (GitHub
+ * still shows attempt 1 after the rerun call) → nothing written, rev unchanged, null: the driver keeps waiting.
+ * Anything else on a head that was re-run already → the ci_fail bounce receipt.
  */
 export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, drift: string | null, toReceipt: ToReceipt): string | null {
   const claim = parseRerunReceipt(receipt);
@@ -160,8 +170,10 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
     throw new LedgerError("invalid", "CI 重跑回执的 head / 检查名与本次合并不符");
   }
   const checks = claim.checks.map((name) => ({ name, link: claim.link }));
-  if (rerunOf(db, row.taskId, claim.prHead)) return toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
   const now = ctx.now ?? Date.now();
+  const prior = rerunOf(db, row.taskId, claim.prHead);
+  if (prior && prior.run === claim.link && now - prior.ts < RERUN_SETTLE_MS) return null;
+  if (prior) return toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
   db.prepare("UPDATE scheduler_merges SET rev=rev+1, updatedAt=? WHERE intentId=?").run(now, row.intentId);
   insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun:${claim.prHead}` }, {
     project: row.project, target: row.taskId, kind: "scheduler",
@@ -172,5 +184,6 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   return null;
 }
 
-const rerunOf = (db: Database, taskId: string, prHead: string): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='scheduler'
-  AND json_extract(data,'$.op')='merge_ci_rerun' AND lower(json_extract(data,'$.prHead'))=lower(?) LIMIT 1`).get(taskId, prHead);
+const rerunOf = (db: Database, taskId: string, prHead: string): { ts: number; run: string } | null => db.query(`SELECT ts,
+  json_extract(data,'$.run') AS run FROM events WHERE target=? AND kind='scheduler' AND json_extract(data,'$.op')='merge_ci_rerun'
+  AND lower(json_extract(data,'$.prHead'))=lower(?) ORDER BY seq LIMIT 1`).get(taskId, prHead) as { ts: number; run: string } | null;
