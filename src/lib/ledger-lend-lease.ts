@@ -16,6 +16,7 @@ import { standardAnswers } from "./order-standard-answers.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import type { bounceWork } from "./scheduler-merge-conflict.js";
 import { lendFixEnv } from "./lend-fix-env.js";
+import { relayTarget } from "./lend-fix-reassign-event.js";
 /** i28-GATE2：出借单外发前把本卡历史 head 截短、敏感问题编号换别名（逻辑在 order-gate-heads.ts） */
 export { forPeer } from "./order-gate-heads.js";
 
@@ -72,11 +73,12 @@ export function writeOfferBranch(db: Database, task: LedgerTask, step: LendStep,
   const branch = lendBranch(task.id, w.fp);
   if (!branch) throw new LedgerError("invalid", `任务 id ${task.id} 或出借方指纹不合格，拼不出出借分支名`);
   const lease = heldLease(db, task);
+  const relay = step === "fix" && !lease && relayTarget(db, task) === peer; // i28-RA1：自动改派的接力单，起点是 PR 当前 head、分支是新出借方自己的
   if (lease && lease.peer !== peer) throw new LedgerError("conflict", `这张卡的写租约在 ${lease.peer}：修复单优先派回它；要换人先 ledger lend-reclaim ${task.id}`);
   if (lease && lease.branch !== branch) throw new LedgerError("conflict", `${peer} 的实例指纹变了（租约记的分支是 ${lease.branch}），先 lend-reclaim 收回`);
   if (step === "fix") {
-    if (!lease) throw new LedgerError("invalid", "修复单只派给持有写租约的出借方（这张卡的开工单没借出去，对方推不了它的分支）");
-    if (task.branch !== branch) throw new LedgerError("invalid", `卡上的分支是 ${task.branch ?? "（空）"}，不是出借分支 ${branch}`);
+    if (!lease && !relay) throw new LedgerError("invalid", "修复单只派给持有写租约的出借方（这张卡的开工单没借出去，对方推不了它的分支）");
+    if (!relay && task.branch !== branch) throw new LedgerError("invalid", `卡上的分支是 ${task.branch ?? "（空）"}，不是出借分支 ${branch}`);
     if (!task.headSHA || !/^[0-9a-f]{40}$/.test(task.headSHA)) throw new LedgerError("invalid", "卡上没有完整的 40 位 head，修复单没有起点");
   } else if (!w.baseSha || !/^[0-9a-f]{40}$/.test(w.baseSha)) {
     throw new LedgerError("invalid", `查不到基线 ${w.base} 在远端的完整 head，开工单没有起点`);
