@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { basisField, basisFromText, findingBasis } from "../src/lib/review-converge-basis.js";
+import { followUpGlobs } from "../src/lib/review-converge-followup-text.js";
 import { reportBasis } from "../src/lib/review-converge-report.js";
 import { convergeReview } from "../src/lib/review-converge.js";
 import type { ReviewFacts, ReviewFinding } from "../src/lib/scheduler-review.js";
 
-/** i28-MT1f2 round 2: a real P1 whose probe opens with a two-line marker, demoted as "no basis" before i28-CONV5. */
-const MT1F2_R2_PROBE = "[验收线 1、2] hold-slot.ts 的占位在 void/done 两条退出路径上都没释放：先跑 /tmp/rv-mt1f2-r2-acceptance.test.ts，" +
-  "第二张卡在 src/lib/scheduler-slot-hold.ts 拿不到写槽，验收线 1 的并发用例和验收线 2 的释放用例都失败。";
+/**
+ * i28-MT1f2 round 2, findings[0].probe (outsider-voids-live-train) verbatim from the ledger: a real P1 whose probe opens with a
+ * two-line marker, demoted as "no basis" before i28-CONV5. Its follow-up globs keep only the real source path.
+ */
+const MT1F2_R2_PROBE = "[验收线 1、2] /tmp/rv-mt1f2-r2-acceptance.test.ts:existing ready outsider must wait during testing / settling 两个测试均失败。" +
+  "T3 已占槽且 ready,因文件与 T1 重叠被正常组车排除;trainProjects 仍允许该项目组车。两轮后都观测到 serial-merge:3,列车提前 void/done," +
+  "而期望无串行效果、等待健康列车结束。src/lib/scheduler-merge-train-hold.ts:41-46 无条件 voidTrain;hold-slot.ts:44 只按 phase 判断候选,不能保证槽主真正入选。";
 
 const facts = (findings: ReviewFinding[]): ReviewFacts => ({ findings, round: 2, head: "d".repeat(40), verdict: "changes", eventSeq: 30,
   reviewer: "rv", reviewerSessionId: "s", reviewerFamily: "codex", reportPath: "/reviews/r.md" });
@@ -36,10 +41,14 @@ describe("acceptance markers that name several lines", () => {
   });
 
   test("the MT1f2 round-2 probe keeps its P1", () => {
-    const f: ReviewFinding = { findingId: "slot-leak", family: "slot-leak", severity: "P1", probe: MT1F2_R2_PROBE };
+    const f: ReviewFinding = { findingId: "outsider-voids-live-train", family: "outsider-voids-live-train", severity: "P1", probe: MT1F2_R2_PROBE };
     expect(findingBasis(f)).toBe("acceptance:1");
     const c = convergeReview([], facts([f]), null);
     expect(c.downgrade).toBeNull();
     expect(c.facts.findings[0].severity).toBe("P1");
+    // /tmp, bare hold-slot.ts and void/done drop; with no real path left the card's globs stand
+    const exists = (p: string) => p === "src/lib/scheduler-merge-train-hold.ts";
+    expect(followUpGlobs([{ probe: MT1F2_R2_PROBE }], ["src/own.ts"], exists)).toEqual(["src/lib/scheduler-merge-train-hold.ts"]);
+    expect(followUpGlobs([{ probe: MT1F2_R2_PROBE }], ["src/own.ts"], () => false)).toEqual(["src/own.ts"]);
   });
 });

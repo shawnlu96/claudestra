@@ -30,6 +30,14 @@ describe("follow-up fileGlobs name only real repo paths", () => {
     expect(followUpGlobs([{ probe: "/tmp/a.ts" }], ["src/own.ts"], () => true)).toEqual(["src/own.ts"]);
   });
 
+  test("an absolute probe path never maps onto main's same-named file", () => {
+    const exists = (p: string) => ["src/lib/review-converge.ts", "package.json"].includes(p);
+    expect(followUpGlobs([{ probe: "/package.json /src/lib/review-converge.ts" }], ["src/own.ts"], exists)).toEqual(["src/own.ts"]);
+    expect(followUpGlobs([{ probe: "~/repo/package.json 和 https://x.io/src/lib/review-converge.ts" }], ["src/own.ts"], exists)).toEqual(["src/own.ts"]);
+    expect(followUpGlobs([{ probe: "/package.json 以及 ./src/lib/review-converge.ts:40、`package.json`" }], ["src/own.ts"], exists))
+      .toEqual(["package.json", "src/lib/review-converge.ts"]);
+  });
+
   test("main's tree is the reference: an untracked working-tree file does not count", () => {
     const dir = mkdtempSync(join(tmpdir(), "converge-main-"));
     try {
