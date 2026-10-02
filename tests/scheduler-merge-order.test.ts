@@ -1,8 +1,8 @@
 /** i28-MQ2: once the merge lock frees, the merge-stage card that entered merge first and can merge takes it; `ledger merge-queue` lists the same order. */
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { finishFirst } from "../src/lib/scheduler-agent-pool.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
@@ -14,6 +14,8 @@ import { paceCards, type TickPace } from "../src/lib/scheduler-yield.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
 import type { Registry } from "../src/manager/core.js";
+import { isWriteInvocation } from "../src/manager/write-commands.js";
+import { testChildEnv } from "./test-env.js";
 
 const H = "a".repeat(40);
 const OVERLAP = (holder: string) => `资源 merge:p 与 merge:p 重叠（${holder} 占用）`;
@@ -181,4 +183,36 @@ describe("i28-MQ2 merge queue picks by merge entry", () => {
       } finally { ro.close(); }
     } finally { f.close(); }
   });
+
+  test("[验收线 5] the real `cmdLedger` entry reads through a read-only connection: no db created, no data fixed, unknown callers can read", async () => {
+    expect(isWriteInvocation("ledger", ["merge-queue", "--project", "p"])).toBe(false);
+    const run = async (state: string) => {
+      writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "p", name: "p", dirs: [], createdAt: "2026-10-02T00:00:00Z" }] }));
+      // An unregistered channel: a write command would be refused before reaching the handler.
+      const env = testChildEnv({ CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run"), DISCORD_CHANNEL_ID: "999000999" });
+      const proc = Bun.spawn([process.execPath, join(import.meta.dir, "../src/manager.ts"), "ledger", "merge-queue", "--project", "p"], { env, stdout: "pipe", stderr: "pipe" });
+      return JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "");
+    };
+    const empty = mkdtempSync(join(tmpdir(), "mq2-empty-"));
+    try {
+      expect((await run(empty)).ok).toBe(false);
+      expect(existsSync(join(empty, "ledger.sqlite"))).toBe(false);
+    } finally { rmSync(empty, { recursive: true, force: true }); }
+
+    const f = reversed();
+    try {
+      // Drift openLedger would reconcile (assignee follows agent): a read must leave it alone.
+      f.db.query("UPDATE tasks SET assignee = 'agent-stale' WHERE id = 'A'").run();
+      const events = (f.db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
+      closeLedger(f.path);
+      const r = await run(dirname(f.path));
+      expect(r).toMatchObject({ ok: true, project: "p" });
+      expect((r.rows as { task: string }[]).map((x) => x.task)).toEqual(["C", "B", "A"]);
+      const check = new Database(f.path, { readonly: true });
+      try {
+        expect(check.query("SELECT assignee FROM tasks WHERE id = 'A'").get()).toEqual({ assignee: "agent-stale" });
+        expect(check.query("SELECT COUNT(*) AS n FROM events").get()).toEqual({ n: events });
+      } finally { check.close(); }
+    } finally { f.close(); }
+  }, 30_000);
 });

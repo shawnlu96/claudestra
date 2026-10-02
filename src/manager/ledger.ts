@@ -48,7 +48,7 @@ import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
 import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
 import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
-import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
+import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
@@ -120,9 +120,9 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
-  // audit / feature-migrate 的 --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
-  const readOnly = DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
-  if (readOnly === null) return { error: "台账库还不存在（或正在建），--dry-run 没东西可看" };
+  // audit / feature-migrate 的 --dry-run 与 merge-queue 只读：不走 openLedger（它会建表 / 迁移 / 修负责人列，分支代码对线上库跑一次就把版本号抬上去）
+  const readOnly = (DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run")) || READER_ONLY_SUBS.has(args[0] ?? "") ? new LedgerReader().get() : undefined;
+  if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
     db: readOnly ?? openLedger(),
     actor,
