@@ -67,8 +67,8 @@ describe("manager shared-ledger-join", () => {
     const cred = resolveSharedLedgerCredential("owner:self", "person", String(r.result.centerId), "team-a", "project-a", "read")!;
     expect(statSync(join(STATE_DIR, "shared-ledger-credentials.json")).mode & 0o777).toBe(0o600);
     for (const s of [code, cred.bearer]) expect(r.text.includes(s)).toBe(false);
-    const again = await run(["--url", url], async () => code);
-    expect(again.result).toEqual({ ok: false, error: "join rejected" });
+    const again = await run(["--url", url], async () => code); // Same instance key retrying its redeemed code is idempotent (i28-JN2).
+    expect(again.result).toMatchObject({ ok: true, personId: "peer-a" });
   });
 
   test("code file path joins; a rejected code yields a fixed error", async () => {

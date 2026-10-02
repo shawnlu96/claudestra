@@ -8,7 +8,7 @@ import { isPublicKey, verifyPurpose } from "../lib/instance-key.js";
 import { sharedLedgerCredentialHash, type SharedLedgerCredential } from "../lib/shared-ledger-auth.js";
 import {
   SHARED_LEDGER_JOIN_PATH, SHARED_LEDGER_JOIN_PURPOSE, formatSharedLedgerJoinCode, parseSharedLedgerJoinCode,
-  sharedLedgerJoinFields, type SharedLedgerJoinGrant,
+  sharedLedgerInstanceId, sharedLedgerJoinFields, type SharedLedgerJoinGrant,
 } from "../lib/shared-ledger-join.js";
 import { registerCredential } from "./identity.js";
 import { Store, decode, encode } from "./store.js";
@@ -66,9 +66,10 @@ interface JoinRow {
   revokedAt: number | null; instanceId: string | null;
 }
 export function listJoinCodes(store: Store, now = Date.now()) {
-  return store.all<JoinRow>("SELECT * FROM join_codes ORDER BY createdAt").map(({ secretHash: _hash, actions, ...r }) => ({
-    ...r, actions: decode<string[]>(actions),
-    status: r.revokedAt !== null ? "revoked" : r.usedAt !== null ? "used" : r.expiresAt <= now ? "expired" : "pending" }));
+  return store.all<JoinRow & { member: string | null }>(`SELECT j.*, m.status member FROM join_codes j
+    LEFT JOIN members m ON m.teamId=j.teamId AND m.personId=j.personId ORDER BY j.createdAt`).map(({ secretHash: _hash, actions, member, ...r }) => ({
+    ...r, actions: decode<string[]>(actions), status: r.revokedAt !== null ? "revoked" : r.usedAt !== null ? "used"
+      : r.expiresAt <= now ? "expired" : member !== null && member !== "active" ? "rejected" : "pending" }));
 }
 /** Revoking a used code changes nothing: the issued credential is managed separately. */
 export function revokeJoinCode(store: Store, id: string, now = Date.now()): boolean {
@@ -88,17 +89,20 @@ function parseRequest(body: string): { code: string; publicKey: string; instance
   return raw as { code: string; publicKey: string; instanceId: string; signature: string };
 }
 
-/** Atomic: lookup, proof check, credential registration and single-use mark share one immediate transaction. */
+/** Atomic: lookup, proof check, credential registration and single-use mark share one immediate transaction. Until expiry the same
+ *  instance key may redeem its own used code again (lost confirmation); the bearer issued earlier by that code is revoked. */
 function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLedgerJoinGrant {
   const req = parseRequest(body);
   const parsed = parseSharedLedgerJoinCode(req.code);
-  if (!parsed || !isPublicKey(req.publicKey) || !ID_RE.test(req.instanceId)) return reject();
+  // Key-derived instance ids can only be claimed by their key, so a teammate cannot squat one before its owner joins.
+  if (!parsed || !isPublicKey(req.publicKey) || !ID_RE.test(req.instanceId)
+    || (req.instanceId.startsWith("sli-") && req.instanceId !== sharedLedgerInstanceId(req.publicKey))) return reject();
   return store.write(() => {
     const center = centerId(store);
     const row = store.get<JoinRow>("SELECT * FROM join_codes WHERE id=?", parsed.codeId);
     const given = Buffer.from(sha(parsed.secret), "hex");
     if (!row || parsed.centerId !== center || !timingSafeEqual(given, Buffer.from(row.secretHash, "hex"))) return reject();
-    if (row.usedAt !== null || row.revokedAt !== null || now >= row.expiresAt) return reject();
+    if ((row.usedAt !== null && row.instanceId !== req.instanceId) || row.revokedAt !== null || now >= row.expiresAt) return reject();
     if (!verifyPurpose(req.publicKey, SHARED_LEDGER_JOIN_PURPOSE, sharedLedgerJoinFields(center, req.code, req.publicKey, req.instanceId),
       req.signature)) return reject();
     const actions = decode<Action[]>(row.actions);
@@ -107,7 +111,9 @@ function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLed
     // An instance id may not be re-bound to another person or another key through enrollment.
     const bound = store.all<{ personId: string; publicKey: string }>(
       "SELECT personId, publicKey FROM instance_bindings WHERE teamId=? AND instanceId=?", row.teamId, req.instanceId);
-    if (bound.some((b) => b.personId !== row.personId || b.publicKey !== req.publicKey)) return reject();
+    if (bound.some((b) => b.personId !== row.personId || b.publicKey !== req.publicKey) || (row.usedAt !== null && !bound.length)) return reject();
+    if (row.usedAt !== null) store.run("UPDATE credentials SET revokedAt=? WHERE teamId=? AND personId=? AND instanceId=? AND expiresAt=? AND revokedAt IS NULL",
+      now, row.teamId, row.personId, req.instanceId, row.usedAt + row.credentialTtlMs);
     const member = store.get<{ status: string }>("SELECT status FROM members WHERE teamId=? AND personId=?", row.teamId, row.personId);
     if (member && member.status !== "active") return reject();
     const bearer = randomBytes(32).toString("base64url");
@@ -115,7 +121,8 @@ function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLed
     const projects: SharedLedgerCredential["projects"] = [{ projectId: row.projectId, role: row.role as Role, actions }];
     registerCredential(store, { credentialHash: sharedLedgerCredentialHash(bearer), teamId: row.teamId, personId: row.personId,
       instanceId: req.instanceId, publicKey: req.publicKey, membershipStatus: "active", revokedAt: null, expiresAt, projects }, row.memberCode, true);
-    if (store.db.query("UPDATE join_codes SET usedAt=?, instanceId=? WHERE id=? AND usedAt IS NULL").run(now, req.instanceId, row.id).changes !== 1) {
+    if (store.db.query("UPDATE join_codes SET usedAt=?, instanceId=? WHERE id=? AND (usedAt IS NULL OR instanceId=?)")
+      .run(now, req.instanceId, row.id, req.instanceId).changes !== 1) {
       return reject();
     }
     return { centerId: center, teamId: row.teamId, personId: row.personId, instanceId: req.instanceId, bearer, expiresAt,
@@ -125,23 +132,24 @@ function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLed
 
 interface Window { at: number; count: number }
 export interface JoinLimits { perSourcePerMinute: number; perCodePer10Minutes: number }
-/** Limits count every attempt, keyed by source address and by the claimed code id (existing or not). */
+/** Limits count every attempt, keyed by source address and by the claimed code id (existing or not); full tables drop the least recently seen key. */
 export function joinHandler(store: Store, limits: JoinLimits = { perSourcePerMinute: 10, perCodePer10Minutes: 5 }) {
   const sources = new Map<string, Window>();
   const codes = new Map<string, Window>();
   const hit = (map: Map<string, Window>, key: string, windowMs: number, max: number, now: number): boolean => {
-    for (const [k, v] of map) if (now - v.at >= windowMs) map.delete(k);
-    if (!map.has(key) && map.size >= 4096) return false;
-    const w = map.get(key) ?? { at: now, count: 0 };
+    const old = map.get(key);
+    const w = old && now - old.at < windowMs ? old : { at: now, count: 0 };
+    map.delete(key); // Map iteration order is insertion order: re-inserting keeps the oldest access first.
+    if (map.size >= 4096) map.delete(map.keys().next().value!);
     w.count++;
     map.set(key, w);
     return w.count <= max;
   };
   const rejected = () => Response.json({ code: "join_rejected", message: "Join rejected" }, { status: 403, headers: { "Cache-Control": "no-store" } });
   return (method: string, body: string, remote: string, now: number): Response => {
-    let codeKey = "malformed";
-    try { codeKey = String(JSON.parse(body)?.code ?? "").split(".")[2] ?? "malformed"; }
-    catch { codeKey = "malformed"; } // Unparseable bodies share one bucket and are rejected below.
+    let codeKey = `malformed:${remote}`;
+    try { codeKey = String(JSON.parse(body)?.code ?? "").split(".")[2] ?? codeKey; }
+    catch { /* Unparseable bodies count against a per-source malformed bucket and are rejected below. */ }
     if (!hit(sources, remote, 60_000, limits.perSourcePerMinute, now) || !hit(codes, codeKey.slice(0, 64), 600_000, limits.perCodePer10Minutes, now)) {
       return Response.json({ code: "rate_limited", message: "Rate limit exceeded" }, { status: 429, headers: { "Retry-After": "60" } });
     }

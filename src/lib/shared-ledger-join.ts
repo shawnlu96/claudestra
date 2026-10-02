@@ -28,6 +28,8 @@ export function parseSharedLedgerJoinCode(code: unknown): SharedLedgerJoinCode |
 /** True for anything shaped like a join code: callers use it to refuse codes passed through argv. */
 export const looksLikeSharedLedgerJoinCode = (v: string): boolean => /sljoin1\./.test(v);
 
+/** Default enrollment instance id, derived from the instance key: only its holder can claim it (free-form ids are first-come). */
+export const sharedLedgerInstanceId = (key: string) => `sli-${createHash("sha256").update(Buffer.from(key, "base64url")).digest("hex").slice(0, 24)}`;
 export function sharedLedgerJoinFields(centerId: string, code: string, publicKey: string, instanceId: string): string[] {
   return ["JOIN", SHARED_LEDGER_JOIN_PATH, centerId, createHash("sha256").update(code).digest("hex"), publicKey, instanceId];
 }
@@ -65,7 +67,7 @@ function centerBaseUrl(raw: string): string {
 }
 
 export interface SharedLedgerJoinInput {
-  url: string; code: string; key: InstanceKey; instanceId: string;
+  url: string; code: string; key: InstanceKey; instanceId?: string;
   /** Local principal the credential is resolved for (owner:self by default for people). */
   subject: string; localProjectId?: string; stateDir?: string; fetch?: typeof fetch; timeoutMs?: number;
 }
@@ -103,7 +105,7 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
   }
   const baseUrl = centerBaseUrl(input.url);
   if (!isPublicKey(input.key.publicKey)) throw new SharedLedgerJoinError("instance key unavailable");
-  const grant = await redeem(input, signSharedLedgerJoin(input.code, input.instanceId, input.key), parsed.centerId);
+  const grant = await redeem(input, signSharedLedgerJoin(input.code, input.instanceId ?? sharedLedgerInstanceId(input.key.publicKey), input.key), parsed.centerId);
   const dir = input.stateDir ?? STATE_DIR;
   const kind = grant.role === "service" ? "service" : "person";
   const project = grant.projects[0]!;
@@ -113,8 +115,12 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
     const features = await new SharedLedgerClient(credential, input.key, { fetch: input.fetch, timeoutMs: input.timeoutMs }).features();
     if (features.teamId !== grant.teamId) throw new Error("team mismatch");
   } catch {
-    throw new SharedLedgerJoinError("joined, but the center did not accept the new credential"); // Client errors may carry response detail.
+    // Client errors may carry response detail. Retrying the same code revokes the bearer this attempt was issued.
+    throw new SharedLedgerJoinError("code redeemed, but the center did not accept the new credential; nothing was saved — retry the same code before it expires");
   }
+  // The code names its center; a different URL answering for an already-pinned center id never replaces local credentials.
+  if (readSharedLedgerBindings(dir).some((b) => b.centerId === grant.centerId && (resolveSharedLedgerCredential(input.subject, kind, b.centerId,
+    b.teamId, b.projectId, "read", dir)?.baseUrl ?? baseUrl) !== baseUrl)) throw new SharedLedgerJoinError("center URL does not match the pinned center; nothing was saved");
   await writeSharedLedgerCredential(credential, dir);
   const localProjectId = input.localProjectId ?? project.projectId;
   await setSharedLedgerBinding({ centerId: grant.centerId, teamId: grant.teamId, projectId: project.projectId, localProjectId }, dir);

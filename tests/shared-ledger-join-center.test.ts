@@ -60,7 +60,7 @@ describe("shared ledger join codes (center)", () => {
     expect(read().status).toBe(403);
     expect(c.store.get<{ status: string }>("SELECT status FROM members WHERE teamId=? AND personId=?", "team-a", "peer-a")!.status)
       .toBe("removed");
-    expect(listJoinCodes(c.store).find((row) => row.id === pending.id)!.status).toBe("pending");
+    expect(listJoinCodes(c.store).find((row) => row.id === pending.id)!.status).toBe("rejected");
   });
 
   test("one-time: second redeem and redeem with a fresh key are rejected identically", async () => {
