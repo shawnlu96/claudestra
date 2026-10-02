@@ -1,0 +1,185 @@
+/**
+ * i28-RT1: retirement stops the card's own executor when PM started it by hand (named in tasks.agent, not in scheduler_sessions)
+ * and it still works in the card's worktree. A real ledger in a temp dir and the ledger CLI in-process; fake agents / agent /
+ * git / exists, so no agent is started and no real checkout is touched.
+ */
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getIntent } from "../src/lib/ledger-scheduler.js";
+import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { createTask } from "../src/lib/ledger-write.js";
+import { schedulerRetireTick, worktreeDirs, type LiveAgent, type RetireDeps } from "../src/lib/scheduler-retire.js";
+import { retireIntentId } from "../src/lib/scheduler-sessions.js";
+import { runLedger } from "../src/manager/ledger.js";
+import type { LedgerDeps } from "../src/manager/ledger-context.js";
+import type { Registry } from "../src/manager/core.js";
+
+const cleanup: (() => void)[] = [];
+afterEach(() => { while (cleanup.length) cleanup.pop()!(); });
+
+const OWN = "agent-task-t1";
+
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), "i28rt1-retire-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
+  const registryPath = join(dir, "registry.json"), root = "/wt";
+  writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {} }));
+  db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
+  let now = 1000;
+  const deps = (actor: string): LedgerDeps => ({
+    db, actor, registryPath, projectIds: ["p"], now: () => (now += 10),
+    loadRegistry: async () => ({ socket: "", agents: {} }) as unknown as Registry, saveRegistry: async () => {},
+  });
+  const [mine, rv] = worktreeDirs(root, "T1");
+  const present = new Set([mine, rv]), dirty = new Map<string, string>();
+  const live: LiveAgent[] = [];
+  /** kill marks the agent stopped and closes its window, unless `stuck` (the window stays, as a tmux error would leave it). */
+  let stuck = false;
+  const calls: string[][] = [], gitCalls: string[][] = [], notices: string[] = [];
+  const retireDeps: RetireDeps = {
+    ledger: async (...args) => runLedger(args.slice(1), deps("scheduler")),
+    agent: async (...args) => {
+      calls.push(args);
+      if (args[0] === "archive") return { ok: true, archived: ["a.jsonl"] };
+      const a = live.find((x) => x.name === args[1]);
+      if (a) { a.status = "stopped"; a.window = stuck; }
+      return { ok: true, message: `${args[1]} 已销毁。` };
+    },
+    git: async (args) => {
+      gitCalls.push(args);
+      const d = args[1], cmd = args[2];
+      if (cmd === "rev-parse") return { code: 0, out: `/repo/.git/worktrees/${d.split("/").pop()}\n/repo/.git` };
+      if (cmd === "status") return { code: 0, out: dirty.get(d) ?? "" };
+      if (cmd === "worktree") { present.delete(d); return { code: 0, out: "" }; }
+      return { code: 1, out: `unexpected ${args.join(" ")}` };
+    },
+    exists: (p) => present.has(p), worktreeRoot: root, notifyPm: async (_t, text) => { notices.push(text); },
+    agents: async () => live.map((a) => ({ ...a })),
+  };
+  /** A verified card whose executor PM started by hand: tasks.agent = OWN, only the reviewer is bound in scheduler_sessions. */
+  const card = (id: string, stage: string, agent = OWN, rvAgent: string | null = `agent-rv-${id.toLowerCase()}`) => {
+    createTask(db, { actor: "owner", now: (now += 10) }, { project: "p", id, title: id, kind: "code", agent });
+    db.query("UPDATE tasks SET stage = ? WHERE id = ?").run(stage, id);
+    if (!rvAgent) return;
+    const ens = `ens:${id}:reviewer`;
+    db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES (?, ?, 'p', 'restate', 'ensure_session', 0, 1, 1, 2, 'done', 'test', 0, 0)`).run(ens, id);
+    db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+      VALUES (?, 'reviewer', ?, ?, 'codex', 'acp', 'active', ?, 0, 0)`).run(id, rvAgent, `s-${id}-rv`, ens);
+  };
+  const working = (name: string, cwd = mine) => live.push({ name, status: "active", sessionId: `s-${name}`, cwd, pending: false, window: true });
+  const tick = async () => {
+    const r = await schedulerRetireTick(db, ["p"], retireDeps);
+    if (r.failed.length) throw new Error(JSON.stringify(r.failed));
+    return r.cards;
+  };
+  const settleReceipt = () => String(listEvents(db, { project: "p", target: "T1" }).find((e) => e.data.op === "settle" && e.data.to === "done")?.data.receipt);
+  const removed = () => gitCalls.filter((a) => a[2] === "worktree").map((a) => a[1]);
+  cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
+  return { db, mine, rv, present, dirty, live, calls, notices, card, working, tick, settleReceipt, removed, stuck: (on: boolean) => { stuck = on; } };
+}
+
+const ownCalls = (calls: string[][]) => calls.filter((c) => c[1] === OWN);
+
+describe("i28-RT1 retirement stops the card's own unregistered executor", () => {
+  test("own executor in the worktree: archive, then kill, then `git worktree remove`; the event carries all three", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN);
+    const [out] = await f.tick();
+    expect(out).toMatchObject({ taskId: "T1", step: "retired" });
+    expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN]]);
+    expect(f.removed()).toEqual([f.mine, f.rv]);
+    expect(f.present.size).toBe(0);
+    expect(getIntent(f.db, retireIntentId("T1"))?.status).toBe("done");
+    const receipt = f.settleReceipt();
+    expect(receipt).toContain(`本卡执行者 ${OWN}`);
+    expect(receipt).toContain("归档 已归档 1 个文件");
+    expect(receipt).toContain(`停止 ${OWN} 已销毁`);
+    expect(receipt).toContain("worktree 已清");
+    expect(f.notices).toEqual([]);
+  });
+
+  test("an agent in the worktree that is not tasks.agent: not killed, the checkout stays, PM is told", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working("agent-pm-scratch");
+    const [out] = await f.tick();
+    expect(out.step).toBe("handoff");
+    expect(f.calls.filter((c) => c[1] === "agent-pm-scratch")).toEqual([]);
+    expect(f.present.has(f.mine)).toBe(true);
+    expect(f.removed()).toEqual([f.rv]);
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain("agent-pm-scratch 还在这里工作");
+  });
+
+  test("tasks.agent still used by another unfinished card: not killed, the checkout stays, PM is told", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.card("T2", "build", OWN, null);
+    f.working(OWN);
+    const [out] = await f.tick();
+    expect(out.step).toBe("handoff");
+    expect(ownCalls(f.calls)).toEqual([]);
+    expect(f.present.has(f.mine)).toBe(true);
+    expect(f.notices[0]).toContain(`${OWN} 还在这里工作`);
+  });
+
+  test("tasks.agent bound in scheduler_sessions (on any card): left to the session steps, not stopped here", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.card("T0", "done", "agent-other", OWN);
+    f.db.query("UPDATE scheduler_sessions SET state = 'retired' WHERE taskId = 'T0'").run();
+    f.working(OWN);
+    await f.tick();
+    expect(ownCalls(f.calls)).toEqual([]);
+    expect(f.present.has(f.mine)).toBe(true);
+    expect(f.notices[0]).toContain(`${OWN} 还在这里工作`);
+  });
+
+  test("kill answers ok but the window is still there: held, nothing removed or settled; the next pass kills again and finishes", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN);
+    f.stuck(true);
+    const [held] = await f.tick();
+    expect(held.step).toBe("held");
+    expect(held.detail).toContain("窗口 / pending 还在");
+    expect(f.removed()).toEqual([]);
+    expect(f.present.size).toBe(2);
+    expect(getIntent(f.db, retireIntentId("T1"))?.status).toBe("submitted");
+    expect(f.notices).toEqual([]);
+    f.stuck(false);
+    const [out] = await f.tick();
+    expect(out.step).toBe("retired");
+    // the kill had begun (registry stopped): the second pass does not archive again
+    expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN], ["kill", OWN]]);
+    expect(f.removed()).toEqual([f.mine, f.rv]);
+    expect(f.settleReceipt()).toContain("kill 已开始过，不再归档");
+  });
+
+  test("uncommitted changes after the executor stopped: the checkout stays and PM is told", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN);
+    f.dirty.set(f.mine, " M a.txt");
+    const [out] = await f.tick();
+    expect(out.step).toBe("handoff");
+    expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN]]);
+    expect(f.present.has(f.mine)).toBe(true);
+    expect(f.removed()).toEqual([f.rv]);
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain("有未提交改动");
+    expect(f.settleReceipt()).toContain(`停止 ${OWN} 已销毁`);
+  });
+
+  test("own executor working outside the card's checkouts: left alone", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN, "/elsewhere");
+    const [out] = await f.tick();
+    expect(out.step).toBe("retired");
+    expect(ownCalls(f.calls)).toEqual([]);
+  });
+});
