@@ -9,7 +9,7 @@ import { REGISTRY_PATH, normalizeRegistryAgents, type RegistryAgent } from "./re
 const LOCAL_CODEX_LIMIT = 6;
 export interface CodexSlotOptions { registryPath?: string; lockPath?: string; codexQuota?: CodexQuotaReader; checkQuota?: boolean }
 const owned = new AsyncLocalStorage<LockHandle>();
-export type SlotWait = { kind: "wait"; reason: string };
+export type SlotWait = { kind: "wait"; reason: string; quota?: { id: string; usedPct: number; resetsAtMs: number | null } };
 const wait = (reason: string): SlotWait => ({ kind: "wait", reason });
 
 // Creating reservations precede runtime assignment; only a proven Claude/Pi reservation can leave a Codex slot free.

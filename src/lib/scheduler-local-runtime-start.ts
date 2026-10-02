@@ -9,7 +9,7 @@ import type { StartPlacement } from "./scheduler-placement-start.js";
 import type { EnsureResult } from "./worker-session.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { localAuthorRuntime } from "./scheduler-local-runtime.js";
-import { codexSlotHeld, withCodexSlot, type CodexSlotOptions } from "./scheduler-local-runtime-slots.js";
+import { codexSlotHeld, withCodexSlot, type CodexSlotOptions, type SlotWait } from "./scheduler-local-runtime-slots.js";
 
 export { localAuthorRuntime } from "./scheduler-local-runtime.js";
 
@@ -47,11 +47,11 @@ export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, 
 }
 
 /** Claim waits before writing anything; nested runStart reuses the same lock instead of racing or deadlocking. */
-export async function localAutostart(project: string, run: () => Promise<void>, opts: LocalStartOptions = {}): Promise<void> {
+export async function localAutostart(project: string, run: () => Promise<void>, opts: LocalStartOptions = {}): Promise<void | SlotWait> {
   const runtime = selected(project, opts.configPath);
-  await selection.run({ project, runtime }, async () => {
+  return selection.run({ project, runtime }, async () => {
     if (runtime === "claude") return run();
-    await withCodexSlot(run, { ...opts, checkQuota: true });
+    return withCodexSlot(run, { ...opts, checkQuota: true });
   });
 }
 
@@ -77,7 +77,7 @@ export function localCreateGuard<T extends (...args: string[]) => Promise<Record
 
 /** LS1 chooses a destination before claim: peer work consumes no local Codex slot, and the choice stays pinned for that claim. */
 export async function localAutostartNode(env: StartTickEnv, cand: Candidate, run: (next: StartTickEnv) => Promise<void>,
-  opts: LocalStartOptions = {}): Promise<void> {
+  opts: LocalStartOptions = {}): Promise<void | SlotWait> {
   if (localAuthorRuntime(cand.f.project, opts.configPath) === "claude") return run(env);
   const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: projectPm(env.db, cand.f.project) ?? "" },
     { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
@@ -87,5 +87,5 @@ export async function localAutostartNode(env: StartTickEnv, cand: Candidate, run
     : { where: "local", reason: "本轮 preflight 选定本机，claim 仍核对目的地容量" };
   const next: StartTickEnv = { ...env, startEnv: () => ({ ...env.startEnv(), placement: async () => placement }) };
   if (peer) return run(next);
-  await localAutostart(cand.f.project, () => run(next), opts);
+  return localAutostart(cand.f.project, () => run(next), opts);
 }
