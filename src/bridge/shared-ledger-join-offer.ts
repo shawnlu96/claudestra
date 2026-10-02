@@ -14,7 +14,7 @@ import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { joinSharedLedger, type SharedLedgerJoinResult } from "../lib/shared-ledger-join.js";
 import {
-  claimPendingOffer, isJoinOfferStatus, isOfferId, JOIN_OFFER_RECEIPT_PATH, JoinOfferLimiter, joinOfferCard, joinOfferOutcomeText,
+  attachPendingOfferAsk, claimPendingOffer, isJoinOfferStatus, isOfferId, JOIN_OFFER_RECEIPT_PATH, JoinOfferLimiter, joinOfferCard, joinOfferOutcomeText,
   listPendingOfferIds, parseJoinOffer, readPendingOffer, receiptNoteText, recordSentOfferStatus, savePendingOffer,
   type JoinOfferStatus, type PendingJoinOffer, type SentJoinOffer,
 } from "../lib/shared-ledger-join-offer.js";
@@ -82,7 +82,7 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
     console.error(`⚠️ [join-offer] 给 owner 开授权卡失败，邀请已删除: ${(e as Error).name}`);
     return refuse(503, "ask_unavailable");
   }
-  await savePendingOffer(d.stateDir(), { ...pending, askId: ask.id }, { replace: true });
+  attachPendingOfferAsk(d.stateDir(), pending.offerId, ask.id);
   console.log(`🤝 [join-offer] 收到 ${peer.name} 的共享台账邀请（中心 ${pending.host}），已开授权卡 ${ask.id}`);
   return { status: 202, body: { ok: true, accepted: true, offerId: pending.offerId } };
 }

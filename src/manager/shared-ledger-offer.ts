@@ -6,6 +6,7 @@
  * ledger note in --project (default: the calling agent's project).
  */
 import { randomBytes } from "node:crypto";
+import { signedFor } from "../lib/instance-key.js";
 import { readProjects } from "../lib/projects.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { STATE_DIR } from "../lib/paths.js";
@@ -69,7 +70,8 @@ const live = (): OfferDeps => ({
   },
   projectExists: async (id) => (await readProjects()).projects.some((p) => p.id === id),
   post: (peer, url, body) => {
-    const init = { method: "POST", headers: { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(30_000) };
+    const headers = { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json", ...signedFor("POST", url, body) };
+    const init = { method: "POST", headers, body, signal: AbortSignal.timeout(30_000) };
     return peer.e2e ? peerE2eOnlyFetch(url, init) : peerCliFetch(url, init);
   },
 });

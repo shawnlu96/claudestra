@@ -162,6 +162,28 @@ describe("receiving a join offer (验收 1)", () => {
 });
 
 describe("owner answers the card (验收 2)", () => {
+  test("answer during publication cannot resurrect pending or settle twice", async () => {
+    for (const button of [DECLINE_BUTTON, JOIN_BUTTON]) {
+      const w = world(`peer-race-${button}`);
+      const body = offerBody(button === JOIN_BUTTON ? mint("peer-race") : markedCode());
+      const open = w.deps.openAsk;
+      let answering: Promise<void> | undefined;
+      w.deps.openAsk = (input) => {
+        const a = answer(open(input), button);
+        w.asks[0] = a;
+        answering = onJoinOfferAnswered(a, w.deps);
+        return a;
+      };
+      expect((await post(w, "in-peer", body)).status).toBe(202);
+      await answering;
+      expect(readPendingOffer(w.dir, body.offerId)).toBeNull();
+      await sweepJoinOffers(w.deps);
+      await onJoinOfferAnswered(w.asks[0]!, w.deps);
+      expect(receiptStatus(w)).toEqual([button === JOIN_BUTTON ? "joined" : "declined"]);
+      expect(w.joins).toHaveLength(button === JOIN_BUTTON ? 1 : 0);
+    }
+  });
+
   test("加入 → joinSharedLedger against the (fake-host) center, credential written, receipt joined, inform card", async () => {
     const w = world("peer-b1");
     const code = mint("peer-b1");

@@ -8,7 +8,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode } from "./shared-ledger-join.js";
-import { writeJsonAtomic } from "./state-file.js";
+import { writeJsonAtomic, writeJsonAtomicSync } from "./state-file.js";
 
 export const JOIN_OFFER_PATH = "/api/v1/shared-ledger-join-offer";
 export const JOIN_OFFER_RECEIPT_PATH = "/api/v1/shared-ledger-join-offer/receipt";
@@ -153,6 +153,13 @@ export async function savePendingOffer(stateDir: string, p: PendingJoinOffer, op
   if (!opts.replace && ids.length >= MAX_PENDING) return "full";
   await writePrivate(pendingOfferDir(stateDir), p.offerId, p);
   return "ok";
+}
+
+/** No await between checking and attaching: answer claims cannot interleave or revive an already claimed offer. */
+export function attachPendingOfferAsk(stateDir: string, offerId: string, askId: string): void {
+  const pending = readPendingOffer(stateDir, offerId);
+  if (!pending) return;
+  writeJsonAtomicSync(join(pendingOfferDir(stateDir), `${offerId}.json`), { ...pending, askId }, { mode: 0o600 });
 }
 
 /** Take the offer out of the store; whoever unlinks it first owns it, so a double click or the sweeper cannot redeem twice. */
