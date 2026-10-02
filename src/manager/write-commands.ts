@@ -60,7 +60,7 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack", "deps", "ask-check", "steps", "scheduler-diff", "lend-orders",
   "feature-show", "dag-show"]);
 /** ledger 里带 --dry-run 就只读的子命令：认主守卫按读算，ledger.ts 给只读连接 */
-export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate"]);
+export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate", "feature-split"]);
 
 /**
  * ledger 里拿命令级写锁的子命令：task-new / task-set 会写 registry；import 不碰 registry，拿锁只为让一次性迁移与 create / restart 等命令错开，
