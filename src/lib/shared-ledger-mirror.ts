@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
@@ -25,6 +25,9 @@ const validId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id);
 const mirrorPath = (dir: string) => join(dir, "shared-ledger-mirrors.json");
 /** Held for the duration of one feature push; `off` waits on it so no push lands after the gate closes. */
 export const mirrorPushLockPath = (dir: string) => join(dir, "shared-ledger-mirrors.push.lock");
+/** The lock scripts/shared-ledger-import.ts holds for commit / activate / revoke: mode writes here take it too. */
+export const migrationLockPath = (dir: string) => join(dir, "shared-ledger-migrations", "migration.lock");
+const ACTIVATED = "这个 feature 已经 activate，规划权在中心，不能进镜像";
 
 function mirrorFile(value: unknown): value is MirrorFile {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -68,7 +71,7 @@ function findCommittedImport(featureId: string, dir = STATE_DIR): CommittedImpor
     try { record = JSON.parse(readFileSync(join(root, name), "utf8")) as JournalRecord; }
     catch { return { refused: "迁移 journal 无法读取，先核对本机 journal" }; }
     if (!Array.isArray(record?.featureIds) || !record.featureIds.includes(featureId)) continue;
-    if (record.phase === "active" || record.receipt?.status === "active") return { refused: "这个 feature 已经 activate，规划权在中心，不能进镜像" };
+    if (record.phase === "active" || record.receipt?.status === "active") return { refused: ACTIVATED };
     if (record.phase !== "verified" || record.receipt?.status !== "staged" || !record.payload || !record.target) continue;
     const payload = parseSharedLedgerImport(record.payload);
     const target = JSON.parse(record.target) as { centerId?: unknown; teamId?: unknown; instanceId?: unknown };
@@ -88,13 +91,22 @@ export const resolveMirrorCredential = (e: Pick<MirrorEntry, "centerId" | "teamI
 
 export interface MirrorControlOptions { stateDir?: string; key?: () => InstanceKey | null }
 
+/** Runs `write` under the migration lock, so an activate cannot land between its re-check and the mode write. */
+async function underMigrationLock<T>(dir: string, write: () => Promise<T>): Promise<T> {
+  const path = migrationLockPath(dir);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const lock = await acquireLock(path);
+  if (!lock) throw new LedgerError("busy", "迁移正在进行（migration.lock 被占用），未改本机模式；稍后重跑");
+  try { return await write(); } finally { lock.release(); }
+}
+
 export async function sharedMirrorOn(db: Database, featureId: string, opts: MirrorControlOptions = {}) {
   const dir = opts.stateDir ?? STATE_DIR;
   if (!validId(featureId)) throw new LedgerError("invalid", "invalid feature id");
   const feature = getFeature(db, featureId);
   if (!feature) throw new LedgerError("not_found", `没有 feature ${featureId}`);
   const mode = readSharedLedgerMode(featureId, dir);
-  if (mode.authorityMode !== "source") throw new LedgerError("forbidden", "这个 feature 已经 activate，规划权在中心，不能进镜像");
+  if (mode.authorityMode !== "source") throw new LedgerError("forbidden", ACTIVATED);
   if (!mode.sharedPlanning) throw new LedgerError("forbidden", "这个 feature 还没有 commit 到中心（本机规划闸未关），不能进镜像");
   const committed = findCommittedImport(featureId, dir);
   if ("refused" in committed) throw new LedgerError("forbidden", committed.refused);
@@ -116,7 +128,21 @@ export async function sharedMirrorOn(db: Database, featureId: string, opts: Mirr
       lastPushAt: same ? prior.lastPushAt : null, lastPushSeq: same ? prior.lastPushSeq : null,
       lastError: null, lastErrorAt: null, failures: 0, nextAttemptAt: 0 };
   });
-  await writeSharedLedgerMode(featureId, { authorityMode: "source", sharedPlanning: true, mirror: true }, dir, db.filename);
+  // The checks above ran before any wait: an activate may have finished since. Re-check and write under its lock.
+  const refused = await underMigrationLock(dir, async () => {
+    const now = readSharedLedgerMode(featureId, dir), again = findCommittedImport(featureId, dir);
+    if (now.authorityMode !== "source" || "refused" in again) return "refused" in again ? again.refused : ACTIVATED;
+    if (!now.sharedPlanning || again.batchId !== committed.batchId) return "迁移批次在开启镜像期间变了，未开启；核对后重跑";
+    await writeSharedLedgerMode(featureId, { authorityMode: "source", sharedPlanning: true, mirror: true }, dir, db.filename);
+    return null;
+  });
+  if (refused) {
+    await updateSharedLedgerMirrors(dir, (features) => {
+      const cur = features[featureId];
+      if (cur?.batchId === committed.batchId) features[featureId] = { ...cur, enabled: false };
+    });
+    throw new LedgerError("forbidden", refused);
+  }
   return sharedMirrorStatus(featureId, dir);
 }
 
@@ -130,11 +156,14 @@ export async function sharedMirrorOff(db: Database, featureId: string, opts: Pic
   const push = await acquireLock(mirrorPushLockPath(dir));
   if (!push) throw new LedgerError("busy", "推送仍在进行，已停推送但未关闭本机规划；稍后重跑 off");
   push.release();
-  const mode = readSharedLedgerMode(featureId, dir);
-  // An activate in between already rewrote the mode; never downgrade it back to source.
-  if (mode.authorityMode === "source" && mode.mirror) {
-    await writeSharedLedgerMode(featureId, { authorityMode: "source", sharedPlanning: true }, dir, db.filename);
-  }
+  // An activate in between already rewrote the mode (or is about to): never downgrade it back to source.
+  const activated = await underMigrationLock(dir, async () => {
+    const mode = readSharedLedgerMode(featureId, dir), journal = findCommittedImport(featureId, dir);
+    if (mode.authorityMode !== "source" || ("refused" in journal && journal.refused === ACTIVATED)) return true;
+    if (mode.mirror) await writeSharedLedgerMode(featureId, { authorityMode: "source", sharedPlanning: true }, dir, db.filename);
+    return false;
+  });
+  if (activated) throw new LedgerError("forbidden", "已停推送；这个 feature 已经 activate，规划权在中心，未改本机模式");
   return sharedMirrorStatus(featureId, dir);
 }
 
