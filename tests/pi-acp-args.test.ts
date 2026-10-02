@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { ACTIVATE_TOOLS_EXTENSION, MCP_MOUNT_EXTENSION, piRpcArgs } from "../src/lib/acp/pi-adapter/args.ts";
+import { ACTIVATE_TOOLS_EXTENSION, MCP_MOUNT_EXTENSION, PI_ENV_SNAPSHOT_EXTENSION, piRpcArgs } from "../src/lib/acp/pi-adapter/args.ts";
 import mountMcpServers, { PI_MCP_SERVERS_ENV } from "../src/lib/acp/pi-adapter/mcp-mount.ts";
 import { parseArgs } from "./pi-upstream-0.99.2.ts";
 import { piEnvFlags } from "../src/lib/pi-env.ts";
@@ -15,12 +15,13 @@ describe("Pi 适配器 · 启动参数", () => {
       expect(extensions(args)).toContain("builtin:mcp");
       expect(extensions(args)).toContain(MCP_MOUNT_EXTENSION);
       expect(extensions(args)).toContain(ACTIVATE_TOOLS_EXTENSION); // 0.99 内建工具（codemode）靠它激活
+      expect(extensions(args)).toContain(PI_ENV_SNAPSHOT_EXTENSION); // 能力快照（更新提示横幅读它）
     }
   });
 
   test("rpc 模式、能力档参数原样保序、会话 id 由适配器给", () => {
     expect(piRpcArgs("sid-1", ["--no-extensions", "--model", "p/m"])).toEqual([
-      "--mode", "rpc", "--no-extensions", "--model", "p/m", "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION, "--session-id", "sid-1",
+      "--mode", "rpc", "--no-extensions", "--model", "p/m", "-e", "builtin:mcp", "-e", MCP_MOUNT_EXTENSION, "-e", ACTIVATE_TOOLS_EXTENSION, "-e", PI_ENV_SNAPSHOT_EXTENSION, "--session-id", "sid-1",
     ]);
   });
 
