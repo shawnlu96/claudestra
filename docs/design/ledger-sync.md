@@ -50,7 +50,9 @@
   dot = `(project, stream, origin, streamSeq)`；日志主键就是 dot。`local` 数据不分配同步序号，不进入同步日志。
   白名单与脱敏在分配序号前完成；白名单升级使用新的流世代并经快照初始化，不在既有流里过滤掉已编号条目。
   `context` 是逐写 MV 因果上下文（§2.1），不是传输游标；非 MV 写可为空。
-- **HLC**：64 位，高 48 位物理毫秒、低 16 位逻辑计数；发送时 `max(本地, 物理)`，收到时取三者最大值再加 1（Kulkarni 2014 算法 1/2）。漂移超过 60 秒的远端条目照收，但标记 `skew` 并告警，不拿它推进本地物理部分。全序 = `(hlc, origin, streamSeq)`。
+- **HLC**：64 位，高 48 位物理毫秒、低 16 位逻辑计数；发送时 `max(本地, 物理)`，收到时取三者最大值再加 1（Kulkarni 2014 算法 1/2）。漂移超过 60 秒的远端条目照收，标记 `skew` 并告警；仍按标准接收算法推进 HLC 的逻辑物理分量（不改操作系统墙钟）。
+  观察该条目后的新写必须严格大于它；逻辑计数溢出时把 HLC 毫秒分量加 1、逻辑计数归零，禁止回绕。
+  HLC 不能用于租约有效期、授权过期或安全判断，这些由中心墙钟及 epoch 判定。全序 = `(hlc, origin, streamSeq)`。
 - **版本向量**：`{project → stream → origin → 已连续持久化的最大 streamSeq}`；只交换获授权项目的向量。
   向量只能由本机已收到的连续条目或已验证快照推进，不能直接复制响应里的中心高水位。重复 dot 幂等。
   项目授权是整个项目同步流的权限；若要行级隐藏，必须建立独立授权流，不准在同一流内删掉条目后继续沿用向量。
@@ -86,10 +88,10 @@
 
 | 表 | 可合并字段（规则） | 中心定序字段 | 只留主场 |
 |---|---|---|---|
-| events | 整行 G-Set，键为同步 dot（旧键保留历史映射）；`dedupKey` 改为来源内唯一，跨来源去重由中心按 `operationId` 做 | 无（阶段迁移等事件由中心定序后以 `center` 来源写入） | `seq`（本机自增，只作本地游标）；`kind` 不在同步白名单里的事件 |
+| events | 仅 §2.2.1 备注/评论/原话白名单 G-Set，键为同步 dot；仅这些观察记录的 dedupKey 来源内唯一 | §2.2.1 所有业务状态/授权/幂等锁事件，中心跨来源业务键唯一；operationId 另做请求幂等 | `seq`（本机自增，只作本地游标）；`kind` 不在同步白名单里的事件 |
 | items | `title`/`oneLine`/`next`/`priority`（LWW）；`ownerWords`（G-Set 追加，不覆盖）；`extra` 的备注类键（Map） | `status`（`done`/`dropped` 会影响下属卡调度） | — |
 | tasks | `title`（LWW）；`extra` 的备注 / 标签类键（Map） | `stage`/`stageBefore`/`round`/`kind`/`agent`/`pm`/`assignee`/`assigneeKind`/`branch`/`pr`/`headSHA`/`spec`/`specRev`/`model`/`featureId`/`itemId`/`rev`；行的创建 | `extra` 里的本机路径类键 |
-| meta | 展示类键（LWW） | `pms` 等授权名单键（要 owner 确认） | 本机目录类键（如 docs 目录） |
+| meta | 展示类键（LWW） | `pms` 等授权名单键（要 owner 确认）、`autostart` 调度开关 | 本机目录类键（如 docs 目录） |
 | task_deps | — | 整表（增删边、`cond`、`state`） | — |
 | feature_deps | `note`（LWW） | 边的增删 | — |
 | features | `ownerWords`（G-Set） | `title`（项目内唯一，中心定序改名）/`status`/`currentVersion`/`rev`；行的创建 | — |
@@ -122,7 +124,7 @@
 - 整表 ordered/local 的行覆盖全部列；混合表先取上表显式规则，其余现有列全部 ordered。
   `items.rev/createdAt/updatedAt`、`features.createdBy/createdAt/updatedAt`、`tasks` 时间戳均因此是 ordered。
   merge 写不改权威 rev/updatedAt；另在同步元数据中派生展示时间，不能让 LWW 时钟充当 CAS rev。
-- `events` 除本地 seq/非白名单整行外，全部列为 G-Set 不可变数据；旧 origin/originSeq 只作历史标识，不能作新流游标。
+- `events` 按 §2.2.1 先分整行 merge/ordered/local，各列随整行不可变；旧 origin/originSeq 只作历史标识，不能作新流游标。
   `audit_baseline.project/rule` 是不可变集合键，`since` 取最大。meta 的 project/key 是不可变键；未登记的 value 键 local，禁止同步。
 - `items/tasks.extra`、asks.extra 未登记键默认 local；只有已登记备注键可合并，控制/授权键 ordered，路径键 local。
   上表未单列的 asks 业务列（包括 source/kind/title/context/body/options/allowText/kindHint/blocking/urgency、去重与身份列）全部 ordered。
@@ -136,6 +138,26 @@
   本节默认规则只覆盖当前迁移已有列；迁移临时表与 sqlite_sequence 全列 local。
 
 「规格正文」：已发布的 `specRev` 是不可变的批准副本（V2 X3），发布动作是定序写（会让在途订单失效）；未发布的草稿是 MV 合并。「owner 原话收件箱」= `items.ownerWords`/`features.ownerWords` 的 G-Set 追加加上 `note` 事件。
+
+### 2.2.1 events 的权限与幂等键分类
+
+先分类，再分配同步序号；调用者不能凭 class=merge 绕过分类。按以下优先级，任一 ordered 条件命中就禁止本地授权：
+
+| kind / data.op / dedupKey | 类别与规则 |
+|---|---|
+| `autostart:`、`autostart-settle:` 前缀；feature 的 `autostart_claim/autostart_settle` op | ordered：中心在同一事务核 claim 活性、节点/arm 与业务键唯一，建卡/绑定及 settle 只走中心 |
+| `scheduler:` 前缀或 scheduler kind；`lend:`、`lend-*` 前缀以及订单/租约相关 op | ordered：意图、锁、派单、交付、结清等原业务幂等键跨来源唯一，不能因不同 operationId 开出两份 |
+| task/item/feature/meta/dependency/ask/review/deploy 等改变权威字段或授予写权的 op；其他任意充当幂等锁的 dedupKey | ordered：包括 stage、创建、审批、DAG/绑定、autostart 开关、授权；结果只接受 center |
+| 已注册的 note/comment/ownerWords/node-note 观察 op，且不满足以上条件 | merge：G-Set 不可变观察，不授予写权、不触发执行；去重键可来源内唯一 |
+| AUQ/permission/本机会话、秘密或路径原文；其余未登记 kind/op/键 | local：不分配同步序号；未知同步输入报契约不兼容，不自动升为 merge |
+
+中心保留 `(project, businessDedupKey)` 唯一约束；相同业务键、不同 operationId 返回已存在 claim/结果，
+不能授予第二份执行权。claim 绑定获选执行器与中心租约/epoch；重复请求的另一执行器只收到 duplicate，不能复用赢家授权。副本里收到中心 claim 只是显示事实；每个执行 step 仍在线向中心事务核 claim/epoch/settle，
+离线直接拒绝 claim/settle 与据此开卡，不能凭缓存 claim 执行。重试未知结果先查回执，不盲重放外部动作。
+旧 `autostart-settle:<seq>`、eventSeq 等引用必须迁成中心稳定 claim dot/ID；本地 seq 只作查询别名；claim 归属与建卡因果检查改用中心绑定/结果序号，而非比较各副本自增 seq。
+
+导入时保存映射并重写引用，不能跨机比较本地 seq 或沿用来源内锁键。历史 ordered 事件只作迁移证据，
+由中心冻结导入事务重建规范结果与业务键索引；不能作为来源 merge 条目上传重新授予写权。
 
 ### 2.3 反例
 
@@ -154,7 +176,11 @@ PM 在本机离线时执行 `stage T review→merge`（期望 `rev=9`、`from=re
 
 ### 3.2 可合并写
 
-本机事务里同时写日志条目和物化表，立即生效，然后推送。冲突不需要人处理：LWW 和 G-Set 自动收敛；MV 字段出现并发值时留两版，标「待挑选」，挑选是一次新的可合并写。
+本机事务里同时写日志条目和可物化表，立即生效，然后推送。
+目标行尚未被中心创建时，不造临时权威行、不丢条目：持久化日志及 pending-materialization 索引，标记依赖待到达。
+接收向量表示日志持久化（可以推进），另记物化进度；收到中心建行结果或加载快照后，对该目标重折叠所有已存 merge 写，原子清理待物化索引。
+重启扫描未处理依赖，重复投递幂等；无合法创建结果的目标保持 pending 并可诊断，不能声称视图已完全收敛。
+物化函数先应用连续中心结构结果再折叠目标 merge 日志，所以传输分页顺序不是业务依赖顺序。冲突不需要人处理：LWW 和 G-Set 自动收敛；MV 字段出现并发值时留两版，标「待挑选」，挑选是一次新的可合并写。
 
 ### 3.3 定序写
 
@@ -211,15 +237,25 @@ PM 在本机离线时执行 `stage T review→merge`（期望 `rev=9`、`from=re
 
 ### 4.4 迁移步骤与回退开关
 
-开关 `ledgerSync.mode = off | observe | on`，按项目设置，默认 `off`。
+开关 `ledgerSync.mode = off | observe | on` 按项目设置，但**同步显示模式不决定执行权威**。
+另有中心持久化的 `authority=local|center` 与单调 authorityEpoch；一旦采用 center，本机任意模式都不能恢复本地定序权。
 
-1. **off**：现状。本机库是本地 feature 的权威，共享 feature 按 V2 处理。
-2. **observe**：同步服务开始推拉，物化结果写进**影子库** `ledger-replica.sqlite`，不碰 `ledger.sqlite`；每小时比对一次影子库和本机库，差异写报告（`ledger sync-diff`）。读写路径都不切。
-   进入 on 的条件：连续 N 天差异为 0（N 由 owner 定）。
-3. **on**：先备份本机库（沿用 `ledger-backup.ts`），把现有 `events` 先按项目与白名单筛选、脱敏，再按旧来源序号顺序分配新流 streamSeq，保存历史键到 dot 的映射后推给中心（无 origin 的老事件补 `origin=本机、class=local`，不同步）。
-   之后 `ledger.sqlite` 的物化表由同步层维护，`ledger` 写命令按 §2 分流。
-4. **回退 on→observe**：停止本机可合并写的本地生效，改成直写本机库加推送。
-5. **回退 →off**：冻结，从中心导出本项目全部 `merge` 条目和定序结果，核对后单独写回本机库（沿用 V2 §7「已有中心新提交不能直接回旧本机库」）；不做静默回滚。
+1. **首次 off（尚未迁移，authority=local）**：现状，本地 feature 的本机库仍是权威，共享 feature 按 V2。
+2. **首次 observe（authority=local）**：只把历史作为无执行权的影子证据，写影子库并比对；中心不得受理这个项目的执行命令。
+   不开放多副本同时执行；这里的影子同步不等于采用中心执行权威，历史 claim 不授予中心或第二副本执行权。
+3. **进入 on**：中心组织项目级冻结屏障，停止所有成员旧执行写，核成员确认与旧租约/在途动作，备份并导入规范快照。
+   历史按项目/白名单/脱敏分流，merge 分配新流序号；ordered 历史按 §2.2.1 中心重建，不作为 merge 上传。
+   中心持久化 authority=center、新 epoch 后解除屏障；不能确认的成员隔离，其旧 epoch 命令拒绝。进入条件及观察天数由 owner 定。
+4. **已迁移 on→observe（authority 仍 center）**：停止新的本地 merge 乐观写，改向中心提交 merge 后经同步确认再显示；
+   原 on 模式尚未推完的 merge 日志保留并继续补传，不丢弃、不重编号；新的提交日志落 pending，但不先改确认视图。
+   定序写继续只走中心与 §3.3 outbox，离线高风险命令仍拒绝，不切回旧本地阶段机。
+   原副本保持只读已确认视图/必要结果接收，影子库用于诊断；不允许用旧本机库生成合并意图。
+5. **已迁移 →off（authority 仍 center）**：冻结该机可合并写及后台同步；读冻结副本并标陈旧。
+   在线定序命令仍走中心，离线按 §3.3 处理；收到回执可显式刷新只读结果，执行决策必须重新在线核中心，不信冻结缓存。
+   导出中心日志/结果仅作备份恢复，不把执行权威交给本机；已迁移项目的旧本地定序入口在所有模式都拒绝。
+6. **不提供 center→local 权威回退**：另开项目级迁移设计与 owner 决策；必须先中心冻结所有成员与执行器、撤销旧 epoch/租约、对账在途动作，
+   不属于单机切开关或导出数据。其他成员保持 on 时，某成员 observe/off 也不会产生第二个权威。
+
 
 ## 5. 安全
 
@@ -265,7 +301,7 @@ SY5 上线后，在 PM 规则文档里把 `sqlite3` 查询改为上表命令（�
   3. 反例 A 和反例 B 原样复现；
   4. 中心从旧快照恢复（序列倒退）；
   5. 撤销成员；
-  6. §10 四项 P1 反例，包括扩权补历史、MV 两种历史与迟到写、同名改写拒绝、部署 CHECK 原子物化。
+  6. §10 及第2轮证据的全部反例，包括扩权补历史、MV 两种历史与迟到写、同名改写拒绝、部署 CHECK 原子物化。
 - **要量的指标**：
 
 | 指标 | 定义 | 门槛（owner 定） |
@@ -294,7 +330,7 @@ fileGlobs：
 - src/lib/ledger-sync-contract*.ts
 - tests/ledger-sync-contract*.test.ts
 
-验收线：条目 / HLC / 向量 / class / outbox / 拒绝码有类型和夹具；§2.2 字段分类表作为常量导出，并有测试逐列核对 27 张表的建表语句，新增列没有分类就测试失败。
+验收线：条目 / HLC / 向量 / class / outbox / 拒绝码有类型和夹具；§2.2 字段与 §2.2.1 event op/幂等前缀分类表作为常量导出，并有测试逐列核对 27 张表的建表语句，新增列没有分类就测试失败。
 
 ### SY1 · 来源日志、HLC 与版本向量
 
@@ -304,7 +340,7 @@ fileGlobs：
 - src/lib/ledger-sync/log/**
 - tests/ledger-sync-log*.test.ts
 
-验收线：各 `(project, stream, origin)` 的 streamSeq 连续、dot 幂等；HLC 发送和接收规则、漂移超 60 秒标记；向量差量对缺口只推进到连续处；`class=local` 不分配流序号，不出日志。
+验收线：各 `(project, stream, origin)` 的 streamSeq 连续、dot 幂等；HLC 发送和接收规则、漂移超 60 秒告警但接收后 HLC 严格推进、溢出不回绕；向量差量对缺口只推进到连续处；`class=local` 不分配流序号，不出日志。
 
 ### SY2 · 物化规则
 
@@ -314,7 +350,7 @@ fileGlobs：
 - src/lib/ledger-sync/merge/**
 - tests/ledger-sync-merge*.test.ts
 
-验收线：逐写 context、顺序覆盖/并发保留/挑选后迟到不复活；feature 改名只能走中心；G-Set / LWW / MV / Map 四种规则在任意投递顺序下结果相同（性质测试）；定序字段只认 `center` 条目；反例 A 夹具里不出现两张活单和环。
+验收线：跨流先收 merge 后收 center 建行不丢写、重启后待物化继续折叠；autostart/scheduler/lend claim 必须中心唯一且只认 center、缓存 claim 不授予离线执行权；逐写 context、顺序覆盖/并发保留/挑选后迟到不复活；feature 改名只能走中心；G-Set / LWW / MV / Map 四种规则在任意投递顺序下结果相同（性质测试）；定序字段只认 `center` 条目；反例 A 夹具里不出现两张活单和环。
 
 ### SY3 · 定序 outbox 与回放
 
@@ -394,7 +430,7 @@ fileGlobs：
 - web/features/collab/shared/shared-view.tsx
 - tests/ledger-sync-wiring*.test.ts
 
-验收线：observe 模式只写影子库、出 `sync-diff`；on 模式写命令按 §2 分流；回退两档可用并有备份；热文件里只加一行接入。lib 接入逻辑放 `src/lib/ledger-sync/wiring/`，仅依赖 lib；上层组合放 `src/ledger-sync/wiring/`。
+验收线：observe 模式只写影子库、出 `sync-diff`；on 模式写命令按 §2 分流；回退两档可用并有备份，采用 center 后所有模式定序仍走中心、旧本地执行入口拒绝、单机回退不降 authorityEpoch；热文件里只加一行接入。lib 接入逻辑放 `src/lib/ledger-sync/wiring/`，仅依赖 lib；上层组合放 `src/ledger-sync/wiring/`。
 lib 通过注入接口获得传输与通知，不导入 shared-ledger、bridge、manager 或上层 wiring；上层单向依赖 lib。
 仓库外 PM 规则由 PM 负责人在 SY5 命令验证完成后独立交付，交付前登记实际文件清单并与在跑卡检查冲突；
 本设计不访问或指定真实机器路径，SY7 不改该规则，也不以规则已修改作为验收证据。PM 切换前必须核对该独立交付回执。
@@ -506,3 +542,14 @@ git grep --no-index -nEI \
 - 独立 `bun run guard` 通过；六入口 bridge/channel-server/manager/launcher/cron/setup 的 Bun build 全部退出 0。
 - §8 glob 脚本实跑：10 个 SY 节点，171 对，overlaps=none，除 SY7 外现有匹配文件数 0；`git diff --check` 通过。
 - 子进程用最小环境与临时 HOME，代码夹具不读取生产台账；未运行新的同步实现测试。
+
+### 10.2 第2轮复现测试与修订结论
+
+复现测试：event-claims、rollback-authority、cross-stream-order、hlc-skew。
+完整合成脚本及确切结果见 [第2轮验证证据](ledger-sync-r2-evidence.md)；属于已运行的设计模型验证，非同步实现代码测试。
+
+- event-claims：旧来源内去重并集产生两份执行权，红；新中心项目业务键 UNIQUE 只留一份，绿。
+  §2.2.1 同时约束实际实施必须中心核 step、稳定 claim 引用与迁移，模型只验证唯一键核心反例。
+- rollback-authority：旧单机回退把阶段机归本地、中心仍为 fix，本地 merge 并执行，红；新 observe 保持 center 权威，零本地 merge 动作，绿。
+- cross-stream-order：旧未知目标丢写，建行后 title=initial，红；新日志缓冲建行后重折叠为 edited，绿。
+- hlc-skew：旧忽略远端 HLC 推进，观察后新写仍小于未来写，红；新按标准接收/发送递增 HLC 严格大于远端，绿。
