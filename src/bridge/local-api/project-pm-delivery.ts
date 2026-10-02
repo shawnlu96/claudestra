@@ -19,8 +19,18 @@ export async function deliverPmLocal<P extends Receipt>(
   const { db, agents } = facts;
   const original = agents.find((a) => a.name === to.agentName || a.channelId === to.channelId);
   if (!db || !original?.projectId) return send(env, to);
-  const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
-  if (!name) return send(env, to);
+  // A retired PM still online finishes the conversations it started itself; offline, the active PM takes the answer over.
+  const pushback = isCallerPushback(env), own = original.channelId ? clients.get(original.channelId) : undefined;
+  const name = pushback && own ? null : pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+  if (!name) {
+    // pmClientFor may have lent another PM's socket under an older pointer; never deliver this channel's message through it.
+    const borrowed = agents.some((a) => a.projectId === original.projectId && a.channelId && a.channelId !== to.channelId
+      && clients.get(a.channelId)?.ws === to.ws);
+    if (!borrowed) return send(env, to);
+    if (!own) return { envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } };
+    env.to = { ...to, ws: own.ws, cwd: own.cwd };
+    return send(env, env.to);
+  }
   const agent = agents.find((a) => a.name === name && a.projectId === original.projectId);
   const client = agent?.channelId ? clients.get(agent.channelId) : undefined;
   if (!agent?.channelId || !client) return { envelope: env, outcome: { kind: "dropped", reason: `active PM ${name} is offline` } };
@@ -64,7 +74,8 @@ export async function deliverPmLocal<P extends Receipt>(
     }
   }
   env.to = target;
-  env.content = `[系统转交：原收件人 ${original.name}；当班 PM ${name}]\n${env.content}`;
+  env.content = pushback ? `[系统转交：这是回复前任 PM ${original.name} 的问题；当班 PM ${name}]\n${env.content}`
+    : `[系统转交：原收件人 ${original.name}；当班 PM ${name}]\n${env.content}`;
   // The previous recipient's session pin is not the new PM's session; pin to the live replacement instead.
   if (env.meta.expectSession) env.meta.expectSession = agent.sessionId;
   const delivery = await send(env, target);
@@ -74,6 +85,20 @@ export async function deliverPmLocal<P extends Receipt>(
     receipts.set(key, (receipts.get(key) ?? []).filter((p) => p !== movedReceipt));
   }
   return delivery;
+}
+
+// Answers pushed back to the agent that asked: local send_to_agent replies / drains / expiries, and HTTP peer replies.
+const PUSHBACK_ID = /^(?:agent_(?:reply|drain|withheld|expired|apierr)|reply_fwd)_/;
+function isCallerPushback(env: Envelope): boolean {
+  if (env.meta.triggerKind === "peer_http") return true;
+  return env.from.kind === "local" && env.meta.triggerKind === "agent_tool" && PUSHBACK_ID.test(env.meta.messageId)
+    && (env.intent === "response" || !env.meta.messageId.startsWith("reply_fwd_"));
+}
+
+/** After an API delivery, typing / source / handoff bookkeeping belongs to whoever actually received it. */
+export function followPmDelivery(agent: { name: string; channelId: string }, delivery: { envelope: Envelope }): void {
+  const to = delivery.envelope.to;
+  if (to.kind === "local" && to.channelId !== agent.channelId) Object.assign(agent, { name: to.agentName ?? agent.name, channelId: to.channelId });
 }
 
 /** Resolve a usable socket before legacy callers reject an offline retired PM; authorization stays in deliverPmLocal. */
