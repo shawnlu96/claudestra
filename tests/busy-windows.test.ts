@@ -160,6 +160,30 @@ describe("回合态一直未知：挡着，但要让人看得见", () => {
     expect(flaky.notices).toHaveLength(2); // 第 2、3 次都试着发（第 2 次没送到）
   });
 
+  test("成员变化：A → A+B → A 不重复报 A；B 答过空闲再卡住会重报 B；每条通知只列新卡住的", async () => {
+    let unknownNow = ["agent-a"];
+    const g = gateWith((names) => ({ turns: Object.fromEntries(names.map((n) => [n, unknownNow.includes(n) ? "unknown" : "idle"])) }));
+    const run = () => g.gate(["agent-a", "agent-b"], "abc1234");
+    await run();
+    await run();
+    expect(g.notices).toHaveLength(1); // A
+    unknownNow = ["agent-a", "agent-b"];
+    await run();
+    await run();
+    expect(g.notices).toHaveLength(2); // 只报新卡住的 B
+    expect(g.notices[1]).toContain("agent-b");
+    expect(g.notices[1]).not.toContain("agent-a");
+    unknownNow = ["agent-a"];
+    await run();
+    await run();
+    expect(g.notices).toHaveLength(2); // 回到 A：A 这个版本报过了
+    unknownNow = ["agent-a", "agent-b"];
+    await run();
+    await run();
+    expect(g.notices).toHaveLength(3); // B 中间答过空闲，又卡住：重报
+    expect(g.notices[2]).toContain("agent-b");
+  });
+
   test("中间宿主答过一次，未知的连续计数清零", async () => {
     let reply: unknown = unknownPi();
     const g = gateWith(() => reply);

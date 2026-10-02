@@ -98,7 +98,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (!c || c.channelId !== channelId || c.ws !== ws) return;
       calls.delete(id);
       clearTimeout(c.timer);
-      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, ...(typeof msg.busy === "boolean" ? { busy: msg.busy } : {}) } : {
+      c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, ...(msg.ok === true && typeof msg.busy === "boolean" ? { busy: msg.busy } : {}) } : {
         ok: false, error: String(msg.error ?? "宿主拒绝"),
         ...(c.op === "clear" && typeof msg.sessionId === "string" ? { uncertain: true as const, sessionId: msg.sessionId } : {}),
       });
@@ -218,7 +218,10 @@ export const acpSlash = (channelId: string, text: string) => acpCall(channelId, 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
 export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
 
-/** 宿主此刻有没有回合在途（AcpTurnLoop.busy，含排着没开的）。不是 ACP 宿主登记的频道、宿主不答、旧宿主不认这个调用 = null（调用方当未知） */
+/**
+ * 宿主此刻有没有回合在途（AcpTurnLoop.busy，含排着没开的）。不是 ACP 宿主登记的频道、宿主不答、旧宿主不认这个调用 = null（调用方当未知）。
+ * busy 只在回包 ok 严格为 true 时才带上来（acp_call_result 那里）：ok 是 "false" / 1 之类的怪值不能被当成「成功 + 空闲」放行升级。
+ */
 export async function acpHostTurnBusy(channelId: string): Promise<boolean | null> {
   if (!isAcpChannel(channelId)) return null;
   const r = await acpCall(channelId, { op: "turn" }, TURN_QUERY_MS);

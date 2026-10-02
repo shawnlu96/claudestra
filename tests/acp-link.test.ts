@@ -478,6 +478,7 @@ describe("权限卡：按钮带代际、排队、经宿主确认（r4 P1-1 / P2�
     expect(await answer({ ok: true, busy: false })).toBe(false);
     expect(await answer({ ok: false, error: "不认识的调用 turn" })).toBeNull();
     expect(await answer({ ok: true })).toBeNull();
+    for (const ok of ["false", "true", 1, {}]) expect([ok, await answer({ ok, busy: false })]).toEqual([ok, null]); // 只认 ok === true
   });
 
   test("宿主不在线：改配置直接失败，不挂着", async () => {
