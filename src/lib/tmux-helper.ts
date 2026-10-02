@@ -494,8 +494,8 @@ export function isClaudeReady(pane: string): boolean {
  *
  * 关键：用户的 zsh 主题（starship / pure）shell 提示符就是 `❯`，跟 Claude Code
  * 的输入框符号一样。所以**先**用 Claude TUI 标志（bypass permissions / esc to
- * interrupt / ❯ N. 选项菜单）排除"claude 还在跑"，**再**看最后一行是不是常见
- * shell prompt 收尾字符。两步顺序不能反，否则 shell 的 ❯ 会被当成 claude 输入框。
+ * interrupt / ❯ N. 选项菜单）排除"claude 还在跑"，再判裸 ❯；明确的 shell
+ * 提示符优先，避免旧菜单残留遮住 Claude 已退出的事实。
  *
  * 用途：wedge-watcher 靠它区分"claude 卡住"（要救援）和"claude 已退出到 shell"
  * （是掉线，不是卡死，发 Esc/C-c 没用）。launch / gracefulExit 也用它判 shell 就绪。
@@ -503,10 +503,12 @@ export function isClaudeReady(pane: string): boolean {
 export function isAtShell(pane: string): boolean {
   const nonEmpty = pane.split("\n").filter((l) => l.trim());
   const tail = nonEmpty.slice(-5).join("\n");
+  const lastLine = nonEmpty.pop() || "";
+  // 明确的 shell 提示符压过已退出 TUI 的旧菜单；裸 ❯ 仍须先排除 Claude 的输入框。
+  if (/[%$#>»λ]\s*$/.test(lastLine) || /➜\s+\S/.test(lastLine)) return true;
   // 如果底部有 Claude Code TUI 标志（任一模式 banner / 跑工具 / modal），肯定不在 shell
   if (CC_MODE_BANNER_RE.test(tail) || /esc to interrupt|esc to cancel/i.test(tail)) return false;
   if (/^\s*❯\s*\d+\./m.test(tail)) return false;
-  const lastLine = nonEmpty.pop() || "";
   // 常见 shell prompt 收尾字符：$ (bash/sh)、% (zsh default)、# (root)、> (fish/cmd)、
   // ❯ (starship / pure 主题 — 依赖上面的 Claude TUI exclusion 判断不是 Claude 的输入框)、
   // » (pure)、λ (lambda prompt)
@@ -576,43 +578,14 @@ export function detectBypassConsentPrompt(pane: string): boolean {
   );
 }
 
-/**
- * v2.21.4+ 目录信任弹窗。CC 2.1.259 起在家目录这类敏感目录启动会先问:
- *   Quick safety check: Is this a project you created or one you trust? …
- *   ❯ No, exit
- *     Yes, I trust this folder
- *   Enter to confirm · Esc to cancel
- * 默认高亮 **No, exit**——直接 Enter 等于退出;它又没有数字编号,parseModalOptions
- * 认不出,就绪轮询只会干等到超时(2026-09-04:cron 临时 agent dir=~ 全部「启动超时」)。
- * 返回到达「Yes」要按几次 Down(负数 = Up,0 = 已高亮);不是该弹窗返回 null。
- * 编排器启动的 agent 目录都是 owner 自己指定的(create / cron),且本来就跑
- * bypassPermissions,自动信任与现有安全模型一致。
- */
-export function trustPromptMoves(pane: string): number | null {
-  const tail = trimTrailingBlank(pane.split("\n")).slice(-25);
-  const joined = tail.join("\n");
-  if (!/trust this folder/i.test(joined) || !/Enter to confirm/i.test(joined)) return null;
-  const opts: Array<{ yes: boolean; selected: boolean }> = [];
-  for (const raw of tail) {
-    const m = raw.match(/^\s*(❯)?\s*(No, exit|Yes, I trust this folder)\s*$/i);
-    if (!m) continue;
-    opts.push({ yes: /^yes/i.test(m[2]), selected: !!m[1] });
-  }
-  const yesIdx = opts.findIndex((o) => o.yes);
-  const selIdx = opts.findIndex((o) => o.selected);
-  if (yesIdx < 0 || selIdx < 0) return null;
-  return yesIdx - selIdx;
-}
+export { trustPromptMoves } from "./trust-prompt.js";
+import { acceptTrustPrompt as acceptTrustWithIO } from "./trust-prompt.js";
+import type { WindowOps } from "./runtimes/types.js";
 
-/** 在信任弹窗上选「Yes, I trust this folder」:按 moves 次 Down/Up 再 Enter。 */
-export async function acceptTrustPrompt(target: string, moves: number): Promise<void> {
-  const key = moves >= 0 ? "Down" : "Up";
-  for (let i = 0; i < Math.abs(moves); i++) {
-    await tmuxRaw(["send-keys", "-t", target, key]);
-    await Bun.sleep(120);
-  }
-  await Bun.sleep(150);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+export async function acceptTrustPrompt(target: string, moves: number, win?: Pick<WindowOps, "sendKey" | "sleep">): Promise<void> {
+  return acceptTrustWithIO(moves, win ?? {
+    sendKey: async (key) => { await tmuxRaw(["send-keys", "-t", target, key]); }, sleep: (ms) => Bun.sleep(ms),
+  });
 }
 
 /**

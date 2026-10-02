@@ -19,9 +19,11 @@ import {
   acceptTrustPrompt,
   detectSessionIdlePrompt,
   isClaudeReady,
+  isAtShell,
   probeTuiContract,
   trustPromptMoves,
 } from "../tmux-helper.js";
+import { trustPromptPending } from "../trust-prompt.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
@@ -232,12 +234,14 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       await win.sleep(budget.pollMs);
       const pane = await win.capture(10);
 
-      if (isClaudeReady(pane)) return { ready: true, recoveredFullSession: sessionIdlePicked };
-
       // 会话被 bg agent 占用 → claude 报错退出；早返回让调用方走 --fork-session 自愈
       if (/currently running as a background agent/i.test(pane)) {
         return { ready: false, reason: "occupied", recoveredFullSession: false };
       }
+
+      if (isAtShell(pane)) return { ready: false, reason: "exited", recoveredFullSession: sessionIdlePicked };
+      if (trustPromptPending(pane)) continue;
+      if (isClaudeReady(pane)) return { ready: true, recoveredFullSession: sessionIdlePicked };
 
       // 闲置弹窗：只选一次，发完给加载留窗口，下轮再判 ready
       if (detectSessionIdlePrompt(pane)) {
@@ -252,7 +256,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
       // 目录信任弹窗默认高亮 No, exit，不能直接 Enter：选 Yes 再继续
       const trustMoves = trustPromptMoves(pane);
       if (trustMoves !== null) {
-        await acceptTrustPrompt(win.target, trustMoves);
+        await acceptTrustPrompt(win.target, trustMoves, win);
         await win.sleep(1000);
         continue;
       }
@@ -264,12 +268,14 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     // 最后再用同样的严格条件捕一次，不靠循环结束的瞬时状态
     const final = await win.capture(10);
-    return isClaudeReady(final)
+    return !isAtShell(final) && !trustPromptPending(final) && isClaudeReady(final)
       ? { ready: true, recoveredFullSession: sessionIdlePicked }
-      : { ready: false, reason: "timeout", recoveredFullSession: sessionIdlePicked };
+      : { ready: false, reason: isAtShell(final) ? "exited" : "timeout", recoveredFullSession: sessionIdlePicked };
   },
 
   async onExitPane(pane, win) {
+    if (isAtShell(pane)) return "none";
+    if (trustPromptPending(pane)) { await win.sleep(1000); return "handled"; }
     // Goodbye! = 正在退出，等它
     if (pane.includes("Goodbye!")) {
       await win.sleep(1000);
@@ -277,7 +283,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     const trustMoves = trustPromptMoves(pane);
     if (trustMoves !== null) {
-      await acceptTrustPrompt(win.target, trustMoves);
+      await acceptTrustPrompt(win.target, trustMoves, win);
       await win.sleep(1000);
       return "handled";
     }
