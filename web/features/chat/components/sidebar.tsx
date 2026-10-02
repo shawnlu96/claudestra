@@ -23,6 +23,7 @@ import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
 import { Chevron, ProjectGroup } from "./project-group";
+import { GroupHistory, HistoryTeam, useSidebarHistory } from "./sidebar-history";
 import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
@@ -190,6 +191,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const entries = buildSidebarEntries(filtered, q, projMeta, master?.name); // 先按 parent 挂树再分组
   const { awake: underMaster, dormantRows } = splitMasterKids(q ? [] : buildTeams(filtered, master?.name).underMaster);
   const { activeEntries, dormantEntries } = splitDormant([...entries, ...dormantRows]);
+  const hist = useSidebarHistory(filtered); // 用完的审查 / 执行会话收进组底「历史 N」——规则见 sidebar-history.ts
   // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
   const rowProps = (a: AgentSession) => ({
     a,
@@ -205,10 +207,11 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   });
   const busyOf = (i: AgentSession) => i.busy || (active === i.name && streaming);
   const row = (a: AgentSession, s?: RowSlots & { projEmoji?: string }) => <AgentRow key={a.name} {...rowProps(a)} {...s} />;
-  const team = (n: TeamNode, projEmoji?: string) => (
+  const teamRaw = (n: TeamNode, projEmoji?: string) => (
     <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={collapsedTeams.has(n.a.name)} busy={n.children.some(busyOf)}
       onToggle={() => toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
   );
+  const team = (n: TeamNode, projEmoji?: string) => <HistoryTeam key={`t:${n.a.name}`} node={n} hist={hist} collapsed={collapsedTeams.has(n.a.name)} row={row} render={(m) => teamRaw(m, projEmoji)} />;
 
   return (
     <aside
@@ -436,12 +439,12 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               return (
                 <ProjectGroup
                   key={`g:${e.id}`}
-                  e={e}
+                  e={hist.group(e)}
                   collapsed={collapsedProjects.has(e.id)}
                   groupBusy={e.items.some(busyOf)}
                   onToggle={() => toggleProjectCollapse(e.id)}
                 >
-                  {e.nodes.map((n) => team(n))}
+                  <GroupHistory e={e} hist={hist} team={(n) => team(n)} />
                 </ProjectGroup>
               );
             };
