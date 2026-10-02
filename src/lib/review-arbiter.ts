@@ -2,7 +2,6 @@
 import type { LedgerEvent } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import type { ReviewFacts, ReviewFinding } from "./scheduler-review.js";
-import { normalizedFamily } from "./review-arbiter-identity.js";
 
 export interface FindingDispute { findingId: string; reason: string }
 export type ArbitrationVerdict = "upheld" | "overturned";
@@ -31,7 +30,7 @@ export function validateDisputes(disputes: readonly FindingDispute[], facts: Rev
     const finding = facts?.findings.find((f) => f.findingId === dispute.findingId && f.severity === "P1");
     if (!finding) throw new LedgerError("invalid", `dispute ${dispute.findingId} 不是上一轮的 P1`);
     const used = events.some((e) => e.data.op === "finding_dispute" && e.data.specRev === specRev &&
-      (e.data.findingId === finding.findingId || typeof e.data.family === "string" && normalizedFamily(e.data.family) === normalizedFamily(finding.family)));
+      e.data.findingId === finding.findingId);
     if (used) throw new LedgerError("conflict", `同一条 ${dispute.findingId} 不能二次 dispute`);
   }
 }
@@ -60,8 +59,7 @@ export function arbitrationResults(events: readonly LedgerEvent[], specRev: numb
 
 /** Closing only the arbitrated identity leaves unrelated P1s and all P0s intact. */
 export function mergeArbitration(findings: readonly ReviewFinding[], results: readonly ArbitrationResult[]): ReviewFinding[] {
-  return findings.filter((f) => f.severity !== "P1" || results.findLast((r) => r.findingId === f.findingId ||
-    normalizedFamily(r.family) === normalizedFamily(f.family))?.verdict !== "overturned");
+  return findings.filter((f) => f.severity !== "P1" || results.findLast((r) => r.findingId === f.findingId)?.verdict !== "overturned");
 }
 
 export function arbitratedFacts(events: readonly LedgerEvent[], specRev: number, facts: ReviewFacts): ReviewFacts {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { arbitrationResults, mergeArbitration, parseDisputes, validateDisputes } from "../src/lib/review-arbiter.js";
+import { arbitratedFacts, arbitrationKeepsP1, arbitrationResults, mergeArbitration, parseDisputes, validateDisputes } from "../src/lib/review-arbiter.js";
 import type { LedgerEvent } from "../src/lib/ledger-stages.js";
 import type { ReviewFinding } from "../src/lib/scheduler-review.js";
 
@@ -33,11 +33,19 @@ test("overturned closes only that P1; upheld keeps it, and P0 stays blocking", (
   expect(() => validateDisputes([{ findingId: "race", reason: "wrong" }], null, [], 1)).toThrow("不是上一轮");
 });
 
-test("renamed findings retain arbitration identity and cannot be disputed twice in the same spec", () => {
-  const renamed = { ...finding, findingId: "renamed", family: "Lock_ing" };
-  const facts = { findings: [renamed], round: 3, head: "a".repeat(40), eventSeq: 3, verdict: "changes" as const,
+test("He a/b reproduction: overturn only a, keep b blocking, and allow b's first dispute", () => {
+  const findings: ReviewFinding[] = [
+    { findingId: "a", family: "locking", severity: "P1", probe: "a" },
+    { findingId: "b", family: "locking", severity: "P1", probe: "b" },
+  ];
+  const events = [event(1, { op: "finding_dispute", findingId: "a", family: "locking", specRev: 1 }),
+    event(2, { op: "arbitration_result", findingId: "a", family: "locking", specRev: 1, disputeSeq: 1, verdict: "overturned" })];
+  const facts = { findings, round: 3, head: "a".repeat(40), eventSeq: 3, verdict: "changes" as const,
     reviewer: "rv", reviewerSessionId: "s", reviewerFamily: "codex" as const, reportPath: "/r.md" };
-  expect(() => validateDisputes([{ findingId: "renamed", reason: "again" }], facts, [dispute], 1)).toThrow("不能二次");
-  expect(() => validateDisputes([{ findingId: "renamed", reason: "new spec" }], facts, [dispute], 2)).not.toThrow();
-  expect(mergeArbitration([renamed], arbitrationResults([dispute, result("overturned")], 1))).toEqual([]);
+  expect(mergeArbitration(findings, arbitrationResults(events, 1))).toEqual([findings[1]]);
+  expect(arbitratedFacts(events, 1, facts)).toMatchObject({ verdict: "changes", findings: [findings[1]] });
+  expect(arbitrationKeepsP1(events, findings[1], 3)).toBe(true);
+  expect(() => validateDisputes([{ findingId: "a", reason: "again" }], facts, events, 1)).toThrow("不能二次");
+  expect(() => validateDisputes([{ findingId: "b", reason: "first dispute" }], facts, events, 1)).not.toThrow();
+  expect(() => validateDisputes([{ findingId: "a", reason: "new spec" }], facts, events, 2)).not.toThrow();
 });

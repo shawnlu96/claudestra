@@ -9,6 +9,8 @@ import type { Tr } from "../collab-model";
 import { actionLine, type ActionMap } from "../collab-action";
 import type { Selection } from "../v4/v4-selection";
 import v from "../v4/v4.module.css";
+import { ProductPanes } from "../product/product-panes";
+import { useProductBoard } from "../product/use-product-board";
 import { DagCanvasView } from "./dag-canvas";
 import { compareOverlay } from "./dag-diff";
 import { drawable, layoutDag, nodeId, type DNode } from "./dag-layout";
@@ -18,11 +20,10 @@ import { WorkBoardView } from "../work/work-board-view";
 import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, FeatureCard } from "./dag-types";
 import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
-import { useDagUi, type DagTab } from "./use-dag-ui";
+import { useDagUi } from "./use-dag-ui";
 import d from "./dag.module.css";
 
 const NO_FEATURES: readonly FeatureCard[] = [];
-const TAB_LABEL: Record<DagTab, string> = { dag: "子 DAG", progress: "谁在干活", team: "团队" };
 
 export interface DagPanesArgs {
   project: string;
@@ -44,6 +45,7 @@ export interface DagPanesArgs {
 export function useDagPanes(a: DagPanesArgs) {
   const { tr } = a;
   const load = useDagBoard(a.project, a.rev);
+  const product = useProductBoard(a.project, a.rev);
   const board = load.status === "ok" ? load.board : null;
   const features = board?.features ?? NO_FEATURES;
   const graph = drawable(features).length > 0;
@@ -51,7 +53,8 @@ export function useDagPanes(a: DagPanesArgs) {
   const rows = useMemo(() => progressRows(board?.agents ?? [], a.agents, a.project), [board, a.agents, a.project]);
   const cmp = useDagCompare(a.project, ui.compare, board, a.rev);
   const overlay = useMemo(() => (ui.compare && cmp ? compareOverlay(ui.compare.featureId, cmp.toNodes, cmp.fromNodes, cmp.diff) : null), [ui.compare, cmp]);
-  const canvas = useMemo(() => layoutDag(features, ui.open, ui.doneOpen, overlay), [features, ui.open, ui.doneOpen, overlay]);
+  const shown = useMemo(() => product && ui.featureId ? features.filter(f => f.id === ui.featureId) : features, [product, ui.featureId, features]);
+  const canvas = useMemo(() => layoutDag(shown, ui.open, ui.doneOpen, overlay), [shown, ui.open, ui.doneOpen, overlay]);
   const detail = useDagVersions(a.project, a.sel?.kind === "dver" ? a.sel.f : null, a.rev);
 
   const featureOf = (id: string) => features.find((f) => f.id === id);
@@ -96,39 +99,24 @@ export function useDagPanes(a: DagPanesArgs) {
   const progress = (
     <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
   );
-  const shelf = drawable(features).filter((f) => !ui.open.includes(f.id));
+  const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (
     <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}
       onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
 
-  /** 桌面中区：三个标签；没有图时第一个标签是因果线画布，快照还在读时先空着（不闪一下因果线） */
+  const paneProps = { board: product, featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
+    onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
-    <div className={v.center}>
-      <div className={v.tabs} role="tablist">
-        {(["dag", "progress", "team"] as const).map((k) => (
-          <button key={k} type="button" role="tab" aria-selected={ui.tab === k} className={`${v.tab} ${ui.tab === k ? v.tabOn : ""}`} onClick={() => ui.setTab(k)}>
-            {tr(k === "dag" && !graph ? "因果线" : TAB_LABEL[k])}
-          </button>
-        ))}
-      </div>
-      {ui.tab === "team" ? <div className={v.teamPane}>{team}</div> : ui.tab === "progress" ? progress : graph ? dagCanvas : load.status === "loading" ? <div className={v.canvas} /> : causal}
-    </div>
+    <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={<div className={v.center}>{causal}</div>} />
   );
 
-  /** 手机：分段「子 DAG / 进度」；没有图时第一段是原来的分组列表；对比走底部抽屉 */
   const mobile = (fallback: React.ReactNode) => (
     <>
-      <div className={d.mseg} role="tablist">
-        {(["dag", "progress"] as const).map((k) => (
-          <button key={k} type="button" role="tab" aria-selected={(ui.tab === "progress") === (k === "progress")} onClick={() => ui.setTab(k)}
-            className={`${d.msegBtn} ${(ui.tab === "progress") === (k === "progress") ? d.msegOn : ""}`}>{tr(k === "dag" && !graph ? "因果线" : TAB_LABEL[k])}</button>
-        ))}
-      </div>
-      {ui.tab === "progress" ? progress : graph ? (
-        <MobileDag features={drawable(features)} open={ui.open} doneOpen={ui.doneOpen} look={(f, n) => lookOf(f.id, n)} onFeature={ui.toggleFeature} onFold={ui.toggleDone}
-          onVersions={onVersions} onNode={onNode} onOwner={ui.jumpRow} tr={tr} />
-      ) : fallback}
+      <ProductPanes {...paneProps} narrow={true} fallback={fallback} subdag={
+        <MobileDag features={drawable(shown)} open={ui.open} doneOpen={ui.doneOpen} look={(f, n) => lookOf(f.id, n)}
+          onFeature={ui.toggleFeature} onFold={ui.toggleDone} onVersions={onVersions} onNode={onNode} onOwner={ui.jumpRow} tr={tr} />
+      } />
       {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
     </>
   );

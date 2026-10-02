@@ -14,4 +14,3 @@ export function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: 
   );
   return rev;
 }
-
