@@ -5,6 +5,7 @@ import type { LedgerEvent, LedgerTask, ReviewVerdict } from "./ledger-stages.js"
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
 import { basisField, findingBasis, type FindingBasis } from "./review-converge-basis.js";
+import { deliveredHead } from "./scheduler-review-rebase.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
@@ -142,8 +143,8 @@ function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, min
     const rows = findingsOf(e?.data.findings);
     if (!e || !rows) { rowsByRound.set(round, null); continue; }
     const head = str(e.data.head);
-    const delivered = events.filter((x) => x.kind === "deliver" && x.seq < e.seq).sort((a, b) => a.seq - b.seq).at(-1);
-    if (!head || !/^[a-f0-9]{40}$/i.test(head) || delivered?.data.headSHA !== head ||
+    // A driver head change (merge-driver movedHead) stands in for the deliver of its round: scheduler-review-rebase.ts.
+    if (!head || !/^[a-f0-9]{40}$/i.test(head) || deliveredHead(events, e) !== head ||
       ["P0", "P1", "P2"].some((p) => count(e.data[p.toLowerCase()]) !== rows.filter((f) => f.severity === p).length)) {
       rowsByRound.set(round, null);
       continue;

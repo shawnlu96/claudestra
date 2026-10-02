@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawnAdapter, type AdapterProc } from "../src/lib/acp/adapter-proc.ts";
 import type { BridgeLinkDeps } from "../src/lib/acp/bridge-link.ts";
 import { AcpHost } from "../src/lib/acp/host.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import type { StopReport } from "../src/lib/acp/turn.ts";
+import { activityPath, readActivity, stuckSince } from "../src/lib/agent-supervisor-activity.ts";
 
 // 整条宿主链：真的 AcpHost + 真的 stub 子进程（scripts/acp-stub.ts）+ stub 按 CODEX_CONFIG 起的真 channel-server +
 // 真的回环代理；只有 bridge（假的连接）和 /hook 是假的。reply 真的从 channel-server 经代理走到「bridge」。
@@ -286,6 +288,29 @@ describe("ACP 宿主整条链（stub）", () => {
     await until(() => h.stops.length === 1);
     expect(await turn("t3")).toMatchObject({ ok: true, busy: false });
   }, 20_000);
+
+  test("回合心跳（i28-S1b）：开一轮写 busy、update 推进、Stop 写 busy=false；/clear 后写新 sessionId，旧 id 不判卡住", async () => {
+    rmSync(activityPath("agent-acp-test"), { force: true });
+    const h = start({}, async () => ({ ok: true }));
+    await until(h.isReady);
+    h.inbound("[stub:pause] 停一下");
+    await until(() => readActivity("agent-acp-test")?.busy === true);
+    const r1 = readActivity("agent-acp-test")!;
+    expect(r1).toMatchObject({ sessionId: SID, hostPid: process.pid });
+    expect(r1.updateAt).toBeGreaterThanOrEqual(r1.turnAt);
+    expect(stuckSince(r1, SID, r1.updateAt + 60_000, 60_000)).toBe(Math.max(r1.updateAt, r1.turnAt));
+    await until(() => h.stops.length === 1);
+    expect(readActivity("agent-acp-test")).toMatchObject({ sessionId: SID, busy: false });
+    h.frame({ type: "acp_call", id: "hb-clear", op: "clear" });
+    await until(() => h.sent.some((f) => f.id === "hb-clear"));
+    const newId = h.sent.find((f) => f.id === "hb-clear").sessionId;
+    expect(newId).not.toBe(SID);
+    h.inbound("[stub:pause] 新会话");
+    await until(() => readActivity("agent-acp-test")?.sessionId === newId && readActivity("agent-acp-test")!.busy);
+    expect(stuckSince(readActivity("agent-acp-test"), SID, Date.now() + 3_600_000, 60_000)).toBeNull();
+    await until(() => h.stops.length === 2);
+    expect(readActivity("agent-acp-test")).toMatchObject({ sessionId: newId, busy: false });
+  }, 30_000);
 
   test("没登录：接线程回 -32000 → 出 auth 卡（不出条目），prompt 按失败收尾", async () => {
     const h = start({ STUB_AUTH_REQUIRED: "1" });
