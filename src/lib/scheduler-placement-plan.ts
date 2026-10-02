@@ -18,6 +18,7 @@ import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./sche
 import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { relayAway } from "./lend-fix-reassign.js";
+import { localFixOwner } from "./lend-fix-start.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
@@ -111,7 +112,7 @@ const LOCAL_OFF_RESTATE = "scheduler.json remote.localPriority = off：本机不
  * order: until its peer can take it, it waits (spec stage included: restate is skipped for it, start_node is the approval).
  */
 export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
-  if (!s.workflow) return null;
+  if (!s.workflow || (role === "fix" && !cardPin(s.task.extra) && localFixOwner(s))) return null; // i28-FB1：无租约、执行者在本机 → 修复给它
   if (s.pool?.remote.agents) return agentPoolWork(s, since, role, locksFree(s));
   const pinned = cardPin(s.task.extra);
   if (!pinned && s.task.stage === "spec") {

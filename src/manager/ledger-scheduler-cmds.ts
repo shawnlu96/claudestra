@@ -18,6 +18,7 @@ import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-p
 import { writeMaterials } from "../lib/lend-write-materials.js";
 import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
 import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
+import { withFixStart } from "../lib/lend-fix-start.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
@@ -53,7 +54,8 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
   if (!repo) return { error: "没有仓库坐标（scheduler.json remote.repo）" };
   try {
     const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);
-    return await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe), probe); // i28-RA1：接力先核对旧 PR 的远端 head
+    const write = await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe), probe); // i28-RA1：接力先核对旧 PR 的远端 head
+    return await withFixStart(c.db, task, peer, write, probe, c.deps.relayGh); // i28-FB1：派回租约方的修复单起点跟上 PR 分支
   } catch (e) {
     if (e instanceof LedgerError) return { error: e.message };
     throw e;
