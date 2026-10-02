@@ -1,54 +1,32 @@
 "use client";
+/** 出借 Claude 直接用本机 Claude Code 登录（和本机开 worker 一样），这里只显示能不能接单；旧 setup-token 不再使用，只提示可删的位置。 */
 import { useEffect, useState } from "react";
-import { ClaudeCopyIcon } from "./lend-claude-icons";
 import { LendIcon } from "./lend-icons";
-import { claudeTokenApi } from "./lend-api";
+import { claudeLoginApi, type ClaudeLogin } from "./lend-api";
 import css from "./lend.module.css";
-interface Status { configured: boolean; savedAt: string | null }
 
 export function LendClaudeLogin() {
-  const [status, setStatus] = useState<Status | null>(null);
-  const [token, setToken] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<"ok" | "error" | null>(null);
+  const [status, setStatus] = useState<ClaudeLogin | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     let live = true;
-    void claudeTokenApi().then((s) => { if (live) setStatus(s); }, () => { if (live) setFeedback("error"); });
+    void claudeLoginApi().then((s) => { if (live) setStatus(s); }, () => { if (live) setFailed(true); });
     return () => { live = false; };
   }, []);
-  const act = async (clear = false) => {
-    setBusy(true);
-    setFeedback(null);
-    try {
-      setStatus(await claudeTokenApi(clear ? "DELETE" : "POST", clear ? undefined : token));
-      setToken("");
-      setFeedback("ok");
-    } catch {
-      // Feedback stays generic so a server/proxy error cannot display submitted credentials.
-      setFeedback("error");
-    } finally { setBusy(false); }
-  };
-  return <div className={`space-y-2 rounded-lg bg-base-100 p-3 ${feedback === "error" ? css.shake : ""}`}
-    onAnimationEnd={() => setFeedback(null)}>
-    <div className="flex flex-wrap items-center gap-2 text-xs">
+  const ok = status?.loggedIn === true;
+  return <div className="space-y-1 rounded-lg bg-base-100 p-3 text-xs">
+    <div className="flex flex-wrap items-center gap-2">
       <LendIcon name="lock" /><span className="font-semibold">Claude 登录</span>
-      <span className="text-base-content/50">{status?.configured ? "已配置" : "未配置"}</span>
-      {status?.savedAt && <time className="text-base-content/40">{new Date(status.savedAt).toLocaleString()}</time>}
-      {feedback === "ok" && <LendIcon name="check" className={`${css.fadeIn} text-success`} />}
+      {status && <span className={`${css.fadeIn} flex items-center gap-1 ${ok ? "text-success" : "text-warning"}`}>
+        <LendIcon name={ok ? "circleCheck" : "circleAlert"} size={12} />{ok ? "用本机登录" : "本机不可用"}
+      </span>}
+      {!status && !failed && <span className="loading loading-spinner loading-xs text-base-content/40" />}
+      {failed && <span className="flex items-center gap-1 text-error"><LendIcon name="circleAlert" size={12} />读取失败</span>}
     </div>
-    <button type="button" className="btn btn-ghost btn-xs gap-2 font-mono" onClick={() => {
-      setFeedback(null);
-      void navigator.clipboard.writeText("claude setup-token").then(() => setFeedback("ok"), () => setFeedback("error"));
-    }}><ClaudeCopyIcon />claude setup-token</button>
-    <div className="flex gap-2">
-      <input type="password" autoComplete="off" aria-label="Claude setup-token" placeholder="setup-token"
-        className="input input-sm min-w-0 flex-1" value={token} onChange={(e) => setToken(e.target.value)} disabled={busy} />
-      <button type="button" className="btn btn-sm btn-square" aria-label="保存 Claude token" disabled={busy || !token.trim()} onClick={() => void act()}>
-        {busy ? <span className="loading loading-spinner loading-xs" /> : <LendIcon name="check" />}
-      </button>
-      <button type="button" className="btn btn-sm btn-square" aria-label="清除 Claude token" disabled={busy || !status?.configured} onClick={() => void act(true)}>
-        <LendIcon name="x" />
-      </button>
-    </div>
+    {status && !ok && status.reason && <p className="break-words text-[11px] text-base-content/60">{status.reason}</p>}
+    {status?.legacyTokenFile && <p className="break-all text-[11px] text-base-content/50">
+      旧 setup-token 已不再使用，可删除 <code className="font-mono">{status.legacyTokenFile}</code></p>}
+    {status?.legacyTokenEnv && <p className="text-[11px] text-base-content/50">
+      环境里的 <code className="font-mono">CLAUDE_CODE_OAUTH_TOKEN</code> 已不再使用，可从 .env 删除</p>}
   </div>;
 }

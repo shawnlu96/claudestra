@@ -1,19 +1,16 @@
-/** Claude 的轻量宿主：保留原终端供 manager 就绪探测，独立看门狗与信号收尾负责终止子进程和清理配置。 */
+/** Claude 的轻量宿主：保留原终端供 manager 就绪探测，独立看门狗与信号收尾负责终止子进程和清理启动代次目录。 */
 import { readFileSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { receiveClaudeToken } from "./lend-claude-worker-auth.js";
 import { archiveClaudeWorker } from "./lend-claude-worker-archive.js";
 import { CLAUDE_LEND_ROOT } from "./lend-claude-worker-session.js";
 import { type ClaudeWorkerPlan } from "./lend-claude-worker.js";
-import { CLAUDE_LEND_TOKEN } from "./lend-claude-worker-capacity.js";
 import { lendWatchdog, WATCHDOG_EVERY_MS } from "./lend-watchdog.js";
 import { childPidsInPsOutput, killPidsEscalating } from "./tmux-helper.js";
 import { redactSecrets } from "./usage-classify.js";
 
 interface Child { pid: number; exited: Promise<number> }
 interface HostIo {
-  receive(path: string): Promise<string>;
-  spawn(plan: ClaudeWorkerPlan, token: string): Child;
+  spawn(plan: ClaudeWorkerPlan): Child;
   stop(child: Child): Promise<void>;
   reason(): string | null;
   cleanup(): void | Promise<void>;
@@ -21,13 +18,11 @@ interface HostIo {
   intervalMs?: number;
 }
 
-/** 清理在 child 退出 / 停止之后；重复信号共享同一次 stop，失败也不遗留凭据目录。 */
+/** 清理在 child 退出 / 停止之后；重复信号共享同一次 stop，失败也不遗留启动代次目录。 */
 export async function runClaudeWorker(plan: ClaudeWorkerPlan, io: HostIo): Promise<number> {
   let child: Child | undefined;
   let stopping: Promise<void> | undefined;
-  let cancelled = false;
   const stop = () => {
-    cancelled = true;
     if (child && !stopping) stopping = io.stop(child);
     return stopping;
   };
@@ -38,13 +33,10 @@ export async function runClaudeWorker(plan: ClaudeWorkerPlan, io: HostIo): Promi
   try {
     const before = io.reason();
     if (before) { io.log(`Claude worker 不起：${before}`); return 1; }
-    const token = await io.receive(plan.authSocket);
-    const after = io.reason();
-    if (cancelled || after) { io.log(`Claude worker 不起：${after ?? "已收到停止信号"}`); return 1; }
-    child = io.spawn(plan, token);
+    child = io.spawn(plan);
     timer = setInterval(() => {
       const why = io.reason();
-      if (why && !cancelled) { io.log(`Claude worker 自停：${why}`); void stop(); }
+      if (why && !stopping) { io.log(`Claude worker 自停：${why}`); void stop(); }
     }, io.intervalMs ?? WATCHDOG_EVERY_MS);
     return await child.exited;
   } finally {
@@ -69,17 +61,13 @@ async function stopTree(child: Child): Promise<void> {
 
 /** 顶层失败转换为退出码，宿主不重试；记录脱敏原因供 owner 排查，清理成功才给成功提示。 */
 export async function runClaudeWorkerHost(plan: ClaudeWorkerPlan, io: HostIo): Promise<number> {
-  let token = "", cleaned = false;
+  let cleaned = false;
   try {
-    return await runClaudeWorker(plan, { ...io,
-      receive: async (path) => { token = await io.receive(path); return token; },
-      cleanup: async () => { await io.cleanup(); cleaned = true; },
-    });
+    return await runClaudeWorker(plan, { ...io, cleanup: async () => { await io.cleanup(); cleaned = true; } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const safe = redactSecrets(token ? message.split(token).join("[redacted]") : message);
+    const safe = redactSecrets(error instanceof Error ? error.message : String(error));
     // 子进程宿主以非零退出码报告失败，继续抛出只会重复日志；调用方按退出码处理。
-    io.log(`Claude 出借启动或停止失败：${safe}；${cleaned ? "配置目录已清理" : "配置目录清理未确认，请检查隔离目录"}`);
+    io.log(`Claude 出借启动或停止失败：${safe}；${cleaned ? "启动目录已清理" : "启动目录清理未确认，请检查出借目录"}`);
     return 1;
   }
 }
@@ -92,8 +80,8 @@ if (import.meta.main) {
   unlinkSync(file);
   const log = (text: string) => console.error(`[lend] ${text}`);
   const reason = lendWatchdog(plan.agent, log);
-  process.exitCode = await runClaudeWorkerHost(plan, { reason, log, receive: receiveClaudeToken, stop: stopTree,
-    spawn: (p, token) => Bun.spawn(p.argv, { cwd: p.cwd, env: { ...p.env, [CLAUDE_LEND_TOKEN]: token }, stdin: "inherit", stdout: "inherit", stderr: "inherit" }),
+  process.exitCode = await runClaudeWorkerHost(plan, { reason, log, stop: stopTree,
+    spawn: (p) => Bun.spawn(p.argv, { cwd: p.cwd, env: p.env, stdin: "inherit", stdout: "inherit", stderr: "inherit" }),
     cleanup: async () => {
       try { await archiveClaudeWorker(plan, log); } finally { rmSync(plan.dir, { recursive: true, force: true }); }
     } });

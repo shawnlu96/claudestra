@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { admitOrders, TICK_KEY } from "../src/lib/lend-inbox.js";
-import { claudeLendSlots, CLAUDE_LEND_TOKEN, lendPollCapacity } from "../src/lib/lend-claude-worker-capacity.js";
+import { claudeLendSlots, lendPollCapacity, noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import { lendRuntimeArgs } from "../src/lib/lend-claude-worker-routing.js";
 import { claimProblem } from "../src/lib/lend-drive.js";
 import { helloBody } from "../src/lib/lend-hello.js";
@@ -10,9 +10,9 @@ import { submitLendResult, submitLendWork, type SubmitterDeps } from "../src/lib
 import { lendBranch } from "../src/lib/lend-git.js";
 import { FP, HEAD, harness, polled, sha, TEXT, toStarted, wire } from "./lend-harness.js";
 
-const original = process.env[CLAUDE_LEND_TOKEN];
-beforeEach(() => { process.env[CLAUDE_LEND_TOKEN] = "fake-lend-token"; });
-afterEach(() => { if (original === undefined) delete process.env[CLAUDE_LEND_TOKEN]; else process.env[CLAUDE_LEND_TOKEN] = original; });
+// 桩：出借方本机 Claude 已登录（不跑真 CLI）
+beforeEach(() => noteClaudeReadiness({ ready: true, reason: null, at: Date.now() }));
+afterEach(() => noteClaudeReadiness(null));
 const caller = { peer: "team-a", fp: FP };
 const claude = (id: string) => ({ ...polled(id), family: "claude" });
 function both() {
@@ -21,7 +21,7 @@ function both() {
   return h;
 }
 
-test("缺省/零 Claude 授权拒收；缺 token hello 为 0 并提示 owner，Codex 不变", async () => {
+test("缺省/零 Claude 授权拒收；本机没登录 hello 为 0 并提示 owner，Codex 不变", async () => {
   for (const families of [{ codex: 1 }, { codex: 1, claude: 0 }]) {
     const h = harness({ entry: { families } });
     expect((await admitOrders(h.d, caller, [claude("c")], "poll")).refused).toEqual([{ orderId: "c", code: "no_slot" }]);
@@ -30,10 +30,10 @@ test("缺省/零 Claude 授权拒收；缺 token hello 为 0 并提示 owner，C
   const h = both();
   const logs: string[] = [];
   expect(claudeLendSlots(h.lend.lend[0])).toBe(1);
-  expect(claudeLendSlots(h.lend.lend[0], {}, (text) => logs.push(text))).toBe(0);
+  noteClaudeReadiness({ ready: false, reason: "本机 Claude Code 没登录", at: Date.now() });
+  expect(claudeLendSlots(h.lend.lend[0], (text) => logs.push(text))).toBe(0);
   expect(logs).toHaveLength(1);
-  expect(logs[0]).toContain("claude setup-token");
-  delete process.env[CLAUDE_LEND_TOKEN];
+  expect(logs[0]).toContain("没登录");
   expect(helloBody(h.db, h.lend.lend[0], h.d.now()).slots).toEqual({ codex: { total: 1, busy: 0 }, claude: { total: 0, busy: 0 } });
   expect(await admitOrders(h.d, caller, [claude("c"), polled("x")], "push")).toEqual({ accepted: ["x"], refused: [{ orderId: "c", code: "no_slot" }] });
 });

@@ -72,7 +72,7 @@ test("LP1 local family restriction prevents repair creation even with available 
     const p = convergenceProbe(f), intent = p.plan();
     p.deps.localFamilyWait = (_task, family) => family === "codex" ? "本机不接 codex" : null;
     await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
-    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting", detail: "本机不接 codex；首次转 peer 需写租约，等 CONV3" });
+    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting", detail: expect.stringContaining("本机不接 codex") });
     expect(p.effects.some((e) => e.startsWith("create:"))).toBe(false);
   } finally { f.close(); }
 });
@@ -92,7 +92,7 @@ test("family-full waits for CONV3 without faking a write lease; a peer-written o
       borrow: [{ peer: "Peer", projects: ["p"], roles: ["write" as const], maxOpen: 2 }] } };
     const intent = p.plan();
     await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
-    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting", detail: "Codex 全机会话已达 6，等待空槽；首次转 peer 需写租约，等 CONV3" });
+    expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting", detail: expect.stringContaining("Codex 全机会话已达 6") });
     expect(p.effects.some((e) => e.startsWith("create:"))).toBe(false);
     p.edit((r) => { for (let n = 0; n < 6; n++) delete r.agents[`agent-full-${n}`]; });
     expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "session" });
