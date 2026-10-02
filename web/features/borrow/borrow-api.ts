@@ -1,6 +1,6 @@
 /**
  * 借入方管理面的接口（bridge/local-api/lend-peers-view.ts）：GET /borrow 读全貌，PUT / DELETE /borrow/peers/:peer 改一条借入，
- * PUT /borrow/local/:project 改本机这一行的档位 / 并发上限（i28-Q1）。PUT 只带改的那格，没带的由 CLI 在写锁里沿用。
+ * PUT /borrow/local/:project 改本机这一行的 Claude / Codex 名额。PUT 只带改的那格，没带的由 CLI 在写锁里沿用。
  * 读回 403（不是 owner 的全权设备）或 404（老 bridge 没这个端点）→ null，面板整块不渲染。形状与 bridge 一致（web 与 src 互不 import）。
  */
 import { api, ApiError } from "@/lib/api/client";
@@ -10,7 +10,6 @@ export type Family = "codex" | "claude";
 export type RemoteModeView = "balance" | "off";
 /** 槽池档位（scheduler / lend.json 同一套）：先用 / 平分 / 少用 / 不用 */
 export type Priority = "first" | "balance" | "low" | "off";
-export const PRIORITIES: readonly Priority[] = ["first", "balance", "low", "off"];
 export type Role = "review" | "write";
 /** 本周额度：整数百分比 + 重置时刻；某家不在 = 读不到 */
 export type QuotaReport = Partial<Record<Family, { weekUsedPct: number; resetAt: number }>>;
@@ -34,6 +33,7 @@ export interface PeerView {
 /** 本机这一行（scheduler.json 的一个项目）：档位与并发上限可改，其余只读；老 bridge 只有前三个字段 */
 export interface LocalProjectView {
   id: string; mode: RemoteModeView; maxActiveWorkers: number;
+  agents?: Record<Family, number> | null;
   localPriority?: Priority; roles?: string[]; repo?: string | null; reviewFirst?: string[];
 }
 /** 卡此刻放哪（与 `ledger lend-orders` 同一份 explainPlacement）；算不出 → error */
@@ -76,7 +76,7 @@ export async function fetchBorrow(signal?: AbortSignal): Promise<BorrowView | nu
 }
 
 export type PeerBody = { projects?: string[]; maxOpen?: number; roles?: Role[]; priority?: Priority };
-export type LocalBody = { priority?: Priority; maxActiveWorkers?: number };
+export type LocalBody = { agents?: Record<Family, number>; priority?: Priority; maxActiveWorkers?: number };
 const peerPath = (peer: string) => `/borrow/peers/${encodeURIComponent(peer)}`;
 
 /** CLI 准入不过也会抛（409 refused）：调用方按失败回弹。machine 由调用方在点击那一刻用 machineNow() 取 */

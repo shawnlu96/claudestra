@@ -4,6 +4,7 @@
  */
 
 import { TMUX_SOCK, sandboxTmuxArgv } from "../lib/tmux-helper.js";
+import { sandboxVerifyNewWindow } from "../lib/sandbox-tmux.js";
 
 // ---------- tmux 小工具（独立于 tmux-helper 的 tmuxRaw：这里需要 exitCode） ----------
 
@@ -18,6 +19,8 @@ export async function tmuxRun(args: string[]): Promise<{ code: number; out: stri
     new Response(proc.stderr).text(),
   ]);
   const code = await proc.exited;
+  // 沙箱：目录 stat 得到但进不去（chmod 000）时 tmux 建窗口照样成功、回落 $HOME——读实际 cwd，不在根下就关掉并抛（同 tmuxRawStrict）
+  if (code === 0) await sandboxVerifyNewWindow(args, async (a) => (await tmuxRun(a)).out);
   return { code, out: out.trim(), err: err.trim() };
 }
 

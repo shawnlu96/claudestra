@@ -1,3 +1,4 @@
+import { placeAgentPool } from "./scheduler-agent-pool.js";
 /** Local writing capacity is separate from file leases, review sessions and remote writing capacity. */
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
@@ -42,6 +43,11 @@ export const newLocalWriteRoom = (writers: number, maxWorkers: number, waitingFi
 
 /** Shared by the autostart preview and its claim transaction; the in-flight bound applies even with free peers. */
 export function newCardCapacity(f: { writers: number; maxWorkers: number; waitingFix: boolean; inFlight: number; placement: PlacementFacts }): string | null {
+  if (f.placement.remote?.agents) {
+    if (f.waitingFix) return "空位优先留给修复";
+    const placed = placeAgentPool(f.placement, "write", "claude");
+    return placed.kind === "wait" ? placed.reason : null;
+  }
   const limit = f.maxWorkers * IN_FLIGHT_MACHINES;
   if (f.inFlight >= limit) return `自动卡总在途已到上限 maxActiveWorkers × ${IN_FLIGHT_MACHINES}（${limit}，三台机器）`;
   if (f.placement.remote?.localPriority !== "off" && newLocalWriteRoom(f.writers, f.maxWorkers, f.waitingFix)) return null;

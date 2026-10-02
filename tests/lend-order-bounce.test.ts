@@ -57,15 +57,18 @@ describe("lent merge-bounce fix orders", () => {
       expect(local.inputs).toContain(DISPUTE_RULE);
       expect(local.inputs).toContain(FIX_STRATEGY_RULE);
       const bounceInputs = local.inputs.slice(1).filter((line) => line !== DISPUTE_RULE && line !== FIX_STRATEGY_RULE);
-      expect(o.wire.inputs.slice(1)).toEqual(bounceInputs.map(peerText));
-      expect(local.acceptance.slice(0, o.wire.acceptance.length - 2).map(peerText)).toEqual(o.wire.acceptance.slice(2));
+      expect(o.wire.inputs.slice(1, 1 + bounceInputs.length)).toEqual(bounceInputs.map(peerText));
+      expect(local.acceptance.slice(0, b.cause === "ci_fail" ? 3 : b.cause === "conflict" ? 4 : 3)
+        .map((s) => peerText(s.replace("git fetch 后合入最新 origin/main", "核对基线后合入 refs/remotes/origin/HEAD")
+          .replace("推送后报新 head", "提交后用 deliver 报新 head，由出借服务推送"))))
+        .toEqual(o.wire.acceptance.slice(2, b.cause === "ci_fail" ? undefined : -1));
       expect(o.wire.findings).toEqual([]);
       expect(o.wire.head).toBe(H);
       expect(o.wire.acceptance[0]).toContain(BRANCH);
       expect(o.wire.acceptance[1]).toContain("不推 main");
       expect(o.text).not.toContain("All checks pass");
       expect(o.text).not.toContain("逐条修上一轮审查");
-      expect(o.text).toContain(b.cause === "conflict" ? "合入最新 origin/main" : b.cause === "update_fail" ? b.error! : ciFail.checks[0]!.link);
+      expect(o.text).toContain(b.cause === "conflict" ? "核对基线后合入 refs/remotes/origin/HEAD" : b.cause === "update_fail" ? b.error! : ciFail.checks[0]!.link);
       expect(o.text).toContain(b.cause === "conflict" ? "解冲突" : b.cause === "update_fail" ? "合入" : ciFail.checks[1]!.name);
       expect(parseOrderWire(JSON.parse(JSON.stringify(o.wire))).ok).toBe(true);
       expect(listLendOrders(db, "T1")[0]!.wire).toEqual(o.wire);

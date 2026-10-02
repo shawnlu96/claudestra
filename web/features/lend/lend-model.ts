@@ -56,14 +56,15 @@ export function addRepos(list: readonly string[], input: string): string[] {
   return out;
 }
 
-/** 请求体：角色由 CLI 沿用；有 initial 时省略未改的名额，防止锁外旧值覆盖并发授权。到期交给 CLI 的时钟算 */
+/** Unchanged counts are omitted to preserve concurrent grants. Daily quota keeps its existing/default value. */
 export function grantBody(f: GrantForm, maxDays: number, initial?: GrantForm): { peer: string; repos: string[]; codex?: number; claude?: number; ordersPerDay: number; until: string } {
   const days = Math.min(f.days, Math.max(1, Math.floor(maxDays)));
   return { peer: f.peer, repos: [...f.repos], ...(initial?.codex === f.codex ? {} : { codex: f.codex }),
     ...(f.claude === undefined || f.claude === initial?.claude ? {} : { claude: f.claude }), ordersPerDay: f.ordersPerDay, until: `${days}d` };
 }
 
-export const canSubmit = (f: GrantForm): boolean => !!f.peer && f.repos.length > 0 && f.codex >= 0 && (f.claude ?? 0) >= 0 && f.ordersPerDay > 0;
+export const canSubmit = (f: GrantForm): boolean => !!f.peer && f.repos.length > 0 &&
+  [f.codex, f.claude ?? 0].every((n) => Number.isInteger(n) && n >= 0 && n <= 16) && f.ordersPerDay > 0;
 
 export type GrantStatus = "ok" | "paused" | "expired" | "invalid";
 export function grantStatus(g: GrantView, now: number): GrantStatus {
@@ -176,6 +177,6 @@ export function withSnapshot(orders: readonly OrderView[], snapshot: readonly Or
 export function switchClaudeGrantPeer(form: GrantForm, peer: string, grants: readonly GrantView[], maxDays: number) {
   const grant = grants.find((g) => g.peer === peer);
   const defaults = formDefaults(maxDays, [{ name: peer }], grant);
-  const next = { ...form, peer, codex: defaults.codex, claude: defaults.claude ?? 0 };
+  const next = { ...form, peer, codex: defaults.codex, claude: defaults.claude ?? 0, ordersPerDay: defaults.ordersPerDay };
   return { form: next, baseline: grant ? next : undefined };
 }
