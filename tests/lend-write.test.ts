@@ -162,7 +162,7 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     const N = "2".repeat(40);
     const run = async (argv: string[], o: { env: Record<string, string> }): Promise<BoundedResult> => {
       seen.push({ argv, env: o.env });
-      const push = argv[1] === "push";
+      const push = argv.includes("push");
       if (push) return { code: 128, stdout: "", stderr: "remote: Permission to o/r.git denied to lender.\nfatal: ... 403", timedOut: false };
       return { code: 0, stdout: argv[1] === "rev-parse" ? N : "", stderr: "", timedOut: false };
     };
@@ -170,8 +170,10 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     const r: PushResult = await pushWork({ orderId: "o", repo: "o/r", branch: BR, base: "main", cloneDir: "/c", orderHead: H, head: N },
       { root, run: run as never, env: { PATH: "/usr/bin", HOME: "/h", GH_TOKEN: "ghp_secret", CLAUDESTRA_CONTROL_TOKEN: "x" } });
     expect(r).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("fork") });
-    const pushes = seen.filter((s) => s.argv[1] === "push");
-    expect(pushes.map((s) => s.argv)).toEqual([["git", "push", "--porcelain", "https://github.com/o/r.git", `${N}:refs/heads/${BR}`]]);
+    const pushes = seen.filter((s) => s.argv.includes("push"));
+    expect(pushes.map((s) => s.argv)).toEqual([
+      ["git", "-c", "credential.helper=!gh auth git-credential", "push", "--porcelain", "https://github.com/o/r.git", `${N}:refs/heads/${BR}`],
+    ]);
     for (const s of seen) expect(Object.keys(s.env).filter((k) => /TOKEN|SECRET/.test(k))).toEqual([]);
   });
 });
