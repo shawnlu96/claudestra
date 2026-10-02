@@ -144,7 +144,7 @@ test("channel-server 经 mcpServers 交给 pi，token 只在挂载配置里；�
   const [run] = h.runs();
   expect(run.argv).toEqual([
     "--mode", "rpc", "--approve",
-    "-e", "builtin:mcp", "-e", expect.stringContaining("mcp-mount.ts"), "-e", expect.stringContaining("activate-tools.ts"),
+    "-e", "builtin:mcp", "-e", expect.stringContaining("mcp-mount.ts"), "-e", expect.stringContaining("activate-tools.ts"), "-e", expect.stringContaining("pi-env-snapshot.ts"),
     "--session-id", SID,
   ]);
   const mounted = JSON.parse(run.mcp).claudestra;

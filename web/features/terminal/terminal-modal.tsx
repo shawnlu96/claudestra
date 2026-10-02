@@ -37,12 +37,15 @@ export function TerminalModal({
   displayName,
   onClose,
   actions,
+  notice,
 }: {
   agent: string;
   displayName: string;
   onClose: () => void;
   /** 标题栏 ✕ 左边的额外按钮（宿主 shell 的「关闭此终端」） */
   actions?: ReactNode;
+  /** 标题栏下方的一行提示（ACP agent：这里只是宿主日志） */
+  notice?: ReactNode;
 }) {
   const t = useT();
   // Esc 关闭；xterm 聚焦时 Esc 被终端吃掉是预期（终端里 Esc 有语义），点 ✕ 或背板关。
@@ -80,6 +83,7 @@ export function TerminalModal({
             </button>
           </div>
         </header>
+        {notice}
         <TerminalView agent={agent} />
       </div>
       <div className="modal-backdrop" onClick={onClose} />

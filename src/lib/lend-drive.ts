@@ -86,6 +86,8 @@ export interface LendDeps {
   failure(agent: string): CodexFailureSeen | undefined;
   /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
   closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 结单收尾全做完后把 worker 的会话收进 archived/（lend-session-archive.ts，自己兜错只记日志）；不设 = 不归档 */
+  archiveSessions?(row: LendRow): Promise<void>;
   /** 本机 Codex 额度（撞额度暂停借单用）；读不到 = null */
   codexQuota(): Promise<QuotaView | null>;
   log(msg: string): void;
@@ -184,6 +186,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
+  await d.archiveSessions?.(told);
 }
 
 /**

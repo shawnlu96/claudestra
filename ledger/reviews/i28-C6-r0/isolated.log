@@ -1,0 +1,290 @@
+bun test v1.3.10 (30e609e0)
+
+tests/shared-ledger-integration-fixture.test.ts:
+
+tests/shared-ledger-client.test.ts:
+(pass) shared ledger signed client with isolated fake center > lost response checks receipt; retries preserve request id and refresh nonce/signature [7.27ms]
+(pass) shared ledger signed client with isolated fake center > committed receipt recovers without another POST [0.54ms]
+(pass) shared ledger signed client with isolated fake center > offline and receipt lookup loss cannot report success or submit [0.45ms]
+(pass) shared ledger signed client with isolated fake center > timeout rejects; CAS rejection is never retried [12.76ms]
+(pass) malformed CAS response never retries or changes expectedRev [0.45ms]
+(pass) every upload goes through sensitive gate before any network request [0.47ms]
+(pass) poll stop aborts network request and cannot populate cache [1.11ms]
+(pass) valid CAS conflict returns the frozen latest DTO without auto resubmission [1.92ms]
+(pass) absolute paths after all non-path delimiters are blocked before signing [1.89ms]
+(pass) missing scrub context derives fresh local identity for all upload methods and fails closed [2.03ms]
+(pass) snapshot regression rebuilds cache and poll warns once [3.06ms]
+(pass) import upload blocks Unicode absolute paths and permits prose, URLs and relative globs [4.14ms]
+(pass) import globs use strict relative syntax and cannot carry embedded absolute paths [4.94ms]
+
+tests/dag-tools-prompt.test.ts:
+(pass) renderExecPrompt：自动卡开工 / 修复先开 PR > DEFAULT_TEMPLATE 段与改前逐字相同
+(pass) renderExecPrompt：自动卡开工 / 修复先开 PR > 开工 / 修复那条：push → 开 PR（base main）→ deliver，PR 自动登记、没开会被拒；CLI 兜底带 --pr [0.12ms]
+(pass) renderExecPrompt：自动卡开工 / 修复先开 PR > AUTO_SECTION 其它行逐字不变，行数不变 [0.06ms]
+(pass) renderExecPrompt：自动卡开工 / 修复先开 PR > 自定义模板也总附上同一段 auto 说明
+
+tests/shared-ledger-integration-gate.test.ts:
+(pass) planning authority rejects actual CLI, MCP and autostart while an existing card advances [32.95ms]
+(pass) bulk migration cannot assign another card into a feature whose planning gate closed [25.03ms]
+
+tests/dag-tools-start-v3.test.ts:
+(pass) start_node 开 auto 卡用 code v3 > 新卡 workflow = code v3 / auto / claude / 原 fallback；复述闸是 restate_recorded [42.64ms]
+(pass) start_node 开 auto 卡用 code v3 > workflow 之后的 bind 失败：切回 manual，版本号沿用 3，其余字段不变，卡取消 [42.02ms]
+(pass) start_node 开 auto 卡用 code v3 > workflow-set 自己失败：没有落 auto，回滚不写 workflow [35.36ms]
+
+tests/shared-ledger-client-export.test.ts:
+(pass) read-only export is deterministic, includes historical bindings and never uploads local columns [37.25ms]
+(pass) preview v1 then local v2 rejects stale commit even while the gate remains installed [19.87ms]
+
+tests/dag-tools-start-spec-path.test.ts:
+(pass) 本机放置 > 规格卡已在：task.spec 是它的绝对路径，执行者说明引用同一路径 [37.03ms]
+(pass) 本机放置 > spec 参数给正文：start_node 写出的那份文件就是 task.spec [37.27ms]
+(pass) 本机放置 > 中途失败回滚：卡取消、本次写的规格卡删掉，specPathFor 不再指向不存在的文件 [31.54ms]
+(pass) peer 放置 > 规格卡已在：peer 卡同样记绝对路径 [33.78ms]
+(pass) peer 放置 > spec 参数给正文：peer 卡记的是写出的那份文件 [36.64ms]
+
+tests/shared-ledger-server-restart.test.ts:
+(pass) receipt remains immutable after restart, fresh nonce retries; old signature stays blocked [18.19ms]
+
+tests/dag-tools-bridge.test.ts:
+(pass) 工具注册 > 四个工具都在 channel-server 的派单工具表里 [17.68ms]
+(pass) P1：权限 > 非 PM 调写类工具一律 forbidden，什么都没写；show_dag 只读可以看 [20.05ms]
+(pass) P1：权限 > master 可以调 [17.30ms]
+(pass) P1：fileGlobs 必填 > 缺 / 空 fileGlobs 的节点被拒，feature 也不建 [16.88ms]
+(pass) 正常路径：规划 → 两条车道 → 两次开工 > 两节点不重叠：两条车道，两次 start_node 建出两张 auto 卡 [54.30ms]
+(pass) P1：start_node 中途失败不留半截 > worktree 失败：卡取消、worktree / 分支 / agent / 说明全撤、节点没绑 [56.86ms]
+(pass) P1：start_node 中途失败不留半截 > agent 失败：卡取消、worktree / 分支 / agent / 说明全撤、节点没绑 [57.49ms]
+(pass) P1：start_node 中途失败不留半截 > task-set 失败：卡取消、worktree / 分支 / agent / 说明全撤、节点没绑 [49.43ms]
+(pass) P1：start_node 中途失败不留半截 > workflow 失败：卡取消、worktree / 分支 / agent / 说明全撤、节点没绑 [41.94ms]
+(pass) P1：start_node 中途失败不留半截 > bind 失败：卡取消、worktree / 分支 / agent / 说明全撤、节点没绑 [51.68ms]
+(pass) P1：start_node 中途失败不留半截 > task-new 失败：什么都没留下；规格卡是这次写的也删掉 [16.91ms]
+(pass) P1：start_node 中途失败不留半截 > 预检不过就一步不做：依赖没满足、没有规格卡、调度服务没开 auto、分支已存在 [14.69ms]
+(pass) P1：rewrite_dag 删进行中的节点必须带原因 > remove 进行中节点被拒；cancel 带原因直接生效，带 scopeChange 才待 owner 批；拆计划节点直接生效，车道跟着变 [32.69ms]
+(pass) P1：rewrite_dag 删进行中的节点必须带原因 > plan_feature 覆盖已有 DAG 要带原因；漏掉进行中的节点被拒 [34.10ms]
+(pass) r1：提交了但结果丢了，按本次 dedup 查库接着走 > task-new 已提交、结果丢了：开工照常完成，只有一张卡，节点绑的是活卡 [31.30ms]
+(pass) r1：提交了但结果丢了，按本次 dedup 查库接着走 > task-set 已提交、结果丢了：开工照常完成，只有一张卡，节点绑的是活卡 [42.12ms]
+(pass) r1：提交了但结果丢了，按本次 dedup 查库接着走 > workflow-set 已提交、结果丢了：开工照常完成，只有一张卡，节点绑的是活卡 [41.83ms]
+(pass) r1：提交了但结果丢了，按本次 dedup 查库接着走 > dag-bind 已提交、结果丢了：开工照常完成，只有一张卡，节点绑的是活卡 [50.46ms]
+(pass) r1：提交了但结果丢了，按本次 dedup 查库接着走 > 没提交的失败照旧回滚；create 已建好但结果丢了：kill 掉，卡取消，不留半截 [39.60ms]
+(pass) r1：提交了但结果丢了，按本次 dedup 查库接着走 > 同名卡是别人建的（本次 task-new 没落库）：回滚不碰它 [19.25ms]
+(pass) r1：只撤本次建的资源 > 不同节点给只差大小写的卡号并发开工：后到的被拒，不删先到那次的 worktree [45.44ms]
+(pass) r1：只撤本次建的资源 > worktree 目录在预检之后才出现：worktree 步报错，回滚不碰它 [39.56ms]
+(pass) r1：只撤本次建的资源 > 分支在预检之后才出现：worktree 步报错，回滚不碰它 [32.51ms]
+(pass) r1：只撤本次建的资源 > agent在预检之后才出现：agent 步报错，回滚不碰它 [43.10ms]
+(pass) r1：只撤本次建的资源 > worktree add 建了一半就失败：本次建的目录与分支照样撤 [29.20ms]
+(pass) r2：真 git——worktree 带本次的锁标记建，回滚只认这个标记 > 正常路径：worktree 落在正式路径、登记在 git 里，锁已解开 [206.86ms]
+(pass) r2：真 git——worktree 带本次的锁标记建，回滚只认这个标记 > 审查员探针：exists 检查之后、add 之前别人在正式路径建了 worktree 并写了未提交文件——原样保留，本次建的分支撤掉 [270.97ms]
+(pass) r2：真 git——worktree 带本次的锁标记建，回滚只认这个标记 > 后面的步骤失败：本次的 worktree 与分支都撤掉 [236.10ms]
+(pass) r1：文件写到一半 > 规格卡写进去后抛错：文件删掉，卡取消，不漏报 [33.63ms]
+(pass) r1：文件写到一半 > 执行者说明覆盖旧文件后抛错：恢复原内容 [35.96ms]
+(pass) r1：文件写到一半 > 规格卡在预检之后被别人写了：spec 步报错，不覆盖也不删 [52.02ms]
+
+tests/shared-ledger-integration-race.test.ts:
+(pass) closing the gate after preflight blocks the write and the first start side effect [29.15ms]
+(pass) gate closes during worktree preparation: no process starts, rollback can cancel the new card [42.72ms]
+(pass) a queued start rechecks durable authority after the queue admits it [19.52ms]
+
+tests/shared-ledger-server-cas.test.ts:
+(pass) different nodes still conflict on feature CAS; snapshot and new-key retry [20.17ms]
+(pass) same title conflicts point to existing feature; no-read conflicts have no snapshot [9.46ms]
+
+tests/shared-ledger-integration-bindings.test.ts:
+(pass) only a local project PM/owner can atomically install a 0600 trusted binding; web bodies cannot [26.30ms]
+
+tests/shared-ledger-server-contract.test.ts:
+(pass) all HTTP business responses conform to frozen C1 parsers [17.43ms]
+
+tests/shared-ledger-integration-api.test.ts:
+(pass) registered shared route authenticates a member at fake center without granting local owner capabilities [41.11ms]
+
+tests/shared-ledger-server-policy.test.ts:
+(pass) bound nodes frozen; execution and arbitrary fields rejected; unbound edits allowed [12.63ms]
+(pass) HTTP size limit, streaming timeout, rate limit and loopback enforcement [35.14ms]
+(pass) HTTP transport accepts signed loopback requests and returns durable receipts [40.66ms]
+
+tests/shared-ledger-server-projection.test.ts:
+(pass) projection home/service gate, watermark gaps, individual revisions and no inferred deletion [18.31ms]
+(pass) failed later task keeps first task, steps and watermark unchanged [10.61ms]
+
+tests/shared-ledger-client-cache.test.ts:
+(pass) cache isolates all identity dimensions, drops late successes and refusals, marks stale [0.23ms]
+(pass) identity switch aborts the old request signal
+
+tests/dag-tools-placement.test.ts:
+(pass) start_node without placement: steps, rollback and products are the pre-W5 ones > normal path [45.22ms]
+(pass) start_node without placement: steps, rollback and products are the pre-W5 ones > workflow-set refused: rolled back exactly as before [37.36ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > local: normal path [33.14ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > local: rollback [49.60ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > auto (default) with no placement wired: normal path [51.78ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > auto (default) with no placement wired: rollback [37.56ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > explicit auto that lands local: normal path [38.44ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > explicit auto that lands local: rollback [35.98ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > auto whose placement read throws: normal path [45.28ms]
+(pass) placement local / auto that lands local: byte-for-byte the pre-W5 start > auto whose placement read throws: rollback [42.03ms]
+(pass) placement peer:<name> > card only: no worktree, no agent, no git; pinned with its repo, restate skipped with an auditable decision, auto, node bound [40.16ms]
+(pass) placement peer:<name> > auto that the pool sends to a peer takes the same peer path [40.61ms]
+(pass) placement peer:<name> > a later step failing rolls the peer card back: back to manual, cancelled, spec it wrote removed, nothing local made [39.03ms]
+(pass) placement peer:<name> > refused before anything is written: placement not wired, the peer fails a constraint, or a bad value [24.93ms]
+(pass) startPlacement against the real rules (before W8) > even an idle peer granting write: auto lands local, a peer pin is refused (remote.roles never holds write before W8) [19.89ms]
+(pass) startPlacement against the real rules (before W8) > once write is allowed (W8) the same rules place it, and a revoked grant refuses the pin [20.73ms]
+
+tests/shared-ledger-gate-window.test.ts:
+(pass) ledger-dag-write: mode switch waits for the admitted write transaction [598.44ms]
+(pass) feature-migrate: mode switch waits for the admitted write transaction [1282.73ms]
+(pass) feature-write: mode switch waits for the admitted write transaction [557.40ms]
+(pass) feature-split: mode switch waits for the admitted write transaction [583.24ms]
+(pass) autostart: mode switch waits for the admitted write transaction [674.36ms]
+(pass) feature-dep: mode switch waits for the admitted write transaction [493.53ms]
+(pass) dag-tools-steps: mode switch waits for the admitted write transaction [418.32ms]
+
+tests/shared-ledger-c6-start.test.ts:
+(pass) task-new carries the feature through manager and rechecks after the outer gate [30.28ms]
+
+tests/shared-ledger-contract.test.ts:
+(pass) frozen V1 fixtures > all request/response fixtures validate with matching digests and versions [0.78ms]
+(pass) frozen V1 fixtures > execution capabilities carry disabled reasons; schema and freshness are explicit
+(pass) frozen V1 fixtures > all errors have stable HTTP status, and conflicts require a coherent authorized snapshot [0.31ms]
+(pass) strict planning write whitelist > unknown commands and extra fields at every nesting level are rejected [0.30ms]
+(pass) strict planning write whitelist > execution operations and scopeChange fail with execution_not_shared [0.06ms]
+(pass) strict planning write whitelist > CAS/request identity fields are mandatory, finite integers and not coerced [0.15ms]
+(pass) strict planning write whitelist > DAG rejects missing refs, cycles, duplicate keys/deps and absolute or parent-relative file paths [0.30ms]
+(pass) strict planning write whitelist > bound node content/deps/estimate/files and bindings remain frozen; free nodes can change [0.11ms]
+(pass) strict planning write whitelist > inconsistent response versions, execution authority and extra response fields fail validation
+(pass) import and read-only projection boundaries > dry-run/commit share manifest identity and reject digest tampering [0.42ms]
+(pass) import and read-only projection boundaries > pending proposals, unknown fields, discontinuous versions and missing bindings reject entire import [0.61ms]
+(pass) import and read-only projection boundaries > projection digest ignores observation time, but includes independent step revisions and source watermarks [0.10ms]
+(pass) import and read-only projection boundaries > projection whitelist rejects raw data, steps beyond watermark and rollback within a batch [0.12ms]
+
+tests/shared-ledger-server-review.test.ts:
+(pass) owner home without projecting service is rejected before import writes; new member plans remain allowed [12.63ms]
+(pass) import requires an active unexpired service credential with the project action [26.39ms]
+(pass) adding an unbound node to a completed imported DAG refreshes status and counts [11.96ms]
+
+tests/dag-tools-prompt-template.test.ts:
+(pass) renderExecPrompt 按模板 > code / security 与不带模板逐字相同，不提截图
+(pass) renderExecPrompt 按模板 > ui = 原说明 + 截图交付一节：≥ 2 张绝对路径、摘要、task-set 整份替换、headless 不用 Playwright MCP [0.11ms]
+(pass) renderExecPrompt 按模板 > 自定义模板（exec-template.md）也覆盖不掉 ui 这一节
+
+tests/dag-tools-template.test.ts:
+(pass) start_node without template: calls, workflow and receipt are the pre-N4 ones > normal [34.09ms]
+(pass) start_node without template: calls, workflow and receipt are the pre-N4 ones > rollback [33.67ms]
+(pass) start_node without template: calls, workflow and receipt are the pre-N4 ones > peer [34.91ms]
+(pass) start_node without template: calls, workflow and receipt are the pre-N4 ones > the default workflow is code v3 / auto / claude / the standing fallback, written once [40.78ms]
+(pass) template code is the default, byte for byte > normal [28.17ms]
+(pass) template code is the default, byte for byte > rollback [34.97ms]
+(pass) template code is the default, byte for byte > peer [57.29ms]
+(pass) ui / security land right from the first write > ui, local card: workflow row is ui v3, no code workflow event ever, receipt notes the gate [42.55ms]
+(pass) ui / security land right from the first write > ui, peer card (fake placement): same workflow, restate skipped after it, receipt notes the gate [54.67ms]
+(pass) ui / security land right from the first write > security, local card: workflow row is security v3, no code workflow event ever, receipt notes the gate [33.19ms]
+(pass) ui / security land right from the first write > security, peer card (fake placement): same workflow, restate skipped after it, receipt notes the gate [43.08ms]
+(pass) a bad template is refused before anything is written > wrong case, unknown, empty, padded, number, object, null: invalid, no manager / git call, no card, worktree or agent [17.67ms]
+(pass) a bad template is refused before anything is written > workflow-set refused on a ui card: card cancelled, agent killed, worktree removed, node left unbound [32.98ms]
+
+tests/shared-ledger-server-auth.test.ts:
+(pass) membership, instance, project, claimed role and revoked credentials cannot broaden authority [11.10ms]
+(pass) valid member import and wrong registered service projection are forbidden [8.49ms]
+
+tests/shared-ledger-auth.test.ts:
+(pass) shared ledger transport > valid member yields central identity, exact grants and own receipt scope [0.07ms]
+(pass) shared ledger transport > signed method, path, body, timestamp, nonce, instance and bearer cannot be substituted [0.91ms]
+(pass) shared ledger transport > no unsigned legacy path, nor reuse of peer or other purpose signatures [0.30ms]
+(pass) shared ledger transport > signature precedes freshness, replay precedes size, size precedes membership [2.47ms]
+(pass) shared ledger transport > past/future timestamp window and durable index across verifier recreation [0.36ms]
+(pass) shared ledger transport > same nonce is rejected even after resigning with changed time; new nonce permits retry [0.32ms]
+(pass) shared ledger transport > missing or failed persistent replay storage cannot permit a write [0.18ms]
+(pass) membership, instance binding and role > absent, revoked, removed, wrong secret and expired credentials fail closed [0.63ms]
+(pass) membership, instance binding and role > credential team and project scopes are exact; local owner:self grants nothing [0.54ms]
+(pass) membership, instance binding and role > forged actor/role/owner never override credentials [0.71ms]
+(pass) membership, instance binding and role > import needs an explicit import grant; projection needs service role and registered home [0.78ms]
+(pass) membership, instance binding and role > GET supports empty body, filtered list, resolved project for detail/receipts, and isolated routes [0.96ms]
+(pass) business idempotency > same requestId/payload gives same digest across nonce, time, and object-key order
+(pass) business idempotency > wire nonce must be inside the signed POST body and match transport nonce [0.23ms]
+
+tests/shared-ledger-integration-split.test.ts:
+(pass) CLI split rejects a shared existing target without moving its bound card or appending either DAG [25.69ms]
+(pass) split rechecks a source gate closed by the backup callback before any transaction writes [17.01ms]
+(pass) split rejects dependency changes involving a third shared feature and rolls back every target [26.03ms]
+(pass) a newly planned target with an installed shared gate is refused before its creation [18.07ms]
+
+tests/shared-ledger-integration-web.test.ts:
+(pass) shared DTO feeds PD2 without fabricating edges, ETA, or completion for stale/missing projections
+(skip) real team entry opens PD2 board with twelve visible features and shared detail
+
+tests/shared-ledger-migration-prepare.test.ts:
+(pass) prepare backs up before gate, preserves the reviewed snapshot and same-batch identity [32.35ms]
+(pass) pending proposal anywhere in the selection blocks the whole group before installing gates [18.02ms]
+(pass) prepare blocks in-flight start without treating a timeout as failure [18.58ms]
+(pass) prepare blocks unknown start without treating a timeout as failure [15.11ms]
+(pass) prepare blocks failed-with-leftovers start without treating a timeout as failure [17.34ms]
+(pass) prepare blocks manual start without treating a timeout as failure [26.34ms]
+(pass) sensitive fields and missing references cannot produce a package, and retain the installed gate [34.44ms]
+(pass) group preflight runs under the ledger writer lock and failure publishes no partial mode [33.49ms]
+
+tests/shared-ledger-c6-fixture.test.ts:
+
+tests/shared-ledger-client-scrub.test.ts:
+(pass) sensitive originals and undeclared fields refuse without echoing values [1.96ms]
+(pass) short identity names use case-insensitive word boundaries [0.23ms]
+(pass) relative repository globs remain valid and empty identities fail closed [0.36ms]
+
+tests/dag-tools-template-gates.test.ts:
+(pass) ui v3: restate like code v3, merge still behind the owner screenshot gate > restate record releases build with no PM; review pass opens the owner ask and waits on it [58.41ms]
+(pass) ui v3: restate like code v3, merge still behind the owner screenshot gate > no screenshots and no digest: the pass escalates ui_missing_screenshots instead of moving to merge [48.68ms]
+(pass) ui v3: restate like code v3, merge still behind the owner screenshot gate > restate-hold stops a ui v3 card until PM releases it [32.74ms]
+(pass) ui v3: restate like code v3, merge still behind the owner screenshot gate > merge-begin still refuses a ui v3 card outright [13.84ms]
+(pass) security v3: review stays local and cross-family > a usable peer in the pool still gets no security review: a local reviewer session is made instead [0.16ms]
+(pass) security v3: review stays local and cross-family > a peer-sourced or same-family reviewer is refused as reviewer_independence; a local codex session reviews [0.31ms]
+(pass) security v3: review stays local and cross-family > restate like code v3: the executor's record releases build with no PM approval [24.03ms]
+(pass) v2 is untouched > templateFor(t, 2) is the same object with the same nodes; every v3 is the latest and differs only at approve_restate
+(pass) v2 is untouched > ui / security v2 in restate still wait for PM; v3 of the same moves on [0.39ms]
+(pass) v2 is untouched > ui / security v2 cards: restate-hold refused, a restate record alone waits for PM [50.91ms]
+
+tests/dag-tools-lanes.test.ts:
+(pass) 并行车道 > 两个文件不重叠的节点：两条车道，都能现在开工 [0.16ms]
+(pass) 并行车道 > 文件重叠的两个节点不会被算成可并行：后一个排在前一个后面，同一条车道 [0.11ms]
+(pass) 并行车道 > 和进行中的节点、图外正占着文件的卡重叠也要排队；满足了的节点不再占文件 [0.10ms]
+(pass) 并行车道 > 依赖没满足的等依赖；没写 fileGlobs 的旧节点不猜能并行 [0.05ms]
+(pass) 并行车道 > 重叠判定和调度器同一口径：前缀包含才算重叠，不合法的资源名不算 [0.02ms]
+(pass) 节点参数 > 缺 fileGlobs、空数组、非字符串都拒 [0.08ms]
+(pass) 节点参数 > rewrite 没有改动、cancel 没原因都拒 [0.05ms]
+(pass) rewrite_dag 拼下一版 > remove 删不了进行中的节点（要走 cancel 带原因），也删不了已完成的 [0.09ms]
+(pass) rewrite_dag 拼下一版 > 拆一个计划节点：remove + add，绑的卡原样带入 [0.09ms]
+(pass) rewrite_dag 拼下一版 > cancel 进行中的节点带原因；依赖指向被移出节点的要先 update [0.07ms]
+(pass) rewrite_dag 拼下一版 > plan_feature 覆盖已有 DAG：同 key 沿用绑的卡；漏掉进行中的节点要走 cancel [0.04ms]
+
+tests/shared-ledger-server-fixture.test.ts:
+
+tests/shared-ledger-client-proxy.test.ts:
+(pass) proxy ignores actor/role and keeps authenticated person and service identities separate [3.54ms]
+(pass) persistent planning gate survives reads and corrupt state refuses writes [5.91ms]
+
+tests/shared-ledger-server-import.test.ts:
+(pass) import dry-run is read-only; commit idempotent, digest/collision/pending/ref failures are atomic [16.51ms]
+(pass) late duplicate title rolls back entire group, source-only imports forbid planning commands [15.17ms]
+(pass) failure during second feature projection rolls back first feature, mappings and events [10.66ms]
+
+tests/shared-ledger-c6-control.test.ts:
+(pass) staged imports have persistent verified receipts, freeze members, and activate once [20.83ms]
+(pass) trial revocation is atomic, durable, cannot activate or replay the revoked batch [20.98ms]
+(pass) verification reads stored rows; drift, cross-project control and changed digest fail closed [28.11ms]
+
+tests/shared-ledger-c6-members.test.ts:
+C6 center temporary port 54839; peer A / peer B have independent credential directories
+C6 V1 1-3 and recovery: shared import, five-second polling, one CAS winner, retained/rebased draft, denials PASS
+C6 cleanup: poll timers stopped; loopback server stopped; both temporary state directories removed
+(pass) two isolated members: import visibility, next poll, CAS draft rebase, locked execution and permissions over HTTP [5297.00ms]
+
+tests/shared-ledger-c6-migration.test.ts:
+(pass) migration commit verifies before routing, restart recovers the same batch, activation preserves gates [60.75ms]
+(pass) lost commit/activation responses and offline lookup retain the gate and recover by receipt first [61.61ms]
+(pass) trial revoke reopens the local gate only after a confirmed durable central revocation [90.20ms]
+(pass) a center rollback or missing previously confirmed receipt cannot reopen or silently recommit [49.07ms]
+
+1 tests skipped:
+(skip) real team entry opens PD2 board with twelve visible features and shared detail
+
+ 198 pass
+ 1 skip
+ 0 fail
+ 1314 expect() calls
+Ran 199 tests across 39 files. [15.34s]
