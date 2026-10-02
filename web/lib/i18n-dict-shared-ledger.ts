@@ -7,6 +7,7 @@ const words: Record<string, string> = {
   '进行中': 'Active', '已完成': 'Done', '已阻塞': 'Blocked', '返回': 'Back', '编辑规划': 'Edit plan',
   '节点': 'Node', '依赖': 'Dependencies', '文件范围': 'File globs', '估时': 'Estimate', '改图原因': 'Rewrite reason',
   '添加节点': 'Add node', '删除节点': 'Remove node', '提交新版本': 'Submit new version', '已绑卡，节点锁定': 'Bound task; node locked',
+  '逐条处理冲突': 'Resolve each conflict', '用我的': 'Use mine', '用最新': 'Use latest',
   '草稿': 'Draft', '最新图': 'Latest graph', '规划已被他人更新': 'Someone updated the plan',
   '重读后编辑': 'Reload and edit', '放弃草稿': 'Discard draft', '全文仅在主场': 'Full text at home only',
   '开卡': 'Create task', '绑卡': 'Bind task', '阶段': 'Stage', '审批': 'Approval',

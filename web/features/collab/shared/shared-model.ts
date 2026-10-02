@@ -1,12 +1,15 @@
 import type { Command, Feature, FeatureDetail, PlanNode } from '../../../lib/api/shared-ledger';
+import type { NodeConflict } from './shared-rebase';
+export { rebaseDraft, resolveNodeConflict } from './shared-rebase';
 import type { BoardNode, FeatureCard } from '../dag/dag-types';
 export const stale = (f: Feature, now: number) => f.projection !== null && now - f.projection.observedAt > 30_000;
 export function progress(f: Feature, now: number): number {
   return stale(f, now) ? 0 : Math.max(0, Math.min(f.counts.completed, f.counts.total - f.counts.missing));
 }
-export interface Draft { base: FeatureDetail; nodes: PlanNode[]; reason: string; latest: FeatureDetail | null }
-export const makeDraft = (base: FeatureDetail): Draft => ({ base, nodes: structuredClone(base.dag.nodes), reason: '', latest: null });
+export interface Draft { base: FeatureDetail; nodes: PlanNode[]; reason: string; latest: FeatureDetail | null; conflicts: NodeConflict[] }
+export const makeDraft = (base: FeatureDetail): Draft => ({ base, nodes: structuredClone(base.dag.nodes), reason: '', latest: null, conflicts: [] });
 export function rewrite(d: Draft, requestId: string = crypto.randomUUID()): Command {
+  if (d.conflicts.length) throw new Error('unresolved_node_conflicts');
   if (d.latest) throw new Error('conflict_requires_reread');
   const bound = new Set(d.base.dag.bindings.map(b => b.nodeKey));
   for (const n of d.base.dag.nodes.filter(n => bound.has(n.key))) {
@@ -30,13 +33,6 @@ export function rewrite(d: Draft, requestId: string = crypto.randomUUID()): Comm
   const f = d.base.feature;
   return { type: d.base.dag.version ? 'dag.rewrite' : 'dag.init', requestId, projectId: f.projectId, featureId: f.id,
     expectedRev: f.rev, baseVersion: d.base.dag.version, nodes: d.nodes, reason: d.reason };
-}
-/** Re-reading deliberately retains editable work; newly bound nodes must come from the latest graph. */
-export function rebaseDraft(d: Draft, latest: FeatureDetail): Draft {
-  const bound = new Set(latest.dag.bindings.map(b => b.nodeKey));
-  return { base: latest, latest: null, reason: d.reason,
-    nodes: [...d.nodes.map(n => bound.has(n.key) ? latest.dag.nodes.find(x => x.key === n.key)! : n),
-      ...latest.dag.nodes.filter(n => bound.has(n.key) && !d.nodes.some(x => x.key === n.key))] };
 }
 export function boardFeature(detail: FeatureDetail, now: number): FeatureCard {
   const f = detail.feature, expired = stale(f, now);

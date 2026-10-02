@@ -20,8 +20,9 @@ Staleness still updates when the server watermark remains unchanged.
 
 A rewrite preserves bound nodes exactly. A 409 preserves the draft and its base,
 displays the latest graph, and requires explicit rereading before another submit.
-Rereading preserves editable draft nodes and adopts newly bound nodes from the
-latest snapshot. A network/response failure keeps the request ID for receipt lookup;
+Rereading starts from the latest graph and replays local changes against the old
+base. Teammate additions remain, bound nodes require the latest choice, and
+concurrent edits/deletions require explicit per-node resolution before submission. A network/response failure keeps the request ID for receipt lookup;
 no command is automatically resubmitted. Unknown receipts retain the draft.
 
 Graph rendering and diff panels receive adapted props from the existing `dag/`

@@ -12,12 +12,17 @@ function FixtureHarness() {
   const base = structuredClone(fixtureDetail);
   const latest = { ...base, serverSeq: 41, feature: { ...base.feature, rev: 8, version: 3, updatedBy: 'person-b' },
     dag: { ...base.dag, version: 3, nodes: base.dag.nodes.map(n => n.key === 'C4' ? { ...n, oneLine: '另一位成员更新的规划' } : n) } };
+  if (mode === 'bound') {
+    latest.dag.nodes.push({ key: 'OTHER', oneLine: '同事新增的未绑节点', deps: ['C1'], fileGlobs: ['other/**'], estimate: '1h' });
+    latest.dag.bindings.push({ nodeKey: 'C4', taskId: 'task-c4' });
+  }
   const [detail, setDetail] = useState<FeatureDetail | null>(mode === 'list' ? null : base);
   const [creating, setCreating] = useState(mode === 'new');
   const [draft, setDraft] = useState<Draft | null>(() => {
-    if (mode !== 'conflict') return null;
+    if (mode !== 'conflict' && mode !== 'resolved' && mode !== 'bound') return null;
     const draft = makeDraft(base); draft.reason = '完善手机上的团队协作视图';
-    draft.nodes[1]!.oneLine = '我的草稿：团队总表与冲突恢复'; return { ...draft, latest };
+    draft.nodes[1]!.oneLine = '我的草稿：团队总表与冲突恢复';
+    return mode === 'resolved' || mode === 'bound' ? rebaseDraft(draft, latest) : { ...draft, latest };
   });
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);

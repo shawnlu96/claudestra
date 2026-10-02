@@ -1,7 +1,7 @@
 /** Standalone browser-safe fixture; deliberately contains missing and stale execution observations. */
 import { ApiError } from '../../../lib/api/client';
 import type { FeatureDetail, FeatureList, Identity, Transport } from '../../../lib/api/shared-ledger';
-export const fixtureIdentity: Identity = { center: 'team-center', team: 'team-a', person: 'person-a', project: 'claudestra', machine: 'Tokyo' };
+export const fixtureIdentity: Identity = { center: 'team-center', team: 'team-a', person: 'person-a', project: 'claudestra', machine: 'machine-a' };
 export const fixtureNow = 1_790_900_000_000;
 export const fixtureDetail: FeatureDetail = {
   schemaVersion: 1, teamId: 'team-a', serverSeq: 40,
@@ -10,24 +10,24 @@ export const fixtureDetail: FeatureDetail = {
     'task.new': { enabled: false }, 'dag.bind': { enabled: false }, stage: { enabled: false }, approval: { enabled: false },
   },
   feature: { id: 'feature-shared', projectId: 'claudestra', title: '团队共享台账', description: '同一份规划，三台机器协作；执行仍由主场推进。',
-    rev: 7, version: 2, authorityMode: 'planning', homeInstanceId: 'Tokyo', executorInstanceIds: ['Tokyo', 'Sekai', 'Hede'],
+    rev: 7, version: 2, authorityMode: 'planning', homeInstanceId: 'machine-a', executorInstanceIds: ['machine-a', 'machine-b', 'machine-c'],
     status: 'active', counts: { total: 3, completed: 1, blocked: 1, missing: 1 }, updatedBy: 'person-a', updatedAt: fixtureNow,
-    projection: { sourceInstanceId: 'Tokyo', sourceSeq: 30, observedAt: fixtureNow, receivedAt: fixtureNow } },
+    projection: { sourceInstanceId: 'machine-a', sourceSeq: 30, observedAt: fixtureNow, receivedAt: fixtureNow } },
   dag: { version: 2, nodes: [
     { key: 'C1', oneLine: '冻结共享契约', deps: [], fileGlobs: ['src/lib/shared-ledger-contract*'], estimate: '30m' },
     { key: 'C4', oneLine: '团队总表与冲突草稿', deps: ['C1'], fileGlobs: ['web/features/collab/shared/**'], estimate: '2h' },
     { key: 'C5', oneLine: '网页入口与代理接入', deps: ['C4'], fileGlobs: ['web/features/collab/collab-entry.tsx'], estimate: '1h' },
   ], bindings: [{ nodeKey: 'C1', taskId: 'task-c1' }, { nodeKey: 'C5', taskId: 'task-c5' }] },
   tasks: [{ taskId: 'task-c1', sourceTaskId: 'i28-C1', sourceRev: 3, sourceSeq: 30, stage: 'done', assigneeCode: 'worker-a',
-    executorInstanceId: 'Tokyo', pr: 381, head: null, deps: [], specSummary: '共享契约与字段白名单', specDigest: null, fullText: 'home_only',
+    executorInstanceId: 'machine-a', pr: 381, head: null, deps: [], specSummary: '共享契约与字段白名单', specDigest: null, fullText: 'home_only',
     steps: [], asks: [] }],
 };
 export const fixtureList: FeatureList = { schemaVersion: 1, teamId: 'team-a', serverSeq: 40, capabilities: fixtureDetail.capabilities,
   features: [fixtureDetail.feature,
-    { ...fixtureDetail.feature, id: 'feature-capacity', title: '跨机闲置 Worker 池', homeInstanceId: 'Sekai', status: 'blocked',
+    { ...fixtureDetail.feature, id: 'feature-capacity', title: '跨机闲置 Worker 池', homeInstanceId: 'machine-b', status: 'blocked',
       counts: { total: 8, completed: 3, blocked: 2, missing: 0 } },
     { ...fixtureDetail.feature, id: 'feature-stale', title: '执行镜像与恢复', status: 'done',
-      projection: { sourceInstanceId: 'Hede', sourceSeq: 15, observedAt: fixtureNow - 60_000, receivedAt: fixtureNow } },
+      projection: { sourceInstanceId: 'machine-c', sourceSeq: 15, observedAt: fixtureNow - 60_000, receivedAt: fixtureNow } },
   ] };
 export function fixtureTransport(conflict = false): Transport {
   let detail = structuredClone(fixtureDetail);

@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
 import { SharedLedgerSession, identityKey } from '../web/lib/api/shared-ledger';
 import type { FeatureDetail, FeatureList, Transport, Identity, Command, Result, Receipt } from '../web/lib/api/shared-ledger';
-import { makeDraft, rebaseDraft, rewrite, stale, progress, boardFeature } from '../web/features/collab/shared/shared-model';
+import { makeDraft, rebaseDraft, resolveNodeConflict, rewrite, stale, progress, boardFeature } from '../web/features/collab/shared/shared-model';
 import { SHARED_LEDGER_FEATURE_FIXTURE, SHARED_LEDGER_LIST_FIXTURE } from '../src/lib/shared-ledger-contract-fixtures';
+import { fixtureDetail } from '../web/features/collab/shared/shared-fixture';
 import type { SharedLedgerCommand } from '../src/lib/shared-ledger-contract';
 // Assignment checks the duplicated browser DTO against the frozen wire contract, without a web/src import.
 const detail: FeatureDetail = SHARED_LEDGER_FEATURE_FIXTURE;
@@ -21,7 +22,6 @@ test('409 retains editable draft; reread uses fresh CAS and preserves newly boun
   const base = editable(), draft = makeDraft(base);
   draft.reason = 'Update plan'; draft.nodes[1]!.oneLine = 'My draft';
   const latest = structuredClone(base); latest.feature.rev++; latest.dag.version++;
-  latest.dag.nodes[1]!.oneLine = 'Someone else';
   const conflict = { ...draft, latest };
   expect(conflict.nodes[1]!.oneLine).toBe('My draft');
   expect(() => rewrite(conflict)).toThrow('conflict_requires_reread');
@@ -30,7 +30,10 @@ test('409 retains editable draft; reread uses fresh CAS and preserves newly boun
   expect(wire.type).toBe('dag.rewrite');
   if ('nodes' in wire) { expect(wire.expectedRev).toBe(latest.feature.rev); expect(wire.nodes[1]!.oneLine).toBe('My draft'); }
   latest.dag.bindings.push({ nodeKey: 'NEW', taskId: 'new-bound' });
-  expect(rebaseDraft(conflict, latest).nodes.find(n => n.key === 'NEW')!.oneLine).toBe('Someone else');
+  const boundConflict = rebaseDraft(conflict, latest);
+  expect(boundConflict.conflicts[0]!.mine!.oneLine).toBe('My draft');
+  expect(() => rewrite(boundConflict)).toThrow('unresolved_node_conflicts');
+  expect(resolveNodeConflict(boundConflict, 'NEW', 'latest').nodes.find(n => n.key === 'NEW')!.oneLine).toBe('New plan');
 });
 test('bound nodes cannot change or disappear; malformed dependencies cannot submit', () => {
   const draft = makeDraft(editable()); draft.reason = 'Rewrite';
@@ -97,4 +100,54 @@ test('late mutation and receipt responses are also fenced after identity changes
   finishCommand(await transport().command(command, new AbortController().signal));
   finishReceipt({ status: 'unknown', requestId: 'r' });
   expect(await pendingCommand).toBeUndefined(); expect(await pendingReceipt).toBeUndefined(); session.close();
+});
+
+test('He probe: C1/C4/C5 + OTHER; teammate unbound addition survives and newly bound edit needs latest choice', () => {
+  const base = structuredClone(fixtureDetail), draft = makeDraft(base); draft.reason = 'Probe';
+  draft.nodes.find(n => n.key === 'C4')!.oneLine = 'my edit';
+  const latest = structuredClone(base); latest.feature.rev++; latest.dag.version++;
+  latest.dag.nodes.push({ key: 'OTHER', oneLine: 'Teammate addition', deps: ['C1'], fileGlobs: ['other/**'], estimate: '1h' });
+  latest.dag.bindings.push({ nodeKey: 'C4', taskId: 'task-c4' });
+  const reread = rebaseDraft({ ...draft, latest }, latest);
+  expect(reread.nodes.map(n => n.key)).toEqual(['C1', 'C4', 'C5', 'OTHER']);
+  expect(reread.conflicts).toHaveLength(1); expect(reread.conflicts[0]!.mine!.oneLine).toBe('my edit');
+  expect(reread.conflicts[0]!.locked).toBe(true);
+  expect(() => rewrite(reread)).toThrow('unresolved_node_conflicts');
+  expect(() => resolveNodeConflict(reread, 'C4', 'mine')).toThrow('bound_node_locked');
+  const resolved = resolveNodeConflict(reread, 'C4', 'latest');
+  const command = rewrite(resolved, 'he-probe');
+  if (!('nodes' in command)) throw new Error('wrong_command');
+  expect(command.nodes.map(n => n.key)).toEqual(['C1', 'C4', 'C5', 'OTHER']);
+  expect(command.nodes.find(n => n.key === 'C4')!.oneLine).toBe('团队总表与冲突草稿');
+  expect(command.expectedRev).toBe(latest.feature.rev); expect(command.baseVersion).toBe(latest.dag.version);
+});
+test('replay keeps teammate additions, replays my uncontested edit, and resolves concurrent unbound edits explicitly', () => {
+  const base = structuredClone(fixtureDetail), draft = makeDraft(base); draft.reason = 'Replay';
+  draft.nodes[1]!.oneLine = 'My update';
+  const latest = structuredClone(base); latest.feature.rev++; latest.dag.version++;
+  latest.dag.nodes.push({ key: 'OTHER', oneLine: 'New node', deps: [], fileGlobs: ['other/**'], estimate: '' });
+  const uncontested = rebaseDraft(draft, latest);
+  expect(uncontested.conflicts).toEqual([]); expect(uncontested.nodes[1]!.oneLine).toBe('My update');
+  expect('nodes' in rewrite(uncontested)).toBe(true);
+  latest.dag.nodes[1]!.oneLine = 'Their update';
+  const contested = rebaseDraft(draft, latest);
+  expect(contested.conflicts).toHaveLength(1); expect(() => rewrite(contested)).toThrow('unresolved_node_conflicts');
+  expect(resolveNodeConflict(contested, 'C4', 'mine').nodes[1]!.oneLine).toBe('My update');
+  expect(resolveNodeConflict(contested, 'C4', 'latest').nodes[1]!.oneLine).toBe('Their update');
+  expect(rebaseDraft(contested, latest).conflicts[0]!.mine!.oneLine).toBe('My update');
+});
+test('my deletion versus latest edit/binding is an explicit conflict; untouched latest deletion is retained', () => {
+  const base = editable(), draft = makeDraft(base); draft.reason = 'Delete'; draft.nodes.pop();
+  const latest = structuredClone(base); latest.feature.rev++; latest.dag.version++;
+  expect(rebaseDraft(draft, latest).nodes.some(n => n.key === 'NEW')).toBe(false);
+  latest.dag.nodes[1]!.estimate = '2h';
+  const contested = rebaseDraft(draft, latest);
+  expect(contested.conflicts[0]!.mine).toBeNull(); expect(contested.conflicts[0]!.latest!.estimate).toBe('2h');
+  expect(() => rewrite(contested)).toThrow('unresolved_node_conflicts');
+  expect(resolveNodeConflict(contested, 'NEW', 'mine').nodes.some(n => n.key === 'NEW')).toBe(false);
+  expect(resolveNodeConflict(contested, 'NEW', 'latest').nodes.some(n => n.key === 'NEW')).toBe(true);
+  latest.dag.bindings.push({ nodeKey: 'NEW', taskId: 'bound-new' });
+  expect(rebaseDraft(draft, latest).conflicts[0]!.locked).toBe(true);
+  const untouched = makeDraft(base); untouched.reason = 'Keep current'; latest.dag.nodes.pop(); latest.dag.bindings.pop();
+  expect(rebaseDraft(untouched, latest).nodes.some(n => n.key === 'NEW')).toBe(false);
 });

@@ -56,3 +56,9 @@
   .conflict { padding: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { .loading { animation: none; } }
+
+.nodeConflict { padding: 12px 0; border-top: 1px solid var(--line); }
+.preview { margin: 0 0 16px; overflow-wrap: anywhere; }
+.preview > div { margin-bottom: 10px; }
+.preview dt { color: var(--muted); font-size: 11px; }
+.preview dd { margin: 4px 0 0; color: var(--text); }

@@ -3,6 +3,7 @@ import { useState } from 'react';
 import type { Command } from '../../../lib/api/shared-ledger';
 import type { Draft } from './shared-model';
 import type { Tr } from '../collab-model';
+import { NodeConflicts } from './shared-conflicts';
 import { Icon } from '../collab-icons';
 import s from './shared.module.css';
 export function NewFeature({ project, home, busy, tr, onSubmit, onCancel }: {
@@ -26,11 +27,13 @@ export function PlanEditor({ draft, busy, tr, onChange, onSubmit, onCancel }: {
   draft: Draft; busy: boolean; tr: Tr; onChange: (draft: Draft) => void; onSubmit: () => void; onCancel: () => void;
 }) {
   const locked = new Set(draft.base.dag.bindings.map(b => b.nodeKey));
+  const unresolved = new Set(draft.conflicts.map(c => c.key));
   const patch = (index: number, field: string, value: string | string[]) => onChange({ ...draft,
     nodes: draft.nodes.map((n, i) => i === index ? { ...n, [field]: value } : n) });
   return <form className={s.form} onSubmit={e => { e.preventDefault(); onSubmit(); }}>
     <h2>{tr('编辑规划')} · v{draft.base.dag.version}</h2>
-    {draft.nodes.map((n, i) => <fieldset key={i} disabled={locked.has(n.key) || busy || !!draft.latest} className={s.nodeForm}>
+    <NodeConflicts draft={draft} busy={busy || !!draft.latest} tr={tr} onChange={onChange} />
+    {draft.nodes.map((n, i) => <fieldset key={i} disabled={locked.has(n.key) || unresolved.has(n.key) || busy || !!draft.latest} className={s.nodeForm}>
       <legend>{n.key} {locked.has(n.key) && <span><Icon name="shieldCheck" /> {tr('已绑卡，节点锁定')}</span>}</legend>
       <label>{tr('节点')}<input required aria-label={`${tr('节点')} ${i + 1}`} value={n.key} onChange={e => patch(i, 'key', e.target.value)} /></label>
       <label>{tr('标题')}<input required value={n.oneLine} onChange={e => patch(i, 'oneLine', e.target.value)} /></label>
@@ -44,7 +47,7 @@ export function PlanEditor({ draft, busy, tr, onChange, onSubmit, onCancel }: {
       <Icon name="plus" /> {tr('添加节点')}</button>
     <label>{tr('改图原因')}<textarea required disabled={busy || !!draft.latest} value={draft.reason}
       onChange={e => onChange({ ...draft, reason: e.target.value })} /></label>
-    <div className={s.actions}><button disabled={busy || !!draft.latest}>{tr('提交新版本')}</button>
+    <div className={s.actions}><button disabled={busy || !!draft.latest || draft.conflicts.length > 0}>{tr('提交新版本')}</button>
       <button type="button" onClick={onCancel}>{tr('取消')}</button></div>
   </form>;
 }

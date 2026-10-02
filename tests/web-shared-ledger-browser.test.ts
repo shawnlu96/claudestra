@@ -50,6 +50,9 @@ test.skipIf(!out)('shared ledger: 390/1400 light/dark states and actual enabled/
         if (view === 'conflict') {
           expect(await page.getByRole('button', { name: '提交新版本' }).isDisabled()).toBe(true);
           await page.getByRole('button', { name: '重读后编辑' }).click();
+          expect(await page.getByRole('button', { name: '提交新版本' }).isDisabled()).toBe(true);
+          await page.screenshot({ path: resolve(out, `after-${width}-${theme}-node-conflict.png`), fullPage: true });
+          await page.getByRole('button', { name: '用我的 C4', exact: true }).click();
           expect(await page.evaluate<number>(`Array.from(document.querySelectorAll('input')).filter(i => i.value === '我的草稿：团队总表与冲突恢复').length`)).toBe(1);
           await page.getByRole('button', { name: '提交新版本' }).click();
           await page.getByTestId('submitted').waitFor();
@@ -57,6 +60,14 @@ test.skipIf(!out)('shared ledger: 390/1400 light/dark states and actual enabled/
           expect(await page.getByRole('heading', { name: '规划已被他人更新' }).count()).toBe(0);
         }
       }
+      await screenshot(page, `${server.url}?view=bound&theme=${theme}`, resolve(out, `after-${width}-${theme}-bound-conflict.png`));
+      expect(await page.getByRole('button', { name: '用我的 C4', exact: true }).isDisabled()).toBe(true);
+      expect(await page.getByRole('button', { name: '提交新版本' }).isDisabled()).toBe(true);
+      await page.getByRole('button', { name: '用最新 C4', exact: true }).click();
+      expect(await page.getByRole('button', { name: '提交新版本' }).isEnabled()).toBe(true);
+      await page.getByRole('button', { name: '提交新版本' }).click();
+      await page.getByTestId('submitted').waitFor();
+      expect(await page.getByRole('button', { name: /OTHER 同事新增的未绑节点/ }).isVisible()).toBe(true);
       await page.goto(`${server.url}?view=live&theme=${theme}`);
       await page.getByRole('button', { name: /团队共享台账/ }).click();
       await page.getByRole('button', { name: '编辑规划' }).click();
@@ -67,6 +78,8 @@ test.skipIf(!out)('shared ledger: 390/1400 light/dark states and actual enabled/
       await page.getByRole('heading', { name: '规划已被他人更新' }).waitFor();
       expect(await title.inputValue()).toBe('保留我的实际提交草稿');
       await page.getByRole('button', { name: '重读后编辑' }).click();
+      expect(await page.getByRole('button', { name: '提交新版本' }).isDisabled()).toBe(true);
+      await page.getByRole('button', { name: '用我的 C4', exact: true }).click();
       await page.getByRole('button', { name: '提交新版本' }).click();
       await page.getByRole('button', { name: '编辑规划' }).waitFor();
       expect(await page.getByRole('heading', { name: '规划已被他人更新' }).count()).toBe(0);
