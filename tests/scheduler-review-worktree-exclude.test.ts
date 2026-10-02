@@ -130,7 +130,8 @@ describe("i28-S2c review worktree: scratch folders are excluded in the shared gi
     expect(existsSync(join(stray, "report.md"))).toBe(true);
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain(`${stray}：有未提交改动：?? report.md`);
-    expect(notices[0]).not.toContain(".review-");
+    const status = notices[0]!.split("有未提交改动：")[1] ?? "";
+    expect(status).toBe("?? report.md"); // the scratch folders are not in porcelain (the notice's absolute paths may contain .review-tmp)
     expect(getIntent(db, retireIntentId("T1"))?.status).toBe("done");
     expect(gitCalls.flat().some((a) => /^(--force|-f)$/.test(a))).toBe(false);
   });
