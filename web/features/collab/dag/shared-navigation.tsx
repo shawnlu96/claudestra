@@ -45,6 +45,6 @@ export function SharedEntry({ projectId }: { projectId: string }) {
 }
 export function SharedCollabContent({ project, fallback }: { project: string; fallback: ReactNode }) {
   const identity = sharedIdentity(project);
-  return identity ? <div className="h-full w-full overflow-auto"><button type="button" onClick={closeCollab}>返回会话</button>
+  return identity ? <div className="h-full w-full overflow-auto"><button type="button" className="btn btn-ghost h-10 min-h-10 px-3" onClick={closeCollab}>返回会话</button>
     <SharedLedger key={project} identity={identity} /></div> : fallback;
 }
