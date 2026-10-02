@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { workBoardSpecReady } from '../src/bridge/local-api/work-board.js';
 import type { Database } from 'bun:sqlite';
 import { openLedger, closeLedger } from '../src/lib/ledger-store.js';
 import { createTask } from '../src/lib/ledger-write.js';
@@ -54,4 +58,18 @@ test('opened cards rely on task.spec without consulting the injection', () => {
   const b = board(() => { throw new Error('opened cards must not consult specReady'); });
   expect(b.todo.ready.map(r => r.taskId)).toEqual(['has-spec']);
   expect(b.todo.blocked[0]).toMatchObject({ taskId: 'no-spec', reason: '缺规格' });
+});
+
+test('a directory at the formal specification path remains missing; only files are ready', () => {
+  const ledger = mkdtempSync(join(tmpdir(), 'i28-wb3-spec-'));
+  const tasks = join(ledger, 'docs', 'tasks');
+  mkdirSync(tasks, { recursive: true });
+  mkdirSync(join(tasks, 'i28-DIR.md'));
+  writeFileSync(join(tasks, 'i28-FILE.md'), '# Specification');
+  feature([{ key: 'DIR' }, { key: 'FILE' }, { key: 'ABSENT' }]);
+  const b = board(id => workBoardSpecReady(join(tasks, `${id}.md`)));
+  expect(b.todo.ready.map(r => r.nodeKey)).toEqual(['FILE']);
+  expect(b.todo.blocked.map(r => ({ key: r.nodeKey, reason: r.reason }))).toEqual([
+    { key: 'DIR', reason: '缺规格' }, { key: 'ABSENT', reason: '缺规格' },
+  ]);
 });
