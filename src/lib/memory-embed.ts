@@ -107,8 +107,12 @@ async function within<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>): P
   }
 }
 
+/**
+ * 所有请求一律 redirect:"error"：remote 只按配置 URL 判过一次，跟随 307/308 会把 home / 未脱敏正文原样转发到别的主机。
+ * 不能等请求完成再看 response.url——那时正文已经发出去了。
+ */
 async function postJson(f: typeof fetch, url: string, body: unknown, signal: AbortSignal, headers: Record<string, string> = {}): Promise<unknown> {
-  const r = await f(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal });
+  const r = await f(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal, redirect: "error" });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -133,16 +137,19 @@ function apiEmbedder(c: Extract<EmbedConfig, { provider: "openai" | "voyage" }>,
   };
 }
 
-/** Ollama 在不在、模型拉没拉：GET /api/tags，名字等于 model 或 `model:<tag>` 都算 */
+/**
+ * Ollama 在不在、模型拉没拉：GET /api/tags。无 tag 的配置只认裸名或 `:latest`（Ollama 把无 tag 名解析成 latest，
+ * 装了别的 tag 也不会自动用）；写了 tag 的配置精确匹配
+ */
 async function ollamaHas(c: Extract<EmbedConfig, { provider: "ollama" }>, f: typeof fetch, ms: number): Promise<boolean> {
   const tags = await within(ms, async (signal) => {
-    const r = await f(`${c.url}/api/tags`, { signal });
+    const r = await f(`${c.url}/api/tags`, { signal, redirect: "error" });
     return r.ok ? ((await r.json()) as { models?: unknown } | null) : null;
   });
   // 网络 JSON 只做过类型断言：models 不是数组（{"models":{}} 之类）当该提供方不可用，继续试下一个
   const models = tags && typeof tags === "object" && Array.isArray(tags.models) ? (tags.models as { name?: unknown }[]) : [];
   const want = c.model.includes(":") ? [c.model] : [c.model, `${c.model}:latest`];
-  return models.some((m) => typeof m?.name === "string" && (want.includes(m.name) || (!c.model.includes(":") && m.name.startsWith(`${c.model}:`))));
+  return models.some((m) => typeof m?.name === "string" && want.includes(m.name));
 }
 
 /** 按配置顺序取第一个可用的嵌入模型；一个都没有返回 null（语义路关闭，不是错误） */

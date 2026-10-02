@@ -186,3 +186,68 @@ describe("远端闸：只发 team 可见、已脱敏的文本", () => {
     expect(textForEmbedder({ remote: true }, { text: secret, visibility: "home" })).toBeNull();
   });
 });
+
+describe("第 2 轮审查回归", () => {
+  test("redirect-privacy：本机端点 307/308 到别处 → 不跟随，正文不出去，结果 null；探活同样不跟随", async () => {
+    const got: string[] = [];
+    const sink = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: async (req) => {
+        got.push(`${req.method} ${await req.text()}`);
+        return Response.json({ embeddings: [[1, 0]], models: [{ name: "embeddinggemma" }] });
+      },
+    });
+    for (const status of [307, 308]) {
+      const local = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (req) => new URL(req.url).pathname === "/api/tags"
+          ? Response.json({ models: [{ name: "embeddinggemma" }] })
+          : new Response(null, { status, headers: { location: `http://127.0.0.1:${sink.port}/api/embed` } }),
+      });
+      try {
+        const e = await pickEmbedder([{ ...OLLAMA, url: `http://127.0.0.1:${local.port}` }]);
+        expect(e?.remote).toBe(false);
+        expect(await embedTexts(e, [{ text: "private home contents", visibility: "home" }])).toEqual([null]);
+      } finally {
+        local.stop(true);
+      }
+      // 探活本身被重定向 → 当不可用
+      const tagsRedirect = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status, headers: { location: `http://127.0.0.1:${sink.port}/api/tags` } }) });
+      try {
+        expect(await pickEmbedder([{ ...OLLAMA, url: `http://127.0.0.1:${tagsRedirect.port}` }])).toBeNull();
+      } finally {
+        tagsRedirect.stop(true);
+      }
+    }
+    sink.stop(true);
+    expect(got).toEqual([]);
+  });
+
+  test("redirect-privacy：探活、Ollama 嵌入、远端 API 的每个请求都带 redirect:'error'", async () => {
+    const calls: Call[] = [];
+    const routes = { "/api/tags": { models: [{ name: "embeddinggemma" }] }, "/api/embed": { embeddings: [[1, 0]] }, voyageai: { data: [{ index: 0, embedding: [1, 0] }] } };
+    const f = fakeFetch(routes, calls);
+    await embedTexts(await pickEmbedder([OLLAMA], { fetch: f }), [{ text: "a", visibility: "team" }]);
+    await embedTexts(await pickEmbedder([VOYAGE], { fetch: f, env: { VK: "k" } }), [{ text: "a", visibility: "team" }]);
+    expect(calls.length).toBe(3);
+    for (const c of calls) expect(c.init?.redirect).toBe("error");
+  });
+
+  test("ollama-tag：无 tag 配置只认裸名或 :latest；只装了别的 tag → 跳过，退到下一个可用模型", async () => {
+    const posted: string[] = [];
+    const f = (async (u: unknown, init?: RequestInit) => {
+      if (String(u).endsWith("/api/tags")) return Response.json({ models: [{ name: "embeddinggemma:custom" }, { name: "bge-m3:latest" }] });
+      const model = JSON.parse(String(init?.body)).model;
+      posted.push(model);
+      return model === "bge-m3" ? Response.json({ embeddings: [[1, 0]] }) : new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    const e = await pickEmbedder(parseEmbedConfig(undefined), { fetch: f });
+    expect(e?.model).toBe("ollama:bge-m3");
+    expect((await embedTexts(e, [{ text: "a", visibility: "team" }]))[0]).toBeInstanceOf(Float32Array);
+    expect(posted).toEqual(["bge-m3"]);
+    // 显式写了 tag 的配置照旧精确匹配
+    expect((await pickEmbedder([{ ...OLLAMA, model: "embeddinggemma:custom" }], { fetch: f }))?.model).toBe("ollama:embeddinggemma:custom");
+  });
+});
