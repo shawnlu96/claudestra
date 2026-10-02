@@ -96,3 +96,10 @@ test("opened nodes keep their card numbers through rewrite and split (regression
   expect(await preflightStart(env, { featureId: "ab12-third", key: "C5" })).toEqual({ ok: true, already: { taskId: "i28-C5", key: "C5" } });
   expect(await preflightStart(env, { featureId: "ab12-shared-ledger", key: "C6" })).toEqual({ ok: true, already: { taskId: "Custom.ID", key: "C6" } });
 });
+
+test("dag-init pins the inferred prefix into each node", () => {
+  createFeature(db, ctx, { project: "p", slug: "fresh", title: "fresh" });
+  initDag(db, ctx, { id: "ab12-fresh", rev: 1, nodes: [node("F1"), node("F2")] });
+  expect(current("fresh").map((n) => n.cardSlug)).toEqual(["fresh", "fresh"]);
+  expect(taskIdOf("fresh", "F1")).toBe("fresh-F1");
+});

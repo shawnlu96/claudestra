@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { answerAsk } from "../src/lib/ledger-asks.js";
 import { cardNames } from "../src/lib/ledger-card-names.js";
 import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
-import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
+import { assignFeature, createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { approveDag, bindNode, rewriteDag } from "../src/lib/ledger-dag-write.js";
 import { applyFeatureSplit } from "../src/lib/ledger-feature-split.js";
 import { planFeatureSplit } from "../src/lib/ledger-feature-split-plan.js";
@@ -97,6 +97,18 @@ test("splits without a same-prefix key collision are accepted", () => {
   expect(planFeatureSplit(db, "ab12-delta", { targets: [{ slug: "epsilon", title: "epsilon", nodes: ["D1"] }], deps: [] }).rejected).toEqual([]);
   // alpha 已有 i28-C5；搬进去的 C7 别的兄弟都没有
   expect(planFeatureSplit(db, "ab12-i28", { targets: [{ id: "alpha", title: "alpha", nodes: ["C7"] }], deps: [] }).rejected).toEqual([]);
+});
+
+test("split counts cards assigned to a co-written target but not in its DAG as taken", () => {
+  rewrite("i28", ["C1", "C2"]);
+  createTask(db, ctx, { project: "p", id: "i28-C1", title: "C1", kind: "code" });
+  assignFeature(db, ctx, { id: "ab12-alpha", taskIds: ["i28-C1"] });
+  const map = { targets: [{ id: "alpha", title: "alpha", nodes: ["C2"] }, { slug: "gamma", title: "gamma", nodes: ["C1"] }], deps: [] };
+  expect(planFeatureSplit(db, "ab12-i28", map).rejected.join("\n")).toMatch(/ab12-gamma.*ab12-alpha.*i28-C1/);
+  expect(() => applyFeatureSplit(db, ctx, "ab12-i28", map)).toThrow(/ab12-alpha/);
+  expect(getFeature(db, "ab12-gamma")).toBeNull();
+  // 不撞号的同一次拆分照常通过
+  expect(planFeatureSplit(db, "ab12-i28", { targets: [{ id: "alpha", title: "alpha", nodes: ["C1"] }, { slug: "gamma", title: "gamma", nodes: ["C2"] }], deps: [] }).rejected).toEqual([]);
 });
 
 test("a pending proposal is voided at approval if a sibling took the key meanwhile", () => {

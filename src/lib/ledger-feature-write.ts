@@ -207,9 +207,9 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
       throw new LedgerError("conflict", `feature ${cur.id} 已有 v${v}：dag-init 只建初版，改图用 dag-rewrite`, { currentVersion: cur.currentVersion });
     }
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
-    const nodes = buildNodes(db, cur, input.nodes);
-    // 只做兄弟校验，不固化：全版没前缀时推断就是 feature id，之后的 rewrite / split 写入时才会固化
-    pinNodes(cardContext(db, cur), nodes, () => true);
+    // 兄弟校验 + 给未开卡节点固化前缀（初版推断就是 feature id）；已开卡的卡号由 taskId 定，不动
+    const built = buildNodes(db, cur, input.nodes), pinned = pinNodes(cardContext(db, cur), built, () => true);
+    const nodes = built.map((n, i) => (n.taskId ? n : pinned[i]));
     const reasonText = input.reasonText === undefined ? "" : String(input.reasonText);
     const now = ctx.now ?? Date.now();
     db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes) VALUES (?, 1, ?, ?, ?, NULL, ?, ?)")

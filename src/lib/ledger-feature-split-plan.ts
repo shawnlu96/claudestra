@@ -103,10 +103,18 @@ function splitNodes(db: Database, source: Feature, groups: SplitGroup[], rejecte
 
 /** 搬进目标的节点按写入后的样子做兄弟校验：同前缀下别的 feature（含这次拆分的其他组）已有同名 key 就拒 */
 function siblingCheck(db: Database, source: Feature, groups: SplitGroup[], owners: Map<string, SplitGroup>, rejected: string[]): void {
-  const base = cardContext(db, source, groups.map((g) => g.id));
+  const ids = groups.map((g) => g.id), base = cardContext(db, source, ids);
+  // 被排除的 feature 名下不在任何组 DAG 里的卡（assignFeature 挂进来的）留在原 feature，照样占号
+  const inDag = new Set(groups.flatMap((g) => g.nodes.flatMap((n) => (n.taskId ? [n.taskId] : []))));
+  const loose = (db.query(`SELECT id, featureId FROM tasks WHERE featureId IN (${ids.map(() => "?").join(",")})`).all(...ids) as { id: string; featureId: string }[])
+    .filter((t) => !inDag.has(t.id));
   for (const g of groups.slice(1)) {
     const taken = new Map(base.taken);
-    for (const o of groups) if (o !== g) for (const n of o.nodes) taken.set(`${n.cardSlug}-${n.key}`, o.id);
+    for (const t of loose) if (t.featureId !== g.id) taken.set(t.id, t.featureId);
+    for (const o of groups) if (o !== g) for (const n of o.nodes) {
+      taken.set(`${n.cardSlug}-${n.key}`, o.id);
+      if (n.taskId) taken.set(n.taskId, o.id);
+    }
     try {
       pinNodes({ ...base, taken }, g.nodes, (n) => owners.get(n.key) === g);
     } catch (e) {
