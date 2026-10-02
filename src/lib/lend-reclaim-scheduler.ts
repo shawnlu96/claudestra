@@ -14,6 +14,7 @@ import { isWriteStep } from "./lend-git.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
+import { updateTask } from "./fix-strategy-task-write.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
@@ -71,11 +72,18 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
     if (live) return "收回前仍有在跑的写单，等待取消";
     const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}`;
     endWriteLease(db, task.id, reason, ctx.now ?? Date.now());
+    if (current.task.assigneeKind === "peer_agent" && current.task.assignee?.startsWith(`${held.fp}/`)) {
+      const patch = { agent: held.prevAssigneeKind === "agent" ? held.prevAssignee : null,
+        assigneeKind: held.prevAssigneeKind, assignee: held.prevAssignee };
+      const rev = updateTask(db, ctx, current.task, patch);
+      db.query("UPDATE scheduler_intents SET taskRev = ?, updatedAt = ? WHERE id = ? AND taskRev = ?")
+        .run(rev, ctx.now ?? Date.now(), id, current.task.rev);
+    }
     db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE taskId = ? AND role = 'author' AND transport = 'peer'")
       .run(id, ctx.now ?? Date.now(), task.id);
     insertEvent(db, { ...ctx, dedupKey: `scheduler:${id}:reclaim` }, { project: task.project, target: task.id,
       kind: "scheduler", text: reason, data: { op: "fix_strategy_reclaim", intentId: id, round: task.round, specRev: task.specRev,
-        head: task.headSHA, reason, peer: lease.peer, family: current.strategy.family } }, true);
+        head: task.headSHA, reason, peer: lease.peer, family: current.strategy.family, taskRev: mustTask(db, task.id).rev } }, true);
     return null;
   });
 }

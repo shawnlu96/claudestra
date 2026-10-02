@@ -30,10 +30,10 @@ export function hello(f: ReturnType<typeof autoFixture>, peer: string, proto = 3
 }
 
 export function peerAuthor(f: ReturnType<typeof autoFixture>, family: "claude" | "codex" = "codex") {
+  holdWriteLease(f.db, f.task(), { peer: "Peer", fp: FP, repo: "o/r", branch: "feat/T1" }, f.tickDeps.now());
   f.db.run("UPDATE tasks SET assigneeKind = 'peer_agent', assignee = ?, agent = NULL WHERE id = 'T1'", [`${FP}/old-worker`]);
   f.db.run("UPDATE scheduler_sessions SET transport = 'peer', agent = 'old-worker@Peer', sessionId = 'old-peer-session', family = ? WHERE taskId = 'T1' AND role = 'author'", [family]);
   f.db.run("UPDATE task_workflows SET authorFamily = ? WHERE taskId = 'T1'", [family]);
-  holdWriteLease(f.db, f.task(), { peer: "Peer", fp: FP, repo: "o/r", branch: "feat/T1" }, f.tickDeps.now());
 }
 
 export function runningOrder(f: ReturnType<typeof autoFixture>, status = "claimed") {

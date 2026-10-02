@@ -84,6 +84,8 @@ test("Codex author cannot swap to Claude when neither machine lends that family;
     const result = await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
     expect(result).toMatchObject({ step: "waiting" }); expect(result.detail).toContain("claude");
     expect(remoteOrder(f.db, intent.id)).toBeNull(); expect(p.effects).toEqual([]); expect(p.notices.length).toBe(1);
+    expect(f.task()).toMatchObject({ assigneeKind: "agent", assignee: "agent-task-one", agent: "agent-task-one" });
+    expect(getIntent(f.db, intent.id)?.taskRev).toBe(f.task().rev);
     expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "fix_strategy_reclaim")).toBe(true);
   } finally { f.close(); }
 });
