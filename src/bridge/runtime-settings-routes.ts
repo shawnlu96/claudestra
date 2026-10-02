@@ -17,8 +17,8 @@ import { handleRuntimeUpdate, RUNTIME_UPDATE_PATH } from "./runtime-update.js";
 import { acpSetConfig } from "./acp-link.js";
 import { isAcpChannel, isConfiguredAcpChannel } from "./acp-state.js";
 import { isSafeModelArg } from "../lib/claude-settings-runtime.js";
-import { agentWindowsOrNull } from "../lib/agent-windows.js";
-import { tmuxSendLine, windowHasChildProcess, windowTarget } from "../lib/tmux-helper.js";
+import { agentLiveness } from "../lib/agent-liveness.js";
+import { tmuxSendLine, windowTarget } from "../lib/tmux-helper.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
 
@@ -136,15 +136,8 @@ async function codexModels(principal: Principal): Promise<Response> {
 const setClaudeArgs = (canonical: string, model: string, effort: string) =>
   ["set-claude", canonical, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : [])];
 
-/**
- * agent 在不在跑：窗口在、且窗口里有进程（宿主）。窗口在但 shell 没有子进程 = 宿主已退出，launcher 会按 registry 重起，算没在跑。
- * 查不清（tmux 出错 / ps 失败）按在跑算：宁可 409 让人稍后重试，也不把改动说成「下次启动生效」。
- */
-async function agentRunning(agent: string): Promise<boolean> {
-  const windows = await agentWindowsOrNull();
-  if (windows && !windows.some((w) => w.name === agent)) return false;
-  return (await windowHasChildProcess(windowTarget(agent))) !== false;
-}
+/** 宿主没连上时用：查不清（null）按在跑算——宁可 409 让人稍后重试，也不把改动说成「下次启动生效」（lib/agent-liveness.ts） */
+const agentRunning = async (agent: string): Promise<boolean> => (await agentLiveness(agent)) !== false;
 
 /**
  * transport=acp 的 Codex / Pi：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
