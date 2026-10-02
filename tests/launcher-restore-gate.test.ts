@@ -171,6 +171,64 @@ describe("launcher restore gate", () => {
     expect(await make().select([agent])).toEqual([]);
   });
 
+  test.each(["pi", "codex"])("%s sustained active after manual restart unlocks the same generation", async (runtime) => {
+    const agent = { ...dead(), runtime };
+    for (let i = 0; i < 3; i++) await make().restart(agent, failed);
+    expect(await make().select([agent])).toEqual([]);
+    const active = { ...agent, status: "active", idle: true };
+    await make().select([active]);
+    expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(3);
+    await make().select([active]);
+    const entry = JSON.parse(readFileSync(path, "utf8")).agents[agent.name];
+    expect(entry.failures).toBe(0);
+    expect(entry.failureAlert).toBe(false);
+    expect(entry.lastFailureAlert).toBeUndefined();
+    expect(await make().select([agent])).toEqual([agent]);
+    for (let i = 0; i < 3; i++) await make().restart(agent, failed);
+    expect(await make().select([agent])).toEqual([]);
+    expect(alerts).toHaveLength(4); // Each failure cycle gets its own first-failure and stop alerts.
+  });
+
+  test.each(["pi", "codex"])("%s transient active between failures cannot bypass the limit", async (runtime) => {
+    const agent = { ...dead(), runtime };
+    let runs = 0;
+    for (let round = 0; round < 5; round++) {
+      for (const a of await make().select([agent])) {
+        await make().restart(a, async () => { runs++; return failed(); });
+      }
+      await make().select([{ ...agent, status: "active", idle: true }]);
+    }
+    expect(runs).toBe(3);
+    expect(await make().select([agent])).toEqual([]);
+    expect(alerts).toHaveLength(2);
+  });
+
+  test.each(["creating", "unknown"])("%s interrupts hook runtime active observations", async (status) => {
+    const agent = { ...dead(), runtime: "pi" };
+    for (let i = 0; i < 3; i++) await make().restart(agent, failed);
+    const active = { ...agent, status: "active", idle: true };
+    await make().select([active]);
+    await make().select([{ ...agent, status }]);
+    await make().select([active]);
+    expect(await make().select([agent])).toEqual([]);
+  });
+
+  test.each(["pi", "codex"])("%s sustained active clears an unfinished restart reservation", async (runtime) => {
+    const agent = { ...dead(), runtime };
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<Awaited<ReturnType<typeof success>>>();
+    const pending = make().restart(agent, () => { started.resolve(); return finish.promise; });
+    await started.promise;
+    try {
+      expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(1);
+      const active = { ...agent, status: "active", idle: true };
+      await make().select([active]);
+      await make().select([active]);
+      expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(0);
+      expect(await make().select([agent])).toEqual([agent]);
+    } finally { finish.resolve(await success()); await pending; }
+  });
+
   test.each(["dead", "active"])("a repaired cwd re-arms its missing alert while %s across launcher restarts", async (status) => {
     const agent = { ...dead(), cwd: join(root, "repaired") };
     expect(await make().select([agent])).toEqual([]);

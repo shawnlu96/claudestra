@@ -23,6 +23,7 @@ interface Entry {
   missingAlert: boolean;
   failureAlert: boolean;
   lastFailureAlert?: number;
+  activeRuntime?: "pi" | "codex";
 }
 interface State { version: 1; agents: Record<string, Entry> }
 interface Options {
@@ -39,7 +40,21 @@ function validState(value: unknown): boolean {
     && Object.values(s.agents).every((e) => e && typeof e.generation === "string"
       && Number.isInteger(e.failures) && e.failures >= 0 && e.failures <= 3
       && typeof e.missingAlert === "boolean" && typeof e.failureAlert === "boolean"
+      && (e.activeRuntime === undefined || e.activeRuntime === "pi" || e.activeRuntime === "codex")
       && (e.lastFailureAlert === undefined || (Number.isFinite(e.lastFailureAlert) && e.lastFailureAlert >= 0)));
+}
+
+function observedRecovery(a: Agent, e: Entry): boolean {
+  // Hook runtimes have synthetic idle. Require consecutive active observations instead;
+  // persist the first so a launcher restart does not prevent a manual recovery from unlocking.
+  if (e.failures > 0 && a.status === "active" && (a.runtime === "pi" || a.runtime === "codex")) {
+    if (e.activeRuntime !== a.runtime) { e.activeRuntime = a.runtime; return false; }
+    delete e.activeRuntime;
+    return true;
+  }
+  delete e.activeRuntime;
+  // A timed-out Claude launch can leave an active process; only its real idle proves readiness.
+  return a.status === "active" && a.runtime === "claude-code" && a.idle === true;
 }
 
 function directoryExists(cwd: string, log: (text: string) => void): boolean {
@@ -140,19 +155,15 @@ export class LauncherRestoreGate {
       const names = new Set(agents.map((a) => a.name));
       for (const name of Object.keys(state.agents)) if (!names.has(name)) delete state.agents[name];
       return agents.filter((a) => {
-        // An active process may be a timed-out launch. Claude's idle prompt proves readiness;
-        // hook-based runtimes report idle unconditionally, so that is not evidence for them.
+        if (a.status !== "dead" && !Object.hasOwn(state.agents, a.name)) return false;
+        const e = this.entry(state, a);
+        if (observedRecovery(a, e)) {
+          e.failures = 0; e.failureAlert = false; delete e.lastFailureAlert;
+        }
         if (a.status !== "dead") {
-          if (Object.hasOwn(state.agents, a.name)) {
-            const e = this.entry(state, a);
-            if (e.missingAlert && directoryExists(a.cwd || process.env.HOME || "/", this.log)) e.missingAlert = false;
-            if (a.status === "active" && a.runtime === "claude-code" && a.idle === true) {
-              e.failures = 0; e.failureAlert = false; delete e.lastFailureAlert;
-            }
-          }
+          if (e.missingAlert && directoryExists(a.cwd || process.env.HOME || "/", this.log)) e.missingAlert = false;
           return false;
         }
-        const e = this.entry(state, a);
         if (e.failures >= 3) { this.stopped(a, e, alerts); return false; }
         // Match manager restart's fallback for legacy records with no cwd.
         const cwd = a.cwd || process.env.HOME || "/";
@@ -178,6 +189,7 @@ export class LauncherRestoreGate {
       const allowed = await this.transaction((state) => {
         const e = this.entry(state, a);
         if (e.failures >= 3) return false;
+        delete e.activeRuntime;
         e.failures++;
         return true;
       });
