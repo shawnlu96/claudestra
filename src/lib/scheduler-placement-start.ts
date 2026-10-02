@@ -53,7 +53,7 @@ function locksFree(db: Database, project: string, globs: readonly string[]): boo
 }
 
 export async function startPlacement(db: Database, io: StartPlacementIO,
-  q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}` }): Promise<StartPlacement> {
+  q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}` }, finishFirst = false): Promise<StartPlacement> {
   const pin = q.want === "auto" ? null : q.want;
   const policy = io.policy(q.project);
   let borrow: readonly BorrowEntry[] = [];
@@ -72,7 +72,8 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     remote: policy?.remote ?? null, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents).map(peerFacts),
     repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: locksFree(db, q.project, q.fileGlobs),
   };
-  const placed = policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");
+  // Only automatic admission opts in; the PM's manual start_node placement keeps its explicit choice.
+  const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");
   if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason };
   if (placed.kind === "wait") return { where: "refused", reason: placed.reason };
   if ((!policy?.remote?.agents && policy?.remote?.localPriority === "off") || !localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) {

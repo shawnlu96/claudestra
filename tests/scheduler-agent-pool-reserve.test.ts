@@ -97,8 +97,11 @@ test("runtime and start preflight use remaining families after reservation", asy
     const policy = { ...remote, agents: { claude: 1, codex: 1 } };
     expect(poolAuthorRuntime("p", policy.agents, f.db.filename)).toBe("codex");
     const io = { policy: () => ({ remote: policy, maxWorkers: 2 }), borrow: async () => [], originRepo: async () => "o/r", now: () => 1000 };
-    expect(await startPlacement(f.db, io, { project: "p", repoDir: f.dir, fileGlobs: ["src/lib/new.ts"], want: "auto" }))
+    const q = { project: "p", repoDir: f.dir, fileGlobs: ["src/lib/new.ts"], want: "auto" as const };
+    expect(await startPlacement(f.db, io, q, true))
       .toMatchObject({ where: "local", reason: expect.stringContaining("codex") });
+    expect(await startPlacement(f.db, io, q))
+      .toMatchObject({ where: "local", reason: expect.stringContaining("claude") });
   } finally { f.close(); }
 });
 
