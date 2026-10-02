@@ -24,13 +24,17 @@ export function downgradeBrief(d: Pick<Downgrade, "items">): string {
 
 const PATH_CHAR = /[\p{L}\p{N}_@.~/-]/u;
 /**
- * probePaths drops a token's leading `/` or `~/`, so ask the probe itself: the path must appear somewhere as written relative
- * (start of text, after a non-path character, or after `./`). `/package.json` or `~/repo/src/a.ts` never maps onto main's file.
+ * probePaths drops a token's leading `/` or `~/`, so ask the probe itself: the path must appear somewhere as a whole token
+ * written relative (start of text, after a non-path character, or after `./`; ending at a non-path character or a
+ * sentence-final `.`). `/package.json` or `~/repo/src/a.ts` never maps onto main's file, nor does `package.json.bak`.
  */
 function writtenRelative(probe: string, p: string): boolean {
+  const at = (k: number) => probe[k] ?? " ";
   for (let i = probe.indexOf(p); i >= 0; i = probe.indexOf(p, i + 1)) {
-    const at = (k: number) => probe[k] ?? " ";
-    if (!PATH_CHAR.test(at(i - 1)) || (at(i - 1) === "/" && at(i - 2) === "." && !PATH_CHAR.test(at(i - 3)))) return true;
+    const left = !PATH_CHAR.test(at(i - 1)) || (at(i - 1) === "/" && at(i - 2) === "." && !PATH_CHAR.test(at(i - 3)));
+    const j = i + p.length;
+    const right = !PATH_CHAR.test(at(j)) || (at(j) === "." && !PATH_CHAR.test(at(j + 1)));
+    if (left && right) return true;
   }
   return false;
 }

@@ -38,6 +38,16 @@ describe("follow-up fileGlobs name only real repo paths", () => {
       .toEqual(["package.json", "src/lib/review-converge.ts"]);
   });
 
+  test("a relative spelling only counts when the whole token matches: package.json.bak is no evidence for /package.json", () => {
+    const exists = (p: string) => ["src/lib/review-converge.ts", "package.json"].includes(p);
+    expect(followUpGlobs([{ probe: "/package.json package.json.bak" }], ["src/own.ts"], mainHasPath())).toEqual(["src/own.ts"]);
+    expect(followUpGlobs([{ probe: "/src/lib/review-converge.ts src/lib/review-converge.ts.bak" }], ["src/own.ts"], exists)).toEqual(["src/own.ts"]);
+    expect(followUpGlobs([{ probe: "/package.json src/lib/review-converge.ts/x" }], ["src/own.ts"], exists)).toEqual(["src/own.ts"]);
+    // sentence-ending punctuation and :line suffixes still close the token
+    expect(followUpGlobs([{ probe: "/package.json 见 package.json. 还有 src/lib/review-converge.ts:40" }], ["src/own.ts"], exists))
+      .toEqual(["package.json", "src/lib/review-converge.ts"]);
+  });
+
   test("main's tree is the reference: an untracked working-tree file does not count", () => {
     const dir = mkdtempSync(join(tmpdir(), "converge-main-"));
     try {
