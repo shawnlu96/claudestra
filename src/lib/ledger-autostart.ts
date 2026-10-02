@@ -10,12 +10,13 @@ import { autostartPlacementGate } from "./scheduler-slot-hold-autostart.js";
 import type { Database } from "bun:sqlite";
 import { claimDedup, claimOwnsCard, claimSettled, getClaim, settleDedup, type AutostartClaim } from "./ledger-autostart-grant.js";
 import type { WriteCtx } from "./ledger-checks.js";
+import { cardNames } from "./ledger-card-names.js";
 import { getFeature, type Feature } from "./ledger-feature.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, getItem, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import {
-  cardNames, currentViews, ledgerGate, projectPm, readSwitch, TEMPLATE_VERSION, type AutostartSwitch, type AutostartTemplate, type ServiceFacts,
+  currentViews, ledgerGate, projectPm, readSwitch, TEMPLATE_VERSION, type AutostartSwitch, type AutostartTemplate, type ServiceFacts,
 } from "./scheduler-autostart.js";
 
 function mustFeature(db: Database, id: string): Feature {

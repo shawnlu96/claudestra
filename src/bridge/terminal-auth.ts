@@ -24,3 +24,12 @@ export function terminalIoDenied(p: Principal, sess: { tokenId: string; agent: s
   if (!terminalAllowedFor(p, sess.agent)) return "terminal access no longer granted for this agent";
   return null;
 }
+
+/** 宿主 shell（web-shell.ts）的终端会话按这个名字记 agent：每次 IO 重验时同样落到 master 的授予上 */
+export const SHELL_AUTH_AGENT = "master";
+
+/**
+ * 网页开宿主 shell：它不属于任何 agent、起始目录可选任一登记项目，所以按 scope 最严的 master 判——
+ * 要 master 在 scope 内 + 终端授予（owner 设备默认有）；只授了部分 agent 终端的 guest、`*` token、peer 都没有。
+ */
+export const shellAllowed = (p: Principal): boolean => terminalAllowedFor(p, SHELL_AUTH_AGENT);

@@ -15,6 +15,7 @@ import { chunkInputs, type InputSplit } from "./order-wire-chunks.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import type { bounceWork } from "./scheduler-merge-conflict.js";
+import { lendFixEnv } from "./lend-fix-env.js";
 
 export interface WriteLease {
   taskId: string; project: string; peer: string; fp: string; branch: string; repo: string;
@@ -27,7 +28,7 @@ export interface WriteOffer {
   /** 基线分支名（开工单从它切）与它此刻在远端的 head（开工单的 head）；修复单两者都不用 */
   base: string;
   baseSha: string | null;
-  /** 修复单：上一轮审查报告原文（本机报告文件的内容） */
+  /** 修复单：普通修复用上一轮报告原文；merge bounce 用本机核定的环境说明 */
   report: string | null;
 }
 
@@ -101,7 +102,7 @@ export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: Inpu
   const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...(o.step === "fix" && !bounce && o.report ? [["上一轮审查报告原文", o.report] as const] : [])]);
   // head 只放在 head 字段里：外发闸扫全部自由文本，别处再写一遍 40 位十六进制会被当成疑似密钥整单拒掉
   const start = o.step === "write" ? `从基线 ${o.base} 切出分支 ${o.branch}（起点是标题里的 head）` : `在分支 ${o.branch} 上接着改（起点是标题里的 head）`;
-  return orderWireOf({
+  return lendFixEnv(orderWireOf({
     taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId,
     inputs: [...inputs, ...(bounce?.inputs ?? []), standardAnswers("author")],
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
@@ -109,5 +110,5 @@ export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: Inpu
       ...(bounce?.acceptance ?? [o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"])],
     writeBack: "提交后用 deliver（M2 前是 lend submit）交一行摘要和自查，单号见标题",
     findings: o.step === "fix" && !bounce ? o.findings : [],
-  }, { repo: o.repo, pr: o.pr });
+  }, { repo: o.repo, pr: o.pr }), bounce, o.report);
 }

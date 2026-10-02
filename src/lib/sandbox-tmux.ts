@@ -1,5 +1,5 @@
 /**
- * 沙箱里的 tmux 闸（lib/tmux-helper.ts 与 bridge/web-terminal.ts 调）。非沙箱进程全是空操作。
+ * 沙箱里的 tmux 闸（lib/tmux-helper.ts 与 bridge/term-fit.ts 调）。非沙箱进程全是空操作。
  *
  * - socket：`tmux -S <sock>` 会跟着软链走。沙箱 agent 一条 `ln -sf /tmp/claude-orchestrator/master.sock
  *   <root>/run/master.sock`，之后沙箱对自己 tmux 的任何操作（包括 down 的 kill-server）就落到生产上。

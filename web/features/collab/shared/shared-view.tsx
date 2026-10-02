@@ -1,7 +1,8 @@
 'use client';
 import type { Capabilities, Command, FeatureDetail, FeatureList, Identity } from '../../../lib/api/shared-ledger';
 import type { Draft } from './shared-model';
-import { progress, stale } from './shared-model';
+import { stale } from './shared-model';
+import { SharedProduct } from '../dag/shared-product';
 import { sharedLedgerTr } from '../../../lib/i18n-dict-shared-ledger';
 import { SharedGraph } from './shared-graph';
 import { NewFeature, PlanEditor } from './shared-forms';
@@ -26,7 +27,6 @@ export interface SharedViewProps {
 export function SharedLedgerView(p: SharedViewProps) {
   const tr = sharedLedgerTr(p.language ?? 'zh'), d = p.detail;
   const loading = p.busy || (!p.list && !p.error);
-  const statuses = { planned: '待规划', active: '进行中', done: '已完成', blocked: '已阻塞' };
   return <main className={`${tokens.tokens} ${s.root}`} aria-busy={loading}>
     <header className={s.header}><div><small>{tr('团队规划')} · {p.identity.team}</small><h1>{tr('全部 feature')}</h1></div>
       <button type="button" disabled={p.busy || !p.list?.capabilities['feature.new']?.enabled}
@@ -59,20 +59,6 @@ export function SharedLedgerView(p: SharedViewProps) {
         onCancel={() => p.onDraft(null)} /> : <SharedGraph detail={d} previous={p.previous} now={p.now} tr={tr} />}
       {d.tasks.map(task => <article key={task.taskId} className={s.task}><b>{task.taskId}</b> · {task.stage}
         <p>{task.specSummary}</p><small>{tr('全文仅在主场')}</small></article>)}
-    </> : <section className={s.list} aria-label={tr('全部 feature')}>
-      <div className={s.tableHead}>{['项目', '标题', '状态', '完成 / 总数', '阻塞', '主场', '执行机器', '最近更新', '缺失', '过期'].map(x => <span key={x}>{tr(x)}</span>)}</div>
-      {p.list?.features.map(f =>
-        <button type="button" className={s.row} key={f.id} onClick={() => p.onOpen(f.id)}>
-          <span data-label={tr('项目')}>{f.projectId}</span><strong>{f.title}</strong>
-          <span data-label={tr('状态')}>{tr((stale(f, p.now) || f.counts.missing > 0) && f.status === 'done' ? '过期' : statuses[f.status])}</span>
-          <span data-label={tr('完成 / 总数')}>{progress(f, p.now)} / {f.counts.total}</span>
-          <span data-label={tr('阻塞')}>{f.counts.blocked}</span><span data-label={tr('主场')}>{f.homeInstanceId}</span>
-          <span data-label={tr('执行机器')}>{f.executorInstanceIds.join(', ') || '—'}</span>
-          <time data-label={tr('最近更新')} dateTime={new Date(f.updatedAt).toISOString()}>{new Date(f.updatedAt).toLocaleString()}</time>
-          <span data-label={tr('缺失')}>{f.counts.missing}</span>
-          <span className={stale(f, p.now) ? s.warn : ''} data-label={tr('过期')}>{tr(stale(f, p.now) ? '过期' : '最新')}</span>
-        </button>)}
-      {p.list && !p.list.features.length && <p>{tr('暂无 feature')}</p>}
-    </section>}
+    </> : <SharedProduct list={p.list} now={p.now} onOpen={p.onOpen} tr={tr} />}
   </main>;
 }

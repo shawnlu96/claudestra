@@ -334,7 +334,7 @@ async function checkBetaUpdates(autoOn: boolean) {
     return;
   }
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
-  const busyNow = await busyAgentWindows(MASTER_WINDOW);
+  const busyNow = await busyAgentWindows(MASTER_WINDOW, remote.slice(0, 7));
   if (busyNow.length) {
     console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),在忙: ${busyNow.join(", ")},下次再试`);
     return;
@@ -430,7 +430,7 @@ async function checkForUpdates() {
   }
 
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
-  const busyNow = await busyAgentWindows(MASTER_WINDOW);
+  const busyNow = await busyAgentWindows(MASTER_WINDOW, release.tag);
   if (busyNow.length) {
     console.log(`🆙 Claudestra ${release.tag} 有新版本，但在忙: ${busyNow.join(", ")}，下次再试`);
     return;
