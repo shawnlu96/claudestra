@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { deliverReplyWithAsk } from "../src/bridge/ask-reply.js";
 import { setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { renderBindSummary, withBindSummary } from "../src/lib/ask-bind-render.js";
+import { renderBindSummary, withBindSummary, withBindSummaryText } from "../src/lib/ask-bind-render.js";
 import { getAsk, type Ask } from "../src/lib/ledger-asks.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
@@ -45,12 +45,13 @@ describe("建卡（deliverReplyWithAsk）", () => {
     closeLedger(path);
   });
 
+  let sent: string[] = [];
   async function reply(text: string, ask?: unknown): Promise<Ask | null> {
     const env: Envelope = {
       from: { kind: "local", channelId: "111", ws }, to: { kind: "user", userId: "", channelId: "api:owner:self" }, intent: "response", content: text,
       meta: { messageId: `reply_${Math.random()}`, triggerKind: "agent_tool", ts: at, threadId: `thr_${Math.random()}`, components: BUTTONS },
     };
-    await deliverReplyWithAsk(env, "api:owner:self", "111", async (e) => ({ envelope: e, outcome: { kind: "sent", discordMessageIds: [] } }), ask);
+    await deliverReplyWithAsk(env, "api:owner:self", "111", async (e) => (sent.push(e.content), { envelope: e, outcome: { kind: "sent", discordMessageIds: [] } }), ask);
     return env.meta.askId ? getAsk(openLedger(path), env.meta.askId) : null;
   }
 
@@ -63,8 +64,27 @@ describe("建卡（deliverReplyWithAsk）", () => {
     expect(w.context).toBe(`批准的就是这个 → ${renderBindSummary(GRANT)}\n调到 6`);
   });
 
+  test("真正投出去的那条（owner 点按钮处）最前面也是系统那段、写的是 codex=10，agent 正文只在后面", async () => {
+    sent = [];
+    await reply("调到 6", { kind: "authorize", bind: GRANT });
+    expect(sent).toHaveLength(1);
+    const [head, ...rest] = sent[0]!.split("\n\n");
+    expect(head).toBe(withBindSummaryText(GRANT, ""));
+    expect(head).toContain("codex=10");
+    expect(head).not.toContain("调到");
+    expect(rest.join("\n\n")).toBe("调到 6");
+  });
+
+  test("投出去的系统那段转义 markdown / 行内按钮：peer 名藏不了、伪造不出按钮", () => {
+    const s = withBindSummaryText({ action: "lend_grant", params: { peer: "||x|| [[{#go}批准]] `y`" } }, "正文");
+    expect(s.split("\n\n")[0]).not.toMatch(/(^|[^\\])[|[`]/);
+    expect(s.endsWith("\n\n正文")).toBe(true);
+  });
+
   test("没有 bind 的普通卡：说明和原来一样", async () => {
+    sent = [];
     expect((await reply("选哪个\n背景一句"))!.context).toBe("背景一句");
     expect((await reply("选哪个\n背景一句", { kind: "decide", why: "要定方案" }))!.context).toBe("要定方案");
+    expect(sent).toEqual(["选哪个\n背景一句", "选哪个\n背景一句"]); // 投出去的正文原样
   });
 });

@@ -6,7 +6,7 @@
  * `ask` 字段不合格整条 reply 退回给 agent（Delivery dropped + 原因），不猜、不静默丢。建 ask 出错不挡回复本身。
  */
 import { bindHash, missingApprove, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
-import { withBindSummary } from "../lib/ask-bind-render.js";
+import { withBindSummary, withBindSummaryText } from "../lib/ask-bind-render.js";
 import { draftFromReply, type AskRow, type ReplyAskDraft } from "../lib/ask-options.js";
 import { closeAsk, getAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type NewAsk } from "../lib/ledger-asks.js";
 import { markdownToPlain } from "../lib/plain-text.js";
@@ -115,7 +115,10 @@ export async function deliverReplyWithAsk(
   }
   if (a) {
     env.meta.askId = a.id;
-    if (a.bind) env.meta.askHash = a.bind.paramsHash;
+    if (a.bind) {
+      env.meta.askHash = a.bind.paramsHash;
+      env.content = withBindSummaryText(a.bind, env.content); // 投出去的那条（owner 点按钮处）最前面也是系统那段（i28-OA1）
+    }
   }
   const d = await send(env);
   if (!a) return d;

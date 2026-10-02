@@ -39,3 +39,12 @@ export function withBindSummary(bind: Pick<AskBind, "action" | "params" | "versi
   const head = `批准的就是这个 → ${renderBindSummary(bind)}`;
   return context?.trim() ? `${head}\n${context}` : head;
 }
+
+/**
+ * 真正投出去的那条消息（Discord / 网页对话，owner 点按钮的地方）也要先看到系统那段：正文最前面单起一段。
+ * 系统那段里的 markdown / 行内按钮符号全转义，agent 控制的值（peer 名之类）藏不了、折叠不了、伪造不出按钮。
+ */
+export function withBindSummaryText(bind: Pick<AskBind, "action" | "params" | "version">, content: string): string {
+  const head = `批准的就是这个 → ${renderBindSummary(bind)}`.replace(/[\\`*_~|>#[\]()<]/g, "\\$&");
+  return content.trim() ? `${head}\n\n${content}` : head;
+}
