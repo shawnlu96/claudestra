@@ -22,6 +22,8 @@ test("探测：只认 auth status 的 loggedIn；没登录 / 读不到 / 额度�
   const resetsAt = Date.now() + 3_600_000; // 定死的重置时刻一过就按「已重置」不再挡（10-02 起全量必挂），取一小时后
   const full = { status: async () => '{"loggedIn":true}', quota: async () => ({ observedAt: 1, full: true, resetsAt }) };
   expect(await probeClaudeLend(full)).toBe(`本机 Claude 额度已满，${new Date(resetsAt).toISOString()} 重置`);
+  const farFull = { status: async () => '{"loggedIn":true}', quota: async () => ({ observedAt: 1, full: true, resetsAt: Date.UTC(2099, 0, 1) }) }; // 远期固定值：probe 只在 resetsAt 晚于当前时刻时才报额度满
+  expect(await probeClaudeLend(farFull)).toBe("本机 Claude 额度已满，2099-01-01T00:00:00.000Z 重置");
   const unknown = { status: async () => '{"loggedIn":true}', quota: async () => { throw new Error("no snapshot"); } };
   expect(await probeClaudeLend(unknown)).toBeNull(); // 额度读不到按未知，不挡
   await expect(claudeAuthStatus()).rejects.toThrow("测试进程"); // 测试进程不跑真 CLI
