@@ -35,13 +35,16 @@ function fixture() {
   const present = new Set([mine, rv]), dirty = new Map<string, string>();
   const live: LiveAgent[] = [];
   /** kill marks the agent stopped and closes its window, unless `stuck` (the window stays, as a tmux error would leave it). */
-  let stuck = false;
+  let stuck = false, settleFails = 0, agentsThrow = 0, archive: Record<string, unknown> = { ok: true, archived: ["a.jsonl"] };
   const calls: string[][] = [], gitCalls: string[][] = [], notices: string[] = [];
   const retireDeps: RetireDeps = {
-    ledger: async (...args) => runLedger(args.slice(1), deps("scheduler")),
+    ledger: async (...args) => {
+      if (args[1] === "scheduler-settle" && settleFails > 0) { settleFails--; return { ok: false, error: "injected settle failure" }; }
+      return runLedger(args.slice(1), deps("scheduler"));
+    },
     agent: async (...args) => {
       calls.push(args);
-      if (args[0] === "archive") return { ok: true, archived: ["a.jsonl"] };
+      if (args[0] === "archive") return archive;
       const a = live.find((x) => x.name === args[1]);
       if (a) { a.status = "stopped"; a.window = stuck; }
       return { ok: true, message: `${args[1]} 已销毁。` };
@@ -55,7 +58,10 @@ function fixture() {
       return { code: 1, out: `unexpected ${args.join(" ")}` };
     },
     exists: (p) => present.has(p), worktreeRoot: root, notifyPm: async (_t, text) => { notices.push(text); },
-    agents: async () => live.map((a) => ({ ...a })),
+    agents: async () => {
+      if (calls.some((c) => c[0] === "kill") && agentsThrow > 0) { agentsThrow--; throw new Error("injected registry read failure"); }
+      return live.map((a) => ({ ...a }));
+    },
   };
   /** A verified card whose executor PM started by hand: tasks.agent = OWN, only the reviewer is bound in scheduler_sessions. */
   const card = (id: string, stage: string, agent = OWN, rvAgent: string | null = `agent-rv-${id.toLowerCase()}`) => {
@@ -74,10 +80,13 @@ function fixture() {
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards;
   };
+  const tickRaw = () => schedulerRetireTick(db, ["p"], retireDeps);
   const settleReceipt = () => String(listEvents(db, { project: "p", target: "T1" }).find((e) => e.data.op === "settle" && e.data.to === "done")?.data.receipt);
   const removed = () => gitCalls.filter((a) => a[2] === "worktree").map((a) => a[1]);
   cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
-  return { db, mine, rv, present, dirty, live, calls, notices, card, working, tick, settleReceipt, removed, stuck: (on: boolean) => { stuck = on; } };
+  const inject = { settleFails: (n: number) => { settleFails = n; }, agentsThrow: (n: number) => { agentsThrow = n; },
+    archive: (r: Record<string, unknown>) => { archive = r; } };
+  return { ...inject, db, mine, rv, present, dirty, live, calls, notices, card, working, tick, tickRaw, settleReceipt, removed, stuck: (on: boolean) => { stuck = on; } };
 }
 
 const ownCalls = (calls: string[][]) => calls.filter((c) => c[1] === OWN);
@@ -153,10 +162,11 @@ describe("i28-RT1 retirement stops the card's own unregistered executor", () => 
     f.stuck(false);
     const [out] = await f.tick();
     expect(out.step).toBe("retired");
-    // the kill had begun (registry stopped): the second pass does not archive again
+    // the second pass does not archive again, and the first pass's archive receipt still reaches the event
     expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN], ["kill", OWN]]);
     expect(f.removed()).toEqual([f.mine, f.rv]);
-    expect(f.settleReceipt()).toContain("kill 已开始过，不再归档");
+    expect(f.settleReceipt()).toContain("归档 已归档 1 个文件");
+    expect(f.settleReceipt()).toContain(`停止 ${OWN} 已销毁`);
   });
 
   test("uncommitted changes after the executor stopped: the checkout stays and PM is told", async () => {
@@ -181,5 +191,63 @@ describe("i28-RT1 retirement stops the card's own unregistered executor", () => 
     const [out] = await f.tick();
     expect(out.step).toBe("retired");
     expect(ownCalls(f.calls)).toEqual([]);
+  });
+
+  test("settle refused after archive / kill / remove: the next pass settles with all three receipts, without acting again", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN);
+    f.settleFails(1);
+    const [held] = await f.tick();
+    expect(held.step).toBe("held");
+    expect(getIntent(f.db, retireIntentId("T1"))?.status).toBe("submitted");
+    const [out] = await f.tick();
+    expect(out.step).toBe("retired");
+    expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN]]);
+    const receipt = f.settleReceipt();
+    expect(receipt).toContain("归档 已归档 1 个文件");
+    expect(receipt).toContain(`停止 ${OWN} 已销毁`);
+    expect(receipt).toContain("worktree 已清");
+  });
+
+  test("the registry read after the kill throws: the card fails this pass, the next one finishes with both receipts", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN);
+    f.agentsThrow(1);
+    const first = await f.tickRaw();
+    expect(first.failed.map((x) => x.taskId)).toEqual(["T1"]);
+    expect(f.removed()).toEqual([]);
+    const [out] = await f.tick();
+    expect(out.step).toBe("retired");
+    expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN]]);
+    expect(f.settleReceipt()).toContain("归档 已归档 1 个文件");
+    expect(f.settleReceipt()).toContain(`停止 ${OWN} 已销毁`);
+  });
+
+  test("own executor already stopped in the checkout (e.g. stopped before a service restart): the stop is still receipted", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.live.push({ name: OWN, status: "stopped", sessionId: `s-${OWN}`, cwd: f.mine, pending: false, window: false });
+    const [out] = await f.tick();
+    expect(out.step).toBe("retired");
+    expect(ownCalls(f.calls)).toEqual([]);
+    expect(f.settleReceipt()).toContain(`本卡执行者 ${OWN}`);
+    expect(f.settleReceipt()).toContain("registry 已是 stopped，不再 kill");
+  });
+
+  test("own executor's archive fails: still killed and the clean tree removed, but PM is told about the archive", async () => {
+    const f = fixture();
+    f.card("T1", "verified");
+    f.working(OWN);
+    f.archive({ ok: false, error: "injected archive failure" });
+    const [out] = await f.tick();
+    expect(out.step).toBe("handoff");
+    expect(ownCalls(f.calls)).toEqual([["archive", OWN], ["kill", OWN]]);
+    expect(f.removed()).toEqual([f.mine, f.rv]);
+    expect(f.notices).toHaveLength(1);
+    expect(f.notices[0]).toContain(`本卡执行者 ${OWN}`);
+    expect(f.notices[0]).toContain("归档没成");
+    expect(getIntent(f.db, retireIntentId("T1"))?.status).toBe("done");
   });
 });

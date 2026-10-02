@@ -74,7 +74,7 @@ export const RETIRE_CARDS_PER_PASS = 5;
 const RS = RETIRE_STAGES.map((s) => `'${s}'`).join(",");
 const oneLine = (s: string, max = 560): string => s.replace(/\s+/g, " ").trim().slice(0, max) || "（空）";
 /** Receipt markers of a session that retired but left something for PM (a failed archive, a kill skipped for a changed session). */
-const ARCHIVE_FAILED = "归档没成", FOR_PM = "交 PM";
+export const ARCHIVE_FAILED = "归档没成", FOR_PM = "交 PM";
 /** On a cancelled card these open intents are closed before retiring; merge / verify belong to the merge queue and are waited for. */
 const QUEUE_ACTIONS = "('merge','verify')";
 
@@ -221,8 +221,8 @@ class RetireCard {
       const why = `${row.role} session ${row.agent} 收不掉：${stop.failed}`;
       return this.owe(this.out("unknown", why), "unknown", why, `${this.task.id} 收尾卡住，意图转 unknown 待核对：${why}`);
     }
-    const own = await stopOwnExecutor({ ...this.deps, db: this.db, task: this.task, dirs: worktreeDirs(this.deps.worktreeRoot, this.task.id),
-      stopped, within, archiveReceipt, killOutcome, inUse: (name) => agentStillInUse(this.db, name, this.task.id) }); // i28-RT1
+    const own = await stopOwnExecutor({ ...this.deps, db: this.db, task: this.task, intentId: this.intent.id, archiveFailed: ARCHIVE_FAILED,
+      dirs: worktreeDirs(this.deps.worktreeRoot, this.task.id), stopped, within, archiveReceipt, killOutcome, inUse: (name) => agentStillInUse(this.db, name, this.task.id) }); // i28-RT1
     if ("busy" in own) return this.out("held", own.busy);
     // re-derived from durable state every time, so a notice resent after a lost one says the same thing
     const kept: string[] = [], agents = await this.deps.agents(), checkouts: TmpStepInput["checkouts"] = [];
@@ -232,8 +232,8 @@ class RetireCard {
       checkouts.push({ dir, role: i === 0 ? "author" : "reviewer", kept: !!why });
     }
     const all = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY role").all(this.task.id) as SchedulerSession[];
-    const left = all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
-      .map((x) => `${r.role} ${r.agent}：${x}`));
+    const left = [...own.pm, ...all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
+      .map((x) => `${r.role} ${r.agent}：${x}`))];
     const others = (this.db.query("SELECT id FROM tasks WHERE id != ?").all(this.task.id) as { id: string }[])
       .flatMap((t) => worktreeDirs(this.deps.worktreeRoot, t.id));
     const tmp = await cleanSessionTmp(this.deps.tmp, { stage: getTask(this.db, this.task.id)?.stage ?? "", checkouts, sessions: all,
