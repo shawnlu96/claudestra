@@ -1,3 +1,4 @@
+import { localReviewFallback } from "./scheduler-local-families-placement.js";
 /**
  * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
  * card pinned to a peer never starts writing anywhere else. Facts come from the snapshot; the decision is placeFor
@@ -71,13 +72,13 @@ const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审�
  */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
   const p = s.pool;
-  if (!p || p.remote.mode === "off") return null;
+  if (!p || p.remote.mode === "off") return localReviewFallback(s);
   return poolReview(s, p, since) ?? (p.remote.localPriority === "off" && s.workflow ? { wait: LOCAL_OFF } : null);
 }
 
 function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Away, { escalate: string }> {
-  if (!p.remote.roles.includes("review")) return null;
-  if (!s.workflow || s.workflow.template === "security" || keepsReviewer(s) || !s.task.headSHA) return null;
+  if (!p.remote.roles.includes("review")) return localReviewFallback(s);
+  if (!s.workflow || s.workflow.template === "security" || keepsReviewer(s) || !s.task.headSHA) return localReviewFallback(s);
   const family = otherFamily(s.workflow.authorFamily);
   const placed = placeFor(snapshotPlacementFacts(s, since, "review"), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };

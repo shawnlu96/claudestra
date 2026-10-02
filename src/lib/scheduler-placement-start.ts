@@ -1,3 +1,4 @@
+import { localFamilyRefusal } from "./scheduler-local-families-placement.js";
 /**
  * start_node's placement (i28-W5): where a new card's writing goes, by the same placeFor the planner uses. `auto` picks
  * by tier and load; a new local start requires writing room and localPriority enabled; `peer:<name>` is
@@ -56,6 +57,8 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     [borrow, repo] = await Promise.all([io.borrow(), io.originRepo(q.repoDir)]);
   } catch (e) {
     if (pin) return { where: "refused", reason: `读借入名单 / 仓库地址失败：${(e as Error).message}` };
+    const refusal = localFamilyRefusal({ remote: policy?.remote ?? null }, "write", "claude");
+    if (refusal) return { where: "refused", reason: refusal };
     if (policy?.remote?.localPriority === "off") return { where: "refused", reason: `本机不写代码，读借入名单失败：${(e as Error).message}` };
     if (!localLoad(db, q.project, policy?.maxWorkers ?? 0).room) return { where: "refused", reason: "本机写槽已满，且无法确认 peer 空位" };
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
