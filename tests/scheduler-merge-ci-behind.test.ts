@@ -149,6 +149,20 @@ describe("i28-CIF2 merge gate merges main in when CI is red only on tests main a
     });
   });
 
+  test("new head already red on first sight while BLOCKED or BEHIND → carried, then back to fix, not unknown / updating", async () => {
+    for (const mergeState of ["BLOCKED", "BEHIND"]) {
+      await withCard({ onUpdate: () => {} }, async (c) => {
+        await c.tick(200);
+        c.setSnap({ ...snapOf(NEW, "fail", RUN2), mergeState }); // main moved again (BEHIND) or protection says BLOCKED
+        await c.tick(201);
+        await c.tick(200 + BEHIND_SETTLE_MS + 1);
+        expect([mergeState, c.state(), c.updates().length]).toEqual([mergeState, BOUNCED, 1]);
+        expect(c.events("review_carry")).toEqual([expect.objectContaining({ from: HEAD, to: NEW })]);
+        expect(c.events("merge_conflict")).toEqual([expect.objectContaining({ cause: "ci_fail", prHead: NEW, checks: [{ name: "ci", link: RUN2 }] })]);
+      });
+    }
+  });
+
   test("new head red only on a timeout in an untouched test → back to fix, no CIF1 rerun after this run merged main in", async () => {
     await withCard({}, async (c) => {
       await c.tick();

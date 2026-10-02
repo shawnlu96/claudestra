@@ -78,11 +78,12 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
     return step("await_review", `update-branch 改了 head：${short(pr.head)}，${carry.reason.slice(0, 300)}，旧审查失效`, undefined, pr.head);
   }
-  if (pr.draft || pr.mergeState === "BEHIND") return run; // re-checked next round on the same evidence
+  // i28-CIF2's own update: a non-draft new head already red (UNSTABLE, BLOCKED or BEHIND) is carried, then bounced below
+  const behind = behindUpdating(run) && !pr.draft && pr.mergeState !== "UNKNOWN" && failed(pr.checks);
+  if ((pr.draft || pr.mergeState === "BEHIND") && !behind) return run; // re-checked next round on the same evidence
   if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
-  const behind = behindUpdating(run); // i28-CIF2's own update: a new head already red is carried, then bounced below
   if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
-  if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState)) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
+  if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState) && !behind) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
   const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
     mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
