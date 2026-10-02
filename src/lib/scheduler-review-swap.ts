@@ -56,6 +56,7 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
   const placement = place(s, since);
   if (placement && "peer" in placement) return null;
   if (placement) return { kind: "wait", code: "reviewer_capacity", reason: placement.wait };
+  if (s.pool?.remote.agents) return null;
   return (s.pool?.localReviewers ?? 0) >= s.maxWorkers
     ? { kind: "wait", code: "reviewer_capacity", reason: "另一家族的 peer 无可用审查槽，本机审查名额也已满，等待空位后自动续派" } : null;
 }

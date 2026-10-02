@@ -60,10 +60,10 @@ function capacityReason(why: string | null): boolean {
 function retryPeer(f: PlacementFacts, p: PeerFacts | undefined, role: PlaceRole, family: AuthorFamily): PeerFacts | null {
   if (!p?.v2) return null;
   // Old snapshots only carry free slots: zero there could mean busy or paused, so keep treating it as capacity.
-  if (p.v2.familyTotals && !peerFamily({ ...p, v2: { ...p.v2, slots: p.v2.familyTotals } }, role, family, f.remote?.writeFamilies)) return null;
+  if (p.v2.familyTotals && !peerFamily({ ...p, v2: { ...p.v2, slots: p.v2.familyTotals } }, role, family, f.remote?.writeFamilies, !!f.remote?.agents)) return null;
   const policy = { ...p, v2: { ...p.v2, slots: { claude: 1, codex: 1 }, why: capacityReason(p.v2.why) ? null : p.v2.why } };
   if (peerRefusal({ ...f, locksFree: true }, policy, role, family)) return null;
-  const selected = peerFamily(p, role, family, f.remote?.writeFamilies);
+  const selected = peerFamily(p, role, family, f.remote?.writeFamilies, !!f.remote?.agents);
   return { ...p, v2: { ...p.v2, slots: { claude: selected === "claude" ? p.v2.slots.claude : 0,
     codex: selected === "codex" ? p.v2.slots.codex : 0 } } };
 }
@@ -82,14 +82,15 @@ export function placeWithRetries(f: RetryPlacementFacts, role: PlaceRole, family
   const tried = [...new Set([...f.tried, ...f.retries.filter((r) => !retryable.some((x) => x.peer === r.peer)).map((r) => r.peer)])];
   const facts = { ...f, peers, tried };
   const placed = placeFor(facts, role, family);
-  if (!f.remote || f.remote.mode === "off" || !f.remote.roles.includes(role === "review" ? "review" : "write")) return placed;
+  if (!f.remote || f.remote.mode === "off" || (!f.remote.agents && !f.remote.roles.includes(role === "review" ? "review" : "write"))) return placed;
   if (placed.kind === "peer") return placed;
   const pinned = f.pin && role !== "review";
   const waiting = retryable.filter((r) => pinned ? f.pin === `peer:${r.peer}` : !tried.includes(r.peer));
   if (!waiting.length) return placed;
   if (role !== "review" && !f.locksFree) return { kind: "wait", reason: "文件锁被别的卡占着" };
   // An eligible remote losing to the local tier is normal placement, not a capacity wait.
-  if (placeFor({ ...facts, remote: { ...f.remote, localPriority: "off" } }, role, family).kind === "peer") return placed;
+  if (placeFor({ ...facts, local: { ...facts.local, pool: facts.local.pool ? { ...facts.local.pool, totals: { claude: 0, codex: 0 } } : undefined },
+    remote: { ...f.remote, ...(f.remote.agents ? { agents: { claude: 0, codex: 0 } } : {}), localPriority: "off" } }, role, family).kind === "peer") return placed;
   const blocked = waiting.filter((r) => r.why || r.gate);
   return blocked.length ? { kind: "wait", reason: blocked.map((r) => `等 ${r.peer} 空位（${[r.why, r.gate].filter(Boolean).join("；")}）`).join("；") } : placed;
 }
