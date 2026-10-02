@@ -11,7 +11,8 @@ not open a database, run a timer, commit a transaction, or enable execution.
 
 - Register `leaseSchema` and `leaseStatements` with `createTransactionOwner`.
   Ordinary command contexts need lease statements and generation **read** only.
-  Grant `leases.generation.put` and `leases.revokeAll` only to recovery contexts.
+  Grant `leases.generation.put`, `leases.revokeAll` and `leases.boots.clear` only
+  to recovery contexts.
 - Build `LeaseDependencies` from X1/X2/X5/X6 adapters, reading current scoped
   task/feature/workflow, owner approval and worker/lend/unknown rows in the same
   transaction. `advanceFeature` must CAS the supplied feature epoch/revision;
@@ -32,10 +33,21 @@ not open a database, run a timer, commit a transaction, or enable execution.
 
 Each task has one lease row. Acquisition consumes a new epoch from the feature's
 high-water mark; retries with the current boot and current live epoch return the
-existing lease without extending it. A boot replacement retires the previous
-task-holder boot, preventing it from stealing the lease back even with a freshly
-observed epoch. Other task leases keep their individual fences, allowing parallel
-work within the feature.
+existing lease without extending it. Boots are tracked per (team, project, home
+instance). The first acquisition by a new boot retires the previous home process
+and atomically revokes its active leases across all tasks/features in that scope,
+advancing each affected feature's epoch and lease tombstones. This also applies
+when the new boot first acquires a previously unleased task. The retired process
+cannot renew, write, release or acquire another task, even with a current epoch.
+Tasks on the same current boot keep independent fences for parallel work.
+
+Boot records are deduplicated per instance/boot, not repeated per task. Retirement
+history is retained for the current service generation: opaque boot IDs cannot
+safely be forgotten on a timer or home change, because a delayed old process
+could then reacquire. Restore clears all boot history in the same transaction as
+the generation change and lease revocation; old-generation requests are rejected
+before boot admission. Storage grows with distinct restarts within a generation,
+not with restarts times tasks, and does not accumulate across restores.
 
 Expiry rejects renewals and writes, but preserves home and the epoch tombstone.
 Reacquisition needs the current tombstone epoch and consumes a newer epoch.
@@ -60,6 +72,12 @@ service sequence in the persisted generation record when recording events and
 snapshots. Every lease command and `assertWritable` rejects old generations and
 frozen services. `activate` requires service-wide confirmed-receipt reconciliation;
 it never revives old leases. A new lease must be acquired after activation.
+
+Epochs are monotonic only within a feature and service generation. Restoring an
+older backup can repeat a numeric epoch in a newer generation; incrementing the
+backup's epoch cannot recover the lost high-water mark. X12/X5/X8 must carry and
+compare `(serviceGeneration, epoch)` with team/project/task identity in results,
+receipts and reconciliation, never epoch alone. Live writes also validate bootId.
 
 The generation record, lease tables and retired boots belong in consistent
 backups. The external generation high-water mark must not roll back with them.

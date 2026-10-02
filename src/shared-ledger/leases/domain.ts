@@ -3,6 +3,7 @@ import {
   V2_LEASE_MS, V2_RENEW_MS, type V2DomainModule, type V2Feature, type V2Lease, type V2TransactionContext,
 } from "../../lib/shared-ledger-contract-v2.js";
 import { assertCurrentGeneration } from "./generation.js";
+import { admitBoot, assertCurrentBoot } from "./boots.js";
 import { installLeaseSchema } from "./schema.js";
 import type { HomeChange, LeaseCommand, LeaseDependencies } from "./types.js";
 
@@ -36,6 +37,7 @@ function assertLease(context: V2TransactionContext, deps: LeaseDependencies, tas
   if (stored.featureId !== feature.id) fail("conflict");
   const lease = parseLease(JSON.parse(stored.lease)), s = context.scope;
   if (lease.serviceGeneration !== s.serviceGeneration) fail("stale_generation");
+  assertCurrentBoot(context);
   if (!stored.active || stored.epoch !== s.epoch || lease.epoch !== s.epoch || lease.bootId !== s.bootId) fail("stale_epoch");
   if (lease.homeInstanceId !== feature.homeInstanceId || lease.holderInstanceId !== s.actor.instanceId) fail("wrong_home");
   if (s.now < lease.renewedAt || s.now >= lease.expiresAt) fail("lease_expired");
@@ -59,17 +61,14 @@ function acquire(context: V2TransactionContext, deps: LeaseDependencies, policy:
   const stored = row(context, task.id), previous = stored ? parseLease(JSON.parse(stored.lease)) : null;
   if (stored && stored.featureId !== feature.id) fail("conflict");
   if (s.epoch !== (stored?.epoch ?? feature.epoch)) fail("stale_epoch");
-  if (context.all("leases.retired", { taskId: task.id, candidateBoot: s.bootId }).length) fail("stale_epoch");
   if (previous && s.now < previous.renewedAt) fail("lease_expired");
   if (stored?.active && previous?.serviceGeneration === s.serviceGeneration && previous.bootId === s.bootId && s.now < previous.expiresAt) {
     return assertLease(context, deps, task.id);
   }
   // Every acquisition consumes a fresh epoch, including reacquisition after expiry.
   // The feature epoch is the high-water mark; unrelated task leases retain their own fences.
-  const epoch = nextEpoch(context, deps, feature);
-  if (previous && previous.bootId !== s.bootId) {
-    context.run("leases.retire", { taskId: task.id, retiredBoot: previous.bootId });
-  }
+  admitBoot(context, deps);
+  const epoch = nextEpoch(context, deps, featureForTask(context, deps, task.id).feature);
   const lease = parseLease({ teamId: s.teamId, projectId: s.projectId, taskId: task.id,
     homeInstanceId: feature.homeInstanceId, holderInstanceId: s.actor.instanceId, serviceGeneration: s.serviceGeneration,
     bootId: s.bootId, epoch, acquiredAt: s.now, renewedAt: s.now, expiresAt: s.now + policy.leaseMs });

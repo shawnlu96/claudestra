@@ -18,6 +18,7 @@ test("restore advances the service-wide generation and revokes every project's o
   const restore = restoreValue(h);
   h.transact(ctx => h.generation.restore(ctx, restore), { now: 2000 });
   expect(h.db.query("SELECT count(*) AS n FROM v2_scheduler_leases WHERE active = 1").get()).toEqual({ n: 0 });
+  expect(h.db.query("SELECT count(*) AS n FROM v2_scheduler_boots").get()).toEqual({ n: 0 });
   expect(() => h.apply("lease.renew", {}, { epoch: lease.epoch, now: 2000 })).toThrow("stale_generation");
   expect(() => h.apply("home.change", {}, { epoch: lease.epoch, now: 2000 })).toThrow("stale_generation");
   expect(() => h.apply("lease.acquire", {}, { serviceGeneration: 2, epoch: lease.epoch, now: 2000 })).toThrow("migration_blocked");
@@ -51,7 +52,31 @@ test("generation revoke/update rolls back atomically when a later recovery actio
   h.transact(ctx => {
     expect(readGeneration(ctx)?.serviceGeneration).toBe(1);
     expect(h.domain.assertWritable(ctx, "task")).toEqual(lease);
+    expect(ctx.all("leases.boot")).toEqual([{ bootId: lease.bootId, active: 1 }]);
   }, { epoch: lease.epoch });
+});
+
+test("restored numeric epochs may repeat but generation fences reject the pre-restore writer", () => {
+  const h = setupLeaseTest();
+  const backupFeature = h.transact(ctx => h.get(ctx, "feature", "feature"));
+  const old = parseLease(h.apply("lease.acquire"));
+  // Restore the consistent pre-acquisition snapshot: feature epoch 1, no leases or boots.
+  h.db.transaction(() => {
+    h.db.run("DELETE FROM v2_scheduler_leases");
+    h.db.run("DELETE FROM v2_scheduler_boots");
+    h.transact(ctx => h.put(ctx, "feature", "feature", backupFeature));
+  })();
+  const next = restoreValue(h);
+  h.transact(ctx => h.generation.restore(ctx, next), { now: 2000 });
+  h.transact(ctx => h.generation.activate(ctx), { serviceGeneration: 2, now: 3000 });
+  const fresh = parseLease(h.apply("lease.acquire", {}, { serviceGeneration: 2, now: 3000 }));
+  expect(fresh.epoch).toBe(old.epoch);
+  expect(fresh.serviceGeneration).toBeGreaterThan(old.serviceGeneration);
+  const oldFence = { epoch: old.epoch, now: 3000 };
+  expect(() => h.apply("lease.renew", {}, oldFence)).toThrow("stale_generation");
+  expect(() => h.apply("lease.acquire", {}, oldFence)).toThrow("stale_generation");
+  expect(() => h.transact(ctx => h.domain.assertWritable(ctx, "task"), oldFence)).toThrow("stale_generation");
+  h.transact(ctx => h.domain.assertWritable(ctx, "task"), { ...oldFence, serviceGeneration: 2 });
 });
 test("recovery authority and snapshot linkage are required before any global mutation", () => {
   const h = setupLeaseTest(), next = restoreValue(h);

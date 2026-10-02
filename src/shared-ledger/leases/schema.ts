@@ -9,9 +9,11 @@ export const leaseSchema = {
     teamId TEXT NOT NULL, projectId TEXT NOT NULL, taskId TEXT NOT NULL, featureId TEXT NOT NULL,
     epoch INTEGER NOT NULL, active INTEGER NOT NULL, lease TEXT NOT NULL,
     PRIMARY KEY (teamId, projectId, taskId))`,
-  "leases.boots.schema": `CREATE TABLE IF NOT EXISTS v2_retired_scheduler_boots (
-    teamId TEXT NOT NULL, projectId TEXT NOT NULL, taskId TEXT NOT NULL, retiredBoot TEXT NOT NULL,
-    PRIMARY KEY (teamId, projectId, taskId, retiredBoot))`,
+  "leases.boots.schema": `CREATE TABLE IF NOT EXISTS v2_scheduler_boots (
+    teamId TEXT NOT NULL, projectId TEXT NOT NULL, homeInstanceId TEXT NOT NULL, bootId TEXT NOT NULL, active INTEGER NOT NULL,
+    PRIMARY KEY (teamId, projectId, homeInstanceId, bootId))`,
+  "leases.boots.index": `CREATE UNIQUE INDEX IF NOT EXISTS v2_scheduler_current_boot
+    ON v2_scheduler_boots (teamId, projectId, homeInstanceId) WHERE active = 1`,
   "leases.generation.schema": `CREATE TABLE IF NOT EXISTS v2_service_generation (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1), generation TEXT NOT NULL)`,
 } as const;
@@ -24,10 +26,19 @@ export const leaseStatements: Readonly<Record<string, V2Statement>> = {
     active = excluded.active, lease = excluded.lease` },
   "leases.revokeFeature": { mode: "write", sql: `UPDATE v2_scheduler_leases SET active = 0, epoch = $nextEpoch
     WHERE ${scope} AND featureId = $featureId` },
-  "leases.retired": { mode: "read", sql: `SELECT retiredBoot FROM v2_retired_scheduler_boots
-    WHERE ${scope} AND taskId = $taskId AND retiredBoot = $candidateBoot` },
-  "leases.retire": { mode: "write", sql: `INSERT OR IGNORE INTO v2_retired_scheduler_boots
-    (teamId, projectId, taskId, retiredBoot) VALUES ($teamId, $projectId, $taskId, $retiredBoot)` },
+  "leases.boot": { mode: "read", sql: `SELECT bootId, active FROM v2_scheduler_boots
+    WHERE ${scope} AND homeInstanceId = $instanceId AND bootId = $bootId` },
+  "leases.retire": { mode: "write", sql: `UPDATE v2_scheduler_boots SET active = 0
+    WHERE ${scope} AND homeInstanceId = $instanceId AND active = 1` },
+  "leases.boot.put": { mode: "write", sql: `INSERT INTO v2_scheduler_boots
+    (teamId, projectId, homeInstanceId, bootId, active) VALUES ($teamId, $projectId, $instanceId, $bootId, 1)` },
+  "leases.boot.features": { mode: "read", sql: `SELECT DISTINCT featureId FROM v2_scheduler_leases
+    WHERE ${scope} AND active = 1 AND json_extract(lease, '$.holderInstanceId') = $instanceId
+    AND json_extract(lease, '$.bootId') != $bootId` },
+  "leases.boot.revoke": { mode: "write", sql: `UPDATE v2_scheduler_leases SET active = 0, epoch = $nextEpoch
+    WHERE ${scope} AND featureId = $featureId AND active = 1 AND json_extract(lease, '$.holderInstanceId') = $instanceId
+    AND json_extract(lease, '$.bootId') != $bootId` },
+  "leases.boots.clear": { mode: "write", sql: `DELETE FROM v2_scheduler_boots WHERE ${serviceScope}` },
   "leases.generation.get": { mode: "read", sql: `SELECT generation FROM v2_service_generation WHERE ${serviceScope}` },
   "leases.generation.put": { mode: "write", sql: `INSERT INTO v2_service_generation (singleton, generation)
     SELECT 1, $generation WHERE ${serviceScope}

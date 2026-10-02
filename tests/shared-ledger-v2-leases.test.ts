@@ -110,7 +110,7 @@ test("later domain/event/receipt failure rolls back lease, feature epoch and boo
   h.transact(ctx => {
     expect(h.domain.assertWritable(ctx, "task")).toEqual(lease);
     expect(h.get(ctx, "feature", "feature").epoch).toBe(lease.epoch);
-    expect(ctx.all("leases.retired", { taskId: "task", candidateBoot: "boot-local" })).toEqual([]);
+    expect(ctx.all("leases.boot")).toEqual([{ bootId: "boot-local", active: 1 }]);
     expect(() => h.get(ctx, "event", "event")).toThrow("not_found");
   }, { epoch: lease.epoch });
 });
