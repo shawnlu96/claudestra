@@ -3,13 +3,14 @@
  * 同名 MCP 撞名闸（pi-adapter/mcp-clash.ts）、pi-settings 的分流。tmux 版 Pi 的选择、策略、启动命令逐字钉住不变。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { settingsRoute } from "../src/bridge/runtime-settings-routes.ts";
+import { acpSettings, settingsRoute } from "../src/bridge/runtime-settings-routes.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../src/lib/acp/host-runtime.ts";
 import { piMcpClash } from "../src/lib/acp/pi-adapter/mcp-clash.ts";
+import { REGISTRY_PATH } from "../src/lib/registry.ts";
 import { shellEscape } from "../src/lib/claude-launch.ts";
 import { pathOverrideAssignments } from "../src/lib/paths.ts";
 import { buildPiCommand, PI_EXTENSION_PATH } from "../src/lib/pi-launch.ts";
@@ -150,16 +151,46 @@ describe("同名 MCP 撞名闸：pi 的 mcp.json 会静默顶掉 channel-server�
 });
 
 describe("pi-settings 分流", () => {
-  test("ACP 宿主连着才走 acpSettings（会话里改）；tmux 版 Pi 仍注入扩展命令，Codex 照旧", () => {
+  test("ACP 宿主连着才走 acpSettings（会话里改）；tmux 版 Pi 仍注入扩展命令，Codex 照旧", async () => {
     const ch = "local-pi-settings-route";
     noteAcpChannel(ch, undefined);
-    expect(settingsRoute("pi", ch)).toBe("pi");
-    expect(settingsRoute("pi", undefined)).toBe("pi");
-    expect(settingsRoute("codex", ch)).toBe("codex");
+    expect(await settingsRoute("pi", ch)).toBe("pi");
+    expect(await settingsRoute("pi", undefined)).toBe("pi");
+    expect(await settingsRoute("codex", ch)).toBe("codex");
     noteAcpChannel(ch, "acp");
-    expect(settingsRoute("pi", ch)).toBe("acp");
-    expect(settingsRoute("codex", ch)).toBe("acp");
+    expect(await settingsRoute("pi", ch)).toBe("acp");
+    expect(await settingsRoute("codex", ch)).toBe("acp");
     noteAcpChannel(ch, "tmux"); // 切回 tmux 后扩展重新登记
-    expect(settingsRoute("pi", ch)).toBe("pi");
+    expect(await settingsRoute("pi", ch)).toBe("pi");
+  });
+
+  test("registry 配的是 ACP、宿主没连上：在跑 → 409 不写；停着 → 只写 registry、回 200 下次启动生效（Codex / Pi 同一条）", async () => {
+    const [chP, chC] = ["local-pi-settings-reconnect", "local-codex-settings-stopped"];
+    const saved = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
+    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {
+      "agent-pr": { runtime: "pi", channelId: chP, transport: "acp" }, "agent-cr": { runtime: "codex", channelId: chC, transport: "acp" },
+    } }));
+    try {
+      noteAcpChannel(chP, undefined);
+      expect(await settingsRoute("pi", chP)).toBe("acp");
+      expect(await settingsRoute("codex", chC)).toBe("acp");
+      const calls: string[][] = [];
+      const rm = async (...a: string[]) => (calls.push(a), { ok: true });
+      const running = await acpSettings("agent-pr", chP, "flash", "", rm, async () => true);
+      expect(running.status).toBe(409);
+      expect(await running.json()).toMatchObject({ ok: false, code: "acp_host_offline" });
+      expect(calls).toEqual([]);
+      for (const [agent, ch] of [["agent-pr", chP], ["agent-cr", chC]]) {
+        const stopped = await acpSettings(agent, ch, "m-1", "high", rm, async () => false);
+        expect(stopped.status).toBe(200);
+        expect(await stopped.json()).toMatchObject({ ok: true, live: false, nextStart: true, message: expect.stringContaining("下次启动生效") });
+        expect(calls.at(-1)).toEqual(["set-claude", agent, "--model", "m-1", "--effort", "high"]);
+      }
+      expect((await acpSettings("agent-pr", chP, "--effort", "", rm, async () => false)).status).toBe(400); // 不让值变成 manager 的开关
+      expect(calls).toHaveLength(2);
+    } finally {
+      if (saved === null) rmSync(REGISTRY_PATH, { force: true });
+      else writeFileSync(REGISTRY_PATH, saved);
+    }
   });
 });

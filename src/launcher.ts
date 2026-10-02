@@ -11,6 +11,7 @@ import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "./lib/restart-result.js";
+import { LauncherRestoreGate } from "./lib/launcher-restore-gate.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 refuseInSandbox("跑 launcher（它管大总管与自动更新，会走到 install-cli）"); // 模块顶层、任何副作用之前；lib/paths 按入口名拦不住 `bun -e 'import(...)'`
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
@@ -645,9 +646,10 @@ async function noteUnknownInstall(path: string): Promise<void> {
  */
 let restartWaveUntil = 0;
 
-// 恢复失败的告警冷却（agentName → 上次通知时刻）：periodic 每分钟跑一次，
-// 救不回来的 agent 不能每分钟刷一条 control 频道
-const restoreFailNotifiedAt = new Map<string, number>();
+// 恢复门槛和告警去重持久化，launcher 重启也不会重新尝试已熔断的会话。
+const restoreGate = new LauncherRestoreGate({
+  alert: (text) => notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text }),
+});
 
 // manager list 连续失败计数：第一次失败打日志，连续 N 轮才告警一次（每分钟巡检，别刷屏）
 let listFailStreak = 0;
@@ -678,7 +680,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     }
     const agents: any[] = list.agents;
     // manager.ts list 会把 "registry active 但 window 丢了" 的标为 status="dead"
-    const reallyDead = agents.filter((a) => a.status === "dead");
+    const reallyDead = await restoreGate.select(agents);
     if (reallyDead.length === 0) {
       if (source === "boot") console.log("🔁 开机自检：没有需要恢复的 dead agent");
       return;
@@ -706,8 +708,8 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     const failed: { name: string; error: string }[] = [];
     for (const agent of reallyDead) {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
-      const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000);
-      const why = restartFailureReason(r);
+      const why = await restoreGate.restart(agent, () =>
+        runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000));
       if (why) {
         console.error(`🔁 [${source}] ❌ ${agent.name} 恢复失败: ${why}`);
         failed.push({ name: agent.name, error: why });
@@ -717,26 +719,6 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     console.log(
       `🔁 [${source}] restart 调用完成（${reallyDead.length - failed.length}/${reallyDead.length} 成功）`,
     );
-    // 静默失败是这次事故最贵的部分——失败必须上报 control 频道，别等用户发消息没反应才发现。
-    // 但 periodic 巡检每分钟跑一次，一个救不回来的 agent 会把频道刷爆：按 agent 冷却 30min。
-    const fresh = failed.filter((f) => Date.now() - (restoreFailNotifiedAt.get(f.name) ?? 0) > 30 * 60_000);
-    for (const f of fresh) restoreFailNotifiedAt.set(f.name, Date.now());
-    if (fresh.length && CONTROL_CHANNEL_ID) {
-      try {
-        await notify({
-          source: "launcher",
-          chatId: CONTROL_CHANNEL_ID,
-          text: t(
-            `⚠️ [${source}] 有 ${fresh.length} 个 agent 恢复失败，窗口可能已建但 Claude Code 没起来：\n` +
-              fresh.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
-              `\n手动重试：\`bun src/manager.ts restart <name>\``,
-            `⚠️ [${source}] ${fresh.length} agent(s) failed to restore — the window may exist without Claude Code running:\n` +
-              fresh.map((f) => `• \`${f.name}\` — ${f.error}`).join("\n") +
-              `\nRetry manually: \`bun src/manager.ts restart <name>\``,
-          ),
-        });
-      } catch { /* non-critical */ }
-    }
   } catch (e) {
     console.error(`🔁 [${source}] 自检失败:`, e);
   }

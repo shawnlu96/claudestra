@@ -3,8 +3,9 @@ import { randomBytes } from "node:crypto";
 import { canonicalJson } from "./ask-bind.js";
 import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCommandDigest } from "./shared-ledger-auth.js";
 import type { InstanceKey } from "./instance-key.js";
-import type { SharedLedgerCommand, SharedLedgerImport, SharedLedgerProjection } from "./shared-ledger-contract.js";
-import { parseSharedLedgerCommand } from "./shared-ledger-contract-validation.js";
+import type { SharedLedgerCommand, SharedLedgerImport, SharedLedgerProjection, SharedLedgerImportReceipt, SharedLedgerImportControl } from "./shared-ledger-contract.js";
+import { parseSharedLedgerCommand, parseSharedLedgerImportControl } from "./shared-ledger-contract-validation.js";
+import { choice, digest, id, integer, literal, nullable, object, record } from "./shared-ledger-contract-schema.js";
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
@@ -23,6 +24,14 @@ export class SharedLedgerUnavailable extends Error {
   constructor() { super("shared ledger unavailable; outcome unconfirmed"); }
 }
 interface ClientOptions { fetch?: typeof fetch; now?: () => number; timeoutMs?: number; attempts?: number; scrub?: SharedLedgerScrubContext }
+function parseImportReceipt(value: unknown): SharedLedgerImportReceipt {
+  if (record(value).status === "unknown") return object({ status: literal("unknown"), batchId: id })(value);
+  return object({ status: choice(["staged", "active", "revoked"]), batchId: id, projectId: id, serverSeq: integer,
+    receipt: (v: unknown) => parseSharedLedgerResponse("import", v),
+    verification: nullable(object({ features: integer, versions: integer, bindings: integer, tasks: integer,
+      sourceSeq: integer, manifestDigest: digest })),
+  })(value);
+}
 /** No implicit local writes or queued commands. Callers retain drafts when the center is unavailable. */
 export class SharedLedgerClient {
   private fetcher: typeof fetch;
@@ -127,6 +136,32 @@ export class SharedLedgerClient {
       } catch (error) { if (!(error instanceof SharedLedgerUnavailable)) throw error; }
     }
     throw new SharedLedgerUnavailable();
+  }
+  async importReceipt(batchId: string) {
+    id(batchId);
+    const result = parseImportReceipt(await this.request("GET", `imports/${batchId}`));
+    if (result.batchId !== batchId || (result.status !== "unknown" && (result.receipt.batchId !== batchId
+      || result.receipt.mode !== "commit" || result.serverSeq < result.receipt.serverSeq))) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  /** One POST at most; a lost response is recovered by the next invocation's receipt lookup. */
+  async commitImport(input: SharedLedgerImport) {
+    const payload = this.scrub({ ...input, mode: "commit" }, parseSharedLedgerImport);
+    const prior = await this.importReceipt(payload.batchId);
+    if (prior.status !== "unknown") {
+      if (prior.status === "revoked" || prior.receipt.manifestDigest !== payload.manifestDigest) throw new SharedLedgerUnavailable();
+      return prior.receipt;
+    }
+    const result = parseSharedLedgerResponse("import", await this.request("POST", "imports", payload));
+    if (result.mode !== "commit" || result.batchId !== payload.batchId || result.manifestDigest !== payload.manifestDigest) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  async controlImport(input: SharedLedgerImportControl) {
+    const payload = this.scrub(input, parseSharedLedgerImportControl);
+    const result = parseImportReceipt(await this.request("POST", `imports/${payload.batchId}`, payload));
+    if (result.status !== (payload.mode === "activate" ? "active" : "revoked") || result.batchId !== payload.batchId
+      || result.projectId !== payload.projectId || result.receipt.manifestDigest !== payload.manifestDigest) throw new SharedLedgerUnavailable();
+    return result;
   }
   async projection(input: SharedLedgerProjection) {
     const payload = this.scrub(input, parseSharedLedgerProjection);

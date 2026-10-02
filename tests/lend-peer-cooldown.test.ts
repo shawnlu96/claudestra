@@ -88,18 +88,22 @@ test("multiple already-claimed orders releasing in one cooldown notify only once
   expect(cooldownReleaseNotices(db, a, ERROR, RESET + 1, []).filter(n => n.text.includes("额度冷却"))).toHaveLength(1);
 });
 
-test("accepted paused hello overrides live cooldown, old hello and other family do not", () => {
+test("accepted paused hello only extends live cooldown, old hello and other family do not", () => {
   released(held("T1").orderId);
-  hello({ reason: "claude_quota", until: RELEASE_AT + 1000 });
+  hello({ reason: "claude_quota", until: RESET + 3 * 3600_000 });
   expect(rows()[0].until).toBe(RESET);
-  hello({ reason: "codex_quota", until: RELEASE_AT + 2 * 3600_000 });
-  expect(rows()[0].until).toBe(RELEASE_AT + 2 * 3600_000);
-  expect(hello({ reason: "codex_quota", until: RESET }, RELEASE_AT, 1)).toEqual({ applied: false });
-  expect(rows()[0].until).toBe(RELEASE_AT + 2 * 3600_000);
+  hello({ reason: "codex_quota", until: RELEASE_AT + 3600_000 });
+  expect(rows()[0].until).toBe(RESET);
+  const later = RESET + 2 * 3600_000;
+  hello({ reason: "codex_quota", until: later });
+  expect(rows()[0].until).toBe(later);
+  expect(hello({ reason: "codex_quota", until: later + 1000 }, RELEASE_AT, 1)).toEqual({ applied: false });
+  expect(rows()[0].until).toBe(later);
   hello(null);
-  expect(rows()[0].until).toBe(RELEASE_AT + 2 * 3600_000);
+  expect(rows()[0].until).toBe(later);
   hello({ reason: "codex_quota", until: RELEASE_AT - 1 });
-  expect(borrowPeers(db, "p", [borrow], RELEASE_AT)[0].v2?.slots.codex).toBe(4);
+  expect(rows()[0].until).toBe(later);
+  expect(borrowPeers(db, "p", [borrow], RELEASE_AT)[0].v2?.slots.codex).toBe(0);
 });
 
 test("reset hints honor UTC and explicit offset, cap eight days and reject unusable dates", () => {
