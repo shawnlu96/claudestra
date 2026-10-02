@@ -1,7 +1,6 @@
 # 共享台账 V2：并行 PR 设计
 
-本稿只拆设计，不写实现、不部署、不改生产台账。依据[原设计](shared-ledger.md)，代码核对基线 ecbf08a8。
-全部 V2 节点通过前 execution 保持禁用；每张实现卡最多半天，热文件集中串接。
+本稿只拆设计，不实施代码/部署/生产台账。依据[原设计](shared-ledger.md)，基线 ecbf08a8；全部V2通过才开execution，每卡最多半天，热文件集中串接。
 
 ## 1. 必须能力及范围对照
 
@@ -54,8 +53,7 @@
 
 ## 2. PR 节点
 
-半天=4小时实现（含针对性测试），审查另计1小时/卡。以下每条验收线均为「缺 = P1」。
-X0冻结 DTO、命令/错误码/capabilities、迁移 manifest/服务代际/读取快照及跨域事务接口。
+半天=4小时实现含针对测试，审查另计1小时/卡，每条验收线「缺 = P1」；X0冻结DTO/命令/错误码/capabilities、迁移manifest/代际/快照/跨域事务接口。
 域模块导出 schema 安装及调用者事务内校验/写入函数，不暗中另提交；统一事务组合在 X12。
 X1/X14、X2与附件/任务、X5与租约/授权均通过冻结接口和夹具开发，无需互改文件或等服务实现。
 X10/X11复用既有UI模式，仅增表单/夹具，不重做视觉系统；字段命名在 C1 后冻结。
@@ -139,7 +137,7 @@ fileGlobs：
 - src/lib/shared-ledger-exec-*.ts
 - tests/shared-ledger-v2-exec-client*.test.ts
 
-验收线：本人/服务身份动作范围校验、禁自报owner；source/planning拒执行，execution走中心；丢响应查回执、断网只草稿/outbox不本地回退。
+验收线：本人/服务身份范围校验、业务ask创建查询答复撤销过期授权检查均中心客户端；source/planning拒执行，execution走中心；丢响应查回执，离线缓存/outbox不产生批准或本地回退。
 
 ### X8 · 调度中心租约意图适配
 
@@ -149,7 +147,7 @@ fileGlobs：
 - src/lib/scheduler-central*.ts
 - tests/shared-ledger-v2-scheduler-client*.test.ts
 
-验收线：每个副作用前在线核租约意图、结果携epoch；失租停派单阶段合并发版；保留同机锁、暂停调整请求不能变远控。
+验收线：每个副作用前在线核租约意图授权、结果携epoch；新增scheduler-central部署适配传递稳定operationId及job上下文，子进程每步在线核验；保留同机锁，失租停执行、请求不变远控。
 
 ### X9 · 出借代理及中心结果回写
 
@@ -183,7 +181,7 @@ fileGlobs：
 
 ### X12 · 集中串接入口及全链路写门
 
-key：X12；oneLine：集中串接入口及全链路写门；deps：X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X14, C5；估时：2小时。
+key：X12；oneLine：集中串接入口及全链路写门；deps：X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X14, C5；估时：4小时。
 fileGlobs：
 
 - src/shared-ledger.ts
@@ -196,6 +194,10 @@ fileGlobs：
 - src/lib/ledger-write.ts
 - src/lib/shared-ledger-mode.ts
 - src/lib/ledger-dag-write.ts
+- src/scheduler.ts
+- src/lib/scheduler-deploy-job.ts
+- src/lib/scheduler-deploy-worker.ts
+- src/lib/scheduler-deploy-steps.ts
 - src/lib/scheduler-pass.ts
 - src/lib/scheduler-apply.ts
 - src/lib/scheduler-auto-deps.ts
@@ -208,6 +210,14 @@ fileGlobs：
 - src/bridge/local-api/lend.ts
 - src/bridge/local-api/lend-inbox.ts
 - src/bridge/local-api/asks.ts
+- src/bridge.ts
+- src/bridge/asks.ts
+- src/bridge/ask-reply.ts
+- src/bridge/ask-entry.ts
+- src/bridge/ask-dismiss.ts
+- src/bridge/ask-expire.ts
+- src/bridge/ask-locate.ts
+- src/manager/ledger-read-cmds.ts
 - web/features/collab/shared/shared-view.tsx
 - web/features/collab/shared/shared-ledger.tsx
 - web/lib/api/shared-ledger.ts
@@ -217,7 +227,8 @@ fileGlobs：
 - src/bridge/shared-ledger-v2-wiring.ts
 - tests/shared-ledger-v2-wiring*.test.ts
 
-验收线：迁移注册/路由/权限/读取/CLI/MCP网页全入口核模式epoch；真实调度合并部署lend每个副作用过在线闸；新wiring放逻辑、旧文件薄调用，execution仍禁用。
+验收线：全部命令入口核模式epoch，副作用核授权；真实reply建中心业务ask，Web/Discord/聊天共用记录，离线本机不能有效批准；独立job提交后、下一步前断中心或失epoch，后续副作用挡住、未确认结果unknown对账。
+验收线：新wiring承载逻辑、旧文件薄调用，execution仍禁用；业务ask跨入口查询/撤销/过期/ask-check一致，本机缓存/outbox非授权权威。
 
 ### X13 · 整组执行权迁移及回执核对
 
@@ -257,7 +268,12 @@ C2/C3/C4宽glob与对应后继相交，故分别列真实前置；X12等C5，X13
 X12独占清单中所有既有热文件：中心真实路由在service而非只entry；commands事务分派，migrations schema安装，reads/identity快照权限。
 其余模式/代理/CLI/DAG和订单MCP/自动阶段/lend/asks/网页壳及DTO也只归X12。
 其他卡规格例外写「只加一行接入，由X12执行」，不得自行碰热文件；如发现新旧入口先补X12清单再核冲突。
-X12扫描所有副作用调用点，不仅schedulerPass外层一次检查；merge/deploy/autostart子调用均要在线闸。
+采用保留独立部署链的接入方式：scheduler.ts --deploy-job → job/worker/steps 四处接线仅归X12，不能只查schedulerPass。
+X8新scheduler-central模块实现job请求/结果的team/project/task/intent/bootId/epoch/operationId/授权引用；不跨进程继承内存回调。
+worker显式建立中心客户端，每个实际步骤前在线核租约/意图/owner授权并使用稳定步骤operationId；离线/失epoch停后续，已开始未确认动作unknown占资源再对账。
+共享卡业务ask按中心id/feature模式分流：WS reply经ask-reply中心创建，查询/locate、Web/Discord/聊天答复、撤销/过期均同中心记录。
+asks/ask-entry/ask-dismiss/ask-expire及CLI ask-check只薄接线，业务逻辑入新bridge wiring和X7客户端；中心核本人/bind/期限/版本后才提交批准。
+本机缓存/通知映射/outbox只作展示投递，不能当授权；禁止把askDb整体远程化，runtime permission/AUQ及非共享ask保留本机路径。
 逻辑放新wiring，旧文件薄调用；src/lib不反向导入bridge/服务端，web与src不互相导入。
 
 ### 附录：检查命令与输出
@@ -305,60 +321,50 @@ for (const [a, na] of nodes) for (const [b, nb] of nodes) {
   const hit = expanded.get(a).filter(f => expanded.get(b).includes(f));
   const planned = na.paths.some(a => nb.paths.some(b => symbolic(a, b)));
   if (hit.length || planned) throw Error(a + '/' + b + ': overlap');
-  rows.push(a + '/' + b + ': existing=0 planned=0'); pairs++;
+  rows.push(a + '/' + b + '=0/0'); pairs++;
 }
-for (let i = 0; i < rows.length; i += 3) console.log(rows.slice(i, i + 3).join(' | '));
+for (let i = 0; i < rows.length; i += 6) console.log(rows.slice(i, i + 6).join(' | '));
 console.log('nodes=' + nodes.size + ' incomparablePairs=' + pairs);
 console.log('X12 tracked hot files=' + expanded.get('X12').length);
 JS
 ```
 
-实测输出：
+实测输出（每对=existing/planned交集数）：
 
 ```text
-X1/X2: existing=0 planned=0 | X1/X3: existing=0 planned=0 | X1/X4: existing=0 planned=0
-X1/X5: existing=0 planned=0 | X1/X6: existing=0 planned=0 | X1/X7: existing=0 planned=0
-X1/X8: existing=0 planned=0 | X1/X9: existing=0 planned=0 | X1/X10: existing=0 planned=0
-X1/X11: existing=0 planned=0 | X1/X14: existing=0 planned=0 | X2/X3: existing=0 planned=0
-X2/X4: existing=0 planned=0 | X2/X5: existing=0 planned=0 | X2/X6: existing=0 planned=0
-X2/X7: existing=0 planned=0 | X2/X8: existing=0 planned=0 | X2/X9: existing=0 planned=0
-X2/X10: existing=0 planned=0 | X2/X11: existing=0 planned=0 | X2/X14: existing=0 planned=0
-X3/X4: existing=0 planned=0 | X3/X5: existing=0 planned=0 | X3/X6: existing=0 planned=0
-X3/X7: existing=0 planned=0 | X3/X8: existing=0 planned=0 | X3/X9: existing=0 planned=0
-X3/X10: existing=0 planned=0 | X3/X11: existing=0 planned=0 | X3/X14: existing=0 planned=0
-X4/X5: existing=0 planned=0 | X4/X6: existing=0 planned=0 | X4/X7: existing=0 planned=0
-X4/X8: existing=0 planned=0 | X4/X9: existing=0 planned=0 | X4/X10: existing=0 planned=0
-X4/X11: existing=0 planned=0 | X4/X14: existing=0 planned=0 | X5/X6: existing=0 planned=0
-X5/X7: existing=0 planned=0 | X5/X8: existing=0 planned=0 | X5/X9: existing=0 planned=0
-X5/X10: existing=0 planned=0 | X5/X11: existing=0 planned=0 | X5/X14: existing=0 planned=0
-X6/X7: existing=0 planned=0 | X6/X8: existing=0 planned=0 | X6/X9: existing=0 planned=0
-X6/X10: existing=0 planned=0 | X6/X11: existing=0 planned=0 | X6/X14: existing=0 planned=0
-X7/X8: existing=0 planned=0 | X7/X9: existing=0 planned=0 | X7/X10: existing=0 planned=0
-X7/X11: existing=0 planned=0 | X7/X14: existing=0 planned=0 | X8/X9: existing=0 planned=0
-X8/X10: existing=0 planned=0 | X8/X11: existing=0 planned=0 | X8/X14: existing=0 planned=0
-X9/X10: existing=0 planned=0 | X9/X11: existing=0 planned=0 | X9/X14: existing=0 planned=0
-X10/X11: existing=0 planned=0 | X10/X14: existing=0 planned=0 | X11/X14: existing=0 planned=0
+X1/X2=0/0 | X1/X3=0/0 | X1/X4=0/0 | X1/X5=0/0 | X1/X6=0/0 | X1/X7=0/0
+X1/X8=0/0 | X1/X9=0/0 | X1/X10=0/0 | X1/X11=0/0 | X1/X14=0/0 | X2/X3=0/0
+X2/X4=0/0 | X2/X5=0/0 | X2/X6=0/0 | X2/X7=0/0 | X2/X8=0/0 | X2/X9=0/0
+X2/X10=0/0 | X2/X11=0/0 | X2/X14=0/0 | X3/X4=0/0 | X3/X5=0/0 | X3/X6=0/0
+X3/X7=0/0 | X3/X8=0/0 | X3/X9=0/0 | X3/X10=0/0 | X3/X11=0/0 | X3/X14=0/0
+X4/X5=0/0 | X4/X6=0/0 | X4/X7=0/0 | X4/X8=0/0 | X4/X9=0/0 | X4/X10=0/0
+X4/X11=0/0 | X4/X14=0/0 | X5/X6=0/0 | X5/X7=0/0 | X5/X8=0/0 | X5/X9=0/0
+X5/X10=0/0 | X5/X11=0/0 | X5/X14=0/0 | X6/X7=0/0 | X6/X8=0/0 | X6/X9=0/0
+X6/X10=0/0 | X6/X11=0/0 | X6/X14=0/0 | X7/X8=0/0 | X7/X9=0/0 | X7/X10=0/0
+X7/X11=0/0 | X7/X14=0/0 | X8/X9=0/0 | X8/X10=0/0 | X8/X11=0/0 | X8/X14=0/0
+X9/X10=0/0 | X9/X11=0/0 | X9/X14=0/0 | X10/X11=0/0 | X10/X14=0/0 | X11/X14=0/0
 nodes=16 incomparablePairs=66
-X12 tracked hot files=26
+X12 tracked hot files=38
 ```
 
 ## 4. 关键路径与工期
 
 工作日按8小时，每卡审查1小时计同一执行槽。假设C1已通过、C2–C6最迟后继开始前就绪；其剩余外部等待W另加，不冒称已经通过。
 依赖链 X0 → 最长并行卡（如X5）→ X12 → X13 → X15。
-纯依赖关键路径 = (1+1)+(3+1)+(2+1)+(2+1)+(2+1) = 15小时。
-并行组10张长卡各4槽小时，X10/X11各2槽小时，共44；全图55槽小时。
+纯依赖关键路径 = (1+1)+(3+1)+(4+1)+(2+1)+(2+1) = 17小时。
+并行组10张长卡各4槽小时，X10/X11各2槽小时，共44；全图57槽小时。
 
 - A档：仅本机Codex，最多6执行者，本机Claude不写代码。首波6张长卡4小时，次波4张长卡加同槽X10→X11共4小时。
-  资源关键路径：X0(1+1) → 两波(4+4) → X12(2+1) → X13(2+1) → X15(2+1) = 19小时 = 2.375工作日，再加W。
+  资源关键路径：X0(1+1) → 两波(4+4) → X12(4+1) → X13(2+1) → X15(2+1) = 21小时 = 2.625工作日，再加W。
   少于6槽或审查员不足更长，A档不保证两天。
 - B档：本机最多6槽，peer A/peer B恢复后合计加5–10执行者，至少11槽。
   10张长卡占10槽，X10/X11在第11槽依次各2小时，同在4小时内结束。
-  X0(1+1) → 并行组(3+1) → X12(2+1) → X13(2+1) → X15(2+1) = 15小时 = 1.875工作日，再加W。
-  ≤2工作日按B档且W≤1小时判；部署/人工全文批准/owner动作另计等待，写完不等于上线。
+  X0(1+1) → 并行组(3+1) → X12(4+1) → X13(2+1) → X15(2+1) = 17小时 = 2.125工作日，再加W。
+  B档比≤2工作日目标多1小时+W：独立部署跨进程和业务ask生命周期接线补齐使X12从2增至4小时；不能删安全闸凑两天。
+  部署/人工全文批准/owner动作另计等待，写完不等于上线；若要压至两天需实测节约至少1小时+W，否则报告超目标。
 
-每卡实现最长3小时，无超半天卡。这是复用契约和既有模式的预算，非既成能力；超预算继续拆卡并重算，不削验收。
-尤其X12真实入口适配超2小时须再拆串接子卡；unknown核清或真实三实例不可用要报告阻塞，不能拿夹具代替真实闭环。
+每卡实现最长4小时，无超半天卡。这是复用契约和既有模式的预算，非既成能力；超预算继续拆卡并重算，不削验收。
+X12已含独立部署和ask全链路，超4小时须再拆串接子卡并重核热文件归属；unknown核清或真实三实例不可用要报告阻塞，不能拿夹具代替真实闭环。
 
 ## 5. C7–C9 去留
 
@@ -388,7 +394,6 @@ git grep --no-index -nEI "$V2_PRIVATE_NAME_PATTERN" -- docs/design/shared-ledger
 
 ## 7. 验收及交付
 
-验收1见§1逐条出处；验收2见§2全字段及每卡3条P1线；验收3见§3命令/实测；验收4见§4两档算式；验收5见§5/§6；验收6见本节。
-只新增本文，不改原设计；提交前bun run check、guard退出0；git grep自检并人工复核。
-普通push、PR base main，全量以PR CI为准；失败须处理或明确报告，不能声称通过。
+验收1见§1逐条出处；验收2见§2全字段及每卡3–5条P1线；验收3见§3命令/实测；验收4见§4两档算式；验收5见§5/§6；验收6见本节。
+只改本文；提交前bun run check、guard退出0、git grep及人工复核；普通push、PR base main，全量以PR CI为准，失败处理或如实报告。
 PR正文只解释共享执行拆分和验证，不写生产台账节点标题；设计PR通过不代表execution已开放。
