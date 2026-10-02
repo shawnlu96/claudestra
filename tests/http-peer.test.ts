@@ -118,6 +118,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const firstPush = async (h: { pushed: string[] }) => { for (let t = 0; t < 200 && !h.pushed.length; t++) await sleep(10); };
 
 describe("http-peer 出站状态机", () => {
+  test("onDelivered 只在对方 2xx 收下后调：403 / 500 / 网络错误不调（i28-ASK4：PM 回话没送到不记已答）", async () => {
+    for (const [r, want] of [[() => json(202, { ok: true, accepted: true }), 1], [() => json(403, { ok: false }), 0],
+      [() => json(500, { ok: false }), 0], [() => { throw new TypeError("fetch failed"); }, 0]] as const) {
+      makeHarness([r as () => Response]);
+      let n = 0;
+      routeToHttpPeer(fakeWs, "chan", "caller", PEER, "agent-lend-x", "ask ask_1 批准", undefined, false, () => void n++);
+      expect(n).toBe(0); // 同步返回时还没投递
+      await sleep(30);
+      expect(n).toBe(want);
+    }
+  });
+
   test("wait 命中:回复推回 caller", async () => {
     const h = makeHarness([() => json(200, { ok: true, reply: "答案", threadId: "t1", agent: "x" })]);
     routeToHttpPeer(fakeWs, "chan", "caller", PEER, "x", "问题");

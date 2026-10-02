@@ -25,6 +25,7 @@ import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
+import { mergeFirst } from "./scheduler-merge-order.js";
 import { peerPrHold } from "./peer-pr-hold.js";
 import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
 import type { BorrowEntry } from "./lend-config.js";
@@ -239,7 +240,7 @@ class Card {
     }
     if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
-    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice();
+    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
     return r.code === "conflict" ? this.cancelStale(intent, String(r.error)) : this.out("held", String(r.error));
   }
@@ -259,10 +260,10 @@ class Card {
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
   /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
-  async diffNotice(): Promise<void> {
+  async diffNotice(downgraded: string | null): Promise<void> {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
-      `，报告 ${String(rv?.data.path ?? "（无）")}`;
+      `，报告 ${String(rv?.data.path ?? "（无）")}${downgraded ? `；${downgraded}` : ""}`;
     await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
@@ -364,6 +365,7 @@ class Card {
     if (open) return this.drive(open, null);
     const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
+    await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
@@ -383,7 +385,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
-  for (const { project, policy, taskId } of finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? "")) {
+  for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
     const task = getTask(db, taskId);
@@ -396,5 +398,6 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
     }
   }
+  await (await import("./lend-fix-reassign-tick.js")).relayPrSweep(db, Object.keys(projects), deps.manager, deps.now); // i28-RA1：卡跑完后每轮一单
   return out;
 }

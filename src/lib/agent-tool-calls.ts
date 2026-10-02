@@ -21,11 +21,16 @@ const heldText: Record<string, (target: string) => string> = {
 
 /** send_to_agent：从工具分发里原样搬出（分发函数太长） */
 export async function sendToAgentTool(bridgeRequest: BridgeRequest, args: any) {
+  // 正文缺失 / 空白当场报错，别投个空消息还报成功；只说参数名，不回显正文
+  if (typeof args?.text !== "string" || !args.text.trim()) {
+    const hint = args?.message !== undefined && args?.text === undefined ? "正文参数名是 text，不是 message。" : "";
+    return { content: [{ type: "text" as const, text: `send_to_agent 没发出：text（消息正文）缺失或为空。${hint}请带上非空 text 重新调用。` }], isError: true };
+  }
   const oneShot = args?.oneShot === true;
   const result = await bridgeRequest({
     type: "route_to_agent",
     targetName: args?.target || "",
-    text: args?.text || "",
+    text: args.text,
     expecting: typeof args?.expecting === "string" ? args.expecting : undefined,
     oneShot,
   });
