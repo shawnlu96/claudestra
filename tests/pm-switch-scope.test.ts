@@ -10,13 +10,15 @@ const fixtures: ReturnType<typeof pmFixture>[] = [];
 const fixture = () => { const f = pmFixture(); fixtures.push(f); return f; };
 afterEach(() => { for (const f of fixtures.splice(0)) f.close(); });
 const switchTo = (f: ReturnType<typeof pmFixture>, dryRun = false) => switchProjectPm(f.db, P, B, { actor: "owner", dryRun, now: 100 }, f.deps);
+const switchReal = async (f: ReturnType<typeof pmFixture>) =>
+  (await switchTo(f)) as Extract<Awaited<ReturnType<typeof switchProjectPm>>, { seq: number }>;
 const file = (f: ReturnType<typeof pmFixture>, name: string) => JSON.parse(readFileSync(join(f.dir, name), "utf8"));
 
 test("peer-prs keeps peers[].agent when both machines' PMs share a name; only replyTo moves", async () => {
   const f = fixture();
   const dry = await switchTo(f, true);
   expect(dry.changes.map((c) => c.location)).not.toContain("peer-prs.peers[0].agent");
-  const r = await switchTo(f);
+  const r = await switchReal(f);
   expect(file(f, "peer-prs.json")).toMatchObject({ replyTo: `${B}@remote`, peers: [{ peer: "remote", agent: A }], extra: "preserve" });
   expect(r.status?.ok).toBe(true);
   expect(r.notifications.map((n) => n.target)).toContain(`${A}@remote`);
@@ -39,11 +41,23 @@ test("this project's peer token lacking the candidate still blocks the switch", 
   await expect(switchTo(f, true)).rejects.toThrow("lacks agent-beta");
 });
 
+test("a peer absent from peer-prs needs no PM destination; its token must still allow the new PM", async () => {
+  const f = fixture(), principals = file(f, "principals.json").principals, peers = file(f, "peers.json").httpPeers;
+  peers.push({ name: "Sekai", addedAt: "" });
+  principals.push({ id: "token:tok_sekai", role: "external", peer: "Sekai", agents: [A, B], createdAt: "2026-01-01" });
+  f.put("peers.json", { httpPeers: peers });
+  f.put("principals.json", { principals });
+  expect((await switchTo(f, true)).ok).toBe(true);
+  principals.at(-1).agents = [A];
+  f.put("principals.json", { principals });
+  await expect(switchTo(f, true)).rejects.toThrow("token token:tok_sekai lacks agent-beta");
+});
+
 test("switch works without peer-prs.json", async () => {
   const f = fixture();
   rmSync(join(f.dir, "peer-prs.json"));
   expect((await switchTo(f, true)).ok).toBe(true);
-  const r = await switchTo(f);
+  const r = await switchReal(f);
   expect(pmPointer(f.db, P)).toBe(B);
   expect(r.notifications.map((n) => n.target)).toEqual([B, A]);
 });
@@ -54,7 +68,7 @@ test("peer-prs.json of another project is neither checked, rewritten nor notifie
   const before = readFileSync(join(f.dir, "peer-prs.json"), "utf8");
   expect((await switchTo(f, true)).ok).toBe(true);
   f.put("peer-prs.json", { enabled: true, project: Q, replyTo: `${A}@remote`, peers: [{ peer: "remote", agent: A }] });
-  const r = await switchTo(f);
+  const r = await switchReal(f);
   expect(r.notifications.map((n) => n.target)).toEqual([B, A]);
   expect(file(f, "peer-prs.json").replyTo).toBe(`${A}@remote`);
   expect(before).toContain(Q);

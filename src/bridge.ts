@@ -3046,7 +3046,7 @@ initApiRoutes({
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
-  deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
+  deliver, getClientWs: (channelId) => ((clients.get(channelId) ?? pmClientFor(channelId, clients))?.ws as any) ?? null, // 前任 PM 离线：当班 PM 的连接接住，deliverPmLocal 加转交抬头
   hold: (env) => void heldLocalMsgs.holdEnv(env),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });

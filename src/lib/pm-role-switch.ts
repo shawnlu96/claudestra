@@ -35,9 +35,11 @@ function switchPlan(db: Database, project: string, agent: string, state: PmState
     if (!agentInScope(p, agent)) errors.push(`peer ${p.peer} token ${p.id} lacks ${agent}`);
   }
   if (state.peerPrs?.project === project) {
+    // Only peers listed in peer-prs receive PR pushes; an unlisted peer needs no destination (PM 定 10-03 02:59).
     const routes = Array.isArray(state.peerPrs.peers) ? state.peerPrs.peers : [];
     for (const peer of state.peers.filter((p) => !p.disabled)) {
-      if (!routes.some((p) => p.peer === peer.name && typeof p.agent === "string" && p.agent)) {
+      const listed = routes.filter((p) => p.peer === peer.name);
+      if (listed.length && !listed.some((p) => typeof p.agent === "string" && p.agent)) {
         errors.push(`peer ${peer.name} lacks a PM agent destination in peer-prs`);
       }
     }

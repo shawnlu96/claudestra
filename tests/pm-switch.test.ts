@@ -117,7 +117,7 @@ test("corrupt authorization file stops switch; read-only invocations do not clai
 
 test("switch preflight lists peers missing a notification destination instead of silently omitting them", async () => {
   const f = fixture();
-  f.put("peer-prs.json", { project: P, peers: [] });
+  f.put("peer-prs.json", { project: P, peers: [{ peer: "remote" }] });
   const bytes = f.bytes();
   await expect(switchTo(f)).rejects.toThrow("peer remote lacks a PM agent destination");
   expect(f.bytes()).toEqual(bytes);

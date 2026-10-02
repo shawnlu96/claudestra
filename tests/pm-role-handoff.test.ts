@@ -1,4 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { initHttpPeer } from "../src/bridge/http-peer.js";
 import { switchProjectPm } from "../src/lib/pm-role-switch.js";
 import { deliverPmLocal, pmClientFor } from "../src/bridge/local-api/project-pm-delivery.js";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
@@ -62,7 +66,7 @@ test("other messages to an online former PM still go to the active PM", async ()
 
 test("pointer moving between pmClientFor and deliverPmLocal re-resolves and never uses the lent socket", async () => {
   const r = await routing(true), lent = pmClientFor(A, r.clients, "scheduler", r.facts)!;
-  expect(lent).toBe(r.clients.get("channel-b"));
+  expect(lent as unknown).toBe(r.clients.get("channel-b"));
   r.point(C);
   await r.deliver(toA("agent_1_x", {}, lent.ws, "request"));
   expect(r.sent).toHaveLength(1);
@@ -80,4 +84,32 @@ test("pointer moving back to the addressed PM uses its own socket, or drops when
   const result = await offline.deliver(toA("agent_1_x", {}, borrowed.ws, "request"));
   expect(result.outcome.kind).toBe("dropped");
   expect(offline.sent).toEqual([]);
+});
+
+// Real transport entry: a resumed HTTP peer call whose caller (former PM A) has no socket.
+async function resumedPeerReply(onlineA: boolean) {
+  const r = await routing(onlineA), dir = mkdtempSync(join(tmpdir(), "pm-hp-")), path = join(dir, "calls.json");
+  writeFileSync(path, JSON.stringify({ hp_1: { callerChannelId: "channel-a", callerName: A, peerName: "remote", peerAgent: "remote-pm", threadId: "th1", deadline: Date.now() + 5_000 } }));
+  const held: Envelope[] = [];
+  // Same expression bridge.ts passes as getClientWs.
+  const getClientWs = (channelId: string) => ((r.clients.get(channelId) ?? pmClientFor(channelId, r.clients, undefined, r.facts))?.ws as any) ?? null;
+  initHttpPeer({
+    deliver: r.deliver, getClientWs, hold: (env) => held.push(env), callBookPath: path, pollIntervalMs: 10, pollGiveUpMs: 5_000,
+    findPeer: async (n) => (n === "remote" ? { name: "remote", baseUrl: "http://x", outToken: "k".repeat(32), addedAt: "" } : null),
+    fetchImpl: (async () => new Response(JSON.stringify({ ok: true, reply: "answer", threadId: "th1" }), { headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch,
+  });
+  for (let i = 0; i < 50 && !r.sent.length && !held.length; i++) await Bun.sleep(10);
+  rmSync(dir, { recursive: true, force: true });
+  return { ...r, held };
+}
+
+test("resumed HTTP peer reply to an offline former PM reaches the active PM through the transport", async () => {
+  const r = await resumedPeerReply(false);
+  expect(r.held).toEqual([]);
+  expect(r.sent.map((s) => [s.to.channelId, s.content])).toEqual([["channel-b", `[系统转交：这是回复前任 PM ${A} 的问题；当班 PM ${B}]\nanswer`]]);
+});
+
+test("resumed HTTP peer reply to an online former PM stays with it", async () => {
+  const r = await resumedPeerReply(true);
+  expect(r.sent.map((s) => [s.to.channelId, s.content])).toEqual([["channel-a", "answer"]]);
 });
