@@ -45,6 +45,7 @@ import { UI_CMDS } from "./ledger-ui-cmds.js";
 import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
+import { MEMORY_CMDS } from "./ledger-memory-cmds.js";
 import { SUPERVISE_CMDS } from "./ledger-supervise-cmds.js";
 import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
 import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
@@ -79,7 +80,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_DEPLOY_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS,
-  ...VERDICT_CMDS,
+  ...VERDICT_CMDS, ...MEMORY_CMDS,
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };

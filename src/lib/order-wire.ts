@@ -6,6 +6,7 @@
  * Rendering and redaction live in order-wire-render.ts. tests/order-wire.test.ts.
  */
 import { deliverWithoutDisputes, deliverDisputeFields, type FindingDispute } from "./review-arbiter-wire.js";
+import { deliverMemoryRefFields, deliverWithoutMemoryRefs, findingPitfalls, withPitfalls, type MemoryRef } from "./memory-tools-wire.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
@@ -48,6 +49,7 @@ export interface OrderWire {
 
 export interface DeliverWire {
   disputes?: FindingDispute[];
+  memoryRefs?: MemoryRef[];
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
   head: string;
@@ -56,7 +58,7 @@ export interface DeliverWire {
   selfCheck: string;
 }
 
-interface VerdictFinding extends ReviewFinding { description: string }
+interface VerdictFinding extends ReviewFinding { description: string; pitfall?: true }
 export interface VerdictWire {
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
@@ -189,11 +191,11 @@ export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
 
 export function parseDeliverWire(raw: unknown): WireResult<DeliverWire> {
   return guarded(raw, () => {
-    const r = record(deliverWithoutDisputes(raw), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
+    const r = record(deliverWithoutMemoryRefs(deliverWithoutDisputes(raw)), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), head: matching(r.head, "head", FULL_SHA),
       evidence: matching(text(r.evidence, "evidence", WIRE_LIMITS.path), "evidence", PATH), summary: text(r.summary, "summary", WIRE_LIMITS.summary),
-      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true), ...deliverDisputeFields(raw, fail),
+      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true), ...deliverDisputeFields(raw, fail), ...deliverMemoryRefFields(raw, fail),
     };
   });
 }
@@ -202,9 +204,10 @@ export function parseVerdictWire(raw: unknown): WireResult<VerdictWire> {
   return guarded(raw, () => {
     const r = record(raw, "$", ["v", "orderId", "head", "verdict", "p0", "p1", "p2", "findings", "reportPath"]);
     if (!["pass", "changes", "block"].includes(r.verdict as string)) fail("verdict", "只认 pass / changes / block");
-    const rows = Array.isArray(r.findings) ? r.findings.map((f) => (f && typeof f === "object" && !("basis" in f) ? { ...f, basis: null } : f)) : r.findings; // basis 可省（旧远端）
+    const { rows: bare, pitfalls } = findingPitfalls(r.findings, fail); // pitfall 可省（项目记忆，memory-tools-wire.ts）
+    const rows = Array.isArray(bare) ? bare.map((f) => (f && typeof f === "object" && !("basis" in f) ? { ...f, basis: null } : f)) : bare; // basis 可省（旧远端）
     const findings = findingList<VerdictFinding>(rows, "findings", [...FINDING_KEYS, "description", "basis"],
-      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true), ...wireBasis(f.basis, (why) => fail(`${p}.basis`, why)) }));
+      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true), ...wireBasis(f.basis, (why) => fail(`${p}.basis`, why)) })).map(withPitfalls(pitfalls));
     const counts = { p0: int(r.p0, "p0", 0, WIRE_LIMITS.findings), p1: int(r.p1, "p1", 0, WIRE_LIMITS.findings), p2: int(r.p2, "p2", 0, WIRE_LIMITS.findings) };
     for (const sev of ["P0", "P1", "P2"] as const) {
       const key = sev.toLowerCase() as "p0" | "p1" | "p2";
