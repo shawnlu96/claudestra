@@ -1,6 +1,7 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
 import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
+import { behindUpdating } from "./scheduler-merge-ci-behind.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 export interface PrSnapshot {
@@ -79,12 +80,13 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   }
   if (pr.draft || pr.mergeState === "BEHIND") return run; // re-checked next round on the same evidence
   if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
-  if (unstableWait(pr) === "failed") return step("unknown", "更新分支后 CI 失败或取消");
+  const behind = behindUpdating(run); // i28-CIF2's own update: a new head already red is carried, then bounced below
+  if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
   if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState)) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
   const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
     mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
-  return pr.mergeState === "DIRTY" ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
+  return pr.mergeState === "DIRTY" || behind ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }
 
 /** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict

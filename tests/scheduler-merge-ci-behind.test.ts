@@ -136,6 +136,35 @@ describe("i28-CIF2 merge gate merges main in when CI is red only on tests main a
     });
   });
 
+  test("new head already red the first time it is seen → carried, then back to fix, not unknown; no second update-branch", async () => {
+    await withCard({ onUpdate: () => {} }, async (c) => {
+      await c.tick();
+      expect(c.state()).toEqual({ run: "updating", stage: "merge" });
+      c.setSnap(snapOf(NEW, "fail", RUN2)); // CI on the merged head finished red between two ticks
+      await c.tick();
+      expect([c.state(), c.updates().length]).toEqual([BOUNCED, 1]);
+      expect(c.events("review_carry")).toEqual([expect.objectContaining({ from: HEAD, to: NEW })]);
+      expect(c.events("merge_conflict")).toEqual([expect.objectContaining({ cause: "ci_fail", prHead: NEW, checks: [{ name: "ci", link: RUN2 }] })]);
+      expect(c.gh.argv.some((a) => a.includes("rerun"))).toBe(false);
+    });
+  });
+
+  test("new head red only on a timeout in an untouched test → back to fix, no CIF1 rerun after this run merged main in", async () => {
+    await withCard({}, async (c) => {
+      await c.tick();
+      await c.tick();
+      expect(c.state()).toEqual({ run: "await_ci", stage: "merge" });
+      c.gh.log = ciLog([at("##[group]tests/slow.test.ts:"), at("(fail) slow [6189.00ms]"), at("  ^ this test timed out after 5000ms."),
+        at("##[endgroup]")]);
+      c.setSnap(snapOf(NEW, "fail", RUN2));
+      await c.tick();
+      expect([c.state(), c.updates().length]).toEqual([BOUNCED, 1]);
+      expect(c.gh.argv.filter((a) => a.includes("rerun"))).toEqual([]);
+      expect(c.events("merge_ci_rerun")).toEqual([]);
+      expect(c.events("merge_conflict")).toEqual([expect.objectContaining({ cause: "ci_fail", prHead: NEW, checks: [{ name: "ci", link: RUN2 }] })]);
+    });
+  });
+
   test("update-branch sent but GitHub still shows the old red head → wait without a second call; past the settle window → back to fix", async () => {
     await withCard({ onUpdate: () => {} }, async (c) => {
       const t0 = 200;

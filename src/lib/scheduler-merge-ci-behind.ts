@@ -2,8 +2,9 @@
  * Red required CI whose failing test files this PR does not touch, and that main has changed since the PR's merge-base, is
  * fixed by merging main in (update-branch, pinned to the reviewed head) instead of bouncing to fix (i28-CIF2). It runs where
  * CIF1 would bounce: CIF1 first (timeouts → rerun), then this layer. Once per merge run and per head: the claim goes through
- * the ledger (phase → updating) before update-branch is sent, and the next red on the new head bounces as before. The moved
- * head is then carried by the existing "only merged main in" check (scheduler-merge-driver.ts movedHead), so no re-review.
+ * the ledger (phase → updating) before update-branch is sent, and the next red on the new head bounces as before (no CIF1
+ * rerun either). The moved head is carried by the existing "only merged main in" check (scheduler-merge-driver.ts movedHead),
+ * so no re-review; a new head already red when first seen is carried, then bounced there, instead of going unknown.
  * Every doubt bounces (fail-closed). tests/scheduler-merge-ci-behind.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -13,7 +14,7 @@ import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog } from "./scheduler-merge-ci-rerun-log.js";
-import { ciRerunGh, ciRerunOrBounce, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
+import { ciRerunClaim, ciRerunGh, ciRerunOrBounce, parseRerunReceipt, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
@@ -180,14 +181,22 @@ type WriteEvent = (db: Database, ctx: WriteCtx, e: { project: string; target: st
 /** How long after the claim GitHub may still show the old head; past it the update evidently never happened. */
 export const BEHIND_SETTLE_MS = 10 * 60_000;
 
+/** The driver's view of "this run sent update-branch itself": `updating` with this layer's claim as the reason. */
+export const behindUpdating = (run: MergeRun): boolean => run.phase === "updating" && !!run.reason && !!parseBehindReceipt(run.reason);
+
 /**
- * Ledger side, inside closeMergeRun's transaction, after CIF1's claim (null passes through: CIF1 claimed). Not a claim → the
- * receipt unchanged. A first claim on a ready / await_ci run whose intent and head never had one → phase `updating`
+ * Ledger side, inside closeMergeRun's transaction, wrapping CIF1's claim (null passes through: CIF1 claimed). A CIF1 rerun
+ * claim in a run that already merged main in → the ci_fail bounce: the new head's red goes back to fix, no rerun (spec 3).
+ * Not a claim → the receipt unchanged. A first claim on a ready / await_ci run whose intent and head never had one → phase `updating`
  * (rev+1, the claim as reason) and the event, null. The same claim re-sent while `updating` within BEHIND_SETTLE_MS →
  * nothing written, null: the driver keeps waiting for the new head. Anything else → the ci_fail bounce receipt.
  */
-export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string | null, drift: string | null, toReceipt: ToReceipt,
+export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, raw: string, drift: string | null, toReceipt: ToReceipt,
   writeEvent: WriteEvent): string | null {
+  const rerun = parseRerunReceipt(raw);
+  const receipt = rerun && behindOf(db, row, false)
+    ? toReceipt({ cause: "ci_fail", prHead: rerun.prHead, mainHead: null, checks: rerun.checks.map((name) => ({ name, link: rerun.link })) })
+    : ciRerunClaim(db, ctx, row, raw, drift, toReceipt, writeEvent);
   const claim = receipt === null ? null : parseBehindReceipt(receipt);
   if (!claim) return receipt;
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
@@ -215,8 +224,8 @@ export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, receip
   return null;
 }
 
-/** One per merge run and one per head: the new head's red, or a later run on the same head, bounces. */
-const behindOf = (db: Database, row: MergeRun): { ts: number; prHead: string } | null => db.query(`SELECT ts,
+/** One per merge run and one per head (`byHead`): the new head's red, or a later run on the same head, bounces. */
+const behindOf = (db: Database, row: MergeRun, byHead = true): { ts: number; prHead: string } | null => db.query(`SELECT ts,
   json_extract(data,'$.prHead') AS prHead FROM events WHERE target=? AND kind='scheduler' AND json_extract(data,'$.op')='merge_ci_behind'
-  AND (json_extract(data,'$.intentId')=? OR lower(json_extract(data,'$.prHead'))=lower(?)) ORDER BY seq LIMIT 1`)
-  .get(row.taskId, row.intentId, row.reviewedHead) as { ts: number; prHead: string } | null;
+  AND (json_extract(data,'$.intentId')=? OR (? AND lower(json_extract(data,'$.prHead'))=lower(?))) ORDER BY seq LIMIT 1`)
+  .get(row.taskId, row.intentId, byHead ? 1 : 0, row.reviewedHead) as { ts: number; prHead: string } | null;
