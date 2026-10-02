@@ -247,8 +247,8 @@ function rawAt(steps: readonly (typeof LEDGER_MIGRATIONS)[number][], version: nu
 const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 describe("迁移到第二版", () => {
-  test("顺序：v1 → asks → 依赖边 → 巡检 → asks v2 → 步骤 → 调度意图 → session → merge → feature → dag → 出借单 → 部署 → 出借写单 → 出借方 v2 → 合并等待起点 → feature 依赖 → 出借冷却基线", () => {
-    expect(LEDGER_MIGRATIONS.length).toBe(20);
+  test("顺序：v1 → asks → 依赖边 → 巡检 → asks v2 → 步骤 → 调度意图 → session → merge → feature → dag → 出借单 → 部署 → 出借写单 → 出借方 v2 → 合并等待起点 → feature 依赖 → 出借冷却基线 → 项目记忆", () => {
+    expect(LEDGER_MIGRATIONS.length).toBe(21);
     expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
     expect(LEDGER_MIGRATIONS[5]).toBe(STEPS_SCHEMA);
     expect(LEDGER_MIGRATIONS[6]).toBe(SCHEDULER_SCHEMA);
