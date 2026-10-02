@@ -141,6 +141,19 @@ describe("计划 / 用量 / 配置 / 线程状态", () => {
     expect(t.push(u)).toEqual([{ type: "system", subtype: "model_state", timestamp: TS, model: "gpt-5.6-luna", effort: "low" }]);
   });
 
+  test("Codex 不变：session_info_update（线程状态 / 标题）、没标 display 的思考不出条目，只有 Pi 适配器的 _meta.claudestra 记号才出", () => {
+    const t = tr();
+    t.push(say("正文", "m1"));
+    for (const u of [
+      { sessionUpdate: "session_info_update", _meta: { codex: { threadStatus: { type: "idle" } } } },
+      { sessionUpdate: "session_info_update", title: "x", _meta: { codex: { notice: "不是我们的记号" } } },
+      { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "**Planning**" }, _meta: { codex: { display: true } } },
+    ]) expect(t.push(u)).toEqual([]);
+    expect(t.push({ sessionUpdate: "session_info_update", _meta: { claudestra: { notice: "提示" } } })).toEqual([
+      assistantText("正文"), { type: "assistant", timestamp: TS, message: { content: [{ type: "thinking", thinking: "提示" }] } },
+    ]);
+  });
+
   test("threadStatusOf：session_info_update 里的线程状态（steer 另起的回合靠它等结束）", () => {
     expect(threadStatusOf({ sessionUpdate: "session_info_update", _meta: { codex: { threadStatus: { type: "idle" } } } })).toBe("idle");
     expect(threadStatusOf({ sessionUpdate: "session_info_update", _meta: { codex: { threadStatus: { type: "active", activeFlags: [] } } } })).toBe("active");
