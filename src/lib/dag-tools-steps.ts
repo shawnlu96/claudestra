@@ -1,3 +1,4 @@
+import { runLocalStart, type QueuedStart } from "./scheduler-local-runtime-start.js";
 /**
  * start_node 的执行：按预检出的 StartPlan 一步步做（= PM 原来的 mk-auto.sh），任何一步失败就把已做的倒序撤掉，回报停在哪一步。
  * 顺序有讲究：绑节点（dag-bind）放最后——绑定只追加、撤不掉，而卡被取消会让节点算「已完成」、之后改不了图；开 auto（workflow-set）
@@ -248,7 +249,7 @@ function restateStep(io: StepIO, p: StartPlan, peer: NonNullable<StartPlan["peer
   };
 }
 
-export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome> {
+export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome | QueuedStart> { return runLocalStart(io, p, async (io, p) => {
   const [workflow, bind] = cardSteps(io, p);
   const steps = p.peer ? [...taskSteps(io, p), workflow, restateStep(io, p, p.peer), bind]
     : [...taskSteps(io, p), worktreeStep(io, p), ...agentSteps(io, p), workflow, bind];
@@ -272,6 +273,7 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome> 
   const names = done.map((s) => s.name);
   if (p.peer) return { ok: true, taskId: p.taskId, placement: `peer:${p.peer.name}`, branch: p.branch, steps: names, reconciled };
   return { ok: true, taskId: p.taskId, agent: p.agent, branch: p.branch, worktree: p.worktree, prompt: p.promptPath, steps: names, reconciled };
+  });
 }
 
 async function rollback(steps: Step[]): Promise<{ rolledBack: StepName[]; leftovers: string[] }> {

@@ -1,3 +1,4 @@
+import { localCreatedFamily } from "./scheduler-local-runtime-start.js";
 /**
  * 自动开卡（i28-A1）的 step：runStart（dag-tools-steps.ts）发出的每条台账写，由调度服务改写成 `ledger scheduler-autostart step <claim> <子命令> …`
  * 到这里执行。每步一个事务：先核 claim 还活着、目标（卡号 / feature / 节点）和 claim 一致，再调现成的 lib 写函数。
@@ -77,7 +78,7 @@ function workflow(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInp
   const r = setWorkflow(db, grant(ctx, c), {
     taskId: task.id, taskRev: int(input.flags.rev, "rev"), workflowRev: int(input.flags["workflow-rev"], "workflow-rev"),
     template: (c.template ?? cur?.template ?? "code") as never, templateVersion: c.version ?? cur?.templateVersion ?? 3,
-    mode, authorFamily: "claude", fallback: AUTOSTART_FALLBACK, reason: mode === "manual" ? (input.flags.reason ?? "自动开卡中途失败，回滚") : undefined,
+    mode, authorFamily: localCreatedFamily(c.agent), fallback: AUTOSTART_FALLBACK, reason: mode === "manual" ? (input.flags.reason ?? "自动开卡中途失败，回滚") : undefined,
   });
   return { ok: true, ...r };
 }

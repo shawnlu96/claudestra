@@ -99,3 +99,5 @@ Share is max(1, feature active nodes)/max(1, project active nodes), including bl
 ETA is now + max(critical path × k, remaining/(throughput × share)) hours. Zero remaining uses the last card completion;
 empty DAGs have a null completion time. Feature dependencies propagate maximum ETA in topological order.
 `eta.basis` supplies perHour, samples, k, cpHours, remaining and share. All computations inject now.
+
+Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes include node/card/PM/time); bridge restart clears it, so call `start_node` again.
