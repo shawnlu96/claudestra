@@ -5,6 +5,7 @@ import type { Database } from 'bun:sqlite';
 import { boardContext, featureCard, hasFeatureSchema, type BoardCtx, type BoardNode } from './ledger-dag-board.js';
 import type { Feature } from './ledger-feature.js';
 import { autoSnapshot } from './scheduler-auto-snapshot.js';
+import { cardNames } from './scheduler-autostart.js';
 import { planScheduler } from './scheduler-plan.js';
 import type { SnapshotOpts } from './scheduler-snapshot.js';
 import { taskWorkerRefs } from './scheduler-sessions.js';
@@ -30,7 +31,7 @@ interface Order { orderId: string; taskId: string; peer: string; family: string;
 interface Ask { taskId: string; assignee: string | null; kind: string; createdAt: number; title: string }
 interface Merge { intentId: string; taskId: string; phase: string; createdAt: number; updatedAt: number; reason: string | null }
 interface NodeRef { featureId: string; node: BoardNode }
-export interface WorkBoardOptions extends SnapshotOpts { availableSlots?: number; manualRegistry?: readonly RegistryAgent[] }
+export interface WorkBoardOptions extends SnapshotOpts { availableSlots?: number; manualRegistry?: readonly RegistryAgent[]; specReady?: (taskId: string) => boolean }
 function rows<T>(db: Database, table: string, project: string, where = ''): T[] {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return [];
   return db.query(`SELECT * FROM ${table} WHERE project=? ${where}`).all(project) as T[];
@@ -108,7 +109,8 @@ function waiting(ctx: BoardCtx, task: LedgerTask, row: WorkRow, opts: WorkBoardO
 export function workBoard(db: Database, project: string, now: number, opts: WorkBoardOptions): WorkBoard {
   opts = { ...opts, manualRegistry: opts.manualRegistry ?? workBoardRegistry() };
   const ctx = boardContext(db, project, now);
-  const features = hasFeatureSchema(db) ? rows<Feature>(db, 'features', project).filter(f => f.status === 'active').map(f => featureCard(ctx, f)) : [];
+  const activeFeatures = hasFeatureSchema(db) ? rows<Feature>(db, 'features', project).filter(f => f.status === 'active') : [];
+  const features = activeFeatures.map(f => featureCard(ctx, f));
   const refs: NodeRef[] = features.flatMap(f => f.nodes.map(node => ({ featureId: f.id, node })));
   const byTask = new Map(refs.filter(r => r.node.taskId).map(r => [r.node.taskId!, r]));
   const orders = rows<Order>(db, 'lend_orders', project, "AND status IN ('pooled','claimed','unknown')");
@@ -150,7 +152,9 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     const task = ref.node.taskId ? ctx.tasks.get(ref.node.taskId) ?? null : null;
     const row = baseRow(ctx, task, ref);
     const blocked = ref.node.deps.filter(key => !features.find(f => f.id === ref.featureId)?.nodes.find(n => n.key === key)?.satisfied);
-    row.reason = [blocked.length ? `被 ${blocked.join('、')} 挡住` : '', !task?.spec ? '缺规格' : ''].filter(Boolean).join('；') || null;
+    const feature = activeFeatures.find(f => f.id === ref.featureId)!;
+    const specReady = task ? !!task.spec : opts.specReady?.(cardNames(db, feature, ref.node.key).taskId) ?? false;
+    row.reason = [blocked.length ? `被 ${blocked.join('、')} 挡住` : '', !specReady ? '缺规格' : ''].filter(Boolean).join('；') || null;
     row.remainingMinutes = estimateMinutes(row.estimate);
     board.todo[row.reason ? 'blocked' : 'ready'].push(row);
   }

@@ -1,4 +1,6 @@
 /** Owner-only compact work board; one deferred read transaction, no scheduler effects. */
+import { statSync } from 'node:fs';
+import { autostartSpecPath } from '../../lib/scheduler-autostart-deps.js';
 import { canReadLedger } from '../../lib/devices.js';
 import { workBoard } from '../../lib/ledger-work-board.js';
 import { readSchedulerConfig } from '../../lib/scheduler-config.js';
@@ -8,6 +10,11 @@ import type { Principal } from '../../lib/principals.js';
 import { apiJson, forbidden } from '../api-respond.js';
 import { ledgerDb } from '../ledger-feed.js';
 import { ledgerProjectExists } from './ledger.js';
+
+export function workBoardSpecReady(path: string): boolean {
+  try { return statSync(path).isFile(); }
+  catch { return false; } // Unavailable paths cannot establish specification readiness; keep the node blocked.
+}
 
 export async function handleWorkBoardApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
   const match = path.match(/^\/ledger\/([^/]+)\/work$/);
@@ -30,7 +37,7 @@ export async function handleWorkBoardApi(req: Request, path: string, principal: 
       ...(policy?.remote ? { pool: { remote: policy.remote, borrow } } : {}) };
     const result = db.transaction(() => {
       const total = workBoardSlots(db, project, opts.maxWorkers, borrow, policy?.remote, now);
-      return workBoard(db, project, now, { ...opts, availableSlots: total });
+      return workBoard(db, project, now, { ...opts, availableSlots: total, specReady: taskId => workBoardSpecReady(autostartSpecPath(taskId)) });
     }).deferred();
     return apiJson(200, { ok: true, ...result });
   } catch (error) {
