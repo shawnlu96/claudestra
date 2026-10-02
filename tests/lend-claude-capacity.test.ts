@@ -19,8 +19,8 @@ test("探测：只认 auth status 的 loggedIn；没登录 / 读不到 / 额度�
   expect(await probeClaudeLend(status("Usage: claude [options]"))).toContain("读不到");
   expect(await probeClaudeLend(status('{"loggedIn":"yes"}'))).toContain("读不到");
   expect(await probeClaudeLend({ status: async () => { throw new Error("找不到 Claude Code CLI"); }, quota: notFull })).toBe("找不到 Claude Code CLI");
-  const full = { status: async () => '{"loggedIn":true}', quota: async () => ({ observedAt: 1, full: true, resetsAt: Date.UTC(2026, 9, 2, 10) }) };
-  expect(await probeClaudeLend(full)).toBe("本机 Claude 额度已满，2026-10-02T10:00:00.000Z 重置");
+  const full = { status: async () => '{"loggedIn":true}', quota: async () => ({ observedAt: 1, full: true, resetsAt: Date.UTC(2099, 0, 1) }) }; // 远期固定值：probe 只在 resetsAt 晚于当前时刻时才报额度满
+  expect(await probeClaudeLend(full)).toBe("本机 Claude 额度已满，2099-01-01T00:00:00.000Z 重置");
   const unknown = { status: async () => '{"loggedIn":true}', quota: async () => { throw new Error("no snapshot"); } };
   expect(await probeClaudeLend(unknown)).toBeNull(); // 额度读不到按未知，不挡
   await expect(claudeAuthStatus()).rejects.toThrow("测试进程"); // 测试进程不跑真 CLI

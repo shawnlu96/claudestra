@@ -16,6 +16,8 @@ import { apiJson } from "./api-respond.js";
 import type { ApiUserEndpoint } from "./router.js";
 import { acpClear, acpSlash } from "./acp-link.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
+import { acpSettings } from "./runtime-settings-routes.js";
+import { PI_BUILTIN_PASSTHROUGH } from "../lib/pi-env.js";
 
 export const SLASH_OWNER_ONLY = {
   code: "slash_owner_only",
@@ -39,6 +41,8 @@ export interface SlashDeps {
   record: (cmd: string, agent: SlashAgent) => void;
   /** 窗口停在额度菜单 / 撞墙倒计时上（lib/wall-screen.ts）：不注入；不给 = 真抓屏 */
   wallWait?: (win: string) => Promise<WallWait | null>;
+  /** ACP 版 Pi 的 /model 写 registry、/reload 重启：和网页切换器 / 重启按钮同一条 manager 路径 */
+  runManager: (...args: string[]) => Promise<any>;
 }
 
 export interface SlashRequest {
@@ -61,6 +65,26 @@ async function acpSlashPassthrough(agent: SlashAgent, cmd: string, ccText: strin
   return apiJson(202, { ok: true, accepted: true, slash: true, ccText, agent: agent.name, acp: true });
 }
 
+/** ACP 版 Pi 的 configOptions id（lib/acp/pi-adapter/map.ts）：CC 风格的 /model /thinking /effort 直接切，不当 prompt 发给 pi */
+const PI_ACP_CONFIG = new Map<string, "model" | "reasoning_effort">([["model", "model"], ["thinking", "reasoning_effort"], ["effort", "reasoning_effort"]]);
+
+/** ACP 版 Pi 自己接的 /model /thinking /effort /reload。/reload：宿主没有原地重载，重启 agent（同一个 --session-id，对话接着走） */
+async function piAcpBuiltin(agent: SlashAgent, cmd: string, args: string, deps: SlashDeps): Promise<Response> {
+  const configId = PI_ACP_CONFIG.get(cmd);
+  if (configId && !args) return apiJson(400, { ok: false, error: `用法：/${cmd} <${configId === "model" ? "provider/模型 id" : "档位"}>` });
+  const res = configId === "model" ? await acpSettings(agent.name, agent.channelId, args, "", deps.runManager)
+    : configId ? await acpSettings(agent.name, agent.channelId, "", args, deps.runManager)
+    : await deps.runManager("restart", "--", agent.name).then((r) => apiJson(r?.ok ? 200 : 500, { ...(r ?? { ok: false, error: "manager restart failed" }), slash: true, reload: true }));
+  if (res.ok) deps.record(cmd, agent);
+  return res;
+}
+
+/** ACP 版 Pi 没有 TUI：CC 的命令 / 技能、Pi 的 TUI 内置命令发过去只会被当正文、白跑一轮 */
+const piAcpUnsupported = (cmd: string) => apiJson(409, {
+  ok: false, code: "slash_unsupported",
+  error: `ACP 版 Pi 不支持 /${cmd}，没有发给 agent。可用：/model /thinking /new /reload /compact，以及 Pi 自己的扩展命令 / 模板 / 技能`,
+});
+
 /** 处理完了（直通 202 / 403 / 409 / 注入失败 500）→ Response；不是能直通的命令 → null，调用方按普通消息投递 */
 export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): Promise<Response | null> {
   const { principal, agent, text } = r;
@@ -70,23 +94,29 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
   const owner = isOwnerPrincipal(principal);
   const regName = agent.name === "master" ? null : agent.name;
   // Pi / Codex 的命令表是它们自己的（lib/runtime-commands.ts），命中就交给运行时原生解释（同名命令语义不同）。
-  // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；Pi 照旧回落到 CC 注册表
+  // Codex 不在表里的 "/xxx" 落回普通消息——CC 的技能注进 Codex 的 TUI 没有意义；tmux 版 Pi 照旧回落到 CC 注册表，ACP 版 Pi 回不支持
   const rt = String(agent.runtime || "");
   const acp = await isConfiguredAcpChannel(agent.channelId);
-  if ((rt === "codex" || rt === "pi") && slashM[1] === "clear" && acp) { // 宿主轮换会话；当 prompt 交过去，pi 只会把它当普通文字
+  const clear = slashM[1] === "clear" || (rt === "pi" && slashM[1] === "new"); // Pi 的 /new 就是换新会话
+  if ((rt === "codex" || rt === "pi") && clear && acp) { // 宿主轮换会话；当 prompt 交过去，pi 只会把它当普通文字
     if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
     if (r.hasAttachments) return apiJson(409, { ok: false, error: "ACP /clear 不接收附件；会话未改动" });
     const cleared = await acpClear(agent.channelId);
     if (!cleared.ok) return apiJson(cleared.uncertain ? 504 : 409, { ok: false, code: cleared.uncertain ? "clear_result_unknown" : undefined, error: cleared.error, sessionId: cleared.sessionId });
-    deps.record("clear", agent);
+    deps.record(slashM[1], agent);
     return apiJson(200, { ok: true, agent: agent.name, sessionId: cleared.sessionId, previousSessionId: agent.sessionId, acp: true, slash: true, clear: true });
   }
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
+  const piAcp = rt === "pi" && acp;
+  if (piAcp && (PI_ACP_CONFIG.has(slashM[1]) || slashM[1] === "reload")) return owner ? piAcpBuiltin(agent, slashM[1], args, deps) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
   const nativeHit = runtimeCommandsFor(rt, agent.name, acp)?.find((c) => c.name === slashM[1]);
   const resolved = nativeHit
     ? { ok: true as const, ccText: `/${nativeHit.invokeName}${args ? ` ${args}` : ""}`, scope: nativeHit.scope }
     : rt === "codex" ? { ok: false as const, reason: "not a Codex command" } : resolveWebInvocation(slashM[1], regName, slashM[2] || "");
+  if (piAcp && !nativeHit && (resolved.ok || PI_BUILTIN_PASSTHROUGH.some((b) => b.name === slashM[1]))) {
+    return owner ? piAcpUnsupported(slashM[1]) : apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+  }
   if (!resolved.ok) {
     const other = isProjectSkillForOtherAgent(slashM[1], regName);
     if (!other) return null; // 不是已知命令 → 按普通消息投递
