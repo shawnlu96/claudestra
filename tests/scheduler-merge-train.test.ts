@@ -409,13 +409,22 @@ describe("i28-MT1 merge train", () => {
     expect(env.store.load("p")).toMatchObject({ phase: "cleanup", outcome: "void" });
   });
 
-  test("review r2 main-drift: the head-pinned merge itself re-checks main and refuses an outside commit", async () => {
+  test("review r3 main-drift: main moves after the await_ci gate and freshness: re-gated before the merging claim, void, retried not unknown", async () => {
     const env = setup([["a"], ["b"]]);
     await env.until("settling");
-    const external = withMergeTrain({} as MergeExternal, { gh: env.gh, store: env.store });
-    env.pushMain();
-    await expect(external.merge(env.cards[0]!.prRef, env.cards[0]!.head)).rejects.toThrow("合并前核对");
+    const run = cardRun(env, 0, BASE, "await_ci");
+    const read = env.gh.mainHead;
+    let reads = 0;
+    env.gh.mainHead = async (...a) => { if (++reads === 2) env.pushMain(); return read(...a); }; // 1st: await_ci gate; 2nd: the pre-claim gate
+    await run.once();
+    expect(reads).toBe(2);
     expect(calls(env, "match-head:")).toEqual([]);
+    expect(run.row.phase).toBe("await_ci"); // never journaled merging, so never unknown
     expect(env.store.load("p")).toMatchObject({ phase: "cleanup", outcome: "void" });
+    env.gh.mainHead = read;
+    await run.once();
+    expect(run.row.phase).toBe("updating"); // the void train no longer clears it: back on the serial path, a candidate for the next train
+    expect(calls(env, "match-head:")).toEqual([]);
   });
+
 });

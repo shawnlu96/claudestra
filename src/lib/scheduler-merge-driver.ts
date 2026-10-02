@@ -90,13 +90,14 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
 
 /** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict
  * still bounces; after the claim only the head-pinned merge API runs (GitHub refuses a moved head, so nothing merges early). */
-async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void): Promise<MergeRun> {
+async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step, assertActive: () => void, trained = false): Promise<MergeRun> {
   const fresh = await external.inspect(run.prRef);
   const same = samePr(run, fresh);
   if (same && fresh.mergeState === "UNKNOWN") return unknownWait(run, step);
   const bounced = await bounceStep(run, fresh, external, step);
   if (bounced) return bounced;
   if (!same || fresh.mergeState !== "CLEAN" || !green(run, fresh.checks)) return step("unknown", "合并前最后一次核对发现 PR/head/CI 已变");
+  if (trained && await external.train?.(run) !== "cleared") return run; // a train voided before the claim: no merge sent, retried next round
   await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
   assertActive();
   const mergeSha = await external.merge(run.prRef, run.reviewedHead);
@@ -130,10 +131,9 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       // Before update-branch: a stale PR GitHub is still computing may be a conflict, which only bounces once it reads DIRTY.
       if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
       // GitHub reports CLEAN for a stale branch unless "require up to date" is on, so staleness is asked directly.
-      const fresh = await external.freshness(run.prRef, pr.head);
       const train = await external.train?.(run); // merge train: wait while it tests, bounce its culprit, skip update-branch once verified
       if (train && train !== "cleared") return train === "wait" ? run : step("resolved", train.bounce);
-      if ((fresh.behindBy > 0 || pr.mergeState === "BEHIND") && train !== "cleared") {
+      if (train !== "cleared" && ((await external.freshness(run.prRef, pr.head)).behindBy > 0 || pr.mergeState === "BEHIND")) {
         const claimed = await step("updating");
         assertActive();
         return await updateOrBounce(claimed, external, step, stopped);
@@ -185,7 +185,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (!green(run, pr.checks)) return run;
       const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch; a train clearance is re-asked after it
       if (stale.behindBy > 0 && (train !== "cleared" || await external.train?.(run) !== "cleared")) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
-      return await claimAndMerge(run, external, step, assertActive);
+      return await claimAndMerge(run, external, step, assertActive, train === "cleared");
     }
     if (run.phase === "merging") {
       const pr = await external.inspect(run.prRef);

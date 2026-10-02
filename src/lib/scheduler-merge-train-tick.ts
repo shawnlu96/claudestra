@@ -21,7 +21,7 @@ import { trainGh } from "./scheduler-merge-train-gh.js";
 import { runBounded } from "./run-bounded.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import {
-  clearedMember, formTrain, recheckCleared, nextSkip, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
+  clearedMember, formTrain, nextSkip, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
 } from "./scheduler-merge-train.js";
 
@@ -179,11 +179,7 @@ export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = d
   return {
     ...base,
     train: (run: MergeRun) => trainGate(ctx.store.load(run.project), run, io),
-    async merge(prRef, head) {
-      const s = clearedMember(ctx.store.all(), prRef, head);
-      if (!s) return base.merge(prRef, head);
-      await recheckCleared(s, io); // the last word before the merge API: main and every verified head as tested, else void and refuse
-      return ctx.gh.mergeMatchHead(prRef, head);
-    },
+    // main / heads are re-checked by `train` right before the driver's `merging` claim, where a void still retries
+    merge: (prRef, head) => clearedMember(ctx.store.all(), prRef, head) ? ctx.gh.mergeMatchHead(prRef, head) : base.merge(prRef, head),
   };
 }
