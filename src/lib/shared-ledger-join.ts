@@ -3,6 +3,7 @@
  * The center learns this instance's public key only through a signature over (center, code, key, instance).
  * Neither the join code nor the issued bearer is ever returned, logged or written outside the 0600 credential file.
  */
+import { sharedLedgerJoinPinsMatch } from "./shared-ledger-gate-proxy-join-pins.js";
 import { createHash } from "node:crypto";
 import { signPurpose, isPublicKey, type InstanceKey } from "./instance-key.js";
 import { STATE_DIR } from "./paths.js";
@@ -118,11 +119,11 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
     // Client errors may carry response detail. Retrying the same code revokes the bearer this attempt was issued.
     throw new SharedLedgerJoinError("code redeemed, but the center did not accept the new credential; nothing was saved — retry the same code before it expires");
   }
-  // The code names its center; a different URL answering for an already-pinned center id never replaces local credentials.
-  if (readSharedLedgerBindings(dir).some((b) => b.centerId === grant.centerId && (resolveSharedLedgerCredential(input.subject, kind, b.centerId,
-    b.teamId, b.projectId, "read", dir)?.baseUrl ?? baseUrl) !== baseUrl)) throw new SharedLedgerJoinError("center URL does not match the pinned center; nothing was saved");
-  await writeSharedLedgerCredential(credential, dir);
   const localProjectId = input.localProjectId ?? project.projectId;
+  if (!sharedLedgerJoinPinsMatch(credential, localProjectId, project.projectId, dir)) {
+    throw new SharedLedgerJoinError("center or project does not match the pinned center; nothing was saved");
+  }
+  await writeSharedLedgerCredential(credential, dir);
   await setSharedLedgerBinding({ centerId: grant.centerId, teamId: grant.teamId, projectId: project.projectId, localProjectId }, dir);
   const identities = readSharedLedgerBindings(dir).filter((b) =>
     resolveSharedLedgerCredential(input.subject, kind, b.centerId, b.teamId, b.projectId, "read", dir));

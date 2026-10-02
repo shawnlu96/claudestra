@@ -92,14 +92,14 @@ function parseRequest(body: string): { code: string; publicKey: string; instance
 /** Atomic: lookup, proof check, credential registration and single-use mark share one immediate transaction. Until expiry the same
  *  instance key may redeem its own used code again (lost confirmation); the bearer issued earlier by that code is revoked. */
 function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLedgerJoinGrant {
-  const req = parseRequest(body);
-  const parsed = parseSharedLedgerJoinCode(req.code);
+  const req = parseRequest(body), parsed = parseSharedLedgerJoinCode(req.code);
   // Key-derived instance ids can only be claimed by their key, so a teammate cannot squat one before its owner joins.
   if (!parsed || !isPublicKey(req.publicKey) || !ID_RE.test(req.instanceId)
     || (req.instanceId.startsWith("sli-") && req.instanceId !== sharedLedgerInstanceId(req.publicKey))) return reject();
   return store.write(() => {
-    const center = centerId(store);
-    const row = store.get<JoinRow>("SELECT * FROM join_codes WHERE id=?", parsed.codeId);
+    // Stored separately to preserve the frozen join-code row format; the transaction publishes link and grant together.
+    store.run("CREATE TABLE IF NOT EXISTS join_issued_credentials(codeId TEXT PRIMARY KEY REFERENCES join_codes(id), hash TEXT NOT NULL REFERENCES credentials(hash))");
+    const center = centerId(store), row = store.get<JoinRow>("SELECT * FROM join_codes WHERE id=?", parsed.codeId);
     const given = Buffer.from(sha(parsed.secret), "hex");
     if (!row || parsed.centerId !== center || !timingSafeEqual(given, Buffer.from(row.secretHash, "hex"))) return reject();
     if ((row.usedAt !== null && row.instanceId !== req.instanceId) || row.revokedAt !== null || now >= row.expiresAt) return reject();
@@ -112,19 +112,18 @@ function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLed
     const bound = store.all<{ personId: string; publicKey: string }>(
       "SELECT personId, publicKey FROM instance_bindings WHERE teamId=? AND instanceId=?", row.teamId, req.instanceId);
     if (bound.some((b) => b.personId !== row.personId || b.publicKey !== req.publicKey) || (row.usedAt !== null && !bound.length)) return reject();
-    if (row.usedAt !== null) store.run("UPDATE credentials SET revokedAt=? WHERE teamId=? AND personId=? AND instanceId=? AND expiresAt=? AND revokedAt IS NULL",
-      now, row.teamId, row.personId, req.instanceId, row.usedAt + row.credentialTtlMs);
+    // Legacy used codes have no exact link: refuse rather than revoke unrelated grants.
+    if (row.usedAt !== null && store.db.query("UPDATE credentials SET revokedAt=? WHERE hash=(SELECT hash FROM join_issued_credentials WHERE codeId=?)")
+      .run(now, row.id).changes !== 1) return reject();
     const member = store.get<{ status: string }>("SELECT status FROM members WHERE teamId=? AND personId=?", row.teamId, row.personId);
     if (member && member.status !== "active") return reject();
-    const bearer = randomBytes(32).toString("base64url");
-    const expiresAt = now + row.credentialTtlMs;
+    const bearer = randomBytes(32).toString("base64url"), expiresAt = now + row.credentialTtlMs;
     const projects: SharedLedgerCredential["projects"] = [{ projectId: row.projectId, role: row.role as Role, actions }];
     registerCredential(store, { credentialHash: sharedLedgerCredentialHash(bearer), teamId: row.teamId, personId: row.personId,
       instanceId: req.instanceId, publicKey: req.publicKey, membershipStatus: "active", revokedAt: null, expiresAt, projects }, row.memberCode, true);
+    store.run("INSERT OR REPLACE INTO join_issued_credentials VALUES (?,?)", row.id, sharedLedgerCredentialHash(bearer));
     if (store.db.query("UPDATE join_codes SET usedAt=?, instanceId=? WHERE id=? AND (usedAt IS NULL OR instanceId=?)")
-      .run(now, req.instanceId, row.id, req.instanceId).changes !== 1) {
-      return reject();
-    }
+      .run(now, req.instanceId, row.id, req.instanceId).changes !== 1) return reject();
     return { centerId: center, teamId: row.teamId, personId: row.personId, instanceId: req.instanceId, bearer, expiresAt,
       role: row.role as Role, projects: [{ projectId: row.projectId, actions: [...actions] }] };
   });
@@ -148,9 +147,9 @@ export function joinHandler(store: Store, limits: JoinLimits = { perSourcePerMin
   const rejected = () => Response.json({ code: "join_rejected", message: "Join rejected" }, { status: 403, headers: { "Cache-Control": "no-store" } });
   return (method: string, body: string, remote: string, now: number): Response => {
     let codeKey = `malformed:${remote}`;
-    try { codeKey = String(JSON.parse(body)?.code ?? "").split(".")[2] ?? codeKey; }
+    try { codeKey = parseSharedLedgerJoinCode(JSON.parse(body)?.code)?.codeId ?? codeKey; }
     catch { /* Unparseable bodies count against a per-source malformed bucket and are rejected below. */ }
-    if (!hit(sources, remote, 60_000, limits.perSourcePerMinute, now) || !hit(codes, codeKey.slice(0, 64), 600_000, limits.perCodePer10Minutes, now)) {
+    if (!hit(sources, remote, 60_000, limits.perSourcePerMinute, now) || !hit(codes, codeKey, 600_000, limits.perCodePer10Minutes, now)) {
       return Response.json({ code: "rate_limited", message: "Rate limit exceeded" }, { status: 429, headers: { "Retry-After": "60" } });
     }
     if (method !== "POST") return rejected();

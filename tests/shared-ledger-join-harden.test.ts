@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,5 +200,59 @@ describe("center identity pinning", () => {
     await expect(joinSharedLedger({ url: "https://evil.example/", code: next, key, subject: "owner:self", stateDir: dir, fetch: evil }))
       .rejects.toThrow("does not match the pinned center");
     expect(files.map((path) => readFileSync(path, "utf8"))).toEqual(before);
+  });
+});
+
+
+describe("P1 enrollment regressions", () => {
+  test("malformed JSON codes cannot exhaust another source's code bucket", () => {
+    const own = new Store(":memory:");
+    try {
+      const h = joinHandler(own, { perSourcePerMinute: 100, perCodePer10Minutes: 2 });
+      for (const code of ["not.a.code", "sljoin1.bad.shared.bad", 7, null]) {
+        const body = JSON.stringify({ code }), source = String(code);
+        expect([h("POST", body, `noisy-${source}`, 1).status, h("POST", body, `noisy-${source}`, 1).status,
+          h("POST", body, `quiet-${source}`, 1).status]).toEqual([403, 403, 403]);
+        expect(h("POST", body, `noisy-${source}`, 1).status).toBe(429);
+      }
+    } finally { own.close(); }
+  });
+
+  test("retry A only revokes its own credential when project B was issued at the same instant", async () => {
+    const own = new Store(":memory:"), key = newKey(), now = Date.now();
+    try {
+      const a = createJoinCode(own, invite(), now), b = createJoinCode(own, invite({ projectId: "project-b" }), now);
+      const body = (code: string) => JSON.stringify(signSharedLedgerJoin(code, sharedLedgerInstanceId(key.publicKey), key));
+      const h = joinHandler(own, { perSourcePerMinute: 100, perCodePer10Minutes: 100 });
+      const first = await h("POST", body(a.code), "peer A", now).json() as { bearer: string };
+      const other = await h("POST", body(b.code), "peer A", now).json() as { bearer: string };
+      // Recreate the handler: the code-to-credential link must outlive its in-memory rate tables.
+      const retry = await joinHandler(own)("POST", body(a.code), "peer A", now + 1).json() as { bearer: string };
+      const rows = own.all<{ hash: string; revokedAt: number | null }>("SELECT hash, revokedAt FROM credentials");
+      const hash = (bearer: string) => createHash("sha256").update(bearer).digest("hex");
+      expect(rows.find((r) => r.hash === hash(first.bearer))!.revokedAt).toBe(now + 1);
+      expect(rows.find((r) => r.hash === hash(other.bearer))!.revokedAt).toBeNull();
+      expect(rows.find((r) => r.hash === hash(retry.bearer))!.revokedAt).toBeNull();
+    } finally { own.close(); }
+  });
+
+  test("a service grant with a changed team cannot bypass center and local project pins", async () => {
+    const key = newKey(), dir = join(root, "service-pin");
+    const code = createJoinCode(store, invite({ personId: "service-pin", memberCode: "service-pin" })).code;
+    const joined = await joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir });
+    const files = ["shared-ledger-credentials.json", "shared-ledger-bindings.json"].map((name) => join(dir, name));
+    const before = files.map((path) => readFileSync(path));
+    const credential = resolveSharedLedgerCredential("owner:self", "person", joined.centerId, "team-a", "project-a", "read", dir)!;
+    const features = await new SharedLedgerClient(credential, key).features();
+    const evil = (async (input: string | URL | Request) => String(input).endsWith(SHARED_LEDGER_JOIN_PATH)
+      ? Response.json({ centerId: joined.centerId, teamId: "team-b", personId: "service-pin", instanceId: credential.instanceId,
+        bearer: randomBytes(32).toString("base64url"), expiresAt: Date.now() + 60_000, role: "service",
+        projects: [{ projectId: "project-a", actions: ["read"] }] })
+      : Response.json({ ...features, teamId: "team-b" })) as unknown as typeof fetch;
+    for (const target of ["https://evil.example/", url]) {
+      await expect(joinSharedLedger({ url: target, code, key, subject: "owner:self", stateDir: dir, fetch: evil,
+        localProjectId: target === url ? "project-a" : "project-b" })).rejects.toThrow("nothing was saved");
+      expect(files.map((path) => readFileSync(path))).toEqual(before);
+    }
   });
 });
