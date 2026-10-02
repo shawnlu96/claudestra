@@ -5,6 +5,7 @@
  * and a silently trimmed order is a different order. `v` lets M2 / M3 rename fields later without guessing.
  * Rendering and redaction live in order-wire-render.ts. tests/order-wire.test.ts.
  */
+import { deliverWithoutDisputes, deliverDisputeFields, type FindingDispute } from "./review-arbiter-wire.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
@@ -44,6 +45,7 @@ export interface OrderWire {
 }
 
 export interface DeliverWire {
+  disputes?: FindingDispute[];
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
   head: string;
@@ -184,11 +186,11 @@ export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
 
 export function parseDeliverWire(raw: unknown): WireResult<DeliverWire> {
   return guarded(raw, () => {
-    const r = record(raw, "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
+    const r = record(deliverWithoutDisputes(raw), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), head: matching(r.head, "head", FULL_SHA),
       evidence: matching(text(r.evidence, "evidence", WIRE_LIMITS.path), "evidence", PATH), summary: text(r.summary, "summary", WIRE_LIMITS.summary),
-      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true),
+      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true), ...deliverDisputeFields(raw, fail),
     };
   });
 }

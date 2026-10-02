@@ -1,3 +1,4 @@
+import { applyFixReplacement } from "./fix-strategy-session.js";
 /** Durable per-card session claims. Sessions are created by the auto tick's ensure step and retired by scheduler-retire.ts. */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
@@ -222,4 +223,8 @@ export function beginReviewerSwap(db: Database, ctx: WriteCtx, id: string): Sche
 
 export function recordReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill" | "reuse", receipt: string): void {
   tx(db, () => applyReviewerSwapEffect(db, ctx, id, effect, receipt, (c, e) => { insertEvent(db, c, e, true); }));
+}
+
+export function bindFixReplacement(db: Database, ctx: WriteCtx, intentId: string, ref: import("./worker-session.js").SessionRef, material: string, registryPath?: string): void {
+  applyFixReplacement(db, ctx, intentId, ref, material, () => preserveSessionHistory(db), registryPath);
 }

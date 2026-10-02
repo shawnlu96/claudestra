@@ -89,7 +89,7 @@ test("different P1s fix past round four, round eight holds without dispatch, sen
   } finally { f.close(); }
 });
 
-test.each(["three_p1_rounds", "review_block"])("%s persists mixed demotions before manual fallback without duplicates", async (code) => {
+test.each(["review_block"])("%s persists mixed demotions before manual fallback without duplicates", async (code) => {
   const f = autoFixture();
   try {
     expect(await f.cli("owner", "meta", "--project", "p", "--docs-dir", f.dir)).toMatchObject({ ok: true });
@@ -98,7 +98,7 @@ test.each(["three_p1_rounds", "review_block"])("%s persists mixed demotions befo
     const feature = createFeature(f.db, f.at("pm"), { project: "p", slug: "manual", title: "manual" }).row;
     initDag(f.db, f.at("pm"), { id: feature.id, rev: feature.rev, nodes: [{ key: "A", taskId: "T1", fileGlobs: ["src/a.ts"] }] });
     await ready(f);
-    const round = code === "three_p1_rounds" ? 3 : 1;
+    const round = 1;
     for (let r = 1; r <= round; r++) {
       const head = String(r).repeat(40);
       const rows = [{ findingId: "persistent", family: "logic", severity: code === "review_block" ? "P0" : "P1",

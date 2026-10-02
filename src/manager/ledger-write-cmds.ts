@@ -235,7 +235,7 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   checkTaskRefs({ head: c.p.flags.head });
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
-  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom, pr: c.p.flags.pr, expect });
+  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom, pr: c.p.flags.pr, expect, disputes: c.p.flags.disputes });
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
@@ -341,8 +341,8 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: {
-    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr"],
-    usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes"],
+    usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
   },

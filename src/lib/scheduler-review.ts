@@ -1,3 +1,5 @@
+import { normalizedFamily } from "./review-arbiter-identity.js";
+import { arbitratedFacts, arbitrationKeepsP1 } from "./review-arbiter.js";
 /** Structured review evidence used by the deterministic planner; free-form report text cannot decide a branch. */
 import type { LedgerEvent, LedgerTask, ReviewVerdict } from "./ledger-stages.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
@@ -112,13 +114,13 @@ export function currentReviewFacts(task: ReviewTask, events: readonly LedgerEven
   const demoted = downgradedIds(events, task.round);
   return {
     kind: "facts",
-    facts: { eventSeq: review.seq, round: task.round, head, verdict: verdict as ReviewVerdict, reviewer,
+    facts: arbitratedFacts(events, task.specRev, { eventSeq: review.seq, round: task.round, head, verdict: verdict as ReviewVerdict, reviewer,
       reviewerSessionId, reviewerFamily: reviewerFamily as AuthorFamily, reportPath,
-      findings: findings.map((f) => f.severity === "P1" && demoted.has(f.findingId) ? { ...f, severity: "P2" } : f) },
+      findings: findings.map((f) => f.severity === "P1" && demoted.has(f.findingId) ? { ...f, severity: "P2" } : f) }),
   };
 }
 
-export const normalizedFamily = (family: string): string => family.normalize("NFKC").toLowerCase().replace(/[-_.]/g, "");
+export { normalizedFamily } from "./review-arbiter-identity.js";
 
 /** The planner's record of P1s it treated as P2 in a round (review-converge-followup.ts writes it with the stage move). */
 export const DOWNGRADE_OP = "review_downgrade";
@@ -129,7 +131,7 @@ export function downgradedIds(events: readonly LedgerEvent[], round: number): Se
 }
 /** A P1 that still blocks in its own round: it names a basis and the planner did not downgrade it then (review-converge.ts). */
 export const countsAsP1 = (events: readonly LedgerEvent[], round: number, f: ReviewFinding): boolean =>
-  f.severity === "P1" && findingBasis(f) !== null && !downgradedIds(events, round).has(f.findingId);
+  f.severity === "P1" && arbitrationKeepsP1(events, f, round) && findingBasis(f) !== null && !downgradedIds(events, round).has(f.findingId);
 
 function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null> {
   const byRound = new Map<number, LedgerEvent>();

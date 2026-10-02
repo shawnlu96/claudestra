@@ -6,6 +6,8 @@
  * tx / insertEvent / replay 在 ledger-tx.ts，只给写入模块用：直接写事件就绕过了阶段机与 owner 校验；纯校验在 ledger-checks.ts。
  */
 import type { Database } from "bun:sqlite";
+import { updateTask } from "./fix-strategy-task-write.js";
+import { deliverDisputes } from "./review-arbiter-deliver.js";
 import {
   APPENDABLE_KINDS,
   checkIdFree,
@@ -168,18 +170,6 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
   });
 }
 
-function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<string, unknown>): number {
-  const cols = Object.keys(patch);
-  const rev = cur.rev + 1;
-  db.prepare(`UPDATE tasks SET ${cols.map((c) => `${c} = ?`).join(", ")}, rev = ?, updatedAt = ? WHERE id = ?`).run(
-    ...(cols.map((c) => toColumn(c, patch[c])) as string[]),
-    rev,
-    ctx.now ?? Date.now(),
-    cur.id,
-  );
-  return rev;
-}
-
 // ── 阶段 ──
 
 /**
@@ -226,7 +216,7 @@ export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; 
 export function deliver(
   db: Database,
   ctx: WriteCtx,
-  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string } },
+  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string }; disputes?: unknown },
 ): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
@@ -238,12 +228,13 @@ export function deliver(
       throw new LedgerError("conflict", `任务 ${task.id} 在核对之后被改过（现在 rev ${task.rev}、分支 ${task.branch ?? "（空）"}），重新核对后再交付`, { rev: task.rev });
     }
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
+    const disputes = deliverDisputes(db, ctx, task, input.disputes, input.text);
     // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
     if (input.headSHA) checkReviewHead(task, input.headSHA);
     const patch = { ...(input.headSHA ? { headSHA: input.headSHA } : {}), ...deliverPrPatch(task, input.pr) };
     if (Object.keys(patch).length) task = (updateTask(db, ctx, task, patch), mustTask(db, task.id));
     if (input.moveFrom) task = applyMove(db, ctx, task, { from: input.moveFrom, to: "review" }, false).task;
-    const data = { round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
+    const data = { ...disputes, round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "deliver", text: input.text, data }, true);
     return { row: task, event, duplicate: false };
   });

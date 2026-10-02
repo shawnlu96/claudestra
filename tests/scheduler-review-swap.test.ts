@@ -240,7 +240,7 @@ describe("i28-RI1 automatic reviewer replacement", () => {
       expect(p.f.db.query("SELECT sessionId, state FROM scheduler_sessions WHERE role = 'reviewer' ORDER BY createdAt").all())
         .toEqual([{ sessionId: "s-rv", state: "retired" }, { sessionId: "s-rv-new", state: "active" }]);
       expect(await p.tick()).toMatchObject({ step: "sent" });
-      expect(await p.verdict("codex", "s-rv-new", [{ ...P1, findingId: "second" }])).toMatchObject({ ok: true });
+      expect(await p.verdict("codex", "s-rv-new", [{ ...P1, findingId: "second", family: "unrelated" }])).toMatchObject({ ok: true });
       expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
       await p.tick();
       await p.f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", "3".repeat(40));

@@ -345,12 +345,13 @@ describe("写事件的底座只给写入模块", () => {
       }
     };
     walk(root);
-    expect(tx.sort()).toEqual(["lib/ledger-autostart-resume.ts", "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
+    expect(tx.sort()).toEqual(["lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
+      "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
       "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts",
       "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
-      "lib/lend-pr-takeover-ledger.ts", "lib/order-mark.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
+      "lib/lend-pr-takeover-ledger.ts", "lib/order-mark.ts", "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
       "lib/scheduler-sessions.ts"]);
