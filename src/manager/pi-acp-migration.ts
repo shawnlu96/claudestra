@@ -1,7 +1,7 @@
 /**
  * Pi 的 transport 迁移：`manager migrate --pi <agent> [--to tmux]`。只动点名的这一个 agent，生产里现有的 Pi 一律不自动迁。
  * 对照 Codex 的迁移（acp-migration.ts）：就绪检查（pi 版本、同名 MCP）和切换都走 `transport` 的同一条路（switchTransport），
- * acp 起不来就切回 tmux 再起一次，不把能用的 agent 留成死窗口（沙箱里没有 tmux 版 Pi，不回退）。
+ * acp 起不来就切回 tmux 再起一次（restart 自己先退一次；退不到才由这里切），不把能用的 agent 留成死窗口（沙箱里没有 tmux 版 Pi，不回退）。
  * 两种 transport 起 pi 都带 registry 里同一个 --session-id，对话接着走；`--to tmux` 是回退。
  * docs/architecture/pi-acp-migration.md，tests/pi-acp-migration.test.ts。
  */
@@ -51,7 +51,9 @@ export async function migratePi(args: string[], deps: PiMigrateDeps = defaultDep
   if (r.ok) return { ...r, sessionId, sameSession: sessionId === info.sessionId };
   // 没有 restarted 字段 = 切换前就被拒（版本 / 同名 MCP），registry 没动，不用回退
   if (r.restarted === undefined || deps.sandbox) return r;
-  const back = await deps.switchTo(key, "tmux");
+  // restart 自己会把起不来的 ACP 退回 tmux 再起一次（recoverFailedAcpLaunch）：registry 已是 tmux 就别再切，再切只会报「没变」
+  const rolledBack = normalizeTransport((await deps.agents())[key]?.transport) === "tmux";
+  const back = rolledBack ? { ok: r.restarted === true, error: r.error } : await deps.switchTo(key, "tmux");
   // 报 registry 里的实际状态：switchTransport 先写 transport 再 restart，回退的 restart 失败时 registry 已是 tmux（只是没起来）
   const now = (await deps.agents())[key];
   const transport = normalizeTransport(now?.transport);
