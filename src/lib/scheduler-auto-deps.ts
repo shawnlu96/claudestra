@@ -150,7 +150,7 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
-    ensure: (task, role, family) => localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family), { registryPath }),
+    ensure: (task, role, family) => localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family), { registryPath, ledgerPath: db.filename }),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
     notifyPm: (task, text) => notifyPm(env, task, text),
