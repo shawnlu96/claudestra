@@ -14,7 +14,7 @@ export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, 
   const task = mustTask(db, input.pos[0]), intent = getIntent(db, input.pos[1]);
   const workflow = getWorkflow(db, task.id), config = readSchedulerConfig(opts.configPath);
   const agent = input.flags.agent, row = readRegistryAgentsSync(opts.registryPath).find((r) => r.name === agent);
-  const family = config.projects[task.project]?.localAuthorRuntime ?? "claude";
+  const family = input.flags["author-family"];
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "只有调度服务能补建本机执行者");
   if (!intent || intent.eventSeq !== input.claim || intent.taskId !== task.id || intent.action !== "ensure_session"
     || intent.node === "adversarial_review" || intent.status !== "submitted" || intent.recipient !== null
@@ -31,7 +31,7 @@ export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, 
     throw new LedgerError("conflict", "卡或自动调度配置已改变，不再补建本机执行者");
   }
   const expectedName = `agent-${`task-${task.id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48)}`;
-  if (!row?.sessionId || row.name !== expectedName || row.projectId !== task.project
+  if ((family !== "claude" && family !== "codex") || !row?.sessionId || row.name !== expectedName || row.projectId !== task.project
     || (row.runtime === "codex" ? "codex" : "claude") !== family) {
     throw new LedgerError("invalid", "执行者会话、项目或本机运行时不符");
   }

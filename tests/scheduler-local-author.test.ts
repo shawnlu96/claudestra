@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -52,6 +53,7 @@ async function fixture(slots = 0, runtime = "codex", explicit = false) {
   let now = 10_000, dead = false;
   const ctx = { actor: "owner", now };
   db.run("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')");
+  for (let n = 0; n < slots; n++) createTask(db, ctx, { id: `slot-${n}`, project: "other", title: "occupied", kind: "code", agent: `agent-slot-${n}` });
   setMeta(db, ctx, { project: "p", key: "pms", value: ["pm"] });
   createFeature(db, ctx, { project: "p", slug: "ap", title: "AP" });
   initDag(db, ctx, { id: "ab12-ap", rev: 1, nodes: [{ key: "a", oneLine: "author", fileGlobs: ["src/a.ts"] }] });
@@ -151,7 +153,7 @@ test("six global Codex sessions queue without worktree/Claude/manual fallback, t
   expect((await f.tick()).step).toBe("waiting");
   expect(f.creates).toEqual([]); expect(f.gitCalls).toEqual([]);
   expect(getWorkflow(f.db, "ap-a")?.mode).toBe("auto"); expect(f.task().agent).toBeNull();
-  expect(listEvents(f.db, { target: "ap-a" }).filter((e) => e.text.includes("Codex 排队 queued"))).toHaveLength(1);
+  expect(listEvents(f.db, { target: "ap-a" }).filter((e) => e.text.includes("本机执行者排队 queued"))).toHaveLength(1);
   delete f.agents["agent-slot-0"]; f.saveRegistry();
   await retryQueuedLocalStarts(); // A timer outside a scheduler pass cannot create with an expired maintenance lease.
   expect(f.creates).toEqual([]);
@@ -194,7 +196,7 @@ test("an existing standalone auto card also creates its missing local author wit
 });
 
 test("a thrown queued retry clears its receipt so a later scheduler pass can retry", async () => {
-  const f = await fixture();
+  const f = await fixture(); f.hello(true); await f.tick();
   const plan = await localAuthorPlan(f.db, f.task(), f.env.worktreeRoot, f.options);
   if (typeof plan === "string") throw new Error(plan);
   const queue = (run: () => ReturnType<typeof ensureLocalAuthor>) => queuedLocalAuthor(f.db, plan, f.options, async () => ({ ok: true }), run);
@@ -217,8 +219,13 @@ test("queue is inert after PM freezes the project, pins a peer, or switches the 
     if (change === "freeze") setFrozen(f.db, { actor: "owner" }, { project: "p", frozen: true, reason: "hold" });
     if (change === "pin") f.db.query("UPDATE tasks SET extra = ? WHERE id = 'ap-a'").run(JSON.stringify({ ...f.task().extra, placement: "peer:Sekai" }));
     if (change === "manual") f.db.query("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'ap-a'").run();
-    delete f.agents["agent-slot-0"]; f.saveRegistry(); await retryQueuedLocalStarts(); await f.tick();
+    await retryQueuedLocalStarts(); await f.tick();
     expect(f.creates).toEqual([]); expect(f.task().agent).toBeNull(); expect(f.gitCalls).toEqual([]);
+    if (change === "freeze") setFrozen(f.db, { actor: "owner" }, { project: "p", frozen: false, reason: "resume" });
+    f.db.query("UPDATE tasks SET extra = ? WHERE id = 'ap-a'").run(JSON.stringify({ ...f.task().extra, placement: undefined }));
+    f.db.query("UPDATE task_workflows SET mode = 'auto' WHERE taskId = 'ap-a'").run();
+    expect((await f.tick()).step).toBe("waiting");
+    expect(listEvents(f.db, { target: "ap-a" }).filter((e) => e.text.includes("本机执行者排队 queued"))).toHaveLength(2);
   }
 });
 
@@ -263,4 +270,149 @@ test("production ledger CLI accepts only the leased scheduler assignment and per
     expect(f.task().agent).toBe("agent-task-ap-a");
     expect(getWorkflow(f.db, "ap-a")?.authorFamily).toBe("codex");
   } finally { reader.close(); singleton.release(); maintenance.release(); }
+});
+
+test("cancelled queue receipts are removed, so an eligible card starts afresh after unfreezing", async () => {
+  const f = await fixture(6); f.hello(true); await f.tick(); await f.tick();
+  setFrozen(f.db, { actor: "owner" }, { project: "p", frozen: true, reason: "hold" });
+  await retryQueuedLocalStarts();
+  setFrozen(f.db, { actor: "owner" }, { project: "p", frozen: false, reason: "resume" });
+  const plan = await localAuthorPlan(f.db, f.task(), f.env.worktreeRoot, f.options);
+  if (typeof plan === "string") throw new Error(plan);
+  let runs = 0;
+  // A new direct attempt happens even while an unrelated global queue driver is busy.
+  const { queueLocalStart } = await import("../src/lib/scheduler-local-runtime-queue.js");
+  const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  await queueLocalStart({ db: () => f.db, manager: async () => ({ ok: true }) } as unknown as StepIO,
+    { ...plan, key: "other" } as never, { queuedReady: async () => { entered.resolve(); await gate.promise; return "cancel"; }, queuedNotice: async () => {} },
+    "test", async () => { throw new Error("cancelled blocker must not launch"); });
+  const driving = retryQueuedLocalStarts(); await entered.promise;
+  try {
+    expect(await queuedLocalAuthor(f.db, plan, f.options, async () => ({ ok: true }), async () => {
+      runs++; return { kind: "unknown", reason: "fresh" };
+    })).toEqual({ kind: "unknown", reason: "fresh" });
+    expect(runs).toBe(1);
+  } finally { gate.resolve(); await driving; }
+});
+
+test("an overlapping global queue driver never borrows another ensure call's launch callback", async () => {
+  const f = await fixture(); f.hello(true); await f.tick();
+  const plan = await localAuthorPlan(f.db, f.task(), f.env.worktreeRoot, f.options);
+  if (typeof plan === "string") throw new Error(plan);
+  const { queueLocalStart } = await import("../src/lib/scheduler-local-runtime-queue.js");
+  const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>();
+  await queueLocalStart({ db: () => f.db, manager: async () => ({ ok: true }) } as unknown as StepIO,
+    { ...plan, key: "blocker" } as never, { queuedReady: async () => { entered.resolve(); await gate.promise; return "cancel"; }, queuedNotice: async () => {} },
+    "test", async () => { throw new Error("cancelled blocker must not launch"); });
+  const queue = (run: () => ReturnType<typeof ensureLocalAuthor>) => queuedLocalAuthor(f.db, plan, f.options, async () => ({ ok: true }), run);
+  await queue(async () => ({ kind: "wait", reason: "full" }));
+  const driving = retryQueuedLocalStarts(); await entered.promise;
+  let runs = 0;
+  const run = async (): ReturnType<typeof ensureLocalAuthor> => { runs++; return { kind: "unknown", reason: "owned" }; };
+  const ensuring = queue(run); gate.resolve();
+  expect((await ensuring).kind).toBe("wait"); await driving;
+  expect(runs).toBe(0);
+  expect(await queue(run)).toEqual({ kind: "unknown", reason: "owned" }); expect(runs).toBe(1);
+});
+
+test("a wait during Claude preparation uses runtime-neutral queue notes", async () => {
+  const f = await fixture(0, "claude"); f.hello(true); await f.tick();
+  const plan = await localAuthorPlan(f.db, f.task(), f.env.worktreeRoot, f.options);
+  if (typeof plan === "string") throw new Error(plan);
+  const notes: string[] = [];
+  const result = await queuedLocalAuthor(f.db, plan, f.options, async (args) => { notes.push(args[3]); return { ok: true }; },
+    async () => ({ kind: "wait", reason: "intent changed" }));
+  expect(result.kind).toBe("wait"); expect(notes).toHaveLength(1);
+  expect(notes[0]).toContain("本机执行者排队"); expect(notes[0]).not.toContain("Codex");
+});
+
+test("microtask overlap cannot run a leased author callback in a background queue context", async () => {
+  const context = new AsyncLocalStorage<string>();
+  for (let offset = 0; offset < 8; offset++) {
+    const f = await fixture(); f.hello(true); await f.tick();
+    const plan = await localAuthorPlan(f.db, f.task(), f.env.worktreeRoot, f.options);
+    if (typeof plan === "string") throw new Error(plan);
+    const queue = (run: () => ReturnType<typeof ensureLocalAuthor>) => queuedLocalAuthor(f.db, plan, f.options, async () => ({ ok: true }), run);
+    await queue(async () => ({ kind: "wait", reason: "full" }));
+    const seen: (string | undefined)[] = [];
+    const run = async (): ReturnType<typeof ensureLocalAuthor> => { seen.push(context.getStore()); return { kind: "unknown", reason: "owned" }; };
+    const background = context.run("background", retryQueuedLocalStarts);
+    for (let n = 0; n < offset; n++) await Promise.resolve();
+    const result = await context.run("ensure", () => queue(run));
+    await background;
+    expect(seen).not.toContain("background");
+    if (result.kind === "wait") expect(await context.run("ensure", () => queue(run))).toEqual({ kind: "unknown", reason: "owned" });
+    expect(seen).toEqual(["ensure"]);
+  }
+});
+
+for (const pool of [false, true]) test(`production autoTickDeps defaults create and bind the selected author (pool=${pool})`, async () => {
+  const f = await fixture(); f.hello(true); await f.tick();
+  if (pool) Object.assign(f.config.projects.p, { localAuthorRuntime: "claude", agents: { claude: 0, codex: 1 } });
+  writeFileSync(f.configPath, JSON.stringify(f.config));
+  const singletonPath = join(f.dir, "singleton.lock"), maintenancePath = join(f.dir, "maintenance.lock");
+  const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
+  const root = new URL("../", import.meta.url).pathname;
+  const script = `
+    import { mock } from "bun:test";
+    import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+    const root = ${JSON.stringify(root)}, state = ${JSON.stringify(f.dir)}, pool = ${pool};
+    const managerModule = await import(root + "src/lib/run-manager.ts");
+    const actualRun = managerModule.runManagerProcess;
+    const { codexSlotHeld } = await import(root + "src/lib/scheduler-local-runtime-slots.ts");
+    let creates = 0;
+    mock.module(root + "src/lib/run-manager.ts", () => ({ ...managerModule, runManagerProcess: async (args, opts) => {
+      if (args[0] !== "create") {
+        if (args[0] !== "ledger") throw new Error("unexpected manager command");
+        return actualRun(args, opts);
+      }
+      if (!codexSlotHeld() || args.slice(-4).join(" ") !== "--runtime codex --transport acp") throw new Error("wrong runtime or missing lock");
+      creates++;
+      const registry = JSON.parse(readFileSync(state + "/registry.json", "utf8"));
+      registry.agents["agent-" + args[1]] = { cwd: args[2], projectId: "p", sessionId: "production-author", runtime: "codex", transport: "acp", status: "active" };
+      writeFileSync(state + "/registry.json", JSON.stringify(registry));
+      if (pool) {
+        const config = JSON.parse(readFileSync(state + "/scheduler.json", "utf8"));
+        // Admission selected Codex, but a freed Claude seat changes the next dynamic selection before session binding.
+        config.projects.p.agents.claude = 2;
+        writeFileSync(state + "/scheduler.json", JSON.stringify(config));
+      }
+      return { ok: true };
+    } }));
+    const { autoTickDeps } = await import(root + "src/lib/scheduler-auto-deps.ts");
+    const { LedgerReader } = await import(root + "src/lib/ledger-read.ts");
+    const { getTask } = await import(root + "src/lib/ledger-store.ts");
+    const reader = new LedgerReader(state + "/ledger.sqlite"), db = reader.get();
+    const deps = autoTickDeps(db, { lease: JSON.parse(process.env[${JSON.stringify(SCHEDULER_LEASE_ENV)}]), git: async (args) => {
+      if (args.includes("rev-parse")) return { code: 1, out: "absent" };
+      if (args.includes("add")) mkdirSync(args.at(-2), { recursive: true });
+      return { code: 0, out: "" };
+    } });
+    if (pool) {
+      const config = JSON.parse(readFileSync(state + "/scheduler.json", "utf8"));
+      config.projects.p.agents.codex = 0;
+      writeFileSync(state + "/scheduler.json", JSON.stringify(config));
+      const waiting = await deps.ensure(getTask(db, "ap-a"), "author", "claude");
+      if (waiting.kind !== "wait" || !waiting.reason.includes("codex") || creates) throw new Error("pool cap bypassed");
+      config.projects.p.agents.codex = 1;
+      writeFileSync(state + "/scheduler.json", JSON.stringify(config));
+    }
+    const result = await deps.ensure(getTask(db, "ap-a"), "author", "claude");
+    console.log(JSON.stringify({ result, creates, task: getTask(db, "ap-a") })); reader.close();
+  `;
+  try {
+    f.deps.ensure = async () => {
+      const proc = Bun.spawn([process.execPath, "--no-env-file", "-e", script], { stdout: "pipe", stderr: "pipe", env: testChildEnv({
+        HOME: f.dir, CODEX_HOME: join(f.dir, "codex-home"), CLAUDESTRA_STATE_DIR: f.dir,
+        [SCHEDULER_LEASE_ENV]: encodeLease({ singleton: { path: singletonPath, token: singleton.token }, maintenance: { path: maintenancePath, token: maintenance.token } }),
+      }) });
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect({ code, err }).toEqual({ code: 0, err: "" });
+      expect(JSON.parse(out)).toMatchObject({ creates: 1, result: { kind: "ready", ref: { family: "codex", transport: "acp" } }, task: { agent: "agent-task-ap-a" } });
+      Object.assign(f.agents, JSON.parse(readFileSync(f.options.registryPath, "utf8")).agents);
+      return JSON.parse(out).result;
+    };
+    expect((await f.tick()).step).toBe("session");
+    expect(getWorkflow(f.db, "ap-a")?.authorFamily).toBe("codex");
+  } finally { singleton.release(); maintenance.release(); }
 });

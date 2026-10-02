@@ -1,5 +1,6 @@
 /** Late local placement creates the same worktree/worker shape as start_node, without reopening the existing card. */
 import type { Database } from "bun:sqlite";
+import { configuredAgentLimits, poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
 import { existsSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
@@ -52,13 +53,13 @@ async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => vo
 async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan, opts: LocalStartOptions): Promise<EnsureResult> {
   const intent = claimed(env, task);
   if (!intent) return { kind: "wait", reason: "作者建会话意图已改变，下一轮重算" };
-  const family = localAuthorRuntime(task.project, opts.configPath);
+  const policy = readSchedulerConfig(opts.configPath).projects[task.project];
+  const family = policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath);
   const guard = () => {
     env.active();
     if (claimed(env, task)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");
     const config = readSchedulerConfig(opts.configPath);
-    if (!config.enabled || !config.autoDispatch || !config.projects[task.project]
-      || localAuthorRuntime(task.project, opts.configPath) !== family) throw new Error("本机执行者配置已改变，停止本次创建");
+    if (!config.enabled || !config.autoDispatch || !config.projects[task.project]) throw new Error("本机执行者配置已改变，停止本次创建");
   };
   const create = async (): Promise<EnsureResult> => {
     guard();
@@ -78,7 +79,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
           return { kind: "unknown", reason: `${p.agent} 的目录、项目或运行时不符` };
         }
         const saved = await whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq), "local-author",
-          task.id, intent.id, `--rev=${task.rev}`, `--agent=${row.name}`, `--dedup=local-author:${intent.id}`));
+          task.id, intent.id, `--rev=${task.rev}`, `--agent=${row.name}`, `--author-family=${family}`, `--dedup=local-author:${intent.id}`));
         if (saved.code === "lease-lost") throw new SchedulerStopped(String(saved.error));
         if (saved.ok !== true) return { kind: "unknown", reason: `本机会话已建，写回执行者失败：${String(saved.error)}` };
         return { kind: "ready", created: true, ref: { taskId: task.id, role: "author", agent: row.name, sessionId: row.sessionId,
@@ -88,7 +89,8 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
     }
     return { kind: "unknown", reason: `${p.agent} 已建，90 秒内没等到 session id` };
   };
-  return family === "codex" ? withCodexSlot(create, { ...opts, registryPath: env.registryPath ?? opts.registryPath, checkQuota: true }) : create();
+  const slotOpts = { ...opts, registryPath: env.registryPath ?? opts.registryPath, ledgerPath: env.db.filename, project: task.project, taskId: task.id, family };
+  return family === "codex" || configuredAgentLimits(slotOpts) ? withCodexSlot(create, { ...slotOpts, checkQuota: true }) : create();
 }
 
 export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}): Promise<EnsureResult> {
@@ -97,6 +99,6 @@ export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, o
   const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, opts);
   if (typeof plan === "string") return { kind: "manual", reason: plan };
   const note = (args: string[]) => whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq),
-    "local-author-note", task.id, intent.id, `--text=${args[3]}`, `--dedup=local-author-queue:${intent.id}:${args[3]?.match(/Codex 排队 (\w+)/)?.[1]}`));
+    "local-author-note", task.id, intent.id, `--text=${args[3]}`, `--dedup=local-author-queue:${intent.id}:${args[3]?.match(/排队 (\w+)/)?.[1]}`));
   return queuedLocalAuthor(env.db, plan, opts, note, () => launch(env, task, plan, opts));
 }
