@@ -273,6 +273,7 @@ class Card {
   /** A sent order is only a receipt: watch its session for a quota / auth failure, which is PM's call, never a resend. */
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
     await informFamilyWait(this.db, this.task, wait, this.opts.pool?.remote, this.deps);
+    await (await import("./scheduler-sec-review.js")).raiseSecReviewNoRoom(this.db, this.task, wait, this.deps); // i28-SR1
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
     if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
