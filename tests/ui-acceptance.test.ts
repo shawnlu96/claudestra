@@ -150,6 +150,7 @@ describe("整页验收节点 PAGEOK", () => {
     expect(page()).toHaveLength(1);
     expect(page()[0]).toMatchObject({ deps: ["a"], taskId: null });
     expect(page()[0].fileGlobs).toBeUndefined();
+    expect(page()[0].cardSlug).toBe("i28");
 
     spec("i28-c", UI_SPEC);
     expect((await rewrite([node("a"), node("b"), node("c")])).ok).toBe(true);

@@ -14,7 +14,9 @@ const ENVIRONMENT = "环境：独立 clone 里自己 `bun install --frozen-lockf
 const DUTIES = "职责：CI 由合并闸核对；ui 卡截图由 PM 验收；审查员只审代码";
 const SPEC_FIRST = "规格里的「PM 定」「PM 补」小节都在规格原文里，以规格为准";
 export const ASK_DEFAULT_GUIDANCE = "拿不准就用 ask，写清 default（默认做法）和 class=design/scope，然后照默认继续做；"
-  + "只有需要人的事（凭据、owner 拍板、安全）才用 class=blocker 等回复。出借池远端 ask 暂仍按 blocker 等 PM 回复。";
+  + "只有需要人的事（凭据、owner 拍板、安全）才用 class=blocker 等回复。出借池远端 ask 暂仍按 blocker 等 PM 回复；"
+  + "例外是测试类扩围：只加 tests/ 下的文件（被本规格替代的旧断言 / 为本卡新行为补测试）时，ask 里填 files（文件路径）和 "
+  + "reason=superseded_assertion / new_test，PM 15 分钟没回就自动批准、追加进本卡 fileGlobs，结论会发给你，不用等，照做继续。";
 
 export const GRADING_RULE = "分级：违反规格「验收线」某一条（写出编号）或本次 diff 引入的正确性 / 安全 bug → P1；其余（验收线以外、改动之前就有的、风格）→ P2。"
   + "拿不准就写进报告并说明理由，不提问";

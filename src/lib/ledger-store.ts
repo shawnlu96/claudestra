@@ -351,6 +351,7 @@ export interface QueueFrozen {
 }
 
 export interface LedgerMeta {
+  activePm?: string;
   /** 项目 PM 名单；只有 owner 能设 */
   pms: string[];
   /** 规格卡 / 报告所在目录；只有 owner 能设 */
@@ -366,6 +367,7 @@ export function getMeta(db: Database, project: string): LedgerMeta {
   const docsDir = kv.get("docsDir");
   const frozen = kv.get("queueFrozen") as QueueFrozen | undefined;
   return {
+    ...(typeof kv.get("activePm") === "string" ? { activePm: kv.get("activePm") as string } : {}),
     pms: Array.isArray(pms) ? pms.filter((p): p is string => typeof p === "string") : [],
     docsDir: typeof docsDir === "string" ? docsDir : null,
     queueFrozen: frozen ?? { frozen: false, reason: "", since: null },

@@ -74,7 +74,7 @@ const uiScope = (n: DagNode): string => JSON.stringify([n.taskId, n.oneLine, [..
 
 /** 系统验收允许重置，普通完成节点仍原样保护；两个重写判定入口必须共用。 */
 export function planPageRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase,
-  ...args: [next: Parameters<typeof planRewrite>[2], cancel: Parameters<typeof planRewrite>[3], scopeChange: boolean]): ReturnType<typeof planRewrite> {
+  ...args: [next: Parameters<typeof planRewrite>[2], cancel: Parameters<typeof planRewrite>[3], scopeChange: boolean, cards?: Parameters<typeof planRewrite>[5]]): ReturnType<typeof planRewrite> {
   return planRewrite(cur, (n) => n.key === PAGE_CHECK_KEY && phase(n) === "done" ? "idle" : phase(n), ...args);
 }
 

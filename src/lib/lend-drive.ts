@@ -28,6 +28,7 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
 import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
+import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -277,7 +278,8 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
 
 async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   if (row.work && !row.payload) {
-    const published = await publishWork(row, d);
+    const pre = await preflightDelivery(row, d); if (typeof pre !== "object") return pre ? finish(row, "stopped", pre, d, true) : undefined;
+    const published = await publishWork(pre, d);
     if (!published) return;
     row = published;
   }
@@ -287,8 +289,9 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   const r = await lendRequest(d.call, row.peer, "result", body);
   if (!r.ok) {
     if (r.code === "transport" || r.code === "bad_response" || r.code === "unavailable") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
-    const gone = GONE[r.code];
-    return finish(row, gone ?? "stopped", `A 不收结论：${r.code} ${r.error}`, d, !gone);
+    const gone = GONE[r.code], note = r.code === DELIVERY_NOTE ? await amendDelivery(row, r.error, d) : undefined; // 说明不全：补写重交
+    if (note === null) return;
+    return finish(row, gone ?? "stopped", note ?? `A 不收结论：${r.code} ${r.error}`, d, !gone);
   }
   const rc = r.value;
   const o = orderOf(row);
