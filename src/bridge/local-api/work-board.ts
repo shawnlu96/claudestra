@@ -1,4 +1,6 @@
 /** Owner-only compact work board; one deferred read transaction, no scheduler effects. */
+import { existsSync } from 'node:fs';
+import { autostartSpecPath } from '../../lib/scheduler-autostart-deps.js';
 import { canReadLedger } from '../../lib/devices.js';
 import { workBoard } from '../../lib/ledger-work-board.js';
 import { readSchedulerConfig } from '../../lib/scheduler-config.js';
@@ -30,7 +32,7 @@ export async function handleWorkBoardApi(req: Request, path: string, principal: 
       ...(policy?.remote ? { pool: { remote: policy.remote, borrow } } : {}) };
     const result = db.transaction(() => {
       const total = workBoardSlots(db, project, opts.maxWorkers, borrow, policy?.remote, now);
-      return workBoard(db, project, now, { ...opts, availableSlots: total });
+      return workBoard(db, project, now, { ...opts, availableSlots: total, specReady: taskId => existsSync(autostartSpecPath(taskId)) });
     }).deferred();
     return apiJson(200, { ok: true, ...result });
   } catch (error) {
