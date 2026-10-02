@@ -1,5 +1,5 @@
 /**
- * Pi 的 ACP 版适配器（transport=acp）。只能经 `manager transport <agent> acp` 切过来，Pi 缺省仍是 tmux（runtimes/pi.ts）。
+ * Pi 的 ACP 版适配器（transport=acp）。新建 / 收编的 Pi 探测通过就缺省走它（manager/acp-lifecycle.ts），老 agent 经 migrate --pi 切过来。
  * 会话来源和 tmux 版同一套（pi 的会话文件照写，历史 / 归档照读）；生命周期换成窗口里跑 ACP 宿主（src/acp-host.ts），
  * 宿主再起仓库里的 Pi 适配器（lib/acp/pi-adapter/）。和 Codex 版的差别：pi 的 --session-id 是 open-or-create，
  * new / resume / restart 同一条命令，没有引导轮；/clear 由适配器换新 id 重起 pi；就绪标记、退出序列与 Codex 版相同。
