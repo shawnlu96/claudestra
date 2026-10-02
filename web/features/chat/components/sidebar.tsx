@@ -11,7 +11,7 @@ import { StatsPanel } from "./stats-panel";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { SidebarExtraGroups } from "./sidebar-extra-groups";
-import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, splitMasterKids, type SidebarEntry, type TeamNode } from "../sidebar-entries";
+import { filterAndRankWorkers, type SidebarEntry, type TeamNode } from "../sidebar-entries";
 import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
 import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
@@ -22,8 +22,9 @@ import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
-import { Chevron, ProjectGroup } from "./project-group";
-import { GroupHistory, HistoryTeam, useSidebarHistory } from "./sidebar-history";
+import { ProjectGroup } from "./project-group";
+import { HistoryFold } from "./sidebar-history";
+import { buildSidebarDirectory, isHistoryAgent } from "../sidebar-history";
 import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
@@ -173,10 +174,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const pinSet = new Set(pinnedList);
   // 大总管独立入口(owner 2026-07-14:「跟普通 agent 区分开」)——不进列表、
   // 不参与搜索过滤,常驻列表区顶部的边框卡片
-  const master = agents.find((a) => a.pinnedMaster);
+  const master = agents.find((a) => a.pinnedMaster && !isHistoryAgent(a));
   // 大总管卡不走 AgentRow，【草稿】标单独订阅一份（agent-row.tsx 同款）
   const masterDraft = useSyncExternalStore(subscribeDrafts, () => (master ? hasDraft(master.name) : false), () => false);
-  const workers = agents.filter((a) => !a.pinnedMaster);
+  const workers = agents.filter((a) => a !== master);
   // 只按「置顶」分层,⚠ 未读不参与排序——规则与缘由见 sidebar-entries.ts
   const filtered = filterAndRankWorkers(workers, q, pinSet, master?.name);
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
@@ -184,14 +185,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const [showProjects, setShowProjects] = useState(false);
   const [collapsedProjects, toggleProjectCollapse] = usePersistedSet("cstra_proj_collapsed");
   const [collapsedTeams, toggleTeam] = usePersistedSet("cstra_team_collapsed"); // 派发者（及大总管）下挂的执行者
-  // 「💤 沉寂」组的展开态:默认折叠,会话内记忆即可(不持久化——每次进来先收起)
-  const [dormantOpen, setDormantOpen] = useState(false);
+  const [openHistory, toggleHistory] = usePersistedSet("cstra_directory_history_open");
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
-  // 单成员 project 不成组;整组全员沉寂才下沉「💤 沉寂」——规则见 sidebar-entries.ts
-  const entries = buildSidebarEntries(filtered, q, projMeta, master?.name); // 先按 parent 挂树再分组
-  const { awake: underMaster, dormantRows } = splitMasterKids(q ? [] : buildTeams(filtered, master?.name).underMaster);
-  const { activeEntries, dormantEntries } = splitDormant([...entries, ...dormantRows]);
-  const hist = useSidebarHistory(filtered); // 用完的审查 / 执行会话收进组底「历史 N」——规则见 sidebar-history.ts
+  const { activeEntries, underMaster, historyEntries, historyCount } = buildSidebarDirectory(q ? [] : filtered, projMeta, master?.name);
   // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
   const rowProps = (a: AgentSession) => ({
     a,
@@ -207,11 +203,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   });
   const busyOf = (i: AgentSession) => i.busy || (active === i.name && streaming);
   const row = (a: AgentSession, s?: RowSlots & { projEmoji?: string }) => <AgentRow key={a.name} {...rowProps(a)} {...s} />;
-  const teamRaw = (n: TeamNode, projEmoji?: string) => (
+  const team = (n: TeamNode, projEmoji?: string) => (
     <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={collapsedTeams.has(n.a.name)} busy={n.children.some(busyOf)}
       onToggle={() => toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
   );
-  const team = (n: TeamNode, projEmoji?: string) => <HistoryTeam key={`t:${n.a.name}`} node={n} hist={hist} collapsed={collapsedTeams.has(n.a.name)} row={row} render={(m) => teamRaw(m, projEmoji)} />;
 
   return (
     <aside
@@ -431,7 +426,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         ) : (
           /* v2.21+ 方案 A(owner 2026-08-28):统一两级树——仅 ≥2 成员的 project
              出组头(树形缩进),单人项目合并为一行(自定义 emoji 前缀);
-             >30 天沉寂的整体收进底部默认折叠的「💤 沉寂」 */
+             已停止的会话只在底部历史展开后显示 */
           (() => {
             const renderEntry = (e: SidebarEntry) => {
               if (e.kind === "row") return team(e, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
@@ -439,38 +434,21 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
               return (
                 <ProjectGroup
                   key={`g:${e.id}`}
-                  e={hist.group(e)}
+                  e={e}
                   collapsed={collapsedProjects.has(e.id)}
                   groupBusy={e.items.some(busyOf)}
                   onToggle={() => toggleProjectCollapse(e.id)}
                 >
-                  <GroupHistory e={e} hist={hist} team={(n) => team(n)} />
+                  {e.nodes.map((n) => team(n))}
                 </ProjectGroup>
               );
             };
             return (
               <ul className="flex w-full list-none flex-col gap-0.5 p-0">
                 {activeEntries.map(renderEntry)}
-                {dormantEntries.length > 0 && (
-                  <li key="__dormant__" className="mt-1 rounded-xl bg-base-300/15 p-1">
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-[12px] font-medium text-base-content/45 transition-colors hover:bg-base-300/40 hover:text-base-content/70"
-                      onClick={() => setDormantOpen((v) => !v)}
-                    >
-                      <Chevron open={dormantOpen} />
-                      <span>💤 {t("沉寂")}</span>
-                      <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/35">
-                        {dormantEntries.reduce((n, e) => n + entryMembers(e).length, 0)}
-                      </span>
-                    </button>
-                    {dormantOpen && (
-                      <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5 opacity-75">
-                        {dormantEntries.map(renderEntry)}
-                      </ul>
-                    )}
-                  </li>
-                )}
+                <HistoryFold count={historyCount} open={openHistory.has("all")} onToggle={() => toggleHistory("all")}>
+                  {historyEntries.map(renderEntry)}
+                </HistoryFold>
               </ul>
             );
           })()

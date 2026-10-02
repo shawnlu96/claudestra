@@ -1,3 +1,4 @@
+import { buildSidebarDirectory } from "@/features/chat/sidebar-history";
 import { describe, expect, test } from "bun:test";
 import {
   DORMANT_MS,
@@ -111,9 +112,11 @@ describe("派发关系构树（parent → 执行者挂在派发者下面）", ()
     const ws = [ag("pm", { projectId: "p" }), ag("t1", { projectId: "p", parent: "pm" }), ag("t3", { projectId: "p", parent: "pm" })];
     expect(build(ws)).toEqual(["pm{t1,t3}"]);
   });
-  test("父已停止：照样挂着", () => {
+  test("默认目录父已停止：活子提升，停止父只留历史", () => {
     const ws = [ag("pm", { status: "stopped", lastActivityTs: null }), ag("t1", { parent: "pm" })];
-    expect(build(ws)).toEqual(["pm{t1}"]);
+    const d = buildSidebarDirectory(ws, meta);
+    expect(shape(d.activeEntries)).toEqual(["t1"]);
+    expect(shape(d.historyEntries)).toEqual(["pm"]);
   });
   test("父不在列表（remove / 归档）：执行者回到自己的 project 下平铺", () => {
     const ws = [ag("t1", { projectId: "p", parent: "gone" }), ag("x", { projectId: "p" })];
