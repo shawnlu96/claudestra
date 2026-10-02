@@ -1,14 +1,21 @@
 /**
- * Right of way for a live merge train (i28-MT1f2). While a project's train is testing or settling, any merge into main that is not
- * one of its riding members voids the whole train and throws its CI away. Its members merge one by one, and each needs the
- * project's only merge slot (`merge:<project>`, held from the merge intent's plan until it settles; beginMergeRun requires it).
- * So the wait happens where the slot is handed out, not in the merge driver: a card the train will not merge gets no merge intent
- * while the train lives (scheduler-merge-train-hold-slot.ts, asked by the auto tick right before it plans), and a train is not formed
- * while the slot sits with a card that can no longer ride. Holding a run in the driver instead would keep the slot from every
- * member: the train could never settle (review r1 P1 train-hold-keeps-project-slot).
+ * Right of way for a live merge train (i28-MT1f2, i28-MT1f2f2). While a project's train is testing or settling, any merge into
+ * main that is not one of its riding members voids the whole train and throws its CI away. Its members merge one by one, and each
+ * needs the project's only merge slot (`merge:<project>`, held from the merge intent's plan until it settles; beginMergeRun requires it).
+ * So the wait happens around the slot, never by voiding a healthy train:
+ * - a card the train will not merge gets no merge intent while the train lives (scheduler-merge-train-hold-slot.ts, asked by the
+ *   auto tick right before it plans);
+ * - a card outside the train that already holds the slot but has sent no merge yet (ready / await_ci) lends it to the train: the
+ *   merge pass journals a same-phase step that gives the slot up (turnMergeSlot), the run waits with a readable reason, and once
+ *   the train is done, void or past HOLD_LIMIT_MS it takes the slot back the same way and goes on. Not a bounce, not unknown;
+ * - a card already merging keeps the slot, and no train forms until it settles (trainProjects).
  * A train still testing or settling past HOLD_LIMIT_MS is judged stuck: the hold lifts, and the first outsider to reach the
  * driver gate voids it and goes on serially.
  */
+import type { Database } from "bun:sqlite";
+import type { WriteCtx } from "./ledger-checks.js";
+import { LedgerError } from "./ledger-store.js";
+import { insertEvent } from "./ledger-tx.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import type { TrainDeps, TrainState } from "./scheduler-merge-train.js";
 
@@ -33,16 +40,38 @@ export const holdReason = (s: TrainState, taskId: string): string =>
 
 type Io = Pick<TrainDeps, "store" | "now" | "notify">;
 /**
- * trainGate's answer for a run the train will not merge. Such a run already holds the project merge slot (no run exists without
- * it), so while it lives no member can begin: waiting here would stall the train until its timeout. It got the slot before the
- * hold could stop it (a train formed around it, or it left the train while holding the slot), so the train cannot settle anyway:
- * it is voided now, before more CI is spent on it, and the run goes on serially.
+ * trainGate's answer for a run the train will not merge. While the train holds, the merge pass has it give the slot up before
+ * driving it (scheduler-merge-train-hold-slot.ts mergeSlotTurn), so it only gets here in the pass it began: it waits, and the
+ * next pass lends the slot to the train. Past the limit the stuck train is voided and the run goes on serially.
  */
 export async function releaseOutsider<D extends Io>(s: TrainState, run: MergeRun, deps: D,
-  voidTrain: (s: TrainState, deps: D, reason: string) => Promise<void>): Promise<null> {
+  voidTrain: (s: TrainState, deps: D, reason: string) => Promise<void>): Promise<"wait" | null> {
   if (s.phase !== "testing" && s.phase !== "settling") return null;
-  await voidTrain(s, deps, trainHolds(s, deps.now())
-    ? `合并槽在本批之外的 ${run.taskId} 手里（${run.phase}），成员拿不到槽无法逐张合并，放行它走串行合并`
-    : `列车超时：${HOLD_STEP[s.phase]}超过 ${HOLD_LIMIT_MS / 60_000} 分钟仍未结束，放行串行合并 ${run.taskId}`);
+  if (trainHolds(s, deps.now())) return "wait";
+  await voidTrain(s, deps, `列车超时：${HOLD_STEP[s.phase]}超过 ${HOLD_LIMIT_MS / 60_000} 分钟仍未结束，放行串行合并 ${run.taskId}`);
   return null;
+}
+
+/** Same-phase merge step receipts that move the project merge slot (no external effect, so no new phase). */
+export const SLOT_YIELD = "让出合并槽：", SLOT_RECLAIM = "取回合并槽，接着合并";
+export const isSlotTurn = (receipt: string | undefined): receipt is string => receipt === SLOT_RECLAIM || !!receipt?.startsWith(SLOT_YIELD);
+
+/**
+ * The ledger side of a slot turn, inside advanceMergeRun's transaction (scheduler-merge.ts observeMergeState, after its drift check).
+ * Yield: only a run that holds the slot and has sent no merge (ready / await_ci; updating finishes its update first). Reclaim:
+ * only a free slot. Either way the run's revision moves, so a racing step is refused.
+ */
+export function turnMergeSlot(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, now: number): void {
+  const lock = `merge:${row.project}`, give = receipt !== SLOT_RECLAIM;
+  const holder = db.query("SELECT intentId FROM scheduler_resources WHERE project = ? AND resource = ?").get(row.project, lock) as
+    { intentId: string } | null;
+  if (give && (row.phase !== "ready" && row.phase !== "await_ci")) throw new LedgerError("conflict", `合并步骤在 ${row.phase}，不能让出合并槽`);
+  if (give && holder?.intentId !== row.intentId) throw new LedgerError("conflict", "本意图未占项目合并槽，无从让出");
+  if (!give && holder) throw new LedgerError("conflict", holder.intentId === row.intentId ? "本意图已占项目合并槽" : "项目合并槽仍被占用");
+  if (give) db.prepare("DELETE FROM scheduler_resources WHERE project = ? AND resource = ? AND intentId = ?").run(row.project, lock, row.intentId);
+  else db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES (?, ?, ?, ?, ?, 'intent')")
+    .run(row.project, lock, row.taskId, row.intentId, now);
+  db.prepare("UPDATE scheduler_merges SET rev = rev + 1, updatedAt = ? WHERE intentId = ?").run(now, row.intentId);
+  insertEvent(db, { actor: ctx.actor, now }, { project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${receipt}`,
+    data: { op: "merge_slot", intentId: row.intentId, phase: row.phase, turn: give ? "yield" : "reclaim", receipt } }, false);
 }

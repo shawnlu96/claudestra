@@ -15,6 +15,7 @@ import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
+import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -162,12 +163,13 @@ export const MERGE_UNKNOWN_CLEAR = "GitHub 合并状态：结束 UNKNOWN 等待"
 
 /** Same-phase observations use the existing manager step (lease + CAS), without claiming an external effect. */
 function observeMergeState(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string | undefined): MergeRun {
-  if (!["ready", "updating", "await_ci"].includes(row.phase) || ![MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR].includes(receipt ?? "")) {
+  if (!["ready", "updating", "await_ci"].includes(row.phase) || (![MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR].includes(receipt ?? "") && !isSlotTurn(receipt))) {
     throw new LedgerError("invalid", "同阶段只接受活动合并的 UNKNOWN 等待观察");
   }
   const drift = mergeRunDrift(db, row);
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
   const now = ctx.now ?? Date.now();
+  if (isSlotTurn(receipt)) { turnMergeSlot(db, ctx, row, receipt, now); return getMergeRun(db, row.intentId) as MergeRun; } // i28-MT1f2f2: lend the slot to a live train / take it back
   const since = receipt === MERGE_UNKNOWN_WAIT ? row.unknownSince ?? now : null;
   if (since !== row.unknownSince) {
     db.prepare("UPDATE scheduler_merges SET unknownSince=?, rev=rev+1, updatedAt=? WHERE intentId=?").run(since, now, row.intentId);

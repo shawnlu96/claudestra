@@ -19,6 +19,7 @@ import { HOLD_LIMIT_MS } from "../src/lib/scheduler-merge-train-hold.js";
 import { mergeSlotHold, trainProjects } from "../src/lib/scheduler-merge-train-hold-slot.js";
 import { memberStatusOf, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
 import { mergeTick } from "../src/lib/scheduler-service.js";
+import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
 
@@ -112,7 +113,7 @@ function world(n: number, opts: { startedAgo?: number; files?: (i: number) => st
   const pass = async (order = ids) => {
     const before = hub.calls.length, live = store.load("p");
     if (live && live.phase !== "done") await stepTrain(live, deps);
-    await mergeTick(db, config, manager, () => withMergeTrain(base, { gh, store }), () => {});
+    await mergeTick(db, config, manager, () => withMergeTrain(base, { gh, store }), () => {}, undefined, store);
     plan(order);
     return hub.calls.slice(before);
   };
@@ -124,7 +125,15 @@ function world(n: number, opts: { startedAgo?: number; files?: (i: number) => st
   const slot = () => (db.query("SELECT taskId FROM scheduler_resources WHERE project='p' AND resource='merge:p'").get() as { taskId: string } | null)?.taskId ?? null;
   const form = (idx: number[]) => formTrain("p", idx.map((i) => cards[i]!), deps);
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, hub, store, events, cards, deps, held, plan, pass, phase, slot, form, close };
+  /** Take the slot and begin the merge run the way mergeTick does, without driving it: the card sits at ready holding the slot. */
+  const begin = async (id: string) => {
+    plan([id]);
+    const intent = (db.query("SELECT id FROM scheduler_intents WHERE taskId=? AND action='merge' AND status='pending'").get(id) as { id: string }).id;
+    await manager("ledger", "scheduler-settle", intent, "--from", "pending", "--to", "submitted", "--receipt", "merge controller claimed");
+    expect((await manager("ledger", "scheduler-merge-begin", intent, "--required-checks", "check")).ok).toBe(true);
+    return intent;
+  };
+  return { db, hub, store, events, cards, deps, held, plan, pass, phase, slot, form, begin, close };
 }
 const holdEvents = (w: ReturnType<typeof world>) => w.events.filter((e) => e.kind === "hold");
 
@@ -221,38 +230,118 @@ describe("i28-MT1f2 merge train right of way", () => {
     } finally { w.close(); }
   });
 
-  test("review r1 probe: a card outside the train that already holds the slot does not stall it — the train is voided at once and the card merges serially", async () => {
-    const w = world(3, { files: (i) => (i === 2 ? "src/1.ts" : `src/${i + 1}.ts`) }); // T3 overlaps T1, so it can't share a car
+  /** The card's own journal: the slot lent to the train (with the reason) and taken back. */
+  const slotTurns = (w: ReturnType<typeof world>, id: string) => listEvents(w.db, { project: "p", target: id })
+    .filter((e) => e.data.op === "merge_slot").map((e) => `${String(e.data.turn)} ${e.text}`);
+  const overlapT1 = { files: (i: number) => (i === 2 ? "src/1.ts" : `src/${i + 1}.ts`) }; // T3 overlaps T1, so it can't share a car
+
+  test("i28-MT1f2f2 line 1: an outsider already holding the slot at ready lends it to the testing train — no update-branch, no merge, a readable wait, the train goes on", async () => {
+    const w = world(3, overlapT1);
     try {
-      w.plan(["T3"]); // T3 took the slot first; its intent is still pending, so it is a train candidate
-      expect([w.slot(), w.phase("T3")]).toEqual(["T3", null]);
-      expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]);
+      await w.begin("T3");
+      expect([w.slot(), w.phase("T3")]).toEqual(["T3", "ready"]);
+      expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]); // ready can still ride or lend: the train may form around it
       w.hub.pending = true;
       const s = (await w.form([0, 1, 2]))!;
       expect(s.members.map((m) => m.taskId)).toEqual(["T1", "T2"]);
+      for (let i = 0; i < 2; i++) expect(await w.pass()).toEqual([]);
+      expect(w.store.load("p")).toMatchObject({ phase: "testing", outcome: null });
+      expect([w.slot(), w.phase("T1"), w.phase("T3")]).toEqual(["T1", "ready", "ready"]); // the slot went to the train's first member
+      const why = `T3 等第 1 辆列车 ${s.id} 结束（拼车 / 跑 CI）再申请合并槽，不 update-branch、不合并`;
+      expect(slotTurns(w, "T3")).toEqual([`yield 合并队列：让出合并槽：${why}`]);
+      expect(holdEvents(w).map((e) => e.text)).toEqual([why]);
+      expect(w.db.query("SELECT status FROM scheduler_intents WHERE taskId='T3' AND action='merge'").all()).toEqual([{ status: "submitted" }]); // not unknown, not bounced
+      expect(w.events.some((e) => e.kind === "void")).toBe(false);
+      w.hub.pending = false;
       const effects: string[][] = [];
-      for (let i = 0; i < 3 && w.phase("T3") !== "merged"; i++) effects.push(await w.pass());
-      expect(effects.flat()).toEqual(["serial-merge:3"]);
-      expect(w.store.load("p")!.reason).toContain("合并槽在本批之外的 T3 手里");
-      expect(w.slot()).not.toBe("T3"); // let go: the members can be merged again
+      for (let i = 0; i < 10 && w.phase("T3") !== "merged"; i++) effects.push(await w.pass());
+      expect(effects.flat()).toEqual(["match-head:1", "match-head:2", "update:3", "serial-merge:3"]);
+      expect(w.store.load("p")!.outcome).toBe("merged");
+      expect(slotTurns(w, "T3")).toEqual([`yield 合并队列：让出合并槽：${why}`, "reclaim 合并队列：取回合并槽，接着合并"]);
     } finally { w.close(); }
   });
 
-  test("no new train while the slot sits with a card that can no longer ride (past ready / updating, or unknown); a live train is always stepped", async () => {
+  test("i28-MT1f2f2 line 2: the same outsider while the train settles: the members merge one by one, then it takes the slot back and merges as usual", async () => {
+    const w = world(3, overlapT1);
+    try {
+      await w.begin("T3");
+      const s = (await w.form([0, 1, 2]))!;
+      for (let i = 0; i < 2; i++) await stepTrain(w.store.load("p")!, w.deps); // assemble, CI green: settling before any merge pass ran
+      expect(w.store.load("p")!.phase).toBe("settling");
+      const rounds: string[][] = [];
+      for (let i = 0; i < 10 && w.phase("T3") !== "merged"; i++) {
+        rounds.push(await w.pass());
+        if (w.store.load("p")!.phase === "settling") expect(w.slot()).not.toBe("T3");
+      }
+      expect(rounds.flat()).toEqual(["match-head:1", "match-head:2", "update:3", "serial-merge:3"]);
+      expect(w.store.load("p")).toMatchObject({ phase: "done", outcome: "merged" });
+      expect(slotTurns(w, "T3")).toEqual([`yield 合并队列：让出合并槽：T3 等第 1 辆列车 ${s.id} 结束（逐张合并）再申请合并槽，不 update-branch、不合并`,
+        "reclaim 合并队列：取回合并槽，接着合并"]);
+      expect(w.slot()).toBeNull();
+    } finally { w.close(); }
+  });
+
+  test("i28-MT1f2f2 line 3: no new train while an outsider is merging (or unknown); once it settles the next pass forms one", async () => {
     const w = world(3);
     try {
-      expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]); // slot free
-      w.plan(["T3"]);
-      expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]); // pending intent: T3 can still ride
-      await w.pass([]);
-      expect(w.phase("T3")).toBe("await_ci"); // RT1 in the 10-02 incident: past ready, CI on its own PR
-      expect(trainProjects(w.db, ["p"], w.store)).toEqual([]);
+      await w.begin("T3");
+      for (const [phase, can] of [["ready", true], ["updating", true], ["await_ci", true], ["merging", false], ["merged", false]] as const) {
+        w.db.query("UPDATE scheduler_merges SET phase=? WHERE taskId='T3'").run(phase);
+        expect([phase, trainProjects(w.db, ["p"], w.store)]).toEqual([phase, can ? ["p"] : []]);
+      }
+      w.db.query("UPDATE scheduler_merges SET phase='merging' WHERE taskId='T3'").run();
       w.db.query("UPDATE scheduler_intents SET status='unknown' WHERE taskId='T3' AND action='merge'").run();
       expect(trainProjects(w.db, ["p"], w.store)).toEqual([]);
-      w.db.query("UPDATE scheduler_intents SET status='submitted' WHERE taskId='T3' AND action='merge'").run();
-      await w.form([0, 1]);
+      w.db.query("UPDATE scheduler_merges SET phase='merged' WHERE taskId='T3'").run(); // the merge settles: intent done frees the slot
+      w.db.query("UPDATE scheduler_intents SET status='done' WHERE taskId='T3' AND action='merge'").run();
+      w.db.query("DELETE FROM scheduler_resources WHERE taskId='T3'").run();
       expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]);
+      expect((await w.form([0, 1]))!.members.map((m) => m.taskId)).toEqual(["T1", "T2"]);
+      expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]); // a live train is always stepped
       expect(trainProjects(w.db, ["p"], null)).toEqual(["p"]); // a test process has no store: unchanged
+    } finally { w.close(); }
+  });
+
+  test("i28-MT1f2f2: a card that lent its slot to one train is not made to lend it again — no new train forms until it merged", async () => {
+    const w = world(5, { files: (i) => (i === 2 ? "src/1.ts" : `src/${i + 1}.ts`) });
+    try {
+      await w.begin("T3");
+      w.hub.pending = true;
+      await w.form([0, 1, 2]);
+      await w.pass([]); // T3 lends the slot
+      expect(w.slot()).toBeNull();
+      w.hub.main = newSha(); // main moves under the train: it is voided before any member merged
+      for (let i = 0; i < 4 && w.store.load("p")!.phase !== "done"; i++) await w.pass([]);
+      expect(w.store.load("p")).toMatchObject({ phase: "done", outcome: "void" });
+      expect(w.phase("T3")).not.toBe("merged");
+      expect(trainProjects(w.db, ["p"], w.store)).toEqual([]); // T4 + T5 could form a train, but T3 goes first
+      for (let i = 0; i < 4 && w.phase("T3") !== "merged"; i++) await w.pass([]);
+      expect(w.phase("T3")).toBe("merged");
+      expect(trainProjects(w.db, ["p"], w.store)).toEqual(["p"]);
+    } finally { w.close(); }
+  });
+
+  test("the merge step that lends or takes back the slot is refused once a merge may be in flight, or when the slot is not free", async () => {
+    const w = world(2);
+    try {
+      const intent = await w.begin("T1");
+      const step = (from: string, receipt: string) => runLedger(["scheduler-merge-step", intent, "--from", from, "--to", from, "--rev",
+        String(getMergeRun(w.db, intent)!.rev), "--receipt", receipt], { db: w.db, actor: "scheduler", projectIds: ["p"],
+        loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => Date.now() }) as Promise<Record<string, unknown>>;
+      expect((await step("ready", "取回合并槽，接着合并")).error).toContain("本意图已占项目合并槽");
+      expect((await step("ready", "让出合并槽：x")).ok).toBe(true);
+      expect(w.slot()).toBeNull();
+      expect((await step("ready", "让出合并槽：x")).error).toContain("本意图未占项目合并槽");
+      w.plan(["T2"]);
+      expect((await step("ready", "取回合并槽，接着合并")).error).toContain("项目合并槽仍被占用");
+      w.db.query("DELETE FROM scheduler_resources WHERE taskId='T2'").run();
+      expect((await step("ready", "取回合并槽，接着合并")).ok).toBe(true);
+      expect(w.slot()).toBe("T1");
+      w.db.query("UPDATE scheduler_merges SET phase='updating' WHERE intentId=?").run(intent);
+      expect((await step("updating", "让出合并槽：x")).error).toContain("不能让出合并槽");
+      w.db.query("UPDATE scheduler_merges SET phase='merging' WHERE intentId=?").run(intent);
+      expect((await step("merging", "让出合并槽：x")).error).toContain("同阶段只接受");
+      expect(w.slot()).toBe("T1");
     } finally { w.close(); }
   });
 });
