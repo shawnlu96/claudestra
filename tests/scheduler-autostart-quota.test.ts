@@ -44,6 +44,8 @@ if (!process.env.AQ1_CHILD) {
         ...(runtime ? { localAuthorRuntime: runtime } : {}) } } }));
     writeFileSync(join(STATE_DIR, "registry.json"), JSON.stringify({ agents: Object.fromEntries(
       Array.from({ length: slots }, (_, i) => [`agent-${i}`, { runtime: "codex", status: "active" }])) }));
+    for (let i = 0; i < slots; i++) db.query(`INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt)
+      VALUES (?, 'p', 'busy', 'code', 'build', ?, 0, 0)`).run(`busy-${i}`, `agent-${i}`);
     db.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
     setMeta(db, { actor: "owner", now: 1 }, { project: "p", key: "pms", value: ["agent-pm"] });
     createFeature(db, { actor: "agent-pm", now: 2 }, { project: "p", slug: "aq1", title: "Quota regression" });
