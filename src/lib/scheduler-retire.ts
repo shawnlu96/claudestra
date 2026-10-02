@@ -7,6 +7,7 @@
  * Removal is only ever `git worktree remove` without --force, which itself refuses dirty trees.
  */
 import type { Database } from "bun:sqlite";
+import { hasUnsettledFinishedWrites } from "./ledger-scheduler-lease-finished.js";
 import { realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
@@ -79,8 +80,8 @@ const QUEUE_ACTIONS = "('merge','verify')";
 
 /**
  * Finished cards with a session still to retire or a claimed retire intent to finish, by id. A card with another open intent
- * waits (beginRetire would refuse it) unless it was cancelled: nothing drives a cancelled card's dispatch / review intents any
- * more, so the tick closes them itself (closeStray). An unknown intent, retire or not, is PM's to reconcile.
+ * waits (beginRetire would refuse it). Cancelled cards may close non-write strays themselves, but residual writes must first
+ * pass finished-card reconciliation. An unknown non-write intent, retire or not, is PM's to reconcile.
  */
 export function retireCandidates(db: Database, projects: readonly string[]): string[] {
   if (!projects.length || !db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return [];
@@ -91,7 +92,7 @@ export function retireCandidates(db: Database, projects: readonly string[]): str
     AND (EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId = t.id AND s.state != 'retired')
       OR EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.action = 'retire' AND i.status = 'submitted'))
     ORDER BY t.id`).all(...projects) as { id: string }[];
-  return rows.map((r) => r.id);
+  return rows.filter((r) => !hasUnsettledFinishedWrites(db, r.id)).map((r) => r.id);
 }
 
 /** An unfinished card still using this agent (bound session or named executor): killing it would kill that card's work. */
@@ -244,9 +245,10 @@ class RetireCard {
   }
 }
 
-/** For a cancelled card: close its open dispatch / review / ask intents, which nothing will settle once the card is out of work. */
+/** For a cancelled card: close non-write strays only after write reconciliation has removed its writer guard. */
 async function closeStray(db: Database, deps: RetireDeps, task: LedgerTask): Promise<string | null> {
   if (task.stage !== "cancelled") return null;
+  if (hasUnsettledFinishedWrites(db, task.id)) return "仍有未结写意图，等待写方空闲后结清";
   const open = db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND action NOT IN ('retire', 'merge', 'verify')
     AND status IN ('pending','submitted') ORDER BY id`).all(task.id) as { id: string; status: string }[];
   for (const i of open) {

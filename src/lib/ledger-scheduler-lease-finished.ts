@@ -1,52 +1,93 @@
 /** Finished cards can retain a dispatch after a pooled round was taken back and completed locally. */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
-import { queueFinishedLeaseNotice } from "./ledger-scheduler-lease-notice.js";
-import { workBoardWorkerAlive } from "./ledger-work-board-registry.js";
-import { bareCanonicalName, normalizeRegistryAgents, REGISTRY_PATH } from "./registry.js";
-import { readJsonStateSync } from "./state-file.js";
+import { clearFinishedLeaseNotice, queueFinishedLeaseNotice } from "./ledger-scheduler-lease-notice.js";
+import { REGISTRY_PATH } from "./registry.js";
+import { finishedWriters, finishedWorkerKey, finishedWorkerIdle } from "./ledger-scheduler-lease-worker.js";
+import type { RegistryAgent } from "./registry.js";
 
+type Options = { registryPath?: string; idleProof?: string; assertActive?: () => void };
+const pending = new Map<string, Promise<void>>();
 const hasTable = (db: Database, table: string): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
 
-function localWriter(db: Database, task: LedgerTask, intents: readonly SchedulerIntent[], registryPath: string): string | null {
-  // An unretired local author remains a writer claim, including the create/retire windows before registry changes.
-  const session = hasTable(db, "scheduler_sessions") ? db.query(`SELECT agent FROM scheduler_sessions
-    WHERE taskId = ? AND role = 'author' AND transport != 'peer' AND state IN ('active','retiring') LIMIT 1`)
-    .get(task.id) as { agent: string } | null : null;
-  if (session) return `本机 author ${session.agent} 尚未退役`;
-  const names = [task.agent, ...intents.map((i) => i.recipient)].filter((n): n is string => !!n && !n.startsWith("peer:"));
-  if (!names.length) return null;
-  const state = readJsonStateSync(registryPath, (value) => {
-    const agents = (value as { agents?: unknown } | null)?.agents;
-    return !!agents && typeof agents === "object" && !Array.isArray(agents) &&
-      Object.values(agents).every((a) => !!a && typeof a === "object");
-  });
-  if (state.status === "corrupt") return `本机 worker 状态无法核实：${state.error}`;
-  if (state.status === "missing") return null;
-  const wanted = new Set(names.map(bareCanonicalName));
-  const worker = normalizeRegistryAgents(state.data).find((a) => wanted.has(bareCanonicalName(a.name)) && workBoardWorkerAlive(a));
-  return worker ? `本机 worker ${worker.name} 仍是 ${worker.status}` : null;
+/** Capture the whole card, intent and lease rows so a concurrent transition or settlement invalidates the probe. */
+function stateKey(db: Database, taskId: string): string | null {
+  const resources = db.query("SELECT * FROM scheduler_resources WHERE taskId = ? ORDER BY resource").all(taskId);
+  if (!resources.length) return null;
+  return JSON.stringify([getTask(db, taskId),
+    db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY id").all(taskId), resources,
+    db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY sessionId").all(taskId)]);
+}
+
+function probeAfterCommit(db: Database, task: LedgerTask, workers: RegistryAgent[], opts: Options): void {
+  const key = stateKey(db, task.id), filename = db.filename;
+  const job = `${filename}:${task.id}`;
+  if (!key || pending.has(job)) return;
+  const token = crypto.randomUUID(), probeKey = `finished-card-lease-probe:${task.id}`;
+  db.prepare("INSERT OR REPLACE INTO scheduler_meta (key, value) VALUES (?, ?)").run(probeKey, token);
+  const work = Promise.resolve().then(() => reconcileWorkers(filename, db, task, workers, opts, { key, probeKey, token }));
+  pending.set(job, work);
+  void work.catch((error) => console.error("[scheduler-lease] 结清探测失败，保留文件锁", error)).finally(() => pending.delete(job));
+}
+
+async function reconcileWorkers(filename: string, writer: Database, task: LedgerTask, workers: RegistryAgent[], opts: Options,
+  proof: { key: string; probeKey: string; token: string }): Promise<void> {
+  const memory = !filename || filename === ":memory:";
+  const db = memory ? writer : new Database(filename, { readwrite: true, create: false });
+  const currentProbe = () => (db.query("SELECT value FROM scheduler_meta WHERE key = ?").get(proof.probeKey) as { value: string } | null)?.value === proof.token;
+  try {
+    if (!currentProbe() || stateKey(db, task.id) !== proof.key) return; // A rolled-back enclosing transaction must never launch a probe.
+    const idle = await Promise.all(workers.map(finishedWorkerIdle));
+    tx(db, () => {
+      opts.assertActive?.();
+      if (!currentProbe() || stateKey(db, task.id) !== proof.key) return;
+      const intents = db.query("SELECT * FROM scheduler_intents WHERE taskId = ?").all(task.id) as SchedulerIntent[];
+      const current = finishedWriters(db, task, intents.filter((i) => i.action === "dispatch" && ["write", "fix"].includes(i.node) &&
+        ["pending", "submitted", "unknown"].includes(i.status)), opts.registryPath ?? REGISTRY_PATH);
+      if (current.reason || finishedWorkerKey(current.workers) !== finishedWorkerKey(workers)) return;
+      if (idle.some((value) => !value)) {
+        queueFinishedLeaseNotice(db, task, `本机 worker ${workers.filter((_, i) => !idle[i]).map((w) => w.name).join("、")} 在忙或忙闲未知`, undefined, opts.assertActive);
+        return;
+      }
+      settleFinishedWriteIntents(db, task, { ...opts, idleProof: finishedWorkerKey(workers) });
+      if (!db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')").get(task.id)) {
+        db.query("DELETE FROM scheduler_resources WHERE taskId = ? AND scope = 'card'").run(task.id);
+      }
+    });
+  } finally {
+    try {
+      opts.assertActive?.();
+      db.prepare("DELETE FROM scheduler_meta WHERE key = ? AND value = ?").run(proof.probeKey, proof.token);
+    } finally { if (!memory) db.close(); }
+  }
 }
 
 /** Uses card-wide writer facts: a takeover's newer order/worker protects every older residual write intent too. */
-export function settleFinishedWriteIntents(db: Database, snapshot: LedgerTask, opts: { registryPath?: string } = {}): void {
+export function settleFinishedWriteIntents(db: Database, snapshot: LedgerTask, opts: Options = {}): void {
   tx(db, () => {
+    opts.assertActive?.();
     const task = getTask(db, snapshot.id);
     if (!task || !["live", "verified", "done", "cancelled"].includes(task.stage)) return;
     const intents = db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch'
       AND node IN ('write','fix') AND status IN ('pending','submitted','unknown') ORDER BY eventSeq, id`).all(task.id) as SchedulerIntent[];
-    if (!intents.length) return;
+    if (!intents.length) { clearFinishedLeaseNotice(db, task.id); return; }
     const order = hasTable(db, "lend_orders") ? db.query(`SELECT orderId, status FROM lend_orders
-      WHERE taskId = ? AND step IN ('write','fix') AND status IN ('pooled','claimed','running') LIMIT 1`)
+      WHERE taskId = ? AND step IN ('write','fix') AND status IN ('pooled','claimed','unknown') LIMIT 1`)
       .get(task.id) as { orderId: string; status: string } | null : null;
-    const held = order ? `出借写单 ${order.orderId} 仍是 ${order.status}` : localWriter(db, task, intents, opts.registryPath ?? REGISTRY_PATH);
-    if (held) { queueFinishedLeaseNotice(db, task, held); return; }
+    if (order) { queueFinishedLeaseNotice(db, task, `出借写单 ${order.orderId} 仍是 ${order.status}`, undefined, opts.assertActive); return; }
+    const local = finishedWriters(db, task, intents, opts.registryPath ?? REGISTRY_PATH);
+    if (local.reason) { queueFinishedLeaseNotice(db, task, local.reason, undefined, opts.assertActive); return; }
+    if (local.workers.length && opts.idleProof !== finishedWorkerKey(local.workers)) {
+      probeAfterCommit(db, task, local.workers, opts);
+      return;
+    }
+    clearFinishedLeaseNotice(db, task.id);
     const now = Date.now();
-    const receipt = `自动结清：卡已 ${task.stage}，同卡无 pooled/claimed/running 出借写单，也无本机在途 worker；取消残留写意图`;
+    const receipt = `自动结清：卡已 ${task.stage}，同卡无 pooled/claimed/unknown 出借写单，也无本机在途 worker；取消残留写意图`;
     for (const intent of intents) {
       db.prepare("UPDATE scheduler_intents SET status = 'cancelled', receipt = ?, updatedAt = ? WHERE id = ? AND status = ?")
         .run(receipt, now, intent.id, intent.status);
@@ -58,4 +99,33 @@ export function settleFinishedWriteIntents(db: Database, snapshot: LedgerTask, o
       }, true);
     }
   });
+}
+
+/** Retry busy/unknown workers on service ticks, including manual cards, before retirement checks open intents. */
+export async function reconcileFinishedCardLeases(db: Database, projects: readonly string[], assertActive: () => void): Promise<void> {
+  if (!projects.length) return;
+  const tasks = db.query(`SELECT DISTINCT t.id FROM tasks t JOIN scheduler_intents i ON i.taskId = t.id
+    WHERE t.project IN (${projects.map(() => "?").join(",")}) AND t.stage IN ('live','verified','done','cancelled')
+    AND i.action = 'dispatch' AND i.node IN ('write','fix') AND i.status IN ('pending','submitted','unknown') ORDER BY t.id`)
+    .all(...projects) as { id: string }[];
+  const probes: Promise<void>[] = [];
+  for (const row of tasks) {
+    assertActive();
+    tx(db, () => {
+      settleFinishedWriteIntents(db, getTask(db, row.id)!, { assertActive });
+      const probe = pending.get(`${db.filename}:${row.id}`);
+      if (probe) probes.push(probe);
+      else if (!db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')").get(row.id)) {
+        db.query("DELETE FROM scheduler_resources WHERE taskId = ? AND scope = 'card'").run(row.id);
+      }
+    });
+  }
+  await Promise.all(probes);
+  assertActive();
+}
+
+/** Reconciliation cancels only proven idle/absent writers. Retirement must not force its remaining writes closed. */
+export function hasUnsettledFinishedWrites(db: Database, taskId: string): boolean {
+  return !!db.query(`SELECT 1 FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch'
+    AND node IN ('write','fix') AND status IN ('pending','submitted','unknown') LIMIT 1`).get(taskId);
 }
