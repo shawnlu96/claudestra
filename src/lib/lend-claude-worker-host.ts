@@ -6,7 +6,7 @@ import { CLAUDE_LEND_ROOT } from "./lend-claude-worker-session.js";
 import { type ClaudeWorkerPlan } from "./lend-claude-worker.js";
 import { lendWatchdog, WATCHDOG_EVERY_MS } from "./lend-watchdog.js";
 import { childPidsInPsOutput, killPidsEscalating } from "./tmux-helper.js";
-import { redactSecrets } from "./usage-classify.js";
+import { redactSecrets } from "./redact-secrets.js";
 
 interface Child { pid: number; exited: Promise<number> }
 interface HostIo {
