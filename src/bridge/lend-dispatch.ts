@@ -66,12 +66,39 @@ const loop = createPushLoop({
 });
 
 let timer: ReturnType<typeof setInterval> | null = null;
+/** 持单期间的规格追加 / 复述答复（i28-RS1，`ledger lend-relay`）：这么久查一次；只在有持单中的写单或待发段时才起 manager */
+const RELAY_TICK_MS = 30_000;
+let relayAt = 0;
+let relaying = false;
+
+function relayDue(now: number): boolean {
+  const db = ledgerDb();
+  if (!db || now - relayAt < RELAY_TICK_MS || relaying) return false;
+  try {
+    return !!db.query(`SELECT 1 FROM lend_orders WHERE status = 'claimed' AND step IN ('write','fix') LIMIT 1`).get()
+      || !!db.query("SELECT 1 FROM lend_relays WHERE state IN ('pending','sending') LIMIT 1").get();
+  } catch {
+    return false; // 旧库还没有这两张表
+  }
+}
+
+function relayTick(): void {
+  const now = Date.now();
+  if (!relayDue(now)) return;
+  relayAt = now;
+  relaying = true;
+  manager(["ledger", "lend-relay"])
+    .then((r) => { if (!r?.ok) console.warn(`⚠️ [lend] lend-relay 失败（下轮再试）：${r?.error ?? "无输出"}`); })
+    .catch((e) => console.warn(`⚠️ [lend] lend-relay 起不来：${(e as Error).message}`))
+    .finally(() => { relaying = false; });
+}
 
 export function startLendDispatch(): void {
   if (timer || sandboxDisabledOutsideLab("出借推送")) return; // 沙箱不对外推送；lab 的 peer 只可能是 lab 实例
   timer = setInterval(() => {
     // 一轮出错（库暂时读不了、peers.json 读坏）只记日志：发送状态在内存里，下一轮照常重试，推不出去的单由推送 TTL 收走
     loop.tick().catch((e) => console.warn(`⚠️ [lend] 推送循环这一轮出错：${(e as Error).message}`));
+    relayTick();
   }, PUSH_TICK_MS);
   timer.unref?.();
 }

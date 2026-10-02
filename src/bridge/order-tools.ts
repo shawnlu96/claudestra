@@ -13,7 +13,7 @@ import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
 import { findPrRows } from "../lib/order-deliver-pr.js";
 import type { LedgerRun } from "../lib/order-ledger-exit.js";
 import { markingTakes, recordTaken } from "../lib/order-mark.js";
-import { currentOrders, orderWireFor } from "../lib/order-take.js";
+import { takeOrderResult } from "../lib/order-take.js";
 import { refuse, routeOrderTool, type OrderToolHandler, type OrderToolResult, type VerifiedCall } from "../lib/order-tool-route.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { runBounded } from "../lib/run-bounded.js";
@@ -36,13 +36,10 @@ const ledgerRun: LedgerRun = (args, channelId) =>
 const cwdOf = (agent: string): string | undefined => (agent === "master" ? MASTER_DIR : readRegistryAgentsSync().find((a) => a.name === agent)?.cwd);
 
 /** 当前的单：多张时取最近动过的一张，其余的单号一并告诉它（deliver / ask 认其中任何一张） */
+/** 写单借给了 peer 的卡：不发给本机会话，order 为空并带 note 说明（lib/order-take.ts takeOrderResult，i28-RS1） */
 const takeOrder: OrderToolHandler = async (call) => {
-  const db = ledgerDb();
-  const cur = db ? currentOrders(db, call) : [];
-  if (!db || !cur.length) return { ok: true, order: null };
-  const w = orderWireFor(db, cur[0]);
-  if (!w.ok) return refuse("invalid_order", w.error);
-  return { ok: true, order: w.order, ...(cur.length > 1 ? { otherOrderIds: cur.slice(1).map((o) => o.orderId) } : {}) };
+  const r = takeOrderResult(ledgerDb(), call);
+  return r.ok ? r : refuse("invalid_order", r.error);
 };
 
 const reviewHandlers = reviewToolHandlers(ledgerRun);

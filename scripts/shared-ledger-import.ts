@@ -16,6 +16,7 @@ import { readSharedLedgerMode, writeSharedLedgerModes, resolveSharedLedgerCreden
 import { parseSharedLedgerImport } from "../src/lib/shared-ledger-contract-transfer.js";
 import type { SharedLedgerImport, SharedLedgerImportReceipt } from "../src/lib/shared-ledger-contract.js";
 import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
+import { migrationLockPath } from "../src/lib/shared-ledger-mirror.js";
 import { setSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
 import { instanceKeySync } from "../src/lib/instance-key.js";
 import { STATE_DIR } from "../src/lib/paths.js";
@@ -90,7 +91,7 @@ export async function prepareSharedLedgerImport(db: Database, options: SharedLed
   if (!validId(options.batchId) || !db.filename || db.filename === ":memory:") throw new MigrationError("persistent batch and ledger required");
   const dir = join(options.stateDir, "shared-ledger-migrations"), path = journalPath(options.stateDir, options.batchId);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const lock = await acquireLock(join(dir, "migration.lock"));
+  const lock = await acquireLock(migrationLockPath(options.stateDir));
   if (!lock) throw new MigrationError("migration lock unavailable");
   try {
     const selectionDigest = createHash("sha256").update(canonicalJson({ ...options, scrub: undefined })).digest("hex");
@@ -131,7 +132,7 @@ export async function prepareSharedLedgerImport(db: Database, options: SharedLed
 export async function revokeUncommittedSharedLedgerImport(db: Database, stateDir: string, batchId: string, approvedDigest = "") {
   if (!validId(batchId)) throw new MigrationError("invalid batch id");
   const dir = join(stateDir, "shared-ledger-migrations"), path = journalPath(stateDir, batchId);
-  const lock = await acquireLock(join(dir, "migration.lock"));
+  const lock = await acquireLock(migrationLockPath(stateDir));
   if (!lock) throw new MigrationError("migration lock unavailable");
   try {
     const record = readRecord(path);
@@ -178,7 +179,7 @@ export async function advanceSharedLedgerImport(db: Database, stateDir: string, 
     if (local) return local;
   }
   const dir = join(stateDir, "shared-ledger-migrations"), path = journalPath(stateDir, batchId);
-  const lock = await acquireLock(join(dir, "migration.lock"));
+  const lock = await acquireLock(migrationLockPath(stateDir));
   if (!lock) throw new MigrationError("migration lock unavailable");
   try {
     const record = readRecord(path), payload = record?.payload;
