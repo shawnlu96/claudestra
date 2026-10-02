@@ -1,11 +1,13 @@
 /** Compact, read-only work projection. The caller owns the deferred transaction and supplies machine policy. */
+import type { RegistryAgent } from './registry.js';
+import { workBoardRegistry, workBoardWorkerAlive } from './ledger-work-board-registry.js';
 import type { Database } from 'bun:sqlite';
 import { boardContext, featureCard, hasFeatureSchema, type BoardCtx, type BoardNode } from './ledger-dag-board.js';
 import type { Feature } from './ledger-feature.js';
 import { autoSnapshot } from './scheduler-auto-snapshot.js';
 import { planScheduler } from './scheduler-plan.js';
 import type { SnapshotOpts } from './scheduler-snapshot.js';
-import { getSchedulerSession, taskWorkerRefs } from './scheduler-sessions.js';
+import { taskWorkerRefs } from './scheduler-sessions.js';
 import { phaseSince } from './lend-pr-takeover.js';
 import { listDeps } from './ledger-store.js';
 import { stepAtStage } from './ledger-steps.js';
@@ -20,13 +22,15 @@ interface WorkRow {
 }
 export interface WorkBoard {
   now: number; asOfSeq: number; working: WorkRow[]; waiting: WorkRow[]; todo: { ready: WorkRow[]; blocked: WorkRow[] };
+  legacyTotal: number;
+  legacy: { taskId: string; title: string; stage: string }[];
   machines: Record<string, number>; completionHours: number | null; availableSlots: number;
 }
 interface Order { orderId: string; taskId: string; peer: string; family: string; step: string; status: string; createdAt: number; updatedAt: number; beat: string | null }
 interface Ask { taskId: string; assignee: string | null; kind: string; createdAt: number; title: string }
 interface Merge { intentId: string; taskId: string; phase: string; createdAt: number; updatedAt: number; reason: string | null }
 interface NodeRef { featureId: string; node: BoardNode }
-export interface WorkBoardOptions extends SnapshotOpts { availableSlots?: number }
+export interface WorkBoardOptions extends SnapshotOpts { availableSlots?: number; manualRegistry?: readonly RegistryAgent[] }
 function rows<T>(db: Database, table: string, project: string, where = ''): T[] {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return [];
   return db.query(`SELECT * FROM ${table} WHERE project=? ${where}`).all(project) as T[];
@@ -76,15 +80,20 @@ function waiting(ctx: BoardCtx, task: LedgerTask, row: WorkRow, opts: WorkBoardO
     if (ahead.length) return set('merge_queue', `合并排队：前面是 ${ahead.map(m => m.taskId).join('、')}`);
   }
   if (order?.status === 'claimed') return false;
-  if (view.workflow?.mode === 'manual' && ['spec', 'restate', 'build', 'fix', 'review'].includes(task.stage)) {
-    const session = getSchedulerSession(ctx.db, task.id, task.stage === 'review' ? 'reviewer' : 'author');
-    if (session?.state === 'active') return false;
+  if (view.workflow?.mode === 'manual') {
+    if (task.stage === 'review') return set('reviewer', '等审查员领单');
+    const alive = opts.manualRegistry?.some(a => a.name === task.agent && workBoardWorkerAlive(a));
+    const writing = ['restate', 'build', 'fix'].includes(task.stage) || row.step === 'restate';
+    if (alive && writing) { row.who = task.agent; return false; }
+    if (fallback && !alive) return set(/额度|quota/.test(manualReason) ? 'quota' : 'manual',
+      /额度|quota/.test(manualReason) ? `额度到线暂停：${manualReason}` : `退回人工（manual）：${manualReason}`, fallback.ts);
+    if (writing) return set('executor_missing', '执行者不在了');
   }
-  if (view.workflow?.mode === 'manual') return set(/额度|quota/.test(manualReason) ? 'quota' : 'manual',
-    /额度|quota/.test(manualReason) ? `额度到线暂停：${manualReason}` : `退回人工（manual）：${manualReason}`, fallback?.ts ?? view.workflow.updatedAt);
   if (view.workflow?.mode === 'auto') {
     const decision = planScheduler(autoSnapshot(ctx.db, task, opts));
-    if (decision.kind === 'escalate') return set(decision.code, `退回人工（${decision.code}）：${decision.reason}`);
+    if (decision.kind === 'escalate') return set(decision.code,
+      fallback && !opts.manualRegistry?.some(a => a.name === task.agent && workBoardWorkerAlive(a)) ?
+        `退回人工（${decision.code}）：${decision.reason}` : `等 PM：${decision.reason}`);
     if (decision.kind === 'wait' && !['in_flight', 'intent_in_flight', 'terminal'].includes(decision.code)) {
       return set(decision.code, decision.code === 'capacity' ? '本机名额满' : decision.code === 'resource_busy' ? `文件锁：${decision.reason}` : decision.reason);
     }
@@ -97,6 +106,7 @@ function waiting(ctx: BoardCtx, task: LedgerTask, row: WorkRow, opts: WorkBoardO
 }
 /** No writes, no dispatch, and no peer credential reads: all scheduler decisions are pure plans. */
 export function workBoard(db: Database, project: string, now: number, opts: WorkBoardOptions): WorkBoard {
+  opts = { ...opts, manualRegistry: opts.manualRegistry ?? workBoardRegistry() };
   const ctx = boardContext(db, project, now);
   const features = hasFeatureSchema(db) ? rows<Feature>(db, 'features', project).filter(f => f.status === 'active').map(f => featureCard(ctx, f)) : [];
   const refs: NodeRef[] = features.flatMap(f => f.nodes.map(node => ({ featureId: f.id, node })));
@@ -105,15 +115,18 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
   const asks = rows<Ask>(db, 'asks', project, `AND state='open' AND blocking=1 AND expiresAt>${now}`);
   const merges = rows<Merge>(db, 'scheduler_merges', project);
   const samples = stepSamples(ctx.events, now);
-  const board: WorkBoard = { now, asOfSeq: ctx.asOfSeq, working: [], waiting: [], todo: { ready: [], blocked: [] }, machines: {},
+  const board: WorkBoard = { now, asOfSeq: ctx.asOfSeq, working: [], waiting: [], legacy: [], legacyTotal: 0, todo: { ready: [], blocked: [] }, machines: {},
     completionHours: null, availableSlots: opts.availableSlots ?? opts.maxWorkers };
   for (const task of ctx.tasks.values()) {
+    if (!ctx.sched.get(task.id)?.workflow && !['verified', 'done', 'cancelled'].includes(task.stage)) {
+      board.legacy.push({ taskId: task.id, title: task.title.slice(0, 180), stage: task.stage }); continue;
+    }
     const latest = ctx.sched.get(task.id)?.latestIntent;
     const restating = task.stage === 'spec' && latest?.node === 'restate' && ['submitted', 'done'].includes(latest.status);
     if (['verified', 'done', 'cancelled'].includes(task.stage) || (task.stage === 'spec' && !restating)) continue;
     const row = baseRow(ctx, task, byTask.get(task.id));
     if (restating) { row.step = 'restate'; row.since = latest!.createdAt; }
-    const order = orders.find(o => o.taskId === task.id);
+    const order = orders.find(o => o.taskId === task.id && (task.stage !== 'review' || o.step === 'review'));
     const mergeIntent = ctx.db.query("SELECT id FROM scheduler_intents WHERE taskId=? AND action='merge' ORDER BY eventSeq DESC, createdAt DESC, id DESC LIMIT 1")
       .get(task.id) as { id: string } | null;
     const merge = mergeIntent ? merges.find(m => m.intentId === mergeIntent.id) : undefined;
@@ -132,7 +145,7 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     if (waiting(ctx, task, row, opts, order, asks.find(a => a.taskId === task.id), merge, merges)) board.waiting.push(row);
     else { board.working.push(row); board.machines[row.machine] = (board.machines[row.machine] ?? 0) + 1; }
   }
-  const started = new Set([...board.working, ...board.waiting].map(r => r.taskId));
+  const started = new Set([...board.working, ...board.waiting, ...board.legacy].map(r => r.taskId));
   for (const ref of refs.filter(r => r.node.phase === 'idle' && !started.has(r.node.taskId))) {
     const task = ref.node.taskId ? ctx.tasks.get(ref.node.taskId) ?? null : null;
     const row = baseRow(ctx, task, ref);
@@ -143,7 +156,8 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
   }
   const allRows = [...board.working, ...board.waiting, ...board.todo.ready, ...board.todo.blocked];
   const durations = new Map(allRows.map(r => [r.taskId ?? `${r.featureId}/${r.nodeKey}`, r.remainingMinutes]));
-  const graph = refs.map(r => ({ id: `${r.featureId}/${r.node.key}`, deps: r.node.deps.map(k => `${r.featureId}/${k}`),
+  const legacyIds = new Set(board.legacy.map(r => r.taskId));
+  const graph = refs.filter(r => !r.node.taskId || !legacyIds.has(r.node.taskId)).map(r => ({ id: `${r.featureId}/${r.node.key}`, deps: r.node.deps.map(k => `${r.featureId}/${k}`),
     minutes: durations.get(r.node.taskId ?? `${r.featureId}/${r.node.key}`) ?? 0 }));
   const taskKey = (id: string) => { const ref = byTask.get(id); return ref ? `${ref.featureId}/${ref.node.key}` : id; };
   const deps = listDeps(db, project);
@@ -151,5 +165,7 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     deps: deps.filter(d => d.to === r.taskId).map(d => taskKey(d.from)), minutes: r.remainingMinutes }));
   board.completionHours = completionHours([...graph, ...offGraph], board.availableSlots);
   board.working.sort((a, b) => (now - b.since) / Math.max(1, b.normalMinutes) - (now - a.since) / Math.max(1, a.normalMinutes));
+  board.legacyTotal = board.legacy.length;
+  board.legacy = board.legacy.sort((a, b) => a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0).slice(0, 50);
   return board;
 }

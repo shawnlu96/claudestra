@@ -4,8 +4,8 @@ import { chromium } from 'playwright-core';
 import { mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { WorkBoard, WorkRow } from '../web/features/collab/work/work-types';
-const enabled = process.env.WORK_BOARD_BROWSER === '1';
-const out = '/Users/shawn/.claude-orchestrator/ledger/reviews/i28-WB1-shots';
+const out = process.env.WORK_BOARD_WB1_SHOTS_DIR;
+const enabled = process.env.WORK_BOARD_BROWSER === '1' && !!out;
 const row = (id: string, patch: Partial<WorkRow> = {}): WorkRow => ({ taskId: id, featureId: 'f', nodeKey: id, title: '协作视图：看清谁在干活与剩余时间',
   who: `agent-${id}`, machine: 'local', step: 'write', round: 1, since: 85 * 60000, normalMinutes: 60, remainingMinutes: 115, overMinutes: 0,
   reason: null, code: null, estimate: '半天', ...patch });
@@ -17,6 +17,7 @@ const board: WorkBoard = { now: 90 * 60000, asOfSeq: 1, machines: { local: 2, Se
   todo: { ready: [row('A1')], blocked: [row('A2', { reason: '被 A1 挡住' }), row('A3', { reason: '缺规格' })] } };
 
 test.skipIf(!enabled)('390/1400 board, segmented navigation, node/task clicks and retry retains rows', async () => {
+  if (!out) return;
   mkdirSync(out, { recursive: true });
   const entry = resolve('web/features/collab/work/.shot-fixture.tsx');
   await Bun.write(entry, `import React from 'react'; import {createRoot} from 'react-dom/client';

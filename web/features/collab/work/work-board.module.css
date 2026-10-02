@@ -36,3 +36,7 @@
   .summary strong { font-size: 19px; }
 }
 @media (prefers-reduced-motion: reduce) { .loading, .retry { animation: none; } .row { transition: none; } }
+
+.legacy summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.legacy summary::-webkit-details-marker { display: none; }
+.legacy[open] summary svg { transform: rotate(90deg); }

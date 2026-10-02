@@ -9,6 +9,7 @@ beforeEach(() => { db = openLedger(':memory:'); });
 afterEach(() => closeLedger(':memory:'));
 function task(id: string, stage = 'build') {
   createTask(db, { actor: 'owner', now: 0 }, { id, project: 'p', title: id, kind: 'code', stage: stage as never, agent: `agent-${id}`, spec: 'spec.md' });
+  workflow(id, 'observe');
 }
 function order(id: string, status: string, step = 'write', beat: unknown = null) {
   db.query(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, wire, text, sha256,
@@ -20,6 +21,7 @@ function intent(id: string, action = 'dispatch', status = 'submitted') {
     status, reason, createdAt, updatedAt) VALUES (?,?,'p','write',?,1,2,1,1,2,?,'test',0,0)`).run(id, id, action, status);
 }
 function workflow(id: string, mode = 'auto') {
+  db.query('DELETE FROM task_workflows WHERE taskId=?').run(id);
   db.query(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, rev,
     createdAt, updatedAt) VALUES (?,'p','code',2,?,'codex','PM',1,1,0,0)`).run(id, mode);
 }
@@ -28,7 +30,7 @@ function session(id: string) {
   db.query(`INSERT INTO scheduler_sessions (taskId,role,agent,sessionId,family,transport,state,createIntentId,createdAt,updatedAt)
     VALUES (?,'author',?,?,'codex','tmux','active',?,0,0)`).run(id, `agent-${id}`, `s-${id}`, id);
 }
-function board(maxWorkers = 2) { return db.transaction(() => workBoard(db, 'p', now, { registry: [], maxWorkers, now })).deferred(); }
+function board(maxWorkers = 2) { return db.transaction(() => workBoard(db, 'p', now, { registry: [], manualRegistry: [], maxWorkers, now })).deferred(); }
 test('local write, peer write, publishing and pool wait; no writes and no unrelated project', () => {
   for (const id of ['local', 'peer', 'publish', 'pool']) task(id);
   order('peer', 'claimed'); order('publish', 'claimed', 'write', { phase: 'publishing', since: 600000 }); order('pool', 'pooled', 'review');
@@ -50,7 +52,7 @@ test('blocking asks, unknown effects, manual and CI use authoritative facts', ()
   db.query(`INSERT INTO scheduler_merges (intentId,taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,phase,createdAt,updatedAt)
     VALUES ('ci','ci','p','a/b#1','b','h','[]','await_ci',100,200)`).run();
   const b = board();
-  expect(b.waiting.map(r => r.code).sort()).toEqual(['ask', 'unknown_effect', 'manual', 'ci', 'merge_queue'].sort());
+  expect(b.waiting.map(r => r.code).sort()).toEqual(['ask', 'unknown_effect', 'executor_missing', 'ci', 'merge_queue'].sort());
   expect(b.waiting.find(r => r.taskId === 'queue')?.reason).toContain('ci');
 });
 test('planner file conflict and local capacity classify as waiting', () => {

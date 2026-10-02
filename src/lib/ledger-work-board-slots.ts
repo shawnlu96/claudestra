@@ -9,7 +9,8 @@ export function workBoardSlots(db: Database, project: string, maxWorkers: number
   const hasOrders = !!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lend_orders'").get();
   if (!hasOrders) return maxWorkers;
   // Claimed writers keep their existing slots even if new borrowing is switched off or its grant expires.
-  const held = (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE project=? AND status='claimed' AND step IN ('write','fix')")
+  const held = (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE project=? AND status='claimed' AND step IN ('write','fix')
+    AND EXISTS (SELECT 1 FROM task_workflows WHERE task_workflows.taskId=lend_orders.taskId)`)
     .get(project) as { n: number }).n;
   const free = remote && remote.mode !== 'off' && remote.roles.includes('write') ? borrow.reduce((sum, b) => {
     if (b.priority === 'off' || !b.projects.includes(project) || !b.roles.includes('write')) return sum;
