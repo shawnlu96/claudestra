@@ -95,6 +95,7 @@ test("Web 聊天 /clear 确认后按会话清理动作返回，结果不确定�
     principal: { id: "owner:self", role: "owner", name: "owner", agents: ["*"], createdAt: "2026-01-01T00:00:00Z" },
     tokenId: "owner:self", agent: { name: "agent-web-clear", channelId: ch, runtime: "codex", sessionId: "old-thread" }, text: "/clear", hasAttachments: false,
   }, { sendLine: async () => {}, mirror: async () => {}, scheduleClearRotation: () => {},
+    scheduleAcpReload: () => {},
     markThinking: () => {}, record: () => {}, wallWait: async () => null });
   try {
     const success = request();

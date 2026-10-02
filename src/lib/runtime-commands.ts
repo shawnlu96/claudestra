@@ -29,7 +29,7 @@ export const CODEX_BUILTIN_PASSTHROUGH: ReadonlyArray<{ name: string; descriptio
  * 快照是 tmux 版扩展写的（迁过来的 agent 还留着旧的），`claudestra-*` 是那个扩展自己的命令，acp 下没加载。
  */
 function piAcpCommandsFor(agent: string): PiCommandInfo[] {
-  return piCommandsFor(agent).filter((c) => c.scope === "pi" ? !c.name.startsWith("claudestra-") : c.name === "compact");
+  return piCommandsFor(agent).filter((c) => (c.scope === "pi" ? !c.name.startsWith("claudestra-") : c.name === "compact" || c.name === "reload"));
 }
 
 /** 这个运行时自己的命令表；Claude Code（或没写 runtime）返回 null = 走 CC 的注册表。acp = 这个 agent 走 ACP 宿主 */

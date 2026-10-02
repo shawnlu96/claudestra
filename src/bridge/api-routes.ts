@@ -215,6 +215,9 @@ export function initApiRoutes(d: ApiDeps): void {
 
 /** 斜杠直通的运行时依赖（api-slash.ts 不 import hub，依赖从这里注入） */
 const slashDeps = (d: ApiDeps): SlashDeps => ({
+  scheduleAcpReload: (name) => {
+    void runManager("restart", name).catch((e) => console.warn(`[slash] ACP /reload 重启 ${name} 失败:`, e));
+  },
   sendLine: tmuxSendLine,
   mirror: d.mirrorApiExchange,
   scheduleClearRotation: d.scheduleClearRotation,

@@ -34,6 +34,8 @@ export interface SlashDeps {
   sendLine: (win: string, text: string) => Promise<void>;
   mirror: (to: ApiUserEndpoint, agentChannelId: string, text: string) => Promise<void>;
   scheduleClearRotation: (agentName: string, channelId: string, cwd: string, oldSid?: string) => void;
+  /** ACP 的 /reload：后台重启该 agent（resume 同一会话）。立即返回，不等 40 秒 */
+  scheduleAcpReload: (agentName: string) => void;
   /** 技能类命令注入后跑真实回合：点亮 web 的思考徽章 / 侧栏 busy（builtin TUI 命令没有回合，不发） */
   markThinking: (agent: SlashAgent) => void;
   record: (cmd: string, agent: SlashAgent) => void;
@@ -80,6 +82,19 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     if (!cleared.ok) return apiJson(cleared.uncertain ? 504 : 409, { ok: false, code: cleared.uncertain ? "clear_result_unknown" : undefined, error: cleared.error, sessionId: cleared.sessionId });
     deps.record("clear", agent);
     return apiJson(200, { ok: true, agent: agent.name, sessionId: cleared.sessionId, previousSessionId: agent.sessionId, acp: true, slash: true, clear: true });
+  }
+  // /reload + ACP：Pi 的 RPC 没有 reload（docs/rpc-commands.md 的命令表里没有），当 prompt 交过去
+  // 只会被当普通文字。唯一的等效手段是轮换 pi 进程后 resume 同一会话 —— 也就是 manager restart
+  //（实测约 40 秒）。所以这里**立即受理、后台重启**，不让 HTTP 请求挂着等 40 秒。
+  if ((rt === "codex" || rt === "pi") && slashM[1] === "reload" && acp) {
+    if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+    deps.record("reload", agent);
+    deps.scheduleAcpReload(agent.name);
+    deps.markThinking(agent);
+    return apiJson(202, {
+      ok: true, accepted: true, agent: agent.name, acp: true, slash: true, reload: "restart",
+      note: "ACP 下 Pi 没有 RPC reload，用重启（resume 同一会话）实现，约 40 秒",
+    });
   }
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();

@@ -35,6 +35,7 @@ function harness(wall: "menu" | "countdown" | null = null) {
     sendLine: async (_win, text) => void sent.push(text),
     mirror: async (_to, _ch, text) => void mirrored.push(text),
     scheduleClearRotation: () => {},
+    scheduleAcpReload: () => {},
     markThinking: () => {},
     record: () => {},
     wallWait: async () => wall, // 不给就会真抓屏
@@ -65,7 +66,7 @@ test("ACP Codex 的 Web 聊天 /clear：宿主不在线与带附件都拒绝，g
   }
 });
 
-test("ACP 版 Pi：/clear 走宿主换会话（不当 prompt 发给 pi），TUI 内置命令按普通消息投，/compact 交给宿主", async () => {
+test("ACP 版 Pi：/clear 走宿主换会话，/reload 走重启，其余 TUI 内置命令按普通消息投，/compact 交给宿主", async () => {
   const agent = { ...AGENT, name: "agent-pi-acp-slash", channelId: "local-pi-acp", runtime: "pi" };
   noteAcpChannel(agent.channelId, "acp");
   try {
@@ -73,7 +74,10 @@ test("ACP 版 Pi：/clear 走宿主换会话（不当 prompt 发给 pi），TUI 
     const clear = (await call(OWNER, "/clear", h.deps, agent))!;
     expect(clear.status).toBe(409); // 宿主不在线：走的是 acpClear，不是「没交给宿主」的 slash 分支
     expect(((await clear.json()) as { error: string }).error).not.toContain("没交给宿主");
-    expect(await call(OWNER, "/reload", h.deps, agent)).toBeNull();
+    // /reload：ACP 下 Pi 没有 RPC reload ⇒ 桥接用「重启（resume 同一会话）」实现，立即 202
+    const reload = (await call(OWNER, "/reload", h.deps, agent))!;
+    expect(reload.status).toBe(202);
+    expect(((await reload.json()) as { reload?: string }).reload).toBe("restart");
     const compact = (await call(OWNER, "/compact 只留结论", h.deps, agent))!;
     expect(((await compact.json()) as { error: string }).error).toContain("没交给宿主");
     expect(h.sent).toEqual([]);

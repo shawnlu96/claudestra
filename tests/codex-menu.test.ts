@@ -112,7 +112,8 @@ describe("④ 斜杠直通（api-slash）", () => {
   test("Codex 停在菜单：409 拒绝、不注入", async () => {
     const sent: string[] = [];
     const deps: SlashDeps = {
-      sendLine: async (_w, t) => void sent.push(t), mirror: async () => {}, scheduleClearRotation: () => {}, markThinking: () => {}, record: () => {},
+      sendLine: async (_w, t) => void sent.push(t), mirror: async () => {}, scheduleClearRotation: () => {},
+    scheduleAcpReload: () => {}, markThinking: () => {}, record: () => {},
       wallWait: async () => wallWaitOf(MENU, "codex"),
     };
     const owner = { id: "owner:self", name: "owner", agents: ["*"], role: "owner" } as never;
