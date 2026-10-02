@@ -11,4 +11,9 @@ export const SHELL_DICT: Record<string, string> = {
   "关闭此终端": "Close this terminal",
   "关闭后 shell 和里面正在跑的命令都会结束，确定？": "Closing ends the shell and anything running in it. Continue?",
   "关闭失败": "Close failed",
+  "粘贴": "Paste",
+  "粘贴剪贴板里的文字（不自动回车）": "Paste clipboard text (does not press Enter)",
+  "剪贴板是空的": "Clipboard is empty",
+  "读不到剪贴板（被拒绝或浏览器不支持）": "Can't read the clipboard (denied or not supported)",
+  "跟随本屏尺寸": "fits this screen",
 };

@@ -1,6 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useState, type RefObject } from "react";
+import type { Terminal } from "@xterm/xterm";
 import { useT } from "@/lib/i18n";
+import { pasteFromClipboard } from "./clipboard-paste";
 
 /**
  * 终端控制键条。
@@ -37,14 +39,52 @@ const KEYS: { label: string; seq: string; title?: string }[] = [
   { label: "^O", seq: "\x0f", title: "Ctrl+O（Claude Code 转录视图，可滚动）" },
 ];
 
+/**
+ * 粘贴：手机上没有 Cmd+V,这是把聊天里复制的命令送进终端的唯一入口。readText 要在本次点击里同步发起。
+ * 提示气泡 absolute 定位到键条根（relative），包含块在横滑行之外，不会被行的 overflow 裁掉。
+ */
+function PasteButton({ termRef, disabled }: { termRef: RefObject<Terminal | null>; disabled?: boolean }) {
+  const t = useT();
+  const [hint, setHint] = useState<string | null>(null);
+  const showHint = (msg: string) => {
+    setHint(msg);
+    setTimeout(() => setHint((v) => (v === msg ? null : v)), 1800);
+  };
+  return (
+    <>
+      {hint && (
+        <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-neutral px-3 py-1.5 text-xs text-neutral-content shadow-lg">
+          {hint}
+        </div>
+      )}
+      <button
+        className="btn btn-sm shrink-0 border-white/10 bg-white/5 font-normal text-[#cdd6f4] hover:bg-white/10"
+        title={t("粘贴剪贴板里的文字（不自动回车）")}
+        onPointerDown={(e) => e.preventDefault()}
+        onClick={async () => {
+          const term = termRef.current;
+          if (!term) return;
+          const r = await pasteFromClipboard(navigator.clipboard, (s) => term.paste(s));
+          if (r === "empty") showHint(t("剪贴板是空的"));
+          if (r === "blocked") showHint(t("读不到剪贴板（被拒绝或浏览器不支持）"));
+        }}
+        disabled={disabled}
+      >
+        {t("粘贴")}
+      </button>
+    </>
+  );
+}
+
 export function ControlBar({
   onKeys,
-  onFocusTerm,
+  termRef,
   onCopy,
   disabled,
 }: {
   onKeys: (seq: string) => void;
-  onFocusTerm: () => void;
+  /** ⌨️ 聚焦它的隐藏 textarea；「粘贴」走它的 paste()（经 onData 进同一条上行通道） */
+  termRef: RefObject<Terminal | null>;
   /** 复制:有选区复制选区,否则复制可见屏幕。返回是否成功(供按钮回显✓)。 */
   onCopy?: () => Promise<boolean>;
   disabled?: boolean;
@@ -55,7 +95,7 @@ export function ControlBar({
   const [copied, setCopied] = useState(false);
   return (
     <div
-      className="flex shrink-0 flex-col gap-1.5 border-t border-white/10 bg-[#181825] px-2 py-2"
+      className="relative flex shrink-0 flex-col gap-1.5 border-t border-white/10 bg-[#181825] px-2 py-2"
       style={{
         // --term-safe-bottom：软键盘弹起时 modal 置 0（home 条在键盘后面无需垫）
         paddingBottom:
@@ -68,12 +108,13 @@ export function ControlBar({
         className="flex items-center gap-1.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         style={{ touchAction: "pan-x" }}
       >
+        <PasteButton termRef={termRef} disabled={disabled} />
         {/* 唤起软键盘：聚焦 xterm 隐藏 textarea（iOS 必须在手势内 focus） */}
         <button
           className="btn btn-sm shrink-0 border-white/10 bg-white/5 font-normal text-[#cdd6f4] hover:bg-white/10"
           title={t("唤起键盘输入")}
           onPointerDown={(e) => e.preventDefault()}
-          onClick={() => onFocusTerm()}
+          onClick={() => termRef.current?.focus()}
           disabled={disabled}
         >
           ⌨️
