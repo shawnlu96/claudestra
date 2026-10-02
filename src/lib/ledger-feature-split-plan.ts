@@ -18,7 +18,8 @@ export function parseSplitMap(raw: unknown): SplitMap {
   if (!m || !Array.isArray(m.targets) || !m.targets.length) bad();
   for (const t of m.targets) {
     if (!t || (typeof t.slug === "string") === (typeof t.id === "string")) bad();
-    if (t.slug && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(t.slug)) bad();
+    if (t.id !== undefined && (typeof t.id !== "string" || !t.id.trim())) bad();
+    if (t.slug !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(t.slug)) bad();
     if (typeof t.title !== "string" || !t.title.trim() || [...t.title.trim()].length > 60 || /[\p{Cc}\p{Cf}]/u.test(t.title)) bad();
     if (t.words !== undefined && typeof t.words !== "string") bad();
     if (!Array.isArray(t.nodes) || !t.nodes.length || !t.nodes.every((n) => typeof n === "string" && n)) bad();

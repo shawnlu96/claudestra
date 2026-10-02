@@ -67,3 +67,17 @@ test("feature dependency cycle is rejected before backup or writes", () => {
   expect(backed).toBe(false);
   expect(db.serialize()).toEqual(before);
 });
+
+for (const target of [{ id: "" }, { slug: "" }, { id: "   " }]) {
+  test(`empty target ${JSON.stringify(target)} rejected identically in dry-run and write`, async () => {
+    const invalid = join(dir, "invalid.json");
+    writeFileSync(invalid, JSON.stringify({ targets: [{ ...target, title: "Empty", nodes: ["A"] }] }));
+    const before = db.serialize();
+    const args = ["feature-split", "src", "--plan", invalid];
+    const dry = await run("owner", ...args, "--dry-run");
+    const write = await run("owner", ...args);
+    expect(dry).toMatchObject({ ok: false, code: "invalid" });
+    expect(write).toEqual(dry);
+    expect(db.serialize()).toEqual(before);
+  });
+}
