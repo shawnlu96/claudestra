@@ -1,5 +1,5 @@
 /**
- * i28-UIQ1：ui 规格必填「## 复用对象」「## 对照基准」；「无，新界面」要引用 owner 记的台账 decision。
+ * i28-UIQ1：ui 规格必填「## 复用对象」「## 对照基准」；「无，新界面」要引用 owner 已批准的同项目同卡 ask。
  * start_node 的预检（preflightStart）拒 / 放；自动开卡走同一个预检，见 tests/scheduler-autostart-run.test.ts 的 i28-UIQ1 一条。
  */
 import type { Database } from "bun:sqlite";
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { answerAsk, openAskFull } from "../src/lib/ledger-asks.js";
 import { preflightStart, type StartEnv } from "../src/lib/dag-tools-start.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, setMeta } from "../src/lib/ledger-write.js";
@@ -19,6 +20,10 @@ const BOTH = "## 复用对象\n团队视图（web/app/team）\n## 对照基准\n
 const no = () => false;
 
 describe("lintUiSpec", () => {
+  test("ui-head-drift：标题前的声明不能绕过标题后的 ui 必填检查", () => {
+    expect(lintUiSpec("模板：code\n# T\n模板：ui\n## 目标\n", no)).toContain("「## 复用对象」「## 对照基准」");
+    expect(lintUiSpec("模板：ui\n# T\n模板：code\n## 目标\n", no)).toBeNull();
+  });
   test("ui 规格缺哪节就点名哪节；空节也算缺", () => {
     expect(lintUiSpec("# T\n模板：ui\n## 目标\n", no)).toContain("「## 复用对象」「## 对照基准」");
     expect(lintUiSpec("# T\n模板：ui\n## 复用对象\n团队视图\n", no)).toContain("「## 对照基准」");
@@ -33,12 +38,12 @@ describe("lintUiSpec", () => {
     expect(lintUiSpec("# T\n## 目标\n模板：ui\n", no)).toBeNull();
   });
 
-  test("「无，新界面」：没有 owner 决定引用拒；引用的不是 owner decision 拒；是就放", () => {
+  test("「无，新界面」：没有批准 ask 拒；引用的不是 owner 批准 ask 拒；是就放", () => {
     const text = (ref: string) => `# T\n模板：ui\n## 复用对象\n无，新界面${ref}\n## 对照基准\n手绘稿 /tmp/sketch.png\n`;
-    expect(lintUiSpec(text(""), no)).toContain("decision #<seq>");
-    expect(lintUiSpec(text("（owner 批：decision #12）"), (s) => s === 7)).toContain("decision #12");
-    expect(lintUiSpec(text("（owner 批：decision #12）"), (s) => s === 12)).toBeNull();
-    expect(lintUiSpec(text("，见决定 #12"), (s) => s === 12)).toBeNull();
+    expect(lintUiSpec(text(""), no)).toContain("请 PM 发 ask");
+    expect(lintUiSpec(text("（owner 批：ask_wrong）"), (s) => s === "ask_good")).toContain("请 PM 发 ask");
+    expect(lintUiSpec(text("（owner 批：ask_good）"), (s) => s === "ask_good")).toBeNull();
+    expect(lintUiSpec(text("，见决定 #12"), () => true)).toContain("请 PM 发 ask");
   });
 });
 
@@ -84,13 +89,25 @@ describe("start_node 预检", () => {
     expect(await preflightStart(env(), { featureId: "i28", key: "a", spec: "# 规格\n模板：code\n## 目标\n" })).toMatchObject({ ok: true });
   });
 
-  test("「无，新界面」：引用 owner 记的 decision 才放行", async () => {
-    const text = (seq: number) => `# 规格\n模板：ui\n## 复用对象\n无，新界面（decision #${seq}）\n## 对照基准\n手绘稿\n`;
-    const pmSaid = appendEvent(db, { actor: PM, now: 600 }, { project: P, target: "", kind: "decision", text: "PM 说新界面" });
-    const ownerSaid = appendEvent(db, { actor: "owner", now: 700 }, { project: P, target: "", kind: "decision", text: "owner 批新界面" });
-    spec(text(pmSaid.event.seq));
-    expect(await preflightStart(env(), { featureId: "i28", key: "a" })).toMatchObject({ ok: false, code: "spec_lint" });
-    spec(text(ownerSaid.event.seq));
+  test("decision-binding：只放同项目同卡 owner 批准 ask，旧 decision 引用拒绝", async () => {
+    const text = (ref: string) => `# 规格\n模板：ui\n## 复用对象\n无，新界面（${ref}）\n## 对照基准\n手绘稿\n`;
+    const approval = (project: string, taskId: string, pick: string, owner: boolean) => {
+      const a = openAskFull(db, { project, taskId, source: "system", kind: "authorize", title: "允许新界面吗",
+        options: [{ type: "buttons", buttons: [{ id: "yes", label: "批准" }, { id: "no", label: "拒绝" }] }],
+        bind: { action: "ui_new_interface", params: { taskId }, paramsHash: "fixture", approve: ["yes"] },
+      }, 1_000).ask;
+      answerAsk(db, a.id, { choices: [`[button:${pick}]`], labels: [pick], text: "", principal: "owner", via: "web_card", at: 1_100,
+        ...(owner ? { owner: true as const } : {}) });
+      return a.id;
+    };
+    const old = appendEvent(db, { actor: "owner", now: 700 }, { project: P, target: "", kind: "decision", text: "owner 批新界面" });
+    const refs = [ `decision #${old.event.seq}`, approval("other", "i28-a", "yes", true), approval(P, "other-card", "yes", true),
+      approval(P, "i28-a", "no", true), approval(P, "i28-a", "yes", false) ];
+    for (const ref of refs) {
+      spec(text(ref));
+      expect(await preflightStart(env(), { featureId: "i28", key: "a" })).toMatchObject({ ok: false, code: "spec_lint" });
+    }
+    spec(text(approval(P, "i28-a", "yes", true)));
     expect(await preflightStart(env(), { featureId: "i28", key: "a" })).toMatchObject({ ok: true });
   });
 });

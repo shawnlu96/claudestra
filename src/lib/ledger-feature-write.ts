@@ -216,7 +216,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
     linkTasks(db, ctx, cur, nodes);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, nodes: nodes.map((n) => n.key), rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
 }

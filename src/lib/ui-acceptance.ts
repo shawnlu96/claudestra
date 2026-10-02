@@ -7,7 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
 import { cardNames } from "./ledger-card-names.js";
-import { nodePhase, type NodePhase } from "./ledger-dag-rules.js";
+import { nodePhase, planRewrite, type CurrentDag, type NodePhase } from "./ledger-dag-rules.js";
 import { effectiveNodes, getDagVersion, PLANNED, type DagNode, type Feature } from "./ledger-feature.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -48,7 +48,7 @@ export const dropPageCheck = (raw: unknown): unknown =>
 
 /**
  * 落库前把 PAGEOK 摆对：有 ui 节点 → 有且只有一个，依赖 = 全部 ui 节点（排序）；没有 ui 节点且它还没开工 → 移除。
- * PAGEOK 只认当前版本那一份（PM 传进来的由 dropPageCheck 先剔掉，免得它的旧依赖指向刚删的节点）；已完成的原样带入（重写规矩要求）。
+ * PAGEOK 只认当前版本那一份（PM 传进来的由 dropPageCheck 先剔掉，免得它的旧依赖指向刚删的节点）；验收完成后 UI 范围变化则清掉验收绑卡，普通节点仍遵循重写规矩。
  * cur = 当前版本节点（dag-init 为 null）。
  */
 export function withPageCheck(db: Database, f: Feature, next: DagNode[], cur: readonly DagNode[] | null,
@@ -56,21 +56,46 @@ export function withPageCheck(db: Database, f: Feature, next: DagNode[], cur: re
   const page = cur?.find((n) => n.key === PAGE_CHECK_KEY);
   const rest = next.filter((n) => n.key !== PAGE_CHECK_KEY);
   const phase = page ? phaseOf(db, page) : "idle";
-  if (page && phase === "done") return [...rest, page];
   const ui = rest.filter((n) => isUiNode(db, f, n, readSpec)).map((n) => n.key).sort();
   if (!ui.length && phase === "idle") return rest;
+  // 已验收的范围变了就重新绑验收卡，旧卡的阶段和历史快照均保留。
+  const sameScope = page && JSON.stringify(page.deps) === JSON.stringify(ui) && ui.every((key) => {
+    const before = cur?.find((n) => n.key === key);
+    const after = rest.find((n) => n.key === key);
+    return before && after && uiScope(before) === uiScope(after);
+  });
+  const keep = phase === "done" && !sameScope ? undefined : page;
   const base: DagNode = { key: PAGE_CHECK_KEY, taskId: null, oneLine: PAGE_CHECK_LINE, deps: [], status: PLANNED, estimate: "", inheritedFrom: null };
-  return [...rest, { ...base, ...page, deps: ui, inheritedFrom: null }];
+  return [...rest, { ...base, ...keep, deps: ui, inheritedFrom: null }];
 }
 
-/** feature 改成 done 之前：当前版本有 PAGEOK 就要它绑的卡已 verified / done，否则拒（说明缺哪个节点） */
+/** UI 范围的身份与内容；卡阶段 / 继承版本不改变要验收的页面。 */
+const uiScope = (n: DagNode): string => JSON.stringify([n.taskId, n.oneLine, [...n.deps].sort(), n.estimate, [...(n.fileGlobs ?? [])].sort()]);
+
+/** 系统验收允许重置，普通完成节点仍原样保护；两个重写判定入口必须共用。 */
+export function planPageRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase,
+  ...args: [next: Parameters<typeof planRewrite>[2], cancel: Parameters<typeof planRewrite>[3], scopeChange: boolean]): ReturnType<typeof planRewrite> {
+  return planRewrite(cur, (n) => n.key === PAGE_CHECK_KEY && phase(n) === "done" ? "idle" : phase(n), ...args);
+}
+
+/** 仅新写入且明确 opt-in 的当前 DAG 版本受缺失验收门约束，历史版本无标记保持原行为。 */
+function pageCheckEnabled(db: Database, f: Feature): boolean {
+  return !!db.query(`SELECT 1 FROM events WHERE project = ? AND target = ? AND kind = 'feature'
+    AND json_extract(data, '$.version') = ? AND json_extract(data, '$.uiPageCheck') = 1 LIMIT 1`).get(f.project, f.id, f.currentVersion);
+}
+
+/** feature 收口时现读 UI 范围，晚绑定 / 晚落盘规格不会绕过整页验收；缺节点让 PM 用 rewrite_dag 补齐。 */
 export function requirePageCheck(db: Database, f: Feature): void {
   const v = f.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null;
-  const page = v ? effectiveNodes(db, v).find((n) => n.key === PAGE_CHECK_KEY) : null;
-  if (!page) return;
-  const stage = page.taskId ? getTask(db, page.taskId)?.stage : null;
-  if (stage === "verified" || stage === "done") return;
-  const where = page.taskId ? `卡 ${page.taskId} 在 ${stage ?? "找不到"}` : "没绑卡";
+  const ns = v ? effectiveNodes(db, v) : [];
+  const page = ns.find((n) => n.key === PAGE_CHECK_KEY);
+  if (!page && !pageCheckEnabled(db, f)) return;
+  const ui = ns.filter((n) => n.key !== PAGE_CHECK_KEY && isUiNode(db, f, n)).map((n) => n.key).sort();
+  if (!page && !ui.length) return;
+  const valid = page && JSON.stringify([...page.deps].sort()) === JSON.stringify(ui);
+  const stage = page?.taskId ? getTask(db, page.taskId)?.stage : null;
+  if (valid && (stage === "verified" || stage === "done")) return;
+  const where = !valid ? "缺有效节点，请 PM 用 rewrite_dag 补齐整页验收" : page?.taskId ? `卡 ${page.taskId} 在 ${stage ?? "找不到"}` : "没绑卡";
   throw new LedgerError("conflict", `feature ${f.id} 的整页验收节点 ${PAGE_CHECK_KEY} 还没 verified（${where}），不能改成 done。验收清单：${PAGE_CHECK_LIST.join("；")}`);
 }
 

@@ -102,5 +102,8 @@ empty DAGs have a null completion time. Feature dependencies propagate maximum E
 
 Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes include node/card/PM/time); bridge restart clears it, so call `start_node` again.
 
-UI cards (i28-UIQ1, `src/lib/spec-lint.ts`): a spec whose head says `模板：ui` needs non-empty `## 复用对象` and `## 对照基准` (「无，新界面」 must cite an owner `decision #<seq>`); start_node's preflight refuses with `spec_lint`, and autostart inherits it (one PM notice per arm).
-Whole-page check (`src/lib/ui-acceptance.ts`): dag-init / dag-rewrite keep one system-managed `PAGEOK` node depending on every ui node (spec head or bound workflow = ui); `feature-set --status done` is refused until its card is verified; ui review orders carry the spec's 对照基准 and `UI_BASIS_RULE`.
+UI cards (`src/lib/spec-lint.ts`): `模板：ui` requires non-empty 复用对象 / 对照基准. 「无，新界面」 requires an owner-approved authorize askId for this project/card.
+start_node refuses invalid specs with spec_lint; autostart inherits that gate (one PM notice per arm). UI review orders carry 对照基准 and UI_BASIS_RULE.
+Whole-page check (`src/lib/ui-acceptance.ts`): new dag-init / dag-rewrite events opt in with uiPageCheck=true; historical versions stay exempt.
+One system PAGEOK depends on every ui node (spec head or bound workflow); feature-set done requires verified acceptance covering current UI.
+Late UI bindings require rewrite_dag to add PAGEOK; changed UI scope resets completed acceptance. dag-bind keeps the existing version.

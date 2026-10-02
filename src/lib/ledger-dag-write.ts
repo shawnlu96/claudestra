@@ -12,14 +12,14 @@ import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
-import { diffNodes, nodePhase, planRewrite, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
+import { diffNodes, nodePhase, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
 import {
   effectiveNodes, getDagVersion, getPendingProposal, getProposal, type DagNode, type DagProposal, type DagVersion, type Feature,
 } from "./ledger-feature.js";
 import { buildNodes, linkTasks, mustFeature, nodeTask, requireManager } from "./ledger-feature-write.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
-import { dropPageCheck, withPageCheck } from "./ui-acceptance.js";
+import { dropPageCheck, planPageRewrite, withPageCheck } from "./ui-acceptance.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
 const DAG_ACTION = "dag_rewrite";
@@ -144,13 +144,13 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
     checkCas(f, input.rev);
     const now = ctx.now ?? Date.now();
     clearStalePending(db, ctx, f, now);
-    const plan = planRewrite(cur, livePhase(db), withPageCheck(db, f, buildNodes(db, f, dropPageCheck(input.nodes)), cur.nodes), input.cancel, input.scopeChange);
+    const plan = planPageRewrite(cur, livePhase(db), withPageCheck(db, f, buildNodes(db, f, dropPageCheck(input.nodes)), cur.nodes), input.cancel, input.scopeChange);
     const c: ProposalContent = { featureId: f.id, version: cur.version + 1, baseVersion: cur.version, ...reasonOf(input.reasonKind, input.reasonText),
       nodes: plan.nodes, cancels: plan.cancels, scopeChange: input.scopeChange };
     const change = summary(cur.nodes, c);
     if (!plan.needsOwner.length) {
       const rev = applyVersion(db, ctx, f, c, { proposedBy: ctx.actor, approvedBy: "auto", askId: null });
-      const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, rev } }, true);
+      const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, uiPageCheck: true, rev } }, true);
       return { row: { version: getDagVersion(db, f.id, c.version), proposal: null, ask: null, inform: informOf(f, c, change) }, event, duplicate: false };
     }
     const sha = proposalSha(c);
@@ -182,7 +182,7 @@ function approvalProblem(db: Database, f: Feature, p: DagProposal, a: Ask | null
   try {
     const cancel = new Map(p.cancels.map((x: DagCancel) => [x.key, x.reason]));
     const input = p.nodes.map(({ key, taskId, oneLine, deps, estimate, fileGlobs }) => ({ key, taskId, oneLine, deps, estimate, fileGlobs }));
-    planRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange);
+    planPageRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange);
   } catch (e) {
     if (e instanceof LedgerError) return { state: "void", why: `卡的状态变了，按现在的规矩不成立：${e.message}` };
     throw e;
@@ -223,7 +223,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     const approvedBy = (a as Ask).answer?.principal || "owner";
     const rev = applyVersion(db, ctx, f, contentOf(p), { proposedBy: p.proposedBy, approvedBy, askId: p.askId });
     db.prepare("UPDATE dag_proposals SET state = 'approved', decidedAt = ?, decidedBy = ? WHERE seq = ?").run(now, approvedBy, p.seq);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-approve", version: p.version, proposal: p.seq, askId: p.askId, approvedBy, rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-approve", version: p.version, proposal: p.seq, askId: p.askId, approvedBy, uiPageCheck: true, rev } }, true);
     return { row: { applied: true, version: getDagVersion(db, f.id, p.version), proposal: getProposal(db, p.seq) as DagProposal, why: null }, event, duplicate: false };
   });
 }
