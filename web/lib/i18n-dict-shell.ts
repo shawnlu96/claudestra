@@ -16,5 +16,6 @@ export const SHELL_DICT: Record<string, string> = {
   "剪贴板是空的": "Clipboard is empty",
   "读不到剪贴板（被拒绝或浏览器不支持）": "Can't read the clipboard (denied or not supported)",
   "跟随本屏尺寸": "fits this screen",
+  "这里只是 ACP 宿主日志；Ctrl+C 会停掉宿主": "This is only the ACP host log; Ctrl+C stops the host",
   "多行内容：当前终端没开 bracketed paste，为免逐行执行已取消，请逐行粘贴": "Multi-line text: bracketed paste is off here, so it was not sent (each line would run). Paste one line at a time",
 };

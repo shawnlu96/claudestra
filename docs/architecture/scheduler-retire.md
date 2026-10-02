@@ -93,5 +93,10 @@ settle: the bridge keeps no send ids, so that notice may come twice (never zero 
 
 ## Not done here
 
+Reviewers' test scratch (`.review-tmp/`, old name `.review-env/`) does not count as untracked: opening a review worktree
+(`openReviewWorktree`, i28-S2c) adds `/.review-tmp/` and `/.review-env/` to the repository's shared `info/exclude`, so the plain
+`worktree remove` deletes it with the checkout. A card already handed to PM is not retried (its intent is settled): PM removes such a
+checkout with `git -C <dir> worktree remove <dir>` (no --force), which works once any review worktree of that repo was opened since.
+
 Remote branches are not deleted (owner's call). PM's own scratch review folders (`rv-*/.review-tmp` outside the worktree root)
 are not touched. Cards without scheduler session rows (never bound by the auto flow) are not picked up.

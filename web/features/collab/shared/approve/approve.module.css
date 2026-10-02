@@ -1,0 +1,10 @@
+.panel { max-width: 920px; margin: 0 auto; }
+.feedback { display: flex; align-items: center; gap: 10px; margin-top: 16px; animation: arrive .25s ease-out; }
+.done { display: inline-flex; color: var(--accent); animation: pop .35s ease-out; }
+.state { display: inline-flex; align-items: center; gap: 6px; color: var(--warn); }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--line-2); border-radius: 999px; font-size: 12px; }
+.material { border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.nodes { margin: 0; padding-left: 18px; }
+@keyframes arrive { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pop { 0% { opacity: 0; transform: scale(.6); } 70% { transform: scale(1.15); } 100% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .feedback, .done { animation: none; } }

@@ -114,6 +114,7 @@ interface ApiAgent {
   contextTokens?: number | null;
   model?: string | null;
   runtime?: string | null;
+  transport?: string | null;
   effort?: string | null;
   /** agent 创建时间（ISO，registry.created）——新建但还没说过话的 agent 靠它排序 */
   created?: string;
