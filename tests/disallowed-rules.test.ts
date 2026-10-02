@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseDisallowedRules, validateDisallowedRules } from "../src/lib/disallowed-rules";
+import { parseDisallowedRules, splitClaudeDisallowedRules, validateDisallowedRules } from "../src/lib/disallowed-rules";
 import { buildClaudeCommand, DEFAULT_DISALLOWED, resolveDisallowed } from "../src/lib/claude-launch";
 import { parseCreateArgs } from "../src/manager/create-args";
 import { testChildEnv } from "./test-env";
@@ -34,7 +34,7 @@ async function commandRules(command: string): Promise<string[]> {
   });
   const value = await new Response(child.stdout).text();
   expect(await child.exited).toBe(0);
-  return parseDisallowedRules(value);
+  return splitClaudeDisallowedRules(value);
 }
 
 test("验收1：带空格三规则 set/get/list 与启动参数保持完整", async () => {
@@ -97,3 +97,44 @@ test("验收4：default/strict 预设命令逐字保持原有规则编码", () =
     expect(buildClaudeCommand({ ...base, disallowedPreset: preset })).toBe(buildClaudeCommand({ ...base, disallowedTools: original }));
   }
 }, 30000);
+
+
+test("r1 P1-1：Claude Code 会拆开的嵌套规则在 set/create 拒绝且 registry 不变", async () => {
+  const original = readFileSync(join(dir, "registry.json"), "utf8");
+  const cases = [
+    ["Bash(:(){ :|:&};:)", ["Bash(:(){", ":|:&};:)"]],
+    ["Bash(foo (x) bar:*)", ["Bash(foo (x)", "bar:*)"]],
+    ["Bash(f (x),y:*)", ["Bash(f (x)", "y:*)"]],
+    ["Bash(python -c print(1) foo:*)", ["Bash(python -c print(1)", "foo:*)"]],
+  ] as const;
+  for (const [rule, fragments] of cases) {
+    const raw = `Read ${rule}`;
+    expect(parseDisallowedRules(raw)).toEqual(["Read", rule]);
+    expect(splitClaudeDisallowedRules(raw)).toEqual(["Read", ...fragments]);
+    const error = validateDisallowedRules(raw);
+    if (!error) throw new Error(`应拒绝规则 ${raw}`);
+    expect(error).toContain("第 2 条规则");
+    expect(error).toContain(`Claude Code 会把它拆成 ${JSON.stringify(fragments)}`);
+    expect(await permissions("set", "demo", "--disallowed", raw)).toMatchObject({ ok: false, error });
+    expect(parseCreateArgs(["demo", "/repo", "--disallowed", raw])).toEqual({ error });
+    expect(readFileSync(join(dir, "registry.json"), "utf8")).toBe(original);
+  }
+}, 30000);
+
+test("r1 P2-b：MCP 通配名与转义括号仍接受并保持完整", async () => {
+  const expected = ["mcp__*", "mcp__x__*", String.raw`Bash(echo \( x:*)`, String.raw`Bash(echo \):*)`, String.raw`Bash(echo \\:*)`];
+  const raw = expected.join(" ");
+  expect(parseDisallowedRules(raw)).toEqual(expected);
+  expect(splitClaudeDisallowedRules(raw)).toEqual(expected);
+  expect(validateDisallowedRules(raw)).toBeUndefined();
+  expect(parseCreateArgs(["demo", "/repo", "--disallowed", raw])).toMatchObject({ perms: { disallowedRaw: raw } });
+  expect(await permissions("set", "demo", "--disallowed", raw)).toMatchObject({ ok: true, tools: expected });
+  expect(await permissions("get", "demo")).toMatchObject({ disallowedRaw: raw, tools: expected });
+  expect(await commandRules(buildClaudeCommand({ ...base, disallowedRaw: raw }))).toEqual(expected);
+}, 30000);
+
+test("r1 P2-a：实际切分器保留 tab 且按首个右括号回到括号外", () => {
+  expect(splitClaudeDisallowedRules(" Read, Edit  ")).toEqual(["Read", "Edit"]);
+  expect(splitClaudeDisallowedRules("Read\tEdit")).toEqual(["Read\tEdit"]);
+  expect(splitClaudeDisallowedRules("Bash(a (b) c) ")).toEqual(["Bash(a (b)", "c)"]);
+});
