@@ -559,7 +559,8 @@ async function cmdCreate(
     if (run.aborting) return; // 信号清理已接手并负责输出
     const r = await abandonCreate(tmuxName, { channelId, windowId }, realOpsDeps, run); // 占位若已被接手，只按本次的 id 收拾
     unguard();
-    output({ ok: false, error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
+    output({ ok: false, cleanedUp: (await import("./lib/scheduler-create-retry.js")).createCleanedUp(r), // 调度器据此退避重试，不交 PM
+      error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
   }
   const lendNo = (await import("./lib/lend-grant-spawn.js")).lendCreateDenied(tmuxName, { choice: { model, effort } }); if (lendNo) return cleanup(lendNo); // 出借 worker：已登记占位，起窗口前现核授权
 
@@ -2492,6 +2493,7 @@ switch (cmd) {
   case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;
   case "skill-toggle": await (await import("./manager/skills.js")).cmdSkillToggle(args); break; // 按 agent 启停技能（lib/agent-settings.ts）
   case "list": await cmdList(); break; case "shared-ledger-join": await (await import("./manager/shared-ledger-join-cmd.js")).cmdSharedLedgerJoin(args); break;
+  case "shared-ledger-offer": await (await import("./manager/shared-ledger-offer.js")).cmdSharedLedgerOffer(args); break; // 把入组码递给 peer 的 bridge，对方 owner 点卡入组
   case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
   case "worker-kind": await (await import("./manager/agent-external.js")).cmdWorkerKind(args[0] || "", args[1] || ""); break;
