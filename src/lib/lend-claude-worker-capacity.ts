@@ -11,6 +11,8 @@ import { pausedUntil, quotaViewOf, type QuotaView } from "./lend-health.js";
 import { readInventoryQuota } from "./ai-quota.js";
 import { pickWorkerEnv } from "./runtimes/clean-env.js";
 import { isTestProcess } from "./test-guard.js";
+import { claudeAuthOutput } from "./lend-claude-pause-auth.js";
+import { claudePauseReadiness, claudePauseSlots, resetClaudePauseCache } from "./lend-claude-pause.js";
 
 export interface ClaudeReadiness { ready: boolean; reason: string | null; at: number }
 export const CLAUDE_READY_FRESH_MS = 60_000;
@@ -29,6 +31,7 @@ export const CLAUDE_REASONS = {
   noCli: "找不到 Claude Code CLI", testProcess: "测试进程不探本机 Claude 登录", unreadable: "读不到 claude auth status 的结果（Claude Code 太旧或卡住）",
   loggedOut: "本机 Claude Code 没登录：在出借方机器上运行 claude 完成 /login", failed: "核对本机 Claude 登录失败", timeout: "核对本机 Claude 登录超时",
   quotaFull: "本机 Claude 额度已满",
+  nonzero: "claude auth status 非零退出，核对本机 Claude 登录失败",
 } as const;
 const FIXED_REASONS = new Set<string>(Object.values(CLAUDE_REASONS));
 const QUOTA_RESET_RE = /^本机 Claude 额度已满，\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z 重置$/;
@@ -42,14 +45,13 @@ export async function claudeAuthStatus(env: Record<string, string | undefined> =
   const bin = Bun.which("claude", { PATH: env.PATH ?? "" });
   if (!bin) throw new Error(CLAUDE_REASONS.noCli);
   const childEnv = { ...pickWorkerEnv(env), ...(env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: env.CLAUDE_CONFIG_DIR } : {}) };
-  const proc = Bun.spawn([bin, "auth", "status", "--json"], { env: childEnv, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: timeoutMs });
-  const [text] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  return text;
+  const proc = Bun.spawn([bin, "auth", "status", "--json"], { env: childEnv, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+  return claudeAuthOutput(proc, timeoutMs);
 }
 
 /**
  * 本机 Claude 能不能接单：null = 能，否则一句原因。只看 auth status 的 loggedIn（不读凭据、不花额度），再看本机 Claude 额度是否已满。
- * 登录过期在这里看不出来，worker 第一轮会以 API 错误结束，走 bridge 现有的 API 错误处理。
+ * 登录过期在这里看不出来，worker 的 API 错误由 lend-claude-pause-worker 判定并暂停。
  */
 export async function probeClaudeLend(io = { status: () => claudeAuthStatus(), quota: claudeQuota }): Promise<string | null> {
   let text: string;
@@ -60,14 +62,15 @@ export async function probeClaudeLend(io = { status: () => claudeAuthStatus(), q
   if (!loggedIn) return CLAUDE_REASONS.loggedOut;
   // 额度快照读不到不挡接单；原始错误可能带本机路径，收单进程的 stderr 还会转进 bridge 日志，所以只打固定文案
   const q = await io.quota().catch(() => { console.error("[lend] 读本机 Claude 额度失败，按未知处理"); return null; });
-  if (q?.full) return `${CLAUDE_REASONS.quotaFull}${q.resetsAt ? `，${new Date(q.resetsAt).toISOString()} 重置` : ""}`;
+  if (q?.full && (q.resetsAt === null || q.resetsAt > Date.now())) return `${CLAUDE_REASONS.quotaFull}${q.resetsAt ? `，${new Date(q.resetsAt).toISOString()} 重置` : ""}`;
   return null;
 }
 
 /** 立即重探（同一时刻只跑一份）；探测出错或给了分类以外的原因都落成「核对失败」，不留在「正在核对」，也不带原始错误 */
 export function refreshClaudeReadiness(probe: () => Promise<string | null> = () => probeClaudeLend()): Promise<ClaudeReadiness> {
-  inflight ??= probe().then((reason) => ({ ready: reason === null, reason: reason === null || isClaudeReason(reason) ? reason : CLAUDE_REASONS.failed, at: Date.now() }),
-    () => ({ ready: false, reason: CLAUDE_REASONS.failed, at: Date.now() }))
+  const at = Date.now(); // A probe begun before a runtime auth failure cannot certify a later retry.
+  inflight ??= probe().then((reason) => ({ ready: reason === null, reason: reason === null || isClaudeReason(reason) ? reason : CLAUDE_REASONS.failed, at }),
+    () => ({ ready: false, reason: CLAUDE_REASONS.failed, at }))
     .then((r) => (cached = r)).finally(() => { inflight = null; });
   return inflight;
 }
@@ -75,7 +78,7 @@ export function refreshClaudeReadiness(probe: () => Promise<string | null> = () 
 /** 同步读缓存；过期就在后台刷新。null = 还没探过 */
 export function claudeReadiness(now = Date.now()): ClaudeReadiness | null {
   if (background && (!cached || now - cached.at >= CLAUDE_READY_FRESH_MS)) void refreshClaudeReadiness();
-  return cached;
+  return claudePauseReadiness(cached, now);
 }
 
 /** 等到一份新鲜结果（bridge 面板接口、推送收单用）；缓存新鲜就直接给 */
@@ -86,7 +89,7 @@ export async function freshClaudeReadiness(now = Date.now(), probe?: () => Promi
 /** 外部已有的判定（测试桩 / 别的进程写进 meta 的）直接记进缓存；null = 回到进程刚起的样子（没结论、没提示过、后台刷新开着），测试模拟新进程用 */
 export function noteClaudeReadiness(r: ClaudeReadiness | null): void {
   cached = r;
-  if (r === null) { warned = null; background = true; }
+  if (r === null) { warned = null; background = true; resetClaudePauseCache(); }
 }
 
 /** 只读缓存，不触发刷新（跨进程同步用：没 Claude 授权的出借方不该因为同步就开始探） */
@@ -99,7 +102,7 @@ export function claudeLendSlots(entry: LendEntry | undefined, log: (s: string) =
   const slots = entry?.families.claude ?? 0;
   if (!slots) return 0;
   const r = claudeReadiness();
-  if (r?.ready) { warned = null; return slots; }
+  if (r?.ready) { warned = null; return claudePauseSlots(slots); }
   if (r?.reason && warned !== r.reason) { log(`[lend] Claude 位暂不可用（报 0 位）：${r.reason}`); warned = r.reason; }
   return 0;
 }

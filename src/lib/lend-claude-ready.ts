@@ -15,6 +15,7 @@ import type { LendDeps } from "./lend-drive.js";
 import { liveGrant } from "./lend-grant.js";
 import { LENDER_IDLE_MS, TICK_KEY } from "./lend-inbox.js";
 import { getMeta, setMeta } from "./lend-journal.js";
+import { settleClaudePause } from "./lend-claude-pause-ready.js";
 
 export const READY_KEY = "claudeReady";
 /** 当场探测的上限：bridge 只给收单子进程 15 秒（local-api/lend-inbox.ts），卡住也得在那之前回 no_slot + 原因，不能被强杀成 unavailable；出借循环同用 */
@@ -59,11 +60,13 @@ export function probeWithin(ms: number, probe = () => probeClaudeLend({ status: 
 
 /** 对齐 meta；wanted 时结论不新鲜就当场探一次，探完先写回 meta 再返回（调用方随后才用它） */
 async function settle(db: Database, wanted: boolean, o: InboxClaude): Promise<void> {
-  claudeReadinessManual();
-  syncClaudeReadiness(db);
-  if (!wanted) return;
-  await freshClaudeReadiness(Date.now(), () => probeWithin(o.budgetMs ?? CLAUDE_PROBE_MS, o.probe)); // 结论的 at 都按 Date.now() 记，新鲜度也按它算
-  syncClaudeReadiness(db);
+  await settleClaudePause(db, wanted, async () => {
+    claudeReadinessManual();
+    syncClaudeReadiness(db);
+    if (!wanted) return;
+    await freshClaudeReadiness(Date.now(), () => probeWithin(o.budgetMs ?? CLAUDE_PROBE_MS, o.probe)); // 结论的 at 按探测开始时刻记，不能覆盖期间出现的运行时失败
+    syncClaudeReadiness(db);
+  });
 }
 
 /** 常驻出借循环每轮在组 hello / 判容量之前调：本轮 hello、poll 容量、轮询收单、领单用的都是写进 meta 的那一份。没有 Claude 授权就不探 */
