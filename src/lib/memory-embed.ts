@@ -11,6 +11,7 @@
  * - 发到远端（远端 API，或不在回环地址上的 Ollama）的只有 visibility = team 的文本，且发之前再过一遍 dispatch-redact
  *   （写入时已过闸，这里防的是规则更新后的老行）；home 文本这一条直接不嵌入。
  */
+import { isIPv4 } from "node:net";
 import { redactForPeer } from "./dispatch-redact.js";
 import type { MemoryVisibility } from "./ledger-memory-schema.js";
 import { CONFIG_PATH } from "./paths.js";
@@ -77,10 +78,11 @@ export function readEmbedConfig(path = CONFIG_PATH): EmbedConfig[] {
   return parseEmbedConfig(memory && typeof memory === "object" ? memory.embed : undefined);
 }
 
+/** 只认 localhost、[::1] 和完整合法的 127.0.0.0/8 IPv4；`127.example.com` 这种以 127. 开头的域名是远端 */
 function isLoopback(url: string): boolean {
   try {
     const h = new URL(url).hostname;
-    return h === "localhost" || h === "::1" || h === "[::1]" || /^127\./.test(h);
+    return h === "localhost" || h === "[::1]" || (isIPv4(h) && h.startsWith("127."));
   } catch {
     return false;
   }
@@ -135,10 +137,12 @@ function apiEmbedder(c: Extract<EmbedConfig, { provider: "openai" | "voyage" }>,
 async function ollamaHas(c: Extract<EmbedConfig, { provider: "ollama" }>, f: typeof fetch, ms: number): Promise<boolean> {
   const tags = await within(ms, async (signal) => {
     const r = await f(`${c.url}/api/tags`, { signal });
-    return r.ok ? ((await r.json()) as { models?: { name?: unknown }[] }) : null;
+    return r.ok ? ((await r.json()) as { models?: unknown } | null) : null;
   });
+  // 网络 JSON 只做过类型断言：models 不是数组（{"models":{}} 之类）当该提供方不可用，继续试下一个
+  const models = tags && typeof tags === "object" && Array.isArray(tags.models) ? (tags.models as { name?: unknown }[]) : [];
   const want = c.model.includes(":") ? [c.model] : [c.model, `${c.model}:latest`];
-  return !!tags?.models?.some((m) => typeof m?.name === "string" && (want.includes(m.name) || (!c.model.includes(":") && m.name.startsWith(`${c.model}:`))));
+  return models.some((m) => typeof m?.name === "string" && (want.includes(m.name) || (!c.model.includes(":") && m.name.startsWith(`${c.model}:`))));
 }
 
 /** 按配置顺序取第一个可用的嵌入模型；一个都没有返回 null（语义路关闭，不是错误） */

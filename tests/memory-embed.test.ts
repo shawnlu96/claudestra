@@ -74,6 +74,33 @@ describe("pickEmbedder：按序取第一个可用的，没有返回 null", () =>
     expect(e?.remote).toBe(true);
   });
 
+  test("以 127. 开头的域名不是回环：当远端，home 不发、team 先脱敏", async () => {
+    const tags = { "/api/tags": { models: [{ name: "embeddinggemma" }] } };
+    for (const url of ["https://127.example.com", "http://127.0.0.1.nip.io:11434", "http://127.1.2.3.example:11434"]) {
+      expect((await pickEmbedder([{ ...OLLAMA, url }], { fetch: fakeFetch(tags) }))?.remote).toBe(true);
+    }
+    for (const url of ["http://127.0.0.1:11434", "http://127.1.2.3:11434", "http://localhost:11434", "http://[::1]:11434"]) {
+      expect((await pickEmbedder([{ ...OLLAMA, url }], { fetch: fakeFetch(tags) }))?.remote).toBe(false);
+    }
+    const sent: string[] = [];
+    const f = (async (u: unknown, init?: RequestInit) => {
+      if (String(u).endsWith("/api/tags")) return Response.json(tags["/api/tags"]);
+      sent.push(String(init?.body));
+      return Response.json({ embeddings: [[1, 0]] });
+    }) as typeof fetch;
+    const e = await pickEmbedder([{ ...OLLAMA, url: "https://127.example.com" }], { fetch: f });
+    expect(await embedTexts(e, [{ text: "private home contents", visibility: "home" }])).toEqual([null]);
+    expect(sent).toEqual([]);
+  });
+
+  test("探活返回形状不对（models 不是数组 / null / 非对象）→ 该提供方不可用，继续试下一个，不抛错", async () => {
+    for (const body of [{ models: {} }, { models: "x" }, null, [1], "str", { models: [null, 3, { name: 1 }] }]) {
+      const f = (async () => Response.json(body)) as unknown as typeof fetch;
+      expect(await pickEmbedder([OLLAMA], { fetch: f })).toBeNull();
+      expect(await pickEmbedder([OLLAMA, VOYAGE], { fetch: f, env: { VK: "k" } })).toMatchObject({ model: "voyage:voyage-4-lite" });
+    }
+  });
+
   test("Ollama 不在时退到 owner 配的远端，key 从环境变量取", async () => {
     const e = await pickEmbedder([OLLAMA, VOYAGE], { fetch: fakeFetch({}), env: { VK: "k" } });
     expect(e).toMatchObject({ model: "voyage:voyage-4-lite", remote: true });
