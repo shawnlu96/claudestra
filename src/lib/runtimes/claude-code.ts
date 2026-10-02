@@ -15,13 +15,8 @@ import { buildLendClaudeCommand } from "../lend-claude-worker.js";
 import { isLendWorkerName } from "./clean-env.js";
 import { buildClaudeCommand, type LaunchOptions } from "../claude-launch.js";
 import { findJsonlBySessionId, projectJsonlPath, projectsDir } from "../jsonl-cost.js";
-import {
-  acceptTrustPrompt,
-  detectSessionIdlePrompt,
-  isClaudeReady,
-  probeTuiContract,
-  trustPromptMoves,
-} from "../tmux-helper.js";
+import { detectSessionIdlePrompt, isClaudeReady, probeTuiContract } from "../tmux-helper.js";
+import { acceptTrustPrompt, trustPromptMoves } from "../trust-prompt.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
@@ -249,10 +244,10 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
         continue;
       }
 
-      // 目录信任弹窗默认高亮 No, exit，不能直接 Enter：选 Yes 再继续
+      // 目录信任弹窗默认高亮 No, exit，不能直接 Enter：一轮只走一步（挪到 Yes / 确认在 Yes 上再 Enter），下轮重新抓屏
       const trustMoves = trustPromptMoves(pane);
       if (trustMoves !== null) {
-        await acceptTrustPrompt(win.target, trustMoves);
+        await acceptTrustPrompt((k) => win.sendKey(k), trustMoves);
         await win.sleep(1000);
         continue;
       }
@@ -277,7 +272,7 @@ export const claudeCodeAdapter: ManagedRuntimeAdapter = {
     }
     const trustMoves = trustPromptMoves(pane);
     if (trustMoves !== null) {
-      await acceptTrustPrompt(win.target, trustMoves);
+      await acceptTrustPrompt((k) => win.sendKey(k), trustMoves);
       await win.sleep(1000);
       return "handled";
     }

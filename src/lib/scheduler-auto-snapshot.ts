@@ -1,3 +1,4 @@
+import { projectAgentPolicy } from "./scheduler-agent-pool-context.js";
 import { convergenceSnapshot } from "./fix-strategy-plan.js";
 /**
  * Auto cards: the planner sees only the engine's own facts. Sessions are the ledger bindings (never a registry guess),
@@ -39,6 +40,9 @@ function reviewProofs(db: Database, events: readonly LedgerEvent[], intents: rea
 }
 
 export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts, exclude?: string): PlannerSnapshot {
+  const policy = opts.pool?.remote.agents ? opts.pool.remote : projectAgentPolicy(task.project);
+  if (policy) opts = { ...opts, maxWorkers: policy.agents!.claude + policy.agents!.codex,
+    pool: { remote: policy, borrow: opts.pool?.borrow ?? [] } };
   const base = observeSnapshot(db, task, opts);
   const bound = taskWorkerRefs(db, task.id);
   const intents = base.intents.filter((i) => !i.id.startsWith("pm-dispatch:") && i.id !== exclude);

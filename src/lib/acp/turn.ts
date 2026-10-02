@@ -1,7 +1,7 @@
 /**
  * 宿主的回合循环：所有「开一轮」都经同一个调度器，保证同一时刻只有一轮（ACP 规定，重叠会让两轮抢同一个线程）。
  * 队列里按到达顺序放四种槽：prompt（空闲时到的，或插不进的）、steer（_session/steering 在途，归属未定）、
- * external（适配器拿 steer 的消息自己另起了一轮，已经在跑）、nudge（补 reply 提示）。调度规则：
+ * external（适配器拿 steer 的消息自己另起了一轮，或适配器自发的一轮——track，已经在跑）、nudge（补 reply 提示）。调度规则：
  * 1. 有 steer 在途就什么都不开、也不算空闲：它可能已经让适配器另起了一轮（startedNewTurn 在新回合开始时就回，
  *    回包到之前那一轮已经在跑），这时再 prompt 就重叠了（tests/acp-turn.test.ts「steer 在途」）；
  * 2. 有 external 就先等它：它在适配器里已经在跑，不管排在哪；
@@ -73,6 +73,8 @@ const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure:
 
 export class AcpTurnLoop {
   private slots: Slot[] = [];
+  /** steer 进在跑回合（injected）的消息，正文 → message_id，只留最近 50 条：叫停时适配器清掉的排队正文按它对回 id（voided） */
+  private steered: { text: string; id: string }[] = [];
   /** 调度器正在跑一轮（含上报）。steer 在途、调度器停着等它时为 false，但 busy 仍为 true */
   private pumping = false;
   private suspended = false;
@@ -108,8 +110,19 @@ export class AcpTurnLoop {
     return idle ? "prompt" : "queued";
   }
 
-  /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用） */
-  async submit(text: string): Promise<"prompt" | "steer" | "queued"> {
+  /** 适配器自己开的一轮（session.ts onSelfTurn）：当 external 槽跟到它结束，Stop 上报 / 补 reply 与宿主自己的回合同一套 */
+  track(done: Promise<PromptOutcome>): void {
+    this.slots.push({ kind: "external", done: call(() => done).catch(failedOutcome) });
+    this.pump();
+  }
+
+  /** 适配器叫停时清掉的排队正文里，宿主 steer 进去的那几条的 message_id（abort_ack 的 voided） */
+  voided(cleared: readonly string[]): string[] {
+    return this.steered.filter((s) => cleared.includes(s.text)).map((s) => s.id);
+  }
+
+  /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用）；messageId 记下来供叫停时对回作废的消息 */
+  async submit(text: string, messageId?: string): Promise<"prompt" | "steer" | "queued"> {
     const steering = this.io.steer && (this.pumping || this.slots.some((s) => s.kind === "steer"));
     if (!steering) {
       const idle = !this.busy;
@@ -122,10 +135,13 @@ export class AcpTurnLoop {
     this.slots.push(slot);
     const r = await call(() => this.io.steer!(text)).catch((e): SteerResult => (this.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
     const at = this.slots.indexOf(slot);
-    if (r.outcome === "injected") this.slots.splice(at, 1);
-    // done 登记时就接住：排到它之前就 reject 的话，不能变成 unhandled rejection（Bun 进程会以 1 退出）
-    else if (r.outcome === "startedNewTurn") this.slots[at] = { kind: "external", done: call(() => r.done).catch(failedOutcome) };
-    else this.slots[at] = { kind: "prompt", text };
+    if (r.outcome === "injected") {
+      this.slots.splice(at, 1);
+      if (messageId) this.steered = [...this.steered.slice(-49), { text, id: messageId }];
+    } else if (r.outcome === "startedNewTurn") {
+      // done 登记时就接住：排到它之前就 reject 的话，不能变成 unhandled rejection（Bun 进程会以 1 退出）
+      this.slots[at] = { kind: "external", done: call(() => r.done).catch(failedOutcome) };
+    } else this.slots[at] = { kind: "prompt", text };
     this.pump();
     return r.outcome === "failed" ? "queued" : "steer";
   }
