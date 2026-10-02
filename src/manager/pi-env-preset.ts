@@ -21,6 +21,7 @@ export function resolveCreatePiEnv(
   baseFlag?: string,
   presetFlag?: string,
 ): { piEnv?: PiEnvProfile } | { error: string } {
+  if (baseFlag && baseFlag !== "minimal" && baseFlag !== "inherit") return { error: `未知的 --pi-base: "${baseFlag}"。可用: inherit, minimal` };
   let piEnv: PiEnvProfile | undefined;
   if (presetFlag) {
     const preset = piEnvPreset(presetFlag);

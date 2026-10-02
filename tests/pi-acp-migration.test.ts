@@ -71,6 +71,22 @@ describe("tmux → acp", () => {
     expect(r.transport).toBe(agents["agent-pa"].transport); // 审查复现：修前这里报 acp，registry 实际是 tmux
   });
 
+  test("restart 自己已退回 tmux（recoverFailedAcpLaunch）：不再切一次，起来了报 ready、没起来把原因给出来", async () => {
+    const selfFellBack = { ok: false, agent: "agent-pa", from: "tmux", transport: "tmux", restarted: true, fellBack: true, error: "acp 启动失败，已恢复 tmux" };
+    const a = deps(fresh(), { acp: [selfFellBack] });
+    expect(await migratePi(["pa"], a.d)).toEqual({ ok: false, agent: "agent-pa", transport: "tmux", sessionId: "s-1", ready: true, fellBack: true, error: selfFellBack.error });
+    expect(a.calls).toEqual(["agent-pa→acp"]);
+    const agents = fresh();
+    const calls: string[] = [];
+    const d: PiMigrateDeps = { agents: async () => agents, sandbox: false, switchTo: async (name, mode) => {
+      calls.push(`${name}→${mode}`);
+      agents["agent-pa"] = { ...agents["agent-pa"], transport: "tmux" }; // restart 退回 tmux 后 tmux 也没起来
+      return { ok: false, restarted: false, error: "tmux 也起不来" };
+    } };
+    expect(await migratePi(["pa"], d)).toMatchObject({ ok: false, transport: "tmux", ready: false, fellBack: true, fallbackError: "tmux 也起不来" });
+    expect(calls).toEqual(["agent-pa→acp"]);
+  });
+
   test("沙箱里不退回 tmux（沙箱没有 TUI 版 Pi）", async () => {
     const failed = { ok: false, restarted: false, error: "重启失败" };
     const { d, calls } = deps(fresh(), { acp: [failed] }, true);
