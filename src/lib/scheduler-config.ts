@@ -1,3 +1,5 @@
+import { localFamilyPolicy, type LocalFamilyPolicy } from "./scheduler-local-families-placement.js";
+import { parseLocalFamilies, type LocalFamilies } from "./scheduler-local-families-config.js";
 /** Local scheduler policy; missing or invalid config keeps the fourth daemon idle. */
 import { localRuntimeFields, type LocalAuthorRuntime } from "./scheduler-local-runtime-config.js";
 import { readFileSync } from "node:fs";
@@ -18,7 +20,7 @@ export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 type RemoteMode = "balance" | "off" | "overflow" | "prefer";
 type RemoteRole = "review" | "write";
 /** reviewFirst: peers that get every review they can take, in order, before the tiers (i28-W5c); absent = none. */
-export interface RemotePolicy {
+export interface RemotePolicy extends LocalFamilies, LocalFamilyPolicy {
   mode: RemoteMode; roles: RemoteRole[]; poolTimeoutMin: number; reviewFirst?: string[]; writeFamilies?: ("claude" | "codex")[];
   /** This machine's tier; absent = balance. */
   localPriority?: Priority;
@@ -88,7 +90,7 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
     }
     if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
     projects[id] = { ...localRuntimeFields(p.localAuthorRuntime), maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
+      repoDir: p.repoDir, remote: localFamilyPolicy(parseRemote(id, p.remote), p.localAuthorRuntime), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
       ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
@@ -138,7 +140,7 @@ export function parseRemotePolicy(raw: unknown, where = "remote"): RemotePolicy 
   const note = isLegacyRemoteMode(rawMode) ? `remote.mode "${rawMode}" 是旧写法，按 balance 处理（i28-W5）` : undefined;
   return { mode, roles: (["review", "write"] as const).filter((x) => roles.includes(x)), poolTimeoutMin: timeout as number,
     ...(first.length ? { reviewFirst: first as string[] } : {}), ...(r.localPriority !== undefined ? { localPriority: r.localPriority as Priority } : {}),
-    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}), ...parseWriteFamilies(r.writeFamilies, where) };
+    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}), ...parseWriteFamilies(r.writeFamilies, where), ...parseLocalFamilies(r.localFamilies) };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&

@@ -1,3 +1,4 @@
+import { localFamiliesFlag } from "../lib/scheduler-local-families-config.js";
 /**
  * `ledger scheduler-remote <project> balance|off --reason`：借算力总开关（i28-W5b），只改 scheduler.json 里该项目的 remote.mode。
  * `ledger scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] --reason`：本机档位 / 并发上限 / 作者运行时，没带的不动。
@@ -29,16 +30,20 @@ export function schedulerRemoteCmds(path = SCHEDULER_CONFIG_PATH): Record<string
       },
     },
     "scheduler-local": {
-      valued: ["priority", "max-workers", "author-runtime", "reason", "dedup"],
-      usage: "scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] [--author-runtime claude|codex] --reason <为什么>（PM / master / owner）",
+      valued: ["priority", "max-workers", "author-runtime", "families", "reason", "dedup"],
+      usage: "scheduler-local <project> [--priority first|balance|low|off] [--max-workers N] [--author-runtime claude|codex] [--families codex[,claude]|any] --reason <为什么>（PM / master / owner）",
       async run(c) {
         const [, project, ...extra] = c.p.pos;
-        if (!project || extra.length) throw new LedgerError("invalid", "用法：scheduler-local <project> [--priority …] [--max-workers N] [--author-runtime claude|codex] --reason <为什么>");
+        if (!project || extra.length) throw new LedgerError("invalid",
+          "用法：scheduler-local <project> [--priority …] [--max-workers N] [--author-runtime claude|codex] [--families codex[,claude]|any] --reason <为什么>");
         const { priority, "max-workers": max, "author-runtime": runtime } = c.p.flags;
         if (priority !== undefined && !isPriority(priority)) throw new LedgerError("invalid", `--priority 只能是 ${PRIORITIES.join(" / ")}，收到 ${priority}`);
         if (max !== undefined && !/^\d{1,2}$/.test(max)) throw new LedgerError("invalid", `--max-workers 要是 0..32 的整数，收到 ${max}`);
         if (runtime !== undefined && runtime !== "claude" && runtime !== "codex") throw new LedgerError("invalid", "--author-runtime 只能是 claude / codex");
-        const set: LocalSlots = { ...(priority !== undefined ? { localPriority: priority } : {}), ...(max !== undefined ? { maxActiveWorkers: Number(max) } : {}),
+        let families;
+        try { families = localFamiliesFlag(c.p.flags.families); }
+        catch (e) { throw new LedgerError("invalid", (e as Error).message); }
+        const set: LocalSlots = { ...families, ...(priority !== undefined ? { localPriority: priority } : {}), ...(max !== undefined ? { maxActiveWorkers: Number(max) } : {}),
           ...(runtime !== undefined ? { localAuthorRuntime: runtime } : {}) };
         const r = await setLocalSlots(c.db, c.ctx(), { project, set, reason: c.need("reason") }, { path });
         return { ok: true, project, from: r.from, to: r.to, changed: r.changed, path: r.path, event: r.event, ...(r.duplicate ? { duplicate: true } : {}),
