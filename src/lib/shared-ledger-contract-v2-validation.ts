@@ -85,6 +85,10 @@ export function distinct<T>(xs: readonly T[], key: (x: T) => string = x => Strin
 export const relativePath: Schema<string> = refine(text(500, 1), s =>
   !/^(?:[\\/~]|[A-Za-z]:)/.test(s) && !/[\\%:#?\s]/.test(s)
   && s.split("/").every(part => !!part && part !== "." && part !== ".."));
+/** DAG globs permit filename spaces and glob syntax; resource/link paths stay canonical. */
+export const relativeGlob: Schema<string> = refine(text(500, 1), s =>
+  !/^(?:[\\/~]|[A-Za-z]:)/.test(s) && !/[\\%:\u0000-\u001f\u007f]/.test(s)
+  && s.split("/").every(part => !!part && part !== "." && part !== ".."));
 export const branch = refine(relativePath, s => !/[~^\[\]*]/.test(s) && !s.includes("..") && !s.includes("@{") && !s.endsWith(".lock"));
 export const scope = { teamId: id, projectId: id };
 export const revisions = { rev: positive, createdAt: timestamp, updatedAt: timestamp };

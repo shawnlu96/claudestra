@@ -11,8 +11,8 @@
  * （src/lib/update-hints.ts 的 readPiRuntimeSnapshot），ACP 不写 ⇒ 重启后横幅永不消失。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { stateDir } from "./state-dir.js";
 
 /**
  * 本进程**正在跑的** Pi 版本（写进快照的 piVersion；网页「本会话还在 X，重启后生效」横幅读它）。
@@ -85,7 +85,9 @@ export function writePiEnvSnapshot(o: PiSnapshotOptions): void {
         }
       })(),
     };
-    const dir = join(o.stateDir?.trim() || process.env.CLAUDESTRA_STATE_DIR?.trim() || join(homedir(), ".claude-orchestrator"), "pi-env");
+    // 状态目录一律走 lib/paths.ts（路径字面量守门：只允许出现在那里与白名单文件）
+    // 每次现算（不 import paths.ts：它的依赖链带 Bun 专有 API，Pi 扩展在 Node/Jiti 里加载会挂）
+    const dir = join(o.stateDir?.trim() || stateDir(), "pi-env");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(join(dir, `${agent}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
   } catch {

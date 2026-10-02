@@ -1,3 +1,4 @@
+import { finishFirst } from "./scheduler-agent-pool.js";
 import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
@@ -17,6 +18,7 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
+import { isResourceWait } from "./scheduler-plan-refusal.js";
 import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
@@ -31,6 +33,7 @@ import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
 import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
+import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -125,9 +128,9 @@ class Card {
       ...(plan.recipient ? ["--recipient", plan.recipient] : []), ...(plan.resources.length ? ["--resources", plan.resources.join(",")] : []));
     return r.ok === true ? r.intent as SchedulerIntent : { code: String(r.code ?? "unknown"), error: String(r.error) };
   }
-
   /** Count a refused plan; on the threshold record it on the ledger, then tell PM once (see PLAN_REJECT_TICKS). */
   async refused(code: string, error: string): Promise<CardOutcome> {
+    if (isResourceWait(code, error)) { refusals.get(this.db)?.delete(this.task.id); return this.out("wait", error); }
     const text = planRejectedReason(error), now = this.deps.now(), detail = `计划没写进台账：${oneLine(error)}`;
     const seen = perDb(refusals, this.db), was = seen.get(this.task.id);
     const r: Refusal = was && was.code === code && was.text === text ? { ...was, ticks: was.ticks + 1 } : { code, text, ticks: 1, since: now, told: false };
@@ -142,7 +145,6 @@ class Card {
       `（${Math.floor((now - r.since) / 60_000)} 分钟）：[${code}] ${text}。建议：${advice}` });
     return this.out("replan", `${detail}；${(await sendNotice(this.db, this.deps, key)) ? "已报警 PM" : "报警没发出去，下个 tick 重发"}`);
   }
-
   async ensure(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
     const role = roleOfIntent(intent);
     if (intent.status === "submitted") {
@@ -272,6 +274,7 @@ class Card {
   /** A sent order is only a receipt: watch its session for a quota / auth failure, which is PM's call, never a resend. */
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
     await informFamilyWait(this.db, this.task, wait, this.opts.pool?.remote, this.deps);
+    await (await import("./scheduler-sec-review.js")).raiseSecReviewNoRoom(this.db, this.task, wait, this.deps); // i28-SR1
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
     if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
@@ -364,7 +367,8 @@ class Card {
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
-    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
+    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
+      : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now()) : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);
@@ -379,7 +383,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
-  for (const { project, policy, taskId } of paceCards(db, projects, "auto", pace)) {
+  for (const { project, policy, taskId } of finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? "")) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
     const task = getTask(db, taskId);

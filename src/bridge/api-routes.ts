@@ -102,6 +102,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 
@@ -223,6 +224,7 @@ const slashDeps = (d: ApiDeps): SlashDeps => ({
     emitEvent({ agent: ev, chatId: a.channelId, type: "agent_status", data: { status: "thinking" } });
   },
   record: (cmd, a) => recordMetric("api_slash", { channelId: a.channelId, agent: a.name, meta: { cmd } }),
+  runManager,
 });
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
@@ -301,6 +303,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
   const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
   if (pub) return pub;
+  const joinOffer = await handleJoinOfferApi(req, url); // 共享台账入组码只收已配置 peer，其余一律 403（local-api/shared-ledger-join-offer.ts）
+  if (joinOffer) return joinOffer;
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;
@@ -348,10 +352,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           a.compacting = st === "compacting";
           if (!a.busy && st === undefined && a.status !== "stopped") {
             try {
-              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]))
-                .split("\n")
-                .slice(-10)
-                .join("\n");
+              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"])).split("\n").slice(-10).join("\n");
               if (paneLooksWorking(tail)) a.busy = true;
             } catch {
               /* 窗口不存在等,保持不忙 */

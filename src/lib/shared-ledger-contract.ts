@@ -180,6 +180,22 @@ export interface SharedLedgerImportResult {
   serverSeq: number;
   mappings: { kind: "feature" | "task"; sourceInstanceId: string; sourceId: string; id: string }[];
 }
+export interface SharedLedgerImportControl {
+  mode: "activate" | "revoke";
+  batchId: string;
+  projectId: string;
+  manifestDigest: string;
+}
+export interface SharedLedgerImportVerification {
+  features: number; versions: number; bindings: number; tasks: number;
+  sourceSeq: number; manifestDigest: string;
+}
+export type SharedLedgerImportReceipt = { status: "unknown"; batchId: string } | {
+  status: "staged" | "active" | "revoked";
+  batchId: string; projectId: string; serverSeq: number;
+  receipt: SharedLedgerImportResult;
+  verification: SharedLedgerImportVerification | null;
+};
 export interface SharedLedgerProjectionResult {
   schemaVersion: 1;
   serverSeq: number;

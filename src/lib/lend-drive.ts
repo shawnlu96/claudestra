@@ -27,6 +27,7 @@ import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, p
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
+import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -85,6 +86,8 @@ export interface LendDeps {
   failure(agent: string): CodexFailureSeen | undefined;
   /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
   closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 结单收尾全做完后把 worker 的会话收进 archived/（lend-session-archive.ts，自己兜错只记日志）；不设 = 不归档 */
+  archiveSessions?(row: LendRow): Promise<void>;
   /** 本机 Codex 额度（撞额度暂停借单用）；读不到 = null */
   codexQuota(): Promise<QuotaView | null>;
   log(msg: string): void;
@@ -114,8 +117,7 @@ const GONE: Record<string, "cancelled" | "stopped"> = { ...CONVERGENCE_GONE, can
 export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Database, now: number): string | null {
   if (!entry) return `已不再向 ${row.peer} 出借（lend.json 关了或删了这条）`;
   if (!entry.repos.includes(str(row.preview.repo))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
-  const role = roleOfStep(str(row.preview.step));
-  if (!role || !entry.roles.includes(role)) return `出借声明没开 ${role ?? str(row.preview.step)} 角色，不领这一单`;
+  if (!roleOfStep(str(row.preview.step))) return `不认识的订单阶段 ${str(row.preview.step)}，不领这一单`;
   const slots = row.family === "claude" ? claudeLendSlots(entry) : row.family === "codex" ? entry.families.codex ?? 0 : 0;
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
@@ -184,6 +186,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
+  await d.archiveSessions?.(told);
 }
 
 /**
@@ -376,7 +379,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   } else if (cur.state === "started") {
     // 失败 / 存活 / 运行上限对 started 的每种 submit 都先查：首条派单一直被拒送时 submit 停在 null，
     // 放在派单后面就一轮都查不到，worker 登录失败也照样续租占位（i28-R5a r1 P1-3）
-    const failed = cur.family === "codex" ? d.failure(cur.agent!) : undefined;
+    const failed = await leasedWorkerFailure(cur, d, finish); if (failed === true) return;
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
       d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);

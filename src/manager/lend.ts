@@ -20,7 +20,7 @@ import { requireOwnerOrMaster } from "./project-guard.js";
 
 const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
-  "[--roles review[,write]] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
+  "[--roles <旧参数，忽略；审查和写代码已不区分>] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
   "[--keep-unset codex,claude,roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
 const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
   "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]";
@@ -49,7 +49,7 @@ function buildLendGrant(ref: string, flags: Record<string, string>, file: LendFi
   if (!who.ok) return who;
   const old = file.lend.find((e) => e.peer === who.entry.peer);
   const kept: Record<string, string | undefined> = { codex: old ? String(old.families.codex ?? 0) : undefined, claude: old ? String(old.families.claude ?? 0) : undefined,
-    roles: old?.roles.join(","), "codex-model": old?.codexModel, "codex-effort": old?.codexEffort };
+    "codex-model": old?.codexModel, "codex-effort": old?.codexEffort };
   const f = { ...flags };
   for (const k of keep) if (f[k] === undefined && kept[k] !== undefined) f[k] = kept[k];
   return withCodexChoice(buildGrant({ ref, families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
@@ -98,7 +98,8 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
   if (kind === "lend") {
     const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
       : eff.lending ? `出借中：${eff.lend.map((e) => e.peer + codexText(e)).join("、")}` : read.file.enabled ? "总开关开着，但没有仍有效的出借条目" : "不出借（总开关关）";
-    return output({ ...base, enabled: read.file.enabled, lending: eff.lending, declared: read.file.lend, effective: eff.lend, message });
+    return output({ ...base, enabled: read.file.enabled, lending: eff.lending,
+      declared: read.file.lend.map(({ roles: _roles, ...e }) => e), effective: eff.lend.map(({ roles: _roles, ...e }) => e), message });
   }
   const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
     : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}${e.priority ? `，档位 ${e.priority}` : ""}）`).join("；")}` : "什么都不外借";
@@ -150,15 +151,16 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx, f: LendFile) 
   });
   if (!built.ok) return output({ ok: false, error: built.error });
   const entry = built.entry;
-  const stop = kind === "lend" ? await stopNow() : undefined; // 重授可能收窄仓库 / 角色 / 家族：不再覆盖的在跑单同样当场停
+  const stop = kind === "lend" ? await stopNow() : undefined; // 重授可能收窄仓库 / 家族：不再覆盖的在跑单同样当场停
   if ("projects" in entry) {
     return output({ ok: true, [kind]: entry, message: `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审` +
       "（代码、规格与验收原文都会到对方那边）" + (entry.roles.includes("write") ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") +
       (entry.priority && entry.priority !== "balance" ? `；槽池档位 ${entry.priority}` : "") });
   }
   const slots = Object.entries(entry.families).map(([f, n]) => `${f} ${n} 个位`).join("、");
-  output({ ok: true, [kind]: entry, warning: SHELL_SENTENCE, message: `${SHELL_SENTENCE}。已授权 ${entry.peer} 到 ${entry.until}：仓库 ${entry.repos.join("、")}，` +
-    `角色 ${entry.roles.join("、")}，${slots}${codexText(entry)}，每天最多 ${entry.ordersPerDay} 单；这段时间来单直接领，开跑和交付都会通知你。随时收回：manager lend revoke --peer ${entry.peer}` +
+  const { roles: _roles, ...grant } = entry;
+  output({ ok: true, [kind]: grant, warning: SHELL_SENTENCE, message: `${SHELL_SENTENCE}。已授权 ${entry.peer} 到 ${entry.until}：仓库 ${entry.repos.join("、")}，` +
+    `审查和写代码已不区分，${slots}${codexText(entry)}，每天最多 ${entry.ordersPerDay} 单；这段时间来单直接领，开跑和交付都会通知你。随时收回：manager lend revoke --peer ${entry.peer}` +
     (stop ? stopText(stop) : ""), ...(stop?.unconfirmed.length ? { unconfirmed: stop.unconfirmed } : {}) });
 }
 

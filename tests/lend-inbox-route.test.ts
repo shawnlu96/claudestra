@@ -19,8 +19,10 @@ import { STATE_DIR } from "../src/lib/paths.ts";
 import { newTokenPrincipal, updatePrincipals, type Principal } from "../src/lib/principals.ts";
 
 const PEER = "w3mate";
-const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH, LEND_JOURNAL_PATH];
-const saved = new Map<string, string | null>();
+const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH,
+  LEND_JOURNAL_PATH, LEND_JOURNAL_PATH + "-wal", LEND_JOURNAL_PATH + "-shm"];
+// The journal and any pending WAL are binary; UTF-8 round-tripping corrupts the database restored for later tests.
+const saved = new Map<string, Buffer | null>();
 const dirA = mkdtempSync(join(tmpdir(), "w3-peer-a-"));
 const ENV_WITH_BUN = BRIDGE_ENV as Record<string, string | undefined>;
 const runtimeBefore = ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
@@ -36,9 +38,9 @@ const offer = (...ids: string[]) => JSON.stringify({ v: 1, proto: 2, orders: ids
 
 beforeAll(async () => {
   ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = join(dirA, "runtime");
-  for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f), "utf8") : null);
+  for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f)) : null);
   for (const f of ["peers.json", "principals.json", "peer-keys.json"]) rmSync(fileOf(f), { force: true });
-  rmSync(LEND_JOURNAL_PATH, { force: true });
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   writeFileSync(join(STATE_DIR, "registry.json"), JSON.stringify({ agents: {} }));
   writeFileSync(join(STATE_DIR, "peers.json"), JSON.stringify({ httpPeers: [{ name: PEER, baseUrl: "http://a.example", addedAt: new Date(0).toISOString(), fp: FP,
     outToken: "token-to-a", publicKey: keyA.publicKey, e2e: { idk: "i", ek: {} } }] }));
@@ -60,6 +62,7 @@ beforeAll(async () => {
 afterAll(() => {
   if (runtimeBefore === undefined) delete ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
   else ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = runtimeBefore;
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   for (const [f, v] of saved) v === null ? rmSync(fileOf(f), { force: true }) : writeFileSync(fileOf(f), v);
   rmSync(dirA, { recursive: true, force: true });
 });

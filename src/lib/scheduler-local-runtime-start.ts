@@ -1,3 +1,4 @@
+import { configuredAgentLimits } from "./scheduler-agent-pool-runtime.js";
 /** Adapts the existing start pipeline, retaining its rollback and the runtime's canonical ACP manager launch. */
 import { queueLocalStart, type QueuedStart } from "./scheduler-local-runtime-queue.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -27,21 +28,23 @@ export type { QueuedStart } from "./scheduler-local-runtime-queue.js";
 
 export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, p: StartPlan) => Promise<StartOutcome | QueuedStart>,
   opts: LocalStartOptions = {}): Promise<StartOutcome | QueuedStart> {
-  if (p.peer || selected(p.project, opts.configPath) === "claude") return run(io, p);
+  const runtime = selected(p.project, opts.configPath);
+  const slotOpts = { ...opts, project: p.project, family: runtime };
+  if (p.peer || (runtime === "claude" && !configuredAgentLimits(slotOpts))) return run(io, p);
   const retry = (beforeStart?: () => Promise<void>) => withCodexSlot(async () => {
     await beforeStart?.();
     return run({ ...io, manager: async (args, timeout) => {
     if (args[0] === "create") {
       if (!codexSlotHeld()) return { ok: false, error: "Codex 全机槽锁已失租，没有创建会话" };
-      args = [...args, "--runtime", "codex", "--transport", "acp"];
+      if (runtime === "codex") args = [...args, "--runtime", "codex", "--transport", "acp"];
     } else if (args[0] === "ledger" && args[1] === "workflow-set") {
-      args = args.map((arg) => arg.startsWith("--author-family=") ? "--author-family=codex" : arg);
+      args = args.map((arg) => arg.startsWith("--author-family=") ? `--author-family=${runtime}` : arg);
       const index = args.indexOf("--author-family");
-      if (index >= 0) { args = [...args]; args[index + 1] = "codex"; }
+      if (index >= 0) { args = [...args]; args[index + 1] = runtime; }
     }
     return io.manager(args, timeout);
   } }, p);
-  }, { ...opts, checkQuota: true });
+  }, { ...slotOpts, checkQuota: true });
   const result = await retry();
   return "kind" in result ? queueLocalStart(io, p, opts, result.reason, retry) : result;
 }
@@ -50,8 +53,8 @@ export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, 
 export async function localAutostart(project: string, run: () => Promise<void>, opts: LocalStartOptions = {}): Promise<void | SlotWait> {
   const runtime = selected(project, opts.configPath);
   return selection.run({ project, runtime }, async () => {
-    if (runtime === "claude") return run();
-    return withCodexSlot(run, { ...opts, checkQuota: true });
+    if (runtime === "claude" && !configuredAgentLimits({ ...opts, project })) return run();
+    return withCodexSlot(run, { ...opts, project, family: runtime, checkQuota: true });
   });
 }
 
@@ -61,6 +64,7 @@ export function localCreatedFamily(agent: string, registryPath?: string): "claud
 }
 
 export async function localEnsure(family: string, exists: boolean, run: () => Promise<EnsureResult>, opts: CodexSlotOptions = {}): Promise<EnsureResult> {
+  if (configuredAgentLimits(opts)) return withCodexSlot(run, { ...opts, family: family as "claude" | "codex" });
   if (family !== "codex" || exists) return run();
   return withCodexSlot(run, opts);
 }
@@ -78,7 +82,8 @@ export function localCreateGuard<T extends (...args: string[]) => Promise<Record
 /** LS1 chooses a destination before claim: peer work consumes no local Codex slot, and the choice stays pinned for that claim. */
 export async function localAutostartNode(env: StartTickEnv, cand: Candidate, run: (next: StartTickEnv) => Promise<void>,
   opts: LocalStartOptions = {}): Promise<void | SlotWait> {
-  if (localAuthorRuntime(cand.f.project, opts.configPath) === "claude") return run(env);
+  if (localAuthorRuntime(cand.f.project, opts.configPath) === "claude" &&
+    !configuredAgentLimits({ ...opts, project: cand.f.project })) return run(env);
   const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: projectPm(env.db, cand.f.project) ?? "" },
     { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
   if (!pre.ok || "already" in pre) return run(env);

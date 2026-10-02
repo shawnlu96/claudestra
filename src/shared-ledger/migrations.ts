@@ -55,5 +55,21 @@ export function migrate(db: Database): void {
     COMMIT;
   `);
   const row = db.query("SELECT version FROM shared_schema").get() as { version: number };
-  if (row.version !== 1) throw new Error("Unsupported shared ledger schema");
+  if (row.version === 1) db.transaction(() => {
+    db.run(`CREATE TABLE import_lifecycle(teamId TEXT NOT NULL, sourceInstanceId TEXT NOT NULL, batchId TEXT NOT NULL,
+      manifest TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('staged','active','revoked')), serverSeq INTEGER NOT NULL,
+      verification TEXT, PRIMARY KEY(teamId,sourceInstanceId,batchId),
+      FOREIGN KEY(teamId,sourceInstanceId,batchId) REFERENCES import_batches(teamId,sourceInstanceId,batchId))`);
+    db.run("UPDATE shared_schema SET version=2");
+  }).immediate();
+  else if (row.version !== 2 && row.version !== 3) throw new Error("Unsupported shared ledger schema");
+  if (row.version <= 2) db.transaction(() => {
+    db.run("CREATE TABLE center_identity(id TEXT PRIMARY KEY)");
+    db.run("INSERT INTO center_identity VALUES ('center-' || lower(hex(randomblob(16))))");
+    db.run(`CREATE TABLE join_codes(id TEXT PRIMARY KEY, secretHash TEXT NOT NULL, teamId TEXT NOT NULL, projectId TEXT NOT NULL,
+      personId TEXT NOT NULL, memberCode TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('member','service')), actions TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, credentialTtlMs INTEGER NOT NULL, usedAt INTEGER, revokedAt INTEGER,
+      instanceId TEXT)`);
+    db.run("UPDATE shared_schema SET version=3");
+  }).immediate();
 }
