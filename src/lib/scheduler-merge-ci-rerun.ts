@@ -104,6 +104,8 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   const bounce = () => step("resolved", toReceipt({ cause: "ci_fail", prHead: pr.head, mainHead: null, checks }));
   const gh = ghOf(external);
   if (!gh) return bounce();
+  const pending = pendingRerun(run, pr, checks);
+  if (pending) return awaitRerun(run, pending, gh, step, bounce);
   let decision: Decision;
   try {
     decision = await decide(run, checks, gh);
@@ -128,6 +130,48 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   }
 }
 
+/**
+ * The rerun this run already claimed on this head (ciRerunClaim keeps it as the run's reason), when the red checks still point at
+ * that run. Null otherwise: the caller decides afresh and the ledger answers any second claim.
+ */
+function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { receipt: string; repo: string; runId: string } | null {
+  if (run.phase !== "await_ci" || !run.reason?.startsWith(WAIT_LEAD)) return null;
+  const receipt = run.reason.slice(WAIT_LEAD.length);
+  const claim = parseRerunReceipt(receipt);
+  if (!claim || claim.prHead.toLowerCase() !== pr.head.toLowerCase()) return null;
+  const m = RUN_LINK.exec(claim.link);
+  const runOf = (link: string) => RUN_LINK.exec(link)?.slice(1, 3).join("/");
+  if (!m || checks.some((c) => runOf(c.link) !== `${m[1]}/${m[2]}`)) return null;
+  return { receipt, repo: m[1]!, runId: m[2]! };
+}
+
+/**
+ * After the rerun was sent only a newer attempt of the run (attempt > 1: a run that was re-run before is never re-run, so the
+ * claimed one was attempt 1) is its result. The old attempt still showing → re-send the same claim: within RERUN_SETTLE_MS the
+ * ledger leaves the run waiting (reason 等 CI 重跑开始), past it the ledger bounces (重跑没有开始). Never a second rerun.
+ */
+async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: string; runId: string }, gh: CiRerunGh, step: Step,
+  bounce: () => Promise<MergeRun>): Promise<MergeRun> {
+  let latest: Awaited<ReturnType<CiRerunGh["runAttempt"]>>;
+  try {
+    latest = await gh.runAttempt(pending.repo, pending.runId);
+  } catch (e) {
+    console.error(`⚠️ [merge] ${run.taskId} CI 重跑后读 run 失败，退回 fix：${oneLine((e as Error).message)}`);
+    return bounce();
+  }
+  if (latest.attempt > 1) {
+    if (latest.status !== "completed" || latest.conclusion === "success") return run; // still running, or green while the PR checks catch up
+    console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：run 已重跑过（第 ${latest.attempt} 次仍红）`);
+    return bounce();
+  }
+  const claimed = await step("resolved", pending.receipt);
+  if (claimed.phase === "resolved") console.error(`⚠️ [merge] ${run.taskId} CI 红，退回 fix：重跑没有开始（${RERUN_SETTLE_MS / 60_000} 分钟后仍是旧 attempt）`);
+  return claimed;
+}
+
+/** Prefix of the run's reason while a claimed rerun has not shown up on GitHub yet; the claim receipt follows it. */
+export const RERUN_WAIT = "等 CI 重跑开始";
+const WAIT_LEAD = `${RERUN_WAIT}：`;
 const LEAD = "CI 自动重跑（只因本卡没碰的测试超时）";
 const RECEIPT_MAX = 600;
 const CASE_MAX = 120;
@@ -156,14 +200,18 @@ export function parseRerunReceipt(receipt: string): { prHead: string; link: stri
 type WriteEvent = (db: Database, ctx: WriteCtx, e: { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> },
   primary: boolean) => unknown;
 
-/** How long after a claim GitHub may still show the old attempt of the same run; past it the rerun evidently never started. */
+/**
+ * How long after a claim GitHub may still show the old attempt of the same run; past it the rerun evidently never started.
+ * Same yardstick as BEHIND_SETTLE_MS (i28-CIF2): it waits for the rerun to start, not for CI to finish (that is TRAIN_CI_TIMEOUT_MS).
+ */
 export const RERUN_SETTLE_MS = 10 * 60_000;
 
 /**
  * Ledger side, inside closeMergeRun's transaction. Not a rerun claim → the receipt unchanged. A first claim for this head →
- * the event is written, the run keeps its phase (rev+1), null. The same run claimed again within RERUN_SETTLE_MS (GitHub
- * still shows attempt 1 after the rerun call) → nothing written, rev unchanged, null: the driver keeps waiting.
- * Anything else on a head that was re-run already → the ci_fail bounce receipt.
+ * the event is written, the run keeps its phase (rev+1) with `等 CI 重跑开始：<claim>` as its reason, null. The same run claimed
+ * again within RERUN_SETTLE_MS (GitHub still shows attempt 1 after the rerun call) → nothing written, rev unchanged, null: the
+ * driver keeps waiting. The same run past it → a `重跑没有开始` event and the ci_fail bounce receipt. Anything else on a head
+ * that was re-run already → the ci_fail bounce receipt.
  * The event goes through `writeEvent`, the caller's own ledger-tx insertEvent: only the writer modules import ledger-tx.
  */
 export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, drift: string | null, toReceipt: ToReceipt,
@@ -177,9 +225,18 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   const checks = claim.checks.map((name) => ({ name, link: claim.link }));
   const now = ctx.now ?? Date.now();
   const prior = rerunOf(db, row.taskId, claim.prHead);
-  if (prior && prior.run === claim.link && now - prior.ts < RERUN_SETTLE_MS) return null;
-  if (prior) return toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
-  db.prepare("UPDATE scheduler_merges SET rev=rev+1, updatedAt=? WHERE intentId=?").run(now, row.intentId);
+  const bounce = toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
+  if (prior && prior.run === claim.link) {
+    if (now - prior.ts < RERUN_SETTLE_MS) return null;
+    writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun_stale:${claim.prHead}` }, {
+      project: row.project, target: row.taskId, kind: "scheduler",
+      text: `合并队列：CI 重跑没有开始（发出重跑 ${RERUN_SETTLE_MS / 60_000} 分钟后 GitHub 仍是旧那次结果），退回 fix ${claim.link}`,
+      data: { op: "merge_ci_rerun_stale", intentId: row.intentId, prHead: claim.prHead, run: claim.link, since: prior.ts, reason: "重跑没有开始" },
+    }, true);
+    return bounce;
+  }
+  if (prior) return bounce;
+  db.prepare("UPDATE scheduler_merges SET rev=rev+1, reason=?, updatedAt=? WHERE intentId=?").run(`${WAIT_LEAD}${receipt}`, now, row.intentId);
   writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun:${claim.prHead}` }, {
     project: row.project, target: row.taskId, kind: "scheduler",
     text: `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
