@@ -140,16 +140,17 @@ export interface AutoDepsOpts {
   git?: Git;
   /** The service's leases handed to every manager / ledger child (scheduler-lease-env.ts); none = those children refuse to act. */
   lease?: SchedulerLease;
+  /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
-  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease } = opts;
+  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease, create = plainManager(lease) } = opts;
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
-    create: localCreateGuard(plainManager(lease)), ledger: schedulerManagerWith(lease), registryPath };
+    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath };
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),

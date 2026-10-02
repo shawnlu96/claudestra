@@ -64,3 +64,22 @@ export async function retryCleanCreate(env: { db: Database; registryRow: Registr
   const loud = n >= CREATE_RETRY_LOUD ? `，⚠ 已连续失败 ${n} 次，请 PM 留意（仍自动重试）` : "";
   return { kind: "wait", reason: `${MARK}（${role} ${f.name} 第 ${n} 次${loud}；${wait / 60_000} 分钟后、最早 ${new Date(now() + wait).toISOString()} 重试）：${first}` };
 }
+
+/**
+ * The author worktree a clean create failure left behind (scheduler-local-author.ts checkout) must not hold the retry as
+ * "already exists". It is reused only when provably untouched: on this card's branch, HEAD at (or behind, if origin moved)
+ * the planned base with no commits of its own, and nothing uncommitted besides the node_modules links checkout makes.
+ * Returns null to reuse, else the held reason; a touched worktree is never removed.
+ */
+export async function reusableAuthorWorktree(git: (args: string[]) => Promise<{ code: number; out: string }>,
+  p: { worktree: string; branch: string; base: string }): Promise<string | null> {
+  const at = (args: string[]) => git(["-C", p.worktree, ...args]);
+  const kept = `worktree ${p.worktree} 已存在`;
+  const branch = await at(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (branch.code !== 0 || branch.out !== p.branch) return `${kept}，但不在本卡分支 ${p.branch} 上（${branch.out || "detached"}），保留并等待核对`;
+  if ((await at(["merge-base", "--is-ancestor", "HEAD", p.base])).code !== 0) return `${kept}，HEAD 不在本卡起点 ${p.base} 上（有自己的提交），保留并等待核对`;
+  const st = await at(["status", "--porcelain"]);
+  if (st.code !== 0) return `${kept}，读不了工作区状态：${st.out}`.slice(0, 400);
+  const changed = st.out.split("\n").filter((l) => l && !/^\?\? (web\/)?node_modules\/?$/.test(l));
+  return changed.length ? `${kept}，worktree 有改动，不复用也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400) : null;
+}
