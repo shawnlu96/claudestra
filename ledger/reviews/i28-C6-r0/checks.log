@@ -1,0 +1,65 @@
+Bun v1.3.10; local checks only. PR head CI is authoritative.
+
+Typecheck (exit 0):
+$ tsc --noEmit
+
+
+Guard (exit 0):
+$ bun scripts/guard/index.ts
+↓ 可收紧 27 项：跑 bun run guard:update 锁定进步
+guard ✓（2410 个文件，4082ms，基准 HEAD）
+
+
+Build (exit 0):
+Bundled 1737 modules in 210ms
+
+  bridge.js          5.11 MB  (entry point)
+  channel-server.js  0.80 MB  (entry point)
+  manager.js         4.61 MB  (entry point)
+  launcher.js        0.93 MB  (entry point)
+  cron.js            0.44 MB  (entry point)
+  setup.js           0.61 MB  (entry point)
+
+Bundled 65 modules in 7ms
+
+  src/shared-ledger.js            89.28 KB   (entry point)
+  scripts/shared-ledger-import.js  139.22 KB  (entry point)
+
+
+
+bun run check (exit 1):
+ 10457 pass
+ 20 skip
+ 116 fail
+ 4 snapshots, 204417 expect() calls
+Ran 10593 tests across 843 files. [465.78s]
+error: script "check" exited with code 1
+
+Failures by test file:
+tests/dag-tools-start-spec-path.test.ts: 5
+tests/usage-cache-write.test.ts: 6
+tests/dag-tools-bridge.test.ts: 29
+tests/lend-config-priority.test.ts: 1
+tests/lend-cli.test.ts: 6
+tests/acp-host.test.ts: 4
+tests/dag-tools-placement.test.ts: 14
+tests/lend-claude-worker.test.ts: 2
+tests/manager-ledger.test.ts: 1
+tests/lend-inbox-route.test.ts: 3
+tests/dag-tools-template.test.ts: 13
+tests/lend-grant-model.test.ts: 1
+tests/lend-lab.test.ts: 1
+tests/lend-claude-worker-host.test.ts: 1
+tests/review-tools.test.ts: 4
+tests/peer-e2e-gates.test.ts: 7
+tests/lend-cli-keep-unset.test.ts: 5
+tests/web-lend-api.test.ts: 3
+tests/project-guard.test.ts: 5
+tests/manager-ledger-identity.test.ts: 4
+tests/lend-config.test.ts: 1
+
+Observed local errors include inherited lend-worker identity rejection, ACP fixture failures, and usage-cache/Python process termination. The earlier full run had the same 116 failure names; this is not a clean-baseline proof.
+Isolated related regression with existing testChildEnv: 198 pass, 1 skip, 0 fail; no runtime identity changes.
+
+Privacy: git grep on design document for user absolute paths, HTTP addresses, IPv4, bearer values and private-key markers returned no matches.
+Sandbox cleanup: ports 24760/24761/24762 have no listeners; sandbox clean completed; temporary center directory removed.

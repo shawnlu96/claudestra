@@ -6,10 +6,10 @@ import { canonicalJson } from "./ask-bind.js";
 import { MAX_SKEW_S, SIG_HEADERS, signPurpose, verifyPurpose, type InstanceKey } from "./instance-key.js";
 import {
   SharedLedgerError, SHARED_LEDGER_MAX_BODY_BYTES, type SharedLedgerCommand,
-  type SharedLedgerImport, type SharedLedgerProjection,
+  type SharedLedgerImport, type SharedLedgerProjection, type SharedLedgerImportControl,
 } from "./shared-ledger-contract.js";
 import { id, nonce } from "./shared-ledger-contract-schema.js";
-import { parseSharedLedgerCommand, parseSharedLedgerEnvelope } from "./shared-ledger-contract-validation.js";
+import { parseSharedLedgerCommand, parseSharedLedgerEnvelope, parseSharedLedgerImportControl } from "./shared-ledger-contract-validation.js";
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 
 const PURPOSE = "claudestra-shared-ledger-v1";
@@ -69,7 +69,7 @@ export interface SharedLedgerPrincipal {
 }
 export interface SharedLedgerAuthResult {
   principal: SharedLedgerPrincipal;
-  payload: SharedLedgerCommand | SharedLedgerImport | SharedLedgerProjection | null;
+  payload: SharedLedgerCommand | SharedLedgerImport | SharedLedgerProjection | SharedLedgerImportControl | null;
 }
 
 export const sharedLedgerCredentialHash = (secret: string): string => createHash("sha256").update(secret).digest("hex");
@@ -125,6 +125,7 @@ function route(req: SharedLedgerSignedRequest): { teamId: string; action: Action
   id(teamId);
   if (item) id(item);
   const method = req.method.toUpperCase();
+  if (resource === "imports" && item && ["GET", "POST"].includes(method)) return { teamId, action: "import", resource, item };
   if (method === "GET" && (resource === "features" || (resource === "commands" && item))) return { teamId, action: "read", resource, item };
   if (method === "POST" && !item && resource !== "features") {
     return { teamId, action: resource === "commands" ? "plan" : resource === "imports" ? "import" : "project", resource };
@@ -136,15 +137,16 @@ const allowedRoles: Record<Role, readonly Action[]> = {
   member: ["read", "plan"], owner: ["read", "plan", "import"], service: ["read", "plan", "import", "project"],
 };
 
-function parsePayload(req: SharedLedgerSignedRequest, action: Action): SharedLedgerAuthResult["payload"] {
-  if (action === "read") {
+function parsePayload(req: SharedLedgerSignedRequest, action: Action, importControl = false): SharedLedgerAuthResult["payload"] {
+  if (req.method === "GET") {
     if (req.body !== "") throw new SharedLedgerError("invalid_field");
     return null;
   }
   let raw: unknown;
   try { raw = JSON.parse(req.body); }
   catch { throw new SharedLedgerError("invalid_field"); } // Malformed wire JSON is an expected input rejection, not a server failure.
-  const parser = action === "plan" ? parseSharedLedgerCommand : action === "import" ? parseSharedLedgerImport : parseSharedLedgerProjection;
+  const parser = importControl ? parseSharedLedgerImportControl : action === "plan" ? parseSharedLedgerCommand
+    : action === "import" ? parseSharedLedgerImport : parseSharedLedgerProjection;
   const envelope = parseSharedLedgerEnvelope<NonNullable<SharedLedgerAuthResult["payload"]>>(raw, parser);
   if (envelope.attemptNonce !== req.attemptNonce) throw new SharedLedgerError("invalid_field");
   return envelope.payload;
@@ -166,7 +168,8 @@ export function authenticateSharedLedgerRequest(
   if (req.publicKey !== credential.publicKey || req.instanceId !== credential.instanceId) throw new SharedLedgerError("forbidden");
   const r = route(req);
   if (r.teamId !== credential.teamId) throw new SharedLedgerError("forbidden");
-  const payload = parsePayload(req, r.action);
+  const payload = parsePayload(req, r.action, r.resource === "imports" && !!r.item);
+  if (r.item && payload && "batchId" in payload && payload.batchId !== r.item) throw new SharedLedgerError("invalid_field");
   const projectId = payload ? ("manifest" in payload ? payload.manifest.projectId : payload.projectId) : target.projectId;
   if ((payload && target.projectId && target.projectId !== projectId) || (r.item && r.resource === "features" && !projectId)) {
     throw new SharedLedgerError("forbidden");
