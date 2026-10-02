@@ -13,6 +13,7 @@ import { isBaseBranch, stepOfStage } from "./lend-git.js";
 import type { RemoteHead } from "./order-deliver.js";
 import { readTextSoft } from "./task-spec.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
+import { lendFixMaterials } from "./lend-fix-env.js";
 
 export interface WriteProbe {
   /** Fingerprint of the peer's pinned instance key; null = not paired end to end. */
@@ -32,7 +33,7 @@ export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: 
     if (!r.ok) throw new LedgerError("invalid", `查不到 ${q.repo} 的 ${q.base}：${r.error}`);
     return { fp, base: q.base, baseSha: r.head, report: null };
   }
-  if (fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage)) return { fp, base: q.base, baseSha: null, report: null };
+  if (fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage)) return lendFixMaterials(fp, q, probe, { db, task });
   const ui = uiRejectLend(db, task); // 同一合成函数决定截图意见与代码 P1 的来源；有代码问题时报告原文也必须内联
   if (ui && !ui.codeReportPath) return { fp, base: q.base, baseSha: null, report: ui.report };
   const path = ui?.codeReportPath ?? lastReviewOf(db, task).path;

@@ -87,5 +87,5 @@ export async function localAutostartNode(env: StartTickEnv, cand: Candidate, run
     : { where: "local", reason: "本轮 preflight 选定本机，claim 仍核对目的地容量" };
   const next: StartTickEnv = { ...env, startEnv: () => ({ ...env.startEnv(), placement: async () => placement }) };
   if (peer) return run(next);
-  return localAutostart(cand.f.project, () => run(next), opts);
+  return localAutostart(cand.f.project, () => run(next), { ...opts, ledgerPath: opts.ledgerPath ?? env.db.filename });
 }

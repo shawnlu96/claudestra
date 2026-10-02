@@ -112,7 +112,7 @@ describe("迁移", () => {
 
 describe("hello", () => {
   test("入账到 lend_peers；回包只有 proto / helloMs / beatMs（bridge 只剥 ok / notified，多一个字段对方就拒）", async () => {
-    expect(await hello()).toEqual({ ok: true, v: 1, proto: 2, helloMs: 60_000, beatMs: 15_000 });
+    expect(await hello()).toEqual({ ok: true, v: 1, proto: 3, helloMs: 60_000, beatMs: 15_000 });
     expect(getLendPeer(db, "mate")).toMatchObject({ proto: 2, boot: "boot-0001", fp: "abcd-ef01-2345-6789", helloAt: now, grant: grant(), paused: null });
   });
 

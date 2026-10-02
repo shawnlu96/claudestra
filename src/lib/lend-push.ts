@@ -13,6 +13,7 @@ import { LEND_ROOT, orderDir, removeOrderDir, type Run } from "./lend-clone.js";
 import { isBaseBranch, labGitRoot, LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { pickWorkerEnv } from "./runtimes/clean-env.js";
+import { pushCardBranch, checkCardPushHead } from "./fix-strategy-remote-branch.js";
 
 const TIMEOUT_MS = 5 * 60_000;
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -27,8 +28,8 @@ const NOT_FF = /non-fast-forward|fetch first|\[rejected\]|stale info/i;
 const tail = (r: BoundedResult): string => (r.timedOut ? "超时" : (r.stderr || r.stdout).trim().split("\n").slice(-2).join(" ").slice(0, 300));
 
 /** 推送目标本身不合格就什么都不做：分支必须是出借分支、不是基线 */
-function pushTargetProblem(t: Pick<PushTarget, "branch" | "base" | "orderHead">): string | null {
-  if (!LEND_BRANCH_RE.test(t.branch)) return `订单分支 ${t.branch.slice(0, 80)} 不是出借分支，不推`;
+function pushTargetProblem(t: PushTarget): string | null {
+  if (!LEND_BRANCH_RE.test(t.branch) && !pushCardBranch(t)) return "订单分支不是出借分支或绑定卡分支，不推";
   if (!isBaseBranch(t.base) || t.base === t.branch) return `基线 ${t.base.slice(0, 80)} 不合格，不推`;
   if (!SHA40.test(t.orderHead)) return "订单起点不是完整 40 位 SHA";
   return null;
@@ -89,6 +90,7 @@ export async function pushWork(t: PushTarget & { head: string }, o: PushOpts = {
   if (st.head !== t.head) return { ok: false, reason: `工作副本 ${t.branch} 的 head 是 ${st.head.slice(0, 12)}，不是交的 ${t.head.slice(0, 12)}`, retry: false };
   const anc = await st.s.git(["merge-base", "--is-ancestor", t.orderHead, t.head]);
   if (anc.code !== 0) return { ok: false, reason: "交的 head 不是从订单起点接着提交的（改写了历史），不推", retry: false };
+  const conflict = await checkCardPushHead(t, st.s.git, st.s.url); if (conflict) return conflict;
   const r = await st.s.git(["push", "--porcelain", st.s.url, `${t.head}:refs/heads/${t.branch}`]);
   return r.code === 0 ? { ok: true } : failed(t.branch, r);
 }

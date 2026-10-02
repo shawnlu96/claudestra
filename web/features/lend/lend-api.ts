@@ -22,5 +22,6 @@ export function postGrant(body: { peer: string; repos: string[]; codex?: number;
 export function postRevoke(peer: string): Promise<CliResult & { orders: OrderView[] }> {
   return api<CliResult & { orders: OrderView[] }>("/lend/grants/revoke", { method: "POST", json: { peer } });
 }
-export const claudeTokenApi = (method = "GET", token?: string) =>
-  api<{ configured: boolean; savedAt: string | null }>("/lend/claude-token", { method, ...(token === undefined ? {} : { json: { token } }) });
+/** 出借 Claude 用本机 Claude Code 登录：能不能接单 + 旧 setup-token 残留在哪（只读，bridge local-api/lend-claude-token.ts） */
+export interface ClaudeLogin { loggedIn: boolean; reason: string | null; legacyTokenFile: string | null; legacyTokenEnv: boolean }
+export const claudeLoginApi = () => api<ClaudeLogin>("/lend/claude-token");
