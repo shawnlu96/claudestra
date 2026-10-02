@@ -38,6 +38,13 @@ describe("lintUiSpec", () => {
     expect(lintUiSpec(body, no)).toBeNull();
   });
 
+  test("reuse-dash-bullet：复用列表和行内连字符不要求批准", () => {
+    for (const reuse of ["- 复用现有团队视图 src/web/TeamView.tsx", "- TeamView 组件\n- 状态徽章", "复用 TeamView - 卡片列表"]) {
+      const body = `# T\n模板：ui\n## 复用对象\n${reuse}\n## 对照基准\n/tmp/b.png`;
+      expect(lintUiSpec(body, no)).toBeNull();
+    }
+  });
+
   test("section-loose：仅精确二级节名算必填，子标题不算内容", () => {
     const bodies = [
       "## 目标\n### 不写复用对象\nfoo\n### 不写对照基准\nbar",
