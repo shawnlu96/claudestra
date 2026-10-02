@@ -266,3 +266,54 @@ describe("pmem-M2 r1 审查修复：memoryRefs 项目边界 / 重放一致 / mar
       ["agent-pm", "confirm", 2_200], ["agent-x", "dispute", 2_300], ["agent-pm", "confirm", 2_400]]);
   });
 });
+
+describe("pmem-M2 r2 审查修复：refs 先校验再落 / record 重试只认同内容", () => {
+  const delivered = () => deliver(db, { actor: "agent-x", now: 1_400, dedupKey: `mcp-deliver:${WRITE_ORDER}:${H1}` }, { taskId: "T60", headSHA: H1, moveFrom: "build" });
+  const pit = () => recordMemory(db, { actor: "agent-pm", now: 1_000 }, { ...PIT, project: P, via: "tool", authorRole: "pm", fixable: true } as never).memory.id;
+  const refsEvents = () => listEvents(db, { project: P, target: "T60" }).filter((e) => e.kind === "memory" && e.data.op === "refs");
+  const SECRET = "ghp_" + "a".repeat(36); // 合成串，只为命中脱敏闸
+
+  test("refs-secret：wrong 的 note 命中脱敏闸 → 整份拒，不落原文、不占幂等键；改成普通 note 重交照常转争议", async () => {
+    const m1 = pit();
+    delivered();
+    const bad = await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, [{ id: m1, use: "wrong", note: SECRET }]);
+    expect(bad).toMatchObject({ ok: true, memoryRefs: { ok: false } });
+    expect((bad as { memoryRefs?: { error: string } }).memoryRefs?.error).toContain("脱敏闸");
+    expect(refsEvents()).toEqual([]);
+    expect(JSON.stringify(listEvents(db, { project: P }))).not.toContain(SECRET);
+    expect(memoryState(db, m1)).toMatchObject({ disputed: false });
+    const fixed = await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, [{ id: m1, use: "wrong", note: "该规矩需要修正" }]);
+    expect(fixed).toMatchObject({ memoryRefs: { ok: true, disputed: [m1] } });
+    expect(memoryState(db, m1)).toMatchObject({ disputed: true });
+    expect(refsEvents().length).toBe(1);
+  });
+
+  test("refs-secret：applied / irrelevant 的 note 命中脱敏闸也整份拒（note 随 refs 事件落库）", async () => {
+    const m1 = pit();
+    delivered();
+    const bad = await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, [{ id: m1, use: "applied", note: SECRET }]);
+    expect(bad).toMatchObject({ memoryRefs: { ok: false } });
+    expect(refsEvents()).toEqual([]);
+  });
+
+  test("refs-secret：wrong 转争议被拒（如 note 含本项目内部名字）→ refs 事件一并回滚，不留部分成功", async () => {
+    const m1 = pit();
+    delivered();
+    db.run(`INSERT INTO features (id, project, title, status, createdBy, createdAt, updatedAt) VALUES ('F1', '${P}', '小部件存储重构', 'active', 'owner', 1, 1)`);
+    const bad = await withMemoryRefs({ ok: true }, X, run, WRITE_ORDER, H1, [{ id: m1, use: "wrong", note: "小部件存储重构里不是这样" }]);
+    expect(bad).toMatchObject({ memoryRefs: { ok: false } });
+    expect(refsEvents()).toEqual([]);
+    expect(listMarks(db, m1)).toEqual([]);
+  });
+
+  test("record-retry：同作者同标题、同 family 有交集但正文不同 → 回 lint 拒绝（不当重试吞掉），库里正文不变", async () => {
+    const rec = (extra: Record<string, unknown> = {}) => cli(["memory-record", `--wire=${JSON.stringify({ ...PIT, project: P, ...extra })}`], "agent-pm");
+    expect(await rec()).toMatchObject({ ok: true, memoryId: "ab12-m1", status: "open" });
+    const changed = await rec({ rule: "必须等待所有异步写完成" });
+    expect(changed).toMatchObject({ ok: false });
+    expect(JSON.stringify(changed)).toContain("ab12-m1");
+    expect(memoryState(db, "ab12-m1")!.memory.body).toMatchObject({ rule: PIT.rule });
+    // 完整同内容同锚点 → 才是重试
+    expect(await rec()).toMatchObject({ ok: true, duplicate: true, memoryId: "ab12-m1" });
+  });
+});

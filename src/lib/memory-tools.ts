@@ -14,7 +14,7 @@ import type { MemoryState } from "./ledger-memory-fold.js";
 import type { MemoryAuthorRole, MemoryMarkKind } from "./ledger-memory-schema.js";
 import { getMeta, getTask, LedgerError } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { memoryLint, type MemoryLintDeps } from "./memory-lint.js";
+import { memoryLint, sameMemoryWrite, type MemoryLintDeps } from "./memory-lint.js";
 import { TOOL_MARKS, WIRE_V } from "./memory-tools-defs.js";
 import { MEMORY_ID } from "./memory-tools-wire.js";
 import { ledgerWrite, type LedgerRun } from "./order-ledger-exit.js";
@@ -186,7 +186,7 @@ function latestTaskEvent(db: Database, taskId: string): MemoryInput["sources"] {
 
 export type MemoryWriteResult = Record<string, unknown> & { ok: true };
 
-/** record_memory / ledger memory-record：角色 → 锚点 → memoryLint → recordMemory。同作者同内容重试回已写的那条（duplicate） */
+/** record_memory / ledger memory-record：角色 → 锚点 → memoryLint → recordMemory。同作者、正文、锚点全一致的重试回已写的那条（duplicate），同类 / 近邻照样拒 */
 export function recordAs(db: Database, caller: MemoryCaller, args: RecordArgs, now: number, lintDeps: MemoryLintDeps = {}): MemoryWriteResult {
   const who = memoryRole(db, caller, { project: args.project, orderId: args.orderId });
   if (!who.ok) throw new LedgerError(who.code === "invalid" ? "invalid" : "forbidden", who.error);
@@ -203,7 +203,7 @@ export function recordAs(db: Database, caller: MemoryCaller, args: RecordArgs, n
   const lint = memoryLint(db, input, lintDeps);
   if (!lint.ok) {
     const prev = lint.duplicateOf ? getMemory(db, lint.duplicateOf) : null;
-    if (prev && prev.author === caller.actor && prev.title === args.title) return { ok: true, duplicate: true, memoryId: prev.id, status: memoryState(db, prev.id)?.status };
+    if (prev && sameMemoryWrite(prev, caller.actor, input)) return { ok: true, duplicate: true, memoryId: prev.id, status: memoryState(db, prev.id)?.status };
     throw new LedgerError("invalid", lint.error, { lintRule: lint.rule, ...(lint.duplicateOf ? { duplicateOf: lint.duplicateOf } : {}) });
   }
   const w = recordMemory(db, { actor: caller.actor, now }, input);

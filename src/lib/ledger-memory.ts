@@ -186,8 +186,8 @@ const IPV6 = [
 /** 任何 IP（含公网）：dispatch-redact 只遮内网段，记忆会进共享台账，公网地址也不该落（同 shared-ledger-scrub 的口径） */
 const ANY_IP = new RegExp(`\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b|(?<![0-9a-z_]|[0-9a-f]:)(?:${IPV6})(?![0-9a-z_]|:[0-9a-f])`, "i");
 
-/** 命中密钥 / 地址 / 个人信息形状的字段名（只报位置）；空 = 没命中 */
-function secretHits(fields: Record<string, unknown>): string[] {
+/** 命中密钥 / 地址 / 个人信息形状的字段名（只报位置）；空 = 没命中。memory-tools-refs 落 refs 事件前也用它查 note */
+export function secretHits(fields: Record<string, unknown>): string[] {
   return Object.entries(fields).filter(([, v]) => typeof v === "string" && !!v && (redactForPeer(v as string).count > 0 || ANY_IP.test(v as string))).map(([k]) => k);
 }
 

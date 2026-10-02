@@ -4,14 +4,15 @@
  * - 每条 wrong 自动转成一条 dispute mark（reason = note，source = 上面那条事件，dedupKey 按设计稿 §1.2 的 auto: 格式），不再进单子、进 PM 待办。
  * 只认「这张单 + 这个 head 的交付是调用方自己记的」（deliver 的 dedup 事件），所以身份跟着 deliver 走、不另收。
  * 只收交付所在项目的记忆：别的项目的 id 整份拒（不落事件、不标争议），执行者不能借自己的交付把别处的记忆标成争议、挤出检索。
- * 重试安全：事件按 dedupKey 只写一次；同键再来必须是同一份 refs（不同就拒），补记 dispute 只按已落的那份做，dispute 按 dedupKey 只记一次。
- * bridge 侧 withMemoryRefs 在 deliver 成功（含重放）之后调，失败只附在回执里、不推翻交付。tests/memory-tools-refs.test.ts。
+ * 先校验再落：note 过脱敏闸，事件与各条 dispute 同一事务，任何一条被拒整份回滚（不留原文、不占幂等键），有效的 wrong 与 dispute 总是一起在。
+ * 重试安全：事件按 dedupKey 只写一次；同键再来必须是同一份 refs（不同就拒），dispute 按 dedupKey 只记一次。
+ * bridge 侧 withMemoryRefs 在 deliver 成功（含重放）之后调，失败只附在回执里（memoryRefs.ok = false）、不推翻交付。tests/memory-tools-refs.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { getMemory, markMemory } from "./ledger-memory.js";
+import { getMemory, markMemory, secretHits } from "./ledger-memory.js";
 import type { MemorySourceRef } from "./ledger-memory-fold.js";
 import { ORIGIN_VALUES, originArgs } from "./ledger-origin.js";
-import { getEventByDedup, LedgerError, toEvent } from "./ledger-store.js";
+import { busyAsLedgerError, getEventByDedup, LedgerError, toEvent } from "./ledger-store.js";
 import type { MemoryRef } from "./memory-tools-wire.js";
 import { ledgerWrite, type LedgerRun } from "./order-ledger-exit.js";
 import type { OrderToolResult, VerifiedCall } from "./order-tool-route.js";
@@ -24,7 +25,7 @@ const refOf = (e: { seq: number; origin?: string | null; originSeq?: number | nu
   e.origin && e.originSeq ? { origin: e.origin, originSeq: e.originSeq } : { seq: e.seq };
 const refText = (r: MemorySourceRef) => ("seq" in r ? `seq/${r.seq}` : `${r.origin}/${r.originSeq}`);
 
-export interface RefsOutcome { eventSeq: number; duplicate: boolean; disputed: string[]; unknown: string[]; failed: { id: string; error: string }[] }
+export interface RefsOutcome { eventSeq: number; duplicate: boolean; disputed: string[]; unknown: string[] }
 
 /** refs 里每条已有的记忆都得在交付的项目里；不在的整份拒（事件与 marks 都还没写） */
 function foreignRefs(db: Database, project: string, refs: readonly MemoryRef[]): string[] {
@@ -40,39 +41,38 @@ export function recordMemoryRefs(db: Database, actor: string, input: { orderId: 
   if (delivered.actor !== actor) throw new LedgerError("forbidden", "这次交付不是你记的，不能替它标 memoryRefs");
   const taskId = delivered.target;
   const key = memoryRefsKey(input.orderId, input.head);
-  let event = getEventByDedup(db, key);
-  const duplicate = !!event;
-  if (event) {
-    const stored = (event.data as { refs?: MemoryRef[] } | null)?.refs ?? [];
-    if (!sameRefs(stored, input.refs)) throw new LedgerError("dedup_mismatch", `${input.orderId} @ ${input.head.slice(0, 12)} 已记过另一份 memoryRefs，同一次交付不能改`);
-  } else {
-    const foreign = foreignRefs(db, delivered.project, input.refs);
-    if (foreign.length) throw new LedgerError("forbidden", `记忆 ${foreign.slice(0, 5).join(", ")} 不在这次交付的项目 ${delivered.project} 里，整份 memoryRefs 没记`);
-    const r = db.prepare(`INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey, origin, originSeq) VALUES (?, ?, ?, ?, 'memory', '', ?, ?, ${ORIGIN_VALUES}) RETURNING *`)
-      .get(now, actor, delivered.project, taskId, JSON.stringify({ op: "refs", orderId: input.orderId, head: input.head, refs: input.refs }), key, ...originArgs(db));
-    event = toEvent(r as Record<string, unknown>);
-  }
-  const source = refOf(event);
-  const out: RefsOutcome = { eventSeq: event.seq, duplicate, disputed: [], unknown: [], failed: [] };
-  for (const ref of input.refs.filter((x) => x.use === "wrong")) {
-    const memory = getMemory(db, ref.id);
-    if (!memory) {
-      out.unknown.push(ref.id);
-      continue;
+  // 事件与 dispute marks 同一事务：任何一条 wrong 转争议被拒（reason 校验、内部名字等）整份回滚，不留原文、不占幂等键，改好再交
+  return busyAsLedgerError("写 memoryRefs", () => db.transaction((): RefsOutcome => {
+    let event = getEventByDedup(db, key);
+    const duplicate = !!event;
+    if (event) {
+      const stored = (event.data as { refs?: MemoryRef[] } | null)?.refs ?? [];
+      if (!sameRefs(stored, input.refs)) throw new LedgerError("dedup_mismatch", `${input.orderId} @ ${input.head.slice(0, 12)} 已记过另一份 memoryRefs，同一次交付不能改`);
+    } else {
+      const foreign = foreignRefs(db, delivered.project, input.refs);
+      if (foreign.length) throw new LedgerError("forbidden", `记忆 ${foreign.slice(0, 5).join(", ")} 不在这次交付的项目 ${delivered.project} 里，整份 memoryRefs 没记`);
+      const secret = secretHits(Object.fromEntries(input.refs.map((r, i) => [`refs[${i}].note`, r.note])));
+      if (secret.length) throw new LedgerError("invalid", `脱敏闸命中（密钥 / 地址 / 个人信息形状），整份 memoryRefs 没记：${secret.join(", ")}`);
+      const r = db.prepare(`INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey, origin, originSeq) VALUES (?, ?, ?, ?, 'memory', '', ?, ?, ${ORIGIN_VALUES}) RETURNING *`)
+        .get(now, actor, delivered.project, taskId, JSON.stringify({ op: "refs", orderId: input.orderId, head: input.head, refs: input.refs }), key, ...originArgs(db));
+      event = toEvent(r as Record<string, unknown>);
     }
-    if (memory.project !== delivered.project) { // 首次落账时还不存在、之后才出现的同号记忆：不跨项目标
-      out.failed.push({ id: ref.id, error: `不在项目 ${delivered.project} 里` });
-      continue;
-    }
-    try {
+    const source = refOf(event);
+    const out: RefsOutcome = { eventSeq: event.seq, duplicate, disputed: [], unknown: [] };
+    for (const ref of input.refs.filter((x) => x.use === "wrong")) {
+      const memory = getMemory(db, ref.id);
+      if (!memory) {
+        out.unknown.push(ref.id);
+        continue;
+      }
+      // 首次落账时还不存在、之后才出现的同号记忆：不跨项目标（重放才可能走到）
+      if (memory.project !== delivered.project) throw new LedgerError("forbidden", `记忆 ${ref.id} 不在项目 ${delivered.project} 里`);
       markMemory(db, { actor, now }, { memoryId: ref.id, mark: "dispute", reason: ref.note ?? "交付时标 wrong", source,
         dedupKey: `auto:dispute:${ref.id}:${taskId}:${refText(source)}` });
       out.disputed.push(ref.id);
-    } catch (e) {
-      out.failed.push({ id: ref.id, error: (e as Error).message.slice(0, 300) });
     }
-  }
-  return out;
+    return out;
+  }).immediate());
 }
 
 /** bridge：交付回执（成功或重放）后补记 memoryRefs；没给或交付被拒就原样返回 */
@@ -80,5 +80,5 @@ export async function withMemoryRefs(result: OrderToolResult, call: VerifiedCall
   refs: MemoryRef[] | undefined): Promise<OrderToolResult> {
   if (!result.ok || !refs?.length) return result;
   const r = await ledgerWrite(call, run, "memory-refs", orderId, { head, refs: JSON.stringify(refs) }, memoryRefsKey(orderId, head));
-  return { ...result, memoryRefs: r.ok ? { ok: true, disputed: r.disputed, unknown: r.unknown, failed: r.failed } : { ok: false, error: r.error } };
+  return { ...result, memoryRefs: r.ok ? { ok: true, disputed: r.disputed, unknown: r.unknown } : { ok: false, error: r.error } };
 }

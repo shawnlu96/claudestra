@@ -10,7 +10,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { redactForPeer } from "./dispatch-redact.js";
-import { MEMORY_LIMITS as LIMITS, memoryState, memoryDigest, type MemoryInput } from "./ledger-memory.js";
+import { MEMORY_LIMITS as LIMITS, memoryState, memoryDigest, type Memory, type MemoryInput } from "./ledger-memory.js";
 
 const MEMORY_LINT_RULES = {
   1: "进度 / 状态不是记忆（那是事件，台账里已有）",
@@ -116,6 +116,17 @@ export function filesOverlap(a: readonly string[], b: readonly string[]): boolea
 
 const bodyOf = (input: MemoryLintInput): string =>
   input.kind === "pitfall" ? JSON.stringify({ symptom: input.symptom, rule: input.rule }) : String(input.body ?? "");
+
+/**
+ * 重试判定（memory-tools recordAs 用）：已有记忆与这次输入的作者、类别、正文与文件（digest）、family、fixable、锚点全都一致才算同一次写；
+ * 第 7 条的同 family 有交集、语义近邻不算，照样回拒绝和 confirm / supersede 指引。
+ */
+export function sameMemoryWrite(prev: Memory, actor: string, input: MemoryInput): boolean {
+  const anchored = input.taskId ? prev.taskId === input.taskId && prev.head === (input.head ?? null) && prev.specRev === (input.specRev ?? null)
+    : prev.taskId === null && prev.featureId === (input.featureId ?? null);
+  return anchored && prev.author === actor && prev.kind === input.kind && prev.family === (input.family ?? null) && prev.fixable === (input.fixable ?? null)
+    && prev.digest === memoryDigest(input.title, bodyOf(input), input.files ?? []);
+}
 
 /** 第 7 条：本项目里同内容的、同 family 且文件有交集的 open / fixing 坑、语义近邻 */
 function lintDuplicate(db: Database, input: MemoryLintInput, deps: MemoryLintDeps = {}): MemoryLintResult {
