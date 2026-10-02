@@ -20,13 +20,14 @@ import { backupBeforeMigrate } from "./ledger-backup.js";
 import { DAG_REWRITE_SCHEMA, FEATURE_DEPS_SCHEMA, FEATURE_COLUMNS, FEATURE_INDEXES, FEATURE_SCHEMA, FEATURE_TABLES } from "./ledger-feature-schema.js";
 import { LEND_PEER_COOLDOWN_SCHEMA, migratePeerCooldownBaseline } from "./lend-peer-cooldown.js";
 import { LEND_QUEUE_SCHEMA } from "./ledger-lend-queue-schema.js";
+import { LEND_RELAY_SCHEMA, LEND_RELAY_TABLES } from "./ledger-lend-relay-schema.js";
 import { LEND_COLUMNS, LEND_INDEXES, LEND_PEERS_SCHEMA, LEND_SCHEMA, LEND_TABLES, LEND_WRITE_SCHEMA } from "./ledger-lend-schema.js";
 import { DEPLOY_COLUMNS, DEPLOY_INDEXES, DEPLOY_SCHEMA, DEPLOY_TABLES } from "./ledger-deploy-schema.js";
 export { schemaVersion };
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
 export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline", "task_steps", ...SCHEDULER_TABLES,
-  ...FEATURE_TABLES, ...LEND_TABLES, ...DEPLOY_TABLES, "lend_push_queue", "lend_peer_cooldowns"] as const;
+  ...FEATURE_TABLES, ...LEND_TABLES, ...DEPLOY_TABLES, "lend_push_queue", "lend_peer_cooldowns", ...LEND_RELAY_TABLES] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -141,7 +142,7 @@ function migrateDeps(db: Database): void {
 export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2,
   STEPS_SCHEMA, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, FEATURE_SCHEMA, DAG_REWRITE_SCHEMA, LEND_SCHEMA,
   DEPLOY_SCHEMA, LEND_WRITE_SCHEMA, LEND_PEERS_SCHEMA, SCHEDULER_MERGE_WAIT_SCHEMA, FEATURE_DEPS_SCHEMA, LEND_QUEUE_SCHEMA, LEND_PEER_COOLDOWN_SCHEMA,
-  migratePeerCooldownBaseline];
+  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */

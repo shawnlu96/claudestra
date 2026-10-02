@@ -19,7 +19,8 @@ export const ORDER_TOOLS = [
     name: "take_order",
     description:
       "Executor: fetch your current work order (OrderWire) from the ledger — the card whose current build/fix step is assigned to you. " +
-      "Returns {ok, order} with order=null when you have none. Only sessions launched by Claudestra (whoami verified=true) may call it.",
+      "Returns {ok, order} with order=null when you have none; when the card's code is written by a lending peer, order=null and `note` says so " +
+      "(you only restate and answer PM: no code, no push, no deliver). Only sessions launched by Claudestra (whoami verified=true) may call it.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
