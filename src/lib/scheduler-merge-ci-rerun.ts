@@ -132,10 +132,11 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
 
 /**
  * The rerun this run already claimed on this head (ciRerunClaim keeps it as the run's reason), when the red checks still point at
- * that run. Null otherwise: the caller decides afresh and the ledger answers any second claim.
+ * that run. Null otherwise: the caller decides afresh and the ledger answers any second claim. Any phase: ready, updating and
+ * await_ci all reach here, the claim keeps the phase, and every phase change rewrites the reason, so a claim reason is current.
  */
 function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { receipt: string; repo: string; runId: string } | null {
-  if (run.phase !== "await_ci" || !run.reason?.startsWith(WAIT_LEAD)) return null;
+  if (!run.reason?.startsWith(WAIT_LEAD)) return null;
   const receipt = run.reason.slice(WAIT_LEAD.length);
   const claim = parseRerunReceipt(receipt);
   if (!claim || claim.prHead.toLowerCase() !== pr.head.toLowerCase()) return null;

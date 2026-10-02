@@ -247,6 +247,40 @@ describe("i28-CIF1f1 after the rerun only a newer attempt counts; the old one st
   });
 });
 
+describe("i28-CIF1f1 the stale-attempt wait holds in every phase that can claim a rerun (ready, updating, await_ci)", () => {
+  for (const phase of ["ready", "updating", "await_ci"]) {
+    test(`${phase}: old attempt still showing and its log unreadable → waits, no log or file read; past the limit → 重跑没有开始`, async () => {
+      await withCard({ lag: true }, async (c) => {
+        c.db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, c.intent);
+        await c.tick(200);
+        expect([c.state(), c.reruns()]).toEqual([{ run: phase, stage: "merge" }, 1]);
+        c.gh.log = new Error("run 77 is still in progress; logs will be available when it is complete");
+        const before = c.gh.argv.filter((a) => a.includes("--log-failed") || a[1] === "pr").length;
+        await c.tick(300);
+        expect([c.state(), c.reruns()]).toEqual([{ run: phase, stage: "merge" }, 1]);
+        expect(getMergeRun(c.db, c.intent)?.reason ?? "").toStartWith(RERUN_WAIT);
+        expect(c.gh.argv.filter((a) => a.includes("--log-failed") || a[1] === "pr").length).toBe(before);
+        expect(c.events("merge_conflict")).toEqual([]);
+        await c.tick(200 + RERUN_SETTLE_MS);
+        expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+        expect(c.events("merge_ci_rerun_stale")).toEqual([expect.objectContaining({ reason: "重跑没有开始" })]);
+      });
+    });
+  }
+
+  test("ready: the newer attempt ends red → ci_fail back to fix, still one rerun", async () => {
+    await withCard({ lag: true }, async (c) => {
+      c.db.query("UPDATE scheduler_merges SET phase='ready' WHERE intentId=?").run(c.intent);
+      await c.tick(200);
+      await c.tick(300);
+      Object.assign(c.gh, { attempt: 2, status: "completed", conclusion: "failure" });
+      await c.tick(400);
+      expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+      expect(c.events("merge_ci_rerun_stale")).toEqual([]);
+    });
+  });
+});
+
 describe("bun test failed-log parsing", () => {
   test("collects (fail) lines with their file group and timeout marker; the closing recap is not a new failure", () => {
     const log = ciLog([at(`##[group]${SLOW}:`), at("(fail) slow [6189.00ms]"), at("  ^ this test timed out after 5000ms."), at("##[endgroup]"),
