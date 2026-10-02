@@ -15,20 +15,26 @@ interface SnapApi {
   getThinkingLevel?(): string | undefined;
 }
 
-export default function piEnvSnapshot(pi: SnapApi): void {
-  if (!AGENT) return;
-  const write = (ctx: unknown) => {
-    const c = ctx as { sessionManager?: { getSessionId?(): string }; model?: { id?: string; name?: string } } | undefined;
-    let sessionId: string | undefined;
-    try {
-      sessionId = c?.sessionManager?.getSessionId?.();
-    } catch {
-      sessionId = undefined; // 老版本没有这个接口时留空，不影响快照其余字段
-    }
-    void runningPiVersion().then((v) => writePiEnvSnapshot({ pi, agent: AGENT, sessionId, ctx: c, piVersion: v }));
+/** version 可注入（测试断言成功值真的写进快照）；默认问 Pi 的虚拟模块。handler 返回写盘的 promise，失败降级成不带版本 */
+export function createPiEnvSnapshot(version: () => Promise<string | undefined> = runningPiVersion) {
+  return function piEnvSnapshot(pi: SnapApi): void {
+    if (!AGENT) return;
+    const write = (ctx: unknown): Promise<void> => {
+      const c = ctx as { sessionManager?: { getSessionId?(): string }; model?: { id?: string; name?: string } } | undefined;
+      let sessionId: string | undefined;
+      try {
+        sessionId = c?.sessionManager?.getSessionId?.();
+      } catch {
+        sessionId = undefined; // 老版本没有这个接口时留空，不影响快照其余字段
+      }
+      return version()
+        .catch(() => undefined) // 拿不到版本只是不提示重启，快照其余字段照写
+        .then((v) => writePiEnvSnapshot({ pi, agent: AGENT, sessionId, ctx: c, piVersion: v }));
+    };
+    pi.on("session_start", (_e, ctx) => write(ctx));
+    // 回合开始再写一次：激活（codemode）发生在别的扩展的 session_start 里，首份快照会少一个工具
+    pi.on("agent_start", (_e, ctx) => write(ctx));
   };
-  pi.on("session_start", (_e, ctx) => write(ctx));
-  // 回合开始再写一次：激活（codemode）发生在别的扩展的 session_start 里，首份快照会少一个工具
-  pi.on("agent_start", (_e, ctx) => write(ctx));
 }
 
+export default createPiEnvSnapshot();
