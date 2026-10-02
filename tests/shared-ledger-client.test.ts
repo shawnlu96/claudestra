@@ -138,7 +138,7 @@ test("absolute paths after all non-path delimiters are blocked before signing", 
   const fetcher = (async () => { calls++; return Response.json({}); }) as unknown as typeof fetch;
   const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher,
     scrub: { identity: { username: "fake-user", hostname: "fake-host" } } });
-  for (const prefix of ["", "artifact=", ":", ",", ";", "|", "<", "[", "{", "\n"]) {
+  for (const prefix of ["", "artifact=", ",", ";", "|", "<", "[", "{", "\n"]) {
     for (const path of ["/srv/private/file", "~/private/file"]) {
       await expect(client.command({ ...fakeCommand, description: prefix + path })).rejects.toThrow("$.description");
     }
@@ -190,4 +190,32 @@ test("snapshot regression rebuilds cache and poll warns once", async () => {
   stop();
   expect(cache.read()?.rollback).toBe(false);
   expect(warnings).toHaveLength(1);
+});
+
+test("import upload blocks Unicode absolute paths and permits prose, URLs and relative globs", async () => {
+  const { SHARED_LEDGER_IMPORT_FIXTURE } = await import("../src/lib/shared-ledger-contract-fixtures.js");
+  const { sharedLedgerManifestDigest } = await import("../src/lib/shared-ledger-contract-transfer.js");
+  let uploads = 0;
+  const fetcher = (async (_url, init) => {
+    uploads++;
+    const payload = JSON.parse(init!.body as string).payload;
+    return Response.json({ schemaVersion: 1, mode: payload.mode, batchId: payload.batchId,
+      manifestDigest: payload.manifestDigest, serverSeq: 1, mappings: [] });
+  }) as typeof fetch;
+  const client = new SharedLedgerClient(fakeConnection, fakeKey(), { fetch: fetcher,
+    scrub: { identity: { username: "fake-user", hostname: "fake-host" } } });
+  const imported = (description: string) => {
+    const payload = structuredClone(SHARED_LEDGER_IMPORT_FIXTURE.payload);
+    payload.manifest.features[0]!.description = description;
+    payload.manifestDigest = sharedLedgerManifestDigest(payload.manifest);
+    return payload;
+  };
+  for (const description of ["artifact=/秘密", "「/秘密/x」", "/données/a", "x=~/私人"]) {
+    await expect(client.import(imported(description))).rejects.toThrow("$.manifest.features[0].description");
+  }
+  expect(uploads).toBe(0);
+  for (const description of ["and/or", "1/2", "https://example.com/a/b", "src/lib/*.ts"]) {
+    expect((await client.import(imported(description))).mode).toBe("dry-run");
+  }
+  expect(uploads).toBe(4);
 });
