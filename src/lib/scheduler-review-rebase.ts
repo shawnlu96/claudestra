@@ -2,12 +2,13 @@
  * i28-RH1: the merge driver moved the head (update-branch merged main in, the carry was refused) and sent the card back to
  * review. That move is the round's "delivery": its merge_phase receipt spells out old head → new head and the main parent,
  * scheduler-review.ts p1RowsByRound takes the new head from it like from a deliver event, and the re-review order is scoped
- * to the PR's net change against main (review-converge-order.ts), not to "last reviewed head → new head", which would pull
- * in all of main. Only the record the driver writes counts: actor scheduler, updating → await_review, the receipt below,
+ * to the PR's net change against main (review-converge-order.ts), and so is the planner's fix diff (review-converge-scope.ts),
+ * not "last reviewed head → new head", which would pull in all of main. Only the record the driver writes counts: actor scheduler, updating → await_review, the receipt below,
  * and the merge → review stage event of the same transaction right before it with the same head. tests/scheduler-review-rebase.test.ts.
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import type { ReviewCarry } from "./scheduler-merge-driver.js";
+import type { FixDiff } from "./review-converge.js";
 import { existsSync } from "node:fs";
 import { statePath } from "./paths.js";
 import { REPO_ROOT } from "./repo-root.js";
@@ -89,6 +90,18 @@ function prFiles(r: RebaseHead & { taskId: string }): string[] | null {
     return files;
   }
   return null;
+}
+
+/**
+ * The planner's fix diff (review-converge-scope.ts fixDiffOf) on a driver re-review: the PR's files against main, the same list
+ * the order hands the reviewer, so a P1 the order put in scope is never demoted as outside "last head → new head" and code main
+ * brought in stays out. undefined = not such a round (ordinary rule); null = no checkout can answer (nothing is demoted).
+ */
+export function rebaseFixDiff(round: number, events: readonly LedgerEvent[], from: string, to: string): FixDiff | null | undefined {
+  const r = currentRebase(round, events, to);
+  if (!r) return undefined;
+  const files = prFiles(r);
+  return files ? { from, to, files } : null;
 }
 
 const LIST_BYTES = 1700;

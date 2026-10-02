@@ -13,6 +13,10 @@ import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/
 import { p1AnyStreak } from "../src/lib/scheduler-review.js";
 import { BASIS_LINE, convergeOrderLines, scopeLine } from "../src/lib/review-converge-order.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
+import { fixDiffOf } from "../src/lib/review-converge-scope.js";
+import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
+import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
+import type { runBounded } from "../src/lib/run-bounded.js";
 import { currentRebase, deliveredHead, movedHeadReceipt, rebaseDiff, rebaseScopeLines } from "../src/lib/scheduler-review-rebase.js";
 
 const H = "a".repeat(40), N = "d".repeat(40), MP = "c".repeat(40);
@@ -34,17 +38,23 @@ const insert = (db: ReturnType<typeof openLedger>, actor: string, kind: string, 
 const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
-/** Round 1 delivered and passed at H, the merge run reached `updating`; the driver then finds update-branch moved the head to N. */
-async function movedToReview(o: { actor?: string; carry?: ReviewCarry } = {}) {
+/** Round `pass` (default 1) delivered and passed at H, the merge run reached `updating`; the driver then finds update-branch moved the head to N. */
+async function movedToReview(o: { actor?: string; carry?: ReviewCarry; pass?: number } = {}) {
+  const pass = o.pass ?? 1;
   const dir = mkdtempSync(join(tmpdir(), "rh1-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   cleanups.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
   const owner = { actor: "owner", now: 100 };
   createTask(db, owner, { project: "p", id: "T1", title: "rebase", kind: "code", agent: author.agent });
   setWorkflow(db, owner, { taskId: "T1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "缩小范围" });
-  db.query("UPDATE tasks SET stage='merge', round=1, rev=2, headSHA=?, pr=?, branch='task/T1' WHERE id='T1'").run(H, PR);
-  insert(db, "agent-review", "stage", { from: "build", to: "review", round: 1 });
-  insert(db, author.agent, "deliver", { round: 1, headSHA: H });
-  insert(db, "agent-review", "review", reviewData(1, H, []));
+  db.query("UPDATE tasks SET stage='merge', round=?, rev=2, headSHA=?, pr=?, branch='task/T1' WHERE id='T1'").run(pass, H, PR);
+  for (let r = 1; r <= pass; r++) {
+    // earlier rounds found a P1 elsewhere (fixed since); round `pass` passed
+    const F = "e".repeat(39) + r;
+    insert(db, "agent-review", "stage", { from: r === 1 ? "build" : "fix", to: "review", round: r });
+    insert(db, author.agent, "deliver", { round: r, headSHA: r === pass ? H : F });
+    insert(db, "agent-review", "review", reviewData(r, r === pass ? H : F, r === pass ? [] :
+      [{ findingId: `old-${r}`, family: "old", severity: "P1", probe: "[验收线 2] src/lib/old.ts:1 旧问题" }]));
+  }
   db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,
     templateVersion,status,reason,createdAt,updatedAt) VALUES ('merge-one','T1','p','merge_deploy','merge',3,4,2,1,?,2,'submitted','ready',100,100)`).run(H);
   db.query("INSERT INTO scheduler_resources (project,resource,taskId,intentId,acquiredAt) VALUES ('p','merge:p','T1','merge-one',100)").run();
@@ -65,19 +75,21 @@ async function movedToReview(o: { actor?: string; carry?: ReviewCarry } = {}) {
   return { db, run: getMergeRun(db, "merge-one")! };
 }
 
-/** Round 2 re-review at N with a P1, dispatched and acknowledged like the scheduler would, then the planner's view. */
-function reReviewed(db: ReturnType<typeof openLedger>): PlannerSnapshot {
+/** Round `pass + 1` re-review at N with a P1, dispatched and acknowledged like the scheduler would, then the planner's view. */
+function reReviewed(db: ReturnType<typeof openLedger>, pass = 1, fixDiff?: PlannerSnapshot["fixDiff"]): PlannerSnapshot {
+  const round = pass + 1;
   const intentSeq = insert(db, "scheduler", "note", { op: "dispatch-proxy" });
   const ackSeq = insert(db, "scheduler", "note", { op: "ack-proxy" });
-  insert(db, "agent-review", "review", reviewData(2, N, [P1]));
+  insert(db, "agent-review", "review", reviewData(round, N, [P1]));
   const task = getTask(db, "T1")!;
-  const sent: SchedulerIntent = { id: "review-r2", taskId: "T1", project: "p", node: "adversarial_review", action: "review",
+  const sent: SchedulerIntent = { id: `review-r${round}`, taskId: "T1", project: "p", node: "adversarial_review", action: "review",
     recipient: reviewer.agent, causalSeq: intentSeq - 1, eventSeq: intentSeq, taskRev: task.rev, specRev: 1, head: N, templateVersion: 2,
     status: "done", attempts: 0, receipt: null, reason: "x", createdAt: 1, updatedAt: 1 };
   return { task, workflow: getWorkflow(db, "T1"), events: listEvents(db, { project: "p", target: "T1" }), intents: [sent],
     blockedBy: [], queueFrozen: false, fileGlobs: ["src/lib/*.ts"], heldResources: [], workerCount: 0, maxWorkers: 2,
     freeWorkerSlot: "slot:p:0", author, reviewer, uiGate: { state: "none" }, screenshotsDigest: null,
-    reviewDispatches: [{ intentId: "review-r2", round: 2, head: N, reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId, ackSeq }] };
+    reviewDispatches: [{ intentId: `review-r${round}`, round, head: N, reviewer: reviewer.agent, reviewerSessionId: reviewer.sessionId, ackSeq }],
+    ...(fixDiff === undefined ? {} : { fixDiff }) };
 }
 
 describe("i28-RH1 a merge-driver head move hands the round in like a deliver", () => {
@@ -125,6 +137,75 @@ describe("i28-RH1 a merge-driver head move hands the round in like a deliver", (
     for (const v of variants) expect(deliveredHead([...base, ...v, review], review)).toBe(H);
     // a record for another round does not cover this round's review either
     expect(deliveredHead([...base, { ...stage, data: { ...stage.data, round: 3 } }, phase, review], review)).toBeUndefined();
+  });
+});
+
+/** The real adapter's carryReview, with git answering as for update-branch merging main parent `mp` into H → N. */
+function realCarry(o: { mp: string; onMain?: boolean; sameDiff?: boolean }): Promise<ReviewCarry> {
+  const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
+    repoDir: "/tmp/project" } } }).projects.p;
+  const ok = (stdout: string, code = 0) => ({ code, stdout, stderr: "", timedOut: false });
+  const command: typeof runBounded = async (argv) => {
+    if (argv[0] !== "git") throw new Error(`unexpected ${argv.join(" ")}`);
+    if (argv.includes("fetch")) return ok("");
+    if (argv.includes("rev-parse")) return ok(`${o.mp}\n`);
+    if (argv.includes("rev-list")) return ok(`${N} ${H} ${o.mp}\n`);
+    if (argv.includes("merge-base")) return ok("", o.onMain === false ? 1 : 0);
+    if (argv.includes("diff")) return ok(o.sameDiff || argv.at(-1)!.endsWith(H) ? "diff --git a/src/lib/x.ts\n" : "diff --git a/src/lib/x.ts\n+main moved\n");
+    throw new Error(`unexpected ${argv.join(" ")}`);
+  };
+  return mergeExternal(policy, command).carryReview(PR, H, N);
+}
+
+describe("i28-RH1 the real adapter → driver → ledger → planner path", () => {
+  test("验收线 1: the production refusal (net diff changed after verified parents) keeps the main parent; round 2 P1 → fix", async () => {
+    const MP2 = "1".repeat(40);
+    const carry = await realCarry({ mp: MP2 });
+    expect(carry).toEqual({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent: MP2, mainHead: MP2 });
+    const { db, run } = await movedToReview({ carry });
+    expect(run.phase).toBe("await_review");
+    const s = reReviewed(db);
+    expect(currentRebase(2, s.events, N)).toMatchObject({ oldHead: H, newHead: N, mainParent: MP2 });
+    const decision = planScheduler(s);
+    expect(decision).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix" });
+    expect(JSON.stringify(decision)).not.toContain("review_history");
+  });
+
+  test("验收线 2: a refusal whose main parent was not verified on main carries none and still stops on review_history", async () => {
+    const carry = await realCarry({ mp: "2".repeat(40), onMain: false });
+    expect(carry.ok).toBe(false);
+    expect(carry.mainParent).toBeUndefined();
+    const { db } = await movedToReview({ carry });
+    expect(planScheduler(reReviewed(db))).toMatchObject({ kind: "escalate", code: "review_history" });
+  });
+
+  test("验收线 1: round 2 pass → movedHead → round 3 P1 on a PR file main did not touch again → fix, not demoted", async () => {
+    const MP3 = "3".repeat(40);
+    const { db } = await movedToReview({ carry: await realCarry({ mp: MP3 }), pass: 2 });
+    expect(getTask(db, "T1")).toMatchObject({ stage: "review", round: 3, headSHA: N });
+    const run = rebaseDiff.run, dirs = rebaseDiff.dirs;
+    rebaseDiff.dirs = () => ["/fake"];
+    rebaseDiff.run = (_, from, to) => from === MP3 && to === N ? ["src/lib/x.ts"] : null; // the PR against main
+    cleanups.push(() => { rebaseDiff.run = run; rebaseDiff.dirs = dirs; });
+    const probe = reReviewed(db, 2);
+    // oldHead..newHead (what an ordinary round would use) only names the file main brought in
+    const fixDiff = fixDiffOf(probe.task, probe.events, (_, from, to) => from === H && to === N ? ["src/lib/other-card.ts"] : null, ["/fake"]);
+    expect(fixDiff).toEqual({ from: H, to: N, files: ["src/lib/x.ts"] });
+    const decision = planScheduler({ ...probe, fixDiff });
+    expect(decision).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix" });
+    expect(JSON.stringify(decision)).not.toContain("outside_diff");
+    // the order the reviewer got named the same file
+    expect(convergeOrderLines(3, probe.events, N).join("\n")).toContain("\"src/lib/x.ts\"");
+  });
+
+  test("验收线 4: an ordinary round 3 still scopes the planner to last head → new head", () => {
+    const at = (seq: number, kind: LedgerEvent["kind"], actor: string, data: Record<string, unknown>): LedgerEvent =>
+      ({ seq, kind, data, actor, ts: seq, project: "p", target: "T1", text: "", dedupKey: null });
+    const [A, B] = ["4".repeat(40), "5".repeat(40)]; // own heads: fixDiffOf caches per process
+    const events = [at(1, "deliver", author.agent, { round: 2, headSHA: A }), at(2, "review", "agent-review", reviewData(2, A, [P1])),
+      at(3, "deliver", author.agent, { round: 3, headSHA: B }), at(4, "review", "agent-review", reviewData(3, B, [P1]))];
+    const fixDiff = fixDiffOf({ id: "T1", round: 3 }, events, (_, from, to) => from === A && to === B ? ["src/lib/fix.ts"] : null, ["/fake"]);
+    expect(fixDiff).toEqual({ from: A, to: B, files: ["src/lib/fix.ts"] });
   });
 });
 
