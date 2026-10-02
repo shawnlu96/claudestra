@@ -5,7 +5,7 @@ import type { Database } from 'bun:sqlite';
 import { boardContext, featureCard, hasFeatureSchema, type BoardCtx, type BoardNode } from './ledger-dag-board.js';
 import type { Feature } from './ledger-feature.js';
 import { autoSnapshot } from './scheduler-auto-snapshot.js';
-import { cardNames } from './scheduler-autostart.js';
+import { cardNames } from './ledger-card-names.js';
 import { planScheduler } from './scheduler-plan.js';
 import type { SnapshotOpts } from './scheduler-snapshot.js';
 import { taskWorkerRefs } from './scheduler-sessions.js';
@@ -153,7 +153,7 @@ export function workBoard(db: Database, project: string, now: number, opts: Work
     const row = baseRow(ctx, task, ref);
     const blocked = ref.node.deps.filter(key => !features.find(f => f.id === ref.featureId)?.nodes.find(n => n.key === key)?.satisfied);
     const feature = activeFeatures.find(f => f.id === ref.featureId)!;
-    const specReady = task ? !!task.spec : opts.specReady?.(cardNames(db, feature, ref.node.key).taskId) ?? false;
+    const specReady = task ? !!task.spec : opts.specReady?.(cardNames(db, feature, ref.node.key, ref.node).taskId) ?? false;
     row.reason = [blocked.length ? `被 ${blocked.join('、')} 挡住` : '', !specReady ? '缺规格' : ''].filter(Boolean).join('；') || null;
     row.remainingMinutes = estimateMinutes(row.estimate);
     board.todo[row.reason ? 'blocked' : 'ready'].push(row);
