@@ -83,9 +83,9 @@ describe("写台账出口", () => {
 });
 
 describe("channel-server 侧：一种帧透传", () => {
-  test("三个执行者工具、两个审查员工具（T97）、四个子 DAG 工具（i28-L5）都登记了", () => {
+  test("三个执行者工具、两个审查员工具（T97）、四个子 DAG 工具（i28-L5）、三个项目记忆工具（pmem-M2）都登记了", () => {
     expect(ORDER_TOOLS.map((t) => t.name)).toEqual(["take_order", "deliver", "ask", "take_review", "submit_verdict",
-      "set_feature_deps", "plan_feature", "rewrite_dag", "start_node", "show_dag"]);
+      "set_feature_deps", "plan_feature", "rewrite_dag", "start_node", "show_dag", "record_memory", "mark_memory", "show_memory"]);
     expect(isOrderTool("deliver")).toBe(true);
     expect(isOrderTool("whoami")).toBe(false);
   });
