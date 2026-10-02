@@ -12,7 +12,7 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { STATE_DIR } from "./paths.js";
+import { stateDir } from "./state-dir.js";
 
 /** 只用得到这几个查询方法（Pi 的扩展 API 子集，便于测试替身） */
 interface PiSnapshotApi {
@@ -72,7 +72,8 @@ export function writePiEnvSnapshot(o: PiSnapshotOptions): void {
       })(),
     };
     // 状态目录一律走 lib/paths.ts（路径字面量守门：只允许出现在那里与白名单文件）
-    const dir = join(o.stateDir?.trim() || STATE_DIR, "pi-env");
+    // 每次现算（不 import paths.ts：它的依赖链带 Bun 专有 API，Pi 扩展在 Node/Jiti 里加载会挂）
+    const dir = join(o.stateDir?.trim() || stateDir(), "pi-env");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(join(dir, `${agent}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
   } catch {
