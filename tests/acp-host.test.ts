@@ -255,7 +255,8 @@ describe("ACP 宿主整条链（stub）", () => {
     h.inbound("[stub:slow] 慢慢来");
     await until(() => h.entries().some((e) => e.message?.content?.[0]?.name === "Bash"));
     h.frame({ type: "abort", id: "abort_1" });
-    expect(h.sent.find((f) => f.type === "abort_ack")).toMatchObject({ id: "abort_1", result: "aborted" });
+    await until(() => h.sent.some((f) => f.type === "abort_ack")); // 回执在 cancel 之后发（Pi 适配器要先清队列；codex-acp 只差一个微任务）
+    expect(h.sent.find((f) => f.type === "abort_ack")).toEqual({ type: "abort_ack", id: "abort_1", result: "aborted", voided: [], inEditor: 0 });
     await until(() => h.stops.length === 1);
     expect(h.stops[0]).toMatchObject({ event: "StopFailure", interrupt: true });
   }, 30_000);

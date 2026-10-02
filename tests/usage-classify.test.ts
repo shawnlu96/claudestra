@@ -2,7 +2,8 @@
  * token 账（src/lib/usage-classify.ts）：哪些会话记录开新一轮、来源摘要的渲染与脱敏、调用的去重键和工具块。
  */
 import { describe, test, expect } from "bun:test";
-import { callOf, inboundIdentity, inboundOf, redactSecrets, triggerSummary } from "../src/lib/usage-classify.js";
+import { redactSecrets } from "../src/lib/redact-secrets.js";
+import { callOf, inboundIdentity, inboundOf, triggerSummary } from "../src/lib/usage-classify.js";
 
 const user = (content: unknown, extra: Record<string, unknown> = {}) => ({ type: "user", uuid: "u1", timestamp: "2026-09-30T01:00:00Z", message: { role: "user", content }, ...extra });
 const channel = (body: string, id = "m1") =>

@@ -48,6 +48,7 @@ import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
 import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
 import { readWeekQuota } from "./quota-week.js";
+import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -170,7 +171,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
       const r = await svc("ledger", "lend-ask", "--retire", askId);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-ask --retire 失败") };
     },
-    failure: (agent) => failureOf(ledger, agent),
+    failure: (agent) => lendWorkerFailureOf(journal, agent, () => failureOf(ledger, agent)),
     closeAsks: async (agent) => {
       const r = await svc("ledger", "lend-close-asks", "--agent", agent);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };

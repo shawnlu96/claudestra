@@ -1,6 +1,6 @@
 /**
- * 出借 / 借入声明 lend.json（docs/design/remote-capacity.md §1）：`lend` = 一次授权（借给谁、哪些仓库和角色、各家族几个位、每天几单、到哪天）；
- * `borrow` = 本机哪些项目的单子可以给谁。只管读写与形状校验；授权此刻算不算数（暂停、到期、write、期限上限）在 lend-grant-rules.ts。
+ * 出借 / 借入声明 lend.json（docs/design/remote-capacity.md §1）：`lend` = 一次授权（借给谁、哪些仓库、各家族几个位、每天几单、到哪天）；
+ * `borrow` = 本机哪些项目的单子可以给谁。只管读写与形状校验；授权此刻算不算数（暂停、到期、期限上限）在 lend-grant-rules.ts。
  * 安全取向是 fail-closed：文件缺失 = 缺省（不出借、不借入）；文件无效（JSON 坏、版本不认识、任一条目不合法）= 按「关」处理并由 doctor 报出来，
  * 绝不退回「上次好的值」。v1 文件照读，但出借条目一律迁成暂停（逐单确认已退役，要出借方本人重新授权）；写一律写 v2。
  * 写入只经 updateLend：独占锁（拿不到就拒写，不降级）+ 锁内重读 + tmp/rename 原子写 + 坏文件拒写。tests/lend-config.test.ts、tests/lend-grant.test.ts。
@@ -16,7 +16,7 @@ const LEND_VERSION = 2;
 
 export const LEND_FAMILIES = ["codex", "claude"] as const;
 export type LendFamily = (typeof LEND_FAMILIES)[number];
-const LEND_ROLES = ["review", "write"] as const;
+export const LEND_ROLES = ["review", "write"] as const;
 export type LendRole = (typeof LEND_ROLES)[number];
 /**
  * 一台机器在槽池里的档位（i28-W9，scheduler-placement.ts）：先在 first 里按在跑最少挑，first 都接不了再看 balance，最后才看 low；off 一律不派。
@@ -43,6 +43,7 @@ export interface LendEntry {
   fp?: string;
   /** 每个模型家族同时在跑的上限 */
   families: Partial<Record<LendFamily, number>>;
+  /** 兼容旧消费者的能力字段；出借授权不按它过滤，读取时归一成全部能力。 */
   roles: LendRole[];
   /** GitHub owner/repo 白名单 */
   repos: string[];
@@ -116,7 +117,6 @@ function slotsProblem(e: Record<string, unknown>): string | null {
     if (!(LEND_FAMILIES as readonly string[]).includes(k)) return `families 里有不认识的家族 ${k}`;
     if (!isInt(n, 0, MAX_FAMILY_SLOTS)) return `families.${k} 必须是 0..${MAX_FAMILY_SLOTS} 的整数`;
   }
-  if (!isRoles(e.roles)) return "roles 必须是 review / write 的非空、不重复列表";
   if (!isStrList(e.repos, REPO_RE, MAX_REPOS)) return "repos 必须是 GitHub owner/repo 的非空、不重复列表";
   return null;
 }
@@ -193,7 +193,7 @@ export const V1_PAUSED_REASON = "升级前的旧条目（逐单确认已退役�
  */
 export function migrateV1(d: Record<string, unknown>): LendFile {
   const lend = (d.lend as Record<string, unknown>[]).map((e): LendEntry => ({
-    peer: e.peer as string, ...(e.fp ? { fp: e.fp as string } : {}), families: e.families as LendEntry["families"], roles: e.roles as LendRole[],
+    peer: e.peer as string, ...(e.fp ? { fp: e.fp as string } : {}), families: e.families as LendEntry["families"], roles: [...LEND_ROLES],
     repos: e.repos as string[], ordersPerDay: (e.quota as { ordersPerDay: number }).ordersPerDay, ...(e.until ? { until: e.until as string } : {}),
     paused: { reason: V1_PAUSED_REASON },
   }));
@@ -206,7 +206,9 @@ function toRead(r: StateRead): LendRead {
   const problem = lendFileProblem(r.data);
   if (problem) return { status: "invalid", error: problem, file: defaultLendFile() };
   const d = r.data as Record<string, unknown>;
-  return d.version === 1 ? { status: "ok", file: migrateV1(d), migrated: true } : { status: "ok", file: d as unknown as LendFile };
+  if (d.version === 1) return { status: "ok", file: migrateV1(d), migrated: true };
+  const file = d as unknown as LendFile;
+  return { status: "ok", file: { ...file, lend: file.lend.map((e) => ({ ...e, roles: [...LEND_ROLES] })) } };
 }
 
 /** 读：缺失 → 缺省；无效 → 缺省（= 关）并带原因；不抛。每次都读磁盘，不缓存（改完马上生效，坏了马上按关） */

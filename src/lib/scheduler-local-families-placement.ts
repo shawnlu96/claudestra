@@ -11,6 +11,7 @@ export function localFamilyPolicy<T extends { localFamilies?: LocalFamily[] }>(r
 
 export function localFamilyRefusal(facts: Pick<PlacementFacts, "remote">, role: PlaceRole, family: LocalFamily): string | null {
   const policy = facts.remote;
+  if (policy?.agents) return policy.agents[family] > 0 ? null : `等 ${family} 空位`;
   const localFamily = role === "review" ? family : policy?.localAuthorRuntime ?? "claude";
   return policy?.localFamilies && !policy.localFamilies.includes(localFamily) ? `本机不接 ${localFamily}` : null;
 }
