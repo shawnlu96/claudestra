@@ -57,16 +57,19 @@ describe("planner: security review with local cap 0", () => {
     expect(planScheduler(snap("code"))).toMatchObject({ kind: "intent", action: "review", recipient: "peer:mate" });
   });
 
-  test("a bound reviewer session or no cap configured → unchanged", () => {
-    expect(secReviewNoRoom(snap("security", { reviewer: { ...author, family: "claude" }, pool: pool({ remote: agents(0) }) }))).toBeNull();
+  test("a bound reviewer session does not exempt cap 0 (placement still refuses it); no cap configured → unchanged", () => {
+    const bound = snap("security", { reviewer: { ...author, agent: "agent-rv", family: "claude" }, pool: pool({ remote: agents(0) }) });
+    expect(secReviewNoRoom(bound)).toMatchObject({ wait: expect.stringContaining(SEC_REVIEW_NO_ROOM) });
+    expect(planScheduler(bound)).toMatchObject({ kind: "wait", reason: expect.stringContaining(SEC_REVIEW_NO_ROOM) });
+    expect(secReviewNoRoom(snap("security", { reviewer: { ...author, agent: "agent-rv", family: "claude" }, pool: pool({ remote: agents(1) }) }))).toBeNull();
     expect(secReviewNoRoom(snap("security"))).toBeNull();
     expect(planScheduler(snap("security"))).toMatchObject({ kind: "intent", action: "ensure_session", sessionRole: "reviewer" });
   });
 });
 
 describe("tick: alarm event + PM ask, once per card and reason", () => {
-  async function atSecurityReview() {
-    const f = autoFixture();
+  async function atSecurityReview(reviewerRuntime?: string) {
+    const f = autoFixture({ reviewerRuntime });
     await toBuild(f);
     await f.tick();
     await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
@@ -182,6 +185,39 @@ describe("tick: alarm event + PM ask, once per card and reason", () => {
       await tickWith(f, agents(0));
       expect(f.notices.length).toBe(notices + 1);
       expect(handoffs(f)).toHaveLength(1);
+    } finally { f.close(); }
+  });
+
+  test("bound-review-silent: a reviewer bound while claude cap was 1, then cap 0 → alarm + ask, not a silent wait", async () => {
+    const f = await atSecurityReview("claude-code");
+    try {
+      expect(await tickWith(f, agents(1))).toMatchObject({ step: "session" });
+      expect(f.ensured.filter((s) => s.role === "reviewer")).toHaveLength(1);
+      const notices = f.notices.length;
+      expect(await tickWith(f, agents(0))).toMatchObject({ step: "waiting", detail: expect.stringContaining(SEC_REVIEW_NO_ROOM) });
+      await tickWith(f, agents(0));
+      expect(alarms(f)).toHaveLength(1);
+      expect(asks(f)).toHaveLength(1);
+      expect(f.notices.slice(notices)).toEqual([expect.stringContaining("default a 要 PM 确认才执行")]);
+    } finally { f.close(); }
+  });
+
+  test("alarm-notice-lost: the first PM notice failing is retried next tick until delivered, then never again", async () => {
+    const f = await atSecurityReview();
+    try {
+      const notices = f.notices.length, notifyPm = f.tickDeps.notifyPm;
+      let calls = 0;
+      f.tickDeps.notifyPm = async () => { calls++; throw new Error("bridge unavailable"); };
+      await tickWith(f, agents(0));
+      expect(calls).toBe(1);
+      expect(alarms(f)).toHaveLength(1);
+      f.tickDeps.notifyPm = notifyPm;
+      await tickWith(f, agents(0));
+      expect(f.notices.slice(notices)).toEqual([expect.stringContaining("default a 要 PM 确认才执行")]);
+      await tickWith(f, agents(0));
+      expect(f.notices.length).toBe(notices + 1);
+      expect(alarms(f)).toHaveLength(1);
+      expect(asks(f)).toHaveLength(1);
     } finally { f.close(); }
   });
 });

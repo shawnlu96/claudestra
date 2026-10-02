@@ -27,7 +27,6 @@ const CODE = "sec_review_no_room";
 type Remote = { agents?: Partial<Record<AuthorFamily, number>>; localFamilies?: readonly AuthorFamily[] } | null | undefined;
 interface SecFacts {
   workflow: { template: string; authorFamily: AuthorFamily } | null;
-  reviewer: unknown;
   pool?: { remote: Remote } | null;
 }
 
@@ -42,9 +41,12 @@ function localCap(remote: Remote, family: AuthorFamily): number | null {
   return null;
 }
 
-/** Planner hook: a security card whose review family has local cap 0 waits with the fixed reason; anything else = null (unchanged). */
+/**
+ * Planner hook: a security card whose review family has local cap 0 waits with the fixed reason; anything else = null (unchanged).
+ * A bound reviewer is no exemption: agentPoolReview / localReviewFallback still refuse its family at cap 0.
+ */
 export function secReviewNoRoom(s: SecFacts): { wait: string; code: string } | null {
-  if (s.workflow?.template !== "security" || s.reviewer) return null;
+  if (s.workflow?.template !== "security") return null;
   const family = reviewFamily(s.workflow.authorFamily);
   return localCap(s.pool?.remote, family) === 0 ? { wait: reasonFor(family), code: CODE } : null;
 }
@@ -87,11 +89,12 @@ interface AlarmCommand {
 
 /**
  * `ledger scheduler-sec-review-alarm`: phase alarm (default) = one alarm event + one PM ask per card and reason, in one transaction;
- * phase handoff = the closed ask's choice recorded once for PM; handoff-sent = that hand-off reached PM. A repeat writes nothing.
+ * alarm-sent = the alarm's PM notice reached PM; phase handoff = the closed ask's choice recorded once for PM; handoff-sent = that
+ * hand-off reached PM. A repeat writes nothing.
  * The review family comes from the current head's author (remoteHeadFamily ?? workflow), the same one autoSnapshot plans with.
  */
 export const secReviewAlarmCommand = {
-  valued: ["rev", "phase", "ask"], bools: [], usage: "scheduler-sec-review-alarm <task> --rev N [--phase alarm|handoff|handoff-sent --ask <id>]",
+  valued: ["rev", "phase", "ask"], bools: [], usage: "scheduler-sec-review-alarm <task> --rev N [--phase alarm|alarm-sent|handoff|handoff-sent --ask <id>]",
   run(c: AlarmCommand): Record<string, unknown> {
     return c.db.transaction(() => {
       const ctx = c.ctx(), task = c.task(c.p.pos[1]), wf = getWorkflow(c.db, task.id), phase = c.p.flags.phase ?? "alarm";
@@ -101,8 +104,13 @@ export const secReviewAlarmCommand = {
       }
       const family = reviewFamily(remoteHeadFamily(c.db, task) ?? wf.authorFamily), reason = reasonFor(family), key = alarmKey(task.id, reason);
       if (phase === "handoff" || phase === "handoff-sent") return handoff(c, ctx, task, family, key, phase);
-      if (phase !== "alarm") throw new LedgerError("invalid", "phase must be alarm|handoff|handoff-sent");
       const prior = getEventByDedup(c.db, key);
+      if (phase === "alarm-sent") {
+        if (!prior) throw new LedgerError("conflict", "报警尚未记账");
+        return { ok: true, ...appendEvent(c.db, { ...ctx, dedupKey: `${key}:sent` }, {
+          project: task.project, target: task.id, kind: "note", text: prior.text, data: { op: `${CODE}_sent` } }) };
+      }
+      if (phase !== "alarm") throw new LedgerError("invalid", "phase must be alarm|alarm-sent|handoff|handoff-sent");
       if (prior) return { ok: true, duplicate: true, event: prior };
       const { event } = appendEvent(c.db, { ...ctx, dedupKey: key }, {
         project: task.project, target: task.id, kind: "note", text: reason, data: { op: CODE, kind: "alarm", family },
@@ -145,28 +153,41 @@ const lost = (what: string) => (e: unknown): void => {
 };
 
 /**
- * Tick hook (watch): on the planner's fixed reason, record the alarm + ask once and tell PM; once that ask is answered or closed,
- * record the choice and hand it to PM (retried each tick until delivered, then never again).
+ * Tick hook (watch): on the planner's fixed reason, record the alarm + ask once and tell PM (retried each tick until delivered, as
+ * long as the ask is open); once that ask is answered or closed, record the choice and hand it to PM (retried the same way).
  */
 export async function raiseSecReviewNoRoom(db: Database, task: LedgerTask, wait: Extract<PlannerDecision, { kind: "wait" }>, deps: NoticeDeps): Promise<void> {
   if (task.stage !== "review" || !wait.reason.startsWith(SEC_REVIEW_NO_ROOM)) return;
   const key = alarmKey(task.id, wait.reason);
-  if (getEventByDedup(db, key)) return handOffAnswer(db, task, key, deps);
-  const r = await deps.manager("ledger", "scheduler-sec-review-alarm", task.id, "--rev", String(task.rev));
-  if (r.ok !== true) { console.error(`⚠️ [scheduler] 安全卡审查报警未记账，下轮重试：${String(r.error)}`); return; }
-  if (r.duplicate === true) return;
-  await deps.notifyPm(task, `[调度引擎] ${task.id} ${wait.reason}。提问卡 ${String(r.askId)} 已开，default a 要 PM 确认才执行`)
-    .catch(lost("安全卡审查报警通知失败（台账已记、提问卡已开）"));
-}
-
-async function handOffAnswer(db: Database, task: LedgerTask, key: string, deps: NoticeDeps): Promise<void> {
+  if (!getEventByDedup(db, key)) {
+    const r = await step(deps, task);
+    if (r.ok !== true) { console.error(`⚠️ [scheduler] 安全卡审查报警未记账，下轮重试：${String(r.error)}`); return; }
+  }
   const row = db.query("SELECT id FROM asks WHERE taskId = ? AND dedupKey = ?").get(task.id, `${key}:ask`) as { id: string } | null;
   const ask = row && getAsk(db, row.id);
-  if (!ask || ask.state === "open" || getEventByDedup(db, `${key}:handoff:${ask.id}:sent`)) return;
-  const step = (phase: string) => deps.manager("ledger", "scheduler-sec-review-alarm", task.id, "--rev", String(task.rev), "--phase", phase, "--ask", ask.id);
-  const r = await step("handoff");
+  if (!ask) return;
+  return ask.state === "open" ? alarmNotice(task, key, ask, wait, deps, db) : handOffAnswer(task, key, ask, deps, db);
+}
+
+const step = (deps: NoticeDeps, task: LedgerTask, ...extra: string[]) =>
+  deps.manager("ledger", "scheduler-sec-review-alarm", task.id, "--rev", String(task.rev), ...extra);
+
+/** The alarm's first PM notice: pending until a send succeeds and is marked (alarm-sent), so a bridge failure or crash retries. */
+async function alarmNotice(task: LedgerTask, key: string, ask: Ask, wait: { reason: string }, deps: NoticeDeps, db: Database): Promise<void> {
+  if (getEventByDedup(db, `${key}:sent`)) return;
+  try {
+    await deps.notifyPm(task, `[调度引擎] ${task.id} ${wait.reason}。提问卡 ${ask.id} 已开，default a 要 PM 确认才执行`);
+  } catch (e) { lost("安全卡审查报警通知失败（台账已记、提问卡已开，下轮重发）")(e); return; }
+  const sent = await step(deps, task, "--phase", "alarm-sent");
+  if (sent.ok !== true) console.error(`⚠️ [scheduler] 安全卡审查报警已通知 PM 但标记未记账，下轮可能重发：${String(sent.error)}`);
+}
+
+async function handOffAnswer(task: LedgerTask, key: string, ask: Ask, deps: NoticeDeps, db: Database): Promise<void> {
+  if (getEventByDedup(db, `${key}:handoff:${ask.id}:sent`)) return;
+  const phase = (p: string) => step(deps, task, "--phase", p, "--ask", ask.id);
+  const r = await phase("handoff");
   if (r.ok !== true) { console.error(`⚠️ [scheduler] 安全卡审查提问卡答复未记账，下轮重试：${String(r.error)}`); return; }
   try { await deps.notifyPm(task, String(r.text)); } catch (e) { lost("安全卡审查答复交给 PM 失败（台账已记，下轮重发）")(e); return; }
-  const sent = await step("handoff-sent");
+  const sent = await phase("handoff-sent");
   if (sent.ok !== true) console.error(`⚠️ [scheduler] 安全卡审查答复已交 PM 但标记未记账，下轮可能重发：${String(sent.error)}`);
 }
