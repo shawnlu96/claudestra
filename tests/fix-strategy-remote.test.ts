@@ -38,6 +38,8 @@ test("full local Codex slots transfer rather than create another local worker", 
   try {
     const p = remoteProbe(f), intent = p.plan();
     p.edit((r) => { for (let n = 0; n < 6; n++) r.agents[`agent-busy-${n}`] = { runtime: "codex", status: "active", sessionId: `busy-${n}` }; });
+    for (let n = 0; n < 6; n++) f.db.query(`INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt)
+      VALUES (?, 'p', 'busy', 'code', 'build', ?, 0, 0)`).run(`busy-${n}`, `agent-busy-${n}`);
     await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
     expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "pooled" });
     expect(remoteOrder(f.db, intent.id)?.family).toBe("codex");
