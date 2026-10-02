@@ -85,10 +85,11 @@ function autoResumeCmd(c: LedgerCli): Result {
 
 function autostartSet(c: LedgerCli): Result {
   const v = c.p.pos[1];
-  if (v !== "on" && v !== "off") throw new LedgerError("invalid", "autostart-set on|off [--feature <id>] [--line <50–100>] --reason <为什么>");
+  if (v !== "on" && v !== "off") throw new LedgerError("invalid", "autostart-set on|off [--feature <id>] [--line <50–100>] [--codex-line <50–100>] --reason <为什么>");
   const project = c.project();
   const featureId = c.p.flags.feature === undefined ? undefined : resolveFeature(c.db, c.p.flags.feature, storedOrigin(c.db)).id;
-  const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"), reason: c.need("reason") });
+  const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
+    codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason") });
   return { ok: true, project, autostart: value };
 }
 
@@ -130,8 +131,8 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     run: autoResumeCmd,
   },
   "autostart-set": {
-    valued: ["feature", "line", "reason", "project", "dedup"],
-    usage: "autostart-set on|off [--feature <id>] [--line <50–100>] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner）",
+    valued: ["feature", "line", "codex-line", "reason", "project", "dedup"],
+    usage: "autostart-set on|off [--feature <id>] [--line <50–100>] [--codex-line <50–100>] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner）",
     run: autostartSet,
   },
 };

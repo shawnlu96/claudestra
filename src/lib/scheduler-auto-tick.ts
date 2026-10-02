@@ -1,5 +1,4 @@
-import { finishFirst } from "./scheduler-agent-pool.js";
-import { driveConvergence } from "./fix-strategy-tick.js";
+import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
  * `ledger scheduler-*` CLI under the scheduler identity, which re-checks inside its own transaction. Per card at most
@@ -27,12 +26,14 @@ import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
 import { peerPrHold } from "./peer-pr-hold.js";
+import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
 import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
+import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -366,7 +367,9 @@ class Card {
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
-    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
+    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
+      : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
+      : plan.action === "merge" ? mergeSlotHold(this.task) : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);
@@ -374,7 +377,6 @@ class Card {
     return this.drive(intent, plan);
   }
 }
-
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };

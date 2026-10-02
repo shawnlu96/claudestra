@@ -24,6 +24,7 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { lendReviewDir } from "./lend-pr-takeover-review.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
+import { retryCleanCreate } from "./scheduler-create-retry.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, openReviewWorktree, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
@@ -88,12 +89,12 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
 async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
   const { registryRow } = env;
   if (role === "author") {
-    if (!task.agent) return ensureLocalAuthor(env, task);
+    if (!task.agent) return retryCleanCreate(env, task, role, (create) => ensureLocalAuthor({ ...env, create }, task)); // 建失败且现场已清：退避重试
     const row = registryRow(task.agent);
     return row ? refOf(task, role, row, family) : { kind: "manual", reason: `执行者 ${task.agent} 不在本机 registry` };
   }
   const existing = registryRow(reviewerName(task.id));
-  return existing ? refOf(task, role, existing, family) : createReviewer(env, task, family);
+  return existing ? refOf(task, role, existing, family) : retryCleanCreate(env, task, role, (create) => createReviewer({ ...env, create }, task, family));
 }
 
 /** Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. */

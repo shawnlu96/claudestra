@@ -8,6 +8,7 @@ import { selectQuotaLayers } from "./quota-layers.js";
 import { quotaFor } from "./ai-quota.js";
 import { readUsageCacheStale } from "./usage-cache.js";
 import { readConfigSync } from "./config-store.js";
+import { codexWeeklyLine } from "./quota-codex-line.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
 
 export function quotaPoolTotals(db: Database, project: string, totals: AgentLimits, now = Date.now()): AgentLimits {
@@ -24,5 +25,5 @@ export function quotaPoolTotals(db: Database, project: string, totals: AgentLimi
   const over = (family: "claude" | "codex", limit: number) => quotaFor(snap, family).windows.some((w) =>
     (w.kind === "weekly" || w.kind === "weekly_scoped") && w.usedPct !== null && w.usedPct >= limit);
   return { claude: over("claude", line) ? 0 : totals.claude,
-    codex: over("codex", 85) ? 0 : totals.codex };
+    codex: over("codex", codexWeeklyLine(db, project)) ? 0 : totals.codex };
 }
