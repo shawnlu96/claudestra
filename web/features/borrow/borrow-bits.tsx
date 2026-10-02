@@ -1,8 +1,8 @@
 "use client";
-/** 借入面板的小部件：hello / beat 年龄、项目开关、「同时最多跑几单」的整句与数字框。点击把被点的元素交给调用方，失败时抖它。 */
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+/** 借入面板的小部件：hello / beat 年龄、项目开关、名额数字框。点击把被点的元素交给调用方，失败时抖它。 */
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useT } from "@/lib/i18n";
-import { ageBand, ageParts, BOX, clampMaxOpen, helloAgeSec, parseMaxOpen, splitAtBox } from "./borrow-model";
+import { ageBand, ageParts, clampMaxOpen, helloAgeSec, parseMaxOpen } from "./borrow-model";
 import { CheckIcon, ClockIcon, MinusIcon, PlusIcon } from "./icons";
 import { shake } from "./motion";
 
@@ -55,28 +55,11 @@ export function ProjectChips(props: {
   );
 }
 
-/** 同时最多跑几单的整句：「<名字> 的电脑：同时最多跑 [框] 单」，框（Stepper）嵌在句中、和框后的字不拆行，徽章跟在句末 */
-export function LimitLine(props: { name: string; n: number; children: ReactNode; badge?: ReactNode; local?: boolean }) {
-  const t = useT();
-  const text = props.local ? t("本机：同时最多跑 {box} 单", { n: props.n, box: BOX }) : t("{name} 的电脑：同时最多跑 {box} 单", { name: props.name, n: props.n, box: BOX });
-  const [before, after] = splitAtBox(text);
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-base-content/70">
-      <span className="min-w-0 break-all">{before}</span>
-      <span className="inline-flex shrink-0 items-center gap-1.5">
-        {props.children}
-        {after && <span>{after}</span>}
-      </span>
-      {props.badge}
-    </div>
-  );
-}
-
 /**
  * 上限的数字框：点数字变输入框（数字键盘），回车 / 失焦交一次；空或非数字退回原值，越界夹到边界并抖一下。
  * −/+ 每点一下交一次。onCommit 只在值真的变了时调；peer 卡每交一次就存一次、存的期间 disabled，新增表单只改本地值。
  */
-export function Stepper(props: { value: number; limit: number; min?: number; disabled: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
+export function Stepper(props: { value: number; limit: number; min?: number; label?: string; disabled: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
   const t = useT();
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -108,7 +91,7 @@ export function Stepper(props: { value: number; limit: number; min?: number; dis
 
   return (
     <div ref={box} className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-base-200 px-1 text-[12px] tabular-nums text-base-content">
-      <button className="btn btn-ghost btn-xs btn-circle" aria-label={t("同时少跑一单")} disabled={props.disabled || editing || v <= min} onClick={() => step(-1)}>
+      <button className="btn btn-ghost btn-xs btn-circle" aria-label={`${props.label ?? t("名额")} −1`} disabled={props.disabled || editing || v <= min} onClick={() => step(-1)}>
         <MinusIcon className="size-3" />
       </button>
       {editing ? (
@@ -120,7 +103,7 @@ export function Stepper(props: { value: number; limit: number; min?: number; dis
           enterKeyHint="done"
           disabled={props.disabled}
           defaultValue={String(v)}
-          aria-label={t("同时最多跑几单")}
+          aria-label={props.label ?? t("名额")}
           onFocus={(e) => e.currentTarget.select()}
           onBlur={(e) => finish(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -132,14 +115,14 @@ export function Stepper(props: { value: number; limit: number; min?: number; dis
       ) : (
         <button
           className="min-w-7 rounded-md px-1 font-semibold underline decoration-base-content/30 decoration-dotted underline-offset-4 hover:bg-base-300 disabled:no-underline"
-          aria-label={t("同时最多跑几单")}
+          aria-label={props.label ?? t("名额")}
           disabled={props.disabled}
           onClick={startEdit}
         >
           {v}
         </button>
       )}
-      <button className="btn btn-ghost btn-xs btn-circle" aria-label={t("同时多跑一单")} disabled={props.disabled || editing || v >= props.limit} onClick={() => step(1)}>
+      <button className="btn btn-ghost btn-xs btn-circle" aria-label={`${props.label ?? t("名额")} +1`} disabled={props.disabled || editing || v >= props.limit} onClick={() => step(1)}>
         <PlusIcon className="size-3" />
       </button>
     </div>

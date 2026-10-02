@@ -1,3 +1,4 @@
+import { poolRemotePolicy } from "../lib/scheduler-agent-pool-context.js";
 import { convergenceSpec } from "../lib/fix-strategy-order.js";
 import { convergenceCommands } from "../lib/review-arbiter-commands.js";
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
@@ -150,6 +151,8 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
           ...(c.p.flags["write-families"] !== undefined ? { writeFamilies: c.p.flags["write-families"].split(",") } : {}),
           ...(c.p.flags.repo ? { repo: c.p.flags.repo } : {}) }, "--remote");
       } catch (e) { throw new LedgerError("invalid", `--mode / --roles / --local-priority / --repo 不认识：${(e as Error).message}`); }
+      const project = getIntent(c.db, intent)?.project ?? "";
+      remote = poolRemotePolicy(project, remote, c.deps.lend?.schedulerPolicy?.(project));
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
       await ensureReviewScope(c.db, getIntent(c.db, intent)?.taskId); // 规格外文件在挂池事务外先登记（i28-ASK2）
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {

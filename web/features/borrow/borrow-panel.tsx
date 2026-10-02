@@ -3,13 +3,13 @@
  * 设置 · Peer 协作页底部的「借入」面板（i28-R7b）：借谁的机器、每台现在能放几单、协议版本、远端在跑的单。
  * 开着时每 15 秒拉一次，页面切到后台就停；读接口 403 / 404（不是 owner 全权设备 / 老 bridge）整块不渲染。
  * 改设置的按钮只给 canRunFleet 的设备（与 bridge 写门同一来源）。分配表（i28-Q1）：本机一行（每个项目）+ 每台 peer 一行，
- * 档位 / 角色 / 上限一点就存，旁边是本周已用（只读参考）。remote.mode 还没有网页写入口，这里只读显示。
+ * 本机 Claude / Codex 名额一点就存，peer 的 hello 名额与在跑数只读。
  */
 import { useEffect, useState } from "react";
 import { fleetAccess } from "@/lib/api/fleet";
 import { useT } from "@/lib/i18n";
 import { Section } from "@/features/chat/components/settings/section";
-import { addableContacts, POLL_MS, reviewFirstFor, sortPeers, stalePeers } from "./borrow-model";
+import { addableContacts, POLL_MS, sortPeers, stalePeers } from "./borrow-model";
 import { LocalRow } from "./borrow-alloc";
 import { BorrowPeerCard } from "./borrow-peer-card";
 import { borrowFeed, EMPTY_FEED, visiblePeers, type FeedState } from "./borrow-feed";
@@ -84,8 +84,7 @@ export function BorrowPanel() {
             <LocalRow key={p.id} project={p} name={names.get(p.id) ?? p.id} quota={view.localQuota} serverNow={view.now} canWrite={canWrite} seq={seq} feed={feed} />
           ))}
           {sortPeers(visiblePeers({ view, gone })).map((p) => (
-            <BorrowPeerCard key={p.peer} peer={p} options={options} limit={view.borrow.maxOpenLimit} canWrite={canWrite} seq={seq} feed={feed}
-              reviewFirst={reviewFirstFor(view, p.peer)}
+            <BorrowPeerCard key={p.peer} peer={p} options={options} canWrite={canWrite} seq={seq} feed={feed}
               dropped={view.borrow.dropped.filter((d) => d.peer === p.peer)} {...stamp} />
           ))}
           {stale.map((s) => <StaleEntry key={s.peer} s={s} view={view} canWrite={canWrite} feed={feed} />)}
