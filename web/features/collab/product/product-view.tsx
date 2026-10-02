@@ -19,7 +19,7 @@ function FeatureBody({ feature: f, now, tr }: { feature: ProductFeature; now: nu
   return <>
     <strong className={s.title}>{f.title || f.id}</strong>
     {f.hasDag ? <>
-      <span className={s.numbers}>{f.counts.completed} / {f.counts.total}<span>{tr(f.status === 'paused' ? '已暂停' : '节点')}</span></span>
+      <span className={s.numbers}>{f.counts.completed} / {f.counts.total}{f.status === 'paused' && <span>{tr('已暂停')}</span>}</span>
       <span className={s.bar} role="progressbar" aria-label={f.title} aria-valuemin={0} aria-valuemax={f.counts.total || 1}
         aria-valuenow={f.counts.completed}><span style={{ width: `${Math.min(100, f.counts.total ? f.counts.completed / f.counts.total * 100 : 0)}%` }} /></span>
     </> : <span className={s.numbers}>{f.counts.total} {tr('卡')}</span>}

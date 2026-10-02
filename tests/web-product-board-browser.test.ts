@@ -32,12 +32,21 @@ async function serveFixture(version: 'before' | 'after', output: string) {
     await Bun.write(entry, `import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
       import {useDagPanes} from '${version === 'before' ? './.before-panes' : '../dag/use-dag-panes'}';
       import s from '../collab.module.css';import {fillParams} from '@/lib/i18n-fill';
+      import {CausalCanvas} from '../v4/causal-canvas';import {causalCanvas} from '../v4/causal-model';
+      import {MobileList} from '../v4/v4-mobile';
+      const ov={exists:true,now:${Date.UTC(2026, 9, 2)},meta:{pms:[],queueFrozen:{frozen:false,reason:'',since:null}},
+        items:[{id:'legacy',title:'协作底座',oneLine:''}],tasks:['build','review'].map((stage,i)=>({id:'legacy-'+i,
+          title:i?'核对任务交付':'推进产品视图',itemId:'legacy',kind:'code',stage,round:1,agent:'worker',updatedAt:${Date.UTC(2026, 9, 2)},metrics:{}}))};
       function Fixture(){const [sel,select]=useState(null);const [rev,setRev]=useState(1);
         window.refresh=()=>setRev(x=>x+1);
-        const narrow=innerWidth<600;const pane=useDagPanes({project:'p',rev,now:${Date.UTC(2026, 9, 2, 0)},narrow,
+        const narrow=innerWidth<600;
+        const legacy=<div data-testid="legacy-view" style={{display:'flex',flex:1,minHeight:0}}>{narrow?
+          <MobileList project="p" ov={ov} lines={new Map()} todayDone={[]} now={ov.now} actionText={()=>''} onPick={()=>{}} tr={fillParams}/>:
+          <CausalCanvas canvas={causalCanvas(ov)} lines={new Map()} selection={null} focus={null} onSelect={()=>{}} actionText={()=>''} hot={null} tr={fillParams}/>}</div>;
+        const pane=useDagPanes({project:'p',rev,now:${Date.UTC(2026, 9, 2, 0)},narrow,
           agents:[],actions:new Map(),busy:new Map(),hot:null,sel,select,close:()=>select(null),tr:fillParams,pickTask:id=>window.clicked=id});
         return <div className={s.tokens} style={{height:'100vh',display:'flex',flexDirection:'column',background:'var(--bg)'}}>
-          {narrow?pane.mobile(<div>旧列表</div>):pane.center(<div>旧画布</div>,<div>团队</div>)}
+          {narrow?pane.mobile(legacy):pane.center(legacy,<div>团队</div>)}
           {sel&&<output>{JSON.stringify(sel)}</output>}</div>}
       createRoot(document.getElementById('root')).render(<Fixture/>);`);
     const bundle = resolve(output, `${version}-bundle`);
@@ -113,6 +122,51 @@ test.skipIf(!enabled)('product and sub-DAG before/after light/dark at 390/1400, 
   } finally { await browser.close(); }
 }, 60000);
 
+test.skipIf(!enabled)('DAG read failure falls back, backs off, refreshes on rev and restores the selected feature', async () => {
+  if (!out) return;
+  const server = await serveFixture('after', out);
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  try {
+    for (const theme of ['light', 'dark']) for (const width of [390, 1400]) {
+      const page = await browser.newPage({ viewport: { width, height: 900 }, timezoneId: 'Asia/Tokyo' });
+      await page.clock.install({ time: Date.UTC(2026, 9, 2) });
+      await page.clock.pauseAt(Date.UTC(2026, 9, 2) + 1000);
+      let calls = 0, fail = true;
+      const errors: string[] = [];
+      page.on('pageerror', e => errors.push(e.message));
+      await page.route('**/dag', route => {
+        calls++;
+        return route.fulfill({ status: fail ? 500 : 200, json: fail ? { error: 'unavailable' } : snapshot });
+      });
+      await page.goto(server.url.toString());
+      await page.evaluate(`document.documentElement.dataset.theme = '${theme}'`);
+      await page.getByRole('button', { name: /调度与自动派单/ }).waitFor();
+      await waitCalls(() => calls, 1);
+      await page.getByRole('button', { name: /调度与自动派单/ }).click();
+      await page.getByTestId('legacy-view').waitFor();
+      await page.getByText('推进产品视图', { exact: true }).waitFor();
+      await page.clock.runFor(200);
+      await noOverflow(page);
+      await page.screenshot({ path: resolve(out, `r1-degraded-${theme}-${width}.png`) });
+      await page.clock.runFor(4800);
+      await waitCalls(() => calls, 2);
+      await page.clock.runFor(9999);
+      expect(calls).toBe(2);
+      await page.clock.runFor(1);
+      await waitCalls(() => calls, 3);
+      fail = false;
+      if (width === 390) await page.evaluate('window.refresh()');
+      else await page.clock.runFor(20000);
+      await waitCalls(() => calls, 4);
+      await page.getByTestId('legacy-view').waitFor({ state: 'hidden' });
+      await page.getByRole('navigation').getByText('调度与自动派单', { exact: true }).waitFor();
+      expect(await page.getByText('产品与团队视图', { exact: true }).count()).toBe(0);
+      expect(errors).toEqual([]);
+      await page.close();
+    }
+  } finally { await browser.close(); server.stop(true); }
+}, 60000);
+
 test.skipIf(!enabled)('404/500/timeout/missing fields return grouped DAG and automatically retry', async () => {
   if (!out) return;
   const server = await serveFixture('after', out);
@@ -140,3 +194,9 @@ test.skipIf(!enabled)('404/500/timeout/missing fields return grouped DAG and aut
     }
   } finally { await browser.close(); server.stop(true); }
 }, 60000);
+
+async function waitCalls(read: () => number, expected: number) {
+  for (let i = 0; i < 100 && read() < expected; i++) await new Promise(r => setTimeout(r, 20));
+  expect(read()).toBe(expected);
+  await new Promise(r => setTimeout(r, 100));
+}

@@ -24,4 +24,7 @@
 .panes { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .tab { min-height: 44px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tab:disabled { opacity: .45; cursor: default; }
+.recovery { flex: 1; min-height: 0; display: flex; flex-direction: column; animation: recover 200ms ease; }
+@keyframes recover { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .recovery { animation: none; } }
 @media (prefers-reduced-motion: reduce) { .card, .bar > span { transition: none; } }

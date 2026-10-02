@@ -106,9 +106,9 @@ export function useDagPanes(a: DagPanesArgs) {
   );
 
   const paneProps = { board: product, featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
-    onTask: a.pickTask, graph, now: a.now, tr, progress };
+    onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
-    <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={load.status === "loading" ? <div className={v.canvas} /> : causal} />
+    <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={<div className={v.center}>{causal}</div>} />
   );
 
   const mobile = (fallback: React.ReactNode) => (

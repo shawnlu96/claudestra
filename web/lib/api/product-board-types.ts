@@ -16,7 +16,7 @@ export interface ProductBoard {
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const count = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 
-/** Reject incomplete successful bodies before rendering, including the empty-body failure seen in V1z. */
+/** Reject incomplete successful bodies before rendering; missing fields cannot safely enter the product layout. */
 export function assertProductBoard(v: unknown): asserts v is ProductBoard {
   if (!record(v) || !Array.isArray(v.features) || !Array.isArray(v.deps)) throw new Error('Invalid product board');
   const ids = new Set<string>();

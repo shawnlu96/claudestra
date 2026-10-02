@@ -2,6 +2,8 @@ import type { ReactNode } from 'react';
 import type { ProductBoard } from '@/lib/api/product-board';
 import type { Tr } from '../collab-model';
 import type { DagTab } from '../dag/use-dag-ui';
+import type { DagBoard } from '../dag/dag-types';
+import { hasFeatureSnapshot } from './dag-availability';
 import { FeatureCards, FeatureTrail, ProductView } from './product-view';
 import v from '../v4/v4.module.css';
 import d from '../dag/dag.module.css';
@@ -10,6 +12,7 @@ import s from './product.module.css';
 const LABELS: Record<DagTab, string> = { product: '产品 DAG', dag: '子 DAG', progress: '谁在干活', team: '团队' };
 interface Props {
   board: ProductBoard | null;
+  dagBoard: DagBoard | null;
   featureId: string | null;
   tab: DagTab;
   setTab: (tab: DagTab) => void;
@@ -35,7 +38,10 @@ export function ProductPanes(p: Props) {
     : p.board && tab === 'product' ? <ProductView board={p.board} narrow={p.narrow} now={p.now} onFeature={p.onFeature} tr={p.tr} />
       : p.board && feature ? <>
         <FeatureTrail title={feature.title} onBack={() => p.setTab('product')} tr={p.tr} />
-        {feature.hasDag ? p.subdag : <FeatureCards feature={feature} onTask={p.onTask} tr={p.tr} />}
+        <div key={hasFeatureSnapshot(p.dagBoard, feature.id) ? 'snapshot' : 'fallback'} className={s.recovery}>
+          {feature.hasDag ? hasFeatureSnapshot(p.dagBoard, feature.id) ? p.subdag : p.fallback
+            : <FeatureCards feature={feature} onTask={p.onTask} tr={p.tr} />}
+        </div>
       </> : p.graph ? p.subdag : p.fallback;
   return <div className={p.narrow ? s.panes : v.center}>
     <div className={p.narrow ? d.mseg : v.tabs} role="tablist">

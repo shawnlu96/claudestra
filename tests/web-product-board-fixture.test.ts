@@ -58,3 +58,19 @@ test('ETA today has time, other dates have month/day, null is hidden', () => {
   expect(productEta(new Date(2026, 9, 4).getTime(), now, '今天')).toBe('10-04');
   expect(productEta(null, now, '今天')).toBeNull();
 });
+
+test('snapshot availability requires selected feature and a current node array; retry caps at sixty seconds', async () => {
+  const { assertDagSnapshot, hasFeatureSnapshot, dagRetryDelay } = await import('../web/features/collab/product/dag-availability');
+  const { board, feature: f, node } = await import('./web-collab-dag-fixture');
+  const snapshot = board([f('f', [node('a', 'active')])]);
+  expect(() => assertDagSnapshot(snapshot)).not.toThrow();
+  expect(hasFeatureSnapshot(snapshot, 'f')).toBe(true);
+  expect(hasFeatureSnapshot(snapshot, 'missing')).toBe(false);
+  expect(hasFeatureSnapshot(null, 'f')).toBe(false);
+  expect(hasFeatureSnapshot(board([f('f', [], { currentVersion: 0 })]), 'f')).toBe(false);
+  for (const value of [{}, { features: [{ id: 'f', currentVersion: 1 }], agents: [] }]) expect(() => assertDagSnapshot(value)).toThrow();
+  let delay = 5000;
+  const waits = [delay];
+  for (let i = 0; i < 5; i++) { delay = dagRetryDelay(delay); waits.push(delay); }
+  expect(waits).toEqual([5000, 10000, 20000, 40000, 60000, 60000]);
+});
