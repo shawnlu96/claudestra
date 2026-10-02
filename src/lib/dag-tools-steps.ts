@@ -17,6 +17,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { ledgerArgs } from "./order-ledger-exit.js";
+import { peerRestateSkip } from "./scheduler-spec-resume-text.js";
 
 interface GitResult {
   ok: boolean;
@@ -247,8 +248,8 @@ function restateStep(io: StepIO, p: StartPlan, peer: NonNullable<StartPlan["peer
   const why = `start_node 放到 peer:${peer.name}（${peer.reason}）；复述环节跳过，start_node 即 PM 放行，开工单由放置结果派给它`;
   return {
     name: "restate",
-    run: async () => failed(await ledger(io, p, "decision", p.taskId, {}, "placement", [why])) ??
-      failed(await ledger(io, p, "stage", p.taskId, { from: "spec", to: "restate", text: `远端卡复述跳过：${why}` }, "restate")),
+    run: async () => failed(await ledger(io, p, "decision", p.taskId, {}, "placement", [peerRestateSkip(why).decision])) ??
+      failed(await ledger(io, p, "stage", p.taskId, peerRestateSkip(why).stage, "restate")),
     landed: () => ours(io, p, "placement") && ours(io, p, "restate"),
   };
 }

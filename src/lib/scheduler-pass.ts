@@ -30,6 +30,7 @@ import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.
 import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
+import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -120,6 +121,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (config.autoDispatch === true) {
         const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
+        failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
         const deps = supervising ? withSupervisorHold(base, db) : base;
         const autoPace = pace.phase();
