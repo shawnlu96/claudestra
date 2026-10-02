@@ -5,6 +5,7 @@
  * tests/order-tools.test.ts。
  */
 import { DAG_TOOL_TIMEOUT_MS, DAG_TOOLS } from "./dag-tools.js";
+import { FINDING_PITFALL_SCHEMA, MEMORY_REFS_SCHEMA, MEMORY_TOOLS } from "./memory-tools-defs.js";
 
 type BridgeRequest = (msg: any, timeoutMs?: number) => Promise<any>;
 
@@ -39,6 +40,7 @@ export const ORDER_TOOLS = [
         disputes: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false,
           properties: { findingId: { type: "string" }, reason: { type: "string", maxLength: 1000 } }, required: ["findingId", "reason"] } },
         selfCheck: { type: "string", description: "按验收线逐条自查的结果（≤4000 字节）" },
+        memoryRefs: MEMORY_REFS_SCHEMA,
       },
       required: ["v", "orderId", "head", "evidence", "summary", "selfCheck"],
     },
@@ -93,7 +95,7 @@ export const ORDER_TOOLS = [
             type: "object",
             properties: {
               findingId: { type: "string" }, family: { type: "string" }, severity: { type: "string", enum: ["P0", "P1", "P2"] },
-              probe: { type: "string", description: "复现 / 探针（≤4000 字节）" }, description: { type: "string", description: "说明（≤4000 字节）" },
+              probe: { type: "string", description: "复现 / 探针（≤4000 字节）" }, description: { type: "string", description: "说明（≤4000 字节）" }, pitfall: FINDING_PITFALL_SCHEMA,
             },
             required: ["findingId", "family", "severity", "probe", "description"],
           },
@@ -104,6 +106,7 @@ export const ORDER_TOOLS = [
     },
   },
   ...DAG_TOOLS,
+  ...MEMORY_TOOLS,
 ];
 
 const NAMES = new Set(ORDER_TOOLS.map((t) => t.name));
