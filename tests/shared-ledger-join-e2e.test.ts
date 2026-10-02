@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/shared-ledger/store.js";
@@ -8,7 +8,7 @@ import { LedgerService } from "../src/shared-ledger/service.js";
 import { startServer } from "../src/shared-ledger/server.js";
 import { runAdmin } from "../scripts/shared-ledger-admin.js";
 import { joinSharedLedger, parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join.js";
-import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
+import { resolveSharedLedgerCredential, writeSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { readSharedLedgerBindings } from "../src/lib/shared-ledger-gate-bindings.js";
 import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
 import type { InstanceKey } from "../src/lib/instance-key.js";
@@ -31,6 +31,47 @@ afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: tru
 const admin = (...a: string[]) => runAdmin(["invite", "--db", db, "--team", "team-a", "--project", "project-a", "--ttl", "1h", ...a]);
 
 describe("shared ledger enrollment end to end", () => {
+  test("legacy single-project credentials remain readable and replacement is project scoped", async () => {
+    const dir = mkdtempSync(join(root, "legacy-"));
+    const credential = { localSubject: "owner:self", kind: "person" as const, centerId: "center-a", baseUrl: url,
+      teamId: "team-a", personId: "peer-a", instanceId: "instance-a", bearer: "legacy-bearer",
+      projects: [{ projectId: "project-a", actions: ["read" as const] }] };
+    writeFileSync(join(dir, "shared-ledger-credentials.json"), JSON.stringify({ credentials: [credential] }), { mode: 0o600 });
+    const resolve = (projectId: string) => resolveSharedLedgerCredential("owner:self", "person", "center-a", "team-a", projectId, "read", dir);
+    expect(resolve("project-a")).toEqual(credential);
+    await writeSharedLedgerCredential({ ...credential, bearer: "b-bearer", projects: [{ projectId: "project-b", actions: ["read"] }] }, dir);
+    await writeSharedLedgerCredential({ ...credential, bearer: "new-a-bearer" }, dir);
+    expect(resolve("project-a")!.bearer).toBe("new-a-bearer");
+    expect(resolve("project-b")!.bearer).toBe("b-bearer");
+    expect(resolve("project-c")).toBeNull();
+  });
+
+  test("same subject joins A then B and reads both while unjoined C is refused", async () => {
+    const dir = join(root, "state-multi"), key = newKey(), subject = "owner:self", instanceId = "instance-multi";
+    let centerId = "";
+    const features: string[] = [];
+    for (const projectId of ["project-a", "project-b"]) {
+      const invite = admin("--project", projectId, "--person", "peer-multi", "--code", "peer-multi",
+        "--role", "member", "--actions", "read,plan");
+      const result = await joinSharedLedger({ url, code: String(invite.joinCode), key, instanceId, subject, stateDir: dir });
+      centerId = result.centerId;
+      const credential = resolveSharedLedgerCredential(subject, "person", centerId, "team-a", projectId, "plan", dir)!;
+      const created = await new SharedLedgerClient(credential, key, { scrub }).command({ type: "feature.new", projectId,
+        requestId: randomBytes(6).toString("hex"), title: projectId, description: "Shared plan", homeInstanceId: instanceId });
+      features.push((created as { result: { featureId: string } }).result.featureId);
+    }
+    const credentials = ["project-a", "project-b"].map((projectId) =>
+      resolveSharedLedgerCredential(subject, "person", centerId, "team-a", projectId, "read", dir));
+    for (const [i, credential] of credentials.entries()) {
+      expect(credential).not.toBeNull();
+      const client = new SharedLedgerClient(credential!, key);
+      expect((await client.feature(features[i]!)).feature.projectId).toBe(i === 0 ? "project-a" : "project-b");
+      await expect(client.feature(features[1 - i]!)).rejects.toMatchObject({ status: 403 });
+    }
+    expect(credentials[0]!.bearer).not.toBe(credentials[1]!.bearer);
+    expect(resolveSharedLedgerCredential(subject, "person", centerId, "team-a", "project-c", "read", dir)).toBeNull();
+  });
+
   test("two members enroll from isolated state dirs and read the same project; a third instance is refused", async () => {
     const logs: string[] = [];
     const spies = (["log", "error", "warn", "info"] as const).map((m) => spyOn(console, m).mockImplementation((...a) => { logs.push(a.join(" ")); }));
