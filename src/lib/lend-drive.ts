@@ -27,6 +27,7 @@ import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, p
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
+import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -375,7 +376,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   } else if (cur.state === "started") {
     // 失败 / 存活 / 运行上限对 started 的每种 submit 都先查：首条派单一直被拒送时 submit 停在 null，
     // 放在派单后面就一轮都查不到，worker 登录失败也照样续租占位（i28-R5a r1 P1-3）
-    const failed = cur.family === "codex" ? d.failure(cur.agent!) : undefined;
+    const failed = await leasedWorkerFailure(cur, d, finish); if (failed === true) return;
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
       d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);
