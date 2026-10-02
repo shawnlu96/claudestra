@@ -140,7 +140,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       }
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
-      return step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`);
+      const waiting = await step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`); // a train-cleared green member merges in this same call
+      return train === "cleared" && pr.mergeState === "CLEAN" && green(waiting, pr.checks) ? await claimAndMerge(waiting, external, step, assertActive, true) : waiting;
     }
     if (run.phase === "updating") {
       const pr = await external.inspect(run.prRef);

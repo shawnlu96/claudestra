@@ -8,6 +8,7 @@
  */
 import { bounceReceipt } from "./scheduler-merge-conflict.js";
 import type { MergeRun } from "./scheduler-merge.js";
+import { holdForTrain } from "./scheduler-merge-train-hold.js";
 
 const TRAIN_MIN = 2, TRAIN_MAX = 6;
 export const TRAIN_MAX_DEPTH = 3;
@@ -35,7 +36,7 @@ export interface TrainState {
   /** `taskId:head` an earlier train already sent serial or bounced: regrouping them would replay the same failure. */
   skip: string[];
 }
-type TrainEventKind = "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done";
+type TrainEventKind = "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold";
 export interface TrainEvent { at: number; train: string; seq: number; kind: TrainEventKind; text: string; data?: Record<string, unknown> }
 export interface TrainCheck { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }
 
@@ -364,16 +365,16 @@ export async function stepTrain(s: TrainState, deps: TrainDeps): Promise<TrainSt
 /**
  * Asked by the merge driver at ready and at await_ci, before any update-branch or merge (scheduler-merge-driver.ts): wait while this
  * card's train is testing, bounce the card the bisect pinned, clear a verified member to skip update-branch only while every
- * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path.
+ * verified member's remote head is still the tested one and main holds only this train's merges; else void. null = serial path; anyone else waits.
  */
 export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & Pick<TrainDeps, "gh">): Promise<TrainGate> {
   if (!s || (s.phase !== "testing" && s.phase !== "settling")) return null;
   const m = s.members.find((x) => x.taskId === run.taskId && sameSha(x.head, run.reviewedHead) && x.prRef === run.prRef);
-  if (!m || s.serial.includes(m.taskId) || s.dropped.includes(m.taskId) || s.merged.some((x) => x.taskId === m.taskId)) return null;
+  if (!m || s.serial.includes(m.taskId) || s.dropped.includes(m.taskId) || s.merged.some((x) => x.taskId === m.taskId)) return holdForTrain(s, run, deps, voidTrain);
   const bounce = s.bounced.find((b) => b.taskId === m.taskId && sameSha(b.head, m.head));
   if (bounce) return { bounce: bounce.receipt };
   if (s.phase === "testing") return "wait";
-  if (!s.cleared.includes(m.taskId)) return null;
+  if (!s.cleared.includes(m.taskId)) return holdForTrain(s, run, deps, voidTrain); // i28-MT1f2: anyone the train won't merge waits for it
   const why = await verdictNow(s, deps.gh);
   if (!why) return "cleared";
   await voidTrain(s, deps, `合并前核对：${why}`);
