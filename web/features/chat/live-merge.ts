@@ -148,7 +148,7 @@ export function pruneLiveBubbles(
 
 /** 历史气泡的首 seq（id = h<seq>） */
 function firstSeq(m: ChatMessage): number | null {
-  const mm = /^h(\d+)$/.exec(m.id);
+  const mm = /^h(\d+(?:\.\d+)?)$/.exec(m.id); // 收件箱拆出的消息挂在工具结果行上：h<行号>.0k（lib/session-history-inbox.ts）
   return mm ? Number(mm[1]) : null;
 }
 

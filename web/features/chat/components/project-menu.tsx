@@ -2,7 +2,7 @@
 /**
  * 侧栏 project 组头的右键 / 长按菜单（owner 2026-09-25「在会话 / 项目右键能执行类似 Reveal in Finder」）。
  * 目前只有「打开目录」一类项：文件管理器 / 终端 / IDE，内容复用 ../agent-menu.ts 的 openItems；
- * project 有多个目录时先选目录（二级页）。只在 /api/host 报本机且探测到程序时出现（组头不挂手势）。
+ * project 有多个目录时先选目录（二级页）；有 manage 授权时再加「主管 PM」二级页（project-pm.tsx）。
  * 手势、外壳与会话菜单同款（menu-gestures.ts / menu-shell.tsx）。
  */
 import { useEffect, useState } from "react";
@@ -14,9 +14,11 @@ import { openItems, type AgentMenuAction } from "../agent-menu";
 import { openLocal, useHostInfo, type Opener } from "../host-info";
 import type { ProjectMeta } from "../type";
 import { useT } from "@/lib/i18n";
+import { useFullScope } from "../contacts-data";
+import { PmMainItem, ProjectPmPage, ProjectPmToast, useProjectPmMenu } from "./project-pm";
 
 type MenuState = { p: ProjectMeta; x: number; y: number } | null;
-type Page = { kind: "main" } | { kind: "list"; group: "terminal" | "ide" } | { kind: "dirs"; target: string };
+type Page = { kind: "main" } | { kind: "list"; group: "terminal" | "ide" } | { kind: "dirs"; target: string } | { kind: "pm" };
 const subs = new Set<(s: MenuState) => void>();
 function emit(s: MenuState) {
   subs.forEach((f) => f(s));
@@ -34,14 +36,15 @@ function baseName(dir: string): string {
   return dir.replace(/\/+$/, "").split("/").pop() || dir;
 }
 
-function ProjectPanel({ s, openers, platform }: { s: NonNullable<MenuState>; openers: Opener[]; platform: string }) {
+function ProjectPanel({ s, openers, platform, manage }: { s: NonNullable<MenuState>; openers: Opener[]; platform: string; manage: boolean }) {
   const t = useT();
   const [page, setPage] = useState<Page>({ kind: "main" });
+  const pm = useProjectPmMenu(s.p.id, manage);
   const dirs = s.p.dirs ?? [];
   const items = openItems(openers, platform);
   const list = page.kind === "list" ? openers.filter((o) => o.kind === page.group) : [];
-  const rows = page.kind === "main" ? items.length : 1 + Math.max(1, page.kind === "list" ? list.length : dirs.length);
-  const title = page.kind === "dirs" ? t("选择目录") : page.kind === "list" ? t(page.group === "terminal" ? "在终端打开" : "用 IDE 打开") : s.p.name || s.p.id;
+  const rows = page.kind === "main" ? items.length + Number(manage) : page.kind === "pm" ? pm.rows : 1 + Math.max(1, page.kind === "list" ? list.length : dirs.length);
+  const title = page.kind === "pm" ? t("主管 PM") : page.kind === "dirs" ? t("选择目录") : page.kind === "list" ? t(page.group === "terminal" ? "在终端打开" : "用 IDE 打开") : s.p.name || s.p.id;
   // 选定程序后：单目录直接开，多目录进目录页
   const pick = (target: string) => {
     if (dirs.length > 1) {
@@ -69,8 +72,10 @@ function ProjectPanel({ s, openers, platform }: { s: NonNullable<MenuState>; ope
     <MenuShell x={s.x} y={s.y} rows={rows} title={title} onClose={closeProjectMenu}>
       {page.kind === "main" &&
         items.map((it) => <MenuItem key={it.id} icon={menuItemIcon(it)} label={menuLabel(t, it.label, it.arg)} chevron={it.submenu} onClick={() => onMain(it.id)} />)}
+      {page.kind === "main" && manage && <PmMainItem pm={pm} onClick={() => setPage({ kind: "pm" })} />}
       {page.kind !== "main" && <MenuItem icon="‹" label={t("返回")} onClick={() => setPage({ kind: "main" })} />}
       {page.kind === "list" && list.map((o) => <MenuItem key={o.id} icon="›" label={o.label} onClick={() => pick(o.id)} />)}
+      {page.kind === "pm" && <ProjectPmPage project={s.p.id} pm={pm} onClose={closeProjectMenu} />}
       {page.kind === "dirs" && dirs.map((d, i) => <MenuItem key={d} icon={<FolderIcon size={14} />} label={baseName(d)} onClick={() => openDir(i)} />)}
     </MenuShell>
   );
@@ -79,6 +84,7 @@ function ProjectPanel({ s, openers, platform }: { s: NonNullable<MenuState>; ope
 /** 单实例菜单，挂一份在 Sidebar 里即可。 */
 export function ProjectMenu() {
   const host = useHostInfo();
+  const manage = useFullScope() === true;
   const [s, setS] = useState<MenuState>(null);
   useEffect(() => {
     subs.add(setS);
@@ -87,7 +93,13 @@ export function ProjectMenu() {
     };
   }, []);
   useCloseOnNavigate(closeProjectMenu);
-  if (typeof document === "undefined" || !s) return null;
+  if (typeof document === "undefined") return null;
   // key 随打开的 project 变：重开时 page 回到主页
-  return createPortal(<ProjectPanel key={`${s.p.id}:${s.x}:${s.y}`} s={s} openers={host.openers} platform={host.platform} />, document.body);
+  const panel = s && <ProjectPanel key={`${s.p.id}:${s.x}:${s.y}`} s={s} openers={host.openers} platform={host.platform} manage={manage} />;
+  return (
+    <>
+      <ProjectPmToast />
+      {panel && createPortal(panel, document.body)}
+    </>
+  );
 }

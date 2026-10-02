@@ -46,14 +46,15 @@ function localLoad(db: Database, project: string, maxWorkers: number, remote: Re
   return { running: localWriterCount(db, project, null) + localReviewerCount(db, project, null), room: newLocalWriteRoom(slots.workerCount, maxWorkers, slots.waitingFix) };
 }
 
-function locksFree(db: Database, project: string, globs: readonly string[]): boolean {
+function locksFree(db: Database, project: string, globs: readonly string[], taskId?: string): boolean {
   const mine = globs.map(resourceKey);
-  const held = db.query("SELECT resource FROM scheduler_resources WHERE project = ?").all(project) as { resource: string }[];
+  const held = db.query("SELECT resource FROM scheduler_resources WHERE project = ? AND (? IS NULL OR taskId != ?)")
+    .all(project, taskId ?? null, taskId ?? null) as { resource: string }[];
   return !mine.includes(null) && !held.some((h) => mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
 }
 
 export async function startPlacement(db: Database, io: StartPlacementIO,
-  q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}` }, finishFirst = false): Promise<StartPlacement> {
+  q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; taskId?: string }, finishFirst = false): Promise<StartPlacement> {
   const pin = q.want === "auto" ? null : q.want;
   const policy = io.policy(q.project);
   let borrow: readonly BorrowEntry[] = [];
@@ -70,7 +71,8 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
   }
   const facts: PlacementFacts = {
     remote: policy?.remote ?? null, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents).map(peerFacts),
-    repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: locksFree(db, q.project, q.fileGlobs),
+    repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null,
+    locksFree: locksFree(db, q.project, q.fileGlobs, q.taskId),
   };
   // Only automatic admission opts in; the PM's manual start_node placement keeps its explicit choice.
   const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");

@@ -1,3 +1,4 @@
+import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
 /**
  * Discord Bridge Service — 主入口
  *
@@ -474,7 +475,7 @@ async function pushBackToCaller(
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
-  if (live) return (await deliver(env)).outcome;
+  if (live || pmClientFor(pac.callerName, clients, pac.targetName)) return (await deliver(env)).outcome; // 前任 PM 离线：当班 PM 接它的答复
   heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
@@ -795,7 +796,8 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
+  return deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
+    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted)));
 }
 
 /** 只经 deliverLocalInOrder 调用 */
@@ -1354,7 +1356,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     return;
   }
 
-  const client = clients.get(channelId);
+  const client = clients.get(channelId) ?? pmClientFor(channelId, clients);
   if (!client) return;
 
   let content = msg.content
@@ -2246,8 +2248,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             // 握手未完成(invite 后等回执的窗口,缺 outToken/baseUrl)会落到下面的
             // 未知 peer 报错,提示里带已配置列表
             if (httpPeer && httpPeer.outToken && httpPeer.baseUrl) {
-              const { routeToHttpPeer } = await import("./bridge/http-peer.js");
-              const result = routeToHttpPeer(
+              const { routeToHttpPeer, sendLendRelay } = await import("./bridge/http-peer.js");
+              const result = msg.lendSupplement === true ? await sendLendRelay(httpPeer, peerAgentName, String(msg.text || "")) : routeToHttpPeer(
                 ws, fromChannelId, fromName, httpPeer, peerAgentName, String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
                 msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回
@@ -2296,7 +2298,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
         if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
-        const targetClient = clients.get(target.channelId);
+        const targetClient = clients.get(target.channelId) ?? pmClientFor(targetName, clients, fromName);
         if (!targetClient) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）`, rejected: "not_connected" }));
           break;
@@ -3044,7 +3046,7 @@ initApiRoutes({
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
-  deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
+  deliver, getClientWs: (channelId) => ((clients.get(channelId) ?? pmClientFor(channelId, clients))?.ws as any) ?? null, // 前任 PM 离线：当班 PM 的连接接住，deliverPmLocal 加转交抬头
   hold: (env) => void heldLocalMsgs.holdEnv(env),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });

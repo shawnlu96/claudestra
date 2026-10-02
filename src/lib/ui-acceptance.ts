@@ -1,0 +1,113 @@
+/**
+ * 带界面的 feature 的整页验收（i28-UIQ1）：子 DAG 里只要有 ui 节点，就由系统维护一个收尾节点 PAGEOK，依赖全部 ui 节点；
+ * 它是 PM 的验收卡（没有文件范围，不会被自动开卡），没 verified 之前 feature 不能改成 done。
+ * 写入点：dag-init / dag-rewrite 落库前（ledger-feature-write.ts / ledger-dag-write.ts），feature 完成判定在 setFeature。
+ * ui 卡的审查单另附规格的「对照基准」一节和 UI_BASIS_RULE（order-standard-answers.ts）。tests/ui-acceptance.test.ts。
+ */
+import type { Database } from "bun:sqlite";
+import { dirname, join } from "node:path";
+import { cardNames } from "./ledger-card-names.js";
+import { nodePhase, planRewrite, type CurrentDag, type NodePhase } from "./ledger-dag-rules.js";
+import { effectiveNodes, getDagVersion, PLANNED, type DagNode, type Feature } from "./ledger-feature.js";
+import { getWorkflow } from "./ledger-scheduler.js";
+import type { LedgerTask } from "./ledger-stages.js";
+import { getMeta, getTask, LedgerError } from "./ledger-store.js";
+import { uiSpecSection } from "./spec-lint-section.js";
+import { isUiSpec } from "./spec-lint.js";
+import { readTextSoft, specPathFor } from "./task-spec.js";
+
+export const PAGE_CHECK_KEY = "PAGEOK";
+const PAGE_CHECK_LINE = "整页验收（PM）：中继 + owner 设备 + 生产数据，和对照基准同屏截图逐栏对台账";
+/** PAGEOK 卡的验收清单（固定）：feature 改 done 被拒时随说明给 PM，开这张卡时照抄进规格 */
+const PAGE_CHECK_LIST = [
+  "经中继（不是本机直连）打开入口",
+  "用 owner 的设备视角（同尺寸 / 同主题）",
+  "用生产数据，不用短标题夹具",
+  "和规格里的对照基准同屏截图",
+  "逐栏对照台账真实状态（标题、计数、状态、顺序）",
+] as const;
+
+/** 规格卡目录跟着台账库走（库在 <state>/ledger.sqlite，规格卡在 <state>/ledger/docs/tasks/）；内存库没有规格卡 */
+function specDirOf(db: Database): string | null {
+  return db.filename && db.filename !== ":memory:" ? join(dirname(db.filename), "ledger", "docs", "tasks") : null;
+}
+
+/** 绑的卡 workflow 模板是 ui，或节点规格卡卡首写了「模板：ui」 */
+function isUiNode(db: Database, f: Feature, n: DagNode, readSpec?: (taskId: string) => string | null): boolean {
+  if (n.taskId && getWorkflow(db, n.taskId)?.template === "ui") return true;
+  const taskId = n.taskId ?? cardNames(db, f, n.key, n).taskId;
+  const dir = specDirOf(db);
+  return isUiSpec(readSpec ? readSpec(taskId) : dir ? readTextSoft(join(dir, `${taskId}.md`)) : null);
+}
+
+const phaseOf = (db: Database, n: DagNode): NodePhase => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
+
+/** 写入的原始节点里剔掉 PAGEOK：它由 withPageCheck 维护，不收调用方给的 */
+export const dropPageCheck = (raw: unknown): unknown =>
+  Array.isArray(raw) ? raw.filter((x) => !(x && typeof x === "object" && (x as { key?: unknown }).key === PAGE_CHECK_KEY)) : raw;
+
+/**
+ * 落库前把 PAGEOK 摆对：有 ui 节点 → 有且只有一个，依赖 = 全部 ui 节点（排序）；没有 ui 节点且它还没开工 → 移除。
+ * PAGEOK 只认当前版本那一份（PM 传进来的由 dropPageCheck 先剔掉，免得它的旧依赖指向刚删的节点）；验收完成后 UI 范围变化则清掉验收绑卡，普通节点仍遵循重写规矩。
+ * cur = 当前版本节点（dag-init 为 null）。
+ */
+export function withPageCheck(db: Database, f: Feature, next: DagNode[], cur: readonly DagNode[] | null,
+  readSpec?: (taskId: string) => string | null): DagNode[] {
+  const page = cur?.find((n) => n.key === PAGE_CHECK_KEY);
+  const rest = next.filter((n) => n.key !== PAGE_CHECK_KEY);
+  const phase = page ? phaseOf(db, page) : "idle";
+  const cancelled = page?.taskId ? getTask(db, page.taskId)?.stage === "cancelled" : false;
+  const ui = rest.filter((n) => isUiNode(db, f, n, readSpec)).map((n) => n.key).sort();
+  if (!ui.length && (phase === "idle" || cancelled)) return rest;
+  // 重写只释放已取消的验收绑卡，spec 阶段的手动绑定需保留；已完成卡只有 UI 范围变化才重验，历史不改。
+  const sameScope = page && JSON.stringify(page.deps) === JSON.stringify(ui) && ui.every((key) => {
+    const before = cur?.find((n) => n.key === key);
+    const after = rest.find((n) => n.key === key);
+    return before && after && uiScope(before) === uiScope(after);
+  });
+  const reset = page?.taskId && (cancelled || (phase === "done" && !sameScope));
+  const keep = reset ? undefined : page;
+  const base: DagNode = { key: PAGE_CHECK_KEY, taskId: null, oneLine: PAGE_CHECK_LINE, deps: [], status: PLANNED, estimate: "", inheritedFrom: null };
+  return [...rest, { ...base, ...keep, deps: ui, inheritedFrom: null }];
+}
+
+/** UI 范围的身份与内容；卡阶段 / 继承版本不改变要验收的页面。 */
+const uiScope = (n: DagNode): string => JSON.stringify([n.taskId, n.oneLine, [...n.deps].sort(), n.estimate, [...(n.fileGlobs ?? [])].sort()]);
+
+/** 系统验收允许重置，普通完成节点仍原样保护；两个重写判定入口必须共用。 */
+export function planPageRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase,
+  ...args: [next: Parameters<typeof planRewrite>[2], cancel: Parameters<typeof planRewrite>[3], scopeChange: boolean, cards?: Parameters<typeof planRewrite>[5]]): ReturnType<typeof planRewrite> {
+  return planRewrite(cur, (n) => n.key === PAGE_CHECK_KEY && phase(n) === "done" ? "idle" : phase(n), ...args);
+}
+
+/** 仅新写入且明确 opt-in 的当前 DAG 版本受缺失验收门约束，历史版本无标记保持原行为。 */
+function pageCheckEnabled(db: Database, f: Feature): boolean {
+  return !!db.query(`SELECT 1 FROM events WHERE project = ? AND target = ? AND kind = 'feature'
+    AND json_extract(data, '$.version') = ? AND json_extract(data, '$.uiPageCheck') = 1 LIMIT 1`).get(f.project, f.id, f.currentVersion);
+}
+
+/** feature 收口时现读 UI 范围，晚绑定 / 晚落盘规格不会绕过整页验收；缺节点让 PM 用 rewrite_dag 补齐。 */
+export function requirePageCheck(db: Database, f: Feature): void {
+  const v = f.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null;
+  const ns = v ? effectiveNodes(db, v) : [];
+  const page = ns.find((n) => n.key === PAGE_CHECK_KEY);
+  if (!page && !pageCheckEnabled(db, f)) return;
+  const ui = ns.filter((n) => n.key !== PAGE_CHECK_KEY && isUiNode(db, f, n)).map((n) => n.key).sort();
+  if (!page && !ui.length) return;
+  const valid = page && JSON.stringify([...page.deps].sort()) === JSON.stringify(ui);
+  const stage = page?.taskId ? getTask(db, page.taskId)?.stage : null;
+  if (valid && (stage === "verified" || stage === "done")) return;
+  const where = !valid ? "缺有效节点，请 PM 用 rewrite_dag 补齐整页验收" : page?.taskId ? `卡 ${page.taskId} 在 ${stage ?? "找不到"}` : "没绑卡";
+  throw new LedgerError("conflict", `feature ${f.id} 的整页验收节点 ${PAGE_CHECK_KEY} 还没 verified（${where}），不能改成 done。验收清单：${PAGE_CHECK_LIST.join("；")}`);
+}
+
+/**
+ * ui 卡审查单上的「对照基准」一节（并进标准答复那一项）；不是 ui 卡为 undefined，审查单逐字不变。
+ * specText 不给就按卡上的规格路径读；规格没写对照基准时明说，审查员按 UI_BASIS_RULE 报 P1。
+ */
+export function uiReviewBasis(db: Database | undefined, task: LedgerTask, specText?: string | null): string | undefined {
+  const text = specText !== undefined ? specText : readTextSoft(specPathFor(task, db ? getMeta(db, task.project).docsDir : null));
+  if (!(db && getWorkflow(db, task.id)?.template === "ui") && !isUiSpec(text)) return undefined;
+  const basis = text ? uiSpecSection(text, "对照基准") : [];
+  return ["对照基准（规格原文，逐项对照截图审）：", ...(basis.length ? basis : ["（规格没写「## 对照基准」）"])].join("\n");
+}

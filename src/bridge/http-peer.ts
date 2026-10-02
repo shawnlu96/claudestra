@@ -6,6 +6,7 @@
  * bridge 重启后接着轮询。**不自动重试 POST**——消息投递非幂等，重试=双发。
  */
 
+export { sendLendRelay } from "./lend-relay-send.js";
 import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
 import { newMessageId, newThreadId } from "./router.js";
@@ -101,7 +102,6 @@ export function cancelHttpPeerCallsForChannel(channelId: string): number {
 /**
  * 出站主入口。**同步阶段**只做参数构造——立即给 caller 回 MCP response
  * （ok+pushBack），真正的 HTTP 往返在后台进行，结果一律以合成消息推回。
- * 返回值是给 send_to_agent handler 的 result 对象。
  */
 export function routeToHttpPeer(
   ws: ServerWebSocket<unknown>,

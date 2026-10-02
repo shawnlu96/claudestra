@@ -73,7 +73,8 @@ const api = (path: string, who: Principal, body?: unknown) =>
 describe("显式 ask", () => {
   test("授权类：记绑定与参数哈希（env.meta.askHash 回给 agent）、默认卡活、key 默认 bind.action", async () => {
     const r = await reply("发 v2.32.0 吗", { kind: "authorize", bind: RELEASE, why: "要打 tag" });
-    expect(r.ask).toMatchObject({ kind: "authorize", blocking: true, askKey: "release", context: "要打 tag", bind: { action: "release", paramsHash: bindHash(RELEASE, "agent-x") } });
+    expect(r.ask).toMatchObject({ kind: "authorize", blocking: true, askKey: "release", context: "批准的就是这个 → 动作：release；tag=v2.32.0\n要打 tag", // 系统那段在前（i28-OA1）
+      bind: { action: "release", paramsHash: bindHash(RELEASE, "agent-x") } });
     expect(r.env.meta.askHash).toBe(bindHash(RELEASE, "agent-x"));
   });
 
