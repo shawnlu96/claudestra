@@ -23,6 +23,11 @@ MIN_BUN=1.3.0
 BODY_LIMIT=1m
 # 与 src/shared-ledger/service.ts 的路由正则一致：只有 /v1/teams/<team>/<资源>[/<id>] 会被反代
 API_RE='^/v1/teams/[A-Za-z0-9_.:-]+/(features|commands|imports|projections)(/[A-Za-z0-9_.:-]+)?$'
+# 与 src/lib/shared-ledger-join.ts 的 SHARED_LEDGER_JOIN_PATH 一致（成员用入组码换凭据，只收 POST）；测试核对
+JOIN_PATH=/v1/join
+# 入组接口单独一档更严的每 IP 限流，防爆破入组码（服务端自己的入组限流经反代后全体共用 127.0.0.1 一桶）
+JOIN_RATE=10r/m
+JOIN_BURST=3
 MODE=${1:-}; shift || true
 HOST_NAME="" PORT="" BUN="" CODE_CHANGED=0 DRY=0
 while [[ $# -gt 0 ]]; do
@@ -55,7 +60,7 @@ put_file() {
   guard_ours "$path"
   if [[ -f $P$path ]] && [[ "$(cat "$P$path")" == "$content" ]]; then say "未变：$path"; return 1; fi
   if [[ $DRY == 1 ]]; then
-    echo "  [dry-run] 写入 $path："
+    echo "  [dry-run] 写入 ${path}："
     printf '%s\n' "$content" | sed 's/^/      | /'
   else
     printf '%s\n' "$content" > "$P$path.tmp-$$"
@@ -170,13 +175,27 @@ WantedBy=timers.target
 EOF
 }
 
+proxy_block() {
+  cat <<EOF
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 15s;
+EOF
+}
+
 render_nginx() { # 证书 私钥 是否听 IPv6
   local v6=""
   [[ $3 == 1 ]] && v6="    listen [::]:443 ssl;"
   cat <<EOF
 $MARK
-# 共享台账中心的 HTTPS 入口：只反代台账 API，其余一律 404。证书复用主机上已有 server 块的那一张，不新申请。
+# 共享台账中心的 HTTPS 入口：只反代台账 API 与入组接口（仅 POST），其余一律 404。证书复用主机上已有 server 块的那一张，不新申请。
 limit_req_zone \$binary_remote_addr zone=claudestra_shared_ledger:10m rate=2r/s;
+limit_req_zone \$binary_remote_addr zone=claudestra_shared_ledger_join:1m rate=$JOIN_RATE;
 
 server {
     listen 443 ssl;
@@ -192,14 +211,16 @@ $v6
     limit_req_status 429;
 
     location ~ "$API_RE" {
-        proxy_pass http://127.0.0.1:$PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_connect_timeout 5s;
-        proxy_send_timeout 15s;
-        proxy_read_timeout 15s;
+$(proxy_block)
+    }
+
+    # 入组：只放行 POST（其他方法 405）；body 上限沿用 server 级的 client_max_body_size；这里的 limit_req 取代 server 级那档
+    location = $JOIN_PATH {
+        if (\$request_method != POST) {
+            return 405;
+        }
+        limit_req zone=claudestra_shared_ledger_join burst=$JOIN_BURST nodelay;
+$(proxy_block)
     }
 
     location / {
@@ -273,7 +294,7 @@ probe_nginx() {
   local conf found
   conf=$(nginx -T 2>&1) || die "nginx -T 失败"
   found=$(detect_collision "$conf")
-  [[ -z $found ]] || die "nginx 配置（$found）中出现完整域名 token $HOST_NAME；请换一个未被占用的 --host-name（注释中出现也保守拒绝）"
+  [[ -z $found ]] || die "nginx 配置（${found}）中出现完整域名 token ${HOST_NAME}；请换一个未被占用的 --host-name（注释中出现也保守拒绝）"
   found=$(detect_cert "$conf")
   [[ -n $found ]] || die "没在已有 nginx server 块里找到覆盖 $HOST_NAME 的证书（server_name 为 $HOST_NAME 或 *.${HOST_NAME#*.}）；本脚本不申请证书、不改 DNS"
   CERT=${found% *}; KEY=${found#* }
@@ -305,16 +326,29 @@ install_nginx() {
   verify_https
 }
 
-# reload 后经本机 443 走一遍真实入口（SNI = 域名，证书照常校验）：API 路径应到中心（401），其他路径 404
+# reload 后经本机 443 走一遍真实入口（SNI = 域名，证书照常校验）：API 路径应到中心（401），入组路径 GET 被 nginx 拦成 405，其他路径 404
 verify_https() {
-  local api other
+  local api join other
   sleep 1
   api=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$HOST_NAME:443:127.0.0.1" "https://$HOST_NAME/v1/teams/healthcheck/features" || true)
+  join=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$HOST_NAME:443:127.0.0.1" "https://$HOST_NAME$JOIN_PATH" || true)
   other=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$HOST_NAME:443:127.0.0.1" "https://$HOST_NAME/" || true)
-  if [[ $api != 401 || $other != 404 ]]; then
-    die "nginx 已 reload，但经 https://$HOST_NAME 自检不符：API 路径回 ${api:-无响应}（期望 401）、/ 回 ${other:-无响应}（期望 404）；回滚见 README"
+  if [[ $api != 401 || $join != 405 || $other != 404 ]]; then
+    die "nginx 已 reload，但经 https://$HOST_NAME 自检不符：API 路径回 ${api:-无响应}（期望 401）、GET $JOIN_PATH 回 ${join:-无响应}（期望 405）、/ 回 ${other:-无响应}（期望 404）；回滚见 README"
   fi
-  say "HTTPS 入口自检：API 路径 401、其他路径 404"
+  say "HTTPS 入口自检：API 路径 401、入组路径 GET 405、其他路径 404"
+}
+
+# 代码目录统一收成 目录 755 / 文件 644、归 root（服务账号只读）。开发机 rsync 带了 --chmod 时本来就是这样，这里什么都不做；
+# openrsync 不认 --chmod，新文件带着开发机上的权限过来，在这里补齐。只在确有不符时才动，保持重跑幂等
+fix_code_perms() {
+  [[ -d $P$APP_DIR ]] || return 0
+  if [[ -n $(find "$P$APP_DIR" -type d ! -perm 755 -print 2>/dev/null | head -n 1) ]]; then
+    act find "$P$APP_DIR" -type d ! -perm 755 -exec chmod 755 {} +
+  fi
+  if [[ -n $(find "$P$APP_DIR" -type f ! -perm 644 -print 2>/dev/null | head -n 1) ]]; then
+    act find "$P$APP_DIR" -type f ! -perm 644 -exec chmod 644 {} +
+  fi
 }
 
 do_install() {
@@ -323,7 +357,7 @@ do_install() {
   echo "→ 前置检查"
   for c in systemctl nginx curl journalctl; do command -v "$c" >/dev/null || die "远端缺少 $c"; done
   [[ $BUN == /* && $BUN != /root/* && $BUN != /home/* ]] || die "--bun 要是绝对路径且不在 /root、/home 下（单元开了 ProtectHome）：$BUN"
-  [[ -x $P$BUN ]] || die "远端没有可执行的 $BUN；先装一个系统级 bun（见 README 前置条件）"
+  [[ -x $P$BUN ]] || die "远端没有可执行的 ${BUN}；先装一个系统级 bun（见 README 前置条件）"
   local v; v=$("$P$BUN" --version)
   [[ "$(printf '%s\n%s\n' "$MIN_BUN" "$v" | sort -V | head -n 1)" == "$MIN_BUN" ]] || die "远端 bun $v 低于 $MIN_BUN"
   say "bun $v @ $BUN"
@@ -341,6 +375,7 @@ do_install() {
   ensure_dir "$STATE_DIR" "$SVC_USER" 0700
   ensure_dir "$DB_DIR" "$SVC_USER" 0700
   ensure_dir "$BACKUP_DIR" "$SVC_USER" 0700
+  fix_code_perms
   local f
   for f in "$P$DB" "$P$DB-wal" "$P$DB-shm"; do
     [[ -f $f ]] && [[ "$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")" != 600 ]] && act chmod 0600 "$f"
@@ -367,7 +402,7 @@ do_install() {
 }
 
 do_uninstall() {
-  echo "→ 停服务（保留 $DB_DIR 与 $BACKUP_DIR）"
+  echo "→ 停服务（保留 $DB_DIR 与 ${BACKUP_DIR}）"
   local u removed=0
   for u in "$SVC.service" "$SVC-backup.service" "$SVC-backup.timer" "$NGINX_FILE"; do
     if [[ $u == /* ]]; then guard_ours "$u"; else guard_ours "$UNIT_DIR/$u"; fi
@@ -389,7 +424,7 @@ do_uninstall() {
       act systemctl reload nginx
     else echo "  [dry-run] nginx -t && systemctl reload nginx"; fi
   else say "没有 $NGINX_FILE"; fi
-  echo "✓ 已卸载；库与备份保留在 $DB_DIR、$BACKUP_DIR，代码目录 $APP_DIR 未删"
+  echo "✓ 已卸载；库与备份保留在 ${DB_DIR}、${BACKUP_DIR}，代码目录 $APP_DIR 未删"
 }
 
 case $MODE in

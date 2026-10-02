@@ -10,7 +10,7 @@ export interface SharedLedgerProps { identity: Identity; language?: 'zh' | 'en';
 /** Identity-keyed mounting clears all editable/UI state before a different member can see it. */
 export function SharedLedger(props: SharedLedgerProps) { return <SessionView key={identityKey(props.identity)} {...props} />; }
 function SessionView({ identity, language = 'zh', transport }: SharedLedgerProps) {
-  const [session] = useState(() => new SharedLedgerSession(identity, transport ?? sharedLedgerTransport({ fp: identity.machine })));
+  const [session] = useState(() => new SharedLedgerSession(identity, transport ?? sharedLedgerTransport({ fp: identity.machine }, identity.project)));
   const [list, setList] = useState<FeatureList | null>(null), [detail, setDetail] = useState<FeatureDetail | null>(null);
   const [previous, setPrevious] = useState<FeatureDetail | undefined>(), [draft, setDraft] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);

@@ -1,5 +1,6 @@
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
+import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
  * 身份与时间由命令推导（ledger-identity.ts），库是 statePath("ledger.sqlite")（lib/ledger-store.ts，沙箱随状态目录隔离）。
@@ -63,7 +64,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...DEP_CMDS,
   ...FEATURE_CMDS, ...FEATURE_SPLIT_CMDS,
   ...FEATURE_MIGRATE_CMDS,
-  ...DAG_CMDS,
+  ...DAG_CMDS, ...START_SETTLE_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,

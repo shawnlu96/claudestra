@@ -30,33 +30,43 @@ interface MigrationRecord {
   target?: string;
   receipt?: SharedLedgerImportReceipt;
 }
+/**
+ * Errors this script raises itself: fixed text with no data from the ledger, the center or a file, so main() prints them as-is.
+ * Anything else (center responses, parse failures, library errors) may carry data and still prints only the generic line.
+ */
+export class MigrationError extends Error {}
+const GENERIC_STOP = "Migration stopped; retain local gate and inspect the local journal before recovery.";
+export const migrationErrorText = (error: unknown): string =>
+  error instanceof MigrationError || error instanceof SharedLedgerScrubError ? error.message : GENERIC_STOP;
+
 const validId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id);
 const journalPath = (dir: string, batch: string) => join(dir, "shared-ledger-migrations", `${batch}.json`);
 
 /** Unknown starts remain blockers even after the scheduler has recorded an unknown settlement. */
 function preflight(db: Database, options: SharedLedgerExportOptions): void {
   const ids = new Set(options.featureIds);
-  if (!ids.size || ids.size !== options.featureIds.length || [...ids].some((id) => !validId(id))) throw new Error("invalid migration selection");
+  if (!ids.size || ids.size !== options.featureIds.length || [...ids].some((id) => !validId(id))) throw new MigrationError("invalid migration selection");
   for (const id of ids) {
     const feature = getFeature(db, id);
-    if (!feature || feature.project !== options.localProject) throw new Error("migration feature unavailable");
-    if (getPendingProposal(db, id)) throw new Error("migration blocked: pending proposal");
+    if (!feature || feature.project !== options.localProject) throw new MigrationError("migration feature unavailable");
+    if (getPendingProposal(db, id)) throw new MigrationError("migration blocked: pending proposal");
   }
   const events = listEvents(db, { project: options.localProject });
   for (const event of events) {
     if (event.data.op !== "autostart_claim" || !ids.has(event.target)) continue;
     const settled = getEventByDedup(db, `autostart-settle:${event.seq}`)?.data;
     if (!settled || !["done", "failed"].includes(String(settled.outcome)) || (settled.leftovers as unknown[] | undefined)?.length) {
-      throw new Error("migration blocked: in-flight or unknown start");
+      throw new MigrationError("migration blocked: in-flight or unknown start");
     }
   }
   // A manual start has no claim; an unfinished dag-start attempt in the project is conservatively unknown.
   // Its first task event may precede feature assignment, so filtering by tasks.featureId would miss it.
   for (const event of events.filter((e) => e.dedupKey?.startsWith("dag-start:") && e.dedupKey.endsWith(":task-new"))) {
     const prefix = event.dedupKey!.slice(0, -"task-new".length);
-    // Cancellation alone does not prove worktree/agent cleanup succeeded; no durable manual settlement exists yet.
-    if (!getEventByDedup(db, `${prefix}bind`)) {
-      throw new Error("migration blocked: unfinished manual start");
+    // Cancellation alone does not prove worktree/agent cleanup succeeded: only a bind or a verified `ledger start-settle` record
+    // (src/lib/dag-start-settle.ts: rolled back, session stopped, worktree gone) finishes the attempt.
+    if (!getEventByDedup(db, `${prefix}bind`) && !getEventByDedup(db, `${prefix}settled`)) {
+      throw new MigrationError("migration blocked: unfinished manual start");
     }
   }
 }
@@ -66,26 +76,26 @@ function readRecord(path: string): MigrationRecord | null {
   const value = JSON.parse(readFileSync(path, "utf8")) as MigrationRecord;
   if (value.schemaVersion !== 1 || !["gating", "prepared", "committing", "verified", "active", "revoking", "revoked", "aborted"].includes(value.phase)
     || typeof value.backup !== "string" || !/^[a-f0-9]{64}$/.test(value.selectionDigest)
-    || !Array.isArray(value.featureIds) || !value.featureIds.length || value.featureIds.some((id) => !validId(id))) throw new Error("invalid migration journal");
+    || !Array.isArray(value.featureIds) || !value.featureIds.length || value.featureIds.some((id) => !validId(id))) throw new MigrationError("invalid migration journal");
   if (value.payload) value.payload = parseSharedLedgerImport(value.payload);
-  if (value.phase !== "gating" && value.phase !== "aborted" && !value.payload) throw new Error("missing migration payload");
+  if (value.phase !== "gating" && value.phase !== "aborted" && !value.payload) throw new MigrationError("missing migration payload");
   return value;
 }
 
 /** Durable, local-only preparation. Nothing is uploaded before the operator reviews the returned manifest digest. */
 export async function prepareSharedLedgerImport(db: Database, options: SharedLedgerExportOptions) {
-  if (!validId(options.batchId) || !db.filename || db.filename === ":memory:") throw new Error("persistent batch and ledger required");
+  if (!validId(options.batchId) || !db.filename || db.filename === ":memory:") throw new MigrationError("persistent batch and ledger required");
   const dir = join(options.stateDir, "shared-ledger-migrations"), path = journalPath(options.stateDir, options.batchId);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lock = await acquireLock(join(dir, "migration.lock"));
-  if (!lock) throw new Error("migration lock unavailable");
+  if (!lock) throw new MigrationError("migration lock unavailable");
   try {
     const selectionDigest = createHash("sha256").update(canonicalJson({ ...options, scrub: undefined })).digest("hex");
     let record = readRecord(path);
-    if (record && record.selectionDigest !== selectionDigest) throw new Error("batch selection changed");
-    if (record?.phase === "revoked" || record?.phase === "aborted") throw new Error("batch revoked; choose a new batch");
+    if (record && record.selectionDigest !== selectionDigest) throw new MigrationError("batch selection changed");
+    if (record?.phase === "revoked" || record?.phase === "aborted") throw new MigrationError("batch revoked; choose a new batch");
     if (record && record.phase !== "gating") {
-      for (const id of options.featureIds) if (!readSharedLedgerMode(id, options.stateDir).sharedPlanning) throw new Error("migration gate missing");
+      for (const id of options.featureIds) if (!readSharedLedgerMode(id, options.stateDir).sharedPlanning) throw new MigrationError("migration gate missing");
       return { payload: record.payload!, preview: canonicalJson(record.payload!.manifest), backup: record.backup };
     }
     if (!record) {
@@ -93,13 +103,13 @@ export async function prepareSharedLedgerImport(db: Database, options: SharedLed
       for (const file of readdirSync(dir).filter((name) => name.endsWith(".json"))) {
         const prior = readRecord(join(dir, file));
         if (prior && prior.phase !== "revoked" && prior.phase !== "aborted" && prior.featureIds.some((id) => options.featureIds.includes(id))) {
-          throw new Error("feature already migrating or shared");
+          throw new MigrationError("feature already migrating or shared");
         }
       }
       preflight(db, options);
       for (const id of options.featureIds) {
         const mode = readSharedLedgerMode(id, options.stateDir);
-        if (mode.sharedPlanning || mode.authorityMode !== "source") throw new Error("feature already migrating or shared");
+        if (mode.sharedPlanning || mode.authorityMode !== "source") throw new MigrationError("feature already migrating or shared");
       }
       const backup = vacuumBackup(db, join(dir, `${options.batchId}.backup.sqlite`), "migration backup failed", "migration stopped", false);
       chmodSync(backup, 0o600);
@@ -116,20 +126,20 @@ export async function prepareSharedLedgerImport(db: Database, options: SharedLed
 
 /** A batch that never entered committing has no possible center write; reopen only while holding the migration and ledger writer locks. */
 export async function revokeUncommittedSharedLedgerImport(db: Database, stateDir: string, batchId: string, approvedDigest = "") {
-  if (!validId(batchId)) throw new Error("invalid batch id");
+  if (!validId(batchId)) throw new MigrationError("invalid batch id");
   const dir = join(stateDir, "shared-ledger-migrations"), path = journalPath(stateDir, batchId);
   const lock = await acquireLock(join(dir, "migration.lock"));
-  if (!lock) throw new Error("migration lock unavailable");
+  if (!lock) throw new MigrationError("migration lock unavailable");
   try {
     const record = readRecord(path);
-    if (!record) throw new Error("migration journal missing");
+    if (!record) throw new MigrationError("migration journal missing");
     if (record.phase === "aborted") return { status: "aborted" as const, batchId };
     if (record.phase !== "gating" && record.phase !== "prepared") return null;
-    if (record.phase === "prepared" && record.payload?.manifestDigest !== approvedDigest) throw new Error("reviewed manifest digest required");
+    if (record.phase === "prepared" && record.payload?.manifestDigest !== approvedDigest) throw new MigrationError("reviewed manifest digest required");
     await writeSharedLedgerModes(Object.fromEntries(record.featureIds.map((id) =>
       [id, { authorityMode: "source" as const, sharedPlanning: false }])), stateDir, db.filename, () => {
       for (const id of record.featureIds) if (readSharedLedgerMode(id, stateDir).authorityMode !== "source") {
-        throw new Error("migration authority changed");
+        throw new MigrationError("migration authority changed");
       }
     });
     record.phase = "aborted";
@@ -140,48 +150,48 @@ export async function revokeUncommittedSharedLedgerImport(db: Database, stateDir
 
 function checkReceipt(payload: SharedLedgerImport, receipt: SharedLedgerImportReceipt) {
   if (receipt.status === "unknown" || receipt.batchId !== payload.batchId || receipt.projectId !== payload.manifest.projectId
-    || receipt.receipt.manifestDigest !== payload.manifestDigest || !receipt.verification) throw new Error("migration receipt unconfirmed");
+    || receipt.receipt.manifestDigest !== payload.manifestDigest || !receipt.verification) throw new MigrationError("migration receipt unconfirmed");
   const features = payload.manifest.features;
   const expected = { features: features.length, versions: features.reduce((n, f) => n + f.versions.length, 0),
     bindings: features.reduce((n, f) => n + f.versions.reduce((a, v) => a + v.bindings.length, 0), 0),
     tasks: features.reduce((n, f) => n + f.projection.tasks.length, 0), sourceSeq: payload.manifest.sourceSeq, manifestDigest: payload.manifestDigest };
   if (canonicalJson(expected) !== canonicalJson(receipt.verification) || receipt.serverSeq < receipt.receipt.serverSeq) {
-    throw new Error("migration verification mismatch");
+    throw new MigrationError("migration verification mismatch");
   }
   const expectedMaps = features.flatMap((f) => [`feature:${f.sourceFeatureId}`, ...f.projection.tasks.map((t) => `task:${t.sourceTaskId}`)]).sort();
   const maps = receipt.receipt.mappings;
   if (canonicalJson(expectedMaps) !== canonicalJson(maps.map((m) => `${m.kind}:${m.sourceId}`).sort())
     || maps.some((m) => m.sourceInstanceId !== payload.manifest.sourceInstanceId) || new Set(maps.map((m) => m.id)).size !== maps.length) {
-    throw new Error("migration mapping mismatch");
+    throw new MigrationError("migration mapping mismatch");
   }
 }
 
 /** Explicit phases, never an automatic queue: every recovery first reads the same batch's durable receipt. */
 export async function advanceSharedLedgerImport(db: Database, stateDir: string, batchId: string, client: SharedLedgerClient,
   approvedDigest: string, action: "commit" | "activate" | "revoke") {
-  if (!validId(batchId)) throw new Error("invalid batch id");
+  if (!validId(batchId)) throw new MigrationError("invalid batch id");
   if (action === "revoke") {
     const local = await revokeUncommittedSharedLedgerImport(db, stateDir, batchId, approvedDigest);
     if (local) return local;
   }
   const dir = join(stateDir, "shared-ledger-migrations"), path = journalPath(stateDir, batchId);
   const lock = await acquireLock(join(dir, "migration.lock"));
-  if (!lock) throw new Error("migration lock unavailable");
+  if (!lock) throw new MigrationError("migration lock unavailable");
   try {
     const record = readRecord(path), payload = record?.payload;
-    if (record?.phase === "aborted") throw new Error("migration aborted");
-    if (!record || !payload || payload.manifestDigest !== approvedDigest) throw new Error("reviewed manifest digest required");
+    if (record?.phase === "aborted") throw new MigrationError("migration aborted");
+    if (!record || !payload || payload.manifestDigest !== approvedDigest) throw new MigrationError("reviewed manifest digest required");
     const { bearer: _secret, ...connection } = client.connection;
     const target = canonicalJson(connection);
-    if ((record.target && record.target !== target) || connection.instanceId !== payload.manifest.sourceInstanceId) throw new Error("migration identity changed");
-    if (record.phase === "revoked" && action !== "revoke") throw new Error("migration revoked");
+    if ((record.target && record.target !== target) || connection.instanceId !== payload.manifest.sourceInstanceId) throw new MigrationError("migration identity changed");
+    if (record.phase === "revoked" && action !== "revoke") throw new MigrationError("migration revoked");
     const save = () => writeJsonAtomicSync(path, record, { mode: 0o600, commitIf: lock.held });
     record.target = target; save();
     let receipt = await client.importReceipt(batchId);
     if (record.receipt && record.receipt.status !== "unknown"
-      && (receipt.status === "unknown" || receipt.serverSeq < record.receipt.serverSeq)) throw new Error("center receipt rollback");
+      && (receipt.status === "unknown" || receipt.serverSeq < record.receipt.serverSeq)) throw new MigrationError("center receipt rollback");
     if (receipt.status === "unknown") {
-      if (action !== "commit" || ["active", "verified", "revoking", "revoked"].includes(record.phase)) throw new Error("migration outcome unknown");
+      if (action !== "commit" || ["active", "verified", "revoking", "revoked"].includes(record.phase)) throw new MigrationError("migration outcome unknown");
       checkLocalSnapshot(db, payload, stateDir);
       await client.import({ ...payload, mode: "dry-run" });
       record.phase = "committing"; save();
@@ -189,15 +199,15 @@ export async function advanceSharedLedgerImport(db: Database, stateDir: string, 
       receipt = await client.importReceipt(batchId);
     }
     checkReceipt(payload, receipt);
-    if (receipt.status === "unknown") throw new Error("migration outcome unknown");
+    if (receipt.status === "unknown") throw new MigrationError("migration outcome unknown");
     // Replaying a finished revoke must never reopen a feature now owned by a newer batch.
     if (record.phase === "revoked") {
-      if (receipt.status !== "revoked") throw new Error("center receipt rollback");
+      if (receipt.status !== "revoked") throw new MigrationError("center receipt rollback");
       return receipt;
     }
     record.receipt = receipt; save();
     if (action === "revoke") {
-      if (receipt.status === "active") throw new Error("planning already opened; separate return migration required");
+      if (receipt.status === "active") throw new MigrationError("planning already opened; separate return migration required");
       record.phase = "revoking"; save();
       receipt = await client.controlImport({ mode: "revoke", batchId, manifestDigest: approvedDigest, projectId: payload.manifest.projectId });
       checkReceipt(payload, receipt);
@@ -206,7 +216,7 @@ export async function advanceSharedLedgerImport(db: Database, stateDir: string, 
       record.phase = "revoked"; record.receipt = receipt; save();
       return receipt;
     }
-    if (receipt.status === "revoked") throw new Error("migration revoked");
+    if (receipt.status === "revoked") throw new MigrationError("migration revoked");
     if (action === "activate" && receipt.status !== "active") {
       checkLocalSnapshot(db, payload, stateDir);
       receipt = await client.controlImport({ mode: "activate", batchId, manifestDigest: approvedDigest, projectId: payload.manifest.projectId });
@@ -229,20 +239,24 @@ function checkLocalSnapshot(db: Database, payload: SharedLedgerImport, dir: stri
       const current = getFeature(db, source.sourceFeatureId);
       if (!readSharedLedgerMode(source.sourceFeatureId, dir).sharedPlanning || !current
         || current.rev !== source.rev || current.currentVersion !== source.versions.length || getPendingProposal(db, source.sourceFeatureId)) {
-        throw new Error("planning changed; new preview required");
+        throw new MigrationError("planning changed; new preview required");
       }
     }
   }).deferred();
 }
 
+/** Import is only granted to service enrollments (JN1: `--role service` codes); member codes carry read/plan only. */
+export const resolveImportCredential = (plan: { centerId: string; teamId: string; projectId: string }, dir = STATE_DIR) =>
+  resolveSharedLedgerCredential("owner:self", "service", plan.centerId, plan.teamId, plan.projectId, "import", dir);
+
 async function main() {
   const [command, planPath, approvedDigest] = Bun.argv.slice(2);
   if (!["prepare", "commit", "activate", "revoke"].includes(command ?? "") || !planPath) {
-    throw new Error("Usage: shared-ledger-import.ts prepare|commit|activate|revoke <local-plan.json> [approvedDigest]");
+    throw new MigrationError("Usage: shared-ledger-import.ts prepare|commit|activate|revoke <local-plan.json> [approvedDigest]");
   }
   const plan = JSON.parse(readFileSync(planPath, "utf8")) as Omit<SharedLedgerExportOptions, "stateDir" | "scrub"> & { centerId: string; teamId: string };
   const dbPath = join(STATE_DIR, "ledger.sqlite");
-  if (!existsSync(dbPath)) throw new Error("existing home ledger required");
+  if (!existsSync(dbPath)) throw new MigrationError("existing home ledger required");
   const db = openLedger(dbPath);
   try {
     const scrub = { identity: { username: userInfo().username, hostname: hostname() } };
@@ -255,9 +269,9 @@ async function main() {
         const local = await revokeUncommittedSharedLedgerImport(db, STATE_DIR, plan.batchId, approvedDigest);
         if (local) { console.log(JSON.stringify(local)); return; }
       }
-      const credential = resolveSharedLedgerCredential("owner:self", "person", plan.centerId, plan.teamId, plan.projectId, "import");
+      const credential = resolveImportCredential(plan);
       const key = instanceKeySync();
-      if (!credential || !key) throw new Error("local import credential unavailable");
+      if (!credential || !key) throw new MigrationError("local import credential unavailable");
       const receipt = await advanceSharedLedgerImport(db, STATE_DIR, plan.batchId, new SharedLedgerClient(credential, key, { scrub }),
         approvedDigest ?? "", command as "commit" | "activate" | "revoke");
       console.log(JSON.stringify(receipt));
@@ -265,6 +279,6 @@ async function main() {
   } finally { closeLedger(dbPath); }
 }
 if (import.meta.main) await main().catch((error) => {
-  console.error(error instanceof SharedLedgerScrubError ? error.message : "Migration stopped; retain local gate and inspect the local journal before recovery.");
+  console.error(migrationErrorText(error));
   process.exitCode = 1;
 });
