@@ -3,16 +3,21 @@
  * cap is 0 (not busy: configured 0) it can never be placed. The planner says so with a fixed wait reason instead of queueing
  * silently; the tick then writes one alarm event per card + reason and opens one PM ask (a: grant 1 slot for this card, the
  * default, only after PM confirms; b: another local reviewer family, with a reason and owner approval; c: back to the author).
- * A cap above 0 that is merely busy keeps the old queueing. tests/scheduler-sec-review.test.ts.
+ * A cap above 0 that is merely busy keeps the old queueing. The family is the current head's (remoteHeadFamily, as autoSnapshot
+ * plans with), so the alarm, ask and dedup reason name the family the planner actually waits for. The ask is the scheduler's own
+ * (bridge never forwards its answer), so the tick reads it back: once answered or closed, the choice is recorded and handed to the
+ * card's PM to carry out (a still needs PM's confirmation, b still needs owner approval); the scheduler never widens a cap itself.
+ * tests/scheduler-sec-review.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
-import { openAskFull } from "./ledger-asks.js";
+import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 
@@ -56,22 +61,47 @@ function askBody(task: LedgerTask, family: AuthorFamily): string {
     "c. 退回作者重写"].join("\n");
 }
 
-/** Structural CLI port (same shape as scheduler-family-pick-notice.ts) keeps lib independent of manager. */
-interface AlarmCommand {
-  db: Database; p: { pos: string[] }; ctx(): WriteCtx; need(flag: string): string; task(id: string | undefined): LedgerTask;
+
+const CHOICES = [
+  ["sec_review_grant", (f: AuthorFamily) => `a（临时开名额）：请 PM 确认后执行——本机临时给这张卡开 1 个 ${f} 审查名额（或起本机 ${f} 审查员），调度器不会自己放宽上限`],
+  ["sec_review_other", (f: AuthorFamily) => `b（改派）：改派本机非 ${f} 的审查员，PM 写明理由，仍要 owner 批准后才执行`],
+  ["sec_review_rewrite", () => "c（退回）：请 PM 把卡退回作者重写"],
+] as const;
+
+/** What PM is told once the ask closed: the picked option (with its confirm / owner-approval condition), or that none was picked. */
+function handoffText(task: LedgerTask, family: AuthorFamily, ask: Ask): { text: string; choice: string | null } {
+  const picked = CHOICES.find(([id]) => ask.answer?.choices.some((w) => w.includes(`:${id}]`)));
+  const who = ask.answer ? (ownerAnswered(ask.answer) ? "owner" : ask.answer.principal) : "";
+  const note = ask.answer?.text && ask.answer.external !== true ? `；附言：${ask.answer.text.slice(0, 300)}` : "";
+  const text = picked
+    ? `[调度引擎] ${task.id} 安全卡审查放不下，提问卡 ${ask.id} 由 ${who} 选了 ${picked[1](family)}${note}。PM 执行前卡照旧等待`
+    : `[调度引擎] ${task.id} 安全卡审查放不下，提问卡 ${ask.id} 已结案（${ask.state}）但没选 a/b/c${note}：卡仍在等本机 ${family} 名额，请 PM 决定`;
+  return { text, choice: picked?.[0] ?? null };
 }
 
-/** `ledger scheduler-sec-review-alarm`: one alarm event + one PM ask per card and reason, in one transaction; a repeat writes nothing. */
+/** Structural CLI port (same shape as scheduler-family-pick-notice.ts) keeps lib independent of manager. */
+interface AlarmCommand {
+  db: Database; p: { pos: string[]; flags: Record<string, string | undefined> }; ctx(): WriteCtx; need(flag: string): string;
+  task(id: string | undefined): LedgerTask;
+}
+
+/**
+ * `ledger scheduler-sec-review-alarm`: phase alarm (default) = one alarm event + one PM ask per card and reason, in one transaction;
+ * phase handoff = the closed ask's choice recorded once for PM; handoff-sent = that hand-off reached PM. A repeat writes nothing.
+ * The review family comes from the current head's author (remoteHeadFamily ?? workflow), the same one autoSnapshot plans with.
+ */
 export const secReviewAlarmCommand = {
-  valued: ["rev"], bools: [], usage: "scheduler-sec-review-alarm <task> --rev N",
+  valued: ["rev", "phase", "ask"], bools: [], usage: "scheduler-sec-review-alarm <task> --rev N [--phase alarm|handoff|handoff-sent --ask <id>]",
   run(c: AlarmCommand): Record<string, unknown> {
     return c.db.transaction(() => {
-      const ctx = c.ctx(), task = c.task(c.p.pos[1]), wf = getWorkflow(c.db, task.id);
+      const ctx = c.ctx(), task = c.task(c.p.pos[1]), wf = getWorkflow(c.db, task.id), phase = c.p.flags.phase ?? "alarm";
       if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "安全卡审查放不下的报警只由调度服务记账");
       if (task.stage !== "review" || task.rev !== Number(c.need("rev")) || wf?.mode !== "auto" || wf.template !== "security") {
         throw new LedgerError("conflict", "卡已不在安全卡自动审查等待状态");
       }
-      const family = reviewFamily(wf.authorFamily), reason = reasonFor(family), key = alarmKey(task.id, reason);
+      const family = reviewFamily(remoteHeadFamily(c.db, task) ?? wf.authorFamily), reason = reasonFor(family), key = alarmKey(task.id, reason);
+      if (phase === "handoff" || phase === "handoff-sent") return handoff(c, ctx, task, family, key, phase);
+      if (phase !== "alarm") throw new LedgerError("invalid", "phase must be alarm|handoff|handoff-sent");
       const prior = getEventByDedup(c.db, key);
       if (prior) return { ok: true, duplicate: true, event: prior };
       const { event } = appendEvent(c.db, { ...ctx, dedupKey: key }, {
@@ -91,18 +121,52 @@ export const secReviewAlarmCommand = {
   },
 };
 
-interface NoticeDeps { notifyPm(task: LedgerTask, text: string): Promise<void>; manager(...args: string[]): Promise<Record<string, unknown>> }
+function handoff(c: AlarmCommand, ctx: WriteCtx, task: LedgerTask, family: AuthorFamily, key: string, phase: string): Record<string, unknown> {
+  const ask = getAsk(c.db, c.need("ask"));
+  if (!ask || ask.taskId !== task.id || ask.dedupKey !== `${key}:ask`) throw new LedgerError("conflict", "不是这张卡当前原因的安全卡审查提问卡");
+  if (ask.state === "open") throw new LedgerError("conflict", "提问卡还没答");
+  const hk = `${key}:handoff:${ask.id}`, pending = getEventByDedup(c.db, hk);
+  if (phase === "handoff-sent") {
+    if (!pending) throw new LedgerError("conflict", "交接尚未记账");
+    return { ok: true, ...appendEvent(c.db, { ...ctx, dedupKey: `${hk}:sent` }, {
+      project: task.project, target: task.id, kind: "note", text: pending.text, data: { op: `${CODE}_handoff_sent`, askId: ask.id } }) };
+  }
+  if (pending) return { ok: true, duplicate: true, event: pending, text: pending.text };
+  const { text, choice } = handoffText(task, family, ask);
+  const { event } = appendEvent(c.db, { ...ctx, dedupKey: hk }, { project: task.project, target: task.id, kind: "note", text,
+    data: { op: `${CODE}_handoff`, kind: "handoff", askId: ask.id, askState: ask.state, choice, family, owner: ownerAnswered(ask.answer) } });
+  return { ok: true, duplicate: false, event, text };
+}
 
-/** Tick hook (watch): on the planner's fixed reason, record the alarm + ask once and tell PM; an already recorded alarm is a no-op. */
+interface NoticeDeps { notifyPm(task: LedgerTask, text: string): Promise<void>; manager(...args: string[]): Promise<Record<string, unknown>> }
+const lost = (what: string) => (e: unknown): void => {
+  if (e instanceof SchedulerStopped) throw e;
+  console.error(`⚠️ [scheduler] ${what}：${(e as Error).message}`);
+};
+
+/**
+ * Tick hook (watch): on the planner's fixed reason, record the alarm + ask once and tell PM; once that ask is answered or closed,
+ * record the choice and hand it to PM (retried each tick until delivered, then never again).
+ */
 export async function raiseSecReviewNoRoom(db: Database, task: LedgerTask, wait: Extract<PlannerDecision, { kind: "wait" }>, deps: NoticeDeps): Promise<void> {
-  if (task.stage !== "review" || !wait.reason.startsWith(SEC_REVIEW_NO_ROOM) || getEventByDedup(db, alarmKey(task.id, wait.reason))) return;
+  if (task.stage !== "review" || !wait.reason.startsWith(SEC_REVIEW_NO_ROOM)) return;
+  const key = alarmKey(task.id, wait.reason);
+  if (getEventByDedup(db, key)) return handOffAnswer(db, task, key, deps);
   const r = await deps.manager("ledger", "scheduler-sec-review-alarm", task.id, "--rev", String(task.rev));
   if (r.ok !== true) { console.error(`⚠️ [scheduler] 安全卡审查报警未记账，下轮重试：${String(r.error)}`); return; }
   if (r.duplicate === true) return;
-  try {
-    await deps.notifyPm(task, `[调度引擎] ${task.id} ${wait.reason}。提问卡 ${String(r.askId)} 已开，default a 要 PM 确认才执行`);
-  } catch (e) {
-    if (e instanceof SchedulerStopped) throw e;
-    console.error(`⚠️ [scheduler] 安全卡审查报警通知失败（台账已记、提问卡已开）：${(e as Error).message}`);
-  }
+  await deps.notifyPm(task, `[调度引擎] ${task.id} ${wait.reason}。提问卡 ${String(r.askId)} 已开，default a 要 PM 确认才执行`)
+    .catch(lost("安全卡审查报警通知失败（台账已记、提问卡已开）"));
+}
+
+async function handOffAnswer(db: Database, task: LedgerTask, key: string, deps: NoticeDeps): Promise<void> {
+  const row = db.query("SELECT id FROM asks WHERE taskId = ? AND dedupKey = ?").get(task.id, `${key}:ask`) as { id: string } | null;
+  const ask = row && getAsk(db, row.id);
+  if (!ask || ask.state === "open" || getEventByDedup(db, `${key}:handoff:${ask.id}:sent`)) return;
+  const step = (phase: string) => deps.manager("ledger", "scheduler-sec-review-alarm", task.id, "--rev", String(task.rev), "--phase", phase, "--ask", ask.id);
+  const r = await step("handoff");
+  if (r.ok !== true) { console.error(`⚠️ [scheduler] 安全卡审查提问卡答复未记账，下轮重试：${String(r.error)}`); return; }
+  try { await deps.notifyPm(task, String(r.text)); } catch (e) { lost("安全卡审查答复交给 PM 失败（台账已记，下轮重发）")(e); return; }
+  const sent = await step("handoff-sent");
+  if (sent.ok !== true) console.error(`⚠️ [scheduler] 安全卡审查答复已交 PM 但标记未记账，下轮可能重发：${String(sent.error)}`);
 }
