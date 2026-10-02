@@ -7,7 +7,7 @@ import type { SchedulerIntent, AuthorFamily } from "./ledger-scheduler.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { getLendOrder, type LendOrder } from "./ledger-lend.js";
-import { heldLease, holdWriteLease } from "./ledger-lend-lease.js";
+import { forPeer, heldLease, holdWriteLease } from "./ledger-lend-lease.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
 import { LEASE_MS_DEFAULT } from "./lend-wire.js";
 import { parseOrderWire, type OrderWire } from "./order-wire.js";
@@ -39,7 +39,7 @@ export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerI
       throw new LedgerError("conflict", "card already has a live lend order");
     }
     const orderId = `lend:${task.id}:cv:${intent.eventSeq}`;
-    const raw = build(task, orderId), lease = heldLease(db, task), holder = getLendPeer(db, peer);
+    const raw = forPeer(db, ctx, task, { wire: build(task, orderId) }).wire, lease = heldLease(db, task), holder = getLendPeer(db, peer);
     if (raw.step === "fix") {
       if (!task.branch || (holder?.proto ?? 1) < 3 || !holder?.fp || (lease && lease.peer !== peer)) {
         throw new LedgerError("conflict", "fix requires card branch and proto-3 pinned holder");
