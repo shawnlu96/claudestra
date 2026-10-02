@@ -21,6 +21,7 @@ import { isWriteStep, lendBranch, roleOfStep } from "./lend-git.js";
 import type { PrInput, PrResult, PushResult, PushTarget } from "./lend-push.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
+import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
@@ -106,7 +107,7 @@ export function detailOf(s: string | null): string | null {
 const leaseFields = (l: Lease, now: number) => ({ leaseGen: l.gen, leaseUntil: now + l.ms, lastBeatAt: now });
 
 /** A 回这几个码 = 这张单在 A 那边已经不归我们了：停 worker，按码记终态 */
-const GONE: Record<string, "cancelled" | "stopped"> = { cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled",
+const GONE: Record<string, "cancelled" | "stopped"> = { ...CONVERGENCE_GONE, cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled",
   done: "stopped" };
 
 /** 这张还没 claim 的单现在还能不能领：声明仍在、仓库仍在白名单、今日额度与在跑位都还有 */
@@ -136,7 +137,8 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const p = row.preview;
   const w = r.value.write;
   const mismatch = o.orderId !== row.orderId ? "orderId" : (o.head ?? "").toLowerCase() !== str(p.head) ? "head" : o.repo !== p.repo ? "repo"
-    : o.pr !== (p.pr ?? null) ? "pr" : o.step !== p.step ? "step" : o.taskId !== p.taskId ? "taskId" : writeMismatch(o.step, o.taskId, w, d);
+    : o.pr !== (p.pr ?? null) ? "pr" : o.step !== p.step ? "step" : o.taskId !== p.taskId ? "taskId"
+    : convergenceWriteMismatch(o, w?.branch, () => writeMismatch(o.step, o.taskId, w, d));
   const claimed = advance(d.db, row.orderId, "asked", "claimed",
     { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}) }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
   if (mismatch) await release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
@@ -193,6 +195,7 @@ async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: 
   extra: Partial<Pick<LendRow, "receipt">> = {}): Promise<void> {
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
+  if (!(await acknowledgeConvergenceCancel(row, why, d))) return;
   const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled" };
   await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle, ...endNotice(row, to, why) }, d.now()), d);
 }

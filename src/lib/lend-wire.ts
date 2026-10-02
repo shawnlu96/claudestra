@@ -8,6 +8,8 @@ import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
 import { LEND_BRANCH_RE, type LendStep } from "./lend-git.js";
 import { parseDeliverWire, parseVerdictWire, type DeliverWire, type VerdictWire } from "./order-wire.js";
 import { sanitizeForeign } from "./order-wire-render.js";
+import { parseConvergenceResult, type ArbiterVerdictWire } from "./lend-arbiter-wire.js";
+import { deliverBranch } from "./lend-arbiter-wire.js";
 
 const LEND_WIRE_VERSION = 1;
 /** Report body bytes; the whole request (verdict + report) must also fit LEND_BODY_MAX, well inside the E2E body cap. */
@@ -32,6 +34,7 @@ export interface LeaseRequest {
 type LendRoleWire = "review" | "write";
 type Session = { id: string; family: LendFamily };
 export interface ResultRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; verdict: VerdictWire; report: string; session: Session }
+export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: { clean: boolean } }
 /** 开工 / 修复单的交付（i28-R6）：B 已把 head 推到订单分支（并开 / 更新了 PR），A 核对远端 head 后记 deliver */
 export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session }
 
@@ -138,12 +141,13 @@ function parseDeliverResult(raw: unknown): DeliverRequest {
   const orderId = matching(r.orderId, "orderId", ORDER_ID);
   if (d.value.orderId !== orderId) fail("deliver.orderId", "与请求的 orderId 不一致");
   if (!/^[0-9a-f]{40}$/.test(d.value.head)) fail("deliver.head", "要是小写的完整 40 位 SHA");
-  return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), deliver: d.value, branch: matching(r.branch, "branch", LEND_BRANCH_RE),
+  return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), deliver: d.value, branch: deliverBranch(r, (v) => matching(v, "branch", LEND_BRANCH_RE)),
     pr: r.pr === null ? null : int(r.pr, "pr", 1, 1e9), session: session(r.session) };
 }
 
 /** 一个接口两种正文：带 deliver 的是开工 / 修复单的交付，否则是审查结论；两种都严格按各自的字段表收 */
 function parseResult(raw: unknown): ResultRequest | DeliverRequest {
+  const convergence = parseConvergenceResult(raw, parseVerdictResult, fail); if (convergence) return convergence;
   return raw && typeof raw === "object" && !Array.isArray(raw) && "deliver" in raw ? parseDeliverResult(raw) : parseVerdictResult(raw);
 }
 

@@ -38,7 +38,7 @@ describe("正文", () => {
     setMeta(h.db, TICK_KEY, String(h.d.now()));
     await admitOrders(h.d, { peer: "team-a", fp: FP }, [polled("o1")], "push");
     const b = helloBody(h.db, h.lend.lend[0], h.d.now());
-    expect(b).toEqual({ proto: 2, paused: null, slots: { codex: { total: 2, busy: 1 }, claude: { total: 0, busy: 0 } },
+    expect(b).toEqual({ proto: 3, paused: null, slots: { codex: { total: 2, busy: 1 }, claude: { total: 0, busy: 0 } },
       grant: { until: Date.parse(h.lend.lend[0].until!), roles: ["review"], repos: ["shawnlu96/claudestra"], ordersPerDay: 5, ordersLeftToday: 4 } });
     expect(parseV2Request("hello", { v: 1, ...b, boot: "boot-aaaa-0001", seq: 1 }).ok).toBe(true);
   });

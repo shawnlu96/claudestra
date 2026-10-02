@@ -14,6 +14,7 @@ import { readRegistryAgentsSync } from "../lib/registry.js";
 import { tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { output } from "./core.js";
 import { parseLedgerArgs } from "./ledger-identity.js";
+import { arbitrateFlags } from "../lib/lend-arbiter-submit.js";
 
 const USAGE = "usage: lend submit <orderId> --verdict pass|changes|block (--findings '<json 数组>' | --findings-file <文件>) --report <报告文件>" +
   " | lend submit <orderId> --summary-file <一行摘要> --self-check-file <自查>（开工 / 修复单）";
@@ -64,7 +65,7 @@ export async function cmdLendSubmit(args: string[]): Promise<void> {
   const p = parseLedgerArgs(args, ["verdict", "findings", "findings-file", "report", "summary-file", "self-check-file"]);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${USAGE}` });
   const [orderId] = p.pos;
-  const f = p.flags;
+  const f = p.flags; arbitrateFlags(f);
   if (f["summary-file"] !== undefined || f["self-check-file"] !== undefined) {
     if (!orderId || p.pos.length !== 1 || !f["summary-file"] || !f["self-check-file"] || f.verdict || f.report || f.findings || f["findings-file"]) return output({ ok: false, error: USAGE });
     if (!existsSync(LEND_JOURNAL_PATH)) return output({ ok: false, error: "本机没有出借 journal：这台机器没在出借" });
