@@ -3,6 +3,7 @@
  * ⚠ --purpose 必须第一个抽：它的值是自由文本（web 经 POST /api/v1/agents 传进来），排在别的 flag 提取后面时，
  * `{"purpose":"--parent=master"}` / `--external` / `--model=x` 会先被当成 flag 吃掉（core.ts extractPurposeFlag 注释）。
  */
+import { validateDisallowedRules } from "../lib/disallowed-rules.js";
 import {
   extractBoolFlag, extractEffortFlag, extractModeFlag, extractModelFlag, extractPermFlags, extractPurposeFlag, extractStringFlag, rejectFlagLikePositional,
 } from "./core.js";
@@ -54,6 +55,9 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
   const { rest: afterMode, mode } = extractModeFlag(afterModel);
   const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
   const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterEffort);
+  const hasRaw = afterEffort.some(arg => arg === "--disallowed" || arg.startsWith("--disallowed="));
+  const validationError = hasRaw ? validateDisallowedRules(disallowedRaw ?? "") : undefined;
+  if (validationError) return { error: validationError };
   const [name, dir, ...purposeParts] = posArgs;
   const flagLike = rejectFlagLikePositional(name, dir);
   if (flagLike) return { error: flagLike };
