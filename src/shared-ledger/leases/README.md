@@ -11,7 +11,7 @@ not open a database, run a timer, commit a transaction, or enable execution.
 
 - Register `leaseSchema` and `leaseStatements` with `createTransactionOwner`.
   Ordinary command contexts need lease statements and generation **read** only.
-  Grant `leases.generation.put`, `leases.revokeAll` and `leases.boots.clear` only
+  Grant `leases.generation.put`, `leases.revokeAll` and `leases.boots.retireAll` only
   to recovery contexts.
 - Build `LeaseDependencies` from X1/X2/X5/X6 adapters, reading current scoped
   task/feature/workflow, owner approval and worker/lend/unknown rows in the same
@@ -42,12 +42,27 @@ cannot renew, write, release or acquire another task, even with a current epoch.
 Tasks on the same current boot keep independent fences for parallel work.
 
 Boot records are deduplicated per instance/boot, not repeated per task. Retirement
-history is retained for the current service generation: opaque boot IDs cannot
-safely be forgotten on a timer or home change, because a delayed old process
-could then reacquire. Restore clears all boot history in the same transaction as
-the generation change and lease revocation; old-generation requests are rejected
-before boot admission. Storage grows with distinct restarts within a generation,
-not with restarts times tasks, and does not accumulate across restores.
+history survives generation changes: opaque boot IDs cannot safely be forgotten
+on a timer, home change or restore, because a delayed old process could then
+reacquire using the current generation and epoch. Restore retires every known
+boot across all projects in the same transaction as generation change and lease
+revocation. After activation each home must start with a new boot ID. Storage
+grows with distinct boots per scoped instance, including across restores; there
+is no safe pruning rule in the frozen contract.
+
+Two integration limits remain for X8/X12:
+
+- `unseen-old-boot`: an opaque boot ID absent from the registry has no provable
+  startup order. This includes boots lost by rollback to an older backup. A
+  never-seen old process can still be admitted with current fences. X8/X12 must
+  stop old processes before resuming; stronger rejection needs an authoritative
+  startup registration/order protocol agreed through the contract owner.
+- `boot-scope-per-project`: ordinary boot retirement is scoped to team/project/
+  home instance by the transaction contract. A restart does not fence leases in
+  other projects until the new boot acquires there. X8 must acquire in each
+  served project before resuming its work there; strict simultaneous fencing
+  needs a separately authorized cross-project retirement path in X12. This
+  module does not grant ordinary project commands service-wide writes.
 
 Expiry rejects renewals and writes, but preserves home and the epoch tombstone.
 Reacquisition needs the current tombstone epoch and consumes a newer epoch.
@@ -66,12 +81,12 @@ durable compare-and-set against that mark before returning. Reservations survive
 database rollback; skipped generation numbers are intentional.
 
 `restore` validates the backup generation/sequence, reserves a strictly newer
-generation, revokes leases across **all** projects and writes the frozen service
+generation, revokes leases and retires known boots across **all** projects, and writes the frozen service
 generation in the caller's transaction. The composition root supplies the current
 service sequence in the persisted generation record when recording events and
 snapshots. Every lease command and `assertWritable` rejects old generations and
 frozen services. `activate` requires service-wide confirmed-receipt reconciliation;
-it never revives old leases. A new lease must be acquired after activation.
+it never revives old leases or boots. A new boot must acquire a lease after activation.
 
 Epochs are monotonic only within a feature and service generation. Restoring an
 older backup can repeat a numeric epoch in a newer generation; incrementing the

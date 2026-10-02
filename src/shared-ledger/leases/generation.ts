@@ -48,7 +48,7 @@ export function createGenerationDomain(deps: GenerationDependencies) {
         || next.restoredFrom.serverSeq !== current.serverSeq || next.serverSeq !== current.serverSeq) fail("invalid_field");
       deps.reserveGeneration(context, highWater, next.serviceGeneration);
       context.run("leases.revokeAll");
-      context.run("leases.boots.clear");
+      context.run("leases.boots.retireAll");
       return putGeneration(context, next);
     },
     activate(context: V2TransactionContext): V2Generation {

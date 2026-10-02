@@ -38,7 +38,7 @@ export const leaseStatements: Readonly<Record<string, V2Statement>> = {
   "leases.boot.revoke": { mode: "write", sql: `UPDATE v2_scheduler_leases SET active = 0, epoch = $nextEpoch
     WHERE ${scope} AND featureId = $featureId AND active = 1 AND json_extract(lease, '$.holderInstanceId') = $instanceId
     AND json_extract(lease, '$.bootId') != $bootId` },
-  "leases.boots.clear": { mode: "write", sql: `DELETE FROM v2_scheduler_boots WHERE ${serviceScope}` },
+  "leases.boots.retireAll": { mode: "write", sql: `UPDATE v2_scheduler_boots SET active = 0 WHERE ${serviceScope}` },
   "leases.generation.get": { mode: "read", sql: `SELECT generation FROM v2_service_generation WHERE ${serviceScope}` },
   "leases.generation.put": { mode: "write", sql: `INSERT INTO v2_service_generation (singleton, generation)
     SELECT 1, $generation WHERE ${serviceScope}
