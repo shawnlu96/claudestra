@@ -348,6 +348,14 @@ C6 本轮按批准的替代方案核验 1–5：同一测试进程内起回环�
 在本机创建仅本机可读的 `local-plan.json`，填入已批准的标识；不放 bearer、私钥、真实地址或规格全文。
 `summaries` 可填经预览的卡摘要与摘要 digest；留空时不上传规格正文。导入凭据先登记在本机 0600 的凭据文件中，
 绑定 `owner:self`、本人实例和准确的 team/project/import 权限；客户端不接受从计划文件传入身份或角色。
+导入凭据必须是 kind=service：用 admin `invite --role service` 发的码经 `manager shared-ledger-join` 入组
+（member 码只带 read/plan，导入脚本只按 service 解析 import 凭据，找不到时报 `local import credential unavailable`）。
+
+prepare 的预检对没有 `dag-start:<卡>:<attempt>:bind` 的开卡一律拒绝（`migration blocked: unfinished manual start`）。
+start_node 中途失败并已回滚的开卡，用 `manager ledger start-settle <卡号> --attempt <attemptId> --reason "<原因>"` 结清：
+命令先核实卡是 cancelled 或该 attempt 有 `undo-task`、本机执行者会话不存在或已 stopped、worktree 目录不在且
+`git worktree list` 里没有它，三项都过才写 `dag-start:<卡>:<attempt>:settled`（带核实结果与操作者，重跑不重复写）；
+预检认 bind 或 settled 放行。脚本自己的固定文本错误原样打到 stderr，来自中心或其他来源的错误只打通用句。
 
 ```json
 {
