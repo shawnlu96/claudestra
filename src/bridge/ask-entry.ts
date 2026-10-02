@@ -18,6 +18,7 @@ import { noticeExpired, sweepExpired } from "./ask-expire.js";
 import { initAskPin } from "./ask-pin.js";
 import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 import { initHumanNode } from "./human-node.js";
+import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
 export function picksFor(a: Ask, wires: string[]): WireMatch[] | null {
@@ -65,7 +66,9 @@ const closedBody = (a: Pick<Ask, "id" | "state" | "answer">) => ({ ok: false, co
 /** 作答；作答时才发现到点的（current.expiredNow：这一笔已记成 expired），先补发过期通知再照抛 */
 async function commitNoticing(i: AnswerInput): Promise<Ask> {
   try {
-    return await commitAnswer(i);
+    const a = await commitAnswer(i);
+    void onJoinOfferAnswered(a).catch((e: Error) => console.error(`⚠️ [join-offer] 处理作答失败: ${e.name}`)); // 共享台账入组卡（不是这类卡立即返回）
+    return a;
   } catch (e) {
     const expired = e instanceof LedgerError && e.current?.expiredNow ? getAsk(askDb(), i.ask.id) : null;
     if (expired) await noticeExpired(expired);
@@ -256,6 +259,7 @@ export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: Disc
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
+  initJoinOffers(); // 共享台账入组邀请：过期清理 + 补处理漏掉的作答（bridge/shared-ledger-join-offer.ts）
   initHumanNode(); // 指给人的任务：进 build / fix 开指派 ask，作答写台账、通知 PM（bridge/human-node.ts）
   if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);
   const sweep = () => void sweepExpired().catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));

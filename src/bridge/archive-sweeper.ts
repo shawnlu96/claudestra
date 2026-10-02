@@ -23,6 +23,7 @@ import { DEFAULT_ARCHIVE_RETENTION_DAYS, readConfigSync } from "../lib/config-st
 import { readRegistryAgents } from "../lib/registry.js";
 import { archiveSession } from "../lib/session-archive.js";
 import { CODEX_SUB_IDLE_DAYS, sweepIdleCodexSubSessions } from "../lib/unmanaged-archive.js";
+import { sweepEndedLendThreads } from "../lib/lend-session-archive.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { tmuxRaw, MASTER_SESSION } from "../lib/tmux-helper.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
@@ -117,6 +118,7 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
 
   const agents = await readRegistryAgents();
 
+  await sweepEndedLendThreads(agents); // 先于 7 天规则：停掉的出借 worker 留在 registry，在那条规则里永远算「挂着」
   await sweepCodexSubsIfEnabled(agents);
 
   // tmux 实际存在的 agent 窗口（P2：registry 标 stopped 但窗口还活着的也要归档）

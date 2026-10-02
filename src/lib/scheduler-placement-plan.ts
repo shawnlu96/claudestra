@@ -1,6 +1,7 @@
 import { peerFacts } from "./scheduler-agent-pool-peer.js";
 import { agentPoolReview, agentPoolWork } from "./scheduler-agent-pool-plan.js";
 import { localReviewFallback } from "./scheduler-local-families-placement.js";
+import { secReviewNoRoom } from "./scheduler-sec-review.js";
 /**
  * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
  * card pinned to a peer never starts writing anywhere else. Snapshot facts pass through placeWithRetries for temporary
@@ -72,7 +73,8 @@ const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审�
  * reviewer's re-review, a security card, no review role lent) waits instead; remote.mode off still means local only.
  */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
-  const p = s.pool;
+  const p = s.pool, sec = secReviewNoRoom(s);
+  if (sec) return sec; // i28-SR1: security review with local cap 0 → alarm + PM ask, not a silent wait
   if (p?.remote.agents) return agentPoolReview(s, since);
   if (!p || p.remote.mode === "off") return localReviewFallback(s);
   return poolReview(s, p, since) ?? (p.remote.localPriority === "off" && s.workflow ? { wait: LOCAL_OFF } : null);
