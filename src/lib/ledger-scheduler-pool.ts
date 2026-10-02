@@ -28,6 +28,7 @@ import { orderFamily } from "./scheduler-placement-plan.js";
 import { planScheduler } from "./scheduler-plan.js";
 import { poolLinkKey, poolOrderId, POOL_TIMEOUT_REASON, prCoordinates, strayPoolOrders } from "./scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
+import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
 
 export interface PoolStepInput {
   intentId: string;
@@ -81,6 +82,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
     order = offerLendCore(db, ctx, { taskId: task.id, peer, family, repo, pr: role === "write" ? null : coords?.pr ?? null, spec: input.spec,
       borrow: poolBorrow(input.borrow.find((b) => b.peer === peer) ?? null, !!input.remote.agents), ...(role !== "review" && write ? { write } : {}) });
   } catch (e) {
+    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message); // once per card + reason (i28-GATE2)
     if (e instanceof LedgerError) return refuse(`出单被拒：${e.message}`);
     throw e;
   }
