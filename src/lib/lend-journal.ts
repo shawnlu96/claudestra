@@ -9,6 +9,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
+import { guardDefaultLendJournal } from "./test-guard.js";
 
 export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
 
@@ -109,6 +110,7 @@ export const guardJournalWrites = (db: Database, check: () => void): void => voi
 const checkWrite = (db: Database): void => writeGuards.get(db)?.();
 
 export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
+  guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path);
   db.exec("PRAGMA busy_timeout = 10000");

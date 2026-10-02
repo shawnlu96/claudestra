@@ -15,6 +15,7 @@ import { remoteCaller } from "../../lib/ledger-lend-peers.js";
 import { getTask } from "../../lib/ledger-store.js";
 import { LEND_BODY_MAX, LEND_STATUS, type LendEndpoint } from "../../lib/lend-wire.js";
 import { LEND_V2_STATUS, parseV2Request, V2_BODY_VERSION } from "../../lib/lend-wire-v2.js";
+import { DELIVERY_NOTE_STATUS } from "../../lib/lend-delivery-amend-code.js";
 import { openOrderAsk } from "../../lib/order-ask.js";
 import { notePeerQuota, type QuotaReport } from "../../lib/quota-week.js";
 import type { Principal } from "../../lib/principals.js";
@@ -33,7 +34,7 @@ const CLI: Record<Exclude<Endpoint, "ask">, string> = {
   poll: "lend-poll", claim: "lend-claim", lease: "lend-lease", result: "lend-write", hello: "lend-hello", beat: "lend-beat",
 };
 /** v1 与 v2 的拒绝码合在一起映射；v2 的码没有 404（404 = 对方版本太旧，见 lend-wire-v2.ts） */
-const STATUS: Record<string, number> = { ...LEND_STATUS, ...LEND_V2_STATUS };
+const STATUS: Record<string, number> = { ...LEND_STATUS, ...LEND_V2_STATUS, ...DELIVERY_NOTE_STATUS };
 /** 频道号置空 = 以 owner 身份跑（CLI 只认 owner 调这几条）；「--」之后全当位置参数 */
 const ENV = { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: "" };
 

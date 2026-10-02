@@ -154,7 +154,9 @@ describe("T68 durable merge queue", () => {
         expect(await schedulerMergeTick(f.db, config, manager, () => external)).toBe(1);
       }
       expect(getMergeRun(f.db, "merge-one")).toMatchObject({ phase: "merged", mergeSha: M, requiredChecks: names.join(",") });
-      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "submitted" });
+      // i28-MT1f2: settled in the pass that merged it (no deploy configured), so the slot is free for the next card's plan
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "done" });
+      expect(f.db.query("SELECT count(*) AS n FROM scheduler_resources WHERE intentId='merge-one'").get()).toEqual({ n: 0 });
     } finally { f.close(); }
   });
   test("preflight rejection records unknown intent instead of retrying it each poll", async () => {
