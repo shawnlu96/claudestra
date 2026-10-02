@@ -72,6 +72,73 @@ async function noOverflow(page: Page) {
   expect(await page.evaluate<boolean>('document.documentElement.scrollWidth <= innerWidth')).toBe(true);
 }
 
+async function visiblePhoneTitles(page: Page, expected: string[]) {
+  const titles = page.locator('button strong');
+  expect((await titles.allTextContents()).sort()).toEqual([...expected].sort());
+  for (const [index, title] of (await titles.all()).entries()) {
+    await title.scrollIntoViewIfNeeded();
+    expect(await title.isVisible()).toBe(true);
+    const metrics = await page.evaluate<{ height: number; width: number; bottom: number; numberTop: number;
+      top: number; listTop: number; listBottom: number; ellipsis: string; wrap: string; cardWidth: number; cardClient: number }>(`(() => {
+      const e = document.querySelectorAll('button strong')[${index}];
+      const rect = e.getBoundingClientRect(), card = e.parentElement;
+      const style = getComputedStyle(e), list = card.parentElement;
+      const number = e.nextElementSibling.getBoundingClientRect();
+      return { height: rect.height, width: rect.width, bottom: rect.bottom, numberTop: number.top,
+        top: rect.top, listTop: list.getBoundingClientRect().top, listBottom: list.getBoundingClientRect().bottom,
+        ellipsis: style.textOverflow, wrap: style.whiteSpace, cardWidth: card.scrollWidth, cardClient: card.clientWidth };
+    })()`);
+    expect(metrics.height).toBeGreaterThan(0);
+    expect(metrics.width).toBeGreaterThan(0);
+    expect(metrics.bottom).toBeLessThanOrEqual(metrics.numberTop);
+    expect(metrics.top).toBeGreaterThanOrEqual(metrics.listTop);
+    expect(metrics.bottom).toBeLessThanOrEqual(metrics.listBottom);
+    expect(metrics.ellipsis).toBe('ellipsis');
+    expect(metrics.wrap).toBe('nowrap');
+    expect(metrics.cardWidth).toBeLessThanOrEqual(metrics.cardClient);
+  }
+}
+
+test.skipIf(!enabled)('crowded phone cards keep visible titles and desktop card opens its sub-DAG', async () => {
+  if (!out) return;
+  mkdirSync(out, { recursive: true });
+  const server = await serveFixture('after', out);
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  const crowded = { ...product, features: [...product.features, ...Array.from({ length: 8 }, (_, i) => ({
+    ...product.features[1], id: `extra-${i}`, title: `Fixture feature ${i} with a deliberately long title to truncate`,
+  }))] };
+  try {
+    for (const theme of ['light', 'dark']) for (const width of [390, 1400]) {
+      const page = await browser.newPage({ viewport: { width, height: 844 } });
+      await page.route('**/product', route => route.fulfill({ json: crowded }));
+      await page.goto(server.url.toString());
+      await page.evaluate(`document.documentElement.dataset.theme = '${theme}'`);
+      await page.getByRole('button', { name: /调度与自动派单/ }).waitFor();
+      if (width === 390) {
+        await visiblePhoneTitles(page, crowded.features.filter(f => f.status !== 'done' && f.status !== 'dropped').map(f => f.title));
+        await page.getByRole('button', { name: /1 已完成/ }).click();
+        await visiblePhoneTitles(page, crowded.features.filter(f => f.status !== 'dropped').map(f => f.title));
+        await page.getByRole('button', { name: /1 已完成/ }).click();
+        await page.getByRole('button', { name: /^调度与自动派单/ }).scrollIntoViewIfNeeded();
+      }
+      await noOverflow(page);
+      await page.screenshot({ path: resolve(out, `pd2b-${theme}-${width}-product.png`) });
+      await page.getByRole('button', { name: /^调度与自动派单/ }).click();
+      await page.getByRole('navigation').getByText('调度与自动派单', { exact: true }).waitFor();
+      await page.locator('button[title="做 B"]').waitFor();
+      expect(await page.getByText('产品与团队视图', { exact: true }).count()).toBe(0);
+      if (width === 1400) {
+        const tab = page.getByRole('tab', { name: '子 DAG · 调度与自动派单', exact: true });
+        expect(await tab.isEnabled()).toBe(true);
+        expect(await tab.getAttribute('aria-selected')).toBe('true');
+      }
+      await noOverflow(page);
+      await page.screenshot({ path: resolve(out, `pd2b-${theme}-${width}-subdag.png`) });
+      await page.close();
+    }
+  } finally { await browser.close(); server.stop(true); }
+}, 60000);
+
 test.skipIf(!enabled)('product and sub-DAG before/after light/dark at 390/1400, navigation and cards', async () => {
   if (!out) return;
   mkdirSync(out, { recursive: true });
