@@ -18,6 +18,7 @@ import { DISPUTE_RULE, FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import { convergenceIntent } from "./fix-strategy-runtime.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { ArbitrationVerdict } from "./review-arbiter.js";
+import { remoteArbiterStep } from "./review-arbiter-remote.js";
 
 export function arbiterBinding(db: Database, id: string): SessionRef | null {
   const value = getEventByDedup(db, `scheduler:${id}:arbiter`)?.data.ref;
@@ -40,6 +41,7 @@ export async function arbiterStep(db: Database, ctx: WriteCtx, id: string, maxWo
     return blocked ? { ok: true, step: "waiting", detail: blocked } : { ok: true, step: "ready", ref: existing };
   }
   if (task.stage !== "review" || task.rev !== intent.taskRev) throw new LedgerError("conflict", "仲裁计划已过期");
+  const remote = await remoteArbiterStep(db, ctx, intent, maxWorkers, deps); if (remote) return remote;
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return { ok: true, step: "waiting", detail: "本机仲裁审查槽已满，等空位" };
   const disputeSeq = Number(id.split(":d").at(-1));
   const dispute = pendingDispute({ task, events: listEvents(db, { project: task.project, target: task.id }) });

@@ -10,7 +10,7 @@ import type { OfferSummary } from "./lend-wire.js";
 import { parseAskWire } from "./order-wire.js";
 
 /** The protocol generation this build speaks; hello carries it both ways. A peer with no hello on file is proto 1 (poll only). */
-export const LEND_PROTO = 2;
+export const LEND_PROTO = 3;
 const BODY_V = 1;
 const HELLO_MS = 60_000;
 const BEAT_MS = 15_000;
@@ -42,7 +42,7 @@ export interface BeatOrder {
   orderId: string; gen: number; phase: (typeof PHASES)[number]; lastActivityAt: number; excerpt: string; ended: { reason: "revoked"; clean: boolean } | null;
 }
 export interface BeatRequest { v: 1; orders: BeatOrder[] }
-const BEAT_VERDICTS = ["ok", "cancelled", "lease_expired", "stale_gen", "not_found", "done"] as const;
+const BEAT_VERDICTS = ["ok", "cancelled", "convergence_cancelled", "lease_expired", "stale_gen", "not_found", "done"] as const;
 type BeatVerdict = (typeof BEAT_VERDICTS)[number];
 interface LeaseV2 { gen: number; expiresAt: number; ms: number }
 export interface BeatAnswer { orderId: string; verdict: BeatVerdict; lease: LeaseV2 | null }
@@ -116,7 +116,7 @@ function quotaOf(v: unknown): HelloQuota {
 function parseHello(raw: unknown): HelloRequest {
   const r = fields(raw, "$", ["v", "proto", "boot", "seq", "grant", "slots", "paused"], ["quota"]);
   const p = r.paused === null ? null : fields(r.paused, "paused", ["reason", "until"]);
-  return { v: version(r), proto: whole(r.proto, "proto", LEND_PROTO, 99), boot: pattern(r.boot, "boot", BOOT), seq: whole(r.seq, "seq", 0, MAX_TS),
+  return { v: version(r), proto: whole(r.proto, "proto", 2, 99), boot: pattern(r.boot, "boot", BOOT), seq: whole(r.seq, "seq", 0, MAX_TS),
     grant: grantOf(r.grant), slots: slotsOf(r.slots), paused: p && { reason: pattern(p.reason, "paused.reason", CODE), until: whole(p.until, "paused.until", 0, MAX_TS) },
     ...(r.quota === undefined ? {} : { quota: quotaOf(r.quota) }) };
 }
@@ -164,7 +164,7 @@ function parseOffer(raw: unknown): OfferRequest {
   const orders = arrayOf(r.orders, "orders", OFFER_MAX, summaryOf);
   if (!orders.length) no("orders", "不能是空的");
   if (new Set(orders.map((o) => o.orderId)).size !== orders.length) no("orders", "同一单出现两次");
-  return { v: version(r), proto: whole(r.proto, "proto", LEND_PROTO, 99), orders };
+  return { v: version(r), proto: whole(r.proto, "proto", 2, 99), orders };
 }
 
 const REQUESTS = { hello: parseHello, beat: parseBeat, ask: parseAsk, offer: parseOffer } as const;

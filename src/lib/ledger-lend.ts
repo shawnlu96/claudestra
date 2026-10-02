@@ -21,7 +21,7 @@ import { queueTimeoutDue, sweepPushTtl } from "./ledger-lend-peers-ttl.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
-import { assignStep } from "./ledger-steps-write.js";
+import { claimConvergenceStep } from "./lend-arbiter-claim.js";
 import { setTask } from "./ledger-write.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
@@ -364,7 +364,7 @@ export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimR
     const until = now + o.leaseMs;
     db.prepare(`UPDATE lend_orders SET status = 'claimed', reason = NULL, worker = ?, leaseGen = leaseGen + 1, leaseUntil = ?, updatedAt = ?
       WHERE orderId = ? AND status = 'pooled'`).run(req.worker, until, now, o.orderId);
-    assignStep(db, ctx, { taskId: o.taskId, step: o.step, executor: `${req.worker}@${peer}`, executorKind: "peer", round: o.round });
+    claimConvergenceStep(db, ctx, o, req.worker, peer);
     note(db, ctx, o, `出借：${peer} 领了${LABEL[o.step]}（${req.worker}）`, { op: "claim", worker: req.worker, gen: o.leaseGen + 1 });
     return claimed((clearPeerCooldown(db, o.peer, o.family), getLendOrder(db, o.orderId) as LendOrder));
   });

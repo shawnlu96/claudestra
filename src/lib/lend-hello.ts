@@ -183,7 +183,7 @@ export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): P
   const base = stateOf(c);
   const at = d.now();
   if (r.ok) {
-    setProto(d.db, peer, r.value.proto >= LEND_PROTO ? 2 : 1, round);
+    setProto(d.db, peer, r.value.proto >= 2 ? 2 : 1, round);
     const keep = clamp(r.value.helloMs, KEEP_MS.min, KEEP_MS.max, KEEP_MS.fallback);
     return save(d.db, peer, { ...base, ok: true, okAt: at, grant: c.body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
       beatMs: r.value.beatMs, nextAt: at + keep });
