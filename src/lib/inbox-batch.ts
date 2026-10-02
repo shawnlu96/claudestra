@@ -68,18 +68,18 @@ export function parseInboxPage(text: string): { messageId: string; page: number;
 }
 
 /**
- * 分页读的各页 → 整条（inbox.ts readPaged：每次读都重算 entryText，抬头里「排队 N 分钟」可能多一位，后面各页的切片随之前移）。
- * bodyLen（预览给的正文字数）核对：末页的抬头长度由它反推，和第 1 页抬头一样长 = 各页同一快照；两页且末页抬头长了 d 位 =
- * 第 2 页开头重复了第 1 页末尾 d 个字，核对重叠后去掉。核对不了（没见过预览、多页且有漂移、读页乱序）→ ok=false，调用方别当权威全文
+ * 分页切片包含每次重算的排队分钟抬头，正文长度只能核对首末页，不能证明中间页的切片边界。
+ * 因此三页以上保留拼接展示但不认作权威全文；否则乱序跨分钟位数变化会吞掉随后正确的普通重投。
+ * 两页可按正文字数反推末页漂移，核对重复边界后去掉重叠；没有预览字数也不能核对。
  */
 export function joinInboxPages(chunks: string[], bodyLen: number | undefined): { full: string; ok: boolean } {
   const joined = chunks.join("");
   const h1 = chunks[0].indexOf("\n");
-  if (bodyLen === undefined || h1 < 0) return { full: joined, ok: false };
+  if (bodyLen === undefined || h1 < 0 || chunks.length > 2) return { full: joined, ok: false };
   if (chunks.length === 1) return { full: joined, ok: joined.length - h1 - 1 === bodyLen };
   const size = chunks[0].length, last = chunks[chunks.length - 1];
   if (chunks.slice(0, -1).some((c) => c.length !== size)) return { full: joined, ok: false };
-  const drift = last.length + (chunks.length - 1) * size - 1 - bodyLen - h1; // 末页抬头比第 1 页长几位
+  const drift = last.length + (chunks.length - 1) * size - 1 - bodyLen - h1; // 两页时末页抬头比第 1 页长几位
   if (drift === 0) return { full: joined, ok: true };
   if (drift < 0 || chunks.length !== 2 || drift > last.length || !chunks[0].endsWith(last.slice(0, drift))) return { full: joined, ok: false };
   return { full: chunks[0] + last.slice(drift), ok: true };

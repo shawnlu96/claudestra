@@ -374,6 +374,30 @@ describe("check_inbox 领走的消息进会话历史", () => {
     expect(us[1].text).toBe(driftBody);
   });
 
+  test("三页乱序跨 9→10 分钟：不把等长错位拼接当权威全文，普通重投和差量恢复正确正文", async () => {
+    const body = Array.from({ length: 6000 }, (_, i) => String(i).padStart(4, "0") + "|").join("") + "END";
+    const id = "agent_three_drift";
+    setup([mk(body, id, { kind: "local", agentName: "agent-codex", channelId: "c-codex", ws: me })]);
+    const recs: unknown[] = [];
+    for (const [mins, page] of [[8, undefined], [9, 2], [10, 1], [10, 3]] as const) {
+      const args = page === undefined ? {} : { read: id, page };
+      const text = await take(mins * MIN, args);
+      const k = recs.length;
+      recs.push(callInbox(`three${k}`, k + 1, args), result(`three${k}`, text, k + 2));
+    }
+    const p = jsonl(recs);
+    const before = (await readSessionHistory(p)).messages;
+    const full = users(before).find((m) => m.text.includes("END"))!;
+    expect(full.text).toContain("未能核对");
+    const cursor = before.at(-1)!.seq;
+    recs.push(channel(id, `[🤖 来自 agent-codex 的 inbound 消息（非 FYI）。\n判断一下。]\n\n${body}`,
+      'user="agent-codex" user_id="agent" is_agent="true"', 2000));
+    writeFileSync(p, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const after = (await readSessionHistory(p)).messages;
+    expect(users(after).filter((m) => m.text.includes("END")).map((m) => m.text)).toEqual([body]);
+    expect(users((await readSessionHistory(p, { after: cursor })).messages).map((m) => m.text)).toEqual([body]);
+  });
+
   test("共存：check_inbox 返回给 agent 的文本逐字不变（改前快照）", async () => {
     setup([schedulerNote(), owner("今晚别发版", "u_msg_1")]);
     const text = (await take(5 * 60_000)).replace(/inbox_[\w-]+/g, "inbox_X");
