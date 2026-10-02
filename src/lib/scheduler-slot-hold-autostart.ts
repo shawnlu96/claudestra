@@ -1,3 +1,4 @@
+import { poolStartGate } from "./scheduler-agent-pool-start.js";
 /** Autostart's capacity read: local writers plus currently usable peer capacity, bounded by total in-flight auto cards. */
 import type { Database } from "bun:sqlite";
 import { readLendSync, type BorrowEntry } from "./lend-config.js";
@@ -16,6 +17,7 @@ function configuredPool(project: string): SlotPool {
 }
 
 export function autostartCapacity(db: Database, project: string, maxWorkers: number, pool = configuredPool(project), now = Date.now()): string | null {
+  if (pool.remote?.agents) return poolStartGate(db, project, pool.remote, pool.borrow, now);
   const slots = writeSlotFacts(db, project);
   const inFlight = (db.query(`SELECT COUNT(*) AS n FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
     WHERE w.project = ? AND w.mode = 'auto' AND (t.stage IN ('spec','restate','build','review','fix','merge')
@@ -30,6 +32,7 @@ export function autostartCapacity(db: Database, project: string, maxWorkers: num
 /** The claim transaction checks the selected destination again; a peer vacancy never authorizes a local start. */
 export function autostartPlacementGate(db: Database, project: string, maxWorkers: number,
   peer: { name: string; repo: string } | null | undefined, pool = configuredPool(project), now = Date.now()): string | null {
+  if (pool.remote?.agents) return poolStartGate(db, project, pool.remote, pool.borrow, now, peer ?? null);
   const slots = writeSlotFacts(db, project);
   if (!peer) return pool.remote?.localPriority !== "off" && newLocalWriteRoom(slots.workerCount, maxWorkers, slots.waitingFix)
     ? null : "本机不写代码或写槽已满，不能在本机开卡";

@@ -1,3 +1,5 @@
+import { poolBorrow } from "./scheduler-agent-pool-context.js";
+import { projectAgentPolicy } from "./scheduler-agent-pool-context.js";
 /**
  * `ledger scheduler-pool <intent>` (i28-R9): one BEGIN IMMEDIATE step for a pool intent (a review, or since i28-W9 a build /
  * fix dispatch, addressed to `peer:<name>`). First call: re-plan with the same pool facts inside the transaction (local
@@ -55,6 +57,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
     ({ outcome: "refused", orderId: null, text: why, intent: settleIntent(db, ctx, { id: intent.id, from: "pending", to: "cancelled", receipt: `未投递：${why}` }) });
   if (intent.status !== "pending") throw new LedgerError("conflict", `挂池意图是 ${intent.status}，却没有出借单`);
   const task = mustTask(db, intent.taskId);
+  input = { ...input, remote: projectAgentPolicy(task.project) ?? input.remote };
   const workflow = getWorkflow(db, task.id);
   const step = stepOfStage(task.stage);
   const role = step === "review" ? "review" : step;
@@ -76,7 +79,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   let order: LendOrder;
   try {
     order = offerLendCore(db, ctx, { taskId: task.id, peer, family, repo, pr: role === "write" ? null : coords?.pr ?? null, spec: input.spec,
-      borrow: input.borrow.find((b) => b.peer === peer) ?? null, ...(role !== "review" && write ? { write } : {}) });
+      borrow: poolBorrow(input.borrow.find((b) => b.peer === peer) ?? null, !!input.remote.agents), ...(role !== "review" && write ? { write } : {}) });
   } catch (e) {
     if (e instanceof LedgerError) return refuse(`出单被拒：${e.message}`);
     throw e;

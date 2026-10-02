@@ -5,6 +5,7 @@
  * - dev channel 加载 + skip-permissions
  */
 
+import { parseDisallowedRules } from "./disallowed-rules.js";
 import { pathOverrideAssignments } from "./paths.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { bridgePortOf } from "./bridge-port.js";
@@ -201,7 +202,7 @@ export function resolveDisallowed(opts: {
   raw?: string;
 }): string[] {
   if (opts.raw && opts.raw.trim()) {
-    return opts.raw.trim().split(/\s+/).filter(Boolean);
+    return parseDisallowedRules(opts.raw);
   }
   const presetName = opts.preset || DEFAULT_PRESET;
   const preset = DISALLOWED_PRESETS[presetName];

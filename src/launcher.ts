@@ -29,8 +29,6 @@ import {
   isIdle as tmuxIsIdle,
   tmuxCapture,
   tmuxSendLine,
-  trustPromptMoves,
-  acceptTrustPrompt,
   detectSessionIdlePrompt,
   CC_MODE_BANNER_RE,
   clearShellInitPrompts,
@@ -38,6 +36,7 @@ import {
   MASTER_WINDOW_NAME,
 } from "./lib/tmux-helper.js";
 import { isAutoConfirmableModal } from "./lib/modal-confirm.js";
+import { acceptTrustPrompt, trustPromptMoves } from "./lib/trust-prompt.js";
 
 /**
  * Master 专用：用 isAutoConfirmableModal 做几何识别 + 允许 session-idle 自动按。
@@ -56,7 +55,7 @@ function masterShouldAutoConfirm(pane: string): boolean {
 async function confirmMasterModal(pane: string): Promise<void> {
   const trustMoves = trustPromptMoves(pane);
   if (trustMoves !== null) {
-    await acceptTrustPrompt(MASTER_WINDOW, trustMoves);
+    await acceptTrustPrompt((k) => tmuxRaw(["send-keys", "-t", MASTER_WINDOW, k]), trustMoves); // 一次一步，下轮抓屏确认在 Yes 上才 Enter
     return;
   }
   if (detectSessionIdlePrompt(pane)) {
