@@ -10,7 +10,7 @@
  * 任何一步失败都返回 { ok:false }，调用方按 not_started 释放；删目录只删 LEND_ROOT 之下、名字对得上的那一个。tests/lend-clone.test.ts、tests/lend-write.test.ts。
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
 import { isFullSha } from "./order-wire.js";
@@ -107,6 +107,12 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
     }
     const locked = await lockProtocols(git);
     if (locked) return { ok: false, reason: locked };
+  }
+  // 交付文件留在副本里供 submit 读取；只排除根目录，避免隐藏仓库自己的同名文件。
+  try {
+    appendFileSync(join(dir, ".git", "info", "exclude"), input.write ? "\n/summary.txt\n/selfcheck.md\n" : "\n/report.md\n/findings.json\n");
+  } catch (e) {
+    return { ok: false, reason: `排除交付文件失败：${(e as Error).message}` };
   }
   return { ok: true, dir };
 }
