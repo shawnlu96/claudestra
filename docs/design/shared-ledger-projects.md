@@ -1,6 +1,6 @@
 # i28-PRJ1 · 共享项目中心化：团队在中心建项目，成员加入
 
-状态：设计稿，specRev 1；代码核对基线 `2bb679d3`。只出设计，不改代码。
+状态：设计稿，specRev 1，第 1 轮审查后修订（schema-join / rebind-conflict / owner-promotion）；代码核对基线 `2bb679d3`。只出设计，不改代码。
 **结论：共享项目的唯一身份是团队在中心建的项目记录（`centerId + teamId + projectId`），不用 git remote，也不靠名字或目录推断。**
 **本机 projects.json 只管「这台机器上的代码在哪」；本机项目和中心项目的对应关系只记在 `shared-ledger-bindings.json`，一对一，由 owner 在卡上点选决定。**
 
@@ -47,6 +47,12 @@
 新表 `project_members(teamId, projectId, personId, role, status, addedBy, addedAt)`：
 `role ∈ owner | member`（与 shared-ledger.md §4 的项目 owner / member 一致），`status ∈ invited | active | removed`。
 `members` 表加 `teamRole ∈ owner | member`（缺省 member）：团队 owner 才能建项目。
+新表 `project_invites(codeId PRIMARY KEY → join_codes.id, teamId, projectId, personId)`：把 `/invites` 铸的码和 `project_members` 行连起来，
+兑换时据此在同一事务里把成员置 active（`join_codes` 行格式冻结不动，做法同现有 `join_issued_credentials`）。
+
+**团队 owner 只来自明确记录**：`teamRole = owner` 只能由 (a) §5.1 的「确认团队 owner」按钮或 (b) 已有团队 owner 通过 API 指定 写入；
+**任何凭据 grant（尤其 `service` 角色的 `project` / `import` 动作）都不推导、不提升 teamRole 或项目 role**。
+`project` 动作只表示「可上传主场投影」，是限定项目的服务授权（shared-ledger.md §4：服务身份不能扩大授权）。
 
 **中心不存任何机器上的目录**（沿用 shared-ledger.md §3.1「不含机器目录」）。每个成员机器的本地目录由**那台机器的 owner 在本机定**，
 存本机 projects.json 的 `dirs`；中心只知道「哪个 person / instance 是成员」。
@@ -88,6 +94,7 @@
 | `GET /v1/projects/:id/members` | 成员列表（代号、角色、状态） | 项目成员 |
 | `POST /v1/projects/:id/invites` | 为某 person（已有或新建代号）铸一次性入组码，返回码给**调用方 bridge** | 项目 owner |
 | `POST /v1/projects/:id/members/:personId/remove` | 移出项目（不移出团队） | 项目 owner |
+| `POST /v1/team/owners` | 增减团队 owner `{personId, op}`（不能移除最后一个） | teamRole=owner |
 
 `/invites` 返回的码只进 bridge 内存，立即走 JN3 offer 发给 peer，不落 owner 机器磁盘、不进网页、不进日志（沿用 JN1/JN3 的码纪律）。
 
@@ -99,7 +106,9 @@
 2. owner 机器 bridge：`POST /v1/projects/:id/invites` 拿码 → 按 JN3 `POST /api/v1/shared-ledger-join-offer` 递给对方 bridge。
    offer 体新增非机密字段 `project: {teamId, projectId, name}`，**只用于卡面显示和预选**，兑换后以中心 grant 为准，不一致即判失败。
 3. 对方 bridge 开授权卡「加入团队项目 Claudestra？」，卡上就是本机项目选择（见 3.2）。owner 点「加入」。
-4. 对方 bridge：兑换码（JN1，实例私钥签名）→ 中心把 `project_members` 置 active → 本机写凭据 → 按卡上选择新建或绑定本地项目 → 写绑定 → 回执给邀请方。
+4. 对方 bridge：兑换码（JN1，实例私钥签名）→ 中心在**同一个兑换事务**里登记凭据、标码已用、按 `project_invites` 把 `project_members` 从 invited 置 active
+   （任一步失败整体回滚，码不算用掉）→ 本机写凭据 → 按卡上选择新建或绑定本地项目 → 写绑定 → 回执给邀请方。
+   中心兑换代码（`src/shared-ledger/join.ts`、`identity.ts`）的改动归 N1（§6）。
 5. 侧栏「团队 · 全部 feature」按绑定出现该项目。
 
 ### 3.2 本机怎样得到这个项目
@@ -132,10 +141,10 @@
 | JN2 加固（instanceId 抢占保护、限流） | **保留** | 不变 |
 | JN3 peer offer / 授权卡 / 回执 | **保留并扩展** | offer 加 `project` 显示字段；卡加本机项目选择；回执不变 |
 | JN4 卡上选本机项目 | **合并** | 并入 §3.2 的入组卡和 §5 的迁移卡，成为同一个选择组件 |
-| `shared-ledger-bindings.json` | **保留，加不变式** | 唯一的对应关系来源；加 `(centerId,teamId,projectId)` 唯一；写入拒绝个人项目 |
+| `shared-ledger-bindings.json` | **保留，加不变式** | 唯一的对应关系来源；加 `(centerId,teamId,projectId)` 唯一；写入拒绝个人项目；改绑只走带旧值核对的替换操作（§5.2） |
 | `shared-ledger-join` 不带 `--project` 时绑到同名 id | **弃用该默认** | 改为必须带明确本机项目（由卡给出）；CLI 不带则报错要求选择 |
 | `manager shared-ledger-join` / `shared-ledger-offer` CLI | **保留为系统内部 / 运维兜底** | 不出现在任何人需要操作的步骤里 |
-| `shared-ledger-admin invite`（离线脚本） | **保留为运维兜底**，日常由 `POST /v1/projects/:id/invites` 取代 | 首个团队 owner 的引导仍由部署单完成（见 §5.1） |
+| `shared-ledger-admin invite`（离线脚本） | **保留为运维兜底**，日常由 `POST /v1/projects/:id/invites` 取代 | 首个团队 owner 由中心所在机器的「确认团队 owner」按钮引导（见 §5.1），不由脚本推导 |
 | 本机 `project-add` | **保留** | 只建本机项目（个人或本地）；不再有「本机建项目后推到中心」 |
 | 本机 `project-assign` / `project-merge` / `project-edit` | **保留** | 只管 agent→本机项目、目录；合并 / 删除一个已绑定项目时先拒绝，提示先「退出团队项目」 |
 | 导入（`import prepare/commit/activate`） | **保留，前置条件改变** | 只能导入到**已在中心存在**、且本机已绑定的项目；不再借导入隐式创建中心项目 |
@@ -146,12 +155,32 @@
 ### 5.1 中心（一次，随中心版本升级自动跑）
 
 中心 schema v4 迁移（事务内、幂等）：
-1. `projects` 加 `name/createdBy/createdAt/updatedAt/status/rev`。现有行：`name = code`，`status = active`，`createdBy` = 规则 3 选出的团队 owner。
-2. 建 `project_members`，从**已用且未吊销**的 `join_codes` 和有效 `credentials.grants` 回填 `(person, project, member, active)`。
-3. `members.teamRole`：持有该团队 `project` 动作服务凭据的 person（即导入身份所代表的本人，见 shared-ledger.md §10.4）标为 owner，
-   并在其已有项目里把 `project_members.role` 设为 owner。若命中 0 或多于 1 人，迁移不猜：全部保持 member，网页显示「团队 owner 待确认」，
-   由部署单（已有的 owner 批准流程）指定；在此之前建项目按钮置灰，其余功能不受影响。
-4. 不改任何 projectId、featureId、凭据哈希；现有 bearer 全部继续有效。
+1. `projects` 加 `name/createdBy/createdAt/updatedAt/status/rev`，全部 `ALTER TABLE … ADD COLUMN` 带常量默认值（`status` 默认 active、`rev` 默认 1、
+   时间默认 0；`createdBy` 可空）；现有行：`name = code`，`createdBy = NULL`（历史项目没有可核验的创建人，不猜）。
+2. 建 `project_members`、`project_invites`，从**已用且未吊销**的 `join_codes` 和**未过期、未吊销、成员 active** 的 `credentials.grants` 回填
+   `(person, project, member, active)`。回填只给 `member` 角色，**不因 grant 的 role/actions 给 owner**。
+3. `members` 加 `teamRole`（默认 member）。**迁移不回填任何 owner**：现有中心没有明确的团队 / 项目 owner 记录
+   （入组只发 member / service，见 `join.ts` 的 `ROLE_ACTIONS`；`shared-ledger-admin invite` 也只发这两种），
+   而 service grant 的 `project` / `import` 动作是限定项目的服务委托，不是 owner 证明，所以不能拿它推导。
+   迁移后每个团队都处于「团队 owner 待确认」：建项目、邀请、改名、移出按钮置灰，读写 / 导入 / 投影等现有功能不受影响。
+4. **既有写入者同版本改为显式列名**（与本迁移同一 PR，N1）：`identity.ts` 的 `registerCredential` 现在是
+   `INSERT … INTO projects VALUES (?,?,?)`、`INTO members VALUES (?,?,?,?)`，加列后会报列数不符。改为：
+   - `INSERT OR IGNORE INTO projects(teamId,id,code,name) VALUES (?,?,?,?)`（其余列走默认值；v4 起正常路径的码都指向已存在项目，
+     只有离线 `shared-ledger-admin invite` 运维兜底还可能新建行，新行同样 `createdBy = NULL`）；
+   - members 由 `INSERT OR REPLACE … VALUES` 改为 `INSERT … (teamId,personId,code,status) … ON CONFLICT(teamId,personId) DO UPDATE SET code/status`
+     （`preserveMember` 时 `DO NOTHING`），**不触碰 `teamRole`**——否则 REPLACE 会把已确认的 owner 冲回 member。
+   - `join.ts` 的兑换事务里追加 `project_invites` → `project_members.active` 更新（§3.1 第 4 步）。
+   - 全仓核对：`projects` / `members` 的写入者只有 `identity.ts` 与 `shared-ledger-member-admin.ts`（后者是带列名的 `UPDATE … SET status`，不受影响）。
+5. 不改任何 projectId、featureId、凭据哈希；现有 bearer 全部继续有效。
+
+**确认团队 owner（一次性引导，按钮）**：
+- 只在**中心所在机器**的网页「团队」面板出现，且仅当该团队 `teamRole = owner` 的人数为 0。
+- 卡面绑定具体的 `centerId + teamId + personId`：personId 取本机 `owner:self` 的 **kind=person** 中心凭据（入组时由本人兑换、实例签名绑定）里的 personId，
+  **不取 service 凭据**；本机没有有效 person 凭据则按钮不出现（先按 §3 入组）。
+- 机器 owner 点「确认我是团队 owner」→ 本机 manager 用中心的离线嵌入接口（与 `shared-ledger-admin` 同一嵌入路径，不新增无认证 HTTP 管理路由）
+  在一个立即事务里复核「该团队 owner 数仍为 0、该 person 成员 active、实例绑定与本机公钥一致」，通过才写 `teamRole = owner`、
+  把该人在已有 active 项目里的 `project_members.role` 设为 owner，并写事件；任一条件变化则拒绝、不写。
+- 之后增减团队 owner 只能由现任团队 owner 走 API（`POST /v1/team/owners`，同样按钮），引导按钮不再出现。
 
 迁移后 owner 在项目设置页把 `claude-orchestrator` 的显示名改成「Claudestra」（按钮）。**中心 id `claude-orchestrator` 不改名**——改 id 会牵动 features、
 dag、id_map、全部 grants，收益只是好看；显示名已解决可读性。
@@ -165,50 +194,69 @@ dag、id_map、全部 grants，收益只是好看；显示名已解决可读性�
   - **重复**：同一中心项目绑了多个本机项目 → 同一张卡让 owner 留一个。
   - **个人**：绑到了个人项目 → 卡上只能改选或新建，不能保留。
   - **有凭据无绑定**：凭据里有项目但没有绑定 → 同一张卡补绑定。
-- owner 点选后，系统在锁内改写 bindings（写前备份为 `shared-ledger-bindings.json.bak-<时间>`，0600），**凭据文件不碰**；改完再读回核对一次。
+- owner 点选后，系统调用 N2 新增的**替换操作** `replaceSharedLedgerBindings({ expected, next })`（不用普通 `setSharedLedgerBinding`）：
+  - `expected` = 开卡时读到的、与该中心项目 `(centerId,teamId,projectId)` 相关的全部绑定行（含悬空 / 重复 / 个人行），卡上带其摘要作版本；
+  - `next` = owner 选定的那一行（已有本机项目，或「新建」后得到的本机 id）；
+  - 在同一把 bindings 锁内：备份为 `shared-ledger-bindings.json.bak-<时间>`（0600）→ 重读并核对当前相关行与 `expected` 逐字相同（不同 = 卡已过时，拒绝、不写，
+    下次核对重开卡）→ 删掉该中心项目的全部旧行 → 校验 `next`（目标本机项目存在、非个人、未绑别的中心项目）→ 写入 → 释放锁后读回核对。
+  - 普通新增 `setSharedLedgerBinding` 保持拒绝冲突（同一中心项目已有绑定即拒绝）；只有带 `expected` 的替换能改掉旧映射。
+  - **凭据文件不碰**。
 
 三台机器各自会发生什么：
 
 | 机器 | 现状（预期） | 升级后发生的事 |
 |---|---|---|
-| 本机（中心所在、owner 机器） | 本机项目即导入来源，已与 `claude-orchestrator` 正确绑定；持 person + service 凭据 | 核对为「正常」，不开卡；中心迁移把 owner 标为团队 owner；owner 点按钮改显示名 |
-| HedeMacBook-Pro | 本机项目 `claudestra`；入组时绑定可能指向不存在的 `claude-orchestrator`（JN4 若已修则正常） | 若已被 JN4 修好：不开卡。否则核对为「悬空」→ 开卡，按显示名「Claudestra」预选本机 `claudestra`，owner 点「确认」即改绑；凭据保留 |
+| 本机（中心所在、owner 机器） | 本机项目即导入来源，已与 `claude-orchestrator` 正确绑定；持 person + service 凭据 | 核对为「正常」，不开卡；中心迁移后团队处于「owner 待确认」，网页出现「确认我是团队 owner」按钮（按本机 person 凭据的 personId），owner 点后成为团队 owner；再点按钮改显示名 |
+| HedeMacBook-Pro | 本机项目 `claudestra`；入组时绑定可能指向不存在的 `claude-orchestrator`（JN4 若已修则正常） | 若已被 JN4 修好：不开卡。否则核对为「悬空」→ 开卡，按显示名「Claudestra」预选本机 `claudestra`，owner 点「确认」→ 替换操作在锁内删掉悬空行 `claude-orchestrator→claude-orchestrator`、写入 `claude-orchestrator→claudestra`；凭据保留。该机不是中心所在机器，不出现团队 owner 确认按钮 |
 | Sekai | 同 HedeMacBook-Pro | 同上 |
 
-不丢东西的保证：凭据文件全程只读；bindings 只在 owner 点选后改、改前备份；中心不改任何 id；本机 projects.json 只在选「新建」时追加一项。
+不丢东西的保证：凭据文件全程只读；bindings 只在 owner 点选后经带旧值核对的替换操作改、改前备份；中心不改任何 id；本机 projects.json 只在选「新建」时追加一项。
 核对卡被忽略或过期 = 什么都不变（与今天一样），下次启动再提示。
 
 ## 6. 拆分（可并行的 PR 节点）
 
 依赖：节点之间只通过本文 §2、§3、§5 写定的接口对接，可同时开工；N4、N5 的端到端验收在 N1–N3 合并后补跑。
 **规格例外（热点文件）**：下列文件允许多个节点改，但每个节点只能**追加一处注册行**、不改已有行：
-`src/shared-ledger/server.ts`（路由表，仅 N1）、`src/bridge/api-routes.ts`（N4、N5 各一行）、`src/bridge/ask-entry.ts`（N6 一行启动钩子）。
+`src/shared-ledger/server.ts`（路由表，仅 N1）、`src/bridge/api-routes.ts`（N4 一行）、`src/bridge/ask-entry.ts`（N6 一行启动钩子）。
 
 ### N1 · 中心项目记录与成员 API
 
-- 目标：中心 schema v4（§5.1）；`GET/POST/PATCH /v1/projects`、成员列表、`/invites`、移出；teamRole 与 project role 权限检查；契约与 fixture。
-- fileGlobs：`src/shared-ledger/projects*.ts`、`src/shared-ledger/migrations.ts`、`src/lib/shared-ledger-contract-v2-projects*.ts`、`tests/shared-ledger-center-projects*.test.ts`
+- 目标：中心 schema v4（§5.1）；**既有写入者显式列名**（`registerCredential`）与兑换事务内 `project_invites → project_members.active`；
+  `GET/POST/PATCH /v1/projects`、成员列表、`/invites`、移出、`POST /v1/team/owners`；团队 owner 引导的离线嵌入接口 `confirmTeamOwner`；
+  teamRole 与 project role 权限检查；契约与 fixture。
+- fileGlobs：`src/shared-ledger/projects*.ts`、`src/shared-ledger/migrations.ts`、`src/shared-ledger/identity.ts`、`src/shared-ledger/join.ts`、
+  `src/lib/shared-ledger-contract-v2-projects*.ts`、`tests/shared-ledger-center-projects*.test.ts`、`tests/shared-ledger-join-center.test.ts`（已有）
 - 规格例外：`src/shared-ledger/server.ts` 只追加路由注册。
 - 验收线：
   1. v3 库升级到 v4 幂等，已有 projectId / 凭据 / features 不变，现有 bearer 读写全部通过；
   2. 非团队 owner 建项目 403，非项目 owner 邀请 / 改名 / 移出 403，改名 rev 冲突 409 带当前值；
   3. `/invites` 码只出现在响应体，日志、事件、错误文本不含码（测试断言）；
-  4. teamRole 回填遇 0 或多个候选时不设 owner；
-  5. 移出项目后该 person 对该项目的读写立即 403，对同团队其他项目不受影响。
+  4. 迁移后所有团队 `teamRole` 均为 member、`createdBy` 为空；负例：团队里**唯一**持 `project`（或 `import`）动作 service grant 的 person 迁移后仍是 member、
+     建项目 403；历史上过期 / 吊销 / 成员 removed 的 grant 不回填 `project_members`；
+  5. 移出项目后该 person 对该项目的读写立即 403，对同团队其他项目不受影响；
+  6. **升级后真实兑换回归**：v3 库（含已有成员与项目）迁到 v4 后，(a) 新 person 用 `/invites` 码兑换成功、`project_members` 同事务变 active；
+     (b) 已有成员兑换第二个项目的码成功，原 `teamRole`（含 owner）与旧凭据不变；(c) 兑换中途失败（如签名错）则码未用、成员仍 invited；
+     (d) 离线 `shared-ledger-admin invite` 兑换仍可用。直接对 v4 库 prepare `registerCredential` 的全部语句不报错；
+  7. `confirmTeamOwner`：团队已有 owner、person 非 active、实例公钥不符、传入 service 身份 → 均拒绝且不写；成功后该人已有项目 role=owner、写事件；
+     不存在任何 HTTP 路由能在无现任 owner 时写 teamRole。
 
 ### N2 · 本机绑定模型与入组兑换
 
-- 目标：bindings 加 `(centerId,teamId,projectId)` 唯一与个人项目拒绝；`joinSharedLedger` 必须传明确的本机项目或 `create` 指令（新建本地项目 id/名默认值逻辑）；
+- 目标：bindings 加 `(centerId,teamId,projectId)` 唯一与个人项目拒绝；新增带旧值核对的原子替换 `replaceSharedLedgerBindings({expected, next})`（§5.2，供 N6 调用）；`joinSharedLedger` 必须传明确的本机项目或 `create` 指令（新建本地项目 id/名默认值逻辑）；
   join 结果核对中心 grant 与 offer 显示字段一致；`shared-ledger-join` CLI 去掉「默认同名」。
 - fileGlobs：`src/lib/shared-ledger-gate-bindings.ts`、`src/lib/shared-ledger-gate-proxy-join-pins.ts`、`src/lib/shared-ledger-join.ts`、
-  `src/lib/shared-ledger-project-link*.ts`（新：建或绑本地项目）、`src/manager/shared-ledger-join-cmd.ts`、`tests/shared-ledger-project-link*.test.ts`、`tests/shared-ledger-join-{cmd,e2e,harden,center}.test.ts`（已有，改默认后要跟着改）
+  `src/lib/shared-ledger-project-link*.ts`（新：建或绑本地项目）、`src/manager/shared-ledger-join-cmd.ts`、`tests/shared-ledger-project-link*.test.ts`、
+  `tests/shared-ledger-gate-bindings-replace*.test.ts`、`tests/shared-ledger-join-{cmd,e2e,harden}.test.ts`（已有，改默认后要跟着改；`-center` 归 N1）
 - 规格例外：无（新建本地项目通过现有 `writeProjects`，不改 `projects.ts`）。
 - 验收线：
   1. 绑定个人项目、同一中心项目绑第二个本机项目、本机项目绑第二个中心项目均拒绝且不写盘；
   2. 未指定本机项目时 join 报错且不兑换码；
   3. 选「新建」时生成 id 撞名加后缀、显示名取中心名、dirs 为空，不是个人项目；
   4. 兑换后 grant 的 projectId 与 offer 显示的不一致 → 不写凭据不写绑定；
-  5. 现有凭据文件在所有失败路径下字节不变。
+  5. 现有凭据文件在所有失败路径下字节不变；
+  6. 替换操作：初态 `{claude-orchestrator→claude-orchestrator(不存在)}`，`expected` 为该行、`next` 为 `→claudestra` → 成功，结果只剩新行、备份 0600 且内容等于初态；
+     重复绑定（同一中心项目两行）同样收敛为一行；`expected` 与盘上不符、`next` 指向个人项目 / 不存在项目 / 已绑别的中心项目 → 拒绝且文件字节不变；
+     普通 `setSharedLedgerBinding` 对同一中心项目第二个本机项目仍拒绝。
 
 ### N3 · 中心项目客户端
 
@@ -223,7 +271,8 @@ dag、id_map、全部 grants，收益只是好看；显示名已解决可读性�
 ### N4 · bridge 侧：建项目、邀请、入组卡
 
 - 目标：本机 local-api `POST /api/v1/shared-projects`（建）、`PATCH …/:id`、`POST …/:id/invite {peers[], note}`、`GET …`（含本机绑定 join 视图）；
-  邀请 = 调 N3 拿码 → JN3 offer（加 `project` 字段）；入组卡改为 §3.2 单选（新建 / 已有项目），点「加入」后用 N2 执行；PM 建议建项目的 authorize 卡。
+  邀请 = 调 N3 拿码 → JN3 offer（加 `project` 字段）；入组卡改为 §3.2 单选（新建 / 已有项目），点「加入」后用 N2 执行；PM 建议建项目的 authorize 卡；
+  中心所在机器的「确认我是团队 owner」端点与卡（调 N1 的 `confirmTeamOwner`，personId 只取本机 kind=person 凭据）。
 - fileGlobs：`src/bridge/local-api/shared-projects*.ts`、`src/bridge/shared-ledger-join-offer.ts`、`src/bridge/local-api/shared-ledger-join-offer.ts`、
   `src/lib/shared-ledger-join-offer.ts`、`src/manager/shared-ledger-offer.ts`、`tests/shared-ledger-join-offer*.test.ts`（已有）、`tests/shared-projects-api*.test.ts`
 - 规格例外：`src/bridge/api-routes.ts` 只追加一行路由注册。
@@ -232,7 +281,8 @@ dag、id_map、全部 grants，收益只是好看；显示名已解决可读性�
   2. 码从中心响应到 offer 请求体全程不落盘、不进日志与卡面（测试扫描日志 / 卡文本）；
   3. 入组卡上未选本机项目不能「加入」；预选规则按 §3.2，且不读 git、不按目录猜；
   4. offer 的 `project` 字段与兑换 grant 不符 → 判 failed，回执 failed，不写绑定；
-  5. PM 建议卡：仅 owner 点「建」才调用中心，参数被改则 ask-check 拒绝。
+  5. PM 建议卡：仅 owner 点「建」才调用中心，参数被改则 ask-check 拒绝；
+  6. 团队 owner 确认：非中心所在机器、团队已有 owner、本机只有 service 凭据 → 不出现按钮且端点 403；卡上 team/person 被改 → ask-check 拒绝。
 
 ### N5 · 网页：团队项目页
 
@@ -251,19 +301,21 @@ dag、id_map、全部 grants，收益只是好看；显示名已解决可读性�
 
 - 目标：§5.2 的「共享项目核对」：启动 / 入组后只读判定，异常开卡（复用 N4 卡组件的数据形态，但卡逻辑在本节点文件里），点选后锁内备份并改写 bindings、读回核对。
 - fileGlobs：`src/lib/shared-ledger-project-audit*.ts`、`src/bridge/shared-ledger-project-audit*.ts`、`tests/shared-ledger-project-audit*.test.ts`
-- 规格例外：`src/bridge/ask-entry.ts` 只追加一行启动钩子；写绑定调用 N2 导出的 `setSharedLedgerBinding`（不改其文件）。
+- 规格例外：`src/bridge/ask-entry.ts` 只追加一行启动钩子；改绑**只**调用 N2 导出的 `replaceSharedLedgerBindings`（不改其文件、不直接写 bindings、不用普通 setter）。
 - 验收线：
   1. 正常、悬空、重复、个人、有凭据无绑定五种状态各有测试，正常状态不开卡；
   2. 改写前生成 0600 备份，凭据文件全程字节不变；
   3. 卡过期 / 忽略时绑定不变，下次启动再提示且不重复开同一张卡（dedupKey）；
-  4. 模拟 HedeMacBook-Pro / Sekai 现状（本机 `claudestra`、绑定指向不存在的 `claude-orchestrator`）→ 卡预选 `claudestra`，点确认后侧栏可见团队 feature；
+  4. 模拟 HedeMacBook-Pro / Sekai 现状（本机 `claudestra`、绑定指向不存在的 `claude-orchestrator`）→ 卡预选 `claudestra`，点确认后经替换操作
+     bindings 只剩 `claude-orchestrator→claudestra`、侧栏可见团队 feature；开卡后 bindings 被他人改动 → 点确认被拒、不写、重新开卡；
   5. 模拟本机（owner 机器）现状 → 不开卡。
 
 ### 节点文件范围两两不重叠核对
 
-N1 只在 `src/shared-ledger/`、`src/lib/shared-ledger-contract-v2-projects*`（中心 `src/shared-ledger/join.ts` 不改）；N2 在绑定 / join / project-link / join CLI；N3 只在 `shared-ledger-client*`；
+N1 只在 `src/shared-ledger/`（含 `identity.ts`、`join.ts` 两个既有写入者）、`src/lib/shared-ledger-contract-v2-projects*`；N2 在本机绑定（含替换操作）/ 本机 join / project-link / join CLI；N3 只在 `shared-ledger-client*`；
 N4 在 bridge local-api 新文件与 join-offer 三件；N5 只在 `web/`；N6 只在 `*project-audit*`。热点文件已列为规格例外并限定为追加一行。
-测试文件同样分开：`tests/shared-ledger-join-offer*` 归 N4，`tests/shared-ledger-join-{cmd,e2e,harden,center}` 归 N2，其余各节点用新前缀。
+测试文件同样分开：`tests/shared-ledger-join-offer*` 归 N4，`tests/shared-ledger-join-center` 归 N1，`tests/shared-ledger-join-{cmd,e2e,harden}` 归 N2，其余各节点用新前缀
+（`shared-ledger-join-{cmd,e2e,harden}` 与 `-offer*` 字面不重叠）。N1 改 `join.ts` 不改其对外行为，N2 的 `harden` 测试照旧应通过。
 
 ## 7. 需要 owner 拍板的点（均有默认，不阻塞实施）
 
@@ -271,3 +323,4 @@ N4 在 bridge local-api 新文件与 join-offer 三件；N5 只在 `web/`；N6 �
 2. 入组卡默认选项——默认「新建本地项目」，有同名未绑定项目时预选「绑定已有」（§3.2）。
 3. 中心 id `claude-orchestrator` 是否改名——默认**不改**，只改显示名（§5.1）。
 4. PM 能否直接建项目——默认**不能**，只能开建议卡（§2）。
+5. 首个团队 owner 怎么定——默认中心所在机器的 owner 点「确认我是团队 owner」按钮（§5.1）；不从任何服务凭据推导。
