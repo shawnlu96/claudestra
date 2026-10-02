@@ -108,11 +108,13 @@ function redeemJoinCode(store: Store, body: string, now = Date.now()): SharedLed
     const bound = store.all<{ personId: string; publicKey: string }>(
       "SELECT personId, publicKey FROM instance_bindings WHERE teamId=? AND instanceId=?", row.teamId, req.instanceId);
     if (bound.some((b) => b.personId !== row.personId || b.publicKey !== req.publicKey)) return reject();
+    const member = store.get<{ status: string }>("SELECT status FROM members WHERE teamId=? AND personId=?", row.teamId, row.personId);
+    if (member && member.status !== "active") return reject();
     const bearer = randomBytes(32).toString("base64url");
     const expiresAt = now + row.credentialTtlMs;
     const projects: SharedLedgerCredential["projects"] = [{ projectId: row.projectId, role: row.role as Role, actions }];
     registerCredential(store, { credentialHash: sharedLedgerCredentialHash(bearer), teamId: row.teamId, personId: row.personId,
-      instanceId: req.instanceId, publicKey: req.publicKey, membershipStatus: "active", revokedAt: null, expiresAt, projects }, row.memberCode);
+      instanceId: req.instanceId, publicKey: req.publicKey, membershipStatus: "active", revokedAt: null, expiresAt, projects }, row.memberCode, true);
     if (store.db.query("UPDATE join_codes SET usedAt=?, instanceId=? WHERE id=? AND usedAt IS NULL").run(now, req.instanceId, row.id).changes !== 1) {
       return reject();
     }

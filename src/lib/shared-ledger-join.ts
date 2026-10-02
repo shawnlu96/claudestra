@@ -94,7 +94,7 @@ async function redeem(input: SharedLedgerJoinInput, req: SharedLedgerJoinRequest
   catch { throw new SharedLedgerJoinError("center returned an invalid join grant"); } // Never surface a body that may hold a bearer.
 }
 
-/** Redeem → 0600 credential → binding → read identities back once and confirm the center accepts the new bearer. */
+/** Confirm the center accepts the bearer before replacing any local credential or binding. */
 export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<SharedLedgerJoinResult> {
   const parsed = parseSharedLedgerJoinCode(input.code);
   if (!parsed) throw new SharedLedgerJoinError("invalid join code");
@@ -109,6 +109,12 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
   const project = grant.projects[0]!;
   const credential: SharedLedgerLocalCredential = { localSubject: input.subject, kind, centerId: grant.centerId, baseUrl,
     teamId: grant.teamId, personId: grant.personId, instanceId: grant.instanceId, bearer: grant.bearer, projects: grant.projects };
+  try {
+    const features = await new SharedLedgerClient(credential, input.key, { fetch: input.fetch, timeoutMs: input.timeoutMs }).features();
+    if (features.teamId !== grant.teamId) throw new Error("team mismatch");
+  } catch {
+    throw new SharedLedgerJoinError("joined, but the center did not accept the new credential"); // Client errors may carry response detail.
+  }
   await writeSharedLedgerCredential(credential, dir);
   const localProjectId = input.localProjectId ?? project.projectId;
   await setSharedLedgerBinding({ centerId: grant.centerId, teamId: grant.teamId, projectId: project.projectId, localProjectId }, dir);
@@ -116,12 +122,6 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
     resolveSharedLedgerCredential(input.subject, kind, b.centerId, b.teamId, b.projectId, "read", dir));
   if (!identities.some((b) => b.centerId === grant.centerId && b.projectId === project.projectId)) {
     throw new SharedLedgerJoinError("joined, but the local identity did not read back");
-  }
-  try {
-    const features = await new SharedLedgerClient(credential, input.key, { fetch: input.fetch, timeoutMs: input.timeoutMs }).features();
-    if (features.teamId !== grant.teamId) throw new Error("team mismatch");
-  } catch {
-    throw new SharedLedgerJoinError("joined, but the center did not accept the new credential"); // Client errors may carry response detail.
   }
   return { centerId: grant.centerId, teamId: grant.teamId, personId: grant.personId, projectId: project.projectId, localProjectId,
     kind, expiresAt: grant.expiresAt, identities: identities.length };

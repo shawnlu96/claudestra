@@ -31,6 +31,22 @@ afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: tru
 const admin = (...a: string[]) => runAdmin(["invite", "--db", db, "--team", "team-a", "--project", "project-a", "--ttl", "1h", ...a]);
 
 describe("shared ledger enrollment end to end", () => {
+  test("failed center confirmation preserves existing credentials and bindings", async () => {
+    const dir = join(root, "state-confirm"), key = newKey(), instanceId = "instance-confirm", subject = "owner:self";
+    const first = admin("--person", "peer-confirm", "--code", "peer-confirm", "--role", "member", "--actions", "read");
+    const joined = await joinSharedLedger({ url, code: String(first.joinCode), key, instanceId, subject, stateDir: dir });
+    const files = ["shared-ledger-credentials.json", "shared-ledger-bindings.json"].map((name) => join(dir, name));
+    const before = files.map((path) => readFileSync(path, "utf8"));
+    let calls = 0;
+    const fakeFetch = (async () => ++calls === 1 ? Response.json({ centerId: joined.centerId, teamId: "team-a", personId: "peer-other",
+      instanceId, bearer: randomBytes(32).toString("base64url"), expiresAt: Date.now() + 60_000, role: "member",
+      projects: [{ projectId: "project-a", actions: ["read"] }] }) : Response.json({}, { status: 403 })) as unknown as typeof fetch;
+    await expect(joinSharedLedger({ url: "https://other.example/", code: String(first.joinCode), key, instanceId, subject,
+      stateDir: dir, fetch: fakeFetch })).rejects.toThrow("center did not accept");
+    expect(calls).toBe(2);
+    expect(files.map((path) => readFileSync(path, "utf8"))).toEqual(before);
+  });
+
   test("legacy single-project credentials remain readable and replacement is project scoped", async () => {
     const dir = mkdtempSync(join(root, "legacy-"));
     const credential = { localSubject: "owner:self", kind: "person" as const, centerId: "center-a", baseUrl: url,

@@ -36,6 +36,33 @@ async function send(h: ReturnType<typeof center>["handle"], b: string, now = Dat
 const REJECTED = { status: 403, body: { code: "join_rejected", message: "Join rejected" } };
 
 describe("shared ledger join codes (center)", () => {
+  test("enrolling an active member preserves their existing display code", async () => {
+    const c = center(), key = newKey();
+    expect((await send(c.handle, body(createJoinCode(c.store, invite()).code, key))).status).toBe(200);
+    const next = createJoinCode(c.store, invite({ projectId: "project-b", memberCode: "new-display" }));
+    expect((await send(c.handle, body(next.code, key))).status).toBe(200);
+    expect(c.store.get<{ code: string; status: string }>("SELECT code,status FROM members WHERE teamId=? AND personId=?", "team-a", "peer-a"))
+      .toEqual({ code: "peer-a", status: "active" });
+  });
+
+  test("removed member cannot redeem a pending code or recover old bearer authority", async () => {
+    const c = center(), key = newKey(), service = new LedgerService(c.store);
+    const first = createJoinCode(c.store, invite());
+    const pending = createJoinCode(c.store, invite({ projectId: "project-b", actions: ["read"] }));
+    const grant = (await send(c.handle, body(first.code, key))).body;
+    const read = () => service.handle(signSharedLedgerRequest({ method: "GET", path: "/v1/teams/team-a/features", body: "",
+      bearer: grant.bearer, instanceId: "instance-a", ts: String(Math.floor(Date.now() / 1000)),
+      attemptNonce: randomBytes(16).toString("hex") }, key), Date.now());
+    expect(read().status).toBe(200);
+    c.store.run("UPDATE members SET status='removed' WHERE teamId=? AND personId=?", "team-a", "peer-a");
+    expect(read().status).toBe(403);
+    expect(await send(c.handle, body(pending.code, key))).toEqual(REJECTED);
+    expect(read().status).toBe(403);
+    expect(c.store.get<{ status: string }>("SELECT status FROM members WHERE teamId=? AND personId=?", "team-a", "peer-a")!.status)
+      .toBe("removed");
+    expect(listJoinCodes(c.store).find((row) => row.id === pending.id)!.status).toBe("pending");
+  });
+
   test("one-time: second redeem and redeem with a fresh key are rejected identically", async () => {
     const c = center();
     const { code } = createJoinCode(c.store, invite());

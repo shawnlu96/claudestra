@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/shared-ledger/store.js";
@@ -18,6 +18,19 @@ beforeAll(() => {
   url = `http://127.0.0.1:${server.port}/`;
 });
 afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
+const stateFiles = ["shared-ledger-bindings.json", "shared-ledger-credentials.json"].map((name) => join(STATE_DIR, name));
+let savedState: { content: Buffer; mode: number }[];
+beforeEach(() => {
+  savedState = stateFiles.map((path) => existsSync(path)
+    ? { content: readFileSync(path), mode: statSync(path).mode & 0o777 } : { content: Buffer.alloc(0), mode: 0 });
+});
+afterEach(() => {
+  for (const [i, path] of stateFiles.entries()) {
+    const saved = savedState[i]!;
+    if (saved.mode) writeFileSync(path, saved.content, { mode: saved.mode });
+    else rmSync(path, { force: true });
+  }
+});
 const mint = (person: string) => createJoinCode(store, { teamId: "team-a", projectId: "project-a", personId: person, memberCode: person,
   role: "member", actions: ["read"], ttlMs: 3_600_000 }).code;
 async function run(args: string[], stdin = async () => "") {
