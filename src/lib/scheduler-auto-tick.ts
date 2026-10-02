@@ -27,6 +27,7 @@ import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
 import { peerPrHold } from "./peer-pr-hold.js";
+import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
@@ -368,6 +369,7 @@ class Card {
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
     if (backoff) return this.out("held", backoff);
+    const trainHold = plan.action === "merge" ? mergeSlotHold(this.task) : null; if (trainHold) return this.out("held", trainHold); // i28-MT1f2 让路列车
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);
     refusals.get(this.db)?.delete(this.task.id);
