@@ -28,14 +28,14 @@ function fixture() {
   return { db, ledgerPath, registryPath, lockPath, agents, registry, task, step };
 }
 
-test("ten idle sessions, two working authors, waiting author and current reviewer occupy three slots", async () => {
+test("ten idle sessions, two working authors, waiting author and current reviewer conservatively occupy four slots", async () => {
   const f = fixture();
   for (let i = 0; i < 10; i++) f.agents[`idle-${i}`] = { runtime: "codex", status: "active" };
   f.task("a", "build"); f.task("b", "build"); f.task("waiting", "review", "waiting", 2);
   f.step("waiting", "old-reviewer", 1); f.step("waiting", "reviewer", 2);
   for (const stage of ["merge", "live", "verified", "cancelled"]) f.task(stage, stage);
   f.registry();
-  expect([...workingCodexAgents(f.ledgerPath)].sort()).toEqual(["a", "b", "reviewer"]);
+  expect([...workingCodexAgents(f.ledgerPath)].sort()).toEqual(["a", "b", "old-reviewer", "reviewer"]);
   expect(await withCodexSlot(async () => "opened", f)).toBe("opened");
 });
 
@@ -53,7 +53,7 @@ test("six working sessions block; unknown creating reservations count and Claude
   }
 });
 
-test("current explicit steps override task agent and stale reviewers; idle scheduler bindings do not reserve slots", () => {
+test("explicit author steps override task agent; all bound review sessions reserve slots", () => {
   const f = fixture();
   for (const stage of ["spec", "restate", "build", "fix"]) {
     f.task(stage, stage, `old-${stage}`);
@@ -64,7 +64,7 @@ test("current explicit steps override task agent and stale reviewers; idle sched
   f.db.run("PRAGMA foreign_keys = OFF");
   f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
     VALUES ('binding', 'reviewer', 'bound', 's', 'codex', 'acp', 'active', 'intent', 0, 0)`).run();
-  expect([...workingCodexAgents(f.ledgerPath)].sort()).toEqual(["do-build", "do-fix", "do-restate", "do-spec"]);
+  expect([...workingCodexAgents(f.ledgerPath)].sort()).toEqual(["bound", "do-build", "do-fix", "do-restate", "do-spec", "stale"]);
 });
 
 test("unreadable registry and missing or broken ledger fail closed without creating a database", async () => {
@@ -86,32 +86,28 @@ test("R1 delivered write/fix rows still reserve all six authors across repeated 
   expect(workingCodexAgents(f.ledgerPath).size).toBe(6);
 });
 
-test("R1 old manual review step cannot hide the current scheduler reviewer", async () => {
+test("R3 custom keys and old reviewers count through same-round recovery, then leave with review stage", async () => {
   const f = fixture();
-  for (let i = 0; i < 5; i++) f.task(`author-${i}`, "build");
+  for (let i = 0; i < 4; i++) f.task(`author-${i}`, "build");
   f.task("review", "review", "waiting", 2); f.step("review", "old", 1);
   f.db.run("PRAGMA foreign_keys = OFF");
   f.agents.current = { runtime: "codex", status: "active" };
   f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
-    VALUES ('review', 'reviewer', 'current', 's', 'codex', 'acp', 'active', 'intent', 0, 0)`).run();
-  f.db.query("UPDATE tasks SET headSHA = 'head' WHERE id = 'review'").run();
-  f.db.query(`INSERT INTO events (ts, actor, project, target, kind, data) VALUES (0,'owner','p','review','stage','{"to":"review","round":2}')`).run();
-  f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
-    VALUES ('t68:s1:r2:review:a0','review','p','review','review','current',1,2,1,1,'head',1,'submitted','test',0,0)`).run();
+    VALUES ('review', 'reviewer', 'current', 's', 'codex', 'acp', 'active', 'custom-key', 0, 0)`).run();
   f.registry();
   expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(true);
-  expect(workingCodexAgents(f.ledgerPath).has("old")).toBe(false);
+  expect(workingCodexAgents(f.ledgerPath).has("old")).toBe(true);
+  expect(workingCodexAgents(f.ledgerPath).size).toBe(6);
   expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
   moveStage(f.db, { actor: "owner" }, { taskId: "review", from: "review", to: "blocked", text: "temporary review interruption" });
   moveStage(f.db, { actor: "owner" }, { taskId: "review", from: "blocked", to: "review" });
   expect(workingCodexAgents(f.ledgerPath).size).toBe(6);
   expect(await withCodexSlot(async () => "opened", f)).toMatchObject({ kind: "wait" });
-  f.db.query("UPDATE tasks SET round = 3 WHERE id = 'review'").run();
+  f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'review'").run();
   expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(false);
-  f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,recipient,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
-    VALUES ('review-swap:s1:r3','review','p','reviewer','ensure_session','current',1,2,1,1,'head',1,'done','test',0,0)`).run();
-  f.db.query("UPDATE scheduler_sessions SET createIntentId = 'review-swap:s1:r3' WHERE taskId = 'review'").run();
-  expect(workingCodexAgents(f.ledgerPath).has("current")).toBe(true);
+  expect(workingCodexAgents(f.ledgerPath).has("old")).toBe(false);
+  expect(workingCodexAgents(f.ledgerPath).size).toBe(4);
+  expect(await withCodexSlot(async () => "opened", f)).toBe("opened");
 });
 
 test("R1 real manual start and reviewer ensure use the current custom ledger before side effects", async () => {

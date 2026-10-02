@@ -14,25 +14,20 @@ export function workingCodexAgents(path = LEDGER_PATH): Set<string> {
       const tasks = db.query("SELECT * FROM tasks WHERE stage IN ('spec','restate','build','fix','review')").all();
       for (const row of tasks) {
         const task = toTask(row as Record<string, unknown>);
-        const step = stepAtStage(steps.get(task.id) ?? [], task);
-        if (step && (task.stage !== "review" || step.round === task.round)) {
-          if (step.executorKind === "agent") agents.add(step.executor);
-          continue;
-        }
+        const rows = steps.get(task.id) ?? [];
         if (task.stage !== "review") {
-          if (task.agent) agents.add(task.agent);
+          const step = stepAtStage(rows, task);
+          if (step?.executorKind === "agent") agents.add(step.executor);
+          else if (!step && task.agent) agents.add(task.agent);
           continue;
         }
-        // Intent ids encode the round; blocked recovery keeps that round and cannot invalidate its work.
-        const session = db.query(`SELECT agent FROM scheduler_sessions WHERE taskId = ? AND role = 'reviewer'
-          AND state = 'active' AND transport != 'peer' AND EXISTS (
-            SELECT 1 FROM scheduler_intents i WHERE i.taskId = scheduler_sessions.taskId
-              AND instr(i.id || ':', ':r' || ? || ':') > 0 AND (
-                i.id = scheduler_sessions.createIntentId OR (
-                  i.recipient = scheduler_sessions.agent AND i.action = 'review'
-                  AND i.status IN ('submitted','done','unknown') AND i.head = ?)))
-          ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(task.id, task.round, task.headSHA) as { agent: string } | null;
-        if (session) agents.add(session.agent);
+        // Review bindings outlive rounds; retaining every local reviewer prevents unsafe undercounting.
+        for (const step of rows) {
+          if ((step.step === "review" || step.step === "final_review") && step.executorKind === "agent") agents.add(step.executor);
+        }
+        const sessions = db.query(`SELECT agent FROM scheduler_sessions
+          WHERE taskId = ? AND role = 'reviewer' AND transport != 'peer'`).all(task.id) as { agent: string }[];
+        for (const session of sessions) agents.add(session.agent);
       }
       return agents;
     })();
