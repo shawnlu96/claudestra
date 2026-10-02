@@ -1,3 +1,5 @@
+import { rollback } from "./shared-ledger-gate-rollback.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import { runLocalStart, type QueuedStart } from "./scheduler-local-runtime-start.js";
 /**
  * start_node 的执行：按预检出的 StartPlan 一步步做（= PM 原来的 mk-auto.sh），任何一步失败就把已做的倒序撤掉，回报停在哪一步。
@@ -37,9 +39,9 @@ export interface StepIO {
 }
 
 const STEP_NAMES = ["task-new", "spec", "worktree", "prompt", "agent", "task-set", "restate", "workflow", "bind"] as const;
-type StepName = (typeof STEP_NAMES)[number];
+export type StepName = (typeof STEP_NAMES)[number];
 
-interface Step {
+export interface Step {
   name: StepName;
   run(): Promise<string | null>;
   /** run 报失败后查库：这一笔其实已经落了（结果丢了）→ 当成功接着走 */
@@ -154,6 +156,7 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
       if (await tip(io, p, `refs/heads/${p.branch}`)) return `分支 ${p.branch} 已存在（预检之后才出现，不是这次建的）`;
       mine.base = await tip(io, p, `${p.base}^{commit}`);
       if (!mine.base) return `起点 ${p.base} 找不到提交`;
+      requireLocalSharedLedgerPlanning(p.feature.id);
       const w = await io.git(p.repo, ["worktree", "add", "--lock", "--reason", tag, "-b", p.branch, p.worktree, p.base]);
       if (!w.ok) return `git worktree add 失败：${w.out}`;
       mine.placed = mine.branch = true;
@@ -258,6 +261,7 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
   for (const s of steps) {
     let err: string | null;
     try {
+      requireLocalSharedLedgerPlanning(p.feature.id);
       err = await s.run();
     } catch (e) {
       err = (e as Error).message;
@@ -274,20 +278,4 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
   if (p.peer) return { ok: true, taskId: p.taskId, placement: `peer:${p.peer.name}`, branch: p.branch, steps: names, reconciled };
   return { ok: true, taskId: p.taskId, agent: p.agent, branch: p.branch, worktree: p.worktree, prompt: p.promptPath, steps: names, reconciled };
   });
-}
-
-async function rollback(steps: Step[]): Promise<{ rolledBack: StepName[]; leftovers: string[] }> {
-  const rolledBack: StepName[] = [];
-  const leftovers: string[] = [];
-  for (const s of steps) {
-    if (!s.undo) continue;
-    try {
-      const err = await s.undo();
-      if (err) leftovers.push(`${s.name}：${err}`);
-      else rolledBack.push(s.name);
-    } catch (e) {
-      leftovers.push(`${s.name}：${(e as Error).message}`);
-    }
-  }
-  return { rolledBack, leftovers };
 }

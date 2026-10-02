@@ -1,3 +1,4 @@
+import { requireLocalSharedLedgerPlanning } from "../lib/shared-ledger-gate.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { effectiveNodes, getDagVersion, resolveFeature } from "../lib/ledger-feature.js";
 import { requireManager } from "../lib/ledger-feature-write.js";
@@ -11,6 +12,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 async function featureSplit(c: LedgerCli): Promise<Result> {
   const f = resolveFeature(c.db, c.p.pos[1], storedOrigin(c.db));
   requireManager(c.db, c.deps.actor, f.project);
+  if (!c.p.bools.has("dry-run")) requireLocalSharedLedgerPlanning(f.id);
   const map = parseSplitMap(JSON.parse(readFileSync(c.need("plan"), "utf8")));
   if (!c.p.bools.has("dry-run")) return { ok: true, ...applyFeatureSplit(c.db, c.ctx(), f.id, map) };
   const plan = planFeatureSplit(c.db, f.id, map);
