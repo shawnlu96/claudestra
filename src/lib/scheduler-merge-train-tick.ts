@@ -45,7 +45,15 @@ export function fileTrainStore(dir = join(stateDir(), "merge-train")): TrainStor
       let names: string[] = [];
       try { names = readdirSync(dir).filter((n) => n.endsWith(".json")); }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; } // no directory yet = no train ever formed
-      return names.map((n) => (readJsonStateSync(join(dir, n)) as { data?: TrainFile }).data?.state ?? null).filter((s): s is TrainState => !!s);
+      // Same three states as read(): a file gone since the listing is no train, a corrupt one throws (the merge override must not
+      // read it as "not a member" and fall back to a plain merge that skips the train's recheck of main and sibling heads).
+      return names.flatMap((n) => {
+        const r = readJsonStateSync(join(dir, n));
+        if (r.status === "missing") return [];
+        if (r.status === "corrupt") throw new Error(`合并列车状态文件损坏：${join(dir, n)}（${r.error}）`);
+        const state = (r.data as TrainFile).state;
+        return state ? [state] : [];
+      });
     },
     save(state) {
       const f = read(state.project);
@@ -180,7 +188,12 @@ export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = d
     ...base,
     train: (run: MergeRun) => trainGate(ctx.store.load(run.project), run, io),
     async merge(prRef, head) {
-      const s = clearedMember(ctx.store.all(), prRef, head);
+      let states: TrainState[];
+      try { states = ctx.store.all(); }
+      catch (e) { // fail closed: no merge sent; the driver journals this reason instead of a plain merge pinned to the PR head only
+        throw new Error(`合并列车状态读不出来，本轮不合并（不退回普通合并）：${(e as Error).message}`);
+      }
+      const s = clearedMember(states, prRef, head);
       if (!s) return base.merge(prRef, head);
       await recheckCleared(s, io);
       return ctx.gh.mergeMatchHead(prRef, head);
