@@ -6,12 +6,13 @@ import { LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent } from "./ledger-tx.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { parseDisputes, validateDisputes, type FindingDispute } from "./review-arbiter.js";
+import { DELIVERY_NOTE, REPRO_NOTE_RE } from "./lend-delivery-amend-code.js";
 
 export function deliverDisputes(db: Database, ctx: WriteCtx, task: LedgerTask, raw: unknown, text?: string): { disputes?: FindingDispute[] } {
   const events = listEvents(db, { project: task.project, target: task.id });
   const repair = events.some((e) => e.data.op === "fix_strategy" && e.data.specRev === task.specRev && e.data.round === task.round);
-  if (task.stage === "fix" && repair && !/复现测试(?:名)?[:：]\s*\S+/.test(text ?? "")) {
-    throw new LedgerError("invalid", "换会话修复交付说明必须写「复现测试：<测试名>」，并说明先红后绿结果");
+  if (task.stage === "fix" && repair && !REPRO_NOTE_RE.test(text ?? "")) { // 出借交付回 delivery_note：B 让 worker 补写说明重交
+    throw new LedgerError("invalid", "换会话修复交付说明必须写「复现测试：<测试名>」，并说明先红后绿结果", { lend: DELIVERY_NOTE, missing: "复现测试" });
   }
   if (raw === undefined) return {};
   let decoded = raw;
