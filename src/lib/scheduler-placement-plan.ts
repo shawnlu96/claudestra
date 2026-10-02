@@ -1,15 +1,16 @@
 import { localReviewFallback } from "./scheduler-local-families-placement.js";
 /**
  * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
- * card pinned to a peer never starts writing anywhere else. Facts come from the snapshot; the decision is placeFor
- * (scheduler-placement.ts). Each hook answers a peer, a wait (pin / write lease / local tier off), or null = local as before.
+ * card pinned to a peer never starts writing anywhere else. Snapshot facts pass through placeWithRetries for temporary
+ * refusal debounce, then family/tier placement. Each hook answers a peer, a wait, or null = local as before.
  * Proto-1 peers keep the i28-R9 rule unchanged (poolTarget in overflow mode: only when local reviewers are full, Codex
  * only, one attempt per round), with its exact intent text, so a machine with no v2 peer plans as it did before W5.
  * tests/scheduler-placement-plan.test.ts, tests/scheduler-no-peer-parity.test.ts.
  */
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { PEER_PLACEMENT, peerFamily, placeFor, allowLegacyReview, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-family-pick.js";
+import { PEER_PLACEMENT, peerFamily, allowLegacyReview, type PeerFacts, type PlaceRole } from "./scheduler-family-pick.js";
+import { placementHistory, placeWithRetries as placeFor, type RetryPlacementFacts as PlacementFacts } from "./scheduler-placement-tried.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
@@ -44,7 +45,7 @@ function snapshotPlacementFacts(s: PlannerSnapshot, since: number, role: PlaceRo
     peers: (p?.peers ?? []).map(peerFacts),
     local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers,
       room: role === "review" ? reviewers < s.maxWorkers : !!own || (s.workerCount < s.maxWorkers && !!s.freeWorkerSlot) },
-    tried: s.intents.filter((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === s.task.headSHA).map((i) => i.recipient!.slice(POOL_RECIPIENT.length)),
+    ...placementHistory(s, since),
     locksFree: locksFree(s),
   };
 }
