@@ -7,7 +7,7 @@ const WORDS: Record<string, string> = {
   "到期": "Expires in", "角色": "Role", "审查": "Review", "写代码": "Write", "提交授权": "Grant access", "取消": "Cancel", "添加": "Add",
   "没有可授权的 peer": "No peer available", "等待": "Waiting", "在跑": "Running", "停止中": "Stopping", "停不下来": "Not stopping",
   "已停": "Stopped", "已交付": "Delivered", "开跑": "Started", "交付": "Delivered", "停止": "Stopped", "待补发": "Notice pending",
-  "已到期": "Expired", "加载失败": "Failed to load", "打开会话": "Open session",
+  "已到期": "Expired", "加载失败": "Failed to load", "打开会话": "Open session", "没起来": "Not started",
   "这会让发起方的任务在你的用户下随时起 shell": "This lets the requester's tasks start a shell as your user at any time",
 };
 
