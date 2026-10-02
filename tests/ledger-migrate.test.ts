@@ -347,7 +347,7 @@ describe("写事件的底座只给写入模块", () => {
     walk(root);
     expect(tx.sort()).toEqual(["lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
-      "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-write.ts",
+      "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
       "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts",
       "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",

@@ -17,6 +17,7 @@ import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
 import { DAG_CMDS } from "./ledger-dag-cmds.js";
+import { FEATURE_SPLIT_CMDS } from "./ledger-feature-split-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
@@ -65,7 +66,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
-  ...FEATURE_CMDS,
+  ...FEATURE_CMDS, ...FEATURE_SPLIT_CMDS,
   ...FEATURE_MIGRATE_CMDS,
   ...DAG_CMDS,
   ...READ_CMDS,
