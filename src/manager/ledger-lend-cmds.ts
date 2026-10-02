@@ -222,8 +222,11 @@ async function sweep(c: LedgerCli): Promise<Result> {
 
 /** sent=false = 请求没出这个进程或 bridge 明确拒了（可重试）；sent=true 却没回执 = 可能已送到（不重发） */
 async function bridgeRelay(target: string, text: string): Promise<RelaySend> {
-  const r = await bridgeSend({ type: "route_to_agent", targetName: target, text, fromName: "lend", oneShot: true }, { timeoutMs: 30_000 });
-  return r.ok ? { ok: true } : { ok: false, error: r.error, maybeSent: r.sent && !r.rejected };
+  const r = await bridgeSend({ type: "route_to_agent", targetName: target, text, fromName: "lend", oneShot: true, lendSupplement: target.includes("@") }, { timeoutMs: 30_000 });
+  if (!r.ok) return { ok: false, error: r.error, maybeSent: r.sent && !r.rejected };
+  if (r.result?.ok === false) return r.result as RelaySend;
+  if (target.includes("@") && r.result?.remoteAccepted !== true) return { ok: false, error: "bridge 未返回远端接收回执", maybeSent: true };
+  return { ok: true };
 }
 
 /**
@@ -241,7 +244,7 @@ async function relay(c: LedgerCli): Promise<Result> {
     try {
       r = await (d.relay ?? bridgeRelay)(row.target, row.text);
     } catch (e) {
-      r = { ok: false, error: (e as Error).message };
+      r = { ok: false, error: (e as Error).message, maybeSent: true };
     }
     if (r.ok) sent.push(row.key);
     notified += await tell(c, settleRelay(c.db, c.ctx(), row.key, r));

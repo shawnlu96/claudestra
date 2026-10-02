@@ -176,7 +176,7 @@ describe("验收 2：推送内容带密钥 / 内网地址：不推，PM 收到�
     expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused"]);
     expect(notices.filter((n) => n.includes(orderId) && n.includes("没推给对方"))).toHaveLength(1);
     // 拒过的这段不再推；之后干净的追加照常推
-    appendFileSync(spec, "- 干净的一条\n");
+    appendFileSync(spec, "\n- 干净的一条\n");
     await relay();
     expect(toWorker()).toHaveLength(1);
     expect(toWorker()[0]!.text).toContain("干净的一条");
@@ -272,4 +272,26 @@ describe("验收 4：单已交付 / 已取消后的追加不推", () => {
 
 test("lend-relay 只给 bridge（owner）调", async () => {
   expect(await run(["lend-relay"], "agent-pm")).toMatchObject({ ok: false, code: "forbidden" });
+});
+
+ test.each(["", "\n"])("relay-sensitive-context: split YAML value stays refused (%j)", async (gap) => {
+    const orderId = await claimed();
+    appendFileSync(spec, "api_key:\n");
+    await relay();
+    appendFileSync(spec, gap + "  placeholder-value\n");
+    await relay();
+    expect(toWorker()).toEqual([]);
+    expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused", "refused"]);
+ });
+
+test.each(["  ", ""])("relay-sensitive-context: repeated blank continuations keep refused header (%j)", async (indent) => {
+  const orderId = await claimed();
+  appendFileSync(spec, "api_key:\n");
+  await relay();
+  for (const value of ["placeholder-first", "placeholder-second"]) {
+    appendFileSync(spec, "\n" + indent + value + "\n");
+    await relay();
+  }
+  expect(toWorker()).toEqual([]);
+  expect(listRelays(db, orderId).filter((r) => r.kind === "spec").map((r) => r.state)).toEqual(["refused", "refused", "refused"]);
 });

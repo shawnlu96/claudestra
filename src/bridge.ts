@@ -2246,8 +2246,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             // 握手未完成(invite 后等回执的窗口,缺 outToken/baseUrl)会落到下面的
             // 未知 peer 报错,提示里带已配置列表
             if (httpPeer && httpPeer.outToken && httpPeer.baseUrl) {
-              const { routeToHttpPeer } = await import("./bridge/http-peer.js");
-              const result = routeToHttpPeer(
+              const { routeToHttpPeer, sendLendRelay } = await import("./bridge/http-peer.js");
+              const result = msg.lendSupplement === true ? await sendLendRelay(httpPeer, peerAgentName, String(msg.text || "")) : routeToHttpPeer(
                 ws, fromChannelId, fromName, httpPeer, peerAgentName,
                 String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,

@@ -1,14 +1,9 @@
 /**
- * i28-RS1：开工 / 修复单借出去之后，本机这边的补充自动送到持单的出借执行者，并告诉本机复述会话「代码不在本机写」。
- * - 持单期间（claimed）卡的规格文件变长了：只取新增的字节；复述有 PM 答复（restate-approve / restate-release / restate-hold 事件）：每条
- *   一段。每段按 key 只入队一次（lend_relays 主键），经现有的 send_to_agent 通道（route_to_agent，`<worker>@<peer>`，单发不等回）送出。
- * - 每段入队前过外发闸（order-wire-render.ts peerTextRefusal：疑似密钥、内网地址 / 个人信息一律拒，不改写）；拒了不推，记 refused 并通知 PM。
- * - 只推一次：发之前 pending → sending（CAS），送达 sent；bridge 明确没收下的回 pending 重试（MAX_TRIES 次后 failed，通知 PM）；
- *   sending 停太久（进程半路没了）当作 unknown 通知 PM，不重发——宁可让 PM 补一句，不让执行者收两遍。
- * - 单已交付 / 撤销 / 过期（不再 claimed）：不再扫，没发出的段记 dropped。
- * - 开工单挂给出借方时，给本机复述会话排一条固定说明（kind note），之后它 take_order 拿到的也是同一句（order-take.ts takeOrderResult）。
- * 基线（lend_relay_marks）在挂单时记：规格按挂单时内联的原文字节数；复述答复从本规格版本的复述记录之后算（开工单）或从挂单那一刻算（修复单）。
- * 推送和 PM 通知都在 CLI（`ledger lend-relay`，bridge 定时调）里做，这里只读写台账。tests/lend-spec-push.test.ts。
+ * Claimed write/fix orders relay spec appends and PM restate answers; keys deduplicate segments across scans.
+ * The sensitive gate includes prior semantic context so refused field headers cannot leak their later values.
+ * CLI settlement waits for authenticated remote acceptance: definite rejection retries, ambiguity goes to PM.
+ * Retired orders drop pending segments; local authors receive the same lent-away note as take_order.
+ * Baselines are recorded at offer; tests/lend-spec-push*.test.ts cover scan and transport boundaries.
  */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -22,7 +17,6 @@ import { WIRE_LIMITS } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { RelayState } from "./ledger-lend-relay-schema.js";
-export type { RelayState };
 
 type RelayKind = "spec" | "answer" | "note";
 
@@ -37,7 +31,7 @@ interface OrderRef { orderId: string; taskId: string; project: string; peer: str
 interface ClaimedRow extends OrderRef { worker: string; head: string }
 
 /** bridge 明确没收下（对方不在 / 握手不全）的段最多重试这么多次，之后 failed 并通知 PM */
-export const MAX_TRIES = 5;
+const MAX_TRIES = 5;
 /** sending 超过这么久没结（发送进程半路没了）：不知道送没送到，交 PM，不重发 */
 export const SENDING_STALE_MS = 10 * 60_000;
 /** 复述的 PM 答复：这三种 decision 事件（ledger-scheduler-write.ts recordRestateBrake、restate-approve） */
@@ -55,7 +49,7 @@ export function restateFacts(events: readonly LedgerEvent[], specRev: number): {
 }
 
 /** 本机复述会话：卡上没退役的作者会话绑定，否则当前这一步的本机执行者，否则卡上的本机 agent */
-export function localAuthorOf(db: Database, task: LedgerTask): string | null {
+function localAuthorOf(db: Database, task: LedgerTask): string | null {
   const s = getSchedulerSession(db, task.id, "author");
   if (s && s.state !== "retired" && s.transport !== "peer") return s.agent;
   const at = stepAtStage(stepsOf(db, task), task);
@@ -105,10 +99,10 @@ function relayText(o: ClaimedRow, kind: "spec" | "answer", part: string): string
 }
 
 /** 一段新内容：过闸（拒了记 refused + 告诉 PM），太长按行分段，每段一个 key */
-function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey: string, label: string, body: string, now: number, out: Notice[]): void {
+function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey: string, label: string, body: string, now: number, out: Notice[], context = body): void {
   const tell = (why: string) => out.push({ project: o.project, taskId: o.taskId,
     text: `出借单 ${o.orderId}（${o.taskId}，${o.peer}）的${label}没推给对方：${why}。要转就脱敏后手动 send_to_agent ${workerAddr(o)}` });
-  const bad = peerTextRefusal(body);
+  const bad = peerTextRefusal(context);
   if (bad) {
     if (enqueue(db, { key: baseKey, orderId: o.orderId, taskId: o.taskId, project: o.project, kind, target: workerAddr(o), text: "" }, "refused", bad, now)) tell(`外发闸拒了（${bad}）`);
     return;
@@ -122,6 +116,17 @@ function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey:
   }
   parts.forEach((p, i) => enqueue(db, { key: parts.length > 1 ? `${baseKey}#${i + 1}` : baseKey, orderId: o.orderId, taskId: o.taskId, project: o.project,
     kind, target: workerAddr(o), text: relayText(o, kind, p.slice(p.indexOf("\n") + 1)) }, "pending", null, now));
+}
+
+/** Only an explicit new heading, list item or field closes context; blank lines alone can be part of a value. */
+function specContext(spec: string, offset: number): string {
+  const prior = Buffer.from(spec, "utf8").subarray(0, offset).toString("utf8");
+  let start = 0;
+  for (const match of spec.matchAll(/\n[ \t]*\n(?=(?:#{1,6} |[-*+] |[A-Za-z_][\w.-]*[ \t]*:))/g)) {
+    if (match.index > prior.length) break;
+    start = match.index + match[0].length;
+  }
+  return spec.slice(start);
 }
 
 /**
@@ -144,7 +149,8 @@ export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerT
         const bytes = Buffer.from(spec, "utf8");
         if (bytes.length > o.specBytes) {
           const added = bytes.subarray(o.specBytes).toString("utf8");
-          if (added.trim()) addPiece(db, o, "spec", `${o.orderId}:spec:${o.specBytes}-${bytes.length}`, "规格追加", added.replace(/^\n+|\s+$/g, ""), now, out);
+          if (added.trim()) addPiece(db, o, "spec", `${o.orderId}:spec:${o.specBytes}-${bytes.length}`, "规格追加",
+            added.replace(/^\n+|\s+$/g, ""), now, out, specContext(spec, o.specBytes));
         } else if (bytes.length < o.specBytes) {
           out.push({ project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId}）持单期间规格文件变短了（${o.specBytes} → ${bytes.length} 字节）：只有追加会自动推，改过的地方请手动转给 ${workerAddr(o)}` });
         }
