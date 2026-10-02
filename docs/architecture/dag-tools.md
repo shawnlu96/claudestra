@@ -101,3 +101,6 @@ empty DAGs have a null completion time. Feature dependencies propagate maximum E
 `eta.basis` supplies perHour, samples, k, cpHours, remaining and share. All computations inject now.
 
 Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes include node/card/PM/time); bridge restart clears it, so call `start_node` again.
+
+UI cards (i28-UIQ1, `src/lib/spec-lint.ts`): a spec whose head says `模板：ui` needs non-empty `## 复用对象` and `## 对照基准` (「无，新界面」 must cite an owner `decision #<seq>`); start_node's preflight refuses with `spec_lint`, and autostart inherits it (one PM notice per arm).
+Whole-page check (`src/lib/ui-acceptance.ts`): dag-init / dag-rewrite keep one system-managed `PAGEOK` node depending on every ui node (spec head or bound workflow = ui); `feature-set --status done` is refused until its card is verified; ui review orders carry the spec's 对照基准 and `UI_BASIS_RULE`.

@@ -13,13 +13,13 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, LedgerError } from "./ledger-store.js";
 import { specSection } from "./review-pack.js";
-import { parseSpecHead } from "./scheduler-autostart.js";
+import { isUiSpec } from "./spec-lint.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 
 export const PAGE_CHECK_KEY = "PAGEOK";
-export const PAGE_CHECK_LINE = "整页验收（PM）：中继 + owner 设备 + 生产数据，和对照基准同屏截图逐栏对台账";
-/** PAGEOK 卡的验收清单（固定）：PM 开这张卡时照抄进规格 */
-export const PAGE_CHECK_LIST = [
+const PAGE_CHECK_LINE = "整页验收（PM）：中继 + owner 设备 + 生产数据，和对照基准同屏截图逐栏对台账";
+/** PAGEOK 卡的验收清单（固定）：feature 改 done 被拒时随说明给 PM，开这张卡时照抄进规格 */
+const PAGE_CHECK_LIST = [
   "经中继（不是本机直连）打开入口",
   "用 owner 的设备视角（同尺寸 / 同主题）",
   "用生产数据，不用短标题夹具",
@@ -32,17 +32,12 @@ function specDirOf(db: Database): string | null {
   return db.filename && db.filename !== ":memory:" ? join(dirname(db.filename), "ledger", "docs", "tasks") : null;
 }
 
-const specIsUi = (text: string | null): boolean => {
-  const t = text ? parseSpecHead(text).template : null;
-  return !!t?.ok && t.template === "ui";
-};
-
 /** 绑的卡 workflow 模板是 ui，或节点规格卡卡首写了「模板：ui」 */
-export function isUiNode(db: Database, f: Feature, n: DagNode, readSpec?: (taskId: string) => string | null): boolean {
+function isUiNode(db: Database, f: Feature, n: DagNode, readSpec?: (taskId: string) => string | null): boolean {
   if (n.taskId && getWorkflow(db, n.taskId)?.template === "ui") return true;
   const taskId = n.taskId ?? cardNames(db, f, n.key, n).taskId;
   const dir = specDirOf(db);
-  return specIsUi(readSpec ? readSpec(taskId) : dir ? readTextSoft(join(dir, `${taskId}.md`)) : null);
+  return isUiSpec(readSpec ? readSpec(taskId) : dir ? readTextSoft(join(dir, `${taskId}.md`)) : null);
 }
 
 const phaseOf = (db: Database, n: DagNode): NodePhase => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
@@ -75,7 +70,8 @@ export function requirePageCheck(db: Database, f: Feature): void {
   if (!page) return;
   const stage = page.taskId ? getTask(db, page.taskId)?.stage : null;
   if (stage === "verified" || stage === "done") return;
-  throw new LedgerError("conflict", `feature ${f.id} 的整页验收节点 ${PAGE_CHECK_KEY} 还没 verified（${page.taskId ? `卡 ${page.taskId} 在 ${stage ?? "找不到"}` : "没绑卡"}），不能改成 done`);
+  const where = page.taskId ? `卡 ${page.taskId} 在 ${stage ?? "找不到"}` : "没绑卡";
+  throw new LedgerError("conflict", `feature ${f.id} 的整页验收节点 ${PAGE_CHECK_KEY} 还没 verified（${where}），不能改成 done。验收清单：${PAGE_CHECK_LIST.join("；")}`);
 }
 
 /**
@@ -84,7 +80,7 @@ export function requirePageCheck(db: Database, f: Feature): void {
  */
 export function uiReviewBasis(db: Database | undefined, task: LedgerTask, specText?: string | null): string | undefined {
   const text = specText !== undefined ? specText : readTextSoft(specPathFor(task, db ? getMeta(db, task.project).docsDir : null));
-  if (!(db && getWorkflow(db, task.id)?.template === "ui") && !specIsUi(text)) return undefined;
+  if (!(db && getWorkflow(db, task.id)?.template === "ui") && !isUiSpec(text)) return undefined;
   const basis = text ? specSection(text, "对照基准") : [];
   return ["对照基准（规格原文，逐项对照截图审）：", ...(basis.length ? basis : ["（规格没写「## 对照基准」）"])].join("\n");
 }
