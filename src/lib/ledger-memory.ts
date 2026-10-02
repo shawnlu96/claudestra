@@ -4,9 +4,10 @@
  * 事件只做时间线与审计、不复制正文。事件直接按 ledger-asks.ts 的写法插（带 origin / originSeq），不走 ledger-tx：记忆不推阶段。
  * 这里只核结构、长度、锚点与脱敏；谁能写哪种记忆 / mark（身份取 verified 会话）、memoryLint 的防噪规则在工具层（M2）。
  *
- * 脱敏分两类（PM 定 10-03 03:01）：命中密钥 / 令牌 / 内网地址 / 个人信息形状的（dispatch-redact 的规则）→ 拒绝写入，哪儿都不落，
- * 报错只说字段位置不带原文；不是密钥但不该出主场的内部内容（本项目 feature 标题、DAG 节点标题、出借 peer 名、调用方给的词）→ 照写，
- * visibility 降为 home（只在本机，不进共享同步），结果里带 homeReason。
+ * 脱敏分两类：命中密钥 / 令牌 / IP / 个人信息形状的（dispatch-redact 的规则加任何 IP）→ 拒绝写入，哪儿都不落（本机库也会被备份、同步），
+ * 所有调用方给的文本字段（含 project、锚点、actor、dedupKey 等元数据）都过这道闸，报错只说字段位置不带原文；
+ * 不是密钥但不该出主场的内部内容（本项目 feature 标题、DAG 节点标题、出借 peer 名、调用方给的词）→ 记忆照写、visibility 降为 home
+ * （只在本机，不进共享同步），结果里带 homeReason；mark 没有自己的 visibility、随记忆走，所以 team 记忆上 reason 含内部名字的 mark 拒写。
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -18,7 +19,7 @@ import {
   MEMORY_AUTHOR_ROLES, MEMORY_KINDS, MEMORY_MARKS, MEMORY_VIAS, MEMORY_VISIBILITIES,
   type MemoryAuthorRole, type MemoryKind, type MemoryMarkKind, type MemoryVia, type MemoryVisibility,
 } from "./ledger-memory-schema.js";
-import { memoryStatus, type FoldMark, type MemoryState } from "./ledger-memory-fold.js";
+import { memoryStatus, type FoldMark, type MemorySourceRef, type MemoryState } from "./ledger-memory-fold.js";
 
 /** 写入时过的脱敏规则版本；规则改了加一，同步上传前按它判要不要重过（§7） */
 const MEMORY_REDACTION_VERSION = 1;
@@ -27,8 +28,6 @@ const MEMORY_EVENT_KIND = "memory";
 const MEMORY_LIMITS = { title: 80, summary: 600, decision: 600, symptom: 300, rule: 300, sourceNote: 200, reason: 300, files: 20, file: 200 } as const;
 const FAMILY_RE = /^[\w.-]{1,64}$/;
 
-/** 来源事件引用：有 origin 的用 {origin, originSeq}；老事件没有 origin 的用 {seq}，只在本机有效 */
-type MemorySourceRef = { origin: string; originSeq: number } | { seq: number };
 type PitfallBody = { symptom: string; rule: string };
 
 export interface Memory {
@@ -121,6 +120,8 @@ export interface MarkInput {
   source?: MemorySourceRef | null;
   /** 自动 mark 用 `auto:<mark>:<memoryId>:<taskId>:<来源事件>`：多处观察到同一件事只记一条 */
   dedupKey?: string | null;
+  /** 调用方额外认定为内部内容的词；team 记忆上 reason 命中即拒 */
+  internalTerms?: readonly string[];
 }
 
 export interface MarkWrite {
@@ -171,12 +172,23 @@ function repoPath(field: string, v: unknown): string {
 
 // ── 脱敏 ──
 
+const H = "[0-9a-f]{1,4}";
+/**
+ * IPv6 各种压缩位置（全写、头 / 中 / 尾压缩）。前面不能贴着字母数字或「十六进制位 + 冒号」（免得从地址中间起匹配、把 `Vec::new`
+ * 这类代码当地址），后面不能贴着字母数字或「冒号 + 十六进制位」（句末冒号照认）；单独的 `::` 不算
+ */
+const IPV6 = [
+  `(?:${H}:){7}${H}`,
+  `(?:${H}:){1,7}:`,
+  ...[1, 2, 3, 4, 5, 6].map((k) => `(?:${H}:){1,${7 - k}}(?::${H}){1,${k}}`),
+  `:(?::${H}){1,7}`,
+].join("|");
 /** 任何 IP（含公网）：dispatch-redact 只遮内网段，记忆会进共享台账，公网地址也不该落（同 shared-ledger-scrub 的口径） */
-const ANY_IP = /\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:[a-f0-9]{1,4}:){2,}[a-f0-9:]+\b/i;
+const ANY_IP = new RegExp(`\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b|(?<![0-9a-z_]|[0-9a-f]:)(?:${IPV6})(?![0-9a-z_]|:[0-9a-f])`, "i");
 
 /** 命中密钥 / 地址 / 个人信息形状的字段名（只报位置）；空 = 没命中 */
-function secretHits(fields: Record<string, string | null | undefined>): string[] {
-  return Object.entries(fields).filter(([, v]) => !!v && (redactForPeer(v).count > 0 || ANY_IP.test(v))).map(([k]) => k);
+function secretHits(fields: Record<string, unknown>): string[] {
+  return Object.entries(fields).filter(([, v]) => typeof v === "string" && !!v && (redactForPeer(v as string).count > 0 || ANY_IP.test(v as string))).map(([k]) => k);
 }
 
 /** 本项目的内部名字：feature 标题、各 feature 当前 DAG 版本的节点标题，加本机出借 peer 名（表在才查） */
@@ -322,7 +334,10 @@ export function recordMemory(db: Database, ctx: MemoryCtx, input: MemoryInput): 
   if (input.decisionOf && !decisionOf?.origin) invalid("decisionOf 要是 {origin, originSeq}");
   let visibility = oneOf("visibility", input.visibility ?? "team", MEMORY_VISIBILITIES);
 
-  const secret = secretHits({ title, body, family, sourceNote, head, ...Object.fromEntries(files.map((f, i) => [`files[${i}]`, f])) });
+  const secret = secretHits({
+    actor: ctx.actor, project, title, body, family, sourceNote, head, featureId: input.featureId, nodeKey: input.nodeKey, taskId: input.taskId,
+    ...Object.fromEntries(files.map((f, i) => [`files[${i}]`, f])),
+  });
   if (secret.length) invalid(`脱敏闸命中（密钥 / 地址 / 个人信息形状），拒绝写入：${secret.join(", ")}`);
   const digest = memoryDigest(title, body, files);
 
@@ -380,7 +395,7 @@ export function markMemory(db: Database, ctx: MemoryCtx, input: MarkInput): Mark
   if ((mark === "link_fix" || mark === "fixed" || mark === "reopen") && !taskId) invalid(`${mark} 要给 taskId（修它的卡）`);
   if ((mark === "supersede") !== !!by) invalid("by 只给 supersede、supersede 必须给 by");
   if (by === memoryId) invalid("不能 supersede 成自己");
-  const secret = secretHits({ reason });
+  const secret = secretHits({ actor: ctx.actor, memoryId, taskId, by, reason, dedupKey });
   if (secret.length) invalid(`脱敏闸命中（密钥 / 地址 / 个人信息形状），拒绝写入：${secret.join(", ")}`);
 
   return busyAsLedgerError("写记忆标记", () =>
@@ -399,6 +414,9 @@ export function markMemory(db: Database, ctx: MemoryCtx, input: MarkInput): Mark
       if (fixMark && !(memory.kind === "pitfall" && memory.fixable)) invalid(`${mark} 只对 fixable 的坑有意义，${memoryId} 不是`);
       if (by && !getMemory(db, by)) throw new LedgerError("not_found", `没有记忆 ${by}（supersede 要指向已写入的新记忆）`);
       if (taskId && !db.prepare("SELECT 1 FROM tasks WHERE id = ?").get(taskId)) throw new LedgerError("not_found", `没有卡 ${taskId}`);
+      if (reason && memory.visibility === "team" && internalHit(reason, [...internalNames(db, memory.project), ...(input.internalTerms ?? [])])) {
+        invalid("reason 含本项目内部名字（feature / 节点标题、peer 名等），mark 随 team 记忆共享，拒绝写入：去掉后重写");
+      }
       const origin = requireOrigin(db);
       const originSeq = (db.prepare("SELECT COALESCE(MAX(originSeq), 0) + 1 AS n FROM memory_marks WHERE origin = ?").get(origin) as { n: number }).n;
       const now = ctx.now ?? Date.now();

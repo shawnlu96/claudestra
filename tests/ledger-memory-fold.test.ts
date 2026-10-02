@@ -39,6 +39,30 @@ describe("转移", () => {
     expect(memoryStatus(PIT, [link, un, mk("fixed", 3, { taskId: "N1f" })]).status).toBe("open");
   });
 
+  test("fixed / reopen 按来源事件先后生效（source-order）：再上线后晚到的旧回滚不重开；来源最新的是回滚就 open", () => {
+    const src = (originSeq: number) => ({ source: { origin: "ab12", originSeq }, taskId: "N1f" });
+    const link = mk("link_fix", 1, { taskId: "N1f" });
+    const f812 = mk("fixed", 10, src(812));
+    const f950 = mk("fixed", 20, src(950));
+    const r900 = mk("reopen", 30, src(900));
+    expect(memoryStatus(PIT, [link, f812, f950, r900])).toMatchObject({ status: "fixed", fixTask: "N1f" });
+    // 回滚 900 先被观察到、上线 812 晚到：来源最新的是回滚
+    expect(memoryStatus(PIT, [link, mk("reopen", 10, src(900)), mk("fixed", 20, src(812))])).toMatchObject({ status: "open", fixTask: "N1f" });
+    // {seq} 来源同理；来源不可比（没带 / 形状不同）退回按观察时间
+    expect(memoryStatus(PIT, [link, mk("fixed", 10, { taskId: "N1f", source: { seq: 50 } }), mk("reopen", 20, { taskId: "N1f", source: { seq: 40 } })]).status).toBe("fixed");
+    expect(memoryStatus(PIT, [link, mk("fixed", 10, src(950)), mk("reopen", 20, { taskId: "N1f", source: { seq: 1 } })]).status).toBe("open");
+    expect(memoryStatus(PIT, [link, mk("fixed", 10, src(950)), mk("reopen", 20, { taskId: "N1f" })]).status).toBe("open");
+  });
+
+  test("回滚后的 open 坑可 unlink_fix 清掉保留的修复关联（unlink-reopened），旧卡之后的 fixed 不再生效", () => {
+    const marks = [mk("link_fix", 10, { taskId: "Fix" }), mk("fixed", 20, { taskId: "Fix" }), mk("reopen", 30, { taskId: "Fix" }), mk("unlink_fix", 40, { taskId: "Fix" })];
+    expect(memoryStatus(PIT, marks)).toMatchObject({ status: "open", fixTask: null });
+    expect(memoryStatus(PIT, [...marks, mk("fixed", 50, { taskId: "Fix" })]).status).toBe("open");
+    // 别的卡的 unlink_fix 不清；清掉后可重新 link 别的卡
+    expect(memoryStatus(PIT, [...marks.slice(0, 3), mk("unlink_fix", 40, { taskId: "Other" })]).fixTask).toBe("Fix");
+    expect(memoryStatus(PIT, [...marks, mk("link_fix", 50, { taskId: "N2f" }), mk("fixed", 60, { taskId: "N2f" })])).toMatchObject({ status: "fixed", fixTask: "N2f" });
+  });
+
   test("修复类 mark 只对 fixable 坑生效", () => {
     const rule = { ...PIT, fixable: false };
     expect(memoryStatus(rule, [mk("link_fix", 1, { taskId: "N1f" }), mk("fixed", 2, { taskId: "N1f" })]).status).toBe("open");
@@ -97,7 +121,7 @@ function shuffle<T>(xs: readonly T[], r: () => number): T[] {
 }
 
 describe("性质：折叠结果与 marks 的排列顺序无关", () => {
-  test("500 组随机 mark 集合（含同 ts、多 origin、别的记忆的行、各种初始状态），每组 20 种随机排列结果一致", () => {
+  test("500 组随机 mark 集合（含同 ts、多 origin、别的记忆的行、各种初始状态、各种来源事件），每组 20 种随机排列结果一致", () => {
     const r = rng(20261003);
     const pick = <T>(xs: readonly T[]) => xs[Math.floor(r() * xs.length)];
     const memories: FoldMemory[] = [PIT, { ...PIT, authorRole: "executor" }, { ...PIT, fixable: false }, { ...PIT, kind: "summary", fixable: null, via: "verify_summary", authorRole: "system" }];
@@ -115,6 +139,7 @@ describe("性质：折叠结果与 marks 的排列顺序无关", () => {
           memoryId: r() < 0.9 ? memory.id : "ab12-m99", origin, originSeq, ts: Math.floor(r() * 5), mark,
           taskId: mark === "unlink_fix" && r() < 0.3 ? null : pick(["N1f", "N2f"]), by: mark === "supersede" ? pick(["ab12-m7", "ab12-m8"]) : null,
           dedupKey: mark === "confirm" && r() < 0.5 ? `auto:confirm:${memory.id}::${origin}/${originSeq}` : null,
+          source: r() < 0.6 ? (r() < 0.8 ? { origin: pick(["ab12", "cd34"]), originSeq: 1 + Math.floor(r() * 6) } : { seq: 1 + Math.floor(r() * 6) }) : null,
         };
       });
       const expected = memoryStatus(memory, marks);

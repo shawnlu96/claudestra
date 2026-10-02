@@ -5,11 +5,14 @@
  *
  *   candidate --confirm--> open
  *   open --link_fix--> fixing --fixed--> fixed --reopen--> open（保留修复关联：同一张卡再上线再 fixed）
- *   fixing --unlink_fix--> open（清修复关联）
+ *   fixing / open（回滚后仍带修复关联）--unlink_fix--> open（清修复关联）
  *   任意 --dispute--> 同状态 + disputed（人工 confirm 清掉；自动 confirm 只加来源、不清）
  *   任意 --retract / supersede--> 终态（之后的 marks 只记录不生效）
  *
  * link_fix / unlink_fix / fixed / reopen 只对 fixable = 1 的坑生效；对不上当前状态或修复卡的 mark 记录但不生效。
+ * fixed / reopen 是修复卡上线 / 回滚的观察，生效看来源事件的先后而不是观察时间：同一修复卡上，来源不比已生效的那条新的
+ * fixed / reopen 不生效（晚到的旧回滚不会把再上线的坑重开）。两条来源可比 = 同为 {origin, originSeq} 且 origin 相同，或同为 {seq}；
+ * 不可比（没带来源、来源形状不同）时退回按观察时间。来源最新的是回滚就是 open，哪怕它更早的那次上线晚到、还没折进来。
  */
 import type { MemoryAuthorRole, MemoryKind, MemoryMarkKind, MemoryVia } from "./ledger-memory-schema.js";
 
@@ -25,6 +28,9 @@ export interface FoldMemory {
   authorRole: MemoryAuthorRole;
 }
 
+/** 来源事件引用：有 origin 的用 {origin, originSeq}；老事件没有 origin 的用 {seq}，只在本机有效 */
+export type MemorySourceRef = { origin: string; originSeq: number } | { seq: number };
+
 /** 折叠要用到的 mark 字段 */
 export interface FoldMark {
   memoryId: string;
@@ -35,6 +41,8 @@ export interface FoldMark {
   taskId: string | null;
   by: string | null;
   dedupKey: string | null;
+  /** 触发它的事件；fixed / reopen 按它定先后 */
+  source?: MemorySourceRef | null;
 }
 
 export interface MemoryState {
@@ -62,7 +70,18 @@ function compareMarks(a: FoldMark, b: FoldMark): number {
 
 const isTerminal = (s: MemoryStatus) => s === "retracted" || s === "superseded";
 
-function apply(m: FoldMemory, st: MemoryState, mk: FoldMark): MemoryState {
+/** a 的来源是否不比 b 新；不可比返回 false */
+function notNewer(a: MemorySourceRef | null | undefined, b: MemorySourceRef | null): boolean {
+  if (!a || !b) return false;
+  if ("seq" in a && "seq" in b) return a.seq <= b.seq;
+  if ("origin" in a && "origin" in b && a.origin === b.origin) return a.originSeq <= b.originSeq;
+  return false;
+}
+
+/** 折叠过程的状态：fixSource = 当前修复卡上已生效的最新 fixed / reopen 来源 */
+type FoldState = MemoryState & { fixSource: MemorySourceRef | null };
+
+function apply(m: FoldMemory, st: FoldState, mk: FoldMark): FoldState {
   if (isTerminal(st.status)) return st;
   const fixablePitfall = m.kind === "pitfall" && m.fixable === true;
   switch (mk.mark) {
@@ -77,20 +96,26 @@ function apply(m: FoldMemory, st: MemoryState, mk: FoldMark): MemoryState {
     case "supersede":
       return { ...st, status: "superseded", supersededBy: mk.by };
     case "link_fix":
-      return fixablePitfall && st.status === "open" && mk.taskId ? { ...st, status: "fixing", fixTask: mk.taskId } : st;
+      return fixablePitfall && st.status === "open" && mk.taskId ? { ...st, status: "fixing", fixTask: mk.taskId, fixSource: null } : st;
     case "unlink_fix":
-      return fixablePitfall && st.status === "fixing" && (mk.taskId === null || mk.taskId === st.fixTask) ? { ...st, status: "open", fixTask: null } : st;
+      return fixablePitfall && (st.status === "fixing" || st.status === "open") && st.fixTask !== null && (mk.taskId === null || mk.taskId === st.fixTask)
+        ? { ...st, status: "open", fixTask: null, fixSource: null }
+        : st;
     case "fixed":
-      return fixablePitfall && (st.status === "fixing" || st.status === "open") && st.fixTask !== null && mk.taskId === st.fixTask ? { ...st, status: "fixed" } : st;
-    case "reopen":
-      return fixablePitfall && st.status === "fixed" && mk.taskId === st.fixTask ? { ...st, status: "open" } : st;
+    case "reopen": {
+      if (!fixablePitfall || st.fixTask === null || mk.taskId !== st.fixTask || notNewer(mk.source, st.fixSource)) return st;
+      const fixSource = mk.source ?? st.fixSource;
+      if (mk.mark === "fixed") return { ...st, status: "fixed", fixSource };
+      return { ...st, status: "open", fixSource };
+    }
   }
 }
 
 /** 当前状态；marks 里别的记忆的行忽略，传入顺序无关 */
 export function memoryStatus(memory: FoldMemory, marks: readonly FoldMark[]): MemoryState {
   const mine = marks.filter((k) => k.memoryId === memory.id).sort(compareMarks);
-  let st: MemoryState = { status: initialStatus(memory), disputed: false, fixTask: null, supersededBy: null };
+  let st: FoldState = { status: initialStatus(memory), disputed: false, fixTask: null, supersededBy: null, fixSource: null };
   for (const mk of mine) st = apply(memory, st, mk);
-  return st;
+  const { fixSource: _, ...state } = st;
+  return state;
 }
