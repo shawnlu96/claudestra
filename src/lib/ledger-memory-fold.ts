@@ -13,6 +13,7 @@
  * fixed / reopen 是修复卡上线 / 回滚的观察，生效看来源事件的先后而不是观察时间：同一修复卡上，来源不比已生效的那条新的
  * fixed / reopen 不生效（晚到的旧回滚不会把再上线的坑重开）。两条来源可比 = 同为 {origin, originSeq} 且 origin 相同，或同为 {seq}；
  * 不可比（没带来源、来源形状不同）时退回按观察时间。来源最新的是回滚就是 open，哪怕它更早的那次上线晚到、还没折进来。
+ * 回滚后对同一张卡重新 link_fix 不清来源水位（只有 unlink_fix 或换卡才清）。
  */
 import type { MemoryAuthorRole, MemoryKind, MemoryMarkKind, MemoryVia } from "./ledger-memory-schema.js";
 
@@ -96,7 +97,10 @@ function apply(m: FoldMemory, st: FoldState, mk: FoldMark): FoldState {
     case "supersede":
       return { ...st, status: "superseded", supersededBy: mk.by };
     case "link_fix":
-      return fixablePitfall && st.status === "open" && mk.taskId ? { ...st, status: "fixing", fixTask: mk.taskId, fixSource: null } : st;
+      // 回滚后重新关联同一张卡：保留来源水位，迟到的旧上线仍拦得住；换卡才清零
+      return fixablePitfall && st.status === "open" && mk.taskId
+        ? { ...st, status: "fixing", fixTask: mk.taskId, fixSource: mk.taskId === st.fixTask ? st.fixSource : null }
+        : st;
     case "unlink_fix":
       return fixablePitfall && (st.status === "fixing" || st.status === "open") && st.fixTask !== null && (mk.taskId === null || mk.taskId === st.fixTask)
         ? { ...st, status: "open", fixTask: null, fixSource: null }

@@ -87,6 +87,15 @@ describe("recordMemory", () => {
     expect([db.query("SELECT COUNT(*) AS n FROM memories").get(), memEvents().length]).toEqual([{ n: 0 }, 0]);
   });
 
+  test("脱敏一查原始 symptom / rule，不查序列化后的正文（body-redaction）：换行、制表符、引号字段名不能绕过", () => {
+    const token = "ghp_" + "a".repeat(30);
+    const base = { ...PIT, taskId: undefined, head: undefined, specRev: undefined };
+    for (const patch of [{ rule: "details\n" + token }, { rule: "details\t" + token }, { symptom: "见\n" + token }, { rule: '{"password": "hunter2-correct-horse"}' }, { rule: "出口\n8.8.8.8 不通" }]) {
+      expect(() => recordMemory(db, ctx(), { ...base, ...patch })).toThrow(/脱敏闸命中/);
+    }
+    expect([db.query("SELECT COUNT(*) AS n FROM memories").get(), memEvents().length]).toEqual([{ n: 0 }, 0]);
+  });
+
   test("脱敏一覆盖所有调用方给的文本：project / 锚点 / head / actor 等元数据也拒（metadata-secrets）", () => {
     const token = "ghp_" + "a".repeat(30);
     const base = { ...PIT, taskId: undefined, head: undefined, specRev: undefined };
@@ -104,7 +113,7 @@ describe("recordMemory", () => {
       "2001 db8 85a3 0 0 8a2e 370 7334".split(" "),
     ].map((xs) => xs.join(":"));
     for (const addr of [...v6, `${v6[1]}:`, `[${v6[0]}]:8080`, `host:${v6[3]}1`]) {
-      expect(() => recordMemory(db, ctx(), { ...PIT, rule: `connect to ${addr}` })).toThrow(/拒绝写入：body/);
+      expect(() => recordMemory(db, ctx(), { ...PIT, rule: `connect to ${addr}` })).toThrow(/拒绝写入：rule/);
     }
     for (const rule of ["用 Vec::new 而不是 vec![]", "在 12:30:45 之后重试", "MAC aa:bb:cc:dd:ee:ff 不算", "C++ 的 :: 作用域", "std::vector<T>"]) {
       expect(recordMemory(db, ctx(), { ...PIT, rule }).memory.visibility).toBe("team");

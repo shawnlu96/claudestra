@@ -289,15 +289,17 @@ function anchors(db: Database, input: MemoryInput): { featureId: string | null; 
   return { featureId, nodeKey, taskId };
 }
 
-function memoryBody(input: MemoryInput): string {
+/** body = 入库的正文（坑是 JSON）；parts = 调用方给的原文分段，脱敏闸查这些（JSON 转义会改掉换行、引号，正则边界就不对了） */
+function memoryBody(input: MemoryInput): { body: string; parts: Record<string, string> } {
   if (input.kind === "pitfall") {
     if (input.body !== undefined) invalid("坑的正文分 symptom / rule 两段给，不收 body");
     const symptom = text("symptom", input.symptom, MEMORY_LIMITS.symptom) as string;
     const rule = text("rule", input.rule, MEMORY_LIMITS.rule) as string;
-    return JSON.stringify({ symptom, rule });
+    return { body: JSON.stringify({ symptom, rule }), parts: { symptom, rule } };
   }
   if (input.symptom !== undefined || input.rule !== undefined) invalid("symptom / rule 只给坑用");
-  return text("body", input.body, input.kind === "summary" ? MEMORY_LIMITS.summary : MEMORY_LIMITS.decision) as string;
+  const body = text("body", input.body, input.kind === "summary" ? MEMORY_LIMITS.summary : MEMORY_LIMITS.decision) as string;
+  return { body, parts: { body } };
 }
 
 /**
@@ -310,7 +312,7 @@ export function recordMemory(db: Database, ctx: MemoryCtx, input: MemoryInput): 
   const via = oneOf("via", input.via, MEMORY_VIAS);
   const authorRole = oneOf("authorRole", input.authorRole, MEMORY_AUTHOR_ROLES);
   const title = text("title", input.title, MEMORY_LIMITS.title) as string;
-  const body = memoryBody(input);
+  const { body, parts } = memoryBody(input);
   const files = input.files ?? [];
   if (!Array.isArray(files) || files.length > MEMORY_LIMITS.files) invalid(`files 要是数组、最多 ${MEMORY_LIMITS.files} 项`);
   files.forEach((f, i) => repoPath(`files[${i}]`, f));
@@ -335,7 +337,7 @@ export function recordMemory(db: Database, ctx: MemoryCtx, input: MemoryInput): 
   let visibility = oneOf("visibility", input.visibility ?? "team", MEMORY_VISIBILITIES);
 
   const secret = secretHits({
-    actor: ctx.actor, project, title, body, family, sourceNote, head, featureId: input.featureId, nodeKey: input.nodeKey, taskId: input.taskId,
+    actor: ctx.actor, project, title, ...parts, family, sourceNote, head, featureId: input.featureId, nodeKey: input.nodeKey, taskId: input.taskId,
     ...Object.fromEntries(files.map((f, i) => [`files[${i}]`, f])),
   });
   if (secret.length) invalid(`脱敏闸命中（密钥 / 地址 / 个人信息形状），拒绝写入：${secret.join(", ")}`);
@@ -345,7 +347,7 @@ export function recordMemory(db: Database, ctx: MemoryCtx, input: MemoryInput): 
     db.transaction((): MemoryWrite => {
       const anchor = anchors(db, input);
       let homeReason: string | null = null;
-      if (visibility === "team" && internalHit([title, body, sourceNote ?? "", ...files].join("\n"), [...internalNames(db, project), ...(input.internalTerms ?? [])])) {
+      if (visibility === "team" && internalHit([title, ...Object.values(parts), sourceNote ?? "", ...files].join("\n"), [...internalNames(db, project), ...(input.internalTerms ?? [])])) {
         visibility = "home";
         homeReason = "含本项目内部名字（feature / 节点标题、peer 名等），只留在本机";
       }

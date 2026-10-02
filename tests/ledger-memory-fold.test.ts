@@ -54,6 +54,15 @@ describe("转移", () => {
     expect(memoryStatus(PIT, [link, mk("fixed", 10, src(950)), mk("reopen", 20, { taskId: "N1f" })]).status).toBe("open");
   });
 
+  test("回滚后同一卡重新 link_fix 保留来源水位（source-order 重新关联分支）：迟到的旧上线不把坑标 fixed", () => {
+    const src = (originSeq: number) => ({ source: { origin: "ab12", originSeq }, taskId: "Fix" });
+    const marks = [mk("link_fix", 1, { taskId: "Fix" }), mk("fixed", 2, src(800)), mk("reopen", 3, src(900)), mk("link_fix", 4, { taskId: "Fix" })];
+    expect(memoryStatus(PIT, [...marks, mk("fixed", 5, src(812))])).toMatchObject({ status: "fixing", fixTask: "Fix" });
+    // 比回滚新的上线照常生效；unlink 后再 link 同一卡是新关联，水位清零
+    expect(memoryStatus(PIT, [...marks, mk("fixed", 5, src(950))]).status).toBe("fixed");
+    expect(memoryStatus(PIT, [...marks.slice(0, 3), mk("unlink_fix", 4, { taskId: "Fix" }), mk("link_fix", 5, { taskId: "Fix" }), mk("fixed", 6, src(812))]).status).toBe("fixed");
+  });
+
   test("回滚后的 open 坑可 unlink_fix 清掉保留的修复关联（unlink-reopened），旧卡之后的 fixed 不再生效", () => {
     const marks = [mk("link_fix", 10, { taskId: "Fix" }), mk("fixed", 20, { taskId: "Fix" }), mk("reopen", 30, { taskId: "Fix" }), mk("unlink_fix", 40, { taskId: "Fix" })];
     expect(memoryStatus(PIT, marks)).toMatchObject({ status: "open", fixTask: null });
