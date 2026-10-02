@@ -106,7 +106,7 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
       const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`, ...runtime);
       deps.active(); return result;
     };
-    const created = family === "codex" ? await withCodexSlot(create, { registryPath: deps.registryPath, lockPath: deps.slotLockPath }) : await create();
+    const created = family === "codex" ? await withCodexSlot(create, { registryPath: deps.registryPath, lockPath: deps.slotLockPath, ledgerPath: db.filename }) : await create();
     if ("kind" in created && created.kind === "wait") return { wait: String(created.reason) };
     if (!("ok" in created) || created.ok !== true) return { wait: "新会话创建未确认，不重复创建" };
     row = deps.registry().find((r) => r.name === name);

@@ -87,7 +87,8 @@ function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
   const row = getLendPeer(db, b.peer);
   if (!row || row.proto < 2) return null;
   const cap = peerCapacity(db, b.peer, b.maxOpen, now);
-  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
+  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [],
+    familyTotals: { claude: row.slots.claude.total, codex: row.slots.codex.total } };
 }
 
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
@@ -110,14 +111,15 @@ export function borrowPeers(db: Database, project: string, borrow: readonly Borr
   const live = (peer: string): number => hasLendTable(db)
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
   return borrow.filter((b) => b.projects.includes(project))
-    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now), ...(b.priority ? { priority: b.priority } : {}) }));
+    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now),
+      helloAt: getLendPeer(db, b.peer)?.helloAt, ...(b.priority ? { priority: b.priority } : {}) }));
 }
 
 export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done" && o.step === "review")?.peer ?? null;
   // A review needs the PR; writing before one exists goes against the configured repo (set only with remote.roles write).
   const repo = prCoordinates(task.pr)?.repo ?? (task.stage === "review" ? null : cfg.remote.repo ?? null);
-  return { remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), localWriters: localWriterCount(db, task.project, task.id),
+  return { now: cfg.now, remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), localWriters: localWriterCount(db, task.project, task.id),
     peers: borrowPeers(db, task.project, cfg.borrow, cfg.now), repo, lastPeer, writeLeasePeer: writeLeasePeer(db, task) };
 }
 
