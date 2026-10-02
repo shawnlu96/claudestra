@@ -15,7 +15,7 @@
 | 中心·HTTP | `/v2` 路由、凭据 → `V2Actor`、快照读 | V1 `LedgerService.handle` 的签名鉴权 |
 | 本机·业务 ask | reply/答复/撤销/过期/locate/ask-check 改走中心 | X7 `SharedLedgerExecClient.ask/command` |
 | 本机·执行侧 | 出借代理（X9）、独立部署 job（X8）、调度 pass 闸 | X9 `LendCentralTransport`、X8 `SchedulerCentralWorkerDeps.openClient` |
-| 本机·入口 | 网页共享台账页、本机 API 代理、DAG/订单 MCP 工具 | X10 `TaskEditor`、X11 `ApprovalPanel`、X7 client |
+| 本机·入口 | TV1 数据源接线、本机 API 代理、DAG/订单 MCP 工具 | X10 `TaskEditor`、X11 `ApprovalPanel`、X7 client |
 | 本机·组合 | 真实传输、单例客户端、持久写门、CLI、热文件接入 | §3 的线契约和 configure* 接口 |
 
 拆分原则：
@@ -36,7 +36,7 @@
 | X12B | 中心 V2 路由、身份映射与快照读 | X12A | 2h | 无 |
 | X12C | 业务 ask 全链路改走中心 | X2、X7（已合并） | 2h | `src/bridge/asks.ts`、`src/bridge/ask-entry.ts` |
 | X12D | 出借代理与独立部署 job 接线 | X8、X9 | 2h | `src/lib/scheduler-pass.ts`、`src/lib/scheduler-auto-deps.ts` |
-| X12E | 网页共享台账页、本机 API 与 MCP 工具入口 | X7、X10、X11（已合并） | 2h | `src/bridge/local-api/index.ts` |
+| X12E | TV1 数据源接线、本机 API 与 MCP 工具入口 | X7、X10、X11（已合并）、TV1 | 2h | `src/bridge/local-api/index.ts` |
 | X12F | 本机传输、组合根、持久写门与 CLI | X12C、X12D、X12E | 2h | `src/bridge.ts`、`src/scheduler.ts`、`src/manager/ledger.ts`、`src/lib/ledger-write.ts` |
 
 依赖图：
@@ -45,12 +45,12 @@
 X6 ──► X12A ──► X12B ──┐
 X8,X9 ─► X12D ─┐       ├──► X13（建议改依赖 X12B、X12F）──► X15
 X2,X7 ─► X12C ─┼► X12F ┘
-X7,X10,X11 ► X12E ┘
+X7,X10,X11,TV1 ► X12E ┘
 ```
 
-- X6/X8/X9 合并后，X12A、X12C、X12D、X12E 四个节点可以同时开工（≥3）。X12C、X12E 的前置都已在 main，现在就能开工，不用等合并队列。
+- X6/X8/X9 合并后，X12A、X12C、X12D 三个节点可以同时开工（≥3）；TV1 完成后 X12E 也可并行。X12C 的前置已在 main，可立即开工；X12E 必须等 TV1。
 - 第二波：X12B（等 X12A）和 X12F（等 C/D/E）并行。
-- 关键路径：max(A+B, max(C,D,E)+F) = (2+1)+(2+1) = 6 槽小时（含每卡 1 小时审查），比原 X12 的 4+1 只多 1 小时，但从一个人写变成 4 路并行。
+- 关键路径（前置含 TV1 全就绪后）：max(A+B, max(C,D,E)+F) = 6 槽小时（每卡 2 小时实现 + 1 小时审查）；TV1 未就绪时另加等待时间。至少 A/C/D 三路并行。
 - X12F 与 X12B 互不依赖：X12F 的传输按 §3.1 线契约对 fake fetch 测试，X12B 用真实中心测同一张表。第一次真实端到端是 X13 / X15（建议见 §7）。
 
 ## 3. 冻结的跨节点契约（本稿定，节点不得私改，要改先回 PM 改本稿）
@@ -92,9 +92,20 @@ interface V2CenterHandle {
 | X12C | `src/bridge/shared-ledger-v2-asks.ts` | `configureSharedAsks(port: { clientFor(projectId: string): SharedLedgerExecClient \| null; featureOfTask(taskId: string): { featureId: string; projectId: string } \| null } \| null)` |
 | X12D | `src/bridge/shared-ledger-v2-lend.ts` | `configureLendCentral(port: { transportFor(projectId: string): LendCentralTransport \| null; grant: LendCentralGrantDeps; outboxDir: string } \| null)` |
 | X12D | `src/lib/scheduler-v2-wiring.ts` | `centralDeployDeps(openClient: SchedulerCentralWorkerDeps["openClient"]): SchedulerCentralWorkerDeps`；`runDeployJob(path, deps)` 的 `WorkerDeps` 新增可选 `central` |
-| X12E | `src/bridge/shared-ledger-v2-entry.ts` | `configureSharedExecEntry(port: { clientFor(principal: Principal, projectId: string): SharedLedgerExecClient \| null; snapshot(projectId: string, featureId: string): Promise<unknown> } \| null)` |
+| X12E | `src/bridge/shared-ledger-v2-entry.ts` | `configureSharedExecEntry(port: { clientFor(principal: Principal, projectId: string): SharedLedgerExecClient \| null; snapshot(principal: Principal, projectId: string, featureId: string): Promise<unknown>; receipt: SharedExecReceiptPort } \| null)` |
 
-本机 API（X12E 自己实现，自己的网页调用，不跨节点）：`GET /api/v1/shared-ledger/v2/features/{featureId}?project=`、`POST /api/v1/shared-ledger/v2/commands`、`GET /api/v1/shared-ledger/v2/receipts/{requestId}?project=&operationId=&commandDigest=`、`GET /api/v1/shared-ledger/v2/asks/{askId}?project=`。
+只读回执端口由 X12E 消费、X12F 注入，独立于 X7 client（不访问其私有 transport，也不调用 `command` 代查）：
+
+```ts
+type SharedExecReceiptPort = (
+  principal: Principal,
+  query: { teamId: string; projectId: string; requestId: string; operationId: string | null; commandDigest: string },
+) => Promise<{ status: "committed"; receipt: V2Receipt } | { status: "unknown"; requestId: string }>;
+```
+
+F 必须从已认证 Principal 和 project 配置解析 actor/凭据，核验 team/project/read 权限，再调用 §3.1 的 GET receipts；query 的 teamId 不可覆盖凭据范围。传输 null 映射为 unknown，错误不能映射为 unknown；完整查询参数原样带到中心。snapshot 同样按 Principal 核读权限。E 仅透传查询结果，任何结果都不触发 submit 或 outbox 重交。
+
+本机 API（X12E 实现，依赖 TV1、接 TV1 的数据源，不另起界面）：`GET /api/v1/shared-ledger/v2/features/{featureId}?project=`、`POST /api/v1/shared-ledger/v2/commands`、`GET /api/v1/shared-ledger/v2/receipts/{requestId}?project=&operationId=&commandDigest=`、`GET /api/v1/shared-ledger/v2/asks/{askId}?project=`。
 
 ## 4. 原 X12 职责 → 新节点对照
 
@@ -111,7 +122,7 @@ interface V2CenterHandle {
 | 出借：主场 bridge 代理中心 claim/beat/result，worker 只限定订单，恢复先查回执 | X12D |
 | 独立部署链：`scheduler.ts --deploy-job` → job/worker/steps 四处接线；每步在线核验；断中心或失 epoch 挡住后续、unknown 对账 | X12D（job/worker/steps/apply/pass 闸）、X12F（`scheduler.ts` 一行注入 openClient） |
 | 自动阶段/调度 pass 不对 execution feature 做本机推进 | X12D |
-| 网页共享台账页接线（开卡/改字段/审批/能力禁用/过期显示） | X12E |
+| TV1 数据源接线（开卡/改字段/审批/能力禁用/过期显示） | X12E |
 | 本机 API 代理和 DTO（web/lib/api、i18n） | X12E |
 | DAG 和订单 MCP 工具在 execution feature 上改走中心 | X12E |
 | 中心客户端单例、真实传输、模式文件；本机缓存/outbox 非授权权威 | X12F |
@@ -157,8 +168,8 @@ interface V2CenterHandle {
 | 32 | src/bridge/ask-expire.ts | X12C | fileGlobs |
 | 33 | src/bridge/ask-locate.ts | X12C | fileGlobs |
 | 34 | src/manager/ledger-read-cmds.ts | X12C | fileGlobs |
-| 35 | web/features/collab/shared/shared-view.tsx | X12E | fileGlobs |
-| 36 | web/features/collab/shared/shared-ledger.tsx | X12E | fileGlobs |
+| 35 | web/features/collab/shared/shared-view.tsx | TV1 | PM 移交，不分给 A–F |
+| 36 | web/features/collab/shared/shared-ledger.tsx | TV1 | PM 移交，不分给 A–F |
 | 37 | web/lib/api/shared-ledger.ts | X12E | fileGlobs |
 | 38 | web/lib/i18n-dict-shared-ledger.ts | X12E | fileGlobs |
 | 39 | src/lib/shared-ledger-v2-wiring.ts | X12F | fileGlobs |
@@ -166,7 +177,7 @@ interface V2CenterHandle {
 | 41 | src/bridge/shared-ledger-v2-wiring.ts | X12F | fileGlobs |
 | 42 | tests/shared-ledger-v2-wiring*.test.ts | X12A–F | 按子前缀分：`-center`/`-routes`/`-asks`/`-exec`/`-web`/`-local` |
 
-新增、原清单里没有的路径只有一个已有文件：`src/lib/ledger-tx.ts`（X12F，近一个月 6 次提交，不算热文件）。理由：`insertEvent` 是 `ledger-write.ts` / `ledger-dag-write.ts` / `ledger-deps-write.ts` 所有写入的共同落点，持久写门放在这里，`ledger-write.ts` 就不用在 13 个写函数里各加一行。
+新增、原清单里没有的路径只有一个已有文件：`src/lib/ledger-tx.ts`（X12F，近一个月 6 次提交，不算热文件）。理由：`insertEvent` 是 `ledger-write.ts` / `ledger-dag-write.ts` / `ledger-deps-write.ts` 所有写入的共同落点，持久写门在这里的 `tx` 事务入口采集旧绑定，并在 `insertEvent` 检查旧/新绑定，避免任务更新先清空 extra 绕过门，也不用在 13 个写函数里各加一行。
 
 ## 5. 节点详情
 
@@ -241,18 +252,15 @@ fileGlobs：
 - 例外 src/lib/scheduler-pass.ts：≤3 行，pass 开头用 `schedulerV2Skip(taskId)` 跳过 execution feature 的本机推进
 - 例外 src/lib/scheduler-auto-deps.ts：≤3 行，`autoTickDeps` 返回的动作在 execution feature 上换成 `refuseCentral`
 
-### X12E · 网页共享台账页、本机 API 与 MCP 工具入口
+### X12E · TV1 数据源接线、本机 API 与 MCP 工具入口
 
-key：X12E；deps：X7, X10, X11；估时：2小时。
+key：X12E；deps：X7, X10, X11, TV1；估时：2小时。
 fileGlobs：
 
 - src/bridge/shared-ledger-v2-entry*.ts
 - src/bridge/local-api/shared-ledger.ts
 - src/bridge/dag-tools.ts
 - src/bridge/order-tools.ts
-- web/features/collab/shared/shared-view.tsx
-- web/features/collab/shared/shared-ledger.tsx
-- web/features/collab/shared/shared-v2*.tsx
 - web/lib/api/shared-ledger.ts
 - web/lib/api/shared-ledger-v2*.ts
 - web/lib/i18n-dict-shared-ledger.ts
@@ -292,7 +300,7 @@ fileGlobs：
 1. 解析本文 §5 的六个节点（fileGlobs + 例外）和 v2 设计稿里除 X12 以外的 X0–X15；
 2. 用 `git ls-files -z` 加 `Bun.Glob.match` 展开，逐对算现有文件交集（existing）和受限语法下的未来路径相交（planned）。六个新节点两两都比（含有依赖关系的对），另外和旧节点全部比一遍；
 3. 例外文件不得出现在任何节点的 fileGlobs 里，每个热文件只能被一个节点认领；
-4. 原 X12 的 42 个条目，每条都必须是某个新节点的 fileGlob、例外，或者（测试 glob 条目）被新节点的子前缀覆盖；
+4. 原 X12 的 42 个条目，每条都必须是某个新节点的 fileGlob、例外，或者（测试 glob 条目）被新节点的子前缀覆盖；PM 10-03 补指定的两个网页文件只记移交 TV1，不分给新节点；
 5. 热文件清单必须全部落在例外里。
 
 ```sh
@@ -349,34 +357,37 @@ for (const [k, n] of split) for (const e of n.exceptions) {
 const HOT = ['src/bridge.ts', 'src/scheduler.ts', 'src/manager/ledger.ts', 'src/lib/scheduler-pass.ts',
   'src/bridge/local-api/index.ts', 'src/lib/ledger-write.ts', 'src/bridge/asks.ts', 'src/lib/scheduler-auto-deps.ts', 'src/bridge/ask-entry.ts'];
 for (const h of HOT) if (!owners.has(h)) throw Error('hot file not an exception ' + h);
-let viaGlob = 0, viaException = 0, viaSubPrefix = 0;
+const tv1 = new Set(["web/features/collab/shared/shared-view.tsx", "web/features/collab/shared/shared-ledger.tsx"]);
+for (const f of tv1) if (allGlobs.some(g => new Bun.Glob(g).match(f)) || owners.has(f)) throw Error("TV1 file claimed " + f);
+let viaGlob = 0, viaException = 0, viaSubPrefix = 0, viaTV1 = 0;
 for (const entry of x12) {
   const n = [...split.entries()];
-  if (n.some(([, v]) => v.paths.includes(entry))) viaGlob++;
+  if (tv1.has(entry)) viaTV1++;
+  else if (n.some(([, v]) => v.paths.includes(entry))) viaGlob++;
   else if (owners.has(entry)) viaException++;
   else if (entry.includes('*') && n.some(([, v]) => v.paths.some(p => p.includes('*') && symbolic(p, entry) && p.startsWith(sp(entry)[0])))) viaSubPrefix++;
   else throw Error('X12 entry not covered ' + entry);
 }
-console.log('X12 entries=' + x12.length + ' fileGlobs=' + viaGlob + ' exceptions=' + viaException + ' testSubPrefix=' + viaSubPrefix);
+console.log('X12 entries=' + x12.length + ' fileGlobs=' + viaGlob + ' exceptions=' + viaException + ' testSubPrefix=' + viaSubPrefix + ' transferredTV1=' + viaTV1);
 console.log('hot exceptions=' + [...owners].map(([f, k]) => k + ':' + f).join(', '));
 for (const [k, n] of split) console.log(k + ' tracked=' + expand(n).length + ' globs=' + n.paths.length + ' exceptions=' + n.exceptions.length + ' deps=' + n.deps.join(','));
 JS
 ```
 
-实测输出（base d9578da0）：
+第 1 轮修订后重跑实测输出（工作树 head d12d0b40，2026-10-03；不含产品代码变更）：
 
 ```text
 X12A/X12B=0/0 | X12A/X12C=0/0 | X12A/X12D=0/0 | X12A/X12E=0/0 | X12A/X12F=0/0
 X12B/X12C=0/0 | X12B/X12D=0/0 | X12B/X12E=0/0 | X12B/X12F=0/0 | X12C/X12D=0/0
 X12C/X12E=0/0 | X12C/X12F=0/0 | X12D/X12E=0/0 | X12D/X12F=0/0 | X12E/X12F=0/0
 splitPairs=15 splitVsOtherXPairs=90 (all 0/0)
-X12 entries=42 fileGlobs=32 exceptions=9 testSubPrefix=1
+X12 entries=42 fileGlobs=30 exceptions=9 testSubPrefix=1 transferredTV1=2
 hot exceptions=X12C:src/bridge/asks.ts, X12C:src/bridge/ask-entry.ts, X12D:src/lib/scheduler-pass.ts, X12D:src/lib/scheduler-auto-deps.ts, X12E:src/bridge/local-api/index.ts, X12F:src/bridge.ts, X12F:src/scheduler.ts, X12F:src/manager/ledger.ts, X12F:src/lib/ledger-write.ts
 X12A tracked=0 globs=4 exceptions=0 deps=X6
 X12B tracked=6 globs=8 exceptions=0 deps=X12A
 X12C tracked=6 globs=8 exceptions=2 deps=X2,X7
 X12D tracked=8 globs=11 exceptions=2 deps=X8,X9
-X12E tracked=7 globs=12 exceptions=1 deps=X7,X10,X11
+X12E tracked=5 globs=9 exceptions=1 deps=X7,X10,X11,TV1
 X12F tracked=3 globs=9 exceptions=4 deps=X12C,X12D,X12E
 ```
 
@@ -453,8 +464,8 @@ X12F tracked=3 globs=9 exceptions=4 deps=X12C,X12D,X12E
 1. 用 fake `ExecTransport`（内存中心，记录收到的每条命令）：共享卡 reply → 恰好 1 条 `ask.create`，本机 askDb 不新增批准记录；非共享卡 reply → 0 条中心命令，本机 ask 照旧。
 2. 同一共享 ask 分别从 `answerFromChat`、`answerFromCard`、`answerFromDiscord` 答复：三次都打到同一个中心 askId；第一次成功后，后两次返回中心的 `conflict`/已答复，本机不会产生第二次批准。
 3. 中心不可用（transport throw unavailable）：答复返回错误，本机 askDb 状态不变，`ask-check` 对该 ask 退出码非 0。
-4. `ask-check`：中心返回 `authorization_mismatch` 或 `authorization_expired` 时退出码非 0；本机缓存里即便有旧的 approved 也不能让它通过。
-5. 撤销和过期：`ask-dismiss` 发 `ask.revoke`，`sweepExpired` 对共享 ask 只读中心状态，不在本机自行判过期。
+4. `ask-check`：中心返回 `authorization_mismatch` 或 `authorization_expired` 时退出码非 0；本机缓存里即便有旧的 approved 也不能让它通过；调用 X7 `checkAuthorization` 在线发 `authorization.check`（新 requestId），验证当前 task/spec/workflow/head 的 liveBind，不以 GET ask 代替。
+5. 撤销和过期：`ask-dismiss` 经 `cancelAsk` 发 `ask.cancel`，断言中心 ask.state 为 `cancelled` 且本机批准状态不变，`sweepExpired` 对共享 ask 只读中心状态，不在本机自行判过期。
 6. runtime permission 和 AUQ 的现有测试原样通过（列出所跑文件）；`git diff --numstat` 显示 `src/bridge/asks.ts`、`src/bridge/ask-entry.ts` 各自新增 ≤3、删除 ≤3。
 
 **依赖**：X2、X7（已合并），可立即开工。
@@ -480,25 +491,25 @@ X12F tracked=3 globs=9 exceptions=4 deps=X12C,X12D,X12E
 
 **依赖**：X8（#457）、X9（#455）合并。
 
-### 附录 E · X12E 网页共享台账页、本机 API 与 MCP 工具入口
+### 附录 E · X12E TV1 数据源接线、本机 API 与 MCP 工具入口
 
 **来源**：v2 §2 X10/X11“复用既有 UI 模式”、X12“网页壳及 DTO”“DAG 和订单 MCP”；§1.1“网页经本人 bridge、CLI/PM 同命令入口”。
 
 **目标**：
-1. 本机 API：`src/bridge/local-api/shared-ledger.ts` 加 `/shared-ledger/v2/*` 四条路由（§3.3 末段），actor 由 Principal 映射，不读 body；通过 `src/bridge/shared-ledger-v2-entry.ts` 的端口调 X7 client。
-2. 网页：`shared-ledger.tsx` 和 `shared-view.tsx` 在 execution feature 上挂 X10 `TaskEditor` 和 X11 `ApprovalPanel`；`EXECUTION_ACTIONS` 的 enabled/reason 来自中心 capabilities；显示主场、执行地和“数据过期”（复用 `isDataStale`）；提交时状态未知只提示查回执。`web/lib/api/shared-ledger-v2.ts` 放 DTO 和 transport；i18n 补中英文。
+1. 本机 API：`src/bridge/local-api/shared-ledger.ts` 加 `/shared-ledger/v2/*` 四条路由（§3.3 末段），actor 由 Principal 映射，不读 body；通过 `src/bridge/shared-ledger-v2-entry.ts` 的端口调 X7 client；独立 receipts 查询走 §3.3 的只读 receipt 端口。
+2. 网页：依赖 TV1、接 TV1 的数据源，在同一个 CollabView 的数据适配层提供 execution feature 的 X10/X11 输入与命令 transport；不新增 shared-v2 界面，不改 TV1 的视图文件；`EXECUTION_ACTIONS` 的 enabled/reason 来自中心 capabilities；显示主场、执行地和“数据过期”（复用 `isDataStale`）；提交时状态未知只提示查回执。`web/lib/api/shared-ledger-v2.ts` 放 DTO 和 transport；i18n 补中英文。
 3. MCP：`dag-tools`、`order-tools` 在 execution feature 上把 dag.* / task.deliver / task.review 改走端口；端口为 null 时返回 `unavailable`；非共享卡不变。
 
-**范围**：fileGlobs 和例外见 §5；不改 `web/features/collab/shared/task/**` 和 `approve/**`（X10/X11）。
+**范围**：fileGlobs 和例外见 §5；不改 `web/features/collab/shared/task/**` 和 `approve/**`（X10/X11），不认领 shared-ledger.tsx/shared-view.tsx（PM 移交 TV1）；网页只接 TV1 数据源。
 
 **验收线**：
-1. 本机 API：fake 端口场景下，POST commands 时 body 带 actor 返回 400；不带时端口收到的 actor 等于 Principal 映射值；receipts 返回 unknown 时原样透传；端口为 null 时 503 `unavailable`。
-2. 网页单测（沿用 X10/X11 夹具）：capabilities 中 `task.new.enabled=false` 时按钮 disabled，title 等于 reason；数据过期时显示过期提示；member 视角看不到签署按钮（复用 X11 `canSign`）。
+1. 本机 API：fake 端口场景下，POST commands 时 body 带 actor 返回 400；不带时端口收到的 actor 等于 Principal 映射值；receipts 端口收到已认证 Principal 及完整 teamId/projectId/requestId/operationId/commandDigest；committed/unknown 原样透传，submit/command spy 都为 0；跨项目拒绝、transport 错误返回错误且不伪装 unknown；端口为 null 时 503 `unavailable`。
+2. TV1 数据源适配单测（沿用 TV1 与 X10/X11 夹具）：capabilities 中 `task.new.enabled=false` 时按钮 disabled，title 等于 reason；数据过期时显示过期提示；member 视角看不到签署按钮（复用 X11 `canSign`）。
 3. DOM 测（`tests/web-dom-shared-ledger-v2-wiring*`）：开卡表单提交后，fetch spy 收到恰好 1 次 POST `/api/v1/shared-ledger/v2/commands`，body 过 `parseCommand`；收到 409 conflict 时进入 X10 冲突态。
 4. MCP：execution feature 上调 `deliver` 工具 → 端口收到 `task.deliver`，本机 `ledger-write.deliver` spy 0 次；非共享卡 spy 1 次。
 5. `git diff --numstat` 显示 `src/bridge/local-api/index.ts` 新增 ≤3、删除 ≤3（预计 0）；web 不 import src（测试扫描 import）。
 
-**依赖**：X7、X10、X11（已合并），可立即开工。
+**依赖**：X7、X10、X11（已合并）及 TV1；等 TV1 的数据源契约完成后开工。
 
 ### 附录 F · X12F 本机传输、组合根、持久写门与 CLI
 
@@ -506,9 +517,9 @@ X12F tracked=3 globs=9 exceptions=4 deps=X12C,X12D,X12E
 
 **目标**：
 1. `src/lib/shared-ledger-v2-transport.ts`：照 §3.1 实现 X7 `ExecTransport`、X9 `LendCentralTransport`、X8 `SchedulerCentralClient`，签名复用 `SharedLedgerClient`；网络错误统一成 `unavailable`，4xx 原样带回 code。
-2. `src/lib/shared-ledger-v2-wiring.ts`：从 `shared-ledger-mode` 的本机凭据构造 `ExecIdentity`、`SharedLedgerExecGate`、`SharedLedgerExecClient`、`SharedLedgerExecLocal`（每个 project 一个单例）；`openSchedulerCentralClient(connectionId)` 只读本机配置。
-3. `src/bridge/shared-ledger-v2-wiring.ts`：`initSharedLedgerV2()` 依次调 `configureSharedAsks`、`configureLendCentral`、`configureSharedExecEntry`；凭据缺失时注入 null（fail-closed）。
-4. 持久写门：`src/lib/shared-ledger-v2-write-gate.ts` 的 `assertLocalWrite(db, ctx, event)`，在 `ledger-tx.insertEvent` 入口调用：目标 task 的 `extra.sharedFeatureId` 所在 feature 是 execution 模式时抛 `LedgerError("forbidden")`；导入身份由 X13 管，这里不放宽。`ledger-dag-write` 对 execution feature 的 rewrite/approve/bind 同样拒绝。
+2. `src/lib/shared-ledger-v2-wiring.ts`：从 `shared-ledger-mode` 的本机凭据构造 `ExecIdentity`、`SharedLedgerExecGate`、`SharedLedgerExecClient`、`SharedLedgerExecLocal`（按已认证身份 + project 缓存单例，不能跨 Principal 共用身份）；`openSchedulerCentralClient(connectionId)` 只读本机配置。
+3. `src/bridge/shared-ledger-v2-wiring.ts`：`initSharedLedgerV2()` 依次调 `configureSharedAsks`、`configureLendCentral`、`configureSharedExecEntry`；凭据缺失时注入 null（fail-closed）；向 E 注入 §3.3 独立只读 receipt/snapshot 端口。
+4. 持久写门：`src/lib/shared-ledger-v2-write-gate.ts` 的 `assertLocalWrite(db, ctx, event)`，在 `ledger-tx.tx` 的 SQLite 事务开始、执行写回调之前采集 task 的旧共享绑定/模式，事务内保持此快照；`insertEvent` 同时核旧快照和新行绑定：任一归属 execution 模式时抛 `LedgerError("forbidden")`；导入身份由 X13 管，这里不放宽。`ledger-dag-write` 对 execution feature 的 rewrite/approve/bind 同样拒绝。
 5. `shared-ledger-mode` 加 `sharedLedgerExecutionEnabled()`，默认 false，只读、本卡不提供写开关。
 6. CLI：`src/manager/ledger-shared-exec-cmds.ts` 提供 `ledger shared-exec receipt <requestId>` 和 `ledger shared-exec recover <kind> [--resubmit]`。recover 先查回执、租约和版本，必须显式带 `--resubmit` 才会重交。
 
@@ -516,10 +527,19 @@ X12F tracked=3 globs=9 exceptions=4 deps=X12C,X12D,X12E
 
 **验收线**：
 1. 传输：fake fetch 对 §3.1 每行断言 method、路径、签名头齐全、body 不含 actor；fetch reject 变成 `unavailable`；403 body 原样得到 `V2ContractError("forbidden")`。
-2. 写门：临时台账里建一张 `extra.sharedFeatureId=F` 的卡，模式文件 F=execution 时，`moveStage`/`deliver`/`recordReview`/`setTask`/`rewriteDag` 每个都抛 forbidden，events 行数不变；F=planning 时原行为不变（表驱动覆盖 `ledger-write` 全部导出写函数）。
-3. 组合：`initSharedLedgerV2()` 在凭据缺失时，三个 configure 都收到 null，并且调各自入口返回 `unavailable`；凭据存在时三者收到同一个 project 的同一个 client 实例。
-4. outbox 不是授权：`SharedLedgerExecLocal` 里有 pending result 时，`ask-check`、写门、`recover` 不带 `--resubmit` 都不会产生任何中心 command（transport spy 0 次）。
+2. 写门：临时台账里建一张 `extra.sharedFeatureId=F` 的卡，模式文件 F=execution 时，`moveStage`/`deliver`/`recordReview`/`setTask`/`rewriteDag` 每个都抛 forbidden，tasks 的 extra/rev/stage 及 events 与调用前完全一致；补 `setTask` 的 extra={}、删除 sharedFeatureId、替换为 planning feature/非共享 feature 四个反例，均按旧归属拒绝并整体回滚；F=planning 时原行为不变（表驱动覆盖 `ledger-write` 全部导出写函数）。
+3. 组合：`initSharedLedgerV2()` 在凭据缺失时，三个 configure 都收到 null，并且调各自入口返回 `unavailable`；凭据存在时 C 的 clientFor 与 E 的 clientFor（同 Principal/project）返回同一缓存 client；D 的 transportFor 返回对应 project 的订单 transport，grant/outboxDir 等于配置依赖；E 的 receipt/snapshot 使用对应 Principal/project 的只读传输；跨 Principal 不复用别人的身份。
+4. outbox 不是授权：`SharedLedgerExecLocal` 里有 pending result 时，`ask-check` 允许且必须在线发 `authorization.check` 校验 liveBind；分别计数 probe 与结果/副作用命令，断言 probe=1、outbox 结果/副作用重交=0。写门与 `recover` 不带 `--resubmit` 的 submit=0（只读对账可调用）；中心不可用时 ask-check 失败，pending 与 outbox 原内容不变。
 5. `sharedLedgerExecutionEnabled()` 默认 false；源码扫描断言本卡没有新增任何写模式文件为 execution 的路径。
 6. `git diff --numstat` 显示 `src/bridge.ts`、`src/scheduler.ts`、`src/manager/ledger.ts`、`src/lib/ledger-write.ts` 各自新增 ≤3、删除 ≤3。
 
 **依赖**：X12C、X12D、X12E（需要它们导出的 configure 端口）。
+
+## 第 1 轮审查项核对（设计验收，不冒充已实现节点的测试）
+
+- P1 ask-cancel：核对 X0 `V2_COMMAND_NAMES` / ask 状态契约及 X7 client；命令为 `ask.cancel`、方法为 `cancelAsk`、撤销状态为 `cancelled`。附录 C.5 已改，已删除原无效撤销命令。
+- P1 receipt-port：核对 X7 client 无公开 receipt 方法且 `command` 在未知回执后会 submit；§3.3 已冻结带 Principal 和五个查询字段的独立只读端口，F 注入、E 消费；E.1 验收分别断言完整参数、unknown 透传、写调用为零及读权限错误。
+- P1 authorization-probe：核对 X7 `checkAuthorization` 发 `authorization.check`，中心 authorization 的 `liveBind` 核当前绑定；C.4 / F.4 保留在线 probe，并将 probe 与 outbox 结果/副作用重交分别计数，不再要求全部 command 为零。
+- P2 write-gate-order：F 在事务回调前保留旧归属，事件落点同时核旧/新归属；F.2 加清空、删除、替换绑定反例，要求任务行和事件整体不变。
+- P2 configure-assertion：F.3 按 C/E 客户端、D 订单 transport/grant/outboxDir、E 只读端口分别验收，不再比较三种不同端口的 client。
+- PM TV1：§4.1 两个网页文件移交 TV1，§5 无其 fileGlob，也无新增 shared-v2 界面；E 依赖 TV1、接 TV1 的数据源。修订后原样运行 §6 脚本，15 对新节点和 90 对旧节点均 0/0；42 条为 30 fileGlobs + 9 例外 + 1 测试前缀 + 2 TV1 移交。
