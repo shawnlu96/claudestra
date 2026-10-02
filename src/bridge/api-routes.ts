@@ -1,4 +1,4 @@
-import { pmClientFor } from "./local-api/project-pm-delivery.js";
+import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
  *
@@ -1206,6 +1206,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(502, { ok: false, error: `delivery failed: ${reason || "unknown"}` });
     }
 
+    followPmDelivery(agent, delivery); // 转交给当班 PM 时，typing / 来源 / 交接记录都记在实际收件人名下
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});

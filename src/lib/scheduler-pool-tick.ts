@@ -27,7 +27,7 @@ export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: Sc
     // The offer re-plans from these flags: a dropped reviewFirst / localPriority would pick another machine and cancel the intent.
     ...(r.reviewFirst?.length ? ["--review-first", r.reviewFirst.join(",")] : []),
     ...(r.localPriority ? ["--local-priority", r.localPriority] : []), ...(r.repo ? ["--repo", r.repo] : []),
-    ...(r.writeFamilies ? ["--write-families", r.writeFamilies.join(",")] : []));
+    ...(r.writeFamilies ? ["--write-families", r.writeFamilies.join(",")] : []), ...(r.fixReassignMin ? ["--fix-reassign-min", String(r.fixReassignMin)] : []));
   if (res.ok !== true) return { step: res.code === "conflict" ? "lost_race" : "held", detail: `挂池一步没走通：${String(res.error)}` };
   const outcome = String(res.outcome), text = String(res.text ?? "");
   if (outcome === "timeout") await deps.notifyPm(task, `[调度引擎] ${task.id} ${text}`).catch(deps.lost("挂池超时通知没发出去（台账已记撤回）"));
