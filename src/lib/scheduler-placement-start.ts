@@ -1,4 +1,6 @@
 import { poolLocalFacts } from "./scheduler-agent-pool-context.js";
+import { reserveFinishing, reservedStartPlacement } from "./scheduler-agent-pool-reserve.js";
+import type { PlacementFacts } from "./scheduler-placement.js";
 import { localFamilyRefusal } from "./scheduler-local-families-placement.js";
 /**
  * start_node's placement (i28-W5): where a new card's writing goes, by the same placeFor the planner uses. `auto` picks
@@ -66,10 +68,11 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     if (!localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) return { where: "refused", reason: "本机写槽已满，且无法确认 peer 空位" };
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
   }
-  const placed = placeFor({
+  const facts: PlacementFacts = {
     remote: policy?.remote ?? null, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents).map(peerFacts),
     repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: locksFree(db, q.project, q.fileGlobs),
-  }, "write", "claude");
+  };
+  const placed = policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");
   if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason };
   if (placed.kind === "wait") return { where: "refused", reason: placed.reason };
   if ((!policy?.remote?.agents && policy?.remote?.localPriority === "off") || !localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) {
