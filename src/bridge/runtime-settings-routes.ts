@@ -15,7 +15,7 @@ import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { rememberSwitchOverride } from "./switch-override.js";
 import { handleRuntimeUpdate, RUNTIME_UPDATE_PATH } from "./runtime-update.js";
 import { acpSetConfig } from "./acp-link.js";
-import { isAcpChannel } from "./acp-state.js";
+import { isAcpChannel, isConfiguredAcpChannel } from "./acp-state.js";
 import { isSafeModelArg } from "../lib/claude-settings-runtime.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -46,14 +46,17 @@ export async function handleRuntimeSettingsRoutes(
   if (reg.runtime !== set[2]) {
     return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 ${set[2] === "pi" ? "Pi" : "Codex"} agent` });
   }
-  const route = settingsRoute(set[2] as "pi" | "codex", reg.channelId);
+  const route = await settingsRoute(set[2] as "pi" | "codex", reg.channelId);
   if (route === "acp") return acpSettings(canonical, reg.channelId!, model, effort, runManager);
   return route === "pi" ? piSettings(canonical, model, effort) : codexSettings(canonical, reg, model, effort, runManager);
 }
 
-/** 走哪条：ACP 宿主连着 = 会话里改、不重启（Codex / Pi 同一条）；否则 Pi 注入扩展命令、Codex 写 registry 后重启。tests/pi-acp-runtime.test.ts */
-export function settingsRoute(runtime: "pi" | "codex", channelId: string | undefined): "acp" | "pi" | "codex" {
-  return channelId && isAcpChannel(channelId) ? "acp" : runtime;
+/**
+ * 走哪条：配置成 ACP（registry 或此刻连着的宿主）= 会话里改、不重启（Codex / Pi 同一条）；否则 Pi 注入扩展命令、Codex 写 registry 后重启。
+ * 只看内存里的连接会在宿主重连那几秒退成往宿主日志窗口打字、还回 200。tests/pi-acp-runtime.test.ts
+ */
+export async function settingsRoute(runtime: "pi" | "codex", channelId: string | undefined): Promise<"acp" | "pi" | "codex"> {
+  return channelId && (await isConfiguredAcpChannel(channelId)) ? "acp" : runtime;
 }
 
 // ── Pi ──────────────────────────────────────────────────────────────────────
@@ -131,9 +134,11 @@ async function codexModels(principal: Principal): Promise<Response> {
 /**
  * transport=acp 的 Codex / Pi：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
  * 校验交给会话自己的 configOptions（宿主那边 configRefusal）——本机的模型目录（codex debug models / pi 的 models.json）对不上会话实际可选的。
- * 改成了再写 registry：宿主重起 / agent 重启时照样按它补上。
+ * 改成了再写 registry：宿主重起 / agent 重启时照样按它补上。宿主不在线回 409，不退回往 tmux 窗口打字（那里只有宿主日志）。
+ * ACP 版 Pi 的 /model /thinking 斜杠命令也走这里（api-slash.ts）。
  */
-async function acpSettings(canonical: string, channelId: string, model: string, effort: string, runManager: RunManager): Promise<Response> {
+export async function acpSettings(canonical: string, channelId: string, model: string, effort: string, runManager: RunManager): Promise<Response> {
+  if (!isAcpChannel(channelId)) return apiJson(409, { ok: false, code: "acp_host_offline", error: "ACP 宿主还没连上（可能正在重连），稍后再试；没有改动" });
   for (const [id, v] of [["model", model], ["reasoning_effort", effort]] as const) {
     if (!v) continue;
     const r = await acpSetConfig(channelId, id, v);

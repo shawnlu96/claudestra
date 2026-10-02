@@ -3,13 +3,14 @@
  * 同名 MCP 撞名闸（pi-adapter/mcp-clash.ts）、pi-settings 的分流。tmux 版 Pi 的选择、策略、启动命令逐字钉住不变。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { settingsRoute } from "../src/bridge/runtime-settings-routes.ts";
+import { acpSettings, settingsRoute } from "../src/bridge/runtime-settings-routes.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { ACP_RUNTIME_ENV, PI_ARGS_ENV } from "../src/lib/acp/host-runtime.ts";
 import { piMcpClash } from "../src/lib/acp/pi-adapter/mcp-clash.ts";
+import { REGISTRY_PATH } from "../src/lib/registry.ts";
 import { shellEscape } from "../src/lib/claude-launch.ts";
 import { pathOverrideAssignments } from "../src/lib/paths.ts";
 import { buildPiCommand, PI_EXTENSION_PATH } from "../src/lib/pi-launch.ts";
@@ -150,16 +151,34 @@ describe("同名 MCP 撞名闸：pi 的 mcp.json 会静默顶掉 channel-server�
 });
 
 describe("pi-settings 分流", () => {
-  test("ACP 宿主连着才走 acpSettings（会话里改）；tmux 版 Pi 仍注入扩展命令，Codex 照旧", () => {
+  test("ACP 宿主连着才走 acpSettings（会话里改）；tmux 版 Pi 仍注入扩展命令，Codex 照旧", async () => {
     const ch = "local-pi-settings-route";
     noteAcpChannel(ch, undefined);
-    expect(settingsRoute("pi", ch)).toBe("pi");
-    expect(settingsRoute("pi", undefined)).toBe("pi");
-    expect(settingsRoute("codex", ch)).toBe("codex");
+    expect(await settingsRoute("pi", ch)).toBe("pi");
+    expect(await settingsRoute("pi", undefined)).toBe("pi");
+    expect(await settingsRoute("codex", ch)).toBe("codex");
     noteAcpChannel(ch, "acp");
-    expect(settingsRoute("pi", ch)).toBe("acp");
-    expect(settingsRoute("codex", ch)).toBe("acp");
+    expect(await settingsRoute("pi", ch)).toBe("acp");
+    expect(await settingsRoute("codex", ch)).toBe("acp");
     noteAcpChannel(ch, "tmux"); // 切回 tmux 后扩展重新登记
-    expect(settingsRoute("pi", ch)).toBe("pi");
+    expect(await settingsRoute("pi", ch)).toBe("pi");
+  });
+
+  test("registry 配的是 ACP、宿主正在重连：仍走 acp，且回 409 宿主没连上，不退回往 tmux 打字、不写 registry", async () => {
+    const ch = "local-pi-settings-reconnect";
+    const saved = existsSync(REGISTRY_PATH) ? readFileSync(REGISTRY_PATH, "utf8") : null;
+    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: { "agent-pr": { runtime: "pi", channelId: ch, transport: "acp" } } }));
+    try {
+      noteAcpChannel(ch, undefined);
+      expect(await settingsRoute("pi", ch)).toBe("acp");
+      const calls: string[][] = [];
+      const res = await acpSettings("agent-pr", ch, "flash", "", async (...a: string[]) => (calls.push(a), { ok: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ ok: false, code: "acp_host_offline" });
+      expect(calls).toEqual([]);
+    } finally {
+      if (saved === null) rmSync(REGISTRY_PATH, { force: true });
+      else writeFileSync(REGISTRY_PATH, saved);
+    }
   });
 });

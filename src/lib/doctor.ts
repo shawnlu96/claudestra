@@ -536,7 +536,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkBridge(repoRoot),
     checkIntegration(repoRoot),
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
-    import("./doctor-acp.js").then((m) => m.checkCodexAcp()), import("./doctor-review-worktrees.js").then((m) => m.checkReviewWorktrees()), // 审查 worktree 残留
+    import("./doctor-acp.js").then((m) => m.checkAcp()), import("./doctor-review-worktrees.js").then((m) => m.checkReviewWorktrees()), // 审查 worktree 残留
     checkGitHead(repoRoot),
     checkWorktreeClean(repoRoot),
     checkWebBuild(repoRoot),

@@ -223,6 +223,7 @@ const slashDeps = (d: ApiDeps): SlashDeps => ({
     emitEvent({ agent: ev, chatId: a.channelId, type: "agent_status", data: { status: "thinking" } });
   },
   record: (cmd, a) => recordMetric("api_slash", { channelId: a.channelId, agent: a.name, meta: { cmd } }),
+  runManager,
 });
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
@@ -348,10 +349,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           a.compacting = st === "compacting";
           if (!a.busy && st === undefined && a.status !== "stopped") {
             try {
-              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]))
-                .split("\n")
-                .slice(-10)
-                .join("\n");
+              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"])).split("\n").slice(-10).join("\n");
               if (paneLooksWorking(tail)) a.busy = true;
             } catch {
               /* 窗口不存在等,保持不忙 */
