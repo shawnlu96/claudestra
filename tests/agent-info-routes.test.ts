@@ -152,6 +152,12 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     expect(extras("agent-task-t68", { kind: "worker" }).kind).toBe("worker");
     expect(extras("agent-open", {}).kind).toBeNull();
   });
+  test("transport=acp 的 agent 带 transport（网页终端提示宿主日志）；tmux / 缺省不带", async () => {
+    const extras = await agentListExtras(owner, io);
+    expect(extras("agent-pi", { transport: "acp" }).transport).toBe("acp");
+    expect(extras("agent-pt", { transport: "tmux" })).not.toHaveProperty("transport");
+    expect(extras("agent-open", {})).not.toHaveProperty("transport");
+  });
   test("external / label 人人可见；sharedPeers 只给全权非 peer（谁在共享是 owner 的事）", async () => {
     const own = await agentListExtras(owner, io);
     expect(own("agent-open", { external: true, label: "L" })).toMatchObject({ external: true, label: "L", sharedPeers: 2, sharedWith: ["A", "B"] });
