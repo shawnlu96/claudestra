@@ -6,9 +6,10 @@
 
 Like Codex, a Pi agent gets ACP by default when the checks pass (`src/manager/acp-lifecycle.ts`, tests: `tests/pi-default-acp.test.ts`):
 
-- `--transport tmux|acp` is used as given (`create`, `resume`, and `adopt` for Pi agents). An explicit `tmux` is recorded in the registry, so a later resume / adopt of the same name keeps it.
+- `--transport tmux|acp` is used as given (`create`, `resume`, and `adopt` for Pi agents). An explicit `tmux` is recorded in the registry, so a later resume / adopt of the same name keeps it. `adopt --transport acp` still runs the checks below first and refuses (non-zero exit, registry untouched, old agent not stopped) when they fail.
 - Without it, the same checks as `migrate --pi` decide: pi ≥ 0.99.0 and no `claudestra` server in pi's `mcp.json` / no capability profile that filters out `reply`. Pass → acp; fail → tmux, with the reason in the output (`transportNote`; adopt prints it to stderr) and `acpPending` in the registry so the next resume / adopt tries again. `migrate --pi <agent>` moves it once the checks pass.
-- If the ACP host does not come up (not ready, or the launch command itself refuses), create / resume stop the host and start the TUI version in the same window; adopt goes through `restart`, which now falls back the same way for every ACP Pi agent as it does for Codex (`acpPending` is set). The output says `transport: "tmux"` with the reason, and no dead window is left behind.
+- If the ACP host does not come up (not ready, or building the launch command throws — e.g. a profile that excludes `reply`, a clashing project `mcp.json`), create / resume stop the host and start the TUI version in the same window; adopt goes through `restart`, which now falls back the same way for every ACP Pi agent as it does for Codex, including the launch-command throw (`acpPending` is set). The output says `transport: "tmux"` with the reason, and no dead window is left behind.
+- `resume --fork` is refused for ACP Pi (non-zero exit, before any channel / window / registry write): Pi has no real session fork — its `--session-id` is open-or-create, and the tmux version's `--fork` just reopens the same session. Drop `--fork`, or pass `--transport tmux` for the old behaviour.
 - `adopt` changes the transport only when the choice differs from the record; a record whose `transport` is explicitly `tmux` (a manual choice or a rollback) stays on tmux.
 - The sandbox is unchanged: it only has the ACP Pi, never probes the production pi, and never falls back (`docs/architecture/pi-acp-sandbox.md`).
 

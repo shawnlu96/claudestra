@@ -742,7 +742,7 @@ async function cmdResume(
 ) {
   const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)], transportFlag, dir);
   let adapter = requireManaged(runtimeFlag, selected.transport), transportNote = selected.note;
-  const avail = await adapter.available();
+  (await import("./manager/acp-lifecycle.js")).refusePiAcpFork(adapter, forkSession); const avail = await adapter.available(); // 拒在建频道 / 窗口之前
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
   // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
   if (!adapter.isValidSessionId(sessionId)) {
@@ -1367,9 +1367,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
       },
     };
 
-    let started = (await launchInWindow(tmuxName, adapter, spec, { waitShell: true })).result;
-    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, started,
-      (a) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result)));
+    const launch = (a: ManagedRuntimeAdapter) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result);
+    let started: ReadyResult; // 首次启动交 promise：ACP 构建命令就抛也要走回退（acp-lifecycle.ts recoverFailedAcpLaunch）
+    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, launch(adapter), launch));
     // v2.7+ 自愈：会话被占用（CC 的 bg agent）→ fork 一份副本重试，就绪后探测
     // 新 session id 回写 registry（否则 watcher / 下次 restart 又会盯回被占用的旧 id）。
     if (!started.ready && started.reason === "occupied") {

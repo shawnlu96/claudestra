@@ -80,6 +80,16 @@ export async function prepareCreateRuntime(name: string, dir: string, runtime?: 
   catch (e) { return { ok: false, error: (e as Error).message }; }
 }
 
+/**
+ * Pi 没有会话分叉（--session-id 是 open-or-create）：ACP 版拒绝 --fork，免得把「按原 id 接着开」当成分叉交出去。
+ * resume 在建频道 / 窗口、写 registry 之前调；tmux 版的 --fork 原样不动。
+ */
+export function refusePiAcpFork(adapter: ManagedRuntimeAdapter, fork: boolean): void {
+  if (!fork || adapter !== managedFor("pi", "acp")) return;
+  throw new Error("Pi 没有真正的会话分叉：ACP 版不支持 --fork（tmux 版的 --fork 也只是按原 session id 打开同一个会话）。"
+    + "要接着原会话就去掉 --fork；确实要 tmux 版那种行为，加 --transport tmux");
+}
+
 /** 停掉窗口里的 ACP 宿主、回到 shell：先走适配器的退出序列，不行就点名强杀子进程。停不下返回 false */
 async function stopAcpHost(win: WindowOps, adapter: ManagedRuntimeAdapter): Promise<boolean> {
   const exited = await gracefulExitWindow(win, adapter).catch((e) => (console.error(`[acp] 宿主退出失败：${String(e)}`), false));
@@ -112,17 +122,20 @@ export function transportReport(adapter: ManagedRuntimeAdapter, spec: LaunchSpec
 }
 
 /**
- * adopt（换会话再 restart）的 Pi 按 resume 的缺省选 transport：点名照用、人工 tmux 保持、其余探测通过走 acp。只改 info（调用方落盘），
+ * adopt（换会话再 restart）的 Pi 按 resume 的缺省选 transport：点名照用（acp 也要过探测）、人工 tmux 保持、其余探测通过走 acp。只改 info（调用方落盘），
  * 记下 acpRestartFrom 让 restart 按旧 transport 退旧窗口；ACP 起不来由 recoverFailedAcpLaunch 回退 tmux。说明打到 stderr 并返回。
  */
 export async function adoptTransport(
-  info: { runtime?: string; cwd?: string; transport?: string; acpPending?: boolean; acpRestartPending?: boolean; acpRestartFrom?: string },
-  requested?: string, piCheck?: PiAcpCheck,
+  info: { runtime?: string; cwd?: string; piEnv?: unknown; transport?: string; acpPending?: boolean; acpRestartPending?: boolean; acpRestartFrom?: string },
+  requested?: string, piCheck: PiAcpCheck = piAcpCheck,
 ): Promise<string | undefined> {
   if (info.runtime !== "pi") {
     if (requested) throw new Error("adopt 的 --transport 只给 Pi agent 用；其它运行时用 transport <agent> tmux|acp");
     return undefined;
   }
+  // 点名 acp 也先验：不通过就在落盘、停旧窗口之前拒（restart 里起不来虽会回退，但旧 agent 已被停过一次）
+  const pre = requested === "acp" ? await piCheck(info.cwd, info.piEnv) : null;
+  if (pre && !pre.ok) throw new Error(`adopt --transport acp 被拒（registry 和旧 agent 都没动）：${pre.reason}`);
   const chosen = await chooseResumeTransport("pi", info, requested, info.cwd, piCheck);
   const from = normalizeTransport(info.transport);
   if (chosen.manualTmux) persistManualTmux(info);
@@ -140,7 +153,7 @@ export async function adoptTransport(
 export async function prepareAcpResume(spec: LaunchSpec, adapter: ManagedRuntimeAdapter, transport: Transport, name: string): Promise<LaunchSpec> {
   if (transport !== "acp") return spec;
   const named = { ...spec, agentName: spec.agentName ?? name };
-  if (named.mode !== "fork" || adapter.id === "pi") return named; // Pi 的 --session-id 是 open-or-create，fork 同 tmux 版按原 id 接着开
+  if (named.mode !== "fork") return named;
   if (!adapter.prepareSession) throw new Error("ACP 适配器没有 fork 准备方法");
   const { sessionId } = await adapter.prepareSession(named);
   if (!adapter.isValidSessionId(sessionId) || sessionId === named.sessionId) throw new Error("ACP fork 没返回新的合法 sessionId");
@@ -172,13 +185,20 @@ export async function markTransportReady(name: string, transport?: string): Prom
   });
 }
 
-/** 适配器能启动但接旧线程失败时，普通 restart 也恢复旧 TUI（Codex、Pi 同一条路；adopt 也经这里）；迁移和手动 restart 用同一条保守路径。 */
+/**
+ * 适配器能启动但接旧线程失败时，普通 restart 也恢复旧 TUI（Codex、Pi 同一条路；adopt 也经这里）；迁移和手动 restart 用同一条保守路径。
+ * first 可以直接给 launch 的 promise：ACP 构建启动命令就抛（能力档筛掉 reply、项目 MCP 撞名）也算没起来、照样回退；其它 transport 原样抛。
+ */
 export async function recoverFailedAcpLaunch(
-  name: string, info: { runtime?: string; transport?: string; cwd?: string }, adapter: ManagedRuntimeAdapter, started: ReadyResult,
+  name: string, info: { runtime?: string; transport?: string; cwd?: string }, adapter: ManagedRuntimeAdapter, first: ReadyResult | Promise<ReadyResult>,
   launch: (a: ManagedRuntimeAdapter) => Promise<ReadyResult>,
   deps: { exit?: () => Promise<boolean>; patch?: typeof patchRegistryAgent } = {},
 ): Promise<{ adapter: ManagedRuntimeAdapter; started: ReadyResult }> {
   const runtime = info.runtime === "codex" || info.runtime === "pi" ? info.runtime : null;
+  const started = await Promise.resolve(first).catch((e: unknown): ReadyResult => {
+    if (!runtime || info.transport !== "acp") throw e;
+    return { ready: false, reason: "exited", detail: `启动命令没构建出来：${e instanceof Error ? e.message : String(e)}` };
+  });
   if (started.ready && runtime) await markTransportReady(name, info.transport);
   if (started.ready || !runtime || info.transport !== "acp") return { adapter, started };
   if (isSandbox()) return { adapter, started }; // 沙箱不得把 stub 启动失败回退成真实 Codex TUI，也没有 TUI 版 Pi
