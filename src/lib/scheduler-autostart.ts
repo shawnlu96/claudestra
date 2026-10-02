@@ -1,3 +1,4 @@
+import { activeProjectPm } from "./pm-role.js";
 import { switchOff } from "./shared-ledger-gate-switch.js";
 export { switchOff } from "./shared-ledger-gate-switch.js";
 import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
@@ -98,10 +99,9 @@ export function quotaOver(q: InventoryQuota, line: number): InventoryQuota["wind
   return q.windows.find((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && w.usedPct !== null && w.usedPct >= line) ?? null;
 }
 
-/** 项目的 PM：PM 名单里第一个不是调度助理的（同 pm-notify.ts）；没有 = 不开 */
+/** 指针优先；未设时取第一个非调度助理的 PM，没有 = 不开。 */
 export function projectPm(db: Database, project: string): string | null {
-  const meta = getMeta(db, project);
-  return meta.pms.find((p) => p !== meta.team?.dispatcher) ?? null;
+  return activeProjectPm(db, project);
 }
 
 /** 调度服务那边的事实：scheduler.json 有没有列这个项目、autoDispatch、这个项目的 maxActiveWorkers */

@@ -3,6 +3,7 @@ import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, t
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -77,7 +78,7 @@ async function carryOf(run: MergeRun, external: MergeExternal, head: string): Pr
 async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
   const carry = await carryOf(run, external, pr.head);
   if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
-    return step("await_review", `update-branch 改了 head：${short(pr.head)}，${carry.reason.slice(0, 300)}，旧审查失效`, undefined, pr.head);
+    return step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, carry), undefined, pr.head); // scheduler-review-rebase.ts
   }
   // i28-CIF2's own update: a non-draft new head already red (UNSTABLE, BLOCKED or BEHIND) is carried, then bounced below
   const behind = behindUpdating(run) && !pr.draft && pr.mergeState !== "UNKNOWN" && failed(pr.checks);
@@ -143,7 +144,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       }
       if (unstableWait(pr) === "failed") return step("unknown", "CI 失败或取消");
       if (pr.mergeState !== "CLEAN" && pr.mergeState !== "UNSTABLE") return step("unknown", `PR mergeState=${pr.mergeState}`);
-      return step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`);
+      const waiting = await step("await_ci", `PR ${short(pr.head)} 可合并，等待 CI`); // a train-cleared green member merges in this same call
+      return train === "cleared" && pr.mergeState === "CLEAN" && green(waiting, pr.checks) ? await claimAndMerge(waiting, external, step, assertActive, true) : waiting;
     }
     if (run.phase === "updating") {
       const pr = await external.inspect(run.prRef);

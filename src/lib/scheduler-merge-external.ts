@@ -99,7 +99,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       if (onMain.timedOut || (onMain.code !== 0 && onMain.code !== 1)) throw new Error(`git merge-base 失败：${oneLine(onMain.stderr)}`);
       if (onMain.code !== 0) return { ok: false, reason: `另一个父提交 ${mainParent.slice(0, 12)} 不在 main 上` };
       const [before, after] = [await netDiff(oldHead), await netDiff(newHead)];
-      if (before !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了" };
+      if (before !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead }; // parents verified: scheduler-review-rebase.ts scopes the re-review on it
       return { ok: true, reason: "净 diff 一致", mainParent, mainHead, diffHash: createHash("sha256").update(after).digest("hex") };
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },

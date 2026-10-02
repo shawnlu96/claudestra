@@ -2,7 +2,7 @@
  * `ledger scheduler-spec-place`（i28-RSM1，只给调度身份）：交回自动时（或存量）停在 spec 的 auto 卡，调度服务按容量池算出放置后的两种台账写。
  * - `--peer <名> --repo <owner/repo> --reason <放置理由>`：照开卡的规矩（scheduler-spec-resume-text.ts）记放置 decision、以「远端卡复述跳过」
  *   推到 restate；卡上没有 extra.repo 就补上（自动开卡的 peer 卡同样带它，planner 派开工单靠它核授权仓库）。
- * - `--wait <原因>`：放置算不出来，记一条可读的等待事件；同一张卡、同一规格版本里与上一条等待原因相同就不再记（recorded=false，调用方不再报 PM）。
+ * - `--wait <原因>`：放置算不出来，记一条可读的等待事件；同一张卡、同一规格版本里与上一条等待原因相同就不再记（recorded=false）；送达确认单独记录，失败可重试。
  * 两种写都在事务里重核 specPlaceBlock 与 rev / workflow-rev，过期了回 conflict，调用方下一轮重算。tests/scheduler-spec-resume.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -54,7 +54,7 @@ function placePeer(c: PlaceCommand, ctx: WriteCtx, task: LedgerTask): Record<str
   const w = peerRestateSkip(`交回自动时卡还在 spec，按容量池放到 peer:${peer}（${reason}）；复述环节跳过，开工单由放置结果派给它`);
   const decision = appendEvent(c.db, ctx, { project: task.project, target: task.id, kind: "decision", text: w.decision,
     data: { op: "spec_placement", placement: `peer:${peer}`, repo, specRev: task.specRev, transcribed: false } }).event;
-  if (typeof task.extra.repo !== "string") updateTask(c.db, ctx, task, { extra: { ...task.extra, repo } });
+  updateTask(c.db, ctx, task, { extra: { ...task.extra, repo: task.extra.repo ?? repo, placement: `peer:${peer}` } });
   const fresh = c.task(task.id);
   const moved = applyMove(c.db, ctx, fresh, { from: "spec", to: "restate" }, true, w.stage.text, "pm");
   return { ok: true, placed: `peer:${peer}`, decision, event: moved.event, task: moved.task };
@@ -65,20 +65,31 @@ function recordWait(c: PlaceCommand, ctx: WriteCtx, task: LedgerTask): Record<st
   if (!reason) throw new LedgerError("invalid", "--wait 要写等待原因");
   const events = listEvents(c.db, { project: task.project, target: task.id });
   const last = events.findLast((e) => e.kind === "note" && e.data.op === SPEC_WAIT_OP && e.data.specRev === task.specRev && e.seq > specSince(events));
-  if (last && last.data.reason === reason) return { ok: true, recorded: false, event: last };
+  if (last && last.data.reason === reason) return { ok: true, recorded: false, event: last,
+    notified: events.some((e) => e.data.op === "spec_place_notified" && e.data.waitSeq === last.seq) };
   const event = appendEvent(c.db, ctx, { project: task.project, target: task.id, kind: "note", text: `交回自动后卡停在 spec，${reason}`,
     data: { op: SPEC_WAIT_OP, kind: "inform", specRev: task.specRev, reason } }).event;
   return { ok: true, recorded: true, event };
 }
 
 export const specPlaceCommand = {
-  valued: ["rev", "workflow-rev", "peer", "repo", "reason", "wait"], bools: [],
+  valued: ["rev", "workflow-rev", "peer", "repo", "reason", "wait", "notified"], bools: [],
   usage: "scheduler-spec-place <task> --rev N --workflow-rev N (--peer <名> --repo <owner/repo> --reason <理由> | --wait <原因>)（调度服务专用：spec 阶段 auto 卡的放置）",
   run(c: PlaceCommand): Record<string, unknown> {
     return c.db.transaction(() => {
       const ctx = c.ctx(), task = c.task(c.p.pos[1]), wf = getWorkflow(c.db, task.id);
       if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "spec 阶段的放置只由调度服务记账");
       if (task.rev !== Number(c.need("rev")) || wf?.rev !== Number(c.need("workflow-rev"))) throw new LedgerError("conflict", "卡或流程已被改过，下一轮重算");
+      if (c.p.flags.notified !== undefined) {
+        const seq = Number(c.need("notified"));
+        const events = listEvents(c.db, { project: task.project, target: task.id });
+        if (!events.some((e) => e.seq === seq && e.data.op === SPEC_WAIT_OP && e.data.specRev === task.specRev))
+          throw new LedgerError("conflict", "等待事件已失效");
+        if (!events.some((e) => e.data.op === "spec_place_notified" && e.data.waitSeq === seq))
+          appendEvent(c.db, ctx, { project: task.project, target: task.id, kind: "note", text: "spec 放置等待已通知 PM",
+            data: { op: "spec_place_notified", waitSeq: seq } });
+        return { ok: true };
+      }
       const blocked = specPlaceBlock(c.db, task, wf);
       if (blocked) throw new LedgerError("conflict", `不再由放置接手：${blocked}`);
       if ((c.p.flags.wait === undefined) === (c.p.flags.peer === undefined)) throw new LedgerError("invalid", "--peer 与 --wait 二选一");

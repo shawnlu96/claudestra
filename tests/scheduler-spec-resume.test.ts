@@ -58,7 +58,7 @@ function setup(opts: { remote?: Partial<RemotePolicy>; maxWorkers?: number; borr
   const hello = (peer = "mate") => recordHello(f.db, peer, null, { v: 1, proto: 2, boot: `boot-${peer}`, seq: 1, paused: null,
     slots: { codex: { total: 2, busy: 0 }, claude: { total: 0, busy: 0 } },
     grant: { until: f.tickDeps.now() + 3_600_000, roles: ["review", "write"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, f.tickDeps.now());
-  return { cli, pass, tick, hello, notices, policy, events: () => listEvents(f.db, { project: "p", target: "T1" }) };
+  return { env, cli, pass, tick, hello, notices, policy, events: () => listEvents(f.db, { project: "p", target: "T1" }) };
 }
 
 /** The card fell back to manual in spec (quota), then the PM (or the service) hands it back to auto. */
@@ -175,4 +175,67 @@ describe("stock cards and idempotency", () => {
     expect(await t.cli("scheduler", "scheduler-spec-place", "T1", "--rev", "99", "--workflow-rev", String(w.rev), "--wait", "x"))
       .toMatchObject({ ok: false, code: "conflict" });
   });
+});
+
+
+describe("resume regression coverage", () => {
+  test("own-lock: retained card lease does not block peer resume", async () => {
+    const t = setup({ borrow: [] });
+    await t.tick();
+    await t.tick();
+    f.db.run("UPDATE scheduler_intents SET status = 'done'");
+    f.db.run(`INSERT OR IGNORE INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope)
+      VALUES ('p', 'src/lib/x.ts', 'T1', (SELECT id FROM scheduler_intents LIMIT 1), 1, 'card')`);
+    await handBack(t);
+    t.policy.remote.localPriority = "off";
+    t.env.place = (db, q) => startPlacement(db, { policy: () => ({ remote: t.policy.remote, maxWorkers: 2 }),
+      borrow: async () => [MATE], originRepo: async () => "o/r", now: () => f.tickDeps.now() }, q, true);
+    t.hello();
+    expect(await t.pass()).toEqual([]);
+    expect(f.task().stage).toBe("restate");
+    expect(f.db.query("SELECT resource FROM scheduler_resources WHERE resource = 'src/lib/x.ts'").all()).toHaveLength(1);
+  });
+
+  test("peer-pin: peer expiry cannot dispatch local write after skipped restate", async () => {
+    const t = setup();
+    t.hello();
+    await t.pass();
+    expect(f.task().extra.placement).toBe("peer:mate");
+    await t.tick();
+    f.advance(3_600_001);
+    await t.tick();
+    await t.tick();
+    expect(f.intents().some((i) => i.action === "ensure_session" && i.node === "write")).toBe(false);
+    expect(f.intents().filter((i) => i.node === "write" && i.recipient === "agent-task-one")).toHaveLength(0);
+  });
+
+  test("notice-loss: failed notification retries then suppresses successful delivery", async () => {
+    const t = setup({ borrow: [], remote: { localPriority: "off" } });
+    let attempts = 0;
+    const send = t.env.notifyPm;
+    t.env.notifyPm = async (p, text) => {
+      if (++attempts === 1) throw new Error("temporary send failure");
+      await send(p, text);
+    };
+    expect(await t.pass()).toHaveLength(1);
+    expect(await t.pass()).toEqual([]);
+    expect(await t.pass()).toEqual([]);
+    expect(waits(t)).toHaveLength(1);
+    expect(attempts).toBe(2);
+    expect(t.notices).toHaveLength(1);
+  });
+
+  test("notice-loss: committed wait without a send is retried after restart", async () => {
+    const t = setup({ borrow: [], remote: { localPriority: "off" } });
+    const w = getWorkflow(f.db, "T1")!;
+    const placed = await t.env.place(f.db, { project: "p", repoDir: "/r", fileGlobs: ["src/lib/x.ts"], want: "auto", taskId: "T1" });
+    expect(placed.where).toBe("refused");
+    expect(await t.cli("scheduler", "scheduler-spec-place", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(w.rev),
+      "--wait", `等写代码的空位：${placed.reason}`)).toMatchObject({ ok: true });
+    await t.pass();
+    await t.pass();
+    expect(waits(t)).toHaveLength(1);
+    expect(t.notices).toHaveLength(1);
+  });
+
 });
