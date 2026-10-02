@@ -53,7 +53,7 @@ function blocks(title: string, rows: readonly string[], cap: number): string[] {
  * The folding quoteExternal does later (drop \p{Cf}, controls and blank runs to one space) plus NFKC, lines kept. Redaction
  * must run on this form: on the raw text a zero-width or full-width split hides a token that quoting then rejoins.
  */
-const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
+export const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
   .split("\n").map((l) => l.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ")).join("\n");
 
 /** Text that came from a peer (a lent review's report and findings) is folded and masked the same way before this machine stores it. */
