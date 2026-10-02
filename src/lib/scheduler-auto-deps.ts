@@ -1,7 +1,8 @@
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
+import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
- * registry, the author taken from the card (PM names it; the engine never invents an executor), and the per-card
+ * registry, the author taken from the card (or created locally when unassigned), and the per-card
  * cross-family reviewer created through `manager create` in its own detached worktree of the author's repository. Anything the engine
  * cannot prove (no session id yet, create timed out) is "unknown" and stops for PM rather than being created twice.
  */
@@ -54,7 +55,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env { db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void; alive: StillActive; git: Git; create: Manager }
+interface Env extends LocalAuthorEnv { alive: StillActive }
 const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
@@ -87,7 +88,7 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
 async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
   const { registryRow } = env;
   if (role === "author") {
-    if (!task.agent) return { kind: "manual", reason: "自动卡要先由 PM 指定执行者（task.agent）并建好它的 session" };
+    if (!task.agent) return ensureLocalAuthor(env, task);
     const row = registryRow(task.agent);
     return row ? refOf(task, role, row, family) : { kind: "manual", reason: `执行者 ${task.agent} 不在本机 registry` };
   }
@@ -146,7 +147,8 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
-  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)), create: localCreateGuard(plainManager(lease)) };
+  const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
+    create: localCreateGuard(plainManager(lease)), ledger: schedulerManagerWith(lease), registryPath };
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
