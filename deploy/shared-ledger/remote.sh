@@ -210,13 +210,13 @@ EOF
 }
 
 # 只排除路径和标记头都属于本脚本的配置；其余输出连注释也检查，
-# 避免 nginx 的合法单行/多指令布局绕过撞名检查。误拒比覆盖现有入口安全。
+# 引号作为边界、尾点归一化，避免等价域名写法绕过检查。误拒比覆盖现有入口安全。
 detect_collision() {
   printf '%s\n' "$1" | awk -v ours="$NGINX_FILE" -v mark="$MARK" -v host="$HOST_NAME" '
     function check(    n, a, i) {
       if (file == ours && header == mark) return
-      n = split(tolower(content), a, /[[:space:];{}]+/)
-      for (i = 1; i <= n; i++) if (a[i] == tolower(host)) { hit = 1; print (file == "" ? "<nginx -T>" : file); exit }
+      n = split(tolower(content), a, /[[:space:];{}"\047]+/)
+      for (i = 1; i <= n; i++) { sub(/\.$/, "", a[i]); if (a[i] == tolower(host)) { hit = 1; print (file == "" ? "<nginx -T>" : file); exit } }
     }
     /^# configuration file / {
       check(); file = $0; sub(/^# configuration file /, "", file); sub(/:$/, "", file)

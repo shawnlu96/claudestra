@@ -299,6 +299,9 @@ case $url in http://*"/v1/teams/"*) printf '{"code":"bad_signature"}' > "$out"; 
   });
 
   test.each([
+    ["双引号域名", `server { listen 443 ssl; server_name "${HOST}"; }`],
+    ["单引号域名", `server { listen 443 ssl; server_name '${HOST}'; }`],
+    ["尾点域名", `server { listen 443 ssl; server_name ${HOST}.; }`],
     ["单行 server 块", `server { listen 443 ssl; server_name ${HOST}; }`],
     ["同一行多条指令", `server {\n listen 443 ssl; server_name ${HOST};\n}`],
     ["注释里的域名预期误拒", `# reserved ${HOST} ;`],
