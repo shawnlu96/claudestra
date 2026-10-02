@@ -1,3 +1,4 @@
+import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
 /**
  * Discord Bridge Service — 主入口
  *
@@ -795,7 +796,8 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
+  return deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
+    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted)));
 }
 
 /** 只经 deliverLocalInOrder 调用 */
@@ -1354,7 +1356,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     return;
   }
 
-  const client = clients.get(channelId);
+  const client = clients.get(channelId) ?? pmClientFor(channelId, clients);
   if (!client) return;
 
   let content = msg.content
@@ -2296,7 +2298,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
         if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
-        const targetClient = clients.get(target.channelId);
+        const targetClient = clients.get(target.channelId) ?? pmClientFor(targetName, clients, fromName);
         if (!targetClient) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）`, rejected: "not_connected" }));
           break;
