@@ -11,7 +11,7 @@ describe("ACP pi-env-snapshot 扩展", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-snap-acp-"));
     process.env.CLAUDESTRA_AGENT = "agent-acp-x";
     process.env.CLAUDESTRA_STATE_DIR = dir;
-      const mod = await import("../src/lib/acp/pi-adapter/pi-env-snapshot.ts");
+    const mod = await import("../src/lib/acp/pi-adapter/pi-env-snapshot.ts");
     const handlers: Record<string, (e: unknown, ctx: unknown) => unknown> = {};
     const pi = {
       on: (ev: string, h: (e: unknown, ctx: unknown) => unknown) => void (handlers[ev] = h),

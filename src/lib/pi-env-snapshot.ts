@@ -15,12 +15,9 @@ import { join } from "node:path";
 import { stateDir } from "./state-dir.js";
 
 /**
- * 本进程**正在跑的** Pi 版本（写进快照的 piVersion；网页「本会话还在 X，重启后生效」横幅读它）。
- *
- * 取法：Pi 把自己的包作为**虚拟模块**提供给扩展 ⇒ `import("@earendil-works/pi-coding-agent").VERSION`
- * 就是本进程的版本。**不要**用 `process.env.PI_VERSION` —— 真机实测（2026-10-02，ACP 会话）
- * 那个变量根本不存在 ⇒ 快照会缺版本 ⇒ 横幅虽然消失但检测不出真正的版本漂移。
- * 老版本 Pi 包名不同 ⇒ undefined（只是不提示重启，通道照常）。
+ * 本进程正在跑的 Pi 版本（快照的 piVersion，网页「重启后生效」横幅读它）。Pi 把自己的包作为虚拟模块提供给扩展，
+ * 所以只在 Pi 加载的扩展里拿得到；Pi 不设 PI_VERSION 环境变量，改用它快照就缺版本、真漂移也不提示。
+ * 老版本 Pi 包名不同 ⇒ undefined（只是不提示重启）。
  */
 export const runningPiVersion = (): Promise<string | undefined> =>
   import("@earendil-works/pi-coding-agent" as string).then(
