@@ -12,6 +12,7 @@ import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
+import { cardContext } from "./ledger-card-names.js";
 import { diffNodes, nodePhase, planRewrite, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
 import {
   effectiveNodes, getDagVersion, getPendingProposal, getProposal, type DagNode, type DagProposal, type DagVersion, type Feature,
@@ -143,7 +144,7 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
     checkCas(f, input.rev);
     const now = ctx.now ?? Date.now();
     clearStalePending(db, ctx, f, now);
-    const plan = planRewrite(cur, livePhase(db), buildNodes(db, f, input.nodes), input.cancel, input.scopeChange);
+    const plan = planRewrite(cur, livePhase(db), buildNodes(db, f, input.nodes), input.cancel, input.scopeChange, cardContext(db, f));
     const c: ProposalContent = { featureId: f.id, version: cur.version + 1, baseVersion: cur.version, ...reasonOf(input.reasonKind, input.reasonText),
       nodes: plan.nodes, cancels: plan.cancels, scopeChange: input.scopeChange };
     const change = summary(cur.nodes, c);
@@ -181,7 +182,7 @@ function approvalProblem(db: Database, f: Feature, p: DagProposal, a: Ask | null
   try {
     const cancel = new Map(p.cancels.map((x: DagCancel) => [x.key, x.reason]));
     const input = p.nodes.map(({ key, taskId, oneLine, deps, estimate, fileGlobs }) => ({ key, taskId, oneLine, deps, estimate, fileGlobs }));
-    planRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange);
+    planRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange, cardContext(db, f));
   } catch (e) {
     if (e instanceof LedgerError) return { state: "void", why: `卡的状态变了，按现在的规矩不成立：${e.message}` };
     throw e;

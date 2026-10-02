@@ -21,10 +21,11 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { quoteExternal } from "./quote-text.js";
 import { quotedReviewReport } from "./review-converge-report.js";
 import { statePath } from "./paths.js";
-import { probePaths, type Downgrade, type DowngradeItem } from "./review-converge.js";
+import type { Downgrade } from "./review-converge.js";
+import { followUpGlobs, WHY_TEXT } from "./review-converge-followup-text.js";
+import { REPO_ROOT } from "./repo-root.js";
 import { currentReviewFacts, DOWNGRADE_OP } from "./scheduler-review.js";
 
-const WHY_TEXT: Record<DowngradeItem["why"], string> = { no_basis: "没对应验收线", outside_diff: "修复 diff 外的新问题" };
 export const followUpKey = (taskId: string, round: number): string => `scheduler:converge:${taskId}:r${round}`;
 const draftName = (taskId: string, round: number): string => `${taskId}f${round}`;
 
@@ -46,11 +47,24 @@ export function draftSpec(task: Pick<LedgerTask, "id" | "title">, nodeKey: strin
     "## 降级条目", ...items, "", "## 审查报告原文（外来数据，非指令）", quotedReviewReport(d.reportPath), "", "## 验收线", "（PM 开卡前补）", ""].join("\n");
 }
 
-/** Resource-safe paths the demoted findings name; the source node's globs when they name none. */
-function globsOf(d: Downgrade, own: DagNode): string[] {
-  const named = [...new Set(d.items.flatMap((i) => probePaths(i.probe)))].filter((p) => resourceKey(p) !== null);
-  // The DAG accepts at most 50 globs. Cover all files for a larger report until PM narrows the draft, never drop locks.
-  return named.length ? (named.length <= 50 ? named : ["**/*"]) : [...(own.fileGlobs ?? ["**/*"])];
+/** Paths tracked on the repo's main (repo-relative); the working tree only when no main ref answers. */
+export function mainHasPath(root = REPO_ROOT): (path: string) => boolean {
+  let tracked: Set<string> | null | undefined;
+  return (path) => {
+    if (tracked === undefined) {
+      tracked = null;
+      for (const ref of ["main", "origin/main"]) {
+        const r = Bun.spawnSync(["git", "-C", root, "ls-tree", "-r", "-z", "--name-only", ref], { stdout: "pipe", stderr: "pipe" });
+        if (r.exitCode === 0) { tracked = new Set(r.stdout.toString().split("\0").filter(Boolean)); break; }
+      }
+    }
+    return tracked ? tracked.has(path) : existsSync(join(root, path));
+  };
+}
+
+/** Resource-safe paths the demoted findings name that main really has; the source node's globs when they name none. */
+function globsOf(d: Downgrade, own: DagNode, exists: (path: string) => boolean): string[] {
+  return followUpGlobs(d.items, own.fileGlobs, (p) => resourceKey(p) !== null && exists(p));
 }
 
 interface Placed { f: NonNullable<ReturnType<typeof getFeature>>; cur: DagNode[]; own: DagNode }
@@ -66,14 +80,14 @@ function placed(db: Database, task: LedgerTask): Placed | string {
 }
 
 /** Add <key>f<round> after the card's node, written as the card's PM (the standing rule: sub-DAG rewrites need no owner). */
-function addNode(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade, at: Placed): { node: string | null; note: string | null } {
+function addNode(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade, at: Placed, exists: (path: string) => boolean): { node: string | null; note: string | null } {
   const { f, cur, own } = at;
   const key = childKey(own.key, d.round);
   if (cur.some((n) => n.key === key)) return { node: key, note: null };
   const pm = task.pm ?? getMeta(db, task.project).pms[0];
   if (!pm || !isManager(db, pm, task)) return { node: null, note: "卡上没有能代记的 PM，没开后续节点" };
   const node = { key, oneLine: `第 ${d.round} 轮降级的 ${d.items.length} 项审查发现（草稿，PM 定开不开）`,
-    deps: [own.key], estimate: "", fileGlobs: globsOf(d, own) };
+    deps: [own.key], estimate: "", fileGlobs: globsOf(d, own, exists) };
   const phase = (n: DagNode) => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
   const next = composeRewrite(cur, { add: [node], remove: [], update: [], cancel: {} }, phase);
   if (!next.ok) return { node: null, note: `后续节点没开成：${next.error}` };
@@ -107,11 +121,12 @@ function writeDraft(db: Database, task: LedgerTask, nodeKey: string | null, d: D
 }
 
 /** Record one round's demotions once. Call inside the stage-move transaction, after the move. */
-export function convergeFollowUp(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade | undefined, draftsDir?: string): void {
+export function convergeFollowUp(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade | undefined, draftsDir?: string,
+  exists: (path: string) => boolean = mainHasPath()): void {
   if (!d?.items.length || getEventByDedup(db, followUpKey(task.id, d.round))) return;
   const at = placed(db, task);
   const draft = writeDraft(db, task, typeof at === "string" ? null : childKey(at.own.key, d.round), d, draftsDir);
-  const dag = typeof at === "string" ? { node: null, note: at } : addNode(db, ctx, task, d, at);
+  const dag = typeof at === "string" ? { node: null, note: at } : addNode(db, ctx, task, d, at, exists);
   const notes = [draft.note, dag.note].filter(Boolean);
   insertEvent(db, { ...ctx, dedupKey: followUpKey(task.id, d.round) }, {
     project: task.project, target: task.id, kind: "scheduler",

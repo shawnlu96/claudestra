@@ -22,9 +22,9 @@ export interface ActivityRecord {
 }
 
 /** 名字只来自 registry（已校验过），这里再挡一次路径分隔与控制字符：坏名字不写也不读 */
-const safeName = (agent: string): boolean => !!agent && agent.length <= 120 && !/[/\\\0]|^\.\.?$|[\p{Cc}]/u.test(agent);
+export const safeName = (agent: string): boolean => !!agent && agent.length <= 120 && !/[/\\\0]|^\.\.?$|[\p{Cc}]/u.test(agent);
 
-const activityPath = (agent: string, dir = statePath("acp-activity")): string => `${dir}/${agent}.json`;
+export const activityPath = (agent: string, dir = statePath("acp-activity")): string => `${dir}/${agent}.json`;
 
 const isRecord = (d: unknown): boolean => {
   const r = d as Partial<ActivityRecord> | null;

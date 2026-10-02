@@ -33,8 +33,8 @@ the auto tick is not wrapped, and the bridge-side hooks see an empty list — be
   ≥ `MISS_GAP_MS` apart with the same agent / session / work (`agent-supervisor-judge.ts`, rules of R5a's `noteLiveness`).
 - **stuck** (ACP only) — the turn is running and the host has seen no `session/update` for `stuckMin`, read from the host's
   heartbeat file `state/acp-activity/<agent>.json` (`agent-supervisor-activity.ts`). Bridge entries are never used for this:
-  thought chunks are not forwarded and text is buffered, so a long-thinking turn would look stuck. Until the host writes the
-  heartbeat (node i28-S1b) there is no file and nothing is judged stuck.
+  thought chunks are not forwarded and text is buffered, so a long-thinking turn would look stuck. The host writes it
+  (`acp/host-heartbeat.ts`) on turn start / Stop / StopFailure at once and on updates at most every 15s; no file = not judged.
 
 ## Disposition table (`agent-supervisor-policy.ts`)
 
