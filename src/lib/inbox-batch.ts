@@ -19,6 +19,7 @@ export function inboxEntryHead(from: string, messageId: string, mins: number, ba
 const HEAD_RE = /^── (?:(\d+)\/(\d+) · )?来自 (.+?) · message_id=(\S+) · 排队 \d+ 分钟(?: · 回复用 reply，chat_id=(\S+))? ──$/gm;
 const BATCH_RE = /^\[📬 收件箱 inbox_[\w-]+：(\d+) 条/;
 const EMPTY_LINE = "收件箱里没有可领取的消息。";
+const PAGE_RE = /^\[📬 message_id=(\S+) 第 (\d+)\/(\d+) 页。[^\n]*\]\n\n/;
 const PREVIEW_TAIL_RE = /\n…（这条共 (\d+) 字，这里只给开头；要现在看全文用 check_inbox\(\{ read: "([^"\n]+)" \}\) 分页读，否则这一轮结束时送达）\s*$/;
 
 export interface InboxEntry {
@@ -55,4 +56,21 @@ export function parseInboxBatch(text: string): InboxEntry[] | "malformed" | null
     out.push(entry);
   }
   return numbered === n ? out : "malformed";
+}
+
+/** 分页读的一页（check_inbox({ read }) 的结果）：bridge 写的页头 + 这一页的原文切片；不是分页结果 → null */
+export function parseInboxPage(text: string): { messageId: string; page: number; pages: number; chunk: string } | null {
+  const m = PAGE_RE.exec(text);
+  return m ? { messageId: m[1], page: Number(m[2]), pages: Number(m[3]), chunk: text.slice(m[0].length) } : null;
+}
+
+/**
+ * 分页读拼回的整条（inbox.ts entryText：一行抬头 + 正文）→ 一条领走的消息。只认第 1 行的抬头（bridge 写的），
+ * 正文里再抄的抬头只是正文；抬头不带批内编号、message_id 要和页头一致，对不上 → null
+ */
+export function parseInboxEntry(full: string, messageId: string): InboxEntry | null {
+  const nl = full.indexOf("\n");
+  const h = new RegExp(HEAD_RE.source).exec(nl < 0 ? full : full.slice(0, nl));
+  if (!h || h[1] || h[4] !== messageId || nl < 0) return null;
+  return { from: h[3], messageId, ...(h[5] ? { replyTo: h[5] } : {}), body: full.slice(nl + 1) };
 }

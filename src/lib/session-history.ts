@@ -549,7 +549,7 @@ function parseHistoryLines(
       if (queued) {
         const msg = channelUserMessage(queued, seq, ts);
         const mid = channelMessageId(queued);
-        if (msg && (!mid || !seenChannelIds.has(mid)) && inbox.fresh(mid)) all.push(msg);
+        if (msg && (!mid || !seenChannelIds.has(mid)) && inbox.fresh(mid, msg)) all.push(msg);
       }
       continue;
     }
@@ -577,7 +577,7 @@ function parseHistoryLines(
       if (rec.isMeta === true) {
         // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；其余 isMeta（caveat / local-command 输出等）照旧过滤
         const msg = channelUserMessage(verified ?? text, seq, ts);
-        if (msg && inbox.fresh(channelMessageId(verified ?? text))) all.push(msg);
+        if (msg && inbox.fresh(channelMessageId(verified ?? text), msg)) all.push(msg);
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷

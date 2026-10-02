@@ -25,6 +25,7 @@ function mk(content: string, id: string, from: Envelope["from"], meta: Partial<E
 const ASK = { id: "ask_7k2", title: "选哪个方案？", createdAt: Date.parse("2026-10-03T00:00:00Z"), source: "card", options: [], state: "answered" } as unknown as Ask;
 const peerReply = () => mk("PR #12 已合，SHA abc1234", "api_peer_1", { kind: "api", tokenId: "tok-p", name: "He", peer: "He" });
 const schedulerNote = () => mk("i28-IBX1 已派单", "agent_sched_1", { kind: "local", agentName: "scheduler", channelId: "c-sched", ws: me });
+const schedulerNoteN = (k: number) => mk(`body${k}`, `agent_sched_n${k}`, { kind: "local", agentName: "scheduler", channelId: "c-sched", ws: me });
 const ownerAnswer = () =>
   mk(answerContent(ASK, [{ label: "方案 A", wire: "[button:plan_a]" } as never], "就按 A 来"), "api_ask_1",
     { kind: "api", tokenId: "owner:self", name: "owner", owner: true }, { triggerKind: "ask_answer", askId: ASK.id });
@@ -235,6 +236,78 @@ describe("check_inbox 领走的消息进会话历史", () => {
     expect(us.length).toBe(1);
     expect(us[0].from).toBe("收件箱");
     expect(us.some((m) => m.from === "owner")).toBe(false);
+  });
+
+  test("同一条 user 记录里两个 check_inbox 结果（20 条分两批）：seq 全部唯一递增，按 after 分页一条不漏", async () => {
+    setup(Array.from({ length: 20 }, (_, k) => schedulerNoteN(k)));
+    const b1 = await take(1000);
+    const b2 = await take(2000, { ack: /inbox_[\w-]+/.exec(b1)![0] }); // 确认前一批、顺带领下一批
+    const recs = [
+      { type: "assistant", timestamp: ts(1), message: { content: [
+        { type: "tool_use", id: "t1", name: "mcp__claudestra__check_inbox", input: {} },
+        { type: "tool_use", id: "t2", name: "mcp__claudestra__check_inbox", input: {} },
+      ] } },
+      { type: "user", timestamp: ts(2), message: { content: [
+        { type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: b1 }] },
+        { type: "tool_result", tool_use_id: "t2", content: [{ type: "text", text: b2 }] },
+      ] } },
+      said("都看完了", 3),
+    ];
+    const us = users(await history(recs));
+    expect(us.map((m) => m.text)).toEqual(Array.from({ length: 20 }, (_, k) => `body${k}`));
+    const seqs = us.map((m) => m.seq);
+    expect(new Set(seqs).size).toBe(20);
+    expect(seqs.every((s, k) => k === 0 || s > seqs[k - 1])).toBe(true);
+    expect(seqs.every((s) => s > 1 && s < 2)).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), "sh-inbox-"));
+    const p = join(dir, "pages.jsonl");
+    writeFileSync(p, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const got: string[] = [];
+    for (let after = 0, more = true; more;) {
+      const pg = await readSessionHistory(p, { after, limit: 10 });
+      got.push(...pg.messages.filter((m) => m.role === "user").map((m) => m.text));
+      more = pg.hasMore;
+      after = pg.messages.at(-1)?.seq ?? after;
+    }
+    expect(got.length).toBe(20);
+  });
+
+  test("领走后又按普通消息重投、普通那份带可信附件：只出一次，附件并到领走那条上", async () => {
+    const img = "/Users/x/.claudestra/inbox/1790000000000-shot.png";
+    setup([mk(`看图\n[attachment: ${img}]`, "api_peer_att", { kind: "api", tokenId: "tok-p", name: "He", peer: "He" }, { attachments: [img] })]);
+    const text = await take(1000);
+    const ms = await history([
+      callInbox("tu1", 1), result("tu1", text, 2),
+      channel("api_peer_att", `看图\n[attachment: ${img}]`, `user="He" user_id="api:tok-p" attachments="${img}"`, 1000),
+    ]);
+    const us = users(ms);
+    expect(us.length).toBe(1);
+    expect(us[0]).toMatchObject({ from: "peer He", attachments: [img] });
+    expect(us[0].seq).toBeLessThan(3);
+  });
+
+  test("长消息分页读完并 ack：历史里那条预览换成全文（带结尾、不再说随后送达），只出一次", async () => {
+    const long = `长报告开头\n${"x".repeat(20_000)}\nlong-END`;
+    const held = setup([mk(long, "agent_long_3", { kind: "local", agentName: "agent-codex", channelId: "c-codex", ws: me })]);
+    const first = await take(1000);
+    const p1 = await take(2000, { read: "agent_long_3" });
+    const p2 = await take(3000, { read: "agent_long_3", page: 2 });
+    expect(p2).toContain("第 2/2 页");
+    const acked = await take(4000, { ack: /ack: "(inbox_[\w-]+)"/.exec(p2)![1] });
+    expect(acked).toContain("已确认");
+    expect(held.get("c-me")?.length ?? 0).toBe(0); // 出队了，不会再按普通消息重投
+    const us = users(await history([
+      callInbox("tu1", 1), result("tu1", first, 2),
+      callInbox("tu2", 3, { read: "agent_long_3" }), result("tu2", p1, 4),
+      callInbox("tu3", 5, { read: "agent_long_3", page: 2 }), result("tu3", p2, 6),
+      callInbox("tu4", 7, { ack: "x" }), result("tu4", acked, 8),
+    ]));
+    expect(us.length).toBe(1);
+    expect(us[0].from).toBe("agent-codex");
+    expect(us[0].text.startsWith("长报告开头\nxxx")).toBe(true);
+    expect(us[0].text.endsWith("long-END")).toBe(true);
+    expect(us[0].text).not.toContain("随后单独送达");
+    expect(us[0].seq).toBeLessThan(3); // 位置在最初领到它的那次调用处
   });
 
   test("共存：check_inbox 返回给 agent 的文本逐字不变（改前快照）", async () => {

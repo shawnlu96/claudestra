@@ -6,12 +6,14 @@
  *   先出现的那份算数，后来的由 fresh() 挡掉。
  * - 太长没进批的只给了开头（批尾的无编号预览，或已打租约后原样重给的那批里的编号预览）：显示开头、注明全文随后单独送达，
  *   同一条的预览只出一次；预览不算「已显示」，全文按普通消息到达时照常进历史。
- * - seq：拆出来的消息挂在工具结果那一行上，取 行号 + 0.01·k，网页的 h<seq> 气泡 id 不撞、差量游标照样按大小比；
+ * - 分页读齐了（check_inbox({ read }) 各页都在）：拼回整条，换掉那条预览（位置不动）、算已显示——读完 ack 了不会再按普通消息重投。
+ * - 已显示的又按普通消息重投：不再出，但普通那份 channel 头上的可信附件并到领走的那条上（批次文本里没有附件元数据）。
+ * - seq：拆出来的消息挂在工具结果那一行上，取 行号 + 0.01·k，k 按整行累计（一行可有多个工具结果），网页的 h<seq> 气泡 id 不撞、差量游标照样按大小比；
  *   网页按 h<seq> 取行号的地方（差量去重、向下翻页、隐藏）和隐藏接口都认这种两位小数。
  * - 发送者只认 bridge 写的抬头（lib/inbox-batch.ts 校验条数）；拆不对就整段原文作为一条「收件箱」消息，不认任何发送者。
  */
 import { answerEcho, stripChannelHeader } from "./inbound-body.js";
-import { parseInboxBatch, type InboxEntry } from "./inbox-batch.js";
+import { parseInboxBatch, parseInboxEntry, parseInboxPage, type InboxEntry } from "./inbox-batch.js";
 import type { HistoryMessage } from "./session-history.js";
 
 const INBOX_TOOL_RE = /(?:^|__)check_inbox$/;
@@ -48,29 +50,61 @@ function entryFields(e: InboxEntry): Pick<HistoryMessage, "text" | "from" | "fro
   return { text: said, ...who, ...(askId ? { askId } : {}), ...(wire ? { wire } : {}) };
 }
 
+const MAX_SUB = 99; // seq 只用两位小数（网页 h<seq> 的行号协议），一行最多 99 个子条目
+
 export function inboxHistory() {
-  const shown = new Set<string>(), previewed = new Set<string>();
+  const shown = new Map<string, HistoryMessage>(), previewed = new Map<string, HistoryMessage>();
+  const pages = new Map<string, string[]>();
+  // 同一行（一条 user 记录的多个 tool_result / Codex 同一条 assistant）共用一个子序号计数：seq 唯一且递增
+  let line = -1, k = 0, last: HistoryMessage | undefined;
+  const out = (seq: number, ts: string | null, f: Omit<HistoryMessage, "seq" | "ts" | "role">, acc: HistoryMessage[]): HistoryMessage => {
+    if (seq !== line) { line = seq; k = 0; }
+    if (k >= MAX_SUB && last) { last.text += `\n\n${f.from ? `（${f.from}）` : ""}${f.text}`; return last; } // 极端情况并进本行最后一条，不撞下一行的 seq
+    last = { seq: Math.round((seq + 0.01 * ++k) * 100) / 100, ts, role: "user", ...f };
+    acc.push(last);
+    return last;
+  };
+  /** 分页读齐了：拼回整条，换掉那条预览（位置不动）；没见过预览就排在这次调用处 */
+  const paged = (pg: NonNullable<ReturnType<typeof parseInboxPage>>, seq: number, ts: string | null, acc: HistoryMessage[]) => {
+    if (shown.has(pg.messageId) || pg.page < 1 || pg.page > pg.pages) return;
+    const got = pages.get(pg.messageId) ?? new Array<string>(pg.pages).fill("");
+    if (got.length !== pg.pages) return;
+    got[pg.page - 1] = pg.chunk;
+    pages.set(pg.messageId, got);
+    if (got.some((c) => !c)) return;
+    const e = parseInboxEntry(got.join(""), pg.messageId);
+    if (!e) return;
+    const f = entryFields(e);
+    if (!f.text.trim()) return;
+    const prev = previewed.get(pg.messageId);
+    shown.set(pg.messageId, prev ? Object.assign(prev, f) : out(seq, ts, f, acc));
+  };
   return {
     /** tool_result 块 → 拆出的入站消息（不是 check_inbox 的结果、报错、空收件箱 / 只 ack → []） */
     expand(card: { name: string } | undefined, b: any, seq: number, ts: string | null): HistoryMessage[] {
       if (b?.type !== "tool_result" || b.is_error === true || !card || !INBOX_TOOL_RE.test(card.name)) return [];
       const text = resultText(b);
+      const acc: HistoryMessage[] = [];
       const parsed = parseInboxBatch(text);
-      const at = (k: number) => Math.round((seq + 0.01 * (k + 1)) * 100) / 100;
-      if (parsed === "malformed") return [{ seq: at(0), ts, role: "user", text: text.trim(), from: INBOX_LABEL }];
-      const out: HistoryMessage[] = [];
+      if (parsed === "malformed") { out(seq, ts, { text: text.trim(), from: INBOX_LABEL }, acc); return acc; }
+      const pg = parsed ? null : parseInboxPage(text);
+      if (pg) paged(pg, seq, ts, acc);
       for (const e of parsed ?? []) {
         if (shown.has(e.messageId) || (e.previewOf !== undefined && previewed.has(e.messageId))) continue; // 预览只出一次，全文出过就不再出预览
         const f = entryFields(e);
         if (!f.text.trim()) continue;
-        (e.previewOf === undefined ? shown : previewed).add(e.messageId);
-        out.push({ seq: at(out.length), ts, role: "user", ...f });
+        (e.previewOf === undefined ? shown : previewed).set(e.messageId, out(seq, ts, f, acc));
       }
-      return out;
+      return acc;
     },
-    /** 这条普通入站消息（message_id）还没作为领走的消息显示过 */
-    fresh(messageId: string | null): boolean {
-      return !messageId || !shown.has(messageId);
+    /**
+     * 这条普通入站消息（message_id）还没作为领走的消息显示过。显示过的不再出，但它带的可信附件（channel 头属性，
+     * 领走的批次文本里没有）并到领走的那条上——外源附件卡片只认这份元数据
+     */
+    fresh(messageId: string | null, msg?: HistoryMessage | null): boolean {
+      const m = messageId ? shown.get(messageId) : undefined;
+      if (m && msg?.attachments?.length && !m.attachments?.length) m.attachments = msg.attachments;
+      return !m;
     },
   };
 }
