@@ -42,6 +42,37 @@ function closeAll(names: string[]): StopIo {
 const report = async (names: string[], path: string) => stopReportText(await stopRevokedWorkers(closeAll(names)), (n) => workerOrderLive(n, path));
 
 describe("重新授权 / 收回时关掉的窗口：在跑的停掉和已结束单的残留分开说", () => {
+  test("probe 的 no_window 快照返回前 create 建窗并退出：返回前关窗且计入报告", async () => {
+    const name = "agent-lend-race";
+    const io = closeAll([]);
+    let window = false;
+    let creating = true;
+    let status = "creating";
+    let probes = 0;
+    const calls: string[] = [];
+    io.workers = async () => [{ name, createPid: 7 }];
+    io.isCreate = () => creating;
+    io.probe = async () => {
+      const snapshot = window ? "running" : "no_window";
+      if (++probes === 1) {
+        await Promise.resolve().then(() => {
+          window = true;
+          status = "active";
+          creating = false;
+          calls.push("create committed and exited");
+        });
+      }
+      return snapshot;
+    };
+    io.killWindows = async () => { calls.push("kill"); window = false; };
+    io.markStopped = async () => { calls.push("markStopped"); status = "stopped"; };
+    const result = await stopRevokedWorkers(io);
+    expect(window).toBe(false);
+    expect(status).toBe("stopped");
+    expect(result).toEqual({ stopped: [name], unconfirmed: [] });
+    expect(calls).toEqual(["create committed and exited", "kill", "markStopped"]);
+  });
+
   test("3 条 stopped 无窗口加 1 条有窗口：只报本次关闭的窗口，再授权不重复报告", async () => {
     const gone = ["agent-lend-gone1", "agent-lend-gone2", "agent-lend-gone3"];
     const active = "agent-lend-left";

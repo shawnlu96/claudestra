@@ -119,7 +119,8 @@ export async function stopRevokedWorkers(io: StopIo): Promise<StopReport> {
     if (!io.stopReason(w.name)) continue;
     const before = await io.probe(w.name);
     const creating = !!w.createPid && io.isCreate(w.createPid, w.name);
-    if (before === "no_window" && !creating) {
+    // create 可能在首份窗口快照之后建窗并退出；确认它已退出后再读窗口，才能静默跳过。
+    if (before === "no_window" && !creating && (await io.probe(w.name)) === "no_window") {
       await io.markStopped(w.name);
       continue;
     }
