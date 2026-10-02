@@ -129,7 +129,7 @@ class Card {
   }
   /** Count a refused plan; on the threshold record it on the ledger, then tell PM once (see PLAN_REJECT_TICKS). */
   async refused(code: string, error: string): Promise<CardOutcome> {
-    if (isResourceWait(code, error)) return this.out("wait", error);
+    if (isResourceWait(code, error)) { refusals.get(this.db)?.delete(this.task.id); return this.out("wait", error); }
     const text = planRejectedReason(error), now = this.deps.now(), detail = `计划没写进台账：${oneLine(error)}`;
     const seen = perDb(refusals, this.db), was = seen.get(this.task.id);
     const r: Refusal = was && was.code === code && was.text === text ? { ...was, ticks: was.ticks + 1 } : { code, text, ticks: 1, since: now, told: false };

@@ -8,6 +8,7 @@ import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const OVERLAPS = [
   "资源 merge:claude-orchestrator 与 merge:claude-orchestrator 重叠（i28-C0 占用）",
+  "资源 merge:p 与 merge:p 重叠（T 0 占用）",
   "资源 slot:p:0 与 slot:p:0 重叠（T0 占用）",
   "资源 src/lib/x.ts 与 src/lib/* 重叠（T0 占用）",
 ];
@@ -87,36 +88,57 @@ describe("i28-MQ1 resource occupancy waits without a plan refusal alarm", () => 
     });
   }
 
-  test("a real merge resource lock queues the reviewed card; releasing it resumes automatic merge", async () => {
+  test("a resource wait breaks an earlier refusal streak", async () => {
     const f = autoFixture();
     try {
       await toBuild(f);
-      await f.tick();
-      expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).ok).toBe(true);
-      await f.tick(); // bind reviewer
-      await f.tick(); // dispatch review
-      expect((await f.review("pass", H1, [])).ok).toBe(true);
-      expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
-      createTask(f.db, f.at("owner"), { project: "p", id: "T0", title: "merging first", kind: "code" });
-      f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,
-        templateVersion,status,reason,createdAt,updatedAt)
-        VALUES ('merge-first','T0','p','merge_deploy','merge',0,0,1,1,2,'submitted','waiting for CI',100,100)`).run();
-      f.db.query(`INSERT INTO scheduler_resources (project,resource,taskId,intentId,acquiredAt)
-        VALUES ('p','merge:p','T0','merge-first',100)`).run();
-      const { state, alarms } = observePlans(f);
-      for (let tick = 0; tick < 8; tick++) {
-        expect(await f.tick()).toMatchObject({ step: "wait", detail: "资源 merge:p 与 merge:p 重叠（T0 占用）" });
-        f.advance(PLAN_REJECT_MS);
-      }
-      expect(state).toMatchObject({ plans: 8, rejectedWrites: 0 });
-      expect([alarms(), f.notices]).toEqual([[], []]);
-      expect(f.task().stage).toBe("merge");
-      expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
-      expect(f.intents().filter((i) => i.action === "merge")).toHaveLength(1);
-      expect((await f.cli("scheduler", "scheduler-settle", "merge-first", "--from", "submitted", "--to", "done", "--receipt", "merged")).ok).toBe(true);
-      expect(await f.tick()).toMatchObject({ step: "merge_queue" });
-      expect(f.intents().at(-1)).toMatchObject({ action: "merge", status: "pending" });
-      expect([alarms(), f.notices]).toEqual([[], []]);
+      const frozen = { code: "conflict", error: "项目合并队列已冻结" };
+      const wait = { code: "conflict", error: "资源 merge:p 与 merge:p 重叠（T0 占用）" };
+      const { state, alarms } = observePlans(f, frozen);
+      for (let tick = 0; tick < 2; tick++) expect(await f.tick()).toMatchObject({ step: "replan" });
+      state.refusal = wait;
+      expect(await f.tick()).toMatchObject({ step: "wait", detail: wait.error });
+      state.refusal = frozen;
+      expect(await f.tick()).toMatchObject({ step: "replan" });
+      expect([state.rejectedWrites, alarms().length, f.notices.length]).toEqual([0, 0, 0]);
+      for (let tick = 0; tick < 2; tick++) await f.tick();
+      expect([state.rejectedWrites, alarms().length, f.notices.length]).toEqual([1, 1, 1]);
+      expect(f.notices[0]).toContain("连续 3 次被台账拒收");
     } finally { f.close(); }
   });
+
+  for (const holderId of ["T0", "T 0"]) {
+    test(`a real merge resource lock held by ${holderId} queues the reviewed card; releasing it resumes automatic merge`, async () => {
+      const f = autoFixture();
+      try {
+        await toBuild(f);
+        await f.tick();
+        expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).ok).toBe(true);
+        await f.tick(); // bind reviewer
+        await f.tick(); // dispatch review
+        expect((await f.review("pass", H1, [])).ok).toBe(true);
+        expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+        createTask(f.db, f.at("owner"), { project: "p", id: holderId, title: "merging first", kind: "code" });
+        f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,
+          templateVersion,status,reason,createdAt,updatedAt)
+          VALUES ('merge-first',?,'p','merge_deploy','merge',0,0,1,1,2,'submitted','waiting for CI',100,100)`).run(holderId);
+        f.db.query(`INSERT INTO scheduler_resources (project,resource,taskId,intentId,acquiredAt)
+          VALUES ('p','merge:p',?,'merge-first',100)`).run(holderId);
+        const { state, alarms } = observePlans(f);
+        for (let tick = 0; tick < 8; tick++) {
+          expect(await f.tick()).toMatchObject({ step: "wait", detail: `资源 merge:p 与 merge:p 重叠（${holderId} 占用）` });
+          f.advance(PLAN_REJECT_MS);
+        }
+        expect(state).toMatchObject({ plans: 8, rejectedWrites: 0 });
+        expect([alarms(), f.notices]).toEqual([[], []]);
+        expect(f.task().stage).toBe("merge");
+        expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+        expect(f.intents().filter((i) => i.action === "merge")).toHaveLength(1);
+        expect((await f.cli("scheduler", "scheduler-settle", "merge-first", "--from", "submitted", "--to", "done", "--receipt", "merged")).ok).toBe(true);
+        expect(await f.tick()).toMatchObject({ step: "merge_queue" });
+        expect(f.intents().at(-1)).toMatchObject({ action: "merge", status: "pending" });
+        expect([alarms(), f.notices]).toEqual([[], []]);
+      } finally { f.close(); }
+    });
+  }
 });
