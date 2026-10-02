@@ -5,7 +5,8 @@
  * 老 bridge 没有路由 = 404 → absent，中区回落到因果线画布；403 照入口的做法收起（collab-entry.tsx）。
  * 版本列表、对比只在点开时按需拉，跟着 rev 一起刷新。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { assertDagSnapshot, dagRetryDelay } from "../product/dag-availability";
 import { ApiError } from "@/lib/api/client";
 import { fetchDagBoard, fetchDagDiff, fetchDagFeature } from "@/lib/api/ledger";
 import { setLedgerAccess } from "../collab-cache";
@@ -16,24 +17,29 @@ export type DagLoad = { status: "loading" } | { status: "absent" } | { status: "
 
 export function useDagBoard(project: string, rev: number): DagLoad {
   const [load, setLoad] = useState<DagLoad>({ status: "loading" });
+  const [retry, setRetry] = useState(0);
+  const backoff = useRef(5_000);
+  useEffect(() => { backoff.current = 5_000; }, [project, rev]);
   useEffect(() => {
     if (rev === 0) return;
     const ctrl = new AbortController();
-    fetchDagBoard(project, ctrl.signal).then(
-      (board) => setLoad({ status: "ok", board }),
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    fetchDagBoard(project, ctrl.signal).then(board => { assertDagSnapshot(board); return board; }).then(
+      (board) => { if (ctrl.signal.aborted) return; backoff.current = 5_000; setLoad({ status: "ok", board }); },
       (e: Error) => {
         if (ctrl.signal.aborted) return;
+        timer = setTimeout(() => setRetry(n => n + 1), backoff.current);
+        backoff.current = dagRetryDelay(backoff.current);
         if (e instanceof ApiError && e.status === 404) return setLoad({ status: "absent" });
         if (e instanceof ApiError && e.status === 403) {
           setLedgerAccess(project, "no");
           return setLoad({ status: "forbidden" });
         }
-        // 已经有快照时重拉失败不清屏：留着旧的，下次台账变了再拉
-        setLoad((cur) => (cur.status === "ok" ? cur : { status: "error", message: e.message }));
+        setLoad({ status: "error", message: e.message });
       },
     );
-    return () => ctrl.abort();
-  }, [project, rev]);
+    return () => { ctrl.abort(); clearTimeout(timer); };
+  }, [project, rev, retry]);
   return load;
 }
 

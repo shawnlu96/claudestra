@@ -5,6 +5,7 @@ import { featureDeps } from "./ledger-feature-deps.js";
 import { deferredNode, featureEta, phase, projectPace, propagateEtas, type EtaNode } from "./ledger-product-board-eta.js";
 import { nodePhase } from "./ledger-dag-rules.js";
 import { listEvents, listTasks } from "./ledger-store.js";
+import { productFeatureCards } from "./ledger-product-board-cards.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 
 export function nodeCounts(nodes: readonly EtaNode[]) {
@@ -42,6 +43,7 @@ export function productBoard(db: Database, project: string, now: number) {
       completed: cards.filter((t) => nodePhase(t.id, t.stage) === "done").length,
       active: cards.filter((t) => nodePhase(t.id, t.stage) === "active").length };
     return { id: f.id, title: f.title, status: f.status, hasDag: f.currentVersion > 0, version: f.currentVersion,
+      ...(!f.currentVersion ? { cards: productFeatureCards(tasks, project, f.id) } : {}),
       counts, eta: f.currentVersion ? featureEta(nodes, pace, active, events, now) : null,
       lastActivityAt: cards.length ? Math.max(...cards.map((t) => t.updatedAt)) : null };
   });
