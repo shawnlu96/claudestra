@@ -14,8 +14,9 @@ import { parseAuqPane } from "./auq-pane.js";
 import { LOG_DIR } from "./paths.js";
 import type { RegistryAgent } from "./registry.js";
 import {
-  detectBypassConsentPrompt, detectRuntimePermissionPrompt, detectSessionIdlePrompt, detectSwitchConfirmPrompt, trustPromptMoves,
+  detectBypassConsentPrompt, detectRuntimePermissionPrompt, detectSessionIdlePrompt, detectSwitchConfirmPrompt,
 } from "./tmux-helper.js";
+import { looksLikeTrustPrompt } from "./trust-prompt.js";
 import { wallWaitOf } from "./wall-screen.js";
 
 export type GuardedScreen =
@@ -28,7 +29,7 @@ export function guardedScreenOf(pane: string, runtime: string | undefined): Guar
   if (detectRuntimePermissionPrompt(pane)) return "permission";
   if (parseAuqPane(pane)) return "ask_user_question";
   if (detectSessionIdlePrompt(pane)) return "session_idle";
-  if (trustPromptMoves(pane) !== null) return "trust_prompt";
+  if (looksLikeTrustPrompt(pane)) return "trust_prompt"; // 半帧也拦：认不全 ≠ 安全
   if (detectBypassConsentPrompt(pane)) return "bypass_consent";
   return null;
 }

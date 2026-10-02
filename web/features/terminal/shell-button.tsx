@@ -28,6 +28,11 @@ function ShellPicker({ list, onClose, onOpen }: { list: ShellList; onClose: () =
   const [err, setErr] = useState("");
   const chosen = list.dirs.some((d) => d.dir === dir) ? dir : (list.dirs[0]?.dir ?? "");
   const full = list.shells.length >= list.max;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose(); // 桌面 Esc 关，同 collab-detail / media-panel
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const create = async () => {
     setBusy(true);

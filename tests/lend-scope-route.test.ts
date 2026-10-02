@@ -25,8 +25,10 @@ const PEER = "w6mate";
 const ORDER = "w6-route:s1:r0:review:a0";
 const WORKER = workerName(ORDER);
 const OTHER = workerName("w6-route:s2:r0:review:a0");
-const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH, LEND_JOURNAL_PATH];
-const saved = new Map<string, string | null>();
+const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH,
+  LEND_JOURNAL_PATH, LEND_JOURNAL_PATH + "-wal", LEND_JOURNAL_PATH + "-shm"];
+// Preserve the SQLite files byte-for-byte so restoring route state cannot poison another test's journal.
+const saved = new Map<string, Buffer | null>();
 const dirA = mkdtempSync(join(tmpdir(), "w6-peer-a-"));
 const ENV_WITH_BUN = BRIDGE_ENV as Record<string, string | undefined>; // bridge 起 manager 子进程用的 env（runManager）
 const runtimeBefore = ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
@@ -49,9 +51,9 @@ function lendFile(granted: boolean): void {
 
 beforeAll(async () => {
   ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = join(dirA, "runtime"); // manager list 的 tmux socket 落到临时目录：没有服务器 = 没有窗口
-  for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f), "utf8") : null);
+  for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f)) : null);
   for (const f of ["peers.json", "principals.json", "peer-keys.json"]) rmSync(fileOf(f), { force: true });
-  rmSync(LEND_JOURNAL_PATH, { force: true });
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   writeFileSync(join(STATE_DIR, "registry.json"), JSON.stringify({ agents: {
     [WORKER]: { name: WORKER, channelId: "ch-lend", cwd: dirA }, [OTHER]: { name: OTHER, channelId: "ch-other", cwd: dirA },
     "agent-x": { name: "agent-x", channelId: "ch-x", cwd: dirA, external: true }, "agent-home": { name: "agent-home", channelId: "ch-home", cwd: dirA },
@@ -81,6 +83,7 @@ beforeAll(async () => {
 afterAll(() => {
   if (runtimeBefore === undefined) delete ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
   else ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = runtimeBefore;
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   for (const [f, v] of saved) v === null ? rmSync(fileOf(f), { force: true }) : writeFileSync(fileOf(f), v);
   rmSync(dirA, { recursive: true, force: true });
 });

@@ -1,12 +1,17 @@
 /**
  * pi rpc（0.99）↔ ACP 的纯映射，形状对着宿主的翻译器（lib/acp/updates.ts）：
  * - 正文：message_update.text_delta → agent_message_chunk，每条助手消息一个 messageId；provider 不流式时在 message_end 补整段。
+ * - 思考：thinking_end 的整块 → agent_thought_chunk，标 _meta.claudestra.display（tmux 下会话文件里的 thinking 也显示，宿主据此翻成进度句）。
  * - 工具：tool_execution_start → tool_call，tool_execution_end → tool_call_update（completed / failed）。
- *   mcp__<server>__<tool> 拆进 rawInput 的 server / tool / arguments，宿主据此认 reply；内置工具按 kind 给标题和路径。
+ *   mcp__<server>__<tool> 拆进 rawInput 的 server / tool / arguments，宿主据此认 reply；内置工具按 kind 给标题和路径，
+ *   另在 _meta.claudestra.toolUse 带上与 tmux 版同一个转换（pi-session.ts mapPiToolCall）的 CC 工具名和入参：Edit 的 diff、Write 的内容。
  *   tool_execution_update 不转：宿主只在结束时展示结果，bash 的中间结果每次都是整段，转了就是反复重发全文。
+ * - 自动压缩 / 自动重试：_meta.claudestra.compacted（宿主翻成 compact_boundary）/ notice（一行进度句）。
  * - 忙闲用中性的 _meta.claudestra.threadStatus（不冒充 _meta.codex）；配置项的 id 沿用宿主认的 model / reasoning_effort。
  * tests/pi-acp-map.test.ts。
  */
+
+import { mapPiToolCall } from "../../pi-session.js";
 
 type Rec = Record<string, any>;
 
@@ -19,10 +24,23 @@ export interface TurnOutcome {
   errorMessage?: string;
 }
 
+/** 中性的 _meta.claudestra 记号，宿主（lib/acp/updates.ts）认 */
+const info = (claudestra: Rec): Rec => ({ sessionUpdate: "session_info_update", _meta: { claudestra } });
+
 /** idle 可带这一轮的结局（turnEnd）：steering 另起的回合没有 session/prompt 可回错误，宿主只能从这里知道它失败了 */
 export function threadStatus(type: "active" | "idle", turn?: Rec): Rec {
-  return { sessionUpdate: "session_info_update", _meta: { claudestra: { threadStatus: { type }, ...(turn ? { turn } : {}) } } };
+  return info({ threadStatus: { type }, ...(turn ? { turn } : {}) });
 }
+
+/** 压缩完成 → 宿主翻成 compact_boundary：watcher 发「📦 上下文已压缩」和 compact_done（网页插分隔线、ctx 徽章即时回落） */
+function compacted(result: unknown, trigger: "auto" | "manual"): Rec {
+  const r = obj(result);
+  const n = (v: unknown) => (typeof v === "number" ? v : 0);
+  return info({ compacted: { preTokens: n(r.tokensBefore), postTokens: n(r.estimatedTokensAfter), trigger } });
+}
+
+/** 给网页的一行提示（宿主翻成进度句，当场推出去、不算答复） */
+const notice = (text: string): Rec => info({ notice: text });
 
 /** 运行时无关的失败种类，宿主据此进额度 / 登录通道（lib/acp/failures.ts）。先认额度：429 insufficient_quota 不是限流 */
 type PiFailureKind = "quota" | "auth" | "rate_limit" | "error";
@@ -47,6 +65,14 @@ export function turnEnd(o: TurnOutcome, cancelled: boolean): Rec {
 function chunk(messageId: string, text: string): Rec {
   return { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text } };
 }
+
+function thought(messageId: string, text: string): Rec {
+  return { sessionUpdate: "agent_thought_chunk", messageId, content: { type: "text", text }, _meta: { claudestra: { display: true } } };
+}
+
+/** provider 不流式时 message_end 里的思考块 */
+const thoughtsOf = (content: unknown): string[] =>
+  (Array.isArray(content) ? content : []).map((c) => (c?.type === "thinking" ? str(c.thinking) : "")).filter((t) => t.trim());
 
 /** 内容块里的文字（pi 的消息 / 工具结果、ACP 的 prompt 同形），其余类型丢掉 */
 export const textOf = (content: unknown): string =>
@@ -80,7 +106,22 @@ function toolCallFields(ev: Rec): Rec {
   const kind = KINDS[name] ?? "other";
   const path = str(args.path);
   const title = kind === "execute" ? str(args.command) : kind === "search" ? str(args.pattern) : path;
-  return { ...base, kind, title: kind === "other" ? name : title || name, rawInput: args, ...(path ? { locations: [{ path }] } : {}) };
+  // 嵌套调用不带：宿主按标题显示，「↳ 」才留得住
+  const toolUse = ev.parentToolCallId ? {} : { _meta: { claudestra: { toolUse: mapPiToolCall(name, args) } } };
+  return { ...base, kind, title: kind === "other" ? name : title || name, rawInput: args, ...(path ? { locations: [{ path }] } : {}), ...toolUse };
+}
+
+/** 自动压缩的结局；手动的（rpc compact）由 server 按回包说（compactNotice），这里不重复；被打断的不说 */
+function compactionEnd(ev: Rec): Rec[] {
+  if (ev.reason === "manual" || ev.aborted === true) return [];
+  if (ev.result) return [compacted(ev.result, "auto")];
+  return str(ev.errorMessage) ? [notice(`上下文自动压缩没成：${ev.errorMessage}`)] : [];
+}
+
+function retryNotice(ev: Rec): Rec {
+  const wait = typeof ev.delayMs === "number" ? `${Math.max(1, Math.round(ev.delayMs / 1000))} 秒后` : "";
+  const nth = typeof ev.attempt === "number" ? `（${ev.attempt}${typeof ev.maxAttempts === "number" ? `/${ev.maxAttempts}` : ""}）` : "";
+  return notice(`请求出错：${str(ev.errorMessage).slice(0, 200) || "未说明原因"}，${wait}自动重试${nth}`);
 }
 
 function toolDone(ev: Rec): Rec {
@@ -111,6 +152,10 @@ export function createPiEventMapper() {
           return [];
         case "message_update": {
           const d = obj(ev.assistantMessageEvent);
+          if (d.type === "thinking_end") {
+            streamed = true;
+            return str(d.content).trim() ? [thought(messageId, d.content)] : [];
+          }
           if (d.type !== "text_delta" || !str(d.delta)) return [];
           streamed = true;
           return [chunk(messageId, d.delta)];
@@ -118,13 +163,20 @@ export function createPiEventMapper() {
         case "message_end": {
           if (m.role !== "assistant") return [];
           outcome = { stopReason: str(m.stopReason) || undefined, errorMessage: str(m.errorMessage) || undefined };
-          const text = streamed ? "" : textOf(m.content);
-          return text ? [chunk(messageId, text)] : [];
+          if (streamed) return [];
+          const text = textOf(m.content);
+          return [...thoughtsOf(m.content).map((t) => thought(messageId, t)), ...(text ? [chunk(messageId, text)] : [])];
         }
         case "tool_execution_start":
           return [toolCall(ev)];
         case "tool_execution_end":
           return [toolDone(ev)];
+        case "compaction_start":
+          return ev.reason === "manual" ? [] : [notice("正在自动压缩上下文…")];
+        case "compaction_end":
+          return compactionEnd(ev);
+        case "auto_retry_start":
+          return [retryNotice(ev)];
         default:
           return [];
       }
@@ -146,12 +198,9 @@ export function compactCommand(text: string): Rec | null {
   return { type: "compact", ...(customInstructions ? { customInstructions } : {}) };
 }
 
-/** compact 的回包 / 失败原因 → 给网页看的一句话（压缩本身不产生助手消息，不说一声就像什么都没发生） */
+/** compact 的回包 → 和自动压缩同一个记号（📦 + compact_done）；失败原因 → 一句话（压缩本身不产生助手消息，不说一声就像什么都没发生） */
 export function compactNotice(result: unknown, error?: string): Rec {
-  const r = obj(result);
-  const after = typeof r.estimatedTokensAfter === "number" ? ` → 约 ${r.estimatedTokensAfter}` : "";
-  const text = error ? `上下文没有压缩：${error}` : typeof r.tokensBefore === "number" ? `上下文已压缩：${r.tokensBefore}${after} tokens` : "上下文已压缩";
-  return chunk(`compact-${Date.now()}`, text);
+  return error ? chunk(`compact-${Date.now()}`, `上下文没有压缩：${error}`) : compacted(result, "manual");
 }
 
 /** get_session_stats 的 contextUsage → usage_update；压缩后 tokens 为 null 时没有可报的 */

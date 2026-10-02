@@ -1,6 +1,6 @@
 /**
  * i28-R6 B 侧：写单副本上锁推不出去、推送只推订单分支（不 force、不推 main / 别的分支、不改写历史）、lab 地址换成本地 bare 仓库（真 git）；
- * lend 循环的写单流程（没开 write 不领、订单分支必须按本机指纹算、试推没权限就退回、交活后推送 + 开 PR 再转交付、推送失败的两种收尾），
+ * lend 循环的写单流程（旧 review 授权也领写单、订单分支必须按本机指纹算、试推没权限就退回、交活后推送 + 开 PR 再转交付、推送失败的两种收尾），
  * 外来原文只进 worker 的派单、不进任何命令行 / 名字；lend submit 的写单形态。A 与 worker 是假的。
  */
 import { describe, expect, test } from "bun:test";
@@ -162,7 +162,7 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     const N = "2".repeat(40);
     const run = async (argv: string[], o: { env: Record<string, string> }): Promise<BoundedResult> => {
       seen.push({ argv, env: o.env });
-      const push = argv[1] === "push";
+      const push = argv.includes("push");
       if (push) return { code: 128, stdout: "", stderr: "remote: Permission to o/r.git denied to lender.\nfatal: ... 403", timedOut: false };
       return { code: 0, stdout: argv[1] === "rev-parse" ? N : "", stderr: "", timedOut: false };
     };
@@ -170,8 +170,10 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     const r: PushResult = await pushWork({ orderId: "o", repo: "o/r", branch: BR, base: "main", cloneDir: "/c", orderHead: H, head: N },
       { root, run: run as never, env: { PATH: "/usr/bin", HOME: "/h", GH_TOKEN: "ghp_secret", CLAUDESTRA_CONTROL_TOKEN: "x" } });
     expect(r).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("fork") });
-    const pushes = seen.filter((s) => s.argv[1] === "push");
-    expect(pushes.map((s) => s.argv)).toEqual([["git", "push", "--porcelain", "https://github.com/o/r.git", `${N}:refs/heads/${BR}`]]);
+    const pushes = seen.filter((s) => s.argv.includes("push"));
+    expect(pushes.map((s) => s.argv)).toEqual([
+      ["git", "-c", "credential.helper=!gh auth git-credential", "push", "--porcelain", "https://github.com/o/r.git", `${N}:refs/heads/${BR}`],
+    ]);
     for (const s of seen) expect(Object.keys(s.env).filter((k) => /TOKEN|SECRET/.test(k))).toEqual([]);
   });
 });
@@ -252,12 +254,12 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
 }
 
 describe("lend 循环：写单", () => {
-  test("P1 反例：出借声明没开 write，写单不落 journal、不 claim", async () => {
+  test("旧 review 声明照样收写单、claim", async () => {
     const h = harness({ roles: ["review"] });
     await h.tick();
     await h.tick();
-    expect(getOrder(h.db, "w1")).toBeNull();
-    expect(h.ops()).not.toContain("claim");
+    expect(getOrder(h.db, "w1")!.state).toBe("claimed");
+    expect(h.ops()).toContain("claim");
   });
 
   test("P1 反例：授权过期，写单不落 journal、不 claim", async () => {
@@ -268,11 +270,12 @@ describe("lend 循环：写单", () => {
     expect(h.log.clones).toEqual([]);
   });
 
-  test("P1 反例（i28-W1）：写单开关关着（writeOpen=false）时授权里写了 write，整条不生效：不 poll、不 claim、不起 worker", async () => {
+  test("测试关闭写单收单开关：仍 poll，但不 claim、不起 worker", async () => {
     const h = harness({ writeOpen: false });
     for (let i = 0; i < 4; i++) await h.tick();
     expect(getOrder(h.db, "w1")).toBeNull();
-    expect(h.ops()).toEqual([]);
+    expect(h.ops()).toContain("poll");
+    expect(h.ops()).not.toContain("claim");
     expect(h.log.created).toEqual([]);
   });
 
