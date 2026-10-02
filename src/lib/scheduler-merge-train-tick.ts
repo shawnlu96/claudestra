@@ -21,7 +21,7 @@ import { trainGh } from "./scheduler-merge-train-gh.js";
 import { runBounded } from "./run-bounded.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import {
-  clearedMember, formTrain, nextSkip, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
+  clearedMember, formTrain, recheckCleared, nextSkip, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
 } from "./scheduler-merge-train.js";
 
@@ -93,8 +93,9 @@ export function memberStatusOf(db: Database, taskId: string, head: string): Memb
   if (merged) return { kind: "merged", sha: merged.mergeSha };
   const task = getTask(db, taskId);
   const mode = (db.query("SELECT mode FROM task_workflows WHERE taskId = ?").get(taskId) as { mode: string } | null)?.mode;
+  // head before stage: a card that went back to fix with a new head moved, and a moved verified member voids its train
+  if (task && task.headSHA?.toLowerCase() !== head.toLowerCase()) return { kind: "gone", why: `head 变成 ${task.headSHA?.slice(0, 12)}`, moved: true };
   if (!task || task.stage !== "merge") return { kind: "gone", why: `阶段 ${task?.stage ?? "缺卡"}` };
-  if (task.headSHA?.toLowerCase() !== head.toLowerCase()) return { kind: "gone", why: `head 变成 ${task.headSHA?.slice(0, 12)}`, moved: true };
   if (mode !== "auto") return { kind: "gone", why: `流程改为 ${mode ?? "缺流程"}` };
   return { kind: "waiting" };
 }
@@ -179,7 +180,10 @@ export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = d
     ...base,
     train: (run: MergeRun) => trainGate(ctx.store.load(run.project), run, io),
     async merge(prRef, head) {
-      return clearedMember(ctx.store.all(), prRef, head) ? ctx.gh.mergeMatchHead(prRef, head) : base.merge(prRef, head);
+      const s = clearedMember(ctx.store.all(), prRef, head);
+      if (!s) return base.merge(prRef, head);
+      await recheckCleared(s, io); // the last word before the merge API: main and every verified head as tested, else void and refuse
+      return ctx.gh.mergeMatchHead(prRef, head);
     },
   };
 }

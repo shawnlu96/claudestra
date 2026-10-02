@@ -61,6 +61,7 @@ describe("i28-MT1 merge train ledger reads", () => {
       expect(memberStatusOf(f.db, "T2", head(2))).toMatchObject({ kind: "gone" });
       f.db.query("UPDATE tasks SET stage='fix' WHERE id='T2'").run();
       expect(memberStatusOf(f.db, "T2", head(2))).toMatchObject({ kind: "gone", why: "阶段 fix" });
+      expect(memberStatusOf(f.db, "T2", head(9))).toMatchObject({ kind: "gone", moved: true }); // review r2: left merge AND moved = moved
     } finally { f.close(); }
   });
 

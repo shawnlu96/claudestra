@@ -306,8 +306,11 @@ async function stepSettling(s: TrainState, deps: TrainDeps): Promise<void> {
     if (st.kind === "merged") {
       s.merged.push({ taskId: id, sha: st.sha });
       await emit(s, deps, "merge", `${id} 已合并 ${short(st.sha)}`, { taskId: id, sha: st.sha });
-    } else if (st.kind === "gone" && st.moved && s.cleared.includes(id)) return voidTrain(s, deps, `${id} ${st.why}`);
-    else if (st.kind === "gone") s.dropped.push(id);
+    } else if (st.kind === "gone") { // a verified member may leave (PM hold, stage), but never with another head
+      const moved = !s.cleared.includes(id) ? null : st.moved ? st.why : await headMoved(s, id, deps.gh);
+      if (moved) return voidTrain(s, deps, `${id} ${moved}`);
+      s.dropped.push(id);
+    }
     save(s, deps);
   }
   const left = unsettled(s).filter((id) => s.cleared.includes(id));
@@ -324,12 +327,12 @@ async function stepSettling(s: TrainState, deps: TrainDeps): Promise<void> {
 
 /** Remote heads of every verified member still to merge: one moved = the train tested something else (a crash can't hide it). */
 async function headsMoved(s: TrainState, gh: TrainGh): Promise<string | null> {
-  for (const id of unsettled(s).filter((x) => s.cleared.includes(x))) {
-    const m = member(s, id), head = await gh.prHead(m.prRef);
-    if (!sameSha(head, m.head)) return `${id} head 变成 ${short(head)}`;
-  }
+  for (const id of unsettled(s).filter((x) => s.cleared.includes(x))) { const moved = await headMoved(s, id, gh); if (moved) return `${id} ${moved}`; }
   return null;
 }
+const headMoved = async (s: TrainState, id: string, gh: TrainGh): Promise<string | null> => {
+  const m = member(s, id), head = await gh.prHead(m.prRef); return sameSha(head, m.head) ? null : `head 变成 ${short(head)}`;
+};
 
 /** Close this train's PRs and delete only its own recorded `train/` branches. */
 async function stepCleanup(s: TrainState, deps: TrainDeps): Promise<void> {
@@ -371,10 +374,23 @@ export async function trainGate(s: TrainState | null, run: MergeRun, deps: Io & 
   if (bounce) return { bounce: bounce.receipt };
   if (s.phase === "testing") return "wait";
   if (!s.cleared.includes(m.taskId)) return null;
-  const moved = await headsMoved(s, deps.gh);
-  if (!moved && await mainOnlyMembers(s, await deps.gh.mainHead(s.repo), deps.gh)) return "cleared";
-  await voidTrain(s, deps, `合并前核对：${moved ?? "main 自列车起点以来多了非本批的提交"}`);
+  const why = await verdictNow(s, deps.gh);
+  if (!why) return "cleared";
+  await voidTrain(s, deps, `合并前核对：${why}`);
   return null;
+}
+
+/** Every verified member's remote head as tested and main = base + this train's merges only; the reason it fails, or null. */
+async function verdictNow(s: TrainState, gh: TrainGh): Promise<string | null> {
+  return await headsMoved(s, gh) ?? (await mainOnlyMembers(s, await gh.mainHead(s.repo), gh) ? null : "main 自列车起点以来多了非本批的提交");
+}
+
+/** The merge override's last check, after the gate and freshness: a failure voids and throws, so no untested combination merges. */
+export async function recheckCleared(s: TrainState, deps: Io & Pick<TrainDeps, "gh">): Promise<void> {
+  const why = await verdictNow(s, deps.gh);
+  if (!why) return;
+  await voidTrain(s, deps, `合并前核对：${why}`);
+  throw new Error(`合并前核对：${why}，列车 ${s.id} 作废，不发合并`);
 }
 
 /** The verified member the merge override may merge with `--match-head-commit` (any project's settling train). */

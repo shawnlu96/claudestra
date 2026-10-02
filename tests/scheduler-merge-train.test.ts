@@ -108,9 +108,11 @@ function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE, p
     return { state: p.merged ? "MERGED" : "OPEN", head: p.head, branch: `task/${card.taskId}`, base: "main", draft: false, crossRepository: false,
       mergeState: "CLEAN", mergeSha: p.merged, checks: [{ name: "check", bucket: "pass" }] };
   };
+  /** A test may wrap `freshness` (e.g. push main while it reads). */
+  const hooks: Pick<MergeExternal, "freshness"> = { freshness: async () => ({ behindBy: env.hub.main === initialMain ? 0 : 1, mainHead: env.hub.main }) };
   const base: MergeExternal = {
     inspect: async () => pr(),
-    freshness: async () => ({ behindBy: env.hub.main === initialMain ? 0 : 1, mainHead: env.hub.main }),
+    freshness: (...a) => hooks.freshness(...a),
     carryReview: async () => ({ ok: false, reason: "不沿用" }),
     updateBranch: async () => { env.hub.calls.push(`update:${card.taskId}`); },
     merge: async () => { env.hub.calls.push(`rest-merge:${card.taskId}`); throw new Error("serial merge not expected here"); },
@@ -123,6 +125,7 @@ function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE, p
     return row;
   };
   return {
+    hooks,
     get row() { return row; },
     once: () => driveMerge(row, external, advance),
     drive: async (times = 4) => { for (let i = 0; i < times && !["merged", "resolved", "unknown", "updating"].includes(row.phase); i++) await driveMerge(row, external, advance); return row; },
@@ -380,5 +383,39 @@ describe("i28-MT1 merge train", () => {
       expect(calls(env, "match-head:")).toHaveLength(1);
       expect(calls(env, "update:")).toEqual([]);
     }
+  });
+
+  test("review r2 head-drift: a cleared member's remote head moves while it leaves merge (gone, no moved flag): void, never dropped", async () => {
+    const env = setup([["a"], ["b"], ["c"]]);
+    await env.until("settling");
+    env.hub.prs.get(env.cards[1]!.prRef)!.head = newSha();
+    env.status.set("T2", { kind: "gone", why: "阶段 fix" });
+    const s = await env.tick();
+    expect(s).toMatchObject({ phase: "cleanup", outcome: "void" });
+    expect(s!.dropped).toEqual([]);
+    await cardRun(env, 0).drive();
+    expect(calls(env, "match-head:")).toEqual([]);
+  });
+
+  test("review r2 main-drift: main moves between the gate and the await_ci freshness read: re-gated, void, no match-head", async () => {
+    const env = setup([["a"], ["b"]]);
+    await env.until("settling");
+    const run = cardRun(env, 0, BASE, "await_ci");
+    const fresh = run.hooks.freshness;
+    run.hooks.freshness = async (...a) => { env.pushMain(); run.hooks.freshness = fresh; return fresh(...a); };
+    await run.once();
+    expect(calls(env, "match-head:")).toEqual([]);
+    expect(run.row.phase).toBe("updating"); // re-gated before the merge claim: back on the serial path, not unknown
+    expect(env.store.load("p")).toMatchObject({ phase: "cleanup", outcome: "void" });
+  });
+
+  test("review r2 main-drift: the head-pinned merge itself re-checks main and refuses an outside commit", async () => {
+    const env = setup([["a"], ["b"]]);
+    await env.until("settling");
+    const external = withMergeTrain({} as MergeExternal, { gh: env.gh, store: env.store });
+    env.pushMain();
+    await expect(external.merge(env.cards[0]!.prRef, env.cards[0]!.head)).rejects.toThrow("合并前核对");
+    expect(calls(env, "match-head:")).toEqual([]);
+    expect(env.store.load("p")).toMatchObject({ phase: "cleanup", outcome: "void" });
   });
 });
