@@ -11,6 +11,13 @@ import { fillParams } from "@/lib/i18n-fill";
 import type { Tr } from "./collab-model";
 
 const COLLAB_WORDS: Record<string, string> = {
+  "产品 DAG": "Product DAG",
+  "预计": "Expected",
+  "还没有子 DAG": "No sub-DAG yet",
+  "返回产品 DAG": "Back to product DAG",
+  "先在产品 DAG 里选一个 feature": "Select a feature in the product DAG first",
+  "节点": "nodes",
+  "已暂停": "Paused",
   "谁在干活": "Who is working",
   "没取到，正在重试": "Could not load, retrying",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写

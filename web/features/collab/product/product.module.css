@@ -1,0 +1,27 @@
+.card { display: flex; flex-direction: column; gap: 10px; padding: 16px; text-align: left; min-height: 44px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); cursor: pointer;
+  transition: border-color 150ms, box-shadow 150ms; }
+.card:hover { border-color: var(--accent); }
+.card:focus-visible, .done:focus-visible, .trail button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.numbers { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.bar { height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--ok); transition: width 250ms; }
+.stats { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 11px; }
+.stats > span { display: inline-flex; align-items: center; gap: 3px; }
+.eta { margin-left: auto; }
+.node { position: absolute; z-index: 2; }
+.foldNode .done { width: 100%; height: 100%; justify-content: center; white-space: nowrap; }
+.mobile { display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.mobile .card { width: 100%; }
+.done { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; padding: 0 12px; border-radius: 8px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--panel); cursor: pointer; }
+.shelf { padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.trail { display: flex; align-items: center; gap: 8px; min-width: 0; flex-shrink: 0; padding: 0 12px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.trail button { min-height: 44px; flex-shrink: 0; background: transparent; border: 0; color: var(--text); cursor: pointer; }
+.trail strong { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { color: var(--muted); font-size: 13px; }
+.panes { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.tab { min-height: 44px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab:disabled { opacity: .45; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .card, .bar > span { transition: none; } }
