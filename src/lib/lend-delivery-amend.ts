@@ -5,8 +5,10 @@
  * 规矩：同一张单最多补 MAX_AMENDS 次（自查与 A 拒收合计），再不合格停单；补写期间单留在 result_pending、交付正文清空，
  * 续租 / 失租照现有规则（lend-drive.ts heartbeat）；head 取 journal 里 worker 交的那个，推送的永远是它，worker 之后多出的提交不进。
  * 补写状态记 lend_meta（delivery-amend:<单号>，不加列），先写状态再发给 worker；没送到下一轮补发。
- * worker 把补好的摘要写进工作副本里的 NOTE_FILE，lend 循环每轮看一次，读到就删。tests/lend-delivery-amend.test.ts。
+ * worker 把补好的摘要写进工作副本里的 NOTE_FILE，lend 循环每轮看一次；合格的先把新摘要和补写状态同一事务落库再删文件，
+ * 中断恢复不丢回复、不多计次。转下一次补写时记下文件此刻的指纹（seen），删前中断留下的旧文件下轮认得出、不当新回复。tests/lend-delivery-amend.test.ts。
  */
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getMeta, orderOf, patchOrder, setMeta, type LendRow } from "./lend-journal.js";
@@ -24,7 +26,7 @@ const REPRO_ASK_RE = /复现测试(?:名)?[:：]/;
 const BAD_LINE = /[\p{Cc}\u2028\u2029]/u;
 
 type AmendDeps = Pick<LendDeps, "db" | "now" | "log"> & { worker: Pick<LendDeps["worker"], "send"> };
-interface AmendState { n: number; head: string; waiting: boolean; told: boolean; since: number; why: string }
+interface AmendState { n: number; head: string; waiting: boolean; told: boolean; since: number; why: string; seen?: string | null }
 
 const key = (orderId: string) => `delivery-amend:${orderId}`;
 export const amendState = (d: Pick<LendDeps, "db">, orderId: string): AmendState | null => {
@@ -48,15 +50,14 @@ function noteProblem(summary: string): string | null {
 const notePath = (row: LendRow) => join(row.dir ?? "", NOTE_FILE);
 const drop = (path: string) => { try { unlinkSync(path); } catch { /* 没有就算了 */ } };
 
-/** 读 worker 写回的摘要并删掉文件；没有 = null。只收普通文件（软链 / 目录不跟），读到的按一行处理 */
-function takeNote(row: LendRow): string | null {
-  const path = notePath(row);
+/** 读 worker 写回的摘要（不删）；没有 = null。只收普通文件（软链 / 目录不跟），读到的按一行处理；sig = 这份文件的指纹 */
+function peekNote(row: LendRow): { text: string; sig: string } | null {
   let st;
-  try { st = lstatSync(path); } catch { return null; }
-  if (!st.isFile() || st.size > 4 * SUMMARY_MAX) return (drop(path), ""); // 不是普通文件 / 太大：按补写不合格处理
-  const text = readFileSync(path, "utf8").trim();
-  drop(path);
-  return text;
+  try { st = lstatSync(notePath(row)); } catch { return null; }
+  const at = `${st.ino}:${st.mtimeMs}:${st.size}`;
+  if (!st.isFile() || st.size > 4 * SUMMARY_MAX) return { text: "", sig: `x:${at}` }; // 不是普通文件 / 太大：按补写不合格处理
+  const raw = readFileSync(notePath(row));
+  return { text: raw.toString("utf8").trim(), sig: `${at}:${createHash("sha256").update(raw).digest("hex")}` };
 }
 
 function instruction(row: LendRow, s: AmendState): string {
@@ -76,9 +77,10 @@ async function tell(row: LendRow, s: AmendState, d: AmendDeps): Promise<void> {
 async function ask(row: LendRow, why: string, d: AmendDeps): Promise<string | null> {
   const n = (amendState(d, row.orderId)?.n ?? 0) + 1;
   if (n > MAX_AMENDS) return `补写说明 ${MAX_AMENDS} 次仍不合格：${why}`.slice(0, 400);
-  const s: AmendState = { n, head: row.work!.head, waiting: true, told: false, since: d.now(), why: why.slice(0, 300) };
+  const seen = peekNote(row)?.sig ?? null; // 此刻在的文件都不算这一次的回复（删前中断也认得出）
+  const s: AmendState = { n, head: row.work!.head, waiting: true, told: false, since: d.now(), why: why.slice(0, 300), seen };
   save(d, row.orderId, s);
-  drop(notePath(row)); // 上一次的残留不算这一次的回复
+  drop(notePath(row));
   await tell(row, s, d);
   return null;
 }
@@ -91,12 +93,15 @@ export async function preflightDelivery(row: LendRow, d: AmendDeps): Promise<Len
   const s = amendState(d, row.orderId);
   if (s?.waiting) {
     if (!s.told) await tell(row, s, d);
-    const note = takeNote(row);
+    let note = peekNote(row);
+    if (note && s.seen && note.sig === s.seen) (drop(notePath(row)), note = null); // 上一次的残留
     if (note === null) return d.now() - s.since > AMEND_WAIT_MS ? `补写说明等了 ${AMEND_WAIT_MS / 60_000} 分钟 worker 没写回，停单` : false;
-    const bad = noteProblem(note);
+    const bad = noteProblem(note.text);
     if (bad) return (await ask(row, bad, d)) ?? false;
-    save(d, row.orderId, { ...s, waiting: false });
-    return patchOrder(d.db, row.orderId, ["result_pending"], { work: { ...row.work!, head: s.head, summary: note } }, d.now());
+    const at = d.now(), work = { ...row.work!, head: s.head, summary: note.text };
+    const next = d.db.transaction(() => (save(d, row.orderId, { ...s, waiting: false }), patchOrder(d.db, row.orderId, ["result_pending"], { work }, at)))();
+    drop(notePath(row)); // 落库之后才删：删不掉 / 删前中断，下一轮 waiting 已是 false、摘要已换，文件不再被读
+    return next;
   }
   if (needsReproNote(row) && !REPRO_NOTE_RE.test(row.work?.summary ?? "")) {
     return (await ask(row, "订单验收线要求交付说明写「复现测试：<测试名>」，摘要里没有（发出前自查）", d)) ?? false;

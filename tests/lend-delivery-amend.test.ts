@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fourRoundFix } from "./fix-strategy-helpers.js";
@@ -18,10 +18,10 @@ import { writeLendDeliver } from "../src/lib/ledger-lend-result.js";
 import { LedgerError } from "../src/lib/ledger-store.js";
 import { workerName } from "../src/lib/lend-drive.js";
 import { DELIVERY_NOTE, DELIVERY_NOTE_STATUS } from "../src/lib/lend-delivery-amend-code.js";
-import { amendState, NOTE_FILE } from "../src/lib/lend-delivery-amend.js";
+import { amendState, NOTE_FILE, preflightDelivery } from "../src/lib/lend-delivery-amend.js";
 import type { LendEntry } from "../src/lib/lend-config.js";
 import { lendBranch } from "../src/lib/lend-git.js";
-import { advance, getOrder, openLendJournal } from "../src/lib/lend-journal.js";
+import { advance, getOrder, guardJournalWrites, openLendJournal } from "../src/lib/lend-journal.js";
 import { lendTick, type LoopDeps } from "../src/lib/lend-loop.js";
 import { lendRequest, type LendOp } from "../src/lib/lend-remote.js";
 import type { DeliverRequest } from "../src/lib/lend-wire.js";
@@ -204,6 +204,48 @@ describe("B 侧：收到 delivery_note 补写说明重交", () => {
     await h.tick();
     expect(getOrder(h.db, "w1")).toMatchObject({ state: "stopped", reason: expect.stringContaining("续租被拒：lease_expired") });
     expect(h.results()).toHaveLength(1);
+  });
+});
+
+describe("B 侧：补写回复的中断恢复", () => {
+  test("第 2 次补写合格、落库时中断：状态和摘要一起回滚、回复文件还在；恢复后按原 head / 原租约交付，不误判 2 次不合格", async () => {
+    const h = harness({ acceptance: [FIX_STRATEGY_RULE], notes: ["还是没写", NOTE_OK] });
+    await h.start("修好了 race");
+    await h.tick(); await h.tick();
+    expect(amendState(h.d, "w1")).toMatchObject({ n: 2, waiting: true, told: true });
+    let writes = 0;
+    guardJournalWrites(h.db, () => { if (++writes === 2) throw new Error("simulate interruption before work write"); });
+    const row = getOrder(h.db, "w1")!;
+    await expect(preflightDelivery(row, h.d)).rejects.toThrow("simulate interruption");
+    expect(existsSync(join(h.dir, NOTE_FILE))).toBe(true);
+    expect(amendState(h.d, "w1")).toMatchObject({ n: 2, waiting: true });
+    expect(getOrder(h.db, "w1")!.work?.summary).toBe("修好了 race");
+    guardJournalWrites(h.db, () => {});
+    await h.tick();
+    expect(getOrder(h.db, "w1")).toMatchObject({ state: "acked", work: { head: H2, summary: NOTE_OK } });
+    expect(h.results()).toEqual([expect.objectContaining({ gen: 1, deliver: expect.objectContaining({ head: H2, summary: NOTE_OK }) })]);
+    expect(h.amends()).toHaveLength(2);
+    expect(amendState(h.d, "w1")).toMatchObject({ n: 2, waiting: false });
+    expect(existsSync(join(h.dir, NOTE_FILE))).toBe(false);
+  });
+
+  test("转下一次补写后旧回复没删掉（删前中断 / 删失败）：下轮认得出是残留，不再计次；worker 新写的照收", async () => {
+    const h = harness({ acceptance: [FIX_STRATEGY_RULE], notes: ["还是没写"] });
+    await h.start("修好了 race");
+    await h.tick();
+    chmodSync(h.dir, 0o555); // 删不掉 = 停在「状态已存、文件未删」
+    try {
+      await h.tick();
+      expect(existsSync(join(h.dir, NOTE_FILE))).toBe(true);
+      expect(amendState(h.d, "w1")).toMatchObject({ n: 2, waiting: true });
+      await h.tick();
+      expect(getOrder(h.db, "w1")!.state).toBe("result_pending");
+      expect(amendState(h.d, "w1")).toMatchObject({ n: 2, waiting: true });
+      expect(h.amends()).toHaveLength(2);
+    } finally { chmodSync(h.dir, 0o755); }
+    writeFileSync(join(h.dir, NOTE_FILE), `${NOTE_OK}\n`);
+    await h.tick();
+    expect(getOrder(h.db, "w1")).toMatchObject({ state: "acked", work: { summary: NOTE_OK } });
   });
 });
 
