@@ -13,7 +13,7 @@ import { advance, getMeta, liveOrders, patchOrder, setMeta, unsettledOrders, LEA
 import { claimOrder, claimProblem, driveLeased, revoke, settleOrder, type LendDeps } from "./lend-drive.js";
 import { liveGrant, isRevoked } from "./lend-grant.js";
 import { claudeLendSlots, lendBlockedReason, lendPollCapacity } from "./lend-claude-worker-capacity.js";
-import { syncClaudeReadiness } from "./lend-claude-ready.js";
+import { loopClaudeReadiness } from "./lend-claude-ready.js";
 import { admitOrders, pushKey, TICK_KEY } from "./lend-inbox.js";
 import { helloPeer, helloTargets, helloView, metaJson, protoKey, speaksV2, v2Live, type LendRound, type V2Port } from "./lend-hello.js";
 import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
@@ -33,6 +33,7 @@ export interface LoopDeps extends LendDeps {
   env: Record<string, string | undefined>;
   /** 协议 v2 的出站（hello / beat）与摘要端口；不设 = 只讲 v1（逐单续租、30 秒轮询），行为和 W3 之前逐字一样 */
   v2?: V2Port;
+  claudeProbe?: () => Promise<string | null>; // 本机 Claude 就绪探测的桩（测试用）；不设 = 真跑 claude auth status
 }
 
 /** doctor 读的本轮摘要（journal meta "status"） */
@@ -232,6 +233,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
     for (const e of eff.lend) r.pollNow.add(e.peer);
   }
   await refreshQuotaPause(d.db, d.codexQuota, d.now(), d.log); // 领单前已满就暂停；到点或观测不满恢复
+  await loopClaudeReadiness(d.db, eff.lend, d.claudeProbe); // 先和 meta 对齐、必要时探完写回，本轮 hello 与推送收单才是同一份 Claude 结论
   const hello = new Set(r.v2 ? helloTargets(d.db, eff.lend, d.now()) : []);
   const p: Pass = { d, rd, r, now, done, failed, hello, status: { at: now, lending: eff.lending, blocked: null, peers: {} },
     entryOf: (peer) => eff.lend.find((e) => e.peer === peer), problemOf: (peer) => peerLendProblem(peers.find((x) => x.name === peer), peer),
@@ -243,7 +245,6 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   if (bad) throw bad.reason;
   const paused = pausedUntil(d.db, d.now());
   p.status.blocked = p.blocked ?? lendBlockedReason(paused, eff.lend);
-  syncClaudeReadiness(d.db); // 推送收单在新进程里判 Claude 名额，靠 meta 拿到和本轮 hello 同一份结论（lend-claude-ready.ts）
   if (p.status.blocked) p.status.peers = {};
   setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };

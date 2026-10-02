@@ -1,8 +1,9 @@
 /**
- * i28-CLP：推送收单是 bridge 每次新起的 `manager lend inbox` 子进程，进程里的 Claude 就绪缓存是空的，以前 Claude 单恒 no_slot。
- * 常驻出借循环每轮把结论写进 journal meta（lend-claude-ready.ts syncClaudeReadiness），收单进程先读它（60 秒内新鲜直接用），
- * 没有 / 过期就当场探一次（8 秒封顶，超时 = 不可用）并写回；
- * 只有 Codex 单不探。每个用例开头 noteClaudeReadiness(null) = 一个新进程；探测都注入计数桩，测试进程不跑真 claude auth status。
+ * i28-CLP：推送收单是 bridge 每次新起的 `manager lend inbox` 子进程，进程里没有 Claude 就绪结论，以前 Claude 单恒 no_slot。
+ * 结论放进 journal meta（lend-claude-ready.ts）：常驻出借循环每轮在发 hello 之前和它对齐（不新鲜就探、先写回），
+ * 收单进程先读它（60 秒内新鲜直接用），没有 / 过期就当场探一次（8 秒封顶，超时 = 不可用）并写回；只有 Codex 单不探。
+ * freshProcess() = 一个新进程；探测都注入计数桩，不跑真 claude auth status。
+ * 条件写的并发见 tests/lend-claude-ready-race.test.ts，原因只用固定文案见 tests/lend-claude-ready-reason.test.ts。
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -10,9 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { instanceKeySync, keyFingerprint } from "../src/lib/instance-key.js";
 import type { LendFile } from "../src/lib/lend-config.js";
-import { claudeReadiness, claudeReadinessOneShot, noteClaudeReadiness, CLAUDE_READY_FRESH_MS, type ClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
-import { INBOX_PROBE_MS, probeWithin, READY_KEY, sharedClaudeReadiness, syncClaudeReadiness } from "../src/lib/lend-claude-ready.js";
-import { helloBody } from "../src/lib/lend-hello.js";
+import { claudeReadiness, CLAUDE_READY_FRESH_MS, CLAUDE_REASONS, noteClaudeReadiness, type ClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
+import { CLAUDE_PROBE_MS, probeWithin, READY_KEY, sharedClaudeReadiness } from "../src/lib/lend-claude-ready.js";
 import { TICK_KEY } from "../src/lib/lend-inbox.js";
 import { getMeta, openLendJournal, setMeta } from "../src/lib/lend-journal.js";
 import type { HttpPeer } from "../src/lib/peers.js";
@@ -32,12 +32,15 @@ const offer = (...orders: ReturnType<typeof order>[]) => JSON.stringify({ v: 1, 
 const lendFile = (families: Record<string, number>): LendFile => ({ version: 2, enabled: true, borrow: [], lend: [{ peer: "team-a", fp: FP, families, roles: ["review"],
   repos: ["shawnlu96/claudestra"], ordersPerDay: 50, grantedAt: new Date(NOW - 1000).toISOString(), until: new Date(NOW + 86_400_000).toISOString() }] });
 const peerRec = { name: "team-a", addedAt: "x", fp: FP, baseUrl: "relay://x", outToken: "t", publicKey: key.publicKey, e2e: { idk: "i", ek: {} } } as unknown as HttpPeer;
-const NOT_LOGGED_IN = "本机 Claude Code 没登录：在出借方机器上运行 claude 完成 /login";
+const { loggedOut: LOGGED_OUT, unreadable: UNREADABLE } = CLAUDE_REASONS;
+/** 一个新进程（可带上它启动时就有的结论） */
+const freshProcess = (r: ClaudeReadiness | null = null) => { noteClaudeReadiness(null); noteClaudeReadiness(r); };
+const line = (reason: string) => `[lend] Claude 位暂不可用（报 0 位）：${reason}`;
 
 let probes = 0;
 const probeSays = (reason: string | null) => async () => { probes++; return reason; };
 let n = 0;
-/** 一份独立 journal：调度服务刚开过一轮（不 lender_idle），meta 里可以预先放常驻循环写的结论 */
+/** 一份独立 journal：调度服务刚开过一轮（不 lender_idle），meta 里可以预先放常驻循环写的结论（对象或原样字符串） */
 function deps(o: { meta?: ClaudeReadiness | string; families?: Record<string, number>; probe?: string | null; tickAt?: number } = {}): InboxDeps & { journalPath: string } {
   const journalPath = join(dir, `j${++n}.sqlite`);
   const db = openLendJournal(journalPath);
@@ -56,14 +59,13 @@ const accepted = (out: Awaited<ReturnType<typeof lendInbox>>) => (out.ok ? out.a
 
 let stderr: ReturnType<typeof spyOn>;
 beforeEach(() => {
-  noteClaudeReadiness(null); // 新进程：缓存是空的
+  freshProcess();
   probes = 0;
   stderr = spyOn(console, "error").mockImplementation(() => {});
 });
 afterEach(() => {
   stderr.mockRestore();
-  noteClaudeReadiness(null);
-  claudeReadinessOneShot(false);
+  freshProcess();
 });
 const stderrLines = () => stderr.mock.calls.map((c: unknown[]) => String(c[0]));
 
@@ -75,11 +77,10 @@ describe("验收 1：meta 里有新鲜结论", () => {
   });
 
   test("30 秒前写的不可用：不探，no_slot，stderr 一行带同一原因", async () => {
-    const reason = `${NOT_LOGGED_IN}（新鲜）`;
-    const d = deps({ meta: { ready: false, reason, at: Date.now() - 30_000 } });
+    const d = deps({ meta: { ready: false, reason: LOGGED_OUT, at: Date.now() - 30_000 } });
     expect(await inbox(d, order("c1"))).toEqual({ ok: true, accepted: [], refused: [{ orderId: "c1", code: "no_slot" }] });
     expect(probes).toBe(0);
-    expect(stderrLines()).toEqual([`[lend] Claude 位暂不可用（报 0 位）：${reason}`]);
+    expect(stderrLines()).toEqual([line(LOGGED_OUT)]);
   });
 });
 
@@ -89,49 +90,47 @@ describe("验收 2：meta 没有或过期，当场探一次", () => {
     expect(await inbox(d, order("c1"))).toEqual({ ok: true, accepted: ["c1"], refused: [] });
     expect(probes).toBe(1);
     expect(metaOf(d.journalPath)).toMatchObject({ ready: true, reason: null });
-    noteClaudeReadiness(null); // 下一个新进程：meta 新鲜，不再探
+    freshProcess(); // 下一个新进程：meta 新鲜，不再探
     expect(await inbox(d, order("c2"))).toMatchObject({ accepted: ["c2"] });
     expect(probes).toBe(1);
   });
 
   test("过期的 ready：重探，探出不可用 → no_slot，stderr 带原因，meta 改成新结论", async () => {
-    const reason = `${NOT_LOGGED_IN}（过期后重探）`;
-    const d = deps({ meta: { ready: true, reason: null, at: Date.now() - CLAUDE_READY_FRESH_MS - 1000 }, probe: reason });
+    const d = deps({ meta: { ready: true, reason: null, at: Date.now() - CLAUDE_READY_FRESH_MS - 1000 }, probe: LOGGED_OUT });
     expect(await inbox(d, order("c1"), order("x1", "codex"))).toEqual({ ok: true, accepted: ["x1"], refused: [{ orderId: "c1", code: "no_slot" }] });
     expect(probes).toBe(1);
-    expect(stderrLines()).toEqual([`[lend] Claude 位暂不可用（报 0 位）：${reason}`]);
-    expect(metaOf(d.journalPath)).toMatchObject({ ready: false, reason });
+    expect(stderrLines()).toEqual([line(LOGGED_OUT)]);
+    expect(metaOf(d.journalPath)).toMatchObject({ ready: false, reason: LOGGED_OUT });
   });
 
   test("过期的不可用：重探，探出 ready → 收下", async () => {
-    const d = deps({ meta: { ready: false, reason: NOT_LOGGED_IN, at: Date.now() - CLAUDE_READY_FRESH_MS - 1000 }, probe: null });
+    const d = deps({ meta: { ready: false, reason: LOGGED_OUT, at: Date.now() - CLAUDE_READY_FRESH_MS - 1000 }, probe: null });
     expect(await inbox(d, order("c1"))).toMatchObject({ accepted: ["c1"], refused: [] });
     expect(probes).toBe(1);
   });
 
-  test("探测卡住：时限内回 no_slot，stderr 带「超时」原因（时限 ≤ 8 秒，短于 bridge 给收单子进程的 15 秒）", async () => {
-    expect(INBOX_PROBE_MS).toBeLessThanOrEqual(8_000);
+  test("探测卡住：时限内回 no_slot，stderr 带「核对超时」（时限 ≤ 8 秒，短于 bridge 给收单子进程的 15 秒）", async () => {
+    expect(CLAUDE_PROBE_MS).toBeLessThanOrEqual(8_000);
     const d = { ...deps(), claude: { probe: () => new Promise<string | null>(() => {}), budgetMs: 200 } };
     const t0 = Date.now();
     expect(await inbox(d, order("c1"), order("x1", "codex"))).toEqual({ ok: true, accepted: ["x1"], refused: [{ orderId: "c1", code: "no_slot" }] });
     expect(Date.now() - t0).toBeLessThan(2_000);
-    expect(stderrLines()).toEqual(["[lend] Claude 位暂不可用（报 0 位）：核对本机 Claude 登录超时（0.2 秒）"]);
-    expect(metaOf(d.journalPath)).toMatchObject({ ready: false, reason: "核对本机 Claude 登录超时（0.2 秒）" });
+    expect(stderrLines()).toEqual([line(CLAUDE_REASONS.timeout)]);
+    expect(metaOf(d.journalPath)).toMatchObject({ ready: false, reason: CLAUDE_REASONS.timeout });
   });
 
-  test("限时探测：按时答完就用它的结论；探测抛错落成不可用", async () => {
+  test("限时探测按时答完就用它的结论", async () => {
     expect(await probeWithin(1_000, async () => null)).toBeNull();
-    expect(await probeWithin(1_000, async () => NOT_LOGGED_IN)).toBe(NOT_LOGGED_IN);
-    const d = { ...deps(), claude: { probe: async (): Promise<string | null> => { throw new Error("spawn 失败"); } } };
-    expect(await inbox(d, order("c1"))).toMatchObject({ refused: [{ orderId: "c1", code: "no_slot" }] });
-    expect(stderrLines()).toEqual(["[lend] Claude 位暂不可用（报 0 位）：核对本机 Claude 登录失败：spawn 失败"]);
+    expect(await probeWithin(1_000, async () => UNREADABLE)).toBe(UNREADABLE);
   });
 
-  test("meta 写坏 / 自相矛盾当没有，照样重探", async () => {
-    for (const bad of ["{", JSON.stringify({ ready: true, reason: "x", at: Date.now() }), JSON.stringify({ ready: false, reason: null, at: Date.now() })]) {
-      const d = deps({ meta: bad, probe: null });
+  test("meta 写坏 / 自相矛盾 / 原因不在分类里都当没有，照样重探", async () => {
+    const bad = ["{", JSON.stringify({ ready: true, reason: "x", at: Date.now() }), JSON.stringify({ ready: false, reason: null, at: Date.now() }),
+      JSON.stringify({ ready: false, reason: "EACCES /Users/alice/.claude", at: Date.now() })];
+    for (const meta of bad) {
+      const d = deps({ meta, probe: null });
       probes = 0;
-      noteClaudeReadiness(null);
+      freshProcess();
       expect(await inbox(d, order("c1"))).toMatchObject({ accepted: ["c1"] });
       expect(probes).toBe(1);
     }
@@ -148,46 +147,77 @@ describe("验收 2：meta 没有或过期，当场探一次", () => {
 describe("验收 3：只有 Codex 单", () => {
   test("不探 Claude（连后台刷新也不起），结果与以前相同，不打 Claude 日志", async () => {
     for (const meta of [undefined, { ready: true, reason: null, at: Date.now() - CLAUDE_READY_FRESH_MS - 1000 }]) {
-      const d = deps({ meta, probe: NOT_LOGGED_IN });
+      const d = deps({ meta, probe: LOGGED_OUT });
       expect(await inbox(d, order("x1", "codex"), order("x2", "codex"), order("x3", "codex"))).toEqual({
         ok: true, accepted: ["x1", "x2"], refused: [{ orderId: "x3", code: "no_slot" }] });
       expect(probes).toBe(0);
-      expect(claudeReadiness()).toBeNull(); // 一次性进程不后台刷新：缓存原样空着
+      expect(claudeReadiness()).toBeNull(); // 不后台刷新：缓存原样空着
       expect(stderrLines()).toEqual([]);
     }
   });
 });
 
-describe("验收 4：hello 和推送收单用同一份结论", () => {
-  for (const [label, r] of [["可用", { ready: true, reason: null }], ["不可用", { ready: false, reason: `${NOT_LOGGED_IN}（hello 对照）` }]] as const) {
-    test(`常驻循环里结论${label}：一轮 lendTick 把它写进 meta，新进程收单判的名额 = hello 报的`, async () => {
-      const loop: ClaudeReadiness = { ...r, at: Date.now() - 30_000 };
-      const h = harness({ entry: { families: { codex: 2, claude: 2 } } });
-      noteClaudeReadiness(loop);
+/** 带 v2 端口的出借循环：记下这一轮真正发出去的 hello 里的 Claude 名额，以及发 hello 那一刻 meta 里的结论（原样） */
+function loopWithHello() {
+  const h = harness({ entry: { families: { codex: 2, claude: 2 } } });
+  const sent: { total: number; meta: string | null }[] = [];
+  h.d.v2 = { boot: "boot-aaaa-0001", call: async (_peer, op, body) => {
+    if (op === "hello") sent.push({ total: (body.slots as { claude: { total: number } }).claude.total, meta: getMeta(h.db, READY_KEY) });
+    return { status: 200, body: { ok: true, v: 1, proto: 2, helloMs: 60_000, beatMs: 15_000 } };
+  } };
+  h.d.claudeProbe = probeSays(LOGGED_OUT);
+  return { h, sent };
+}
+
+/** 同一时刻起一个新的收单进程（生产里两边是同一个 journal：把发 hello 时的 meta 原样搬过去），推两张 Claude 单，返回收下几张 */
+async function inboxAcceptsAt(meta: string | null, probe: string | null): Promise<number | undefined> {
+  freshProcess();
+  const before = probes;
+  const out = await inbox(deps({ meta: meta ?? undefined, probe }), order("c1"), order("c2"));
+  expect(probes).toBe(before); // meta 新鲜：收单进程没自己探
+  return accepted(out)?.length;
+}
+
+describe("验收 4：这一轮真正发出去的 hello 和同一时刻新收单进程用同一份结论", () => {
+  const RECENT = 1000;
+  for (const [label, cache, meta] of [
+    ["缓存可用 / meta 新写不可用", { ready: true, reason: null }, { ready: false, reason: LOGGED_OUT }],
+    ["缓存不可用 / meta 新写可用", { ready: false, reason: LOGGED_OUT }, { ready: true, reason: null }],
+  ] as const) {
+    test(`${label}：hello 发出前先认 meta 里更新的那份`, async () => {
+      const { h, sent } = loopWithHello();
+      freshProcess({ ...cache, at: Date.now() - 30_000 });
+      setMeta(h.db, READY_KEY, JSON.stringify({ ...meta, at: Date.now() - RECENT }));
       await h.tick();
-      expect(sharedClaudeReadiness(h.db)).toEqual(loop);
-      const helloTotal = helloBody(h.db, h.lend.lend[0], h.d.now()).slots.claude.total;
-      expect(helloTotal).toBe(r.ready ? 2 : 0);
-      // 生产里两边是同一个 journal：把循环写下的 meta 原样搬过去；探测桩故意给相反结论，用了它就对不上
-      const d = deps({ meta: getMeta(h.db, READY_KEY)!, probe: r.ready ? NOT_LOGGED_IN : null });
-      noteClaudeReadiness(null);
-      expect(accepted(await inbox(d, order("c1"), order("c2")))?.length).toBe(helloTotal);
-      expect(probes).toBe(0);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.total).toBe(meta.ready ? 2 : 0);
+      expect(probes).toBe(0); // meta 新鲜：循环也没探
+      expect(await inboxAcceptsAt(sent[0]!.meta, meta.ready ? LOGGED_OUT : null)).toBe(sent[0]!.total); // 探测桩给相反结论：用了它就对不上
     });
   }
 
-  test("收单进程探到的更新结论，常驻循环下一轮认它（hello 跟着变）；更旧的不覆盖", async () => {
-    const h = harness({ entry: { families: { codex: 2, claude: 2 } } });
-    noteClaudeReadiness({ ready: true, reason: null, at: Date.now() - 40_000 });
-    const newer: ClaudeReadiness = { ready: false, reason: `${NOT_LOGGED_IN}（收单进程新探）`, at: Date.now() - 1000 };
-    setMeta(h.db, READY_KEY, JSON.stringify(newer));
+  for (const [label, cache, probe] of [
+    ["循环里从没探过", null, LOGGED_OUT],
+    ["循环里的结论过期", { ready: false, reason: LOGGED_OUT, at: Date.now() - CLAUDE_READY_FRESH_MS - 1000 }, null],
+  ] as const) {
+    test(`${label}：本轮先探、写进 meta，再发 hello`, async () => {
+      const { h, sent } = loopWithHello();
+      freshProcess(cache);
+      h.d.claudeProbe = probeSays(probe);
+      await h.tick();
+      expect(probes).toBe(1);
+      expect(sent).toHaveLength(1);
+      expect(JSON.parse(sent[0]!.meta ?? "null")).toMatchObject({ ready: probe === null, reason: probe }); // 发 hello 时 meta 里已经是本轮探的结论
+      expect(sent[0]!.total).toBe(probe === null ? 2 : 0);
+      expect(await inboxAcceptsAt(sent[0]!.meta, probe === null ? LOGGED_OUT : null)).toBe(sent[0]!.total);
+    });
+  }
+
+  test("授权里没有 Claude 位：循环不探、不写 meta", async () => {
+    const h = harness({ entry: { families: { codex: 2 } } });
+    h.d.claudeProbe = probeSays(null);
     await h.tick();
-    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).slots.claude.total).toBe(0);
-    const mine: ClaudeReadiness = { ready: true, reason: null, at: Date.now() };
-    noteClaudeReadiness(mine);
-    setMeta(h.db, READY_KEY, JSON.stringify({ ...newer, at: mine.at - 5000 }));
-    syncClaudeReadiness(h.db);
-    expect(sharedClaudeReadiness(h.db)).toEqual(mine);
-    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).slots.claude.total).toBe(2);
+    expect(probes).toBe(0);
+    expect(getMeta(h.db, READY_KEY)).toBeNull();
   });
 });

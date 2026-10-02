@@ -58,7 +58,7 @@ export async function lendInbox(args: string[], deps: InboxDeps = realDeps): Pro
     const caller = { peer, fp: peerLendProblem(rec ?? undefined, peer) || !rec?.publicKey || keyFingerprint(rec.publicKey) !== fp ? null : fp };
     // 记录对不上（没钉钥、禁用、指纹不是钉住的那把）按「没有授权」整批拒：admitOrders 对 fp 为 null 的调用方一单不收
     const d = { db, now: () => Date.now(), readLend: deps.readLend, context: deps.context };
-    await primeInboxClaude(d, caller, req.value.orders, deps.claude); // 本进程刚起、Claude 缓存是空的：先对齐常驻循环的结论，否则 Claude 单恒 no_slot
+    await primeInboxClaude(d, caller, req.value.orders, deps.claude); // 本进程刚起、没有 Claude 结论：先对齐常驻循环写进 meta 的那份，否则 Claude 单恒 no_slot
     const r = await admitOrders(d, caller, req.value.orders, "push");
     return { ok: true, ...r };
   } finally { db.close(); }
