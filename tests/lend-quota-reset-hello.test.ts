@@ -15,7 +15,7 @@ beforeEach(() => {
   db = openLedger(":memory:");
   seq = 0;
   for (const [peer, family] of [["mate", "codex"], ["mate", "claude"], ["other", "codex"]]) {
-    db.run("INSERT INTO lend_peer_cooldowns VALUES (?, ?, ?, ?, ?)", [peer, family, RESET, "usage limit", NOW - 60_000]);
+    db.run("INSERT INTO lend_peer_cooldowns (peer, family, until, reason, startedAt) VALUES (?, ?, ?, ?, ?)", [peer, family, RESET, "usage limit", NOW - 60_000]);
   }
 });
 afterEach(() => closeLedger(":memory:"));

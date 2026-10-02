@@ -78,7 +78,7 @@ test("paused hello preserves a weekly cooldown against shorter hints and extends
   const db = new Database(":memory:");
   databases.push(db);
   for (const sql of LEND_PEER_COOLDOWN_SCHEMA) db.run(sql);
-  db.run("INSERT INTO lend_peer_cooldowns VALUES (?, ?, ?, ?, ?)", ["mate", "codex", RESET, ERROR, NOW]);
+  db.run("INSERT INTO lend_peer_cooldowns (peer, family, until, reason, startedAt) VALUES (?, ?, ?, ?, ?)", ["mate", "codex", RESET, ERROR, NOW]);
   const row = () => db.query("SELECT until, reason, startedAt FROM lend_peer_cooldowns WHERE peer = 'mate' AND family = 'codex'").get();
   for (const until of [NOW + PAUSE_FALLBACK_MS, NOW - 1, RESET]) {
     updatePeerCooldownHello(db, "mate", { reason: "codex_quota", until }, NOW);
