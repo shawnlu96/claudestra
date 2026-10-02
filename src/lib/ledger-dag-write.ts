@@ -19,6 +19,7 @@ import {
 import { buildNodes, linkTasks, mustFeature, nodeTask, requireManager } from "./ledger-feature-write.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
+import { dropPageCheck, withPageCheck } from "./ui-acceptance.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
 const DAG_ACTION = "dag_rewrite";
@@ -143,7 +144,7 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
     checkCas(f, input.rev);
     const now = ctx.now ?? Date.now();
     clearStalePending(db, ctx, f, now);
-    const plan = planRewrite(cur, livePhase(db), buildNodes(db, f, input.nodes), input.cancel, input.scopeChange);
+    const plan = planRewrite(cur, livePhase(db), withPageCheck(db, f, buildNodes(db, f, dropPageCheck(input.nodes)), cur.nodes), input.cancel, input.scopeChange);
     const c: ProposalContent = { featureId: f.id, version: cur.version + 1, baseVersion: cur.version, ...reasonOf(input.reasonKind, input.reasonText),
       nodes: plan.nodes, cancels: plan.cancels, scopeChange: input.scopeChange };
     const change = summary(cur.nodes, c);

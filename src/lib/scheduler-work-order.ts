@@ -13,6 +13,7 @@ import { SRC_DIR } from "./repo-root.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { bounceReviewLine, bounceWork } from "./scheduler-merge-conflict.js";
 import { standardAnswers } from "./order-standard-answers.js";
+import { uiReviewBasis } from "./ui-acceptance.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
 import type { OrderProbe, SessionRef, WorkOrder } from "./worker-session.js";
 
@@ -42,7 +43,7 @@ export function workOrderFor(task: LedgerTask, intent: SchedulerIntent, plan: Pl
     const report = `${statePath("ledger", "reviews", `${task.id}-r${task.round}`)}/report.md`;
     const where = checkout ? [`审查目录：${checkout}（已固定在这个 head；只读，不改、不提交、不推送）`] : [];
     const targeted = w?.bounce ? [bounceReviewLine(w.bounce)] : [];
-    return withDeliverScope(db, task, { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...targeted, ...where, ...convergenceOrderLines(db, task), standardAnswers("review")],
+    return withDeliverScope(db, task, { ...base, inputs: [spec, `只审 head ${intent.head ?? "（无）"}`, ...targeted, ...where, ...convergenceOrderLines(db, task), standardAnswers("review", uiReviewBasis(db, task))],
       outputs: ["逐项结论 JSON（findingId / family / severity / probe）", `报告：${report}`],
       acceptance: ["对抗式：专找能打穿规格保证的路径", "同类问题沿用上一轮的 findingId", REVIEW_CI_RULE],
       writeBack: `${CLI} review ${task.id} --reviewer ${ref.agent} --verdict pass|changes|block --p0 N --p1 N --p2 N --head ${intent.head ?? "<head>"}` +

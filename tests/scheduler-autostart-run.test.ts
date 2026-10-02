@@ -163,7 +163,7 @@ describe("完整开卡", () => {
   });
 
   test("卡首声明 ui：workflow 从落库那一刻就是 ui 最高版，不存在先写 code 的窗口", async () => {
-    spec("i28-a", "# 规格\n模板：UI\n\n## 目标\n");
+    spec("i28-a", "# 规格\n模板：UI\n\n## 目标\n## 复用对象\n团队视图\n## 对照基准\n/tmp/base.png\n");
     await autostartTick(env());
     const wfEvents = listEvents(db, { target: "i28-a" }).filter((e) => e.data.op === "workflow");
     expect(wfEvents.map((e) => [e.data.template, e.data.templateVersion, e.data.mode])).toEqual([["ui", TEMPLATE_VERSION.ui, "auto"]]);

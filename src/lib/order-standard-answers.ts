@@ -19,11 +19,13 @@ export const ASK_DEFAULT_GUIDANCE = "拿不准就用 ask，写清 default（默�
 export const GRADING_RULE = "分级：违反规格「验收线」某一条（写出编号）或本次 diff 引入的正确性 / 安全 bug → P1；其余（验收线以外、改动之前就有的、风格）→ P2。"
   + "拿不准就写进报告并说明理由，不提问";
 
+export const UI_BASIS_RULE = "ui 卡：和对照基准不一致（版式、组件、字号、错位、重叠、拿 id 当标题）按 P1，basis 写对应验收线；规格没写基准的，报 P1 basis=acceptance 缺基准";
+
 /** 审查单上的 ask 当场得到的答复（不开 PM ask、不发通知） */
 export const REVIEW_ASK_REPLY = `${GRADING_RULE}。\n把你的判断和理由写进报告，交结论。`;
 
-/** 并进派单 inputs 的那一项 */
-export function standardAnswers(kind: StandardAnswerFor): string {
-  const items = [ENVIRONMENT, DUTIES, ...(kind === "review" ? [GRADING_RULE] : [ASK_DEFAULT_GUIDANCE]), SPEC_FIRST];
-  return [STANDARD_ANSWERS_HEAD, ...items.map((s) => `- ${s}`)].join("\n");
+/** 并进派单 inputs 的那一项；uiBasis = ui 卡审查单的对照基准一节（ui-acceptance.ts uiReviewBasis），带上时多一条 UI_BASIS_RULE */
+export function standardAnswers(kind: StandardAnswerFor, uiBasis?: string): string {
+  const items = [ENVIRONMENT, DUTIES, ...(kind === "review" ? [GRADING_RULE] : [ASK_DEFAULT_GUIDANCE]), ...(uiBasis ? [UI_BASIS_RULE] : []), SPEC_FIRST];
+  return [STANDARD_ANSWERS_HEAD, ...items.map((s) => `- ${s}`), ...(uiBasis ? [uiBasis] : [])].join("\n");
 }
