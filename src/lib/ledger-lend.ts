@@ -1,3 +1,4 @@
+import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
 /**
  * The lending instance A's side of remote capacity (docs/design/remote-capacity.md §2.2, §6; table in ledger-lend-schema.ts):
  * PM offers a card's current step to one peer — the review round, or (i28-R6) the build / fix round as a write order — the peer
@@ -171,7 +172,6 @@ export function offerLend(db: Database, ctx: WriteCtx, input: OfferInput): LendO
 /**
  * The offer itself, without offerLend's two gates (PM identity, manual cards only): the scheduler (i28-R9) calls it for auto cards
  * under its own identity, which its CLI checks. Stage / head / borrow / live-order checks, T87's peer gate and the wire check all stay.
- * Safe inside a caller's transaction (tx nests). createdBy is ctx.actor.
  */
 export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): LendOrder {
   return tx(db, () => {
@@ -179,6 +179,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     const step = stepOfStage(task.stage);
     if (!step) throw new LedgerError("invalid", `任务 ${task.id} 在 ${task.stage}，只有 review / build / fix 阶段的卡能借出去`);
     if (step === "review" && (!task.headSHA || !/^[0-9a-f]{40}$/.test(task.headSHA))) throw new LedgerError("invalid", "卡上没有完整的 40 位 head，借不出去");
+    input = { ...input, borrow: unifiedBorrow(task.project, input.borrow) };
     const role = roleOfStep(step) as "review" | "write";
     if (!input.borrow || !input.borrow.projects.includes(task.project) || !input.borrow.roles.includes(role)) {
       throw new LedgerError("forbidden", `lend.json 的 borrow 里没有允许把项目 ${task.project} 的${role === "write" ? "写代码" : "审查"}借给 ${input.peer}`);
@@ -318,7 +319,7 @@ export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (
   const rows = (db.query("SELECT * FROM lend_orders WHERE peer = ? AND status = 'pooled' ORDER BY createdAt").all(peer) as Record<string, unknown>[]).map(toOrder);
   const role = (o: LendOrder) => roleOfStep(o.step) as "review" | "write";
   const orders = c.ordersLeftToday <= 0 ? [] : rows
-    .filter((o) => c.repos.includes(o.repo) && open(o.family) && c.roles.includes(role(o)) && !!borrow(o.project)?.roles.includes(role(o)))
+    .filter((o) => c.repos.includes(o.repo) && open(o.family) && c.roles.includes(role(o)) && !!unifiedBorrow(o.project, borrow(o.project))?.roles.includes(role(o)))
     .slice(0, pollLimit(rows.length))
     .map((o) => ({ orderId: o.orderId, taskId: o.taskId, step: o.step, family: o.family, repo: o.repo, pr: o.pr, head: o.head, round: o.round,
       specRev: o.specRev, offeredAt: o.createdAt }));
@@ -337,7 +338,6 @@ export const cardMoved = (task: LedgerTask, o: Pick<LendOrder, "step" | "head" |
 /** What a claim hands the peer; a write order also names the one branch it may push and the base it was cut from. */
 const claimed = (o: LendOrder) => ({ order: o.wire, text: o.text, sha256: o.sha256, lease: lease(o),
   ...(o.branch && o.base ? { write: { branch: o.branch, base: o.base } } : {}) });
-
 /** One transition per call: an idempotent re-claim by the holder returns the same order and the current lease unchanged. */
 export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimRequest, borrow: (project: string) => BorrowEntry | null) {
   return tx(db, () => {
@@ -351,7 +351,7 @@ export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimR
     if (o.status === "unknown") return refuse("lease_expired", "这一单已过期或已报停，交 PM 核对");
     if (o.status === "done") return refuse("conflict", "这一单的结论已入账");
     if (o.status !== "pooled") return refuse("cancelled", "这一单已撤销");
-    const b = borrow(o.project);
+    const b = unifiedBorrow(o.project, borrow(o.project));
     if (!b?.roles.includes(roleOfStep(o.step) as "review" | "write")) return refuse("not_borrowed", "本机的 borrow 已不再允许把这个项目借给你");
     const held = (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status = 'claimed'").get(peer) as { n: number }).n;
     if (held >= b.maxOpen) return refuse("max_open", `你已持有 ${held} 单，达到上限 ${b.maxOpen}`);
