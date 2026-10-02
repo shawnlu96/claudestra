@@ -3,7 +3,7 @@ import { parseAsk, parseCommand, parseProposal, v2ObjectDigest } from '../src/li
 import { V2_DTO_FIXTURES, V2_FIXTURE_FENCE, V2_FIXTURE_SCOPE } from '../src/lib/shared-ledger-contract-v2-fixtures';
 import {
   approvalCommands, approvalStatus, beginApproval, bindDigest, canSign, canonicalJson, documentView, driftReasons,
-  settleApproval, signBlocker, startApproval, type ApprovalAsk, type ApprovalProposal, type ApprovalView,
+  approvalKey, settleApproval, settleIfCurrent, signBlocker, startApproval, stateFor, type ApprovalAsk, type ApprovalProposal, type ApprovalView,
 } from '../web/features/collab/shared/approve/approve-model';
 import {
   approveFixtureDrifted, approveFixtureExpired, approveFixtureMember, approveFixtureMergeView, approveFixtureNow,
@@ -101,14 +101,14 @@ test('a member sees the approval but cannot sign on the owner’s behalf', () =>
 });
 
 test('form state: normal success, disabled, and central refusal never pretends success', () => {
-  const submitting = startApproval(idle, 'approved');
+  const submitting = startApproval(stateFor(idle, view), 'approved', 'request-1');
   expect(canSign(submitting, view, owner, now, 'approved')).toBe(false);
   const saved = settleApproval(submitting, { ok: true });
-  expect(saved).toEqual({ phase: 'saved', decision: 'approved', error: null });
+  expect(saved).toEqual({ key: approvalKey(view), phase: 'saved', decision: 'approved', error: null, requestId: 'request-1' });
   expect(canSign(saved, view, owner, now, 'approved')).toBe(false);
   for (const code of ['authorization_expired', 'authorization_mismatch', 'conflict', 'pending_proposal']) {
     const refused = settleApproval(submitting, { ok: false, code });
-    expect(refused).toEqual({ phase: 'rejected', decision: 'approved', error: code });
+    expect(refused).toMatchObject({ phase: 'rejected', decision: 'approved', error: code });
     expect(refused.phase).not.toBe('saved');
     expect(canSign(refused, approveFixtureDrifted, owner, now, 'approved')).toBe(false);
   }
@@ -118,6 +118,34 @@ test('form state: normal success, disabled, and central refusal never pretends s
   expect(canSign(idle, onlyApprove, owner, now, 'rejected')).toBe(false);
   const freeText: ApprovalView = { ...onlyApprove, ask: { ...onlyApprove.ask, allowText: true } };
   expect(canSign(idle, freeText, owner, now, 'rejected')).toBe(true);
+});
+
+test('approval state is scoped to the ask and its bind; late completions for another record are dropped', () => {
+  const askB: ApprovalView = { ...view, ask: { ...view.ask, id: 'ask-b', title: 'NEW ASK B', state: 'cancelled' } };
+  expect(approvalKey(askB)).not.toBe(approvalKey(view));
+  for (const changed of [{ ...view.ask, rev: 2 }, { ...view.ask, bind: { ...view.ask.bind!, baseVersion: 2 } },
+    { ...view.ask, bind: { ...view.ask.bind!, expiresAt: 99_999 } }, { ...view.ask, bind: { ...view.ask.bind!, proposalDigest: 'f'.repeat(64) } }])
+    expect(approvalKey({ ...view, ask: changed })).not.toBe(approvalKey(view));
+  // pending A, view switches to B, A resolves ok: B stays idle (and revoked), never "saved".
+  const pendingA = startApproval(stateFor(idle, view), 'approved', 'request-a');
+  expect(stateFor(pendingA, askB)).toEqual(beginApproval(approvalKey(askB)));
+  const afterA = settleIfCurrent(pendingA, pendingA, { ok: true });
+  expect(afterA).toMatchObject({ key: approvalKey(view), phase: 'saved' });
+  expect(stateFor(afterA, askB).phase).toBe('idle');
+  expect(canSign(afterA, askB, owner, now, 'approved')).toBe(false);
+  expect(signBlocker(askB, owner, now)).toBe('revoked');
+  // already saved A, switch to an open B: B is fresh and signable, A's success does not leak.
+  const openB: ApprovalView = { ...approveFixtureMergeView };
+  expect(stateFor(afterA, openB).phase).toBe('idle');
+  expect(canSign(afterA, openB, owner, now, 'approved')).toBe(true);
+  // B submitted meanwhile: A's late completion must not settle B's pending request.
+  const pendingB = startApproval(stateFor(pendingA, openB), 'rejected', 'request-b');
+  expect(settleIfCurrent(pendingB, pendingA, { ok: true })).toBe(pendingB);
+  expect(settleIfCurrent(pendingB, pendingB, { ok: false, code: 'conflict' })).toMatchObject({ phase: 'rejected', error: 'conflict' });
+  // a second click on the same record (new request id) supersedes the old completion too.
+  const retry = startApproval(stateFor(idle, view), 'approved', 'request-a2');
+  expect(settleIfCurrent(retry, pendingA, { ok: true })).toBe(retry);
+  expect(settleIfCurrent(afterA, pendingA, { ok: false, code: 'conflict' })).toBe(afterA);
 });
 
 test('fixtures use only 本机 / peer A / peer B identities', async () => {

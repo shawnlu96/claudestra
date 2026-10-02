@@ -29,7 +29,11 @@ export interface ApprovalViewer { role: 'owner' | 'member'; instanceId: string }
 export interface ApprovalScope { teamId: string; projectId: string; serviceGeneration: number; epoch: number; bootId: string }
 export type ApprovalStatus = 'open' | 'drifted' | 'expired' | 'revoked' | 'answered' | 'unbound';
 export type Decision = 'approved' | 'rejected';
-export interface ApprovalState { phase: 'idle' | 'submitting' | 'rejected' | 'saved'; decision: Decision | null; error: string | null }
+/** key = the ask + bound record the state belongs to; requestId = the submission a completion must match. */
+export interface ApprovalState {
+  key: string; phase: 'idle' | 'submitting' | 'rejected' | 'saved'; decision: Decision | null; error: string | null;
+  requestId: string | null;
+}
 export type ApprovalResult = { ok: true } | { ok: false; code: string };
 
 const required = (ok: boolean, code: string): void => { if (!ok) throw new Error(code); };
@@ -74,10 +78,19 @@ export function answerFor(ask: ApprovalAsk, decision: Decision): { kind: 'option
   return ask.allowText ? { kind: 'text', text: decision === 'approved' ? '批准' : '驳回' } : null;
 }
 
-export const beginApproval = (): ApprovalState => ({ phase: 'idle', decision: null, error: null });
+/** Identity of what is being signed: ask id + rev + the whole bind (digest, base version, expiry, actions, …). */
+export const approvalKey = (view: ApprovalView): string =>
+  canonicalJson({ askId: view.ask.id, rev: view.ask.rev, bind: view.ask.bind });
+export const beginApproval = (key = ''): ApprovalState => ({ key, phase: 'idle', decision: null, error: null, requestId: null });
+/** The state for this view: a result recorded for another ask / bind is never carried over to it. */
+export function stateFor(state: ApprovalState, view: ApprovalView): ApprovalState {
+  const key = approvalKey(view);
+  return state.key === key ? state : beginApproval(key);
+}
 /** Members see everything but cannot sign; only an open, current bind is signable and never twice. */
 export function canSign(state: ApprovalState, view: ApprovalView, viewer: ApprovalViewer, now: number, decision: Decision): boolean {
-  return viewer.role === 'owner' && state.phase !== 'submitting' && state.phase !== 'saved'
+  const phase = stateFor(state, view).phase;
+  return viewer.role === 'owner' && phase !== 'submitting' && phase !== 'saved'
     && approvalStatus(view, now) === 'open' && answerFor(view.ask, decision) !== null;
 }
 export function signBlocker(view: ApprovalView, viewer: ApprovalViewer, now: number): string | null {
@@ -107,14 +120,24 @@ export function approvalCommands(state: ApprovalState, view: ApprovalView, viewe
   return { answer: answerCommand, decide: decideCommand };
 }
 export type ApprovalSubmission = ReturnType<typeof approvalCommands>;
+export interface ApprovalPanelProps {
+  view: ApprovalView; viewer: ApprovalViewer; scope: ApprovalScope; now: number;
+  instanceNames: Readonly<Record<string, string>>;
+  submit: (submission: ApprovalSubmission) => Promise<ApprovalResult>; onClose: () => void;
+}
 
 /** Only an explicit center acceptance counts; every refusal or transport failure stays visible as a failure. */
 export function settleApproval(state: ApprovalState, result: ApprovalResult | Error): ApprovalState {
   if (result instanceof Error) return { ...state, phase: 'rejected', error: result.message || 'unavailable' };
   return result.ok ? { ...state, phase: 'saved', error: null } : { ...state, phase: 'rejected', error: result.code || 'unavailable' };
 }
-export const startApproval = (state: ApprovalState, decision: Decision): ApprovalState =>
-  ({ phase: 'submitting', decision, error: null });
+export const startApproval = (state: ApprovalState, decision: Decision, requestId: string): ApprovalState =>
+  ({ key: state.key, phase: 'submitting', decision, error: null, requestId });
+/** A completion lands only on the submission still pending for the same record; late results for another are dropped. */
+export function settleIfCurrent(current: ApprovalState, pending: ApprovalState, result: ApprovalResult | Error): ApprovalState {
+  if (current.phase !== 'submitting' || current.key !== pending.key || current.requestId !== pending.requestId) return current;
+  return settleApproval(pending, result);
+}
 
 /** Shared copy / redacted summary are labelled as such; the full original is only ever "仅在主场". */
 export function documentView(document: ApprovalDocument | null) {

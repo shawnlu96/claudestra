@@ -4,10 +4,10 @@ import { Icon } from '../../collab-icons';
 import shared from '../shared.module.css';
 import s from './approve.module.css';
 import {
-  approvalCommands, approvalStatus, beginApproval, bindDigest, canSign, documentView, settleApproval, shortDigest,
-  signBlocker, startApproval, type ApprovalResult, type ApprovalScope, type ApprovalState, type ApprovalSubmission,
-  type ApprovalView, type ApprovalViewer, type Decision,
+  approvalCommands, approvalStatus, beginApproval, bindDigest, canSign, documentView, settleIfCurrent, shortDigest,
+  signBlocker, startApproval, stateFor, type ApprovalPanelProps, type ApprovalResult, type ApprovalState, type Decision,
 } from './approve-model';
+export type { ApprovalPanelProps } from './approve-model';
 
 const statusLabels: Record<string, string> = {
   open: '待审批', drifted: '基础版已变化', expired: '已过期', revoked: '已撤销', answered: '已答复', unbound: '无授权绑定',
@@ -18,28 +18,25 @@ const errorLabels: Record<string, string> = {
   authorization_expired: '授权已过期', authorization_mismatch: '绑定内容不一致', stale_epoch: '版本已过期',
   stale_generation: '数据已更新', unavailable: '暂时无法提交', invalid_field: '请求无效',
 };
-export interface ApprovalPanelProps {
-  view: ApprovalView; viewer: ApprovalViewer; scope: ApprovalScope; now: number;
-  instanceNames: Readonly<Record<string, string>>;
-  submit: (submission: ApprovalSubmission) => Promise<ApprovalResult>; onClose: () => void;
-}
 
 /** X12 wires submit to the shared command client; the owner role comes from verified identity, not this prop alone. */
 export function ApprovalPanel(p: ApprovalPanelProps) {
-  const [state, setState] = useState<ApprovalState>(beginApproval);
+  const [recorded, setRecorded] = useState<ApprovalState>(beginApproval);
+  const state = stateFor(recorded, p.view);
   const { ask, proposal } = p.view, bind = ask.bind;
   const status = approvalStatus(p.view, p.now), blocker = signBlocker(p.view, p.viewer, p.now);
   const material = documentView(p.view.document);
   const sign = async (decision: Decision) => {
     if (!canSign(state, p.view, p.viewer, p.now, decision) || !bind) return;
-    const pending = startApproval(state, decision);
-    setState(pending);
+    const requestIds = { answer: crypto.randomUUID(), decide: crypto.randomUUID() };
+    const pending = startApproval(state, decision, requestIds.answer);
+    const settle = (result: ApprovalResult | Error) => setRecorded(current => settleIfCurrent(current, pending, result));
+    setRecorded(pending);
     try {
-      const commands = approvalCommands(state, p.view, p.viewer, p.scope, p.now, decision, await bindDigest(bind),
-        { answer: crypto.randomUUID(), decide: crypto.randomUUID() });
-      setState(settleApproval(pending, await p.submit(commands)));
+      const commands = approvalCommands(state, p.view, p.viewer, p.scope, p.now, decision, await bindDigest(bind), requestIds);
+      settle(await p.submit(commands));
     } catch (cause) {
-      setState(settleApproval(pending, cause instanceof Error ? cause : new Error('unavailable')));
+      settle(cause instanceof Error ? cause : new Error('unavailable'));
     }
   };
   const button = (decision: Decision, icon: 'circleCheck' | 'circleX', label: string) =>
