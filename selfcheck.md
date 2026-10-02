@@ -1,13 +1,14 @@
-# i28-V1p · specRev 2 自查
+# i28-X6 · specRev 1 自查
 
-订单：lend:i28-V1p:s2:r1:a2。基线 625b82dd72423d05d9cb65282fd40e6a4ceb8c3d，仅修改 lend/i28-V1p-9109；不自行 push。
+订单 lend:i28-X6:s1:r0:a0；基线 391666f9f2caf1289967391fb185f13d2a9fefe9；仅提交 lend/i28-X6-9109，不自行 push。
 
-1. 总览体积：50/500 张已完成 + 30 张在跑分别 53,171/53,193 B，差 22 B。补充 overview-deps 场景：1 张在跑依赖 50/500 张已完成为 20,030/20,035 B，差 5 B。最近窗口 30 张，依赖窗口按完成时间另保留至多 30 张；窗口外聚合计数，deps 两端均在总览才返回；详情保留全量依赖。
-2. 分页：固定快照每页 7/50/100 张验证游标连续、同毫秒次序、不重不漏；已有窗口移动补段测试通过。分页后子 DAG 已完成节点状态正确。cursor-backfill 按 PM 仲裁不修改。
-3. **生产字节数待 PM 实测**。出借机没有该生产库；PM 已在 ask_muq0t0sq909c546cf0 答复中明确：生产库不外发，本项改为 PM 合并后经中继实测。上述数据为测试库测量，不冒充生产值。
-4. 截图：ledger/reviews/i28-V1p-shots/，浅/深色 × 手机 390px/桌面 × 首屏/翻页，共 8 张。真实 Chromium 渲染 MobileList/Outline，真实读侧函数处理夹具请求；手机首屏及分页项均有步骤点，无横向溢出、无 pageerror。真实分页请求模拟 503：保留已有行，约 2 秒后自动重试同一游标成功。
-5. 根 tsc 0 error、guard 通过；web tsc 0 error，全 web eslint 0 error（34 warnings），改动的 web 文件 eslint 0 warning。针对性 6 文件 72 测试通过，浏览器 4 测试通过。bun run check 全量结果：9875 pass、9 skip、113 fail（750 文件）；失败含 DAG 开工/放置、usage-cache-write、出借身份相关权限测试，其中两文件单独运行也复现 11 fail；未改这些模块，全量以 PR CI 三项为准。
-6. today-cap：今日完成和最近窗口同限 30；额外依赖不能绕过今日上限。当天 50/500 张 + 30 在跑为 74,097/74,102 B，差 5 B。分页查询步骤行，返回 stepLine；手机「更早完成」显示分页卡步骤点，涵盖当日溢出卡。
-7. 跨时区：服务端 Asia/Shanghai、浏览器 America/Los_Angeles；在服务端昨日、浏览器今日完成的卡，首屏和翻页均有步骤点。保留客户端 dayStart；分页步骤点不按服务器零点裁剪。
+1. 通过：中心 v2_lend_* 表持有订单、claim、lease、result；订单号全局唯一，同项目任务只能有一张活单，unknown/过期 claimed 仍占位。第二次 claim 拒绝，包含同持有人重领、另一 worker 及独立 SQLite 连接；重开连接仍读到原持有人。source/planning 模式、错误主场/身份范围/代际拒绝。
+2. 通过：结果核 orderId、leaseGen、expectedHead、specRev、round、worker、存活租约及当前任务/步骤绑定。review 的 head 必须等于订单 head；write/fix 的 head 是输出提交。只改订单和对应步骤，不改整卡 stage/head/主场/授权/工作流及其他步骤；额外字段拒绝。相同结果幂等，异文或复用 operationId 拒绝；failed/unknown 不标成功。步骤、事件、回执失败时同事务全回滚。
+3. 通过：复用既有 lend-wire / lend-wire-v2 解析器和 offer/lease 外形。hello、beat、offer、claim、result 样例往返及旧 v1 golden 测试通过；未改协议字段、版本或 V1 服务。
+4. 通过：在调用者事务内按冻结 migration manifest 导入，保留原订单号、leaseGen（覆盖代际 7）、原截止时间及结清状态；不重发、不 claim、不续租。缺失/错绑 claim、lease、step，过期活单、重映射单号、内容冲突均拒绝；同内容重复导入无新单。审批/源写门/整组导入由必填事务适配器及 X13 核验。
+5. 验证：专属域测试 31 项通过；域+冻结契约+现有出借协议回归共 153 pass、0 fail。根 tsc 通过，guard 通过（未改基线），bridge/channel-server/manager/launcher/cron/setup 六入口及新域入口 build 通过，git diff --check 通过。
+   已跑 bun run check：10691 pass、20 skip、113 fail（858 文件），退出 1；不宣称全量绿。失败集中在未修改的 DAG 工具、出借身份/CLI、ACP、usage-cache-write、peer-e2e 等路径；usage-cache-write 与 lend-config-priority 单独复跑仍 7 fail。当前环境 python3 连简单 print 都无输出，CLI 失败含 actor=? 的权限拒绝。全量结果以出借服务推送后的 PR head CI 三项为准，CI 由合并闸核对。
 
-范围：代码与测试全部在 fileGlobs 内；没有新增范围外 web 接入口。截图与本交付文件按要求附带。
+接入：只加一行接入，由 X12 执行。migrations 注册 lendSchema 并调 domain.installSchema；commands/V2 wiring 注册 lendStatements 并在统一事务调用 createLendDomain(ports).applyInTransaction；reads 用 readLendRow。X13 同事务调用 importInTransaction。必填 ports 连接中心 task/workflow/feature、步骤 CAS、事件序列及授权/机器算力 grant 校验；不得替换为本机库或整卡交付 helper。完整约束见 src/shared-ledger/lend/README.md。真实 HTTP/CLI 接线及 execution 开关未开启。
+
+范围：实现和测试仅在指定目录/前缀；按派单要求更新 summary.txt/selfcheck.md 交付报告。未修改冻结契约、热文件、V1 服务或 guard 基线；未读取生产配置、连接生产 bridge 或改机器设施。
