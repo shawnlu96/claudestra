@@ -98,10 +98,3 @@ export const HourglassIcon = ({ className }: IconProps) => (
     <path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
   </Svg>
 );
-
-/** lucide flag：审查先给（reviewFirst） */
-export const FlagIcon = ({ className }: IconProps) => (
-  <Svg className={className}>
-    <path d="M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.528" />
-  </Svg>
-);
