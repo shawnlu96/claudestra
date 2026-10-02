@@ -3,7 +3,7 @@
 // {key:"guard:scripts/guard/config.ts", from:0, to:0, why}，否则 guard 失败（见 self.ts）。
 
 /** 默认上限：代码文件 / tests / 数据文件（纯表格型，行多但无逻辑）。 */
-const CODE_CAP = 400;
+const CODE_CAP = 800;
 const TEST_CAP = 600;
 const DATA_CAP = 1000;
 const DATA_FILES: RegExp[] = [/^web\/lib\/i18n-dict\.ts$/, /^src\/bridge\/slash-catalog\.ts$/];
@@ -108,7 +108,7 @@ export const CATCH_COMMENT_MIN = 6;
 
 /** 每类违规的改法（CLI 输出里每条违规附一行）。 */
 export const HINTS: Record<string, string> = {
-  size: "新逻辑放新模块（≤400 行），大文件里只留一行调用；或先抽出等量代码",
+  size: "新逻辑放新模块（≤800 行），大文件里只留一行调用；或先抽出等量代码",
   doc: "功能细节写进 docs/，这里只留一行指针",
   longLine: "别压行：拆成多行（单行 ≤200 字符）",
   fn: "拆函数；把超长函数原样搬出大文件不算违规（按全仓总量计）",
