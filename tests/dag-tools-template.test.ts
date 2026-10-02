@@ -122,9 +122,9 @@ afterEach(() => {
 
 /** sha256 of product() for each path, recorded before N4 (no template parameter yet). */
 const TEMPLATE_GOLDEN: Record<string, string> = {
-  normal: "6336300117b3cecaa845ca31e601abc5683d610792304c632d7bd905b7f398d5",
-  rollback: "cdd9cfaf8bdb84c8f92df5d6ee12677781528d0e094f4e3f1954d7c90425ef41",
-  peer: "152d8aa531ca1226910f022cbebec91435f2a55220c90715bfa75f98b76dcdf8",
+  normal: "378f7dcc875b5dad31a726ada137990f12634e12681addfe31c03856bebd3ff6",
+  rollback: "5875590e587fea208408d63360a6a9f98d8de330c3ef05ca68a042ae590911cf",
+  peer: "af265a9224d8e5232700af3223d7844dbbe60a4fcd61131123c128c6e8dc2409",
 };
 
 const digest = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");

@@ -26,7 +26,7 @@ const P1_PLAIN = [
 ];
 const RULES = [
   "审查目录只读：不改、不提交、不推送。",
-  "跑测试一律加 `env -i`，HOME / TMPDIR 指向审查目录下的临时目录，PATH 显式给。",
+  "跑测试一律加 `env -i`，HOME / TMPDIR 只用审查目录下的 `.review-tmp/home`、`.review-tmp/tmp`（固定这个名字，已在 git exclude 里，收尾能删），PATH 显式给。",
   "不碰本机 Claudestra 状态目录里的生产文件，不连本机 bridge，不调任何模型或外部 API。",
   "只跑相关测试和自己写的探针，不跑全量 check（CI 已经跑过）。",
   "不给任何 agent 或 peer 发消息：报告由调度器脱敏后转给作者。",

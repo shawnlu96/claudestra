@@ -123,8 +123,8 @@ afterEach(() => {
 
 /** sha256 of product() for each path, recorded before W5. */
 const START_GOLDEN: Record<string, string> = {
-  normal: "6336300117b3cecaa845ca31e601abc5683d610792304c632d7bd905b7f398d5",
-  rollback: "cdd9cfaf8bdb84c8f92df5d6ee12677781528d0e094f4e3f1954d7c90425ef41",
+  normal: "378f7dcc875b5dad31a726ada137990f12634e12681addfe31c03856bebd3ff6",
+  rollback: "5875590e587fea208408d63360a6a9f98d8de330c3ef05ca68a042ae590911cf",
 };
 
 const digest = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");

@@ -124,6 +124,8 @@
 {"d":"out","r":{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"…"},{"type":"toolCall","id":"call_00_ILr6Rvf3svd8rHUeW1ff5293","name":"bash","arguments":{"command":"sleep 30","timeout":60}}],"api":"openai-completions","provider":"cc-switch-deep-seek","model":"deepseek-flash","usage":{"input":150,"output":101,"cacheRead":2048,"cacheWrite":0,"reasoning":45,"totalTokens":2299,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1790790600496,"responseId":"6ac030c8-d3fd-4903-b064-050c86e61368","rawStopReason":"tool_calls","thinkingLevel":"max"}}}
 {"d":"out","r":{"type":"tool_execution_start","toolCallId":"call_00_ILr6Rvf3svd8rHUeW1ff5293","toolName":"bash","args":{"command":"sleep 30","timeout":60}}}
 {"d":"out","r":{"type":"tool_execution_update","toolCallId":"call_00_ILr6Rvf3svd8rHUeW1ff5293","toolName":"bash","args":{"command":"sleep 30","timeout":60},"partialResult":{"content":[]}}}
+{"d":"in","r":{"type":"clear_queue","id":"p20q"}}
+{"d":"out","r":{"id":"p20q","type":"response","command":"clear_queue","success":true,"data":{"steering":[],"followUp":[]}}}
 {"d":"in","r":{"type":"abort","id":"p20"}}
 {"d":"out","r":{"type":"tool_execution_end","toolCallId":"call_00_ILr6Rvf3svd8rHUeW1ff5293","toolName":"bash","result":{"content":[{"type":"text","text":"Command aborted"}],"details":{}},"isError":true}}
 {"d":"out","r":{"type":"message_start","message":{"role":"toolResult","toolCallId":"call_00_ILr6Rvf3svd8rHUeW1ff5293","toolName":"bash","content":[{"type":"text","text":"Command aborted"}],"details":{},"isError":true,"timestamp":1790790601410}}}
