@@ -109,7 +109,9 @@ function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE, p
       mergeState: "CLEAN", mergeSha: p.merged, checks: [{ name: "check", bucket: "pass" }] };
   };
   /** A test may wrap `freshness` (e.g. push main while it reads). */
-  const hooks: Pick<MergeExternal, "freshness"> = { freshness: async () => ({ behindBy: env.hub.main === initialMain ? 0 : 1, mainHead: env.hub.main }) };
+  const hooks: Pick<MergeExternal, "freshness"> & { advance?: (to: MergeRun["phase"]) => void } = {
+    freshness: async () => ({ behindBy: env.hub.main === initialMain ? 0 : 1, mainHead: env.hub.main }),
+  };
   const base: MergeExternal = {
     inspect: async () => pr(),
     freshness: (...a) => hooks.freshness(...a),
@@ -121,6 +123,7 @@ function cardRun(env: ReturnType<typeof setup>, i: number, initialMain = BASE, p
   const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string) => {
     expect([from, rev]).toEqual([row.phase, row.rev]);
     row = { ...row, phase: to, rev: row.rev + 1, reason: receipt ?? null, mergeSha: mergeSha ?? row.mergeSha };
+    hooks.advance?.(to);
     if (to === "merged") env.status.set(card.taskId, { kind: "merged", sha: mergeSha! });
     return row;
   };
@@ -426,5 +429,25 @@ describe("i28-MT1 merge train", () => {
     expect(run.row.phase).toBe("updating"); // the void train no longer clears it: back on the serial path, a candidate for the next train
     expect(calls(env, "match-head:")).toEqual([]);
   });
+
+  for (const drift of ["main", "sibling"] as const) {
+    test(`review r4 ${drift}-drift during merging persistence: void train before merge API`, async () => {
+      const env = setup([["src/a.ts"], ["src/b.ts"]]);
+      await env.until("settling");
+      const run = cardRun(env, 0, BASE, "await_ci");
+      run.hooks.advance = (to) => {
+        if (to !== "merging") return;
+        if (drift === "main") env.pushMain();
+        else env.hub.prs.get(env.cards[1]!.prRef)!.head = newSha();
+      };
+      await run.once();
+      expect(calls(env, "match-head:")).toEqual([]);
+      expect(calls(env, "rest-merge:")).toEqual([]);
+      expect(run.row.phase).toBe("unknown");
+      expect(env.store.load("p")).toMatchObject({ phase: "cleanup", outcome: "void" });
+      await cardRun(env, 1).drive();
+      expect(calls(env, "match-head:")).toEqual([]);
+    });
+  }
 
 });

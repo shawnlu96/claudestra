@@ -385,6 +385,13 @@ async function verdictNow(s: TrainState, gh: TrainGh): Promise<string | null> {
   return await headsMoved(s, gh) ?? (await mainOnlyMembers(s, await gh.mainHead(s.repo), gh) ? null : "main 自列车起点以来多了非本批的提交");
 }
 
+/** Recheck after the durable merging claim: a moved main or sibling voids the train before the merge API. */
+export async function recheckCleared(s: TrainState, deps: Io & Pick<TrainDeps, "gh">): Promise<void> {
+  const why = await verdictNow(s, deps.gh);
+  if (!why) return;
+  await voidTrain(s, deps, `合并前核对：${why}`);
+  throw new Error(`合并前核对：${why}，列车 ${s.id} 作废，不发合并`);
+}
 /** The verified member the merge override may merge with `--match-head-commit` (any project's settling train). */
 export function clearedMember(states: readonly TrainState[], prRef: string, head: string): TrainState | null {
   return states.find((s) => s.phase === "settling" && s.members.some((m) => m.prRef === prRef && sameSha(m.head, head) &&
