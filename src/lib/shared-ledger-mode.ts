@@ -8,7 +8,8 @@ import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import { LedgerError } from "./ledger-store.js";
 
 type SharedLedgerAuthorityMode = "source" | "planning" | "execution";
-export interface SharedLedgerMode { authorityMode: SharedLedgerAuthorityMode; sharedPlanning: boolean }
+/** mirror: committed-but-not-activated source feature mirrored read-only to the center (PJ1); local planning stays open. */
+export interface SharedLedgerMode { authorityMode: SharedLedgerAuthorityMode; sharedPlanning: boolean; mirror?: true }
 interface ModeFile { features: Record<string, SharedLedgerMode> }
 export interface SharedLedgerLocalCredential extends SharedLedgerConnection {
   localSubject: string;
@@ -20,7 +21,8 @@ function modeFile(value: unknown): value is ModeFile {
   if (!value || typeof value !== "object" || !("features" in value)) return false;
   const features = (value as ModeFile).features;
   return !!features && typeof features === "object" && !Array.isArray(features) && Object.values(features).every((m) =>
-    m && ["source", "planning", "execution"].includes(m.authorityMode) && typeof m.sharedPlanning === "boolean");
+    m && ["source", "planning", "execution"].includes(m.authorityMode) && typeof m.sharedPlanning === "boolean"
+    && (m.mirror === undefined || (m.mirror === true && m.authorityMode === "source" && m.sharedPlanning)));
 }
 function credentialFile(value: unknown): value is CredentialFile {
   if (!value || typeof value !== "object" || !Array.isArray((value as CredentialFile).credentials)) return false;
@@ -52,7 +54,7 @@ export function readSharedLedgerMode(featureId: string, dir = STATE_DIR): Shared
   return Object.hasOwn(state.features, featureId) ? { ...state.features[featureId] } : { authorityMode: "source", sharedPlanning: false };
 }
 export function localSharedLedgerPlanningAllowed(mode: SharedLedgerMode): boolean {
-  return mode.authorityMode === "source" && !mode.sharedPlanning;
+  return mode.authorityMode === "source" && (!mode.sharedPlanning || mode.mirror === true);
 }
 /** start_node carries the feature through the existing manager path; creation rechecks inside its writer transaction. */
 export function requireSharedLedgerTaskPlanning(extra: Record<string, unknown> | undefined): void {

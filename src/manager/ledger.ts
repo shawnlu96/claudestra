@@ -1,5 +1,6 @@
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
+import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
 import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
@@ -56,7 +57,7 @@ import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
-  ...SHARED_BINDINGS_CMDS,
+  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
