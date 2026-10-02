@@ -11,6 +11,7 @@ import { settleIntent } from "./ledger-scheduler-settle.js";
 import { canTransition, nextTaskState, type LedgerEvent } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent } from "./ledger-tx.js";
+import { ciRerunClaim, ciRerunOrBounce } from "./scheduler-merge-ci-rerun.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
@@ -107,7 +108,7 @@ type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 export async function bounceStep(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, only?: BounceCause): Promise<MergeRun | null> {
   const cause = bounceOf(run, pr, only);
   if (!cause) return null;
-  if (cause === "ci_fail") return step("resolved", bounceReceipt({ cause, prHead: pr.head, mainHead: null, checks: failedRequired(run, pr.checks) }));
+  if (cause === "ci_fail") return ciRerunOrBounce(run, pr, external, step, failedRequired(run, pr.checks), bounceReceipt); // i28-CIF1
   const { mainHead } = await external.freshness(run.prRef, pr.head);
   return step("resolved", bounceReceipt({ cause, prHead: pr.head, mainHead, checks: [] }));
 }
@@ -172,7 +173,9 @@ export function closeMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, rawRec
   const now = ctx.now ?? Date.now();
   const receipt = rawReceipt?.trim() ?? "";
   if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt)) throw new LedgerError("invalid", "回执要是单行且不超过 600 字");
-  const b = parseBounceReceipt(receipt);
+  const own = ciRerunClaim(db, ctx, row, receipt, drift, bounceReceipt, insertEvent); // null: a CI re-run was claimed, the run keeps its phase
+  if (own === null) return;
+  const b = parseBounceReceipt(own);
   if (!b) {
     if (!manualCancel(db, row)) throw new LedgerError("conflict", "只有 PM 切手动、且还没发出合并的运行能直接结束；退回 fix 要带冲突 / CI 失败回执");
     return cancelMergeRun(db, ctx, row, receipt);

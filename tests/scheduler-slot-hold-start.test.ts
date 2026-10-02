@@ -90,7 +90,8 @@ for (const off of [false, true]) {
     if (off) pool.remote!.localPriority = "off";
     else { author("a", "build"); author("b", "build"); }
     expect(await autostartTick(env())).toEqual([]);
-    expect(getTask(db, "slots-next")).toMatchObject({ stage: "restate", agent: null, extra: { placement: "peer:mate", repo: "o/r" } });
+    expect(getTask(db, "slots-next")).toMatchObject({ stage: "restate", agent: null, extra: { repo: "o/r" } });
+    expect(getTask(db, "slots-next")!.extra).not.toHaveProperty("placement");
     expect(creates).toBe(0); expect(gitCalls).toBe(0);
   });
   test(`autostart waits when peer full and ${off ? "local off" : "local full"}`, async () => {
@@ -146,7 +147,8 @@ test("PM changed after preflight: no claim or failed arm, then next tick opens w
   expect(db.query("SELECT seq FROM events WHERE json_extract(data, '$.op') = 'autostart_settle'").all()).toEqual([]);
   expect(creates).toBe(0); expect(gitCalls).toBe(0);
   expect(await autostartTick(env())).toEqual([]);
-  expect(getTask(db, "slots-next")).toMatchObject({ pm: "new-pm", stage: "restate", extra: { placement: "peer:mate" } });
+  expect(getTask(db, "slots-next")).toMatchObject({ pm: "new-pm", stage: "restate" });
+  expect(getTask(db, "slots-next")!.extra).not.toHaveProperty("placement");
   expect(claims()).toHaveLength(1);
 });
 
