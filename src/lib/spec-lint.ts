@@ -12,7 +12,8 @@ import { uiSpecSection } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 const UI_REQUIRED_SECTIONS = ["复用对象", "对照基准"] as const;
-const NEW_UI = /(?:^|[\s，,。；;])无(?:$|[\s，,。；;（(])|新界面|新页面|无可复用/;
+const NEW_UI = /(?:^|[\s，,。；;])无(?:$|[\s，,。；;（(])|(?:无|无需|没有|不)(?:可)?复用|新(?:界面|页面|\s*UI)|(?:^|[\s，,。；;])(?:N\/A|-)(?=$|[\s，,。；;])/i;
+const NO_NEW_UI = /(?:不做|不建|不新增|无需新增|无需新建)(?:新)?(?:页面|界面|\s*UI)/gi;
 const ASK_REF = /\bask_[a-z0-9]+\b/gi;
 
 /** 和自动开卡共用卡首扫描，避免标题前的模板声明使两道门认出不同模板。 */
@@ -39,7 +40,7 @@ export function lintUiSpec(text: string, isOwnerApproval: (askId: string) => boo
       "复用对象写要复用的现有页面 / 组件；对照基准写验收时同屏对照的截图路径或说明";
   }
   const reuse = uiSpecSection(text, "复用对象").join("\n");
-  if (!NEW_UI.test(reuse)) return null;
+  if (!NEW_UI.test(reuse.replace(NO_NEW_UI, ""))) return null;
   const refs = [...reuse.matchAll(ASK_REF)].map((m) => m[0]);
   if (refs.some(isOwnerApproval)) return null;
   return "「## 复用对象」声明无复用或新界面 / 新页面，要引用同项目、针对本卡且 owner 已点批准按钮的授权 askId（ask_…）；旧 decision 文字引用不算批准，请 PM 发 ask";

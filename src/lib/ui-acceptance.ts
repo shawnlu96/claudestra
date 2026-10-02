@@ -59,13 +59,13 @@ export function withPageCheck(db: Database, f: Feature, next: DagNode[], cur: re
   const cancelled = page?.taskId ? getTask(db, page.taskId)?.stage === "cancelled" : false;
   const ui = rest.filter((n) => isUiNode(db, f, n, readSpec)).map((n) => n.key).sort();
   if (!ui.length && (phase === "idle" || cancelled)) return rest;
-  // 重写会释放未开工或已取消的验收绑卡，PM 可重绑；已完成卡只有 UI 范围变化才重验，历史不改。
+  // 重写只释放已取消的验收绑卡，spec 阶段的手动绑定需保留；已完成卡只有 UI 范围变化才重验，历史不改。
   const sameScope = page && JSON.stringify(page.deps) === JSON.stringify(ui) && ui.every((key) => {
     const before = cur?.find((n) => n.key === key);
     const after = rest.find((n) => n.key === key);
     return before && after && uiScope(before) === uiScope(after);
   });
-  const reset = page?.taskId && (phase === "idle" || cancelled || (phase === "done" && !sameScope));
+  const reset = page?.taskId && (cancelled || (phase === "done" && !sameScope));
   const keep = reset ? undefined : page;
   const base: DagNode = { key: PAGE_CHECK_KEY, taskId: null, oneLine: PAGE_CHECK_LINE, deps: [], status: PLANNED, estimate: "", inheritedFrom: null };
   return [...rest, { ...base, ...keep, deps: ui, inheritedFrom: null }];

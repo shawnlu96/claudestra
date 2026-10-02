@@ -25,12 +25,17 @@ describe("lintUiSpec", () => {
     expect(lintUiSpec("模板：ui\n# T\n模板：code\n## 目标\n", no)).toBeNull();
   });
   test("new-ui-variant：无复用与新页面的常见写法都要求批准", () => {
-    for (const reuse of ["无", "无(新界面)", "新界面,无可复用", "无。新界面", "新页面"]) {
+    for (const reuse of ["无", "无(新界面)", "新界面,无可复用", "无。新界面", "新页面", "无复用", "无需复用", "没有可复用对象", "不复用,全新 UI", "N/A", "-"]) {
       const body = `# T\n模板：ui\n## 复用对象\n${reuse}\n## 对照基准\n/tmp/base.png\n`;
       expect(lintUiSpec(body, no)).toContain("请 PM 发 ask");
       expect(lintUiSpec(body.replace(reuse, `${reuse}，ask_good`), (id) => id === "ask_good")).toBeNull();
     }
     expect(lintUiSpec(`# T\n模板：ui\n## 复用对象\n现有团队视图，无需新增页面\n## 对照基准\n/tmp/base.png`, no)).toBeNull();
+  });
+
+  test("new-ui-variant：明确复用且否定新页面时不要求批准", () => {
+    const body = "# T\n模板：ui\n## 复用对象\n复用现有组件,不做新页面\n## 对照基准\n/tmp/base.png";
+    expect(lintUiSpec(body, no)).toBeNull();
   });
 
   test("section-loose：仅精确二级节名算必填，子标题不算内容", () => {

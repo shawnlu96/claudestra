@@ -115,7 +115,17 @@ describe("整页验收节点 PAGEOK", () => {
     expect(result.error).toContain(PAGE_CHECK_KEY);
   });
 
-  for (const stage of ["cancelled", "spec"] as const) {
+  test("page-idle-unbind：spec 阶段 PAGEOK 绑定在无关重写后保留", async () => {
+    spec("i28-a", UI_SPEC);
+    expect((await run(PM, "dag-init", "i28", "--rev", rev(), "--nodes", J([node("a"), node("b")]))).ok).toBe(true);
+    createTask(db, { actor: "owner", now: 600 }, { project: P, id: "PG", title: "整页验收", kind: "code" });
+    expect((await run(PM, "dag-bind", "i28", PAGE_CHECK_KEY, "PG", "--rev", rev())).ok).toBe(true);
+    expect(getTask(db, "PG")!.stage).toBe("spec");
+    expect((await rewrite([node("a"), node("b"), node("c")])).ok).toBe(true);
+    expect(page()[0]).toMatchObject({ taskId: "PG", deps: ["a"] });
+  });
+
+  for (const stage of ["cancelled"] as const) {
     test(`page-stuck：${stage} 验收卡经重写释放绑定并可换卡完成`, async () => {
       spec("i28-a", UI_SPEC);
       expect((await run(PM, "dag-init", "i28", "--rev", rev(), "--nodes", J([node("a"), node("b")]))).ok).toBe(true);
