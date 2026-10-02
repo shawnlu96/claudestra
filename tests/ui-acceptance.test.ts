@@ -115,6 +115,27 @@ describe("整页验收节点 PAGEOK", () => {
     expect(result.error).toContain(PAGE_CHECK_KEY);
   });
 
+  for (const stage of ["cancelled", "spec"] as const) {
+    test(`page-stuck：${stage} 验收卡经重写释放绑定并可换卡完成`, async () => {
+      spec("i28-a", UI_SPEC);
+      expect((await run(PM, "dag-init", "i28", "--rev", rev(), "--nodes", J([node("a"), node("b")]))).ok).toBe(true);
+      for (const id of ["U", "PG", "PG2"]) createTask(db, { actor: "owner", now: 600 }, { project: P, id, title: id, kind: "code" });
+      uiWorkflow("U");
+      expect((await run(PM, "dag-bind", "i28", "a", "U", "--rev", rev())).ok).toBe(true);
+      expect((await run(PM, "dag-bind", "i28", PAGE_CHECK_KEY, "PG", "--rev", rev())).ok).toBe(true);
+      db.prepare("UPDATE tasks SET stage = 'verified' WHERE id = 'U'").run();
+      db.prepare("UPDATE tasks SET stage = ? WHERE id = 'PG'").run(stage);
+      const oldVersion = getFeature(db, F)!.currentVersion;
+      expect((await rewrite(nodes())).ok).toBe(true);
+      expect(page()[0]).toMatchObject({ taskId: null, deps: ["a"] });
+      expect(getTask(db, "PG")!.stage).toBe(stage);
+      expect(effectiveNodes(db, getDagVersion(db, F, oldVersion)!).find((n) => n.key === PAGE_CHECK_KEY)!.taskId).toBe("PG");
+      expect((await run(PM, "dag-bind", "i28", PAGE_CHECK_KEY, "PG2", "--rev", rev())).ok).toBe(true);
+      db.prepare("UPDATE tasks SET stage = 'verified' WHERE id = 'PG2'").run();
+      expect((await run(PM, "feature-set", "i28", "--rev", rev(), "--status", "done")).ok).toBe(true);
+    });
+  }
+
   test("历史 DAG 无 opt-in 不追溯拦截，之后重写才启用整页验收", async () => {
     const old = { ...node("a"), taskId: null, status: "planned" as const, estimate: "", inheritedFrom: null };
     db.prepare(`INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, createdAt, nodes)

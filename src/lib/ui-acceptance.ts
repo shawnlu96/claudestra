@@ -12,7 +12,7 @@ import { effectiveNodes, getDagVersion, PLANNED, type DagNode, type Feature } fr
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, LedgerError } from "./ledger-store.js";
-import { specSection } from "./review-pack.js";
+import { uiSpecSection } from "./spec-lint-section.js";
 import { isUiSpec } from "./spec-lint.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 
@@ -56,15 +56,17 @@ export function withPageCheck(db: Database, f: Feature, next: DagNode[], cur: re
   const page = cur?.find((n) => n.key === PAGE_CHECK_KEY);
   const rest = next.filter((n) => n.key !== PAGE_CHECK_KEY);
   const phase = page ? phaseOf(db, page) : "idle";
+  const cancelled = page?.taskId ? getTask(db, page.taskId)?.stage === "cancelled" : false;
   const ui = rest.filter((n) => isUiNode(db, f, n, readSpec)).map((n) => n.key).sort();
-  if (!ui.length && phase === "idle") return rest;
-  // 已验收的范围变了就重新绑验收卡，旧卡的阶段和历史快照均保留。
+  if (!ui.length && (phase === "idle" || cancelled)) return rest;
+  // 重写会释放未开工或已取消的验收绑卡，PM 可重绑；已完成卡只有 UI 范围变化才重验，历史不改。
   const sameScope = page && JSON.stringify(page.deps) === JSON.stringify(ui) && ui.every((key) => {
     const before = cur?.find((n) => n.key === key);
     const after = rest.find((n) => n.key === key);
     return before && after && uiScope(before) === uiScope(after);
   });
-  const keep = phase === "done" && !sameScope ? undefined : page;
+  const reset = page?.taskId && (phase === "idle" || cancelled || (phase === "done" && !sameScope));
+  const keep = reset ? undefined : page;
   const base: DagNode = { key: PAGE_CHECK_KEY, taskId: null, oneLine: PAGE_CHECK_LINE, deps: [], status: PLANNED, estimate: "", inheritedFrom: null };
   return [...rest, { ...base, ...keep, deps: ui, inheritedFrom: null }];
 }
@@ -106,6 +108,6 @@ export function requirePageCheck(db: Database, f: Feature): void {
 export function uiReviewBasis(db: Database | undefined, task: LedgerTask, specText?: string | null): string | undefined {
   const text = specText !== undefined ? specText : readTextSoft(specPathFor(task, db ? getMeta(db, task.project).docsDir : null));
   if (!(db && getWorkflow(db, task.id)?.template === "ui") && !isUiSpec(text)) return undefined;
-  const basis = text ? specSection(text, "对照基准") : [];
+  const basis = text ? uiSpecSection(text, "对照基准") : [];
   return ["对照基准（规格原文，逐项对照截图审）：", ...(basis.length ? basis : ["（规格没写「## 对照基准」）"])].join("\n");
 }

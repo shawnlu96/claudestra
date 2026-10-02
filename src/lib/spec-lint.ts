@@ -8,11 +8,11 @@ import type { Database } from "bun:sqlite";
 import { getAsk, hasAsksTable, ownerAnswered } from "./ledger-asks.js";
 import { scanSpecHead } from "./spec-lint-head.js";
 import { join } from "node:path";
-import { specSection } from "./review-pack.js";
+import { uiSpecSection } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 const UI_REQUIRED_SECTIONS = ["复用对象", "对照基准"] as const;
-const NEW_UI = /无\s*[,，、]?\s*新界面/;
+const NEW_UI = /(?:^|[\s，,。；;])无(?:$|[\s，,。；;（(])|新界面|新页面|无可复用/;
 const ASK_REF = /\bask_[a-z0-9]+\b/gi;
 
 /** 和自动开卡共用卡首扫描，避免标题前的模板声明使两道门认出不同模板。 */
@@ -33,16 +33,16 @@ function ownerApproval(db: Database, id: string, project: string | undefined, ta
 /** 规格文本的问题；null = 不是 ui 规格或检查通过。isOwnerApproval 按 askId 核台账 */
 export function lintUiSpec(text: string, isOwnerApproval: (askId: string) => boolean): string | null {
   if (!isUiSpec(text)) return null;
-  const missing = UI_REQUIRED_SECTIONS.filter((name) => !specSection(text, name).some((l) => l.trim()));
+  const missing = UI_REQUIRED_SECTIONS.filter((name) => !uiSpecSection(text, name, true).some((l) => l.trim()));
   if (missing.length) {
     return `ui 规格缺 ${missing.map((n) => `「## ${n}」`).join("")}（或该节为空）：补上后照常开卡。` +
       "复用对象写要复用的现有页面 / 组件；对照基准写验收时同屏对照的截图路径或说明";
   }
-  const reuse = specSection(text, "复用对象").join("\n");
+  const reuse = uiSpecSection(text, "复用对象").join("\n");
   if (!NEW_UI.test(reuse)) return null;
   const refs = [...reuse.matchAll(ASK_REF)].map((m) => m[0]);
   if (refs.some(isOwnerApproval)) return null;
-  return "「## 复用对象」写了「无，新界面」，要引用同项目、针对本卡且 owner 已点批准按钮的授权 askId（ask_…）；旧 decision 文字引用不算批准，请 PM 发 ask";
+  return "「## 复用对象」声明无复用或新界面 / 新页面，要引用同项目、针对本卡且 owner 已点批准按钮的授权 askId（ask_…）；旧 decision 文字引用不算批准，请 PM 发 ask";
 }
 
 /** start_node 预检用：inline 是 spec 参数给的正文，没有就读 <ledgerDir>/docs/tasks/<卡号>.md；都读不到不在这里拦（预检另有规格卡门） */

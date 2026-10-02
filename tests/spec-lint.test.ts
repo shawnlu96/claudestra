@@ -24,6 +24,25 @@ describe("lintUiSpec", () => {
     expect(lintUiSpec("模板：code\n# T\n模板：ui\n## 目标\n", no)).toContain("「## 复用对象」「## 对照基准」");
     expect(lintUiSpec("模板：ui\n# T\n模板：code\n## 目标\n", no)).toBeNull();
   });
+  test("new-ui-variant：无复用与新页面的常见写法都要求批准", () => {
+    for (const reuse of ["无", "无(新界面)", "新界面,无可复用", "无。新界面", "新页面"]) {
+      const body = `# T\n模板：ui\n## 复用对象\n${reuse}\n## 对照基准\n/tmp/base.png\n`;
+      expect(lintUiSpec(body, no)).toContain("请 PM 发 ask");
+      expect(lintUiSpec(body.replace(reuse, `${reuse}，ask_good`), (id) => id === "ask_good")).toBeNull();
+    }
+    expect(lintUiSpec(`# T\n模板：ui\n## 复用对象\n现有团队视图，无需新增页面\n## 对照基准\n/tmp/base.png`, no)).toBeNull();
+  });
+
+  test("section-loose：仅精确二级节名算必填，子标题不算内容", () => {
+    const bodies = [
+      "## 目标\n### 不写复用对象\nfoo\n### 不写对照基准\nbar",
+      "## 复用对象\n### 待定\n## 对照基准\n/tmp/base.png",
+      "## 不写复用对象\nfoo\n## 对照基准\n/tmp/base.png",
+    ];
+    for (const body of bodies) expect(lintUiSpec(`# T\n模板：ui\n${body}`, no)).toContain("「## 复用对象」");
+    expect(lintUiSpec(`# T\n模板：ui\n## 复用对象\n### 组件\n团队视图\n## 对照基准\n/tmp/base.png`, no)).toBeNull();
+  });
+
   test("ui 规格缺哪节就点名哪节；空节也算缺", () => {
     expect(lintUiSpec("# T\n模板：ui\n## 目标\n", no)).toContain("「## 复用对象」「## 对照基准」");
     expect(lintUiSpec("# T\n模板：ui\n## 复用对象\n团队视图\n", no)).toContain("「## 对照基准」");
