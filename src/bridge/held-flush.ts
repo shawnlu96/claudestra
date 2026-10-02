@@ -142,7 +142,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
-    adoptStrandedTransfers(d.held); // 存量 A/B 双队：同一封已在新 PM 队里的，旧队不再投；每次 flush 前对全部频道，不靠扫描先后（bridge/pm-held-transfer.ts）
+    const unresolved = adoptStrandedTransfers(d.held); // 全队归并：角色通知留新 PM，直聊留原目标；原目标不明的保留待诊断
     const working = await d.working(channelId, evAgent);
     if (!working) openedBy.delete(channelId);
     let first: HeldItem | undefined;
@@ -155,6 +155,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     const late = new Set(q.filter((i) => ownerLate(i, now)));
     const due = q.filter((i) => !leaseActive(i) && (!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)));
     for (const item of [...due.filter((i) => late.has(i)), ...due.filter((i) => !late.has(i))]) {
+      if (unresolved.has(item)) continue;
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);
       if (!fresh) break;

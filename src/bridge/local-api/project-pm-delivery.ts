@@ -6,8 +6,7 @@ import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } fr
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
-import { isOwnerSource } from "../../lib/delegate-marker.js";
-import { markPmTransfer, retryLater, undoPmTransfer } from "../pm-held-transfer.js";
+import { isHumanDirect, markPmTransfer, retryLater, undoPmTransfer } from "../pm-held-transfer.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
 interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile> }
@@ -124,15 +123,6 @@ async function apiScopeAllows(from: ApiFrom, name: string, facts: RouteFacts): P
 async function finalScopeRefusal(env: Envelope, name: string, facts: RouteFacts): Promise<Delivery | null> {
   if (env.from.kind !== "api" || await apiScopeAllows(env.from, name, facts)) return null;
   return { envelope: env, outcome: { kind: "dropped", reason: `API credential scope excludes ${name}` } };
-}
-
-/**
- * A human talking to the agent they chose (Discord channel / Web chat of that agent). Trust comes only from the entry point:
- * kind=user exists only for allow-listed Discord users, the api owner flag is set from the principal (lib/delegate-marker.ts);
- * peers never count, whatever the body says. A message an agent forwarded on the user's behalf was routed by that agent.
- */
-function isHumanDirect(env: Envelope): boolean {
-  return isOwnerSource(env.from) && !env.meta.forwarded && env.meta.triggerKind !== "peer_http";
 }
 
 // Answers pushed back to the agent that asked: local send_to_agent replies / drains / expiries, and HTTP peer replies.

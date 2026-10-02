@@ -320,6 +320,111 @@ test("旧版孤本（只在 A 队、env.to 已是 B、正文带旧抬头）转�
 
 // 验收线 7：人类明确选了某个 agent 的直聊不被 PM 角色接管；调度 / peer 任务照旧跟当班 PM
 const ownerWeb = { kind: "api", tokenId: "tok_owner", name: "owner", owner: true } as Envelope["from"];
+async function strandedOwner(from: Envelope["from"] = ownerWeb) {
+  const dir = mkdtempSync(join(tmpdir(), "pm-held-owner-"));
+  dirs.push(dir);
+  const w = await world({ path: join(dir, "held.json") });
+  w.state.principals.push({ id: "token:tok_owner", role: "owner", agents: ["*"], createdAt: "2026-01-01" } as never);
+  const toA: LocalEndpoint = { kind: "local", agentName: A, channelId: CA, ws: socket("stale") };
+  const legacy = webChat(`${HEADER}\n  我还有问题想问 A\n\n原文  `, toA, from);
+  legacy.to = { kind: "local", agentName: B, channelId: CB, ws: socket("b") };
+  w.held.set(CA, [{ env: legacy, to: toA, heldAt: 100 }]);
+  w.held.set(CB, [{ env: legacy, to: legacy.to as LocalEndpoint, heldAt: 200 }]);
+  w.restart();
+  return { w, legacy };
+}
+
+for (const order of ["A-first", "B-first", "concurrent"] as const) {
+  for (const availability of ["idle", "busy", "offline"] as const) {
+    test(`持久化 owner 双队 ${order}/${availability}：保留 A 原目标，B 零投递，恢复后 A 仅收一次`, async () => {
+      const { w, legacy } = await strandedOwner();
+      const a = w.clients.get(CA)!;
+      if (availability === "busy") w.busy.add(CA);
+      if (availability === "offline") w.clients.delete(CA);
+      if (order === "concurrent") await Promise.all([w.flush(CA), w.flush(CB), w.flush(CA), w.flush(CB)]);
+      else for (const c of order === "A-first" ? [CA, CB] : [CB, CA]) await w.flush(c);
+      expect(w.sent.filter((s) => s.channelId === CB)).toEqual([]);
+      expect(w.q(CB)).toEqual([]);
+      if (availability !== "idle") {
+        expect(w.q(CA)).toHaveLength(1);
+        expect(w.q(CA)[0]!.to.channelId).toBe(CA);
+        expect(w.q(CA)[0]!.env.to).toMatchObject({ channelId: CA });
+        expect(w.q(CA)[0]!.heldAt).toBe(100);
+      }
+      w.restart();
+      w.busy.delete(CA);
+      w.clients.set(CA, a);
+      for (let i = 0; i < 3; i++) await Promise.all([w.flush(CB), w.flush(CA)]);
+      expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CA, legacy.content]]);
+      expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+    });
+  }
+}
+
+for (const grant of ["valid", "disabled", "expired", "revoked", "excludes-A"] as const) {
+  test(`持久化 owner 双队归并后仍核当前 device credential：${grant}`, async () => {
+    const from = { ...ownerWeb, credential: "dev-A" } as Envelope["from"];
+    const { w, legacy } = await strandedOwner(from);
+    const p = w.state.principals.at(-1)!;
+    p.credentials = [{ id: "dev-A", v: 1, type: "bearer", hash: "test-only", deviceName: "test", createdAt: "2026-01-01",
+      expiresAt: "2050-01-01T00:00:00Z", grant: { agents: [A], terminal: false, manage: false } }];
+    w.busy.add(CA);
+    await w.flush(CB); // 先收回 A 归属；凭据在真正投递前发生变化
+    expect(w.q(CA)).toHaveLength(1);
+    expect(w.q(CB)).toEqual([]);
+    if (grant === "disabled") p.credentials[0]!.disabled = true;
+    if (grant === "expired") p.credentials[0]!.expiresAt = "2020-01-01T00:00:00Z";
+    if (grant === "revoked") p.credentials = [];
+    if (grant === "excludes-A") p.credentials[0]!.grant!.agents = [B];
+    w.restart();
+    w.busy.delete(CA);
+    await w.flush(CA);
+    await w.flush(CB);
+    expect(w.sent.map((s) => [s.channelId, s.content])).toEqual(grant === "valid" ? [[CA, legacy.content]] : []);
+    expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+  });
+}
+
+test("owner 双队归并等待授权期间删除的 ask 不投递、不重新押回，其他项目不动", async () => {
+  const { w } = await strandedOwner();
+  for (const c of [CA, CB]) w.q(c)[0]!.env.meta.triggerKind = "ask_answer";
+  const foreign = letter("other project", { to: { kind: "local", agentName: "agent-other", channelId: OTHER, ws: socket("o") } });
+  holdFor(w.held, foreign);
+  w.facts.principals = async () => {
+    w.held.remove(CA, w.q(CA)[0]!);
+    return { principals: w.state.principals };
+  };
+  await Promise.all([w.flush(CB), w.flush(CA)]);
+  w.restart();
+  await Promise.all([w.flush(CB), w.flush(CA)]);
+  expect(w.sent).toEqual([]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+  expect(w.q(OTHER).map((i) => i.env.content)).toEqual([foreign.content]);
+});
+
+for (const evidence of ["missing-address", "conflicting-address", "marked-orphan"] as const) {
+  test(`owner 转交原目标证据不足 ${evidence}：重启后保留待诊断，不解析正文投错人`, async () => {
+    const { w } = await strandedOwner();
+    if (evidence === "missing-address") w.q(CA)[0]!.to.channelId = "";
+    if (evidence === "conflicting-address") {
+      const other = { ...w.q(CA)[0]!, to: { kind: "local" as const, agentName: "agent-other", channelId: OTHER, ws: socket("o") } };
+      w.held.set(OTHER, [other]);
+    }
+    if (evidence === "marked-orphan") {
+      Object.assign(w.q(CB)[0]!.env, { pmTransfer: { from: CA, to: CB, header: "", legacy: true } });
+      w.held.remove(CA, w.q(CA)[0]!); // owner 已撤掉原条目，不能拿 B 的副本补造 A
+    }
+    w.held.persist();
+    const counts = [CA, CB, OTHER].map((c) => w.q(c).length);
+    for (let i = 0; i < 2; i++) {
+      w.restart();
+      await Promise.all([w.flush(CB), w.flush(CA), w.flush(OTHER)]);
+      expect(w.sent).toEqual([]);
+      expect([CA, CB, OTHER].map((c) => w.q(c).length)).toEqual(counts);
+    }
+  });
+}
+
 function webChat(content: string, to: LocalEndpoint, from: Envelope["from"] = ownerWeb): Envelope {
   return { from, to, intent: "request", content,
     meta: { messageId: `api_${++seq}`, triggerKind: "system", ts: "2026-10-01T00:00:00Z", threadId: `thr-${seq}`, skipInterAgentWatchdog: true } };
