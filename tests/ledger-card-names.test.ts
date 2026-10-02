@@ -71,7 +71,7 @@ async function assertConsumers(slug: string, key = "C5", cardSlug = "i28") {
 test("unopened C5 keeps original card across autostart, start_node and board after split", async () => {
   split("i28", "shared-ledger");
   expect(getDagVersion(db, feature("shared-ledger").id, 1)!.nodes[0]).toMatchObject({ cardSlug: "i28", taskId: null });
-  expect(getDagVersion(db, feature("i28").id, 2)!.nodes[0].cardSlug).toBeUndefined();
+  expect(getDagVersion(db, feature("i28").id, 2)!.nodes[0]).toMatchObject({ key: "C6", cardSlug: "i28" });
   await assertConsumers("shared-ledger");
 });
 
@@ -90,7 +90,7 @@ test("a node added after splitting inherits the unique cardSlug in every consume
     reasonText: "Add a new node after split", cancel: new Map(), scopeChange: false, askFrom: { agent: "pm", channelId: null } });
   const updated = feature("shared-ledger");
   await assertConsumers("shared-ledger");
-  expect(getDagVersion(db, updated.id, updated.currentVersion)!.nodes.find(n => n.key === "NEW")!.cardSlug).toBeUndefined();
+  expect(getDagVersion(db, updated.id, updated.currentVersion)!.nodes.find(n => n.key === "NEW")!.cardSlug).toBe("i28");
   await assertConsumers("shared-ledger", "NEW");
   expect(cardNames(db, updated, "NEW", {})).toEqual(cardNames(db, updated, "NEW"));
   rewriteDag(db, ctx, { id: updated.id, rev: updated.rev,
@@ -168,11 +168,12 @@ for (const [slugs, expected] of [
   });
 }
 
-test("removed historical cardSlugs no longer influence the current version", async () => {
+test("a node added while removing the last prefixed node is pinned to the prefix inferred before the write", async () => {
   split("i28", "shared-ledger");
   rewrite("shared-ledger", [node("NEW")]);
-  expect(getDagVersion(db, feature("shared-ledger").id, 1)!.nodes[0].cardSlug).toBe("i28");
-  await assertConsumers("shared-ledger", "NEW", "shared-ledger");
+  const f = feature("shared-ledger");
+  expect(getDagVersion(db, f.id, f.currentVersion)!.nodes).toEqual([expect.objectContaining({ key: "NEW", cardSlug: "i28" })]);
+  await assertConsumers("shared-ledger", "NEW");
 });
 
 test("a pending rewrite cannot change the current version's inherited slug", () => {
@@ -195,7 +196,7 @@ test("autostart claims the same inherited card as start_node and spec lookup", a
   expect(claim).toMatchObject({ taskId: "i28-NEW", agent: "agent-task-i28-new", branch: "feat/i28-new" });
 });
 
-test("an already-bound unmarked node keeps its custom task and is never autostarted", async () => {
+test("an already-bound node keeps its custom task and is never autostarted", async () => {
   split("i28", "shared-ledger");
   rewrite("shared-ledger", [node("C5"), node("NEW")]);
   const f = feature("shared-ledger");
@@ -203,7 +204,7 @@ test("an already-bound unmarked node keeps its custom task and is never autostar
   bindNode(db, ctx, { id: f.id, rev: f.rev, key: "NEW", taskId: "Custom.ID" });
   const updated = feature("shared-ledger"), views = currentViews(db, updated);
   expect(views.find(n => n.key === "NEW")!.taskId).toBe("Custom.ID");
-  expect(views.find(n => n.key === "NEW")!.cardSlug).toBeUndefined();
+  expect(views.find(n => n.key === "NEW")!.cardSlug).toBe("i28");
   expect(await preflightStart(env(), { featureId: f.id, key: "NEW" })).toEqual({ ok: true, already: { taskId: "Custom.ID", key: "NEW" } });
   const read: string[] = [];
   expect(nodeCandidate(db, updated, "NEW", featureLanes(db, updated), views, (id) => { read.push(id); return null; }, 100_000))
