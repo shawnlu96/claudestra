@@ -19,6 +19,7 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import type { Grant } from "../src/lib/lend-wire-v2.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
+import { passPace } from "../src/lib/scheduler-yield.js";
 import { parseRemotePolicy, type RemotePolicy } from "../src/lib/scheduler-config.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { orderFamily } from "../src/lib/scheduler-placement-plan.js";
@@ -84,7 +85,7 @@ async function ready(remote: RemotePolicy = WRITE) {
   const lendCall = (op: string, peer: string, body: unknown) => cli("owner", op, "--", peer, JSON.stringify(body));
   const events = () => listEvents(f.db, { project: "p", target: "T1" });
   await toBuild(f);
-  return { f, cli, tick, hello, lendCall, heads, gh, ghFail, policy, borrow, events, orders: () => listLendOrders(f.db, "T1") };
+  return { f, cli, tick, deps, hello, lendCall, heads, gh, ghFail, policy, borrow, events, orders: () => listLendOrders(f.db, "T1") };
 }
 type P = Awaited<ReturnType<typeof ready>>;
 
@@ -458,6 +459,42 @@ describe("relay review fixes (i28-RA1 round 2)", () => {
       expect(await p.tick()).toMatchObject({ step: "pool_pooled", detail: expect.stringContaining("修复挂给 other") });
       const rev = String(p.f.task().rev);
       expect(await p.cli("scheduler", "scheduler-fix-relay", "T1", "--op", "wait-start", "--rev", rev)).toMatchObject({ ok: true, changed: false });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("a slow failing old-PR close runs after the cards, once per pass, backing off from its end", async () => {
+    const p = await ready();
+    try {
+      await toFix(p);
+      both(p, FULL);
+      await p.tick();
+      p.f.advance(21 * MIN);
+      both(p, FULL);
+      await p.tick();
+      await deliverAs(p, "other", p.orders().at(-1)!.orderId, RELAY_BRANCH, H3, 9);
+      const closes: number[] = [];
+      // The production manager times out at 120 s: each close-pr burns that much of the injected clock and fails.
+      const deps = { ...p.deps, manager: async (...args: string[]) => {
+        if (!args.includes("close-pr")) return p.deps.manager(...args);
+        closes.push(p.f.tickDeps.now());
+        p.f.advance(120_000);
+        return { ok: false, error: "manager 超时" };
+      } };
+      const cursor: Record<string, string | undefined> = {};
+      const pass = () => schedulerAutoTick(p.f.db, { p: p.policy }, deps, passPace(cursor, { request: join(p.f.dir, "no-request"), now: p.f.tickDeps.now }).phase());
+      const first = await pass();
+      expect(first).toMatchObject({ cards: [expect.objectContaining({ step: "pool_done" })], failed: [] });
+      expect(cursor.auto).toBe("p/T1");
+      expect(p.f.task().stage).toBe("review");
+      expect(closes).toHaveLength(1);
+      for (let i = 0; i < 2; i++) {
+        const r = await pass(); // retry due 60 s after the 120 s call ended, not at its start: the cards keep running, no close
+        expect(r.cards).toHaveLength(1);
+        expect(closes).toHaveLength(1);
+      }
+      p.f.advance(61_000);
+      expect((await pass()).cards).toHaveLength(1);
+      expect(closes).toHaveLength(2);
     } finally { p.f.close(); }
   }, E2E_MS);
 

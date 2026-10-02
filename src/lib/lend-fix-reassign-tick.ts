@@ -1,6 +1,6 @@
 /**
  * Automatic fix reassignment, the tick's half. Every pass it (1) retries closing the old PR of a delivered relay until that is
- * recorded, and (2) records the holder-wait clock: a start when the planner first says fix_lease_wait, an end on any other decision
+ * recorded (one close per pass, after the cards), and (2) records the holder-wait clock: a start when the planner first says fix_lease_wait, an end on any other decision
  * except the relay's own pool intent.
  * The ledger writes go through `ledger scheduler-fix-relay` under the scheduler identity, like every tick write.
  * tests/lend-fix-reassign.test.ts.
@@ -59,15 +59,14 @@ export const fixRelayCommand = {
   },
 };
 
-/** Retry the old PR's close while a delivered relay still owes it. */
-async function relayPrFollowUp(db: Database, task: LedgerTask, manager: Manager, now: number): Promise<void> {
+/** Retry the old PR's close while a delivered relay still owes it; the backoff runs from the call's end (a slow failure must not come due at once). */
+async function relayPrFollowUp(db: Database, task: LedgerTask, manager: Manager, clock: () => number): Promise<void> {
   const tries = retryAt.get(db) ?? new Map<string, number>();
   retryAt.set(db, tries);
-  if (!relayPrPending(db, task) || (tries.get(task.id) ?? 0) > now) return;
   const r = await manager("ledger", "scheduler-fix-relay", task.id, "--op", "close-pr");
   const res = r.relayPr as { closed: boolean; text: string } | null | undefined;
   if (r.ok === true && (!res || res.closed)) { tries.delete(task.id); return; }
-  tries.set(task.id, now + RETRY_MS);
+  tries.set(task.id, clock() + RETRY_MS);
   console.error(`⚠️ [scheduler] ${task.id} 自动改派的旧 PR 收尾没完成，${RETRY_MS / 1000}s 后重试：${String(res?.text ?? r.error)}`);
 }
 
@@ -85,16 +84,18 @@ export async function trackLeaseWait(db: Database, task: LedgerTask, plan: Plann
 }
 
 /**
- * Start of every auto pass: the close is owed by the relay event, not by the card, so a card already done / cancelled / manual
- * still gets it. The dedupKey range scan (unique index) finds relays without a closed event; relayPrPending decides the rest.
+ * End of every auto pass, after the cards: the close is owed by the relay event, not by the card, so a card already done /
+ * cancelled / manual still gets it. The dedupKey range scan (unique index) finds relays without a closed event; relayPrPending
+ * decides the rest. At most one close per pass, the least recently tried due one first: a slow or failing gh costs one call
+ * per pass on its own budget, never the cards' (they ran already), and several owed closes take turns.
  */
-export async function relayPrSweep(db: Database, projects: readonly string[], manager: Manager, now: number): Promise<void> {
+export async function relayPrSweep(db: Database, projects: readonly string[], manager: Manager, clock: () => number): Promise<void> {
   if (!projects.length) return;
   const rows = db.query(`SELECT DISTINCT r.target FROM events AS r WHERE r.dedupKey >= 'scheduler:fix-relay:' AND r.dedupKey < 'scheduler:fix-relay;'
-    AND r.project IN (${projects.map(() => "?").join(",")}) AND NOT EXISTS (SELECT 1 FROM events AS c WHERE c.dedupKey = 'scheduler:fix-relay-closed:' || r.seq)`)
-    .all(...projects) as { target: string }[];
-  for (const { target } of rows) {
-    const task = getTask(db, target);
-    if (task) await relayPrFollowUp(db, task, manager, now);
-  }
+    AND r.project IN (${projects.map(() => "?").join(",")}) AND NOT EXISTS (SELECT 1 FROM events AS c WHERE c.dedupKey = 'scheduler:fix-relay-closed:' || r.seq)
+    ORDER BY r.target`).all(...projects) as { target: string }[];
+  const tries = retryAt.get(db), now = clock(), at = (id: string) => tries?.get(id) ?? 0;
+  const due = rows.map(({ target }) => getTask(db, target)).filter((t): t is LedgerTask => !!t && at(t.id) <= now && !!relayPrPending(db, t));
+  const next = due.sort((a, b) => at(a.id) - at(b.id))[0];
+  if (next) await relayPrFollowUp(db, next, manager, clock);
 }
