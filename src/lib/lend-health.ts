@@ -4,7 +4,7 @@
  *   running / unknown 清零，身份变了按第一次算。
  *   一次读失败曾让正在审查的 worker 被当成「窗口没了」杀掉（ledger/reviews/i28-R5a-rootcause.md），所以单次否定不算数。
  * - 撞额度 / 登录失败：认 bridge 为这个 worker 开的 Codex 运行时卡（scheduler-auto-ports codexFailure 同一信号）；撞额度的同时
- *   本机暂停借单（meta `pause:codex`），到 Codex 额度窗口的重置时刻，读不到就 PAUSE_FALLBACK_MS；之后观测到每个窗口都明确不满才提前恢复。
+ *   本机暂停借单（meta `pause:codex`），启动失败也认报错中的重置时刻，均读不到就 PAUSE_FALLBACK_MS；之后观测到每个窗口都明确不满才提前恢复。
  * tests/lend-health.test.ts、tests/lend-loop.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -12,6 +12,7 @@ import type { InventoryQuota } from "./ai-quota.js";
 import { getMeta, setMeta, type LendRow } from "./lend-journal.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { classifyAirFailure } from "./acp/failures.js";
+import { lendQuotaResetAt } from "./lend-quota-reset.js";
 
 export type WorkerDown = "no_window" | "no_host";
 export const MISS_GAP_MS = 5_000;
@@ -102,8 +103,9 @@ export async function pauseForStartFailure(db: Database, row: LendRow, error: st
   // retry 阻止 AIR 的无动作 limit 兜底，只让已有 usage-limit 正文规则认额度。
   const limit = classifyAirFailure({ id: row.orderId, revision: 1, category: "limit", severity: "error", title: error, actions: ["retry"] });
   if (limit.kind !== "quota") return;
-  const q = await quota().catch((e) => { log(`起 worker 失败后读 Codex 额度失败，使用兜底暂停：${String(e)}`); return null; });
-  pauseForQuota(db, row.orderId, q, now, log);
+  const q = await quota().catch((e) => { log(`起 worker 失败后读 Codex 额度失败，按报错判断暂停：${String(e)}`); return null; });
+  const reset = q?.resetsAt != null && q.resetsAt > now ? null : lendQuotaResetAt(error, now);
+  pauseForQuota(db, row.orderId, reset === null ? q : { observedAt: now, full: true, resetsAt: reset }, now, log);
 }
 
 /** 领单前先处理旧暂停，再看明确已满的读数；保留旧截止，避免未知重置时每轮延长兜底。 */

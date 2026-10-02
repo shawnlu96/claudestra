@@ -1,0 +1,49 @@
+bun test v1.3.14 (0d9b296a)
+
+tests/shared-ledger-gate-window.test.ts:
+(pass) ledger-dag-write: mode switch waits for the admitted write transaction [730.40ms]
+(pass) feature-migrate: mode switch waits for the admitted write transaction [853.41ms]
+(pass) feature-write: mode switch waits for the admitted write transaction [1059.99ms]
+(pass) feature-split: mode switch waits for the admitted write transaction [691.90ms]
+(pass) autostart: mode switch waits for the admitted write transaction [571.29ms]
+(pass) feature-dep: mode switch waits for the admitted write transaction [945.52ms]
+(pass) dag-tools-steps: mode switch waits for the admitted write transaction [641.81ms]
+
+tests/shared-ledger-c6-start.test.ts:
+(pass) task-new carries the feature through manager and rechecks after the outer gate [86.38ms]
+
+tests/shared-ledger-migration-prepare.test.ts:
+(pass) prepare backs up before gate, preserves the reviewed snapshot and same-batch identity [67.82ms]
+(pass) pending proposal anywhere in the selection blocks the whole group before installing gates [10.27ms]
+(pass) prepare blocks in-flight start without treating a timeout as failure [8.34ms]
+(pass) prepare blocks unknown start without treating a timeout as failure [8.69ms]
+(pass) prepare blocks failed-with-leftovers start without treating a timeout as failure [10.70ms]
+(pass) prepare blocks manual start without treating a timeout as failure [50.59ms]
+(pass) sensitive fields and missing references cannot produce a package, and retain the installed gate [20.22ms]
+(pass) group preflight runs under the ledger writer lock and failure publishes no partial mode [11.37ms]
+
+tests/shared-ledger-c6-fixture.test.ts:
+
+tests/shared-ledger-c6-control.test.ts:
+(pass) staged imports have persistent verified receipts, freeze members, and activate once [57.19ms]
+(pass) trial revocation is atomic, durable, cannot activate or replay the revoked batch [14.99ms]
+(pass) verification reads stored rows; drift, cross-project control and changed digest fail closed [8.07ms]
+
+tests/shared-ledger-c6-members.test.ts:
+C6 center temporary port 59597; peer A / peer B have independent credential directories
+C6 V1 1-3 and recovery: shared import, five-second polling, one CAS winner, retained/rebased draft, denials PASS
+C6 cleanup: poll timers stopped; loopback server stopped; both temporary state directories removed
+(pass) two isolated members: import visibility, next poll, CAS draft rebase, locked execution and permissions over HTTP [5322.68ms]
+
+tests/shared-ledger-c6-migration.test.ts:
+(pass) migration commit verifies before routing, restart recovers the same batch, activation preserves gates [341.97ms]
+(pass) lost commit/activation responses and offline lookup retain the gate and recover by receipt first [811.11ms]
+(pass) trial revoke reopens the local gate only after a confirmed durable central revocation [775.86ms]
+(pass) a center rollback or missing previously confirmed receipt cannot reopen or silently recommit [114.28ms]
+(pass) prepared batch aborts locally while offline and a new selection can prepare under a new batch [416.17ms]
+(pass) gating crash aborts without payload or center credential; committing cannot abort locally [311.00ms]
+
+ 26 pass
+ 0 fail
+ 141 expect() calls
+Ran 26 tests across 7 files. [14.22s]

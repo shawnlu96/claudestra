@@ -21,6 +21,7 @@
  */
 
 import { homedir } from "os";
+import { stateDir, stateDirIn } from "./state-dir.js";
 import { join } from "path";
 import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "./bridge-url.js";
 import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
@@ -28,10 +29,8 @@ import { testSafeStateDir } from "./test-guard.js";
 /** 入口文件（launcher / cron）经这里拿：它们本来就 import paths，省一行 import（三个文件都在体积上限） */
 export { refuseInSandbox } from "./sandbox.js";
 
-/** 某个 home 下的默认状态目录（不看 override）。给带 `home` 参数的纯函数用。 */
-export function stateDirIn(home: string): string {
-  return join(home, ".claude-orchestrator");
-}
+// stateDirIn 定义在 lib/state-dir.ts（那里只依赖 node: 模块，Pi 扩展能安全 import）
+export { stateDirIn };
 
 function envDir(name: string): string | undefined {
   const v = (process.env[name] || "").trim();
@@ -39,7 +38,7 @@ function envDir(name: string): string | undefined {
 }
 
 /** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR）；测试进程落不到真实目录（lib/test-guard.ts） */
-export const STATE_DIR = testSafeStateDir(envDir("CLAUDESTRA_STATE_DIR") ?? stateDirIn(homedir()), stateDirIn(homedir()));
+export const STATE_DIR = testSafeStateDir(stateDir(), stateDirIn(homedir()));
 
 /** 生产默认运行目录（不看 override）。沙箱脚本拿它当拒绝清单的一项 */
 export const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";

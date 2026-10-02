@@ -24,7 +24,7 @@ export interface CreateArgs {
   external: boolean;
   projectFlag?: string;
   runtimeFlag?: string;
-  /** T60：--transport acp（只有 codex 支持，缺省 tmux） */
+  /** T60：--transport tmux|acp（codex / pi 能走 acp；不给时两者都探测通过缺省 acp，见 manager/acp-lifecycle.ts） */
   transportFlag?: string;
   piBaseFlag?: string;
   /** --pi-preset <name>：能力档案预设（如 codemode） */

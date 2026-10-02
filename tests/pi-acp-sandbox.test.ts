@@ -70,12 +70,13 @@ describe("闸门：只有 acp + 目录钉在沙箱根才放行", () => {
     expect(sandboxManagerRefusal(["transport", "p", "tmux"])).toContain("不起真实 TUI");
   });
 
-  test("create 的 transport：沙箱里 Pi 缺省 acp（点名 tmux 就交给闸门拒）；生产 Pi 缺省仍是 tmux", async () => {
-    expect(await chooseCreateTransport("pi")).toEqual({ transport: "tmux" });
-    expect(await chooseCreateTransport("pi", "acp")).toEqual({ transport: "tmux" });
+  test("create 的 transport：沙箱里 Pi 固定 acp、不探测（点名 tmux 就交给闸门拒）；生产 Pi 按探测缺省 acp（tests/pi-default-acp.test.ts）", async () => {
+    const fail = async () => ({ ok: false as const, reason: "pi 0.98.0 太旧" });
+    expect(await chooseCreateTransport("pi", undefined, {}, fail)).toMatchObject({ transport: "tmux" });
     withEnv(ON);
-    expect(await chooseCreateTransport("pi")).toEqual({ transport: "acp" });
-    expect(await chooseCreateTransport("pi", "tmux")).toEqual({ transport: "tmux" });
+    const never = async (): Promise<never> => { throw new Error("沙箱里不该探测生产 pi"); };
+    expect(await chooseCreateTransport("pi", undefined, {}, never)).toEqual({ transport: "acp" });
+    expect(await chooseCreateTransport("pi", "tmux", {}, never)).toEqual({ transport: "tmux" });
   });
 });
 
