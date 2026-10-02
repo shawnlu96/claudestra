@@ -95,7 +95,7 @@ For any "it feels janky" change, take a baseline with the panel first and compar
 
 - **Dev-only code lives in `web/features/devtools/`**, or touches product code through a single line: `devCount("x")` (counts only while on) / `if (isDevMode())`. No new debugging libraries; stats.js and lil-gui are already there.
 - The big files (chat.tsx / chat-store.ts / message-list.tsx) are locked by the guard to only ever shrink: adding a touch point means saving the same number of lines elsewhere in that file; whatever an existing global signal already provides (`cstra:commit-burst` events, `__cstraProduceTrail`) should be read from there instead of adding a counter.
-- The repo root's `scripts/guard` applies here too: new files ≤400 lines, functions ≤100 lines (useEffect callbacks count as functions), every `catch` says why losing the error is harmless. That is why the panel is split into dev-meters / dev-panel-sections / dev-overlay.
+- The repo root's `scripts/guard` applies here too: new files ≤800 lines, functions ≤100 lines (useEffect callbacks count as functions), every `catch` says why losing the error is harmless. That is why the panel is split into dev-meters / dev-panel-sections / dev-overlay.
 - The panel is portaled to `document.body`; never put any overlay inside the swipe transform container in `chat.tsx` (container rule 5b).
 - No localStorage inside sections; tuning is one-off, the result goes into code.
 - The built-in sections already mark what Safari lacks (`PerformanceObserver` long tasks, Event Timing) as n/a; feature-detect the same way when adding readouts so the panel never throws on iOS.
