@@ -1,3 +1,4 @@
+import { requireLocalSharedLedgerSplit } from "./shared-ledger-gate-split.js";
 import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { vacuumBackup } from "./ledger-backup.js";
@@ -59,6 +60,7 @@ export function applyFeatureSplit(db: Database, ctx: WriteCtx, sourceId: string,
     const prior = duplicate();
     if (prior) return { duplicate: true, backup: saved, event: prior.event };
     const plan = planFeatureSplit(db, sourceId, map);
+    requireLocalSharedLedgerSplit(plan);
     if (plan.rejected.length) throw new LedgerError("conflict", plan.rejected.join("；"), { rejected: plan.rejected });
     const secondary = { ...ctx, dedupKey: undefined };
     const reason = plan.groups.slice(1).flatMap((g) => g.target!.nodes.map((key) => `feature-split：${key} → ${g.id}`)).join("\n");

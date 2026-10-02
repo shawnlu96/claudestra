@@ -1,6 +1,6 @@
 /** 远程终端授权（src/bridge/terminal-auth.ts）：属主按设备凭据判、每次 IO 重验 grant */
 import { describe, expect, test } from "bun:test";
-import { terminalAllowedFor, terminalIoDenied, terminalOwnerKey } from "../src/bridge/terminal-auth.js";
+import { SHELL_AUTH_AGENT, shellAllowed, terminalAllowedFor, terminalIoDenied, terminalOwnerKey } from "../src/bridge/terminal-auth.js";
 import type { Principal } from "../src/lib/principals.js";
 
 const at = "2026-09-27T00:00:00Z";
@@ -33,5 +33,25 @@ describe("terminalIoDenied", () => {
   test("terminalAllowedFor：带不带 agent- 前缀都认", () => {
     expect(terminalAllowedFor({ ...cli, role: "external", terminal: true, agents: ["agent-worker"] }, "worker")).toBe(true);
     expect(terminalAllowedFor(tablet, "worker")).toBe(false);
+  });
+});
+
+describe("shellAllowed（网页开宿主 shell）", () => {
+  test("owner 设备 / owner token：放行", () => {
+    expect(shellAllowed(phone)).toBe(true);
+    expect(shellAllowed(cli)).toBe(true);
+  });
+  test("配对时关了终端的设备、只授部分 agent 终端的 guest、* + 终端但不含 master、peer token、停用的：一律拒", () => {
+    expect(shellAllowed(tablet)).toBe(false);
+    expect(shellAllowed({ ...cli, id: "guest:g1", role: "external", terminal: true, agents: ["worker"] })).toBe(false);
+    expect(shellAllowed({ ...cli, role: "external", terminal: true, agents: ["*"] })).toBe(false);
+    expect(shellAllowed({ ...cli, role: "external", terminal: true, agents: ["*", "master"], peer: "shawn" })).toBe(false);
+    expect(shellAllowed({ ...cli, disabled: true })).toBe(false);
+  });
+  test("shell 的 viewer 按 master 记：之后收窄掉 master 或终端，IO 立刻被拒", () => {
+    const sess = { tokenId: terminalOwnerKey(phone), agent: SHELL_AUTH_AGENT };
+    expect(terminalIoDenied(phone, sess)).toBeNull();
+    expect(terminalIoDenied({ ...phone, agents: ["*"] }, sess)).toBe("terminal access no longer granted for this agent");
+    expect(terminalIoDenied({ ...phone, role: "external", terminal: false }, sess)).toBe("terminal access no longer granted for this agent");
   });
 });

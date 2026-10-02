@@ -1,3 +1,5 @@
+import { patchFlags } from "../lib/shared-ledger-gate-patch.js";
+import { requireLocalSharedLedgerPlanning } from "../lib/shared-ledger-gate.js";
 import { changeFeatureDep } from "../lib/ledger-feature-deps-write.js";
 import { featureDeps } from "../lib/ledger-feature-deps.js";
 /**
@@ -5,9 +7,8 @@ import { featureDeps } from "../lib/ledger-feature-deps.js";
  * 写入、权限与 CAS 在 lib/ledger-feature-write.ts；这里只解析参数。feature id 可以写全（带本机前缀）也可以只写 slug。
  * 重写（v2 起）、审批、绑卡与 dag-show 在 ledger-dag-cmds.ts。
  */
-import type { FeatureStatus } from "../lib/ledger-feature-schema.js";
 import { effectiveNodes, getDagVersion, getPendingProposal, projectNodes, resolveFeature } from "../lib/ledger-feature.js";
-import { createFeature, initDag, requireManager, setFeature, type FeaturePatch } from "../lib/ledger-feature-write.js";
+import { createFeature, initDag, requireManager, setFeature } from "../lib/ledger-feature-write.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { autostartShow } from "./ledger-autostart-cmds.js";
@@ -21,15 +22,6 @@ function needRev(c: LedgerCli, what: string): number {
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", `${what}要带 --rev（feature-show 里看当前 rev）`);
   return rev;
-}
-
-function patchFlags(c: LedgerCli): FeaturePatch {
-  const f = c.p.flags;
-  return {
-    ...(f.title !== undefined ? { title: f.title } : {}),
-    ...(f.words !== undefined ? { ownerWords: f.words } : {}),
-    ...(f.status !== undefined ? { status: f.status as FeatureStatus } : {}),
-  };
 }
 
 function featureNew(c: LedgerCli): Result {
@@ -70,6 +62,7 @@ function featureShow(c: LedgerCli): Result {
 function featureDep(c: LedgerCli): Result {
   const from = feature(c);
   const to = resolveFeature(c.db, c.p.pos[2], storedOrigin(c.db));
+  requireLocalSharedLedgerPlanning(from.id); requireLocalSharedLedgerPlanning(to.id);
   return changeFeatureDep(c.db, c.ctx(), from.id, to.id, c.p.pos[0] === "feature-dep-rm", c.p.flags.note);
 }
 

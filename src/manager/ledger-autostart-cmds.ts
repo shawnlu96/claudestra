@@ -1,3 +1,5 @@
+import { requireLocalSharedLedgerPlanning } from "../lib/shared-ledger-gate.js";
+import { liveClaim } from "../lib/ledger-autostart.js";
 /**
  * 自动开卡 / 自动交回（i28-A1，docs/architecture/scheduler-autostart.md）的 ledger 子命令：这里只解析参数，事务与权限在 lib。
  * - `scheduler-autostart claim|step|settle`、`scheduler-auto-resume`：只给调度身份（manager/ledger.ts SCHEDULER_SERVICE_COMMANDS）。
@@ -50,6 +52,7 @@ function claim(c: LedgerCli): Result {
 function step(c: LedgerCli): Result {
   const seq = Number(c.p.pos[2]);
   if (!Number.isInteger(seq) || seq <= 0) throw new LedgerError("invalid", "step <claim> <子命令> <目标> …");
+  if (c.p.pos[3] === "task-new") requireLocalSharedLedgerPlanning(liveClaim(c.db, seq).featureId);
   const flags: Record<string, string | undefined> = { ...c.p.flags };
   return autostartStep(c.db, c.ctx(), { claim: seq, sub: c.p.pos[3] ?? "", pos: c.p.pos.slice(4), flags });
 }

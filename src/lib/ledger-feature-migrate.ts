@@ -1,3 +1,5 @@
+import { migrateBackupPath } from "./shared-ledger-gate-backup.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 /**
  * 旧卡迁进 feature（T84 设计稿的 L3，docs/design/feature-dag.md）：按映射表建 feature、给卡挂 featureId、每个 feature 用 dag-init 建 v1。
  * 卡按此刻的 stage 分四类：已完成 / 已取消 / 待排只挂 featureId；进行中的卡连同它在同一 feature 里的已完成直接前驱进 v1，
@@ -6,8 +8,6 @@
  * planMigration 只读；applyMigration 先 VACUUM INTO 备份再在一个事务里重新规划并写入，任何一步失败整批回滚。
  */
 import type { Database } from "bun:sqlite";
-import { createHash, randomBytes } from "node:crypto";
-import { basename, dirname, join } from "node:path";
 import { vacuumBackup } from "./ledger-backup.js";
 import { getFeature } from "./ledger-feature.js";
 import { assignFeature, createFeature, initDag } from "./ledger-feature-write.js";
@@ -227,12 +227,6 @@ const planHasWrites = (p: MigrationPlan): boolean => p.writes.features + p.write
  * 正式迁移前的备份文件：库文件旁 backups/，时间到毫秒 + 映射表摘要 + 随机段，每次有写入的尝试都是新的一份。
  * 不复用同名旧备份：失败留下的备份之后库可能又被改过，拿它回滚会丢掉那些改动（tests/ledger-feature-l3.test.ts「同一时刻重试」）。
  */
-function migrateBackupPath(dbPath: string, map: MigrateMap, now: number): string {
-  const hash = createHash("sha256").update(JSON.stringify(map)).digest("hex").slice(0, 8);
-  const ts = new Date(now).toISOString().replace(/[-:]/g, "").replace(".", "-").replace("Z", "");
-  return join(dirname(dbPath), "backups", `${basename(dbPath)}.pre-feature-migrate-${ts}-${hash}-${randomBytes(4).toString("hex")}.bak`);
-}
-
 export interface ApplyResult {
   plan: MigrationPlan;
   backup: string | null;
@@ -260,6 +254,7 @@ export function applyMigration(db: Database, ctx: WriteCtx, map: MigrateMap): Ap
     if (!ro) throw new LedgerError("invalid", "取不到本机前缀（状态目录的 instance-id 读写失败），不迁移");
     const plan = planMigration(db, map, ro);
     if (plan.conflicts.length) throw new LedgerError("conflict", `有冲突，整批不写：${plan.conflicts.join("；")}`, { conflicts: plan.conflicts });
+    for (const f of plan.features) requireLocalSharedLedgerPlanning(f.id);
     const out: ApplyResult = { plan, backup, created: [], versions: [], assigned: 0 };
     for (const f of plan.features) {
       if (!f.exists) {

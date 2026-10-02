@@ -60,7 +60,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `interruptKeys` | `[]` | 窗口里只是宿主日志，一个键都不发 |
 | `abortVia` | `"extension"` | 打断走宿主的 `session/cancel` |
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
-| `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看 |
+| `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
 | `modelEnforcement` | `"config-option"` | 经 `session/set_config_option` 改，不重启 |
 | `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start` |
 
