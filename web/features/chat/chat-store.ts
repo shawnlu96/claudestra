@@ -224,7 +224,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const idx = this.state.messages.findIndex((m) => m.id === id);
     if (idx < 0) return { ok: false, reason: "not-history" };
     const m = this.state.messages[idx];
-    const seqM = m.id.match(/^h(\d+)/);
+    const seqM = m.id.match(/^h(\d+(?:\.\d+)?)/); // 收件箱拆出的 h<行号>.0k 只隐藏它自己
     if (!seqM) return { ok: false, reason: "not-history" };
     const from = Number(seqM[1]);
     const to = typeof m.seqEnd === "number" && m.seqEnd >= from ? m.seqEnd : from;
@@ -740,7 +740,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 本 session 的历史气泡 id 是裸 h<seq>(接上来的更旧 session 带 ~ns 后缀)
     let afterSeq = -1;
     for (const m of this.state.messages) {
-      const mm = /^h(\d+)$/.exec(m.id);
+      const mm = /^h(\d+(?:\.\d+)?)$/.exec(m.id); // 含收件箱拆出的 h<行号>.0k
       if (mm) afterSeq = Math.max(afterSeq, Number(mm[1]));
     }
     if (afterSeq < 0) return;

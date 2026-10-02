@@ -25,6 +25,7 @@ import type { InboundLookup } from "./inbound-ledger.js";
 import { settleToolCard } from "./auq-echo.js";
 import { dropFailedReplyRows, keepReplyRows, sanitizeComponents } from "./history-components.js";
 import { askIdOfReplyResult } from "./reply-ask-schema.js";
+import { inboxHistory } from "./session-history-inbox.js";
 
 /** 超过此字节数的 session jsonl 走尾读(见 readSessionHistory)。与搜索同阈值。 */
 const MAX_HISTORY_FULL_READ_BYTES = 16 * 1024 * 1024;
@@ -526,6 +527,7 @@ function parseHistoryLines(
   const replyById = new Map<string, HistoryMessage>(), replyRows = new Map<string, ReplyComponentRow[]>();
   // v2.21.4 队列附件去重:同一条入站消息若另有 user(isMeta) 记录,以 user 记录为准
   const seenChannelIds = collectChannelMessageIds(lines);
+  const inbox = inboxHistory(); // check_inbox 领走的消息：拆进历史，同一 message_id 只出一次（lib/session-history-inbox.ts）
 
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -547,7 +549,7 @@ function parseHistoryLines(
       if (queued) {
         const msg = channelUserMessage(queued, seq, ts);
         const mid = channelMessageId(queued);
-        if (msg && (!mid || !seenChannelIds.has(mid))) all.push(msg);
+        if (msg && (!mid || !seenChannelIds.has(mid)) && inbox.fresh(mid, msg)) all.push(msg);
       }
       continue;
     }
@@ -561,6 +563,7 @@ function parseHistoryLines(
         const rm = replyById.get(b.tool_use_id);
         if (rm) rm.replyAskId = askIdOfReplyResult(b) ?? rm.replyAskId;
         if (rm && b.is_error === true) dropFailedReplyRows(rm, replyRows.get(b.tool_use_id)); // 被 bridge 拒发的 reply，按钮不进历史
+        all.push(...inbox.expand(toolById.get(b.tool_use_id), b, seq, ts));
       }
       const text =
         typeof c === "string"
@@ -574,7 +577,7 @@ function parseHistoryLines(
       if (rec.isMeta === true) {
         // isMeta + <channel> 包装 = channel 送达的真实入站消息，解包进历史；其余 isMeta（caveat / local-command 输出等）照旧过滤
         const msg = channelUserMessage(verified ?? text, seq, ts);
-        if (msg) all.push(msg);
+        if (msg && inbox.fresh(channelMessageId(verified ?? text), msg)) all.push(msg);
         continue;
       }
       if (!text.trim()) continue; // 纯 tool_result 载荷
@@ -640,7 +643,7 @@ function parseHistoryLines(
         settleToolCard(toolById.get(b.tool_use_id), b, rec);
         if (replyIds.includes(b.tool_use_id)) msg.replyAskId = askIdOfReplyResult(b) ?? msg.replyAskId;
       }
-      all.push(msg);
+      all.push(msg, ...content.flatMap((b: any) => inbox.expand(toolById.get(b?.tool_use_id), b, seq, ts))); // Codex：结果和调用同一条
     }
   }
 
