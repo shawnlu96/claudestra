@@ -104,6 +104,13 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   const bounce = () => step("resolved", toReceipt({ cause: "ci_fail", prHead: pr.head, mainHead: null, checks }));
   const gh = ghOf(external);
   if (!gh) return bounce();
+  if (!run.reason?.startsWith(WAIT_LEAD)) {
+    const links = checks.map((c) => RUN_LINK.exec(c.link));
+    if (links.length && links.every((m) => m && m[1] === links[0]![1] && m[2] === links[0]![2])) {
+      const link = `https://github.com/${links[0]![1]}/actions/runs/${links[0]![2]}`;
+      run = await step("resolved", `${QUERY_LEAD}${rerunReceipt(pr.head, { link, checks: checks.map((c) => c.name), cases: [] })}`);
+    }
+  }
   const pending = pendingRerun(run, pr, checks);
   if (pending) return awaitRerun(run, pending, gh, step, bounce);
   let decision: Decision;
@@ -130,11 +137,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   }
 }
 
-/**
- * The rerun this run already claimed on this head (ciRerunClaim keeps it as the run's reason), when the red checks still point at
- * that run. Null otherwise: the caller decides afresh and the ledger answers any second claim. Any phase: ready, updating and
- * await_ci all reach here, the claim keeps the phase, and every phase change rewrites the reason, so a claim reason is current.
- */
+/** The ledger restores this cache from its durable claim after phase changes clear the reason; head/run must still match. */
 function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { receipt: string; repo: string; runId: string } | null {
   if (!run.reason?.startsWith(WAIT_LEAD)) return null;
   const receipt = run.reason.slice(WAIT_LEAD.length);
@@ -173,6 +176,8 @@ async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: strin
 /** Prefix of the run's reason while a claimed rerun has not shown up on GitHub yet; the claim receipt follows it. */
 export const RERUN_WAIT = "等 CI 重跑开始";
 const WAIT_LEAD = `${RERUN_WAIT}：`;
+/** Claim lookup through the existing transaction channel restores the reason cache, never creates a claim or sends a rerun. */
+const QUERY_LEAD = "查询 CI 重跑：";
 const LEAD = "CI 自动重跑（只因本卡没碰的测试超时）";
 const RECEIPT_MAX = 600;
 const CASE_MAX = 120;
@@ -217,7 +222,9 @@ export const RERUN_SETTLE_MS = 10 * 60_000;
  */
 export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, drift: string | null, toReceipt: ToReceipt,
   writeEvent: WriteEvent): string | null {
-  const claim = parseRerunReceipt(receipt);
+  const query = receipt.startsWith(QUERY_LEAD);
+  const raw = query ? receipt.slice(QUERY_LEAD.length) : receipt;
+  const claim = parseRerunReceipt(raw);
   if (!claim) return receipt;
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
   if (claim.prHead.toLowerCase() !== row.reviewedHead.toLowerCase() || claim.checks.some((c) => !row.requiredChecks.split(",").includes(c))) {
@@ -227,6 +234,13 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   const now = ctx.now ?? Date.now();
   const prior = rerunOf(db, row.taskId, claim.prHead);
   const bounce = toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
+  if (query) {
+    // Phase transitions erase the reason, but the append-only event remains authoritative. No matching event means no write.
+    if (prior?.run === claim.link) {
+      db.prepare("UPDATE scheduler_merges SET rev=rev+1, reason=? WHERE intentId=?").run(`${WAIT_LEAD}${raw}`, row.intentId);
+    }
+    return null;
+  }
   if (prior && prior.run === claim.link) {
     if (now - prior.ts < RERUN_SETTLE_MS) return null;
     writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun_stale:${claim.prHead}` }, {

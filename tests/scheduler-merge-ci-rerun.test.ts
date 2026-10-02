@@ -268,6 +268,31 @@ describe("i28-CIF1f1 the stale-attempt wait holds in every phase that can claim 
     });
   }
 
+  for (const phase of ["ready", "updating"]) {
+    test(`${phase}: pending PR snapshot must not forget the claimed rerun`, async () => {
+      await withCard({ lag: true }, async (c) => {
+        c.db.query("UPDATE scheduler_merges SET phase=? WHERE intentId=?").run(phase, c.intent);
+        await c.tick(200);
+        expect(c.reruns()).toBe(1);
+        c.setSnap({ ...red(), checks: [{ name: "ci", bucket: "pending", link: `${RUN}/job/9` }] });
+        await c.tick(300);
+        expect(c.state()).toEqual({ run: "await_ci", stage: "merge" });
+        expect(getMergeRun(c.db, c.intent)?.reason).toBeNull();
+        c.setSnap(red());
+        c.gh.log = new Error("logs unavailable while rerun begins");
+        const before = c.gh.argv.filter((a) => a.includes("--log-failed")).length;
+        await c.tick(400);
+        expect(c.state()).toEqual({ run: "await_ci", stage: "merge" });
+        expect(c.reruns()).toBe(1);
+        expect(c.gh.argv.filter((a) => a.includes("--log-failed")).length).toBe(before);
+        expect(c.events("merge_conflict")).toEqual([]);
+        await c.tick(200 + RERUN_SETTLE_MS);
+        expect([c.state(), c.reruns()]).toEqual([BOUNCED, 1]);
+        expect(c.events("merge_ci_rerun_stale")).toHaveLength(1);
+      });
+    });
+  }
+
   test("ready: the newer attempt ends red → ci_fail back to fix, still one rerun", async () => {
     await withCard({ lag: true }, async (c) => {
       c.db.query("UPDATE scheduler_merges SET phase='ready' WHERE intentId=?").run(c.intent);
