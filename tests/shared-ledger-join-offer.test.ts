@@ -12,7 +12,7 @@ import type { Ask } from "../src/lib/ledger-asks.js";
 import type { HttpPeer } from "../src/lib/peers.js";
 import type { Principal } from "../src/lib/principals.js";
 import { joinSharedLedger, parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join.js";
-import { centerOfferUrl, pendingOfferDir, readPendingOffer } from "../src/lib/shared-ledger-join-offer.js";
+import { centerOfferUrl, pendingOfferDir, readPendingOffer, savePendingOffer } from "../src/lib/shared-ledger-join-offer.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { DECLINE_BUTTON, JOIN_BUTTON, onJoinOfferAnswered, sweepJoinOffers } from "../src/bridge/shared-ledger-join-offer.js";
 import { handleJoinOfferApi, type JoinOfferRouteDeps } from "../src/bridge/local-api/shared-ledger-join-offer.js";
@@ -162,6 +162,38 @@ describe("receiving a join offer (验收 1)", () => {
 });
 
 describe("owner answers the card (验收 2)", () => {
+  test("deduplicated settled offer ID cannot redeem or decline a replacement code", async () => {
+    for (const button of [JOIN_BUTTON, DECLINE_BUTTON]) {
+      const w = world(`peer-reuse-${button}`);
+      const body = offerBody(mint(`peer-reuse-${button}`), { expiresAt: w.clock.now + 60000 });
+      const open = w.deps.openAsk;
+      w.deps.openAsk = input => w.asks.find(a => a.dedupKey === input.dedupKey) ?? open(input);
+      expect((await post(w, "in-peer", body)).status).toBe(202);
+      w.asks[0] = answer(w.asks[0]!, button);
+      await onJoinOfferAnswered(w.asks[0]!, w.deps);
+      const replacement = { ...body, code: mint(`peer-new-${button}`) };
+      expect((await post(w, "in-peer", replacement)).status).toBe(409);
+      await sweepJoinOffers(w.deps);
+      expect(w.asks).toHaveLength(1);
+      expect(w.joins).toHaveLength(button === JOIN_BUTTON ? 1 : 0);
+      expect(receiptStatus(w)).toEqual([button === JOIN_BUTTON ? "joined" : "declined"]);
+      expect(pendingFiles(w)).toEqual([]);
+    }
+  });
+
+  test("authorization binds the exact code even within the same center", async () => {
+    const w = world("peer-code-binding");
+    const body = offerBody(markedCode());
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    const p = readPendingOffer(w.dir, body.offerId)!;
+    const replacement = p.code.replace(MARK, "N".repeat(43));
+    await savePendingOffer(w.dir, { ...p, code: replacement }, { replace: true });
+    await onJoinOfferAnswered(answer(w.asks[0]!, JOIN_BUTTON), w.deps);
+    expect(w.joins).toEqual([]);
+    expect(receiptStatus(w)).toEqual(["failed"]);
+    expect(pendingFiles(w)).toEqual([]);
+  });
+
   test("answer during publication cannot resurrect pending or settle twice", async () => {
     for (const button of [DECLINE_BUTTON, JOIN_BUTTON]) {
       const w = world(`peer-race-${button}`);
@@ -174,7 +206,7 @@ describe("owner answers the card (验收 2)", () => {
         answering = onJoinOfferAnswered(a, w.deps);
         return a;
       };
-      expect((await post(w, "in-peer", body)).status).toBe(202);
+      expect((await post(w, "in-peer", body)).status).toBe(409);
       await answering;
       expect(readPendingOffer(w.dir, body.offerId)).toBeNull();
       await sweepJoinOffers(w.deps);

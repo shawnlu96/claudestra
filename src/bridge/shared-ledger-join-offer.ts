@@ -5,6 +5,7 @@
  *   Sender: the receipt from that same peer marks our sent record and becomes a ledger note.
  * Every message here is fixed wording (lib joinOfferCard / joinOfferOutcomeText); the code and center responses never reach them.
  */
+import { createHash } from "node:crypto";
 import { bindHash, checkAsk } from "../lib/ask-bind.js";
 import { instanceIdSync } from "../lib/instance-id.js";
 import { instanceKeySync, signedFor } from "../lib/instance-key.js";
@@ -56,7 +57,8 @@ export async function configuredPeer(name: string | undefined, d: Pick<JoinOffer
 }
 
 const bindOf = (p: PendingJoinOffer): Omit<AskBind, "paramsHash"> => ({
-  action: BIND_ACTION, approve: [JOIN_BUTTON], params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt },
+  action: BIND_ACTION, approve: [JOIN_BUTTON], params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt,
+    codeHash: createHash("sha256").update(p.code).digest("hex") },
 });
 
 /** POST /api/v1/shared-ledger-join-offer from peer `peerName` (already authenticated as a configured peer). */
@@ -81,6 +83,10 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
     claimPendingOffer(d.stateDir(), pending.offerId);
     console.error(`⚠️ [join-offer] 给 owner 开授权卡失败，邀请已删除: ${(e as Error).name}`);
     return refuse(503, "ask_unavailable");
+  }
+  if (ask.state !== "open") {
+    claimPendingOffer(d.stateDir(), pending.offerId);
+    return refuse(409, "duplicate_offer");
   }
   attachPendingOfferAsk(d.stateDir(), pending.offerId, ask.id);
   console.log(`🤝 [join-offer] 收到 ${peer.name} 的共享台账邀请（中心 ${pending.host}），已开授权卡 ${ask.id}`);
