@@ -137,7 +137,7 @@ export function CollabView({ project }: { project: string }) {
     for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
     return set;
   }, [agents, project]);
-  const { load, now, actions, connected, rev, advance, refetch, reviewers } = useCollab(project, members);
+  const { load, now, actions, connected, rev, advance, refetch, reviewers, source } = useCollab(project, members);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const lastSeen = useLastSeen(project);
   const ov = load.status === "ok" ? load.ov : null;
@@ -155,7 +155,7 @@ export function CollabView({ project }: { project: string }) {
   const [filter, setFilter] = useState<Filter>("all");
   const { sel, setSel, focus, pickTask, select, close } = useSelection(openTask);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr });
-  const projectName = projects.find((p) => p.id === project)?.name || project;
+  const projectName = source.label ?? projects.find((p) => p.id === project)?.name || project;
 
   const lineAction = (l: LineView) => {
     const waitLabel = l.attention === "waiting" || l.attention === "stuck" ? l.stageLabel : null;
@@ -173,12 +173,12 @@ export function CollabView({ project }: { project: string }) {
   const resolved = resolveSelection(sel, o, canvas);
   if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
   const pane = narrowPane(openTask, resolved);
-  const team = <TeamPanel embedded ov={o} project={project} agents={agents} now={o.now} selected={sel?.kind === "member" ? sel.id : null}
-    onSelect={(n) => select(memberSel(n))} />;
+  const team = <>{source.ops?.(null)}<TeamPanel embedded ov={o} project={project} agents={agents} now={o.now} selected={sel?.kind === "member" ? sel.id : null}
+    onSelect={(n) => select(memberSel(n))} /></>;
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null}
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
-      extra={<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} />} />
+      extra={<>{source.ops?.(openTask)}<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)

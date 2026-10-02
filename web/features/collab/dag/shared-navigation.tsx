@@ -3,8 +3,8 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import { api } from '@/lib/api/client';
 import { machines } from '@/lib/machines';
 import type { Identity } from '@/lib/api/shared-ledger';
-import { SharedLedger } from '../shared/shared-ledger';
-import { closeCollab, openCollab } from '../collab-nav';
+import { TeamSource } from '../shared/team-ops';
+import { openCollab } from '../collab-nav';
 import { useChatNav } from '../../chat/components/nav-context';
 
 const subscribeMachines = (fn: () => void) => machines.subscribe(fn);
@@ -45,6 +45,6 @@ export function SharedEntry({ projectId }: { projectId: string }) {
 }
 export function SharedCollabContent({ project, fallback }: { project: string; fallback: ReactNode }) {
   const identity = sharedIdentity(project);
-  return identity ? <div className="h-full w-full overflow-auto"><button type="button" className="btn btn-ghost h-10 min-h-10 px-3" onClick={closeCollab}>返回会话</button>
-    <SharedLedger key={project} identity={identity} /></div> : fallback;
+  // 团队视图就是本地 CollabView（fallback），只是数据换成中心共享台账（i28-TV1）
+  return identity ? <TeamSource identity={identity}>{fallback}</TeamSource> : fallback;
 }
