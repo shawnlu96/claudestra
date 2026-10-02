@@ -183,6 +183,7 @@ describe("launcher restore gate", () => {
     expect(entry.failures).toBe(0);
     expect(entry.failureAlert).toBe(false);
     expect(entry.lastFailureAlert).toBeUndefined();
+    expect(entry.deadAfterStop).toBeUndefined();
     expect(await make().select([agent])).toEqual([agent]);
     for (let i = 0; i < 3; i++) await make().restart(agent, failed);
     expect(await make().select([agent])).toEqual([]);
@@ -203,9 +204,37 @@ describe("launcher restore gate", () => {
     expect(alerts).toHaveLength(2);
   });
 
+  test.each(["pi", "codex"])("%s timeout followed by two active observations cannot erase failures", async (runtime) => {
+    const agent = { ...dead(), runtime };
+    let runs = 0;
+    for (let round = 0; round < 10; round++) {
+      for (const a of await make().select([agent])) {
+        await make().restart(a, async () => { runs++; return failed(); });
+        const active = { ...agent, status: "active", idle: true };
+        await make().select([active]);
+        await make().select([active]);
+      }
+      if (round >= 3) expect(runs).toBe(3);
+    }
+    expect(runs).toBe(3);
+    expect(alerts.filter((text) => text.includes("3"))).toHaveLength(1);
+  });
+
+  test.each(["pi", "codex"])("%s active left by the third timeout never unlocks the stop", async (runtime) => {
+    const agent = { ...dead(), runtime };
+    for (let i = 0; i < 3; i++) await make().restart(agent, failed);
+    const active = { ...agent, status: "active", idle: true };
+    for (let i = 0; i < 10; i++) await make().select([active]);
+    const entry = JSON.parse(readFileSync(path, "utf8")).agents[agent.name];
+    expect(entry.failures).toBe(3);
+    expect(entry.failureAlert).toBe(true);
+    expect(entry.deadAfterStop).toBeUndefined();
+  });
+
   test.each(["creating", "unknown"])("%s interrupts hook runtime active observations", async (status) => {
     const agent = { ...dead(), runtime: "pi" };
     for (let i = 0; i < 3; i++) await make().restart(agent, failed);
+    await make().select([agent]);
     const active = { ...agent, status: "active", idle: true };
     await make().select([active]);
     await make().select([{ ...agent, status }]);
@@ -213,7 +242,7 @@ describe("launcher restore gate", () => {
     expect(await make().select([agent])).toEqual([]);
   });
 
-  test.each(["pi", "codex"])("%s sustained active clears an unfinished restart reservation", async (runtime) => {
+  test.each(["pi", "codex"])("%s sustained active before the stop preserves an unfinished restart reservation", async (runtime) => {
     const agent = { ...dead(), runtime };
     const started = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<Awaited<ReturnType<typeof success>>>();
@@ -224,7 +253,7 @@ describe("launcher restore gate", () => {
       const active = { ...agent, status: "active", idle: true };
       await make().select([active]);
       await make().select([active]);
-      expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(0);
+      expect(JSON.parse(readFileSync(path, "utf8")).agents[agent.name].failures).toBe(1);
       expect(await make().select([agent])).toEqual([agent]);
     } finally { finish.resolve(await success()); await pending; }
   });

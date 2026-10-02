@@ -24,6 +24,7 @@ interface Entry {
   failureAlert: boolean;
   lastFailureAlert?: number;
   activeRuntime?: "pi" | "codex";
+  deadAfterStop?: boolean;
 }
 interface State { version: 1; agents: Record<string, Entry> }
 interface Options {
@@ -40,16 +41,19 @@ function validState(value: unknown): boolean {
     && Object.values(s.agents).every((e) => e && typeof e.generation === "string"
       && Number.isInteger(e.failures) && e.failures >= 0 && e.failures <= 3
       && typeof e.missingAlert === "boolean" && typeof e.failureAlert === "boolean"
+      && (e.deadAfterStop === undefined || typeof e.deadAfterStop === "boolean")
       && (e.activeRuntime === undefined || e.activeRuntime === "pi" || e.activeRuntime === "codex")
       && (e.lastFailureAlert === undefined || (Number.isFinite(e.lastFailureAlert) && e.lastFailureAlert >= 0)));
 }
 
 function observedRecovery(a: Agent, e: Entry): boolean {
-  // Hook runtimes have synthetic idle. Require consecutive active observations instead;
-  // persist the first so a launcher restart does not prevent a manual recovery from unlocking.
-  if (e.failures > 0 && a.status === "active" && (a.runtime === "pi" || a.runtime === "codex")) {
+  // A stopped hook runtime must become dead before active can indicate a manual recovery;
+  // otherwise the third timed-out launch itself could erase the stop. Persist both observations.
+  if (e.failureAlert && a.status === "dead") e.deadAfterStop = true;
+  if (e.failureAlert && e.deadAfterStop && e.failures > 0 && a.status === "active" && (a.runtime === "pi" || a.runtime === "codex")) {
     if (e.activeRuntime !== a.runtime) { e.activeRuntime = a.runtime; return false; }
     delete e.activeRuntime;
+    delete e.deadAfterStop;
     return true;
   }
   delete e.activeRuntime;
@@ -190,6 +194,7 @@ export class LauncherRestoreGate {
         const e = this.entry(state, a);
         if (e.failures >= 3) return false;
         delete e.activeRuntime;
+        delete e.deadAfterStop;
         e.failures++;
         return true;
       });
@@ -202,7 +207,7 @@ export class LauncherRestoreGate {
     try {
       await this.transaction((state) => {
         const e = this.entry(state, a);
-        if (!reason) { e.failures = 0; e.failureAlert = false; delete e.lastFailureAlert; }
+        if (!reason) { delete e.deadAfterStop; e.failures = 0; e.failureAlert = false; delete e.lastFailureAlert; }
         else if (e.failures >= 3) this.stopped(a, e, alerts);
         else if (e.lastFailureAlert === undefined || Date.now() - e.lastFailureAlert >= 30 * 60_000) {
           e.lastFailureAlert = Date.now();
