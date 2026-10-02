@@ -5,9 +5,11 @@ import { featureDeps } from "./ledger-feature-deps.js";
 import { mustFeature, requireManager } from "./ledger-feature-write.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 
 export function changeFeatureDep(db: Database, ctx: WriteCtx, from: string, to: string, remove = false, note = "") {
   return tx(db, () => {
+    requireLocalSharedLedgerPlanning(from); requireLocalSharedLedgerPlanning(to);
     const a = mustFeature(db, from), b = mustFeature(db, to);
     requireManager(db, ctx.actor, a.project);
     if (a.project !== b.project) throw new LedgerError("invalid", "feature 依赖只能连同一个项目");

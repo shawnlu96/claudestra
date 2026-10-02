@@ -171,7 +171,7 @@ function boundaryLines(i: ReviewPackInput): string[] {
     `- 不碰 ${i.prod.stateDir}（上面点名的文档除外，线上 ledger.sqlite、peers.json 等一律不碰）。`,
     `- 不对线上 tmux（${i.prod.tmuxSocket}）发键，不连 127.0.0.1:${i.prod.bridgePort}，不给任何 agent 或 peer 发消息，不读 Keychain，不在 owner 屏幕上做 UI 自动化。`,
     "- 需要实测就用私有 tmux socket（tmux -L 独有名）或执行者留下的沙箱（先确认 socket 不是线上那个），用完保持原样。",
-    `- 临时文件只写 ${i.workDir}/。`,
+    `- 临时文件只写 ${i.workDir}/；跑测试一律加 \`env -i\`，HOME / TMPDIR 只用其下的 \`.review-tmp/home\`、\`.review-tmp/tmp\`（与 peer PR 审查同名，不写进被审 worktree），PATH 显式给。`,
   ];
 }
 

@@ -66,8 +66,8 @@ test("planner with local Claude zero dispatches across model to peer without rol
     s.pool!.peers = [{ peer: "mate", roles: [], priority: "off", open: 99, maxOpen: 1,
       v2: { why: null, roles: [], repos: ["o/r"], slots: { claude: 1, codex: 0 }, familyTotals: { claude: 1, codex: 0 } } }];
     expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "review", recipient: "peer:mate" });
-    s.workflow!.template = "security";
-    expect(planScheduler(s)).toMatchObject({ kind: "wait", reason: "等 claude 空位" });
+    s.workflow!.template = "security"; // i28-SR1: cap 0 (not busy) is reported to PM instead of a silent wait
+    expect(planScheduler(s)).toMatchObject({ kind: "wait", reason: expect.stringContaining("本机 claude 名额上限是 0") });
   } finally { f.close(); }
 });
 
