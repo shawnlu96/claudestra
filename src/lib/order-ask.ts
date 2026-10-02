@@ -18,7 +18,7 @@ import { getMeta } from "./ledger-store.js";
 import { REVIEW_ASK_REPLY } from "./order-standard-answers.js";
 import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
-import { parseAskWire, type AskWire } from "./order-wire.js";
+import { askScopeExtra, parseAskWire, type AskWire } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { slotByOrderId } from "./review-order.js";
 
@@ -111,7 +111,7 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
     // 不阻塞的到期由自动定收口，不走 24 小时过期；其余不写 blocking，保持改动前的 null
     ...(nonblocking ? { blocking: false, expiresAt: 253402300799999 } : {}),
     extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending",
-      class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}) },
+      class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}), ...askScopeExtra(q as Partial<AskWire>) },
   });
   const ask = opened.ask;
   const askee = ask.assignee ?? pm;

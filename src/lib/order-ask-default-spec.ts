@@ -11,6 +11,11 @@ import { listAsks, patchAsk, type Ask } from "./ledger-asks.js";
 import { getMeta, getTask } from "./ledger-store.js";
 import { specPathFor } from "./task-spec.js";
 
+/** i28-ASK4 测试类扩围（order-ask-default.ts isTestScopeAsk）的自动定：一节里写申请的文件和理由，不写默认做法 */
+const REASON_TEXT: Record<string, string> = { superseded_assertion: "被本规格替代的旧断言", new_test: "为本卡新行为补测试" };
+export const testScopeFiles = (a: Ask): string[] | null =>
+  a.extra.autoScope === true && Array.isArray(a.extra.files) ? a.extra.files.map(String) : null;
+
 interface AppendPlan { path: string; offset: number; prefixHash: string; section: string }
 const digest = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const planOf = (a: Ask) => (a.extra.defaultAppendPlan ?? undefined) as AppendPlan | undefined;
@@ -33,9 +38,13 @@ export function prepareDefaultSpec(db: Database, a: Ask): void {
   }
   const before = readFileSync(path);
   const quote = (s: string) => s.split(/\r?\n/).map((l) => `> ${l}`).join("\n");
+  const files = testScopeFiles(a);
+  const decided = files
+    ? `申请加进范围的测试文件（${REASON_TEXT[String(a.extra.reason)] ?? String(a.extra.reason)}）：\n${files.map((f) => `- \`${f}\``).join("\n")}\n\n`
+      + "结论：测试类扩围自动批准，以上文件已追加进本卡 fileGlobs。PM 若已另行答复，以规格里 PM 定为准。"
+    : `默认做法：\n${quote(String(a.extra.default))}\n\n结论：按执行者默认做法定。PM 若已另行答复，以规格里 PM 定为准。`;
   const section = `\n\n${startMarker(a.id)}\n## 自动定（${new Date(Number(a.extra.defaultAt)).toISOString()}）\n\n`
-    + `问题原文：\n${quote(a.body)}\n\n默认做法：\n${quote(String(a.extra.default))}\n\n`
-    + `结论：按执行者默认做法定。PM 若已另行答复，以规格里 PM 定为准。\n<!-- /ask-default:${a.id} -->\n`;
+    + `问题原文：\n${quote(a.body)}\n\n${decided}\n<!-- /ask-default:${a.id} -->\n`;
   patchAsk(db, a.id, { extra: { defaultAppendPlan: { path, offset: before.length, prefixHash: digest(before), section } } });
 }
 
