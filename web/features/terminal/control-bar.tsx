@@ -48,12 +48,17 @@ function PasteButton({ termRef, disabled }: { termRef: RefObject<Terminal | null
   const [hint, setHint] = useState<string | null>(null);
   const showHint = (msg: string) => {
     setHint(msg);
-    setTimeout(() => setHint((v) => (v === msg ? null : v)), 1800);
+    setTimeout(() => setHint((v) => (v === msg ? null : v)), 3000);
   };
   return (
     <>
       {hint && (
-        <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 whitespace-nowrap rounded-full bg-neutral px-3 py-1.5 text-xs text-neutral-content shadow-lg">
+        <div
+          className={
+            "pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 w-max max-w-[90vw] -translate-x-1/2 " +
+            "rounded-2xl bg-neutral px-3 py-1.5 text-center text-xs text-neutral-content shadow-lg"
+          }
+        >
           {hint}
         </div>
       )}
@@ -64,9 +69,10 @@ function PasteButton({ termRef, disabled }: { termRef: RefObject<Terminal | null
         onClick={async () => {
           const term = termRef.current;
           if (!term) return;
-          const r = await pasteFromClipboard(navigator.clipboard, (s) => term.paste(s));
+          const r = await pasteFromClipboard(navigator.clipboard, term);
           if (r === "empty") showHint(t("剪贴板是空的"));
           if (r === "blocked") showHint(t("读不到剪贴板（被拒绝或浏览器不支持）"));
+          if (r === "multiline") showHint(t("多行内容：当前终端没开 bracketed paste，为免逐行执行已取消，请逐行粘贴"));
         }}
         disabled={disabled}
       >
