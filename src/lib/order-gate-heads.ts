@@ -5,6 +5,9 @@
  *   in inputs become 12-char short SHAs. Only whole 40 / 64 hex runs that are this card's heads; any other long hex still refuses.
  * - a findingId the gate would refuse (a sensitive word, a token or address shape) goes out as an alias F1, F2…; the alias map is
  *   kept on this machine keyed by order id, and a verdict citing the alias is mapped back before it reaches the ledger.
+ * - (i28-GATE3) any other whole 40-char lowercase hex in inputs (a commit SHA a report quoted, e.g. the base) also goes out as its
+ *   12-char prefix, with a note counting how many were cut. Not on a line naming a secret (credential, token…), not inside a path
+ *   or file name, not mixed case, not 64 long: those still reach the gate unchanged and refuse as before.
  * A refused order on the scheduler's pool path is recorded once per card + reason (recordGateRefused) instead of the card stalling silently.
  * tests/order-gate-heads.test.ts.
  */
@@ -34,9 +37,35 @@ export function cardHeads(db: Database, task: Pick<LedgerTask, "project" | "id" 
   return heads;
 }
 
+const HEAD_RUN = /(?<![\w-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\w-])/g;
+
 /** Whole 40 / 64 hex runs (same boundary as the gate's head exemption) that are one of `heads` → their 12-char prefix. */
 export const shortenHeads = (text: string, heads: ReadonlySet<string>): string =>
-  text.replace(/(?<![\w-])(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40})(?![\w-])/g, (m) => (heads.has(m.toLowerCase()) ? m.slice(0, 12) : m));
+  text.replace(HEAD_RUN, (m) => (heads.has(m.toLowerCase()) ? m.slice(0, 12) : m));
+
+/**
+ * A whole 40-char lowercase hex run: neither side a word char or `-`, not a path segment (`/` `\` before or after), not a file
+ * name (a single `.` before, `.x` after). A sentence-ending `.` and a git range `a..b` / `a...b` are still boundaries.
+ */
+const COMMIT_SHA = /(?<![\w/\\-])(?<!(?<!\.)\.)[0-9a-f]{40}(?![\w/\\-]|\.\w)/g;
+
+/**
+ * A line naming a secret (PM 定 10-03 03:11): a 40-hex there may be an old-style access token, so it is not cut and the gate
+ * judges it. Plain substring match, case-insensitive (`author` counts as `auth`: refusal first); covers `name=value` / `name: value`.
+ */
+const SECRET_WORD = /credential|secret|token|passw(?:or)?d|api[\s_-]?key|auth|bearer|private[\s_-]?key/i;
+
+/**
+ * Card heads (GATE2), then commit-shaped SHAs on lines without a secret word → 12-char prefixes; `cut` counts both. Any other
+ * hex stays for the gate.
+ */
+export function shortenShas(text: string, heads: ReadonlySet<string>): { text: string; cut: number } {
+  let cut = 0;
+  const short = (m: string) => { cut++; return m.slice(0, 12); };
+  const out = text.replace(HEAD_RUN, (m) => (heads.has(m.toLowerCase()) ? short(m) : m))
+    .split("\n").map((line) => (SECRET_WORD.test(line) ? line : line.replace(COMMIT_SHA, short))).join("\n");
+  return { text: out, cut };
+}
 
 /** The gate refuses an id that masking would change or that reads as a secret (order-wire-render.ts gatePeer). */
 const refusedId = (id: string): boolean => sanitizeForeign(id) !== id || peerSecretHit(id) !== null;
@@ -56,19 +85,25 @@ export function aliasFindings<F extends { findingId: string }>(findings: readonl
 }
 
 const aliasKey = (orderId: string): string => `lend-alias:${orderId}`;
+const shaNoteKey = (orderId: string): string => `lend-sha-cut:${orderId}`;
 
 /**
- * The order as it goes to a peer: card heads in inputs shortened, refused finding ids aliased. `whole` (the unsplit form the gate
- * scans) gets the same rewrite. The alias map is written as one note event keyed by the order id, inside the caller's transaction,
- * so an order the gate then refuses leaves no map behind.
+ * The order as it goes to a peer: card heads and commit SHAs in inputs shortened, refused finding ids aliased. `whole` (the unsplit form the gate
+ * scans) gets the same rewrite. The alias map and the SHA cut count are each written as one note event keyed by the order id, inside the caller's
+ * transaction, so an order the gate then refuses leaves neither behind.
  */
 export function forPeer<M extends { wire: OrderWire; whole?: OrderWire }>(db: Database, ctx: WriteCtx, task: LedgerTask, made: M): M {
   const heads = cardHeads(db, task);
   const one = (w: OrderWire) => {
     const a = aliasFindings(w.findings);
-    return { wire: { ...w, inputs: w.inputs.map((s) => shortenHeads(s, heads)), findings: a.findings }, aliases: a.aliases };
+    const cuts = w.inputs.map((s) => shortenShas(s, heads));
+    return { wire: { ...w, inputs: cuts.map((c) => c.text), findings: a.findings }, aliases: a.aliases, cut: cuts.reduce((n, c) => n + c.cut, 0) };
   };
   const out = one(made.wire);
+  if (out.cut && !getEventByDedup(db, shaNoteKey(made.wire.orderId))) {
+    insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: shaNoteKey(made.wire.orderId) }, { project: task.project, target: task.id,
+      kind: "note", text: `派单材料里 ${out.cut} 处完整 SHA 已截成 12 位（${made.wire.orderId}）`, data: { op: "sha_cut", orderId: made.wire.orderId, count: out.cut } }, true);
+  }
   if (Object.keys(out.aliases).length && !getEventByDedup(db, aliasKey(made.wire.orderId))) {
     insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: aliasKey(made.wire.orderId) }, { project: task.project, target: task.id,
       kind: "note", text: `出借单 ${made.wire.orderId} 的问题编号外发用别名`, data: { op: "finding_alias", orderId: made.wire.orderId, aliases: out.aliases } }, true);
