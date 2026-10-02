@@ -19,7 +19,7 @@ import { beatPeer, beatView, type Renewal } from "./lend-beat.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import type { HttpPeer } from "./peers.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { pausedUntil, refreshPause } from "./lend-health.js";
+import { pausedUntil, refreshQuotaPause } from "./lend-health.js";
 
 export const POLL_MS = 30_000;
 /** proto 2、hello 新鲜、而且 PUSH_SEEN_MS 内真收到过这个 A 的推送：轮询只剩兜底 */
@@ -230,7 +230,7 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
     setMeta(d.db, BOOT_KEY, d.v2!.boot); // 调度服务刚启动：每个 peer 当轮立刻 poll 一次
     for (const e of eff.lend) r.pollNow.add(e.peer);
   }
-  await refreshPause(d.db, d.codexQuota, d.now(), d.log); // 本机 worker 撞了 Codex 额度：到重置时刻前不领新单（lend-health.ts）
+  await refreshQuotaPause(d.db, d.codexQuota, d.now(), d.log); // 领单前已满就暂停；到点或观测不满恢复
   const hello = new Set(r.v2 ? helloTargets(d.db, eff.lend, d.now()) : []);
   const p: Pass = { d, rd, r, now, done, failed, hello, status: { at: now, lending: eff.lending, blocked: null, peers: {} },
     entryOf: (peer) => eff.lend.find((e) => e.peer === peer), problemOf: (peer) => peerLendProblem(peers.find((x) => x.name === peer), peer),

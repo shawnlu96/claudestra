@@ -11,6 +11,7 @@ import type { Database } from "bun:sqlite";
 import type { InventoryQuota } from "./ai-quota.js";
 import { getMeta, setMeta, type LendRow } from "./lend-journal.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
+import { classifyAirFailure } from "./acp/failures.js";
 
 export type WorkerDown = "no_window" | "no_host";
 export const MISS_GAP_MS = 5_000;
@@ -94,8 +95,28 @@ export function pausedUntil(db: Database, now: number): number | null {
   return p && now < p.until ? p.until : null;
 }
 
+/** create 只保留错误正文：借用 ACP 的正文判定，普通失败不能冻结整个 Codex 家族。 */
+export async function pauseForStartFailure(db: Database, row: LendRow, error: string,
+  quota: () => Promise<QuotaView | null>, now: number, log: (m: string) => void): Promise<void> {
+  if (row.family !== "codex") return;
+  // retry 阻止 AIR 的无动作 limit 兜底，只让已有 usage-limit 正文规则认额度。
+  const limit = classifyAirFailure({ id: row.orderId, revision: 1, category: "limit", severity: "error", title: error, actions: ["retry"] });
+  if (limit.kind !== "quota") return;
+  const q = await quota().catch((e) => { log(`起 worker 失败后读 Codex 额度失败，使用兜底暂停：${String(e)}`); return null; });
+  pauseForQuota(db, row.orderId, q, now, log);
+}
+
+/** 领单前先处理旧暂停，再看明确已满的读数；保留旧截止，避免未知重置时每轮延长兜底。 */
+export async function refreshQuotaPause(db: Database, quota: () => Promise<QuotaView | null>, now: number,
+  log: (m: string) => void): Promise<number | null> {
+  const q = await quota().catch((e) => { log(`领单前读 Codex 额度失败，按未知处理：${String(e)}`); return null; });
+  const until = await refreshPause(db, async () => q, now, log);
+  if (until === null && q?.full === true && (q.resetsAt === null || q.resetsAt > now)) pauseForQuota(db, "quota_observation", q, now, log);
+  return pausedUntil(db, now);
+}
+
 /** 每轮开头：到点了，或暂停之后又观测到额度不满，就解除暂停 */
-export async function refreshPause(db: Database, quota: () => Promise<QuotaView | null>, now: number, log: (m: string) => void): Promise<number | null> {
+async function refreshPause(db: Database, quota: () => Promise<QuotaView | null>, now: number, log: (m: string) => void): Promise<number | null> {
   const p = readJson<Pause>(db, PAUSE_KEY);
   if (!p) return null;
   if (now >= p.until) return setMeta(db, PAUSE_KEY, ""), log("Codex 额度暂停到点，恢复借单"), null;
