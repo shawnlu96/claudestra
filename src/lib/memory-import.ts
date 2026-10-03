@@ -75,19 +75,43 @@ function inputOf(db: Database, project: string, raw: unknown): MemoryInput {
   } as MemoryInput;
 }
 
-function replayOf(db: Database, project: string, key: string, input: MemoryInput): Memory | null {
+/** A receipt binds frozen content; current task membership and write gates cannot invalidate an earlier successful import. */
+function replayOf(db: Database, project: string, key: string, raw: unknown): Pick<ImportRow, "input" | "memory"> | null {
   const event = getEventByDedup(db, key);
   if (!event) return null;
   const id = event.data.memoryId;
   const m = typeof id === "string" ? getMemory(db, id) : null;
-  const digest = memoryDigest(input.title, JSON.stringify({ symptom: input.symptom, rule: input.rule }), input.files ?? []);
   if (!m || event.project !== project || m.project !== project || m.kind !== "pitfall" || m.via !== "import"
     || event.kind !== "note" || event.target !== "" || event.data.op !== "memory_import" || Object.keys(event.data).length !== 2
-    || m.digest !== digest || m.taskId !== (input.taskId ?? null) || m.family !== (input.family || null)
-    || m.fixable !== input.fixable || m.sourceNote !== (input.sourceNote || null)) {
+    || !raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new LedgerError("dedup_mismatch", "导入幂等键已被别的项目或动作占用");
   }
-  return m;
+  const r = raw as Record<string, unknown>;
+  const body = m.body as { symptom: string; rule: string };
+  const fields: Record<string, unknown> = {
+    kind: m.kind, title: m.title, symptom: body.symptom, rule: body.rule, files: m.files, family: m.family,
+    fixable: m.fixable, feature: m.featureId, task: m.taskId, sourceNote: m.sourceNote,
+    visibility: m.visibility, head: m.head, specRev: m.specRev,
+  };
+  const matches = Object.entries(r).every(([field, value]) => {
+    if (!Object.hasOwn(fields, field)) return false;
+    if (field === "feature" && value === null) return !!m.taskId || m.featureId === null;
+    if (field === "visibility" && (value == null || value === "team")) return true; // Original team inputs may have been downgraded to home.
+    if (field === "files") return Array.isArray(value) && JSON.stringify(value) === JSON.stringify(m.files);
+    if (field === "family" || field === "head" || field === "sourceNote") value = value === "" ? null : value;
+    return value === fields[field];
+  });
+  if (!matches || r.kind !== m.kind || r.fixable !== m.fixable || (r.task ?? null) !== m.taskId
+    || (r.family === "" ? null : r.family ?? null) !== m.family || (r.sourceNote ?? null) !== m.sourceNote
+    || (!m.taskId && (r.feature ?? null) !== m.featureId) || !Array.isArray(r.files)
+    || m.digest !== memoryDigest(r.title as string, JSON.stringify({ symptom: r.symptom, rule: r.rule }), r.files as string[])) {
+    throw new LedgerError("dedup_mismatch", "导入回执与冻结记忆的原内容或绑定不一致");
+  }
+  return { memory: m, input: {
+    project, kind: "pitfall", title: m.title, symptom: body.symptom, rule: body.rule, files: m.files,
+    family: m.family, fixable: m.fixable!, featureId: m.featureId, taskId: m.taskId, sourceNote: m.sourceNote,
+    head: m.head, specRev: m.specRev, visibility: m.visibility, via: "import", authorRole: "pm",
+  } };
 }
 
 /** A project-level audit receipt carries the row hash; memory contents and their timeline event remain append-only. */
@@ -104,11 +128,11 @@ function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, 
   try {
     let value: unknown;
     try { value = JSON.parse(raw); } catch { return { line, kind: "format", reason: "不是合法 JSON（不回显原文）" }; }
+    const prev = replayOf(db, project, key, value);
+    if (prev) return { line, key, ...prev, replay: true };
     const hits = secretHits(textFields(value));
     if (hits.length) return { line, kind: "redaction", reason: `命中字段位置：${hits.join(", ")}` };
     const input = inputOf(db, project, value);
-    const prev = replayOf(db, project, key, input);
-    if (prev) return { line, key, input, memory: prev, replay: true };
     const lint = memoryLint(db, input);
     if (!lint.ok) {
       const kind = lint.rule === 6 ? "redaction" : lint.rule === 7 ? "duplicate" : lint.rule === 8 ? "format" : "lint";
