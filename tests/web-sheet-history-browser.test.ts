@@ -38,7 +38,7 @@ const state = (p: Page) => p.evaluate("window.sheetApi.state()") as Promise<{ se
 
 test.skipIf(!enabled)("系统返回：整屏页收起，条目不被压回去", async () => {
   const p = await page();
-  expect(await p.evaluate("window.popOrder")).toEqual(["shell", "sheet"]); // 外层监听先注册，才测得到「外层先渲染」
+  expect(await p.evaluate("window.popOrder") as string[]).toEqual(["shell", "sheet"]); // 外层监听先注册，才测得到「外层先渲染」
   await p.evaluate("window.sheetApi.open('team')");
   await p.waitForFunction("location.hash === '#chat?collab=~team'");
   await p.evaluate("history.back()");
