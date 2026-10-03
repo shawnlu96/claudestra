@@ -333,6 +333,7 @@ describe("写事件的底座只给写入模块", () => {
   //   step 回滚取消本 claim 建的卡时按 pm 推 cancelled（applyMove asRole）；自动交回在事务里重判后走 PM 交回的同一核心
   // scheduler-spec-resume-write.ts：spec 阶段 auto 卡放到 peer（i28-RSM1），调度身份照开卡的规矩按 pm 推 spec→restate（applyMove asRole），事务内重核资格与 rev
   // lend-fix-reassign-start.ts / -pr.ts / -tick.ts：自动改派修复单（i28-RA1）在挂池事务里结束旧写租约、记改派事件；关旧 PR、等租约方计时各记去重事件，不推阶段
+  // lend-fix-start.ts：修复单起点（i28-FB1）在挂池事务里记起点更新 / 报警 / 重挂事件，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -357,7 +358,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
-      "lib/lend-fix-reassign-tick.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
+      "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
       "lib/scheduler-merge-train-hold.ts", "lib/scheduler-merge.ts",

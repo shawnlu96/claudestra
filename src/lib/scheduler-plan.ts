@@ -15,6 +15,7 @@ import { planConvergence, strategyWarning } from "./fix-strategy-plan.js";
 import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 
 export interface WorkerRef {
   agent: string;
@@ -189,7 +190,7 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 const bouncePackage = (bounce: MergeBounce | null): WorkOrderFacts | null => bounce && { reportPath: "", findings: [], fallbackWarning: null, bounce };
 
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
-  const read = currentReviewFacts(s.task, s.events);
+  const read = fixStartReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return escalate("fix_report", "修复阶段缺上一轮完整审查报告");
   const facts = convergeReview(s.events, read.facts, s.fixDiff).facts;
   const p1 = facts.findings.filter((f) => f.severity === "P1");
