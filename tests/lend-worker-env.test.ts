@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../src/lib/acp/adapter-proc.js";
 import { shellEscape } from "../src/lib/claude-launch.js";
 import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.js";
-import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST } from "../src/lib/runtimes/clean-env.js";
+import {
+  BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST, workerPrivateDirs,
+} from "../src/lib/runtimes/clean-env.js";
+import { lendSubmitCmd } from "../src/lib/lend-arbiter-submit.js";
+import { RUNTIME_DIR, STATE_DIR } from "../src/lib/paths.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -25,7 +29,7 @@ describe("T94 白名单环境", () => {
     expect(Object.keys(pickWorkerEnv(DIRTY)).sort()).toEqual([...WORKER_ENV_WHITELIST].sort());
   });
 
-  test("状态 / 运行目录改过就带上（worker 里的 lend submit 与自停兜底要找到同一个 journal）；沙箱变量只在沙箱里带", () => {
+  test("状态 / 运行目录改过就带上（宿主的自停兜底要找到同一个 journal；worker 本体另由 workerPrivateDirs 盖掉）；沙箱变量只在沙箱里带", () => {
     const dirs = { CLAUDESTRA_STATE_DIR: "/s/state", CLAUDESTRA_RUNTIME_DIR: "/s/run" };
     const lab = { CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", CLAUDESTRA_SANDBOX_DENY_PORTS: "3847", CLAUDESTRA_LAB_ROOT: "/l", BRIDGE_PORT: "24101" };
     expect(pickWorkerEnv({ ...DIRTY, ...dirs })).toMatchObject(dirs);
@@ -68,10 +72,11 @@ describe("T94 codex-acp 接线", () => {
   test("适配器环境（worker 本体）：clean 时只有白名单 + 频道变量 + lend 档位 + codex 自己的几项，挂 lend 档 MCP、BRIDGE_URL 是回环代理", () => {
     const env = adapterEnv({
       base: DIRTY, bunBin: "/b/bun", channelServer: "/r/src/channel-server.ts", mcpName: "claudestra", codexPath: "/b/codex", logsDir: "/l",
-      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
+      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true, workerRoot: "/w",
     });
     const channelVars = ["DISCORD_CHANNEL_ID", "BRIDGE_URL", "CLAUDESTRA_AGENT", "CLAUDESTRA_RUNTIME", "CLAUDESTRA_SESSION_ID", "MCP_NAME", "CLAUDESTRA_MCP_PROFILE"];
-    expect(Object.keys(env).sort()).toEqual([...WORKER_ENV_WHITELIST, LEND_WORKER_MARK, ...channelVars, "CODEX_PATH", "INITIAL_AGENT_MODE", "APP_SERVER_LOGS", "CODEX_CONFIG"].sort());
+    const dirs = ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"];
+    expect(Object.keys(env).sort()).toEqual([...WORKER_ENV_WHITELIST, LEND_WORKER_MARK, ...channelVars, ...dirs, "CODEX_PATH", "INITIAL_AGENT_MODE", "APP_SERVER_LOGS", "CODEX_CONFIG"].sort());
     expect(env[LEND_WORKER_MARK]).toBe("1"); // worker 里跑的 manager / ledger 靠它认出「不是 owner」
     expect(env.BRIDGE_URL).toBe("ws://127.0.0.1:9/?t=tok");
     expect(env.CLAUDESTRA_MCP_PROFILE).toBe("lend");
@@ -83,7 +88,7 @@ describe("T94 codex-acp 接线", () => {
     const base = { ...DIRTY, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_SANDBOX_ROOT: "/s", BRIDGE_URL: "ws://127.0.0.1:24101", BRIDGE_PORT: "24101" };
     const env = adapterEnv({
       base, bunBin: "/b/bun", channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l",
-      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true,
+      channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: "agent-lend-x", sessionId: "thr-1" }, clean: true, workerRoot: "/w",
     });
     expect(env.BRIDGE_URL).toBe("ws://127.0.0.1:9/?t=tok");
     expect(env.BRIDGE_PORT).toBeUndefined();
@@ -98,6 +103,24 @@ describe("T94 codex-acp 接线", () => {
     expect(env.GH_TOKEN).toBe("gh-secret");
     expect(env[LEND_WORKER_MARK]).toBeUndefined();
     expect(JSON.parse(env.CODEX_CONFIG).mcp_servers.claudestra).toBeDefined();
+  });
+
+  test("codex 本体（和它的 shell）的状态 / 运行目录指到 workerRoot 下，不是宿主的生产目录；缺 workerRoot 就拒起", () => {
+    const base = { ...DIRTY, CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: RUNTIME_DIR };
+    const spec = { base, bunBin: "/b/bun", channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l", clean: true };
+    const env = adapterEnv({ ...spec, workerRoot: "/w" });
+    expect(env.CLAUDESTRA_STATE_DIR).not.toBe(STATE_DIR);
+    expect(env).toMatchObject(workerPrivateDirs("/w"));
+    expect(env).toMatchObject({ CLAUDESTRA_STATE_DIR: "/w/state", CLAUDESTRA_RUNTIME_DIR: "/w/runtime" });
+    expect(() => adapterEnv(spec)).toThrow("workerRoot");
+    expect(adapterEnv({ ...spec, clean: false }).CLAUDESTRA_STATE_DIR).toBe(STATE_DIR); // 本机 agent 照旧继承
+  });
+
+  test("交付命令自己带生产目录：worker 环境里没有，交付照样找得到 journal / registry / tmux", () => {
+    const cmd = lendSubmitCmd("o-1");
+    expect(cmd).toStartWith(`env CLAUDESTRA_STATE_DIR=${shellEscape(STATE_DIR)} CLAUDESTRA_RUNTIME_DIR=${shellEscape(RUNTIME_DIR)} `);
+    expect(cmd).toContain(BUN_NO_AUTOLOAD.join(" "));
+    expect(cmd).toEndWith("/manager.ts lend submit o-1");
   });
 });
 
@@ -150,7 +173,7 @@ describe("T94 外来 clone 里起 bun：不自动加载 .env* / bunfig.toml（r1
     const got = acpAgentCommand(lab, process.execPath, undefined, true);
     if ("error" in got) throw new Error(got.error);
     expect(got.cmd.slice(0, -1)).toEqual([process.execPath, ...BUN_NO_AUTOLOAD]);
-    const env = { ...testChildEnv(), ...adapterEnv({ base: DIRTY, bunBin: process.execPath, channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l", clean: true }) };
+    const env = { ...testChildEnv(), ...adapterEnv({ base: DIRTY, bunBin: process.execPath, channelServer: "/r/c.ts", mcpName: "claudestra", logsDir: "/l", clean: true, workerRoot: clone }) };
     const proc = spawnAdapter([...got.cmd.slice(0, -1), probe], env, clone, () => {});
     let out = "";
     proc.wire.onData((c) => (out += typeof c === "string" ? c : new TextDecoder().decode(c)));

@@ -13,7 +13,7 @@ import { resolveBridgeUrl } from "./bridge-url.js";
 import { RUNTIME_DIR, STATE_DIR } from "./paths.js";
 import { SRC_DIR } from "./repo-root.js";
 import { MCP_PROFILE_ENV, LEND_PROFILE } from "./lend-mcp-profile.js";
-import { BUN_NO_AUTOLOAD, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, pickWorkerEnv } from "./runtimes/clean-env.js";
+import { BUN_NO_AUTOLOAD, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "./runtimes/clean-env.js";
 import type { LaunchSpec } from "./runtimes/types.js";
 import { projectSlug } from "./session-recall.js";
 
@@ -57,13 +57,14 @@ function sessionsDir(cwd: string, env: Record<string, string>): string {
 export function claudeWorkerPlan(spec: LaunchSpec, dir: string, base: Record<string, string | undefined>, bin: string): ClaudeWorkerPlan {
   if (!spec.cwd || !isLendWorkerName(spec.agentName) || !spec.callerCredFile) throw new Error("Claude 出借启动缺工作副本、worker 名或 MCP 身份凭据");
   // HOME / CLAUDE_CONFIG_DIR 照出借方原值，Claude 才找得到本机登录；登录凭据变量不在白名单里，env -i 后不会带进来。
+  // 状态 / 运行目录是代次目录下的专属目录（随代次目录清掉）：Claude 的 Bash 继承这份环境，不能指向生产（clean-env.ts workerPrivateDirs）。
   const env: Record<string, string> = { ...pickWorkerEnv(base), ...(base.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: base.CLAUDE_CONFIG_DIR } : {}),
-    ENABLE_CLAUDEAI_MCP_SERVERS: "false",
-    CLAUDESTRA_STATE_DIR: base.CLAUDESTRA_STATE_DIR || STATE_DIR, CLAUDESTRA_RUNTIME_DIR: base.CLAUDESTRA_RUNTIME_DIR || RUNTIME_DIR,
+    ENABLE_CLAUDEAI_MCP_SERVERS: "false", ...workerPrivateDirs(dir),
     [LEND_WORKER_MARK]: "1", CLAUDESTRA_AGENT: spec.agentName!, [MCP_PROFILE_ENV]: LEND_PROFILE };
   delete env.CODEX_HOME;
-  const mcpEnv = { ...env, DISCORD_CHANNEL_ID: spec.channelId, BRIDGE_URL: spec.bridgeUrl || resolveBridgeUrl(), MCP_NAME,
-    [CALLER_CRED_FILE_ENV]: spec.callerCredFile };
+  // 只有 channel-server（和 bridge 对话）用生产目录
+  const mcpEnv = { ...env, CLAUDESTRA_STATE_DIR: base.CLAUDESTRA_STATE_DIR || STATE_DIR, CLAUDESTRA_RUNTIME_DIR: base.CLAUDESTRA_RUNTIME_DIR || RUNTIME_DIR,
+    DISCORD_CHANNEL_ID: spec.channelId, BRIDGE_URL: spec.bridgeUrl || resolveBridgeUrl(), MCP_NAME, [CALLER_CRED_FILE_ENV]: spec.callerCredFile };
   const mcp = { mcpServers: { [MCP_NAME]: { command: "/usr/bin/env", args: ["-i", ...Object.entries(mcpEnv).map(([k, v]) => `${k}=${v}`),
     resolveBunPath(), ...BUN_NO_AUTOLOAD, join(SRC_DIR, "channel-server.ts")] } } };
   const mode = spec.permissionMode === "auto" ? DEFAULT_PERMISSION_MODE : spec.permissionMode || DEFAULT_PERMISSION_MODE;

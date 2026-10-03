@@ -221,17 +221,17 @@ export function writeJsonAtomicSync(path: string, data: unknown, opts: WriteOpts
   writeTextAtomicSync(path, serialize(data, opts), opts);
 }
 
-/** 原子写文本（同 writeJsonAtomicSync，内容由调用方给） */
-export function writeTextAtomicSync(path: string, text: string, opts: Pick<WriteOpts, "mode" | "preserveMode" | "commitIf"> = {}): void {
+/** 原子写文本（同 writeJsonAtomicSync，内容由调用方给）；noFollow 同 writeJsonAtomic：不解析软链，rename 替换的是链接本身 */
+export function writeTextAtomicSync(path: string, text: string, opts: Pick<WriteOpts, "mode" | "preserveMode" | "commitIf"> & { noFollow?: boolean } = {}): void {
   mkdirSync(dirname(path), { recursive: true });
-  const target = resolveTarget(path);
+  const target = opts.noFollow ? path : resolveTarget(path);
   let mode = opts.mode;
   if (opts.preserveMode && existsSync(target)) {
     try { mode = statSync(target).mode & 0o777; } catch { /* 用 opts.mode */ }
   }
   const tmp = tmpName(target);
   try {
-    writeFileSync(tmp, text, mode !== undefined ? { mode } : undefined);
+    writeFileSync(tmp, text, { flag: opts.noFollow ? "wx" : "w", ...(mode !== undefined ? { mode } : {}) });
     if (mode !== undefined) chmodSync(tmp, mode);
     if (opts.commitIf && !opts.commitIf()) throw new Error(`提交前核验没通过，没写 ${path}`);
     renameSync(tmp, target);
