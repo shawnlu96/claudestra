@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, listEvents } from "./ledger-store.js";
+import { getEventByDedup, listEvents, listTasks } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
 import { convergeReview } from "./review-converge.js";
@@ -102,8 +102,11 @@ async function recordInformed(db: Database, key: string, deps: FollowUpNoticeDep
 }
 
 /** The auto tick's per-pass retry of sent-but-unrecorded notices: a card that left auto / live still gets its record. */
-export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps): Promise<void> {
+export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps, projects: readonly string[]): Promise<void> {
   for (const key of [...(unrecorded.get(db)?.keys() ?? [])]) await recordInformed(db, key, deps);
+  // The ledger is the durable pending source after a restart; mode/stage must not hide a failed follow-up.
+  // With no in-memory send receipt, notify again before recording: absence of informed is not proof of delivery.
+  for (const project of projects) for (const task of listTasks(db, project)) await followUpFailureNotice(db, task, deps);
 }
 
 /**

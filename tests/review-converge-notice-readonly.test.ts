@@ -3,23 +3,26 @@
  * `ledger scheduler-converge-notice`, so the next tick stays quiet and nothing writes to the read-only connection.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
 import { convergeFollowUp } from "../src/lib/review-converge-followup.js";
 import { followUpFailureNotice } from "../src/lib/review-converge-notice.js";
 import { convergeNoticeKey } from "../src/lib/review-converge-notice-write.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
-import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
+import { acquireLock } from "../src/lib/file-lock.js";
+import { encodeLease, SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { runManagerProcess } from "../src/lib/run-manager.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { autoFixture, H1 } from "./scheduler-auto-helpers.js";
 
+import { testChildEnv } from "./test-env.js";
+
 const NOTICE = "后续节点未建立";
 let cleanup: (() => void)[] = [];
-afterEach(() => { for (const c of cleanup.splice(0)) c(); });
+afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
 /** A real downgrade whose follow-up failed (T1 sits in no DAG), written by the production convergeFollowUp on the writer. */
 function setup() {
@@ -122,6 +125,66 @@ describe("failed follow-up notice on the read-only scheduler connection", () => 
     expect(getEventByDedup(f.db, key)?.data.informed).toBe(true);
     await schedulerAutoTick(ro, { p: { maxActiveWorkers: 2 } }, counted);
     expect(records).toBe(2);
+  });
+
+  test("notice-pending-exit: manual fallback survives reader and process restart through guarded CLI", async () => {
+    const { f, ro, told, key } = setup();
+    const busy = { ...f.tickDeps,
+      manager: async (...args: string[]) => args[1] === "scheduler-converge-notice"
+        ? { ok: false, code: "busy", error: "temporary record failure" } : f.tickDeps.manager(...args),
+      ensure: async () => ({ kind: "manual" as const, reason: "author unavailable" }),
+    };
+    expect((await schedulerAutoTick(ro, { p: { maxActiveWorkers: 2 } }, busy)).cards[0].step).toBe("manual");
+    expect(told()).toHaveLength(1);
+    expect(getEventByDedup(f.db, key)).toBeNull();
+    const singletonPath = join(f.dir, "singleton.lock"), maintenancePath = join(f.dir, "maintenance.lock");
+    const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
+    cleanup.push(() => { singleton.release(); maintenance.release(); });
+    const home = join(f.dir, "home"), runtime = join(f.dir, "runtime");
+    mkdirSync(home); mkdirSync(runtime);
+    const env = testChildEnv({ PATH: process.env.PATH!, HOME: home, TMPDIR: process.env.TMPDIR!, CLAUDESTRA_STATE_DIR: f.dir,
+      CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1", CLAUDESTRA_SCHEDULER_SERVICE: "1",
+      BRIDGE_URL: "ws://127.0.0.1:9", BRIDGE_PORT: "9",
+      CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
+        maintenance: { path: maintenancePath, token: maintenance.token } }) });
+    const script = join(f.dir, "restart.ts");
+    const modulePath = (p: string) => JSON.stringify(resolve(p));
+    writeFileSync(script, `
+      import { LedgerReader } from ${modulePath("src/lib/ledger-read.ts")};
+      import { schedulerAutoTick } from ${modulePath("src/lib/scheduler-auto-tick.ts")};
+      const reader = new LedgerReader(${JSON.stringify(join(f.dir, "ledger.sqlite"))});
+      let notices = 0, records = 0;
+      const unexpected = async () => { throw new Error("unexpected worker action"); };
+      const deps = { now: () => Date.now(), notifyPm: async () => { notices++; if (process.argv[2] === "unknown") throw new Error("delivery unknown"); },
+        manager: async (...args) => {
+          records++;
+          const p = Bun.spawn([process.execPath, "--no-env-file", ${modulePath("src/manager.ts")}, ...args],
+            { env: process.env, stdout: "pipe", stderr: "pipe" });
+          const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+          await p.exited;
+          if (err) throw new Error(err);
+          return JSON.parse(out);
+        },
+        ensure: unexpected, worker: unexpected, pinReview: unexpected, reviewDirty: unexpected };
+      const first = await schedulerAutoTick(reader.get(), { p: { maxActiveWorkers: 2 } }, deps);
+      reader.close();
+      const second = await schedulerAutoTick(reader.get(), { p: { maxActiveWorkers: 2 } }, deps);
+      reader.close();
+      console.log(JSON.stringify({ notices, records, first, second }));
+    `);
+    const unknown = Bun.spawn([process.execPath, "--no-env-file", script, "unknown"], { env, stdout: "pipe", stderr: "pipe" });
+    const [unknownOut, unknownErr] = await Promise.all([new Response(unknown.stdout).text(), new Response(unknown.stderr).text()]);
+    expect(await unknown.exited).toBe(0);
+    expect(unknownErr).toContain("delivery unknown");
+    expect(JSON.parse(unknownOut)).toMatchObject({ notices: 2, records: 0 });
+    expect(getEventByDedup(f.db, key)).toBeNull();
+    const child = Bun.spawn([process.execPath, "--no-env-file", script], { env, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect({ exit: await child.exited, stderr }).toEqual({ exit: 0, stderr: "" });
+    console.log("RESTART_RECOVERY", stdout.trim());
+    expect(JSON.parse(stdout)).toEqual({ notices: 1, records: 1, first: { cards: [], failed: [] }, second: { cards: [], failed: [] } });
+    expect(getEventByDedup(f.db, key)?.data.informed).toBe(true);
+    expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "review_followup_failed")).toHaveLength(1);
   });
 
   test("the CLI only takes the scheduler, this card's own failed downgrade at its round/head, and replays idempotently", async () => {
