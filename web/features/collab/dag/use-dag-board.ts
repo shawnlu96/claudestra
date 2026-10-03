@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { assertDagSnapshot, dagRetryDelay } from "../product/dag-availability";
 import { ApiError } from "@/lib/api/client";
 import { fetchDagBoard, fetchDagDiff, fetchDagFeature } from "@/lib/api/ledger";
+import { useCollabSource } from "../team-source-context";
 import { setLedgerAccess } from "../collab-cache";
 import type { Compare } from "./dag-diff";
 import type { BoardNode, DagBoard, DagDiffResponse, FeatureDetail } from "./dag-types";
@@ -16,6 +17,7 @@ import type { BoardNode, DagBoard, DagDiffResponse, FeatureDetail } from "./dag-
 export type DagLoad = { status: "loading" } | { status: "absent" } | { status: "forbidden" } | { status: "error"; message: string } | { status: "ok"; board: DagBoard };
 
 export function useDagBoard(project: string, rev: number): DagLoad {
+  const read = useCollabSource(project).dag?.board ?? fetchDagBoard;
   const [load, setLoad] = useState<DagLoad>({ status: "loading" });
   const [retry, setRetry] = useState(0);
   const backoff = useRef(5_000);
@@ -24,7 +26,7 @@ export function useDagBoard(project: string, rev: number): DagLoad {
     if (rev === 0) return;
     const ctrl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    fetchDagBoard(project, ctrl.signal).then(board => { assertDagSnapshot(board); return board; }).then(
+    read(project, ctrl.signal).then(board => { assertDagSnapshot(board); return board; }).then(
       (board) => { if (ctrl.signal.aborted) return; backoff.current = 5_000; setLoad({ status: "ok", board }); },
       (e: Error) => {
         if (ctrl.signal.aborted) return;
@@ -39,22 +41,23 @@ export function useDagBoard(project: string, rev: number): DagLoad {
       },
     );
     return () => { ctrl.abort(); clearTimeout(timer); };
-  }, [project, rev, retry]);
+  }, [project, rev, retry, read]);
   return load;
 }
 
 /** 某个 feature 的版本列表（属性区版本页）；featureId 为 null 不拉 */
 export function useDagVersions(project: string, featureId: string | null, rev: number): FeatureDetail | null {
+  const read = useCollabSource(project).dag?.feature ?? fetchDagFeature;
   const [got, setGot] = useState<{ id: string; d: FeatureDetail } | null>(null);
   useEffect(() => {
     if (!featureId) return;
     const ctrl = new AbortController();
-    fetchDagFeature(project, featureId, undefined, ctrl.signal).then(
+    read(project, featureId, undefined, ctrl.signal).then(
       (d) => setGot({ id: featureId, d }),
       (e: Error) => !ctrl.signal.aborted && console.warn(`[collab] 读 ${featureId} 的版本列表失败：${e.message}`), // 版本页显示加载中，下次 rev 变了再拉
     );
     return () => ctrl.abort();
-  }, [project, featureId, rev]);
+  }, [project, featureId, rev, read]);
   return got && got.id === featureId ? got.d : null;
 }
 
@@ -70,6 +73,7 @@ const compareKey = (c: Compare) => `${c.featureId}:${c.from}:${c.to}`;
 
 /** 对比要的三样：diff、from 版快照、to 版快照（to = 当前版时不拉，用 board 的节点）；拉齐之前是 null */
 export function useDagCompare(project: string, c: Compare | null, board: DagBoard | null, rev: number): CompareData | null {
+  const source = useCollabSource(project), read = source.dag?.feature ?? fetchDagFeature, diffRead = source.dag?.diff ?? fetchDagDiff;
   const [got, setGot] = useState<CompareData | null>(null);
   const cur = c ? board?.features.find((f) => f.id === c.featureId) : undefined;
   const live = c && cur && c.to === cur.currentVersion ? cur.nodes : null;
@@ -78,13 +82,13 @@ export function useDagCompare(project: string, c: Compare | null, board: DagBoar
     if (!fid) return;
     const ctrl = new AbortController();
     const key = compareKey({ featureId: fid, from, to });
-    const snap = (v: number | "pending") => fetchDagFeature(project, fid, v, ctrl.signal).then((d) => d.snapshot?.nodes ?? []);
-    Promise.all([fetchDagDiff(project, fid, from, to, ctrl.signal), snap(from), needTo ? snap(to) : Promise.resolve(null)]).then(
+    const snap = (v: number | "pending") => read(project, fid, v, ctrl.signal).then((d) => d.snapshot?.nodes ?? []);
+    Promise.all([diffRead(project, fid, from, to, ctrl.signal), snap(from), needTo ? snap(to) : Promise.resolve(null)]).then(
       ([diff, fromNodes, toNodes]) => setGot({ key, diff, fromNodes, toNodes: toNodes ?? [] }),
       (e: Error) => !ctrl.signal.aborted && console.warn(`[collab] 读 ${key} 的对比失败：${e.message}`), // 叠图先不出，下次 rev 变了再拉
     );
     return () => ctrl.abort();
-  }, [project, fid, from, to, needTo, rev]);
+  }, [project, fid, from, to, needTo, rev, read, diffRead]);
   if (!c || !got || got.key !== compareKey(c)) return null;
   return live ? { ...got, toNodes: live } : got;
 }

@@ -12,7 +12,10 @@ import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 import { escalationDowngrade, convergeReview, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
 import { planConvergence, strategyWarning } from "./fix-strategy-plan.js";
+import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
+import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 
 export interface WorkerRef {
   agent: string;
@@ -187,7 +190,7 @@ function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
 const bouncePackage = (bounce: MergeBounce | null): WorkOrderFacts | null => bounce && { reportPath: "", findings: [], fallbackWarning: null, bounce };
 
 function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
-  const read = currentReviewFacts(s.task, s.events);
+  const read = fixStartReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return escalate("fix_report", "修复阶段缺上一轮完整审查报告");
   const facts = convergeReview(s.events, read.facts, s.fixDiff).facts;
   const p1 = facts.findings.filter((f) => f.severity === "P1");
@@ -250,7 +253,7 @@ function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, down
       return makeIntent(s, node, "stage", "PM 未通过前后截图，进入 fix", [taskResource(s)], { targetStage: "fix", ...(downgrade ? { downgrade } : {}) });
     }
   }
-  return makeIntent(s, node, "stage", downgrade ? `审查通过（${downgrade.items.length} 项 P1 降为 P2），进入合并队列` : "审查通过，进入合并队列", [taskResource(s)], {
+  return makeIntent(s, node, "stage", downgrade ? `审查通过（${downgrade.items.length} 项 P1 降为 P2：${downgradeBrief(downgrade)}），进入合并队列` : "审查通过，进入合并队列", [taskResource(s)], {
     targetStage: "merge", pmDiffNotice: facts.findings.some((f) => f.severity === "P2"), ...(downgrade ? { downgrade } : {}),
   });
 }
@@ -314,7 +317,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
     if (cancelled && bounceLimitHit(s.events, cancelled.id)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
-    if (cancelled) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
+    if (cancelled && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;
   }

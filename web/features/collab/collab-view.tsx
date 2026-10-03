@@ -7,12 +7,15 @@
  * 底部时间轴放第二期。数据只用总览（tasks / items / deps）和任务详情，没有来源的指标标「暂无」。
  */
 import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
 import { CollabDetail, useNarrow } from "./collab-detail";
+import { useSheetHistory } from "./v4/sheet-history";
+import { browserHistory } from "@/lib/hash-nav-browser";
 import { Icon } from "./collab-icons";
 import { waitsOnOwner } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
@@ -55,8 +58,8 @@ function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circle
 
 function MetricsBar({ m, connected, tr }: { m: Metrics; connected: boolean; tr: Tr }) {
   const cells: [string, string, string?][] = [
-    ["在场 agent", String(m.present)], ["进行中", String(m.active)], ["今日完成", String(m.todayDone)], ["审查轮次", String(m.reviewRounds)],
-    ["P0/P1 修掉", String(m.fixed)], ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
+    ["在场 agent", String(m.present)], ["进行中", String(m.active)], ["今日完成", String(m.todayDone)], ["审查轮次", m.reviewRounds === null ? tr("暂无") : String(m.reviewRounds)],
+    ["P0/P1 修掉", m.fixed === null ? tr("暂无") : String(m.fixed)], ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
     ["周额度", "—", "暂无数据来源"], ["协作消息", "—", "暂无数据来源"],
   ];
   return (
@@ -124,6 +127,17 @@ function useSelection(openTask: string | null) {
   return { sel, setSel, focus, pickTask, select, close };
 }
 
+/** useSelection + 手机整屏页的历史条目（v4/sheet-history.ts）：select 在整屏页出现之前先压历史 */
+function useSheetSelection(openTask: string | null, narrow: boolean) {
+  const s = useSelection(openTask);
+  const prepare = useSheetHistory(!!s.sel && s.sel.kind !== "task" && !openTask, narrow, `~${s.sel?.kind ?? ""}`, s.close, browserHistory);
+  const select = (x: Selection) => {
+    if (x && x.kind !== "task" && !openTask) prepare(`~${x.kind}`);
+    s.select(x);
+  };
+  return { ...s, select };
+}
+
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
   const nav = useChatNav();
@@ -137,7 +151,7 @@ export function CollabView({ project }: { project: string }) {
     for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
     return set;
   }, [agents, project]);
-  const { load, now, actions, connected, rev, advance, refetch, reviewers } = useCollab(project, members);
+  const { load, now, actions, connected, rev, advance, refetch, reviewers, source } = useCollab(project, members);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const lastSeen = useLastSeen(project);
   const ov = load.status === "ok" ? load.ov : null;
@@ -153,9 +167,9 @@ export function CollabView({ project }: { project: string }) {
   const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>("all");
-  const { sel, setSel, focus, pickTask, select, close } = useSelection(openTask);
+  const { sel, setSel, focus, pickTask, select, close } = useSheetSelection(openTask, narrow);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr });
-  const projectName = projects.find((p) => p.id === project)?.name || project;
+  const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
   const lineAction = (l: LineView) => {
     const waitLabel = l.attention === "waiting" || l.attention === "stuck" ? l.stageLabel : null;
@@ -166,19 +180,20 @@ export function CollabView({ project }: { project: string }) {
     return l ? lineAction(l).text : "";
   };
 
-  if (load.status !== "ok" || !ov!.exists || (ov?.tasks?.length ?? 0) === 0) return <LoadState load={load} refetch={refetch} tr={tr} />;
+  if (load.status !== "ok" || !ov!.exists || ((ov?.tasks?.length ?? 0) === 0 && !source.ops)) return <LoadState load={load} refetch={refetch} tr={tr} />;
 
   const o = ov!, hv = view!;
   const m = metricsOf(o, hv.todayDone.length, agents.filter((a) => members.has(a.name) && a.status === "active").length);
+  if (source.unknownMetrics) { m.reviewRounds = null; m.fixed = null; }
   const resolved = resolveSelection(sel, o, canvas);
   if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
   const pane = narrowPane(openTask, resolved);
-  const team = <TeamPanel embedded ov={o} project={project} agents={agents} now={o.now} selected={sel?.kind === "member" ? sel.id : null}
-    onSelect={(n) => select(memberSel(n))} />;
+  const team = <>{source.ops?.(null)}<TeamPanel embedded ov={o} project={project} agents={agents} now={o.now} selected={sel?.kind === "member" ? sel.id : null}
+    onSelect={(n) => select(memberSel(n))} /></>;
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null}
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
-      extra={<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} />} />
+      extra={<>{source.ops?.(openTask)}<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
@@ -207,7 +222,7 @@ export function CollabView({ project }: { project: string }) {
         <>
           {dag.mobile(<MobileList project={project} ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
           {pane === "detail" && detail}
-          {pane !== "detail" && page && <div className={v.sheet}>{page}</div>}
+          {pane !== "detail" && page && createPortal(<div className={`${s.tokens} ${v.sheet} ${s.full}`}>{page}</div>, document.body)}
         </>
       ) : (
         <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline project={project} ov={o} lines={lines} filter={filter}

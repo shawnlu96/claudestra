@@ -18,7 +18,7 @@ import { getMeta } from "./ledger-store.js";
 import { REVIEW_ASK_REPLY } from "./order-standard-answers.js";
 import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
-import { parseAskWire, type AskWire } from "./order-wire.js";
+import { askScopeExtra, parseAskWire, type AskWire } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { slotByOrderId } from "./review-order.js";
 
@@ -73,8 +73,9 @@ export type OpenedOrderAsk = { askId: string; askee: string; duplicate: boolean;
 /** 审查单上的提问：没开 ask、没发通知，answer 是当场回给审查员的规则原文 */
 export type AnsweredReviewAsk = { answered: string };
 
-const askDigest = (q: Question): string =>
-  createHash("sha256").update(JSON.stringify([q.question, q.options, ...(q.default || q.class ? [q.default, q.class] : [])])).digest("hex").slice(0, 16);
+const askDigest = (q: Question, scope = askScopeExtra(q as Partial<AskWire>)): string => // 申请的文件 / 理由也算问题本身；没给的旧报文摘要不变
+  createHash("sha256").update(JSON.stringify([q.question, q.options,
+    ...(q.default || q.class ? [q.default, q.class] : []), ...(scope.files ? [scope.files, scope.reason] : [])])).digest("hex").slice(0, 16);
 
 /** 出借池里这一单的步骤；本机的单（调度器 intent / 手动单号）不在 lend_orders 里 = null */
 function lendStepOf(db: Database, orderId: string): string | null {
@@ -111,7 +112,7 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
     // 不阻塞的到期由自动定收口，不走 24 小时过期；其余不写 blocking，保持改动前的 null
     ...(nonblocking ? { blocking: false, expiresAt: 253402300799999 } : {}),
     extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending",
-      class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}) },
+      class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}), ...askScopeExtra(q as Partial<AskWire>) },
   });
   const ask = opened.ask;
   const askee = ask.assignee ?? pm;

@@ -20,6 +20,7 @@ import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
 import { parseDeliverWire } from "./order-wire.js";
 import { deliveredScope } from "./order-deliver-scope.js";
+import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -36,7 +37,7 @@ export interface DeliverDeps {
   run: LedgerRun;
 }
 
-export const deliverDedupKey = (orderId: string, head: string): string => `mcp-deliver:${orderId}:${head}`;
+export { deliverDedupKey }; // 定义在 memory-tools-refs.ts（memoryRefs 认同一个键；放那边免得两文件互相 import 成环）
 
 /** 解析 `git ls-remote origin refs/heads/<branch>` 的输出：恰好一行、ref 名完全一致才算 */
 export function parseLsRemote(r: BoundedResult, branch: string): RemoteHead {
@@ -72,12 +73,12 @@ function replayed(db: Database, call: VerifiedCall, key: string, orderId: string
 export async function deliverOrder(call: VerifiedCall, args: unknown, deps: DeliverDeps): Promise<OrderToolResult> {
   const w = parseDeliverWire(args);
   if (!w.ok) return refuse("invalid_wire", w.error);
-  const { orderId, head, evidence, summary, selfCheck, disputes } = w.value;
+  const { orderId, head, evidence, summary, selfCheck, disputes, memoryRefs } = w.value;
   if (!SHA40.test(head)) return refuse("invalid_wire", "head 要是小写的完整 40 位 SHA");
   if (!deps.db) return refuse("no_ledger", "这台机器没有台账");
   const key = deliverDedupKey(orderId, head);
   const again = replayed(deps.db, call, key, orderId);
-  if (again) return again;
+  if (again) return withMemoryRefs(again, call, deps.run, orderId, head, memoryRefs); // 交付之后补记 memoryRefs（wrong → dispute），重放也补
   const cur = currentOrders(deps.db, call).find((o) => o.orderId === orderId);
   if (!cur) return refuse("not_current_order", `${orderId} 不是你当前的单（take_order 看当前的单；卡可能已被收回或换了人 / 会话）`);
   const { branch, rev } = cur.task;
@@ -94,5 +95,5 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;
   await deliveredScope(deps.db, cur.task.id, head); // 规格外文件登记：异步、不抛，失败只记事件（order-deliver-scope.ts）
-  return receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null);
+  return withMemoryRefs(receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null), call, deps.run, orderId, head, memoryRefs);
 }

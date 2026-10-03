@@ -7,7 +7,7 @@
  */
 import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
 import type { OfferSummary } from "./lend-wire.js";
-import { parseAskWire } from "./order-wire.js";
+import { askScopeExtra, parseAskWire, type AskScopeReason } from "./order-wire.js";
 
 /** The protocol generation this build speaks; hello carries it both ways. A peer with no hello on file is proto 1 (poll only). */
 export const LEND_PROTO = 3;
@@ -47,7 +47,7 @@ type BeatVerdict = (typeof BEAT_VERDICTS)[number];
 interface LeaseV2 { gen: number; expiresAt: number; ms: number }
 export interface BeatAnswer { orderId: string; verdict: BeatVerdict; lease: LeaseV2 | null }
 
-interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[] }
+interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[]; files?: string[]; reason?: AskScopeReason }
 export interface OfferRequest { v: 1; proto: number; orders: OfferSummary[] }
 export interface OfferResponse { accepted: string[]; refused: { orderId: string; code: string }[] }
 
@@ -145,10 +145,12 @@ function parseBeat(raw: unknown): BeatRequest {
 
 /** The question and options follow the local ask tool's limits (order-wire parseAskWire); gen pins the lease it is asked under. */
 function parseAsk(raw: unknown): AskRequest {
-  const r = fields(raw, "$", ["v", "orderId", "gen", "question", "options"]);
-  const w = parseAskWire({ v: version(r), orderId: r.orderId, question: r.question, options: r.options });
+  // files / reason（i28-ASK4 测试类扩围）可选：旧版出借方不带，照常解析；不升版本号
+  const r = fields(raw, "$", ["v", "orderId", "gen", "question", "options"], ["files", "reason"]);
+  const scope = Object.fromEntries((["files", "reason"] as const).filter((k) => k in r).map((k) => [k, r[k]]));
+  const w = parseAskWire({ v: version(r), orderId: r.orderId, question: r.question, options: r.options, ...scope });
   if (!w.ok) return no("ask", w.error);
-  return { v: BODY_V, orderId: w.value.orderId, gen: whole(r.gen, "gen", 1, 1e9), question: w.value.question, options: w.value.options };
+  return { v: BODY_V, orderId: w.value.orderId, gen: whole(r.gen, "gen", 1, 1e9), question: w.value.question, options: w.value.options, ...askScopeExtra(w.value) };
 }
 
 function summaryOf(v: unknown, path: string): OfferSummary {

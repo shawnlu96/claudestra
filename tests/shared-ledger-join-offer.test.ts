@@ -77,6 +77,8 @@ function world(peerName: string, centerFetch?: typeof fetch): World {
     },
     stateDir: () => dir,
     now: () => clock.now,
+    projects: async () => [{ id: "project-a", name: "project-a", lastActivityAt: 0 }],
+    sharedProject: () => "project-a",
     peers: async () => peers,
     openAsk: (input) => {
       const a = { ...input, id: `ask_${asks.length + 1}`, state: "open", answer: null, fromAgent: null, fromChannelId: null, extra: input.extra ?? {},
@@ -86,9 +88,9 @@ function world(peerName: string, centerFetch?: typeof fetch): World {
     },
     getAsk: (id) => asks.find((a) => a.id === id) ?? null,
     closeAsk: (id) => { const a = asks.find((x) => x.id === id); if (a) a.state = "cancelled"; },
-    join: async (url, code) => {
+    join: async (url, code, localProjectId) => {
       joins.push({ url, code });
-      return joinSharedLedger({ url, code, key, instanceId: `instance-${peerName}`, subject: "owner:self", stateDir: joinDir, fetch: centerFetch ?? rewrite });
+      return joinSharedLedger({ url, code, key, instanceId: `instance-${peerName}`, subject: "owner:self", localProjectId, stateDir: joinDir, fetch: centerFetch ?? rewrite });
     },
     inform: async (text) => { informs.push(text); },
     sendReceipt: async (peer, body) => { receipts.push({ peer: peer.name, body }); return 200; },
@@ -111,7 +113,7 @@ function answer(a: Ask, button: string, owner = true): Ask {
 const receiptStatus = (w: World) => w.receipts.map((r) => JSON.parse(r.body).status);
 
 describe("receiving a join offer (验收 1)", () => {
-  test("configured peer → 0600 pending file + authorize card with peer, center host and only 加入 / 不加入", async () => {
+  test("configured peer → 0600 pending file + authorize card with peer, center host and a marked same-id join / 不加入", async () => {
     const w = world("peer-a1");
     const body = offerBody(markedCode());
     const res = await post(w, "in-peer", body);
@@ -127,7 +129,7 @@ describe("receiving a join offer (验收 1)", () => {
     expect(card!.context).toContain("中心主机：ledger-a.example");
     expect(card!.context).toContain(`中心 ID：${parseSharedLedgerJoinCode(body.code as string)!.centerId}`);
     expect(card!.context).toContain("团队 / 项目：入组后显示");
-    expect(card!.options).toEqual([{ type: "buttons", buttons: [{ id: JOIN_BUTTON, label: "加入", style: "success" }, { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }]);
+    expect(card!.options).toEqual([{ type: "buttons", buttons: [{ id: JOIN_BUTTON, label: "加入并绑到 project-a（同名）", style: "success" }, { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }]);
     expect(card!.expiresAt).toBeLessThanOrEqual(w.clock.now + 24 * 3600_000);
   });
 
@@ -351,4 +353,75 @@ describe("URL and code validation (验收 4)", () => {
     expect(centerOfferUrl("https://xn--ldger-bsa.example/")?.host).toBe("xn--ldger-bsa.example");
     expect(centerOfferUrl("https://lédger.example/")).toBeNull(); // IDN is shown only in its punycode form
   });
+});
+
+describe("local project selection (JN4)", () => {
+  test("same shared project id: marked same-id choice leads and binds that local project", async () => {
+    const w = world("peer-jn4-same");
+    w.deps.projects = async () => [{ id: "other", name: "Other", lastActivityAt: 100 }, { id: "project-a", name: "本机同名项目", lastActivityAt: 0 }];
+    expect((await post(w, "in-peer", offerBody(mint("jn4-same")))).status).toBe(202);
+    const card = w.asks[0]!;
+    expect(card.context).toContain("共享项目（根据已有绑定）：project-a");
+    expect((card.options[0] as { buttons: { label: string }[] }).buttons.map(b => b.label)).toEqual(["加入并绑到 本机同名项目（同名）", "加入并绑到 Other", "不加入"]);
+    await onJoinOfferAnswered(answer(card, JOIN_BUTTON), w.deps);
+    expect(JSON.parse(readFileSync(join(w.joinDir, "shared-ledger-bindings.json"), "utf8"))[0].localProjectId).toBe("project-a");
+  });
+  test("old invitation without project metadata: three recent project choices each bind exactly the selected local project", async () => {
+    for (let i = 0; i < 3; i++) {
+      const w = world(`peer-jn4-choice-${i}`);
+      w.deps.sharedProject = undefined;
+      w.deps.projects = async () => [0, 1, 2, 3].map(n => ({ id: `local-${n}`, name: `Local ${n}`, lastActivityAt: 10 - n }));
+      const body = offerBody(mint(`jn4-choice-${i}`));
+      expect((await post(w, "in-peer", body)).status).toBe(202);
+      const card = w.asks[0]!;
+      expect((card.options[0] as { buttons: { label: string }[] }).buttons.map(b => b.label)).toEqual([
+        "加入并绑到 Local 0", "加入并绑到 Local 1", "加入并绑到 Local 2", "不加入",
+      ]);
+      await onJoinOfferAnswered(answer(card, `${JOIN_BUTTON}_${i}`), w.deps);
+      expect(JSON.parse(readFileSync(join(w.joinDir, "shared-ledger-bindings.json"), "utf8"))[0].localProjectId).toBe(`local-${i}`);
+      expect(receiptStatus(w)).toEqual(["joined"]);
+    }
+  });
+  test("changing the saved choices or deleting the selected project refuses enrollment", async () => {
+    for (const mode of ["changed", "deleted"]) {
+      const w = world(`peer-jn4-${mode}`), body = offerBody(markedCode());
+      expect((await post(w, "in-peer", body)).status).toBe(202);
+      if (mode === "changed") {
+        const p = readPendingOffer(w.dir, body.offerId)!;
+        await savePendingOffer(w.dir, { ...p, projectChoices: [{ button: JOIN_BUTTON, localProjectId: "other", name: "Other" }] }, { replace: true });
+      } else w.deps.projects = async () => [];
+      await onJoinOfferAnswered(answer(w.asks[0]!, JOIN_BUTTON), w.deps);
+      expect(w.joins).toEqual([]);
+      expect(receiptStatus(w)).toEqual(["failed"]);
+    }
+  });
+});
+
+
+test("legacy pending accept reports failed with reinvite advice, while explicit decline remains declined", async () => {
+  for (const button of [JOIN_BUTTON, DECLINE_BUTTON]) {
+    const w = world(`peer-legacy-${button}`), body = offerBody(markedCode());
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    const p = readPendingOffer(w.dir, body.offerId)!;
+    await savePendingOffer(w.dir, { ...p, projectChoices: undefined, sharedProjectId: undefined }, { replace: true });
+    await onJoinOfferAnswered(answer(w.asks[0]!, button), w.deps);
+    expect(receiptStatus(w)).toEqual([button === JOIN_BUTTON ? "failed" : "declined"]);
+    if (button === JOIN_BUTTON) expect(w.informs[0]).toContain("重新发码");
+    expect(w.joins).toEqual([]);
+  }
+});
+
+test("known conflicting binding does not consume an intake choice and invalid binding state gives a fixed refusal", async () => {
+  const w = world("peer-bound-options");
+  w.deps.sharedProject = undefined;
+  w.deps.projects = async () => ["bound", "a", "b", "c"].map((id, i) => ({ id, name: id, lastActivityAt: 10 - i }));
+  w.deps.bindings = () => [{ centerId: "other", teamId: "other", projectId: "other", localProjectId: "bound" }];
+  expect((await post(w, "in-peer", offerBody(markedCode()))).status).toBe(202);
+  expect((w.asks[0]!.options[0] as { buttons: { label: string }[] }).buttons.map(b => b.label))
+    .toEqual(["加入并绑到 a", "加入并绑到 b", "加入并绑到 c", "不加入"]);
+  w.deps.bindings = () => { throw new Error(MARK); };
+  const response = await post(w, "in-peer", offerBody(markedCode()));
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ code: "local_project_state_unavailable" });
+  expect(logs.join("\n")).not.toContain(MARK);
 });

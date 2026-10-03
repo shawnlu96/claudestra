@@ -22,6 +22,7 @@ import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
+import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -184,8 +185,9 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       const entered = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
         AND json_extract(data, '$.to') = 'merge'`).get(task.id) as { seq: number };
       const cancelled = db.query(`SELECT id FROM scheduler_intents WHERE taskId = ? AND action = 'merge'
-        AND status = 'cancelled' AND causalSeq >= ? LIMIT 1`).get(task.id, entered.seq);
-      if (cancelled) throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
+        AND status = 'cancelled' AND causalSeq >= ? ORDER BY eventSeq DESC LIMIT 1`).get(task.id, entered.seq) as { id: string } | null;
+      const events = cancelled ? listEvents(db, { project: task.project, target: task.id }) : [];
+      if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!)) throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
       requireReviewedMerge(db, task, workflow, node, ctx.now ?? Date.now());
     }
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")

@@ -16,6 +16,7 @@ import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js
 import { getItem, getTask } from "./ledger-store.js";
 import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
+import { uiSpecGate } from "./spec-lint.js";
 
 export interface StartArgs {
   featureId: string;
@@ -139,6 +140,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   if (!node.fileGlobs?.length) return no("no_globs", `节点 ${node.key} 没有 fileGlobs：先用 rewrite_dag 的 update 补上文件范围`);
   const taskId = args.taskId ?? cardNames(env.db, f, node.key).taskId;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
+  const lint = uiSpecGate(env.db, env.ledgerDir, taskId, args.spec, f.project); if (lint) return no("spec_lint", lint);
   // 大小写不同的卡号也算占用：worktree / agent / 分支由小写卡号派生，Case-A 与 case-a 会落到同一个目录
   const taken = getTask(env.db, taskId) ?? (env.db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(taskId) as { id: string } | null);
   if (taken) return no("conflict", `卡号 ${taken.id} 已被占用：换一个 taskId`);

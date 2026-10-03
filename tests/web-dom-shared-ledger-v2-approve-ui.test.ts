@@ -3,7 +3,7 @@
  * React 19 (guard TESTS_WEB_DOM: tests/web-dom-*.test.ts may import web modules that use react). happy-dom is
  * registered only in this file and unregistered in afterAll, since all bun test files share one process.
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ApprovalPanelProps, ApprovalResult, ApprovalView } from "../web/features/collab/shared/approve/approve-model";
@@ -43,11 +43,17 @@ afterAll(async () => {
 /** Each submit returns a held promise; resolve(i, result) finishes the i-th call later. */
 function heldSubmit() {
   const pending: ((r: ApprovalResult) => void)[] = [];
-  const submit = () => new Promise<ApprovalResult>(resolve => { pending.push(resolve); });
-  return { submit, pending, resolve: (i: number, r: ApprovalResult) => React.act(async () => pending[i]!(r)) };
+  let onSubmit = () => {};
+  const submit = () => new Promise<ApprovalResult>(resolve => { pending.push(resolve); onSubmit(); });
+  const waitForSubmit = () => new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Approval submit did not arrive")), 2000);
+    onSubmit = () => { clearTimeout(timeout); resolve(); };
+  });
+  return { submit, pending, waitForSubmit, resolve: (i: number, r: ApprovalResult) => React.act(async () => pending[i]!(r)) };
 }
 
-async function mount(view: ApprovalView, submit: ApprovalPanelProps["submit"]) {
+async function mount(view: ApprovalView, held: ReturnType<typeof heldSubmit>) {
+  const submit = held.submit;
   const host = doc.createElement("div");
   doc.body.appendChild(host);
   const root = createRoot(host as never);
@@ -59,11 +65,32 @@ async function mount(view: ApprovalView, submit: ApprovalPanelProps["submit"]) {
   const approve = () => buttons().find(b => b.textContent.includes("批准"))!;
   return {
     render, approve,
-    click: () => React.act(async () => { approve().click(); await new Promise(r => setTimeout(r, 0)); }),
+    click: () => React.act(async () => {
+      const submitted = held.waitForSubmit();
+      approve().click();
+      await submitted;
+    }),
     success: () => host.querySelector('[aria-label="已批准"]') !== null || host.querySelector('[aria-label="已驳回"]') !== null,
     text: () => host.textContent ?? "",
     unmount: async () => { await React.act(async () => root.unmount()); host.remove(); },
   };
+}
+
+async function withUi(held: ReturnType<typeof heldSubmit>, run: (ui: Awaited<ReturnType<typeof mount>>) => Promise<void>) {
+  // Hashing may finish after a timer turn on CI; keep the real digest and exercise that ordering deliberately.
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  const delayed = spyOn(crypto.subtle, "digest").mockImplementation(async (...args) => {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    return digest(...args);
+  });
+  let ui: Awaited<ReturnType<typeof mount>> | undefined;
+  try {
+    ui = await mount(approveFixtureScopeView, held);
+    await run(ui);
+  } finally {
+    delayed.mockRestore();
+    if (ui) await ui.unmount();
+  }
 }
 
 const cancelledB: ApprovalView = { ...approveFixtureScopeView,
@@ -71,60 +98,60 @@ const cancelledB: ApprovalView = { ...approveFixtureScopeView,
 
 test("pending approval for ask A resolving after the panel switched to ask B never shows success under B", async () => {
   const held = heldSubmit();
-  const ui = await mount(approveFixtureScopeView, held.submit);
-  await ui.click();
-  expect(held.pending.length).toBe(1);
-  await ui.render(cancelledB);
-  await held.resolve(0, { ok: true });
-  expect(ui.text()).toContain("NEW ASK B");
-  expect(ui.text()).toContain("已撤销");
-  expect(ui.success()).toBe(false);
-  expect(ui.approve().disabled).toBe(true);
-  await ui.unmount();
+  await withUi(held, async ui => {
+    await ui.click();
+    expect(held.pending.length).toBe(1);
+    await ui.render(cancelledB);
+    await held.resolve(0, { ok: true });
+    expect(ui.text()).toContain("NEW ASK B");
+    expect(ui.text()).toContain("已撤销");
+    expect(ui.success()).toBe(false);
+    expect(ui.approve().disabled).toBe(true);
+  });
 });
 
 test("an already-saved approval for A does not carry over to a fresh open B, which stays signable", async () => {
   const held = heldSubmit();
-  const ui = await mount(approveFixtureScopeView, held.submit);
-  await ui.click();
-  await held.resolve(0, { ok: true });
-  expect(ui.success()).toBe(true);
-  await ui.render(approveFixtureMergeView);
-  expect(ui.text()).toContain("合成合并授权");
-  expect(ui.success()).toBe(false);
-  expect(ui.approve().disabled).toBe(false);
-  // B is refused by the center while A's earlier record is gone: failure is shown, not success.
-  await ui.click();
-  await held.resolve(1, { ok: false, code: "authorization_mismatch" });
-  expect(ui.success()).toBe(false);
-  expect(ui.text()).toContain("绑定内容不一致");
-  await ui.unmount();
+  await withUi(held, async ui => {
+    await ui.click();
+    await held.resolve(0, { ok: true });
+    expect(ui.success()).toBe(true);
+    await ui.render(approveFixtureMergeView);
+    expect(ui.text()).toContain("合成合并授权");
+    expect(ui.success()).toBe(false);
+    expect(ui.approve().disabled).toBe(false);
+    // B is refused by the center while A's earlier record is gone: failure is shown, not success.
+    await ui.click();
+    await held.resolve(1, { ok: false, code: "authorization_mismatch" });
+    expect(ui.success()).toBe(false);
+    expect(ui.text()).toContain("绑定内容不一致");
+  });
 });
 
 test("a late completion for A does not settle B's own pending submission", async () => {
   const held = heldSubmit();
-  const ui = await mount(approveFixtureScopeView, held.submit);
-  await ui.click();
-  await ui.render(approveFixtureMergeView);
-  await ui.click();
-  expect(held.pending.length).toBe(2);
-  await held.resolve(0, { ok: true });
-  expect(ui.success()).toBe(false);
-  expect(ui.approve().disabled).toBe(true);
-  await held.resolve(1, { ok: false, code: "conflict" });
-  expect(ui.success()).toBe(false);
-  expect(ui.text()).toContain("版本已变化");
-  await ui.unmount();
+  await withUi(held, async ui => {
+    await ui.click();
+    await ui.render(approveFixtureMergeView);
+    await ui.click();
+    expect(held.pending.length).toBe(2);
+    await held.resolve(0, { ok: true });
+    expect(ui.success()).toBe(false);
+    expect(ui.approve().disabled).toBe(true);
+    await held.resolve(1, { ok: false, code: "conflict" });
+    expect(ui.success()).toBe(false);
+    expect(ui.text()).toContain("版本已变化");
+  });
 });
 
 test("a rebind of the same ask (base version moved) drops the earlier result", async () => {
   const held = heldSubmit();
-  const ui = await mount(approveFixtureScopeView, held.submit);
-  await ui.click();
-  const rebound: ApprovalView = { ...approveFixtureScopeView, ask: { ...approveFixtureScopeView.ask, rev: 2 } };
-  await ui.render(rebound);
-  await held.resolve(0, { ok: true });
-  expect(ui.success()).toBe(false);
-  expect(ui.approve().disabled).toBe(false);
-  await ui.unmount();
+  await withUi(held, async ui => {
+    await ui.click();
+    const rebound: ApprovalView = { ...approveFixtureScopeView, ask: { ...approveFixtureScopeView.ask, rev: 2 } };
+    await ui.render(rebound);
+    await held.resolve(0, { ok: true });
+    expect(ui.success()).toBe(false);
+    expect(ui.approve().disabled).toBe(false);
+  });
 });
