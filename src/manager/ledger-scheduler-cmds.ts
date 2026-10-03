@@ -30,6 +30,7 @@ import { reviewSwapStep } from "../lib/scheduler-review-swap-runtime.js";
 import { familyWaitCommand } from "../lib/scheduler-family-pick-notice.js";
 import { secReviewAlarmCommand } from "../lib/scheduler-sec-review.js";
 import { specPlaceCommand } from "../lib/scheduler-spec-resume-write.js";
+import { CONVERGE_NOTICE_CMDS } from "./ledger-converge-notice-cmds.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -66,6 +67,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   ...convergenceCommands,
+  ...CONVERGE_NOTICE_CMDS,
   "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
     run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
   "scheduler-family-wait": familyWaitCommand,
