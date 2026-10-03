@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../src/lib/acp/adapter-proc.js";
 import { shellEscape } from "../src/lib/claude-launch.js";
 import { buildAcpHostCommand } from "../src/lib/runtimes/codex-acp.js";
-import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST, workerPrivateDirs } from "../src/lib/runtimes/clean-env.js";
+import {
+  BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, LEND_WORKER_PREFIX, pickWorkerEnv, WORKER_ENV_WHITELIST, workerPrivateDirs,
+} from "../src/lib/runtimes/clean-env.js";
 import { lendSubmitCmd } from "../src/lib/lend-arbiter-submit.js";
 import { RUNTIME_DIR, STATE_DIR } from "../src/lib/paths.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
