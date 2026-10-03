@@ -31,8 +31,9 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src
   event that got past the CLI by another path still does not count.
 - The merge write (`requireReviewedMerge` → `uiMergeRefusal`) re-reads the ledger inside its transaction: an owner-answered
   scheduler ask bound to the card, or — only when the card is not `ownerVisual` — a bound PM approval. The merge run re-reads the
-  same check when it starts (`beginMergeRun`) and before every GitHub step (`mergeRunDrift`): an approval that went stale, was
-  replaced or does not cover a carried head stops the run before the merge call.
+  same check when it starts (`beginMergeRun`), before every GitHub step (`mergeRunDrift`) and once more after the `merging` claim
+  returns, right before the merge call (`driveMerge` recheck): an approval that went stale, was replaced, was raised to ownerVisual
+  or does not cover a carried head stops the run as unknown ("合并未发出") before anything is sent.
 
 ## ownerVisual
 
