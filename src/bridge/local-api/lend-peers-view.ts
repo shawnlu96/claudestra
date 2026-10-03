@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import { canReadLedger } from "../../lib/devices.js";
 import { LEND_LIVE } from "../../lib/ledger-lend-schema.js";
 import { getTask } from "../../lib/ledger-store.js";
-import { getLendPeer, peerCapacity, type PeerCapacity } from "../../lib/ledger-lend-peers.js";
+import { getLendPeer, peerCapacity, unifiedPeerCapacity, type PeerCapacity, type UnifiedPeerCapacity } from "../../lib/ledger-lend-peers.js";
 import { isPriority, LEND_PATH, MAX_OPEN, readLend, type BorrowEntry, type Priority } from "../../lib/lend-config.js";
 import { placementOf } from "../../lib/lend-placement-view.js";
 import { effectiveLend, isPersonalProject, readLendContext, type LendContact } from "../../lib/lend-policy.js";
@@ -147,13 +147,26 @@ function openDb(): Database | null {
   }
 }
 
-function peerView(db: Database | null, b: BorrowEntry, now: number): PeerView {
+/**
+ * A peer's capacity is read the way placement counts it: unified (no borrow.maxOpen) only when every project of the entry that
+ * scheduler.json knows uses the agents pool; otherwise the legacy maxOpen cap still bounds some project, so it stays.
+ * The figure is per peer, never summed per project: a peer shared by two projects has one set of seats.
+ */
+const unifiedEntry = (b: BorrowEntry, cfg: SchedulerConfig | null): boolean => {
+  const known = b.projects.filter((id) => cfg?.projects[id]);
+  return known.length > 0 && known.every((id) => !!cfg?.projects[id]?.agents);
+};
+
+/** The wire keeps PeerCapacity's shape: totals / busy are already in `reported`. */
+const peerCapacityOf = ({ totals: _t, busy: _b, ...cap }: UnifiedPeerCapacity): PeerCapacity => cap;
+
+function peerView(db: Database | null, b: BorrowEntry, now: number, unified = false): PeerView {
   const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects, roles: b.roles, priority: b.priority ?? "balance", quota: peerQuota(b.peer, now) };
   if (!db || !hasTable(db, "lend_orders")) return { ...base, capacity: null, reported: null, paused: null, grant: null };
   const p = getLendPeer(db, b.peer);
   const g = p?.grant;
   return {
-    ...base, capacity: peerCapacity(db, b.peer, b.maxOpen, now), reported: p?.slots ?? null, paused: p?.paused ?? null,
+    ...base, capacity: unified ? peerCapacityOf(unifiedPeerCapacity(db, b.peer, now)) : peerCapacity(db, b.peer, b.maxOpen, now), reported: p?.slots ?? null, paused: p?.paused ?? null,
     grant: g ? { roles: g.roles, repos: g.repos, until: g.until, ordersLeftToday: g.ordersLeftToday } : null,
   };
 }
@@ -208,7 +221,7 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
       maxOpenLimit: MAX_OPEN,
     },
     ledger: !!db && hasTable(db, "lend_orders"),
-    peers: eff.borrow.map((b) => peerView(db, b, now)),
+    peers: eff.borrow.map((b) => peerView(db, b, now, unifiedEntry(b, cfg))),
     remote: remoteRows(db, (d, id) => placementView(d, id, cfg, eff.borrow, now)),
   };
 }

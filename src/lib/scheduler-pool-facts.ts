@@ -15,7 +15,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { WorkerRef } from "./scheduler-plan.js";
-import { getLendPeer, peerCapacity } from "./ledger-lend-peers.js";
+import { getLendPeer, peerCapacity, unifiedPeerCapacity } from "./ledger-lend-peers.js";
 import type { PeerFacts } from "./scheduler-placement.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
 
@@ -87,17 +87,13 @@ export function prCoordinates(pr: string | null): { repo: string; pr: number } |
 function peerV2(db: Database, b: BorrowEntry, now: number, unified = false): PeerFacts["v2"] {
   const row = getLendPeer(db, b.peer);
   if (!row || row.proto < 2) return null;
-  const cap = peerCapacity(db, b.peer, unified ? Number.MAX_SAFE_INTEGER : b.maxOpen, now);
+  const grant = { roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [], familyTotals: { claude: row.slots.claude.total, codex: row.slots.codex.total } };
   if (unified) {
-    for (const family of ["claude", "codex"] as const) {
-      const live = (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer=? AND family=?
-        AND status IN ('pooled','claimed','unknown')`).get(b.peer, family) as { n: number }).n;
-      cap.slots[family] = Math.min(cap.slots[family], Math.max(0, row.slots[family].total - live));
-    }
+    const u = unifiedPeerCapacity(db, b.peer, now);
+    return { familyBusy: u.busy, why: u.why, slots: u.slots, ...grant };
   }
-  return { ...(unified ? { familyBusy: { claude: row.slots.claude.total - cap.slots.claude, codex: row.slots.codex.total - cap.slots.codex } } : {}),
-    why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [],
-    familyTotals: { claude: row.slots.claude.total, codex: row.slots.codex.total } };
+  const cap = peerCapacity(db, b.peer, b.maxOpen, now);
+  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), ...grant };
 }
 
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
