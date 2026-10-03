@@ -1,6 +1,6 @@
 # 团队视图 ↔ 本机协作视图 1:1 核对与实施规格（team-parity-P1）
 
-> 规格 specRev 1 · 基线 `a538824a` · r1 按审查修订（见 §8）· 只读核代码，本页是唯一改动；产品代码一行没改。
+> 规格 specRev 1 · 基线 `a538824a` · r1、r2 按审查修订（见 §8）· 只读核代码，本页是唯一改动；产品代码一行没改。
 > 目的：说清"同一个已授权 Feature，团队视图和本机视图哪些已经一样、哪些不一样、为什么不一样"，
 > 再把差异拆成能直接派单的小节点。差异分三种处理：缺数据就补契约；中心已经有数据就补读口和适配；
 > 权限不同的照常不开放，但要明确显示"仅主场可见"，不能用空白或 0 冒充，也不能当 bug 修。
@@ -33,6 +33,7 @@
    P1-B（用上已经读到的字段、边归属改成「未记录」）、P1-C（真正"同一份数据双喂"的对照夹具）、
    P1-I（权限差异显式化 + 脱敏事件不再显示 undefined / 假「失败」）。A、C 立刻可写，B、I 等 A 合并（类型 + 串行文件，§5.0）。
    需要 PM 拍板的是 P1-D（V1 冻结契约做只增不改的读口扩展）和 P1-G（审查计数能不能出境）。
+   扩展数据从中心回到浏览器走 P1-K 的独立读口（r2 补），不改冻结的 `features/{id}` 响应。
 
 ---
 
@@ -214,10 +215,13 @@
   | `web/features/collab/collab-model.ts` | P1-A → P1-B |
   | `web/features/collab/team-source-adapter.ts` | P1-B → P1-H |
   | `web/features/collab/team-source-dag.ts` | P1-B → P1-F |
+  | `web/features/collab/team-source-history.ts` | P1-F 建 → P1-H（r2） |
   | `tests/helpers/team-parity-matrix.ts` | P1-C 建 → P1-F → P1-H（后两个只改期望值） |
+  | `src/lib/shared-ledger-client.ts`、`src/lib/shared-ledger-gate-proxy.ts`、`src/bridge/local-api/shared-ledger.ts`、`src/lib/shared-ledger-contract-fixtures.ts`、`web/lib/api/shared-ledger-reads.ts` | P1-D → P1-K（r2） |
 
   事件 / 回放 / 详情的消费者（`collab-detail-model.ts`、`collab-replay*.ts`、`collab-detail.tsx`）只归 P1-I；
-  P1-F / P1-H 只改适配器产出的数据形状，不改消费者。
+  P1-F / P1-H 只改适配器产出的数据形状，不改这三个消费者。DAG 版本页的消费者（`dag/dag-props.tsx`、`dag/dag-types.ts`
+  的 `VersionMeta`）只归 P1-F（r2），全仓库只有 `dag-props.tsx VersionRow` 读 `reasonKind / proposedBy / createdAt`。
 
 ### 5.1 第一批 · 马上可以开写（不等 CL1，不改契约）
 
@@ -340,7 +344,10 @@
     `by` 是成员代号（`actorCode`），不是人名。
   - `GET /v1/teams/{team}/features/{id}/activity/{afterServerSeq}` → `{serverSeq, items: ({src:"center", serverSeq, kind, by, at} | {src:"home", sourceSeq, taskId, type, at})[], truncated}`；
     `taskId` 是中心 id；**不含任何原文**（投影上来的 `summary` 本身就等于 kind，`shared-ledger-projector.ts:128`）。
-  - capabilities 新增 `read.versions`、`read.activity`（`enabled:false` 时 web 退回现状）。
+  - **能力发现（r2 更正）**：不往现有 `capabilities` 里加键——`shared-ledger-contract-responses.ts:10-13` 对 `capabilities`
+    逐键 `literal` 严格解析，加键会让老客户端拒收**所有** features 响应（现有公开数据降级）。改为新增
+    `GET /v1/teams/{team}/ext-capabilities` → `{schemaVersion:1, reads:{versions:boolean, activity:boolean, ext1:boolean, activityExt:boolean}}`；
+    老中心 404 → 全部视为 false，web 不发对应请求、退回现状。本节点只用 `versions / activity` 两键，`ext1 / activityExt` 由 P1-K 消费。
   - 路径参数不用 query：现有代理遇到 `new URL(req.url).search` 一律 400。`actionFor` 的正则只放行上面两条 `read`。
 - **读写权限**：read grant，和 `features/{id}` 同一道门；跨项目一律 403，响应体相同（沿用 X12 §3.1 的原则）。
 - **验收线**：代理对这两条路径按 `read` 选凭据、按 projectId 过滤；老中心（没有 capability）时 web 不发请求；
@@ -359,23 +366,41 @@
 
 #### P1-F · 团队视图用上版本 / 活动（公开 · 共用 UI 适配层）
 
-- **范围 globs（8）**：`web/features/collab/team-source-history.ts`（新建）、`web/features/collab/team-source-dag.ts`、
+- **范围 globs（12，r2 加版本页消费者）**：`web/features/collab/team-source-history.ts`（新建）、`web/features/collab/team-source-dag.ts`、
   `web/features/collab/team-source-shared.ts`、`web/features/collab/dag/dag-diff.ts`、`web/features/collab/dag/use-dag-board.ts`、
-  `tests/web-team-source-history*.test.ts`、`tests/web-team-source-activity*.test.ts`、`tests/helpers/team-parity-matrix.ts`（只改期望值）
-- **契约字段**：`versions` → `VersionMeta{version, reasonKind: v1 ? "initial" : "requirement_change", reasonText: reason, proposedBy: by ?? "", approvedBy: null, createdAt: at ?? 0, cancels: [], scopeChange:false, askId:null}`。
-  `reasonKind` 不是中心给的，UI 上标「类型未记录」，不能把映射值当成事实显示；`at === null` 时版本页时间显示「未记录」（不显示 1970）。
-  `snapshot` 从对应版本的 nodes 生成；对比用两份快照在前端算（新增纯函数，产出 `DagDiffResponse` 形状）。
-  capability 关着时：版本页显示「团队暂无历史版本」而不是一直「加载中」（`use-dag-board.ts` 识别团队源的"不可用"结果），
-  英文 `Error` 不再抛。
+  `web/features/collab/dag/dag-types.ts`、`web/features/collab/dag/dag-props.tsx`、`web/lib/i18n-dict-collab.ts`、
+  `tests/web-team-source-history*.test.ts`、`tests/web-team-source-activity*.test.ts`、`tests/web-dag-versions-unknown*.test.ts`、
+  `tests/helpers/team-parity-matrix.ts`（只改期望值）
+- **未知版本元数据的类型（r2，本节点声明并消费）**：`dag-types.ts VersionMeta` 放宽为
+  `reasonKind: ReasonKind | null`、`proposedBy: string | null`、`createdAt: number | null`（`approvedBy` 已是 `| null`）；
+  `FeatureDetail` 加可选 `history?: "unavailable"`（缺省 = 可用；本机 bridge 永远不发，照旧给值，本机行为不变）。
+  `PendingMeta = VersionMeta & …` 跟着放宽，团队的 `pending` 恒为 `null`，本机照旧有值。
+- **契约字段**：`versions` → `VersionMeta{version, reasonKind: null, reasonText: reason, proposedBy: by, approvedBy: null, createdAt: at, cancels: [], scopeChange:false, askId:null}`：
+  **不再把 v1 映射成 `initial`、其余映射成 `requirement_change`**——中心没有 reasonKind，就是 `null`；`by / at` 为 `null` 时原样 `null`，不填 `""` / `0`。
+  `snapshot` 从对应版本的 nodes 生成，`snapshot.meta` 同上；对比用两份快照在前端算（新增纯函数，产出 `DagDiffResponse` 形状）。
+- **版本页渲染（r2，`dag-props.tsx`）**：`VersionRow` 在 `reasonKind === null` 时图标用中性的 `history`、原因首行为空时文字为「类型未记录」
+  （不查 `REASON_ICON / REASON_WORD`）；`proposedBy` 和 `approvedBy` 都为 `null` 时提出人一栏显示「提出人未记录」；`createdAt === null`
+  时显示「时间未记录」，**不调 `hhmm`**（`hhmm(0)` 出 1970、`hhmm(null)` 出 1970 / Invalid Date）。`VersionsPage` 在
+  `detail?.history === "unavailable"` 时不画列表、不开「对比」，显示「团队暂无历史版本」；`!detail` 的「正在读取…」只在真正加载中出现。
+  三条新词条进 `i18n-dict-collab.ts`。本机三项都有值时 `VersionRow` 输出逐字不变。
+- **capability 关着时**（`ext-capabilities` 404 或 `reads.versions:false`）：团队源 `dag.feature()` 对当前版本返回
+  `{…, versions: [], snapshot: null, history: "unavailable"}`，不再抛；`use-dag-board.ts useDagVersions` 拿到的是正常结果，版本页不卡「加载中」；
+  请求非当前版本的英文 `Error` 不再出现（`VersionsPage` 不会在 unavailable 时发起对比）。
 - **活动 → 事件（r1 改）**：`activity` → `TaskDetail.events{seq, ts: at, kind: type, text: "", actor: by ?? "主场", data: {redacted: true}}`，
   **一律带 `redacted: true`，不伪造 `to / result / verdict`**；按 P1-I 的消费者规则只显示「类型 + 时间 + 详情仅主场」。
   「最近 3 件事」因此从 absent 变 present（类型 / 时间级），**回放仍是 home_only**：没有阶段证据，`hasReplay` 为 false，
   不会回放成 spec；等 P1-H 提供 stage `{from,to}` 后才有回放。
 - **读写权限**：只读；capability 关着时保持 P1-I 的「暂无 / 仅主场」。
 - **验收线**：P1-C 矩阵里 G5 / G7 / G8 / T5（类型 / 时间级）从 absent 变成 present，T6 保持 home_only；
-  事件行里不出现 "undefined"、「线上验证失败」（除非数据确实是失败）；不出现 "unavailable" 英文；版本页不卡「加载中」。
+  事件行里不出现 "undefined"、「线上验证失败」（除非数据确实是失败）；不出现 "unavailable" 英文；版本页不卡「加载中」；
+  版本行不出现 1970 / Invalid Date / 「初版」「需求变了」这类中心没给的原因类型；capability 关时版本页显示「团队暂无历史版本」。
 - **旧红新绿**：`teamDagFeature(board, id, 1)` 在 main 上抛错 → 红；有 versions 时返回快照 → 绿。
   活动适配：一条 `type:"verify"` 的 activity 经 adapter → `recentThree` 的文字不含「失败」→ 绿（main 上无此路径，先写断言为红）。
+  版本页渲染（r2，`tests/web-dag-versions-unknown*.test.ts`，happy-dom 渲染真实 `VersionsPage`）：
+  ① `VersionMeta{reasonKind:null, proposedBy:null, createdAt:null}`：main 上类型不允许、按 r1 映射（`at ?? 0`、`initial`）渲染出 "1970" 和「初版」→ 红，
+  修完含「类型未记录」「时间未记录」、不含 "1970" / "Invalid" / 「初版」→ 绿；② `detail = {versions:[], history:"unavailable"}`：
+  main 上 `versions` 空列表 + 无提示（或调用抛错时恒「正在读取…」）→ 红，修完「团队暂无历史版本」且「对比」按钮 disabled → 绿；
+  ③ 本机完整 `VersionMeta` 的行文字和图标逐字不变（防回归，绿）。
 - **依赖**：P1-D（类型）、P1-I（脱敏事件消费者规则，**必须先合并**，否则会出现 r0 审查里的 undefined / 失败）、
   P1-B（`team-source-dag.ts` 串行）、P1-A（`team-source-shared.ts` 串行）；联调依赖 P1-E。写代码和单测可以用假数据先行，**不用等 CL1**。
 
@@ -395,10 +420,15 @@
     reviews: { round: number; verdict: "pass" | "changes" | "block" | null; p0: number; p1: number; p2: number; at: number }[];
     metrics: { startTs: number | null; endTs: number | null; reviewRounds: number;
                p0: number; p1: number; p2: number; reviewWaitSince: number | null };
+    eventExt: EventExt1[];   // r2：事件扩展放在卡的 ext1 里，不改 V1 的 projection.events 形状
   }
-  事件扩展：type="stage" 带 {from: Stage, to: Stage}；type="review" 带 {round, verdict, p0, p1, p2}；
-           type="verify" 带 {result: "pass"|"fail"|"unknown"}（只枚举）
+  EventExt1 =                 // 按 sourceSeq 对上 V1 projection.events 里同一条事件，sourceTaskId 即本卡
+    | { sourceSeq: number; type: "stage";  from: Stage; to: Stage }
+    | { sourceSeq: number; type: "review"; round: number; verdict: "pass" | "changes" | "block" | null; p0: number; p1: number; p2: number }
+    | { sourceSeq: number; type: "verify"; result: "pass" | "fail" | "unknown" }
   ```
+  - 类型定义和严格解析（键集合封闭、按 `type` 判别、枚举外值和任何 `text / data / summary / note` 键一律拒收）放在新文件
+    `shared-ledger-contract-projection-ext.ts`，**上传（本节点）和读回（P1-K）共用同一份 schema**，避免两端各写一套。
   - `verdict` **沿用本机真实枚举 `pass|changes|block`**（`src/lib/ledger-steps.ts:47` 的 CHECK、`collab-step-line-model.ts:30,97`、
     `collab-detail-model.ts` 的 `VERDICT`），不引入 `reject`，不做转换；本机事件里不在这三个值里的结论投成 `null`（UI 显示「审查」不带结论）。
   - `metrics` **直接由导出端调用本机同一个 `taskMetrics()`（`src/lib/ledger-metrics.ts`）算**，保证同数据同数字：
@@ -409,8 +439,9 @@
 - **出境闸**：所有字段都过 `scrubSharedLedger`（数字 / 枚举也走一遍，枚举外的值拒收）；mirror entry 上新增显式开关
   `ext1Consent`（默认关，开启走现有导出预检，`shared-ledger-export.ts` 的 refusal 报告列出新字段）。不开 → 和现在完全一样，
   **现有的公开数据不降级**。
-- **私有部分**：中心接收和存储 `ext1`、`detail()` 在 capability 开着时**按卡原样回传**（没收到的卡不补默认值）
-  （floka-ai/cloud，依赖 CL1）。
+- **私有部分**：中心接收和存储 `ext1`（含 `eventExt`），并实现 P1-K 定义的 `ext1` / `activity-ext` 两条读口，**按卡 / 按事件原样回传**
+  （没收到的不补默认值）；**不往现有 `features/{id}` 的 detail 响应里加 `ext1`**（r2 更正：V1 detail 的 `taskProjectionSchema`
+  严格拒收多余键，加了会让老客户端整页读失败）。floka-ai/cloud，依赖 CL1。
 - **验收线**：没有 capability 时发出的包和 main 上逐字节一致（快照测试）；有 capability 但没有 consent 时也一致；
   两者都开时只多出 `ext1` 和事件扩展；scrub 遇到夹带文本或 `reject` 等枚举外值的 review 拒收。
 - **旧红新绿**：投影快照测试，main 上没有 `ext1` → 新断言红；开 consent 后变绿；未开时的快照保持绿（防降级）。
@@ -419,11 +450,46 @@
 - **依赖**：**owner / PM 决定审查结论和 P0/P1/P2 计数能不能出境**（class=design；默认：只出枚举和计数，原文永远 home_only）；
   中心那一半依赖 CL1 + P1-E 的部署通道。公开导出端可以先合并（capability 默认关，等于不生效）。
 
+#### P1-K · 扩展数据读回契约：中心 → bridge → 浏览器（公开 · 共享读 API + web 传输；r2 新增）
+
+- **为什么单列**：P1-G 只定了上传，P1-D 的 activity 只有类型 / 时间且拒收 `text / data`；没有这一节点，`stage.to / review.verdict /
+  verify.result` 到不了浏览器，P1-H 只能保持脱敏占位。
+- **范围 globs（9）**：`src/lib/shared-ledger-contract-ext-reads.ts`（新建，读响应 DTO + 严格解析；元素 schema 从
+  `shared-ledger-contract-projection-ext.ts` 导入，不另写）、`src/lib/shared-ledger-client.ts`、`src/lib/shared-ledger-gate-proxy.ts`、
+  `src/bridge/local-api/shared-ledger.ts`、`src/lib/shared-ledger-contract-fixtures.ts`、`web/lib/api/shared-ledger-reads.ts`、
+  `tests/shared-ledger-ext-reads*.test.ts`、`tests/shared-ledger-gate-proxy-ext*.test.ts`、`tests/web-shared-ledger-ext-reads*.test.ts`
+- **读 DTO（全部是新路径，老客户端永远不会请求，所以不影响冻结的 V1 响应）**：
+  - `GET /v1/teams/{team}/features/{id}/ext1` →
+    `{schemaVersion:1, teamId, serverSeq, featureId, consent: boolean, tasks: {taskId, ext1: TaskExt1WithoutEventExt}[]}`；
+  - `GET /v1/teams/{team}/features/{id}/activity-ext/{afterServerSeq}` →
+    `{schemaVersion:1, teamId, serverSeq, featureId, consent: boolean, items: ({taskId} & EventExt1)[], truncated: boolean}`；
+    `sourceSeq` 和 P1-D activity 的 `{src:"home", sourceSeq}` 一一对应，浏览器按 `(taskId, sourceSeq)` 合并。
+  - 两条都只回 P1-G 上传时已经过 scrub 的枚举 / 数字 / 时间戳，**没有任何自由文本**；解析器对多余键、`text / data / summary / note`、
+    枚举外值（含 `reject`）、`type` 不在 `stage / review / verify` 里的项一律拒收整包（不是丢单项后放行）。
+- **缺省行为**：`ext-capabilities`（P1-D）404 或 `reads.ext1 / reads.activityExt` 为 false → web 不发请求，所有卡视为"没有 `ext1`"、
+  所有事件保持 P1-F 的 `redacted: true`；capability 开但该 feature 没 consent → 中心返回 `consent:false` 和空数组（不补默认值），
+  web 同样视为全部未知；某张卡 / 某条事件不在数组里 → 该卡 / 该事件未知。三种情况都**不会**变成 0 或「失败」。
+- **web 传输类型**：`web/lib/api/shared-ledger-reads.ts` 新增 `TeamExt1Read`、`TeamActivityExtRead` 及 `fetchTeamExt1 / fetchTeamActivityExt`，
+  响应先过同一严格解析再交给适配层；解析失败按"读不到"处理（未知），不抛到界面。
+- **读写权限**：read grant，与 `features/{id}` 同门、同一 projectId 过滤；`gate-proxy` 的 `actionFor` 只把这两条加进 `read`
+  （改 `shared-ledger-gate-proxy.ts` 按 CLAUDE.md 在 baseline 里留 `raised[]` 记录）；跨项目 403、响应体与现有一致。
+- **验收线**：代理对两条路径按 `read` 选凭据；capability 关 / consent 关 / 部分卡缺失三种响应都解析成"未知"而不是默认值；
+  夹带 `text` 的 review、`verdict:"reject"`、`result:"ok"` 的响应被拒收。
+- **旧红新绿**：main 上代理对 `features/x/ext1`、`features/x/activity-ext/0` 返回 400 → 红，修完 → 绿；
+  **导出 → 回环假中心 → 严格解析联通**：本机一条 `verify{result:"pass"}`、一条 `stage{from:"build", to:"review"}`、一条 `review{verdict:"block", p0:1}`
+  经 P1-G 投影（consent 开）→ 回环假中心原样存回 → `activity-ext` 响应 → `parseActivityExt` 得到同样三项（main 上没有该解析器 → 红）；
+  同一条 review 夹带 `text:"…"` 时整包拒收（绿，防原文漏出）。
+- **依赖**：P1-D（文件串行 + `ext-capabilities`）、P1-G 公开部分（共用 `shared-ledger-contract-projection-ext.ts` 的 schema，只导入不改）；
+  联调依赖 P1-G 的私有中心一半（CL1）。不需要 owner 再拍板（出境范围已在 P1-G 定）。
+
 #### P1-H · 团队视图用上扩展字段（公开 · 共用 UI 适配层）
 
-- **范围 globs（6）**：`web/features/collab/team-source-adapter.ts`、`web/features/collab/team-source-shared.ts`、
+- **范围 globs（8）**：`web/features/collab/team-source-adapter.ts`、`web/features/collab/team-source-shared.ts`、
+  `web/features/collab/team-source-history.ts`（r2：活动 + `activity-ext` 合并成事件）、
   `web/features/collab/team-source-metrics.ts`（新建，覆盖率 / 聚合纯函数）、`tests/web-team-source-ext*.test.ts`、
-  `tests/web-team-source-ext-metrics*.test.ts`、`tests/helpers/team-parity-matrix.ts`（只更新期望值）
+  `tests/web-team-source-ext-metrics*.test.ts`、`tests/web-team-parity-ext-e2e*.test.ts`（r2）、`tests/helpers/team-parity-matrix.ts`（只更新期望值）
+- **数据来源（r2）**：卡级扩展只来自 P1-K 的 `fetchTeamExt1`，事件扩展只来自 `fetchTeamActivityExt`；团队源在 `overview()` / `task()`
+  里并行读，读不到按"没有 `ext1`"处理。
 - **字段映射（逐项，r1 补全）**：
 
   | 本机消费字段 | 来源（只在该卡有 `ext1` 时填） | 没有 `ext1` 时 |
@@ -434,13 +500,19 @@
   | `metrics.reviewRounds / p0 / p1 / p2` | `ext1.metrics.*` | 不填 |
   | `metrics.reviewWaitPendingMs` | `reviewWaitSince === null ? null : now - reviewWaitSince` | 不填 |
   | `lastReview` | `ext1.reviews` 最后一条（`text: ""`，原文 home_only） | `null` |
-  | `TaskDetail.events` 的 stage / review / verify | 事件扩展字段（`data.to / verdict / result`），**不带 `redacted`** | P1-F 的 `redacted: true` |
+  | `TaskDetail.events` 的 stage / review / verify | `activity-ext` 里同 `(taskId, sourceSeq)` 的项 → `data:{from,to}` / `{round,verdict,p0,p1,p2}` / `{result}`，**不带 `redacted`**（`team-source-history.ts`） | P1-F 的 `redacted: true` |
 
 - **按覆盖率给 `unknownMetrics`（r1 改：不再"capability 开就全知"）**：对本次总览里的卡逐张判断有没有 `ext1`：
   - `reviewRounds` / `fixed`：参与求和的卡（`fixed` 只看合并及以后的卡）**全部**有 `ext1` 才已知，否则列入 `unknownMetrics`；
   - `todayDone`：所有 done / verified 卡都有 `ext1` 且 `metrics.endTs` 是数字才已知；有一张缺就未知
     （不能退回按 `observedAt` 算）；
-  - `reviewWait`：所有 review 阶段的卡都有 `ext1` 才已知；已知且没人在等 → 「—」，未知 → 「暂无」；
+  - `reviewWait`（r2 改）：**本次总览 `tasks` 里的每一张卡**都有 `ext1` 才已知——`metricsOf`（`v4/v4-model.ts:27`）对所有卡收
+    `reviewWaitPendingMs`，而 pending 由 deliver / review 事件决定（`src/lib/ledger-metrics.ts reviewWaits`），和 stage 无关：
+    build / ops、blocked、甚至 done 卡都可能有 pending（`tests/web-collab-v4-model.test.ts:23-30` 的 ops 卡就是 180000ms）。
+    缺 `ext1` 时没有任何"已知不参与"的证据（V1 投影里只有 stage），所以不能按 stage 排除；有一张缺就整项「暂无」。
+    已知且没人在等 → 「—」，未知 → 「暂无」；
+  - 同理，`reviewRounds` 的"参与求和的卡"就是总览里的**全部卡**（`metricsOf` 对 `reviewRounds` 不按阶段过滤）；`fixed` 只看合并及以后
+    的卡是对的——它按 V1 已有的 `stage` 过滤（`PAST_REVIEW`），stage 本身是已知证据。
   - capability 关、或 capability 开但该 feature 没 consent → 每张卡都没有 `ext1` → 四项全未知，和 P1-A 之后的现状逐字一致。
   - 指标条 title 写覆盖率（如「12 / 15 张卡有扩展数据」），不显示部分和冒充总数。
 - **验收线**：矩阵里 T2 / T3 / T6（有 stage 扩展时）/ T7（计数和结论）/ M3 / M4 / M5 只在对应卡有 `ext1` 时变成 present；
@@ -450,10 +522,20 @@
     新规则四项「暂无」→ 绿；
   - 老卡 / 新卡混合（2 张有 `ext1`、1 张没有）：`reviewRounds` 未知、title 显示 2 / 3 → 绿；
   - 全部有 `ext1` 且含审查数据（`round 2, p0 1, p1 2`）：`metricsOf` 结果和本机同夹具相同（`reviewRounds`、`fixed` 非 0）→ 绿；
+  - **平均等复核混合卡（r2，用真实 `metricsOf`）**：review 卡 pending 60000ms 有 `ext1`、build/ops 卡 pending 180000ms 没有 `ext1`：
+    本机平均 120000、团队只能算出 60000；按 r1「只看 review 阶段卡」的规则判已知 → 显示 60000 ≠ 本机 → 红；
+    r2 规则判 `reviewWait` 未知、显示「暂无」→ 绿。再加一张 blocked 的 build 卡（没有 `ext1`）同样判未知；
+    两张都补上 `ext1` 后团队平均 = 本机 120000 → 绿。（本轮已用隔离探针跑过真实 `metricsOf`：
+    `{homeAvg:120000, teamAvg:60000, r1Known:true, r2Known:false, r1KnownBlocked:true, r2KnownBlocked:false}`。）
   - 源审查为 `block`：适配后 `eventLine` 显示「拦下」、`reviewRows[].verdict === "block"`、`lastReview.verdict === "block"` → 绿。
     （步骤线的结论来自 V1 `steps`，那里只有 `state` 没有 verdict，仍显示无结论——列为已知差异，不在本节点伪造。）
-- **依赖**：P1-G（公开部分）、P1-B（`team-source-adapter.ts` 串行，B 先）、P1-F（`team-source-shared.ts` 串行，F 先）；
-  联调依赖私有中心。
+  - **事件 / 回放联通（r2，`tests/web-team-parity-ext-e2e*.test.ts`）**：本机事件 `stage{from:"build",to:"review"}`、`verify{result:"pass"}`
+    → P1-G 投影 → 回环假中心 → P1-K `activity-ext` 严格解析 → `team-source-history.ts` 合并 → 真实 `eventLine` / `replayFrames`：
+    事件行分别为和本机同夹具同一文案的阶段推进行（目标阶段 review）和「线上验证通过」，回放帧阶段为 build → review，`hasReplay === true`，和本机同夹具逐字相同；
+    main 上（或只有 P1-F）同链路输出「推进阶段（目标阶段仅主场）」「线上验证（结果仅主场）」、`hasReplay === false` → 新断言红，修完绿。
+    同一条事件在 `activity-ext` 里缺失时仍是脱敏占位（绿）；夹带 `text` 的响应被 P1-K 拒收，事件保持占位（绿）。
+- **依赖**：P1-G（公开部分）、**P1-K（读回契约 + web 传输，r2）**、P1-B（`team-source-adapter.ts` 串行，B 先）、
+  P1-F（`team-source-shared.ts`、`team-source-history.ts` 串行，F 先）；联调依赖私有中心。
 
 ### 5.4 依赖图与真实阻塞
 
@@ -463,12 +545,12 @@ P1-A ──► P1-B（collab-model.ts 串行）
 P1-C（并行；A/B/I 合并后更新矩阵）
 P1-D ──(PM 批准只增扩展)──► P1-F（还需 P1-I、P1-B、P1-A 已合并；可以用假数据先行）
   └──► P1-E [私有 floka-ai/cloud，前置 CL1 gitlink] ──► P1-F 联调
-P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-H（还需 P1-B、P1-F 已合并）
-  └── 中心一半 [私有，前置 CL1]
+P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D；读回 DTO + 严格解析 + web 传输）──► P1-H（还需 P1-B、P1-F 已合并）
+  └── 中心一半 [私有，前置 CL1：存 ext1 + 实现 ext1 / activity-ext 读口] ──► P1-K / P1-H 联调
 ```
 
 真实阻塞只有三处：**① PM 批准在 V1 冻结契约上做只增扩展（P1-D）；② owner / PM 定审查计数是否出境（P1-G）；
-③ 私有中心的实现和部署（P1-E、P1-G 中心一半，前置 CL1）**。P1-A / C 马上可写；P1-B / I 只等 P1-A 合并（类型和串行文件），
+③ 私有中心的实现和部署（P1-E、P1-G 中心一半，前置 CL1）**。P1-K 的公开代码和回环测试不等 CL1。P1-A / C 马上可写；P1-B / I 只等 P1-A 合并（类型和串行文件），
 不受三处真实阻塞影响。
 
 ---
@@ -491,7 +573,7 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-H（还需 P1-B�
 |---|---|---|
 | 1 逐项对照 + 文件符号 / 契约证据 | §2、§3（47 行，分 A–F） | 完成；每行都有代码证据，不只依据设计注释 |
 | 2 隔离合成同数据、1200 / 390、深浅、前后截图 | §4 | 部分完成：桌面首页 + 详情、手机首页已实测；手机详情、版本 / 对比、谁在干活 / 团队标签**没有验证**，已经写明；截图没上传 |
-| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：9 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 14（P1-A） |
+| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：10 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有；r2 新增 K 读回契约）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 14（P1-A），F 12、K 9、H 8 |
 | 4 沿用闸门、不降级、原文不出境 | §6 | 完成 |
 | 5 完整方案 + 覆盖矩阵 + 第一批 + 真实阻塞 | §0、§3、§5.1、§5.4 | 完成 |
 
@@ -506,3 +588,11 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-H（还需 P1-B�
 | node-scope | P1-B 置空边元数据违反必填类型且 `v4-props.tsx` 不在范围；P1-I 要扩 `InjectedSource` 却不含定义文件；todayDone 未知不在 A 的键里 | §5.0 写明类型归属：`unavailable / homeOnly` 加在 `CollabSource`（`team-source.ts`，P1-A），注入侧经 `extends` 自动可见，不需要改 `team-source-context.ts`；`todayDone` 进 P1-A 的 `unknownMetrics`。P1-B 范围加入 `collab-model.ts`（边元数据放宽为 `null`）、`v4-props.tsx`（显示「未记录」不调 `hhmm`）、`team-fixture-gen.ts`。新增重叠文件串行表；各节点 globs ≤ 14。另更正：DAG 对比 / 历史快照的英文报错只进 console，界面是版本页卡「加载中」，归 P1-F 修。 |
 | review-enum | `verdict` 写成 `pass|changes|reject`，和真实 `pass|changes|block` 不符 | 改用真实枚举 `pass|changes|block|null`，不做转换；scrub 拒收枚举外值；P1-G / P1-H 各补一条 `block` 从投影 → 解析 → 适配 → UI 的回归。 |
 
+## 9. r2 修订记录（对应上一轮审查 lend:team-parity-P1:s1:r2:a0）
+
+| 审查项 | 问题 | 本版怎么改 |
+|---|---|---|
+| node-scope | P1-F 要求版本页显示「未记录」/「团队暂无历史版本」，但实际消费者 `dag/dag-props.tsx`（`VersionRow` 无条件查 `REASON_ICON` + `hhmm(createdAt)`，`VersionsPage` 只有列表和「正在读取…」）不在范围；`createdAt: at ?? 0`、映射出的 reasonKind 会显示 1970 和假原因 | P1-F globs 加 `dag-props.tsx`、`dag-types.ts`、`i18n-dict-collab.ts` 和渲染测试（12 个）；`VersionMeta.reasonKind / proposedBy / createdAt` 放宽为 `null`，`FeatureDetail.history?: "unavailable"`，本机照旧给值；团队映射一律 `null` 不填 0 / 假枚举；`VersionRow` 的未知分支和 `VersionsPage` 的不可用分支写清；补三条渲染旧红新绿；§5.0 写明版本页消费者只归 P1-F。 |
+| optional-metrics | `reviewWait` 只看 review 阶段卡是否有 `ext1`，而 `metricsOf` 对所有卡聚合 pending，build/ops 卡缺 `ext1` 时团队平均 60000 冒充本机 120000 | 改为总览里**全部卡**都有 `ext1` 才已知（缺 `ext1` 时 stage 不能证明不参与）；`reviewRounds` 同样按全部卡；`fixed` 按 V1 stage 过滤保留并说明理由。补混合 review/build、blocked 两条旧红新绿；本轮用真实 `metricsOf` 隔离探针复现：r1 规则 `known:true` 且 60000≠120000（红），r2 规则 `known:false`（绿）。 |
+| event-readback | 事件扩展只有上传端，没有中心 → 浏览器的读契约；`verify.result` 无载体，P1-D 的严格 activity 解析拒收 | 新增节点 **P1-K**：`features/{id}/ext1` 和 `features/{id}/activity-ext/{after}` 两条新读口的 DTO、严格解析（与 P1-G 共用 schema，拒收文本 / 枚举外值）、capability / consent / 缺项三种缺省行为（都是未知，不是 0 / 失败）、gate-proxy 放行、web 传输类型；P1-G 的事件扩展改为放在卡 `ext1.eventExt` 里（不改 V1 `projection.events`）；P1-H 加 `team-source-history.ts` 合并和 verify pass + stage to 的「导出 → 中心响应 → 严格解析 → 事件行 / 回放」联通测试。 |
+| （自查）能力发现 | P1-D 原写「capabilities 新增 read.*」，但 `shared-ledger-contract-responses.ts:10-13` 对 `capabilities` 逐键 `literal` 严格解析，加键会让老客户端拒收全部 features 响应 | 改为独立的 `GET …/ext-capabilities`，老中心 404 = 全关；同理 P1-G 不再往 V1 detail 响应里加 `ext1`。 |
