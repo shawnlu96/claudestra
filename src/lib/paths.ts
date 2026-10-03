@@ -25,7 +25,7 @@ import { stateDir, stateDirIn } from "./state-dir.js";
 import { join } from "path";
 import { DEFAULT_BRIDGE_PORT, resolveBridgeUrl } from "./bridge-url.js";
 import { enforceSandboxProcess, SANDBOX_DENY_DIRS_ENV, SANDBOX_DENY_PORTS_ENV, SANDBOX_FLAG, SANDBOX_ROOT_ENV } from "./sandbox.js";
-import { testSafeStateDir } from "./test-guard.js";
+import { testSafeRuntimeDir, testSafeStateDir } from "./test-guard.js";
 /** 入口文件（launcher / cron）经这里拿：它们本来就 import paths，省一行 import（三个文件都在体积上限） */
 export { refuseInSandbox } from "./sandbox.js";
 
@@ -38,13 +38,13 @@ function envDir(name: string): string | undefined {
 }
 
 /** ~/.claude-orchestrator（或 CLAUDESTRA_STATE_DIR）；测试进程落不到真实目录（lib/test-guard.ts） */
-export const STATE_DIR = testSafeStateDir(stateDir(), stateDirIn(homedir()));
+export const STATE_DIR = testSafeStateDir(stateDir());
 
 /** 生产默认运行目录（不看 override）。沙箱脚本拿它当拒绝清单的一项 */
 export const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";
 
-/** /tmp/claude-orchestrator（或 CLAUDESTRA_RUNTIME_DIR） */
-export const RUNTIME_DIR = envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_DIR;
+/** /tmp/claude-orchestrator（或 CLAUDESTRA_RUNTIME_DIR）；测试进程连不上线上 tmux（lib/test-guard.ts） */
+export const RUNTIME_DIR = testSafeRuntimeDir(envDir("CLAUDESTRA_RUNTIME_DIR") ?? DEFAULT_RUNTIME_DIR, DEFAULT_RUNTIME_DIR);
 
 // 沙箱进程（CLAUDESTRA_SANDBOX=1）在任何路径被用到之前过闸；非沙箱是空操作
 enforceSandboxProcess({
