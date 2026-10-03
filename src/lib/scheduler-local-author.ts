@@ -9,7 +9,7 @@ import { getMeta, getTask } from "./ledger-store.js";
 import type { RegistryRow } from "./scheduler-auto-ports.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { localAuthorPlan, type LocalAuthorPlan } from "./scheduler-local-author-plan.js";
-import { reusableAuthorWorktree } from "./scheduler-create-retry.js";
+import { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-retry.js";
 import { queuedLocalAuthor } from "./scheduler-local-author-queue.js";
 import { localAuthorRuntime, localCreateGuard, type LocalStartOptions } from "./scheduler-local-runtime-start.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
@@ -43,7 +43,7 @@ async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => vo
     const fetch = await git(["fetch", "-q", "origin"]);
     if (fetch.code !== 0) return `更新仓库失败：${fetch.out}`;
     if ((await git(["check-ref-format", "--branch", p.branch])).code !== 0) return "卡上分支名不合法";
-    const add = await git(["worktree", "add", "-b", p.branch, p.worktree, p.base]);
+    const add = await addAuthorWorktree(git, p);
     if (add.code !== 0) return `创建本机 worktree 失败：${add.out}`;
   }
   guard();

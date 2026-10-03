@@ -3,7 +3,7 @@
  * the failed try prepared. Real ensureLocalAuthor / createReviewer + retryCleanCreate over real git; only `manager create` is fake.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownQuota } from "../src/lib/ai-quota.js";
@@ -26,7 +26,7 @@ import { clearQueuedLocalStarts } from "../src/lib/scheduler-local-runtime-queue
 import { git } from "../src/lib/scheduler-review-worktree.js";
 import { startPlacement } from "../src/lib/scheduler-placement-start.js";
 import { runLedger } from "../src/manager/ledger.js";
-import { autoFixture } from "./scheduler-auto-helpers.js";
+import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 
 const CAPACITY = { ok: false, cleanedUp: true, error: "Selected model is at capacity. Please try a different model.\n（已清理：窗口已关；频道已删；占位已删）" };
 const cleanups: (() => void)[] = [];
@@ -42,11 +42,14 @@ async function gitRepo(dir: string): Promise<{ repo: string; run: (cwd: string, 
   };
   await run(repo, "init", "-q", "-b", "main");
   writeFileSync(join(repo, "a.ts"), "one\n");
-  await run(repo, "add", "a.ts");
+  mkdirSync(join(repo, "web"));
+  writeFileSync(join(repo, "web", "a.ts"), "web\n");
+  await run(repo, "add", ".");
   await run(repo, "commit", "-q", "-m", "one");
   await run(repo, "remote", "add", "origin", repo);
   await run(repo, "fetch", "-q", "origin");
   mkdirSync(join(repo, "node_modules")); // checkout links it into the worktree, untracked there: not "a change"
+  mkdirSync(join(repo, "web", "node_modules"));
   return { repo, run };
 }
 
@@ -123,6 +126,7 @@ async function authorFixture(fails: number) {
   const ensureIntents = () => db.query("SELECT status, receipt FROM scheduler_intents WHERE action = 'ensure_session' ORDER BY eventSeq")
     .all() as { status: string; receipt: string | null }[];
   return { tick, hello, creates, notices, ensureIntents, run, repo, worktree: join(worktreeRoot, "ap-a"), branch: pre.plan.branch,
+    setHead: (head: string) => db.query("UPDATE tasks SET headSHA = ? WHERE id = 'ap-a'").run(head),
     task: () => getTask(db, "ap-a")!, advance: (ms: number) => { now += ms; } };
 }
 
@@ -135,6 +139,42 @@ async function failOnceAndWait(f: Awaited<ReturnType<typeof authorFixture>>) {
   expect(f.ensureIntents().at(-1)).toMatchObject({ status: "cancelled", receipt: expect.stringContaining("第 1 次") });
   expect(existsSync(f.worktree)).toBe(true); // the failed try prepared its worktree and left it
   f.advance(createRetryDelay(1));
+}
+
+
+async function reviewerFixture() {
+  const f = autoFixture();
+  const root = mkdtempSync(join(tmpdir(), "sc1f1-rv-"));
+  cleanups.push(() => { f.close(); rmSync(root, { recursive: true, force: true }); });
+  const { repo, run } = await gitRepo(root);
+  const head = await run(repo, "rev-parse", "HEAD");
+  await toBuild(f);
+  await f.tick(); // author receives build order
+  expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", head)).ok).toBe(true);
+  f.db.query("UPDATE task_workflows SET authorFamily = 'codex' WHERE taskId = 'T1'").run();
+  const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
+  reg.agents["agent-task-one"].cwd = repo;
+  delete reg.agents["agent-rv-t1"];
+  writeFileSync(f.registryPath, JSON.stringify(reg));
+  const creates: string[][] = [];
+  const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(root, "wt"), create: async (...args) => {
+    creates.push(args);
+    if (creates.length === 1) return CAPACITY;
+    const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
+    r.agents[args[1]] = { runtime: "claude-code", sessionId: "s-rv2", cwd: args[2] };
+    writeFileSync(f.registryPath, JSON.stringify(r));
+    return { ok: true };
+  } });
+  f.tickDeps.ensure = d.ensure;
+  expect((await f.tick()).step).toBe("waiting");
+  expect(creates).toHaveLength(1);
+  expect(f.intents().at(-1)).toMatchObject({ node: "adversarial_review", status: "cancelled" });
+  expect((await f.tick()).detail).toContain("连续 1 次失败");
+  f.advance(createRetryDelay(1) - 1_000);
+  await f.tick();
+  expect(creates).toHaveLength(1);
+  f.advance(1_000);
+  return { f, d, creates, repo, run, checkout: join(root, "wt", "rv-t1") };
 }
 
 describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktree", () => {
@@ -181,42 +221,130 @@ describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktr
     expect(existsSync(g.worktree)).toBe(true);
   });
 
-  test("[验收线 3] reviewer: fail clean, then after the backoff its leftover checkout is reused and the reviewer is created", async () => {
-    const f = autoFixture();
-    const root = mkdtempSync(join(tmpdir(), "sc1f1-rv-"));
-    try {
-      const { repo, run } = await gitRepo(root);
-      const head = await run(repo, "rev-parse", "HEAD");
-      await f.tick(); // binds the author session
-      const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
-      reg.agents["agent-task-one"].cwd = repo;
-      delete reg.agents["agent-rv-t1"];
-      writeFileSync(f.registryPath, JSON.stringify(reg));
-      const creates: string[][] = [];
-      const d = autoTickDeps(f.db, { registryPath: f.registryPath, worktreeRoot: join(root, "wt"), create: async (...args) => {
-        creates.push(args);
-        if (creates.length === 1) return CAPACITY;
-        const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
-        r.agents[args[1]] = { runtime: "claude-code", sessionId: "s-rv2", cwd: args[2] };
-        writeFileSync(f.registryPath, JSON.stringify(r));
-        return { ok: true };
-      } });
-      const task = { ...getTask(f.db, "T1")!, headSHA: head };
-      expect(await d.ensure(task, "reviewer", "claude")).toMatchObject({ kind: "wait", reason: expect.stringContaining("reviewer agent-rv-t1 第 1 次") });
-      const checkout = join(root, "wt", "rv-t1");
-      expect(existsSync(checkout)).toBe(true);
-      expect(await d.ensure(task, "reviewer", "claude")).toMatchObject({ kind: "ready", created: true, ref: { agent: "agent-rv-t1", sessionId: "s-rv2" } });
-      expect(creates).toHaveLength(2);
-      expect(creates[1][2]).toBe(checkout);
-
-      // A leftover whose tracked files were changed is not overwritten: manual, untouched.
-      const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
-      delete r.agents["agent-rv-t1"];
-      writeFileSync(f.registryPath, JSON.stringify(r));
-      writeFileSync(join(checkout, "a.ts"), "patched\n");
-      expect(await d.ensure(task, "reviewer", "claude")).toMatchObject({ kind: "manual", reason: expect.stringContaining("已跟踪文件被改过") });
-      expect(creates).toHaveLength(2);
-      expect(readFileSync(join(checkout, "a.ts"), "utf8")).toBe("patched\n");
-    } finally { f.close(); rmSync(root, { recursive: true, force: true }); }
+  test("wrong-start: a correct branch at ancestor A cannot retry from immutable base B", async () => {
+    const f = await authorFixture(1);
+    const ancestor = await f.run(f.repo, "rev-parse", "HEAD");
+    await f.run(f.repo, "commit", "-q", "--allow-empty", "-m", "base B");
+    f.setHead(await f.run(f.repo, "rev-parse", "HEAD"));
+    await failOnceAndWait(f);
+    await f.run(f.worktree, "reset", "--hard", ancestor); // only the disposable fixture, before any human edits
+    expect((await f.tick()).step).toBe("held");
+    expect(f.ensureIntents().at(-1)!.receipt).toContain("不在本卡起点");
+    expect(f.creates).toHaveLength(1);
+    expect(await f.run(f.worktree, "rev-parse", "HEAD")).toBe(ancestor);
   });
+
+  for (const state of ["legacy clean", "legacy wrong start", "corrupt saved start", "different card"]) {
+    test(`saved-start validation: ${state}`, async () => {
+      const f = await authorFixture(1);
+      const ancestor = await f.run(f.repo, "rev-parse", "HEAD");
+      await f.run(f.repo, "commit", "-q", "--allow-empty", "-m", "expected base");
+      f.setHead(await f.run(f.repo, "rev-parse", "HEAD"));
+      await failOnceAndWait(f);
+      const metadata = join(await f.run(f.worktree, "rev-parse", "--absolute-git-dir"), "scheduler-author-start.json");
+      if (state.startsWith("legacy")) rmSync(metadata);
+      else if (state === "corrupt saved start") writeFileSync(metadata, "{");
+      else writeFileSync(metadata, JSON.stringify({ ...JSON.parse(readFileSync(metadata, "utf8")), branch: "another-card" }));
+      if (state === "legacy wrong start") await f.run(f.worktree, "reset", "--hard", ancestor);
+      expect((await f.tick()).step).toBe(state === "legacy clean" ? "session" : "held");
+      expect(f.creates).toHaveLength(state === "legacy clean" ? 2 : 1);
+    });
+  }
+
+  for (const obstacle of ["invalid base", "existing branch"]) {
+    test(`initial checkout still refuses ${obstacle}`, async () => {
+      const f = await authorFixture(0);
+      if (obstacle === "invalid base") f.setHead("f".repeat(40));
+      else await f.run(f.repo, "branch", f.branch);
+      f.hello(true);
+      expect((await f.tick()).step).toBe("stage");
+      expect((await f.tick()).step).toBe("held");
+      expect(f.creates).toHaveLength(0);
+      expect(existsSync(f.worktree)).toBe(false);
+      expect(f.ensureIntents().at(-1)!.receipt).toContain(obstacle === "invalid base" ? "创建本机 worktree 失败" : "分支");
+    });
+  }
+
+  test("the saved start survives origin/main advancing while create backs off", async () => {
+    const f = await authorFixture(1);
+    await failOnceAndWait(f);
+    const start = await f.run(f.worktree, "rev-parse", "HEAD");
+    await f.run(f.repo, "commit", "-q", "--allow-empty", "-m", "new main");
+    await f.run(f.repo, "fetch", "-q", "origin");
+    expect(await f.run(f.repo, "rev-parse", "origin/main")).not.toBe(start);
+    expect((await f.tick()).step).toBe("session");
+    expect(f.creates).toHaveLength(2);
+    expect(await f.run(f.worktree, "rev-parse", "HEAD")).toBe(start);
+  });
+
+  test("hidden-untracked: status.showUntrackedFiles=no cannot conceal an uncommitted file", async () => {
+    const f = await authorFixture(1);
+    await failOnceAndWait(f);
+    await f.run(f.repo, "config", "status.showUntrackedFiles", "no");
+    writeFileSync(join(f.worktree, "new.ts"), "human edit\n");
+    expect((await f.tick()).step).toBe("held");
+    expect(f.ensureIntents().at(-1)!.receipt).toContain("worktree 有改动");
+    expect(f.creates).toHaveLength(1);
+    expect(readFileSync(join(f.worktree, "new.ts"), "utf8")).toBe("human edit\n");
+  });
+
+  for (const sub of ["node_modules", "web/node_modules"]) {
+    for (const shape of ["directory", "redirected link", "ignored directory"]) {
+      test(`dependency-exemption: ${sub} replaced by ${shape} is preserved and held`, async () => {
+        const f = await authorFixture(1);
+        await failOnceAndWait(f);
+        const dest = join(f.worktree, sub), other = join(f.repo, "other-deps");
+        rmSync(dest); // unlink the fixture's scheduler link, never its shared target
+        if (shape === "redirected link") { mkdirSync(other); symlinkSync(other, dest); }
+        else mkdirSync(dest);
+        writeFileSync(join(dest, "human-edits"), "keep me\n");
+        if (shape === "ignored directory") {
+          const exclude = await f.run(f.repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude");
+          writeFileSync(exclude, "node_modules\n");
+        }
+        expect((await f.tick()).step).toBe("held");
+        expect(f.ensureIntents().at(-1)!.receipt).toContain("worktree 有改动");
+        expect(f.creates).toHaveLength(1);
+        expect(readFileSync(join(dest, "human-edits"), "utf8")).toBe("keep me\n");
+      });
+    }
+  }
+
+  test("[验收线 3] reviewer: fail clean, wait through planner backoff, then create again", async () => {
+    const { f, d, creates, checkout } = await reviewerFixture();
+    expect(existsSync(checkout)).toBe(true);
+    expect((await f.tick()).step).toBe("session");
+    expect(f.intents().at(-1)).toMatchObject({ node: "adversarial_review", status: "done" });
+    expect(creates).toHaveLength(2);
+    expect(creates[1][2]).toBe(checkout);
+    const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
+    delete r.agents["agent-rv-t1"];
+    writeFileSync(f.registryPath, JSON.stringify(r));
+    writeFileSync(join(checkout, "a.ts"), "patched\n");
+    expect(await d.ensure(f.task(), "reviewer", "claude")).toMatchObject({ kind: "manual", reason: expect.stringContaining("已跟踪文件被改过") });
+    expect(creates).toHaveLength(2);
+    expect(readFileSync(join(checkout, "a.ts"), "utf8")).toBe("patched\n");
+  });
+
+  for (const change of ["tracked", "hidden untracked", "wrong branch", "wrong head", "dependency directory"]) {
+    test(`reviewer clean-failure retry preserves and holds ${change}`, async () => {
+      const { f, creates, checkout, repo, run } = await reviewerFixture();
+      let edited: string | null = null;
+      if (change === "wrong branch") await run(checkout, "checkout", "-q", "-b", "human-branch");
+      else if (change === "wrong head") await run(checkout, "commit", "-q", "--allow-empty", "-m", "human commit");
+      else {
+        await run(repo, "config", "status.showUntrackedFiles", "no");
+        if (change === "dependency directory") mkdirSync(join(checkout, "node_modules"));
+        edited = join(checkout, change === "tracked" ? "a.ts" : change === "dependency directory" ? "node_modules/human-edits" : "new.ts");
+        writeFileSync(edited, "keep me\n");
+      }
+      const head = await run(checkout, "rev-parse", "HEAD");
+      const held = await f.tick();
+      expect(held.step).toBe("held");
+      expect(held.detail).toContain(edited ? "worktree 有改动" : "不在预期 detached 起点");
+      expect(creates).toHaveLength(1);
+      expect(await run(checkout, "rev-parse", "HEAD")).toBe(head);
+      if (edited) expect(readFileSync(edited, "utf8")).toBe("keep me\n");
+    });
+  }
 });

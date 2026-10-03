@@ -4,11 +4,16 @@
  * (2 → 4 → 8 → 15 min, per card and role) instead of stopping as "unknown" for PM. Anything less certain stays unknown.
  * tests/scheduler-create-retry.test.ts.
  */
+import { existsSync } from "node:fs";
+import { openReviewWorktree, type Git, type Pinned } from "./scheduler-review-worktree.js";
+import { retryWorktreeDirty } from "./scheduler-create-retry-worktree.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { RegistryRow } from "./scheduler-auto-ports.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
+
+export { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-retry-worktree.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -65,21 +70,14 @@ export async function retryCleanCreate(env: { db: Database; registryRow: Registr
   return { kind: "wait", reason: `${MARK}（${role} ${f.name} 第 ${n} 次${loud}；${wait / 60_000} 分钟后、最早 ${new Date(now() + wait).toISOString()} 重试）：${first}` };
 }
 
-/**
- * The author worktree a clean create failure left behind (scheduler-local-author.ts checkout) must not hold the retry as
- * "already exists". It is reused only when provably untouched: on this card's branch, HEAD at (or behind, if origin moved)
- * the planned base with no commits of its own, and nothing uncommitted besides the node_modules links checkout makes.
- * Returns null to reuse, else the held reason; a touched worktree is never removed.
- */
-export async function reusableAuthorWorktree(git: (args: string[]) => Promise<{ code: number; out: string }>,
-  p: { worktree: string; branch: string; base: string }): Promise<string | null> {
-  const at = (args: string[]) => git(["-C", p.worktree, ...args]);
-  const kept = `worktree ${p.worktree} 已存在`;
-  const branch = await at(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  if (branch.code !== 0 || branch.out !== p.branch) return `${kept}，但不在本卡分支 ${p.branch} 上（${branch.out || "detached"}），保留并等待核对`;
-  if ((await at(["merge-base", "--is-ancestor", "HEAD", p.base])).code !== 0) return `${kept}，HEAD 不在本卡起点 ${p.base} 上（有自己的提交），保留并等待核对`;
-  const st = await at(["status", "--porcelain"]);
-  if (st.code !== 0) return `${kept}，读不了工作区状态：${st.out}`.slice(0, 400);
-  const changed = st.out.split("\n").filter((l) => l && !/^\?\? (web\/)?node_modules\/?$/.test(l));
-  return changed.length ? `${kept}，worktree 有改动，不复用也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400) : null;
+/** Only a clean failed reviewer creation may reuse its checkout without moving or accepting edits. */
+export async function openCreateReviewWorktree(db: Database, task: LedgerTask, authorDir: string, dir: string, git: Git): Promise<Pinned | { held: string }> {
+  if (streak(db, task.id, "reviewer").n && existsSync(dir)) {
+    const branch = await git(["-C", dir, "symbolic-ref", "--quiet", "HEAD"]);
+    const head = await git(["-C", dir, "rev-parse", "HEAD"]);
+    if (branch.code !== 1 || head.code !== 0 || head.out !== task.headSHA) return { held: `审查 worktree ${dir} 不在预期 detached 起点，保留并等待核对` };
+    const dirty = await retryWorktreeDirty(git, dir);
+    if (dirty) return { held: dirty };
+  }
+  return openReviewWorktree(authorDir, dir, task.headSHA, git);
 }
