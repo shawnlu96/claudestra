@@ -46,13 +46,13 @@ afterAll(async () => {
 
 interface Ctl { sel: string | null; setSel(s: string | null): void; setNarrow(n: boolean): void; prepare(id: string): void }
 /** 和 collab-view 同一种接法：成员页的 × 回团队，其余 × 收起 */
-async function mount(initialNarrow = true) {
+async function mount(initialNarrow = true, hp: HistoryPort = port) {
   const ctl = {} as Ctl;
   function Harness() {
     const [sel, setSel] = React.useState<string | null>(null);
     const [narrow, setNarrow] = React.useState(initialNarrow);
     const close = () => setSel((s) => (s === "member" ? "team" : null));
-    const prepare = useSheetHistory(sel !== null, narrow, `~${sel ?? ""}`, close, port);
+    const prepare = useSheetHistory(sel !== null, narrow, `~${sel ?? ""}`, close, hp);
     Object.assign(ctl, { sel, setSel, setNarrow, prepare });
     return null;
   }
@@ -82,7 +82,52 @@ async function reset() {
   win().history.replaceState(null, "", "#chat");
 }
 
+/** back 不立刻生效：flush() 时才出栈并发 popstate（浏览器里 back 的遍历和 popstate 都是异步的，happy-dom 太快测不出竞态） */
+function controlled() {
+  const stack = ["#chat"];
+  let at = 0, queued = 0;
+  const subs = new Set<() => void>();
+  const p: HistoryPort = {
+    hash: () => stack[at]!,
+    push: (h) => { stack.splice(at + 1, stack.length, h); at++; },
+    replace: (h) => { stack[at] = h; },
+    back: () => { queued++; },
+    onPop: (f) => { subs.add(f); return () => { subs.delete(f); }; },
+  };
+  const flush = () => { for (; queued > 0; queued--) { if (at > 0) at--; for (const f of [...subs]) f(); } };
+  return { port: p, flush, live: () => stack.slice(0, at + 1) };
+}
+
 describe("整屏页历史条目", () => {
+  test("收起后旧 back 还在途就打开另一层：新层不被旧 popstate 关掉，落地后认领新条目（PR556-r1）", async () => {
+    const c = controlled();
+    const { ctl, act, unmount } = await mount(true, c.port);
+    await act(() => ctl.setSel("team"));
+    expect(c.port.hash()).toBe("#chat?collab=~team");
+    await act(() => ctl.setSel(null));
+    await act(() => { ctl.prepare("~waits"); ctl.setSel("waits"); });
+    expect(c.port.hash()).toBe("#chat?collab=~team"); // 在途期间不认领、不 replace
+    await act(() => c.flush());
+    expect(ctl.sel).toBe("waits");
+    expect(c.live()).toEqual(["#chat", "#chat?collab=~waits"]);
+    await act(() => ctl.setSel(null));
+    await act(() => c.flush());
+    expect(c.live()).toEqual(["#chat"]);
+    await unmount();
+  });
+
+  test("自己的 back 一直没落地：800ms 后放行，开着的层照样认领", async () => {
+    const c = controlled();
+    const { ctl, act, unmount } = await mount(true, c.port);
+    await act(() => ctl.setSel("team"));
+    await act(() => ctl.setSel(null));
+    await act(() => ctl.setSel("waits"));
+    await act(() => new Promise<void>((r) => setTimeout(r, 900)));
+    expect(ctl.sel).toBe("waits");
+    expect(c.port.hash()).toBe("#chat?collab=~waits");
+    await unmount();
+  });
+
   test("窄屏打开压一条；× 收起时消掉自己那条，不留空记录", async () => {
     await reset();
     const { ctl, act, unmount } = await mount();
