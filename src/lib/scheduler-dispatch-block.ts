@@ -61,7 +61,8 @@ function closedBy(e: Ev, events: readonly Ev[], window: number): boolean {
   }
   if (e.kind === "note" && lendOp(e) === "reclaim") return true;
   if (e.kind !== "scheduler") return false;
-  if (e.data.op !== "settle" || (e.data.to !== "submitted" && e.data.to !== "done")) return false;
+  // submitted is only the pre-send claim; rejected or unknown delivery must keep the standing block visible.
+  if (e.data.op !== "settle" || e.data.to !== "done") return false;
   const plan = events.find((p) => p.kind === "scheduler" && p.data.op === "plan" && p.data.id === e.data.id);
   return plan?.data.action === "dispatch" && typeof plan.data.recipient === "string" && !isPoolIntent({ action: "dispatch", recipient: plan.data.recipient });
 }

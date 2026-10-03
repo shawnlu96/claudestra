@@ -9,6 +9,7 @@
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { auditLedger } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
@@ -146,6 +147,47 @@ describe("r1: assignment is not takeover, and released restate changes outbound 
       expect(p.events().find((e) => e.kind === "stage" && e.data.to === "restate")!.text).toBe(original);
       if (stillUnsafe) expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
       else expect(p.orders()[0]!.text).not.toContain(original);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+});
+
+describe("r2: only confirmed local delivery closes a gate block", () => {
+  for (const mode of ["refuse", "lost", "ok"] as const) test(`local send ${mode}: preserve uncertain work, close confirmed delivery`, async () => {
+    const p = await blockFixture();
+    try {
+      writeFileSync(p.f.task().spec!, leaked());
+      p.policy.remote.agents = { claude: 0, codex: 0 };
+      p.hello();
+      expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+      expect(await later(p)).toMatchObject({ step: "waiting", detail: expect.stringContaining("安全材料阻塞") });
+      p.f.setSend(mode);
+      p.policy.remote.agents = { claude: 1, codex: 0 };
+      await later(p);
+      const settles = p.events().filter((e) => e.kind === "scheduler" && e.data.op === "settle");
+      expect(settles.some((e) => e.data.to === "submitted")).toBe(true);
+      expect(settles.at(-1)!.data.to).toBe(mode === "ok" ? "done" : mode === "lost" ? "unknown" : "cancelled");
+      const fresh = new Database(join(p.f.dir, "ledger.sqlite"), { readonly: true });
+      try {
+        const block = gateBlock(getTask(fresh, "T1")!, listEvents(fresh, { target: "T1" }));
+        if (mode === "ok") expect(block).toBeNull();
+        else expect(block).toMatchObject({ state: "blocked" });
+      } finally { fresh.close(); }
+      expect(blocked(p)).toHaveLength(mode === "ok" ? 0 : 1);
+      p.f.setSend("ok");
+      p.policy.remote.agents = { claude: 0, codex: 0 };
+      for (let i = 0; i < 4; i++) {
+        const r = await later(p);
+        if (mode === "refuse") expect(r).toMatchObject({ step: "waiting", detail: expect.stringContaining("安全材料阻塞") });
+      }
+      expect(p.refusals()).toHaveLength(1);
+      expect(p.orders()).toEqual([]);
+      if (mode === "ok") expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      else {
+        expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+        expect(blocked(p)).toHaveLength(1);
+        if (mode === "refuse") expect(view(p)).toMatchObject({ category: "security_material", block: { state: "blocked" } });
+        else expect(p.f.intents().some((i) => i.status === "unknown")).toBe(true);
+      }
     } finally { p.f.close(); }
   }, E2E_MS);
 });
