@@ -5,7 +5,7 @@ import {
 } from "../lib/shared-ledger-contract.js";
 import { sharedLedgerManifestDigest } from "../lib/shared-ledger-contract-transfer.js";
 import type { SharedLedgerPrincipal } from "../lib/shared-ledger-auth.js";
-import { assertSharedLedgerMutation } from "../lib/shared-ledger-contract-validation.js";
+import { assertImportedDagStep } from "./import-history.js";
 import { actorCode, projectionHome } from "./identity.js";
 import { conflict, feature, meta } from "./reads.js";
 import { insertFeature, saveDag, saveFeature } from "./commands.js";
@@ -50,14 +50,7 @@ export function importManifest(store: Store, p: SharedLedgerPrincipal, input: Sh
     insertFeature(store, p.teamId, f);
     let previousDag = { version: 0, nodes: [], bindings: [], reason: "" } as typeof source.versions[number];
     for (const dag of source.versions) {
-      if (previousDag.version) {
-        assertSharedLedgerMutation({ type: "dag.rewrite", requestId: input.batchId, projectId: m.projectId, featureId: id,
-          expectedRev: f.rev, baseVersion: previousDag.version, nodes: dag.nodes, reason: dag.reason || "import" },
-        { ...meta(store, p.teamId), feature: { ...f, authorityMode: "planning", version: previousDag.version }, dag: previousDag, tasks: [] }, false);
-        if (previousDag.bindings.some((b) => !dag.bindings.some((next) => next.nodeKey === b.nodeKey && next.taskId === b.taskId))) {
-          throw new SharedLedgerError("invalid_field", "Historical binding removed");
-        }
-      }
+      if (previousDag.version) assertImportedDagStep(previousDag, dag, f, meta(store, p.teamId), input.batchId);
       const bindings = dag.bindings.map((b) => ({ ...b, taskId: mappings.find((map) => map.kind === "task" && map.sourceId === b.taskId)!.id }));
       saveDag(store, id, { ...dag, bindings }, dag.reason, source.authorityMode === "source");
       previousDag = dag;
