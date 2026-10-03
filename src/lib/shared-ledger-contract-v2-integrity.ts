@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "./ask-bind.js";
+import { canonicalJson } from "./canonical-json.js";
 import { fail, parseFence, type V2Fence } from "./shared-ledger-contract-v2-validation.js";
 
 export const v2ContentDigest = (content: string): string => createHash("sha256").update(content, "utf8").digest("hex");
