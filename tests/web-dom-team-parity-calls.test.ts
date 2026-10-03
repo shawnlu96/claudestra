@@ -83,7 +83,7 @@ beforeAll(async () => {
   doc = (globalThis as unknown as { document: Doc }).document;
   const home = homeLedger(), team = project(home);
   // 只回环夹具：拦下全部请求，记下解码后的路径；夹具之外一律 404，不出网
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     const path = decodeURIComponent(url.pathname + url.search);
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${path}`);
