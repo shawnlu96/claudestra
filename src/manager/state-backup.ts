@@ -1,8 +1,6 @@
 /** `state-backup list | now | restore <时间戳> [文件名…]`：关键状态文件的快照（逻辑在 lib/state-backup.ts，bridge 每小时自动做一份） */
-import { BACKUP_FILES, listSnapshots, restoreSnapshot, takeSnapshot } from "../lib/state-backup.js";
+import { BACKUP_FILES, listSnapshots, restoreLocked, takeSnapshot } from "../lib/state-backup.js";
 import { LEND_WORKER_MARK } from "../lib/runtimes/clean-env.js";
-import { acquireLock } from "../lib/file-lock.js";
-import { principalsLockPath } from "../lib/principals.js";
 import { output } from "./core.js";
 
 const USAGE = `usage: state-backup list | now | restore <时间戳> [文件名…]（文件名只能是 ${BACKUP_FILES.join(" ")}）`;
@@ -17,10 +15,7 @@ export async function cmdStateBackup(args: string[]): Promise<void> {
   if (sub !== "restore" || !rest[0]) return output({ ok: false, error: USAGE });
   // 恢复旧的 principals 会让之后撤销的令牌重新生效：外来出借任务不许顺手做
   if (process.env[LEND_WORKER_MARK]) return output({ ok: false, error: "出借 worker 不能恢复状态文件" });
-  // 和 bridge 的设备凭据写（updatePrincipals）互斥，不然它拿旧副本写回会把恢复吃掉；拿不到照 write-lock.ts 的口径降级继续
-  const lock = await acquireLock(principalsLockPath());
-  let r: ReturnType<typeof restoreSnapshot>;
-  try { r = restoreSnapshot(rest[0], rest.slice(1)); } finally { lock?.release(); }
+  const r = await restoreLocked(rest[0], rest.slice(1));
   if (!r.ok) return output(r);
   output({
     ...r,

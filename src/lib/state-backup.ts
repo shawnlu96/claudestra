@@ -3,9 +3,11 @@
  * 这些文件丢了没有别处可以重建（登录 / API 令牌、peer 联系方式与钉住的公钥、出借授权），所以单独快照到 backups/state/<时间戳>/。
  * 里面有明文密钥：目录 0700、文件 0600。tests/state-backup.test.ts。
  */
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
+import { principalsLockPath } from "./principals.js";
 import { REGISTRY_PATH } from "./registry.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
@@ -62,7 +64,11 @@ export function takeSnapshot(dir = STATE_DIR, now = new Date(), keep = KEEP_SNAP
   const last = listSnapshots(dir).at(-1);
   if (!cur.size || sameAs(cur, last, dir)) return { created: false, ts: last?.ts ?? null, files: last?.files ?? [] };
   const root = backupRoot(dir);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
+  // 逐级建、逐级核：backups 或 backups/state 是软链就会把密钥写到状态目录外，连空目录也不在外面建
+  for (const rel of ["backups", join("backups", "state")]) {
+    if (!existsSync(join(dir, rel))) mkdirSync(join(dir, rel), { mode: 0o700 });
+    if (!noSymlinkUnder(dir, rel)) throw new Error(`备份目录 ${join(dir, rel)} 经软链指到了别处，不快照`);
+  }
   chmodSync(root, 0o700);
   const ts = stamp(now);
   // 先写进隐藏目录再改名：写到一半挂掉不会留下一份残缺快照给 restore 用
@@ -76,8 +82,23 @@ export function takeSnapshot(dir = STATE_DIR, now = new Date(), keep = KEEP_SNAP
 
 export type RestoreResult = { ok: true; restored: string[]; safetyTs: string | null } | { ok: false; error: string };
 
-/** 恢复 ts 那份里的 names（缺省 = 那份里全部）；先把当前文件快照一份，恢复错了还能回去 */
-export function restoreSnapshot(ts: string, names: string[], dir = STATE_DIR, now = new Date()): RestoreResult {
+/** dir 下的 rel 解析软链后还在 dir 下同一个位置（中间哪一段是软链都不行）。解析不了（不存在 / 读不了）就当不安全，调用方拒掉 */
+function noSymlinkUnder(dir: string, rel: string): boolean {
+  try { return realpathSync(join(dir, rel)) === join(realpathSync(dir), rel); } catch { return false; }
+}
+
+/** 恢复的目标要么不存在、要么是普通文件：软链 / 目录一律拒，不跟着软链写到状态目录外 */
+function targetProblem(dir: string, name: string): string | null {
+  let st: ReturnType<typeof lstatSync>;
+  try { st = lstatSync(join(dir, name)); } catch { return null; /* 不存在：正是要恢复的情形 */ }
+  return st.isFile() ? null : `${join(dir, name)} 不是普通文件（软链 / 目录），不恢复；先手动挪走它`;
+}
+
+/**
+ * 恢复 ts 那份里的 names（缺省 = 那份里全部）；先把当前文件快照一份，恢复错了还能回去。
+ * holds：写之前最后核一次 principals 锁还在手里（restoreLocked 给）；从这里到写完都是同步的，中间不会被别的写者插进来。
+ */
+export function restoreSnapshot(ts: string, names: string[], dir = STATE_DIR, now = new Date(), holds: () => boolean = () => true): RestoreResult {
   if (!TS_RE.test(ts)) return { ok: false, error: `时间戳格式不对：${ts}（用 state-backup list 里的）` };
   const snap = listSnapshots(dir).find((s) => s.ts === ts);
   if (!snap) return { ok: false, error: `没有这份快照：${ts}` };
@@ -86,11 +107,30 @@ export function restoreSnapshot(ts: string, names: string[], dir = STATE_DIR, no
   const want = names.length ? names : snap.files;
   const missing = want.filter((n) => !snap.files.includes(n));
   if (missing.length) return { ok: false, error: `${ts} 这份里没有：${missing.join(" ")}` };
+  const rel = (n: string) => join("backups", "state", ts, n);
+  const escaped = want.filter((n) => !noSymlinkUnder(dir, rel(n)) || !lstatSync(join(dir, rel(n))).isFile());
+  if (escaped.length) return { ok: false, error: `快照里的 ${escaped.join(" ")} 不是备份目录里的普通文件（经软链指到了别处），不恢复` };
+  const blocked = want.map((n) => targetProblem(dir, n)).filter((p): p is string => !!p);
+  if (blocked.length) return { ok: false, error: blocked.join("；") };
   // 先读进内存：下面的安全快照会轮转，可能正好删掉最旧的这一份
-  const data = want.map((n) => [n, readFileSync(join(backupRoot(dir), ts, n), "utf8")] as const);
+  const data = want.map((n) => [n, readFileSync(join(dir, rel(n)), "utf8")] as const);
+  if (!holds()) return { ok: false, error: "principals 锁已经不在手里，什么都没写；稍后重试" };
   const safety = takeSnapshot(dir, now);
-  for (const [n, text] of data) writeTextAtomicSync(join(dir, n), text, { mode: 0o600 });
+  // noFollow：目标在上面核完之后被换成软链，替换的也是软链本身，不会写到它指的文件
+  for (const [n, text] of data) writeTextAtomicSync(join(dir, n), text, { mode: 0o600, noFollow: true });
   return { ok: true, restored: want, safetyTs: safety.ts };
+}
+
+/**
+ * CLI 的恢复入口：先拿 principals 锁（和 bridge 的设备凭据写 updatePrincipals 互斥，不然它拿旧副本写回会把恢复吃掉）。
+ * 拿不到就拒，不像命令级写锁那样降级继续：恢复正是要和那些写者错开。等 5 秒和 updatePrincipals 一样，那些写都很短，等不到就让人重试。
+ * tests/state-backup-lock.test.ts
+ */
+export async function restoreLocked(ts: string, names: string[], o: { dir?: string; waitMs?: number } = {}): Promise<RestoreResult> {
+  const dir = o.dir ?? STATE_DIR;
+  const lock = await acquireLock(principalsLockPath(join(dir, "principals.json")), o.waitMs ?? 5_000);
+  if (!lock) return { ok: false, error: "principals 锁被占着（bridge 在写设备凭据，或有别的写命令在跑），什么都没写；稍后重试" };
+  try { return restoreSnapshot(ts, names, dir, new Date(), lock.held); } finally { lock.release(); }
 }
 
 /**

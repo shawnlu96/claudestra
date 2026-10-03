@@ -1,10 +1,12 @@
 /** 关键状态文件的快照 / 轮转 / 恢复与消失报警（src/lib/state-backup.ts）；全部在 mkdtemp 的临时状态目录里 */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
-import { KEEP_SNAPSHOTS, latestSnapshotWith, listSnapshots, restoreSnapshot, stateGuard, takeSnapshot } from "../src/lib/state-backup.js";
+import { KEEP_SNAPSHOTS, latestSnapshotWith, listSnapshots, restoreLocked, restoreSnapshot, stateGuard, takeSnapshot } from "../src/lib/state-backup.js";
+import { writeTextAtomicSync } from "../src/lib/state-file.js";
+import { acquireLock } from "../src/lib/file-lock.js";
 
 const dirs: string[] = [];
 const state = () => { const d = mkdtempSync(join(tmpdir(), "state-backup-")); dirs.push(d); return d; };
@@ -94,6 +96,73 @@ describe("恢复", () => {
     expect(restoreSnapshot("2026-01-01T00-00-00-000Z", [], d, at(1)).ok).toBe(false);
     expect(readFileSync(join(d, "principals.json"), "utf8")).toBe("changed");
     expect(listSnapshots(d)).toHaveLength(1);
+  });
+
+  test("目标是指到状态目录外的软链：写之前就拒，外部文件内容 / 权限不变，也不做安全快照", () => {
+    const d = state();
+    const outside = join(state(), "victim.txt");
+    writeFileSync(join(d, "principals.json"), "snap");
+    const ts = takeSnapshot(d, at(0)).ts!;
+    writeFileSync(outside, "outside", { mode: 0o644 });
+    rmSync(join(d, "principals.json"));
+    symlinkSync(outside, join(d, "principals.json"));
+    const r = restoreSnapshot(ts, ["principals.json"], d, at(1));
+    expect(r).toMatchObject({ ok: false, error: expect.stringContaining("不是普通文件") });
+    expect(readFileSync(outside, "utf8")).toBe("outside");
+    expect(mode(outside)).toBe(0o644);
+    expect(lstatSync(join(d, "principals.json")).isSymbolicLink()).toBe(true);
+    expect(listSnapshots(d)).toHaveLength(1);
+  });
+
+  test("快照里的文件 / 备份目录经软链指到别处：拒，不读不写", () => {
+    const d = state();
+    const elsewhere = state();
+    writeFileSync(join(d, "peers.json"), "snap");
+    const ts = takeSnapshot(d, at(0)).ts!;
+    writeFileSync(join(elsewhere, "secret"), "outside-secret");
+    rmSync(join(d, "backups", "state", ts, "peers.json"));
+    symlinkSync(join(elsewhere, "secret"), join(d, "backups", "state", ts, "peers.json"));
+    writeFileSync(join(d, "peers.json"), "current");
+    expect(restoreSnapshot(ts, ["peers.json"], d, at(1))).toMatchObject({ ok: false, error: expect.stringContaining("软链") });
+    expect(readFileSync(join(d, "peers.json"), "utf8")).toBe("current");
+    // backups 本身是软链：快照不往外写，连 state 子目录也不在外面建
+    const d2 = state();
+    writeFileSync(join(d2, "peers.json"), "x");
+    symlinkSync(elsewhere, join(d2, "backups"));
+    expect(() => takeSnapshot(d2, at(0))).toThrow("软链");
+    expect(readdirSync(elsewhere)).toEqual(["secret"]);
+  });
+
+  test("恢复写入不跟软链：核完之后目标才被换成软链，替换的也是软链本身", () => {
+    const d = state();
+    const outside = join(state(), "victim.txt");
+    writeFileSync(outside, "outside");
+    symlinkSync(outside, join(d, "principals.json"));
+    writeTextAtomicSync(join(d, "principals.json"), "restored", { mode: 0o600, noFollow: true });
+    expect(lstatSync(join(d, "principals.json")).isFile()).toBe(true);
+    expect(readFileSync(join(d, "principals.json"), "utf8")).toBe("restored");
+    expect(readFileSync(outside, "utf8")).toBe("outside");
+  });
+
+  test("principals 锁被别人占着：拒绝恢复、什么都不写；锁在写之前丢了同样不写；拿到锁的恢复完会放锁", async () => {
+    const d = state();
+    writeFileSync(join(d, "principals.json"), "good");
+    const ts = takeSnapshot(d, at(0)).ts!;
+    writeFileSync(join(d, "principals.json"), "bad");
+    const lock = join(d, "principals.json.lock");
+    const holder = (await acquireLock(lock))!; // 另一个持有者：真建出 principals.json.lock/owner
+    expect(readFileSync(join(lock, "owner"), "utf8")).toBe(holder.token);
+    expect(await restoreLocked(ts, ["principals.json"], { dir: d, waitMs: 300 })).toMatchObject({ ok: false, error: expect.stringContaining("锁被占着") });
+    expect(readFileSync(join(d, "principals.json"), "utf8")).toBe("bad");
+    expect(listSnapshots(d)).toHaveLength(1);
+    expect(holder.held()).toBe(true);
+    holder.release();
+    expect(restoreSnapshot(ts, ["principals.json"], d, at(1), () => false)).toMatchObject({ ok: false, error: expect.stringContaining("锁") });
+    expect(readFileSync(join(d, "principals.json"), "utf8")).toBe("bad");
+    expect(listSnapshots(d)).toHaveLength(1);
+    expect(await restoreLocked(ts, ["principals.json"], { dir: d, waitMs: 300 })).toMatchObject({ ok: true, restored: ["principals.json"] });
+    expect(readFileSync(join(d, "principals.json"), "utf8")).toBe("good");
+    expect(existsSync(lock)).toBe(false);
   });
 
   test("restore 是写命令（认主守卫 + 命令级写锁），list / now 不是", () => {
