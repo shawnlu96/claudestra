@@ -40,6 +40,8 @@ export interface DagPanesArgs {
   pickTask: (id: string) => void;
   close: () => void;
   tr: Tr;
+  /** 这个源没有「谁在干活」（团队视图）：不挂 WorkBoardView（不请求本机 /ledger/:p/work），标签里只放主场提示 */
+  noWorkBoard?: boolean;
 }
 
 export function useDagPanes(a: DagPanesArgs) {
@@ -96,9 +98,9 @@ export function useDagPanes(a: DagPanesArgs) {
     }} />
   )) || (!a.narrow && diffPage) || null;
 
-  const progress = (
-    <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
-  );
+  const progress = a.noWorkBoard
+    ? <div className={v.center} role="status"><p className={v.none}>{tr("V1 仅共享规划，执行操作仍在主场")}</p></div>
+    : <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (
     <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}

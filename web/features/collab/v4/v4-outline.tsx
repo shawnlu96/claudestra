@@ -12,6 +12,8 @@ export function Outline(props: {
   filter: Filter;
   onFilter: (f: Filter) => void;
   waits: readonly OwnerWait[];
+  /** 这个源不知道待你处理（团队键对不上本机 asks）：显示「暂无」，不显示 0 */
+  waitsUnknown?: boolean;
   onWaits: () => void;
   selected: string | null;
   onPick: (id: string) => void;
@@ -23,8 +25,9 @@ export function Outline(props: {
   const groups = outlineOf(filter === "done" ? { ...ov, tasks: [...ov.tasks, ...done.pages] } : ov, filter);
   return (
     <nav className={v.outline} aria-label={tr("大纲")}>
-      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} onClick={props.onWaits}>
-        {tr("待你处理")} <b>{props.waits.length}</b>
+      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} title={props.waitsUnknown ? tr("V1 仅共享规划，执行操作仍在主场") : undefined}
+        onClick={props.onWaits}>
+        {tr("待你处理")} <b>{props.waitsUnknown ? tr("暂无") : props.waits.length}</b>
       </button>
       <div className={v.filters} role="tablist">
         {FILTERS.map((f) => (

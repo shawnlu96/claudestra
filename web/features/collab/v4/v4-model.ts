@@ -12,27 +12,33 @@ const open = (t: LedgerTaskView) => !TERMINAL.has(t.stage) && t.kind !== "ops";
 const blocked = (t: LedgerTaskView) => (t.blockedBy?.length ?? 0) > 0;
 
 export interface Metrics {
-  present: number;
+  /** null = 这个源不知道谁在场（团队键对不上本机 registry），不是 0 */
+  present: number | null;
   active: number;
-  todayDone: number;
+  /** null = 这次总览没有完成时刻（unknownMetrics 里有 todayDone） */
+  todayDone: number | null;
   reviewRounds: number | null;
   /** 审出来、已经过了审查（合并及以后）的 P0 + P1 */
   fixed: number | null;
-  /** 此刻在等审查的任务平均已经等了多久；没有在等的 = null */
+  /** 此刻在等审查的任务平均已经等了多久；没有在等的 = null（「—」）；未知看 ov.unknownMetrics 的 reviewWait（「暂无」） */
   avgReviewWaitMs: number | null;
 }
 
-/** 计数都把总览窗口外的已完成卡（ov.doneRest）补上：分页只少了列表里的卡，数字不跟着变 */
-export function metricsOf(ov: Pick<LedgerOverview, "tasks" | "doneRest">, todayDone: number, present: number): Metrics {
+/**
+ * 计数都把总览窗口外的已完成卡（ov.doneRest）补上：分页只少了列表里的卡，数字不跟着变。
+ * ov.unknownMetrics 里的项给 null：缺省字段在本机等于 0，团队数据不能借这个约定把「不知道」算成 0
+ */
+export function metricsOf(ov: Pick<LedgerOverview, "tasks" | "doneRest" | "unknownMetrics">, todayDone: number, present: number | null): Metrics {
+  const unknown = new Set(ov.unknownMetrics ?? []);
   const waits = ov.tasks.map((t) => t.metrics?.reviewWaitPendingMs).filter((ms): ms is number => typeof ms === "number");
   return {
     present,
     active: ov.tasks.filter(open).length + restCount(ov, open),
-    todayDone,
-    reviewRounds: ov.tasks.reduce((s, t) => s + (t.metrics?.reviewRounds ?? 0), 0) + restSum(ov, () => true, "reviewRounds"),
-    fixed: ov.tasks.filter((t) => PAST_REVIEW.has(t.stage)).reduce((s, t) => s + (t.metrics?.p0 ?? 0) + (t.metrics?.p1 ?? 0), 0)
+    todayDone: unknown.has("todayDone") ? null : todayDone,
+    reviewRounds: unknown.has("reviewRounds") ? null : ov.tasks.reduce((s, t) => s + (t.metrics?.reviewRounds ?? 0), 0) + restSum(ov, () => true, "reviewRounds"),
+    fixed: unknown.has("fixed") ? null : ov.tasks.filter((t) => PAST_REVIEW.has(t.stage)).reduce((s, t) => s + (t.metrics?.p0 ?? 0) + (t.metrics?.p1 ?? 0), 0)
       + restSum(ov, (t) => PAST_REVIEW.has(t.stage), "p0p1"),
-    avgReviewWaitMs: waits.length ? Math.round(waits.reduce((a, b) => a + b, 0) / waits.length) : null,
+    avgReviewWaitMs: !unknown.has("reviewWait") && waits.length ? Math.round(waits.reduce((a, b) => a + b, 0) / waits.length) : null,
   };
 }
 

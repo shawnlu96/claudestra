@@ -102,11 +102,13 @@ function hookPage(): void {
   document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && flushLeaveMarks());
 }
 
-export function useLastSeen(project: string): { state: SinceState; dismiss: () => void } {
+/** off：这个源没有「上次以来」（团队视图）——不读、不标记看过，摘要不出 */
+export function useLastSeen(project: string, off = false): { state: SinceState; dismiss: () => void } {
   const [state, setState] = useState<SinceState>(EMPTY);
   const gen = useRef(0);
 
   useEffect(() => {
+    if (off) return void setState(EMPTY);
     hookPage();
     clearTimeout(leaveMarks.get(project));
     leaveMarks.delete(project);
@@ -154,15 +156,16 @@ export function useLastSeen(project: string): { state: SinceState; dismiss: () =
           sendMark(project);
         }, LEAVE_MARK_MS));
     };
-  }, [project]);
+  }, [project, off]);
 
   const dismiss = useCallback(() => {
+    if (off) return;
     gen.current++;
     setState(EMPTY);
     showing.delete(project);
     inherited.delete(project);
     sendMark(project);
-  }, [project]);
+  }, [project, off]);
   return { state, dismiss };
 }
 

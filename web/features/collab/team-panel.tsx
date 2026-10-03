@@ -21,10 +21,16 @@ export interface TeamPanelProps {
   ov: LedgerOverview | null; project: string; agents: readonly TeamAgent[];
   /** Server epoch milliseconds, never the browser's wall clock. */
   now: number; embedded?: boolean; selected?: string | null; onSelect?: (node: TeamNode) => void;
+  /** The source has no local members (team view): render nothing, so /peers/contacts, /team/quota and /team/activity are never read. */
+  unavailable?: boolean;
+}
+
+export function TeamPanel({ unavailable, ...props }: TeamPanelProps) {
+  return unavailable ? null : <LocalTeamPanel {...props} />;
 }
 
 /** Embedded selection belongs to the host's inspector; standalone keeps its own task section. */
-export function TeamPanel({ ov, project, agents, now, embedded = false, selected, onSelect }: TeamPanelProps) {
+function LocalTeamPanel({ ov, project, agents, now, embedded = false, selected, onSelect }: Omit<TeamPanelProps, "unavailable">) {
   const t = useTeamT();
   const data = useTeamPanel();
   const activity = useTeamActivity(project);
