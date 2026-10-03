@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, listEvents, listTasks } from "./ledger-store.js";
+import { getEventByDedup, getTask, listEvents, toEvent } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
 import { convergeReview } from "./review-converge.js";
@@ -101,12 +101,47 @@ async function recordInformed(db: Database, key: string, deps: FollowUpNoticeDep
   console.error(`⚠️ [scheduler] 后续节点失败通知已发出但未记账（第 ${pending.n} 次），${Math.round(createRetryDelay(pending.n) / 60_000)} 分钟后重试：${error}`);
 }
 
+/**
+ * Failed follow-ups of one project that have no "informed" record yet. The range is the review_downgrade dedupKeys
+ * (followUpKey, one per card round; UNIQUE index) and the anti-join is the notice key, so the pass reads the pending sources,
+ * not every card's history. `+project` keeps the planner on the dedupKey index. Mode / stage are not filtered.
+ */
+export function pendingFollowUpSources(db: Database, project: string): LedgerEvent[] {
+  const rows = db.query(`SELECT d.* FROM events d WHERE d.dedupKey >= 'scheduler:converge:' AND d.dedupKey < 'scheduler:converge;'
+    AND +d.project = ? AND d.kind = 'scheduler'
+    AND NOT EXISTS (SELECT 1 FROM events n WHERE n.dedupKey = 'scheduler:converge-notice:' || d.target || ':' || d.seq)
+    ORDER BY d.seq`).all(project) as Record<string, unknown>[];
+  return rows.map(toEvent).filter((e) => e.data.op === "review_downgrade" && typeof e.data.followUpFailure === "string");
+}
+
+type PassFailure = { taskId: string; error: string };
+/** One card's notice work: a lost lease ends the pass; any other throw (a busy read, a bad row) is reported and the pass goes on. */
+async function isolated(failed: PassFailure[], taskId: string, run: () => Promise<void>): Promise<void> {
+  try { await run(); } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    if (e instanceof SchedulerLeaseLost) throw new SchedulerStopped(`scheduler-converge-notice: ${e.message}`);
+    const error = `后续节点失败通知：${(e as Error).message}`;
+    console.error(`⚠️ [scheduler] ${taskId} ${error}（下个 tick 重试）`);
+    failed.push({ taskId, error });
+  }
+}
+
 /** The auto tick's per-pass retry of sent-but-unrecorded notices: a card that left auto / live still gets its record. */
-export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps, projects: readonly string[]): Promise<void> {
-  for (const key of [...(unrecorded.get(db)?.keys() ?? [])]) await recordInformed(db, key, deps);
+export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps, projects: readonly string[]): Promise<PassFailure[]> {
+  const failed: PassFailure[] = [];
+  for (const [key, { args }] of [...(unrecorded.get(db) ?? [])]) await isolated(failed, args[0], () => recordInformed(db, key, deps));
   // The ledger is the durable pending source after a restart; mode/stage must not hide a failed follow-up.
   // With no in-memory send receipt, notify again before recording: absence of informed is not proof of delivery.
-  for (const project of projects) for (const task of listTasks(db, project)) await followUpFailureNotice(db, task, deps);
+  for (const project of projects) {
+    let sources: LedgerEvent[] = [];
+    await isolated(failed, `${project}/*`, async () => { sources = pendingFollowUpSources(db, project); });
+    const byTask = Map.groupBy(sources, (e) => e.target);
+    for (const [taskId, events] of byTask) await isolated(failed, taskId, async () => {
+      const task = getTask(db, taskId);
+      if (task?.project === project) await noticeSources(db, task, events.filter((e) => isFailedFollowUp(task, e)), deps);
+    });
+  }
+  return failed;
 }
 
 /**
@@ -116,7 +151,10 @@ export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeD
  * retried on backoff (also after the card leaves auto); a lost lease ends the pass.
  */
 export async function followUpFailureNotice(db: Database, task: LedgerTask, deps: FollowUpNoticeDeps): Promise<void> {
-  const failed = listEvents(db, { project: task.project, target: task.id }).filter((e) => isFailedFollowUp(task, e));
+  await noticeSources(db, task, listEvents(db, { project: task.project, target: task.id }).filter((e) => isFailedFollowUp(task, e)), deps);
+}
+
+async function noticeSources(db: Database, task: LedgerTask, failed: readonly LedgerEvent[], deps: FollowUpNoticeDeps): Promise<void> {
   const pending = unrecorded.get(db) ?? unrecorded.set(db, new Map()).get(db)!;
   for (const e of failed) {
     const key = convergeNoticeKey(task.id, e.seq);

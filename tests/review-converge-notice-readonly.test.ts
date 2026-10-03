@@ -3,13 +3,14 @@
  * `ledger scheduler-converge-notice`, so the next tick stays quiet and nothing writes to the read-only connection.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LedgerReader } from "../src/lib/ledger-read.js";
-import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
-import { convergeFollowUp } from "../src/lib/review-converge-followup.js";
+import { getEventByDedup, getTask, listEvents } from "../src/lib/ledger-store.js";
+import { convergeFollowUp, followUpKey } from "../src/lib/review-converge-followup.js";
 import { followUpFailureNotice } from "../src/lib/review-converge-notice.js";
-import { convergeNoticeKey } from "../src/lib/review-converge-notice-write.js";
+import { convergeNoticeKey, recordFollowUpInformed } from "../src/lib/review-converge-notice-write.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { encodeLease, SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
@@ -205,5 +206,107 @@ describe("failed follow-up notice on the read-only scheduler connection", () => 
     expect(await f.cli("scheduler", ...args("T1", downgrade.seq))).toMatchObject({ ok: true, duplicate: false });
     expect(await f.cli("scheduler", ...args("T1", downgrade.seq))).toMatchObject({ ok: true, duplicate: true });
     expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "review_followup_failed")).toHaveLength(1);
+  });
+});
+
+/**
+ * state-protection-F4: the pass reads only pending sources (convergence dedupKey range anti-joined with the notice key), and one
+ * card's read failure is reported in the tick's `failed` while other cards' notices and the normal auto card go on.
+ */
+type Reads = { rows: number; fault: ((sql: string, args: unknown[]) => boolean) | null };
+/** The reader's connection, counting rows that tasks / events statements hand back; `fault` makes matching reads throw busy. */
+function watched(db: Database): { db: Database; reads: Reads } {
+  const reads: Reads = { rows: 0, fault: null };
+  const stmt = (s: object, sql: string) => new Proxy(s, { get(t, k) {
+    const v = Reflect.get(t, k, t);
+    if (typeof v !== "function") return v;
+    if (k !== "all" && k !== "get" && k !== "values") return v.bind(t);
+    return (...args: unknown[]) => {
+      if (reads.fault?.(sql, args)) throw new Error("SQLITE_BUSY: database is locked");
+      const r = v.apply(t, args);
+      if (/\b(events|tasks)\b/.test(sql)) reads.rows += Array.isArray(r) ? r.length : r ? 1 : 0;
+      return r;
+    };
+  } });
+  const proxy = new Proxy(db, { get(t, k) {
+    const v = Reflect.get(t, k, t);
+    if (k === "query" || k === "prepare") return (sql: string) => stmt(v.call(t, sql), sql);
+    return typeof v === "function" ? v.bind(t) : v;
+  } });
+  return { db: proxy, reads };
+}
+
+/** A card with a real failed follow-up (no DAG) on the writer; `informed` also closes it through the guarded record. */
+function failedSource(f: ReturnType<typeof autoFixture>, id: string, informed: boolean) {
+  createTask(f.db, { actor: "owner", now: 3000 }, { project: "p", id, title: id, kind: "code" });
+  f.db.transaction(() => convergeFollowUp(f.db, { actor: "scheduler", now: 3000 }, getTask(f.db, id)!, {
+    round: 1, head: H1, reportPath: join(f.dir, "report.md"), items: [{ findingId: "F1", family: "other", probe: "src/y.ts:1", why: "no_basis" }],
+  }, f.dir, () => true))();
+  const d = getEventByDedup(f.db, followUpKey(id, 1))!;
+  expect(typeof d.data.followUpFailure).toBe("string");
+  if (informed) recordFollowUpInformed(f.db, { actor: "scheduler", now: 3000 }, { taskId: id, downgradeSeq: d.seq, round: 1, head: H1 });
+}
+
+/** `history` done cards with closed sources and 20 events each, `pending` open sources; the rows one real auto tick read. */
+async function sweepRows(history: number, pending: number) {
+  const { f, ro, told } = setup();
+  for (let i = 0; i < history; i++) {
+    failedSource(f, `D${i}`, true);
+    const add = f.db.prepare("INSERT INTO events (ts, actor, project, target, kind, text) VALUES (?, 'owner', 'p', ?, 'note', 'x')");
+    f.db.transaction(() => { for (let j = 0; j < 20; j++) add.run(4000 + j, `D${i}`); })();
+    f.db.run("UPDATE tasks SET stage = 'done' WHERE id = ?", [`D${i}`]);
+  }
+  for (let i = 0; i < pending; i++) failedSource(f, `Q${i}`, false);
+  // no auto card left: the card planner's own per-card reads are paced elsewhere; an observe / done source is still found
+  f.db.run("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'");
+  f.db.run("UPDATE tasks SET stage = 'done' WHERE id = 'Q0'");
+  const w = watched(ro);
+  const result = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+  return { rows: w.reads.rows, told: told().length, result, f, ro };
+}
+
+describe("state-protection-F4 targeted sweep and per-card isolation", () => {
+  test("sweep-cost: a tick's ledger reads follow pending sources, not done-card history", async () => {
+    const small = await sweepRows(5, 1), large = await sweepRows(300, 1), more = await sweepRows(300, 4);
+    console.log("SWEEP_ROWS", JSON.stringify({ small: small.rows, large: large.rows, more: more.rows }));
+    expect(large.rows).toBe(small.rows);
+    expect(more.rows).toBeGreaterThan(large.rows);
+    expect(more.rows).toBeLessThan(large.rows + 20 * 3);
+    expect({ small: small.told, large: large.told, more: more.told }).toEqual({ small: 2, large: 2, more: 5 });
+    for (const id of ["T1", "Q0", "Q3"]) expect(getEventByDedup(more.f.db, convergeNoticeKey(id, getEventByDedup(more.f.db, followUpKey(id, id === "T1" ? 2 : 1))!.seq))).not.toBeNull();
+    const plan = more.ro.query(`EXPLAIN QUERY PLAN SELECT d.* FROM events d WHERE d.dedupKey >= 'scheduler:converge:'
+      AND d.dedupKey < 'scheduler:converge;' AND +d.project = ? AND d.kind = 'scheduler'`).all("p") as { detail: string }[];
+    expect(plan.map((r) => r.detail).join(" ")).toMatch(/SEARCH d USING INDEX/);
+    await schedulerAutoTick(more.ro, { p: { maxActiveWorkers: 2 } }, more.f.tickDeps);
+    expect(more.f.notices.length).toBe(5);
+  });
+
+  test("sweep-isolation: one card's busy read is reported, the others and the auto card go on, then it is told", async () => {
+    const { f, ro, told } = setup();
+    failedSource(f, "Q0", false); failedSource(f, "Q1", false); failedSource(f, "Q2", false);
+    const w = watched(ro);
+    w.reads.fault = (sql, args) => args.includes("Q1") && (sql.includes("FROM events") || sql.includes("FROM tasks WHERE id"));
+    const r = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(r.failed).toEqual([{ taskId: "Q1", error: "后续节点失败通知：SQLITE_BUSY: database is locked" }]);
+    expect(r.cards.map((c) => c.taskId)).toEqual(["T1"]);
+    expect(told().filter((t) => / Q1 /.test(t))).toEqual([]);
+    expect(told()).toHaveLength(3);
+    w.reads.fault = (sql) => sql.includes("'scheduler:converge:'");
+    const busy = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(busy.failed).toEqual([{ taskId: "p/*", error: "后续节点失败通知：SQLITE_BUSY: database is locked" }]);
+    expect(busy.cards.map((c) => c.taskId)).toEqual(["T1"]);
+    w.reads.fault = null;
+    expect((await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).failed).toEqual([]);
+    expect(told().filter((t) => / Q1 /.test(t))).toHaveLength(1);
+    expect(getEventByDedup(f.db, convergeNoticeKey("Q1", getEventByDedup(f.db, followUpKey("Q1", 1))!.seq))?.data.informed).toBe(true);
+    await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(told()).toHaveLength(4);
+
+    const g = setup();
+    failedSource(g.f, "Q0", false);
+    const lost = watched(g.ro);
+    lost.reads.fault = (sql, args) => args.includes("Q0") && sql.includes("FROM tasks WHERE id");
+    const deps = { ...g.f.tickDeps, manager: async () => { throw new SchedulerLeaseLost("gone"); } };
+    await expect(schedulerAutoTick(lost.db, { p: { maxActiveWorkers: 2 } }, deps)).rejects.toBeInstanceOf(SchedulerStopped);
   });
 });
