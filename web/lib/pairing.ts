@@ -93,3 +93,39 @@ export function isLoopbackHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   return h === "localhost" || h === "127.0.0.1" || h === "::1";
 }
+
+/** 等批准中的配对请求：离开配对页（「回到 Claudestra」、刷新、MachineGate 跳走再跳回）后凭它接着轮询，批准结果才有人领 */
+export interface SavedPending {
+  fp: string;
+  approvalId: string;
+  machineName: string;
+  /** 本机一键配对的展示码；手输短码的待确认没有 */
+  code?: string;
+  /** 有没有已配对设备能批（本机请求才有意义） */
+  approver?: boolean;
+  expiresAt: string;
+}
+const PENDING_KEY = "cstra_pair_pending";
+type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+const session = (): Store | null => (typeof sessionStorage === "undefined" ? null : sessionStorage);
+
+/** null = 清掉。存不了（隐私模式等）只是离开页面后接不上，与没有这份记录时一样 */
+export function savePendingPairing(p: SavedPending | null, store: Store | null = session()): void {
+  try {
+    if (p) store?.setItem(PENDING_KEY, JSON.stringify(p));
+    else store?.removeItem(PENDING_KEY);
+  } catch (e) {
+    console.warn("[pair] 记不下待批请求，离开配对页后要重新发起:", (e as Error).message);
+  }
+}
+
+/** 还没过期的那条；坏数据 / 过期按没有 */
+export function loadPendingPairing(now = Date.now(), store: Store | null = session()): SavedPending | null {
+  try {
+    const p = JSON.parse(store?.getItem(PENDING_KEY) ?? "null") as Partial<SavedPending> | null;
+    const ok = !!p && typeof p.fp === "string" && typeof p.approvalId === "string" && typeof p.expiresAt === "string" && Date.parse(p.expiresAt) > now;
+    return ok ? (p as SavedPending) : null;
+  } catch {
+    return null; // 不是 JSON（被别的代码写坏了）：当没有，用户重新发起即可
+  }
+}

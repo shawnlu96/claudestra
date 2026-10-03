@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createHmac, randomBytes } from "node:crypto";
-import { base64urlToBytes, bytesToBase64url, codeFromFragment, defaultDeviceName, formatCode, hmacProof, isLoopbackHost, parsePairFragment } from "@/lib/pairing";
+import {
+  base64urlToBytes, bytesToBase64url, codeFromFragment, defaultDeviceName, formatCode, hmacProof, isLoopbackHost, loadPendingPairing, parsePairFragment, savePendingPairing,
+} from "@/lib/pairing";
 
 describe("parsePairFragment（二维码 / 链接的 # 片段）", () => {
   test("#<fp>.<secret> → 两段；fp 转小写", () => {
@@ -53,5 +55,24 @@ describe("短码整形 / 设备名 / 回环判定", () => {
     expect(isLoopbackHost("127.0.0.1")).toBe(true);
     expect(isLoopbackHost("[::1]")).toBe(true);
     expect(isLoopbackHost("mini.tail1234.ts.net")).toBe(false);
+  });
+});
+
+describe("等批准的请求跨页面留存（离开配对页再回来接着等）", () => {
+  const memory = () => {
+    const m = new Map<string, string>();
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k) };
+  };
+  test("存了就读得回；过期、坏数据、清掉都按没有", () => {
+    const store = memory();
+    const p = { fp: "local", approvalId: "a1", machineName: "mac", code: "ABCD2345", approver: false, expiresAt: "2026-10-03T15:48:00.000Z" };
+    savePendingPairing(p, store);
+    expect(loadPendingPairing(Date.parse("2026-10-03T15:40:00Z"), store)).toEqual(p);
+    expect(loadPendingPairing(Date.parse("2026-10-03T15:48:00Z"), store)).toBeNull();
+    store.setItem("cstra_pair_pending", "{not json");
+    expect(loadPendingPairing(0, store)).toBeNull();
+    savePendingPairing(p, store);
+    savePendingPairing(null, store);
+    expect(loadPendingPairing(0, store)).toBeNull();
   });
 });

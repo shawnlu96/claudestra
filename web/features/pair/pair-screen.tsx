@@ -3,8 +3,8 @@
  * /pair：把这个浏览器配对到一台 Mac（docs/design-hosted-frontend.md §4）。三种进来法：
  *   扫二维码 / 点链接 → 地址带 `#<fp>.<secret>`，自动走挑战应答，秘密不出浏览器；
  *   手输 8 位短码 → 中继查到机器 → 进待确认，Mac 侧点头才发凭据（这里每 1.5s 轮询）；
- *   直托管 + 本机回环 → 一键配对。
- * 片段只在浏览器里读（# 不上服务器）。成功后机器进清单、设为当前，去 /chat。
+ *   直托管 + 本机回环 → 一键配对：已配对的设备核对展示码批准，或在这台电脑的终端运行 claudestra pair approve <码>。
+ * 片段只在浏览器里读（# 不上服务器）。成功后机器进清单、设为当前，去 /chat。等批准时离开过这页，回来接着等（use-pair-flow resume）。
  */
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -12,6 +12,7 @@ import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import type { AppConfig } from "@/lib/app-config";
 import { codeFromFragment, compactCode, defaultDeviceName, formatCode, isLoopbackHost, parsePairFragment } from "@/lib/pairing";
+import { copyText } from "@/features/chat/select-mode";
 import { bootMachines, useMachines } from "../machines/use-machines";
 import { usePairFlow } from "./use-pair-flow";
 
@@ -32,7 +33,7 @@ export function PairScreen() {
   const flow = usePairFlow(cfg, () => router.replace(afterPair()));
   const autoRan = useRef(false);
 
-  // 进页：拉配置；地址里带东西就自动走（扫码 / 老短码链接），等首帧渲染完再动（effect 里同步 setState 会级联重渲染）
+  // 进页：拉配置；地址里带东西就自动走（扫码 / 老短码链接），否则接着等上次没等完的批准；等首帧渲染完再动（effect 里同步 setState 会级联重渲染）
   useEffect(() => {
     let dead = false;
     void bootMachines().then((c) => {
@@ -56,7 +57,7 @@ export function PairScreen() {
       else if (legacy) {
         setCode(formatCode(legacy));
         void flow.runCode(legacy, name);
-      }
+      } else flow.resume();
     }, 0);
     return () => clearTimeout(timer);
   }, [cfg, flow]);
@@ -68,7 +69,7 @@ export function PairScreen() {
           <h1 className="mb-1 text-center text-xl font-bold">Claudestra</h1>
           <p className="mb-4 text-center text-xs text-base-content/60">{t("把这个浏览器配对到你的电脑")}</p>
           {flow.phase.kind === "pending" ? (
-            <PendingCard machineName={flow.phase.machineName} code={flow.phase.code} onCancel={flow.cancel} />
+            <PendingCard machineName={flow.phase.machineName} code={flow.phase.code} approver={flow.phase.approver} onCancel={flow.cancel} />
           ) : (
             <PairForm
               code={code}
@@ -157,22 +158,42 @@ function PairForm({ code, deviceName, phase, loopback, onCode, onDeviceName, onS
   );
 }
 
-function PendingCard({ machineName, code, onCancel }: { machineName: string; code?: string; onCancel: () => void }) {
+function PendingCard({ machineName, code, approver, onCancel }: { machineName: string; code?: string; approver?: boolean; onCancel: () => void }) {
   const t = useT();
+  const hint = !code
+    ? "回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。"
+    : approver
+      ? "在手机等已配对的设备上核对这个码并允许，或在这台电脑的终端运行下面这条命令。确认后这里会自动进入。"
+      : "在这台电脑的终端运行下面这条命令批准。确认后这里会自动进入。";
   return (
     <div className="space-y-3 text-center">
       <span className="loading loading-dots loading-md text-primary" />
       <div className="text-sm font-medium">
-        {t(code ? "等待已配对的设备批准" : "等待电脑确认")}
+        {t(code && approver ? "等待已配对的设备批准" : "等待电脑确认")}
         {machineName ? ` · ${machineName}` : ""}
       </div>
       {code && <div className="font-mono text-2xl font-semibold tracking-[0.2em]">{formatCode(code)}</div>}
-      <div className="text-xs leading-relaxed text-base-content/60">
-        {t(code ? "在手机等已配对的设备上核对这个码并允许。确认后这里会自动进入。" : "回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。")}
-      </div>
+      <div className="text-xs leading-relaxed text-base-content/60">{t(hint)}</div>
+      {code && <ApproveCommand command={`claudestra pair approve ${formatCode(code)}`} />}
       <button className="btn btn-ghost btn-sm" onClick={onCancel}>
         {t("取消")}
       </button>
     </div>
+  );
+}
+
+/** 终端批准本机请求的命令：点一下复制（回环 http 下 clipboard API 也在，copyText 另有兜底） */
+function ApproveCommand({ command }: { command: string }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="flex w-full items-center justify-between gap-2 rounded-lg bg-base-200 px-3 py-2 text-left font-mono text-xs"
+      onClick={() => void copyText(command).then(setCopied)}
+    >
+      <code className="break-all">{command}</code>
+      <span className="shrink-0 font-sans text-base-content/60">{t(copied ? "已复制" : "复制")}</span>
+    </button>
   );
 }

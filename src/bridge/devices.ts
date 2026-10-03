@@ -15,7 +15,7 @@ import { LEGACY_SESSION_COOKIE, redeemLegacySession } from "../lib/legacy-web.js
 import { webDb } from "./local-api/db.js";
 import { readPrincipalsStrict, reservedNameError, secretEquals, updatePrincipals, type Principal, type PrincipalsFile } from "../lib/principals.js";
 import { canonicalAgentName, REGISTRY_PATH, readRegistryAgentsSync } from "../lib/registry.js";
-import { formatCode, randomCode } from "../lib/relay-protocol.js";
+import { formatCode, normalizeCode, randomCode } from "../lib/relay-protocol.js";
 import { extractControlToken } from "./api-auth.js";
 import { apiJson, forbidden, INVALID_JSON, invalidJsonBody, readJsonBody } from "./api-respond.js";
 import { emitCredentialRevoked } from "./credential-revocation.js";
@@ -24,7 +24,7 @@ import { activePairingCodeList, issuePairingCode, redeemPairingByProof, redeemPa
 import { requestContextOf, sourceAllows, type RequestContext } from "./request-context.js";
 
 const challenges = new ChallengeStore();
-const approvals = new Approvals();
+const approvals = new Approvals(Date.now, undefined, undefined, (a) => void revokeUnclaimed(a.result!.credentialId));
 const MANAGE_MSG = "device management requires a credential with manage grant";
 const PAIR_ADMIN_MSG = "pairing management requires a device credential with manage grant";
 /** 单测把 principals.json / registry.json 指到临时目录；生产不调 */
@@ -176,13 +176,14 @@ function sameGrant(a: Grant | null, b: Grant): boolean {
 }
 
 /**
- * 有没有人能批本机浏览器的全权请求：与批准门（decideApproval）同一个有效权限视图——未停用、未过期的设备凭据经 effectivePrincipal 收窄后
- * 要过 canAdministerPairing，且 capGrant 能原样给出全权。没有 = 只能走终端 claudestra pair，/devices/local 直接回 no_approver，免得网页干等。
+ * 有没有已配对设备能批本机浏览器的全权请求：与批准门（decideApproval）同一个有效权限视图——未停用、未过期的设备凭据经 effectivePrincipal 收窄后
+ * 要过 canAdministerPairing，且 capGrant 能原样给出全权。还得真被用过（有 lastSeenAt）：批准了却没被浏览器领走的凭据不在任何设备上，
+ * 算进来网页就会让人去「已配对的设备」上批一个谁也批不了的请求。没有 = 网页只提示终端 claudestra pair approve <码>。
  */
 export function hasPairingApprover(file: PrincipalsFile, now = Date.now()): boolean {
   const full = fullGrant();
   return file.principals.some((principal) => !principal.disabled && (principal.credentials ?? []).some((credential) => {
-    if (credential.disabled || Date.parse(credential.expiresAt) <= now) return false;
+    if (credential.disabled || !credential.lastSeenAt || Date.parse(credential.expiresAt) <= now) return false;
     const view = effectivePrincipal({ principal, credential });
     return canAdministerPairing(view) && sameGrant(capGrant(full, view), full);
   }));
@@ -221,9 +222,9 @@ function controlTokenOk(req: Request, url: URL): boolean {
 
 /**
  * 本机浏览器要全权凭据：只认真实回环 socket（经中继 dispatch 的 source 是 relay，进不来）+ 自定义头 + 同源，这三样本机任何进程都凑得齐
- * （bypass agent 一条 curl 就行），所以还要二选一：带 BRIDGE_CONTROL_TOKEN 直接签；否则进待批（local），owner 在已配对的全权设备上
- * 核对展示码点允许，发起的浏览器凭领取 cookie 轮询 /devices/pair/status 取凭据（只给一次、10 分钟过期）。没有能批的设备 → no_approver，
- * 网页回落到终端 claudestra pair（tests/bridge-devices.test.ts「本机回环自动配对」）。
+ * （bypass agent 一条 curl 就行），所以还要二选一：带 BRIDGE_CONTROL_TOKEN 直接签；否则进待批（local），由已配对的全权设备核对展示码点允许，
+ * 或在终端跑 claudestra pair approve <展示码>（decideLocalByCode）；发起的浏览器凭领取 cookie 轮询 /devices/pair/status 取凭据（只给一次、
+ * 10 分钟过期）。approver 告诉网页有没有已配对设备能批，没有就只提示终端（tests/bridge-devices.test.ts「本机回环自动配对」）。
  */
 async function pairLocal(req: Request, url: URL): Promise<Response> {
   const ctx = requestContextOf(req);
@@ -235,9 +236,6 @@ async function pairLocal(req: Request, url: URL): Promise<Response> {
   const deviceName = str((body === INVALID_JSON || !body ? {} : (body as Body)).deviceName) ?? "本机浏览器";
   dropOwnLocalPending(req);
   if (controlTokenOk(req, url)) return pairedResponse(ctx, await grantCredential(deviceName, fullGrant(), undefined, ctx.clientIp, { issuedBy: "control-token" }));
-  if (!hasPairingApprover(await readPrincipalsStrict(principalsPath))) {
-    return apiJson(403, { ok: false, code: "no_approver", error: "no paired device can approve this; run `claudestra pair` in the terminal" });
-  }
   if (approvals.pending().filter((a) => a.local).length >= LOCAL_PENDING_MAX) {
     return apiJson(429, { ok: false, code: "rate_limited", error: "too many local pairing requests waiting for approval" });
   }
@@ -246,7 +244,8 @@ async function pairLocal(req: Request, url: URL): Promise<Response> {
   void import("./push/init.js")
     .then((m) => m.pushOwnerNotice("本机浏览器请求配对", `「${deviceName}」要这台电脑的全权。码 ${formatCode(a.code)} 对得上再允许；不是你开的就拒绝。`))
     .catch((e) => console.error(`⚠️ 本机配对待批提醒没发出去: ${(e as Error).message}`));
-  const res = apiJson(202, { ok: true, pending: true, approvalId: a.id, code: a.code, expiresAt: new Date(a.expiresAt).toISOString(), machineName: hostname() });
+  const approver = hasPairingApprover(await readPrincipalsStrict(principalsPath));
+  const res = apiJson(202, { ok: true, pending: true, approvalId: a.id, code: a.code, approver, expiresAt: new Date(a.expiresAt).toISOString(), machineName: hostname() });
   res.headers.append("set-cookie", localClaimCookie(`${a.id}.${claim}`));
   return res;
 }
@@ -259,7 +258,10 @@ async function cancelLocal(req: Request): Promise<Response> {
   const a = approvals.get(str((body === INVALID_JSON || !body ? {} : (body as Body)).approval) ?? "");
   if (!a || !ownsLocalClaim(req, a)) return forbidden("only the browser that asked can cancel this request");
   if (a.state === "pending") approvals.decide(a.id, false);
-  else if (a.state === "approved") approvals.take(a.id);
+  else if (a.state === "approved" && a.result) {
+    approvals.take(a.id);
+    await revokeUnclaimed(a.result.credentialId);
+  }
   const res = apiJson(200, { ok: true });
   res.headers.append("set-cookie", localClaimCookie(null));
   return res;
@@ -310,11 +312,8 @@ async function revokeDevice(req: Request, principal: Principal, id: string): Pro
   const own = principal.credential === id;
   if (!own && !canManage(principal)) return forbidden(MANAGE_MSG);
   const holderId = await updatePrincipals((file) => {
-    const holder = file.principals.find((p) => (p.credentials ?? []).some((c) => c.id === id));
-    if (!holder) return { changed: false, result: null };
-    holder.credentials = (holder.credentials ?? []).filter((c) => c.id !== id);
-    if (holder.id.startsWith("guest:") && holder.credentials.length === 0) holder.disabled = true;
-    return { changed: true, result: holder.id };
+    const holder = dropCredential(file, id);
+    return { changed: !!holder, result: holder };
   }, { path: principalsPath });
   if (!holderId) return apiJson(404, { ok: false, error: "device not found" });
   emitCredentialRevoked(id); // 在途的 SSE / 终端流随之中止
@@ -323,12 +322,41 @@ async function revokeDevice(req: Request, principal: Principal, id: string): Pro
   return res;
 }
 
+/** 从 principals 里摘掉一条凭据，返回持有者 id（没有 = null）；guest 摘到最后一条就停用那个 principal */
+function dropCredential(file: PrincipalsFile, id: string): string | null {
+  const holder = file.principals.find((p) => (p.credentials ?? []).some((c) => c.id === id));
+  if (!holder) return null;
+  holder.credentials = (holder.credentials ?? []).filter((c) => c.id !== id);
+  if (holder.id.startsWith("guest:") && holder.credentials.length === 0) holder.disabled = true;
+  return holder.id;
+}
+
+/**
+ * 批准了却没被领走（过期 / 浏览器取消）的凭据收回：token 只在内存里、已随待批一起丢了，留着只会在设备列表里多一台「从没上线」的设备。
+ * 已经用过的（有 lastSeenAt）不动——那说明浏览器其实拿到了。写失败只记日志：那张凭据没人持有，也已不算能批准的设备（hasPairingApprover）。
+ */
+async function revokeUnclaimed(credentialId: string): Promise<void> {
+  try {
+    const holder = await updatePrincipals((file) => {
+      const used = file.principals.some((p) => (p.credentials ?? []).some((c) => c.id === credentialId && c.lastSeenAt));
+      const h = used ? null : dropCredential(file, credentialId);
+      return { changed: !!h, result: h };
+    }, { path: principalsPath });
+    if (holder) console.log(`🧹 配对凭据 ${credentialId} 批准后没人领，已收回`);
+  } catch (e) {
+    console.error(`⚠️ 没人领的配对凭据 ${credentialId} 收回失败: ${(e as Error).message}`);
+  }
+}
+
 // ── 回环控制路由与管理端点共用 ─────────────────────────────────────────────
 
-/** loopback = 回环 /relay/pair/approvals（本机任何进程都读得到）：本机全权请求不给编号——CLI 按自己签的码找，本来也用不上 */
+/**
+ * loopback = 回环 /relay/pair/approvals（本机任何进程都读得到）：本机全权请求编号、展示码都不给——终端批它要报出浏览器上显示的码
+ * （decideLocalByCode），列表里抄得到就不算核对了。CLI 的 waitForApproval 按自己签的码找，用不上这两样。
+ */
 export function pendingApprovals(loopback = false): Array<Record<string, unknown>> {
   return approvals.pending().map((a) => ({
-    ...(loopback && a.local ? {} : { id: a.id }), code: a.code, deviceName: a.deviceName, clientIp: a.clientIp, grant: a.grant,
+    ...(loopback && a.local ? {} : { id: a.id, code: a.code }), deviceName: a.deviceName, clientIp: a.clientIp, grant: a.grant,
     ...(a.guest ? { guest: a.guest } : {}), ...(a.local ? { local: true } : {}),
     createdAt: new Date(a.createdAt).toISOString(), expiresAt: new Date(a.expiresAt).toISOString(),
   }));
@@ -338,11 +366,25 @@ export function pendingApprovals(loopback = false): Array<Record<string, unknown
  * 批准 / 拒绝：先 claim（多台设备同时点只有一个赢），批准就此刻签凭据挂进待确认，浏览器下次轮询取走。
  * approver = 网页里点批准的那台设备：请求的权限超过它自己手里的就拒（本机终端走回环路由，不传）。
  */
-export async function decideApproval(id: string, approve: boolean, approver?: Principal): Promise<Record<string, unknown> | null> {
+export function decideApproval(id: string, approve: boolean, approver?: Principal): Promise<Record<string, unknown> | null> {
+  return decide(id, approve, approver, false);
+}
+
+/**
+ * 终端批本机浏览器的全权请求（claudestra pair approve <码>）：码要和浏览器上显示的一致，批的就是那一个浏览器——本机 agent 自己发起的请求
+ * 码不同，混不进来；凭据照旧只给持领取 cookie 的浏览器。回环本来就能经 /relay/pair/new 签全权码再自己兑换，这条路没有放宽本机进程能拿到的东西。
+ */
+export function decideLocalByCode(input: string, approve: boolean): Promise<Record<string, unknown> | null> {
+  const code = normalizeCode(input);
+  const a = code ? approvals.pending().find((x) => x.local && x.code === code) : undefined;
+  return a ? decide(a.id, approve, undefined, true) : Promise.resolve(null);
+}
+
+async function decide(id: string, approve: boolean, approver: Principal | undefined, codeChecked: boolean): Promise<Record<string, unknown> | null> {
   const peek = approvals.get(id);
-  // 本机浏览器的全权请求：回环控制路由（approver 缺省）本机任何进程都打得到，批准只认网页里的设备；拒绝谁都能拒
-  if (approve && !approver && peek?.local && peek.state === "pending") {
-    return { ok: false, id, state: "pending", error: "本机浏览器的全权请求只能在已配对的设备上批准（网页侧栏的配对横幅）" };
+  // 本机浏览器的全权请求：回环按编号批不了（本机任何进程都打得到、编号也不对回环公开），要么网页里的设备批，要么终端报出展示码；拒绝谁都能拒
+  if (approve && !approver && !codeChecked && peek?.local && peek.state === "pending") {
+    return { ok: false, id, state: "pending", error: "本机浏览器的全权请求要在已配对的设备上批准，或在终端运行 claudestra pair approve <浏览器上显示的码>" };
   }
   if (approve && approver && peek?.state === "pending" && !sameGrant(capGrant(peek.grant, approver), peek.grant)) {
     return { ok: false, id, state: "pending", error: "这个请求要的权限比你这台设备的还大，批准不了；到电脑上或用全权设备批准" };
