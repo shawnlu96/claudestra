@@ -18,6 +18,7 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
+import { endsInModal, paneTail, trimTrailingBlank } from "./pane-tail.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -329,17 +330,6 @@ export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
 export const CC_BUSY_RE =
   /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*(?:…|\.\.\.)\s*\([^)\n]*?(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b|^[·✢✳✶✻✽*] \S[^\n]*(?:…|\.\.\.)[^\S\n]*$|^[·✢✳✶✻✽*] [^\n]*\b(?:retrying|will retry)\b/im;
 
-/** 剪掉 capture-pane 输出的尾部空行(v2.17.2 P0,peer 报告)。pane 比 TUI 实绘区
- *  高(窗口 resize 后 CC 未重绘底部)时,capture 会带出成片尾部空行——最多实测
- *  30 行——把页脚整个挤出 slice(-N) 窗口:paneLooksIdle 恒 false = 全体 agent
- *  被误判 busy,用量抓取/wedge/就绪轮询/claude-settings 409 守卫/web busy 态
- *  全部失真。所有「看 pane 尾部」的判定都必须先过这一刀。 */
-export function trimTrailingBlank(lines: string[]): string[] {
-  let end = lines.length;
-  while (end > 0 && !lines[end - 1]!.trim()) end--;
-  return lines.slice(0, end);
-}
-
 /** `❯` 判据该看的行:输入框的 `❯` 行(上一行是顶边框 `────`,可带名字标签)到底。按结构找而不数
  *  「最后 5 行」:页脚高度不固定(窄窗口里状态栏 / banner / 右侧通知各折一行),数行会把 `❯` 挤出去
  *  ⇒ 空闲恒判忙。只搜尾部 15 行,找不到退回最后 5 行。用例见 tests/prompt-zone.test.ts。 */
@@ -537,13 +527,13 @@ export const PERMISSION_MODE_CYCLE = [
 
 /** 从 pane 底部 banner 判断当前 permission mode。default 模式没 banner（只有 ❯）。 */
 export function detectPermissionMode(pane: string): string | null {
-  const tail = pane.split("\n").slice(-6).join("\n");
+  const tail = paneTail(pane, 6).join("\n");
   if (/auto mode on/i.test(tail)) return "auto";
   if (/accept edits on/i.test(tail)) return "acceptEdits";
   if (/plan mode on/i.test(tail)) return "plan";
   if (/bypass permissions on/i.test(tail)) return "bypassPermissions";
   // 无 mode banner 但在 ready 提示符 → default 模式（无 banner）
-  if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) return "default";
+  if (/❯/.test(paneTail(pane, 5).join("\n"))) return "default";
   return null;
 }
 
@@ -582,7 +572,7 @@ export function detectBypassConsentPrompt(pane: string): boolean {
  * 返回弹窗描述，没有返回 null。
  */
 export function detectSessionIdlePrompt(pane: string): string | null {
-  const lines = pane.split("\n");
+  const lines = trimTrailingBlank(pane.split("\n"));
   // v2.0.23+: 只看 pane 底部 —— 真 session-idle 弹窗总在最底下。之前 pane.includes
   // 扫**全 pane**，会把 scrollback 里显示的代码 / 输出当成真弹窗误报。实测：owner 编辑
   // 本检测器自己的测试 fixture（"❯ 1. Resume from summary" 之类）时，claudestra 的屏幕
@@ -623,7 +613,7 @@ export interface ModalOption {
 
 export function parseModalOptions(pane: string): ModalOption[] | null {
   // 只看 pane 最后 30 行（modal 总在底部）
-  const tail = pane.split("\n").slice(-30);
+  const tail = paneTail(pane, 30);
   const seen = new Set<string>();
   const options: ModalOption[] = [];
   for (const raw of tail) {
@@ -725,7 +715,7 @@ export type ArrowNavKind = "horizontal" | "vertical" | "both";
 
 export function detectArrowNavModal(pane: string): ArrowNavKind | null {
   // 只看最后 20 行
-  const tail = pane.split("\n").slice(-20).join("\n");
+  const tail = paneTail(pane, 20).join("\n");
   const hasHoriz = /←\/→|◀\/▶|[^\s]→ to/.test(tail) || /to change/.test(tail) && /←/.test(tail);
   const hasVert = /↑\/↓|▲\/▼/.test(tail);
   // 还必须有 "Enter to confirm" 或 "Enter to" 暗示确认流程
@@ -1232,7 +1222,8 @@ export async function killPidsEscalating(pids: number[], graceMs = 4000): Promis
  * auto-Enter 会毁掉用户正在交互的 /model 类菜单)。
  */
 export function detectDevChannelsModal(pane: string): boolean {
-  const tail = pane.split("\n").slice(-20).join("\n");
+  if (!endsInModal(pane)) return false; // 框后面已有别的内容 = 残留
+  const tail = paneTail(pane, 20).join("\n");
   if (!/Loading development channels/i.test(tail)) return false;
   if (!/❯\s*1\./.test(tail)) return false;
   return !isAtShell(pane);
@@ -1257,7 +1248,7 @@ export async function ensureSocketDir(): Promise<void> {
  * 「▰▰▱▱… 37%」)。拿不到返回 null。
  */
 export function paneCompactProgress(pane: string): number | null {
-  const tail = pane.split("\n").slice(-12).join("\n");
+  const tail = paneTail(pane, 12).join("\n");
   const m = tail.match(/[▰▱]+\s*(\d{1,3})%/);
   if (!m) return null;
   const n = Number(m[1]);
