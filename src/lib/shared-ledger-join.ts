@@ -17,7 +17,7 @@ import { resolveSharedLedgerCredential, writeSharedLedgerCredential, type Shared
 /** The pure protocol lives in shared-ledger-join-protocol.ts; these names stay importable from here. */
 export {
   formatSharedLedgerJoinCode, looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode, SHARED_LEDGER_JOIN_PATH, SHARED_LEDGER_JOIN_PURPOSE,
-  sharedLedgerInstanceId, sharedLedgerJoinFields, type SharedLedgerJoinGrant,
+  sharedLedgerInstanceId, sharedLedgerJoinFields, type SharedLedgerJoinCode, type SharedLedgerJoinGrant,
 } from "./shared-ledger-join-protocol.js";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
