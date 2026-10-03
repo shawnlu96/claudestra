@@ -13,7 +13,9 @@ import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
-import { CollabDetail, useDetailHistory, useNarrow } from "./collab-detail";
+import { CollabDetail, useNarrow } from "./collab-detail";
+import { useSheetHistory } from "./v4/sheet-history";
+import { browserHistory } from "@/lib/hash-nav-browser";
 import { Icon } from "./collab-icons";
 import { waitsOnOwner } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
@@ -154,9 +156,8 @@ export function CollabView({ project }: { project: string }) {
   const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>("all");
-  const { sel, setSel, focus, pickTask, select, close: closeSel } = useSelection(openTask);
-  const sheetKey = narrow && sel && !openTask ? `~${sel.kind}` : null; // 手机整屏页同详情一样占一条历史：系统左滑先收起它
-  const close = useDetailHistory(!!sheetKey, sheetKey ?? "", closeSel);
+  const { sel, setSel, focus, pickTask, select, close } = useSelection(openTask);
+  useSheetHistory(!!sel && sel.kind !== "task" && !openTask, narrow, `~${sel?.kind ?? ""}`, close, browserHistory);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr });
   const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
