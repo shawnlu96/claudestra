@@ -1,9 +1,4 @@
-/**
- * peer-share-F1：设置 → Peer 协作里的分享候选（GET /peers 的 localAgents，bridge/peers-routes.ts）不列一次性出借 worker。
- * 识别只用 lib/lend-workers-view.ts 的 isLendWorkerName（agent-lend-<10hex> / lend-<10hex>），不看项目名、不看状态。
- * 只改候选：peer 已有的 scope（exposedAgents）原样返回，GET 不调任何改授权的 manager 命令、不写 principals。
- * 三条入口（改 scope / 新邀请 / 双向加入）都用同一份 GET /peers 的 localAgents，这里对 web 源码做接线断言（不挂 React）。
- */
+/** Sharing candidates use registry kind; GET preserves existing scopes and never writes the input files. */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
@@ -18,25 +13,28 @@ const OWNER: Principal = { id: "owner:self", role: "owner", agents: ["*", "maste
 const STATUSES = ["active", "creating", "stopped"] as const;
 const hex10 = (i: number) => i.toString(16).padStart(10, "0");
 
-/** 80 个 stopped 标准出借 worker（Sekai 报告的形状）+ 各状态、两种前缀的 worker + 普通会话（含名字相近但不规范的） */
+/** Many stopped workers plus arbitrary names in each lifecycle state, and legacy/main sessions. */
 function fixture() {
   const agents: Record<string, Record<string, unknown>> = {};
   for (let i = 0; i < 80; i++) agents[`agent-lend-${hex10(0xa0000 + i)}`] = { status: "stopped", kind: "worker", purpose: "lend" };
   STATUSES.forEach((status, i) => {
-    agents[`agent-lend-${hex10(0xb000 + i)}`] = { status };
-    agents[`lend-${hex10(0xc000 + i)}`] = { status };
+    agents[`agent-lend-${hex10(0xb000 + i)}`] = { status, kind: "worker" };
+    agents[`agent-job-${status}`] = { status, kind: "worker", external: true };
+    agents[`lend-${hex10(0xc000 + i)}`] = { status, kind: "worker" };
   });
   const ordinary: Record<string, Record<string, unknown>> = {
     "agent-alpha": { status: "active", external: true },
     "agent-beta": { status: "idle" },
     "agent-gamma": { status: "stopped", external: true },
-    // 只差一点的普通名字：不是 10 位小写 hex / 多了前后缀 → 照常可见
+    // Names are not a type discriminator, even exact legacy lend names.
     "agent-lend-review": { status: "active" },
+    "agent-lend-0123456789": { status: "active", kind: "main", external: true },
+    "lend-9876543210": { status: "stopped" },
     "agent-lend-0123456789a": { status: "stopped" },
     "agent-lend-ABCDEF0123": { status: "active" },
     "agent-my-lend-0123456789": { status: "active", external: true },
     "lending-desk": { status: "stopped" },
-    // 项目名 / purpose 像出借也不算：只认名字
+    // Project and purpose do not turn a main/legacy session into a worker.
     "agent-pool-ops": { status: "active", projectId: "lend", purpose: "lend pool ops" },
   };
   return { agents: { ...agents, ...ordinary }, ordinary };
@@ -47,6 +45,8 @@ const EXPECTED_ORDINARY = [
   { name: "beta", external: false, status: "idle" },
   { name: "gamma", external: true, status: "stopped" },
   { name: "lend-review", external: false, status: "active" },
+  { name: "lend-0123456789", external: true, status: "active" },
+  { name: "lend-9876543210", external: false, status: "stopped" },
   { name: "lend-0123456789a", external: false, status: "stopped" },
   { name: "lend-ABCDEF0123", external: false, status: "active" },
   { name: "my-lend-0123456789", external: true, status: "active" },
@@ -77,25 +77,33 @@ beforeEach(async () => {
   for (const p of written) await mkdir(dirname(p), { recursive: true });
   writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: fixture().agents }));
   writeFileSync(PRINCIPALS_PATH, JSON.stringify({ principals: [SEKAI] }));
-  writeFileSync(PEERS_PATH, JSON.stringify({ httpPeers: [{ name: "sekai", baseUrl: "http://100.64.0.7:3847", outToken: "o".repeat(40), addedAt: "2026-09-01T00:00:00Z" }], pendingInvites: [] }));
+  writeFileSync(PEERS_PATH, JSON.stringify({ httpPeers: [{ name: "sekai", baseUrl: "https://peer.example.test", outToken: "o".repeat(40), addedAt: "2026-09-01T00:00:00Z" }], pendingInvites: [] }));
 });
 afterAll(async () => { for (const p of written) await rm(p, { force: true }); });
 
 describe("GET /peers 的分享候选 localAgents", () => {
-  test("80 个 stopped 出借 worker + active/creating/stopped 两种前缀的 worker 全不出现；普通会话按原映射全在", async () => {
+  test("scoped callers cannot inspect peer sharing candidates or invoke manager", async () => {
+    const m = recorder();
+    const res = await handlePeersRoutes(new Request("https://bridge.example.test/api/v1/peers"), "/peers",
+      { ...OWNER, agents: ["alpha"], role: "external" }, m.run);
+    expect(res?.status).toBe(403);
+    expect(m.calls).toEqual([]);
+  });
+  test("kind=worker 任意名字及 active/creating/stopped 全隐藏；main/缺 kind 含标准 lend 名保留", async () => {
     const body = await getPeers(recorder().run);
-    expect(body.localAgents.some((a) => /^lend-[0-9a-f]{10}$/.test(a.name))).toBe(false);
     expect(body.localAgents).toEqual(EXPECTED_ORDINARY);
-    expect(body.localAgents.length).toBe(Object.keys(fixture().ordinary).length); // 9 条，原来是 9 + 80 + 6 = 95
+    expect(body.localAgents.length).toBe(Object.keys(fixture().ordinary).length);
   });
 
   test("只改候选：peer 已有 scope（含出借 worker 名）原样返回，GET 只调 peer-invite-list，principals 不被改写", async () => {
-    const before = readFileSync(PRINCIPALS_PATH, "utf8");
+    const before = written.map((p) => readFileSync(p, "utf8"));
     const m = recorder();
     const body = await getPeers(m.run);
     expect(body.peers.find((p) => p.name === "sekai")?.exposedAgents).toEqual(SEKAI.agents);
     expect(m.calls).toEqual([["peer-invite-list"]]);
-    expect(readFileSync(PRINCIPALS_PATH, "utf8")).toBe(before);
+    expect(written.map((p) => readFileSync(p, "utf8"))).toEqual(before);
+    await getPeers(m.run);
+    expect(written.map((p) => readFileSync(p, "utf8"))).toEqual(before);
   });
 });
 
