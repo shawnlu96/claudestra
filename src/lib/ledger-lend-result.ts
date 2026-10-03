@@ -95,7 +95,7 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
       taskId: o.taskId, reviewer: `peer:${peer}`, verdict: v.verdict, p0: v.p0, p1: v.p1, p2: v.p2, path, text: `远端审查（${peer}，单号 ${o.orderId}）：${v.verdict}`,
       head: o.head, reviewerSessionId: `lend:${peer}:${o.orderId}`, reviewerFamily: o.family,
       findings: v.findings.map((f) => ({ findingId: f.findingId, family: f.family, severity: f.severity, probe: probeOf(f.probe),
-        ...storedBasis(f, req.report) })),
+        ...storedBasis(f, req.report), ...(f.pitfall ? { pitfall: true } : {}) })),
       ...{ lend: { orderId: o.orderId, peer, gen: o.leaseGen, sha256: bodySha, claim: { family: req.session.family, session } } },
     });
     const eventSeq = review.event.seq;

@@ -13,6 +13,9 @@ import { parseMemoryRefs } from "../lib/memory-tools-wire.js";
 import { redeemVerdictTicket } from "../lib/verdict-ticket.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { observeMemory } from "../lib/memory-auto.js";
+import { configuredLesson } from "../lib/memory-auto-summary.js";
+import { memoryAutoRepoDeps } from "../lib/memory-auto-repo.js";
 
 const TICKET_FLAGS = ["wire", "session", "family", "ticket-file", "ticket", "dedup"];
 
@@ -84,6 +87,13 @@ function refsCmd(c: LedgerCli) {
 }
 
 export const MEMORY_CMDS: Record<string, CommandSpec> = {
+  "memory-auto": {
+    valued: ["project"], usage: "memory-auto --project <id>（调度器的本机记忆观察器）",
+    run: async (c) => ({ ok: true, ...await observeMemory(c.db, c.deps.actor, c.project(), {
+      assertLease: c.deps.assertLease, lesson: configuredLesson,
+      ...await memoryAutoRepoDeps(c.project(), c.deps.actor, c.deps.assertLease, c.deps.factsDeps),
+    }) }),
+  },
   "memory-record": {
     valued: TICKET_FLAGS,
     usage: "memory-record --wire <JSON {kind,title,symptom,rule,files,family?,fixable,orderId?|project}>（记坑 / 总结补充；PM / owner 直接跑，执行者 / 审查员用 MCP record_memory）",
