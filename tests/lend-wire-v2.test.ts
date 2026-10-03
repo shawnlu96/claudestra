@@ -90,7 +90,7 @@ describe("协议常量与状态码", () => {
       }
     };
     walk(root);
-    expect(hits).toEqual(["lib/lend-wire-v2.ts"]);
+    expect(hits).toEqual(["lib/lend-wire-v2-schema.ts"]);
   });
 
   test("v2 拒绝码没有 404：对方 v2 接口回 404 只可能是旧版", () => {
