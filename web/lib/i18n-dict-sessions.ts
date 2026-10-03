@@ -41,6 +41,7 @@ export const SESSIONS_DICT: Record<string, string> = {
   "{n} 个会话": "{n} session|{n} sessions",
   "归档失败:": "Archive failed: ", // 值尾带空格
   "沉寂": "Dormant",
+  "历史": "History", // 侧栏组底收起的用完会话（sidebar-history.tsx）
   // 子会话收编确认（components/adopt-panel.tsx）
   "另一个会话": "another session",
   "确认收编子会话": "Confirm adopting a sub-session",

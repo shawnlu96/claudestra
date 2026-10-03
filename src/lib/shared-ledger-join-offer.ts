@@ -8,6 +8,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode } from "./shared-ledger-join.js";
+import type { SharedLedgerProjectChoice } from "./shared-ledger-local-project.js";
 import { writeJsonAtomic, writeJsonAtomicSync } from "./state-file.js";
 
 export const JOIN_OFFER_PATH = "/api/v1/shared-ledger-join-offer";
@@ -93,7 +94,7 @@ export class JoinOfferLimiter {
 
 // ── 0600 files: pending offers (receiver) and sent offers (sender) ──
 
-export interface PendingJoinOffer extends JoinOffer { peer: string; receivedAt: number; askId?: string }
+export interface PendingJoinOffer extends JoinOffer { peer: string; receivedAt: number; askId?: string; projectChoices?: SharedLedgerProjectChoice[]; sharedProjectId?: string }
 export interface SentJoinOffer {
   offerId: string; peer: string; host: string; centerId: string; project: string; target: string; sentAt: number; expiresAt: number;
   status?: JoinOfferStatus; statusAt?: number;
