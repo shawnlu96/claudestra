@@ -29,6 +29,9 @@ export interface PeerView {
   roles?: string[];
   priority?: Priority;
   quota?: QuotaReport | null;
+  /** capacity 适用的项目；混合条目里 legacy 项目仍受 maxOpen 的读数（与 capacity 是同一台机器的两种上界，不相加）；老 bridge 没有 */
+  capacityProjects?: string[];
+  legacyCapacity?: { projects: string[]; capacity: PeerCapacity } | null;
 }
 /** 本机这一行（scheduler.json 的一个项目）：档位与并发上限可改，其余只读；老 bridge 只有前三个字段 */
 export interface LocalProjectView {
