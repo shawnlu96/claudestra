@@ -56,7 +56,7 @@ const EXPECTED_ORDINARY = [
 
 // peer 已有的授权里故意带着出借 worker：刷新候选不能把它摘掉，也不能多给
 const SEKAI: Principal = {
-  id: "token:tok_sekai", role: "peer", peer: "sekai", createdAt: "2026-09-01T00:00:00Z",
+  id: "token:tok_sekai", role: "external", peer: "sekai", createdAt: "2026-09-01T00:00:00Z",
   agents: ["alpha", `lend-${hex10(0xa0000)}`, `agent-lend-${hex10(0xb000)}`],
 };
 
