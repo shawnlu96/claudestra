@@ -10,6 +10,8 @@
  * - plan → update_plan（与 rollout 里 Codex 的计划工具同名同参）；usage_update → context_usage；config_option_update → model_state。
  * - 适配器的中性记号（Pi，pi-adapter/map.ts；codex-acp 不发）：tool_call 的 _meta.claudestra.toolUse 直接当 tool_use 的名字和入参；
  *   session_info_update 的 _meta.claudestra.compacted → compact_boundary，notice → 进度句。
+ * - 压缩完成只认宿主按运行时定的那一个来源（CompactSource.from）：Pi 认上面的 compacted，Codex 认 ACP 的 compaction_update（只有 completed
+ *   出边界，同一 compactionId 只出一次；开始 / 失败是进度句）。另一种来源的同类字段一律不认，免得别处带的字段冒充压缩完成。
  * tests/acp-updates.test.ts。
  */
 import { codexCommandText, codexTextOf } from "../codex-session.js";
@@ -37,6 +39,12 @@ const OUTPUT_TAIL = 64 * 1024;
 /** 结束过的调用 id 记这么多个：迟到的 tool_call_update 不能让它再起一次头 */
 const DONE_CAP = 500;
 const TERMINAL = new Set(["completed", "failed"]);
+
+/** compact_boundary 认哪种来源（见文件头）；trigger 由宿主按这一轮是不是 /compact 命令给 */
+export interface CompactSource {
+  from: "claudestra-meta" | "compaction-update";
+  trigger?: () => "manual" | "auto";
+}
 
 export interface AcpTranslator {
   /** 一条 session/update 的 update 字段 → 零到多条条目 */
@@ -108,7 +116,25 @@ function mergeTool(t: ToolState, u: Rec): void {
   if (typeof delta === "string" && delta) t.out = (t.out + delta).slice(-OUTPUT_TAIL);
 }
 
-export function createAcpTranslator(now: () => string = () => new Date().toISOString()): AcpTranslator {
+/**
+ * ACP compaction_update（unstable，宿主在 initialize 声明 session.compaction 才会收到；来源不是它就一概不理）。同一 compactionId
+ * 到了终态就不再理：重复的 completed、终态后迟到的更新都不出第二条。completed → 边界的 compactMetadata，in_progress / failed → 进度句
+ */
+function compactionTracker(compact: CompactSource): (u: Rec) => { boundary: Rec } | { progress: string } | null {
+  const seen = new Map<string, boolean>(); // id → 是否已到终态
+  return (u) => {
+    const id = typeof u.compactionId === "string" ? u.compactionId : "";
+    if (compact.from !== "compaction-update" || !id || seen.get(id)) return null;
+    const first = !seen.has(id);
+    seen.set(id, ["completed", "failed", "cancelled"].includes(u.status));
+    if (seen.size > DONE_CAP) seen.delete(seen.keys().next().value as string);
+    if (u.status === "completed") return { boundary: { trigger: compact.trigger?.() ?? "auto" } };
+    if (u.status === "failed") return { progress: `上下文压缩没成功${typeof u.error === "string" && u.error ? `：${u.error}` : ""}` };
+    return u.status === "in_progress" && first ? { progress: "📦 正在压缩上下文…" } : null;
+  };
+}
+
+export function createAcpTranslator(now: () => string = () => new Date().toISOString(), compact: CompactSource = { from: "claudestra-meta" }): AcpTranslator {
   let text = "";
   let textId: string | undefined;
   let planSeq = 0;
@@ -153,10 +179,10 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
   const progress = (text: unknown): Rec[] =>
     typeof text === "string" && text.trim() ? [...flushText(), { type: "assistant", timestamp: now(), message: { content: [{ type: "thinking", thinking: text }] } }] : [];
 
+  const boundary = (compactMetadata: Rec): Rec[] => [...flushText(), { type: "system", subtype: "compact_boundary", timestamp: now(), compactMetadata }];
   const info = (c: Rec): Rec[] =>
-    c.compacted && typeof c.compacted === "object"
-      ? [...flushText(), { type: "system", subtype: "compact_boundary", timestamp: now(), compactMetadata: c.compacted }]
-      : progress(c.notice);
+    compact.from === "claudestra-meta" && c.compacted && typeof c.compacted === "object" ? boundary(c.compacted) : progress(c.notice);
+  const compaction = compactionTracker(compact);
 
   const plan = (u: Rec): Rec[] => {
     const id = `acp-plan-${++planSeq}`;
@@ -179,6 +205,8 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
           return u._meta?.claudestra?.display === true ? progress(u.content?.text) : [];
         case "session_info_update":
           return info(u._meta?.claudestra ?? {});
+        case "compaction_update":
+          return ((r) => (!r ? [] : "boundary" in r ? boundary(r.boundary) : progress(r.progress)))(compaction(u));
         case "tool_call":
         case "tool_call_update": {
           const id = typeof u.toolCallId === "string" ? u.toolCallId : "";

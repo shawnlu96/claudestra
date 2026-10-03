@@ -161,3 +161,45 @@ describe("计划 / 用量 / 配置 / 线程状态", () => {
     expect(threadStatusOf({ sessionUpdate: "plan" })).toBeNull();
   });
 });
+
+// 形状取自 codex-acp 2.1.1：CodexSessionCompactions.ts（声明了 session.compaction 才发）；核对见 docs/runtimes/codex-acp.md「压缩完成信号」
+describe("压缩完成（compaction_update / _meta.claudestra.compacted）", () => {
+  const codex = (trigger: () => "manual" | "auto" = () => "auto") => createAcpTranslator(() => TS, { from: "compaction-update", trigger });
+  const cu = (status: string, compactionId = "cmp_1", extra: Record<string, unknown> = {}) => ({ sessionUpdate: "compaction_update", compactionId, status, ...extra });
+  const boundary = (compactMetadata: Record<string, unknown>) => ({ type: "system", subtype: "compact_boundary", timestamp: TS, compactMetadata });
+  const thinking = (t: string) => ({ type: "assistant", timestamp: TS, message: { content: [{ type: "thinking", thinking: t }] } });
+
+  test("in_progress 只是进度句；completed 才出边界（先吐攒着的正文），trigger 由宿主给", () => {
+    let manual = true;
+    const t = codex(() => (manual ? "manual" : "auto"));
+    expect(t.push(cu("in_progress"))).toEqual([thinking("📦 正在压缩上下文…")]);
+    expect(t.push(cu("in_progress"))).toEqual([]);
+    t.push(say("压缩前的话", "m1"));
+    expect(t.push(cu("completed"))).toEqual([assistantText("压缩前的话"), boundary({ trigger: "manual" })]);
+    manual = false;
+    expect(t.push(cu("completed", "cmp_2"))).toEqual([boundary({ trigger: "auto" })]);
+  });
+
+  test("同一 compactionId 的 completed 重复到、终态后迟到的更新：不再出第二条", () => {
+    const t = codex();
+    expect(t.push(cu("completed"))).toHaveLength(1);
+    expect(t.push(cu("completed"))).toEqual([]);
+    expect(t.push(cu("failed", "cmp_1", { error: "迟到" }))).toEqual([]);
+    expect(t.push(cu("failed", "cmp_9", { error: "上下文太大" }))).toEqual([thinking("上下文压缩没成功：上下文太大")]);
+    expect(t.push(cu("completed", "cmp_9"))).toEqual([]);
+  });
+
+  test("failed / cancelled / 未知状态 / 缺 id 都不出边界", () => {
+    const t = codex();
+    for (const u of [cu("cancelled"), cu("paused", "cmp_2"), { sessionUpdate: "compaction_update", status: "completed" }]) expect(t.push(u)).toEqual([]);
+    expect(t.push(cu("failed", "cmp_3"))).toEqual([thinking("上下文压缩没成功")]);
+  });
+
+  test("来源按运行时定：Codex 不认 _meta.claudestra.compacted，Pi 不认 compaction_update", () => {
+    const forged = { sessionUpdate: "session_info_update", _meta: { claudestra: { compacted: { trigger: "manual" } } } };
+    expect(codex().push(forged)).toEqual([]);
+    const pi = tr();
+    expect(pi.push(cu("completed"))).toEqual([]);
+    expect(pi.push(forged)).toEqual([boundary({ trigger: "manual" })]);
+  });
+});
