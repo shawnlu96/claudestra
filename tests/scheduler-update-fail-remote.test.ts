@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { auditLedger } from "../src/lib/ledger-audit.js";
+import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
@@ -49,6 +50,8 @@ test(`GitHub update refusal: ${mode}`, async () => {
     const cli = (...args: string[]) => f.cliWith({ lend }, "scheduler", ...args);
     const doTick = () => schedulerAutoTick(f.db, { p: policy }, { ...f.tickDeps, borrow: async () => borrow,
       manager: (...args) => cli(...args.slice(1)) as Promise<Record<string, any>> });
+    if (refused) { const r = auditLedger({ project: "p", pms: ["pm"], tasks: [], agents: null, reviewers: null, held: null, ownerInbox: null }, Date.now());
+      reconcileFindings(f.db, "p", r.findings, r.evaluated, Date.now()); } // the patrol was already running before the refusal
     const tick = await doTick();
     expect(tick.failed).toEqual([]);
     if (refused) {
@@ -67,10 +70,19 @@ test(`GitHub update refusal: ${mode}`, async () => {
       await doTick();
       expect(f.notices).toEqual([]);
       expect(listLendOrders(f.db, "T1")).toEqual([]);
-      const row = auditLedger({ project: "p", pms: ["pm"], tasks: [{ task: f.task(), events: listEvents(f.db, { project: "p", target: "T1" }) }],
-        agents: null, reviewers: null, held: null, ownerInbox: null }, Date.now()).findings.filter((x) => x.rule === "dispatch_blocked");
-      expect(row).toEqual([expect.objectContaining({ taskId: "T1", notify: "pm" })]);
-      expect(row[0]!.detail.includes(error)).toBe(false);
+      // The one PM notice is now the patrol's: a persisted open finding, pushed to PM once, deduped on later runs.
+      const patrol = () => {
+        const r = auditLedger({ project: "p", pms: ["pm"], tasks: [{ task: f.task(), events: listEvents(f.db, { project: "p", target: "T1" }) }],
+          agents: null, reviewers: null, held: null, ownerInbox: null }, Date.now());
+        return reconcileFindings(f.db, "p", r.findings, r.evaluated, Date.now());
+      };
+      const first = patrol().pending.filter((x) => x.rule === "dispatch_blocked");
+      expect(first).toEqual([expect.objectContaining({ taskId: "T1", notify: "pm" })]);
+      expect(first[0]!.detail.includes(error) || first[0]!.detail.includes(foreign)).toBe(false);
+      ackFindings(f.db, first.map((x) => x.key), Date.now());
+      await doTick();
+      expect(patrol().pending.filter((x) => x.rule === "dispatch_blocked")).toEqual([]);
+      expect(openFindings(f.db, "p").filter((x) => x.rule === "dispatch_blocked")).toHaveLength(1);
       return;
     }
     expect(tick.cards[0]).toMatchObject({ step: "pool_pooled" });

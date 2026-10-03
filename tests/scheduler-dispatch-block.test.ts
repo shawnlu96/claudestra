@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { auditLedger } from "../src/lib/ledger-audit.js";
+import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
@@ -33,6 +34,8 @@ const later = async (p: Fx) => { p.f.advance(MIN); p.hello(); return p.tick(); }
 async function refusedFix() {
   const p = await blockFixture();
   await toFix(p, leaked());
+  const r = audit(p); // the patrol was already running before the refusal (its rules' first run stays silent)
+  reconcileFindings(p.f.db, "p", r.findings, r.evaluated, p.f.tickDeps.now());
   expect(await p.tick()).toMatchObject({ step: "pool_refused", detail: expect.stringContaining("外发闸") });
   expect(p.fixes()).toEqual([]);
   expect(p.f.task().agent).toBeNull();
@@ -55,6 +58,14 @@ describe("acceptance 1: a refused fix is a visible, accurate block (no local age
       const [row] = blocked(p);
       expect(row).toMatchObject({ taskId: "T1", notify: "pm", detail: expect.stringContaining("长十六进制") });
       expect(audit(p).evaluated).toContain("dispatch_blocked"); // no agents / reviewers source needed
+      // Persisted PM item: pushed once, then deduped, still listed as open while PM was away.
+      const patrol = () => { const r = audit(p); return reconcileFindings(p.f.db, "p", r.findings, r.evaluated, p.f.tickDeps.now()); };
+      const pending = patrol().pending.filter((x) => x.rule === "dispatch_blocked");
+      expect(pending).toHaveLength(1);
+      ackFindings(p.f.db, pending.map((x) => x.key), p.f.tickDeps.now());
+      await later(p);
+      expect(patrol().pending.filter((x) => x.rule === "dispatch_blocked")).toEqual([]);
+      expect(openFindings(p.f.db, "p").filter((x) => x.rule === "dispatch_blocked")).toHaveLength(1);
     } finally { p.f.close(); }
   }, E2E_MS);
 });
@@ -195,6 +206,18 @@ describe("acceptance 4: coexists with peer outages, capacity, PM takeover and ob
         "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason", "PM 接管")).toMatchObject({ ok: true });
       expect(gateBlock(q.f.task(), q.events())).toBeNull();
     } finally { q.f.close(); }
+  }, E2E_MS);
+
+  test("off (manual): a changed material is reported but nothing is retried automatically", async () => {
+    const p = await refusedFix();
+    try {
+      p.f.db.run("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T1'");
+      p.rereview(CLEAN);
+      for (let i = 0; i < 3; i++) expect((await later(p))?.step ?? "skipped").not.toMatch(/^pool_/); // a manual card is not driven
+      expect(p.fixes()).toEqual([]);
+      expect(p.refusals()).toHaveLength(1);
+      expect(blocked(p)).toEqual([expect.objectContaining({ suggestion: expect.stringContaining("observe / manual 卡由 PM 决定") })]);
+    } finally { p.f.close(); }
   }, E2E_MS);
 
   test("observe reports the block and the pending retry but writes no order", async () => {
