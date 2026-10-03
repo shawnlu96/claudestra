@@ -27,6 +27,19 @@ describe("T94 lendRequest", () => {
     expect(await lendRequest(async () => { throw new Error("断了"); }, "a", "poll", {})).toMatchObject({ ok: false, code: "transport" });
   });
 
+  test("i28-RR1 拒绝体的 reason：短标识串原样带出；缺了 / 不是字符串 / 格式不对都不带", async () => {
+    const sig = (reason: unknown) => reply(401, { ok: false, code: "peer_signature", error: "rejected: replay", reason });
+    expect(await lendRequest(sig("replay"), "a", "result", {})).toEqual({ ok: false, status: 401, code: "peer_signature", error: "rejected: replay", reason: "replay" });
+    expect(await lendRequest(sig("before_start"), "a", "result", {})).toMatchObject({ reason: "before_start" });
+    for (const bad of [undefined, 1, null, true, ["replay"], { r: 1 }, "", "re play", "x".repeat(41), "replay\n"]) {
+      const r = await lendRequest(sig(bad), "a", "result", {});
+      expect(r).toMatchObject({ ok: false, status: 401, code: "peer_signature" });
+      expect("reason" in r).toBe(false);
+    }
+    const noReason = await lendRequest(reply(409, { ok: false, code: "lease_expired", error: "过期" }), "a", "result", {});
+    expect(noReason).toEqual({ ok: false, status: 409, code: "lease_expired", error: "过期" });
+  });
+
   test("claim：派单全文的 sha256 对不上 / 订单不合格都不收", async () => {
     const order = { v: 1, orderId: "o", taskId: "T", specRev: 1, dagVersion: null, node: "n", step: "review", round: 1, head: "a".repeat(40),
       repo: "o/r", pr: 1, inputs: [], outputs: [], acceptance: [], writeBack: "w", findings: [], fallback: null };

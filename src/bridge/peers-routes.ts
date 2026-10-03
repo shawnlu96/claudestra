@@ -9,7 +9,6 @@ import { RELAY_PAGE_JOIN_REFUSED } from "../lib/peer-e2e-local.js";
 import { sourceAllows } from "./request-context.js";
 import { handleRelayStrict, keyedJoinAllowed, relayPageJoinNote } from "./peer-relay-strict.js";
 import { readRegistryAgents } from "../lib/registry.js";
-import { isLendWorkerName } from "../lib/lend-workers-view.js";
 import { recordMetric } from "../lib/metrics.js";
 import { instanceKeySync, keyFingerprint } from "../lib/instance-key.js";
 import { peerSignatureState } from "./peer-signature.js";
@@ -78,8 +77,8 @@ async function listPeers(runManager: RunManager): Promise<Response> {
       signature: peerSignatureState(p.name), // 对方请求的验签结果与钉住的指纹（bridge/peer-signature.ts）
     };
   });
-  // 一次性出借 worker（agent-lend-<10hex>）不是可分享的会话：只从候选里拿掉，peer 已有的 scope（exposedAgents）原样不动
-  const localAgents = regAgents.filter((a) => !isLendWorkerName(a.name)).map((a) => ({
+  // Registry kind defines workers; names can also belong to ordinary sessions. Existing peer scopes stay intact.
+  const localAgents = regAgents.filter((a) => a.kind !== "worker").map((a) => ({
     name: a.name.startsWith("agent-") ? a.name.slice(6) : a.name,
     external: !!a.external,
     status: a.status ?? "unknown",
