@@ -143,6 +143,30 @@ describe("default UI card: PM's bound screenshot acceptance releases the automat
     } finally { f.close(); }
   });
 
+  test("revoked after the merging claim committed but before its receipt returned: no merge is sent (review ui-revoke-race)", async () => {
+    const f = await shown();
+    try {
+      expect(await pmApprove(f)).toMatchObject({ ok: true });
+      const id = await planned(f);
+      const gh = github();
+      let revoked = false;
+      const manager = async (...args: string[]) => {
+        const result = await scheduler(f)(...args);
+        // Another PM CLI write commits while the scheduler's merging-claim subprocess receipt is still in flight.
+        if (args[1] === "scheduler-merge-step" && args[args.indexOf("--to") + 1] === "merging" && result.ok) {
+          expect(await f.cli("pm", "ui-owner-visual", "T1", "on")).toMatchObject({ ok: true });
+          revoked = true;
+        }
+        return result;
+      };
+      for (let i = 0; i < 3; i++) await schedulerMergeTick(f.db, config, manager, () => gh.external).catch(() => 0);
+      expect(revoked).toBe(true);
+      expect(gh.calls).not.toContain("merge");
+      expect(getMergeRun(f.db, id)).toMatchObject({ phase: "unknown", mergeSha: null,
+        reason: expect.stringMatching(/^合并未发出：UI 截图验收已失效/) });
+    } finally { f.close(); }
+  });
+
   test("a new head does not inherit the old acceptance", async () => {
     const f = await shown();
     try {

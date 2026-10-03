@@ -95,7 +95,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
           const result = requireOk(await manager(...args), "advance merge run");
           return result.run as MergeRun;
         };
-        const after = await mergeSlotTurn(db, run, advance, (r) => driveMerge(r, externalFactory(policy), advance, assertActive), trains); // i28-MT1f2f2: slot lent to a live train
+        const after = await mergeSlotTurn(db, run, advance, (r) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m)), trains); // i28-MT1f2f2: slot lent to a live train
         if (after.phase === "merged" && !policy.deploy) await settle(after); // i28-MT1f2: free the slot before this pass's auto tick plans the next merge
       }
       handled++;
