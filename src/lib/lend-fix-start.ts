@@ -1,6 +1,6 @@
 /**
  * i28-FB1: a fix order starts from the PR branch's actual head. Before the pool step puts out a fix to the write-lease holder, the
- * branch's remote head is read with RA1's probe (WriteProbe.remoteHead, the same one the relay uses) and, when it differs from the
+ * branch's remote head is read with RA1's shared gh API probe and, when it differs from the
  * card's head, compared on GitHub (gh api compare): a descendant (card-merge's update-branch merge commit, a previous worker's push
  * whose delivery was refused) moves the card's head there with an event naming both heads; diverged / unknown keeps today's
  * behaviour and leaves PM a visible alarm. A peer that still reports not_started because the start does not match keeps the
@@ -33,6 +33,17 @@ const realGh: Gh = (args) => runBounded(["gh", ...args], { env: { ...process.env
 /** ok = adopt `head` (a descendant of `from`); not ok = keep the card's head and alarm PM. */
 export type FixStart = { ok: true; from: string; head: string } | { ok: false; from: string; head: string | null; why: string };
 type FixStartWrite = WriteOffer & { fixStart?: FixStart };
+
+/** Shared production probe for FB1 and RA1; GitHub credentials suffice without a Git HTTPS credential helper. */
+export function ghFixStartProbe(probe: WriteProbe, gh: Gh = realGh): WriteProbe {
+  if (labGitRoot()) return probe;
+  return { ...probe, remoteHead: async (repo, branch) => {
+    const r = await gh(["api", `repos/${repo}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`, "--jq", ".object.sha"]);
+    const head = r.stdout.trim();
+    return r.code === 0 && !r.timedOut && SHA40.test(head) ? { ok: true, head }
+      : { ok: false, error: `gh head 查询失败：${(r.timedOut ? "超时" : r.stderr || r.stdout || "空 head").trim().slice(0, 200)}` };
+  } };
+}
 
 /** The PR branch's current head against the card's: null = same head (nothing to do). */
 export async function probeFixStart(repo: string, branch: string, from: string, remoteHead: WriteProbe["remoteHead"], gh: Gh = realGh): Promise<FixStart | null> {

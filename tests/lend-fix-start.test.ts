@@ -19,7 +19,9 @@ import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import type { Gh } from "../src/lib/lend-fix-reassign-pr.js";
-import { FIX_START_ALARM_OP, FIX_START_MOVED_OP, FIX_START_RETRY_OP, probeFixStart } from "../src/lib/lend-fix-start.js";
+import { FIX_START_ALARM_OP, FIX_START_MOVED_OP, FIX_START_RETRY_OP, ghFixStartProbe, probeFixStart } from "../src/lib/lend-fix-start.js";
+import { fixStartReviewFacts } from "../src/lib/lend-fix-start-review.js";
+import { currentReviewFacts } from "../src/lib/scheduler-review.js";
 import { autoFixture, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
 const H3 = "3".repeat(40);
@@ -45,18 +47,25 @@ async function ready() {
   const key = instanceKeySync(mkdtempSync(join(f.dir, "key-")));
   const policy: { maxActiveWorkers: number; remote: RemotePolicy } = { maxActiveWorkers: 2, remote: WRITE };
   const heads: Record<string, RemoteHead> = { main: { ok: true, head: "b".repeat(40) } };
-  /** The fake GitHub: compare answers by `<base>...<head>`; anything else succeeds empty. */
+  /** Fake GitHub refs and compare answers; no Git credential helper or network. */
   const compare: Record<string, ReturnType<typeof ok> | { code: number; stdout: string; stderr: string; timedOut: boolean }> = {};
   const gh: string[][] = [];
   const relayGh: Gh = async (args) => {
     gh.push(args);
+    const ref = args[1]?.match(/^repos\/o\/r\/git\/ref\/heads\/(.+)$/);
+    if (ref) {
+      const h = heads[ref[1]];
+      return h?.ok ? ok(h.head) : { code: 1, stdout: "", stderr: h?.error ?? "没有这个分支", timedOut: false };
+    }
     const m = args[1]?.match(/^repos\/o\/r\/compare\/(.+)$/);
     return m ? compare[m[1]] ?? ok("") : ok("");
   };
+  const startProbe = ghFixStartProbe({ peerFp: async (peer) => peer === "mate" ? FP : null,
+    remoteHead: async () => { throw new Error("fix head must use gh API"); } }, relayGh);
   const lend = {
     borrow: async () => borrow, notifyPm: async () => {}, schedulerPolicy: () => policy,
     result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
-      peerFp: async (peer: string) => (peer === "mate" ? FP : null), remoteHead: async (_repo: string, branch: string) => heads[branch] ?? { ok: false as const, error: "没有这个分支" } },
+      ...startProbe },
   };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend, relayGh }, actor, ...args) as Promise<Record<string, any>>;
   const deps = { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow };
@@ -126,6 +135,7 @@ describe("fix order start follows the PR branch (i28-FB1)", () => {
       const [moved] = ofOp(p, FIX_START_MOVED_OP);
       expect(moved.data).toMatchObject({ oldHead: H2, newHead: remote });
       expect(moved.data.reason).toContain("update-branch");
+      expect(p.gh).toContainEqual(["api", `repos/o/r/git/ref/heads/${BRANCH}`, "--jq", ".object.sha"]);
       expect(p.gh).toContainEqual(["api", `repos/o/r/compare/${H2}...${remote}`, "--jq", ".status"]);
       expect(await p.lendCall("lend-claim", { v: 1, orderId: p.fixes()[0].orderId, worker: "w2" })).toMatchObject({ ok: true });
     } finally { p.f.close(); }
@@ -134,7 +144,7 @@ describe("fix order start follows the PR branch (i28-FB1)", () => {
   test.each([
     ["diverged", (p: P) => { p.heads[BRANCH] = { ok: true, head: H3 }; p.compare[`${H2}...${H3}`] = ok("diverged"); }, "已分叉"],
     ["gh compare fails", (p: P) => { p.heads[BRANCH] = { ok: true, head: H3 }; p.compare[`${H2}...${H3}`] = { code: 1, stdout: "", stderr: "gh: 502", timedOut: false }; }, "gh compare 失败"],
-    ["remote head unreadable", (p: P) => { p.heads[BRANCH] = { ok: false, error: "ls-remote 超时" }; }, "查不到"],
+    ["remote head unreadable", (p: P) => { p.heads[BRANCH] = { ok: false, error: "gh API 超时" }; }, "查不到"],
   ])("%s → not adopted: the fix keeps the card's head and PM gets a visible alarm", async (_label, arrange, why) => {
     const p = await ready();
     try {
@@ -152,25 +162,46 @@ describe("fix order start follows the PR branch (i28-FB1)", () => {
     } finally { p.f.close(); }
   }, E2E_MS);
 
-  test("not_started for a start mismatch: lease stays held, re-offered once from the refreshed head; second time in the round → PM", async () => {
+  test.each([false, true])("not_started keeps lease and retries once; initial offer refreshed: %s", async (refreshFirst) => {
     const p = await ready();
     try {
       await toFix(p);
+      const firstHead = refreshFirst ? H3 : H2;
+      const retryHead = refreshFirst ? H4 : H3;
+      p.heads[BRANCH] = { ok: true, head: firstHead };
+      p.compare[`${H2}...${firstHead}`] = ok("ahead");
       p.hello();
       await p.tick();
-      expect(p.fixes()).toEqual([expect.objectContaining({ head: H2, status: "pooled" })]);
-      // Between the offer and the claim card-merge pushed an update-branch merge commit.
-      p.heads[BRANCH] = { ok: true, head: H3 };
-      p.compare[`${H2}...${H3}`] = ok("ahead");
+      expect(p.fixes()).toEqual([expect.objectContaining({ head: firstHead, status: "pooled" })]);
+      // The remote advances again after the first offer.
+      p.heads[BRANCH] = { ok: true, head: retryHead };
+      p.compare[`${firstHead}...${retryHead}`] = ok("ahead");
       const first = await mismatch(p);
       expect(getWriteLease(p.f.db, "T1")).toMatchObject({ peer: "mate", state: "held" });
-      expect(ofOp(p, FIX_START_RETRY_OP).map((e) => e.data)).toEqual([expect.objectContaining({ orderId: first.orderId, head: H2 })]);
+      expect(ofOp(p, FIX_START_RETRY_OP).map((e) => e.data)).toEqual([expect.objectContaining({ orderId: first.orderId, head: firstHead })]);
       expect(p.events().some((e) => e.data.lend && (e.data.lend as Record<string, unknown>).op === "send_back")).toBe(false);
 
       p.hello();
       for (let i = 0; i < 4 && p.fixes().length < 2; i++) await p.tick();
-      expect(p.fixes().map((o) => [o.peer, o.head, o.status])).toEqual([["mate", H2, "released"], ["mate", H3, "pooled"]]);
-      expect(p.f.task().headSHA).toBe(H3);
+      expect(p.fixes().map((o) => [o.peer, o.head, o.status])).toEqual([["mate", firstHead, "released"], ["mate", retryHead, "pooled"]]);
+      expect(p.f.task().headSHA).toBe(retryHead);
+      const task = p.f.task(), events = p.events();
+      expect(fixStartReviewFacts(task, events)).toMatchObject({ kind: "facts", facts: { head: H2, findings: [expect.objectContaining({ findingId: P1.findingId })] } });
+      expect(currentReviewFacts(task, events).kind).toBe("invalid");
+      expect(fixStartReviewFacts({ ...task, stage: "merge" }, events).kind).toBe("invalid");
+      const moved = events.find((e) => e.data.op === FIX_START_MOVED_OP)!;
+      const badMoves = [
+        { ...moved, actor: "peer:mate" }, { ...moved, target: "OTHER" },
+        { ...moved, data: { ...moved.data, specRev: task.specRev + 1 } },
+        { ...moved, data: { ...moved.data, round: task.round + 1 } },
+        { ...moved, data: { ...moved.data, oldHead: H4 } },
+      ];
+      for (const bad of badMoves) {
+        expect(fixStartReviewFacts(task, events.map((e) => e === moved ? bad : e)).kind).toBe("invalid");
+      }
+      expect(fixStartReviewFacts(task, events.filter((e) => e !== moved)).kind).toBe("invalid");
+      const delivered = { ...moved, seq: events.at(-1)!.seq + 1, kind: "deliver" as const, data: { headSHA: retryHead } };
+      expect(fixStartReviewFacts(task, [...events, delivered]).kind).toBe("invalid");
 
       // The second mismatch in the same round ends the lease and goes back to PM, as before.
       await mismatch(p);
