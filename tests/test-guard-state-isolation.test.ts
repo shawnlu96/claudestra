@@ -3,6 +3,8 @@
  * STATE_DIR 下的 principals.json，再看「生产目录」里的哨兵文件还在不在。生产目录一律由一次性的哨兵目录扮演：要扮演
  * 「不在临时目录下」就得真的不在，所以建在仓库的 node_modules/.cache 下（gitignore、用完即删）；仓库本身在临时目录下时跳过。
  * 运行目录的用例只比路径字符串（子进程只 import paths、不碰 tmux），生产默认值写死在 paths.ts，没法换成哨兵。
+ * 「照用」的目录由子进程在 preload 之后按自己的 tmpdir 算（TGSI_KEEP_*）：preload 会在继承来的 TMPDIR 下再建一层根，父进程的
+ * tmpdir 不在 /tmp、/var/folders 下时（自定义 TMPDIR）就不算子进程的临时目录，会被正确地换掉。
  * 只 import 修复前也有的导出：同一个文件能拿去旧代码上跑，复现修复前的失败。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -16,12 +18,18 @@ import { isUnderTempDir } from "../src/lib/test-guard.ts";
 const PROD_RUNTIME = "/tmp/claude-orchestrator";
 const SENTINEL_BASE = join(REPO_ROOT, "node_modules", ".cache", "cstra-test-sentinels");
 const SENTINEL_OK = !isUnderTempDir(SENTINEL_BASE);
-const SCRIPT = `const p = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/paths.ts"))});
+const SCRIPT = `const { tmpdir } = await import("node:os");
+const given = {};
+for (const k of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"]) {
+  const rel = process.env["TGSI_KEEP_" + k];
+  if (rel !== undefined) process.env[k] = given[k] = rel ? tmpdir() + "/" + rel : tmpdir();
+}
+const p = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/paths.ts"))});
 const { rmSync } = await import("node:fs");
 rmSync(p.statePath("principals.json"), { force: true });
-console.log(JSON.stringify({ env: process.env.CLAUDESTRA_STATE_DIR ?? null, state: p.STATE_DIR, sock: p.TMUX_SOCK }));`;
+console.log(JSON.stringify({ env: process.env.CLAUDESTRA_STATE_DIR ?? null, state: p.STATE_DIR, sock: p.TMUX_SOCK, given }));`;
 
-type Probe = { env: string | null; state: string; sock: string };
+type Probe = { env: string | null; state: string; sock: string; given: Record<string, string> };
 let fakeHome = "";
 const roots: string[] = [];
 
@@ -87,9 +95,10 @@ describe("状态目录：不在临时目录下的一律换成临时目录，哨�
   }, 30_000);
 
   test("4 临时目录边界：tmpdir 本身、它的子目录（含末尾 / 和不出界的 ..）照用", () => {
-    for (const dir of [tmpdir(), join(tmpdir(), "tgsi-state"), `${join(tmpdir(), "tgsi-state")}/`, `${tmpdir()}/a/../tgsi-state`]) {
-      const got = probe({ CLAUDESTRA_STATE_DIR: dir });
-      expect({ dir, kept: got.state, env: got.env }).toEqual({ dir, kept: dir, env: dir });
+    for (const rel of ["", "tgsi-state", "tgsi-state/", "a/../tgsi-state"]) {
+      const got = probe({ TGSI_KEEP_CLAUDESTRA_STATE_DIR: rel });
+      const dir = got.given.CLAUDESTRA_STATE_DIR;
+      expect({ dir, underTemp: isUnderTempDir(dir), kept: got.state, env: got.env }).toEqual({ dir, underTemp: true, kept: dir, env: dir });
     }
   }, 30_000);
 });
@@ -104,7 +113,8 @@ describe("5 运行目录：TMUX_SOCK 不落在生产的 /tmp/claude-orchestrator
   }
 
   test("测试自己的临时运行目录照用", () => {
-    const dir = join(tmpdir(), "tgsi-run");
-    expect(probe({ CLAUDESTRA_RUNTIME_DIR: dir }).sock).toBe(join(dir, "master.sock"));
+    const got = probe({ TGSI_KEEP_CLAUDESTRA_RUNTIME_DIR: "tgsi-run" });
+    const dir = got.given.CLAUDESTRA_RUNTIME_DIR;
+    expect({ underTemp: isUnderTempDir(dir), sock: got.sock }).toEqual({ underTemp: true, sock: join(dir, "master.sock") });
   }, 30_000);
 });
