@@ -37,13 +37,12 @@ import { readProjects } from "./projects.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
-import { BUN_NO_AUTOLOAD } from "./runtimes/clean-env.js";
 import { codexFailure, sendVia } from "./scheduler-auto-ports.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { probeAcpWorker } from "./worker-liveness.js";
-import { arbiterFooter, arbiterFullMessage } from "./lend-arbiter-submit.js";
+import { arbiterFooter, arbiterFullMessage, lendSubmitCmd } from "./lend-arbiter-submit.js";
 import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
@@ -89,7 +88,7 @@ async function ensureLendProject(m: Manager): Promise<void> {
   if (r.ok !== true && !String(r.error ?? "").includes("已存在")) throw new Error(`建 lend 项目失败：${String(r.error ?? "")}`);
 }
 
-const submitCmd = (row: LendRow): string => `${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId}`;
+const submitCmd = (row: LendRow): string => lendSubmitCmd(row.orderId);
 
 /** 审查单的首条派单（整条就是它，不带订单原文）：领单、交结论都走 lend 档 MCP，CLI 只在工具调不通时兜底 */
 const reviewWake = (row: LendRow): string[] => [

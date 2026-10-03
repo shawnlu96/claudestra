@@ -83,6 +83,9 @@ test("不配 setup-token：宿主用出借方默认 HOME 起 Claude，交付后�
     expect(seen.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     expect(seen.ENABLE_CLAUDEAI_MCP_SERVERS).toBe("false");
     expect(seen.LEND_ENV_POISON).toBeUndefined();
+    // Claude（和它的 Bash）拿的是代次目录下的专属目录，不是宿主的状态目录；代次目录清掉时一起清
+    expect(seen.CLAUDESTRA_STATE_DIR).toBe(join(f.dir, "state"));
+    expect(seen.CLAUDESTRA_RUNTIME_DIR).toBe(join(f.dir, "runtime"));
     expect(existsSync(f.dir)).toBe(false);
     expect(readFileSync(join(f.state, "archive", f.agent, `${sessionId}.jsonl`), "utf8")).toContain("delivered");
     expect(existsSync(join(f.project, `${sessionId}.jsonl`))).toBe(true);
