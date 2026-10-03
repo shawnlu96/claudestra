@@ -12,6 +12,7 @@ import { PersistedMap } from "./persisted-map.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { emitHeldToWeb } from "./held-web.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
+import { ownedHeldItems } from "./pm-held-transfer.js";
 
 export interface HeldItem {
   env: Envelope;
@@ -174,7 +175,7 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
 
   /** 这个频道押着、check_inbox 领得到的各类条数（bridge 回 reply 结果时带上，lib/reply-ask-schema.ts 写成提醒） */
   stat(channelId: string): HeldTally {
-    return heldTally(this.get(channelId));
+    return heldTally(ownedHeldItems(this, channelId));
   }
 
   /** 额度闸押着的条数，人发的和 agent / bridge 消息分开数（横幅和进闸通知分开写） */

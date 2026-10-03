@@ -32,12 +32,14 @@ for (const mode of ["plain", "e2e"]) {
           fp: a.fp, publicKey: a.key.publicKey, ...(encrypted ? { e2e: { idk: a.key.publicKey, ek: a.signed } } : {}) };
         const asks = [], notes = [];
         const deps = { ...joinOfferLiveDeps, stateDir: () => dir + "/receiver", peers: async () => [inbound],
+          projects: async () => [{ id: "local", name: "local", lastActivityAt: 0 }],
           auth: (req, url) => authenticateApi(req, url, { rateLimit: true }),
           openAsk: input => {
             const a = { ...input, id: "ask_1", state: "open", answer: null, extra: input.extra };
             asks.push(a); return a;
           }, writeNote: async (sent, text) => { notes.push(text); } };
         const route = createE2eRoute({ local: async () => b, peers: async () => [inbound],
+          projects: async () => [{ id: "local", name: "local", lastActivityAt: 0 }],
           pin: async () => { throw new Error("unexpected rotation"); } });
         const handle = async req => {
           const url = new URL(req.url);

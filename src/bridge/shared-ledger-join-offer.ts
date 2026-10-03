@@ -13,6 +13,11 @@ import { closeAsk, getAsk, MASTER_PROJECT, ownerAnswered, type Ask, type AskBind
 import { STATE_DIR } from "../lib/paths.js";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { runManagerProcess } from "../lib/run-manager.js";
+import {
+  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, sharedLedgerOfferProjectId, sharedLedgerEligibleProjects, type SharedLedgerLocalProject,
+} from "../lib/shared-ledger-local-project.js";
+import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
+import { sweepSharedLedgerRebinds, onSharedLedgerRebindAnswered, liveRebindDeps } from "./shared-ledger-rebind.js";
 import { joinSharedLedger, type SharedLedgerJoinResult } from "../lib/shared-ledger-join.js";
 import {
   attachPendingOfferAsk, claimPendingOffer, isJoinOfferStatus, isOfferId, JOIN_OFFER_RECEIPT_PATH, JoinOfferLimiter, joinOfferCard, joinOfferOutcomeText,
@@ -36,7 +41,10 @@ export interface JoinOfferDeps {
   openAsk: (input: CreateAskInput) => Ask;
   getAsk: (id: string) => Ask | null;
   closeAsk: (id: string) => void;
-  join: (url: string, code: string) => Promise<SharedLedgerJoinResult>;
+  projects: () => Promise<SharedLedgerLocalProject[]>;
+  sharedProject?: (centerId: string) => string | undefined;
+  bindings?: () => SharedLedgerBinding[];
+  join: (url: string, code: string, localProjectId: string) => Promise<SharedLedgerJoinResult>;
   /** The inform card: a notification to the owner (no buttons). */
   inform: (text: string) => Promise<void>;
   /** POST the receipt to the inviter; resolves with the HTTP status. */
@@ -57,8 +65,9 @@ export async function configuredPeer(name: string | undefined, d: Pick<JoinOffer
 }
 
 const bindOf = (p: PendingJoinOffer): Omit<AskBind, "paramsHash"> => ({
-  action: BIND_ACTION, approve: [JOIN_BUTTON], params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt,
-    codeHash: createHash("sha256").update(p.code).digest("hex") },
+  action: BIND_ACTION, approve: p.projectChoices?.map(c => c.button) ?? [JOIN_BUTTON],
+  params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt,
+    projectChoices: p.projectChoices, sharedProjectId: p.sharedProjectId, codeHash: createHash("sha256").update(p.code).digest("hex") },
 });
 
 /** POST /api/v1/shared-ledger-join-offer from peer `peerName` (already authenticated as a configured peer). */
@@ -67,15 +76,30 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
   if (!limiter.tryAcquire(peer.name, now)) return refuse(429, "rate_limited");
   const parsed = parseJoinOffer(body, now);
   if (!parsed.ok) return refuse(400, parsed.error);
-  const pending: PendingJoinOffer = { ...parsed.offer, peer: peer.name, receivedAt: now };
+  let projects: SharedLedgerLocalProject[], bindings: SharedLedgerBinding[], sharedProjectId: string | undefined;
+  try {
+    bindings = d.bindings?.() ?? [];
+    sharedProjectId = d.sharedProject?.(parsed.offer.centerId);
+    projects = await d.projects();
+  } catch (e) {
+    console.error(`⚠️ [join-offer] 本机项目状态不可用: ${(e as Error).name}`);
+    return refuse(503, "local_project_state_unavailable");
+  }
+  const target = sharedProjectId ? { centerId: parsed.offer.centerId, projectId: sharedProjectId } : undefined;
+  const projectChoices = sharedLedgerProjectChoices(sharedLedgerEligibleProjects(projects, bindings, target), sharedProjectId, JOIN_BUTTON, JOIN_BUTTON);
+  if (!projectChoices.length) return refuse(409, "no_local_projects");
+  const pending: PendingJoinOffer = { ...parsed.offer, peer: peer.name, receivedAt: now, projectChoices, sharedProjectId };
   const saved = await savePendingOffer(d.stateDir(), pending);
   if (saved !== "ok") return refuse(saved === "exists" ? 409 : 429, saved === "exists" ? "duplicate_offer" : "too_many_pending");
   let ask: Ask;
   try {
-    const bind = bindOf(pending);
+    const bind = bindOf(pending), card = joinOfferCard(pending);
+    const context = `${card.context}\n${sharedProjectId ? `共享项目（根据已有绑定）：${sharedProjectId}` : "入组后才能确定团队 / 共享项目"}\n请选择要绑定的本机项目`;
+    const buttons = projectChoices.map(c => ({ id: c.button,
+      label: `加入并绑到 ${c.name.slice(0, 60)}${c.localProjectId === sharedProjectId ? "（同名）" : ""}`, style: "success" }));
     ask = d.openAsk({
-      source: "system", createdBy: JOIN_OFFER_CREATOR, kind: "authorize", project: MASTER_PROJECT, ...joinOfferCard(pending),
-      options: [{ type: "buttons", buttons: [{ id: JOIN_BUTTON, label: "加入", style: "success" }, { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }],
+      source: "system", createdBy: JOIN_OFFER_CREATOR, kind: "authorize", project: MASTER_PROJECT, ...card, context,
+      options: [{ type: "buttons", buttons: [...buttons, { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }],
       allowText: false, blocking: true, expiresAt: pending.expiresAt, dedupKey: `sl-join-offer:${pending.offerId}`,
       bind: { ...bind, paramsHash: bindHash(bind, JOIN_OFFER_CREATOR) }, extra: { joinOfferId: pending.offerId },
     });
@@ -116,16 +140,23 @@ async function settle(p: PendingJoinOffer, status: JoinOfferStatus, d: JoinOffer
 /** Hook after any ask answer (ask-entry.ts commitNoticing): acts only on our own cards once they are answered. */
 export async function onJoinOfferAnswered(a: Ask, d: JoinOfferDeps = liveDeps): Promise<void> {
   const offerId = a.extra.joinOfferId;
-  if (a.createdBy !== JOIN_OFFER_CREATOR || a.state !== "answered" || !isOfferId(offerId)) return;
+  if (a.createdBy !== JOIN_OFFER_CREATOR) return onSharedLedgerRebindAnswered(a, liveRebindDeps(d.inform));
+  if (a.state !== "answered" || !isOfferId(offerId)) return;
   const p = claimPendingOffer(d.stateDir(), offerId);
   if (!p) return;
-  const accept = (a.answer?.choices ?? []).includes(`[button:${JOIN_BUTTON}]`);
-  if (!accept) return settle(p, "declined", d);
+  if (!p.projectChoices) {
+    const declined = (a.answer?.choices ?? []).includes(`[button:${DECLINE_BUTTON}]`);
+    return settle(p, declined ? "declined" : "failed", d);
+  }
+  const choice = p.projectChoices.filter(c => (a.answer?.choices ?? []).includes(`[button:${c.button}]`));
+  if (!choice?.length) return settle(p, "declined", d);
   if (p.expiresAt <= d.now()) return settle(p, "expired", d);
-  if (!approved(a, p)) return settle(p, "failed", d);
+  if (choice.length !== 1 || !approved(a, p) || !(await d.projects()).some(c => c.id === choice[0]!.localProjectId)) {
+    return settle(p, "failed", d);
+  }
   let joined: SharedLedgerJoinResult;
   try {
-    joined = await d.join(p.url, p.code);
+    joined = await d.join(p.url, p.code, choice[0]!.localProjectId);
   } catch {
     return settle(p, "failed", d); // SharedLedgerJoinError text is fixed, but nothing of it is needed: the card says "failed" only.
   }
@@ -179,11 +210,14 @@ const liveDeps: JoinOfferDeps = {
     const a = closeAsk(askDb(), id, "cancelled", "join offer expired");
     if (a) publishAsk(a);
   },
-  join: (url, code) => {
+  projects: () => readSharedLedgerLocalProjects(),
+  bindings: () => readSharedLedgerBindings(),
+  sharedProject: centerId => sharedLedgerOfferProjectId(centerId, readSharedLedgerBindings()),
+  join: (url, code, localProjectId) => {
     const key = instanceKeySync();
     const instanceId = instanceIdSync();
     if (!key || !instanceId) return Promise.reject(new Error("instance key unavailable"));
-    return joinSharedLedger({ url, code, key, instanceId, subject: "owner:self" });
+    return joinSharedLedger({ url, code, key, instanceId, subject: "owner:self", localProjectId });
   },
   inform: async (text) => {
     const d = asksDeps();
@@ -210,7 +244,16 @@ export const joinOfferLiveDeps = liveDeps;
 
 /** ask-entry.ts initAskWiring: sweep once now, then every minute. */
 export function initJoinOffers(): void {
-  const sweep = () => void sweepJoinOffers().catch((e: Error) => console.error(`⚠️ [join-offer] 扫描失败: ${e.message.slice(0, 200)}`));
+  const sweep = () => void sweepJoinOfferMaintenance();
   sweep();
   setInterval(sweep, 60_000).unref?.();
+}
+
+
+/** Each sweep must still run if the other store is unreadable; errors never include pending offer contents. */
+export async function sweepJoinOfferMaintenance(d: JoinOfferDeps = liveDeps, rebind = liveRebindDeps(d.inform)): Promise<void> {
+  const results = await Promise.allSettled([sweepJoinOffers(d), sweepSharedLedgerRebinds(rebind)]);
+  for (const r of results) if (r.status === "rejected") {
+    console.error(`⚠️ [join-offer] 扫描失败: ${(r.reason as Error).name}`);
+  }
 }
