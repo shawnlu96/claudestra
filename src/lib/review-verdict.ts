@@ -44,7 +44,7 @@ export const verdictKey = (w: Pick<VerdictWire, "orderId" | "head">): string => 
 
 /** 事件里存的逐项结论：四个字段，与 PM 用 `ledger review --findings` 代记的同构（说明文字在报告里） */
 const storedFindings = (w: VerdictWire): ReviewFinding[] => w.findings.map((f) => ({ findingId: f.findingId, family: f.family, severity: f.severity,
-  probe: f.probe, ...storedBasis(f, w.reportPath, true) }));
+  probe: f.probe, ...storedBasis(f, w.reportPath, true), ...(f.pitfall ? { pitfall: true } : {}) }));
 
 /** 重试是不是同一个结论：结论、计数、逐项、报告路径都一样 */
 function sameVerdict(prev: LedgerEvent, w: VerdictWire): boolean {

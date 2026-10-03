@@ -29,6 +29,7 @@ import { parseRemotePolicy, type RemotePolicy } from "../lib/scheduler-config.js
 import { reviewSwapStep } from "../lib/scheduler-review-swap-runtime.js";
 import { familyWaitCommand } from "../lib/scheduler-family-pick-notice.js";
 import { secReviewAlarmCommand } from "../lib/scheduler-sec-review.js";
+import { specPlaceCommand } from "../lib/scheduler-spec-resume-write.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -70,6 +71,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "scheduler-family-wait": familyWaitCommand,
   "scheduler-fix-relay": fixRelayCommand,
   "scheduler-sec-review-alarm": secReviewAlarmCommand,
+  "scheduler-spec-place": specPlaceCommand,
   "workflow-set": {
     valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
     usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +

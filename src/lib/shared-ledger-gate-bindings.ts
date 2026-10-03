@@ -17,14 +17,18 @@ export function readSharedLedgerBindings(dir = STATE_DIR): SharedLedgerBinding[]
   if (file.status !== "ok" || (statSync(path).mode & 0o777) !== 0o600) throw new Error("invalid shared bindings");
   return file.data as SharedLedgerBinding[];
 }
-/** Only the authenticated local CLI installs mappings; this function does not install central grants or credentials. */
-export async function setSharedLedgerBinding(binding: SharedLedgerBinding, dir = STATE_DIR): Promise<void> {
+/** Local owner approval or the authenticated CLI installs mappings; central grants and credentials are unchanged. */
+export async function setSharedLedgerBinding(binding: SharedLedgerBinding, dir = STATE_DIR,
+  preflight: (current: SharedLedgerBinding[]) => void = () => {}): Promise<void> {
   if (!validBindings([binding]) || !binding.localProjectId) throw new Error("invalid shared binding");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, "shared-ledger-bindings.json"), lock = await acquireLock(`${path}.lock`);
   if (!lock) throw new Error("shared ledger binding lock unavailable");
   try {
-    const current = readSharedLedgerBindings(dir).filter(b => (b.localProjectId ?? b.projectId) !== binding.localProjectId);
+    const bindings = readSharedLedgerBindings(dir);
+    preflight(bindings);
+    const current = bindings.filter(b => (b.localProjectId ?? b.projectId) !== binding.localProjectId
+      && !(b.centerId === binding.centerId && b.teamId === binding.teamId && b.projectId === binding.projectId));
     writeJsonAtomicSync(path, [...current, binding], { mode: 0o600, commitIf: lock.held });
   } finally { lock.release(); }
 }

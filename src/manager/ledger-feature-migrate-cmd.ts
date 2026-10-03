@@ -5,8 +5,8 @@
  * 正式迁移要 PM / master / owner，先备份、整批一个事务。
  */
 import type { Database } from "bun:sqlite";
-import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { writeMemoryImportReport } from "../lib/memory-import-report.js";
 import { applyMigration, parseMap, planMigration, type CardRef, type MigrationPlan } from "../lib/ledger-feature-migrate.js";
 import { renderMigrationReport, type LagInfo } from "../lib/ledger-feature-migrate-md.js";
 import { LedgerError } from "../lib/ledger-store.js";
@@ -77,58 +77,6 @@ function readOnly<T>(db: Database, fn: () => Promise<T>): Promise<T> {
   return fn().finally(() => db.exec(`PRAGMA query_only = ${was ? "ON" : "OFF"}`));
 }
 
-const lstatOrNull = (p: string): Stats | null => {
-  try {
-    return lstatSync(p);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw e;
-  }
-};
-
-function isSqlite(p: string): boolean {
-  const fd = openSync(p, "r");
-  try {
-    const head = Buffer.alloc(16);
-    return readSync(fd, head, 0, 16, 0) === 16 && head.toString("latin1") === "SQLite format 3\0";
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * dry-run 报告落盘：目标（按真实目录解析，软链目录也算）不能是台账库或它的 -wal / -shm / -journal，已有文件必须是普通文件、
- * 不是库的硬链、也不是 SQLite 库（备份等）。写法是同目录临时文件再 rename：rename 只换目录项，检查之后目标被换成软链或硬链也写不进库。
- * 少了这道闸，`--out ledger.sqlite` 会把库整个覆写成 markdown（tests/ledger-feature-l3.test.ts「--out 落到库」）。
- */
-function writeReport(out: string, dbPath: string, md: string): void {
-  const refuse = (why: string): never => {
-    throw new LedgerError("invalid", `--out ${out} ${why}，报告没写`);
-  };
-  let target: string;
-  try {
-    target = join(realpathSync(dirname(resolve(out))), basename(out));
-  } catch (e) {
-    return refuse(`所在目录读不了（${(e as Error).message}）`);
-  }
-  const dbReal = dbPath && dbPath !== ":memory:" && existsSync(dbPath) ? realpathSync(dbPath) : null;
-  const guarded = dbReal ? ["", "-wal", "-shm", "-journal"].map((s) => dbReal + s) : [];
-  if (guarded.includes(target)) refuse("是台账库或它的 -wal / -shm / -journal");
-  const st = lstatOrNull(target);
-  if (st) {
-    if (!st.isFile()) refuse("已存在且不是普通文件（软链、目录等）");
-    if (guarded.some((g) => existsSync(g) && statSync(g).ino === st.ino && statSync(g).dev === st.dev)) refuse("是台账库或旁路文件的硬链");
-    if (isSqlite(target)) refuse("已存在且是 SQLite 库");
-  }
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    writeFileSync(tmp, md, { flag: "wx" });
-    renameSync(tmp, target);
-  } finally {
-    if (existsSync(tmp)) rmSync(tmp);
-  }
-}
-
 const summary = (plan: MigrationPlan) => ({
   writes: plan.writes,
   features: plan.features.map((f) => ({ id: f.id, exists: f.exists, nodes: f.nodes?.length ?? 0, assign: f.toAssign.length, dag: f.dagNote })),
@@ -146,7 +94,7 @@ async function dryRun(c: LedgerCli, path: string): Promise<Result> {
     const { lagging, prErrors } = await findLagging(c.deps.factsDeps?.() ?? realFactsDeps(REPO_ROOT), plan);
     const md = renderMigrationReport({ plan, lagging, prErrors, generatedAt: new Date(c.deps.now()).toISOString(), source: c.db.filename });
     const out = c.p.flags.out;
-    if (out) writeReport(out, c.db.filename, md);
+    if (out) writeMemoryImportReport(out, c.db.filename, md);
     return { ok: true, dryRun: true, ...summary(plan), lagging: lagging.map((l) => l.id), prErrors, ...(out ? { report: out } : { markdown: md }) };
   });
 }

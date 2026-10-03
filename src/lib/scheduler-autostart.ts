@@ -1,3 +1,4 @@
+import { scanSpecHead } from "./spec-lint-head.js";
 import { activeProjectPm } from "./pm-role.js";
 import { switchOff } from "./shared-ledger-gate-switch.js";
 export { switchOff } from "./shared-ledger-gate-switch.js";
@@ -53,20 +54,12 @@ export type TemplateDecl = { ok: true; template: AutostartTemplate; version: num
 /** ownerVisual: the card changes the overall look (palette, theme tokens, redesign), so the owner sees its screenshots, not PM */
 export interface SpecHead { off: boolean; template: TemplateDecl; ownerVisual: boolean }
 
-const TEMPLATE_LINE = /^模板\s*[:：]\s*(.*)$/;
 const OFF_LINE = /^自动开卡\s*[:：]\s*关\s*$/;
 const OWNER_VISUAL_LINE = /^owner\s*看截图\s*[:：]\s*是\s*$/i;
 
 /** 卡首 = 标题（第一个 `# ` 行）之后、第一个 `## ` 之前；没有标题行就从第一行算 */
 export function parseSpecHead(text: string): SpecHead {
-  const lines = text.split(/\r?\n/).map((l) => l.trim());
-  const title = lines.findIndex((l) => /^#\s/.test(l));
-  const head: string[] = [];
-  for (const l of lines.slice(title + 1)) {
-    if (/^##\s/.test(l)) break;
-    head.push(l);
-  }
-  const decls = head.map((l) => l.match(TEMPLATE_LINE)?.[1]?.trim()).filter((v): v is string => v !== undefined);
+  const { head, decls } = scanSpecHead(text);
   const off = head.some((l) => OFF_LINE.test(l));
   const ownerVisual = head.some((l) => OWNER_VISUAL_LINE.test(l));
   if (decls.length > 1) return { off, ownerVisual, template: { ok: false, error: `卡首写了 ${decls.length} 行模板声明，只能有一行` } };

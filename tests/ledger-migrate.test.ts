@@ -315,6 +315,7 @@ describe("v1 → 依赖边版本", () => {
 });
 
 describe("写事件的底座只给写入模块", () => {
+  // scheduler-merge-train-hold.ts：合并槽让出 / 取回在推进合并的事务内校验持槽与阶段、递增 rev，并写同阶段的调度回执
   // ledger-human.ts：v3.2 例外（human 节点的人工交付与重开指派），它按执行者角色推 build / fix → review，门在 human-node.ts；
   // ledger-steps-write.ts：步骤化台账（T47）的写入，派步骤要 PM，交付 / 审查的钩子挂在 ledger-write.ts 的事务里
   // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS；意图结算（CAS）拆在 ledger-scheduler-settle.ts
@@ -326,9 +327,11 @@ describe("写事件的底座只给写入模块", () => {
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
   // scheduler-deploy.ts：部署 journal（T68g），只有调度身份推进，deployed 才把本卡 merge→live，结清只 PM / master / owner
   // ledger-lend-peers.ts：借算力 v2（i28-W2）的 hello 入账、beat 续租 / 收回、推送应答，CAS 在它的事务里，写事件只经 ledger-lend.ts 的 leaseLend / withdrawPooledLend
+  // ledger-lend-relay.ts：出借写单持单期间的规格追加 / 复述答复转发队列（i28-RS1），只写自己的两张表和一条 lend relay note，不推阶段
   // order-mark.ts：只写两种按意图去重的 scheduler 事件（领单留痕 = 收件人本人本会话、未领单报警 = 调度身份），不推阶段（i28-M4b）
   // ledger-autostart*.ts：自动开卡的 claim / step / settle 与开关（i28-A1）：调度身份的写权只由活着的 claim 授予，step 先核 claim 再调 lib 写函数；
   //   step 回滚取消本 claim 建的卡时按 pm 推 cancelled（applyMove asRole）；自动交回在事务里重判后走 PM 交回的同一核心
+  // scheduler-spec-resume-write.ts：spec 阶段 auto 卡放到 peer（i28-RSM1），调度身份照开卡的规矩按 pm 推 spec→restate（applyMove asRole），事务内重核资格与 rev
   // lend-fix-reassign-start.ts / -pr.ts / -tick.ts：自动改派修复单（i28-RA1）在挂池事务里结束旧写租约、记改派事件；关旧 PR、等租约方计时各记去重事件，不推阶段
   // lend-fix-start.ts：修复单起点（i28-FB1）在挂池事务里记起点更新 / 报警 / 重挂事件，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
@@ -351,15 +354,16 @@ describe("写事件的底座只给写入模块", () => {
       "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
-      "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts",
-      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
+      "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts", "lib/ledger-lend-relay.ts",
+      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
-      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge.ts",
+      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
+      "lib/scheduler-merge-train-hold.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
       "lib/scheduler-sessions.ts"]);
-    expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
+    expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts", "lib/scheduler-spec-resume-write.ts"]);
   });
 });

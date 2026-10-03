@@ -11,6 +11,8 @@ import { getDeployRun } from "./scheduler-deploy.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import type { TickPace } from "./scheduler-yield.js";
+import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
+import type { TrainStore } from "./scheduler-merge-train.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -47,7 +49,7 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
 
 /** The merge pass itself; the caller holds the maintenance lease and passes a manager already guarded by assertActive. */
 export async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
-  externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace): Promise<number> {
+  externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace, trains?: TrainStore | null): Promise<number> {
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {
     const intents = db.query(`SELECT id, status FROM scheduler_intents WHERE project=? AND action='merge'
@@ -93,7 +95,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
           const result = requireOk(await manager(...args), "advance merge run");
           return result.run as MergeRun;
         };
-        const after = await driveMerge(run, externalFactory(policy), advance, assertActive);
+        const after = await mergeSlotTurn(db, run, advance, (r) => driveMerge(r, externalFactory(policy), advance, assertActive), trains); // i28-MT1f2f2: slot lent to a live train
         if (after.phase === "merged" && !policy.deploy) await settle(after); // i28-MT1f2: free the slot before this pass's auto tick plans the next merge
       }
       handled++;

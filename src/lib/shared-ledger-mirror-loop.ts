@@ -22,8 +22,10 @@ export interface MirrorLoopDeps {
   stateDir?: string;
   ledgerPath?: string;
   now?: () => number;
-  /** Real: SharedLedgerClient with the instance key; tests inject a fake center. */
-  client?: (credential: SharedLedgerLocalCredential) => MirrorClient | null;
+  /** Real: SharedLedgerClient with the instance key and this pass's scrub context; tests inject a fake center. */
+  client?: (credential: SharedLedgerLocalCredential, scrub: SharedLedgerScrubContext) => MirrorClient | null;
+  /** Transport for the real client only (tests: a fake center behind the real client's own scrub). */
+  fetch?: typeof fetch;
   /** Real: local identity plus heads that are commits in the install repo. */
   scrub?: (heads: readonly string[]) => Promise<SharedLedgerScrubContext>;
 }
@@ -34,10 +36,11 @@ async function realScrub(heads: readonly string[]): Promise<SharedLedgerScrubCon
   for (let i = 0; i < want.length; i += 200) for (const sha of await knownCommits(REPO_ROOT, want.slice(i, i + 200))) known.add(sha);
   return { identity: { username: userInfo().username, hostname: hostname() }, commits: new Set(heads.filter((h) => known.has(h))) };
 }
-function realClient(dir: string) {
-  return (credential: SharedLedgerLocalCredential) => {
+function realClient(dir: string, fetcher?: typeof fetch) {
+  // The client scrubs again before upload: without the same commit allowlist a real head is rejected there.
+  return (credential: SharedLedgerLocalCredential, scrub: SharedLedgerScrubContext) => {
     const key = instanceKeySync(dir);
-    return key ? new SharedLedgerClient(credential, key) : null;
+    return key ? new SharedLedgerClient(credential, key, { scrub, ...(fetcher ? { fetch: fetcher } : {}) }) : null;
   };
 }
 
@@ -65,9 +68,10 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
       let next: MirrorEntry, outcome: PushOutcome;
       try {
         const credential = resolveMirrorCredential(entry, dir);
-        const client = credential && credential.instanceId === entry.sourceInstanceId ? (deps.client ?? realClient(dir))(credential) : null;
-        if (!client) throw new Error("credential unavailable");
+        if (!credential || credential.instanceId !== entry.sourceInstanceId) throw new Error("credential unavailable");
         const scrub = await (deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject));
+        const client = (deps.client ?? realClient(dir, deps.fetch))(credential, scrub);
+        if (!client) throw new Error("credential unavailable");
         ({ entry: next, outcome } = await pushSharedLedgerMirror(db, featureId, entry, { client, scrub, now: now() }));
       } catch (error) {
         const failures = entry.failures + 1;
