@@ -5,7 +5,8 @@ import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, typ
 import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
-import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
+import { reviewPlacement } from "./scheduler-placement-plan.js";
+import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import { reviewSwapPlan, reviewsAfterSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
@@ -159,7 +160,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
 function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const prior = liveIntent(s, node, "dispatch");
   if (prior) return prior;
-  const away = remoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
+  const away = blockedRemoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write"); // a gate-refused material waits (dispatch-recovery-R1)
   if (away && "wait" in away) return wait(away.code ?? "placement", away.wait);
   if (away && "escalate" in away) return escalate("placement_lease", away.escalate);
   const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? uiFixPackage(s, () => fixPackage(s)) : null;

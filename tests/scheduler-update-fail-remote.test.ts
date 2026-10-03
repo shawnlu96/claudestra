@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { auditLedger } from "../src/lib/ledger-audit.js";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
@@ -57,14 +58,19 @@ test(`GitHub update refusal: ${mode}`, async () => {
       const settled = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "settle");
       expect(settled.at(-1)?.data.receipt).toContain("疑似含密钥");
       expect(settled.at(-1)?.data.receipt).not.toContain(error);
-      expect((await doTick()).cards[0]).toMatchObject({ step: "manual" });
-      expect(f.notices).toHaveLength(1);
-      expect(f.notices[0]).toContain("T1");
-      expect(f.notices[0]).not.toContain(error);
+      // dispatch-recovery-R1: a gate refusal is a tracked block on the auto card (no manual fallback), reported to PM by the patrol.
+      const next = (await doTick()).cards[0]!;
+      expect(next.step).toBe("waiting");
+      expect(next.detail).toStartWith("安全材料阻塞（第 1 轮 fix");
+      expect(next.detail.includes(error)).toBe(false);
       await doTick();
       await doTick();
-      expect(f.notices).toHaveLength(1);
+      expect(f.notices).toEqual([]);
       expect(listLendOrders(f.db, "T1")).toEqual([]);
+      const row = auditLedger({ project: "p", pms: ["pm"], tasks: [{ task: f.task(), events: listEvents(f.db, { project: "p", target: "T1" }) }],
+        agents: null, reviewers: null, held: null, ownerInbox: null }, Date.now()).findings.filter((x) => x.rule === "dispatch_blocked");
+      expect(row).toEqual([expect.objectContaining({ taskId: "T1", notify: "pm" })]);
+      expect(row[0]!.detail.includes(error)).toBe(false);
       return;
     }
     expect(tick.cards[0]).toMatchObject({ step: "pool_pooled" });
