@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, listEvents, listTasks } from "./ledger-store.js";
+import { getEventByDedup, getTask, listEvents, toEvent } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
 import { convergeReview } from "./review-converge.js";
@@ -101,12 +101,88 @@ async function recordInformed(db: Database, key: string, deps: FollowUpNoticeDep
   console.error(`⚠️ [scheduler] 后续节点失败通知已发出但未记账（第 ${pending.n} 次），${Math.round(createRetryDelay(pending.n) / 60_000)} 分钟后重试：${error}`);
 }
 
+/** A candidate source, kept raw: it is parsed inside its own card's isolation, so one bad row cannot hide the others. */
+type SourceRow = Record<string, unknown> & { seq: number; project: string; target: string };
+/** Per connection: every event up to `cursor` is swept for the projects in `open`, each holding its failed sources not yet seen informed. */
+const sweeps = new WeakMap<Database, { cursor: number; open: Map<string, Map<number, SourceRow>> }>();
+
+const RANGE = (p: string): string => `${p}dedupKey >= 'scheduler:converge:' AND ${p}dedupKey < 'scheduler:converge;' AND ${p}kind = 'scheduler'`;
+// CASE (not OR) keeps json_* off a malformed row: it stays a candidate and fails in its own card instead of failing the query.
+const MAYBE_FAILED = `CASE WHEN json_valid(data) THEN json_extract(data, '$.op') = 'review_downgrade'
+  AND json_type(data, '$.followUpFailure') = 'text' ELSE 1 END`;
+
+/**
+ * Failed follow-ups with no "informed" record yet, configured projects only. A project's first sweep on a connection (process
+ * start, a swapped ledger file, a project newly configured) reads its review_downgrade dedupKey range once up to the cursor,
+ * anti-joined with the notice key; later sweeps read only the events after the cursor for the held projects (`+` keeps the
+ * planner on the rowid range) and the open set shrinks as notices land, so a tick costs configured pending sources plus new
+ * events, not the history nor other projects. A project leaving the configuration is dropped and swept afresh if it comes back.
+ * A throw leaves cursor and sets unchanged. Mode / stage are not filtered. tests/review-converge-notice-readonly.test.ts sweep-cost.
+ */
+function sweepFollowUpSources(db: Database, projects: readonly string[]): void {
+  const cursor = (db.query("SELECT COALESCE(MAX(seq), 0) AS m FROM events").get() as { m: number }).m;
+  let sweep = sweeps.get(db);
+  if (!sweep) sweeps.set(db, sweep = { cursor, open: new Map() });
+  for (const p of sweep.open.keys()) if (!projects.includes(p)) sweep.open.delete(p);
+  const held = [...sweep.open.keys()];
+  if (cursor > sweep.cursor && held.length) {
+    const rows = db.query(`SELECT * FROM events WHERE seq > ? AND seq <= ? AND +project IN (${held.map(() => "?").join(", ")})
+      AND ${RANGE("+")} AND ${MAYBE_FAILED}`).all(sweep.cursor, cursor, ...held) as SourceRow[];
+    for (const r of rows) sweep.open.get(r.project)!.set(r.seq, r);
+  }
+  if (cursor > sweep.cursor) sweep.cursor = cursor;
+  for (const p of projects) if (!sweep.open.has(p)) {
+    const rows = db.query(`SELECT * FROM events d WHERE ${RANGE("d.")} AND +d.project = ? AND d.seq <= ? AND ${MAYBE_FAILED}
+      AND NOT EXISTS (SELECT 1 FROM events n WHERE n.dedupKey = 'scheduler:converge-notice:' || d.target || ':' || d.seq)`).all(p, sweep.cursor) as SourceRow[];
+    sweep.open.set(p, new Map(rows.map((r) => [r.seq, r])));
+  }
+}
+
+/** One card's swept rows → its failed follow-ups still owed a notice. Informed / foreign rows leave the set for good. */
+function cardSources(db: Database, task: LedgerTask, rows: readonly SourceRow[], failed: PassFailure[]): LedgerEvent[] {
+  const out: LedgerEvent[] = [];
+  for (const row of rows) {
+    let e: LedgerEvent;
+    try { e = toEvent(row); } catch (error) {
+      // a corrupt source row is this card's read error: reported every pass, its other sources still go out
+      const message = `后续节点失败通知：事件 ${row.seq} 读不出：${(error as Error).message}`;
+      console.error(`⚠️ [scheduler] ${task.id} ${message}（下个 tick 重试）`);
+      failed.push({ taskId: task.id, error: message });
+      continue;
+    }
+    if (isFailedFollowUp(task, e) && !getEventByDedup(db, convergeNoticeKey(task.id, e.seq))) out.push(e);
+    else sweeps.get(db)?.open.get(row.project)?.delete(row.seq);
+  }
+  return out;
+}
+
+type PassFailure = { taskId: string; error: string };
+/** One card's notice work: a lost lease ends the pass; any other throw (a busy read, a bad row) is reported and the pass goes on. */
+async function isolated(failed: PassFailure[], taskId: string, run: () => Promise<void>): Promise<void> {
+  try { await run(); } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    if (e instanceof SchedulerLeaseLost) throw new SchedulerStopped(`scheduler-converge-notice: ${e.message}`);
+    const error = `后续节点失败通知：${(e as Error).message}`;
+    console.error(`⚠️ [scheduler] ${taskId} ${error}（下个 tick 重试）`);
+    failed.push({ taskId, error });
+  }
+}
+
 /** The auto tick's per-pass retry of sent-but-unrecorded notices: a card that left auto / live still gets its record. */
-export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps, projects: readonly string[]): Promise<void> {
-  for (const key of [...(unrecorded.get(db)?.keys() ?? [])]) await recordInformed(db, key, deps);
+export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps, projects: readonly string[]): Promise<PassFailure[]> {
+  const failed: PassFailure[] = [];
+  for (const [key, { args }] of [...(unrecorded.get(db) ?? [])]) await isolated(failed, args[0], () => recordInformed(db, key, deps));
   // The ledger is the durable pending source after a restart; mode/stage must not hide a failed follow-up.
   // With no in-memory send receipt, notify again before recording: absence of informed is not proof of delivery.
-  for (const project of projects) for (const task of listTasks(db, project)) await followUpFailureNotice(db, task, deps);
+  // A failed sweep is reported as "*" and the sources swept before still go out: a busy read is not "no events".
+  await isolated(failed, "*", async () => sweepFollowUpSources(db, projects));
+  const open = sweeps.get(db)?.open;
+  const sources = projects.flatMap((p) => [...(open?.get(p)?.values() ?? [])]).sort((a, b) => a.seq - b.seq);
+  for (const [taskId, rows] of Map.groupBy(sources, (r) => r.target)) await isolated(failed, taskId, async () => {
+    const task = getTask(db, taskId);
+    if (task) await noticeSources(db, task, cardSources(db, task, rows, failed), deps);
+  });
+  return failed;
 }
 
 /**
@@ -116,7 +192,10 @@ export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeD
  * retried on backoff (also after the card leaves auto); a lost lease ends the pass.
  */
 export async function followUpFailureNotice(db: Database, task: LedgerTask, deps: FollowUpNoticeDeps): Promise<void> {
-  const failed = listEvents(db, { project: task.project, target: task.id }).filter((e) => isFailedFollowUp(task, e));
+  await noticeSources(db, task, listEvents(db, { project: task.project, target: task.id }).filter((e) => isFailedFollowUp(task, e)), deps);
+}
+
+async function noticeSources(db: Database, task: LedgerTask, failed: readonly LedgerEvent[], deps: FollowUpNoticeDeps): Promise<void> {
   const pending = unrecorded.get(db) ?? unrecorded.set(db, new Map()).get(db)!;
   for (const e of failed) {
     const key = convergeNoticeKey(task.id, e.seq);

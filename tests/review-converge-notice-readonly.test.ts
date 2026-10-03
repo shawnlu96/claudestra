@@ -3,19 +3,21 @@
  * `ledger scheduler-converge-notice`, so the next tick stays quiet and nothing writes to the read-only connection.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LedgerReader } from "../src/lib/ledger-read.js";
-import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
-import { convergeFollowUp } from "../src/lib/review-converge-followup.js";
+import { getEventByDedup, getTask, listEvents } from "../src/lib/ledger-store.js";
+import { convergeFollowUp, followUpKey } from "../src/lib/review-converge-followup.js";
 import { followUpFailureNotice } from "../src/lib/review-converge-notice.js";
-import { convergeNoticeKey } from "../src/lib/review-converge-notice-write.js";
+import { convergeNoticeKey, recordFollowUpInformed } from "../src/lib/review-converge-notice-write.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { encodeLease, SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { runManagerProcess } from "../src/lib/run-manager.js";
 import { createTask } from "../src/lib/ledger-write.js";
+import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { autoFixture, H1 } from "./scheduler-auto-helpers.js";
 
 import { testChildEnv } from "./test-env.js";
@@ -205,5 +207,223 @@ describe("failed follow-up notice on the read-only scheduler connection", () => 
     expect(await f.cli("scheduler", ...args("T1", downgrade.seq))).toMatchObject({ ok: true, duplicate: false });
     expect(await f.cli("scheduler", ...args("T1", downgrade.seq))).toMatchObject({ ok: true, duplicate: true });
     expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "review_followup_failed")).toHaveLength(1);
+  });
+});
+
+
+/**
+ * state-protection-F4: after a connection's first sweep, a tick reads the pending sources plus the events since the last tick
+ * (rowid range) of the configured projects, not done-card / closed / successful / other-project history; one card's read failure — a busy read or a
+ * corrupt source row — is reported in the tick's `failed` with that card's id while other cards and the auto card go on.
+ */
+type Reads = { rows: number; log: { sql: string; args: unknown[] }[]; fault: ((sql: string, args: unknown[]) => boolean) | null };
+/** The reader's connection, counting rows that tasks / events statements hand back; `fault` makes matching reads throw busy. */
+function watched(db: Database): { db: Database; reads: Reads } {
+  const reads: Reads = { rows: 0, log: [], fault: null };
+  const stmt = (s: object, sql: string) => new Proxy(s, { get(t, k) {
+    const v = Reflect.get(t, k, t);
+    if (typeof v !== "function") return v;
+    if (k !== "all" && k !== "get" && k !== "values") return v.bind(t);
+    return (...args: unknown[]) => {
+      if (reads.fault?.(sql, args)) throw new Error("SQLITE_BUSY: database is locked");
+      const r = v.apply(t, args);
+      reads.log.push({ sql, args });
+      if (/\b(events|tasks)\b/.test(sql)) reads.rows += Array.isArray(r) ? r.length : r ? 1 : 0;
+      return r;
+    };
+  } });
+  const proxy = new Proxy(db, { get(t, k) {
+    const v = Reflect.get(t, k, t);
+    if (k === "query" || k === "prepare") return (sql: string) => stmt(v.call(t, sql), sql);
+    return typeof v === "function" ? v.bind(t) : v;
+  } });
+  return { db: proxy, reads };
+}
+
+const DOWNGRADE = (f: ReturnType<typeof autoFixture>) => ({
+  round: 1, head: H1, reportPath: join(f.dir, "report.md"), items: [{ findingId: "F1", family: "other", probe: "src/y.ts:1", why: "no_basis" as const }],
+});
+
+/** A card with a real failed follow-up (no DAG) on the writer; `informed` also closes it through the guarded record. */
+function failedSource(f: ReturnType<typeof autoFixture>, id: string, informed: boolean, project = "p") {
+  createTask(f.db, { actor: "owner", now: 3000 }, { project, id, title: id, kind: "code" });
+  f.db.transaction(() => convergeFollowUp(f.db, { actor: "scheduler", now: 3000 }, getTask(f.db, id)!, DOWNGRADE(f), f.dir, () => true))();
+  const d = getEventByDedup(f.db, followUpKey(id, 1))!;
+  expect(typeof d.data.followUpFailure).toBe("string");
+  if (informed) recordFollowUpInformed(f.db, { actor: "scheduler", now: 3000 }, { taskId: id, downgradeSeq: d.seq, round: 1, head: H1 });
+}
+
+/** A card in a real DAG whose follow-up node was created: a review_downgrade source with no failure and no notice key. */
+function okSource(f: ReturnType<typeof autoFixture>, id: string) {
+  const ctx = { actor: "owner", now: 3000 };
+  createTask(f.db, ctx, { project: "p", id, title: id, kind: "code" });
+  const feature = createFeature(f.db, ctx, { project: "p", slug: id.toLowerCase(), title: id }).row;
+  initDag(f.db, ctx, { id: feature.id, rev: feature.rev, nodes: [{ key: "A", taskId: id, fileGlobs: ["src/old.ts"] }] });
+  f.db.transaction(() => convergeFollowUp(f.db, { actor: "scheduler", now: 3000 }, getTask(f.db, id)!, DOWNGRADE(f), f.dir, () => true))();
+  const d = getEventByDedup(f.db, followUpKey(id, 1))!;
+  expect({ op: d.data.op, failure: d.data.followUpFailure }).toEqual({ op: "review_downgrade", failure: null });
+}
+
+/** The sweep statements of one tick: rows handed back, and the events each planned range covers (EXPLAIN + COUNT on its args). */
+function sweepCost(ro: Database, reads: Reads) {
+  const sweeps = reads.log.filter((l) => l.sql.includes("'scheduler:converge:'"));
+  const plans = sweeps.map((l) => (ro.query(`EXPLAIN QUERY PLAN ${l.sql}`).all(...(l.args as (number | string)[])) as { detail: string }[]).map((r) => r.detail).join(" "));
+  const scanned = sweeps.map((l) => l.sql.includes("seq > ?") // the cursor range: (after, upTo, ...held projects)
+    ? (ro.query("SELECT COUNT(*) AS n FROM events WHERE seq > ? AND seq <= ?").get(...(l.args.slice(0, 2) as number[])) as { n: number }).n : -1);
+  return { plans, scanned };
+}
+
+/** `history` done cards each of closed failed / successful / other-project closed sources (20 notes each) + `pending` open ones. */
+async function sweepTicks(history: number, pending: number) {
+  const { f, ro, told } = setup();
+  const notes = f.db.prepare("INSERT INTO events (ts, actor, project, target, kind, text) VALUES (?, 'owner', ?, ?, 'note', 'x')");
+  for (let i = 0; i < history; i++) {
+    failedSource(f, `D${i}`, true); okSource(f, `S${i}`); failedSource(f, `X${i}`, true, "o");
+    f.db.transaction(() => { for (const [p, id] of [["p", `D${i}`], ["p", `S${i}`], ["o", `X${i}`]]) for (let j = 0; j < 20; j++) notes.run(4000 + j, p, id); })();
+    f.db.run("UPDATE tasks SET stage = 'done' WHERE id IN (?, ?, ?)", [`D${i}`, `S${i}`, `X${i}`]);
+  }
+  for (let i = 0; i < pending; i++) failedSource(f, `Q${i}`, false);
+  // no auto card left: the card planner's own per-card reads are paced elsewhere; an observe / done source is still found
+  f.db.run("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'");
+  f.db.run("UPDATE tasks SET stage = 'done' WHERE id = 'Q0'");
+  const w = watched(ro), ticks = [];
+  for (let i = 0; i < 3; i++) {
+    w.reads.rows = 0; w.reads.log = [];
+    const r = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    ticks.push({ rows: w.reads.rows, failed: r.failed, told: told().length, ...sweepCost(ro, w.reads) });
+  }
+  return { ticks, f };
+}
+
+describe("state-protection-F4 targeted sweep and per-card isolation", () => {
+  test("sweep-cost: after the first sweep a tick reads pending sources and new events, not any kind of history", async () => {
+    const small = await sweepTicks(5, 1), large = await sweepTicks(300, 1), more = await sweepTicks(300, 4);
+    console.log("SWEEP_TICKS", JSON.stringify([small, large, more].map((s) => s.ticks.map(({ rows, scanned, told }) => ({ rows, scanned, told })))));
+    for (const s of [small, large, more]) {
+      expect(s.ticks.flatMap((t) => t.failed)).toEqual([]);
+      // tick 1 told T1 + every Q once and recorded each through the CLI; later ticks stay quiet
+      const n = s === more ? 5 : 2;
+      expect(s.ticks.map((t) => t.told)).toEqual([n, n, n]);
+      expect(s.ticks[1].plans).toEqual([expect.stringMatching(/SEARCH events USING INTEGER PRIMARY KEY \(rowid>\? AND rowid<\?\)/)]);
+      expect(s.ticks[2].plans).toEqual([]); // nothing written since: no sweep statement at all
+    }
+    // tick 2 sees only the notice records tick 1 wrote (one per pending source) and closes them; tick 3 reads nothing new
+    expect(large.ticks[1]).toMatchObject({ rows: small.ticks[1].rows, scanned: small.ticks[1].scanned });
+    expect(large.ticks[2]).toMatchObject({ rows: small.ticks[2].rows, scanned: [] });
+    expect(more.ticks[1].scanned).toEqual([large.ticks[1].scanned[0] + 3]);
+    expect(more.ticks[1].rows).toBeGreaterThan(large.ticks[1].rows);
+    expect(more.ticks[2].rows).toBe(large.ticks[2].rows);
+    for (const id of ["T1", "Q0", "Q3"]) expect(getEventByDedup(more.f.db, convergeNoticeKey(id, getEventByDedup(more.f.db, followUpKey(id, id === "T1" ? 2 : 1))!.seq))).not.toBeNull();
+  }, 60_000);
+
+  test("sweep-cost: a failure written between ticks is found by the cursor range; a reopened reader finds the old ones", async () => {
+    const { f, ro, told } = setup();
+    failedSource(f, "D0", true);
+    const w = watched(ro);
+    await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(told()).toHaveLength(1);
+    failedSource(f, "Q0", false);
+    f.db.run("UPDATE tasks SET stage = 'done' WHERE id = 'Q0'");
+    expect((await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).failed).toEqual([]);
+    expect(told().filter((t) => / Q0 /.test(t))).toHaveLength(1);
+    failedSource(f, "Q1", false);
+    // a fresh connection (process restart) sweeps the history once: Q1 is told, closed ones stay quiet
+    const fresh = new LedgerReader(join(f.dir, "ledger.sqlite"));
+    cleanup.push(() => fresh.close());
+    await schedulerAutoTick(fresh.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(told().map((t) => t.split(" ")[1])).toEqual(["T1", "Q0", "Q1"]);
+  });
+
+  test("sweep-project: unconfigured projects' open sources are never read or held; configuring one later finds its old ones", async () => {
+    for (const foreign of [5, 300]) {
+      const { f, ro, told } = setup();
+      f.db.run("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'");
+      const w = watched(ro);
+      await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps); // T1 told and closed: p has nothing pending
+      for (let i = 0; i < foreign; i++) failedSource(f, `O${i}`, false, "o");
+      // the review's probe: visits of project-o rows by any Array#filter callback during a tick, plus o rows any sweep read
+      const filter = Array.prototype.filter, visits: number[] = [], oRows: number[] = [];
+      for (let t = 0; t < 3; t++) {
+        let n = 0;
+        Array.prototype.filter = function (this: unknown[], cb: (v: unknown, i: number, a: unknown[]) => unknown, that?: unknown) {
+          return filter.call(this, (v: unknown, i: number, a: unknown[]) => {
+            if (v && typeof v === "object" && (v as { project?: unknown }).project === "o" && "dedupKey" in v) n++;
+            return cb.call(that, v, i, a);
+          });
+        } as typeof filter;
+        w.reads.log = [];
+        try {
+          expect((await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).failed).toEqual([]);
+        } finally { Array.prototype.filter = filter; }
+        visits.push(n);
+        oRows.push(w.reads.log.filter((l) => l.sql.includes("'scheduler:converge:'"))
+          .reduce((k, l) => k + (ro.query(l.sql).all(...(l.args as string[])) as { project: string }[]).filter((r) => r.project === "o").length, 0));
+      }
+      expect({ foreign, visits, oRows, told: told().length }).toEqual({ foreign, visits: [0, 0, 0], oRows: [0, 0, 0], told: 1 });
+      // o configured: its old sources, written before any tick looked at o, are told once each and closed
+      const both = { p: { maxActiveWorkers: 2 }, o: { maxActiveWorkers: 2 } };
+      expect((await schedulerAutoTick(w.db, both, f.tickDeps)).failed).toEqual([]);
+      expect(told()).toHaveLength(1 + foreign);
+      await schedulerAutoTick(w.db, both, f.tickDeps);
+      expect(told()).toHaveLength(1 + foreign);
+      // o dropped then re-added: a new failure written meanwhile is found, the informed ones stay quiet
+      await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+      failedSource(f, "O-late", false, "o");
+      await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+      expect(told()).toHaveLength(1 + foreign);
+      await schedulerAutoTick(w.db, both, f.tickDeps);
+      expect(told().slice(1 + foreign).map((t) => t.split(" ")[1])).toEqual(["O-late"]);
+    }
+  }, 120_000);
+
+  test("sweep-isolation: one card's busy read is reported, the others and the auto card go on, then it is told", async () => {
+    const { f, ro, told } = setup();
+    failedSource(f, "Q0", false); failedSource(f, "Q1", false); failedSource(f, "Q2", false);
+    const w = watched(ro);
+    w.reads.fault = (sql, args) => args.includes("Q1") && (sql.includes("FROM events") || sql.includes("FROM tasks WHERE id"));
+    const r = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(r.failed).toEqual([{ taskId: "Q1", error: "后续节点失败通知：SQLITE_BUSY: database is locked" }]);
+    expect(r.cards.map((c) => c.taskId)).toEqual(["T1"]);
+    expect(told().filter((t) => / Q1 /.test(t))).toEqual([]);
+    expect(told()).toHaveLength(3);
+    failedSource(f, "Q3", false);
+    // the sweep itself busy: reported, not read as "no events"; Q1 (already swept) still goes out, Q3 waits for the next sweep
+    w.reads.fault = (sql) => sql.includes("'scheduler:converge:'");
+    const busy = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(busy.failed).toEqual([{ taskId: "*", error: "后续节点失败通知：SQLITE_BUSY: database is locked" }]);
+    expect(busy.cards.map((c) => c.taskId)).toEqual(["T1"]);
+    expect(told().filter((t) => / Q1 /.test(t))).toHaveLength(1);
+    expect(told().filter((t) => / Q3 /.test(t))).toEqual([]);
+    w.reads.fault = null;
+    expect((await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).failed).toEqual([]);
+    expect(told().filter((t) => / Q3 /.test(t))).toHaveLength(1);
+    expect(getEventByDedup(f.db, convergeNoticeKey("Q1", getEventByDedup(f.db, followUpKey("Q1", 1))!.seq))?.data.informed).toBe(true);
+    await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+    expect(told()).toHaveLength(5);
+
+    const g = setup();
+    failedSource(g.f, "Q0", false);
+    const lost = watched(g.ro);
+    lost.reads.fault = (sql, args) => args.includes("Q0") && sql.includes("FROM tasks WHERE id");
+    const deps = { ...g.f.tickDeps, manager: async () => { throw new SchedulerLeaseLost("gone"); } };
+    await expect(schedulerAutoTick(lost.db, { p: { maxActiveWorkers: 2 } }, deps)).rejects.toBeInstanceOf(SchedulerStopped);
+  });
+
+  test("sweep-isolation: a corrupt source row fails only its own card, with its id; the other sources are told", async () => {
+    for (const reopen of [false, true]) {
+      const { f, ro, told } = setup();
+      f.db.run("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'"); // the auto card's own JSON reads are not this sweep
+      const w = watched(ro);
+      if (reopen) await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps); // corrupt row arrives via the cursor range
+      createTask(f.db, { actor: "owner", now: 3000 }, { project: "p", id: "Q0", title: "Q0", kind: "code" });
+      f.db.run("INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (3000, 'scheduler', 'p', 'Q0', 'scheduler', 'x', '{', ?)",
+        [followUpKey("Q0", 1)]);
+      failedSource(f, "Q1", false);
+      for (let i = 0; i < 2; i++) {
+        const r = await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+        expect(r.failed).toEqual([{ taskId: "Q0", error: expect.stringMatching(/^后续节点失败通知：事件 \d+ 读不出：.*JSON/) }]);
+      }
+      expect(told().map((t) => t.split(" ")[1])).toEqual(["T1", "Q1"]);
+    }
   });
 });
