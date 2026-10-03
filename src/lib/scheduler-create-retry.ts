@@ -4,11 +4,16 @@
  * (2 → 4 → 8 → 15 min, per card and role) instead of stopping as "unknown" for PM. Anything less certain stays unknown.
  * tests/scheduler-create-retry.test.ts.
  */
+import { existsSync } from "node:fs";
+import { openReviewWorktree, type Git, type Pinned } from "./scheduler-review-worktree.js";
+import { retryWorktreeDirty } from "./scheduler-create-retry-worktree.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { RegistryRow } from "./scheduler-auto-ports.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
+
+export { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-retry-worktree.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -63,4 +68,16 @@ export async function retryCleanCreate(env: { db: Database; registryRow: Registr
   const first = String(f.r.error ?? "").split("\n")[0].trim().slice(0, 240);
   const loud = n >= CREATE_RETRY_LOUD ? `，⚠ 已连续失败 ${n} 次，请 PM 留意（仍自动重试）` : "";
   return { kind: "wait", reason: `${MARK}（${role} ${f.name} 第 ${n} 次${loud}；${wait / 60_000} 分钟后、最早 ${new Date(now() + wait).toISOString()} 重试）：${first}` };
+}
+
+/** Only a clean failed reviewer creation may reuse its checkout without moving or accepting edits. */
+export async function openCreateReviewWorktree(db: Database, task: LedgerTask, authorDir: string, dir: string, git: Git): Promise<Pinned | { held: string }> {
+  if (streak(db, task.id, "reviewer").n && existsSync(dir)) {
+    const branch = await git(["-C", dir, "symbolic-ref", "--quiet", "HEAD"]);
+    const head = await git(["-C", dir, "rev-parse", "HEAD"]);
+    if (branch.code !== 1 || head.code !== 0 || head.out !== task.headSHA) return { held: `审查 worktree ${dir} 不在预期 detached 起点，保留并等待核对` };
+    const dirty = await retryWorktreeDirty(git, dir);
+    if (dirty) return { held: dirty };
+  }
+  return openReviewWorktree(authorDir, dir, task.headSHA, git);
 }

@@ -169,7 +169,7 @@ test("体检不过：问题逐条以禁用样式列出，确认行不放行", as
   await ui.click("pm-b");
   expect(ui.disabled()).toEqual(["›切到 pm-b"]);
   expect(ui.notes().map((n) => n.textContent)).toEqual(["pm-b is offline", "peer p1 lacks a PM agent destination in peer-prs"]);
-  await React.act(async () => { ui.click("切到 pm-b"); });
+  await ui.click("切到 pm-b");
   expect(state.posts.filter((p) => !p.dryRun)).toEqual([]);
   expect(ui.menu()).not.toBeNull();
   await ui.unmount();

@@ -21,6 +21,7 @@ import { runManagerProcess } from "../lib/run-manager.js";
 import { askDb } from "./asks.js";
 import { callerOf } from "./caller-identity.js";
 import { dagToolHandlers } from "./dag-tools.js";
+import { memoryToolHandlers } from "../lib/memory-tools.js";
 import { answerLendTool } from "./lend-tools.js";
 export { lendFrameDenied } from "./lend-tools.js"; // bridge.ts 原生帧入口的出借闸口，跟派单工具同一行 import 进去
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
@@ -61,6 +62,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed", handedAt: Date.now() } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
   }),
   ...dagToolHandlers(),
+  ...memoryToolHandlers(ledgerRun, ledgerDb), // 项目记忆 record / mark / show_memory（写经 manager，show 读只读连接）
 };
 
 export async function answerOrderTool(ws: ServerWebSocket<unknown>, msg: Record<string, unknown>): Promise<void> {

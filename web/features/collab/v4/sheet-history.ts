@@ -1,0 +1,83 @@
+"use client";
+import { useEffect, useRef } from "react";
+
+const COLLAB_Q = "collab=";
+
+/** 用到的 history 能力：生产是 lib/hash-nav-browser.ts 的 browserHistory；本文件不碰 window，仓库根的测试能直接引用 */
+export interface HistoryPort {
+  hash(): string;
+  push(hash: string): void;
+  replace(hash: string): void;
+  back(): void;
+  onPop(f: () => void): () => void;
+}
+
+/**
+ * 手机整屏页（团队 / 待你处理 / 成员…）占一条历史记录 #chat?collab=~<kind>：系统左滑 / 返回键先收起这一层。
+ * 条目归属和「此刻是不是窄屏」分开：只在窄屏压，但压过的条目切到宽屏后照样认 popstate。层被任何路径收起（×、跳进度的
+ * select(null)、切宽屏后点 ×）时，当前条目还是自己的就 back 消掉，免得留一条空记录要多退一次；详情已经 replaceState
+ * 接手了这条就不动它。返回的 prepare 要在「打开这一层」的事件里、setState 之前调：WKWebView 左滑预览用的是压栈那一刻
+ * 截的图，等渲染完再压（effect 里压），图里已经有这一层，松手像弹回来（同 chat.tsx toContent 先压再切）。
+ * tests/web-dom-collab-sheet-history.test.ts。
+ */
+export function useSheetHistory(open: boolean, push: boolean, id: string, onClose: () => void, h: HistoryPort): (next: string) => void {
+  const owned = useRef<string | null>(null); // 自己压进去的那条 hash
+  // 自己收起时调的 back 还没等到 popstate：那次 popstate 不是用户返回，迟到多久都认作自己的（只计数，不靠计时）。
+  // hold = 在途期间暂停认领，落地后再对账；800ms 没落地也放行认领，免得新层一直没有条目（PR556-r1 P1）
+  const pendingBacks = useRef(0);
+  const hold = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const live = useRef({ open, push, id, onClose });
+  useEffect(() => { live.current = { open, push, id, onClose }; }); // popstate 异步到：读最近一次渲染的值
+  /** 层开着、窄屏、在 #chat：把当前条目换成 / 压成自己的 */
+  const claim = (s: { open: boolean; push: boolean; id: string }) => {
+    const hash = h.hash();
+    if (!s.open || !s.push || hash.split("?")[0] !== "#chat") return;
+    const tagged = tagOf(s.id);
+    if (hash !== tagged) {
+      if (hash.includes(COLLAB_Q)) h.replace(tagged);
+      else h.push(tagged); // 没经 prepare 打开的（切回窄屏时层还开着、back 在途时打开的）：补压
+    }
+    owned.current = tagged;
+  };
+  const release = () => {
+    if (hold.current) clearTimeout(hold.current);
+    hold.current = null;
+    claim(live.current);
+  };
+  const onPop = useRef(() => {});
+  useEffect(() => {
+    onPop.current = () => {
+      if (pendingBacks.current > 0) {
+        pendingBacks.current--;
+        return release();
+      }
+      if (!owned.current || h.hash() === owned.current) return;
+      owned.current = null;
+      if (live.current.open) live.current.onClose();
+    };
+  });
+  // 监听只挂一次、经 ref 调最新处理：别的 popstate 监听先触发渲染时，派发途中被摘掉的监听这次就收不到（DOM 规则）
+  useEffect(() => h.onPop(() => onPop.current()), [h]);
+  useEffect(() => () => { if (hold.current) clearTimeout(hold.current); }, []);
+  useEffect(() => {
+    if (hold.current) return; // 等自己的 back 落地再对账
+    // 自己的条目被返回带走了（hash 已不是它）：交给 popstate 收起。别的 popstate 监听（chat.tsx）会先触发一次渲染，
+    // 这时这里若照常认领，会把刚退掉的条目又压回去，左滑看着像弹回（tests/web-dom-collab-sheet-history.test.ts）
+    if (open && owned.current !== null && h.hash() !== owned.current) return;
+    if (open) return claim({ open, push, id });
+    const mine = owned.current !== null && h.hash() === owned.current;
+    owned.current = null;
+    if (!mine || pendingBacks.current > 0) return; // 上一次 back 还没落地：它本来就会退到这条之前，不再叠一次
+    pendingBacks.current++;
+    hold.current = setTimeout(release, 800);
+    h.back();
+  }); // 每次渲染都核一遍（幂等）：prepare 压了但这层没真打开（选中的目标刷新后没了）也能消掉
+  return (next) => {
+    const hash = h.hash();
+    if (!push || pendingBacks.current > 0 || owned.current || hash.split("?")[0] !== "#chat" || hash.includes(COLLAB_Q)) return; // 已开着 / 详情占着 / back 在途：交给 effect
+    owned.current = tagOf(next);
+    h.push(owned.current);
+  };
+}
+
+const tagOf = (id: string) => `#chat?${COLLAB_Q}${encodeURIComponent(id)}`;

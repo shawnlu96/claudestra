@@ -6,6 +6,7 @@ import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { placeFor, peerFamily, type PlacementFacts, type PlaceRole } from "./scheduler-family-pick.js";
 import { peerRefusal, type PeerFacts, type Placement } from "./scheduler-placement.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
+import { startRetried } from "./lend-fix-start.js";
 
 /** Only the exact unclaimed push-withdrawal receipt qualifies; arbitrary cancellation text or a claimed order does not. */
 function refusedAt(s: PlannerSnapshot, i: SchedulerIntent, peer: string): number | null {
@@ -34,7 +35,7 @@ export interface RetryPlacementFacts extends PlacementFacts { retries: Retry[] }
 export function placementHistory(s: PlannerSnapshot, since: number): Pick<RetryPlacementFacts, "tried" | "retries"> {
   const tried = new Set<string>(), temporary = new Map<string, number>();
   for (const i of [...s.intents].sort((a, b) => a.eventSeq - b.eventSeq)) {
-    if (!isPoolIntent(i) || i.causalSeq < since || i.head !== s.task.headSHA) continue;
+    if (!isPoolIntent(i) || i.causalSeq < since || i.head !== s.task.headSHA || startRetried(s.events, i.id)) continue; // i28-FB1
     const peer = i.recipient!.slice(POOL_RECIPIENT.length);
     const knownClock = s.pool?.now !== undefined && s.pool.peers.some((p) => p.peer === peer && p.helloAt !== undefined);
     const at = knownClock ? refusedAt(s, i, peer) : null;

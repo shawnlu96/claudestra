@@ -1,0 +1,27 @@
+/** Default navigation follows session status, so idle live sessions stay reachable.
+ * Partition before building teams: stopped parents cannot hide or relocate live children.
+ * History retains the original records for search and recovery; no session data is changed.
+ */
+import { buildSidebarEntries, buildTeams, type SidebarEntry } from "./sidebar-entries";
+import type { AgentSession, ProjectMeta } from "./type";
+
+export function isHistoryAgent(a: AgentSession): boolean {
+  return a.status === "stopped";
+}
+
+export function buildSidebarDirectory(list: AgentSession[], meta: Map<string, ProjectMeta>, masterName?: string): {
+  activeEntries: SidebarEntry[];
+  underMaster: AgentSession[];
+  historyEntries: SidebarEntry[];
+  historyCount: number;
+} {
+  const live = list.filter((a) => !isHistoryAgent(a));
+  const history = list.filter(isHistoryAgent);
+  return {
+    activeEntries: buildSidebarEntries(live, "", meta, masterName),
+    underMaster: buildTeams(live, masterName).underMaster,
+    // Do not attach stopped children to the separately rendered live master card.
+    historyEntries: buildSidebarEntries(history, "", meta),
+    historyCount: history.length,
+  };
+}

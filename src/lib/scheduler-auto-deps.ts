@@ -24,10 +24,10 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { lendReviewDir } from "./lend-pr-takeover-review.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
-import { retryCleanCreate } from "./scheduler-create-retry.js";
+import { openCreateReviewWorktree, retryCleanCreate } from "./scheduler-create-retry.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
-import { git as realGit, gitDirtySync, openReviewWorktree, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
+import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
@@ -65,7 +65,8 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const author = boundRef(db, task.id, "author");
   const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? (await lendReviewDir(db, task, env.git));
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
-  const opened = await openReviewWorktree(authorDir, checkoutOf(env, task.id), task.headSHA, env.git);
+  const opened = await openCreateReviewWorktree(db, task, authorDir, checkoutOf(env, task.id), env.git);
+  if ("held" in opened) return { kind: "unknown", reason: opened.held };
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
   const dir = opened.dir;
   const name = reviewerName(task.id);
@@ -140,16 +141,17 @@ export interface AutoDepsOpts {
   git?: Git;
   /** The service's leases handed to every manager / ledger child (scheduler-lease-env.ts); none = those children refuse to act. */
   lease?: SchedulerLease;
+  /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
-  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease } = opts;
+  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease, create = plainManager(lease) } = opts;
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
-    create: localCreateGuard(plainManager(lease)), ledger: schedulerManagerWith(lease), registryPath };
+    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath };
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),

@@ -127,15 +127,15 @@ describe("local write slots", () => {
     expect(resources("fresh")).toContainEqual({ resource: "slot:p:0" });
   });
 
-  test("merge/live stages free slots, but file locks wait for terminal effects to settle", () => {
+  test("merge frees slots; live settles orphaned writes and frees their file locks", () => {
     card("one");
     const i = dispatch("one", false);
     db.run("UPDATE tasks SET stage = 'merge' WHERE id = 'one'");
     releaseFinishedCardLeases(db, "one");
     expect(snapshot("one").workerCount).toBe(0);
-    moveStage(db, ctx, { taskId: "one", from: "merge", to: "live" });
     expect(resources("one")).toContainEqual({ resource: "src/one.ts" });
-    settleIntent(db, ctx, { id: i.id, from: "pending", to: "cancelled" });
+    moveStage(db, ctx, { taskId: "one", from: "merge", to: "live" });
+    expect(db.query("SELECT status FROM scheduler_intents WHERE id = ?").get(i.id)).toEqual({ status: "cancelled" });
     expect(resources("one")).toEqual([]);
   });
 

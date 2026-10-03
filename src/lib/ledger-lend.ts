@@ -19,6 +19,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
 import { claimConvergenceStep } from "./lend-arbiter-claim.js";
+import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
@@ -391,6 +392,8 @@ export function leaseLend(db: Database, ctx: WriteCtx, peer: string, req: LeaseR
     setStatus(db, o, started ? "unknown" : "released", now, `${req.reason}${why}`);
     if (!started) unbindStep(db, o);
     note(db, ctx, o, `出借：${peer} 报 ${req.reason}${why}`, { op: "release", reason: req.reason, gen: o.leaseGen });
+    const retry = started ? null : fixStartRetry(db, ctx, o, req.detail, now); // i28-FB1：起点不符本轮第一次不结束写租约，调度刷新起点重挂
+    if (retry) return { lease: null, notices: [retry] };
     // 写单没起得来（没有推送权限、clone 不下来…）= 派不回这个出借方：写租约结束，卡退回本机
     if (!started && isWriteStep(o.step)) return { lease: null, notices: cooldownReleaseNotices(db, o, why, now, [sendBack(db, ctx, { ...o, status: "released" }, `对方没起得来 worker${why}`, now)]) };
     const label = LABEL[o.step];
