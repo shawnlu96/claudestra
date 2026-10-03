@@ -75,4 +75,18 @@ describe("等批准的请求跨页面留存（离开配对页再回来接着等�
     savePendingPairing(null, store);
     expect(loadPendingPairing(0, store)).toBeNull();
   });
+
+  test("禁用站点存储（读 sessionStorage 属性就抛 SecurityError）：默认参数取存储也不抛，按没有记录处理", () => {
+    const before = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, get() { throw new DOMException("denied", "SecurityError"); } });
+    try {
+      const p = { fp: "local", approvalId: "a1", machineName: "mac", expiresAt: "2099-01-01T00:00:00.000Z" };
+      expect(() => savePendingPairing(p)).not.toThrow();
+      expect(() => savePendingPairing(null)).not.toThrow();
+      expect(loadPendingPairing()).toBeNull();
+    } finally {
+      if (before) Object.defineProperty(globalThis, "sessionStorage", before);
+      else delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
+    }
+  });
 });

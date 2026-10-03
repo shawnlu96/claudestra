@@ -107,7 +107,14 @@ export interface SavedPending {
 }
 const PENDING_KEY = "cstra_pair_pending";
 type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
-const session = (): Store | null => (typeof sessionStorage === "undefined" ? null : sessionStorage);
+/** 禁用站点存储时读 sessionStorage 这个属性本身就抛 SecurityError：吞掉按「没有存储」处理，配对照常走，只是离开页面后接不上 */
+function session(): Store | null {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
 
 /** null = 清掉。存不了（隐私模式等）只是离开页面后接不上，与没有这份记录时一样 */
 export function savePendingPairing(p: SavedPending | null, store: Store | null = session()): void {
