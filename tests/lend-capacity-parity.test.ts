@@ -21,6 +21,8 @@ import type { ProjectDef } from "../src/lib/projects.js";
 import { poolStartFacts } from "../src/lib/scheduler-agent-pool-start.js";
 import { readSchedulerConfig, type RemotePolicy } from "../src/lib/scheduler-config.js";
 import { placeFor } from "../src/lib/scheduler-placement.js";
+import type { PeerView as WebPeerView } from "@/features/borrow/borrow-api";
+import { peerState, sortPeers } from "@/features/borrow/borrow-model";
 
 const at = "2026-10-01T00:00:00Z";
 const OWNER = effectivePrincipal({
@@ -175,9 +177,61 @@ describe("legacy projects keep the maxOpen cap", () => {
     writeConfig([legacy]);
     expect((await borrowPeer()).capacity?.slots).toEqual({ codex: 2, claude: 2 });
   });
-  test("an entry mixing unified and legacy projects keeps the legacy figure in the borrow GET (still bounds the legacy one)", async () => {
+  test("an entry mixing unified and legacy projects reports each figure with the projects it applies to", async () => {
+    const mixed = { ...ENTRY, projects: ["alpha", "old"] };
+    writeConfig([mixed]);
+    const peer = await borrowPeer();
+    expect(board("alpha", [mixed])).toBe(13);
+    expect(placementSlots("alpha")).toEqual({ codex: 8, claude: 5 });
+    expect(peer.capacity?.slots).toEqual({ codex: 8, claude: 5 });
+    expect(peer.capacityProjects).toEqual(["alpha"]);
+    expect(board("old", [mixed])).toBe(2);
+    expect(peer.legacyCapacity).toEqual({ projects: ["old"], capacity: expect.objectContaining({ slots: { codex: 2, claude: 2 }, why: null }) });
+    expect(peer.maxOpen).toBe(2);
+  });
+  test("mixed figures are bounds on one machine: legacy orders use both, nothing adds up to 4 or 15", async () => {
+    const mixed = { ...ENTRY, projects: ["alpha", "old"] };
+    writeConfig([mixed]);
+    order("o1", "old", "codex");
+    order("o2", "old", "codex");
+    expect(board("old", [mixed])).toBe(0);
+    expect(board("alpha", [mixed])).toBe(11);
+    const peer = await borrowPeer();
+    expect(peer.legacyCapacity?.capacity.slots).toEqual({ codex: 0, claude: 0 });
+    expect(peer.capacity?.slots).toEqual({ codex: 6, claude: 5 });
+  });
+  test("project order does not change the split", async () => {
+    writeConfig([{ ...ENTRY, projects: ["old", "beta", "alpha"] }]);
+    const peer = await borrowPeer();
+    expect(peer.capacity?.slots).toEqual({ codex: 8, claude: 5 });
+    expect(peer.capacityProjects).toEqual(["beta", "alpha"]);
+    expect(peer.legacyCapacity?.projects).toEqual(["old"]);
+  });
+  test("a single-kind entry has no legacy figure and names its own projects", async () => {
+    const unified = await borrowPeer();
+    expect([unified.capacityProjects, unified.legacyCapacity, unified.capacity?.slots]).toEqual([["alpha", "beta"], null, { codex: 8, claude: 5 }]);
+    writeConfig([{ ...ENTRY, projects: ["old"] }]);
+    const legacy = await borrowPeer();
+    expect([legacy.capacityProjects, legacy.legacyCapacity, legacy.capacity?.slots]).toEqual([["old"], null, { codex: 2, claude: 2 }]);
+  });
+  test("scheduler.json unreadable: no scope is guessed and the legacy figure stays", async () => {
     writeConfig([{ ...ENTRY, projects: ["alpha", "old"] }]);
-    expect((await borrowPeer()).capacity?.slots).toEqual({ codex: 2, claude: 2 });
-    expect(board("alpha", [{ ...ENTRY, projects: ["alpha", "old"] }])).toBe(13);
+    writeFileSync(schedPath, "{not json");
+    const peer = await borrowPeer();
+    expect([peer.capacityProjects, peer.legacyCapacity, peer.capacity?.slots]).toEqual([[], null, { codex: 2, claude: 2 }]);
+  });
+  test("no ledger: capacity unknown, no scope", async () => {
+    writeConfig([{ ...ENTRY, projects: ["alpha", "old"] }]);
+    setBorrowViewDepsForTest({ db: () => { throw new Error("locked"); }, lendPath, schedulerPath: schedPath, now: () => NOW,
+      context: async () => ({ contacts: [{ name: "mate" }], projects: PROJECTS }), run: async () => null,
+      localQuota: async () => { throw new Error("not needed"); } });
+    const peer = await borrowPeer();
+    expect([peer.capacity, peer.capacityProjects, peer.legacyCapacity]).toEqual([null, [], null]);
+  });
+  test("an older bridge without the scope fields still reads", () => {
+    const old = { peer: "mate", maxOpen: 2, projects: ["alpha"], capacity: { peer: "mate", proto: 2, helloAt: NOW, open: 0, slots: { codex: 2, claude: 2 }, why: null },
+      reported: null, paused: null, grant: null } satisfies WebPeerView;
+    expect(peerState(old)).toBe("push");
+    expect(sortPeers([old]).map((p) => p.peer)).toEqual(["mate"]);
   });
 });
