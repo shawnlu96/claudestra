@@ -1,6 +1,6 @@
 # 团队视图 ↔ 本机协作视图 1:1 核对与实施规格（team-parity-P1）
 
-> 规格 specRev 1 · 基线 `a538824a` · 只读核代码，本页是唯一改动；产品代码一行没改。
+> 规格 specRev 1 · 基线 `a538824a` · r1 按审查修订（见 §8）· 只读核代码，本页是唯一改动；产品代码一行没改。
 > 目的：说清"同一个已授权 Feature，团队视图和本机视图哪些已经一样、哪些不一样、为什么不一样"，
 > 再把差异拆成能直接派单的小节点。差异分三种处理：缺数据就补契约；中心已经有数据就补读口和适配；
 > 权限不同的照常不开放，但要明确显示"仅主场可见"，不能用空白或 0 冒充，也不能当 bug 修。
@@ -29,8 +29,9 @@
 7. **现有截图对照会把差距掩盖掉**：`tests/web-shared-ledger-browser.test.ts` 喂给"本地"那一侧的 DAG / 产品 / 任务详情，
    也是从团队数据推出来的（`teamDagBoard`、`sharedProductBoard`、`events: [] / timeline: []`），
    本地夹具同样 `agent: null`、`metrics: {}`，所以两边截图一致不能证明 1:1。§4 用独立夹具重测了一遍。
-8. **第一批马上可以开写（不依赖 CL1、不改契约）**：P1-A（去掉误调用和假 0）、P1-B（用上已经读到的字段、
-   修掉假「今日完成」和边归属）、P1-C（真正"同一份数据双喂"的对照夹具）、P1-I（权限差异显式化）。
+8. **第一批马上可以开写（不依赖 CL1、不改契约）**：P1-A（去掉误调用、假 0 和假「今日完成」，并声明未知 / 仅主场的类型）、
+   P1-B（用上已经读到的字段、边归属改成「未记录」）、P1-C（真正"同一份数据双喂"的对照夹具）、
+   P1-I（权限差异显式化 + 脱敏事件不再显示 undefined / 假「失败」）。A、C 立刻可写，B、I 等 A 合并（类型 + 串行文件，§5.0）。
    需要 PM 拍板的是 P1-D（V1 冻结契约做只增不改的读口扩展）和 P1-G（审查计数能不能出境）。
 
 ---
@@ -64,7 +65,7 @@
 | 实时 | `followCollabEvents` → `/events?types=ledger,tool_*,agent_status,bg_task_*` | 每 5s 轮询 list，`serverSeq` 变了才发一条合成的 ledger 事件；没有 tool / agent / bg 事件 |
 | DAG 看板 | `fetchDagBoard` `/ledger/:p/dag` | `teamDagBoard()`（`team-source-dag.ts`），`agents: []` |
 | DAG 版本 | `fetchDagFeature` `/ledger/:p/dag/:f?version=` → `versions[]` + `snapshot` | `teamDagFeature()`：`versions: []`、`snapshot: null`；请求非当前版本时抛 "Shared historical snapshots are unavailable" |
-| DAG 对比 | `fetchDagDiff` | 直接抛 `'Shared version comparisons are unavailable'`（英文原文进 UI） |
+| DAG 对比 | `fetchDagDiff` | 直接抛 `'Shared version comparisons are unavailable'`；`use-dag-board.ts:88` 只 `console.warn`，叠图不出（r1 更正：英文不进 UI） |
 | 产品看板 | `fetchProductBoard` | `sharedProductBoard()`（`dag/shared-product-model.ts`），`cards: []`、`active: 0`、`eta: null` |
 | 谁在干活 | `fetchWorkBoard` `/ledger/:p/work`（`work/use-work-board.ts`，**没走注入**） | 同一路径，`p` 变成团队键 → 本机 bridge 返回 404/403，卡在重试 |
 | 上次以来 | `fetchLastSeen` / `markLastSeen` `/me/last-seen/:p`（`use-collab-extra.ts`，**没走注入**） | 同一路径用团队键：**实测** GET+PUT 都打到本机，bridge 判 `ledgerProjectExists` 后返回 404 |
@@ -88,7 +89,7 @@
 | G1 | Feature 列表、标题、描述 | `fetchLedger` → `items` | `teamOverview` → `items` 取 `f.title / f.description` | `Feature.title/description` | A | — |
 | G2 | 节点、标题、依赖、文件范围、估时 | `/ledger/:p/dag` → `BoardNode` | `teamDagBoard`：`oneLine/deps/fileGlobs/estimate` 全量；像 id 的键换成卡号 | `PlanNode` 全字段 | A | — |
 | G3 | 节点阶段 / phase | bridge 按卡的 stage 算 | `stageOf(task.stage)`，没绑卡的是 `planned` | `TaskProjection.stage` | A（别名 write→build 等有损，见 `ALIAS`） | — |
-| G4 | 依赖边：建立者 / 时间 / 状态 | `LedgerDepView.createdBy/createdAt/state` | `createdBy: f.updatedBy`、`createdAt: f.updatedAt`（feature 级冒充边级）；`state: null` | 契约里没有边元数据 | **F**（错误归属，`v4-props.tsx:105` 显示「{who} 建于…」）＋D | P1-B |
+| G4 | 依赖边：建立者 / 时间 / 状态 | `LedgerDepView.createdBy/createdAt/state` | `createdBy: f.updatedBy`、`createdAt: f.updatedAt`（feature 级冒充边级）；`state: null` | 契约里没有边元数据；`LedgerDepView.createdBy/createdAt/updatedAt` 是必填 string / number（`collab-model.ts:83-85`），`v4-props.tsx:105` 无条件 `hhmm()` | **F**（错误归属）＋D | P1-B（类型放宽为 null + 边页「未记录」） |
 | G5 | 版本历史列表（版本号、原因） | `fetchDagFeature` → `versions: VersionMeta[]` | `teamDagFeature` → `versions: []` | 已存：`dag_versions(featureId,version,data)` / `source_dag_mirrors`，`data` 含 `reason`（`commands.ts saveDag`）；`reads.ts detail()` 只取 `f.version` | **C** | P1-D→P1-E→P1-F |
 | G6 | 版本元数据：提出人 / 批准人 / 时间 / reasonKind / cancels | `VersionMeta` | 无 | `dag_versions.data` 里没有；`events(serverSeq,kind,actor,at)` 里有 `dag.init/dag.rewrite` 的 actor 代号和时间，可以按 serverSeq 关联；批准人、reasonKind 在 V1 规划模式中不存在 | C（actor / 时间）＋D / E（批准：V1 规划没有审批） | P1-E / P1-F |
 | G7 | 历史版本快照 | `?version=n` → `snapshot.nodes` | 抛 "Shared historical snapshots are unavailable" | 同 G5，中心已存 | **C** | P1-D/E/F |
@@ -106,9 +107,9 @@
 | T2 | 「现在」：阶段 + 停留时长 | `stageSince` → 「已经等了 9 小时」 | 只有「等审查 · 第 1 轮」，没有时长 | `stageSince: null`（adapter）；契约里没有 | D | P1-G/H |
 | T3 | 阶段用时条 | `timeline` → `stageSegments` | 全是「—」 | `timeline: []`；契约里没有 | D | P1-G/H |
 | T4 | 因果线（在等 / 谁在等它） | `deps` | 一致 | `PlanNode.deps` | A | — |
-| T5 | 最近 3 件事 | `events` → `recentThree` | 整块不显示 | `events: []`；中心 `source_event_mirrors` 存了 `{sourceSeq,sourceTaskId,type,at,summary=kind}` | **C**（只有类型和时间）；原文属 E | P1-D/E/F |
-| T6 | 回放这条任务 | `collab-replay*.ts` 吃 events | 不显示 | 同 T5 | C（能回放类型 / 时间轴）＋E（原文） | P1-F |
-| T7 | 审查（轮次、结论、P0/P1/P2） | `reviewRows(events)` / `lastReview` | 不显示 | 投影里只有 `events.type = "review"`，没有计数和结论 | D（计数、结论枚举）＋E（审查原文） | P1-G/H（需要 PM 定能不能出境） |
+| T5 | 最近 3 件事 | `events` → `recentThree` | 整块不显示 | `events: []`；中心 `source_event_mirrors` 存了 `{sourceSeq,sourceTaskId,type,at,summary=kind}` | **C**（只有类型和时间，按 `data.redacted` 只显示类型 + 时间）；原文属 E | P1-I（消费者）→ P1-D/E/F |
+| T6 | 回放这条任务 | `collab-replay*.ts` 吃 events | 不显示 | 同 T5 | E / D：回放要阶段证据（`collab-replay.ts` 读 `stage.data.to`），只有类型 / 时间的活动不能回放，否则全回落成 spec | P1-I（无证据不回放）→ P1-H（stage 扩展后才有） |
+| T7 | 审查（轮次、结论、P0/P1/P2） | `reviewRows(events)` / `lastReview` | 不显示 | 投影里只有 `events.type = "review"`，没有计数和结论 | D（计数、结论枚举 `pass/changes/block`）＋E（审查原文） | P1-G/H（需要 PM 定能不能出境） |
 | T8 | 参与者（执行者 / 审查员 / PM） | `agent/pm/sessions` | 「参与者」标题下是空的 | `assigneeCode`、`executorInstanceId` **已给**但被丢；审查员 / PM 没有 | B＋D | P1-B / P1-G |
 | T9 | 打开会话 / 对它说 | `CollabSay`、`sessions` | 不显示 | 对端 agent 会话不归本人 | **E** | P1-I（显示「仅主场」） |
 | T10 | 步骤线（write/review 第几轮） | `stepLine` | 没有 | `TaskProjection.steps` **已给** | B | P1-B |
@@ -126,9 +127,9 @@
 | E3 | 刚推进高亮（advance） | 比较前后 stage | 一致（同一套 `useCollab`） | — | A | — |
 | M1 | 在场 agent | registry ∩ 项目 | **固定显示 0** | 团队键对不上 registry（`collab-view.tsx members`） | **F**（应为「暂无」） | P1-A |
 | M2 | 进行中 | `metricsOf` | 一致 | — | A | — |
-| M3 | 今日完成 | `metrics.endTs ?? updatedAt` ≥ 零点（`collab-model.ts homeView.todayDone`） | `updatedAt = projection.observedAt`，`metrics: {}` → 镜像今天刷过就把所有 done 都算进去；实测因夹具 `observedAt` 早于今天显示 0（本地 4） | `team-source-adapter.ts teamOverview` | **F**（假数据）；真正修复要完成时刻（D） | P1-B（先改成暂无）→ P1-H |
-| M4 | 审查轮次 / P0P1 修掉 | `metrics.reviewRounds`、events | `unknownMetrics` → 「暂无」 | `team-source-shared.ts unknownMetrics: true` | D（已经诚实地显示暂无） | P1-H |
-| M5 | 平均等复核 | `reviewWaitPendingMs` | 「—」 | D | D | P1-H |
+| M3 | 今日完成 | `metrics.endTs ?? updatedAt` ≥ 零点（`collab-model.ts homeView.todayDone`） | `updatedAt = projection.observedAt`，`metrics: {}` → 镜像今天刷过就把所有 done 都算进去；实测因夹具 `observedAt` 早于今天显示 0（本地 4） | `team-source-adapter.ts teamOverview` | **F**（假数据）；注意 `endTs: null` 修不了：`null ?? updatedAt` 仍回落 observedAt；真正修复要完成时刻（D） | P1-A（`unknownMetrics` 暂无）→ P1-H（按覆盖率） |
+| M4 | 审查轮次 / P0P1 修掉 | `metrics.reviewRounds`、events | `unknownMetrics` → 「暂无」 | `team-source-shared.ts unknownMetrics: true` | D（已经诚实地显示暂无；但「暂无」只靠源级布尔，`metricsOf` 本身把缺省当 0） | P1-A（改成按总览给）→ P1-G/H |
+| M5 | 平均等复核 | `reviewWaitPendingMs` | 「—」（和本机"没人在等"同一个符号，混淆） | `metricsOf` 无数据即 null | D | P1-A（未知显示「暂无」）→ P1-G/H |
 | M6 | 周额度 / 协作消息 | 两边都是「暂无数据来源」 | 一致 | — | A | — |
 | M7 | 产品看板卡片计数 | `fetchProductBoard` | `sharedProductBoard` 里 `active: 0`、`cards: []`、`eta: null` | `Feature.counts` 只有 total/completed/blocked/missing | B（active 可由投影 stage 算）＋D（eta） | P1-B |
 | M8 | 已完成分页 | `ov.doneCursor` → `/ledger/:p/done` | 不带 cursor，不分页 | 团队一次全量读 | A（没有误调） | — |
@@ -193,71 +194,137 @@
 ## 5. 实施节点（验收线 3）
 
 约定：「公开」= 本仓库 shawnlu96/claudestra；「私有」= floka-ai/cloud（中心实现）。所有公开节点不得改中心存储和服务；
-节点之间 fileGlobs 不重叠；每个节点都要「旧红新绿」：先写一个能复现当前错误、在 main 上为红的测试，修完变绿。
+每个节点都要「旧红新绿」：先写一个能复现当前错误、在 main 上为红的测试，修完变绿。
+
+### 5.0 共通规则（r1 补）
+
+- **类型归属**：新字段的类型声明只在一个节点里落，其余节点只消费。`CollabSource.unavailable / homeOnly`（`team-source.ts`）
+  和 `LedgerOverview.unknownMetrics`（`collab-model.ts`）都归 P1-A；`InjectedSource extends CollabSource`
+  （`team-source-context.ts`），所以加在 `CollabSource` 上的字段注入侧自动可见，**任何节点都不需要改 `team-source-context.ts`**。
+  团队源的声明（`sharedCollabSource` 里填哪些键）也归 P1-A（`team-source-shared.ts`）。
+- **未知 ≠ 0 ≠ 空串**：本机总览的 `metricsSummary`（`src/lib/ledger-read-cards.ts`）对 0 值**省略**字段，
+  `metricsOf`（`v4/v4-model.ts`）又把缺省当 0 累加，所以"字段缺失"在本机等于 0。团队数据不能复用这个约定：
+  未知只能通过 `unknownMetrics` / `unavailable` / `homeOnly` 或类型上的 `null` 表达，不准用缺字段、`0`、`""` 冒充。
+- **重叠文件串行**：下表里的文件被多个节点改，按列出的顺序串行派单（前一个合并后，后一个 rebase 再开写），
+  不重叠的节点可并行。
+
+  | 文件 | 改它的节点（顺序） |
+  |---|---|
+  | `web/features/collab/team-source-shared.ts` | P1-A → P1-F → P1-H |
+  | `web/features/collab/collab-model.ts` | P1-A → P1-B |
+  | `web/features/collab/team-source-adapter.ts` | P1-B → P1-H |
+  | `web/features/collab/team-source-dag.ts` | P1-B → P1-F |
+  | `tests/helpers/team-parity-matrix.ts` | P1-C 建 → P1-F → P1-H（后两个只改期望值） |
+
+  事件 / 回放 / 详情的消费者（`collab-detail-model.ts`、`collab-replay*.ts`、`collab-detail.tsx`）只归 P1-I；
+  P1-F / P1-H 只改适配器产出的数据形状，不改消费者。
 
 ### 5.1 第一批 · 马上可以开写（不等 CL1，不改契约）
 
-#### P1-A · 团队视图不再误调本机接口，不显示假 0（公开 · web）
+#### P1-A · 团队视图不再误调本机接口，不显示假 0 / 假「今日完成」（公开 · web）
 
-- **范围 globs（11）**：`web/features/collab/team-source.ts`、`web/features/collab/team-source-shared.ts`、
-  `web/features/collab/collab-view.tsx`、`web/features/collab/use-collab-extra.ts`、`web/features/collab/work/use-work-board.ts`、
+- **范围 globs（14）**：`web/features/collab/team-source.ts`、`web/features/collab/team-source-shared.ts`、
+  `web/features/collab/collab-model.ts`、`web/features/collab/v4/v4-model.ts`、`web/features/collab/collab-view.tsx`、
+  `web/features/collab/v4/v4-outline.tsx`、`web/features/collab/use-collab-extra.ts`、`web/features/collab/work/use-work-board.ts`、
   `web/features/collab/work/work-board-view.tsx`、`web/features/collab/use-team-activity.ts`、`web/features/collab/team-panel.tsx`、
   `web/features/collab/dag/use-dag-panes.tsx`、`tests/web-team-parity-calls*.test.ts`、`tests/web-team-parity-metrics*.test.ts`
-- **契约字段**：`CollabSource` 增加可选项 `local?: false`（或者 `unavailable?: ReadonlySet<"lastSeen"|"workBoard"|"presence"|"ownerWaits"|"teamPanel">`）；
-  `sharedCollabSource` 声明这几项都不可用。本机源不声明，行为完全不变。
+- **契约字段（本节点声明类型，并给团队源填值）**：
+  - `CollabSource.unavailable?: ReadonlySet<"lastSeen"|"workBoard"|"presence"|"ownerWaits"|"teamPanel">`：源级、静态。
+  - `CollabSource.homeOnly?: ReadonlySet<"events.text"|"review.text"|"sessions"|"say"|"spec.full"|"replay">`：源级、静态；
+    本节点只声明类型并在 `sharedCollabSource` 里填全集，**消费在 P1-I**。
+  - `LedgerOverview.unknownMetrics?: readonly ("todayDone"|"reviewRounds"|"fixed"|"reviewWait")[]`：**按每次总览**给，
+    缺省 = 全部已知（本机 bridge 永远不发，本机行为不变）。`Metrics.todayDone` 改成 `number | null`。
+  - 删掉现有的 `CollabSource.unknownMetrics: boolean`（`team-source.ts`、`team-source-shared.ts`、`collab-view.tsx:187`），
+    团队源的 `overview()` 包一层，给返回值填 `unknownMetrics` 全集（四项都未知）。P1-H 再把它改成按覆盖率算。
+  - 本机源不声明任何一项，行为完全不变。
+- **消费者**：`collab-view.tsx` 指标条按 `unknownMetrics` 显示「暂无」（含 todayDone、平均等复核：未知显示「暂无」，
+  和本机"没人在等"显示的「—」区分）；`presence` 不可用时「在场 agent」显示「暂无」；`ownerWaits` 不可用时
+  手机顶栏（`collab-view.tsx`）和桌面大纲（`v4/v4-outline.tsx`）「待你处理」显示「暂无」，不显示 0；
+  `useLastSeen / useWorkBoard / useTeamActivity / useTeamPanel` 在对应键不可用时不发请求。
 - **读写权限**：只读；不新增任何网络请求。
 - **验收线**：注入团队源后，`/me/last-seen/*`、`/ledger/shared-ledger:*/work`、`/team/activity?project=shared-ledger:*`、
-  `/peers/contacts`、`/team/quota` 都是 0 次请求；「在场 agent」「待你处理」显示「暂无」（带 title 说明原因），不显示 0；
-  「谁在干活」标签在团队视图里隐藏，或者显示「仅主场可见」；本机视图的截图和请求序列不变。
-- **旧红新绿**：在 happy-dom 里挂 `CollabView` + 注入团队源，记录 fetch 路径。main 上能抓到 `/me/last-seen/shared-ledger:` → 红；修完 → 绿。
+  `/peers/contacts`、`/team/quota` 都是 0 次请求；「在场 agent」「待你处理」「今日完成」「审查轮次」「P0/P1 修掉」「平均等复核」
+  显示「暂无」（带 title 说明原因）；「谁在干活」标签在团队视图里隐藏，或者显示「仅主场可见」；本机视图的截图和请求序列不变。
+- **旧红新绿**：① happy-dom 里挂 `CollabView` + 注入团队源，记录 fetch 路径：main 上能抓到 `/me/last-seen/shared-ledger:` → 红。
+  ② 3 张 done 卡、`observedAt = now` 喂团队源：main 上指标条「今日完成 3」→ 红，修完「暂无」→ 绿。
+  ③ 本机源同一夹具指标条数字不变（防回归）。
 - **依赖**：无。
 
-#### P1-B · 用上读口已经给的字段，去掉假数据（公开 · web 适配层）
+#### P1-B · 用上读口已经给的字段，去掉边上的假归属（公开 · web 适配层 + 边页）
 
-- **范围 globs（7）**：`web/features/collab/team-source-adapter.ts`、`web/features/collab/team-source-dag.ts`、
+- **范围 globs（11）**：`web/features/collab/team-source-adapter.ts`、`web/features/collab/team-source-dag.ts`、
   `web/features/collab/dag/shared-product-model.ts`、`web/features/collab/team-source-steps.ts`（新建，steps → stepLine 的纯函数）、
-  `tests/web-team-source.test.ts`、`tests/web-team-source-fields*.test.ts`、`tests/web-team-source-product*.test.ts`
-- **契约字段（只读现有字段）**：`TaskProjection.assigneeCode` → `LedgerTaskView.agent`，以「成员代号」显示，加标记让详情不出现
-  「打开会话」；`steps[]`（`sourceStepId = step:round`）→ `stepLine{steps, active}`；`asks[]` → 阻塞提问数；`head` → 短 SHA；
-  `executorInstanceId` → 执行实例（像 id 的不显示原文）；`Feature.projection` + `stale()` → 总览和详情里的「镜像过期」提示；
-  `Feature.counts` 和节点算出来的进度做交叉校验，不一致时以中心 `counts` 为准并打 warn。
-- **去假数据**：边的 `createdBy/createdAt` 不再填 feature 级的值，改为空，EdgePage 显示「暂无」（改 adapter 的输出，
-  不改 `v4-props.tsx`）；`updatedAt` 继续用 observedAt，但在 `metrics` 里明确标 `endTs: null`，团队源声明 `todayDone` 未知，
-  指标条显示「暂无」（和 P1-A 共用 `unavailable` 机制，P1-B 只改 adapter / source 的输出）。
+  `web/features/collab/collab-model.ts`、`web/features/collab/v4/v4-props.tsx`、`web/features/collab/shared/team-fixture-gen.ts`、
+  `tests/web-team-source.test.ts`、`tests/web-team-source-fields*.test.ts`、`tests/web-team-source-product*.test.ts`、
+  `tests/web-collab-edge-meta*.test.ts`
+- **契约字段（只读现有字段）**：`TaskProjection.assigneeCode` → `LedgerTaskView.agent`，以「成员代号」显示（「打开会话」
+  由 P1-I 的 `homeOnly.sessions` 挡）；`steps[]`（`sourceStepId = step:round`）→ `stepLine{steps, active}`；`asks[]` → 阻塞提问数；
+  `head` → 短 SHA；`executorInstanceId` → 执行实例（像 id 的不显示原文）；`Feature.projection` + `stale()` → 总览和详情里的
+  「镜像过期」提示；`Feature.counts` 和节点算出来的进度做交叉校验，不一致时以中心 `counts` 为准并打 warn。
+- **边元数据诚实化（r1 改）**：`LedgerDepView.createdBy: string | null`、`createdAt: number | null`、`updatedAt: number | null`
+  （`collab-model.ts`；本机 bridge 照旧给值，只是类型放宽）。团队 adapter 三项都给 `null`，不再填 feature 级的
+  `updatedBy / updatedAt`。`v4-props.tsx DepBody`：任一为 `null` 时「判定依据」显示「建立者 / 时间未记录（团队数据没有边级元数据）」，
+  不调 `hhmm`（避免 `hhmm(0)` 出 1970、`hhmm(null)` 出 Invalid Date）。`team-fixture-gen.ts` 跟着改成 `null`。
+  全仓库 `LedgerDepView` 只有 `v4-props.tsx:105` 读这三个字段（`v4-selection.ts / v4-model.ts / causal-model.ts` 只用 from/to/state），
+  所以类型放宽不波及别处；`tsc` 兜底。
+- **「今日完成」**：由 P1-A 的 `unknownMetrics` 处理，本节点不再碰；`updatedAt` 继续用 observedAt（只用于排序）。
+- **DAG 历史快照报错**：`teamDagFeature` 请求非当前版本时的英文 `Error`（`team-source-dag.ts:37`）只进 console
+  （`dag/use-dag-board.ts:57`），界面上版本页停在「加载中」——真正的修复在 P1-F（有读口时返回快照，没读口时版本页显示「暂无」），
+  本节点不改这行。
 - **读写权限**：只读。
-- **验收线**：同一个夹具下团队详情显示负责人代号、步骤线、阻塞提问数、镜像状态；「今日完成」显示「暂无」，不再按 observedAt 计数；
-  边页不再把 feature 修改人当成边的建立者；没有 UUID 被当成标题（沿用 `looksLikeId`）。
-- **旧红新绿**：`teamOverview` 单测：给 3 张 done 的卡、`observedAt = now`，main 上算出 `todayDone = 3` → 红，修完是「未知」→ 绿；
-  `assigneeCode` 在 main 上被丢 → 红。
-- **依赖**：P1-A 的 `unavailable` 键（只依赖类型，可以并行，最后合并时按 P1-A → P1-B 的顺序）。
+- **验收线**：同一个夹具下团队详情显示负责人代号、步骤线、阻塞提问数、镜像状态；边页显示「建立者 / 时间未记录」，
+  不出现 feature 修改人、空名字、1970 或 Invalid Date；本机边页文字不变；没有 UUID 被当成标题（沿用 `looksLikeId`）。
+- **旧红新绿**：`teamOverview` 单测：`assigneeCode` 在 main 上被丢 → 红；边 `createdBy === f.updatedBy` 在 main 上成立 → 红，
+  修完为 `null` → 绿；`DepBody` 渲染 `createdAt: null` 的边不含 "1970" / "Invalid" → 绿。
+- **依赖**：P1-A（`collab-model.ts` 串行，A 先）。
 
 #### P1-C · 真正"同一份数据双喂"的对照夹具（公开 · 测试）
 
-- **范围 globs（6）**：`web/features/collab/shared/team-fixture-gen.ts`、`web/features/collab/shared/fixture-harness.tsx`、
-  `web/features/collab/shared/home-fixture-gen.ts`（新建）、`tests/web-shared-ledger-browser.test.ts`、
+- **范围 globs（6）**：`web/features/collab/shared/fixture-harness.tsx`、`web/features/collab/shared/home-fixture-gen.ts`（新建）、
+  `web/features/collab/shared/home-to-team-fixture.ts`（新建）、`tests/web-shared-ledger-browser.test.ts`、
   `tests/web-team-parity-browser*.test.ts`、`tests/helpers/team-parity-matrix.ts`
-- **契约字段**：夹具从**一份本机台账形状的数据**出发（`LedgerOverview` + 每张卡的 `TaskDetail`，events 带完整的 `data`，
-  再加 DAG 的 `versions[]`），用一个和 `mirrorTaskProjections` 字段规则相同的纯函数推出 `FeatureDetail`。
-  本地路由只返回本地数据，**不准再用 `teamDagBoard` / `sharedProductBoard` 喂本地**。
+- **契约字段**：夹具从**一份本机台账形状的数据**出发（`LedgerOverview` + 每张卡的 `TaskDetail`，events 按 `LedgerEventView`
+  带完整的 `data`：stage 的 `from/to`、review 的 `round/verdict/p0..p2`、verify 的 `result`；再加 DAG 的 `versions[]`），
+  用一个和 `mirrorTaskProjections` 字段规则相同的纯函数推出 `FeatureDetail`。审查结论至少各有一条 `pass / changes / block`。
+  本地路由只返回本地数据，**不准再用 `teamDagBoard` / `sharedProductBoard` 喂本地**。（`team-fixture-gen.ts` 归 P1-B，本节点不改。）
 - **读写权限**：只在测试进程里起回环服务器；截图目录由环境变量指定，不进 git。
 - **验收线**：1200 / 390 × 浅 / 深 × 本地 / 团队，首页、任务详情（手机先进 feature 再点卡）、版本页、对比页、谁在干活、团队标签各一张；
-  每个区块输出 `{section, local: present|absent, team: present|absent|home_only}`，和 `team-parity-matrix.ts` 里写死的期望矩阵
-  （就是本页 §3 的 A–F 分类）逐项比对。之后每补一个节点，只能把对应项从 absent 改成 present，不能悄悄改期望。
+  每个区块输出 `{section, local: present|absent, team: present|absent|home_only|unknown}`，和 `team-parity-matrix.ts` 里写死的期望矩阵
+  （就是本页 §3 的 A–F 分类）逐项比对。之后每补一个节点，只能把对应项往 present 方向改，不能悄悄改期望。
 - **旧红新绿**：把现有的「本地 DAG 由 teamDagBoard 生成」改掉之后，矩阵检查能抓到 T3 / T5 / T7 的差异（在 main 的
   harness 下这些差异看不到）。
-- **依赖**：无（可以和 A / B 并行；A / B 合并后更新期望矩阵）。
+- **依赖**：无（可以和 A / B / I 并行；它们合并后更新期望矩阵）。
 
-#### P1-I · 权限差异显式化（公开 · web 视图）
+#### P1-I · 权限差异显式化 + 脱敏事件的诚实渲染（公开 · web 视图）
 
-- **范围 globs（5）**：`web/features/collab/collab-detail.tsx`、`web/features/collab/collab-detail-model.ts`、
-  `web/features/collab/collab-i18n.ts`、`web/lib/i18n-dict-shared-ledger.ts`、`tests/web-team-parity-home-only*.test.ts`
-- **契约字段**：`InjectedSource` 增加 `homeOnly?: ReadonlySet<"events.text"|"review.text"|"sessions"|"say"|"spec.full">`。
-  对应区块显示「仅主场可见」占位，不是整块消失。DAG 对比的英文报错改成 i18n 文案。
+- **范围 globs（9）**：`web/features/collab/collab-detail.tsx`、`web/features/collab/collab-detail-model.ts`、
+  `web/features/collab/collab-replay.ts`、`web/features/collab/collab-replay-player.tsx`、`web/features/collab/collab-i18n.ts`、
+  `web/lib/i18n-dict-shared-ledger.ts`、`tests/web-team-parity-home-only*.test.ts`、`tests/web-collab-redacted-events*.test.ts`、
+  `tests/web-collab-replay-evidence*.test.ts`
+- **契约字段（只消费，类型在 P1-A）**：`source.homeOnly`。对应区块显示「仅主场可见」占位，不是整块消失：
+  「最近 3 件事」原文、「审查」原文、「参与者 · 打开会话」「对它说」、规格全文、回放（`replay`）。
+- **脱敏事件约定（r1 新增，供 P1-F 使用）**：`LedgerEventView.data.redacted === true` 表示"只有类型和时间，其余字段不出境"。
+  消费者规则：
+  - `eventLine`：`redacted` 时不读 `data.*`，只输出类型名 + 「（详情仅主场）」：stage → 「推进阶段（目标阶段仅主场）」、
+    verify → 「线上验证（结果仅主场）」、review → 「审查（结论仅主场）」、deliver / deploy / rollback 同理；
+    非 `redacted` 但缺字段时也不再拼 `undefined`：stage 缺 `to` → 「推进阶段」，review 缺 `verdict` → 「审查」不带结论，
+    verify 的 `result` 不是 `pass/unknown/fail` 之一 → 「线上验证（结果未记录）」，**不再默认成「失败」**。
+  - `reviewRows` / `participants`：跳过 `redacted` 的 review（审查区块显示「仅主场」占位，不出空行）。
+  - `replayFrames`：初始阶段只在有证据时定（`task:new` 的 `patch.stage`）；没有证据前 `ReplayFrame.stage = null`
+    （类型改 `Stage | null`），`stage` 事件缺 `to` 时阶段保持不变而不是回落 `spec`；新增 `hasStageEvidence(events)`，
+    `hasReplay` 在没有任何阶段证据时返回 false，回放按钮位置显示「回放仅主场」（`homeOnly.replay`）。
+    `collab-replay-player.tsx` 对 `stage: null` 的帧阶段条画成「阶段未知」。
 - **读写权限**：只读。
-- **验收线**：团队详情里「最近 3 件事」「审查」「参与者 · 打开会话」在没有数据时显示「仅主场可见 / 暂无」，有可出境数据时
-  （P1-F / P1-H 之后）显示数据但不显示原文；本机视图不变。
-- **旧红新绿**：main 上团队详情没有「审查」区块（整块隐藏）→ 断言占位存在 → 红；修完 → 绿。
-- **依赖**：无（文案和 P1-A 的「暂无」统一）。
+- **验收线**：团队详情里「最近 3 件事」「审查」「参与者 · 打开会话」「回放」在没有数据时显示「仅主场可见 / 暂无」；
+  有可出境数据时（P1-F / P1-H 之后）显示数据但不显示原文；本机视图（events 都带完整 data）文案和帧序列逐字不变。
+- **旧红新绿**（纯函数，喂 `text:""` 的事件）：
+  - `eventLine({kind:"verify", data:{result:"pass"}})` 在 main 上为「线上验证通过」（防回归，绿）；
+    `eventLine({kind:"verify", data:{redacted:true}})` main 上「线上验证失败」→ 红，修完「线上验证（结果仅主场）」→ 绿；
+  - `eventLine({kind:"stage", data:{}})` main 上「推到『undefined』」→ 红；
+  - `eventLine({kind:"review", data:{}})` main 上「第 ? 轮：undefined · P0 ? …」→ 红；
+  - `replayFrames` 喂三条 `redacted` 事件：main 上 `stage` 全是 `"spec"` → 红，修完全为 `null` 且 `hasReplay === false` → 绿；
+  - 本机完整事件夹具（现有 `tests/web-collab-since.test.ts` 回放一节）保持绿。
+- **依赖**：P1-A（只依赖 `homeOnly` 类型；可以先按类型并行写，合并按 A → I）。
 
 ### 5.2 第二批 · 读口契约（公开协议投影 / 共享读 API）
 
@@ -272,13 +339,13 @@
   - `GET /v1/teams/{team}/features/{id}/versions` → `{schemaVersion:1, teamId, serverSeq, versions: {version, reason, nodes, bindings, at: number|null, by: string|null}[]}`；
     `by` 是成员代号（`actorCode`），不是人名。
   - `GET /v1/teams/{team}/features/{id}/activity/{afterServerSeq}` → `{serverSeq, items: ({src:"center", serverSeq, kind, by, at} | {src:"home", sourceSeq, taskId, type, at})[], truncated}`；
-    `taskId` 是中心 id；**不含任何原文**（投影上来的 `summary` 本身就等于 kind）。
+    `taskId` 是中心 id；**不含任何原文**（投影上来的 `summary` 本身就等于 kind，`shared-ledger-projector.ts:128`）。
   - capabilities 新增 `read.versions`、`read.activity`（`enabled:false` 时 web 退回现状）。
   - 路径参数不用 query：现有代理遇到 `new URL(req.url).search` 一律 400。`actionFor` 的正则只放行上面两条 `read`。
 - **读写权限**：read grant，和 `features/{id}` 同一道门；跨项目一律 403，响应体相同（沿用 X12 §3.1 的原则）。
 - **验收线**：代理对这两条路径按 `read` 选凭据、按 projectId 过滤；老中心（没有 capability）时 web 不发请求；
   响应解析器拒收多余字段；改 `shared-ledger-gate-proxy.ts` 时按 CLAUDE.md 的规定在 baseline 里留 `raised[]` 记录。
-- **旧红新绿**：main 上代理对 `features/x/versions` 返回 400 → 红；修完 → 绿。客户端解析器对带 `text` 字段的 activity 拒收（绿，防止原文漏出）。
+- **旧红新绿**：main 上代理对 `features/x/versions` 返回 400 → 红；修完 → 绿。客户端解析器对带 `text` / `data` 字段的 activity 拒收（绿，防止原文漏出）。
 - **依赖**：**PM 批准在冻结的 V1 上做只增不改的扩展**（class=design；默认做法：新文件 + capability 门控，不改已有类型）。不依赖 CL1。
 
 #### P1-E · 中心实现版本 / 活动读口（**私有 floka-ai/cloud**）
@@ -292,63 +359,117 @@
 
 #### P1-F · 团队视图用上版本 / 活动（公开 · 共用 UI 适配层）
 
-- **范围 globs（6）**：`web/features/collab/team-source-history.ts`（新建）、`web/features/collab/team-source-dag.ts`、
-  `web/features/collab/team-source-shared.ts`、`web/features/collab/dag/dag-diff.ts`、`tests/web-team-source-history*.test.ts`、
-  `tests/web-team-source-activity*.test.ts`
+- **范围 globs（8）**：`web/features/collab/team-source-history.ts`（新建）、`web/features/collab/team-source-dag.ts`、
+  `web/features/collab/team-source-shared.ts`、`web/features/collab/dag/dag-diff.ts`、`web/features/collab/dag/use-dag-board.ts`、
+  `tests/web-team-source-history*.test.ts`、`tests/web-team-source-activity*.test.ts`、`tests/helpers/team-parity-matrix.ts`（只改期望值）
 - **契约字段**：`versions` → `VersionMeta{version, reasonKind: v1 ? "initial" : "requirement_change", reasonText: reason, proposedBy: by ?? "", approvedBy: null, createdAt: at ?? 0, cancels: [], scopeChange:false, askId:null}`。
-  `reasonKind` 不是中心给的，UI 上标「类型未记录」，不能把映射值当成事实显示。
+  `reasonKind` 不是中心给的，UI 上标「类型未记录」，不能把映射值当成事实显示；`at === null` 时版本页时间显示「未记录」（不显示 1970）。
   `snapshot` 从对应版本的 nodes 生成；对比用两份快照在前端算（新增纯函数，产出 `DagDiffResponse` 形状）。
-  `activity` → `TaskDetail.events{kind:type, text:"", actor: by|"主场", data:{}}`，给「最近 3 件事」和回放用（只有类型 / 时间）。
-- **读写权限**：只读；capability 关着时保持 P1-I 的「暂无」。
-- **验收线**：P1-C 矩阵里 G5 / G7 / G8 / T5 / T6 从 absent 变成 present（原文仍然是 home_only）；不出现 "unavailable" 英文。
+  capability 关着时：版本页显示「团队暂无历史版本」而不是一直「加载中」（`use-dag-board.ts` 识别团队源的"不可用"结果），
+  英文 `Error` 不再抛。
+- **活动 → 事件（r1 改）**：`activity` → `TaskDetail.events{seq, ts: at, kind: type, text: "", actor: by ?? "主场", data: {redacted: true}}`，
+  **一律带 `redacted: true`，不伪造 `to / result / verdict`**；按 P1-I 的消费者规则只显示「类型 + 时间 + 详情仅主场」。
+  「最近 3 件事」因此从 absent 变 present（类型 / 时间级），**回放仍是 home_only**：没有阶段证据，`hasReplay` 为 false，
+  不会回放成 spec；等 P1-H 提供 stage `{from,to}` 后才有回放。
+- **读写权限**：只读；capability 关着时保持 P1-I 的「暂无 / 仅主场」。
+- **验收线**：P1-C 矩阵里 G5 / G7 / G8 / T5（类型 / 时间级）从 absent 变成 present，T6 保持 home_only；
+  事件行里不出现 "undefined"、「线上验证失败」（除非数据确实是失败）；不出现 "unavailable" 英文；版本页不卡「加载中」。
 - **旧红新绿**：`teamDagFeature(board, id, 1)` 在 main 上抛错 → 红；有 versions 时返回快照 → 绿。
-- **依赖**：P1-D（类型）；联调依赖 P1-E。写代码和单测可以用假数据先行，**不用等 CL1**。
+  活动适配：一条 `type:"verify"` 的 activity 经 adapter → `recentThree` 的文字不含「失败」→ 绿（main 上无此路径，先写断言为红）。
+- **依赖**：P1-D（类型）、P1-I（脱敏事件消费者规则，**必须先合并**，否则会出现 r0 审查里的 undefined / 失败）、
+  P1-B（`team-source-dag.ts` 串行）、P1-A（`team-source-shared.ts` 串行）；联调依赖 P1-E。写代码和单测可以用假数据先行，**不用等 CL1**。
 
 ### 5.3 第三批 · 投影契约扩展（需要 owner / PM 定出境范围）
 
-#### P1-G · 投影可选字段：时间线 / 完成时刻 / 轮次 / 审查计数（公开导出端 + 私有中心）
+#### P1-G · 投影可选字段：时间线 / 完成时刻 / 轮次 / 审查计数 / 指标（公开导出端 + 私有中心）
 
 - **公开范围 globs（10）**：`src/lib/shared-ledger-contract-projection-ext.ts`（新建）、`src/lib/shared-ledger-contract-transfer.ts`、
   `src/lib/shared-ledger-projector.ts`、`src/lib/shared-ledger-export.ts`、`src/lib/shared-ledger-scrub.ts`、
   `src/lib/shared-ledger-mirror.ts`、`tests/shared-ledger-projector-ext*.test.ts`、`tests/shared-ledger-client-scrub-ext*.test.ts`、
   `tests/shared-ledger-export-ext*.test.ts`、`tests/shared-ledger-mirror-ext*.test.ts`
-- **契约字段（全部可选；只有中心 capability `projection.ext1` 开着才发）**：
-  `TaskProjectionExt{stageSince:number|null, completedAt:number|null, round:number, timeline:{stage, from, to}[], reviews:{round, verdict:"pass"|"changes"|"reject", p0, p1, p2, at}[]}`，
-  事件扩展 `stage` 类型带 `{from, to}`（只用阶段枚举）。**不含任何自由文本**。
-- **出境闸**：所有字段都过 `scrubSharedLedger`（数字 / 枚举也走一遍，防止出现未知字段）；mirror entry 上新增显式开关
+- **契约字段（全部可选；只有中心 capability `projection.ext1` 开着 **且** 该 mirror entry 的 `ext1Consent` 开着才发）**：
+  ```
+  TaskProjection.ext1?: {
+    stageSince: number | null;
+    timeline: { stage: Stage; from: number; to: number }[];
+    reviews: { round: number; verdict: "pass" | "changes" | "block" | null; p0: number; p1: number; p2: number; at: number }[];
+    metrics: { startTs: number | null; endTs: number | null; reviewRounds: number;
+               p0: number; p1: number; p2: number; reviewWaitSince: number | null };
+  }
+  事件扩展：type="stage" 带 {from: Stage, to: Stage}；type="review" 带 {round, verdict, p0, p1, p2}；
+           type="verify" 带 {result: "pass"|"fail"|"unknown"}（只枚举）
+  ```
+  - `verdict` **沿用本机真实枚举 `pass|changes|block`**（`src/lib/ledger-steps.ts:47` 的 CHECK、`collab-step-line-model.ts:30,97`、
+    `collab-detail-model.ts` 的 `VERDICT`），不引入 `reject`，不做转换；本机事件里不在这三个值里的结论投成 `null`（UI 显示「审查」不带结论）。
+  - `metrics` **直接由导出端调用本机同一个 `taskMetrics()`（`src/lib/ledger-metrics.ts`）算**，保证同数据同数字：
+    `reviewRounds = reviews.length`、`p0/p1/p2` 为各轮之和、`endTs` 即完成时刻；`reviewWaitSince = now - reviewWaitPendingMs`
+    （传绝对时刻，接收端按自己的 now 重算 pending，避免镜像延迟把等待时长冻住）。
+  - `ext1` 是"每张卡要么整块有、要么整块没有"：有 `ext1` 时其中 `null` 表示"本机也没有"（如未完成的 `endTs`），
+    没有 `ext1` 表示"没授权 / 老镜像 / 老导出端"，**语义是未知，不是 0**。**不含任何自由文本**。
+- **出境闸**：所有字段都过 `scrubSharedLedger`（数字 / 枚举也走一遍，枚举外的值拒收）；mirror entry 上新增显式开关
   `ext1Consent`（默认关，开启走现有导出预检，`shared-ledger-export.ts` 的 refusal 报告列出新字段）。不开 → 和现在完全一样，
   **现有的公开数据不降级**。
-- **私有部分**：中心接收和存储扩展字段、`detail()` 在 `capabilities` 开着时回传（floka-ai/cloud，依赖 CL1）。
+- **私有部分**：中心接收和存储 `ext1`、`detail()` 在 capability 开着时**按卡原样回传**（没收到的卡不补默认值）
+  （floka-ai/cloud，依赖 CL1）。
 - **验收线**：没有 capability 时发出的包和 main 上逐字节一致（快照测试）；有 capability 但没有 consent 时也一致；
-  两者都开时只多出上面这些字段；scrub 遇到夹带文本的 review 拒收。
-- **旧红新绿**：投影快照测试，main 上没有 `timeline` → 新断言红；开 consent 后变绿；未开时的快照保持绿（防降级）。
+  两者都开时只多出 `ext1` 和事件扩展；scrub 遇到夹带文本或 `reject` 等枚举外值的 review 拒收。
+- **旧红新绿**：投影快照测试，main 上没有 `ext1` → 新断言红；开 consent 后变绿；未开时的快照保持绿（防降级）。
+  **block 回归**：本机一条 `verdict:"block"`、`p0:1` 的 review → 投影 → 客户端解析（`shared-ledger-contract-transfer.ts`）
+  → 结果仍是 `block`、`p0 = 1`（P1-H 接着验到 UI）。
 - **依赖**：**owner / PM 决定审查结论和 P0/P1/P2 计数能不能出境**（class=design；默认：只出枚举和计数，原文永远 home_only）；
   中心那一半依赖 CL1 + P1-E 的部署通道。公开导出端可以先合并（capability 默认关，等于不生效）。
 
 #### P1-H · 团队视图用上扩展字段（公开 · 共用 UI 适配层）
 
-- **范围 globs（4）**：`web/features/collab/team-source-adapter.ts`、`web/features/collab/team-source-shared.ts`、
-  `tests/web-team-source-ext*.test.ts`、`tests/helpers/team-parity-matrix.ts`（只更新期望值）
-- **契约字段**：`stageSince/completedAt/round/timeline/reviews` → `LedgerTaskView.stageSince/metrics.endTs/round/lastReview`、
-  `TaskDetail.timeline`、`events(kind:"review", data:{round, verdict, p0, p1, p2})`；`unknownMetrics` 只在 capability 关着时为 true。
-- **验收线**：矩阵里 T2 / T3 / T7（计数）/ M3 / M4 / M5 变成 present；审查原文仍然是 home_only。
-- **依赖**：P1-G（公开部分）；联调依赖私有中心。
-- **和 P1-B 的冲突**：两个节点都改 `team-source-adapter.ts`，按顺序串行（P1-B 先），不并行派。
+- **范围 globs（6）**：`web/features/collab/team-source-adapter.ts`、`web/features/collab/team-source-shared.ts`、
+  `web/features/collab/team-source-metrics.ts`（新建，覆盖率 / 聚合纯函数）、`tests/web-team-source-ext*.test.ts`、
+  `tests/web-team-source-ext-metrics*.test.ts`、`tests/helpers/team-parity-matrix.ts`（只更新期望值）
+- **字段映射（逐项，r1 补全）**：
+
+  | 本机消费字段 | 来源（只在该卡有 `ext1` 时填） | 没有 `ext1` 时 |
+  |---|---|---|
+  | `LedgerTaskView.stageSince` | `ext1.stageSince` | `null`（显示无时长，现状） |
+  | `TaskDetail.timeline` | `ext1.timeline` | `[]`（用时条「—」，现状） |
+  | `metrics.endTs` | `ext1.metrics.endTs` | 不填 |
+  | `metrics.reviewRounds / p0 / p1 / p2` | `ext1.metrics.*` | 不填 |
+  | `metrics.reviewWaitPendingMs` | `reviewWaitSince === null ? null : now - reviewWaitSince` | 不填 |
+  | `lastReview` | `ext1.reviews` 最后一条（`text: ""`，原文 home_only） | `null` |
+  | `TaskDetail.events` 的 stage / review / verify | 事件扩展字段（`data.to / verdict / result`），**不带 `redacted`** | P1-F 的 `redacted: true` |
+
+- **按覆盖率给 `unknownMetrics`（r1 改：不再"capability 开就全知"）**：对本次总览里的卡逐张判断有没有 `ext1`：
+  - `reviewRounds` / `fixed`：参与求和的卡（`fixed` 只看合并及以后的卡）**全部**有 `ext1` 才已知，否则列入 `unknownMetrics`；
+  - `todayDone`：所有 done / verified 卡都有 `ext1` 且 `metrics.endTs` 是数字才已知；有一张缺就未知
+    （不能退回按 `observedAt` 算）；
+  - `reviewWait`：所有 review 阶段的卡都有 `ext1` 才已知；已知且没人在等 → 「—」，未知 → 「暂无」；
+  - capability 关、或 capability 开但该 feature 没 consent → 每张卡都没有 `ext1` → 四项全未知，和 P1-A 之后的现状逐字一致。
+  - 指标条 title 写覆盖率（如「12 / 15 张卡有扩展数据」），不显示部分和冒充总数。
+- **验收线**：矩阵里 T2 / T3 / T6（有 stage 扩展时）/ T7（计数和结论）/ M3 / M4 / M5 只在对应卡有 `ext1` 时变成 present；
+  审查原文仍然是 home_only；同一份 P1-C 夹具（含 `block`）团队侧与本机侧的审查结论、轮次、P0/P1、今日完成数字相同。
+- **旧红新绿**（三类覆盖 + 枚举）：
+  - capability 开、consent 关（卡上都没 `ext1`）：按 r0 规则会把 `unknownMetrics` 清空、`metricsOf` 把缺省累加成 0 → 红；
+    新规则四项「暂无」→ 绿；
+  - 老卡 / 新卡混合（2 张有 `ext1`、1 张没有）：`reviewRounds` 未知、title 显示 2 / 3 → 绿；
+  - 全部有 `ext1` 且含审查数据（`round 2, p0 1, p1 2`）：`metricsOf` 结果和本机同夹具相同（`reviewRounds`、`fixed` 非 0）→ 绿；
+  - 源审查为 `block`：适配后 `eventLine` 显示「拦下」、`reviewRows[].verdict === "block"`、`lastReview.verdict === "block"` → 绿。
+    （步骤线的结论来自 V1 `steps`，那里只有 `state` 没有 verdict，仍显示无结论——列为已知差异，不在本节点伪造。）
+- **依赖**：P1-G（公开部分）、P1-B（`team-source-adapter.ts` 串行，B 先）、P1-F（`team-source-shared.ts` 串行，F 先）；
+  联调依赖私有中心。
 
 ### 5.4 依赖图与真实阻塞
 
 ```
-P1-A ─┐
-P1-B ─┼─(合并后更新矩阵)─ P1-C
-P1-I ─┘
-P1-D ──(PM 批准只增扩展)──► P1-F（可以用假数据先行）
+P1-A ──► P1-B（collab-model.ts 串行）
+  └────► P1-I（homeOnly 类型）
+P1-C（并行；A/B/I 合并后更新矩阵）
+P1-D ──(PM 批准只增扩展)──► P1-F（还需 P1-I、P1-B、P1-A 已合并；可以用假数据先行）
   └──► P1-E [私有 floka-ai/cloud，前置 CL1 gitlink] ──► P1-F 联调
-P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-H
+P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-H（还需 P1-B、P1-F 已合并）
   └── 中心一半 [私有，前置 CL1]
 ```
 
 真实阻塞只有三处：**① PM 批准在 V1 冻结契约上做只增扩展（P1-D）；② owner / PM 定审查计数是否出境（P1-G）；
-③ 私有中心的实现和部署（P1-E、P1-G 中心一半，前置 CL1）**。P1-A / B / C / I 不受任何一处阻塞。
+③ 私有中心的实现和部署（P1-E、P1-G 中心一半，前置 CL1）**。P1-A / C 马上可写；P1-B / I 只等 P1-A 合并（类型和串行文件），
+不受三处真实阻塞影响。
 
 ---
 
@@ -370,6 +491,18 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-H
 |---|---|---|
 | 1 逐项对照 + 文件符号 / 契约证据 | §2、§3（47 行，分 A–F） | 完成；每行都有代码证据，不只依据设计注释 |
 | 2 隔离合成同数据、1200 / 390、深浅、前后截图 | §4 | 部分完成：桌面首页 + 详情、手机首页已实测；手机详情、版本 / 对比、谁在干活 / 团队标签**没有验证**，已经写明；截图没上传 |
-| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：8 个节点（4 个马上可写，1 个私有） |
+| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：9 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 14（P1-A） |
 | 4 沿用闸门、不降级、原文不出境 | §6 | 完成 |
 | 5 完整方案 + 覆盖矩阵 + 第一批 + 真实阻塞 | §0、§3、§5.1、§5.4 | 完成 |
+
+---
+
+## 8. r1 修订记录（对应上一轮审查 lend:team-parity-P1:s1:r1:a0）
+
+| 审查项 | 问题 | 本版怎么改 |
+|---|---|---|
+| activity-shape | P1-F 把活动映射成 `text:"", data:{}`，`eventLine` 出 "undefined" / 把成功 verify 显示成「失败」，`replayFrames` 全回落 spec | 新约定 `data.redacted: true`（P1-I 定义消费者规则：只显示类型 + 时间 +「详情仅主场」；缺 `to / verdict / result` 时不拼 undefined、不默认失败；无阶段证据 `stage = null`、`hasReplay = false`）。P1-F 必须在 P1-I 之后合并，T6 改为 home_only 直到 P1-H 的 stage 扩展。补了成功 verify / 缺 to 的 stage / 缺 verdict 的 review / 纯脱敏回放四条旧红新绿（§5.1 P1-I）。 |
+| optional-metrics | capability 开、consent 关时把未知变成 0；扩展只映射 endTs / lastReview，没有 reviewRounds / p0 / p1 / reviewWait 来源 | `unknownMetrics` 从源级布尔改成每次总览给的列表（P1-A 定义）；P1-G 的 `ext1.metrics` 由导出端直接调本机 `taskMetrics()` 算，给齐 `endTs / reviewRounds / p0..p2 / reviewWaitSince`；P1-H 逐字段映射表 + 按覆盖率判定已知 / 未知（有一张参与求和的卡缺 `ext1` 就「暂无」，不回落 observedAt）。补了 consent 关 / 新老混合 / 有审查数据三类测试。 |
+| node-scope | P1-B 置空边元数据违反必填类型且 `v4-props.tsx` 不在范围；P1-I 要扩 `InjectedSource` 却不含定义文件；todayDone 未知不在 A 的键里 | §5.0 写明类型归属：`unavailable / homeOnly` 加在 `CollabSource`（`team-source.ts`，P1-A），注入侧经 `extends` 自动可见，不需要改 `team-source-context.ts`；`todayDone` 进 P1-A 的 `unknownMetrics`。P1-B 范围加入 `collab-model.ts`（边元数据放宽为 `null`）、`v4-props.tsx`（显示「未记录」不调 `hhmm`）、`team-fixture-gen.ts`。新增重叠文件串行表；各节点 globs ≤ 14。另更正：DAG 对比 / 历史快照的英文报错只进 console，界面是版本页卡「加载中」，归 P1-F 修。 |
+| review-enum | `verdict` 写成 `pass|changes|reject`，和真实 `pass|changes|block` 不符 | 改用真实枚举 `pass|changes|block|null`，不做转换；scrub 拒收枚举外值；P1-G / P1-H 各补一条 `block` 从投影 → 解析 → 适配 → UI 的回归。 |
+
