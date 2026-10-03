@@ -44,18 +44,26 @@ export function useSheetHistory(open: boolean, push: boolean, id: string, onClos
     hold.current = null;
     claim(live.current);
   };
-  useEffect(() => h.onPop(() => {
-    if (pendingBacks.current > 0) {
-      pendingBacks.current--;
-      return release();
-    }
-    if (!owned.current || h.hash() === owned.current) return;
-    owned.current = null;
-    if (live.current.open) live.current.onClose();
-  })); // 每次渲染重挂：闭包里的 release / claim 总是最新的
+  const onPop = useRef(() => {});
+  useEffect(() => {
+    onPop.current = () => {
+      if (pendingBacks.current > 0) {
+        pendingBacks.current--;
+        return release();
+      }
+      if (!owned.current || h.hash() === owned.current) return;
+      owned.current = null;
+      if (live.current.open) live.current.onClose();
+    };
+  });
+  // 监听只挂一次、经 ref 调最新处理：别的 popstate 监听先触发渲染时，派发途中被摘掉的监听这次就收不到（DOM 规则）
+  useEffect(() => h.onPop(() => onPop.current()), [h]);
   useEffect(() => () => { if (hold.current) clearTimeout(hold.current); }, []);
   useEffect(() => {
     if (hold.current) return; // 等自己的 back 落地再对账
+    // 自己的条目被返回带走了（hash 已不是它）：交给 popstate 收起。别的 popstate 监听（chat.tsx）会先触发一次渲染，
+    // 这时这里若照常认领，会把刚退掉的条目又压回去，左滑看着像弹回（tests/web-dom-collab-sheet-history.test.ts）
+    if (open && owned.current !== null && h.hash() !== owned.current) return;
     if (open) return claim({ open, push, id });
     const mine = owned.current !== null && h.hash() === owned.current;
     owned.current = null;

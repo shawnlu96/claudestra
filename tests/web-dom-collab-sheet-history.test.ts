@@ -32,28 +32,35 @@ type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
+let flushSync: (f: () => void) => void;
 
 beforeAll(() => {
   GlobalRegistrator.register({ url: "http://localhost/" });
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
+  ({ flushSync } = webRequire("react-dom") as { flushSync: (f: () => void) => void });
 });
 afterAll(async () => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   await GlobalRegistrator.unregister();
 });
 
-interface Ctl { sel: string | null; setSel(s: string | null): void; setNarrow(n: boolean): void; prepare(id: string): void }
-/** 和 collab-view 同一种接法：成员页的 × 回团队，其余 × 收起 */
-async function mount(initialNarrow = true, hp: HistoryPort = port) {
+interface Ctl { sel: string | null; setSel(s: string | null): void; setNarrow(n: boolean): void; prepare(id: string): void; bump(): void }
+/**
+ * 和 collab-view 同一种接法：成员页的 × 回团队，其余 × 收起。
+ * shell = 先挂一个 popstate 监听、回调里同步渲染一次（同 chat.tsx 的监听先于整屏页、setState 先触发渲染）。
+ */
+async function mount(initialNarrow = true, hp: HistoryPort = port, shell = false) {
   const ctl = {} as Ctl;
+  const offShell = shell ? hp.onPop(() => flushSync(() => ctl.bump())) : () => {};
   function Harness() {
+    const [, setTick] = React.useState(0);
     const [sel, setSel] = React.useState<string | null>(null);
     const [narrow, setNarrow] = React.useState(initialNarrow);
     const close = () => setSel((s) => (s === "member" ? "team" : null));
     const prepare = useSheetHistory(sel !== null, narrow, `~${sel ?? ""}`, close, hp);
-    Object.assign(ctl, { sel, setSel, setNarrow, prepare });
+    Object.assign(ctl, { sel, setSel, setNarrow, prepare, bump: () => setTick((n) => n + 1) });
     return null;
   }
   const host = doc().createElement("div");
@@ -61,7 +68,7 @@ async function mount(initialNarrow = true, hp: HistoryPort = port) {
   const root = createRoot(host as never);
   await React.act(async () => root.render(React.createElement(Harness)));
   const act = (f: () => void | Promise<void>) => React.act(async () => { await f(); });
-  return { ctl, act, unmount: () => React.act(async () => root.unmount()) };
+  return { ctl, act, unmount: () => { offShell(); return React.act(async () => root.unmount()); } };
 }
 
 const hash = () => win().location.hash;
@@ -157,6 +164,29 @@ describe("整屏页历史条目", () => {
     await act(() => c.flush());
     expect(ctl.sel).toBeNull();
     expect(c.live()).toEqual(["#chat"]);
+    await unmount();
+  });
+
+  test("别的 popstate 监听先触发渲染（chat.tsx）：系统返回照样收起，不把刚退掉的条目压回去（iPhone 左滑弹回）", async () => {
+    await reset();
+    const { ctl, act, unmount } = await mount(true, port, true);
+    await act(() => { ctl.prepare("~team"); ctl.setSel("team"); });
+    expect(hash()).toBe("#chat?collab=~team");
+    await back(act);
+    expect(ctl.sel).toBeNull();
+    expect(hash()).toBe("#chat");
+    await unmount();
+  });
+
+  test("同上，叠加自己的 back 在途时打开另一层：旧 popstate 落地后新层保留、只压一条", async () => {
+    const c = controlled();
+    const { ctl, act, unmount } = await mount(true, c.port, true);
+    await act(() => ctl.setSel("team"));
+    await act(() => ctl.setSel(null));
+    await act(() => { ctl.prepare("~waits"); ctl.setSel("waits"); });
+    await act(() => c.flush());
+    expect(ctl.sel).toBe("waits");
+    expect(c.live()).toEqual(["#chat", "#chat?collab=~waits"]);
     await unmount();
   });
 
