@@ -7,6 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
+import { memoryAutoTick } from "./memory-auto-tick.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -15,6 +16,7 @@ export interface ObserveTickResult { recorded: number; unchanged: number; failed
 export async function schedulerObserveTick(db: Database, projects: Record<string, { maxActiveWorkers: number }>, manager: Manager,
   pace?: TickPace): Promise<ObserveTickResult> {
   const out: ObserveTickResult = { recorded: 0, unchanged: 0, failed: [] };
+  out.failed.push(...await memoryAutoTick(db, Object.keys(projects), manager));
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const { project, policy, taskId } of paceCards(db, projects, "observe", pace)) {
     if (pace?.yieldNow()) break;

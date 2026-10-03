@@ -9,7 +9,7 @@ import { deliveredHead } from "./scheduler-review-rebase.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
-export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string; basis?: FindingBasis }
+export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string; basis?: FindingBasis; pitfall?: true }
 export interface ReviewFacts {
   eventSeq: number;
   round: number;
@@ -38,10 +38,12 @@ function findingsOf(value: unknown): ReviewFinding[] | null {
     if (!findingId || !/^[\w.-]{1,80}$/.test(findingId) || ids.has(findingId) || !familyName(r.family) ||
       !["P0", "P1", "P2"].includes(String(r.severity)) || !str(r.probe) || (r.probe as string).length > 4000) return null;
     if (r.basis !== undefined && r.basis !== null && !basisField(r.basis)) return null;
+    if (r.pitfall !== undefined && (typeof r.pitfall !== "boolean" || r.pitfall && r.severity !== "P1")) return null;
     ids.add(findingId);
     const basis = findingBasis({ findingId, family: r.family, probe: r.probe as string, basis: r.basis,
       description: typeof r.description === "string" ? r.description : undefined });
-    rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string, ...(basis && (r.basis || r.description) ? { basis } : {}) });
+    rows.push({ findingId, family: r.family, severity: r.severity as FindingSeverity, probe: r.probe as string,
+      ...(basis && (r.basis || r.description) ? { basis } : {}), ...(r.pitfall ? { pitfall: true as const } : {}) });
   }
   return rows;
 }
