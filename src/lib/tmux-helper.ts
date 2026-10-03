@@ -18,7 +18,7 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
-import { paneTail, trimTrailingBlank } from "./pane-tail.js";
+import { endsInModal, paneTail, trimTrailingBlank } from "./pane-tail.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -1222,6 +1222,7 @@ export async function killPidsEscalating(pids: number[], graceMs = 4000): Promis
  * auto-Enter 会毁掉用户正在交互的 /model 类菜单)。
  */
 export function detectDevChannelsModal(pane: string): boolean {
+  if (!endsInModal(pane)) return false; // 框后面已有别的内容 = 残留
   const tail = paneTail(pane, 20).join("\n");
   if (!/Loading development channels/i.test(tail)) return false;
   if (!/❯\s*1\./.test(tail)) return false;
