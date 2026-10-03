@@ -140,19 +140,24 @@
 - 后续进度：每次状态迁移发 SSE（新事件 `compact_op`），并在 agent 频道发一行知会。
 - 取消：**按 op 取消**，不复用现有的停止按钮。
   - 现有 `abortAcpTurn`（`acp/abort.ts:19-24`）取消的是会话当前的回合，不认 op；它也不删宿主 `AcpTurnLoop` 里排着的 command 槽。直接复用会有两个错：等待期间点取消会打断别人的业务轮（可能正是自调用工具所在的那一轮）；command 已排队时取消，当前轮停了，压缩却在下一轮照跑。
-  - 所以 op 发给宿主的槽都带 `opId`（N1），宿主新增 `cancel_slot{opId}`：槽还在队列里就**删掉**并回 `revoked`；正在跑的就是这个 op 的槽才回 `running`；不在了回 `gone`。
+  - 所以 op 发给宿主的槽都带 `opId` 和宿主内单调的槽代次 `gen`（N1）。宿主新增 `cancel_slot{opId}`，它是**宿主内一次同步操作**，归属检查和发取消之间没有 `await`，调度器也不能在中间切到下一槽：
+    - 槽还在队列里 → **删掉**，回 `revoked`；
+    - 当前在跑的槽就是这个 op（`opId` 和 `gen` 都对上）→ 在同一个同步段里置 `cancelHold`、调 `io.cancel()`（Codex 是 `session/cancel` 通知，同步写进 stdio），回 `cancelling`。`cancelHold` 期间 `next()` 不挑下一槽，直到这一槽的结局和 Stop 上报都处理完、`io.cancel()` 的 Promise 也落定，才放行；
+    - 不在了、或在跑的不是这个 op → 回 `gone`，**什么取消都不发**。
+  - bridge 对 op **从不**发 session 级取消，也不会凭某次回执再补发；它只发 `cancel_slot`。旧方案「先回 `running`、bridge 再 `session.cancel`」两步之间目标槽可能已经结束、宿主已经开了下一业务轮，取消就会落到无关回合上（`turn.ts:188-196` 收尾即挑下一槽，`session.ts:156-168` 的 cancel 只认 sessionId），所以作废。
+  - 剩下的一个窗口：目标轮在适配器那边已经结束，回包还在 stdio 里没被宿主处理，这时 `cancel_slot` 仍会看到它在跑并发出 `session/cancel`。这条通知在 stdio 上排在下一轮 `session/prompt` 之前，适配器收到时没有回合在跑。ACP 规定这时的 cancel 不生效，但 codex-acp 是否真的丢弃、而不是记到下一轮上，要由 N2 核实。核实不了或确实会记到下一轮时，**运行中阶段不提供取消**：`cancel_slot` 对在跑槽回 `uncancellable`，op 只等结局，界面写「正在压缩，不能中途取消」。
   - 各阶段：
 
     | 阶段 | 取消做什么 | 结果 |
     |------|-----------|------|
     | accepted / waiting | 只在 bridge 撤掉等待，**不碰会话** | `cancelled{waiting}` |
     | saving，槽还在排队 | `cancel_slot` → `revoked` | `cancelled{saving}`，不压缩 |
-    | saving，槽在跑 | `cancel_slot` 回 `running` 后，才对这一轮 `session.cancel` | 回合结束后 `cancelled{saving}`，不压缩 |
+    | saving，槽在跑 | `cancel_slot` 在宿主内核对归属并发取消 → `cancelling` | 槽结局是 cancelled → `cancelled{saving}`，不压缩；槽已正常结束 → 按保存结果走，见竞态规则 |
     | saved | 只在 bridge 结束 op | `cancelled{saved}`，交接保留 |
     | compacting，槽还在排队 | `cancel_slot` → `revoked`，压缩不会再跑 | `cancelled{compacting}`，交接保留 |
-    | compacting，槽在跑 | 同上，只取消属于本 op 的这一轮 | 见下方竞态规则 |
+    | compacting，槽在跑 | 同上，只取消属于本 op 的这一轮；回 `gone` 时什么都不发 | 见下方竞态规则 |
 
-  - **竞态**：最终状态以宿主报的这个槽的实际结局为准，不以点击为准。取消回执之前完成信号已经到了 → `compacted`；宿主回 `gone` 且没有完成信号 → 等槽的 prompt 结局再定。界面先显示「正在取消」，不提前写「已取消」。
+  - **竞态**：最终状态以宿主报的这个槽的实际结局（槽结束时的 `{opId, gen, outcome}`）为准，不以点击为准。完成信号先到 → `compacted`；回 `gone` → 什么都没发，等这个槽已上报或即将上报的结局再定；回 `cancelling` 但槽其实已经正常结束 → 仍按完成信号记 `compacted`。界面先显示「正在取消」，不提前写「已取消」。无论哪种交错，下一业务轮都不会收到取消：宿主只有在核对过归属的同步段里才发取消，而且 `cancelHold` 放行前不会开下一轮。
   - 现有停止按钮照旧只管当前回合。它停掉的恰好是 op 的槽时，op 跟着记 `cancelled{阶段}`；停的是别的回合，op 不受影响。
 - 不能用时的解释（都不发任何东西）：
 
@@ -205,12 +210,19 @@
 - **改动**：
   - command 槽在跑时，新入站排在命令之后，不 steer；
   - `submitCommand(text, opId?)`，另加独占一轮、不与普通 prompt 合批的 `op` 槽（给 saving 用；现在 `next()` 会把相邻 prompt 拼成一轮）；
-  - `cancelSlot(opId)` → `revoked` / `running` / `gone`；`slotStatus(opId)`；宿主 `call` 新增 `op:"cancel_slot"`、`op:"slot_status"`，`acp-link.ts` 加对应调用；
-  - 槽结束时宿主上报 `{opId, outcome}`。
+  - 槽带 `opId` 和单调代次 `gen`；`TurnIO` 加 `cancel(): Promise<unknown>`（宿主接 `session.cancel`）；
+  - `cancelSlot(opId)` → `revoked` / `cancelling` / `gone`（N2 核实不了 idle cancel 时，在跑槽回 `uncancellable`）。它是同步方法：排队的就删掉；在跑的且归属对上，就在同一段里置 `cancelHold` 并调 `io.cancel()`。`next()` 在 `cancelHold` 时返回 null，等目标槽 `run()` 收尾、`io.cancel()` 落定后清掉并 `pump()`。`slotStatus(opId)`；宿主 `call` 新增 `op:"cancel_slot"`、`op:"slot_status"`，`acp-link.ts` 加对应调用；
+  - 槽结束时宿主上报 `{opId, gen, outcome}`。
 - **旧红 → 新绿**：
   - command 槽在跑时 `submit()` 返回 `"queued"`、不调 `io.steer`，下一轮才跑。现状返回 `"steer"`，红。
   - 排队中的 command 槽 `cancelSlot` 后不会开回合（`io.prompt` 不被调用）；现状没有这个方法，红。
   - 正在跑别的回合时 `cancelSlot(本 op)` 回 `revoked`，**不调 `session.cancel`**；现状 abort 只会取消当前回合，红。
+  - 「取消不落到下一业务轮」：内存 TurnIO 按顺序记下 `prompt:*` 和 `cancel` 事件。先跑 op 槽，再排一条业务 prompt，用确定性的顺序穷举三种交错：
+    1. 目标轮的 prompt Promise 已 resolve，但还没进宿主处理时调 `cancelSlot`；
+    2. 目标轮收尾后、下一轮开之前调；
+    3. 下一轮已经开了再调。
+    断言：`cancel` 只出现在 `prompt:next-business-turn` 之前，或者根本不出现（后两种必须回 `gone`、一次都不调 `io.cancel`）；业务轮的结局是 `done`，不是 `cancelled`；槽上报的 `{opId, gen, outcome}` 是目标槽的真实结局。现状（bridge 拿到 running 回执再发 session 级 cancel）下，交错 1 和 2 的取消会落到 `next-business-turn`，红。
+  - `cancelHold` 期间 `submit()` 进来的消息只排队，不开回合；hold 放行后按到达顺序跑。
   - `op` 槽不和前后 prompt 合并成一轮。
   - 原有 steer、abort（`acp-self-turn.test.ts`）测试保持绿。
 
@@ -221,6 +233,7 @@
   1. 在临时目录按 `lib/acp/resolve.ts` 的规则下载 pinned codex-acp 包，读 `dist/index.js`，并参照 app-server 的公开 schema，记下 §1.4 那三件事。只读，不起 app-server，也不登录。
   2. 宿主把核实过的完成信号翻成 `compact_boundary`，上报的语义要和 Pi 的 `_meta.claudestra.compacted` 一致。
   3. 如果上游根本没有可靠的完成信号，宿主改为把「`session/prompt` 返回 + rollout 中出现新的压缩记录」两者都满足才算完成。这时还需要扩 `codex-session.ts`，把这一条追加进 globs。
+- 另核一件：Codex 空闲（没有回合在跑）时收到 `session/cancel`，适配器是丢弃，还是记到下一轮。结果写进 `codex-acp.md`。丢弃 → N1 的运行中取消照常开；会记到下一轮或看不出来 → `cancel_slot` 对在跑槽回 `uncancellable`（§2.4）。
 - **stub**：
   - `/compact` 按指令进入不同模式：`[stub:compact-ok]`、`[stub:compact-fail]`、`[stub:compact-slow]`（等待取消）；
   - 只讲协议、不连模型。
@@ -230,7 +243,11 @@
 
 ### N3 · 交接存储 + `save_handoff` 工具（无依赖）
 
-- **globs**：`src/lib/agent-handoff.ts`（新，存储）、`src/lib/compact-tools.ts`（新，`SAVE_HANDOFF_TOOL` 声明 + `saveHandoffTool` 调 bridge，写法同 `lib/fleet-tool.ts`）、`src/channel-server.ts`（工具列表 `:600` 加一项、`:742` dispatch 加一个 `case`）、`src/bridge/handoff-route.ts`（新，按连接认身份）、`src/bridge.ts`（ws 消息分派加一行，同 `:2220` `fleet_*` 的写法）、`tests/agent-handoff.test.ts`（新）、`tests/compact-tools.test.ts`（新）
+- **globs**：`src/lib/agent-handoff.ts`（新，存储）、`src/lib/compact-tools.ts`（新，`SAVE_HANDOFF_TOOL` 声明 + `saveHandoffTool` 调 bridge，写法同 `lib/fleet-tool.ts`）、`src/channel-server.ts`（工具列表 `:600` 加一项、`:742` dispatch 加一个 `case`）、`src/lib/acp/tool-proxy.ts`（`PROXIED_TYPES` 加 `save_handoff`，不进 `CLEAN_TYPES`）、`src/bridge/handoff-route.ts`（新，按 `callerOf(ws, msg)` 认身份）、`src/bridge.ts`（ws 消息分派加一行，同 `:2220` `fleet_*` 的写法）、`tests/agent-handoff.test.ts`（新）、`tests/compact-tools.test.ts`（新）、`tests/acp-tool-proxy.test.ts`、`tests/compact-tool-proxy.test.ts`（新，代理回路集成）
+- **wire 协议**：新帧类型 `save_handoff`，和工具同名，不复用已有帧。请求是 `{type:"save_handoff", requestId, opId, text}`，回包走现有的 `{type:"response", requestId, result|error}`。
+  - Codex ACP 下，channel-server 的 `BRIDGE_URL` 指向宿主工具代理（`tool-proxy.ts` 文件头 2-9 行），代理只转 `PROXIED_TYPES`，未知帧在 `:107` 直接丢掉、不回错误。所以代理白名单必须一起加，否则请求到不了 bridge，只会超时。
+  - 身份：代理照旧剥掉帧里自带的 `callerCred` / `callerDowngraded`，并给非 MCP 连接加上 `callerDowngraded`。`handoff-route.ts` 用 `callerOf(ws, msg)`，要求 `verified` 且没被降级，只写这条连接自己那个 agent 的交接；被降级的回错误，不写盘。
+  - 出借 worker（`clean`）的代理不转这个帧，就地回错误，与 `fleet_*` 一致。
 - **新绿**：
   - 写到 `STATE_DIR/handoff/<名>/HANDOFF.md`，原子写，带 op id 和时间；
   - 不在 registry 的名字拒绝；
@@ -238,6 +255,11 @@
   - 超过上限（例如 16 KB）拒绝；
   - 不触碰 `~/.claude` 下的任何路径（测试里用临时 HOME 断言）；
   - 工具声明没有路径 / 名字参数；`saveHandoffTool` 把参数原样交 bridge，身份只由连接决定（现状没有这个工具，红）。
+  - `acp-tool-proxy.test.ts`（旧红新绿）：
+    - 登记过的 MCP 连接发 `save_handoff` → 上送帧的 `requestId` 被改写、不带 `callerDowngraded`，`onBridgeFrame` 的回包回到原连接、原 id。现状这帧被丢、上游收不到，红；
+    - `outsideMcpLauncher` 连接发同一帧 → 上送带 `callerDowngraded:true`，自带的 `callerCred` 被剥掉；
+    - `clean:true` → 不上送，就地回 `error`。
+  - `compact-tool-proxy.test.ts`（集成，不 mock `bridgeRequest`）：真实的 channel-server 工具调用路径（`saveHandoffTool` 的 bridge 客户端，`BRIDGE_URL` 指向 `proxy.url`）→ 真实 `startToolProxy` → 内存 bridge 假件，后者把帧交给真实的 `handoff-route.ts` 处理函数（身份用测试桩的 `callerOf` 注入）→ 回包经 `proxy.onBridgeFrame` 回到原工具调用。断言：交接文件写在临时 STATE_DIR；降级连接拿到错误、没写盘；clean 代理拿到错误、假件没收到帧。
 
 ### N4 · Codex save-compact 编排器（依赖 N1、N2、N3）
 
@@ -253,12 +275,12 @@
   - 完成信号到达前结果一直是 `queued`，没有 `done`；
   - 重启续接：`saving` 宿主不认 → `failed: interrupted`、不重放；`saved` 断点（交接已存、未发压缩）重启 → 等安全点后 stub 只收到一次 `/compact`；`saved` 超过 30 分钟 → `failed: interrupted{saved}`、交接还在，再点一次建新 op；`compacting` 宿主还在跑 → 跟到结局，stub 没有收到第二次 `/compact`；
   - 落盘顺序：模拟 `compacting` 写盘失败 → 不发 `/compact`；
-  - 取消：waiting 时取消，stub 上正在跑的业务轮不被 cancel、正常结束；command 已排队未开始时取消 → stub 从未收到 `/compact`、状态 `cancelled{compacting}`；完成信号与取消回执竞态 → 以完成信号为准记 `compacted`；
+  - 取消：waiting 时取消，stub 上正在跑的业务轮不被 cancel、正常结束；command 已排队未开始时取消 → stub 从未收到 `/compact`、状态 `cancelled{compacting}`；完成信号与取消回执竞态 → 以完成信号为准记 `compacted`；compacting 槽在 stub 上跑、后面排着业务轮时取消，按 N1 的三种交错各跑一次 → stub 上的业务轮从未收到 `session/cancel`、正常结束，op 状态按 compact 槽的实际结局记；
   - 押后队列文件在 op 前后逐字不变。
 
 ### N5 · 入口接线（依赖 N4；`request_self_compact` 还依赖 N3 的 `compact-tools.ts`）
 
-- **globs**：`src/lib/fleet-plan.ts`、`src/bridge/fleet/service.ts`、`src/bridge/fleet/runner.ts`、`src/lib/fleet-caller.ts`、`src/bridge/api-slash.ts`、`src/lib/runtime-commands.ts`、`src/lib/compact-tools.ts`（加 `REQUEST_SELF_COMPACT_TOOL` 与调用）、`src/channel-server.ts`（`:600` 列表、`:742` dispatch 各加一项）、`src/bridge/codex-compact/self-route.ts`（新，按连接认出调用方、只能给自己登记）、`src/bridge.ts`（ws 消息分派加一行）、`tests/fleet-plan.test.ts`、`tests/fleet-runner.test.ts`、`tests/fleet-caller.test.ts`、`tests/api-slash.test.ts`、`tests/runtime-commands.test.ts`、`tests/compact-tools.test.ts`
+- **globs**：`src/lib/fleet-plan.ts`、`src/bridge/fleet/service.ts`、`src/bridge/fleet/runner.ts`、`src/lib/fleet-caller.ts`、`src/bridge/api-slash.ts`、`src/lib/runtime-commands.ts`、`src/lib/compact-tools.ts`（加 `REQUEST_SELF_COMPACT_TOOL` 与调用）、`src/channel-server.ts`（`:600` 列表、`:742` dispatch 各加一项）、`src/lib/acp/tool-proxy.ts`（`PROXIED_TYPES` 加 `request_self_compact`，不进 `CLEAN_TYPES`）、`src/bridge/codex-compact/self-route.ts`（新，按 `callerOf(ws, msg)` 认出调用方、只能给自己登记）、`src/bridge.ts`（ws 消息分派加一行）、`tests/acp-tool-proxy.test.ts`、`tests/compact-tool-proxy.test.ts`、`tests/fleet-plan.test.ts`、`tests/fleet-runner.test.ts`、`tests/fleet-caller.test.ts`、`tests/api-slash.test.ts`、`tests/runtime-commands.test.ts`、`tests/compact-tools.test.ts`
 - **改动**：
   - `ccOnly` 改为按动作和运行时判断：`compact` / `save-compact` 支持 `codex` 且 transport 是 acp；`lp-*` 仍只支持 CC。
   - fleet runner 对 Codex ACP 的 `compact` 和 `save-compact` 都只调 `requestCodexCompact`（N4 `entry.ts`），不走发键。执行者在 Codex 下也可以存交接，因为路径按 agent 隔离，不再需要改成 compact；这条差异写进 dryRun 说明。
@@ -271,6 +293,7 @@
   - 网页对 Codex ACP 连发两次 `/compact`：两次都回同一个 op id，宿主假件只收到一次 `slash`（现状两次，红）；
   - 适配器未核实：`/compact` 回 409，宿主假件一次都没收到（现状 202，红）；
   - `request_self_compact` 只能登记调用方自己，传任何名字字段都被忽略；peer / external 连接调用被拒。
+  - wire：新帧 `{type:"request_self_compact", requestId, kind}`，回包 `response{result:{outcome:"queued", opId}}`。`acp-tool-proxy.test.ts` 补三条，和 N3 的 `save_handoff` 一样：正常转发并回包、降级连接带 `callerDowngraded`、clean 就地回错。现状这帧被丢，红。`compact-tool-proxy.test.ts` 补一条穿过真实代理和真实 `self-route.ts` 的回路：降级连接被拒，不建 op。
 - **保留**：master 排除、PM 项目范围、peer 斜杠当普通消息、远端只读，这些断言原样保持绿。
 
 ### N6 · 网页反馈（依赖 N5，ui 卡，截图由 PM 验收）
@@ -294,7 +317,7 @@
 ## 4. 测试与需要用户原生操作的部分
 
 - **最小真实协议 stub 集成**：只用 `scripts/acp-stub.ts`，配临时 STATE_DIR / HOME（`tests/` 现有的 acp stub 用法）。
-  - 覆盖：宿主 ↔ stub 的 `session/prompt("/compact")`、完成和失败信号、`save_handoff` 工具回路、单飞（含网页 `/compact` 连发）、能力闸、按 op 取消（waiting / 已排队 / 竞态）、`saved` 与 `compacting` 断点重启。
+  - 覆盖：宿主 ↔ stub 的 `session/prompt("/compact")`、完成和失败信号、`save_handoff` / `request_self_compact` 工具回路（必须穿过真实 `tool-proxy.ts`）、单飞（含网页 `/compact` 连发）、能力闸、按 op 取消（waiting / 已排队 / 运行中与换轮交错，下一业务轮不被取消）、`saved` 与 `compacting` 断点重启。
   - 不碰真实 Codex、`~/.codex`、`auth.json`，不碰生产 bridge，也不调用模型。
 - **需要 owner 原生操作的时机**：N5 合并后，由 owner 在自己的一个 Codex ACP agent 上手动点一次「存交接再压缩」。只有这一步会真正调用 `thread/compact/start` 并消耗模型。执行者和 CI 一律不做。
   - 验收看三点：交接文件落在 `STATE_DIR/handoff/<名>/`；完成卡只在完成信号到达后出现；压缩期间发的一条消息在压缩之后才被处理。
