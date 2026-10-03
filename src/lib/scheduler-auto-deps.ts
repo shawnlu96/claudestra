@@ -7,7 +7,7 @@ import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author
  * cannot prove (no session id yet, create timed out) is "unknown" and stops for PM rather than being created twice.
  */
 import type { Database } from "bun:sqlite";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBunPath } from "./bun-path.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
@@ -28,6 +28,8 @@ import { openCreateReviewWorktree, retryCleanCreate } from "./scheduler-create-r
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
+import { boundedGit, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
+import type { SchedulerConfig } from "./scheduler-config.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
@@ -56,16 +58,19 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env extends LocalAuthorEnv { alive: StillActive }
+interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive }
 const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? (await lendReviewDir(db, task, env.git));
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? (await lendReviewDir(db, task, env.net, env.readConfig));
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
-  const opened = await openCreateReviewWorktree(db, task, authorDir, checkoutOf(env, task.id), env.git);
+  const checkout = checkoutOf(env, task.id), reuse = existsSync(checkout);
+  const absent = task.headSHA ? await prepareReviewHead(env, task, task.headSHA, reuse ? checkout : authorDir, reuse) : null;
+  if (absent) return { kind: "manual", reason: absent };
+  const opened = await openCreateReviewWorktree(db, task, authorDir, checkout, env.git);
   if ("held" in opened) return { kind: "unknown", reason: opened.held };
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
   const dir = opened.dir;
@@ -106,6 +111,8 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   if (!head) return { manual: "派审意图没有 head" };
   const missing = await peerPrHeadMissing(task, head, env.git);
   if (missing) return { manual: missing };
+  const absent = await prepareReviewHead(env, task, head, dir, true);
+  if (absent) return { manual: absent };
   return pinReviewWorktree(dir, head, env.git);
 }
 
@@ -141,16 +148,21 @@ export interface AutoDepsOpts {
   git?: Git;
   /** The service's leases handed to every manager / ledger child (scheduler-lease-env.ts); none = those children refuse to act. */
   lease?: SchedulerLease;
+  /** Tests only: the network git's deadline (default REVIEW_FETCH_TIMEOUT_MS) and scheduler.json in place of the state dir's. */
+  netTimeoutMs?: number;
+  readConfig?: () => SchedulerConfig;
   /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
-  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease, create = plainManager(lease) } = opts;
+  const { registryPath, worktreeRoot = statePath("worktrees"), active = () => {}, git: baseGit = realGit, lease, create = plainManager(lease), readConfig } = opts;
+  const netGit = boundedGit(opts.netTimeoutMs);
   const registryRow: RegistryRow = (agent) => readRegistryAgentsSync(registryPath).find((a) => a.name === agent);
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
+    net: (args) => whileOwned(active, () => netGit(args)), readConfig,
     create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath };
   return {
     manager: schedulerManagerWith(lease),
