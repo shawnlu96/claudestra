@@ -85,14 +85,17 @@ export async function ensureDirectCredential(): Promise<boolean> {
 export interface LocalPending {
   pending: true;
   approvalId: string;
-  /** 8 位展示码：批准的设备上会显示同一个，对得上再允许 */
+  /** 8 位展示码：批准的设备上会显示同一个，对得上再允许；终端批准要报这个码（claudestra pair approve <码>） */
   code: string;
+  /** 有没有已配对设备能批：没有就只能在这台电脑的终端批（老 bridge 不给 → undefined，按有处理） */
+  approver?: boolean;
+  expiresAt: string;
   machineName: string;
 }
 
 /**
  * 直托管 + 本机回环：一键配对。bridge 带控制 token 才直接签（网页没有）；否则 202 进待批，拿 approvalId 轮询 pairStatus——
- * 响应顺带种一个 HttpOnly 领取 cookie，只有这个浏览器取得走结果。
+ * 响应顺带种一个 HttpOnly 领取 cookie，只有这个浏览器取得走结果。批准由已配对设备核对展示码，或终端 claudestra pair approve <码>。
  */
 export function pairLocal(fp: string, deviceName: string): Promise<PairedInfo | LocalPending> {
   return api<PairedInfo | LocalPending>("/devices/local", { method: "POST", json: { deviceName } }, m(fp));
@@ -191,8 +194,6 @@ export function pairErrorText(e: unknown, local = false): string {
       return "这台机器没有连上中继";
     case "no_machine":
       return "还没有选择机器";
-    case "no_approver":
-      return "还没有能批准的已配对设备：在电脑终端运行 claudestra pair";
   }
   if (err?.status === 403) return local ? "只能在电脑本机的浏览器里一键配对" : "配对请求被这台机器拒绝了";
   return err?.message || "配对失败";

@@ -4,6 +4,7 @@
  * 所有 agent + master + 终端 + 管理；--guest 给别人的设备：独立身份、不含 master、无终端、无管理，agents 必须写明，
  * '*' 要在这里再确认一次或加 --confirm-all）。手输短码的设备会进「待确认」：这里轮询并提示 Y/n，
  * 生成码的人就在 Mac 前，点头才发凭据。扫码 / 点链接走挑战应答，不需要确认——码被消费掉即视为配好。
+ * `claudestra pair approve <码>`：批准本机浏览器「一键配对本机」的请求，码要报浏览器上显示的那个（bridge/devices.ts decideLocalByCode）。
  */
 import { toString as qrToString } from "qrcode";
 import { bridgeHttpBase } from "../lib/bridge-port.js";
@@ -22,7 +23,7 @@ const POLL_MS = 2000;
 const GUEST_EXAMPLE = `例：claudestra pair --guest "Alex 的手机" --agents gc-car,relay`;
 export const GUEST_ALL_WARNING = "给别人开放 '*' 等于开放全部非大总管 agent（以后新建的也算）";
 
-const USAGE = "用法：claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest 名字 --agents a,b [--confirm-all]] [--url 入口] [--json]";
+const USAGE = "用法：claudestra pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest 名字 --agents a,b [--confirm-all]] [--url 入口] [--json]；批准本机浏览器的一键配对：claudestra pair approve <码>";
 const VALUE_FLAGS = new Set(["--agents", "--guest", "--url"]);
 const BOOL_FLAGS = new Set(["--no-terminal", "--no-manage", "--json", "--confirm-all"]);
 
@@ -115,6 +116,7 @@ async function post(path: string, body: unknown): Promise<Response> {
 }
 
 export async function cmdPair(args: string[]): Promise<void> {
+  if (args[0] === "approve") return approveLocal(args.slice(1));
   const { body, json, error, needsAllConfirm } = parsePairArgs(args);
   if (error) return fail({ error });
   if (needsAllConfirm) {
@@ -150,6 +152,20 @@ export async function cmdPair(args: string[]): Promise<void> {
   ];
   process.stdout.write(lines.join("\n") + "\n"); // 人看的命令，bridge 从不调它（要机器可读加 --json）
   if (process.stdin.isTTY) await waitForApproval(info);
+}
+
+/** 批准本机浏览器的一键配对：码就是浏览器上显示的那个；bridge 按码找，对不上就 404（不会批到别的请求上） */
+async function approveLocal(args: string[]): Promise<void> {
+  if (args.length !== 1) return fail({ error: "用法：claudestra pair approve <浏览器上显示的 8 位码>" });
+  let r: Response;
+  try {
+    r = await post("/relay/pair/approve", { code: args[0], approve: true });
+  } catch (e) {
+    return fail({ error: `bridge 没有响应（${(e as Error).message}）——先确认 bridge 在跑：claudestra doctor` });
+  }
+  const j = (await r.json().catch(() => null)) as { ok?: boolean; deviceName?: string; error?: string } | null; // 非 JSON 按失败：状态码就是全部信息
+  if (!j?.ok) return fail({ error: j?.error ?? `bridge 返回 ${r.status}` });
+  process.stdout.write(`✓ 已批准「${j.deviceName ?? "本机浏览器"}」，浏览器会自动进入。\n`);
 }
 
 /** 轮询待确认：手输短码的设备出现就问一句；码被消费（扫码配对）或过期就收工 */

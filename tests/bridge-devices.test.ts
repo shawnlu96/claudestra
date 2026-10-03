@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setApiAuthPrincipalsPathForTest, authenticateApi } from "../src/bridge/api-auth.js";
 import {
-  decideApproval, handleDevicesManaged, hasPairingApprover, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
+  decideApproval, decideLocalByCode, handleDevicesManaged, hasPairingApprover, handleDevicesPublic, issuePairing, pendingApprovals, setDevicesPrincipalsPathForTest, setDevicesRegistryPathForTest,
   setLocalPairingControlTokenForTest,
 } from "../src/bridge/devices.js";
 import { relayControlRoutes } from "../src/bridge/relay-routes.js";
@@ -285,24 +285,52 @@ describe("本机回环自动配对", () => {
     expect((await pub("POST", "/api/v1/devices/local", LOOPBACK, { headers: { "x-cstra-device": "1", origin: "http://evil.local", ...tok } }))!.status).toBe(403);
   });
 
-  test("只有回环 + 头 + 同源：不再直接签——没有能批的设备回 no_approver，有就进待批（202，不发设备 cookie）", async () => {
-    const empty = join(dir, "empty-principals.json");
-    setDevicesPrincipalsPathForTest(empty);
+  test("只有回环 + 头 + 同源：不直接签，一律进待批（202，不发设备 cookie）；approver 说有没有已配对设备能批", async () => {
+    const used = join(dir, "used-principals.json");
+    const file = { version: 1, principals: [] } as unknown as PrincipalsFile;
+    attachCredential(ensureOwnerPrincipal(file), "phone", fullGrant()).credential.lastSeenAt = new Date().toISOString();
+    writeFileSync(used, JSON.stringify(file));
+    for (const [path, approver] of [[join(dir, "empty-principals.json"), false], [used, true]] as const) {
+      setDevicesPrincipalsPathForTest(path);
+      try {
+        const r = await local();
+        expect(r.status).toBe(202);
+        expect(devCookies(r)).toEqual([]);
+        const { approvalId, code, ...rest } = (await r.json()) as { approvalId: string; code: string; approver: boolean };
+        expect([code, rest.approver]).toEqual([expect.stringMatching(/^[0-9A-Z]{8}$/), approver]);
+        expect(pendingApprovals().find((a) => a.id === approvalId)).toMatchObject({ local: true, code, grant: { agents: ["*", "master"], terminal: true, manage: true } });
+        expect(await decideApproval(approvalId, false)).toMatchObject({ state: "denied" });
+      } finally {
+        setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
+      }
+    }
+  });
+
+  test("只有一台电脑：终端报出浏览器上的展示码就能批（claudestra pair approve）；码不对 / 只给编号都批不了；凭据只给发起的浏览器", async () => {
+    setDevicesPrincipalsPathForTest(join(dir, "empty-principals-2.json"));
+    const approve = (body: Record<string, unknown>) =>
+      relayControlRoutes(new Request("http://bridge.local/relay/pair/approve", { method: "POST", body: JSON.stringify(body) }), new URL("http://bridge.local/relay/pair/approve"));
     try {
-      const r = await local();
-      expect(r.status).toBe(403);
-      expect(await r.json()).toMatchObject({ code: "no_approver" });
-      expect(r.headers.getSetCookie()).toEqual([]);
+      const mine = await open();
+      const other = await open({ ...LOCAL_H, cookie: "" });
+      expect((await loopbackList()).filter((a) => a.local).every((a) => a.code === undefined && a.id === undefined)).toBe(true); // 回环抄不到码
+      expect((await approve({ id: mine.id, approve: true })).status).toBe(403);
+      expect((await approve({ code: "ABCD-2345", approve: true })).status).toBe(404);
+      expect((await status(mine.id, mine.claim)).status).toBe(202);
+      const ok = await approve({ code: `${mine.code.slice(0, 4)}-${mine.code.slice(4)}`.toLowerCase(), approve: true });
+      const out = (await ok.json()) as { credentialId: string };
+      expect([ok.status, out]).toEqual([200, expect.objectContaining({ ok: true, state: "approved", deviceName: "Safari" })]);
+      expect((await approve({ code: mine.code, approve: true })).status).toBe(404); // 一次性
+      expect((await status(mine.id, other.claim)).status).toBe(403);
+      const got = await status(mine.id, mine.claim);
+      expect([got.status, devCookies(got).length]).toEqual([200, 1]);
+      const creds = (await readPrincipalsStrict(join(dir, "empty-principals-2.json"))).principals.flatMap((p) => p.credentials ?? []);
+      expect(creds.find((c) => c.id === out.credentialId)).toMatchObject({ approvedBy: "cli", grant: fullGrant() });
+      expect(pendingApprovals().some((a) => a.id === other.id)).toBe(true); // 码不同的另一个请求没被顺带批掉
+      await decideApproval(other.id, false);
     } finally {
       setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
     }
-    const r = await local();
-    expect(r.status).toBe(202);
-    expect(devCookies(r)).toEqual([]);
-    const { approvalId, code } = (await r.json()) as { approvalId: string; code: string };
-    expect(code).toMatch(/^[0-9A-Z]{8}$/);
-    expect(pendingApprovals().find((a) => a.id === approvalId)).toMatchObject({ local: true, code, grant: { agents: ["*", "master"], terminal: true, manage: true } });
-    expect(await decideApproval(approvalId, false)).toMatchObject({ state: "denied" });
   });
 
   test("带控制 token（Bearer / X-Bridge-Token）→ 直接签全权，cookie 不带 Secure、Path=/；token 不对 → 仍进待批", async () => {
@@ -400,17 +428,69 @@ describe("本机回环自动配对", () => {
   });
 });
 
+describe("批准了没人领（浏览器在等批准时离开了配对页）", () => {
+  test("终端批准手输短码后浏览器不再轮询：那张凭据从没用过，不算能批准的设备；批准结果过期没人领就收回", async () => {
+    const path = join(dir, "unclaimed-principals.json");
+    const creds = async () => (await readPrincipalsStrict(path)).principals.flatMap((p) => p.credentials ?? []);
+    setDevicesPrincipalsPathForTest(path);
+    try {
+      const info = issuePairing(machine, {});
+      const r = (await pub("POST", "/api/v1/devices/pair", LOOPBACK, { body: { code: String(info.code), deviceName: "Mac · Chrome" } }))!;
+      const { approvalId } = (await r.json()) as { approvalId: string };
+      const out = (await decideApproval(approvalId, true))!; // 回环 /relay/pair/approve；浏览器这时已经不在轮询了
+      expect((await creds()).map((c) => c.id)).toEqual([String(out.credentialId)]);
+      expect(hasPairingApprover(await readPrincipalsStrict(path))).toBe(false);
+      setSystemTime(new Date(Date.now() + 10 * 60_000 + 1_000));
+      try {
+        pendingApprovals(); // 任何一次读待批都会清掉过期的
+        for (let i = 0; i < 50 && (await creds()).length; i++) await Bun.sleep(20);
+      } finally {
+        setSystemTime();
+      }
+      expect(await creds()).toEqual([]);
+    } finally {
+      setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
+    }
+  });
+
+  test("本机请求批准后浏览器点了取消（结果没领）：凭据当场收回", async () => {
+    const path = join(dir, "cancelled-principals.json");
+    setDevicesPrincipalsPathForTest(path);
+    const h = { "x-cstra-device": "1", origin: "http://bridge.local" };
+    try {
+      const r = (await pub("POST", "/api/v1/devices/local", LOOPBACK, { headers: h, body: {} }))!;
+      const { approvalId, code } = (await r.json()) as { approvalId: string; code: string };
+      const claim = r.headers.getSetCookie()[0].split(";")[0];
+      expect(await decideLocalByCode(code, true)).toMatchObject({ ok: true, state: "approved" });
+      expect((await readPrincipalsStrict(path)).principals.flatMap((p) => p.credentials ?? [])).toHaveLength(1);
+      const c = (await pub("POST", "/api/v1/devices/local/cancel", LOOPBACK, { headers: { ...h, cookie: claim }, body: { approval: approvalId } }))!;
+      expect(c.status).toBe(200);
+      expect((await readPrincipalsStrict(path)).principals.flatMap((p) => p.credentials ?? [])).toEqual([]);
+    } finally {
+      setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
+    }
+  });
+});
+
 describe("hasPairingApprover（本机全权请求有没有人能批）", () => {
   const T0 = new Date("2026-09-27T12:00:00Z");
-  test("只认未停用、未过期、全 scope 带 manage 的设备凭据；guest / 受限 / 过期 / 停用都不算", () => {
+  /** 用过一次（浏览器领走了凭据）：lastSeenAt 由 api-auth 在第一次请求时写 */
+  const seen = (p: Principal, name: string, grant: ReturnType<typeof fullGrant>) => {
+    const { credential } = attachCredential(p, name, grant, { now: T0 });
+    credential.lastSeenAt = T0.toISOString();
+    return credential;
+  };
+  test("只认未停用、未过期、用过的全 scope 带 manage 的设备凭据；guest / 受限 / 过期 / 停用 / 从没用过都不算", () => {
     const file = ({ principals: [] } as PrincipalsFile);
     expect(hasPairingApprover(file, T0.getTime())).toBe(false);
     const guest = newGuestPrincipal("alex", guestGrant(["x"]), T0);
-    attachCredential(guest, "alex", guestGrant(["x"]), { now: T0 });
+    seen(guest, "alex", guestGrant(["x"]));
     file.principals.push(guest);
     const owner = ensureOwnerPrincipal(file, T0);
-    attachCredential(owner, "narrow", { agents: ["x"], terminal: false, manage: true }, { now: T0 });
+    seen(owner, "narrow", { agents: ["x"], terminal: false, manage: true });
     const { credential } = attachCredential(owner, "mac", fullGrant(), { now: T0 });
+    expect(hasPairingApprover(file, T0.getTime())).toBe(false); // 批准了却没被浏览器领走：不在任何设备上
+    credential.lastSeenAt = T0.toISOString();
     expect(hasPairingApprover(file, T0.getTime())).toBe(true);
     expect(hasPairingApprover(file, Date.parse(credential.expiresAt) + 1)).toBe(false);
     credential.disabled = true;
@@ -425,7 +505,7 @@ describe("hasPairingApprover（本机全权请求有没有人能批）", () => {
       const file = ({ principals: [] } as PrincipalsFile);
       const owner = ensureOwnerPrincipal(file, T0);
       tweak(owner);
-      attachCredential(owner, "only", grant, { now: T0 });
+      seen(owner, "only", grant);
       return hasPairingApprover(file, T0.getTime());
     };
     expect(only({ agents: ["*", "master"], terminal: false, manage: true })).toBe(false);
