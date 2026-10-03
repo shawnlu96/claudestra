@@ -94,7 +94,9 @@ export function adoptStrandedTransfers(held: HeldQueue): Set<HeldItem> {
 /** Inbox reads, acknowledgements and reply tallies must use the same ownership recovery as flush, including leased entries. */
 export function ownedHeldItems(held: HeldQueue, channelId: string): HeldItem[] {
   const unresolved = adoptStrandedTransfers(held);
-  return (held.get(channelId) ?? []).filter((item) => !unresolved.has(item));
+  // A stranded role copy still needs flush's authorized handoff; an old inbox must not consume or ack it before that succeeds.
+  return (held.get(channelId) ?? []).filter((item) => !unresolved.has(item)
+    && (isHumanDirect(item.env) || item.env.to.kind !== "local" || item.env.to.channelId === channelId));
 }
 
 /** Missing / conflicting original queue addresses are not recoverable from body headers. Never fabricate a deleted original. */

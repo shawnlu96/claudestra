@@ -51,6 +51,10 @@ async function inboxWorld() {
       client: (c) => clients.get(c), touch: (c, e) => calls.touchDelivered(c, e), settled: async () => true, now: () => 1000,
       deliver: (env, to, wanted) => deliverPmLocal(env, to, clients, calls, new Map(), async (e, t) => {
         if (wanted && !wanted()) return { envelope: e, outcome: { kind: "dropped", reason: "removed" } };
+        if (busy.has(t.channelId)) {
+          held.holdEnv(e);
+          return { envelope: e, outcome: { kind: "sent", note: "queued" } };
+        }
         sent.push({ channel: t.channelId, text: e.content });
         return { envelope: e, outcome: { kind: "sent" } };
       }, { db: fixture.db, agents: state.agents, principals: async () => ({ principals: state.principals }) }),
@@ -232,4 +236,99 @@ test("inbox-bypass: role dual B-first take preserves B lease; A flush never rede
   expect(w.sent).toEqual([]);
   await w.take(CB, { ack: lease.batchId });
   expect(w.q(CB)).toEqual([]);
+});
+
+function strandedRole(w: World, source: "executor" | "peer" | "ledger" = "executor"): HeldItem {
+  const env = ownerLetter("  stranded role body\n\nunchanged  ");
+  env.intent = "notification";
+  if (source === "executor") env.from = { kind: "local", agentName: "agent-task-1", channelId: "executor", ws: ws("exec") };
+  if (source === "peer") env.from = { kind: "api", tokenId: "tok_peer", peer: "remote", name: "remote" };
+  if (source === "ledger") {
+    env.from = { kind: "bridge", label: "ledger" };
+    env.meta.messageId = "ledger-ask:ask_test123";
+  }
+  w.held.set(CA, [{ env, to: target(CA), heldAt: 100 }]);
+  w.restart();
+  return w.q(CA)[0]!;
+}
+
+for (const source of ["executor", "peer", "ledger"] as const) {
+  for (const availability of ["idle", "busy", "offline"] as const) {
+    for (const mode of ["take", "read", "read-thread"]) {
+      test(`stranded-role-inbox: ${source}/${availability}/${mode} stays for flush, never old-PM consumption`, async () => {
+        const w = await inboxWorld(), item = strandedRole(w, source), body = item.env.content;
+        const b = w.clients.get(CB)!;
+        if (availability === "busy") w.busy.add(CB);
+        if (availability === "offline") w.clients.delete(CB);
+        const opts = mode === "take" ? {} : { read: mode === "read" ? item.env.meta.messageId : item.env.meta.threadId };
+        const r = await w.take(CA, opts);
+        expect(r.n).toBe(0);
+        expect(r.text).not.toContain("stranded role body");
+        expect(w.held.stat(CA)).toEqual({});
+        expect(w.q(CA)).toEqual([item]);
+        expect(item.lease).toBeUndefined();
+        expect(w.rendered).toEqual([]);
+        expect(w.mirrors).toEqual([]);
+        await w.flush(CA);
+        expect(w.sent.filter((e) => e.channel === CA)).toEqual([]);
+        if (availability === "busy") {
+          expect(w.q(CA)).toEqual([]);
+          expect(w.q(CB)).toHaveLength(1);
+          await w.flush(CB);
+          expect(w.sent).toEqual([]);
+        }
+        if (availability === "offline") {
+          expect(w.q(CA)).toEqual([item]);
+          expect(item.heldAt).toBe(100);
+          expect(w.sent).toEqual([]);
+          await w.flush(CA);
+          expect(w.q(CA)).toEqual([item]);
+        }
+        w.busy.clear(); w.clients.set(CB, b); w.restart();
+        await Promise.all([w.flush(CA), w.flush(CB)]);
+        await w.flush(CA); await w.flush(CB);
+        expect(w.sent).toEqual([{ channel: CB, text: body }]);
+        expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+      });
+    }
+  }
+}
+
+test("stranded-role-inbox: stale A lease cannot re-read or ack the transferred role; expiry allows flush retry", async () => {
+  const w = await inboxWorld(), item = strandedRole(w), body = item.env.content;
+  item.lease = { batchId: "inbox_old_A", at: Date.now() };
+  w.held.persist(); w.restart();
+  const retained = w.q(CA)[0]!, lease = { ...retained.lease! };
+  expect((await w.take(CA)).n).toBe(0);
+  expect((await w.take(CA, { read: retained.env.meta.messageId })).n).toBe(0);
+  expect((await w.take(CA, { ack: lease.batchId })).n).toBe(0);
+  expect(retained.lease).toEqual(lease);
+  expect(w.q(CA)).toEqual([retained]);
+  await w.flush(CA);
+  expect(w.sent).toEqual([]);
+  retained.lease!.at -= INBOX_LEASE_MS + 1; // 模拟原租约到期，不改批次号或队龄
+  await w.flush(CA); await w.flush(CB);
+  expect(w.sent).toEqual([{ channel: CB, text: body }]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+});
+
+test("stranded-role-inbox: two legitimate same-messageId role clicks remain distinct, unrelated owner entry still takes/acks", async () => {
+  const w = await inboxWorld(), first = strandedRole(w);
+  const second: HeldItem = { ...first, env: { ...first.env, content: "second click", meta: { ...first.env.meta, ts: "2026-10-01T00:00:01Z" } } };
+  const direct = ownerLetter("direct owner A");
+  direct.to = target(CA); direct.meta = { ...direct.meta, messageId: "other-owner" };
+  w.held.set(CA, [first, second, { env: direct, to: direct.to as LocalEndpoint, heldAt: 150 }]);
+  w.restart();
+  expect(w.held.stat(CA)).toEqual({ owner: 1 });
+  const r = await w.take(CA);
+  expect(r.n).toBe(1);
+  expect(r.text).toContain("direct owner A");
+  expect(r.text).not.toContain("stranded role body");
+  expect(r.text).not.toContain("second click");
+  const batch = w.q(CA).find((i) => i.env.meta.messageId === "other-owner")!.lease!.batchId;
+  await w.take(CA, { ack: batch });
+  expect(w.q(CA)).toHaveLength(2);
+  await w.flush(CA); await w.flush(CB);
+  expect(w.sent).toEqual([{ channel: CB, text: first.env.content }, { channel: CB, text: "second click" }]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
 });
