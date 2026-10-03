@@ -13,7 +13,7 @@ import type { Embedder } from "../src/lib/memory-embed.js";
 import {
   fileRoute, graphRoute, memoryCandidates, overlaps, rankMemories, SCORE_FLOOR, type Scored,
 } from "../src/lib/memory-retrieve.js";
-import { ensureMemoryRetrieval, memoryDedupKey, retrieveMemories } from "../src/lib/memory-retrieve-order.js";
+import { ensureMemoryRetrieval, memoryDedupKey, retrieveMemories, withMemory } from "../src/lib/memory-retrieve-order.js";
 import { getEventByDedup } from "../src/lib/ledger-store.js";
 import { openVectorStore } from "../src/lib/memory-vectors.js";
 
@@ -172,15 +172,15 @@ describe("没有嵌入：图和文件两路照常（验收线 2）", () => {
 
   test("ensureMemoryRetrieval 无模型：照样登记两路结果、不抛错", async () => {
     await ensureMemoryRetrieval(db, n3(), "write", null, { embedder: null, now: NOW, headFiles: HEAD_FILES });
-    const e = getEventByDedup(db, memoryDedupKey(n3(), null, "write"))!;
+    const e = getEventByDedup(db, `${memoryDedupKey(n3(), null, "write")}:prepared`)!;
     expect(e.kind).toBe("scheduler");
-    expect(e.data).toMatchObject({ op: "memory_retrieve", routes: ["graph", "file"], memoryIds: [id("m1"), id("m4")] });
+    expect(e.data).toMatchObject({ op: "memory_rank", routes: ["graph", "file"], items: [{ id: id("m1") }, { id: id("m4") }] });
   });
 
   test("嵌入模型调用失败：语义路为空，两路照常", async () => {
     const broken: Embedder = { model: "fake:broken", remote: false, embed: async () => { throw new Error("down"); } };
     await ensureMemoryRetrieval(db, n3(), "write", null, { embedder: broken, vectors: openVectorStore(":memory:"), now: NOW, headFiles: HEAD_FILES });
-    expect(getEventByDedup(db, memoryDedupKey(n3(), null, "write"))!.data.memoryIds).toEqual([id("m1"), id("m4")]);
+    expect(getEventByDedup(db, `${memoryDedupKey(n3(), null, "write")}:prepared`)!.data.items).toMatchObject([{ id: id("m1") }, { id: id("m4") }]);
   });
 });
 
@@ -201,9 +201,11 @@ describe("语义路端到端（假模型，余弦按 §3.5）", () => {
       }),
     };
     await ensureMemoryRetrieval(db, n3(), "write", null, { embedder: fake, vectors: openVectorStore(":memory:"), now: NOW, headFiles: HEAD_FILES });
-    const e = getEventByDedup(db, memoryDedupKey(n3(), null, "write"))!;
+    const e = getEventByDedup(db, `${memoryDedupKey(n3(), null, "write")}:prepared`)!;
     expect(e.data.routes).toEqual(["graph", "file", "vector"]);
-    expect(e.data.memoryIds).toEqual([id("m4"), id("m7"), id("m1"), id("m6")]);
+    expect(e.data.memoryIds).toBeUndefined();
+    withMemory(db, n3(), "write", null, { inputs: [] });
+    expect(getEventByDedup(db, memoryDedupKey(n3(), null, "write"))!.data.memoryIds).toEqual([id("m4"), id("m7"), id("m1"), id("m6")]);
     const items = e.data.items as { id: string; why: string; routes: string[] }[];
     expect(items.map((i) => i.why)).toEqual(["本 feature + 语义", "同 feature N2 + 语义", "依赖 N1", "语义"]);
     expect((e.data.dropped as { id: string; reason: string }[]).map((d) => [d.id, d.reason])).toEqual([[id("m2"), `同来源卡留坑 ${id("m1")}`], [id("m5"), `同来源卡留坑 ${id("m6")}`]]);

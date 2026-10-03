@@ -13,7 +13,7 @@ import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
 import { findPrRows } from "../lib/order-deliver-pr.js";
 import type { LedgerRun } from "../lib/order-ledger-exit.js";
 import { markingTakes, recordTaken } from "../lib/order-mark.js";
-import { takeOrderResult } from "../lib/order-take.js";
+import { takeOrderWithMemory } from "../lib/memory-retrieve-take.js";
 import { refuse, routeOrderTool, type OrderToolHandler, type OrderToolResult, type VerifiedCall } from "../lib/order-tool-route.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { runBounded } from "../lib/run-bounded.js";
@@ -38,7 +38,7 @@ const cwdOf = (agent: string): string | undefined => (agent === "master" ? MASTE
 /** 当前的单：多张时取最近动过的一张，其余的单号一并告诉它（deliver / ask 认其中任何一张） */
 /** 写单借给了 peer 的卡：不发给本机会话，order 为空并带 note 说明（lib/order-take.ts takeOrderResult，i28-RS1） */
 const takeOrder: OrderToolHandler = async (call) => {
-  const r = takeOrderResult(ledgerDb(), call);
+  const r = await takeOrderWithMemory(ledgerDb(), call);
   return r.ok ? r : refuse("invalid_order", r.error);
 };
 

@@ -3,7 +3,7 @@
  * 先异步算好命中（memory-retrieve-order.ts ensureMemoryRetrieval）传进来，没传 = 这路为空，图和文件两路照常。
  * 写进单子、记 scheduler 事件在 memory-retrieve-order.ts。tests/memory-retrieve.test.ts（§3.5 夹具逐数复现）。
  *
- * 去重按规则走、在上限之前（PM 10-03 定，pmem-D1 审查 P2 retrieval-dedup）：所有有命中的候选里，同一来源卡的总结和坑同时在 → 留坑；
+ * 去重在上限之前：所有有命中的候选里，同一来源卡的总结和坑同时在 → 留坑；
  * 两条余弦 ≥0.92 → 留新的。§3.5 夹具按这条重算：m2 与 m1 同来源卡（N1）→ m2 出局，开工单是 m4、m7、m1、m6。
  */
 import type { Database } from "bun:sqlite";

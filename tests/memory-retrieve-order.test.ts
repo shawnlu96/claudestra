@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
+import { markMemory, recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { MEMORY_CAPS } from "../src/lib/memory-retrieve.js";
@@ -148,8 +148,12 @@ describe("字节上限（验收线 3）", () => {
     const tight = withMemory(db, task(), "write", HEAD, room(900));
     expect(tight.inputs.at(-1)!.split("\n").filter((l) => l.startsWith("- [")).length).toBeLessThan(4);
     expect(bytes(JSON.stringify(tight))).toBeLessThanOrEqual(WIRE_MAX_BYTES);
+    expect(memEvents().at(-1)!.data.memoryIds).toEqual([...tight.inputs.at(-1)!.matchAll(/\[坑 (ab12-m\d+)/g)].map((m) => m[1]));
     const none = room(50);
     expect(withMemory(db, task(), "write", HEAD, none)).toBe(none);
+    expect(memEvents().at(-1)!.data.memoryIds).toEqual([]);
+    expect(withMemory(db, task(), "write", HEAD, room(2000))).toEqual(full);
+    expect(memEvents().at(-1)!.data.memoryIds).toHaveLength(4);
     const twenty = { inputs: Array.from({ length: 20 }, () => "i") };
     expect(withMemory(db, task(), "write", HEAD, twenty)).toBe(twenty);
   });
@@ -160,5 +164,35 @@ describe("字节上限（验收线 3）", () => {
     db.prepare("DROP TRIGGER memories_no_update").run();
     db.prepare("UPDATE memories SET body = 'not json' WHERE id = 'ab12-m1'").run();
     expect(withMemory(db, task(), "write", HEAD, wire)).toBe(wire);
+  });
+});
+
+
+describe("审查回归：实际注入与当前状态", () => {
+  test("预算不够时不得记录未推出的 memoryIds", () => {
+    recordMemory(db, { actor: "pm", now: 1 }, fat(1, "pitfall"));
+    const wire = { inputs: ["x"], pad: "" };
+    wire.pad = "p".repeat(WIRE_MAX_BYTES - bytes(JSON.stringify(wire)) - 50);
+    expect(withMemory(db, task(), "write", HEAD, wire)).toBe(wire);
+    expect(memEvents().flatMap((e) => e.data.memoryIds as string[])).toEqual([]);
+  });
+
+  test.each(["dispute", "retract", "supersede", "fixed"] as const)("缓存后 %s 的记忆不再注入", (mark) => {
+    recordMemory(db, { actor: "pm", now: 1 }, { ...fat(1, "pitfall"), fixable: true });
+    expect(writeOrder().inputs.at(-1)).toContain("ab12-m1");
+    if (mark === "supersede") recordMemory(db, { actor: "pm", now: 2 }, fat(2, "pitfall"));
+    if (mark === "fixed") markMemory(db, { actor: "pm" }, { memoryId: "ab12-m1", mark: "link_fix", taskId: "T1" });
+    markMemory(db, { actor: "pm" }, {
+      memoryId: "ab12-m1", mark, reason: "规则已变", ...(mark === "supersede" ? { by: "ab12-m2" } : {}), ...(mark === "fixed" ? { taskId: "T1" } : {}),
+    });
+    expect(writeOrder().inputs.join("\n")).not.toContain("ab12-m1");
+    expect(memEvents().at(-1)!.data.memoryIds).toEqual([]);
+  });
+
+  test("缓存后的 open → fixing 显示当前状态", () => {
+    recordMemory(db, { actor: "pm", now: 1 }, { ...fat(1, "pitfall"), fixable: true });
+    expect(writeOrder().inputs.at(-1)).toContain("开放");
+    markMemory(db, { actor: "pm" }, { memoryId: "ab12-m1", mark: "link_fix", taskId: "T1" });
+    expect(writeOrder().inputs.at(-1)).toContain("修复中");
   });
 });

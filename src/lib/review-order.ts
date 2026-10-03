@@ -78,7 +78,7 @@ export function slotByOrderId(db: Database, orderId: string, caller: ReviewCalle
 }
 
 /** 在 review 阶段、调用方是审查员的卡（一个审查员可能同时挂几张） */
-function reviewSlotsFor(db: Database, caller: ReviewCaller): ReviewSlot[] {
+export function reviewSlotsFor(db: Database, caller: ReviewCaller): ReviewSlot[] {
   const ids = (db.query("SELECT id FROM tasks WHERE stage = 'review' ORDER BY id").all() as { id: string }[]).map((r) => r.id);
   return ids.map((id) => getTask(db, id)).flatMap((t) => (t ? [reviewSlotFor(db, t, caller)] : [])).filter((s): s is ReviewSlot => !!s);
 }
