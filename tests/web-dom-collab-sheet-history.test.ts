@@ -60,23 +60,35 @@ async function mount(initialNarrow = true, hp: HistoryPort = port) {
   doc().body.appendChild(host);
   const root = createRoot(host as never);
   await React.act(async () => root.render(React.createElement(Harness)));
-  const act = (f: () => void) => React.act(async () => f());
+  const act = (f: () => void | Promise<void>) => React.act(async () => { await f(); });
   return { ctl, act, unmount: () => React.act(async () => root.unmount()) };
 }
 
 const hash = () => win().location.hash;
-/** history.back() 的 popstate 是异步的：等它到（或 300ms 没来）再看结果 */
-function settle(): Promise<void> {
-  return new Promise((r) => {
-    const t = setTimeout(r, 300);
-    win().addEventListener("popstate", () => { clearTimeout(t); setTimeout(r, 0); }, { once: true });
+/** 等下一次 popstate（happy-dom 的 back 遍历与 popstate 都是异步的）。5s 没来直接判失败，不拿超时当「到了」 */
+function nextPop(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("popstate 5s 没来")), 5000);
+    win().addEventListener("popstate", () => { clearTimeout(t); resolve(); }, { once: true });
   });
 }
-async function back(act: (f: () => void) => Promise<void>) {
-  const p = settle();
-  win().history.back();
-  await p;
-  await act(() => {});
+/**
+ * 系统返回：在 async act 里等 popstate，监听器触发的 setState 落在 act 里、退出时同步 flush。
+ * 曾经是 popstate 后再补一个空 act：那次 setState 在 act 外、交给 React 调度器，断言和调度器赛跑——
+ * 本机碰巧赢、CI 上读到旧值（run 37097397640）。
+ */
+async function back(act: (f: () => Promise<void>) => Promise<void>) {
+  await act(async () => {
+    const p = nextPop();
+    win().history.back();
+    await p;
+  });
+}
+/** 收起这一层（effect 里 back 消掉自己的条目）：等那次 popstate 落地，落地处理也包在 act 里 */
+async function closeAndLand(act: (f: () => void | Promise<void>) => Promise<void>, close: () => void) {
+  const p = nextPop();
+  await act(close);
+  await act(() => p);
 }
 async function reset() {
   win().history.replaceState(null, "", "#chat");
@@ -155,9 +167,7 @@ describe("整屏页历史条目", () => {
     await act(() => ctl.setSel("team"));
     expect(hash()).toBe("#chat?collab=~team");
     expect(win().history.length).toBe(len + 1);
-    const p = settle();
-    await act(() => ctl.setSel(null));
-    await p;
+    await closeAndLand(act, () => ctl.setSel(null));
     expect(hash()).toBe("#chat");
     expect(ctl.sel).toBeNull();
     await unmount();
@@ -168,9 +178,7 @@ describe("整屏页历史条目", () => {
     const { ctl, act, unmount } = await mount();
     await act(() => ctl.setSel("dnode"));
     expect(hash()).toBe("#chat?collab=~dnode");
-    const p = settle();
-    await act(() => ctl.setSel(null));
-    await p;
+    await closeAndLand(act, () => ctl.setSel(null));
     expect(hash()).toBe("#chat");
     await unmount();
   });
@@ -180,9 +188,7 @@ describe("整屏页历史条目", () => {
     const a = await mount();
     await a.act(() => a.ctl.setSel("team"));
     await a.act(() => a.ctl.setNarrow(false));
-    const p = settle();
-    await a.act(() => a.ctl.setSel(null));
-    await p;
+    await closeAndLand(a.act, () => a.ctl.setSel(null));
     expect(hash()).toBe("#chat");
     await a.unmount();
 
@@ -217,11 +223,12 @@ describe("整屏页历史条目", () => {
 
   test("详情已经 replaceState 接手这条：整屏页收起时不 back", async () => {
     await reset();
-    const { ctl, act, unmount } = await mount();
+    let backs = 0;
+    const { ctl, act, unmount } = await mount(true, { ...port, back: () => { backs++; port.back(); } });
     await act(() => ctl.setSel("waits"));
     win().history.replaceState(win().history.state, "", "#chat?collab=T1"); // 待你处理 → 点任务：详情接手
     await act(() => ctl.setSel(null));
-    await new Promise((r) => setTimeout(r, 300));
+    expect(backs).toBe(0);
     expect(hash()).toBe("#chat?collab=T1");
     await unmount();
   });
@@ -234,9 +241,7 @@ describe("整屏页历史条目", () => {
     expect(win().history.length).toBe(len + 1);
     await act(() => ctl.prepare("~member")); // 已开着：不再压
     expect(win().history.length).toBe(len + 1);
-    const p = settle();
-    await act(() => ctl.setSel(null));
-    await p;
+    await closeAndLand(act, () => ctl.setSel(null));
     expect(hash()).toBe("#chat");
     await unmount();
   });
@@ -244,10 +249,10 @@ describe("整屏页历史条目", () => {
   test("prepare 压了但这层没打开：下一次渲染就消掉", async () => {
     await reset();
     const { ctl, act, unmount } = await mount();
-    const p = settle();
+    const p = nextPop();
     await act(() => { ctl.prepare("~team"); ctl.setNarrow(true); });
     await act(() => ctl.setNarrow(false));
-    await p;
+    await act(() => p);
     expect(hash()).toBe("#chat");
     await unmount();
   });
