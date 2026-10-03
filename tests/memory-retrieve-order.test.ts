@@ -11,11 +11,13 @@ import { markMemory, recordMemory, type MemoryInput } from "../src/lib/ledger-me
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { MEMORY_CAPS } from "../src/lib/memory-retrieve.js";
-import { memoryDedupKey, memorySection, withMemory } from "../src/lib/memory-retrieve-order.js";
+import { memoryDedupKey, memorySection, withMemory as previewMemory } from "../src/lib/memory-retrieve-order.js";
 import { orderWireFor } from "../src/lib/order-take.js";
 import { WIRE_MAX_BYTES } from "../src/lib/order-wire.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
 
+const withMemory: typeof previewMemory = (db, task, kind, head, wire, opts = {}) =>
+  previewMemory(db, task, kind, head, wire, { ...opts, recordInjection: true });
 const P = "demo";
 const HEAD = "a".repeat(40);
 const bytes = (s: string) => Buffer.byteLength(s);
@@ -25,12 +27,12 @@ let path = ":memory:";
 const memEvents = () => listEvents(db, { project: P }).filter((e) => e.kind === "scheduler" && e.data.op === "memory_retrieve");
 const task = () => getTask(db, "T1")!;
 const writeOrder = () => {
-  const r = orderWireFor(db, { task: task(), stage: "build", step: "write", orderId: "T1:write:r0", intent: null });
+  const r = orderWireFor(db, { task: task(), stage: "build", step: "write", orderId: "T1:write:r0", intent: null }, true);
   if (!r.ok) throw new Error(r.error);
   return r.order;
 };
 const reviewOrder = (dir: string) => {
-  const r = reviewOrderOf(db, { task: task(), orderId: "T1:review:r1", node: "review", head: HEAD, auto: false }, dir);
+  const r = reviewOrderOf(db, { task: task(), orderId: "T1:review:r1", node: "review", head: HEAD, auto: false }, dir, true);
   if (!r.ok) throw new Error(r.error);
   return r.order;
 };

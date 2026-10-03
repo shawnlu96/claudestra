@@ -41,7 +41,7 @@ export async function takeOrderWithMemory(db: Database | null, call: VerifiedCal
   if (before !== claimStamp(db, currentOrders(db, call), "author") || caller !== callerStamp(call.agent)) {
     return { ok: false, error: "记忆检索期间订单或会话已变化，请重新领单" };
   }
-  return takeOrderResult(db, call);
+  return takeOrderResult(db, call, true);
 }
 
 export async function takeReviewWithMemory(db: Database, identity: CallerIdentity, dir?: string, deps: EnsureDeps = {}): Promise<TakeReviewResult> {
@@ -57,5 +57,5 @@ export async function takeReviewWithMemory(db: Database, identity: CallerIdentit
   if (before !== claimStamp(db, reviewSlotsFor(db, who.caller), "reviewer") || caller !== callerStamp(who.caller.agent)) {
     return { ok: false, error: "order_changed", message: "记忆检索期间订单或会话已变化，请重新领单" };
   }
-  return takeReview(db, identity, dir);
+  return takeReview(db, identity, dir, true);
 }

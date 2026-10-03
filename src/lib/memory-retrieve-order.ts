@@ -40,6 +40,8 @@ interface RetrievedItem {
 
 export interface RetrieveOpts {
   now?: number;
+  /** 仅最终领取入口启用；预检与全文拼单不能冒充已领取。 */
+  recordInjection?: boolean;
   /** 语义路的命中（ensureMemoryRetrieval 算好的）；不给 = 这路为空 */
   vector?: VectorHit[];
   /** HEAD 的文件列表（glob 对 glob 求交、「文件都不在了」先验用）；不给 = 按目录前缀判、不扣分 */
@@ -308,7 +310,7 @@ export function withMemory<W extends { inputs: string[] }>(db: Database | null |
       }
     }
     // 坏单会被入口拒绝，不把其中的候选误记成已经发出。
-    if (!("orderId" in result) || parseOrderWire(result).ok) recordInjection(db, task, kind, head, e, ids, result, opts.now ?? Date.now());
+    if (opts.recordInjection && (!("orderId" in result) || parseOrderWire(result).ok)) recordInjection(db, task, kind, head, e, ids, result, opts.now ?? Date.now());
     return result;
   } catch (e) {
     console.error(`⚠️ ${task.id} 项目记忆没写进单子（单子照发）：${(e as Error).message}`);

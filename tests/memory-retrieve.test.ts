@@ -204,7 +204,7 @@ describe("语义路端到端（假模型，余弦按 §3.5）", () => {
     const e = getEventByDedup(db, `${memoryDedupKey(n3(), null, "write")}:prepared`)!;
     expect(e.data.routes).toEqual(["graph", "file", "vector"]);
     expect(e.data.memoryIds).toBeUndefined();
-    withMemory(db, n3(), "write", null, { inputs: [] });
+    withMemory(db, n3(), "write", null, { inputs: [] }, { recordInjection: true });
     expect(getEventByDedup(db, memoryDedupKey(n3(), null, "write"))!.data.memoryIds).toEqual([id("m4"), id("m7"), id("m1"), id("m6")]);
     const items = e.data.items as { id: string; why: string; routes: string[] }[];
     expect(items.map((i) => i.why)).toEqual(["本 feature + 语义", "同 feature N2 + 语义", "依赖 N1", "语义"]);

@@ -77,6 +77,25 @@ async function probe(kind: string, mode: string): Promise<void> {
     return result;
   };
   const deliveryEvents = () => listEvents(db, { project: "demo" }).filter((e) => e.data.op === "memory_retrieve");
+  if (mode.startsWith("preview")) {
+    const { unpullableReason } = await import("../src/lib/order-pullable.js");
+    const { getIntent } = await import("../src/lib/ledger-scheduler.js");
+    const { currentOrders } = await import("../src/lib/order-take.js");
+    const orderId = kind === "write" ? currentOrders(db, { ...identity, channelId: "test" })[0]!.orderId : "test";
+    const intent = { ...getIntent(db, "test")!, id: orderId };
+    const ref = { agent: "agent-x", sessionId: "s1", role: kind === "write" ? "author" : "reviewer" } as any;
+    expect(unpullableReason(db, ref, intent)).toBeNull();
+    expect(deliveryEvents()).toEqual([]);
+    if (mode === "preview-text") {
+      const { takeOrderResult } = await import("../src/lib/order-take.js");
+      const { takeReview } = await import("../src/lib/review-order.js");
+      const full = kind === "write" ? takeOrderResult(db, { ...identity, channelId: "test" }) : takeReview(db, identity);
+      expect(JSON.stringify(full)).toContain("项目记忆");
+      expect(deliveryEvents()).toEqual([]);
+    }
+    // 唤醒失败或无人领取：只有预检，没有真实工具领取，不能生成领取回执。
+    if (mode !== "preview-claim") { db.close(); return; }
+  }
   if (mode === "fallback") {
     const { takeOrderResult } = await import("../src/lib/order-take.js");
     const { takeReview } = await import("../src/lib/review-order.js");
@@ -108,7 +127,8 @@ async function probe(kind: string, mode: string): Promise<void> {
 if (process.argv.includes("--probe")) {
   await probe(process.argv.at(-2)!, process.argv.at(-1)!);
 } else {
-  const modes = ["first", "concurrent", "session", "head", "claim", "dispute", "unauthorized", "empty", "no-model", "failure", "timeout", "fallback", "registered"];
+  const modes = ["first", "concurrent", "session", "head", "claim", "dispute", "unauthorized", "empty", "no-model", "failure", "timeout", "fallback", "registered",
+    "preview-claim", "preview-unclaimed", "preview-failed-wake", "preview-text"];
   for (const kind of ["write", "review"]) for (const mode of [...modes, ...(kind === "write" ? ["lease"] : [])]) {
     test(`真实工具 ${kind}: ${mode}`, async () => {
       const dir = mkdtempSync(join(tmpdir(), "memory-tool-"));
@@ -153,6 +173,7 @@ async function checkResult(kind: string, mode: string, result: any, events: any[
       expect(section).not.toContain("ab12-m1"); // 两条语义坑余弦 1，留新的
       expect(calls).toBe(2); // 一次批量嵌入、一次查询；并发领单也只准备一次
     }
+    if (mode === "preview-claim") expect(events).toHaveLength(1);
     const ids = [...section.matchAll(/\[坑 (ab12-m\d+)/g)].map((m) => m[1]);
     expect(events.at(-1)!.data.memoryIds).toEqual(ids);
     expect(Buffer.byteLength(JSON.stringify(order))).toBeLessThanOrEqual(32768);
