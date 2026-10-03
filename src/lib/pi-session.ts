@@ -29,13 +29,24 @@
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
 import { hasInboundHeader } from "./inbound-body.js";
+import { piAgentDirOf } from "./pi-path.js";
+import { isSandbox, sandboxPiAgentDir, SANDBOX_ROOT_ENV } from "./sandbox.js";
+import { realInside } from "./sandbox-pi-fs.js";
 
-/** Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖（与 Pi 自身一致） */
+/**
+ * Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖；`~` / file:// 的展开与 Pi 自身一致（lib/pi-path.ts）。沙箱里只认从沙箱根
+ * 推出来的那个：不回落 ~/.pi（会话发现、用量、归档会扫到 owner 真实的 Pi 会话），也不认手设的别处（lib/sandbox.ts sandboxPiAgentDir）。
+ */
 export function piAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+  if (isSandbox()) return sandboxPiAgentDir(process.env[SANDBOX_ROOT_ENV]?.trim());
+  return piAgentDirOf(process.env);
+}
+
+/** 沙箱里会话目录 / 文件的真实路径必须在真实沙箱根下：链接指到根外的当它不存在（不用 jsonl 里的 cwd 代替文件边界）；非沙箱不查 */
+export function piSessionPathAllowed(p: string): boolean {
+  return !isSandbox() || realInside(process.env[SANDBOX_ROOT_ENV]?.trim() ?? "", p);
 }
 
 /** 解析软链；路径不存在时原样返回（不抛） */
@@ -74,7 +85,8 @@ export function listPiSessionJsonls(cwd: string, agentDir = piAgentDir()): strin
     return readdirSync(dir)
       .filter((n) => n.endsWith(".jsonl"))
       .sort()
-      .map((n) => join(dir, n));
+      .map((n) => join(dir, n))
+      .filter(piSessionPathAllowed);
   } catch {
     return [];
   }
@@ -86,7 +98,7 @@ export function piSessionPath(cwd: string, sessionId: string, agentDir = piAgent
   const dir = piSessionsDir(cwd, agentDir);
   try {
     const hit = readdirSync(dir).find((n) => n.endsWith(`_${sessionId}.jsonl`));
-    return hit ? join(dir, hit) : null;
+    return hit && piSessionPathAllowed(join(dir, hit)) ? join(dir, hit) : null;
   } catch {
     return null;
   }
@@ -105,7 +117,7 @@ export function findPiSessionBySessionId(sessionId: string, agentDir = piAgentDi
   for (const d of dirs) {
     try {
       const hit = readdirSync(join(root, d)).find((n) => n.endsWith(`_${sessionId}.jsonl`));
-      if (hit) return join(root, d, hit);
+      if (hit && piSessionPathAllowed(join(root, d, hit))) return join(root, d, hit);
     } catch { /* 单目录读不了就跳过 */ }
   }
   return null;
@@ -215,6 +227,9 @@ export function wrapPiInboundAsChannel(text: string): string {
   const mark = /^\s*\[🤖/.test(text) ? ' is_agent="true"' : ' api="true"';
   return `<channel source="claudestra"${from ? ` user="${from}"` : ""}${mark}>\n${text}\n</channel>`;
 }
+
+/** 已是 <channel …>…</channel>（ACP 下的入站；排队几条拼成的一串也算，拼缝由 cc-own-records.plainUserText 去）：wrapPiInboundAsChannel 原样返回、不双包 */
+const CHANNEL_WRAPPED_RE = /^\s*<channel\s[^>]*>[\s\S]*<\/channel>\s*$/;
 
 /** 把 content（字符串或块数组）转成"可包 channel 的正文" */
 function inboundWrapped(text: string): string {
@@ -355,7 +370,8 @@ export function piLineToClaudeShape(line: string): AnyRecord | null {
         : Array.isArray(blocks)
           ? blocks.filter((b: AnyRecord) => b?.type === "text").map((b: AnyRecord) => String(b.text ?? "")).join("\n")
           : "";
-    if (joined && hasInboundHeader(joined)) {
+    // ACP 宿主投给 Pi 的已是完整 <channel> 包装（同 Codex，lib/codex-session.ts）：不认头也要标 isMeta，否则标签原样进历史
+    if (joined && (hasInboundHeader(joined) || CHANNEL_WRAPPED_RE.test(joined))) {
       // ⚠ isMeta:true 是 Claude Code 侧 channel 记录的标记，session-history 只在
       // isMeta 为真时才走 unwrapChannelMessage（其余 isMeta 是 caveat 之类，过滤）。
       // 不带这个标记 ⇒ <channel> 标签原样留在正文里（实测过）。

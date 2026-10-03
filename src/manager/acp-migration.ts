@@ -11,7 +11,13 @@ import { loadRegistry, migrateWorkerToAgent, output, patchRegistryAgent, saveReg
 
 const RESTART_TIMEOUT_MS = 240_000;
 
-export async function cmdMigrate(mode?: string): Promise<void> {
+export async function cmdMigrate(mode?: string, rest: string[] = []): Promise<void> {
+  if (mode === "--pi") { // Pi 只按点名逐个迁（pi-acp-migration.ts），不进下面的批量 / 启动迁移
+    const r = await (await import("./pi-acp-migration.js")).migratePi(rest);
+    output(r);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
   const r = await runMigrateMode(mode, migrateWorkersOnly, migrateAll);
   output(r);
   if ("failed" in r && r.failed.length) { console.error(`[migrate] Codex 重启失败：${r.failed.join(", ")}`); process.exitCode = 1; }

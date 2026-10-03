@@ -6,11 +6,13 @@
  * bridge 重启后接着轮询。**不自动重试 POST**——消息投递非幂等，重试=双发。
  */
 
+export { sendLendRelay } from "./lend-relay-send.js";
 import type { ServerWebSocket } from "bun";
 import type { Envelope, Delivery } from "./router.js";
 import { newMessageId, newThreadId } from "./router.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { handoffEnd, handoffStart } from "../lib/handoff-log.js";
+import { isLendWorkerName } from "../lib/lend-workers-view.js";
 import { signedFor } from "../lib/instance-key.js";
 import { peerAuthHint, peerCallFailureText, peerCallIsTimeout, peerErrorText } from "../lib/peer-auth-hints.js";
 import { readJsonCapped } from "../lib/body-reader.js";
@@ -69,6 +71,7 @@ interface CallerRef {
   ws?: ServerWebSocket<unknown>;
   channelId: string;
   name: string;
+  onDelivered?: () => void; // 只在发起时有；不进调用簿
 }
 
 /** 进行中的出站调用数（诊断/测试用） */
@@ -99,7 +102,6 @@ export function cancelHttpPeerCallsForChannel(channelId: string): number {
 /**
  * 出站主入口。**同步阶段**只做参数构造——立即给 caller 回 MCP response
  * （ok+pushBack），真正的 HTTP 往返在后台进行，结果一律以合成消息推回。
- * 返回值是给 send_to_agent handler 的 result 对象。
  */
 export function routeToHttpPeer(
   ws: ServerWebSocket<unknown>,
@@ -110,9 +112,11 @@ export function routeToHttpPeer(
   text: string,
   expecting?: string,
   oneShot = false,
+  onDelivered?: () => void, // 对方 2xx 收下之后才调（PM 带 ask id 的回话记成已答）；POST 失败 / 被拒不调
 ): { ok: true; targetName: string; pushBack: boolean } {
-  const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName };
+  const caller: CallerRef = { ws, channelId: fromChannelId, name: fromName, onDelivered };
   const callId = `hp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  if (isLendWorkerName(peerAgentName)) oneShot = true; // 出借 worker 没有 reply，只走 ask 回话：不挂 2 小时轮询、不进调用簿（i28-W6）
   // oneShot 是 FYI 通知，不等回复，不算一次交接
   if (!oneShot) void handoffStart(callId, { dir: "out", peer: peer.name, localAgent: fromName, remoteAgent: peerAgentName }, text.length);
   track(callId, fromChannelId, () => runCall(callId, caller, peer, peerAgentName, text, expecting, oneShot));
@@ -211,12 +215,10 @@ async function runCall(
     settle(callId, caller, "http_peer_out_error", { peer: peer.name, kind: "http", status: res.status });
     return;
   }
+  try { caller.onDelivered?.(); } catch (e) { console.error(`⚠️ ${label} 投递后回调失败：${(e as Error).message}`); } // 出错不影响取回复
 
   // oneShot:对方已接收(2xx)即完成——不取回复不轮询,让对方按 FYI 处理
-  if (oneShot) {
-    settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "oneshot" });
-    return;
-  }
+  if (oneShot) return settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "oneshot" });
 
   // 同步拿到回复（wait 命中）
   const replyText = extractReplyText(body);

@@ -9,18 +9,13 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { replyResultText } from "../lib/reply-ask-schema.js"; // 这个文件没有任何 import，不破坏「只依赖 node: 内置模块」；历史按这句认 reply 建出的 askId
+import { replyResultText } from "../lib/reply-ask-schema.js";
+import { runningPiVersion, writePiEnvSnapshot } from "../lib/pi-env-snapshot.js"; // 这个文件没有任何 import，不破坏「只依赖 node: 内置模块」；历史按这句认 reply 建出的 askId
 import { createAbortControl } from "./abort-control.js";
 
 const CHANNEL_ID = (process.env.DISCORD_CHANNEL_ID ?? "").trim();
 const AGENT_NAME = (process.env.CLAUDESTRA_AGENT ?? "").trim();
-// 本进程加载的 Pi 版本（进快照 → 网页「重启生效」提示）。Pi 把自己的包作为虚拟模块提供给扩展；`as string` 绕开 tsc 解析。
-// 留着 promise 由写快照处 await：session_start 可能早于 import 落定。老版本 Pi 包名不同 → undefined，只是不提示重启，通道照常
-const RUNNING_PI_VERSION: Promise<string | undefined> = import("@earendil-works/pi-coding-agent" as string)
-  .then((m) => (typeof m?.VERSION === "string" ? m.VERSION : undefined), () => undefined);
 // ⚠ 本文件由 Pi 直接加载、只依赖 node: 内置模块，所以内联 lib/bridge-url.ts 的规则：兜底从 BRIDGE_PORT 推，
 //   写死 3847 会让改过端口的机器上 Pi agent 静默连不上 bridge（正常由 pi-launch 传 BRIDGE_URL）。
 const BRIDGE_URL = (
@@ -147,42 +142,8 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     execFile("tmux", ["set-option", "-w", "-t", pane, READY_OPTION, "1"], () => { /* 不在 tmux 里就忽略 */ });
   }
 
-  /**
-   * 把「这个会话实际加载了什么」写成快照（manager pi-env / 网页端读），记实况而不是配置（`--no-extensions` 到底关掉了什么只有这里看得见）。
-   * 落文件（0600，和 registry 同目录家族）而不是发 bridge：bridge 挂了、会话死了之后仍要可读（排查用）。
-   */
   async function writeEnvSnapshot(ctx?: PiContext) {
-    if (!AGENT_NAME) return;
-    try {
-      const tools = (pi.getAllTools?.() ?? [])
-        .map((t) => (typeof t?.name === "string" ? t.name : ""))
-        .filter(Boolean)
-        .sort();
-      const active = (pi.getActiveTools?.() ?? []).slice().sort();
-      const commands = (pi.getCommands?.() ?? [])
-        .map((c) => (typeof c?.name === "string" ? c.name : ""))
-        .filter(Boolean)
-        .sort();
-      const model = ctx?.model ?? pi.getModel?.();
-      const snap = {
-        at: new Date().toISOString(),
-        agent: AGENT_NAME,
-        sessionId: sessionId || undefined,
-        cwd: process.cwd(),
-        piVersion: undefined as string | undefined,
-        toolCount: tools.length,
-        tools,
-        activeTools: active,
-        commandCount: commands.length,
-        commands,
-        model: model?.id || model?.name || undefined,
-        thinking: (() => { try { return pi.getThinkingLevel?.(); } catch { return undefined; } })(),
-      };
-      snap.piVersion = await RUNNING_PI_VERSION; // 实况在上面同步取齐（ctx 只在事件回调里可靠），最后才等版本号
-      const dir = join(process.env.CLAUDESTRA_STATE_DIR?.trim() || join(homedir(), ".claude-orchestrator"), "pi-env"); // = lib/paths STATE_DIR
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      writeFileSync(join(dir, `${AGENT_NAME}.json`), JSON.stringify(snap, null, 1), { mode: 0o600 });
-    } catch { /* 快照写不了不影响通道本身 */ }
+    writePiEnvSnapshot({ pi, agent: AGENT_NAME, sessionId, ctx, piVersion: await runningPiVersion() });
   }
 
   // ── bridge 连接 ──────────────────────────────────────────
@@ -420,6 +381,9 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
     setLinkStatus(false);
     connect();
   });
+
+  // 回合开始再写一次：激活（codemode）发生在别的扩展的 session_start 里，首份快照会少一个工具
+  pi.on("agent_start", (_event, ctx) => void writeEnvSnapshot(ctx));
 
   // 模型换了就重写快照（档案里钉的模型/用户手动切换都走这里）
   pi.on("model_select", (_event, ctx) => writeEnvSnapshot(ctx));

@@ -14,7 +14,7 @@ import { listLendOrders, WRITE_POOL_TTL_MS } from "../src/lib/ledger-lend.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listSteps } from "../src/lib/ledger-steps.js";
-import { closeLedger, getTask, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getTask, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, setMeta, setTask } from "../src/lib/ledger-write.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
@@ -352,7 +352,7 @@ test("生产库按旧顺序把出借写单跑成了第 13 版（部署表缺）�
   closeLedger(file);
   const m = openLedger(file);
   expect(m.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
-  expect(LEDGER_SCHEMA_VERSION).toBe(14);
+  expect(LEDGER_SCHEMA_VERSION).toBe(LEDGER_MIGRATIONS.length);
   expect(m.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_deploys'").all()).toHaveLength(1);
   expect(m.query("SELECT orderId, step, branch, seenAt FROM lend_orders").all()).toEqual([{ orderId: "lend:T1:s1:r0:a0", step: "write", branch: BR, seenAt: 5 }]);
   closeLedger(file);

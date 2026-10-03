@@ -1,5 +1,7 @@
 /**
- * B → A 的四个出借接口（T93 定的 lend wire v1：POST /api/v1/lend/{poll,claim,lease,result}）的请求体与响应解析。
+ * B → A 的出借接口的请求体与响应解析：T93 定的 lend wire v1（POST /api/v1/lend/{poll,claim,lease,result}，逐字节冻结），
+ * 加 i28-W2 的 v2（hello / beat / ask，格式在 lend-wire-v2.ts）。v2 接口回 404 = 对方是没有 v2 的旧版本，code 记 old_peer，
+ * 调用方据此退回 v1 轮询（A 的 v2 拒绝码里没有 404）。
  * 传输由调用方注入（生产是 `manager lend call`：peerCliFetch 的 E2E 那一半，走不了 E2E 就拒，不退明文）。
  * 响应一律严格解析：多字段、少字段、类型不对都当「对方回了看不懂的东西」（transport 类失败，结果不明），不猜。
  * 前提检查（peer 记录钉钥 + E2E、没有代理变量）也在这里：不满足就不发任何请求。tests/lend-remote.test.ts。
@@ -8,12 +10,19 @@ import type { HttpPeer } from "./peers.js";
 import { isBaseBranch, LEND_BRANCH_RE } from "./lend-git.js";
 import { parseOrderWire, type OrderWire } from "./order-wire.js";
 import { createHash } from "node:crypto";
+import { parseV2Response, type LendV2Endpoint } from "./lend-wire-v2.js";
+import { claimBranch } from "./lend-arbiter-wire.js";
 
 const LEND_WIRE_V = 1;
+const V2_OPS: readonly string[] = ["hello", "beat", "ask"] satisfies LendV2Endpoint[];
 export type LendOp = "poll" | "claim" | "lease" | "result";
+/** v1 的四个加 v2 的三个（B → A） */
+export type LendAnyOp = LendOp | "hello" | "beat" | "ask";
+/** 对方没有这个 v2 接口（旧版本）：按 proto 1 处理，只轮询 */
+export const LEND_OLD_PEER = "old_peer";
 
 /** 注入的传输：status = HTTP 状态，body = 解析后的 JSON（不是 JSON 就是 null）；抛错 = 没发出去或不知道发没发出去 */
-export type LendCall = (peer: string, op: LendOp, body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>;
+export type LendCall<O extends string = LendOp> = (peer: string, op: O, body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>;
 
 type LendErr = { ok: false; status: number; code: string; error: string };
 export type LendRes<T> = { ok: true; value: T } | LendErr;
@@ -66,6 +75,7 @@ function polled(v: unknown, i: number): PolledOrder {
 }
 
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
+const v2 = <T>(r: { ok: true; value: T } | { ok: false; error: string }): T => (r.ok ? r.value : bad(r.error));
 
 /** 成功体的解析器：拿到的是 ok/v 之外的字段 */
 const PARSE = {
@@ -83,7 +93,7 @@ const PARSE = {
     const sum = str(o.sha256, HEX64, "sha256").toLowerCase();
     if (sha256(text) !== sum) bad("派单全文的 sha256 对不上");
     const w = has ? obj(o.write, ["branch", "base"], "write") : null;
-    const write = w ? { branch: str(w.branch, LEND_BRANCH_RE, "write.branch"), base: str(w.base, BASE, "write.base") } : null;
+    const write = w ? { branch: claimBranch(order, w.branch, (v) => str(v, LEND_BRANCH_RE, "write.branch")), base: str(w.base, BASE, "write.base") } : null;
     if (write && !isBaseBranch(write.base)) bad("write.base 不是能用的分支名");
     return { order: (order as { ok: true; value: OrderWire }).value, text, sha256: sum, lease: lease(o.lease), write };
   },
@@ -98,15 +108,18 @@ const PARSE = {
       eventSeq: int(c.eventSeq, "receipt.eventSeq"), taskId: str(c.taskId, NAME, "receipt.taskId"), key: str(c.key, B64URL, "receipt.key"),
       sig: str(c.sig, B64URL, "receipt.sig") };
   },
+  hello: (r: unknown) => v2(parseV2Response("hello", r)),
+  beat: (r: unknown) => v2(parseV2Response("beat", r)),
+  ask: (r: unknown) => v2(parseV2Response("ask", r)),
 } as const;
 
-type Parsed = { [K in LendOp]: ReturnType<(typeof PARSE)[K]> };
+type Parsed = { [K in LendAnyOp]: ReturnType<(typeof PARSE)[K]> };
 
 /**
  * 发一次、解析一次。transport 抛错 → code "transport"（不知道对方收没收到，调用方按「结果不明」处理，不当成拒绝）；
  * 对方明确拒绝（ok:false + code）→ 原样带出；成功体解析不了 → code "bad_response"（同样是结果不明）。
  */
-export async function lendRequest<K extends LendOp>(call: LendCall, peer: string, op: K, body: Record<string, unknown>): Promise<LendRes<Parsed[K]>> {
+export async function lendRequest<K extends LendAnyOp>(call: LendCall<K>, peer: string, op: K, body: Record<string, unknown>): Promise<LendRes<Parsed[K]>> {
   let res: { status: number; body: unknown };
   try {
     res = await call(peer, op, { v: LEND_WIRE_V, ...body });
@@ -114,6 +127,7 @@ export async function lendRequest<K extends LendOp>(call: LendCall, peer: string
     return { ok: false, status: 0, code: "transport", error: (e as Error).message.slice(0, 300) };
   }
   const b = res.body as Record<string, unknown> | null;
+  if (V2_OPS.includes(op) && res.status === 404) return { ok: false, status: 404, code: LEND_OLD_PEER, error: `对方没有 lend/${op} 接口（旧版本），退回轮询` };
   if (!b || typeof b !== "object") return { ok: false, status: res.status, code: "bad_response", error: `对方回了 ${res.status}（不是 JSON）` };
   if (b.ok !== true) {
     const code = typeof b.code === "string" && /^[\w.-]{1,40}$/.test(b.code) ? b.code : `http_${res.status}`;

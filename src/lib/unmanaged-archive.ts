@@ -23,8 +23,9 @@ export interface UnmanagedArchiveMeta {
 
 /**
  * 快照进 archive/archived/<sid>/，旁边写 .meta.json（恢复要知道原路径：cwd 编码不可逆），再删原文件。
- * 用复制不用 rename：副本的 mtime 是归档时刻，归档区按 mtime 算保留期（archive-sweeper pruneArchives）——
- * rename 保留原 mtime，几个月前的子线程一挪进来就会被当成超期清掉。
+ * 归档区按 mtime 算保留期（archive-sweeper pruneArchives），所以副本 mtime 必须是归档时刻：rename 保留原 mtime，
+ * Bun 在 macOS 上 copyFile 大文件走 clonefile 也保留原 mtime（小文件不会，测试要用大文件）——复制后显式 utimes 成现在，
+ * 不然几个月前的子线程一挪进来就会被当成超期清掉。
  * sessionId 会拼进目录名，而 Codex 的 id 来自文件内容：先过会话 id 白名单，建好目录再核对真实路径仍在归档根下一层
  * （防 `../` 和预先放好的软链把副本写到归档区外面）。
  */
@@ -34,7 +35,10 @@ export async function archiveUnmanagedFile(file: string, meta: UnmanagedArchiveM
   await mkdir(dest, { recursive: true });
   const [realRoot, realDest] = await Promise.all([realpath(root), realpath(dest)]);
   if (dirname(realDest) !== realRoot) throw new Error(`归档目录不在归档根下，拒绝写入: ${realDest}`);
-  await copyFile(file, join(dest, file.split("/").pop()!));
+  const copy = join(dest, file.split("/").pop()!);
+  await copyFile(file, copy);
+  const now = new Date();
+  await utimes(copy, now, now);
   const record = {
     kind: "unmanaged", originalPath: file, runtime: meta.runtime ?? null, cwd: meta.cwd ?? null, sessionId: meta.sessionId,
     ...(meta.reason ? { reason: meta.reason } : {}),
@@ -94,7 +98,7 @@ export async function restoreUnmanagedArchive(
 /** Codex 子线程多久没写就收进归档 */
 export const CODEX_SUB_IDLE_DAYS = 7;
 
-interface SweepOpts {
+export interface SweepOpts {
   /** registry 里所有 agent（含大总管）挂着的会话：线程本身、它的父线程或根线程在里面就不动 */
   keep: ReadonlySet<string>;
   now?: number;
@@ -116,33 +120,48 @@ function isPinned(p: Record<string, any>, sid: string, opts: SweepOpts, locksDir
   return related.some((id) => opts.keep.has(id) || existsSync(join(locksDir, `${id}.lock`)));
 }
 
+/** 挑哪些 Codex 线程收：before = 只看这一刻之前最后写过的文件（不设 = 不按时间筛，先筛 mtime 省得逐个读首行）；want 看 session_meta 的 payload */
+interface CodexThreadPick {
+  before?: number;
+  want: (p: Record<string, any>) => boolean;
+  reason: string;
+}
+
 /**
- * Codex 的子线程（subagent 做完一件事就停、自动审查每审一次新开一条）结束后不会再被写，Codex 自己又从不清理，
- * 有的机器两个月攒了 355 个；`codex exec` 的一次性会话（isCodexOneShot）同理。这里把 idleDays 天没写过的这两类收进归档（可恢复）；
- * 人开的主会话、被挂着 / 被锁着的（isPinned）、用户恢复过的一律不动。开关在 config.json autoArchiveCodexSubs（缺省关，archive-sweeper 判）。单个文件失败只记一笔。
+ * 按 pick 把 Codex 线程收进归档（可恢复）；被挂着 / 被锁着的（isPinned）、用户恢复过的一律不动，单个文件失败只记一笔。
+ * 闲置子线程的每日扫描（下面）和出借 worker 结单归档（lend-session-archive.ts）共用这一套。
  */
-export async function sweepIdleCodexSubSessions(opts: SweepOpts): Promise<{ archived: number; bytes: number }> {
+export async function archiveCodexThreads(opts: SweepOpts, pick: CodexThreadPick): Promise<{ archived: number; bytes: number }> {
   const codexRoot = opts.codexRoot ?? codexRolloutRoot();
   const locksDir = opts.locksDir ?? join(dirname(codexRoot), "thread-writer-locks");
-  const cutoff = (opts.now ?? Date.now()) - (opts.idleDays ?? CODEX_SUB_IDLE_DAYS) * 86_400_000;
   const restored = await readRestored(opts.restoredIndex);
   let archived = 0;
   let bytes = 0;
   for (const file of listCodexSessionFiles(codexRoot)) {
     try {
       const st = await stat(file);
-      if (st.mtimeMs > cutoff) continue;
+      if (pick.before !== undefined && st.mtimeMs > pick.before) continue;
       const p = await readCodexMetaPayload(file);
-      if (!p || !(isCodexSubThread(p) || isCodexOneShot(p))) continue;
+      if (!p || !pick.want(p)) continue;
       const sid = String(p.id ?? p.session_id ?? "");
       if (restored[sid] || isPinned(p, sid, opts, locksDir)) continue;
       const cwd = typeof p.cwd === "string" ? p.cwd : null;
-      await archiveUnmanagedFile(file, { sessionId: sid, runtime: "codex", cwd, reason: "codex-sub-idle" }, opts.archiveRoot);
+      await archiveUnmanagedFile(file, { sessionId: sid, runtime: "codex", cwd, reason: pick.reason }, opts.archiveRoot);
       archived++;
       bytes += st.size;
     } catch (e) {
-      console.log(`⚠️ Codex 子会话归档失败（跳过）: ${file}: ${(e as Error).message}`);
+      console.log(`⚠️ Codex 会话归档失败（跳过）: ${file}: ${(e as Error).message}`);
     }
   }
   return { archived, bytes };
+}
+
+/**
+ * Codex 的子线程（subagent 做完一件事就停、自动审查每审一次新开一条）结束后不会再被写，Codex 自己又从不清理，
+ * 有的机器两个月攒了 355 个；`codex exec` 的一次性会话（isCodexOneShot）同理。这里把 idleDays 天没写过的这两类收进归档（可恢复）；
+ * 人开的主会话不动。开关在 config.json autoArchiveCodexSubs（缺省关，archive-sweeper 判）。
+ */
+export function sweepIdleCodexSubSessions(opts: SweepOpts): Promise<{ archived: number; bytes: number }> {
+  const before = (opts.now ?? Date.now()) - (opts.idleDays ?? CODEX_SUB_IDLE_DAYS) * 86_400_000;
+  return archiveCodexThreads(opts, { before, want: (p) => isCodexSubThread(p) || isCodexOneShot(p), reason: "codex-sub-idle" });
 }

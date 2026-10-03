@@ -145,6 +145,8 @@ describe("T68 durable merge queue", () => {
         mergeState: "CLEAN", mergeSha: null, checks: names.map((name) => ({ name, bucket: "pass" as const })) };
       const external: MergeExternal = {
         inspect: async () => snapshot,
+        freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }), // i28-M9: never behind main here
+        carryReview: async () => ({ ok: false, reason: "不沿用" }),
         updateBranch: async () => { throw new Error("clean PR must not be updated"); },
         merge: async () => { snapshot = { ...snapshot, state: "MERGED", mergeSha: M }; return M; },
       };
@@ -152,7 +154,9 @@ describe("T68 durable merge queue", () => {
         expect(await schedulerMergeTick(f.db, config, manager, () => external)).toBe(1);
       }
       expect(getMergeRun(f.db, "merge-one")).toMatchObject({ phase: "merged", mergeSha: M, requiredChecks: names.join(",") });
-      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "submitted" });
+      // i28-MT1f2: settled in the pass that merged it (no deploy configured), so the slot is free for the next card's plan
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id='merge-one'").get()).toEqual({ status: "done" });
+      expect(f.db.query("SELECT count(*) AS n FROM scheduler_resources WHERE intentId='merge-one'").get()).toEqual({ n: 0 });
     } finally { f.close(); }
   });
   test("preflight rejection records unknown intent instead of retrying it each poll", async () => {

@@ -1,20 +1,96 @@
 /**
- * manager lend set|off|status 与 borrow set|off|status：写 / 看 lend.json（lib/lend-config.ts 读写，lib/lend-policy.ts 准入）。
+ * manager lend grant|revoke|status 与 borrow set|off|status：写 / 看 lend.json（lib/lend-config.ts 读写，lib/lend-policy.ts 准入）。
  * 只做声明，领单循环不在这里（设计稿 docs/design/remote-capacity.md §2.3）。改动只许 owner / master（project-guard.ts）。
+ * 出借是一次授权（lend grant，到期时间必填、最长 7 天）；收回（lend revoke）先删条目，再当场停掉授权已不覆盖的出借 worker（lib/lend-grant-spawn.ts），
+ * 订单的账由调度服务下一轮记。
+ * lend set / off 是 grant / revoke 的旧名；逐单确认（--confirm）已退役。
  */
-import { LEND_PATH, readLend, updateLend, type LendFile } from "../lib/lend-config.js";
-import { buildBorrowEntry, buildLendEntry, effectiveLend, readLendContext, type Built } from "../lib/lend-policy.js";
+import { CODEX_EFFORT_LEVELS } from "../lib/codex-launch.js";
+import { isCodexEffort, isCodexModel, isPriority, LEND_PATH, PRIORITIES, readLend, updateLend, type BorrowEntry, type LendEntry, type LendFile } from "../lib/lend-config.js";
+import { SHELL_SENTENCE } from "../lib/lend-grant-rules.js";
+import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, readLendContext, resolveContact, type Built } from "../lib/lend-policy.js";
+import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
+import { lendStopReason } from "../lib/lend-watchdog.js";
+import { readStoppedWorkSummary, stoppedWorkText } from "../lib/lend-work-retention.js";
+import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
+import { ASK_HINT, ASK_USAGE, askGate, lendAskAction, offParams, printBind, type AskGate } from "../lib/lend-ask-auth.js";
+import { probeAcpWorker } from "../lib/worker-liveness.js";
 import { parseLedgerArgs } from "./ledger-identity.js";
-import { output } from "./core.js";
+import { loadRegistry, output, saveRegistry } from "./core.js";
+import { realOpsDeps } from "./ops-deps.js";
 import { requireOwnerOrMaster } from "./project-guard.js";
 
 const LEND_USAGE =
-  "usage: lend status | lend set <peer名|指纹> [--codex N] [--claude N] --repos owner/repo[,..] [--roles review[,write]] " +
-  "[--orders-per-day N] [--confirm per-order|auto] [--until <ISO>] | lend off [--peer <名>]";
-const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] | borrow off [--peer <名>]";
+  "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
+  "[--roles <旧参数，忽略；审查和写代码已不区分>] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
+  "[--keep-unset codex,claude,roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）" + ASK_USAGE;
+const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
+  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]" + ASK_USAGE;
 
-const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until"];
-const BORROW_FLAGS = ["projects", "roles", "max-open"];
+/** confirm 留在表里只为认出旧写法、报「已退役」，不当未知参数 */
+const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort", "keep-unset"];
+const CONFIRM_RETIRED = "逐单确认 / 限时预先授权（--confirm）已退役：改用一次授权 lend grant <peer> --repos … --until <到期时间>，到期前来单直接领，随时 lend revoke 收回";
+export const BORROW_FLAGS = ["projects", "roles", "max-open", "priority"];
+export const BORROW_BOOLS = ["keep-unset"];
+
+/** 授权里写的 Codex 模型 / 推理档（lend-config.ts 同一套校验，写盘前 updateLend 还会整份再核）；都没写返回原条目 */
+function withCodexChoice(b: Built<LendEntry>, model: string | undefined, effort: string | undefined): Built<LendEntry> {
+  if (!b.ok) return b;
+  if (model !== undefined && !isCodexModel(model)) return { ok: false, error: `--codex-model 只能是小写字母、数字、点、横线（首字符不能是 -，最长 64）：${JSON.stringify(model)}` };
+  if (effort !== undefined && !isCodexEffort(effort)) return { ok: false, error: `--codex-effort 只能是 ${CODEX_EFFORT_LEVELS.join(" / ")}：${JSON.stringify(effort)}` };
+  return { ok: true, entry: { ...b.entry, ...(model !== undefined ? { codexModel: model } : {}), ...(effort !== undefined ? { codexEffort: effort } : {}) } };
+}
+
+/** 只在 setEntry 的写锁内调用：网页省略的字段按最新条目补；未列入的仍按 CLI 缺省（模型 / 档位清掉）。 */
+function buildLendGrant(ref: string, flags: Record<string, string>, file: LendFile, ctx: Ctx): Built<LendEntry> {
+  const keep = flags["keep-unset"]?.split(",") ?? [];
+  if (keep.some((k) => !["codex", "claude", "roles", "codex-model", "codex-effort"].includes(k))) {
+    return { ok: false, error: "--keep-unset 只能列 codex,claude,roles,codex-model,codex-effort（逗号分隔、非空）" };
+  }
+  const who = resolveContact(ctx.contacts, ref);
+  if (!who.ok) return who;
+  const old = file.lend.find((e) => e.peer === who.entry.peer);
+  const kept: Record<string, string | undefined> = { codex: old ? String(old.families.codex ?? 0) : undefined, claude: old ? String(old.families.claude ?? 0) : undefined,
+    "codex-model": old?.codexModel, "codex-effort": old?.codexEffort };
+  const f = { ...flags };
+  for (const k of keep) if (f[k] === undefined && kept[k] !== undefined) f[k] = kept[k];
+  return withCodexChoice(buildGrant({ ref, families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
+    ordersPerDay: f["orders-per-day"], until: f.until }, ctx.contacts), f["codex-model"], f["codex-effort"]);
+}
+
+/** 借入条目的槽池档位（i28-W9）；不写 = 条目不带 priority（读作 balance） */
+function withPriority(b: Built<BorrowEntry>, priority: string | undefined): Built<BorrowEntry> {
+  if (!b.ok || priority === undefined) return b;
+  if (!isPriority(priority)) return { ok: false, error: `--priority 只能是 ${PRIORITIES.join(" / ")}：${JSON.stringify(priority)}` };
+  return { ok: true, entry: { ...b.entry, priority } };
+}
+
+/**
+ * --keep-unset（网页分配表用，i28-Q1）：没带的旗标从这个 peer 现有的借入条目补，在 lend.json 写锁里读，所以改一格不会把别的字段冲回缺省。
+ * 现有条目里已失效的项目（被删 / 标成个人）不再沿用：它们本来就不生效，带上只会让整次保存被拒。没有现有条目 = 按 CLI 缺省。
+ */
+export function keepUnset(flags: Record<string, string>, ref: string, f: LendFile, ctx: Pick<Ctx, "contacts" | "projects">): Record<string, string> {
+  const who = resolveContact(ctx.contacts, ref);
+  const old = who.ok ? f.borrow.find((e) => e.peer === who.entry.peer) : undefined;
+  if (!old) return flags;
+  const live = old.projects.filter((id) => ctx.projects.some((p) => p.id === id && !isPersonalProject(p)));
+  return {
+    ...(live.length ? { projects: live.join(",") } : {}), roles: old.roles.join(","), "max-open": String(old.maxOpen),
+    ...(old.priority ? { priority: old.priority } : {}), ...flags,
+  };
+}
+
+/** borrow set 在 lend.json 写锁里组条目（网页 PUT 的单测也调它，tests/web-borrow-view.test.ts） */
+export function buildBorrowSet(ref: string, flags: Record<string, string>, keep: boolean, file: LendFile, ctx: Pick<Ctx, "contacts" | "projects">): Built<BorrowEntry> {
+  const b = keep ? keepUnset(flags, ref, file, ctx) : flags;
+  return withPriority(buildBorrowEntry({ ref, projects: b.projects, roles: b.roles, maxOpen: b["max-open"] }, ctx.contacts, ctx.projects), b.priority);
+}
+
+/** 「（codex 模型 x · 推理档 y）」；都没写 = 空串 */
+const codexText = (e: Pick<LendEntry, "codexModel" | "codexEffort">): string => {
+  const parts = [e.codexModel && `codex 模型 ${e.codexModel}`, e.codexEffort && `推理档 ${e.codexEffort}`].filter(Boolean);
+  return parts.length ? `（${parts.join(" · ")}）` : "";
+};
 
 async function status(kind: "lend" | "borrow"): Promise<void> {
   const read = await readLend();
@@ -23,11 +99,14 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
   const base = { ok: true, path: LEND_PATH, file: read.status, ...(eff.invalid ? { invalid: eff.invalid } : {}), dropped: eff.dropped };
   if (kind === "lend") {
     const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
-      : eff.lending ? `出借中：${eff.lend.map((e) => e.peer).join("、")}` : read.file.enabled ? "总开关开着，但没有仍有效的出借条目" : "不出借（总开关关）";
-    return output({ ...base, enabled: read.file.enabled, lending: eff.lending, declared: read.file.lend, effective: eff.lend, message });
+      : eff.lending ? `出借中：${eff.lend.map((e) => e.peer + codexText(e)).join("、")}` : read.file.enabled ? "总开关开着，但没有仍有效的出借条目" : "不出借（总开关关）";
+    const stoppedWork = readStoppedWorkSummary();
+    return output({ ...base, enabled: read.file.enabled, lending: eff.lending,
+      declared: read.file.lend.map(({ roles: _roles, ...e }) => e), effective: eff.lend.map(({ roles: _roles, ...e }) => e), message,
+      stoppedWork, stoppedWorkText: stoppedWorkText(stoppedWork) });
   }
   const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
-    : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}）`).join("；")}` : "什么都不外借";
+    : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}${e.priority ? `，档位 ${e.priority}` : ""}）`).join("；")}` : "什么都不外借";
   output({ ...base, declared: read.file.borrow, effective: eff.borrow, message });
 }
 
@@ -35,12 +114,36 @@ type AnyEntry = LendFile["lend"][number] | LendFile["borrow"][number];
 type Ctx = Awaited<ReturnType<typeof readLendContext>>;
 
 /**
- * 通过准入的条目按 peer 名 upsert；lend set 同时打开总开关（执行 set 本身就是 owner 的明确意思）。
+ * lend.json 写完之后调（先写自己的、再读对方的）：registry 里授权已不覆盖的出借 worker 当场停，返回前确认窗口已关。
+ * 出错不往外抛：lend.json 已经写成，报成命令失败会让人以为没收回；记进 unconfirmed，调度服务下一轮和宿主看门狗照样会停。
+ */
+const stopNow = (): Promise<StopReport> => stopRevokedWorkers({
+  workers: async () => Object.entries((await loadRegistry()).agents).filter(([n]) => isLendWorkerName(n))
+    .map(([name, a]) => ({ name, createPid: a.pending?.op === "create" ? a.pending.pid : undefined })),
+  stopReason: (name) => lendStopReason(name),
+  isCreate: isCreateProcess,
+  signal: (pid, sig) => {
+    try { process.kill(pid, sig); } catch (e) { console.error(`[lend] 给 ${pid} 发 ${sig} 失败（多半已退出）：${(e as Error).message}`); }
+  },
+  killWindows: (name) => realOpsDeps.killWindow(name),
+  probe: (name) => probeAcpWorker(name),
+  markStopped: async (name) => {
+    const reg = await loadRegistry();
+    const a = reg.agents[name];
+    if (a?.status === "active" && !a.pending) await saveRegistry({ ...reg, agents: { ...reg.agents, [name]: { ...a, status: "stopped" } } });
+  },
+  sleep: (ms) => Bun.sleep(ms),
+}).catch((e) => ({ stopped: [], unconfirmed: [{ name: "出借 worker", why: `当场停出错：${(e as Error).message}` }] }));
+
+const stopText = (r: StopReport): string => stopReportText(r, (n) => workerOrderLive(n));
+
+/**
+ * 通过准入的条目按 peer 名 upsert（再授权一次 = 换掉旧条目，暂停的也就恢复了）；lend grant 同时打开总开关（执行它本身就是 owner 的明确意思）。
  * 准入在拿到 lend 锁之后才读 peers / projects 再判：等锁期间联系人被删、项目被标成个人项目，都按新状态拒（tests/lend-cli.test.ts「P1-4」）。
  */
-async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyEntry>): Promise<void> {
+async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx, f: LendFile) => Built<AnyEntry>): Promise<void> {
   const built = await updateLend(async (f) => {
-    const b = build(await readLendContext());
+    const b = build(await readLendContext(), f);
     if (!b.ok) return b;
     const entry = b.entry;
     const list = (kind === "lend" ? f.lend : f.borrow) as (typeof entry)[];
@@ -52,16 +155,24 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx) => Built<AnyE
   });
   if (!built.ok) return output({ ok: false, error: built.error });
   const entry = built.entry;
-  const write = entry.roles.includes("write");
-  output({ ok: true, [kind]: entry, message: "confirm" in entry
-    ? `已开始向 ${entry.peer} 出借（${entry.confirm === "auto" ? `预先授权到 ${entry.until}：这段时间免逐单确认，每单仍通知你；到期后恢复逐单确认` : "每单等你确认"}）` +
-      (write ? "；含写代码：对方的开工 / 修复单会在你这台机器上改代码，并用你的 GitHub 登录推到对方仓库的 lend/ 分支、开 PR" : "")
-    : `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审（代码、规格与验收原文都会到对方那边）` +
-      (write ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") });
+  const stop = kind === "lend" ? await stopNow() : undefined; // 重授可能收窄仓库 / 家族：不再覆盖的在跑单同样当场停
+  if ("projects" in entry) {
+    return output({ ok: true, [kind]: entry, message: `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审` +
+      "（代码、规格与验收原文都会到对方那边）" + (entry.roles.includes("write") ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") +
+      (entry.priority && entry.priority !== "balance" ? `；槽池档位 ${entry.priority}` : "") });
+  }
+  const slots = Object.entries(entry.families).map(([f, n]) => `${f} ${n} 个位`).join("、");
+  const { roles: _roles, ...grant } = entry;
+  output({ ok: true, [kind]: grant, warning: SHELL_SENTENCE, message: `${SHELL_SENTENCE}。已授权 ${entry.peer} 到 ${entry.until}：仓库 ${entry.repos.join("、")}，` +
+    `审查和写代码已不区分，${slots}${codexText(entry)}，每天最多 ${entry.ordersPerDay} 单；这段时间来单直接领，开跑和交付都会通知你。随时收回：manager lend revoke --peer ${entry.peer}` +
+    (stop ? stopText(stop) : ""), ...(stop?.unconfirmed.length ? { unconfirmed: stop.unconfirmed } : {}) });
 }
 
-async function off(kind: "lend" | "borrow", peer: string | undefined): Promise<void> {
+/** lend：删条目（不带 peer = 全删并关总开关），当场停掉已不覆盖的 worker，订单由调度服务下一轮按阶段退回或记停；borrow：删条目 / 清空 */
+async function off(kind: "lend" | "borrow", peer: string | undefined, gate?: AskGate): Promise<void> {
   const res = await updateLend((f) => {
+    const no = gate?.check(offParams(peer)); // 非 owner 凭授权卡执行：锁内核卡（lib/lend-ask-auth.ts）
+    if (no) return no;
     const list: { peer: string }[] = kind === "lend" ? f.lend : f.borrow;
     if (peer !== undefined) {
       const i = list.findIndex((e) => e.peer === peer);
@@ -69,15 +180,15 @@ async function off(kind: "lend" | "borrow", peer: string | undefined): Promise<v
       list.splice(i, 1);
       return null;
     }
-    if (kind === "lend") f.enabled = false; // 只关总开关、保留条目：再 set 一条或手动改回 true 即恢复
+    if (kind === "lend") Object.assign(f, { enabled: false, lend: [] });
     else f.borrow = [];
     return null;
   });
   if (res) return output({ ok: false, error: res });
-  const message = kind === "lend"
-    ? peer ? `已不再向 ${peer} 出借` : "出借已关闭（条目保留，lend set 会重新打开）"
-    : peer ? `已不再把单子给 ${peer}` : "已清空借入列表：什么都不外借";
-  output({ ok: true, message });
+  if (kind === "borrow") return output({ ok: true, message: peer ? `已不再把单子给 ${peer}` : "已清空借入列表：什么都不外借" });
+  const stop = await stopNow();
+  output({ ok: true, message: `已收回${peer ? `对 ${peer} 的` : "全部"}出借授权：还没领的单放弃，在跑的 worker 当场停掉${stopText(stop)}`,
+    stopped: stop.stopped, ...(stop.unconfirmed.length ? { unconfirmed: stop.unconfirmed } : {}) });
 }
 
 export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<void> {
@@ -86,22 +197,25 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
   if (sub === "status") return status(kind);
   if (sub === "submit" && kind === "lend") return (await import("./lend-submit.js")).cmdLendSubmit(rest); // 出借 worker 交结论（不过 owner 守卫）
   if (sub === "call" && kind === "lend") return (await import("./lend-call.js")).cmdLendCall(rest); // 调度服务调 A 的出借接口
-  if (sub !== "set" && sub !== "off") return output({ ok: false, error: usage });
-  const p = parseLedgerArgs(rest, sub === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS);
+  if (sub === "inbox" && kind === "lend") return (await import("./lend-inbox.js")).cmdLendInbox(rest); // bridge 收 A 推来的单（身份在里面核）
+  const op = kind === "lend" ? ({ grant: "set", set: "set", revoke: "off", off: "off" } as const)[sub] : sub === "set" || sub === "off" ? sub : undefined;
+  if (!op) return output({ ok: false, error: usage });
+  const p = parseLedgerArgs(rest, [...(op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS), "ask"], [...(kind === "borrow" && op === "set" ? BORROW_BOOLS : []), "print-bind"]);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${usage}` });
+  const f = p.flags, action = lendAskAction(kind, op);
+  const build = (ctx: Ctx, file: LendFile): Built<AnyEntry> => kind === "lend" ? buildLendGrant(p.pos[0], f, file, ctx) : buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
+  if (p.bools.has("print-bind")) return output(p.pos.length !== (op === "off" ? 0 : 1) ? { ok: false, error: usage } : await printBind(action, op === "off" ? { off: offParams(f.peer) } : { build }));
   const denied = await requireOwnerOrMaster(kind === "lend" ? "改出借声明" : "改借入声明");
-  if (denied) return output({ ok: false, code: "forbidden", ...denied });
+  const gate = denied && f.ask !== undefined ? askGate(f.ask, denied.params.actor, action) : undefined; // owner / master 带了 --ask 也照旧直接执行
+  if (denied && !gate) return output({ ok: false, code: "forbidden", ...denied, error: `${denied.error}；${ASK_HINT}` });
   try {
-    if (sub === "off") {
+    if (op === "off") {
       if (p.pos.length) return output({ ok: false, error: usage });
-      return await off(kind, p.flags.peer);
+      return await off(kind, f.peer, gate);
     }
     if (p.pos.length !== 1) return output({ ok: false, error: usage });
-    const f = p.flags;
-    await setEntry(kind, (ctx) => kind === "lend"
-      ? buildLendEntry({ ref: p.pos[0], families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
-        ordersPerDay: f["orders-per-day"], confirm: f.confirm, until: f.until }, ctx.contacts)
-      : buildBorrowEntry({ ref: p.pos[0], projects: f.projects, roles: f.roles, maxOpen: f["max-open"] }, ctx.contacts, ctx.projects));
+    if (kind === "lend" && f.confirm !== undefined) return output({ ok: false, error: CONFIRM_RETIRED });
+    await setEntry(kind, gate ? gate.wrap(build) : build);
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   }

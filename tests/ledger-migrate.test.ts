@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { LedgerReader, projectView } from "../src/lib/ledger-read.js";
+import { SCHEDULER_MERGE_WAIT_SCHEMA } from "../src/lib/ledger-scheduler-schema.js";
 import { closeLedger, getTask, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, listDeps, openLedger, schemaVersion } from "../src/lib/ledger-store.js";
+
+const BEFORE_MERGE_WAIT = LEDGER_MIGRATIONS.indexOf(SCHEDULER_MERGE_WAIT_SCHEMA);
 
 function tmp(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "ledger-mig-"));
@@ -24,6 +27,57 @@ function makeV1(path: string): void {
   ins.run("T3", "空串", "spec", "");
   raw.close();
 }
+
+/** The schema immediately before UNKNOWN waits were persisted, including an in-flight merge row. */
+function makeBeforeMergeWait(path: string): void {
+  makeV1(path);
+  const db = new Database(path);
+  for (const step of LEDGER_MIGRATIONS.slice(1, BEFORE_MERGE_WAIT)) {
+    if (typeof step === "function") step(db);
+    else for (const sql of step) db.prepare(sql).run();
+  }
+  db.prepare(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,taskRev,specRev,templateVersion,status,reason,createdAt,updatedAt)
+    VALUES ('merge-old','T1','p','merge_deploy','merge',1,1,1,2,'submitted','r',0,0)`).run();
+  db.prepare(`INSERT INTO scheduler_merges (intentId,taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,phase,createdAt,updatedAt)
+    VALUES ('merge-old','T1','p','https://github.com/a/b/pull/1','task/T1',?,'check','await_ci',0,0)`).run("a".repeat(40));
+  db.exec(`PRAGMA user_version = ${BEFORE_MERGE_WAIT}`);
+  db.close();
+}
+
+describe("UNKNOWN wait migration", () => {
+  test("old schema upgrades existing merge rows to a nullable unknownSince, also repairing a version collision", () => {
+    for (const version of [BEFORE_MERGE_WAIT, LEDGER_SCHEMA_VERSION]) {
+      const { dir, path } = tmp();
+      try {
+        makeBeforeMergeWait(path);
+        const raw = new Database(path);
+        expect((raw.query("PRAGMA table_info(scheduler_merges)").all() as { name: string }[]).some((c) => c.name === "unknownSince")).toBe(false);
+        raw.exec(`PRAGMA user_version = ${version}`);
+        raw.close();
+        const db = openLedger(path);
+        expect(schemaVersion(db)).toBe(LEDGER_SCHEMA_VERSION);
+        expect(db.query("SELECT phase,rev,unknownSince FROM scheduler_merges WHERE intentId='merge-old'").get())
+          .toEqual({ phase: "await_ci", rev: 1, unknownSince: null });
+      } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+    }
+  });
+  test("repeated migration and reopening preserve an existing wait timestamp", () => {
+    const { dir, path } = tmp();
+    try {
+      makeBeforeMergeWait(path);
+      const db = openLedger(path);
+      db.prepare("UPDATE scheduler_merges SET unknownSince=123456 WHERE intentId='merge-old'").run();
+      for (let round = 0; round < 2; round++) {
+        openLedger(path).exec(`PRAGMA user_version = ${BEFORE_MERGE_WAIT}`);
+        closeLedger(path);
+        const again = openLedger(path);
+        expect(schemaVersion(again)).toBe(LEDGER_SCHEMA_VERSION);
+        expect(again.query("SELECT unknownSince FROM scheduler_merges WHERE intentId='merge-old'").get()).toEqual({ unknownSince: 123456 });
+        expect((again.query("PRAGMA table_info(scheduler_merges)").all() as { name: string }[]).filter((c) => c.name === "unknownSince")).toHaveLength(1);
+      }
+    } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
 
 /** 子进程：同一时刻打开旧库（触发迁移），T2 → T1 各加一条不同的边 */
 function openerScript(path: string, startAt: number, i: number): string {
@@ -261,6 +315,7 @@ describe("v1 → 依赖边版本", () => {
 });
 
 describe("写事件的底座只给写入模块", () => {
+  // scheduler-merge-train-hold.ts：合并槽让出 / 取回在推进合并的事务内校验持槽与阶段、递增 rev，并写同阶段的调度回执
   // ledger-human.ts：v3.2 例外（human 节点的人工交付与重开指派），它按执行者角色推 build / fix → review，门在 human-node.ts；
   // ledger-steps-write.ts：步骤化台账（T47）的写入，派步骤要 PM，交付 / 审查的钩子挂在 ledger-write.ts 的事务里
   // ledger-scheduler-write.ts：调度意图与资源锁同事务写，入口只提供限定动作与 CAS；意图结算（CAS）拆在 ledger-scheduler-settle.ts
@@ -271,7 +326,15 @@ describe("写事件的底座只给写入模块", () => {
   // ledger-scheduler-pool.ts：调度身份把审查挂进共享池（i28-R9），事务内重算计划核对后才出单，之后只按出借单状态 CAS 结算意图
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
   // scheduler-deploy.ts：部署 journal（T68g），只有调度身份推进，deployed 才把本卡 merge→live，结清只 PM / master / owner
+  // ledger-lend-peers.ts：借算力 v2（i28-W2）的 hello 入账、beat 续租 / 收回、推送应答，CAS 在它的事务里，写事件只经 ledger-lend.ts 的 leaseLend / withdrawPooledLend
+  // ledger-lend-relay.ts：出借写单持单期间的规格追加 / 复述答复转发队列（i28-RS1），只写自己的两张表和一条 lend relay note，不推阶段
   // order-mark.ts：只写两种按意图去重的 scheduler 事件（领单留痕 = 收件人本人本会话、未领单报警 = 调度身份），不推阶段（i28-M4b）
+  // ledger-autostart*.ts：自动开卡的 claim / step / settle 与开关（i28-A1）：调度身份的写权只由活着的 claim 授予，step 先核 claim 再调 lib 写函数；
+  //   step 回滚取消本 claim 建的卡时按 pm 推 cancelled（applyMove asRole）；自动交回在事务里重判后走 PM 交回的同一核心
+  // scheduler-spec-resume-write.ts：spec 阶段 auto 卡放到 peer（i28-RSM1），调度身份照开卡的规矩按 pm 推 spec→restate（applyMove asRole），事务内重核资格与 rev
+  // lend-fix-reassign-start.ts / -pr.ts / -tick.ts：自动改派修复单（i28-RA1）在挂池事务里结束旧写租约、记改派事件；关旧 PR、等租约方计时各记去重事件，不推阶段
+  // memory-retrieve-order.ts：只写排名缓存与最终领取的 scheduler 回执，事务内按 dedupKey 去重；appendEvent 不允许 scheduler kind。
+  // lend-fix-start.ts：修复单起点（i28-FB1）在挂池事务里记起点更新 / 报警 / 重挂事件，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -288,11 +351,21 @@ describe("写事件的底座只给写入模块", () => {
       }
     };
     walk(root);
-    expect(tx.sort()).toEqual(["lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
-      "lib/ledger-feature-write.ts", "lib/ledger-human.ts", "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-pool.ts",
+    expect(tx.sort()).toEqual(["lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-remote-deliver.ts", "lib/fix-strategy-remote-order.ts", "lib/fix-strategy-remote.ts",
+      "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
+      "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
+      "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
+      "lib/ledger-human.ts", "lib/ledger-lend-peers.ts", "lib/ledger-lend-queue.ts", "lib/ledger-lend-relay.ts",
+      "lib/ledger-lend-result.ts", "lib/ledger-lend.ts", "lib/ledger-scheduler-lease-finished.ts", "lib/ledger-scheduler-pool.ts",
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
-      "lib/order-mark.ts", "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge.ts", "lib/scheduler-observe.ts",
+      "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
+      "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts",
+      "lib/memory-retrieve-order.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
+      "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice.ts",
+      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
+      "lib/scheduler-merge-train-hold.ts", "lib/scheduler-merge.ts",
+      "lib/scheduler-observe.ts",
       "lib/scheduler-sessions.ts"]);
-    expect(move.sort()).toEqual(["lib/ledger-human.ts", "lib/scheduler-apply.ts"]);
+    expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts", "lib/scheduler-spec-resume-write.ts"]);
   });
 });

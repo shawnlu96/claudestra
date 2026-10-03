@@ -1,5 +1,5 @@
 "use client";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { t, useT } from "@/lib/i18n";
@@ -36,10 +36,16 @@ export function TerminalModal({
   agent,
   displayName,
   onClose,
+  actions,
+  notice,
 }: {
   agent: string;
   displayName: string;
   onClose: () => void;
+  /** 标题栏 ✕ 左边的额外按钮（宿主 shell 的「关闭此终端」） */
+  actions?: ReactNode;
+  /** 标题栏下方的一行提示（ACP agent：这里只是宿主日志） */
+  notice?: ReactNode;
 }) {
   const t = useT();
   // Esc 关闭；xterm 聚焦时 Esc 被终端吃掉是预期（终端里 Esc 有语义），点 ✕ 或背板关。
@@ -64,16 +70,20 @@ export function TerminalModal({
           <span className="text-xs opacity-40">
             {t("实时镜像 tmux 会话 · 关闭即断开（不影响运行）")}
           </span>
-          <button
-            className="btn btn-ghost btn-sm ml-auto px-2 text-[#cdd6f4]/70 hover:text-[#cdd6f4]"
-            aria-label={t("关闭终端")}
-            onClick={onClose}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {actions}
+            <button
+              className="btn btn-ghost btn-sm px-2 text-[#cdd6f4]/70 hover:text-[#cdd6f4]"
+              aria-label={t("关闭终端")}
+              onClick={onClose}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </header>
+        {notice}
         <TerminalView agent={agent} />
       </div>
       <div className="modal-backdrop" onClick={onClose} />

@@ -4,7 +4,18 @@
  * 标签放在列缝里（出发节点右边那道缝、到达节点左边那道缝，都不行再沿曲线试），每处再上下错开几档；压到节点或别的标签就换，
  * 全都压到就退成一个点（悬停看全文，点开右侧属性页）。宽度按字数估、以列缝为上限，放不全的省略号截断、悬停看全文。
  */
-import { COL_GAP, type Box, type Canvas, type CEdge } from "./causal-model";
+import { COL_GAP, type Box, type CEdge } from "./causal-model";
+
+/**
+ * 视口几何只看框的位置：因果线画布（causal-model.ts Canvas）和子 DAG 图（dag/dag-layout.ts DagCanvas）都满足它。
+ * kind = "full" 的节点所在的框是打开时优先对齐的；折叠组按 members 数算「还有 N 件」
+ */
+export interface ViewCanvas {
+  groups: readonly (Box & { nodes: readonly (Box & { id: string; kind: string })[]; folds: readonly (Box & { id: string; members: readonly string[] })[] })[];
+  w: number;
+  h: number;
+  boxOf: ReadonlyMap<string, string>;
+}
 
 export interface View { x: number; y: number; k: number }
 /** 外面要求居中到某个任务；seq 每次点都 +1，同一个任务再点一次也会再居中 */
@@ -23,15 +34,17 @@ const LABEL_H = 18, GAP = 3, LABEL_MAX_W = COL_GAP - 2 * GAP;
 const TRY_T = [0.5, 0.35, 0.65];
 const TRY_DY = [0, -1, 1, -2, 2].map((n) => n * (LABEL_H + GAP));
 
-const bend = (e: CEdge) => Math.max(40, Math.abs(e.x2 - e.x1) / 2);
+/** 只用两端坐标的几何：因果线的边和子 DAG 的线共用 */
+type Seg = Pick<CEdge, "x1" | "y1" | "x2" | "y2">;
+const bend = (e: Seg) => Math.max(40, Math.abs(e.x2 - e.x1) / 2);
 
-export function edgePath(e: CEdge): string {
+export function edgePath(e: Seg): string {
   const dx = bend(e);
   return `M ${e.x1} ${e.y1} C ${e.x1 + dx} ${e.y1}, ${e.x2 - dx} ${e.y2}, ${e.x2} ${e.y2}`;
 }
 
 /** 三次贝塞尔（控制点同 edgePath）上 t 处的点 */
-export function pointAt(e: CEdge, t: number): { x: number; y: number } {
+export function pointAt(e: Seg, t: number): { x: number; y: number } {
   const dx = bend(e), u = 1 - t;
   const [a, b, c, d] = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
   return { x: a * e.x1 + b * (e.x1 + dx) + c * (e.x2 - dx) + d * e.x2, y: a * e.y1 + b * e.y1 + c * e.y2 + d * e.y2 };
@@ -81,14 +94,14 @@ export function placeLabels(edges: readonly CEdge[], obstacles: readonly Box[]):
   });
 }
 
-const boxesOf = (c: Canvas) => c.groups.flatMap((g) => [...g.nodes.map((n) => ({ id: n.id, box: n as Box, n: 1 })),
+const boxesOf = (c: ViewCanvas) => c.groups.flatMap((g) => [...g.nodes.map((n) => ({ id: n.id, box: n as Box, n: 1 })),
   ...g.folds.map((f) => ({ id: f.id, box: f as Box, n: f.members.length }))]);
 
 /**
  * 打开时的视口：整张能在 MIN_K 以上放下就整张放下；放不下就用 MIN_K，
  * 把有在跑节点（full）的那几个框对齐到左上角——它们是打开这页最想看的，剩下的由 offscreen 提示
  */
-export function initialView(c: Canvas, vw: number, vh: number): View {
+export function initialView(c: ViewCanvas, vw: number, vh: number): View {
   const fit = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
   if (!c.w || fit >= MIN_K) return { x: VIEW_PAD, y: VIEW_PAD, k: fit || 1 };
   const live = c.groups.filter((g) => g.nodes.some((n) => n.kind === "full"));
@@ -98,7 +111,7 @@ export function initialView(c: Canvas, vw: number, vh: number): View {
 }
 
 /** 视口外（含被截掉一截）的任务数，按方向；折叠组按里面的件数算 */
-export function offscreen(c: Canvas, v: View, vw: number, vh: number): { right: number; down: number; left: number; up: number } {
+export function offscreen(c: ViewCanvas, v: View, vw: number, vh: number): { right: number; down: number; left: number; up: number } {
   const out = { right: 0, down: 0, left: 0, up: 0 };
   for (const { box: b, n } of boxesOf(c)) {
     const x1 = v.x + b.x * v.k, x2 = v.x + (b.x + b.w) * v.k, y1 = v.y + b.y * v.k, y2 = v.y + (b.y + b.h) * v.k;
@@ -111,7 +124,7 @@ export function offscreen(c: Canvas, v: View, vw: number, vh: number): { right: 
 }
 
 /** 「适配全部」：整张放进视口，最大 1、最小 MIN_K；到下限还放不下就从左上角看起，其余靠拖 */
-export function fitAllView(c: Canvas, vw: number, vh: number): View {
+export function fitAllView(c: ViewCanvas, vw: number, vh: number): View {
   if (!c.w || !c.h) return { x: VIEW_PAD, y: VIEW_PAD, k: 1 };
   const k = Math.min(1, (vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h);
   return { x: VIEW_PAD, y: VIEW_PAD, k: Math.max(MIN_K, k) };
@@ -126,7 +139,7 @@ function centerOn(v: View, b: Box, vw: number, vh: number): View {
  * 每次数据刷新 / 量到新尺寸 / 外面要求居中时调：第一次有图有尺寸就按 initialView 摆；Focus.seq 没处理过就居中一次
  * （框不在画布上也记为处理过，免得它后来出现时突然跳过去）；其余情况原样返回——刷新不动用户的视口
  */
-export function reconcileView(st: ViewState, c: Canvas, vw: number, vh: number, focus: Focus | null): ViewState {
+export function reconcileView(st: ViewState, c: ViewCanvas, vw: number, vh: number, focus: Focus | null): ViewState {
   if (!vw) return st;
   let next = st;
   if (!st.placed && c.w > 0) next = { ...next, view: initialView(c, vw, vh), placed: true };
@@ -141,7 +154,7 @@ export function reconcileView(st: ViewState, c: Canvas, vw: number, vh: number, 
 export type Dir = "right" | "down" | "left" | "up";
 
 /** 「还有 N 件在 X 边」：往那边平移大半屏（留一截上一屏的内容接上），不越过画布那一侧的边 */
-export function panView(c: Canvas, v: View, vw: number, vh: number, dir: Dir): View {
+export function panView(c: ViewCanvas, v: View, vw: number, vh: number, dir: Dir): View {
   const sx = vw * 0.8, sy = vh * 0.8;
   if (dir === "right") return { ...v, x: Math.min(v.x, Math.max(v.x - sx, vw - VIEW_PAD - c.w * v.k)) };
   if (dir === "left") return { ...v, x: Math.max(v.x, Math.min(v.x + sx, VIEW_PAD)) };
@@ -150,4 +163,4 @@ export function panView(c: Canvas, v: View, vw: number, vh: number, dir: Dir): V
 }
 
 /** 整张在文字下限（MIN_K）以上装得下吗；装不下时「适配全部」从左上角看起，并用动效示意到底了 */
-export const fitsAll = (c: Canvas, vw: number, vh: number) => !c.w || Math.min((vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h) >= MIN_K;
+export const fitsAll = (c: ViewCanvas, vw: number, vh: number) => !c.w || Math.min((vw - VIEW_PAD * 2) / c.w, (vh - VIEW_PAD * 2) / c.h) >= MIN_K;

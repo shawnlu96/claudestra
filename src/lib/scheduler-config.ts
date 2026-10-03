@@ -1,24 +1,47 @@
+import { parseAgents, agentLimitSum, agentPoolRemote, type AgentPoolPolicy } from "./scheduler-agent-pool-config.js";
+import { localFamilyPolicy, type LocalFamilyPolicy } from "./scheduler-local-families-placement.js";
+import { parseLocalFamilies, type LocalFamilies } from "./scheduler-local-families-config.js";
 /** Local scheduler policy; missing or invalid config keeps the fourth daemon idle. */
+import { localRuntimeFields, type LocalAuthorRuntime } from "./scheduler-local-runtime-config.js";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { isPriority, PRIORITIES, REPO_RE, type Priority } from "./lend-config.js";
 import { statePath } from "./paths.js";
+import { parseWriteFamilies } from "./scheduler-family-pick.js";
+import { mergeTrainField, type MergeTrainMode } from "./scheduler-merge-train-switch-config.js";
+import { parseFixReassign, type FixReassignPolicy } from "./lend-fix-reassign-config.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 /**
- * Shared-pool overflow (i28-R9): off = never pool; overflow = pool a ready node only when no local slot is free;
- * prefer = pool whenever a peer is eligible. Only review nodes can be pooled until remote writing (i28-R6) lands,
- * so build / fix in roles are refused rather than silently ignored.
+ * Shared slot pool (i28-W5, lib/scheduler-placement.ts): balance = local and usable peers share the ready nodes by tier
+ * (localPriority here, `priority` on each borrow entry: first → balance → low, off never; i28-W9), fewest running first;
+ * off = local only. overflow / prefer are i28-R9's spellings: parsing reads them as balance with a note instead of throwing
+ * (a throw would switch the whole scheduler config off); a hand-built policy that still says them is treated as balance too.
+ * roles: "review" and "write" (= build + fix, i28-W9); absent = review only. Writing needs `repo` (the GitHub owner/repo a
+ * peer clones and pushes its lend/ branch to): a build card has no PR yet to take it from.
  */
-export type RemoteMode = "off" | "overflow" | "prefer";
-export interface RemotePolicy { mode: RemoteMode; roles: "review"[]; poolTimeoutMin: number }
-export const DEFAULT_REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
+type RemoteMode = "balance" | "off" | "overflow" | "prefer";
+type RemoteRole = "review" | "write";
+/** reviewFirst: peers that get every review they can take, in order, before the tiers (i28-W5c); absent = none. */
+export interface RemotePolicy extends LocalFamilies, LocalFamilyPolicy, AgentPoolPolicy, FixReassignPolicy {
+  mode: RemoteMode; roles: RemoteRole[]; poolTimeoutMin: number; reviewFirst?: string[]; writeFamilies?: ("claude" | "codex")[];
+  /** This machine's tier; absent = balance. */
+  localPriority?: Priority;
+  /** Set exactly when roles holds "write". */
+  repo?: string;
+  note?: string;
+}
+export const DEFAULT_REMOTE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15 };
+export const isLegacyRemoteMode = (m: unknown): m is "overflow" | "prefer" => m === "overflow" || m === "prefer";
 
-interface ProjectSchedule {
+interface ProjectSchedule extends AgentPoolPolicy {
+  localAuthorRuntime?: LocalAuthorRuntime;
   /** 0 = no local worker at all (every eligible node goes to the pool; nothing else is dispatched). */
   maxActiveWorkers: number;
   /** Always set by parseSchedulerConfig (default DEFAULT_REMOTE); a hand-built policy without it never pools. */
   remote?: RemotePolicy;
   requiredChecks: string[];
+  /** Merge train switch (i28-MT1sw): absent = on; observe = only record what a train would have done; off = no train at all. */ mergeTrain?: MergeTrainMode;
   /** Local clone whose `gh` context must match the PR repository; with `deploy` it is also the tree that gets deployed. */
   repoDir: string;
   /** Absent = merge only, the PM deploys (T68g). */
@@ -61,7 +84,8 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
   for (const [id, value] of Object.entries(r.projects)) {
     if (!/^[\w.-]{1,80}$/.test(id) || !value || typeof value !== "object") throw new Error(`invalid scheduler project ${id}`);
     const p = value as Record<string, unknown>;
-    if (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 0 || (p.maxActiveWorkers as number) > 32) {
+    const agents = parseAgents(p.agents);
+    if (!agents.agents && (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 0 || (p.maxActiveWorkers as number) > 32)) {
       throw new Error(`scheduler project ${id} needs maxActiveWorkers 0..32`);
     }
     const requiredChecks = parseRequiredChecks(p.requiredChecks);
@@ -70,9 +94,11 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
     if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
-    projects[id] = { maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, remote: parseRemote(id, p.remote), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
-      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}) };
+    projects[id] = { ...agents, ...localRuntimeFields(p.localAuthorRuntime),
+      maxActiveWorkers: agents.agents ? agentLimitSum(agents.agents) : p.maxActiveWorkers as number, requiredChecks,
+      repoDir: p.repoDir, remote: { ...localFamilyPolicy(parseRemote(id, agentPoolRemote(p.remote, !!agents.agents)), p.localAuthorRuntime), ...agents },
+      ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
+      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}), ...mergeTrainField(id, p.mergeTrain) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise) };
@@ -92,17 +118,37 @@ function parseSupervise(raw: unknown): SuperviseConfig {
 
 function parseRemote(id: string, raw: unknown): RemotePolicy {
   if (raw === undefined) return { ...DEFAULT_REMOTE, roles: [...DEFAULT_REMOTE.roles] };
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`scheduler project ${id}: remote must be an object`);
+  return parseRemotePolicy(raw, `scheduler project ${id}: remote`);
+}
+
+/** One project's `remote`; also how `ledger scheduler-pool` rebuilds the policy the daemon passed (one parser, no copy). */
+export function parseRemotePolicy(raw: unknown, where = "remote"): RemotePolicy {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${where} must be an object`);
   const r = raw as Record<string, unknown>;
-  const mode = r.mode ?? DEFAULT_REMOTE.mode;
-  if (mode !== "off" && mode !== "overflow" && mode !== "prefer") throw new Error(`scheduler project ${id}: remote.mode must be off|overflow|prefer`);
+  const rawMode = r.mode ?? DEFAULT_REMOTE.mode;
+  if (rawMode !== "off" && rawMode !== "balance" && !isLegacyRemoteMode(rawMode)) throw new Error(`${where}.mode must be balance|off`);
+  const mode = isLegacyRemoteMode(rawMode) ? "balance" : rawMode;
   const roles = r.roles ?? DEFAULT_REMOTE.roles;
-  if (!Array.isArray(roles) || roles.length > 3 || roles.some((x) => x !== "review")) {
-    throw new Error(`scheduler project ${id}: remote.roles only takes "review" (build / fix wait for remote writing, i28-R6)`);
+  if (!Array.isArray(roles) || roles.length > 2 || new Set(roles).size !== roles.length || roles.some((x) => x !== "review" && x !== "write")) {
+    throw new Error(`${where}.roles takes "review" / "write" (write = build + fix), each once`);
   }
   const timeout = r.poolTimeoutMin ?? DEFAULT_REMOTE.poolTimeoutMin;
-  if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`scheduler project ${id}: remote.poolTimeoutMin must be 1..240`);
-  return { mode, roles: roles.length ? ["review"] : [], poolTimeoutMin: timeout as number };
+  if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 240) throw new Error(`${where}.poolTimeoutMin must be 1..240`);
+  const first = r.reviewFirst === undefined ? [] : r.reviewFirst;
+  if (!Array.isArray(first) || first.length > 8 || new Set(first).size !== first.length
+    || first.some((x) => typeof x !== "string" || !x || /[\p{Cc}\p{Cf}]/u.test(x))) {
+    throw new Error(`${where}.reviewFirst must be up to 8 distinct nonempty peer names`);
+  }
+  if (r.localPriority !== undefined && !isPriority(r.localPriority)) throw new Error(`${where}.localPriority must be ${PRIORITIES.join("|")}`);
+  const writes = roles.includes("write");
+  if (writes ? typeof r.repo !== "string" || !REPO_RE.test(r.repo) : r.repo !== undefined) {
+    throw new Error(`${where}.repo (GitHub owner/repo) is required with roles "write" and only then`);
+  }
+  const note = isLegacyRemoteMode(rawMode) ? `remote.mode "${rawMode}" 是旧写法，按 balance 处理（i28-W5）` : undefined;
+  return { mode, roles: (["review", "write"] as const).filter((x) => roles.includes(x)), poolTimeoutMin: timeout as number,
+    ...(first.length ? { reviewFirst: first as string[] } : {}), ...(r.localPriority !== undefined ? { localPriority: r.localPriority as Priority } : {}),
+    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}), ...parseWriteFamilies(r.writeFamilies, where), ...parseLocalFamilies(r.localFamilies),
+    ...parseFixReassign(r.fixReassignMin, where) };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&

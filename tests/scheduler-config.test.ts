@@ -59,17 +59,26 @@ describe("T68 scheduler service configuration", () => {
     expect(() => parseSchedulerConfig({ enabled: true, pollMs: 0, projects: {} })).toThrow(/pollMs/);
     expect(() => parseSchedulerConfig({ enabled: true, projects: {} })).toThrow(/at least one project/);
   });
-  test("i28-R9 remote pool policy: default overflow + review + 15 min, zero local workers allowed, build / fix refused until R6", () => {
+  test("i28-W5 remote pool policy: default balance + review + 15 min, zero local workers allowed, build / fix refused until W8", () => {
     const p = { maxActiveWorkers: 0, requiredChecks: ["check"], repoDir: "/tmp/project" };
     expect(parseSchedulerConfig({ enabled: true, projects: { p } }).projects.p).toMatchObject({
-      maxActiveWorkers: 0, remote: { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 },
+      maxActiveWorkers: 0, remote: { mode: "balance", roles: ["review"], poolTimeoutMin: 15 },
     });
+    expect(parseSchedulerConfig({ enabled: true, projects: { p } }).projects.p.remote).not.toHaveProperty("note");
     const off = parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote: { mode: "off", roles: [] } } } });
     expect(off.projects.p.remote).toEqual({ mode: "off", roles: [], poolTimeoutMin: 15 });
-    expect(parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote: { mode: "prefer", poolTimeoutMin: 30 } } } }).projects.p.remote)
-      .toEqual({ mode: "prefer", roles: ["review"], poolTimeoutMin: 30 });
-    for (const remote of [{ mode: "always" }, { roles: ["build"] }, { roles: ["review", "fix"] }, { poolTimeoutMin: 0 }, { poolTimeoutMin: 1.5 }, [], "overflow"]) {
+    expect(parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote: { mode: "balance", poolTimeoutMin: 30 } } } }).projects.p.remote)
+      .toEqual({ mode: "balance", roles: ["review"], poolTimeoutMin: 30 });
+    for (const remote of [{ mode: "always" }, { roles: ["build"] }, { roles: ["review", "fix"] }, { roles: ["write"] }, { poolTimeoutMin: 0 }, { poolTimeoutMin: 1.5 }, [], "overflow"]) {
       expect(() => parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote } } })).toThrow(/remote/);
+    }
+  });
+
+  test("i28-R9's overflow / prefer still parse: read as balance with a note, never a throw that would switch the scheduler off", () => {
+    const p = { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: "/tmp/project" };
+    for (const mode of ["overflow", "prefer"]) {
+      const remote = parseSchedulerConfig({ enabled: true, projects: { p: { ...p, remote: { mode, poolTimeoutMin: 30 } } } }).projects.p.remote;
+      expect(remote).toMatchObject({ mode: "balance", roles: ["review"], poolTimeoutMin: 30, note: expect.stringContaining(mode) });
     }
   });
 });

@@ -10,7 +10,7 @@ import { LedgerReader } from "../lib/ledger-read.js";
 import { identityFlags, ledgerWrite, type LedgerRun } from "../lib/order-ledger-exit.js";
 import { refuse, type OrderToolHandler, type VerifiedCall } from "../lib/order-tool-route.js";
 import { parseVerdictWire } from "../lib/order-wire.js";
-import { takeReview } from "../lib/review-order.js";
+import { takeReviewWithMemory } from "../lib/memory-retrieve-take.js";
 import { verdictKey } from "../lib/review-verdict.js";
 import { issueVerdictTicket } from "../lib/verdict-ticket.js";
 
@@ -21,7 +21,7 @@ export function reviewToolHandlers(run: LedgerRun, reader: Pick<LedgerReader, "g
     async take_review(call) {
       const db = reader.get();
       if (!db) return { ok: true, orders: [], errors: [] };
-      const r = takeReview(db, identityOf(call));
+      const r = await takeReviewWithMemory(db, identityOf(call));
       return r.ok ? r : refuse(r.error, r.message);
     },
     async submit_verdict(call, args) {

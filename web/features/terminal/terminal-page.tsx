@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { t, useT } from "@/lib/i18n";
@@ -39,10 +39,16 @@ export function TerminalPage({
   agent,
   displayName,
   onClose,
+  actions,
+  notice,
 }: {
   agent: string;
   displayName: string;
   onClose: () => void;
+  /** 标题栏右侧的额外按钮（宿主 shell 的「关闭此终端」） */
+  actions?: ReactNode;
+  /** 标题栏下方的一行提示（ACP agent：这里只是宿主日志） */
+  notice?: ReactNode;
 }) {
   const t = useT();
   const [vp, setVp] = useState<{ h: number; top: number } | null>(null);
@@ -167,7 +173,9 @@ export function TerminalPage({
           <span className="truncate text-sm font-medium">
             {t(displayName)} · {t("终端")}
           </span>
+          {actions && <span className="ml-auto flex shrink-0 items-center">{actions}</span>}
         </header>
+        {notice}
         <TerminalView agent={agent} mobile />
       </div>
     </div>,

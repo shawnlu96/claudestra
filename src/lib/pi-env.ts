@@ -23,6 +23,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { isBuiltinExtension } from "./pi-presets.js";
 
 /** 一个 Pi agent 的能力档案。缺省 = 继承全局（不改动既有行为） */
 export interface PiEnvProfile {
@@ -102,9 +103,15 @@ export function piEnvFlags(env: PiEnvProfile | undefined): string[] {
     flags.push("--no-extensions", "--no-skills", "--no-prompt-templates");
   }
   if (profile.trustProject === false) flags.push("--no-approve");
-  // ② 额外扩展：包源在前，路径在后（见上方实测）
+  // ② 额外扩展：包源 → builtin: → 路径（见上方实测：路径必须排最后，否则前面的被静默忽略）。
+  // builtin: 是 0.99 才有的第三类，归在路径之前 —— 它是"声明式资源"，与包源同类。
   const extras = profile.extensions ?? [];
-  for (const src of [...extras.filter(isPackageSource), ...extras.filter((s) => !isPackageSource(s))]) {
+  const ordered = [
+    ...extras.filter(isPackageSource),
+    ...extras.filter((s) => isBuiltinExtension(s) && !isPackageSource(s)),
+    ...extras.filter((s) => !isPackageSource(s) && !isBuiltinExtension(s)),
+  ];
+  for (const src of ordered) {
     flags.push("--extension", src);
   }
   for (const s of profile.skills ?? []) flags.push("--skill", s);
@@ -355,3 +362,4 @@ export async function piAvailable(): Promise<boolean> {
     }
   });
 }
+export { isBuiltinExtension, piActivateTools, piEnvPreset, piEnvPresetNames } from "./pi-presets.js";

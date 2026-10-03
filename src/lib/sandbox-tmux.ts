@@ -1,11 +1,11 @@
 /**
- * 沙箱里的 tmux 闸（lib/tmux-helper.ts 与 bridge/web-terminal.ts 调）。非沙箱进程全是空操作。
+ * 沙箱里的 tmux 闸（lib/tmux-helper.ts 与 bridge/term-fit.ts 调）。非沙箱进程全是空操作。
  *
  * - socket：`tmux -S <sock>` 会跟着软链走。沙箱 agent 一条 `ln -sf /tmp/claude-orchestrator/master.sock
  *   <root>/run/master.sock`，之后沙箱对自己 tmux 的任何操作（包括 down 的 kill-server）就落到生产上。
  *   所以每次调 tmux 前核对：socket 不是软链、真实路径在沙箱运行目录里、不碰生产目录。
- * - new-window：`-c` 的目录必须是沙箱根下已存在的目录（不存在时 tmux 静默回落到 $HOME）；建完再读
- *   #{pane_current_path} 复核一遍，不在根目录下就关掉窗口并报错。
+ * - new-window / 带 -c 的 new-session：`-c` 的目录必须是沙箱根下已存在的目录（不存在或进不去时 tmux 静默回落到 $HOME）；
+ *   建完再读 #{pane_current_path} 复核一遍，不在根目录下就关掉窗口并报错。new-session 不带 -c（终端 viewer 的临时 session）不管。
  */
 import { lstatSync } from "fs";
 import { DEFAULT_RUNTIME_DIR, RUNTIME_DIR } from "./paths.js";
@@ -31,7 +31,7 @@ export function sandboxTmuxArgv(argv: string[]): string[] {
   const sock = s >= 0 ? argv[s + 1] ?? "" : "";
   const problems = [sock ? socketProblem(sock) : "tmux 调用没带 -S（会连到默认 server）"];
   const sub = s >= 0 ? argv.slice(s + 2) : [];
-  if (sub[0] === "new-window") {
+  if (sub[0] === "new-window" || (sub[0] === "new-session" && sub.includes("-c"))) {
     const c = sub.indexOf("-c");
     problems.push(c >= 0 ? sandboxAgentDirProblem(sub[c + 1] ?? "") : "沙箱里的 new-window 必须带 -c <沙箱根下的目录>");
   }
@@ -40,10 +40,11 @@ export function sandboxTmuxArgv(argv: string[]): string[] {
   return argv;
 }
 
-/** new-window 成功之后的复核：窗口实际所在目录必须在沙箱根下，否则关掉它并抛错 */
+/** new-window / 带 -c 的 new-session 成功之后的复核：窗口实际所在目录必须在沙箱根下，否则关掉它并抛错 */
 export async function sandboxVerifyNewWindow(args: string[], run: (a: string[]) => Promise<string>): Promise<void> {
-  if (!isSandbox() || args[0] !== "new-window") return;
-  const t = args[args.indexOf("-t") + 1] ?? "";
+  const session = args[0] === "new-session" && args.includes("-c");
+  if (!isSandbox() || !(session || args[0] === "new-window")) return;
+  const t = session ? `=${args[args.indexOf("-s") + 1] ?? ""}` : args[args.indexOf("-t") + 1] ?? "";
   const target = `${t.endsWith(":") ? t : `${t}:`}=${args[args.indexOf("-n") + 1] ?? ""}`; // = 精确匹配：别复核到前缀同名的窗口上
   const cwd = (await run(["display-message", "-p", "-t", target, "#{pane_current_path}"])).trim();
   const problem = sandboxAgentDirProblem(cwd);

@@ -3,6 +3,7 @@
  *
  * 从 manager.ts 逐字搬出（函数体未改，只加 export / 改相对路径）。
  */
+import { parseDisallowedRules, validateDisallowedRules } from "../lib/disallowed-rules.js";
 import { AGENT_PREFIX } from "../lib/tmux-helper.js";
 import { listPresets, isKnownPreset, DISALLOWED_PRESETS, DEFAULT_PRESET } from "../lib/claude-launch.js";
 import { type AgentInfo, loadRegistry, saveRegistry, normalizeName, output, extractPermFlags } from "./core.js";
@@ -20,7 +21,7 @@ function describePerm(info: AgentInfo): {
     return {
       preset: "(custom)",
       raw: info.disallowedRaw,
-      tools: info.disallowedRaw.trim().split(/\s+/).filter(Boolean),
+      tools: parseDisallowedRules(info.disallowedRaw),
     };
   }
   const preset = info.disallowedPreset || DEFAULT_PRESET;
@@ -38,7 +39,7 @@ export async function cmdPermissions(sub: string, ...rest: string[]) {
       .filter(([, info]) => info.status === "active")
       .map(([name, info]) => {
         const d = describePerm(info);
-        return { name, preset: d.preset, toolCount: d.tools.length };
+        return { name, preset: d.preset, tools: d.tools, toolCount: d.tools.length };
       });
     output({ ok: true, agents: rows });
     return;
@@ -74,6 +75,7 @@ export async function cmdPermissions(sub: string, ...rest: string[]) {
       preset: d.preset,
       disallowedRaw: d.raw,
       tools: d.tools,
+      toolCount: d.tools.length,
     });
     return;
   }
@@ -90,6 +92,9 @@ export async function cmdPermissions(sub: string, ...rest: string[]) {
       return;
     }
     const { preset, disallowedRaw } = extractPermFlags(rest.slice(1));
+    const hasRaw = rest.slice(1).some(arg => arg === "--disallowed" || arg.startsWith("--disallowed="));
+    const validationError = hasRaw ? validateDisallowedRules(disallowedRaw ?? "") : undefined;
+    if (validationError) { output({ ok: false, error: validationError }); return; }
     if (!preset && !disallowedRaw) {
       output({
         ok: false,
@@ -123,6 +128,7 @@ export async function cmdPermissions(sub: string, ...rest: string[]) {
       preset: d.preset,
       disallowedRaw: d.raw,
       tools: d.tools,
+      toolCount: d.tools.length,
       hint: `新配置已写入 registry。要让 ${tmuxName} 立即生效，跑: bun src/manager.ts restart ${tmuxName.replace(AGENT_PREFIX, "")}`,
     });
     return;

@@ -81,6 +81,7 @@ import { listSessionJsonls, readyTimeoutHint } from "./lib/runtimes/claude-code.
 import { gracefulExitWindow } from "./lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "./lib/runtimes/window-ops.js";
 import { agentRuntime, isMasterAgent, readRegistryAgents } from "./lib/registry.js";
+import { applyPiEnvPreset, parsePiEnvSetFlags, resolveCreatePiEnv } from "./manager/pi-env-preset.js";
 import { describePiEnvProfile, normalizePiEnvProfile, piEnvSnapshotPath, readPiGlobalEnv, readPiProjectEnv, readPiRuntimeSnapshot, snapshotIsFresh, type PiEnvProfile } from "./lib/pi-env.js";
 import { printTmuxGuide } from "./lib/tmux-guide.js";
 import { resolveBunPath } from "./lib/bun-path.js";
@@ -110,6 +111,7 @@ import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
+import { expectArg, expectMissing, expectSkip, markExpectSkips } from "./manager/restart-expect.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
@@ -463,24 +465,22 @@ async function cmdCreate(
   projectFlag?: string,
   runtimeFlag?: string, transportFlag?: string,
   piBaseFlag?: string,
+  piPresetFlag?: string,
   teamFlags: import("./manager/team.js").TeamFlags = {},
 ) {
-  const selected = await (await import("./manager/acp-lifecycle.js")).prepareCreateRuntime(name, dir, runtimeFlag, transportFlag);
+  const presetRes = resolveCreatePiEnv(piBaseFlag, piPresetFlag); // --pi-preset 展开 + --pi-base 覆盖（未知值在这里拒）
+  if ("error" in presetRes) return output({ ok: false, error: presetRes.error });
+  const piEnv = presetRes.piEnv; // 先于选 transport：Pi 缺省走 ACP 前要按能力档查会不会筛掉 reply
+  const selected = await (await import("./manager/acp-lifecycle.js")).prepareCreateRuntime(name, dir, runtimeFlag, transportFlag, piEnv);
   if (!selected.ok) return output({ ok: false, error: selected.error });
   dir = selected.dir;
-  const adapter = selected.adapter;
-  if (piBaseFlag && piBaseFlag !== "minimal" && piBaseFlag !== "inherit") {
-    output({ ok: false, error: `未知的 --pi-base: "${piBaseFlag}"。可用: inherit, minimal` });
-    return;
-  }
+  let adapter = selected.adapter;
   // 可执行文件不在就早败：否则会照建频道 + 窗口，卡满就绪预算后才报错
   const avail = await adapter.available();
   if (!avail.ok) {
     output({ ok: false, error: `--runtime ${adapter.id} 建不出能用的 agent：${avail.hint}` });
     return;
   }
-  // 能力档案：只认 --pi-base（更细的增删走 manager pi-env-set，避免 create 参数爆炸）
-  const piEnv: PiEnvProfile | undefined = piBaseFlag ? { base: piBaseFlag as PiEnvProfile["base"] } : undefined;
   const tmuxName = normalizeName(name);
   const channelName = tmuxName.replace(AGENT_PREFIX, "");
   const team = await (await import("./manager/team.js")).teamFieldsForCreate(tmuxName, teamFlags); // 派发者校验在建频道 / 拉起之前
@@ -559,10 +559,12 @@ async function cmdCreate(
     if (run.aborting) return; // 信号清理已接手并负责输出
     const r = await abandonCreate(tmuxName, { channelId, windowId }, realOpsDeps, run); // 占位若已被接手，只按本次的 id 收拾
     unguard();
-    output({ ok: false, error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
+    output({ ok: false, cleanedUp: (await import("./lib/scheduler-create-retry.js")).createCleanedUp(r), // 调度器据此退避重试，不交 PM
+      error: r.ok ? `${reason}（已清理：${r.steps.join("；") || "无残留"}）` : `${reason}（${r.error}）` });
   }
+  const lendNo = (await import("./lib/lend-grant-spawn.js")).lendCreateDenied(tmuxName, { choice: { model, effort } }); if (lendNo) return cleanup(lendNo); // 出借 worker：已登记占位，起窗口前现核授权
 
-  let ready = false;
+  let ready = false, transportNote = selected.note; // transportNote：Pi 没走 ACP / 回退 tmux 的原因，进输出
   let spec: LaunchSpec;
   const expandedDir = dir.replace(/^~/, process.env.HOME || "~");
 
@@ -592,7 +594,9 @@ async function cmdCreate(
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
     // 按窗口 id 操作，并经 gateOps：信号清理接手后不再往 tmux 发任何东西（按名字发可能落到别的窗口）
-    const started = (await launchInWindow(tmuxName, adapter, spec, { target: windowId, gate: (w) => gateOps(w, run) })).result;
+    const go = await (await import("./manager/acp-lifecycle.js")).launchWithPiFallback(adapter, (a) => launchInWindow(tmuxName, a, spec, { target: windowId, gate: (w) => gateOps(w, run) }),
+      gateOps(tmuxWindowOps(tmuxName, windowId), run)); // Pi 的 ACP 起不来：同一窗口回退 tmux
+    const started = go.result; adapter = go.adapter; transportNote = go.note ?? transportNote;
     ready = started.ready;
     if (!started.ready) {
       // 按 reason 出文案（对话框原文 / 秒退 / 占用）；CC 状态栏契约提示只对「超时」有意义
@@ -650,7 +654,7 @@ async function cmdCreate(
     channelName,
     sessionId,
     ready,
-    transport: (adapter.registryFields(spec) as { transport?: string }).transport ?? "tmux",
+    ...(await import("./manager/acp-lifecycle.js")).transportReport(adapter, spec, transportNote),
     project: proj.id,
     ...(projRes.created ? { projectCreated: true } : {}),
     ...(begun.recovered ? { recoveredResidue: begun.recovered.steps } : {}), // 上次砍在半路的残留，这次先清掉了
@@ -735,11 +739,11 @@ async function cmdResume(
   // v2.7+ --fork：--fork-session 分支副本（收编野生 bg 会话 / 源 session 被
   // bg agent 占用时）。就绪后探测实际新 session id 写 registry。
   forkSession = false,
-  runtimeFlag?: string,
+  runtimeFlag?: string, transportFlag?: string,
 ) {
-  const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)]);
-  const adapter = requireManaged(runtimeFlag, selected.transport);
-  const avail = await adapter.available();
+  const selected = await (await import("./manager/acp-lifecycle.js")).chooseResumeTransport(runtimeFlag, (await loadRegistry()).agents[normalizeName(name)], transportFlag, dir);
+  let adapter = requireManaged(runtimeFlag, selected.transport), transportNote = selected.note;
+  (await import("./manager/acp-lifecycle.js")).refusePiAcpFork(adapter, forkSession); const avail = await adapter.available(); // 拒在建频道 / 窗口之前
   if (!avail.ok) throw new Error(`无法用 --runtime ${adapter.id} 收编会话：${avail.hint}`);
   // 会话 id 格式各家不同（Claude Code 是 UUID，Pi 收任意自造 id）
   if (!adapter.isValidSessionId(sessionId)) {
@@ -869,8 +873,8 @@ async function cmdResume(
       },
     };
     spec = await (await import("./manager/acp-lifecycle.js")).prepareAcpResume(spec, adapter, selected.transport, tmuxName);
-    const launched = await launchInWindow(tmuxName, adapter, spec, { cwd: resolvedDir });
-    ready = launched.result.ready;
+    const launched = await (await import("./manager/acp-lifecycle.js")).launchWithPiFallback(adapter, (a) => launchInWindow(tmuxName, a, spec, { cwd: resolvedDir }), tmuxWindowOps(tmuxName));
+    ({ adapter } = launched); transportNote = launched.note ?? transportNote; ready = launched.result.ready;
     baseline = launched.baseline;
     if (!launched.result.ready) {
       const hint = launched.result.reason === "timeout" ? readyTimeoutHint(await captureLast(name, 40).catch(() => "")) : "";
@@ -923,7 +927,7 @@ async function cmdResume(
     ...(model ? { model } : {}),
     // resume 不提供档案编辑，但**不能把已有的档案弄丢**（丢了下次 restart 就变回继承全局）
     ...adapter.registryFields({ ...spec, extras: { piEnv: prior?.piEnv } }),
-    ...(selected.acpPending ? { transport: "tmux" as const, acpPending: true } : {}),
+    ...(selected.acpPending || selected.manualTmux ? { transport: "tmux" as const, ...(selected.acpPending ? { acpPending: true } : {}) } : {}), // 点名 tmux 要落盘才粘
     ...(await import("./manager/team.js")).keepOnResume(prior, actualSessionId), // 派发关系 / 显示名；external 只在同一会话时保留
   };
   await saveRegistry(reg); if (!prior) (await import("./lib/agent-settings.js")).releaseNameForFreshAgent(tmuxName, reg.agents); // 新名字 = 全新 agent，旧设置此时才清
@@ -974,7 +978,7 @@ async function cmdResume(
     channelId,
     channelName,
     sessionId,
-    ready,
+    ready, ...(await import("./manager/acp-lifecycle.js")).transportReport(adapter, spec, transportNote),
     permissionMode: mode,
     message: ready
       ? `Agent ${tmuxName} 已恢复，Discord 频道 #${channelName} 已就绪`
@@ -1112,7 +1116,7 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
  * 拉起。restart 的 bg 占用自愈路径会自动 --fork-session 并回写实际新 session id，
  * 所以这里只需要改 registry —— 占用与否都能正确拉起。
  */
-async function cmdAdopt(name: string, sessionId: string) {
+async function cmdAdopt(name: string, sessionId: string, transportFlag?: string) {
   if (!UUID_RE.test(sessionId)) {
     output({ ok: false, error: `非法 sessionId: "${sessionId}"（应为 UUID 格式）` });
     return;
@@ -1127,6 +1131,7 @@ async function cmdAdopt(name: string, sessionId: string) {
   }
   const oldId = info.sessionId;
   // v2.8+ 被替换的旧 session 先归档快照
+  await (await import("./manager/acp-lifecycle.js")).adoptTransport(info, transportFlag); // Pi 同 resume 缺省 ACP（只改 info，下面一起落盘）
   if (oldId && oldId !== sessionId) {
     await archiveAgentSession(tmuxName, info, oldId).catch(() => {});
   }
@@ -1220,7 +1225,7 @@ async function restartMaster(): Promise<{ name: string; ok: boolean; error?: str
   };
 }
 
-async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {}) {
+async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect?: string } = {}) {
   const reg = await loadRegistry();
   const liveWindows = await listAgentWindowsShared();
 
@@ -1231,7 +1236,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     const tmuxName = normalizeName(name);
     const inReg = !!reg.agents[tmuxName];
     if (!liveWindows.includes(tmuxName) && !inReg) {
-      output({ ok: false, error: `${tmuxName} 不存在` });
+      output({ ok: false, error: `${tmuxName} 不存在`, ...expectMissing(tmuxName, opts.expect) });
       return;
     }
     targets = [tmuxName];
@@ -1247,7 +1252,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     return;
   }
 
-  const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string }[] = [];
+  const results: { name: string; ok: boolean; error?: string; recreated?: boolean; note?: string; skipped?: string }[] = [];
 
   for (const tmuxName of targets) {
     const info = reg.agents[tmuxName];
@@ -1270,10 +1275,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
     const fresh = (await loadRegistry()).agents[tmuxName];
     const late = pendingRefusal(fresh?.pending, "restart", fresh?.pending ? await listAgentWindowsShared() : [], Date.now(), pidAlive)
       ?? (!name && fresh?.status !== "active" ? "排队期间已被 kill / 移除，跳过" : null);
-    if (late) {
-      results.push({ name: tmuxName, ok: false, error: late });
-      continue;
-    }
+    if (late) { results.push({ name: tmuxName, ok: false, error: late }); continue; }
+    const skip = await expectSkip(tmuxName, opts.expect); // 监护传来的重启前提：拿锁后、碰窗口前再核（manager/restart-expect.ts）
+    if (skip) { results.push(skip); continue; }
     // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
     let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
     if (!adapter) {
@@ -1364,9 +1368,9 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
       },
     };
 
-    let started = (await launchInWindow(tmuxName, adapter, spec, { waitShell: true })).result;
-    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, started,
-      (a) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result)));
+    const launch = (a: ManagedRuntimeAdapter) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result);
+    let started: ReadyResult; // 首次启动交 promise：ACP 构建命令就抛也要走回退（acp-lifecycle.ts recoverFailedAcpLaunch）
+    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, launch(adapter), launch));
     // v2.7+ 自愈：会话被占用（CC 的 bg agent）→ fork 一份副本重试，就绪后探测
     // 新 session id 回写 registry（否则 watcher / 下次 restart 又会盯回被占用的旧 id）。
     if (!started.ready && started.reason === "occupied") {
@@ -1459,7 +1463,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean } = {})
 
   output({
     ok: results.every((r) => r.ok),
-    results,
+    results: markExpectSkips(results, opts.expect),
     message: results
       .map((r) => `${r.name}: ${r.ok ? `✅${r.note ? ` ${r.note}` : ""}` : `❌ ${r.error}`}`)
       .join("\n"),
@@ -2237,6 +2241,7 @@ async function cmdPiEnvSet(
   name: string,
   opts: {
     base?: string;
+    preset?: string;
     addExt?: string[];
     addSkill?: string[];
     excludeTool?: string[];
@@ -2262,6 +2267,8 @@ async function cmdPiEnvSet(
   }
 
   const next: PiEnvProfile = opts.reset ? {} : normalizePiEnvProfile(info.piEnv);
+  const presetErr = applyPiEnvPreset(next, opts.preset).error; // 预设铺基底，显式 flag 随后覆盖
+  if (presetErr) return output({ ok: false, error: presetErr });
   if (opts.base) {
     if (opts.base === "inherit") delete next.base;
     else next.base = "minimal";
@@ -2302,30 +2309,24 @@ switch (cmd) {
     break;
   }
   case "pi-env-set": {
-    const { rest: a1, value: base } = extractStringFlag(args, "--base");
-    const { rest: a2, value: mcpConfig } = extractStringFlag(a1, "--mcp-config");
-    const { rest: a3, values: addExt } = extractMultiFlag(a2, "--add-ext");
-    const { rest: a4, values: addSkill } = extractMultiFlag(a3, "--add-skill");
-    const { rest: a5, values: excludeTool } = extractMultiFlag(a4, "--exclude-tool");
-    const { rest: a6, value: noTrust } = extractBoolFlag(a5, "--no-trust");
-    const { rest: a7, value: trust } = extractBoolFlag(a6, "--trust");
-    const { rest: posArgs, value: reset } = extractBoolFlag(a7, "--reset");
-    const [name] = posArgs;
+    const p = parsePiEnvSetFlags(args);
+    const [name] = p.rest;
     if (!name) {
       output({
         ok: false,
-        error: 'usage: pi-env-set <agent> [--base inherit|minimal] [--add-ext <src>]... [--add-skill <path>]... [--exclude-tool <name>]... [--mcp-config <path>] [--no-trust|--trust] [--reset]',
+        error: 'usage: pi-env-set <agent> [--preset N] [--base inherit|minimal] [--add-ext <src>] [--add-skill <path>] [--exclude-tool <t>] [--mcp-config <path>] [--no-trust|--trust] [--reset]'
       });
       break;
     }
     await cmdPiEnvSet(name, {
-      base,
-      addExt,
-      addSkill,
-      excludeTool,
-      mcpConfig,
-      trust: noTrust ? false : trust ? true : undefined,
-      reset,
+      base: p.base,
+      preset: p.preset,
+      addExt: p.addExt,
+      addSkill: p.addSkill,
+      excludeTool: p.excludeTool,
+      mcpConfig: p.mcpConfig,
+      trust: p.trust,
+      reset: p.reset,
     });
     break;
   }
@@ -2333,7 +2334,7 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.teamFlags);
+    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags);
     break;
   }
 
@@ -2377,8 +2378,8 @@ switch (cmd) {
 
   case "resume": {
     const { rest: afterFork, value: fork } = extractBoolFlag(args, "--fork");
-    const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterFork, "--runtime");
-    const { rest: afterModel, model } = extractModelFlag(afterRuntime);
+    const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterFork, "--runtime"), { rest: afterT, value: transportFlag } = extractStringFlag(afterRuntime, "--transport");
+    const { rest: afterModel, model } = extractModelFlag(afterT);
     const { rest: afterMode, mode } = extractModeFlag(afterModel);
     const { rest: afterEffort, effort } = extractEffortFlag(afterMode);
     const { rest: posArgs, preset, disallowedRaw } = extractPermFlags(afterEffort);
@@ -2386,11 +2387,11 @@ switch (cmd) {
     if (!name || !sessionId) {
       output({
         ok: false,
-        error: 'resume <name> <sessionId> [dir] [--runtime pi] [--fork] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>]',
+        error: 'resume <name> <sessionId> [dir] [--runtime pi] [--transport tmux|acp] [--fork] [--preset <preset>] [--disallowed "..."] [--effort <level>] [--mode <mode>] [--model <model>]',
       });
       break;
     }
-    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork, runtimeFlag);
+    await cmdResume(name, sessionId, dir, { preset, disallowedRaw }, effort, mode, model, fork, runtimeFlag, transportFlag);
     break;
   }
 
@@ -2405,12 +2406,12 @@ switch (cmd) {
 
   // v2.7+ 收编：adopt <name> <sessionId> —— 把 bg 分身/任意 session 立为正式会话并重启
   case "adopt": {
-    const [name, sessionId] = args;
+    const { rest: [name, sessionId], value: transportFlag } = extractStringFlag(args, "--transport");
     if (!name || !sessionId) {
-      output({ ok: false, error: "usage: adopt <name> <sessionId> — 把指定 session（如 bg 分身）收编为该 agent 的正式会话并重启拉起" });
+      output({ ok: false, error: "usage: adopt <name> <sessionId> [--transport tmux|acp] — 把指定 session（如 bg 分身）收编为该 agent 的正式会话并重启拉起（--transport 只给 Pi）" });
       break;
     }
-    await cmdAdopt(name, sessionId);
+    await cmdAdopt(name, sessionId, transportFlag);
     break;
   }
 
@@ -2491,7 +2492,8 @@ switch (cmd) {
   }
   case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;
   case "skill-toggle": await (await import("./manager/skills.js")).cmdSkillToggle(args); break; // 按 agent 启停技能（lib/agent-settings.ts）
-  case "list": await cmdList(); break;
+  case "list": await cmdList(); break; case "shared-ledger-join": await (await import("./manager/shared-ledger-join-cmd.js")).cmdSharedLedgerJoin(args); break;
+  case "shared-ledger-offer": await (await import("./manager/shared-ledger-offer.js")).cmdSharedLedgerOffer(args); break; // 把入组码递给 peer 的 bridge，对方 owner 点卡入组
   case "repair": await (await import("./manager/repair.js")).cmdRepair(args); break; // 收拾做到一半的 create / kill / rename 与孤儿窗口、频道（默认只列计划）
   case "label": await (await import("./manager/agent-external.js")).cmdAgentLabel(args[0] || "", args.slice(1).join(" ")); break;
   case "worker-kind": await (await import("./manager/agent-external.js")).cmdWorkerKind(args[0] || "", args[1] || ""); break;
@@ -2536,7 +2538,7 @@ switch (cmd) {
       output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
       break;
     }
-    await cmdRestart(name || undefined, { includeMaster });
+    await cmdRestart(name || undefined, { includeMaster, expect: expectArg(args) });
     break;
   }
 
@@ -2759,7 +2761,7 @@ switch (cmd) {
     break;
   }
 
-  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0]); break;
+  case "migrate": await (await import("./manager/acp-migration.js")).cmdMigrate(args[0], args.slice(1)); break;
   case "migrate-web-state": await (await import("./manager/migrate-web-state.js")).cmdMigrateWebState(); break; // 旧 Next BFF 的 settings.db / config.json → bridge（先 tar 备份，幂等）
   case "web-release": await cmdWebRelease(args); break; // 网页版本发布 / 回滚（lib/web-releases.ts）
   case "retire-web": await (await import("./manager/retire-web.js")).cmdRetireWeb(); break; // 卸旧 com.claudestra.web（前端已由 bridge 托管；先验新模式 + 有备份才动手）
@@ -2867,7 +2869,7 @@ switch (cmd) {
       error: `Unknown command: ${cmd || "(empty)"}`,
       usage: [
         "create <name> <dir> [purpose]  — create an agent",
-        "resume <name> <sessionId> [dir] — resume a past session",
+        "resume <name> <sessionId> [dir] — resume a past session (Pi: ACP by default, falls back to tmux; --transport tmux|acp)",
         "kill <name> [--force]           — destroy an agent (rerun finishes a half-done kill; --force gives up a channel that can't be deleted)",
         "rename <old-name> <new-name>    — rename (tmux window + registry + Discord channel); rerun finishes a half-done rename",
         "repair [--apply]                — clean up half-done create/kill/rename, orphan windows/channels (dry run unless --apply)",

@@ -60,7 +60,7 @@ lib/                    无 React 的共享逻辑（i18n.tsx 例外）
     push.ts             VAPID 公钥（relay 取 app-config，direct 问 /push/config）、订阅增删、markRead（read + notify-read）、reads、APNs
     settings.ts         /settings /profile /skills/prefs /config/claude-defaults /auto-compact /memory-hygiene /update/*：形状还原成组件既有 props
     system.ts           /host、/stats、/relay/*、/remote-access、peers / cron / projects 分发、会话清单与归档、后台任务、转写、client-log
-    terminal.ts         terminalStream（SSE）/ terminalInput / terminalResize；grant 缺 terminal 则 403
+    terminal.ts         terminalStream（SSE）/ terminalInput / terminalResize；grant 缺 terminal 则 403；宿主 shell 的 listShells / createShell / closeShell
     version.ts          fetchVersion（relay 读 app-config；direct 问 /version）与 fetchMachineVersion（永远问当前机器：apiVersion / minClient）
   chat/                 协议与纯变换（lib → features 单向，这里不许 import features）
     events.ts           WebStreamEvent 协议 v1（tool / text / reply / done / ask / bg-* / compact / telemetry…）+ AnchoredStreamEvent.eid
@@ -105,7 +105,8 @@ features/chat/          Chat 本体；无 React 的纯逻辑单独成文件，�
                         bg-task-panel / cc-task-panel / skills-sheet / session-search / share-dock / share-ui / invite-intake；
                         responsive-shell / nav-context / centered-modal 是浮层与导航基建
 features/terminal/      terminal-button（入口：窄屏 #terminal 伪路由全屏页 terminal-page，宽屏 terminal-modal）、
-                        terminal-view（xterm v6 + fit + webgl 尽力；SSE 下行 → term.write，onData 8ms 微批串行 POST，RO 防抖 resize）、control-bar
+                        terminal-view（xterm v6 + fit + webgl 尽力；SSE 下行 → term.write，onData 8ms 微批串行 POST，RO 防抖 resize）、control-bar；
+                        shell-button + use-shell-view（侧栏「新终端」：宿主 shell 列表 / 新开，窄屏 #shell 伪路由，复用 terminal-page / modal）
 features/devtools/      开发者模式（?dev=1 / 设置 → 实验）。dev-only 代码只能在这里，业务代码只留 isDevMode() 一行；见 docs/web-dev-mode.md
 components/domd/        助手 markdown 的 do-md 只读封装：index.tsx（行内规则 = 默认集 + 行内按钮 / chip）、inline-button.tsx、normalize-md.ts、prism.ts
 ```

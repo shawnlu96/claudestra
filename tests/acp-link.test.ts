@@ -1,10 +1,11 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { acpClear, acpConfigOf, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
+import { acpClear, acpConfigOf, acpHostTurnBusy, acpSetConfig, answerAcp, answerAcpDiscord, answerAcpResponse, liveAcpButtons, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { handleSlashPassthrough } from "../src/bridge/api-slash.ts";
 import { subscribeEvents } from "../src/bridge/event-bus.ts";
 import { drainChannelWatcher, pushEntries, startWatching, stopWatching, stopWatchingByChannel } from "../src/bridge/jsonl-watcher.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
+import { acpSettings } from "../src/bridge/runtime-settings-routes.ts";
 
 // bridge 这一头：只认当前登记的那条连接；流式条目进 watcher 的推送模式；额度卡 / 权限卡的答案经宿主落地（不发键）
 
@@ -95,7 +96,7 @@ test("Web 聊天 /clear 确认后按会话清理动作返回，结果不确定�
     principal: { id: "owner:self", role: "owner", name: "owner", agents: ["*"], createdAt: "2026-01-01T00:00:00Z" },
     tokenId: "owner:self", agent: { name: "agent-web-clear", channelId: ch, runtime: "codex", sessionId: "old-thread" }, text: "/clear", hasAttachments: false,
   }, { sendLine: async () => {}, mirror: async () => {}, scheduleClearRotation: () => {},
-    markThinking: () => {}, record: () => {}, wallWait: async () => null });
+    markThinking: () => {}, record: () => {}, wallWait: async () => null, runManager: async () => ({ ok: true }) });
   try {
     const success = request();
     await Bun.sleep(0);
@@ -116,6 +117,56 @@ test("Web 聊天 /clear 确认后按会话清理动作返回，结果不确定�
     const unknownResponse = await committedButUnbound;
     expect(unknownResponse?.status).toBe(504);
     expect(await unknownResponse?.json()).toMatchObject({ code: "clear_result_unknown", sessionId: "committed-thread" });
+  } finally {
+    noteAcpChannel(ch, "tmux");
+  }
+});
+
+test("ACP 版 Pi 的 /model、/thinking：经宿主 set_config_option 切，切成了再写 registry（和网页切换器同一条路），不发键", async () => {
+  const ch = "local-pi-acp-model";
+  const s = sock(ch);
+  noteAcpChannel(ch, "acp");
+  const managed: string[][] = [];
+  const sent: string[] = [];
+  const request = (text: string) => handleSlashPassthrough({
+    principal: { id: "owner:self", role: "owner", name: "owner", agents: ["*"], createdAt: "2026-01-01T00:00:00Z" },
+    tokenId: "owner:self", agent: { name: "agent-pi-model", channelId: ch, runtime: "pi" }, text, hasAttachments: false,
+  }, { sendLine: async (_w, t) => void sent.push(t), mirror: async () => {}, scheduleClearRotation: () => {},
+    markThinking: () => {}, record: () => {}, wallWait: async () => null, runManager: async (...a) => (managed.push(a), { ok: true }) });
+  try {
+    for (const [text, configId, value, flag] of [["/model google/flash", "model", "google/flash", "--model"], ["/thinking high", "reasoning_effort", "high", "--effort"]] as const) {
+      const pending = request(text);
+      await Bun.sleep(0);
+      const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+      expect(call).toMatchObject({ op: "set_config", configId, value });
+      await onAcpFrame({ type: "acp_call_result", channelId: ch, id: call.id, ok: true }, s, discord);
+      const res = (await pending)!;
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, live: true });
+      expect(managed.at(-1)).toEqual(["set-claude", "agent-pi-model", flag, value]);
+    }
+    expect(s.sent.some((f) => f.op === "slash")).toBe(false);
+    expect(sent).toEqual([]);
+  } finally {
+    noteAcpChannel(ch, "tmux");
+  }
+});
+
+test("网页切换器：宿主在线 → 直接 set_config_option，不看 agent 在不在跑，切成了再写 registry", async () => {
+  const ch = "local-acp-settings-live";
+  const s = sock(ch);
+  noteAcpChannel(ch, "acp");
+  const managed: string[][] = [];
+  let probed = false;
+  try {
+    const pending = acpSettings("agent-live", ch, "", "high", async (...a) => (managed.push(a), { ok: true }), async () => (probed = true));
+    await Bun.sleep(0);
+    const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+    expect(call).toMatchObject({ op: "set_config", configId: "reasoning_effort", value: "high" });
+    await onAcpFrame({ type: "acp_call_result", channelId: ch, id: call.id, ok: true }, s, discord);
+    expect(await (await pending).json()).toMatchObject({ ok: true, live: true });
+    expect(managed).toEqual([["set-claude", "agent-live", "--effort", "high"]]);
+    expect(probed).toBe(false);
   } finally {
     noteAcpChannel(ch, "tmux");
   }
@@ -457,6 +508,28 @@ describe("权限卡：按钮带代际、排队、经宿主确认（r4 P1-1 / P2�
     const pending = answerAcp(CH, after, who);
     expect(await hostAnswers(s2, true)).toMatchObject({ permId: "d-1" });
     expect((await pending).status).toBe(200);
+  });
+
+  test("问宿主回合态：只问 ACP 宿主登记的频道；答 busy 才算数，旧宿主拒绝 / 没带 busy = 未知", async () => {
+    const ch = "local-acp-turn";
+    const s = sock(ch);
+    noteAcpChannel(ch, "tmux");
+    expect(await acpHostTurnBusy(ch)).toBeNull();
+    expect(s.sent).toEqual([]);
+    noteAcpChannel(ch, "acp");
+    const answer = async (result: Record<string, unknown>) => {
+      const pending = acpHostTurnBusy(ch);
+      await new Promise((r) => setTimeout(r, 0));
+      const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+      expect(call).toMatchObject({ op: "turn" });
+      await onAcpFrame({ type: "acp_call_result", channelId: ch, id: call.id, ...result }, s, discord);
+      return pending;
+    };
+    expect(await answer({ ok: true, busy: true })).toBe(true);
+    expect(await answer({ ok: true, busy: false })).toBe(false);
+    expect(await answer({ ok: false, error: "不认识的调用 turn" })).toBeNull();
+    expect(await answer({ ok: true })).toBeNull();
+    for (const ok of ["false", "true", 1, {}]) expect([ok, await answer({ ok, busy: false })]).toEqual([ok, null]); // 只认 ok === true
   });
 
   test("宿主不在线：改配置直接失败，不挂着", async () => {

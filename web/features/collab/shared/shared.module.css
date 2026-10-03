@@ -1,0 +1,25 @@
+/* 团队操作的表单（i28-TV1）：挂在本地协作视图的 Sec 里，颜色 / 字号 / 圆角全用本地视图的 token（collab.module.css .tokens） */
+.line, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+.head { color: var(--text); font-size: var(--fs-1); font-weight: 600; margin: 4px 0; }
+.sub { color: var(--muted); font-size: var(--fs-3); margin-bottom: 4px; }
+.conflict { border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent); border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
+.form { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; min-width: 0; }
+.form label { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--muted); font-size: var(--fs-3); }
+.form input, .form textarea { width: 100%; min-width: 0; background: var(--bg-2); color: var(--text); font: inherit; font-size: 16px; padding: 7px 10px;
+  border: 1px solid var(--line-2); border-radius: 8px; outline: none; }
+.form input:focus-visible, .form textarea:focus-visible { border-color: var(--accent); }
+.form textarea { min-height: 64px; resize: vertical; }
+.nodeForm { min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; border: 1px solid var(--line-2); border-radius: 10px; padding: 10px; }
+.nodeForm legend { color: var(--text); font-family: var(--mono); font-size: var(--fs-3); padding: 0 4px; }
+.nodeForm legend span { color: var(--muted); font-family: inherit; }
+.nodeForm:disabled { opacity: .55; }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.compare > div { min-width: 0; }
+.nodeConflict { padding: 8px 0; border-top: 1px solid var(--line); }
+.preview { margin: 0 0 8px; overflow-wrap: anywhere; font-size: var(--fs-2); }
+.preview > div { margin-bottom: 6px; }
+.preview dt { color: var(--muted); font-size: var(--fs-3); }
+.preview dd { margin: 2px 0 0; color: var(--text); }
+@media (max-width: 700px) {
+  .compare, .nodeForm { grid-template-columns: 1fr; }
+}

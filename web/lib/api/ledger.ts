@@ -4,14 +4,37 @@
  */
 import type { LedgerEventView, LedgerOverview } from "@/features/collab/collab-model";
 import type { TaskDetail } from "@/features/collab/collab-detail-model";
+import type { DagBoard, DagDiffResponse, FeatureDetail } from "@/features/collab/dag/dag-types";
 import { drainFrames, type BridgeEvent } from "@/lib/chat/stream-shape";
 import { apiAgentName } from "@/lib/chat/agents";
+import { assertLedgerOverview } from "@/lib/ledger-meta-guard";
 import { api, apiStream } from "./client";
 
 const enc = encodeURIComponent;
 
-export function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
-  return api(`/ledger/${enc(project)}`, { timeoutMs: 10_000, signal });
+/** dayStart = 本机零点：bridge 按它定哪些已完成卡算「今天」、带小圆点（和 homeView 的今日完成同一个零点）；老 bridge 不认就忽略 */
+export async function fetchLedger(project: string, signal?: AbortSignal): Promise<LedgerOverview & { ok: boolean }> {
+  const day = new Date();
+  day.setHours(0, 0, 0, 0);
+  const ov = await api<LedgerOverview & { ok: boolean }>(`/ledger/${enc(project)}?dayStart=${day.getTime()}`, { timeoutMs: 10_000, signal });
+  assertLedgerOverview(ov);
+  return ov;
+}
+
+/** 子 DAG 两张图共用的快照（bridge i28-L4，同一道 canReadLedger 门）；老 bridge 没有这条路由 = 404，调用方回落到因果线画布 */
+export function fetchDagBoard(project: string, signal?: AbortSignal): Promise<DagBoard> {
+  return api(`/ledger/${enc(project)}/dag`, { timeoutMs: 10_000, signal });
+}
+
+/** 某个 feature 的版本列表 + 一版快照；version 缺省 = 当前版，"pending" = 等批的重写 */
+export function fetchDagFeature(project: string, featureId: string, version?: number | "pending", signal?: AbortSignal): Promise<FeatureDetail> {
+  const q = version === undefined ? "" : `?version=${enc(String(version))}`;
+  return api(`/ledger/${enc(project)}/dag/${enc(featureId)}${q}`, { timeoutMs: 10_000, signal });
+}
+
+/** 两版对比（to 可以是 "pending"） */
+export function fetchDagDiff(project: string, featureId: string, from: number, to: number | "pending", signal?: AbortSignal): Promise<DagDiffResponse> {
+  return api(`/ledger/${enc(project)}/dag/${enc(featureId)}/diff?from=${from}&to=${enc(String(to))}`, { timeoutMs: 10_000, signal });
 }
 
 export interface LastSeenView {

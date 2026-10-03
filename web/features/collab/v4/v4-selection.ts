@@ -12,8 +12,10 @@ import type { TeamNode } from "../team-graph-model";
  * 所在实例、本机 agent 名，状态由团队面板自己拉）、团队（手机没有中区标签，整屏打开团队面板）
  */
 export type Member = { kind: "member"; id: string; name: string; peer: string | null; agent: string | null };
-export type Selection = { kind: "task"; id: string } | { kind: "edge"; keys: string[] } | { kind: "fold"; id: string } | { kind: "waits" } | Member | { kind: "team" } | null;
-export type Resolved = { kind: "edge"; deps: LedgerDepView[] } | { kind: "fold"; fold: CFold } | { kind: "waits" } | Member | { kind: "team" } | null;
+/** 子 DAG 的三页（dag/use-dag-panes.tsx 按快照解析）：节点（feature + key）、某个 feature 的版本列表、它正在看的对比 */
+export type DagSel = { kind: "dnode"; f: string; key: string } | { kind: "dver"; f: string } | { kind: "ddiff"; f: string };
+export type Selection = { kind: "task"; id: string } | { kind: "edge"; keys: string[] } | { kind: "fold"; id: string } | { kind: "waits" } | Member | { kind: "team" } | DagSel | null;
+export type Resolved = { kind: "edge"; deps: LedgerDepView[] } | { kind: "fold"; fold: CFold } | { kind: "waits" } | Member | { kind: "team" } | DagSel | null;
 
 export const memberSel = (n: TeamNode): Member => ({ kind: "member", id: n.id, name: n.name, peer: n.peer ?? null, agent: n.agent?.name ?? null });
 
@@ -23,7 +25,7 @@ export const edgeSel = (deps: readonly LedgerDepView[]): Selection => ({ kind: "
 /** 任务选中走任务详情（openTask），这里只管其余几种；目标全没了 = null */
 export function resolveSelection(sel: Selection, ov: Pick<LedgerOverview, "deps">, canvas: Pick<Canvas, "groups">): Resolved {
   if (!sel || sel.kind === "task") return null;
-  if (sel.kind === "waits" || sel.kind === "member" || sel.kind === "team") return sel;
+  if (sel.kind === "waits" || sel.kind === "member" || sel.kind === "team" || sel.kind === "dnode" || sel.kind === "dver" || sel.kind === "ddiff") return sel;
   if (sel.kind === "edge") {
     const deps = (ov.deps ?? []).filter((d) => sel.keys.includes(depKey(d)));
     return deps.length ? { kind: "edge", deps } : null;

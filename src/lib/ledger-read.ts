@@ -7,15 +7,18 @@
  */
 import { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
-import { blockedBy, depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
-import { currentStageMark, stageTimeline, taskMetrics, type StageEntry, type TaskMetrics } from "./ledger-metrics.js";
-import { isAskEvent, TERMINAL_STAGES, type LedgerEvent, type LedgerItem, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./ledger-deps.js";
+import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
+import { compactStage, doneCard, eventsByTarget, liveCard, overviewCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
+import { dayStartOf, doneWindow, type DoneRest } from "./ledger-read-done.js";
+import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
-import { schedulerProjectView } from "./ledger-scheduler.js";
 import { taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
+
+export { clipFirstLine } from "./ledger-read-cards.js";
 
 /** 读连接等锁的上限：WAL 下读不等写，只有写者刚建库、还没切 WAL 的那一瞬会撞上；宁可这一轮报 busy 也不卡住 bridge */
 const READ_BUSY_TIMEOUT_MS = 200;
@@ -91,90 +94,29 @@ function changedProjects(db: Database, afterSeq: number): { projects: string[]; 
   return { projects: rows.map((r) => r.project), lastSeq: rows.reduce((m, r) => Math.max(m, r.m), afterSeq) };
 }
 
-/** 最近一轮审查的摘要：首页「返工原因」只要这一条，不必为每条线再拉详情 */
-interface ReviewSummary {
-  round: number | null;
-  verdict: string | null;
-  p0: number | null;
-  p1: number | null;
-  p2: number | null;
-  text: string;
-  ts: number;
-}
-interface TaskView extends LedgerTask {
-  lastEvent: LedgerEvent | null;
-  /** 进入当前阶段的时刻（时间线最后一段的 from）；没有建任务事件的残缺数据为 null */
-  stageSince: number | null;
-  /** stageSince 是导入时推断的近似时间：网页不拿它判「卡住」，时长前面标 ≈ */
-  stageSinceApprox: boolean;
-  lastReview: ReviewSummary | null;
-  metrics: TaskMetrics;
-  /** 挡着它的前置任务 id（ledger-deps.ts blockedBy）；空 = 依赖上不挡 */
-  blockedBy: string[];
-  /** 不是终态且依赖上不挡（runnableTasks 的口径） */
-  runnable: boolean;
-  /** 步骤线（T51，ledger-step-line.ts）：只有总览里带，详情在 TaskDetail.stepLine */
-  stepLine?: StepLineInfo;
-}
 export interface ProjectView {
-  /** Same-snapshot scheduler facts for the existing v4 DAG; absent tables yield manual tasks. */
-  scheduler: ReturnType<typeof schedulerProjectView>;
   meta: LedgerMeta;
-  items: LedgerItem[];
-  tasks: TaskView[];
+  items: OverviewItem[];
+  tasks: OverviewTask[];
   /** 项目的依赖边，带推导值与最终状态 */
   deps: DepView[];
   /** 最近 PROJECT_EVENTS_LIMIT 条 target 为空的项目级事件，seq 升序 */
   projectEvents: LedgerEvent[];
   /** 巡检发现、还没解决的「可能漏了」（lib/ledger-audit.ts）；库还没有 audit_findings 表 = 空 */
   audit: StoredFinding[];
-}
-
-const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
-
-/** 总览只要一句原因：首行、按码点截到 120（全文在详情接口里） */
-const REVIEW_TEXT_MAX = 120;
-
-/** 首个非空行，按码点截到 max（超出补 …）：总览只给一句，全文留给详情接口 */
-export function clipFirstLine(text: string, max: number = REVIEW_TEXT_MAX): string {
-  const first = [...(text.split("\n").find((l) => l.trim()) ?? "").trim()];
-  return first.length > max ? `${first.slice(0, max).join("")}…` : first.join("");
-}
-
-function reviewSummary(e: LedgerEvent | undefined): ReviewSummary | null {
-  if (!e) return null;
-  const d = e.data;
-  const text = clipFirstLine(e.text);
-  return { round: numOrNull(d.round), verdict: typeof d.verdict === "string" ? d.verdict : null, p0: numOrNull(d.p0), p1: numOrNull(d.p1), p2: numOrNull(d.p2), text, ts: e.ts };
-}
-
-function taskView(task: LedgerTask, own: readonly LedgerEvent[], now: number, deps: readonly DepView[]): TaskView {
-  const blockers = blockedBy(task.id, deps).map((d) => d.from);
-  return {
-    ...task,
-    // dep 事件是关系变更不是进展、ask 族有自己的卡片：算进来会把回滚 / 验证失败这类「出问题」信号和最近一条进展盖掉（web collab-model 看 lastEvent）
-    lastEvent: own.findLast((e) => !isAskEvent(e) && e.kind !== "dep") ?? null,
-    stageSince: stageTimeline(own, now).at(-1)?.from ?? null,
-    stageSinceApprox: currentStageMark(own)?.data.approxTime === true,
-    lastReview: reviewSummary(own.findLast((e) => e.kind === "review")),
-    metrics: taskMetrics(task, own, now),
-    blockedBy: blockers,
-    runnable: !TERMINAL_STAGES.includes(task.stage) && blockers.length === 0,
-  };
+  /** 已完成卡只带窗口（ledger-read-done.ts）：更早的从这个游标起翻 GET /ledger/:project/done；null = 没有更早的 */
+  doneCursor: string | null;
+  /** 窗口外已完成卡的聚合计数 */
+  doneRest: DoneRest;
 }
 
 /** GET /ledger/:project：事项 + 任务（每个带最近一条事件与指标）+ 最近的项目级事件；整个项目的事件只查一次 */
-export function projectView(db: Database, project: string, now: number): ProjectView {
-  return db.transaction(() => projectViewSnapshot(db, project, now)).deferred();
+export function projectView(db: Database, project: string, now: number, clientDayStart: number | null = null): ProjectView {
+  return db.transaction(() => projectViewSnapshot(db, project, now, dayStartOf(now, clientDayStart))).deferred();
 }
 
-function projectViewSnapshot(db: Database, project: string, now: number): ProjectView {
-  const byTarget = new Map<string, LedgerEvent[]>();
-  for (const e of listEvents(db, { project })) {
-    const list = byTarget.get(e.target);
-    if (list) list.push(e);
-    else byTarget.set(e.target, [e]);
-  }
+function projectViewSnapshot(db: Database, project: string, now: number, dayStart: number): ProjectView {
+  const byTarget = eventsByTarget(listEvents(db, { project }));
   // ask 族事件不进项目级列表（isAskEvent 同一口径）：25 条没挂任务的 ask 就能把这 20 条挤满
   const recent = db
     .query(`SELECT * FROM events WHERE project = ? AND target = '' AND kind NOT IN ('ask', 'ask_expire', 'ask_cancel', 'ask_reopen')
@@ -183,12 +125,17 @@ function projectViewSnapshot(db: Database, project: string, now: number): Projec
   const tasks = listTasks(db, project);
   const deps = depViews(listDeps(db, project), tasks);
   const rows = stepsByTask(db);
+  const views = tasks.map((t) => taskView(t, byTarget.get(t.id) ?? [], now, deps));
+  const win = doneWindow(views.filter((v) => compactStage(v.stage)), deps, dayStart);
+  const visible = new Set(views.filter((v) => !compactStage(v.stage) || win.keep.has(v.id)).map((v) => v.id));
+  const line = (v: TaskView) => stepLineInfo(v, rows.get(v.id) ?? [], byTarget.get(v.id) ?? []);
   return {
-    scheduler: schedulerProjectView(db, project),
     meta: getMeta(db, project),
-    items: listItems(db, project),
-    tasks: tasks.map((t) => ({ ...taskView(t, byTarget.get(t.id) ?? [], now, deps), stepLine: stepLineInfo(t, rows.get(t.id) ?? [], byTarget.get(t.id) ?? []) })),
-    deps,
+    items: listItems(db, project).map((i) => ({ id: i.id, title: i.title, oneLine: i.oneLine })),
+    tasks: views.flatMap((v) => (!compactStage(v.stage) ? [liveCard(v, line(v))] : win.keep.has(v.id) ? [doneCard(v, win.today.has(v.id) ? line(v) : null)] : [])).map(overviewCard),
+    doneCursor: win.cursor,
+    doneRest: win.rest,
+    deps: deps.filter((d) => visible.has(d.from) && visible.has(d.to)),
     projectEvents: recent.reverse().map(toEvent),
     audit: openFindings(db, project),
   };

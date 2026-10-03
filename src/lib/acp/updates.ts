@@ -1,12 +1,15 @@
 /**
  * session/update → Claude Code 形状的条目（与 codex-session.ts 翻 rollout 的产物同形），宿主推给 bridge，网页的流式展示不用改。
  * - 正文：agent_message_chunk 是增量，按 messageId 攒着，换消息 / 出工具调用 / 回合结束（flush）时整条吐出。
- *   思考（agent_thought_chunk）不吐：tmux 下 rollout 的 reasoning 也不显示，两条 transport 看到的东西一致。
+ *   思考（agent_thought_chunk）不吐：tmux 下 rollout 的 reasoning 也不显示，两条 transport 看到的东西一致；
+ *   适配器标了 _meta.claudestra.display 的整块（Pi：tmux 下会话文件里的 thinking 也显示）吐成 thinking 块，watcher 当进度句。
  *   user_message_chunk 只在 session/load 回放历史时出现，宿主不需要它。
  * - 工具：tool_call 起头就吐 tool_use（watcher 据此发 tool_start），tool_call_update 到 completed / failed 吐 user 的 tool_result。
  *   MCP 调用从 rawInput 的 server / tool 拼成 mcp__<server>__<tool>（reply 的识别、隐藏照旧），入参是 rawInput.arguments；
  *   命令的标题就是去掉 shell 前缀的命令，输出攒 _meta.terminal_output_delta（只留末尾一段）。
  * - plan → update_plan（与 rollout 里 Codex 的计划工具同名同参）；usage_update → context_usage；config_option_update → model_state。
+ * - 适配器的中性记号（Pi，pi-adapter/map.ts；codex-acp 不发）：tool_call 的 _meta.claudestra.toolUse 直接当 tool_use 的名字和入参；
+ *   session_info_update 的 _meta.claudestra.compacted → compact_boundary，notice → 进度句。
  * tests/acp-updates.test.ts。
  */
 import { codexCommandText, codexTextOf } from "../codex-session.js";
@@ -23,6 +26,7 @@ interface ToolState {
   rawOutput?: Rec;
   content?: Rec[];
   locations?: Rec[];
+  toolUse?: { name: string; input: Rec };
   mcp: boolean;
   out: string;
   started: boolean;
@@ -41,15 +45,25 @@ export interface AcpTranslator {
   flush(): Rec[];
 }
 
-/** 线程状态（session_info_update._meta.codex.threadStatus.type：idle / active / systemError / notLoaded）；不是这类更新返回 null */
+/**
+ * 线程状态（session_info_update 的 threadStatus.type：idle / active / systemError / notLoaded）；不是这类更新返回 null。
+ * codex-acp 放在 _meta.codex，Pi 适配器用中性的 _meta.claudestra（pi-adapter/map.ts），两个都认。
+ */
 export function threadStatusOf(update: unknown): string | null {
   const u = update as Rec | null;
   if (u?.sessionUpdate !== "session_info_update") return null;
-  const t = u._meta?.codex?.threadStatus?.type;
+  const t = u._meta?.codex?.threadStatus?.type ?? u._meta?.claudestra?.threadStatus?.type;
   return typeof t === "string" ? t : null;
 }
 
+/** Pi 适配器在 idle 上带的这一轮结局（pi-adapter/map.ts turnEnd）；codex-acp 不带，返回 null，Codex 的解释照旧 */
+export function turnEndOf(update: unknown): { stopReason?: string; failure?: { kind?: string; message?: string } } | null {
+  const t = (update as Rec | null)?._meta?.claudestra?.turn;
+  return t && typeof t === "object" ? t : null;
+}
+
 function toolUseOf(t: ToolState): { name: string; input: Rec } {
+  if (t.toolUse) return t.toolUse;
   const raw = t.rawInput ?? {};
   if (t.mcp || (typeof raw.server === "string" && typeof raw.tool === "string")) {
     const args = raw.arguments && typeof raw.arguments === "object" ? raw.arguments : {};
@@ -88,6 +102,8 @@ function mergeTool(t: ToolState, u: Rec): void {
   }
   const m = u._meta ?? {};
   if (m.is_mcp_tool_call === true) t.mcp = true;
+  const cc = m.claudestra?.toolUse;
+  if (typeof cc?.name === "string" && cc.input && typeof cc.input === "object") t.toolUse = { name: cc.name, input: cc.input };
   const delta = m.terminal_output_delta?.data ?? m.mcp_output_delta?.data;
   if (typeof delta === "string" && delta) t.out = (t.out + delta).slice(-OUTPUT_TAIL);
 }
@@ -133,6 +149,15 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
     return out;
   };
 
+  /** 进度句：watcher 认的 thinking 块（💭 一行，不算答复），当场吐 */
+  const progress = (text: unknown): Rec[] =>
+    typeof text === "string" && text.trim() ? [...flushText(), { type: "assistant", timestamp: now(), message: { content: [{ type: "thinking", thinking: text }] } }] : [];
+
+  const info = (c: Rec): Rec[] =>
+    c.compacted && typeof c.compacted === "object"
+      ? [...flushText(), { type: "system", subtype: "compact_boundary", timestamp: now(), compactMetadata: c.compacted }]
+      : progress(c.notice);
+
   const plan = (u: Rec): Rec[] => {
     const id = `acp-plan-${++planSeq}`;
     const steps = (Array.isArray(u.entries) ? u.entries : []).map((e: Rec) => ({ step: String(e?.content ?? ""), status: String(e?.status ?? "pending") }));
@@ -150,6 +175,10 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
       switch (u.sessionUpdate) {
         case "agent_message_chunk":
           return chunk(u);
+        case "agent_thought_chunk":
+          return u._meta?.claudestra?.display === true ? progress(u.content?.text) : [];
+        case "session_info_update":
+          return info(u._meta?.claudestra ?? {});
         case "tool_call":
         case "tool_call_update": {
           const id = typeof u.toolCallId === "string" ? u.toolCallId : "";
@@ -170,7 +199,7 @@ export function createAcpTranslator(now: () => string = () => new Date().toISOSt
           return e ? [e] : [];
         }
         default:
-          return []; // 思考、历史回放、命令表、会话信息等：不进流式条目（线程状态见 threadStatusOf）
+          return []; // 历史回放、命令表等：不进流式条目（线程状态见 threadStatusOf）
       }
     },
     flush: flushText,

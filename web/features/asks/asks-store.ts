@@ -13,6 +13,7 @@ import { fetchAsks, followAskEvents, postPresence } from "@/lib/api/asks";
 import { askFromLink, hashBase, leavePlan, shouldPush } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
 import { applyPending, ASK_EVENT_REFRESH_MS, ASK_LIST_WAIT_MS, PENDING_MAX_MS, type PendingAnswer, type WebAsk } from "./asks-model";
+import { isAskForViewer } from "./ask-viewer";
 
 export interface AsksSnap {
   asks: WebAsk[];
@@ -110,12 +111,14 @@ async function refresh(): Promise<void> {
     const r = await fetchAsks();
     if (my < appliedSeq) return;
     appliedSeq = my;
-    const fresh = r.asks.filter((a) => a.state === "open" && !seen.has(a.id));
+    const audience = r.asks.filter(isAskForViewer);
+    const fresh = audience.filter((a) => a.state === "open" && !seen.has(a.id));
     // 第一次拉到的不算「新来的」；之后新来的卡活 ask 在前台就弹横幅
     const bannerAsk = snap.loaded && visible() ? fresh.find((a) => a.blocking === true && a.kind !== "accept") : undefined;
-    for (const a of r.asks) seen.add(a.id);
-    server = r.asks;
-    show({ loaded: true, full: r.full === true, ...(bannerAsk ? { banner: bannerAsk } : {}) });
+    for (const a of audience) seen.add(a.id);
+    server = audience;
+    const banner = bannerAsk ?? audience.find((a) => a.id === snap.banner?.id && a.state === "open") ?? null;
+    show({ loaded: true, full: r.full === true, banner });
   } catch (e) {
     if (my < appliedSeq) return; // 上一台机器的、或已被更新的结果盖过的失败，不作数
     const status = e instanceof ApiError ? e.status : 0;

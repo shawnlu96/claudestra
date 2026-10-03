@@ -23,9 +23,18 @@ export const CODEX_BUILTIN_PASSTHROUGH: ReadonlyArray<{ name: string; descriptio
   { name: "goal", description: "set or view the goal for a long-running task" },
 ];
 
-/** 这个运行时自己的命令表；Claude Code（或没写 runtime）返回 null = 走 CC 的注册表 */
-export function runtimeCommandsFor(runtime: string | undefined, agent: string): PiCommandInfo[] | null {
-  if (runtime === "pi") return piCommandsFor(agent);
+/**
+ * ACP 版 Pi 只列适配器真能执行的：pi 的 rpc prompt 照常跑扩展 / 包的命令，内置命令只有 /compact 被适配器换成 rpc compact
+ * （lib/acp/pi-adapter/map.ts compactCommand），其余内置命令是 TUI 面板，会被当普通文字发给模型。
+ * 快照是 tmux 版扩展写的（迁过来的 agent 还留着旧的），`claudestra-*` 是那个扩展自己的命令，acp 下没加载。
+ */
+function piAcpCommandsFor(agent: string): PiCommandInfo[] {
+  return piCommandsFor(agent).filter((c) => c.scope === "pi" ? !c.name.startsWith("claudestra-") : c.name === "compact");
+}
+
+/** 这个运行时自己的命令表；Claude Code（或没写 runtime）返回 null = 走 CC 的注册表。acp = 这个 agent 走 ACP 宿主 */
+export function runtimeCommandsFor(runtime: string | undefined, agent: string, acp = false): PiCommandInfo[] | null {
+  if (runtime === "pi") return acp ? piAcpCommandsFor(agent) : piCommandsFor(agent);
   // scope 沿用 CC 的约定：「builtin」= 纯 TUI 命令、没有回合（api-routes 据此不亮思考中）
   if (runtime === "codex") return CODEX_BUILTIN_PASSTHROUGH.map((b) => ({ name: b.name, invokeName: b.name, description: b.description, scope: b.turn ? "codex-turn" : "builtin" }));
   return null;

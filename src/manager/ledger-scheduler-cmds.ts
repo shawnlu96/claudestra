@@ -1,9 +1,12 @@
+import { poolRemotePolicy } from "../lib/scheduler-agent-pool-context.js";
+import { convergenceSpec } from "../lib/fix-strategy-order.js";
+import { convergenceCommands } from "../lib/review-arbiter-commands.js";
 /** Narrow CLI entrypoints for durable scheduler facts; no arbitrary stage or owner action is exposed here. */
 import { INTENT_ACTIONS, INTENT_STATUSES, WORKFLOW_MODES, WORKFLOW_TEMPLATES, AUTHOR_FAMILIES, getIntent } from "../lib/ledger-scheduler.js";
 import { settleIntent } from "../lib/ledger-scheduler-settle.js";
-import { planIntent, setWorkflow } from "../lib/ledger-scheduler-write.js";
+import { planIntent, recordPlanRejected, setWorkflow } from "../lib/ledger-scheduler-write.js";
 import { resumeAutoWorkflow } from "../lib/ledger-scheduler-resume.js";
-import { bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
+import { beginRetire, bindSchedulerSession, recordSessionRetirement, type SessionRole, type SessionTransport } from "../lib/scheduler-sessions.js";
 import { advanceMergeRun, beginMergeRun, MERGE_RESOLUTIONS, resolveMergeRun, type MergePhase, type MergeResolution } from "../lib/scheduler-merge.js";
 import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { getDeployRun, resolveDeployRun } from "../lib/scheduler-deploy.js";
@@ -11,10 +14,22 @@ import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
-import { schedulerPoolStep } from "../lib/ledger-scheduler-pool.js";
+import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
+import { writeMaterials } from "../lib/lend-write-materials.js";
+import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
+import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
+import { ghFixStartProbe, withFixStart } from "../lib/lend-fix-start.js";
+import { ensureReviewScope } from "../lib/order-deliver-scope.js";
+import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
+import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
+import { writeDeps } from "./ledger-lend-cmds.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { readTextSoft, specPathFor } from "../lib/task-spec.js";
-import type { RemoteMode } from "../lib/scheduler-config.js";
+import { parseRemotePolicy, type RemotePolicy } from "../lib/scheduler-config.js";
+import { reviewSwapStep } from "../lib/scheduler-review-swap-runtime.js";
+import { familyWaitCommand } from "../lib/scheduler-family-pick-notice.js";
+import { secReviewAlarmCommand } from "../lib/scheduler-sec-review.js";
+import { specPlaceCommand } from "../lib/scheduler-spec-resume-write.js";
 
 const integer = (c: LedgerCli, flag: string): number => {
   const n = intFlag(c.p, flag);
@@ -25,10 +40,38 @@ const integer = (c: LedgerCli, flag: string): number => {
 /** The spec text travels inside the order (the peer cannot read this machine's files); read outside the transaction. */
 function specOf(c: LedgerCli, intentId: string): string | null {
   const task = getTask(c.db, getIntent(c.db, intentId)?.taskId ?? "");
-  return task ? readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir)) : null;
+  return task ? convergenceSpec(c.db, task, readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir))) : null;
+}
+
+/**
+ * A build / fix pool intent's first step needs the write materials (fingerprint, base head, last report), fetched here
+ * outside the transaction; a failed probe becomes the offer's refusal reason (the round moves on), never a stuck intent.
+ */
+async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): Promise<PoolStepInput["write"]> {
+  const intent = getIntent(c.db, intentId);
+  const task = intent && getTask(c.db, intent.taskId);
+  if (!intent || !task || intent.action !== "dispatch" || intent.status !== "pending" || !isPoolIntent(intent) || poolOrderId(c.db, intentId)) return null;
+  const repo = prCoordinates(task.pr)?.repo ?? remote.repo;
+  if (!repo) return { error: "没有仓库坐标（scheduler.json remote.repo）" };
+  try {
+    const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);
+    const startProbe = c.deps.lend ? probe : ghFixStartProbe(probe, c.deps.relayGh);
+    const write = await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe), startProbe);
+    return await withFixStart(c.db, task, peer, write, startProbe, c.deps.relayGh);
+  } catch (e) {
+    if (e instanceof LedgerError) return { error: e.message };
+    throw e;
+  }
 }
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
+  ...convergenceCommands,
+  "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
+    run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
+  "scheduler-family-wait": familyWaitCommand,
+  "scheduler-fix-relay": fixRelayCommand,
+  "scheduler-sec-review-alarm": secReviewAlarmCommand,
+  "scheduler-spec-place": specPlaceCommand,
   "workflow-set": {
     valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
     usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
@@ -81,6 +124,13 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       return { ok: true, ...r };
     },
   },
+  "scheduler-plan-rejected": {
+    valued: ["code", "text"], bools: [],
+    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因>（调度服务专用：同一原因连续被台账拒收，记一次报警；按卡 + 原因去重）",
+    run(c) {
+      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), { taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text") }) };
+    },
+  },
   "scheduler-settle": {
     valued: ["from", "to", "receipt"], bools: [],
     usage: "scheduler-settle <intent-key> --from pending|submitted|unknown --to submitted|done|unknown|cancelled [--receipt <evidence>]",
@@ -94,20 +144,30 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-pool": {
-    valued: ["max-workers", "mode", "roles", "timeout-min"], bools: [],
-    usage: "scheduler-pool <intent-key> --max-workers N --mode off|overflow|prefer --roles review|none --timeout-min N（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
+    valued: ["max-workers", "mode", "roles", "timeout-min", "review-first", "local-priority", "repo", "write-families", "fix-reassign-min"], bools: [],
+    usage: "scheduler-pool <intent-key> --max-workers N --mode balance|off --roles review|write|review,write|none --timeout-min N [--review-first a,b]" +
+      " [--local-priority first|balance|low|off] [--repo owner/name] [--write-families claude,codex]（调度服务专用：挂池 / 同步出借单 / 超时撤回）",
     async run(c) {
-      const mode = c.need("mode"), roles = c.need("roles");
-      if (!["off", "overflow", "prefer"].includes(mode) || !["review", "none"].includes(roles)) throw new LedgerError("invalid", "--mode / --roles 不认识");
+      const roles = c.need("roles");
       const minutes = integer(c, "timeout-min");
       if (minutes < 1) throw new LedgerError("invalid", "--timeout-min 至少 1");
       const intent = c.p.pos[1] ?? "", maxWorkers = integer(c, "max-workers");
       if (maxWorkers > 32) throw new LedgerError("invalid", "--max-workers 要在 0–32");
+      const reviewFirst = (c.p.flags["review-first"] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+      // The daemon's policy goes through the config's own parser: the offer re-plans with exactly what scheduler.json says.
+      let remote: RemotePolicy;
+      try {
+        remote = parseRemotePolicy({ mode: c.need("mode"), roles: roles === "none" ? [] : roles.split(","), poolTimeoutMin: minutes,
+          ...(reviewFirst.length ? { reviewFirst } : {}), ...(c.p.flags["local-priority"] ? { localPriority: c.p.flags["local-priority"] } : {}),
+          ...(c.p.flags["write-families"] !== undefined ? { writeFamilies: c.p.flags["write-families"].split(",") } : {}),
+          ...(c.p.flags.repo ? { repo: c.p.flags.repo } : {}), ...(c.p.flags["fix-reassign-min"] ? { fixReassignMin: Number(c.p.flags["fix-reassign-min"]) } : {}) }, "--remote");
+      } catch (e) { throw new LedgerError("invalid", `--mode / --roles / --local-priority / --repo 不认识：${(e as Error).message}`); }
+      const project = getIntent(c.db, intent)?.project ?? "";
+      remote = poolRemotePolicy(project, remote, c.deps.lend?.schedulerPolicy?.(project));
       const borrow = await (c.deps.lend?.borrow() ?? readEffectiveBorrow());
+      await ensureReviewScope(c.db, getIntent(c.db, intent)?.taskId); // 规格外文件在挂池事务外先登记（i28-ASK2）
       return { ok: true, ...schedulerPoolStep(c.db, c.ctx(), {
-        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow,
-        remote: { mode: mode as RemoteMode, roles: roles === "review" ? ["review"] : [], poolTimeoutMin: minutes },
-        spec: specOf(c, intent),
+        intentId: intent, maxWorkers, timeoutMs: minutes * 60_000, borrow, remote, spec: specOf(c, intent), write: await poolWrite(c, intent, remote),
       }) };
     },
   },
@@ -133,6 +193,10 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
       }
       return { ok: true, ...bound };
     },
+  },
+  "scheduler-retire": {
+    valued: [], bools: [], usage: "scheduler-retire <task>（verified / done / cancelled 卡开退役意图，不看流程模式；见 docs/architecture/scheduler-retire.md）",
+    run(c) { return { ok: true, ...beginRetire(c.db, c.ctx(), c.p.pos[1] ?? "") }; },
   },
   "scheduler-session-retire": {
     valued: ["role", "intent", "effect", "receipt"], bools: [],

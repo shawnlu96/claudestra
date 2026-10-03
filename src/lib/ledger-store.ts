@@ -14,16 +14,21 @@ import { STEPS_SCHEMA } from "./ledger-steps.js";
 import { toTeam, type TeamConfig } from "./ledger-team-config.js";
 import { statePath } from "./paths.js";
 import { SCHEDULER_COLUMNS, SCHEDULER_INDEXES, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, SCHEDULER_TABLES } from "./ledger-scheduler-schema.js";
+import { SCHEDULER_MERGE_WAIT_SCHEMA } from "./ledger-scheduler-schema.js";
 import { missingSchema, runMigrations, schemaVersion, type SchemaSpec } from "./sqlite-migrate.js";
 import { backupBeforeMigrate } from "./ledger-backup.js";
-import { DAG_REWRITE_SCHEMA, FEATURE_COLUMNS, FEATURE_INDEXES, FEATURE_SCHEMA, FEATURE_TABLES } from "./ledger-feature-schema.js";
-import { LEND_COLUMNS, LEND_INDEXES, LEND_SCHEMA, LEND_TABLES, LEND_WRITE_SCHEMA } from "./ledger-lend-schema.js";
+import { DAG_REWRITE_SCHEMA, FEATURE_DEPS_SCHEMA, FEATURE_COLUMNS, FEATURE_INDEXES, FEATURE_SCHEMA, FEATURE_TABLES } from "./ledger-feature-schema.js";
+import { LEND_PEER_COOLDOWN_SCHEMA, migratePeerCooldownBaseline } from "./lend-peer-cooldown.js";
+import { LEND_QUEUE_SCHEMA } from "./ledger-lend-queue-schema.js";
+import { LEND_RELAY_SCHEMA, LEND_RELAY_TABLES } from "./ledger-lend-relay-schema.js";
+import { LEND_COLUMNS, LEND_INDEXES, LEND_PEERS_SCHEMA, LEND_SCHEMA, LEND_TABLES, LEND_WRITE_SCHEMA } from "./ledger-lend-schema.js";
 import { DEPLOY_COLUMNS, DEPLOY_INDEXES, DEPLOY_SCHEMA, DEPLOY_TABLES } from "./ledger-deploy-schema.js";
+import { MEMORY_COLUMNS, MEMORY_INDEXES, MEMORY_SCHEMA, MEMORY_TABLES } from "./ledger-memory-schema.js";
 export { schemaVersion };
 
 export const LEDGER_PATH = statePath("ledger.sqlite");
 export const LEDGER_TABLES = ["items", "tasks", "events", "meta", "asks", "task_deps", "audit_findings", "audit_baseline", "task_steps", ...SCHEDULER_TABLES,
-  ...FEATURE_TABLES, ...LEND_TABLES, ...DEPLOY_TABLES] as const;
+  ...FEATURE_TABLES, ...LEND_TABLES, ...DEPLOY_TABLES, "lend_push_queue", "lend_peer_cooldowns", ...LEND_RELAY_TABLES, ...MEMORY_TABLES] as const;
 /** 另一个进程持有写锁时最多等这么久，再报 SQLITE_BUSY */
 const BUSY_TIMEOUT_MS = 5000;
 /** 切 WAL 时每次尝试只等这么久，总时长由 ensureWal 的退避循环控制在 BUSY_TIMEOUT_MS 内 */
@@ -137,7 +142,8 @@ function migrateDeps(db: Database): void {
 /** 下标 i 把库从版本 i 升到 i+1；新迁移只往末尾追加（并行分支后合的一方排到后面即可，常量都由下标算）。执行规矩见 sqlite-migrate.ts */
 export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2,
   STEPS_SCHEMA, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, FEATURE_SCHEMA, DAG_REWRITE_SCHEMA, LEND_SCHEMA,
-  DEPLOY_SCHEMA, LEND_WRITE_SCHEMA];
+  DEPLOY_SCHEMA, LEND_WRITE_SCHEMA, LEND_PEERS_SCHEMA, SCHEDULER_MERGE_WAIT_SCHEMA, FEATURE_DEPS_SCHEMA, LEND_QUEUE_SCHEMA, LEND_PEER_COOLDOWN_SCHEMA,
+  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
@@ -222,6 +228,7 @@ export function closeLedger(path: string = LEDGER_PATH): void {
 
 /** 迁移完必须在的列（表由 LEDGER_TABLES 核）：新迁移加了列就补在这里 */
 const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
+  lend_peer_cooldowns: ["baselineWeekUsedPct"],
   tasks: ["assigneeKind", "assignee", "featureId"],
   task_deps: ["project", "fromTask", "toTask", "kind", "cond", "state", "rev", "createdBy"],
   asks: ASKS_REQUIRED_COLUMNS,
@@ -231,6 +238,7 @@ const REQUIRED_COLUMNS: Record<string, readonly string[]> = {
   ...FEATURE_COLUMNS,
   ...LEND_COLUMNS,
   ...DEPLOY_COLUMNS,
+  ...MEMORY_COLUMNS,
 };
 /** 迁移完必须在的索引，按所属表：同名索引先建在别的表上时 CREATE INDEX IF NOT EXISTS 会静默跳过，只核名字查不出来 */
 const REQUIRED_INDEXES: Record<string, readonly string[]> = {
@@ -242,6 +250,7 @@ const REQUIRED_INDEXES: Record<string, readonly string[]> = {
   ...FEATURE_INDEXES,
   ...LEND_INDEXES,
   ...DEPLOY_INDEXES,
+  ...MEMORY_INDEXES,
 };
 
 const LEDGER_SCHEMA: SchemaSpec = { label: "台账库", migrations: LEDGER_MIGRATIONS, tables: LEDGER_TABLES, columns: REQUIRED_COLUMNS, indexes: REQUIRED_INDEXES };
@@ -346,6 +355,7 @@ export interface QueueFrozen {
 }
 
 export interface LedgerMeta {
+  activePm?: string;
   /** 项目 PM 名单；只有 owner 能设 */
   pms: string[];
   /** 规格卡 / 报告所在目录；只有 owner 能设 */
@@ -361,6 +371,7 @@ export function getMeta(db: Database, project: string): LedgerMeta {
   const docsDir = kv.get("docsDir");
   const frozen = kv.get("queueFrozen") as QueueFrozen | undefined;
   return {
+    ...(typeof kv.get("activePm") === "string" ? { activePm: kv.get("activePm") as string } : {}),
     pms: Array.isArray(pms) ? pms.filter((p): p is string => typeof p === "string") : [],
     docsDir: typeof docsDir === "string" ? docsDir : null,
     queueFrozen: frozen ?? { frozen: false, reason: "", since: null },

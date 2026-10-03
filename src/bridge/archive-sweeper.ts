@@ -16,13 +16,14 @@
  *    那个 agent 裸奔。
  */
 
-import { existsSync, readdirSync, rmdirSync, statSync, unlinkSync } from "fs";
+import { existsSync, readdirSync, readFileSync, rmdirSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
 import { ARCHIVE_ROOT, USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { DEFAULT_ARCHIVE_RETENTION_DAYS, readConfigSync } from "../lib/config-store.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { archiveSession } from "../lib/session-archive.js";
 import { CODEX_SUB_IDLE_DAYS, sweepIdleCodexSubSessions } from "../lib/unmanaged-archive.js";
+import { sweepEndedLendThreads } from "../lib/lend-session-archive.js";
 import { projectsSlug } from "../lib/jsonl-cost.js";
 import { tmuxRaw, MASTER_SESSION } from "../lib/tmux-helper.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
@@ -32,48 +33,55 @@ const SWEEP_MS = 24 * 3600_000;
 const FIRST_DELAY_MS = 10 * 60_000; // 启动 10min 后跑首轮，避开 bridge 启动风暴
 
 /**
- * 超期归档清理（v2.23+）：**只清用户手动归档区** `archive/archived/**`（USER_ARCHIVE_ROOT）。
- *
- * ⚠ 绝不走 ARCHIVE_ROOT 整棵树：`archive/<agent>/` 是退役快照 —— 被 kill 的 agent 的
- * 唯一历史副本（原件早被 Claude Code cleanupPeriodDays 清掉），CLAUDE.md 的不变量是
- * "a killed agent's archives remain readable"。review #10 时那版按整棵树 mtime 删，
- * 本机当时已有 26 个 >90 天的快照会在合并后第一次 sweep 被静默删掉。
- * 按文件 mtime 判龄；`archiveRetentionDays = 0` 表示不清理。空目录顺手删掉。
+ * 超期归档清理：**只清用户手动归档区** archive/archived/**（USER_ARCHIVE_ROOT）。绝不走 ARCHIVE_ROOT 整棵树——
+ * archive/<agent>/ 是退役快照，被 kill 的 agent 唯一的历史副本（"a killed agent's archives remain readable"）。
+ * 按文件 mtime 判龄，days=0 不清理。目录只在这一轮删过文件、删空了才删：agent 归档标记（kind=agent 的 .meta.json 不清，
+ * lib/agent-archive-marker.ts）和老的空标记目录都得留着，删了 agent 就回到侧栏。tests/archive-sweeper.test.ts。
  */
 export function pruneArchives(days: number, now = Date.now(), root: string = USER_ARCHIVE_ROOT): number {
   if (!Number.isFinite(days) || days <= 0) return 0;
-  const cutoff = now - days * 86_400_000;
+  return pruneDir(root, now - days * 86_400_000);
+}
+
+function pruneDir(dir: string, cutoff: number): number {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0; // 根不存在 / 没权限：这一支没东西可清
+  }
+  const keepMeta = isAgentMarker(dir);
   let removed = 0;
-  const walk = (dir: string): void => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const full = join(dir, e.name);
-      if (e.isDirectory()) {
-        walk(full);
-        try {
-          if (readdirSync(full).length === 0) rmdirSync(full);
-        } catch {
-          /* 非空/权限：留着 */
+  for (const e of entries) {
+    const full = join(dir, e.name);
+    if (e.isDirectory()) {
+      const n = pruneDir(full, cutoff);
+      removed += n;
+      try {
+        if (n > 0 && readdirSync(full).length === 0) rmdirSync(full);
+      } catch {
+        /* 删不掉（权限 / 并发写入）就留个空目录，下一轮再说，不影响其余条目 */
+      }
+    } else if (!(keepMeta && e.name === ".meta.json")) {
+      try {
+        if (statSync(full).mtimeMs < cutoff) {
+          unlinkSync(full);
+          removed++;
         }
-      } else {
-        try {
-          if (statSync(full).mtimeMs < cutoff) {
-            unlinkSync(full);
-            removed++;
-          }
-        } catch {
-          /* 单个文件失败不影响其余 */
-        }
+      } catch {
+        /* 单个文件失败不影响其余 */
       }
     }
-  };
-  walk(root);
+  }
   return removed;
+}
+
+function isAgentMarker(dir: string): boolean {
+  try {
+    return JSON.parse(readFileSync(join(dir, ".meta.json"), "utf8"))?.kind === "agent";
+  } catch {
+    return false; // 没有 meta（会话条目 / 老的空标记）或坏 JSON：按会话条目处理；空标记没文件可删，目录照样留着
+  }
 }
 
 /**
@@ -110,6 +118,7 @@ export async function sweepArchives(): Promise<{ agents: number; archived: numbe
 
   const agents = await readRegistryAgents();
 
+  await sweepEndedLendThreads(agents); // 先于 7 天规则：停掉的出借 worker 留在 registry，在那条规则里永远算「挂着」
   await sweepCodexSubsIfEnabled(agents);
 
   // tmux 实际存在的 agent 窗口（P2：registry 标 stopped 但窗口还活着的也要归档）

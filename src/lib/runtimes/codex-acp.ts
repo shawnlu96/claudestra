@@ -16,20 +16,20 @@ import { acpCallerCredAssignment } from "../caller-cred-launch.js";
 import { BOOTSTRAP_PROMPT, codexContextPreamble, codexDeveloperInstructions, codexEffort, codexModel } from "../codex-launch.js";
 import { encodePreambleEnv } from "../codex-thread.js";
 import { recordCodexRunning } from "../codex-version.js";
-import { pathOverrideAssignments, statePath } from "../paths.js";
+import { pathOverrideAssignments } from "../paths.js";
+import { acpLogDir } from "../log-paths.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
 import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName } from "./clean-env.js";
-import { CODEX_ACP_CONTROL } from "./codex-control.js";
+import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
 import { codexSource, isValidCodexSessionId } from "./codex-source.js";
-import type { LaunchSpec, ManagedRuntimeAdapter, WindowOps } from "./types.js";
+import type { LaunchSpec, ManagedRuntimeAdapter } from "./types.js";
 
 const BOOTSTRAP_TIMEOUT_MS = 180_000;
-const EXIT_POLL_ROUNDS = 20;
 const mcpName = () => process.env.MCP_NAME || "claudestra";
 
 /** 启动命令：环境变量前缀 + bun acp-host.ts（窗口的 cwd 就是会话的 cwd）。纯函数，单测逐字钉住 */
@@ -79,7 +79,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   });
   const env = adapterEnv({
     base: process.env, bunBin: deps.bunBin, channelServer: join(deps.repoRoot, "src/channel-server.ts"), mcpName: mcpName(),
-    codexPath, logsDir: statePath("logs", "acp", "bootstrap"), developerInstructions, clean: isLendWorkerName(spec.agentName),
+    codexPath, logsDir: acpLogDir("bootstrap"), developerInstructions, clean: isLendWorkerName(spec.agentName),
   });
   const logs: string[] = [];
   const proc = spawnAdapter(agent.cmd, env, spec.cwd, (m) => logs.push(m));
@@ -102,16 +102,6 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   }
 }
 
-/** 退出：C-c 给宿主（它收尾关掉适配器），等窗口里没有子进程 = 回到 shell */
-async function acpExitPrelude(win: WindowOps): Promise<"at-shell" | "continue"> {
-  await win.sendKey("C-c");
-  for (let i = 0; i < EXIT_POLL_ROUNDS; i++) {
-    await win.sleep(250);
-    if ((await win.childPids().catch(() => [1])).length === 0) return "at-shell"; // 查不到子进程按「还在」算，接着等
-  }
-  return "continue";
-}
-
 export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {}): ManagedRuntimeAdapter {
   let depsCache: CodexAdapterDeps | null = null;
   const deps = () => (depsCache ??= { ...defaultCodexDeps(), ...overrides });
@@ -119,8 +109,8 @@ export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {})
   return {
     ...codexSource,
     manageable: true,
-    control: CODEX_ACP_CONTROL,
-    acp: { control: CODEX_ACP_CONTROL },
+    control: ACP_CONTROL,
+    acp: { control: ACP_CONTROL },
     inbound: "acp-host",
     turnEnd: "acp-host",
     exitCommand: "",

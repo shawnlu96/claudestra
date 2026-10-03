@@ -33,8 +33,8 @@ the auto tick is not wrapped, and the bridge-side hooks see an empty list — be
   ≥ `MISS_GAP_MS` apart with the same agent / session / work (`agent-supervisor-judge.ts`, rules of R5a's `noteLiveness`).
 - **stuck** (ACP only) — the turn is running and the host has seen no `session/update` for `stuckMin`, read from the host's
   heartbeat file `state/acp-activity/<agent>.json` (`agent-supervisor-activity.ts`). Bridge entries are never used for this:
-  thought chunks are not forwarded and text is buffered, so a long-thinking turn would look stuck. Until the host writes the
-  heartbeat (node i28-S1b) there is no file and nothing is judged stuck.
+  thought chunks are not forwarded and text is buffered, so a long-thinking turn would look stuck. The host writes it
+  (`acp/host-heartbeat.ts`) on turn start / Stop / StopFailure at once and on updates at most every 15s; no file = not judged.
 
 ## Disposition table (`agent-supervisor-policy.ts`)
 
@@ -58,7 +58,7 @@ same key. Right before restarting the supervisor checks again — once before th
 the quota) and once after it (the claim waits on the ledger CLI): the agent must still be supervised with the same session and
 work, and still down the same way (the scope is read after the probe, since the probe itself waits). The production effect
 runs the same scope check (`RestartExpect.eligible`, synchronous: latest registry + ledger) once more right before it spawns
-`manager restart`. A failed re-check records the claim as `skipped`, which does not count toward the restart limit.
+`manager restart`, and the child checks again after taking the restart lock (next section). A failed re-check records the claim as `skipped`, which does not count toward the restart limit.
 
 ## Bridge side (`agent-supervisor-bridge.ts`)
 
@@ -73,16 +73,24 @@ runs the same scope check (`RestartExpect.eligible`, synchronous: latest registr
   closes its open failed-turn cards (`stop-settle.ts` `closeRecoveredCards`); quota / login cards and other agents' cards are
   never touched. The auto tick stands aside (`agent-supervisor-hold.ts`) for the one card whose recovery the supervisor claimed.
 
-## Known risk (fixed for good by node i28-S1c)
+## Re-check inside the restart child (`restart --expect`, node i28-S1c)
 
-`manager restart` only takes a name, so the last check happens in the scheduler, not inside the child after it takes the
-per-agent restart lock. The window between that check and the lock is the child's start-up, about one second.
+The scheduler's last check runs before it spawns `manager restart`; the child takes the per-agent restart lock about a second
+later. So that a delivery, a hand-back to the PM, a session swap or a window coming back inside that second cannot still
+lead to a restart, the supervisor passes `restart --expect <json> -- <agent>` (wire format: `agent-supervisor-expect.ts`:
+exactly `v`, `agent`, `sessionId`, `down`, `workKey`; `agent` must equal the restart target, anything else is refused).
+After taking the lock and before touching any window, the child (`src/manager/restart-expect.ts`) re-checks:
 
-- Worst case: the work is delivered or handed back to the PM inside that second, and an agent whose window / host is
-  already gone is restarted anyway. It resumes its own session and sits idle — the same thing the launcher's
-  `restoreDeadAgents` already does every minute for dead tmux agents.
-- A working agent cannot be killed by it: a window coming back or a session being swapped in that second can only be the
-  work of another `manager restart` / `resume` / `adopt`, and those go through the same restart lock or registry `pending`.
+1. the agent is still supervised with the same session and work (`stillSupervised`, the same scope function the scheduler's
+   own re-check uses; the supervise switch being off counts as out of scope);
+2. a fresh probe (`agent-supervisor-probe.ts`, the same probe and the same `downOf` verdict) still shows the confirmed fault —
+   `no_window` / `no_host`, or for `stuck` a running ACP turn with no update for `stuckMin`;
+3. the scope once more after the probe, since the probe waits.
 
-PM rated this P2 (ledger note on i28-S1). Node i28-S1c adds `restart --expect <json>`: the child re-checks scope and liveness
-after taking the lock.
+Any failed condition, and any read failure (scheduler.json, registry, ledger, probe `unknown` or throwing), releases the
+lock without touching the window and returns `{ name, ok: false, skipped: <reason> }`. With `--expect`, refusals that happen before the
+re-check passes are skipped too, since none of them touched a window: a create / rename / kill still in progress, a registry
+entry missing its session or channel, the agent gone, another restart holding the lock (`markExpectSkips` / `expectMissing`).
+A failure after the re-check passed stays a failure. The supervisor books that exactly like
+its own failed re-check: `restart/done/skipped`, no restart-limit use, no report. Without `--expect`, restart reads none of
+this and behaves as before. Tests: `tests/restart-expect.test.ts`.

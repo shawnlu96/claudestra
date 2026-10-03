@@ -1,3 +1,4 @@
+import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
 /**
  * Discord Bridge Service — 主入口
  *
@@ -73,7 +74,7 @@ import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContextOf, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
-import { inboundEventData } from "./bridge/inbound-event.js";
+import { inboundEventData, inboundLedgerGate } from "./bridge/inbound-event.js";
 import { startSweepers } from "./bridge/sweepers.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
 import { handleTerminalApi, sweepStaleTerminalSessions } from "./bridge/web-terminal.js";
@@ -205,8 +206,10 @@ import {
 // Discord 交互块（D5-4 从本文件搬出；import 时零副作用，下面显式注册）
 import { registerSlashCommands } from "./bridge/slash-commands.js";
 import { registerInteractionHandlers } from "./bridge/discord-interactions.js";
-import { admitCaller, answerWhoami } from "./bridge/caller-identity.js";
-import { answerOrderTool } from "./bridge/order-tools.js";
+import { admitCaller, answerWhoami, callerOf } from "./bridge/caller-identity.js";
+import { recordDefaultPmReply } from "./lib/order-ask-default.js";
+import { askDbIfExists } from "./bridge/asks.js";
+import { answerOrderTool, lendFrameDenied } from "./bridge/order-tools.js";
 
 // ============================================================
 // 类型定义
@@ -472,7 +475,7 @@ async function pushBackToCaller(
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
   };
-  if (live) return (await deliver(env)).outcome;
+  if (live || pmClientFor(pac.callerName, clients, pac.targetName)) return (await deliver(env)).outcome; // 前任 PM 离线：当班 PM 接它的答复
   heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
   return { kind: "sent" as const, note: "queued" };
@@ -793,7 +796,8 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  return localSendOrder(to.channelId, () => deliverToLocal(env, to, stillWanted));
+  return deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
+    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted)));
 }
 
 /** 只经 deliverLocalInOrder 调用 */
@@ -861,6 +865,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     return { envelope: env, outcome: { kind: "sent", note: "queued", ...(wallHold ? { heldBy: "quota_wall" as const } : {}) } };
   }
   try {
+    const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
     noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
@@ -1351,7 +1356,7 @@ discord.on("messageCreate", async (msg: DiscordMessage) => {
     return;
   }
 
-  const client = clients.get(channelId);
+  const client = clients.get(channelId) ?? pmClientFor(channelId, clients);
   if (!client) return;
 
   let content = msg.content
@@ -1628,8 +1633,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     return;
   }
 
-  // v2.13.1+ 任何来自这条连接的消息都是"它还活着"的证据（keepalive ping 也走这里）。
-  // case "register" 的冲突判定靠它区分活连接与僵尸连接。
+  // 任何来自这条连接的消息都是"它还活着"的证据（keepalive ping 也走这里）；case "register" 的冲突判定靠它区分活连接与僵尸连接。
   for (const info of clients.values()) {
     if (info.ws === ws) {
       info.lastSeen = Date.now();
@@ -1637,6 +1641,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     }
   }
 
+  if (lendFrameDenied(ws, msg)) return; // 出借 worker 的连接只开派单工具与 whoami，频道类原生帧回 lend_forbidden（bridge/lend-tools.ts）
   switch (msg.type) {
     case "ping": {
       // v2.2.0+: keepalive。收到本身就重置了 Bun 的 ws idleTimeout；回个 pong 让 channel-server 那侧的 idle 也重置，无需其它处理。
@@ -1835,7 +1840,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           break;
         }
         const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId); // edit_message 只准改自己发的（bridge/edit-guard.ts）
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash } }));
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash, held: heldLocalMsgs.stat(fromChannelId) } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
         // api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
@@ -2208,8 +2213,10 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
+    case "turn_status": void (await import("./bridge/acp-turn-status.js")).answerTurnStatus(ws, msg); break; // launcher 升级闸问 ACP 宿主有没有回合在途
     case "whoami": answerWhoami(ws, msg); break; // T85 调用方身份探针（bridge/caller-identity.ts）
     case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
+    case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
     case "route_to_agent": {
       try {
@@ -2241,12 +2248,12 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             // 握手未完成(invite 后等回执的窗口,缺 outToken/baseUrl)会落到下面的
             // 未知 peer 报错,提示里带已配置列表
             if (httpPeer && httpPeer.outToken && httpPeer.baseUrl) {
-              const { routeToHttpPeer } = await import("./bridge/http-peer.js");
-              const result = routeToHttpPeer(
-                ws, fromChannelId, fromName, httpPeer, peerAgentName,
-                String(msg.text || ""),
+              const { routeToHttpPeer, sendLendRelay } = await import("./bridge/http-peer.js");
+              const result = msg.lendSupplement === true ? await sendLendRelay(httpPeer, peerAgentName, String(msg.text || "")) : routeToHttpPeer(
+                ws, fromChannelId, fromName, httpPeer, peerAgentName, String(msg.text || ""),
                 typeof msg.expecting === "string" ? msg.expecting.trim() || undefined : undefined,
                 msg.oneShot === true, // v2.17.2 任务#85:FYI 不挂 2h 轮询/超时推回
+                () => recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, `${peerAgentName}@${httpPeer.name}`, msg.text), // 对方收下后：PM 带 ask id 回远端执行者（i28-ASK4）
               );
               ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
               console.log(`🌐 HTTP PEER ROUTE: ${fromName} → ${httpPeer.name}/${peerAgentName} (${httpPeer.baseUrl})`);
@@ -2291,7 +2298,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
         if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
-        const targetClient = clients.get(target.channelId);
+        const targetClient = clients.get(target.channelId) ?? pmClientFor(targetName, clients, fromName);
         if (!targetClient) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 未连接到 Bridge（可能已停止）`, rejected: "not_connected" }));
           break;
@@ -2379,6 +2386,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         }
 
         if (answering && fromChannelId) pendingAgentCalls.consume(fromChannelId, target.channelId, answering);
+        recordDefaultPmReply(askDbIfExists, callerOf(ws, msg).identity, targetName, msg.text); // 投出去之后：PM 带 ask id 答了默认做法提问（不抛）
         // v1.9.6+: send_to_agent 触发的 turn 不发完成 @（用户没在这个 channel 问问题）
         lastMessageSource.set(target.channelId, "agent");
 
@@ -3038,7 +3046,7 @@ initApiRoutes({
 
 // v2.11+ HTTP peer 出站 transport（docs/design-http-peers.md）
 initHttpPeer({
-  deliver, getClientWs: (channelId) => (clients.get(channelId)?.ws as any) ?? null,
+  deliver, getClientWs: (channelId) => ((clients.get(channelId) ?? pmClientFor(channelId, clients))?.ws as any) ?? null, // 前任 PM 离线：当班 PM 的连接接住，deliverPmLocal 加转交抬头
   hold: (env) => void heldLocalMsgs.holdEnv(env),
   handleApi: async (r) => (await handleTerminalApi(r, new URL(r.url))) ?? serveApiRequest(r, new URL(r.url)), // 中继路径模式的进程内 dispatch（relay-dispatch.ts）
 });

@@ -7,12 +7,15 @@
  *   CODEX_CONFIG 把 claudestra 的 channel-server 以 mcp_servers.<MCP_NAME>.* 深合并进去（同名 server 走 ACP 的 mcpServers
  *   会被适配器静默丢掉，config.toml 里就有 claudestra），它的 BRIDGE_URL 指到宿主的回环工具代理（带 token）。
  *   TMUX / TMUX_PANE 不给：channel-server 拿到它们会自己去标窗口就绪、往窗口里打字，acp 下这两件事都归宿主。
+ * - 出借 worker（clean）：照样挂 channel-server，但设 lend 档（lib/lend-mcp-profile.ts，只有派单工具 + whoami），bun 不读 clone 里的
+ *   .env* / bunfig.toml（channel-server 在外来 clone 里起）；代理在 clean 下也只转这几样（tool-proxy.ts），bridge 再按单核（bridge/lend-tools.ts）。
  * tests/acp-adapter-proc.test.ts。
  */
 import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
+import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
@@ -20,6 +23,8 @@ import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.
 
 /** 给 channel-server 的环境白名单：去掉只有 tmux 模式才用得上的（窗口就绪 / 打字投递 / 重启前言） */
 const ACP_MCP_ENV_VARS = CODEX_MCP_ENV_VARS.filter((k) => k !== "TMUX" && k !== "TMUX_PANE" && k !== "CLAUDESTRA_CODEX_PREAMBLE");
+/** 出借 worker 的 channel-server 另带档位变量（丢了也不怕：channel-server 按 agent 名前缀照样开 lend 档） */
+const LEND_MCP_ENV_VARS = [...ACP_MCP_ENV_VARS, MCP_PROFILE_ENV];
 
 /** clean = 出借 worker：适配器在外来 clone 里起，bun 不自动加载 cwd 的 .env* 与 bunfig.toml（runtimes/clean-env.ts BUN_NO_AUTOLOAD），也不认手工覆盖 */
 export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string, clean = false): { cmd: string[]; stub: boolean } | { error: string } {
@@ -54,28 +59,36 @@ export interface AdapterEnvSpec {
   /** 有 = 宿主模式：channel-server 挂上、指向回环代理；没有 = create 的引导（不挂 claudestra，频道相关变量全清掉） */
   channel?: { channelId: string; proxyUrl: string; agentName: string; sessionId: string };
   developerInstructions?: string;
-  /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量，不挂 claudestra MCP（channel 忽略），不给回环代理的地址与 token */
+  /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量；channel-server 挂 lend 档（只有派单工具 + whoami） */
   clean?: boolean;
 }
 
-export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
+/** 宿主环境 → 适配器环境的公共底（两家共用）：拷一份，去掉 tmux / 频道 / bridge 变量；干净模式只拿白名单 */
+export function hostEnvBase(s: AdapterEnvSpec): Record<string, string> {
   const env: Record<string, string> = s.clean ? { ...pickWorkerEnv(s.base), [LEND_WORKER_MARK]: "1" } : {};
   if (!s.clean) for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
   // 干净模式的 BRIDGE_* 只可能是 pickWorkerEnv 在沙箱里放进来的（宿主的 bridge 地址，不带 token）：删了 worker 里的 manager 在沙箱里一加载就被拒
   const drop = ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", ...(s.clean ? [] : ["BRIDGE_URL", "BRIDGE_PORT"]), ACP_AGENT_ENV];
   for (const k of drop) delete env[k];
+  return env;
+}
+
+/** channel-server 要的频道变量（BRIDGE_URL 是宿主回环代理的地址，带 token） */
+export function channelServerEnv(c: NonNullable<AdapterEnvSpec["channel"]>, mcpName: string, runtime: string): Record<string, string> {
+  return { DISCORD_CHANNEL_ID: c.channelId, BRIDGE_URL: c.proxyUrl, CLAUDESTRA_AGENT: c.agentName, CLAUDESTRA_RUNTIME: runtime, CLAUDESTRA_SESSION_ID: c.sessionId, MCP_NAME: mcpName };
+}
+
+/** Codex：channel-server 以 CODEX_CONFIG 的 mcp_servers 交给 codex-acp，它按 env_vars 白名单从适配器环境里取频道变量 */
+export function adapterEnv(s: AdapterEnvSpec): Record<string, string> {
+  const env = hostEnvBase(s);
   const config: Record<string, unknown> = { check_for_update_on_startup: false };
   if (s.developerInstructions) config.developer_instructions = s.developerInstructions;
-  if (s.channel && !s.clean) {
-    config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args: [s.channelServer], env_vars: ACP_MCP_ENV_VARS } };
-    Object.assign(env, {
-      DISCORD_CHANNEL_ID: s.channel.channelId,
-      BRIDGE_URL: s.channel.proxyUrl,
-      CLAUDESTRA_AGENT: s.channel.agentName,
-      CLAUDESTRA_RUNTIME: "codex",
-      CLAUDESTRA_SESSION_ID: s.channel.sessionId,
-      MCP_NAME: s.mcpName,
-    });
+  if (s.channel) {
+    const args = s.clean ? [...BUN_NO_AUTOLOAD, s.channelServer] : [s.channelServer];
+    config.mcp_servers = { [s.mcpName]: { command: s.bunBin, args, env_vars: s.clean ? LEND_MCP_ENV_VARS : ACP_MCP_ENV_VARS } };
+    Object.assign(env, channelServerEnv(s.channel, s.mcpName, "codex"), s.clean ? { [MCP_PROFILE_ENV]: LEND_PROFILE } : {});
+    // 沙箱 clean 带进来的宿主 BRIDGE_PORT 和代理地址的端口对不上，worker 里任何 bun 进程过沙箱总闸都会被拒（lib/sandbox.ts）
+    if (s.clean) delete env.BRIDGE_PORT;
   }
   if (s.codexPath) env.CODEX_PATH = s.codexPath;
   if (isSandbox(s.base)) Object.assign(env, sandboxAcpHome(s.base[SANDBOX_ROOT_ENV])); // 沙箱：适配器和它起的 channel-server 碰不到 owner 的家目录
@@ -92,8 +105,8 @@ export interface AdapterProc {
   exited: Promise<number>;
 }
 
-/** 起子进程；stderr 按行交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS） */
-export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: string, log: (msg: string) => void): AdapterProc {
+/** 起子进程；stderr 按行加 label 前缀交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS）。Pi 适配器也用它起 pi */
+export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: string, log: (msg: string) => void, label = "codex-acp"): AdapterProc {
   if (isSandbox(env) && env.HOME) mkdirSync(env.HOME, { recursive: true }); // 沙箱里隔离出来的 HOME（adapterEnv）第一次用时还不存在
   const proc: Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn(cmd, { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   const closeCbs: ((why: string) => void)[] = [];
@@ -104,7 +117,7 @@ export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: st
   void pump(proc.stdout, (c) => dataCb(c)).catch((e) => log(`适配器 stdout 读取出错：${e}`));
   const dec = new TextDecoder();
   void pump(proc.stderr, (c) => {
-    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[codex-acp] ${line.slice(0, 300)}`);
+    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[${label}] ${line.slice(0, 300)}`);
   }).catch((e) => log(`适配器 stderr 读取出错：${e}`));
   void proc.exited.then((code) => closeCbs.splice(0).forEach((cb) => cb(`exit ${code}`)));
   const stop = () => {

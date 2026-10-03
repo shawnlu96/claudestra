@@ -125,7 +125,7 @@ describe("sandboxEnv", () => {
       CLAUDESTRA_SANDBOX_DENY_DIRS: "/p/state:/p/run", CLAUDESTRA_STATE_DIR: "/tmp/sbx/state", CLAUDESTRA_RUNTIME_DIR: "/tmp/sbx/run",
       MASTER_DIR: "/tmp/sbx/master", BRIDGE_PORT: "23900", BRIDGE_URL: "ws://localhost:23900", BRIDGE_BIND: "127.0.0.1",
       HISTFILE: "/tmp/sbx/shell_history", ZDOTDIR: "/tmp/sbx/zdotdir", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "/tmp/sbx/bun-cache",
-      PYTHONDONTWRITEBYTECODE: "1", CODEX_HOME: "/tmp/sbx/acp-home/.codex",
+      PYTHONDONTWRITEBYTECODE: "1", CODEX_HOME: "/tmp/sbx/acp-home/.codex", PI_CODING_AGENT_DIR: "/tmp/sbx/pi-agent",
     });
   });
 });
@@ -198,7 +198,7 @@ describe("沙箱 agent 的目录与 runtime", () => {
       delete process.env.CLAUDESTRA_SANDBOX;
     }
   });
-  test("只许 Claude Code runtime", () => {
+  test("只许 Claude Code runtime（Codex / Pi 的 acp 例外另测）", () => {
     expect(() => assertSandboxRuntime("codex", env)).toThrow("Claude Code");
     expect(() => assertSandboxRuntime("pi", env)).toThrow();
     expect(() => assertSandboxRuntime("claude-code", env)).not.toThrow();
@@ -216,14 +216,15 @@ describe("sandboxStaticDirProblem", () => {
 });
 
 describe("sandboxManagerRefusal", () => {
-  test("白名单外的子命令、master、外部共享、非 Claude Code runtime 都拒绝", () => {
+  test("白名单外的子命令、master、外部共享、tmux 版 Pi / Codex 与其它 runtime 都拒绝（acp 版细则在 tests/pi-acp-sandbox.test.ts）", () => {
     expect(sandboxManagerRefusal(["create", "a", "/tmp/w"])).toBeNull();
     expect(sandboxManagerRefusal(["install-cli"])).toContain("install-cli");
     expect(sandboxManagerRefusal(["update"])).not.toBeNull();
     expect(sandboxManagerRefusal(["resume", "a", "sid"])).not.toBeNull();
     expect(sandboxManagerRefusal(["restart", "--include-master"])).not.toBeNull();
     expect(sandboxManagerRefusal(["create", "a", "/w", "--external"])).not.toBeNull();
-    expect(sandboxManagerRefusal(["create", "a", "/w", "--runtime", "pi"])).not.toBeNull();
+    expect(sandboxManagerRefusal(["create", "a", "/w", "--runtime", "pi", "--transport", "tmux"])).not.toBeNull();
+    expect(sandboxManagerRefusal(["create", "a", "/w", "--runtime", "gemini"])).not.toBeNull();
     expect(sandboxManagerRefusal([])).not.toBeNull();
   });
 });

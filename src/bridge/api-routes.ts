@@ -1,3 +1,4 @@
+import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
  *
@@ -46,6 +47,7 @@ import { isMasterName, readRegistryAgents } from "../lib/registry.js";
 import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from "../lib/claude-settings-runtime.js";
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
+import { inboundFor } from "./inbound-event.js";
 import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
 import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
@@ -86,6 +88,7 @@ import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { ctxBoundaryViewFor } from "./ctx-boundary.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
+import { lendScopeAllows } from "./lend-scope.js";
 import { firstFlagLikeField, textFieldsProblem } from "../lib/flag-like.js";
 import { handleRuntimeSettingsRoutes } from "./runtime-settings-routes.js";
 import { handleCronRoutes } from "./cron-routes.js";
@@ -101,6 +104,7 @@ import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
 import { invitePageResponse } from "./invite-page.js";
+import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
 
@@ -222,6 +226,7 @@ const slashDeps = (d: ApiDeps): SlashDeps => ({
     emitEvent({ agent: ev, chatId: a.channelId, type: "agent_status", data: { status: "thinking" } });
   },
   record: (cmd, a) => recordMetric("api_slash", { channelId: a.channelId, agent: a.name, meta: { cmd } }),
+  runManager,
 });
 
 // ── 鉴权 + 通用 helper ──────────────────────────────────────────────────
@@ -300,6 +305,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (url.pathname === "/api/v1/invite" && req.method === "GET") return invitePageResponse(); // 邀请落地页，不要 token（bridge/invite-page.ts）
   const pub = await handleDevicesPublic(req, url); // 设备配对的公开端点（bridge/devices.ts）：没有凭据才能配对
   if (pub) return pub;
+  const joinOffer = await handleJoinOfferApi(req, url); // 共享台账入组码只收已配置 peer，其余一律 403（local-api/shared-ledger-join-offer.ts）
+  if (joinOffer) return joinOffer;
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;
@@ -617,12 +624,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     // 只建标记目录（瞬间）⇒ 列表立刻隐藏、归档栏立刻出现，请求亚秒返回；
     // 会话快照与停窗口 fire-and-forget 跑后台，卡住/失败都不影响分类结果。
     {
-      const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-      const { existsSync: ex2 } = await import("node:fs");
-      const { mkdir: mk2 } = await import("node:fs/promises");
-      if (!ex2(`${USER_ARCHIVE_ROOT}/${name}`)) {
-        await mk2(`${USER_ARCHIVE_ROOT}/${name}`, { recursive: true }).catch(() => {});
-      }
+      const marked = await (await import("../lib/agent-archive-marker.js")).markAgentArchived(name).catch((e: Error) => e);
+      if (marked instanceof Error) return apiJson(500, { ok: false, error: `写归档标记失败: ${marked.message}` });
       void runManager("archive", name).catch(() => {});
       void runManager("kill", name).catch(() => {});
       return apiJson(200, { ok: true, archived: true, background: "快照 + 停窗口在后台跑" });
@@ -740,7 +743,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           const full = `${d}/${e.name}`;
           if (e.isDirectory()) await rec(full);
           else {
-            files++;
+            if (e.name !== ".meta.json") files++; // meta 不是会话：agent 归档标记只有它，显示 0 个会话
             const st = await fsp.stat(full).catch(() => null);
             if (st) {
               bytes += st.size;
@@ -827,10 +830,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const file = locateSessionFile(sid, runtime, cwd);
     if (!file) return apiJson(404, { ok: false, error: `session "${sid}" not found on disk` });
     if (masterSessionHidden(principal, file, MASTER_DIR)) return notInScope("master"); // "*" 不含 master（bridge/session-file.ts）
-    const page = await readSessionHistory(file, {
-      limit,
-      ...(before ? { before: Number(before) } : {}),
-    });
+    const page = await readSessionHistory(file, { limit, ...(before ? { before: Number(before) } : {}) }); // 没有 agent 名 → 不查入站账，Pi / Codex 保守显示
     return apiJson(200, { ok: true, sessionId: sid, path: file, ...page });
   }
 
@@ -958,7 +958,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         const idx = cursor++;
         const f = files[idx];
         try {
-          const hits = await searchSessionHistory(f.path, q, { maxHits: 20 });
+          const hits = await searchSessionHistory(f.path, q, { maxHits: 20, inbound: inboundFor(f.agent) }); // 与历史同规则：对上入站账的认来源
           perFile[idx] = hits.map((h) => ({ agent: f.agent, sessionId: f.sessionId, source: f.source, ...h }));
           collected += hits.length;
         } catch {
@@ -1089,7 +1089,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
         before: before != null && Number.isFinite(before) ? before : undefined,
         after: after != null && Number.isFinite(after) ? after : undefined,
         formatToolFn: formatTool,
-        toolDetailFn: formatToolDetail,
+        toolDetailFn: formatToolDetail, inbound: inboundFor(canonical), // Pi / Codex 对上入站账的认来源（lib/inbound-ledger.ts）
       });
       return apiJson(200, {
         ok: true,
@@ -1108,10 +1108,10 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const msgMatch = path.match(/^\/agents\/([^/]+)\/messages$/);
   if (msgMatch && req.method === "POST") {
     const agentParam = decodeURIComponent(msgMatch[1]);
-    if (!inScopeEitherName(principal, agentParam)) return notInScope(agentParam);
+    if (!inScopeEitherName(principal, agentParam) && !(await lendScopeAllows(req, principal, agentParam))) return notInScope(agentParam);
     const agent = await findApiAgent(agentParam);
     if (!agent) return apiJson(404, { ok: false, error: `agent "${agentParam}" not found` });
-    const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId); // create 还没落盘：当离线，不投递（manager list 的 creating）
+    const client = agent.status === "creating" ? undefined : deps.clients.get(agent.channelId) ?? pmClientFor(agent.name, deps.clients); // creating agents cannot receive messages
     if (!client) {
       // ws 不在 ≠ agent 死了。channel-server 是独立子进程，被顶替/重启时 ws 会短暂
       // 缺席，而 tmux window 里的 Claude Code 照常跑着上一回合（2026-07-25 owner:
@@ -1168,7 +1168,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const tokenName = principal.name || tokenId;
     const threadId = newThreadId();
     const env: Envelope = {
-      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}), ...(isOwnerPrincipal(principal) ? { owner: true } : {}) },
+      from: { kind: "api", tokenId, name: tokenName, ...(principal.peer ? { peer: principal.peer } : {}),
+        ...(isOwnerPrincipal(principal) ? { owner: true } : {}), ...(principal.credential ? { credential: principal.credential } : {}) },
       to: { kind: "local", agentName: agent.name, channelId: agent.channelId, ws: client.ws as any, cwd: client.cwd },
       intent: "request",
       content: withAttachmentLines(text, attachments), // 附件照 Discord 入口写进正文：Pi 只认正文，历史/直播靠它还原缩略图
@@ -1206,6 +1207,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       return apiJson(502, { ok: false, error: `delivery failed: ${reason || "unknown"}` });
     }
 
+    followPmDelivery(agent, delivery); // 转交给当班 PM 时，typing / 来源 / 交接记录都记在实际收件人名下
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
@@ -1253,7 +1255,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const runtime = String((agent as any).runtime || "") || "claude-code";
     // 斜杠直通只给 owner（api-slash.ts）：别人拿到命令表也用不了，给空表，网页就不显示候选 / 技能按钮
     if (!isOwnerPrincipal(principal)) return apiJson(200, { ok: true, agent: agent.name, runtime, commands: [], slash: false });
-    const commands = runtimeCommandsFor(runtime, agent.name) ?? commandsForAgent(agent.name === "master" ? null : agent.name);
+    const commands = runtimeCommandsFor(runtime, agent.name, await isConfiguredAcpChannel(agent.channelId)) ?? commandsForAgent(agent.name === "master" ? null : agent.name);
     return apiJson(200, { ok: true, agent: agent.name, runtime, commands });
   }
 

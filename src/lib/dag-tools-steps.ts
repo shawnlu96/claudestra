@@ -1,3 +1,6 @@
+import { rollback } from "./shared-ledger-gate-rollback.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
+import { runLocalStart, type QueuedStart } from "./scheduler-local-runtime-start.js";
 /**
  * start_node 的执行：按预检出的 StartPlan 一步步做（= PM 原来的 mk-auto.sh），任何一步失败就把已做的倒序撤掉，回报停在哪一步。
  * 顺序有讲究：绑节点（dag-bind）放最后——绑定只追加、撤不掉，而卡被取消会让节点算「已完成」、之后改不了图；开 auto（workflow-set）
@@ -12,7 +15,9 @@ import type { StartPlan } from "./dag-tools-start.js";
 import { getFeature } from "./ledger-feature.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
+import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { ledgerArgs } from "./order-ledger-exit.js";
+import { peerRestateSkip } from "./scheduler-spec-resume-text.js";
 
 interface GitResult {
   ok: boolean;
@@ -34,10 +39,10 @@ export interface StepIO {
   attempt: string;
 }
 
-const STEP_NAMES = ["task-new", "spec", "worktree", "prompt", "agent", "task-set", "workflow", "bind"] as const;
-type StepName = (typeof STEP_NAMES)[number];
+const STEP_NAMES = ["task-new", "spec", "worktree", "prompt", "agent", "task-set", "restate", "workflow", "bind"] as const;
+export type StepName = (typeof STEP_NAMES)[number];
 
-interface Step {
+export interface Step {
   name: StepName;
   run(): Promise<string | null>;
   /** run 报失败后查库：这一笔其实已经落了（结果丢了）→ 当成功接着走 */
@@ -48,6 +53,7 @@ interface Step {
 
 export type StartOutcome =
   | { ok: true; taskId: string; agent: string; branch: string; worktree: string; prompt: string; steps: StepName[]; reconciled: StepName[] }
+  | { ok: true; taskId: string; placement: string; branch: string; steps: StepName[]; reconciled: StepName[] }
   | { ok: false; code: "start_failed"; error: string; failedStep: StepName; rolledBack: StepName[]; leftovers: string[] };
 
 const CREATE_TIMEOUT_MS = 240_000;
@@ -74,7 +80,9 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
     {
       name: "task-new",
       run: async () => failed(await ledger(io, p, "task-new", p.taskId, {
-        title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specRel, pm: p.pm, project: p.project, extra: JSON.stringify({ fileGlobs: p.fileGlobs }),
+        title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
+        extra: JSON.stringify({ sharedFeatureId: p.feature.id, fileGlobs: p.fileGlobs,
+          ...(p.peer ? { placement: `peer:${p.peer.name}`, repo: p.peer.repo } : {}) }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
       // 只取消本次建的卡：同名卡若是别人（并发 / 手工）建的，本次的 task-new 事件不在库里
@@ -150,6 +158,7 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
       if (await tip(io, p, `refs/heads/${p.branch}`)) return `分支 ${p.branch} 已存在（预检之后才出现，不是这次建的）`;
       mine.base = await tip(io, p, `${p.base}^{commit}`);
       if (!mine.base) return `起点 ${p.base} 找不到提交`;
+      requireLocalSharedLedgerPlanning(p.feature.id);
       const w = await io.git(p.repo, ["worktree", "add", "--lock", "--reason", tag, "-b", p.branch, p.worktree, p.base]);
       if (!w.ok) return `git worktree add 失败：${w.out}`;
       mine.placed = mine.branch = true;
@@ -198,10 +207,17 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
       run: async () => failed(await ledger(io, p, "task-set", p.taskId, { rev: rev(io, p.taskId), agent: p.agent }, "task-set")),
       landed: () => ours(io, p, "task-set"),
     },
+  ];
+}
+
+/** 开 auto 与绑节点：本机卡、peer 卡都走，且总在最后（绑定撤不掉） */
+function cardSteps(io: StepIO, p: StartPlan): Step[] {
+  const { template, version } = p.workflow ?? { template: "code", version: LATEST_TEMPLATE_VERSION.code };
+  return [
     {
       name: "workflow",
       run: async () => failed(await ledger(io, p, "workflow-set", p.taskId, {
-        rev: rev(io, p.taskId), "workflow-rev": "0", template: "code", version: "2", mode: "auto", "author-family": "claude", fallback: FALLBACK,
+        rev: rev(io, p.taskId), "workflow-rev": "0", template, version: String(version), mode: "auto", "author-family": "claude", fallback: FALLBACK,
       }, null)),
       // workflow-set 没有 dedup：卡是本次建的（task-new 已确认归属），它的 workflow 是 auto 就是这一笔落了
       landed: () => getWorkflow(io.db(), p.taskId)?.mode === "auto",
@@ -223,13 +239,31 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
   ];
 }
 
-export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome> {
-  const steps = [...taskSteps(io, p), worktreeStep(io, p), ...agentSteps(io, p)];
+/**
+ * peer 卡（i28-W5）跳过复述：start_node 本身就是 PM 放行，先记一条写明放置理由的 decision，再以复述记录把卡推到 restate。
+ * 排在开 auto 之后（workflow-set 只收 spec 卡）；两步之间调度器若推到这张卡，卡上的 extra.placement 让它只会等，不会派复述单
+ * 或起本机 agent（scheduler-placement-plan.ts pinnedWork）。失败时 workflow / task-new 的 undo 把卡退成人工并取消。
+ */
+function restateStep(io: StepIO, p: StartPlan, peer: NonNullable<StartPlan["peer"]>): Step {
+  const why = `start_node 放到 peer:${peer.name}（${peer.reason}）；复述环节跳过，start_node 即 PM 放行，开工单由放置结果派给它`;
+  return {
+    name: "restate",
+    run: async () => failed(await ledger(io, p, "decision", p.taskId, {}, "placement", [peerRestateSkip(why).decision])) ??
+      failed(await ledger(io, p, "stage", p.taskId, peerRestateSkip(why).stage, "restate")),
+    landed: () => ours(io, p, "placement") && ours(io, p, "restate"),
+  };
+}
+
+export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome | QueuedStart> { return runLocalStart(io, p, async (io, p) => {
+  const [workflow, bind] = cardSteps(io, p);
+  const steps = p.peer ? [...taskSteps(io, p), workflow, restateStep(io, p, p.peer), bind]
+    : [...taskSteps(io, p), worktreeStep(io, p), ...agentSteps(io, p), workflow, bind];
   const done: Step[] = [];
   const reconciled: StepName[] = [];
   for (const s of steps) {
     let err: string | null;
     try {
+      requireLocalSharedLedgerPlanning(p.feature.id);
       err = await s.run();
     } catch (e) {
       err = (e as Error).message;
@@ -242,21 +276,8 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome> 
     }
     done.push(s);
   }
-  return { ok: true, taskId: p.taskId, agent: p.agent, branch: p.branch, worktree: p.worktree, prompt: p.promptPath, steps: done.map((s) => s.name), reconciled };
-}
-
-async function rollback(steps: Step[]): Promise<{ rolledBack: StepName[]; leftovers: string[] }> {
-  const rolledBack: StepName[] = [];
-  const leftovers: string[] = [];
-  for (const s of steps) {
-    if (!s.undo) continue;
-    try {
-      const err = await s.undo();
-      if (err) leftovers.push(`${s.name}：${err}`);
-      else rolledBack.push(s.name);
-    } catch (e) {
-      leftovers.push(`${s.name}：${(e as Error).message}`);
-    }
-  }
-  return { rolledBack, leftovers };
+  const names = done.map((s) => s.name);
+  if (p.peer) return { ok: true, taskId: p.taskId, placement: `peer:${p.peer.name}`, branch: p.branch, steps: names, reconciled };
+  return { ok: true, taskId: p.taskId, agent: p.agent, branch: p.branch, worktree: p.worktree, prompt: p.promptPath, steps: names, reconciled };
+  }, { ledgerPath: io.db().filename });
 }

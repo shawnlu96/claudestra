@@ -1,9 +1,11 @@
+import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
  * `ledger scheduler-*` CLI under the scheduler identity, which re-checks inside its own transaction. Per card at most
  * one step: drive the card's open intent, else plan the next one and drive it. An unknown result, a lost race or a
  * stale plan ends the card's pass; nothing is resent under a new key unless the ledger itself says the old one is void.
  */
+import { poolReader } from "./scheduler-auto-tick-helpers.js";
 import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type AuthorFamily, type IntentStatus, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -15,19 +17,28 @@ import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { CLAIM_LEASE_MS, driveDispatch, type DriveOutcome, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
 import { planScheduler, type PlannerDecision } from "./scheduler-plan.js";
+import { isResourceWait } from "./scheduler-plan-refusal.js";
+import { pmNoticeResume, pmUiNotice } from "./scheduler-ui-gate.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
+import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
+import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, type TickPace } from "./scheduler-yield.js";
+import { mergeFirst } from "./scheduler-merge-order.js";
+import { peerPrHold } from "./peer-pr-hold.js";
+import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
+import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
+import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
+import { createRetryBackoff } from "./scheduler-create-retry.js";
+import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
-
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
-
 export interface AutoTickDeps {
   /** The ledger CLI under the scheduler identity. */
   manager: Manager;
@@ -58,6 +69,26 @@ const noticeLost = (what: string) => (e: unknown): void => {
 /** 未领单报警没送到 PM 时多久重发一次；上次失败时间只放内存（按库分开），重启后立刻再试一次，无妨 */
 const UNCLAIMED_RETRY_MS = 60_000;
 const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
+/**
+ * A plan the ledger keeps refusing for one reason (code + whole first line) is reported once: after PLAN_REJECT_TICKS refusals or
+ * PLAN_REJECT_MS. Counts live in memory per ledger; a restart re-reports a standing reason at most once (the event dedups).
+ * An undelivered notice is kept per card + reason, apart from the count, and retried at the start of every pass, whatever its card
+ * does now (planned, waiting, taken to manual). tests/scheduler-freeze-alarm.test.ts.
+ */
+const PLAN_REJECT_TICKS = 3;
+export const PLAN_REJECT_MS = 5 * 60_000;
+interface Refusal { code: string; text: string; ticks: number; since: number; told: boolean }
+const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, { task: LedgerTask; text: string }>>();
+const perDb = <V>(w: WeakMap<Database, Map<string, V>>, db: Database): Map<string, V> => w.get(db) ?? w.set(db, new Map()).get(db)!;
+/** Send one undelivered refused-plan notice; a failure is logged and the notice stays for the next pass. */
+async function sendNotice(db: Database, deps: AutoTickDeps, key: string): Promise<boolean> {
+  const n = unsent.get(db)?.get(key);
+  if (!n) return true;
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下轮重发）")(e); return false; }
+  unsent.get(db)?.delete(key);
+  return true;
+}
+const FREEZE_ADVICE = "查 scheduler_merges 未结运行 → scheduler-merge-resolve → unfreeze";
 const roleOfIntent = (i: Pick<SchedulerIntent, "action" | "node">): SessionRole =>
   i.action === "review" || i.node === "adversarial_review" ? "reviewer" : "author";
 
@@ -65,7 +96,6 @@ export function boundRef(db: Database, taskId: string, role: SessionRole): Sessi
   const s = getSchedulerSession(db, taskId, role);
   return s && s.state === "active" ? { taskId, role, agent: s.agent, sessionId: s.sessionId, family: s.family, transport: s.transport } : null;
 }
-
 class Card {
   constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps) {}
 
@@ -91,15 +121,31 @@ class Card {
     return this.out(ok ? "replan" : "lost_race", why);
   }
 
-  async plan(plan: Planned): Promise<SchedulerIntent | string> {
+  async plan(plan: Planned): Promise<SchedulerIntent | { code: string; error: string }> {
     const workflow = getWorkflow(this.db, this.task.id);
     const seq = (this.db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(this.task.project) as { seq: number }).seq;
     const r = await this.deps.manager("ledger", "scheduler-plan", this.task.id, "--id", plan.id, "--rev", String(this.task.rev),
       "--workflow-rev", String(workflow?.rev ?? 0), "--seq", String(seq), "--node", plan.node, "--action", plan.action, "--reason", plan.reason,
       ...(plan.recipient ? ["--recipient", plan.recipient] : []), ...(plan.resources.length ? ["--resources", plan.resources.join(",")] : []));
-    return r.ok === true ? r.intent as SchedulerIntent : `计划没写进台账：${String(r.error)}`;
+    return r.ok === true ? r.intent as SchedulerIntent : { code: String(r.code ?? "unknown"), error: String(r.error) };
   }
-
+  /** Count a refused plan; on the threshold record it on the ledger, then tell PM once (see PLAN_REJECT_TICKS). */
+  async refused(code: string, error: string): Promise<CardOutcome> {
+    if (isResourceWait(code, error)) { refusals.get(this.db)?.delete(this.task.id); return this.out("wait", error); }
+    const text = planRejectedReason(error), now = this.deps.now(), detail = `计划没写进台账：${oneLine(error)}`;
+    const seen = perDb(refusals, this.db), was = seen.get(this.task.id);
+    const r: Refusal = was && was.code === code && was.text === text ? { ...was, ticks: was.ticks + 1 } : { code, text, ticks: 1, since: now, told: false };
+    seen.set(this.task.id, r);
+    if (r.told || (r.ticks < PLAN_REJECT_TICKS && now - r.since < PLAN_REJECT_MS)) return this.out("replan", detail);
+    const rec = await this.deps.manager("ledger", "scheduler-plan-rejected", this.task.id, "--code", code, "--text", text);
+    if (rec.ok !== true) return this.out("held", `${detail}；拒收报警没记上（下个 tick 再记）：${String(rec.error)}`);
+    const advice = text.includes("冻结") ? FREEZE_ADVICE : "按原因核对台账；处理不了就 workflow-set --mode manual 接管";
+    r.told = true;
+    const key = `${this.task.id}\n${code}\n${text}`;
+    perDb(unsent, this.db).set(key, { task: this.task, text: `[调度引擎] ${this.task.id} 的调度计划连续 ${r.ticks} 次被台账拒收` +
+      `（${Math.floor((now - r.since) / 60_000)} 分钟）：[${code}] ${text}。建议：${advice}` });
+    return this.out("replan", `${detail}；${(await sendNotice(this.db, this.deps, key)) ? "已报警 PM" : "报警没发出去，下个 tick 重发"}`);
+  }
   async ensure(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
     const role = roleOfIntent(intent);
     if (intent.status === "submitted") {
@@ -114,6 +160,10 @@ class Card {
     if (!family) return this.cancelStale(intent, "计划里没有 session 家族");
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure ${role} ${family}`))) return this.out("lost_race", "认领失败");
     const got = await this.deps.ensure(this.task, role, family);
+    if (got.kind === "wait") {
+      await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
+      return this.out("waiting", got.reason);
+    }
     if (got.kind === "unknown") {
       await this.settle(intent.id, "submitted", "unknown", `建 session 结果不明：${got.reason}`);
       return this.out("held", got.reason);
@@ -163,7 +213,8 @@ class Card {
       }
       checkout = pinned.dir;
     }
-    const order = workOrderFor(this.task, intent, plan, ref, checkout);
+    if (stepOfNode(intent.node) === "review") await ensureDeliverScope(this.db, this.task, intent.head); // 派审前事务外补登记规格外文件（i28-ASK2）
+    const order = workOrderFor(this.task, intent, plan, ref, checkout, this.db);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
@@ -179,7 +230,7 @@ class Card {
   }
 
   async internal(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
-    if (intent.status !== "pending") return this.out("held", `${intent.action} 意图停在 ${intent.status}`);
+    if (intent.status !== "pending") return this.out(...await pmNoticeResume(intent, (f, t, r) => this.settle(intent.id, f, t, r)));
     const cmd = intent.action === "stage" ? ["scheduler-stage", intent.id, "--to", plan?.targetStage ?? ""] : ["scheduler-ui-ask", intent.id];
     if (intent.action === "stage" && !plan?.targetStage) return this.cancelStale(intent, "计划里没有目标阶段");
     const shots = intent.action === "ask" ? screenshotRefs(this.task) : null;
@@ -187,13 +238,16 @@ class Card {
       await this.settle(intent.id, "pending", "cancelled", `未开 ask：${shots.missing}`);
       return this.escalate(shots.missing, intent.id);
     }
+    if (shots && plan?.pmNotice) return this.out("ask", await pmUiNotice(this.task, plan.pmNotice, shots.refs, this.deps.notifyPm, (f, t, r) => this.settle(intent.id, f, t, r)));
     const r = await this.deps.manager("ledger", ...cmd, "--max-workers", String(this.opts.maxWorkers));
-    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice();
+    if (r.ok === true && r.duplicate !== true && plan?.pmDiffNotice) await this.diffNotice(plan.downgrade ? plan.reason : null);
     if (r.ok === true) return this.out(intent.action, intent.action === "stage" ? `${this.task.stage}→${plan?.targetStage}` : `ask ${String(r.askId)}`);
     return r.code === "conflict" ? this.cancelStale(intent, String(r.error)) : this.out("held", String(r.error));
   }
 
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
+    const convergence = await driveConvergence(this, intent); if (convergence) return convergence;
+    const swap = await driveReviewSwap(this, intent); if (swap) return swap;
     if (isPoolIntent(intent)) {
       const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,
         this.opts.maxWorkers, this.opts.pool?.remote);
@@ -205,26 +259,26 @@ class Card {
     if (intent.action === "merge") return this.out("merge_queue", "合并意图交合并队列");
     return this.out("held", `意图 ${intent.action} 不由本服务执行`);
   }
-
   /** P2 findings do not block the merge, but PM reads the diff: best-effort, the stage event itself is the durable record. */
-  async diffNotice(): Promise<void> {
+  async diffNotice(downgraded: string | null): Promise<void> {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
-      `，报告 ${String(rv?.data.path ?? "（无）")}`;
+      `，报告 ${String(rv?.data.path ?? "（无）")}${downgraded ? `；${downgraded}` : ""}`;
     await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
-
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
   uiAskDead(): SchedulerIntent | null {
     const sent = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'ask' AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     return sent && deadUiAsk(this.db, sent.id, this.deps.now()) ? sent : null;
   }
-
   /** A sent order is only a receipt: watch its session for a quota / auth failure, which is PM's call, never a resend. */
   async watch(wait: Extract<PlannerDecision, { kind: "wait" }>): Promise<CardOutcome> {
+    await informFamilyWait(this.db, this.task, wait, this.opts.pool?.remote, this.deps);
+    await (await import("./scheduler-sec-review.js")).raiseSecReviewNoRoom(this.db, this.task, wait, this.deps); // i28-SR1
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
+    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);
@@ -285,10 +339,8 @@ class Card {
     return this.out("waiting", `${ref.agent} 未领单，已报警`);
   }
 
-  /**
-   * An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
-   * refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second.
-   */
+  /** An order the transport refused (bridge down, session swapped) is safely re-planned, but not every poll: consecutive
+   *  refusals back off 30s → 10min, or a bridge restart would write a plan + cancel pair per card per second. */
   undeliveredBackoff(): string | null {
     const recent = this.db.query(`SELECT status, receipt, updatedAt FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review')
       ORDER BY eventSeq DESC LIMIT 6`).all(this.task.id) as Pick<SchedulerIntent, "status" | "receipt" | "updatedAt">[];
@@ -299,7 +351,7 @@ class Card {
     return left > 0 ? `连续 ${streak} 次派单未投递（${oneLine(recent[0].receipt ?? "")}），${Math.ceil(left / 1000)}s 后再派` : null;
   }
 
-  async step(): Promise<CardOutcome> {
+  async step(): Promise<CardOutcome> { await (await import("./review-converge-notice.js")).followUpFailureNotice(this.db, this.task, this.deps.notifyPm);
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
@@ -311,34 +363,29 @@ class Card {
       return this.drive(open, again);
     }
     if (open) return this.drive(open, null);
+    const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
-    if (plan.kind === "escalate") return this.escalate(`${plan.code}：${plan.reason}`);
+    await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
+    if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
-    if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / PM 收尾`);
-    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff() : null;
+    if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
+    const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
+      : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
+      : plan.action === "merge" ? mergeSlotHold(this.task) : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
-    return typeof intent === "string" ? this.out("replan", intent) : this.drive(intent, plan);
+    if ("error" in intent) return this.refused(intent.code, intent.error);
+    refusals.get(this.db)?.delete(this.task.id);
+    return this.drive(intent, plan);
   }
 }
-
-/** One borrow read per pass, and only when some project may pool; an unreadable lend.json pools nothing (fail-closed). */
-function poolReader(deps: AutoTickDeps) {
-  let borrow: Promise<BorrowEntry[]> | null = null;
-  return async (remote: RemotePolicy | undefined): Promise<SnapshotOpts["pool"]> => {
-    if (!remote || !deps.borrow) return undefined;
-    if (remote.mode === "off") return { remote, borrow: [] };
-    borrow ??= deps.borrow().catch((e: unknown) => { console.error(`⚠️ [scheduler] 读 lend.json 借入名单失败，本轮不挂池：${(e as Error).message}`); return []; });
-    return { remote, borrow: await borrow };
-  };
-}
-
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
-  for (const { project, policy, taskId } of paceCards(db, projects, "auto", pace)) {
+  for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
+  for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
     const task = getTask(db, taskId);
@@ -351,5 +398,6 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
     }
   }
+  await (await import("./lend-fix-reassign-tick.js")).relayPrSweep(db, Object.keys(projects), deps.manager, deps.now); // i28-RA1：卡跑完后每轮一单
   return out;
 }

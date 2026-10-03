@@ -44,7 +44,10 @@ bridge ──ws（channel-server / Pi 扩展同一套协议，register 带 runti
   - 代理只绑 `127.0.0.1` 的随机端口。
   - 宿主生成一次性 token，经环境变量交给 channel-server；连接不带 token 的一律拒绝。
   - 代理吞掉 register，只转发 channel-server 现有的请求类型，其它帧不转发。
-- **打断复用 Pi 扩展的 abort 帧协议**（`abortVia: "extension"`）：宿主收到 `abort` 就调 `session/cancel`，然后回 `abort_ack`。
+- **打断复用 Pi 扩展的 abort 帧协议**（`abortVia: "extension"`）：宿主收到 `abort` 时会话里有回合（调度器在跑 / 排着，或适配器报着 active）就取消，然后回 `abort_ack`（`lib/acp/abort.ts`）。
+  - codex-acp：发 `session/cancel` 通知，`voided` 为空。
+  - Pi 适配器在 initialize 里声明 `_meta.claudestra.cancelReturnsQueue`，宿主改发 `_claudestra/cancel` 请求：适配器先 `clear_queue` 再 `abort`（pi 的 abort 会接着跑排队消息），清掉的正文交回宿主，宿主对回 steer 时记下的 message_id 填进 `voided`。叫停到 settle 之间（最多 60 秒）pi 续跑的轮再中止，这期间的插话不进 pi 的队列，停稳后另起一轮（同 `pi/abort-control.ts`）。
+- **适配器自己开的回合**：线程从非 active 变 active 时宿主既没有 prompt 在途、也没有 steer 另起的回合在等，就当 external 槽跟到下一个 idle：期间升级闸答忙、叫停会取消，结束照常报 Stop / 补 reply（`session.ts` onSelfTurn → `turn.ts` track）。Pi 的扩展 `triggerTurn`、压缩后续跑走这条；codex-acp 只在宿主的 prompt / steer 期间变 active（它的 goal 续跑只经 `_session/goal`，宿主不调），行为不变。Pi 扩展的 notify / setStatus 脱敏后进宿主日志。
 
 ## 开关放在哪
 
@@ -60,7 +63,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `interruptKeys` | `[]` | 窗口里只是宿主日志，一个键都不发 |
 | `abortVia` | `"extension"` | 打断走宿主的 `session/cancel` |
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
-| `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看 |
+| `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
 | `modelEnforcement` | `"config-option"` | 经 `session/set_config_option` 改，不重启 |
 | `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start` |
 
@@ -94,6 +97,8 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 ## 已知边界与限制
 
 - **claudestra MCP 的接法。** ACP `mcpServers` 里的同名 server，如果 `~/.codex/config.toml` 已经定义了，会被适配器**静默丢掉**（`CodexAcpClient.ts`），本机的 config.toml 恰好有 `claudestra`。所以 channel-server 经 `CODEX_CONFIG` 的 `mcp_servers.claudestra.*` 传入（`lib/acp/adapter-proc.ts`），和 tmux 下 `-c mcp_servers.claudestra.*` 覆盖是同一个语义（Codex 把它深合并到 config.toml 之上）。环境白名单去掉了 `TMUX` / `TMUX_PANE` / 前言：标就绪、打字投递、前言在 acp 下都归宿主。
+- **Pi 走 ACP 时的挂载闸（残余风险）。** Pi 的 mcp.json 里有同名 server 会静默顶掉扩展挂的 channel-server，所以切 acp / 起宿主、适配器起 pi 前、pi 的 `session_start` 时都查撞名，任何一处不过就拒（`lib/acp/pi-adapter/mcp-clash.ts`，三处调用见 `lib/runtimes/pi-acp.ts`、`pi-adapter/main.ts`、`pi-adapter/mcp-mount.ts`）。挂载闸查的是磁盘上的 mcp.json，不是 Pi 已加载的快照；在加载与检查之间改写再恢复配置的同机进程不防（没有系统级隔离时这类进程本来就能直接改 Pi 配置）。以后可改为 channel-server 回宿主握手确认实际挂上的是自己的实例。
+- **Pi 走 ACP 时 channel-server 不靠 builtin:mcp。** 用户装了注册 `/mcp` 的第三方 MCP 扩展（如 pi-mcp-adapter）时 pi 不加载 builtin:mcp，经 `registerMcpServer` 挂的 server 没人连，模型没有 reply、宿主却照报就绪。现在挂载扩展用 pi 公开导出的 `createMcpExtension` 自己连（只连交给它的 server，不注册 `/mcp`、不接别的扩展注册的 server、不动 `mcp_servers` 提示段），第三方扩展的工具（pi-mcp-adapter 的 `mcp` / `mcpScript`）照常在；`session_start` 等到 `mcp__<MCP_NAME>__reply` 真进了模型的工具表才报挂载 OK，最多等 20s，等不到就拒会话，`migrate --pi` 走已有的回退 tmux（`pi-adapter/mcp-mount.ts`，`tests/pi-acp-mount-tools.test.ts`）。
 - **沙箱只用 stub（owner 定的）。** 沙箱端到端不碰真 Codex 的登录和 `~/.codex`，用 `scripts/acp-stub.ts` 这个假的 ACP agent（只讲协议、不连模型，但会像 Codex 一样按 `CODEX_CONFIG` 起 channel-server、真的调 reply），把宿主、代理、bridge、网页整条链路测通。真模型只在合并后切 Shawn 本机的 agent-codex 时跑。沙箱闸门放「codex + `--transport acp`」，适配器固定起本仓的 `scripts/acp-stub.ts`（真实路径要在本仓里，`lib/acp/stub.ts`）；外部的 `CLAUDESTRA_ACP_AGENT` 是任意 argv，沙箱不继承、不认，带着它建 / 切 acp 直接拒。ACP 这条链（宿主、适配器、它起的 channel-server）的 `HOME` / `CODEX_HOME` 挪到沙箱根下的 `acp-home`；沙箱里的 Claude Code agent 仍用真 HOME（登录在那里）。tmux 版 Codex 照旧拒（`lib/sandbox.ts assertSandboxRuntime`）。
   - **不许**用软链或复制 `auth.json`：ChatGPT 登录的 refresh token 会轮换，一边刷新，另一边就失效。
   - `~/.codex/sessions` 是共享的，和 `~/.claude` 一样。

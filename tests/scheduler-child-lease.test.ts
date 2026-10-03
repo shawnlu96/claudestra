@@ -25,18 +25,29 @@ function children(pid: number): { pid: number; args: string }[] {
 }
 
 const gone = (pid: number): boolean => { try { process.kill(pid, 0); return false; } catch { return true; /* ESRCH: exited */ } };
+/** Exited, reaped or not: a frozen daemon cannot reap its children, and kill(pid, 0) still finds a zombie. */
+const exited = (pid: number): boolean => gone(pid) || Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)]).stdout.toString().trim().startsWith("Z");
 
-/** Returns the manager write lock, held, with the daemon's session-bind child queued behind it. */
+/**
+ * Returns the manager write lock, held, with the daemon's session-bind child queued behind it. Earlier ledger children
+ * are let through with the daemon frozen (SIGSTOP), so it cannot spawn the bind while the lock is free: unfrozen, the
+ * bind could take the free lock and write before we hold it again, and the 40s loop would never see it queued.
+ */
 async function queueBind(s: Svc): Promise<LockHandle> {
-  const path = join(s.state, ".manager-write.lock");
+  const path = join(s.state, ".manager-write.lock"), pid = s.child!.pid;
+  const managerKids = () => children(pid).filter((k) => k.args.includes("manager.ts"));
   let lock = await acquireLock(path, 0);
   for (const end = Date.now() + 40_000; Date.now() < end; await Bun.sleep(15)) {
-    const kids = children(s.child!.pid).filter((k) => k.args.includes("manager.ts"));
-    if (kids.some((k) => k.args.includes("scheduler-session-bind"))) return lock!;
-    if (!kids.length) continue;
-    lock!.release();
-    for (const k of kids) await until(() => gone(k.pid), 20_000);
-    lock = await acquireLock(path, 5_000);
+    if (!managerKids().length) continue;
+    process.kill(pid, "SIGSTOP");
+    try {
+      const kids = managerKids(); // the daemon is frozen: this set can only shrink
+      if (kids.some((k) => k.args.includes("scheduler-session-bind"))) return lock!;
+      lock!.release();
+      for (const k of kids) if (!(await until(() => exited(k.pid), 20_000))) throw new Error(`ledger child never exited: ${k.args}`);
+      lock = await acquireLock(path, 5_000); // nothing else can want it: the daemon is frozen and its children are gone
+      if (!lock) throw new Error("write lock not regained");
+    } finally { process.kill(pid, "SIGCONT"); }
   }
   throw new Error("session-bind never queued");
 }

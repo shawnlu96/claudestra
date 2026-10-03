@@ -6,6 +6,9 @@
  * tx / insertEvent / replay 在 ledger-tx.ts，只给写入模块用：直接写事件就绕过了阶段机与 owner 校验；纯校验在 ledger-checks.ts。
  */
 import type { Database } from "bun:sqlite";
+import { requireSharedLedgerTaskPlanning } from "./shared-ledger-mode.js";
+import { updateTask } from "./fix-strategy-task-write.js";
+import { deliverDisputes } from "./review-arbiter-deliver.js";
 import {
   APPENDABLE_KINDS,
   checkIdFree,
@@ -36,6 +39,7 @@ import {
 } from "./ledger-checks.js";
 import { canTransition, nextTaskState, roleOf, TERMINAL_STAGES, type EventKind, type LedgerEvent, type LedgerItem, type LedgerTask, type Role, type Stage } from "./ledger-stages.js";
 import { checksAllClear } from "./ledger-probes.js";
+import { deliverPrPatch } from "./order-deliver-pr.js";
 import { getItem, getMeta, LedgerError, pmsByProject, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 import { activeStepFor, checkReviewHead, checkReviewStep, noteStepDelivered, noteStepReview } from "./ledger-steps-write.js";
@@ -118,6 +122,7 @@ function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boole
 
 export function createTask(db: Database, ctx: WriteCtx, input: NewTask): WriteResult<LedgerTask> {
   return tx(db, () => {
+    requireSharedLedgerTaskPlanning(input.extra);
     const dup = replay(db, ctx, { project: input.project, target: input.id, kind: "task" }, () => mustTask(db, input.id));
     if (dup) return dup;
     const event = insertTask(db, ctx, input, checkNewTask(db, ctx.actor, input));
@@ -167,24 +172,12 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
   });
 }
 
-function updateTask(db: Database, ctx: WriteCtx, cur: LedgerTask, patch: Record<string, unknown>): number {
-  const cols = Object.keys(patch);
-  const rev = cur.rev + 1;
-  db.prepare(`UPDATE tasks SET ${cols.map((c) => `${c} = ?`).join(", ")}, rev = ?, updatedAt = ? WHERE id = ?`).run(
-    ...(cols.map((c) => toColumn(c, patch[c])) as string[]),
-    rev,
-    ctx.now ?? Date.now(),
-    cur.id,
-  );
-  return rev;
-}
-
 // ── 阶段 ──
 
 /**
  * 在已开的事务里推一步：CAS from → 现算角色 → canTransition → 改行 + stage 事件。
- * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）
- * 与 recordVerify（调度身份过了 schedulerCanVerify 闸，按 pm 推 live → verified，T68g）；
+ * asRole 只给 ledger-human.ts（v3.2：human 节点的人按执行者推 build / fix → review，actor 是 person id，roleOf 认不出）、
+ * recordVerify（调度身份过了 schedulerCanVerify 闸，按 pm 推 live → verified，T68g）与 moveStage 的 asPm（只收 peer PR 卡，peer-pr-ledger.ts）；
  * 别的调用方传它就绕过了角色判定，tests/ledger-migrate.test.ts 查着只有那一处 import。
  */
 export function applyMove(
@@ -209,22 +202,23 @@ export function applyMove(
 /** 进 verified 只经 recordVerify（系统核对完成检查单）；从 blocked 回到原本就是 verified 的阶段不算「进」 */
 export const VERIFY_HINT = "进 verified 要跑 `ledger verify <task>`：系统核对完成检查单，全过才推（stage 不能直接推 verified）";
 
-export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; text?: string } & StageMove): WriteResult<LedgerTask> {
+export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; text?: string; asPm?: boolean } & StageMove): WriteResult<LedgerTask> {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "stage" }, () => task);
     if (dup) return dup;
     if (input.to === "verified" && task.stage !== "blocked") throw new LedgerError("forbidden", VERIFY_HINT, { stage: task.stage });
-    const { task: row, event } = applyMove(db, ctx, task, input, true, input.text);
+    if (input.asPm && !task.extra.peerPr) throw new LedgerError("forbidden", "按 PM 角色代推阶段只给 peer PR 卡（收卡 / 漂移事务）");
+    const { task: row, event } = applyMove(db, ctx, task, input, true, input.text, input.asPm ? "pm" : undefined);
     return { row, event, duplicate: false };
   });
 }
 
-/** 交付：记 headSHA 与证据位置；带 moveFrom 时同一事务推到 review（build / fix → review） */
+/** 交付：记 headSHA 与证据位置（带 pr 时按 deliverPrPatch 补 PR 链接）；带 moveFrom 时同一事务推到 review（build / fix → review） */
 export function deliver(
   db: Database,
   ctx: WriteCtx,
-  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; expect?: { rev?: number; branch?: string } },
+  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string }; disputes?: unknown },
 ): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
@@ -236,14 +230,13 @@ export function deliver(
       throw new LedgerError("conflict", `任务 ${task.id} 在核对之后被改过（现在 rev ${task.rev}、分支 ${task.branch ?? "（空）"}），重新核对后再交付`, { rev: task.rev });
     }
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
+    const disputes = deliverDisputes(db, ctx, task, input.disputes, input.text);
     // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
-    if (input.headSHA) {
-      checkReviewHead(task, input.headSHA);
-      updateTask(db, ctx, task, { headSHA: input.headSHA });
-      task = mustTask(db, task.id);
-    }
+    if (input.headSHA) checkReviewHead(task, input.headSHA);
+    const patch = { ...(input.headSHA ? { headSHA: input.headSHA } : {}), ...deliverPrPatch(task, input.pr) };
+    if (Object.keys(patch).length) task = (updateTask(db, ctx, task, patch), mustTask(db, task.id));
     if (input.moveFrom) task = applyMove(db, ctx, task, { from: input.moveFrom, to: "review" }, false).task;
-    const data = { round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
+    const data = { ...disputes, round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "deliver", text: input.text, data }, true);
     return { row: task, event, duplicate: false };
   });

@@ -7,7 +7,6 @@ import { activationSeq, getIntent, getWorkflow, schedulerProjectView } from "../
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { addDep } from "../src/lib/ledger-deps-write.js";
-import { projectView } from "../src/lib/ledger-read.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage } from "../src/lib/ledger-write.js";
 
@@ -128,7 +127,7 @@ describe("T68 durable scheduler facts", () => {
     } finally { f.close(); }
   });
 
-  test("dispatch file and worker slot leases survive receipt and review until the card reaches live", () => {
+  test("dispatch leases survive receipts; file leases last until the card reaches live", () => {
     const f = fixture();
     try {
       const a = f.workflow("T1"), b = f.workflow("T2");
@@ -151,19 +150,18 @@ describe("T68 durable scheduler facts", () => {
     } finally { f.close(); }
   });
 
-  test("an unknown external effect keeps the card lease even if PM advances the stage", () => {
+  test("an orphaned unknown write is cancelled when PM advances the card to live", () => {
     const f = fixture();
     try {
       const w = f.workflow("T1");
       planIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", taskId: "T1", taskRev: 1,
         workflowRev: w.rev, causalSeq: f.seq(), node: "write", action: "dispatch", reason: "write", resources: ["src/bridge.ts"] });
       settleIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", from: "pending", to: "unknown", receipt: "投递结果不明" });
-      f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
-      moveStage(f.db, f.owner, { taskId: "T1", from: "merge", to: "live" });
-      expect(f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = 'T1'").all()).toEqual([{ resource: "src/bridge.ts" }]);
       expect(() => settleIntent(f.db, { actor: "scheduler" }, { id: "uncertain:T1", from: "unknown", to: "done", receipt: "x" }))
         .toThrow(/只有 PM/);
-      settleIntent(f.db, f.owner, { id: "uncertain:T1", from: "unknown", to: "done", receipt: "核对：已交付" });
+      f.db.query("UPDATE tasks SET stage = 'merge' WHERE id = 'T1'").run();
+      moveStage(f.db, f.owner, { taskId: "T1", from: "merge", to: "live" });
+      expect(getIntent(f.db, "uncertain:T1")).toMatchObject({ status: "cancelled", receipt: expect.stringContaining("卡已 live") });
       expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'T1'").get()).toEqual({ n: 0 });
     } finally { f.close(); }
   });
@@ -277,7 +275,7 @@ describe("T68 durable scheduler facts", () => {
       const row = view.tasks.find((x) => x.taskId === "T1");
       expect([row?.latestIntent?.status, row?.resources, row?.waitReason]).toEqual(["unknown", ["reviewer:codex"], "外部结果不明：跨模型审查"]);
       expect(view.asOfSeq).toBe(f.seq());
-      expect(projectView(f.db, "p", 100).scheduler.tasks.find((x) => x.taskId === "T1")?.waitReason).toBe("外部结果不明：跨模型审查");
+      expect(schedulerProjectView(f.db, "p").tasks.find((x) => x.taskId === "T1")?.waitReason).toBe("外部结果不明：跨模型审查");
       settleIntent(f.db, f.owner, { id, from: "unknown", to: "done", receipt: "台账 review seq 9" });
       expect(schedulerProjectView(f.db, "p").tasks.find((x) => x.taskId === "T1")?.resources).toEqual([]);
     } finally { f.close(); }

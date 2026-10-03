@@ -193,9 +193,9 @@ describe("正常路径：规划 → 两条车道 → 两次开工", () => {
     expect((await start("b")).ok).toBe(true);
     for (const [id, key, globs] of [["i28-a", "a", ["src/lib/a*.ts"]], ["i28-b", "b", ["src/bridge/b.ts"]]] as const) {
       const t = getTask(db, id)!;
-      expect(t).toMatchObject({ stage: "spec", agent: `agent-task-${id}`, pm: PM.agent, branch: `feat/${id}`, featureId: "ab12-i28", spec: `docs/tasks/${id}.md` });
+      expect(t).toMatchObject({ stage: "spec", agent: `agent-task-${id}`, pm: PM.agent, branch: `feat/${id}`, featureId: "ab12-i28", spec: join(dir, "ledger", "docs", "tasks", `${id}.md`) });
       expect(t.extra.fileGlobs).toEqual([...globs]);
-      expect(getWorkflow(db, id)).toMatchObject({ mode: "auto", template: "code", templateVersion: 2, authorFamily: "claude" });
+      expect(getWorkflow(db, id)).toMatchObject({ mode: "auto", template: "code", templateVersion: 3, authorFamily: "claude" });
       const prompt = readFileSync(join(dir, "ledger", "reviews", `${id}-exec-prompt.md`), "utf8");
       expect(prompt).toContain("本卡是自动卡");
       expect(prompt).toContain(`不要给 ${PM.agent} 发任何进度`);
@@ -263,7 +263,7 @@ describe("P1：start_node 中途失败不留半截", () => {
 });
 
 describe("P1：rewrite_dag 删进行中的节点必须带原因", () => {
-  test("remove 进行中节点被拒；cancel 带原因 → 待 owner 批；拆计划节点直接生效，车道跟着变", async () => {
+  test("remove 进行中节点被拒；cancel 带原因直接生效，带 scopeChange 才待 owner 批；拆计划节点直接生效，车道跟着变", async () => {
     await plan();
     spec("i28-a");
     expect((await start("a")).ok).toBe(true);
@@ -273,11 +273,15 @@ describe("P1：rewrite_dag 删进行中的节点必须带原因", () => {
     expect(await call(PM, "rewrite_dag", { featureId: "i28", remove: ["b"] })).toMatchObject({ ok: false, error: expect.stringContaining("reason") });
     const split = await call(PM, "rewrite_dag", { ...base, remove: ["b"], add: [node("b1", ["src/lib/a-x.ts"]), node("b2", ["docs/b2.md"])] });
     expect(split).toMatchObject({ ok: true, applied: true, lanes: { startNow: ["b2"], waiting: [{ key: "b1", why: "files", on: ["a"] }] } });
-    const cancel = await call(PM, "rewrite_dag", { ...base, cancel: { a: "owner 说不做了" } });
-    expect(cancel).toMatchObject({ ok: true, applied: false, askId: expect.any(String) });
+    const scoped = await call(PM, "rewrite_dag", { ...base, cancel: { a: "owner 说不做了" }, scopeChange: true });
+    expect(scoped).toMatchObject({ ok: true, applied: false, askId: expect.any(String) });
     expect(getFeature(db, "ab12-i28")?.currentVersion).toBe(2);
-    const diff = await call(PM, "show_dag", { featureId: "i28", diff: ["1", "pending"] });
+    const diff = await call(PM, "show_dag", { featureId: "i28", diff: ["2", "pending"] });
     expect(diff.diff.cancelled).toEqual([{ key: "a", taskId: "i28-a", reason: "owner 说不做了" }]);
+    db.prepare("UPDATE asks SET expiresAt = 0").run(); // 让待批的提案过期作废，下一次重写才能落地
+    const cancel = await call(PM, "rewrite_dag", { ...base, cancel: { a: "owner 说不做了" } });
+    expect(cancel).toMatchObject({ ok: true, applied: true, askId: null });
+    expect(getFeature(db, "ab12-i28")?.currentVersion).toBe(3);
   });
 
   test("plan_feature 覆盖已有 DAG 要带原因；漏掉进行中的节点被拒", async () => {

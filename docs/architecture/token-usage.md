@@ -113,3 +113,23 @@ agent、sessionId、是否子 agent（sidechain）、开始时间（外来输入
 **何时算**：每次 `usage ingest`（bridge 10 分钟一趟、每日那趟、查询前那趟）导完就按台账**整体重算**一遍、只写变了的行（本机 30 天约 8 千轮，毫秒级）。所以规则改了、台账补推了阶段，下一趟全部跟着变；不需要迁移旧数据。明细清掉（30 天）之后的轮不再有归属，按卡的永久汇总不在本卡范围。
 
 **只读 API**：`GET /api/v1/usage/task/:id`、`GET /api/v1/usage/feature/:id`，只给全权设备（`canAdministerPairing`：全 scope、非 peer、manage、设备凭据，与 `/ai-inventory` 同一道门），只读 usage 库现有数据（只读连接），不导入、不重算。
+
+## Agent 详情（T4）
+
+会话详情弹窗的「token 账」从 `GET /api/v1/usage/agent/:name?since=&limit=&before=` 读取现成数据。
+权限同 task / feature：`canAdministerPairing`，peer、guest、没有 manage、非全 scope 或非设备凭据均为 403。
+SQLite 只读连接，单次请求在同一读事务里取汇总与明细，不导入、不重算、不读取会话文件。
+
+- 今天按服务器本地 00:00 起，与 `usage summary --today` 共用 `usageSummary` 的按调用时间聚合；跨午夜的轮也只算今天发生的调用。
+- 近 7 天是当前时刻往前 168 小时，不用额度重置周期。两组汇总都按 agent × 运行时 × 模型，Codex 标 `modelBasis=request`，模型后显示「(请求)」。
+- 最近轮次按开始时间倒序，默认 20 条，`limit` 上限 100；`since` 支持非负毫秒或 ISO 日期时间，只过滤轮开始时间，不改变今天 / 近 7 天汇总。
+- `before` 是服务器返回的 `next`（开始时间 + SQLite 数字行号），加载更多只取下一页；同毫秒多轮、翻页期间新增轮都不会重复或漏掉原来的轮。
+  `turnsFor` 先限轮头，再聚合这些轮的调用和工具，不把整月工具明细拉出来。CLI 仍返回时间正序。
+- 对外显式挑字段：不传 sessionId、内部 turnId、文件路径；摘要只取库中已脱敏的 trigger、最多 80 字，再隐藏其中的本机路径和本轮 sessionId。
+  工具只给次数最多的 3 个；新产出 = output，Codex reasoning 另列，合计包含 reasoning。
+- 未归属显示中文原因；卡号通过现有台账读接口确认所属项目后，复用 `openCollab` / `openCollabTask` 导航，兼容 agent 换项目后的历史卡。
+- 库不存在、从未记录、历史 daily 仍在但明细已超过 30 天，分别返回 `missing` / `empty` / `expired` 空状态；不创建数据库。
+  无权限隐藏此节；请求失败保留已有数据并提供图标重试。切 agent、机器或关闭弹窗会取消旧请求。
+
+验证：`tests/usage-agent.test.ts`（口径、只读、分页、600 轮体积、投影隐私、空态）、`tests/usage-attr-api.test.ts`（权限矩阵）。
+`AGENT_USAGE_BROWSER=1 bun test tests/web-agent-usage-browser.test.ts` 在本机 Chrome 跑交互和 390px / 桌面布局夹具；生产截图与对账由 PM 验收。

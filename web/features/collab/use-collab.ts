@@ -7,15 +7,17 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "@/lib/api/client";
-import { fetchLedger, fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
+import { collabLoader, type Visibility } from "./collab-loader";
+import { useCollabSource } from "./team-source-context";
+import type { FollowOpts } from "./team-source";
 import { reduceAction, type ActionMap } from "./collab-action";
-import { cachedOverview, cacheOverview, setLedgerAccess } from "./collab-cache";
+import { cachedOverview, cacheOverview, clearOverview, setLedgerAccess } from "./collab-cache";
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { useReviewers } from "./use-collab-extra";
 
-export type CollabLoad = { status: "loading" } | { status: "forbidden" } | { status: "error"; message: string } | { status: "ok"; ov: LedgerOverview };
+export type CollabLoad = { status: "loading" } | { status: "error"; message: string } | { status: "ok"; ov: LedgerOverview; error?: string };
 
 /** 刚推进的那一条：从哪个阶段来、什么时候（驱动品牌色高亮与短标签） */
 export interface Advance {
@@ -28,9 +30,22 @@ const TICK_MS = 30_000;
 const REFETCH_DEBOUNCE_MS = 250;
 const RETRY_MIN_MS = 2_000;
 const RETRY_MAX_MS = 30_000;
+/** 总览 403（设备没有台账权限）不会自己好：重试封顶放到 5 分钟，权限补上后最多等这么久 */
+const FORBIDDEN_RETRY_CAP_MS = 5 * 60_000;
+const forbidden = (e: unknown) => e instanceof ApiError && e.status === 403;
+/** 标签页隐藏时总览的失败重试先停（事件流此时也断开），回到前台再拉 */
+export const pageVisibility: Visibility = {
+  hidden: () => document.visibilityState === "hidden",
+  onShow: (cb) => {
+    const h = () => document.visibilityState === "visible" && cb();
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+  },
+};
 
 /** members：本项目的 agent（前端会话名）；别的项目的 agent 在跑什么与这里无关，不进此刻动作表 */
 export function useCollab(project: string, members: ReadonlySet<string>) {
+  const source = useCollabSource(project);
   const cached = cachedOverview(project);
   const [load, setLoad] = useState<CollabLoad>(cached ? { status: "ok", ov: cached.ov } : { status: "loading" });
   const [offset, setOffset] = useState(cached?.offset ?? 0);
@@ -39,47 +54,43 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
   const [rev, setRev] = useState(0);
   const [advance, setAdvance] = useState<Advance | null>(null);
   const prevStages = useRef<Map<string, Stage> | null>(null);
-  const inflight = useRef<AbortController | null>(null);
-
-  const refetch = useCallback(async () => {
-    inflight.current?.abort();
-    const ctrl = new AbortController();
-    inflight.current = ctrl;
-    try {
-      const ov = await fetchLedger(project, ctrl.signal);
-      if (ctrl.signal.aborted) return;
-      const prev = prevStages.current;
-      const moved = prev ? ov.tasks.find((t) => prev.has(t.id) && prev.get(t.id) !== t.stage) : undefined;
-      if (moved) setAdvance({ id: moved.id, from: prev!.get(moved.id)!, at: Date.now() });
-      prevStages.current = new Map(ov.tasks.map((t) => [t.id, t.stage]));
-      cacheOverview(project, ov, ov.now - Date.now());
-      setOffset(ov.now - Date.now());
-      setClock(Date.now());
-      setLoad({ status: "ok", ov });
-      setRev((r) => r + 1);
-    } catch (e) {
-      if (ctrl.signal.aborted) return;
-      if (e instanceof ApiError && e.status === 403) {
-        setLedgerAccess(project, "no");
-        setLoad({ status: "forbidden" });
-      }
-      // 已经有数据时重拉失败不清屏：留着旧的，下次事件 / 重连再拉
-      else setLoad((cur) => (cur.status === "ok" ? cur : { status: "error", message: (e as Error).message }));
-    }
-  }, [project]);
+  const loader = useRef<ReturnType<typeof collabLoader<LedgerOverview>> | null>(null);
+  const refetch = useCallback(async () => { await loader.current?.refetch(); }, []);
 
   useEffect(() => {
     const seen = cachedOverview(project)?.ov;
-    prevStages.current = seen ? new Map(seen.tasks.map((t) => [t.id, t.stage])) : null;
-    setAdvance(null);
-    // 先拉一次：事件流连不上（老 bridge / 限流）也有数据看；连上后 onOpen 再全量拉一次（会中止这一次）
-    void refetch();
+    // 切项目会整个重挂（collab-switch.tsx 按 project 加 key），load / advance 的初值就是这个项目的，这里不再重置
+    prevStages.current = seen ? new Map((seen.tasks ?? []).map((t) => [t.id, t.stage])) : null;
+    const reader = collabLoader({
+      fetch: (signal) => source.overview(signal),
+      success: (ov) => {
+        const prev = prevStages.current;
+        const moved = prev ? (ov.tasks ?? []).find((t) => prev.has(t.id) && prev.get(t.id) !== t.stage) : undefined;
+        if (moved) setAdvance({ id: moved.id, from: prev!.get(moved.id)!, at: Date.now() });
+        prevStages.current = new Map((ov.tasks ?? []).map((t) => [t.id, t.stage]));
+        cacheOverview(project, ov, ov.now - Date.now());
+        setOffset(ov.now - Date.now());
+        setClock(Date.now());
+        setLoad({ status: "ok", ov });
+        setRev((r) => r + 1);
+      },
+      failure: (e) => {
+        // 没权限：侧栏入口先收起（读成功会再放出来），视图照样显示重试，只是隔得久一些
+        if (forbidden(e)) setLedgerAccess(project, "no");
+        const message = e instanceof Error ? e.message : String(e);
+        setLoad((cur) => cur.status === "ok" ? { ...cur, error: message } : { status: "error", message });
+      },
+      capOf: (e) => (forbidden(e) ? FORBIDDEN_RETRY_CAP_MS : RETRY_MAX_MS),
+      visibility: pageVisibility,
+    });
+    loader.current = reader;
+    void reader.refetch();
     const tick = setInterval(() => setClock(Date.now()), TICK_MS);
     return () => {
       clearInterval(tick);
-      inflight.current?.abort();
+      reader.dispose();
     };
-  }, [project, refetch]);
+  }, [project, source]);
   const membersRef = useRef(members);
   useEffect(() => {
     membersRef.current = members;
@@ -96,16 +107,21 @@ export function useCollab(project: string, members: ReadonlySet<string>) {
     reseed();
     void refetch();
   }, [refetch, reseed]);
-  const connected = useCollabStream(project, onOpen, refetch, onAction);
+  const connected = useCollabStream(project, onOpen, refetch, onAction, source.follow);
 
-  return { load, now: clock + offset, actions, connected, rev, advance, refetch, reviewers: rv.map };
+  const retry = useCallback(() => {
+    clearOverview(project);
+    setLoad({ status: "loading" });
+    return refetch();
+  }, [project, refetch]);
+  return { load, now: clock + offset, actions, connected, rev, advance, refetch: retry, reviewers: rv.map, source };
 }
 
 /**
  * 协作视图自己的一条 /events：连上（含重连）→ onOpen（清旧动作 + 全量重拉）；本项目的 ledger 事件去抖后 onLedger；其余交给 onAction。
  * 卸载、页面隐藏都断开，回前台再连；断线按 2s → 30s 退避重连。返回此刻连没连着。
  */
-function useCollabStream(project: string, onOpen: () => void, onLedger: () => Promise<void>, onAction: (e: BridgeEvent) => void): boolean {
+function useCollabStream(project: string, onOpen: () => void, onLedger: () => Promise<void>, onAction: (e: BridgeEvent) => void, follow: (o: FollowOpts) => Promise<void>): boolean {
   const [connected, setConnected] = useState(false);
   useEffect(() => {
     let alive = true;
@@ -130,7 +146,7 @@ function useCollabStream(project: string, onOpen: () => void, onLedger: () => Pr
         retry = setTimeout(connect, backoff);
         backoff = Math.min(backoff * 2, RETRY_MAX_MS);
       };
-      followCollabEvents({
+      follow({
         signal: mine.signal,
         onOpen: () => {
           setConnected(true);
@@ -154,7 +170,7 @@ function useCollabStream(project: string, onOpen: () => void, onLedger: () => Pr
       disconnect();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [project, onOpen, onLedger, onAction]);
+  }, [project, onOpen, onLedger, onAction, follow]);
   return connected;
 }
 
@@ -162,6 +178,7 @@ export type DetailLoad = { status: "loading" } | { status: "error"; message: str
 
 /** 详情：打开某条任务时拉一次；总览每重拉一次（rev 变）就跟着重拉，保持和首页同一时刻 */
 export function useTaskDetail(project: string, id: string | null, rev: number): DetailLoad {
+  const source = useCollabSource(project);
   const [load, setLoad] = useState<DetailLoad>({ status: "loading" });
   const shown = useRef<string | null>(null);
   useEffect(() => {
@@ -169,8 +186,9 @@ export function useTaskDetail(project: string, id: string | null, rev: number): 
     const ctrl = new AbortController();
     // 换了任务才显示加载态；同一条任务的后台重拉不闪
     if (shown.current !== id) setLoad({ status: "loading" });
-    fetchLedgerTask(project, id, ctrl.signal).then(
+    source.task(id, ctrl.signal).then(
       (d) => {
+        if (ctrl.signal.aborted) return;
         shown.current = id;
         setLoad({ status: "ok", d });
       },
@@ -179,6 +197,6 @@ export function useTaskDetail(project: string, id: string | null, rev: number): 
       },
     );
     return () => ctrl.abort();
-  }, [project, id, rev]);
+  }, [project, id, rev, source]);
   return load;
 }

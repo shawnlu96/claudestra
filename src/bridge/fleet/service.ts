@@ -14,10 +14,12 @@ import {
   ACTION_LABEL, bareName, DEFAULT_COMPACT_KEEP, fleetKeep, NO_GRANT, notApplicable, selectTargets, summarizeFleet,
   type Excluded, type FleetAction, type FleetCandidate, type FleetResult, type FleetSelect,
 } from "../../lib/fleet-plan.js";
+import { lendWorkerRows, type LendWorkerRow } from "../../lib/lend-workers-view.js";
 import { isLinkedWorktree } from "../../lib/linked-worktree.js";
 import { agentRuntime, readRegistryAgents } from "../../lib/registry.js";
 import { ensurePaneInteractive, tmuxRawStrict, tmuxSendEscape } from "../../lib/tmux-helper.js";
 import { compactInjectedRecently, injectCompact, injectTargetFor } from "../ctx-boundary.js";
+import { ledgerDb } from "../ledger-feed.js";
 import type { ApiUserEndpoint, Delivery, Envelope } from "../router.js";
 import { newMessageId, newThreadId } from "../router.js";
 import { auditFleet } from "./audit.js";
@@ -97,13 +99,38 @@ async function withContext(list: Cand[]): Promise<Cand[]> {
 /** 这次调用的凭据能动哪些 agent（名字按 registry / "master"）；MCP 调用方的由 lib/fleet-caller.ts allowedForCaller 给 */
 export type FleetAllowed = (name: string) => boolean;
 
-/** 面板用：凭据能动的每个候选的最新 LP 状态（现抓一遍；不能动的不抓也不列） */
-export async function fleetState(allowed: FleetAllowed): Promise<{ agents: (Cand & { lp?: LpSnapshot })[]; compactKeep: string }> {
+/**
+ * 借到的远端 worker（lib/lend-workers-view.ts）：只读展示，从不进 candidates()，所以选不中、不发键、不投递。
+ * 台账读不了就当没有：只会少列几行，不会把远端行混进可操作的候选
+ */
+function remoteWorkers(): LendWorkerRow[] {
+  try {
+    const db = ledgerDb();
+    return db ? lendWorkerRows(db, Date.now()) : [];
+  } catch (e) {
+    console.warn(`⚠️ [fleet] 读远端 worker 失败，这次不列：${(e as Error).message}`);
+    return [];
+  }
+}
+
+/** 面板用：凭据能动的每个候选的最新 LP 状态（现抓一遍；不能动的不抓也不列）；远端行同样按凭据过一遍，没有就不带 remote 键 */
+export async function fleetState(allowed: FleetAllowed): Promise<{ agents: (Cand & { lp?: LpSnapshot })[]; compactKeep: string; remote?: LendWorkerRow[] }> {
   const list = (await candidates()).filter((c) => allowed(c.name));
   const lp = await refreshLp(list.filter((c) => c.runtime === "claude-code" && c.online));
   const agents = (await withContext(list)).map((c) => ({ ...withLp(c, lp), lp: lp.get(bareName(c.name)) }));
-  return { agents, compactKeep: compactKeep() ?? DEFAULT_COMPACT_KEEP };
+  const remote = remoteWorkers().filter((r) => allowed(r.name));
+  return { agents, compactKeep: compactKeep() ?? DEFAULT_COMPACT_KEEP, ...(remote.length ? { remote } : {}) };
 }
+
+/** 点名里的远端 worker 先摘出来记进 excluded：它们不在候选里，留着会被报成「没有这个 agent」或在调用方收窄时报错 */
+function withoutRemote(sel: FleetSelect): { select: FleetSelect; excluded: Excluded[] } {
+  if (!sel.agents?.some((a) => a.includes("@"))) return { select: sel, excluded: [] };
+  const remote = new Set(remoteWorkers().map((r) => r.name));
+  const hit = (a: string) => remote.has(bareName(a));
+  const excluded = sel.agents.filter(hit).map((a) => ({ name: bareName(a), reason: REMOTE_READ_ONLY }));
+  return excluded.length ? { select: { ...sel, agents: sel.agents.filter((a) => !hit(a)) }, excluded } : { select: sel, excluded: [] };
+}
+const REMOTE_READ_ONLY = "远端 worker 只读";
 
 export interface FleetRunRequest {
   action: FleetAction;
@@ -201,14 +228,15 @@ export async function runFleet(req: FleetRunRequest, io: PaneIO = tmuxPaneIO): P
   const runId = `fl_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   // 先按调用方收窄再抓屏：PM 不去读别的项目的窗口
   const all = await candidates();
-  const scoped = req.caller ? scopeForCaller(req.caller, req.action.kind, req.select, all) : { ok: true as const, cands: all, select: req.select, excluded: [] };
+  const remote = withoutRemote(req.select);
+  const scoped = req.caller ? scopeForCaller(req.caller, req.action.kind, remote.select, all) : { ok: true as const, cands: all, select: remote.select, excluded: [] };
   if (!scoped.ok) throw new FleetScopeError(scoped.error);
   const lp = await refreshLp(scoped.cands.filter((c) => c.runtime === "claude-code" && c.online));
   let list = scoped.cands.map((c) => withLp(c, lp));
   if (req.select.ctxOver !== undefined) list = await withContext(list);
   const picked = selectTargets(list, scoped.select, req.allowed);
   const { targets } = picked;
-  const excluded = [...scoped.excluded, ...picked.excluded];
+  const excluded = [...remote.excluded, ...scoped.excluded, ...picked.excluded];
   const names = targets.map((t) => t.name);
   // 留痕按全部候选归项目（没选中的也要能归到它的项目）；预演、没选中任何人也记，只是标明没发键
   const projectOf = new Map(all.filter((c) => c.project).map((c) => [bareName(c.name), c.project!]));

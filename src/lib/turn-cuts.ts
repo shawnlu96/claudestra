@@ -7,6 +7,7 @@ import { bashCommandOf, classifyTool, heavier, sideEffectLabel, type SideEffect,
 import { inputHash } from "./program-input.js";
 import { matchStopWord } from "./stop-words.js";
 import { neutralizeDelegateMarker } from "./delegate-marker.js";
+import { HELD_NOTE_LEAD, PREEMPT_NOTE_LEAD, STOP_NOTE_LEAD } from "./interrupt-note.js";
 
 /** terminal：人在 CC 终端里自己按了打断（会话记录出现 [Request interrupted by user，而 bridge 没发过键） */
 export type CutCause = "preempt" | "manual" | "stopword" | "codex_interrupt" | "terminal";
@@ -261,7 +262,7 @@ const STOP_PHRASE: Record<string, string> = {
 export function preemptHeadline(c: Cut): string {
   const trig = triggerText(c.turnTrigger);
   return [
-    `[⚡ 收到这条新消息，系统自动中断了上一回合：${doingText(c)}${trig ? `，在处理 ${trig}` : ""}。`,
+    `[${PREEMPT_NOTE_LEAD}：${doingText(c)}${trig ? `，在处理 ${trig}` : ""}。`,
     `先处理这条；如果它让你停，就停下并说一声；否则处理完接着做被打断的事。`,
     `${STOP_PHRASE[c.runtime ?? ""] ?? "工具结果里的「STOP … wait for the user」是打断的固定措辞，不代表用户要你放弃。"}]`,
   ].join("\n");
@@ -290,7 +291,7 @@ export function stopHeadline(c: Cut | undefined, outcome: StopOutcome, queuedBef
     ? `\n这一轮里停之前还送来过 ${c.alsoPending.map((t) => `「${clip(norm(t.excerpt), 30)}」`).join("、")}：也是停之前发的，先别照做，问用户还要不要。`
     : "";
   const editor = inEditor ? `\nPi 输入框里退回了 ${inEditor} 条停之前送到的消息，未执行（已作废，发送方已收到通知）：别照做，也别替用户提交。` : "";
-  return `[⏹ 这是一条「停」指令：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}${also}${editor}]`;
+  return `[${STOP_NOTE_LEAD}：${what}。停下手上的事，简短确认已停；不要续做被打断的事，除非用户之后再让你做。${queued}${also}${editor}]`;
 }
 
 /** Pi 的停字自己的 API 同步等待超时拿到的答复（bridge/pi-abort.ts holdStopWait）：照实写中止回执，它还没回这条「停」 */
@@ -306,7 +307,7 @@ export function stopWaitReply(agent: string, outcome: StopOutcome): string {
 /** 押在叫停之前、叫停之后才送到的消息（忙时作答的 ask 答复、agent 请求）的抬头：它不是「停之后用户又让你做」 */
 export function heldAcrossStopNote(heldAt: number, stopAt: number): string {
   const [h, s] = [hhmmss(heldAt).slice(0, 5), hhmmss(stopAt).slice(0, 5)];
-  return `[⏹ 这条是叫停之前（${h}）发来的，押到现在才送到；用户 ${s} 叫停过。它不是停之后又让你做的事：先别照做，问用户还要不要。]`;
+  return `[${HELD_NOTE_LEAD}（${h}）发来的，押到现在才送到；用户 ${s} 叫停过。它不是停之后又让你做的事：先别照做，问用户还要不要。]`;
 }
 
 /**

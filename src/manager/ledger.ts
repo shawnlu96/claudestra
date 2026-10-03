@@ -1,3 +1,8 @@
+import { PM_SWITCH_CMDS } from "./pm-switch.js";
+import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
+import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
+import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
+import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
  * 身份与时间由命令推导（ledger-identity.ts），库是 statePath("ledger.sqlite")（lib/ledger-store.ts，沙箱随状态目录隔离）。
@@ -17,6 +22,7 @@ import { loadRegistry, output, saveRegistry } from "./core.js";
 import { LedgerCli, type LedgerDeps, type Result } from "./ledger-context.js";
 import { DEP_CMDS } from "./ledger-dep-cmds.js";
 import { DAG_CMDS } from "./ledger-dag-cmds.js";
+import { FEATURE_SPLIT_CMDS } from "./ledger-feature-split-cmds.js";
 import { FEATURE_CMDS } from "./ledger-feature-cmds.js";
 import { FEATURE_MIGRATE_CMDS } from "./ledger-feature-migrate-cmd.js";
 import { parseLedgerArgs, resolveActor } from "./ledger-identity.js";
@@ -35,45 +41,49 @@ import { SCHEDULER_CMDS } from "./ledger-scheduler-cmds.js";
 import { SCHEDULER_DEPLOY_CMDS } from "./ledger-scheduler-deploy-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
+import { UI_CMDS } from "./ledger-ui-cmds.js";
 import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
+import { MEMORY_IMPORT_CMDS } from "./ledger-memory-import.js";
+import { MEMORY_CMDS } from "./ledger-memory-cmds.js";
+import { MEMORY_METRICS_CMDS } from "../lib/memory-metrics-cmd.js";
 import { SUPERVISE_CMDS } from "./ledger-supervise-cmds.js";
-import { DRY_RUN_READS, isWriteInvocation } from "./write-commands.js";
+import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
+import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
+import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
+import { MERGE_TRAIN_SWITCH_CMDS } from "./ledger-merge-train-switch.js";
+import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
+import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
+import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
-const SCHEDULER_SERVICE_COMMANDS = new Set([
-  "scheduler-plan", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step",
-  "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "scheduler-pool",
-  "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
-  "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise",
-]);
-
 const COMMANDS: Record<string, CommandSpec> = {
+  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
   ...DEP_CMDS,
-  ...FEATURE_CMDS,
+  ...FEATURE_CMDS, ...FEATURE_SPLIT_CMDS,
   ...FEATURE_MIGRATE_CMDS,
-  ...DAG_CMDS,
+  ...DAG_CMDS, ...START_SETTLE_CMDS,
   ...READ_CMDS,
   verify: VERIFY_CMD,
   ...AUDIT_CMDS,
   ...PEER_CMDS,
   ...LEND_ASK_CMDS,
-  ...LEND_CMDS,
+  ...LEND_CMDS, ...LEND_TAKEOVER_CMDS,
   ...STEP_CMDS,
   ...SCHEDULER_CMDS,
   ...SCHEDULER_DEPLOY_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
-  ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS,
-  ...VERDICT_CMDS,
-  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS,
+  ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS,
+  ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
+  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 
@@ -117,9 +127,10 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   if (!who.ok && isWriteInvocation("ledger", args)) return { error: who.error };
   const actor = who.ok ? who.actor : UNKNOWN_ACTOR;
   const projects = await readProjects();
-  // audit / feature-migrate 的 --dry-run 只读：不走 openLedger（它会建表 / 迁移，分支代码对线上库跑一次就把版本号抬上去）
-  const readOnly = DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run") ? new LedgerReader().get() : undefined;
-  if (readOnly === null) return { error: "台账库还不存在（或正在建），--dry-run 没东西可看" };
+  // audit / feature-migrate 的 --dry-run、pm-status 与 merge-queue 只读：不走 openLedger（它会建表 / 迁移 / 修负责人列，分支代码对线上库跑一次就把版本号抬上去）
+  const readInvocation = args[0] === "pm-status" || READER_ONLY_SUBS.has(args[0] ?? "") || (DRY_RUN_READS.has(args[0] ?? "") && args.includes("--dry-run"));
+  const readOnly = readInvocation ? new LedgerReader().get() : undefined;
+  if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
     db: readOnly ?? openLedger(),
     actor,

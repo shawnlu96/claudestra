@@ -12,3 +12,15 @@ export const backGuard = createBackGuard({
 
 /** 摘掉 hash、不动历史栈（基础条目用） */
 export const stripHash = (): void => window.history.replaceState(null, "", window.location.pathname + window.location.search);
+
+/** features/collab/v4/sheet-history.ts 的浏览器实现；push 打 cstraCollab 标，同详情页压的条目 */
+export const browserHistory = {
+  hash: (): string => window.location.hash,
+  push: (hash: string): void => window.history.pushState({ cstraCollab: true }, "", hash),
+  replace: (hash: string): void => window.history.replaceState(window.history.state, "", hash),
+  back: (): void => window.history.back(),
+  onPop: (f: () => void): (() => void) => {
+    window.addEventListener("popstate", f);
+    return () => window.removeEventListener("popstate", f);
+  },
+};

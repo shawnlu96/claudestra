@@ -3,8 +3,11 @@
  * review before every dispatch. It shares the object store, so a head the author committed is visible without a fetch,
  * and the author's later commits never shift what the reviewer reads. A reviewer that left tracked edits is not
  * overwritten: the dispatch stops for PM. This isolates files only — the session's permission mode is the runtime's.
+ * Reviewers keep their test HOME / TMPDIR under `.review-tmp/` (peer-pr-spec.ts); the repository's shared exclude lists it, so
+ * retirement's plain `git worktree remove` (no --force) is not stopped by it. tests/scheduler-review-worktree*.test.ts.
  */
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export type Git = (args: string[]) => Promise<{ code: number; out: string }>;
 export type Pinned = { dir: string } | { manual: string };
@@ -40,13 +43,43 @@ export async function pinReviewWorktree(dir: string, head: string, g: Git = git)
   return at.code === 0 && at.out === head ? { dir } : { manual: `审查 worktree 切完不在 ${head}（在 ${at.out}）` };
 }
 
-/** Create `dir` (once) from the author's repository and pin it. */
+/** The reviewer's scratch folder (tests' HOME / TMPDIR), and the name some reviewers used before it was fixed. */
+const REVIEW_TMP_DIR = ".review-tmp";
+export const REVIEW_EXCLUDES = [`/${REVIEW_TMP_DIR}/`, "/.review-env/"] as const;
+
+/**
+ * Make sure the shared `info/exclude` of the repository `dir` belongs to (`git rev-parse --git-common-dir`, so every linked
+ * worktree sees it) lists REVIEW_EXCLUDES: missing lines are appended, nothing else is touched. null = done; otherwise why not.
+ */
+export async function ensureReviewExcludes(dir: string, g: Git = git): Promise<string | null> {
+  const common = await g(["-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (common.code !== 0 || !common.out) return `读不出公共 git 目录：${common.out}`.slice(0, 300);
+  const file = join(common.out, "info", "exclude");
+  try {
+    const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+    const have = new Set(text.split(/\r?\n/).map((l) => l.trim()));
+    const missing = REVIEW_EXCLUDES.filter((l) => !have.has(l));
+    if (!missing.length) return null;
+    mkdirSync(dirname(file), { recursive: true });
+    appendFileSync(file, `${text && !text.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`);
+    return null;
+  } catch (e) { return `写不了 ${file}：${(e as Error).message}`.slice(0, 300); }
+}
+
+/** Exclude the reviewers' scratch folders, then pin. A failed exclude only warns: the review goes on, retirement then hands to PM. */
+async function excludeAndPin(dir: string, head: string, g: Git): Promise<Pinned> {
+  const why = await ensureReviewExcludes(dir, g);
+  if (why) console.error(`⚠️ [review-worktree] ${dir} 的临时目录没进 exclude（收尾删 worktree 会被挡、交 PM）：${why}`);
+  return pinReviewWorktree(dir, head, g);
+}
+
+/** Create `dir` (once) from the author's repository, keep the scratch folders out of git status, and pin it. */
 export async function openReviewWorktree(authorDir: string, dir: string, head: string | null, g: Git = git): Promise<Pinned> {
   if (!head) return { manual: "卡上没有交付 head，审查 worktree 不知道固定到哪" };
-  if (existsSync(dir)) return pinReviewWorktree(dir, head, g);
+  if (existsSync(dir)) return excludeAndPin(dir, head, g);
   const top = await g(["-C", authorDir, "rev-parse", "--show-toplevel"]);
   if (top.code !== 0) return { manual: `执行者目录 ${authorDir} 不是 git 仓库，建不了独立的审查 worktree` };
   const add = await g(["-C", authorDir, "worktree", "add", "--detach", dir, head]);
   if (add.code !== 0) return { manual: `建审查 worktree 失败：${add.out}`.slice(0, 400) };
-  return pinReviewWorktree(dir, head, g);
+  return excludeAndPin(dir, head, g);
 }

@@ -1,13 +1,20 @@
-/** Durable per-card session claims. Creation and retirement effects are performed by the later worker adapter. */
+import { applyFixReplacement } from "./fix-strategy-session.js";
+/** Durable per-card session claims. Sessions are created by the auto tick's ensure step and retired by scheduler-retire.ts. */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
-import { getIntent, getWorkflow, type AuthorFamily } from "./ledger-scheduler.js";
+import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
+import { actorMaySchedule } from "./ledger-scheduler-settle.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
+import type { Stage } from "./ledger-stages.js";
+import { applyReviewerSwap, applyReviewerSwapEffect, mayRebindReviewer, reviewerReuseNote } from "./scheduler-review-swap.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 export type SessionRole = "author" | "reviewer";
+/** Stages a card is finished in: only these retire. build / review / fix / merge / live never do (tests/scheduler-retire.test.ts). */
+export const RETIRE_STAGES: readonly Stage[] = ["verified", "done", "cancelled"];
 export type SessionTransport = "acp" | "tmux" | "peer";
 export interface SchedulerSession {
   taskId: string;
@@ -35,7 +42,7 @@ const mayWrite = (db: Database, ctx: WriteCtx, project: string): boolean =>
 
 export function getSchedulerSession(db: Database, taskId: string, role: SessionRole): SchedulerSession | null {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return null;
-  return db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? AND role = ?").get(taskId, role) as SchedulerSession | null;
+  return db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? AND role = ? ORDER BY (state != 'retired') DESC, createdAt DESC, rowid DESC LIMIT 1").get(taskId, role) as SchedulerSession | null;
 }
 
 export function taskWorkerRefs(db: Database, taskId: string): { author: WorkerRef | null; reviewer: WorkerRef | null } {
@@ -84,14 +91,15 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
     requireSessionIdentity(db, task, input, agent);
     const prior = getSchedulerSession(db, task.id, input.role);
-    if (prior) {
+    if (prior && !mayRebindReviewer(db, prior, input.intentId)) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||
         prior.createIntentId !== input.intentId) throw new LedgerError("conflict", "本卡角色已绑定另一个 session；不能换审查上下文");
       return { session: prior, duplicate: true };
     }
     const intent = getIntent(db, input.intentId);
     const reviewer = input.role === "reviewer";
-    const expectedFamily = reviewer ? (workflow.authorFamily === "claude" ? "codex" : "claude") : workflow.authorFamily;
+    const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily; // a peer-delivered head: review across from its family
+    const expectedFamily = reviewer ? (wrote === "claude" ? "codex" : "claude") : workflow.authorFamily;
     if (!intent || intent.taskId !== task.id || intent.action !== "ensure_session" || !["submitted", "unknown"].includes(intent.status) ||
       (intent.recipient !== null && intent.recipient !== agent) ||
       (reviewer ? intent.node !== "adversarial_review" : intent.node === "adversarial_review")) {
@@ -114,6 +122,8 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
         source: input.transport === "peer" ? "peer_claim" : "registry_runtime", intentId: input.intentId,
         ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
+    const note = reviewer ? reviewerReuseNote(task, prior) : null;
+    if (note) insertEvent(db, { actor: ctx.actor, now, dedupKey: `reviewer-reuse:${input.intentId}` }, note, true);
     return { session: getSchedulerSession(db, task.id, input.role) as SchedulerSession, duplicate: false };
   });
 }
@@ -125,7 +135,7 @@ export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     if (!mayWrite(db, ctx, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能记录 session 退役");
-    if (task.stage !== "verified" && task.stage !== "done") throw new LedgerError("conflict", "任务未验证，不能退役 session");
+    if (!RETIRE_STAGES.includes(task.stage)) throw new LedgerError("conflict", "任务未验证也未取消，不能退役 session");
     const intent = getIntent(db, input.intentId);
     if (!intent || intent.taskId !== task.id || intent.action !== "retire" || !["submitted", "unknown"].includes(intent.status)) {
       throw new LedgerError("conflict", "缺本卡已派出的退役意图");
@@ -142,8 +152,8 @@ export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
       return row;
     }
     const now = ctx.now ?? Date.now();
-    db.prepare(`UPDATE scheduler_sessions SET ${col} = ?, retireIntentId = ?, state = ?, updatedAt = ? WHERE taskId = ? AND role = ?`)
-      .run(receipt, input.intentId, col === "killReceipt" ? "retired" : "retiring", now, task.id, input.role);
+    db.prepare(`UPDATE scheduler_sessions SET ${col} = ?, retireIntentId = ?, state = ?, updatedAt = ? WHERE sessionId = ?`)
+      .run(receipt, input.intentId, col === "killReceipt" ? "retired" : "retiring", now, row.sessionId);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${input.intentId}:${input.role}:${input.effect}` }, {
       project: task.project, target: task.id, kind: "scheduler", text: `${input.role} session ${input.effect} 已确认`,
       data: { op: "session_retire", role: input.role, effect: input.effect, intentId: input.intentId, receipt,
@@ -151,4 +161,70 @@ export function recordSessionRetirement(db: Database, ctx: WriteCtx, input: {
     }, true);
     return getSchedulerSession(db, task.id, input.role) as SchedulerSession;
   });
+}
+
+/** One key per card: a finished card never goes back to work, so a second retirement would only repeat the first. */
+export const retireIntentId = (taskId: string): string => `retire:${taskId}`;
+
+const projectSeq = (db: Database, project: string): number =>
+  (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
+
+/**
+ * Open (or return, duplicate: true) the card's retire intent, already claimed (docs/architecture/scheduler-retire.md). Unlike planIntent
+ * it does not require an auto workflow — most finished cards were taken to manual on the way, and their scheduler-bound sessions still
+ * need collecting. It does require a finished card (RETIRE_STAGES) with no other open intent, so a card still in work is never retired.
+ */
+export function beginRetire(db: Database, ctx: WriteCtx, taskId: string): { intent: SchedulerIntent; duplicate: boolean } {
+  return tx(db, () => {
+    const task = mustTask(db, taskId);
+    if (!actorMaySchedule(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有调度服务或项目 PM / master / owner 能开退役意图");
+    const id = retireIntentId(task.id);
+    const prior = getIntent(db, id);
+    if (prior) return { intent: prior, duplicate: true };
+    if (!RETIRE_STAGES.includes(task.stage)) throw new LedgerError("conflict", `${task.id} 在 ${task.stage}，没收尾的卡不退役`);
+    const open = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")
+      .get(task.id) as { id: string } | null;
+    if (open) throw new LedgerError("conflict", `${task.id} 还有未结调度意图 ${open.id}，先结清再退役`);
+    const now = ctx.now ?? Date.now(), causalSeq = projectSeq(db, task.project);
+    const workflow = getWorkflow(db, task.id), reason = `${task.stage} 卡收尾：归档并结束 session、清 worktree`;
+    db.prepare(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, taskRev, specRev, head,
+      templateVersion, status, attempts, receipt, reason, createdAt, updatedAt) VALUES (?, ?, ?, 'retire', 'retire', NULL, ?, ?, ?, ?, ?, 'submitted', 1, ?, ?, ?, ?)`)
+      .run(id, task.id, task.project, causalSeq, task.rev, task.specRev, task.headSHA, workflow?.templateVersion ?? 0, "claimed; retire", reason, now, now);
+    const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${id}` }, {
+      project: task.project, target: task.id, kind: "scheduler", text: reason,
+      data: { op: "plan", id, node: "retire", action: "retire", recipient: null, resources: [], causalSeq, taskRev: task.rev,
+        specRev: task.specRev, head: task.headSHA, template: workflow?.template ?? null, version: workflow?.templateVersion ?? 0,
+        claimed: true, ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
+    }, true);
+    db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
+    return { intent: getIntent(db, id) as SchedulerIntent, duplicate: false };
+  });
+}
+
+/** Lazily widen the original per-role key at the first swap; all bindings, FKs and uniqueness survive the transaction. */
+export function preserveSessionHistory(db: Database): void {
+  const columns = db.query("PRAGMA table_info(scheduler_sessions)").all() as { name: string; pk: number }[];
+  if (columns.some((c) => c.name === "sessionId" && c.pk)) return;
+  const schema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get() as { sql: string };
+  db.run(schema.sql.replace("scheduler_sessions", "scheduler_sessions_history_upgrade")
+    .replace(/PRIMARY KEY\s*\(taskId,\s*role\)/i, "PRIMARY KEY (taskId, role, sessionId)"));
+  db.run("INSERT INTO scheduler_sessions_history_upgrade SELECT * FROM scheduler_sessions");
+  db.run("DROP TABLE scheduler_sessions");
+  db.run("ALTER TABLE scheduler_sessions_history_upgrade RENAME TO scheduler_sessions");
+  db.run("CREATE INDEX scheduler_sessions_state ON scheduler_sessions(state)");
+  db.run("CREATE UNIQUE INDEX scheduler_sessions_current ON scheduler_sessions(taskId, role) WHERE state != 'retired'");
+}
+
+/** Binding changes use the session writer's transaction/event authority; swap guards and semantics live in the swap module. */
+export function beginReviewerSwap(db: Database, ctx: WriteCtx, id: string): SchedulerSession {
+  return tx(db, () => applyReviewerSwap(db, ctx, id, getSchedulerSession(db, getIntent(db, id)?.taskId ?? "", "reviewer"),
+    () => preserveSessionHistory(db), (c, e) => { insertEvent(db, c, e, true); }));
+}
+
+export function recordReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill" | "reuse", receipt: string): void {
+  tx(db, () => applyReviewerSwapEffect(db, ctx, id, effect, receipt, (c, e) => { insertEvent(db, c, e, true); }));
+}
+
+export function bindFixReplacement(db: Database, ctx: WriteCtx, intentId: string, ref: import("./worker-session.js").SessionRef, material: string, registryPath?: string): void {
+  applyFixReplacement(db, ctx, intentId, ref, material, () => preserveSessionHistory(db), registryPath);
 }

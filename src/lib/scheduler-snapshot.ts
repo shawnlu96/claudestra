@@ -1,3 +1,4 @@
+import { poolSnapshotSlots } from "./scheduler-agent-pool-snapshot.js";
 /**
  * Ledger → PlannerSnapshot. For an observe card the scheduler owns no intents or sessions, so its own facts are
  * replaced by what PM actually recorded before the fact: the step executors (with the registry's real session) are the
@@ -15,7 +16,10 @@ import type { RegistryAgent } from "./registry.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
-import { projectUiGate } from "./scheduler-ui-gate.js";
+import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
+import { ownerVisualOf, projectUiGate } from "./scheduler-ui-gate.js";
+import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
+import { newLocalWriteRoom, returnedFix } from "./scheduler-slot-hold.js";
 
 export interface SnapshotOpts {
   registry: readonly RegistryAgent[];
@@ -65,13 +69,14 @@ function shadowReviews(task: LedgerTask, events: readonly LedgerEvent[], bound: 
   return { intents, proofs };
 }
 
-function slotFacts(db: Database, project: string, maxWorkers: number) {
-  const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(project) as { resource: string; taskId: string }[];
-  const slots = held.filter((h) => h.resource.startsWith("slot:"));
+function slotFacts(db: Database, task: LedgerTask, events: readonly LedgerEvent[], maxWorkers: number) {
+  const { held, slots, workerCount, waitingFix } = writeSlotFacts(db, task.project);
   const used = new Set(slots.map((h) => h.resource));
   let free: string | null = null;
-  for (let i = 0; i < maxWorkers && !free; i++) if (!used.has(`slot:${project}:${i}`)) free = `slot:${project}:${i}`;
-  return { held, workerCount: new Set(slots.map((h) => h.taskId)).size, freeWorkerSlot: free };
+  if (returnedFix(task, events) || newLocalWriteRoom(workerCount, maxWorkers, waitingFix)) {
+    for (let i = 0; i < maxWorkers && !free; i++) if (!used.has(`slot:${task.project}:${i}`)) free = `slot:${task.project}:${i}`;
+  }
+  return { held, workerCount, freeWorkerSlot: free };
 }
 
 /** Current state only: registry sessions, steps, bindings, asks and resources have no history, so no past replay. */
@@ -86,7 +91,7 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
   const reviewer = bound.reviewer ?? (reviewStep?.executorKind === "agent" ? localRef(opts, task.id, reviewStep.executor) : null);
   const shadow = shadowReviews(task, events, bound.reviewer, opts);
   const real = db.query("SELECT * FROM scheduler_intents WHERE taskId = ? ORDER BY eventSeq").all(task.id) as SchedulerIntent[];
-  const slots = slotFacts(db, task.project, opts.maxWorkers);
+  const slots = opts.pool?.remote.agents ? poolSnapshotSlots(db, task, opts.pool.remote.agents) : slotFacts(db, task, events, opts.maxWorkers);
   const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
   const digest = typeof task.extra.screenshotsDigest === "string" ? task.extra.screenshotsDigest : null;
   return {
@@ -95,5 +100,6 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
     author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
+    pmUiGate: projectPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events),
   };
 }

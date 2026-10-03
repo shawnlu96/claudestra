@@ -14,6 +14,8 @@ import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
+import { mergeTrainPass } from "./scheduler-merge-train-tick.js";
+import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
@@ -24,6 +26,12 @@ import { deployTick } from "./scheduler-deploy-tick.js";
 import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
+import { peerPrStep } from "./peer-pr-tick.js";
+import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.js";
+import { lendTakeoverStep } from "./lend-pr-takeover.js";
+import { takeoverGh } from "./lend-pr-takeover-gh.js";
+import { retireStep } from "./scheduler-retire-deps.js";
+import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -46,6 +54,10 @@ export interface PassOpts {
   lend?: (active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { orderId: string; error: string }[] }>;
   /** Agent supervision (i28-S1, agent-supervisor-deps.ts superviseStep); runs only while scheduler.json has supervise on. */
   supervise?: (db: Database, config: SchedulerConfig, active: Active, lease: SchedulerLease | undefined) => Promise<{ failed: { agent: string; error: string }[] }>;
+  peerPr?: (active: Active, manager: Manager) => Promise<{ failed: PassResult["failed"] }>; // peer PR 自动审（i28-A2）；默认 peerPrStep，测试注入
+  /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
+  autostart?: (active: Active, manager: Manager) => AutostartHooks;
+  retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -95,6 +107,8 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   try {
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
+      if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
+      await mergeTrainPass(db, trainProjects(db, Object.keys(config.projects)), active); // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
@@ -106,10 +120,18 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const supervising = config.supervise?.enabled === true && !!opts.supervise;
       if (supervising) failed.push(...(await opts.supervise!(db, config, active, held)).failed.map((f) => ({ taskId: `supervise ${f.agent}`, error: f.error })));
       if (config.autoDispatch === true) {
+        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
+        failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
+        failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
         const deps = supervising ? withSupervisorHold(base, db) : base;
-        failed.push(...(await schedulerAutoTick(db, config.projects, deps, pace.phase())).failed);
+        const autoPace = pace.phase();
+        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
+        failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
       }
+      failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
+      // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
+      failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
     return { ran: true, failed };

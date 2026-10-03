@@ -11,6 +11,8 @@
  * agent 这一侧（有 tmux 时）：经沙箱 manager 真建一个 agent，`claude` 换成假 Claude Code（tests/sandbox-fake-claude.ts），
  * 它照真的那样跑 settings.json 里的 hooks / statusLine、拉起 channel-server、写会话 jsonl、收消息回 pong。
  * 假 home 里只许出现它自己写进 ~/.claude/projects 的会话文件（Claude Code 自身的写入，已知边界）。
+ * Pi 这一侧：`pi` 换成假 pi（tests/sandbox-fake-pi.ts），经 ACP 真建一个 Pi agent，reply 经 channel-server 回到沙箱 bridge，
+ * 核对它拿到的 Pi 目录 / HOME / 发现开关是沙箱那一套。
  * 另测：绕过脚本、直接带着 Discord token / 中继地址起沙箱 bridge → 拒绝启动，同样零写入零出站。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -20,6 +22,7 @@ import { join, resolve } from "path";
 import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
+import { fakePiSource } from "./sandbox-fake-pi.ts";
 import { testChildEnv } from "./test-env.ts";
 
 const REPO = resolve(import.meta.dir, "..");
@@ -100,7 +103,11 @@ function writeShims(dir: string): void {
     chmodSync(p, 0o755);
   };
   shim("tmux", REAL_TMUX ? `exec '${REAL_TMUX}' "$@"` : "exit 1");
-  for (const n of ["launchctl", "codex", "pi", "npm", "curl", "open", "osascript", "tailscale"]) shim(n, "exit 1");
+  for (const n of ["launchctl", "codex", "npm", "curl", "open", "osascript", "tailscale"]) shim(n, "exit 1");
+  // pi：只答版本探测和 ACP 适配器起的 rpc 模式（交给假 pi），别的（pi update / install …）照旧失败并被下面的断言抓到
+  writeFileSync(join(dir, "fake-pi"), fakePiSource(BUN, join(tmp, "fake-pi.log")));
+  chmodSync(join(dir, "fake-pi"), 0o755);
+  shim("pi", `case "$1" in --version) echo 0.99.2 ;; --mode) exec '${join(dir, "fake-pi")}' "$@" ;; *) exit 1 ;; esac`);
   writeFileSync(join(dir, "claude"), fakeClaudeSource(BUN, join(tmp, "fake-claude.log")));
   chmodSync(join(dir, "claude"), 0o755);
 }
@@ -110,6 +117,7 @@ function callerEnv(): Record<string, string> {
     PATH: `${join(tmp, "shim")}:${process.env.PATH}`,
     HOME: home,
     TMPDIR: tmp,
+    LANG: "en_US.UTF-8", // 同生产 launchd plist：没有 UTF-8 locale 时 tmux 把 -F 输出里的 \t 换成 _，按 \t 切的解析（如 web-shell readShells）全落空
     HTTP_PROXY: `http://127.0.0.1:${proxy!.port}`,
     HTTPS_PROXY: `http://127.0.0.1:${proxy!.port}`,
     NO_PROXY: "127.0.0.1,localhost",
@@ -246,6 +254,57 @@ async function agentSide(): Promise<void> {
   expect(sandbox("manager", "kill", "sbxt").code).toBe(0);
 }
 
+const firstJson = (out: string) => JSON.parse(out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as Record<string, any>;
+
+/** 网页新终端：登记过的项目目录 stat 是目录但进不去（chmod 000），tmux 会回落 HOME——路由必须报错、不留窗口（new-session / new-window 两条分支） */
+async function webShellSide(): Promise<void> {
+  const noperm = join(root, "work", "sh-noperm");
+  mkdirSync(noperm);
+  expect(sandbox("manager", "project-add", "sbxsh", "--dirs", noperm).out).toContain('"ok":true');
+  const secret = firstJson(sandbox("manager", "token-add", "dev-sh", "--agents", "master", "--force", "--terminal").out).secret;
+  const api = async (method: string, path = "", body?: unknown) => {
+    const r = await fetch(`http://127.0.0.1:${port}/api/v1/shells${path}`, {
+      method, headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: r.status, body: (await r.json()) as Record<string, any> };
+  };
+  chmodSync(noperm, 0o000);
+  try {
+    const first = await api("POST", "", { dir: noperm }); // 还没有 webshell session：new-session
+    expect(first.status, JSON.stringify(first.body)).toBe(500);
+    expect(first.body.error).toContain("已关掉");
+    expect((await api("GET")).body.shells).toEqual([]);
+    const ok = await api("POST", "", { dir: join(root, "work") });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const second = await api("POST", "", { dir: noperm }); // session 已在：new-window
+    expect(second.status, JSON.stringify(second.body)).toBe(500);
+    expect((await api("GET")).body.shells.map((s: { id: string }) => s.id)).toEqual([ok.body.shell.id]);
+    expect((await api("DELETE", `/${ok.body.shell.id}`)).status).toBe(200);
+  } finally {
+    chmodSync(noperm, 0o755);
+  }
+}
+
+/** Pi 走 ACP（假 pi）：目录钉在沙箱根、HOME 隔离、发现开关全关，reply 经 channel-server 回到沙箱 bridge；切回 tmux 在沙箱里被拒 */
+async function piSide(): Promise<void> {
+  const plog = () => (existsSync(join(tmp, "fake-pi.log")) ? readFileSync(join(tmp, "fake-pi.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
+  const created = sandbox("manager", "create", "sbxpi", join(root, "work"), "Pi 隔离测试", "--runtime", "pi");
+  const info = firstJson(created.out);
+  expect(info, created.out).toMatchObject({ ok: true, transport: "acp" });
+  const secret = firstJson(sandbox("manager", "token-add", "dev-pi", "--agents", "*", "--force").out).secret;
+  const r = await fetch(`http://127.0.0.1:${port}/api/v1/agents/agent-sbxpi/messages`, {
+    method: "POST", headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" }, body: JSON.stringify({ text: "ping", wait: 20 }),
+  });
+  expect(((await r.json()) as { reply?: string }).reply, JSON.stringify(plog())).toBe("pong");
+  const start = plog().find((l) => l.argv);
+  expect(start).toMatchObject({ HOME: join(root, "acp-home"), PI_CODING_AGENT_DIR: join(root, "pi-agent"), PI_OFFLINE: "1", BRIDGE_PORT: null, DISCORD_CHANNEL_ID: null, mcp: ["claudestra"] });
+  expect(start.argv).toEqual(expect.arrayContaining(["--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates", "-e", "builtin:mcp", "--session-id", info.sessionId]));
+  const back = sandbox("manager", "migrate", "--pi", "sbxpi", "--to", "tmux");
+  expect(back.code, back.out).not.toBe(0);
+  expect(back.out).toContain("只走 ACP");
+  expect(sandbox("manager", "kill", "sbxpi").code).toBe(0);
+}
+
 /**
  * 以「生产」身份跑 manager（不带沙箱开关）：状态 / 运行目录是另一套一次性目录（不碰假 home 的状态目录，
  * 也绝不碰真实的 /tmp/claude-orchestrator），bridge 地址指向中继替身——万一闸门失效，替身会记到请求
@@ -306,6 +365,8 @@ describe("沙箱 bridge 无副作用", () => {
     // agent 侧要真 tmux。CI 装了 tmux（.github/workflows/ci.yml）；CI 里没有就失败，免得这段覆盖悄悄没跑
     if (!REAL_TMUX && process.env.CI) throw new Error("CI 里找不到 tmux：agent 侧隔离测试不能跳过");
     if (REAL_TMUX) await agentSide();
+    if (REAL_TMUX) await webShellSide();
+    if (REAL_TMUX) await piSide();
     const open = openFiles(pid);
     if (open) expect(open.filter((f) => f.includes("claude-orchestrator"))).toEqual([]);
 
@@ -326,7 +387,7 @@ describe("沙箱 bridge 无副作用", () => {
     // 例外只有测试自己以「生产」身份跑的 manager（productionManager，一次性的假生产运行目录）
     const prodSock = join(tmp, "prodmgr", "run", "master.sock");
     expect(calls.filter((c) => c.startsWith("tmux") && !c.includes(`-S ${sock}`) && !c.includes(`-S ${prodSock}`))).toEqual([]);
-    expect(calls.filter((c) => /^(npm|pi|curl|codex) /.test(c))).toEqual([]);
+    expect(calls.filter((c) => /^(npm|pi|curl|codex) /.test(c) && !/^pi (--version$|--mode rpc )/.test(c))).toEqual([]);
 
     expect(hits).toEqual({ proxy: [], decoy: [] });
     const log = readFileSync(join(root, "bridge.log"), "utf8");
@@ -335,7 +396,7 @@ describe("沙箱 bridge 无副作用", () => {
     // 写入确实落在沙箱里
     expect(existsSync(join(root, "state", "projects.json"))).toBe(true);
     expect(readdirSync(join(root, "state")).length).toBeGreaterThan(0);
-  }, 90_000);
+  }, 150_000);
 
   test("绕过脚本、带着生产身份直接起沙箱 bridge → 拒绝启动，零写入零出站", async () => {
     const before = snapshot(home);

@@ -1,12 +1,15 @@
 /** ACP 宿主协调适配器、bridge、回合与出站确认；协议细节见 docs/runtimes/codex-acp.md。 */
 import { randomBytes } from "node:crypto";
 import { codexReplyHint, wrapChannelContent } from "../codex-thread.js";
-import { adapterEnv, type AdapterEnvSpec, type AdapterProc } from "./adapter-proc.js";
+import { abortAcpTurn } from "./abort.js";
+import type { AdapterEnvSpec, AdapterProc } from "./adapter-proc.js";
 import { applyAcpLaunchConfig } from "./apply-config.js";
 import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
 import { commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
+import { HostHeartbeat } from "./host-heartbeat.js";
+import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
 import { AcpTurnLoop, type StopReport } from "./turn.js";
@@ -25,6 +28,7 @@ export interface HostConfig {
   effort?: string;
   agentCmd: string[];
   env: Omit<AdapterEnvSpec, "channel">;
+  runtime?: AcpRuntime; // 缺省 codex（host-runtime.ts）
   /** 单测注入：出站条目的重送退避、回合末等确认的上限、权限卡等多久（缺省用下面的 TIMINGS） */
   timings?: Partial<typeof TIMINGS>;
 }
@@ -40,17 +44,12 @@ export interface HostDeps {
   log(msg: string): void;
 }
 
-const RESTART_BASE_MS = 3_000;
-const RESTART_MAX_MS = 60_000;
-const RESTART_STABLE_MS = 5 * 60_000;
+const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
 const AUTH_RETRY_MS = 60_000;
 /** prompt 等适配器接回线程最多这么久；等不到按失败收尾（带上最近一次起不来的原因） */
 const SESSION_WAIT_MS = 120_000;
 /** 出站条目：一批最多几条、队列最多攒几条（bridge 太久不在就丢最老的，这一轮按 StopFailure 报）、单批等回包多久 */
-const ENTRY_BATCH_MAX = 200;
-const ENTRY_OUTBOX_MAX = 5_000;
-const ENTRY_ACK_MS = 15_000;
-const ENTRY_RETRY_MAX = 8;
+const ENTRY_BATCH_MAX = 200, ENTRY_OUTBOX_MAX = 5_000, ENTRY_ACK_MS = 15_000, ENTRY_RETRY_MAX = 8;
 const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number } = { retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -70,6 +69,7 @@ export class AcpHost {
   private rotating = false;
   private restartDeferred = false;
   private readonly hostId = randomBytes(6).toString("hex");
+  private readonly rt: AcpRuntime;
   private outbox: { seq: number; entry: Record<string, unknown> }[] = [];
   private entrySeq = 0;
   private droppedEntries = 0;
@@ -83,6 +83,7 @@ export class AcpHost {
   private readonly permits = new Map<string, { frame: Record<string, unknown>; resolve: (optionId: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
   private permSeq = 0;
   private translator = createAcpTranslator();
+  private readonly beat = new HostHeartbeat(() => ({ agent: this.cfg.agentName, sessionId: this.cfg.sessionId }), (m) => this.deps.log(m)); // 监护判卡住的回合心跳
   private readonly dedup = new FailureDedup();
   private readonly proxy: ToolProxy;
   private readonly link: ReturnType<HostDeps["makeLink"]>;
@@ -90,11 +91,12 @@ export class AcpHost {
 
   constructor(private readonly cfg: HostConfig, private readonly deps: HostDeps) {
     this.preamblePending = cfg.preamble;
+    this.rt = cfg.runtime ?? acpRuntime();
     this.proxy = deps.startProxy({ channelId: cfg.channelId, toBridge: (f) => this.link.send(f), log: (m) => deps.log(m) });
     this.link = deps.makeLink({
       registerFrame: () => ({
         type: "register", channelId: cfg.channelId, cwd: cfg.cwd, pid: process.pid, ppid: process.ppid,
-        runtime: "codex", transport: "acp", agentName: cfg.agentName, sessionId: cfg.sessionId, abort: true,
+        runtime: this.rt.id, transport: "acp", agentName: cfg.agentName, sessionId: cfg.sessionId, abort: true,
       }),
       onFrame: (m) => this.onFrame(m),
       onRegistered: () => {
@@ -112,12 +114,13 @@ export class AcpHost {
     });
     this.loop = new AcpTurnLoop({
       prompt: async (text) => {
+        this.beat.turn();
         const s = await this.waitSession();
         if (!s) return { kind: "failed", failure: this.lastStartError ?? { kind: "error", key: `nosession#${++this.startSeq}`, message: "ACP 适配器没起来" } };
         return s.prompt(text);
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text) : Promise.resolve({ outcome: "failed" as const })),
-      reportStop: (r) => this.reportStop(r),
+      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
+      reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       log: deps.log,
     });
@@ -131,7 +134,7 @@ export class AcpHost {
   /** SIGINT / SIGTERM / SIGHUP：停当前回合、关适配器（带走 app-server）、关代理和连接 */
   stop(): void {
     this.stopping = true;
-    if (this.loop.busy) this.session?.cancel();
+    if (this.loop.busy) void this.session?.cancel();
     for (const id of [...this.permits.keys()]) this.endPermission(id, null);
     this.proc?.stop();
     this.proxy.close();
@@ -143,10 +146,12 @@ export class AcpHost {
     if (this.stopping) return;
     await this.deps.beforeSpawn?.().catch((e) => this.deps.log(`⚠️ 起适配器前的版本探测失败，按未知照常起：${String(e)}`));
     if (this.stopping || this.rotating) return void (this.restartDeferred ||= this.rotating); // 停机中不再起；/clear 轮换中等它换完再起
-    const env = adapterEnv({ ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } });
-    const proc = this.deps.spawn(this.cfg.agentCmd, env, this.cfg.cwd);
-    this.proc = proc;
-    const session = new AcpSession(proc.wire, { onUpdate: (u) => this.onUpdate(u), onPermission: (card) => this.askPermission(card), log: this.deps.log });
+    const spec = { ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } };
+    const proc = (this.proc = this.deps.spawn(this.cfg.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
+    const session = new AcpSession(proc.wire, {
+      onUpdate: (u) => (this.rotating || this.beat.update(), this.onUpdate(u)), onPermission: (card) => (this.beat.update(), this.askPermission(card)), // /clear 引导不算动静
+      onSelfTurn: (done) => (this.beat.turn(), this.loop.track(done)), log: this.deps.log, label: this.rt.label,
+    }, this.rt.mcpServers(spec));
     const startedAt = Date.now();
     void proc.exited.then((code) => this.onAdapterExit(session, code, startedAt));
     try {
@@ -296,7 +301,7 @@ export class AcpHost {
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
-    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [] });
+    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label });
   }
 
   /** 权限请求：按 permId 交 bridge 出卡，等 owner 答（bridge 经 acp_call 回来）；到点按取消回适配器 */
@@ -327,7 +332,10 @@ export class AcpHost {
   private onFrame(m: Record<string, any>): void {
     if (this.proxy.onBridgeFrame(m)) return;
     if (m.type === "message") return void this.inbound(String(m.content ?? ""), (m.meta ?? {}) as Record<string, string>);
-    if (m.type === "abort") return this.abort(String(m.id ?? ""));
+    if (m.type === "abort") return void abortAcpTurn(String(m.id ?? ""), {
+      session: this.session, loop: this.loop, send: (f) => this.link.send(f), log: this.deps.log,
+      endPermissions: () => { for (const permId of [...this.permits.keys()]) this.endPermission(permId, null, "回合已打断"); },
+    });
     if (m.type === "acp_call") return void this.call(m);
     if (m.type !== "rejected") this.deps.log(`bridge 发来不认识的帧：${String(m.type)}`);
   }
@@ -337,23 +345,15 @@ export class AcpHost {
     const wrapped = wrapChannelContent(content, shown, this.cfg.mcpName, codexReplyHint(this.cfg.mcpName));
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
-    const how = await this.loop.submit(text);
+    const how = await this.loop.submit(text, meta.message_id);
     this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${how === "steer" ? "插进当前回合" : how === "prompt" ? "开一轮" : "排队"}`);
-  }
-
-  /** 停止：有回合在跑就 session/cancel；排着的消息照旧留着（下一轮处理） */
-  private abort(id: string): void {
-    const busy = this.loop.busy && !!this.session;
-    if (busy) this.session!.cancel();
-    for (const permId of [...this.permits.keys()]) this.endPermission(permId, null, "回合已打断");
-    this.link.send({ type: "abort_ack", id, result: busy ? "aborted" : "idle", voided: [], inEditor: 0 });
-    this.deps.log(busy ? "收到停止：已调 session/cancel" : "收到停止：当前空闲");
   }
 
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
     if (m.op === "clear") return void reply(await this.clearSession());
+    if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
     if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);
@@ -371,7 +371,7 @@ export class AcpHost {
     const oldPreamble = this.preamblePending;
     return rotateAcpHost({
       session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permits.size),
-      loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, rotateRegistry: this.deps.rotateSession,
+      loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, bootstrap: this.rt.clearBootstrap, rotateRegistry: this.deps.rotateSession,
       configure: (s) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log),
       begin: () => ((this.rotating = true), (this.preamblePending = this.cfg.clearPreamble)),
       failed: (changed) => {

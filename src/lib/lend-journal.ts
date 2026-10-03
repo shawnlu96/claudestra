@@ -9,15 +9,16 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
+import { guardDefaultLendJournal } from "./test-guard.js";
 
 export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
 
 /**
- * asked = 已看到单子、在等 owner 批（auto 模式也先落这一行再 claim）；claimed = A 已把单给我们（带租约代数）；
+ * asked = 已看到单子、在授权内等 claim（额度 / 位满了就等）；claimed = A 已把单给我们（带租约代数）；
  * cloned = 工作副本就绪、head 已核（写单还核过推送权限）；started = worker 会话已建（记 agent / session）；
  * result_pending = 结论 / 写单的提交已落本地（写单还要推送、开 PR），等 A 的回执。
  * 终态：acked 回执已验；stopped 我方停了（额度 / 登录 / 心跳过期 / 手动）；cancelled A 撤单；released 没起过 worker 就退回（not_started）；
- * declined 没 claim 就放弃（owner 不批 / 过期 / 声明变了）。
+ * declined 没 claim 就放弃（授权收回 / 过期 / 变了）。
  */
 export type LendState = "asked" | "claimed" | "cloned" | "started" | "result_pending" | "acked" | "stopped" | "cancelled" | "released" | "declined";
 
@@ -66,6 +67,11 @@ export interface LendRow {
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
   settle: { notify: "stopped" | "not_started" | null; removeDir: boolean } | null;
+  /**
+   * 给出借方 owner 的通知（lend-notice.ts）：start = 开跑通知交出去的时刻（交出去才起 worker）；end = 交付 / 停止通知，
+   * 和终态同一次写入、sentAt 为 null，发成功才填，没发成的每轮补发（重启后也补）
+   */
+  notices: { start?: number; end?: { kind: "acked" | "stopped"; why: string | null; sentAt: number | null } } | null;
   /** claim 那天（本机日界线），日额度按它数；released 的不算 */
   day: string | null;
   createdAt: number;
@@ -86,9 +92,12 @@ const SCHEMA: SchemaSpec = {
   }, (db) => {
     const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes("work")) db.prepare("ALTER TABLE lend_orders ADD COLUMN work TEXT").run();
+  }, (db) => {
+    const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("notices")) db.prepare("ALTER TABLE lend_orders ADD COLUMN notices TEXT").run();
   }],
   tables: ["lend_orders", "lend_meta"],
-  columns: { lend_orders: ["settle", "work"] },
+  columns: { lend_orders: ["settle", "work", "notices"] },
   indexes: { lend_orders: ["lend_orders_state"] },
 };
 
@@ -101,6 +110,7 @@ export const guardJournalWrites = (db: Database, check: () => void): void => voi
 const checkWrite = (db: Database): void => writeGuards.get(db)?.();
 
 export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
+  guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path);
   db.exec("PRAGMA busy_timeout = 10000");
@@ -109,7 +119,7 @@ export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   return db;
 }
 
-const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle", "work"] as const;
+const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle", "work", "notices"] as const;
 
 function toRow(r: Record<string, unknown>): LendRow {
   const out = { ...r } as Record<string, unknown>;
@@ -144,7 +154,7 @@ export function recordAsked(db: Database, o: { orderId: string; peer: string; fp
 type Patch = Partial<Omit<LendRow, "orderId" | "peer" | "fp" | "family" | "state" | "createdAt" | "updatedAt">>;
 
 const PATCH_COLS = ["preview", "askId", "wire", "leaseGen", "leaseUntil", "lastBeatAt", "dir", "agent", "sessionId", "startedAt", "submit", "payload", "payloadSha",
-  "receipt", "reason", "day", "settle", "work"] as const;
+  "receipt", "reason", "day", "settle", "work", "notices"] as const;
 
 function patchSql(p: Patch): { sets: string[]; vals: (string | number | null)[] } {
   const sets: string[] = [];

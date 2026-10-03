@@ -1,6 +1,6 @@
 /**
  * 非 Claude Code 运行时的模型 / 档位切换（从 api-routes 拆出来：那个文件只许变小）。
- * - Pi：GET /pi-models 读 ~/.pi/agent/models.json；POST /agents/:name/pi-settings 注入扩展命令
+ * - Pi：GET /pi-models 读 ~/.pi/agent/models.json；POST /agents/:name/pi-settings 注入扩展命令（transport=acp 的走宿主，同 Codex）
  * - Codex：GET /codex-models 读 `codex debug models`；POST /agents/:name/codex-settings 写 registry 后重启
  * Claude Code 的 /claude-settings 仍在 api-routes（与 permission-watcher 的代按逻辑缠在一起）。
  * runManager 由调用方注入：它在 management.ts（hub），bridge 模块不能反向 import。
@@ -15,8 +15,10 @@ import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { rememberSwitchOverride } from "./switch-override.js";
 import { handleRuntimeUpdate, RUNTIME_UPDATE_PATH } from "./runtime-update.js";
 import { acpSetConfig } from "./acp-link.js";
-import { isAcpChannel } from "./acp-state.js";
+import { isAcpChannel, isConfiguredAcpChannel } from "./acp-state.js";
 import { isSafeModelArg } from "../lib/claude-settings-runtime.js";
+import { agentLiveness } from "../lib/agent-liveness.js";
+import { tmuxSendLine, windowTarget } from "../lib/tmux-helper.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
 
@@ -46,8 +48,17 @@ export async function handleRuntimeSettingsRoutes(
   if (reg.runtime !== set[2]) {
     return apiJson(400, { ok: false, error: `agent "${canonical}" 不是 ${set[2] === "pi" ? "Pi" : "Codex"} agent` });
   }
-  if (set[2] === "codex" && reg.channelId && isAcpChannel(reg.channelId)) return acpSettings(canonical, reg.channelId, model, effort, runManager); // ACP：会话里改，不重启
-  return set[2] === "pi" ? piSettings(canonical, model, effort) : codexSettings(canonical, reg, model, effort, runManager);
+  const route = await settingsRoute(set[2] as "pi" | "codex", reg.channelId);
+  if (route === "acp") return acpSettings(canonical, reg.channelId!, model, effort, runManager);
+  return route === "pi" ? piSettings(canonical, model, effort) : codexSettings(canonical, reg, model, effort, runManager);
+}
+
+/**
+ * 走哪条：配置成 ACP（registry 或此刻连着的宿主）= 会话里改、不重启（Codex / Pi 同一条）；否则 Pi 注入扩展命令、Codex 写 registry 后重启。
+ * 只看内存里的连接会在宿主重连那几秒退成往宿主日志窗口打字、还回 200。tests/pi-acp-runtime.test.ts
+ */
+export async function settingsRoute(runtime: "pi" | "codex", channelId: string | undefined): Promise<"acp" | "pi" | "codex"> {
+  return channelId && (await isConfiguredAcpChannel(channelId)) ? "acp" : runtime;
 }
 
 // ── Pi ──────────────────────────────────────────────────────────────────────
@@ -100,7 +111,6 @@ async function piSettings(canonical: string, model: string, effort: string): Pro
       if (ids.size && !ids.has(model)) return apiJson(400, { ok: false, error: `未知的 Pi 模型：${model}` });
     } catch { /* 读不到清单就不拦（扩展侧仍会拒绝） */ }
   }
-  const { tmuxSendLine, windowTarget } = await import("../lib/tmux-helper.js");
   const target = windowTarget(canonical);
   try {
     if (model) await tmuxSendLine(target, `/claudestra-model ${model}`);
@@ -122,18 +132,34 @@ async function codexModels(principal: Principal): Promise<Response> {
   return apiJson(200, { ok: true, count: models.length, models, defaults: codexDisplayDefaults(models, readCodexConfigDefaults(), null) });
 }
 
+/** manager set-claude 的参数：只写 registry 里钉住的模型 / 档位 */
+const setClaudeArgs = (canonical: string, model: string, effort: string) =>
+  ["set-claude", canonical, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : [])];
+
+/** 宿主没连上时用：查不清（null）按在跑算——宁可 409 让人稍后重试，也不把改动说成「下次启动生效」（lib/agent-liveness.ts） */
+const agentRunning = async (agent: string): Promise<boolean> => (await agentLiveness(agent)) !== false;
+
 /**
- * transport=acp 的 Codex：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
- * 校验交给会话自己的 configOptions（宿主那边 configRefusal）——本机 `codex debug models` 的目录对不上 stub 的模型。
- * 改成了再写 registry：宿主重起 / agent 重启时照样按它补上。
+ * transport=acp 的 Codex / Pi：经宿主调 session/set_config_option，会话里直接改、回合进行中也能改（ACP 规范允许），不重启。
+ * 校验交给会话自己的 configOptions（宿主那边 configRefusal）——本机的模型目录（codex debug models / pi 的 models.json）对不上会话实际可选的。
+ * 改成了再写 registry：宿主重起 / agent 重启时照样按它补上。宿主没连上时：agent 在跑（宿主正在重连）回 409，不退回往 tmux 窗口打字
+ * （那里只有宿主日志）；agent 没在跑就只写 registry，下次启动生效。ACP 版 Pi 的 /model /thinking 斜杠命令也走这里（api-slash.ts）。
  */
-async function acpSettings(canonical: string, channelId: string, model: string, effort: string, runManager: RunManager): Promise<Response> {
+export async function acpSettings(canonical: string, channelId: string, model: string, effort: string, runManager: RunManager, running = agentRunning): Promise<Response> {
+  if (!isAcpChannel(channelId)) {
+    if (await running(canonical)) return apiJson(409, { ok: false, code: "acp_host_offline", error: "ACP 宿主还没连上（可能正在重连），稍后再试；没有改动" });
+    // 没有会话可校验：至少挡住会被 manager 当成参数开关的值（set-claude 不校验）
+    if (![model, effort].every((v) => !v || isSafeModelArg(v))) return apiJson(400, { ok: false, error: "model / effort 含非法字符" });
+    const saved = await runManager(...setClaudeArgs(canonical, model, effort));
+    if (!saved?.ok) return apiJson(500, { ok: false, error: saved?.error || "写 registry 失败" });
+    return apiJson(200, { ok: true, agent: canonical, model: model || null, effort: effort || null, live: false, nextStart: true, message: "agent 没在跑，已记下，下次启动生效" });
+  }
   for (const [id, v] of [["model", model], ["reasoning_effort", effort]] as const) {
     if (!v) continue;
     const r = await acpSetConfig(channelId, id, v);
     if (!r.ok) return apiJson(409, { ok: false, error: `没切成 ${id}=${v}：${r.error}` });
   }
-  const saved = await runManager("set-claude", canonical, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []));
+  const saved = await runManager(...setClaudeArgs(canonical, model, effort));
   rememberSwitchOverride(canonical, { ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
   const warning = saved?.ok ? {} : { warning: `会话里已经改了，但写 registry 失败（重启后会回到原设置）：${saved?.error || "未知原因"}` };
   return apiJson(200, { ok: true, agent: canonical, model: model || null, effort: effort || null, live: true, ...warning });
@@ -168,8 +194,7 @@ async function codexSettings(
   if (isBusyStatus(getAgentStatus(canonical) ?? getAgentStatus(canonical.replace(/^agent-/, "")))) {
     return apiJson(409, { ok: false, error: "agent 正在回合中，等回合结束再切换" });
   }
-  const setArgs = ["set-claude", canonical, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : [])];
-  const saved = await runManager(...setArgs);
+  const saved = await runManager(...setClaudeArgs(canonical, model, effort));
   if (!saved?.ok) return apiJson(500, { ok: false, error: saved?.error || "写 registry 失败" });
   const restarted = await runManager("restart", canonical);
   if (!restarted?.ok) {

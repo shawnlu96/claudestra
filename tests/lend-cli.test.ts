@@ -16,26 +16,119 @@ describe("manager lend / borrow 接线", () => {
     { id: "diary", name: "diary", dirs: [join(state, "diary")], createdAt: "" },
   ] }));
   const manager = join(import.meta.dir, "../src/manager.ts");
-  const run = (args: string[], channel?: string) => {
-    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, DISCORD_CHANNEL_ID: channel };
+  const run = (args: string[], channel?: string, extra: Record<string, string> = {}) => {
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, DISCORD_CHANNEL_ID: channel, ...extra };
     if (!channel) delete env.DISCORD_CHANNEL_ID;
     const r = Bun.spawnSync([process.execPath, manager, ...args], { env, stdout: "pipe", stderr: "pipe" });
     return JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!) as Record<string, any>;
   };
   const file = () => JSON.parse(readFileSync(join(state, "lend.json"), "utf8"));
 
-  test("缺省关；set 只认联系人、执行者被拒；off 只关总开关", () => {
+  test("缺省关；grant 只认联系人、钉指纹、执行者被拒、到期时间必填且 ≤7 天、roles 忽略、--confirm 已退役；revoke 删条目", () => {
+    const g = (...extra: string[]) => ["lend", "grant", "team-a", "--repos", "shawnlu96/claudestra", ...extra];
     expect(run(["lend", "status"])).toMatchObject({ ok: true, file: "missing", enabled: false, lending: false });
-    expect(run(["lend", "set", "stranger", "--codex", "2", "--repos", "shawnlu96/claudestra"])).toMatchObject({ ok: false, error: expect.stringContaining("不在联系人里") });
-    expect(run(["lend", "set", "team-a", "--codex", "2", "--repos", "shawnlu96/claudestra"], "222")).toMatchObject({ ok: false, code: "forbidden" });
-    expect(run(["lend", "set", "team-a", "--codex", "2", "--repos", "shawnlu96/claudestra", "--bogus", "1"])).toMatchObject({ ok: false });
-    expect(run(["lend", "set", "aaaa-bbbb-cccc-dddd", "--codex", "2", "--repos", "shawnlu96/claudestra"])).toMatchObject({ ok: true, lend: { peer: "team-a" } });
-    expect(file()).toMatchObject({ version: 1, enabled: true, lend: [{ peer: "team-a", fp: "aaaa-bbbb-cccc-dddd", confirm: "per-order" }], borrow: [] });
-    expect(run(["lend", "status"])).toMatchObject({ ok: true, lending: true });
-    expect(run(["lend", "off"])).toMatchObject({ ok: true });
-    expect(file()).toMatchObject({ enabled: false, lend: [{ peer: "team-a" }] });
-    expect(run(["lend", "off", "--peer", "team-a"])).toMatchObject({ ok: true });
+    expect(run(["lend", "grant", "stranger", "--repos", "shawnlu96/claudestra", "--until", "3d"])).toMatchObject({ ok: false, error: expect.stringContaining("不在联系人里") });
+    expect(run(g("--until", "3d"), "222")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(run(g("--until", "3d", "--bogus", "1"))).toMatchObject({ ok: false });
+    expect(run(g())).toMatchObject({ ok: false, error: expect.stringContaining("到期时间") });
+    expect(run(g("--until", "8d"))).toMatchObject({ ok: false, error: expect.stringContaining("最长 7 天") });
+    expect(run(g("--until", "2999-01-01T00:00:00Z"))).toMatchObject({ ok: false, error: expect.stringContaining("最长 7 天") });
+    expect(run(["lend", "set", "team-a", "--repos", "shawnlu96/claudestra", "--until", "3d", "--confirm", "auto"])).toMatchObject({ ok: false, error: expect.stringContaining("已退役") });
+    expect(existsSync(join(state, "lend.json"))).toBe(false);
+    const ok = run(["lend", "grant", "aaaa-bbbb-cccc-dddd", "--repos", "shawnlu96/claudestra", "--until", "3d"]);
+    expect(ok).toMatchObject({ ok: true, warning: "这会让发起方的任务在你的用户下随时起 shell", lend: { peer: "team-a" } });
+    expect(ok.message).toContain("这会让发起方的任务在你的用户下随时起 shell");
+    expect(ok.message).toContain("审查和写代码已不区分");
+    expect(ok.lend).not.toHaveProperty("roles");
+    expect(file()).toMatchObject({ version: 2, enabled: true, borrow: [],
+      lend: [{ peer: "team-a", fp: "aaaa-bbbb-cccc-dddd", roles: ["review", "write"], families: { codex: 5 }, ordersPerDay: 200 }] });
+    for (const roles of ["review", "write", "review,admin", ""]) {
+      const ignored = run(g("--until", "3d", `--roles=${roles}`));
+      expect(ignored).toMatchObject({ ok: true, message: expect.stringContaining("审查和写代码已不区分") });
+      expect(ignored.lend).not.toHaveProperty("roles");
+      expect(file().lend[0].roles).toEqual(["review", "write"]);
+    }
+    const e = file().lend[0];
+    expect(Date.parse(e.until) - Date.parse(e.grantedAt)).toBe(3 * 86_400_000);
+    const status = run(["lend", "status"]);
+    expect(status).toMatchObject({ ok: true, lending: true });
+    expect(status.declared[0]).not.toHaveProperty("roles");
+    expect(status.effective[0]).not.toHaveProperty("roles");
+    expect(run(["lend", "revoke", "--peer", "team-a"], "222")).toMatchObject({ ok: false, code: "forbidden" });
+    // P1-6 出借 worker 自己（没有频道号、带出借 worker 标记）也不能改授权：延长、扩大、收回都拒
+    const worker = { CLAUDESTRA_LEND_WORKER: "1" };
+    expect(run(g("--until", "7d", "--codex", "16"), undefined, worker)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(run(["lend", "revoke"], undefined, worker)).toMatchObject({ ok: false, code: "forbidden" });
+    expect(file().lend).toHaveLength(1);
+    expect(run(["lend", "revoke", "--peer", "team-a"])).toMatchObject({ ok: true, message: expect.stringContaining("已收回") });
     expect(file().lend).toEqual([]);
+    expect(run(g("--until", "12h"))).toMatchObject({ ok: true });
+    expect(run(["lend", "revoke"])).toMatchObject({ ok: true });
+    expect(file()).toMatchObject({ enabled: false, lend: [] });
+  }, 60_000);
+
+  test("lend grant --keep-unset 只继承列出的缺失字段；显式值优先，坏字段拒写，roles 参数忽略", () => {
+    const g = ["lend", "grant", "team-a", "--repos=o/r", "--until=3d"];
+    const keep = "--keep-unset=roles,codex-model,codex-effort";
+    expect(run([...g, "--roles=review,write", "--codex-model=gpt-6-astra", "--codex-effort=xhigh"])).toMatchObject({ ok: true });
+    expect(run([...g, keep])).toMatchObject({ ok: true, lend: { codexModel: "gpt-6-astra", codexEffort: "xhigh" } });
+    expect(run([...g, keep, "--roles=review", "--codex-model=gpt-6-sol", "--codex-effort=low"]))
+      .toMatchObject({ ok: true, lend: { codexModel: "gpt-6-sol", codexEffort: "low" } });
+    const before = readFileSync(join(state, "lend.json"), "utf8");
+    for (const bad of ["", "repos", "roles,bogus", "codexModel", "roles,"]) {
+      expect(run([...g, `--keep-unset=${bad}`])).toMatchObject({ ok: false, error: expect.stringContaining("--keep-unset") });
+    }
+    expect(run([...g, keep, "--codex-effort=nope"])).toMatchObject({ ok: false });
+    expect(readFileSync(join(state, "lend.json"), "utf8")).toBe(before);
+    expect(run([...g, "--keep-unset=roles,codex-effort"])).toMatchObject({ ok: true });
+    expect(file().lend[0]).toMatchObject({ roles: ["review", "write"], codexEffort: "low" });
+    expect(file().lend[0].codexModel).toBeUndefined();
+    expect(run([...g, "--roles=write", "--codex-model=gpt-6-astra", "--codex-effort=high"])).toMatchObject({ ok: true });
+    expect(run(g)).toMatchObject({ ok: true });
+    expect(file().lend[0].roles).toEqual(["review", "write"]);
+    expect(file().lend[0].codexModel).toBeUndefined();
+    expect(file().lend[0].codexEffort).toBeUndefined();
+  }, 60_000);
+
+  test("P1 沿用只读锁内最新值：等锁期间模型 / 推理档改变，不覆盖成锁外旧值", async () => {
+    const g = ["lend", "grant", "team-a", "--repos=o/r", "--until=3d"];
+    expect(run([...g, "--roles=review,write", "--codex-model=gpt-6-astra", "--codex-effort=xhigh"])).toMatchObject({ ok: true });
+    const path = join(state, "lend.json");
+    const lock = await acquireLock(`${path}.lock`, 0);
+    expect(lock).not.toBeNull();
+    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state };
+    delete env.DISCORD_CHANNEL_ID;
+    const child = Bun.spawn([process.execPath, manager, ...g, "--keep-unset=roles,codex-model,codex-effort"], { env, stdout: "pipe", stderr: "pipe" });
+    try {
+      await Bun.sleep(1500);
+      expect(child.exitCode).toBeNull();
+      const latest = file();
+      Object.assign(latest.lend[0], { roles: ["review"], codexModel: "gpt-6-sol", codexEffort: "low" });
+      writeFileSync(path, JSON.stringify(latest)); // 当前持锁写者先提交，等锁的网页 CLI 随后才能继承
+    } finally {
+      lock?.release();
+    }
+    expect(await child.exited).toBe(0);
+    const out = JSON.parse((await new Response(child.stdout).text()).trim().split("\n").at(-1)!);
+    expect(out).toMatchObject({ ok: true });
+    expect(file().lend[0]).toMatchObject({ roles: ["review", "write"], codexModel: "gpt-6-sol", codexEffort: "low" });
+  }, 60_000);
+
+  test("v1 文件：照读、出借条目一律暂停（不生效）；再授权一次落成 v2，别的旧条目仍暂停", () => {
+    const v1 = (peer: string, fp: string, confirm: string, until?: string) => ({ peer, fp, families: { codex: 2 }, roles: ["review"], repos: ["shawnlu96/claudestra"],
+      quota: { ordersPerDay: 5, tokensPerDay: null }, confirm, ...(until ? { until } : {}) });
+    writeFileSync(join(state, "peers.json"), JSON.stringify({ httpPeers: [{ name: "team-a", fp: "aaaa-bbbb-cccc-dddd", addedAt: "" },
+      { name: "team-b", fp: "1111-2222-3333-4444", addedAt: "" }], pendingInvites: [] }));
+    writeFileSync(join(state, "lend.json"), JSON.stringify({ version: 1, enabled: true, borrow: [],
+      lend: [v1("team-a", "aaaa-bbbb-cccc-dddd", "per-order"), v1("team-b", "1111-2222-3333-4444", "auto", new Date(Date.now() + 86_400_000).toISOString())] }));
+    const st = run(["lend", "status"]);
+    expect(st).toMatchObject({ ok: true, file: "ok", lending: false, effective: [] });
+    expect(st.dropped.join("\n")).toContain("重新授权");
+    expect(file().version).toBe(1); // 只读不写
+    expect(run(["lend", "grant", "team-a", "--repos", "shawnlu96/claudestra", "--until", "1d"])).toMatchObject({ ok: true });
+    expect(file()).toMatchObject({ version: 2, lend: [{ peer: "team-a", grantedAt: expect.any(String) }, { peer: "team-b", paused: { reason: expect.any(String) } }] });
+    expect(run(["lend", "status"])).toMatchObject({ lending: true, effective: [{ peer: "team-a" }] });
+    unlinkSync(join(state, "lend.json"));
   }, 60_000);
 
   test("borrow 拒个人项目；取消个人项目标记只许 owner / master", () => {
@@ -50,7 +143,7 @@ describe("manager lend / borrow 接线", () => {
     expect(file().borrow).toEqual([]);
     writeFileSync(join(state, "lend.json"), "{oops");
     expect(run(["lend", "status"])).toMatchObject({ ok: true, file: "invalid", lending: false });
-    expect(run(["lend", "set", "team-a", "--codex", "1", "--repos", "a/b"])).toMatchObject({ ok: false, error: expect.stringContaining("无效") });
+    expect(run(["lend", "grant", "team-a", "--repos", "a/b", "--until", "1d"])).toMatchObject({ ok: false, error: expect.stringContaining("无效") });
   }, 60_000);
 
   test("P1-4 等 lend 锁期间联系人被删：拿到锁后重核，拒写", async () => {
@@ -59,7 +152,7 @@ describe("manager lend / borrow 接线", () => {
     const lock = await acquireLock(join(state, "lend.json.lock"), 0);
     const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state };
     delete env.DISCORD_CHANNEL_ID;
-    const child = Bun.spawn([process.execPath, manager, "lend", "set", "team-a", "--codex", "1", "--repos", "a/b"], { env, stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawn([process.execPath, manager, "lend", "grant", "team-a", "--repos", "a/b", "--until", "1d"], { env, stdout: "pipe", stderr: "pipe" });
     await Bun.sleep(1500);
     writeFileSync(join(state, "peers.json"), JSON.stringify({ httpPeers: [], pendingInvites: [] }));
     lock?.release();

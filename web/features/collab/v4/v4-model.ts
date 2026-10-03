@@ -4,6 +4,7 @@
  * 单测 tests/web-collab-v4-model.test.ts。
  */
 import { COLUMNS, columnOf, type LedgerDepView, type LedgerOverview, type LedgerTaskView, type Stage, type Tr } from "../collab-model";
+import { restCount, restSum } from "@/lib/api/ledger-done";
 
 const TERMINAL: ReadonlySet<Stage> = new Set(["done", "cancelled"]);
 const PAST_REVIEW: ReadonlySet<Stage> = new Set(["merge", "live", "verified", "done"]);
@@ -14,21 +15,23 @@ export interface Metrics {
   present: number;
   active: number;
   todayDone: number;
-  reviewRounds: number;
+  reviewRounds: number | null;
   /** 审出来、已经过了审查（合并及以后）的 P0 + P1 */
-  fixed: number;
+  fixed: number | null;
   /** 此刻在等审查的任务平均已经等了多久；没有在等的 = null */
   avgReviewWaitMs: number | null;
 }
 
-export function metricsOf(ov: Pick<LedgerOverview, "tasks">, todayDone: number, present: number): Metrics {
-  const waits = ov.tasks.map((t) => t.metrics.reviewWaitPendingMs).filter((ms): ms is number => typeof ms === "number");
+/** 计数都把总览窗口外的已完成卡（ov.doneRest）补上：分页只少了列表里的卡，数字不跟着变 */
+export function metricsOf(ov: Pick<LedgerOverview, "tasks" | "doneRest">, todayDone: number, present: number): Metrics {
+  const waits = ov.tasks.map((t) => t.metrics?.reviewWaitPendingMs).filter((ms): ms is number => typeof ms === "number");
   return {
     present,
-    active: ov.tasks.filter(open).length,
+    active: ov.tasks.filter(open).length + restCount(ov, open),
     todayDone,
-    reviewRounds: ov.tasks.reduce((s, t) => s + t.metrics.reviewRounds, 0),
-    fixed: ov.tasks.filter((t) => PAST_REVIEW.has(t.stage)).reduce((s, t) => s + t.metrics.p0 + t.metrics.p1, 0),
+    reviewRounds: ov.tasks.reduce((s, t) => s + (t.metrics?.reviewRounds ?? 0), 0) + restSum(ov, () => true, "reviewRounds"),
+    fixed: ov.tasks.filter((t) => PAST_REVIEW.has(t.stage)).reduce((s, t) => s + (t.metrics?.p0 ?? 0) + (t.metrics?.p1 ?? 0), 0)
+      + restSum(ov, (t) => PAST_REVIEW.has(t.stage), "p0p1"),
     avgReviewWaitMs: waits.length ? Math.round(waits.reduce((a, b) => a + b, 0) / waits.length) : null,
   };
 }
@@ -37,12 +40,16 @@ export const FILTERS = ["all", "runnable", "waiting", "done", "p0"] as const;
 export type Filter = (typeof FILTERS)[number];
 export const FILTER_LABEL: Record<Filter, string> = { all: "全部", runnable: "可执行", waiting: "在等", done: "已完成", p0: "P0" };
 
+/** 筛选芯片上的数：总览里的 + 窗口外的 */
+export const filterCount = (ov: Pick<LedgerOverview, "tasks" | "doneRest">, f: Filter): number =>
+  ov.tasks.filter((t) => matchFilter(t, f)).length + restCount(ov, (t) => matchFilter(t, f));
+
 export function matchFilter(t: LedgerTaskView, f: Filter): boolean {
   if (f === "all") return t.stage !== "cancelled";
   if (f === "runnable") return open(t) && !blocked(t);
   if (f === "waiting") return open(t) && blocked(t);
   if (f === "done") return t.stage === "done" || t.stage === "verified";
-  return t.metrics.p0 > 0 || (t.lastReview?.p0 ?? 0) > 0;
+  return (t.metrics?.p0 ?? 0) > 0 || (t.lastReview?.p0 ?? 0) > 0;
 }
 
 /** 大纲：事项 → 任务（按筛选），没归事项的放最后一组；空组不出 */
@@ -84,8 +91,9 @@ export function edgeBasis(d: LedgerDepView, tr: Tr): string {
 export const STATE_WORD: Record<LedgerDepView["effective"], string> = { done: "已成立", active: "判定中", waiting: "还没到" };
 
 /** 项目概览：各阶段列（与 v3 同一套列）的任务数 */
-export function stageCounts(ov: Pick<LedgerOverview, "tasks">): { label: string; n: number }[] {
+export function stageCounts(ov: Pick<LedgerOverview, "tasks" | "doneRest">): { label: string; n: number }[] {
   const n = COLUMNS.map(() => 0);
   for (const t of ov.tasks.filter(open)) n[columnOf(t.stage, t.stageBefore)]!++;
+  for (const stage of ["verified", "done", "cancelled"] as const) n[columnOf(stage)]! += restCount(ov, (t) => t.stage === stage && open(t));
   return COLUMNS.map((label, i) => ({ label, n: n[i]! })).filter((c) => c.n > 0);
 }

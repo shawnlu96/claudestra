@@ -18,7 +18,7 @@ import type { Registry } from "../src/manager/core.js";
 
 export const H1 = "1".repeat(40), H2 = "2".repeat(40);
 export const DIGEST = "d".repeat(64);
-export const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
+export const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "[验收线 1] two ticks claim the same intent" };
 export const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
 /** Each agent's own runtime session, as its shell environment would report it. */
@@ -32,7 +32,8 @@ function shots(dir: string): string[] {
   return out;
 }
 
-export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: string } = {}) {
+/** ownerVisual: a ui card whose screenshots go to the owner ask; without it PM accepts them (scheduler-ui-gate.ts). */
+export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: string; ownerVisual?: boolean } = {}) {
   const template = opts.template ?? "code";
   const dir = mkdtempSync(join(tmpdir(), "t68f-auto-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
@@ -44,7 +45,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
   createTask(db, at("owner"), { project: "p", id: "T1", title: "auto", kind: "code", agent: "agent-task-one",
-    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST, screenshots: shots(dir) } : {}) } });
+    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST, screenshots: shots(dir) } : {}), ...(opts.ownerVisual ? { ownerVisual: true } : {}) } });
   db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
   const deps = (actor: string): LedgerDeps => ({

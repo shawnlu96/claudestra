@@ -6,6 +6,7 @@
  *   bun run sandbox manager <子命令…>                            在沙箱里跑 manager（create / kill / list / token-add …）
  *   bun run sandbox status | down | clean                        看状态 / 停掉 bridge 与沙箱 tmux / 停掉并删沙箱目录
  *   bun run sandbox env                                          打印沙箱环境（export 行，手动调试用）
+ *   bun run sandbox pi-auth <provider>                           把一家 provider 的 API key 拷进沙箱的 Pi（scripts/sandbox-pi-auth.ts）
  *   … --lab [--pair] [--as a|b]                                  lab 模式：回环中继 + 两实例 peer + 假推送（scripts/sandbox-lab.ts），不支持代理
  *   bun run sandbox lab-push --lab [--as a|b]                    lab：给实例登记一个假 Web Push 订阅和一台假 APNs 设备
  *
@@ -211,7 +212,7 @@ async function cmdUp(o: Opts, layout: SandboxLayout): Promise<void> {
   // 新建 agent 要能按目录归到某个 project：给沙箱工作目录建一个（已存在时 manager 报错，无害）
   runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, "project-add", "sandbox", "--dirs", layout.workDir, "--name", "Sandbox"], true);
   const self = o.lab ? `bun run sandbox --lab${o.lab.ports.a === DEFAULT_PORT ? "" : ` --port ${o.lab.ports.a}`}${o.lab.side === "b" ? " --as b" : ""}`
-    : `bun run sandbox${o.port === DEFAULT_PORT ? "" : ` --port ${o.port}`}`;
+    : `bun run sandbox${o.port === DEFAULT_PORT ? "" : ` --port ${o.port}`}${o.root ? ` --root ${o.root}` : ""}`;
   console.log([
     `✅ 沙箱 bridge 已启动：http://127.0.0.1:${o.port}（pid ${pid}，Web-only${o.lab ? `，lab 实例 ${o.lab.side}` : ""}）`,
     `   根目录 ${layout.root}（状态 state/、tmux 与截图 run/、日志 bridge.log；agent 只能建在这下面）`,
@@ -348,10 +349,6 @@ async function cmdStatus(o: Opts, layout: SandboxLayout): Promise<void> {
   if (pid) runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, "list"]);
 }
 
-function cmdEnv(o: Opts, layout: SandboxLayout): void {
-  for (const [k, v] of Object.entries(envFor(o, layout))) console.log(`export ${k}='${v.replace(/'/g, "'\\''")}'`);
-}
-
 /** 沙箱环境里执行的内部步骤：此时 lib/paths 已按沙箱目录求值，tmux 走沙箱 socket */
 async function inner(op: string, layout: SandboxLayout): Promise<void> {
   if (process.env[SANDBOX_FLAG] !== "1") fail("内部命令只能由沙箱脚本在沙箱环境里调用");
@@ -372,7 +369,9 @@ async function inner(op: string, layout: SandboxLayout): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const [cmd = "", ...argv] = process.argv.slice(2);
+  const raw = process.argv.slice(2); // 子命令 = 第一个不是沙箱选项（及其值）的词：up 的提示和文档都把 --port / --lab 写在子命令前面
+  const at = raw.findIndex((a, i) => !a.startsWith("--") && !["--port", "--root", "--static", "--as"].includes(raw[i - 1] ?? ""));
+  const [cmd, argv] = at < 0 ? ["", raw] : [raw[at]!, [...raw.slice(0, at), ...raw.slice(at + 1)]];
   if (cmd === LAB_RELAY) return (await import("./sandbox-lab-relay.ts")).runLabRelay(); // 已在沙箱 + lab 环境里（cmdLabUp 拉起）
   const o = parseOpts(argv, cmd);
   const layout = sandboxLayout(o.root);
@@ -384,7 +383,8 @@ async function main(): Promise<void> {
     case "down": return cmdDown(o, layout);
     case "clean": return cmdClean(o, layout);
     case "status": return cmdStatus(o, layout);
-    case "env": return cmdEnv(o, layout);
+    case "env": return void Object.entries(envFor(o, layout)).forEach(([k, v]) => console.log(`export ${k}='${v.replace(/'/g, "'\\''")}'`));
+    case "pi-auth": return (await import("./sandbox-pi-auth.ts")).cmdPiAuth(o.rest, layout.root, markerProblem(layout), fail);
     case "manager": {
       const refusal = sandboxManagerRefusal(o.rest, !!o.lab);
       if (refusal) fail(refusal);
@@ -392,7 +392,7 @@ async function main(): Promise<void> {
     }
     case INNER: return inner(o.rest[0] ?? "", layout);
     default:
-      console.log("用法：bun run sandbox up|status|down|clean|env|manager <子命令…>|lab-push [--port N] [--root DIR] [--static DIR] [--lab [--pair] [--as a|b]]");
+      console.log("用法：bun run sandbox up|status|down|clean|env|manager <子命令…>|pi-auth <provider>|lab-push [--port N] [--root DIR] [--static DIR] [--lab [--pair] [--as a|b]]");
       process.exit(cmd ? 1 : 0);
   }
 }

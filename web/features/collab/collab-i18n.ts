@@ -11,6 +11,15 @@ import { fillParams } from "@/lib/i18n-fill";
 import type { Tr } from "./collab-model";
 
 const COLLAB_WORDS: Record<string, string> = {
+  "产品 DAG": "Product DAG",
+  "预计": "Expected",
+  "还没有子 DAG": "No sub-DAG yet",
+  "返回产品 DAG": "Back to product DAG",
+  "先在产品 DAG 里选一个 feature": "Select a feature in the product DAG first",
+  "节点": "nodes",
+  "已暂停": "Paused",
+  "谁在干活": "Who is working",
+  "没取到，正在重试": "Could not load, retrying",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
   "：": ": ",
   "、": ", ",
@@ -21,6 +30,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "PM": "PM",
   "上线": "Live",
   "今日完成": "Done today",
+  "更早完成": "Earlier",
   "参与者": "People",
   "受阻": "Blocked",
   "合并": "Merge",
@@ -96,6 +106,23 @@ const COLLAB_WORDS: Record<string, string> = {
   "还没到": "Not yet",
   "各阶段": "By stage",
   "成员": "Members",
+  // 子 DAG / 进度两张图（dag/）
+  "子 DAG": "Sub-DAG",
+  "进度": "Progress",
+  "审": "Review",
+  "待批": "Pending",
+  "版本": "Versions",
+  "对比": "Compare",
+  "计划中": "Planned",
+  "取消原因": "Why cancelled",
+  "卡": "Card",
+  "前置": "Depends on",
+  "粗估": "Estimate",
+  "初版": "Initial",
+  "需求变了": "Scope change",
+  "增": "Added",
+  "删": "Removed",
+  "带入有改": "Carried, changed",
 };
 
 export function useCollabT(): Tr {

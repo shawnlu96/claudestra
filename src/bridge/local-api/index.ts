@@ -1,3 +1,8 @@
+import { handleProjectPmApi } from "./project-pm.js";
+export { LOCAL_API_FEATURES } from "../../lib/shared-ledger-gate-api-features.js";
+import { sharedLedgerGateProxy } from "../../lib/shared-ledger-gate-proxy.js";
+import { handleSharedLedgerApi } from "./shared-ledger.js";
+import { handleProductBoardApi } from "./product-board.js";
 /**
  * bridge 本地 API（docs/design-hosted-frontend.md §13.2）：原 Next BFF 里「逻辑在服务端」的那批路由搬进 bridge，
  * 在 api-extensions.ts 登记、api-routes 鉴权之后被调。每个端点族一个模块，handler 返回 null = 不是我的路径。
@@ -19,7 +24,14 @@ import { handleLastSeen } from "./last-seen.js";
 import { handleTalkApi } from "./talk.js";
 import { handleTeamApi } from "./team.js";
 import { handleLedgerApi } from "./ledger.js";
+import { handleWorkBoardApi } from "./work-board.js";
+import { handleLedgerDagApi } from "./ledger-dag.js";
 import { handleLendApi } from "./lend.js";
+import { handleLendClaudeTokenApi } from "./lend-claude-token.js";
+import { handleLendGrantApi } from "./lend-grant.js";
+import { handleLendInbox } from "./lend-inbox.js";
+import { handleBorrowApi } from "./lend-peers-view.js";
+import { handleLendWorkersApi } from "./lend-workers.js";
 import { handleMedia } from "./media.js";
 import { handleMissionApi } from "./mission.js";
 import { handlePeerLedgerApi } from "./peer-ledger.js";
@@ -30,18 +42,14 @@ import { handleTranscribe } from "./transcribe.js";
 import { handleUsageApi } from "./usage.js";
 import { versionResponse } from "./version.js";
 
-/** GET /api/v1/capabilities 的 features 里报的名字（前端按名字判某能力在不在） */
-export const LOCAL_API_FEATURES = [
-  "version", "settings", "profile", "agent-settings", "hidden-messages", "skill-prefs", "transcribe", "client-log", "host-open", "attachments",
-  "control", "handoff", "mission", "access-paths", "skill-library", "ledger", "quota", "last-seen", "asks", "fleet", "agent-skill-settings", "media", "talk",
-  "peer-ledger", "ai-inventory", "lend", "usage",
-];
-
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
+  (req, path, principal) => sharedLedgerGateProxy(req, path, principal, handleSharedLedgerApi),
+  (req, path, principal) => handleProjectPmApi(req, path, principal),
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
-  handleTalkApi, handlePeerLedgerApi, handleLendApi, handleTeamApi, handleAiInventoryApi, handleUsageApi,
+  handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
+  handleLendGrantApi, handleBorrowApi, handleLendClaudeTokenApi, handleWorkBoardApi, handleProductBoardApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {

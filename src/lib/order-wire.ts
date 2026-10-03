@@ -5,8 +5,12 @@
  * and a silently trimmed order is a different order. `v` lets M2 / M3 rename fields later without guessing.
  * Rendering and redaction live in order-wire-render.ts. tests/order-wire.test.ts.
  */
+import { deliverWithoutDisputes, deliverDisputeFields, type FindingDispute } from "./review-arbiter-wire.js";
+import { deliverMemoryRefFields, deliverWithoutMemoryRefs, findingPitfalls, withPitfalls, type MemoryRef } from "./memory-tools-wire.js";
 import type { ReviewFinding } from "./scheduler-review.js";
+import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
+import { convergenceFields, withoutConvergence, type ConvergenceWire } from "./lend-arbiter-wire.js";
 
 const ORDER_WIRE_VERSION = 1;
 /** Whole-wire byte cap: a spec quoted inline plus findings fits; anything larger is refused at both ends, never trimmed. */
@@ -19,6 +23,7 @@ export const WIRE_LIMITS = {
 
 type OrderStep = WorkOrder["step"];
 export interface OrderWire {
+  convergence?: ConvergenceWire;
   v: typeof ORDER_WIRE_VERSION;
   /** = scheduler intent id (the dedup key); the only handle a deliver / verdict may cite. */
   orderId: string;
@@ -43,6 +48,8 @@ export interface OrderWire {
 }
 
 export interface DeliverWire {
+  disputes?: FindingDispute[];
+  memoryRefs?: MemoryRef[];
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
   head: string;
@@ -51,7 +58,7 @@ export interface DeliverWire {
   selfCheck: string;
 }
 
-interface VerdictFinding extends ReviewFinding { description: string }
+interface VerdictFinding extends ReviewFinding { description: string; pitfall?: true }
 export interface VerdictWire {
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
@@ -166,7 +173,7 @@ const STEPS: readonly OrderStep[] = ["restate", "write", "review", "fix"];
 
 export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
   return guarded(raw, () => {
-    const r = record(raw, "$", ORDER_KEYS);
+    const r = record(withoutConvergence(raw), "$", ORDER_KEYS);
     if (!STEPS.includes(r.step as OrderStep)) fail("step", "只认 restate / write / review / fix");
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), taskId: matching(r.taskId, "taskId", TASK_ID),
@@ -177,17 +184,18 @@ export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
       outputs: texts(r.outputs, "outputs", WIRE_LIMITS.line), acceptance: texts(r.acceptance, "acceptance", WIRE_LIMITS.line),
       writeBack: text(r.writeBack, "writeBack", WIRE_LIMITS.writeBack, true), findings: findingList(r.findings, "findings", FINDING_KEYS, () => ({})),
       fallback: nullable(r.fallback, (x) => text(x, "fallback", WIRE_LIMITS.fallback, true)),
+      ...convergenceFields(raw, fail),
     };
   });
 }
 
 export function parseDeliverWire(raw: unknown): WireResult<DeliverWire> {
   return guarded(raw, () => {
-    const r = record(raw, "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
+    const r = record(deliverWithoutMemoryRefs(deliverWithoutDisputes(raw)), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), head: matching(r.head, "head", FULL_SHA),
       evidence: matching(text(r.evidence, "evidence", WIRE_LIMITS.path), "evidence", PATH), summary: text(r.summary, "summary", WIRE_LIMITS.summary),
-      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true),
+      selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true), ...deliverDisputeFields(raw, fail), ...deliverMemoryRefFields(raw, fail),
     };
   });
 }
@@ -196,8 +204,10 @@ export function parseVerdictWire(raw: unknown): WireResult<VerdictWire> {
   return guarded(raw, () => {
     const r = record(raw, "$", ["v", "orderId", "head", "verdict", "p0", "p1", "p2", "findings", "reportPath"]);
     if (!["pass", "changes", "block"].includes(r.verdict as string)) fail("verdict", "只认 pass / changes / block");
-    const findings = findingList<VerdictFinding>(r.findings, "findings", [...FINDING_KEYS, "description"],
-      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true) }));
+    const { rows: bare, pitfalls } = findingPitfalls(r.findings, fail); // pitfall 可省（项目记忆，memory-tools-wire.ts）
+    const rows = Array.isArray(bare) ? bare.map((f) => (f && typeof f === "object" && !("basis" in f) ? { ...f, basis: null } : f)) : bare; // basis 可省（旧远端）
+    const findings = findingList<VerdictFinding>(rows, "findings", [...FINDING_KEYS, "description", "basis"],
+      (f, p) => ({ description: text(f.description, `${p}.description`, WIRE_LIMITS.probe, true), ...wireBasis(f.basis, (why) => fail(`${p}.basis`, why)) })).map(withPitfalls(pitfalls));
     const counts = { p0: int(r.p0, "p0", 0, WIRE_LIMITS.findings), p1: int(r.p1, "p1", 0, WIRE_LIMITS.findings), p2: int(r.p2, "p2", 0, WIRE_LIMITS.findings) };
     for (const sev of ["P0", "P1", "P2"] as const) {
       const key = sev.toLowerCase() as "p0" | "p1" | "p2";
@@ -218,18 +228,51 @@ export interface AskWire {
   orderId: string;
   question: string;
   options: string[];
+  default?: string;
+  class?: "design" | "scope" | "blocker";
+  /** i28-ASK4 测试类扩围：申请加进本卡范围的文件（仓库相对路径）与理由；两个一起给才算，order-ask-default.ts 据此自动定 */
+  files?: string[];
+  reason?: AskScopeReason;
 }
 
-const ASK_LIMITS = { question: 2000, options: 10, option: 200 } as const;
+/** superseded_assertion = 被本规格替代的旧断言；new_test = 为本卡新行为补测试 */
+export const ASK_SCOPE_REASONS = ["superseded_assertion", "new_test"] as const;
+export type AskScopeReason = (typeof ASK_SCOPE_REASONS)[number];
+
+const ASK_LIMITS = { question: 2000, options: 10, option: 200, files: 20 } as const;
+
+/** files / reason：都给或都不给；files 是不带通配、不带 .. 的仓库相对路径 */
+function askScope(r: Record<string, unknown>): Pick<AskWire, "files" | "reason"> {
+  if (!("files" in r) && !("reason" in r)) return {};
+  if (!("files" in r) || !("reason" in r)) fail("files", "files 与 reason 要一起给");
+  if (!ASK_SCOPE_REASONS.includes(r.reason as AskScopeReason)) fail("reason", `只认 ${ASK_SCOPE_REASONS.join(" / ")}`);
+  if (!Array.isArray(r.files) || !r.files.length || r.files.length > ASK_LIMITS.files) fail("files", `要是 1–${ASK_LIMITS.files} 项的数组`);
+  const files = (r.files as unknown[]).map((f, i) => {
+    const s = matching(text(f, `files[${i}]`, WIRE_LIMITS.path), `files[${i}]`, PATH);
+    if (s.split("/").some((seg) => seg === ".." || seg === "." || !seg) || /[*?[\]{}]/.test(s)) fail(`files[${i}]`, "要是不带通配、不带 . / .. 的仓库相对路径");
+    return s;
+  });
+  return { files: [...new Set(files)], reason: r.reason as AskScopeReason };
+}
+
+/** order-ask.ts 存进 ask.extra 的那两项（没给 = 空） */
+export const askScopeExtra = (q: Partial<Pick<AskWire, "files" | "reason">>): Pick<AskWire, "files" | "reason"> =>
+  q.files?.length && q.reason ? { files: q.files, reason: q.reason } : {};
 
 export function parseAskWire(raw: unknown): WireResult<AskWire> {
   return guarded(raw, () => {
     const given = raw && typeof raw === "object" && !Array.isArray(raw) && !("options" in raw) ? { ...raw, options: [] } : raw;
-    const r = record(given, "$", ["v", "orderId", "question", "options"]);
+    const r = record(given, "$", ["v", "orderId", "question", "options",
+      ...(given && typeof given === "object" ? ["default", "class", "files", "reason"].filter((k) => k in given) : [])]);
+    if ("class" in r && !["design", "scope", "blocker"].includes(r.class as string)) fail("class", "只认 design / scope / blocker");
+    if ("default" in r && (typeof r.default !== "string" || !r.default.trim() || [...r.default].length > 600)) fail("default", "默认做法要非空且不超过 600 字");
     if (!Array.isArray(r.options) || r.options.length > ASK_LIMITS.options) fail("options", `要是不超过 ${ASK_LIMITS.options} 项的数组`);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), question: text(r.question, "question", ASK_LIMITS.question, true),
       options: (r.options as unknown[]).map((o, i) => text(o, `options[${i}]`, ASK_LIMITS.option)),
+      ...("default" in r ? { default: text(r.default, "default", 2400, true) } : {}),
+      ...("class" in r ? { class: r.class as AskWire["class"] } : {}),
+      ...askScope(r),
     };
   });
 }

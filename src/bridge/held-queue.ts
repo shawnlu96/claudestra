@@ -11,6 +11,8 @@ import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { PersistedMap } from "./persisted-map.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { emitHeldToWeb } from "./held-web.js";
+import { isOwnerSource } from "../lib/delegate-marker.js";
+import { ownedHeldItems } from "./pm-held-transfer.js";
 
 export interface HeldItem {
   env: Envelope;
@@ -36,6 +38,30 @@ export function unseenFrom(q: HeldQueue, target: string): { fromKind: string; fr
   return q.get(target)?.filter((i) => !i.lease).map((i) => ({
     fromKind: i.env.from.kind, fromChannelId: i.env.from.kind === "local" ? i.env.from.channelId : undefined, messageId: i.env.meta.messageId,
   }));
+}
+
+/**
+ * 押后条目的来源类别（check_inbox 能领哪些、谁排批首，reply 结果的押后提醒按它数）：卡片答复（ask_answer）、owner 本人、
+ * peer、本机 agent；其余（bridge 通知、guest）是 other——check_inbox 不领，留给 Stop / 扫描按原规则投（班子通知要走送达回调）
+ */
+export type HeldKind = "ask" | "owner" | "peer" | "agent" | "other";
+export function heldKindOf(env: Envelope): HeldKind {
+  if (env.meta.triggerKind === "ask_answer") return "ask";
+  if (isOwnerSource(env.from)) return "owner";
+  if (env.from.kind === "api" && env.from.peer) return "peer";
+  return env.from.kind === "local" ? "agent" : "other";
+}
+export const inboxTakeable = (i: HeldItem): boolean => heldKindOf(i.env) !== "other";
+
+/** 各类别押着、check_inbox 还领得到（没在租约里）的条数，只列非零的；没有 = {}（reply 结果据此一字不加） */
+export type HeldTally = Partial<Record<Exclude<HeldKind, "other">, number>>;
+export function heldTally(items: readonly HeldItem[] | undefined, now = Date.now()): HeldTally {
+  const out: HeldTally = {};
+  for (const i of items ?? []) {
+    const k = heldKindOf(i.env);
+    if (k !== "other" && !leaseActive(i, now)) out[k] = (out[k] ?? 0) + 1;
+  }
+  return out;
 }
 
 export const HELD_NOTIFY_MS = 30 * 60_000;
@@ -145,6 +171,11 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   /** 这个频道还押着（没送到 agent 手上）的消息 id：挂在它们上的 API 请求不能被别的回合结掉（bridge/stop-settle.ts takeApiWaiters） */
   ids(channelId: string): Set<string> {
     return new Set((this.get(channelId) ?? []).map((i) => i.env.meta.messageId));
+  }
+
+  /** 这个频道押着、check_inbox 领得到的各类条数（bridge 回 reply 结果时带上，lib/reply-ask-schema.ts 写成提醒） */
+  stat(channelId: string): HeldTally {
+    return heldTally(ownedHeldItems(this, channelId));
   }
 
   /** 额度闸押着的条数，人发的和 agent / bridge 消息分开数（横幅和进闸通知分开写） */

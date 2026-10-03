@@ -16,12 +16,13 @@ import type { LedgerDeps } from "../src/manager/ledger-context.js";
 import type { Registry } from "../src/manager/core.js";
 
 const H1 = "1".repeat(40), H2 = "2".repeat(40);
-const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "two ticks claim the same intent" };
+const P1 = { findingId: "race-1", family: "concurrency", severity: "P1" as const, probe: "[验收线 1] two ticks claim the same intent" };
 const P2 = { findingId: "name-1", family: "naming", severity: "P2" as const, probe: "rename helper" };
 
 const DIGEST = "d".repeat(64);
 
-function fixture(template: "code" | "ui" = "code") {
+/** ownerVisual: the ui card goes to the owner (the screenshot-ask path); without it PM accepts (tests/scheduler-ui-pm-gate.test.ts). */
+function fixture(template: "code" | "ui" = "code", ownerVisual = false) {
   const dir = mkdtempSync(join(tmpdir(), "t68e-observe-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const registryPath = join(dir, "registry.json");
   const setReviewSession = (sessionId: string) => writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
@@ -32,7 +33,7 @@ function fixture(template: "code" | "ui" = "code") {
   let now = 1000;
   const at = (actor: string) => ({ actor, now: (now += 10) });
   createTask(db, at("owner"), { project: "p", id: "T1", title: "observe", kind: "code", agent: "agent-one",
-    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST } : {}) } });
+    extra: { fileGlobs: ["src/lib/x.ts"], ...(template === "ui" ? { screenshotsDigest: DIGEST } : {}), ...(ownerVisual ? { ownerVisual: true } : {}) } });
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template, templateVersion: 2, mode: "observe", authorFamily: "claude", fallback: "只报错" });
   const deps = (actor: string): LedgerDeps => ({
     db, actor, registryPath, projectIds: ["p"], now: () => (now += 10),
@@ -231,7 +232,7 @@ describe("T68e observe mode", () => {
     }
   });
 
-  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 is a three-P1 stop", async () => {
+  test("P1-2 regression: review --to is never a match; with an observation after the verdict round 3 still plans repair", async () => {
     for (const observed of [false, true]) {
       const f = fixture();
       try {
@@ -246,7 +247,7 @@ describe("T68e observe mode", () => {
         }
         await f.observe();
         const moves = (await f.rows()).filter((r) => r.actual === "推阶段 review→fix").map((r) => [r.verdict, r.planned]);
-        expect(moves).toEqual(observed ? [["match", "推阶段到 fix"], ["match", "推阶段到 fix"], ["diff", "停下升级（three_p1_rounds）"]]
+        expect(moves).toEqual(observed ? Array(3).fill(["match", "推阶段到 fix"])
           : Array(3).fill(["unknown", "（结论后的计划没有记录）"]));
       } finally { f.close(); }
     }
@@ -282,7 +283,7 @@ describe("T68e observe mode", () => {
   });
 
   test("P1-3 regression: the owner's real screenshot ask is projected — none / open / approved / rejected / stale", async () => {
-    const f = fixture("ui");
+    const f = fixture("ui", true);
     try {
       f.toReview();
       f.dispatch(H1);
@@ -304,7 +305,7 @@ describe("T68e observe mode", () => {
   });
 
   test("r2 P2 regression: only an answer carrying the authenticated owner mark counts as the owner's approval", async () => {
-    const f = fixture("ui");
+    const f = fixture("ui", true);
     try {
       f.toReview();
       f.dispatch(H1);
@@ -327,11 +328,11 @@ describe("T68e observe mode", () => {
       await f.observe();
       f.review("changes", H1, [P1]);
       const first = await f.observe();
-      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "probe B" }]);
+      f.review("changes", H1, [{ ...P1, findingId: "race-2", probe: "[验收线 1] probe B" }]);
       const second = await f.observe();
       expect(second.duplicate).toBe(false);
       expect(first.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-1" }] } });
-      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "probe B" }] } });
+      expect(second.event.data.decision).toMatchObject({ workOrder: { findings: [{ findingId: "race-2", probe: "[验收线 1] probe B" }] } });
     } finally { f.close(); }
   });
 

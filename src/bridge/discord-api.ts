@@ -2,7 +2,8 @@
  * Discord API 操作：发消息、获取历史、反应、编辑、创建/删除频道
  */
 
-import { TextChannel, PermissionFlagsBits, type CategoryChannel, type Client } from "discord.js";
+import { TextChannel, PermissionFlagsBits, type CategoryChannel, type Client, type Guild } from "discord.js";
+import { categoryInfos, isParentFullError, placeInCategory, renameCategoryFamily, type CategoryOps } from "../lib/discord-category.js";
 import { buildComponents } from "./components.js";
 import { reservedEditRefusal } from "./edit-guard.js";
 // guild id 走 config 的唯一导出，别各处直读 env（D7-10）
@@ -151,61 +152,48 @@ export async function discordEditMessage(
 }
 
 /**
- * v2.21+ 把已有频道挪到指定 category(不存在则自动创建)。project-assign 用——
+ * 把已有频道挪到指定 category(不存在则自动创建,满 50 用溢出分类「<名> 2」…)。project-assign 用——
  * 频道随 agent 的 project 归属走。lockPermissions:false 保留频道自身的权限覆盖
  * (allowlist 隐藏策略是建频道时写在频道上的,同步 category 权限会把它冲掉)。
  */
-async function discordMoveChannel(
+export async function discordMoveChannel(
   discord: Client,
+  guild: Guild,
   channelId: string,
   categoryName: string,
-  /** project 改名时的旧 category 名：新名字的还没有、旧的在 ⇒ 把旧的原地改名，不另建 */
+  /** project 改名时的旧 category 名：新名字的还没有、旧的在 ⇒ 把旧的（连同溢出分类）原地改名，不另建 */
   renameFrom?: string,
 ): Promise<void> {
-  const guildId = DISCORD_GUILD_ID;
-  if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
-  const guild =
-    discord.guilds.cache.get(guildId) ?? (await discord.guilds.fetch(guildId).catch(() => null));
-  if (!guild) throw new Error(`Bot 未加入 guild ${guildId}`);
-  const findCat = (name: string) => guild.channels.cache.find((c) => c.name === name && c.type === 4);
-  let cat = findCat(categoryName);
-  const old = !cat && renameFrom ? findCat(renameFrom) : undefined;
-  if (old) cat = await (old as CategoryChannel).setName(categoryName);
-  if (!cat) {
-    cat = await guild.channels.create({ name: categoryName, type: 4 });
-  }
+  const ops = categoryOps(guild, channelId);
+  if (renameFrom) await renameCategoryFamily(ops, renameFrom, categoryName);
   const ch = await discord.channels.fetch(channelId);
   if (!ch || !("setParent" in ch)) throw new Error("频道不存在或不可移动");
-  await (ch as TextChannel).setParent(cat.id, { lockPermissions: false });
+  await placeInCategory(ops, categoryName, (id) => (ch as TextChannel).setParent(id, { lockPermissions: false }));
 }
 
-export async function discordCreateChannel(
-  discord: Client,
-  name: string,
-  categoryName?: string
-): Promise<string> {
+async function resolveGuild(discord: Client): Promise<Guild> {
   const guildId = DISCORD_GUILD_ID;
   if (!guildId) throw new Error("DISCORD_GUILD_ID 未配置");
-  const guild =
-    discord.guilds.cache.get(guildId) ??
-    (await discord.guilds.fetch(guildId).catch(() => null));
+  const guild = discord.guilds.cache.get(guildId) ?? (await discord.guilds.fetch(guildId).catch(() => null));
   if (!guild) throw new Error(`Bot 未加入 guild ${guildId}`);
+  return guild;
+}
 
-  let parentId: string | undefined;
-  if (categoryName) {
-    let cat = guild.channels.cache.find(
-      (c) => c.name === categoryName && c.type === 4
-    );
-    if (!cat) {
-      // category 不存在，自动创建
-      cat = await guild.channels.create({
-        name: categoryName,
-        type: 4, // GuildCategory
-      });
-    }
-    parentId = cat?.id;
-  }
+/** lib/discord-category 的 guild 适配；excludeId = 正在移动的频道（不占目标分类名额） */
+function categoryOps(guild: Guild, excludeId?: string): CategoryOps {
+  return {
+    list: () => categoryInfos(guild.channels.cache.values(), excludeId),
+    create: (name) => guild.channels.create({ name, type: 4 }),
+    rename: (id, name) => (guild.channels.cache.get(id) as CategoryChannel).setName(name),
+  };
+}
 
+export async function discordCreateChannel(discord: Client, name: string, categoryName?: string): Promise<string> {
+  return createChannelInGuild(await resolveGuild(discord), name, categoryName);
+}
+
+/** guild 已解析好的建频道（单独导出给 tests/discord-category-wire.test.ts 用假 guild 跑） */
+export async function createChannelInGuild(guild: Guild, name: string, categoryName?: string): Promise<string> {
   // v2.13.1+ 建频道时写权限覆盖：默认对 @everyone 隐藏，只放行 allowlist 里的人。
   // 此前不设任何覆盖 = 继承服务器默认，服务器里**每个成员都能读到所有 agent 的完整
   // 对话**（含代码、文件内容、命令输出）。自己一个人的服务器无所谓，多一个人就不成立。
@@ -251,25 +239,30 @@ export async function discordCreateChannel(
     }
   }
 
-  const base = { name, parent: parentId, topic: `Claude Code agent channel` };
-  if (overwrites.length === 0) {
-    const ch = await guild.channels.create(base);
-    return ch.id;
-  }
-  try {
-    const ch = await guild.channels.create({ ...base, permissionOverwrites: overwrites });
-    return ch.id;
-  } catch (e) {
-    // 上面已经对齐了权限位,但 @everyone 被服务器管理员收紧、或用户手改过 bot 的 role,
-    // 仍可能让某个位落空 → 50013。隔离是加分项,**建不出频道是致命项**(agent 直接
-    // 创建失败),所以失败退回无覆盖创建,并把「频道没设成私有」明确喊出来。
-    console.warn(
-      `⚠️ 频道 ${name} 的权限覆盖被 Discord 拒绝(${(e as Error).message})——退回无覆盖创建。\n` +
-        `   该频道服务器成员均可见。请手动收紧频道权限,或给 bot 补齐权限后重建频道。`,
-    );
-    const ch = await guild.channels.create(base);
-    return ch.id;
-  }
+  // 分类满了不能让建频道失败：placeInCategory 选溢出分类「<名> 2」…（lib/discord-category.ts）
+  const create = async (parentId?: string): Promise<string> => {
+    const base = { name, parent: parentId, topic: `Claude Code agent channel` };
+    if (overwrites.length === 0) {
+      const ch = await guild.channels.create(base);
+      return ch.id;
+    }
+    try {
+      const ch = await guild.channels.create({ ...base, permissionOverwrites: overwrites });
+      return ch.id;
+    } catch (e) {
+      // 上面已经对齐了权限位,但 @everyone 被服务器管理员收紧、或用户手改过 bot 的 role,
+      // 仍可能让某个位落空 → 50013。隔离是加分项,**建不出频道是致命项**(agent 直接
+      // 创建失败),所以失败退回无覆盖创建,并把「频道没设成私有」明确喊出来。
+      if (isParentFullError(e)) throw e; // 分类满不是权限问题：交给 placeInCategory 换分类，覆盖不能丢
+      console.warn(
+        `⚠️ 频道 ${name} 的权限覆盖被 Discord 拒绝(${(e as Error).message})——退回无覆盖创建。\n` +
+          `   该频道服务器成员均可见。请手动收紧频道权限,或给 bot 补齐权限后重建频道。`,
+      );
+      const ch = await guild.channels.create(base);
+      return ch.id;
+    }
+  };
+  return categoryName ? placeInCategory(categoryOps(guild), categoryName, create) : create(undefined);
 }
 
 export async function discordDeleteChannel(
@@ -286,7 +279,7 @@ export async function discordDeleteChannel(
 export async function moveChannelRequest(discord: Client, webOnly: boolean, msg: any): Promise<{ result: { ok: true } } | { error: string }> {
   try {
     if (!webOnly && !String(msg.channelId || "").startsWith("local-")) {
-      await discordMoveChannel(discord, msg.channelId, String(msg.category || ""), msg.renameFrom ? String(msg.renameFrom) : undefined);
+      await discordMoveChannel(discord, await resolveGuild(discord), msg.channelId, String(msg.category || ""), msg.renameFrom ? String(msg.renameFrom) : undefined);
     }
     return { result: { ok: true } };
   } catch (err) {
