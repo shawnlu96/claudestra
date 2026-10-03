@@ -4,7 +4,11 @@
  * 授权绑定是产品约束，不是安全边界：bypass 模式下 agent 本来就能直接执行（docs 13 §4.7）。
  */
 import { createHash } from "node:crypto";
+import { canonicalJson } from "./canonical-json.js";
 import type { Ask, AskBind, AskKind } from "./ledger-asks.js";
+
+/** 实现在 canonical-json.ts（不经 ledger-asks 类型图）；这里保留旧导出路径 */
+export { canonicalJson };
 
 /** reply 里能声明的类型；inform = 知会，不建 ask、这条回复也不推送；assigned 只能由 createAsk 开 */
 type ReplyAskKind = Exclude<AskKind, "assigned"> | "inform";
@@ -27,16 +31,6 @@ const TEXT_MAX = 300;
 const PARAMS_MAX = 4096;
 const EXPIRES_MIN_S = 60;
 const EXPIRES_MAX_S = 7 * 24 * 3600;
-
-/** 键排好序的 JSON：同样的参数不管 agent 按什么顺序写，哈希都一样 */
-export function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
-  if (v && typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o).sort().filter((k) => o[k] !== undefined).map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(",")}}`;
-  }
-  return JSON.stringify(v ?? null);
-}
 
 /**
  * 授权绑定的哈希：action、version、发起 agent、params 一起算——换了动作 / 版本、换个 agent 拿去核对，哈希都对不上。
