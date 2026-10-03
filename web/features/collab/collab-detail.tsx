@@ -42,10 +42,10 @@ const COLLAB_Q = "collab=";
 const onDetailEntry = () => window.location.hash.includes(COLLAB_Q);
 
 /**
- * 手机全屏层（详情 / 团队等整屏页）占一条历史记录（#chat?collab=<id>）：系统返回（左滑 / 返回键）先收起这一层，不直接退到会话列表。
+ * 手机全屏详情占一条历史记录（#chat?collab=<id>）：系统返回（左滑 / 返回键）先回协作视图首页，不直接退到会话列表。
  * 只在已经处于 #chat（手机横滑到内容页）时压；桌面窗口拉窄不压也不关。返回的关闭函数：压过就 back，由 popstate 收起。
  */
-export function useDetailHistory(narrow: boolean, id: string, onClose: () => void): () => void {
+function useDetailHistory(narrow: boolean, id: string, onClose: () => void): () => void {
   useEffect(() => {
     if (!narrow || window.location.hash.split("?")[0] !== "#chat") return;
     const tagged = `#chat?${COLLAB_Q}${encodeURIComponent(id)}`;

@@ -13,7 +13,9 @@ import { useCollabT } from "./collab-i18n";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
-import { CollabDetail, useDetailHistory, useNarrow } from "./collab-detail";
+import { CollabDetail, useNarrow } from "./collab-detail";
+import { useSheetHistory } from "./v4/sheet-history";
+import { browserHistory } from "@/lib/hash-nav-browser";
 import { Icon } from "./collab-icons";
 import { waitsOnOwner } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
@@ -125,6 +127,17 @@ function useSelection(openTask: string | null) {
   return { sel, setSel, focus, pickTask, select, close };
 }
 
+/** useSelection + 手机整屏页的历史条目（v4/sheet-history.ts）：select 在整屏页出现之前先压历史 */
+function useSheetSelection(openTask: string | null, narrow: boolean) {
+  const s = useSelection(openTask);
+  const prepare = useSheetHistory(!!s.sel && s.sel.kind !== "task" && !openTask, narrow, `~${s.sel?.kind ?? ""}`, s.close, browserHistory);
+  const select = (x: Selection) => {
+    if (x && x.kind !== "task" && !openTask) prepare(`~${x.kind}`);
+    s.select(x);
+  };
+  return { ...s, select };
+}
+
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
   const nav = useChatNav();
@@ -154,9 +167,7 @@ export function CollabView({ project }: { project: string }) {
   const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>("all");
-  const { sel, setSel, focus, pickTask, select, close: closeSel } = useSelection(openTask);
-  const sheetKey = narrow && sel && !openTask ? `~${sel.kind}` : null; // 手机整屏页同详情一样占一条历史：系统左滑先收起它
-  const close = useDetailHistory(!!sheetKey, sheetKey ?? "", closeSel);
+  const { sel, setSel, focus, pickTask, select, close } = useSheetSelection(openTask, narrow);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr });
   const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
