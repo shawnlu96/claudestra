@@ -16,7 +16,7 @@ import { mkdirSync } from "node:fs";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
-import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv } from "../runtimes/clean-env.js";
+import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
@@ -61,11 +61,15 @@ export interface AdapterEnvSpec {
   developerInstructions?: string;
   /** 出借 worker（runtimes/clean-env.ts）：只从 base 里拿白名单变量；channel-server 挂 lend 档（只有派单工具 + whoami） */
   clean?: boolean;
+  /** clean 必填：worker 专属的临时目录，状态 / 运行目录指到它下面（workerPrivateDirs），由起它的进程负责删 */
+  workerRoot?: string;
 }
 
 /** 宿主环境 → 适配器环境的公共底（两家共用）：拷一份，去掉 tmux / 频道 / bridge 变量；干净模式只拿白名单 */
 export function hostEnvBase(s: AdapterEnvSpec): Record<string, string> {
-  const env: Record<string, string> = s.clean ? { ...pickWorkerEnv(s.base), [LEND_WORKER_MARK]: "1" } : {};
+  // 宿主的生产状态目录不往下传：codex / pi 的 shell 继承这份环境（clean-env.ts workerPrivateDirs）
+  if (s.clean && !s.workerRoot) throw new Error("出借 worker 的适配器环境缺专属临时目录（workerRoot）");
+  const env: Record<string, string> = s.clean ? { ...pickWorkerEnv(s.base), ...workerPrivateDirs(s.workerRoot!), [LEND_WORKER_MARK]: "1" } : {};
   if (!s.clean) for (const [k, v] of Object.entries(s.base)) if (typeof v === "string") env[k] = v;
   // 干净模式的 BRIDGE_* 只可能是 pickWorkerEnv 在沙箱里放进来的（宿主的 bridge 地址，不带 token）：删了 worker 里的 manager 在沙箱里一加载就被拒
   const drop = ["TMUX", "TMUX_PANE", "CLAUDESTRA_CODEX_PREAMBLE", "DISCORD_CHANNEL_ID", ...(s.clean ? [] : ["BRIDGE_URL", "BRIDGE_PORT"]), ACP_AGENT_ENV];

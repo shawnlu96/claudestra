@@ -6,6 +6,7 @@ import { buildLendClaudeCommand, claudeWorkerPlan, removeClaudeWorkerConfig, typ
 import { DEFAULT_DISALLOWED } from "../src/lib/claude-launch.js";
 import { profileRefusal, profileTools } from "../src/lib/lend-mcp-profile.js";
 import { acpHostVerdict } from "../src/lib/worker-liveness.js";
+import { RUNTIME_DIR, STATE_DIR } from "../src/lib/paths.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
 
 const dirs: string[] = [];
@@ -41,6 +42,17 @@ test("本机登录口径：HOME / CLAUDE_CONFIG_DIR 照出借方原值，不带 
   expect(strict.argv).not.toContain("--dangerously-skip-permissions");
   expect(strict.argv).not.toContain("--allow-dangerously-skip-permissions");
   expect(arg(strict, "--disallowedTools")).toContain("Bash(sudo:*)");
+});
+
+test("worker 本体（Bash 继承它）的状态 / 运行目录是代次目录下的专属目录、不是生产；只有 MCP（channel-server）那一路是生产目录", () => {
+  for (const base of [{ HOME: "/owner" }, { HOME: "/owner", CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: RUNTIME_DIR }]) {
+    const p = claudeWorkerPlan(spec, "/run-x", base, "/claude");
+    expect(p.env.CLAUDESTRA_STATE_DIR).not.toBe(STATE_DIR);
+    expect(p.env).toMatchObject({ CLAUDESTRA_STATE_DIR: "/run-x/state", CLAUDESTRA_RUNTIME_DIR: "/run-x/runtime" });
+    const m = Object.values(JSON.parse(arg(p, "--mcp-config")).mcpServers as Record<string, { args: string[] }>)[0]!;
+    const mcpEnv = Object.fromEntries(m.args.filter((a) => /^[A-Z_]+=/.test(a)).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+    expect(mcpEnv).toMatchObject({ CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: RUNTIME_DIR });
+  }
 });
 
 test("MCP 只有 lend 服务，env -i 隔断凭据；列表和调用同样 fail closed", () => {
