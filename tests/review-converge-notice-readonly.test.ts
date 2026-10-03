@@ -213,7 +213,7 @@ describe("failed follow-up notice on the read-only scheduler connection", () => 
 
 /**
  * state-protection-F4: after a connection's first sweep, a tick reads the pending sources plus the events since the last tick
- * (rowid range), not done-card / closed / successful / other-project history; one card's read failure — a busy read or a
+ * (rowid range) of the configured projects, not done-card / closed / successful / other-project history; one card's read failure — a busy read or a
  * corrupt source row — is reported in the tick's `failed` with that card's id while other cards and the auto card go on.
  */
 type Reads = { rows: number; log: { sql: string; args: unknown[] }[]; fault: ((sql: string, args: unknown[]) => boolean) | null };
@@ -267,9 +267,9 @@ function okSource(f: ReturnType<typeof autoFixture>, id: string) {
 /** The sweep statements of one tick: rows handed back, and the events each planned range covers (EXPLAIN + COUNT on its args). */
 function sweepCost(ro: Database, reads: Reads) {
   const sweeps = reads.log.filter((l) => l.sql.includes("'scheduler:converge:'"));
-  const plans = sweeps.map((l) => (ro.query(`EXPLAIN QUERY PLAN ${l.sql}`).all(...(l.args as number[])) as { detail: string }[]).map((r) => r.detail).join(" "));
-  const scanned = sweeps.map((l) => l.args.length === 2
-    ? (ro.query("SELECT COUNT(*) AS n FROM events WHERE seq > ? AND seq <= ?").get(...(l.args as number[])) as { n: number }).n : -1);
+  const plans = sweeps.map((l) => (ro.query(`EXPLAIN QUERY PLAN ${l.sql}`).all(...(l.args as (number | string)[])) as { detail: string }[]).map((r) => r.detail).join(" "));
+  const scanned = sweeps.map((l) => l.sql.includes("seq > ?") // the cursor range: (after, upTo, ...held projects)
+    ? (ro.query("SELECT COUNT(*) AS n FROM events WHERE seq > ? AND seq <= ?").get(...(l.args.slice(0, 2) as number[])) as { n: number }).n : -1);
   return { plans, scanned };
 }
 
@@ -333,6 +333,48 @@ describe("state-protection-F4 targeted sweep and per-card isolation", () => {
     await schedulerAutoTick(fresh.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
     expect(told().map((t) => t.split(" ")[1])).toEqual(["T1", "Q0", "Q1"]);
   });
+
+  test("sweep-project: unconfigured projects' open sources are never read or held; configuring one later finds its old ones", async () => {
+    for (const foreign of [5, 300]) {
+      const { f, ro, told } = setup();
+      f.db.run("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'");
+      const w = watched(ro);
+      await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps); // T1 told and closed: p has nothing pending
+      for (let i = 0; i < foreign; i++) failedSource(f, `O${i}`, false, "o");
+      // the review's probe: visits of project-o rows by any Array#filter callback during a tick, plus o rows any sweep read
+      const filter = Array.prototype.filter, visits: number[] = [], oRows: number[] = [];
+      for (let t = 0; t < 3; t++) {
+        let n = 0;
+        Array.prototype.filter = function (this: unknown[], cb: (v: unknown, i: number, a: unknown[]) => unknown, that?: unknown) {
+          return filter.call(this, (v: unknown, i: number, a: unknown[]) => {
+            if (v && typeof v === "object" && (v as { project?: unknown }).project === "o" && "dedupKey" in v) n++;
+            return cb.call(that, v, i, a);
+          });
+        } as typeof filter;
+        w.reads.log = [];
+        try {
+          expect((await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).failed).toEqual([]);
+        } finally { Array.prototype.filter = filter; }
+        visits.push(n);
+        oRows.push(w.reads.log.filter((l) => l.sql.includes("'scheduler:converge:'"))
+          .reduce((k, l) => k + (ro.query(l.sql).all(...(l.args as string[])) as { project: string }[]).filter((r) => r.project === "o").length, 0));
+      }
+      expect({ foreign, visits, oRows, told: told().length }).toEqual({ foreign, visits: [0, 0, 0], oRows: [0, 0, 0], told: 1 });
+      // o configured: its old sources, written before any tick looked at o, are told once each and closed
+      const both = { p: { maxActiveWorkers: 2 }, o: { maxActiveWorkers: 2 } };
+      expect((await schedulerAutoTick(w.db, both, f.tickDeps)).failed).toEqual([]);
+      expect(told()).toHaveLength(1 + foreign);
+      await schedulerAutoTick(w.db, both, f.tickDeps);
+      expect(told()).toHaveLength(1 + foreign);
+      // o dropped then re-added: a new failure written meanwhile is found, the informed ones stay quiet
+      await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+      failedSource(f, "O-late", false, "o");
+      await schedulerAutoTick(w.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+      expect(told()).toHaveLength(1 + foreign);
+      await schedulerAutoTick(w.db, both, f.tickDeps);
+      expect(told().slice(1 + foreign).map((t) => t.split(" ")[1])).toEqual(["O-late"]);
+    }
+  }, 120_000);
 
   test("sweep-isolation: one card's busy read is reported, the others and the auto card go on, then it is told", async () => {
     const { f, ro, told } = setup();

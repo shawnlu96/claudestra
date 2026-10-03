@@ -103,8 +103,8 @@ async function recordInformed(db: Database, key: string, deps: FollowUpNoticeDep
 
 /** A candidate source, kept raw: it is parsed inside its own card's isolation, so one bad row cannot hide the others. */
 type SourceRow = Record<string, unknown> & { seq: number; project: string; target: string };
-/** Per connection: every event up to `cursor` is swept; `open` holds the failed sources not yet seen informed. */
-const sweeps = new WeakMap<Database, { cursor: number; open: Map<number, SourceRow> }>();
+/** Per connection: every event up to `cursor` is swept for the projects in `open`, each holding its failed sources not yet seen informed. */
+const sweeps = new WeakMap<Database, { cursor: number; open: Map<string, Map<number, SourceRow>> }>();
 
 const RANGE = (p: string): string => `${p}dedupKey >= 'scheduler:converge:' AND ${p}dedupKey < 'scheduler:converge;' AND ${p}kind = 'scheduler'`;
 // CASE (not OR) keeps json_* off a malformed row: it stays a candidate and fails in its own card instead of failing the query.
@@ -112,23 +112,29 @@ const MAYBE_FAILED = `CASE WHEN json_valid(data) THEN json_extract(data, '$.op')
   AND json_type(data, '$.followUpFailure') = 'text' ELSE 1 END`;
 
 /**
- * Failed follow-ups with no "informed" record yet, all projects. A connection's first sweep (process start, a swapped ledger
- * file) reads the review_downgrade dedupKey range once, anti-joined with the notice key; later sweeps read only the events after
- * the cursor (`+` keeps the planner on the rowid range) and the open set shrinks as notices land, so a tick costs pending
- * sources plus new events, not the history. A throw leaves cursor and set unchanged. Mode / stage are not filtered.
- * tests/review-converge-notice-readonly.test.ts sweep-cost.
+ * Failed follow-ups with no "informed" record yet, configured projects only. A project's first sweep on a connection (process
+ * start, a swapped ledger file, a project newly configured) reads its review_downgrade dedupKey range once up to the cursor,
+ * anti-joined with the notice key; later sweeps read only the events after the cursor for the held projects (`+` keeps the
+ * planner on the rowid range) and the open set shrinks as notices land, so a tick costs configured pending sources plus new
+ * events, not the history nor other projects. A project leaving the configuration is dropped and swept afresh if it comes back.
+ * A throw leaves cursor and sets unchanged. Mode / stage are not filtered. tests/review-converge-notice-readonly.test.ts sweep-cost.
  */
-function sweepFollowUpSources(db: Database): void {
-  const sweep = sweeps.get(db);
+function sweepFollowUpSources(db: Database, projects: readonly string[]): void {
   const cursor = (db.query("SELECT COALESCE(MAX(seq), 0) AS m FROM events").get() as { m: number }).m;
-  if (!sweep) {
-    const rows = db.query(`SELECT * FROM events d WHERE ${RANGE("d.")} AND d.seq <= ? AND ${MAYBE_FAILED}
-      AND NOT EXISTS (SELECT 1 FROM events n WHERE n.dedupKey = 'scheduler:converge-notice:' || d.target || ':' || d.seq)`).all(cursor) as SourceRow[];
-    sweeps.set(db, { cursor, open: new Map(rows.map((r) => [r.seq, r])) });
-  } else if (cursor > sweep.cursor) {
-    const rows = db.query(`SELECT * FROM events WHERE seq > ? AND seq <= ? AND ${RANGE("+")} AND ${MAYBE_FAILED}`).all(sweep.cursor, cursor) as SourceRow[];
-    for (const r of rows) sweep.open.set(r.seq, r);
-    sweep.cursor = cursor;
+  let sweep = sweeps.get(db);
+  if (!sweep) sweeps.set(db, sweep = { cursor, open: new Map() });
+  for (const p of sweep.open.keys()) if (!projects.includes(p)) sweep.open.delete(p);
+  const held = [...sweep.open.keys()];
+  if (cursor > sweep.cursor && held.length) {
+    const rows = db.query(`SELECT * FROM events WHERE seq > ? AND seq <= ? AND +project IN (${held.map(() => "?").join(", ")})
+      AND ${RANGE("+")} AND ${MAYBE_FAILED}`).all(sweep.cursor, cursor, ...held) as SourceRow[];
+    for (const r of rows) sweep.open.get(r.project)!.set(r.seq, r);
+  }
+  if (cursor > sweep.cursor) sweep.cursor = cursor;
+  for (const p of projects) if (!sweep.open.has(p)) {
+    const rows = db.query(`SELECT * FROM events d WHERE ${RANGE("d.")} AND +d.project = ? AND d.seq <= ? AND ${MAYBE_FAILED}
+      AND NOT EXISTS (SELECT 1 FROM events n WHERE n.dedupKey = 'scheduler:converge-notice:' || d.target || ':' || d.seq)`).all(p, sweep.cursor) as SourceRow[];
+    sweep.open.set(p, new Map(rows.map((r) => [r.seq, r])));
   }
 }
 
@@ -145,7 +151,7 @@ function cardSources(db: Database, task: LedgerTask, rows: readonly SourceRow[],
       continue;
     }
     if (isFailedFollowUp(task, e) && !getEventByDedup(db, convergeNoticeKey(task.id, e.seq))) out.push(e);
-    else sweeps.get(db)?.open.delete(e.seq);
+    else sweeps.get(db)?.open.get(row.project)?.delete(row.seq);
   }
   return out;
 }
@@ -169,8 +175,9 @@ export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeD
   // The ledger is the durable pending source after a restart; mode/stage must not hide a failed follow-up.
   // With no in-memory send receipt, notify again before recording: absence of informed is not proof of delivery.
   // A failed sweep is reported as "*" and the sources swept before still go out: a busy read is not "no events".
-  await isolated(failed, "*", async () => sweepFollowUpSources(db));
-  const sources = [...(sweeps.get(db)?.open.values() ?? [])].filter((r) => projects.includes(r.project)).sort((a, b) => a.seq - b.seq);
+  await isolated(failed, "*", async () => sweepFollowUpSources(db, projects));
+  const open = sweeps.get(db)?.open;
+  const sources = projects.flatMap((p) => [...(open?.get(p)?.values() ?? [])]).sort((a, b) => a.seq - b.seq);
   for (const [taskId, rows] of Map.groupBy(sources, (r) => r.target)) await isolated(failed, taskId, async () => {
     const task = getTask(db, taskId);
     if (task) await noticeSources(db, task, cardSources(db, task, rows, failed), deps);
