@@ -12,12 +12,13 @@ export function workBoardSlots(db: Database, project: string, maxWorkers: number
   const held = (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE project=? AND status='claimed' AND step IN ('write','fix')
     AND EXISTS (SELECT 1 FROM task_workflows WHERE task_workflows.taskId=lend_orders.taskId)`)
     .get(project) as { n: number }).n;
-  // The unified pool (remote.agents) places by unifiedPeerCapacity with no borrow.maxOpen or entry roles; legacy keeps both caps.
+  // The unified pool (remote.agents) places by unifiedPeerCapacity and ignores borrow roles/priority/maxOpen and grant roles
+  // (scheduler-agent-pool.ts); legacy keeps all of those gates.
   const unified = !!remote?.agents;
   const free = remote && remote.mode !== 'off' && remote.roles.includes('write') ? borrow.reduce((sum, b) => {
-    if (b.priority === 'off' || !b.projects.includes(project) || (!unified && !b.roles.includes('write'))) return sum;
+    if (!b.projects.includes(project) || (!unified && (b.priority === 'off' || !b.roles.includes('write')))) return sum;
     const peer = getLendPeer(db, b.peer);
-    if (!peer?.grant?.roles.includes('write') || (remote.repo && !peer.grant.repos.includes(remote.repo))) return sum;
+    if (!peer?.grant || (!unified && !peer.grant.roles.includes('write')) || (remote.repo && !peer.grant.repos.includes(remote.repo))) return sum;
     if (unified) {
       if (peer.proto < 2) return sum;
       const { slots } = unifiedPeerCapacity(db, b.peer, now);

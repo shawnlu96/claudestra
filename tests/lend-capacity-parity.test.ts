@@ -154,14 +154,28 @@ describe("gates are kept", () => {
     expect(board("alpha")).toBe(5);
     expect((await borrowPeer()).capacity?.slots).toEqual({ codex: 0, claude: 5 });
   });
-  test("repo or write role not granted, priority off, remote off: no free writing seats on the board", () => {
+  test("repo not granted or remote off: no free writing seats on the board and no peer placement", () => {
     hello({ grant: { ...GRANT, repos: ["x/y"] } });
     expect(board("alpha")).toBe(0);
-    hello({ grant: { ...GRANT, roles: ["review"] } });
-    expect(board("alpha")).toBe(0);
+    expect(placeFor(poolStartFacts(db, "alpha", remoteOf("alpha"), [ENTRY], NOW), "write", "codex").kind).not.toBe("peer");
     hello();
-    expect(board("alpha", [{ ...ENTRY, priority: "off" }])).toBe(0);
-    expect(board("alpha", [ENTRY], { ...remoteOf("alpha"), mode: "off" })).toBe(0);
+    const off = { ...remoteOf("alpha"), mode: "off" as const };
+    expect(board("alpha", [ENTRY], off)).toBe(0);
+    expect(placeFor(poolStartFacts(db, "alpha", off, [ENTRY], NOW), "write", "codex").kind).not.toBe("peer");
+  });
+  test("retired entry priority and grant roles: the board follows placement and counts the peer's seats", () => {
+    const place = (role: "write" | "review", borrow: BorrowEntry[]) => {
+      writeConfig(borrow);
+      return placeFor(poolStartFacts(db, "alpha", remoteOf("alpha"), borrow, NOW), role, "codex");
+    };
+    const off = [{ ...ENTRY, priority: "off" as const, roles: [] as BorrowEntry["roles"], maxOpen: 0 }];
+    expect(place("write", off)).toMatchObject({ kind: "peer", peer: "mate" });
+    expect(board("alpha", off)).toBe(13);
+    for (const roles of [["review"], ["write"], []] as Grant["roles"][]) {
+      hello({ grant: { ...GRANT, roles } });
+      expect(place("write", [ENTRY])).toMatchObject({ kind: "peer", peer: "mate" });
+      expect(board("alpha")).toBe(13);
+    }
   });
   test("claimed writers remain counted even when new borrowing is off", () => {
     claimedWriter("w1");
@@ -176,6 +190,13 @@ describe("legacy projects keep the maxOpen cap", () => {
     expect(board("old", [legacy])).toBe(2);
     writeConfig([legacy]);
     expect((await borrowPeer()).capacity?.slots).toEqual({ codex: 2, claude: 2 });
+  });
+  test("a project without agents keeps entry priority/roles and grant role gates", () => {
+    const legacy = { ...ENTRY, projects: ["old"] };
+    expect(board("old", [{ ...legacy, priority: "off" }])).toBe(0);
+    expect(board("old", [{ ...legacy, roles: ["review"] }])).toBe(0);
+    hello({ grant: { ...GRANT, roles: ["review"] } });
+    expect(board("old", [legacy])).toBe(0);
   });
   test("an entry mixing unified and legacy projects reports each figure with the projects it applies to", async () => {
     const mixed = { ...ENTRY, projects: ["alpha", "old"] };
