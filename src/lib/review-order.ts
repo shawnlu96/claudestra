@@ -26,6 +26,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 import { convergeOrderLines } from "./review-converge-order.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
+import { withMemory } from "./memory-retrieve-order.js";
 
 /** bridge 认出并验证过的调用方（requireVerified 之后）；family 是 registry 的 runtime */
 export interface ReviewCaller { agent: string; sessionId: string | null; family: string | null }
@@ -77,7 +78,7 @@ export function slotByOrderId(db: Database, orderId: string, caller: ReviewCalle
 }
 
 /** 在 review 阶段、调用方是审查员的卡（一个审查员可能同时挂几张） */
-function reviewSlotsFor(db: Database, caller: ReviewCaller): ReviewSlot[] {
+export function reviewSlotsFor(db: Database, caller: ReviewCaller): ReviewSlot[] {
   const ids = (db.query("SELECT id FROM tasks WHERE stage = 'review' ORDER BY id").all() as { id: string }[]).map((r) => r.id);
   return ids.map((id) => getTask(db, id)).flatMap((t) => (t ? [reviewSlotFor(db, t, caller)] : [])).filter((s): s is ReviewSlot => !!s);
 }
@@ -111,7 +112,7 @@ function reportPathFor(slot: Pick<ReviewSlot, "task" | "node">, dir = reviewsDir
 }
 
 /** 审查单本身；构造完过一遍 parseOrderWire——发出去的单和收进来的单用同一把尺子，坏了就不发（返回 null 并说明） */
-export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()): { ok: true; order: OrderWire } | { ok: false; error: string } {
+export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir(), recordMemory = false): { ok: true; order: OrderWire } | { ok: false; error: string } {
   const { task } = slot;
   const events = listEvents(db, { project: task.project, target: task.id });
   const wf = getWorkflow(db, task.id);
@@ -133,7 +134,9 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
     fallback: wf?.fallback ? clip(wf.fallback, WIRE_LIMITS.fallback) : null,
   };
   let scoped: OrderWire;
-  try { scoped = withDeliverScope(db, task, order, (w) => fitFindings(w, prev.report)); } catch (e) { return { ok: false, error: (e as Error).message }; }
+  try {
+    scoped = withMemory(db, task, "review", slot.head, withDeliverScope(db, task, order, (w) => fitFindings(w, prev.report)), { recordInjection: recordMemory });
+  } catch (e) { return { ok: false, error: (e as Error).message }; }
   const checked = parseOrderWire(scoped);
   return checked.ok ? { ok: true, order: checked.value } : { ok: false, error: `审查单构造出错（${checked.error}）` };
 }
@@ -141,12 +144,12 @@ export function reviewOrderOf(db: Database, slot: ReviewSlot, dir = reviewsDir()
 export type TakeReviewResult = { ok: true; orders: OrderWire[]; errors: string[] } | { ok: false; error: string; message: string };
 
 /** take_review：调用方现在该审的单（可能没有，也可能几张）；某张构造不出来不连累别的，原因放 errors */
-export function takeReview(db: Database, identity: CallerIdentity, dir = reviewsDir()): TakeReviewResult {
+export function takeReview(db: Database, identity: CallerIdentity, dir = reviewsDir(), recordMemory = false): TakeReviewResult {
   const who = reviewCallerOf(identity);
   if ("error" in who) return { ok: false, ...who };
   const orders: OrderWire[] = [], errors: string[] = [];
   for (const slot of reviewSlotsFor(db, who.caller)) {
-    const r = reviewOrderOf(db, slot, dir);
+    const r = reviewOrderOf(db, slot, dir, recordMemory);
     if (r.ok) orders.push(r.order);
     else errors.push(`${slot.task.id}：${r.error}`);
   }
