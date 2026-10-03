@@ -4,8 +4,8 @@
  * = refused, never trimmed) because they come from another machine. B's side (T94) builds the same shapes; `v` lets
  * either side rename a field later. Responses are typed here and built by ledger-lend.ts. tests/lend-wire.test.ts.
  */
-import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
-import { LEND_BRANCH_RE, type LendStep } from "./lend-git.js";
+import { LEND_BRANCH_RE } from "./lend-git.js";
+import { LEND_FAMILIES, type LendFamily } from "./lend-wire-types.js";
 import { parseDeliverWire, parseVerdictWire, type DeliverWire, type VerdictWire } from "./order-wire.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { parseConvergenceResult, type ArbiterVerdictWire } from "./lend-arbiter-wire.js";
@@ -15,7 +15,7 @@ const LEND_WIRE_VERSION = 1;
 /** Report body bytes; the whole request (verdict + report) must also fit LEND_BODY_MAX, well inside the E2E body cap. */
 const LEND_REPORT_MAX = 64 * 1024;
 export const LEND_BODY_MAX = 96 * 1024;
-export const LEASE_MS_DEFAULT = 10 * 60_000;
+export { LEASE_MS_DEFAULT } from "./lend-wire-types.js";
 export const POLL_AFTER_MS = 30_000;
 const DETAIL_MAX = 500;
 const POLL_MAX_ORDERS = 20;
@@ -38,10 +38,7 @@ export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: {
 /** 开工 / 修复单的交付（i28-R6）：B 已把 head 推到订单分支（并开 / 更新了 PR），A 核对远端 head 后记 deliver */
 export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session }
 
-export interface OfferSummary {
-  orderId: string; taskId: string; step: LendStep; family: LendFamily; repo: string; pr: number | null; head: string; round: number; specRev: number; offeredAt: number;
-}
-export interface LeaseState { gen: number; expiresAt: number; ms: number }
+export type { LeaseState, OfferSummary } from "./lend-wire-types.js";
 export interface LendReceipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }
 
 /** HTTP status per refusal code; the bridge maps a CLI {code} through this and nothing else. */
