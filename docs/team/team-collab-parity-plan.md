@@ -217,7 +217,9 @@
   | `web/features/collab/team-source-dag.ts` | P1-B → P1-F |
   | `web/features/collab/team-source-history.ts` | P1-F 建 → P1-H（r2） |
   | `tests/helpers/team-parity-matrix.ts` | P1-C 建 → P1-F → P1-H（后两个只改期望值） |
-  | `src/lib/shared-ledger-client.ts`、`src/lib/shared-ledger-gate-proxy.ts`、`src/bridge/local-api/shared-ledger.ts`、`src/lib/shared-ledger-contract-fixtures.ts`、`web/lib/api/shared-ledger-reads.ts` | P1-D → P1-K（r2） |
+  | `src/lib/shared-ledger-client.ts` | P1-D → P1-G（r4，只加 `projectionExt1()`）→ P1-K |
+  | `src/lib/shared-ledger-gate-proxy.ts`、`src/bridge/local-api/shared-ledger.ts`、`src/lib/shared-ledger-contract-fixtures.ts`、`web/lib/api/shared-ledger-reads.ts` | P1-D → P1-K（r2） |
+  | `src/lib/shared-ledger-auth.ts` | 只有 P1-G（r4） |
   | `src/lib/shared-ledger-contract-reads.ts`（`ext-capabilities` DTO，r3） | P1-D 建；P1-G / P1-K 只导入不改 |
 
   事件 / 回放 / 详情的消费者（`collab-detail-model.ts`、`collab-replay*.ts`、`collab-detail.tsx`）只归 P1-I；
@@ -427,11 +429,13 @@
 
 #### P1-G · 投影可选字段：时间线 / 完成时刻 / 轮次 / 审查计数 / 指标（公开导出端 + 私有中心）
 
-- **公开范围 globs（12，r3 加 mirror-loop）**：`src/lib/shared-ledger-contract-projection-ext.ts`（新建）、`src/lib/shared-ledger-contract-transfer.ts`、
+- **公开范围 globs（15，r4 加 client / auth 两个传输文件）**：`src/lib/shared-ledger-contract-projection-ext.ts`（新建）、`src/lib/shared-ledger-contract-transfer.ts`、
   `src/lib/shared-ledger-projector.ts`、`src/lib/shared-ledger-export.ts`、`src/lib/shared-ledger-scrub.ts`、
-  `src/lib/shared-ledger-mirror.ts`、`src/lib/shared-ledger-mirror-loop.ts`、`tests/shared-ledger-projector-ext*.test.ts`、`tests/shared-ledger-client-scrub-ext*.test.ts`、
-  `tests/shared-ledger-export-ext*.test.ts`、`tests/shared-ledger-mirror-ext*.test.ts`、`tests/shared-ledger-mirror-loop-ext*.test.ts`
-  （`shared-ledger-client.ts` 不在范围：`extCapabilities()` 由 P1-D 提供，本节点只调用）
+  `src/lib/shared-ledger-mirror.ts`、`src/lib/shared-ledger-mirror-loop.ts`、`src/lib/shared-ledger-client.ts`（r4，只加 `projectionExt1()`）、
+  `src/lib/shared-ledger-auth.ts`（r4，只加 `parsePayload` 的扩展解析开关）、`tests/shared-ledger-projector-ext*.test.ts`、`tests/shared-ledger-client-scrub-ext*.test.ts`、
+  `tests/shared-ledger-export-ext*.test.ts`、`tests/shared-ledger-mirror-ext*.test.ts`、`tests/shared-ledger-mirror-loop-ext*.test.ts`、
+  `tests/shared-ledger-auth-ext*.test.ts`
+  （`extCapabilities()` 仍由 P1-D 在 `shared-ledger-client.ts` 里提供，本节点只调用不改；`src/bridge/local-api/shared-ledger.ts` 不在范围，bridge 代理保持只收 V1）
 - **契约字段（全部可选；只有 P1-D `ext-capabilities` 的 `uploads.projectionExt1 === true` **且** 该 mirror entry 的 `ext1Consent` 开着才发；
   `reads.*` 不参与判断）**：
   ```
@@ -463,6 +467,20 @@
   `MirrorClient` 接口加可选 `extCapabilities?()`，假客户端不实现 = false。404 / 任何错误 / 解析拒收 → false，**本轮照发 V1 原包，不计失败、不退避**
   （能力发现失败不能让现在能推的镜像停推）。consent 关时不发能力请求（和 main 一样零额外请求）。
   `ext1Upload` 为 true 时用新文件里的 `parseSharedLedgerProjectionExt` scrub 整包，为 false 时仍用现有 `parseSharedLedgerProjection`，代码路径和 main 相同。
+- **扩展包的传输客户端（r4）**：现有 `SharedLedgerClient.projection()`（`src/lib/shared-ledger-client.ts:166-170`）在发请求前无条件
+  `this.scrub(input, parseSharedLedgerProjection)`，而 V1 `taskProjectionSchema`（`shared-ledger-contract-transfer.ts:11-17`）是封闭键集合、没有 `ext1`，
+  所以带 `tasks[].ext1` 的包走 `projection()` 会在本机抛错、**根本到不了中心**，下面的"中心 4xx 重发"分支也接不住。因此：
+  - **`projection()` 一字不改**，继续用 V1 解析（bridge 代理 `src/bridge/local-api/shared-ledger.ts:64-66` 先用 V1 scrub 再调它，两层都拒 `ext1`，保持只收 V1）；
+    **不放宽 `parseSharedLedgerProjection`**（它同时被 bridge 代理和中心 `shared-ledger-auth.ts:148-149` 用，放宽就破坏 V1-only）。
+  - 新增 **`SharedLedgerClient.projectionExt1(input: SharedLedgerProjectionExt1)`**：`this.scrub(input, parseSharedLedgerProjectionExt)`
+    （从 `shared-ledger-contract-projection-ext.ts` 导入，类型 `SharedLedgerProjectionExt1 = SharedLedgerProjection & {tasks: (SharedLedgerTaskProjection & {ext1?: TaskExt1})[]}` 也在该文件），
+    同一个 `POST projections`、同一凭据 / 签名 / 超时，响应用同一 `parseSharedLedgerResponse("projection", …)` 和 `sourceInstanceId / sourceSeq` 校验。
+  - `MirrorClient`（`shared-ledger-projector.ts:34`）加可选 `projectionExt1?(input: SharedLedgerProjectionExt1)`；投影端只有
+    `ext1Upload && typeof client.projectionExt1 === "function"` 才带 `ext1` 并调它，否则按 V1 调 `projection()`（假客户端 / 老实现自动退回 V1）。
+    中心非 409 的 4xx 后的 V1 重发调的是 `projection(stripExt1(payload))`，不是再调 `projectionExt1`。
+  - **中心入站解析**：`shared-ledger-auth.ts parsePayload` 对 `project` 动作目前固定用 V1 解析；`authenticateSharedLedgerRequest` 加可选参数
+    `{ projectionExt1?: boolean }`（缺省 false = 和 main 完全一样，带 `ext1` 的包回 400 `invalid_field`），为 true 时改用 `parseSharedLedgerProjectionExt`。
+    中心（私有一半）在把 `uploads.projectionExt1` 置 true 的同一次发布里传 true；公开仓库只提供这个开关，不实现中心存储。
   **中心降级保护**：带 `ext1` 的包被中心以非 409 的 4xx 拒收时，同一轮立刻去掉 `ext1` 按 V1 重发一次；重发成功即算本轮成功，
   下一轮重新问能力。409 仍走现有快照重试（快照也按同一 `ext1Upload` 决定带不带）。bridge 的 `POST projections` 代理路径不变，仍只收 V1。
 - **出境闸**：所有字段都过 `scrubSharedLedger`（数字 / 枚举也走一遍，枚举外的值拒收）；mirror entry 上新增显式开关
@@ -478,11 +496,19 @@
   → 包和 main 逐字节一致（**只有读支持不得上传**）；③ 老中心 `ext-capabilities` 404 + consent → 逐字节一致、`failures` 不变；
   ④ 能力请求 503 → 同 ③；⑤ consent 关 → 假中心收不到 `ext-capabilities` 请求；⑥ 能力 true 但 `projections` 对带 `ext1` 的包回 400
   → 同一轮 V1 重发成功；scrub 遇到夹带文本或 `reject` 等枚举外值的 review 拒收。
+  **真实传输链路（r4，`tests/shared-ledger-client-scrub-ext*.test.ts` + `tests/shared-ledger-auth-ext*.test.ts`，不用假 `MirrorClient`）**：
+  ⑦ 投影端 → **真实 `SharedLedgerClient`** → 回环假中心（`127.0.0.1` 临时端口，入站用真实 `authenticateSharedLedgerRequest({projectionExt1:true})`，
+  `ext-capabilities` 回 `uploads.projectionExt1:true`）+ consent 开 → 假中心收到的 `POST projections` 包体里 `tasks[].ext1` 原样存在、响应校验通过；
+  ⑧ 同一个带 `ext1` 的包直接调 `client.projection()` → 本机抛 `invalid_field`，假中心**收到 0 个 `POST`**（V1 方法不放行扩展）；
+  ⑨ 同一个包经 bridge 代理 `handleSharedLedgerApi` 的 `POST projections` → 400，假中心收到 0 个 `POST`（代理仍只收 V1，`shared-ledger.ts` 不改）；
+  ⑩ 假中心用缺省 `authenticateSharedLedgerRequest()`（不开扩展）但 `ext-capabilities` 谎报 true → 带 `ext1` 的包被真实 400 拒收 → 同一轮
+  `projection()` V1 重发成功（⑥ 的真实链路版）；⑪ consent 关 / 能力关时经真实 `SharedLedgerClient` 发出的 V1 包和 main 逐字节一致，
+  `projection()` 对普通 V1 包的行为、请求体、签名字段不变（防降级）。
 - **旧红新绿**：投影快照测试，main 上没有 `ext1` → 新断言红；开 consent 后变绿；未开时的快照保持绿（防降级）。
   **block 回归**：本机一条 `verdict:"block"`、`p0:1` 的 review → 投影 → 客户端解析（`shared-ledger-contract-transfer.ts`）
   → 结果仍是 `block`、`p0 = 1`（P1-H 接着验到 UI）。
 - **依赖**：**owner / PM 决定审查结论和 P0/P1/P2 计数能不能出境**（class=design；默认：只出枚举和计数，原文永远 home_only）；
-  **P1-D 已合并**（`extCapabilities()` 和 DTO）；中心那一半依赖 CL1 + P1-E 的部署通道（`ext-capabilities` 路由由 P1-E 先上线）。
+  **P1-D 已合并**（`extCapabilities()` 和 DTO；`shared-ledger-client.ts` 按 §5.0 串行 P1-D → P1-G → P1-K）；中心那一半依赖 CL1 + P1-E 的部署通道（`ext-capabilities` 路由由 P1-E 先上线）。
   公开导出端可以先合并（`uploads.projectionExt1` 不为 true 就不生效）。
 
 #### P1-K · 扩展数据读回契约：中心 → bridge → 浏览器（公开 · 共享读 API + web 传输；r2 新增）
@@ -515,7 +541,7 @@
   **导出 → 回环假中心 → 严格解析联通**：本机一条 `verify{result:"pass"}`、一条 `stage{from:"build", to:"review"}`、一条 `review{verdict:"block", p0:1}`
   经 P1-G 投影（consent 开）→ 回环假中心原样存回 → `activity-ext` 响应 → `parseActivityExt` 得到同样三项（main 上没有该解析器 → 红）；
   同一条 review 夹带 `text:"…"` 时整包拒收（绿，防原文漏出）。
-- **依赖**：P1-D（文件串行 + `ext-capabilities`）、P1-G 公开部分（共用 `shared-ledger-contract-projection-ext.ts` 的 schema，只导入不改）；
+- **依赖**：P1-D（文件串行 + `ext-capabilities`）、P1-G 公开部分（`shared-ledger-client.ts` 串行在 G 之后，r4；共用 `shared-ledger-contract-projection-ext.ts` 的 schema，只导入不改）；
   联调依赖 P1-G 的私有中心一半（CL1）。不需要 owner 再拍板（出境范围已在 P1-G 定）。
 
 #### P1-H · 团队视图用上扩展字段（公开 · 共用 UI 适配层）
@@ -610,7 +636,7 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D�
 |---|---|---|
 | 1 逐项对照 + 文件符号 / 契约证据 | §2、§3（47 行，分 A–F） | 完成；每行都有代码证据，不只依据设计注释 |
 | 2 隔离合成同数据、1200 / 390、深浅、前后截图 | §4 | 部分完成：桌面首页 + 详情、手机首页已实测；手机详情、版本 / 对比、谁在干活 / 团队标签**没有验证**，已经写明；截图没上传 |
-| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：10 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有；r2 新增 K 读回契约）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 14（P1-A），F 12、G 12（r3）、K 9、H 8 |
+| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：10 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有；r2 新增 K 读回契约）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 15（P1-G，r4），A 14、F 12、K 9、H 8 |
 | 4 沿用闸门、不降级、原文不出境 | §6 | 完成 |
 | 5 完整方案 + 覆盖矩阵 + 第一批 + 真实阻塞 | §0、§3、§5.1、§5.4 | 完成 |
 
@@ -639,3 +665,9 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D�
 | 审查项 | 问题 | 本版怎么改 |
 |---|---|---|
 | extension-capability-contract | 新 `ext-capabilities` DTO 只有 `reads`，P1-G 却按不存在的 `projection.ext1` 门控上传（加回旧 `capabilities` 又破坏严格兼容）；发现路由没有分派、中心实现和成功路径测试 | P1-D DTO 加 `uploads:{projectionExt1}`，读写分开，**只有 `uploads.projectionExt1` 授权上传**；`SharedLedgerClient.extCapabilities()`（404 → 全关常量，旧 `capabilities` 解析不动）；P1-G 写明导出端取得路径（mirror-loop 每轮、consent 开才问、直连中心、`PushDeps.ext1Upload`，失败一律按 V1 原包、不计失败）、中心拒收时同轮 V1 重发，globs 加 `shared-ledger-mirror-loop.ts` 和测试（12），依赖 P1-D；P1-D 写明 `actionFor` 实际在 `src/bridge/local-api/shared-ledger.ts:22-26`，`read` 加 `ext-capabilities / versions / activity` 三条及 `handleSharedLedgerApi` 三支（versions/activity 按响应 `projectId` 过滤，DTO 因此加 `projectId`，P1-K 两条同理）；P1-E 实现发现路由、P1-G 中心一半负责翻 `uploads / reads.ext1*`。测试：新中心（读写全开）/ 只读中心 / 老中心 404 三种发现响应 + 旧 features 夹具逐字不变；P1-G 能力 × consent 六格（只读中心 + consent 不得上传）。 |
+
+## 11. r4 修订记录（对应 r4 审查，head f275d13）
+
+| 审查项 | 问题 | 本版怎么改 |
+|---|---|---|
+| extension-client-scrub | P1-G 把 `shared-ledger-client.ts` 排除在范围外，但真实上传走 `SharedLedgerClient.projection()`，它在请求前用 V1 `parseSharedLedgerProjection` 二次 scrub（`shared-ledger-client.ts:166-168`），V1 task schema 没有 `ext1`（`shared-ledger-contract-transfer.ts:11-17`）→ 扩展包本机即被拒，到不了中心，"中心 4xx 重发"接不住；假 `MirrorClient` 测试绕过了这一层 | P1-G globs 加 `shared-ledger-client.ts`（新增 `projectionExt1()`，用 `parseSharedLedgerProjectionExt` scrub，同一 `POST projections` 与响应校验）和 `shared-ledger-auth.ts`（`authenticateSharedLedgerRequest` 可选 `projectionExt1` 开关，缺省 V1）及其测试，共 15 个；`projection()`、`parseSharedLedgerProjection`、bridge 代理一律不改，保持 V1-only；`MirrorClient` 加可选 `projectionExt1?`，没有就退回 V1；V1 重发调 `projection(stripExt1(…))`。§5.0 串行表把 client 改为 P1-D → P1-G → P1-K。新增真实链路测试 ⑦–⑪：投影 → 真实 `SharedLedgerClient` → 回环假中心（真实入站鉴权）收到 `ext1`；`projection()` 与 bridge 代理对同一扩展包本机拒收、假中心 0 请求；中心未开扩展解析时真实 400 → 同轮 V1 重发；普通 V1 上传逐字节不变。 |
