@@ -193,4 +193,22 @@ describe("§9 指标：截止与归因", () => {
     expect(useRates({ ...input, events: [...events.slice(0, 3), refs("A", 15, [{ id: "m1", use: "applied" }], "A:write:rX", h1)], since: 0 }))
       .toMatchObject({ pushed: 1, applied: 0 });
   });
+  test("同 head 连续返工：每张写单的推出各算各的，同一单内重领仍去重（push-order-dedup）", () => {
+    seq = 0;
+    const o1 = "A:fix:r1", o2 = "A:fix:r2";
+    const r = rank("A", 9, [{ id: "m1", routes: ["graph"] }]);
+    const events = [stage("A", 5, "review", "fix"), r, inject("A", 10, ["m1"], r.seq), inject("A", 11, ["m1"], r.seq), deliver("A", 20, o1, H),
+      refs("A", 21, [{ id: "m1", use: "applied" }], o1, H), stage("A", 22, "fix", "review"), stage("A", 25, "review", "fix"),
+      inject("A", 30, ["m1"], r.seq), deliver("A", 40, o2, H), refs("A", 41, [{ id: "m1", use: "applied" }], o2, H), stage("A", 42, "fix", "review")];
+    const all = memoryMetrics({ events, tasks: [task("A")], memories: mems, since: 0, until: 100 });
+    expect(all.uses).toMatchObject({ pushed: 2, applied: 2 });
+    expect(all.coverage).toEqual({ orders: 2, covered: 2, rate: 1 });
+    // 只看第二单所在的窗口
+    const second = memoryMetrics({ events, tasks: [task("A")], memories: mems, since: 25, until: 50 });
+    expect(second.uses).toMatchObject({ pushed: 1, applied: 1 });
+    expect(second.coverage).toEqual({ orders: 1, covered: 1, rate: 1 });
+    // 从 blocked 回来不算新单：重领仍去重
+    const blocked = [stage("B", 1, "restate", "build"), inject("B", 2, ["m1"], 0), stage("B", 3, "build", "blocked"), stage("B", 4, "blocked", "build"), inject("B", 5, ["m1"], 0)];
+    expect(pushedItems(blocked)).toHaveLength(1);
+  });
 });

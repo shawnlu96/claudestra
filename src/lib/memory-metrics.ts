@@ -33,7 +33,10 @@ export interface MetricsInput {
   launchTs?: number | null;
 }
 
-/** 推出的一条：同一张单（卡 + specRev + head + 写 / 审查）同一条记忆只算一次，取第一次推出 */
+/**
+ * 推出的一条：同一张单同一条记忆只算一次，取第一次推出。一张单 = 卡 + specRev + head + 写 / 审查 + 所在的那次进 build / fix（审查单：进 review），
+ * 从 blocked 回来不算新单（同 coverage / deliverScope）。head 不变的返工（只补证据、提争议）是新单，推出另算；同一单内重领仍去重。
+ */
 export interface PushedItem { task: string; order: MemoryOrderKind; head: string | null; id: string; ts: number; seq: number; routes: MemoryRoute[] }
 /** 一条算数的 P1（本轮仍挡路、没被降级） */
 export interface P1Hit { task: string; seq: number; ts: number; family: string }
@@ -42,14 +45,21 @@ export function pushedItems(events: readonly LedgerEvent[]): PushedItem[] {
   const ranks = new Map(events.filter((e) => e.kind === "scheduler" && e.data.op === "memory_rank").map((e) => [e.seq, e]));
   const seen = new Set<string>();
   const out: PushedItem[] = [];
+  const lifecycle = new Map<string, Record<MemoryOrderKind, number>>();
   for (const e of events) {
+    if (e.kind === "stage" && e.data.from !== "blocked") {
+      const cur = lifecycle.get(e.target) ?? { write: -1, review: -1 };
+      if (e.data.to === "build" || e.data.to === "fix") cur.write = e.seq;
+      if (e.data.to === "review") cur.review = e.seq;
+      lifecycle.set(e.target, cur);
+    }
     if (e.kind !== "scheduler" || e.data.op !== "memory_retrieve" || !Array.isArray(e.data.memoryIds)) continue;
     const order: MemoryOrderKind = e.data.order === "review" ? "review" : "write";
     const head = typeof e.data.head === "string" ? e.data.head : null;
     const rank = typeof e.data.rankingSeq === "number" ? ranks.get(e.data.rankingSeq) : undefined;
     const items = Array.isArray(rank?.data.items) ? rank.data.items as { id?: unknown; routes?: unknown }[] : [];
     for (const id of e.data.memoryIds.filter((x): x is string => typeof x === "string")) {
-      const key = JSON.stringify([e.target, e.data.specRev ?? null, head, order, id]);
+      const key = JSON.stringify([e.target, e.data.specRev ?? null, head, order, lifecycle.get(e.target)?.[order] ?? -1, id]);
       if (seen.has(key)) continue;
       seen.add(key);
       const routes = items.find((i) => i?.id === id)?.routes;
