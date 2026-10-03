@@ -4,37 +4,27 @@
  * Neither the join code nor the issued bearer is ever returned, logged or written outside the 0600 credential file.
  */
 import { sharedLedgerJoinPinsMatch } from "./shared-ledger-gate-proxy-join-pins.js";
-import { createHash } from "node:crypto";
 import { signPurpose, isPublicKey, type InstanceKey } from "./instance-key.js";
 import { STATE_DIR } from "./paths.js";
+import {
+  parseSharedLedgerJoinCode, SHARED_LEDGER_JOIN_PATH, SHARED_LEDGER_JOIN_PURPOSE, sharedLedgerInstanceId, sharedLedgerJoinFields,
+  type SharedLedgerJoinGrant, type SharedLedgerJoinRequest,
+} from "./shared-ledger-join-protocol.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
 import { readSharedLedgerBindings, setSharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
 import { resolveSharedLedgerCredential, writeSharedLedgerCredential, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 
-export const SHARED_LEDGER_JOIN_PATH = "/v1/join";
-/** Join proofs reuse the shared-ledger purpose; the JOIN tag and field count keep them disjoint from request signatures. */
-export const SHARED_LEDGER_JOIN_PURPOSE = "claudestra-shared-ledger-v1";
-const CODE_RE = /^sljoin1\.(center-[a-f0-9]{32})\.([a-f0-9]{32})\.([A-Za-z0-9_-]{43})$/;
+/** The pure protocol lives in shared-ledger-join-protocol.ts; these names stay importable from here. */
+export {
+  formatSharedLedgerJoinCode, looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode, SHARED_LEDGER_JOIN_PATH, SHARED_LEDGER_JOIN_PURPOSE,
+  sharedLedgerInstanceId, sharedLedgerJoinFields, type SharedLedgerJoinGrant,
+} from "./shared-ledger-join-protocol.js";
+
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const BEARER_RE = /^[A-Za-z0-9_-]{43}$/;
-type Action = SharedLedgerLocalCredential["projects"][number]["actions"][number];
+type Action = SharedLedgerJoinGrant["projects"][number]["actions"][number];
 const ACTIONS: readonly Action[] = ["read", "plan", "import", "project"];
 
-export interface SharedLedgerJoinCode { centerId: string; codeId: string; secret: string }
-export const formatSharedLedgerJoinCode = (c: SharedLedgerJoinCode): string => `sljoin1.${c.centerId}.${c.codeId}.${c.secret}`;
-export function parseSharedLedgerJoinCode(code: unknown): SharedLedgerJoinCode | null {
-  const m = typeof code === "string" ? CODE_RE.exec(code.trim()) : null;
-  return m ? { centerId: m[1]!, codeId: m[2]!, secret: m[3]! } : null;
-}
-/** True for anything shaped like a join code: callers use it to refuse codes passed through argv. */
-export const looksLikeSharedLedgerJoinCode = (v: string): boolean => /sljoin1\./.test(v);
-
-/** Default enrollment instance id, derived from the instance key: only its holder can claim it (free-form ids are first-come). */
-export const sharedLedgerInstanceId = (key: string) => `sli-${createHash("sha256").update(Buffer.from(key, "base64url")).digest("hex").slice(0, 24)}`;
-export function sharedLedgerJoinFields(centerId: string, code: string, publicKey: string, instanceId: string): string[] {
-  return ["JOIN", SHARED_LEDGER_JOIN_PATH, centerId, createHash("sha256").update(code).digest("hex"), publicKey, instanceId];
-}
-interface SharedLedgerJoinRequest { code: string; publicKey: string; instanceId: string; signature: string }
 export function signSharedLedgerJoin(code: string, instanceId: string, key: InstanceKey): SharedLedgerJoinRequest {
   const parsed = parseSharedLedgerJoinCode(code);
   if (!parsed || !ID_RE.test(instanceId)) throw new SharedLedgerJoinError("invalid join input");
@@ -43,10 +33,6 @@ export function signSharedLedgerJoin(code: string, instanceId: string, key: Inst
   return { code: code.trim(), publicKey: signed.key, instanceId, signature: signed.sig };
 }
 
-export interface SharedLedgerJoinGrant {
-  centerId: string; teamId: string; personId: string; instanceId: string; bearer: string; expiresAt: number;
-  role: "member" | "service"; projects: { projectId: string; actions: Action[] }[];
-}
 function parseGrant(v: unknown, centerId: string, instanceId: string): SharedLedgerJoinGrant {
   const g = v as SharedLedgerJoinGrant;
   const ok = !!g && typeof g === "object" && g.centerId === centerId && g.instanceId === instanceId
