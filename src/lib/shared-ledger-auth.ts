@@ -2,8 +2,8 @@
  * C2 supplies freshly loaded credentials on every request; never cache membership authorization.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { canonicalJson } from "./ask-bind.js";
-import { MAX_SKEW_S, SIG_HEADERS, signPurpose, verifyPurpose, type InstanceKey } from "./instance-key.js";
+import { canonicalJson } from "./canonical-json.js";
+import { MAX_SKEW_S, SIG_HEADERS, signPurpose, verifyPurpose, type InstanceKey } from "./instance-signature.js";
 import {
   SharedLedgerError, SHARED_LEDGER_MAX_BODY_BYTES, type SharedLedgerCommand,
   type SharedLedgerImport, type SharedLedgerProjection, type SharedLedgerImportControl,
