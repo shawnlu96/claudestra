@@ -10,12 +10,12 @@ import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { FP_RE } from "./relay-protocol.js";
 import { assertWritable, readJsonState, readJsonStateSync, writeJsonAtomicSync, type StateRead } from "./state-file.js";
+import { LEND_FAMILIES, type LendFamily } from "./lend-wire-types.js";
 
 export const LEND_PATH = statePath("lend.json");
 const LEND_VERSION = 2;
 
-export const LEND_FAMILIES = ["codex", "claude"] as const;
-export type LendFamily = (typeof LEND_FAMILIES)[number];
+export { LEND_FAMILIES, type LendFamily } from "./lend-wire-types.js";
 export const LEND_ROLES = ["review", "write"] as const;
 export type LendRole = (typeof LEND_ROLES)[number];
 /**
