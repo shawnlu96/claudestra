@@ -44,7 +44,7 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
-interface Ctl { sel: string | null; setSel(s: string | null): void; setNarrow(n: boolean): void }
+interface Ctl { sel: string | null; setSel(s: string | null): void; setNarrow(n: boolean): void; prepare(id: string): void }
 /** 和 collab-view 同一种接法：成员页的 × 回团队，其余 × 收起 */
 async function mount(initialNarrow = true) {
   const ctl = {} as Ctl;
@@ -52,8 +52,8 @@ async function mount(initialNarrow = true) {
     const [sel, setSel] = React.useState<string | null>(null);
     const [narrow, setNarrow] = React.useState(initialNarrow);
     const close = () => setSel((s) => (s === "member" ? "team" : null));
-    useSheetHistory(sel !== null, narrow, `~${sel ?? ""}`, close, port);
-    Object.assign(ctl, { sel, setSel, setNarrow });
+    const prepare = useSheetHistory(sel !== null, narrow, `~${sel ?? ""}`, close, port);
+    Object.assign(ctl, { sel, setSel, setNarrow, prepare });
     return null;
   }
   const host = doc().createElement("div");
@@ -158,6 +158,32 @@ describe("整屏页历史条目", () => {
     await act(() => ctl.setSel(null));
     await new Promise((r) => setTimeout(r, 300));
     expect(hash()).toBe("#chat?collab=T1");
+    await unmount();
+  });
+
+  test("prepare 在打开前先压（左滑预览不带这一层）：打开后不重复压，× 照样消掉", async () => {
+    await reset();
+    const { ctl, act, unmount } = await mount();
+    const len = win().history.length;
+    await act(() => { ctl.prepare("~team"); expect(hash()).toBe("#chat?collab=~team"); ctl.setSel("team"); });
+    expect(win().history.length).toBe(len + 1);
+    await act(() => ctl.prepare("~member")); // 已开着：不再压
+    expect(win().history.length).toBe(len + 1);
+    const p = settle();
+    await act(() => ctl.setSel(null));
+    await p;
+    expect(hash()).toBe("#chat");
+    await unmount();
+  });
+
+  test("prepare 压了但这层没打开：下一次渲染就消掉", async () => {
+    await reset();
+    const { ctl, act, unmount } = await mount();
+    const p = settle();
+    await act(() => { ctl.prepare("~team"); ctl.setNarrow(true); });
+    await act(() => ctl.setNarrow(false));
+    await p;
+    expect(hash()).toBe("#chat");
     await unmount();
   });
 
