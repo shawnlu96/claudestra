@@ -6,7 +6,7 @@
  * clean write order whose branch A itself saw unpushed; anything else stops for PM as before. Every peer-supplied field
  * other than the peer name is checked against the order row, never trusted. tests/ledger-lend-peers.test.ts.
  */
-import { updatePeerCooldownHello } from "./lend-peer-cooldown.js";
+import { cooldownPeerSlots, updatePeerCooldownHello } from "./lend-peer-cooldown.js";
 import type { Database } from "bun:sqlite";
 import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
@@ -67,9 +67,9 @@ const pausedFamily = (p: Paused | null, f: LendFamily, now: number): boolean => 
 /**
  * What the scheduler may place on this peer per family now. Zero when there is no hello (proto 1), the hello is older than
  * HELLO_FRESH_MS, the grant is gone, expired or used up for today; otherwise the reported free slots, capped by the room
- * borrow.maxOpen leaves after A's own live orders there.
+ * borrow.maxOpen leaves after A's own live orders there (null = no maxOpen cap: the unified pool, see unifiedPeerCapacity).
  */
-export function peerCapacity(db: Database, peer: string, maxOpen: number, now: number): PeerCapacity {
+export function peerCapacity(db: Database, peer: string, maxOpen: number | null, now: number): PeerCapacity {
   const p = getLendPeer(db, peer);
   const open = liveOrdersAt(db, peer);
   const base = { peer, proto: p?.proto ?? 1, helloAt: p?.helloAt ?? null, open, slots: zero() };
@@ -78,10 +78,32 @@ export function peerCapacity(db: Database, peer: string, maxOpen: number, now: n
   if (!p.grant) return { ...base, why: "对方没有授权（或已收回）" };
   if (p.grant.until <= now) return { ...base, why: "对方的授权已到期" };
   if (p.grant.ordersLeftToday <= 0) return { ...base, why: "对方今天的单数用完了" };
-  const room = Math.max(0, maxOpen - open);
+  const room = maxOpen === null ? Infinity : Math.max(0, maxOpen - open);
   const slots = zero();
   for (const f of LEND_FAMILIES) slots[f] = pausedFamily(p.paused, f, now) ? 0 : Math.min(room, Math.max(0, p.slots[f].total - p.slots[f].busy));
   return { ...base, slots, why: null };
+}
+
+export interface UnifiedPeerCapacity extends PeerCapacity { totals: Record<LendFamily, number>; busy: Record<LendFamily, number> }
+
+/**
+ * The unified agent pool's view of a peer, shared by placement and every capacity reading: borrow.maxOpen does not apply;
+ * each family is min(reported free, reported total − A's live orders of that family there, across all projects), so two
+ * projects borrowing the same peer see one set of seats. busy is taken before cooldown (placement load); slots after it.
+ * tests/lend-capacity-parity.test.ts.
+ */
+export function unifiedPeerCapacity(db: Database, peer: string, now: number): UnifiedPeerCapacity {
+  const cap = peerCapacity(db, peer, null, now);
+  const p = getLendPeer(db, peer);
+  const slots = { ...cap.slots }, totals = zero(), busy = zero();
+  for (const f of LEND_FAMILIES) {
+    totals[f] = p?.slots[f].total ?? 0;
+    const live = (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND status IN (${LEND_LIVE.map(() => "?").join(",")})`)
+      .get(peer, f, ...LEND_LIVE) as { n: number }).n;
+    slots[f] = Math.min(slots[f], Math.max(0, totals[f] - live));
+    busy[f] = totals[f] - slots[f];
+  }
+  return { ...cap, slots: cooldownPeerSlots(db, peer, slots, now), totals, busy };
 }
 
 /** A beat or ask says a revocation happened: the grant counts as gone until the lender's next hello says otherwise. */
