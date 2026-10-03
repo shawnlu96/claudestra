@@ -19,7 +19,12 @@
 | 执行者换法 | `src/bridge/fleet/service.ts:163` `actionFor()`，依据 `src/lib/ctx-boundary-policy.ts:142` `effectiveAction` / `:148` `isExecutor` | 执行者（`agent-task-*` 或 linked worktree）跑 save-compact 时改成 compact，免得覆盖 PM 的 HANDOFF |
 | 发键 | `src/bridge/fleet/runner.ts:146` `compact()` → `service.ts:252` `injectCompact`（`bridge/ctx-boundary-inject.ts`） | 读的是 tmux 屏幕和 CC 文案，Codex ACP 窗口里只有宿主日志，这条路不能复用 |
 | 「完成」口径 | `runner.ts:156-162`：看到 spinner 或 `Compacting conversation` 就报 `done`，detail 是「已开始压缩」 | CC 这边也只确认「已开始」。Codex 版必须区分「已受理」和「已完成」（见 §2.4） |
-| 防重复 | `runner.ts:223` `inFlight`（进程内 Set）、`withWindow` 窗口执行权、15 分钟守卫 `compactInjectedRecently` | 都只在内存里，bridge 重启就没了；而且都以 tmux 窗口为键 |
+| 防重复 | 三层，性质不同（见下） | 都是给 tmux 发键设计的，Codex ACP 都用不上，需要新的持久单飞（§2.5） |
+
+防重复的三层要分开看：
+- `runner.ts:229` `inFlight`：进程内 `Set`，**以 agent 名为键**，bridge 重启就清空。只防同一进程里两个批量动作同时处理同一个 agent。
+- `withWindow`：进程内的窗口执行权，**以 tmux 窗口为键**，同样不落盘。
+- 15 分钟注入守卫：**已经落盘**。`ctx-boundary.ts:383` 启动时 `loadInjectState("live")`，`ctx-boundary-inject.ts:23,93-101` 把守卫换成 `PersistedMap`（`ctx-boundary-injected.json`），`:156-158` `noteCompactInjected` 写入，bridge 重启后还在。它以 tmux 窗口为键（`windowKey`），只记「发过压缩键」，不记压缩是否完成。
 
 ### 1.2 权限 / 范围
 
@@ -41,6 +46,7 @@
 3. **宿主入队**：`src/lib/acp/host.ts:357` 收到 `op:"slash"` 后调 `loop.submitCommand(text)`，**同步回 `{ok:true}`**，这时只是入队。
 4. **网页回包**：`api-slash.ts:65` 回 **HTTP 202 `accepted: true`**，再 `markThinking`。这只是「已受理」。
 5. **独占一轮**：`src/lib/acp/turn.ts:106` `submitCommand`，`next()`（`:156`）让 command 槽独占一轮 `session/prompt`。
+5b. **没有去重**：连续两次 `/compact` 会走两次 `acpSlash`，宿主两次 `submitCommand`，`turn.ts:106-110` 排两个 command 槽，也就是压缩两轮。
 6. **适配器转换**：`src/lib/runtimes/acp-control.ts:9` / `runtimes/types.ts:215`（`slashAsPrompt`）。按注释，codex-acp 会把 `/compact` 文本转成 app-server 的 `thread/compact/start`。
 
 ### 1.4 compacted 事件链
@@ -98,7 +104,9 @@
    - 校验大小和非空。
 4. **判定保存结果**：回合结束时 bridge 核对这个 op 的交接文件，op id 和时间都要比受理晚，才转入 `saved`。
    - 没写、超时、回合失败或被取消 → `failed: save` / `cancelled`，**不压缩**。
-5. **压缩（compacting）**：`acpSlash("/compact <保留清单>")`，复用 `fleet.compactKeep`；op 记录 `compacting`。
+5. **压缩（compacting）**：先把 op 记成 `compacting{dispatched:false}` 并落盘，**落盘成功后**才发 `acpSlash("/compact <保留清单>", opId)`（复用 `fleet.compactKeep`）；宿主回执到了再记 `dispatched:true`。
+   - 顺序的用意：磁盘上只要还是 `saved`，就一定没发过压缩；一旦是 `compacting`，就可能发过，重启后不能自动重放（§2.5）。
+   - 落盘失败 → `failed: compact`（原因写「状态没写进去，没发」），交接保留。
 6. **完成判定**：
    - 只有拿到 N2 核实过的完成信号，才转 `compacted`，同时发 `compact_done` 并放行押后；
    - 失败 / 被取消 / 超时 → `failed: compact` / `cancelled`。此时**交接文件保留**，界面明确写「交接已存，压缩没成功」。
@@ -122,16 +130,30 @@
 
 ### 2.4 状态 / 失败 / 取消的反馈
 
-- 状态机：`accepted → waiting → saving → saved → compacting → compacted`。
+- 状态机：
+  - save-compact：`accepted → waiting → saving → saved → compacting → compacted`；
+  - compact-only（fleet `compact`、网页 `/compact`，见 §2.6）：`accepted → waiting → compacting → compacted`，跳过 saving / saved，不写交接。
 - 任一步都可能落到 `failed{stage, reason}` 或 `cancelled{stage}`。
 - 对外回包：
   - 网页和 fleet 结果的 `outcome` 只用 `queued`（已受理 / 等待）、`done`（**仅 `compacted`**）、`skipped`、`failed`；
   - 受理时回 `queued` 加 op id，不回 `done`。
 - 后续进度：每次状态迁移发 SSE（新事件 `compact_op`），并在 agent 频道发一行知会。
-- 取消：
-  - 网页的打断（`abort` 帧 / `session/cancel`）作用在当前阶段，op 记为 `cancelled`；
-  - saving 阶段取消 → 不压缩；
-  - compacting 阶段取消 → 交接保留，报「压缩被取消」。
+- 取消：**按 op 取消**，不复用现有的停止按钮。
+  - 现有 `abortAcpTurn`（`acp/abort.ts:19-24`）取消的是会话当前的回合，不认 op；它也不删宿主 `AcpTurnLoop` 里排着的 command 槽。直接复用会有两个错：等待期间点取消会打断别人的业务轮（可能正是自调用工具所在的那一轮）；command 已排队时取消，当前轮停了，压缩却在下一轮照跑。
+  - 所以 op 发给宿主的槽都带 `opId`（N1），宿主新增 `cancel_slot{opId}`：槽还在队列里就**删掉**并回 `revoked`；正在跑的就是这个 op 的槽才回 `running`；不在了回 `gone`。
+  - 各阶段：
+
+    | 阶段 | 取消做什么 | 结果 |
+    |------|-----------|------|
+    | accepted / waiting | 只在 bridge 撤掉等待，**不碰会话** | `cancelled{waiting}` |
+    | saving，槽还在排队 | `cancel_slot` → `revoked` | `cancelled{saving}`，不压缩 |
+    | saving，槽在跑 | `cancel_slot` 回 `running` 后，才对这一轮 `session.cancel` | 回合结束后 `cancelled{saving}`，不压缩 |
+    | saved | 只在 bridge 结束 op | `cancelled{saved}`，交接保留 |
+    | compacting，槽还在排队 | `cancel_slot` → `revoked`，压缩不会再跑 | `cancelled{compacting}`，交接保留 |
+    | compacting，槽在跑 | 同上，只取消属于本 op 的这一轮 | 见下方竞态规则 |
+
+  - **竞态**：最终状态以宿主报的这个槽的实际结局为准，不以点击为准。取消回执之前完成信号已经到了 → `compacted`；宿主回 `gone` 且没有完成信号 → 等槽的 prompt 结局再定。界面先显示「正在取消」，不提前写「已取消」。
+  - 现有停止按钮照旧只管当前回合。它停掉的恰好是 op 的槽时，op 跟着记 `cancelled{阶段}`；停的是别的回合，op 不受影响。
 - 不能用时的解释（都不发任何东西）：
 
   | 情况 | 结果 |
@@ -148,7 +170,12 @@
   - 有未终结的 op 时，再点一次直接返回同一个 op id，不重复保存、不重复压缩、不多跑模型；
   - bridge 重启后从记录续上：
     - `waiting` / `accepted`：重新等安全点；
-    - `saving` / `compacting`：标成 `failed: interrupted`，不自动重放，避免重复消耗。
+    - `saving`：向宿主查 `slot_status{opId}`。宿主还排着 → `cancel_slot` 撤掉后记 `failed: interrupted`；宿主在跑或已跑完 → 等它的结局，按 §2.1 第 4 步判保存结果；宿主不在 / 不认这个 op → `failed: interrupted`。都不重放保存。
+    - `saved`：交接已存、压缩**一定没发**（§2.1 第 5 步的落盘顺序保证）。先核对交接文件还在且 op id 对得上：
+      - 对得上，且 `saved` 不超过 30 分钟 → 重新等安全点，然后照常进入 compacting（只会发这一次）；
+      - 文件不在 / 对不上 / 超过 30 分钟 → 记 `failed: interrupted{saved}`，交接保留，界面写「交接已存，压缩没发，可以再点一次」。
+    - `compacting`：先查 `slot_status{opId}`（宿主是独立进程，bridge 重启时它可能还在跑这个槽）。在排队 / 在跑 → 继续跟它的结局；已结束 → 按完成信号判；宿主不在、不认这个 op、或 `dispatched:false` 且宿主没有这个槽 → `failed: interrupted`。**任何情况都不自动重放 `/compact`**，避免重复消耗。
+  - 终结状态（`compacted` / `failed` / `cancelled`）之后再点，才建新 op。`failed: interrupted{saved}` 后再点 save-compact，新 op 照常重新保存，不复用旧交接（旧文件会被同 agent 的新交接原子替换）。
 - **消息**：压缩期间入站一律排在压缩之后（N1）。押后队列、租约和台账任务进度不受影响：它们都在磁盘上，本流程只读不写。
 - **不开定时**：
   - 不新增 cron，也不新增自动触发；
@@ -156,16 +183,36 @@
   - 不消耗 owner 的第二张重置卡，不改额度闸。
 - **压缩本身会耗模型**：只在 owner 或 PM 明确点击 / 调用时发生。
 
+### 2.6 统一入口：fleet compact 与网页 `/compact` 也走 op
+
+- Codex ACP 的所有压缩入口都调同一个函数 `requestCodexCompact({agent, kind, keep, actor, via})`（N4 的 `entry.ts`），它负责能力闸、权限之后的单飞、落盘 op、回包：
+  - fleet `compact` / `save-compact`（网页批量面板、MCP `fleet` 工具、本机 CLI）；
+  - 网页 `/compact`、`/save-compact` 发给 Codex ACP agent 时（`api-slash.ts` 不再直通 `acpSlashPassthrough`）；
+  - MCP `request_self_compact`（只登记本 agent 自己的 op）。
+- `kind: "compact"` 走 compact-only 分支，不写交接；`kind: "save-compact"` 走完整流程。
+- **能力闸**：适配器版本不在 N2 核实过的清单里 → 回 `skipped：适配器不支持可确认的压缩`，**什么都不发**。这会改变现状：今天网页 `/compact` 对 Codex 会直通宿主，改后未核实的版本不再发。
+- **单飞**：有未终结的 op 就返回它，不论 kind。正在 compact-only 时点 save-compact，返回旧 op 并说明「正在压缩，结束后再点」，不排第二个。
+- 回包：受理回 `queued` + op id（网页 HTTP 202），只有 `compacted` 才是 `done`。
+- Pi 的 `/compact` 直通、CC 的发键路径都不改。
+
 ## 3. 节点拆分（给 PM 落正式代码节点）
 
 每个节点都要附 `bun run check` 通过。新文件 ≤ 800 行（测试 ≤ 600），函数 ≤ 100 行；大文件只加一行调用。
 
-### N1 · ACP 命令槽期间不 steer（无依赖）
+### N1 · ACP 宿主：命令槽不 steer + 槽带 op id、可撤销（无依赖）
 
-- **globs**：`src/lib/acp/turn.ts`、`tests/acp-turn.test.ts`
+- **globs**：`src/lib/acp/turn.ts`、`src/lib/acp/host.ts`、`src/lib/acp/abort.ts`、`src/bridge/acp-link.ts`、`tests/acp-turn.test.ts`、`tests/acp-self-turn.test.ts`
+- **改动**：
+  - command 槽在跑时，新入站排在命令之后，不 steer；
+  - `submitCommand(text, opId?)`，另加独占一轮、不与普通 prompt 合批的 `op` 槽（给 saving 用；现在 `next()` 会把相邻 prompt 拼成一轮）；
+  - `cancelSlot(opId)` → `revoked` / `running` / `gone`；`slotStatus(opId)`；宿主 `call` 新增 `op:"cancel_slot"`、`op:"slot_status"`，`acp-link.ts` 加对应调用；
+  - 槽结束时宿主上报 `{opId, outcome}`。
 - **旧红 → 新绿**：
-  - 新测试：command 槽在跑时 `submit()` 应返回 `"queued"`、不调 `io.steer`，并且排在命令之后、作为下一轮 prompt 跑。现状返回 `"steer"`，测试为红。
-  - 原有 steer 测试（普通 prompt 回合）保持绿。
+  - command 槽在跑时 `submit()` 返回 `"queued"`、不调 `io.steer`，下一轮才跑。现状返回 `"steer"`，红。
+  - 排队中的 command 槽 `cancelSlot` 后不会开回合（`io.prompt` 不被调用）；现状没有这个方法，红。
+  - 正在跑别的回合时 `cancelSlot(本 op)` 回 `revoked`，**不调 `session.cancel`**；现状 abort 只会取消当前回合，红。
+  - `op` 槽不和前后 prompt 合并成一轮。
+  - 原有 steer、abort（`acp-self-turn.test.ts`）测试保持绿。
 
 ### N2 · 核实上游协议 + Codex 压缩完成信号（无依赖，先做）
 
@@ -183,43 +230,61 @@
 
 ### N3 · 交接存储 + `save_handoff` 工具（无依赖）
 
-- **globs**：`src/lib/agent-handoff.ts`（新）、`src/channel-server.ts`（只加工具声明）、`src/bridge/handoff-route.ts`（新）、`src/bridge.ts`（一行接线）、`tests/agent-handoff.test.ts`（新）
+- **globs**：`src/lib/agent-handoff.ts`（新，存储）、`src/lib/compact-tools.ts`（新，`SAVE_HANDOFF_TOOL` 声明 + `saveHandoffTool` 调 bridge，写法同 `lib/fleet-tool.ts`）、`src/channel-server.ts`（工具列表 `:600` 加一项、`:742` dispatch 加一个 `case`）、`src/bridge/handoff-route.ts`（新，按连接认身份）、`src/bridge.ts`（ws 消息分派加一行，同 `:2220` `fleet_*` 的写法）、`tests/agent-handoff.test.ts`（新）、`tests/compact-tools.test.ts`（新）
 - **新绿**：
   - 写到 `STATE_DIR/handoff/<名>/HANDOFF.md`，原子写，带 op id 和时间；
   - 不在 registry 的名字拒绝；
   - 名字和连接不符时拒绝；
   - 超过上限（例如 16 KB）拒绝；
-  - 不触碰 `~/.claude` 下的任何路径（测试里用临时 HOME 断言）。
+  - 不触碰 `~/.claude` 下的任何路径（测试里用临时 HOME 断言）；
+  - 工具声明没有路径 / 名字参数；`saveHandoffTool` 把参数原样交 bridge，身份只由连接决定（现状没有这个工具，红）。
 
 ### N4 · Codex save-compact 编排器（依赖 N1、N2、N3）
 
-- **globs**：`src/bridge/codex-compact/ops.ts`（新，状态机和落盘）、`src/bridge/codex-compact/run.ts`（新，等安全点 → 保存 → 压缩 → 判定）、`tests/codex-compact-ops.test.ts`（新）、`tests/codex-compact-stub.test.ts`（新，临时 stub 集成）
+- **globs**：`src/bridge/codex-compact/ops.ts`（新，状态机和落盘）、`src/bridge/codex-compact/run.ts`（新，等安全点 → 保存 → 压缩 → 判定）、`src/bridge/codex-compact/cancel.ts`（新，按 op 取消，§2.4）、`src/bridge/codex-compact/recover.ts`（新，重启续接，§2.5）、`src/bridge/codex-compact/entry.ts`（新，`requestCodexCompact` 统一入口 + 能力闸，§2.6）、`tests/codex-compact-ops.test.ts`（新）、`tests/codex-compact-cancel.test.ts`（新）、`tests/codex-compact-stub.test.ts`（新，临时 stub 集成）
 - **新绿**（全部跑在临时 STATE_DIR + stub 上）：
   - 保存失败时不发 `/compact`；
   - 压缩失败时交接文件还在，状态是 `failed: compact`，不报 `done`；
   - 重复受理返回同一个 op id，stub 只收到一次 `/compact`；
   - 安全点在 busy 或有押后条目时等待，不发东西；
-  - bridge 重启后，`saving` 状态记为 `failed: interrupted`，不重放；
-  - 取消时状态为 `cancelled`；
+  - compact-only：不调 `save_handoff`，直接 compacting；
+  - 连续两次 `requestCodexCompact(kind:"compact")` 返回同一 op id，stub 只收到一次 `/compact`；
+  - 适配器版本不在核实清单 → `skipped`，stub 什么都没收到；
+  - 完成信号到达前结果一直是 `queued`，没有 `done`；
+  - 重启续接：`saving` 宿主不认 → `failed: interrupted`、不重放；`saved` 断点（交接已存、未发压缩）重启 → 等安全点后 stub 只收到一次 `/compact`；`saved` 超过 30 分钟 → `failed: interrupted{saved}`、交接还在，再点一次建新 op；`compacting` 宿主还在跑 → 跟到结局，stub 没有收到第二次 `/compact`；
+  - 落盘顺序：模拟 `compacting` 写盘失败 → 不发 `/compact`；
+  - 取消：waiting 时取消，stub 上正在跑的业务轮不被 cancel、正常结束；command 已排队未开始时取消 → stub 从未收到 `/compact`、状态 `cancelled{compacting}`；完成信号与取消回执竞态 → 以完成信号为准记 `compacted`；
   - 押后队列文件在 op 前后逐字不变。
 
-### N5 · 入口接线（依赖 N4）
+### N5 · 入口接线（依赖 N4；`request_self_compact` 还依赖 N3 的 `compact-tools.ts`）
 
-- **globs**：`src/lib/fleet-plan.ts`、`src/bridge/fleet/service.ts`、`src/bridge/fleet/runner.ts`、`src/lib/fleet-caller.ts`、`src/bridge/api-slash.ts`、`src/lib/runtime-commands.ts`、`tests/fleet-plan.test.ts`、`tests/fleet-runner.test.ts`、`tests/fleet-caller.test.ts`、`tests/api-slash.test.ts`、`tests/runtime-commands.test.ts`
+- **globs**：`src/lib/fleet-plan.ts`、`src/bridge/fleet/service.ts`、`src/bridge/fleet/runner.ts`、`src/lib/fleet-caller.ts`、`src/bridge/api-slash.ts`、`src/lib/runtime-commands.ts`、`src/lib/compact-tools.ts`（加 `REQUEST_SELF_COMPACT_TOOL` 与调用）、`src/channel-server.ts`（`:600` 列表、`:742` dispatch 各加一项）、`src/bridge/codex-compact/self-route.ts`（新，按连接认出调用方、只能给自己登记）、`src/bridge.ts`（ws 消息分派加一行）、`tests/fleet-plan.test.ts`、`tests/fleet-runner.test.ts`、`tests/fleet-caller.test.ts`、`tests/api-slash.test.ts`、`tests/runtime-commands.test.ts`、`tests/compact-tools.test.ts`
 - **改动**：
   - `ccOnly` 改为按动作和运行时判断：`compact` / `save-compact` 支持 `codex` 且 transport 是 acp；`lp-*` 仍只支持 CC。
-  - Codex 的 `save-compact` 走 N4。执行者在 Codex 下也可以存交接，因为路径按 agent 隔离，不再需要改成 compact；这条差异要写进 dryRun 说明。
-  - 网页 `/save-compact` 对 Codex ACP 走 N4，回 202 并带 op id。
-  - 自压：保持 `INTERRUPTS_SELF` 拒绝，不让 fleet 点名自己。另外提供 MCP `request_self_compact`，只登记 op、等安全点，所以不会中断当前工具结果。
+  - fleet runner 对 Codex ACP 的 `compact` 和 `save-compact` 都只调 `requestCodexCompact`（N4 `entry.ts`），不走发键。执行者在 Codex 下也可以存交接，因为路径按 agent 隔离，不再需要改成 compact；这条差异写进 dryRun 说明。
+  - `api-slash.ts`：Codex ACP 的 `/compact`、`/save-compact` 改调 `requestCodexCompact`，回 202 + op id；能力闸不过回 409 + 原因，不发。Pi 的 `/compact` 仍走 `acpSlashPassthrough`。
+  - 自压：保持 `INTERRUPTS_SELF` 拒绝，不让 fleet 点名自己。另提供 MCP `request_self_compact`（没有 agent 参数），只登记 op、等安全点，所以不会中断当前工具结果。
 - **旧红 → 新绿（被替代的旧断言）**：
   - `fleet-plan` 中「codex 的 compact 报 `运行时不支持（codex）`」改为只对 tmux 版 Codex 成立；
   - `fleet-runner` 对 Codex ACP 的 `compact` 结果是 `queued`，不是 `done`。
+- **新绿**：
+  - 网页对 Codex ACP 连发两次 `/compact`：两次都回同一个 op id，宿主假件只收到一次 `slash`（现状两次，红）；
+  - 适配器未核实：`/compact` 回 409，宿主假件一次都没收到（现状 202，红）；
+  - `request_self_compact` 只能登记调用方自己，传任何名字字段都被忽略；peer / external 连接调用被拒。
 - **保留**：master 排除、PM 项目范围、peer 斜杠当普通消息、远端只读，这些断言原样保持绿。
 
 ### N6 · 网页反馈（依赖 N5，ui 卡，截图由 PM 验收）
 
-- **globs**：`src/bridge/event-bus.ts`、`web/` 下 fleet 面板与 agent 状态相关组件、对应 `tests/web-*.test.ts`
-- **内容**：显示 op 各阶段，失败时说明是哪一步，取消按钮复用打断。
+- **globs**：
+  - bridge：`src/bridge/event-bus.ts`（新事件 `compact_op`）、`src/bridge/local-api/fleet.ts`（加 `GET /fleet/compact-op?agent=`、`POST /fleet/compact-op/cancel`，与 `/fleet/run` 同一个 `canRunFleet` + `agentInScope` 闸）
+  - 网页：`web/lib/api/fleet.ts`（`requestCompact` 只把 `done` 当完成、`queued` 返回 op id；新增 `followCompactOps`，订阅 `/events?types=compact_op`，写法同 `followLpEvents`；`cancelCompactOp`）、`web/features/fleet/fleet-panel.tsx`（结果列显示阶段、订阅事件）、`web/features/fleet/fleet-actions.tsx`（op 未终结时压缩按钮置灰并显示「取消压缩」）、`web/features/chat/components/ctx-badge.tsx`、`web/features/chat/components/ctx-warn-banner.tsx`（「存记忆 + Compact」显示阶段，不再在 `queued` 时写成功）
+  - 测试：`tests/web-fleet-api.test.ts`、`tests/event-bus.test.ts`、`tests/fleet-routes.test.ts`、`tests/web-stream-shape.test.ts`
+- **内容**：显示 op 各阶段，失败时说明是哪一步。取消按钮调 `cancelCompactOp`（按 op 取消，§2.4），**不复用**输入框的停止按钮。
+- **旧红 → 新绿**：
+  - `requestCompact` 拿到 `queued` 时仍算受理成功（按钮不可再点），但文案是「已受理」并带 op id，不写完成；`web-fleet-api.test.ts:11`「已排队算成」的旧断言按此补文案断言（现状直接显示 bridge detail，红）；
+  - `followCompactOps` 只把 `compact_op` 事件交给回调；
+  - `/fleet/compact-op/cancel` 对没有 manage 凭据的设备回 403、对 scope 外的 agent 回 403；
+  - `compact_op` 事件的形状进 `web-stream-shape` 断言。
 
 ### N7 · 文档（随 N5 合并）
 
@@ -229,7 +294,7 @@
 ## 4. 测试与需要用户原生操作的部分
 
 - **最小真实协议 stub 集成**：只用 `scripts/acp-stub.ts`，配临时 STATE_DIR / HOME（`tests/` 现有的 acp stub 用法）。
-  - 覆盖：宿主 ↔ stub 的 `session/prompt("/compact")`、完成和失败信号、`save_handoff` 工具回路、单飞、取消。
+  - 覆盖：宿主 ↔ stub 的 `session/prompt("/compact")`、完成和失败信号、`save_handoff` 工具回路、单飞（含网页 `/compact` 连发）、能力闸、按 op 取消（waiting / 已排队 / 竞态）、`saved` 与 `compacting` 断点重启。
   - 不碰真实 Codex、`~/.codex`、`auth.json`，不碰生产 bridge，也不调用模型。
 - **需要 owner 原生操作的时机**：N5 合并后，由 owner 在自己的一个 Codex ACP agent 上手动点一次「存交接再压缩」。只有这一步会真正调用 `thread/compact/start` 并消耗模型。执行者和 CI 一律不做。
   - 验收看三点：交接文件落在 `STATE_DIR/handoff/<名>/`；完成卡只在完成信号到达后出现；压缩期间发的一条消息在压缩之后才被处理。
