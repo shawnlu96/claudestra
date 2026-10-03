@@ -1,7 +1,7 @@
 /**
  * 测试一律用临时状态目录：lib/paths.ts 在加载时读 CLAUDESTRA_STATE_DIR，不隔离的话 recordMetric、
  * cron、config 之类会往真实的 ~/.claude-orchestrator 里写（用量统计、交接记录都会被测试数据污染）。
- * 已经显式设了就尊重（手动指定 / 子进程测试）。检查默认路径的用例在子进程里去掉这个变量再验。
+ * 已经显式设成临时目录下的就尊重（子进程测试）。检查默认路径的用例在子进程里去掉这个变量再验。
  * 没加载本文件时（仓库外目录跑、绝对路径跑）由 lib/test-guard.ts 按 NODE_ENV=test 兜底。
  */
 import { mkdtempSync } from "node:fs";
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readAutoloadedEnvUnguarded } from "../src/lib/env-file.ts";
 import { REPO_ROOT } from "../src/lib/repo-root.ts";
-import { TEST_FLAG } from "../src/lib/test-guard.ts";
+import { TEST_FLAG, testSafeStateDir } from "../src/lib/test-guard.ts";
 import { installTestTmpRoot } from "./test-tmp-root.ts";
 
 // Bun's test runner skips process exit events on completion; a preload afterAll runs once after all files' hooks.
@@ -37,7 +37,9 @@ for (const dir of new Set([process.cwd(), REPO_ROOT])) {
 }
 
 process.env[TEST_FLAG] = "1";
-if (!process.env.CLAUDESTRA_STATE_DIR) process.env.CLAUDESTRA_STATE_DIR = mkdtempSync(join(tmpdir(), "cstra-test-state-"));
+process.env.CLAUDESTRA_STATE_DIR ||= mkdtempSync(join(tmpdir(), "cstra-test-state-"));
+// 继承来的不在临时目录下（出借执行者的会话带着生产目录）就换掉。运行目录由 lib/paths.ts 加载时经 test-guard 换
+testSafeStateDir(process.env.CLAUDESTRA_STATE_DIR);
 
 // bridge 一律指向没人听的端口，无条件：agent 会话里本来就带着 BRIDGE_URL，没设时默认又是线上的 3847，
 // 漏注入依赖的用例会把消息真发给线上 bridge。频道号 / token 也清掉，免得身份被当成跑测试的那个 agent。
