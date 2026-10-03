@@ -385,6 +385,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
+  await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps); // state-protection-F2：已发未记的收尾，不论卡是否还在 auto
   for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;

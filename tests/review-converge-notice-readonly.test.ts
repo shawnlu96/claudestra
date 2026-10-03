@@ -13,6 +13,7 @@ import { convergeNoticeKey } from "../src/lib/review-converge-notice-write.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
+import { runManagerProcess } from "../src/lib/run-manager.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { autoFixture, H1 } from "./scheduler-auto-helpers.js";
 
@@ -62,16 +63,65 @@ describe("failed follow-up notice on the read-only scheduler connection", () => 
     expect(calls).toHaveLength(1);
     expect(getEventByDedup(f.db, key)).toBeNull();
     f.advance(120_000);
-    await followUpFailureNotice(ro, f.task(), f.tickDeps); // backoff over: retried, now recorded
-    expect(told()).toHaveLength(2);
+    await followUpFailureNotice(ro, f.task(), f.tickDeps); // backoff over: only the record is retried, PM already has it
+    expect(told()).toHaveLength(1);
     expect(getEventByDedup(f.db, key)?.data.downgradeSeq).toBe(downgrade.seq);
     await followUpFailureNotice(ro, f.task(), f.tickDeps);
-    expect(told()).toHaveLength(2);
+    expect(told()).toHaveLength(1);
 
     const g = setup();
     const lost = { ...g.f.tickDeps, manager: async () => ({ ok: false, code: "lease-lost", error: "失租" }) };
     await expect(followUpFailureNotice(g.ro, g.f.task(), lost)).rejects.toBeInstanceOf(SchedulerStopped);
     expect(getEventByDedup(g.f.db, g.key)).toBeNull();
+  });
+
+  test("a manager that throws (real runManagerProcess, spawn ENOENT) backs off like a refusal: one notice, one attempt", async () => {
+    const { f, ro, told, key } = setup();
+    let attempts = 0;
+    const spawnFails = { ...f.tickDeps, manager: async (...args: string[]) => {
+      attempts++;
+      return runManagerProcess(args, { bunPath: join(f.dir, "missing-bun"), managerPath: join(f.dir, "manager.ts"), env: {}, timeoutMs: 1000 });
+    } };
+    const errors: string[] = [];
+    for (let i = 0; i < 3; i++) await followUpFailureNotice(ro, f.task(), spawnFails).catch((e) => errors.push((e as Error).message));
+    expect({ notices: told().length, attempts, errors, informed: getEventByDedup(f.db, key) }).toEqual({ notices: 1, attempts: 1, errors: [], informed: null });
+    f.advance(120_000);
+    await followUpFailureNotice(ro, f.task(), spawnFails);
+    expect({ notices: told().length, attempts }).toEqual({ notices: 1, attempts: 2 });
+    f.advance(240_000);
+    await followUpFailureNotice(ro, f.task(), f.tickDeps);
+    expect(told()).toHaveLength(1);
+    expect(getEventByDedup(f.db, key)?.data.informed).toBe(true);
+    const lost = setup();
+    const thrown = { ...lost.f.tickDeps, manager: async () => { throw new SchedulerLeaseLost("gone"); } };
+    await expect(followUpFailureNotice(lost.ro, lost.f.task(), thrown)).rejects.toBeInstanceOf(SchedulerStopped);
+  });
+
+  test("a record that failed before the card fell back to manual is still retried by later auto ticks", async () => {
+    const { f, ro, told, key } = setup();
+    let records = 0;
+    const busy = { ...f.tickDeps,
+      manager: async (...args: string[]) => {
+        if (args[1] !== "scheduler-converge-notice") return f.tickDeps.manager(...args);
+        records++;
+        return { ok: false, code: "busy", error: "transient record failure" };
+      },
+      ensure: async () => ({ kind: "manual" as const, reason: "author session cannot be used" }),
+    };
+    const first = await schedulerAutoTick(ro, { p: { maxActiveWorkers: 2 } }, busy);
+    expect(first.cards.map((c) => c.step)).toEqual(["manual"]);
+    expect({ notices: told().length, records, informed: getEventByDedup(f.db, key) }).toEqual({ notices: 1, records: 1, informed: null });
+    f.advance(900_000);
+    const counted = { ...f.tickDeps, manager: async (...args: string[]) => {
+      if (args[1] === "scheduler-converge-notice") records++;
+      return f.tickDeps.manager(...args);
+    } };
+    const next = await schedulerAutoTick(ro, { p: { maxActiveWorkers: 2 } }, counted);
+    expect({ cards: next.cards, failed: next.failed }).toEqual({ cards: [], failed: [] });
+    expect({ notices: told().length, records }).toEqual({ notices: 1, records: 2 });
+    expect(getEventByDedup(f.db, key)?.data.informed).toBe(true);
+    await schedulerAutoTick(ro, { p: { maxActiveWorkers: 2 } }, counted);
+    expect(records).toBe(2);
   });
 
   test("the CLI only takes the scheduler, this card's own failed downgrade at its round/head, and replays idempotently", async () => {

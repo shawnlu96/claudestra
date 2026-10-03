@@ -14,6 +14,7 @@ import { fixDiffOf } from "./review-converge-scope.js";
 import { convergeNoticeKey, followUpFailureText, isFailedFollowUp } from "./review-converge-notice-write.js";
 import { createRetryDelay } from "./scheduler-create-retry.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { SchedulerLeaseLost } from "./scheduler-lease-env.js";
 import { countsAsP1, currentReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
 export const isRoundCap = (code: string): boolean => code === ROUND_CAP_CODE;
@@ -74,36 +75,59 @@ export interface FollowUpNoticeDeps {
   manager(...args: string[]): Promise<Record<string, unknown>>;
   now(): number;
 }
-/** Sent notices whose "informed" record failed, per ledger: retried on createRetryDelay's 2 → 15 min backoff, not every tick. */
-const unrecorded = new WeakMap<Database, Map<string, { n: number; last: number }>>();
+/** A sent notice whose "informed" record failed: what the CLI needs, and its createRetryDelay streak (2 → 15 min). */
+interface Unrecorded { args: string[]; n: number; last: number }
+/** Per ledger. Retried at the start of every auto pass (retryUnrecordedNotices), whatever the card's mode or stage. */
+const unrecorded = new WeakMap<Database, Map<string, Unrecorded>>();
+
+/** One record attempt. A lost lease ends the pass; any other refusal or throw (spawn / pipe) keeps it pending and backs off. */
+async function recordInformed(db: Database, key: string, deps: FollowUpNoticeDeps): Promise<void> {
+  const pending = unrecorded.get(db)?.get(key);
+  if (!pending) return;
+  if (getEventByDedup(db, key)) { unrecorded.get(db)!.delete(key); return; }
+  if (pending.n > 0 && deps.now() - pending.last < createRetryDelay(pending.n)) return;
+  let error: string;
+  try {
+    const r = await deps.manager("ledger", "scheduler-converge-notice", ...pending.args);
+    if (r.code === "lease-lost") throw new SchedulerStopped(`scheduler-converge-notice: ${String(r.error)}`);
+    if (r.ok === true) { unrecorded.get(db)!.delete(key); return; }
+    error = String(r.error ?? r.code);
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    if (e instanceof SchedulerLeaseLost) throw new SchedulerStopped(`scheduler-converge-notice: ${e.message}`);
+    error = (e as Error).message;
+  }
+  pending.n += 1; pending.last = deps.now();
+  console.error(`⚠️ [scheduler] 后续节点失败通知已发出但未记账（第 ${pending.n} 次），${Math.round(createRetryDelay(pending.n) / 60_000)} 分钟后重试：${error}`);
+}
+
+/** The auto tick's per-pass retry of sent-but-unrecorded notices: a card that left auto / live still gets its record. */
+export async function retryUnrecordedNotices(db: Database, deps: FollowUpNoticeDeps): Promise<void> {
+  for (const key of [...(unrecorded.get(db)?.keys() ?? [])]) await recordInformed(db, key, deps);
+}
 
 /**
  * Failed follow-ups stay visible to PM even after the original card advances to merge. The tick's connection is read-only:
  * once the notice is out, "informed" goes through `ledger scheduler-converge-notice` (review-converge-notice-write.ts). A failed
- * send records nothing and retries next tick; a failed record keeps the item pending and backs off; a lost lease ends the pass.
+ * send records nothing and retries next tick; a sent one whose record fails is not re-sent in this process, only its record is
+ * retried on backoff (also after the card leaves auto); a lost lease ends the pass.
  */
 export async function followUpFailureNotice(db: Database, task: LedgerTask, deps: FollowUpNoticeDeps): Promise<void> {
   const failed = listEvents(db, { project: task.project, target: task.id }).filter((e) => isFailedFollowUp(task, e));
-  const backoff = unrecorded.get(db) ?? unrecorded.set(db, new Map()).get(db)!;
+  const pending = unrecorded.get(db) ?? unrecorded.set(db, new Map()).get(db)!;
   for (const e of failed) {
     const key = convergeNoticeKey(task.id, e.seq);
-    if (getEventByDedup(db, key)) { backoff.delete(key); continue; }
-    const was = backoff.get(key);
-    if (was && deps.now() - was.last < createRetryDelay(was.n)) continue;
-    const text = followUpFailureText(task.id, e);
-    try { await deps.notifyPm(task, text); }
-    catch (error) {
-      if (error instanceof SchedulerStopped) throw error;
-      console.error(`[scheduler] 后续节点失败通知未发送，下个 tick 重试：${(error as Error).message}`);
-      return;
+    if (getEventByDedup(db, key)) { pending.delete(key); continue; }
+    if (!pending.has(key)) {
+      try { await deps.notifyPm(task, followUpFailureText(task.id, e)); }
+      catch (error) {
+        if (error instanceof SchedulerStopped) throw error;
+        console.error(`[scheduler] 后续节点失败通知未发送，下个 tick 重试：${(error as Error).message}`);
+        return;
+      }
+      pending.set(key, { args: [task.id, "--downgrade-seq", String(e.seq), "--round", String(e.data.round), "--head", String(e.data.head ?? "")], n: 0, last: 0 });
     }
-    const r = await deps.manager("ledger", "scheduler-converge-notice", task.id, "--downgrade-seq", String(e.seq),
-      "--round", String(e.data.round), "--head", String(e.data.head ?? ""));
-    if (r.code === "lease-lost") throw new SchedulerStopped(`scheduler-converge-notice: ${String(r.error)}`);
-    if (r.ok === true) { backoff.delete(key); continue; }
-    const n = (was?.n ?? 0) + 1;
-    backoff.set(key, { n, last: deps.now() });
-    console.error(`⚠️ [scheduler] 后续节点失败通知已发出但未记账（第 ${n} 次），${Math.round(createRetryDelay(n) / 60_000)} 分钟后重试：${String(r.error)}`);
+    await recordInformed(db, key, deps);
   }
 }
 
