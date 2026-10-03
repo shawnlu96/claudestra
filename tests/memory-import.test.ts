@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyMemoryImport, importVectorKey, planMemoryImport } from "../src/lib/memory-import.js";
 import { importVectors } from "../src/lib/memory-import-vectors.js";
-import { memoryState, recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
+import { markMemory, memoryState, recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
+import { createHash } from "node:crypto";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { createTask } from "../src/lib/ledger-write.js";
+import { appendEvent, createTask } from "../src/lib/ledger-write.js";
 import { renderMemoryImportReport } from "../src/manager/ledger-memory-import.js";
 
 let dir: string, path: string, db: Database;
@@ -108,6 +109,96 @@ test("锚卡自动取 head/specRev、feature 与 task 必须一致；内部内�
   expect(p.rows[0]?.memory).toMatchObject({ head: "abc1234", specRev: 1, visibility: "home", featureId: "ab12-fx" });
   const result = applyMemoryImport(db, ctx, "demo", text);
   expect(memoryState(db, result.imported[0]!)?.memory.visibility).toBe("home");
+});
+
+test("报告展示解析版本；卡版本变化后重跑保留已存历史版本且零写入", () => {
+  createTask(db, { actor: "owner" }, { id: "N1", project: "demo", title: "demo", kind: "code" });
+  db.prepare("UPDATE tasks SET headSHA = 'old-head', specRev = 2 WHERE id = 'N1'").run();
+  const text = raw(row({ task: "N1" }));
+  const initial = plan(text);
+  expect(renderMemoryImportReport(initial)).toContain("head=old-head, specRev=2");
+  const result = applyMemoryImport(db, ctx, "demo", text);
+  db.prepare("UPDATE tasks SET headSHA = 'new-head', specRev = 3 WHERE id = 'N1'").run();
+  const before = counts();
+  const replay = applyMemoryImport(db, ctx, "demo", text);
+  expect(replay).toEqual({ backup: null, imported: [], replayed: result.imported });
+  expect(counts()).toEqual(before);
+  expect(memoryState(db, result.imported[0]!)?.memory).toMatchObject({ head: "old-head", specRev: 2 });
+  expect(renderMemoryImportReport(plan(text))).toContain("head=old-head, specRev=2");
+});
+
+test("显式版本保留；显式 null/错误类型不当省略，未有版本的卡逐行报错", () => {
+  createTask(db, { actor: "owner" }, { id: "N1", project: "demo", title: "demo", kind: "code" });
+  expect(plan(raw(row({ task: "N1" }))).issues).toMatchObject([{ line: 1, kind: "format" }]);
+  db.prepare("UPDATE tasks SET headSHA = 'current', specRev = 3 WHERE id = 'N1'").run();
+  expect(plan(raw(row({ task: "N1", head: "explicit", specRev: 2 }))).rows[0]?.memory).toMatchObject({ head: "explicit", specRev: 2 });
+  for (const version of [{ head: null }, { specRev: null }, { head: 123 }, { specRev: 0 }]) {
+    expect(plan(raw(row({ task: "N1", ...version }))).issues).toMatchObject([{ line: 1, kind: "format" }]);
+  }
+});
+
+test("回执核空 target、pitfall 类型、完整绑定；错误 op/id/项目均拒", () => {
+  const text = raw(row());
+  const key = "import:" + createHash("sha256").update(text).digest("hex");
+  const unrelated = recordMemory(db, ctx, {
+    project: "demo", kind: "pitfall", title: "不同内容", symptom: "不同症状", rule: "必须稳定排序", files: ["src/other.ts"],
+    family: "other", fixable: false, via: "import", authorRole: "pm", sourceNote: "PM import",
+  }).memory;
+  appendEvent(db, { ...ctx, dedupKey: key }, { project: "demo", target: "", kind: "note", data: { op: "memory_import", memoryId: unrelated.id } });
+  expect(plan(text).issues).toMatchObject([{ line: 1, kind: "duplicate" }]);
+});
+
+test("规范完整哈希 note 键可存；非空 target、错误 op/id/项目/类型/额外数据回执拒绝", () => {
+  createTask(db, { actor: "owner" }, { id: "Anchor", project: "demo", title: "anchor", kind: "code" });
+  const cases = ["target", "op", "id", "project", "kind", "extra", "memory-kind"];
+  for (const bad of cases) {
+    const r = row({ title: "导入约束 " + bad, family: "binding-" + bad });
+    const text = raw(r), key = "import:" + createHash("sha256").update(text).digest("hex");
+    const memory = recordMemory(db, ctx, bad === "memory-kind"
+      ? { project: "demo", kind: "decision", title: r.title, body: "必须复核", files: r.files, via: "import", authorRole: "pm", sourceNote: r.sourceNote }
+      : { ...r, project: "demo", kind: "pitfall", via: "import", authorRole: "pm" } as MemoryInput).memory;
+    appendEvent(db, { ...ctx, dedupKey: key }, {
+      project: bad === "project" ? "other" : "demo", target: bad === "target" ? "Anchor" : "",
+      kind: bad === "kind" ? "decision" : "note",
+      data: { op: bad === "op" ? "other" : "memory_import", memoryId: bad === "id" ? "ab12-m99999" : memory.id,
+        ...(bad === "extra" ? { raw: "unexpected" } : {}) },
+    });
+    const before = counts();
+    expect(plan(text).issues).toMatchObject([{ line: 1, kind: "duplicate" }]);
+    expect(() => applyMemoryImport(db, ctx, "demo", text)).toThrow("清单有问题");
+    expect(counts()).toEqual(before);
+  }
+});
+
+test("重跑 disputed/fixed/retracted 的行保持状态且不追加任何行", () => {
+  createTask(db, { actor: "owner" }, { id: "Fix", project: "demo", title: "fix", kind: "code" });
+  const text = raw(row({ fixable: true }));
+  const id = applyMemoryImport(db, ctx, "demo", text).imported[0]!;
+  markMemory(db, ctx, { memoryId: id, mark: "dispute", reason: "需复核" });
+  for (const action of ["disputed", "fixed", "retracted"] as const) {
+    if (action === "fixed") {
+      markMemory(db, ctx, { memoryId: id, mark: "link_fix", taskId: "Fix" });
+      markMemory(db, ctx, { memoryId: id, mark: "fixed", taskId: "Fix" });
+    }
+    if (action === "retracted") markMemory(db, ctx, { memoryId: id, mark: "retract", reason: "不再采用" });
+    const before = counts(), state = memoryState(db, id);
+    if (action === "disputed") expect(state?.disputed).toBe(true);
+    else expect(state?.status).toBe(action);
+    expect(applyMemoryImport(db, ctx, "demo", text)).toMatchObject({ backup: null, imported: [], replayed: [id] });
+    expect(counts()).toEqual(before);
+    expect(memoryState(db, id)).toEqual(state);
+  }
+});
+
+test("权限回调在正式 IMMEDIATE 事务内重核；拒绝不留记忆/回执", () => {
+  let called = 0;
+  expect(() => applyMemoryImport(db, ctx, "demo", raw(row()), new Map(), () => {
+    expect(db.inTransaction).toBe(true);
+    called++;
+    throw new Error("permission revoked");
+  })).toThrow("permission revoked");
+  expect(called).toBe(1);
+  expect(counts()).toEqual([0, 0, 0]);
 });
 
 test("备份失败则不写；失败重试使用不同备份，不复用旧库快照", () => {

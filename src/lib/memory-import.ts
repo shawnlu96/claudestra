@@ -3,7 +3,7 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { vacuumBackup } from "./ledger-backup.js";
-import { getMemory, memoryState, recordMemory, secretHits, type Memory, type MemoryCtx, type MemoryInput } from "./ledger-memory.js";
+import { getMemory, memoryDigest, memoryState, recordMemory, secretHits, type Memory, type MemoryCtx, type MemoryInput } from "./ledger-memory.js";
 import { storedOrigin } from "./ledger-origin.js";
 import { busyAsLedgerError, getEventByDedup, LedgerError } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
@@ -71,16 +71,20 @@ function inputOf(db: Database, project: string, raw: unknown): MemoryInput {
   if (r.feature && task && r.feature !== task.featureId) throw new LedgerError("not_found", "feature 与 task 锚点不一致");
   return {
     ...r, project, via: "import", authorRole: "pm", featureId: r.feature ?? null, taskId: r.task ?? null,
-    ...(r.task ? { head: r.head ?? task?.head, specRev: r.specRev ?? task?.specRev } : {}),
+    ...(r.task ? { head: r.head === undefined ? task?.head : r.head, specRev: r.specRev === undefined ? task?.specRev : r.specRev } : {}),
   } as MemoryInput;
 }
 
-function replayOf(db: Database, project: string, key: string): Memory | null {
+function replayOf(db: Database, project: string, key: string, input: MemoryInput): Memory | null {
   const event = getEventByDedup(db, key);
   if (!event) return null;
   const id = event.data.memoryId;
   const m = typeof id === "string" ? getMemory(db, id) : null;
-  if (!m || event.project !== project || m.project !== project || m.via !== "import" || event.kind !== "note" || event.data.op !== "memory_import") {
+  const digest = memoryDigest(input.title, JSON.stringify({ symptom: input.symptom, rule: input.rule }), input.files ?? []);
+  if (!m || event.project !== project || m.project !== project || m.kind !== "pitfall" || m.via !== "import"
+    || event.kind !== "note" || event.target !== "" || event.data.op !== "memory_import" || Object.keys(event.data).length !== 2
+    || m.digest !== digest || m.taskId !== (input.taskId ?? null) || m.family !== (input.family || null)
+    || m.fixable !== input.fixable || m.sourceNote !== (input.sourceNote || null)) {
     throw new LedgerError("dedup_mismatch", "导入幂等键已被别的项目或动作占用");
   }
   return m;
@@ -103,7 +107,7 @@ function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, 
     const hits = secretHits(textFields(value));
     if (hits.length) return { line, kind: "redaction", reason: `命中字段位置：${hits.join(", ")}` };
     const input = inputOf(db, project, value);
-    const prev = replayOf(db, project, key);
+    const prev = replayOf(db, project, key, input);
     if (prev) return { line, key, input, memory: prev, replay: true };
     const lint = memoryLint(db, input);
     if (!lint.ok) {
@@ -155,7 +159,7 @@ export function planMemoryImport(db: Database, ctx: MemoryCtx, project: string, 
   } finally { copy.close(); }
 }
 
-export function applyMemoryImport(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors = new Map()) {
+export function applyMemoryImport(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors = new Map(), authorize?: () => void) {
   const first = planMemoryImport(db, ctx, project, raw, vectors);
   const clean = (p: ImportPlan) => {
     if (p.issues.length) throw new LedgerError("invalid", "清单有问题，整批不写；先跑 --dry-run", { issues: p.issues });
@@ -168,6 +172,8 @@ export function applyMemoryImport(db: Database, ctx: MemoryCtx, project: string,
   const dest = join(dirname(db.filename), "backups", `${basename(db.filename)}.pre-memory-import-${stamp}-${first.digest.slice(0, 12)}-${randomBytes(4).toString("hex")}.bak`);
   const backup = vacuumBackup(db, dest, "记忆导入前备份失败", "未导入，库保持原样", false);
   return busyAsLedgerError("导入记忆", () => db.transaction(() => {
+    // The backup can take time: the CLI must recheck PM membership under the same write lock as the rows.
+    authorize?.();
     const plan = planMemoryImport(db, ctx, project, raw, vectors);
     clean(plan);
     const imported: string[] = [], replayed: string[] = [];

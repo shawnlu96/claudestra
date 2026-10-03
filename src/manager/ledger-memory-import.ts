@@ -18,6 +18,14 @@ export function renderMemoryImportReport(plan: ImportPlan): string {
     const issues = plan.issues.filter((p) => p.kind === kind);
     lines.push(...(issues.length ? issues.map((p) => `- 行 ${p.line}：${p.reason}`) : ["无。"]), "");
   });
+  const anchored = plan.rows.filter((r) => r.memory.taskId);
+  if (anchored.length) {
+    lines.push("## 卡锚点解析版本", "");
+    for (const r of anchored) {
+      lines.push(`- 行 ${r.line}（${r.replay ? "已导入历史版本" : "本次解析"}）：head=${r.memory.head}, specRev=${r.memory.specRev}`);
+    }
+    lines.push("");
+  }
   const home = plan.rows.filter((r) => r.memory.visibility === "home");
   if (home.length) lines.push(`仅留本机的行：${home.map((r) => r.line).join(", ")}（不会共享）。`, "");
   return lines.join("\n");
@@ -44,7 +52,7 @@ export async function memoryImportCmd(c: LedgerCli, embedder?: Embedder | null) 
   }
   if (!dry) {
     c.requireRealPm(project, "记忆导入");
-    return { ok: true, ...applyMemoryImport(c.db, ctx, project, raw, vectors) };
+    return { ok: true, ...applyMemoryImport(c.db, ctx, project, raw, vectors, () => c.requireRealPm(project, "记忆导入")) };
   }
   const markdown = renderMemoryImportReport(plan);
   const out = c.p.flags.out;

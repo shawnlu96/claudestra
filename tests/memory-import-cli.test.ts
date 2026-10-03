@@ -135,3 +135,34 @@ test("report writer 拒绝库本体硬链（数据库关闭后检查，避免 ma
   expect(readFileSync(path)).toEqual(before);
   unlinkSync(hard);
 });
+
+test("两个进程并发导入相同行，只存一次记忆与规范回执", async () => {
+  db.prepare("CREATE TABLE import_start (worker TEXT PRIMARY KEY)").run();
+  const script = join(dir, "concurrent.ts");
+  writeFileSync(script, `
+    import { readFileSync } from "node:fs";
+    import { applyMemoryImport } from ${JSON.stringify(new URL("../src/lib/memory-import.ts", import.meta.url).href)};
+    import { openLedger, closeLedger } from ${JSON.stringify(new URL("../src/lib/ledger-store.ts", import.meta.url).href)};
+    const [path, file, worker] = process.argv.slice(2);
+    const db = openLedger(path);
+    try {
+      db.prepare("INSERT INTO import_start(worker) VALUES (?)").run(worker);
+      while (db.query("SELECT count(*) AS n FROM import_start").get().n < 2) await Bun.sleep(10);
+      const result = applyMemoryImport(db, { actor: "agent-pm", now: 1000 }, "demo", readFileSync(file, "utf8"));
+      console.log(JSON.stringify(result));
+    } finally { closeLedger(path); }
+  `);
+  const children = ["first", "second"].map((worker) => Bun.spawn([process.execPath, "--no-env-file", script, path, file, worker], {
+    env: { ...process.env, CLAUDESTRA_STATE_DIR: dir }, stdout: "pipe", stderr: "pipe",
+  }));
+  const results = await Promise.all(children.map(async (child) => {
+    const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect(code, error).toBe(0);
+    return JSON.parse(output) as { imported: string[]; replayed: string[] };
+  }));
+  expect(results.flatMap((r) => r.imported)).toHaveLength(1);
+  expect(results.flatMap((r) => r.replayed)).toHaveLength(1);
+  expect(db.query("SELECT count(*) AS n FROM memories").get()).toEqual({ n: 1 });
+  expect(db.query("SELECT count(*) AS n FROM events WHERE kind = 'memory'").get()).toEqual({ n: 1 });
+  expect(db.query("SELECT count(*) AS n FROM events WHERE dedupKey LIKE 'import:%'").get()).toEqual({ n: 1 });
+}, 15000);
