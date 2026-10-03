@@ -104,6 +104,52 @@ describe("acceptance 2: a refusal is not a dispatch; it persists and only real w
   }, E2E_MS);
 });
 
+describe("r1: assignment is not takeover, and released restate changes outbound material", () => {
+  test("rewriting the same assignee cannot clear a refusal while the peer lease is held", async () => {
+    const p = await blockFixture();
+    try {
+      await toFix(p, leaked());
+      const assign = () => p.cli("pm", "task-set", "T1", "--rev", String(p.f.task().rev), "--agent", "agent-task-one");
+      expect(await assign()).toMatchObject({ ok: true });
+      expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+      expect(await assign()).toMatchObject({ ok: true });
+      expect(getWriteLease(p.f.db, "T1")).toMatchObject({ state: "held", peer: "mate" });
+      expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+      expect(blocked(p)).toHaveLength(1);
+      expect(await later(p)).toMatchObject({ step: "waiting", detail: expect.stringContaining("安全材料阻塞") });
+      expect(p.fixes()).toEqual([]);
+      expect(await p.cli("pm", "lend-reclaim", "T1", "--reason", "合法本机接手")).toMatchObject({ ok: true });
+      expect(gateBlock(p.f.task(), p.events())).toBeNull();
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  for (const stillUnsafe of [false, true]) test(`release retries through gate once; other unsafe material=${stillUnsafe}`, async () => {
+    const original = leaked();
+    const p = await blockFixture(undefined, original);
+    try {
+      if (stillUnsafe) {
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(p.f.task().spec!, leaked());
+      }
+      p.policy.remote.agents = { claude: 0, codex: 0 };
+      p.hello();
+      expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+      expect(await later(p)).toMatchObject({ step: "waiting" });
+      expect(await p.cli("pm", "restate-release", "T1", "--text", "复述已核准")).toMatchObject({ ok: true });
+      const fresh = new Database(join(p.f.dir, "ledger.sqlite"), { readonly: true });
+      try { expect(gateBlock(getTask(fresh, "T1")!, listEvents(fresh, { target: "T1" }))).toMatchObject({ state: "retry" }); }
+      finally { fresh.close(); }
+      expect(await later(p)).toMatchObject({ step: stillUnsafe ? "pool_refused" : "pool_pooled" });
+      for (let i = 0; i < 3; i++) await later(p);
+      expect(p.refusals()).toHaveLength(stillUnsafe ? 2 : 1);
+      expect(p.orders()).toHaveLength(stillUnsafe ? 0 : 1);
+      expect(p.events().find((e) => e.kind === "stage" && e.data.to === "restate")!.text).toBe(original);
+      if (stillUnsafe) expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+      else expect(p.orders()[0]!.text).not.toContain(original);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+});
+
 describe("FB1 coexistence: a moved fix start is not a dispatch", () => {
   test("head / rev moved after the refusal (fix_start_moved) keeps the block open (at most one more full-gate offer)", async () => {
     const p = await refusedFix();
@@ -191,7 +237,7 @@ describe("acceptance 4: coexists with peer outages, capacity, PM takeover and ob
     } finally { q.f.close(); }
   }, E2E_MS);
 
-  test("PM's reclaim closes the block (lease ends, card back home); a manual takeover closes it too", async () => {
+  test("PM's reclaim closes the block (lease ends, card back home); manual mode alone leaves it open until reclaim", async () => {
     const p = await refusedFix();
     try {
       expect(await p.cli("pm", "lend-reclaim", "T1", "--reason", "本机接手")).toMatchObject({ ok: true });
@@ -204,6 +250,9 @@ describe("acceptance 4: coexists with peer outages, capacity, PM takeover and ob
       const w = q.f.db.query("SELECT rev FROM task_workflows WHERE taskId = 'T1'").get() as { rev: number };
       expect(await q.cli("pm", "workflow-set", "T1", "--rev", String(q.f.task().rev), "--workflow-rev", String(w.rev), "--template", "code", "--version", "2",
         "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason", "PM 接管")).toMatchObject({ ok: true });
+      expect(getWriteLease(q.f.db, "T1")).toMatchObject({ state: "held" });
+      expect(gateBlock(q.f.task(), q.events())).toMatchObject({ state: "blocked" });
+      expect(await q.cli("pm", "lend-reclaim", "T1", "--reason", "完成本机接手")).toMatchObject({ ok: true });
       expect(gateBlock(q.f.task(), q.events())).toBeNull();
     } finally { q.f.close(); }
   }, E2E_MS);

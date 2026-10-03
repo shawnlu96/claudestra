@@ -27,7 +27,7 @@ export const FREE: Slots = { codex: { total: 2, busy: 0 }, claude: { total: 0, b
 /** The unified family pool (scheduler.json agents): this machine has no Codex, so a fix can only go back to mate. */
 const POOL: RemotePolicy = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "o/r", agents: { claude: 1, codex: 0 } };
 
-export async function blockFixture(remote: RemotePolicy = POOL) {
+export async function blockFixture(remote: RemotePolicy = POOL, pendingRestate?: string) {
   const f = autoFixture({ reviewerRuntime: "claude-code" });
   const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
   delete reg.agents["agent-rv-t1"].transport;
@@ -72,7 +72,15 @@ export async function blockFixture(remote: RemotePolicy = POOL) {
     const last = events().filter((e) => e.kind === "review").at(-1)!;
     insertEvent(f.db, f.at("agent-rv-t1"), { project: "p", target: "T1", kind: "review", text: "本机复核", data: { ...last.data, path } }, true);
   };
-  await toBuild(f);
+  if (pendingRestate !== undefined) {
+    expect(await cli("pm", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev", "1", "--template", "code", "--version", "3",
+      "--mode", "auto", "--author-family", "claude", "--fallback", "只报错不修", "--reason", "验证待答复复述")).toMatchObject({ ok: true });
+    await f.tick();
+    await f.tick();
+    expect(await cli("agent-task-one", "stage", "T1", "--from", "spec", "--to", "restate", "--text", pendingRestate)).toMatchObject({ ok: true });
+    await f.tick();
+    expect(f.task().stage).toBe("build");
+  } else await toBuild(f);
   return { f, cli, tick, hello, lendCall, heads, policy, events, orders, fixes, refusals, rereview, notices };
 }
 export type Fx = Awaited<ReturnType<typeof blockFixture>>;

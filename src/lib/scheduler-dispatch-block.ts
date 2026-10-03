@@ -1,12 +1,9 @@
 /**
- * dispatch-recovery-R1: a build / fix order the peer outbound gate refused is a standing block on the card's current stage
- * window, read from the ledger events alone (the `gate_refused` event and what came after), so the planner, the placement view
- * and the audit agree and a scheduler restart changes nothing. While the material the gate saw is unchanged no peer gets it
- * again (this machine still may: the gate is only on the way out). Material = spec revision, round, head, the review the fix
- * report comes from, and GATE_HANDLER_VERSION; a key not refused yet allows one more offer, which goes through the full gate.
- * A claim of an order offered in this window, PM's reclaim or manual takeover, a local assignee or local dispatch, a new stage
- * window or a terminal stage closes it; notes, memory and unrelated commits do not. tests/scheduler-dispatch-block*.test.ts.
+ * Gate refusals persist across scheduler restarts. Only changed outbound material gets one more full-gate attempt;
+ * assignment and workflow edits are not proof of takeover. Claims, reclaim and settled local dispatch are evidence.
+ * Planner, placement and patrol share these event-derived facts. See tests/scheduler-dispatch-block.test.ts.
  */
+import { restateFacts } from "./ledger-lend-relay.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
@@ -21,7 +18,7 @@ const BLOCK_STAGES: readonly string[] = ["build", "fix"];
 /** The pool step's receipt for an offer the ledger refused (ledger-scheduler-pool.ts refuse); only the gate's wording counts. */
 const isGateReceipt = (r: string | null): boolean => !!r?.startsWith("未投递：出单被拒：") && r.includes("外发闸");
 
-type Ev = Pick<LedgerEvent, "seq" | "ts" | "kind" | "actor" | "data">;
+type Ev = LedgerEvent;
 type Task = Pick<LedgerTask, "id" | "stage" | "round" | "specRev" | "headSHA">;
 
 /** The seq the card entered its current stage (the planner's `since`); its creation when it never moved. */
@@ -31,7 +28,9 @@ const stageWindow = (task: Pick<LedgerTask, "stage">, events: readonly Ev[]): nu
 /** What a write order is made of, as far as the ledger records it; base-branch commits are deliberately not part of it. */
 function gateMaterial(task: Task, events: readonly Ev[]): string {
   const review = events.findLast((e) => e.kind === "review")?.seq ?? 0;
-  return `g${GATE_HANDLER_VERSION}:s${task.specRev}:r${task.round}:h${(task.headSHA ?? "-").slice(0, 12)}:v${review}`;
+  const facts = task.stage === "build" ? restateFacts(events, task.specRev) : null;
+  const carried = facts && !facts.answered && facts.text ? facts.seq : 0;
+  return `g${GATE_HANDLER_VERSION}:s${task.specRev}:r${task.round}:h${(task.headSHA ?? "-").slice(0, 12)}:v${review}${facts?.text ? `:t${carried}` : ""}`;
 }
 
 /** Facts the pool step stores on its gate_refused event so the block can be scoped and compared later. */
@@ -61,10 +60,7 @@ function closedBy(e: Ev, events: readonly Ev[], window: number): boolean {
     return events.some((o) => o.kind === "note" && lendOp(o) === "offer" && lendOrder(o) === lendOrder(e) && o.seq > window);
   }
   if (e.kind === "note" && lendOp(e) === "reclaim") return true;
-  if (e.kind === "task" && e.data.op === "set") return !!(e.data.patch as { agent?: unknown } | undefined)?.agent;
   if (e.kind !== "scheduler") return false;
-  if (e.data.op === "workflow") return e.data.mode === "manual" && e.actor !== "scheduler";
-  if (e.data.op === "fallback_manual") return e.data.manual === true;
   if (e.data.op !== "settle" || (e.data.to !== "submitted" && e.data.to !== "done")) return false;
   const plan = events.find((p) => p.kind === "scheduler" && p.data.op === "plan" && p.data.id === e.data.id);
   return plan?.data.action === "dispatch" && typeof plan.data.recipient === "string" && !isPoolIntent({ action: "dispatch", recipient: plan.data.recipient });
