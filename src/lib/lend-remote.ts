@@ -24,7 +24,8 @@ export const LEND_OLD_PEER = "old_peer";
 /** 注入的传输：status = HTTP 状态，body = 解析后的 JSON（不是 JSON 就是 null）；抛错 = 没发出去或不知道发没发出去 */
 export type LendCall<O extends string = LendOp> = (peer: string, op: O, body: Record<string, unknown>) => Promise<{ status: number; body: unknown }>;
 
-type LendErr = { ok: false; status: number; code: string; error: string };
+/** reason：对方拒绝体里的 reason（只认短标识串，缺了 / 不是字符串 / 格式不对就不带）；拒绝体来自 `manager lend call` 解开的 E2E 内层响应（已认证） */
+type LendErr = { ok: false; status: number; code: string; error: string; reason?: string };
 export type LendRes<T> = { ok: true; value: T } | LendErr;
 
 export interface Lease { gen: number; expiresAt: number; ms: number }
@@ -57,6 +58,8 @@ const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const HEX64 = /^[0-9a-f]{64}$/i;
 const B64URL = /^[A-Za-z0-9_-]{1,200}$/;
 const BASE = /^[\w./-]{1,100}$/;
+/** 拒绝体里的 code / reason */
+const TOKEN = /^[\w.-]{1,40}$/;
 
 function lease(v: unknown): Lease {
   const r = obj(v, ["gen", "expiresAt", "ms"], "lease");
@@ -117,7 +120,7 @@ type Parsed = { [K in LendAnyOp]: ReturnType<(typeof PARSE)[K]> };
 
 /**
  * 发一次、解析一次。transport 抛错 → code "transport"（不知道对方收没收到，调用方按「结果不明」处理，不当成拒绝）；
- * 对方明确拒绝（ok:false + code）→ 原样带出；成功体解析不了 → code "bad_response"（同样是结果不明）。
+ * 对方明确拒绝（ok:false + code）→ 原样带出（reason 合格的也带出，lend-result-retry.ts 据此认 result 的同秒重放）；成功体解析不了 → code "bad_response"（同样是结果不明）。
  */
 export async function lendRequest<K extends LendAnyOp>(call: LendCall<K>, peer: string, op: K, body: Record<string, unknown>): Promise<LendRes<Parsed[K]>> {
   let res: { status: number; body: unknown };
@@ -130,8 +133,9 @@ export async function lendRequest<K extends LendAnyOp>(call: LendCall<K>, peer: 
   if (V2_OPS.includes(op) && res.status === 404) return { ok: false, status: 404, code: LEND_OLD_PEER, error: `对方没有 lend/${op} 接口（旧版本），退回轮询` };
   if (!b || typeof b !== "object") return { ok: false, status: res.status, code: "bad_response", error: `对方回了 ${res.status}（不是 JSON）` };
   if (b.ok !== true) {
-    const code = typeof b.code === "string" && /^[\w.-]{1,40}$/.test(b.code) ? b.code : `http_${res.status}`;
-    return { ok: false, status: res.status, code, error: typeof b.error === "string" ? b.error.slice(0, 300) : code };
+    const code = typeof b.code === "string" && TOKEN.test(b.code) ? b.code : `http_${res.status}`;
+    const reason = typeof b.reason === "string" && TOKEN.test(b.reason) ? { reason: b.reason } : {};
+    return { ok: false, status: res.status, code, error: typeof b.error === "string" ? b.error.slice(0, 300) : code, ...reason };
   }
   try {
     if (b.v !== LEND_WIRE_V) bad(`只认 v${LEND_WIRE_V}`);
