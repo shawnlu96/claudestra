@@ -86,7 +86,12 @@ async function fixture(slots = 0, runtime = "codex", explicit = false) {
     active: () => { if (dead) throw new SchedulerStopped("stopped"); },
     git: async (args) => {
       gitCalls.push(args);
-      if (args.includes("rev-parse")) return { code: 1, out: "absent" };
+      if (args.includes("rev-parse")) {
+        if (args.at(-1)?.startsWith("refs/heads/")) return { code: 1, out: "absent" };
+        if (args.at(-1) === "--absolute-git-dir") return { code: 0, out: join(dir, "worktree-git") };
+        if (["origin/main^{commit}", "HEAD"].includes(args.at(-1)!)) return { code: 0, out: "1".repeat(40) };
+        return { code: 128, out: "invalid base" };
+      }
       if (args.includes("add")) mkdirSync(args.at(-2)!, { recursive: true });
       return { code: 0, out: "" };
     },
@@ -384,7 +389,12 @@ for (const pool of [false, true]) test(`production autoTickDeps defaults create 
     const { getTask } = await import(root + "src/lib/ledger-store.ts");
     const reader = new LedgerReader(state + "/ledger.sqlite"), db = reader.get();
     const deps = autoTickDeps(db, { lease: JSON.parse(process.env[${JSON.stringify(SCHEDULER_LEASE_ENV)}]), git: async (args) => {
-      if (args.includes("rev-parse")) return { code: 1, out: "absent" };
+      if (args.includes("rev-parse")) {
+        if (args.at(-1)?.startsWith("refs/heads/")) return { code: 1, out: "absent" };
+        if (args.at(-1) === "--absolute-git-dir") return { code: 0, out: state + "/worktree-git" };
+        if (["origin/main^{commit}", "HEAD"].includes(args.at(-1))) return { code: 0, out: "1".repeat(40) };
+        return { code: 128, out: "invalid base" };
+      }
       if (args.includes("add")) mkdirSync(args.at(-2), { recursive: true });
       return { code: 0, out: "" };
     } });
