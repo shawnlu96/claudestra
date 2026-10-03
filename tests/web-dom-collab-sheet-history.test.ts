@@ -116,15 +116,35 @@ describe("整屏页历史条目", () => {
     await unmount();
   });
 
-  test("自己的 back 一直没落地：800ms 后放行，开着的层照样认领", async () => {
+  test("800ms 放行后旧 popstate 才迟到：新层保留，栈正确（计时放行不等于旧返回已结束）", async () => {
+    const c = controlled();
+    const { ctl, act, unmount } = await mount(true, c.port);
+    await act(() => ctl.setSel("team"));
+    await act(() => ctl.setSel(null));
+    await act(() => { ctl.prepare("~waits"); ctl.setSel("waits"); });
+    await act(() => new Promise<void>((r) => setTimeout(r, 900)));
+    expect(ctl.sel).toBe("waits");
+    expect(c.port.hash()).toBe("#chat?collab=~waits"); // 放行后先认领（旧遍历还没走）
+    await act(() => c.flush()); // 旧 back 迟到
+    expect(ctl.sel).toBe("waits");
+    expect(c.live()).toEqual(["#chat", "#chat?collab=~waits"]);
+    await act(() => ctl.setSel(null));
+    await act(() => c.flush());
+    expect(c.live()).toEqual(["#chat"]);
+    await unmount();
+  });
+
+  test("放行后旧 back 还没落地又收起新层：不叠第二次 back，旧 back 落地正好回到 #chat", async () => {
     const c = controlled();
     const { ctl, act, unmount } = await mount(true, c.port);
     await act(() => ctl.setSel("team"));
     await act(() => ctl.setSel(null));
     await act(() => ctl.setSel("waits"));
     await act(() => new Promise<void>((r) => setTimeout(r, 900)));
-    expect(ctl.sel).toBe("waits");
-    expect(c.port.hash()).toBe("#chat?collab=~waits");
+    await act(() => ctl.setSel(null));
+    await act(() => c.flush());
+    expect(ctl.sel).toBeNull();
+    expect(c.live()).toEqual(["#chat"]);
     await unmount();
   });
 

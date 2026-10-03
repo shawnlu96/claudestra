@@ -22,9 +22,10 @@ export interface HistoryPort {
  */
 export function useSheetHistory(open: boolean, push: boolean, id: string, onClose: () => void, h: HistoryPort): (next: string) => void {
   const owned = useRef<string | null>(null); // 自己压进去的那条 hash
-  // 自己收起时调的 back 还在途：它落地的 popstate 不是用户返回。在途期间又打开的层先不认领，落地后再对账，
-  // 否则新层会 replace 掉旧条目、随后被旧 back 的 popstate 当成用户返回关掉（PR556-r1 P1）
-  const backing = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 自己收起时调的 back 还没等到 popstate：那次 popstate 不是用户返回，迟到多久都认作自己的（只计数，不靠计时）。
+  // hold = 在途期间暂停认领，落地后再对账；800ms 没落地也放行认领，免得新层一直没有条目（PR556-r1 P1）
+  const pendingBacks = useRef(0);
+  const hold = useRef<ReturnType<typeof setTimeout> | null>(null);
   const live = useRef({ open, push, id, onClose });
   useEffect(() => { live.current = { open, push, id, onClose }; }); // popstate 异步到：读最近一次渲染的值
   /** 层开着、窄屏、在 #chat：把当前条目换成 / 压成自己的 */
@@ -38,30 +39,34 @@ export function useSheetHistory(open: boolean, push: boolean, id: string, onClos
     }
     owned.current = tagged;
   };
-  const landed = () => { // 自己的 back 落地（popstate 到了，或 800ms 没到也放行，别永久卡住）
-    if (backing.current) clearTimeout(backing.current);
-    backing.current = null;
+  const release = () => {
+    if (hold.current) clearTimeout(hold.current);
+    hold.current = null;
     claim(live.current);
   };
   useEffect(() => h.onPop(() => {
-    if (backing.current) return landed();
+    if (pendingBacks.current > 0) {
+      pendingBacks.current--;
+      return release();
+    }
     if (!owned.current || h.hash() === owned.current) return;
     owned.current = null;
     if (live.current.open) live.current.onClose();
-  })); // 每次渲染重挂：闭包里的 landed / claim 总是最新的
-  useEffect(() => () => { if (backing.current) clearTimeout(backing.current); }, []);
+  })); // 每次渲染重挂：闭包里的 release / claim 总是最新的
+  useEffect(() => () => { if (hold.current) clearTimeout(hold.current); }, []);
   useEffect(() => {
-    if (backing.current) return; // 等自己的 back 落地再对账
+    if (hold.current) return; // 等自己的 back 落地再对账
     if (open) return claim({ open, push, id });
     const mine = owned.current !== null && h.hash() === owned.current;
     owned.current = null;
-    if (!mine) return;
-    backing.current = setTimeout(landed, 800);
+    if (!mine || pendingBacks.current > 0) return; // 上一次 back 还没落地：它本来就会退到这条之前，不再叠一次
+    pendingBacks.current++;
+    hold.current = setTimeout(release, 800);
     h.back();
   }); // 每次渲染都核一遍（幂等）：prepare 压了但这层没真打开（选中的目标刷新后没了）也能消掉
   return (next) => {
     const hash = h.hash();
-    if (!push || backing.current || owned.current || hash.split("?")[0] !== "#chat" || hash.includes(COLLAB_Q)) return; // 已开着 / 详情占着 / back 在途：交给 effect
+    if (!push || pendingBacks.current > 0 || owned.current || hash.split("?")[0] !== "#chat" || hash.includes(COLLAB_Q)) return; // 已开着 / 详情占着 / back 在途：交给 effect
     owned.current = tagOf(next);
     h.push(owned.current);
   };
