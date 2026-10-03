@@ -15,8 +15,7 @@ import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 import { observeMemory } from "../lib/memory-auto.js";
 import { configuredLesson } from "../lib/memory-auto-summary.js";
-import { collectPrStage, realFactsDeps } from "../lib/ledger-verify-facts.js";
-import { REPO_ROOT } from "../lib/repo-root.js";
+import { memoryAutoRepoDeps } from "../lib/memory-auto-repo.js";
 
 const TICKET_FLAGS = ["wire", "session", "family", "ticket-file", "ticket", "dedup"];
 
@@ -92,7 +91,7 @@ export const MEMORY_CMDS: Record<string, CommandSpec> = {
     valued: ["project"], usage: "memory-auto --project <id>（调度器的本机记忆观察器）",
     run: async (c) => ({ ok: true, ...await observeMemory(c.db, c.deps.actor, c.project(), {
       assertLease: c.deps.assertLease, lesson: configuredLesson,
-      files: async (t) => t.pr ? (await collectPrStage(c.deps.factsDeps?.() ?? realFactsDeps(REPO_ROOT), t.pr)).pr?.files ?? null : null,
+      ...await memoryAutoRepoDeps(c.project(), c.deps.actor, c.deps.assertLease, c.deps.factsDeps),
     }) }),
   },
   "memory-record": {
