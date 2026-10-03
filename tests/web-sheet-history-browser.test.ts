@@ -21,7 +21,7 @@ beforeAll(async () => {
   if (await build.exited) throw new Error(await new Response(build.stderr).text());
   js = readFileSync(join(out, readdirSync(out).find((f) => f.endsWith(".js"))!), "utf8");
   browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
-});
+}, 60_000); // 打包 + 冷启动 Chrome 超过默认 5s
 afterAll(async () => { await browser?.close(); });
 
 async function page(): Promise<Page> {
@@ -38,6 +38,7 @@ const state = (p: Page) => p.evaluate("window.sheetApi.state()") as Promise<{ se
 
 test.skipIf(!enabled)("系统返回：整屏页收起，条目不被压回去", async () => {
   const p = await page();
+  expect(await p.evaluate("window.popOrder") as string[]).toEqual(["shell", "sheet"]); // 外层监听先注册，才测得到「外层先渲染」
   await p.evaluate("window.sheetApi.open('team')");
   await p.waitForFunction("location.hash === '#chat?collab=~team'");
   await p.evaluate("history.back()");
