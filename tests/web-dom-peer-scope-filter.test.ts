@@ -3,6 +3,7 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { scopeGateError } from "../src/lib/peer-scope-gate";
+import { appConfigSync, setAppConfigForTest, type AppConfig } from "@/lib/app-config";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
@@ -63,6 +64,9 @@ async function input(el: El | null, value: string) {
 }
 
 function intercept() {
+  const previousConfig = appConfigSync();
+  // Real API clients cache /app-config.json across test files; this fixture must own and restore its config too.
+  setAppConfigForTest({ mode: "direct", fp: "local", machineName: "peer-scope-fixture", version: "test" });
   const requests: { path: string; method: string; body?: Record<string, unknown> }[] = [];
   const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (url, init) => {
     const path = new URL(String(url), "https://fixture.example.test").pathname;
@@ -80,7 +84,9 @@ function intercept() {
     else throw new Error(`Unexpected request ${method} ${path}`);
     return new Response(JSON.stringify(response), { headers: { "Content-Type": "application/json" } });
   }) as typeof globalThis.fetch);
-  return { requests, restore: () => fetchSpy.mockRestore() };
+  return { requests, restore: () => {
+    try { fetchSpy.mockRestore(); } finally { setAppConfigForTest(previousConfig); }
+  } };
 }
 
 async function mount(element: ReturnType<ReactNS["createElement"]>) {
@@ -102,11 +108,14 @@ async function withPicker(initial: string[], run: (ui: Awaited<ReturnType<typeof
         onOpened: () => { throw new Error("Searching must not open external gates"); } }),
       React.createElement("button", { onClick: () => saved.push(sel) }, "save"));
   }
-  const ui = await mount(React.createElement(Harness));
+  let ui: Awaited<ReturnType<typeof mount>> | undefined;
   try {
+    ui = await mount(React.createElement(Harness));
     await run(ui, changes, saved);
     expect(network.requests).toEqual([]);
-  } finally { await ui.unmount(); network.restore(); }
+  } finally {
+    try { if (ui) await ui.unmount(); } finally { network.restore(); }
+  }
 }
 
 test("ScopePicker filters display names: Chinese, case, trimmed whitespace, zero results and clear", async () => {
@@ -171,9 +180,10 @@ test("external locks and legacy * cancellation stay intact; server still bans ma
 
 test("real edit-scope, new-invite and two-way-join entrances share the same search and preserve saved selections", async () => {
   const network = intercept();
-  const ui = await mount(React.createElement(PeersPanel));
+  let mounted: Awaited<ReturnType<typeof mount>> | undefined;
   let joinUi: Awaited<ReturnType<typeof mount>> | undefined;
   try {
+    const ui = mounted = await mount(React.createElement(PeersPanel));
     await React.act(async () => button(ui.host, "修改").click());
     const edit = ui.host.querySelector('input[type="search"]');
     const before = network.requests.length;
@@ -204,5 +214,30 @@ test("real edit-scope, new-invite and two-way-join entrances share the same sear
     await tick();
     expect(network.requests.find(r => r.path.endsWith("/join-auto"))?.body?.agents).toEqual(["AlphaDesk"]);
     expect(network.requests.some(r => r.path.includes("/external"))).toBe(false);
-  } finally { if (joinUi) await joinUi.unmount(); await ui.unmount(); network.restore(); }
+  } finally {
+    try { if (joinUi) await joinUi.unmount(); } finally {
+      try { if (mounted) await mounted.unmount(); } finally { network.restore(); }
+    }
+  }
 });
+
+test.each([null, { mode: "relay", relayBase: "relay.example.test", version: "test", webCommit: "prior" } satisfies AppConfig])(
+  "real DOM fixture restores the prior config cache and fetch: %j", async initial => {
+    const previousConfig = appConfigSync();
+    const previousFetch = globalThis.fetch;
+    setAppConfigForTest(initial);
+    const network = intercept();
+    let ui: Awaited<ReturnType<typeof mount>> | undefined;
+    try {
+      try {
+        ui = await mount(React.createElement(PeersPanel));
+        expect(appConfigSync()?.mode).toBe("direct");
+        expect(ui.host.textContent).toContain("demo");
+      } finally {
+        try { if (ui) await ui.unmount(); } finally { network.restore(); }
+      }
+      expect(globalThis.fetch).toBe(previousFetch);
+      expect(appConfigSync()).toBe(initial);
+    } finally { setAppConfigForTest(previousConfig); }
+  },
+);
