@@ -37,6 +37,17 @@ describe("hygieneReport 三条理由", () => {
     expect(rows.find((r) => r.id === "m-stale")!.lastPushedAt).toBe(NOW - 100 * DAY);
   });
 
+  test("最后推出时间取每条推出事件里最新的：同一单后来再推（报文变了）也算", () => {
+    const same = (ts: number, fp: string) => ev("A", "scheduler", ts, { op: "memory_retrieve", order: "write", specRev: 1, head: "h", memoryIds: ["m1"], fingerprint: fp });
+    const now = 200 * DAY;
+    const rows = hygieneReport({ memories: [mem("m1", { kind: "summary", family: null, createdAt: 0 })],
+      events: [same(20 * DAY, "f1"), same(199 * DAY, "f2")], headFiles: null, now });
+    expect(rows).toEqual([]);
+    const stale = hygieneReport({ memories: [mem("m1", { kind: "summary", family: null, createdAt: 0 })],
+      events: [same(20 * DAY, "f1"), same(100 * DAY, "f2")], headFiles: null, now });
+    expect(stale.map((r) => [r.reasons, r.lastPushedAt])).toEqual([[["not_pushed_90d"], 100 * DAY]]);
+  });
+
   test("没有 HEAD 文件列表不判「文件全没了」；fixed / retracted / superseded 不进清单", () => {
     const gone = mem("m-gone", { kind: "summary", family: null, files: ["src/lib/old.ts"], createdAt: NOW - DAY });
     expect(hygieneReport({ memories: [gone], events: [], headFiles: null, now: NOW })).toEqual([]);

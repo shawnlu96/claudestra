@@ -2,14 +2,14 @@
  * 每周记忆卫生清单（设计稿 docs/design/project-memory.md §4.3）：**只报告**——列出该 PM 看一眼的记忆，处置（retract / supersede / confirm）由 PM 决定。
  * 本模块不写库：不追加 mark、不写事件（同 mem0 卫生的「只报告」红线，lib/memory-hygiene.ts）。tests/memory-metrics-hygiene.test.ts。
  * 三条理由（一条记忆可同时中几条）：
- * - not_pushed_90d：建了满 90 天，近 90 天没被任何单子推出（scheduler 事件 memoryIds）；
+ * - not_pushed_90d：建了满 90 天，近 90 天没被任何单子推出（scheduler 事件 memoryIds；取每条推出事件里最新的，同一单后来再推也算）；
  * - files_gone：files 在当前 HEAD 一个都不存在（给了 HEAD 文件列表才判）；
  * - family_quiet_60d：带 family 的坑建了满 60 天，近 60 天本项目没再出现同 family 的 P1。
  * 只看还会进单子的状态（candidate / open / fixing）；fixed / retracted / superseded 已经不推了，不进清单。
  */
 import type { MemoryStatus } from "./ledger-memory-fold.js";
 import type { LedgerEvent } from "./ledger-stages.js";
-import { p1Hits, pushedItems, type MetricsMemory } from "./memory-metrics.js";
+import { lastPushedAt, p1Hits, type MetricsMemory } from "./memory-metrics.js";
 import { normalizedFamily } from "./scheduler-review.js";
 
 const DAY_MS = 86_400_000;
@@ -37,8 +37,7 @@ const isGlob = (p: string) => /[*?[{]/.test(p);
 const present = (f: string, head: readonly string[]) => (isGlob(f) ? head.some((h) => new Bun.Glob(f).match(h)) : head.includes(f));
 
 export function hygieneReport(input: HygieneInput): HygieneRow[] {
-  const last = new Map<string, number>();
-  for (const p of pushedItems(input.events)) last.set(p.id, Math.max(last.get(p.id) ?? 0, p.ts));
+  const last = lastPushedAt(input.events.filter((e) => e.ts <= input.now));
   const quietSince = input.now - HYGIENE_QUIET_DAYS * DAY_MS, staleSince = input.now - HYGIENE_STALE_DAYS * DAY_MS;
   const loud = new Set(p1Hits(input.events).filter((h) => h.ts >= quietSince).map((h) => h.family));
   const rows: HygieneRow[] = [];

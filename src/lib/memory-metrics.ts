@@ -3,11 +3,13 @@
  * 三类数据：单子里推了什么（scheduler 事件 op = memory_retrieve 的 memoryIds，排名事件 items[].routes 给路由）、
  * 执行者怎么用（memory 事件 op = refs）、之后同类 P1 还出不出现（review 事件 findings，口径同 memory-auto-pitfalls：countsAsP1 + normalizedFamily）。
  * 只算不读库（输入是事件 / 卡 / 记忆数组），读库与 CLI 在 memory-metrics-cmd.ts。tests/memory-metrics.test.ts 每个指标一组定义测试。
+ * 观察截止 until：窗口前的事件留着做关联与八周对照，until 及之后的事件（迟到的 refs、P1、返工审查、新推出）一律不看，已截止的周报不随后来的数据变。
  */
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { MemoryKind } from "./ledger-memory-schema.js";
 import { taskMetrics } from "./ledger-metrics.js";
 import { autoFiles } from "./memory-auto-common.js";
+import { deliverDedupKey } from "./memory-tools-refs.js";
 import { overlaps, type MemoryOrderKind, type MemoryRoute } from "./memory-retrieve.js";
 import { countsAsP1, normalizedFamily, type ReviewFinding } from "./scheduler-review.js";
 
@@ -24,7 +26,7 @@ export interface MetricsInput {
   events: readonly LedgerEvent[];
   tasks: readonly LedgerTask[];
   memories: readonly MetricsMemory[];
-  /** 统计窗口 [since, until) */
+  /** 统计窗口 [since, until)；until 也是观察截止（见文件头） */
   since: number;
   until: number;
   /** 记忆注入上线时刻；不给 = 本项目第一条推出事件的时刻（都没有 = 没有对照） */
@@ -58,6 +60,16 @@ export function pushedItems(events: readonly LedgerEvent[]): PushedItem[] {
   return out;
 }
 
+/** 最后一次实际推出的时刻（每条推出事件都算，不做 pushedItems 的「同一张单取第一次」去重）；卫生清单用 */
+export function lastPushedAt(events: readonly LedgerEvent[]): Map<string, number> {
+  const last = new Map<string, number>();
+  for (const e of events) {
+    if (e.kind !== "scheduler" || e.data.op !== "memory_retrieve" || !Array.isArray(e.data.memoryIds)) continue;
+    for (const id of e.data.memoryIds) if (typeof id === "string") last.set(id, Math.max(last.get(id) ?? -Infinity, e.ts));
+  }
+  return last;
+}
+
 export function p1Hits(events: readonly LedgerEvent[]): P1Hit[] {
   const byTask = groupByTarget(events);
   return events.filter((e) => e.kind === "review" && Array.isArray(e.data.findings)).flatMap((e) =>
@@ -72,6 +84,8 @@ function groupByTarget(events: readonly LedgerEvent[]): Map<string, LedgerEvent[
   return m;
 }
 
+/** until 截止的观察：until 及之后的事件不看 */
+const observed = (input: MetricsInput): LedgerEvent[] => input.events.filter((e) => e.ts < input.until);
 const ratio = (n: number, d: number): number | null => (d ? n / d : null);
 const inWindow = (ts: number, since: number, until: number) => ts >= since && ts < until;
 const famOf = (m: MetricsMemory | undefined) => (m?.kind === "pitfall" && m.family ? normalizedFamily(m.family) : "");
@@ -99,7 +113,7 @@ export interface RecurrenceRate {
 }
 
 /** 指标 1：同类 P1 复发率（降） */
-export function recurrenceRate(input: MetricsInput, pushed = pushedItems(input.events), hits = p1Hits(input.events)): RecurrenceRate {
+export function recurrenceRate(input: MetricsInput, pushed = pushedItems(observed(input)), hits = p1Hits(observed(input))): RecurrenceRate {
   const mems = new Map(input.memories.map((m) => [m.id, m]));
   const pairs = pitfallPairs(pushed.filter((p) => inWindow(p.ts, input.since, input.until)), mems);
   const recurred = pairs.filter((p) => recurrences(p, hits).length > 0).length;
@@ -109,7 +123,7 @@ export function recurrenceRate(input: MetricsInput, pushed = pushedItems(input.e
 
 function baselineRate(input: MetricsInput, hits: readonly P1Hit[], launch: number): NonNullable<RecurrenceRate["baseline"]> {
   const since = launch - BASELINE_MS;
-  const byTask = groupByTarget(input.events);
+  const byTask = groupByTarget(observed(input));
   const reviewed = input.tasks.filter((t) => (byTask.get(t.id) ?? []).some((e) => e.kind === "review" && inWindow(e.ts, since, launch)));
   const pits = input.memories.filter((m) => famOf(m) && m.files.length);
   let pairs = 0, recurred = 0;
@@ -126,7 +140,7 @@ function baselineRate(input: MetricsInput, hits: readonly P1Hit[], launch: numbe
 export interface PitfallRecurrence { id: string; family: string; cards: number; recurrences: number }
 
 /** 指标 2：坑复发次数（降）——每个推出过的坑，在推过它的卡上之后又出现同 family P1 的次数；多的排前（「推了也没用」，多半要改写 rule） */
-export function pitfallRecurrences(input: MetricsInput, pushed = pushedItems(input.events), hits = p1Hits(input.events)): PitfallRecurrence[] {
+export function pitfallRecurrences(input: MetricsInput, pushed = pushedItems(observed(input)), hits = p1Hits(observed(input))): PitfallRecurrence[] {
   const mems = new Map(input.memories.map((m) => [m.id, m]));
   const rows = new Map<string, PitfallRecurrence>();
   for (const pair of pitfallPairs(pushed.filter((p) => inWindow(p.ts, input.since, input.until)), mems)) {
@@ -141,19 +155,33 @@ export function pitfallRecurrences(input: MetricsInput, pushed = pushedItems(inp
 /** 交付里对一条推出记忆的标注，已对上它推出的那张写单 */
 interface MatchedRef { use: "applied" | "irrelevant" | "wrong"; item: PushedItem }
 
+/** 一次交付所属写单的推出范围：交付之前最近一次进 build / fix（从 blocked 回来不算新单，同 coverage）到交付本身 */
+function deliverScope(own: readonly LedgerEvent[], deliver: LedgerEvent): { task: string; from: number; to: number } {
+  const start = own.filter((s) => s.kind === "stage" && s.seq < deliver.seq && (s.data.to === "build" || s.data.to === "fix") && s.data.from !== "blocked").at(-1);
+  return { task: deliver.target, from: start?.seq ?? -Infinity, to: deliver.seq };
+}
+
 /**
- * memoryRefs 对推出：同一张卡、同一条记忆、在交付之前推出的写单（交付 head 是执行者的新提交，和派单时的 head 对不上，所以不按 head 配）；
- * 每条推出至多被一次标注认领（取最近一次还没被认领的），没推过的 id 不算（分子不超过分母）。
+ * memoryRefs 对推出：refs 自带 orderId / head，先按 deliverDedupKey 找到它跟着的那次交付，再只在该交付所属写单的推出里配
+ * （同卡、同记忆、写单、落在 deliverScope 里；派单 head 和交付 head 对不上，所以不按 head 配）。不按 refs 落账时刻跨单匹配：
+ * 上一单交付后补记 / 重放的 refs 不会认领下一单的推出。找不到交付的 refs 不算。
+ * 每条推出至多被一次标注认领（取范围内最近一次还没被认领的），没推过的 id 不算（分子不超过分母）。
  */
 function matchedRefs(events: readonly LedgerEvent[], pushed = pushedItems(events)): MatchedRef[] {
   const writes = pushed.filter((p) => p.order === "write");
+  const delivers = new Map(events.filter((e) => e.kind === "deliver" && e.dedupKey).map((e) => [e.dedupKey!, e]));
+  const byTask = groupByTarget(events);
   const claimed = new Set<PushedItem>();
   const out: MatchedRef[] = [];
   for (const e of events) {
     if (e.kind !== "memory" || e.data.op !== "refs" || !Array.isArray(e.data.refs)) continue;
+    if (typeof e.data.orderId !== "string" || typeof e.data.head !== "string") continue;
+    const deliver = delivers.get(deliverDedupKey(e.data.orderId, e.data.head));
+    if (!deliver) continue;
+    const scope = deliverScope(byTask.get(deliver.target) ?? [], deliver);
     for (const r of e.data.refs as { id?: unknown; use?: unknown }[]) {
       if (r?.use !== "applied" && r?.use !== "irrelevant" && r?.use !== "wrong") continue;
-      const item = writes.filter((p) => p.task === e.target && p.id === r.id && p.seq < e.seq && !claimed.has(p)).at(-1);
+      const item = writes.filter((p) => p.task === scope.task && p.id === r.id && p.seq > scope.from && p.seq < scope.to && !claimed.has(p)).at(-1);
       if (!item) continue;
       claimed.add(item);
       out.push({ use: r.use, item });
@@ -166,9 +194,9 @@ export interface UseRates { pushed: number; applied: number; irrelevant: number;
   /** 指标 3 引用率（升）/ 4 无关率（降）/ 5 错误率（降）：分母都是窗口内推出到写单的条数（审查单的坑不经 memoryRefs 标） */
   appliedRate: number | null; irrelevantRate: number | null; wrongRate: number | null }
 
-export function useRates(input: MetricsInput, pushed = pushedItems(input.events)): UseRates {
+export function useRates(input: MetricsInput, pushed = pushedItems(observed(input))): UseRates {
   const writes = pushed.filter((p) => p.order === "write" && inWindow(p.ts, input.since, input.until));
-  const refs = matchedRefs(input.events, pushed).filter((r) => inWindow(r.item.ts, input.since, input.until));
+  const refs = matchedRefs(observed(input), pushed).filter((r) => inWindow(r.item.ts, input.since, input.until));
   const n = (u: MatchedRef["use"]) => refs.filter((r) => r.use === u).length;
   const [applied, irrelevant, wrong] = [n("applied"), n("irrelevant"), n("wrong")];
   return { pushed: writes.length, applied, irrelevant, wrong,
@@ -179,10 +207,10 @@ export function useRates(input: MetricsInput, pushed = pushedItems(input.events)
  * 指标 6 覆盖率（参考）：至少推了 1 条的写单 / 全部写单。一张写单 = 卡进 build / fix 的一次（从 blocked 回来不算新单，同 taskMetrics.reworkCount）；
  * 「推了」= 这段 build / fix 期间有一条写单推出。没有记忆的单子不写注入事件，所以分母只能从阶段事件数。
  */
-export function coverage(input: MetricsInput, pushed = pushedItems(input.events)): { orders: number; covered: number; rate: number | null } {
+export function coverage(input: MetricsInput, pushed = pushedItems(observed(input))): { orders: number; covered: number; rate: number | null } {
   const writes = pushed.filter((p) => p.order === "write");
   let orders = 0, covered = 0;
-  for (const own of groupByTarget(input.events).values()) {
+  for (const own of groupByTarget(observed(input)).values()) {
     const stages = own.filter((e) => e.kind === "stage");
     stages.forEach((e, i) => {
       if ((e.data.to !== "build" && e.data.to !== "fix") || e.data.from === "blocked" || !inWindow(e.ts, input.since, input.until)) return;
@@ -197,10 +225,10 @@ export function coverage(input: MetricsInput, pushed = pushedItems(input.events)
 export interface RoundsDiff { hitCards: number; missCards: number; hitAvg: number | null; missAvg: number | null; diff: number | null }
 
 /** 指标 7 轮数差（参考，观察性、不当因果）：窗口内结束（taskMetrics.endTs）的卡，单子上推过坑的与没推过的平均审查轮数之差（有 − 无） */
-export function roundsDiff(input: MetricsInput, pushed = pushedItems(input.events)): RoundsDiff {
+export function roundsDiff(input: MetricsInput, pushed = pushedItems(observed(input))): RoundsDiff {
   const mems = new Map(input.memories.map((m) => [m.id, m]));
   const hit = new Set(pushed.filter((p) => mems.get(p.id)?.kind === "pitfall").map((p) => p.task));
-  const byTask = groupByTarget(input.events);
+  const byTask = groupByTarget(observed(input));
   const groups: Record<"hit" | "miss", number[]> = { hit: [], miss: [] };
   for (const t of input.tasks) {
     const m = taskMetrics(t, byTask.get(t.id) ?? [], input.until);
@@ -235,9 +263,9 @@ export function costLatency(input: MetricsInput): CostLatency {
 }
 
 /** 指标 9 路由贡献（参考）：被 applied 的推出各来自哪几路（一条多路命中每路各计 1；排名事件缺失的记 unknown） */
-export function routeContribution(input: MetricsInput, pushed = pushedItems(input.events)): Record<MemoryRoute | "unknown", number> & { applied: number } {
+export function routeContribution(input: MetricsInput, pushed = pushedItems(observed(input))): Record<MemoryRoute | "unknown", number> & { applied: number } {
   const out = { graph: 0, file: 0, vector: 0, unknown: 0, applied: 0 };
-  for (const r of matchedRefs(input.events, pushed)) {
+  for (const r of matchedRefs(observed(input), pushed)) {
     if (r.use !== "applied" || !inWindow(r.item.ts, input.since, input.until)) continue;
     out.applied++;
     if (!r.item.routes.length) out.unknown++;
@@ -267,7 +295,8 @@ export interface MemoryMetricsReport {
 }
 
 export function memoryMetrics(input: MetricsInput): MemoryMetricsReport {
-  const pushed = pushedItems(input.events), hits = p1Hits(input.events);
+  const events = observed(input);
+  const pushed = pushedItems(events), hits = p1Hits(events);
   return {
     since: input.since, until: input.until,
     recurrenceRate: recurrenceRate(input, pushed, hits), pitfallRecurrences: pitfallRecurrences(input, pushed, hits),

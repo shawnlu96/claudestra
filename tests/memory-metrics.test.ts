@@ -5,6 +5,7 @@ import {
   BASELINE_MS, costLatency, coverage, memoryMetrics, METRIC_SPECS, pitfallRecurrences, pushedItems, recurrenceRate, roundsDiff,
   routeContribution, useRates, type MetricsInput, type MetricsMemory,
 } from "../src/lib/memory-metrics.js";
+import { deliverDedupKey } from "../src/lib/memory-tools-refs.js";
 
 const P = "demo", W0 = 1_000_000_000, WEEK = 7 * 86_400_000, H = "a".repeat(40);
 let seq = 0;
@@ -18,7 +19,10 @@ const rank = (t: string, ts: number, items: { id: string; routes: string[] }[], 
   ev(t, "scheduler", ts, { op: "memory_rank", order: "write", specRev: 1, head: H, items, ...extra });
 const inject = (t: string, ts: number, ids: string[], rankingSeq: number, order = "write") =>
   ev(t, "scheduler", ts, { op: "memory_retrieve", order, specRev: 1, head: H, memoryIds: ids, rankingSeq });
-const refs = (t: string, ts: number, r: { id: string; use: string }[]) => ev(t, "memory", ts, { op: "refs", orderId: `${t}:write:r1`, head: "b".repeat(40), refs: r });
+const refs = (t: string, ts: number, r: { id: string; use: string }[], orderId = `${t}:write:r1`, head = "b".repeat(40)) =>
+  ev(t, "memory", ts, { op: "refs", orderId, head, refs: r });
+const deliver = (t: string, ts: number, orderId = `${t}:write:r1`, head = "b".repeat(40)): LedgerEvent =>
+  ({ ...ev(t, "deliver", ts, { orderId, head }), dedupKey: deliverDedupKey(orderId, head) });
 const task = (id: string, fileGlobs: string[] = []): LedgerTask => ({
   id, project: P, itemId: null, title: id, kind: "code", stage: "build", stageBefore: null, round: 1, agent: null, assigneeKind: null, assignee: null,
   pm: null, branch: null, pr: null, headSHA: H, spec: null, specRev: 1, model: null, rev: 1, extra: { fileGlobs }, createdAt: 0, updatedAt: 0 });
@@ -48,6 +52,7 @@ function fixture(): MetricsInput {
   const ra = add(rank("A", L - 5, [{ id: "ab12-m1", routes: ["graph", "file"] }, { id: "ab12-m3", routes: ["vector"] }, { id: "ab12-d9", routes: ["graph"] }]));
   add(inject("A", L, ["ab12-m1", "ab12-m3", "ab12-d9"], ra.seq));
   add(inject("A", L + 1, ["ab12-m1"], ra.seq));
+  add(deliver("A", L + 99));
   add(refs("A", L + 100, [{ id: "ab12-m1", use: "applied" }, { id: "ab12-m3", use: "irrelevant" }, { id: "ab12-d9", use: "wrong" }, { id: "ab12-m2", use: "applied" }]));
   add(stage("A", L + 110, "build", "review"));
   const rr = add(rank("A", L + 120, [{ id: "ab12-m1", routes: ["file"] }]));
@@ -137,5 +142,55 @@ describe("§9 指标定义", () => {
       ["同类 P1 复发率", "坑复发次数", "引用率", "无关率", "错误率", "覆盖率", "轮数差", "成本 / 延迟", "路由贡献"]);
     expect(Object.values(METRIC_SPECS).every((s) => s.threshold === null)).toBe(true);
     expect(memoryMetrics(fixture()).specs).toBe(METRIC_SPECS);
+  });
+});
+
+/** pmem-M7 第 1 轮审查：观察截止 until、refs 按 orderId/head 找交付归因 */
+describe("§9 指标：截止与归因", () => {
+  const mems: MetricsMemory[] = [{ id: "m1", kind: "pitfall", family: "widget-tx", files: [], createdAt: 0 }];
+
+  test("until 之后的 refs / P1 / 返工审查 / 新推出不改变已截止的报表", () => {
+    seq = 0;
+    const base = [stage("A", 1, "restate", "build"), inject("A", 10, ["m1"], 0), deliver("A", 20)];
+    const input = { events: base, tasks: [task("A")], memories: mems, since: 0, until: 100 };
+    const before = memoryMetrics(input);
+    expect(before.uses).toMatchObject({ pushed: 1, applied: 0, appliedRate: 0 });
+    expect(before.recurrenceRate).toMatchObject({ rate: 0, recurred: 0 });
+    const later = [...base, refs("A", 150, [{ id: "m1", use: "applied" }]), review("A", 160, 1, [p1("a1", "widget-tx")]),
+      stage("A", 170, "review", "fix"), inject("A", 180, ["m1"], 0), stage("A", 190, "fix", "review"), review("A", 195, 2, []), stage("A", 199, "review", "verified")];
+    const after = memoryMetrics({ ...input, events: later });
+    expect(after).toEqual(before);
+    expect(after.pitfallRecurrences).toEqual([{ id: "m1", family: "widget-tx", cards: 1, recurrences: 0 }]);
+    expect(after.routeContribution.applied).toBe(0);
+    // 截止前就结束的卡：截止后又被打回返工，旧周的轮数不变
+    seq = 0;
+    const done = [stage("B", 1, "restate", "build"), stage("B", 5, "build", "review"), review("B", 6, 1, []), stage("B", 7, "review", "verified")];
+    const r0 = roundsDiff({ events: done, tasks: [task("B")], memories: mems, since: 0, until: 100 });
+    const r1 = roundsDiff({ events: [...done, stage("B", 120, "verified", "fix"), review("B", 130, 2, [])], tasks: [task("B")], memories: mems, since: 0, until: 100 });
+    expect(r1).toEqual(r0);
+    expect(r0.missAvg).toBe(1);
+  });
+
+  test("上一单交付后补记的 refs 归给上一单的推出，不认领下一单；下一单自己的 refs 也不反认旧单", () => {
+    seq = 0;
+    const o1 = "A:write:r1", o2 = "A:fix:r2", h1 = "c".repeat(40), h2 = "d".repeat(40);
+    const r1 = rank("A", 9, [{ id: "m1", routes: ["graph"] }]);
+    const events = [stage("A", 1, "restate", "build"), r1, inject("A", 10, ["m1"], r1.seq), deliver("A", 20, o1, h1),
+      stage("A", 22, "build", "review"), stage("A", 25, "review", "fix")];
+    const r2 = rank("A", 29, [{ id: "m1", routes: ["vector"] }]);
+    events.push(r2, { ...inject("A", 30, ["m1"], r2.seq), data: { ...inject("A", 30, ["m1"], r2.seq).data, head: h1 } },
+      refs("A", 40, [{ id: "m1", use: "applied" }], o1, h1));
+    const input = { events, tasks: [task("A")], memories: mems, since: 25, until: 50 };
+    expect(useRates(input)).toMatchObject({ pushed: 1, applied: 0, appliedRate: 0 });
+    expect(routeContribution(input)).toMatchObject({ vector: 0, applied: 0 });
+    // 整段看：单一的 applied 归 graph
+    expect(routeContribution({ ...input, since: 0 })).toEqual({ graph: 1, file: 0, vector: 0, unknown: 0, applied: 1 });
+    // 单二交付后它自己的 refs 只认单二的推出（vector）
+    const both = [...events, deliver("A", 60, o2, h2), refs("A", 61, [{ id: "m1", use: "irrelevant" }], o2, h2)];
+    expect(useRates({ ...input, events: both, since: 0, until: 100 })).toMatchObject({ pushed: 2, applied: 1, irrelevant: 1 });
+    expect(routeContribution({ ...input, events: both, since: 0, until: 100 })).toMatchObject({ graph: 1, vector: 0, applied: 1 });
+    // 找不到对应交付的 refs 不算
+    expect(useRates({ ...input, events: [...events.slice(0, 3), refs("A", 15, [{ id: "m1", use: "applied" }], "A:write:rX", h1)], since: 0 }))
+      .toMatchObject({ pushed: 1, applied: 0 });
   });
 });
