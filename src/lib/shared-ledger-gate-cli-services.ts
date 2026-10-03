@@ -5,5 +5,5 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
   "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
   "scheduler-autostart", "scheduler-auto-resume", "scheduler-retire", "scheduler-review-swap", "lend-takeover", "scheduler-family-wait", "scheduler-fix-relay", "scheduler-sec-review-alarm",
-  "scheduler-spec-place", "memory-auto",
+  "scheduler-spec-place", "memory-auto", "scheduler-converge-notice",
 ]);

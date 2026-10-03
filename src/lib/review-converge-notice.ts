@@ -11,6 +11,8 @@ import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
 import { convergeReview } from "./review-converge.js";
 import { convergeFollowUp, escalationFollowUp } from "./review-converge-followup.js";
 import { fixDiffOf } from "./review-converge-scope.js";
+import { convergeNoticeKey, followUpFailureText, isFailedFollowUp } from "./review-converge-notice-write.js";
+import { createRetryDelay } from "./scheduler-create-retry.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { countsAsP1, currentReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
@@ -66,35 +68,50 @@ export async function roundCapNotice(db: Database, task: LedgerTask, notifyPm: (
   return `第 ${task.round} 轮到上限，已通知 PM`;
 }
 
-/** Failed follow-ups stay visible to PM even after the original card advances to merge. */
-export async function followUpFailureNotice(db: Database, task: LedgerTask,
-  notifyPm: (t: LedgerTask, text: string) => Promise<void>): Promise<void> {
-  const failed = listEvents(db, { project: task.project, target: task.id })
-    .filter((e) => e.data.op === "review_downgrade" && typeof e.data.followUpFailure === "string");
+/** What the failed follow-up notice needs: the PM channel, the scheduler-identity ledger CLI that records "informed", a clock. */
+export interface FollowUpNoticeDeps {
+  notifyPm(task: LedgerTask, text: string): Promise<void>;
+  manager(...args: string[]): Promise<Record<string, unknown>>;
+  now(): number;
+}
+/** Sent notices whose "informed" record failed, per ledger: retried on createRetryDelay's 2 → 15 min backoff, not every tick. */
+const unrecorded = new WeakMap<Database, Map<string, { n: number; last: number }>>();
+
+/**
+ * Failed follow-ups stay visible to PM even after the original card advances to merge. The tick's connection is read-only:
+ * once the notice is out, "informed" goes through `ledger scheduler-converge-notice` (review-converge-notice-write.ts). A failed
+ * send records nothing and retries next tick; a failed record keeps the item pending and backs off; a lost lease ends the pass.
+ */
+export async function followUpFailureNotice(db: Database, task: LedgerTask, deps: FollowUpNoticeDeps): Promise<void> {
+  const failed = listEvents(db, { project: task.project, target: task.id }).filter((e) => isFailedFollowUp(task, e));
+  const backoff = unrecorded.get(db) ?? unrecorded.set(db, new Map()).get(db)!;
   for (const e of failed) {
-    const key = `scheduler:converge-notice:${task.id}:${e.seq}`;
-    if (getEventByDedup(db, key)) continue;
-    const text = `[调度引擎] ${task.id} 第 ${e.data.round} 轮降级发现的后续节点未建立，请 PM 补建：${e.data.followUpFailure}；报告 ${e.data.reportPath}`;
-    try { await notifyPm(task, text); }
+    const key = convergeNoticeKey(task.id, e.seq);
+    if (getEventByDedup(db, key)) { backoff.delete(key); continue; }
+    const was = backoff.get(key);
+    if (was && deps.now() - was.last < createRetryDelay(was.n)) continue;
+    const text = followUpFailureText(task.id, e);
+    try { await deps.notifyPm(task, text); }
     catch (error) {
       if (error instanceof SchedulerStopped) throw error;
       console.error(`[scheduler] 后续节点失败通知未发送，下个 tick 重试：${(error as Error).message}`);
       return;
     }
-    tx(db, () => {
-      if (!getEventByDedup(db, key)) insertEvent(db, { actor: "scheduler", dedupKey: key }, {
-        project: task.project, target: task.id, kind: "scheduler", text,
-        data: { op: "review_followup_failed", downgradeSeq: e.seq, informed: true },
-      }, true);
-    });
+    const r = await deps.manager("ledger", "scheduler-converge-notice", task.id, "--downgrade-seq", String(e.seq),
+      "--round", String(e.data.round), "--head", String(e.data.head ?? ""));
+    if (r.code === "lease-lost") throw new SchedulerStopped(`scheduler-converge-notice: ${String(r.error)}`);
+    if (r.ok === true) { backoff.delete(key); continue; }
+    const n = (was?.n ?? 0) + 1;
+    backoff.set(key, { n, last: deps.now() });
+    console.error(`⚠️ [scheduler] 后续节点失败通知已发出但未记账（第 ${n} 次），${Math.round(createRetryDelay(n) / 60_000)} 分钟后重试：${String(r.error)}`);
   }
 }
 
 /** Review demotions survive automatic exits; failure informs are sent before the card stops receiving auto ticks. */
 export async function escalationWithFollowUp<T>(db: Database, task: LedgerTask,
   plan: { code: string; reason: string; reviewSeq?: number; downgrade?: import("./review-converge.js").Downgrade },
-  notifyPm: (task: LedgerTask, text: string) => Promise<void>, fallback: (reason: string) => Promise<T>): Promise<T> {
+  deps: FollowUpNoticeDeps, fallback: (reason: string) => Promise<T>): Promise<T> {
   escalationFollowUp(db, task, plan);
-  await followUpFailureNotice(db, task, notifyPm);
+  await followUpFailureNotice(db, task, deps);
   return fallback(`${plan.code}：${plan.reason}`);
 }
