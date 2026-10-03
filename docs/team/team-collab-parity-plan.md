@@ -51,7 +51,7 @@
   本方案**不在这里实现中心新功能**，测试只用回环假服务器。如果 PM 对 CL1 的指代另有定义，以 PM 为准，节点依赖不受影响。
 - **契约冻结**：`src/lib/shared-ledger-contract.ts` 开头写明是 "Frozen V1 wire contract"。scrub 遇到未知字段会拒绝上传
   （`shared-ledger-scrub.ts`："Unknown field names may themselves contain a secret"）。所以投影只能**加可选字段，
-  并且只有中心在 capabilities 里声明支持之后才发**，不能直接往 V1 里加字段（否则老中心会拒收整包，导致现有公开数据降级）。
+  并且只有中心在新的 `ext-capabilities.uploads` 里声明能收之后才发**，不能直接往 V1 里加字段（否则老中心会拒收整包，导致现有公开数据降级）。
 
 ---
 
@@ -218,6 +218,7 @@
   | `web/features/collab/team-source-history.ts` | P1-F 建 → P1-H（r2） |
   | `tests/helpers/team-parity-matrix.ts` | P1-C 建 → P1-F → P1-H（后两个只改期望值） |
   | `src/lib/shared-ledger-client.ts`、`src/lib/shared-ledger-gate-proxy.ts`、`src/bridge/local-api/shared-ledger.ts`、`src/lib/shared-ledger-contract-fixtures.ts`、`web/lib/api/shared-ledger-reads.ts` | P1-D → P1-K（r2） |
+  | `src/lib/shared-ledger-contract-reads.ts`（`ext-capabilities` DTO，r3） | P1-D 建；P1-G / P1-K 只导入不改 |
 
   事件 / 回放 / 详情的消费者（`collab-detail-model.ts`、`collab-replay*.ts`、`collab-detail.tsx`）只归 P1-I；
   P1-F / P1-H 只改适配器产出的数据形状，不改这三个消费者。DAG 版本页的消费者（`dag/dag-props.tsx`、`dag/dag-types.ts`
@@ -340,19 +341,35 @@
   `src/lib/shared-ledger-contract-fixtures.ts`、`tests/shared-ledger-contract-reads*.test.ts`、`tests/shared-ledger-client-reads*.test.ts`、
   `tests/shared-ledger-gate-proxy*.test.ts`、`tests/web-shared-ledger-reads*.test.ts`
 - **契约字段**：
-  - `GET /v1/teams/{team}/features/{id}/versions` → `{schemaVersion:1, teamId, serverSeq, versions: {version, reason, nodes, bindings, at: number|null, by: string|null}[]}`；
+  - `GET /v1/teams/{team}/features/{id}/versions` → `{schemaVersion:1, teamId, projectId, serverSeq, versions: {version, reason, nodes, bindings, at: number|null, by: string|null}[]}`；
     `by` 是成员代号（`actorCode`），不是人名。
-  - `GET /v1/teams/{team}/features/{id}/activity/{afterServerSeq}` → `{serverSeq, items: ({src:"center", serverSeq, kind, by, at} | {src:"home", sourceSeq, taskId, type, at})[], truncated}`；
+  - `GET /v1/teams/{team}/features/{id}/activity/{afterServerSeq}` → `{schemaVersion:1, teamId, projectId, serverSeq, items: ({src:"center", serverSeq, kind, by, at} | {src:"home", sourceSeq, taskId, type, at})[], truncated}`；
     `taskId` 是中心 id；**不含任何原文**（投影上来的 `summary` 本身就等于 kind，`shared-ledger-projector.ts:128`）。
   - **能力发现（r2 更正）**：不往现有 `capabilities` 里加键——`shared-ledger-contract-responses.ts:10-13` 对 `capabilities`
     逐键 `literal` 严格解析，加键会让老客户端拒收**所有** features 响应（现有公开数据降级）。改为新增
-    `GET /v1/teams/{team}/ext-capabilities` → `{schemaVersion:1, reads:{versions:boolean, activity:boolean, ext1:boolean, activityExt:boolean}}`；
-    老中心 404 → 全部视为 false，web 不发对应请求、退回现状。本节点只用 `versions / activity` 两键，`ext1 / activityExt` 由 P1-K 消费。
-  - 路径参数不用 query：现有代理遇到 `new URL(req.url).search` 一律 400。`actionFor` 的正则只放行上面两条 `read`。
+    `GET /v1/teams/{team}/ext-capabilities` →
+    `{schemaVersion:1, teamId, reads:{versions:boolean, activity:boolean, ext1:boolean, activityExt:boolean}, uploads:{projectionExt1:boolean}}`
+    （r3 加 `uploads`）。键集合封闭、全部必填，多键 / 缺键 / 非布尔整包拒收，拒收按"全关"处理。
+    **读和写分开声明**：`reads.*` 只决定 web 发不发对应读请求；**只有 `uploads.projectionExt1 === true` 才允许导出端发 `ext1`**（P1-G），
+    `reads.ext1 / reads.activityExt` 为 true 也不构成上传许可（只读中心 / 已存旧数据但停收的中心就是这种组合）。
+    老中心 404 → 全部视为 false，web 不发对应请求、导出端发 V1 原包，退回现状。
+    `SharedLedgerClient.extCapabilities()`（本节点新增）：仅 404 映射成全关常量 `EXT_CAPABILITIES_OFF`，其他远端错误照常抛
+    （bridge 代理照现有规则回 503 / 原状态码，web 按"读不到 = 全关"处理）。**老的 `capabilities` 解析和 `SHARED_LEDGER_CAPABILITIES` 一字不改**。
+    消费者：web 的 `reads.versions / activity`（P1-F）、`reads.ext1 / activityExt`（P1-K）；导出端的 `uploads.projectionExt1`（P1-G，直连中心，不经 bridge 代理）。
+  - **bridge 代理分派（r3 写明）**：`actionFor` 在 `src/bridge/local-api/shared-ledger.ts:22-26`（不在 `shared-ledger-gate-proxy.ts`；
+    gate-proxy 只按 `/shared-ledger/` 前缀选绑定，路径不用改），现有 GET 正则只认 `features[/id]` 和 `commands/id`，其余 400。
+    本节点在 `read` 里**只加三条**：`ext-capabilities`、`features/{id}/versions`、`features/{id}/activity/{非负整数}`；
+    `handleSharedLedgerApi` 的 GET 分支对应新增三支：`ext-capabilities` → `client.extCapabilities()` 原样回 200（团队级、只有布尔，不含项目数据，
+    不做 projectId 过滤，但仍要求该 principal 对当前 projectId 有 read 凭据，否则 403）；`versions / activity` → 响应 `projectId !== deps.projectId`
+    回 403 `project unavailable`（与 `feature()` 同一句）。其他路径仍 400，`ext1 / activity-ext` 两支归 P1-K。
+  - 路径参数不用 query：现有代理遇到 `new URL(req.url).search` 一律 400。
 - **读写权限**：read grant，和 `features/{id}` 同一道门；跨项目一律 403，响应体相同（沿用 X12 §3.1 的原则）。
-- **验收线**：代理对这两条路径按 `read` 选凭据、按 projectId 过滤；老中心（没有 capability）时 web 不发请求；
-  响应解析器拒收多余字段；改 `shared-ledger-gate-proxy.ts` 时按 CLAUDE.md 的规定在 baseline 里留 `raised[]` 记录。
-- **旧红新绿**：main 上代理对 `features/x/versions` 返回 400 → 红；修完 → 绿。客户端解析器对带 `text` / `data` 字段的 activity 拒收（绿，防止原文漏出）。
+- **验收线**：代理对三条路径按 `read` 选凭据，`versions / activity` 按 projectId 过滤；老中心（没有 capability）时 web 不发请求；
+  响应解析器拒收多余字段；**能力发现三种中心各一条测试**（假中心 + 真实 `handleSharedLedgerApi`）：
+  ① 新中心 `reads` 全 true、`uploads.projectionExt1:true` → 代理 200 原样、解析通过；② 只读中心 `reads` 全 true、`uploads.projectionExt1:false`
+  → 解析通过且 `uploads` 为 false；③ 老中心 404 → `extCapabilities()` 得 `EXT_CAPABILITIES_OFF`、代理 200 全关；另加多键 / 缺 `uploads` 拒收。
+  **旧响应不变**：现有 `features` / `feature` 夹具（含旧 `capabilities`）在改动前后都按原解析器通过、输出逐字相同（防降级，绿）；改 `shared-ledger-gate-proxy.ts` 时按 CLAUDE.md 的规定在 baseline 里留 `raised[]` 记录。
+- **旧红新绿**：main 上代理对 `features/x/versions`、`ext-capabilities` 返回 400 → 红；修完 → 绿。客户端解析器对带 `text` / `data` 字段的 activity 拒收（绿，防止原文漏出）。
 - **依赖**：**PM 批准在冻结的 V1 上做只增不改的扩展**（class=design；默认做法：新文件 + capability 门控，不改已有类型）。不依赖 CL1。
 
 #### P1-E · 中心实现版本 / 活动读口（**私有 floka-ai/cloud**）
@@ -360,6 +377,8 @@
 - **范围**：floka-ai/cloud 里中心的 reads / service 路由（具体 glob 由私有仓库给）；公开仓库**不实现**。
 - **契约字段**：按 P1-D。`versions` 从 `dag_versions` / `source_dag_mirrors` 读（`data.reason` 已有），`at/by` 按 `events`
   里 `kind IN ('dag.init','dag.rewrite','import')` 的 serverSeq 关联；`activity` 从 `events` 和 `source_event_mirrors` 合并按序输出。
+  **`GET …/ext-capabilities`（r3）也由本节点实现**：上线时 `reads.versions / activity` 为 true，`reads.ext1 / activityExt` 和
+  `uploads.projectionExt1` 固定 false，直到 P1-G 中心一半上线再翻；同一份夹具（新中心 / 只读中心）作契约测试。
 - **读写权限**：只读；鉴权和 `detail()` 相同。
 - **验收线**：契约测试用公开仓库的 `shared-ledger-contract-fixtures.ts` 夹具，双方都通过。
 - **依赖**：**CL1（固定 gitlink）** + P1-D 契约合并。
@@ -408,11 +427,13 @@
 
 #### P1-G · 投影可选字段：时间线 / 完成时刻 / 轮次 / 审查计数 / 指标（公开导出端 + 私有中心）
 
-- **公开范围 globs（10）**：`src/lib/shared-ledger-contract-projection-ext.ts`（新建）、`src/lib/shared-ledger-contract-transfer.ts`、
+- **公开范围 globs（12，r3 加 mirror-loop）**：`src/lib/shared-ledger-contract-projection-ext.ts`（新建）、`src/lib/shared-ledger-contract-transfer.ts`、
   `src/lib/shared-ledger-projector.ts`、`src/lib/shared-ledger-export.ts`、`src/lib/shared-ledger-scrub.ts`、
-  `src/lib/shared-ledger-mirror.ts`、`tests/shared-ledger-projector-ext*.test.ts`、`tests/shared-ledger-client-scrub-ext*.test.ts`、
-  `tests/shared-ledger-export-ext*.test.ts`、`tests/shared-ledger-mirror-ext*.test.ts`
-- **契约字段（全部可选；只有中心 capability `projection.ext1` 开着 **且** 该 mirror entry 的 `ext1Consent` 开着才发）**：
+  `src/lib/shared-ledger-mirror.ts`、`src/lib/shared-ledger-mirror-loop.ts`、`tests/shared-ledger-projector-ext*.test.ts`、`tests/shared-ledger-client-scrub-ext*.test.ts`、
+  `tests/shared-ledger-export-ext*.test.ts`、`tests/shared-ledger-mirror-ext*.test.ts`、`tests/shared-ledger-mirror-loop-ext*.test.ts`
+  （`shared-ledger-client.ts` 不在范围：`extCapabilities()` 由 P1-D 提供，本节点只调用）
+- **契约字段（全部可选；只有 P1-D `ext-capabilities` 的 `uploads.projectionExt1 === true` **且** 该 mirror entry 的 `ext1Consent` 开着才发；
+  `reads.*` 不参与判断）**：
   ```
   TaskProjection.ext1?: {
     stageSince: number | null;
@@ -436,19 +457,33 @@
     （传绝对时刻，接收端按自己的 now 重算 pending，避免镜像延迟把等待时长冻住）。
   - `ext1` 是"每张卡要么整块有、要么整块没有"：有 `ext1` 时其中 `null` 表示"本机也没有"（如未完成的 `endTs`），
     没有 `ext1` 表示"没授权 / 老镜像 / 老导出端"，**语义是未知，不是 0**。**不含任何自由文本**。
+- **上传许可的取得路径（r3）**：导出端不经 bridge 代理，`shared-ledger-mirror-loop.ts` 每轮在 `pushSharedLedgerMirror` 前，
+  只对 `ext1Consent` 开着的 entry、用该 entry 的同一个 service 凭据 / 实例签名客户端调 `client.extCapabilities()`（P1-D），
+  得出 `ext1Upload = consent && caps.uploads.projectionExt1 === true`，经 `PushDeps.ext1Upload`（新增可选字段，缺省 false）传给投影；
+  `MirrorClient` 接口加可选 `extCapabilities?()`，假客户端不实现 = false。404 / 任何错误 / 解析拒收 → false，**本轮照发 V1 原包，不计失败、不退避**
+  （能力发现失败不能让现在能推的镜像停推）。consent 关时不发能力请求（和 main 一样零额外请求）。
+  `ext1Upload` 为 true 时用新文件里的 `parseSharedLedgerProjectionExt` scrub 整包，为 false 时仍用现有 `parseSharedLedgerProjection`，代码路径和 main 相同。
+  **中心降级保护**：带 `ext1` 的包被中心以非 409 的 4xx 拒收时，同一轮立刻去掉 `ext1` 按 V1 重发一次；重发成功即算本轮成功，
+  下一轮重新问能力。409 仍走现有快照重试（快照也按同一 `ext1Upload` 决定带不带）。bridge 的 `POST projections` 代理路径不变，仍只收 V1。
 - **出境闸**：所有字段都过 `scrubSharedLedger`（数字 / 枚举也走一遍，枚举外的值拒收）；mirror entry 上新增显式开关
   `ext1Consent`（默认关，开启走现有导出预检，`shared-ledger-export.ts` 的 refusal 报告列出新字段）。不开 → 和现在完全一样，
   **现有的公开数据不降级**。
-- **私有部分**：中心接收和存储 `ext1`（含 `eventExt`），并实现 P1-K 定义的 `ext1` / `activity-ext` 两条读口，**按卡 / 按事件原样回传**
+- **私有部分**：中心接收和存储 `ext1`（含 `eventExt`），能收时在 `ext-capabilities` 把 `uploads.projectionExt1` 置 true、
+  读口就绪时把 `reads.ext1 / activityExt` 置 true（两者可以分别发布），并实现 P1-K 定义的 `ext1` / `activity-ext` 两条读口，**按卡 / 按事件原样回传**
   （没收到的不补默认值）；**不往现有 `features/{id}` 的 detail 响应里加 `ext1`**（r2 更正：V1 detail 的 `taskProjectionSchema`
   严格拒收多余键，加了会让老客户端整页读失败）。floka-ai/cloud，依赖 CL1。
 - **验收线**：没有 capability 时发出的包和 main 上逐字节一致（快照测试）；有 capability 但没有 consent 时也一致；
-  两者都开时只多出 `ext1` 和事件扩展；scrub 遇到夹带文本或 `reject` 等枚举外值的 review 拒收。
+  两者都开时只多出 `ext1` 和事件扩展；**能力 × consent 矩阵（r3，`tests/shared-ledger-mirror-loop-ext*.test.ts`，假中心 + 真实 mirror-loop）**：
+  ① `uploads.projectionExt1:true` + consent → 包里有 `ext1`；② 只读中心（`reads` 全 true、`uploads.projectionExt1:false`）+ consent
+  → 包和 main 逐字节一致（**只有读支持不得上传**）；③ 老中心 `ext-capabilities` 404 + consent → 逐字节一致、`failures` 不变；
+  ④ 能力请求 503 → 同 ③；⑤ consent 关 → 假中心收不到 `ext-capabilities` 请求；⑥ 能力 true 但 `projections` 对带 `ext1` 的包回 400
+  → 同一轮 V1 重发成功；scrub 遇到夹带文本或 `reject` 等枚举外值的 review 拒收。
 - **旧红新绿**：投影快照测试，main 上没有 `ext1` → 新断言红；开 consent 后变绿；未开时的快照保持绿（防降级）。
   **block 回归**：本机一条 `verdict:"block"`、`p0:1` 的 review → 投影 → 客户端解析（`shared-ledger-contract-transfer.ts`）
   → 结果仍是 `block`、`p0 = 1`（P1-H 接着验到 UI）。
 - **依赖**：**owner / PM 决定审查结论和 P0/P1/P2 计数能不能出境**（class=design；默认：只出枚举和计数，原文永远 home_only）；
-  中心那一半依赖 CL1 + P1-E 的部署通道。公开导出端可以先合并（capability 默认关，等于不生效）。
+  **P1-D 已合并**（`extCapabilities()` 和 DTO）；中心那一半依赖 CL1 + P1-E 的部署通道（`ext-capabilities` 路由由 P1-E 先上线）。
+  公开导出端可以先合并（`uploads.projectionExt1` 不为 true 就不生效）。
 
 #### P1-K · 扩展数据读回契约：中心 → bridge → 浏览器（公开 · 共享读 API + web 传输；r2 新增）
 
@@ -460,9 +495,9 @@
   `tests/shared-ledger-ext-reads*.test.ts`、`tests/shared-ledger-gate-proxy-ext*.test.ts`、`tests/web-shared-ledger-ext-reads*.test.ts`
 - **读 DTO（全部是新路径，老客户端永远不会请求，所以不影响冻结的 V1 响应）**：
   - `GET /v1/teams/{team}/features/{id}/ext1` →
-    `{schemaVersion:1, teamId, serverSeq, featureId, consent: boolean, tasks: {taskId, ext1: TaskExt1WithoutEventExt}[]}`；
+    `{schemaVersion:1, teamId, projectId, serverSeq, featureId, consent: boolean, tasks: {taskId, ext1: TaskExt1WithoutEventExt}[]}`；
   - `GET /v1/teams/{team}/features/{id}/activity-ext/{afterServerSeq}` →
-    `{schemaVersion:1, teamId, serverSeq, featureId, consent: boolean, items: ({taskId} & EventExt1)[], truncated: boolean}`；
+    `{schemaVersion:1, teamId, projectId, serverSeq, featureId, consent: boolean, items: ({taskId} & EventExt1)[], truncated: boolean}`；
     `sourceSeq` 和 P1-D activity 的 `{src:"home", sourceSeq}` 一一对应，浏览器按 `(taskId, sourceSeq)` 合并。
   - 两条都只回 P1-G 上传时已经过 scrub 的枚举 / 数字 / 时间戳，**没有任何自由文本**；解析器对多余键、`text / data / summary / note`、
     枚举外值（含 `reject`）、`type` 不在 `stage / review / verify` 里的项一律拒收整包（不是丢单项后放行）。
@@ -471,8 +506,9 @@
   web 同样视为全部未知；某张卡 / 某条事件不在数组里 → 该卡 / 该事件未知。三种情况都**不会**变成 0 或「失败」。
 - **web 传输类型**：`web/lib/api/shared-ledger-reads.ts` 新增 `TeamExt1Read`、`TeamActivityExtRead` 及 `fetchTeamExt1 / fetchTeamActivityExt`，
   响应先过同一严格解析再交给适配层；解析失败按"读不到"处理（未知），不抛到界面。
-- **读写权限**：read grant，与 `features/{id}` 同门、同一 projectId 过滤；`gate-proxy` 的 `actionFor` 只把这两条加进 `read`
-  （改 `shared-ledger-gate-proxy.ts` 按 CLAUDE.md 在 baseline 里留 `raised[]` 记录）；跨项目 403、响应体与现有一致。
+- **读写权限**：read grant，与 `features/{id}` 同门、同一 projectId 过滤（响应 `projectId !== deps.projectId` → 403）；
+  `src/bridge/local-api/shared-ledger.ts` 的 `actionFor` 在 P1-D 的三条之后只再加这两条进 `read`，`handleSharedLedgerApi` 加对应两支
+  （若改 `shared-ledger-gate-proxy.ts` 按 CLAUDE.md 在 baseline 里留 `raised[]` 记录）；本节点只读 `reads.ext1 / activityExt`，不读也不改 `uploads`；跨项目 403、响应体与现有一致。
 - **验收线**：代理对两条路径按 `read` 选凭据；capability 关 / consent 关 / 部分卡缺失三种响应都解析成"未知"而不是默认值；
   夹带 `text` 的 review、`verdict:"reject"`、`result:"ok"` 的响应被拒收。
 - **旧红新绿**：main 上代理对 `features/x/ext1`、`features/x/activity-ext/0` 返回 400 → 红，修完 → 绿；
@@ -545,6 +581,7 @@ P1-A ──► P1-B（collab-model.ts 串行）
 P1-C（并行；A/B/I 合并后更新矩阵）
 P1-D ──(PM 批准只增扩展)──► P1-F（还需 P1-I、P1-B、P1-A 已合并；可以用假数据先行）
   └──► P1-E [私有 floka-ai/cloud，前置 CL1 gitlink] ──► P1-F 联调
+P1-D ──► P1-G 公开部分（r3：用 extCapabilities().uploads.projectionExt1 判断能否上传）
 P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D；读回 DTO + 严格解析 + web 传输）──► P1-H（还需 P1-B、P1-F 已合并）
   └── 中心一半 [私有，前置 CL1：存 ext1 + 实现 ext1 / activity-ext 读口] ──► P1-K / P1-H 联调
 ```
@@ -562,7 +599,7 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D�
 - **永远不出境**：会话日志、任意文件、owner 消息、规格全文、审查 / 事件原文、本机 agent 名和 peer 名（成员只用代号 `actorCode`）、
   分支名、不在本机仓库里的 head（`mirrorTaskHeads` 规则不变）。
 - 新增的读口只返回中心已经存了的、上传时已经过 scrub 的数据，不引入新的出境面；新增的投影字段只有数字 / 枚举 / 时间戳，
-  并且双开关（中心 capability + 本机 consent）都开着才发。
+  并且双开关（中心 `ext-capabilities.uploads.projectionExt1` + 本机 consent）都开着才发；读能力不构成上传许可。
 - 防降级：现有字段、现有包的形状、现有 capabilities 一律不删不改；每个节点都带"不开新开关时和 main 上逐字节一致"的快照测试。
 
 ---
@@ -573,7 +610,7 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D�
 |---|---|---|
 | 1 逐项对照 + 文件符号 / 契约证据 | §2、§3（47 行，分 A–F） | 完成；每行都有代码证据，不只依据设计注释 |
 | 2 隔离合成同数据、1200 / 390、深浅、前后截图 | §4 | 部分完成：桌面首页 + 详情、手机首页已实测；手机详情、版本 / 对比、谁在干活 / 团队标签**没有验证**，已经写明；截图没上传 |
-| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：10 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有；r2 新增 K 读回契约）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 14（P1-A），F 12、K 9、H 8 |
+| 3 可执行小节点（globs ≤ 16、字段、权限、验收、旧红新绿、依赖、公开 / 私有区分） | §5 | 完成：10 个节点（A/B/C/I 第一批，其中 B、I 等 A 合并；E 私有；r2 新增 K 读回契约）；§5.0 写明类型归属、未知语义和重叠文件串行顺序；最大 globs 14（P1-A），F 12、G 12（r3）、K 9、H 8 |
 | 4 沿用闸门、不降级、原文不出境 | §6 | 完成 |
 | 5 完整方案 + 覆盖矩阵 + 第一批 + 真实阻塞 | §0、§3、§5.1、§5.4 | 完成 |
 
@@ -596,3 +633,9 @@ P1-G 公开部分 ──(owner/PM 定审查出境)──► P1-K（还需 P1-D�
 | optional-metrics | `reviewWait` 只看 review 阶段卡是否有 `ext1`，而 `metricsOf` 对所有卡聚合 pending，build/ops 卡缺 `ext1` 时团队平均 60000 冒充本机 120000 | 改为总览里**全部卡**都有 `ext1` 才已知（缺 `ext1` 时 stage 不能证明不参与）；`reviewRounds` 同样按全部卡；`fixed` 按 V1 stage 过滤保留并说明理由。补混合 review/build、blocked 两条旧红新绿；本轮用真实 `metricsOf` 隔离探针复现：r1 规则 `known:true` 且 60000≠120000（红），r2 规则 `known:false`（绿）。 |
 | event-readback | 事件扩展只有上传端，没有中心 → 浏览器的读契约；`verify.result` 无载体，P1-D 的严格 activity 解析拒收 | 新增节点 **P1-K**：`features/{id}/ext1` 和 `features/{id}/activity-ext/{after}` 两条新读口的 DTO、严格解析（与 P1-G 共用 schema，拒收文本 / 枚举外值）、capability / consent / 缺项三种缺省行为（都是未知，不是 0 / 失败）、gate-proxy 放行、web 传输类型；P1-G 的事件扩展改为放在卡 `ext1.eventExt` 里（不改 V1 `projection.events`）；P1-H 加 `team-source-history.ts` 合并和 verify pass + stage to 的「导出 → 中心响应 → 严格解析 → 事件行 / 回放」联通测试。 |
 | （自查）能力发现 | P1-D 原写「capabilities 新增 read.*」，但 `shared-ledger-contract-responses.ts:10-13` 对 `capabilities` 逐键 `literal` 严格解析，加键会让老客户端拒收全部 features 响应 | 改为独立的 `GET …/ext-capabilities`，老中心 404 = 全关；同理 P1-G 不再往 V1 detail 响应里加 `ext1`。 |
+
+## 10. r3 修订记录（对应 r3 审查，head 5354098）
+
+| 审查项 | 问题 | 本版怎么改 |
+|---|---|---|
+| extension-capability-contract | 新 `ext-capabilities` DTO 只有 `reads`，P1-G 却按不存在的 `projection.ext1` 门控上传（加回旧 `capabilities` 又破坏严格兼容）；发现路由没有分派、中心实现和成功路径测试 | P1-D DTO 加 `uploads:{projectionExt1}`，读写分开，**只有 `uploads.projectionExt1` 授权上传**；`SharedLedgerClient.extCapabilities()`（404 → 全关常量，旧 `capabilities` 解析不动）；P1-G 写明导出端取得路径（mirror-loop 每轮、consent 开才问、直连中心、`PushDeps.ext1Upload`，失败一律按 V1 原包、不计失败）、中心拒收时同轮 V1 重发，globs 加 `shared-ledger-mirror-loop.ts` 和测试（12），依赖 P1-D；P1-D 写明 `actionFor` 实际在 `src/bridge/local-api/shared-ledger.ts:22-26`，`read` 加 `ext-capabilities / versions / activity` 三条及 `handleSharedLedgerApi` 三支（versions/activity 按响应 `projectId` 过滤，DTO 因此加 `projectId`，P1-K 两条同理）；P1-E 实现发现路由、P1-G 中心一半负责翻 `uploads / reads.ext1*`。测试：新中心（读写全开）/ 只读中心 / 老中心 404 三种发现响应 + 旧 features 夹具逐字不变；P1-G 能力 × consent 六格（只读中心 + consent 不得上传）。 |
