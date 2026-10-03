@@ -28,7 +28,7 @@ export interface RowBox {
 
 /** h<seq> → seq；其余（直播 / 乐观 / 跨 session 命名空间 / 分隔条）→ null */
 export function seqOfId(id: string): number | null {
-  const m = /^h(\d+)$/.exec(id);
+  const m = /^h(\d+(?:\.\d+)?)$/.exec(id); // 含收件箱拆出的 h<行号>.0k
   return m ? Number(m[1]) : null;
 }
 

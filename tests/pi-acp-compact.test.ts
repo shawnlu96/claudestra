@@ -1,6 +1,7 @@
 /**
  * Pi 适配器的 /compact：pi 的 rpc prompt 不认内置命令（沙箱 e2e 实测，模型收到的是一句「/compact」），适配器把整条 `/compact [指示]`
- * 换成 rpc compact；回一句压缩结果；没压成（会话太短）也只回一句话、照常结束；session/cancel 的 abort 让它以 cancelled 收尾。
+ * 换成 rpc compact；压成了发和自动压缩同一个记号（宿主翻成 compact_boundary）；没压成（会话太短）只回一句话、照常结束；
+ * session/cancel 的 abort 让它以 cancelled 收尾。
  * 带 <channel> 头的普通消息、句中的 /compact 不拦。
  */
 import { describe, expect, test } from "bun:test";
@@ -10,6 +11,8 @@ import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
 import { createRpcPeer, type RpcWire } from "../src/lib/acp/rpc.ts";
 
 type Rec = Record<string, any>;
+const compacted = (preTokens: number, postTokens: number) =>
+  ({ sessionUpdate: "session_info_update", _meta: { claudestra: { compacted: { preTokens, postTokens, trigger: "manual" } } } });
 
 describe("compactCommand / compactNotice", () => {
   test("整条是 /compact 才算，指示原样带上；普通消息、句中提到的不算", () => {
@@ -18,9 +21,9 @@ describe("compactCommand / compactNotice", () => {
     for (const t of ["/compacting", "<channel>/compact</channel>", "请 /compact 一下", "/clear"]) expect(compactCommand(t), t).toBeNull();
   });
 
-  test("回包 → 一句话；失败原因 → 一句话", () => {
-    expect(compactNotice({ tokensBefore: 13521, estimatedTokensAfter: 9326 }).content.text).toBe("上下文已压缩：13521 → 约 9326 tokens");
-    expect(compactNotice({}).content.text).toBe("上下文已压缩");
+  test("回包 → 压缩记号（trigger=manual）；失败原因 → 一句话", () => {
+    expect(compactNotice({ tokensBefore: 13521, estimatedTokensAfter: 9326 })).toEqual(compacted(13521, 9326));
+    expect(compactNotice({})).toEqual(compacted(0, 0));
     expect(compactNotice(null, "pi compact 失败：Nothing to compact").content.text).toBe("上下文没有压缩：pi compact 失败：Nothing to compact");
   });
 });
@@ -60,12 +63,13 @@ function harness(onCompact: () => Promise<unknown>) {
 const texts = (updates: Rec[]) => updates.filter((u) => u.sessionUpdate === "agent_message_chunk").map((u) => u.content.text);
 
 describe("PiAcpServer 的 /compact", () => {
-  test("换成 rpc compact（不发 prompt），回一句结果，end_turn", async () => {
+  test("换成 rpc compact（不发 prompt），发压缩记号，end_turn", async () => {
     const h = harness(async () => ({ tokensBefore: 100, estimatedTokensAfter: 40 }));
     await h.open();
     expect(await h.prompt("/compact 只留结论")).toEqual({ stopReason: "end_turn" });
     expect(h.sent.filter((c) => c.type === "compact" || c.type === "prompt")).toEqual([{ type: "compact", customInstructions: "只留结论" }]);
-    expect(texts(h.updates)).toEqual(["上下文已压缩：100 → 约 40 tokens"]);
+    expect(texts(h.updates)).toEqual([]);
+    expect(h.updates).toContainEqual(compacted(100, 40));
     expect(await h.prompt("你好")).toEqual({ stopReason: "end_turn" }); // 普通消息照常走 prompt
     expect(h.sent.filter((c) => c.type === "prompt")).toMatchObject([{ message: "你好" }]);
   });

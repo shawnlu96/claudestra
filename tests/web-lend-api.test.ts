@@ -350,9 +350,9 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
     expect(entry().codexModel).toBeUndefined();
     expect(entry()).toMatchObject({ roles: ["review", "write"], codexEffort: "xhigh" });
     expect((await web({ ...GOOD, roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high" })).status).toBe(200);
-    expect(entry()).toMatchObject({ roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high" });
+    expect(entry()).toMatchObject({ roles: ["review", "write"], codexModel: "gpt-6-sol", codexEffort: "high" });
     expect((await web({ ...GOOD, codexEffort: null })).status).toBe(200);
-    expect(entry()).toMatchObject({ roles: ["write"], codexModel: "gpt-6-sol" });
+    expect(entry()).toMatchObject({ roles: ["review", "write"], codexModel: "gpt-6-sol" });
     expect(entry().codexEffort).toBeUndefined();
     expect((await web({ ...GOOD, codexModel: null, codexEffort: null })).status).toBe(200);
     expect(entry().codexModel).toBeUndefined();
@@ -371,13 +371,13 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
     const api = apiWith();
     const web = (body: Record<string, unknown>) => api(req("/lend/grants", "POST", body), "/lend/grants", OWNER);
     expect((await web(GOOD))?.status).toBe(200);
-    expect(entry().roles).toEqual(["review"]);
+    expect(entry().roles).toEqual(["review", "write"]);
     expect(entry().codexModel).toBeUndefined();
     expect(entry().codexEffort).toBeUndefined();
     const old = { ...entry(), roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high", until: iso(0), paused: { reason: "旧授权" } };
     writeFileSync(lendPath, JSON.stringify({ version: 2, enabled: false, lend: [old], borrow: [] }));
     expect((await web({ ...GOOD, peer: FP.toUpperCase() }))?.status).toBe(200);
-    expect(entry()).toMatchObject({ peer: "team-a", roles: ["write"], codexModel: "gpt-6-sol", codexEffort: "high" });
+    expect(entry()).toMatchObject({ peer: "team-a", roles: ["review", "write"], codexModel: "gpt-6-sol", codexEffort: "high" });
     expect(entry().paused).toBeUndefined();
   }, 30_000);
 
@@ -393,7 +393,7 @@ describe("重授沿用：请求体没带的字段交给 CLI 在写锁内沿用",
         return run(args);
       });
       expect((await api(req("/lend/grants", "POST", GOOD), "/lend/grants", OWNER))?.status).toBe(200);
-      expect(entry().roles).toEqual(["review"]);
+      expect(entry().roles).toEqual(["review", "write"]);
       expect(entry().codexModel).toBe(clear ? undefined : "gpt-6-sol");
       expect(entry().codexEffort).toBe(clear ? undefined : "low");
     }

@@ -11,7 +11,9 @@ import { SHELL_SENTENCE } from "../lib/lend-grant-rules.js";
 import { buildBorrowEntry, buildGrant, effectiveLend, isPersonalProject, readLendContext, resolveContact, type Built } from "../lib/lend-policy.js";
 import { isCreateProcess, stopReportText, stopRevokedWorkers, workerOrderLive, type StopReport } from "../lib/lend-grant-spawn.js";
 import { lendStopReason } from "../lib/lend-watchdog.js";
+import { readStoppedWorkSummary, stoppedWorkText } from "../lib/lend-work-retention.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
+import { ASK_HINT, ASK_USAGE, askGate, lendAskAction, offParams, printBind, type AskGate } from "../lib/lend-ask-auth.js";
 import { probeAcpWorker } from "../lib/worker-liveness.js";
 import { parseLedgerArgs } from "./ledger-identity.js";
 import { loadRegistry, output, saveRegistry } from "./core.js";
@@ -20,10 +22,10 @@ import { requireOwnerOrMaster } from "./project-guard.js";
 
 const LEND_USAGE =
   "usage: lend status | lend grant <peer名|指纹> --repos owner/repo[,..] --until <ISO|3d|12h>（最长 7 天） [--codex N（缺省 5）] [--claude N] " +
-  "[--roles review[,write]] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
-  "[--keep-unset codex,claude,roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）";
+  "[--roles <旧参数，忽略；审查和写代码已不区分>] [--orders-per-day N（缺省 200）] [--codex-model <模型>] [--codex-effort <档位>]（不写 = 本机 Codex 默认；重授不带就清掉） " +
+  "[--keep-unset codex,claude,roles,codex-model,codex-effort]（仅列出的未提供字段在写锁内沿用） | lend revoke [--peer <名>]（不带 --peer = 全部收回）" + ASK_USAGE;
 const BORROW_USAGE = "usage: borrow status | borrow set <peer名|指纹> --projects <id,..> [--roles review[,write]] [--max-open N] " +
-  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]";
+  "[--priority first|balance|low|off]（槽池档位，不写 = balance；重设不带就回到 balance） [--keep-unset]（没带的旗标沿用现有条目） | borrow off [--peer <名>]" + ASK_USAGE;
 
 /** confirm 留在表里只为认出旧写法、报「已退役」，不当未知参数 */
 const LEND_FLAGS = ["codex", "claude", "roles", "repos", "orders-per-day", "confirm", "until", "codex-model", "codex-effort", "keep-unset"];
@@ -49,7 +51,7 @@ function buildLendGrant(ref: string, flags: Record<string, string>, file: LendFi
   if (!who.ok) return who;
   const old = file.lend.find((e) => e.peer === who.entry.peer);
   const kept: Record<string, string | undefined> = { codex: old ? String(old.families.codex ?? 0) : undefined, claude: old ? String(old.families.claude ?? 0) : undefined,
-    roles: old?.roles.join(","), "codex-model": old?.codexModel, "codex-effort": old?.codexEffort };
+    "codex-model": old?.codexModel, "codex-effort": old?.codexEffort };
   const f = { ...flags };
   for (const k of keep) if (f[k] === undefined && kept[k] !== undefined) f[k] = kept[k];
   return withCodexChoice(buildGrant({ ref, families: { codex: f.codex, claude: f.claude }, roles: f.roles, repos: f.repos,
@@ -98,7 +100,10 @@ async function status(kind: "lend" | "borrow"): Promise<void> {
   if (kind === "lend") {
     const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
       : eff.lending ? `出借中：${eff.lend.map((e) => e.peer + codexText(e)).join("、")}` : read.file.enabled ? "总开关开着，但没有仍有效的出借条目" : "不出借（总开关关）";
-    return output({ ...base, enabled: read.file.enabled, lending: eff.lending, declared: read.file.lend, effective: eff.lend, message });
+    const stoppedWork = readStoppedWorkSummary();
+    return output({ ...base, enabled: read.file.enabled, lending: eff.lending,
+      declared: read.file.lend.map(({ roles: _roles, ...e }) => e), effective: eff.lend.map(({ roles: _roles, ...e }) => e), message,
+      stoppedWork, stoppedWorkText: stoppedWorkText(stoppedWork) });
   }
   const message = eff.invalid ? `lend.json 无效，按「关」处理：${eff.invalid}`
     : eff.borrow.length ? `借入：${eff.borrow.map((e) => `${e.peer}（${e.projects.join(",")}${e.priority ? `，档位 ${e.priority}` : ""}）`).join("；")}` : "什么都不外借";
@@ -150,21 +155,24 @@ async function setEntry(kind: "lend" | "borrow", build: (ctx: Ctx, f: LendFile) 
   });
   if (!built.ok) return output({ ok: false, error: built.error });
   const entry = built.entry;
-  const stop = kind === "lend" ? await stopNow() : undefined; // 重授可能收窄仓库 / 角色 / 家族：不再覆盖的在跑单同样当场停
+  const stop = kind === "lend" ? await stopNow() : undefined; // 重授可能收窄仓库 / 家族：不再覆盖的在跑单同样当场停
   if ("projects" in entry) {
     return output({ ok: true, [kind]: entry, message: `已允许把 ${entry.projects.join("、")} 的单子给 ${entry.peer}：这些项目的 PR 会发给对方机器上的 agent 审` +
       "（代码、规格与验收原文都会到对方那边）" + (entry.roles.includes("write") ? "；含写代码：开工 / 修复单由对方的 agent 写，推到本仓库的 lend/ 分支再走审查" : "") +
       (entry.priority && entry.priority !== "balance" ? `；槽池档位 ${entry.priority}` : "") });
   }
   const slots = Object.entries(entry.families).map(([f, n]) => `${f} ${n} 个位`).join("、");
-  output({ ok: true, [kind]: entry, warning: SHELL_SENTENCE, message: `${SHELL_SENTENCE}。已授权 ${entry.peer} 到 ${entry.until}：仓库 ${entry.repos.join("、")}，` +
-    `角色 ${entry.roles.join("、")}，${slots}${codexText(entry)}，每天最多 ${entry.ordersPerDay} 单；这段时间来单直接领，开跑和交付都会通知你。随时收回：manager lend revoke --peer ${entry.peer}` +
+  const { roles: _roles, ...grant } = entry;
+  output({ ok: true, [kind]: grant, warning: SHELL_SENTENCE, message: `${SHELL_SENTENCE}。已授权 ${entry.peer} 到 ${entry.until}：仓库 ${entry.repos.join("、")}，` +
+    `审查和写代码已不区分，${slots}${codexText(entry)}，每天最多 ${entry.ordersPerDay} 单；这段时间来单直接领，开跑和交付都会通知你。随时收回：manager lend revoke --peer ${entry.peer}` +
     (stop ? stopText(stop) : ""), ...(stop?.unconfirmed.length ? { unconfirmed: stop.unconfirmed } : {}) });
 }
 
 /** lend：删条目（不带 peer = 全删并关总开关），当场停掉已不覆盖的 worker，订单由调度服务下一轮按阶段退回或记停；borrow：删条目 / 清空 */
-async function off(kind: "lend" | "borrow", peer: string | undefined): Promise<void> {
+async function off(kind: "lend" | "borrow", peer: string | undefined, gate?: AskGate): Promise<void> {
   const res = await updateLend((f) => {
+    const no = gate?.check(offParams(peer)); // 非 owner 凭授权卡执行：锁内核卡（lib/lend-ask-auth.ts）
+    if (no) return no;
     const list: { peer: string }[] = kind === "lend" ? f.lend : f.borrow;
     if (peer !== undefined) {
       const i = list.findIndex((e) => e.peer === peer);
@@ -192,22 +200,22 @@ export async function cmdLend(kind: "lend" | "borrow", args: string[]): Promise<
   if (sub === "inbox" && kind === "lend") return (await import("./lend-inbox.js")).cmdLendInbox(rest); // bridge 收 A 推来的单（身份在里面核）
   const op = kind === "lend" ? ({ grant: "set", set: "set", revoke: "off", off: "off" } as const)[sub] : sub === "set" || sub === "off" ? sub : undefined;
   if (!op) return output({ ok: false, error: usage });
-  const p = parseLedgerArgs(rest, op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS, kind === "borrow" && op === "set" ? BORROW_BOOLS : []);
+  const p = parseLedgerArgs(rest, [...(op === "off" ? ["peer"] : kind === "lend" ? LEND_FLAGS : BORROW_FLAGS), "ask"], [...(kind === "borrow" && op === "set" ? BORROW_BOOLS : []), "print-bind"]);
   if ("error" in p) return output({ ok: false, error: `${p.error}；${usage}` });
+  const f = p.flags, action = lendAskAction(kind, op);
+  const build = (ctx: Ctx, file: LendFile): Built<AnyEntry> => kind === "lend" ? buildLendGrant(p.pos[0], f, file, ctx) : buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
+  if (p.bools.has("print-bind")) return output(p.pos.length !== (op === "off" ? 0 : 1) ? { ok: false, error: usage } : await printBind(action, op === "off" ? { off: offParams(f.peer) } : { build }));
   const denied = await requireOwnerOrMaster(kind === "lend" ? "改出借声明" : "改借入声明");
-  if (denied) return output({ ok: false, code: "forbidden", ...denied });
+  const gate = denied && f.ask !== undefined ? askGate(f.ask, denied.params.actor, action) : undefined; // owner / master 带了 --ask 也照旧直接执行
+  if (denied && !gate) return output({ ok: false, code: "forbidden", ...denied, error: `${denied.error}；${ASK_HINT}` });
   try {
     if (op === "off") {
       if (p.pos.length) return output({ ok: false, error: usage });
-      return await off(kind, p.flags.peer);
+      return await off(kind, f.peer, gate);
     }
     if (p.pos.length !== 1) return output({ ok: false, error: usage });
-    const f = p.flags;
     if (kind === "lend" && f.confirm !== undefined) return output({ ok: false, error: CONFIRM_RETIRED });
-    await setEntry(kind, (ctx, file) => {
-      if (kind === "lend") return buildLendGrant(p.pos[0], f, file, ctx);
-      return buildBorrowSet(p.pos[0], f, p.bools.has("keep-unset"), file, ctx);
-    });
+    await setEntry(kind, gate ? gate.wrap(build) : build);
   } catch (e) {
     output({ ok: false, error: (e as Error).message });
   }

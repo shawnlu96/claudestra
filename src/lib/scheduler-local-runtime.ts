@@ -1,3 +1,4 @@
+import { poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
 /** Project-local author selection and an adapter to the canonical authorized, audited config writer. */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-write.js";
@@ -6,7 +7,8 @@ import { setLocalSlots } from "./scheduler-config-write.js";
 import type { LocalAuthorRuntime } from "./scheduler-local-runtime-config.js";
 
 export function localAuthorRuntime(project: string, path = SCHEDULER_CONFIG_PATH): LocalAuthorRuntime {
-  return readSchedulerConfig(path).projects[project]?.localAuthorRuntime ?? "claude";
+  const policy = readSchedulerConfig(path).projects[project];
+  return policy?.agents ? poolAuthorRuntime(project, policy.agents) : policy?.localAuthorRuntime ?? "claude";
 }
 
 /** The existing writer owns permissions, reason validation, deduplication and audit-failure rollback. */

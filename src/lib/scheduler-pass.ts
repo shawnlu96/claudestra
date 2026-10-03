@@ -14,6 +14,8 @@ import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
+import { mergeTrainPass } from "./scheduler-merge-train-tick.js";
+import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
@@ -29,6 +31,7 @@ import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.
 import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
+import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -105,6 +108,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
+      await mergeTrainPass(db, trainProjects(db, Object.keys(config.projects)), active); // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
@@ -118,6 +122,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (config.autoDispatch === true) {
         const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
+        failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
         const deps = supervising ? withSupervisorHold(base, db) : base;
         const autoPace = pace.phase();

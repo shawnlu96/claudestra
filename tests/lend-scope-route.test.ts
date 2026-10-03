@@ -6,7 +6,7 @@
  * 不读线上 tmux。
  * 同一凭据打 history / interrupt / pending / bg-tasks 仍 403、事件流过滤不放行、GET /agents 不列它；源码断言例外只在消息路由那一行。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,13 +20,19 @@ import { workerName } from "../src/lib/lend-drive.ts";
 import { advance, LEND_JOURNAL_PATH, openLendJournal, recordAsked } from "../src/lib/lend-journal.ts";
 import { STATE_DIR } from "../src/lib/paths.ts";
 import { newTokenPrincipal, readPrincipals, updatePrincipals, type Principal } from "../src/lib/principals.ts";
+import { isolatedStateSuite } from "./isolated-state.ts";
+
+// 路由内部读默认 journal / peers / principals，只能走默认路径：整文件在独立状态目录的子进程里跑（i28-TJ1）
+const { afterAll, beforeAll, describe, test } = isolatedStateSuite(import.meta.path);
 
 const PEER = "w6mate";
 const ORDER = "w6-route:s1:r0:review:a0";
 const WORKER = workerName(ORDER);
 const OTHER = workerName("w6-route:s2:r0:review:a0");
-const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH, LEND_JOURNAL_PATH];
-const saved = new Map<string, string | null>();
+const STATE_FILES = ["registry.json", "peers.json", "principals.json", "peer-keys.json", LEND_PATH,
+  LEND_JOURNAL_PATH, LEND_JOURNAL_PATH + "-wal", LEND_JOURNAL_PATH + "-shm"];
+// Preserve the SQLite files byte-for-byte so restoring route state cannot poison another test's journal.
+const saved = new Map<string, Buffer | null>();
 const dirA = mkdtempSync(join(tmpdir(), "w6-peer-a-"));
 const ENV_WITH_BUN = BRIDGE_ENV as Record<string, string | undefined>; // bridge 起 manager 子进程用的 env（runManager）
 const runtimeBefore = ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
@@ -49,9 +55,9 @@ function lendFile(granted: boolean): void {
 
 beforeAll(async () => {
   ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = join(dirA, "runtime"); // manager list 的 tmux socket 落到临时目录：没有服务器 = 没有窗口
-  for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f), "utf8") : null);
+  for (const f of STATE_FILES) saved.set(f, existsSync(fileOf(f)) ? readFileSync(fileOf(f)) : null);
   for (const f of ["peers.json", "principals.json", "peer-keys.json"]) rmSync(fileOf(f), { force: true });
-  rmSync(LEND_JOURNAL_PATH, { force: true });
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   writeFileSync(join(STATE_DIR, "registry.json"), JSON.stringify({ agents: {
     [WORKER]: { name: WORKER, channelId: "ch-lend", cwd: dirA }, [OTHER]: { name: OTHER, channelId: "ch-other", cwd: dirA },
     "agent-x": { name: "agent-x", channelId: "ch-x", cwd: dirA, external: true }, "agent-home": { name: "agent-home", channelId: "ch-home", cwd: dirA },
@@ -81,6 +87,7 @@ beforeAll(async () => {
 afterAll(() => {
   if (runtimeBefore === undefined) delete ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR;
   else ENV_WITH_BUN.CLAUDESTRA_RUNTIME_DIR = runtimeBefore;
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
   for (const [f, v] of saved) v === null ? rmSync(fileOf(f), { force: true }) : writeFileSync(fileOf(f), v);
   rmSync(dirA, { recursive: true, force: true });
 });

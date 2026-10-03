@@ -163,10 +163,23 @@ describe("完整开卡", () => {
   });
 
   test("卡首声明 ui：workflow 从落库那一刻就是 ui 最高版，不存在先写 code 的窗口", async () => {
-    spec("i28-a", "# 规格\n模板：UI\n\n## 目标\n");
+    spec("i28-a", "# 规格\n模板：UI\n\n## 目标\n## 复用对象\n团队视图\n## 对照基准\n/tmp/base.png\n");
     await autostartTick(env());
     const wfEvents = listEvents(db, { target: "i28-a" }).filter((e) => e.data.op === "workflow");
     expect(wfEvents.map((e) => [e.data.template, e.data.templateVersion, e.data.mode])).toEqual([["ui", TEMPLATE_VERSION.ui, "auto"]]);
+  });
+
+  test("i28-UIQ1：ui 规格缺复用对象 / 对照基准：不开卡，通知 PM 一次写明缺的节；补上后照常开", async () => {
+    spec("i28-a", "# 规格\n模板：ui\n\n## 目标\n## 复用对象\n团队视图\n");
+    await autostartTick(env());
+    await autostartTick(env());
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(listEvents(db, { target: FID }).find((e) => e.data.op === "autostart_settle")!.data.code).toBe("spec_lint");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("「## 对照基准」");
+    spec("i28-a", "# 规格\n模板：ui\n\n## 目标\n## 复用对象\n团队视图\n## 对照基准\n/tmp/base.png\n");
+    await autostartTick(env());
+    expect(getTask(db, "i28-a")).not.toBeNull();
   });
 
   test("模板值不认识：不开卡，记失败并通知 PM 一次，同一份规格不再试", async () => {

@@ -17,6 +17,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask } from "./ledger-store.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { ledgerArgs } from "./order-ledger-exit.js";
+import { peerRestateSkip } from "./scheduler-spec-resume-text.js";
 
 interface GitResult {
   ok: boolean;
@@ -80,7 +81,8 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
       name: "task-new",
       run: async () => failed(await ledger(io, p, "task-new", p.taskId, {
         title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
-        extra: JSON.stringify(p.peer ? { fileGlobs: p.fileGlobs, placement: `peer:${p.peer.name}`, repo: p.peer.repo } : { fileGlobs: p.fileGlobs }),
+        extra: JSON.stringify({ sharedFeatureId: p.feature.id, fileGlobs: p.fileGlobs,
+          ...(p.peer ? { placement: `peer:${p.peer.name}`, repo: p.peer.repo } : {}) }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
       // 只取消本次建的卡：同名卡若是别人（并发 / 手工）建的，本次的 task-new 事件不在库里
@@ -246,8 +248,8 @@ function restateStep(io: StepIO, p: StartPlan, peer: NonNullable<StartPlan["peer
   const why = `start_node 放到 peer:${peer.name}（${peer.reason}）；复述环节跳过，start_node 即 PM 放行，开工单由放置结果派给它`;
   return {
     name: "restate",
-    run: async () => failed(await ledger(io, p, "decision", p.taskId, {}, "placement", [why])) ??
-      failed(await ledger(io, p, "stage", p.taskId, { from: "spec", to: "restate", text: `远端卡复述跳过：${why}` }, "restate")),
+    run: async () => failed(await ledger(io, p, "decision", p.taskId, {}, "placement", [peerRestateSkip(why).decision])) ??
+      failed(await ledger(io, p, "stage", p.taskId, peerRestateSkip(why).stage, "restate")),
     landed: () => ours(io, p, "placement") && ours(io, p, "restate"),
   };
 }
@@ -277,5 +279,5 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
   const names = done.map((s) => s.name);
   if (p.peer) return { ok: true, taskId: p.taskId, placement: `peer:${p.peer.name}`, branch: p.branch, steps: names, reconciled };
   return { ok: true, taskId: p.taskId, agent: p.agent, branch: p.branch, worktree: p.worktree, prompt: p.promptPath, steps: names, reconciled };
-  });
+  }, { ledgerPath: io.db().filename });
 }

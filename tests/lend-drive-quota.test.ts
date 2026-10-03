@@ -2,20 +2,19 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { helloBody } from "../src/lib/lend-hello.js";
 import { pausedUntil, PAUSE_FALLBACK_MS } from "../src/lib/lend-health.js";
 import { getOrder } from "../src/lib/lend-journal.js";
-import { lendPollCapacity, CLAUDE_LEND_TOKEN } from "../src/lib/lend-claude-worker-capacity.js";
+import { lendPollCapacity, noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
 import { borrowPeers } from "../src/lib/scheduler-pool-facts.js";
 import { lendBranch } from "../src/lib/lend-git.js";
 import { harness, polled, wire, TEXT, sha, FP } from "./lend-harness.js";
 
-const original = process.env[CLAUDE_LEND_TOKEN];
 const journals: ReturnType<typeof harness>[] = [];
-beforeEach(() => { process.env[CLAUDE_LEND_TOKEN] = "fixture-token"; });
+beforeEach(() => noteClaudeReadiness({ ready: true, reason: null, at: Date.now() })); // 桩：出借方本机 Claude 已登录
 afterEach(() => {
   for (const h of journals.splice(0)) h.db.close();
   closeLedger(":memory:");
-  if (original === undefined) delete process.env[CLAUDE_LEND_TOKEN]; else process.env[CLAUDE_LEND_TOKEN] = original;
+  noteClaudeReadiness(null);
 });
 function setup() {
   const h = harness({ entry: { families: { codex: 2, claude: 1 }, ordersPerDay: 20 } });

@@ -21,11 +21,14 @@ import { isWriteStep, lendBranch, roleOfStep } from "./lend-git.js";
 import type { PrInput, PrResult, PushResult, PushTarget } from "./lend-push.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
+import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
-import { createHash } from "node:crypto";
+import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
+import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
+import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -84,6 +87,8 @@ export interface LendDeps {
   failure(agent: string): CodexFailureSeen | undefined;
   /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
   closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 结单收尾全做完后把 worker 的会话收进 archived/（lend-session-archive.ts，自己兜错只记日志）；不设 = 不归档 */
+  archiveSessions?(row: LendRow): Promise<void>;
   /** 本机 Codex 额度（撞额度暂停借单用）；读不到 = null */
   codexQuota(): Promise<QuotaView | null>;
   log(msg: string): void;
@@ -93,7 +98,7 @@ export interface LendDeps {
   settleHold?(row: LendRow): boolean;
 }
 
-export const workerName = (orderId: string): string => `agent-lend-${createHash("sha256").update(orderId).digest("hex").slice(0, 10)}`;
+export { workerName } from "./lend-worker-name.js";
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
@@ -106,15 +111,14 @@ export function detailOf(s: string | null): string | null {
 const leaseFields = (l: Lease, now: number) => ({ leaseGen: l.gen, leaseUntil: now + l.ms, lastBeatAt: now });
 
 /** A 回这几个码 = 这张单在 A 那边已经不归我们了：停 worker，按码记终态 */
-const GONE: Record<string, "cancelled" | "stopped"> = { cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled",
+const GONE: Record<string, "cancelled" | "stopped"> = { ...CONVERGENCE_GONE, cancelled: "cancelled", lease_expired: "stopped", stale_gen: "stopped", not_found: "stopped", conflict: "cancelled",
   done: "stopped" };
 
 /** 这张还没 claim 的单现在还能不能领：声明仍在、仓库仍在白名单、今日额度与在跑位都还有 */
 export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Database, now: number): string | null {
   if (!entry) return `已不再向 ${row.peer} 出借（lend.json 关了或删了这条）`;
   if (!entry.repos.includes(str(row.preview.repo))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
-  const role = roleOfStep(str(row.preview.step));
-  if (!role || !entry.roles.includes(role)) return `出借声明没开 ${role ?? str(row.preview.step)} 角色，不领这一单`;
+  if (!roleOfStep(str(row.preview.step))) return `不认识的订单阶段 ${str(row.preview.step)}，不领这一单`;
   const slots = row.family === "claude" ? claudeLendSlots(entry) : row.family === "codex" ? entry.families.codex ?? 0 : 0;
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
@@ -136,7 +140,8 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const p = row.preview;
   const w = r.value.write;
   const mismatch = o.orderId !== row.orderId ? "orderId" : (o.head ?? "").toLowerCase() !== str(p.head) ? "head" : o.repo !== p.repo ? "repo"
-    : o.pr !== (p.pr ?? null) ? "pr" : o.step !== p.step ? "step" : o.taskId !== p.taskId ? "taskId" : writeMismatch(o.step, o.taskId, w, d);
+    : o.pr !== (p.pr ?? null) ? "pr" : o.step !== p.step ? "step" : o.taskId !== p.taskId ? "taskId"
+    : convergenceWriteMismatch(o, w?.branch, () => writeMismatch(o.step, o.taskId, w, d));
   const claimed = advance(d.db, row.orderId, "asked", "claimed",
     { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}) }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
   if (mismatch) await release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
@@ -182,6 +187,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
+  await d.archiveSessions?.(told);
 }
 
 /**
@@ -193,6 +199,7 @@ async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: 
   extra: Partial<Pick<LendRow, "receipt">> = {}): Promise<void> {
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
+  if (!(await acknowledgeConvergenceCancel(row, why, d))) return;
   const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled" };
   await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle, ...endNotice(row, to, why) }, d.now()), d);
 }
@@ -271,7 +278,8 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
 
 async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   if (row.work && !row.payload) {
-    const published = await publishWork(row, d);
+    const pre = await preflightDelivery(row, d); if (typeof pre !== "object") return pre ? finish(row, "stopped", pre, d, true) : undefined;
+    const published = await publishWork(pre, d);
     if (!published) return;
     row = published;
   }
@@ -281,8 +289,9 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   const r = await lendRequest(d.call, row.peer, "result", body);
   if (!r.ok) {
     if (r.code === "transport" || r.code === "bad_response" || r.code === "unavailable") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
-    const gone = GONE[r.code];
-    return finish(row, gone ?? "stopped", `A 不收结论：${r.code} ${r.error}`, d, !gone);
+    const gone = GONE[r.code], note = r.code === DELIVERY_NOTE ? await amendDelivery(row, r.error, d) : undefined; // 说明不全：补写重交
+    if (note === null) return;
+    return finish(row, gone ?? "stopped", note ?? `A 不收结论：${r.code} ${r.error}`, d, !gone);
   }
   const rc = r.value;
   const o = orderOf(row);
@@ -373,7 +382,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   } else if (cur.state === "started") {
     // 失败 / 存活 / 运行上限对 started 的每种 submit 都先查：首条派单一直被拒送时 submit 停在 null，
     // 放在派单后面就一轮都查不到，worker 登录失败也照样续租占位（i28-R5a r1 P1-3）
-    const failed = cur.family === "codex" ? d.failure(cur.agent!) : undefined;
+    const failed = await leasedWorkerFailure(cur, d, finish); if (failed === true) return;
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
       d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);

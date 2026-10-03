@@ -1,12 +1,14 @@
 /** ACP 宿主协调适配器、bridge、回合与出站确认；协议细节见 docs/runtimes/codex-acp.md。 */
 import { randomBytes } from "node:crypto";
 import { codexReplyHint, wrapChannelContent } from "../codex-thread.js";
+import { abortAcpTurn } from "./abort.js";
 import type { AdapterEnvSpec, AdapterProc } from "./adapter-proc.js";
 import { applyAcpLaunchConfig } from "./apply-config.js";
 import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
 import { commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
+import { HostHeartbeat } from "./host-heartbeat.js";
 import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
@@ -81,6 +83,7 @@ export class AcpHost {
   private readonly permits = new Map<string, { frame: Record<string, unknown>; resolve: (optionId: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
   private permSeq = 0;
   private translator = createAcpTranslator();
+  private readonly beat = new HostHeartbeat(() => ({ agent: this.cfg.agentName, sessionId: this.cfg.sessionId }), (m) => this.deps.log(m)); // 监护判卡住的回合心跳
   private readonly dedup = new FailureDedup();
   private readonly proxy: ToolProxy;
   private readonly link: ReturnType<HostDeps["makeLink"]>;
@@ -111,12 +114,13 @@ export class AcpHost {
     });
     this.loop = new AcpTurnLoop({
       prompt: async (text) => {
+        this.beat.turn();
         const s = await this.waitSession();
         if (!s) return { kind: "failed", failure: this.lastStartError ?? { kind: "error", key: `nosession#${++this.startSeq}`, message: "ACP 适配器没起来" } };
         return s.prompt(text);
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text) : Promise.resolve({ outcome: "failed" as const })),
-      reportStop: (r) => this.reportStop(r),
+      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
+      reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       log: deps.log,
     });
@@ -130,7 +134,7 @@ export class AcpHost {
   /** SIGINT / SIGTERM / SIGHUP：停当前回合、关适配器（带走 app-server）、关代理和连接 */
   stop(): void {
     this.stopping = true;
-    if (this.loop.busy) this.session?.cancel();
+    if (this.loop.busy) void this.session?.cancel();
     for (const id of [...this.permits.keys()]) this.endPermission(id, null);
     this.proc?.stop();
     this.proxy.close();
@@ -144,8 +148,10 @@ export class AcpHost {
     if (this.stopping || this.rotating) return void (this.restartDeferred ||= this.rotating); // 停机中不再起；/clear 轮换中等它换完再起
     const spec = { ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } };
     const proc = (this.proc = this.deps.spawn(this.cfg.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
-    const sessionDeps = { onUpdate: (u: Record<string, unknown>) => this.onUpdate(u), onPermission: (card: unknown) => this.askPermission(card), log: this.deps.log, label: this.rt.label };
-    const session = new AcpSession(proc.wire, sessionDeps, this.rt.mcpServers(spec));
+    const session = new AcpSession(proc.wire, {
+      onUpdate: (u) => (this.rotating || this.beat.update(), this.onUpdate(u)), onPermission: (card) => (this.beat.update(), this.askPermission(card)), // /clear 引导不算动静
+      onSelfTurn: (done) => (this.beat.turn(), this.loop.track(done)), log: this.deps.log, label: this.rt.label,
+    }, this.rt.mcpServers(spec));
     const startedAt = Date.now();
     void proc.exited.then((code) => this.onAdapterExit(session, code, startedAt));
     try {
@@ -326,7 +332,10 @@ export class AcpHost {
   private onFrame(m: Record<string, any>): void {
     if (this.proxy.onBridgeFrame(m)) return;
     if (m.type === "message") return void this.inbound(String(m.content ?? ""), (m.meta ?? {}) as Record<string, string>);
-    if (m.type === "abort") return this.abort(String(m.id ?? ""));
+    if (m.type === "abort") return void abortAcpTurn(String(m.id ?? ""), {
+      session: this.session, loop: this.loop, send: (f) => this.link.send(f), log: this.deps.log,
+      endPermissions: () => { for (const permId of [...this.permits.keys()]) this.endPermission(permId, null, "回合已打断"); },
+    });
     if (m.type === "acp_call") return void this.call(m);
     if (m.type !== "rejected") this.deps.log(`bridge 发来不认识的帧：${String(m.type)}`);
   }
@@ -336,24 +345,15 @@ export class AcpHost {
     const wrapped = wrapChannelContent(content, shown, this.cfg.mcpName, codexReplyHint(this.cfg.mcpName));
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
-    const how = await this.loop.submit(text);
+    const how = await this.loop.submit(text, meta.message_id);
     this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${how === "steer" ? "插进当前回合" : how === "prompt" ? "开一轮" : "排队"}`);
-  }
-
-  /** 停止：有回合在跑就 session/cancel；排着的消息照旧留着（下一轮处理） */
-  private abort(id: string): void {
-    const busy = this.loop.busy && !!this.session;
-    if (busy) this.session!.cancel();
-    for (const permId of [...this.permits.keys()]) this.endPermission(permId, null, "回合已打断");
-    this.link.send({ type: "abort_ack", id, result: busy ? "aborted" : "idle", voided: [], inEditor: 0 });
-    this.deps.log(busy ? "收到停止：已调 session/cancel" : "收到停止：当前空闲");
   }
 
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
     if (m.op === "clear") return void reply(await this.clearSession());
-    if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts）
+    if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
     if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);

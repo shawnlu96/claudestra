@@ -9,10 +9,11 @@ import { api, apiStream } from "./client";
 /** 宿主 shell（bridge/web-shell.ts）在 TerminalView 里的目标写法：agent 名过不了「:」的校验，不会撞 */
 const SHELL_PREFIX = "shell:";
 export const shellTerminalTarget = (id: string): string => `${SHELL_PREFIX}${id}`;
+export const isShellTarget = (target: string): boolean => target.startsWith(SHELL_PREFIX);
 
 /** target = agent 名或 shellTerminalTarget(id) */
 export function terminalStreamPath(target: string, cols: string | number, rows: string | number): string {
-  const base = target.startsWith(SHELL_PREFIX)
+  const base = isShellTarget(target)
     ? `/shells/${encodeURIComponent(target.slice(SHELL_PREFIX.length))}`
     : `/agents/${encodeURIComponent(apiAgentName(target))}`;
   return `${base}/terminal?cols=${encodeURIComponent(String(cols))}&rows=${encodeURIComponent(String(rows))}`;

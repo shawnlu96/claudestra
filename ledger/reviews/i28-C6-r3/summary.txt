@@ -1,0 +1,1 @@
+修复 C6 试迁本机撤销：prepared/gating 批次可在写锁内恢复 source 并记 aborted、重新选批迁移；保留 committing 后中心回执约束，校准冒充 owner/未入组断言。

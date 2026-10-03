@@ -1,10 +1,11 @@
-/** Codex ACP 迁移健康检查；doctor 只读，不试图安装或重启。 */
-import { checkAcpReady, type AcpReady } from "./acp/readiness.js";
+/** Codex / Pi 的 ACP 健康检查；doctor 只读，不试图安装或重启。 */
+import { checkAcpReady, probePiAcp, type AcpReady } from "./acp/readiness.js";
 import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { rangeAllows } from "./acp/resolve.js";
 import { probeClaudeVersion } from "./claude-binary.js";
 import { defaultRunner } from "./codex-thread.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
+import { piAcpClash } from "./runtimes/pi-acp.js";
 import type { Check } from "./doctor.js";
 
 /**
@@ -54,9 +55,39 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
   return checks;
 }
 
-export async function checkCodexAcp(): Promise<Check[]> {
+async function checkCodexAcp(): Promise<Check[]> {
   const [agents, ready] = await Promise.all([readRegistryAgents(), checkAcpReady(false)]);
   const bin = ready.ok ? ready.codexBin : undefined; // 沙箱 stub 没有 codexBin：不探
   const version = bin ? await probeClaudeVersion(defaultRunner, bin).catch(() => null) : undefined; // 探失败 = 「读不出版本」照样报 warn
   return acpDoctorChecks(agents, ready, version);
+}
+
+const isPiAcp = (a: RegistryAgent) => a.runtime === "pi" && a.transport === "acp";
+
+/**
+ * ACP 版 Pi 的前置条件（没有 transport=acp 的 Pi 就不报）：pi 版本（probePiAcp，迁移 / 启动用的同一道闸），每个 agent 的同名 MCP 与
+ * 能力档里的 reply（piAcpClash，transport 命令和启动命令拦的同一处）。不满足的下次重启会被拒起，或起来了模型没有 reply。
+ */
+export function piAcpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, clash = (a: RegistryAgent) => piAcpClash(a.cwd, process.env, a.piEnv)): Check[] {
+  const pi = agents.filter(isPiAcp);
+  if (!pi.length) return [];
+  const group = "Pi ACP";
+  const bad = pi.map((a) => ({ name: a.name, why: clash(a) })).filter((x) => x.why);
+  return [
+    { group, name: "pi 版本", status: ready.ok ? "ok" : "fail", detail: ready.ok ? `${pi.length} 个 ACP 版 Pi，pi 版本够用` : ready.reason,
+      ...(!ready.ok ? { fix: "跑 pi update 后重启这些 agent；要先退回就 bun src/manager.ts migrate --pi <agent> --to tmux" } : {}) },
+    { group, name: "同名 MCP / reply 工具", status: bad.length ? "fail" : "ok",
+      detail: bad.length ? bad.map((x) => `${x.name}：${x.why}`).join("；") : "没有同名 MCP server，能力档都保留了 reply",
+      ...(bad.length ? { fix: "按提示改名 / 删掉同名 server，或在能力档里放开 reply；改好前这些 agent 重启会被拒起" } : {}) },
+  ];
+}
+
+async function checkPiAcp(): Promise<Check[]> {
+  const agents = await readRegistryAgents();
+  if (!agents.some(isPiAcp)) return []; // 没有就不探 pi
+  return piAcpDoctorChecks(agents, await probePiAcp());
+}
+
+export async function checkAcp(): Promise<Check[]> {
+  return (await Promise.all([checkCodexAcp(), checkPiAcp()])).flat();
 }

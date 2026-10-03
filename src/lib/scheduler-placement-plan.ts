@@ -1,18 +1,23 @@
+import { peerFacts } from "./scheduler-agent-pool-peer.js";
+import { agentPoolReview, agentPoolWork } from "./scheduler-agent-pool-plan.js";
 import { localReviewFallback } from "./scheduler-local-families-placement.js";
+import { secReviewNoRoom } from "./scheduler-sec-review.js";
 /**
  * The planner's two placement hooks (i28-W5): a review node and a build / fix node (i28-W9) go to the slot pool's pick; a
- * card pinned to a peer never starts writing anywhere else. Facts come from the snapshot; the decision is placeFor
- * (scheduler-placement.ts). Each hook answers a peer, a wait (pin / write lease / local tier off), or null = local as before.
+ * card pinned to a peer never starts writing anywhere else. Snapshot facts pass through placeWithRetries for temporary
+ * refusal debounce, then family/tier placement. Each hook answers a peer, a wait, or null = local as before.
  * Proto-1 peers keep the i28-R9 rule unchanged (poolTarget in overflow mode: only when local reviewers are full, Codex
  * only, one attempt per round), with its exact intent text, so a machine with no v2 peer plans as it did before W5.
  * tests/scheduler-placement-plan.test.ts, tests/scheduler-no-peer-parity.test.ts.
  */
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { PEER_PLACEMENT, peerFamily, placeFor, allowLegacyReview, type PeerFacts, type PlaceRole, type PlacementFacts } from "./scheduler-family-pick.js";
+import { PEER_PLACEMENT, peerFamily, allowLegacyReview, type PeerFacts, type PlaceRole } from "./scheduler-family-pick.js";
+import { placementHistory, placeWithRetries as placeFor, type RetryPlacementFacts as PlacementFacts } from "./scheduler-placement-tried.js";
 import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
+import { relayAway } from "./lend-fix-reassign.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
@@ -28,9 +33,7 @@ function locksFree(s: PlannerSnapshot): boolean {
     mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())));
 }
 
-/** borrowPeers' row as placeFor reads it; start_node uses it too, so neither entry can drop a field (the tier) the other keeps. */
-export const peerFacts = (x: PoolFacts["peers"][number]): PeerFacts =>
-  ({ peer: x.peer, roles: x.roles ?? ["review"], open: x.open, v2: x.v2 ?? null, ...(x.priority ? { priority: x.priority } : {}) });
+export { peerFacts } from "./scheduler-agent-pool-peer.js";
 
 /** room per role: a review needs a reviewer under the cap; writing needs the card's own worker slot or a free one (dispatchWork's gate). */
 function snapshotPlacementFacts(s: PlannerSnapshot, since: number, role: PlaceRole): PlacementFacts {
@@ -44,7 +47,7 @@ function snapshotPlacementFacts(s: PlannerSnapshot, since: number, role: PlaceRo
     peers: (p?.peers ?? []).map(peerFacts),
     local: { running: (p?.localWriters ?? Math.max(0, s.workerCount - own)) + reviewers,
       room: role === "review" ? reviewers < s.maxWorkers : !!own || (s.workerCount < s.maxWorkers && !!s.freeWorkerSlot) },
-    tried: s.intents.filter((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === s.task.headSHA).map((i) => i.recipient!.slice(POOL_RECIPIENT.length)),
+    ...placementHistory(s, since),
     locksFree: locksFree(s),
   };
 }
@@ -71,7 +74,9 @@ const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审�
  * reviewer's re-review, a security card, no review role lent) waits instead; remote.mode off still means local only.
  */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
-  const p = s.pool;
+  const p = s.pool, sec = secReviewNoRoom(s);
+  if (sec) return sec; // i28-SR1: security review with local cap 0 → alarm + PM ask, not a silent wait
+  if (p?.remote.agents) return agentPoolReview(s, since);
   if (!p || p.remote.mode === "off") return localReviewFallback(s);
   return poolReview(s, p, since) ?? (p.remote.localPriority === "off" && s.workflow ? { wait: LOCAL_OFF } : null);
 }
@@ -107,6 +112,7 @@ const LOCAL_OFF_RESTATE = "scheduler.json remote.localPriority = off：本机不
  */
 export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
   if (!s.workflow) return null;
+  if (s.pool?.remote.agents) return agentPoolWork(s, since, role, locksFree(s));
   const pinned = cardPin(s.task.extra);
   if (!pinned && s.task.stage === "spec") {
     return s.pool?.remote.localPriority === "off" ? offRestate(snapshotPlacementFacts(s, since, "write"), s.workflow.authorFamily) : null;
@@ -114,10 +120,12 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
   const facts = snapshotPlacementFacts(s, since, role);
   const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
+  const placed = placeFor(facts, role, s.workflow.authorFamily);
+  const relay = lease && !pinned && placed.kind === "wait" ? relayAway(s, since, facts, lease, placed.reason) : null; // i28-RA1：先于 tried 升级
+  if (relay) return relay;
   if (lease && facts.tried.includes(lease)) {
     return { escalate: `修复单派回写租约方 ${lease} 这一轮没成（撤回 / 退回 / 拒挂），写租约还在它那里：PM 核对后 ledger lend-reclaim ${s.task.id} 或 lend-reoffer` };
   }
-  const placed = placeFor(facts, role, s.workflow.authorFamily);
   const code = pinned ? "placement_pinned" : "placement";
   if (pinned && s.task.stage === "spec") return { code, wait: placed.kind === "peer" ? "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" : placed.reason };
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：${role === "fix" ? "修复" : "开工"}单派给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` };
@@ -129,7 +137,7 @@ export function orderFamily(s: PlannerSnapshot, peer: string, role: PlaceRole): 
   if (!s.workflow) return null;
   if (role === "review") return otherFamily(s.workflow.authorFamily);
   const p = s.pool?.peers.find((x) => x.peer === peer);
-  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies) : null;
+  return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies, !!s.pool?.remote.agents) : null;
 }
 
 /**

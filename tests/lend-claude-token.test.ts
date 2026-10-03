@@ -1,66 +1,37 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, statSync, rmSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { claudeTokenPath, claudeTokenStatus, readClaudeLendToken, saveClaudeToken } from "../src/lib/lend-claude-token.js";
-import { claudeLendSlots } from "../src/lib/lend-claude-worker-capacity.js";
+/** setup-token 下线后的旧数据：存过的 token 文件、调度服务环境里的 CLAUDE_CODE_OAUTH_TOKEN 都不会让 worker 改用 token 启动，也不影响位数。 */
+import { afterEach, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { claudeTokenPath } from "../src/lib/lend-claude-token.js";
+import { claudeLendSlots, noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
+import { buildLendClaudeCommand, removeClaudeWorkerConfig, type ClaudeWorkerPlan } from "../src/lib/lend-claude-worker.js";
 import type { LendEntry } from "../src/lib/lend-config.js";
-const root = mkdtempSync("/tmp/c3t-");
-afterAll(() => rmSync(root, { recursive: true, force: true }));
-test("file-first hot reload, clear suppresses legacy env, private modes and status", async () => {
-  const env = { CLAUDESTRA_STATE_DIR: root, CLAUDE_CODE_OAUTH_TOKEN: "fake-legacy" };
-  const path = claudeTokenPath(env);
-  const entry = { families: { claude: 3 } } as LendEntry;
-  expect(readClaudeLendToken(env)).toBe("fake-legacy");
-  expect(claudeLendSlots(entry, env)).toBe(3);
-  const status = await saveClaudeToken("fake-secret-cl3", path);
-  expect(readClaudeLendToken(env)).toBe("fake-secret-cl3");
-  expect(claudeLendSlots(entry, env)).toBe(3);
-  expect(statSync(path).mode & 0o777).toBe(0o600);
-  expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
-  expect(status).toEqual(claudeTokenStatus(path));
-  expect(JSON.stringify(status)).not.toContain("fake-secret-cl3");
-  await saveClaudeToken(null, path);
-  const logs: string[] = [];
-  expect(claudeLendSlots(entry, env, (s) => logs.push(s))).toBe(0);
-  expect(JSON.stringify(logs)).not.toContain("fake-secret-cl3");
-  expect(readFileSync(path, "utf8")).not.toContain("fake-secret-cl3");
-});
 
-test("unreadable, malformed and symlink credentials fail closed instead of legacy fallback", async () => {
-  const { chmodSync, mkdirSync, symlinkSync, writeFileSync } = await import("node:fs");
-  const env = { CLAUDESTRA_STATE_DIR: join(root, "unsafe"), CLAUDE_CODE_OAUTH_TOKEN: "fake-legacy" };
-  const path = claudeTokenPath(env);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, "fake-invalid-json", { mode: 0o600 });
-  expect(readClaudeLendToken(env)).toBeUndefined();
-  await saveClaudeToken("fake-private", path);
-  chmodSync(path, 0o644);
-  expect(readClaudeLendToken(env)).toBeUndefined();
-  rmSync(path);
-  const target = join(root, "target");
-  writeFileSync(target, JSON.stringify({ token: "fake-target", savedAt: "2026" }), { mode: 0o600 });
-  symlinkSync(target, path);
-  expect(readClaudeLendToken(env)).toBeUndefined();
-  await saveClaudeToken("fake-new", path);
-  expect(readFileSync(target, "utf8")).toContain("fake-target");
-  expect(readClaudeLendToken(env)).toBe("fake-new");
-});
+afterEach(() => noteClaudeReadiness(null));
 
-test("saved token stays out of worker command, argv and launch configuration", async () => {
-  const { buildLendClaudeCommand, removeClaudeWorkerConfig } = await import("../src/lib/lend-claude-worker.js");
-  const { readdirSync } = await import("node:fs");
-  const env = { CLAUDESTRA_STATE_DIR: join(root, "worker-state"), CLAUDESTRA_RUNTIME_DIR: join(root, "runtime"), PATH: "/usr/bin:/bin" };
-  const secret = "fake-file-worker-secret";
-  await saveClaudeToken(secret, claudeTokenPath(env));
-  const workerRoot = join(root, "worker-config");
-  const name = "agent-lend-cl3-test";
+test("旧 token 文件和环境变量都在：启动计划照样用出借方 HOME，不带 token；位数只看本机登录", () => {
+  const root = mkdtempSync(join(tmpdir(), "cl4-old-"));
+  const name = "agent-lend-cl4old";
+  const secret = "fake-legacy-cl4";
   try {
+    const env = { CLAUDESTRA_STATE_DIR: root, HOME: join(root, "owner"), PATH: "/bin", CLAUDE_CODE_OAUTH_TOKEN: `${secret}-env` };
+    mkdirSync(join(root, "lend-credentials"), { mode: 0o700 });
+    writeFileSync(claudeTokenPath(env), JSON.stringify({ token: secret, savedAt: new Date(0).toISOString() }), { mode: 0o600 });
+    const workers = join(root, "workers");
     const command = buildLendClaudeCommand({ mode: "new", cwd: root, agentName: name, callerCredFile: join(root, "fake-cred"),
-      sessionId: "fake-session", channelId: "fake-channel", bridgeUrl: "ws://fixture.invalid:24983" }, { base: env, root: workerRoot, bin: "/fake/claude", authRoot: join(root, "auth") });
+      channelId: "test", bridgeUrl: "ws://127.0.0.1:9", sessionId: "550e8400-e29b-41d4-a716-446655440000" }, { base: env, root: workers, bin: "/fake/claude" });
     expect(command).not.toContain(secret);
-    const dir = join(workerRoot, name, readdirSync(join(workerRoot, name))[0]);
-    const plan = readFileSync(join(dir, "launch.json"), "utf8");
-    expect(plan).not.toContain(secret);
-    expect(JSON.parse(plan).argv.join(" ")).not.toContain(secret);
-  } finally { removeClaudeWorkerConfig(name, workerRoot); }
+    const run = join(workers, name, readdirSync(join(workers, name))[0]!);
+    const raw = readFileSync(join(run, "launch.json"), "utf8");
+    expect(raw).not.toContain(secret);
+    expect((JSON.parse(raw) as ClaudeWorkerPlan).env.HOME).toBe(env.HOME);
+    removeClaudeWorkerConfig(name, workers);
+    const entry = { families: { claude: 2 } } as LendEntry;
+    noteClaudeReadiness({ ready: false, reason: "本机 Claude Code 没登录", at: Date.now() });
+    expect(claudeLendSlots(entry, () => {})).toBe(0); // 有旧 token 也不顶替本机登录
+    noteClaudeReadiness({ ready: true, reason: null, at: Date.now() });
+    expect(claudeLendSlots(entry)).toBe(2);
+    expect(readFileSync(claudeTokenPath(env), "utf8")).toContain(secret); // 不自动删用户文件
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

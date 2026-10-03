@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { AgentSession } from "../chat/type";
 import { TerminalModal } from "./terminal-modal";
 import { TerminalPage } from "./terminal-page";
+import { terminalNotice } from "./terminal-notice";
 import { useT } from "@/lib/i18n";
 
 /** 终端：>_ 提示符图标（顶栏平铺按钮与窄屏折叠菜单项共用） */
@@ -32,6 +33,16 @@ const isTerminalHash = () =>
 export const isNarrow = () =>
   typeof window !== "undefined" &&
   window.matchMedia("(max-width: 639.98px)").matches;
+
+/** 标题栏下的一行提示（文案与何时出现见 terminal-notice.ts） */
+function TerminalNotice({ text }: { text: string }) {
+  const t = useT();
+  return (
+    <div role="note" className="shrink-0 border-b border-white/10 bg-[#181825] px-3 py-1 text-xs text-[#f9e2af]">
+      {t(text)}
+    </div>
+  );
+}
 
 /** 顶栏平铺的终端入口按钮，只管触发；状态在 useTerminalEntry */
 export function TerminalButton({ onClick }: { onClick: () => void }) {
@@ -104,6 +115,8 @@ export function useTerminalEntry(agent: AgentSession): { available: boolean; ope
     else setOpenPage(false);
   };
 
+  const noticeText = terminalNotice(agent);
+  const notice = noticeText ? <TerminalNotice text={noticeText} /> : undefined;
   // 入口只在 active 时给;已打开的终端页不随 status 抖动卸载——agents 轮询数据
   // 瞬时异常(bridge 重启窗口)不该让用户被丢回聊天页,agent 真停了终端流自己会
   // exit 并给出「已结束」遮罩
@@ -114,6 +127,7 @@ export function useTerminalEntry(agent: AgentSession): { available: boolean; ope
           agent={agent.name}
           displayName={agent.displayName}
           onClose={() => setOpenModal(false)}
+          notice={notice}
         />
       )}
       {openPage && (
@@ -121,6 +135,7 @@ export function useTerminalEntry(agent: AgentSession): { available: boolean; ope
           agent={agent.name}
           displayName={agent.displayName}
           onClose={closePage}
+          notice={notice}
         />
       )}
     </>

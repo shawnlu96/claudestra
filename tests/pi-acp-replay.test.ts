@@ -2,7 +2,8 @@
  * Pi 适配器契约测试：宿主真用的 AcpSession / 翻译器 ↔ 适配器（真代码）↔ 回放录下来的 pi 0.99.1 rpc 流。
  * 夹具 tests/fixtures/pi-rpc-0.99.1.jsonl 是真 pi（deepseek-v4-flash、隔离的 PI_CODING_AGENT_DIR）经 tap 外壳按到达顺序录的
  * {d:"in"|"out", r}：in = 适配器发给 pi 的命令，out = pi 的输出。录完删掉了适配器不读的 thinking_delta / toolcall_delta 和
- * system 消息（提示词全文），agent_end.messages 清空，思考正文换成 …，路径换成 /rec。回放时适配器发出的每条命令（除 id）必须与录的逐字相同，
+ * system 消息（提示词全文），agent_end.messages 清空，思考正文换成 …，路径换成 /rec；打断前那一对 clear_queue（p20q）是后补的（录制时适配器
+ * 还只发 abort），回包形状照 pi rpc 文档。回放时适配器发出的每条命令（除 id）必须与录的逐字相同，
  * pi 的输出按段一次性整块吐出（最严的交错）。pi 升级后要重录；场景与下面的步骤一一对应。
  */
 import { describe, expect, test } from "bun:test";
@@ -173,11 +174,11 @@ describe("Pi 适配器 · 回放 pi 0.99.1 录制流（契约）", () => {
     expect(await session.rpc.request<Rec>("_session/steering", { sessionId: session.sessionId, prompt: [{ type: "text", text: "Also append the word: steered" }] })).toEqual({ outcome: "injected" });
     expect(await turn2).toEqual({ kind: "done" });
 
-    // 5. 打断：session/cancel → abort，bash 当场失败，回合 cancelled
+    // 5. 打断：_claudestra/cancel → clear_queue 再 abort，bash 当场失败，回合 cancelled
     const t5 = updates.length;
     const turn3 = session.prompt("Run `sleep 30` with the bash tool, then answer with exactly the word: finished");
     await until(() => updates.slice(t5).some((u) => u.sessionUpdate === "tool_call"), "sleep 30 的工具调用");
-    session.cancel();
+    expect(await session.cancel()).toEqual([]);
     expect(await turn3).toEqual({ kind: "cancelled" });
     expect(updates.slice(t5).find((u) => u.sessionUpdate === "tool_call_update")).toMatchObject({ status: "failed", content: [{ content: { text: "Command aborted" } }] });
 

@@ -2,17 +2,19 @@ import {
   authenticateSharedLedgerRequest, sharedLedgerCredentialHash, type SharedLedgerSignedRequest,
   type SharedLedgerPrincipal,
 } from "../lib/shared-ledger-auth.js";
-import { SharedLedgerError, type SharedLedgerCommand, type SharedLedgerImport, type SharedLedgerProjection } from "../lib/shared-ledger-contract.js";
+import { SharedLedgerError, type SharedLedgerCommand, type SharedLedgerImport, type SharedLedgerProjection, type SharedLedgerImportControl } from "../lib/shared-ledger-contract.js";
 import { Store, decode } from "./store.js";
 import { loadCredential, recheck, hasRead } from "./identity.js";
 import { Conflict, feature, detail, meta, ownReceipt } from "./reads.js";
 import { executeCommand } from "./commands.js";
-import { importManifest } from "./imports.js";
+import { importManifest, importReceipt, controlImport } from "./imports.js";
 import { applyProjection } from "./projections.js";
+import { recomputeFeatureStates } from "./feature-state.js";
 
 /** All business writes share one synchronous transaction. Replay claims commit independently of rejected commands. */
 export class LedgerService {
-  constructor(readonly store: Store, readonly notify?: (serverSeq: number) => void) {}
+  // Startup repairs completion derived under older rules; idempotent, no events or serverSeq.
+  constructor(readonly store: Store, readonly notify?: (serverSeq: number) => void) { recomputeFeatureStates(store); }
   handle(req: SharedLedgerSignedRequest, now = Date.now()): { status: number; body: unknown } {
     try {
       const credential = loadCredential(this.store, req.bearer);
@@ -27,6 +29,10 @@ export class LedgerService {
           const row = this.store.get<{ projectId: string }>(`SELECT projectId FROM command_receipts
             WHERE teamId=? AND personId=? AND instanceId=? AND requestId=?`, credential.teamId, credential.personId, credential.instanceId, route[3]);
           target.projectId = row?.projectId;
+        } else if (route[2] === "imports" && route[3]) {
+          target.projectId = this.store.get<{ projectId: string }>(
+            "SELECT projectId FROM import_batches WHERE teamId=? AND sourceInstanceId=? AND batchId=?",
+            credential.teamId, credential.instanceId, route[3])?.projectId;
         } else if (req.method === "POST" && route[2] === "projections") {
           // Raw ids can only locate home metadata; C1 still rejects unsigned/malformed bodies and extra fields.
           let raw: { payload?: { featureId?: string } };
@@ -51,7 +57,8 @@ export class LedgerService {
       const body = this.store.write(() => {
         recheck(this.store, req.bearer, p, now, req.publicKey);
         if (route[2] === "commands") return executeCommand(this.store, p, auth.payload as SharedLedgerCommand, now);
-        if (route[2] === "imports") return importManifest(this.store, p, auth.payload as SharedLedgerImport, now);
+        if (route[2] === "imports") return route[3] ? controlImport(this.store, p, auth.payload as SharedLedgerImportControl, now)
+          : importManifest(this.store, p, auth.payload as SharedLedgerImport, now);
         return applyProjection(this.store, p, auth.payload as SharedLedgerProjection, now);
       });
       if (this.store.seq() > before && this.notify) {
@@ -67,6 +74,7 @@ export class LedgerService {
     }
   }
   private read(p: SharedLedgerPrincipal, resource: string, item?: string): unknown {
+    if (resource === "imports" && item) return importReceipt(this.store, p, item);
     if (resource === "commands" && item) {
       const receipt = ownReceipt(this.store, p, item);
       if (receipt && !hasRead(p, receipt.projectId)) throw new SharedLedgerError("forbidden");

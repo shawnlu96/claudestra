@@ -2,7 +2,7 @@
  * 借入面板的纯函数（tests/web-borrow-model.test.ts）：hello 年龄与分档、peer 三态、排序、按钮能不能点。
  * 年龄由调用方传入的 tick 算，渲染里不读时钟；服务端与本机的时钟差靠「服务端 now + 拿到之后过了多久」抵掉。
  */
-import type { BorrowView, DroppedCode, Family, LocalProjectView, PeerView, PlacementView, Priority, QuotaReport, RemoteRow, Role } from "./borrow-api";
+import type { BorrowView, DroppedCode, Family, LocalProjectView, PeerView, PlacementView, LocalBody, QuotaReport, RemoteRow } from "./borrow-api";
 
 /** 与 bridge 的 HELLO_FRESH_MS 同值：超过它 peerCapacity 就按 0 位算 */
 export const HELLO_FRESH_SEC = 180;
@@ -153,23 +153,14 @@ export function splitAtBox(text: string): [string, string] {
 
 /** 本机项目上限的范围（scheduler.json maxActiveWorkers 0..32；0 = 本机不接） */
 export const LOCAL_MAX = 32;
-/** 本机档位能不能点：卡片锁着、没写权限都不行；remote.mode=off 时调度器不看本机档位（W9：只用本机），点了也不生效 */
-export const localTierDisabled = (cardDisabled: boolean, p: Pick<LocalProjectView, "mode">): boolean => cardDisabled || p.mode === "off";
-
-/** 老 bridge 没有 priority / roles：按缺省（平分、只审查）显示 */
-export const peerPriority = (p: Pick<PeerView, "priority">): Priority => p.priority ?? "balance";
-export const peerRoles = (p: Pick<PeerView, "roles">): Role[] => (p.roles ?? ["review"]).filter((r): r is Role => r === "review" || r === "write");
-
-/** 勾 / 取消一个角色：至少留一个（borrow set 不收空列表）→ 留空返回 null；顺序固定审查在前 */
-export function toggleRole(cur: readonly Role[], r: Role): Role[] | null {
-  const next = cur.includes(r) ? cur.filter((x) => x !== r) : [...cur, r];
-  if (!next.length) return null;
-  return (["review", "write"] as const).filter((x) => next.includes(x));
+/** Preserve the other family's count when committing one cell. An unset pool starts at zero so the first edit creates explicit counts. */
+export function localAgentsBody(p: Pick<LocalProjectView, "agents">, family: Family, n: number): LocalBody {
+  return { agents: { ...(p.agents ?? { claude: 0, codex: 0 }), [family]: clampMaxOpen(n, LOCAL_MAX, 0) } };
 }
 
-/** 哪些项目的 reviewFirst 点名了这台 peer：审查单先给它，压过档位（scheduler-placement.ts），面板标出来 */
-export function reviewFirstFor(view: Pick<BorrowView, "projects">, peer: string): boolean {
-  return view.projects.some((p) => p.reviewFirst?.includes(peer));
+/** Read-only peer cells always show hello totals and busy counts, including paused or stale peers. */
+export function peerAgentSlots(p: Pick<PeerView, "reported">, family: Family): { total: number; busy: number } | null {
+  return p.reported?.[family] ?? null;
 }
 
 /** 一家的本周已用；没有 / 已过重置时刻 = null（显示「—」） */

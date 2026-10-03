@@ -13,12 +13,12 @@ import {
   detectPermissionMode,
   probeTuiContract,
   paneIdleVerdict,
-  trustPromptMoves,
   btabStepsTo,
   PERMISSION_MODE_CYCLE,
   detectDevChannelsModal,
   childPidsInPsOutput, parseChoicePrompt, detectBypassConsentPrompt } from "../src/lib/tmux-helper.ts";
 import { isAutoConfirmableModal } from "../src/lib/modal-confirm.ts";
+import { trustPromptMoves } from "../src/lib/trust-prompt.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
