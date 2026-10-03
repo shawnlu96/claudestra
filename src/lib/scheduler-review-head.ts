@@ -50,6 +50,25 @@ async function commonDir(git: Git, dir: string): Promise<string | null> {
 
 const cut = (s: string): string => s.replace(/\s+/g, " ").slice(0, 300);
 
+function projectRepoDir(env: ReviewHeadEnv, task: LedgerTask): { dir: string } | { error: string } {
+  let dir: string | undefined;
+  try { dir = (env.readConfig ?? readSchedulerConfig)().projects[task.project]?.repoDir; }
+  catch (e) { return { error: `读 scheduler.json 失败：${cut((e as Error).message)}` }; }
+  return dir ? { dir } : { error: `scheduler.json 里没有项目 ${task.project} 的 repoDir` };
+}
+
+/**
+ * Where a lend-written card with no local author adds its reviewer worktree from: the configured project repository.
+ * Pure lookup, no git and no network: whether the head is there (and fetching it, branch then PR) is prepareReviewHead's
+ * job, run only after a reused checkout has been checked for tracked edits. null for any other card, or no repoDir configured.
+ */
+export function lendProjectDir(env: ReviewHeadEnv, task: LedgerTask): string | null {
+  if (!task.headSHA || !SHA40.test(task.headSHA) || !remoteHeadFamily(env.db, task)) return null;
+  const repo = projectRepoDir(env, task);
+  if ("error" in repo) { console.error(`⚠️ [review-head] ${task.id} 的审查目录退不到项目仓库：${repo.error}`); return null; }
+  return repo.dir;
+}
+
 /**
  * null = `head` is a commit `dir` can check out (it was there, or was fetched just now); otherwise why the review is not dispatched.
  * `dir` is the reviewer's checkout (`isCheckout`: tracked edits there refuse before any fetch) or the repository it is added from.
@@ -68,10 +87,9 @@ export async function prepareReviewHead(env: ReviewHeadEnv, task: LedgerTask, he
   if (head !== task.headSHA) return `派审 head ${short} 不是卡上的交付 head，不从远端取`;
   const refs = sources(task);
   if (!refs.length) return `交付 head ${short} 不在本机，卡上没有可取的出借分支或 PR 号，不派审`;
-  let repoDir: string | undefined;
-  try { repoDir = (env.readConfig ?? readSchedulerConfig)().projects[task.project]?.repoDir; }
-  catch (e) { return `读 scheduler.json 失败，取不了交付 head ${short}：${cut((e as Error).message)}`; }
-  if (!repoDir) return `scheduler.json 里没有项目 ${task.project} 的 repoDir，取不了交付 head ${short}`;
+  const repo = projectRepoDir(env, task);
+  if ("error" in repo) return `${repo.error}，取不了交付 head ${short}`;
+  const repoDir = repo.dir;
   const mine = await commonDir(env.git, dir), project = await commonDir(env.git, repoDir);
   if (!mine || mine !== project) return `${dir} 与项目仓库 ${repoDir} 不共用对象库，不从别处取交付 head ${short}`;
   const tried: string[] = [];

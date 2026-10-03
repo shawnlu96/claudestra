@@ -22,13 +22,12 @@ import { acpPort, messagePort, type RegistryRow, type StillActive } from "./sche
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
-import { lendReviewDir } from "./lend-pr-takeover-review.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { openCreateReviewWorktree, retryCleanCreate } from "./scheduler-create-retry.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
-import { boundedGit, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
+import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
@@ -65,7 +64,7 @@ const realOr = (p: string): string => { try { return realpathSync.native(p); } c
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
   const author = boundRef(db, task.id, "author");
-  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? (await lendReviewDir(db, task, env.net, env.readConfig));
+  const authorDir = peerPrRepoDir(task) ?? (author && registryRow(author.agent)?.cwd) ?? lendProjectDir(env, task); // no network: a reused checkout is checked for tracked edits before any fetch
   if (!authorDir) return { kind: "manual", reason: "找不到执行者的工作目录，建不了审查 session" };
   const checkout = checkoutOf(env, task.id), reuse = existsSync(checkout);
   const absent = task.headSHA ? await prepareReviewHead(env, task, task.headSHA, reuse ? checkout : authorDir, reuse) : null;

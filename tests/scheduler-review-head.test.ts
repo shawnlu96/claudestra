@@ -275,4 +275,65 @@ describe("F5 reviewer created for a lend-written card whose author directory lac
       expect(gitHeadSync(w.checkout)).toBe(w.h2);
     } finally { close(); }
   });
+
+  // Round-1 review findings: a lend-written card with no local author binding (only the configured project repoDir).
+  test("no local author, reused checkout with tracked edits: refused before any fetch", async () => {
+    const { w, f, deps, close } = await setup();
+    try {
+      setAgentCwd(f.registryPath, "agent-rv-t1", null);
+      writeFileSync(join(w.checkout, "a.ts"), "patched\n");
+      writeFileSync(join(w.checkout, "notes.md"), "evidence");
+      const task = lendWritten(f, w.h2);
+      expect(await deps({ create: created(f.registryPath, w.checkout) }).ensure(task, "reviewer", "claude"))
+        .toEqual({ kind: "manual", reason: expect.stringContaining("不取远端、不覆盖") });
+      expect(w.fetched()).toBe(false);
+      expect(await w.has(w.h2)).toBe(false);
+      expect(gitHeadSync(w.checkout)).toBe(w.h1);
+      expect(readFileSync(join(w.checkout, "a.ts"), "utf8")).toBe("patched\n");
+      expect(readFileSync(join(w.checkout, "notes.md"), "utf8")).toBe("evidence");
+    } finally { close(); }
+  });
+
+  test("no local author, first creation: the lend branch is gone, the card's PR head on origin supplies the exact commit", async () => {
+    const { w, f, deps, close } = await setup();
+    try {
+      await must("-C", w.project, "worktree", "remove", w.checkout);
+      setAgentCwd(f.registryPath, "agent-rv-t1", null);
+      await must("-C", w.lender, "push", "-q", "origin", `${w.h2}:refs/pull/7/head`, `:refs/heads/${BRANCH}`);
+      const task = lendWritten(f, w.h2, { pr: "7" });
+      expect(await deps({ create: created(f.registryPath, w.checkout) }).ensure(task, "reviewer", "claude")).toMatchObject({ kind: "ready", created: true });
+      expect(w.fetched()).toBe(true);
+      expect(gitHeadSync(w.checkout)).toBe(w.h2);
+      expect(gitHeadSync(w.project)).toBe(w.h1);
+    } finally { close(); }
+  });
+
+  test("no local author, first creation through the lend branch; no source at all refuses without fetching", async () => {
+    const { w, f, deps, close } = await setup();
+    try {
+      await must("-C", w.project, "worktree", "remove", w.checkout);
+      setAgentCwd(f.registryPath, "agent-rv-t1", null);
+      const bare = lendWritten(f, w.h2, { branch: null });
+      const d = deps({ create: created(f.registryPath, w.checkout) });
+      expect(await d.ensure(bare, "reviewer", "claude")).toEqual({ kind: "manual", reason: expect.stringContaining("没有可取的出借分支或 PR 号") });
+      expect(w.fetched()).toBe(false);
+      expect(existsSync(w.checkout)).toBe(false);
+      f.db.query("UPDATE tasks SET branch = ? WHERE id = 'T1'").run(BRANCH);
+      expect(await d.ensure(getTask(f.db, "T1")!, "reviewer", "claude")).toMatchObject({ kind: "ready", created: true });
+      expect(gitHeadSync(w.checkout)).toBe(w.h2);
+    } finally { close(); }
+  });
+
+  test("no local author and no configured repoDir: refused as before, no fetch", async () => {
+    const { w, f, deps, close } = await setup();
+    try {
+      await must("-C", w.project, "worktree", "remove", w.checkout);
+      setAgentCwd(f.registryPath, "agent-rv-t1", null);
+      const task = lendWritten(f, w.h2);
+      const none = (): SchedulerConfig => ({ projects: {} }) as unknown as SchedulerConfig;
+      expect(await deps({ create: created(f.registryPath, w.checkout), readConfig: none }).ensure(task, "reviewer", "claude"))
+        .toEqual({ kind: "manual", reason: expect.stringContaining("找不到执行者的工作目录") });
+      expect(w.fetched()).toBe(false);
+    } finally { close(); }
+  });
 });
