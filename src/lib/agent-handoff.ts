@@ -4,11 +4,14 @@
  * 调用方给不了路径也给不了名字，所以执行者和 PM 互相盖不到、worktree 也改不到主仓交接；不碰 `~/.claude` 下任何东西。
  * - 名字必须在 registry 里、且是一段安全的目录名（registry 的建名黑名单：没有 / . : ~ 空白 控制符）；
  * - 目录 0700（组 / 其他人有权限位就收紧）、文件 0600；handoff 根、agent 目录、HANDOFF.md 任一是软链（或不是目录 / 普通文件）就拒，realpath 再核一次不出根；
- * - 写入走 lib/state-file.ts 的原子写（tmp + rename，noFollow），同 agent 的写者经 lib/file-lock.ts 串行，rename 前核锁；
+ * - 写入走 lib/state-file.ts 的原子写（tmp + rename，noFollow），同 agent 的写者经 lib/file-lock.ts 串行；
+ *   拿到锁之后整套定位校验重做一遍（等锁期间目录可能被换成软链），并记下 agent 目录的 dev/ino，
+ *   rename 前（commitIf）再核锁 + 目录仍是同一个真目录且 realpath 不出根，不对就删 tmp、不提交；
+ *   Node 没有 openat/renameat，commitIf 与 rename 两次系统调用之间的同步间隙无法再收窄（同 UID 进程恰在其中换目录）。
  * - 文件首行是一行 HTML 注释的元数据（opId / savedAt / agent / bytes），N4 据它和文件时间核这次保存的结果。
  * 保存成功只代表交接落盘，不代表压缩完成。tests/agent-handoff.test.ts。
  */
-import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "fs";
+import { chmodSync, lstatSync, type Stats, mkdirSync, readFileSync, realpathSync } from "fs";
 import { join } from "path";
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
@@ -79,7 +82,7 @@ function privateDir(path: string): void {
 }
 
 /** 定位本 agent 的交接文件：逐级核目录，realpath 不出 handoff 根；HANDOFF.md 已存在时必须是普通文件 */
-function locate(stateDir: string, agent: string): { lock: string; file: string } {
+function locate(stateDir: string, agent: string): { lock: string; dir: string; root: string; file: string } {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const root = handoffRoot(stateDir);
   privateDir(root);
@@ -93,7 +96,17 @@ function locate(stateDir: string, agent: string): { lock: string; file: string }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
-  return { lock: join(root, `${agent}.lock`), file }; // 锁放在根下：agent 名里没有「.」，撞不上别的 agent 目录
+  return { lock: join(root, `${agent}.lock`), dir, root, file }; // 锁放在根下：agent 名里没有「.」，撞不上别的 agent 目录
+}
+
+/** dir 此刻仍是 pinned 那个真目录（不是软链、dev/ino 没换） */
+function sameDirectory(dir: string, pinned: Stats): boolean {
+  try {
+    const st = lstatSync(dir);
+    return st.isDirectory() && !st.isSymbolicLink() && st.dev === pinned.dev && st.ino === pinned.ino;
+  } catch {
+    return false;
+  }
 }
 
 function renderHandoff(meta: HandoffMeta, text: string): string {
@@ -104,12 +117,16 @@ function renderHandoff(meta: HandoffMeta, text: string): string {
 export async function saveAgentHandoff(input: SaveHandoffInput): Promise<HandoffMeta & { path: string }> {
   const { opId, text, bytes } = checkHandoffArgs(input.opId, input.text);
   const agent = safeAgentName(input.agent, input.registered);
-  const { lock: lockPath, file } = locate(input.stateDir ?? STATE_DIR, agent);
-  const lock = await acquireLock(lockPath, LOCK_WAIT_MS);
+  const stateDir = input.stateDir ?? STATE_DIR;
+  const lock = await acquireLock(locate(stateDir, agent).lock, LOCK_WAIT_MS);
   if (!lock) throw new HandoffError(`${agent} 的交接正在被另一个写者占用，没写，稍后再试`);
   try {
+    // 等锁期间 agent 目录可能被挪走、原位放上软链：持锁后重新定位，之后只认这一刻的那个目录
+    const { dir, root, file } = locate(stateDir, agent);
+    const pinned = lstatSync(dir);
     const meta: HandoffMeta = { opId, savedAt: (input.now?.() ?? new Date()).toISOString(), agent, bytes };
-    writeTextAtomicSync(file, renderHandoff(meta, text), { mode: 0o600, noFollow: true, commitIf: lock.held });
+    const sameDir = () => sameDirectory(dir, pinned) && realpathSync(dir) === join(realpathSync(root), agent);
+    writeTextAtomicSync(file, renderHandoff(meta, text), { mode: 0o600, noFollow: true, commitIf: () => lock.held() && sameDir() });
     return { ...meta, path: file };
   } finally {
     lock.release();

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { acquireLock } from "../src/lib/file-lock.ts";
 import { HANDOFF_MAX_BYTES, handoffRoot, readAgentHandoff, saveAgentHandoff } from "../src/lib/agent-handoff.ts";
 
 const A = "agent-codex-a";
@@ -38,7 +39,7 @@ describe("agent-handoff：落点与元数据", () => {
     expect(lstatSync(r.path).mode & 0o777).toBe(0o600);
     expect(lstatSync(join(stateDir, "handoff", A)).mode & 0o777).toBe(0o700);
     expect(lstatSync(join(stateDir, "handoff")).mode & 0o777).toBe(0o700);
-    expect(r.path.includes(".claude")).toBe(false);
+    expect(r.path.startsWith(join(home, ".claude"))).toBe(false);
     expect(claudeTree()).toEqual(before);
     expect(readFileSync(join(home, ".claude", "projects", "x", "memory", "HANDOFF.md"), "utf8")).toBe("PM 的交接");
     expect(readAgentHandoff(A, stateDir)).toEqual({ meta: { opId: "op-1", savedAt: "2026-10-04T00:00:00.000Z", agent: A, bytes: r.bytes }, text: "# 交接\n进度" });
@@ -107,6 +108,36 @@ describe("agent-handoff：链接与逃逸", () => {
     symlinkSync(target, join(stateDir, "handoff", A, "HANDOFF.md"));
     await expect(save()).rejects.toThrow("不是普通文件");
     expect(readFileSync(target, "utf8")).toBe("PM 的交接");
+  });
+
+  test("等锁期间 agent 目录被换成指向外部 memory 的软链 → 拒，外部 HANDOFF.md 逐字不变（handoff-link-race）", async () => {
+    const outside = join(home, ".claude", "projects", "x", "memory");
+    const dir = join(stateDir, "handoff", A);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const held = await acquireLock(join(stateDir, "handoff", `${A}.lock`));
+    const pending = save({ opId: "op-race", text: "attacker content" });
+    renameSync(dir, `${dir}-original`);
+    symlinkSync(outside, dir);
+    held!.release();
+    await expect(pending).rejects.toThrow("不是普通目录");
+    expect(readFileSync(join(outside, "HANDOFF.md"), "utf8")).toBe("PM 的交接");
+    expect(readdirSync(outside)).toEqual(["HANDOFF.md"]);
+    expect(readdirSync(`${dir}-original`)).toEqual([]);
+  });
+
+  test("持锁重定位之后、rename 之前目录被换成软链 → 提交前核验拦下，外部不留 tmp、不被覆盖", async () => {
+    const outside = join(home, ".claude", "projects", "x", "memory");
+    const dir = join(stateDir, "handoff", A);
+    await save({ opId: "op-old", text: "旧交接" });
+    const now = () => { // now() 在重定位之后、写 tmp 之前调用：借它在这个窗口里换目录
+      renameSync(dir, `${dir}-original`);
+      symlinkSync(outside, dir);
+      return new Date();
+    };
+    await expect(save({ opId: "op-race", text: "attacker content", now })).rejects.toThrow("提交前核验没通过");
+    expect(readFileSync(join(outside, "HANDOFF.md"), "utf8")).toBe("PM 的交接");
+    expect(readdirSync(outside)).toEqual(["HANDOFF.md"]);
+    expect(readFileSync(join(`${dir}-original`, "HANDOFF.md"), "utf8")).toContain("旧交接");
   });
 });
 
