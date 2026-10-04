@@ -72,7 +72,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
       diff: async () => { throw new Error('Shared version comparisons are unavailable'); },
     },
-    product: async () => { const got = last ?? await read(); return sharedProductBoard(got.list, got.team.ov.now, got.team.ov.tasks); },
+    product: async () => { const got = last ?? await read(); return sharedProductBoard(got.list, got.team.ov.now, got.team.ov.tasks, got.details); },
     last: () => last,
     poke: () => { for (const p of pokes) p(); },
     overview: async () => ({ ...(await read()).team.ov, unknownMetrics: UNKNOWN_METRICS }),
