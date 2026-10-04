@@ -4,7 +4,8 @@ export interface ProductFeature {
   status: 'active' | 'paused' | 'done' | 'dropped';
   hasDag: boolean;
   version: number;
-  counts: { total: number; completed: number; active: number; blocked?: number; ready?: number; deferred?: number };
+  /** activeUnknown: true = active is a placeholder the source could not know; absent = active is a real count (0 is a real 0). */
+  counts: { total: number; completed: number; active: number; blocked?: number; ready?: number; deferred?: number; activeUnknown?: true };
   eta: { at: number | null } | null;
   cards?: { id: string; title: string; stage: string }[];
 }
@@ -24,7 +25,7 @@ export function assertProductBoard(v: unknown): asserts v is ProductBoard {
     if (!record(f) || typeof f.id !== 'string' || !f.id || ids.has(f.id) || typeof f.title !== 'string'
       || !['active', 'paused', 'done', 'dropped'].includes(String(f.status)) || typeof f.hasDag !== 'boolean'
       || !count(f.version) || !record(f.counts) || !count(f.counts.total) || !count(f.counts.completed) || !count(f.counts.active)
-      || (f.hasDag && !count(f.counts.blocked))
+      || (f.hasDag && !count(f.counts.blocked)) || !(f.counts.activeUnknown === undefined || f.counts.activeUnknown === true)
       || !(f.eta === null || (record(f.eta) && (f.eta.at === null || count(f.eta.at))))) throw new Error('Invalid product feature');
     if (!f.hasDag && !Array.isArray(f.cards)) throw new Error('Missing feature cards');
     if (f.cards !== undefined && (!Array.isArray(f.cards) || f.cards.some(c =>

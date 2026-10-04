@@ -202,7 +202,10 @@ test("复现测试：团队详情显示成员代号 / 主场实例 / 8 位 head 
   // 步骤线：审查第 2 轮是当前步，执行者不知道显示「—」，没有编出来的结论
   expect(v.host.querySelector('[data-step="review"][aria-current="step"]')?.textContent).toContain("R2");
   expect(v.host.querySelector('[data-step="fix"]')?.textContent).toContain("已完成");
-  expect(v.text()).not.toMatch(/打开会话|对它说|要改|拦下/);
+  // 主线详情现在明确显示「对它说仅主场可见」；限制针对可操作入口，不能把主场提示当成按钮。
+  expect(v.text()).toContain("对它说仅主场可见");
+  expect(v.text()).not.toMatch(/打开会话|要改|拦下/);
+  expect(Array.from(v.host.querySelectorAll("button, a, input, textarea"), e => e.textContent ?? "").join(" ")).not.toMatch(/打开会话|对它说/);
   expect(calls.filter((c) => LOCAL_ONLY.some((re) => re.test(c)))).toEqual([]);
   expect(calls.filter((c) => !c.startsWith("GET "))).toEqual([]);
   await v.unmount();

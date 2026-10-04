@@ -80,6 +80,7 @@ test("复现测试：子 DAG 节点挂上步骤线（当前步来自 steps），
 
 test("复现测试：列表成功而首次 feature 详情失败（无缓存）：子 DAG / 产品看板保留中心 counts，不因读失败变 0，并明确 warn 在跑未知", async () => {
   const fx = generateTeamFixture();
+  fx.list.features[0]!.counts = { total: 9, completed: 3, blocked: 0, missing: 2 };
   const identity = { center: "c", team: fx.team, person: "p", project: fx.project, machine: "m" };
   const src = sharedCollabSource(new SharedLedgerSession(identity, {
     list: async () => structuredClone(fx.list),
@@ -94,9 +95,9 @@ test("复现测试：列表成功而首次 feature 详情失败（无缓存）�
     expect(f.counts.total).toBeGreaterThan(0);
     const dag = board.features.find((x) => x.id === f.id)!;
     expect(dag.nodes).toEqual([]);
-    expect(dag.counts).toMatchObject({ total: f.counts.total, done: f.counts.completed, missing: f.counts.missing });
+    expect(dag.counts).toMatchObject({ total: f.counts.total, done: f.counts.completed, missing: f.counts.missing, activeUnknown: true });
     const p = product.features.find((x) => x.id === f.id)!;
-    expect(p.counts).toMatchObject({ total: f.counts.total, completed: f.counts.completed, blocked: f.counts.blocked });
+    expect(p.counts).toMatchObject({ total: f.counts.total, completed: f.counts.completed, blocked: f.counts.blocked, activeUnknown: true });
     expect(warns.some((w) => w.includes(f.id) && w.includes("在跑") && w.includes("未知"))).toBe(true);
   }
 });

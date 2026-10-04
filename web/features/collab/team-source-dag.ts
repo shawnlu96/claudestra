@@ -24,11 +24,11 @@ export function checkedCounts(f: FeatureList['features'][number], nodes: readonl
 
 /**
  * 详情没读到（读失败、也没有缓存）：节点画不出来，但中心 counts 照样可信——总数 / 完成 / 缺失用中心的，不因读失败变 0；
- * 在跑 / 未开始只有详情里的节点知道，这里不知道：FeatureCounts 还表示不了未知（team-parity-Bc1 加标记），先明确 warn
+ * 在跑 / 未开始只有详情里的节点知道；标记未知，让消费者显示暂无，占位 0 不是真实计数。
  */
 export function centerCounts(f: FeatureList['features'][number]): FeatureCounts {
   console.warn(`[team] feature ${f.id} 详情没读到：总数 / 完成 / 缺失按中心 counts，在跑 / 未开始未知`);
-  return { total: f.counts.total, done: f.counts.completed, active: 0, idle: 0, missing: f.counts.missing };
+  return { total: f.counts.total, done: f.counts.completed, active: 0, idle: 0, missing: f.counts.missing, activeUnknown: true };
 }
 
 export function teamDagBoard(project: string, list: FeatureList, details: ReadonlyMap<string, SharedDetail>, team: TeamOverview): DagBoard {
