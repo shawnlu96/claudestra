@@ -4,6 +4,7 @@ import {
   type SharedLedgerFeatureList, type SharedLedgerCommandResult, type SharedLedgerCommandReceipt, type SharedLedgerErrorResponse,
   type SharedLedgerImport, type SharedLedgerImportResult, type SharedLedgerProjection, type SharedLedgerProjectionResult,
 } from "./shared-ledger-contract.js";
+import type { SharedLedgerExtCapabilities, SharedLedgerFeatureActivity, SharedLedgerFeatureVersions } from "./shared-ledger-contract-reads.js";
 
 const now = 1_790_000_000_000;
 const nonce = "0123456789abcdef0123456789abcdef";
@@ -77,3 +78,16 @@ export const SHARED_LEDGER_PROJECTION_RESULT_FIXTURE: SharedLedgerProjectionResu
   schemaVersion: 1, serverSeq: 40, sourceInstanceId: "instance-a", sourceSeq: 30,
   digest: "0049aa35ebb89b9edd1a9643f838718504a2f32249a6df203eecb0138782167c",
 };
+
+/** Add-only reads (contract-reads.ts): three center kinds share these; an old center answers ext-capabilities with 404. */
+export const SHARED_LEDGER_EXT_CAPABILITIES_NEW_FIXTURE: SharedLedgerExtCapabilities = { schemaVersion: 1, teamId: "team-a",
+  reads: { versions: true, activity: true, ext1: true, activityExt: true }, uploads: { projectionExt1: true } };
+export const SHARED_LEDGER_EXT_CAPABILITIES_READONLY_FIXTURE: SharedLedgerExtCapabilities = { schemaVersion: 1, teamId: "team-a",
+  reads: { versions: true, activity: true, ext1: true, activityExt: true }, uploads: { projectionExt1: false } };
+export const SHARED_LEDGER_EXT_CAPABILITIES_OLD_CENTER_STATUS = 404;
+export const SHARED_LEDGER_VERSIONS_FIXTURE: SharedLedgerFeatureVersions = { schemaVersion: 1, teamId: "team-a", projectId: "project-a", serverSeq: 40,
+  versions: [{ version: 1, reason: "建立规划", nodes, bindings: [{ nodeKey: "C1", taskId: "task-global-a" }], at: now, by: "worker-a" },
+    { version: 2, reason: "初始导入", nodes, bindings: [], at: null, by: null }] };
+export const SHARED_LEDGER_ACTIVITY_FIXTURE: SharedLedgerFeatureActivity = { schemaVersion: 1, teamId: "team-a", projectId: "project-a", serverSeq: 40,
+  items: [{ src: "center", serverSeq: 39, kind: "dag.rewrite", by: "worker-a", at: now },
+    { src: "home", sourceSeq: 30, taskId: "task-global-a", type: "stage", at: now }], truncated: false };
