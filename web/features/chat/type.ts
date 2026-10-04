@@ -1,4 +1,5 @@
 import type { CtxBoundaryInfo } from "./ctx-boundary-view";
+import type { BgShellEnd } from "./bg-shell-state";
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
 import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
@@ -66,6 +67,8 @@ export interface BgTaskView {
   model?: string;
   progress?: BgProgress;
   endStatus?: BgEndStatus;
+  /** shell 才有：结束后的结论（退出码 / 状态未知），规则见 bg-shell-state.ts */
+  shellEnd?: BgShellEnd;
 }
 
 /** Claude Code 原生任务清单条目（~/.claude/tasks/<sessionId>/<id>.json）。 */
