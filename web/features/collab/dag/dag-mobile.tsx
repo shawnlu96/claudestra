@@ -56,7 +56,7 @@ export function MobileDag(props: {
               <button type="button" className={d.mft} aria-expanded={isOpen} onClick={() => props.onFeature(f.id)}>
                 <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={14} />
                 <span className={d.mftT}>{f.title || f.id}</span>
-                <span className={d.mcounts}><Counts f={f} /></span>
+                <Counts f={f} />
               </button>
               <button type="button" className={d.vbtn} onClick={() => props.onVersions(f.id)}>
                 v{f.currentVersion}{f.pending && <span className={d.pend} />}

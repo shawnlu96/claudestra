@@ -91,12 +91,12 @@
 .mfh { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .mfh > button { min-height: 44px; min-width: 44px; }
 .mfh > .vbtn { justify-content: center; }
-/* 框头按钮：标题省略、计数整组不收缩（以前 .mft span 连计数一起截，英文 Unknown 成了「Unk」）。
-   标题至少留 6em 还放不下计数时，计数整组换到第二行（与标题左对齐），不缩字号、不缩写 */
+/* 框头按钮：只有标题省略，计数不收缩（以前 .mft span 连计数一起截，英文 Unknown 成了「Unk」）。
+   标题至少留 6em，放不下的计数换到下一行；不缩字号、不缩写 */
 .mft { flex: 1; display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 2px 6px; min-width: 0; text-align: left; color: var(--text); font-size: var(--fs-2); font-weight: 600; }
 .mft > svg { flex: none; }
 .mftT { flex: 1 1 6em; min-width: 0; max-width: max-content; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mcounts { display: inline-flex; align-items: center; gap: 6px; flex: none; max-width: 100%; white-space: nowrap; }
+.mft > .cnum { flex: none; white-space: nowrap; }
 .mnode { position: relative; display: flex; flex-direction: column; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); scroll-margin: 12px; }
 .mnode .nmain { min-height: 44px; padding: 9px 12px 4px; }
 .mnode .nf { padding: 0 12px 6px; }
