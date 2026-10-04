@@ -247,3 +247,30 @@ test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英�
     i18n.setLang("zh");
   }
 });
+
+test("复现测试:英文模式团队未知数值不回落中文「暂无」（五项指标 / 桌面与手机待你处理），本机已知 0 / 数字不变", async () => {
+  i18n.setLang("en");
+  try {
+    const v = await mount("team", 1200);
+    const values = Object.fromEntries(["Agents present", "Done today", "Review rounds", "P0/P1 fixed", "Avg review wait"]
+      .map((k) => [k, v.metric(k)?.value]));
+    const deskWaits = v.button("For you")?.querySelector("b")?.textContent;
+    await v.unmount();
+    const m = await mount("team", 390);
+    const phoneWaits = m.button("For you")?.querySelector("b")?.textContent;
+    await m.unmount();
+    const NA = "Unknown";
+    expect({ values, deskWaits, phoneWaits }).toEqual({
+      values: { "Agents present": NA, "Done today": NA, "Review rounds": NA, "P0/P1 fixed": NA, "Avg review wait": NA },
+      deskWaits: NA, phoneWaits: NA,
+    });
+    // 本机同数据：已知 0 / 数字照旧，不被未知短词替换
+    const l = await mount("local", 1200);
+    expect(l.metric("Agents present")?.value).toBe("0");
+    expect(l.metric("Done today")?.value).toBe("3");
+    expect(l.button("For you")?.querySelector("b")?.textContent).toBe("0");
+    await l.unmount();
+  } finally {
+    i18n.setLang("zh");
+  }
+});
