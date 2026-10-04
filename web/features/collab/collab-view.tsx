@@ -10,6 +10,8 @@ import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
+import { useLang } from "@/lib/i18n";
+import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 import { useChatStore } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { actionLine } from "./collab-action";
@@ -58,16 +60,19 @@ function Empty({ icon, title, children }: { icon: "listTree" | "clock" | "circle
 
 /** 不知道的指标显示「暂无」并在 title 里给原因；本机「没人在等审查」照旧是「—」 */
 function MetricsBar({ m, waitUnknown, connected, tr }: { m: Metrics; waitUnknown: boolean; connected: boolean; tr: Tr }) {
-  const known = (n: number | null, why = "暂无数据来源"): [string, string?] => n === null ? [tr("暂无"), why] : [String(n)];
+  // 主场相关的原因复用团队规划（shared-ledger）的既有词条，那份字典不在 DICT 里
+  const homeTr = sharedLedgerTr(useLang());
+  const noSource = tr("暂无数据来源");
+  const known = (n: number | null, why = noSource): [string, string?] => n === null ? [tr("暂无"), why] : [String(n)];
   const cells: [string, string, string?][] = [
-    ["在场 agent", ...known(m.present, "主场在线状态未知")], ["进行中", String(m.active)], ["今日完成", ...known(m.todayDone)], ["审查轮次", ...known(m.reviewRounds)],
-    ["P0/P1 修掉", ...known(m.fixed)], waitUnknown ? ["平均等复核", tr("暂无"), "暂无数据来源"] : ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
-    ["周额度", "—", "暂无数据来源"], ["协作消息", "—", "暂无数据来源"],
+    ["在场 agent", ...known(m.present, homeTr("主场在线状态未知"))], ["进行中", String(m.active)], ["今日完成", ...known(m.todayDone)], ["审查轮次", ...known(m.reviewRounds)],
+    ["P0/P1 修掉", ...known(m.fixed)], waitUnknown ? ["平均等复核", tr("暂无"), noSource] : ["平均等复核", m.avgReviewWaitMs === null ? "—" : fmtDuration(m.avgReviewWaitMs, tr)],
+    ["周额度", "—", noSource], ["协作消息", "—", noSource],
   ];
   return (
     <div className={v.metrics}>
       {cells.map(([k, val, hint]) => (
-        <span key={k} className={v.metric} title={hint ? tr(hint) : undefined}>
+        <span key={k} className={v.metric} title={hint}>
           <b>{val}</b>
           <span>{tr(k)}</span>
         </span>
@@ -142,6 +147,7 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
 
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
+  const homeTr = sharedLedgerTr(useLang());
   const nav = useChatNav();
   const narrow = useNarrow();
   const { task: openTask } = useCollabNav();
@@ -216,7 +222,7 @@ export function CollabView({ project }: { project: string }) {
         </button>
         <span className={v.ttl}>{projectName}</span>
         {narrow && <button type="button" className={v.teamM} onClick={() => select({ kind: "team" })}>{tr("团队")}</button>}
-        {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? tr("V1 仅共享规划，执行操作仍在主场") : undefined} onClick={() => select({ kind: "waits" })}>
+        {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? homeTr("V1 仅共享规划，执行操作仍在主场") : undefined} onClick={() => select({ kind: "waits" })}>
           {tr("待你处理")} <b>{waitsUnknown ? tr("暂无") : waits.length}</b></button>}
         {!narrow && <MetricsBar m={m} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}
       </div>

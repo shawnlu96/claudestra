@@ -9,6 +9,8 @@ import type { Tr } from "../collab-model";
 import { actionLine, type ActionMap } from "../collab-action";
 import type { Selection } from "../v4/v4-selection";
 import v from "../v4/v4.module.css";
+import { useLang } from "@/lib/i18n";
+import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 import { ProductPanes } from "../product/product-panes";
 import { useProductBoard } from "../product/use-product-board";
 import { DagCanvasView } from "./dag-canvas";
@@ -46,6 +48,7 @@ export interface DagPanesArgs {
 
 export function useDagPanes(a: DagPanesArgs) {
   const { tr } = a;
+  const homeTr = sharedLedgerTr(useLang());
   const load = useDagBoard(a.project, a.rev);
   const product = useProductBoard(a.project, a.rev);
   const board = load.status === "ok" ? load.board : null;
@@ -99,7 +102,7 @@ export function useDagPanes(a: DagPanesArgs) {
   )) || (!a.narrow && diffPage) || null;
 
   const progress = a.noWorkBoard
-    ? <div className={v.center} role="status"><p className={v.none}>{tr("V1 仅共享规划，执行操作仍在主场")}</p></div>
+    ? <div className={v.center} role="status"><p className={v.none}>{homeTr("V1 仅共享规划，执行操作仍在主场")}</p></div>
     : <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (

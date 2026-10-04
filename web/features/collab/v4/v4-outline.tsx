@@ -4,6 +4,8 @@ import type { LedgerOverview, LineView, OwnerWait, Tr } from "../collab-model";
 import { DoneMoreButton, useDonePages } from "../collab-done";
 import { FILTER_LABEL, FILTERS, filterCount, outlineOf, type Filter } from "./v4-model";
 import v from "./v4.module.css";
+import { useLang } from "@/lib/i18n";
+import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 
 export function Outline(props: {
   project: string;
@@ -21,11 +23,12 @@ export function Outline(props: {
 }) {
   const { ov, lines, filter, tr } = props;
   const done = useDonePages(props.project, ov);
+  const homeTr = sharedLedgerTr(useLang());
   // 「已完成」把翻到的更早的卡并进各事项组，底部「更多」接着翻（collab-done.tsx）
   const groups = outlineOf(filter === "done" ? { ...ov, tasks: [...ov.tasks, ...done.pages] } : ov, filter);
   return (
     <nav className={v.outline} aria-label={tr("大纲")}>
-      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} title={props.waitsUnknown ? tr("V1 仅共享规划，执行操作仍在主场") : undefined}
+      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} title={props.waitsUnknown ? homeTr("V1 仅共享规划，执行操作仍在主场") : undefined}
         onClick={props.onWaits}>
         {tr("待你处理")} <b>{props.waitsUnknown ? tr("暂无") : props.waits.length}</b>
       </button>

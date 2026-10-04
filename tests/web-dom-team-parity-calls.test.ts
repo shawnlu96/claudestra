@@ -31,6 +31,7 @@ const mod = (p: string) => new URL(`../web/features/${p}`, import.meta.url).href
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
+let i18n: { setLang(l: "zh" | "en"): void };
 let ui: {
   CollabView: (p: { project: string }) => unknown;
   ChatStoreProvider: (p: { children: unknown }) => unknown;
@@ -99,6 +100,7 @@ beforeAll(async () => {
     return json({ ok: false, error: "not in fixture" }, 404);
   }) as typeof fetch;
   const view = await import(mod("collab/collab-view.tsx"));
+  i18n = await import(new URL("../web/lib/i18n.tsx", import.meta.url).href);
   const store = await import(mod("chat/chat-store.ts"));
   const ops = await import(mod("collab/shared/team-ops.tsx"));
   const nav = await import(mod("collab/dag/shared-navigation.tsx"));
@@ -131,7 +133,7 @@ async function mount(side: "local" | "team", width: number) {
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, collab) as never));
   // 手机团队首页是产品 DAG（列事项），本机没有产品看板退回分组列表（列卡）
   const text = () => host.textContent ?? "";
-  await until(() => text().includes("待你处理") && (text().includes("在等审查的卡") || text().includes("对照事项 parity")), `${side} view`);
+  await until(() => (text().includes("待你处理") || text().includes("For you")) && (text().includes("在等审查的卡") || text().includes("对照事项 parity")), `${side} view`);
   const buttons = () => Array.from(host.querySelectorAll("button,[role=tab]"));
   const click = async (label: string) => {
     const b = buttons().find((x) => (x.textContent ?? "").trim().startsWith(label));
@@ -225,4 +227,23 @@ test("防回归:本机手机今日完成分组照旧列 3 张", async () => {
   expect(h).toContain("今日完成 3");
   expect(v.button("待你处理")?.querySelector("b")?.textContent).toBe("0");
   await v.unmount();
+});
+
+test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英文词条（在场原因 / 待你处理 / 谁在干活占位）", async () => {
+  i18n.setLang("en");
+  try {
+    const EXEC = "V1 shares planning; execution stays at home";
+    const v = await mount("team", 1200);
+    const desk = { presence: v.metric("Agents present")?.title, waits: v.button("For you")?.title };
+    await v.click("Who is working");
+    const work = v.host.querySelector("[role=status] p")?.textContent;
+    const zhLeft = (v.host.textContent ?? "").includes("执行操作仍在主场");
+    await v.unmount();
+    const m = await mount("team", 390);
+    const phone = m.button("For you")?.title;
+    await m.unmount();
+    expect({ ...desk, work, zhLeft, phone }).toEqual({ presence: "Home presence unknown", waits: EXEC, work: EXEC, zhLeft: false, phone: EXEC });
+  } finally {
+    i18n.setLang("zh");
+  }
 });
