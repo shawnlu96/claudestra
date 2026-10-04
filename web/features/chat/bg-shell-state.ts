@@ -7,13 +7,19 @@ import type { BgTaskView } from "./type";
  * 唯一的「已结束」证据是 bridge 读到 CC 追加的独立末行 `[exited with code N]` 后发的 bg_task_completed（status=done，
  * 最后一行就是那条退出行，src/lib/bg-shell-progress.ts）。其余情况都不是成功：
  *   - 静默多久都还在跑（重定向日志的 bun test 十几分钟不出一字）——前端不按时间收敛 shell，只显示「已 N 无输出」；
- *   - 快照里没了（bridge 重启丢了跟踪）/ 输出文件消失 / 老 bridge 的 3min idle 收尾 → 状态未知，不画绿勾；
+ *   - 快照里没了（bridge 重启丢了跟踪）/ 输出文件消失 / 老 bridge 的 3min idle 收尾 / 输出读不到 → 状态未知：
+ *     卡留在运行组（顶栏计数、折叠行、停止按钮都不当它完成），只是不转圈、显示「状态未知 · 可能仍在运行」；
+ *   - 刷新 / 新连接：bridge 快照带近期收尾 shell 的 end（bg-activity-watcher.ts endedShells），replay 成 bg-done 还原结局；
  *   - 非 0 退出码 = 进程结束但失败。
  * subagent 不走这里，保持原来的 31min 兜底与快照缺失即完成。
  */
 
-/** shell 卡结束后的结论：exited = 读到退出行（code 0 才是成功）；unknown = 不再被跟踪但没证据说它结束了 */
-export type BgShellEnd = { kind: "exited"; code: number } | { kind: "unknown" };
+/** shell 卡的结局：只有读到退出行才算结束（code 0 才是成功）。没有「unknown 结局」——不可确认的卡仍留在运行组（见 shellUnknown） */
+export type BgShellEnd = { kind: "exited"; code: number };
+
+/** 为什么不可确认：untracked = bridge 不再跟踪（快照缺失 / 输出文件消失 / 老 bridge 的 idle 收尾）；
+ *  unreadable = 仍在跟踪但输出文件读不到（权限 / IO，bridge 继续重试，读通即恢复） */
+export type BgShellUnknown = "untracked" | "unreadable";
 
 const EXIT_LINE = /^\[exited with code (-?\d+)\]$/;
 
@@ -23,18 +29,33 @@ function exitCodeOfLines(lines: readonly string[]): number | null {
   return m ? Number(m[1]) : null;
 }
 
-/** bg_task_completed 到达：只有 bridge 判 done 且末行是退出行才算「已退出」，否则（idle / 文件消失 / 老 bridge）未知 */
-export function shellEndOnDone(lines: readonly string[], status: BgEndStatus | undefined): BgShellEnd {
-  const code = status === "done" ? exitCodeOfLines(lines) : null;
-  return code === null ? { kind: "unknown" } : { kind: "exited", code };
+/** bg_task_completed 到达：只有 bridge 判 done 且末行是退出行才算「已退出」，否则（idle / 文件消失 / 老 bridge）null */
+export function shellExitOnDone(lines: readonly string[], status: BgEndStatus | undefined): number | null {
+  return status === "done" ? exitCodeOfLines(lines) : null;
 }
 
-/** bg_task_completed 落到卡上：subagent 原样记 bridge 的收尾状态；shell 另按退出行定结论 */
+/** 已确认退出的 shell：结局定了，replay / 重连再来的 start / update 不能把它拉回运行中（也不重复堆行） */
+export function shellExited(t: BgTaskView): boolean {
+  return t.kind === "shell" && t.shellEnd?.kind === "exited";
+}
+
+/** bg_task_completed 落到卡上：subagent 原样记 bridge 的收尾状态；shell 只有读到退出行才进「已结束」，
+ *  否则留在运行组标「状态未知」——计数 / 折叠行 / 顶栏 / 停止按钮都不会把它当完成 */
 export function markBgDone(t: BgTaskView, durationMs: number | undefined, status: BgEndStatus | undefined): void {
-  t.status = "done";
   t.durationMs = durationMs;
   t.endStatus = status;
-  if (t.kind === "shell") t.shellEnd = shellEndOnDone(t.lines, status);
+  if (t.kind !== "shell") {
+    t.status = "done";
+    return;
+  }
+  const code = shellExitOnDone(t.lines, status);
+  if (code === null) {
+    t.shellUntracked = true;
+    return;
+  }
+  t.status = "done";
+  t.shellEnd = { kind: "exited", code };
+  t.shellUntracked = undefined;
 }
 
 const SUBAGENT_STALE_MS = 31 * 60_000; // 镜像 bridge 的 30min 无动静收尾再多给 1 分钟
@@ -44,18 +65,22 @@ export function bgSweepable(t: BgTaskView, now: number): boolean {
   return t.status === "running" && t.kind === "subagent" && (t.lastEventAt ?? 0) < now - SUBAGENT_STALE_MS;
 }
 
-/** 活跃快照里没有这张 running 卡：subagent 照旧标完成；shell 标「状态未知」（bridge 不再跟踪 ≠ 进程结束） */
+/** 活跃快照里没有这张 running 卡：subagent 照旧标完成；shell 仍算运行组、标「状态未知」（bridge 不再跟踪 ≠ 进程结束） */
 export function applySnapshotMissing(t: BgTaskView): void {
-  t.status = "done";
-  if (t.kind === "shell") t.shellEnd = { kind: "unknown" };
+  if (t.kind === "shell") t.shellUntracked = true;
+  else t.status = "done";
 }
 
-/** 状态未知的 shell 又来了输出 / 重新出现在开始事件里 → 说明仍被跟踪，回到运行中 */
+/** 不再跟踪的 shell 又来了输出 / 重新出现在开始事件里 → 说明仍被跟踪，清掉「不再跟踪」 */
 export function reviveUnknownShell(t: BgTaskView): void {
-  if (t.kind === "shell" && t.shellEnd?.kind === "unknown") {
-    t.status = "running";
-    t.shellEnd = undefined;
-  }
+  if (t.kind === "shell") t.shellUntracked = undefined;
+}
+
+/** 运行组里的 shell 现在能不能确认状态：不能 → 原因（面板显示「状态未知」而不是转圈） */
+export function shellUnknown(t: BgTaskView): BgShellUnknown | null {
+  if (t.kind !== "shell" || t.status !== "running") return null;
+  if (t.shellUntracked) return "untracked";
+  return t.progress?.unreadable ? "unreadable" : null;
 }
 
 /** shell 最后一次输出的时刻：bridge 给的 lastTs（刷新后仍准）优先，没有就用本地收到事件的时刻 */
@@ -64,7 +89,7 @@ export function shellQuietMs(t: BgTaskView, now: number): number {
   return last ? Math.max(0, now - last) : 0;
 }
 
-/** 面板文案的语义类别：success = 退出 0；failed = 非 0；unknown = 不可确认 */
+/** 面板文案的语义类别：success = 退出 0；failed = 非 0；unknown = 不可确认（正常不会出现在已结束组，防御用） */
 export type BgShellTone = "success" | "failed" | "unknown";
 
 export function shellTone(end: BgShellEnd | undefined): BgShellTone {

@@ -5,7 +5,7 @@ import type { BgTaskView } from "../type";
 import { fmtClock } from "../fmt-clock";
 import { useNow } from "../use-now";
 import { useT, getLang } from "@/lib/i18n";
-import { bgConfirmedSuccess, shellQuietMs, shellTone } from "../bg-shell-state";
+import { bgConfirmedSuccess, shellQuietMs, shellTone, shellUnknown, type BgShellUnknown } from "../bg-shell-state";
 
 /**
  * 后台任务（subagent / bg shell）列表 —— Discord 子区在 web 的对应物，挂在顶栏按钮的弹层里（bg-task-button.tsx）。
@@ -83,15 +83,30 @@ function ShellQuiet({ d }: { d: string }) {
   );
 }
 
-/** shell 卡结束后的状态：只有读到退出行才有 exit 码；0 才画绿勾，非 0 标失败，其余一律「状态未知」 */
+/** 「状态未知」：不转圈（不假装在看着它跑）、也不画完成；「可能仍在运行」同 ShellQuiet 窄屏收进 title */
+function ShellUnknown({ why }: { why: BgShellUnknown }) {
+  useT(); // 订阅语言切换
+  const hint =
+    why === "unreadable"
+      ? zhEn("输出文件暂时读不到（权限 / IO），无法确认进度；恢复可读后继续跟踪", "Output file can't be read right now (permission / IO); will resume tracking once readable")
+      : zhEn("已不在跟踪（bridge 重启 / 输出文件已消失），无法确认是否已结束", "No longer tracked (bridge restarted / output file gone); can't confirm it ended");
+  const tail = zhEn(" · 可能仍在运行", " · may still be running");
+  return (
+    <span className="ml-1 shrink-0 opacity-60" title={hint + tail}>
+      ? {zhEn("状态未知", "status unknown")}
+      <span className="hidden sm:inline">{tail}</span>
+    </span>
+  );
+}
+
+/** shell 卡结束后的状态：只有读到退出行才进已结束组；0 才画绿勾，非 0 标失败（不可确认的留在运行组，见 ShellUnknown） */
 function ShellEnd({ t }: { t: BgTaskView }) {
   useT(); // 订阅语言切换
   const tone = shellTone(t.shellEnd);
   const code = t.shellEnd?.kind === "exited" ? t.shellEnd.code : null;
   if (tone === "success") return <span className="ml-1 shrink-0 text-success">✓ exit 0 {fmtDuration(t.durationMs)}</span>;
   if (tone === "failed") return <span className="ml-1 shrink-0 text-error">✗ exit {code} {fmtDuration(t.durationMs)}</span>;
-  const hint = zhEn("无法确认是否已结束（已不在跟踪 / 输出文件已消失）", "Can't confirm it ended (no longer tracked / output file gone)");
-  return <span className="ml-1 shrink-0 opacity-50" title={hint}>? {zhEn("状态未知", "status unknown")}</span>;
+  return <ShellUnknown why="untracked" />;
 }
 
 /** 卡片右侧的状态：运行中 = 转圈 + 耗时 + 上下文 + 静默提示；结束 = 真实收尾状态 + 时长。
@@ -100,8 +115,10 @@ function BgStatus({ t }: { t: BgTaskView }) {
   const tr = useT();
   const p = t.progress;
   const shell = t.kind === "shell";
-  const now = useNow(t.status === "running" && (p?.startedTs || shell) ? 1000 : 0);
+  const unknown = shellUnknown(t);
+  const now = useNow(t.status === "running" && !unknown && (p?.startedTs || shell) ? 1000 : 0);
   if (t.status !== "running" && shell) return <ShellEnd t={t} />;
+  if (unknown) return <ShellUnknown why={unknown} />;
   if (t.status !== "running") {
     if (t.endStatus === "stopped") return <span className="ml-1 shrink-0 opacity-50">⏹ {tr("已停止")} {fmtDuration(t.durationMs)}</span>;
     if (t.endStatus === "idle") return <span className="ml-1 shrink-0 opacity-50">⏸ {tr("无动静结束")} {fmtDuration(t.durationMs)}</span>;
@@ -229,7 +246,8 @@ export function BgTaskList() {
   if (!tasks.length) return null;
   const running = tasks.filter((t) => t.status === "running");
   const done = tasks.filter((t) => t.status !== "running");
-  // 折叠行的绿勾只代表确认成功：有 shell 失败 / 状态未知时换成中性的「已结束」（subagent 维持原显示）
+  // 已结束组的 shell 都读到了退出行（状态未知的留在运行组，bg-shell-state.ts）；
+  // 折叠行的绿勾只代表确认成功：有 shell 非 0 退出时换成中性的「已结束」（subagent 维持原显示）
   const allOk = done.every((t) => t.kind !== "shell" || bgConfirmedSuccess(t));
   return (
     <div className="flex flex-col gap-1.5">
@@ -241,7 +259,7 @@ export function BgTaskList() {
               className="self-start text-[11px] text-base-content/35 hover:text-base-content/60"
               onClick={() => setShowDone(false)}
             >
-              {tr("收起已完成")}
+              {allOk ? tr("收起已完成") : zhEn("收起已结束", "Collapse ended")}
             </button>
             <TaskRows tasks={done} />
           </>

@@ -27,7 +27,7 @@ import { composeView, droppedBlobUrls, revokeBlobUrls, sendCursor } from "./view
 import { claimEcho, findEchoTarget, type HeldState } from "./held-echo";
 import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
-import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell } from "./bg-shell-state";
+import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell, shellExited } from "./bg-shell-state";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
@@ -2205,8 +2205,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       const existing = s.bgTasks.find((t) => t.id === id);
       if (existing) {
+        if (shellExited(existing)) return; // 已确认退出的 shell 结局已定（replay 会再发一遍 start）
         // 同 id 重开（restart 后 baseline 再触发 / 连流 replay）→ 重置为 running，带上最新的类型/进度
-        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined, shellEnd: undefined }, meta);
+        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined, shellUntracked: undefined }, meta);
       } else {
         s.bgTasks.push({ id, kind, title, lines: [], status: "running", lastEventAt: Date.now(), ...meta });
       }
@@ -2214,10 +2215,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   public bgTaskUpdate(id: string, items: string[], progress?: BgProgress) {
-    if (!id || !items.length) return;
+    if (!id || (!items.length && !progress)) return; // 空 items 只在 shell 读不到 / 恢复可读时来，带进度
     this.produce((s) => {
       let t = s.bgTasks.find((x) => x.id === id);
+      if (t && shellExited(t)) return;
       if (!t) {
+        if (!items.length) return;
         // update 早于 start（事件乱序/连流后补）→ 建一个占位任务
         t = { id, kind: "subagent", title: id, lines: [], status: "running" };
         s.bgTasks.push(t);

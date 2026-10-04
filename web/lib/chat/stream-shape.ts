@@ -7,7 +7,7 @@
  *   question → ask；question_cleared → ask-cleared；auto_deny / session_anomaly → 醒目系统文本；bg_task_* → bg-*
  *   compact_progress / compact_done / turn_duration / thinking_telemetry → 对应事件；其余不消费（null）
  */
-import { bgEndStatusOf, bgMetaOf, bgProgressOf, type WebAuqQuestion, type WebComponentRow, type WebStreamEvent } from "./events";
+import { bgEndStatusOf, bgMetaOf, bgProgressOf, type BgProgress, type WebAuqQuestion, type WebComponentRow, type WebStreamEvent } from "./events";
 import { attachmentUrl, extractAttachments, isImageName } from "./attachments";
 import { foreignAware, isSelfSource } from "./history-shape";
 
@@ -182,10 +182,11 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
         ...(typeof d.effort === "string" && d.effort ? { effort: d.effort } : {}),
       };
     case "bg_task_started":
-      return { t: "bg-start", id: String(d.id ?? ""), kind: d.kind === "shell" ? "shell" : "subagent", title: String(d.title ?? ""), ...bgMetaOf(d) };
+      return { t: "bg-start", id: String(d.id ?? ""), kind: d.kind === "shell" ? "shell" : "subagent", title: String(d.title ?? ""), ...bgMetaOf(d), progress: bgTaskProgressOf(d.progress) };
     case "bg_task_update":
-      if (!Array.isArray(d.items) || d.items.length === 0) return null; // 老 bridge 没 items → 无内容可渲染
-      return { t: "bg-update", id: String(d.id ?? ""), items: (d.items as unknown[]).map(String), progress: bgProgressOf(d.progress) };
+      // 老 bridge 没 items → 无内容可渲染；空 items 只有 shell「读不到 / 恢复可读」的状态切换（带进度）才要
+      if (!Array.isArray(d.items) || (d.items.length === 0 && !(d.kind === "shell" && d.progress))) return null;
+      return { t: "bg-update", id: String(d.id ?? ""), items: (d.items as unknown[]).map(String), progress: bgTaskProgressOf(d.progress) };
     case "bg_task_completed":
       return { t: "bg-done", id: String(d.id ?? ""), durationMs: typeof d.durationMs === "number" ? d.durationMs : undefined, status: bgEndStatusOf(d.status) };
     case "turn_duration":
@@ -206,12 +207,23 @@ export function pendingEvents(p: { question?: { questions: unknown; ts: number }
   return out;
 }
 
-/** 连流即补发的后台任务快照：bg-start + 已积累的尾部行，最后一条 bg-sync 全集（空数组也发，幽灵 working 卡靠它收敛） */
+/** bgProgressOf 之外再留 shell 的 unreadable（bridge 读不到输出文件 → 前端显示状态未知；events.ts 的 BgProgress 只收数字） */
+export function bgTaskProgressOf(x: unknown): (BgProgress & { unreadable?: boolean }) | undefined {
+  const p = bgProgressOf(x);
+  return p && (x as Record<string, unknown>).unreadable === true ? { ...p, unreadable: true } : p;
+}
+
+/** 连流即补发的后台任务快照：bg-start + 已积累的尾部行，最后一条 bg-sync 全集（空数组也发，幽灵 working 卡靠它收敛）。
+ *  近期已收尾的 shell 带 end（bg-activity-watcher.ts endedShells）→ 再补一条 bg-done，刷新后还原退出码 / 状态未知 */
 export function bgReplayEvents(tasks: ({ id: string; kind: "subagent" | "shell"; title: string; lines?: string[] } & Record<string, unknown>)[]): WebStreamEvent[] {
   const out: WebStreamEvent[] = [];
   for (const t of tasks) {
-    out.push({ t: "bg-start", id: t.id, kind: t.kind, title: t.title, ...bgMetaOf(t) });
+    out.push({ t: "bg-start", id: t.id, kind: t.kind, title: t.title, ...bgMetaOf(t), progress: bgTaskProgressOf(t.progress) });
     if (t.lines?.length) out.push({ t: "bg-update", id: t.id, items: t.lines });
+    const end = t.end as Record<string, unknown> | undefined;
+    if (t.kind === "shell" && end && typeof end === "object") {
+      out.push({ t: "bg-done", id: t.id, durationMs: typeof end.durationMs === "number" ? end.durationMs : undefined, status: bgEndStatusOf(end.status) });
+    }
   }
   out.push({ t: "bg-sync", ids: tasks.map((t) => t.id) });
   return out;

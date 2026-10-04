@@ -6,7 +6,7 @@
  * 隔离：HOME / shell 任务目录都是本文件的临时目录，不碰真实 ~/.claude 或 /tmp/claude-<uid>。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, appendFileSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, appendFileSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { activeBgTasksFor, hasActiveBgActivities, pollBgActivitiesForTest } from "../src/bridge/bg-activity-watcher";
@@ -51,7 +51,8 @@ function fixture(name: string) {
   const out = (id: string) => join(tasks, `${id}.output`);
   const of = (id: string) => events.filter((e) => e.agent === agent.name && (e.data as { id?: string }).id === id);
   const completed = (id: string) => of(id).filter((e) => e.type === "bg_task_completed");
-  const active = (id: string) => activeBgTasksFor(agent.name).some((t) => t.id === id);
+  /** 仍在跟踪（快照里近期已收尾的 shell 带 end，不算） */
+  const active = (id: string) => activeBgTasksFor(agent.name).some((t) => t.id === id && !t.end);
   return { agent, tasks, poll, confirmBg, out, of, completed, active };
 }
 
@@ -117,6 +118,80 @@ describe("bg-activity-watcher · 后台 shell", () => {
     await f.poll(10_000);
     expect(f.completed("g1")).toHaveLength(1);
     expect(f.completed("g1")[0].data).toMatchObject({ status: "unknown", exitCode: null });
+    // 刷新后快照仍带着「状态未知」的结局（不是消失、不是成功）
+    expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "g1")).toMatchObject({ kind: "shell", end: { status: "unknown", exitCode: null } });
+  });
+
+  test("已确认的退出结果留在快照里（刷新 / 新连接据此还原），按 agent 封顶 8 个、30 分钟后过期", async () => {
+    const f = fixture("ended");
+    await f.poll();
+    writeFileSync(f.out("e1"), "boom\n[exited with code 3]\n");
+    f.confirmBg("e1");
+    await f.poll(10_000);
+    await f.poll(10_000);
+    expect(f.completed("e1")).toHaveLength(1);
+    expect(hasActiveBgActivities(f.agent.name)).toBe(false); // bgPending 不受影响：已结束的不算活跃
+    const snap = activeBgTasksFor(f.agent.name).find((t) => t.id === "e1")!;
+    expect(snap).toMatchObject({ kind: "shell", end: { status: "done", exitCode: 3 } });
+    expect(snap.lines.at(-1)).toBe("[exited with code 3]");
+    for (let i = 0; i < 9; i++) {
+      writeFileSync(f.out(`n${i}`), "[exited with code 0]\n");
+      f.confirmBg(`n${i}`);
+    }
+    await f.poll(10_000);
+    const ids = activeBgTasksFor(f.agent.name).map((t) => t.id);
+    expect(ids).toHaveLength(8);
+    expect(ids).not.toContain("e1");
+    clock += 31 * MIN;
+    expect(activeBgTasksFor(f.agent.name)).toEqual([]);
+  });
+
+  test("读失败 → 进度带 unreadable 发给前端 / 进快照（不收尾、不推进），读通后恢复并补上漏掉的输出", async () => {
+    const f = fixture("eacces");
+    await f.poll();
+    writeFileSync(f.out("r1"), "start\n");
+    f.confirmBg("r1");
+    await f.poll(10_000);
+    await f.poll(10_000);
+    appendFileSync(f.out("r1"), "more\n");
+    chmodSync(f.out("r1"), 0o000);
+    try {
+      await f.poll(10_000);
+      const upd = f.of("r1").filter((e) => e.type === "bg_task_update").pop()!;
+      expect(upd.data).toMatchObject({ items: [], progress: { unreadable: true } });
+      for (let i = 0; i < 6 * 12; i++) await f.poll(10_000); // 12 分钟读不到：仍在跟踪、状态未知，不收尾
+      expect(f.completed("r1")).toEqual([]);
+      expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "r1")?.progress).toMatchObject({ unreadable: true });
+      expect(f.of("r1").filter((e) => (e.data as { progress?: { unreadable?: boolean } }).progress?.unreadable)).toHaveLength(1); // 只在切换时发
+    } finally {
+      chmodSync(f.out("r1"), 0o644);
+    }
+    await f.poll(10_000);
+    const snap = activeBgTasksFor(f.agent.name).find((t) => t.id === "r1")!;
+    expect(snap.progress).not.toHaveProperty("unreadable");
+    appendFileSync(f.out("r1"), "[exited with code 0]\n");
+    await f.poll(10_000);
+    expect(f.completed("r1")).toHaveLength(1);
+    const items = f.of("r1").flatMap((e) => (e.data as { items?: string[] }).items ?? []);
+    expect(items).toEqual(["start", "more", "[exited with code 0]"]);
+  });
+
+  test("读不到但没新字节（stat 仍成功）不会被误报恢复", async () => {
+    const f = fixture("eacces2");
+    await f.poll();
+    writeFileSync(f.out("r2"), "a\n");
+    f.confirmBg("r2");
+    await f.poll(10_000);
+    appendFileSync(f.out("r2"), "b\n");
+    chmodSync(f.out("r2"), 0o000);
+    try {
+      await f.poll(10_000); // 读失败 → unreadable
+      await f.poll(10_000); // 没新字节：要真确认可读才清
+      await f.poll(10_000);
+      expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "r2")?.progress).toMatchObject({ unreadable: true });
+    } finally {
+      chmodSync(f.out("r2"), 0o644);
+    }
   });
 
   test("保留：首轮 baseline 不开流、前台瞬时 .output 不开卡、subagent 软链不当 shell", async () => {

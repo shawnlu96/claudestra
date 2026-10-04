@@ -6,7 +6,7 @@
  * 隔离：HOME / tasks 目录是临时目录；fetch 拦成 404，不出网；happy-dom 只在本文件注册（guard TESTS_WEB_DOM）。
  */
 import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,6 +128,16 @@ const badgeCount = (host: El) => Array.from(host.querySelectorAll("button[aria-e
 /** 已结束的卡默认折叠成一行：点开它 */
 const doneRow = (host: El) => Array.from(host.querySelectorAll("button")).find((b) => /个已|ended|completed/.test(b.textContent ?? ""));
 const expandDone = (host: El) => React.act(async () => (doneRow(host) as unknown as { click(): void }).click());
+const summaryOf = (host: El, title: string) => Array.from(host.querySelectorAll("summary")).find((s) => (s.textContent ?? "").includes(title));
+const stopButtons = (host: El, title: string) =>
+  summaryOf(host, title)?.querySelectorAll('button[aria-label="停止任务"], button[aria-label="Stop task"]').length ?? 0;
+/** 刷新页面：卸载 Provider（丢掉内存里的 store），重新挂载，按连流路径 activeBgTasksFor → bgReplayEvents 重建 */
+const refresh = async (host: El & { unmount(): Promise<void> }) => {
+  await host.unmount();
+  const next = await mount();
+  await frontendSweepAndReplay();
+  return next;
+};
 const rowText = (host: El, title: string) => Array.from(host.querySelectorAll("summary")).find((s) => (s.textContent ?? "").includes(title))?.textContent ?? "";
 
 describe("后台 shell 全链路：静默不等于结束", () => {
@@ -178,11 +188,19 @@ describe("后台 shell 全链路：静默不等于结束", () => {
     // 结束后的 sweep / 快照不改写已确认的结局
     await frontendSweepAndReplay();
     expect(task("chain1").shellEnd).toEqual({ kind: "exited", code: 1 });
+    expect(task("chain1").lines.filter((l) => l === "[exited with code 1]")).toHaveLength(1); // replay 不重复堆行
+    // 完成后刷新页面：新 store 从快照还原已确认的 exit 1（旧红：任务直接从面板消失）
+    host = await refresh(host);
+    expect(task("chain1")).toMatchObject({ status: "done", shellEnd: { kind: "exited", code: 1 } });
+    await expandDone(host);
+    expect(rowText(host, "chain1")).toContain("✗ exit 1");
+    expect(badgeCount(host)).toBe("");
     await host.unmount();
   });
 
-  test("exit 0 = 成功；快照缺失 = 状态未知（不画绿勾，折叠行不说已完成）；再有输出回到运行；中英文", async () => {
-    const host = await mount();
+  // 快照缺失 = 状态未知：留在运行组（顶栏不说已完成、停止键还在、不转圈）；再有输出恢复；文件消失同样未知且刷新后保持
+  test("exit 0 = 成功；快照缺失 / 文件消失 = 状态未知（含刷新后）；中英文", async () => {
+    let host = await mount();
     writeFileSync(out("ok0"), "build\n");
     writeFileSync(out("lost"), "serving on :0\n");
     confirmBg("ok0");
@@ -192,32 +210,80 @@ describe("后台 shell 全链路：静默不等于结束", () => {
     await poll(10_000);
     expect(task("ok0").shellEnd).toEqual({ kind: "exited", code: 0 });
 
-    // bridge 重启：快照里没有 lost → 状态未知
+    // bridge 重启：快照里没有 lost → 状态未知（旧红：status=done，顶栏「1 个已完成」、折叠行「已结束」、停止键消失）
     await React.act(async () => ui.processStreamEvent(store as unknown as Sink, { t: "bg-sync", ids: [] }));
-    expect(task("lost")).toMatchObject({ status: "done", shellEnd: { kind: "unknown" } });
-    expect(doneRow(host)?.textContent).toContain("2 个已结束");
-    expect(doneRow(host)?.textContent).not.toContain("✓");
+    expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
+    expect(btnLabel(host)).toBe("后台任务 · 运行中 1");
+    expect(btnLabel(host)).not.toContain("已完成");
+    expect(badgeCount(host)).toBe("1");
+    expect(rowText(host, "lost")).toContain("状态未知 · 可能仍在运行");
+    expect(rowText(host, "lost")).not.toContain("✓");
+    expect(stopButtons(host, "lost")).toBe(1);
+    expect(host.querySelectorAll("summary .loading").length).toBe(0); // 不转圈：不假装还看着它
+    expect(doneRow(host)?.textContent).toContain("1 个已完成"); // 折叠行只有 ok0
     await expandDone(host);
     expect(rowText(host, "ok0")).toContain("✓ exit 0");
-    expect(rowText(host, "lost")).toContain("状态未知");
-    expect(rowText(host, "lost")).not.toContain("✓");
 
     await React.act(async () => ui.setLang("en"));
-    expect(rowText(host, "lost")).toContain("status unknown");
+    expect(btnLabel(host)).toBe("Background tasks · Running 1");
+    expect(rowText(host, "lost")).toContain("status unknown · may still be running");
+    expect(stopButtons(host, "lost")).toBe(1);
     expect(rowText(host, "ok0")).toContain("✓ exit 0");
     await React.act(async () => ui.setLang("zh"));
 
-    // 仍被跟踪的那张又来了输出 → 回到运行中（不是永久判死）
+    // 仍被跟踪的那张又来了输出 → 恢复正常跟踪（不是永久判死）
     appendFileSync(out("lost"), "GET / 200\n");
     await poll(10_000);
     await React.act(async () => new Promise((r) => setTimeout(r, 2_700))); // bridge 子区推送 debounce
-    expect(task("lost")).toMatchObject({ status: "running" });
-    expect(task("lost").shellEnd).toBeUndefined();
+    expect(task("lost").status).toBe("running");
+    expect(task("lost").shellUntracked).toBeUndefined();
+    expect(host.querySelectorAll("summary .loading").length).toBe(1);
 
-    // 输出文件被清理：bridge 报 unknown，前端也是状态未知
+    // 输出文件被清理：bridge 报 unknown，前端也是状态未知（运行组）；刷新后从快照还原同样的状态
     unlinkSync(out("lost"));
     await poll(10_000);
-    expect(task("lost").shellEnd).toEqual({ kind: "unknown" });
+    expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
+    host = await refresh(host);
+    expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
+    expect(task("ok0").shellEnd).toEqual({ kind: "exited", code: 0 });
+    expect(rowText(host, "lost")).toContain("状态未知");
+    expect(btnLabel(host)).not.toContain("已完成");
+    // ✕ 收起照旧可用
+    const dismiss = summaryOf(host, "lost")!.querySelectorAll('button[aria-label="收起任务卡"]')[0] as unknown as { click(): void };
+    await React.act(async () => dismiss.click());
+    expect(store!.state.bgTasks.some((t) => t.id === "lost")).toBe(false);
+    await host.unmount();
+  });
+
+  test("读不到输出（EACCES）→ 前端状态未知（含刷新后），12 分钟后读通恢复跟踪，真实 exit 0 才结束", async () => {
+    let host = await mount();
+    writeFileSync(out("perm"), "step 1\n");
+    confirmBg("perm");
+    await poll(10_000);
+    appendFileSync(out("perm"), "step 2\n");
+    chmodSync(out("perm"), 0o000);
+    try {
+      await poll(10_000);
+      expect(task("perm").status).toBe("running");
+      expect(rowText(host, "perm")).toContain("状态未知 · 可能仍在运行");
+      expect(stopButtons(host, "perm")).toBe(1);
+      for (let i = 0; i < 72; i++) await poll(10_000); // 12 分钟
+      host = await refresh(host);
+      expect(task("perm").status).toBe("running");
+      expect(task("perm").progress?.unreadable).toBe(true);
+      expect(rowText(host, "perm")).toContain("状态未知");
+      expect(btnLabel(host)).not.toContain("已完成");
+    } finally {
+      chmodSync(out("perm"), 0o644);
+    }
+    await poll(10_000);
+    await React.act(async () => new Promise((r) => setTimeout(r, 2_700)));
+    expect(task("perm").progress?.unreadable).toBeUndefined();
+    expect(rowText(host, "perm")).not.toContain("状态未知");
+    expect(task("perm").lines).toContain("step 2");
+    appendFileSync(out("perm"), "[exited with code 0]\n");
+    await poll(10_000);
+    expect(task("perm")).toMatchObject({ status: "done", shellEnd: { kind: "exited", code: 0 } });
     await host.unmount();
   });
 
@@ -230,7 +296,7 @@ describe("后台 shell 全链路：静默不等于结束", () => {
     const host = await mount(); // 新 Provider = 新 store：用快照 replay 重建（刷新页面的路径）
     await frontendSweepAndReplay();
     expect(rowText(host, "en1")).toContain("no output 5m · may still be running");
-    expect(btnLabel(host)).toContain("1");
+    expect(btnLabel(host)).toContain("Background tasks · Running");
     await React.act(async () => ui.setLang("zh"));
     await host.unmount();
   });
