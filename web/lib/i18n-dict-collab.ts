@@ -219,4 +219,8 @@ export const COLLAB_DICT: Record<string, string> = {
   "发现新问题": "New issue found",
   "P1 退路": "P1 fallback",
   "已完成被改写": "Done node rewritten",
+  // 团队数据（team-parity P1-B）：边没有建立者 / 时间、主场的阻塞提问、执行镜像过期
+  "建立者 / 时间未记录（团队数据没有边级元数据）": "Creator / time not recorded (team data has no edge-level metadata)",
+  "主场有 {n} 个阻塞提问": "{n} blocking question(s) at home",
+  "{n} 个 feature 主场镜像过期": "Home mirror stale for {n} feature(s)",
 };

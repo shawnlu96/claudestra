@@ -22,6 +22,15 @@ const COLLAB_WORDS: Record<string, string> = {
   // 团队源拿不到的指标 / 待你处理（「暂无」+ 原因 title）；不是「0」也不是本机「没人在等」的「—」
   "暂无": "Unknown",
   "没取到，正在重试": "Could not load, retrying",
+  // 团队数据的执行镜像新鲜度（team-parity P1-B）
+  "主场镜像过期": "Home mirror is stale",
+  "主场镜像最新": "Home mirror is fresh",
+  "镜像": "Mirror",
+  // 任务详情「团队」段（v4-props.tsx TeamFactsSec）
+  "成员代号": "Member code",
+  "执行实例": "Executor instance",
+  "主场实例": "Home instance",
+  "阻塞提问": "Blocking questions",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
   "：": ": ",
   "、": ", ",
