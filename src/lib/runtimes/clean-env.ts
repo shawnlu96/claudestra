@@ -6,6 +6,9 @@
  * 哪条漏传一个字段都不会让出借 worker 带着全量环境起来。tests/lend-worker-env.test.ts。
  */
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { isSandbox } from "../sandbox.js";
 
 /** 出借 worker 的 agent 名前缀；lend 循环按 orderId 生成，别的入口建不出这个前缀以外的出借 worker */
@@ -17,12 +20,25 @@ export const WORKER_ENV_WHITELIST = ["PATH", "HOME", "USER", "LANG", "TERM", "TM
 export const isLendWorkerName = (name: string | undefined): boolean => !!name && name.startsWith(LEND_WORKER_PREFIX);
 
 /**
- * 白名单之外还要带的路径 / 隔离变量（都不是凭据）：状态与运行目录改过时不带，worker 里的 `lend submit` 和宿主自停兜底会去读默认目录，
+ * 白名单之外还要带的路径 / 隔离变量（都不是凭据）：状态与运行目录改过时不带，宿主自停兜底会去读默认目录，
  * 找不到这张单就当它结束了（lend-watchdog.ts）；沙箱实例不带沙箱变量，worker 会被当成生产进程（碰生产目录、起真 Codex）。
+ * 这两个目录只给宿主：worker 本体（Claude / Codex 进程）再用 workerPrivateDirs 盖掉。
  */
 const PLUMBING = ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"] as const;
 /** 沙箱进程加载 lib/paths 时要核 bridge 地址不是生产端口，不带 BRIDGE_* 会回落到默认端口、当场拒绝启动（都是回环地址，不是凭据） */
 const SANDBOX_VAR = /^(?:CLAUDESTRA_(?:SANDBOX(?:_[A-Z_]+)?|LAB_[A-Z_]+)|BRIDGE_(?:PORT|URL|BIND))$/;
+
+/**
+ * worker 本体（它的 Bash、跑的测试都继承这份环境）的状态 / 运行目录：root 下两个专属目录，随 root 一起清。
+ * 不能只删变量：worker 留着真实 HOME（要找本机登录），没设就回落到生产的 ~/.claude-orchestrator，worker 里一次 rmSync 就删到生产文件。
+ * 生产目录只留给宿主（看门狗读 journal）和 MCP 那一路；交付命令自己带上（lend-arbiter-submit.ts lendSubmitCmd）。tests/lend-worker-env.test.ts
+ */
+export function workerPrivateDirs(root: string): { CLAUDESTRA_STATE_DIR: string; CLAUDESTRA_RUNTIME_DIR: string } {
+  return { CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "runtime") };
+}
+
+/** workerPrivateDirs 的 root（没有现成代次目录的 Codex 宿主 / 引导用）：系统临时目录下、只有本用户可进，起它的进程退出时删 */
+export const makeWorkerRoot = (): string => mkdtempSync(join(tmpdir(), "cstra-lend-worker-"));
 
 /** 只留白名单里有值的变量（外加上面的路径变量；沙箱里再加沙箱变量） */
 export function pickWorkerEnv(env: Record<string, string | undefined>): Record<string, string> {

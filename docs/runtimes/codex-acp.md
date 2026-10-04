@@ -65,7 +65,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
 | `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
 | `modelEnforcement` | `"config-option"` | 经 `session/set_config_option` 改，不重启 |
-| `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start` |
+| `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start`（完成信号见「压缩完成信号」） |
 
 ## 库（`src/lib/acp/`）
 
@@ -145,4 +145,28 @@ bun run sandbox up --port <N> --static web/out
 bun scripts/sandbox.ts manager create acpx <沙箱里的目录> 测试 --runtime codex --transport acp --port <N>
 ```
 
-stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quota]` = 撞额度（结构化失败），`[stub:noreply]` = 这轮不调 reply（测补 reply）；起宿主时环境变量 `STUB_AUTH_REQUIRED=1` = 没登录（出登录卡）。
+stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quota]` = 撞额度（结构化失败），`[stub:noreply]` = 这轮不调 reply（测补 reply）；起宿主时环境变量 `STUB_AUTH_REQUIRED=1` = 没登录（出登录卡）。`/compact` 后面带 `[stub:compact-fail]` = 压缩失败，`[stub:compact-slow]` = 压缩等打断，`[stub:compact-dup]` = 完成信号连发两次；缺省压缩成功（形状见下节）。
+
+## 压缩完成信号（codex-compact-N2 核对）
+
+只读核对，没起 app-server、没登录、没连模型，也没读本机已装的适配器。2026-10-04 按 `lib/acp/resolve.ts` 的规则在临时目录取包：
+
+- **包**：`@agentclientprotocol/codex-acp` **2.1.1**（registry 元数据 `dist-tags.latest`；配本机记录的 `codex-cli 0.159.3`，`pickAdapterFor` 选中，范围 `^0.159.1`）。tarball `https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-2.1.1.tgz`，sha512 与元数据 `dist.integrity` 一致（`sha512-dppZxW3f…Uibu1qQ==`）。读的是包里的 `dist/index.js`（bundle，下面的名字是其中的源文件段）。
+- **协议**：`compaction_update` 与 `clientCapabilities.session.compaction` 在 ACP 官方 schema 源码（`agentclientprotocol/agent-client-protocol` `20361dd2`，`agent-client-protocol-schema/src/v1/client.rs`）里标着 **UNSTABLE**、feature `unstable_session_compaction`：「不属于正式规范，随时可能改」。
+
+| 问题 | 2.1.1 的实际行为（出处） |
+|------|------------------------|
+| `session/prompt("/compact")` 何时返回 | 压缩**结束后**才回。`AvailableCommands.tryHandleCommand` 的 `compact` 分支 await `CodexAcpClient.runCompact` → `CodexAppServerClient.runCompact`：发 `thread/compact/start` 后一直等到 `item/completed{contextCompaction}`、`thread/compacted`，或这一轮 `turn/completed`（非 inProgress）才 resolve。`/compact` 后面的文字被忽略（保留清单传不进去） |
+| 成功时的回包 | `{stopReason:"end_turn"}`（`CodexAgent.prompt` 的「Prompt handled by a command」分支） |
+| 完成的 `session/update` | 宿主声明了 `session.compaction` → `compaction_update{compactionId, status}`：开始 `in_progress`，结束 `completed`；同一 id 到终态后不再发（`CodexSessionCompactions.finish`）。没声明 → 只有标题「Compact conversation」的 `tool_call` / `tool_call_update completed`（AIR `_meta.jetbrains.air.contextCompaction`），旧版 `thread/compacted` 是一句文字或 notice |
+| 失败 | 声明了能力：`compaction_update{status:"failed", error}`（这一轮 `turn/completed` failed 或不再重试的 `error`）、被打断是 `cancelled`；回包是 JSON-RPC 错误或 AIR `sessionFailure`，打断是 `stopReason:"cancelled"`；连接断开 → 请求失败 |
+
+**宿主的接法**：`session.ts` 的 `CLIENT_CAPABILITIES` 声明 `session.compaction: {}`；`updates.ts` 只在 Codex 上认 `compaction_update`，只有 `completed` 才翻成 `compact_boundary`（同一 `compactionId` 只出一次，`in_progress` / `failed` 是进度句，`cancelled` 和未知状态不出东西）；`compactMetadata.trigger` 由宿主定：这一轮是宿主发的 `/compact` 就是 `manual`，否则 `auto`。Codex 的翻译器不认 `_meta.claudestra.compacted`，Pi 的不认 `compaction_update`，来源只看宿主按运行时认定的那一种。宿主收下 slash（`acp_call` 回 `ok:true`）、命令入队、压缩开始都**不是**完成。没有 token 数（`compaction_update` 不带），watcher 显示「📦 上下文已压缩」。
+
+**核实过的版本清单：仅 2.1.1。** 能力是 unstable 的，换版本要重核这一节；N4 的能力闸按这份清单放行。这不代表 Codex 已经有完整的 save-compact（还缺 N1/N3/N4/N5）。
+
+**空闲时的 `session/cancel`**：
+- 适配器回完 `session/prompt` 之后才到的 cancel：`CodexAgent.cancel` → `interruptSessionTurn` → `getInterruptibleTurnId`。此时 `currentTurnId` 已在 prompt 的 finally 里清空、`pendingTurnStarts` 已删，日志一句「no current turn」就**丢弃**，不记到下一轮。
+- 但「回包还在 stdio 里」的那个窗口（save-compact 方案 §2.4）：prompt 的 finally 里先 await 了几步（`waitForSessionNotifications`、文件变更报告、`dispose`）才清 `currentTurnId`，这期间到的 cancel 会对**已结束的那一轮**发 `turn/interrupt{threadId, turnId}`；报「no active turn」时，只要这个 session 又有 prompt 在跑（下一业务轮）就按 25/50/100/200/400 ms 重试同一个旧 turnId。app-server 会不会把旧 turnId 的 interrupt 落到当前在跑的轮上，取决于 app-server（Rust，不在这个包里），**没核实：unknown**。
+- 结论：**证明不了不会影响下一轮**。N1 的 `cancel_slot` 对在跑的槽只能回 `uncancellable`（「正在压缩，不能中途取消」）；排队中的槽撤掉不发任何东西，照常可用。本卡没有开启任何「运行中取消」的路径。
+

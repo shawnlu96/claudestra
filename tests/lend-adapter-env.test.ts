@@ -6,7 +6,7 @@ import { BUN_NO_AUTOLOAD } from "../src/lib/runtimes/clean-env.js";
 
 const BASE = { PATH: "/usr/bin", HOME: "/Users/b", GH_TOKEN: "gh-secret", BRIDGE_CONTROL_TOKEN: "ctl-secret", CLAUDESTRA_MCP_PROFILE: "full" };
 const spec = (clean: boolean): AdapterEnvSpec => ({
-  base: BASE, bunBin: "/b/bun", channelServer: "/r/src/channel-server.ts", mcpName: "claudestra", logsDir: "/l", clean,
+  base: BASE, bunBin: "/b/bun", channelServer: "/r/src/channel-server.ts", mcpName: "claudestra", logsDir: "/l", clean, workerRoot: "/w",
   channel: { channelId: "123", proxyUrl: "ws://127.0.0.1:9/?t=tok", agentName: clean ? "agent-lend-0123456789" : "agent-codex", sessionId: "thr-1" },
 });
 const server = (env: Record<string, string>) => JSON.parse(env.CODEX_CONFIG).mcp_servers.claudestra as { command: string; args: string[]; env_vars: string[] };
