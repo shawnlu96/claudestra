@@ -15,6 +15,7 @@ import type { Client } from "discord.js";
 import { parseConfigOptions, quotaCardChoices, type ConfigOption, type QuotaChoice } from "../lib/acp/config.js";
 import type { AcpFailure } from "../lib/acp/failures.js";
 import type { PermissionCard } from "../lib/acp/permissions.js";
+import { parseSlotReply, SLOT_OPS, type CancelSlotResult, type HostSlotState } from "../lib/acp/turn.js";
 import { apiJson } from "./api-respond.js";
 import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
@@ -39,8 +40,9 @@ const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }
 const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
-type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean };
-const calls = new Map<string, { channelId: string; ws: Socket; op: unknown; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> }>();
+type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean; slot?: HostSlotState; cancel?: CancelSlotResult };
+type Call = { channelId: string; ws: Socket; op: unknown; opId?: string; gen?: number; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> };
+const calls = new Map<string, Call>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
 const TURN_QUERY_MS = 5_000;
@@ -98,6 +100,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (!c || c.channelId !== channelId || c.ws !== ws) return;
       calls.delete(id);
       clearTimeout(c.timer);
+      if (msg.ok === true && c.opId !== undefined) return void c.resolve(slotResult(msg, c));
       c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, ...(msg.ok === true && typeof msg.busy === "boolean" ? { busy: msg.busy } : {}) } : {
         ok: false, error: String(msg.error ?? "宿主拒绝"),
         ...(c.op === "clear" && typeof msg.sessionId === "string" ? { uncertain: true as const, sessionId: msg.sessionId } : {}),
@@ -212,8 +215,28 @@ export function onAcpHostGone(channelId: string, ws: Socket): void {
 /** 经宿主调 session/set_config_option（设置页的模型 / 推理强度、额度卡的「切到 X」）：不重启 */
 export const acpSetConfig = (channelId: string, configId: string, value: string) => acpCall(channelId, { op: "set_config", configId, value });
 
-/** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts） */
-export const acpSlash = (channelId: string, text: string) => acpCall(channelId, { op: "slash", text });
+/**
+ * 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts）。
+ * 带 opId = 独占命令槽：回包的 slot 带宿主 hostId + 槽代次 gen，之后查 / 撤都带上它们（旧宿主、旧代次的槽一律 gone）。
+ */
+export const acpSlash = (channelId: string, text: string, opId?: string) => acpCall(channelId, { op: "slash", text, ...(opId === undefined ? {} : { opId }) });
+
+/** 编排器的一轮普通 prompt（保存交接用）：独占一轮，不和相邻入站拼 */
+export const acpOpTurn = (channelId: string, text: string, opId: string) => acpCall(channelId, { op: "op_turn", text, opId });
+
+type SlotRef = { hostId?: string; gen?: number };
+/** 槽状态；waitMs 有值 = 宿主等槽结束（或被撤）才回，结局 {opId, gen, outcome} 是宿主按这一槽的实际结局报的 */
+export const acpSlotStatus = (channelId: string, opId: string, ref: SlotRef = {}, waitMs?: number) =>
+  acpCall(channelId, { op: "slot_status", opId, ...ref, ...(waitMs ? { wait: true } : {}) }, waitMs);
+
+/** 按 op 撤槽：排着的删掉（revoked），在跑的 uncancellable，不认识 / 已结束 gone；宿主从不因此发 session/cancel */
+export const acpCancelSlot = (channelId: string, opId: string, ref: SlotRef = {}) => acpCall(channelId, { op: "cancel_slot", opId, ...ref });
+
+/** 槽回包只信形状、opId（及请求带的 gen）都对得上的；对不上当宿主答错，不当结局 */
+function slotResult(msg: Record<string, any>, c: Call): CallResult {
+  const r = parseSlotReply(msg, c.opId!, c.gen);
+  return r ? { ok: true, ...r } : { ok: false, error: "宿主回的槽信息和请求对不上" };
+}
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
 export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
@@ -228,7 +251,7 @@ export async function acpHostTurnBusy(channelId: string): Promise<boolean | null
   return r.ok && typeof r.busy === "boolean" ? r.busy : null;
 }
 
-function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<CallResult> {
+function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs: number = CALL_TIMEOUT_MS): Promise<CallResult> {
   const ws = extensionSocketOf(channelId);
   if (!ws) return Promise.resolve({ ok: false, error: "ACP 宿主不在线" });
   const id = `acpcall_${bridgeEpoch}_${++nextCall}`;
@@ -237,7 +260,8 @@ function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = C
       calls.delete(id);
       resolve({ ok: false, uncertain: true, error: "宿主未在期限内回应，结果未确认；请先查看当前会话，再决定是否重试" });
     }, timeoutMs);
-    calls.set(id, { channelId, ws, op: body.op, resolve, timer });
+    const slot = SLOT_OPS.has(String(body.op)) && typeof body.opId === "string" ? { opId: body.opId, ...(Number.isInteger(body.gen) ? { gen: body.gen as number } : {}) } : {};
+    calls.set(id, { channelId, ws, op: body.op, ...slot, resolve, timer });
     try {
       ws.send(JSON.stringify({ type: "acp_call", id, ...body }));
     } catch (e) {

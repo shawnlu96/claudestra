@@ -12,7 +12,7 @@ import { HostHeartbeat } from "./host-heartbeat.js";
 import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
-import { AcpTurnLoop, type StopReport } from "./turn.js";
+import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
 import { createAcpTranslator, type AcpTranslator } from "./updates.js";
 
 export interface HostConfig {
@@ -128,6 +128,7 @@ export class AcpHost {
       steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
+      onSlotEnd: (e) => deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`),
       log: deps.log,
     });
   }
@@ -366,7 +367,8 @@ export class AcpHost {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
     if (m.op === "clear") return void reply(await this.clearSession());
     if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
-    if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
+    const slot = acpSlotCall(this.loop, m, this.hostId); // slash / op_turn / slot_status / cancel_slot（turn.ts）
+    if (slot) return void slot.then(reply);
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);
       return void reply(ok ? { ok: true } : { ok: false, error: "这个权限请求已经不在等了（超时或适配器重起过）" });
