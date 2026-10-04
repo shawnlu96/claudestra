@@ -133,7 +133,8 @@ export interface PendingApiRequest {
   agentChannelId: string;
   agentName: string;
   threadId: string;
-  messageId?: string; waitUntil?: number; // messageId：带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）；waitUntil：同步等到几时
+  messageId?: string; waitUntil?: number; // messageId：reply_to / 作废回显的 inReplyTo 按它认领（lib/pending-reply-scope.ts claimApiReply）；waitUntil：同步等到几时
+  siblingThreadId?: string; // 它等着时 agent 的回复记到了同一调用方的另一条（那条的 threadId）：Stop 兜底回「没单独答复」的说明，不回空（lib/pending-reply-scope.ts claimApiReply）
   ts: number; acceptsFiles?: boolean; // 请求方（新版 peer）声明看得懂回复里的 files，reply 带附件时据此决定警不警告（bridge/api-reply-files.ts）
   /** wait 模式挂的 resolver（无 wait 则为空） */
   resolve?: (result: ApiReplyResult) => void;
@@ -145,15 +146,15 @@ export interface ApiReplyResult {
   files?: { name: string; url: string; media?: string; size?: number; sha256?: string }[]; // 对方 peer 按 lib/peer-reply-files.ts 解析、推给它的 agent
   threadId: string;
   agent: string;
-  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型 */
-  viaFallback?: boolean; apiError?: boolean; error?: string;
+  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型；siblingThreadId = 没单独答，reply 是 bridge 的说明 */
+  viaFallback?: boolean; apiError?: boolean; error?: string; siblingThreadId?: string;
 }
 
 export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
 /** threadId → 已完成结果（轮询兜底用，TTL 清理见 sweepApiState）。
  *  tokenId = 发起请求的 token——GET /threads 校验属主,peer token 发到外部实例后
- *  threadId 可枚举面变大,不能让它读别的 token 的结果(review 2026-07-19 #4) */
-export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string }>();
+ *  threadId 可枚举面变大,不能让它读别的 token 的结果(review 2026-07-19 #4)。messageId / agentChannelId = 答的是哪条请求（reply_to 据此认出已答过 / 写回空着的） */
+export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string; messageId?: string; agentChannelId?: string }>();
 /** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
 export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
 // 每 principal 每分钟配额与限流器在 api-auth.ts（唯一真值，429 文案从同一常量取）
@@ -177,7 +178,7 @@ export function sweepApiState(now = Date.now()): void {
     else if (fresh.length !== queue.length) pendingApiRequests.set(key, fresh);
   }
   for (const [tid, hit] of apiThreadResults.entries()) {
-    if (now - hit.ts > API_RESULT_TTL_MS) apiThreadResults.delete(tid);
+    if (now - hit.ts > (hit.result.reply?.trim() ? API_RESULT_TTL_MS : API_PENDING_TTL_MS)) apiThreadResults.delete(tid); // 空结果留 2 小时：peer 还在轮询等补答
   }
   if (apiFiles.size > 200) {
     // 附件登记只按容量截断（文件本身在 TMP_DIR，系统自己清）

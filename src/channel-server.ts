@@ -471,7 +471,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => INERT ? { tools: [] } 
 - Badge \`[[{.badge .success}deployed]]\` — status pill (tones: success|warning|error|info); plain text on Discord.
 Use inline buttons when ONE action belongs inside a sentence; for several non-exclusive choices use a components multiselect (never a row of single-choice buttons); for standalone option lists use components.`,
           },
-          reply_to: { type: "string", description: "Message ID to reply to (optional, for threading)" },
+          reply_to: { type: "string", description: "Message ID to reply to (optional). On api: chats it picks which waiting request this answers; default = the newest" },
           ask: REPLY_ASK_PROPERTY,
           components: {
             type: "array",
