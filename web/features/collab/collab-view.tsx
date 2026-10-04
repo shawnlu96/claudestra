@@ -36,7 +36,7 @@ import { edgeSel, memberSel, narrowPane, resolveSelection, type Selection } from
 import { MobileList } from "./v4/v4-mobile";
 import { PaneLayout } from "./v4/side-pane";
 import { Outline } from "./v4/v4-outline";
-import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamPage, WaitsPage } from "./v4/v4-props";
+import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
 import { TeamPanel } from "./team-panel";
 import { metricsOf, type Filter, type Metrics } from "./v4/v4-model";
 import s from "./collab.module.css";
@@ -203,7 +203,7 @@ export function CollabView({ project }: { project: string }) {
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null}
       action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} onClose={closeTask}
-      extra={<>{source.ops?.(openTask)}<CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
+      extra={<>{source.ops?.(openTask)}<TeamFactsSec task={o.tasks.find((t) => t.id === openTask)} tr={tr} /><CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
     || (resolved?.kind === "fold" && <FoldPage fold={resolved.fold} ov={o} onPick={pickTask} onClose={close} tr={tr} />)

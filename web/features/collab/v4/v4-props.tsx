@@ -4,7 +4,7 @@
  * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条，
  * 团队成员 = 他在本项目手上的卡（team-panel-cards.tsx）+ 本机的打开会话；手机上团队面板本身也用这里的外框整屏打开。
  */
-import type { HomeView, LedgerDepView, LedgerOverview, OwnerWait, Tr } from "../collab-model";
+import type { HomeView, LedgerDepView, LedgerOverview, LedgerTaskView, OwnerWait, Tr } from "../collab-model";
 import { useChatStoreApi } from "../../chat/chat-store";
 import { useChatNav } from "../../chat/components/nav-context";
 import { uiAgentName } from "@/lib/chat/agents";
@@ -15,6 +15,7 @@ import { Icon } from "../collab-icons";
 import s from "../collab.module.css";
 import type { CFold } from "./causal-model";
 import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
+import { looksLikeId } from "../team-source-adapter";
 import v from "./v4.module.css";
 
 export const hhmm = (ms: number) => new Date(ms).toLocaleString([], { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -87,9 +88,31 @@ export function Overview(props: {
           ))}
         </div>
       </Sec>
+      {ov.mirror && <MirrorSec m={ov.mirror} tr={tr} />}
       {view.pm.pm && <Sec title="PM"><div className={v.kv}>{view.pm.pm} · {tr("在管")} {view.pm.managing} · {tr("排队")} {view.pm.queued.length}</div></Sec>}
     </Shell>
   );
+}
+
+/**
+ * 团队总览：各 feature 执行镜像的新鲜度（过期 = 看到的可能不是现在的状态）。有过期的报过期数；全部有镜像且都新鲜才说最新；
+ * 有 feature 还没有镜像（没有证据）就是暂无，不凭缺值说最新。本机总览没有 mirror，不显示
+ */
+function MirrorSec({ m, tr }: { m: NonNullable<LedgerOverview["mirror"]>; tr: Tr }) {
+  return (
+    <Sec title={tr("镜像")}>
+      <div className={v.kv}>
+        {m.stale > 0 ? <span className={v.warn}>{tr("{n} 个 feature 主场镜像过期", { n: m.stale })}</span>
+          : m.none === 0 && m.fresh > 0 ? tr("主场镜像最新") : tr("暂无")}
+      </div>
+    </Sec>
+  );
+}
+
+/** 边的建立者 / 时间：团队数据没有边级元数据（null），不调 hhmm（0 会出 1970、null 出 Invalid Date），也不留空名字 */
+function edgeMeta(dep: LedgerDepView, tr: Tr): string {
+  if (!dep.createdBy || !dep.createdAt || !dep.updatedAt) return tr("建立者 / 时间未记录（团队数据没有边级元数据）");
+  return tr("{who} 建于 {t}，最后改于 {u}", { who: dep.createdBy, t: hhmm(dep.createdAt), u: hhmm(dep.updatedAt) });
 }
 
 function DepBody({ dep, ov, onPick, tr }: { dep: LedgerDepView; ov: LedgerOverview; onPick: (id: string) => void; tr: Tr }) {
@@ -102,7 +125,7 @@ function DepBody({ dep, ov, onPick, tr }: { dep: LedgerDepView; ov: LedgerOvervi
         {dep.fromCancelled && <div className={v.warn}>{tr("前置已取消：这条边永远到不了「已成立」，请 PM 删边或改指向")}</div>}
       </Sec>
       <Sec title={tr("判定依据")}>
-        <div className={v.muted}>{tr("{who} 建于 {t}，最后改于 {u}", { who: dep.createdBy, t: hhmm(dep.createdAt), u: hhmm(dep.updatedAt) })}</div>
+        <div className={v.muted}>{edgeMeta(dep, tr)}</div>
       </Sec>
       <Sec title={tr("两端")}>
         <TaskLink id={dep.from} ov={ov} onPick={onPick} />
@@ -162,6 +185,31 @@ export function CauseSec({ id, deps, onEdge, tr }: { id: string; deps: readonly 
       {incoming.map((d) => row(d, d.from))}
       {outgoing.length > 0 && <div className={v.muted}>{tr("谁在等它")}</div>}
       {outgoing.map((d) => row(d, d.to))}
+    </Sec>
+  );
+}
+
+/** head 只显示短 SHA（8 位，和步骤线 collab-step-line-model.ts 同口径）；不像 commit 的不显示原文 */
+const shortHead = (h: string | null) => (h && /^[0-9a-f]{7,64}$/i.test(h.trim()) ? h.trim().slice(0, 8) : null);
+
+/**
+ * 任务详情里团队卡多挂的一段：执行镜像带来的成员代号（不是本机 agent，不给打开会话）、执行实例（像 id 的不显示原文）、
+ * head（只显示短 SHA）、主场开着的阻塞提问数、镜像新鲜度。不知道的写「暂无」（镜像没有证据也是暂无，不说最新）；本机卡没有 team，整段不显示。
+ */
+export function TeamFactsSec({ task, tr }: { task: LedgerTaskView | undefined; tr: Tr }) {
+  const f = task?.team;
+  if (!f) return null;
+  const inst = f.executorInstanceId ? (looksLikeId(f.executorInstanceId) ? tr("主场实例") : f.executorInstanceId) : tr("暂无");
+  const rows: [string, React.ReactNode][] = [
+    ["成员代号", f.assigneeCode || tr("暂无")],
+    ["执行实例", inst],
+    ["head", shortHead(f.head) ?? tr("暂无")],
+    ["阻塞提问", f.blockingAsks],
+    ["镜像", f.mirror === "stale" ? <span className={v.warn}>{tr("主场镜像过期")}</span> : tr(f.mirror === "fresh" ? "主场镜像最新" : "暂无")],
+  ];
+  return (
+    <Sec title={tr("团队")}>
+      {rows.map(([k, val]) => <div key={k} className={v.kv} data-team-fact={k}>{tr(k)}{tr("：")}{val}</div>)}
     </Sec>
   );
 }

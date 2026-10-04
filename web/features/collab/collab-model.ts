@@ -68,6 +68,20 @@ export interface LedgerTaskView {
   stepLine?: unknown;
   /** 挡着它的前置任务（src/lib/ledger-deps.ts blockedBy）；老 bridge 没有 = 不挡 */
   blockedBy?: string[];
+  /** 团队数据才有（team-source-adapter.ts）；本机 bridge 不发 */
+  team?: TeamTaskFacts;
+}
+
+/**
+ * 团队执行镜像带过来的事实：成员代号、执行实例、head 都是中心给的原值（显示时再缩短 / 遮住像 id 的，v4-props.tsx TeamFactsSec），
+ * 不是本机 agent 名，不能拿去开会话；blockingAsks = 主场开着的阻塞提问数；mirror = 所属 feature 镜像的新鲜度（null = 还没有执行镜像）
+ */
+export interface TeamTaskFacts {
+  assigneeCode: string | null;
+  executorInstanceId: string | null;
+  head: string | null;
+  blockingAsks: number;
+  mirror: "stale" | "fresh" | null;
 }
 
 /** 依赖边（src/lib/ledger-deps.ts DepView）：effective = PM 定死的 state，没定就按前置阶段推导的 derived */
@@ -80,9 +94,10 @@ export interface LedgerDepView {
   derived: "waiting" | "active" | "done";
   effective: "waiting" | "active" | "done";
   fromCancelled?: boolean;
-  createdBy: string;
-  createdAt: number;
-  updatedAt: number;
+  /** 团队数据没有边级元数据：三项都是 null（不拿 feature 的修改人 / 时间冒充）；本机 bridge 照旧给值 */
+  createdBy: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
 }
 
 /** 这次总览里不知道的指标（不是 0）：本机 bridge 从不发 = 全都已知 */
@@ -101,6 +116,8 @@ export interface LedgerOverview {
   doneRest?: DoneRest;
   /** 按每次总览给；缺省 = 全部已知。团队数据没有完成时刻时 todayDone 在这里，updatedAt 不能当完成时刻 */
   unknownMetrics?: readonly UnknownMetric[];
+  /** 团队数据才有：各 feature 执行镜像的新鲜度计数（none = 还没有执行镜像）；本机 bridge 不发 */
+  mirror?: { stale: number; fresh: number; none: number };
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */
@@ -299,6 +316,14 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
   return "";
 }
 
+/** 团队卡多带的一句：主场镜像过期（数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
+export function teamNote(t: Pick<LedgerTaskView, "team">, tr: Tr = zh): string {
+  const bits: string[] = [];
+  if (t.team?.mirror === "stale") bits.push(tr("主场镜像过期"));
+  if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
+  return bits.join(" · ");
+}
+
 function toneOf(att: Attention): Tone {
   if (att === "problem") return "red";
   if (att === "stuck" || att === "owner" || att === "waiting") return "amber";
@@ -342,7 +367,7 @@ export function lineOf(
     dwellMs: dwell,
     dwellApprox: t.stageSinceApprox === true,
     stuck: att === "stuck",
-    reason: att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr),
+    reason: [att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr), teamNote(t, tr)].filter(Boolean).join(" · "),
     agent: bareAgent(t.agent),
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),

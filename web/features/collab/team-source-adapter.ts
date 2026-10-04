@@ -4,10 +4,15 @@
  * 加上没挂在节点上的执行镜像；依赖边 = 节点的 deps。
  * 标题一律卡号 + 标题：卡号取主场的卡号（sourceTaskId），不像卡号（UUID / 长十六进制）就用节点代号；
  * 中心没有的字段（事件、阶段时间线、审查、指标、执行者会话）不编，留给视图现有的「暂无」。
+ * 读口已经给的（P1-B）：成员代号、执行实例、head 原值和开着的阻塞提问数、镜像新鲜度 → team（collab-model.ts TeamTaskFacts）；
+ * agent 仍是 null——成员代号不是本机 agent 名，不能开会话 / 对它说。steps → stepLine（team-source-steps.ts）。
+ * 边没有建立者 / 时间：三项给 null，边页显示「未记录」，不拿 feature 的 updatedBy / updatedAt 冒充。
  */
 import type { FeatureDetail, FeatureList, TaskProjection } from "@/lib/api/shared-ledger";
-import type { LedgerDepView, LedgerOverview, LedgerTaskView, Stage } from "./collab-model";
+import type { LedgerDepView, LedgerOverview, LedgerTaskView, Stage, TeamTaskFacts } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
+import { stale } from "./shared/shared-model";
+import { teamStepLine } from "./team-source-steps";
 
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const HEX = /^[0-9a-f]{16,}$/i;
@@ -26,6 +31,12 @@ export function stageOf(raw: string): Stage {
 const SETTLED: ReadonlySet<Stage> = new Set(["done", "verified"]);
 
 const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s) ? s.trim() : null);
+
+/** 阻塞提问 = blocking 且还开着的；答完 / 过期 / 取消的不算 */
+export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.filter((a) => a.blocking && a.state === "open").length;
+
+type Mirror = TeamTaskFacts["mirror"];
+const mirrorOf = (f: FeatureList["features"][number], now: number): Mirror => (f.projection ? (stale(f, now) ? "stale" : "fresh") : null);
 
 interface Row { featureId: string; key: string | null; task: TaskProjection | null; title: string; deps: string[] }
 
@@ -67,15 +78,23 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
     const ids = rows.map((r, i) => unique(card(r.task?.sourceTaskId) ?? card(r.key) ?? `${f.title || "feature"} #${i + 1}`));
     const idOfKey = new Map(rows.flatMap((r, i) => (r.key ? [[r.key, ids[i]!] as const] : [])));
     const at = f.projection?.observedAt ?? f.updatedAt;
+    const mirror = mirrorOf(f, now);
     const views = rows.map((r, i): LedgerTaskView => {
       index.set(ids[i]!, { featureId: f.id, key: r.key, taskId: r.task?.taskId ?? null });
       const summary = r.task?.specSummary ?? "";
       const title = [r.title, summary].find((t) => t && !looksLikeId(t)) ?? ids[i]!;
-      return {
-        id: ids[i]!, itemId: f.id, title, kind: "code", stage: r.task ? stageOf(r.task.stage) : "spec", round: 0,
+      const stage = r.task ? stageOf(r.task.stage) : "spec";
+      const view: LedgerTaskView = {
+        id: ids[i]!, itemId: f.id, title, kind: "code", stage, round: 0,
         agent: null, pm: null, pr: r.task?.pr ? `#${r.task.pr}` : null, spec: summary || null,
         extra: summary && summary !== title ? { goal: summary } : {}, updatedAt: at, stageSince: null, metrics: {},
       };
+      if (!r.task) return view;
+      const line = teamStepLine(r.task.steps, stage);
+      if (line) view.stepLine = line;
+      const t = r.task;
+      view.team = { assigneeCode: t.assigneeCode, executorInstanceId: t.executorInstanceId, head: t.head, blockingAsks: blockingAsks(t), mirror };
+      return view;
     });
     rows.forEach((r, i) => {
       const to = views[i]!;
@@ -85,8 +104,9 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
         if (!from || !pre) continue;
         const state = SETTLED.has(pre.stage) ? "done" : pre.stage === "spec" ? "waiting" : "active";
         if (state !== "done") (to.blockedBy ??= []).push(from);
+        // 契约里没有边级元数据：建立者 / 时间不知道就是 null（feature 的 updatedBy / updatedAt 是改规划的人，不是建这条边的）
         deps.push({ from, to: to.id, kind: "blocks", when: "", state: null, derived: state, effective: state,
-          createdBy: f.updatedBy, createdAt: f.updatedAt, updatedAt: f.updatedAt });
+          createdBy: null, createdAt: null, updatedAt: null });
       }
     });
     tasks.push(...views);
@@ -96,11 +116,17 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
     meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } },
     items: list.features.map((f) => ({ id: f.id, title: f.title, oneLine: f.description })),
     tasks, deps,
+    mirror: {
+      stale: list.features.filter((f) => mirrorOf(f, now) === "stale").length,
+      fresh: list.features.filter((f) => mirrorOf(f, now) === "fresh").length,
+      none: list.features.filter((f) => mirrorOf(f, now) === null).length,
+    },
   };
   return { ov, index };
 }
 
 export function teamTaskDetail(team: TeamOverview, id: string, now: number): TaskDetail | null {
   const task = team.ov.tasks.find((t) => t.id === id);
-  return task ? { task, events: [], timeline: [], now } : null;
+  if (!task) return null;
+  return task.stepLine ? { task, events: [], timeline: [], stepLine: task.stepLine, now } : { task, events: [], timeline: [], now };
 }
