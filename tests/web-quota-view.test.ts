@@ -91,13 +91,36 @@ describe("文案与按钮", () => {
 });
 
 describe("重置卡截止说明", () => {
+  // expiryParts 走 fmtAt 的默认 now=Date.now()：钉在 T，不随跑测那天变；finally 无论断言成败都还原
+  const withNow = (now: number, fn: () => void) => {
+    const real = Date.now;
+    Date.now = () => now;
+    try {
+      fn();
+    } finally {
+      Date.now = real;
+    }
+  };
+
   test("Claude 的卡：剩几次（>1 才写）、到限额才能用；Codex 的 credit 只有到期", () => {
     const at = new Date(2026, 9, 4, 22, 28).getTime();
     const keys = (x: Parameters<typeof expiryParts>[0]) => expiryParts(x).map((p) => p.key);
-    expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
-    expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
-    expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
-    expect(keys({ at: null, left: 1, requiresLimit: true })).toEqual(["无截止日", "到限额才能用"]);
+    withNow(T, () => {
+      expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
+      expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
+      expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
+      expect(keys({ at: null, left: 1, requiresLimit: true })).toEqual(["无截止日", "到限额才能用"]);
+    });
+  });
+
+  test("截止时刻和现在同一天只写时分，跨日带月-日", () => {
+    const at = new Date(2026, 9, 4, 22, 28).getTime();
+    withNow(new Date(2026, 9, 4, 9, 0).getTime(), () => {
+      expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("22:28");
+    });
+    withNow(T, () => {
+      expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
+    });
   });
 });
 
