@@ -149,9 +149,12 @@ const MEASURE = `(() => {
       const t = [...n.childNodes].find((c) => c.nodeType === 3);
       const rg = document.createRange(); rg.selectNodeContents(t); const r = rg.getBoundingClientRect();
       const c = clipW(n, r);
-      const overlap = others.some((o) => { if (o === n) return false; const b = o.getBoundingClientRect(); return b.left < r.right - 0.5 && b.right > r.left + 0.5 && b.top < r.bottom - 0.5 && b.bottom > r.top + 0.5; });
+      const hit = (b) => b.left < r.right - 0.5 && b.right > r.left + 0.5 && b.top < r.bottom - 0.5 && b.bottom > r.top + 0.5;
+      const overlap = others.some((o) => o !== n && hit(o.getBoundingClientRect()));
       const hb = head.getBoundingClientRect();
-      labels.push({ feature: title.textContent, text: t.textContent, textW: r.width, visibleW: c.w, inHead: Math.max(0, Math.min(r.right, hb.right) - Math.max(r.left, hb.left)), clipped: c.w + 0.5 < r.width || n.scrollWidth > n.clientWidth + 0.5, overlap,
+      labels.push({ feature: title.textContent, text: t.textContent, textW: r.width, visibleW: c.w,
+        inHead: Math.max(0, Math.min(r.right, hb.right) - Math.max(r.left, hb.left)),
+        clipped: c.w + 0.5 < r.width || n.scrollWidth > n.clientWidth + 0.5, overlap,
         fontPx: parseFloat(getComputedStyle(n).fontSize) });
     }
     for (const b of row.tagName === "BUTTON" ? [] : row.querySelectorAll(":scope > button")) { const r = b.getBoundingClientRect(); targets.push({ label: b.textContent, w: r.width, h: r.height }); }
@@ -214,7 +217,7 @@ test.skipIf(!enabled)("new green: 390 / 320 × en / zh × light / dark keep ever
     // 展开和版本按钮还能点（真点击，不是 dispatch）
     await o.page.getByRole("button", { name: /^v12/ }).click();
     await o.page.getByRole("button", { name: /Known zero/ }).click();
-    expect(await o.page.evaluate("window.clicks")).toEqual(["v:many-unknown", "f:known-zero"]);
+    expect(await o.page.evaluate("window.clicks") as string[]).toEqual(["v:many-unknown", "f:known-zero"]);
     await o.page.context().close();
   }
 }, 120_000);
@@ -242,7 +245,10 @@ test.skipIf(!enabled)("the loopback guard really blocks: a non-loopback fetch an
   const o = await open("after", 390, "en", "dark");
   const r = await o.page.evaluate(`(async () => {
     const http = await fetch("https://example.com/x").then(() => "ok", () => "blocked");
-    const ws = await new Promise((res) => { const w = new WebSocket("wss://example.com/ws"); w.onopen = () => res("open"); w.onclose = w.onerror = () => res("blocked"); setTimeout(() => res("timeout"), 3000); });
+    const ws = await new Promise((res) => {
+      const w = new WebSocket("wss://example.com/ws");
+      w.onopen = () => res("open"); w.onclose = w.onerror = () => res("blocked"); setTimeout(() => res("timeout"), 3000);
+    });
     return { http, ws };
   })()`) as { http: string; ws: string };
   expect(r.http).toBe("blocked");
