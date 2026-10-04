@@ -1,8 +1,9 @@
 /**
  * i28-TV1 同屏对照（opt-in）：SHARED_LEDGER_SHOTS_DIR=<审查目录> bun test tests/web-shared-ledger-browser.test.ts
  * 同一个项目的本地协作视图和团队视图（同一个 CollabView，换数据源），1400 / 390 × 浅 / 深 共 8 张，拼成 compare.png；
- * 每张都过截图自动检查（tests/helpers/ui-shot-checks.ts）。数据缺省用生成器造的生产形状夹具；
- * TEAM_VIEW_SNAPSHOT=<仓库外的只读 JSON，形状同 TeamFixture> 换成本机台账导出的生产快照（不进 git）。
+ * 每张都过截图自动检查（tests/helpers/ui-shot-checks.ts）。数据缺省是 home-fixture-gen.ts 的一份本机台账：本地路由吐它，
+ * 团队路由吐 home-to-team-fixture.ts 从它推出的投影（不再用 teamDagBoard / sharedProductBoard 冒充本地，team-parity-C）。
+ * TEAM_VIEW_SNAPSHOT=<仓库外的只读 JSON，形状同 TeamFixture> 换成生产快照（不进 git）：快照里没有本机 DAG / 产品看板，只截团队一侧。
  * 另在团队视图里把团队操作点一遍：编辑规划 → 409 → 重读 → 逐条处理 → 提交；任务详情里的开卡 / 绑卡 / 阶段 / 审批。
  */
 import { expect, test } from "bun:test";
@@ -10,20 +11,23 @@ import { chromium, type Browser, type Page } from "playwright-core";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { generateTeamFixture, type TeamFixture } from "@/features/collab/shared/team-fixture-gen";
+import { generateHomeFixture, homeDagBoard, homeProductBoard, type HomeFixture } from "@/features/collab/shared/home-fixture-gen";
+import { homeToTeam } from "@/features/collab/shared/home-to-team-fixture";
 import type { FeatureDetail } from "@/lib/api/shared-ledger";
 import { teamOverview } from "@/features/collab/team-source-adapter";
-import { teamDagBoard } from "@/features/collab/team-source-dag";
-import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
 import { shotIssues, type ShotIssue } from "./helpers/ui-shot-checks";
 
 const out = process.env.SHARED_LEDGER_SHOTS_DIR;
 const snapshot = process.env.TEAM_VIEW_SNAPSHOT;
 
-function loadFixture(): TeamFixture {
-  return snapshot ? JSON.parse(readFileSync(snapshot, "utf8")) as TeamFixture : generateTeamFixture();
+/** home = 本地一侧的唯一数据源；生产快照只有团队一侧，home 为 null */
+function loadFixture(): { fx: TeamFixture; home: HomeFixture | null } {
+  if (snapshot) return { fx: JSON.parse(readFileSync(snapshot, "utf8")) as TeamFixture, home: null };
+  const home = generateHomeFixture(), team = homeToTeam(home);
+  return { fx: { team: home.team, project: home.project, now: home.now, list: team.list, details: team.details, local: home.overview }, home };
 }
 
-async function serve(fx: TeamFixture, bundle: string) {
+async function serve(fx: TeamFixture, bundle: string, home: HomeFixture | null = null) {
   const files = readdirSync(bundle);
   let details = new Map(fx.details.map((d) => [d.feature.id, d]));
   let conflictOnce = true, conflicts = 0, seq = fx.list.serverSeq;
@@ -39,13 +43,13 @@ async function serve(fx: TeamFixture, bundle: string) {
     if (path === "/__rearm") { conflictOnce = true; return json({ ok: true }); } // 每轮团队操作都要再撞一次 409
     if (path === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (path === `/api/v1/ledger/${fx.project}`) return json({ ok: true, ...fx.local });
-    if (path === `/api/v1/ledger/${fx.project}/dag`) return json(teamDagBoard(fx.project, fx.list,
-      new Map(fx.details.map(d => [d.feature.id, d])), teamOverview(fx.list, new Map(fx.details.map(d => [d.feature.id, d])), fx.now)));
-    if (path === `/api/v1/ledger/${fx.project}/product`) return json(sharedProductBoard(fx.list, fx.now, fx.local.tasks));
+    // 本地 DAG / 产品看板 / 任务详情只从本机台账出；没有本机数据（只喂团队的回归用例、生产快照）就 404，不拿团队模型冒充
+    if (path === `/api/v1/ledger/${fx.project}/dag`) return home ? json(homeDagBoard(home)) : json({ error: "no home ledger" }, 404);
+    if (path === `/api/v1/ledger/${fx.project}/product`) return home ? json(homeProductBoard(home)) : json({ error: "no home ledger" }, 404);
     const task = path.match(new RegExp(`^/api/v1/ledger/${fx.project}/tasks/(.+)$`));
     if (task) {
-      const t = fx.local.tasks.find((x) => x.id === decodeURIComponent(task[1]!));
-      return t ? json({ ok: true, task: t, events: [], timeline: [], now: fx.now }) : json({ error: "nf" }, 404);
+      const d = home?.details[decodeURIComponent(task[1]!)];
+      return d ? json({ ok: true, ...d }) : json({ error: "nf" }, 404);
     }
     if (path === "/api/v1/shared-ledger/features") return json({ ...fx.list, serverSeq: seq, features: [...details.values()].map((d) => d.feature) });
     const feature = path.match(/^\/api\/v1\/shared-ledger\/features\/(.+)$/);
@@ -121,13 +125,14 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
   const build = Bun.spawn([process.execPath, "build", "web/features/collab/shared/fixture-harness.tsx", "--target", "browser",
     "--outdir", bundle, "--tsconfig-override", "web/tsconfig.json"], { stdout: "pipe", stderr: "pipe" });
   if (await build.exited) throw new Error(await new Response(build.stderr).text());
-  const fx = loadFixture();
-  const server = await serve(fx, bundle);
+  const { fx, home } = loadFixture();
+  const server = await serve(fx, bundle, home);
   const browser: Browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const shots: { name: string; png: Buffer }[] = [];
   const issues: Record<string, ShotIssue[]> = {};
   try {
     for (const width of [1400, 390]) for (const theme of ["light", "dark"] as const) for (const side of ["local", "team"] as const) {
+      if (side === "local" && !home) continue; // 生产快照没有本机 DAG / 产品看板
       const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme: theme });
       const errors: string[] = [];
       page.on("pageerror", (e) => errors.push(e.message));
@@ -138,7 +143,9 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
       const bar = page.getByRole("progressbar", { name: firstFeature.title, exact: true });
       await bar.waitFor();
       const tasks = side === "local" ? fx.local.tasks : teamOverview(fx.list, new Map(fx.details.map(d => [d.feature.id, d])), fx.now).ov.tasks;
-      const completed = tasks.filter(t => t.itemId === firstFeature.id && (t.stage === "done" || t.stage === "verified")).length;
+      // 本地事项 id 是主场的，团队的是中心 UUID：按标题对上同一个 feature
+      const itemId = side === "local" ? fx.local.items.find(i => i.title === firstFeature.title)?.id : firstFeature.id;
+      const completed = tasks.filter(t => t.itemId === itemId && (t.stage === "done" || t.stage === "verified")).length;
       expect(Number(await bar.getAttribute("aria-valuenow"))).toBe(completed);
       const name = `${side}-${width}-${theme}`;
       const png = await page.screenshot({ path: resolve(out, `${name}.png`) });
