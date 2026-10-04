@@ -6,7 +6,7 @@
  * - codex-acp：只在宿主的 prompt / steer 期间变 active，不触发自发回合；叫停照旧发 session/cancel 通知，voided 为空。
  * 宿主（AcpHost）、会话、回合调度、Pi 适配器、pi-link 都是真的；pi 和 bridge 连接是内存里的假货。
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { AcpHost } from "../src/lib/acp/host.ts";
 import { piLinkOver, type PiProc } from "../src/lib/acp/pi-adapter/pi-link.ts";
 import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
@@ -260,5 +260,217 @@ describe("codex-acp：行为不变", () => {
     expect(c.tracked).toHaveLength(1);
     c.raw(c.status("systemError"));
     expect(await c.tracked[0]).toMatchObject({ kind: "failed" });
+  });
+});
+
+/**
+ * 独占命令槽（codex-compact N1）走生产接线：bridge 的 acp-link（acpSlash / acpSlotStatus / acpCancelSlot）→ 内存 ws →
+ * 真 AcpHost（acp_call）→ 真 AcpTurnLoop → 真 AcpSession → 假 codex-acp（只讲 JSON-RPC，session/prompt 由单测放行）。
+ * 等的都是具体事件（适配器收到某个请求、宿主某行日志），不靠 sleep。
+ */
+type Bridge = typeof import("../src/bridge/acp-link.ts");
+const SLOT_CH = "local-acp-slot";
+let bridgeSock: { send(d: string): void } | undefined;
+let bridge!: Bridge;
+
+function signals() {
+  const seen: string[] = [];
+  const waits: { pred: (e: string) => boolean; resolve: (e: string) => void }[] = [];
+  const push = (e: string) => {
+    seen.push(e);
+    for (const w of waits.filter((x) => x.pred(e))) waits.splice(waits.indexOf(w), 1), w.resolve(e);
+  };
+  const when = (pred: (e: string) => boolean) => new Promise<string>((resolve) => {
+    const hit = seen.find(pred);
+    if (hit !== undefined) resolve(hit);
+    else waits.push({ pred, resolve });
+  });
+  return { seen, push, when };
+}
+
+/** 假 codex-acp：自动答 initialize / resume / steering（injected），session/prompt 挂着等 end(text) */
+function fakeCodexWire(sig: ReturnType<typeof signals>) {
+  let onData: (c: string) => void = () => {};
+  const prompts = new Map<string, number>();
+  const send = (m: Rec) => queueMicrotask(() => onData(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n"));
+  const wire: RpcWire = {
+    write(line) {
+      const m = JSON.parse(line);
+      const text = m.params?.prompt?.[0]?.text;
+      sig.push(m.method === "session/prompt" || m.method === "_session/steering" ? `${m.method}:${text}` : String(m.method));
+      if (m.method === "initialize") send({ id: m.id, result: { agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } } });
+      else if (m.method === "session/resume") send({ id: m.id, result: {} });
+      else if (m.method === "_session/steering") send({ id: m.id, result: { outcome: "injected" } });
+      else if (m.method === "session/prompt") prompts.set(text, m.id);
+    },
+    onData: (cb) => void (onData = cb as typeof onData), onClose: () => {}, close: () => {},
+  };
+  const end = (text: string, stopReason = "end_turn") => send({ id: prompts.get(text)!, result: { stopReason } });
+  return { wire, end };
+}
+
+/** 起一个真宿主，接到 bridge 的 acp-link 上（当前登记的连接就是它）；返回事件流和操作 */
+async function slotHost() {
+  const sig = signals();
+  const codex = fakeCodexWire(sig);
+  let link!: { onRegistered(): void; onFrame(m: Rec): void };
+  const ready = Promise.withResolvers<void>();
+  const ws = { send: (d: string) => queueMicrotask(() => link.onFrame(JSON.parse(d))) };
+  bridgeSock = ws;
+  const host = new AcpHost(
+    {
+      channelId: SLOT_CH, agentName: "codex-slot", sessionId: "cx", cwd: "/tmp", mcpName: "claudestra", agentCmd: ["fake"],
+      env: { base: {}, bunBin: "bun", channelServer: "x", mcpName: "claudestra", logsDir: "/tmp" }, timings: { retryMs: [5], drainMs: 1_000 },
+    },
+    {
+      spawn: () => ({ wire: codex.wire, stop() {}, exited: new Promise(() => {}) }),
+      makeLink: (d) => ((link = d as typeof link), {
+        connect: () => d.onRegistered(), request: async () => true, close() {}, up: true,
+        send: (f: Rec) => (f.type === "acp_call_result" && queueMicrotask(() => void bridge.onAcpFrame({ ...f, channelId: SLOT_CH }, ws, {} as any)), true),
+      }) as any,
+      startProxy: () => ({ url: "ws://127.0.0.1:1/?t=x", onBridgeFrame: () => false, failInFlight() {}, close() {} }) as any,
+      postHook: async (b) => (sig.push(`hook:${b.event}`), {}),
+      markReady: async () => ready.resolve(),
+      rotateSession: async () => ({ ok: true }),
+      log: (m) => sig.push(`log:${m}`),
+    },
+  );
+  host.start();
+  await ready.promise;
+  const inbound = (content: string, message_id: string) => link.onFrame({ type: "message", content, meta: { chat_id: "api:owner", message_id } });
+  const abort = (id: string) => link.onFrame({ type: "abort", id });
+  return { host, sig, codex, inbound, abort, cancels: () => sig.seen.filter((e) => e === "session/cancel").length };
+}
+
+const isPrompt = (needle: string) => (e: string) => e.startsWith("session/prompt:") && e.includes(needle);
+
+describe("独占命令槽：宿主 + bridge 接线（codex-compact N1）", () => {
+  beforeAll(async () => {
+    bridge = await import("../src/bridge/acp-link.ts");
+    const { setExtensionSocket } = await import("../src/bridge/pi-abort.ts");
+    setExtensionSocket((ch) => (ch === SLOT_CH ? bridgeSock : undefined), {
+      deliver: async () => undefined, ownerId: () => "", books: () => ({}) as any, hold: () => { throw new Error("slot fixture must not echo"); },
+    });
+  });
+
+  test("复现测试：/compact 槽在跑时入站排在命令之后、不发 _session/steering；在跑的槽 uncancellable、不发 session/cancel", async () => {
+    const h = await slotHost();
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-1");
+    expect(sub).toMatchObject({ ok: true, slot: { state: "running", opId: "op-1", gen: 1 } });
+    const hostId = sub.slot!.hostId;
+    await h.sig.when((e) => e === "session/prompt:/compact");
+    h.inbound("压缩时发来的话", "m-1");
+    await h.sig.when((e) => e.startsWith("log:") && e.includes("m-1"));
+    expect(h.sig.seen.find((e) => e.includes("m-1"))).toContain("排队");
+    expect(h.sig.seen.filter((e) => e.startsWith("_session/steering"))).toEqual([]);
+    const ended = bridge.acpSlotStatus(SLOT_CH, "op-1", { hostId, gen: 1 }, 5_000);
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-1", { hostId, gen: 1 })).toEqual({ ok: true, cancel: "uncancellable" });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-1", { hostId })).toMatchObject({ ok: true, slot: { state: "running", gen: 1 } });
+    h.codex.end("/compact");
+    await h.sig.when(isPrompt("压缩时发来的话"));
+    expect(await ended).toEqual({ ok: true, slot: { state: "ended", opId: "op-1", gen: 1, outcome: "done", hostId } });
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-1", { hostId })).toEqual({ ok: true, cancel: "gone" });
+    h.codex.end(h.sig.seen.find(isPrompt("压缩时发来的话"))!.slice("session/prompt:".length));
+    await h.sig.when((e) => e === "log:槽 op-1#1 结束：done");
+    expect(h.cancels()).toBe(0);
+    h.host.stop();
+  });
+
+  test("业务轮在跑时排队的槽：cancel_slot → revoked，适配器既没收到这一槽的 prompt，也没收到 session/cancel；业务轮正常收尾", async () => {
+    const h = await slotHost();
+    h.inbound("业务", "m-biz");
+    await h.sig.when(isPrompt("业务"));
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-q");
+    expect(sub.slot).toMatchObject({ state: "queued", gen: 1 });
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-q", { hostId: sub.slot!.hostId, gen: 1 })).toEqual({ ok: true, cancel: "revoked" });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-q")).toMatchObject({ slot: { state: "ended", outcome: "revoked" } });
+    h.codex.end(h.sig.seen.find(isPrompt("业务"))!.slice("session/prompt:".length));
+    await h.sig.when((e) => e === "hook:Stop");
+    await bridge.acpOpTurn(SLOT_CH, "哨兵", "op-sentinel"); // 独占槽不 steer：它开出来时，被撤的槽要是还在就会先跑
+    await h.sig.when((e) => e === "session/prompt:哨兵");
+    expect(h.sig.seen.filter((e) => e.startsWith("session/prompt:")).map((e) => e.includes("业务") ? "业务" : e.slice(15))).toEqual(["业务", "哨兵"]);
+    expect(h.cancels()).toBe(0);
+    h.host.stop();
+  });
+
+  test("停止按钮照旧只停当前业务轮；排着的槽不被它撤，也不扩大成撤槽（之后照常跑完）", async () => {
+    const h = await slotHost();
+    h.inbound("业务", "m-biz");
+    await h.sig.when(isPrompt("业务"));
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-a");
+    h.abort("a1");
+    await h.sig.when((e) => e === "session/cancel");
+    h.codex.end(h.sig.seen.find(isPrompt("业务"))!.slice("session/prompt:".length), "cancelled");
+    await h.sig.when((e) => e === "session/prompt:/compact");
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-a", { hostId: sub.slot!.hostId })).toMatchObject({ slot: { state: "running", gen: 1 } });
+    h.codex.end("/compact");
+    await h.sig.when((e) => e === "log:槽 op-a#1 结束：done");
+    expect(h.cancels()).toBe(1);
+    h.host.stop();
+  });
+
+  test("op 槽独占一轮、不和相邻入站拼；同 opId 重复提交被拒；带错 gen 的查询回 gone", async () => {
+    const h = await slotHost();
+    h.inbound("前", "m-1");
+    await h.sig.when(isPrompt("前"));
+    const sub = await bridge.acpOpTurn(SLOT_CH, "保存交接", "op-s");
+    expect(sub.slot).toMatchObject({ state: "queued", gen: 1 });
+    expect(await bridge.acpOpTurn(SLOT_CH, "保存交接", "op-s")).toMatchObject({ ok: false });
+    h.codex.end(h.sig.seen.find(isPrompt("前"))!.slice("session/prompt:".length));
+    await h.sig.when((e) => e === "session/prompt:保存交接");
+    h.inbound("后", "m-2");
+    await h.sig.when((e) => e.startsWith("log:") && e.includes("m-2"));
+    expect(h.sig.seen.find((e) => e.startsWith("log:") && e.includes("m-2"))).toContain("排队");
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-s", { gen: 99 })).toMatchObject({ ok: true, slot: { state: "gone" } });
+    h.codex.end("保存交接");
+    await h.sig.when(isPrompt("后"));
+    expect(h.sig.seen.filter((e) => e.startsWith("session/prompt:")).map((e) => e.includes("保存交接") ? "op" : e.includes("前") ? "前" : "后")).toEqual(["前", "op", "后"]);
+    h.host.stop();
+  });
+
+  test("宿主重起：新宿主不认旧 hostId 的槽（gone），不重放命令", async () => {
+    const old = await slotHost();
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-r");
+    await old.sig.when((e) => e === "session/prompt:/compact");
+    old.host.stop();
+    const h = await slotHost();
+    const ref = { hostId: sub.slot!.hostId, gen: 1 };
+    expect(sub.slot).toMatchObject({ state: "running", gen: 1 });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-r", ref)).toMatchObject({ ok: true, slot: { state: "gone" } });
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-r", ref)).toEqual({ ok: true, cancel: "gone" });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-r")).toMatchObject({ ok: true, slot: { state: "gone" } });
+    expect(h.sig.seen.filter((e) => e.startsWith("session/prompt:"))).toEqual([]);
+    h.host.stop();
+  });
+});
+
+describe("独占命令槽：bridge 只认自己发出的调用的回包（codex-compact N1）", () => {
+  test("别的连接发的、opId / gen 对不上的、形状不对的回包都不当结局", async () => {
+    const sent: Rec[] = [];
+    const ws = { send: (d: string) => void sent.push(JSON.parse(d)) };
+    bridgeSock = ws;
+    const stranger = { send: () => {} };
+    const ask = (ref: { gen?: number } = {}) => {
+      const p = bridge.acpSlotStatus(SLOT_CH, "op-x", ref, 5_000);
+      return { p, id: sent.at(-1)!.id as string };
+    };
+    const a = ask({ gen: 3 });
+    expect(sent.at(-1)).toMatchObject({ type: "acp_call", op: "slot_status", opId: "op-x", gen: 3, wait: true });
+    const forged = { type: "acp_call_result", channelId: SLOT_CH, id: a.id, ok: true, slot: { state: "ended", opId: "op-x", gen: 3, outcome: "done", hostId: "h" } };
+    await bridge.onAcpFrame(forged, stranger, {} as any);
+    await bridge.onAcpFrame({ ...forged, slot: { ...forged.slot, gen: 2 } }, ws, {} as any);
+    expect(await a.p).toEqual({ ok: false, error: "宿主回的槽信息和请求对不上" });
+    const b = ask();
+    await bridge.onAcpFrame({ ...forged, id: b.id, slot: { ...forged.slot, opId: "op-other" } }, ws, {} as any);
+    expect(await b.p).toMatchObject({ ok: false });
+    const c = ask();
+    await bridge.onAcpFrame({ ...forged, id: c.id, slot: { ...forged.slot, outcome: "compacted" } }, ws, {} as any);
+    expect(await c.p).toMatchObject({ ok: false });
+    const d = ask();
+    await bridge.onAcpFrame({ ...forged, id: d.id }, ws, {} as any);
+    expect(await d.p).toEqual({ ok: true, slot: { state: "ended", opId: "op-x", gen: 3, outcome: "done", hostId: "h" } });
+    const e = bridge.acpCancelSlot(SLOT_CH, "op-x");
+    await bridge.onAcpFrame({ type: "acp_call_result", channelId: SLOT_CH, id: sent.at(-1)!.id, ok: true, cancel: "cancelled", opId: "op-x" }, ws, {} as any);
+    expect(await e).toMatchObject({ ok: false });
   });
 });
