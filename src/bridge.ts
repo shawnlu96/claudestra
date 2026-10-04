@@ -170,7 +170,7 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
+import { claimApiReply, dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { sessionGone } from "./lib/route-session.js";
 import { onCodexTypeInFailed } from "./bridge/codex-menu-hold.js";
@@ -564,7 +564,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -692,11 +692,12 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   if (missing) return { envelope: env, outcome: { kind: "error", error: new Error(missing) } };
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
-  const queue = pendingApiRequests.get(key);
-  const pending = queue ? takeApiPending(queue, env.meta.inReplyTo) : undefined; // 作废回显只对它自己那条请求
-  if (queue && queue.length === 0) pendingApiRequests.delete(key);
-
-  const threadId = pending?.threadId || env.meta.threadId;
+  const queue = pendingApiRequests.get(key) ?? [];
+  const claim = claimApiReply(queue, apiThreadResults, { ...to, channelId: fromChannelId, inReplyTo: env.meta.inReplyTo, replyTo: env.meta.replyTo,
+    unseen: new Set(heldFromOf(fromChannelId)?.map((i) => i.messageId)) });
+  if (!queue.length) pendingApiRequests.delete(key);
+  if (claim.error) return { envelope: env, outcome: { kind: "error", error: new Error(claim.error) } };
+  const pending = claim.taken, threadId = pending?.threadId || claim.threadId || env.meta.threadId;
   const agentName = pending?.agentName ||
     (env.from.kind === "local" ? env.from.agentName : undefined) ||
     agentNameForChannel(fromChannelId) ||
@@ -716,7 +717,8 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     threadId,
     agent: agentName,
   };
-  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: pending?.tokenId ?? (env.to.kind === "api" ? env.to.tokenId : undefined) });
+  const req = pending ?? apiThreadResults.get(threadId); // 答的是哪条请求（写回旧 thread 时沿用它的）
+  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: to.tokenId, messageId: req?.messageId, agentChannelId: req?.agentChannelId });
   pending?.resolve?.(result);
 
   emitEvent({
@@ -729,7 +731,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
   mirrorApiExchange(to, fromChannelId, `[🌐 API→${to.name}] ${env.content}`).catch(() => {});
 
-  return { envelope: env, outcome: { kind: "sent", ...(staged.warning ? { warning: staged.warning } : {}) } };
+  return { envelope: env, outcome: { kind: "sent", warning: [claim.warning, staged.warning].filter(Boolean).join("；") || undefined } };
 }
 
 /** R2：API 对话镜像到 agent 的 Discord 频道（principal.mirror === false 时不发） */
@@ -2532,6 +2534,7 @@ async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | 
       const file = await readPrincipals();
       const p = findByTokenId(file, parsed.id);
       if (p?.name) name = p.name;
+      if (p?.peer) return { kind: "api", tokenId: parsed.id, name, peer: p.peer }; // peer 收不到没在等的回复：deliverToApi 据此报错而不是假装送到
     } catch { /* 名字仅展示用，查不到就用 tokenId */ }
     return { kind: "api", tokenId: parsed.id, name };
   }
@@ -2824,11 +2827,11 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);
             for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
-              apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
+              apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId, messageId: p.messageId, agentChannelId: p.agentChannelId });
               p.resolve?.(result);
-              const data = { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) };
+              const { data, label } = apiFallbackEvent(p, result);
               emitEvent({ agent: p.agentName, chatId: `api:${p.tokenId}`, type: "chat_message", data });
-              console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${result.apiError ? `API 错误 ${result.error}` : result.reply ? result.reply.length + " chars" : "no-text"}）`);
+              console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${label}）`);
             }
 
             // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），

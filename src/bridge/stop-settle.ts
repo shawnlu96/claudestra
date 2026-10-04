@@ -233,11 +233,26 @@ async function onApiErrorTurn(d: CallerSettleDeps, t: StopTurn): Promise<void> {
 }
 
 /** 挂着的 API 请求（bridge 的 pendingApiRequests 条目；这里不 import api-routes，按形状收） */
-export interface ApiWaiter { agentChannelId: string; agentName: string; threadId: string; tokenId: string; messageId?: string }
-export interface ApiWaiterResult { reply: string | null; threadId: string; agent: string; viaFallback: true; apiError?: boolean; error?: string }
+export interface ApiWaiter { agentChannelId: string; agentName: string; threadId: string; tokenId: string; messageId?: string; siblingThreadId?: string }
+/** siblingThreadId：它等着时 agent 的回复记到了同一调用方的另一条（lib/pending-reply-scope.ts claimApiReply），reply 是 bridge 写的说明、不是 agent 的话 */
+export interface ApiWaiterResult { reply: string | null; threadId: string; agent: string; viaFallback: true; apiError?: boolean; error?: string; siblingThreadId?: string }
+
+/** 回给「没单独答复」的那条：明说不是空答。不能回 reply:null——peer 把空回复读成「对方回合结束但没有文本」，以为 agent 没理它 */
+const notSeparatelyAnswered = (agent: string, sibling: string): string =>
+  `[ℹ️ bridge 兜底] ${agent} 本回合没有单独答复这条请求：同一回合它回复了你的另一条请求（thread ${sibling}），可能已在那条回复里一并作答。`;
+
+/** Stop 兜底结掉一条 API 请求时的 chat_message(out) 负载和日志里的结局 */
+export function apiFallbackEvent(p: ApiWaiter, r: ApiWaiterResult): { data: Record<string, unknown>; label: string } {
+  // 上面那句是写给轮询 / 等待方的：事件里不放进 text，网页会把它接在 agent 那条回复后面，像是 agent 说的
+  const text = r.siblingThreadId ? "" : r.reply || "";
+  const data = { direction: "out", from: p.agentName, text, threadId: p.threadId, api: true, viaFallback: true,
+    ...(r.apiError ? { apiError: true } : {}), ...(r.siblingThreadId ? { siblingThreadId: r.siblingThreadId } : {}) };
+  const label = r.apiError ? `API 错误 ${r.error}` : r.siblingThreadId ? `没单独答复，回复记在 ${r.siblingThreadId}` : r.reply ? `${r.reply.length} chars` : "no-text";
+  return { data, label };
+}
 
 /**
- * cid 这一轮收尾时结掉它名下的 API 请求（wait 调用方不必干等超时）：正常结束 → drain 文字（没有 = reply:null）；
+ * cid 这一轮收尾时结掉它名下的 API 请求（wait 调用方不必干等超时）：正常结束 → drain 文字（没有 = reply:null，回复记到了同一调用方别的请求上 = 那句说明）；
  * 以 API 错误结束 → reply:null + apiError、error = 错误类型。不能挂着等下一轮：之后随便哪一轮（比如 owner 在 Discord 上聊的）
  * 都会被当成答复发给那个 token，重试的请求还会错位；Bun 对一个字节都没写的 HTTP 请求约 10 秒就掐断。返回结掉的请求。
  * 留在队里不结的：Pi 叫停那次 Stop 里停字自己的等待（stopWait，留给停字那一轮答）；消息还押着、没送到 cid 手上的（held）——
@@ -262,7 +277,8 @@ export function takeApiWaiters<W extends ApiWaiter>(
     if (!queue.length || queue[0].agentChannelId !== t.cid) continue;
     for (const w of apiQueueToSettle(queues, key, skip, atStop)) {
       const base = { threadId: w.threadId, agent: w.agentName, viaFallback: true as const };
-      out.push({ waiter: w, result: apiErr ? { ...base, reply: null, apiError: true, error: t.drain.error?.error || t.event } : { ...base, reply: t.drain.text || null } });
+      const sibling = !t.drain.text && w.siblingThreadId ? { reply: notSeparatelyAnswered(w.agentName, w.siblingThreadId), siblingThreadId: w.siblingThreadId } : undefined;
+      out.push({ waiter: w, result: apiErr ? { ...base, reply: null, apiError: true, error: t.drain.error?.error || t.event } : { ...base, reply: t.drain.text || null, ...sibling } });
     }
   }
   return out;

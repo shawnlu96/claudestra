@@ -430,7 +430,7 @@ export default function claudestraChannel(pi: PiExtensionApi): void {
           type: "string",
           description: "Message text to send. Markdown supported. Inline widgets also work (buttons [[{#id .primary}label]], copy chips [[{.copy}cmd]], agent chips [[{.agent}name]], badges).",
         },
-        reply_to: { type: "string", description: "Message ID to reply to (optional, for threading)" },
+        reply_to: { type: "string", description: "Message ID to reply to (optional). On api: chats it picks which waiting request this answers; default = the newest" },
         components: {
           type: "array",
           description: "Optional UI rows: {type:'buttons',buttons:[{id,label,style,emoji}]} | {type:'select',id,placeholder,options:[{label,value}]} | {type:'multiselect',id,options,min,max,submitLabel}. Clicks come back as [button:id] / [select:id:value].",

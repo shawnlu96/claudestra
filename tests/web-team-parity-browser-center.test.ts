@@ -67,7 +67,7 @@ function materialize(db: Database, home: HomeFixture): Record<string, string> {
       principal: OWNER, via: "web_card", at: v2!.meta.createdAt, owner: true });
     if (r.row.ask && !approveDag(db, { actor: PM, now: v2!.meta.createdAt }, { id }).row.applied) throw new Error(`DAG v2 of ${f.id} not applied`);
   }
-  for (const d of home.overview.deps ?? []) addDep(db, { actor: PM, now: d.createdAt }, { from: d.from, to: d.to, when: d.when as "verified" });
+  for (const d of home.overview.deps ?? []) addDep(db, { actor: PM, now: d.createdAt ?? undefined }, { from: d.from, to: d.to, when: d.when as "verified" });
   return local;
 }
 
