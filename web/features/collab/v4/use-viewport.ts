@@ -7,6 +7,8 @@
 import { useEffect, useRef, useState } from "react";
 import { fitAllView, fitsAll, MAX_K, MIN_K, offscreen, panView, reconcileView, VIEW_PAD, type Dir, type Focus, type View, type ViewCanvas, type ViewState } from "./canvas-view";
 
+/** 按下后移过这么多 px 才算拖（之内松手 = 点击） */
+const DRAG_SLOP = 4;
 const INITIAL: ViewState = { view: { x: VIEW_PAD, y: VIEW_PAD, k: 1 }, placed: false, centered: 0 };
 
 /** 画布视口的宽高，没量到之前是 0 */
@@ -25,7 +27,8 @@ export function usePort() {
 
 /** 点空白 = onBackground */
 export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, focus: Focus | null, onBackground: () => void) {
-  const drag = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
+  const drag = useRef<{ id: number; x: number; y: number; vx: number; vy: number; moved: boolean; onButton: boolean } | null>(null);
+  const suppress = useRef(false);
   const [st, setSt] = useState<ViewState>(INITIAL);
   const [glide, setGlide] = useState(false);
   const [bump, setBump] = useState(false);
@@ -55,22 +58,40 @@ export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, 
       return { k, x: px - ((px - v.x) * k) / v.k, y: py - ((py - v.y) * k) / v.k };
     });
   };
+  // 拖拽：只认主键（触摸 / 笔也报 0），右键 / 中键不平移。按在按钮上（节点卡的文字就在按钮里）也能拖，所以先不抓指针，
+  // 移过 DRAG_SLOP 才算拖、才 setPointerCapture；没移过就松手照常是那个按钮的 click / 点空白。拖过之后跟着来的 click 吞掉，
+  // 免得松手时误点节点。画布内不选字靠 v4.module.css .canvas 的 user-select（mousedown 的默认动作就是开始选字）。
   const onDown = (e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest("button")) return;
-    drag.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    suppress.current = false;
+    if (e.button !== 0) return;
+    const onButton = !!(e.target as HTMLElement).closest("button");
+    drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false, onButton };
   };
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current;
-    if (!d) return;
-    d.moved = true;
+    if (!d || d.id !== e.pointerId) return;
+    if (e.pointerType === "mouse" && !(e.buttons & 1)) { drag.current = null; return; } // 在画布外松的键（还没抓指针时）
+    if (!d.moved) {
+      if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < DRAG_SLOP) return;
+      d.moved = true;
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    }
     setView((v) => ({ ...v, x: d.vx + e.clientX - d.x, y: d.vy + e.clientY - d.y }));
   };
-  const onUp = () => {
-    if (drag.current && !drag.current.moved) onBackground();
+  const onUp = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
     drag.current = null;
+    if (d.moved) suppress.current = true;
+    else if (!d.onButton && e.type === "pointerup") onBackground();
+  };
+  const onClickCapture = (e: React.MouseEvent) => {
+    if (!suppress.current) return;
+    suppress.current = false;
+    e.stopPropagation();
+    e.preventDefault();
   };
 
-  const handlers = { onWheel, onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp };
+  const handlers = { onWheel, onPointerDown: onDown, onPointerMove: onMove, onPointerUp: onUp, onPointerCancel: onUp, onClickCapture };
   return { view, glide, bump, fitAll, pan, off, handlers };
 }
