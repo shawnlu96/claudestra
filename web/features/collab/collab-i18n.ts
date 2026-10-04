@@ -19,6 +19,8 @@ const COLLAB_WORDS: Record<string, string> = {
   "节点": "nodes",
   "已暂停": "Paused",
   "谁在干活": "Who is working",
+  // 团队源拿不到的指标 / 待你处理（「暂无」+ 原因 title）；不是「0」也不是本机「没人在等」的「—」
+  "暂无": "Unknown",
   "没取到，正在重试": "Could not load, retrying",
   // 拼句用的标点与日期词：英文用半角；today / yesterday 在时间前面，一律小写
   "：": ": ",
