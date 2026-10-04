@@ -9,6 +9,7 @@
  * - 退出：C-c 给宿主（它收尾关掉适配器，app-server 跟着走），回到 shell。
  * 选用见 runtimes/index.ts managedFor(runtime, transport)。docs/runtimes/codex-acp.md；tests/codex-acp-adapter.test.ts。
  */
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { channelInstructions } from "../channel-instructions.js";
 import { shellEscape } from "../claude-launch.js";
@@ -22,7 +23,7 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { acpAgentCommand, adapterEnv, spawnAdapter } from "../acp/adapter-proc.js";
 import { ACP_AGENT_ENV, sandboxAcpHome } from "../acp/stub.js";
 import { AcpSession } from "../acp/session.js";
-import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName } from "./clean-env.js";
+import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, makeWorkerRoot } from "./clean-env.js";
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
@@ -77,9 +78,11 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   const developerInstructions = spec.mode === "fork" ? undefined : codexDeveloperInstructions({
     agentName: spec.agentName, purpose: spec.purpose, projectContext: spec.projectContext, channelRules: channelInstructions(deps.repoRoot),
   });
+  const clean = isLendWorkerName(spec.agentName);
+  const workerRoot = clean ? makeWorkerRoot() : undefined; // 引导轮的 codex 同样不拿生产状态目录（clean-env.ts workerPrivateDirs），finally 里删
   const env = adapterEnv({
     base: process.env, bunBin: deps.bunBin, channelServer: join(deps.repoRoot, "src/channel-server.ts"), mcpName: mcpName(),
-    codexPath, logsDir: acpLogDir("bootstrap"), developerInstructions, clean: isLendWorkerName(spec.agentName),
+    codexPath, logsDir: acpLogDir("bootstrap"), developerInstructions, clean, workerRoot,
   });
   const logs: string[] = [];
   const proc = spawnAdapter(agent.cmd, env, spec.cwd, (m) => logs.push(m));
@@ -99,6 +102,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   } finally {
     clearTimeout(timer);
     proc.stop();
+    if (workerRoot) rmSync(workerRoot, { recursive: true, force: true });
   }
 }
 

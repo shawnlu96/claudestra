@@ -7,6 +7,9 @@ import { parseLendRequest } from "./lend-wire.js";
 import type { OrderWire } from "./order-wire.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
+import { shellEscape } from "./claude-launch.js";
+import { RUNTIME_DIR, STATE_DIR } from "./paths.js";
+import { BUN_NO_AUTOLOAD } from "./runtimes/clean-env.js";
 
 export function arbiterSubmit(db: Database, row: LendRow, input: SubmitInput, now: number): SubmitOutcome | null {
   const order = row.wire?.order as unknown as OrderWire | undefined;
@@ -34,9 +37,17 @@ export function arbiterSubmit(db: Database, row: LendRow, input: SubmitInput, no
     : { ok: false, error: "arbitration already has a different conclusion or is cancelled" };
 }
 
+/**
+ * worker 的交付命令。worker 本体的状态 / 运行目录是专属空目录（runtimes/clean-env.ts workerPrivateDirs），而交付要读写生产的 journal /
+ * registry、核 tmux 窗口，所以只在这一条命令里显式带上生产目录；去掉它们，交付会报「本机没有出借 journal」。
+ */
+export const lendSubmitCmd = (orderId: string): string =>
+  `env CLAUDESTRA_STATE_DIR=${shellEscape(STATE_DIR)} CLAUDESTRA_RUNTIME_DIR=${shellEscape(RUNTIME_DIR)} ${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ` +
+  `${SRC_DIR}/manager.ts lend submit ${orderId}`;
+
 export function arbiterFooter(row: LendRow, ordinary: () => string): string {
   return (row.wire?.order as unknown as OrderWire | undefined)?.convergence?.kind === "arbitration"
-    ? `独立新会话仲裁，只读，不提交。报告写当前clone普通文件。回写：${resolveBunPath()} ${SRC_DIR}/manager.ts lend submit ${row.orderId}` +
+    ? `独立新会话仲裁，只读，不提交。报告写当前clone普通文件。回写：${lendSubmitCmd(row.orderId)}` +
       " --verdict upheld|overturned --report report.md（只裁单上finding，不用submit_verdict）" : ordinary();
 }
 
