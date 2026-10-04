@@ -15,8 +15,14 @@ export interface FollowOpts {
   onEvent: (e: BridgeEvent) => void;
 }
 
+/** 这个源拿不到、对应 hook 不发请求、界面显示「暂无」或隐藏的数据（源级、静态）；本机源不声明 = 全都有 */
+export type CollabUnavailable = "lastSeen" | "workBoard" | "presence" | "ownerWaits" | "teamPanel";
+/** 只在主场能看的原文 / 操作（源级、静态）；本卡只声明，界面上的「仅主场可见」由后续节点消费 */
+export type CollabHomeOnly = "events.text" | "review.text" | "sessions" | "say" | "spec.full" | "replay";
+
 export interface CollabSource {
-  unknownMetrics?: boolean;
+  unavailable?: ReadonlySet<CollabUnavailable>;
+  homeOnly?: ReadonlySet<CollabHomeOnly>;
   dag?: {
     board: typeof fetchDagBoard;
     feature: typeof fetchDagFeature;

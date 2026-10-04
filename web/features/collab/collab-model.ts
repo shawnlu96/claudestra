@@ -85,6 +85,9 @@ export interface LedgerDepView {
   updatedAt: number;
 }
 
+/** 这次总览里不知道的指标（不是 0）：本机 bridge 从不发 = 全都已知 */
+export type UnknownMetric = "todayDone" | "reviewRounds" | "fixed" | "reviewWait";
+
 export interface LedgerOverview {
   exists: boolean;
   now: number;
@@ -96,6 +99,8 @@ export interface LedgerOverview {
   /** 已完成卡只带窗口时（i28-V1p）更早的从这里翻，null = 没有更早的；窗口外的计数在 doneRest。老 bridge 没有 = tasks 是全量 */
   doneCursor?: string | null;
   doneRest?: DoneRest;
+  /** 按每次总览给；缺省 = 全部已知。团队数据没有完成时刻时 todayDone 在这里，updatedAt 不能当完成时刻 */
+  unknownMetrics?: readonly UnknownMetric[];
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */
@@ -374,7 +379,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       stuck: lines.filter((l) => l.attention === "stuck").length,
       owner: lines.filter((l) => l.attention === "owner").length,
     },
-    todayDone: ov.tasks
+    todayDone: ov.unknownMetrics?.includes("todayDone") ? [] : ov.tasks
       .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics?.endTs ?? t.updatedAt) >= midnight)
       .sort((a, b) => (a.metrics?.endTs ?? a.updatedAt) - (b.metrics?.endTs ?? b.updatedAt))
       .map((t) => t.id),

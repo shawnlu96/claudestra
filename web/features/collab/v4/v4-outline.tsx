@@ -4,6 +4,8 @@ import type { LedgerOverview, LineView, OwnerWait, Tr } from "../collab-model";
 import { DoneMoreButton, useDonePages } from "../collab-done";
 import { FILTER_LABEL, FILTERS, filterCount, outlineOf, type Filter } from "./v4-model";
 import v from "./v4.module.css";
+import { useLang } from "@/lib/i18n";
+import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 
 export function Outline(props: {
   project: string;
@@ -12,6 +14,8 @@ export function Outline(props: {
   filter: Filter;
   onFilter: (f: Filter) => void;
   waits: readonly OwnerWait[];
+  /** 这个源不知道待你处理（团队键对不上本机 asks）：显示「暂无」，不显示 0 */
+  waitsUnknown?: boolean;
   onWaits: () => void;
   selected: string | null;
   onPick: (id: string) => void;
@@ -19,12 +23,14 @@ export function Outline(props: {
 }) {
   const { ov, lines, filter, tr } = props;
   const done = useDonePages(props.project, ov);
+  const homeTr = sharedLedgerTr(useLang());
   // 「已完成」把翻到的更早的卡并进各事项组，底部「更多」接着翻（collab-done.tsx）
   const groups = outlineOf(filter === "done" ? { ...ov, tasks: [...ov.tasks, ...done.pages] } : ov, filter);
   return (
     <nav className={v.outline} aria-label={tr("大纲")}>
-      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} onClick={props.onWaits}>
-        {tr("待你处理")} <b>{props.waits.length}</b>
+      <button type="button" className={`${v.waits} ${props.waits.length ? v.hasWaits : ""}`} title={props.waitsUnknown ? homeTr("V1 仅共享规划，执行操作仍在主场") : undefined}
+        onClick={props.onWaits}>
+        {tr("待你处理")} <b>{props.waitsUnknown ? tr("暂无") : props.waits.length}</b>
       </button>
       <div className={v.filters} role="tablist">
         {FILTERS.map((f) => (

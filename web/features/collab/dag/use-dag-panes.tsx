@@ -9,6 +9,8 @@ import type { Tr } from "../collab-model";
 import { actionLine, type ActionMap } from "../collab-action";
 import type { Selection } from "../v4/v4-selection";
 import v from "../v4/v4.module.css";
+import { useLang } from "@/lib/i18n";
+import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 import { ProductPanes } from "../product/product-panes";
 import { useProductBoard } from "../product/use-product-board";
 import { DagCanvasView } from "./dag-canvas";
@@ -40,10 +42,13 @@ export interface DagPanesArgs {
   pickTask: (id: string) => void;
   close: () => void;
   tr: Tr;
+  /** 这个源没有「谁在干活」（团队视图）：不挂 WorkBoardView（不请求本机 /ledger/:p/work），标签里只放主场提示 */
+  noWorkBoard?: boolean;
 }
 
 export function useDagPanes(a: DagPanesArgs) {
   const { tr } = a;
+  const homeTr = sharedLedgerTr(useLang());
   const load = useDagBoard(a.project, a.rev);
   const product = useProductBoard(a.project, a.rev);
   const board = load.status === "ok" ? load.board : null;
@@ -96,9 +101,9 @@ export function useDagPanes(a: DagPanesArgs) {
     }} />
   )) || (!a.narrow && diffPage) || null;
 
-  const progress = (
-    <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
-  );
+  const progress = a.noWorkBoard
+    ? <div className={v.center} role="status"><p className={v.none}>{homeTr("V1 仅共享规划，执行操作仍在主场")}</p></div>
+    : <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (
     <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}

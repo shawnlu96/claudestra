@@ -133,8 +133,13 @@ test("团队 DAG 与产品读取复用共享快照：绑定用卡号，版本不
   expect(history.snapshot).toBeNull();
   const product = await src.product!("team");
   expect(product.features.map(f => f.version)).toEqual(fx.list.features.map(f => f.version));
-  expect(src.unknownMetrics).toBe(true);
-  expect(localCollabSource("proj").unknownMetrics).toBeUndefined();
+  expect([...src.unavailable!].sort()).toEqual(["lastSeen", "ownerWaits", "presence", "teamPanel", "workBoard"]);
+  expect([...src.homeOnly!].sort()).toEqual(["events.text", "replay", "review.text", "say", "sessions", "spec.full"]);
+  expect((await src.overview(new AbortController().signal)).unknownMetrics).toEqual(["todayDone", "reviewRounds", "fixed", "reviewWait"]);
+  const local = localCollabSource("proj");
+  expect(local.unavailable).toBeUndefined();
+  expect(local.homeOnly).toBeUndefined();
+  expect((await local.overview(new AbortController().signal)).unknownMetrics).toBeUndefined();
 });
 
 test("团队导航 project 编解码保留身份与规划主场，兼容旧缓存", async () => {
