@@ -44,10 +44,11 @@ export interface Transport {
   command(command: Command, signal: AbortSignal): Promise<Result>;
   receipt(id: string, signal: AbortSignal): Promise<Receipt>;
 }
+export const sharedLedgerProjectHeaders = (project?: string) => project ? { "X-Shared-Ledger-Project": project } : undefined;
 /** `project` (center project id) selects the bridge binding when this machine joined several projects. */
 export function sharedLedgerTransport(machine?: MachineRef, project?: string): Transport {
   const root = "/shared-ledger";
-  const headers = project ? { "X-Shared-Ledger-Project": project } : undefined;
+  const headers = sharedLedgerProjectHeaders(project);
   return {
     list: signal => api(`${root}/features`, { signal, headers }, machine),
     detail: (id, signal) => api(`${root}/features/${encodeURIComponent(id)}`, { signal, headers }, machine),
