@@ -81,6 +81,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "打开会话仅主场": "Open session at home only",
   "回放仅主场": "Replay at home only",
   "阶段未知": "Stage unknown",
+  "受阻前阶段未知": "Stage before blocked unknown",
   "推进阶段（目标阶段仅主场）": "Stage changed (target at home only)",
   "审查（结论仅主场）": "Review (verdict at home only)",
   "线上验证（结果仅主场）": "Live verification (result at home only)",

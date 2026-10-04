@@ -167,17 +167,22 @@ async function until(ok: () => boolean, what: string, read: () => string) {
   throw new Error(`timeout waiting for ${what}: ${read().slice(0, 600)}`);
 }
 
+/** 只有类型 / 时间的历史之后首次出现合法 blocked（审查 r1 blocked-unknown）：受阻前阶段没有证据 */
+function blockedUnknownDetail(home: LedgerOverview): TaskDetail {
+  return { ...redactedDetail(home), events: [ev("verify", { redacted: true }, "", "system"), ev("stage", { to: "blocked" }, "", "system")] };
+}
+
 /** 脱敏喂法：测试内注入的源（P1-F 以后的数据形状），overview 同一份本机台账，task 给脱敏事件，homeOnly 全集 */
-function redactedSource(): CollabSource {
+function redactedSource(detail: (home: LedgerOverview) => TaskDetail = redactedDetail): CollabSource {
   return {
     homeOnly: HOME_ONLY,
     overview: async () => home,
-    task: async () => redactedDetail(home),
+    task: async () => detail(home),
     follow: ({ signal }) => new Promise<void>((r) => signal.addEventListener("abort", () => r())),
   };
 }
 
-type Side = "local" | "team" | "redacted";
+type Side = "local" | "team" | "redacted" | "blocked";
 /** 上一个用例断言失败时没走到 unmount：下一次挂载前先收掉，别让旧面板留在 body 里串到下一个用例 */
 let leftover: (() => Promise<void>) | null = null;
 async function mount(side: Side, width: number) {
@@ -194,7 +199,8 @@ async function mount(side: Side, width: number) {
   const h = React.createElement as (...a: unknown[]) => unknown;
   const view = h(ui.CollabView, { project });
   const collab = side === "team" ? h(ui.TeamSource, { identity: IDENTITY }, view)
-    : side === "redacted" ? h(ui.Provider, { value: redactedSource() }, view) : view;
+    : side === "redacted" ? h(ui.Provider, { value: redactedSource() }, view)
+    : side === "blocked" ? h(ui.Provider, { value: redactedSource(blockedUnknownDetail) }, view) : view;
   await React.act(async () => root.render(h(ui.ChatStoreProvider, null, h(ui.SeedAgents), collab) as never));
   // 手机详情 portal 到 body：一律在 body 里找详情面板
   const panel = () => {
@@ -299,6 +305,24 @@ for (const width of [1200, 390]) {
     await v.unmount();
   });
 }
+
+// 阶段条不高亮开发由 web-collab-replay-evidence「未知历史后的 blocked 不应凭空高亮开发」断言（happy-dom 下 CSS module 类名为空，DOM 分不出当前段）
+test("复现测试:回放里未知历史后的 blocked 提示受阻前阶段未知", async () => {
+  const v = await mount("blocked", 1200);
+  const open = v.buttons().find((b) => (b.textContent ?? "").includes("回放这条任务"));
+  expect(open).toBeDefined();
+  await React.act(async () => open!.click());
+  await tick(30);
+  const unknown = () => v.panel()!.querySelector("[data-stage-unknown]")?.getAttribute("data-stage-unknown") ?? null;
+  expect(unknown()).toBe("stage");
+  const next = v.buttons().find((b) => b.getAttribute("aria-label") === "下一步");
+  await React.act(async () => next!.click());
+  await tick(30);
+  expect(unknown()).toBe("before");
+  expect(v.text()).toContain("受阻前阶段未知");
+  expect(v.text()).not.toContain("undefined");
+  await v.unmount();
+});
 
 test("复现测试:英文模式团队占位走协作视图本地词表，不回落中文", async () => {
   i18n.setLang("en");

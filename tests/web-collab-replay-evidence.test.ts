@@ -5,7 +5,7 @@
  * 旧红新绿：main 上三条 redacted 事件的帧全是 spec、hasReplay 为 true；修完全为 null、不可回放。完整本机事件帧序列不变。
  */
 import { describe, expect, test } from "bun:test";
-import { hasReplay, hasStageEvidence, replayFrames, segmentsAt } from "../web/features/collab/collab-replay";
+import { hasReplay, hasStageEvidence, replayFrames, segmentsAt, stageUnknownAt } from "../web/features/collab/collab-replay";
 import type { LedgerEventView } from "../web/features/collab/collab-model";
 
 const MIN = 60_000;
@@ -86,5 +86,33 @@ describe("合法阶段证据出现后才开始有阶段", () => {
       ["线上验证通过", "build"],
     ]);
     expect(hasReplay(events)).toBe(true);
+  });
+});
+
+describe("受阻：受阻前阶段没有证据就不套开发默认值（审查 r1 blocked-unknown）", () => {
+  test("复现测试:未知历史后的 blocked 不应凭空高亮开发", () => {
+    const events = [red("verify"), ev("stage", { to: "blocked" })];
+    expect(hasReplay(events)).toBe(true);
+    const frames = replayFrames(events);
+    expect(frames.map((f) => [f.stage, f.stageBefore])).toEqual([[null, null], ["blocked", null]]);
+    expect(segmentsAt(frames[1]!, []).map((s) => s.state)).toEqual(Array(7).fill("future"));
+    expect(frames.map(stageUnknownAt)).toEqual(["stage", "before"]);
+  });
+
+  test("防回归:已知 review → blocked 仍落在审查列，不提示未知", () => {
+    const events = [ev("task", { op: "new", patch: { stage: "review" } }), ev("stage", { from: "review", to: "blocked" })];
+    const frames = replayFrames(events);
+    expect(frames.map((f) => [f.stage, f.stageBefore])).toEqual([["review", null], ["blocked", "review"]]);
+    const segs = segmentsAt(frames[1]!, []);
+    expect(segs.filter((s) => s.state === "current").map((s) => s.label)).toEqual(["审查"]);
+    expect(segs.filter((s) => s.state === "past").map((s) => s.label)).toEqual(["规格", "复述", "开发"]);
+    expect(frames.map(stageUnknownAt)).toEqual([null, null]);
+  });
+
+  test("防回归:未知 → blocked → blocked 仍未知；之后合法阶段证据出现即恢复", () => {
+    const events = [red("review"), ev("stage", { to: "blocked" }), ev("stage", { from: "blocked", to: "blocked" }), ev("stage", { from: "blocked", to: "build" })];
+    const frames = replayFrames(events);
+    expect(frames.map(stageUnknownAt)).toEqual(["stage", "before", "before", null]);
+    expect(segmentsAt(frames[3]!, []).filter((s) => s.state === "current").map((s) => s.label)).toEqual(["开发"]);
   });
 });

@@ -16,7 +16,7 @@ export interface ReplayFrame {
   text: string;
   /** 这一帧之后任务所处的阶段；null = 还没有阶段证据（脱敏 / 缺字段的团队数据），播放器画成「阶段未知」 */
   stage: Stage | null;
-  /** stage 为 blocked 时受阻前的阶段（阶段条落列用） */
+  /** stage 为 blocked 时受阻前的阶段（阶段条落列用）；blocked 而这里为 null = 受阻前阶段没有证据（stageUnknownAt 为 "before"） */
   stageBefore: Stage | null;
   approx: boolean;
 }
@@ -82,9 +82,22 @@ export function timelineAt(timeline: readonly StageEntryView[], ts: number): Sta
   return timeline.filter((e) => e.from <= ts).map((e) => ({ ...e, to: Math.min(e.to, ts) }));
 }
 
-/** 某一帧的阶段条：当前段按帧的阶段，各段用时按截到这一刻的时间线 */
+/**
+ * 这一帧哪部分阶段没有证据：「stage」= 整个阶段未知；「before」= 已知受阻、但受阻前的阶段没有证据
+ * （团队只给类型 / 时间的历史之后首次出现 blocked）；null = 都有证据。播放器按它出提示。
+ */
+export function stageUnknownAt(frame: ReplayFrame): "stage" | "before" | null {
+  if (frame.stage === null) return "stage";
+  return frame.stage === "blocked" && frame.stageBefore === null ? "before" : null;
+}
+
+/**
+ * 某一帧的阶段条：当前段按帧的阶段，各段用时按截到这一刻的时间线。
+ * 受阻前阶段未知时不套 stageSegments 的「受阻落开发」默认值（那是本机任务字段缺省的语义，回放里没有证据），画成没有当前段。
+ */
 export function segmentsAt(frame: ReplayFrame, timeline: readonly StageEntryView[]): Segment[] {
-  return stageSegments({ task: frame, timeline: timelineAt(timeline, frame.ts) });
+  const task = stageUnknownAt(frame) === "before" ? { stage: null, stageBefore: null } : frame;
+  return stageSegments({ task, timeline: timelineAt(timeline, frame.ts) });
 }
 
 /** 播放头的下一步：到末帧就停在末帧（返回 null = 该停了） */
