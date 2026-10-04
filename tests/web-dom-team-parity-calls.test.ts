@@ -12,13 +12,17 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { setAppConfigForTest } from "../web/lib/app-config";
 import type { FeatureDetail, FeatureList } from "../web/lib/api/shared-ledger";
 import type { LedgerOverview, LedgerTaskView } from "../web/features/collab/collab-model";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
-interface El { textContent: string | null; title: string; getAttribute(n: string): string | null; querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El>; click(): void; remove(): void }
+interface El {
+  textContent: string | null; title: string; getAttribute(n: string): string | null;
+  querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El>; click(): void; remove(): void;
+}
 interface Doc { createElement(tag: string): El; body: El & { appendChild(c: El): void } }
 interface Win { happyDOM: { setViewport(v: { width: number; height: number }): void } }
 
@@ -103,6 +107,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   globalThis.fetch = realFetch;
+  setAppConfigForTest(null); // 模块级缓存：别把夹具的 app-config 留给后面的测试文件
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   await GlobalRegistrator.unregister();
 });
