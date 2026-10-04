@@ -3,6 +3,8 @@
  * A 两边 present；B 读口已给 → 团队应 present；C/D 没读口 / 契约没有 → 团队诚实地 absent 或「暂无」(unknown)；
  * E 权限不同 → home_only；F 假数据 / 误调 → 团队应 unknown / absent。本机夹具是全量的，本机一律按 present / absent 写死。
  * gap = 现在 main 上已知的偏差（团队实测值 + 负责修它的节点）：照实输出为 known_gap，不把期望改成现状。
+ * team-parity-Cf1：P1-A 合并后真实 Chromium 1200/390 × 浅/深四场景实测这 9 行都已命中期望（指标「暂无」、谁在干活「执行操作仍在主场」、
+ * 本机接口 0 次请求），删掉 P1-A 的 gap；期望值和本机真值一个没动，其余节点的 gap 照旧。
  * 规则：后续节点合并后只能删掉对应 gap、或把 team 期望往 present 方向改（absent/unknown/home_only → present），不准删行、不准放宽本机期望。
  * §3 每一行都在表里：没有检测入口的写 limit（原因照实，结果是 not_run），其余每行至少一个场景真测到；实测里出现表外区块判 unlisted。
  */
@@ -25,15 +27,15 @@ export interface MatrixRow {
 
 /** 「…误调」行的 present = 发出了那条本机请求（看请求记录，不看界面） */
 export const MATRIX: readonly MatrixRow[] = [
-  { section: "在场 agent", ref: "M1", view: "home", cls: "F", local: "present", team: "unknown", gap: { team: "present", node: "P1-A" } },
+  { section: "在场 agent", ref: "M1", view: "home", cls: "F", local: "present", team: "unknown" },
   { section: "进行中", ref: "M2", view: "home", cls: "A", local: "present", team: "present" },
-  { section: "今日完成", ref: "M3", view: "home", cls: "F", local: "present", team: "unknown", gap: { team: "present", node: "P1-A" } },
+  { section: "今日完成", ref: "M3", view: "home", cls: "F", local: "present", team: "unknown" },
   { section: "审查轮次", ref: "M4", view: "home", cls: "D", local: "present", team: "unknown" },
   { section: "P0/P1 修掉", ref: "M4", view: "home", cls: "D", local: "present", team: "unknown" },
-  { section: "平均等复核", ref: "M5", view: "home", cls: "D", local: "present", team: "unknown", gap: { team: "absent", node: "P1-A" } },
-  { section: "待你处理", ref: "W1", view: "home", cls: "F", local: "present", team: "unknown", gap: { team: "present", node: "P1-A" } },
+  { section: "平均等复核", ref: "M5", view: "home", cls: "D", local: "present", team: "unknown" },
+  { section: "待你处理", ref: "W1", view: "home", cls: "F", local: "present", team: "unknown" },
   { section: "上次以来", ref: "W2", view: "home", cls: "C", local: "present", team: "absent" },
-  { section: "上次以来·本机接口误调", ref: "W2", view: "home", cls: "F", local: "present", team: "absent", gap: { team: "present", node: "P1-A" } },
+  { section: "上次以来·本机接口误调", ref: "W2", view: "home", cls: "F", local: "present", team: "absent" },
   { section: "产品 DAG 卡片", ref: "G1", view: "home", cls: "A", local: "present", team: "present" },
   { section: "标题", ref: "T1", view: "task", cls: "A", local: "present", team: "present" },
   { section: "现在·停留时长", ref: "T2", view: "task", cls: "D", local: "present", team: "absent" },
@@ -49,10 +51,10 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "子 DAG 节点", ref: "G2", view: "versions", cls: "A", local: "present", team: "present" },
   { section: "版本历史", ref: "G5", view: "versions", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
   { section: "两版对比", ref: "G8", view: "diff", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
-  { section: "谁在干活", ref: "W3", view: "work", cls: "F", local: "present", team: "home_only", gap: { team: "absent", node: "P1-A" } },
-  { section: "谁在干活·本机接口误调", ref: "W3", view: "work", cls: "F", local: "present", team: "absent", gap: { team: "present", node: "P1-A" } },
-  { section: "团队成员卡（本机 peers）", ref: "W4", view: "team", cls: "F", local: "present", team: "absent", gap: { team: "present", node: "P1-A" } },
-  { section: "团队标签·本机接口误调", ref: "W4", view: "team", cls: "F", local: "present", team: "absent", gap: { team: "present", node: "P1-A" } },
+  { section: "谁在干活", ref: "W3", view: "work", cls: "F", local: "present", team: "home_only" },
+  { section: "谁在干活·本机接口误调", ref: "W3", view: "work", cls: "F", local: "present", team: "absent" },
+  { section: "团队成员卡（本机 peers）", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
+  { section: "团队标签·本机接口误调", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
   { section: "团队规划", ref: "T13", view: "team", cls: "E", local: "absent", team: "present" },
   // ---- §3 其余各行（r1 补齐）：present 的口径见 tests/web-team-parity-browser.test.ts 对应检测器，值要和本机真值对上才算 present ----
   { section: "节点阶段（大纲行）", ref: "G3", view: "versions", cls: "A", local: "present", team: "present" },

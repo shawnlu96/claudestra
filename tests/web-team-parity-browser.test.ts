@@ -171,6 +171,37 @@ async function observeFeaturePage(page: Page, home: HomeFixture, narrow: boolean
     "轮次（大纲行）": row(ROUND_CARD).includes(`第 ${round} 轮`) ? "present" : "absent" };
 }
 
+/**
+ * 谁在干活：摘要行「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图里中区只放
+ * 「V1 仅共享规划，执行操作仍在主场」状态提示（dag/use-dag-panes.tsx noWorkBoard）= home_only。只认 role=status 里的这句，
+ * 页面别处（团队操作区块）的同一句不算；提示去掉又没有在干活的卡 = absent。
+ */
+async function observeWork(page: Page): Promise<TeamState> {
+  const body = await page.locator("body").innerText();
+  if (/在干活\s*[1-9]/.test(body)) return "present";
+  const hint = await page.getByRole("status").filter({ hasText: "执行操作仍在主场" }).count();
+  return hint || /仅主场/.test(body) ? "home_only" : "absent";
+}
+
+/** §5.1 P1-A 验收线列的本机接口：团队视图里这些请求必须是 0 次 */
+const TEAM_FORBIDDEN = [/\/me\/last-seen\//, /\/ledger\/shared-ledger:[^?]*\/work/, /\/team\/activity\?project=shared-ledger:/, /\/peers\/contacts/, /\/team\/quota/];
+const forbidden = (calls: readonly string[]) => calls.filter((c) => TEAM_FORBIDDEN.some((re) => re.test(c)));
+
+/** 误调：看请求记录（本地这几条是正当请求，团队带团队键 / 本机 peers 就是误调） */
+function misCalls(calls: readonly string[], side: "local" | "team", project: string): Observed {
+  const hit = (re: RegExp) => (calls.some((c) => re.test(c)) ? "present" : "absent") as TeamState;
+  const key = side === "team" ? "shared-ledger:" : project;
+  return {
+    "上次以来·本机接口误调": hit(new RegExp(`/me/last-seen/${key.replace(/[{}]/g, "")}`)),
+    "谁在干活·本机接口误调": hit(new RegExp(`/ledger/${key}[^?]*/work`)),
+    "团队标签·本机接口误调": side === "team" ? hit(/\/team\/activity\?project=shared-ledger:|\/peers\/contacts|\/team\/quota/) : hit(/\/peers\/contacts/),
+  };
+}
+
+/** G6：每个版本行都有提出人和「月/日 时:分」才算 present（正则不因 locale 放宽） */
+const versionMeta = (vrows: readonly string[], noHistory: boolean): TeamState =>
+  vrows.length ? (vrows.every((t) => /pm-a/.test(t) && /\d+\/\d+ \d+:\d+/.test(t)) ? "present" : "absent") : noHistory ? "unknown" : "absent";
+
 async function metric(page: Page, label: string): Promise<TeamState> {
   const el = page.getByText(label, { exact: true }).first();
   if (!(await el.count())) return "absent";
@@ -204,9 +235,12 @@ async function openTask(page: Page, home: HomeFixture, narrow: boolean) {
  * 每个页面都从这里开：BrowserContext 级的 HTTP 与 WebSocket 路由在建页、首次导航之前装好，非回环服务器本源的一律 abort / close 并记账。
  * 调用方断言 external 为空；tests 里的 sentinel 用例证明拦截真的生效（不同源的第二个回环服务器收不到请求）。
  */
-async function guardedPage(browser: Browser, url: string, opts: { width?: number; theme?: "light" | "dark" } = {}) {
+async function guardedPage(browser: Browser, url: string, opts: { width?: number; theme?: "light" | "dark"; locale?: string } = {}) {
   const origin = new URL(url).origin, wsOrigin = origin.replace(/^http/, "ws");
-  const ctx = await browser.newContext({ viewport: { width: opts.width ?? 1200, height: 900 }, colorScheme: opts.theme ?? "light", timezoneId: "Asia/Shanghai" });
+  // locale 固定 zh-CN（Cf1，PM 定）：不设时 Chromium 退到 navigator.language=en-US，hhmm() 的 toLocaleString([]) 出「10/2, 13:00」，
+  // 和中文夹具的 G6 检测对不上；进程 LANG 管不到 macOS Chromium。en-US 只给负探针用
+  const ctx = await browser.newContext({ viewport: { width: opts.width ?? 1200, height: 900 }, colorScheme: opts.theme ?? "light", timezoneId: "Asia/Shanghai",
+    locale: opts.locale ?? "zh-CN" });
   const calls: string[] = [], external: string[] = [], errors: string[] = [];
   await ctx.route("**/*", (r) => {
     if (new URL(r.request().url()).origin === origin) return r.continue();
@@ -297,9 +331,7 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     // 只认版本页自己的「暂无历史版本」（P1-F 的文案）：页面别处（指标条）本来就有「暂无」
     const noHistory = /暂无历史版本/.test(await page.locator("body").innerText());
     observed["版本历史"] = rows > 0 ? "present" : noHistory ? "unknown" : "absent";
-    const vrows = await page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).allInnerTexts();
-    observed["版本元数据（提出人/时间）"] = vrows.length ? (vrows.every((t) => /pm-a/.test(t) && /\d+\/\d+ \d+:\d+/.test(t)) ? "present" : "absent")
-      : noHistory ? "unknown" : "absent";
+    observed["版本元数据（提出人/时间）"] = versionMeta(await page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).allInnerTexts(), noHistory);
     await shot("versions");
     const cmp = page.getByRole("button", { name: "对比", exact: true }).first();
     if (await cmp.isEnabled()) {
@@ -315,11 +347,9 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     const workTab = page.getByRole("tab", { name: "谁在干活", exact: true });
     if (await workTab.count()) {
       await workTab.first().click();
-      // 摘要行「在干活 N」：N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队现状是假 0 + 骨架屏一直重试
-      await page.waitForFunction(`/在干活\\s*[1-9]|仅主场/.test(document.body.innerText)`, undefined, { timeout: 5000 })
-        .catch(() => notes.push(`${side}: 谁在干活 5s 内没有在干活的卡，也没有「仅主场」占位`));
-      const body = await page.locator("body").innerText();
-      observed["谁在干活"] = /在干活\s*[1-9]/.test(body) ? "present" : /仅主场/.test(body) ? "home_only" : "absent";
+      await page.waitForFunction(`/在干活\\s*[1-9]|仅主场|执行操作仍在主场/.test(document.body.innerText)`, undefined, { timeout: 5000 })
+        .catch(() => notes.push(`${side}: 谁在干活 5s 内没有在干活的卡，也没有主场占位`));
+      observed["谁在干活"] = await observeWork(page);
       await shot("work");
     } else { observed["谁在干活"] = "not_run"; notes.push(`${width}: 没有「谁在干活」标签入口`); }
     const teamBtn = narrow ? page.getByRole("button", { name: "团队", exact: true }) : page.getByRole("tab", { name: "团队", exact: true });
@@ -332,12 +362,7 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     observed["团队规划"] = (await page.getByText("团队规划", { exact: true }).count()) ? "present" : "absent";
     await shot("team");
   } finally { await ctx.close(); }
-  // 误调：看请求记录（本地这几条是正当请求，团队带团队键 / 本机 peers 就是误调）
-  const hit = (re: RegExp) => (calls.some((c) => re.test(c)) ? "present" : "absent") as TeamState;
-  const key = side === "team" ? "shared-ledger:" : home.project;
-  observed["上次以来·本机接口误调"] = hit(new RegExp(`/me/last-seen/${key.replace(/[{}]/g, "")}`));
-  observed["谁在干活·本机接口误调"] = hit(new RegExp(`/ledger/${key}[^?]*/work`));
-  observed["团队标签·本机接口误调"] = side === "team" ? hit(/\/team\/activity\?project=shared-ledger:|\/peers\/contacts|\/team\/quota/) : hit(/\/peers\/contacts/);
+  Object.assign(observed, misCalls(calls, side, home.project));
   return { observed, notes, calls, external, errors };
 }
 
@@ -357,7 +382,7 @@ test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/3
   const { server, unexpected } = serve(home, team, bundle);
   const browser = await launch(), shots: Shot[] = [];
   const report: { scenario: string; matrix: { section: string; ref: string; local: TeamState | "not_run"; team: TeamState | "not_run"; limit?: string }[];
-    results: MatrixResult[]; differing: string[]; notes: string[] }[] = [];
+    results: MatrixResult[]; differing: string[]; notes: string[]; forbidden: { team: string[] } }[] = [];
   const seen: { local: Observed[]; team: Observed[] } = { local: [], team: [] };
   try {
     for (const width of [1200, 390]) for (const theme of ["light", "dark"] as const) {
@@ -367,10 +392,13 @@ test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/3
       const results = [...compareMatrix("local", local.observed), ...compareMatrix("team", team.observed)];
       report.push({ scenario, matrix: MATRIX.map((r) => ({ section: r.section, ref: r.ref, local: local.observed[r.section] ?? "not_run",
         team: team.observed[r.section] ?? "not_run", ...(r.limit ? { limit: r.limit } : {}) })),
-        results, differing: differing(local.observed, team.observed), notes: [...local.notes, ...team.notes] });
+        results, differing: differing(local.observed, team.observed), notes: [...local.notes, ...team.notes], forbidden: { team: forbidden(team.calls) } });
       await Bun.write(resolve(out, `calls-${scenario}.json`), JSON.stringify({ local: local.calls, team: team.calls }, null, 2));
       expect({ scenario, external: [...local.external, ...team.external] }).toEqual({ scenario, external: [] });
       expect({ scenario, errors: [...local.errors, ...team.errors] }).toEqual({ scenario, errors: [] });
+      // P1-A：团队视图对 §5.1 列的本机接口 0 次请求；本机视图照旧请求 last-seen / work / peers（本机真值不变）
+      expect({ scenario, forbidden: forbidden(team.calls) }).toEqual({ scenario, forbidden: [] });
+      expect({ scenario, local: forbidden(local.calls).length > 0 }).toEqual({ scenario, local: true });
       seen.local.push(local.observed); seen.team.push(team.observed);
     }
     await Bun.write(resolve(out, "matrix.json"), JSON.stringify(report, null, 2));
@@ -430,6 +458,88 @@ test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T
     await Bun.write(resolve(out, "old-red-new-green.json"), JSON.stringify({ legacyLocal: old.observed, homeLocal: now.observed, team, mutated, noPr, placeholder }, null, 2));
   } finally { for (const g of pages) await g.ctx.close(); await browser.close(); legacy.server.stop(true); fresh.server.stop(true); }
 }, 180_000);
+
+test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a restored fake number / home request fails, unresolved gaps still go stale", async () => {
+  if (!out) return;
+  const home = generateHomeFixture(), bundle = await bundleHarness(out), teamData = await teamFromHome(home);
+  const { server } = serve(home, teamData, bundle), browser = await launch(), url = String(server.url);
+  const g = await guardedPage(browser, url);
+  const verdict = (o: Observed, sec: string) => compareMatrix("team", o).find((r) => r.section === sec)!;
+  try {
+    const { page, calls } = g;
+    await page.goto(`${url}?side=team&project=${home.project}&team=${home.team}`);
+    await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    await settle(page);
+    // 真实团队页：P1-A 的指标是「暂无」，按删掉 gap 后的矩阵直接 pass
+    const metrics: Observed = { "在场 agent": await metric(page, "在场 agent"), "今日完成": await metric(page, "今日完成"), "平均等复核": await metric(page, "平均等复核") };
+    expect(Object.keys(metrics).map((k) => verdict(metrics, k).verdict)).toEqual(["pass", "pass", "pass"]);
+    // 受控变异：把「今日完成」恢复成 P1-A 之前的假数字 → present → fail（gap 已删，不再有 known_gap 兜底）
+    await page.evaluate(`[...document.querySelectorAll("span")].find((e) => e.childElementCount === 0 && e.textContent === "今日完成").previousElementSibling.textContent = "3"`);
+    const fake = { ...metrics, "今日完成": await metric(page, "今日完成") };
+    expect(verdict(fake, "今日完成")).toMatchObject({ observed: "present", verdict: "fail" });
+
+    // 谁在干活：真实提示「执行操作仍在主场」= home_only → pass；去掉提示 → absent → fail
+    await page.getByRole("tab", { name: "谁在干活", exact: true }).first().click();
+    await page.getByRole("status").filter({ hasText: "执行操作仍在主场" }).first().waitFor({ timeout: 5000 });
+    const work: Observed = { "谁在干活": await observeWork(page) };
+    expect(verdict(work, "谁在干活")).toMatchObject({ observed: "home_only", verdict: "pass" });
+    await page.evaluate(`[...document.querySelectorAll("[role=status]")].filter((e) => e.textContent.includes("执行操作仍在主场")).forEach((e) => e.remove())`);
+    const noHint: Observed = { "谁在干活": await observeWork(page) };
+    expect(verdict(noHint, "谁在干活")).toMatchObject({ observed: "absent", verdict: "fail" });
+
+    // 到这里团队页没有任何本机接口请求；受控变异：页面里补发一条本机 peers / last-seen 请求 → 误调 present → fail
+    expect(forbidden(calls)).toEqual([]);
+    const clean = misCalls(calls, "team", home.project);
+    expect(Object.keys(clean).map((k) => verdict(clean, k).verdict)).toEqual(["pass", "pass", "pass"]);
+    await page.evaluate(`Promise.all([fetch("/api/v1/peers/contacts"), fetch("/api/v1/me/last-seen/shared-ledger:" + ${JSON.stringify(home.team)})])`);
+    const leaked = misCalls(calls, "team", home.project);
+    expect(forbidden(calls).length).toBe(2);
+    expect([verdict(leaked, "团队标签·本机接口误调").verdict, verdict(leaked, "上次以来·本机接口误调").verdict, verdict(leaked, "谁在干活·本机接口误调").verdict])
+      .toEqual(["fail", "fail", "pass"]);
+
+    // 其余没修的 gap 照旧：真实详情里「步骤」缺失 = known_gap（P1-B）；补上一个步骤区块（模拟真修好）→ stale_gap，检测没被取消
+    await page.goto(`${url}?side=team&project=${home.project}&team=${home.team}`);
+    await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    await openTask(page, home, false);
+    const task = await observeTask(page, home);
+    expect(verdict(task, "步骤线")).toMatchObject({ observed: "absent", verdict: "known_gap", node: "P1-B" });
+    await page.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "参与者").parentElement
+      .insertAdjacentHTML("beforebegin", "<div><h5>步骤</h5><div>build ▸ review</div></div>")`);
+    const fixedSteps = await observeTask(page, home);
+    expect(verdict(fixedSteps, "步骤线")).toMatchObject({ observed: "present", verdict: "stale_gap", node: "P1-B" });
+    expect({ external: g.external, errors: g.errors }).toEqual({ external: [], errors: [] });
+    await Bun.write(resolve(out, "cf1-mutations.json"), JSON.stringify({ metrics, fake, work, noHint, clean, leaked, calls, task, fixedSteps }, null, 2));
+  } finally { await g.ctx.close(); await browser.close(); server.stop(true); }
+}, 120_000);
+
+test.skipIf(!out)("team-parity-Cf1 locale negative probe: an en-US context still reads local G6 as absent (the detector was not loosened)", async () => {
+  if (!out) return;
+  const home = generateHomeFixture(), bundle = await bundleHarness(out), teamData = await teamFromHome(home);
+  const { server } = serve(home, teamData, bundle), browser = await launch(), url = String(server.url);
+  const pages: Awaited<ReturnType<typeof guardedPage>>[] = [];
+  try {
+    const versions = async (locale?: string) => {
+      const g = await guardedPage(browser, url, locale ? { locale } : {});
+      pages.push(g);
+      const first = home.features[0]!;
+      await g.page.goto(`${url}?side=local&project=${home.project}&team=${home.team}`);
+      await g.page.getByRole("progressbar", { name: first.title, exact: true }).first().waitFor({ timeout: 15_000 });
+      await g.page.getByRole("button").filter({ has: g.page.getByText(first.title, { exact: true }) }).first().click();
+      await g.page.getByRole("button", { name: /^(版本|v\d+)$/ }).first().click();
+      await g.page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).first().waitFor();
+      const lang = String(await g.page.evaluate("navigator.language"));
+      const rows = await g.page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).allInnerTexts();
+      return { lang, rows, g6: versionMeta(rows, false) };
+    };
+    const zh = await versions(), en = await versions("en-US");
+    // 默认上下文 = zh-CN：「10/2 13:00」→ present；en-US：「10/2, 13:00」→ 同一条正则判 absent，本机期望 present 的比对报 fail
+    expect({ lang: zh.lang, g6: zh.g6 }).toEqual({ lang: "zh-CN", g6: "present" });
+    expect({ lang: en.lang, g6: en.g6, comma: en.rows.every((t) => /\d+\/\d+, \d+:\d+/.test(t)) }).toEqual({ lang: "en-US", g6: "absent", comma: true });
+    expect(compareMatrix("local", { "版本元数据（提出人/时间）": en.g6 }).find((r) => r.section === "版本元数据（提出人/时间）")!.verdict).toBe("fail");
+    expect(pages.map((g) => ({ external: g.external, errors: g.errors }))).toEqual(pages.map(() => ({ external: [], errors: [] })));
+    await Bun.write(resolve(out, "cf1-locale-probe.json"), JSON.stringify({ zh, en }, null, 2));
+  } finally { for (const g of pages) await g.ctx.close(); await browser.close(); server.stop(true); }
+}, 120_000);
 
 test.skipIf(!out)("team-parity-C egress sentinel: a page in the guarded context cannot reach a second loopback origin", async () => {
   if (!out) return;
