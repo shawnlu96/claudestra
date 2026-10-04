@@ -3,6 +3,7 @@
  * （owner 在这里打字不起作用）。逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、
  * 接真实依赖、处理信号。启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；手动排障：`tmux -S … attach` 看这个窗口。
  */
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
@@ -17,7 +18,7 @@ import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
-import { CLEAN_ENV_FLAG } from "./lib/runtimes/clean-env.js";
+import { CLEAN_ENV_FLAG, makeWorkerRoot } from "./lib/runtimes/clean-env.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
 import { takeCallerCred } from "./lib/caller-cred.js";
@@ -47,6 +48,9 @@ const log = (msg: string) => {
 };
 const bridgeUrl = resolveBridgeUrl();
 const bunBin = resolveBunPath();
+// 出借 worker：codex 本体（和它的 shell）用专属状态 / 运行目录，宿主自己留生产目录给看门狗（runtimes/clean-env.ts workerPrivateDirs）
+const workerRoot = process.env[CLEAN_ENV_FLAG] === "1" ? makeWorkerRoot() : undefined;
+if (workerRoot) process.on("exit", () => rmSync(workerRoot, { recursive: true, force: true }));
 let runtime: ReturnType<typeof acpRuntime>;
 try {
   runtime = acpRuntime(process.env[ACP_RUNTIME_ENV]?.trim());
@@ -86,6 +90,7 @@ const host = new AcpHost(
       logsDir,
       developerInstructions: process.env.CLAUDESTRA_ACP_DEVELOPER ? Buffer.from(process.env.CLAUDESTRA_ACP_DEVELOPER, "base64").toString("utf8") : undefined,
       clean: process.env[CLEAN_ENV_FLAG] === "1", // 出借 worker：适配器只拿白名单环境、不挂 claudestra MCP（lib/runtimes/clean-env.ts）
+      workerRoot,
     },
   },
   {
