@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AcpTurnLoop, hookPromptText, type PromptOutcome, type SteerResult, type StopReport, type TurnIO } from "../src/lib/acp/turn.ts";
+import { AcpTurnLoop, acpSlotCall, hookPromptText, type PromptOutcome, type SteerResult, type StopReport, type TurnIO } from "../src/lib/acp/turn.ts";
 import type { AcpFailure } from "../src/lib/acp/failures.ts";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -477,6 +477,33 @@ describe("AcpTurnLoop · 独占槽（codex-compact N1）", () => {
     expect(f.loop.cancelSlot("op-1", 1)).toBe("gone");
     expect(f.loop.slotStatus("op-1")).toEqual({ state: "queued", opId: "op-1", gen: 2 });
     expect(f.loop.cancelSlot("op-1", 2)).toBe("revoked");
+  });
+
+  test("复现测试：slot_status wait 带不存在 / 旧 gen 不挂到同 opId 的新代次上，立即回 gone / 旧代次真实结局（旧：等到新槽结束）", async () => {
+    const f = slotFixture();
+    const status = (gen: number, wait: boolean) => acpSlotCall(f.loop, { op: "slot_status", opId: "same", hostId: "h", gen, wait }, "h")!;
+    f.loop.submitCommand("/compact", "same"); // gen=1 在跑，prompt 一直不 resolve
+    const gone = { ok: true, slot: { state: "gone", opId: "same", hostId: "h" } };
+    expect(await status(99, true)).toEqual(gone); // 旧实现在这里一直挂着
+    expect(await status(99, false)).toEqual(gone);
+    expect(f.loop.slotStatus("same")).toEqual({ state: "running", opId: "same", gen: 1 });
+
+    const g = slotFixture();
+    const old = (wait: boolean) => acpSlotCall(g.loop, { op: "slot_status", opId: "same", hostId: "h", gen: 1, wait }, "h")!;
+    await g.loop.submit("work");
+    g.loop.submitCommand("/compact", "same");
+    expect(g.loop.cancelSlot("same", 1)).toBe("revoked");
+    g.loop.submitCommand("/compact", "same"); // gen=2 排在 work 后面
+    const revoked = { ok: true, slot: { state: "ended", opId: "same", gen: 1, outcome: "revoked", hostId: "h" } };
+    expect(await old(true)).toEqual(revoked);
+    expect(await old(false)).toEqual(revoked);
+    expect(g.loop.slotStatus("same")).toEqual({ state: "queued", opId: "same", gen: 2 });
+    const cur = acpSlotCall(g.loop, { op: "slot_status", opId: "same", hostId: "h", gen: 2, wait: true }, "h")!;
+    g.end("work");
+    await g.when("prompt:/compact");
+    g.end("/compact");
+    expect(await cur).toEqual({ ok: true, slot: { state: "ended", opId: "same", gen: 2, outcome: "done", hostId: "h" } });
+    expect(g.events).not.toContain("cancel");
   });
 });
 

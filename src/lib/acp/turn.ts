@@ -148,16 +148,18 @@ export class AcpTurnLoop {
     return this.slots.find((s): s is Owned => owned(s) && s.opId === opId);
   }
 
-  slotStatus(opId: string): SlotState {
+  /** 给了 gen 就只认这一代：在排 / 在跑的是别的代次时查它自己的结局，查不到回 gone */
+  slotStatus(opId: string, gen?: number): SlotState {
     const live = this.liveSlot(opId);
-    if (live) return { state: live === this.current ? "running" : "queued", opId, gen: live.gen };
-    const e = this.ended.findLast((x) => x.opId === opId);
+    if (live && (gen === undefined || live.gen === gen)) return { state: live === this.current ? "running" : "queued", opId, gen: live.gen };
+    const e = this.ended.findLast((x) => x.opId === opId && (gen === undefined || x.gen === gen));
     return e ? { state: "ended", ...e } : { state: "gone", opId };
   }
 
-  /** 槽不在排 / 在跑时立即给状态，否则等它结束（或被撤） */
-  waitSlot(opId: string): Promise<SlotState> {
-    if (!this.liveSlot(opId)) return Promise.resolve(this.slotStatus(opId));
+  /** 槽（给了 gen 就是这一代）不在排 / 在跑时立即给状态，否则等它结束（或被撤）；绝不挂到同 opId 的别的代次上 */
+  waitSlot(opId: string, gen?: number): Promise<SlotState> {
+    const live = this.liveSlot(opId);
+    if (!live || (gen !== undefined && live.gen !== gen)) return Promise.resolve(this.slotStatus(opId, gen));
     return new Promise((resolve) => this.waiters.set(opId, [...(this.waiters.get(opId) ?? []), resolve]));
   }
 
@@ -313,8 +315,7 @@ export function acpSlotCall(loop: AcpTurnLoop, m: Record<string, unknown>, hostI
   const foreign = typeof m.hostId === "string" && m.hostId !== hostId;
   if (m.op === "cancel_slot") return Promise.resolve({ ok: true, cancel: foreign ? "gone" : loop.cancelSlot(opId, gen), opId, hostId });
   if (foreign) return Promise.resolve(slot({ state: "gone", opId }));
-  const mine = (s: SlotState) => (gen !== undefined && "gen" in s && s.gen !== gen ? slot({ state: "gone", opId }) : slot(s));
-  return m.wait === true ? loop.waitSlot(opId).then(mine) : Promise.resolve(mine(loop.slotStatus(opId)));
+  return m.wait === true ? loop.waitSlot(opId, gen).then(slot) : Promise.resolve(slot(loop.slotStatus(opId, gen)));
 }
 
 const SLOT_STATES = new Set(["queued", "running", "ended", "gone"]);
