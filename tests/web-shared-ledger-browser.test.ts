@@ -2,7 +2,7 @@
  * i28-TV1 同屏对照（opt-in）：SHARED_LEDGER_SHOTS_DIR=<审查目录> bun test tests/web-shared-ledger-browser.test.ts
  * 同一个项目的本地协作视图和团队视图（同一个 CollabView，换数据源），1400 / 390 × 浅 / 深 共 8 张，拼成 compare.png；
  * 每张都过截图自动检查（tests/helpers/ui-shot-checks.ts）。数据缺省是 home-fixture-gen.ts 的一份本机台账：本地路由吐它，
- * 团队路由吐 home-to-team-fixture.ts 从它推出的投影（不再用 teamDagBoard / sharedProductBoard 冒充本地，team-parity-C）。
+ * 团队路由吐它经生产导出 / 投影器 / 中心读口得到的投影（web-team-parity-browser-center.test.ts；不再用 teamDagBoard 冒充本地，team-parity-C）。
  * TEAM_VIEW_SNAPSHOT=<仓库外的只读 JSON，形状同 TeamFixture> 换成生产快照（不进 git）：快照里没有本机 DAG / 产品看板，只截团队一侧。
  * 另在团队视图里把团队操作点一遍：编辑规划 → 409 → 重读 → 逐条处理 → 提交；任务详情里的开卡 / 绑卡 / 阶段 / 审批。
  */
@@ -12,18 +12,18 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { generateTeamFixture, type TeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import { generateHomeFixture, homeDagBoard, homeProductBoard, type HomeFixture } from "@/features/collab/shared/home-fixture-gen";
-import { homeToTeam } from "@/features/collab/shared/home-to-team-fixture";
 import type { FeatureDetail } from "@/lib/api/shared-ledger";
 import { teamOverview } from "@/features/collab/team-source-adapter";
 import { shotIssues, type ShotIssue } from "./helpers/ui-shot-checks";
+import { teamFromHome } from "./web-team-parity-browser-center.test";
 
 const out = process.env.SHARED_LEDGER_SHOTS_DIR;
 const snapshot = process.env.TEAM_VIEW_SNAPSHOT;
 
 /** home = 本地一侧的唯一数据源；生产快照只有团队一侧，home 为 null */
-function loadFixture(): { fx: TeamFixture; home: HomeFixture | null } {
+async function loadFixture(): Promise<{ fx: TeamFixture; home: HomeFixture | null }> {
   if (snapshot) return { fx: JSON.parse(readFileSync(snapshot, "utf8")) as TeamFixture, home: null };
-  const home = generateHomeFixture(), team = homeToTeam(home);
+  const home = generateHomeFixture(), team = await teamFromHome(home);
   return { fx: { team: home.team, project: home.project, now: home.now, list: team.list, details: team.details, local: home.overview }, home };
 }
 
@@ -125,7 +125,7 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
   const build = Bun.spawn([process.execPath, "build", "web/features/collab/shared/fixture-harness.tsx", "--target", "browser",
     "--outdir", bundle, "--tsconfig-override", "web/tsconfig.json"], { stdout: "pipe", stderr: "pipe" });
   if (await build.exited) throw new Error(await new Response(build.stderr).text());
-  const { fx, home } = loadFixture();
+  const { fx, home } = await loadFixture();
   const server = await serve(fx, bundle, home);
   const browser: Browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const shots: { name: string; png: Buffer }[] = [];

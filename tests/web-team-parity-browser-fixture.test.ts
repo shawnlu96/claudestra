@@ -1,26 +1,17 @@
 /**
  * team-parity-C 的纯逻辑部分（常跑，不开浏览器）：
  * ① 本机夹具是全量的（审查 pass / changes / block 各一、事件 data 完整、DAG 有两版）；
- * ② home-to-team-fixture.ts 的卡投影规则和真投影器 mirrorTaskProjections 逐字段一致（临时台账上跑 pushSharedLedgerMirror 对拍）；
+ * ② 团队一侧只经生产导出 → 真中心导入 → 真投影器 → 中心读口得到（web-team-parity-browser-center.test.ts），没有规则副本；
  * ③ 旧「本机由团队模型生成」的喂法让 T3 / T5 / T7 的消费者全空，本机数据下都有内容（数据层旧红新绿）；
  * ④ 矩阵比对器的受控变异：缺口修好 → stale_gap，退回 → fail，期望只能往 present 走。
  * 浏览器对照见 tests/web-team-parity-browser.test.ts（opt-in）。
  */
 import { expect, test } from "bun:test";
-import { createTask, moveStage, setTask } from "../src/lib/ledger-write.js";
-import { bindNode } from "../src/lib/ledger-dag-write.js";
-import { addDep } from "../src/lib/ledger-deps-write.js";
-import { getTask, listDeps, listTasks } from "../src/lib/ledger-store.js";
-import { listSteps } from "../src/lib/ledger-steps.js";
-import type { SharedLedgerProjection } from "../src/lib/shared-ledger-contract.js";
-import { pushSharedLedgerMirror } from "../src/lib/shared-ledger-projector.js";
-import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
-import { globalSeq, mirrorEntry, SCRUB } from "./shared-ledger-mirror-fixture.test.js";
 import { generateHomeFixture } from "@/features/collab/shared/home-fixture-gen";
-import { homeToTeam, mirrorTaskRows } from "@/features/collab/shared/home-to-team-fixture";
+import { teamFromHome } from "./web-team-parity-browser-center.test";
 import { teamOverview, teamTaskDetail } from "@/features/collab/team-source-adapter";
 import { recentThree, reviewRows, stageSegments } from "@/features/collab/collab-detail-model";
-import { compareMatrix, MATRIX, ratchetViolations, type Observed } from "./helpers/team-parity-matrix";
+import { compareMatrix, MATRIX, ratchetViolations, unprobed, type Observed } from "./helpers/team-parity-matrix";
 
 test("home fixture is a full home ledger: complete event data, every review verdict, two DAG versions", () => {
   const home = generateHomeFixture();
@@ -38,8 +29,29 @@ test("home fixture is a full home ledger: complete event data, every review verd
   expect(JSON.stringify(generateHomeFixture())).toBe(JSON.stringify(home));
 });
 
-test("team side is derived from the same home data: titles, stages, deps and bindings line up", () => {
-  const home = generateHomeFixture(), team = homeToTeam(home);
+test("team side comes from the production export → center import → mirror projector → center reads", async () => {
+  const home = generateHomeFixture(), team = await teamFromHome(home);
+  expect(team.details.map((d) => team.localFeature[d.feature.id]).sort()).toEqual(home.features.map((f) => f.id).sort());
+  const tasks = team.details.flatMap((d) => d.tasks), by = (id: string) => tasks.find((t) => t.sourceTaskId === id)!;
+  expect(tasks.map((t) => t.sourceTaskId).sort()).toEqual(home.overview.tasks.map((t) => t.id).sort());
+  for (const t of home.overview.tasks) expect([t.id, by(t.id).stage]).toEqual([t.id, t.stage]);
+  // 生产规则在起作用（不是这里写的）：URL PR → null、未知提交的 head → null、permission 来源的提问被滤、成员只有代号
+  expect(by("i28-A3").pr).toBeNull();
+  expect(by("i28-A1").head).toBe(home.rows["i28-A1"]!.headSHA);
+  expect(by("i28-A4").head).toBeNull();
+  expect(by("i28-A7").asks).toEqual([{ kind: "decide", state: "open", blocking: true }]);
+  expect(by("i28-A1").assigneeCode).toBe(home.rows["i28-A1"]!.meta.assigneeCode);
+  expect(JSON.stringify(team)).not.toContain("agent-dev");
+  // 中心 refreshFeatureState 的 counts：只算显式 done / verified；没开卡的计划节点进 total 不进 missing
+  const a = team.details.find((d) => team.localFeature[d.feature.id] === "feat-a")!;
+  expect(a.feature.counts).toEqual({ total: 8, completed: 2, blocked: 0, missing: 0 });
+  expect(a.feature.status).toBe("active");
+  expect(a.dag.version).toBe(2);
+  expect(a.feature.projection?.sourceInstanceId).toBe(home.sourceInstanceId);
+});
+
+test("team side is derived from the same home data: titles, stages, deps and bindings line up", async () => {
+  const home = generateHomeFixture(), team = await teamFromHome(home);
   const ov = teamOverview(team.list, new Map(team.details.map((d) => [d.feature.id, d])), home.now).ov;
   for (const t of home.overview.tasks) {
     const v = ov.tasks.find((x) => x.id === t.id)!;
@@ -49,66 +61,11 @@ test("team side is derived from the same home data: titles, stages, deps and bin
   expect(ov.tasks.filter((t) => !home.details[t.id]).map((t) => t.stage)).toEqual(["spec", "spec"]);
   expect(ov.deps!.map((d) => `${d.from}>${d.to}`).filter((e) => home.overview.deps!.some((x) => `${x.from}>${x.to}` === e)).length)
     .toBe(home.overview.deps!.length);
-  // URL 形式的 PR、不在提交集里的 head 按投影规则变 null；成员只有代号，不带本机 agent 名
-  const tasks = team.details.flatMap((d) => d.tasks);
-  expect(tasks.find((t) => t.sourceTaskId === "i28-A3")!.pr).toBeNull();
-  expect(tasks.find((t) => t.sourceTaskId === "i28-A1")!.head).toBe(home.rows["i28-A1"]!.headSHA);
-  expect(tasks.find((t) => t.sourceTaskId === "i28-A4")!.head).toBeNull();
   expect(JSON.stringify(team)).not.toContain("agent-dev");
-  expect(tasks.find((t) => t.sourceTaskId === "i28-A7")!.asks).toEqual([{ kind: "decide", state: "open", blocking: true }]);
 });
 
-test("mirrorTaskRows follows the real mirrorTaskProjections field rules on a temp ledger", async () => {
-  const f = integrationFixture();
-  try {
-    const ctx = { actor: f.actor }, now = Date.now();
-    moveStage(f.db, ctx, { taskId: "c5-existing", from: "spec", to: "restate" });
-    createTask(f.db, ctx, { project: f.project, id: "c5-new", title: "New card", kind: "code" });
-    bindNode(f.db, ctx, { id: f.id, rev: f.feature().rev, key: "next", taskId: "c5-new" });
-    addDep(f.db, ctx, { from: "c5-existing", to: "c5-new", when: "verified" });
-    createTask(f.db, ctx, { project: f.project, id: "c5-loose", title: "Unbound card in another feature", kind: "code" });
-    const head = "a".repeat(40), other = "b".repeat(40);
-    setTask(f.db, ctx, { id: "c5-existing", rev: getTask(f.db, "c5-existing")!.rev, patch: { pr: "417", headSHA: head } });
-    setTask(f.db, ctx, { id: "c5-new", rev: getTask(f.db, "c5-new")!.rev, patch: { pr: "https://github.com/x/y/pull/9", headSHA: other } });
-    const step = f.db.prepare("INSERT INTO task_steps (taskId, step, round, executor, executorKind, state, verdict, rev, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?)");
-    step.run("c5-existing", "write", 1, "agent-dev", "agent", "done", null, 2, now, now);
-    step.run("c5-existing", "review", 1, "agent-rv", "agent", "done", "changes", 3, now, now);
-    step.run("c5-existing", "fix", 1, "agent-dev", "agent", "assigned", null, 1, now, now);
-    step.run("c5-existing", "restate", 1, "agent-dev", "agent", "done", null, 1, now, now);
-    const ask = f.db.prepare("INSERT INTO asks (id, project, taskId, fromAgent, fromChannelId, source, kind, blocking, title, expiresAt, state, createdAt, updatedAt)"
-      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
-    ask.run("ask-1", f.project, "c5-existing", "agent-dev", "c", "reply", "decide", 1, "t", now + 1e6, "open", now, now);
-    ask.run("ask-2", f.project, "c5-existing", "agent-dev", "c", "permission", "authorize", 0, "t", now + 1e6, "open", now, now);
-    ask.run("ask-3", f.project, "c5-new", "agent-dev", "c", "reply", "owner_action", null, "t", now + 1e6, "answered", now, now);
-    const taskMeta = { "c5-existing": { specSummary: "Existing work", specDigest: null, assigneeCode: "m-01" } };
-    const sent: SharedLedgerProjection[] = [];
-    const entry = mirrorEntry(f, 0, { snapshot: true, taskMeta });
-    const r = await pushSharedLedgerMirror(f.db, f.id, entry, { scrub: { ...SCRUB, commits: new Set([head]) }, now, client: { async projection(p) {
-      sent.push(structuredClone(p));
-      return { schemaVersion: 1, serverSeq: 1, sourceInstanceId: p.sourceInstanceId, sourceSeq: p.sourceSeq, digest: "a".repeat(64) };
-    } } });
-    expect(r.outcome.kind).toBe("pushed");
-    const seq = globalSeq(f), tasks = listTasks(f.db, f.project);
-    const lastSeq = new Map((f.db.prepare("SELECT target, MAX(seq) AS seq FROM events WHERE project = ? GROUP BY target").all(f.project) as { target: string; seq: number }[])
-      .map((x) => [x.target, x.seq]));
-    const ours = mirrorTaskRows({
-      featureId: f.id, tasks: tasks.map((t) => ({ id: t.id, rev: t.rev, stage: t.stage, pr: t.pr, headSHA: t.headSHA, featureId: t.featureId ?? null })),
-      bound: new Set(["c5-existing", "c5-new"]), lastSeq, deps: listDeps(f.db, f.project),
-      steps: (id) => listSteps(f.db, id), sourceInstanceId: entry.sourceInstanceId, seq, commits: new Set([head]), meta: taskMeta,
-      asks: (id) => f.db.prepare("SELECT kind, state, blocking, source FROM asks WHERE taskId = ? ORDER BY id").all(id) as never,
-    });
-    expect(sent[0]!.tasks.length).toBe(2);
-    expect(ours).toEqual(sent[0]!.tasks as never);
-    // 被测规则确实走到了：数字 PR、URL PR → null、未知 head → null、隐藏来源的提问被滤、步骤按 step 排序
-    expect(ours.map((t) => [t.sourceTaskId, t.pr, t.head])).toEqual([["c5-existing", 417, head], ["c5-new", null, null]]);
-    expect(ours[0]!.steps.map((s) => s.sourceStepId)).toEqual(["fix:1", "restate:1", "review:1", "write:1"]);
-    expect(ours[0]!.asks).toEqual([{ kind: "decide", state: "open", blocking: true }]);
-    expect(ours[1]!.deps).toEqual(["c5-existing"]);
-  } finally { await f.close(); }
-});
-
-test("old red / new green at the data layer: team-model-fed local detail empties T3/T5/T7 consumers", () => {
-  const home = generateHomeFixture(), team = homeToTeam(home);
+test("old red / new green at the data layer: team-model-fed local detail empties T3/T5/T7 consumers", async () => {
+  const home = generateHomeFixture(), team = await teamFromHome(home);
   const tov = teamOverview(team.list, new Map(team.details.map((d) => [d.feature.id, d])), home.now);
   const legacy = teamTaskDetail(tov, "i28-A5", home.now)!, real = home.details["i28-A5"]!;
   const consumers = (d: typeof real) => ({
@@ -139,4 +96,27 @@ test("matrix comparator: expectation hit, known gap, fixed gap and regressions a
   expect(ratchetViolations(MATRIX, MATRIX.map((r) => (r.section === "阶段用时" ? { ...r, local: "absent" as const } : r)))).toEqual(["阶段用时: local present→absent"]);
   // A 类（§3 一致项）两边都必须 present
   for (const r of MATRIX.filter((x) => x.cls === "A")) expect([r.section, r.local, r.team]).toEqual([r.section, "present", "present"]);
+});
+
+test("matrix baseline covers every §3 row; added rows really take part; unlisted and unprobed sections are reported", () => {
+  const refs = new Set(MATRIX.map((r) => r.ref)), want = (p: string, n: number) => Array.from({ length: n }, (_, i) => `${p}${i + 1}`);
+  expect([...want("G", 12), ...want("T", 14), ...want("E", 3), ...want("M", 9), ...want("W", 4), ...want("N", 5)].filter((r) => !refs.has(r))).toEqual([]);
+  // r0 审查探针的反面：改新增行的实测，报告必须跟着变（之前这些区块不在表里，报告逐字不变）
+  const team: Observed = Object.fromEntries(MATRIX.map((r) => [r.section, r.gap?.team ?? r.team]));
+  const base = JSON.stringify(compareMatrix("team", team));
+  for (const sec of ["阻塞提问", "PR", "规格全文", "依赖边·建立者/时间", "节点处理人/步骤", "head", "版本元数据（提出人/时间）", "产品卡·进行中计数", "镜像新鲜度", "进度条 counts"]) {
+    const flipped = compareMatrix("team", { ...team, [sec]: team[sec] === "absent" ? "unknown" : "absent" });
+    expect([sec, JSON.stringify(flipped) === base]).toEqual([sec, false]);
+    // 翻成别的值：要么是回归（fail），要么正好命中修好后的期望（stale_gap，逼着删 gap）；不能还是 pass / known_gap
+    expect([sec, ["fail", "stale_gap"].includes(flipped.find((r) => r.section === sec)!.verdict)]).toEqual([sec, true]);
+  }
+  // 检测器报了表外区块 → unlisted；没写 limit 的行哪个场景都没测到 → unprobed 列出来
+  expect(compareMatrix("team", { ...team, "表外区块": "present" }).filter((r) => r.verdict === "unlisted").map((r) => r.section)).toEqual(["表外区块"]);
+  expect(unprobed([team])).toEqual([]);
+  const { "阻塞提问": _drop, ...missing } = team;
+  expect(unprobed([missing, { ...missing, "阻塞提问": "not_run" }])).toEqual(["阻塞提问"]);
+  // 写了 limit 的行允许 not_run，且结果带上原因
+  const g7 = compareMatrix("team", missing).find((r) => r.section === "历史版本快照")!;
+  expect(g7.verdict === "not_run" || g7.verdict === "pass").toBe(true);
+  expect(MATRIX.filter((r) => r.limit).every((r) => r.limit!.length >= 8)).toBe(true);
 });

@@ -13,19 +13,23 @@ import { chromium, type Browser, type Page } from "playwright-core";
 import { mkdirSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { generateHomeFixture, homeDagBoard, homeDagDiff, homeDagFeature, homeProductBoard, homeWorkBoard, type HomeFixture } from "@/features/collab/shared/home-fixture-gen";
-import { homeToTeam } from "@/features/collab/shared/home-to-team-fixture";
 import { teamOverview } from "@/features/collab/team-source-adapter";
 import { teamDagBoard } from "@/features/collab/team-source-dag";
 import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
-import { compareMatrix, differing, MATRIX, type MatrixResult, type Observed, type TeamState } from "./helpers/team-parity-matrix";
+import { compareMatrix, differing, MATRIX, unprobed, type MatrixResult, type Observed, type TeamState } from "./helpers/team-parity-matrix";
+import { teamFromHome, type TeamFromHome } from "./web-team-parity-browser-center.test";
 
 const out = process.env.TEAM_PARITY_SHOTS_DIR;
 /** 手机列表会把已完成的卡折起来：选一张在返工、带 block 审查的卡，桌面 / 手机都能点到 */
 const FOCUS = "i28-A5";
+/** 第二轮审查中的卡：轮次真值是 2 */
+const ROUND_CARD = "i28-B2";
+/** 大纲行的阶段词（只需要焦点卡的） */
+const STAGE_WORD: Record<string, string> = { fix: "返工中" };
 
 /** legacy = 旧夹具的喂法：本地也由团队模型生成（teamOverview / teamDagBoard / sharedProductBoard，详情 events / timeline 为空） */
-function serve(home: HomeFixture, bundle: string, legacy = false) {
-  const files = readdirSync(bundle), team = homeToTeam(home), p = home.project, L = `/api/v1/ledger/${p}`;
+function serve(home: HomeFixture, team: TeamFromHome, bundle: string, legacy = false) {
+  const files = readdirSync(bundle), p = home.project, L = `/api/v1/ledger/${p}`;
   const details = new Map(team.details.map((d) => [d.feature.id, d]));
   const teamOv = teamOverview(team.list, details, home.now);
   const json = (v: unknown, status = 200) => Response.json(v, { status });
@@ -107,8 +111,10 @@ async function detailSections(page: Page, id: string): Promise<Record<string, st
   })()`);
 }
 
-async function observeTask(page: Page, id: string, title: string): Promise<Observed> {
-  const s = await detailSections(page, id), all = s.__all ?? "";
+/** 焦点卡详情：值要和本机真值对上（head 前 8 位）才算 present */
+async function observeTask(page: Page, home: HomeFixture): Promise<Observed> {
+  const title = home.details[FOCUS]!.task.title, head = home.rows[FOCUS]!.headSHA!.slice(0, 8);
+  const s = await detailSections(page, FOCUS), all = s.__all ?? "";
   const line = (re: RegExp) => all.split("\n").find((l) => re.test(l)) ?? null;
   return {
     "标题": all.includes(title) ? "present" : "absent",
@@ -123,7 +129,46 @@ async function observeTask(page: Page, id: string, title: string): Promise<Obser
     "步骤线": classify(s["步骤"] ?? null, () => true),
     // 团队操作区块里本来就有「全文仅在主场」（T14），不能按占位词判
     "团队操作": s["团队操作"] ? "present" : "absent",
+    "head": all.includes(head) ? "present" : "absent",
+    "PR": /PR #\d+/.test(all) ? "present" : "absent",
+    "规格全文": /全文仅在主场/.test(all) ? "home_only" : /规格全文/.test(all) ? "present" : "absent",
   };
+}
+
+/** 因果线点第一条边看「判定依据」：显示了建立者 + 时间 = present（团队那边按契约只能是冒充的），「未记录」= unknown */
+async function observeEdge(page: Page): Promise<TeamState> {
+  const row = page.locator("aside h5", { hasText: "它的因果线" }).locator("..").getByRole("button").first();
+  if (!(await row.count())) return "absent";
+  await row.click();
+  const basis = page.locator("aside h5", { hasText: "判定依据" }).first();
+  await basis.waitFor();
+  const text = await basis.locator("..").innerText();
+  return /未记录/.test(text) ? "unknown" : /建于/.test(text) ? "present" : "absent";
+}
+
+/** 首页产品卡（第一个 feature）：进度条、进行中计数、预计完成都和本机产品看板真值比 */
+async function observeProductCard(page: Page, home: HomeFixture): Promise<Observed> {
+  const truth = homeProductBoard(home).features[0]!, bar = page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first();
+  const [now, max] = [await bar.getAttribute("aria-valuenow"), await bar.getAttribute("aria-valuemax")];
+  const card = await bar.locator("..").innerText();
+  return {
+    "进度条 counts": Number(now) === truth.counts.completed && Number(max) === truth.counts.total ? "present" : "absent",
+    "产品卡·进行中计数": new RegExp(`(^|\\n)${truth.counts.active} 进行中`).test(card) ? "present" : /暂无/.test(card) ? "unknown" : "absent",
+    "产品卡·预计完成": /预计/.test(card) ? "present" : "absent",
+  };
+}
+
+/** 子 DAG 页：大纲行（桌面）看阶段和轮次，画布节点看处理人；都按本机真值判 */
+async function observeFeaturePage(page: Page, home: HomeFixture, narrow: boolean): Promise<Observed> {
+  const lines = (await page.locator("body").innerText()).split("\n");
+  const after = (id: string) => lines.flatMap((l, i) => (l === id ? [lines[i + 2] ?? ""] : []));
+  const focus = home.details[FOCUS]!.task, round = home.overview.tasks.find((t) => t.id === ROUND_CARD)!.round;
+  const out: Observed = { "节点处理人/步骤": after(FOCUS).some((l) => /· (执行者|审查员)/.test(l)) ? "present" : "absent" };
+  if (narrow) return { ...out, "节点阶段（大纲行）": "not_run", "轮次（大纲行）": "not_run" };
+  const outline = (await page.locator("nav[aria-label='大纲']").first().innerText()).split("\n");
+  const row = (id: string) => outline[outline.indexOf(id) + 2] ?? "";
+  return { ...out, "节点阶段（大纲行）": row(FOCUS).startsWith(STAGE_WORD[focus.stage] ?? "?") ? "present" : "absent",
+    "轮次（大纲行）": row(ROUND_CARD).includes(`第 ${round} 轮`) ? "present" : "absent" };
 }
 
 async function metric(page: Page, label: string): Promise<TeamState> {
@@ -155,20 +200,34 @@ async function openTask(page: Page, home: HomeFixture, narrow: boolean) {
   await settle(page);
 }
 
-async function runSide(browser: Browser, url: string, home: HomeFixture, width: number, theme: "light" | "dark", side: "local" | "team", shots: Shot[], dir: string | null): Promise<RunResult> {
-  const narrow = width < 700, name = `${side}-${width}-${theme}`;
-  const ctx = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: theme, timezoneId: "Asia/Shanghai" });
-  const page = await ctx.newPage();
-  page.setDefaultTimeout(10_000);
-  const calls: string[] = [], external: string[] = [], errors: string[] = [], notes: string[] = [];
-  const origin = new URL(url).origin;
-  await page.route("**/*", (r) => {
+/**
+ * 每个页面都从这里开：BrowserContext 级的 HTTP 与 WebSocket 路由在建页、首次导航之前装好，非回环服务器本源的一律 abort / close 并记账。
+ * 调用方断言 external 为空；tests 里的 sentinel 用例证明拦截真的生效（不同源的第二个回环服务器收不到请求）。
+ */
+async function guardedPage(browser: Browser, url: string, opts: { width?: number; theme?: "light" | "dark" } = {}) {
+  const origin = new URL(url).origin, wsOrigin = origin.replace(/^http/, "ws");
+  const ctx = await browser.newContext({ viewport: { width: opts.width ?? 1200, height: 900 }, colorScheme: opts.theme ?? "light", timezoneId: "Asia/Shanghai" });
+  const calls: string[] = [], external: string[] = [], errors: string[] = [];
+  await ctx.route("**/*", (r) => {
     if (new URL(r.request().url()).origin === origin) return r.continue();
     external.push(r.request().url());
     return r.abort();
   });
+  await ctx.routeWebSocket(() => true, (ws) => {
+    if (new URL(ws.url()).origin === wsOrigin) return void ws.connectToServer();
+    external.push(ws.url());
+    return ws.close();
+  });
+  const page = await ctx.newPage();
+  page.setDefaultTimeout(10_000);
   page.on("request", (r) => { if (r.url().includes("/api/")) calls.push(`${r.method()} ${decodeURIComponent(new URL(r.url()).pathname + new URL(r.url()).search)}`); });
   page.on("pageerror", (e) => errors.push(e.message));
+  return { ctx, page, calls, external, errors };
+}
+
+async function runSide(browser: Browser, url: string, home: HomeFixture, width: number, theme: "light" | "dark", side: "local" | "team", shots: Shot[], dir: string | null): Promise<RunResult> {
+  const narrow = width < 700, name = `${side}-${width}-${theme}`, notes: string[] = [];
+  const { ctx, page, calls, external, errors } = await guardedPage(browser, url, { width, theme });
   const shot = async (view: string) => {
     await settle(page);
     const png = await page.screenshot(dir ? { path: resolve(dir, `${name}-${view}.png`) } : {});
@@ -197,11 +256,29 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     observed["待你处理"] = /暂无/.test(w) ? "unknown" : /^\d/.test(w) ? "present" : "absent";
     observed["上次以来"] = (await page.getByRole("region", { name: "上次来之后" }).count()) ? "present" : narrow ? "not_run" : "absent";
     if (narrow && observed["上次以来"] === "not_run") notes.push("390：上次以来卡片只在桌面右栏概览里（Overview since=），手机首页不渲染");
+    Object.assign(observed, await observeProductCard(page, home));
+    // 只认新鲜度文案（shared/team-ops.tsx 里的「主场镜像过期 / 最新」「尚无执行镜像」）：卡标题里本来就有「执行镜像」
+    observed["镜像新鲜度"] = /主场镜像(过期|最新)|尚无执行镜像/.test(await page.locator("body").innerText()) ? "present" : "absent";
+    if (narrow) {
+      observed["阻塞提问"] = observed["桌面中区标签"] = "not_run";
+      observed["手机顶栏按钮"] = (await page.getByRole("button", { name: "团队", exact: true }).count()) && (await page.getByRole("button", { name: /^待你处理/ }).count())
+        ? "present" : "absent";
+      notes.push("390：「要你定的」在桌面右栏概览里，手机首页不渲染，阻塞提问记 not_run；中区标签换成顶栏按钮（N3）");
+    } else {
+      // 右栏概览「要你定的」：本机列出 i28-A7 的阻塞提问；团队按投影 asks 应给「阻塞 N」，现在是「没有」
+      const asks = String(await page.evaluate(`[...document.querySelectorAll("*")].find((e) => e.childElementCount === 0 && e.textContent === "要你定的")?.parentElement?.innerText ?? ""`));
+      observed["阻塞提问"] = /i28-A7|阻塞\s*\d/.test(asks) ? "present" : /暂无/.test(asks) ? "unknown" : "absent";
+      observed["桌面中区标签"] = (await page.getByRole("tab", { name: "谁在干活", exact: true }).count()) && (await page.getByRole("tab", { name: "团队", exact: true }).count())
+        ? "present" : "absent";
+      observed["手机顶栏按钮"] = "not_run";
+    }
     await shot("home");
 
     await openTask(page, home, narrow);
-    Object.assign(observed, await observeTask(page, FOCUS, home.details[FOCUS]!.task.title));
+    Object.assign(observed, await observeTask(page, home));
     await shot("task");
+    observed["依赖边·建立者/时间"] = await observeEdge(page);
+    await shot("edge");
     await page.keyboard.press("Escape");
 
     // 版本页 / 对比页：进 feature 的子 DAG，点「版本」，再点「对比」（默认上一版 → 当前版）
@@ -210,6 +287,8 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     await page.getByRole("button").filter({ has: page.getByText(first.title, { exact: true }) }).first().click();
     await page.getByText(home.details[FOCUS]!.task.title, { exact: true }).first().waitFor();
     observed["子 DAG 节点"] = "present";
+    Object.assign(observed, await observeFeaturePage(page, home, narrow));
+    if (narrow) notes.push("390：手机子 DAG 没有大纲栏，G3 / G10 轮次记 not_run（节点处理人照测）");
     await page.getByRole("button", { name: /^(版本|v\d+)$/ }).first().click();
     await page.getByRole("button", { name: "对比", exact: true }).first().waitFor();
     await page.waitForFunction(`!document.body.innerText.includes("正在读取")`, undefined, { timeout: 5000 })
@@ -218,6 +297,9 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     // 只认版本页自己的「暂无历史版本」（P1-F 的文案）：页面别处（指标条）本来就有「暂无」
     const noHistory = /暂无历史版本/.test(await page.locator("body").innerText());
     observed["版本历史"] = rows > 0 ? "present" : noHistory ? "unknown" : "absent";
+    const vrows = await page.locator("button[aria-pressed]").filter({ hasText: /^v\d/ }).allInnerTexts();
+    observed["版本元数据（提出人/时间）"] = vrows.length ? (vrows.every((t) => /pm-a/.test(t) && /\d+\/\d+ \d+:\d+/.test(t)) ? "present" : "absent")
+      : noHistory ? "unknown" : "absent";
     await shot("versions");
     const cmp = page.getByRole("button", { name: "对比", exact: true }).first();
     if (await cmp.isEnabled()) {
@@ -271,27 +353,32 @@ const launch = () => chromium.launch({ headless: true, ...(process.env.CHROME_PA
 test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/390 × light/dark matrix against §3", async () => {
   if (!out) return;
   mkdirSync(out, { recursive: true });
-  const home = generateHomeFixture(), bundle = await bundleHarness(out);
-  const { server, unexpected } = serve(home, bundle);
+  const home = generateHomeFixture(), bundle = await bundleHarness(out), team = await teamFromHome(home);
+  const { server, unexpected } = serve(home, team, bundle);
   const browser = await launch(), shots: Shot[] = [];
-  const report: { scenario: string; matrix: { section: string; ref: string; local: TeamState | "not_run"; team: TeamState | "not_run" }[];
+  const report: { scenario: string; matrix: { section: string; ref: string; local: TeamState | "not_run"; team: TeamState | "not_run"; limit?: string }[];
     results: MatrixResult[]; differing: string[]; notes: string[] }[] = [];
+  const seen: { local: Observed[]; team: Observed[] } = { local: [], team: [] };
   try {
     for (const width of [1200, 390]) for (const theme of ["light", "dark"] as const) {
       const local = await runSide(browser, String(server.url), home, width, theme, "local", shots, out);
       const team = await runSide(browser, String(server.url), home, width, theme, "team", shots, out);
       const scenario = `${width}-${theme}`;
       const results = [...compareMatrix("local", local.observed), ...compareMatrix("team", team.observed)];
-      report.push({ scenario, matrix: MATRIX.map((r) => ({ section: r.section, ref: r.ref, local: local.observed[r.section] ?? "not_run", team: team.observed[r.section] ?? "not_run" })),
+      report.push({ scenario, matrix: MATRIX.map((r) => ({ section: r.section, ref: r.ref, local: local.observed[r.section] ?? "not_run",
+        team: team.observed[r.section] ?? "not_run", ...(r.limit ? { limit: r.limit } : {}) })),
         results, differing: differing(local.observed, team.observed), notes: [...local.notes, ...team.notes] });
       await Bun.write(resolve(out, `calls-${scenario}.json`), JSON.stringify({ local: local.calls, team: team.calls }, null, 2));
       expect({ scenario, external: [...local.external, ...team.external] }).toEqual({ scenario, external: [] });
       expect({ scenario, errors: [...local.errors, ...team.errors] }).toEqual({ scenario, errors: [] });
+      seen.local.push(local.observed); seen.team.push(team.observed);
     }
     await Bun.write(resolve(out, "matrix.json"), JSON.stringify(report, null, 2));
+    // 每个没写 limit 的 §3 行两边都至少在一个场景里真测到：检测器漏一行就是基准悄悄缩水
+    expect({ local: unprobed(seen.local), team: unprobed(seen.team) }).toEqual({ local: [], team: [] });
     expect(unexpected).toEqual([]);
     // 已知缺口照实列出（不让它变绿），但任何 fail / stale_gap 都要红：前者是回归或夹具问题，后者说明缺口已修、该删 gap
-    const bad = report.flatMap((r) => r.results.filter((x) => x.verdict === "fail" || x.verdict === "stale_gap").map((x) => ({ scenario: r.scenario, ...x })));
+    const bad = report.flatMap((r) => r.results.filter((x) => x.verdict === "fail" || x.verdict === "stale_gap" || x.verdict === "unlisted").map((x) => ({ scenario: r.scenario, ...x })));
     expect(bad).toEqual([]);
     // 桌面上 T3 / T5 / T7 的差异必须检得出（旧夹具检不出，见下一条）
     for (const r of report.filter((x) => x.scenario.startsWith("1200"))) for (const s of ["阶段用时", "最近 3 件事", "审查"]) expect(r.differing).toContain(s);
@@ -300,23 +387,21 @@ test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/3
 
 test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T3/T5/T7; controlled mutation is caught", async () => {
   if (!out) return;
-  const home = generateHomeFixture(), bundle = await bundleHarness(out);
+  const home = generateHomeFixture(), bundle = await bundleHarness(out), teamData = await teamFromHome(home);
   const browser = await launch();
-  const legacy = serve(home, bundle, true), fresh = serve(home, bundle);
+  const legacy = serve(home, teamData, bundle, true), fresh = serve(home, teamData, bundle);
+  const pages: Awaited<ReturnType<typeof guardedPage>>[] = [];
   try {
-    const one = async (url: string) => {
-      const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
-      await page.goto(`${url}?side=local&project=${home.project}&team=${home.team}`);
-      await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
-      await openTask(page, home, false);
-      return { page, observed: await observeTask(page, FOCUS, home.details[FOCUS]!.task.title) };
+    const one = async (url: string, side: "local" | "team") => {
+      const g = await guardedPage(browser, url);
+      pages.push(g);
+      await g.page.goto(`${url}?side=${side}&project=${home.project}&team=${home.team}`);
+      await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+      await openTask(g.page, home, false);
+      return { page: g.page, observed: await observeTask(g.page, home) };
     };
-    const old = await one(String(legacy.server.url)), now = await one(String(fresh.server.url));
-    const teamPage = await browser.newPage({ viewport: { width: 1200, height: 900 } });
-    await teamPage.goto(`${fresh.server.url}?side=team&project=${home.project}&team=${home.team}`);
-    await teamPage.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
-    await openTask(teamPage, home, false);
-    const team = await observeTask(teamPage, FOCUS, home.details[FOCUS]!.task.title);
+    const old = await one(String(legacy.server.url), "local"), now = await one(String(fresh.server.url), "local");
+    const { page: teamPage, observed: team } = await one(String(fresh.server.url), "team");
     const t357 = ["阶段用时", "最近 3 件事", "审查"];
     // 旧红：本机由团队模型生成时，本机这三块也是空的 → 两边「一致」，差异检不出；本机期望 present 的比对报 fail
     expect(t357.filter((s) => differing(old.observed, team).includes(s))).toEqual([]);
@@ -326,15 +411,52 @@ test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T
     expect(compareMatrix("local", now.observed).filter((r) => t357.includes(r.section)).map((r) => r.verdict)).toEqual(["pass", "pass", "pass"]);
     // 受控变异：在真实页面里删掉「最近 3 件事」区块，检测器必须看成 absent、比对必须报 fail（检测器真的在读 DOM）
     await now.page.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "最近 3 件事")?.parentElement?.remove()`);
-    const mutated = await observeTask(now.page, FOCUS, home.details[FOCUS]!.task.title);
+    const mutated = await observeTask(now.page, home);
     expect(mutated["最近 3 件事"]).toBe("absent");
     expect(compareMatrix("local", mutated).find((r) => r.section === "最近 3 件事")!.verdict).toBe("fail");
+    // 受控变异：r1 新增的检测器同样读 DOM——去掉本机详情里的 PR 链接，T12 必须变 absent / fail
+    expect(mutated["PR"]).toBe("present");
+    await now.page.evaluate(`document.querySelectorAll("aside a[href*='/pull/']").forEach((a) => a.remove())`);
+    const noPr = await observeTask(now.page, home);
+    expect(compareMatrix("local", noPr).find((r) => r.section === "PR")).toMatchObject({ observed: "absent", verdict: "fail" });
     // 受控变异：把团队详情里的「审查」换成「仅主场可见」占位，检测器必须看成 home_only，已知缺口变 stale_gap
     await teamPage.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "参与者").parentElement
       .insertAdjacentHTML("beforebegin", "<div><h5>审查</h5><div>审查原文仅主场可见</div></div>")`);
-    const placeholder = await observeTask(teamPage, FOCUS, home.details[FOCUS]!.task.title);
+    const placeholder = await observeTask(teamPage, home);
     expect(placeholder["审查"]).toBe("home_only");
     expect(compareMatrix("team", placeholder).find((r) => r.section === "审查")!.verdict).toBe("stale_gap");
-    await Bun.write(resolve(out, "old-red-new-green.json"), JSON.stringify({ legacyLocal: old.observed, homeLocal: now.observed, team, mutated, placeholder }, null, 2));
-  } finally { await browser.close(); legacy.server.stop(true); fresh.server.stop(true); }
+    // 三个页面（旧本机 / 新本机 / 团队）都在受限上下文里，出站请求为零
+    expect(pages.map((g) => ({ external: g.external, errors: g.errors }))).toEqual(pages.map(() => ({ external: [], errors: [] })));
+    await Bun.write(resolve(out, "old-red-new-green.json"), JSON.stringify({ legacyLocal: old.observed, homeLocal: now.observed, team, mutated, noPr, placeholder }, null, 2));
+  } finally { for (const g of pages) await g.ctx.close(); await browser.close(); legacy.server.stop(true); fresh.server.stop(true); }
+}, 180_000);
+
+test.skipIf(!out)("team-parity-C egress sentinel: a page in the guarded context cannot reach a second loopback origin", async () => {
+  if (!out) return;
+  const home = generateHomeFixture(), bundle = await bundleHarness(out), teamData = await teamFromHome(home);
+  let hits = 0;
+  // 另一个回环端口 = 另一个源：拦截按源判，所以它代表「任何外部地址」，又保证测试本身不出本机
+  const sentinel = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { hits++; return new Response("hit"); },
+    websocket: { message() {} } });
+  const { server } = serve(home, teamData, bundle), browser = await launch();
+  const g = await guardedPage(browser, String(server.url));
+  try {
+    await g.page.goto(`${server.url}?side=team&project=${home.project}&team=${home.team}`);
+    await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
+    const target = String(sentinel.url), ws = target.replace(/^http/, "ws");
+    // 每个探针 3s 内没有结论就记 timeout（断言会红），不让页面里的悬挂拖到用例超时
+    const probe = await g.page.evaluate(`(() => {
+      const cap = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r("timeout"), 3000))]);
+      return Promise.all([
+        cap(fetch(${JSON.stringify(target)}, { mode: "no-cors" }).then(() => "reached", () => "blocked")),
+        cap(new Promise((r) => { const s = new WebSocket(${JSON.stringify(ws)}); s.onopen = () => r("reached"); s.onerror = s.onclose = () => r("blocked"); })),
+        cap(new Promise((r) => { const i = new Image(); i.onload = () => r("reached"); i.onerror = () => r("blocked"); i.src = ${JSON.stringify(`${target}img.png`)}; })),
+      ]);
+    })()`);
+    expect({ probe, hits }).toEqual({ probe: ["blocked", "blocked", "blocked"], hits: 0 });
+    expect(g.external.map((u) => new URL(u).origin).sort()).toEqual([new URL(target).origin, new URL(target).origin, new URL(ws).origin].sort());
+    // 对照：同一个 sentinel 不经过受限上下文时确实能被打到（证明上面的 0 不是 sentinel 本身坏了）
+    expect(await (await fetch(target)).text()).toBe("hit");
+    expect(hits).toBe(1);
+  } finally { await g.ctx.close(); await browser.close(); server.stop(true); sentinel.stop(true); }
 }, 120_000);

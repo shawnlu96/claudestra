@@ -1,9 +1,9 @@
 /**
- * team-parity-C 的唯一数据源：一份「主场本机台账」形状的合成数据（LedgerOverview + 每张卡的 TaskDetail + DAG 版本），
- * 本地路由只吐它，团队路由只吐 home-to-team-fixture.ts 从它推出来的投影——两边不再各造一份（docs/team/team-collab-parity-plan.md §5.1 P1-C）。
- * 事件按 LedgerEventView 带完整 data（stage from/to、review round/verdict/p0..p2、verify result），审查结论 pass / changes / block 各至少一条。
- * 台账里有、总览不带的行级事实（rev、headSHA、步骤行、提问行、导入时审过的摘要 / 成员代号）放在 rows，投影规则只读这些。
- * 纯模块，tests/ 直接 import；确定性（同参数同输出），截图可对比。
+ * team-parity-C 的唯一数据源：一份「主场本机台账」形状的合成数据（LedgerOverview + 每张卡的 TaskDetail + DAG 版本）。本地路由只吐它；
+ * 团队路由只吐 tests/web-team-parity-browser-center.test.ts 把它落进临时台账、走生产导出 / 投影器 / 中心读口得到的投影（§5.1 P1-C）。
+ * 数据要过真台账和中心的校验（一句话 ≤ 60 字、实例 id 不像密钥、规划模式不改已绑卡节点）。事件带完整 data（stage from/to、
+ * review round/verdict/p0..p2、verify result），审查结论 pass / changes / block 各至少一条。台账里有、总览不带的行级事实
+ * （rev、headSHA、步骤行、提问行、导入时审过的摘要 / 成员代号）放在 rows。纯模块，确定性（同参数同输出），截图可对比。
  */
 import type { LedgerDepView, LedgerEventView, LedgerOverview, LedgerTaskView, Stage, TaskMetricsView } from "../collab-model";
 import type { StageEntryView, TaskDetail } from "../collab-detail-model";
@@ -11,7 +11,7 @@ import type { BoardNode, DagBoard, DagDiffResponse, FeatureCard, FeatureDetail a
 import type { ProductBoard } from "../../../lib/api/product-board";
 import type { WorkBoard, WorkRow } from "../work/work-types";
 
-/** 主场台账里一张卡的行级事实：mirrorTaskProjections 读的正是这些（src/lib/shared-ledger-projector.ts） */
+/** 主场台账里一张卡的行级事实：落进临时台账后 mirrorTaskProjections 读的正是这些（src/lib/shared-ledger-projector.ts） */
 export interface HomeLedgerRow {
   rev: number;
   headSHA: string | null;
@@ -22,7 +22,7 @@ export interface HomeLedgerRow {
 }
 export interface HomeDagNode { key: string; oneLine: string; deps: string[]; fileGlobs: string[]; estimate: string; taskId: string | null }
 export interface HomeFeature {
-  id: string; centerId: string; title: string; ownerWords: string;
+  id: string; title: string; ownerWords: string;
   versions: { meta: VersionMeta; nodes: HomeDagNode[] }[];
 }
 export interface HomeFixture {
@@ -52,7 +52,8 @@ const PLANS: (CardPlan | null)[][] = [[
   { stage: "verified", path: upTo("spec", "restate", "build", "review", "fix", "review", "merge", "live", "verified"), reviews: [CHANGES, PASS], pr: "412", commit: true },
   { stage: "merge", path: upTo("spec", "restate", "build", "review", "merge"), reviews: [PASS], pr: "https://github.com/shawnlu96/claudestra/pull/413" },
   { stage: "review", path: upTo("spec", "restate", "build", "review"), reviews: [], pr: "414" },
-  { stage: "fix", path: upTo("spec", "restate", "build", "review", "fix"), reviews: [BLOCK], pr: "415" },
+  // 交付写口只收完整 PR 链接（order-deliver-pr.ts deliverPrPatch）：焦点卡照生产形状，其余保留手填的纯数字
+  { stage: "fix", path: upTo("spec", "restate", "build", "review", "fix"), reviews: [BLOCK], pr: "https://github.com/shawnlu96/claudestra/pull/415", commit: true },
   { stage: "build", path: upTo("spec", "restate", "build"), reviews: [] },
   { stage: "build", path: upTo("spec", "restate", "build"), reviews: [], ask: true },
   null,
@@ -69,7 +70,7 @@ const VERBS = ["复用本地协作视图的组件并接上中心数据源", "补
 const STEP_OF: Partial<Record<Stage, string>> = { restate: "restate", build: "write", review: "review", fix: "fix", merge: "merge", verified: "verify" };
 const STEP_MS = 40 * 60_000;
 
-/** 确定性的十六进制串（head、中心 id）：同 key 同输出 */
+/** 确定性的十六进制串（head、主场实例 id）：同 key 同输出 */
 function hex(key: string, len: number): string {
   let h = 2166136261, out = "";
   while (out.length < len) {
@@ -78,7 +79,7 @@ function hex(key: string, len: number): string {
   }
   return out.slice(0, len);
 }
-export const uuidOf = (key: string) => { const x = hex(key, 32); return `${x.slice(0, 8)}-${x.slice(8, 12)}-4${x.slice(13, 16)}-a${x.slice(17, 20)}-${x.slice(20)}`; };
+const uuidOf = (key: string) => { const x = hex(key, 32); return `${x.slice(0, 8)}-${x.slice(8, 12)}-4${x.slice(13, 16)}-a${x.slice(17, 20)}-${x.slice(20)}`; };
 
 interface Built { view: LedgerTaskView; detail: TaskDetail; row: HomeLedgerRow }
 
@@ -151,7 +152,7 @@ export function generateHomeFixture(opts: { now?: number } = {}): HomeFixture {
     const letter = String.fromCharCode(65 + f), fid = `feat-${letter.toLowerCase()}`;
     const nodes: HomeDagNode[] = plans.map((plan, n) => {
       const key = `i28-${letter}${n + 1}`;
-      const title = `${SUBJECTS[(f * 3 + n) % SUBJECTS.length]}：${VERBS[(n + f) % VERBS.length]}（第 ${n + 1} 步，long title to wrap）`;
+      const title = `${SUBJECTS[(f * 3 + n) % SUBJECTS.length]}：${VERBS[(n + f) % VERBS.length]}（第 ${n + 1} 步·long title）`;
       const deps = n === 0 ? [] : n % 3 === 0 ? [`i28-${letter}${n}`, `i28-${letter}${n - 2}`] : [`i28-${letter}${n}`];
       return { key, oneLine: title, deps, fileGlobs: [`web/features/collab/${key.toLowerCase()}/**`], estimate: `${1 + (n % 4)}h`, taskId: plan ? key : null };
     });
@@ -168,8 +169,10 @@ export function generateHomeFixture(opts: { now?: number } = {}): HomeFixture {
       createdAt: at, cancels: [], scopeChange: false, askId: null };
     const v2: VersionMeta = { version: 2, reasonKind: "requirement_change", reasonText: "补上手机详情与提问节点", proposedBy: "agent-pm-a",
       approvedBy: "owner", createdAt: at + 3600_000, cancels: [], scopeChange: true, askId: null };
-    const first = nodes.slice(0, -2).map((n, i) => i === nodes.length - 3 ? { ...n, oneLine: `${n.oneLine}（v1 原标题）` } : n);
-    features.push({ id: fid, centerId: uuidOf(`center:${fid}`), title: `${SUBJECTS[f]} feature ${f + 1}：${VERBS[f]}`, ownerWords: VERBS[(f + 2) % VERBS.length]!,
+    // v2 新开最后一张卡、改写没开卡的计划节点的一句话：绑了卡的节点在规划模式下不能改（中心按 dag.rewrite 规则拒收这种历史）
+    const kept = nodes.filter((_, i) => i !== nodes.length - 2), keys = new Set(kept.map((n) => n.key));
+    const first = kept.map((n) => ({ ...n, deps: n.deps.filter((d) => keys.has(d)), ...(n.taskId ? {} : { oneLine: `${[...n.oneLine].slice(0, 40).join("")}（v1 原标题）` }) }));
+    features.push({ id: fid, title: `${SUBJECTS[f]} feature ${f + 1}：${VERBS[f]}`, ownerWords: VERBS[(f + 2) % VERBS.length]!,
       versions: [{ meta: v1, nodes: first }, { meta: v2, nodes }] });
   });
   const byId = new Map(tasks.map((t) => [t.id, t]));
@@ -182,7 +185,7 @@ export function generateHomeFixture(opts: { now?: number } = {}): HomeFixture {
     })));
   const overview: LedgerOverview = { exists: true, now, meta: { pms: ["agent-pm-a"], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } },
     items: features.map((f) => ({ id: f.id, title: f.title, oneLine: f.ownerWords })), tasks, deps };
-  return { team: "team-a", project, now, sourceInstanceId: hex("home-instance", 32), seq: seq.n, commits, overview, details, rows, features };
+  return { team: "team-a", project, now, sourceInstanceId: uuidOf("home-instance"), seq: seq.n, commits, overview, details, rows, features };
 }
 
 // ---- 本地路由的其余响应：全部从上面这一份推，不另造数据 ----
