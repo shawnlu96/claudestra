@@ -8,6 +8,7 @@ import { parseSharedLedgerCommand, parseSharedLedgerImportControl } from "./shar
 import { choice, digest, id, integer, literal, nullable, object, record } from "./shared-ledger-contract-schema.js";
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
+import { EXT_CAPABILITIES_OFF, parseSharedLedgerReadResponse, type SharedLedgerExtCapabilities } from "./shared-ledger-contract-reads.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { SharedLedgerCache, type SharedLedgerCacheIdentity } from "./shared-ledger-cache.js";
 
@@ -96,6 +97,33 @@ export class SharedLedgerClient {
     if (!/^[A-Za-z0-9_.:-]+$/.test(id)) throw new Error("invalid feature id");
     const result = parseSharedLedgerResponse("feature", await this.request("GET", `features/${id}`));
     if (result.teamId !== this.connection.teamId || result.feature.id !== id) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  /** Only 404 (a center without the extension) maps to all-off; any other rejection or bad body still throws. */
+  async extCapabilities(): Promise<SharedLedgerExtCapabilities> {
+    let raw: unknown;
+    try { raw = await this.request("GET", "ext-capabilities"); }
+    catch (error) {
+      if (error instanceof SharedLedgerRemoteError && error.status === 404) return { ...structuredClone(EXT_CAPABILITIES_OFF), teamId: this.connection.teamId };
+      throw error;
+    }
+    const result = parseSharedLedgerReadResponse("extCapabilities", raw);
+    if (result.teamId !== this.connection.teamId) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  async versions(id: string) {
+    if (!/^[A-Za-z0-9_.:-]+$/.test(id)) throw new Error("invalid feature id");
+    const result = parseSharedLedgerReadResponse("versions", await this.request("GET", `features/${id}/versions`));
+    if (result.teamId !== this.connection.teamId) throw new SharedLedgerUnavailable();
+    return result;
+  }
+  async activity(id: string, afterServerSeq: number) {
+    if (!/^[A-Za-z0-9_.:-]+$/.test(id)) throw new Error("invalid feature id");
+    if (!Number.isSafeInteger(afterServerSeq) || afterServerSeq < 0) throw new Error("invalid activity cursor");
+    const result = parseSharedLedgerReadResponse("activity", await this.request("GET", `features/${id}/activity/${afterServerSeq}`));
+    if (result.teamId !== this.connection.teamId || result.items.some((i) => i.src === "center" && i.serverSeq <= afterServerSeq)) {
+      throw new SharedLedgerUnavailable();
+    }
     return result;
   }
   async receipt(requestId: string) {
