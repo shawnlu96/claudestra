@@ -76,7 +76,8 @@ export function generateTeamFixture(opts: { seed?: number; features?: number; no
     }
     const feature = { id: fid, projectId: project, title: `${SUBJECTS[f % SUBJECTS.length]} feature ${f + 1}：${VERBS[f % VERBS.length]}`,
       description: VERBS[(f + 2) % VERBS.length]!, rev: 3 + f, version: 2, authorityMode: "planning" as const, homeInstanceId: home,
-      executorInstanceIds: [home], status: "active" as const, counts: { total: perFeature, completed: tasks.filter((t) => t.stage === "done" || t.stage === "verified").length, blocked: 0, missing: 0 },
+      executorInstanceIds: [home], status: "active" as const,
+      counts: { total: perFeature, completed: tasks.filter((t) => t.stage === "done" || t.stage === "verified").length, blocked: 0, missing: 0 },
       updatedBy: "person-a", updatedAt: now, projection: { sourceInstanceId: home, sourceSeq: 40, observedAt: now, receivedAt: now } };
     details.push({ schemaVersion: 1, teamId: team, serverSeq: 40, capabilities: caps, feature, dag: { version: 2, nodes, bindings }, tasks });
   }

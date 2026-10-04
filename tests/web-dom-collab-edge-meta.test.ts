@@ -37,7 +37,7 @@ let ui: {
   sharedCollabProject: (i: Identity) => string;
   EdgePage: (p: { deps: LedgerDepView[]; ov: LedgerOverview; onPick: (id: string) => void; onClose: () => void; tr: (s: string, p?: Record<string, string | number>) => string }) => unknown;
   hhmm: (ms: number) => string;
-  TeamFactsSec: (p: { task: LedgerTaskView | undefined; tr: (s: string, p?: Record<string, string | number>) => string }) => unknown;
+  TeamFactsSec: (p: { id: string; ov: Pick<LedgerOverview, "tasks">; tr: (s: string, p?: Record<string, string | number>) => string }) => unknown;
   Overview: (p: Record<string, unknown>) => unknown;
   homeView: (ov: LedgerOverview, now: number) => unknown;
   openCollabTask: (id: string | null) => void;
@@ -178,7 +178,8 @@ async function mountView(side: "local" | "team", width: number) {
 }
 
 /** P1-A 已验证的禁止项：团队视图不得用团队键碰本机接口 */
-const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:.*\/work/, /\/team\/activity\?project=shared-ledger:/, /\/peers\/contacts/, /\/team\/quota/, /\/ledger\/shared-ledger:/];
+const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:.*\/work/, /\/team\/activity\?project=shared-ledger:/,
+  /\/peers\/contacts/, /\/team\/quota/, /\/ledger\/shared-ledger:/];
 
 test("复现测试：团队总览显示镜像状态；本机总览没有", async () => {
   const team = await mountView("team", 1200);
@@ -209,7 +210,7 @@ test("复现测试：团队详情显示成员代号 / 主场实例 / 8 位 head 
 
 test("复现测试：缺字段 / 没有镜像证据显示暂无，不补成最新；阻塞提问真 0 显示 0", async () => {
   const task = { ...homeLedger().tasks[1]!, team: { assigneeCode: null, executorInstanceId: null, head: null, blockingAsks: 0, mirror: null } };
-  const v = await render(h(ui.TeamFactsSec, { task, tr: ui.zh }));
+  const v = await render(h(ui.TeamFactsSec, { id: task.id, ov: { tasks: [task] }, tr: ui.zh }));
   const facts = Object.fromEntries(Array.from(v.host.querySelectorAll("[data-team-fact]")).map((e) => [e.getAttribute("data-team-fact"), e.textContent]));
   expect(facts).toEqual({ 成员代号: "成员代号：暂无", 执行实例: "执行实例：暂无", head: "head：暂无", 阻塞提问: "阻塞提问：0", 镜像: "镜像：暂无" });
   await v.unmount();
