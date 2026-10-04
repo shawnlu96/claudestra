@@ -8,7 +8,7 @@ import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-deliv
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld } from "./lib/held-pac.js";
-import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
+import { missingReplyFiles, stageApiReplyFiles } from "./bridge/api-reply-files.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
@@ -686,19 +686,14 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
+  const missing = await missingReplyFiles(env.meta.files || []); // 附件不在就整条报错、请求不出队，别回一个看似成功的空结果
+  if (missing) return { envelope: env, outcome: { kind: "error", error: new Error(missing) } };
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key);
   const pending = queue ? takeApiPending(queue, env.meta.inReplyTo) : undefined; // 作废回显只对它自己那条请求
   if (queue && queue.length === 0) pendingApiRequests.delete(key);
 
-  // 附件登记 → 下载 URL（属主 = 该 token，GET /api/v1/files/:id 校验）
-  const files = (env.meta.files || []).map((p) => {
-    const id = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const name = p.split("/").pop() || "file";
-    apiFiles.set(id, { path: p, tokenId: to.tokenId, name });
-    return { name, url: `/api/v1/files/${id}` };
-  });
   const threadId = pending?.threadId || env.meta.threadId;
   const agentName = pending?.agentName ||
     (env.from.kind === "local" ? env.from.agentName : undefined) ||
@@ -709,12 +704,13 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // "?" 的幽灵会话，用户在正确的会话里什么也看不到（owner 两次实报「问号频道」，
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
-  // reply 的附件（常在临时目录）拷进 inbox 供网页内联显示，并记账「谁、哪个原路径 → 哪个副本」（媒体索引按账认领，见 lib/media-outbound.ts）
-  const eventFiles = (env.meta.sentFiles = await copyOutboundToInbox(env.meta.files || [], agentName)); // ask-reply.ts 把它记进作答附件
+  // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles });
+  const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
-    files: files.length ? files : undefined,
+    files: staged.files.length ? staged.files : undefined,
     threadId,
     agent: agentName,
   };
@@ -731,7 +727,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
   mirrorApiExchange(to, fromChannelId, `[🌐 API→${to.name}] ${env.content}`).catch(() => {});
 
-  return { envelope: env, outcome: { kind: "sent" } };
+  return { envelope: env, outcome: { kind: "sent", ...(staged.warning ? { warning: staged.warning } : {}) } };
 }
 
 /** R2：API 对话镜像到 agent 的 Discord 频道（principal.mirror === false 时不发） */
@@ -1839,8 +1835,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
           break;
         }
-        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId); // edit_message 只准改自己发的（bridge/edit-guard.ts）
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash, held: heldLocalMsgs.stat(fromChannelId) } }));
+        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId), { askId, askHash } = env.meta, { warning } = delivery.outcome; // edit_message 只准改自己发的（bridge/edit-guard.ts）
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId, askHash, held: heldLocalMsgs.stat(fromChannelId), warning } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
         // api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
