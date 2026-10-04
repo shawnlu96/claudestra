@@ -92,7 +92,7 @@ describe("文案与按钮", () => {
 
 describe("重置卡截止说明", () => {
   test("Claude 的卡：剩几次（>1 才写）、到限额才能用；Codex 的 credit 只有到期", () => {
-    const at = new Date(2020, 9, 4, 22, 28).getTime();
+    const at = new Date(2026, 9, 4, 22, 28).getTime();
     const keys = (x: Parameters<typeof expiryParts>[0]) => expiryParts(x).map((p) => p.key);
     expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
     expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
