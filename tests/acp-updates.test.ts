@@ -189,6 +189,16 @@ describe("压缩完成（compaction_update / _meta.claudestra.compacted）", () 
     expect(t.push(cu("completed", "cmp_9"))).toEqual([]);
   });
 
+  test("终态去重跨容量边界：之后再来 500+ 个别的 id，旧 id 迟到的 completed 仍不出边界（completed / failed / cancelled）", () => {
+    for (const initial of ["completed", "failed", "cancelled"]) {
+      const t = codex();
+      t.push(cu(initial, "original"));
+      for (let i = 0; i < 600; i++) t.push(cu("completed", `later-${i}`));
+      expect(t.push(cu("completed", "original"))).toEqual([]);
+      expect(t.push(cu("completed", "later-0"))).toEqual([]);
+    }
+  });
+
   test("failed / cancelled / 未知状态 / 缺 id 都不出边界", () => {
     const t = codex();
     for (const u of [cu("cancelled"), cu("paused", "cmp_2"), { sessionUpdate: "compaction_update", status: "completed" }]) expect(t.push(u)).toEqual([]);

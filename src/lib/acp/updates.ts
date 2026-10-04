@@ -118,16 +118,24 @@ function mergeTool(t: ToolState, u: Rec): void {
 
 /**
  * ACP compaction_update（unstable，宿主在 initialize 声明 session.compaction 才会收到；来源不是它就一概不理）。同一 compactionId
- * 到了终态就不再理：重复的 completed、终态后迟到的更新都不出第二条。completed → 边界的 compactMetadata，in_progress / failed → 进度句
+ * 到了终态就不再理：重复的 completed、终态后迟到的更新都不出第二条。completed → 边界的 compactMetadata，in_progress / failed → 进度句。
+ * 终态 id 不按数量淘汰：compactionId 只在会话内唯一，translator 随会话 id 换新（host.ts），所以终态记到会话结束；
+ * 淘汰了再来的 completed 会被当成首次完成，把失败 / 取消的压缩也报成成功。只有「已开始」的 id 有上限（只管进度句去重）
  */
 function compactionTracker(compact: CompactSource): (u: Rec) => { boundary: Rec } | { progress: string } | null {
-  const seen = new Map<string, boolean>(); // id → 是否已到终态
+  const ended = new Set<string>();
+  const started = new Set<string>();
   return (u) => {
     const id = typeof u.compactionId === "string" ? u.compactionId : "";
-    if (compact.from !== "compaction-update" || !id || seen.get(id)) return null;
-    const first = !seen.has(id);
-    seen.set(id, ["completed", "failed", "cancelled"].includes(u.status));
-    if (seen.size > DONE_CAP) seen.delete(seen.keys().next().value as string);
+    if (compact.from !== "compaction-update" || !id || ended.has(id)) return null;
+    const first = !started.has(id);
+    if (["completed", "failed", "cancelled"].includes(u.status)) {
+      ended.add(id);
+      started.delete(id);
+    } else {
+      started.add(id);
+      if (started.size > DONE_CAP) started.delete(started.values().next().value as string);
+    }
     if (u.status === "completed") return { boundary: { trigger: compact.trigger?.() ?? "auto" } };
     if (u.status === "failed") return { progress: `上下文压缩没成功${typeof u.error === "string" && u.error ? `：${u.error}` : ""}` };
     return u.status === "in_progress" && first ? { progress: "📦 正在压缩上下文…" } : null;
