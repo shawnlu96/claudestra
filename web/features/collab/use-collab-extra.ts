@@ -108,7 +108,7 @@ export function useLastSeen(project: string, off = false): { state: SinceState; 
   const gen = useRef(0);
 
   useEffect(() => {
-    if (off) return void setState(EMPTY);
+    if (off) return;
     hookPage();
     clearTimeout(leaveMarks.get(project));
     leaveMarks.delete(project);
@@ -166,7 +166,7 @@ export function useLastSeen(project: string, off = false): { state: SinceState; 
     inherited.delete(project);
     sendMark(project);
   }, [project, off]);
-  return { state, dismiss };
+  return { state: off ? EMPTY : state, dismiss };
 }
 
 /** description 晚到的占位 started：过这么久按快照重建一次（bridge 取快照时会重读 meta） */
