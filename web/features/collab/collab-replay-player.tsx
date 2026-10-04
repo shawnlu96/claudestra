@@ -7,7 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fmtDuration, type Tr } from "./collab-model";
 import { fmtEventTime, type TaskDetail } from "./collab-detail-model";
 import { Icon, type IconName } from "./collab-icons";
-import { hasReplay, nextIndex, replayFrames, segmentsAt } from "./collab-replay";
+import { hasReplay, nextIndex, replayFrames, segmentsAt, stageUnknownAt } from "./collab-replay";
 import base from "./collab.module.css";
 import s from "./collab-v2.module.css";
 
@@ -17,10 +17,19 @@ const EVENT_ICON: Record<string, IconName> = {
   deploy: "zap", verify: "shieldCheck", rollback: "rotateCcw", note: "history",
 };
 
-/** 收起时不拼文案、不算帧（几千条事件要几百毫秒，审查 T12C r1 P2-7），只数能成帧的事件：不到 2 帧没什么可回放 */
-export function CollabReplay({ d, tr }: { d: TaskDetail; tr: Tr }) {
+/**
+ * 收起时不拼文案、不算帧（几千条事件要几百毫秒，审查 T12C r1 P2-7），只数能成帧的事件：不到 2 帧或没有阶段证据没什么可回放。
+ * homeOnly = 源声明回放只在主场（团队视图）：回放不了时按钮位置给一个点不动的「回放仅主场」，不整块消失。
+ */
+export function CollabReplay({ d, tr, homeOnly = false }: { d: TaskDetail; tr: Tr; homeOnly?: boolean }) {
   const [open, setOpen] = useState(false);
-  if (!hasReplay(d.events)) return null;
+  if (!hasReplay(d.events))
+    return homeOnly ? (
+      <button type="button" className={`${base.btn} ${s.rpOpen}`} disabled data-home-only="replay">
+        <Icon name="play" size={12} />
+        {tr("回放仅主场")}
+      </button>
+    ) : null;
   if (!open)
     return (
       <button type="button" className={`${base.btn} ${s.rpOpen}`} onClick={() => setOpen(true)}>
@@ -59,6 +68,7 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
 
   // 按钮只在能成两帧以上时出现（hasReplay）；这里再兜一次：数据异常到一帧都没有时不画
   if (!cur) return null;
+  const unknown = stageUnknownAt(cur);
   const tone = cur.stage === "fix" || cur.stage === "blocked" || cur.kind === "rollback" ? base.red : base.neutral;
   const toggle = () => {
     // 停在末帧时再点播放 = 从头再放一遍
@@ -93,6 +103,11 @@ function Player({ d, tr, onClose }: { d: TaskDetail; tr: Tr; onClose: () => void
           </div>
         ))}
       </div>
+      {unknown && (
+        <div className={base.rr} data-stage-unknown={unknown}>
+          <div className={base.tx}>{tr(unknown === "stage" ? "阶段未知" : "受阻前阶段未知")}</div>
+        </div>
+      )}
       <div className={s.rpNow}>
         <span className={s.ic}>
           <Icon name={EVENT_ICON[cur.kind] ?? "history"} size={14} />
