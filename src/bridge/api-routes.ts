@@ -15,6 +15,7 @@ import { sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
 import { apiMirrorBody, withAttachmentLines } from "../lib/inbound-body.js";
+import { peerSeesAnswer } from "../lib/peer-reply-files.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
 import {
@@ -178,7 +179,7 @@ export function sweepApiState(now = Date.now()): void {
     else if (fresh.length !== queue.length) pendingApiRequests.set(key, fresh);
   }
   for (const [tid, hit] of apiThreadResults.entries()) {
-    if (now - hit.ts > (hit.result.reply?.trim() ? API_RESULT_TTL_MS : API_PENDING_TTL_MS)) apiThreadResults.delete(tid); // 空结果留 2 小时：peer 还在轮询等补答
+    if (now - hit.ts > (peerSeesAnswer(hit.result) ? API_RESULT_TTL_MS : API_PENDING_TTL_MS)) apiThreadResults.delete(tid); // 空结果留 2 小时：peer 还在轮询等补答
   }
   if (apiFiles.size > 200) {
     // 附件登记只按容量截断（文件本身在 TMP_DIR，系统自己清）

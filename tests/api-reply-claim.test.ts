@@ -7,10 +7,12 @@
 import { describe, expect, test } from "bun:test";
 import { claimApiReply } from "../src/lib/pending-reply-scope.js";
 import { apiFallbackEvent, takeApiWaiters, type ApiWaiter, type StopTurn } from "../src/bridge/stop-settle.js";
+import { apiThreadResults, sweepApiState } from "../src/bridge/api-routes.js";
+import { peerReplyText } from "../src/lib/peer-reply-files.js";
 
 const CH = "c-debug";
 const req = (n: number): ApiWaiter => ({ agentChannelId: CH, agentName: "agent-claudestra-debug", threadId: `thr-${n}`, tokenId: "tok", messageId: `api_${n}` });
-type Settled = { result: { reply: string | null }; ts: number; tokenId?: string; agentChannelId?: string; messageId?: string };
+type Settled = { result: { reply: string | null; files?: unknown }; ts: number; tokenId?: string; agentChannelId?: string; messageId?: string };
 const noSettled = () => new Map<string, Settled>();
 const by = (extra: Partial<Parameters<typeof claimApiReply>[2]> = {}) => ({ tokenId: "tok", channelId: CH, ...extra });
 const stop = (text: string | null = null): StopTurn => ({ cid: CH, stopChannelId: CH, stopWs: 1, candidateWs: 1, event: "Stop", drain: { text } });
@@ -110,6 +112,21 @@ describe("claimApiReply：没有在等的请求（reply_to 指向已结掉的 / 
     expect(claimApiReply([], settledWith(null), by({ peer: "shawn" })).error).toContain("等补答的：api_1");
   });
 
+  test("第一次只带附件、正文为空：对方已当答复收下、停了轮询 → 第二次 reply_to 同一条报错，不重写线程（审查 P1）", () => {
+    // deliverToApi 第一次认领后写进 apiThreadResults 的结果：reply 空串、files 非空
+    const first = { reply: "", files: [{ name: "answer.tgz", url: "/api/v1/files/f_answer" }], threadId: "thr-1", agent: "agent-claudestra-debug" };
+    expect(peerReplyText({ ok: true, ...first }, "peer")).not.toBeNull(); // 对方同步收 / 轮询看到的就是这个：非空 = 停
+    const settled = new Map<string, Settled>([["thr-1", { result: first, ts: 0, tokenId: "tok", agentChannelId: CH, messageId: "api_1" }]]);
+    const peer = claimApiReply([], settled, by({ replyTo: "api_1", peer: "shawn", now: 6 * 60_000 }));
+    expect(peer.threadId).toBeUndefined();
+    expect(peer.error).toContain("已经回过");
+    expect(peer.error).not.toContain("等补答的");
+    const web = claimApiReply([], settled, by({ replyTo: "api_1" }));
+    expect(web.threadId).toBeUndefined();
+    expect(web.warning).toContain("已经回过");
+    expect(claimApiReply([], settled, by({ peer: "shawn" })).error).not.toContain("api_1");
+  });
+
   test("网页 / API 调用方的主动消息（没在等、没带 reply_to）：照旧投，不提醒", () => {
     expect(claimApiReply([], noSettled(), by())).toEqual({});
   });
@@ -133,5 +150,20 @@ describe("Stop 兜底", () => {
     expect(data).toMatchObject({ text: "", siblingThreadId: "thr-2", viaFallback: true, threadId: "thr-1" });
     expect(label).toContain("thr-2");
     expect(apiFallbackEvent(req(3), { threadId: "thr-3", agent: "a", viaFallback: true, reply: null }).label).toBe("no-text");
+  });
+});
+
+describe("apiThreadResults 的保留期（sweepApiState）", () => {
+  test("对方还在轮询等补答的空结果留 2 小时；只带附件的答复和有正文的一样 30 分钟清掉", () => {
+    const now = 10 * 3600_000, old = now - 31 * 60_000;
+    apiThreadResults.set("t-null", { result: { reply: null, threadId: "t-null", agent: "a", viaFallback: true }, ts: old, tokenId: "tok" });
+    apiThreadResults.set("t-file", { result: { reply: "", files: [{ name: "a.tgz", url: "/api/v1/files/f_a" }], threadId: "t-file", agent: "a" }, ts: old, tokenId: "tok" });
+    apiThreadResults.set("t-text", { result: { reply: "答复", threadId: "t-text", agent: "a" }, ts: old, tokenId: "tok" });
+    try {
+      sweepApiState(now);
+      expect([...apiThreadResults.keys()].filter((k) => k.startsWith("t-"))).toEqual(["t-null"]);
+    } finally {
+      for (const k of ["t-null", "t-file", "t-text"]) apiThreadResults.delete(k);
+    }
   });
 });

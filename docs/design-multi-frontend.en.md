@@ -237,7 +237,7 @@ An agent may `end_turn` without calling `reply()` (on Discord, the watcher's ðŸ’
 
 Several requests from one token waiting at once (update 2026-10-04): a reply with `reply_to` settles only that request; without it, the reply goes to the newest request the agent has seen, and the reply result lists the other waiting message ids.
 Requests left without their own answer get a bridge-written sentence at Stop (`viaFallback: true` + `siblingThreadId`) instead of `reply: null`; `reply: null` still means "the agent said nothing to this caller this turn".
-`reply_to` pointing at an already settled request: if its result is still empty, the reply is written back to that thread (the caller is still polling); otherwise a peer token gets an error and nothing is sent, other tokens still get the SSE event plus a warning. Rules: `lib/pending-reply-scope.ts` `claimApiReply`.
+`reply_to` pointing at an already settled request: if its result has neither text nor files, the reply is written back to that thread (the caller is still polling; same `peerSeesAnswer` predicate as the peer receiver); otherwise a peer token gets an error and nothing is sent, other tokens still get the SSE event plus a warning. Rules: `lib/pending-reply-scope.ts` `claimApiReply`.
 
 ### 5.6 Inbound attachments (gap R5)
 

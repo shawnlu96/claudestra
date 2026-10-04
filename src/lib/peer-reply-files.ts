@@ -37,6 +37,23 @@ function fileLine(f: ReplyFileRef): string {
   return `- ${parts.filter(Boolean).join(" · ")}${f.url || f.media ? "" : "（对方没给取件路径）"}`;
 }
 
+/** 对方 messages/threads 响应里提取回复正文（wait 命中与轮询兑现同构）——这是对 api-routes ApiReplyResult 形状的契约 */
+export function extractReplyText(body: any): string | null {
+  if (!body) return null;
+  const r = body.reply ?? body.result?.reply ?? null;
+  if (typeof r === "string" && r.trim()) return r.trim();
+  if (r && typeof r.text === "string" && r.text.trim()) return r.text.trim();
+  if (typeof body.text === "string" && body.text.trim() && body.answered) return body.text.trim();
+  return null;
+}
+
+/**
+ * 推回给发起方 agent 的答复（正文 + 附件说明）；非空 = 这一拍算答复到了，同步收和轮询都就此停（bridge/http-peer.ts）。
+ * 对方 bridge 判一条已结掉的请求还有没有人在轮询等补答，用下面的 peerSeesAnswer——两边同一个口径，只带附件的答复也算答完。
+ */
+export const peerReplyText = (body: unknown, peer: string): string | null => withReplyFiles(extractReplyText(body), body, peer);
+export const peerSeesAnswer = (body: unknown): boolean => !!peerReplyText(body, "");
+
 /** 回复正文后接上附件说明；没有附件原样返回（null 也照旧 null，调用方按空回复处理）。只有附件没有正文的回复也不能当空回复丢掉 */
 export function withReplyFiles(text: string | null, body: unknown, peer: string): string | null {
   const files = replyFileRefs(body);

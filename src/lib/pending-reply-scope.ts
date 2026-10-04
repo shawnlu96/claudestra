@@ -7,6 +7,8 @@
  * 判错一次就是「该催的不催」或「该欠的被别人销掉」。
  */
 
+import { peerSeesAnswer } from "./peer-reply-files.js";
+
 /**
  * 这条 envelope 要不要挂 pendingReply。
  *
@@ -160,8 +162,8 @@ export function dropVoidedPendings(books: VoidableBooks, channelId: string, void
 
 /** 认领要看的字段；siblingThreadId = 它等着时 agent 的回复记到了同一调用方的另一条（那条的 threadId），Stop 兜底据此说明「没单独答复」 */
 type ApiQueued = { messageId?: string; threadId: string; siblingThreadId?: string };
-/** 已结掉的 API 请求（apiThreadResults 的条目，按形状收）：reply 空着 = 调用方还在轮询这个 thread 等补答（peer 空回合后盯 2 小时） */
-type ApiSettled = { result: { reply: string | null }; ts: number; tokenId?: string; agentChannelId?: string; messageId?: string };
+/** 已结掉的 API 请求（apiThreadResults 的条目，按形状收）：peerSeesAnswer 为假 = 调用方还在轮询这个 thread 等补答（peer 空回合后盯 2 小时） */
+type ApiSettled = { result: { reply: string | null; files?: unknown }; ts: number; tokenId?: string; agentChannelId?: string; messageId?: string };
 export interface ApiReplyClaim<T> { taken?: T; threadId?: string; warning?: string; error?: string }
 
 /**
@@ -179,7 +181,7 @@ function takeApiPending<T extends ApiQueued>(queue: T[], id: string | undefined,
 
 /**
  * agent 发往 api:<token> 的回复记到哪：认领到在等的请求（同一调用方还有别的在等时给它们记 siblingThreadId，没指明回哪条就在 warning 里列出）；
- * reply_to 指向已结掉、结果还空着的那条 → 写回它的 thread（调用方还在轮询，能真正送到）；都不是 → peer 只收它在等的请求的答复，报错不投；
+ * reply_to 指向已结掉、对方还没当答复收下的那条（peerSeesAnswer：没正文也没附件）→ 写回它的 thread（调用方还在轮询，能真正送到）；都不是 → peer 只收它在等的请求的答复，报错不投；
  * 网页 / API 调用方经事件流也收得到主动消息，照投，reply_to 对不上时提醒没记到请求上。tests/api-reply-claim.test.ts。
  */
 export function claimApiReply<T extends ApiQueued>(queue: T[], settled: Map<string, ApiSettled>, by: {
@@ -197,12 +199,12 @@ export function claimApiReply<T extends ApiQueued>(queue: T[], settled: Map<stri
   }
   const mine = [...settled].filter(([, s]) => s.messageId && s.tokenId === by.tokenId && s.agentChannelId === by.channelId);
   const prev = by.replyTo ? mine.find(([, s]) => s.messageId === by.replyTo) : undefined;
-  if (prev && !prev[1].result.reply?.trim()) return { threadId: prev[0] };
+  if (prev && !peerSeesAnswer(prev[1].result)) return { threadId: prev[0] };
   const ago = prev ? `${Math.max(1, Math.round(((by.now ?? Date.now()) - prev[1].ts) / 60_000))} 分钟前` : "";
   const why = !by.replyTo ? `api:${by.tokenId} 现在没有在等你答复的请求`
     : prev ? `reply_to=${by.replyTo} 那条请求${ago}已经回过（agent 的答复或 bridge 兜底），对方已取走、不再等待`
     : `reply_to=${by.replyTo} 对不上 api:${by.tokenId} 在等的请求（已答过、已超时被清掉，或不是这个调用方的）`;
-  const owed = mine.filter(([, s]) => !s.result.reply?.trim()).map(([, s]) => s.messageId).join("、");
+  const owed = mine.filter(([, s]) => !peerSeesAnswer(s.result)).map(([, s]) => s.messageId).join("、");
   const rest = (waiting.length ? `；还在等：${ids}，要答它们就带 reply_to=<message_id>` : "")
     + (owed ? `；之前回合没答上、对方还在轮询等补答的：${owed}，带 reply_to=<message_id> 补答能送到` : "");
   if (by.peer) return { error: `${why}${rest}。peer 只收得到它在等的请求的答复，这次回复对方收不到，没有投递` };
