@@ -8,6 +8,7 @@
  *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
  *   [stub:call:<工具>:<base64url 的 JSON 参数>] = 先调这个 MCP 工具、结果写进回复（T96 派单工具实测，可写多个，按顺序调）；
  *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
+ * - /compact：见 compact()，照 codex-acp 2.1.1 的形状（docs/runtimes/codex-acp.md「压缩完成信号」）。
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
 import { randomUUID } from "node:crypto";
@@ -21,6 +22,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let sessionId = "";
 let air = false;
+/** 宿主声明了 clientCapabilities.session.compaction（ACP unstable）：压缩按 compaction_update 报，不再当工具调用 */
+let compaction = false;
 let mcp: { client: Client; server: string } | null = null;
 let running: { cancelled: boolean; steered: string[] } | null = null;
 const config: Rec[] = [
@@ -104,6 +107,40 @@ function lendWork(bun: string, manager: string, orderId: string): string {
   return `（lend submit：${(r.stdout.toString() || r.stderr.toString()).trim().slice(0, 200)}）`;
 }
 
+/**
+ * /compact 独占的一轮，照 codex-acp 2.1.1（CodexAgent.tryHandleCommand → runCompact）：压缩真的结束才回 session/prompt。
+ * 声明了 session.compaction → compaction_update（in_progress → completed / failed / cancelled，同一个 compactionId）；
+ * 没声明 → 「Compact conversation」工具调用（只有开始和完成，失败 / 取消没有专门的更新）。
+ * 注入：[stub:compact-fail] = 失败（failed + JSON-RPC 错误），[stub:compact-slow] = 等 session/cancel（30 秒没等到照常完成），
+ * [stub:compact-dup] = completed 连发两次（测宿主去重）；缺省成功。
+ */
+async function compact(text: string): Promise<Rec> {
+  const run = (running = { cancelled: false, steered: [] });
+  status("active");
+  const id = `cmp-${randomUUID().slice(0, 8)}`;
+  const mark = (state: string, error?: string) => {
+    if (compaction) return update({ sessionUpdate: "compaction_update", compactionId: id, status: state, ...(error ? { error } : {}) });
+    if (state === "in_progress") update({ sessionUpdate: "tool_call", toolCallId: id, title: "Compact conversation", kind: "think", status: state });
+    else if (state === "completed") update({ sessionUpdate: "tool_call_update", toolCallId: id, status: state });
+  };
+  try {
+    mark("in_progress");
+    if (text.includes("[stub:compact-slow]")) for (let i = 0; i < 300 && !run.cancelled; i++) await sleep(100);
+    if (run.cancelled) return mark("cancelled"), { stopReason: "cancelled" };
+    if (text.includes("[stub:compact-fail]")) {
+      mark("failed", "Codex ended the turn before compaction completed. (stub)");
+      throw { code: -32603, message: "Internal error", data: { message: "compaction failed (stub)" } };
+    }
+    mark("completed");
+    if (text.includes("[stub:compact-dup]")) mark("completed");
+    update({ sessionUpdate: "usage_update", used: 321, size: 272000 });
+    return { stopReason: "end_turn" };
+  } finally {
+    running = null;
+    status("idle");
+  }
+}
+
 /** 一轮：正文 → 命令 → （慢回合等打断）→ reply → 用量 */
 async function turn(text: string): Promise<Rec> {
   running = { cancelled: false, steered: [] };
@@ -157,6 +194,7 @@ async function handle(m: Rec): Promise<Rec | undefined> {
   const p = m.params ?? {};
   switch (m.method) {
     case "initialize":
+      compaction = p.clientCapabilities?.session?.compaction != null;
       air = Array.isArray(p.clientCapabilities?._meta?.jetbrains?.air?.capabilities) && p.clientCapabilities._meta.jetbrains.air.capabilities.includes("sessionFailure");
       return {
         protocolVersion: 1,
@@ -177,8 +215,10 @@ async function handle(m: Rec): Promise<Rec | undefined> {
       sessionId = String(p.sessionId);
       await startMcp();
       return { configOptions: config };
-    case "session/prompt":
-      return turn((p.prompt ?? []).map((b: Rec) => b.text ?? "").join("\n"));
+    case "session/prompt": {
+      const text = (p.prompt ?? []).map((b: Rec) => b.text ?? "").join("\n");
+      return /^\/compact(\s|$)/i.test(text.trim()) ? compact(text) : turn(text); // 认命令同 codex-acp parseCommand：首块去空白后 /名字
+    }
     case "_session/steering": {
       const text = (p.prompt ?? []).map((b: Rec) => b.text ?? "").join("\n");
       if (running) return running.steered.push(text), update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "（收到插话）" } }), { outcome: "injected" };
