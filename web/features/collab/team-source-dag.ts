@@ -22,6 +22,15 @@ export function checkedCounts(f: FeatureList['features'][number], nodes: readonl
   return { ...mine, total: center.total, done: center.completed, missing: center.missing };
 }
 
+/**
+ * 详情没读到（读失败、也没有缓存）：节点画不出来，但中心 counts 照样可信——总数 / 完成 / 缺失用中心的，不因读失败变 0；
+ * 在跑 / 未开始只有详情里的节点知道，这里不知道：FeatureCounts 还表示不了未知（team-parity-Bc1 加标记），先明确 warn
+ */
+export function centerCounts(f: FeatureList['features'][number]): FeatureCounts {
+  console.warn(`[team] feature ${f.id} 详情没读到：总数 / 完成 / 缺失按中心 counts，在跑 / 未开始未知`);
+  return { total: f.counts.total, done: f.counts.completed, active: 0, idle: 0, missing: f.counts.missing };
+}
+
 export function teamDagBoard(project: string, list: FeatureList, details: ReadonlyMap<string, SharedDetail>, team: TeamOverview): DagBoard {
   const features: FeatureCard[] = list.features.map(f => {
     const d = details.get(f.id);
@@ -43,8 +52,7 @@ export function teamDagBoard(project: string, list: FeatureList, details: Readon
     });
     return { id: f.id, title: f.title, status: f.status === 'done' ? 'done' : 'active', ownerWords: f.description,
       currentVersion: f.version, version: null, pending: null, lastActivityAt: f.updatedAt,
-      // 详情没读到（读失败）：没有节点可核，照旧是空图，不拿中心数字配上不知道的在跑 / 未开始
-      counts: d ? checkedCounts(f, nodes) : nodeCounts(nodes), nodes };
+      counts: d ? checkedCounts(f, nodes) : centerCounts(f), nodes };
   });
   return { ok: true, project, exists: true, now: team.ov.now, asOfSeq: list.serverSeq, features, agents: [] };
 }

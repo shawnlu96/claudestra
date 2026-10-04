@@ -209,18 +209,39 @@ test("复现测试：团队详情显示成员代号 / 主场实例 / 8 位 head 
 });
 
 test("复现测试：缺字段 / 没有镜像证据显示暂无，不补成最新；阻塞提问真 0 显示 0", async () => {
-  const task = { ...homeLedger().tasks[1]!, team: { assigneeCode: null, executorInstanceId: null, head: null, blockingAsks: 0, mirror: null } };
-  const v = await render(h(ui.TeamFactsSec, { id: task.id, ov: { tasks: [task] }, tr: ui.zh }));
+  const task = { ...homeLedger().tasks[1]!, team: { assigneeCode: null, executorInstanceId: null, head: null, blockingAsks: 0, mirror: null, freshUntil: null } };
+  const v = await render(h(ui.TeamFactsSec, { id: task.id, ov: { tasks: [task] }, now: NOW, tr: ui.zh }));
   const facts = Object.fromEntries(Array.from(v.host.querySelectorAll("[data-team-fact]")).map((e) => [e.getAttribute("data-team-fact"), e.textContent]));
   expect(facts).toEqual({ 成员代号: "成员代号：暂无", 执行实例: "执行实例：暂无", head: "head：暂无", 阻塞提问: "阻塞提问：0", 镜像: "镜像：暂无" });
   await v.unmount();
   // 总览：有 feature 还没有镜像 → 暂无；有过期 → 报过期数
-  for (const [mirror, want, not] of [[{ stale: 0, fresh: 1, none: 1 }, "暂无", "主场镜像最新"], [{ stale: 2, fresh: 1, none: 0 }, "2 个 feature 主场镜像过期", "主场镜像最新"]] as const) {
+  const fresh = { mirror: "fresh", freshUntil: NOW + 30_000 } as const, stale = { mirror: "stale", freshUntil: null } as const;
+  const none = { mirror: null, freshUntil: null } as const;
+  for (const [mirror, want, not] of [[[fresh, none], "暂无", "主场镜像最新"], [[stale, stale, fresh], "2 个 feature 主场镜像过期", "主场镜像最新"]] as const) {
     const ov = { ...homeLedger(), mirror };
-    const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, NOW), waits: [], projectName: "p", onPick: () => {}, tr: ui.zh }));
+    const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, NOW), waits: [], projectName: "p", onPick: () => {}, now: NOW, tr: ui.zh }));
     const sec = Array.from(o.host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
     expect(sec?.textContent).toContain(want);
     expect(sec?.textContent).not.toContain(not);
+    await o.unmount();
+  }
+});
+
+test("复现测试：读到时新鲜、走表越过 30 秒：详情团队段和总览镜像段改报过期（主场停了也不会有新水位来重拉）", async () => {
+  const facts = { assigneeCode: "worker-a", executorInstanceId: null, head: null, blockingAsks: 0, mirror: "fresh", freshUntil: NOW + 30_000 } as const;
+  const task = { ...homeLedger().tasks[1]!, team: facts };
+  const cases = [[NOW, "主场镜像最新", "主场镜像过期"], [NOW + 60_000, "主场镜像过期", "主场镜像最新"]] as const;
+  for (const [now, want, not] of cases) {
+    const v = await render(h(ui.TeamFactsSec, { id: task.id, ov: { tasks: [task] }, now, tr: ui.zh }));
+    expect(v.host.querySelector('[data-team-fact="镜像"]')?.textContent).toContain(want);
+    expect(v.host.textContent).not.toContain(not);
+    await v.unmount();
+  }
+  for (const [now, want] of [[NOW, "主场镜像最新"], [NOW + 60_000, "1 个 feature 主场镜像过期"]] as const) {
+    const ov = { ...homeLedger(), mirror: [{ mirror: "fresh", freshUntil: NOW + 30_000 }] as const };
+    const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, now), waits: [], projectName: "p", onPick: () => {}, now, tr: ui.zh }));
+    const sec = Array.from(o.host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
+    expect(sec?.textContent).toContain(want);
     await o.unmount();
   }
 });

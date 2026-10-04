@@ -74,14 +74,33 @@ export interface LedgerTaskView {
 
 /**
  * 团队执行镜像带过来的事实：成员代号、执行实例、head 都是中心给的原值（显示时再缩短 / 遮住像 id 的，v4-props.tsx TeamFactsSec），
- * 不是本机 agent 名，不能拿去开会话；blockingAsks = 主场开着的阻塞提问数；mirror = 所属 feature 镜像的新鲜度（null = 还没有执行镜像）
+ * 不是本机 agent 名，不能拿去开会话；blockingAsks = 主场开着的阻塞提问数；mirror / freshUntil = 这张卡实际显示的那份详情的镜像证据（MirrorFact）
  */
-export interface TeamTaskFacts {
+export interface TeamTaskFacts extends MirrorFact {
   assigneeCode: string | null;
   executorInstanceId: string | null;
   head: string | null;
   blockingAsks: number;
+}
+
+/**
+ * 镜像新鲜度的证据：mirror = 读到时的判定（null = 没有执行镜像，未知，不是最新）；freshUntil = 读到时新鲜的话新鲜到哪一刻
+ * （observedAt + 30 秒，shared-model.ts stale 同口径），过期 / 未知时为 null。主场停了就不会有新水位来触发重拉，
+ * 所以显示时一律经 mirrorAt(…, now) 随时间重判，不直接读 mirror。
+ */
+export interface MirrorFact {
   mirror: "stale" | "fresh" | null;
+  freshUntil: number | null;
+}
+
+/** 此刻的镜像状态：读到时新鲜、但已经过了 freshUntil 的算过期 */
+export const mirrorAt = (m: MirrorFact, now: number): MirrorFact["mirror"] =>
+  m.mirror === "fresh" && (m.freshUntil === null || now > m.freshUntil) ? "stale" : m.mirror;
+
+/** 各 feature 此刻的镜像新鲜度计数（none = 还没有执行镜像） */
+export function mirrorCounts(ms: readonly MirrorFact[], now: number): { stale: number; fresh: number; none: number } {
+  const at = ms.map((m) => mirrorAt(m, now));
+  return { stale: at.filter((m) => m === "stale").length, fresh: at.filter((m) => m === "fresh").length, none: at.filter((m) => m === null).length };
 }
 
 /** 依赖边（src/lib/ledger-deps.ts DepView）：effective = PM 定死的 state，没定就按前置阶段推导的 derived */
@@ -116,8 +135,8 @@ export interface LedgerOverview {
   doneRest?: DoneRest;
   /** 按每次总览给；缺省 = 全部已知。团队数据没有完成时刻时 todayDone 在这里，updatedAt 不能当完成时刻 */
   unknownMetrics?: readonly UnknownMetric[];
-  /** 团队数据才有：各 feature 执行镜像的新鲜度计数（none = 还没有执行镜像）；本机 bridge 不发 */
-  mirror?: { stale: number; fresh: number; none: number };
+  /** 团队数据才有：每个 feature 的镜像证据（显示时 mirrorCounts(…, now) 随时间重判）；本机 bridge 不发 */
+  mirror?: readonly MirrorFact[];
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */
@@ -317,9 +336,9 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
 }
 
 /** 团队卡多带的一句：主场镜像过期（数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
-export function teamNote(t: Pick<LedgerTaskView, "team">, tr: Tr = zh): string {
+export function teamNote(t: Pick<LedgerTaskView, "team">, now: number, tr: Tr = zh): string {
   const bits: string[] = [];
-  if (t.team?.mirror === "stale") bits.push(tr("主场镜像过期"));
+  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(tr("主场镜像过期"));
   if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
   return bits.join(" · ");
 }
@@ -367,7 +386,7 @@ export function lineOf(
     dwellMs: dwell,
     dwellApprox: t.stageSinceApprox === true,
     stuck: att === "stuck",
-    reason: [att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr), teamNote(t, tr)].filter(Boolean).join(" · "),
+    reason: [att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr), teamNote(t, now, tr)].filter(Boolean).join(" · "),
     agent: bareAgent(t.agent),
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),

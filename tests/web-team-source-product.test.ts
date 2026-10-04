@@ -9,6 +9,8 @@ import { teamStepLine } from "@/features/collab/team-source-steps";
 import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
 import { nodeSteps } from "@/features/collab/dag/dag-steps";
 import { generateTeamFixture } from "@/features/collab/shared/team-fixture-gen";
+import { sharedCollabSource } from "@/features/collab/team-source-shared";
+import { SharedLedgerSession } from "@/lib/api/shared-ledger";
 
 const warns: string[] = [];
 const realWarn = console.warn;
@@ -74,4 +76,27 @@ test("复现测试：子 DAG 节点挂上步骤线（当前步来自 steps），
   // 没开卡的计划节点没有步骤线
   const plan = board.features.flatMap((f) => f.nodes).find((n) => n.status === "planned");
   if (plan) expect(plan.stepLine).toBeNull();
+});
+
+test("复现测试：列表成功而首次 feature 详情失败（无缓存）：子 DAG / 产品看板保留中心 counts，不因读失败变 0，并明确 warn 在跑未知", async () => {
+  const fx = generateTeamFixture();
+  const identity = { center: "c", team: fx.team, person: "p", project: fx.project, machine: "m" };
+  const src = sharedCollabSource(new SharedLedgerSession(identity, {
+    list: async () => structuredClone(fx.list),
+    detail: async () => { throw new Error("synthetic detail failure"); },
+    command: async () => { throw new Error("read only"); },
+    receipt: async (id) => ({ status: "unknown", requestId: id }),
+  }), "team", "label");
+  await src.overview(new AbortController().signal);
+  const board = await src.dag!.board("team");
+  const product = await src.product!("team");
+  for (const f of fx.list.features) {
+    expect(f.counts.total).toBeGreaterThan(0);
+    const dag = board.features.find((x) => x.id === f.id)!;
+    expect(dag.nodes).toEqual([]);
+    expect(dag.counts).toMatchObject({ total: f.counts.total, done: f.counts.completed, missing: f.counts.missing });
+    const p = product.features.find((x) => x.id === f.id)!;
+    expect(p.counts).toMatchObject({ total: f.counts.total, completed: f.counts.completed, blocked: f.counts.blocked });
+    expect(warns.some((w) => w.includes(f.id) && w.includes("在跑") && w.includes("未知"))).toBe(true);
+  }
 });

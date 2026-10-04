@@ -4,7 +4,7 @@
  * 没选中 = 项目概览，边 = 条件原文与判定依据，折叠组 = 成员，「待你处理」= 挂在这个项目上的那几条，
  * 团队成员 = 他在本项目手上的卡（team-panel-cards.tsx）+ 本机的打开会话；手机上团队面板本身也用这里的外框整屏打开。
  */
-import type { HomeView, LedgerDepView, LedgerOverview, OwnerWait, Tr } from "../collab-model";
+import { mirrorAt, mirrorCounts, type HomeView, type LedgerDepView, type LedgerOverview, type OwnerWait, type Tr } from "../collab-model";
 import { useChatStoreApi } from "../../chat/chat-store";
 import { useChatNav } from "../../chat/components/nav-context";
 import { uiAgentName } from "@/lib/chat/agents";
@@ -62,6 +62,8 @@ export function Overview(props: {
   ov: LedgerOverview; view: HomeView; waits: readonly OwnerWait[]; projectName: string; onPick: (id: string) => void; tr: Tr;
   /** 「上次来之后」（collab-since-card.tsx），没有上次记录时不给 */
   since?: React.ReactNode;
+  /** 走表的现在（use-collab）：镜像新鲜度随它重判；不给按 ov.now */
+  now?: number;
 }) {
   const { ov, view, waits, projectName, onPick, tr } = props;
   const h = view.headline;
@@ -88,7 +90,7 @@ export function Overview(props: {
           ))}
         </div>
       </Sec>
-      {ov.mirror && <MirrorSec m={ov.mirror} tr={tr} />}
+      {ov.mirror && <MirrorSec m={mirrorCounts(ov.mirror, props.now ?? ov.now)} tr={tr} />}
       {view.pm.pm && <Sec title="PM"><div className={v.kv}>{view.pm.pm} · {tr("在管")} {view.pm.managing} · {tr("排队")} {view.pm.queued.length}</div></Sec>}
     </Shell>
   );
@@ -98,7 +100,7 @@ export function Overview(props: {
  * 团队总览：各 feature 执行镜像的新鲜度（过期 = 看到的可能不是现在的状态）。有过期的报过期数；全部有镜像且都新鲜才说最新；
  * 有 feature 还没有镜像（没有证据）就是暂无，不凭缺值说最新。本机总览没有 mirror，不显示
  */
-function MirrorSec({ m, tr }: { m: NonNullable<LedgerOverview["mirror"]>; tr: Tr }) {
+function MirrorSec({ m, tr }: { m: ReturnType<typeof mirrorCounts>; tr: Tr }) {
   return (
     <Sec title={tr("镜像")}>
       <div className={v.kv}>
@@ -194,18 +196,19 @@ const shortHead = (h: string | null) => (h && /^[0-9a-f]{7,64}$/i.test(h.trim())
 
 /**
  * 任务详情里团队卡多挂的一段：执行镜像带来的成员代号（不是本机 agent，不给打开会话）、执行实例（像 id 的不显示原文）、
- * head（只显示短 SHA）、主场开着的阻塞提问数、镜像新鲜度。不知道的写「暂无」（镜像没有证据也是暂无，不说最新）；本机卡没有 team，整段不显示。
+ * head（只显示短 SHA）、主场开着的阻塞提问数、镜像新鲜度（按 now 随时间重判）。不知道的写「暂无」（镜像没有证据也是暂无，不说最新）；本机卡没有 team，整段不显示。
  */
-export function TeamFactsSec({ id, ov, tr }: { id: string; ov: Pick<LedgerOverview, "tasks">; tr: Tr }) {
+export function TeamFactsSec({ id, ov, now, tr }: { id: string; ov: Pick<LedgerOverview, "tasks">; now: number; tr: Tr }) {
   const f = ov.tasks.find((t) => t.id === id)?.team;
   if (!f) return null;
+  const mirror = mirrorAt(f, now);
   const inst = f.executorInstanceId ? (looksLikeId(f.executorInstanceId) ? tr("主场实例") : f.executorInstanceId) : tr("暂无");
   const rows: [string, React.ReactNode][] = [
     ["成员代号", f.assigneeCode || tr("暂无")],
     ["执行实例", inst],
     ["head", shortHead(f.head) ?? tr("暂无")],
     ["阻塞提问", f.blockingAsks],
-    ["镜像", f.mirror === "stale" ? <span className={v.warn}>{tr("主场镜像过期")}</span> : tr(f.mirror === "fresh" ? "主场镜像最新" : "暂无")],
+    ["镜像", mirror === "stale" ? <span className={v.warn}>{tr("主场镜像过期")}</span> : tr(mirror === "fresh" ? "主场镜像最新" : "暂无")],
   ];
   return (
     <Sec title={tr("团队")}>
