@@ -9,6 +9,7 @@ import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-deliv
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld } from "./lib/held-pac.js";
 import { missingReplyFiles, stageApiReplyFiles } from "./bridge/api-reply-files.js";
+import { stageLocalReplyFiles, withLocalAttachments } from "./bridge/local-reply-files.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
@@ -463,18 +464,19 @@ function nudgeAmbiguousCallers(cid: string): void {
 /** target 的答复推回 caller。caller 的 ws 按 channelId 现取(回程簿落盘不存 ws,caller 重连 / bridge 重启后旧连接已失效);
  *  caller 此刻不在线就进押后队列,它连上后的每分钟扫描会投。fromChannel = 推回的 meta.chat_id(见 originalReplyChannel)。 */
 async function pushBackToCaller(
-  pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string, intent: "response" | "notification" = "response",
+  pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string,
+  intent: "response" | "notification" = "response", attachments: readonly string[] = [], // inbox 副本路径（bridge/local-reply-files.ts）
 ) {
   const live = clients.get(pac.callerChannelId);
   // 不在线时没有可用的 ws:押后队列落盘本来就剥掉 ws、投递时换最新连接,这里同样留空
   const callerWs = live?.ws as ServerWebSocket<unknown>;
-  const env: RouterEnvelope = {
+  const env = withLocalAttachments({
     from: { kind: "local", agentName: pac.targetName, channelId: fromChannel, ws: fromWs ?? callerWs },
     to: { kind: "local", agentName: pac.callerName, channelId: pac.callerChannelId, ws: callerWs, cwd: live?.cwd },
     intent,
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
-  };
+  }, attachments);
   if (live || pmClientFor(pac.callerName, clients, pac.targetName)) return (await deliver(env)).outcome; // 前任 PM 离线：当班 PM 接它的答复
   heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
@@ -987,25 +989,22 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
       components,
       files: env.meta.files,
     });
-    // v2.0.15+ cross-agent forward —— 见函数注释（Discord 专属：clients 的 key
-    // 是 Discord channel id，别的 transport 没有"用户频道=agent 频道"的重合）
+    // cross-agent forward 见函数注释（Discord 专属：clients 的 key 是 Discord channel id，别的 transport 没有「用户频道=agent 频道」的重合）
+    let warning: string | undefined;
     if (env.from.kind === "local" && dest.transport === "discord") {
       const fromLocal = env.from;
       const isFromMaster = isMasterWs(fromLocal.ws);
       const targetClient = clients.get(to.channelId);
-      // v2.5.5: fromLocal.channelId 为空 = 发送方不是任何已注册的 agent，而是
-      // manager/cron 的临时 bridge-client 连接（restart 完成通知、cron 播报这类
-      // **给用户看的管理消息**）。这类只发 Discord，不 forward 进目标 agent 的
-      // 上下文 —— 否则 agent 收到"你自己已重启"的通知，判断一轮不用回应（内心戏
-      // 被 jsonl-watcher 以 💬 播到频道），ia-watchdog 又 nudge 一轮，一条通知
-      // 变三条噪音 + 两轮 LLM 消耗（owner 2026-07-08 报的"重启后一堆乱七八糟
-      // bridge 消息"）。真 agent reply 到别的 agent 频道时 channelId 非空，不受影响。
+      // channelId 为空 = manager/cron 的临时 bridge-client（重启完成、cron 播报这类给用户看的管理消息）：只发 Discord；
+      // forward 进对方上下文会让它白跑一轮、再被看门狗 nudge 一轮。真 agent reply 到别的 agent 频道时 channelId 非空
       if (!isFromMaster && fromLocal.channelId && targetClient && targetClient.ws !== fromLocal.ws) {
-        forwardReplyToAgentClaude(fromLocal, env.content, to.channelId, targetClient)
+        const files = await stageLocalReplyFiles(env.meta.files, agentLabelForChannel(fromLocal.channelId)); // 转发不等，拷不过去要现在写进 reply 结果
+        warning = files.warning;
+        forwardReplyToAgentClaude(fromLocal, env.content, to.channelId, targetClient, files.attachments)
           .catch((e) => console.error("reply→别agent频道 forward 异常:", e));
       }
     }
-    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids } };
+    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids, warning } };
   } catch (e) {
     return { envelope: env, outcome: { kind: "error", error: e as Error } };
   }
@@ -1021,6 +1020,7 @@ async function forwardReplyToAgentClaude(
   content: string,
   targetChannelId: string,
   targetClient: ClientInfo,
+  attachments: readonly string[],
 ): Promise<void> {
   let fromAgentName = fromEndpoint.agentName;
   let targetAgentName: string | undefined;
@@ -1036,7 +1036,7 @@ async function forwardReplyToAgentClaude(
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
   const answering = exactPac(fromEndpoint.channelId, targetChannelId);
   const text = content.replace(/<@!?\d+>\s*/g, "").trim();
-  const fwdEnv: RouterEnvelope = {
+  const fwdEnv = withLocalAttachments({
     from: { kind: "local", agentName: fromAgentName, channelId: fromEndpoint.channelId, ws: fromEndpoint.ws },
     to: { kind: "local", agentName: targetAgentName, channelId: targetChannelId, ws: targetClient.ws, cwd: targetClient.cwd },
     intent: answering ? "response" : "notification",
@@ -1047,7 +1047,7 @@ async function forwardReplyToAgentClaude(
       ts: new Date().toISOString(),
       threadId: newThreadId(),
     },
-  };
+  }, attachments);
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
     if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId, answering);
@@ -1835,7 +1835,12 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
           break;
         }
-        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId), { askId, askHash } = env.meta, { warning } = delivery.outcome; // edit_message 只准改自己发的（bridge/edit-guard.ts）
+        // target 在自己频道答复等它的 caller：同时推回 caller（pushBackToCaller → deliver，「[🤖 来自 X]」抬头），caller 不用轮询。
+        // ⚠ 必须是 target 本人发的：按频道取 pending 的话，任何 agent reply 到 target 的频道都会被当成 target 的答复推给 caller（判据 lib/pushback-scope.ts）
+        const pending = isTargetsOwnReply(msg.chatId, fromChannelId, ws, clients.get(msg.chatId)?.ws) ? answerablePac(msg.chatId) : undefined;
+        const pbFiles = await stageLocalReplyFiles(pending ? msg.files : undefined, pending?.targetName ?? ""); // 推回带附件：拷不过去的要写进这次 reply 结果
+        const warning = [delivery.outcome.warning, pbFiles.warning].filter(Boolean).join("；") || undefined;
+        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId), { askId, askHash } = env.meta; // edit_message 只准改自己发的（bridge/edit-guard.ts）
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId, askHash, held: heldLocalMsgs.stat(fromChannelId), warning } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
@@ -1846,37 +1851,12 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}) } });
         }
 
-        // v1.9.21+ send_to_agent 推回机制：
-        // 如果 reply 的 chat_id 正好是某个 pending send_to_agent 的 target agent 的
-        // channel，说明 agent 在它自己的 channel 里发了答案（discord 看得到，供审计）；
-        // bridge 同时把这段 text push 回 caller 的 ws 作为合成消息，caller 不用再轮询。
-        //
-        // 推回走 pushBackToCaller → deliver(envelope)，caller 的 ws 现取。
-        // from=local(target agent), to=local(caller agent), intent=response。
-        // renderContentForLocal 的 from.kind==="local" 分支会拼 "[🤖 来自 <name>]"
-        // 前缀（原来写的是 "[🤖 target 回复]"，语义等价 —— 都是标识"这条是别的
-        // agent 发来的 response"）。
-        // ⚠ 必须确认「发这条 reply 的就是 target 本人」。原先只按 msg.chatId 取 pending，
-        // 于是**任何** agent 只要 reply 到 target 的频道，它自己那条就会被当成 target 的
-        // 答复推回给 caller——带 intent=response、带「对方答复如下，请按计划继续」、还附上
-        // caller 自己填的 expecting（owner 2026-09-18 实报，一晚上撞十几次：
-        // 「正文逐字是我自己写的答复」「它一度以为我回了并准备据此动手」）。
-        // 判据见 lib/pushback-scope.ts：key 就是 target 的 channelId，所以
-        // 「发送方自己的频道 == 这条 reply 的目的频道」才成立。
-        const pending = isTargetsOwnReply(msg.chatId, fromChannelId, ws, clients.get(msg.chatId)?.ws)
-          ? answerablePac(msg.chatId)
-          : undefined;
         if (pending) {
           try {
-            // v2.0.1+: from.channelId 用 originalReplyChannel（caller 手头的
-            // 原 inbound 请求频道）而不是 target 的私频。
-            // resolveReplyBackChannel 对 from.kind=local 返回 from.channelId，
-            // pushback 的 meta.chat_id 就会是原频道，caller LLM 顺手回就对了。
-            // 没有 originalReplyChannel 时回退到 msg.chatId（target 私频）—
-            // 这是旧行为，保守兜底。
+            // 推回的 meta.chat_id 用 caller 手头那条请求的频道（originalReplyChannel），caller 顺手回就对了；没有才退回 target 私频
             const replyBackHint = pending.originalReplyChannel || msg.chatId;
             const cleanedReply = text.replace(/<@!?\d+>\s*/g, "").trim();
-            const outcome = await pushBackToCaller(pending, ws, replyBackHint, withExpecting(pending, cleanedReply), "agent_reply");
+            const outcome = await pushBackToCaller(pending, ws, replyBackHint, withExpecting(pending, cleanedReply), "agent_reply", "response", pbFiles.attachments);
             if (outcome.kind === "sent") {
               lastMessageSource.set(pending.callerChannelId, "agent");
               console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
