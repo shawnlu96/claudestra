@@ -134,7 +134,7 @@ export interface PendingApiRequest {
   agentName: string;
   threadId: string;
   messageId?: string; waitUntil?: number; // messageId：带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）；waitUntil：同步等到几时
-  ts: number;
+  ts: number; acceptsFiles?: boolean; // 请求方（新版 peer）声明看得懂回复里的 files，reply 带附件时据此决定警不警告（bridge/api-reply-files.ts）
   /** wait 模式挂的 resolver（无 wait 则为空） */
   resolve?: (result: ApiReplyResult) => void;
 }
@@ -142,7 +142,7 @@ export interface PendingApiRequest {
 export interface ApiReplyResult {
   reply: string | null;
   components?: unknown[];
-  files?: { name: string; url: string }[];
+  files?: { name: string; url: string; media?: string; size?: number; sha256?: string }[]; // 对方 peer 按 lib/peer-reply-files.ts 解析、推给它的 agent
   threadId: string;
   agent: string;
   /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型 */
@@ -1129,7 +1129,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
     // body：JSON {text, wait} 或 multipart（text 字段 + files，R5 入站附件）
     let text = "";
-    let waitSec = 0;
+    let waitSec = 0; let acceptsFiles = false;
     const attachments: string[] = [];
     const contentType = req.headers.get("Content-Type") || "";
     try {
@@ -1149,9 +1149,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           attachments.push(await saveUploadToInbox(f, agent.name)); // 原子占名 + 记归属（local-api/media-refresh.ts）
         }
       } else {
-        const body = (await req.json()) as { text?: string; wait?: number };
+        const body = (await req.json()) as { text?: string; wait?: number; acceptsReplyFiles?: unknown };
         text = String(body.text || "");
-        waitSec = Number(body.wait || 0);
+        waitSec = Number(body.wait || 0); acceptsFiles = body.acceptsReplyFiles === true;
       }
     } catch {
       return apiJson(400, { ok: false, error: "invalid body (JSON {text, wait?} or multipart with text/files)" });
@@ -1192,7 +1192,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentName: agent.name,
       threadId,
       messageId: env.meta.messageId, waitUntil: waitSec > 0 ? Date.now() + waitSec * 1000 : undefined, // 投递前就标：停字的抢占在 deliver 里跑，resolve 这时还没挂（pi-abort holdStopWait）
-      ts: Date.now(),
+      ts: Date.now(), acceptsFiles,
     };
     const queue = pendingApiRequests.get(key) || [];
     queue.push(entry);

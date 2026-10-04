@@ -17,6 +17,7 @@ import { signedFor } from "../lib/instance-key.js";
 import { peerAuthHint, peerCallFailureText, peerCallIsTimeout, peerErrorText } from "../lib/peer-auth-hints.js";
 import { readJsonCapped } from "../lib/body-reader.js";
 import { isE2eResponse } from "../lib/peer-e2e-client.js";
+import { withReplyFiles } from "../lib/peer-reply-files.js";
 import { recordMetric } from "../lib/metrics.js";
 import { startPeerPresence } from "./peer-presence.js";
 import { initPush } from "./push/init.js";
@@ -172,7 +173,7 @@ async function runCall(
   let res: Response;
   try {
     const url = `${base}/api/v1/agents/${encodeURIComponent(peerAgentName)}/messages`;
-    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC, nonce: crypto.randomUUID() }); // nonce：同一秒同样的正文签名也不同，不会被对方当成重放
+    const body = JSON.stringify({ text, wait: oneShot ? 0 : WAIT_SEC, nonce: crypto.randomUUID(), acceptsReplyFiles: true }); // nonce：同一秒同样的正文签名也不同，不会被对方当成重放；acceptsReplyFiles：回复里的 files 会推给 caller
     res = await peerFetch(url, {
       method: "POST",
       headers: {
@@ -221,7 +222,7 @@ async function runCall(
   if (oneShot) return settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "oneshot" });
 
   // 同步拿到回复（wait 命中）
-  const replyText = extractReplyText(body);
+  const replyText = withReplyFiles(extractReplyText(body), body, peer.name); // 附件只带引用，不带文件本身（lib/peer-reply-files.ts）
   if (replyText) {
     await pushReply(caller, peer, peerAgentName, replyText, expecting, callId);
     settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "wait" }, replyText.length);
@@ -293,7 +294,7 @@ async function pollThread(callId: string, caller: CallerRef, peer: HttpPeer, rec
         }
         if (!pr.ok) continue;            // 瞬时故障,下轮再试
         const pb: any = await readJsonCapped(pr);
-        const t = extractReplyText(pb);
+        const t = withReplyFiles(extractReplyText(pb), pb, peer.name);
         if (t) {
           await pushReply(caller, peer, peerAgentName, t, expecting, callId);
           settle(callId, caller, "http_peer_out_ok", { peer: peer.name, mode: "poll" }, t.length);

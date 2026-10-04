@@ -38,10 +38,14 @@ export function askIdOfReplyResult(b: { content?: unknown }): string | null {
   return /^Sent message\(s\): .* · ask (ask_[a-z0-9]{1,40})\b/.exec(text)?.[1] ?? null;
 }
 
-/** reply 结果里给 agent 的那句：带 askId（授权类另带 askHash），不带就是普通回复；本频道还押着消息就在末尾提醒去领 */
-export function replyResultText(r: { messageIds?: unknown; askId?: unknown; askHash?: unknown; held?: unknown }): string {
+/**
+ * reply 结果里给 agent 的那句：带 askId（授权类另带 askHash），不带就是普通回复；本频道还押着消息就在末尾提醒去领；
+ * 正文送到了但附件没送到（bridge/api-reply-files.ts 的 warning）放最后，别让 agent 以为全送到了
+ */
+export function replyResultText(r: { messageIds?: unknown; askId?: unknown; askHash?: unknown; held?: unknown; warning?: unknown }): string {
   const ask = typeof r.askId === "string" ? ` · ask ${r.askId}${typeof r.askHash === "string" ? ` · askHash ${r.askHash}` : ""}` : "";
-  return `Sent message(s): ${JSON.stringify(r.messageIds)}${ask}${heldHint(r.held)}`;
+  const warn = typeof r.warning === "string" && r.warning ? ` · ⚠️ ${r.warning}` : "";
+  return `Sent message(s): ${JSON.stringify(r.messageIds)}${ask}${heldHint(r.held)}${warn}`;
 }
 
 const HELD_LABELS = [["owner", "owner"], ["ask", "卡片答复"], ["peer", "peer"], ["agent", "agent"]] as const;
