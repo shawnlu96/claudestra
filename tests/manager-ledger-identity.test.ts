@@ -24,6 +24,18 @@ describe("resolveActor", () => {
     expect(resolveActor({ channelId: "999", controlChannelId: "999" }, agents, "1")).toMatchObject({ ok: false });
     expect(resolveActor({ controlChannelId: "999" }, agents, undefined)).toEqual({ ok: true, actor: "owner" });
   });
+  test("没有频道号但带 CLAUDESTRA_AGENT（ACP 下的 Pi）→ 它的 registry 键，认不出就拒，不落成 owner", () => {
+    expect(resolveActor({ controlChannelId: "999" }, agents, undefined, "agent-task-t8b")).toEqual({ ok: true, actor: "agent-task-t8b" });
+    expect(resolveActor({ controlChannelId: "999" }, agents, undefined, " task-T8B ")).toEqual({ ok: true, actor: "agent-task-t8b" });
+    expect(resolveActor({ controlChannelId: "999" }, agents, undefined, "agent-gone")).toMatchObject({ ok: false });
+    expect(resolveActor({ controlChannelId: "999" }, agents, undefined, "master")).toMatchObject({ ok: false });
+    expect(resolveActor({ controlChannelId: "999" }, agents, undefined, "  ")).toEqual({ ok: true, actor: "owner" });
+  });
+  test("频道号优先于 CLAUDESTRA_AGENT；出借 worker 带着 agent 名也照样拒", () => {
+    expect(resolveActor({ channelId: "999", controlChannelId: "999" }, agents, undefined, "agent-task-t8b")).toEqual({ ok: true, actor: "master" });
+    expect(resolveActor({ channelId: "111", controlChannelId: "999" }, agents, undefined, "agent-task-t8b")).toEqual({ ok: true, actor: "agent-claudestra" });
+    expect(resolveActor({ controlChannelId: "999" }, agents, "1", "agent-task-t8b")).toMatchObject({ ok: false });
+  });
   test("未知频道拒绝，不降级成 owner；没配控制频道时控制频道也算未知", () => {
     const r = resolveActor({ channelId: "333", controlChannelId: "999" }, agents);
     expect(r.ok).toBe(false);
