@@ -1,9 +1,9 @@
 /**
  * GET /api/v1/agents —— scope 内的 agent 快照（从 api-routes.ts 搬出的热点；路由分发仍在那边）。
- * 顺序是硬要求：先按凭据 scope 筛，再读会话尾——老实现先把整个 registry 的会话尾读一遍再按 scope 丢，
- * Sekai 机器 402 条 registry（384 个已停出借 worker）串行尾读 27–45s，网页 5s 超时（AGL1）。
+ * 顺序是硬要求：先按凭据 scope 筛，再读会话尾——先读整个 registry 再按 scope 丢的话，几百个已停出借 worker 的串行尾读
+ * 就把列表接口拖过网页的请求超时（复现见 tests/api-agents-list-recovery.test.ts）。
  * 已停的出借 worker（lib/worker-kind.ts 判定）不读尾、不找 Codex rollout、不探 pane：只保留列表需要的最小元数据，
- * 隐藏 / 归档规则照旧。活的 worker 与普通会话走有界并发 + 短缓存（agents-list-tails.ts）。
+ * 隐藏 / 归档规则照旧。活会话与已停的普通会话走全局有界并发 + 短缓存（agents-list-tails.ts）。
  * 字段语义（busy / model / effort / contextTokens / lastActivityTs / projectId / archived）与搬出前逐字段相同。
  */
 import { existsSync } from "node:fs";
@@ -64,7 +64,7 @@ async function listAgentsForPrincipal(url: URL, principal: Principal, io: Agents
   // 先 scope 后 IO：scope 外的会话一个字节都不读
   const rows = ((listResult.agents || []) as Row[]).filter((a) => agentInScope(principal, a.name)).map((a) => baseRow(a, principal));
   await Promise.all(rows.map((a) => attachBusyFlags(a)));
-  const tails = await readSessionTails(rows.flatMap((a) => tailTargetFor(a.name, regByName.get(a.name), true)), io.tails);
+  const tails = await readSessionTails(rows.flatMap((a) => tailTargetFor(a.name, regByName.get(a.name))), io.tails);
   const globals = await claudeGlobalDefaults();
   for (const a of rows) attachSessionFields(a, regByName.get(a.name), tails.get(a.name) ?? null, extras, globals);
   // 「该重启/该 pi update」提示：不给 peer（不向别的实例透露本机确切版本）；出任何错都只少个提示，不能让整张列表 500
@@ -108,9 +108,12 @@ async function attachBusyFlags(a: Row): Promise<void> {
   }
 }
 
-/** 有 cwd + sessionId 才有会话文件可读；findById 只给活会话（Codex 的 rollout 路径推不出来、按 id 找） */
-function tailTargetFor(name: string, r: RegistryAgent | undefined, findById: boolean): TailTarget[] {
-  return r?.cwd && r.sessionId ? [{ name, runtime: r.runtime, cwd: r.cwd, sessionId: r.sessionId, findById }] : [];
+/**
+ * 有 cwd + sessionId 才有会话文件可读。Codex 的 rollout 路径由 cwd + id 推不出来、只能按 id 全库找：
+ * 活会话和已停的普通会话都允许（否则已停的普通 Codex 永远没有 lastActivity），已停的出借 worker 根本不进这里。
+ */
+function tailTargetFor(name: string, r: RegistryAgent | undefined): TailTarget[] {
+  return r?.cwd && r.sessionId ? [{ name, runtime: r.runtime, cwd: r.cwd, sessionId: r.sessionId, findById: true }] : [];
 }
 
 /** model / effort 兜底链末端：全局默认（settings.json） */
@@ -155,12 +158,12 @@ function attachSessionFields(a: Row, r: RegistryAgent | undefined, info: Session
 
 /**
  * registry 里已停止、不在 manager list 里的 agent。已停的出借 worker 只带最小元数据（lastActivityTs 为 null）：
- * 它们的会话尾 / rollout 查找就是 27–45s 的来源，而网页列表对已停 worker 只需要名字 / 归档 / 归属。
- * 归档标记必须在这条独立路径也带一份（extras 里有）——漏了的话灰点的归档 agent 照样留在列表里（2026-09-14）。
+ * 网页列表对它们只需要名字 / 归档 / 归属，而它们数量最多、会话尾 / rollout 查找最贵。已停的普通会话照常读尾。
+ * 归档标记必须在这条独立路径也带一份（extras 里有），漏了的话灰点的归档 agent 照样留在列表里。
  */
 async function stoppedRows(regs: RegistryAgent[], listed: Set<string>, principal: Principal, extras: AgentListExtras, tailIo?: TailIo): Promise<Row[]> {
   const cands = regs.filter((r) => !listed.has(r.name) && agentInScope(principal, r.name));
-  const targets = cands.filter((r) => workerKind(r.name, r) !== "worker").flatMap((r) => tailTargetFor(r.name, r, false));
+  const targets = cands.filter((r) => workerKind(r.name, r) !== "worker").flatMap((r) => tailTargetFor(r.name, r));
   const tails = await readSessionTails(targets, tailIo);
   return cands.map((r) => ({
     name: r.name,
