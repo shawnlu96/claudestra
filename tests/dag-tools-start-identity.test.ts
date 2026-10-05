@@ -23,8 +23,8 @@ let dir: string, db: Database, now: number, kills: string[];
 /** create 登记 agent 后顺带做的事（模拟执行者已在 worktree 里开工） */
 let onCreate: (args: string[]) => void;
 let agents: Record<string, { channelId: string; projectId: string; task?: string }>;
-/** create 的行为：normal = 真实 manager；lost = 建好但结果丢了；reuse = 回执给出别的（已有的）名字 */
-let createMode: "normal" | "lost" | "reuse" | "nameless" | "phantom";
+/** create 的行为：normal = 真实 manager；lost = 建好但结果丢了；thrown = 建好但取结果时抛异常；reuse = 回执给出别的（已有的）名字 */
+let createMode: "normal" | "lost" | "thrown" | "reuse" | "nameless" | "phantom";
 
 async function manager(args: string[]): Promise<any> {
   if (args[0] === "create") {
@@ -33,6 +33,7 @@ async function manager(args: string[]): Promise<any> {
     if (createMode === "phantom") return { ok: true };
     agents[name] = { channelId: `ch-${name}`, projectId: P, task: args[args.indexOf("--task") + 1] };
     onCreate(args);
+    if (createMode === "thrown") throw new Error("读 manager 输出时断了");
     return createMode === "lost" ? { ok: false, error: "超时，结果丢了" } : createMode === "nameless" ? { ok: true } : { ok: true, agent: name };
   }
   if (args[0] === "kill") { kills.push(args[1]); delete agents[args[1]]; return { ok: true }; }
@@ -153,11 +154,11 @@ describe("unknown 执行者的工作目录：真实 git", () => {
     read: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null), write: (p, t) => writeFileSync(p, t), remove: (p) => rmSync(p, { force: true }),
   });
 
-  test("create 已登记、执行者已在 worktree 写了文件、回执超时：不 kill，worktree / 分支 / 说明 / 卡都留着，未提交的工作不丢", async () => {
+  test.each([["回执超时", "lost"], ["create 的 Promise 抛异常", "thrown"]] as const)("create 已登记、执行者已在 worktree 写了文件、%s：不 kill，worktree / 分支 / 说明 / 卡都留着，未提交的工作不丢", async (_, mode) => {
     const repo = join(dir, "repo");
     mkdirSync(repo);
     for (const a of [["init", "-q", "-b", "main"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]]) expect(sh(repo, a).ok).toBe(true);
-    createMode = "lost";
+    createMode = mode;
     onCreate = (args) => writeFileSync(join(args[2], "inflight.txt"), "未提交的工作");
     const p = plan("f-w");
     const r = await runStart(realIo(), p);

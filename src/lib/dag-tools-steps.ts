@@ -203,7 +203,10 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
         if (io.agentExists(p.agent)) return `agent ${p.agent} 已存在（预检之后才出现，不是这次建的）`;
         // manager normalizeName 吃掉名字里第一个 agent- 片段：短名自带 agent-（AGL1 卡号）时传规范全名，它只去掉开头那层，落成的就是 p.agent
         const name = p.agentName.includes("agent-") ? p.agent : p.agentName;
-        const r = await io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS);
+        // 取结果时抛异常（读输出 / 等退出出错）也可能已建好：与失败回执同样走下面的 registry 分类，别直接跳到回滚
+        const r = await Promise.resolve()
+          .then(() => io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS))
+          .catch((e: unknown) => ({ ok: false, error: `manager create 异常：${(e as Error)?.message ?? e}` }));
         // 回执没给名字不拿计划名充数：改由 registry 核实（create 前已确认没有），核实不了留 unknown
         const got = typeof r?.agent === "string" ? r.agent : null;
         if (r?.ok && (got === null ? io.agentExists(p.agent) : got === p.agent)) { owned = p.agent; return null; }
