@@ -183,6 +183,32 @@ function settleResponse(pending: Map<number, Pending>, m: Record<string, any>, l
   p.resolve(m.result);
 }
 
+/**
+ * 登记并写出一条请求。line() 在登记之前调：序列化抛错 = 还没写，普通错误交出去；写入时抛错 = 可能写了一半，
+ * 撤掉在途记录、按 RpcLostError(sent:true) 失败。超时同样是 sent:true（tests/acp-rpc.test.ts「投递状态」）
+ */
+function startRequest(wire: RpcWire, pending: Map<number, Pending>, id: number, method: string, line: () => string,
+  ropts?: { timeoutMs?: number; onResult?: (result: any) => void }): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const text = line();
+    const p: Pending = { resolve, reject, onResult: ropts?.onResult };
+    if (ropts?.timeoutMs) {
+      p.timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new RpcLostError(`${method} 超时（${ropts.timeoutMs}ms）`, true));
+      }, ropts.timeoutMs);
+    }
+    pending.set(id, p);
+    try {
+      wire.write(text);
+    } catch (e) {
+      pending.delete(id);
+      if (p.timer) clearTimeout(p.timer);
+      reject(new RpcLostError(`${method} 写出时出错（${e instanceof Error ? e.message : String(e)}）`, true));
+    }
+  });
+}
+
 /** 处理器抛的错 → 回给对端的 error 对象 */
 function errorBody(e: unknown): { code: number; message: string; data?: unknown } {
   const err = e instanceof RpcError ? e : new RpcError(INTERNAL_ERROR, e instanceof Error ? e.message : String(e));
@@ -275,24 +301,7 @@ export function createRpcPeer(wire: RpcWire, opts: RpcPeerOpts = {}): RpcPeer {
     request(method, params, ropts) {
       if (closed) return Promise.reject(new RpcLostError(`acp 连接已断，${method} 发不出去`, false));
       const id = nextId++;
-      return new Promise((resolve, reject) => {
-        const line = frame({ id, method, ...(params === undefined ? {} : { params }) }); // 序列化抛错 = 还没写：普通错误交出去
-        const p: Pending = { resolve, reject, onResult: ropts?.onResult };
-        if (ropts?.timeoutMs) {
-          p.timer = setTimeout(() => {
-            pending.delete(id);
-            reject(new RpcLostError(`${method} 超时（${ropts.timeoutMs}ms）`, true));
-          }, ropts.timeoutMs);
-        }
-        pending.set(id, p);
-        try {
-          wire.write(line);
-        } catch (e) {
-          pending.delete(id);
-          if (p.timer) clearTimeout(p.timer);
-          reject(new RpcLostError(`${method} 写出时出错（${e instanceof Error ? e.message : String(e)}）`, true));
-        }
-      });
+      return startRequest(wire, pending, id, method, () => frame({ id, method, ...(params === undefined ? {} : { params }) }), ropts);
     },
     notify(method, params) {
       send({ method, ...(params === undefined ? {} : { params }) });
