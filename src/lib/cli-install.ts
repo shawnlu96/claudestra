@@ -37,7 +37,6 @@
 
 import { resolveBridgePort } from "./bridge-url.js";
 import { readDotenvFileSync } from "./env-file.js";
-import { TMUX_SOCK } from "./paths.js";
 import { LOG_DIR, ensureLogDir } from "./log-paths.js";
 import { mkdir, writeFile, chmod, stat, rename, unlink, symlink, readFile } from "fs/promises";
 import { existsSync, readFileSync, realpathSync } from "fs";
@@ -53,25 +52,11 @@ import { legacyWebPlistPath, staticIndexExists, webStaticState, webStaticWarning
 import { cliPathNotes } from "./cli-path.js";
 import { migrateWebHosting } from "./legacy-web.js";
 import { refuseInSandbox } from "./sandbox.js";
+import { DAEMONS, cliWrapperScript, type DaemonSpec } from "./cli-wrapper.js";
+import { renderDaemonPlist, type DaemonPlistInput } from "./daemon-plist.js";
 
-interface DaemonSpec {
-  label: string;
-  stem: string;
-  /** bun 跑的仓库内脚本 */
-  script: string;
-}
+export { DAEMONS, cliWrapperScript } from "./cli-wrapper.js";
 
-/** 常驻 daemon 的 launchd 定义。改这里 = 改启动链。 */
-export const DAEMONS: DaemonSpec[] = [
-  // ⚠ 顺序即 reload 顺序,launcher 必须最后:update 子进程常由 launcher 派生,
-  // bootout launcher 会让 launchd 连坐回收它(macOS 责任链不随 detach 断,
-  // peer 取证 2026-08-09)——launcher 放最后保证 bridge/cron/scheduler 先完成 reload,
-  // 自杀只损失收尾输出。
-  { label: "com.claudestra.bridge",   script: "src/bridge.ts",   stem: "bridge" },
-  { label: "com.claudestra.cron",     script: "src/cron.ts",     stem: "cron" },
-  { label: "com.claudestra.scheduler", script: "src/scheduler.ts", stem: "scheduler" },
-  { label: "com.claudestra.launcher", script: "src/launcher.ts", stem: "launcher" },
-];
 /** 旧 web 服务的默认端口（web/package.json 的 `start` 脚本没写明时用它）；只剩中继的子域名兼容隧道在用 */
 export const WEB_PORT_FALLBACK = 3333;
 
@@ -274,207 +259,49 @@ async function writeCliWrapper(repoRoot: string, bunPath: string): Promise<strin
   return primary;
 }
 
-/** `claudestra` 包装脚本的内容（纯函数，单测做 bash -n 语法检查） */
-export function cliWrapperScript(repoRoot: string, bunPath = "bun"): string {
-  const daemonLabels = DAEMONS.map((d) => `"${d.label}"`).join(" ");
-  return `#!/usr/bin/env bash
-# claudestra — one-shot launcher (Claudestra-installed, v2.4.1+)
-# 用法：
-#   claudestra                 检查 daemon 后 attach（在 iTerm 里用 -CC 原生标签，其它终端用普通 tmux）
-#   claudestra attach --plain  强制普通 tmux attach（任何终端都能用）
-#   claudestra attach --iterm  不在 iTerm 里也唤起 iTerm 新窗口走 -CC
-#   claudestra ls              列出 master session 里的窗口（agent）
-#   claudestra relay           relay-status 的简写（中继连接状态）
-#   claudestra <命令> [参数]   其余一律交给 manager（pair / doctor / version / create …），在仓库目录里跑
-# 流程：
-#   1) launchctl 检查 3 个 daemon，没 load 的 bootstrap
-#   2) 已在 tmux 嵌套，提示 + 退出
-#   3) 在 iTerm（且没 --plain）：exec tmux -CC（iTerm 集成需要 tmux 是 iTerm 直接子进程）
-#   4) --iterm 且装了 iTerm：osascript 唤起 iTerm 新窗口跑 attach
-#   5) 其余（--plain / Terminal.app / ssh 等）：普通 tmux attach（-CC 在普通终端里只会吐控制协议文本；ssh 进来时唤起 iTerm 会开在远端桌面上）
-set -u
-# 沙箱环境（eval "$(bun run sandbox env)" 之后）里敲 claudestra 会连到生产 tmux / launchd：拒绝
-[ "\${CLAUDESTRA_SANDBOX:-}" = "1" ] && { echo "claudestra：当前 shell 带着沙箱环境（CLAUDESTRA_SANDBOX=1），生产命令拒绝执行；开个新 shell 再用" >&2; exit 1; }
+type DaemonPlistEnv = Pick<DaemonPlistInput, "home" | "envPath" | "logDir">;
 
-REPO=${JSON.stringify(repoRoot)}
-SOCK=${JSON.stringify(TMUX_SOCK)}
-DAEMONS=(${daemonLabels})
-PLIST_DIR="$HOME/Library/LaunchAgents"
-ATTACH=(tmux -S "$SOCK" -CC attach -t master)
-PLAIN_ATTACH=(tmux -S "$SOCK" attach -t master)
-BUN=${JSON.stringify(bunPath)}
-
-MODE=auto
-case "\${1:-}" in
-  ls|list)
-    echo "会话在私有 socket（\${SOCK}）里，普通 tmux ls 看不到是正常的。"
-    exec tmux -S "$SOCK" list-windows -t master -F '#{window_index}  #{window_name}'
-    ;;
-  attach)
-    case "\${2:-}" in
-      --plain) MODE=plain ;;
-      --iterm) MODE=iterm ;;
-    esac
-    ;;
-  --plain) MODE=plain ;;
-  --iterm) MODE=iterm ;;
-  "") ;;
-  -h|--help|help)
-    echo "用法: claudestra [attach [--plain|--iterm] | ls | relay | <manager 命令> ...]"
-    echo "manager 命令（在 $REPO 里跑）："
-    cd "$REPO" && "$BUN" run src/manager.ts help 2>/dev/null | "$BUN" -e 'const t = await Bun.stdin.text(); try { for (const u of JSON.parse(t).usage) console.log("  " + u) } catch { console.log(t) }'
-    exit 0
-    ;;
-  relay) shift; cd "$REPO" && exec "$BUN" run src/manager.ts relay-status "$@" ;;
-  *)
-    # 在仓库目录里跑（与 daemon 的 WorkingDirectory 一致，也不会读到调用者当前目录里别的项目的 .env）；
-    # 所以先把 . / .. / ./x / ../x 这种相对路径参数换成绝对路径（create / resume / cron-add 的目录参数）
-    ARGS=()
-    for a in "$@"; do
-      case "$a" in
-        .|..|./*|../*) ARGS+=("$(cd "$a" 2>/dev/null && pwd || echo "$PWD/$a")") ;;
-        *) ARGS+=("$a") ;;
-      esac
-    done
-    cd "$REPO" && exec "$BUN" run src/manager.ts "\${ARGS[@]}"
-    ;;
-esac
-
-UID_NUM=$(/usr/bin/id -u)
-
-CI=$'\\033[2m▶\\033[0m'
-CO=$'\\033[32m✓\\033[0m'
-CW=$'\\033[33m⚠\\033[0m'
-CF=$'\\033[31m✗\\033[0m'
-CB=$'\\033[1;36m'
-CR=$'\\033[0m'
-
-echo "\${CB}🚀 Claudestra\${CR} \\033[2m↗ $REPO\\033[0m"
-echo "$CI 会话在私有 socket 里，普通 tmux ls 看不到是正常的；看窗口用 claudestra ls；iTerm 外的终端自动走普通 tmux attach"
-
-missing=()
-for d in "\${DAEMONS[@]}"; do
-  /bin/launchctl list "$d" >/dev/null 2>&1 || missing+=("$d")
-done
-
-if [ \${#missing[@]} -eq 0 ]; then
-  echo "$CO launchd daemon 都在 (\${DAEMONS[*]})"
-else
-  echo "$CI daemon 缺 \${#missing[@]}/\${#DAEMONS[@]}（\${missing[*]}），bootstrap…"
-  fail=0
-  for d in "\${missing[@]}"; do
-    plist="$PLIST_DIR/$d.plist"
-    /bin/launchctl bootout "gui/$UID_NUM" "$plist" >/dev/null 2>&1 || true
-    if ! /bin/launchctl bootstrap "gui/$UID_NUM" "$plist" 2>/dev/null; then
-      echo "$CF bootstrap $d 失败 — 查 plist: $plist"
-      fail=1
-    fi
-  done
-  [ "$fail" -eq 1 ] && exit 1
-  echo "$CO daemon 都起来了"
-fi
-
-# 已在 tmux 里：不嵌套 attach
-if [ -n "\${TMUX:-}" ]; then
-  echo "$CI 已在 tmux 里 (\${TMUX%%,*})，跳过 attach 避免嵌套"
-  echo "    要进 master TUI：在 iTerm 外层（非 tmux）shell 里再跑 claudestra；"
-  echo "    或者手动：\${ATTACH[*]}"
-  exit 0
-fi
-
-# 在 iTerm：exec 替换当前进程，让 tmux 直接成为 iTerm 子进程（-CC 协议字节直送 PTY）
-if [ "$MODE" != plain ] && [ "\${TERM_PROGRAM:-}" = "iTerm.app" ]; then
-  echo "$CI 在 iTerm，exec tmux -CC（iTerm 集成会切到 native tabs）"
-  exec "\${ATTACH[@]}"
-fi
-
-# 其余一律普通 tmux attach，任何终端都能用；只有显式 --iterm 才去唤起 iTerm
-if [ "$MODE" != iterm ] || [ ! -d /Applications/iTerm.app ]; then
-  [ "$MODE" = iterm ] && echo "$CW 没装 iTerm，改用普通 tmux attach"
-  echo "$CI 普通 tmux attach（切窗口 Ctrl-B n/p，离开 Ctrl-B d；要 iTerm 原生标签：claudestra attach --iterm）"
-  exec "\${PLAIN_ATTACH[@]}"
-fi
-
-# --iterm 且不在 iTerm：osascript 唤起 iTerm 新窗口跑 attach
-echo "$CI AppleScript 唤起 iTerm 新窗口…"
-ATTACH_STR="\${ATTACH[*]}"
-/usr/bin/osascript <<APPLESCRIPT
-tell application "iTerm"
-  activate
-  set newWindow to (create window with default profile)
-  tell current session of newWindow to write text "$ATTACH_STR"
-end tell
-APPLESCRIPT
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  echo "$CO 已在 iTerm 打开新窗口并 attach 到 master"
-else
-  echo "$CF osascript 失败。在 iTerm 里手动跑：\${ATTACH[*]}；其它终端：claudestra attach --plain"
-fi
-exit "$rc"
-`;
+/** plist 里的 HOME、PATH、日志目录取原值（同抽出前：每个 daemon 各取一次） */
+function currentPlistEnv(): DaemonPlistEnv {
+  return { home: homedir(), envPath: buildEnvPath(), logDir: LOG_DIR };
 }
 
+/** 模板在 daemon-plist.ts（纯函数）；这里只把取好的原值传进去 */
 function buildDaemonPlist(
   repoRoot: string,
   bunPath: string,
   daemon: DaemonSpec,
+  env: DaemonPlistEnv,
 ): string {
-  const home = homedir();
-  const envPath = buildEnvPath();
-  const argv = [bunPath, `${repoRoot}/${daemon.script}`];
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${daemon.label}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
-  <key>WorkingDirectory</key>
-  <string>${repoRoot}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${envPath}</string>
-    <key>HOME</key>
-    <string>${home}</string>
-    <!--
-      LANG/LC_ALL 必须注入 UTF-8 locale，否则 daemon 派生的子进程（tmux 尤其）
-      跑在 C locale 下会把 CJK 字符渲染成 '_' placeholder。导致 launcher 调
-      manager.ts list 时拿到的 tmux window name 跟 registry 里的真实 CJK name
-      不 match，永远判定 dead → 死循环 restart → zombie window 累积。
-      pm2 时代不出问题是因为 pm2 从 user shell 启动，继承了 LANG。
-    -->
-    <key>LANG</key>
-    <string>en_US.UTF-8</string>
-    <key>LC_ALL</key>
-    <string>en_US.UTF-8</string>
-  </dict>
-  <key>ProgramArguments</key>
-  <array>
-${argv.map((a) => `    <string>${a}</string>`).join("\n")}
-  </array>
-  <key>StandardOutPath</key>
-  <string>${LOG_DIR}/${daemon.stem}.out</string>
-  <key>StandardErrorPath</key>
-  <string>${LOG_DIR}/${daemon.stem}.err</string>
-</dict>
-</plist>
-`;
+  return renderDaemonPlist({ repoRoot, bunPath, daemon, ...env });
 }
 
-async function writeDaemonPlists(repoRoot: string, bunPath: string): Promise<{ label: string; plistPath: string }[]> {
-  const dir = `${homedir()}/Library/LaunchAgents`;
-  await mkdir(dir, { recursive: true });
+/** writeDaemonPlists 的 IO 边界：默认是真实目录 / 环境 / 文件，测试注入假 IO */
+export interface DaemonPlistWriteIO {
+  launchAgentsDir: () => string;
+  plistEnv: () => DaemonPlistEnv;
+  mkdir: (dir: string) => Promise<unknown>;
+  writeFile: (path: string, content: string) => Promise<void>;
+}
+
+const realPlistWriteIO: DaemonPlistWriteIO = {
+  launchAgentsDir: () => `${homedir()}/Library/LaunchAgents`,
+  plistEnv: currentPlistEnv,
+  mkdir: (dir) => mkdir(dir, { recursive: true }),
+  writeFile: (path, content) => writeFile(path, content),
+};
+
+export async function writeDaemonPlists(
+  repoRoot: string,
+  bunPath: string,
+  io: DaemonPlistWriteIO = realPlistWriteIO,
+): Promise<{ label: string; plistPath: string }[]> {
+  const dir = io.launchAgentsDir();
+  await io.mkdir(dir);
   const out: { label: string; plistPath: string }[] = [];
   for (const d of DAEMONS) {
     const plistPath = `${dir}/${d.label}.plist`;
-    await writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d));
+    await io.writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d, io.plistEnv()));
     out.push({ label: d.label, plistPath });
   }
   return out;
