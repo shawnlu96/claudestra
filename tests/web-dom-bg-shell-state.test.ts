@@ -16,6 +16,7 @@ import { subscribeEvents } from "../src/bridge/event-bus";
 import { projectJsonlPath } from "../src/lib/jsonl-cost";
 import type { BgTaskView } from "../web/features/chat/type";
 import type { WebStreamEvent } from "../web/lib/chat/events";
+import { testChildEnv } from "./test-env";
 
 type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
@@ -285,6 +286,80 @@ describe("后台 shell 全链路：静默不等于结束", () => {
     await poll(10_000);
     expect(task("perm")).toMatchObject({ status: "done", shellEnd: { kind: "exited", code: 0 } });
     await host.unmount();
+  });
+
+  test("r2 no-growth: consumed output loses readability and recovers without appended bytes", async () => {
+    let host = await mount();
+    writeFileSync(out("nogrowth"), "quiet process\n");
+    confirmBg("nogrowth");
+    await poll(10_000);
+    chmodSync(out("nogrowth"), 0o000);
+    try {
+      await expect(Bun.file(out("nogrowth")).text()).rejects.toThrow();
+      await poll(12 * MIN);
+      expect(activeBgTasksFor(AGENT.name).find((t) => t.id === "nogrowth")?.progress).toMatchObject({ unreadable: true });
+      host = await refresh(host);
+      expect(task("nogrowth").progress?.unreadable).toBe(true);
+      expect(rowText(host, "nogrowth")).toContain("状态未知");
+      expect(stopButtons(host, "nogrowth")).toBe(1);
+    } finally {
+      chmodSync(out("nogrowth"), 0o644);
+      await poll(10_000);
+      await host.unmount();
+    }
+    host = await mount();
+    await frontendSweepAndReplay();
+    expect(task("nogrowth").progress?.unreadable).toBeUndefined();
+    expect(rowText(host, "nogrowth")).not.toContain("状态未知");
+    expect(task("nogrowth").status).toBe("running");
+    await host.unmount();
+  });
+
+  test("r2 refresh-result: confirmed exit 1 survives a Provider refresh after 31 minutes", async () => {
+    let host = await mount();
+    writeFileSync(out("retained1"), "running\n");
+    confirmBg("retained1");
+    await poll(10_000);
+    appendFileSync(out("retained1"), "[exited with code 1]\n");
+    await poll(10_000);
+    expect(task("retained1").shellEnd).toEqual({ kind: "exited", code: 1 });
+    await poll(31 * MIN);
+    await frontendSweepAndReplay();
+    expect(task("retained1").shellEnd).toEqual({ kind: "exited", code: 1 });
+    host = await refresh(host);
+    try {
+      expect(task("retained1")?.shellEnd).toEqual({ kind: "exited", code: 1 });
+      const watcher = new URL("../src/bridge/bg-activity-watcher.ts", import.meta.url).href;
+      const code = `
+        import { pollBgActivitiesForTest, activeBgTasksFor } from ${JSON.stringify(watcher)};
+        const deps = { now: () => ${clock}, agents: async () => [${JSON.stringify(AGENT)}], shellDir: () => ${JSON.stringify(tasks)} };
+        await pollBgActivitiesForTest(deps);
+        await pollBgActivitiesForTest(deps);
+        console.log("SNAPSHOT " + JSON.stringify(activeBgTasksFor(${JSON.stringify(AGENT.name)})));
+        process.exit(0);
+      `;
+      const child = Bun.spawn([process.execPath, "--no-env-file", "-e", code], {
+        cwd: tmpdir(), env: testChildEnv({ CLAUDESTRA_STATE_DIR: process.env.CLAUDESTRA_STATE_DIR,
+          CLAUDESTRA_RUNTIME_DIR: process.env.CLAUDESTRA_RUNTIME_DIR }), stdout: "pipe", stderr: "pipe",
+      });
+      const [stdout, stderr, result] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      expect({ result, stderr }).toEqual({ result: 0, stderr: "" });
+      expect(stdout).not.toContain("bg 活动开始");
+      const recovered = JSON.parse(stdout.split("SNAPSHOT ")[1]);
+      await host.unmount();
+      host = await mount();
+      await React.act(async () => {
+        for (const e of ui.bgReplayEvents(recovered)) ui.processStreamEvent(store as unknown as Sink, e);
+      });
+      expect(task("retained1")?.shellEnd).toEqual({ kind: "exited", code: 1 });
+      expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
+      expect(task("nogrowth")).toMatchObject({ status: "running", shellUntracked: true });
+      await expandDone(host);
+      expect(rowText(host, "retained1")).toContain("exit 1");
+      expect(rowText(host, "retained1")).not.toContain("✓");
+    } finally {
+      await host.unmount();
+    }
   });
 
   test("英文：静默提示", async () => {

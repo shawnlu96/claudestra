@@ -18,7 +18,7 @@
  * 在跑工具时静默再久也不收尾；后台 shell 只认 CC 追加的独立末行 `[exited with code N]`（lib/bg-shell-progress.ts），
  * 静默再久也不收尾（重定向日志的 bun test 可以十几分钟不写一字）；输出文件消失 = 状态未知，不当成功；
  * 输出读不到（权限 / IO）不收尾、照旧重试，但经事件 / 快照的 progress.unreadable 告诉前端「状态未知」。
- * 近期收尾的 shell 结局（退出码 / 未知）留在快照里（endedShells），web 刷新后据此还原。
+ * 已跟踪 shell 的最小结局按 agent-session 持久化，web 刷新 / bridge 重启后据此还原。
  *
  * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 只记 baseline（已存在的
  * 文件全部标记 seen 不开流），之后只对新出现的文件开活动 —— bridge 重启不会把历史
@@ -37,6 +37,7 @@ import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
 import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
+import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
 import { feedShellChunk, newShellProgress, settleShellTail, type ShellProgress } from "../lib/bg-shell-progress.js";
 import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress } from "../lib/subagent-progress.js";
@@ -57,6 +58,7 @@ interface Activity {
   id: string;
   kind: BgActivityKind;
   agentName: string;
+  sessionId: string;
   ownerChatId: string;
   filePath: string;
   threadId: string | null; // 建 thread 失败 → null，只发事件
@@ -212,6 +214,7 @@ async function startActivity(
     id: basename(filePath).replace(/\.(jsonl|output)$/, ""),
     kind,
     agentName: agent.name,
+    sessionId: agent.sessionId,
     ownerChatId: agent.channelId,
     filePath,
     threadId,
@@ -231,6 +234,7 @@ async function startActivity(
     unreadable: false,
   };
   activities.set(filePath, act);
+  if (kind === "shell") await shellResults.remember(act);
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
@@ -315,7 +319,8 @@ async function consumeShell(act: Activity, size: number): Promise<void> {
     act.exitCode = r.exitCode;
   } else {
     // 没新字节时 stat 照样成功，「读得到」要单独确认，否则 chmod 000 的文件会被误报恢复
-    if (act.unreadable) setUnreadable(act, !(await access(act.filePath, fsConstants.R_OK).then(() => true, () => false)));
+    setUnreadable(act, !(await access(act.filePath, fsConstants.R_OK).then(() => true, () => false)));
+    if (act.unreadable) return;
     const tail = settleShellTail(act.shell);
     if (tail) {
       act.queue.push(tail.line);
@@ -399,7 +404,7 @@ async function finalize(act: Activity, status: FinalStatus = "idle", reason: str
     type: "bg_task_completed",
     data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, ...(act.kind === "shell" ? { exitCode: act.exitCode } : {}) },
   });
-  if (act.kind === "shell") rememberShellEnd(act, durationMs, status);
+  if (act.kind === "shell") await shellResults.remember(act, durationMs, status === "done" ? "done" : "unknown");
   if (act.threadId && act.adapter) {
     const head =
       act.kind === "subagent"
@@ -441,6 +446,7 @@ async function tickInner(): Promise<void> {
   for (const agent of agents) {
     // 该 agent-session 首次被扫到 → 本轮只记存量(baseline),不开流
     const first = baseline.first(agent.name, agent.sessionId);
+    await shellResults.select(agent.name, agent.sessionId);
     const subFiles = await listFiles(subagentsDir(agent.cwd, agent.sessionId), ".jsonl");
     const shellFiles = await listFiles(deps.shellDir(agent.cwd, agent.sessionId), ".output");
     // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
@@ -541,38 +547,11 @@ export function activeBgActivities(): number {
  *  lines = 已 flush 的尾部行（≤RECENT_MAX）;刷新后前端据此重建面板。 */
 type BgTaskSnapshot = { id: string; kind: BgActivityKind; title: string; startedAt: number; lines: string[] } & Record<string, unknown>;
 
-/**
- * 近期收尾的 shell 结局（退出码 / 状态未知）：完成事件只在流里发一次，页面刷新 / 新连接（不带 since）就再也拿不到，
- * 已确认的 exit 0 / 非 0 会从面板上消失。留在快照里带 end 字段，前端 replay 成 bg-done 还原。
- * 按 agent 保留最近 ENDED_MAX 个、ENDED_TTL_MS 内的；bridge 重启即清空（那时前端按快照缺失显示状态未知）。
- */
-const ENDED_MAX = 8; // 与前端 done 卡上限一致（chat-store trimDoneBgTasks）
-const ENDED_TTL_MS = 30 * 60_000;
-const endedShells: { agentName: string; at: number; snap: BgTaskSnapshot }[] = [];
-
-function rememberShellEnd(act: Activity, durationMs: number, status: FinalStatus): void {
-  endedShells.push({
-    agentName: act.agentName,
-    at: deps.now(),
-    snap: {
-      id: act.id,
-      kind: "shell",
-      title: titleFor("shell", act.filePath),
-      startedAt: act.startedAt,
-      lines: [...act.recent],
-      progress: progressView(act),
-      end: { status, durationMs, exitCode: act.exitCode },
-    },
-  });
-  const mine = endedShells.filter((e) => e.agentName === act.agentName);
-  if (mine.length > ENDED_MAX) endedShells.splice(endedShells.indexOf(mine[0]), 1);
-}
+const shellResults = new ShellResults();
 
 export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
-  const out: BgTaskSnapshot[] = [];
-  const cutoff = deps.now() - ENDED_TTL_MS;
-  for (let i = endedShells.length - 1; i >= 0; i--) if (endedShells[i].at < cutoff) endedShells.splice(i, 1);
-  for (const e of endedShells) if (e.agentName === agentName) out.push({ ...e.snap, lines: [...e.snap.lines] });
+  const liveIds = new Set([...activities.values()].filter((a) => a.agentName === agentName).map((a) => a.id));
+  const out: BgTaskSnapshot[] = shellResults.snapshots(agentName).filter((s) => !liveIds.has(s.id));
   for (const act of activities.values()) {
     if (act.agentName !== agentName || act.finished) continue;
     if (act.kind === "subagent" && !act.meta.description) act.meta = readSubagentMeta(act.filePath); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员

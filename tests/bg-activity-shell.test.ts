@@ -122,7 +122,7 @@ describe("bg-activity-watcher · 后台 shell", () => {
     expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "g1")).toMatchObject({ kind: "shell", end: { status: "unknown", exitCode: null } });
   });
 
-  test("已确认的退出结果留在快照里（刷新 / 新连接据此还原），按 agent 封顶 8 个、30 分钟后过期", async () => {
+  test("已确认的退出结果留在快照里（刷新 / 新连接据此还原），按 agent 封顶 8 个、31 分钟后仍保留", async () => {
     const f = fixture("ended");
     await f.poll();
     writeFileSync(f.out("e1"), "boom\n[exited with code 3]\n");
@@ -143,7 +143,7 @@ describe("bg-activity-watcher · 后台 shell", () => {
     expect(ids).toHaveLength(8);
     expect(ids).not.toContain("e1");
     clock += 31 * MIN;
-    expect(activeBgTasksFor(f.agent.name)).toEqual([]);
+    expect(activeBgTasksFor(f.agent.name).map((t) => t.id)).toEqual(ids);
   });
 
   test("读失败 → 进度带 unreadable 发给前端 / 进快照（不收尾、不推进），读通后恢复并补上漏掉的输出", async () => {
