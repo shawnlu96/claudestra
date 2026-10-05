@@ -13,7 +13,7 @@ import { makeRealpathCache } from "../src/lib/realpath-cache.ts";
 import { projectsSlug } from "../src/lib/jsonl-cost.ts";
 import { resolveCwd } from "../src/lib/pi-session.ts";
 
-const errno = (code: string) => Object.assign(new Error(code), { code });
+const errno = (code: string | undefined) => (code ? Object.assign(new Error(code), { code }) : new Error("no code"));
 
 describe("makeRealpathCache", () => {
   test("打得开：同一路径只真解析一次", () => {
@@ -32,12 +32,12 @@ describe("makeRealpathCache", () => {
     }
   });
 
-  test("目录还没建（ENOENT / ENOTDIR）不记：建好后下次照常解开", () => {
-    for (const code of ["ENOENT", "ENOTDIR"]) {
-      let exists = false;
-      const real = makeRealpathCache((p) => { if (!exists) throw errno(code); return `/private${p}`; });
+  test("目录还没建、一时缺资源（EMFILE / ENFILE / EIO）、没有 code 的错误都不记：恢复后下次解开真实路径", () => {
+    for (const code of ["ENOENT", "ENOTDIR", "EMFILE", "ENFILE", "EIO", undefined]) {
+      let recovered = false;
+      const real = makeRealpathCache((p) => { if (!recovered) throw errno(code); return `/private${p}`; });
       expect(real("/tmp/later")).toBe("/tmp/later");
-      exists = true;
+      recovered = true;
       expect(real("/tmp/later")).toBe("/private/tmp/later");
     }
   });
