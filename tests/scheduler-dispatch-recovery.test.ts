@@ -340,6 +340,68 @@ describe("FB2 takeover: one local Codex author through the formal claim, card st
   }, E2E_MS);
 });
 
+/**
+ * claim-hold-race (review r1): an owner hold, a freeze or the policy turned off between the last assessment and the claim. The real
+ * ledger CLI (PM freeze included), the real fact reader with the same lease-ended seam as the execution tests above, the spec file on
+ * disk; only the worker transport is the fixture's. Each window must end with the claim voided (submitted→cancelled), no send, no create.
+ */
+describe("FB2 claim-hold-race: eligibility is re-proven after the claim, before any send / create", () => {
+  type Race = "spec-hold" | "policy-off" | "freeze-after-plan" | "freeze-after-claim";
+  /** Runs one takeover with the race injected at the given window; returns the outcome and what went out. */
+  async function race(kind: "author" | "none", what: Race) {
+    const p = await stuck(kind);
+    let mode: "on" | "off" = "on";
+    const h = harness(p, () => ({ mode, manualAfterMs: null }), { ended: true });
+    const specPath = getTask(p.f.db, "T1")!.spec!;
+    h.deps.manager = async (...args) => {
+      if (args[1] === "scheduler-plan" && what === "spec-hold") writeFileSync(specPath, `人工验收：是\n${readFileSync(specPath, "utf8")}`);
+      if (args[1] === "scheduler-plan" && what === "policy-off") mode = "off";
+      const r = await p.cli("scheduler", ...args.slice(1));
+      if (r.ok === true && args[1] === "scheduler-plan" && what === "freeze-after-plan") expect((await p.cli("pm", "freeze", "--reason", "owner pause", "--project", "p")).ok).toBe(true);
+      if (r.ok === true && args[1] === "scheduler-settle" && args[6] === "submitted" && what === "freeze-after-claim") {
+        expect((await p.cli("pm", "freeze", "--reason", "owner pause", "--project", "p")).ok).toBe(true);
+      }
+      return r;
+    };
+    const sent = p.f.sent.length;
+    const out = await drive(p, h);
+    return { p, h, out, sends: p.f.sent.length - sent, base: sent };
+  }
+
+  for (const kind of ["author", "none"] as const) {
+    for (const what of ["spec-hold", "policy-off", "freeze-after-plan", "freeze-after-claim"] as const) {
+      test(`${kind === "author" ? "bound author, dispatch claim" : "new author, ensure claim"}: ${what} → claim voided, nothing sent or created`, async () => {
+        const { p, h, out, sends, base } = await race(kind, what);
+        try {
+          expect(out.step).toBe("replan");
+          expect(sends).toBe(0);
+          expect(h.ensured).toEqual([]);
+          const last = p.f.intents().at(-1)!;
+          expect(last).toMatchObject({ action: kind === "author" ? "dispatch" : "ensure_session", status: "cancelled" });
+          // It was claimed and then voided: the claim is the ordering point, the void its receipt.
+          const settles = p.events().filter((e) => e.data.op === "settle" && e.data.id === last.id).map((e) => `${e.data.from}→${e.data.to}`);
+          expect(settles).toEqual(["pending→submitted", "submitted→cancelled"]);
+          expect(getSchedulerSession(p.f.db, "T1", "author")?.agent ?? null).toBe(kind === "author" ? "agent-task-one" : null);
+          // The next pass does not take it over while the hold / freeze / off stands.
+          const next = await drive(p, harness(p, what === "policy-off" ? off : on, { ended: true }));
+          expect(next.step).not.toBe("sent");
+          expect(p.f.sent.length).toBe(base);
+        } finally { p.f.close(); }
+      }, E2E_MS);
+    }
+  }
+
+  test("a voided claim is no lasting block: once the policy is on again the next pass takes over normally", async () => {
+    const { p, out, sends, h, base } = await race("author", "policy-off");
+    try {
+      expect([out.step, sends]).toEqual(["replan", 0]);
+      expect(await drive(p, h)).toMatchObject({ step: "off" });
+      expect(await drive(p, harness(p, on, { ended: true }))).toMatchObject({ step: "sent" });
+      expect(p.f.sent.slice(base)).toEqual([expect.objectContaining({ agent: "agent-task-one", route: "acp" })]);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+});
+
 describe("FB2 slot proof", () => {
   test("a bound local Codex author keeps its seat; a full pool or legacy slot count is no proof", async () => {
     const p = await ready();

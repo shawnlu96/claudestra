@@ -5,6 +5,10 @@
  * - one CAS write: `ledger scheduler-plan` with the project seq read before the fresh facts were re-assessed (staleBasis), so any write in
  *   between refuses the plan; one live intent per card and the intent key make a duplicate tick or a restarted service a replay, never a
  *   second author; `scheduler-settle` pending→submitted is the claim;
+ * - the claim is the ordering point, so the takeover's own eligibility is proven again right after it and before any external effect
+ *   (afterClaim): no foreign project event since the plan's seq (a PM freeze, a lease / order / spec event, …), the queue not frozen,
+ *   the spec file byte-identical to the text the plan was assessed on and free of holds, the policy port still on. Anything else
+ *   voids the claim (submitted→cancelled, nothing sent or created) and the next pass re-plans from scratch;
  * - the existing ensure (ensureLocalAuthor: worktree, `manager create`, `scheduler-autostart step local-author`), `scheduler-session-bind`,
  *   and driveDispatch for the work order. A failed step settles cancelled (nothing went out) or unknown (never retried, PM checks).
  * Never here: ending a peer's write lease (`lend-reclaim` is PM's), changing a pinned placement, replacing a card's author session row,
@@ -17,7 +21,7 @@ import type { Database } from "bun:sqlite";
 import type { InventoryQuota } from "./ai-quota.js";
 import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getTask } from "./ledger-store.js";
+import { getMeta, getTask } from "./ledger-store.js";
 import type { BorrowEntry } from "./lend-config.js";
 import { orderTakenSeq } from "./order-mark.js";
 import { unpullableReason } from "./order-pullable.js";
@@ -34,6 +38,8 @@ import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { workOrderFor } from "./scheduler-work-order.js";
 import { deliveryFor, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
+import { specHolds } from "./recovery-plan-gap.js";
+import { readTextSoft, specPathFor } from "./task-spec.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -104,6 +110,9 @@ function localDecision(s: PlannerSnapshot): Planned | string {
   if (d.action === "dispatch" && (d.node === "write" || d.node === "fix")) return d;
   return `本机规划是 ${d.action} ${d.node}，不是 Codex 作者或开工 / 修复派单`;
 }
+
+/** What the plan was decided on, re-proven after the claim: the project seq read before the fresh facts, and the spec text they held. */
+interface ClaimGuard { seq: number; specText: string }
 
 const triggerText = (p: EligiblePlan): string =>
   p.trigger.kind === "gate_refused" ? `外发闸拒收 #${p.trigger.seq}` : `无可安全投递 peer（${oneLine(p.trigger.reason).slice(0, 120)}）`;
@@ -184,7 +193,7 @@ class Takeover {
         return this.out("blocked", `family_switch：${why}`);
       }
     }
-    // Revalidate on fresh facts with the policy asked again; the seq read first is the plan's CAS, so nothing can slip in between.
+    // Revalidate on fresh facts with the policy asked again; the seq read first is the plan's CAS, and voided() re-proves it after the claim.
     const seq = (this.deps.db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(this.task.project) as { seq: number }).seq;
     const task = getTask(this.deps.db, this.task.id), workflow = getWorkflow(this.deps.db, this.task.id);
     if (!task || !workflow) return this.out("replan", "卡或流程读不到");
@@ -200,18 +209,48 @@ class Takeover {
     if (r.ok !== true) return this.out("replan", `接管计划没写进台账：${String(r.error)}`);
     const intent = r.intent as SchedulerIntent;
     if (intent.status !== "pending") return this.out("lost_race", `意图 ${intent.id} 已是 ${intent.status}`);
+    if (fresh.specText === null) return this.out("replan", "规格读不到");
+    const guard: ClaimGuard = { seq, specText: fresh.specText };
     const preserve = `branch=${plan.preserve.branch ?? "-"}; head=${plan.preserve.head ?? "-"}; specRev=${plan.preserve.specRev}; round=${plan.preserve.round}`;
     if (local.action === "ensure_session") {
-      const done = await this.author(task, intent, plan, preserve);
+      const done = await this.author(task, intent, plan, preserve, guard);
       // A new author is bound: its work order follows in the same pass, re-planned from scratch on the new facts.
       return done.step === "session" && depth === 0 ? this.run(1) : done;
     }
-    return this.dispatch(task, intent, local);
+    return this.dispatch(task, intent, local, guard);
   }
 
-  async author(task: LedgerTask, intent: SchedulerIntent, plan: EligiblePlan, preserve: string): Promise<TakeoverOutcome> {
+  /**
+   * After the claim, before any send / create: why the takeover no longer stands, or null. Ledger facts are ordered by the claim
+   * (every event committed before it is visible now); the spec file and the policy port have no ledger version, so they are read
+   * again here, after the claim — a change made before this read is seen, one made later is after the decision, as with any send.
+   */
+  async voided(intent: SchedulerIntent, guard: ClaimGuard): Promise<string | null> {
+    const db = this.deps.db, project = this.task.project;
+    const foreign = db.query(`SELECT seq, kind, actor FROM events WHERE project = ? AND seq > ?
+      AND NOT (kind = 'scheduler' AND json_extract(data, '$.id') = ?) ORDER BY seq LIMIT 3`).all(project, guard.seq, intent.id) as { seq: number; kind: string; actor: string }[];
+    if (foreign.length) return `计划后项目有新事件（${foreign.map((e) => `#${e.seq} ${e.kind}/${e.actor}`).join("、")}），接管作废重规划`;
+    const meta = getMeta(db, project);
+    if (meta.queueFrozen.frozen) return `项目队列冻结（${meta.queueFrozen.reason || "无原因"}）`;
+    const task = getTask(db, this.task.id);
+    if (!task) return "卡读不到";
+    const text = readTextSoft(specPathFor(task, meta.docsDir));
+    if (text === null) return "规格读不到";
+    if (text !== guard.specText) return "规格在计划后改过";
+    const h = specHolds(text);
+    if (h.manual || h.superseded || h.localOnly) return "规格写明人工验收 / 已替代 / 本机限定";
+    const policy = localFallbackPolicy(this.deps.policy, project);
+    if (policy.mode !== "on") return `本机接管策略已是 ${policy.mode}${policy.diag ? `（${policy.diag}）` : ""}`;
+    return null;
+  }
+
+  async author(task: LedgerTask, intent: SchedulerIntent, plan: EligiblePlan, preserve: string, guard: ClaimGuard): Promise<TakeoverOutcome> {
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure author codex; local-takeover ${plan.key}; ${triggerText(plan)}; ${preserve}`))) {
       return this.out("lost_race", "认领失败");
+    }
+    const voided = await this.voided(intent, guard);
+    if (voided) {
+      return (await this.settle(intent.id, "submitted", "cancelled", `未建：${voided}`)) ? this.out("replan", voided) : this.out("lost_race", "作废失败");
     }
     let got: EnsureResult;
     try { got = await this.deps.ensure(task, "author", "codex"); }
@@ -247,7 +286,7 @@ class Takeover {
     return this.out("session", `author = ${ref.agent}（本机 Codex 接管）`);
   }
 
-  ops(): SchedulerLedgerOps {
+  ops(guard: ClaimGuard): SchedulerLedgerOps {
     const db = this.deps.db;
     return {
       intent: (id) => db.query("SELECT * FROM scheduler_intents WHERE id = ?").get(id) as SchedulerIntent | null,
@@ -258,10 +297,11 @@ class Takeover {
       settle: (id, from, to, receipt) => this.settle(id, from, to, receipt),
       taken: (id) => orderTakenSeq(db, id),
       now: () => this.deps.now(),
+      afterClaim: (intent) => this.voided(intent, guard),
     };
   }
 
-  async dispatch(task: LedgerTask, intent: SchedulerIntent, local: Planned): Promise<TakeoverOutcome> {
+  async dispatch(task: LedgerTask, intent: SchedulerIntent, local: Planned, guard: ClaimGuard): Promise<TakeoverOutcome> {
     const ref = boundRef(this.deps.db, task.id, "author");
     if (!ref || ref.family !== "codex" || ref.transport === "peer") {
       await this.settle(intent.id, "pending", "cancelled", "未投递：没有绑定的本机 Codex 作者");
@@ -281,7 +321,7 @@ class Takeover {
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.deps.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
-    const r = await driveDispatch(this.ops(), w, ref, { ...order, delivery });
+    const r = await driveDispatch(this.ops(guard), w, ref, { ...order, delivery });
     if (r.kind === "sent") return this.out("sent", `本机 Codex 接管已派 ${order.step}：${r.receipt.route}`);
     if (r.kind === "held") await this.tell("unknown", `本机接管派单未定：${r.reason}`);
     return this.out(r.kind === "settled" ? "settled" : r.kind, "reason" in r ? r.reason : r.kind === "settled" ? r.status : "");
