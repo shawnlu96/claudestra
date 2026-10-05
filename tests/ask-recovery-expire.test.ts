@@ -9,6 +9,7 @@ import { deliverReplyWithAsk } from "../src/bridge/ask-reply.js";
 import { ownerPresence, setAsksForTest, type AsksDeps } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import type { Envelope } from "../src/bridge/router.js";
+import { remindOne } from "../src/lib/ask-recovery.js";
 import { getAsk, listAsks, type Ask } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
@@ -41,12 +42,12 @@ afterEach(() => {
 });
 
 /** agent-x 用真 reply 路径发一条授权 ask，再把它拨到已到点 */
-async function expiringAuthorize(): Promise<Ask> {
+async function expiringAuthorize(content = "发 v2.32.0 吗", messageId = "reply_1", bind = RELEASE): Promise<Ask> {
   const env: Envelope = {
-    from: { kind: "local", channelId: "111", ws }, to: { kind: "user", userId: "", channelId: "api:owner:self" }, intent: "response", content: "发 v2.32.0 吗",
-    meta: { messageId: "reply_1", triggerKind: "agent_tool", ts: at, threadId: "thr_1", components: BUTTONS },
+    from: { kind: "local", channelId: "111", ws }, to: { kind: "user", userId: "", channelId: "api:owner:self" }, intent: "response", content,
+    meta: { messageId, triggerKind: "agent_tool", ts: at, threadId: "thr_1", components: BUTTONS },
   };
-  await deliverReplyWithAsk(env, "api:owner:self", "111", async (e) => ({ envelope: e, outcome: { kind: "sent", discordMessageIds: [] } }), { kind: "authorize", bind: RELEASE });
+  await deliverReplyWithAsk(env, "api:owner:self", "111", async (e) => ({ envelope: e, outcome: { kind: "sent", discordMessageIds: [] } }), { kind: "authorize", bind });
   openLedger(s.path).run("UPDATE asks SET expiresAt = ? WHERE id = ?", [Date.now() - 1000, env.meta.askId!]);
   return getAsk(openLedger(s.path), env.meta.askId!)!;
 }
@@ -92,5 +93,39 @@ describe("过期扫描里的再提示", () => {
     await expiringAuthorize();
     await sweepExpired();
     expect(reminders()).toEqual([]);
+  });
+
+  test("批里后一条查询抛错：前面开出的照样发 SSE + 告诉发起方，不丢；下一轮只补没发的，不重发", async () => {
+    const a = await expiringAuthorize("发 v2.32.0 吗", "reply_1");
+    const b = await expiringAuthorize("部署 v2.32.0 吗", "reply_2", { ...RELEASE, action: "deploy" }); // 不同 action = 不同 askKey，不互相取代
+    let calls = 0;
+    setAskReminderPorts({
+      policy: () => ({ mode: "on", manualAfterMs: null }),
+      ownerActive: () => { if (calls++ === 1) throw new Error("presence temporarily down"); return { active: true, evidence: "test" }; },
+    });
+    await sweepExpired();
+    const [first] = reminders();
+    expect(reminders()).toHaveLength(1);
+    expect(s.asks.some((e) => (e.data as { askId: string }).askId === first.id)).toBe(true);
+    expect(s.sent.filter((e) => e.content.includes(`新卡 ${first.id}`))).toHaveLength(1);
+    expect(getAsk(openLedger(s.path), first.id)!.extra.remindNotice).toBe("done");
+    await sweepExpired();
+    expect(reminders().map((x) => x.extra.recoveryOf).sort()).toEqual([a.id, b.id].sort());
+    expect(s.sent.filter((e) => e.content.includes("新卡"))).toHaveLength(2);
+  });
+
+  test("落库后、发布前进程没了（卡带 pending 待办）：下一次扫描补发 SSE + 发起方通知，补一次就记 done", async () => {
+    const a = await expiringAuthorize();
+    await sweepExpired(); // 结成 expired（缺策略 = observe，不开）
+    const on = { policy: () => ({ mode: "on" as const, manualAfterMs: null }), ownerActive: () => ({ active: true, evidence: "t" }), askerLive: () => true };
+    const r = await remindOne(openLedger(s.path), getAsk(openLedger(s.path), a.id)!, on, Date.now());
+    expect(r.result).toBe("opened");
+    const n = reminders()[0];
+    expect(s.sent.some((e) => e.content.includes(n.id))).toBe(false);
+    await sweepExpired(); // 重启后的第一次扫描：策略仍缺（observe），待办照补
+    expect(s.asks.some((e) => (e.data as { askId: string }).askId === n.id)).toBe(true);
+    expect(s.sent.filter((e) => e.content.includes(`新卡 ${n.id}`))).toHaveLength(1);
+    await sweepExpired();
+    expect(s.sent.filter((e) => e.content.includes(`新卡 ${n.id}`))).toHaveLength(1);
   });
 });

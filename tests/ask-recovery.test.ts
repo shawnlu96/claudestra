@@ -1,7 +1,7 @@
 /** 决定过期后的再提示（lib/ask-recovery.ts）：真实台账上的状态机——资格、等待、至多一次、重绑定、并发复核、原过期记录不动 */
 import { afterEach, describe, expect, test } from "bun:test";
 import { bindHash, checkAsk } from "../src/lib/ask-bind.js";
-import { reminderDedupKey, remindOne, sweepReminders, type ReminderPorts } from "../src/lib/ask-recovery.js";
+import { markReminderNoticed, pendingReminderNotices, reminderDedupKey, remindOne, sweepReminders, type ReminderPorts } from "../src/lib/ask-recovery.js";
 import { answerAsk, closeAsk, getAsk, listAsks, openAsk, patchAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
@@ -44,7 +44,7 @@ describe("再提示：开卡", () => {
     expect(n.id).not.toBe(a.id);
     expect(n).toMatchObject({ state: "open", kind: "decide", source: "reply", fromAgent: "agent-x", fromChannelId: "111", title: a.title, options: BUTTONS, askKey: "release",
       dedupKey: reminderDedupKey(a.id), supersedes: null, discordMessageIds: [] });
-    expect(n.extra).toEqual({ recoveryOf: a.id, parent: "agent-pm", parentChannelId: "222" });
+    expect(n.extra).toEqual({ recoveryOf: a.id, parent: "agent-pm", parentChannelId: "222", remindNotice: "pending" });
     expect(n.expiresAt).toBe(a.expiresAt + 60_000 + 4 * H);
     expect(getAsk(db(), a.id)).toEqual(before.row);
     expect(listEvents(db(), { project: "p" }).length).toBe(before.events + 1);
@@ -125,12 +125,16 @@ describe("再提示：开关", () => {
     expect(reminders()).toEqual([]);
   });
 
-  test("窗口：manualAfterMs 设了按它，null 按原卡有效期", async () => {
+  test("窗口：manualAfterMs 设了按它；null = owner 没设期限，不拿原卡有效期顶替——4 小时卡过期 5 小时 / 10 天后 owner 回来照开", async () => {
     const a = expired();
     const tight = { ...ON, policy: () => ({ mode: "on" as const, manualAfterMs: 10 * 60_000 }) };
     expect((await remindOne(db(), a, tight, a.expiresAt + 11 * 60_000))).toMatchObject({ result: "skip", reason: "reminder window passed" });
-    expect((await remindOne(db(), a, ON, a.expiresAt + 4 * H + 1))).toMatchObject({ result: "skip", reason: "reminder window passed" });
-    expect((await remindOne(db(), a, ON, a.expiresAt + 4 * H)).result).toBe("opened");
+    expect((await remindOne(db(), a, tight, a.expiresAt + 10 * 60_000)).result).toBe("opened");
+    const b = expired({ askKey: "b" });
+    expect((await remindOne(db(), b, { ...ON, ownerActive: () => null }, b.expiresAt + 5 * H)).result).toBe("wait");
+    expect((await remindOne(db(), b, ON, b.expiresAt + 5 * H)).result).toBe("opened");
+    const c = expired({ askKey: "c" });
+    expect((await sweepReminders(db(), ON, c.expiresAt + 10 * 24 * H)).find((r) => r.id === c.id)?.result).toBe("opened");
   });
 });
 
@@ -186,10 +190,47 @@ describe("再提示：检查 + 写入原子", () => {
     expect(reminders()).toHaveLength(1);
   });
 
+  test("等 owner 活跃 / 发起方查询期间 owner 暂停了、或策略改成 observe / off → 写锁内复核放弃，不开", async () => {
+    const a = expired();
+    let paused = false;
+    const pauseRace: ReminderPorts = { ...ON, paused: () => paused, ownerActive: async () => ((paused = true), { active: true, evidence: "heartbeat" }) };
+    expect(await remindOne(db(), a, pauseRace, a.expiresAt + 1)).toMatchObject({ result: "skip", reason: "paused by owner" });
+    for (const mode of ["observe", "off"] as const) {
+      let m: "on" | "observe" | "off" = "on";
+      const flip: ReminderPorts = { ...ON, policy: () => ({ mode: m, manualAfterMs: null }), askerLive: async () => ((m = mode), true) };
+      expect(await remindOne(db(), a, flip, a.expiresAt + 1)).toMatchObject({ result: "skip", reason: `mode=${mode}` });
+    }
+    expect(reminders()).toEqual([]);
+    expect((await remindOne(db(), a, { ...ON, paused: () => paused }, a.expiresAt + 2)).result).toBe("skip");
+    paused = false;
+    expect((await remindOne(db(), a, { ...ON, paused: () => paused }, a.expiresAt + 2)).result).toBe("opened");
+  });
+
   test("原卡在判定后被改过（如 owner 隐藏）→ 放弃", async () => {
     const a = expired();
     const hide: ReminderPorts = { ...ON, askerLive: () => (patchAsk(db(), a.id, { extra: { hidden: { by: "owner:self", at: 1 } } }, a.expiresAt + 5), true) };
     expect(await remindOne(db(), a, hide, a.expiresAt + 10)).toMatchObject({ result: "skip", reason: "original changed" });
     expect(reminders()).toEqual([]);
+  });
+});
+
+describe("再提示：批量与通知待办", () => {
+  test("批里某条的 port 抛错：只有那条 wait，前面开出的保留；开出的卡带通知待办，记 done 后不再列出；已答的不补", async () => {
+    const a = expired({ askKey: "a" });
+    const b = expired({ askKey: "b" });
+    let calls = 0;
+    const flaky: ReminderPorts = { ...ON, ownerActive: () => { if (calls++ === 1) throw new Error("presence temporarily down"); return { active: true, evidence: "heartbeat" }; } };
+    const res = await sweepReminders(db(), flaky, b.expiresAt + 1);
+    expect(res.map((r) => r.result).sort()).toEqual(["opened", "wait"]);
+    expect(res.find((r) => r.result === "wait")).toMatchObject({ reason: "check failed: presence temporarily down" });
+    expect(pendingReminderNotices(db()).map((x) => x.extra.recoveryOf)).toHaveLength(1);
+    // 恢复后再扫：另一条开出；两张都还在待办里（第一张的通知没人发过）
+    await sweepReminders(db(), ON, b.expiresAt + 60_000);
+    const pend = pendingReminderNotices(db());
+    expect(pend.map((x) => x.extra.recoveryOf).sort()).toEqual([a.id, b.id].sort());
+    markReminderNoticed(db(), pend[0].id, b.expiresAt + 60_001);
+    answerAsk(db(), pend[1].id, answer(b.expiresAt + 60_002));
+    expect(pendingReminderNotices(db())).toEqual([]);
+    expect(getAsk(db(), pend[0].id)!.state).toBe("open");
   });
 });

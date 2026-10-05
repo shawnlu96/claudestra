@@ -4,11 +4,12 @@
  * - 指派事项（assigned）：给该任务（同一项目里的）的 PM 一条固定模板「<任务号> 指派给 <assignee> 的事项已过期」（T28 §2.5 第 7 行）——不抢占、
  *   每条只发一次（expired 只会结一次）；PM 不在线就不投、不改投大总管，在线但这一下没投进去的照 sendCalm 进押后队列等它空下来；PM 据此 ask-reopen 或改派；
  * - 其余人 / 系统发起的：只有 SSE。
- * 扫完再看近期过期的要不要再提示一次（lib/ask-recovery.ts）：策略 port 没接上（等 CFG）时是 observe，只记一次日志、不开卡。
+ * 扫完再看过期的要不要再提示一次（lib/ask-recovery.ts）：策略 port 没接上（等 CFG）时是 observe，只记一次日志、不开卡；
+ * 开出的卡发 SSE / 告诉发起方按台账里的 remindNotice 待办来，没发完的（批里别条出错、重启）下一分钟补。
  */
 import { isHumanNodeAsk } from "../lib/human-node.js";
 import { t } from "../lib/i18n.js";
-import { sweepReminders, type ReminderPorts } from "../lib/ask-recovery.js";
+import { markReminderNoticed, pendingReminderNotices, sweepReminders, type ReminderPorts } from "../lib/ask-recovery.js";
 import { closeAsk, dueAsks, hasAsksTable, type Ask } from "../lib/ledger-asks.js";
 import { isCurrentAssignment } from "../lib/ledger-human.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
@@ -85,16 +86,31 @@ export function setAskReminderPorts(p: Partial<ReminderPorts> | undefined): void
   observed.clear();
 }
 
-async function remindAfterSweep(db: Parameters<typeof sweepReminders>[0], now: number): Promise<void> {
+let reminding: Promise<void> | null = null;
+
+/** 同一进程里上一轮还没跑完（port 慢）就不叠一轮，免得同一条待办通知发两遍 */
+function remindAfterSweep(db: Parameters<typeof sweepReminders>[0], now: number): Promise<void> {
+  reminding ??= runReminders(db, now).finally(() => (reminding = null));
+  return reminding;
+}
+
+async function runReminders(db: Parameters<typeof sweepReminders>[0], now: number): Promise<void> {
   const res = await sweepReminders(db, reminderPorts, now).catch((e: Error) => (console.error(`⚠️ 过期再提示扫描失败（下一分钟再扫）: ${e.message}`), []));
   for (const r of res) {
     if (r.result === "observe" && !observed.has(r.id)) {
       observed.add(r.id);
       console.log(`[askReminder observe] ${r.id} 满足再提示条件（${r.evidence}），observe 模式不开卡`);
     }
-    if (r.result !== "opened") continue;
-    publishAsk(r.reminder);
-    await noticeReminded(r.reminder, r.id).catch((e) => console.error(`⚠️ 再提示通知发起方失败（${r.reminder.id}，卡已开）: ${(e as Error).message}`));
+  }
+  // 这一轮开出的和以前没发完的一起：台账里的待办才算数，「卡已存在」不等于「通知已发」
+  for (const n of pendingReminderNotices(db)) {
+    try {
+      if (!reminderPorts.paused?.(n)) publishAsk(n); // owner 后来暂停了：卡已在收件箱，不再推 / 弹；发起方照样要知道新 id
+      await noticeReminded(n, String(n.extra.recoveryOf));
+      markReminderNoticed(db, n.id, now);
+    } catch (e) {
+      console.error(`⚠️ 再提示通知没发完（${n.id}，卡已开，下一分钟补）: ${(e as Error).message}`);
+    }
   }
 }
 
