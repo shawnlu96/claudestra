@@ -128,6 +128,22 @@ describe("轮询游标（手动 tick）", () => {
     expect(ids(f.got)).toEqual([a, b, c, d]);
   });
 
+  test("同库：先取时间、后提交的关闭（ts 早于上次读成功、也早于已发的那条）照发，不被更晚 ts 的事件连带跳过（ask-sse r2）", () => {
+    const f = start();
+    const requestStartedAt = Date.now() - 60_000; // 结清请求先取 now，等锁后才提交
+    f.tick();
+    const a = ask();
+    settle(a); // ts = 此刻，比下面那条晚
+    f.tick();
+    expect(ids(f.got)).toEqual([a]);
+    const x = ask({ now: requestStartedAt });
+    settle(x, requestStartedAt);
+    f.tick();
+    expect(ids(f.got)).toEqual([a, x]);
+    f.tick();
+    expect(f.got).toHaveLength(2);
+  });
+
   test("重启（新的 feed）只取基线：之前的关闭不洪泛，之后的照发", () => {
     const f1 = start();
     f1.tick();
