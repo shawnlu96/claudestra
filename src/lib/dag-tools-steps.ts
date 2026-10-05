@@ -82,7 +82,8 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
       run: async () => failed(await ledger(io, p, "task-new", p.taskId, {
         title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
         extra: JSON.stringify({ sharedFeatureId: p.feature.id, fileGlobs: p.fileGlobs,
-          ...(p.peer ? { placement: `peer:${p.peer.name}`, repo: p.peer.repo } : {}) }),
+          ...(p.peer ? { placement: `peer:${p.peer.name}`, repo: p.peer.repo,
+            ...(p.peer.reservation ? { placementReservation: p.peer.reservation } : {}) } : p.localOnly ? { placement: "local" } : {}) }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
       // 只取消本次建的卡：同名卡若是别人（并发 / 手工）建的，本次的 task-new 事件不在库里
