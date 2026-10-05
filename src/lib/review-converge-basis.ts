@@ -8,13 +8,35 @@
 export type FindingBasis = `acceptance:${number}` | "regression";
 
 const FIELD = /^(?:acceptance:([1-9]\d{0,2})|regression)$/;
-const LINE_NO = String.raw`[#]?\s*[1-9]\d{0,2}`;
-const LIST_SEP = String.raw`\s*(?:[、,，;；/&]|和|及|与|and)\s*`;
-/** 「[验收线 N]」 or a list 「[验收线 1、2]」「[acceptance 1, 2]」「[验收线 1 和 2]」: the first line named is the basis. */
-const MARK_ACCEPT = new RegExp(String.raw`[[【]\s*(?:验收线|验收|acceptance)\s*[#:：]?\s*([1-9]\d{0,2})(?:${LIST_SEP}${LINE_NO})*\s*[\]】]`, "i");
+/** A bracketed marker: ASCII / full-width square brackets, 【】 or full-width parentheses, on one line. */
+const MARK = /[[【［（]([^[\]【】［］（）\r\n]{1,200})[\]】］）]/g;
+/** One label inside a marker: 「验收线 N」 (any spelling), 「回归」, or a bare N continuing an acceptance list. */
+const ITEM = /\s*(?:(?:验收线|验收|acceptance)\s*[#:：]?\s*([1-9]\d{0,2})(?!\d)|(回归|regression)(?![a-z])|#?\s*([1-9]\d{0,2})(?!\d))\s*/iy;
+const SEP = /(?:[、,，;；/&]|和|及|与|and(?![a-z]))\s*/iy;
 /** The field spelling written bare in a report heading (「acceptance:1 and acceptance:2」): the first one counts. */
 const MARK_FIELD = /(?<![\w-])acceptance:([1-9]\d{0,2})(?!\d)/i;
-const MARK_REGRESSION = /[[【]\s*(?:回归|regression)\s*[\]】]/i;
+
+/**
+ * A marker's labels, or null unless the whole content is labels: 「[验收线 1、2]」「[回归;验收线 6]」「[验收线 2 / 验收线 6]」.
+ * A bare number only continues an acceptance list; line 0, four digits or any stray word voids the whole marker.
+ */
+function markLabels(body: string): { lines: number[]; regression: boolean } | null {
+  const lines: number[] = [];
+  let regression = false;
+  for (let at = 0; ;) {
+    ITEM.lastIndex = at;
+    const m = ITEM.exec(body);
+    if (!m) return null;
+    if (m[2]) regression = true;
+    else if (m[1] || lines.length) lines.push(Number(m[1] ?? m[3]));
+    else return null;
+    at = ITEM.lastIndex;
+    if (at === body.length) return { lines, regression };
+    SEP.lastIndex = at;
+    if (SEP.exec(body)) at = SEP.lastIndex;
+    else if (!/\s/.test(body[at - 1])) return null;
+  }
+}
 
 /** The structured field as written; anything else is "no basis", never an error (a bad basis only costs the P1 its weight). */
 export function basisField(v: unknown): FindingBasis | null {
@@ -23,9 +45,15 @@ export function basisField(v: unknown): FindingBasis | null {
 
 /** First marker in free text: an acceptance line wins over a regression mark when both appear (it is the narrower claim). */
 export function basisFromText(text: string): FindingBasis | null {
-  const n = MARK_ACCEPT.exec(text)?.[1] ?? MARK_FIELD.exec(text)?.[1];
+  let regression = false;
+  for (const m of text.matchAll(MARK)) {
+    const labels = markLabels(m[1]);
+    if (labels?.lines.length) return `acceptance:${labels.lines[0]}`;
+    regression ||= !!labels?.regression;
+  }
+  const n = MARK_FIELD.exec(text)?.[1];
   if (n) return `acceptance:${Number(n)}`;
-  return MARK_REGRESSION.test(text) ? "regression" : null;
+  return regression ? "regression" : null;
 }
 
 export interface BasisSource { basis?: unknown; findingId: string; family: string; probe: string; description?: string }
