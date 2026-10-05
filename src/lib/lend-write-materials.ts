@@ -14,6 +14,7 @@ import type { RemoteHead } from "./order-deliver.js";
 import { readTextSoft } from "./task-spec.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
 import { lendFixMaterials } from "./lend-fix-env.js";
+import { fixMaterials, materialsMode, type FixMaterials, type MaterialsPolicy } from "./fix-materials.js";
 
 const PR_BASE = "main";
 
@@ -23,8 +24,15 @@ export interface WriteProbe {
   remoteHead(repo: string, branch: string): Promise<RemoteHead>;
 }
 
-/** null = the card's stage lends no write order (review, or not lendable at all). */
-export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: string; repo: string; base: string }, probe: WriteProbe): Promise<WriteOffer | null> {
+/** A fix offer may carry structured material (fix-materials.ts); `report` is then only the UI part, or null. */
+export type WriteMaterial = WriteOffer & { materials?: FixMaterials };
+
+/**
+ * null = the card's stage lends no write order (review, or not lendable at all). `policy` is the materials recovery read; the
+ * production callers do not pass it yet, so the report goes out whole as before (observe only records what on would send).
+ */
+export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: string; repo: string; base: string }, probe: WriteProbe,
+  policy?: MaterialsPolicy): Promise<WriteMaterial | null> {
   const step = stepOfStage(task.stage);
   if (step !== "write" && step !== "fix") return null;
   const fp = await probe.peerFp(q.peer);
@@ -41,5 +49,9 @@ export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: 
   const path = ui?.codeReportPath ?? lastReviewOf(db, task).path;
   const report = readTextSoft(path);
   if (!report) throw new LedgerError("invalid", `找不到上一轮审查报告原文（${path ?? "卡上最近的审查没记报告路径"}），修复单要把它内联给对方`);
-  return { fp, base: q.base, baseSha: null, report: ui ? `${ui.report}\n\n# 代码审查报告\n\n${report}` : report };
+  const whole = { fp, base: q.base, baseSha: null, report: ui ? `${ui.report}\n\n# 代码审查报告\n\n${report}` : report };
+  const mode = materialsMode(policy, task.project);
+  const materials = mode === "off" ? null : fixMaterials(mode, listEvents(db, { project: task.project, target: task.id }), path as string, report);
+  if (!materials) return whole; // off, or a review without structured findings: the original full-text path
+  return mode === "on" ? { ...whole, report: ui ? ui.report : null, materials } : { ...whole, materials };
 }

@@ -27,6 +27,8 @@ import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.
 import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
 import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
+import { assertFresh, materialsNote, MATERIALS_BLOCKED, withMaterials, type FixMaterials } from "./fix-materials.js";
+import type { WriteMaterial } from "./lend-write-materials.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
@@ -117,7 +119,7 @@ export const STALE_WRITE_SQL = "status = 'pooled' AND step IN ('write','fix') AN
 export interface OfferInput {
   taskId: string; peer: string; family: LendFamily; repo: string; pr: number | null; spec: string; borrow: BorrowEntry | null; supersedes?: string;
   /** build / fix cards: the peer's fingerprint, the base and (fix) the last review report, prepared by the CLI outside the transaction */
-  write?: WriteOffer;
+  write?: WriteMaterial;
 }
 
 /**
@@ -143,7 +145,7 @@ function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: Off
  * `whole` is the same order with every source unsplit, only for the peer gate's secret scan (never stored or sent).
  */
 function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput):
-  { wire: OrderWire; whole: OrderWire; branch: string | null; base: string | null } {
+  { wire: OrderWire; whole: OrderWire; branch: string | null; base: string | null; materials?: FixMaterials } {
   if (step === "review") return { wire: reviewOrder(db, task, orderId, input), whole: reviewOrder(db, task, orderId, input, wholeInputs), branch: null, base: null };
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
@@ -157,7 +159,10 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const facts = step === "write" ? restateFacts(events, task.specRev) : null;
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce, restate };
-  return { wire: writeOrderWire(task, o), whole: writeOrderWire(task, o, wholeInputs), branch, base: input.write.base };
+  const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
+  if (m?.mode === "on") assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
+  const made = (split: InputSplit) => m?.mode === "on" ? withMaterials(writeOrderWire(task, o, split), m, findings, split) : writeOrderWire(task, o, split);
+  return { wire: made(chunkInputs), whole: made(wholeInputs), branch, base: input.write.base, ...(m ? { materials: m } : {}) };
 }
 
 /** PM puts the card's current round in the pool for one peer; the order text is fixed here and never rebuilt. */
@@ -198,7 +203,8 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
       wire = redactOrderForPeer(made.wire, head).order;
       text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
     } catch (e) {
-      if (e instanceof OrderRenderError) throw new LedgerError("invalid", `派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
+      const blocked = made.materials?.mode === "on" ? MATERIALS_BLOCKED : "";
+      if (e instanceof OrderRenderError) throw new LedgerError("invalid", `${blocked}派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
       throw e;
     }
     const parsed = parseOrderWire(JSON.parse(JSON.stringify(wire)));
@@ -212,7 +218,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
     markRelayBaseline(db, task, { orderId, taskId: task.id, project: task.project, peer: input.peer, step, specRev: task.specRev }, input.spec, now);
     note(db, ctx, { project: task.project, taskId: task.id, orderId, peer: input.peer }, `出借：${LABEL[step]}挂给 ${input.peer}（${input.family}）`,
-      { op: "offer", step, ...(made.branch ? { branch: made.branch } : {}) });
+      { op: "offer", step, ...(made.branch ? { branch: made.branch } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
     return getLendOrder(db, orderId) as LendOrder;
   });
 }
