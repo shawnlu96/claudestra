@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { sharedLedgerEligibleProjects, sharedLedgerOfferProjectId, sharedLedgerProjectChoices } from "../src/lib/shared-ledger-local-project.js";
+import { sharedLedgerEligibleProjects, sharedLedgerOfferBinding, sharedLedgerOfferProjectId, sharedLedgerProjectChoices } from "../src/lib/shared-ledger-local-project.js";
 
 const projects = [
   { id: "old", name: "Older", lastActivityAt: 1 }, { id: "shared", name: "Same ID", lastActivityAt: 0 },
@@ -40,4 +40,20 @@ test("conflicting bound projects are excluded before the three-choice cap", () =
   expect(sharedLedgerEligibleProjects(list, [binding], binding).map(p => p.id)).toContain("busy");
   expect(sharedLedgerEligibleProjects(list, [binding]).map(p => p.id)).not.toContain("busy");
   expect(sharedLedgerEligibleProjects(list, [binding], { ...binding, teamId: "other" }).map(p => p.id)).not.toContain("busy");
+});
+
+test("explicit shared project: only an exact center/team/project binding supplies the hint, never another project at that center", () => {
+  const a = { centerId: "c", teamId: "team", projectId: "shared", localProjectId: "local" };
+  const other = { ...a, projectId: "other", localProjectId: "elsewhere" };
+  expect(sharedLedgerOfferProjectId("c", [other], { teamId: "team", projectId: "shared" })).toBeUndefined();
+  expect(sharedLedgerOfferProjectId("c", [other], { projectId: "shared" })).toBeUndefined();
+  expect(sharedLedgerOfferBinding("c", [a, other], { teamId: "team", projectId: "shared" })).toEqual(a);
+  expect(sharedLedgerOfferProjectId("c", [a], { teamId: "team2", projectId: "shared" })).toBeUndefined();
+  expect(sharedLedgerOfferProjectId("d", [a], { teamId: "team", projectId: "shared" })).toBeUndefined();
+  // No team given and the same project id is bound under two teams: ambiguous, so unknown.
+  expect(sharedLedgerOfferProjectId("c", [a, { ...a, teamId: "team2", localProjectId: "l2" }], { projectId: "shared" })).toBeUndefined();
+  // Same-center other project never becomes a same-id choice.
+  const list = [{ id: "other", name: "Other", lastActivityAt: 0 }, { id: "x", name: "X", lastActivityAt: 5 }];
+  const hint = sharedLedgerOfferProjectId("c", [other], { teamId: "team", projectId: "shared" });
+  expect(sharedLedgerProjectChoices(list, hint, "join", "join").map(c => c.button)).toEqual(["join_0", "join_1"]);
 });
