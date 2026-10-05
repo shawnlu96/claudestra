@@ -1,5 +1,6 @@
 /** Untouched checkouts left by clean create failures can be reused; every uncertain case is preserved for PM. */
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
@@ -55,13 +56,74 @@ function dependencyLinks(worktree: string, repo?: string): { allowed: Set<string
   return { allowed, changed };
 }
 
-/** Explicit untracked listing ignores status.showUntrackedFiles; NUL records preserve unusual filenames. */
+type TreeFile = { mode: string; oid: string };
+
+/** HEAD's object IDs bypass index stat caches, assume-unchanged and skip-worktree without changing their flags. */
+function treeFiles(out: string): Map<string, TreeFile> {
+  const files = new Map<string, TreeFile>();
+  if (out && !out.endsWith("\0")) throw new Error("Git tree 输出不完整");
+  for (const record of out.split("\0").filter(Boolean)) {
+    const m = /^(100644|100755|120000) blob ([0-9a-f]{40}|[0-9a-f]{64})\t([\s\S]+)$/.exec(record);
+    if (!m || m[3].includes("\ufffd") || m[3].split("/").some((part) => !part || [".", "..", ".git"].includes(part))) {
+      throw new Error(`不能完整核对 Git tree 条目：${record.slice(0, 150)}`);
+    }
+    if (files.has(m[3])) throw new Error(`Git tree 重复路径：${m[3]}`);
+    files.set(m[3], { mode: m[1], oid: m[2] });
+  }
+  return files;
+}
+
+/** Compare raw Git blob bytes, including symlink targets and execute bits; filters cannot erase hidden user edits. */
+function sameBlob(path: string, file: TreeFile): boolean {
+  const stat = lstatSync(path);
+  if (file.mode === "120000" ? !stat.isSymbolicLink() : !stat.isFile()) return false;
+  if (file.mode !== "120000" && (stat.mode & 0o111 ? "100755" : "100644") !== file.mode) return false;
+  const bytes = file.mode === "120000" ? readlinkSync(path, { encoding: "buffer" }) : readFileSync(path);
+  const hash = createHash(file.oid.length === 64 ? "sha256" : "sha1");
+  return hash.update(`blob ${bytes.length}\0`).update(bytes).digest("hex") === file.oid;
+}
+
+/** Walk disk rather than ignored listings: Git can silently omit unreadable ignored directories. Never follow symlinks. */
+function diskChanges(worktree: string, files: Map<string, TreeFile>, allowed: Set<string>): string[] {
+  const changed: string[] = [];
+  const visit = (dir: string) => {
+    for (const name of readdirSync(join(worktree, dir))) {
+      if (!dir && name === ".git") continue; // Only the checkout's own Git metadata is outside its content.
+      const sub = dir ? `${dir}/${name}` : name, path = join(worktree, sub), tracked = files.get(sub);
+      if (name.includes("\ufffd")) throw new Error(`不能完整解码工作区路径：${sub}`);
+      if (tracked) {
+        if (!sameBlob(path, tracked)) changed.push(sub);
+        files.delete(sub);
+      } else if (allowed.has(sub)) {
+        // dependencyLinks already verified this exact scheduler-created link, never a whole ignored subtree.
+        continue;
+      } else if (lstatSync(path).isDirectory()) visit(sub);
+      else changed.push(sub);
+    }
+  };
+  visit("");
+  changed.push(...files.keys()); // A flagged deletion is invisible to status, too.
+  return changed;
+}
+
+/** Status checks staged edits; the independent disk/object comparison catches ignored and index-hidden edits. */
 export async function retryWorktreeDirty(git: Git, worktree: string, repo?: string): Promise<string | null> {
-  const st = await git(["-C", worktree, "status", "--porcelain", "-z", "--untracked-files=all"]);
-  if (st.code !== 0) return `worktree ${worktree} 读不了工作区状态：${st.out}`.slice(0, 400);
-  const { allowed, changed } = dependencyLinks(worktree, repo);
-  changed.push(...st.out.split("\0").filter((l) => l && !(l.startsWith("?? ") && allowed.has(l.slice(3)))));
-  return changed.length ? `worktree 有改动（${worktree}），不复用也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400) : null;
+  try {
+    const st = await git(["-C", worktree, "status", "--porcelain", "-z", "--untracked-files=all"]);
+    if (st.code !== 0) return `worktree ${worktree} 读不了工作区状态：${st.out}`.slice(0, 400);
+    const { allowed, changed } = dependencyLinks(worktree, repo);
+    changed.push(...st.out.split("\0").filter((l) => l && !(l.startsWith("?? ") && allowed.has(l.slice(3)))));
+    const dirty = () => `worktree 有改动（${worktree}），不复用也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400);
+    // A known edit already forbids reuse; do not traverse a potentially huge replacement dependency directory.
+    if (changed.length) return dirty();
+    const tree = await git(["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+    if (tree.code !== 0) return `worktree ${worktree} 读不了 Git tree：${tree.out}`.slice(0, 400);
+    // Generated caches have no provenance guarantee either: only the two exact dependency links are exempt.
+    changed.push(...diskChanges(worktree, treeFiles(tree.out), allowed));
+    return changed.length ? dirty() : null;
+  } catch (e) {
+    return `worktree ${worktree} 读不了完整工作区，保留并等待核对：${String(e)}`.slice(0, 400);
+  }
 }
 
 /** Same branch, exact initial SHA, no edits: a clean create failure may retry without deleting its prepared worktree. */
