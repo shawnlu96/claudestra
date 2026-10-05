@@ -1,9 +1,9 @@
 /**
- * 诊断开关 CLAUDESTRA_SYNC_FS_TRACE=1：给 node:fs 常用同步 API 和 bun:sqlite 的 Database 构造套计时，单次 ≥1s 打一行（路径 / 耗时 /
- * 调用栈前 12 帧），外加事件循环卡顿监视（每 500ms 打点，偏差 >2s 记一行）。不设 = 什么都不装，零开销；只追被点名的进程，子进程不继承。
- * 装的时机：bun 里 ESM 对内置模块的具名导入在整张模块图链接时就绑死了函数，入口代码里再 patch 已经晚了，所以 bunfig.toml 顶层 preload
- * 本文件（仓库根目录下的 `bun <file>` 才吃，bun test 不吃）；bridge.ts 首行 import 是 bunfig 不生效时的兜底（只剩卡顿监视 + CJS / 动态 import）。
- * 本文件不能静态 import node:fs / bun:sqlite：preload 自己一 import 就先把它们绑死了。验证：tests/sync-fs-trace.test.ts。
+ * 诊断开关 CLAUDESTRA_SYNC_FS_TRACE=1：node:fs 常用同步 API 与 bun:sqlite 的 new Database 单次 ≥1s 打一行（路径 / 耗时 / 栈前 12 帧），
+ * 事件循环每 500ms 打点、偏差 >2s 记一行。不设 = 什么都不装。子进程会继承开关（bun 默认 spawn 用启动时的环境，改 process.env 管不到），
+ * 仓库根目录下起的 `bun <file>` 子进程（manager 等）也各自追踪、写进各自的 stderr。装的时机：bun 里 ESM 对内置模块的具名导入在模块图
+ * 链接时就绑死了函数，入口里再 patch 已晚，所以 bunfig.toml 顶层 preload 本文件（bun test 不吃）；bridge.ts 首行 import 是兜底（只剩卡顿
+ * 监视 + CJS / 动态 import）。本文件不能静态 import node:fs / bun:sqlite，否则 preload 自己先把它们绑死。验证：tests/sync-fs-trace.test.ts。
  */
 import { createRequire } from "node:module";
 
@@ -90,7 +90,6 @@ export function installSyncFsTrace(env: Record<string, string | undefined> = pro
   if (!deps) {
     if (g[INSTALLED]) return false; // preload 和 bridge.ts 首行各进来一次
     g[INSTALLED] = true;
-    delete env[FLAG]; // bridge 派生的 manager 等子进程不继承：只追被点名的进程
   }
   const d = deps ?? defaultDeps();
   const nativeRealpath = (d.fs.realpathSync as { native?: object } | undefined)?.native;
@@ -98,7 +97,8 @@ export function installSyncFsTrace(env: Record<string, string | undefined> = pro
   if (nativeRealpath) (d.fs.realpathSync as { native?: object }).native = traced("realpathSync.native", nativeRealpath, d);
   if (typeof d.sqlite.Database === "function") d.sqlite.Database = traced("new Database", d.sqlite.Database as object, d);
   watchLag(d);
-  d.warn(`⏱ [sync-fs-trace] 已开启：同步 fs / new Database 单次 ≥${SLOW_MS}ms、事件循环卡顿 >${LAG_WARN_MS}ms 会记一行`);
+  const who = `pid ${process.pid} ${process.argv[1] ?? "?"}`;
+  d.warn(`⏱ [sync-fs-trace] 已开启（${who}）：同步 fs / new Database 单次 ≥${SLOW_MS}ms、事件循环卡顿 >${LAG_WARN_MS}ms 记一行；子进程会继承本开关`);
   return true;
 }
 
