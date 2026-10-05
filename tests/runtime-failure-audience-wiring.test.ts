@@ -1,7 +1,8 @@
 /**
  * 回合失败卡的真实接线（lib/runtime-failure-audience.ts）：临时 registry / 台账 / 出借 journal + 假 ACP socket，走 onAcpFrame → openRuntimeAsk →
- * 台账里的 ask → 推送派发器的判定与实际发送，再走调度器 codexFailure → 退人工 → 通知 PM。派单会话的非 retry 回合错误：卡照开、
- * owner 推送 / 横幅为零、PM 照常收到；普通会话、名字像但没绑定、会话 / 项目对不上、登录 / 额度照旧推；retry 不开卡；重复帧、bridge 重启不变。
+ * 台账里的 ask → 推送派发器的判定与实际发送，再走调度器 codexFailure → 退人工 → 通知 PM。派单会话的非 retry 回合错误（宿主帧报的会话 / 时刻
+ * 证明属于这张单）：卡照开、owner 推送 / 横幅为零、PM 照常收到；普通会话、名字像但没绑定、会话 / 项目对不上、老宿主不报归属、早于认领的迟到帧、
+ * 出借 worker（出借服务不消费 error 卡）、registry 先好后坏、登录 / 额度照旧推；retry 不开卡；重复帧、bridge 重启不变。
  * 子进程：env 只带隔离项，HOME / 状态 / 运行目录 / TMPDIR 都是临时的，bridge 地址指向死端口。
  */
 import { expect, test } from "bun:test";
@@ -20,7 +21,7 @@ async function probe() {
   const { createDispatcher } = await import("../src/bridge/push/dispatcher.ts");
   const { listAsks } = await import("../src/lib/ledger-asks.ts");
   const { openLendJournal } = await import("../src/lib/lend-journal.ts");
-  const { normalizeRegistryAgents } = await import("../src/lib/registry.ts");
+  const { normalizeRegistryAgents, readRegistryAgentsSync } = await import("../src/lib/registry.ts");
   const { saveApnsDevice, savePushSubscription } = await import("../src/lib/push-store.ts");
   const { openWebState } = await import("../src/lib/web-state.ts");
   const { codexFailure } = await import("../src/lib/scheduler-auto-ports.ts");
@@ -40,6 +41,8 @@ async function probe() {
   async function scenario(name: string, o: {
     channel?: string; failure?: Record<string, unknown>; frames?: number; restart?: boolean;
     edit?: (agents: Record<string, any>) => void; lend?: { agent: string; state: string; sessionId: string };
+    /** 宿主帧报的失败归属；不给 = 新宿主、这个频道 registry 里的会话、此刻；null = 老宿主不带 */
+    at?: { sessionId?: string; failedAt?: number } | null; corruptRegistry?: boolean;
   }) {
     const f = autoFixture();
     const ledgerPath = join(f.dir, "ledger.sqlite"), lendPath = join(f.dir, "lend.sqlite");
@@ -100,20 +103,28 @@ async function probe() {
 
       const channelId = o.channel ?? "ch-rv";
       const failure = o.failure ?? { kind: "error", key: "turn-1", message: POLICY, retry: false };
+      const own = Object.values(reg().agents as Record<string, any>).find((a) => a.channelId === channelId);
+      const at = o.at === null ? {} : o.at ?? { sessionId: own?.sessionId, failedAt: Date.now() };
+      if (o.corruptRegistry) { // 先真读成功一次（进程里的通用读者有了缓存），再把文件写坏
+        readRegistryAgentsSync(f.registryPath);
+        writeFileSync(f.registryPath, "{ not json");
+      }
+      const frame = { type: "acp_failure", channelId, failure, label: "Codex", ...at };
       for (let n = 0; n < (o.frames ?? 1); n++) {
-        await onAcpFrame({ type: "acp_failure", channelId, failure, label: "Codex" }, ws, {} as never);
+        await onAcpFrame(frame, ws, {} as never);
         await drain();
       }
       if (o.restart) { // bridge 重启：内存表清空，宿主重报同一失败 → 认领台账里那张，不另开、不另推
         resetRuntimeAsksForTest();
-        await onAcpFrame({ type: "acp_failure", channelId, failure, label: "Codex" }, ws, {} as never);
+        await onAcpFrame(frame, ws, {} as never);
         await drain();
       }
       const asks = listAsks(f.db, {}).filter((a) => a.fromChannelId === channelId);
       const after = await f.tick();
       unsub();
       dAway.stop(); dHere.stop();
-      return { name, sent: sent?.step, asks: asks.map((a) => ({ id: a.id, kind: a.kind, state: a.state, blocking: a.blocking, project: a.project, fromAgent: a.fromAgent,
+      return { name, sent: sent?.step, lendFailure: codexFailure(f.db, "agent-lend-0123456789")?.failure.kind ?? null,
+        asks: asks.map((a) => ({ id: a.id, kind: a.kind, state: a.state, blocking: a.blocking, project: a.project, fromAgent: a.fromAgent,
         fromChannelId: a.fromChannelId, source: a.source, title: a.title, context: a.context, extra: a.extra })),
         pushed: pushed.length, decisions, banners, after: { step: after?.step, detail: after?.detail }, notices: [...f.notices],
         mode: (f.db.query("SELECT mode FROM task_workflows WHERE taskId = 'T1'").get() as { mode: string }).mode };
@@ -138,6 +149,10 @@ async function probe() {
   out.push(await scenario("quota on bound reviewer", { failure: { kind: "quota", key: "q1", message: "Quota depleted" } }));
   out.push(await scenario("retry true", { failure: { kind: "error", key: "turn-1", message: POLICY, retry: true } }));
   out.push(await scenario("duplicate frames + restart", { frames: 2, restart: true }));
+  out.push(await scenario("old host frame without session / time", { at: null }));
+  out.push(await scenario("late frame from old session", { at: { sessionId: "s-old", failedAt: Date.now() } }));
+  out.push(await scenario("late frame failed before claim", { at: { sessionId: "s-rv", failedAt: 1 } }));
+  out.push(await scenario("registry corrupt after good read", { corruptRegistry: true }));
   return out;
 }
 
@@ -170,7 +185,9 @@ test("派单会话的回合失败：卡照开、调度照常退人工通知 PM�
     expect(bound.notices[0]).toContain("cybersecurity");
 
     // 普通 owner 会话、身份 / 绑定对不上：原路推（不在 → 推送，在用 → 横幅）
-    for (const name of ["plain owner session", "session mismatch", "project mismatch", "lend-like name without journal", "lend journal other session", "lend bound but kind not worker"]) {
+    for (const name of ["plain owner session", "session mismatch", "project mismatch", "lend-like name without journal", "lend journal other session",
+      "lend bound worker", "lend bound but kind not worker", "old host frame without session / time", "late frame from old session", "late frame failed before claim",
+      "registry corrupt after good read"]) {
       const s = by[name];
       expect({ name, n: s.asks.length, blocking: s.asks[0]?.blocking, failure: s.asks[0]?.extra.failure }).toEqual({ name, n: 1, blocking: true, failure: "error" });
       expect({ name, pushed: s.pushed > 0, banners: s.banners.length }).toEqual({ name, pushed: true, banners: 1 });
@@ -178,11 +195,14 @@ test("派单会话的回合失败：卡照开、调度照常退人工通知 PM�
     // 会话对不上的：调度器照旧（这张卡仍归这张单）退人工通知 PM，只是 owner 也收到
     expect(by["session mismatch"].notices).toHaveLength(1);
 
-    // 出借 worker：registry 明写 kind=worker、journal 里在跑的单、会话对得上 → 不推
+    // 出借 worker：出借服务 / 调度都不消费它的 error 卡（codexFailure 归不到任何调度单），owner 推送是唯一信号 → 照推
     const lend = by["lend bound worker"];
-    expect(lend.asks).toHaveLength(1);
-    expect(lend.asks[0]).toMatchObject({ kind: "owner_action", blocking: false, fromAgent: "agent-lend-0123456789", fromChannelId: "ch-lend", extra: { failure: "error" } });
-    expect({ pushed: lend.pushed, banners: lend.banners }).toEqual({ pushed: 0, banners: [] });
+    expect(lend.asks[0]).toMatchObject({ kind: "owner_action", fromAgent: "agent-lend-0123456789", fromChannelId: "ch-lend", extra: { failure: "error" } });
+    expect(lend.lendFailure).toBeNull();
+    // 照推的迟到 / 老宿主 / registry 损坏场景：卡字段不变，调度照旧退人工通知 PM（codexFailure 的归属是基线语义，本卡不改）
+    for (const name of ["old host frame without session / time", "late frame failed before claim", "registry corrupt after good read"]) {
+      expect({ name, failure: by[name].asks[0].extra.failure, step: by[name].after.step, notices: by[name].notices.length }).toEqual({ name, failure: "error", step: "manual", notices: 1 });
+    }
 
     // 登录 / 额度：派单会话上也照旧推 owner
     expect(by["auth on bound reviewer"].asks[0]).toMatchObject({ kind: "owner_action", blocking: true, title: "Codex 需要 owner 登录" });

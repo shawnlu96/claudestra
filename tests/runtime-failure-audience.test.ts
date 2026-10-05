@@ -1,6 +1,7 @@
 /**
- * 回合失败卡的受众判定（lib/runtime-failure-audience.ts）在真实台账 / registry / 出借 journal 文件上：只认台账绑定、在途的调度单和
- * journal 里在跑的出借单；退人工、已交、读不出来都照原路推 owner（读不出来留诊断）。监护恢复次数用完后仍由派活方接手。
+ * 回合失败卡的受众判定（lib/runtime-failure-audience.ts）在真实台账 / registry / 出借 journal 文件上：只认台账绑定、在途的调度单，且宿主帧报的
+ * 会话 / 失败时刻证明失败属于这张单；退人工、已交、迟到的旧帧、出借 worker（没有 error 消费者）、读不出来（含 registry 损坏）都照原路推 owner。
+ * 监护恢复次数用完后仍由派活方接手。
  * 整条接线（onAcpFrame → ask → 推送 → 调度退人工）见 tests/runtime-failure-audience-wiring.test.ts。
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -11,6 +12,7 @@ import { recordSupervise } from "../src/lib/agent-supervisor-ledger.js";
 import type { Supervised } from "../src/lib/agent-supervisor-scope.js";
 import { openLendJournal } from "../src/lib/lend-journal.js";
 import { audienceView, dispatchedFailureQuiet, failureAudience, setFailureAudienceViewForTest } from "../src/lib/runtime-failure-audience.js";
+import { readRegistryAgentsSync } from "../src/lib/registry.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { autoFixture, H1 } from "./scheduler-auto-helpers.js";
 
@@ -32,60 +34,70 @@ async function atReview() {
   await f.tick();
   expect(await f.tick()).toMatchObject({ step: "sent" });
   const lend = join(f.dir, "lend.sqlite");
-  const view = audienceView({ registry: f.registryPath, ledger: join(f.dir, "ledger.sqlite"), lend });
+  const view = audienceView({ registry: f.registryPath, ledger: join(f.dir, "ledger.sqlite") });
   return { f, view, lend };
 }
 
+/** 当前会话、现在失败：新宿主的帧 */
+const NOW = () => ({ sessionId: "s-rv", failedAt: Date.now() });
+
 test("在途的审查单：quiet；退回人工、已交了结论之后：照原路推", async () => {
   const { f, view } = await atReview();
-  expect(failureAudience("ch-rv", view)).toMatchObject({ quiet: true, who: "agent-rv-t1", why: expect.stringContaining("T1 reviewer") });
-  expect(failureAudience("ch-unknown", view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", NOW(), view)).toMatchObject({ quiet: true, who: "agent-rv-t1", why: expect.stringContaining("T1 reviewer") });
+  expect(failureAudience("ch-unknown", NOW(), view)).toEqual({ quiet: false });
 
   f.db.query("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T1'").run();
-  expect(failureAudience("ch-rv", view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", NOW(), view)).toEqual({ quiet: false });
   f.db.query("UPDATE task_workflows SET mode = 'auto' WHERE taskId = 'T1'").run();
 
   await f.review("pass", H1, []);
-  expect(failureAudience("ch-rv", view)).toEqual({ quiet: false }); // 已交：之后的失败不归这张单
+  expect(failureAudience("ch-rv", NOW(), view)).toEqual({ quiet: false }); // 已交：之后的失败不归这张单
 });
 
-test("出借 worker：kind=worker + journal 在跑 + 会话一致才 quiet；单结束了 / 不是 worker 都不算", async () => {
+test("归属证明不了：老宿主不报会话 / 时刻、别的会话、早于本单认领的迟到帧，都照原路推", async () => {
+  const { view } = await atReview();
+  expect(failureAudience("ch-rv", {}, view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", { sessionId: "s-rv" }, view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", { sessionId: "s-old", failedAt: Date.now() }, view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", { sessionId: "s-rv", failedAt: 1 }, view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", { sessionId: "s-rv", failedAt: Number.NaN }, view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-rv", NOW(), view).quiet).toBe(true);
+});
+
+test("出借 worker：出借服务不消费回合 error 卡，kind=worker + journal 在跑也不 quiet", async () => {
   const { f, view, lend } = await atReview();
   const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
   reg.agents["agent-lend-aa"] = { runtime: "codex", transport: "acp", sessionId: "s-l", channelId: "ch-l", kind: "worker" };
   writeFileSync(f.registryPath, JSON.stringify(reg));
-  expect(failureAudience("ch-l", view)).toEqual({ quiet: false }); // journal 还不在
   const j = openLendJournal(lend);
   cleanup.push(() => j.close());
   j.query(`INSERT INTO lend_orders (orderId, peer, fp, family, state, preview, agent, sessionId, createdAt, updatedAt)
     VALUES ('lend:o:s1:r0:a0', 'peer:A', NULL, 'codex', 'started', '{}', 'agent-lend-aa', 's-l', 1, 1)`).run();
-  expect(failureAudience("ch-l", view)).toMatchObject({ quiet: true, why: expect.stringContaining("lend:o:s1:r0:a0") });
-  j.query("UPDATE lend_orders SET state = 'stopped'").run();
-  expect(failureAudience("ch-l", view)).toEqual({ quiet: false });
-  j.query("UPDATE lend_orders SET state = 'result_pending'").run();
-  expect(failureAudience("ch-l", view).quiet).toBe(true);
-  reg.agents["agent-lend-aa"].kind = "main";
-  writeFileSync(f.registryPath, JSON.stringify(reg));
-  expect(failureAudience("ch-l", view)).toEqual({ quiet: false });
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: Date.now() }, view)).toEqual({ quiet: false });
 });
 
 test("读不出来：不 quiet、留诊断，接线照原路推 owner", async () => {
-  const { f, view, lend } = await atReview();
-  const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
-  reg.agents["agent-lend-aa"] = { runtime: "codex", transport: "acp", sessionId: "s-l", channelId: "ch-l", kind: "worker" };
-  writeFileSync(f.registryPath, JSON.stringify(reg));
-  writeFileSync(lend, "not a sqlite file");
-  const a = failureAudience("ch-l", view);
-  expect(a).toMatchObject({ quiet: false, diag: expect.stringContaining("照原路推 owner") });
-
+  const { view } = await atReview();
   const broken = { ...view, ledger: () => { throw new Error("ledger locked"); } };
-  expect(failureAudience("ch-rv", broken)).toMatchObject({ quiet: false, diag: expect.stringContaining("ledger locked") });
+  expect(failureAudience("ch-rv", NOW(), broken)).toMatchObject({ quiet: false, diag: expect.stringContaining("ledger locked") });
   setFailureAudienceViewForTest(broken);
   const warn = spyOn(console, "warn").mockImplementation(() => {});
   try {
-    expect(dispatchedFailureQuiet("ch-rv")).toBe(false);
+    expect(dispatchedFailureQuiet("ch-rv", NOW())).toBe(false);
     expect(warn.mock.calls.flat().join(" ")).toContain("ledger locked");
   } finally { warn.mockRestore(); }
+});
+
+test("registry 先读成功、再损坏：不拿上次成功的缓存当本次核验，不 quiet、留诊断", async () => {
+  const { f, view } = await atReview();
+  readRegistryAgentsSync(f.registryPath); // 让进程里的通用读者也有一份上次成功值
+  expect(failureAudience("ch-rv", NOW(), view).quiet).toBe(true);
+  writeFileSync(f.registryPath, "{ not json");
+  const err = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(readRegistryAgentsSync(f.registryPath).some((a) => a.channelId === "ch-rv")).toBe(true); // 通用读者仍回缓存（不改它）
+    expect(failureAudience("ch-rv", NOW(), view)).toMatchObject({ quiet: false, diag: expect.stringContaining("registry 读不出来") });
+  } finally { err.mockRestore(); }
 });
 
 test("监护恢复次数用完（failureCardQuiet = false）后，派单会话的失败仍由派活方接手、不推 owner", async () => {
@@ -100,5 +112,5 @@ test("监护恢复次数用完（failureCardQuiet = false）后，派单会话�
   recordSupervise(f.db, { actor: "scheduler", now }, { agent: "agent-rv-t1", project: "p", target: "T1", sessionId: "s-rv", fault: "cyber",
     faultKey: "ask_1", workKey: "order:i-1", step: "recover", phase: "claim", attempt: 1, limit: 1 });
   expect(failureCardQuiet("agent-rv-t1", CYBER, now, sv)).toBe(false);
-  expect(failureAudience("ch-rv", view).quiet).toBe(true);
+  expect(failureAudience("ch-rv", NOW(), view).quiet).toBe(true);
 });
