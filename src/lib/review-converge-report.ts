@@ -26,7 +26,8 @@ export function reportBasis(f: BasisSource, report: string): FindingBasis | null
     if (!/^\s*#{1,6}\s/.test(lines[i])) continue;
     let end = i + 1;
     while (end < lines.length && !/^\s*#{1,6}\s/.test(lines[end])) end++;
-    const basis = basisFromText(lines.slice(i + 1, end).join("\n"));
+    // From the heading itself, so a marker it opens and the section closes still counts.
+    const basis = basisFromText(lines.slice(i, end).join("\n"));
     if (basis) return basis;
   }
   return null;
