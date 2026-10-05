@@ -46,7 +46,7 @@ export interface RetireDeps {
  */
 export type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean; window: boolean };
 /** Stopped for good: runKill writes `stopped` + pending *before* it closes the window, so neither alone proves the stop. */
-const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending && !a.window;
+export const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending && !a.window;
 
 const agentWindowNames = async (): Promise<string[] | null> => (await agentWindowsOrNull())?.map((w) => w.name) ?? null;
 

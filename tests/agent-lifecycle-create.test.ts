@@ -1,6 +1,6 @@
 /**
  * LIFE1 registration side: `manager create --card` flags and gate (an executor without a card is refused, user agents are not,
- * names decide nothing; only the session the create started is registered, a failed registration undoes the create), the ledger
+ * names decide nothing; only the session the create started is registered, a failed registration keeps the agent for PM), the ledger
  * write the scheduler uses (`scheduler-worker-retire`, scheduler identity only for stock rows), and the swap parsers behind the
  * memory backstop.
  */
@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activeWorkers, registerWorker } from "../src/lib/agent-lifecycle-store.js";
+import { activeWorkers, recordRegisterFailure, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseMeminfo, parseSwapUsage } from "../src/lib/sys-memory.js";
@@ -60,85 +60,103 @@ describe("create flags and gate", () => {
   });
 });
 
-describe("registerCreated: only the session this create started, a failed registration undoes the create", () => {
-  function fake(path: string, agents: Record<string, Record<string, unknown>>) {
+describe("registerCreated: only the session this create started; a failed registration keeps the agent for PM", () => {
+  function fake(db: ReturnType<typeof ledger>["db"], path: string, agents: Record<string, Record<string, unknown>>) {
     const reg = { socket: "", agents } as unknown as Registry;
-    const removed: string[] = [], saved: string[] = [];
+    const saved: string[] = [];
     const deps: RegisterDeps = { ledgerPath: path, loadRegistry: async () => reg, createdBy: async () => "agent-pm",
-      saveRegistry: async (r) => { saved.push(JSON.stringify(r.agents)); },
-      remove: async (a) => { removed.push(a); delete reg.agents[a]; return { ok: true }; } };
-    return { reg, deps, removed, saved };
+      saveRegistry: async (r) => { saved.push(JSON.stringify(r.agents)); }, recordFailure: (f) => recordRegisterFailure(db, f) };
+    return { reg, deps, saved };
   }
   const card = { taskId: "T1", role: "reviewer" as const };
+  const failures = (db: ReturnType<typeof ledger>["db"]) => listEvents(db, { project: "p" })
+    .filter((e) => (e.data as { op?: string }).op === "worker_register_failed").map((e) => e.data as { agent: string; sessionId: string; reason: string });
+  const noReg = "CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END";
 
   test("a failed create (name taken by the user's agent) registers nothing and tags nothing", async () => {
     const { db, path } = ledger();
-    const { deps, removed, saved, reg } = fake(path, { "agent-personal": { sessionId: "personal", channelId: "9" } });
+    const { deps, saved, reg } = fake(db, path, { "agent-personal": { sessionId: "personal", channelId: "9" } });
     const failed = { ok: false, error: "agent-personal 已存在" };
     expect(await registerCreated("agent-personal", card, failed, "personal", deps)).toEqual(failed);
     expect(await registerCreated("agent-personal", card, null, "personal", deps)).toMatchObject({ ok: false });
     // ok but the session is the one that was already there: not this create's, refused without touching it
     expect(await registerCreated("agent-personal", card, { ok: true, agent: "agent-personal", sessionId: "personal" }, "personal", deps))
       .toMatchObject({ ok: false });
-    expect([activeWorkers(db), removed, saved, (reg.agents["agent-personal"] as { kind?: string }).kind]).toEqual([[], [], [], undefined]);
+    expect([activeWorkers(db), saved, (reg.agents["agent-personal"] as { kind?: string }).kind, failures(db)]).toEqual([[], [], undefined, []]);
   });
 
   test("success: the new session is registered and kind=worker saved; the create's result goes back with the card", async () => {
     const { db, path } = ledger();
-    const { deps, saved } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    const { deps, saved } = fake(db, path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
     const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
     expect(out).toMatchObject({ ok: true, agent: "agent-r", card: { taskId: "T1", role: "reviewer", registered: true } });
     expect(activeWorkers(db).map((w) => [w.agent, w.sessionId, w.role])).toEqual([["agent-r", "new-s", "reviewer"]]);
     expect(saved.at(-1)).toContain("\"kind\":\"worker\"");
   });
 
-  test("ledger registration fails: the created agent is removed and the caller gets ok:false (no orphan nobody collects)", async () => {
+  test("ledger registration fails: the agent is kept untagged, create reports it for PM, one failure event recorded", async () => {
     const { db, path } = ledger();
-    db.exec("CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END");
-    const { deps, removed } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    db.exec(noReg);
+    const { deps, saved, reg } = fake(db, path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
     const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
-    expect(out).toMatchObject({ ok: false, rolledBack: true });
+    expect(out).toMatchObject({ ok: false, agent: "agent-r", sessionId: "new-s", registered: false, kept: true });
+    expect(String(out.error)).toContain("agent agent-r 已建但登记失败，未打 worker 标签，需 PM 处理");
     expect(String(out.error)).toContain("synthetic registration failure");
-    expect([removed, activeWorkers(db)]).toEqual([["agent-r"], []]);
+    expect([reg.agents["agent-r"]?.sessionId, (reg.agents["agent-r"] as { kind?: string }).kind, saved, activeWorkers(db)]).toEqual(["new-s", undefined, [], []]);
+    expect(failures(db)).toMatchObject([{ agent: "agent-r", sessionId: "new-s", reason: expect.stringContaining("synthetic") }]);
   });
 
-  test("a protected agent (PM) is never registered as a worker and never removed by the undo", async () => {
+  test("the registry read fails: kept and reported too (no undo on a read error)", async () => {
     const { db, path } = ledger();
-    const { deps, removed } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9", role: "pm" } });
+    const { deps, reg } = fake(db, path, { "agent-r": { sessionId: "new-s", channelId: "9", role: "pm" } });
+    deps.loadRegistry = async () => { throw new Error("synthetic registry read failure"); };
     const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
-    expect(out).toMatchObject({ ok: false, rolledBack: false });
-    expect([removed, activeWorkers(db)]).toEqual([[], []]);
+    expect(out).toMatchObject({ ok: false, kept: true });
+    expect(String(out.error)).toContain("synthetic registry read failure");
+    expect([reg.agents["agent-r"]?.sessionId, failures(db).map((f) => f.agent)]).toEqual(["new-s", ["agent-r"]]);
   });
 
-  test("rollback-replacement: the name now runs another session → not registered, nothing removed (the replacement is kept)", async () => {
+  test("a protected agent (PM) is never registered as a worker, never tagged, kept", async () => {
     const { db, path } = ledger();
-    const { deps, removed, reg } = fake(path, { "agent-reused": { sessionId: "replacement-user-session", channelId: "9" } });
+    const { deps, reg, saved } = fake(db, path, { "agent-r": { sessionId: "new-s", channelId: "9", role: "pm" } });
+    const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
+    expect(out).toMatchObject({ ok: false, kept: true });
+    expect([JSON.stringify(reg.agents["agent-r"]), saved, activeWorkers(db)]).toEqual([JSON.stringify({ sessionId: "new-s", channelId: "9", role: "pm" }), [], []]);
+  });
+
+  test("rollback-replacement: the name now runs another session → not registered, the replacement is kept and not tagged", async () => {
+    const { db, path } = ledger();
+    const { deps, reg, saved } = fake(db, path, { "agent-reused": { sessionId: "replacement-user-session", channelId: "9" } });
     const out = await registerCreated("agent-reused", card, { ok: true, agent: "agent-reused", sessionId: "created-session" }, null, deps);
-    expect(out).toMatchObject({ ok: false, rolledBack: false });
+    expect(out).toMatchObject({ ok: false, kept: true });
     expect(String(out.error)).toContain("不是本次建的会话");
-    expect([removed, activeWorkers(db), reg.agents["agent-reused"]?.sessionId]).toEqual([[], [], "replacement-user-session"]);
+    expect([activeWorkers(db), saved, JSON.stringify(reg.agents["agent-reused"])]).toEqual([[], [], JSON.stringify({ sessionId: "replacement-user-session", channelId: "9" })]);
   });
 
-  test("registration fails and the name is replaced before the undo: the undo checks the expected session and removes nothing", async () => {
+  test("the name is replaced while the ledger row is written: the replacement is not tagged, nothing is removed", async () => {
     const { db, path } = ledger();
-    db.exec("CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END");
-    const { deps, removed, reg } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
-    deps.saveRegistry = async () => { reg.agents["agent-r"] = { sessionId: "someone-else", channelId: "9" } as never; };
+    const { deps, reg, saved } = fake(db, path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    let reads = 0;
+    const load = deps.loadRegistry;
+    deps.loadRegistry = async () => {
+      if (++reads === 2) reg.agents["agent-r"] = { sessionId: "someone-else", channelId: "9" } as never;
+      return load();
+    };
     const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
-    expect(out).toMatchObject({ ok: false, rolledBack: false });
-    expect(String(out.error)).toContain("manager remove agent-r");
-    expect([removed, reg.agents["agent-r"]?.sessionId]).toEqual([[], "someone-else"]);
+    expect(out).toMatchObject({ ok: false, kept: true });
+    expect(String(out.error)).toContain("worker 标签没打");
+    expect([saved, reg.agents["agent-r"]?.sessionId, (reg.agents["agent-r"] as { kind?: string }).kind]).toEqual([[], "someone-else", undefined]);
   });
 
-  test("registration fails and the undo itself fails: reported with the manual step", async () => {
+  test("the failure event itself cannot be written: still kept, both reasons reported", async () => {
     const { db, path } = ledger();
-    db.exec("CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END");
-    const { deps } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
-    deps.remove = async () => ({ ok: false, error: "tmux gone" });
+    db.exec(noReg);
+    const { deps, reg } = fake(db, path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    deps.recordFailure = () => { throw new Error("ledger locked"); };
     const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
-    expect(out).toMatchObject({ ok: false, rolledBack: false });
-    expect(String(out.error)).toContain("tmux gone");
-    expect(String(out.error)).toContain("manager remove agent-r");
+    expect(out).toMatchObject({ ok: false, kept: true });
+    expect(String(out.error)).toContain("ledger locked");
+    expect(reg.agents["agent-r"]?.sessionId).toBe("new-s");
   });
 });
 

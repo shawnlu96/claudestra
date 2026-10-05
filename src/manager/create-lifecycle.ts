@@ -4,11 +4,12 @@
  * when its card finishes. The registration is the one label every reader uses; names decide nothing. An executor (--role executor)
  * without --card is refused before anything is created; ordinary user agents are unaffected. tests/agent-lifecycle-create.test.ts.
  * Only the session this create started is registered: the create's own result must say ok with this agent and a session id the
- * registry now holds and did not hold before. A registration that fails undoes the create (manager remove), so no window is left
- * that nothing would ever collect; the caller gets ok:false either way. The undo only removes the session this create started: when
- * the registry no longer holds it under that name (replaced since, or never was) or holds a protected agent, nothing is removed.
+ * registry now holds and did not hold before. Ledger row first, worker tag second, so a failure leaves the agent untagged.
+ * A registration that fails never removes, archives or kills anything: the agent is kept, create returns ok:false saying it is
+ * left for PM, and one ledger event (agent, session, reason) records it; doctor counts the unresolved ones as 登记失败 N.
+ * (An undo by name could not be made safe: between any check and the remove the name may come to run another session.)
  */
-import { isWorkerRole, checkCard, registerWorker, type WorkerRole } from "../lib/agent-lifecycle-store.js";
+import { isWorkerRole, checkCard, recordRegisterFailure, registerWorker, type RegisterFailure, type WorkerRole } from "../lib/agent-lifecycle-store.js";
 import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { SCHEDULER_LEASE_ENV } from "../lib/scheduler-lease-env.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
@@ -41,8 +42,8 @@ export interface RegisterDeps {
   ledgerPath: string;
   loadRegistry(): Promise<Registry>;
   saveRegistry(reg: Registry): Promise<void>;
-  /** undo a create whose registration failed (production: manager remove) */
-  remove(agent: string): Promise<Record<string, unknown>>;
+  /** the ledger event of a failed registration (production: recordRegisterFailure) */
+  recordFailure(f: RegisterFailure): void;
   createdBy(): Promise<string>;
 }
 
@@ -55,44 +56,29 @@ async function createdBy(): Promise<string> {
 
 const realDeps: RegisterDeps = {
   ledgerPath: LEDGER_PATH, loadRegistry, saveRegistry, createdBy,
-  remove: async (agent) => {
-    const { runRemove } = await import("./agent-kill.js"), { realOpsDeps } = await import("./ops-deps.js");
-    return runRemove(agent, realOpsDeps);
-  },
+  recordFailure: (f) => recordRegisterFailure(openLedger(LEDGER_PATH), f),
 };
 
-/** The registry holds this create's session under `key` (not pending): the only state a registration or an undo may act on. */
+/** The registry holds this create's session under `key` (not pending): the only state a registration may act on. */
 const holdsSession = (reg: Registry, key: string, sessionId: string): boolean => {
   const info = reg.agents[key];
   return !!info && !info.pending && info.sessionId === sessionId;
 };
 
-/**
- * kind=worker in the registry, then the ledger row; null = registered. `undo` says whether the failure may be undone by removing
- * the agent: never when the name no longer runs this session (a replacement is someone else's) or is a protected agent.
- */
-async function register(key: string, sessionId: string, card: CardFlags, deps: RegisterDeps): Promise<{ why: string; undo: boolean } | null> {
+/** Ledger row, then kind=worker in the registry; null = registered, else why not (nothing is undone either way). */
+async function register(key: string, sessionId: string, card: CardFlags, by: string, deps: RegisterDeps): Promise<string | null> {
   try {
     const reg = await deps.loadRegistry();
-    if (!holdsSession(reg, key, sessionId)) return { why: `registry 里 ${key} 现在不是本次建的会话 ${sessionId}（已被替换或没落地），没登记也没动它`, undo: false };
-    const info = reg.agents[key];
-    if (!setWorkerKind(reg.agents, key, "worker") || info.kind !== "worker") return { why: `${key} 是受保护的 agent（master / PM / kind=main），不能登记成卡 worker`, undo: false };
-    await deps.saveRegistry(reg);
-    registerWorker(openLedger(deps.ledgerPath), { agent: key, sessionId, taskId: card.taskId, role: card.role, createdBy: await deps.createdBy() });
+    if (!holdsSession(reg, key, sessionId)) return `registry 里 ${key} 现在不是本次建的会话 ${sessionId}（已被替换或没落地）`;
+    const probe = { [key]: { ...reg.agents[key] } };
+    if (!setWorkerKind(probe, key, "worker") || probe[key].kind !== "worker") return `${key} 是受保护的 agent（master / PM / kind=main），不能登记成卡 worker`;
+    registerWorker(openLedger(deps.ledgerPath), { agent: key, sessionId, taskId: card.taskId, role: card.role, createdBy: by });
+    const now = await deps.loadRegistry(); // re-read: the ledger write took a moment, save only onto the registry as it is now
+    if (!holdsSession(now, key, sessionId) || !setWorkerKind(now.agents, key, "worker")) return `台账已登记，但 registry 里 ${key} 已不是本次建的会话，worker 标签没打`;
+    await deps.saveRegistry(now);
     return null;
   } catch (e) {
-    return { why: (e as Error).message, undo: true };
-  }
-}
-
-/** Removes the agent only while the registry still holds the session this create started; otherwise says why it was left. */
-async function undoCreate(key: string, sessionId: string, deps: RegisterDeps): Promise<{ ok: boolean; error?: string }> {
-  try {
-    if (!holdsSession(await deps.loadRegistry(), key, sessionId)) return { ok: false, error: `registry 里 ${key} 已不是本次建的会话 ${sessionId}，不删` };
-    const r = await deps.remove(key);
-    return r.ok === true ? { ok: true } : { ok: false, error: String(r.error) };
-  } catch (e) {
-    return { ok: false, error: (e as Error).message };
+    return (e as Error).message;
   }
 }
 
@@ -109,12 +95,15 @@ export async function registerCreated(name: string, card: CardFlags, result: Rec
   if (result.agent !== key || !sessionId || sessionId === before) {
     return { ...result, ok: false, error: `create 报成功，但没拿到 ${key} 本次新建的会话 id，没登记也没动它；请核对后 manager remove 或重建` };
   }
-  const failed = await register(key, sessionId, card, deps);
-  if (!failed) return { ...result, card: { taskId: card.taskId, role: card.role, registered: true } };
-  if (!failed.undo) return { ok: false, agent: key, sessionId, rolledBack: false, error: `${key} 卡 worker 没登记：${failed.why}；没撤回（不是本次建的会话或受保护），请核对` };
-  const undo = await undoCreate(key, sessionId, deps);
-  return { ok: false, agent: key, sessionId, rolledBack: undo.ok,
-    error: `${key} 建好了但卡 worker 登记失败：${failed.why}；${undo.ok ? "已撤回本次创建（manager remove），可重试 create" : `撤回没做成（${undo.error}），请核对后手动 manager remove ${key}`}` };
+  let by = "cli";
+  try { by = await deps.createdBy(); } catch { /* attribution only */ }
+  const why = await register(key, sessionId, card, by, deps);
+  if (!why) return { ...result, card: { taskId: card.taskId, role: card.role, registered: true } };
+  let unrecorded = "";
+  try { deps.recordFailure({ agent: key, sessionId, taskId: card.taskId, role: card.role, createdBy: by, reason: why }); }
+  catch (e) { unrecorded = `；失败事件也没记上台账：${(e as Error).message}`; }
+  return { ok: false, agent: key, sessionId, registered: false, kept: true,
+    error: `agent ${key} 已建但登记失败，未打 worker 标签，需 PM 处理（会话 ${sessionId} 保留，没删）：${why}${unrecorded}` };
 }
 
 /** Runs `create` with stdout's result line held back, so the caller gets one object: the create's, or the registration's verdict. */

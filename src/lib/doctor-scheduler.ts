@@ -71,9 +71,10 @@ export async function checkWorkerLifecycle(reader = new LedgerReader()): Promise
     const { lifecycleLine } = await import("./agent-lifecycle.js");
     const plan = await lifecycleSnapshot(db, policy);
     const mode = policy?.mode ?? "observe";
-    const warn = (plan.actions.length > 0 && mode !== "on") || plan.memory.length > 0;
-    return [{ ...base, status: warn ? "warn" : "ok", detail: lifecycleLine(plan, mode),
-      ...(warn ? { fix: "核对 scheduler 日志里的 [lifecycle] 清单后，在 scheduler.json 设 lifecycle: \"on\"" } : {}) }];
+    const warn = (plan.actions.length > 0 && mode !== "on") || plan.memory.length > 0 || plan.registerFailed > 0;
+    const fix = plan.registerFailed > 0 ? "登记失败的 agent 已保留：PM 按台账 worker_register_failed 事件核对后 manager remove 或补登记"
+      : "核对 scheduler 日志里的 [lifecycle] 清单后，在 scheduler.json 设 lifecycle: \"on\"";
+    return [{ ...base, status: warn ? "warn" : "ok", detail: lifecycleLine(plan, mode), ...(warn ? { fix } : {}) }];
   } catch (e) {
     return [{ ...base, status: "warn", detail: `算不出：${(e as Error).message}` }];
   } finally { reader.close(); }

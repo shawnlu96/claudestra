@@ -21,6 +21,7 @@
  */
 import type { LifecyclePolicy } from "./agent-lifecycle-config.js";
 import type { CardWorker, CleanupEntry, PendingCleanup, WorkerRole } from "./agent-lifecycle-store.js";
+import { stopped } from "./scheduler-retire.js";
 
 const MIN = 60_000;
 const FINISHED_STAGES: readonly string[] = ["verified", "done", "cancelled"];
@@ -39,6 +40,8 @@ export interface AgentFacts {
   sessionId?: string;
   /** a tmux window or ACP host is running it */
   running: boolean;
+  /** the registry marks an operation on it (a kill cut off half way, a create) as unfinished */
+  pending?: boolean;
   /** ms since the last turn activity; null = unknown */
   idleMs: number | null;
   /** a turn is running now */
@@ -76,6 +79,8 @@ export interface PlanInput {
   swapPct: number | null;
   /** pendingCleanups(db): disk earlier retires left behind */
   pending?: readonly (PendingCleanup & { error?: string })[];
+  /** registerFailures(db): creates whose registration failed (the agent was kept for PM) */
+  registerFailed?: readonly { agent: string; sessionId: string }[];
 }
 
 type Rule = "card_finished" | "reviewer_done" | "author_idle" | "stock" | "memory" | "cleanup_retry";
@@ -100,6 +105,8 @@ export interface Plan {
   kept: { agent: string; reason: string; bound?: true }[];
   /** running worker agents */
   live: number;
+  /** creates whose registration failed and whose agent still runs that session unregistered or untagged: PM has to handle them */
+  registerFailed: number;
   swapPct: number | null;
 }
 
@@ -174,7 +181,8 @@ function decide(input: PlanInput, w: Worker, card: CardFacts | undefined): Actio
 export function planLifecycle(input: PlanInput): Plan {
   const cards = new Map(input.cards.map((c) => [c.id, c]));
   const all = workers(input);
-  const plan: Plan = { actions: [], memory: [], cleanups: [], frozen: [], kept: [], live: all.filter((w) => w.facts.running).length, swapPct: input.swapPct };
+  const plan: Plan = { actions: [], memory: [], cleanups: [], frozen: [], kept: [], live: all.filter((w) => w.facts.running).length, swapPct: input.swapPct,
+    registerFailed: unresolvedRegisterFailures(input) };
   const recentMs = input.policy.recentTurnMin * MIN;
   // a stopped agent whose activity is unknown (no session file left) cannot have had a turn; a running one might
   const recent = (f: AgentFacts) => f.turnActive || (f.idleMs !== null ? f.idleMs < recentMs : f.running);
@@ -215,6 +223,20 @@ export function planLifecycle(input: PlanInput): Plan {
   return plan;
 }
 
+/** A failure stays PM's until the agent no longer runs that session, or runs it registered (worker_agents) and tagged kind=worker. */
+function unresolvedRegisterFailures(input: PlanInput): number {
+  const open = new Set((input.registerFailed ?? []).filter((f) => {
+    const a = input.agents.find((x) => x.name === f.agent && x.sessionId === f.sessionId);
+    if (!a) return false;
+    const registered = input.index.get(a.name)?.links.some((l) => l.source === "worker_agents" && l.sessionId === f.sessionId);
+    return !registered || a.kind !== "worker";
+  }).map((f) => `${f.agent}\0${f.sessionId}`));
+  return open.size;
+}
+
+/** scheduler-retire.ts's one definition of "stopped for good", fed from planner facts (a window or ACP host running = not stopped). */
+const stoppedFacts = (a: AgentFacts): boolean => stopped({ name: a.name, status: a.status, pending: a.pending ?? false, window: a.running });
+
 const inside = (path: string, dir: string): boolean => path === dir || path.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
 
 /**
@@ -229,7 +251,7 @@ function retryBlocked(input: PlanInput, p: PendingCleanup, card: CardFacts | und
   if (same && (same.kind === "main" || same.role === "pm" || same.role === "dispatcher" || input.pms.has(same.name) || input.master.has(same.name)
     || input.foreign.has(same.name))) return `${p.agent} 现在是受保护的 agent`;
   if (same && recent(same)) return `同名 agent ${p.agent} 最近有活动`;
-  const holder = input.agents.find((a) => a.status !== "stopped" && a.cwd && p.entries.some((e) => inside(a.cwd!, e.checkout)));
+  const holder = input.agents.find((a) => !stoppedFacts(a) && a.cwd && p.entries.some((e) => inside(a.cwd!, e.checkout)));
   return holder ? `${holder.name}（会话 ${holder.sessionId ?? "?"}）正在 ${holder.cwd} 工作` : null;
 }
 
@@ -237,8 +259,8 @@ function retryBlocked(input: PlanInput, p: PendingCleanup, card: CardFacts | und
 const boundDue = (plan: Pick<Plan, "kept">): number => new Set(plan.kept.filter((k) => k.bound).map((k) => k.agent)).size;
 
 /** The one-line health summary doctor / ledger audit show: 应收 includes the bound ones, also shown on their own as K. */
-export function lifecycleLine(plan: Pick<Plan, "live" | "actions" | "swapPct" | "cleanups" | "kept">, mode: string): string {
+export function lifecycleLine(plan: Pick<Plan, "live" | "actions" | "swapPct" | "cleanups" | "kept"> & { registerFailed?: number }, mode: string): string {
   const k = boundDue(plan);
   return `worker agent：活 ${plan.live} / 应收 ${plan.actions.length + k}${k ? `（调度绑定待收 ${k}）` : ""} / swap ${plan.swapPct === null ? "?" : `${plan.swapPct.toFixed(0)}%`}` +
-    `${plan.cleanups.length ? ` / 待补清 ${plan.cleanups.length}` : ""}（lifecycle ${mode}）`;
+    `${plan.cleanups.length ? ` / 待补清 ${plan.cleanups.length}` : ""}${plan.registerFailed ? ` / 登记失败 ${plan.registerFailed}` : ""}（lifecycle ${mode}）`;
 }

@@ -134,6 +134,28 @@ export function registerWorker(db: Database, input: RegisterInput): WorkerRegist
   });
 }
 
+/** A create whose registration failed: the agent is kept (never undone by name) and left for PM; one event records it. */
+export interface RegisterFailure { agent: string; sessionId: string; taskId: string; role: WorkerRole; createdBy: string; reason: string; now?: number }
+
+export function recordRegisterFailure(db: Database, f: RegisterFailure): void {
+  const task = getTask(db, f.taskId);
+  if (!task) throw new LedgerError("not_found", checkCard(db, f.taskId) ?? "");
+  const now = f.now ?? Date.now();
+  tx(db, () => insertEvent(db, { actor: f.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler",
+    text: `${f.role} agent ${f.agent} 已建但登记失败，未打 worker 标签，需 PM 处理：${f.reason}`.slice(0, 400),
+    data: { op: "worker_register_failed", agent: f.agent, sessionId: f.sessionId, role: f.role, createdBy: f.createdBy, reason: f.reason.slice(0, 300) } }, false));
+}
+
+/** Every recorded registration failure (agent + the session the create started); the planner counts the ones still unresolved. */
+export function registerFailures(db: Database): { agent: string; sessionId: string; taskId: string }[] {
+  const rows = db.query("SELECT target, data FROM events WHERE kind = 'scheduler' AND json_extract(data, '$.op') = 'worker_register_failed'").all() as
+    { target: string; data: string }[];
+  return rows.flatMap((r) => {
+    const d = JSON.parse(r.data) as { agent?: unknown; sessionId?: unknown };
+    return typeof d.agent === "string" && typeof d.sessionId === "string" ? [{ agent: d.agent, sessionId: d.sessionId, taskId: r.target }] : [];
+  });
+}
+
 export interface RetireRecord {
   agent: string; sessionId: string | null; taskId: string | null; role: WorkerRole | "stock"; rule: string; reason: string;
   idleMs: number | null; bytesBefore: number | null; bytesAfter: number | null; steps: string[]; now: number;

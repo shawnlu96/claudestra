@@ -9,6 +9,8 @@
  * r4 review fixes: a due scheduler-bound session is listed in kept with BOUND_WAIT and counted (应收 / 调度绑定待收 K) until LIFE3;
  * a cleanup retry checks every current holder of its checkouts (a same-name new session included) and keeps the frozen / protected /
  * recent guards; a retry closes only its own pending row (agent + regAt), other sessions' debts stay owed.
+ * r5 review fixes: a holder is anyone not `stopped` (scheduler-retire.ts: status, pending and window together), in the planner and in
+ * the executor's temp folder step, also when the checkout is already gone; unresolved registration failures show as 登记失败 N.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -17,7 +19,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, parseLifecycle, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
-import { activeWorkers, cardWorkerIndex, pendingCleanups, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
+import { activeWorkers, cardWorkerIndex, pendingCleanups, recordRegisterFailure, recordWorkerRetire, registerFailures, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { BOUND_WAIT, planLifecycle, lifecycleLine, type AgentFacts, type PlanInput } from "../src/lib/agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
 import { ledgerFacts, lendAgents } from "../src/lib/agent-lifecycle-deps.js";
@@ -328,6 +330,37 @@ describe("run", () => {
     expect(pendingCleanups(db).length).toBe(1); // still owed
   });
 
+  test("stale-session-ownership: checkout gone, temp evidence left; a same-name new session stopped but pending / windowed keeps it", async () => {
+    const { db, dir, card } = ledger();
+    card("O1", "verified");
+    const root = join(dir, "worktrees"), tmpRoot = join(dir, "claude-tmp"), gone = join(root, "o1");
+    mkdirSync(root); mkdirSync(tmpRoot);
+    const tmpDir = claudeTmpDirFor(gone, tmpRoot);
+    mkdirSync(tmpDir); writeFileSync(join(tmpDir, "evidence"), "x");
+    registerWorker(db, { agent: "old-holder", sessionId: "old", taskId: "O1", role: "author", createdBy: "pm", now: 1 });
+    recordWorkerRetire(db, "scheduler", { agent: "old-holder", sessionId: "old", taskId: "O1", role: "author", rule: "card_finished", reason: "t",
+      idleMs: 1, bytesBefore: 1, bytesAfter: 1, steps: [], now: NOW, pending: [{ checkout: gone, tmp: tmpDir }], retry: false });
+    // planner: status stopped but its window still runs (idle 10h, so not "recent") → a holder, kept
+    const newcomer = agent("old-holder", 10, { sessionId: "new", status: "stopped", running: true, cwd: gone });
+    const plan = planLifecycle(input(db, [newcomer], { pending: pendingCleanups(db) }));
+    expect([plan.cleanups, plan.kept.map((k) => k.agent)]).toEqual([[], ["old-holder"]]);
+    expect(planLifecycle(input(db, [{ ...newcomer, running: false, pending: true }], { pending: pendingCleanups(db) })).cleanups).toEqual([]);
+    // executor, fed a stale plan: stopped + pending, stopped + window each keep the temp folder and the debt
+    const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
+    const stale = planLifecycle(input(db, [], { pending: pendingCleanups(db) }));
+    for (const [pending, window] of [[true, true], [true, false], [false, true]]) {
+      const { deps } = fakeDeps(db, root, [], [{ name: "old-holder", status: "stopped", sessionId: "new", cwd: gone, pending, window }]);
+      deps.tmp = { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) };
+      const r = await runLifecycle(stale, on, deps);
+      expect([r.done, r.failed.map((f) => f.agent), existsSync(join(tmpDir, "evidence")), pendingCleanups(db).length]).toEqual([[], ["old-holder"], true, 1]);
+    }
+    // stopped for good (no pending, no window): the retry finishes
+    const { deps } = fakeDeps(db, root, [], [{ name: "old-holder", status: "stopped", sessionId: "new", cwd: gone, pending: false, window: false }]);
+    deps.tmp = { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) };
+    const fin = await runLifecycle(planLifecycle(input(db, [{ ...newcomer, running: false }], { pending: pendingCleanups(db) })), on, deps);
+    expect([fin.done.map((d) => d.agent), existsSync(tmpDir), pendingCleanups(db)]).toEqual([["old-holder"], false, []]);
+  });
+
   test("a cleanup retry keeps the frozen / protected / recent guards", () => {
     const { db, dir, card } = ledger();
     card("F1", "verified", { frozen: true }); card("G1", "verified");
@@ -365,6 +398,23 @@ describe("run", () => {
     rmSync(join(b, "dirty.txt"));
     const fin = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
     expect([fin.done.length, existsSync(a), existsSync(b), pendingCleanups(db)]).toEqual([1, false, false, []]);
+  });
+});
+
+describe("registration failures (create kept the agent for PM)", () => {
+  test("counted while the agent still runs that session unregistered or untagged; shown as 登记失败 N", () => {
+    const { db, card } = ledger();
+    card("E1", "build");
+    const fail = (agent: string, sessionId: string) => recordRegisterFailure(db, { agent, sessionId, taskId: "E1", role: "author", createdBy: "agent-pm", reason: "synthetic" });
+    fail("agent-e1", "s"); fail("agent-e1", "s"); // the same failure twice counts once
+    fail("agent-moved-on", "old"); // the name runs another session now
+    fail("agent-fixed", "s"); // PM registered and tagged it since
+    registerWorker(db, { agent: "agent-fixed", sessionId: "s", taskId: "E1", role: "author", createdBy: "agent-pm", now: 5 });
+    const plan = planLifecycle(input(db, [agent("agent-e1", 1), agent("agent-moved-on", 1, { sessionId: "new" }), agent("agent-fixed", 1, { kind: "worker" })],
+      { registerFailed: registerFailures(db) }));
+    expect(plan.registerFailed).toBe(1);
+    expect(lifecycleLine(plan, "observe")).toContain("/ 登记失败 1（lifecycle observe）");
+    expect(plan.actions).toEqual([]); // never collected by the lifecycle: PM's to handle
   });
 });
 

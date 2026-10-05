@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite";
 import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "./agent-lifecycle-config.js";
-import { cardWorkerIndex, pendingCleanups } from "./agent-lifecycle-store.js";
+import { cardWorkerIndex, pendingCleanups, registerFailures } from "./agent-lifecycle-store.js";
 import { planLifecycle, lifecycleLine, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
 import { readActivity } from "./agent-supervisor-activity.js";
@@ -16,7 +16,7 @@ import { agentWindowsOrNull } from "./agent-windows.js";
 import { resolveBunPath } from "./bun-path.js";
 import { pmsByProject } from "./ledger-store.js";
 import { statePath } from "./paths.js";
-import { isMasterName, readRegistryAgents, type RegistryAgent } from "./registry.js";
+import { isMasterName, normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
 import { LEND_JOURNAL_PATH } from "./lend-journal.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
@@ -27,6 +27,7 @@ import { readLiveAgents } from "./scheduler-retire.js";
 import { nodeTmpCleaner } from "./scheduler-retire-tmp.js";
 import { git } from "./scheduler-review-worktree.js";
 import { sessionJsonlPath } from "./session-source.js";
+import { readJsonLenient } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
 
 export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string> } {
@@ -56,8 +57,9 @@ async function activity(a: RegistryAgent, now: number): Promise<{ idleMs: number
 async function agentFacts(now: number): Promise<AgentFacts[]> {
   // tmux unreadable: fall back to the registry status; the stop itself (manager kill / remove) re-checks the window
   const windows = await agentWindowsOrNull(), open = new Set(windows?.map((w) => w.name) ?? []);
-  return Promise.all((await readRegistryAgents()).map(async (a) => ({
-    name: a.name, kind: a.kind, role: a.role, status: a.status, cwd: a.cwd, sessionId: a.sessionId,
+  const raw = await readJsonLenient<{ agents?: Record<string, { pending?: unknown }> } | null>(REGISTRY_PATH, null, { who: "registry", writersGuarded: false });
+  return Promise.all(normalizeRegistryAgents(raw).map(async (a) => ({
+    name: a.name, kind: a.kind, role: a.role, status: a.status, cwd: a.cwd, sessionId: a.sessionId, pending: !!raw?.agents?.[a.name]?.pending,
     running: open.has(a.name) || ((a.transport === "acp" || !windows) && a.status === "active"), ...(await activity(a, now)),
   })));
 }
@@ -81,7 +83,7 @@ export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = 
   const [agents, memory] = await Promise.all([agentFacts(now), readMemory()]);
   const master = new Set(agents.filter((a) => isMasterName(a.name)).map((a) => a.name));
   return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master,
-    swapPct: memory.swapPct, pending: pendingCleanups(db) });
+    swapPct: memory.swapPct, pending: pendingCleanups(db), registerFailed: registerFailures(db) });
 }
 
 async function du(paths: string[]): Promise<number | null> {

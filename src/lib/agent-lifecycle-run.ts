@@ -14,7 +14,7 @@ import { join, sep } from "node:path";
 import type { LifecyclePolicy } from "./agent-lifecycle-config.js";
 import type { CleanupEntry, RetireRecord } from "./agent-lifecycle-store.js";
 import type { Action, Plan } from "./agent-lifecycle.js";
-import { archiveReceipt, killOutcome, removeCleanWorktree, type LiveAgent, type RetireDeps, within, worktreeDirs } from "./scheduler-retire.js";
+import { archiveReceipt, killOutcome, removeCleanWorktree, stopped, type LiveAgent, type RetireDeps, within, worktreeDirs } from "./scheduler-retire.js";
 import { claudeTmpDirFor, tmpDirVerdict, type TmpCleaner } from "./scheduler-retire-tmp.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -59,10 +59,12 @@ const isSymlink = (p: string): boolean => {
 /**
  * Cleans what it may; returns what is left (a kept checkout keeps its temp folder with it). Every current agent counts as a holder
  * except `self`, the session this retire just stopped (name and session both); a retry has no self, so a same-name agent running
- * another session in the checkout keeps it.
+ * another session in the checkout keeps it. Held = not `stopped` (scheduler-retire.ts: status, pending and window together), also for
+ * a temp folder whose checkout is already gone (a tmp-only retry), so the evidence of any current holder stays.
  */
 async function cleanDisk(entries: CleanupEntry[], deps: LifecycleDeps, self: { name: string; sessionId: string } | null, steps: string[]): Promise<CleanupEntry[]> {
   const agents = (await deps.agents()).filter((x) => !self || x.name !== self.name || x.sessionId !== self.sessionId);
+  const live = agents.filter((x) => !stopped(x) && x.cwd).map((x) => ({ name: x.name, cwd: x.cwd! }));
   const left: CleanupEntry[] = [];
   for (const e of entries) {
     const why = isSymlink(e.checkout) ? "是符号链接，不跟" : await removeCleanWorktree(deps, e.checkout, agents);
@@ -73,9 +75,9 @@ async function cleanDisk(entries: CleanupEntry[], deps: LifecycleDeps, self: { n
     }
     steps.push(`worktree 已清 ${e.checkout}`);
     if (!e.tmp || !deps.tmp?.root) continue;
-    const live = agents.filter((x) => x.status !== "stopped" && x.cwd).map((x) => ({ name: x.name, cwd: x.cwd! }));
+    const holder = live.find((x) => within(x.cwd, e.checkout));
     let v: ReturnType<typeof tmpDirVerdict>;
-    try { v = tmpDirVerdict(e.tmp, deps.tmp.root, live); } catch (err) { v = { refuse: `检查出错：${(err as Error).message}` }; }
+    try { v = holder ? { refuse: `${holder.name} 还在 ${e.checkout} 工作（agent 没停）` } : tmpDirVerdict(e.tmp, deps.tmp.root, live); } catch (err) { v = { refuse: `检查出错：${(err as Error).message}` }; }
     if ("gone" in v) continue;
     if ("refuse" in v) { steps.push(`临时目录没删：${v.refuse}`); left.push({ checkout: e.checkout, tmp: e.tmp }); continue; }
     const err = await deps.tmp.rm(v.rm).then(() => null, (x: unknown) => {
