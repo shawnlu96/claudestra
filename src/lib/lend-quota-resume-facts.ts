@@ -26,7 +26,7 @@ export interface QuotaStopFact {
   resultCommitted: boolean | null; resultPending: boolean | null;
   /** 停之前有没有对外副作用（推送、评论…）；unknown = 不恢复 */
   sideEffects: "none" | "unknown" | null;
-  /** 额度停止事实自带的重置时刻（ms）；只认这一处，不现读额度 */
+  /** 额度停止事实自带的重置时刻（ms）；只认这一处，不现读额度。null = 没给（才走兜底）；给了但非有限 = 无效，交 PM */
   resetAt: number | null;
 }
 
@@ -36,8 +36,11 @@ export type OrderSnap = Pick<LendOrder, "orderId" | "taskId" | "peer" | "family"
 export interface VerifiedQuotaStop {
   orderId: string; taskId: string; peer: string; family: LendFamily; gen: number;
   step: OrderSnap["step"]; specRev: number; round: number; head: string; repo: string;
-  observedAt: number;
-  /** 恢复截止：事实里的重置时刻，缺失才是 observedAt + PAUSE_FALLBACK_MS；由事实算出，不随 tick 变 */
+  /** 停止事件时刻 = 同一事实最早被观察到的时刻；重复观察不动它，计划层的「停止之后」门槛也以它为准 */
+  stoppedAt: number;
+  /** 同一事实最近一次被观察到的时刻（只作审计，不当门槛） */
+  lastObservedAt: number;
+  /** 恢复截止：事实里的重置时刻（即使早于观察时刻也原样保留），缺失才是 stoppedAt + PAUSE_FALLBACK_MS；由事实算出，不随 tick 变 */
   deadline: number; deadlineFrom: "reset" | "fallback";
   /** 原证据引用，原样带给计划与审计 */
   evidence: string[];
@@ -50,6 +53,8 @@ export type FactVerdict =
 
 const refOf = (f: QuotaStopFact): string => `${f.source.kind}:${f.source.ref}@${f.observedAt ?? "?"}`;
 const finite = (n: number | null): n is number => typeof n === "number" && Number.isFinite(n);
+/** 来源引用必须是非空白字符串：空引用的事实不可追溯，不能当证据 */
+export const hasRef = (ref: unknown): ref is string => typeof ref === "string" && ref.trim() !== "";
 
 /** 两条事实说的是不是同一件事（字段任何一处不同就是矛盾） */
 function sameClaim(a: QuotaStopFact, b: QuotaStopFact): boolean {
@@ -79,6 +84,7 @@ export function verifyQuotaStop(facts: readonly QuotaStopFact[], o: OrderSnap, n
   if (o.status !== "unknown") return manual(`单不在 unknown（${o.status}），不是报停待核对的单`);
   const { own, foreignGen } = ownFacts(facts, o);
   if (!own.length) return foreignGen ? manual(`只有别的租约代的停止事实，当前 gen ${o.leaseGen}`) : wait("没有认证来源的停止事实");
+  if (own.some((f) => !hasRef(f.source.ref))) return manual("认证停止事实缺来源引用，不可追溯");
   const first = own[0];
   if (own.some((f) => !sameClaim(f, first))) return manual("同一单的停止事实互相矛盾");
   if (first.cause !== "quota") return manual(`停止原因是 ${first.cause}，不走额度恢复`, false);
@@ -86,14 +92,16 @@ export function verifyQuotaStop(facts: readonly QuotaStopFact[], o: OrderSnap, n
   if (first.resultCommitted === true || first.resultPending === true) return manual("出借方有已提交或待转交的结果，结果优先", false);
   const observed = own.map((f) => f.observedAt);
   if (!observed.every(finite) || observed.some((t) => t > now)) return manual("观察时刻缺失或在未来");
-  const observedAt = Math.max(...observed);
+  const stoppedAt = Math.min(...(observed as number[])), lastObservedAt = Math.max(...(observed as number[]));
   if (first.stopped !== true) return wait(first.stopped === false ? "worker 还没停" : "不知道 worker 停没停");
   if (first.resultCommitted !== false || first.resultPending !== false) return wait("不知道有没有已提交 / 待转交的结果");
-  const reset = finite(first.resetAt) && first.resetAt > Math.min(...(observed as number[])) ? first.resetAt : null;
-  // 截止取最早那条事实的观察时刻：同一事实被重复观察（每 tick 一次）也不会往后推兜底截止
-  const deadline = reset ?? Math.min(...(observed as number[])) + PAUSE_FALLBACK_MS;
+  // 原 reset 存在就原样用（恢复进程晚于 reset 才看到事实，截止也早已到，不往后推）；只有真没给才兜底
+  if (first.resetAt !== null && !finite(first.resetAt)) return manual("额度停止事实的重置时刻无效");
+  const reset = first.resetAt;
+  // 兜底截止取停止事件时刻（最早观察）：同一事实被重复观察（每 tick 一次）也不会往后推
+  const deadline = reset ?? stoppedAt + PAUSE_FALLBACK_MS;
   return { kind: "verified", stop: {
     orderId: o.orderId, taskId: o.taskId, peer: o.peer, family: o.family, gen: o.leaseGen, step: o.step, specRev: o.specRev,
-    round: o.round, head: o.head, repo: o.repo, observedAt, deadline, deadlineFrom: reset === null ? "fallback" : "reset", evidence,
+    round: o.round, head: o.head, repo: o.repo, stoppedAt, lastObservedAt, deadline, deadlineFrom: reset === null ? "fallback" : "reset", evidence,
   } };
 }

@@ -44,6 +44,7 @@ function input(stop: ResumeInput["stop"], order: OrderSnap, at: number, over: Pa
     stop, order, task: { head: order.head, specRev: order.specRev, round: order.round },
     worker: { value: "stopped", source: "beat#9", observedAt: at - 1_000 },
     pendingResult: { value: false, source: "beat#9", observedAt: at - 1_000 },
+    settlement: { value: { orderId: ORDER, gen: 1, settled: true }, source: "receipt#3", observedAt: at - 1_000 },
     hello: { value: { grant: grant(), paused: null, quota: {} }, source: "hello#42", observedAt: at - 1_000 },
     writeLease: { peer: PEER, state: "held" }, consumed: new Set(), ...over,
   };
@@ -108,11 +109,27 @@ describe("verifyQuotaStop：只认认证来源的精确额度停止", () => {
     expect(verifyQuotaStop([fact({ observedAt: T0 + 5 })], snap(db), T0).kind).toBe("manual");
   });
 
+  test("认证停止事实来源引用空白 → manual，不出不可追溯的 verified", () => {
+    for (const ref of ["", "  "]) {
+      const v = verifyQuotaStop([fact({ source: { kind: "lease_release", ref, peer: PEER, authenticated: true } })], snap(orderDb()), T0 + 1_000);
+      expect(v.kind).toBe("manual");
+    }
+  });
+
+  test("原 reset 早于观察时刻（晚看到）→ 原样保留，已到期；非有限 reset → manual，不静默兜底", () => {
+    const s = verified([fact({ resetAt: 1_060_000, observedAt: 1_060_100 })], orderDb(), 1_061_000);
+    expect([s.deadline, s.deadlineFrom]).toEqual([1_060_000, "reset"]);
+    for (const resetAt of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(verifyQuotaStop([fact({ resetAt })], snap(orderDb()), T0 + 1_000).kind).toBe("manual");
+    }
+  });
+
   test("没 reset → 停止观察时刻 + PAUSE_FALLBACK_MS；重复观察同一事实不往后推", () => {
     const once = verified([fact({ resetAt: null })]);
     const again = verified([fact({ resetAt: null }), fact({ resetAt: null, source: { kind: "beat", ref: "b2", peer: PEER, authenticated: true },
       observedAt: T0 + 600_000 })], orderDb(), T0 + 700_000);
     expect([once.deadline, once.deadlineFrom, again.deadline]).toEqual([T0 + PAUSE_FALLBACK_MS, "fallback", T0 + PAUSE_FALLBACK_MS]);
+    expect([again.stoppedAt, again.lastObservedAt]).toEqual([T0, T0 + 600_000]);
   });
 });
 
@@ -126,9 +143,10 @@ describe("planQuotaResume：截止、出借方现状、结果优先、一次资�
     const p = planQuotaResume(input(s, o, RESET), RESET);
     if (p.kind !== "plan") throw new Error(kindOf(p));
     expect(p.key).toBe(`qstop:${ORDER}:g1`);
-    expect(p.steps.map((x) => x.op)).toEqual(["cas", "cancel", "repool"]);
+    expect(p.steps.map((x) => x.op)).toEqual(["cas", "settle", "cancel", "repool"]);
+    expect(p.steps[1]).toEqual({ op: "settle", orderId: ORDER, gen: 1, peer: PEER, require: "settled", evidence: "receipt#3" });
     expect(p.steps[0]).toMatchObject({ expect: { status: "unknown", leaseGen: 1, resultSha: null, peer: PEER, round: 0 } });
-    expect(p.steps[2]).toMatchObject({ peer: PEER, family: "claude", step: "write", round: 0, specRev: 1, supersedes: ORDER, keepWriteLease: true });
+    expect(p.steps[3]).toMatchObject({ peer: PEER, family: "claude", step: "write", round: 0, specRev: 1, supersedes: ORDER, keepWriteLease: true });
   });
 
   test("无 deadline 的兜底截止跨 tick 稳定：两次 tick 都等同一个 until", () => {
@@ -186,7 +204,41 @@ describe("planQuotaResume：截止、出借方现状、结果优先、一次资�
     expect(planQuotaResume(input(stop(), snap(orderDb()), at, { writeLease: { peer: PEER, state: "ended" } }), at).kind).toBe("manual");
     const review = orderDb({ step: "review", branch: null, base: null });
     const p = planQuotaResume(input(verified([fact()], review), snap(review), at, { writeLease: null }), at);
-    expect(p.kind === "plan" && p.steps[2]).toMatchObject({ step: "review", keepWriteLease: false });
+    expect(p.kind === "plan" && p.steps[3]).toMatchObject({ step: "review", keepWriteLease: false });
+  });
+
+  test("旧单收尾未结清 / 不知道 / 过期 / 早于停止 → wait；结清事实是别的单或别的代 → manual", () => {
+    const s = stop(), o = snap(orderDb()), at = RESET + 1;
+    const st = (v: Partial<{ orderId: string; gen: number; settled: boolean | null }>, observedAt = at - 1) =>
+      ({ settlement: { value: { orderId: ORDER, gen: 1, settled: true, ...v }, source: "receipt#4", observedAt } });
+    for (const over of [{ settlement: null }, st({ settled: false }), st({ settled: null }), st({}, at - 200_000), st({}, T0 - 1)]) {
+      expect(planQuotaResume(input(s, o, at, over), at)).toMatchObject({ kind: "wait", until: null });
+    }
+    expect(planQuotaResume(input(s, o, at, st({ gen: 2 })), at).kind).toBe("manual");
+    expect(planQuotaResume(input(s, o, at, st({ orderId: "lend:demo:s1:r0:a0" })), at).kind).toBe("manual");
+  });
+
+  test("worker / 待转交 / hello / 结清的来源空白 → wait，不出计划", () => {
+    const s = stop(), o = snap(orderDb()), at = RESET + 1, base = input(s, o, at);
+    for (const k of ["worker", "pendingResult", "hello", "settlement"] as const) {
+      const over = { [k]: { ...base[k]!, source: " " } } as Partial<ResumeInput>;
+      expect(planQuotaResume(input(s, o, at, over), at).kind).toBe("wait");
+    }
+  });
+
+  test("同 beat 重复报停 + 已停 + 无结果：门槛不随重复观察移动，连续 tick 都能出计划", () => {
+    const o = snap(orderDb());
+    const orig = fact({ observedAt: 1_000_000, resetAt: 1_060_000 });
+    for (const at of [1_061_000, 1_062_000]) {
+      const beat = fact({ observedAt: at, resetAt: 1_060_000, source: { kind: "beat", ref: `b@${at}`, peer: PEER, authenticated: true } });
+      const s = verified([orig, beat], orderDb(), at);
+      expect([s.stoppedAt, s.deadline]).toEqual([1_000_000, 1_060_000]);
+      const same = { source: `b@${at}`, observedAt: at };
+      const p = planQuotaResume(input(s, o, at, { worker: { value: "stopped", ...same }, pendingResult: { value: false, ...same },
+        hello: { value: { grant: grant({ until: at + 86_400_000 }), paused: null, quota: {} }, ...same },
+        settlement: { value: { orderId: ORDER, gen: 1, settled: true }, ...same } }), at);
+      expect(p.kind).toBe("plan");
+    }
   });
 
   test("重启 + 重复 tick + 并发消费：同一资格只出一次计划", () => {
