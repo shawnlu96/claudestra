@@ -53,6 +53,7 @@ import { cliPathNotes } from "./cli-path.js";
 import { migrateWebHosting } from "./legacy-web.js";
 import { refuseInSandbox } from "./sandbox.js";
 import { DAEMONS, cliWrapperScript, type DaemonSpec } from "./cli-wrapper.js";
+import { renderDaemonPlist, type DaemonPlistInput } from "./daemon-plist.js";
 
 export { DAEMONS, cliWrapperScript } from "./cli-wrapper.js";
 
@@ -258,66 +259,49 @@ async function writeCliWrapper(repoRoot: string, bunPath: string): Promise<strin
   return primary;
 }
 
+type DaemonPlistEnv = Pick<DaemonPlistInput, "home" | "envPath" | "logDir">;
+
+/** plist 里的 HOME、PATH、日志目录取原值（同抽出前：每个 daemon 各取一次） */
+function currentPlistEnv(): DaemonPlistEnv {
+  return { home: homedir(), envPath: buildEnvPath(), logDir: LOG_DIR };
+}
+
+/** 模板在 daemon-plist.ts（纯函数）；这里只把取好的原值传进去 */
 function buildDaemonPlist(
   repoRoot: string,
   bunPath: string,
   daemon: DaemonSpec,
+  env: DaemonPlistEnv,
 ): string {
-  const home = homedir();
-  const envPath = buildEnvPath();
-  const argv = [bunPath, `${repoRoot}/${daemon.script}`];
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${daemon.label}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
-  <key>WorkingDirectory</key>
-  <string>${repoRoot}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${envPath}</string>
-    <key>HOME</key>
-    <string>${home}</string>
-    <!--
-      LANG/LC_ALL 必须注入 UTF-8 locale，否则 daemon 派生的子进程（tmux 尤其）
-      跑在 C locale 下会把 CJK 字符渲染成 '_' placeholder。导致 launcher 调
-      manager.ts list 时拿到的 tmux window name 跟 registry 里的真实 CJK name
-      不 match，永远判定 dead → 死循环 restart → zombie window 累积。
-      pm2 时代不出问题是因为 pm2 从 user shell 启动，继承了 LANG。
-    -->
-    <key>LANG</key>
-    <string>en_US.UTF-8</string>
-    <key>LC_ALL</key>
-    <string>en_US.UTF-8</string>
-  </dict>
-  <key>ProgramArguments</key>
-  <array>
-${argv.map((a) => `    <string>${a}</string>`).join("\n")}
-  </array>
-  <key>StandardOutPath</key>
-  <string>${LOG_DIR}/${daemon.stem}.out</string>
-  <key>StandardErrorPath</key>
-  <string>${LOG_DIR}/${daemon.stem}.err</string>
-</dict>
-</plist>
-`;
+  return renderDaemonPlist({ repoRoot, bunPath, daemon, ...env });
 }
 
-async function writeDaemonPlists(repoRoot: string, bunPath: string): Promise<{ label: string; plistPath: string }[]> {
-  const dir = `${homedir()}/Library/LaunchAgents`;
-  await mkdir(dir, { recursive: true });
+/** writeDaemonPlists 的 IO 边界：默认是真实目录 / 环境 / 文件，测试注入假 IO */
+export interface DaemonPlistWriteIO {
+  launchAgentsDir: () => string;
+  plistEnv: () => DaemonPlistEnv;
+  mkdir: (dir: string) => Promise<unknown>;
+  writeFile: (path: string, content: string) => Promise<void>;
+}
+
+const realPlistWriteIO: DaemonPlistWriteIO = {
+  launchAgentsDir: () => `${homedir()}/Library/LaunchAgents`,
+  plistEnv: currentPlistEnv,
+  mkdir: (dir) => mkdir(dir, { recursive: true }),
+  writeFile: (path, content) => writeFile(path, content),
+};
+
+export async function writeDaemonPlists(
+  repoRoot: string,
+  bunPath: string,
+  io: DaemonPlistWriteIO = realPlistWriteIO,
+): Promise<{ label: string; plistPath: string }[]> {
+  const dir = io.launchAgentsDir();
+  await io.mkdir(dir);
   const out: { label: string; plistPath: string }[] = [];
   for (const d of DAEMONS) {
     const plistPath = `${dir}/${d.label}.plist`;
-    await writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d));
+    await io.writeFile(plistPath, buildDaemonPlist(repoRoot, bunPath, d, io.plistEnv()));
     out.push({ label: d.label, plistPath });
   }
   return out;

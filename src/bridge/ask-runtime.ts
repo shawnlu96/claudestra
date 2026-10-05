@@ -80,6 +80,9 @@ interface RuntimeAskInput {
   instance?: string;
   /** ACP 回合失败（不是额度 / 登录）：落在 extra.failure，调度器按它认出是哪类失败（scheduler-auto-ports.ts codexFailure） */
   failure?: "error";
+  /** 回合失败发生在哪个会话、什么时刻（宿主报的）：落在 extra，出借停单只认当前会话当前回合的卡（lib/lend-turn-failure.ts） */
+  sessionId?: string;
+  failedAt?: number;
   /**
    * 监护在处置（lib/agent-supervisor-bridge.ts failureCardQuiet）或派单会话的失败由派活方接手（lib/runtime-failure-audience.ts）：
    * 卡照开、留在看板上，但不卡活、不推 owner
@@ -113,6 +116,7 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
       chatId: r.channelId, expiresAt, extra: {
         ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}), ...(r.failure ? { failure: r.failure } : {}),
+        ...(r.sessionId ? { sessionId: r.sessionId } : {}), ...(r.failedAt !== undefined ? { failedAt: r.failedAt } : {}),
       },
     }, now);
     publishAsk(a);
