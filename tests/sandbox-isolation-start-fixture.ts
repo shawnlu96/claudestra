@@ -27,6 +27,8 @@ export interface StartSpec {
   firstPort?: number;
   /** 每次起 up child 后调用（Fleet 用它登记起到一半的进程组，runner 中途收尾时也能收掉） */
   onSpawn?: (proc: Proc, port: number) => void;
+  /** 外层 onPicked await 恢复后同步复核取消；与 spawn 之间不能再 await，否则 stop 可漏收新 child。 */
+  checkCancelled?: () => void;
 }
 
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -250,6 +252,7 @@ export async function startSandbox(spec: StartSpec): Promise<Started> {
     const prevPid = readPid(spec.root);
     const offset = logSize(spec.root);
     const hadMarker = existsSync(join(spec.root, SANDBOX_MARKER));
+    spec.checkCancelled?.();
     const child = spawnChild(spec, spec.argv("up", port));
     spec.onSpawn?.(child.proc, port);
     const kind = await settle(spec, child, port, prevPid, offset);
@@ -300,13 +303,17 @@ export class Fleet {
     const onPicked = async (p: number, i: number) => {
       if (it.stopped) throw halted();
       await spec.onPicked?.(p, i);
-      if (it.stopped) throw halted(); // 钩子 await 期间被 stop：此后到 spawn 全是同步代码，这里拦下就不会再起 child
+      if (it.stopped) throw halted();
     };
     const onSpawn = (proc: Proc, p: number) => {
       [it.up, it.port] = [proc, p];
       spec.onSpawn?.(proc, p);
     };
-    it.run = startSandbox({ ...spec, onPicked, onSpawn }).then((up) => {
+    const checkCancelled = () => {
+      spec.checkCancelled?.();
+      if (it.stopped) throw halted();
+    };
+    it.run = startSandbox({ ...spec, onPicked, onSpawn, checkCancelled }).then((up) => {
       [it.port, it.pid] = [up.port, up.pid];
       return up;
     });
@@ -330,7 +337,7 @@ export class Fleet {
       killGroup(it.up.pid, "SIGKILL"); // child 还没被回收，组号仍是本次的
       if (!(await within(it.up.exited, CLEANUP_MS))) bad.push(`${root} 起到一半的 up（pid ${it.up.pid}）收不掉`);
     }
-    // 起过 child：等这次启动（成功返回或失败收尾）落定，拿到最终的端口 / pid 再 down；没起过 child 时启动只可能停在 onPicked 钩子里，放行后必被拦下、不会 spawn
+    // 起过 child 就等启动与失败收尾落定再 down；还没起 child 时，外层 await 后的同步取消检查保证不会再 spawn。
     if (it.up && it.run && !(await within(Promise.allSettled([it.run]), 4 * CLEANUP_MS))) bad.push(`${root} 起到一半的启动 ${4 * CLEANUP_MS}ms 内没落定`);
     this.live.delete(root);
     const pid = it.pid ?? readPid(root);

@@ -1,19 +1,6 @@
 /**
- * 受控测试：真实起一个沙箱 bridge（scripts/sandbox.ts），启动 → 使用 → 重启 → 退出，全程证明没有副作用。
- *
- * 「生产」由临时目录冒充：HOME 指向假 home（里面种好 ~/.claude-orchestrator 与 ~/.claude），调用者环境里
- * 塞满生产地址与身份（BRIDGE_URL=生产端口、Discord token、中继地址），PATH 前面垫一层记账 shim
- * （launchctl / tmux / claude …）。断言：
- *   1. 假 home 下没有任何文件新建 / 修改 / 删除（逐文件比 size + mtime + 内容哈希）；
- *   2. launchctl 一次都没被调；tmux 每次调用都走沙箱 socket；
- *   3. 出站请求 0 次：代理替身、中继替身都没收到请求，bridge 日志里也没有出站闸门拦截记录；
- *   4. bridge 只监听沙箱端口（有 lsof 时）；沙箱状态目录确实收到了写入（证明写入被重定向，而不是没发生）。
- * agent 这一侧（有 tmux 时）：经沙箱 manager 真建一个 agent，`claude` 换成假 Claude Code（tests/sandbox-fake-claude.ts），
- * 它照真的那样跑 settings.json 里的 hooks / statusLine、拉起 channel-server、写会话 jsonl、收消息回 pong。
- * 假 home 里只许出现它自己写进 ~/.claude/projects 的会话文件（Claude Code 自身的写入，已知边界）。
- * Pi 这一侧：`pi` 换成假 pi（tests/sandbox-fake-pi.ts），经 ACP 真建一个 Pi agent，reply 经 channel-server 回到沙箱 bridge，
- * 核对它拿到的 Pi 目录 / HOME / 发现开关是沙箱那一套。
- * 另测：绕过脚本、直接带着 Discord token / 中继地址起沙箱 bridge → 拒绝启动，同样零写入零出站。
+ * 真实 sandbox 生命周期、bridge/ws 与假 agent：假生产 home 的 hash、socket 归属、出站与设施调用均须保持隔离。
+ * 端口竞争及取消由可控钩子注入；失败路径仍核验 child、bridge、pid 文件与监听端口的清理。
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
@@ -25,7 +12,6 @@ import { fakeClaudeSource } from "./sandbox-fake-claude.js";
 import { fakePiSource } from "./sandbox-fake-pi.ts";
 import { testChildEnv } from "./test-env.ts";
 import { atGate, Fleet, gateHit, gateShell, pickPort, pidAlive as alive, StartFailure, startSandbox, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
-
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
 const BUN = process.execPath;
@@ -33,11 +19,9 @@ const REAL_TMUX = Bun.which("tmux");
 const PROD_SID = "11111111-2222-4333-8444-555555555555";
 /** 候选端口禁用表：生产端口与下面拒连负例用的固定端口 */
 const AVOID_PORTS = [DEFAULT_BRIDGE_PORT, 23998, 23999];
-
 let [tmp, home, root, shimLog, port] = ["", "", "", "", 0];
 const hits: { proxy: string[]; decoy: string[] } = { proxy: [], decoy: [] };
 let [proxy, decoy]: Array<ReturnType<typeof Bun.serve> | null> = [null, null];
-
 function snapshot(dir: string): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (d: string) => {
@@ -55,14 +39,12 @@ function snapshot(dir: string): Map<string, string> {
   walk(dir);
   return out;
 }
-
 function diff(a: Map<string, string>, b: Map<string, string>): string[] {
   const out: string[] = [];
   for (const [k, v] of b) if (a.get(k) !== v) out.push(`${a.has(k) ? "改" : "新"} ${k}`);
   for (const k of a.keys()) if (!b.has(k)) out.push(`删 ${k}`);
   return out;
 }
-
 function seedFakeHome(): void {
   const st = join(home, ".claude-orchestrator");
   mkdirSync(join(st, "logs"), { recursive: true });
@@ -91,7 +73,6 @@ function seedFakeHome(): void {
   const rc = `export PATH="${join(tmp, "shim")}:$PATH"\n`;
   for (const f of [".zshenv", ".zshrc", ".bashrc", ".profile"]) writeFileSync(join(home, f), rc);
 }
-
 /** 记账 shim：记下 argv；tmux 透传真 tmux（沙箱 socket 上的真实行为），其余一律失败退出 */
 function writeShims(dir: string): void {
   mkdirSync(dir, { recursive: true });
@@ -109,9 +90,7 @@ function writeShims(dir: string): void {
   writeFileSync(join(dir, "claude"), fakeClaudeSource(BUN, join(tmp, "fake-claude.log")));
   chmodSync(join(dir, "claude"), 0o755);
 }
-
 const tmuxGate = () => join(tmp, "tmux-gate");
-
 function callerEnv(): Record<string, string> {
   return {
     PATH: `${join(tmp, "shim")}:${process.env.PATH}`,
@@ -132,14 +111,12 @@ function callerEnv(): Record<string, string> {
     CLAUDESTRA_STATE_DIR: join(home, ".claude-orchestrator"),
   };
 }
-
 function sandbox(...args: string[]): { code: number; out: string } {
   const r = Bun.spawnSync([BUN, SCRIPT, ...args, "--port", String(port), "--root", root], {
     cwd: REPO, env: callerEnv(), stdout: "pipe", stderr: "pipe",
   });
   return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
 }
-
 /** 经原入口 scripts/sandbox.ts up 起沙箱的夹具参数（端口竞争由 startSandbox 协调）；deadline 取调用方现有 timeout 之内 */
 function upSpec(r: string, ms: number, extra: Partial<StartSpec> = {}): StartSpec {
   return {
@@ -147,14 +124,12 @@ function upSpec(r: string, ms: number, extra: Partial<StartSpec> = {}): StartSpe
     argv: (sub, p) => [BUN, SCRIPT, sub, "--port", String(p), "--root", r], ...extra,
   };
 }
-
 /** 进程当前打开的文件路径（有 lsof 时）：用来断言沙箱 bridge 没开着任何生产目录里的文件 */
 function openFiles(pid: number): string[] | null {
   if (!Bun.which("lsof")) return null;
   const r = Bun.spawnSync(["lsof", "-p", String(pid), "-Fn"], { stdout: "pipe" });
   return r.stdout.toString().split("\n").filter((l) => l.startsWith("n/")).map((l) => l.slice(1));
 }
-
 function listeningPorts(pid: number): number[] | null {
   if (!Bun.which("lsof")) return null;
   const r = Bun.spawnSync(["lsof", "-a", "-p", String(pid), "-iTCP", "-sTCP:LISTEN", "-nP", "-Fn"], { stdout: "pipe" });
@@ -583,6 +558,29 @@ describe("启动夹具：端口竞争（受控扰动）", () => {
     const first = await inHook.then(() => fleet.stopAll()).finally(go); // 钩子还停着时收：没有 child、没有端口可收；收完放行
     expect([first, String(await late), await fleet.stopAll(), spawned, existsSync(join(r, "bridge.pid"))]).toEqual([[], expect.stringContaining("起到一半已被收掉"), [], 0, false]);
   }, 30_000);
+
+  test("onPicked 检查后外层 await 恢复前 stopAll：微任务取消不能再 spawn 或遗留 bridge", async () => {
+    const r = join(tmp, "race-microtask"), before = snapshot(home);
+    let stop: Promise<string[]> | undefined, spawned = 0, picked = 0;
+    const spec = upSpec(r, 45_000, {
+      onPicked: (p) => { picked = p; queueMicrotask(() => queueMicrotask(() => { stop = fleet.stopAll(); })); },
+      onSpawn: () => void spawned++,
+    });
+    try {
+      const result = await fleet.start(spec).catch((e) => e);
+      const pidFile = join(r, "bridge.pid"), pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : null;
+      expect([await stop, await fleet.stopAll(), spawned, pid !== null && alive(pid), existsSync(pidFile)])
+        .toEqual([[], [], 0, false, false]);
+      expect(String(result)).toContain("起到一半已被收掉");
+      expect([diff(before, snapshot(home)), hits]).toEqual([[], { proxy: [], decoy: [] }]);
+    } finally {
+      // 原缺陷会摘掉 Fleet 登记却留下 detached bridge；原红复现也必须经原入口收回本次临时资源。
+      if (spawned) {
+        const d = Bun.spawnSync(spec.argv("down", picked), { cwd: REPO, env: spec.env(), stdout: "pipe", stderr: "pipe" });
+        expect([d.exitCode, existsSync(join(r, "bridge.pid"))], d.stderr.toString()).toEqual([0, false]);
+      }
+    }
+  }, 60_000);
 
   test("反向故障照常失败、不重跑：非端口原因、端口被本沙箱活宿主占着、候选是生产端口", async () => {
     const before = snapshot(home);
