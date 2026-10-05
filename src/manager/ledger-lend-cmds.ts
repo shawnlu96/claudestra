@@ -126,22 +126,25 @@ function offerPeer(c: LedgerCli, task: LedgerTask): { peer: string; repo: string
 
 /**
  * 审查单的家族（dispatch-recovery-FAM1b）：缺省 codex；显式 claude 只给审查单，写 / 修复单仍只借 Codex（租约与家族约束不变）。
- * Claude 审查要证明跨模型独立：作者家族 = 出借方写的 head 记下的家族（remoteHeadFamily），否则卡流程上的 authorFamily，
- * 须是 Codex（Claude 写的、认不出作者的都拒），security 模板的审查只在本机做。Codex 这条与旧 CLI 一致，不加新闸。
+ * 审查单两个家族同一套闸（与调度器 scheduler-placement-plan / scheduler-plan 一致）：security 模板只在本机审；
+ * 作者家族 = 出借方写的 head 记下的家族（remoteHeadFamily），否则卡流程上的 authorFamily，与审查家族相同就拒（跨模型独立）。
+ * 认不出作者时 Claude 拒（证明不了跨模型），Codex 沿用旧 CLI（无流程的手动卡缺省借 Codex）。
+ * 角色闸是本机 borrow.roles（offerLend 核）与对方 poll 报的 capacity.roles；出借 grant.roles 已归一全角色（lend-config），不在这里另造。
  * 对方剩余的家族空位、仓库授权在 poll 时按对方报的 capacity 过滤（没空位就留在池里等），交结论时再核会话家族。
  */
 function offerFamily(c: LedgerCli, task: LedgerTask): LendFamily {
   const { family = "codex" } = c.p.flags;
   if (!(LEND_FAMILIES as readonly string[]).includes(family)) throw new LedgerError("invalid", `--family 只能是 ${LEND_FAMILIES.join(" / ")}（不是 ${family}）`);
-  const step = stepOfStage(task.stage);
-  if (family !== "codex" && step !== "review") throw new LedgerError("invalid", `写 / 修复单只借 Codex，--family ${family} 只给审查单`);
-  if (family !== "claude") return family as LendFamily;
+  if (stepOfStage(task.stage) !== "review") {
+    if (family !== "codex") throw new LedgerError("invalid", `写 / 修复单只借 Codex，--family ${family} 只给审查单`);
+    return "codex";
+  }
   const wf = getWorkflow(c.db, task.id);
   if (wf?.template === "security") throw new LedgerError("forbidden", "security 卡的审查只在本机做，不借出去");
   const author = remoteHeadFamily(c.db, task) ?? wf?.authorFamily ?? null;
-  if (author === "claude") throw new LedgerError("forbidden", "这张卡的代码是 claude 写的，不能再借 claude 审（要跨模型独立审查）");
-  if (!author) throw new LedgerError("forbidden", "认不出这张卡的作者家族，证明不了 Claude 审查是跨模型的（作者是 Codex 才能借 Claude 审）");
-  return "claude";
+  if (author === family) throw new LedgerError("forbidden", `这张卡的代码是 ${author} 写的，不能再借 ${family} 审（要跨模型独立审查）`);
+  if (!author && family === "claude") throw new LedgerError("forbidden", "认不出这张卡的作者家族，证明不了 Claude 审查是跨模型的（作者是 Codex 才能借 Claude 审）");
+  return family as LendFamily;
 }
 
 function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null): OfferInput {
@@ -301,7 +304,8 @@ const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
 export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-offer": {
     valued: OFFER_FLAGS,
-    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex|claude] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；--family 缺省 codex，claude 只给审查单且作者须是 Codex）",
+    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex|claude] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；" +
+      "--family 缺省 codex，claude 只给审查单且作者须是 Codex；审查单不借给与作者同家族的模型，security 卡不借）",
     run: (c) => offer(c, false),
   },
   "lend-reoffer": {

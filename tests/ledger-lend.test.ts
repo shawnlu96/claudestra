@@ -131,14 +131,25 @@ describe("lend-offer --family（dispatch-recovery-FAM1b）", () => {
     expect(JSON.parse(ev!.data)).toMatchObject({ reviewer: "peer:mate", verdict: "pass", reviewerFamily: "claude", lend: { claim: { family: "claude" } } });
   });
 
-  test("a Claude-written card refuses a Claude reviewer and still goes to Codex by default; the Codex path keeps the old CLI's gates", async () => {
+  test("a Claude-written card refuses a Claude reviewer and still goes to Codex by default; a Codex-written card refuses a Codex reviewer", async () => {
     workflow("T9", "claude");
     expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("跨模型") });
     expect(listLendOrders(db, "T9")).toEqual([]);
     expect(await offer()).toMatchObject({ ok: true, family: "codex" });
     card("T12");
     workflow("T12", "codex");
-    expect(await offer("T12", "--family", "codex")).toMatchObject({ ok: true, family: "codex" }); // 旧 CLI 行为不变（tests/fix-materials-offer.test.ts 依赖）
+    expect(await offer("T12")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("跨模型") });
+    expect(await offer("T12", "--family", "codex")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(listLendOrders(db, "T12")).toEqual([]);
+    expect(await offer("T12", "--family", "claude")).toMatchObject({ ok: true, family: "claude" });
+  });
+
+  test("a security card's review stays local for both families, the default Codex included; nothing is pooled", async () => {
+    workflow("T9", "claude", "security");
+    for (const args of [[], ["--family", "codex"], ["--family", "claude"]]) {
+      expect(await offer("T9", ...args)).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("security") });
+    }
+    expect(listLendOrders(db, "T9")).toEqual([]);
   });
 
   test("the author is the family that wrote the head when a lender did: a Codex lender's delivery beats the workflow's claude", async () => {
@@ -149,6 +160,7 @@ describe("lend-offer --family（dispatch-recovery-FAM1b）", () => {
     const { orderId } = await offer();
     db.run(`UPDATE lend_orders SET step = 'write', status = 'done', eventSeq = ${seq} WHERE orderId = '${orderId}'`);
     expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: true, family: "claude" });
+    expect(await run(["lend-reoffer", "T9", "--peer", "mate", "--repo", REPO, "--family", "codex", "--reason", "换家族"])).toMatchObject({ ok: false, code: "forbidden" });
   });
 
   test("no review role in borrow, a security card, or a build / fix card refuse --family claude; nothing is pooled", async () => {
@@ -157,8 +169,8 @@ describe("lend-offer --family（dispatch-recovery-FAM1b）", () => {
     expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
     borrow = [{ peer: "mate", projects: [P], roles: ["review", "write"], maxOpen: 1 }];
     card("T13");
-    workflow("T13", "codex", "security");
-    expect(await offer("T13", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
+    workflow("T13", "claude", "security");
+    expect(await offer("T13", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("security") });
     card("T14");
     db.run("UPDATE tasks SET stage = 'build', headSHA = NULL WHERE id = 'T14'");
     expect(await offer("T14", "--family", "claude")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("只借 Codex") });
