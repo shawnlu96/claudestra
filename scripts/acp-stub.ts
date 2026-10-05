@@ -7,7 +7,8 @@
  *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复），
  *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
  *   [stub:call:<工具>:<base64url 的 JSON 参数>] = 先调这个 MCP 工具、结果写进回复（T96 派单工具实测，可写多个，按顺序调）；
- *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
+ *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）；STUB_INITIALIZE=<JSON> = 按 JSON merge patch 改 initialize 回包
+ *   （null 删键：{"protocolVersion":2}、{"protocolVersion":null} 测协议不兼容，{"_meta":{"steering":null}} 测可选能力降级，见 lib/acp/protocol.ts）。
  * - /compact：见 compact()，照 codex-acp 2.1.1 的形状（docs/runtimes/codex-acp.md「压缩完成信号」）。
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
@@ -15,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ACP_PROTOCOL_VERSION } from "../src/lib/acp/protocol.ts";
 
 type Rec = Record<string, any>;
 const out = (m: Rec) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
@@ -40,6 +42,14 @@ const requestHost = (method: string, params: Rec) => new Promise<Rec>((resolve) 
   out({ id, method, params });
 });
 
+/** RFC 7386 JSON merge patch：对象逐键合并，null 删键，其它值整个替换（STUB_INITIALIZE 用） */
+function mergePatch(base: unknown, patch: unknown): unknown {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
+  const out: Rec = base && typeof base === "object" && !Array.isArray(base) ? { ...base } : {};
+  for (const [k, v] of Object.entries(patch)) if (v === null) delete out[k]; else out[k] = mergePatch(out[k], v);
+  return out;
+}
+
 const update = (u: Rec) => out({ method: "session/update", params: { sessionId, update: u } });
 const status = (type: string) => update({ sessionUpdate: "session_info_update", _meta: { codex: { threadStatus: { type, ...(type === "active" ? { activeFlags: [] } : {}) } } } });
 
@@ -52,7 +62,7 @@ async function startMcp(): Promise<void> {
   const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
   for (const k of (s.env_vars ?? []) as string[]) if (process.env[k] !== undefined) env[k] = process.env[k]!;
   // 测试 / 沙箱标记和目录照带（CLAUDESTRA_*：状态 / 运行目录、沙箱开关、测试标记）：真 Codex 只给 env_vars 白名单，但 stub 起的
-  // channel-server 丢了它们就会按生产规则跑（lib/test-guard.ts、沙箱闸）。stub 自己不引 src/lib：沙箱闸会在加载时查 bridge 地址
+  // channel-server 丢了它们就会按生产规则跑（lib/test-guard.ts、沙箱闸）。stub 只引零依赖的 lib/acp/protocol.ts：别的 src/lib 模块会在加载时过沙箱闸、查 bridge 地址
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && (k.startsWith("CLAUDESTRA_") || k === "NODE_ENV" || k === "TMPDIR")) env[k] ??= v;
   const client = new Client({ name: "acp-stub", version: "1" });
   await client.connect(new StdioClientTransport({ command: s.command, args: s.args ?? [], env, stderr: "ignore" }));
@@ -196,12 +206,12 @@ async function handle(m: Rec): Promise<Rec | undefined> {
     case "initialize":
       compaction = p.clientCapabilities?.session?.compaction != null;
       air = Array.isArray(p.clientCapabilities?._meta?.jetbrains?.air?.capabilities) && p.clientCapabilities._meta.jetbrains.air.capabilities.includes("sessionFailure");
-      return {
-        protocolVersion: 1,
+      return mergePatch({
+        protocolVersion: ACP_PROTOCOL_VERSION,
         agentInfo: { name: "acp-stub", version: "0" },
         agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {}, fork: {} } },
         _meta: { steering: { supported: true } },
-      };
+      }, JSON.parse(process.env.STUB_INITIALIZE || "{}")) as Rec;
     case "session/new":
       sessionId = randomUUID();
       return { sessionId, configOptions: config };

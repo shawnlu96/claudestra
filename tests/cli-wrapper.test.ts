@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { spawnSync } from "child_process";
 import { cliWrapperScript } from "../src/lib/cli-install";
+import { testChildEnv } from "./test-env.ts";
 
 const script = cliWrapperScript("/opt/claudestra");
 
@@ -49,4 +50,52 @@ test("相对路径参数转绝对：. 与 ./x 换成调用者目录下的绝对�
   const r = spawnSync("bash", ["-s", "--", "create", "demo", ".", "./sub", "purpose text"], { input: probe, encoding: "utf8", cwd: dir });
   const real = require("fs").realpathSync(dir);
   expect(r.stdout.trim().split("\n")).toEqual(["create", "demo", real, `${real}/sub`, "purpose text"]);
+});
+
+// 脚本生成抽到 src/lib/cli-wrapper.ts：cli-install 原名 re-export，旧入口和新模块是同一个函数 / 同一份 DAEMONS
+test("cli-install 旧入口与 cli-wrapper 新模块等价：同一函数、同一 DAEMONS，路径矩阵输出逐字节一致", async () => {
+  const oldMod = await import("../src/lib/cli-install");
+  const newMod = await import("../src/lib/cli-wrapper");
+  expect(oldMod.cliWrapperScript).toBe(newMod.cliWrapperScript);
+  expect(oldMod.DAEMONS).toBe(newMod.DAEMONS);
+  const matrix: Array<[string, string | undefined]> = [
+    ["/opt/claudestra", undefined],
+    ["/Users/a b/my repo", "/Users/a b/.bun/bin/bun"],
+    ["/opt/claudestra", "/opt/bun/bin/bun"],
+  ];
+  for (const [repo, bun] of matrix) {
+    const a = bun === undefined ? oldMod.cliWrapperScript(repo) : oldMod.cliWrapperScript(repo, bun);
+    const b = bun === undefined ? newMod.cliWrapperScript(repo) : newMod.cliWrapperScript(repo, bun);
+    expect(Buffer.from(a).equals(Buffer.from(b))).toBe(true);
+    expect(a).toContain(`REPO=${JSON.stringify(repo)}\n`);
+    expect(a).toContain(`BUN=${JSON.stringify(bun ?? "bun")}\n`);
+    expect(a).toContain(`DAEMONS=(${newMod.DAEMONS.map((d) => `"${d.label}"`).join(" ")})\n`);
+    expect(spawnSync("bash", ["-n"], { input: a, encoding: "utf8" }).status).toBe(0);
+  }
+});
+
+// 临时沙箱里真跑 wrapper：HOME/TMPDIR 指向临时目录，BUN 换成打印参数的桩，只走 relay 分支（不碰 launchctl / tmux）
+test("wrapper smoke：带空格的仓库路径与 Bun 路径下 relay 分支在仓库目录里调到 BUN", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const root = fs.mkdtempSync(path.join(require("os").tmpdir(), "cliw smoke-"));
+  const repo = path.join(root, "my repo");
+  const bunDir = path.join(root, "bun bin");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(bunDir);
+  const bun = path.join(bunDir, "bun");
+  fs.writeFileSync(bun, '#!/bin/sh\npwd -P\nfor a in "$@"; do echo "$a"; done\n', { mode: 0o755 });
+  const env = testChildEnv({ PATH: "/usr/bin:/bin", HOME: root, TMPDIR: root });
+  try {
+    const r = spawnSync("bash", ["-s", "--", "relay", "--json"], { input: cliWrapperScript(repo, bun), encoding: "utf8", cwd: root, env });
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim().split("\n")).toEqual([fs.realpathSync(repo), "run", "src/manager.ts", "relay-status", "--json"]);
+    const refused = spawnSync("bash", ["-s", "--", "relay"], { input: cliWrapperScript(repo, bun), encoding: "utf8", cwd: root, env: { ...env, CLAUDESTRA_SANDBOX: "1" } });
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toContain("CLAUDESTRA_SANDBOX=1");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
