@@ -68,7 +68,7 @@ export interface BgTaskView {
   /** shell 的进度另可带 unreadable（bridge 读不到输出文件，lib/chat/stream-shape.ts bgTaskProgressOf） */
   progress?: BgProgress & { unreadable?: boolean };
   endStatus?: BgEndStatus;
-  /** shell 才有：读到退出行后的结局（退出码），规则见 bg-shell-state.ts */
+  /** shell 才有：读到退出行 / [killed] 后的结局（退出码 / 已停止），规则见 bg-shell-state.ts */
   shellEnd?: BgShellEnd;
   /** shell 才有：bridge 已不再跟踪（快照缺失 / 文件消失），但没证据说它结束了 → 留在运行组显示状态未知 */
   shellUntracked?: boolean;
