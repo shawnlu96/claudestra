@@ -1599,14 +1599,14 @@ discord.on("channelDelete", async (channel) => {
 // ============================================================
 
 // /clear 后的会话轮转收尾（运行时在模块里按频道推导，bridge/clear-rotation.ts）
-const scheduleClearRotation = createClearRotation({
-  clientRuntime: (cid) => clients.get(cid)?.runtime,
+const rotationDeps = {
   runManager,
-  rewatch: (name, cwd, sid, cid, runtime) => {
+  rewatch: (name: string, cwd: string, sid: string, cid: string, runtime: string | undefined) => {
     stopWatchingByChannel(cid);
     startWatching(name, cwd, sid, cid, discord, { runtime });
   },
-});
+};
+const scheduleClearRotation = createClearRotation({ clientRuntime: (cid) => clients.get(cid)?.runtime, ...rotationDeps });
 
 registerInteractionHandlers(discord, {
   allowedDiscordIds,
@@ -2660,7 +2660,7 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean; acpDeliveryWarning?: boolean };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean; acpDeliveryWarning?: boolean; sessionId?: string };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
@@ -2711,7 +2711,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done", ...(bgPending ? { bgPending: true } : {}) } });
         // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
-        void maybeHealRotatedSession(channelId, { runManager, discord });
+        void maybeHealRotatedSession(channelId, body.sessionId, rotationDeps);
         // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
         const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent, afterAbort); // 叫停中止引起的 Stop 不清送达记录（⏹ 抬头要列）
         if (cutNotice) heldLocalMsgs.holdEnv(cutNotice);
