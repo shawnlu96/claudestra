@@ -36,7 +36,7 @@ function books(queue: Waiter[]) {
   return { b, sent, droppedReqs, touched };
 }
 const item = (from: Record<string, unknown>) =>
-  ({ id: "q1", agent: "dev", regName: "agent-dev", env: { from, meta: { messageId: "q1", threadId: "th-orig" } } as unknown as Envelope, to: { channelId: "ch1" } });
+  ({ id: "q1", agent: "dev", regName: "agent-dev", env: { from, intent: "request", meta: { messageId: "q1", threadId: "th-orig" } } as unknown as Envelope, to: { channelId: "ch1" } });
 
 describe("settleGuardDropped", () => {
   test("API 等待：挂在这条上的结掉（reply 是说明、error=guard_dropped），别的留着", () => {
@@ -76,6 +76,14 @@ describe("settleGuardDropped", () => {
     expect(touched).toEqual(["ch1:q1"]);
     settleGuardReleased(item({ kind: "api", tokenId: "guest:1" }), b, 6);
     expect(b.apiQueues.get("guest:1|ch1")).toHaveLength(1); // 已经挂着就不重复补
+    expect(b.apiQueues.get("guest:1|ch1")![0].ts).toBe(6); // 续期：隔离的时间不算在 2 h 里
+  });
+  test("第三轮：卡片答复（intent=response）本来没有等待，放行时不补登，免得抢走真正请求的答复", () => {
+    const { b, touched } = books([]);
+    const resp = { ...item({ kind: "api", tokenId: "guest:1" }), env: { ...item({ kind: "api", tokenId: "guest:1" }).env, intent: "response" } as Envelope };
+    settleGuardReleased(resp, b, 5);
+    expect(b.apiQueues.size).toBe(0);
+    expect(touched).toEqual(["ch1:q1"]);
   });
 });
 

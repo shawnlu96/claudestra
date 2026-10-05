@@ -73,9 +73,11 @@ export function settleGuardDropped(item: Item, books: GuardDroppedBooks, now = D
   });
 }
 
+/** 只给原本就是 API 请求（intent=request）的补登：卡片答复等 response 本来没有等待，凭空补一个会抢走真正请求的答复 */
 export function settleGuardReleased(item: Item, books: GuardDroppedBooks, now = Date.now()): void {
-  const api = apiFrom(item.env);
+  const api = item.env.intent === "request" ? apiFrom(item.env) : null;
   const threadId = item.env.meta.threadId;
+  for (const q of books.apiQueues.values()) for (const w of q) if (w.messageId === item.id) w.ts = now; // 已有的等待续期：隔离的时间不算在 2 h 里
   if (api && threadId && !hasWaiter(books, item.id)) {
     const key = books.reqKey(api.tokenId, item.to.channelId);
     const entry: ApiWaiterLike = {

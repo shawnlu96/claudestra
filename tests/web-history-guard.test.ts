@@ -67,6 +67,14 @@ describe("mergeGuardRecords", () => {
     const stranger = rec({ id: "q8", status: "released", fromId: "guest:7", from: "stranger", actedAt: "2026-09-28T10:03:00Z" });
     expect(mergeGuardRecords(hist, [stranger], self, { newest: true }).some((x) => x.guard)).toBe(false);
   });
+  test("长消息：守门记录只剩以「…」结尾的摘要，按开头对上照样打「已放行」（Codex 第三轮复审）", () => {
+    const long = "长".repeat(3000);
+    const hist = [...base, m("big", "2026-09-28T10:03:00Z", long)];
+    const r = rec({ id: "q9", status: "released", text: `${long.slice(0, 2000)}…`, actedAt: "2026-09-28T10:03:00Z" });
+    expect(mergeGuardRecords(hist, [r], self, { newest: true }).find((x) => x.id === "big")).toMatchObject({ guard: "released" });
+    const other = [...base, m("diff", "2026-09-28T10:03:00Z", "别".repeat(3000))];
+    expect(mergeGuardRecords(other, [r], self, { newest: true }).some((x) => x.guard)).toBe(false);
+  });
   test("空页不合（差量页常为空，合了会被追加到列表末尾）", () => {
     expect(mergeGuardRecords([], [rec({ id: "q0", status: "dropped" })], self, { newest: true })).toEqual([]);
   });

@@ -3,7 +3,7 @@
  * 判「拦」就进隔离区（guard-quarantine.json，PersistedMap，bridge 重启不丢），发 chat_guard 事件给 manage 设备、推送给 owner，
  * 对投递方返回 outcome.note="guarded"。放行 = 原信封打 meta.guard="released" 走 deliverToLocal 原路（跳过守门，ts / messageId 不变）。
  * Jev 没配 → 不生效；Jev 挂了 → fail-open（照投 + 记日志）；超长的不送 Jev，直接隔离。规则本体在 lib/chat-guard.ts。
- * 判定中 / 隔离中 / 放行中的消息都还没送到 agent（guardUnseenIds / guardUnseenFrom）：回合结算把它们当「押后」跳过。
+ * 投递中（排队 + 判定 + 投出去之前）/ 隔离中 / 放行中的消息都还没送到 agent（guardUnseenIds / guardUnseenFrom）：回合结算与回复认领都跳过。
  */
 import { appendFileSync, chmodSync, existsSync, renameSync, statSync } from "node:fs";
 import { CONFIG_PATH, readConfig } from "../lib/config-store.js";
@@ -174,6 +174,20 @@ async function judge(subject: GuardSubject, t: GuardThresholds, logBase: Record<
 /** 正在等 Jev 判定的消息（还没送到 agent，也还没进隔离区）：messageId → 目标频道与来源 */
 const judging = new Map<string, { channelId: string; fromKind: string; fromChannelId?: string }>();
 const fromChannelOf = (env: Envelope): string | undefined => (env.from.kind === "local" ? env.from.channelId : undefined);
+/** 正在投递的（bridge.ts deliverLocalInOrder 从排队起到投完）：排在一条正等 Jev 的消息后面时可能要等十几秒，这段时间它也没到 agent 手上 */
+const inflight = new Map<string, { channelId: string; fromKind: string; fromChannelId?: string; n: number }>();
+export async function trackGuardInflight<T>(env: Envelope, channelId: string, run: () => Promise<T>): Promise<T> {
+  const id = env.meta.messageId;
+  const cur = inflight.get(id);
+  inflight.set(id, { channelId, fromKind: env.from.kind, fromChannelId: fromChannelOf(env), n: (cur?.n ?? 0) + 1 });
+  try {
+    return await run();
+  } finally {
+    const e = inflight.get(id);
+    if (e && e.n > 1) e.n--;
+    else inflight.delete(id);
+  }
+}
 
 /** null = 放行（照常投递）；返回 Delivery = 已隔离，调用方直接把它当结果 */
 export async function guardInbound(env: Envelope, to: LocalEndpoint): Promise<Delivery | null> {
@@ -219,7 +233,7 @@ function emitGuard(item: QuarantineItem, action: "quarantined" | "released" | "d
 }
 
 function quarantine(item: QuarantineItem): void {
-  const tooLarge = item.env.content.length > MAX_ITEM_CHARS;
+  const tooLarge = sizeOf(item) > MAX_ITEM_CHARS;
   deps.store.set(item.id, tooLarge ? slim(acted(item, "dropped", "too_large")) : item);
   sweepQuarantine();
   const top = item.decision.hits.find((h) => h.verdict === "block");
@@ -239,10 +253,12 @@ export function listQuarantine(agent?: string, all = false): QuarantineItem[] {
 }
 
 type Unseen = { fromKind: string; fromChannelId?: string; messageId: string };
-/** 这个频道还没送到 agent 手上的：判定中、隔离中、放行中（认领了、还没投出去） */
+/** 这个频道还没送到 agent 手上的：投递中、判定中、隔离中、放行中（认领了、还没投出去） */
 function unseenIn(channelId: string): Unseen[] {
   const out: Unseen[] = [];
-  for (const [messageId, j] of judging) if (j.channelId === channelId) out.push({ fromKind: j.fromKind, fromChannelId: j.fromChannelId, messageId });
+  for (const [messageId, j] of [...inflight, ...judging]) {
+    if (j.channelId === channelId && !out.some((u) => u.messageId === messageId)) out.push({ fromKind: j.fromKind, fromChannelId: j.fromChannelId, messageId });
+  }
   for (const i of deps.store.values()) {
     if ((i.status === "pending" || i.status === "releasing") && i.to.channelId === channelId) out.push({ fromKind: i.env.from.kind, fromChannelId: fromChannelOf(i.env), messageId: i.id });
   }
@@ -258,13 +274,15 @@ const releasing = new Set<string>();
 const doneAt = (i: QuarantineItem): number => Date.parse(i.actedAt ?? i.at);
 const isDone = (i: QuarantineItem): boolean => i.status === "released" || i.status === "dropped";
 
+/** 一条记录里的正文体积：正文 + 卡片答复回显（askEcho 另存了一份） */
+const sizeOf = (i: QuarantineItem): number => i.env.content.length + (i.env.meta.askEcho?.echo.length ?? 0) + (i.env.meta.askEcho?.wire?.length ?? 0);
 /** pending 里该按 overflow 丢的：条数或正文合计超限时从最早的开始丢 */
 function overflowIds(items: QuarantineItem[]): Set<string> {
   const pending = items.filter((i) => i.status === "pending").sort((a, b) => b.at.localeCompare(a.at));
   const out = new Set<string>();
   let chars = 0;
   pending.forEach((i, n) => {
-    chars += i.env.content.length;
+    chars += sizeOf(i);
     if (n >= MAX_PENDING || chars > MAX_PENDING_CHARS) out.add(i.id);
   });
   return out;
@@ -280,10 +298,12 @@ function sweepQuarantine(): void {
     if (i.status === "pending" && (overflow.has(i.id) || Date.parse(i.at) < now - QUARANTINE_TTL_MS)) changed.push(slim(acted(i, "dropped", overflow.has(i.id) ? "overflow" : "timeout")));
     else if (i.status === "releasing" && !releasing.has(i.id)) changed.push(slim(acted(i, "released", "interrupted")));
   }
+  // 早先版本存下的终态没截过：补成摘要（不再广播）
+  const legacy = items.filter((i) => isDone(i) && !changed.some((c) => c.id === i.id) && sizeOf(i) > DONE_TEXT_CHARS + 1).map(slim);
   const done = [...items.filter((i) => isDone(i) && !changed.some((c) => c.id === i.id)), ...changed].sort((a, b) => doneAt(b) - doneAt(a));
   const deletes = done.filter((i, n) => n >= MAX_DONE || doneAt(i) < now - RETAIN_DONE_MS).map((i) => i.id);
-  if (!changed.length && !deletes.length) return;
-  deps.store.update(changed.map((i) => [i.id, i]), deletes);
+  if (!changed.length && !deletes.length && !legacy.length) return;
+  deps.store.update([...changed, ...legacy.filter((i) => !deletes.includes(i.id))].map((i) => [i.id, i]), deletes);
   for (const i of changed) announce(i);
 }
 
@@ -292,7 +312,7 @@ const acted = (item: QuarantineItem, status: "released" | "dropped", by: string)
 /** 终态只留摘要：历史视图要的是开头和发送方，全文留着只是占地方、多存敏感内容 */
 const slim = (i: QuarantineItem): QuarantineItem => ({
   ...i,
-  env: { ...i.env, content: previewText(i.env.content, DONE_TEXT_CHARS) },
+  env: { ...i.env, content: previewText(i.env.content, DONE_TEXT_CHARS), meta: { ...i.env.meta, askEcho: undefined } },
   subject: { ...i.subject, text: previewText(i.subject.text, DONE_TEXT_CHARS), recent: undefined },
 });
 
@@ -324,13 +344,14 @@ export async function releaseQuarantined(id: string, by: string): Promise<{ ok: 
   }
   try {
     const env: Envelope = { ...item.env, meta: { ...item.env.meta, guard: "released" } };
-    const r = await deps.deliverLocal(env, { ...item.to, ws: c.ws, cwd: c.cwd }).catch((e: unknown) => ({ outcome: { kind: "error" as const, error: e as Error } }));
+    const r = await deps.deliverLocal(env, { ...item.to, ws: c.ws, cwd: c.cwd }).catch((e: unknown): Delivery => ({ envelope: env, outcome: { kind: "error", error: e as Error } }));
     const error = r.outcome.kind === "error" ? r.outcome.error.message : r.outcome.kind === "dropped" ? r.outcome.reason : null;
     if (error !== null) {
       deps.store.set(id, item); // 没投出去（返回失败或抛异常）：退回 pending，可以再放
       return { ok: false, error };
     }
-    deps.onReleased(item);
+    // PM 换了人时实际收件的是新 PM：回程补登 / 送达计时都按实际目标走（local-api/project-pm-delivery.ts）
+    deps.onReleased(r.envelope.to.kind === "local" ? { ...item, to: r.envelope.to } : item);
     finish(item, "released", by);
     return { ok: true };
   } finally {

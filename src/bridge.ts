@@ -573,7 +573,7 @@ import {
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
-import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds } from "./bridge/chat-guard.js";
+import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
 import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
@@ -710,7 +710,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key) ?? [];
   const claim = claimApiReply(queue, apiThreadResults, { ...to, channelId: fromChannelId, inReplyTo: env.meta.inReplyTo, replyTo: env.meta.replyTo,
-    unseen: new Set(heldFromOf(fromChannelId)?.map((i) => i.messageId)) });
+    unseen: new Set(heldFromOf(fromChannelId)?.map((i) => i.messageId)), blocked: new Set(guardUnseenIds(fromChannelId)) });
   if (!queue.length) pendingApiRequests.delete(key);
   if (claim.error) return { envelope: env, outcome: { kind: "error", error: new Error(claim.error) } };
   const pending = claim.taken, threadId = pending?.threadId || claim.threadId || env.meta.threadId;
@@ -812,8 +812,9 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  return deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
-    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted)));
+  // 从排队起到投完都算没送到（排在一条正等 Jev 的消息后面时可能要等十几秒）：别的回合结束不能结它（bridge/chat-guard.ts）
+  return trackGuardInflight(env, to.channelId, () => deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
+    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted))));
 }
 
 /** 只经 deliverLocalInOrder 调用 */

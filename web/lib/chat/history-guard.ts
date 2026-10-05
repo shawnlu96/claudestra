@@ -8,6 +8,8 @@ import type { GuardItem } from "@/lib/api/guard";
  * - pending 不管（待放行卡在输入框上方）。只合并落在本页时间范围内的记录（newest 页范围上不封顶）。
  */
 const RELEASE_WINDOW_MS = 10 * 60_000;
+/** 守门记录处理完只留开头的摘要（以「…」结尾）：摘要对得上开头就算同一条，长消息放行后的标记才不会丢 */
+const sameText = (full: string, rec: string): boolean => full === rec || (rec.endsWith("…") && full.length >= rec.length && full.startsWith(rec.slice(0, -1)));
 
 export function mergeGuardRecords(messages: ChatMessage[], records: GuardItem[], selfIds: ReadonlySet<string>, opts: { newest?: boolean } = {}): ChatMessage[] {
   // 空页没有时间锚点：差量 / 翻页拿到 0 条时什么都不合（曾把全部 dropped 记录塞进空的差量页，再被追加到列表末尾）
@@ -39,7 +41,7 @@ export function mergeGuardRecords(messages: ChatMessage[], records: GuardItem[],
       out.forEach((m, i) => {
         // 同一发送方：本人发的不带 from；别人发的 from 要对上记录里的发送方（否则 owner 同文的一条会被标成「放行过」）
         const sameSender = isSelf ? !m.from : m.from === r.from;
-        if (m.role !== "user" || m.guard || taken.has(m.id) || m.content !== r.text || !sameSender) return;
+        if (m.role !== "user" || m.guard || taken.has(m.id) || !sameText(m.content, r.text) || !sameSender) return;
         const d = Math.abs(Date.parse(m.ts ?? "") - acted);
         if (d <= RELEASE_WINDOW_MS && d < best) { best = d; idx = i; }
       });

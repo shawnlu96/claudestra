@@ -97,14 +97,14 @@ export function judge(answers, probes, env): GuardDecision;   // 汇总：任一
 3. owner 自己的消息也判（手机丢了的场景）——是。是否要给 owner 本机回环入口豁免？（建议不豁免，统一规则）
 4. 放行权限只给 manage 凭据——是。
 
-## 7. 加固（2026-10-05 Codex 对抗审查 14 条 + 复审）
+## 7. 加固（2026-10-05 Codex 对抗审查 14 条 + 两轮复审）
 
 回归测试在 `tests/chat-guard-hardening.test.ts`、`tests/guard-dropped.test.ts`、`tests/web-guard-marks.test.ts`，以及 `tests/chat-guard.test.ts`、`tests/web-history-guard.test.ts` 的新增用例。
 
-- **没送到就不结算**：判定中（等 Jev）、隔离中、放行中（已认领、还没投出去）的消息，在回合结算和回程簿里都按「押后」处理（`guardUnseenIds` / `guardUnseenFrom` 并进 `bridge.ts` 的 held 集合），别的回合的回复不会结给它们。
+- **没送到就不结算**：投递中（`deliverLocalInOrder` 从排队起到投完，`trackGuardInflight`）、判定中（等 Jev）、隔离中、放行中（已认领、还没投出去）的消息，在回合结算和回程簿里都按「押后」处理（`guardUnseenIds` / `guardUnseenFrom` 并进 `bridge.ts` 的 held 集合），别的回合的回复不会结给它们。agent 发往 `api:<token>` 的回复认领（`claimApiReply` 的 `blocked`）也不会落到这些消息上，退回最早一条和 reply_to 都不认。
 - **发件方的等待**：消息接口遇到隔离立即回 `202 { guarded: true, messageId }`，不再干等。
   - 丢弃（人工 / 24 h 超时 / 溢出 / 太大）时，`bridge/guard-dropped.ts` 结掉挂着的 API 等待（`error: "guard_dropped"`）。等待已经过期或 bridge 重启过的，也给原线程写上终态。同时撤掉 send_to_agent 回程槽，通知发件 agent。
-  - 放行时，等待已经没了就按原 threadId 补登，并重置回程簿的送达计时。
+  - 放行时，原本是请求（intent=request）而等待已经没了的，按原 threadId、按实际投递目标（PM 换人时是新 PM）补登；已有的等待续期；回程簿重置送达计时。卡片答复等 response 不补登。
 - **不按正文免检**：网页 / API 的 `[button:…]` 回投只是正文，谁都打得出来，一律照判。只有 Discord 原生按钮事件（`triggerKind=button`）免检。
 - **按 channelId 认会话**：Discord 入站信封不带 agentName，开关按 registry 的 channelId 查（`pickGuardAgent`）。
 - **判定**：
@@ -120,13 +120,18 @@ export function judge(answers, probes, env): GuardDecision;   // 汇总：任一
 - **存储有界**：每 10 分钟清扫一次。
   - pending 最多 200 条、正文合计 200 万字，超出时从最早的开始按 overflow 丢弃。
   - 单条超过 20 万字的不进隔离区，直接按 too_large 丢弃。
-  - 放行 / 丢弃后的记录只留 2000 字摘要，最多 500 条、30 天。
+  - 放行 / 丢弃后的记录只留 2000 字摘要（卡片答复的回显 askEcho 也清掉），最多 500 条、30 天；早先存下的整条终态在清扫时补成摘要。
   - 一批改动只落一次盘。日志超过 5 MB 转存为 `.1`。
 - **可见性**：
   - `chat_guard` 事件只发给 manage 凭据，且只带 120 字预览。待放行卡收到事件后，去管理接口取全文，取到之前不能放行。
   - 发件凭据自己另收不带正文的 `chat_guard_status`，用来更新自己气泡的状态。
   - 网页按 messageId 打标（`guard-marks.ts`），事件和回执谁先到都不会标错。迟到的回执只在还停在原会话、还没收到输出时才解锁。
-  - 历史里的放行标记要求发送方对得上。
+  - 历史里的放行标记要求发送方对得上；记录只剩摘要时按开头匹配。迟到的回执只在本端最后一条发送就是它时才解锁。
 - **斜杠命令**：网页直通和 Discord 斜杠的参数都过守门，内置命令也判（`/goal` `/plan` `/btw` 的参数会进模型上下文）。判「拦」就拒绝注入，不进隔离区。
 - **文件权限**：隔离区、守门日志（含 `.1`）、`config.json` 都以 0600 写入；早先建的 0644 文件在 bridge 启动时收紧。
-- **已知局限**：历史里的放行标记仍按发送方显示名 + 正文 + 时间匹配（历史记录里没有 messageId）。同名的不同凭据、同一人反复发同一句时，可能标到相邻的那条上。
+- **已知局限**：
+  - 历史里的放行标记仍按发送方显示名 + 正文 + 时间匹配（历史记录里没有 messageId）。同名的不同凭据、同一人反复发同一句时，可能标到相邻的那条上。
+  - peer 那一侧自己最多轮询 2 小时（对方实例的协议）：隔离超过 2 小时才放行的，对方可能已经不等了；答复仍会按原线程记下。
+  - API 的线程结果与等待只在内存里：放行 / 丢弃处理完之后 bridge 再重启，原线程的结果拿不回来（与守门无关的老限制）。
+  - 放行到一半 bridge 退出的，重启后按「已放行」收尾但不补登回程（不知道到底投没投出去，宁可不登）。
+  - 消息已经发进 agent 的连接、投递函数还没返回的几毫秒内，它仍算「没送到」：agent 不可能在这么短的时间里答复，影响可忽略。
