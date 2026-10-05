@@ -6,13 +6,18 @@ import { Probe } from "../scripts/codex-probe.ts";
 
 /**
  * 假 app-server：回 initialize（userAgent 里带版本号），并起一个**独立进程组**、忽略 SIGTERM 和 EOF 的孙进程
- * （和 Q0-6 里实测的 MCP server 一样不在 app-server 的组里），把它的 pid 写进 cwd。收到 EOF 自己退出，孙进程变孤儿。
+ * （和 Q0-6 里实测的 MCP server 一样不在 app-server 的组里），把它的 pid 写进 cwd。
+ * 普通模式收到 EOF 立刻退出，孙进程变孤儿。LATE 模式收到 EOF 后才再派生一个同样的孙进程（late.pid），
+ * 900ms 后才退出：模拟收尾宽限期里冒出来的后代（审查第 2 轮的复现方式）。
  */
-const FAKE_APP_SERVER = `
+const FAKE_APP_SERVER = (late: boolean) => `
 const fs = require("node:fs");
 const cp = require("node:child_process");
-const g = cp.spawn(process.execPath, ["-e", "for (const s of ['SIGTERM','SIGHUP','SIGINT']) process.on(s, () => {}); setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
-fs.writeFileSync("grandchild.pid", String(g.pid));
+const stray = (file) => {
+  const g = cp.spawn(process.execPath, ["-e", "for (const s of ['SIGTERM','SIGHUP','SIGINT']) process.on(s, () => {}); setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  fs.writeFileSync(file, String(g.pid));
+};
+stray("grandchild.pid");
 let buf = "";
 process.stdin.on("data", (c) => {
   buf += c;
@@ -23,7 +28,11 @@ process.stdin.on("data", (c) => {
     if (m.id !== undefined) process.stdout.write(JSON.stringify({ id: m.id, result: { userAgent: "fake-probe/9.9.9 (test)" } }) + "\\n");
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+  if (!${late}) process.exit(0);
+  stray("late.pid");
+  setTimeout(() => process.exit(0), 900);
+});
 `;
 
 const alive = (pid: number): boolean => {
@@ -44,12 +53,12 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
-function setup(): { out: string; bin: string } {
+function setup(late = false): { out: string; bin: string } {
   // probe 拒绝带软链的路径；macOS 的 tmpdir 在 /var → /private/var 软链下面，先取 realpath
   const root = mkdtempSync(join(realpathSync(tmpdir()), "codex-probe-test-"));
   roots.push(root);
   const bin = join(root, "fake-codex");
-  writeFileSync(bin, `#!${process.execPath}\n${FAKE_APP_SERVER}`);
+  writeFileSync(bin, `#!${process.execPath}\n${FAKE_APP_SERVER(late)}`);
   chmodSync(bin, 0o755);
   return { out: root, bin };
 }
@@ -73,6 +82,21 @@ describe("codex-probe 收尾", () => {
     expect(gpid).toBeGreaterThan(0);
     expect(alive(gpid)).toBe(false);
     expect(JSON.parse(readFileSync(join(p.dir, "result.json"), "utf8")).error).toContain("scenario blew up mid-way");
+  }, 20_000);
+
+  test("收尾宽限期里（EOF 之后）才冒出来的独立进程组后代也会被登记并清掉", async () => {
+    const { out, bin } = setup(true);
+    const p = new Probe("late", out, bin);
+    try {
+      await p.start(quick);
+      strays.push(Number(readFileSync(join(p.work, "grandchild.pid"), "utf8")));
+    } finally {
+      await p.finish({});
+    }
+    const late = Number(readFileSync(join(p.work, "late.pid"), "utf8"));
+    strays.push(late);
+    expect(late).toBeGreaterThan(0);
+    expect(alive(late)).toBe(false);
   }, 20_000);
 
   test("启动前就拒跑（CODEX_HOME 里有 auth.json）：finish 不再抛第二个错，拒跑原因写进 result.json", async () => {

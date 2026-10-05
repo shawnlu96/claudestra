@@ -34,19 +34,12 @@ export interface ProbeOptions {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-type PsRow = { pid: number; ppid: number; pgid: number; comm: string };
+/** start 是 ps 的 lstart（秒级启动时间），和 pid 一起认「还是不是当初那个进程」 */
+type PsRow = { pid: number; ppid: number; pgid: number; start: string; comm: string };
 type Subprocess = ReturnType<typeof Bun.spawn>;
-/** 运行期间扫后代的间隔：比这还短命的后代可能漏登记（只在收尾前那次扫描里还活着才抓得到） */
+/** 运行期间扫后代的间隔；收尾宽限期里改成每 GRACE_POLL_MS 扫一次。两次扫描之间就脱离 app-server 的后代抓不到 */
 const SCAN_MS = 500;
-
-async function waitUntil(pred: () => boolean, ms: number): Promise<boolean> {
-  const end = Date.now() + ms;
-  while (!pred()) {
-    if (Date.now() > end) return false;
-    await sleep(20);
-  }
-  return true;
-}
+const GRACE_POLL_MS = 100;
 const REAL_HOME = userInfo().homedir;
 const FORBIDDEN_ROOTS = [join(REAL_HOME, ".codex"), stateDirIn(REAL_HOME), stateDir()];
 
@@ -336,11 +329,14 @@ export class Probe {
     }
   }
 
-  /** 把 app-server 的后代登记进 tracked：从 app-server 和已登记且仍是原进程的 pid 往下找 */
-  private scan(): void {
+  /**
+   * 把 app-server 的后代登记进 tracked：从 app-server（还没被回收时）和已登记且仍是原进程的 pid 往下找。
+   * app-server 回收后它的 pid 可能被别的进程复用，所以只在 exitedAt 为 null 时拿它当根
+   */
+  private scan(rows: PsRow[] = psSnapshot()): void {
     if (!this.child) return;
-    const rows = psSnapshot();
-    const roots = new Set([this.child.pid, ...this.liveTracked(rows).map((x) => x.pid)]);
+    const roots = new Set(this.liveTracked(rows).map((x) => x.pid));
+    if (this.exitedAt === null) roots.add(this.child.pid);
     for (let grew = true; grew; ) {
       grew = false;
       for (const x of rows) {
@@ -352,56 +348,85 @@ export class Probe {
     }
   }
 
-  /** 登记过、现在还活着、且 pgid 和命令名都没变（防 pid 复用）的后代 */
-  private liveTracked(rows = psSnapshot()): PsRow[] {
+  /**
+   * 登记过、现在还活着（不算僵尸）、启动时间没变（防 pid 复用）的后代，返回**当前**这一行：
+   * 登记之后才 setsid / exec 的进程 pgid、命令名会变，发信号要用现在的 pgid
+   */
+  private liveTracked(rows: PsRow[]): PsRow[] {
     const byPid = new Map(rows.map((x) => [x.pid, x]));
-    return [...this.tracked.values()].filter((t) => {
+    return [...this.tracked.values()].flatMap((t) => {
       const now = byPid.get(t.pid);
-      return !!now && now.pgid === t.pgid && now.comm === t.comm && now.comm !== "<defunct>";
+      return now && now.start === t.start && now.comm !== "<defunct>" ? [now] : [];
     });
   }
 
-  private survivors(): string[] {
-    const self = this.child && this.exitedAt === null ? [`${this.child.pid}:app-server`] : [];
-    return [...self, ...this.liveTracked().map((x) => `${x.pid}:${x.comm.split("/").pop()}`)];
+  /** 一次 ps：先补登记新冒出来的后代，再返回还活着的登记后代 */
+  private sweep(): PsRow[] {
+    const rows = psSnapshot();
+    this.scan(rows);
+    return this.liveTracked(rows);
   }
 
-  /** 对 app-server 的进程组，以及每个还活着的后代（它自己的进程组 + pid）发信号；不碰探针自己所在的组 */
-  private signalAll(sig: NodeJS.Signals, ownPgid: number | undefined): void {
+  private survivorsOf(live: PsRow[]): string[] {
+    const self = this.child && this.exitedAt === null ? [`${this.child.pid}:app-server`] : [];
+    return [...self, ...live.map((x) => `${x.pid}:${x.comm.split("/").pop()}`)];
+  }
+
+  /** 宽限期等待：每 GRACE_POLL_MS 补扫一次（新后代随时并入），done 成立或超时为止；返回最后一次扫到的存活后代 */
+  private async graceWait(done: (live: PsRow[]) => boolean, ms: number): Promise<PsRow[]> {
+    const end = Date.now() + ms;
+    for (;;) {
+      const live = this.sweep();
+      if (done(live) || Date.now() >= end) return live;
+      await sleep(GRACE_POLL_MS);
+    }
+  }
+
+  /** 对 app-server 的进程组，以及 live 里每个后代（它现在的进程组 + pid）发信号；不碰探针自己所在的组 */
+  private signalAll(sig: NodeJS.Signals, ownPgid: number | undefined, live: PsRow[]): void {
     if (this.child) this.kill(-this.child.pid, sig);
-    for (const x of this.liveTracked()) {
+    for (const x of live) {
       if (x.pgid > 1 && x.pgid !== ownPgid) this.kill(-x.pgid, sig);
       this.kill(x.pid, sig);
     }
   }
 
   /**
-   * 统一收尾（场景正常结束或中途抛错都走这里）：先登记一次后代 → EOF 等 2s → SIGTERM 等 1s → SIGKILL 等 1s。
-   * 每一步都覆盖 app-server 进程组和登记过的后代（MCP server、命令各在自己的进程组，Q0-6），返回每一步之后的存活者。
+   * 统一收尾（场景正常结束或中途抛错都走这里）：EOF 等 2s → SIGTERM 等 1s → SIGKILL 等 1s，最后再扫一次记存活者。
+   * 后台扫描一直开到收尾结束；每段等待里每 GRACE_POLL_MS 补扫一次，每次发信号前用的都是刚扫出来的集合，
+   * 所以宽限期里才冒出来的后代（EOF 之后才派生、改了进程组的）也会并进来。覆盖 app-server 进程组和全部登记后代（Q0-6）
    */
   async cleanup(): Promise<Record<string, unknown>> {
-    if (this.scanTimer) clearInterval(this.scanTimer);
-    this.scanTimer = null;
-    if (!this.child) return { spawned: false };
-    this.scan();
-    const tracked = [...this.tracked.values()].map((x) => `${x.pid}:${x.comm.split("/").pop()}:pgid=${x.pgid}`);
-    const ownPgid = psSnapshot().find((x) => x.pid === process.pid)?.pgid;
-    if (this.exitedAt === null) {
-      try {
-        (this.child.stdin as import("bun").FileSink).end();
-      } catch (e) {
-        // stdin 已经关了：照样往下走信号步骤
-        this.note(`收尾关 stdin：${(e as Error).message}`);
+    try {
+      if (!this.child) return { spawned: false };
+      const ownPgid = psSnapshot().find((x) => x.pid === process.pid)?.pgid;
+      this.sweep();
+      if (this.exitedAt === null) {
+        try {
+          (this.child.stdin as import("bun").FileSink).end();
+        } catch (e) {
+          // stdin 已经关了：照样往下走信号步骤
+          this.note(`收尾关 stdin：${(e as Error).message}`);
+        }
       }
-      await waitUntil(() => this.exitedAt !== null, 2_000);
+      const done = (live: PsRow[]) => this.survivorsOf(live).length === 0;
+      // EOF 之后要等的是 app-server 退出，后代的去留交给后面两步；等待期间照样补扫
+      let live = await this.graceWait(() => this.exitedAt !== null, 2_000);
+      live = this.sweep();
+      const afterEof = this.survivorsOf(live);
+      if (afterEof.length) this.signalAll("SIGTERM", ownPgid, live);
+      live = await this.graceWait(done, 1_000);
+      live = this.sweep();
+      const afterTerm = this.survivorsOf(live);
+      if (afterTerm.length) this.signalAll("SIGKILL", ownPgid, live);
+      await this.graceWait(done, 1_000);
+      const afterKill = this.survivorsOf(this.sweep());
+      const tracked = [...this.tracked.values()].map((x) => `${x.pid}:${x.comm.split("/").pop()}:pgid=${x.pgid}`);
+      return { spawned: true, tracked, afterEof, afterTerm, afterKill };
+    } finally {
+      if (this.scanTimer) clearInterval(this.scanTimer);
+      this.scanTimer = null;
     }
-    const afterEof = this.survivors();
-    if (afterEof.length) this.signalAll("SIGTERM", ownPgid);
-    await waitUntil(() => this.survivors().length === 0, 1_000);
-    const afterTerm = this.survivors();
-    if (afterTerm.length) this.signalAll("SIGKILL", ownPgid);
-    await waitUntil(() => this.survivors().length === 0, 1_000);
-    return { spawned: true, tracked, afterEof, afterTerm, afterKill: this.survivors() };
   }
 
   /** 先落 result.json（原始结果 / 错误绝不因收尾出错而丢），再收尾，收尾报告进 probe.json */
@@ -429,14 +454,14 @@ export function timeline(msgs: Msg[], from = 0): string[] {
     });
 }
 
-/** ps 快照：pid、ppid、pgid、命令名 */
+/** ps 快照：pid、ppid、pgid、启动时间（lstart，形如 "Mon Oct  5 17:23:01 2026"）、命令名 */
 export function psSnapshot(): PsRow[] {
-  const out = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid=,pgid=,comm="]).stdout.toString();
+  const out = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid=,pgid=,lstart=,comm="]).stdout.toString();
   return out
     .split("\n")
-    .map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/))
+    .map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s+(.*)$/))
     .filter((m): m is RegExpMatchArray => !!m)
-    .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), comm: m[4]! }));
+    .map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), start: m[4]!, comm: m[5]! }));
 }
 
 /** CODEX_HOME 下所有 rollout 文件的内容拼起来（Q0-1 查 steer 进没进 rollout） */

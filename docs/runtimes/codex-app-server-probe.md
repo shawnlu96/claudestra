@@ -29,8 +29,11 @@ bun scripts/codex-probe.ts --out <临时目录> [--only a,b] [--repeat N] [--cod
 - 记录到的外网访问（全套一次，均被拒，均不影响功能）：`chatgpt.com:443` 57 次、`github.com:443` 30 次、`api.github.com:443` 27 次。
 - app-server 用 `Bun.spawn({detached: true})` 起在自己的进程组。运行中每 500ms（以及场景主动 EOF / 发信号之前）用 `ps` 登记它的
   所有后代，包括改过进程组的 MCP server 和命令（Q0-6）。场景结束或中途抛错都走同一个收尾：先写 `result.json`，再
-  EOF 等 2s → 对 app-server 进程组和每个还活着的后代（各自的进程组 + pid）SIGTERM 等 1s → SIGKILL 等 1s，每步之后的存活者记进
-  `probe.json`。kill 前核对 pgid 和命令名防 pid 复用，不碰探针自己所在的组。活不到 500ms、又在收尾前就脱离 app-server 的后代不保证抓到。
+  EOF 等 2s → 对 app-server 进程组和每个还活着的后代（各自**当前**的进程组 + pid）SIGTERM 等 1s → SIGKILL 等 1s，最后再扫一次，
+  每步之后的存活者记进 `probe.json`。扫描一直持续到收尾结束：三段等待里每 100ms 补扫一次，每次发信号前用的都是刚扫出来的集合，
+  所以宽限期里才派生、改了进程组的后代也会并进来。按 pid + 启动时间（`ps lstart`）认进程防 pid 复用，不碰探针自己所在的组。
+  **已知上限**：存活时间短于扫描间隔（运行中 500ms、收尾时 100ms）、并且在两次扫描之间就脱离了 app-server（父进程退出、
+  它被过继给 launchd）的后代不保证抓到。
 
 ### 假 provider 的配置（0.159.3 实测）
 
