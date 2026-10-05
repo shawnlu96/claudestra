@@ -1,5 +1,5 @@
 import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js";
-import { ApiFileTable, serveApiFile } from "./api-files.js";
+import { ApiFileTable, peerFileOwner, serveApiFile, type FileOwner } from "./api-files.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
  *
@@ -126,7 +126,7 @@ export interface PendingApiRequest {
   tokenId: string;
   tokenName: string;
   agentChannelId: string;
-  agentName: string;
+  agentName: string; fileOwner?: FileOwner; // 请求那一刻钉住的 peer 指纹，回复登记附件时用（bridge/api-files.ts peerFileOwner）
   threadId: string;
   messageId?: string; waitUntil?: number; // messageId：reply_to / 作废回显的 inReplyTo 按它认领（lib/pending-reply-scope.ts claimApiReply）；waitUntil：同步等到几时
   siblingThreadId?: string; // 它等着时 agent 的回复记到了同一调用方的另一条（那条的 threadId）：Stop 兜底回「没单独答复」的说明，不回空（lib/pending-reply-scope.ts claimApiReply）
@@ -1007,7 +1007,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentName: agent.name,
       threadId,
       messageId: env.meta.messageId, waitUntil: waitSec > 0 ? Date.now() + waitSec * 1000 : undefined, // 投递前就标：停字的抢占在 deliver 里跑，resolve 这时还没挂（pi-abort holdStopWait）
-      ts: Date.now(), acceptsFiles,
+      ts: Date.now(), acceptsFiles, fileOwner: await peerFileOwner(principal),
     };
     const queue = pendingApiRequests.get(key) || [];
     queue.push(entry);
