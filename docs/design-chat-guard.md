@@ -97,15 +97,36 @@ export function judge(answers, probes, env): GuardDecision;   // 汇总：任一
 3. owner 自己的消息也判（手机丢了的场景）——是。是否要给 owner 本机回环入口豁免？（建议不豁免，统一规则）
 4. 放行权限只给 manage 凭据——是。
 
-## 7. 加固（2026-10-05 Codex 对抗审查，14 条全修）
+## 7. 加固（2026-10-05 Codex 对抗审查 14 条 + 复审）
 
-回归测试在 `tests/chat-guard-hardening.test.ts`、`tests/guard-dropped.test.ts`，以及 `tests/chat-guard.test.ts`、`tests/web-history-guard.test.ts` 的新增用例。
+回归测试在 `tests/chat-guard-hardening.test.ts`、`tests/guard-dropped.test.ts`、`tests/web-guard-marks.test.ts`，以及 `tests/chat-guard.test.ts`、`tests/web-history-guard.test.ts` 的新增用例。
 
-- **隔离 = 没送到**：隔离中的消息在回合结算里按「押后」处理（`quarantinedIds` / `quarantinedFrom` 并进 `bridge.ts` 的 held 集合和回程簿），别的回合的回复不会结给它。发送接口遇到隔离立即回 `202 { guarded: true, messageId }`，不再干等。丢弃（人工 / 24 h 超时 / 溢出）时 `bridge/guard-dropped.ts` 结掉挂着的 API 等待（`error: "guard_dropped"`），并撤掉 send_to_agent 回程槽、通知发件 agent。
-- **免检只给纯交互**：整条只是一个 `[button|select|multiselect:值]`、值只含标识符字符才免检；前缀后面夹文字、值里有空格或中文的都照判。
+- **没送到就不结算**：判定中（等 Jev）、隔离中、放行中（已认领、还没投出去）的消息，在回合结算和回程簿里都按「押后」处理（`guardUnseenIds` / `guardUnseenFrom` 并进 `bridge.ts` 的 held 集合），别的回合的回复不会结给它们。
+- **发件方的等待**：消息接口遇到隔离立即回 `202 { guarded: true, messageId }`，不再干等。
+  - 丢弃（人工 / 24 h 超时 / 溢出 / 太大）时，`bridge/guard-dropped.ts` 结掉挂着的 API 等待（`error: "guard_dropped"`）。等待已经过期或 bridge 重启过的，也给原线程写上终态。同时撤掉 send_to_agent 回程槽，通知发件 agent。
+  - 放行时，等待已经没了就按原 threadId 补登，并重置回程簿的送达计时。
+- **不按正文免检**：网页 / API 的 `[button:…]` 回投只是正文，谁都打得出来，一律照判。只有 Discord 原生按钮事件（`triggerKind=button`）免检。
 - **按 channelId 认会话**：Discord 入站信封不带 agentName，开关按 registry 的 channelId 查（`pickGuardAgent`）。
-- **超长不送 Jev**：正文超过 `GUARD_TEXT_BUDGET`（12000 字）直接隔离（hit `oversize`），不让「Jev 拒收 → fail-open」变成绕过办法；recent 每条截到 500 字。Jev 漏答或答的不是 [0, 1] 概率 → 记为判定失败（降级），不再当「通过」。
-- **放行互斥、至多一次**：放行先把记录改成 `releasing` 并落盘，再投递；并发的放行 / 丢弃回 `already releasing`。投递失败退回 pending；bridge 在放行中途退出，重启后按「已放行（interrupted）」收尾，不重投。放行前先清扫，超过 24 h 的不能再放。
-- **清扫**：每 10 分钟一次。pending 最多 200 条，超出时最早的按 overflow 丢弃；放行 / 丢弃后的记录留 30 天再删；一批改动只落一次盘。日志超过 5 MB 转存为 `.1`。
-- **可见性**：`chat_guard` 事件只发给 manage 凭据（`bridge/ledger-feed.ts sseEventAllow`），且只带 120 字预览。待放行卡收到事件后去管理接口取全文，取到之前不能放行。网页按 messageId 给本端气泡打标、解除「思考中」，不再按正文逐字对比；历史里的放行标记要求发送方对得上。
-- **其它入口与文件**：网页斜杠直通把技能参数送进模型上下文前也过守门，判「拦」就 409 拒绝注入（`guardSlashArgs`），不进隔离区。隔离区、守门日志、`config.json` 都以 0600 写入。
+- **判定**：
+  - 没配 Jev key 时整个不生效（先查配置，再看长度）。
+  - 正文超过 `GUARD_TEXT_BUDGET`（12000 字）不送 Jev，直接隔离（hit `oversize`）。
+  - recent 每条截到 500 字。
+  - Jev 漏答、答案类型不是 noul，或者值不是 [0, 1] 的概率，都记为判定失败（降级照投），不当「通过」。
+- **放行至多一次**：放行先把记录改成 `releasing` 并落盘，再投递；落盘失败就不投。
+  - 并发的放行 / 丢弃回 `already releasing`。
+  - 投递返回失败或抛异常，都退回 pending。
+  - bridge 在放行中途退出的，重启后按「已放行（interrupted）」收尾，不重投。
+  - 放行前先清扫：超过 24 h 的不能再放。
+- **存储有界**：每 10 分钟清扫一次。
+  - pending 最多 200 条、正文合计 200 万字，超出时从最早的开始按 overflow 丢弃。
+  - 单条超过 20 万字的不进隔离区，直接按 too_large 丢弃。
+  - 放行 / 丢弃后的记录只留 2000 字摘要，最多 500 条、30 天。
+  - 一批改动只落一次盘。日志超过 5 MB 转存为 `.1`。
+- **可见性**：
+  - `chat_guard` 事件只发给 manage 凭据，且只带 120 字预览。待放行卡收到事件后，去管理接口取全文，取到之前不能放行。
+  - 发件凭据自己另收不带正文的 `chat_guard_status`，用来更新自己气泡的状态。
+  - 网页按 messageId 打标（`guard-marks.ts`），事件和回执谁先到都不会标错。迟到的回执只在还停在原会话、还没收到输出时才解锁。
+  - 历史里的放行标记要求发送方对得上。
+- **斜杠命令**：网页直通和 Discord 斜杠的参数都过守门，内置命令也判（`/goal` `/plan` `/btw` 的参数会进模型上下文）。判「拦」就拒绝注入，不进隔离区。
+- **文件权限**：隔离区、守门日志（含 `.1`）、`config.json` 都以 0600 写入；早先建的 0644 文件在 bridge 启动时收紧。
+- **已知局限**：历史里的放行标记仍按发送方显示名 + 正文 + 时间匹配（历史记录里没有 messageId）。同名的不同凭据、同一人反复发同一句时，可能标到相邻的那条上。

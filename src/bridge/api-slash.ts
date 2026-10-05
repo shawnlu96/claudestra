@@ -127,8 +127,8 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     return apiJson(409, { ok: false, error: `/${slashM[1]} 是 ${other.replace(/^agent-/, "")} 的项目技能，当前 agent 不可用` });
   }
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
-  // 技能参数会进模型上下文：守门对 owner 本人也判（拿到 owner 手机的人用 /技能 夹带指令）；内置 TUI 命令的参数不进上下文
-  const refusal = args && resolved.scope !== "builtin" ? await (deps.guardArgs ?? guardSlashArgs)(agent, args, { name: principal.name || r.tokenId }) : null;
+  // 参数会进模型上下文（技能，以及 /goal /plan /btw 这类内置命令）：守门对 owner 本人也判（拿到 owner 手机的人用斜杠夹带指令）
+  const refusal = args ? await (deps.guardArgs ?? guardSlashArgs)(agent, args, { name: principal.name || r.tokenId }) : null;
   if (refusal) return apiJson(409, { ok: false, code: "guarded", error: refusal });
   if (acp) return acpSlashPassthrough(agent, slashM[1], resolved.ccText, deps);
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);

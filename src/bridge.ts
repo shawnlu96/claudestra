@@ -428,10 +428,14 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
-// 守门放行走原路；丢弃时结掉挂在那条消息上的回程（bridge/guard-dropped.ts）
-configureChatGuard({ client: (id) => clients.get(id), deliverLocal: (env, to) => deliverLocalInOrder(env, to), onDropped: (it) => settleGuardDropped(it, guardBooks()) });
+// 守门放行走原路；放行 / 丢弃后收拾挂在那条消息上的回程（bridge/guard-dropped.ts）
+configureChatGuard({
+  client: (id) => clients.get(id), deliverLocal: (env, to) => deliverLocalInOrder(env, to),
+  onDropped: (it) => settleGuardDropped(it, guardBooks()), onReleased: (it) => settleGuardReleased(it, guardBooks()),
+});
 const guardBooks = (): GuardDroppedBooks => ({
-  apiQueues: pendingApiRequests, threadResults: apiThreadResults, dropAgentRequest: (t, c, m) => pendingAgentCalls.dropRequest(t, c, m), client: (id) => clients.get(id), deliver,
+  apiQueues: pendingApiRequests, threadResults: apiThreadResults, reqKey: apiReqKey, client: (id) => clients.get(id), deliver,
+  dropAgentRequest: (t, c, m) => pendingAgentCalls.dropRequest(t, c, m), touchDelivered: (t, env) => pendingAgentCalls.touchDelivered(t, env),
 });
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
 setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, hold: (env) => void heldLocalMsgs.holdEnv(env),
@@ -453,7 +457,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
-const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...quarantinedFrom(target)]; // 守门隔离中的同押后：target 没看到
+const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target)]; // 守门判定 / 隔离 / 放行中的同押后：target 没看到
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
@@ -569,8 +573,8 @@ import {
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
-import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, quarantinedFrom, quarantinedIds } from "./bridge/chat-guard.js";
-import { settleGuardDropped, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
+import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds } from "./bridge/chat-guard.js";
+import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
 import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
@@ -2688,7 +2692,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
     // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
     const afterAbort = event === "Stop" && stopAfterAbort(channelId);
-    const atStop = stopSnapshot(new Set([...heldLocalMsgs.ids(channelId), ...quarantinedIds(channelId)]), pendingApiRequests); // 只结这一刻就挂着、没押着的（bridge/stop-settle.ts stopSnapshot）
+    const atStop = stopSnapshot(new Set([...heldLocalMsgs.ids(channelId), ...guardUnseenIds(channelId)]), pendingApiRequests); // 只结这一刻就挂着、没押着的（bridge/stop-settle.ts stopSnapshot）
     if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
@@ -2842,7 +2846,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             });
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
-            const held = new Set([...heldLocalMsgs.ids(cid), ...quarantinedIds(cid), ...atStop.held]); // 押着 / 被守门隔离的都没送到 cid 手上
+            const held = new Set([...heldLocalMsgs.ids(cid), ...guardUnseenIds(cid), ...atStop.held]); // 押着 / 被守门隔离的都没送到 cid 手上
             for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId, messageId: p.messageId, agentChannelId: p.agentChannelId });
               p.resolve?.(result);

@@ -49,6 +49,7 @@ beforeAll(() => {
     store,
     logPath: null,
     sweepEveryMs: 0,
+    configured: async () => true,
     guardAgent: async () => "agent-dev",
     client: (id) => (id === "ch1" ? { ws: to.ws } : undefined),
     deliverLocal: async (e) => {

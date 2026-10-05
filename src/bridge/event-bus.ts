@@ -18,6 +18,8 @@ export type BridgeEventType =
   | "chat_held"
   // Chat Guard（bridge/chat-guard.ts）：quarantined / released / dropped，web 画待放行卡
   | "chat_guard"
+  // 同上的状态（quarantined / released / dropped），不带正文，只发给发件的 API 凭据（chatId=api:<token>）
+  | "chat_guard_status"
   // 上下文压缩完成（CC 在 jsonl 落 system/compact_boundary 时发出）。web 端据此
   // 插分隔线、让 ctx 徽章即时回落。jsonl-watcher 一直在发，但漏了在这里声明 ——
   // 加类型检查后才暴露出来。

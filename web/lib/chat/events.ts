@@ -81,6 +81,8 @@ export type WebStreamEvent =
   | {
       t: "guard"; action: "quarantined" | "released" | "dropped"; id: string; agent: string;
       from?: string; trust?: string; text?: string; probe?: string; score?: number; at?: string;
+      /** chat_guard_status：发件凭据自己收到的状态（不带正文），只更新自己气泡的标记 */
+      self?: boolean;
     }
   /** reply() 的最终回复（挂到当前 assistant 气泡的 replyText，与叙述分区渲染）。
    *  components：reply 附带的按钮/选单（点击回投 [button:<id>] / [select:<id>:<value>]）。

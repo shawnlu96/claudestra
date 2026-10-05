@@ -8,7 +8,7 @@ import { askWhoOf, canSeeAsk } from "../lib/ask-access.js";
 import { canManage, canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
 import { settledAskClosuresSince, type SettledAskClosure } from "../lib/order-ask-terminal.js";
-import { agentInScope, canRunFleet, type Principal } from "../lib/principals.js";
+import { agentInScope, canRunFleet, tokenIdOf, type Principal } from "../lib/principals.js";
 import { emitEvent, type BridgeEvent } from "./event-bus.js";
 import { talkEventAllowed } from "./talk.js";
 
@@ -124,6 +124,7 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
     if (evt.type === "low_priority") return canRunFleet(principal); // 和 /agents 的 lowPriority 字段、批量管理同一道门：只给 owner 的全权设备
     if (evt.type === "talk") return talkEventAllowed(principal, evt.data);
     if (evt.type === "chat_guard") return canManage(principal) && agentInScope(principal, evt.agent);
+    if (evt.type === "chat_guard_status") return evt.chatId === `api:${tokenIdOf(principal)}`; // 不带正文，只给发件凭据自己（bridge/chat-guard.ts emitGuard）
     if (evt.type === "ask") return canSeeAsk(principal, askWhoOf(evt.data, evt.agent));
     return agentInScope(principal, evt.agent);
   };

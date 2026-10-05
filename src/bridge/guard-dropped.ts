@@ -1,8 +1,9 @@
 /**
- * 隔离中的消息被丢弃（owner 点丢弃 / 24 h 超时 / 隔离区溢出）之后，结掉挂在它上面的回程：
- *   - API 请求（网页 / guest / peer 的 wait 调用方与线程轮询）：拿到一条「没送达」的说明，不再干等；
- *   - send_to_agent 的回程槽：撤掉这一条请求，并告诉发件 agent 没送到。
- * 不结的话，这些等待要么干等到超时，要么被之后某一轮的回复当成它的答复结掉（tests/guard-dropped.test.ts）。
+ * 守门隔离的消息有了结果之后，把挂在它上面的回程收拾好（tests/guard-dropped.test.ts）：
+ *   - 丢弃（owner 点丢弃 / 24 h 超时 / 溢出）：API 请求（网页 / guest / peer 的 wait 调用方与线程轮询）拿到一条「没送达」的说明，
+ *     等待已过期（2 h）或 bridge 重启过的，也给原线程写上终态；send_to_agent 的槽撤掉这一条并告诉发件 agent。
+ *   - 放行：API 等待已过期 / 重启丢了的，按原 threadId 补登，agent 的答复才回得到原线程；send_to_agent 的槽重置送达计时。
+ * 不收拾的话，这些等待要么干等到超时，要么被之后某一轮的回复当成它的答复结掉。
  */
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
 
@@ -10,21 +11,35 @@ interface ApiWaiterLike {
   messageId?: string;
   threadId: string;
   tokenId: string;
+  tokenName?: string;
   agentName: string;
   agentChannelId: string;
+  ts?: number;
   resolve?: (r: { reply: string | null; threadId: string; agent: string; error?: string }) => void;
 }
+type ThreadResult = { result: { reply: string | null; threadId: string; agent: string; error?: string }; ts: number; tokenId?: string; messageId?: string; agentChannelId?: string };
 
 export interface GuardDroppedBooks {
   apiQueues: Map<string, ApiWaiterLike[]>;
-  threadResults: Map<string, { result: { reply: string | null; threadId: string; agent: string; error?: string }; ts: number; tokenId?: string; messageId?: string; agentChannelId?: string }>;
+  threadResults: Map<string, ThreadResult>;
+  /** api-routes.ts apiReqKey：同一 token × 频道一个队列 */
+  reqKey: (tokenId: string, channelId: string) => string;
   dropAgentRequest: (target: string, caller: string, messageId: string) => void;
+  /** 回程簿 touchDelivered：消息这才真正送到 target 手上，重置它的送达计时 */
+  touchDelivered: (target: string, env: Envelope) => void;
   client: (channelId: string) => { ws: LocalEndpoint["ws"]; cwd?: string } | undefined;
   deliver: (env: Envelope) => Promise<Delivery>;
 }
+type Item = { id: string; agent: string; regName?: string; env: Envelope; to: { channelId: string } };
+const apiFrom = (env: Envelope): { tokenId: string; name?: string } | null => {
+  const f = env.from as { kind: string; tokenId?: string; name?: string };
+  return f.kind === "api" && f.tokenId ? { tokenId: f.tokenId, name: f.name } : null;
+};
+const hasWaiter = (books: GuardDroppedBooks, id: string): boolean => [...books.apiQueues.values()].some((q) => q.some((w) => w.messageId === id));
 
-export function settleGuardDropped(item: { id: string; agent: string; env: Envelope; to: { channelId: string } }, books: GuardDroppedBooks, now = Date.now()): void {
+export function settleGuardDropped(item: Item, books: GuardDroppedBooks, now = Date.now()): void {
   const reply = `（这条消息被 Chat Guard 隔离后丢弃，没有送达 ${item.agent}）`;
+  let settled = false;
   for (const [key, queue] of [...books.apiQueues.entries()]) {
     const hit = queue.filter((w) => w.messageId === item.id);
     if (!hit.length) continue;
@@ -35,7 +50,14 @@ export function settleGuardDropped(item: { id: string; agent: string; env: Envel
       const result = { reply, threadId: w.threadId, agent: w.agentName, error: "guard_dropped" };
       books.threadResults.set(w.threadId, { result, ts: now, tokenId: w.tokenId, messageId: w.messageId, agentChannelId: w.agentChannelId });
       w.resolve?.(result);
+      settled = true;
     }
+  }
+  const api = apiFrom(item.env);
+  const threadId = item.env.meta.threadId;
+  if (!settled && api && threadId && !books.threadResults.has(threadId)) { // 等待已过期 / 重启丢了：线程轮询照样拿到终态
+    const result = { reply, threadId, agent: item.regName ?? item.agent, error: "guard_dropped" };
+    books.threadResults.set(threadId, { result, ts: now, tokenId: api.tokenId, messageId: item.id, agentChannelId: item.to.channelId });
   }
   const from = item.env.from;
   if (from.kind !== "local" || !from.channelId) return;
@@ -49,4 +71,17 @@ export function settleGuardDropped(item: { id: string; agent: string; env: Envel
     content: `🛡 你发给 ${item.agent} 的消息被它的 Chat Guard 隔离后丢弃，没有送达（消息 id ${item.id}），不用再等它的回复。`,
     meta: { messageId: newMessageId("guard"), triggerKind: "bridge_synth", ts: new Date(now).toISOString(), threadId: newThreadId() },
   });
+}
+
+export function settleGuardReleased(item: Item, books: GuardDroppedBooks, now = Date.now()): void {
+  const api = apiFrom(item.env);
+  const threadId = item.env.meta.threadId;
+  if (api && threadId && !hasWaiter(books, item.id)) {
+    const key = books.reqKey(api.tokenId, item.to.channelId);
+    const entry: ApiWaiterLike = {
+      tokenId: api.tokenId, tokenName: api.name ?? api.tokenId, agentChannelId: item.to.channelId, agentName: item.regName ?? item.agent, threadId, messageId: item.id, ts: now,
+    };
+    books.apiQueues.set(key, [...(books.apiQueues.get(key) ?? []), entry]);
+  }
+  books.touchDelivered(item.to.channelId, item.env);
 }

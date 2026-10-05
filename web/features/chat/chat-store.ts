@@ -1635,7 +1635,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
       if (result?.heldBy || result?.queued) this.produce((s) => markHeldSend(s, optimisticId, result!.heldBy ?? "queued", this.nextId(), getLang() === "zh")); // 押住了：没有回合
-      if (result?.guarded) { noteGuardedSend(result.messageId, optimisticId); return this.unlockTurn(); } // 被守门隔离：没进 agent，不会有回合
+      // 被守门隔离：没进 agent，不会有回合。只在还停在这个会话、且还没收到任何输出时解锁（迟到的回执不能解掉别的会话 / 正在跑的回合）
+      if (result?.guarded) {
+        noteGuardedSend(result.messageId, optimisticId);
+        if (this.state.activeAgent === agent && this.state.awaitingChunk) this.unlockTurn();
+        return;
+      }
       // slash 直通没有常规 done；立即解除思考态，普通消息仍等持久流。
       if (result?.clear) return void this.produce(settleClearSend(this.messageCache, agent, optimisticId, this.retiredAcpStreams, result.previousSessionId));
       if (result?.slash) {

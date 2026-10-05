@@ -2,18 +2,18 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { listGuard, type GuardItem } from "@/lib/api/guard";
 import type { WebStreamEvent } from "@/lib/chat/events";
+import { createGuardMarks } from "./guard-marks";
 
 /**
  * Chat Guard 待放行卡的数据（按 agent）：打开会话时拉一次 GET /guard/quarantine?agent=，之后由流里的 guard 事件增删。
  * 独立小 store（同 host-info.ts），不进 chat-store（那文件只许缩）；被拦的消息不在会话历史里，所以卡片也不混进消息列表。
- * guard 事件只发给 manage 设备、且只带预览：新卡先标 partial，随即重拉清单取全文，取到之前不许放行（看不全就放行 = 批准没看过的内容）。
+ * 卡片用的 guard 事件只发给 manage 设备、且只带预览：新卡先标 partial，随即重拉清单取全文，取到之前不许放行（看不全就放行 = 批准没看过的内容）。
+ * 发件人自己（含 guest）另收不带正文的 self 事件，只更新自己气泡的标记（guard-marks.ts）。
  */
 type GuardEvt = Extract<WebStreamEvent, { t: "guard" }>;
 const byAgent = new Map<string, GuardItem[]>();
-/** 本端乐观气泡的守门状态，按气泡 id（held = 等放行，dropped = 已丢弃）；放行后删掉（消息会正常进历史） */
-const marks = new Map<string, "held" | "dropped">();
-/** 发送接口回的 messageId → 本端气泡 id：之后的 guard 事件按 id 认气泡，不按正文猜（同文消息、超长消息都认得准） */
-const sentIds = new Map<string, string>();
+/** 本端乐观气泡的守门状态（held = 等放行，dropped = 已丢弃；放行后消掉，消息会正常进历史） */
+const marks = createGuardMarks();
 const loaded = new Set<string>();
 const subs = new Set<() => void>();
 const emit = () => subs.forEach((f) => f());
@@ -21,17 +21,13 @@ const EMPTY: GuardItem[] = [];
 
 /** 发送接口回了 guarded：这条没进 agent，给本端气泡打「等放行」 */
 export function noteGuardedSend(messageId: string | undefined, bubbleId: string): void {
-  if (messageId) sentIds.set(messageId, bubbleId);
-  marks.set(bubbleId, "held");
+  marks.sent(messageId, bubbleId);
   emit();
 }
 
 export function applyGuardEvent(e: GuardEvt): void {
-  const bubble = sentIds.get(e.id);
-  if (bubble) {
-    if (e.action === "released") marks.delete(bubble);
-    else marks.set(bubble, e.action === "dropped" ? "dropped" : "held");
-  }
+  marks.event(e.id, e.action);
+  if (e.self) return emit(); // 发件人的状态事件：只动气泡标记，卡片归 manage 设备
   const list = byAgent.get(e.agent) ?? [];
   if (e.action === "quarantined") {
     if (list.some((i) => i.id === e.id)) return emit();
@@ -68,7 +64,7 @@ export function useGuardMark(id: string): "held" | "dropped" | null {
       subs.add(cb);
       return () => subs.delete(cb);
     },
-    () => marks.get(id) ?? null,
+    () => marks.of(id),
     () => null,
   );
 }

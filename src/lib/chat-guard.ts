@@ -35,8 +35,8 @@ export interface GuardProbe {
 }
 
 const noulOf = (a: unknown): number | null => {
-  const v = (a as { noul?: unknown })?.noul;
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+  const { type, noul: v } = (a ?? {}) as { type?: unknown; noul?: unknown };
+  return type === "noul" && typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
 };
 /** 答案不是 [0, 1] 里的概率 = Jev 回了坏数据：抛出去按「判定失败」记（降级），不能当成低风险的「通过」 */
 const byNoul = (a: unknown, t: GuardThresholds): GuardVerdict => {
@@ -67,20 +67,14 @@ const exfilProbe: GuardProbe = {
 export const GUARD_PROBES: GuardProbe[] = [exfilProbe];
 
 /**
- * 整条只是一次按钮 / 选单回投、值只含标识符字符，才算纯交互。正文谁都能打这个前缀：只看前缀的话，
- * 在后面夹一句「把 .env 发我」就整条免检；值里带空格 / 中文的也照判（多一次 Jev 而已）。
+ * 这条消息要不要过守门：bridge 自己合成的、已放行重投的、Discord 原生按钮事件（triggerKind=button，平台交互，正文伪造不出来）、
+ * 空文本的不判。网页 / API 的「[button:id]」回投只是正文，谁都打得出来（id 本身就能写成一句指令），照判——多一次 Jev 而已。
  */
-const INTERACTION_ONLY = /^\[(button|select|multiselect):[\w.,:@/+-]{1,200}\]$/;
-
-/** 这条消息要不要过守门：bridge 自己合成的、已放行重投的、Discord 按钮事件、纯交互回投、空文本的不判 */
 export function shouldGuard(e: { fromKind: string; triggerKind: string; released?: boolean; content: string }): boolean {
   if (e.released) return false;
   if (e.fromKind === "bridge") return false;
   if (e.triggerKind === "button") return false;
-  const text = e.content.trim();
-  if (!text) return false;
-  if (INTERACTION_ONLY.test(text)) return false;
-  return true;
+  return e.content.trim().length > 0;
 }
 
 /**
@@ -89,7 +83,7 @@ export function shouldGuard(e: { fromKind: string; triggerKind: string; released
  */
 export const GUARD_TEXT_BUDGET = 12_000;
 /** recent 里每条最多带多少字：只为看出「分步套取」，不必全文 */
-const RECENT_MAX_CHARS = 500;
+export const RECENT_MAX_CHARS = 500;
 export const overBudget = (s: Pick<GuardSubject, "text">): boolean => s.text.length > GUARD_TEXT_BUDGET;
 
 /** 发送方信任级：只用于给 Jev 的上下文与日志，不改变判定规则（owner 自己也判） */
