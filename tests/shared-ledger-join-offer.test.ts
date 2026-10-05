@@ -78,7 +78,7 @@ function world(peerName: string, centerFetch?: typeof fetch): World {
     stateDir: () => dir,
     now: () => clock.now,
     projects: async () => [{ id: "project-a", name: "project-a", lastActivityAt: 0 }],
-    sharedProject: () => "project-a",
+    sharedProject: () => ({ teamId: "team-a", projectId: "project-a" }),
     // The receiver already holds the exact project-a binding at the center of the latest offer, so the default offer has a hint.
     bindings: () => centers.slice(-1).map(centerId => ({ centerId, teamId: "team-a", projectId: "project-a", localProjectId: "project-a" })),
     peers: async () => peers,
@@ -468,6 +468,20 @@ describe("shared-project hint only from an exact binding (JN4H)", () => {
     expect((await post(w, "in-peer", body)).status).toBe(202);
     expect(w.asks[0]!.context).not.toContain("根据已有绑定");
     expect(labels(w)).toEqual(["加入并绑到 project-a", "加入并绑到 x", "不加入"]);
+  });
+
+  test("explicit project without the invitation team and a unique team-other binding: no hint, no 同名, binding stays excluded", async () => {
+    for (const explicit of ["project-a", { projectId: "project-a" }] as const) {
+      const w = world("peer-jn4h-noteam"), body = offerBody(markedCode());
+      w.deps.projects = projects;
+      w.deps.sharedProject = () => explicit;
+      w.deps.bindings = () => [{ centerId: parseSharedLedgerJoinCode(body.code)!.centerId, teamId: "team-other", projectId: "project-a", localProjectId: "bound" }];
+      expect((await post(w, "in-peer", body)).status).toBe(202);
+      expect(w.asks[0]!.context).toContain("入组后才能确定团队 / 共享项目");
+      expect(w.asks[0]!.context).not.toContain("根据已有绑定");
+      expect(labels(w)).toEqual(["加入并绑到 project-a", "加入并绑到 x", "不加入"]);
+      expect(readPendingOffer(w.dir, body.offerId)!.sharedProjectId).toBeUndefined();
+    }
   });
 
   test("old offer without project: two bindings at the center stay unknown; one binding keeps the original inference", async () => {

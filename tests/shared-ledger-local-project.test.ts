@@ -52,6 +52,13 @@ test("explicit shared project: only an exact center/team/project binding supplie
   expect(sharedLedgerOfferProjectId("d", [a], { teamId: "team", projectId: "shared" })).toBeUndefined();
   // No team given and the same project id is bound under two teams: ambiguous, so unknown.
   expect(sharedLedgerOfferProjectId("c", [a, { ...a, teamId: "team2", localProjectId: "l2" }], { projectId: "shared" })).toBeUndefined();
+  // Explicit project whose invitation team is unknown: even a unique same-center same-project binding is not borrowed.
+  const teamOther = { ...a, teamId: "team-other" };
+  expect(sharedLedgerOfferBinding("c", [teamOther], { projectId: "shared" })).toBeUndefined();
+  expect(sharedLedgerOfferBinding("c", [a], { projectId: "shared" })).toBeUndefined();
+  expect(sharedLedgerEligibleProjects([{ id: "local", name: "L", lastActivityAt: 0 }], [teamOther], undefined).map(p => p.id)).toEqual([]);
+  // Legacy offer with no project metadata keeps the authorized single-binding inference.
+  expect(sharedLedgerOfferBinding("c", [teamOther])).toEqual(teamOther);
   // Same-center other project never becomes a same-id choice.
   const list = [{ id: "other", name: "Other", lastActivityAt: 0 }, { id: "x", name: "X", lastActivityAt: 5 }];
   const hint = sharedLedgerOfferProjectId("c", [other], { teamId: "team", projectId: "shared" });

@@ -42,13 +42,15 @@ export interface SharedLedgerOfferProject { projectId: string; teamId?: string }
 
 /**
  * The binding that supplies the card's shared-project hint. With an explicit project only a center/team/project match counts:
- * another project bound at the same center is never shown as "同名". Old offers carry no project id, so only one existing mapping
- * at this center supplies a hint; ambiguous centers stay unknown.
+ * another project bound at the same center is never shown as "同名", and an explicit project without its team stays unknown rather
+ * than borrowing a binding's team. Old offers carry no project id, so only one existing mapping at this center supplies a hint;
+ * ambiguous centers stay unknown.
  */
 export function sharedLedgerOfferBinding(centerId: string, bindings: SharedLedgerBinding[],
   explicit?: SharedLedgerOfferProject): SharedLedgerBinding | undefined {
+  if (explicit && explicit.teamId === undefined) return undefined;
   const matches = bindings.filter(b => b.centerId === centerId && (!explicit
-    || (b.projectId === explicit.projectId && (explicit.teamId === undefined || b.teamId === explicit.teamId))));
+    || (b.projectId === explicit.projectId && b.teamId === explicit.teamId)));
   return matches.length === 1 ? matches[0] : undefined;
 }
 export function sharedLedgerOfferProjectId(centerId: string, bindings: SharedLedgerBinding[], explicit?: SharedLedgerOfferProject): string | undefined {
