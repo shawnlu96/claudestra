@@ -1,10 +1,12 @@
 /**
  * dispatch-recovery-MATW：PM 的 `ledger lend-offer` 生产入口经 recovery-materials-wiring 拿 CFG recoveryPolicy(project, "materials")。
- * reader 是真动态加载的模块文件（测试只换模块位置：tmp 里的替身 CFG，按 globalThis 钩子答策略）；默认位置在 main 上不存在 = 未安装。
+ * reader 是真动态加载的模块文件（测试只换模块位置：tmp 里的替身 CFG，按 globalThis 钩子答策略）。
+ * 主线整合（MATWC1）：CFG 已落地，默认位置就是真 recovery-policy.ts，经正式 API（setRecovery）写临时状态目录里的配置后现读；
+ * 「未安装」只在隔离夹具里制造（tmp 里不存在的位置），不动生产文件。
  * 对方实际收到的单子取自 lend-claim 的应答（bridge 原样转给对方的 body）。
  */
 import type { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,6 +21,7 @@ import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { cfgReaderPath, materialsPolicyPort } from "../src/lib/recovery-materials-wiring.js";
+import { RECOVERY_POLICY_PATH, setRecovery } from "../src/lib/recovery-policy.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator", Q = "other-project";
@@ -102,9 +105,32 @@ beforeEach(() => {
 afterEach(() => closeLedger(":memory:"));
 
 describe("reader 加载（真动态 import）", () => {
-  test("当前 main 上 CFG 正式位置没有模块 = 未安装：不给 port（observe），诊断写明", async () => {
+  test("当前 main：CFG 正式位置是真 recoveryPolicy，经正式 API 写的临时配置每次现读；坏配置 = off", async () => {
     expect(cfgReaderPath()).toBe(join(import.meta.dir, "..", "src", "lib", "recovery-policy.ts"));
-    const r = await materialsPolicyPort();
+    // 真 CFG 读的是本测试进程的临时状态目录（tests/preload.ts），跑完还原
+    expect(RECOVERY_POLICY_PATH.startsWith(realpathSync(tmpdir())) || RECOVERY_POLICY_PATH.startsWith(tmpdir())).toBe(true);
+    const saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null;
+    try {
+      rmSync(RECOVERY_POLICY_PATH, { force: true });
+      const r = await materialsPolicyPort();
+      expect(r).toMatchObject({ reader: "loaded", diag: null });
+      expect(r.policy!(P, "materials")).toEqual({ mode: "observe" }); // 没配置 = CFG 缺省 observe
+      const ctx = { actor: "owner", now };
+      await setRecovery(db, ctx, { project: P, set: { key: "materials", mode: "on" }, reason: "MATWC1 测试" });
+      expect(r.policy!(P, "materials")).toEqual({ mode: "on" });
+      await setRecovery(db, ctx, { project: P, set: { key: "materials", mode: "off" }, reason: "MATWC1 测试" });
+      expect(r.policy!(P, "materials")).toEqual({ mode: "off" });
+      expect(r.policy!(Q, "materials")).toEqual({ mode: "observe" });
+      writeFileSync(RECOVERY_POLICY_PATH, "{坏");
+      expect(r.policy!(P, "materials")).toEqual({ mode: "off" }); // CFG 读坏 = off（保守停手）
+    } finally {
+      if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true });
+      else writeFileSync(RECOVERY_POLICY_PATH, saved);
+    }
+  });
+
+  test("隔离夹具里模块不在位置上 = 未安装：不给 port（observe），诊断写明", async () => {
+    const r = await materialsPolicyPort(MISSING);
     expect(r.reader).toBe("missing");
     expect(r.policy).toBeUndefined();
     expect(r.diag).toContain("未安装");
