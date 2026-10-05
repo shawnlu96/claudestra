@@ -1,5 +1,9 @@
-/** Scheduler-only CLI for the deploy journal (T68g); the exit from a deploy `unknown` is `scheduler-merge-resolve`. */
+/**
+ * Scheduler-only CLI for the deploy journal (T68g; the exit from a deploy `unknown` is `scheduler-merge-resolve`) and for the
+ * other exit from `merge`, the repository-owner handoff (MHO1, lib/scheduler-merge-handoff.ts).
+ */
 import { advanceDeployRun, beginDeployRun } from "../lib/scheduler-deploy.js";
+import { landMergeHandoff, recordMergeHandoff } from "../lib/scheduler-merge-handoff.js";
 import { DEPLOY_PHASES, type DeployPhase } from "../lib/ledger-deploy-schema.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { intFlag } from "./ledger-identity.js";
@@ -12,6 +16,16 @@ const oneOf = <T extends string>(v: string | undefined, xs: readonly T[], flag: 
 };
 
 export const SCHEDULER_DEPLOY_CMDS: Record<string, CommandSpec> = {
+  "scheduler-merge-handoff": {
+    valued: ["head", "pr", "merged"], bools: [],
+    usage: "scheduler-merge-handoff <task> --head <sha> --pr <url> [--merged <合并提交>]（调度服务专用：合并交给仓库方；带 --merged = 仓库方已合并，进 live）",
+    run(c) {
+      const input = { taskId: c.task(c.p.pos[1]).id, head: c.need("head"), pr: c.need("pr") };
+      const merged = c.p.flags.merged;
+      return merged === undefined ? { ok: true, ...recordMergeHandoff(c.db, c.ctx(), input) }
+        : { ok: true, task: landMergeHandoff(c.db, c.ctx(), { ...input, mergeSha: merged }) };
+    },
+  },
   "scheduler-deploy-begin": {
     valued: [], bools: [], usage: "scheduler-deploy-begin <intent-key>（调度服务专用：merged 之后占位自动部署）",
     run(c) { return { ok: true, ...beginDeployRun(c.db, c.ctx(), c.p.pos[1] ?? "") }; },
