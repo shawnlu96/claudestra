@@ -709,7 +709,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
-  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles });
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
   const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,

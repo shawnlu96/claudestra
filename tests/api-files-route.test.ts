@@ -1,16 +1,19 @@
 /**
  * GET /api/v1/files/:id 对 peer 的取件（2026-10-05 实报：peer 拿回复里的 /api/v1/files/:id 一律 404，只能改走 /api/v1/media）。
  * 照 tests/lend-scope-route.test.ts 的搭法：独立状态目录里放好 peer 记录与 token，经真 serveApiRequest（真鉴权：验签 + 钉钥 + E2E
- * 会话上下文）取件；登记走真 stageApiReplyFiles（与 bridge.ts deliverToApi 同一个调用）。「bridge 重启」= 重新加载一份路由模块
+ * 会话上下文）取件。回复前先有请求：真鉴权验过签名，再照消息路由挂 pending 时那样钉对方指纹（peerFileOwner；消息路由要 tmux 里有
+ * agent 窗口才收，单测里走不到，路由与 bridge.ts 各用一行把它接上，末尾按源码核这两行）；登记走真 stageApiReplyFiles、参数照 bridge.ts
+ * deliverToApi 从 pending 取。「bridge 重启」= 重新加载一份路由模块
  * （带查询串的 import 是一个全新的模块实例，模块级的登记表从头建），登记只在内存里的话这一步就 404。
  */
 import { expect } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { apiFileAllowed, type ApiFileEntry } from "../src/bridge/api-files.ts";
+import { authenticateApi } from "../src/bridge/api-auth.ts";
+import { apiFileAllowed, peerFileOwner, type ApiFileEntry } from "../src/bridge/api-files.ts";
 import { stageApiReplyFiles } from "../src/bridge/api-reply-files.ts";
-import { apiFiles, initApiRoutes, serveApiRequest } from "../src/bridge/api-routes.ts";
+import { apiFiles, initApiRoutes, serveApiRequest, type PendingApiRequest } from "../src/bridge/api-routes.ts";
 import { setAttachmentDirsForTest } from "../src/bridge/local-api/attachments.ts";
 import { setMediaForTest } from "../src/bridge/local-api/media-refresh.ts";
 import { setRequestContext } from "../src/bridge/request-context.ts";
@@ -67,14 +70,30 @@ async function get(routes: Routes, id: string, who: Principal, from: Machine): P
   return routes.serveApiRequest(req, new URL(req.url));
 }
 
-/** agent-x 回复 to 这张 token 时带了一个附件：返回登记的 id */
-async function reply(to: Principal): Promise<string> {
+type Pending = Pick<PendingApiRequest, "tokenId" | "acceptsFiles" | "fileOwner">;
+
+/** from 机器拿 who 这张 token 给 agent-x 发一条消息：过真鉴权（验签、E2E 会话），照消息路由挂 pending 那样钉指纹 */
+async function request(who: Principal, from: Machine): Promise<Pending> {
+  const path = "/api/v1/agents/agent-x/messages", body = JSON.stringify({ text: `打包发我 ${++n}`, acceptsReplyFiles: true });
+  const headers = { Authorization: `Bearer ${who.secret}`, "Content-Type": "application/json", ...signedHeaders("POST", path, body, from.key) };
+  const req = new Request(`http://b.local${path}`, { method: "POST", headers, body });
+  setRequestContext(req, { source: "loopback", clientIp: null, https: false, e2e: { peerFp: from.fp } });
+  const principal = await authenticateApi(req, new URL(req.url), { rateLimit: true });
+  if (principal instanceof Response) throw new Error(`请求没过鉴权：${await principal.text()}`);
+  return { tokenId: tokenIdOf(principal), acceptsFiles: true, fileOwner: await peerFileOwner(principal) };
+}
+
+/** agent-x 答这条请求时带了一个附件（参数照 bridge.ts deliverToApi）：返回登记的 id */
+async function answer(pending: Pending): Promise<string> {
   const src = join(root, `bundle-${++n}.zip`);
   writeFileSync(src, BYTES);
-  const s = await stageApiReplyFiles([src], { agent: "agent-x", tokenId: tokenIdOf(to), table: apiFiles, acceptsFiles: true });
+  const s = await stageApiReplyFiles([src], { agent: "agent-x", tokenId: pending.tokenId, table: apiFiles, acceptsFiles: pending.acceptsFiles, owner: pending.fileOwner });
   expect(s.files).toHaveLength(1);
   return /^\/api\/v1\/files\/(.+)$/.exec(s.files[0]!.url)![1]!;
 }
+
+/** 这张 token 从 MATE 发请求，agent-x 随即带附件答复 */
+const reply = async (to: Principal): Promise<string> => answer(await request(to, MATE));
 
 const live: Routes = { initApiRoutes, serveApiRequest };
 /** bridge 重启：新的路由模块实例（模块级状态从头建），照 bridge 启动时那样 initApiRoutes */
@@ -127,6 +146,19 @@ describe("同一个 peer 经 E2E 取件", () => {
     expect(r.status).toBe(200);
     expect(await r.text()).toBe(BYTES);
   }, 30_000);
+
+  test("请求之后、回复之前同一台机器换了 token → 迟到的回复新 token 照样取得到", async () => {
+    const pending = await request(await issue("peer-mate", ["agent-x"], "mate", true), MATE);
+    const after = await issue("peer-mate", ["agent-x"], "mate", true);
+    const r = await get(live, await answer(pending), after, MATE);
+    expect(r.status).toBe(200);
+    expect(await r.text()).toBe(BYTES);
+  }, 30_000);
+
+  test("登记表落盘 0600（记着谁能取哪个文件）", async () => {
+    await reply(await issue("peer-mate", ["agent-x"], "mate", true));
+    expect(statSync(join(STATE_DIR, "api-files.json")).mode & 0o777).toBe(0o600);
+  }, 30_000);
 });
 
 describe("别人拿到 id 也取不到（与没有这个 id 同一个 404）", () => {
@@ -155,6 +187,30 @@ describe("别人拿到 id 也取不到（与没有这个 id 同一个 404）", (
       writePeers();
     }
   }, 30_000);
+
+  test("请求之后 peer 删掉同名加回另一台机器，旧请求的回复才到 → 新机器取件 404，与没有这个 id 同形（旧代码：登记时读到新指纹，放行）", async () => {
+    const pending = await request(await issue("peer-mate", ["agent-x"], "mate", true), MATE);
+    const other = machine("mate-reborn-late");
+    writePeers(other.fp);
+    try {
+      const imposter = await issue("peer-mate", ["agent-x"], "mate", true);
+      const id = await answer(pending); // 晚到：此刻 mate 名下已是另一台机器
+      const [hit, none] = [await get(live, id, imposter, other), await get(live, "f_nope", imposter, other)];
+      expect(hit.status).toBe(404);
+      expect([await hit.text(), [...hit.headers]]).toEqual([await none.text(), [...none.headers]]);
+    } finally {
+      writePeers();
+    }
+  }, 30_000);
+});
+
+describe("钉指纹接在真路径上（消息路由单测走不到，按源码核）", () => {
+  const src = (f: string) => readFileSync(join(import.meta.dir, "../src", f), "utf8");
+  test("消息路由挂 pending 时钉指纹；deliverToApi 登记附件时用它", () => {
+    expect(src("bridge/api-routes.ts")).toContain("ts: Date.now(), acceptsFiles, fileOwner: await peerFileOwner(principal),\n    };\n    const queue = pendingApiRequests.get(key)");
+    const call = "stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, ";
+    expect(src("bridge.ts")).toContain(`${call}acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });`);
+  });
 });
 
 describe("取件授权（apiFileAllowed）：非 peer 的凭据只认登记的那张", () => {

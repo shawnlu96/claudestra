@@ -10,7 +10,7 @@ import { basename, join } from "node:path";
 import { E2E_RESPONSE_MAX } from "../lib/peer-e2e-wire.js";
 import type { ReplyFileRef } from "../lib/peer-reply-files.js";
 import { findByTokenId, readPrincipals, type Principal } from "../lib/principals.js";
-import { livePeerAnchor, type ApiFileEntry, type PeerAnchor } from "./api-files.js";
+import type { ApiFileEntry, FileOwner } from "./api-files.js";
 import { attachmentDirs } from "./local-api/attachments.js";
 import { copyOutboundToInbox } from "./local-api/media-refresh.js";
 
@@ -24,9 +24,10 @@ export interface StageOpts {
   table: FileTable;
   /** 发请求的一方声明看得懂回复里的 files（新版 peer 的 acceptsReplyFiles） */
   acceptsFiles?: boolean;
-  /** 单测注入；缺省读 principals.json / peers.json */
+  /** 单测注入；缺省读 principals.json */
   lookup?: (tokenId: string) => Promise<PeerInfo>;
-  anchor?: PeerAnchor;
+  /** 对方发请求那一刻钉住的 peer 名与指纹（pending.fileOwner，bridge/api-files.ts peerFileOwner）；没有就只认原 token */
+  owner?: FileOwner;
 }
 
 export interface Staged {
@@ -58,7 +59,6 @@ export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise
   const out: Staged = { files: [], sent: [] };
   const failed: string[] = [];
   const who = paths.length ? await (o.lookup ?? defaultLookup)(o.tokenId) : null;
-  const owner = await fileOwner(who, o.anchor ?? livePeerAnchor);
   for (const p of paths) {
     const [copy] = await copyOutboundToInbox([p], o.agent); // 一个一个拷：它拷失败只记日志跳过，这里要知道是哪个
     if (!copy) {
@@ -68,7 +68,7 @@ export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise
     const abs = join(attachmentDirs().inboxDirs[0]!, copy.attachment);
     const id = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const name = basename(p) || "file";
-    o.table.set(id, { path: abs, tokenId: o.tokenId, name, agent: o.agent, ...owner });
+    o.table.set(id, { path: abs, tokenId: o.tokenId, name, agent: o.agent, ...o.owner });
     out.sent.push(copy);
     const media = `/api/v1/media?agent=${encodeURIComponent(o.agent)}&dir=out&name=${encodeURIComponent(copy.attachment)}`;
     out.files.push({ name, url: `/api/v1/files/${id}`, media, size: Bun.file(abs).size, sha256: await sha256Of(abs) });
@@ -77,12 +77,6 @@ export async function stageApiReplyFiles(paths: string[], o: StageOpts): Promise
   if (out.files.length) why.push(...peerReasons(who, out.files, o.acceptsFiles));
   if (why.length) out.warning = `附件可能没送达：${why.join("；")}`;
   return out;
-}
-
-/** 对方是 peer：登记带上它的名字与此刻的钥匙指纹，它日后换了 token 也认得出是同一台机器（bridge/api-files.ts apiFileAllowed） */
-async function fileOwner(p: PeerInfo, anchor: PeerAnchor): Promise<Pick<ApiFileEntry, "peer" | "peerFp">> {
-  const peerFp = p?.peer ? await anchor(p.peer) : null;
-  return peerFp ? { peer: p!.peer, peerFp } : {};
 }
 
 /** 对方是 peer 时附件取不到的原因；网页 / 脚本直接拿 files 与 SSE 事件，不在这里 */
