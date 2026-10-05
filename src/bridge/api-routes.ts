@@ -10,7 +10,6 @@ import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.j
  * deliver（统一投递）、镜像 / typing / 完成通知抑制、SSE 处理器。
  * 其余依赖（manager 调用、principals、session-history……）都是无状态模块，直接 import。
  */
-
 import { sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
@@ -73,6 +72,7 @@ import {
 } from "../lib/tmux-helper.js";
 import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
 import { paneLooksWorking } from "../lib/turn-state.js";
+import { paneTail } from "../lib/pane-tail.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
@@ -355,7 +355,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           a.compacting = st === "compacting";
           if (!a.busy && st === undefined && a.status !== "stopped") {
             try {
-              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"])).split("\n").slice(-10).join("\n");
+              const tail = paneTail(await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]), 10).join("\n");
               if (paneLooksWorking(tail)) a.busy = true;
             } catch {
               /* 窗口不存在等,保持不忙 */
