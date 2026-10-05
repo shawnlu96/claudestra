@@ -1,0 +1,23 @@
+{
+  "cliSha256": {
+    "entry": "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+    "native": "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878",
+    "platform": "darwin-arm64"
+  },
+  "cliVersion": "0.159.3",
+  "files": {
+    "inbound.json": "4062dbc99dc30f9de065c62147620c037db971cd112d75cfc5298ee847f1bf6a",
+    "methods.json": "45ed16a6ed950d04f6f956efc374ad3648c47e4196f8a9ed5dbbe64f89ea511c",
+    "outbound.json": "57d580e1399affc53a33e37f1a6698acedd66c171a110324ab4a5ba64cb1ff61"
+  },
+  "flags": [
+    "--experimental"
+  ],
+  "generator": "scripts/codex-schema/lock.ts",
+  "outboundClosure": {
+    "bytes": 53863,
+    "defs": 80
+  },
+  "provenance": "由 codex-cli 的 `app-server generate-json-schema` 产物（openai/codex，Apache-2.0）投影、摘录而来；生成器见 generator",
+  "schemaFullSha256": "345a8d9bb98a38f73e3d3b6238501da7f81a09f0ad87432a00b7fdcab8f37577"
+}
