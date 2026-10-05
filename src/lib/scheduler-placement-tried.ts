@@ -28,6 +28,27 @@ function refusedAt(s: PlannerSnapshot, i: SchedulerIntent, peer: string): number
   return isTemporaryLendRefusal(code) ? cancelled.ts : null;
 }
 
+/**
+ * PM's own lend-cancel of an order nobody claimed, which the scheduler then settled: not a spent attempt (PC1). Only structure counts:
+ * cancelLend is manager-gated and its note alone carries no withdrawnBy / stale (refusals, TTL and timeouts all go through
+ * withdrawPooledLend), the link must name this intent, peer, head and round, and the settle event must follow the cancel.
+ */
+function pmCancelled(s: PlannerSnapshot, i: SchedulerIntent, peer: string): boolean {
+  if (i.status !== "cancelled") return false;
+  const link = s.events.find((e) => e.kind === "scheduler" && e.dedupKey === `scheduler:${i.id}:pool` && e.data.id === i.id &&
+    e.data.peer === peer && e.data.head === i.head && e.data.round === s.task.round);
+  const orderId = link?.data.orderId;
+  if (typeof orderId !== "string") return false;
+  const notes = s.events.filter((e) => e.kind === "note" && e.target === i.taskId &&
+    (e.data.lend as Record<string, unknown> | undefined)?.orderId === orderId);
+  const lend = notes.at(-1)?.data.lend as Record<string, unknown> | undefined;
+  if (notes.some((e) => (e.data.lend as Record<string, unknown>).op === "claim") || !lend || notes.at(-1)!.actor === "scheduler" ||
+    lend.op !== "cancel" || lend.from !== "pooled" || lend.peer !== peer || "withdrawnBy" in lend || "stale" in lend) return false;
+  const cancelSeq = notes.at(-1)!.seq;
+  return s.events.some((e) => e.kind === "scheduler" && e.dedupKey === `scheduler:${i.id}:cancelled` && e.data.op === "settle" &&
+    e.data.id === i.id && e.data.to === "cancelled" && e.seq > cancelSeq);
+}
+
 interface Retry { peer: string; gate: string | null }
 export interface RetryPlacementFacts extends PlacementFacts { retries: Retry[] }
 
@@ -37,6 +58,7 @@ export function placementHistory(s: PlannerSnapshot, since: number): Pick<RetryP
   for (const i of [...s.intents].sort((a, b) => a.eventSeq - b.eventSeq)) {
     if (!isPoolIntent(i) || i.causalSeq < since || i.head !== s.task.headSHA || startRetried(s.events, i.id)) continue; // i28-FB1
     const peer = i.recipient!.slice(POOL_RECIPIENT.length);
+    if (pmCancelled(s, i, peer)) continue; // PC1: neither spent nor a refusal; earlier outcomes for this peer stand
     const knownClock = s.pool?.now !== undefined && s.pool.peers.some((p) => p.peer === peer && p.helloAt !== undefined);
     const at = knownClock ? refusedAt(s, i, peer) : null;
     if (at === null) {

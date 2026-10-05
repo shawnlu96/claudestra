@@ -213,3 +213,92 @@ test("pinned writing also observes the retry delay; disabled remote stays local"
   s.pool!.remote.mode = "off";
   expect(planScheduler(s)).toMatchObject({ action: "ensure_session" });
 });
+
+/** PC1: PM's lend-cancel of the unclaimed order (no withdrawnBy), then the scheduler's settle to cancelled. */
+function pmCancel(s: PlannerSnapshot, peer: string, id = `pm-${peer}`) {
+  refusal(s, peer, "no_slot", id);
+  const cancel = s.events.at(-1)!;
+  cancel.actor = "pm";
+  cancel.data = { lend: { peer, orderId: `order-${id}`, op: "cancel", from: "pooled" } };
+  cancel.text = "出借：撤单（原状态 pooled）：依赖未就绪";
+  s.events[s.events.length - 2].data = { ...s.events[s.events.length - 2].data, head: s.task.headSHA, round: s.task.round };
+  s.events = [...s.events, { ...event(cancel.seq + 1, "scheduler", { op: "settle", id, from: "pending", to: "cancelled", receipt: "returned" }),
+    dedupKey: `scheduler:${id}:cancelled` }];
+}
+
+for (const stage of ["review", "build"] as const) test(`PC1 ${stage}: a settled PM cancel is neither spent nor a retry`, () => {
+  const s = snapshot(stage);
+  pmCancel(s, "mate");
+  expect(placementHistory(s, 10)).toEqual({ tried: [], retries: [] });
+  expect(planScheduler(s)).toMatchObject({ kind: "intent", recipient: "peer:mate", action: stage === "review" ? "review" : "dispatch" });
+});
+
+test("PC1: forged, mismatched, unsettled or live cancels keep the peer spent", () => {
+  const cases: Record<string, (s: PlannerSnapshot) => void> = {
+    withdrawn: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).withdrawnBy = "pm"; },
+    stale: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).stale = true; },
+    byScheduler: (s) => { s.events.at(-2)!.actor = "scheduler"; },
+    textOnly: (s) => { s.events.at(-2)!.data = {}; },
+    claimedFrom: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).from = "claimed"; },
+    unknownFrom: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).from = "unknown"; },
+    claimed: (s) => { s.events = [...s.events.slice(0, -2), event(13, "note", { lend: { peer: "mate", orderId: "order-pm-mate", op: "claim" } }), ...s.events.slice(-2)]; },
+    wrongOrder: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).orderId = "order-other"; },
+    wrongNotePeer: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).peer = "other"; },
+    wrongLinkPeer: (s) => { s.events.at(-3)!.data.peer = "other"; },
+    wrongHead: (s) => { s.events.at(-3)!.data.head = "e".repeat(40); },
+    wrongRound: (s) => { s.events.at(-3)!.data.round = 0; },
+    wrongTask: (s) => { s.events.at(-2)!.target = "T2"; },
+    unsettled: (s) => { s.events = s.events.slice(0, -1); },
+    settledOther: (s) => { s.events.at(-1)!.data.id = "other"; },
+    settledBefore: (s) => { s.events.at(-1)!.seq = s.events.at(-2)!.seq - 1; },
+    settledDone: (s) => { s.events.at(-1)!.data.to = "done"; },
+    laterRelease: (s) => { s.events = [...s.events, event(99, "note", { lend: { peer: "mate", orderId: "order-pm-mate", op: "release" } })]; },
+    ...Object.fromEntries((["pending", "submitted", "unknown", "done"] as const).map((st) => [st, (s: PlannerSnapshot) => { s.intents[0].status = st; }])),
+  };
+  for (const [name, mutate] of Object.entries(cases)) {
+    const s = snapshot();
+    pmCancel(s, "mate");
+    mutate(s);
+    expect([name, placementHistory(s, 10)]).toEqual([name, { tried: ["mate"], retries: [] }]);
+  }
+});
+
+test("PC1: refusals, gate refusals and real failures stay spent; earlier history is kept, later failures count", () => {
+  const gate = snapshot();
+  pmCancel(gate, "mate");
+  gate.events = gate.events.filter((e) => e.kind !== "scheduler"); // offer refused at the materials gate: no order was ever linked
+  expect(placementHistory(gate, 10).tried).toEqual(["mate"]);
+  for (const code of ["repo", "content_policy", "unknown"]) {
+    const s = snapshot();
+    refusal(s, "mate", code, "first");
+    pmCancel(s, "mate");
+    expect(placementHistory(s, 10)).toEqual({ tried: ["mate"], retries: [] });
+  }
+  const later = snapshot();
+  pmCancel(later, "mate");
+  refusal(later, "mate", "repo", "after");
+  expect(placementHistory(later, 10)).toEqual({ tried: ["mate"], retries: [] });
+  const temp = snapshot();
+  refusal(temp, "mate", "no_slot", "first");
+  pmCancel(temp, "mate");
+  temp.pool!.now = REFUSED + 1;
+  expect(placementHistory(temp, 10)).toMatchObject({ tried: [], retries: [{ peer: "mate", gate: expect.stringContaining("2 分钟") }] });
+  expect(planScheduler(temp)).toMatchObject(wait);
+});
+
+test("PC1: a released peer still passes off / pause / repo / role / grant / hello / file-lock gates", () => {
+  for (const blocked of ["off", "repo", "role", "grant", "paused", "full", "lock", "mode-off"] as const) {
+    const s = snapshot("build");
+    pmCancel(s, "mate");
+    const p = s.pool!.peers[0];
+    if (blocked === "off") p.priority = "off";
+    if (blocked === "repo") p.v2!.repos = [];
+    if (blocked === "role") p.v2!.roles = ["review"];
+    if (blocked === "grant") p.v2!.why = "对方没有授权（或已收回）";
+    if (blocked === "paused") p.v2!.why = "对方暂停接单";
+    if (blocked === "full") p.v2!.slots = { claude: 0, codex: 0 };
+    if (blocked === "lock") s.heldResources = [{ taskId: "other", resource: "src/lib/x.ts" }];
+    if (blocked === "mode-off") s.pool!.remote.mode = "off";
+    expect([blocked, planScheduler(s)]).not.toMatchObject([blocked, { recipient: "peer:mate" }]);
+  }
+});
