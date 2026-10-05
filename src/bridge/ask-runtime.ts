@@ -80,7 +80,10 @@ interface RuntimeAskInput {
   instance?: string;
   /** ACP 回合失败（不是额度 / 登录）：落在 extra.failure，调度器按它认出是哪类失败（scheduler-auto-ports.ts codexFailure） */
   failure?: "error";
-  /** 监护在处置、恢复次数还没用完（lib/agent-supervisor-bridge.ts failureCardQuiet）：卡照开、留在看板上，但不卡活、不推 owner */
+  /**
+   * 监护在处置（lib/agent-supervisor-bridge.ts failureCardQuiet）或派单会话的失败由派活方接手（lib/runtime-failure-audience.ts）：
+   * 卡照开、留在看板上，但不卡活、不推 owner
+   */
   quiet?: true;
 }
 

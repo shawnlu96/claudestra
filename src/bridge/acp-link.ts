@@ -23,6 +23,7 @@ import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
 import { isAcpChannel } from "./acp-state.js";
 import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
+import { dispatchedFailureQuiet } from "../lib/runtime-failure-audience.js";
 
 type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
@@ -157,8 +158,9 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
   } else if (f?.kind === "error" && f.retry !== true) {
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
+    const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId); // 监护在处置 / 派单会话由派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
-      failure: "error", instance: f.key, ...(failureCardQuiet(agentName, f.message, Date.now()) ? { quiet: true as const } : {}) }); // 监护在处置：不推 owner
+      failure: "error", instance: f.key, ...(quiet ? { quiet: true as const } : {}) });
   }
 }
 
