@@ -13,21 +13,10 @@
  */
 
 import { networkInterfaces, type NetworkInterfaceInfo } from "os";
+import { isPrivateAddr, isTailscaleAddr } from "./address-predicates.js";
 
-/** Tailscale 分配的地址落在 100.64.0.0/10（CGNAT 段） */
-export function isTailscaleAddr(ip: string): boolean {
-  const m = /^100\.(\d{1,3})\./.exec(ip);
-  if (!m) return false;
-  const second = Number(m[1]);
-  return second >= 64 && second <= 127;
-}
-
-/** RFC1918 私网段 */
-export function isPrivateAddr(ip: string): boolean {
-  if (/^192\.168\./.test(ip)) return true;
-  if (/^10\./.test(ip)) return true;
-  return /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
-}
+/** 旧 import 路径兼容：谓词本体在纯模块 address-predicates.ts */
+export { isPrivateAddr, isTailscaleAddr };
 
 /** magicdns 只在调用方显式要求时出现（跨 tailnet 的 peer 解析不了对方的 MagicDNS 名，IP 更稳） */
 export type AddrKind = "tailscale" | "lan" | "magicdns";
