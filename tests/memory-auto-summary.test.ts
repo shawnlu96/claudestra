@@ -147,3 +147,37 @@ test("non-memory startup stages and clean review verdicts do not spawn an observ
   await schedulerObserveTick(db, { demo: { maxActiveWorkers: 2 } }, async (...args) => { calls.push(args); return { ok: true }; });
   expect(calls).toEqual([]); expect((await run()).recorded).toBe(0);
 });
+
+test("same-round reviews aggregate under canonical families instead of the last report overwriting the round", async () => {
+  card();
+  const p1 = (family: string, id = family) => ({ findingId: id, severity: "P1", family, probe: `${family} probe` });
+  add("review", { round: 1, p1: 1, findings: [p1("widget-tx")] });
+  add("review", { round: 1, p1: 2, findings: [p1("Widget_TX", "w2"), p1("cache-key")] });
+  add("review", { round: 1, p1: 0, findings: [] });
+  add("review", { round: 2, p1: 1, findings: [p1("widget.tx", "w3")] });
+  add("review", { round: 2, p1: 0, findings: [] });
+  add("review", { round: 3, p1: 0, findings: [] });
+  const done = add("stage", { to: "verified" });
+  add("review", { round: 3, p1: 1, findings: [p1("late-after-completion")] });
+  const m = (await prepareSummary(db, done, {}))!;
+  expect(m.body).toContain("r1: widget-tx(持续),cache-key(下一轮消失)");
+  expect(m.body).toContain("r2: widget.tx(下一轮消失)");
+  expect(m.body).toContain("r3: 无P1");
+  expect(m.body).not.toContain("late-after-completion");
+  expect(m.sources).toEqual([{ origin: "ab12", originSeq: done.originSeq! }]);
+  expect(m.head).toBe(H);
+});
+
+test("an unfixed P1 stays persistent and an unreadable same-round report never reads as clean or vanished", async () => {
+  card();
+  const p1 = (family: string) => ({ findingId: family, severity: "P1", family, probe: "still broken" });
+  add("review", { round: 1, p1: 1, findings: [p1("revision-skip")] });
+  add("review", { round: 2, p1: 0, findings: [] });
+  add("review", { round: 2, p1: 1 });
+  add("review", { round: 3, p1: 1, findings: [p1("REVISION_SKIP")] });
+  const m = (await prepareSummary(db, add("stage", { to: "verified" }), {}))!;
+  expect(m.body).toContain("r1: revision-skip(下一轮不明)");
+  expect(m.body).toContain("r2: 审查不全");
+  expect(m.body).toContain("r3: REVISION_SKIP(无下一轮)");
+  expect(m.body).not.toContain("下一轮消失");
+});

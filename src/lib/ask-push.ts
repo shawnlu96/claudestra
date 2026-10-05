@@ -4,6 +4,7 @@
  * 同一条 ask 每个状态最多推一次由调用方（dispatcher.onAsk）记。iOS 规矩：推了就必须显示，所以「不打扰」只能是不推。
  * 规则表逐行单测：tests/ask-push.test.ts。
  */
+import { isReminder } from "./ask-recovery.js";
 import { t } from "./i18n.js";
 import type { Ask } from "./ledger-asks.js";
 import type { Presence } from "./owner-presence.js";
@@ -24,9 +25,13 @@ export function askPushToAssignee(a: Pick<Ask, "state" | "kind" | "assignee">): 
   return a.state === "open" || (a.kind === "assigned" && a.state === "expired");
 }
 
-/** 推送内容：标题「待你处理 · <谁发的>」（过期「已过期 · …」），点开直达卡片；tag 每条 ask 每个状态一个（同 tag 在 iOS 上是静默替换） */
-export function askPushMessage(a: Pick<Ask, "id" | "fromAgent" | "title" | "state" | "kind">): { title: string; body: string; url: string; tag: string } {
+/**
+ * 推送内容：标题「待你处理 · <谁发的>」（过期「已过期 · …」，过期后的再提示卡「再提醒 · …」，lib/ask-recovery.ts），点开直达卡片；
+ * tag 每条 ask 每个状态一个（同 tag 在 iOS 上是静默替换；再提示卡是新 id，不会替换掉原卡那条）
+ */
+export function askPushMessage(a: Pick<Ask, "id" | "fromAgent" | "title" | "state" | "kind"> & { extra?: Ask["extra"] }): { title: string; body: string; url: string; tag: string } {
   const who = a.fromAgent ?? (a.kind === "assigned" ? t("指派", "Assigned") : t("审核", "Review"));
-  const head = a.state === "expired" ? t("已过期", "Expired") : t("待你处理", "Needs you");
+  const again = a.state === "open" && a.extra && isReminder({ extra: a.extra });
+  const head = a.state === "expired" ? t("已过期", "Expired") : again ? t("再提醒", "Reminder") : t("待你处理", "Needs you");
   return { title: `${head} · ${who}`, body: a.title, url: `/chat?ask=${encodeURIComponent(a.id)}`, tag: `cstra-ask-${a.id}-${a.state}` };
 }

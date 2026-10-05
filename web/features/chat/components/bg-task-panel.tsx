@@ -5,6 +5,7 @@ import type { BgTaskView } from "../type";
 import { fmtClock } from "../fmt-clock";
 import { useNow } from "../use-now";
 import { useT, getLang } from "@/lib/i18n";
+import { bgConfirmedSuccess, shellQuietMs, shellTone, shellUnknown, type BgShellUnknown } from "../bg-shell-state";
 
 /**
  * 后台任务（subagent / bg shell）列表 —— Discord 子区在 web 的对应物，挂在顶栏按钮的弹层里（bg-task-button.tsx）。
@@ -66,25 +67,72 @@ function fmtDuration(ms?: number): string {
 }
 
 const QUIET_MS = 3 * 60_000; // subagent 超过这么久没写记录 → 标「静默」（仍在跑，只是在等命令/CI）
+const SHELL_QUIET_MS = 60_000; // 后台 shell 超过这么久没输出 → 标「N 无输出 · 可能仍在运行」（静默不等于结束，bg-shell-state.ts）
+
+/** 本面板 shell 专用的几句文案（i18n-dict.ts 已到行数上限，沿用本文件「行数」那种就地中英分支） */
+const zhEn = (zh: string, en: string) => (getLang() === "en" ? en : zh);
+
+/** 「无输出 N」常显（与 subagent 的「静默 N」同宽量级）；「可能仍在运行」窄屏收进 title，免得 390 宽把标题和停止键挤掉 */
+function ShellQuiet({ d }: { d: string }) {
+  const tail = zhEn(" · 可能仍在运行", " · may still be running");
+  return (
+    <span className="font-sans opacity-70" title={zhEn(`${d} 无输出`, `no output for ${d}`) + tail}>
+      {zhEn(`无输出 ${d}`, `no output ${d}`)}
+      <span className="hidden sm:inline">{tail}</span>
+    </span>
+  );
+}
+
+/** 「状态未知」：不转圈（不假装在看着它跑）、也不画完成；「可能仍在运行」同 ShellQuiet 窄屏收进 title */
+function ShellUnknown({ why }: { why: BgShellUnknown }) {
+  useT(); // 订阅语言切换
+  const hint =
+    why === "unreadable"
+      ? zhEn("输出文件暂时读不到（权限 / IO），无法确认进度；恢复可读后继续跟踪", "Output file can't be read right now (permission / IO); will resume tracking once readable")
+      : zhEn("已不在跟踪（bridge 重启 / 输出文件已消失），无法确认是否已结束", "No longer tracked (bridge restarted / output file gone); can't confirm it ended");
+  const tail = zhEn(" · 可能仍在运行", " · may still be running");
+  return (
+    <span className="ml-1 shrink-0 opacity-60" title={hint + tail}>
+      ? {zhEn("状态未知", "status unknown")}
+      <span className="hidden sm:inline">{tail}</span>
+    </span>
+  );
+}
+
+/** shell 卡结束后的状态：只有读到退出行才进已结束组；0 才画绿勾，非 0 标失败（不可确认的留在运行组，见 ShellUnknown） */
+function ShellEnd({ t }: { t: BgTaskView }) {
+  useT(); // 订阅语言切换
+  const tone = shellTone(t.shellEnd);
+  const code = t.shellEnd?.kind === "exited" ? t.shellEnd.code : null;
+  if (tone === "success") return <span className="ml-1 shrink-0 text-success">✓ exit 0 {fmtDuration(t.durationMs)}</span>;
+  if (tone === "failed") return <span className="ml-1 shrink-0 text-error">✗ exit {code} {fmtDuration(t.durationMs)}</span>;
+  return <ShellUnknown why="untracked" />;
+}
 
 /** 卡片右侧的状态：运行中 = 转圈 + 耗时 + 上下文 + 静默提示；结束 = 真实收尾状态 + 时长。
  *  每秒走的时钟只放在这里——放到面板上会让每张卡（连同最多 500 行的进度视口）每秒重渲染一遍 */
 function BgStatus({ t }: { t: BgTaskView }) {
   const tr = useT();
   const p = t.progress;
-  const now = useNow(t.status === "running" && p?.startedTs ? 1000 : 0);
+  const shell = t.kind === "shell";
+  const unknown = shellUnknown(t);
+  const now = useNow(t.status === "running" && !unknown && (p?.startedTs || shell) ? 1000 : 0);
+  if (t.status !== "running" && shell) return <ShellEnd t={t} />;
+  if (unknown) return <ShellUnknown why={unknown} />;
   if (t.status !== "running") {
     if (t.endStatus === "stopped") return <span className="ml-1 shrink-0 opacity-50">⏹ {tr("已停止")} {fmtDuration(t.durationMs)}</span>;
     if (t.endStatus === "idle") return <span className="ml-1 shrink-0 opacity-50">⏸ {tr("无动静结束")} {fmtDuration(t.durationMs)}</span>;
     return <span className="ml-1 shrink-0 text-success">✓ {fmtDuration(t.durationMs)}</span>;
   }
-  const quietMs = p?.lastTs ? now - p.lastTs : 0;
+  const quietMs = shell ? 0 : p?.lastTs ? now - p.lastTs : 0;
+  const shellQuiet = shell ? shellQuietMs(t, now) : 0;
   return (
     <span className="ml-1 flex shrink-0 items-center gap-1.5 font-mono tabular-nums text-warning-soft-80">
       <span className="loading loading-spinner loading-xs text-warning" />
       {!!p?.startedTs && <span>{fmtClock(now - p.startedTs)}</span>}
       {!!p?.ctxTokens && <span className="opacity-60">{Math.round(p.ctxTokens / 1000)}k</span>}
       {quietMs > QUIET_MS && <span className="font-sans opacity-70">{tr("静默")} {fmtClock(quietMs).replace(/ \d+s$/, "")}</span>}
+      {shellQuiet >= SHELL_QUIET_MS && <ShellQuiet d={fmtClock(shellQuiet).replace(/ \d+s$/, "")} />}
     </span>
   );
 }
@@ -109,7 +157,7 @@ const BgTaskCard = memo(function BgTaskCard({ t }: { t: BgTaskView }) {
           {(t.title || (t.kind === "shell" ? tr("后台命令") : "subagent")).replace(/^[🐚🧵🤖]\s*/u, "")}
         </span>
         <BgStatus t={t} />
-        {!t.progress && t.lines.length > 0 && (
+        {(!t.progress || t.kind === "shell") && t.lines.length > 0 && (
           <span className="ml-auto shrink-0 opacity-40">{getLang() === "en" ? `${t.lines.length} line${t.lines.length > 1 ? "s" : ""}` : `${t.lines.length} 行`}</span>
         )}
         {/* 停止 = 请 agent 用 TaskStop(bridge 无 kill 权柄);✕ = 收起卡片(纯前端)。
@@ -198,6 +246,9 @@ export function BgTaskList() {
   if (!tasks.length) return null;
   const running = tasks.filter((t) => t.status === "running");
   const done = tasks.filter((t) => t.status !== "running");
+  // 已结束组的 shell 都读到了退出行（状态未知的留在运行组，bg-shell-state.ts）；
+  // 折叠行的绿勾只代表确认成功：有 shell 非 0 退出时换成中性的「已结束」（subagent 维持原显示）
+  const allOk = done.every((t) => t.kind !== "shell" || bgConfirmedSuccess(t));
   return (
     <div className="flex flex-col gap-1.5">
       {running.length > 0 && <TaskRows tasks={running} />}
@@ -208,7 +259,7 @@ export function BgTaskList() {
               className="self-start text-[11px] text-base-content/35 hover:text-base-content/60"
               onClick={() => setShowDone(false)}
             >
-              {tr("收起已完成")}
+              {allOk ? tr("收起已完成") : zhEn("收起已结束", "Collapse ended")}
             </button>
             <TaskRows tasks={done} />
           </>
@@ -218,9 +269,9 @@ export function BgTaskList() {
             onClick={() => setShowDone(true)}
             title={tr("展开已完成的后台任务")}
           >
-            <span className="text-success-soft-70">✓</span>
+            <span className={allOk ? "text-success-soft-70" : "opacity-60"}>{allOk ? "✓" : "•"}</span>
             <span>
-              {tr("{n} 个已完成", { n: done.length })}
+              {allOk ? tr("{n} 个已完成", { n: done.length }) : zhEn(`${done.length} 个已结束`, `${done.length} ended`)}
             </span>
             <span className="opacity-50">›</span>
           </button>
