@@ -6,7 +6,7 @@ import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } fr
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
-import { isHumanDirect, markPmTransfer, retryLater, setPmRoleRoute, undoPmTransfer } from "../pm-held-transfer.js";
+import { isCallerPushback, isHumanDirect, markPmTransfer, retryLater, setPmRoleRoute, undoPmTransfer, type PmTarget } from "../pm-held-transfer.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
 interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile> }
@@ -40,6 +40,8 @@ export async function deliverPmLocal<P extends Receipt>(
       if (refused) return refused;
       undoPmTransfer(env, via); // an earlier replay may have pointed it at the active PM
     }
+    // The predecessor's own answer stays its own: an older build / failed retry may have pointed it at the active PM.
+    if (pushback && own) undoPmTransfer(env, via);
     if (borrowed) env.to = via;
     return send(env, via);
   }
@@ -127,26 +129,19 @@ async function finalScopeRefusal(env: Envelope, name: string, facts: RouteFacts)
   return { envelope: env, outcome: { kind: "dropped", reason: `API credential scope excludes ${name}` } };
 }
 
-// Answers pushed back to the agent that asked: local send_to_agent replies / drains / expiries, and HTTP peer replies.
-const PUSHBACK_ID = /^(?:agent_(?:reply|drain|withheld|expired|apierr)|reply_fwd)_/;
-function isCallerPushback(env: Envelope): boolean {
-  if (env.meta.triggerKind === "peer_http") return true;
-  return env.from.kind === "local" && env.meta.triggerKind === "agent_tool" && PUSHBACK_ID.test(env.meta.messageId)
-    && (env.intent === "response" || !env.meta.messageId.startsWith("reply_fwd_"));
-}
-
 /**
  * 押后队列的归属判定（收件箱领取 / 计数、flush 交给当班 PM）：同 deliverPmLocal 的转交规则，但前任自己请求的回程不看在不在线——
  * 押着的就留给它本人，不从正文猜身份。台账读不出来按「留在原频道」，和改动前一样
  */
-export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: Envelope) => string | null {
+export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: Envelope) => PmTarget | null {
   return (channelId) => {
     const { db, agents } = facts ?? { db: ledgerDb(), agents: readRegistryAgentsSync() };
     const original = agents.find((a) => a.channelId === channelId);
     return (env) => {
       if (!db || !original?.projectId || isHumanDirect(env) || isCallerPushback(env)) return null;
       try {
-        return pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+        const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+        return name ? { agentName: name, channelId: agents.find((a) => a.name === name && a.projectId === original.projectId)?.channelId } : null;
       } catch (e) {
         console.error("[pm-role] held ownership check failed", (e as Error).message);
         return null;

@@ -14,6 +14,17 @@ export function isHumanDirect(env: Envelope): boolean {
   return isOwnerSource(env.from) && !env.meta.forwarded && env.meta.triggerKind !== "peer_http";
 }
 
+// Answers pushed back to the agent that asked: local send_to_agent replies / drains / expiries, and HTTP peer replies.
+const PUSHBACK_ID = /^(?:agent_(?:reply|drain|withheld|expired|apierr)|reply_fwd)_/;
+/** 回程：只认 bridge 自己写的来源 / 触发方式 / 消息号前缀，不从正文猜（同一判据给投递、押后归属、存量双队配对用） */
+export function isCallerPushback(env: Envelope): boolean {
+  if (env.meta.triggerKind === "peer_http") return true;
+  return env.from.kind === "local" && env.meta.triggerKind === "agent_tool" && PUSHBACK_ID.test(env.meta.messageId)
+    && (env.intent === "response" || !env.meta.messageId.startsWith("reply_fwd_"));
+}
+/** 押后队列里留给原收件人（押进的那个队 item.to）的：人类直聊、它自己请求的回程。信封后来被旧版改指别人也一样 */
+const staysWithAddressee = (env: Envelope): boolean => isHumanDirect(env) || isCallerPushback(env);
+
 /** 记在 env.pmTransfer：转给了哪个频道、正文前加的抬头原样（legacy = 旧版转交过，抬头已在正文里但没有记录，不再加） */
 interface PmTransfer { from: string; to: string; header: string; legacy?: true }
 type Transferred = Envelope & { pmTransfer?: PmTransfer };
@@ -80,7 +91,7 @@ const sameLetter = (a: Envelope, b: Envelope): boolean => {
 
 /**
  * 存量：旧版代码（或交接途中崩溃）留下的 A/B 双队——A 队条目的信封已转给 B（env.to=B），B 队也押着同一封。
- * B 队有对应的一条（同一对象，或重启后读回的同一封：messageId / thread / ts / intent / 发送方都相同）：角色通知摘 A，人类直聊摘 B。
+ * B 队有对应的一条（同一对象，或重启后读回的同一封：messageId / thread / ts / intent / 发送方都相同）：角色通知摘 A，人类直聊和 A 本人请求的回程摘 B。
  * 一条对一条配对，同一 messageId 的两次合法点击各配各的。B 队没有对应的不摘：按新规则再转一次（不再加抬头），成功即交出。
  * 任何一个频道 flush 之前都把所有频道对一遍（不只扫到的这个）：B 先投掉自己那份之后 A 再扫就找不到 twin 了，
  * 只扫 A 的话结果随扫描先后变（B 先投 → A 那份又转给 B 一次）。返回原目标无法证明、须保留待诊断的直聊条目。
@@ -95,7 +106,8 @@ export function adoptStrandedTransfers(held: HeldQueue): Set<HeldItem> {
  * 频道 → 押在它队里的一封按 PM 角色该归哪位当班 PM（null = 留在本频道）。规则同 deliverPmLocal（人类直聊、前任自己请求的回程不转），
  * 由 bridge/local-api/project-pm-delivery.ts 注册；每个频道判一次只读一次台账 / 注册表，没有候选条目就不读
  */
-type PmRoleRoute = (channelId: string) => (env: Envelope) => string | null;
+export interface PmTarget { agentName: string; channelId?: string }
+type PmRoleRoute = (channelId: string) => (env: Envelope) => PmTarget | null;
 let pmRoleRoute: PmRoleRoute = () => () => null;
 export function setPmRoleRoute(fn: PmRoleRoute): PmRoleRoute {
   const prev = pmRoleRoute;
@@ -104,16 +116,17 @@ export function setPmRoleRoute(fn: PmRoleRoute): PmRoleRoute {
 }
 
 /**
- * channelId 队里归当班 PM 的角色消息：旧版已转过（信封指向别的频道）的，和切换前押进旧 PM 队、信封还指着旧 PM 的。
+ * channelId 队里归当班 PM 的角色消息 → 当班 PM：切换前押进旧 PM 队的，和旧版已转过（信封指向别的频道）的，一律按原收件队（item.to）重判角色——
+ * 信封指向别人不算证据：旧版转交 / 失败重试后的前任本人回程信封也指着别人，仍归前任（tests/project-pm-held-inbox.test.ts legacy-return）。
  * 旧 PM 的收件箱不领不 ack，flush 不等旧 PM 在线 / 空闲就交给当班 PM（tests/project-pm-held-inbox.test.ts retired-offline-stranded）
  */
-export function roleHandoffs(held: HeldQueue, channelId: string, unresolved: Set<HeldItem>): Set<HeldItem> {
-  const away = new Set<HeldItem>();
+export function roleHandoffs(held: HeldQueue, channelId: string, unresolved: Set<HeldItem>): Map<HeldItem, PmTarget> {
+  const away = new Map<HeldItem, PmTarget>();
   let route: ReturnType<PmRoleRoute> | undefined;
   for (const item of held.get(channelId) ?? []) {
-    const to = item.env.to;
-    if (unresolved.has(item) || isHumanDirect(item.env) || to.kind !== "local") continue;
-    if (to.channelId !== channelId || (route ??= pmRoleRoute(channelId))(item.env)) away.add(item);
+    if (unresolved.has(item) || staysWithAddressee(item.env) || item.env.to.kind !== "local") continue;
+    const pm = (route ??= pmRoleRoute(channelId))(item.env);
+    if (pm) away.set(item, pm);
   }
   return away;
 }
@@ -153,10 +166,10 @@ function adoptIn(held: HeldQueue, channelId: string, unresolved: Set<HeldItem>):
       const to = item.env.to;
       if (unresolved.has(item) || drop.has(item) || item.to.channelId !== channelId || to.kind !== "local" || to.channelId === channelId) continue;
       const twin = (held.get(to.channelId) ?? []).find((i) => !used.has(i) && !unresolved.has(i) && i.to.channelId === to.channelId
-        && isHumanDirect(i.env) === isHumanDirect(item.env) && match(i.env, item.env));
+        && staysWithAddressee(i.env) === staysWithAddressee(item.env) && match(i.env, item.env));
       if (!twin) continue;
       used.add(twin);
-      if (isHumanDirect(item.env)) {
+      if (staysWithAddressee(item.env)) {
         // Keep the existing item (including its age / lease); never recreate a deleted owner message or ask.
         // remove persists the whole map after undo, so restart observes both changes together.
         undoPmTransfer(item.env, item.to);

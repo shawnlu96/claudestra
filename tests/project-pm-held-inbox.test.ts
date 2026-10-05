@@ -9,6 +9,7 @@ import { HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-que
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
 import { deliverPmLocal, pmRoleRoute } from "../src/bridge/local-api/project-pm-delivery.js";
 import { setPmRoleRoute } from "../src/bridge/pm-held-transfer.js";
+import { takeApiWaiters, type ApiWaiter } from "../src/bridge/stop-settle.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { switchProjectPm } from "../src/lib/pm-role-switch.js";
 import { A, B, P, pmFixture } from "./pm-role-fixture.test.js";
@@ -33,7 +34,8 @@ async function inboxWorld() {
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   let held = new HeldQueue(path);
   const clients = new Map([CA, CB].map((c) => [c, { ws: ws(c) }]));
-  const calls = new AgentCallBook(null), busy = new Set<string>();
+  const calls = new AgentCallBook(null), busy = new Set<string>(), receipts = new Map<string, ApiWaiter[]>();
+  const opts = { busyOnSend: false };
   const sent: { channel: string; text: string }[] = [], rendered: { channel: string; text: string }[] = [];
   const mirrors: { channel: string; text: unknown }[] = [];
   cleanups.push(subscribeEvents({}, (e) => { if (e.type === "chat_message") mirrors.push({ channel: e.chatId, text: e.data.text }); }));
@@ -52,13 +54,14 @@ async function inboxWorld() {
     const d: FlushDeps = {
       held, compacting: () => false, working: async (c) => busy.has(c), isHumanRequest: () => false,
       client: (c) => clients.get(c), touch: (c, e) => calls.touchDelivered(c, e), settled: async () => true, now: () => 1000,
-      deliver: (env, to, wanted) => deliverPmLocal(env, to, clients, calls, new Map(), async (e, t) => {
+      deliver: (env, to, wanted) => deliverPmLocal(env, to, clients, calls, receipts, async (e, t) => {
         if (wanted && !wanted()) return { envelope: e, outcome: { kind: "dropped", reason: "removed" } };
         if (busy.has(t.channelId)) {
           held.holdEnv(e);
           return { envelope: e, outcome: { kind: "sent", note: "queued" } };
         }
         sent.push({ channel: t.channelId, text: e.content });
+        if (opts.busyOnSend) busy.add(t.channelId); // 投进去就开了一轮
         return { envelope: e, outcome: { kind: "sent" } };
       }, { db: fixture.db, agents: state.agents, principals: async () => ({ principals: state.principals }) }),
     };
@@ -67,7 +70,8 @@ async function inboxWorld() {
   const restart = () => { held = new HeldQueue(path); init(); };
   const q = (c: string) => held.get(c) ?? [];
   const scope = (agents: string[]) => { Object.assign(state.principals.find((p) => p.id === "token:tok_peer")!, { agents }); };
-  return { get held() { return held; }, take, flush, restart, q, scope, clients, calls, busy, sent, rendered, mirrors };
+  const principal = (p: Record<string, unknown>) => { state.principals.push(p as never); };
+  return { get held() { return held; }, take, flush, restart, q, scope, principal, opts, receipts, clients, calls, busy, sent, rendered, mirrors };
 }
 
 function ownerLetter(text = BODY): Envelope {
@@ -484,3 +488,102 @@ test("pre-switch-role-inbox: A's own direct chat and request answer stay takeabl
   expect(r.text).toContain("direct owner A");
   expect(r.text).not.toContain("role for B");
 });
+
+// followup-reliability-PMSWR r1 handoff-mixed-turn：转给当班 PM 也按它的分轮规则，两个 peer principal 不进同一轮、Stop 兜底不串答复
+function peerRequest(w: World, id: string, tokenId: string, peer: string): void {
+  preSwitchRole(w, `${id} body`, (env) => {
+    env.from = { kind: "api", tokenId, peer, name: peer };
+    env.intent = "request";
+    env.meta = { ...env.meta, messageId: id, threadId: `thread-${id}` };
+  });
+  w.receipts.set(`${tokenId}|${CA}`, [{ agentChannelId: CA, agentName: A, tokenId, messageId: id, threadId: `thread-${id}` }]);
+}
+const stopB = (w: World, text: string) => takeApiWaiters(w.receipts, {
+  cid: CB, stopChannelId: CB, stopWs: 1, candidateWs: 1, event: "Stop", drain: { text },
+}, true, new Set(), w.held.ids(CB)).map((s) => ({ peer: s.waiter.tokenId, reply: s.result.reply }));
+
+for (const a of ["online", "offline"] as const) {
+  test(`handoff-mixed-turn: A ${a}, two peer principals handed to idle B one turn each; Stop settles only that peer`, async () => {
+    const w = await inboxWorld();
+    w.principal({ id: "token:tok_second", role: "external", peer: "second", agents: [A, B], createdAt: "2026-01-01" });
+    peerRequest(w, "first-peer", "tok_peer", "remote");
+    peerRequest(w, "second-peer", "tok_second", "second");
+    if (a === "offline") w.clients.delete(CA);
+    w.opts.busyOnSend = true;
+    await w.flush(CA);
+    expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\nfirst-peer body` }]);
+    expect(w.q(CA).map((i) => i.env.meta.messageId)).toEqual(["second-peer"]);
+    expect(stopB(w, "private answer to first peer")).toEqual([{ peer: "tok_peer", reply: "private answer to first peer" }]);
+    w.busy.delete(CB);
+    await w.flush(CA);
+    expect(w.sent.map((e) => e.channel)).toEqual([CB, CB]);
+    expect(w.sent[1]!.text).toBe(`${HEADER}\nsecond-peer body`);
+    expect(stopB(w, "answer to second")).toEqual([{ peer: "tok_second", reply: "answer to second" }]);
+    expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+  });
+}
+
+test("handoff-mixed-turn: B mid-turn for another caller parks the peer request in B's queue, never into that turn", async () => {
+  const w = await inboxWorld();
+  peerRequest(w, "first-peer", "tok_peer", "remote");
+  w.clients.delete(CA);
+  w.busy.add(CB);
+  await w.flush(CA);
+  expect(w.sent).toEqual([]);
+  expect(w.q(CA)).toEqual([]);
+  expect(w.q(CB).map((i) => i.env.meta.messageId)).toEqual(["first-peer"]);
+  expect(w.q(CB)[0]!.env.meta.waitForIdle).toBe(true);
+  w.restart(); // 押进 B 队的也落盘
+  w.busy.delete(CB);
+  await w.flush(CB);
+  expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\nfirst-peer body` }]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+});
+
+test("handoff-mixed-turn: B's own flush running blocks A's handover until it releases", async () => {
+  const w = await inboxWorld();
+  peerRequest(w, "first-peer", "tok_peer", "remote");
+  w.clients.delete(CA);
+  expect(w.held.claim(CB)).toBe(true);
+  await w.flush(CA);
+  expect(w.sent).toEqual([]);
+  expect(w.q(CA)).toHaveLength(1);
+  w.held.release(CB);
+  await w.flush(CA);
+  expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\nfirst-peer body` }]);
+});
+
+// followup-reliability-PMSWR r1 legacy-return-misroute：旧版 / 重试后信封已指向当班 PM 的前任本人回程，仍按原收件队留给前任
+function legacyReturn(w: World, marked: boolean): HeldItem {
+  return preSwitchRole(w, marked ? `[系统转交：这是回复前任 PM ${A} 的问题；当班 PM ${B}]\nprivate reply to A's own question` : "private reply to A's own question", (env) => {
+    env.intent = "response";
+    env.meta = { ...env.meta, messageId: "agent_reply_legacy", triggerKind: "agent_tool" };
+    env.to = target(CB);
+    if (marked) (env as Envelope & { pmTransfer?: unknown }).pmTransfer = { from: CA, to: CB, header: `[系统转交：这是回复前任 PM ${A} 的问题；当班 PM ${B}]` };
+  });
+}
+
+for (const marked of [false, true]) {
+  for (const twin of [false, true]) {
+    test(`legacy-return-misroute: ${marked ? "recorded" : "legacy"} transfer${twin ? " + B twin" : ""}, A offline keeps it; back online only A gets it`, async () => {
+      const w = await inboxWorld();
+      const item = legacyReturn(w, marked);
+      if (twin) { w.held.set(CB, [{ env: { ...item.env, to: target(CB) }, to: target(CB), heldAt: 200 }]); w.restart(); }
+      const a = w.clients.get(CA)!;
+      w.clients.delete(CA);
+      for (let i = 0; i < 2; i++) { await Promise.all([w.flush(CA), w.flush(CB)]); w.restart(); }
+      expect(w.sent).toEqual([]);
+      expect(w.q(CB)).toEqual([]);
+      expect(w.q(CA).map((i) => i.env.meta.messageId)).toEqual(["agent_reply_legacy"]);
+      w.clients.set(CA, a);
+      const r = await w.take(CA, { read: "agent_reply_legacy" });
+      expect(r.n).toBe(1); // inbox 与 flush 同一归属：A 本人可领
+      expect(r.text).toContain("private reply to A's own question");
+      w.restart();
+      await w.flush(CA); await w.flush(CB);
+      if (w.q(CA).length) { w.q(CA)[0]!.lease!.at -= INBOX_LEASE_MS + 1; await w.flush(CA); }
+      expect(w.sent).toEqual([{ channel: CA, text: "private reply to A's own question" }]);
+      expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+    });
+  }
+}
