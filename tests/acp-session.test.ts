@@ -274,15 +274,23 @@ describe("AcpSession · 用户输入已写出、拿不到可信结果（CX-H）"
     expect(await s4).toMatchObject({ outcome: "deliveredUnknown", failure: { ...UNKNOWN, message: expect.stringContaining("30000ms") } });
   });
 
-  for (const mode of ["回包不合规", "写入抛错"] as const) {
+  /** steer 写出之后的几种「拿不到可信结果」：opts 改线路，answer 是适配器回的东西（不给 = 线路自己出错，不用回） */
+  const steerFaults: Record<string, { opts?: Parameters<typeof fakeAdapter>[0]; answer?: (f: ReturnType<typeof fakeAdapter>) => void }> = {
+    回包不合规: { answer: (f) => badReply(f, "_session/steering") },
+    写入抛错: { opts: { onWrite: throwOn("_session/steering") } },
+    "结果是 null": { answer: (f) => f.reply("_session/steering", null) },
+    "结果是 {}": { answer: (f) => f.reply("_session/steering", {}) },
+    "outcome 认不出": { answer: (f) => f.reply("_session/steering", { outcome: "queuedSomewhere" }) },
+  };
+  for (const [mode, how] of Object.entries(steerFaults)) {
     test(`整条链：steer ${mode} 时不改回 prompt，适配器只收到这条输入一次、只出一张卡`, async () => {
-      const f = fakeAdapter(mode === "写入抛错" ? { onWrite: throwOn("_session/steering") } : {});
+      const f = fakeAdapter(how.opts);
       await attached(f);
       const h = looped(f);
       expect(await h.loop.submit("A")).toBe("prompt");
       const b = h.loop.submit("B");
       await tick();
-      if (mode === "回包不合规") badReply(f, "_session/steering");
+      how.answer?.(f);
       await b;
       f.reply("session/prompt", { stopReason: "end_turn" }); // A 收尾：以前 B 在这之后被当 prompt 重发
       await tick();
@@ -308,6 +316,52 @@ describe("AcpSession · 用户输入已写出、拿不到可信结果（CX-H）"
     expect(h.failures).toHaveLength(2);
     expect(h.failures.every((x) => x.kind === "error" && x.retry === false && x.deliveryUnknown)).toBe(true);
     expect(new Set(h.failures.map((x) => x.key)).size).toBe(2);
+  });
+
+  test("steer 回包合规但结果认不出（null / {} / 认不出的 outcome）→ deliveredUnknown；failed / deferred 照旧 failed", async () => {
+    for (const result of [null, {}, { outcome: "queuedSomewhere" }]) {
+      const f = fakeAdapter();
+      await attached(f);
+      const s = f.session.steer("x");
+      f.reply("_session/steering", result);
+      expect(await s).toMatchObject({ outcome: "deliveredUnknown", failure: { ...UNKNOWN, message: expect.stringContaining("认不出") } });
+    }
+    for (const outcome of ["failed", "deferred"]) {
+      const f = fakeAdapter();
+      await attached(f);
+      const s = f.session.steer("y");
+      f.reply("_session/steering", { outcome });
+      expect(await s).toEqual({ outcome: "failed" });
+    }
+  });
+
+  test("prompt 回包合规但结果认不出（{} / null / 认不出的 stopReason）：不报 done，按投递不明；合法终态照旧 done", async () => {
+    for (const result of [{}, null, { stopReason: "weird" }]) {
+      const f = fakeAdapter();
+      await attached(f);
+      const p = f.session.prompt("a");
+      f.reply("session/prompt", result);
+      expect(await p).toMatchObject({ kind: "failed", failure: { ...UNKNOWN, message: expect.stringContaining("认不出") } });
+    }
+    const f = fakeAdapter();
+    await attached(f);
+    for (const stopReason of ["end_turn", "max_tokens", "max_turn_requests", "refusal"]) {
+      const p = f.session.prompt("b");
+      f.reply("session/prompt", { stopReason });
+      expect(await p).toEqual({ kind: "done" });
+    }
+  });
+
+  test("适配器明说投递不明但错误消息为空：prompt / steer 照样按投递不明，文案有兜底", async () => {
+    const f = fakeAdapter();
+    await attached(f);
+    const quiet = (method: string) => f.raw({ id: f.last(method).id, error: { code: -32603, message: "", data: { deliveryUnknown: true } } });
+    const p = f.session.prompt("a");
+    quiet("session/prompt");
+    expect(await p).toMatchObject({ kind: "failed", failure: { ...UNKNOWN, message: expect.stringContaining("对端没说明原因") } });
+    const s = f.session.steer("b");
+    quiet("_session/steering");
+    expect(await s).toMatchObject({ outcome: "deliveredUnknown", failure: { ...UNKNOWN, message: expect.stringContaining("对端没说明原因") } });
   });
 
   test("保持原样：写出之前连接已断（sent:false）→ prompt 照旧可续跑，steer 照旧抛错（调度器改回 prompt）", async () => {

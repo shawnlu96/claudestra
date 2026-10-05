@@ -90,8 +90,8 @@ export function classifyPromptError(e: unknown, turnKey: string): AcpFailure {
  * 没写出（sent:false）和适配器明确的错误返回 null，照旧处理。tests/acp-session.test.ts「CX-H」。
  */
 export function deliveryUnknownCause(e: unknown): string | null {
-  if (e instanceof RpcLostError) return e.sent ? e.message : null;
-  return e instanceof RpcError && (e.data as { deliveryUnknown?: unknown } | undefined)?.deliveryUnknown === true ? e.message : null;
+  const marked = e instanceof RpcLostError ? e.sent : e instanceof RpcError && (e.data as { deliveryUnknown?: unknown } | undefined)?.deliveryUnknown === true;
+  return marked ? (e as Error).message || "对端没说明原因" : null; // 调用方按 !== null 判：标记看的是 sent / data，不看 message 是否为空
 }
 
 /** 卡上附的原文上限：够人工核对、重发，又不让一条贴了整份日志的消息撑爆卡片和流里的错误条目 */

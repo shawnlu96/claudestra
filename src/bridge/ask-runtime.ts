@@ -196,6 +196,7 @@ function noteAbsent(source: RuntimeSource, channelId: string): void {
     try {
       const db = askDbIfExists();
       for (const a of db && hasAsksTable(db) ? unclearedRuntimeAsks(db, source, channelId) : []) {
+        if (a.extra.deliveryUnknown === true) continue; // 只能由人结（RuntimeAskInput.deliveryUnknown）：屏上有没有弹框和它无关，也不记消失
         const c = a.state === "open" ? closeAsk(db!, a.id, "cancelled", t("弹框已关闭", "dialog closed"), Date.now(), { clearedAt: Date.now() }) : null;
         if (c) publishAsk(c);
         else markCleared(a.id);

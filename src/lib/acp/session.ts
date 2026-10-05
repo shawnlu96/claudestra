@@ -8,7 +8,7 @@
  * - idle 带了这一轮的结局（Pi 适配器的 _meta.claudestra.turn）就按它兑现：steering 另起的回合失败了也得出卡、报 StopFailure。
  * - 适配器自己开的回合（Pi 的异步子任务回调 triggerTurn、压缩后续跑）：线程从非 active 变 active 时既没有 prompt 在途、也没有
  *   steer 另起的回合在等，就当自发回合交给宿主（onSelfTurn），等到下一个 idle。codex-acp 只在宿主的 prompt / steer 期间变 active，不受影响。
- * - prompt / steer 的输入写出后拿不到可信结果（failures.ts deliveryUnknownCause）：prompt 以不可重试的失败收尾，steer 回 deliveredUnknown，
+ * - prompt / steer 的输入写出后拿不到可信结果（failures.ts deliveryUnknownCause，或回包合规但结果认不出）：prompt 以不可重试的失败收尾，steer 回 deliveredUnknown，
  *   都不 reject——调度器的 catch 会把 reject 的 steer 改回 prompt 重发（turn.ts）。没写出的失败照旧抛 / 照旧分类。
  * 规矩与形状见 docs/runtimes/codex-acp.md；tests/acp-session.test.ts。
  */
@@ -43,6 +43,10 @@ export interface SessionDeps {
   /** 适配器自己开了一轮（见文件头）：done 在这一轮结束时兑现。不给就不跟（create / fork 的短命引导会话） */
   onSelfTurn?(done: Promise<PromptOutcome>): void;
 }
+
+/** session/prompt 的合法终态（ACP StopReason）。之外的结果（{}、null、认不出的值）说明不了输入怎样了：输入已经写出，按投递不明收尾 */
+const STOP_REASONS = new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
+const badResult = (method: string, r: unknown) => `适配器回了认不出的 ${method} 结果（${(JSON.stringify(r) ?? String(r)).slice(0, 200)}）`;
 
 /** _claudestra/cancel 等适配器清完队列最多这么久（bridge 等回执 1.5s，过了照样认迟到的作废列表） */
 const CANCEL_TIMEOUT_MS = 5_000;
@@ -137,10 +141,11 @@ export class AcpSession {
       const r = await this.rpc.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { timeoutMs, onResult: settled });
       const air = airFailureOf(r);
       if (air) return { kind: "failed", failure: classifyAirFailure(air, this.label) };
-      return r?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
+      if (!STOP_REASONS.has(r?.stopReason)) return { kind: "failed", failure: deliveryUnknownFailure(`unknown:${turnKey}`, badResult("session/prompt", r), text) };
+      return r.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
     } catch (e) {
       const lost = deliveryUnknownCause(e);
-      return { kind: "failed", failure: lost ? deliveryUnknownFailure(`unknown:${turnKey}`, lost, text) : classifyPromptError(e, turnKey) };
+      return { kind: "failed", failure: lost !== null ? deliveryUnknownFailure(`unknown:${turnKey}`, lost, text) : classifyPromptError(e, turnKey) };
     } finally {
       settled();
     }
@@ -164,13 +169,14 @@ export class AcpSession {
       r = await this.rpc.request("_session/steering", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { onResult });
     } catch (e) {
       const lost = deliveryUnknownCause(e);
-      if (lost) return unknown(lost);
+      if (lost !== null) return unknown(lost);
       throw e;
     }
     if (r?.outcome === "injected" || tracked) return { outcome: "injected" };
     if (r?.outcome === "startedNewTurn") return { outcome: "startedNewTurn", done: done ?? this.waitEndAfter(this.statusSeq) };
-    if (r?.outcome === "deliveredUnknown") return unknown(typeof r.message === "string" && r.message ? r.message : "适配器报投递结果不明");
-    return { outcome: "failed" };
+    if (r?.outcome === "failed" || r?.outcome === "deferred") return { outcome: "failed" }; // 适配器明说没投递（Pi 叫停中是 deferred）：宿主改回 prompt
+    if (r?.outcome !== "deliveredUnknown") return unknown(badResult("_session/steering", r)); // null / {} / 认不出的 outcome：已写出，不能当没投递
+    return unknown(typeof r.message === "string" && r.message ? r.message : "适配器报投递结果不明");
   }
 
   /**
