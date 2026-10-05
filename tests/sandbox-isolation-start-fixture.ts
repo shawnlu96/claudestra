@@ -284,6 +284,8 @@ interface Entry {
   port: number | null;
   pid: number | null;
   stopped: boolean;
+  /** 本次启动（含失败路径的收尾）；stop 等它落定后再 down，收尾报完就不会再冒出新资源 */
+  run: Promise<Started> | null;
 }
 
 /** 夹具起的沙箱登记表：起之前就登记，正常收尾 stop 摘掉；断言中途失败或起到一半 runner 收尾时 stopAll 兜底（detached bridge 不随测试进程退出） */
@@ -292,22 +294,28 @@ export class Fleet {
 
   async start(spec: StartSpec): Promise<Started> {
     if (this.live.has(spec.root)) throw new Error(`${spec.root} 已登记在跑，不能再起`);
-    const it: Entry = { spec, up: null, port: null, pid: null, stopped: false };
+    const it: Entry = { spec, up: null, port: null, pid: null, stopped: false, run: null };
     this.live.set(spec.root, it);
+    const halted = () => new Error(`${spec.root} 起到一半已被收掉，不再尝试`);
     const onPicked = async (p: number, i: number) => {
-      if (it.stopped) throw new Error(`${spec.root} 起到一半已被收掉，不再尝试`);
+      if (it.stopped) throw halted();
       await spec.onPicked?.(p, i);
+      if (it.stopped) throw halted(); // 钩子 await 期间被 stop：此后到 spawn 全是同步代码，这里拦下就不会再起 child
     };
     const onSpawn = (proc: Proc, p: number) => {
       [it.up, it.port] = [proc, p];
       spec.onSpawn?.(proc, p);
     };
-    try {
-      const up = await startSandbox({ ...spec, onPicked, onSpawn });
+    it.run = startSandbox({ ...spec, onPicked, onSpawn }).then((up) => {
       [it.port, it.pid] = [up.port, up.pid];
       return up;
+    });
+    try {
+      const up = await it.run;
+      if (it.stopped) throw new Error(`${spec.root} 起好时已被收掉（由 stop 负责 down 与核验），不算启动成功`);
+      return up;
     } catch (e) {
-      if (this.live.get(spec.root) === it) this.live.delete(spec.root); // 失败路径 startSandbox 已收并把清理结果并进 e
+      if (!it.stopped && this.live.get(spec.root) === it) this.live.delete(spec.root); // 失败路径 startSandbox 已收并把清理结果并进 e
       throw e;
     }
   }
@@ -316,13 +324,15 @@ export class Fleet {
   async stop(root: string): Promise<string[]> {
     const it = this.live.get(root);
     if (!it) return [`${root} 没登记，无从 down`];
-    this.live.delete(root);
     it.stopped = true;
     const bad: string[] = [];
     if (it.up && it.up.exitCode === null && it.up.signalCode === null) {
       killGroup(it.up.pid, "SIGKILL"); // child 还没被回收，组号仍是本次的
       if (!(await within(it.up.exited, CLEANUP_MS))) bad.push(`${root} 起到一半的 up（pid ${it.up.pid}）收不掉`);
     }
+    // 起过 child：等这次启动（成功返回或失败收尾）落定，拿到最终的端口 / pid 再 down；没起过 child 时启动只可能停在 onPicked 钩子里，放行后必被拦下、不会 spawn
+    if (it.up && it.run && !(await within(Promise.allSettled([it.run]), 4 * CLEANUP_MS))) bad.push(`${root} 起到一半的启动 ${4 * CLEANUP_MS}ms 内没落定`);
+    this.live.delete(root);
     const pid = it.pid ?? readPid(root);
     if (it.port !== null && existsSync(join(root, SANDBOX_MARKER))) {
       const d = await runBounded(it.spec, it.spec.argv("down", it.port), CLEANUP_MS);

@@ -34,14 +34,9 @@ const PROD_SID = "11111111-2222-4333-8444-555555555555";
 /** 候选端口禁用表：生产端口与下面拒连负例用的固定端口 */
 const AVOID_PORTS = [DEFAULT_BRIDGE_PORT, 23998, 23999];
 
-let tmp = "";
-let home = "";
-let root = "";
-let shimLog = "";
-let port = 0;
+let [tmp, home, root, shimLog, port] = ["", "", "", "", 0];
 const hits: { proxy: string[]; decoy: string[] } = { proxy: [], decoy: [] };
-let proxy: ReturnType<typeof Bun.serve> | null = null;
-let decoy: ReturnType<typeof Bun.serve> | null = null;
+let [proxy, decoy]: Array<ReturnType<typeof Bun.serve> | null> = [null, null];
 
 function snapshot(dir: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -300,8 +295,7 @@ async function piSide(): Promise<void> {
   expect(start).toMatchObject({ HOME: join(root, "acp-home"), PI_CODING_AGENT_DIR: join(root, "pi-agent"), PI_OFFLINE: "1", BRIDGE_PORT: null, DISCORD_CHANNEL_ID: null, mcp: ["claudestra"] });
   expect(start.argv).toEqual(expect.arrayContaining(["--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates", "-e", "builtin:mcp", "--session-id", info.sessionId]));
   const back = sandbox("manager", "migrate", "--pi", "sbxpi", "--to", "tmux");
-  expect(back.code, back.out).not.toBe(0);
-  expect(back.out).toContain("只走 ACP");
+  expect([back.code === 0, back.out]).toEqual([false, expect.stringContaining("只走 ACP")]);
   expect(sandbox("manager", "kill", "sbxpi").code).toBe(0);
 }
 
@@ -333,9 +327,7 @@ function sandboxEnvOf(): Record<string, string> {
 
 beforeAll(async () => {
   tmp = mkdtempSync("/tmp/sbxi-"); // 短路径：unix socket 上限 104 字节
-  home = join(tmp, "home");
-  root = join(tmp, "sbx");
-  shimLog = join(tmp, "shim.log");
+  [home, root, shimLog] = [join(tmp, "home"), join(tmp, "sbx"), join(tmp, "shim.log")];
   writeFileSync(shimLog, "");
   seedFakeHome();
   writeShims(join(tmp, "shim"));
@@ -345,8 +337,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   if (existsSync(join(root, "bridge.pid"))) sandbox("down");
-  proxy?.stop(true);
-  decoy?.stop(true);
+  [proxy, decoy].forEach((s) => s?.stop(true));
   if (tmp) rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -582,6 +573,15 @@ describe("启动夹具：端口竞争（受控扰动）", () => {
     const late = fleet.start(upSpec(join(tmp, "race-abort"), 45_000)).catch((e) => e);
     const shim = await gateHit(tmuxGate(), 15_000);
     expect([await fleet.stopAll(), await late, alive(shim), existsSync(join(tmp, "race-abort", "bridge.pid")), Date.now() - t0 < 16_000]).toEqual([[], expect.any(StartFailure), false, false, true]);
+  }, 30_000);
+
+  test("onPicked 钩子 await 期间被 stopAll：放行后不再起 child，启动失败、无活 bridge，再收一次也不漏", async () => {
+    const r = join(tmp, "race-hook");
+    let [entered, go, spawned] = [() => {}, () => {}, 0];
+    const inHook = new Promise<void>((ok) => (entered = ok)), gate = new Promise<void>((ok) => (go = ok));
+    const late = fleet.start(upSpec(r, 45_000, { onPicked: async () => { entered(); await gate; }, onSpawn: () => void spawned++ })).catch((e) => e);
+    const first = await inHook.then(() => fleet.stopAll()).finally(go); // 钩子还停着时收：没有 child、没有端口可收；收完放行
+    expect([first, String(await late), await fleet.stopAll(), spawned, existsSync(join(r, "bridge.pid"))]).toEqual([[], expect.stringContaining("起到一半已被收掉"), [], 0, false]);
   }, 30_000);
 
   test("反向故障照常失败、不重跑：非端口原因、端口被本沙箱活宿主占着、候选是生产端口", async () => {
