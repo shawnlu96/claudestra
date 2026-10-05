@@ -96,7 +96,7 @@ wire 校验 → dedup 回放（必须本人事件）→ 当前单 → origin `ls
 状态转移（意图 id = `handoff:<task>:<eventSeq>`）：
 
 ```
-begin  (真 PM, tx) ──▶ intent pending   事件 op:"author_handoff_begin"{from:{agent,session}, to:{agent,session,family,transport}, taskRev, workflowRev, stage, specRev, branch, head, round}
+begin  (真 PM, tx) ──▶ intent pending   事件 op:"author_handoff_begin"{from:{agent,session,family}, to:{agent,session,family,transport}, taskRev, workflowRev, stage, specRev, branch, head, round}
 step   (真 PM, 幂等) ─▶ intent submitted → 记 handoff:<id>:archive 回执 → 复核停止 → 记 handoff:<id>:kill 回执
 complete(真 PM, tx) ─▶ 旧行 retired(retireIntentId=id, 两条回执) + 新行 active(createIntentId=id) + intent done   事件 op:"author_handoff"
 cancel (真 PM, tx) ─▶ intent cancelled（仅在 complete 前；已有的回执事件不删）
@@ -105,7 +105,13 @@ cancel (真 PM, tx) ─▶ intent cancelled（仅在 complete 前；已有的回
 
 - **begin 前置**（同一事务、`--rev/--workflow-rev` CAS）：卡 `code`、`workflow=manual`、`stage ∈ build/fix`、非终态；有 active（非 retiring）author 旧绑定且 `transport ≠ peer`（peer 旧会话无法本机停止，沿用 `stopConvergenceAuthor` 的拒绝口径，报阻塞）；卡上无 `pending/submitted/unknown` 意图；无 `pooled/claimed/unknown` 出借单；新会话 `requireSessionIdentity`（registry 核 runtime / 家族 / 完整名、不得是长驻 PM，`scheduler-session-identity.ts`）；新 sessionId ≠ 旧 sessionId 且未绑在任何卡上。没有旧绑定（从未 auto 过的卡）→ begin 直接写 complete（`applyFixReplacement` 的 `old=null` 分支同理），不需要回执。
 - **step**：复用 `scheduler-retire.ts` 已导出的 `readLiveAgents / archiveReceipt / killOutcome` 与 `stopConvergenceAuthor` 同序检查——旧 agent 还被别的卡 / 审查绑定则拒；registry 里旧 agent 的 sessionId 必须仍等于 `from.session`，否则不归档、不停止；先 `manager archive` 记回执，下一次 step 再复核 `stopped && !pending && !window`（必要时 `manager kill`）后记 kill 回执。回执事件 dedup 键 `handoff:<id>:archive|kill`，重放无副作用。执行者是真 PM 的 CLI 进程（manual 卡不交给调度服务驱动）。
-- **complete 事务**：意图 `submitted`；`task.rev/stage/specRev/branch/headSHA/round` 与 begin 快照一致、`workflow.mode=manual` 且 `workflow.rev` 一致（旧会话在交接期间交付或 PM 改卡 → `conflict`，交接作废需重来）；两条回执存在且 `sessionId = from.session`；当前 active 行仍是 `from`；再跑一次 `requireSessionIdentity(to)`；`preserveSessionHistory`；更新旧行 / 插入新行；`task.agent` 与**当前步**（`stepAtStage` 的 write 或 fix、当前 round）执行者改为 `to.agent`；`task_workflows.rev+1`；事件 dedup `handoff:<id>:done`。不改任何既有事件、不推 stage、不派单。
+- **complete 事务**：意图 `submitted`；`task.rev/stage/specRev/branch/headSHA/round` 与 begin 快照一致、`workflow.mode=manual` 且 `workflow.rev` 一致（旧会话在交接期间交付或 PM 改卡 → `conflict`，交接作废需重来）；两条回执存在且 `sessionId = from.session`；当前 active 行仍是 `from`；再跑一次 `requireSessionIdentity(to)`；`preserveSessionHistory`；更新旧行 / 插入新行；`task.agent` 与**当前步**（`stepAtStage` 的 write 或 fix、当前 round）执行者改为 `to.agent`；**同一条 UPDATE 把 `task_workflows.authorFamily` 改为 `to.family`** 并 `rev+1`（照 `applyFixReplacement` 的 `fix-strategy-session.ts:38` 先例）；事件 dedup `handoff:<id>:done`。不改任何既有事件、不推 stage、不派单。
+- **跨家族交接与审查独立性**：允许 `to.family ≠ from.family`（如 Claude→Codex），但 `authorFamily` 必须在 complete 同一事务里跟着换，否则派审器仍按旧家族选 / 验对侧（`scheduler-plan.ts:149-155` 用 `workflow.authorFamily` 判 `reviewer_independence`、`:154` 用 `familyOtherThan(authorFamily)` 建审查会话、出借池按它挑对侧家族），会把同家族会话当跨模型审查员；同步后：
+  - 无 reviewer：按新家族选对侧（本机建会话或 peer 池），原逻辑不变；
+  - 已有本机 reviewer 且与新作者同家族 / 同 agent：交回 auto 后由原 `reviewSwapPlan`（`scheduler-review-swap.ts:43`，`swapNeeded` 比 `reviewer.family === authorFamily`）走 `review_swap` 归档旧审查员再派；同轮已换过仍不独立 → `reviewer_independence` 升级 PM，不派审；
+  - 已有 reviewer 且仍是对侧家族：保留，同卡复验规则（`reviewer_replaced`）不变；
+  - 同时作者自检 `scheduler-plan.ts:141`（`session.family !== authorFamily` → `author_family`）也因同步而不会误报。
+  授予时再核一次 active author 绑定 `family = workflow.authorFamily`（§3.2 前置），不一致说明有未同步的旧数据 → 拒授予、报 PM。
 - **共存**：开放中的 `author_handoff` 意图本身就让 `resumeCore` 拒（它拒 `submitted/unknown`），也让 `beginRetire` 拒（未结意图）；`currentIntent` 只看 `action='dispatch'`，所以不影响单号；hold（manual→manual）按现规则只取消 `pending`。
 - 交接完成后新会话 `take_order`：`bindingAllows` 认新行；旧会话 `not_current_order`。单号不变（仍是保留的 dispatch id 或 manualOrderId），§3 按实际单号绑定。
 
@@ -136,16 +142,17 @@ review/manual[G] ──scheduler-auto-resume（同一事务判定+resumeCore）�
 
 ```
 { id: "grant:<task>:<eventSeq>", agent: task.agent, session: <当前 active author 绑定的 sessionId>,
-  specRev, branch, priorHead: task.headSHA, round: task.round, stage: task.stage, step: "write"|"fix",
+  specRev, branch, priorHead: task.headSHA, workRound: task.round, stage: task.stage, step: "write"|"fix",  // 工作轮次（授予时 build/fix 的 round）
   stageSeq: stageEnteredSeq(task),                       // 本阶段起点，防跨阶段串单
-  orderId: currentIntent(task, step)?.id ?? manualOrderId(task, step, round),
+  orderId: currentIntent(task, step)?.id ?? manualOrderId(task, step, workRound),   // 绑定原工作单，不随 review 轮次重算
+  family: workflow.authorFamily,
   orderKind: "dispatch" | "manual", orderIntentStatus: <dispatch 时的 status，通常 done>,
   expiresAt: now + ttl(默认 24h, 上限 72h) }
 ```
 
 实现：`order-take.ts` 抽出并导出纯函数 `formalOrderFor(db, task): { step, orderId, intent, stageSeq } | null`（`currentIntent ?? manualOrderId`，不含调用方过滤），`scanOrders` 与授予共用，保证二者口径永远一致。
 
-前置（同一事务）：卡 `code`、非终态、`stage ∈ build/fix`（停在 review/blocked 的卡由 PM 先按现有命令退回 fix 再授予）、有 `task.agent`/`branch`；有 active author 绑定且 `agent = task.agent`、当前步 `executorKind=agent` 且 `executor = task.agent`；无 `pending/submitted/unknown` 意图（含开放中的 `author_handoff`）；无 `pooled/claimed/unknown` 出借单；`--rev/--workflow-rev` CAS。授予不改 stage、不派单、不改任何 dispatch 行。
+前置（同一事务）：卡 `code`、非终态、`stage ∈ build/fix`（停在 review/blocked 的卡由 PM 先按现有命令退回 fix 再授予）、有 `task.agent`/`branch`；有 active author 绑定且 `agent = task.agent`、`family = workflow.authorFamily`（§2.4 跨家族交接已同步）、当前步 `executorKind=agent` 且 `executor = task.agent`；无 `pending/submitted/unknown` 意图（含开放中的 `author_handoff`）；无 `pooled/claimed/unknown` 出借单；`--rev/--workflow-rev` CAS。授予不改 stage、不派单、不改任何 dispatch 行。
 
 ### 3.3 判定 `grantVerdict`（新，纯函数，`src/lib/scheduler-resume-grant.ts`）
 
@@ -154,7 +161,7 @@ review/manual[G] ──scheduler-auto-resume（同一事务判定+resumeCore）�
 1. workflow=manual，卡在 review，非 done/cancelled；
 2. T 的 actor 在授予时已核为真 PM（写入时核；判定再核 actor ∈ 项目 PM 名单且非 team 调度助理，防名单变化后过期身份）；
 3. `now < expiresAt`；
-4. `task.specRev / branch / agent / round` 与 G 一致；author 未退役绑定 = `G.agent + G.session`（T 之后若发生 §2.4 交接，`workflow.rev` 变化不算 mode 事件，但绑定不再等于 G.session → 拒；换会话的正确顺序是先交接、后授予）；
+4. `task.specRev / branch / agent` 与 G 一致，`workflow.authorFamily = G.family`；**轮次区分工作轮次与审查轮次**：正式 deliver 先推阶段再记交付（`ledger-write.ts:238-239`），`nextTaskState` 对 build/fix→review 必定 `round+1`（`ledger-stages.ts:209-215`，blocked 恢复除外，而 G.stage 只能是 build/fix），所以要求 `task.round = G.workRound + 1`、`d.data.round = G.workRound + 1`、紧前 stage 事件 `to=review`；`= G.workRound`（还没交付）或 `≥ G.workRound + 2`（已多走一轮审查 / 退回再交）都拒。例：build 授予 workRound=0 → 交付后 1；fix 授予 workRound=1 → 交付后 2。author 未退役绑定 = `G.agent + G.session`（T 之后若发生 §2.4 交接，`workflow.rev` 变化不算 mode 事件，但绑定不再等于 G.session → 拒；换会话的正确顺序是先交接、后授予）；
 5. T 之后最新 deliver d：`actor = G.agent`、`data.via="order_tool"`、`data.session = G.session`、**`data.orderId = G.orderId`**（G 里记的实际正式单号，dispatch id 与 manual id 一视同仁）、该 dedup 键 `deliverDedupKey(G.orderId, d.headSHA)` 的事件就是 d；`G.orderKind="dispatch"` 时再核该意图行仍存在、`taskId/node=G.step/specRev` 一致、`eventSeq > G.stageSeq` 且未 `cancelled`（只读核对，不改写历史派单来凑人工单号）；d 紧前的 stage 事件 `from = G.stage`，且 T 与 d 之间没有别的 stage 事件（同阶段同一张单）；
 6. `d.headSHA ≠ G.priorHead` 且 `= task.headSHA`；紧前一条 stage 事件 `seq = d.seq-1`、`to=review`、同 actor（复用原检查）；
 7. T 之后没有：别人的 deliver / stage、`resume_grant` 以外的 mode 事件、新的 lend `refused`/`unknown`、未答的 `class=blocker` ask（「模型拒绝」/需要人：执行者以 blocker 报拒做或安全阻塞时不自动恢复）；
@@ -233,6 +240,14 @@ PM 职责收窄为：决定是否授予、处理异常（rejected 通知、block
 | 4d | step / complete 重放、重启后重跑 | 回执与换绑各只发生一次（dedup 键） | 新 I2a |
 | 4e | 非真 PM（调度助理 / 执行者 / scheduler）调 `author-handoff` | `forbidden` | 新 I2a |
 | 4f | 交接完成后授予，新会话 fresh head 交付 | 交回一次；若授予在交接前（G.session=旧）→ 不交回 | 新 I2 + I3 |
+| 4g0 | build 卡 workRound=0，同会话授予后 fresh head MCP 交付 | 交付后 `task.round=d.round=1 = G.workRound+1`，`G.orderId` 仍是 r0 工作单，恰好一次交回 | 新 I3（成功用例） |
+| 4g1 | fix 卡 workRound=1，同会话授予后 fresh head MCP 交付 | 交付后 `round=2 = G.workRound+1`，`G.orderId` 仍是 fix r1 单，恰好一次交回 | 新 I3（成功用例） |
+| 4g2 | 同上但轮次不符：判定时 `task.round = G.workRound`（未进 review）或 `≥ G.workRound+2`（又审又退再交） | 不交回 | 新 I3 |
+| 4i | Claude→Codex 跨家族 §2.4 交接 complete | 同事务 `authorFamily=codex`、`workflow.rev+1`；作者自检不报 `author_family` | 新 I2a |
+| 4j | 4i 后授予、fresh head 交回，**无 reviewer** | planner 按 `familyOtherThan(codex)=claude` 建 / 派审；不会选 Codex 会话 | 新 I3 + 现 `scheduler-plan` 用例 |
+| 4k | 4i 后交回，**已有本机 Codex reviewer**（round≥2） | `review_swap` 先退旧审查员再派 Claude；同轮已换过仍同家族 → `reviewer_independence` 升级，不派 | 新 + 现 `reviewSwapPlan` 用例 |
+| 4l | 4i 后交回，已有 Claude reviewer | 保留原审查员同卡复验 | 现 + 新 |
+| 4m | 绑定 family ≠ `workflow.authorFamily`（旧数据未同步）时授予 | 授予拒、报 PM | 新 I2 |
 | 4g | 本阶段已有 **done** write dispatch，auto→manual 接管 `--resume-grant`，同一执行者同会话 `take_order` 得原 dispatch id，fresh head MCP 交付 | `G.orderId = dispatch id`，恰好一次交回；再次 deliver / tick 不二次交回；dispatch 行未被改写 | 新 I2 + I3 |
 | 4h | 同上但交付走的是 manualOrderId 或别的单号 / 意图行被取消 / 交付前 stage 被 PM 改过 | 不交回 | 新 I3 |
 | 5 | 卡分支被 PM 改（wrong branch）期间交付 | CLI CAS `conflict`，不写 | 现 `deliver` expect |
