@@ -110,7 +110,7 @@ describe("capacity is the real local room and peer refusal", () => {
     const f = facts();
     expect(f.localRoom).toBe(2);
     // writeFamilies default codex: 3 total − 1 busy
-    expect(f.peers).toEqual([{ peer: "mate", seats: 2, why: null, free: { codex: 2 }, allowed: ["codex"] }]);
+    expect(f.peers).toEqual([{ peer: "mate", seats: 2, why: null, free: { codex: 2 }, allowed: ["codex"], budget: 5 }]);
     remote = { ...WRITE, writeFamilies: ["codex", "claude"] };
     expect(facts().peers[0].seats).toBe(4);
   });

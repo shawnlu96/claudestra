@@ -20,6 +20,7 @@ import {
   type WorkItem,
 } from "../src/lib/recovery-plan-gap.js";
 import { SPEC_SETTLE_MS } from "../src/lib/scheduler-autostart.js";
+import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 
 const P = "proj-a", Q = "proj-b", MIN = 60_000;
 let dir: string, path: string, db: Database, sent: { project: string; text: string }[];
@@ -227,6 +228,18 @@ describe("assessment", () => {
     }
   });
 
+  test("a project's budget on a peer caps only its own edge; fleet idle never counts seats nobody may fill", () => {
+    const stuck = item("x", { state: "blocked", gate: "spec", why: "缺规格" });
+    const capped = pf(Q, { localRoom: 0, work: [stuck], peers: [{ ...peer("mate", 3), seats: 1, budget: 1 }] });
+    expect(fleetIdle([capped])).toBe(1);
+    expect(assessPlanGap([capped])[0]).toMatchObject({ idle: 1, peerSeats: 1 });
+    const open = pf(P, { localRoom: 0, work: [stuck], peers: [peer("mate", 3)] });
+    for (const order of [[open, capped], [capped, open]]) {
+      expect(Object.fromEntries(assessPlanGap(order).map((g) => [g.project, g.idle]))).toEqual({ [P]: 3, [Q]: 1 });
+      expect(fleetIdle(order)).toBe(3);
+    }
+  });
+
   test("local-only ready work uses local room first; it never takes a peer seat", () => {
     const [g] = assessPlanGap([pf(P, { localRoom: 1, work: [item("lo", { external: false }), item("lo2", { external: false }), item("e")] })]);
     expect(g).toMatchObject({ ready: 3, readyLocalOnly: 2, readyExternal: 1, idle: 2 });
@@ -262,4 +275,33 @@ test("end to end on a real ledger: facts → tick → one notice naming the stuc
   expect(out[0]).toMatchObject({ action: "notified", gap: { ready: 1, localRoom: 3, idle: 2 } });
   expect(sent[0].text).toContain("i28-b");
   expect(sent[0].text).toContain("依赖没满足");
+});
+
+test("real read path: a legacy project's borrow maxOpen is its own budget, never the peer's physical pool", async () => {
+  const { recordHello } = await import("../src/lib/ledger-lend-peers.js");
+  const now = 10_000_000;
+  db.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+  for (const [project, slug] of [[P, "pa"], [Q, "pb"]]) {
+    setMeta(db, { actor: "owner", now: 500 }, { project, key: "pms", value: ["agent-pm"] });
+    createFeature(db, { actor: "agent-pm", now }, { project, slug, title: "t" });
+    initDag(db, { actor: "agent-pm", now: now + 1 }, { id: `ab12-${slug}`, rev: 1, nodes: [{ key: "x", oneLine: "x", fileGlobs: [`src/${slug}.ts`], deps: [] }] });
+  }
+  recordHello(db, "mate", null, { v: 1, proto: 2, boot: "b", seq: 1, paused: null,
+    grant: { until: now + 86_400_000, roles: ["review", "write"], repos: ["a/b"], ordersPerDay: 50, ordersLeftToday: 50 },
+    slots: { codex: { total: 3, busy: 0 }, claude: { total: 0, busy: 0 } } }, now);
+  const borrow = [{ peer: "mate", projects: [P, Q], roles: ["review", "write"] as ("review" | "write")[], maxOpen: 1 }];
+  const base = { mode: "balance" as const, roles: ["review", "write"] as ("review" | "write")[], poolTimeoutMin: 15, repo: "a/b", localPriority: "off" as const };
+  const remotes: Record<string, RemotePolicy> = { [P]: { ...base, agents: { codex: 3, claude: 0 } }, [Q]: base };
+  const facts = [P, Q].map((project) => readPlanGapFacts(db, project, {
+    now, svc: { autoDispatch: true, projects: [P, Q], maxWorkers: () => 3 }, pool: (p) => ({ remote: remotes[p], borrow }),
+    readSpec: () => null, drafts: () => [],
+  }));
+  // one hello, one physical pool: both projects read the same 3 free codex slots; the legacy maxOpen=1 is only Q's budget
+  expect(facts.map((f) => f.peers[0].free.codex)).toEqual([3, 3]);
+  expect(facts.map((f) => f.peers[0].seats)).toEqual([3, 1]);
+  for (const order of [facts, [...facts].reverse()]) {
+    const byP = Object.fromEntries(assessPlanGap(order).map((g) => [g.project, g.idle]));
+    expect(byP).toEqual({ [P]: 3, [Q]: 1 });
+    expect(fleetIdle(order)).toBe(3);
+  }
 });

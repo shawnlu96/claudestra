@@ -3,13 +3,15 @@
  * tell the project's PM once, with the list of what blocks each piece of planned work and which drafts are not yet in a DAG.
  * Readiness is the autostart gate itself (featureGate / nodeCandidate: spec file, deps / files / locks lanes, claims, arm);
  * capacity is local write room plus peers that peerRefusal accepts for a write. A peer's free slots are one physical pool however
- * many projects borrow it; each project only adds permission edges to it, so assessPlanGap matches ready work to seats by max
- * flow (order-independent, a refused project never shrinks the pool). Nothing here picks scope or edits a DAG.
+ * many projects borrow it, read from its hello alone (unifiedPeerCapacity); each project only adds permission edges to it, and a
+ * legacy project's borrow.maxOpen is a budget on its own edge, so assessPlanGap matches ready work to seats by max flow
+ * (order-independent, a refused or capped project never shrinks the pool). Nothing here picks scope or edits a DAG.
  * Policy comes through an injected port (CFG's recoveryPolicy); without one the tick observes. tests/recovery-plan-gap*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { featureLanes } from "./dag-tools-lanes.js";
+import { unifiedPeerCapacity } from "./ledger-lend-peers.js";
 import { cardNames } from "./ledger-card-names.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { getFeature, PLANNED, type Feature } from "./ledger-feature.js";
@@ -64,8 +66,13 @@ export interface WorkItem {
 type DraftFlag = "missing_spec" | "missing_deps" | "duplicate" | "stale";
 export interface DraftCandidate { name: string; title: string | null; flags: DraftFlag[]; why: string[] }
 export interface DraftFile { name: string; mtimeMs: number; text: string }
-/** seats = free slots this project may use; free = the peer's physical free slots per write family; allowed = families it may use */
-export interface PeerSeats { peer: string; seats: number; why: string | null; free: Partial<Record<AuthorFamily, number>>; allowed: AuthorFamily[] }
+/**
+ * seats = free slots this project may use; free = the peer's physical free slots per write family (same for every project);
+ * allowed = families it may use; budget = this project's own cap there (legacy borrow.maxOpen − live orders), absent = none.
+ */
+export interface PeerSeats {
+  peer: string; seats: number; why: string | null; free: Partial<Record<AuthorFamily, number>>; allowed: AuthorFamily[]; budget?: number;
+}
 
 export interface ProjectFacts {
   project: string;
@@ -172,22 +179,31 @@ function localRoom(db: Database, project: string, io: FactsIo, pool: SlotPool): 
   return { room, why: room ? null : `本机写槽已满（maxActiveWorkers ${io.svc.maxWorkers(project)}）` };
 }
 
-/** Free write seats per borrowed peer, accepted by the same refusal check placement uses (roles, off, grant, repo, freshness). */
+/**
+ * Free write seats per borrowed peer, accepted by the same refusal check placement uses (roles, off, grant, repo, freshness).
+ * free is the peer's physical pool from its hello (unifiedPeerCapacity: fresh, granted, unpaused, minus every project's live
+ * orders, after cooldown), so it never depends on which project reads it; a legacy pool's maxOpen only becomes this project's budget.
+ */
 function peerSeats(db: Database, project: string, pool: SlotPool, now: number): PeerSeats[] {
   const repo = pool.remote?.repo ?? null;
-  const peers = borrowPeers(db, project, pool.borrow, now, !!pool.remote?.agents).map(peerFacts);
+  const raw = borrowPeers(db, project, pool.borrow, now, !!pool.remote?.agents);
+  const peers = raw.map(peerFacts);
   const facts: PlacementFacts = { remote: pool.remote, repo, peers, local: { running: 0, room: false }, pin: null, tried: [], lastPeer: null,
     writeLeasePeer: null, locksFree: true };
   const families: readonly AuthorFamily[] = pool.remote?.agents ? ["claude", "codex"] : (pool.remote?.writeFamilies ?? ["codex"]);
-  return peers.map((p) => {
+  return peers.map((p, i) => {
     const refused = families.map((fam) => peerRefusal(facts, p, "write", fam));
     const ok = refused.some((r) => r === null);
+    const physical = p.v2 ? unifiedPeerCapacity(db, p.peer, now).slots : null;
     const free: Partial<Record<AuthorFamily, number>> = {};
-    for (const fam of families) free[fam] = Math.max(0, p.v2?.slots[fam] ?? 0);
-    const allowed = families.filter((fam, i) => refused[i] === null && (free[fam] ?? 0) > 0);
-    const seats = allowed.reduce((n, fam) => n + (free[fam] ?? 0), 0);
+    for (const fam of families) free[fam] = Math.max(0, physical?.[fam] ?? 0);
+    const { maxOpen, open } = raw[i];
+    const budget = pool.remote?.agents || maxOpen == null ? undefined : Math.max(0, maxOpen - open);
+    const allowed = families.filter((fam, j) => refused[j] === null && (free[fam] ?? 0) > 0);
+    const seats = Math.min(budget ?? Infinity, allowed.reduce((n, fam) => n + (free[fam] ?? 0), 0));
     // peerRefusal accepts any family's free seat for a write; placement then keeps only writeFamilies, so seats can still be 0.
-    return { peer: p.peer, seats, why: !ok ? refused[0] : seats ? null : `写单家族 ${families.join(" / ")} 没有空位`, free, allowed };
+    return { peer: p.peer, seats, why: !ok ? refused[0] : seats ? null : `写单家族 ${families.join(" / ")} 没有空位`, free, allowed,
+      ...(budget === undefined ? {} : { budget }) };
   });
 }
 
@@ -225,9 +241,10 @@ export interface ProjectGap {
 }
 
 /**
- * The seat graph: source → each project's local-only / external ready work → its local room or the (peer, family) seats it is
- * allowed → sink. A (peer, family) node holds the peer's physical free slots once (two reports of one hello keep the smaller);
- * projects only add edges, so a project refused by a peer leaves the pool intact for the projects that are allowed.
+ * The seat graph: source → each project's local-only / external ready work → its local room, or its edge to a peer (capped by
+ * the project's own budget there) → the (peer, family) seats it is allowed → sink. A (peer, family) node holds the peer's physical
+ * free slots once (read from the hello alone; two reports of one hello keep the smaller); projects only add capped edges, so a
+ * project refused or capped by a peer leaves the pool intact for the projects that are allowed.
  */
 const BIG = 1 << 30;
 interface Graph { cap: number[][]; n: number }
@@ -239,22 +256,29 @@ function physicalSeats(facts: readonly ProjectFacts[]): Map<string, number> {
   }
   return seats;
 }
-function seatGraph(facts: readonly ProjectFacts[], unbounded: number | null): Graph {
+/** unbounded(i) = project i gets unlimited ready work (to measure the seats it could still fill). */
+function seatGraph(facts: readonly ProjectFacts[], unbounded: (i: number) => boolean): Graph {
   const seats = physicalSeats(facts);
   const seatIx = new Map([...seats.keys()].map((k, i) => [k, i]));
-  // 0 source, 1 sink, then per project [local-only, external, local room], then seat nodes
-  const n = 2 + facts.length * 3 + seats.size;
+  // 0 source, 1 sink, then per project [local-only, external, local room], then seat nodes, then one edge node per (project, peer)
+  const edges = facts.reduce((n, f) => n + f.peers.length, 0);
+  const n = 2 + facts.length * 3 + seats.size + edges;
   const cap = Array.from({ length: n }, () => new Array<number>(n).fill(0));
   const seatNode = (k: string) => 2 + facts.length * 3 + (seatIx.get(k) as number);
+  let edge = 2 + facts.length * 3 + seats.size;
   for (const [k, free] of seats) cap[seatNode(k)][1] = free;
   facts.forEach((f, i) => {
     const lo = 2 + i * 3, ext = lo + 1, local = lo + 2;
     const ready = f.work.filter((w) => w.state === "ready");
     const e = ready.filter((w) => w.external).length;
-    cap[0][lo] = unbounded === i ? BIG : ready.length - e;
-    cap[0][ext] = unbounded === i ? BIG : e;
+    cap[0][lo] = unbounded(i) ? BIG : ready.length - e;
+    cap[0][ext] = unbounded(i) ? BIG : e;
     cap[lo][local] = BIG; cap[ext][local] = BIG; cap[local][1] = Math.max(0, f.localRoom);
-    for (const p of f.peers) for (const fam of p.allowed) if (seats.has(seatKey(p.peer, fam))) cap[ext][seatNode(seatKey(p.peer, fam))] = BIG;
+    for (const p of f.peers) {
+      const via = edge++;
+      cap[ext][via] = p.budget ?? BIG;
+      for (const fam of p.allowed) if (seats.has(seatKey(p.peer, fam))) cap[via][seatNode(seatKey(p.peer, fam))] = BIG;
+    }
   });
   return { cap, n };
 }
@@ -278,20 +302,16 @@ function maxFlow({ cap, n }: Graph): number {
   }
 }
 
-/** Seats some project may use: local room is per project; a peer's (family) seats count once if any project is allowed them. */
-function usableSeats(facts: readonly ProjectFacts[]): number {
-  const seats = physicalSeats(facts);
-  const allowed = new Set(facts.flatMap((f) => f.peers.flatMap((p) => p.allowed.map((fam) => seatKey(p.peer, fam)))));
-  return facts.reduce((n, f) => n + Math.max(0, f.localRoom), 0) + [...allowed].reduce((n, k) => n + (seats.get(k) ?? 0), 0);
-}
+/** Seats some project may use: every project's local room plus each peer seat once, within each project's allowed, capped edges. */
+const usableSeats = (facts: readonly ProjectFacts[]): number => maxFlow(seatGraph(facts, () => true));
 
 /**
  * Idle is order-independent: placed = the max flow of every project's ready work; a project's idle is how many more seats it
  * could fill with more ready work while every other project's ready work stays placed.
  */
 function place(facts: readonly ProjectFacts[]) {
-  const placed = maxFlow(seatGraph(facts, null));
-  const idle = facts.map((_, i) => maxFlow(seatGraph(facts, i)) - placed);
+  const placed = maxFlow(seatGraph(facts, () => false));
+  const idle = facts.map((_, i) => maxFlow(seatGraph(facts, (j) => j === i)) - placed);
   return { placed, idle };
 }
 
