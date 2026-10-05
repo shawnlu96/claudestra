@@ -61,6 +61,13 @@ export interface EchoCandidate {
   replyText?: string;
   segments?: { kind: string; text?: string; progress?: boolean }[];
   toolCalls?: unknown[];
+  /** 以下只给回合切分用（postReplyFolds）：记录区间尾、入站发件人（本人没有）、回合结束标记 */
+  seqEnd?: number;
+  from?: string;
+  turnMs?: number;
+  turnDone?: boolean;
+  turnInterrupted?: boolean;
+  turnBgPending?: boolean;
 }
 
 /** 这条消息里的所有回复正文（segments 里的 reply 段 + 挂在 replyText 上的） */
@@ -116,14 +123,30 @@ export function isEchoSegment(m: EchoCandidate, segText: string | undefined): bo
 }
 
 /**
+ * 回合中途插进来的入站，不切回合（tests/web-midturn-fold.test.ts）：
+ * (a) check_inbox 领出的消息：服务端挂在工具结果行上，seq 带小数（lib/session-history-inbox.ts），谁发的都一样；
+ * (b) 别人发的、前一个 assistant 没有回合结束标记：CC 忙时队列吸收的（queued_command），落到网页和开新回合的入站同形。
+ *     只在列表里见过 turnMs 时才用：Pi / Codex 不写 turn_duration，不设门槛它们的入站全成了中途。
+ * 本人消息、system 条目永远是边界。turnMs 偶尔丢（差量 / 分页窗口边界）只会少收一段，不会多藏。
+ */
+function midTurnInsert(m: EchoCandidate, lastAsst: EchoCandidate | null, marks: boolean): boolean {
+  if (m.role !== "user") return false;
+  if (typeof m.seqEnd === "number" && !Number.isInteger(m.seqEnd)) return true;
+  if (!marks || !m.from || !lastAsst) return false;
+  return typeof lastAsst.turnMs !== "number" && !lastAsst.turnDone && !lastAsst.turnInterrupted && !lastAsst.turnBgPending;
+}
+
+/**
  * 默认收起的旁白：消息 id → 这条消息里第几段之后的 text 段收起（-1 = 整条都收）。两种来源：
  * ① 紧跟在 reply 之后、只有旁白的消息（历史按 jsonl 记录切条，「回复完又用文字写一遍」常独立成一条）；
- * ② 本轮（到下一条非 assistant 消息为止）最后一次 reply 之后的文字：agent 常先记记忆、改文件再补一段总结，
+ * ② 本轮（到下一条开新回合的非 assistant 消息为止，见 midTurnInsert）最后一次 reply 之后的文字：agent 常先记记忆、改文件再补一段总结，
  *    中间隔了工具调用也算，工具段照常显示；两次 reply 之间的过程旁白不收。
  * 不看文字是否相同——中文 reply + 英文复述这种 isReplyEcho 认不出；这里只决定默认收起（narration-fold.ts），不藏。
  */
 export function postReplyFolds(messages: EchoCandidate[]): Map<string, number> {
   const out = new Map<string, number>();
+  const marks = messages.some((m) => m.role === "assistant" && typeof m.turnMs === "number");
+  let lastAsst: EchoCandidate | null = null;
   let prevEndsWithReply = false;
   let turn: EchoCandidate[] = [];
   const closeTurn = () => {
@@ -138,10 +161,13 @@ export function postReplyFolds(messages: EchoCandidate[]): Map<string, number> {
   };
   for (const m of messages) {
     if (m.role !== "assistant") {
+      if (midTurnInsert(m, lastAsst, marks)) continue;
       closeTurn();
       prevEndsWithReply = false;
+      lastAsst = null;
       continue;
     }
+    lastAsst = m;
     if (prevEndsWithReply && bareNarration(m)) out.set(m.id, -1);
     turn.push(m);
     const segs = m.segments ?? [];
