@@ -15,7 +15,7 @@ import { TerminalIcon } from "./ask-icons";
 
 /**
  * 一张开着的「待你处理」卡的作答区（ask-card.tsx）：reply / 人发起的是按钮行 + 文本框（答不了的凭据只给一句说明），
- * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端（额度用完的只是告知几点恢复，不叫人去终端）。作答一律乐观（asks-store.answer）。
+ * AUQ / 权限走原有的按键端点，Codex 弹框只能去终端（额度用完的只是告知几点恢复、回合失败卡 extra.failure 只说明已停，都不叫人去终端）。作答一律乐观（asks-store.answer）。
  */
 export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
   const t = useT();
@@ -87,8 +87,9 @@ export function AskActions({ ask, agent }: { ask: WebAsk; agent: string }) {
       )}
       {ask.source === "codex" && !ask.extra?.quota && !acp && (
         <p className="flex items-center gap-1.5 text-[13px] opacity-75">
-          <TerminalIcon />
-          {t("这个弹框要到终端里处理")}
+          {ask.extra?.failure === "error"
+            ? t("不是弹框，终端里没有要点的：这一轮已出错停下（原因见上），卡只作记录。内容策略拦下的，开了监护会在原会话发恢复消息、再被拦才报派活方；其余调度单退给 PM")
+            : <><TerminalIcon />{t("这个弹框要到终端里处理")}</>}
         </p>
       )}
     </div>

@@ -1,14 +1,14 @@
 /**
  * bridge/local-api/ledger.ts + bridge/ledger-feed.ts：台账读接口的权限矩阵、项目校验、视图、docs 路径穿越，
  * 以及 SSE 过滤（ledger 事件只给 canReadLedger）与懒启动的每秒轮询。库是临时目录里的真实文件。
+ * SSE 段每个用例在独立子进程里跑（local-api-ledger-feed-fixture.ts），不碰本进程的 feed / event-bus。
  */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentListExtras } from "../src/bridge/agent-info-routes.js";
-import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
-import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
+import { setLedgerFeedForTest } from "../src/bridge/ledger-feed.js";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
 import { handleLedgerApi, setLedgerApiProjectsForTest } from "../src/bridge/local-api/ledger.js";
 import { canReadLedger, effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
@@ -16,6 +16,7 @@ import { taskMetrics } from "../src/lib/ledger-metrics.js";
 import { closeLedger, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import type { Principal } from "../src/lib/principals.js";
+import { runFeedScenario, type AgentResult, type E2eResult, type LazyResult } from "./local-api-ledger-feed-fixture.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const at = "2026-09-28T00:00:00Z";
@@ -65,12 +66,6 @@ async function get(path: string, p: Principal = OWNER, method = "GET"): Promise<
   const r = new Request(`http://bridge.local/api/v1${path}`, { method });
   return (await handleLocalApi(r, new URL(r.url), p))!;
 }
-/** 轮询 1s 一次：等到条件成立为止，最多 3s（CI 机器慢时一两百毫秒的余量不够） */
-async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
-  const end = Date.now() + ms;
-  while (!cond() && Date.now() < end) await Bun.sleep(50);
-}
-
 /** 绕过 URL 规范化，直接把原始路径交给 handler（`..` 在 new URL 里会先被折叠掉） */
 async function raw(path: string): Promise<Response> {
   return (await handleLedgerApi(new Request("http://bridge.local/"), path, OWNER))!;
@@ -229,53 +224,26 @@ test("GET /agents 的 ledgerTask 默认从同一条只读连接读：执行中�
   expect((await agentListExtras(MATRIX[2][1]))("agent-exec", {}).ledgerTask).toBeUndefined();
 });
 
-describe("SSE：ledger 事件只给 canReadLedger；轮询在第一条能读的连接上懒启动", () => {
-  test("端到端：写入 → 1 秒内能读的连接收到 {project}，其余连接收不到；agent 事件照旧按 scope", async () => {
-    const path = tempLedgerPath();
-    await runLedgerScript(path, "seedLedger(path);");
-    setLedgerFeedForTest({ path }); // 真发到 event-bus
-    const got = new Map<string, BridgeEvent[]>();
-    const unsubs = MATRIX.map(([name, p]) => {
-      got.set(name, []);
-      return subscribeEvents({ allow: sseEventAllow(p) }, (e) => got.get(name)!.push(e));
-    });
-    try {
-      await runLedgerScript(path, `appendEvent(openLedger(path), { actor: "owner" }, { project: "p", target: "", kind: "note", text: "x" });`);
-      await waitFor(() => MATRIX.every(([name, , ok]) => !ok || got.get(name)!.some((e) => e.type === "ledger")));
-      for (const [name, , ok] of MATRIX) {
-        const ledger = got.get(name)!.filter((e) => e.type === "ledger");
-        expect(ledger.map((e) => e.data)).toEqual(ok ? [{ project: "p" }] : []);
-      }
-    } finally {
-      unsubs.forEach((u) => u());
-      setLedgerFeedForTest({ path: dbPath, emit: () => {} });
-    }
+describe("SSE：ledger 事件只给 canReadLedger；轮询在第一条能读的连接上懒启动（每个用例一个独立子进程，见 feed-fixture）", () => {
+  const conns = (rows: typeof MATRIX) => rows.map(([name, principal]) => ({ name, principal }));
+
+  test("端到端：写入 → 覆盖它的那一轮轮询里能读的连接收到 {project}，其余连接收不到；多条能读的连接只起一个轮询", async () => {
+    const r = await runFeedScenario<E2eResult>({ kind: "e2e", conns: conns(MATRIX) });
+    for (const [name, , ok] of MATRIX) expect([name, r.got[name]]).toEqual([name, ok ? [{ project: "p" }] : []]);
+    expect([r.emitted, r.timers]).toEqual([[{ project: "p" }], 1]);
   });
 
-  test("只有不能读台账的连接时不起轮询", async () => {
-    const path = tempLedgerPath();
-    await runLedgerScript(path, "seedLedger(path);");
-    const emitted: string[] = [];
-    setLedgerFeedForTest({ path, emit: (p) => emitted.push(p) });
-    try {
-      for (const [, p, ok] of MATRIX) if (!ok) sseEventAllow(p);
-      await runLedgerScript(path, `appendEvent(openLedger(path), { actor: "owner" }, { project: "p", target: "", kind: "note", text: "x" });`);
-      await Bun.sleep(1500); // 等「没有」只能等满：轮询要是起了，1s 一轮早该发了
-      expect(emitted).toEqual([]);
-      sseEventAllow(OWNER); // 第一条能读的连接：先记游标，之后的写入才发
-      await runLedgerScript(path, `appendEvent(openLedger(path), { actor: "owner" }, { project: "q", target: "", kind: "note", text: "y" });`);
-      await waitFor(() => emitted.length > 0);
-      expect(emitted).toEqual(["q"]);
-    } finally {
-      setLedgerFeedForTest({ path: dbPath, emit: () => {} });
-    }
+  test("只有不能读台账的连接时不起轮询；第一条能读的连接先记游标，之后别的项目的写入才发", async () => {
+    const denied = MATRIX.filter(([, , ok]) => !ok);
+    const r = await runFeedScenario<LazyResult>({ kind: "lazy", denied: conns(denied), reader: { name: "owner", principal: OWNER } });
+    expect([r.deniedTimers, r.readerTimers]).toEqual([0, 1]);
+    expect([r.emitted, r.got.owner]).toEqual([[{ project: "q" }], [{ project: "q" }]]);
+    for (const [name] of denied) expect([name, r.got[name]]).toEqual([name, []]);
   });
 
-  test("agent 事件的过滤不变：* 不含 master，部分 scope 只看自己的", () => {
-    const ev = (agent: string): BridgeEvent => ({ seq: 1, ts: at, agent, chatId: "c", type: "assistant_text", data: {} });
-    const star = sseEventAllow(MATRIX[6][1]);
-    expect([star(ev("agent-worker")), star(ev("master")), star(ev("agent-master"))]).toEqual([true, false, false]);
-    const part = sseEventAllow(MATRIX[7][1]);
-    expect([part(ev("agent-worker")), part(ev("agent-other"))]).toEqual([true, false]);
+  test("agent 事件的过滤不变：* 不含 master，部分 scope 只看自己的", async () => {
+    const r = await runFeedScenario<AgentResult>({ kind: "agent", conns: conns([MATRIX[6], MATRIX[7]]), agents: ["agent-worker", "master", "agent-master", "agent-other"] });
+    expect(r[MATRIX[6][0]]).toEqual([true, false, false, true]);
+    expect(r[MATRIX[7][0]]).toEqual([true, false, false, false]);
   });
 });

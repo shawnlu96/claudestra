@@ -86,10 +86,10 @@ describe("peer orders (acceptance 1, 2, 4)", () => {
     expect(parseOrderWire(JSON.parse(JSON.stringify(o.wire))).ok).toBe(true);
   });
 
-  test("a 40-hex that is not this card's head (mixed case or in a path), or 32+ random hex, still refuses with the same code and message", () => {
+  test("a 40-hex that is not this card's head (mixed case or in a path), or 32+ random hex other than a lowercase 40 / 64 run, still refuses with the same code and message", () => {
     // A bare lowercase 40-hex now goes out as 12 chars (i28-GATE3, tests/order-gate-heads-sha.test.ts); these shapes do not.
     const foreign = sha();
-    for (const bad of [`Ab${foreign.slice(2)}`, `reviews/${foreign}/r.md`, sha(16), sha(24), sha(32), `${H}${sha(12)}`]) {
+    for (const bad of [`Ab${foreign.slice(2)}`, `reviews/${foreign}/r.md`, sha(16), sha(24), sha(31), sha(33), sha(32).toUpperCase(), `${H}${sha(13)}`, `${H}${sha(1)}`]) {
       const e = refusal(`# Review\n在 ${H} 上复现，另见 ${bad}`);
       expect(e).toBeInstanceOf(LedgerError);
       expect(e.code).toBe("invalid");

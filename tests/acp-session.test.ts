@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ACP_PROTOCOL_VERSION } from "../src/lib/acp/protocol.ts";
 import { AcpSession, CLIENT_CAPABILITIES } from "../src/lib/acp/session.ts";
 import type { RpcWire } from "../src/lib/acp/rpc.ts";
 import type { PermissionCard } from "../src/lib/acp/permissions.ts";
@@ -26,7 +27,8 @@ function fakeAdapter(opts: { permission?: (c: PermissionCard) => Promise<string 
 
 async function attached(f: ReturnType<typeof fakeAdapter>, resume = true) {
   const init = f.session.initialize();
-  f.reply("initialize", { agentCapabilities: { sessionCapabilities: resume ? { resume: {} } : {} }, _meta: { steering: { supported: true } } });
+  const agentCapabilities = { loadSession: true, sessionCapabilities: resume ? { resume: {} } : {} };
+  f.reply("initialize", { protocolVersion: ACP_PROTOCOL_VERSION, agentCapabilities, _meta: { steering: { supported: true } } });
   const caps = await init;
   const a = f.session.attach(SID, "/w", caps.resume);
   f.reply(caps.resume ? "session/resume" : "session/load", {
@@ -55,7 +57,7 @@ describe("AcpSession · 起步", () => {
   test("fork 能力和新线程 id 都按 ACP 回包确认", async () => {
     const f = fakeAdapter();
     const init = f.session.initialize();
-    f.reply("initialize", { agentCapabilities: { sessionCapabilities: { resume: {}, fork: {} } } });
+    f.reply("initialize", { protocolVersion: ACP_PROTOCOL_VERSION, agentCapabilities: { sessionCapabilities: { resume: {}, fork: {} } } });
     expect(await init).toEqual({ resume: true, fork: true });
     const fork = f.session.fork(SID, "/w");
     expect(f.last("session/fork").params).toEqual({ sessionId: SID, cwd: "/w", mcpServers: [] });

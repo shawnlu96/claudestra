@@ -1,0 +1,3852 @@
+{
+  "CommandExecutionRequestApprovalParams": {
+    "": {
+      "keys": {
+        "additionalPermissions": false,
+        "approvalId": false,
+        "availableDecisions": false,
+        "command": false,
+        "commandActions": false,
+        "cwd": false,
+        "environmentId": false,
+        "itemId": true,
+        "kind": false,
+        "networkApprovalContext": false,
+        "proposedExecpolicyAmendment": false,
+        "proposedNetworkPolicyAmendments": false,
+        "reason": false,
+        "startedAtMs": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "CommandExecutionRequestApprovalParams",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "availableDecisions": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "array"
+        ]
+      },
+      "required": false,
+      "types": [
+        "array"
+      ]
+    },
+    "availableDecisions[]": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": true,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "CommandExecutionApprovalDecision",
+      "required": true,
+      "types": [
+        "object",
+        "string"
+      ],
+      "values": [
+        "accept",
+        "acceptForSession",
+        "acceptWithExecpolicyAmendment",
+        "applyNetworkPolicyAmendment",
+        "cancel",
+        "decline"
+      ]
+    },
+    "command": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "cwd": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/LegacyAppPathString",
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "itemId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "reason": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "FileChangeRequestApprovalParams": {
+    "": {
+      "keys": {
+        "grantRoot": false,
+        "itemId": true,
+        "reason": false,
+        "startedAtMs": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "FileChangeRequestApprovalParams",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "grantRoot": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "itemId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "reason": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "InitializeResponse": {
+    "": {
+      "keys": {
+        "codexHome": true,
+        "platformFamily": true,
+        "platformOs": true,
+        "userAgent": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "InitializeResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    }
+  },
+  "McpServerElicitationRequestParams": {
+    "": {
+      "discriminator": "mode",
+      "members": [
+        "form",
+        "openai/form",
+        "openai/userVerification",
+        "openaiForm",
+        "url"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "McpServerElicitationRequestParams",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "serverName": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "PermissionsRequestApprovalParams": {
+    "": {
+      "keys": {
+        "cwd": true,
+        "environmentId": false,
+        "itemId": true,
+        "permissions": true,
+        "reason": false,
+        "startedAtMs": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "PermissionsRequestApprovalParams",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "itemId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "ToolRequestUserInputParams": {
+    "": {
+      "keys": {
+        "autoResolutionMs": false,
+        "isBlocking": true,
+        "itemId": true,
+        "questions": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "ToolRequestUserInputParams",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "itemId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/AgentMessageDeltaNotification": {
+    "": {
+      "keys": {
+        "delta": true,
+        "itemId": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/AgentMessageDeltaNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "delta": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "itemId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/CommandExecutionOutputDeltaNotification": {
+    "": {
+      "keys": {
+        "delta": true,
+        "itemId": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/CommandExecutionOutputDeltaNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "delta": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "itemId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ConfigReadResponse": {
+    "": {
+      "keys": {
+        "config": true,
+        "layers": false,
+        "origins": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ConfigReadResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "config": {
+      "keys": {
+        "analytics": false,
+        "approval_policy": false,
+        "approvals_reviewer": false,
+        "apps": false,
+        "browser_use": false,
+        "compact_prompt": false,
+        "computer_use": false,
+        "desktop": false,
+        "developer_instructions": false,
+        "forced_chatgpt_workspace_id": false,
+        "forced_login_method": false,
+        "instructions": false,
+        "model": false,
+        "model_auto_compact_token_limit": false,
+        "model_auto_compact_token_limit_scope": false,
+        "model_context_window": false,
+        "model_provider": false,
+        "model_reasoning_effort": false,
+        "model_reasoning_summary": false,
+        "model_verbosity": false,
+        "review_model": false,
+        "sandbox_mode": false,
+        "sandbox_workspace_write": false,
+        "service_tier": false,
+        "tools": false,
+        "web_search": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Config",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "config.model_provider": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ContextCompactedNotification": {
+    "": {
+      "keys": {
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ContextCompactedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ErrorNotification": {
+    "": {
+      "keys": {
+        "error": true,
+        "threadId": true,
+        "turnId": true,
+        "willRetry": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ErrorNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "error": {
+      "keys": {
+        "additionalDetails": false,
+        "codexErrorInfo": false,
+        "message": true,
+        "misalignment": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnError",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "error.additionalDetails": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "error.codexErrorInfo": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "v2/CodexErrorInfo",
+      "required": false,
+      "types": [
+        "object",
+        "string"
+      ],
+      "values": [
+        "activeTurnNotSteerable",
+        "badRequest",
+        "contextWindowExceeded",
+        "cyberPolicy",
+        "flexUnavailable",
+        "httpConnectionFailed",
+        "internalServerError",
+        "misalignmentPolicyViolation",
+        "other",
+        "rateLimitExceeded",
+        "responseStreamConnectionFailed",
+        "responseStreamDisconnected",
+        "responseTooManyFailedAttempts",
+        "sandboxError",
+        "serverOverloaded",
+        "sessionBudgetExceeded",
+        "threadRollbackFailed",
+        "tooManyDenials",
+        "unauthorized",
+        "usageLimitExceeded"
+      ]
+    },
+    "error.message": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "willRetry": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "boolean"
+        ]
+      },
+      "required": true,
+      "types": [
+        "boolean"
+      ]
+    }
+  },
+  "v2/GetAccountResponse": {
+    "": {
+      "keys": {
+        "account": false,
+        "requiresOpenaiAuth": true,
+        "workspaceRouting": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/GetAccountResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "account": {
+      "discriminator": "type",
+      "members": [
+        "amazonBedrock",
+        "apiKey",
+        "chatgpt"
+      ],
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Account",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "requiresOpenaiAuth": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "boolean"
+        ]
+      },
+      "required": true,
+      "types": [
+        "boolean"
+      ]
+    }
+  },
+  "v2/ItemCompletedNotification": {
+    "": {
+      "keys": {
+        "completedAtMs": true,
+        "item": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ItemCompletedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "item": {
+      "discriminator": "type",
+      "members": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadItem",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "item.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "item.type": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ItemStartedNotification": {
+    "": {
+      "keys": {
+        "item": true,
+        "startedAtMs": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ItemStartedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "item": {
+      "discriminator": "type",
+      "members": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadItem",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "item.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "item.type": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ModelListResponse": {
+    "": {
+      "keys": {
+        "data": true,
+        "nextCursor": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ModelListResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "data": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "array"
+        ]
+      },
+      "required": true,
+      "types": [
+        "array"
+      ]
+    },
+    "data[]": {
+      "keys": {
+        "additionalSpeedTiers": false,
+        "availabilityNux": false,
+        "availableAccessPrograms": false,
+        "defaultReasoningEffort": true,
+        "defaultServiceTier": false,
+        "description": true,
+        "displayName": true,
+        "hidden": true,
+        "id": true,
+        "inputModalities": false,
+        "isDefault": true,
+        "model": true,
+        "modelSpecialty": false,
+        "multiAgentVersion": false,
+        "serviceTiers": false,
+        "supportedReasoningEfforts": true,
+        "supportsPersonality": false,
+        "upgrade": false,
+        "upgradeInfo": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Model",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "data[].defaultReasoningEffort": {
+      "limits": {
+        "minLength": 1
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/ReasoningEffort",
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "data[].displayName": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "data[].hidden": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "boolean"
+        ]
+      },
+      "required": true,
+      "types": [
+        "boolean"
+      ]
+    },
+    "data[].id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "data[].isDefault": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "boolean"
+        ]
+      },
+      "required": true,
+      "types": [
+        "boolean"
+      ]
+    },
+    "data[].model": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "data[].supportedReasoningEfforts": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "array"
+        ]
+      },
+      "required": true,
+      "types": [
+        "array"
+      ]
+    },
+    "data[].supportedReasoningEfforts[]": {
+      "keys": {
+        "description": true,
+        "reasoningEffort": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ReasoningEffortOption",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "data[].supportedReasoningEfforts[].reasoningEffort": {
+      "limits": {
+        "minLength": 1
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/ReasoningEffort",
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "nextCursor": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ThreadCompactStartResponse": {
+    "": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadCompactStartResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    }
+  },
+  "v2/ThreadForkResponse": {
+    "": {
+      "keys": {
+        "activePermissionProfile": false,
+        "approvalPolicy": true,
+        "approvalsReviewer": true,
+        "cwd": true,
+        "disabledPluginIds": false,
+        "instructionSources": false,
+        "model": true,
+        "modelProvider": true,
+        "multiAgentMode": false,
+        "reasoningEffort": false,
+        "runtimeWorkspaceRoots": false,
+        "sandbox": true,
+        "serviceTier": false,
+        "thread": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadForkResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "model": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "modelProvider": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "reasoningEffort": {
+      "limits": {
+        "minLength": 1
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/ReasoningEffort",
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "thread": {
+      "keys": {
+        "agentNickname": false,
+        "agentRole": false,
+        "canAcceptDirectInput": false,
+        "cliVersion": true,
+        "createdAt": true,
+        "cwd": true,
+        "daybreakEnabled": false,
+        "environments": false,
+        "ephemeral": true,
+        "extra": false,
+        "forkedFromId": false,
+        "gitInfo": false,
+        "historyMode": false,
+        "id": true,
+        "model": false,
+        "modelProvider": true,
+        "name": false,
+        "originator": false,
+        "parentThreadId": false,
+        "path": false,
+        "preview": true,
+        "projectId": true,
+        "reasoningEffort": false,
+        "recencyAt": false,
+        "section": false,
+        "sectionEnteredAt": false,
+        "sessionId": true,
+        "source": true,
+        "status": true,
+        "threadSource": false,
+        "turns": true,
+        "updatedAt": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Thread",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ThreadItem": {
+    "": {
+      "discriminator": "type",
+      "members": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ],
+        "values": [
+          "agentMessage",
+          "commandExecution",
+          "contextCompaction",
+          "mcpToolCall"
+        ]
+      },
+      "ref": "v2/ThreadItem",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=agentMessage>": {
+      "keys": {
+        "delivery": false,
+        "id": true,
+        "memoryCitation": false,
+        "phase": false,
+        "questions": false,
+        "text": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=agentMessage>.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=agentMessage>.text": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=agentMessage>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "agentMessage"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "agentMessage"
+      ]
+    },
+    "<type=commandExecution>": {
+      "keys": {
+        "aggregatedOutput": false,
+        "command": true,
+        "commandActions": true,
+        "cwd": true,
+        "durationMs": false,
+        "exitCode": false,
+        "id": true,
+        "pluginId": false,
+        "processId": false,
+        "scriptPath": false,
+        "source": false,
+        "status": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=commandExecution>.aggregatedOutput": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.command": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.commandActions": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "array"
+        ]
+      },
+      "required": true,
+      "types": [
+        "array"
+      ]
+    },
+    "<type=commandExecution>.commandActions[]": {
+      "discriminator": "type",
+      "members": [
+        "listFiles",
+        "read",
+        "search",
+        "unknown"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/CommandAction",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=commandExecution>.commandActions[].type": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "listFiles",
+        "read",
+        "search",
+        "unknown"
+      ]
+    },
+    "<type=commandExecution>.cwd": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/LegacyAppPathString",
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.exitCode": {
+      "limits": {
+        "format": "int32"
+      },
+      "nullable": true,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": true,
+        "required": false,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": false,
+      "types": [
+        "integer"
+      ]
+    },
+    "<type=commandExecution>.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.status": {
+      "closed": true,
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "completed",
+          "declined",
+          "failed",
+          "inProgress"
+        ]
+      },
+      "ref": "v2/CommandExecutionStatus",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "completed",
+        "declined",
+        "failed",
+        "inProgress"
+      ]
+    },
+    "<type=commandExecution>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "commandExecution"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "commandExecution"
+      ]
+    },
+    "<type=contextCompaction>": {
+      "keys": {
+        "id": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=contextCompaction>.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=contextCompaction>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "contextCompaction"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "contextCompaction"
+      ]
+    },
+    "<type=mcpToolCall>": {
+      "keys": {
+        "appContext": false,
+        "arguments": true,
+        "durationMs": false,
+        "error": false,
+        "id": true,
+        "mcpAppResourceUri": false,
+        "mcpAppUi": false,
+        "pluginId": false,
+        "readOnlyHint": false,
+        "result": false,
+        "server": true,
+        "status": true,
+        "tool": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=mcpToolCall>.arguments": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": true,
+        "types": [
+          "any"
+        ]
+      },
+      "required": true,
+      "types": [
+        "any"
+      ]
+    },
+    "<type=mcpToolCall>.error": {
+      "keys": {
+        "message": true
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/McpToolCallError",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=mcpToolCall>.error.message": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=mcpToolCall>.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=mcpToolCall>.result": {
+      "keys": {
+        "_meta": false,
+        "content": true,
+        "structuredContent": false
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/McpToolCallResult",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=mcpToolCall>.server": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=mcpToolCall>.status": {
+      "closed": true,
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "completed",
+          "failed",
+          "inProgress"
+        ]
+      },
+      "ref": "v2/McpToolCallStatus",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "completed",
+        "failed",
+        "inProgress"
+      ]
+    },
+    "<type=mcpToolCall>.tool": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=mcpToolCall>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "mcpToolCall"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "mcpToolCall"
+      ]
+    }
+  },
+  "v2/ThreadReadResponse": {
+    "": {
+      "keys": {
+        "thread": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadReadResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread": {
+      "keys": {
+        "agentNickname": false,
+        "agentRole": false,
+        "canAcceptDirectInput": false,
+        "cliVersion": true,
+        "createdAt": true,
+        "cwd": true,
+        "daybreakEnabled": false,
+        "environments": false,
+        "ephemeral": true,
+        "extra": false,
+        "forkedFromId": false,
+        "gitInfo": false,
+        "historyMode": false,
+        "id": true,
+        "model": false,
+        "modelProvider": true,
+        "name": false,
+        "originator": false,
+        "parentThreadId": false,
+        "path": false,
+        "preview": true,
+        "projectId": true,
+        "reasoningEffort": false,
+        "recencyAt": false,
+        "section": false,
+        "sectionEnteredAt": false,
+        "sessionId": true,
+        "source": true,
+        "status": true,
+        "threadSource": false,
+        "turns": true,
+        "updatedAt": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Thread",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "thread.status": {
+      "closed": true,
+      "discriminator": "type",
+      "members": [
+        "active",
+        "idle",
+        "notLoaded",
+        "systemError"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ],
+        "values": [
+          "active",
+          "idle",
+          "notLoaded",
+          "systemError"
+        ]
+      },
+      "ref": "v2/ThreadStatus",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.status<type=active>": {
+      "keys": {
+        "activeFlags": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.status<type=active>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "active"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "active"
+      ]
+    },
+    "thread.status<type=idle>": {
+      "keys": {
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.status<type=idle>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "idle"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "idle"
+      ]
+    },
+    "thread.status<type=notLoaded>": {
+      "keys": {
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.status<type=notLoaded>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "notLoaded"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "notLoaded"
+      ]
+    },
+    "thread.status<type=systemError>": {
+      "keys": {
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.status<type=systemError>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "systemError"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "systemError"
+      ]
+    }
+  },
+  "v2/ThreadResumeResponse": {
+    "": {
+      "keys": {
+        "activePermissionProfile": false,
+        "approvalPolicy": true,
+        "approvalsReviewer": true,
+        "collaborationMode": false,
+        "cwd": true,
+        "disabledPluginIds": false,
+        "initialTurnsPage": false,
+        "instructionSources": false,
+        "itemsBackwardsCursor": false,
+        "model": true,
+        "modelProvider": true,
+        "multiAgentMode": false,
+        "reasoningEffort": false,
+        "runtimeWorkspaceRoots": false,
+        "sandbox": true,
+        "serviceTier": false,
+        "thread": true,
+        "turnsBackwardsCursor": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadResumeResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "model": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "modelProvider": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "reasoningEffort": {
+      "limits": {
+        "minLength": 1
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/ReasoningEffort",
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "thread": {
+      "keys": {
+        "agentNickname": false,
+        "agentRole": false,
+        "canAcceptDirectInput": false,
+        "cliVersion": true,
+        "createdAt": true,
+        "cwd": true,
+        "daybreakEnabled": false,
+        "environments": false,
+        "ephemeral": true,
+        "extra": false,
+        "forkedFromId": false,
+        "gitInfo": false,
+        "historyMode": false,
+        "id": true,
+        "model": false,
+        "modelProvider": true,
+        "name": false,
+        "originator": false,
+        "parentThreadId": false,
+        "path": false,
+        "preview": true,
+        "projectId": true,
+        "reasoningEffort": false,
+        "recencyAt": false,
+        "section": false,
+        "sectionEnteredAt": false,
+        "sessionId": true,
+        "source": true,
+        "status": true,
+        "threadSource": false,
+        "turns": true,
+        "updatedAt": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Thread",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ThreadStartResponse": {
+    "": {
+      "keys": {
+        "activePermissionProfile": false,
+        "approvalPolicy": true,
+        "approvalsReviewer": true,
+        "cwd": true,
+        "disabledPluginIds": false,
+        "instructionSources": false,
+        "model": true,
+        "modelProvider": true,
+        "multiAgentMode": false,
+        "reasoningEffort": false,
+        "runtimeWorkspaceRoots": false,
+        "sandbox": true,
+        "serviceTier": false,
+        "thread": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadStartResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "model": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "modelProvider": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "reasoningEffort": {
+      "limits": {
+        "minLength": 1
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/ReasoningEffort",
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "thread": {
+      "keys": {
+        "agentNickname": false,
+        "agentRole": false,
+        "canAcceptDirectInput": false,
+        "cliVersion": true,
+        "createdAt": true,
+        "cwd": true,
+        "daybreakEnabled": false,
+        "environments": false,
+        "ephemeral": true,
+        "extra": false,
+        "forkedFromId": false,
+        "gitInfo": false,
+        "historyMode": false,
+        "id": true,
+        "model": false,
+        "modelProvider": true,
+        "name": false,
+        "originator": false,
+        "parentThreadId": false,
+        "path": false,
+        "preview": true,
+        "projectId": true,
+        "reasoningEffort": false,
+        "recencyAt": false,
+        "section": false,
+        "sectionEnteredAt": false,
+        "sessionId": true,
+        "source": true,
+        "status": true,
+        "threadSource": false,
+        "turns": true,
+        "updatedAt": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Thread",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "thread.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ThreadStatusChangedNotification": {
+    "": {
+      "keys": {
+        "status": true,
+        "threadId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadStatusChangedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "status": {
+      "closed": true,
+      "discriminator": "type",
+      "members": [
+        "active",
+        "idle",
+        "notLoaded",
+        "systemError"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ],
+        "values": [
+          "active",
+          "idle",
+          "notLoaded",
+          "systemError"
+        ]
+      },
+      "ref": "v2/ThreadStatus",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "status<type=active>": {
+      "keys": {
+        "activeFlags": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "status<type=active>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "active"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "active"
+      ]
+    },
+    "status<type=idle>": {
+      "keys": {
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "status<type=idle>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "idle"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "idle"
+      ]
+    },
+    "status<type=notLoaded>": {
+      "keys": {
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "status<type=notLoaded>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "notLoaded"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "notLoaded"
+      ]
+    },
+    "status<type=systemError>": {
+      "keys": {
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "status<type=systemError>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "systemError"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "systemError"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ThreadTokenUsageUpdatedNotification": {
+    "": {
+      "keys": {
+        "threadId": true,
+        "tokenUsage": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadTokenUsageUpdatedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "tokenUsage": {
+      "keys": {
+        "last": true,
+        "modelContextWindow": false,
+        "total": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadTokenUsage",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "tokenUsage.last": {
+      "keys": {
+        "cacheWriteInputTokens": false,
+        "cachedInputTokens": true,
+        "inputTokens": true,
+        "outputTokens": true,
+        "reasoningOutputTokens": true,
+        "totalTokens": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TokenUsageBreakdown",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "tokenUsage.last.totalTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.modelContextWindow": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": true,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": true,
+        "required": false,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": false,
+      "types": [
+        "integer"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/ThreadUnsubscribeResponse": {
+    "": {
+      "keys": {
+        "status": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadUnsubscribeResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    }
+  },
+  "v2/TurnCompletedNotification": {
+    "": {
+      "keys": {
+        "threadId": true,
+        "turn": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnCompletedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn": {
+      "keys": {
+        "completedAt": false,
+        "durationMs": false,
+        "error": false,
+        "id": true,
+        "items": true,
+        "itemsView": false,
+        "startedAt": false,
+        "status": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Turn",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "turn.error": {
+      "keys": {
+        "additionalDetails": false,
+        "codexErrorInfo": false,
+        "message": true,
+        "misalignment": false
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnError",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "turn.error.additionalDetails": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.error.codexErrorInfo": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "v2/CodexErrorInfo",
+      "required": false,
+      "types": [
+        "object",
+        "string"
+      ],
+      "values": [
+        "activeTurnNotSteerable",
+        "badRequest",
+        "contextWindowExceeded",
+        "cyberPolicy",
+        "flexUnavailable",
+        "httpConnectionFailed",
+        "internalServerError",
+        "misalignmentPolicyViolation",
+        "other",
+        "rateLimitExceeded",
+        "responseStreamConnectionFailed",
+        "responseStreamDisconnected",
+        "responseTooManyFailedAttempts",
+        "sandboxError",
+        "serverOverloaded",
+        "sessionBudgetExceeded",
+        "threadRollbackFailed",
+        "tooManyDenials",
+        "unauthorized",
+        "usageLimitExceeded"
+      ]
+    },
+    "turn.error.message": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.status": {
+      "closed": true,
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "completed",
+          "failed",
+          "inProgress",
+          "interrupted"
+        ]
+      },
+      "ref": "v2/TurnStatus",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "completed",
+        "failed",
+        "inProgress",
+        "interrupted"
+      ]
+    }
+  },
+  "v2/TurnInterruptResponse": {
+    "": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnInterruptResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    }
+  },
+  "v2/TurnPlanUpdatedNotification": {
+    "": {
+      "keys": {
+        "explanation": false,
+        "plan": true,
+        "threadId": true,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnPlanUpdatedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "plan": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "array"
+        ]
+      },
+      "required": true,
+      "types": [
+        "array"
+      ]
+    },
+    "plan[]": {
+      "keys": {
+        "status": true,
+        "step": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnPlanStep",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "plan[].status": {
+      "closed": true,
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "completed",
+          "inProgress",
+          "pending"
+        ]
+      },
+      "ref": "v2/TurnPlanStepStatus",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "completed",
+        "inProgress",
+        "pending"
+      ]
+    },
+    "plan[].step": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  },
+  "v2/TurnStartResponse": {
+    "": {
+      "keys": {
+        "turn": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnStartResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "turn": {
+      "keys": {
+        "completedAt": false,
+        "durationMs": false,
+        "error": false,
+        "id": true,
+        "items": true,
+        "itemsView": false,
+        "startedAt": false,
+        "status": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Turn",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "turn.error": {
+      "keys": {
+        "additionalDetails": false,
+        "codexErrorInfo": false,
+        "message": true,
+        "misalignment": false
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnError",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "turn.error.additionalDetails": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.error.codexErrorInfo": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "v2/CodexErrorInfo",
+      "required": false,
+      "types": [
+        "object",
+        "string"
+      ],
+      "values": [
+        "activeTurnNotSteerable",
+        "badRequest",
+        "contextWindowExceeded",
+        "cyberPolicy",
+        "flexUnavailable",
+        "httpConnectionFailed",
+        "internalServerError",
+        "misalignmentPolicyViolation",
+        "other",
+        "rateLimitExceeded",
+        "responseStreamConnectionFailed",
+        "responseStreamDisconnected",
+        "responseTooManyFailedAttempts",
+        "sandboxError",
+        "serverOverloaded",
+        "sessionBudgetExceeded",
+        "threadRollbackFailed",
+        "tooManyDenials",
+        "unauthorized",
+        "usageLimitExceeded"
+      ]
+    },
+    "turn.error.message": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.status": {
+      "closed": true,
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "completed",
+          "failed",
+          "inProgress",
+          "interrupted"
+        ]
+      },
+      "ref": "v2/TurnStatus",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "completed",
+        "failed",
+        "inProgress",
+        "interrupted"
+      ]
+    }
+  },
+  "v2/TurnStartedNotification": {
+    "": {
+      "keys": {
+        "threadId": true,
+        "turn": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnStartedNotification",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "threadId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn": {
+      "keys": {
+        "completedAt": false,
+        "durationMs": false,
+        "error": false,
+        "id": true,
+        "items": true,
+        "itemsView": false,
+        "startedAt": false,
+        "status": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/Turn",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "turn.error": {
+      "keys": {
+        "additionalDetails": false,
+        "codexErrorInfo": false,
+        "message": true,
+        "misalignment": false
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnError",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "turn.error.additionalDetails": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.error.codexErrorInfo": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "v2/CodexErrorInfo",
+      "required": false,
+      "types": [
+        "object",
+        "string"
+      ],
+      "values": [
+        "activeTurnNotSteerable",
+        "badRequest",
+        "contextWindowExceeded",
+        "cyberPolicy",
+        "flexUnavailable",
+        "httpConnectionFailed",
+        "internalServerError",
+        "misalignmentPolicyViolation",
+        "other",
+        "rateLimitExceeded",
+        "responseStreamConnectionFailed",
+        "responseStreamDisconnected",
+        "responseTooManyFailedAttempts",
+        "sandboxError",
+        "serverOverloaded",
+        "sessionBudgetExceeded",
+        "threadRollbackFailed",
+        "tooManyDenials",
+        "unauthorized",
+        "usageLimitExceeded"
+      ]
+    },
+    "turn.error.message": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "turn.status": {
+      "closed": true,
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "completed",
+          "failed",
+          "inProgress",
+          "interrupted"
+        ]
+      },
+      "ref": "v2/TurnStatus",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "completed",
+        "failed",
+        "inProgress",
+        "interrupted"
+      ]
+    }
+  },
+  "v2/TurnSteerResponse": {
+    "": {
+      "keys": {
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/TurnSteerResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    }
+  }
+}
