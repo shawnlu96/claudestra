@@ -16,6 +16,7 @@
  */
 import { codexCommandText, codexTextOf } from "../codex-session.js";
 import { modelStateEntry, parseConfigOptions } from "./config.js";
+import type { TurnEndFailure } from "./failures.js";
 
 type Rec = Record<string, any>;
 
@@ -64,8 +65,8 @@ export function threadStatusOf(update: unknown): string | null {
   return typeof t === "string" ? t : null;
 }
 
-/** Pi 适配器在 idle 上带的这一轮结局（pi-adapter/map.ts turnEnd）；codex-acp 不带，返回 null，Codex 的解释照旧 */
-export function turnEndOf(update: unknown): { stopReason?: string; failure?: { kind?: string; message?: string } } | null {
+/** 适配器在 idle 上带的这一轮结局（Pi：pi-adapter/map.ts turnEnd；自研 Codex 适配器另带 id / retry 等）；codex-acp 2.1.0 不带，返回 null */
+export function turnEndOf(update: unknown): { stopReason?: string; failure?: TurnEndFailure } | null {
   const t = (update as Rec | null)?._meta?.claudestra?.turn;
   return t && typeof t === "object" ? t : null;
 }

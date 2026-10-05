@@ -13,10 +13,10 @@
  * 规矩与形状见 docs/runtimes/codex-acp.md；tests/acp-session.test.ts。
  */
 import { configRefusal, parseConfigOptions, resolveConfigValue, type ConfigOption } from "./config.js";
-import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError, deliveryUnknownCause, deliveryUnknownFailure } from "./failures.js";
+import { airFailureOf, classifyAirFailure, classifyPromptError, classifyTurnEndFailure, deliveryUnknownCause, deliveryUnknownFailure } from "./failures.js";
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
 import { ACP_PROTOCOL_VERSION, AcpIncompatibleError, checkInitialize, type AgentInfo } from "./protocol.js";
-import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
+import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "./rpc.js";
 import type { PromptOutcome, SteerResult } from "./turn.js";
 import { threadStatusOf, turnEndOf } from "./updates.js";
 
@@ -93,7 +93,10 @@ export class AcpSession {
   /** initialize：回包先过协议版本与必要能力检查（protocol.ts，不过就抛 AcpIncompatibleError），返回接线程要用的会话能力。need.fork = 要 fork */
   async initialize(need: { fork?: boolean } = {}): Promise<{ resume: boolean; fork: boolean }> {
     const params = { protocolVersion: ACP_PROTOCOL_VERSION, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "claudestra-acp-host", version: "1" } };
-    const r = await this.rpc.request("initialize", params, { timeoutMs: 60_000 });
+    const r = await this.rpc.request("initialize", params, { timeoutMs: 60_000 }).catch((e: unknown) => {
+      // 适配器明说起不来（环境不合格，data.fatal）：和协议不兼容走同一条路——固定一张卡、不再重起（host.ts refused）
+      throw e instanceof RpcError && (e.data as { fatal?: unknown } | undefined)?.fatal === true ? new AcpIncompatibleError(e.message) : e;
+    });
     const verdict = checkInitialize(r, need);
     if (!verdict.ok) throw new AcpIncompatibleError(verdict.reason);
     this.agentInfo = verdict.agentInfo;
@@ -242,7 +245,7 @@ export class AcpSession {
     const f = e.end?.failure;
     if (f) {
       const message = typeof f.message === "string" && f.message ? f.message : `${this.label} 回合失败`;
-      return { kind: "failed", failure: classifyNeutralFailure(f.kind, key, message) ?? { kind: "error", key, message } };
+      return { kind: "failed", failure: classifyTurnEndFailure(f, key, message) };
     }
     return cancelled || e.end?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
   }
