@@ -49,6 +49,7 @@ import { findSessionJsonlBySessionId, translateSessionLine } from "./session-sou
 import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
+import { gapPort } from "./lend-update-gap-host.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -160,7 +161,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const send = sendVia(registryRow, alive);
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
-    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() },
+    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() }, updateGap: gapPort(),
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: (m) => console.error(`[lend] ${m}`),
     notify: async (p) => {

@@ -23,6 +23,7 @@ import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { gapHolds } from "./lend-update-gap.js";
 import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
@@ -126,6 +127,7 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   if (busy.n >= slots) return "wait";
   if (ordersToday(db, row.peer, now) >= entry.ordersPerDay) return "wait";
   if (row.family === "codex" && pausedUntil(db, now) !== null) return "wait"; // 本机 Codex 撞额度暂停中：批了也先不领
+  if (gapHolds(db)) return "wait"; // 出借更新空档：已接下的单先不领，空档结束再领（lend-update-gap.ts）
   return null;
 }
 
