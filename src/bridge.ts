@@ -870,7 +870,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
+    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog); // 谁开的这一轮（stop-settle）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
