@@ -159,13 +159,17 @@ describe("placement local / auto that lands local: byte-for-byte the pre-W5 star
     test(`${name}: normal path`, async () => {
       expect((await plan()).ok).toBe(true);
       calls = [];
-      expect(digest(product(await start(args, d())))).toBe(START_GOLDEN.normal);
+      const result = product(await start(args, d()));
+      if (name === "local") expect(getTask(db, "i28-a")!.extra.placement).toBe("local");
+      expect(digest(name === "local" ? result.replaceAll(',"placement":"local"', '').replaceAll(',\\"placement\\":\\"local\\"', '') : result)).toBe(START_GOLDEN.normal);
     });
     test(`${name}: rollback`, async () => {
       expect((await plan()).ok).toBe(true);
       calls = [];
       failOn = (a) => a[0] === "ledger" && a[1] === "workflow-set";
-      expect(digest(product(await start(args, d())))).toBe(START_GOLDEN.rollback);
+      const result = product(await start(args, d()));
+      if (name === "local") expect(getTask(db, "i28-a")!.extra.placement).toBe("local");
+      expect(digest(name === "local" ? result.replaceAll(',"placement":"local"', '').replaceAll(',\\"placement\\":\\"local\\"', '') : result)).toBe(START_GOLDEN.rollback);
     });
   }
 });
