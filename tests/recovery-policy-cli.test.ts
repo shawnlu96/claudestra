@@ -3,20 +3,21 @@
  * mode by PM / master / owner, manualStallHours by owner only, bad files refused, concurrent writers serialized,
  * and the real manager.ts CLI refusing unknown / scheduler-service / lend-worker callers.
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
-import { recoveryPolicy, setRecovery } from "../src/lib/recovery-policy.js";
+import { gateRecovery, recoveryPolicy, setRecovery } from "../src/lib/recovery-policy.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { LedgerCli, type LedgerDeps } from "../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
 import { recoveryCmds } from "../src/manager/ledger-recovery-cmds.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
+import { testChildEnv } from "./test-env.js";
 
 const PM_A = "agent-pm-a", PM_B = "agent-pm-b", DISP = "agent-helper", EXEC = "agent-task-x";
 let db: Database, path: string;
@@ -155,6 +156,78 @@ describe("concurrency", () => {
       .rejects.toMatchObject({ code: "busy" });
     expect([snap(), decisions()]).toEqual([null, []]);
   });
+
+  test("permission revoked while queued on the lock → forbidden after the lock, nothing written", async () => {
+    const hold = () => { mkdirSync(`${path}.lock`, { recursive: true }); writeFileSync(join(`${path}.lock`, "owner"), "someone-else"); };
+    hold();
+    const pending = setRecovery(db, { actor: PM_A, now: 1 }, { project: "a", set: { mode: "on" }, reason: "r" }, { path });
+    await Bun.sleep(100);
+    setMeta(db, { actor: "owner", now: 2 }, { project: "a", key: "pms", value: [DISP] });
+    rmSync(`${path}.lock`, { recursive: true });
+    await expect(pending).rejects.toMatchObject({ code: "forbidden" });
+    expect([snap(), decisions()]).toEqual([null, []]);
+  });
+});
+
+/** Real manager.ts children against an isolated state dir; the parent holds the file lock / ledger write lock to stage the race. */
+describe("real CLI races (review r1)", () => {
+  const setup = () => {
+    const state = mkdtempSync(join(tmpdir(), "recovery-race-state-"));
+    writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "a", name: "A", dirs: [state] }] }));
+    writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "s", agents: { [PM_A]: { channelId: "111" } } }));
+    const env = { CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
+    const file = join(state, "recovery-policy.json"), ledger = join(state, "ledger.sqlite");
+    const cli = (extra: Record<string, string>, ...args: string[]) => {
+      const proc = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), "ledger", "scheduler-recovery", ...args],
+        { env: testChildEnv({ ...env, ...extra }), stdout: "pipe", stderr: "pipe" });
+      return (async () => { const t = await new Response(proc.stdout).text(); await proc.exited; return JSON.parse(t.trim().split("\n").at(-1) ?? "{}"); })();
+    };
+    const hold = () => { mkdirSync(`${file}.lock`, { recursive: true }); writeFileSync(join(`${file}.lock`, "owner"), "parent"); };
+    const release = () => rmSync(`${file}.lock`, { recursive: true });
+    return { state, file, ledger, cli, hold, release };
+  };
+  const ledgerDecisions = (p: string) => listEvents(openLedger(p), {}).filter((e) => e.kind === "decision" && e.data.op === "scheduler_recovery");
+
+  test("PM dropped from pms while its CLI waits for the file lock → forbidden, mode stays off", async () => {
+    const t = setup();
+    expect(await t.cli({}, "a", "off", "--reason", "init")).toMatchObject({ ok: true, changed: true }); // creates the ledger
+    const ldb = openLedger(t.ledger);
+    setMeta(ldb, { actor: "owner", now: 1 }, { project: "a", key: "pms", value: [PM_A] });
+    t.hold();
+    const pending = t.cli({ DISCORD_CHANNEL_ID: "111" }, "a", "on", "--reason", "probe");
+    await Bun.sleep(2_500); // child is up and polling the lock
+    setMeta(ldb, { actor: "owner", now: 2 }, { project: "a", key: "pms", value: [] });
+    t.release();
+    expect(await pending).toMatchObject({ ok: false, code: "forbidden" });
+    expect(recoveryPolicy("a", "audit", t.file).mode).toBe("off");
+    expect(ledgerDecisions(t.ledger)).toHaveLength(1);
+  }, 60_000);
+
+  test("ledger busy during the audit → the new mode is never visible to readers, no recovery runs, CLI busy", async () => {
+    const t = setup();
+    expect(await t.cli({}, "a", "off", "--reason", "init")).toMatchObject({ ok: true, changed: true });
+    t.hold();
+    const pending = t.cli({}, "a", "on", "--reason", "probe");
+    await Bun.sleep(2_500);
+    const blocker = new Database(t.ledger);
+    blocker.exec("BEGIN IMMEDIATE");
+    t.release();
+    let acted = 0, seen = new Set<string>(), done = false;
+    pending.finally(() => { done = true; });
+    const gdb = new Database(":memory:");
+    while (!done) {
+      seen.add(recoveryPolicy("a", "audit", t.file).mode);
+      const g = await gateRecovery(gdb, { project: "a", mechanism: "audit", target: "", actionKey: "probe", action: "probe" }, () => ++acted,
+        { now: 1, policy: (p, m) => recoveryPolicy(p, m, t.file) });
+      expect(g.outcome).toBe("skipped");
+      await Bun.sleep(50);
+    }
+    expect(await pending).toMatchObject({ ok: false, code: "busy" });
+    blocker.exec("ROLLBACK");
+    blocker.close();
+    expect([acted, [...seen], recoveryPolicy("a", "audit", t.file).mode]).toEqual([0, ["off"], "off"]);
+    expect(ledgerDecisions(t.ledger)).toHaveLength(1);
+  }, 60_000);
 });
 
 describe("registered in the ledger command family", () => {
@@ -167,11 +240,10 @@ describe("registered in the ledger command family", () => {
   test("real manager.ts: terminal owner writes; unknown channel / scheduler service / lend worker are refused", async () => {
     const state = mkdtempSync(join(tmpdir(), "recovery-cli-state-"));
     writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "a", name: "A", dirs: [state] }] }));
-    const base: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
-    for (const k of ["DISCORD_CHANNEL_ID", "CLAUDESTRA_SCHEDULER_SERVICE", "CLAUDESTRA_LEND_WORKER"]) delete base[k];
-    const cli = async (env: Record<string, string | undefined>, ...args: string[]) => {
+    const base: Record<string, string> = { CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
+    const cli = async (env: Record<string, string>, ...args: string[]) => {
       const proc = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), "ledger", "scheduler-recovery", ...args],
-        { env, stdout: "pipe", stderr: "pipe" });
+        { env: testChildEnv(env), stdout: "pipe", stderr: "pipe" });
       const out = JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "{}");
       await proc.exited;
       return { out };
