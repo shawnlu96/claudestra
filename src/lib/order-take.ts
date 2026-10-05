@@ -17,7 +17,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
-import { currentReviewFacts } from "./scheduler-review.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
 import { standardAnswers } from "./order-standard-answers.js";
@@ -119,7 +119,7 @@ function dagVersionOf(db: Database, task: LedgerTask): number | null {
 const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 
 /**
- * 修复单要带上这一轮审查的逐项结论与报告路径（和调度器 fixPackage 同一口径：currentReviewFacts 取本轮、本 head 的结论）；
+ * 修复单要带上这一轮审查的逐项结论与报告路径（和调度器 fixPackage 同一口径：fixStartReviewFacts 取本轮、本 head 的结论，或经核实起点链迁移前那个 head 的结论）；
  * 唤醒派单时执行者只看得到 take_order 的单，缺了它就只知道「要修」不知道修什么。写单 / 结论不完整时不带。
  */
 function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
@@ -129,7 +129,7 @@ function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findi
   if (bounce) return { findings: [], report: null, bounce: bounceWork(bounce) };
   const ui = uiRejectFixFor(db, t, events, getWorkflow(db, t.id)?.template); // 同一退回来源的代码 findings / 报告与 PM 截图意见一起带上
   if (ui) return { findings: wireFindings(ui.findings), report: ui.reportPath };
-  const read = currentReviewFacts(t, events);
+  const read = fixStartReviewFacts(t, events);
   return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
 }
 
