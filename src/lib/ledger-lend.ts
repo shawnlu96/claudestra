@@ -27,7 +27,7 @@ import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.
 import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
 import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
-import { assertFresh, materialsNote, MATERIALS_BLOCKED, withMaterials, type FixMaterials } from "./fix-materials.js";
+import { assertFresh, materialsNote, MATERIALS_BLOCKED, sendsItems, withMaterials, type FixMaterials } from "./fix-materials.js";
 import type { WriteMaterial } from "./lend-write-materials.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 import { fitFindings } from "./order-findings.js";
@@ -160,8 +160,8 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce, restate };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
-  if (m?.mode === "on") assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
-  const made = (split: InputSplit) => m?.mode === "on" ? withMaterials(writeOrderWire(task, o, split), m, findings, split) : writeOrderWire(task, o, split);
+  if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
+  const made = (split: InputSplit) => sendsItems(m) ? withMaterials(writeOrderWire(task, o, split), m, findings, split) : writeOrderWire(task, o, split);
   return { wire: made(chunkInputs), whole: made(wholeInputs), branch, base: input.write.base, ...(m ? { materials: m } : {}) };
 }
 
@@ -203,7 +203,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
       wire = redactOrderForPeer(made.wire, head).order;
       text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
     } catch (e) {
-      const blocked = made.materials?.mode === "on" ? MATERIALS_BLOCKED : "";
+      const blocked = sendsItems(made.materials) ? MATERIALS_BLOCKED : "";
       if (e instanceof OrderRenderError) throw new LedgerError("invalid", `${blocked}派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
       throw e;
     }

@@ -14,7 +14,7 @@ import type { RemoteHead } from "./order-deliver.js";
 import { readTextSoft } from "./task-spec.js";
 import { fixBounce } from "./scheduler-merge-conflict.js";
 import { lendFixMaterials } from "./lend-fix-env.js";
-import { fixMaterials, materialsMode, type FixMaterials, type MaterialsPolicy } from "./fix-materials.js";
+import { fixMaterials, materialsMode, sendsItems, type FixMaterials, type MaterialsPolicy } from "./fix-materials.js";
 
 const PR_BASE = "main";
 
@@ -53,5 +53,6 @@ export async function writeMaterials(db: Database, task: LedgerTask, q: { peer: 
   const mode = materialsMode(policy, task.project);
   const materials = mode === "off" ? null : fixMaterials(mode, listEvents(db, { project: task.project, target: task.id }), path as string, report);
   if (!materials) return whole; // off, or a review without structured findings: the original full-text path
-  return mode === "on" ? { ...whole, report: ui ? ui.report : null, materials } : { ...whole, materials };
+  // An item without its description (a local review keeps it only in free text) keeps the full text; the note records the fallback.
+  return sendsItems(materials) ? { ...whole, report: ui ? ui.report : null, materials } : { ...whole, materials };
 }
