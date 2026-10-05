@@ -125,6 +125,76 @@ describe("字段：输入不可信，错了给原因", () => {
   });
 });
 
+describe("反射安全：只认自有数据字段，不可信访问器 / 代理不逃逸", () => {
+  test("JSON 自有 __proto__ 键是未知字段，不能借原型把候选整个塞进来", () => {
+    const smuggled = JSON.parse(JSON.stringify({ ["__proto__"]: cand() })) as unknown;
+    expect(Object.getOwnPropertyNames(smuggled)).toEqual(["__proto__"]);
+    const d = decideDirectRoute(input([smuggled]), ports());
+    expect(only(d)).toEqual({ id: null, eligible: false, reason: "unknown_field" });
+    expect(d.route).toBe("relay");
+    expect(reasonFor({ ["__proto__"]: { trusted: true } })).toBe("unknown_field"); // 计算键 / 展开得到的自有 __proto__ 也是字段
+    const viaJson = JSON.parse(`{"__proto__":{"x":1},${JSON.stringify(cand()).slice(1)}`) as unknown;
+    expect(only(decideDirectRoute(input([viaJson]), ports()))).toMatchObject({ eligible: false, reason: "unknown_field" });
+  });
+
+  test("嵌套身份 / port 判决里的 __proto__ 同样不算数", () => {
+    const instance = JSON.parse(JSON.stringify({ ["__proto__"]: ME })) as unknown;
+    expect(reasonFor({ instance })).toBe("bad_instance");
+    const smuggledVerdict = JSON.parse(JSON.stringify({ ["__proto__"]: { ok: true, source: "lan" } })) as UrlVerdict;
+    expect(reasonFor({}, { ...ports(), classifyUrl: () => smuggledVerdict })).toBe("url_port_bad_verdict");
+  });
+
+  test("能力数组下标 getter 不执行，给 bad_capabilities 而不是抛出", () => {
+    let touched = 0;
+    const caps: unknown[] = [];
+    Object.defineProperty(caps, 0, { enumerable: true, get() { touched++; throw new Error("getter executed"); } });
+    expect(reasonFor({ capabilities: caps })).toBe("bad_capabilities");
+    expect(touched).toBe(0);
+  });
+
+  test("候选列表下标 getter 不执行，该条 bad_shape，其余照评", () => {
+    let touched = 0;
+    const list: unknown[] = [cand()];
+    Object.defineProperty(list, 1, { enumerable: true, get() { touched++; return cand({ id: "b" }); } });
+    const d = decideDirectRoute(input(list), ports());
+    expect(d.results.map((r) => (r.eligible ? "ok" : r.reason))).toEqual(["ok", "bad_shape"]);
+    expect(touched).toBe(0);
+  });
+
+  test("抛错 Proxy 作为候选 / 身份 / 能力 / 列表 / 判决都转成明确拒绝，异常不逃逸", () => {
+    const hostile = (target: object = {}) => new Proxy(target, {
+      getPrototypeOf() { throw new Error("hostile proxy"); },
+      ownKeys() { throw new Error("hostile proxy"); },
+      getOwnPropertyDescriptor() { throw new Error("hostile proxy"); },
+      get() { throw new Error("hostile proxy"); },
+    });
+    expect(only(decideDirectRoute(input([hostile()]), ports()))).toEqual({ id: null, eligible: false, reason: "bad_shape" });
+    expect(reasonFor({ instance: hostile() })).toBe("bad_instance");
+    expect(reasonFor({ capabilities: hostile(["peer"]) })).toBe("bad_capabilities");
+    expect(reasonFor({}, { ...ports(), classifyUrl: () => hostile() as UrlVerdict })).toBe("url_port_bad_verdict");
+    expect(reasonFor({}, { ...ports(), verifyProof: () => hostile() as ProofVerdict })).toBe("proof_port_bad_verdict");
+    expect(decideDirectRoute(input(hostile([cand()])), ports())).toMatchObject({ route: "relay", listError: "not_array", results: [] });
+    const { proxy, revoke } = Proxy.revocable([cand()], {});
+    revoke();
+    expect(decideDirectRoute(input(proxy), ports())).toMatchObject({ route: "relay", listError: "not_array", results: [] });
+    expect(decideDirectRoute(input([cand()], { budget: hostile() as DirectBudget }), ports())).toMatchObject({ listError: "bad_budget" });
+    expect(decideDirectRoute(input([cand()], { expected: hostile() as InstanceIdentity }), ports())).toMatchObject({ listError: "bad_expected" });
+  });
+
+  test("代理列表每次读给不同值也只读一次：查重、评估、挑选用的是同一份快照", () => {
+    let reads = 0;
+    const list = new Proxy([cand()], {
+      getOwnPropertyDescriptor(t, k) {
+        if (k === "0") return { value: cand({ id: `v${reads++}`, proof: `sig:v${reads - 1}` }), writable: true, enumerable: true, configurable: true };
+        return Reflect.getOwnPropertyDescriptor(t, k);
+      },
+    });
+    const d = decideDirectRoute(input(list), ports());
+    expect(reads).toBe(1);
+    expect(d.pick).toEqual({ id: "v0", source: "lan", url: "http://192.168.1.20:3847/" });
+  });
+});
+
 describe("身份与有效期", () => {
   test("候选声明的实例与期望对端不符 → identity_mismatch", () => {
     expect(reasonFor({ instance: { ...OTHER } })).toBe("identity_mismatch");

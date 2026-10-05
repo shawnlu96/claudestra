@@ -111,19 +111,51 @@ const MAX_DETAIL = 200;
 
 type Plain = Record<string, unknown>;
 
-/** 只认普通对象的自有数据属性：getter、原型链字段、类实例一律当形状不对（不触发 getter） */
+/** 数组里读不到自有数据值的位置（空洞、getter）：后续按形状不对处理，不执行访问器 */
+const NOT_DATA: unique symbol = Symbol("not_data");
+
+/**
+ * 只认普通对象的自有数据属性：getter、原型链字段、类实例一律当形状不对（不触发 getter）。
+ * 副本无原型、逐键 defineProperty，自有 __proto__ 键照常是一个（未知）字段；Proxy 的反射陷阱抛错同样当形状不对。
+ */
 function readPlain(v: unknown): Plain | null {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
-  const proto = Object.getPrototypeOf(v);
-  if (proto !== Object.prototype && proto !== null) return null;
-  const out: Plain = {};
-  for (const key of Reflect.ownKeys(v)) {
-    if (typeof key !== "string") return null;
-    const d = Object.getOwnPropertyDescriptor(v, key);
-    if (!d || !("value" in d)) return null;
-    out[key] = d.value;
+  if (typeof v !== "object" || v === null) return null;
+  try {
+    if (Array.isArray(v)) return null;
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return null;
+    const out: Plain = Object.create(null) as Plain;
+    for (const key of Reflect.ownKeys(v)) {
+      if (typeof key !== "string") return null;
+      const d = Object.getOwnPropertyDescriptor(v, key);
+      if (!d || !("value" in d)) return null;
+      Object.defineProperty(out, key, { value: d.value, enumerable: true, writable: true, configurable: true });
+    }
+    return out;
+  } catch {
+    return null;
   }
-  return out;
+}
+
+/**
+ * 不可信数组的一次性快照：只经 length / 下标的自有数据描述符读，空洞与 getter 位置记为 NOT_DATA；
+ * 长度超过 max 时不逐项读（返回 "too_many"）；不是数组或反射抛错（含已撤销的 Proxy）返回 null。
+ */
+function readArray(v: unknown, max: number): unknown[] | "too_many" | null {
+  try {
+    if (!Array.isArray(v)) return null;
+    const len = Object.getOwnPropertyDescriptor(v, "length");
+    if (!len || !("value" in len) || !Number.isSafeInteger(len.value) || len.value < 0) return null;
+    if (len.value > max) return "too_many";
+    const out: unknown[] = [];
+    for (let i = 0; i < len.value; i++) {
+      const d = Object.getOwnPropertyDescriptor(v, String(i));
+      out.push(d && "value" in d ? d.value : NOT_DATA);
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 function readIdentity(v: unknown): InstanceIdentity | null {
@@ -153,10 +185,10 @@ function readUrl(v: unknown, source: DirectSource): string | null {
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 function readCapabilities(v: unknown): DirectCapability[] | null {
-  if (!Array.isArray(v) || v.length === 0 || v.length > DIRECT_CAPABILITIES.length) return null;
+  const items = readArray(v, DIRECT_CAPABILITIES.length);
+  if (!Array.isArray(items) || items.length === 0) return null;
   const out: DirectCapability[] = [];
-  for (let i = 0; i < v.length; i++) {
-    const c: unknown = v[i];
+  for (const c of items) {
     if (!(DIRECT_CAPABILITIES as readonly unknown[]).includes(c) || out.includes(c as DirectCapability)) return null;
     out.push(c as DirectCapability);
   }
@@ -249,20 +281,25 @@ function checkProof(f: DirectCandidateFact, proof: unknown, port: DirectPorts["v
   return sameIdentity(signer!, f.instance) ? null : { reason: "signer_mismatch" };
 }
 
-function judge(raw: unknown, c: Ctx): CandidateResult {
-  const o = readPlain(raw);
-  if (!o) return { id: null, eligible: false, reason: "bad_shape" };
+type Judged = { result: CandidateResult; verifiedAt: number };
+
+/** o 是候选的一次性快照（readPlain 结果）；之后只读快照，不再碰原输入 */
+function judge(o: Plain | null, c: Ctx): Judged {
+  const refuse = (id: string | null, r: Refusal): Judged =>
+    ({ result: { id, eligible: false, reason: r.reason, ...(r.detail === undefined ? {} : { detail: r.detail }) }, verifiedAt: 0 });
+  if (!o) return refuse(null, { reason: "bad_shape" });
   const p = parseCandidate(o);
   const id = typeof o.id === "string" && ID_RE.test(o.id) ? o.id : null;
-  if (!p.ok) return { id, eligible: false, reason: p.reason };
+  if (!p.ok) return refuse(id, { reason: p.reason });
   const f = p.fact;
   const local = localRefusal(f, c);
-  if (local) return { id: f.id, eligible: false, reason: local };
+  if (local) return refuse(f.id, { reason: local });
   const refused = checkUrl(f, c.ports.classifyUrl) ?? checkProof(f, p.proof, c.ports.verifyProof);
-  if (refused) return { id: f.id, eligible: false, ...refused, ...(refused.detail === undefined ? {} : { detail: refused.detail }) };
-  return { id: f.id, eligible: true, source: f.source, url: f.url };
+  if (refused) return refuse(f.id, refused);
+  return { result: { id: f.id, eligible: true, source: f.source, url: f.url }, verifiedAt: f.verifiedAt };
 }
 
+/** 预算的无原型副本；之后只用副本 */
 function validBudget(v: unknown): DirectBudget | null {
   const o = readPlain(v);
   if (!o) return null;
@@ -276,24 +313,35 @@ function validBudget(v: unknown): DirectBudget | null {
   return ok ? (o as unknown as DirectBudget) : null;
 }
 
-/** 整单层面的拒绝：输入坏、空、超量、重复 id —— 这些情况下一个 port 都不调 */
-function listRefusal(input: DirectDecisionInput): ListError | null {
-  if (!validBudget(input.budget)) return "bad_budget";
-  if (!isTime(input.now)) return "bad_now";
-  if (!readIdentity(input.expected)) return "bad_expected";
-  if (!(DIRECT_CAPABILITIES as readonly unknown[]).includes(input.need)) return "bad_need";
-  const list = input.candidates;
-  if (!Array.isArray(list)) return "not_array";
-  if (list.length === 0) return "empty";
-  if (list.length > input.budget.maxCandidates) return "too_many";
+type Prepared = { ok: true; ctx: Ctx; items: (Plain | null)[] } | { ok: false; listError: ListError };
+
+/**
+ * 整单层面的拒绝：输入坏、空、超量、重复 id —— 这些情况下一个 port 都不调。
+ * 通过时给出决策上下文与候选快照：预算 / 期望身份 / 列表 / 每条候选都只读一次，查重、评估、挑选共用这一份。
+ */
+function prepare(input: DirectDecisionInput, ports: DirectPorts): Prepared {
+  const budget = validBudget(input.budget);
+  if (!budget) return { ok: false, listError: "bad_budget" };
+  const now = input.now;
+  if (!isTime(now)) return { ok: false, listError: "bad_now" };
+  const expected = readIdentity(input.expected);
+  if (!expected) return { ok: false, listError: "bad_expected" };
+  const need = input.need;
+  if (!(DIRECT_CAPABILITIES as readonly unknown[]).includes(need)) return { ok: false, listError: "bad_need" };
+  const list = readArray(input.candidates, budget.maxCandidates);
+  if (list === null) return { ok: false, listError: "not_array" };
+  if (list === "too_many") return { ok: false, listError: "too_many" };
+  if (list.length === 0) return { ok: false, listError: "empty" };
+  const items = list.map(readPlain);
   const seen = new Set<string>();
-  for (let i = 0; i < list.length; i++) {
-    const id = readPlain(list[i])?.id;
+  for (const o of items) {
+    const id = o?.id;
     if (typeof id !== "string") continue;
-    if (seen.has(id)) return "duplicate_id";
+    if (seen.has(id)) return { ok: false, listError: "duplicate_id" };
     seen.add(id);
   }
-  return null;
+  const p = { classifyUrl: ports.classifyUrl, verifyProof: ports.verifyProof };
+  return { ok: true, ctx: { expected, need, now, budget, ports: p }, items };
 }
 
 /** 同等可核时：来源偏好 → 验证时间新 → id 字典序小（不用 localeCompare，避免依赖运行环境的区域设置） */
@@ -304,12 +352,8 @@ function rank(a: { source: DirectSource; id: string; verifiedAt: number }, b: ty
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-function choose(list: unknown[], results: CandidateResult[]): DirectDecision["pick"] {
-  const pool = results.flatMap((r, i) => {
-    if (!r.eligible) return [];
-    const verifiedAt = readPlain(list[i])!.verifiedAt as number;
-    return [{ id: r.id, source: r.source, url: r.url, verifiedAt }];
-  });
+function choose(judged: Judged[]): DirectDecision["pick"] {
+  const pool = judged.flatMap(({ result: r, verifiedAt }) => (r.eligible ? [{ id: r.id, source: r.source, url: r.url, verifiedAt }] : []));
   const best = pool.sort(rank)[0];
   return best ? { id: best.id, source: best.source, url: best.url } : null;
 }
@@ -324,11 +368,9 @@ export function decideDirectRoute(input: DirectDecisionInput, ports: DirectPorts
   if (mode !== "off" && mode !== "observe" && mode !== "on") return { ...base, mode: "off", advisoryOnly: false, listError: "bad_mode" };
   if (mode === "off") return { ...base, mode, advisoryOnly: false, listError: null };
   const advisoryOnly = mode === "observe";
-  const listError = listRefusal(input);
-  if (listError) return { ...base, mode, advisoryOnly, listError };
-  const list = input.candidates as unknown[];
-  const ctx: Ctx = { expected: input.expected, need: input.need, now: input.now, budget: input.budget, ports };
-  const results = Array.from({ length: list.length }, (_, i) => judge(list[i], ctx));
-  const pick = choose(list, results);
-  return { ...base, mode, advisoryOnly, listError: null, results, pick, route: mode === "on" && pick ? "direct" : "relay" };
+  const prep = prepare(input, ports);
+  if (!prep.ok) return { ...base, mode, advisoryOnly, listError: prep.listError };
+  const judged = prep.items.map((o) => judge(o, prep.ctx));
+  const pick = choose(judged);
+  return { ...base, mode, advisoryOnly, listError: null, results: judged.map((j) => j.result), pick, route: mode === "on" && pick ? "direct" : "relay" };
 }
