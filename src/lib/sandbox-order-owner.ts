@@ -238,9 +238,9 @@ export function listSandboxOwners(dir: string): { status: "ok"; entries: OwnerLi
   return { status: "ok", entries };
 }
 
-/** 按记录 key 加锁（创建、追加子进程、清理互斥）；拿不到锁就抛，不像命令锁那样降级放行 */
+/** 属主目录共享锁（跨 key 创建、追加、清理互斥）；拿不到锁就抛，不像命令锁那样降级放行 */
 export async function lockSandboxOwner(dir: string, key: SandboxOwnerKey): Promise<LockHandle> {
-  const lock = await acquireLock(join(ownerArea(dir, "locks", true), `${ownerRecordId(key)}.lock`), LOCK_WAIT_MS);
+  const lock = await acquireLock(join(ownerArea(dir, "locks", true), "ownership.lock"), LOCK_WAIT_MS);
   if (!lock) throw new Error(`属主记录 ${key.orderId} 正被别的进程占用`);
   return lock;
 }
@@ -289,7 +289,7 @@ function captureDir(path: string, ownerDir: string): OwnedDir {
   return id;
 }
 
-/** 创建端刚起的进程：自己探测身份，并核它确实绑在这个沙箱根上（tmux 看 socket，其余看 cwd / 命令行带根目录） */
+/** 创建端刚起的进程：自己探测身份，并核它确实绑在这个沙箱根上（tmux 看 socket，其余严格核真实 cwd） */
 async function captureResource(s: OwnedSpawn, root: string): Promise<OwnedResource> {
   if (s.pid === process.pid || s.pid === process.ppid) throw new Error(`pid ${s.pid} 是登记者自己 / 父进程`);
   const p = await probeProcess(s.pid);
@@ -297,7 +297,7 @@ async function captureResource(s: OwnedSpawn, root: string): Promise<OwnedResour
   const base = { kind: s.kind, pid: s.pid, startedAt: p.startedAt, commandHash: p.commandHash, entry: p.entry, cwd: p.cwd };
   if (s.kind !== "tmux") {
     if (s.socket !== undefined) throw new Error(`${s.kind} 不带 socket`);
-    if (!inside(p.cwd, root) && !p.command.includes(root)) throw new Error(`${s.kind} pid ${s.pid} 的 cwd / 入口不在沙箱根 ${root} 下`);
+    if (!inside(p.cwd, root)) throw new Error(`${s.kind} pid ${s.pid} 的 cwd / 入口不在沙箱根 ${root} 下`);
     return base;
   }
   if (!s.socket) throw new Error("tmux 必须给私有 socket");

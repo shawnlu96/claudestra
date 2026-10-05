@@ -10,6 +10,7 @@ import { lstatSync, rmSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import type { LendState } from "./lend-journal.js";
 import { statePath } from "./paths.js";
+import { pathsOverlap } from "./sandbox.js";
 import {
   addSandboxOwned, archiveOwnerEvidence, dirIdentity, identityVerdict, listSandboxOwners, lockSandboxOwner, markSandboxCleanup, ownerReviewDue,
   ownershipConflict, probeProcess, readSandboxOwner, registerSandboxOwner, socketProblem,
@@ -28,6 +29,8 @@ export interface CleanupDeps {
   /** 订单此刻的事实；null / 抛错 = 不知道 */
   orderFacts(orderId: string): Promise<OrderFacts | null>;
   workerLiveness(worker: string): Promise<WorkerLiveness>;
+  /** producer 的订单生命周期锁：回调全程排除换代/恢复，失租时 held() 必须为 false。缺失拒绝清理。 */
+  withOrderCleanupLease?: (key: SandboxOwnerKey, run: (held: () => boolean) => Promise<CleanupReport>) => Promise<CleanupReport>;
   probe?: (pid: number) => Promise<ProcessProbe>;
   signal?: (pid: number, sig: NodeJS.Signals) => void;
   /** SIGTERM 之后等多久再 SIGKILL；SIGKILL 之后等多久认停不掉 */
@@ -36,12 +39,12 @@ export interface CleanupDeps {
   now?: () => number;
 }
 
-type ResourceOutcome = "stopped" | "already_exited" | "pid_reused" | "removed" | "already_removed" | "kept" | "stop_failed";
+type ResourceOutcome = "retained" | "stopped" | "already_exited" | "removed" | "already_removed" | "kept" | "stop_failed";
 /** 进程带 pid，目录带 path */
 interface ResourceReport { kind: OwnedResource["kind"] | "dir"; pid?: number; path?: string; outcome: ResourceOutcome; detail?: string }
 
 /**
- * done = 每个登记进程都确认已退出（或 pid 已被复用、原进程必然已退），socket 和登记目录也清了；
+ * done = 每个登记进程都确认已退出，socket 和登记临时目录也清了；根与日志始终保留；
  * refused = 证据不足，零动作；partial = 动过手但有没停掉 / 没清掉 / 没记上的，下次再调重试。
  */
 interface CleanupReport { status: "done" | "refused" | "partial"; reason?: string; resources: ResourceReport[]; signals: number; archive?: string }
@@ -61,7 +64,7 @@ async function evidenceProblem(record: SandboxOwnerRecord, deps: CleanupDeps): P
   return live === "no_window" ? null : `worker ${record.key.worker} 活性是 ${live}，不是确定不在`;
 }
 
-type Planned = { r: OwnedResource; verdict: "same" | "gone" | "reused" };
+type Planned = { r: OwnedResource; verdict: "same" | "gone" };
 
 /** 目录此刻还是不是登记的那个：不在 = gone；软链 / 换了目录 / 读不了 = 说不清 */
 function dirVerdict(d: OwnedDir): "same" | "gone" | string {
@@ -83,6 +86,7 @@ async function planResources(record: SandboxOwnerRecord, probe: (pid: number) =>
   }
   for (const r of record.resources) {
     const v = identityVerdict(r, await probe(r.pid));
+    if (v === "reused") return `${r.kind} pid ${r.pid} 已复用，整单拒绝`;
     if (v === "unknown") return `${r.kind} pid ${r.pid} 身份说不清`;
     if (r.kind === "tmux" && v === "same") {
       const bad = socketProblem(r.socket!, record.root);
@@ -94,8 +98,11 @@ async function planResources(record: SandboxOwnerRecord, probe: (pid: number) =>
 }
 
 /** 发信号前重核身份；对不上就不发。返回 true = 发出去了 */
-async function signalIfSame(r: OwnedResource, sig: NodeJS.Signals, deps: Required<Pick<CleanupDeps, "probe" | "signal">>): Promise<boolean> {
-  if (identityVerdict(r, await deps.probe(r.pid)) !== "same") return false;
+async function signalIfSame(r: OwnedResource, sig: NodeJS.Signals, deps: ActionDeps): Promise<boolean> {
+  const verdict = identityVerdict(r, await deps.probe(r.pid));
+  if (verdict === "gone") return false;
+  if (verdict !== "same") throw new Error(`pid ${r.pid} 身份已变：${verdict}`);
+  await deps.authorize();
   deps.signal(r.pid, sig);
   return true;
 }
@@ -103,13 +110,14 @@ async function signalIfSame(r: OwnedResource, sig: NodeJS.Signals, deps: Require
 async function waitExit(r: OwnedResource, probe: (pid: number) => Promise<ProcessProbe>, ms: number): Promise<boolean> {
   for (const deadline = Date.now() + ms; ; await Bun.sleep(50)) {
     const v = identityVerdict(r, await probe(r.pid));
-    if (v === "gone" || v === "reused") return true;
+    if (v === "gone") return true;
+    if (v === "reused" || v === "unknown") return false;
     if (Date.now() >= deadline) return false;
   }
 }
 
 /** 单个进程：TERM → 等 → KILL → 等；只有探测确认退出才算 stopped */
-async function stopOne(r: OwnedResource, deps: Required<Pick<CleanupDeps, "probe" | "signal" | "graceMs" | "killWaitMs">>): Promise<{ rep: ResourceReport; signals: number }> {
+async function stopOne(r: OwnedResource, deps: ActionDeps): Promise<{ rep: ResourceReport; signals: number }> {
   let signals = 0;
   try {
     for (const [sig, wait] of [["SIGTERM", deps.graceMs], ["SIGKILL", deps.killWaitMs]] as const) {
@@ -133,35 +141,62 @@ function socketListening(path: string): Promise<boolean | null> {
 }
 
 /** tmux server 退出后留下的私有 socket：是根下的 socket 文件、且确定没人在听才删（同路径上可能已有别的 server） */
-async function removeSocket(r: OwnedResource, root: string): Promise<string | null> {
+async function removeSocket(r: OwnedResource, root: string, authorize: () => Promise<void>): Promise<string | null> {
   if (!lstatSync(r.socket!, { throwIfNoEntry: false })) return null;
   const bad = socketProblem(r.socket!, root);
   if (bad) return `socket 没删：${bad}`;
   const listening = await socketListening(r.socket!);
   if (listening !== false) return `socket 没删：${listening ? "还有 server 在听" : "探不清有没有 server 在听"}`;
+  await authorize();
   try { unlinkSync(r.socket!); return null; } catch (e) { return `socket 没删：${(e as Error).message}`; }
 }
 
-async function stopAll(record: SandboxOwnerRecord, plan: Planned[], deps: Required<Pick<CleanupDeps, "probe" | "signal" | "graceMs" | "killWaitMs">>) {
+type ActionDeps = Required<Pick<CleanupDeps, "probe" | "signal" | "graceMs" | "killWaitMs">> & { authorize(): Promise<void> };
+
+/** 只检查明确登记的路径；任何打开文件/cwd 都保守视为占用，工具失败不能当空。 */
+async function directoryProblem(d: OwnedDir, allowed: number[] = []): Promise<string | null> {
+  try {
+    const verdict = dirVerdict(d);
+    if (verdict === "gone") return null;
+    if (verdict !== "same") return verdict;
+    const p = Bun.spawn(["lsof", "-nP", "+D", d.path, "-F", "p"], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    const pids = out.split("\n").filter((line) => /^p[0-9]+$/.test(line)).map((line) => Number(line.slice(1)));
+    if (pids.some((pid) => !allowed.includes(pid))) return `目录 ${d.path} 仍有活进程占用`;
+    return (code === 0 || code === 1) && !err.trim() ? null : `目录 ${d.path} 占用读不清：${err.trim() || code}`;
+  } catch (e) { return `目录 ${d.path} 占用读不清：${(e as Error).message}`; }
+}
+
+async function stopAll(record: SandboxOwnerRecord, plan: Planned[], deps: ActionDeps) {
   const resources: ResourceReport[] = [];
   let signals = 0;
   for (const kind of STOP_ORDER) {
     for (const { r, verdict } of plan.filter((p) => p.r.kind === kind)) {
-      let rep: ResourceReport = { kind, pid: r.pid, outcome: verdict === "gone" ? "already_exited" : "pid_reused" };
+      let rep: ResourceReport = { kind, pid: r.pid, outcome: "already_exited" };
       if (verdict === "same") {
         const s = await stopOne(r, deps);
         rep = s.rep;
         signals += s.signals;
       }
       if (kind === "tmux" && rep.outcome !== "stop_failed") {
-        const left = await removeSocket(r, record.root);
-        if (left) rep = { ...rep, outcome: "stop_failed", detail: left };
+        try {
+          await deps.authorize();
+          const left = await removeSocket(r, record.root, deps.authorize);
+          if (left) rep = { ...rep, outcome: "stop_failed", detail: left };
+        } catch (e) { rep = { ...rep, outcome: "stop_failed", detail: (e as Error).message }; }
       }
       resources.push(rep);
     }
   }
   const stopped = resources.every((r) => r.outcome !== "stop_failed");
-  for (const d of record.dirs) resources.push(stopped ? removeDir(d) : { kind: "dir", path: d.path, outcome: "kept", detail: "有进程没停掉，目录先留着" });
+  for (const d of record.dirs) {
+    if (pathsOverlap(d.path, record.root)) { resources.push({ kind: "dir", path: d.path, outcome: "retained" }); continue; }
+    const bad = stopped ? await directoryProblem(d) : "有进程没停掉，目录先留着";
+    try { await deps.authorize(); } catch (e) {
+      resources.push({ kind: "dir", path: d.path, outcome: "kept", detail: (e as Error).message }); continue;
+    }
+    resources.push(bad ? { kind: "dir", path: d.path, outcome: "kept", detail: bad } : removeDir(d));
+  }
   return { resources, signals };
 }
 
@@ -180,6 +215,12 @@ function removeDir(d: OwnedDir): ResourceReport {
 
 /** consumer 入口：见文件头。持记录锁跑完全程，与登记 / 补登记互斥 */
 async function cleanupSandboxOrder(dir: string, key: SandboxOwnerKey, deps: CleanupDeps): Promise<CleanupReport> {
+  if (!deps.withOrderCleanupLease) return refused("缺少订单生命周期清理租约");
+  try { return await deps.withOrderCleanupLease(key, (held) => cleanupLeased(dir, key, deps, held)); }
+  catch (e) { return refused(`清理租约失败：${(e as Error).message}`); }
+}
+
+async function cleanupLeased(dir: string, key: SandboxOwnerKey, deps: CleanupDeps, held: () => boolean): Promise<CleanupReport> {
   const d = { probe: probeProcess, signal: (pid: number, sig: NodeJS.Signals) => void process.kill(pid, sig), graceMs: 5_000, killWaitMs: 3_000, ...deps };
   const now = (deps.now ?? Date.now)();
   let lock;
@@ -188,6 +229,15 @@ async function cleanupSandboxOrder(dir: string, key: SandboxOwnerKey, deps: Clea
     const read = readSandboxOwner(dir, key);
     if (read.status !== "ok") return refused(read.reason);
     const record = read.record;
+    const authorize = async () => {
+      for (const r of record.resources) {
+        const v = identityVerdict(r, await d.probe(r.pid));
+        if (v === "reused" || v === "unknown") throw new Error(`pid ${r.pid} 身份已变：${v}`);
+      }
+      const bad = await evidenceProblem(record, d);
+      if (bad) throw new Error(bad);
+      if (!held() || !lock.held()) throw new Error("清理租约已失");
+    };
     const evidence = await evidenceProblem(record, d);
     if (evidence) return refused(evidence);
     const all = listSandboxOwners(dir);
@@ -196,13 +246,19 @@ async function cleanupSandboxOrder(dir: string, key: SandboxOwnerKey, deps: Clea
     if (conflict) return refused(conflict);
     const plan = await planResources(record, d.probe);
     if (typeof plan === "string") return refused(plan);
+    for (const dir of record.dirs) {
+      if (pathsOverlap(dir.path, record.root)) continue;
+      const bad = await directoryProblem(dir, record.resources.map((r) => r.pid));
+      if (bad) return refused(bad);
+    }
     let archive: string;
     try {
       archive = await archiveOwnerEvidence(dir, record, plan.map((p) => ({ kind: p.r.kind, pid: p.r.pid, verdict: p.verdict })), now);
     } catch (e) {
       return refused(`属主证据保全失败：${(e as Error).message}`);
     }
-    const { resources, signals } = await stopAll(record, plan, d);
+    try { await authorize(); } catch (e) { return refused((e as Error).message); }
+    const { resources, signals } = await stopAll(record, plan, { ...d, authorize });
     const done = resources.every((r) => r.outcome !== "stop_failed" && r.outcome !== "kept");
     const mark = { attempts: (record.cleanup?.attempts ?? 0) + 1, lastAt: now, done, outcomes: resources.map((r) => `${r.kind}:${r.pid ?? r.path}:${r.outcome}`) };
     try {
@@ -238,13 +294,11 @@ function reviewSandboxOwners(dir: string, now: number, ttlMs: number): OwnerRevi
 }
 
 /**
- * 后续接线（SBXC2）唯一入口。本卡不接任何生产路径。
- * - register：producer 在沙箱 bridge / 私有 tmux / 子进程都起来之后、对外报 started 之前调；抛错 = 没登记，producer 应自己停掉刚起的进程并报启动失败。
- * - addChild / addDir：后起、需要回收的子进程 / 自有临时目录（place / validation / disk-measure 之类）补登记；清理开始后拒绝。
- *   目录前缀只能拿来诊断，不能当归属证据，所以只有创建端在这里显式登记的目录才会被删。
- * - cleanup：订单进终态、结果已回执之后调（lend 循环结单处）；resolve 时报告里每个进程都已确认退出，或写明哪个没停掉（partial，下轮再调）；
- *   refused 什么都没动，原因如实上报，不重试成「成功」。
- * - review：周期复核用；due 只代表该再调一次 cleanup，unknown 原样报给人，不自动认领。
+ * SBXC2 唯一接线入口：register 在 producer 启动后、报 started 前调用；失败则 producer 停自己的新资源。
+ * addChild/addDir 补登记，开始清理后拒绝；未知历史只由 review 上报，TTL 不授权删除。
+ * cleanup 在终态/结果回执后调用，必须注入与换代、恢复、资源创建共用的 withOrderCleanupLease。
+ * 锁顺序是生命周期锁→共享属主锁；resolve 确认退出或报告 partial，refused 零动作。
+ * root 及重叠目录保留日志并报告 retained；本模块尚未接生产启动或结单路径。
  */
 export interface SandboxOrderOwnership {
   register(input: RegisterInput): Promise<SandboxOwnerRecord>;

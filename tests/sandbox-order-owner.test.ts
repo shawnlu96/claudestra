@@ -202,3 +202,30 @@ test("TTL 只标记该复核：没到 / 已清完都不算", async () => {
   expect(ownerReviewDue(rec, 2000, 1000)).toBe(true);
   expect(ownerReviewDue({ ...rec, cleanup: { attempts: 1, lastAt: 2, done: true, outcomes: [] } }, 9e9, 1000)).toBe(false);
 });
+
+
+test("root-prefix: 根外 cwd 与包含根前缀的 argv 不构成归属", async () => {
+  const outside = `${root}-other`;
+  mkdirSync(outside);
+  const p = child(outside, realpathSync(outside));
+  await expect(registerSandboxOwner(owners, { key: key(), root, resources: [{ kind: "bridge", pid: p.pid }] })).rejects.toThrow("不在沙箱根");
+  expect((await probeProcess(p.pid)).state).toBe("alive");
+});
+
+test("owner-race: 不同 key 同时登记同一根只能成功一个", async () => {
+  const results = await Promise.allSettled(["first", "second"].map((id) =>
+    registerSandboxOwner(owners, { key: key(id), root, resources: [], dirs: [root] })));
+  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+  expect(readdirSync(join(owners, "records"))).toHaveLength(1);
+});
+
+
+test("owner-race: 不同 key 同时补登记同一目录只能成功一个", async () => {
+  const root2 = join(base, "root2"), place = join(base, "place");
+  mkdirSync(root2); mkdirSync(place);
+  for (const [id, dir] of [["first", root], ["second", root2]]) {
+    await registerSandboxOwner(owners, { key: key(id), root: dir, resources: [], dirs: [dir] });
+  }
+  const results = await Promise.allSettled(["first", "second"].map((id) => addSandboxOwned(owners, key(id), { dir: place })));
+  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+});

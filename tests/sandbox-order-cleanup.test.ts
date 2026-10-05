@@ -7,7 +7,7 @@ import { afterAll, beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandboxOrderOwnership, type CleanupDeps, type OrderFacts, type SandboxOrderOwnership } from "../src/lib/sandbox-order-cleanup.ts";
-import { ownerRecordId, type SandboxOwnerKey } from "../src/lib/sandbox-order-owner.ts";
+import { ownerRecordId, probeProcess, readSandboxOwner, type SandboxOwnerKey } from "../src/lib/sandbox-order-owner.ts";
 import type { WorkerLiveness } from "../src/lib/worker-liveness.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -55,6 +55,7 @@ function harness(facts: () => OrderFacts | null = () => ended, live: WorkerLiven
   const signals: Array<[number, string]> = [];
   const own = sandboxOrderOwnership({
     dir: owners,
+    withOrderCleanupLease: async (_key, run) => run(() => true),
     orderFacts: async () => facts(),
     workerLiveness: async () => live,
     signal: (pid, sig) => (signals.push([pid, sig]), void process.kill(pid, sig)),
@@ -143,7 +144,7 @@ test("worker 活性：running / unknown / no_host 都不动；没有记录（普
   await expectRefused(harness(), s.all, { ...key(), worker: "agent-someone" }, "没有属主记录");
 }, 30_000);
 
-test("pid 复用：登记的启动时刻对不上 = 原进程已退，不给现在占着这个 pid 的进程发信号", async () => {
+test("pid 复用：登记启动时刻对不上，整单拒绝", async () => {
   const h = harness();
   const pid = sleeper();
   await h.own.register({ key: key(), root, resources: [{ kind: "bridge", pid }] });
@@ -152,7 +153,7 @@ test("pid 复用：登记的启动时刻对不上 = 原进程已退，不给现�
   rec.resources[0].startedAt -= 3_600_000;
   writeFileSync(file, JSON.stringify(rec));
   const rep = await h.own.cleanup(key());
-  expect(rep).toMatchObject({ status: "done", signals: 0, resources: [{ kind: "bridge", pid, outcome: "pid_reused" }] });
+  expect(rep).toMatchObject({ status: "refused", signals: 0, resources: [] });
   expect(h.signals).toEqual([]);
   expect(alive(pid)).toBe(true);
   // 启动时刻一致但命令对不上：说不清，整单拒绝
@@ -163,7 +164,7 @@ test("pid 复用：登记的启动时刻对不上 = 原进程已退，不给现�
   await expectRefused(h, [pid], key(), "身份说不清");
 }, 30_000);
 
-test("tmux 登记身份对不上（pid 复用）而 socket 上仍有 server：不发信号、不删 socket，报 partial", async () => {
+test("tmux PID 复用：不发信号、不删 socket，报 refused", async () => {
   const h = harness();
   const tmux = await privateTmux();
   await h.own.register({ key: key(), root, resources: [{ kind: "tmux", pid: tmux.pid, socket: tmux.socket }] });
@@ -172,7 +173,7 @@ test("tmux 登记身份对不上（pid 复用）而 socket 上仍有 server：�
   rec.resources[0].startedAt -= 3_600_000;
   writeFileSync(file, JSON.stringify(rec));
   const rep = await h.own.cleanup(key());
-  expect(rep).toMatchObject({ status: "partial", signals: 0, resources: [{ kind: "tmux", outcome: "stop_failed", detail: expect.stringContaining("在听") }] });
+  expect(rep).toMatchObject({ status: "refused", signals: 0, resources: [] });
   expect(h.signals).toEqual([]);
   expect(alive(tmux.pid) && existsSync(tmux.socket)).toBe(true);
 }, 30_000);
@@ -310,4 +311,67 @@ test("复核：TTL 到了只列出该复核的 key，坏记录单列；属主目
   expect(h.own.review(2_000, 1_000).due).toEqual([key()]);
   rmSync(owners, { recursive: true });
   expect(h.own.review(2_000, 1_000)).toMatchObject({ status: "unknown", due: [], unknown: [] });
+});
+
+
+test("reuse-actions: PID 复用混合资源整单零动作", async () => {
+  const h = harness(), pid = sleeper(), bridge = sleeper();
+  const place = join(base, "place"); mkdirSync(place);
+  await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }, { kind: "bridge", pid: bridge }], dirs: [place] });
+  const file = join(owners, "records", `${ownerRecordId(key())}.json`);
+  const rec = JSON.parse(readFileSync(file, "utf8")); rec.resources[0].startedAt -= 3_600_000;
+  writeFileSync(file, JSON.stringify(rec));
+  await expectRefused(h, [pid, bridge]);
+  expect(existsSync(place)).toBe(true);
+});
+
+test("live-dir: 未登记活进程占用目录整单零动作", async () => {
+  const h = harness(), place = join(base, "place"); mkdirSync(place);
+  const pid = spawnIn(["perl", "-e", "sleep 300"], place);
+  await h.own.register({ key: key(), root, resources: [], dirs: [place] });
+  await expectRefused(h, [pid]);
+  expect(existsSync(place)).toBe(true);
+});
+
+test("root-retention: 登记根仍保留日志，重复清理及无关登记可读", async () => {
+  const h = harness();
+  await h.own.register({ key: key(), root, resources: [], dirs: [root] });
+  expect((await h.own.cleanup(key())).status).toBe("done");
+  expect(readFileSync(join(root, "bridge.log"), "utf8")).toBe("log line\n");
+  expect((await h.own.cleanup(key())).status).toBe("done");
+  expect(readSandboxOwner(owners, key()).status).toBe("ok");
+  const root2 = join(base, "root2"); mkdirSync(root2);
+  await h.own.register({ key: key("next"), root: root2, resources: [], dirs: [root2] });
+});
+
+test("stale-facts: 预检异步期间换代拒绝发信号", async () => {
+  let generation = 2;
+  const h = harness(() => ({ ...ended, generation }), "no_window", {
+    probe: async (pid) => { generation = 3; return probeProcess(pid); },
+  });
+  const pid = sleeper();
+  await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }] });
+  await expectRefused(h, [pid], key(), "换代");
+});
+
+
+test("live-dir: 登记与未登记进程混合占用仍零动作", async () => {
+  const h = harness(), place = join(base, "place"); mkdirSync(place);
+  const pid = sleeper();
+  const stranger = spawnIn(["perl", "-e", "sleep 300"], place);
+  await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }], dirs: [place] });
+  await expectRefused(h, [pid, stranger]);
+  expect(existsSync(place)).toBe(true);
+});
+
+test("stale-facts: 缺少生命周期租约或预检期间失租零动作", async () => {
+  let held = true;
+  const h = harness(undefined, "no_window", {
+    withOrderCleanupLease: async (_key, run) => run(() => held),
+    probe: async (pid) => { held = false; return probeProcess(pid); },
+  });
+  const pid = sleeper();
+  await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }] });
+  await expectRefused(h, [pid], key(), "租约已失");
+  await expectRefused(harness(undefined, "no_window", { withOrderCleanupLease: undefined }), [pid], key(), "生命周期");
 });
