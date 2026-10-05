@@ -85,6 +85,14 @@ async function hiddenPredicate(agentKey: string, sid: string): Promise<((seq: nu
   return (seq) => mine.some((r) => seq >= r.fromSeq && seq <= r.toSeq);
 }
 
+/**
+ * 全量页之后还能不能往上翻：本 session 没拿满一页，也要看清单里还有没有更旧的 session（翻到头会接上它，见 before 分支）。
+ * 只按条数判的话，/clear 后不满 500 条的新会话会报 false，「加载更早」不出现，clear 前的记录整段接不上（CLR1）。
+ */
+export function fullLoadHasMore(count: number, sids: string[], sid: string): boolean {
+  return count >= 500 || sids.indexOf(sid) + 1 < sids.length;
+}
+
 export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise<HistoryPage> {
   const agentKey = apiAgentName(agent);
   const name = encodeURIComponent(agentKey);
@@ -121,7 +129,7 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
       try {
         const items = (await page(sid, "?limit=500")).messages ?? [];
         // lastSeq = 合并成气泡前最后一条原始记录的 seq——差量同步的游标锚（不能用气泡 id 推）
-        return { data: await shape(items, sid), sessionId: sid, lastSeq: items.length ? items[items.length - 1].seq : null, hasMore: items.length >= 500 };
+        return { data: await shape(items, sid), sessionId: sid, lastSeq: items.length ? items[items.length - 1].seq : null, hasMore: fullLoadHasMore(items.length, sids, sid) };
       } catch (e) {
         lastErr = e; // not found（轮转竞态）→ 试下一个；其它错误也顺延，全败再抛
       }

@@ -4,6 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { translate, type BridgeEvent } from "@/lib/chat/stream-shape";
 import { rotationNotice, settleRotation, type RotationHost } from "@/features/chat/session-rotated";
+import { fullLoadHasMore } from "@/lib/api/history";
 
 const NEW = "b10e3ff1-0000-4000-8000-000000000002";
 const ev = (data: Record<string, unknown>): BridgeEvent => ({ seq: 1, ts: "t", agent: "agent-w", chatId: "c", type: "session_rotated", data });
@@ -53,4 +54,15 @@ describe("settleRotation", () => {
   });
 
   test("英文文案", () => expect(rotationNotice(NEW, "en")).toBe("🧹 Context cleared — new session b10e3ff1"));
+});
+
+describe("全量加载后能否往上翻（clear 前的记录接得上）", () => {
+  test("新会话不满一页、清单里还有更旧的会话 → 仍可往上翻（现场：b10e3ff1 292 条，上一个会话 69d8e0d8）", () => {
+    expect(fullLoadHasMore(292, ["b10e3ff1", "69d8e0d8"], "b10e3ff1")).toBe(true);
+  });
+  test("拿满一页 → 可翻；不满且已是最旧的会话 → 到头了", () => {
+    expect(fullLoadHasMore(500, ["only"], "only")).toBe(true);
+    expect(fullLoadHasMore(10, ["only"], "only")).toBe(false);
+    expect(fullLoadHasMore(10, ["b", "a"], "a")).toBe(false);
+  });
 });
