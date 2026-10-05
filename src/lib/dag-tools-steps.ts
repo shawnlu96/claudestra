@@ -190,22 +190,30 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
 }
 
 function agentSteps(io: StepIO, p: StartPlan): Step[] {
-  let mine = false;
+  // owned：回执名 = 预检规范名、registry 里有、create 前没有，才算本次建的；只有它会被绑定 / kill。结果不明的留 unknown，不 kill
+  let owned: string | null = null;
+  let unknown: string | null = null;
   return [
     fileStep("prompt", io, p.promptPath, () => p.promptText, true),
     {
       name: "agent",
       run: async () => {
         if (io.agentExists(p.agent)) return `agent ${p.agent} 已存在（预检之后才出现，不是这次建的）`;
-        mine = true;
-        return failed(await io.manager(["create", p.agentName, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS));
+        // 传规范全名：manager normalizeName 只吃掉第一个 agent- 片段，裸名里含 agent-（AGL1 卡号）会被改名
+        const r = await io.manager(["create", p.agent, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS);
+        const got = typeof r?.agent === "string" ? r.agent : p.agent;
+        if (r?.ok && got === p.agent && io.agentExists(p.agent)) { owned = p.agent; return null; }
+        if (io.agentExists(got)) unknown = got;
+        return r?.ok ? `manager create 回执 agent ${got} 与规范名 ${p.agent} 不一致或不在 registry` : failed(r);
       },
-      // create 超时可能已建好：registry 里有、且是本次 create 之前没有的，才 kill
-      undo: async () => (mine && io.agentExists(p.agent) ? failed(await io.manager(["kill", p.agent])) : null),
+      undo: async () => {
+        if (owned && io.agentExists(owned)) return failed(await io.manager(["kill", owned]));
+        return unknown ? `agent ${unknown} 归属不明（unknown），没 kill，等 PM 核对` : null;
+      },
     },
     {
       name: "task-set",
-      run: async () => failed(await ledger(io, p, "task-set", p.taskId, { rev: rev(io, p.taskId), agent: p.agent }, "task-set")),
+      run: async () => failed(await ledger(io, p, "task-set", p.taskId, { rev: rev(io, p.taskId), agent: owned ?? p.agent }, "task-set")),
       landed: () => ours(io, p, "task-set"),
     },
   ];
