@@ -14,7 +14,7 @@ import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
-import { mergeTrainPass, type TrainContext } from "./scheduler-merge-train-tick.js";
+import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
@@ -49,7 +49,7 @@ export interface PassOpts {
   train?: TrainContext;
   /** The in-pass train tick (default mergeTrainPass: guarded gh, PM notices, required checks from scheduler.json); tests hand in
    *  mergeTrainTick with fake ports and their own required checks, still called here, between trainProjects and mergeTick. */
-  trainTick?: (db: Database, projects: readonly string[], active: Active) => Promise<void>;
+  trainTick?: (db: Database, projects: readonly string[], active: Active, formFence?: FormFence) => Promise<void>;
   autoDeps?: (active: Active) => AutoTickDeps;
   /** Tests point this at a private lock / update marker / update request. */
   maintenance?: { path?: string; marker?: string; request?: string };
@@ -120,9 +120,10 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       const trains = opts.train?.store, projects = Object.keys(config.projects);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
-      const trainTick = opts.trainTick ?? ((d, ps, a) => mergeTrainPass(d, ps, a, opts.train));
       const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
-      await trainTick(db, trainProjects(db, projects, trains, manual.blocks), active);
+      // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
+      const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
+      await trainTick(db, trainProjects(db, projects, trains, manual.blocks), active, manual.formFence);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass

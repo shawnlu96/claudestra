@@ -15,8 +15,12 @@ audited queue that hands the project merge slot over between trains, without tou
 
 Queue order = request event seq (persistent, restart-safe). Request state is derived every time (`requestStatus`): queued,
 waiting (frozen queue, explicit hold, safety hold, paused feature, open ask, unsettled intent, deps), void (head / spec / round /
-review / UI digest / mode / stage moved, or the review fails: same family, P0/P1, not written by the reviewer it names,
-the requester reviewing their own card), revoked, running, merged, ended, unknown. One open request per card; the same
+review / UI digest / mode / stage moved, or the review fails: same family, P0/P1, the requester or the author as reviewer,
+or recorded by anyone other than the reviewer itself, the scheduler (pool) or — the official manual path, `ledger review
+<task> --reviewer … --session … --family … --findings … --path …`, which on a manual card only PM / master / owner may run —
+a project PM other than the dispatcher / master / owner; or an authorization ask (authorize / owner_action) that was open at
+the request or opened since was closed without a bound approve answer: expired / cancelled / superseded / answered "no" is
+not approval, the owner answers and a PM requests again), revoked, running, merged, ended, unknown. One open request per card; the same
 binding again answers the existing one.
 
 ## The one decision: `manualTurn` (lib/manual-merge-queue.ts)
@@ -26,7 +30,12 @@ merge intent since: auto goes first, at most `OWED_LIMIT_MS`) → `due` with a w
 slot held, a run that lent its slot to the last train still to take it back) or claimable. Read by:
 
 1. `trainProjects` at the top of the pass (on only): no new train forms while the head is `due` or `active`. A live train is
-   still stepped, never frozen, re-based or interrupted.
+   still stepped, never frozen, re-based or interrupted. That pre-read is not the decision: the train tick saves a newly formed
+   train only through `formFence` (manual-merge-queue-pass.ts), which re-runs `manualTurn` in one ledger read transaction and
+   saves synchronously right after it. Requests are written under BEGIN IMMEDIATE, so the ledger's commit order decides: a
+   request in that snapshot stops the formation (nothing external was done for the train yet), one committed after it queues
+   behind a train that already exists — at most that one train. (The pass's connection is query_only, so it cannot take the
+   write lock itself; the snapshot is the serialization point.)
 2. The claim step, after `reclaimLentSlots` and before the auto tick: the CLI child decides again under BEGIN IMMEDIATE and
    writes intent + slot + run in one transaction (`beginMergeRun` re-checks everything). A racing auto plan or a second claimer
    loses on the slot's primary key / the transaction order. A train in `cleanup` may be reserved against, but the manual run
@@ -39,7 +48,10 @@ inspect, freshness / update-branch, CI, final re-check, one head-pinned merge, `
 re-sent; `scheduler-merge-resolve` is the only exit). `mergeRunDrift` / `beginMergeRun` take the manual branch for node
 `manual_merge`: workflow must be `manual` and the request still valid (a head moved by this run's own carried update-branch
 counts as bound). A request that stops holding before any merge was sent ends the run cancelled with the slot freed
-(`manualCancel`); nothing is faked as done. A manual merge is not auto-deployed (`deployDrift` wants auto): the intent settles
+(`manualCancel`); nothing is faked as done. While nothing irreversible is out (ready / updating / await_ci,
+which includes the `merging` claim's own transaction) the manual drift also re-reads the policy: off, observe or unreadable
+ends the run cancelled with the slot freed, nothing sent; the claim child re-reads it too. A merge already sent keeps its
+journal (never re-sent, unknown stays unknown). A manual merge is not auto-deployed (`deployDrift` wants auto): the intent settles
 "待 PM 部署".
 
 ## Policy

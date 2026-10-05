@@ -22,7 +22,7 @@ import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-drive
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import type { TrainEvent, TrainGh, TrainState, TrainStore } from "../src/lib/scheduler-merge-train.js";
 import { trainHolds } from "../src/lib/scheduler-merge-train-hold.js";
-import { fileTrainStore, mergeTrainTick, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
+import { fileTrainStore, mergeTrainTick, withMergeTrain, type FormFence } from "../src/lib/scheduler-merge-train-tick.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -165,8 +165,8 @@ export function reclaimWorld(opts: WorldOpts) {
   /** `arrive` runs right after the in-pass train tick, where a card the train no longer holds would reach this pass's auto tick. */
   const pass = async (o: { budgetMs?: number; arrive?: () => void } = {}) => {
     const before = hub.calls.length;
-    const trainTick = async (d: typeof db, projects: readonly string[]) => {
-      await mergeTrainTick(d, projects, { now: Date.now, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
+    const trainTick = async (d: typeof db, projects: readonly string[], _active: unknown, formFence?: FormFence) => {
+      await mergeTrainTick(d, projects, { now: Date.now, formFence, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
       o.arrive?.();
     };
     const r = await schedulerPass(db, config, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,

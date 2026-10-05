@@ -19,7 +19,7 @@ import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import {
-  CLAIM_OP, eventAt, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
+  CLAIM_OP, eventAt, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
   type ManualRequest,
 } from "./manual-merge-queue-facts.js";
 import { recordObserved } from "./recovery-policy.js";
@@ -134,6 +134,9 @@ export function claimManualMerge(db: Database, ctx: WriteCtx, input: { project: 
         action: `给人工合并请求 #${req.seq}（${req.taskId} @ ${req.head.slice(0, 12)}）占合并槽并合并`, data: { request: req.seq } }, now);
       return { claimed: false, observed: r.recorded, turn: "due", why: "observe：只记录" };
     }
+    // the child re-reads the policy inside the transaction: a switch away from on after the pass read it reserves nothing
+    const mode = manualQueueMode(req.project);
+    if (mode !== "on") return { claimed: false, turn: "due", why: `人工合并排队策略已是 ${mode}，不占槽` };
     const task = mustTask(db, req.taskId), wf = getWorkflow(db, req.taskId)!, id = manualIntentId(req.seq), lock = `merge:${req.project}`;
     const causal = (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(req.project) as { seq: number }).seq;
     const reason = `人工合并请求 #${req.seq}（${req.requestedBy}）轮到合并槽`;

@@ -8,10 +8,13 @@
  */
 import type { Database } from "bun:sqlite";
 import { blockedBy, depViews } from "./ledger-deps.js";
+import { getAsk, type Ask } from "./ledger-asks.js";
 import { getFeature } from "./ledger-feature.js";
 import { getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
+import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, listDeps, listEvents, listTasks, toEvent } from "./ledger-store.js";
+import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
@@ -24,6 +27,17 @@ export const manualIntentId = (seq: number): string => `mmq:${seq}`;
 export const requestSeqOf = (intentId: string): number | null => (/^mmq:(\d+)$/.exec(intentId) ? Number(intentId.slice(4)) : null);
 export const SHA = /^[a-f0-9]{40}$/i;
 const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/;
+
+/** The effective manualMergeQueue mode through CFG's RecoveryPolicyPort, read right before each use; a read that throws is off. */
+export function manualQueueMode(project: string, policy: RecoveryPolicyPort = recoveryPolicy): "on" | "observe" | "off" {
+  try {
+    const m = policy(project, "manualMergeQueue").mode;
+    return m === "on" || m === "observe" ? m : "off";
+  } catch (e) {
+    console.error(`⚠️ [manual-merge] ${project} 读恢复策略失败，按 off：${(e as Error).message}`);
+    return "off";
+  }
+}
 
 export interface ManualRequest {
   seq: number; ts: number; project: string; taskId: string; requestedBy: string; reason: string;
@@ -71,9 +85,12 @@ const authorFamilyOf = (db: Database, task: LedgerTask): AuthorFamily | null =>
   remoteHeadFamily(db, task) ?? getWorkflow(db, task.id)?.authorFamily ?? null;
 
 /**
- * The review this request binds must still be the card's current structured review, written by the reviewer it names (or by the
- * scheduler for a pool result), from another family than the author, passing (pass, or changes with only P2) with no P0/P1.
- * A requester is never their own reviewer. Nothing here accepts a review the engine did not see as a dispatch proof.
+ * The review this request binds must still be the card's current structured review, from another family than the author, passing
+ * (pass, or changes with only P2) with no P0/P1. Who wrote the event is part of the proof: the reviewer it names, the scheduler for
+ * a pool result, or — the official manual path, `ledger review <task> --reviewer … --session … --family … --findings … --path …`,
+ * which on a manual card only a project PM / master / owner may run — a project PM other than the dispatcher / master / owner
+ * recording that reviewer's report. Anyone else (the author, the dispatcher, another agent) naming a reviewer is refused.
+ * Neither the requester nor the author is the reviewer. Nothing here accepts a review the engine did not see as a dispatch proof.
  */
 function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEvent[], req: Pick<ManualRequest, "review" | "requestedBy">): string | null {
   const read = currentReviewFacts(task, events);
@@ -81,8 +98,12 @@ function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEv
   const f = read.facts, r = req.review;
   if (f.eventSeq !== r.seq) return `本轮审查结论已换成 #${f.eventSeq}（请求绑定 #${r.seq}）`;
   const ev = events.find((e) => e.seq === f.eventSeq);
-  if (!ev || ev.actor !== r.actor || (ev.actor !== f.reviewer && ev.actor !== "scheduler")) return "审查事件不是 reviewer 本人（或调度服务代池单）写的";
-  if (ev.actor === req.requestedBy || f.reviewer === req.requestedBy) return "请求人不能是自己这张卡的审查人";
+  if (!ev || ev.actor !== r.actor) return "审查事件的写入人与请求绑定不一致";
+  if (ev.actor !== f.reviewer && ev.actor !== "scheduler" && !actorMayConfigure(db, ev.actor, task.project)) {
+    return "审查事件不是 reviewer 本人、调度服务（池单）或项目 PM（调度助理除外）/ master / owner 经 ledger review 登记的";
+  }
+  if (f.reviewer === req.requestedBy) return "请求人不能是自己这张卡的审查人";
+  if (task.agent && (f.reviewer === task.agent || ev.actor === task.agent)) return "作者不能审查 / 登记自己这张卡的审查";
   if (f.reviewer !== r.reviewer || f.reviewerSessionId !== r.sessionId || f.reviewerFamily !== r.family || f.reportPath !== r.reportPath) {
     return "审查人 / session / 家族 / 报告与请求绑定不一致";
   }
@@ -90,6 +111,29 @@ function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEv
   if (!author || f.reviewerFamily === author) return `审查人家族 ${f.reviewerFamily} 与作者家族 ${author ?? "未知"} 不是跨模型`;
   if (f.findings.some((x) => x.severity === "P0" || x.severity === "P1")) return "审查仍有 P0 / P1";
   if (f.verdict === "block" || (f.verdict === "changes" && !f.findings.some((x) => x.severity === "P2"))) return `审查结论 ${f.verdict} 未通过合并闸`;
+  return null;
+}
+
+/** Approved = answered with a button its binding lists as approval (lib/ask-bind.ts checkAsk's rule, minus the caller / hash). */
+const approvedAsk = (a: Ask): boolean => {
+  if (a.state !== "answered" || !a.bind) return false;
+  const picked = new Set((a.answer?.choices ?? []).map((c) => /^\[button:(.+)\]$/.exec(c)?.[1]).filter(Boolean));
+  return a.bind.approve.some((id) => picked.has(id));
+};
+
+/**
+ * An authorization (kind authorize / owner_action) that was still open when the request was made, or opened since, and has been
+ * closed without a verifiable approval (expired, cancelled, superseded, or answered with no approve button): expiry is not
+ * approval, so the request can never merge as made. The owner answers, then a PM requests again (the explicit lift); one closed
+ * before the request was made is that PM's own reading and does not void it.
+ */
+function authorizationRefusal(db: Database, taskId: string, since: number): string | null {
+  const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') AND state != 'open' AND updatedAt >= ?
+    ORDER BY createdAt, id`).all(taskId, since) as { id: string }[];
+  for (const { id } of rows) {
+    const a = getAsk(db, id);
+    if (a && !approvedAsk(a)) return `授权 ${id} ${a.state === "answered" ? "的答复不是批准" : `未获答复即 ${a.state}`}（过期 / 撤销不是批准）：owner 批准后要 PM 重新排队`;
+  }
   return null;
 }
 
@@ -125,6 +169,8 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
     const ui = uiMergeRefusal(db, task, now);
     if (ui) return { kind: "void", why: `UI 验收：${ui}` };
   }
+  const auth = authorizationRefusal(db, task.id, req.ts);
+  if (auth) return { kind: "void", why: auth };
   const frozen = getMeta(db, task.project).queueFrozen;
   if (frozen.frozen) return { kind: "wait", why: `项目合并队列已冻结：${frozen.reason || "无原因"}` };
   const hold = holdOf(events);
@@ -143,12 +189,25 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   return null;
 }
 
-/** mergeRunDrift's manual branch: the run stops (and, before any merge was sent, ends cancelled) once its request no longer holds. */
-export function manualRunDrift(db: Database, intent: Pick<SchedulerIntent, "id">, now: number): string | null {
+/** Phases in which nothing irreversible was sent: a policy that stopped being on ends such a run (manualCancel) instead of acting. */
+const UNSENT: readonly string[] = ["ready", "updating", "await_ci"];
+
+/**
+ * mergeRunDrift's manual branch: the run stops (and, before any merge was sent, ends cancelled) once its request no longer holds,
+ * or — while nothing irreversible is out (`phase` ready / updating / await_ci, which covers the `merging` claim) — once the
+ * manualMergeQueue policy is no longer on (off, observe, or unreadable = off). A merge already sent keeps its journal: never
+ * re-sent, an unknown result stays unknown.
+ */
+export function manualRunDrift(db: Database, intent: Pick<SchedulerIntent, "id">, now: number, phase?: string): string | null {
   const seq = requestSeqOf(intent.id), req = seq === null ? null : requestAt(db, seq);
   if (!req) return "人工合并请求缺失";
   const r = requestRefusal(db, req, now, true);
-  return r ? `人工合并请求已失效：${r.why}` : null;
+  if (r) return `人工合并请求已失效：${r.why}`;
+  if (phase !== undefined && UNSENT.includes(phase)) {
+    const mode = manualQueueMode(req.project);
+    if (mode !== "on") return `人工合并排队策略已是 ${mode}（不是 on），未发出的合并不再执行`;
+  }
+  return null;
 }
 
 /** beginMergeRun's reviewer for a manual run: the one its request bound, only while the request is valid. */

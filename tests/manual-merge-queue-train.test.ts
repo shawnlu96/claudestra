@@ -38,7 +38,7 @@ describe("manual head vs continuous trains (real pass, fake GitHub)", () => {
     test(`${mode}: the old path — trains keep forming, the manual card never gets the slot, nothing is sent for it`, async () => {
       setup(); policy(mode);
       for (const id of ["A1", "A2"]) w.card(id);
-      const m = manualCard(w, "M");
+      const m = await manualCard(w, "M");
       expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "queued" });
       const r = await run(14, () => false);
       expect(r.trains).toBeGreaterThanOrEqual(2); // waited past more than one train
@@ -56,7 +56,7 @@ describe("manual head vs continuous trains (real pass, fake GitHub)", () => {
     w.hub.pending = true;
     await w.pass(); // train 1 forms with A1 + A2 and tests
     w.hub.pending = false;
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "queued" });
     const r = await run(16, () => w.events.filter((e) => e.kind === "form").length >= 2 && w.phase("M") === "merged");
     const mergeOf = (id: string) => r.calls.findIndex((c) => c.endsWith(`merge:${id}`));
@@ -80,7 +80,7 @@ describe("manual head vs continuous trains (real pass, fake GitHub)", () => {
 
   test("on: two requests go one per turn in queue order, an auto turn between them; a restart keeps the places", async () => {
     setup(); policy("on");
-    const m1 = manualCard(w, "M1"), m2 = manualCard(w, "M2");
+    const m1 = await manualCard(w, "M1"), m2 = await manualCard(w, "M2");
     expect(await as(PM, ...requestArgs(m1))).toMatchObject({ ok: true });
     expect(await as(PM, ...requestArgs(m2))).toMatchObject({ ok: true });
     expect(await as(PM, ...requestArgs(m2))).toMatchObject({ ok: true, duplicate: true }); // same binding again: same request

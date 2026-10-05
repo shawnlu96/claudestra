@@ -47,7 +47,7 @@ function setup(mode: "on" | "observe" | "off" = "on") {
 describe("request: who, what it binds, what is refused", () => {
   test("PM (not the dispatcher) / owner only; binding must equal the card; the review's facts are copied, never typed", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     expect(await as(DISP, ...requestArgs(m))).toMatchObject({ ok: false, code: "forbidden" });
     expect(await as("agent-author", ...requestArgs(m))).toMatchObject({ ok: false, code: "forbidden" });
     expect(await as(PM, ...requestArgs({ ...m, head: "f".repeat(40) }))).toMatchObject({ ok: false, code: "conflict" });
@@ -57,22 +57,30 @@ describe("request: who, what it binds, what is refused", () => {
     expect(r).toMatchObject({ ok: true, state: "queued", duplicate: false });
     const ev = listEvents(w.db, { project: "p", target: "M" }).find((e) => e.data.op === "manual_merge_request")!;
     expect(ev.actor).toBe(PM);
-    expect(ev.data.review).toEqual({ seq: m.reviewSeq, actor: "agent-review", reviewer: "agent-review", sessionId: "rs-M", family: "codex", reportPath: "r.md", verdict: "pass" });
+    // the review was recorded through the real `ledger review` by PM, naming the actual reviewer (no engine ack exists)
+    expect(ev.data.review).toEqual({ seq: m.reviewSeq, actor: PM, reviewer: "agent-review", sessionId: "rs-M", family: "codex", reportPath: "r.md", verdict: "pass" });
     // a different binding while one is open is refused; revoke first
     expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, duplicate: true, request: r.request });
   });
 
   test("same-family, P1, self-written and forged-actor reviews are refused; an auto card is not a manual one", async () => {
     setup();
-    const same = manualCard(w, "S");
+    const same = await manualCard(w, "S");
     const seq = reviewOf("S", { reviewerFamily: "claude" });
     expect(await as(PM, ...requestArgs({ ...same, reviewSeq: seq }))).toMatchObject({ ok: false, code: "conflict", error: expect.stringMatching(/跨模型/) });
-    const p1 = manualCard(w, "P");
+    const p1 = await manualCard(w, "P");
     const p1Seq = reviewOf("P", { verdict: "changes", findings: [{ findingId: "f1", severity: "P1", title: "x", basis: "spec", file: "a.ts", line: 1 }], p1: 1 });
     expect((await as(PM, ...requestArgs({ ...p1, reviewSeq: p1Seq }))).ok).toBe(false);
-    const forged = manualCard(w, "G");
-    const fSeq = reviewOf("G", {}, PM); // PM writes a review naming someone else as reviewer
-    expect(await as(PM, ...requestArgs({ ...forged, reviewSeq: fSeq }))).toMatchObject({ ok: false, error: expect.stringMatching(/reviewer 本人/) });
+    const forged = await manualCard(w, "G");
+    // not PM / master / owner, not the reviewer: the dispatcher or another agent naming someone else as reviewer is refused
+    for (const actor of [DISP, "agent-other", "agent-author"]) {
+      const fSeq = reviewOf("G", {}, actor);
+      expect(await as(PM, ...requestArgs({ ...forged, reviewSeq: fSeq }))).toMatchObject({ ok: false, error: expect.stringMatching(/reviewer 本人|作者/) });
+    }
+    // the requester is never the reviewer it binds
+    const own = await manualCard(w, "O");
+    const oSeq = reviewOf("O", { reviewer: PM }, PM);
+    expect(await as(PM, ...requestArgs({ ...own, reviewSeq: oSeq }))).toMatchObject({ ok: false, error: expect.stringMatching(/审查人/) });
     const auto = w.card("A");
     const aSeq = listEvents(w.db, { project: "p", target: "A" }).findLast((e) => e.kind === "review")!.seq;
     expect(await as(PM, ...requestArgs({ ...auto, reviewSeq: aSeq }))).toMatchObject({ ok: false, error: expect.stringMatching(/不是 manual/) });
@@ -80,7 +88,7 @@ describe("request: who, what it binds, what is refused", () => {
 
   test("owner hold, open approval, frozen queue: queued but waiting, never claimed; the wait clears and the turn comes", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     openAsk(w.db, { project: "p", taskId: "M", source: "human", kind: "decide", title: "能合吗", options: [{ type: "buttons", buttons: [{ id: "go", label: "好" }] }] } as NewAsk);
     expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "waiting", why: expect.stringMatching(/审批未答/) });
     expect(claim()).toMatchObject({ claimed: false, turn: "none" });
@@ -98,13 +106,13 @@ describe("request: who, what it binds, what is refused", () => {
 describe("spec / round / UI drift", () => {
   test("spec or round moving after the request voids it; a ui card needs the accepted digest and a live UI approval", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     const r = await as(PM, ...requestArgs(m));
     w.db.query("UPDATE tasks SET round = 2, rev = rev + 1 WHERE id = 'M'").run();
     expect(manualTurn(w.db, "p", "none", Date.now()).kind).toBe("none");
     const view = await as(PM, "merge-queue", "--project", "p");
     expect(JSON.stringify(view)).toMatch(new RegExp(`人工#${r.request} M｜已失效`));
-    const u = manualCard(w, "U");
+    const u = await manualCard(w, "U");
     w.db.query("UPDATE task_workflows SET template = 'ui' WHERE taskId = 'U'").run();
     w.db.query(`UPDATE tasks SET extra = json_set(extra, '$.screenshotsDigest', ?) WHERE id = 'U'`).run("a".repeat(64));
     expect(await as(PM, ...requestArgs(u))).toMatchObject({ ok: false, code: "invalid" });
@@ -116,7 +124,7 @@ describe("spec / round / UI drift", () => {
 describe("claim: the one authoritative entry", () => {
   test("waits for a live train, a busy slot, a train file it cannot read; never claims for a non-scheduler", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     await as(PM, ...requestArgs(m));
     expect(() => claimManualMerge(w.db, { actor: PM }, { project: "p", mode: "on", train: "none", requiredChecks: ["check"] })).toThrow(/调度服务/);
     expect(await as(PM, "manual-merge-claim", "p", "--mode", "on", "--train", "none", "--required-checks", "check")).toMatchObject({ ok: false, code: "forbidden" });
@@ -130,7 +138,7 @@ describe("claim: the one authoritative entry", () => {
 
   test("two connections and two processes claim at once: exactly one intent, one slot, one run", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     await as(PM, ...requestArgs(m));
     const path = w.db.filename, other = openLedger(path);
     try {
@@ -141,7 +149,7 @@ describe("claim: the one authoritative entry", () => {
     // processes: a second request for another card, claimed from two children started together
     w.db.query("DELETE FROM scheduler_resources WHERE taskId = 'M'").run();
     w.db.query("UPDATE scheduler_intents SET status = 'cancelled' WHERE taskId = 'M'").run();
-    const n = manualCard(w, "N");
+    const n = await manualCard(w, "N");
     await as(PM, ...requestArgs(n));
     const lib = join(import.meta.dir, "../src/lib/manual-merge-queue.ts"), store = join(import.meta.dir, "../src/lib/ledger-store.ts");
     const code = `const { claimManualMerge } = await import(${JSON.stringify(lib)}); const { openLedger } = await import(${JSON.stringify(store)});
@@ -160,7 +168,7 @@ describe("claim: the one authoritative entry", () => {
 
   test("a claimed slot keeps auto merges out: the auto plan for another card is refused while the manual run holds it", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     await as(PM, ...requestArgs(m));
     expect(claim()).toMatchObject({ claimed: true });
     w.card("A1");
@@ -182,7 +190,7 @@ describe("deploy in flight", () => {
     w.card("A1"); await w.begin("A1");
     for (let i = 0; i < 4 && !w.hub.calls.includes("deploy:A1"); i++) await w.pass();
     expect(w.hub.calls).toContain("deploy:A1");
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     await as(PM, ...requestArgs(m));
     expect(w.slot()).toBe("A1");
     expect(claim()).toMatchObject({ claimed: false, why: expect.stringMatching(/合并槽在 A1/) });
@@ -205,7 +213,7 @@ describe("after the claim: drift, revoke, lease loss, a merge sent then lost", (
 
   async function claimed() {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     const r = await as(PM, ...requestArgs(m));
     expect(claim()).toMatchObject({ claimed: true });
     return { m, request: Number(r.request), intent: w.intentOf("M")! };
@@ -261,7 +269,7 @@ describe("after the claim: drift, revoke, lease loss, a merge sent then lost", (
 describe("policy and view", () => {
   test("observe: one deduped would-be note, no intent / slot / block; off and a throwing port: nothing at all", async () => {
     setup("observe");
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     await as(PM, ...requestArgs(m));
     for (let i = 0; i < 3; i++) await w.pass();
     expect(listEvents(w.db, { project: "p", target: "M" }).filter((e) => e.data.op === "recovery_observe")).toHaveLength(1);
@@ -279,7 +287,7 @@ describe("policy and view", () => {
 
   test("merge-queue lists the request with its turn, source and reason, never the reviewer session", async () => {
     setup();
-    const m = manualCard(w, "M");
+    const m = await manualCard(w, "M");
     w.card("A1"); await w.begin("A1");
     await as(PM, ...requestArgs(m));
     const view = mergeQueueCmds(() => ({ mode: "on", manualAfterMs: null, source: "config" }))["merge-queue"]!;

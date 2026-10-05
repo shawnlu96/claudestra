@@ -61,7 +61,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
   if (!workflow || workflow.mode !== (manual ? "manual" : "auto") || workflow.specRev !== task.specRev || intent?.status !== "submitted") {
     return "流程被暂停、规格已变或合并意图不再有效";
   }
-  const request = manual ? manualRunDrift(db, intent, now) : null;
+  const request = manual ? manualRunDrift(db, intent, now, run.phase) : null;
   if (request) return request;
   if (task.headSHA !== run.reviewedHead) return "任务 head 已变化，旧审查失效";
   if (task.pr !== run.prRef || task.branch !== run.expectedBranch) return "任务 PR 或分支已变化";

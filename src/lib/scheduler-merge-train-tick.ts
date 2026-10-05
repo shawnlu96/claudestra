@@ -118,7 +118,12 @@ const defaultTrainContext = (gh: () => TrainGh = () => trainGh()): TrainContext 
 export const trainContext = (command: Parameters<typeof trainGh>[0]): TrainContext | null => defaultTrainContext(() => trainGh(command));
 
 type Notify = (task: LedgerTask, text: string) => Promise<void>;
-export interface TrainTickDeps { notifyPm: Notify; now(): number }
+/** `formFence` (MQ1, manual-merge-queue-pass.ts): the save of a newly formed train goes through it; a throw = not formed. */
+export type FormFence = (project: string, save: () => void) => void;
+export interface TrainTickDeps { notifyPm: Notify; now(): number; formFence?: FormFence }
+
+const fenced = (store: TrainStore, project: string, fence: FormFence | undefined): TrainStore =>
+  fence ? { ...store, save: (s) => fence(project, () => store.save(s)) } : store;
 
 /** One train step per project per pass; a GitHub hiccup is logged and retried next pass, a stop still ends the pass. */
 export async function mergeTrainTick(db: Database, projects: readonly string[], deps: TrainTickDeps,
@@ -138,7 +143,8 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
         } };
       const live = ctx.store.load(project);
       if (live && live.phase !== "done") await stepTrain(live, train);
-      else await formTrain(project, trainCandidates(db, project), train, (c) => cachedFiles(ctx.gh, c), nextSkip(live));
+      else await formTrain(project, trainCandidates(db, project), { ...train, store: fenced(ctx.store, project, deps.formFence) },
+        (c) => cachedFiles(ctx.gh, c), nextSkip(live));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       console.error(`⚠️ [merge-train] ${project}：${(e as Error).message}`);
@@ -157,9 +163,9 @@ export const guardedCommand = (active: () => void, command: typeof runBounded = 
  * every gh call and PM notice is checked against the pass's ownership / lease, and a stop ends the pass with SchedulerStopped.
  */
 export async function mergeTrainPass(db: Database, projects: readonly string[], active: () => void,
-  ctx: TrainContext | null = trainContext(guardedCommand(active))): Promise<void> {
+  ctx: TrainContext | null = trainContext(guardedCommand(active)), formFence?: FormFence): Promise<void> {
   const alive = () => { try { active(); return true; } catch { return false; } };
-  await mergeTrainTick(db, projects, { now: Date.now, notifyPm: async (task, text) => {
+  await mergeTrainTick(db, projects, { now: Date.now, formFence, notifyPm: async (task, text) => {
     active();
     try { await notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive }); } finally { active(); }
   } }, ctx);
