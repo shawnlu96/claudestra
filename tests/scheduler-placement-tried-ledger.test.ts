@@ -9,6 +9,7 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
+import { createTask } from "../src/lib/ledger-write.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 async function ready(stage: "build" | "review", pinned = false) {
@@ -167,3 +168,114 @@ for (const prior of ["timeout", "claimed_return"] as const) {
     } finally { p.f.close(); }
   });
 }
+
+/** PC1: PM's own lend-cancel (a dependency turned out unready), settled by the scheduler, does not spend the peer. */
+async function pmCancelled(stage: "build" | "review", pinned = false) {
+  const p = await ready(stage, pinned);
+  createTask(p.f.db, p.f.at("owner"), { project: "p", id: "T0", title: "前置", kind: "code", agent: "agent-task-one" });
+  expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_pooled" });
+  expect(await p.f.cli("pm", "dep-add", "T0", "T1", "--when", "前置合并")).toMatchObject({ ok: true });
+  expect(await p.f.cli("pm", "lend-cancel", "T1", "--reason", "依赖未就绪")).toMatchObject({ ok: true, status: "cancelled" });
+  expect(p.orders()[0]).toMatchObject({ status: "cancelled", reason: "依赖未就绪" });
+  expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_returned" });
+  expect(p.f.intents().filter((i) => i.recipient === "peer:mate").map((i) => i.status)).toEqual(["cancelled"]);
+  expect(p.plan()).toMatchObject({ kind: "wait", code: "dependency" });
+  const rev = (await p.f.cli("pm", "deps", "T1") as { deps: { rev: number }[] }).deps[0].rev;
+  expect(await p.f.cli("pm", "dep-set", "T0", "T1", "--rev", String(rev), "--state", "done")).toMatchObject({ ok: true });
+  p.f.advance(1000);
+  p.hello();
+  return p;
+}
+
+for (const [stage, pinned] of [["review", false], ["build", false], ["build", true]] as const) {
+  test(`PC1 ${stage} pinned=${pinned}: a settled PM cancel re-offers to the same peer once dependencies clear`, async () => {
+    const p = await pmCancelled(stage, pinned);
+    try {
+      expect(p.plan()).toMatchObject({ kind: "intent", recipient: "peer:mate" });
+      expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_pooled" });
+      expect(p.orders().map((o) => o.status)).toEqual(["cancelled", "pooled"]);
+      if (stage === "build") expect(getWriteLease(p.f.db, "T1")?.state).toBe("held");
+      if (pinned) return; // a pin already re-offers after any refusal; the unpinned cases prove failures stay spent
+      // A real failure afterwards is still spent: a permanent refusal of the new order keeps the peer out.
+      p.refuse("repo");
+      expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_returned" });
+      p.f.advance(120_000);
+      p.hello();
+      expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+      expect(p.orders()).toHaveLength(2);
+    } finally { p.f.close(); }
+  });
+}
+
+test("PC1: the released peer still passes every gate — off, paused, full, revoked repo, stale hello", async () => {
+  const p = await pmCancelled("review");
+  try {
+    for (const [busy, left, pause] of [[2, 50, false], [0, 0, false], [0, 50, true]] as const) {
+      p.hello(busy, left, pause);
+      expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+    }
+    p.hello(0, 50, false, false, 0);
+    expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+    p.hello();
+    p.f.advance(10 * 60_000);
+    expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+    p.hello();
+    expect(p.plan()).toMatchObject({ recipient: "peer:mate" });
+    expect(p.orders()).toHaveLength(1);
+  } finally { p.f.close(); }
+});
+
+test("PC1: a cancel the scheduler has not settled yet, or one after a claim, keeps the peer spent", async () => {
+  for (const variant of ["unsettled", "claimed"] as const) {
+    const p = await ready("review");
+    try {
+      await p.tick();
+      const orderId = p.orders()[0].orderId;
+      if (variant === "claimed") {
+        claimLend(p.f.db, { actor: "owner", now: p.f.tickDeps.now() }, "mate", { v: 1, orderId, worker: "w1" },
+          () => ({ peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 2 }));
+        await p.tick();
+      }
+      expect(await p.f.cli("pm", "lend-cancel", "T1", "--reason", "依赖未就绪")).toMatchObject({ ok: true });
+      if (variant === "claimed") await p.tick();
+      p.f.advance(120_000);
+      p.hello();
+      if (variant === "unsettled") expect(p.plan()).toMatchObject({ kind: "wait", code: "in_flight" });
+      else expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+      expect(p.orders()).toHaveLength(1);
+    } finally { p.f.close(); }
+  }
+});
+
+test("PC1: lend-cancel stays a PM write — the executor and the peer cannot release a peer", async () => {
+  const p = await ready("review");
+  try {
+    await p.tick();
+    for (const actor of ["agent-task-one", "agent-rv-t1", "peer:mate", "scheduler"]) {
+      expect(await p.f.cli(actor, "lend-cancel", "T1", "--reason", "依赖未就绪")).toMatchObject({ ok: false, code: "forbidden" });
+    }
+    expect(p.orders()[0].status).toBe("pooled");
+  } finally { p.f.close(); }
+});
+
+test("PC1: a peer-pr-push-record note shaped like a PM cancel cannot erase a real content_policy refusal (review cancel-note-source)", async () => {
+  const p = await ready("review");
+  try {
+    expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_pooled" });
+    const orderId = p.orders()[0].orderId;
+    expect(p.refuse("content_policy").withdrawn).toHaveLength(1);
+    const peerPr = { peer: "mate", fp: "abcd-ef01-2345-6789", agent: "agent-x", login: "mate", number: 7, url: "https://github.com/o/r/pull/7", base: "main" };
+    expect(await p.f.cli("pm", "task-set", "T1", "--rev", String(p.f.task().rev), "--assignee-kind", "peer_agent",
+      "--assignee", `${peerPr.fp}/${peerPr.agent}`, "--extra", JSON.stringify({ ...p.f.task().extra, peerPr }))).toMatchObject({ ok: true });
+    expect(await p.f.cli("pm", "peer-pr-push-record", "T1", "--key", "k1", "--result", "sent", "--text", "出借：撤单（原状态 pooled）：依赖未就绪",
+      "--data", JSON.stringify({ lend: { orderId, peer: "mate", op: "cancel", from: "pooled" } }))).toMatchObject({ ok: true });
+    expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_returned" });
+    expect(p.f.intents().filter((i) => i.recipient === "peer:mate").map((i) => i.status)).toEqual(["cancelled"]);
+    p.f.advance(120_000);
+    p.hello();
+    expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+    await p.tick();
+    expect(p.orders()).toHaveLength(1);
+    expect(p.orders()[0]).toMatchObject({ status: "cancelled", reason: expect.stringContaining("content_policy") });
+  } finally { p.f.close(); }
+});

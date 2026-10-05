@@ -133,6 +133,31 @@ describe("spec-stage auto card handed back: placed like the auto-open", () => {
 });
 
 describe("stock cards and idempotency", () => {
+  test("explicit local survives spec resume and stale peer placement command", async () => {
+    const t = setup();
+    t.hello();
+    f.db.run(`UPDATE tasks SET extra=json_set(extra, '$.placement', 'local') WHERE id='T1'`);
+    const before = f.task();
+    expect(await t.pass()).toEqual([]);
+    expect(f.task()).toEqual(before);
+    expect(await t.cli("scheduler", "scheduler-spec-place", "T1", "--rev", String(before.rev),
+      "--workflow-rev", String(getWorkflow(f.db, "T1")!.rev), "--peer", "mate", "--repo", "o/r", "--reason", "old snapshot"))
+      .toMatchObject({ ok: false, code: "conflict" });
+  });
+
+  test("existing local author remains local without changing its Codex family", async () => {
+    const t = setup();
+    await t.tick();
+    f.db.run("UPDATE scheduler_intents SET status='done'");
+    f.db.run("UPDATE scheduler_sessions SET family='codex' WHERE taskId='T1' AND role='author'");
+    f.db.run("UPDATE task_workflows SET authorFamily='codex' WHERE taskId='T1'");
+    t.hello();
+    const before = f.task();
+    expect(await t.pass()).toEqual([]);
+    expect(f.task()).toEqual(before);
+    expect(getWorkflow(f.db, "T1")!.authorFamily).toBe("codex");
+  });
+
   test("a stock spec/auto card with no placement record is picked up on the next round; re-running records nothing more", async () => {
     const t = setup();
     t.hello();
@@ -184,6 +209,8 @@ describe("resume regression coverage", () => {
     await t.tick();
     await t.tick();
     f.db.run("UPDATE scheduler_intents SET status = 'done'");
+    // Only a retired author may be placed anew; the retained file lock still belongs to this card.
+    f.db.run("UPDATE scheduler_sessions SET state='retired' WHERE taskId='T1' AND role='author'");
     f.db.run(`INSERT OR IGNORE INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope)
       VALUES ('p', 'src/lib/x.ts', 'T1', (SELECT id FROM scheduler_intents LIMIT 1), 1, 'card')`);
     await handBack(t);
@@ -238,4 +265,35 @@ describe("resume regression coverage", () => {
     expect(t.notices).toHaveLength(1);
   });
 
+});
+
+test("on spec recovery reserves eight formal cards across two peers before any order is claimed", async () => {
+  const t = setup({ borrow: [MATE, { ...MATE, peer: "second" }], remote: { localPriority: "off" } });
+  for (const peer of ["mate", "second"]) recordHello(f.db, peer, null, { v: 1, proto: 2, boot: peer, seq: 1, paused: null,
+    slots: { codex: { total: 4, busy: 0 }, claude: { total: 0, busy: 0 } },
+    grant: { until: 100000, roles: ["write"], repos: ["o/r"], ordersPerDay: 100, ordersLeftToday: 100 } }, f.tickDeps.now());
+  const borrow = [MATE, { ...MATE, peer: "second" }].map((b) => ({ ...b, maxOpen: 4 }));
+  t.env.place = (db, q) => startPlacement(db, { policy: () => ({ remote: t.policy.remote, maxWorkers: 0 }),
+    borrow: async () => borrow, originRepo: async () => "o/r", now: () => f.tickDeps.now(), reservations: { mode: "on" } }, q);
+  for (let i = 2; i <= 8; i++) {
+    expect(await t.cli("pm", "task-new", `T${i}`, "--project", "p", "--title", `write ${i}`, "--kind", "code", "--spec", f.task().spec!,
+      "--extra", JSON.stringify({ fileGlobs: [`src/t${i}.ts`] }))).toMatchObject({ ok: true });
+    expect(await t.cli("pm", "workflow-set", `T${i}`, "--rev", "1", "--workflow-rev", "0", "--template", "code", "--version", "3",
+      "--mode", "auto", "--author-family", "claude", "--fallback", "PM接管")).toMatchObject({ ok: true });
+  }
+  expect(await t.pass()).toEqual([]);
+  const placements = () => f.db.query("SELECT json_extract(extra,'$.placement') AS placement FROM tasks ORDER BY id").all();
+  expect(placements()).toEqual(Array.from({ length: 8 }, (_, i) => ({ placement: `peer:${i % 2 ? "second" : "mate"}` })));
+  expect(await t.pass()).toEqual([]);
+  expect(placements()).toHaveLength(8);
+});
+
+
+test("a held peer write lease prevents spec migration even after the order has finished", async () => {
+  const t = setup(); t.hello();
+  f.db.query(`INSERT INTO lend_write_leases (taskId,project,peer,fp,branch,repo,state,createdAt,updatedAt)
+    VALUES ('T1','p','original','fp','lend/original','o/r','held',1,1)`).run();
+  const before = f.task();
+  expect(await t.pass()).toEqual([]);
+  expect(f.task()).toEqual(before);
 });
