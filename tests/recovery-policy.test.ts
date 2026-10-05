@@ -8,11 +8,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import {
   decideRecovery, gateRecovery, observedRecent, observeDedupKey, RECOVERY_KEYS, recordObserved, recoveryPolicy,
   type ObservedAction, type RecoveryDecision, type RecoveryKey, type RecoveryPolicy, type RecoveryPolicyPort,
 } from "../src/lib/recovery-policy.js";
+import { appendEvent, createItem } from "../src/lib/ledger-write.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const H = 3_600_000;
@@ -121,13 +122,61 @@ describe("observe: dedup-able record only", () => {
     expect(observedRecent(db, "a%", 5)).toEqual([]);
   });
 
+  test("legal colon and empty-target tuples survive SQLite retries and reopen independently", () => {
+    const path = tempLedgerPath("recovery-obs-collision-");
+    let db = openLedger(path);
+    const tuples: ObservedAction[] = [
+      { ...A, project: "a", mechanism: "audit", target: "", actionKey: "-:x" },
+      { ...A, project: "a", mechanism: "audit", target: "-:-", actionKey: "x" },
+      { ...A, project: "a", mechanism: "audit", target: "-", actionKey: "-:x" },
+      { ...A, project: "a_b", mechanism: "audit", target: "", actionKey: "-:x" },
+    ];
+    for (const id of ["-:-", "-"]) createItem(db, { actor: "owner", now: 0 },
+      { project: "a", id, title: id, status: "doing", ownerWords: "collision fixture" });
+    const seqs = tuples.map((a) => {
+      const r = recordObserved(db, a, 1);
+      expect(r.recorded).toBe(true);
+      return r.seq;
+    });
+    closeLedger(path);
+    db = openLedger(path);
+    expect(new Set(tuples.map(observeDedupKey)).size).toBe(4);
+    tuples.forEach((a, i) => expect(recordObserved(db, a, 2)).toEqual({ recorded: false, seq: seqs[i] }));
+    expect(observedRecent(db, "a", 10)).toHaveLength(3);
+    expect(observedRecent(db, "a_b", 10)).toHaveLength(1);
+    expect(observedRecent(db, "a%", 10)).toEqual([]);
+    expect(db.query("SELECT count(*) AS n FROM events WHERE kind = 'note'").get()).toEqual({ n: 4 });
+    closeLedger(path);
+  });
+
+  test("legacy observations replay exact tuples while colliding tuples get new records", () => {
+    const path = tempLedgerPath("recovery-obs-legacy-");
+    let db = openLedger(path);
+    const a = { ...A, project: "a", mechanism: "audit" as const, target: "", actionKey: "-:x" };
+    const old = appendEvent(db, { actor: "scheduler", now: 1, dedupKey: "recovery-observe:a:audit:-:-:x" },
+      { project: "a", target: "", kind: "note", text: "legacy", data: { op: "recovery_observe", mechanism: "audit", actionKey: "-:x" } });
+    expect(recordObserved(db, a, 2)).toEqual({ recorded: false, seq: old.event.seq });
+    createItem(db, { actor: "owner", now: 0 },
+      { project: "a", id: "-:-", title: "target", status: "doing", ownerWords: "collision fixture" });
+    const b = { ...a, target: "-:-", actionKey: "x" };
+    expect(recordObserved(db, b, 3).recorded).toBe(true);
+    closeLedger(path);
+    db = openLedger(path);
+    expect(recordObserved(db, a, 4)).toEqual({ recorded: false, seq: old.event.seq });
+    expect(recordObserved(db, b, 5).recorded).toBe(false);
+    expect(observedRecent(db, "a", 10).map((e) => e.target)).toEqual(["-:-", ""]);
+    expect(observedRecent(db, "a%", 10)).toEqual([]);
+    expect(db.query("SELECT text FROM events WHERE seq = ?").get(old.event.seq)).toEqual({ text: "legacy" });
+    closeLedger(path);
+  });
+
   test("unknown key / bad actionKey / bad target are refused, nothing written", () => {
     const db = openLedger(tempLedgerPath("recovery-obs-bad-"));
     for (const bad of [{ mechanism: "nudge" as RecoveryKey }, { actionKey: "" }, { actionKey: "a b" }, { actionKey: "x".repeat(121) }, { target: "T 1" }]) {
       expect(() => recordObserved(db, { ...A, ...bad }, 1)).toThrow();
     }
     expect(notes(db)).toEqual([]);
-    expect(observeDedupKey(A)).toBe("recovery-observe:p:localFallback:-:T1:r0");
+    expect(observeDedupKey(A)).toBe('recovery-observe-v2:["p","localFallback","","T1:r0"]');
   });
 
   test("concurrent processes recording the same action leave exactly one event", async () => {

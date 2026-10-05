@@ -115,7 +115,7 @@ export function observeDedupKey(a: Pick<ObservedAction, "project" | "mechanism" 
   if (!PART.test(a.actionKey) || (a.target && !PART.test(a.target))) {
     throw new LedgerError("invalid", `恢复观察的 actionKey / target 要是 1..120 个 [\\w.:@/-] 字符，收到 ${JSON.stringify([a.actionKey, a.target])}`);
   }
-  return `recovery-observe:${a.project}:${a.mechanism}:${a.target || "-"}:${a.actionKey}`;
+  return `recovery-observe-v2:${JSON.stringify([a.project, a.mechanism, a.target, a.actionKey])}`;
 }
 
 /**
@@ -125,9 +125,18 @@ export function observeDedupKey(a: Pick<ObservedAction, "project" | "mechanism" 
 export function recordObserved(db: Database, a: ObservedAction, now: number): { recorded: boolean; seq: number } {
   const dedupKey = observeDedupKey(a);
   const text = textOneLine(`恢复观察（${a.mechanism}）：本会 ${a.action}`, "观察说明", 600);
-  const r = appendEvent(db, { actor: "scheduler", now, dedupKey },
-    { project: a.project, target: a.target, kind: "note", text, data: { ...a.data, op: RECOVERY_OBSERVE_OP, mechanism: a.mechanism, actionKey: a.actionKey } });
-  return { recorded: !r.duplicate, seq: r.event.seq };
+  return tx(db, () => {
+    // Legacy keys are ambiguous: replay only the exact stored tuple, leaving collisions available under the v2 key.
+    // Keep this lookup and append under one immediate transaction so retries cannot race the compatibility check.
+    const legacy = getEventByDedup(db, `recovery-observe:${a.project}:${a.mechanism}:${a.target || "-"}:${a.actionKey}`);
+    if (legacy?.project === a.project && legacy.target === a.target && legacy.kind === "note"
+      && legacy.data.op === RECOVERY_OBSERVE_OP && legacy.data.mechanism === a.mechanism && legacy.data.actionKey === a.actionKey) {
+      return { recorded: false, seq: legacy.seq };
+    }
+    const r = appendEvent(db, { actor: "scheduler", now, dedupKey },
+      { project: a.project, target: a.target, kind: "note", text, data: { ...a.data, op: RECOVERY_OBSERVE_OP, mechanism: a.mechanism, actionKey: a.actionKey } });
+    return { recorded: !r.duplicate, seq: r.event.seq };
+  });
 }
 
 export type GateOutcome<T> = { outcome: "acted"; value: T } | { outcome: "observed"; recorded: boolean } | { outcome: "skipped"; reason: string };
@@ -287,7 +296,8 @@ export function recoveryPolicies(project: string, path = RECOVERY_POLICY_PATH): 
 
 /** The last `last` would-be actions observe recorded for a project, newest first (dedup prefix, so other notes never match). */
 export function observedRecent(db: Database, project: string, last: number) {
-  const rows = db.prepare("SELECT seq, ts, target, text, data FROM events WHERE project = ? AND kind = 'note' AND dedupKey LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT ?")
+  const rows = db.prepare("SELECT seq, ts, target, text, data FROM events WHERE project = ? AND kind = 'note'"
+    + " AND (dedupKey LIKE ? ESCAPE '\\' OR dedupKey GLOB 'recovery-observe-v2:*') ORDER BY seq DESC LIMIT ?")
     .all(project, `recovery-observe:${project.replace(/[%_\\]/g, "\\$&")}:%`, last) as { seq: number; ts: number; target: string; text: string; data: string }[];
   return rows.map((r) => {
     const d = JSON.parse(r.data) as { mechanism?: string };
