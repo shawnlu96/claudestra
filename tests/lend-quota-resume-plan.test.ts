@@ -7,12 +7,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PAUSE_FALLBACK_MS } from "../src/lib/lend-health.ts";
+import type { HelloQuota } from "../src/lib/lend-wire-v2.ts";
 import { verifyQuotaStop, type OrderSnap, type QuotaStopFact, type VerifiedQuotaStop } from "../src/lib/lend-quota-resume-facts.ts";
 import { planQuotaResume, resumeKey, type ResumeInput, type ResumePlan } from "../src/lib/lend-quota-resume-plan.ts";
 
 const T0 = Date.UTC(2026, 9, 5, 9, 0);
 const RESET = Date.UTC(2026, 9, 5, 10, 50);
 const PEER = "peer:B";
+/** 新 hello 里停止家族明确有余量的读数 */
+const OKQ = { claude: { weekUsedPct: 10, resetAt: RESET + 7 * 86_400_000 } };
 const ORDER = "lend:demo:s1:r0:a1";
 
 function orderDb(over: Record<string, unknown> = {}): Database {
@@ -45,7 +48,7 @@ function input(stop: ResumeInput["stop"], order: OrderSnap, at: number, over: Pa
     worker: { value: "stopped", source: "beat#9", observedAt: at - 1_000 },
     pendingResult: { value: false, source: "beat#9", observedAt: at - 1_000 },
     settlement: { value: { orderId: ORDER, gen: 1, settled: true }, source: "receipt#3", observedAt: at - 1_000 },
-    hello: { value: { grant: grant(), paused: null, quota: {} }, source: "hello#42", observedAt: at - 1_000 },
+    hello: { value: { grant: grant(), paused: null, quota: OKQ }, source: "hello#42", observedAt: at - 1_000 },
     writeLease: { peer: PEER, state: "held" }, consumed: new Set(), ...over,
   };
 }
@@ -157,7 +160,7 @@ describe("planQuotaResume：截止、出借方现状、结果优先、一次资�
 
   test("新 hello 仍暂停 / 家族额度满 → wait 到其截止；授权撤销 / 过期 / 仓库或角色不允许 → manual", () => {
     const s = stop(), o = snap(orderDb()), at = RESET + 1;
-    const hello = (v: Partial<NonNullable<ResumeInput["hello"]>["value"]>) => ({ hello: { value: { grant: grant(), paused: null, quota: {}, ...v },
+    const hello = (v: Partial<NonNullable<ResumeInput["hello"]>["value"]>) => ({ hello: { value: { grant: grant(), paused: null, quota: OKQ, ...v },
       source: "hello#43", observedAt: at - 1 } });
     expect(planQuotaResume(input(s, o, at, hello({ paused: { reason: "额度", until: at + 9 } })), at)).toMatchObject({ kind: "wait", until: at + 9 });
     expect(planQuotaResume(input(s, o, at, hello({ quota: { claude: { weekUsedPct: 100, resetAt: at + 7 } } })), at))
@@ -167,8 +170,22 @@ describe("planQuotaResume：截止、出借方现状、结果优先、一次资�
     }
   });
 
+  test("当前家族额度未知（quota 省略 / 空对象 / 只有别的家族）或满额读数已过 reset → wait；明确有余量 → plan", () => {
+    const s = stop(), o = snap(orderDb()), at = RESET;
+    const withQuota = (quota: HelloQuota | undefined) => {
+      const value: NonNullable<ResumeInput["hello"]>["value"] = { grant: grant(), paused: null, ...(quota === undefined ? {} : { quota }) };
+      return planQuotaResume(input(s, o, at, { hello: { value, source: "hello#44", observedAt: at } }), at);
+    };
+    for (const q of [undefined, {}, { codex: { weekUsedPct: 0, resetAt: at + 60_000 } }, { claude: { weekUsedPct: 100, resetAt: at } }]) {
+      expect(withQuota(q)).toMatchObject({ kind: "wait", until: null });
+    }
+    expect(withQuota({ claude: { weekUsedPct: 100, resetAt: at + 60_000 } })).toMatchObject({ kind: "wait", until: at + 60_000 });
+    expect(withQuota({ claude: { weekUsedPct: 10, resetAt: at + 60_000 } }).kind).toBe("plan");
+    expect(withQuota({ claude: { weekUsedPct: 99, resetAt: at - 1 }, codex: { weekUsedPct: 100, resetAt: at + 60_000 } }).kind).toBe("plan");
+  });
+
   test("hello 缺失 / 早于停止 / 过期 → wait", () => {
-    const s = stop(), o = snap(orderDb()), at = RESET + 1, value = { grant: grant(), paused: null, quota: {} };
+    const s = stop(), o = snap(orderDb()), at = RESET + 1, value = { grant: grant(), paused: null, quota: OKQ };
     for (const h of [null, { value, source: "h", observedAt: T0 - 1 }, { value, source: "h", observedAt: at - 200_000 }]) {
       expect(planQuotaResume(input(s, o, at, { hello: h }), at).kind).toBe("wait");
     }
@@ -235,7 +252,7 @@ describe("planQuotaResume：截止、出借方现状、结果优先、一次资�
       expect([s.stoppedAt, s.deadline]).toEqual([1_000_000, 1_060_000]);
       const same = { source: `b@${at}`, observedAt: at };
       const p = planQuotaResume(input(s, o, at, { worker: { value: "stopped", ...same }, pendingResult: { value: false, ...same },
-        hello: { value: { grant: grant({ until: at + 86_400_000 }), paused: null, quota: {} }, ...same },
+        hello: { value: { grant: grant({ until: at + 86_400_000 }), paused: null, quota: OKQ }, ...same },
         settlement: { value: { orderId: ORDER, gen: 1, settled: true }, ...same } }), at);
       expect(p.kind).toBe("plan");
     }
