@@ -25,7 +25,14 @@ export interface StartSpec {
   onPicked?: (port: number, attempt: number) => void | Promise<void>;
   /** 指定首个候选端口（重启时沿用原端口）；之后的尝试照常随机选 */
   firstPort?: number;
+  /** 每次起 up child 后调用（Fleet 用它登记起到一半的进程组，runner 中途收尾时也能收掉） */
+  onSpawn?: (proc: Proc, port: number) => void;
 }
+
+type Proc = ReturnType<typeof Bun.spawn>;
+
+/** 截止后的每段收尾（杀进程组后等退出、排空输出、down）各自的上限：收尾有界，不靠加大调用方 timeout */
+const CLEANUP_MS = 5_000;
 
 export interface Attempt {
   port: number;
@@ -113,15 +120,63 @@ function precheckPortOnly(out: string, port: number): boolean {
 /** Bun.serve 撞 EADDRINUSE 的报错原文；bridge 的 uncaughtException 兜底只记 message、进程不退，所以按这句认 */
 const bridgeInUse = (log: string, port: number) => log.includes(`Failed to start server. Is port ${port} in use?`);
 
-interface Child {
-  proc: ReturnType<typeof Bun.spawn>;
-  out: () => Promise<string>;
+/** 给整个进程组发信号；ESRCH = 组里已没有进程，正是要的结果，其余错误原样抛 */
+function killGroup(pgid: number, sig: "SIGTERM" | "SIGKILL"): void {
+  try {
+    process.kill(-pgid, sig);
+  } catch (e) {
+    if ((e as { code?: string }).code !== "ESRCH") throw e;
+  }
 }
 
-function spawnUp(spec: StartSpec, port: number): Child {
-  const proc = Bun.spawn(spec.argv("up", port), { cwd: spec.cwd, env: spec.env(), stdout: "pipe", stderr: "pipe" });
-  const text = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]).then(([a, b]) => a + b);
-  return { proc, out: () => text };
+const within = <T>(p: Promise<T>, ms: number) => Promise.race([p.then(() => true), Bun.sleep(ms).then(() => false)]);
+
+/** 读一路输出直到 EOF；返回「ms 内读完没有 + 已读内容」，没读完就取消读取（不无限等攥着管道的后代） */
+function drain(stream: ReadableStream<Uint8Array>): (ms: number) => Promise<[boolean, string]> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  const eof = (async () => {
+    for (let r = await reader.read(); !r.done; r = await reader.read()) chunks.push(r.value);
+  })();
+  return async (ms) => {
+    const ended = await within(eof, ms);
+    if (!ended) await reader.cancel();
+    return [ended, Buffer.concat(chunks).toString()];
+  };
+}
+
+interface Child {
+  proc: Proc;
+  /** 有界收输出：ms 内后代仍攥着管道没 EOF → 收掉整组（组里还有进程，组号不会被复用）再截断返回 */
+  out: (ms: number) => Promise<string>;
+  /** 收掉整个进程组（child 与继承它输出管道的后代），有界等 child 退出 */
+  kill: (sig: "SIGTERM" | "SIGKILL") => Promise<void>;
+}
+
+/** 原入口子进程独占一个进程组（detached = setsid，组号即 pid），收尾按组杀，后代不会漏 */
+function spawnChild(spec: StartSpec, argv: string[]): Child {
+  const proc = Bun.spawn(argv, { cwd: spec.cwd, env: spec.env(), stdout: "pipe", stderr: "pipe", detached: true });
+  const [a, b] = [drain(proc.stdout), drain(proc.stderr)];
+  const kill = async (sig: "SIGTERM" | "SIGKILL") => {
+    killGroup(proc.pid, sig);
+    if (!(await within(proc.exited, CLEANUP_MS))) throw new Error(`${argv.join(" ")}（pid ${proc.pid}）${sig} 后 ${CLEANUP_MS}ms 仍没退出`);
+  };
+  const out = async (ms: number) => {
+    const got = await Promise.all([a(ms), b(ms)]);
+    const ended = got.every(([e]) => e);
+    if (!ended) killGroup(proc.pid, "SIGKILL");
+    return got.map(([, t]) => t).join("") + (ended ? "" : `\n（输出 ${ms}ms 内没结束：后代还攥着管道，已收掉整个进程组）`);
+  };
+  return { proc, out, kill };
+}
+
+/** 有界跑一次原入口（down）：ms 内没结束就收掉整组并报失败，不无限等 */
+async function runBounded(spec: StartSpec, argv: string[], ms: number): Promise<{ ok: boolean; out: string }> {
+  const c = spawnChild(spec, argv);
+  const done = await within(c.proc.exited, ms);
+  if (!done) await c.kill("SIGKILL");
+  const out = await c.out(CLEANUP_MS);
+  return { ok: done && c.proc.exitCode === 0, out: done ? out : `${ms}ms 内没结束，已收掉整个进程组：${out}` };
 }
 
 /** 等 up child 退出；本次起的 bridge 日志已报本端口 EADDRINUSE 时不必等脚本 20 秒的就绪超时，提前收掉 child */
@@ -130,13 +185,11 @@ async function settle(spec: StartSpec, child: Child, port: number, prevPid: numb
     if (child.proc.exitCode !== null || child.proc.signalCode !== null) return "exited";
     const pid = readPid(spec.root);
     if (pid && pid !== prevPid && bridgeInUse(logSince(spec.root, offset), port)) {
-      child.proc.kill("SIGTERM");
-      await child.proc.exited;
+      await child.kill("SIGTERM");
       return "bridge-in-use";
     }
     if (Date.now() > spec.deadline) {
-      child.proc.kill("SIGKILL");
-      await child.proc.exited;
+      await child.kill("SIGKILL");
       return "deadline";
     }
     await Bun.sleep(50);
@@ -146,8 +199,8 @@ async function settle(spec: StartSpec, child: Child, port: number, prevPid: numb
 /** 换端口前清理本次尝试：down 收掉本次 bridge、pid 文件与沙箱 tmux；核验本次 bridge 已退、pid 文件已删（确无活宿主） */
 async function cleanupAttempt(spec: StartSpec, port: number, pid: number | null): Promise<void> {
   if (existsSync(join(spec.root, SANDBOX_MARKER))) {
-    const r = Bun.spawnSync(spec.argv("down", port), { cwd: spec.cwd, env: spec.env(), stdout: "pipe", stderr: "pipe" });
-    if (r.exitCode !== 0) throw new Error(`冲突后清理（down）失败：${r.stdout.toString()}${r.stderr.toString()}`);
+    const r = await runBounded(spec, spec.argv("down", port), CLEANUP_MS);
+    if (!r.ok) throw new Error(`本次尝试的清理（down）失败：${r.out}`);
   }
   for (let i = 0; pid && pidAlive(pid) && i < 20; i++) await Bun.sleep(100); // 被 kill 后等它被回收
   if (pid && pidAlive(pid)) throw new Error(`端口 ${port} 冲突后本次 bridge（pid ${pid}）清理不掉，不能换端口重来`);
@@ -197,9 +250,10 @@ export async function startSandbox(spec: StartSpec): Promise<Started> {
     const prevPid = readPid(spec.root);
     const offset = logSize(spec.root);
     const hadMarker = existsSync(join(spec.root, SANDBOX_MARKER));
-    const child = spawnUp(spec, port);
+    const child = spawnChild(spec, spec.argv("up", port));
+    spec.onSpawn?.(child.proc, port);
     const kind = await settle(spec, child, port, prevPid, offset);
-    const out = await child.out();
+    const out = await child.out(CLEANUP_MS);
     const pid = readPid(spec.root);
     const fresh = pid !== null && pid !== prevPid ? pid : null;
     const created = !hadMarker && existsSync(join(spec.root, SANDBOX_MARKER));
@@ -223,27 +277,61 @@ export async function startSandbox(spec: StartSpec): Promise<Started> {
   throw new StartFailure(`连续 ${max} 次端口被抢，放弃：${attempts.map((a) => a.port).join(", ")}`, attempts);
 }
 
-/** 夹具起成功的沙箱登记表：正常收尾 stop 摘掉；测试断言中途失败时 stopAll 兜底 down（detached bridge 不会随测试进程退出） */
+interface Entry {
+  spec: StartSpec;
+  /** 当前（最后一次）起的 up child 与它的候选端口；起成功后 pid 为本次 bridge */
+  up: Proc | null;
+  port: number | null;
+  pid: number | null;
+  stopped: boolean;
+}
+
+/** 夹具起的沙箱登记表：起之前就登记，正常收尾 stop 摘掉；断言中途失败或起到一半 runner 收尾时 stopAll 兜底（detached bridge 不随测试进程退出） */
 export class Fleet {
-  private live = new Map<string, { spec: StartSpec; port: number; pid: number }>();
+  private live = new Map<string, Entry>();
 
   async start(spec: StartSpec): Promise<Started> {
-    const up = await startSandbox(spec);
-    this.live.set(spec.root, { spec, port: up.port, pid: up.pid });
-    return up;
+    if (this.live.has(spec.root)) throw new Error(`${spec.root} 已登记在跑，不能再起`);
+    const it: Entry = { spec, up: null, port: null, pid: null, stopped: false };
+    this.live.set(spec.root, it);
+    const onPicked = async (p: number, i: number) => {
+      if (it.stopped) throw new Error(`${spec.root} 起到一半已被收掉，不再尝试`);
+      await spec.onPicked?.(p, i);
+    };
+    const onSpawn = (proc: Proc, p: number) => {
+      [it.up, it.port] = [proc, p];
+      spec.onSpawn?.(proc, p);
+    };
+    try {
+      const up = await startSandbox({ ...spec, onPicked, onSpawn });
+      [it.port, it.pid] = [up.port, up.pid];
+      return up;
+    } catch (e) {
+      if (this.live.get(spec.root) === it) this.live.delete(spec.root); // 失败路径 startSandbox 已收并把清理结果并进 e
+      throw e;
+    }
   }
 
-  /** down 并核验：本次 bridge 已退、bridge.pid 已删、端口已释放；问题逐条返回，不吞 */
+  /** 收掉起到一半的 up 进程组、down，并核验：bridge 已退、bridge.pid 已删、端口已释放；问题逐条返回，不吞 */
   async stop(root: string): Promise<string[]> {
     const it = this.live.get(root);
     if (!it) return [`${root} 没登记，无从 down`];
     this.live.delete(root);
-    const d = Bun.spawnSync(it.spec.argv("down", it.port), { cwd: it.spec.cwd, env: it.spec.env(), stdout: "pipe", stderr: "pipe" });
-    const bad = d.exitCode === 0 ? [] : [`${root} down 失败：${d.stdout.toString()}${d.stderr.toString()}`];
-    for (let i = 0; pidAlive(it.pid) && i < 20; i++) await Bun.sleep(100);
-    if (pidAlive(it.pid)) bad.push(`${root} 的 bridge（pid ${it.pid}）down 后仍活着`);
+    it.stopped = true;
+    const bad: string[] = [];
+    if (it.up && it.up.exitCode === null && it.up.signalCode === null) {
+      killGroup(it.up.pid, "SIGKILL"); // child 还没被回收，组号仍是本次的
+      if (!(await within(it.up.exited, CLEANUP_MS))) bad.push(`${root} 起到一半的 up（pid ${it.up.pid}）收不掉`);
+    }
+    const pid = it.pid ?? readPid(root);
+    if (it.port !== null && existsSync(join(root, SANDBOX_MARKER))) {
+      const d = await runBounded(it.spec, it.spec.argv("down", it.port), CLEANUP_MS);
+      if (!d.ok) bad.push(`${root} down 失败：${d.out}`);
+    }
+    for (let i = 0; pid && pidAlive(pid) && i < 20; i++) await Bun.sleep(100);
+    if (pid && pidAlive(pid)) bad.push(`${root} 的 bridge（pid ${pid}）down 后仍活着`);
     if (existsSync(sandboxLayout(root).pidFile)) bad.push(`${root} down 后 bridge.pid 还在`);
-    if (bindProbe(it.port) !== null) bad.push(`${root} down 后端口 ${it.port} 仍被占`);
+    if (pid && it.port !== null && bindProbe(it.port) !== null) bad.push(`${root} down 后端口 ${it.port} 仍被占`);
     return bad;
   }
 
@@ -255,18 +343,25 @@ export class Fleet {
 }
 
 /**
- * 测试可确认的同步点：闸门文件 gate 在时，嵌进 shim 的这段 sh 记下 `${gate}.hit` 后停住，等 gate 被删（有界 15 秒）。
- * 嵌在 tmux shim 前头 = 停在 up 的 ensure-tmux（预检之后、起 bridge 之前）
+ * 测试可确认的同步点：闸门文件 gate 在、且还没人停过时，嵌进 shim 的这段 sh 把自己的 pid 写进 `${gate}.hit` 后停住，
+ * 等 gate 被删（有界 15 秒）；之后的调用（如收尾的 down）直接放行。嵌在 tmux shim 前头 = 停在 up 的 ensure-tmux（预检之后、起 bridge 之前）
  */
 export const gateShell = (gate: string) =>
-  `if [ -e '${gate}' ]; then : > '${gate}.hit'; i=0; while [ -e '${gate}' ] && [ $i -lt 300 ]; do sleep 0.05; i=$((i+1)); done; fi`;
+  `if [ -e '${gate}' ] && [ ! -e '${gate}.hit' ]; then echo $$ > '${gate}.hit'; i=0; while [ -e '${gate}' ] && [ $i -lt 300 ]; do sleep 0.05; i=$((i+1)); done; fi`;
+
+/** 等子进程停到闸门上（ms 内），返回停着的 shim 的 pid；等不到原样抛出 */
+export async function gateHit(gate: string, ms: number): Promise<number> {
+  for (const end = Date.now() + ms; !existsSync(`${gate}.hit`); await Bun.sleep(20)) {
+    if (Date.now() > end) throw new Error(`子进程没走到闸门 ${gate}`);
+  }
+  for (let i = 0; readFileSync(`${gate}.hit`, "utf8").trim() === "" && i < 50; i++) await Bun.sleep(10); // pid 刚建文件还没写完
+  return Number(readFileSync(`${gate}.hit`, "utf8").trim());
+}
 
 /** 等子进程停在闸门上 → 做 act（如抢端口）→ 放行；等不到（ms 内）或 act 抛错都原样抛出，闸门总会删 */
 export async function atGate(gate: string, ms: number, act: () => void): Promise<void> {
   try {
-    for (const end = Date.now() + ms; !existsSync(`${gate}.hit`); await Bun.sleep(20)) {
-      if (Date.now() > end) throw new Error(`子进程没走到闸门 ${gate}`);
-    }
+    await gateHit(gate, ms);
     act();
   } finally {
     rmSync(gate, { force: true });

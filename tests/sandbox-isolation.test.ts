@@ -24,7 +24,7 @@ import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
 import { fakePiSource } from "./sandbox-fake-pi.ts";
 import { testChildEnv } from "./test-env.ts";
-import { atGate, Fleet, gateShell, pickPort, pidAlive as alive, StartFailure, startSandbox, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
+import { atGate, Fleet, gateHit, gateShell, pickPort, pidAlive as alive, StartFailure, startSandbox, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
 
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
@@ -536,18 +536,14 @@ describe("沙箱 bridge 无副作用", () => {
 describe("启动夹具：端口竞争（受控扰动）", () => {
   const held: Array<{ stop(force?: boolean): void }> = [];
   const hold = (p: number) => held.push(Bun.listen({ hostname: "127.0.0.1", port: p, socket: { data() {} } }));
-  const fleet = new Fleet(); // 起成功的一律登记：断言中途失败时 afterEach 兜底 down 并核验，问题汇总抛出
+  const fleet = new Fleet(); // 起之前就登记：断言中途失败、起到一半 runner 收尾时 afterEach 兜底收掉并核验，问题汇总抛出
   /** 正常收尾核验：down 干净（bridge 已退、pid 文件已删、端口已释放）；假 home 零改动、零出站 */
-  const downAndVerify = async (r: string, before: Map<string, string>) => {
-    expect(await fleet.stop(r)).toEqual([]);
-    expect(diff(before, snapshot(home))).toEqual([]);
-    expect(hits).toEqual({ proxy: [], decoy: [] });
-  };
+  const downAndVerify = async (r: string, before: Map<string, string>) =>
+    expect([await fleet.stop(r), diff(before, snapshot(home)), hits]).toEqual([[], [], { proxy: [], decoy: [] }]);
   afterEach(async () => {
     for (const f of [tmuxGate(), `${tmuxGate()}.hit`]) rmSync(f, { force: true });
     held.splice(0).forEach((l) => l.stop(true));
-    const bad = await fleet.stopAll();
-    if (bad.length) throw new Error(`兜底清理没收干净：\n${bad.join("\n")}`);
+    expect(await fleet.stopAll(), "兜底清理没收干净").toEqual([]);
   });
 
   test("候选端口在 up 前被抢：原路径拒绝启动；夹具确认本端口 EADDRINUSE、无活宿主后换端口，归属与清理核验", async () => {
@@ -556,11 +552,9 @@ describe("启动夹具：端口竞争（受控扰动）", () => {
     const p0 = pickPort(AVOID_PORTS);
     hold(p0); // 原路径：探测关占位 → 别人抢到 → up
     const old = Bun.spawnSync([BUN, SCRIPT, "up", "--port", String(p0), "--root", r], { cwd: REPO, env: callerEnv(), stdout: "pipe", stderr: "pipe" });
-    expect(old.exitCode).not.toBe(0);
-    expect(old.stderr.toString()).toContain(`端口 ${p0} 已被占用`);
+    expect([old.exitCode === 0, old.stderr.toString()]).toEqual([false, expect.stringContaining(`端口 ${p0} 已被占用`)]);
     const up = await fleet.start(upSpec(r, 45_000, { onPicked: (p, i) => void (i === 0 && hold(p)) }));
-    expect(up.attempts.map((a) => a.outcome)).toEqual(["port-race", "started"]);
-    expect(up.port).not.toBe(up.attempts[0]!.port);
+    expect([up.attempts.map((a) => a.outcome), up.port === up.attempts[0]!.port]).toEqual([["port-race", "started"], false]);
     expect((await fetch(`http://127.0.0.1:${up.port}/stats`)).ok).toBe(true);
     await downAndVerify(r, before);
   }, 60_000);
@@ -574,26 +568,33 @@ describe("启动夹具：端口竞争（受控扰动）", () => {
     const t0 = Date.now();
     const up = await fleet.start(upSpec(r, 45_000, { onPicked: (p, i) => { if (i === 0) raced = atGate(tmuxGate(), 15_000, () => hold(p)).then(() => null, (e: unknown) => e); } }));
     expect(await raced, "扰动没在闸门处抢到端口").toBeNull();
-    expect(up.attempts.map((a) => a.outcome)).toEqual(["port-race", "started"]);
-    expect(up.attempts[0]!.out).not.toContain("已被占用"); // 冲突发生在 bridge 绑定，而不是脚本预检
-    expect(Date.now() - t0).toBeLessThan(20_000);
+    // 冲突发生在 bridge 绑定（而不是脚本预检），且不等 20 秒就绪超时
+    expect([up.attempts.map((a) => a.outcome), up.attempts[0]!.out.includes("已被占用"), Date.now() - t0 < 20_000]).toEqual([["port-race", "started"], false, true]);
     await downAndVerify(r, before);
   }, 60_000);
+
+  test("up 的后代攥着输出管道时撞截止 / 起到一半被兜底收：不拖过截止，整组进程有界收掉、本次起的不留", async () => {
+    writeFileSync(tmuxGate(), ""); // up 停在 ensure-tmux 的 tmux shim 里：up 的后代、继承 up 的输出管道，闸门不删就一直占着
+    const t0 = Date.now();
+    const cut = await fleet.start(upSpec(join(tmp, "race-hang"), 1_500)).catch((e) => e);
+    expect([(cut as StartFailure).attempts?.map((a) => a.outcome), alive(await gateHit(tmuxGate(), 0)), Date.now() - t0 < 8_000]).toEqual([["failed"], false, true]);
+    rmSync(`${tmuxGate()}.hit`); // 起到一半时 runner 收尾：起之前就登记过，stopAll 收掉整组进程，启动随之失败
+    const late = fleet.start(upSpec(join(tmp, "race-abort"), 45_000)).catch((e) => e);
+    const shim = await gateHit(tmuxGate(), 15_000);
+    expect([await fleet.stopAll(), await late, alive(shim), existsSync(join(tmp, "race-abort", "bridge.pid")), Date.now() - t0 < 16_000]).toEqual([[], expect.any(StartFailure), false, false, true]);
+  }, 30_000);
 
   test("反向故障照常失败、不重跑：非端口原因、端口被本沙箱活宿主占着、候选是生产端口", async () => {
     const before = snapshot(home);
     const bad = await fleet.start(upSpec(join(home, ".claude-orchestrator", "sbx"), 30_000)).catch((e) => e);
-    expect(bad).toBeInstanceOf(StartFailure);
-    expect((bad as StartFailure).attempts.map((a) => a.outcome)).toEqual(["failed"]);
-    expect(String(bad.message)).toContain("重叠");
+    expect([bad instanceof StartFailure, (bad as StartFailure).attempts?.map((a) => a.outcome), String(bad.message)]).toEqual([true, ["failed"], expect.stringContaining("重叠")]);
     const cut = await fleet.start(upSpec(join(tmp, "race-cut"), 300)).catch((e) => e); // 起到一半撞截止：不重跑，本次起的收干净
     expect([(cut as StartFailure).attempts?.map((a) => a.outcome), existsSync(join(tmp, "race-cut", "bridge.pid"))]).toEqual([["failed"], false]);
     const r = join(tmp, "race-live");
     const up = await fleet.start(upSpec(r, 45_000));
     const twice = await startSandbox(upSpec(r, 30_000, { firstPort: up.port })).catch((e) => e); // 同 root：意外成功也由 live 里这条收
     expect([(twice as StartFailure).attempts?.map((a) => a.outcome), alive(up.pid)]).toEqual([["failed"], true]);
-    const prod = await startSandbox(upSpec(r, 30_000, { firstPort: DEFAULT_BRIDGE_PORT })).catch((e) => e);
-    expect((prod as StartFailure).attempts).toEqual([]);
+    expect(((await startSandbox(upSpec(r, 30_000, { firstPort: DEFAULT_BRIDGE_PORT })).catch((e) => e)) as StartFailure).attempts).toEqual([]); // 生产端口
     await downAndVerify(r, before);
   }, 90_000);
 });
