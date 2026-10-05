@@ -1,22 +1,28 @@
 /**
  * LIFE1 card worker lifecycle: synthetic ledger + fake registry / tmux facts + fake manager. Covers the acceptance lines: finished
- * card → author and reviewer collected; merge author idle 7h parked, 1h kept; frozen card and user agents untouched; swap backstop
+ * card → author and reviewer collected; merge author idle 7h retired, 1h kept; frozen card and user agents untouched; swap backstop
  * idle-longest first without touching a live turn; observe has no side effects; disk measured and the worktree removed.
  * Old red, new green: a PM-tool `-once` reviewer of a verified card is not a scheduler retire candidate, but the lifecycle collects it.
+ * r3 review fixes: session identity (a reused name is kept), recent turn protects stopped agents too, scheduler-bound sessions are the
+ * scheduler's, an unreadable card extra is skipped, no park (every collection retires), a kept checkout keeps its temp folder and
+ * leaves a pending cleanup that later passes retry, observe reads the lend journal without writing it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, parseLifecycle, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
-import { activeWorkers, cardWorkerIndex, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
+import { activeWorkers, cardWorkerIndex, pendingCleanups, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { planLifecycle, lifecycleLine, type AgentFacts, type PlanInput } from "../src/lib/agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
-import { ledgerFacts } from "../src/lib/agent-lifecycle-deps.js";
+import { ledgerFacts, lendAgents } from "../src/lib/agent-lifecycle-deps.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { retireCandidates } from "../src/lib/scheduler-retire.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
+import { claudeTmpDirFor } from "../src/lib/scheduler-retire-tmp.js";
 
 const H = 3_600_000, NOW = 100 * H;
 const cleanup: (() => void)[] = [];
@@ -35,7 +41,7 @@ function ledger() {
 }
 
 const agent = (name: string, idleH: number | null, more: Partial<AgentFacts> = {}): AgentFacts =>
-  ({ name, status: "active", running: true, idleMs: idleH === null ? null : idleH * H, turnActive: false, ...more });
+  ({ name, status: "active", sessionId: "s", running: true, idleMs: idleH === null ? null : idleH * H, turnActive: false, ...more });
 
 function input(db: ReturnType<typeof ledger>["db"], agents: AgentFacts[], over: Partial<PlanInput> = {}): PlanInput {
   return { now: NOW, policy: { ...DEFAULT_LIFECYCLE }, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
@@ -49,20 +55,68 @@ describe("plan", () => {
     registerWorker(db, { agent: "agent-t1-claude-local", sessionId: "s1", taskId: "T1", role: "author", createdBy: "agent-pm", now: 1 });
     registerWorker(db, { agent: "agent-t1-once", sessionId: "s2", taskId: "T1", role: "reviewer", createdBy: "agent-pm", now: 2 });
     expect(retireCandidates(db, ["p"])).toEqual([]); // the old path has nothing bound, so both would live forever
-    const plan = planLifecycle(input(db, [agent("agent-t1-claude-local", 2), agent("agent-t1-once", 2)]));
-    expect(plan.actions.map((a) => [a.agent, a.rule, a.mode])).toEqual([
-      ["agent-t1-claude-local", "card_finished", "retire"], ["agent-t1-once", "card_finished", "retire"]]);
+    const plan = planLifecycle(input(db, [agent("agent-t1-claude-local", 2, { sessionId: "s1" }), agent("agent-t1-once", 2, { sessionId: "s2" })]));
+    expect(plan.actions.map((a) => [a.agent, a.rule, a.sessionId])).toEqual([
+      ["agent-t1-claude-local", "card_finished", "s1"], ["agent-t1-once", "card_finished", "s2"]]);
     expect(lifecycleLine(plan, "observe")).toBe("worker agent：活 2 / 应收 2 / swap 10%（lifecycle observe）");
   });
 
-  test("merge author: idle 7h parked, idle 1h kept; a turn in the last 30 min is never touched", () => {
+  test("merge author: idle 7h retired (no park), idle 1h kept; a turn in the last 30 min is never touched", () => {
     const { db, card } = ledger();
     card("T2", "merge"); card("T3", "merge"); card("T4", "verified");
     registerWorker(db, { agent: "a2", sessionId: "s", taskId: "T2", role: "author", createdBy: "pm", now: 1 });
     registerWorker(db, { agent: "a3", sessionId: "s", taskId: "T3", role: "author", createdBy: "pm", now: 2 });
     registerWorker(db, { agent: "a4", sessionId: "s", taskId: "T4", role: "author", createdBy: "pm", now: 3 });
     const plan = planLifecycle(input(db, [agent("a2", 7), agent("a3", 1), agent("a4", 0.2)]));
-    expect(plan.actions.map((a) => [a.agent, a.rule, a.mode])).toEqual([["a2", "author_parked", "park"]]);
+    expect(plan.actions.map((a) => [a.agent, a.rule])).toEqual([["a2", "author_idle"]]);
+  });
+
+  test("recent turn protects a stopped agent too; a stopped agent with no activity record can be collected", () => {
+    const { db, card } = ledger();
+    card("R1", "verified"); card("R2", "verified");
+    registerWorker(db, { agent: "just-stopped", sessionId: "s", taskId: "R1", role: "reviewer", createdBy: "pm", now: 1 });
+    registerWorker(db, { agent: "long-gone", sessionId: "s", taskId: "R2", role: "reviewer", createdBy: "pm", now: 2 });
+    const plan = planLifecycle(input(db, [agent("just-stopped", 1 / 60, { running: false, status: "stopped" }),
+      agent("long-gone", null, { running: false, status: "stopped" })]));
+    expect(plan.actions.map((a) => a.agent)).toEqual(["long-gone"]);
+    // running with unknown activity: might be mid-use, kept
+    expect(planLifecycle(input(db, [agent("just-stopped", null)])).actions).toEqual([]);
+  });
+
+  test("session identity: a name reused by a new (unregistered) session, or an unknown session, is kept and reported", () => {
+    const { db, card } = ledger();
+    card("U1", "verified");
+    registerWorker(db, { agent: "agent-personal", sessionId: "personal-session", taskId: "U1", role: "reviewer", createdBy: "pm", now: 1 });
+    const reused = planLifecycle(input(db, [agent("agent-personal", 7, { sessionId: "new-unregistered-session" })]));
+    expect(reused.actions).toEqual([]);
+    expect(reused.kept.map((k) => k.agent)).toEqual(["agent-personal"]);
+    expect(reused.kept[0].reason).toContain("new-unregistered-session");
+    const unknown = planLifecycle(input(db, [agent("agent-personal", 7, { sessionId: undefined })]));
+    expect([unknown.actions, unknown.kept.map((k) => k.agent)]).toEqual([[], ["agent-personal"]]);
+    // positive control: the registered session itself is collected
+    expect(planLifecycle(input(db, [agent("agent-personal", 7, { sessionId: "personal-session" })])).actions.map((a) => a.agent)).toEqual(["agent-personal"]);
+  });
+
+  test("scheduler-bound sessions stay the scheduler's: due ones are reported, never collected or parked", () => {
+    const { db, card } = ledger();
+    card("B1", "merge");
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, createIntentId, state, createdAt, updatedAt)
+      VALUES ('B1', 'author', 'bound1', 's', 'claude', 'tmux', 'i1', 'active', 1, 1)`).run();
+    const plan = planLifecycle(input(db, [agent("bound1", 9)], { swapPct: 99 }));
+    expect([plan.actions, plan.memory]).toEqual([[], []]);
+    expect(plan.kept[0].reason).toContain("调度器");
+  });
+
+  test("a card whose extra cannot be parsed is skipped and reported (frozen unknown), not read as unfrozen", () => {
+    const { db, card } = ledger();
+    card("X1", "verified");
+    registerWorker(db, { agent: "x1", sessionId: "s", taskId: "X1", role: "author", createdBy: "pm", now: 1 });
+    db.query("UPDATE tasks SET extra = '{broken' WHERE id = 'X1'").run();
+    const plan = planLifecycle(input(db, [agent("x1", 50)], { swapPct: 99 }));
+    expect([plan.actions, plan.memory, plan.frozen]).toEqual([[], [], []]);
+    expect(plan.kept[0]).toMatchObject({ agent: "x1" });
+    expect(plan.kept[0].reason).toContain("extra 读不出");
   });
 
   test("frozen card only reported; user agents, master, PM, lend workers and live turns untouched", () => {
@@ -87,7 +141,7 @@ describe("plan", () => {
     registerWorker(db, { agent: "r7", sessionId: "s", taskId: "T7", role: "reviewer", createdBy: "pm", now: 1 });
     registerWorker(db, { agent: "r8", sessionId: "s", taskId: "T8", role: "reviewer", createdBy: "pm", now: 2 });
     const plan = planLifecycle(input(db, [agent("r7", 1), agent("r8", 1)]));
-    expect(plan.actions.map((a) => [a.agent, a.rule, a.mode])).toEqual([["r7", "reviewer_done", "retire"]]);
+    expect(plan.actions.map((a) => [a.agent, a.rule])).toEqual([["r7", "reviewer_done"]]);
   });
 
   test("stock: only a ledger record links an agent to a card; the name never does", () => {
@@ -106,7 +160,7 @@ describe("plan", () => {
     const agents = [agent("m1", 2), agent("m2", 5), agent("m3", 9), agent("m4", 4, { turnActive: true })];
     const plan = planLifecycle(input(db, agents, { swapPct: 85 }));
     expect(plan.actions).toEqual([]);
-    expect(plan.memory.map((a) => [a.agent, a.mode])).toEqual([["m2", "park"], ["m1", "park"]]);
+    expect(plan.memory.map((a) => [a.agent, a.rule])).toEqual([["m2", "memory"], ["m1", "memory"]]);
     expect(planLifecycle(input(db, agents, { swapPct: 60 })).memory).toEqual([]);
   });
 });
@@ -117,11 +171,11 @@ describe("run", () => {
     if (r.exitCode !== 0) throw new Error(r.stderr.toString());
   };
 
-  function fakeDeps(db: ReturnType<typeof ledger>["db"], root: string, swaps: number[] = []) {
+  function fakeDeps(db: ReturnType<typeof ledger>["db"], root: string, swaps: number[] = [], live: Awaited<ReturnType<LifecycleDeps["agents"]>> = []) {
     const calls: string[][] = [];
     const deps: LifecycleDeps = {
       manager: async (...args) => { calls.push(args); return args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: "done" }; },
-      git, exists: existsSync, worktreeRoot: root, agents: async () => [],
+      git, exists: existsSync, worktreeRoot: root, agents: async () => live,
       du: async (paths) => paths.filter((p) => existsSync(p)).length * 4096,
       swapPct: async () => swaps.shift() ?? 0, record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => NOW,
     };
@@ -142,7 +196,7 @@ describe("run", () => {
     const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
     const r = await runLifecycle(plan, on, deps);
     expect(calls).toEqual([["archive", "agent-w1"], ["remove", "agent-w1"]]);
-    expect(r.done).toEqual([{ agent: "agent-w1", rule: "card_finished", mode: "retire", freed: 4096 }]);
+    expect(r.done).toEqual([{ agent: "agent-w1", rule: "card_finished", freed: 4096 }]);
     expect(existsSync(join(root, "w1"))).toBe(false);
     const ev = listEvents(db, { project: "p" }).filter((e) => (e.data as { op?: string }).op === "worker_retire");
     expect(ev.map((e) => (e.data as Record<string, unknown>).bytesFreed)).toEqual([4096]);
@@ -175,7 +229,74 @@ describe("run", () => {
     const plan = planLifecycle(input(db, [agent("s1", 3), agent("s2", 2)], { swapPct: 90 }));
     const { deps, calls } = fakeDeps(db, "/nonexistent", [90, 50]);
     await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, deps);
-    expect(calls).toEqual([["archive", "s1"], ["kill", "s1"]]);
+    expect(calls).toEqual([["archive", "s1"], ["remove", "s1"]]);
+  });
+
+  test("the session is re-checked before anything is touched: a name re-created since the plan is left alone", async () => {
+    const { db, card } = ledger();
+    card("I1", "verified");
+    registerWorker(db, { agent: "i1", sessionId: "s", taskId: "I1", role: "reviewer", createdBy: "pm", now: 1 });
+    const plan = planLifecycle(input(db, [agent("i1", 7)]));
+    expect(plan.actions.length).toBe(1);
+    const { deps, calls } = fakeDeps(db, "/nonexistent", [], [{ name: "i1", status: "active", sessionId: "user-new", cwd: "/x", pending: false, window: true }]);
+    const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, deps);
+    expect(calls).toEqual([]);
+    expect(r.failed[0].error).toContain("user-new");
+    expect(activeWorkers(db).map((w) => w.agent)).toEqual(["i1"]);
+  });
+
+  test("dirty checkout: worktree and its temp evidence both kept, row left as a pending cleanup, reported failed; once clean a later pass finishes it; replay is harmless", async () => {
+    const { db, dir, card } = ledger();
+    card("D1", "verified");
+    const repo = join(dir, "repo"), root = join(dir, "worktrees"), tmpRoot = join(dir, "claude-tmp"), wt = join(root, "d1");
+    mkdirSync(repo); mkdirSync(root); mkdirSync(tmpRoot);
+    sh(repo, "init", "-q"); sh(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
+    sh(repo, "worktree", "add", "-q", "--detach", wt);
+    writeFileSync(join(wt, "evidence.txt"), "uncommitted");
+    const tmpDir = claudeTmpDirFor(wt, tmpRoot);
+    mkdirSync(tmpDir, { recursive: true }); writeFileSync(join(tmpDir, "tool-output"), "evidence");
+    registerWorker(db, { agent: "agent-d1", sessionId: "s", taskId: "D1", role: "author", createdBy: "pm", now: 1 });
+    const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
+    const { deps, calls } = fakeDeps(db, root);
+    deps.tmp = { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) };
+    const first = await runLifecycle(planLifecycle(input(db, [agent("agent-d1", 7, { cwd: wt })])), on, deps);
+    expect(calls).toEqual([["archive", "agent-d1"], ["remove", "agent-d1"]]);
+    expect([first.done, first.failed.map((f) => f.agent)]).toEqual([[], ["agent-d1"]]);
+    expect([existsSync(join(wt, "evidence.txt")), existsSync(join(tmpDir, "tool-output"))]).toEqual([true, true]);
+    expect(activeWorkers(db)).toEqual([]); // no longer an agent...
+    expect(pendingCleanups(db)).toMatchObject([{ agent: "agent-d1", sessionId: "s", entries: [{ checkout: wt, tmp: tmpDir }] }]); // ...but a disk debt
+    // the agent is gone from the registry now: the next plan carries only the retry, and doctor's line shows it
+    const again = planLifecycle(input(db, [], { pending: pendingCleanups(db) }));
+    expect(again.cleanups.map((a) => [a.agent, a.rule])).toEqual([["agent-d1", "cleanup_retry"]]);
+    expect(lifecycleLine(again, "on")).toContain("待补清 1");
+    const stillDirty = await runLifecycle(again, on, deps);
+    expect(stillDirty.failed.map((f) => f.agent)).toEqual(["agent-d1"]);
+    expect(existsSync(join(tmpDir, "tool-output"))).toBe(true);
+    rmSync(join(wt, "evidence.txt")); // PM saved the evidence and cleaned up
+    const retried = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
+    expect([retried.done.map((d) => d.agent), retried.failed]).toEqual([["agent-d1"], []]);
+    expect([existsSync(wt), existsSync(tmpDir)]).toEqual([false, false]);
+    expect(pendingCleanups(db)).toEqual([]);
+    expect(calls.filter((c) => c[0] === "remove").length).toBe(1); // retries never stop anything
+    const replay = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
+    expect(replay).toEqual({ done: [], failed: [] });
+    const evs = listEvents(db, { project: "p" }).filter((e) => (e.data as { op?: string }).op === "worker_retire");
+    expect(evs.map((e) => (e.data as { pending: unknown[] }).pending.length)).toEqual([1, 1, 0]);
+  });
+});
+
+describe("observe reads without writing", () => {
+  test("lend journal is read through a read-only connection: no migration, no WAL, no new tables; missing table = none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "life1-lend-")), path = join(dir, "lend.sqlite");
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    new Database(path).close(); // an existing, empty journal (user_version 0)
+    expect(lendAgents(path)).toEqual(new Set());
+    const raw = new Database(path);
+    expect([raw.query("PRAGMA user_version").get(), raw.query("SELECT name FROM sqlite_master").all(), raw.query("PRAGMA journal_mode").get()])
+      .toEqual([{ user_version: 0 }, [], { journal_mode: "delete" }]);
+    raw.exec("CREATE TABLE lend_orders (agent TEXT)"); raw.exec("INSERT INTO lend_orders VALUES ('agent-lend-x'), (NULL)"); raw.close();
+    expect(lendAgents(path)).toEqual(new Set(["agent-lend-x"]));
+    expect(lendAgents(join(dir, "absent.sqlite"))).toEqual(new Set());
   });
 });
 

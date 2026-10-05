@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE } from "../src/lib/agent-lifecycle-config.js";
 import { WORKER_AGENTS_SCHEMA } from "../src/lib/agent-lifecycle-schema.js";
-import { activeWorkers, buildCardWorkerIndex, cardWorkerIndex, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
+import { activeWorkers, buildCardWorkerIndex, cardWorkerIndex, pendingCleanups, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { planLifecycle } from "../src/lib/agent-lifecycle.js";
 import { runLifecycle } from "../src/lib/agent-lifecycle-run.js";
 import { ledgerFacts } from "../src/lib/agent-lifecycle-deps.js";
@@ -68,8 +68,8 @@ describe("cardWorkerIndex", () => {
       VALUES ('D', 'reviewer', 'sched', 's2', 'claude', 'tmux', 'i1', 'active', 1, 1)`).run();
     const ix = cardWorkerIndex(db);
     expect(ix.get("both")).toMatchObject({ taskId: "A", role: "reviewer", source: "worker_agents" });
-    expect(ix.get("both")!.links.map((l) => l.source)).toEqual(["worker_agents", "tasks.agent"]);
-    expect(ix.get("sched")).toMatchObject({ taskId: "D", role: "reviewer", source: "scheduler_sessions" });
+    expect(ix.get("both")!.links.map((l) => [l.source, l.sessionId])).toEqual([["worker_agents", "s1"], ["tasks.agent", undefined]]);
+    expect(ix.get("sched")).toMatchObject({ taskId: "D", role: "reviewer", source: "scheduler_sessions", sessionId: "s2" });
     expect(ix.get("exec-only")).toMatchObject({ taskId: "B", role: "author", source: "tasks.agent" });
     expect(ix.get("exec-only")!.links.map((l) => l.taskId)).toEqual(["B", "C"]);
     expect(ix.has("agent-rv-whatever-once")).toBe(false); // a worker-looking name with no record is the user's
@@ -91,7 +91,7 @@ describe("cardWorkerIndex", () => {
     card("F", "verified"); card("G", "build", "shared");
     registerWorker(db, { agent: "shared", sessionId: "s", taskId: "F", role: "author", createdBy: "pm", now: 1 });
     const plan = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
-      master: new Set(), swapPct: 10, agents: [{ name: "shared", running: true, idleMs: 9 * H, turnActive: false }] });
+      master: new Set(), swapPct: 10, agents: [{ name: "shared", sessionId: "s", running: true, idleMs: 9 * H, turnActive: false }] });
     expect(plan.actions).toEqual([]);
     expect(plan.kept).toEqual([{ agent: "shared", reason: "tasks.agent 还关联卡 G（build），记录不一致，保守保留" }]);
   });
@@ -103,7 +103,7 @@ describe("cardWorkerIndex", () => {
     const index = cardWorkerIndex(db);
     index.get("u")!.links.push({ taskId: "GHOST", role: "reviewer", source: "scheduler_sessions" });
     const plan = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index, ...ledgerFacts(db), foreign: new Set(),
-      master: new Set(), swapPct: 10, agents: [{ name: "u", running: true, idleMs: 9 * H, turnActive: false }] });
+      master: new Set(), swapPct: 10, agents: [{ name: "u", sessionId: "s", running: true, idleMs: 9 * H, turnActive: false }] });
     expect([plan.actions, plan.kept.map((k) => k.agent)]).toEqual([[], ["u"]]);
   });
 });
@@ -128,7 +128,7 @@ describe("disk (验收线 8)", () => {
     mkdirSync(join(tmpDir, "scratch"), { recursive: true }); writeFileSync(join(tmpDir, "scratch", "out"), "y");
     registerWorker(db, { agent: "agent-k", sessionId: "s", taskId: "K", role: "author", createdBy: "pm", now: 1 });
     const plan = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
-      master: new Set(), swapPct: 10, agents: [{ name: "agent-k", cwd: wt, running: false, idleMs: 7 * H, turnActive: false }] });
+      master: new Set(), swapPct: 10, agents: [{ name: "agent-k", sessionId: "s", cwd: wt, running: false, idleMs: 7 * H, turnActive: false }] });
     const measured: string[][] = [];
     const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
       manager: async (...args) => (args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: "done" }),
@@ -152,8 +152,8 @@ describe("disk (验收线 8)", () => {
     registerWorker(db, { agent: "agent-l", sessionId: "s", taskId: "L", role: "author", createdBy: "pm", now: 1 });
     registerWorker(db, { agent: "agent-l2", sessionId: "s", taskId: "L2", role: "author", createdBy: "pm", now: 2 });
     const plan = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
-      master: new Set(), swapPct: 10, agents: [{ name: "agent-l", running: false, idleMs: 9 * H, turnActive: false },
-        { name: "agent-l2", cwd: join(root, "l2"), running: false, idleMs: 9 * H, turnActive: false }] });
+      master: new Set(), swapPct: 10, agents: [{ name: "agent-l", sessionId: "s", running: false, idleMs: 9 * H, turnActive: false },
+        { name: "agent-l2", sessionId: "s", cwd: join(root, "l2"), running: false, idleMs: 9 * H, turnActive: false }] });
     const calls: string[][] = [];
     const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
       manager: async (...args) => { calls.push(args); return args[0] === "archive"
@@ -162,9 +162,21 @@ describe("disk (验收线 8)", () => {
       record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW,
     });
     expect(calls).toEqual([["archive", "agent-l"], ["archive", "agent-l2"], ["remove", "agent-l2"]]);
-    expect(r.failed.map((f) => f.agent)).toEqual(["agent-l"]);
+    // agent-l: archive failed, nothing touched; agent-l2: stopped, but the symlinked checkout is a disk debt, not a finished retire
+    expect(r.failed.map((f) => f.agent)).toEqual(["agent-l", "agent-l2"]);
     expect([existsSync(join(real, "keep")), activeWorkers(db).map((w) => w.agent)]).toEqual([true, ["agent-l"]]);
+    expect(pendingCleanups(db)).toMatchObject([{ agent: "agent-l2", entries: [{ checkout: join(root, "l2") }] }]);
     const ev = listEvents(db, { project: "p" }).find((e) => (e.data as { op?: string; agent?: string }).op === "worker_retire")!;
     expect(String((ev.data as { steps: string[] }).steps)).toContain("符号链接");
+    // retried every pass, never followed: the target stays, the debt stays, repeating is harmless
+    for (let i = 0; i < 2; i++) {
+      const again = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
+        master: new Set(), swapPct: 10, agents: [], pending: pendingCleanups(db) });
+      const rr = await runLifecycle(again, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
+        manager: async (...args) => { calls.push(args); return { ok: true }; }, git, exists: existsSync, worktreeRoot: root, agents: async () => [],
+        du: async () => 0, swapPct: async () => 0, record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW });
+      expect(rr.failed.map((f) => f.agent)).toEqual(["agent-l2"]);
+    }
+    expect([existsSync(join(real, "keep")), pendingCleanups(db).length, calls.length]).toEqual([true, 1, 3]);
   });
 });

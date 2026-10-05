@@ -1,7 +1,8 @@
 /**
  * LIFE1 registration side: `manager create --card` flags and gate (an executor without a card is refused, user agents are not,
- * names decide nothing), the ledger write the scheduler uses (`scheduler-worker-retire`, scheduler identity only for stock rows),
- * and the swap parsers behind the memory backstop.
+ * names decide nothing; only the session the create started is registered, a failed registration undoes the create), the ledger
+ * write the scheduler uses (`scheduler-worker-retire`, scheduler identity only for stock rows), and the swap parsers behind the
+ * memory backstop.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -11,7 +12,7 @@ import { activeWorkers, registerWorker } from "../src/lib/agent-lifecycle-store.
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseMeminfo, parseSwapUsage } from "../src/lib/sys-memory.js";
-import { cardGate, extractCardFlags } from "../src/manager/create-lifecycle.js";
+import { cardGate, extractCardFlags, registerCreated, type RegisterDeps } from "../src/manager/create-lifecycle.js";
 import { parseCreateArgs } from "../src/manager/create-args.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
@@ -59,8 +60,61 @@ describe("create flags and gate", () => {
   });
 });
 
+describe("registerCreated: only the session this create started, a failed registration undoes the create", () => {
+  function fake(path: string, agents: Record<string, Record<string, unknown>>) {
+    const reg = { socket: "", agents } as unknown as Registry;
+    const removed: string[] = [], saved: string[] = [];
+    const deps: RegisterDeps = { ledgerPath: path, loadRegistry: async () => reg, createdBy: async () => "agent-pm",
+      saveRegistry: async (r) => { saved.push(JSON.stringify(r.agents)); },
+      remove: async (a) => { removed.push(a); delete reg.agents[a]; return { ok: true }; } };
+    return { reg, deps, removed, saved };
+  }
+  const card = { taskId: "T1", role: "reviewer" as const };
+
+  test("a failed create (name taken by the user's agent) registers nothing and tags nothing", async () => {
+    const { db, path } = ledger();
+    const { deps, removed, saved, reg } = fake(path, { "agent-personal": { sessionId: "personal", channelId: "9" } });
+    const failed = { ok: false, error: "agent-personal 已存在" };
+    expect(await registerCreated("agent-personal", card, failed, "personal", deps)).toEqual(failed);
+    expect(await registerCreated("agent-personal", card, null, "personal", deps)).toMatchObject({ ok: false });
+    // ok but the session is the one that was already there: not this create's, refused without touching it
+    expect(await registerCreated("agent-personal", card, { ok: true, agent: "agent-personal", sessionId: "personal" }, "personal", deps))
+      .toMatchObject({ ok: false });
+    expect([activeWorkers(db), removed, saved, (reg.agents["agent-personal"] as { kind?: string }).kind]).toEqual([[], [], [], undefined]);
+  });
+
+  test("success: the new session is registered and kind=worker saved; the create's result goes back with the card", async () => {
+    const { db, path } = ledger();
+    const { deps, saved } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
+    expect(out).toMatchObject({ ok: true, agent: "agent-r", card: { taskId: "T1", role: "reviewer", registered: true } });
+    expect(activeWorkers(db).map((w) => [w.agent, w.sessionId, w.role])).toEqual([["agent-r", "new-s", "reviewer"]]);
+    expect(saved.at(-1)).toContain("\"kind\":\"worker\"");
+  });
+
+  test("ledger registration fails: the created agent is removed and the caller gets ok:false (no orphan nobody collects)", async () => {
+    const { db, path } = ledger();
+    db.exec("CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END");
+    const { deps, removed } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
+    expect(out).toMatchObject({ ok: false, rolledBack: true });
+    expect(String(out.error)).toContain("synthetic registration failure");
+    expect([removed, activeWorkers(db)]).toEqual([["agent-r"], []]);
+  });
+
+  test("a protected agent (PM) is never registered as a worker; a failed undo is reported with the manual step", async () => {
+    const { db, path } = ledger();
+    const { deps } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9", role: "pm" } });
+    deps.remove = async () => ({ ok: false, error: "tmux gone" });
+    const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
+    expect(out).toMatchObject({ ok: false, rolledBack: false });
+    expect(String(out.error)).toContain("manager remove agent-r");
+    expect(activeWorkers(db)).toEqual([]);
+  });
+});
+
 describe("ledger scheduler-worker-retire", () => {
-  const wire = (o: Record<string, unknown>) => JSON.stringify({ agent: "agent-a", taskId: "T1", role: "author", rule: "card_finished", mode: "retire",
+  const wire = (o: Record<string, unknown>) => JSON.stringify({ agent: "agent-a", sessionId: "s1", taskId: "T1", role: "author", rule: "card_finished",
     reason: "卡 T1 已 verified", idleMs: 1, bytesBefore: 9000, bytesAfter: 1000, steps: ["已归档"], ...o });
 
   test("scheduler records a retire: row closed, event carries bytes freed; repeat is harmless", async () => {
@@ -75,7 +129,8 @@ describe("ledger scheduler-worker-retire", () => {
   test("stock without a card: scheduler only; an executor may not write it; bad wire refused", async () => {
     const { deps } = ledger();
     expect(await runLedger(["scheduler-worker-retire", "--wire", wire({ taskId: null, role: "stock" })], deps("agent-x"))).toMatchObject({ ok: false });
-    expect(await runLedger(["scheduler-worker-retire", "--wire", wire({ mode: "nuke" })], deps("scheduler"))).toMatchObject({ ok: false });
+    expect(await runLedger(["scheduler-worker-retire", "--wire", wire({ pending: "nope" })], deps("scheduler"))).toMatchObject({ ok: false });
+    expect(await runLedger(["scheduler-worker-retire", "--wire", wire({ pending: [{ checkout: 3 }] })], deps("scheduler"))).toMatchObject({ ok: false });
     expect(await runLedger(["scheduler-worker-retire", "--wire", wire({ taskId: null, role: "stock" })], deps("scheduler"))).toMatchObject({ ok: true });
   });
 });

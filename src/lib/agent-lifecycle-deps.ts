@@ -4,11 +4,11 @@
  * manager children holding the pass's leases. observe only logs the plan when it changes; off does nothing.
  * `lifecycleSnapshot` is the same read-only plan for doctor's one-line summary.
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "./agent-lifecycle-config.js";
-import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { cardWorkerIndex, pendingCleanups } from "./agent-lifecycle-store.js";
 import { planLifecycle, lifecycleLine, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
 import { readActivity } from "./agent-supervisor-activity.js";
@@ -17,7 +17,7 @@ import { resolveBunPath } from "./bun-path.js";
 import { pmsByProject } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { isMasterName, readRegistryAgents, type RegistryAgent } from "./registry.js";
-import { LEND_JOURNAL_PATH, openLendJournal } from "./lend-journal.js";
+import { LEND_JOURNAL_PATH } from "./lend-journal.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
@@ -35,9 +35,10 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string
   const stageAt = last("stage"), reviewAt = last("review");
   const rows = db.query("SELECT id, project, stage, agent, extra FROM tasks").all() as { id: string; project: string; stage: string; agent: string | null; extra: string | null }[];
   const cards = rows.map((r) => {
-    let extra: Record<string, unknown> = {};
-    try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch { extra = {}; /* a malformed extra only loses the frozen flag, which then reads as not frozen */ }
-    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra.frozen === true,
+    let extra: Record<string, unknown> = {}, extraError: string | undefined;
+    // unparsable: whether the card is frozen is unknown, so the planner skips (and reports) it instead of reading "not frozen"
+    try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch (e) { extraError = (e as Error).message; }
+    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true, ...(extraError ? { extraError } : {}),
       stageAt: stageAt.get(r.id) ?? null, reviewAt: reviewAt.get(r.id) ?? null };
   });
   return { cards, pms: new Set([...pmsByProject(db).values()].flat()) };
@@ -61,17 +62,26 @@ async function agentFacts(now: number): Promise<AgentFacts[]> {
   })));
 }
 
-/** Agents the lend journal records as order workers: the lend service retires those (lend-work-retention.ts). */
-function lendAgents(path = LEND_JOURNAL_PATH): Set<string> {
+/**
+ * Agents the lend journal records as order workers: the lend service retires those (lend-work-retention.ts). Read through a
+ * read-only connection (no WAL switch, no migration: observe / doctor must not write); no journal or no table = no lend workers;
+ * any read error throws, so the pass plans nothing rather than treating every lend worker as unprotected.
+ */
+export function lendAgents(path = LEND_JOURNAL_PATH): Set<string> {
   if (!existsSync(path)) return new Set();
-  const rows = openLendJournal(path).query("SELECT DISTINCT agent FROM lend_orders WHERE agent IS NOT NULL").all() as { agent: string }[];
-  return new Set(rows.map((r) => r.agent));
+  const db = new Database(path, { readonly: true });
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_orders'").get()) return new Set();
+    const rows = db.query("SELECT DISTINCT agent FROM lend_orders WHERE agent IS NOT NULL").all() as { agent: string }[];
+    return new Set(rows.map((r) => r.agent));
+  } finally { db.close(); }
 }
 
 export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = DEFAULT_LIFECYCLE, now = Date.now()): Promise<Plan> {
   const [agents, memory] = await Promise.all([agentFacts(now), readMemory()]);
   const master = new Set(agents.filter((a) => isMasterName(a.name)).map((a) => a.name));
-  return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master, swapPct: memory.swapPct });
+  return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master,
+    swapPct: memory.swapPct, pending: pendingCleanups(db) });
 }
 
 async function du(paths: string[]): Promise<number | null> {
@@ -96,10 +106,11 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     if (e instanceof SchedulerStopped) throw e;
     return [{ taskId: "lifecycle", error: (e as Error).message }];
   }
-  const report = JSON.stringify({ a: plan.actions.map((x) => [x.agent, x.rule, x.mode]), m: plan.memory.map((x) => x.agent), f: plan.frozen, k: plan.kept });
+  const report = JSON.stringify({ a: plan.actions.map((x) => [x.agent, x.rule]), m: plan.memory.map((x) => x.agent), c: plan.cleanups.map((x) => x.agent), f: plan.frozen, k: plan.kept });
   if (report !== lastObserved) {
     lastObserved = report;
-    console.log(`[lifecycle] ${lifecycleLine(plan, policy.mode)}；应收 ${plan.actions.map((x) => `${x.agent}(${x.rule}/${x.mode}：${x.reason})`).join("、") || "无"}` +
+    console.log(`[lifecycle] ${lifecycleLine(plan, policy.mode)}；应收 ${plan.actions.map((x) => `${x.agent}(${x.rule}：${x.reason})`).join("、") || "无"}` +
+      `${plan.cleanups.length ? `；待补清 ${plan.cleanups.map((x) => `${x.agent}（${x.entries?.map((e) => e.checkout).join(" ")}）`).join("、")}` : ""}` +
       `${plan.memory.length ? `；内存候选 ${plan.memory.map((x) => x.agent).join("、")}` : ""}${plan.frozen.length ? `；冻结卡不收 ${plan.frozen.map((x) => `${x.agent}@${x.taskId}`).join("、")}` : ""}` +
       `${plan.kept.length ? `；记录不一致保留 ${plan.kept.map((x) => `${x.agent}（${x.reason}）`).join("、")}` : ""}`);
   }
@@ -119,6 +130,6 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
       if (w.ok !== true) throw new Error(`收回记录没记上：${String(w.error)}`);
     },
   });
-  for (const d of result.done) console.log(`[lifecycle] ${d.mode === "retire" ? "收" : "停"} ${d.agent}（${d.rule}）${d.freed !== null ? `，腾出 ${Math.round(d.freed / 1048576)}MB` : ""}`);
+  for (const d of result.done) console.log(`[lifecycle] 收 ${d.agent}（${d.rule}）${d.freed !== null ? `，腾出 ${Math.round(d.freed / 1048576)}MB` : ""}`);
   return result.failed.map((f) => ({ taskId: `lifecycle ${f.agent}`, error: f.error }));
 }

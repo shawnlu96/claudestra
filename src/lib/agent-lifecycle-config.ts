@@ -11,7 +11,7 @@ export interface LifecyclePolicy {
   reviewerAfterReviewMin: number;
   /** A reviewer idle this long is collected whatever its card's stage. */
   reviewerIdleMin: number;
-  /** An author idle this long on a card in merge / live / blocked is parked (stopped, resumable). */
+  /** An author idle this long on a card in merge / live / blocked is retired (removed with its own disk; a later round resumes or creates a fresh one). */
   authorIdleMin: number;
   /** An unregistered worker-looking agent idle this long on a finished or unknown card is collected (stock backfill). */
   stockIdleMin: number;

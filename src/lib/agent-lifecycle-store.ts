@@ -4,6 +4,9 @@
  * which PM-tool and start_node agents do not have; scheduler-bound sessions keep retiring through scheduler-retire.ts.
  * The table comes from the ledger migrations (agent-lifecycle-schema.ts); a reader on a ledger without it sees nothing registered.
  * Retirement marks rows retired and writes one ledger event per agent (the card's project; an unknown card's row is the record).
+ * A retirement whose disk cleanup did not finish (dirty / held / symlinked checkout, a temp folder that could not go) keeps its row
+ * active with `reason` = CLEANUP_PENDING + JSON of what is left: such a row is no longer an agent (the index skips it, a same-name
+ * create does not close it) but a disk debt the lifecycle retries every pass (pendingCleanups) and doctor counts.
  * `cardWorkerIndex` is the one reader of "which card does this agent work for": the lifecycle, the sidebar list (LIFE2) and the
  * collaboration view all import it instead of reading these tables themselves.
  */
@@ -29,14 +32,39 @@ export interface WorkerRegistration {
 
 const hasTable = (db: Database, name: string): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
-/** No table (a ledger not yet migrated, opened read-only) = nothing registered. */
+const CLEANUP_PENDING = "cleanup_pending:";
+const NOT_PENDING = `(reason IS NULL OR reason NOT LIKE '${CLEANUP_PENDING}%')`;
+
+/** No table (a ledger not yet migrated, opened read-only) = nothing registered. Rows that are only a pending cleanup are not agents. */
 export function activeWorkers(db: Database): WorkerRegistration[] {
   if (!hasTable(db, "worker_agents")) return [];
-  return db.query("SELECT * FROM worker_agents WHERE state = 'active' ORDER BY createdAt").all() as WorkerRegistration[];
+  return db.query(`SELECT * FROM worker_agents WHERE state = 'active' AND ${NOT_PENDING} ORDER BY createdAt`).all() as WorkerRegistration[];
+}
+
+/** One checkout of a collected agent still on disk, and the Claude temp folder that may only go after it. */
+export interface CleanupEntry { checkout: string; tmp: string | null }
+export interface PendingCleanup { agent: string; sessionId: string; taskId: string | null; role: WorkerRole; createdAt: number; entries: CleanupEntry[] }
+
+const isEntry = (v: unknown): v is CleanupEntry => !!v && typeof v === "object" && typeof (v as CleanupEntry).checkout === "string"
+  && ((v as CleanupEntry).tmp === null || typeof (v as CleanupEntry).tmp === "string");
+
+/** Collected agents whose disk cleanup is still owed. A marker that does not parse is reported with no entries (never guessed). */
+export function pendingCleanups(db: Database): (PendingCleanup & { error?: string })[] {
+  if (!hasTable(db, "worker_agents")) return [];
+  const rows = db.query(`SELECT * FROM worker_agents WHERE state = 'active' AND reason LIKE '${CLEANUP_PENDING}%' ORDER BY createdAt`).all() as WorkerRegistration[];
+  return rows.map((r) => {
+    const base = { agent: r.agent, sessionId: r.sessionId, taskId: r.taskId, role: r.role, createdAt: r.createdAt };
+    try {
+      const entries = JSON.parse(r.reason!.slice(CLEANUP_PENDING.length)) as unknown;
+      if (Array.isArray(entries) && entries.every(isEntry)) return { ...base, entries };
+    } catch { /* reported below */ }
+    return { ...base, entries: [], error: `待补清记录读不懂：${r.reason!.slice(0, 120)}` };
+  });
 }
 
 type CardWorkerSource = "worker_agents" | "scheduler_sessions" | "tasks.agent";
-interface CardWorkerLink { taskId: string | null; role: WorkerRole; source: CardWorkerSource }
+/** sessionId: the session the record was made for (registration / binding); absent for tasks.agent, which names no session. */
+interface CardWorkerLink { taskId: string | null; role: WorkerRole; source: CardWorkerSource; sessionId?: string }
 /** The primary link (registration, then scheduler binding, then an unfinished card naming it as executor) plus every link. */
 export interface CardWorker extends CardWorkerLink { links: CardWorkerLink[] }
 
@@ -45,24 +73,25 @@ const SOURCE_RANK: Record<CardWorkerSource, number> = { worker_agents: 0, schedu
 
 /** Pure half of cardWorkerIndex (tests feed rows directly). `executors` = cards' tasks.agent with the card's stage. */
 export function buildCardWorkerIndex(rows: {
-  registrations: readonly Pick<WorkerRegistration, "agent" | "taskId" | "role">[];
-  bound: readonly { agent: string; taskId: string; role: "author" | "reviewer" }[];
+  registrations: readonly (Pick<WorkerRegistration, "agent" | "taskId" | "role"> & { sessionId?: string })[];
+  bound: readonly { agent: string; taskId: string; role: "author" | "reviewer"; sessionId?: string }[];
   executors: readonly { agent: string; taskId: string; stage: string }[];
 }): Map<string, CardWorker> {
   const all = new Map<string, (CardWorkerLink & { open: boolean })[]>();
   const add = (agent: string, l: CardWorkerLink, open = true) => {
     if (!agent) return;
     const xs = all.get(agent) ?? [];
-    if (!xs.some((x) => x.taskId === l.taskId && x.source === l.source)) xs.push({ ...l, open });
+    if (!xs.some((x) => x.taskId === l.taskId && x.source === l.source && x.sessionId === l.sessionId)) xs.push({ ...l, open });
     all.set(agent, xs);
   };
-  for (const r of rows.registrations) add(r.agent, { taskId: r.taskId, role: r.role, source: "worker_agents" });
-  for (const b of rows.bound) add(b.agent, { taskId: b.taskId, role: b.role, source: "scheduler_sessions" });
+  const sid = (s: string | undefined) => (s ? { sessionId: s } : {});
+  for (const r of rows.registrations) add(r.agent, { taskId: r.taskId, role: r.role, source: "worker_agents", ...sid(r.sessionId) });
+  for (const b of rows.bound) add(b.agent, { taskId: b.taskId, role: b.role, source: "scheduler_sessions", ...sid(b.sessionId) });
   for (const e of rows.executors) add(e.agent, { taskId: e.taskId, role: "author", source: "tasks.agent" }, !FINISHED.includes(e.stage));
   const out = new Map<string, CardWorker>();
   for (const [agent, xs] of all) {
     const sorted = [...xs].sort((a, b) => SOURCE_RANK[a.source] - SOURCE_RANK[b.source] || Number(b.open) - Number(a.open));
-    const links = sorted.map(({ taskId, role, source }) => ({ taskId, role, source }));
+    const links = sorted.map(({ open: _open, ...l }) => l);
     out.set(agent, { ...links[0], links });
   }
   return out;
@@ -71,10 +100,13 @@ export function buildCardWorkerIndex(rows: {
 /**
  * The one reader: agent → the card it works for, merged from worker_agents (active rows), scheduler_sessions (not retired) and
  * tasks.agent. An agent absent from the map has no ledger record and is the user's own agent. Read-only; missing tables read as empty.
+ * Links carry the session they were recorded for: a reader acting on an agent must check its current session against them (the
+ * name may have been reused after a manual remove).
  */
 export function cardWorkerIndex(db: Database): Map<string, CardWorker> {
   const bound = hasTable(db, "scheduler_sessions")
-    ? db.query("SELECT agent, taskId, role FROM scheduler_sessions WHERE state != 'retired'").all() as { agent: string; taskId: string; role: "author" | "reviewer" }[] : [];
+    ? db.query("SELECT agent, taskId, role, sessionId FROM scheduler_sessions WHERE state != 'retired'").all() as
+      { agent: string; taskId: string; role: "author" | "reviewer"; sessionId: string }[] : [];
   const executors = db.query("SELECT agent, id AS taskId, stage FROM tasks WHERE agent IS NOT NULL AND agent != ''").all() as { agent: string; taskId: string; stage: string }[];
   return buildCardWorkerIndex({ registrations: activeWorkers(db), bound, executors });
 }
@@ -93,7 +125,7 @@ export function registerWorker(db: Database, input: RegisterInput): WorkerRegist
     const task = getTask(db, input.taskId);
     if (!task) throw new LedgerError("not_found", checkCard(db, input.taskId) ?? "");
     const now = input.now ?? Date.now();
-    db.prepare("UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = '同名 agent 重建' WHERE agent = ? AND state = 'active'").run(now, input.agent);
+    db.prepare(`UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = '同名 agent 重建' WHERE agent = ? AND state = 'active' AND ${NOT_PENDING}`).run(now, input.agent);
     db.prepare(`INSERT OR REPLACE INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state) VALUES (?, ?, ?, ?, ?, ?, 'active')`)
       .run(input.agent, input.sessionId, task.id, input.role, input.createdBy, now);
     insertEvent(db, { actor: input.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler", text: `登记 ${input.role} agent ${input.agent}`,
@@ -103,31 +135,36 @@ export function registerWorker(db: Database, input: RegisterInput): WorkerRegist
 }
 
 export interface RetireRecord {
-  agent: string; taskId: string | null; role: WorkerRole | "stock"; rule: string; mode: "retire" | "park"; reason: string;
+  agent: string; sessionId: string | null; taskId: string | null; role: WorkerRole | "stock"; rule: string; reason: string;
   idleMs: number | null; bytesBefore: number | null; bytesAfter: number | null; steps: string[]; now: number;
+  /** what is still on disk after this attempt; empty = cleanup finished */
+  pending: CleanupEntry[];
+  /** a retry of an earlier pending cleanup (the agent itself is already gone) */
+  retry: boolean;
 }
 
 /**
- * Idempotent: a park keeps the row active (the agent may be resumed for the same card), a retire closes it; an agent with no
- * active row (stock) gets a retired row so the ledger keeps a record even when its card is unknown. The event goes to the card's
- * project when the card is known.
+ * Idempotent. Cleanup finished: the agent's row is closed (an agent with no row, stock, gets a retired row so the ledger keeps a
+ * record even when its card is unknown). Cleanup not finished: the row stays active as a pending cleanup with what is left, so the
+ * next pass retries it. The event goes to the card's project when the card is known.
  */
 export function recordWorkerRetire(db: Database, actor: string, r: RetireRecord): void {
   tx(db, () => {
     const freed = r.bytesBefore !== null && r.bytesAfter !== null ? Math.max(0, r.bytesBefore - r.bytesAfter) : null;
-    const reason = `${r.rule}: ${r.reason}`.slice(0, 300);
-    if (r.mode === "retire") {
-      const hit = db.prepare("UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = ? WHERE agent = ? AND state = 'active'").run(r.now, reason, r.agent);
-      if (hit.changes === 0) {
-        db.prepare(`INSERT OR IGNORE INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state, retiredAt, reason)
-          VALUES (?, '', ?, 'other', 'lifecycle-stock', ?, 'retired', ?, ?)`).run(r.agent, r.taskId, r.now, r.now, reason);
-      }
+    const done = r.pending.length === 0;
+    const reason = done ? `${r.rule}: ${r.reason}`.slice(0, 300) : CLEANUP_PENDING + JSON.stringify(r.pending);
+    const which = r.retry ? `reason LIKE '${CLEANUP_PENDING}%'` : NOT_PENDING;
+    const hit = db.prepare(`UPDATE worker_agents SET state = ?, retiredAt = ?, reason = ? WHERE agent = ? AND state = 'active' AND ${which}`)
+      .run(done ? "retired" : "active", done ? r.now : null, reason, r.agent);
+    if (hit.changes === 0 && !r.retry) {
+      db.prepare(`INSERT OR IGNORE INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state, retiredAt, reason)
+        VALUES (?, ?, ?, 'other', 'lifecycle-stock', ?, ?, ?, ?)`).run(r.agent, r.sessionId ?? "", r.taskId, r.now, done ? "retired" : "active", done ? r.now : null, reason);
     }
     const task = r.taskId ? getTask(db, r.taskId) : null;
     if (!task) return;
     insertEvent(db, { actor, now: r.now }, { project: task.project, target: task.id, kind: "scheduler",
-      text: `${r.mode === "retire" ? "收" : "停"} ${r.role} agent ${r.agent}：${r.reason}`.slice(0, 400),
-      data: { op: "worker_retire", agent: r.agent, role: r.role, rule: r.rule, mode: r.mode, reason: r.reason, idleMs: r.idleMs,
-        bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, bytesFreed: freed, steps: r.steps } }, false);
+      text: `${r.retry ? "补清" : "收"} ${r.role} agent ${r.agent}：${r.reason}${done ? "" : `；还剩 ${r.pending.length} 处没清，下轮再试`}`.slice(0, 400),
+      data: { op: "worker_retire", agent: r.agent, sessionId: r.sessionId, role: r.role, rule: r.rule, reason: r.reason, idleMs: r.idleMs, retry: r.retry,
+        bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, bytesFreed: freed, steps: r.steps, pending: r.pending } }, false);
   });
 }
