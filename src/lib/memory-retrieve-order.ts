@@ -103,11 +103,8 @@ function record(db: Database, task: LedgerTask, key: string, text: string, data:
   }
 }
 
-/** 算一次并登记（没有候选就不登记、返回 null）；已登记过直接返回那条 */
-function registerRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts = {}, prepared = false): LedgerEvent | null {
-  const key = `${memoryDedupKey(task, head, kind)}:${prepared ? "prepared" : "fallback"}`;
-  const prior = getEventByDedup(db, key);
-  if (prior) return prior;
+/** 只算排名数据，预览 cache miss 与真实领取共用同一套排名规则。 */
+function retrievalData(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts) {
   const now = opts.now ?? Date.now();
   const { candidates, ranked } = retrieveMemories(db, task, kind, head, { ...opts, now });
   if (!candidates.length) return null;
@@ -116,10 +113,19 @@ function registerRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind
     ageDays: Math.max(0, Math.floor((now - s.memory.createdAt) / DAY_MS)),
   }));
   const used = ["graph", "file", ...(opts.vector ? ["vector"] : [])];
-  return record(db, task, key, `项目记忆排名：${items.length} 条（${used.join(" + ")}）`, {
+  return {
     op: "memory_rank", order: kind, specRev: task.specRev, head, routes: used, items,
     dropped: ranked.dropped.slice(0, DROPPED_MAX).map((d) => ({ id: d.id, score: Number(d.score.toFixed(6)), reason: dropText(d.reason) })),
-  }, now);
+  };
+}
+
+/** 算一次并登记（没有候选就不登记、返回 null）；仅真实领取的准备 / 同步降级入口调用。 */
+function registerRetrieval(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts = {}, prepared = false): LedgerEvent | null {
+  const key = `${memoryDedupKey(task, head, kind)}:${prepared ? "prepared" : "fallback"}`;
+  const prior = getEventByDedup(db, key);
+  if (prior) return prior;
+  const data = retrievalData(db, task, kind, head, opts);
+  return data ? record(db, task, key, `项目记忆排名：${data.items.length} 条（${data.routes.join(" + ")}）`, data, opts.now ?? Date.now()) : null;
 }
 
 // ── 异步一半：语义路 ──
@@ -250,12 +256,19 @@ function sectionOf(kind: MemoryOrderKind, lines: readonly string[], bytes: numbe
   return [HEADER[kind], ...lines.map((l) => clipWire(l, each)), FOOTER].join("\n");
 }
 
-/** 优先取异步排名；旧的同步降级结果不会遮住三路结果。 */
-function rankedEvent(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts): LedgerEvent | null {
-  return getEventByDedup(db, `${memoryDedupKey(task, head, kind)}:prepared`) ?? registerRetrieval(db, task, kind, head, opts);
+type RetrievalRanking = Pick<LedgerEvent, "data"> & { seq?: number };
+
+/** 优先取异步排名；预览 cache miss 只在内存算，不开写连接或事务。 */
+function rankedEvent(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, opts: RetrieveOpts, persist = false): RetrievalRanking | null {
+  const key = memoryDedupKey(task, head, kind);
+  const cached = getEventByDedup(db, `${key}:prepared`) ?? getEventByDedup(db, `${key}:fallback`);
+  if (cached) return cached;
+  if (persist) return registerRetrieval(db, task, kind, head, opts);
+  const data = retrievalData(db, task, kind, head, opts);
+  return data ? { data } : null;
 }
 
-function liveLines(db: Database, e: LedgerEvent | null): { item: RetrievedItem; line: string }[] {
+function liveLines(db: Database, e: RetrievalRanking | null): { item: RetrievedItem; line: string }[] {
   const items = Array.isArray(e?.data.items) ? e.data.items as RetrievedItem[] : [];
   return items.flatMap((item) => {
     const line = lineOf(db, item);
@@ -271,9 +284,9 @@ export function memorySection(db: Database, task: LedgerTask, kind: MemoryOrderK
 }
 
 /** 事件不可改写：同一实际报文去重，预算 / 状态改变时另记一条，保留过去确实推出过的记录。 */
-function recordInjection(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, e: LedgerEvent | null,
+function recordInjection(db: Database, task: LedgerTask, kind: MemoryOrderKind, head: string | null, e: RetrievalRanking | null,
   ids: string[], wire: unknown, now: number): void {
-  if (!e) return;
+  if (e?.seq === undefined) return;
   const base = memoryDedupKey(task, head, kind);
   const fingerprint = createHash("sha256").update(JSON.stringify(wire)).digest("hex");
   const last = db.query(`SELECT dedupKey FROM events WHERE target = ? AND kind = 'scheduler'
@@ -295,7 +308,7 @@ export function withMemory<W extends { inputs: string[] }>(db: Database | null |
   head: string | null, wire: W, opts: RetrieveOpts = {}): W {
   if (!db) return wire;
   try {
-    const e = rankedEvent(db, task, kind, head, opts);
+    const e = rankedEvent(db, task, kind, head, opts, opts.recordInjection);
     const lines = liveLines(db, e);
     let result = wire, ids: string[] = [];
     for (let n = Math.min(MEMORY_CAPS[kind].count, lines.length); wire.inputs.length < WIRE_LIMITS.items && n > 0; n--) {
