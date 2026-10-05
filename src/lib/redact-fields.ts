@@ -6,7 +6,9 @@
  * ctxTokens、maxTokens、tokenCount 这类不以敏感词结尾的字段不动。纯函数，tests/dispatch-order.test.ts。
  */
 
-const SENSITIVE = String.raw`(?:[\w.-]*?(?:token|password|passwd|secret|api[_-]?key|apikey|authorization|credential|private[_-]?key)|key)`;
+/** 敏感字段名的词尾；dispatch-gate.ts 在最终正文上判「字段名 + 分隔符」也用这张表 */
+export const SENSITIVE_NAMES = String.raw`token|password|passwd|secret|api[_-]?key|apikey|authorization|credential|private[_-]?key`;
+const SENSITIVE = String.raw`(?:[\w.-]*?(?:${SENSITIVE_NAMES})|key)`;
 /** 字段在行首或分隔符之后，可带引号，后面跟 : 或 = */
 const KEY_RE = new RegExp(String.raw`(^|[\s{,;(\[?&])(["']?)(${SENSITIVE})\2\s*([:=])[ \t]*`, "gi");
 const FLAG_RE = /(--[\w-]*?(?:token|password|secret|api-key|apikey))(\s+|=)(?!\[已脱敏)(\S+)/gi;

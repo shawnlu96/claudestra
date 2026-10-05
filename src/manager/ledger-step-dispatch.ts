@@ -7,7 +7,7 @@
  * 通道：本机 agent 走 bridge 的 route_to_agent（同 send_to_agent）；<x>@<peer> 只发给目录里登记的对方项目 PM（POST 对方 messages）。
  * tests/ledger-step-dispatch.test.ts。
  */
-import { buildDispatchOrder, isDispatchStep, DISPATCHABLE_STEPS } from "../lib/dispatch-order.js";
+import { buildDispatchOrder, isDispatchStep, DispatchBlocked, DISPATCHABLE_STEPS, type DispatchOrder } from "../lib/dispatch-order.js";
 import {
   ackEvent, getDispatch, insertDispatch, listDispatches, markDispatch, noteAttempt, sweepAction, type DispatchRow,
 } from "../lib/ledger-dispatch-log.js";
@@ -81,6 +81,20 @@ function roundReport(events: readonly LedgerEvent[]): string | null {
   return [head, r.text, ...(md ? [md] : []), ...notes].filter((s) => s.trim()).join("\n\n");
 }
 
+/**
+ * 生成单子。发 peer 的退到只剩任务号和模板仍过不了最终检测（DispatchBlocked）：记一行原因、报错给 PM——
+ * 不发，也不退回去发原文；日志和报错都只有原因，不带正文
+ */
+function orderOrFail(make: () => DispatchOrder): DispatchOrder {
+  try {
+    return make();
+  } catch (e) {
+    if (!(e instanceof DispatchBlocked)) throw e;
+    console.error(`⚠️ 派单没发：${e.message}`);
+    throw new LedgerError("invalid", e.message);
+  }
+}
+
 /** 执行者 → 通道与收件人；peer 没登记对方项目 PM 就拒 */
 function channelFor(c: LedgerCli, task: LedgerTask, executor: string, kind: "agent" | "peer"): Pick<DispatchRow, "channel" | "target"> {
   if (kind === "agent") return { channel: "local", target: executor };
@@ -118,27 +132,31 @@ async function stepDispatch(c: LedgerCli): Promise<Result> {
   const now = c.deps.now();
   const round = intFlag(c.p, "round") ?? task.round;
   let events = listEvents(c.db, { project: task.project, target: task.id });
+  const review = step === "review" || step === "final_review";
   // 去重先于派人：同一张卡、同一步、同一个执行者、同一轮重跑，原样返回上一次，不重置步骤结果、不再发
   const key = stepDispatchKey(c, events, task.id, step, to, round);
   if ("duplicate" in key) return { ok: true, duplicate: true, event: key.duplicate, log: getDispatch(c.db, key.duplicate.seq) };
-  assignStep(c.db, { actor: c.deps.actor, now }, { taskId: task.id, step, executor: to, executorKind: kind, round });
-  events = listEvents(c.db, { project: task.project, target: task.id });
   const peer = kind === "peer" ? stepPeer({ executor: to, executorKind: "peer" }) : null;
   const accepted = !peer || events.some((e) => e.kind === "accept" && e.data.peer === peer);
-  const specText = readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir));
-  const review = step === "review" || step === "final_review";
+  const specPath = specPathFor(task, getMeta(c.db, task.project).docsDir);
+  const specText = readTextSoft(specPath);
+  const orderOf = (dispatchId: number) => buildDispatchOrder({
+    task: { id: task.id, title: task.title, pr: task.pr, headSHA: task.headSHA }, step, dispatchId, round,
+    toPeer: route.channel === "peer", accepted, spec: specText, specPath, report: step === "fix" || review ? roundReport(events) : null,
+  });
+  // 先试生成一次：发不出去（DispatchBlocked 只看任务号和模板，与派单编号、报告无关）就在派人、记事件之前报错
+  orderOrFail(() => orderOf(0));
+  assignStep(c.db, { actor: c.deps.actor, now }, { taskId: task.id, step, executor: to, executorKind: kind, round });
+  events = listEvents(c.db, { project: task.project, target: task.id });
   // 审查类派单沿用派审事件的字段（reviewer / round / head / policy）：合并门与「下一轮是什么」按最近一条 dispatch 判（ledger-handler.ts）
   const reviewData = review ? { reviewer: step === "final_review" ? "adversarial" : "regular", policy: strictPolicy(reviewPolicy(specText), events) } : {};
   const data = { step, to, channel: route.channel, target: route.target, round, head: task.headSHA, ...reviewData };
   const ev = appendEvent(c.db, { ...c.ctx(), now, dedupKey: key.key }, { project: task.project, target: task.id, kind: "dispatch", text: `派单：${step} → ${to}`, data });
-  const order = buildDispatchOrder({
-    task: { id: task.id, title: task.title, pr: task.pr, headSHA: task.headSHA }, step, dispatchId: ev.event.seq, round,
-    toPeer: route.channel === "peer", accepted, spec: specText, report: step === "fix" || review ? roundReport(events) : null,
-  });
+  const order = orderOrFail(() => orderOf(ev.event.seq));
   insertDispatch(c.db, { seq: ev.event.seq, taskId: task.id, project: task.project, step, round, executor: to, ...route, text: order.text, createdAt: now });
   const sent = await sendOf(c)({ ...route, seq: ev.event.seq, round }, order.text);
   noteAttempt(c.db, ev.event.seq, c.deps.now(), sent.ok, sent.error ?? null);
-  return { ok: true, event: ev.event, delivered: sent.ok, ...(sent.error ? { error: sent.error } : {}), redactions: order.redactions, text: order.text };
+  return { ok: true, event: ev.event, delivered: sent.ok, ...(sent.error ? { error: sent.error } : {}), redactions: order.redactions, refsOnly: order.refsOnly, text: order.text };
 }
 
 /** 提醒 PM 的话：只用台账里的字段拼，不带单子正文 */

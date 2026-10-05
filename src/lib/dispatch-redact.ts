@@ -10,7 +10,8 @@ export const REDACTED = { secret: "[已脱敏:密钥]", addr: "[已脱敏:内网
 
 type Rule = { re: RegExp; to: string | ((m: string, ...g: string[]) => string) };
 
-const RULES: readonly Rule[] = [
+/** 密钥形状的几条：dispatch-gate.ts 拿同一组在最终正文上再判一次（secretShapeHit），所以单列 */
+const SECRET_RULES: readonly Rule[] = [
   // 按字段名遮整段值（JSON / YAML / key=value / --flag，跨行也算）在 redact-fields.ts，先跑；这里补字段名之外的写法
   { re: /\b(Bearer\s+)(?!\[已脱敏)[A-Za-z0-9._~+/=-]{8,}/gi, to: (_m, p) => `${p}${REDACTED.secret}` },
   // 常见前缀的密钥
@@ -20,6 +21,13 @@ const RULES: readonly Rule[] = [
   // 长串随机值：十六进制 ≥ 48 位（git sha 最长 40 位，不受影响）、base64url ≥ 32 位且大小写字母和数字都有
   { re: /\b[0-9a-f]{48,}\b/gi, to: REDACTED.secret },
   { re: /(?<![\w/.-])(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{32,}(?![\w/.-])/g, to: REDACTED.secret },
+];
+
+/** 正文里还有没遮掉的密钥形状（search 不看 /g 的 lastIndex，反复调用结果一样） */
+export const secretShapeHit = (s: string): boolean => SECRET_RULES.some((r) => s.search(r.re) >= 0);
+
+const RULES: readonly Rule[] = [
+  ...SECRET_RULES,
   // 内网地址：Tailscale 100.64/10、10/8、172.16/12、192.168/16、链路本地，以及内部域名
   { re: /\b(?:100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168|169\.254)\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b/g, to: REDACTED.addr },
   { re: /\b(?:fd[0-9a-f]{2}|fe80):[0-9a-f:]{2,}\b/gi, to: REDACTED.addr },

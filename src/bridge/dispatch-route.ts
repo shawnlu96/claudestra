@@ -22,8 +22,14 @@ export interface DispatchRouteDeps {
 }
 
 type Reply = { result: Record<string, unknown> } | { error: string };
+type DispatchMsg = { requestId?: unknown; targetName?: unknown; text?: unknown; dedup?: unknown };
 
-export async function dispatchToAgent(msg: { targetName?: unknown; text?: unknown; dedup?: unknown }, ws: ServerWebSocket<unknown>, d: DispatchRouteDeps): Promise<Reply> {
+/** bridge.ts 的 ws 分支（动态 import，一行调用）：回 {type:"response", requestId, result | error} 的 JSON */
+export async function dispatchWsResponse(msg: DispatchMsg, ws: ServerWebSocket<unknown>, d: DispatchRouteDeps): Promise<string> {
+  return JSON.stringify({ type: "response", requestId: msg.requestId, ...(await dispatchToAgent(msg, ws, d)) });
+}
+
+export async function dispatchToAgent(msg: DispatchMsg, ws: ServerWebSocket<unknown>, d: DispatchRouteDeps): Promise<Reply> {
   const name = typeof msg.targetName === "string" ? msg.targetName : "";
   if (!LOCAL_NAME_RE.test(name)) return { error: `本机派单只收本机 agent 名（不带 @、不以 peer: 开头），收到 ${JSON.stringify(name.slice(0, 80))}` };
   const channelId = d.channelOf ? d.channelOf(name) : readRegistryAgentsSync().find((a) => a.name === name)?.channelId;

@@ -3,7 +3,7 @@
  * 修的单子附本轮报告、常设授权、注入头认出「回报」
  */
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { getMeta, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, deliver, moveStage, recordReview, setMeta } from "../src/lib/ledger-write.js";
 import { recordAccept } from "../src/lib/ledger-steps-write.js";
@@ -14,7 +14,7 @@ import { isTaskDelegatedToPeer } from "../src/lib/peer-delegated.js";
 import { checkAcceptAsk } from "../src/manager/peer-ledger-cli.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { sendKeyOf } from "../src/manager/ledger-step-dispatch.js";
-import { dispatchToAgent } from "../src/bridge/dispatch-route.js";
+import { dispatchToAgent, dispatchWsResponse } from "../src/bridge/dispatch-route.js";
 import { withDeliveryDedup } from "../src/bridge/api-dedup.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
@@ -233,6 +233,8 @@ describe("复审修复（T48 round 1）", () => {
     for (const name of ["agent-x@Shawn", "peer:Shawn.agent-x"]) {
       expect(await dispatchToAgent({ targetName: name, text: "x" }, {} as never, deps)).toMatchObject({ error: expect.stringContaining("本机派单只收本机 agent 名") });
     }
+    // bridge.ts 的 ws 分支：同一个结果包成 {type:"response", requestId}
+    expect(JSON.parse(await dispatchWsResponse({ requestId: "r1", targetName: "x@Shawn", text: "x" }, {} as never, deps))).toMatchObject({ type: "response", requestId: "r1" });
     expect(delivered).toBe(0);
   });
 
@@ -280,5 +282,47 @@ describe("复审修复（T48 round 1）", () => {
     expect(sent.length).toBe(3);
     const explicit = await run("agent-pm", "dispatch", "T1", "--step", "restate", "--to", "agent-exec", "--dedup", "k1");
     expect((await run("agent-pm", "dispatch", "T1", "--step", "write", "--to", "agent-exec", "--dedup", "k1")).event.seq).toBe(explicit.event.seq);
+  });
+});
+
+describe("发 peer 的最终检测（T48 方案 D）", () => {
+  const TOKEN = "a71f92b770352ec96e3670a9f9e27dcb";
+  test("报告带敏感字段：发出去、记进投递行（重发用）的都是只发引用的那份，结果带 refsOnly", async () => {
+    await run("agent-pm", "team-set", "--peer-pm", "Shawn=agent-claudestra-dev");
+    recordAccept(db, { actor: "peer:Shawn", now: 2 }, { taskId: "T1", peer: "Shawn" });
+    moveStage(db, { actor: "owner", now: 3 }, { taskId: "T1", from: "spec", to: "restate" });
+    moveStage(db, { actor: "owner", now: 4 }, { taskId: "T1", from: "restate", to: "build" });
+    deliver(db, { actor: "agent-exec", now: 5 }, { taskId: "T1", headSHA: "abc1234", moveFrom: "build" });
+    recordReview(db, { actor: "agent-rev", now: 6 }, { taskId: "T1", reviewer: "agent-rev", verdict: "changes", p0: 0, p1: 1, p2: 0, text: `{"token": [  \n  "${TOKEN}"\n]}` });
+    const r = await run("agent-pm", "dispatch", "T1", "--step", "fix", "--to", "agent-codex@Shawn", "--kind", "peer");
+    expect(r.refsOnly).toBe(true);
+    expect(sent.at(-1)!.text).toBe(r.text);
+    expect(getDispatch(db, r.event.seq)!.text).toBe(r.text);
+    expect(r.text).not.toContain(TOKEN);
+    expect(r.text).toContain("参考资料含敏感内容，已改为只发引用");
+  });
+
+  test("只剩任务号和模板仍命中：报错给 PM、记一行原因（不带正文），不派人、不记事件、不发", async () => {
+    createTask(db, { actor: "owner", now: 1 }, { project: P, id: "token=T9", title: "t9", kind: "code", agent: "agent-exec", branch: "task/t9" });
+    await run("agent-pm", "team-set", "--peer-pm", "Shawn=agent-claudestra-dev");
+    const logged: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...a: unknown[]) => void logged.push(a.join(" ")));
+    let r: Record<string, any>;
+    try {
+      r = await run("agent-pm", "dispatch", "token=T9", "--step", "write", "--to", "agent-codex@Shawn", "--kind", "peer");
+    } finally {
+      spy.mockRestore();
+    }
+    const [code, error] = [r.code, String(r.error)];
+    expect(code).toBe("invalid");
+    expect(error).toContain("只剩任务号和模板仍过不了最终检测（命中：field）");
+    const lines = logged.filter((l) => l.includes("派单没发"));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).not.toContain("token=T9");
+    expect(sent).toEqual([]);
+    expect(listDispatches(db)).toEqual([]);
+    expect(listEvents(db, { project: P, target: "token=T9" }).filter((e) => e.kind === "dispatch" || e.kind === "step")).toEqual([]);
+    const steps = await run("agent-pm", "steps", "token=T9");
+    expect(steps.steps.filter((s: any) => s.step === "write" && !s.derived)).toEqual([]);
   });
 });

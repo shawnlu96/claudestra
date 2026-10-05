@@ -71,7 +71,6 @@ import { cleanupBgJob } from "./lib/bg-jobs.js";
 import { startSessionReconciler } from "./bridge/session-reconciler.js";
 import { initPeerIngress, localProbeResponse, relayControlRoutes, requestContextOf, socketTrust } from "./bridge/relay-routes.js";
 import { handleForward, initForward, rememberInbound } from "./bridge/forward.js";
-import { dispatchToAgent } from "./bridge/dispatch-route.js"; // 统一派单的本机入口（ws dispatch_to_agent），不做 peer 转换
 import { initInbox, takeInbox, inboxOpts } from "./bridge/inbox.js";
 import { startArchiveSweeper } from "./bridge/archive-sweeper.js";
 // Web 远程终端（PTY attach → SSE；见 web-terminal.ts 头注释）
@@ -2200,7 +2199,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
-    case "dispatch_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await dispatchToAgent(msg, ws, { clients, deliver, lastMessageSource })) })); break;
+    case "dispatch_to_agent": ws.send(await (await import("./bridge/dispatch-route.js")).dispatchWsResponse(msg, ws, { clients, deliver, lastMessageSource })); break; // 派单本机入口
     case "route_to_agent": {
       try {
         // 找发送方的 channelId
