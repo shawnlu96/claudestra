@@ -17,6 +17,8 @@ import { setWorkerKind } from "../lib/worker-kind.js";
 import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
 import { materialsPolicyPort } from "../lib/recovery-materials-wiring.js";
+// macro: same build-time reader location as lend-offer (ledger-lend-cmds.ts)
+import { cfgReaderPath } from "../lib/recovery-materials-wiring.js" with { type: "macro" };
 import { stepOfStage } from "../lib/lend-git.js";
 import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
 import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
@@ -60,7 +62,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
     const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);
     const startProbe = c.deps.lend ? probe : ghFixStartProbe(probe, c.deps.relayGh);
     // 与 lend-offer 同一份 CFG materials 策略（dispatch-recovery-MATW）：没装 = observe，读坏 = off，诊断进 stderr
-    const policy = stepOfStage(task.stage) === "fix" ? (await materialsPolicyPort(c.deps.lend?.recoveryReader)).policy : undefined;
+    const policy = stepOfStage(task.stage) === "fix" ? (await materialsPolicyPort(c.deps.lend?.recoveryReader ?? cfgReaderPath())).policy : undefined;
     const write = await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe, policy), startProbe);
     return await withFixStart(c.db, task, peer, write, startProbe, c.deps.relayGh);
   } catch (e) {

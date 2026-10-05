@@ -4,7 +4,7 @@
  * 对方实际收到的单子取自 lend-claim 的应答（bridge 原样转给对方的 body）。
  */
 import type { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,7 +18,7 @@ import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js"
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
-import { CFG_READER, materialsPolicyPort } from "../src/lib/recovery-materials-wiring.js";
+import { cfgReaderPath, materialsPolicyPort } from "../src/lib/recovery-materials-wiring.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator", Q = "other-project";
@@ -103,7 +103,7 @@ afterEach(() => closeLedger(":memory:"));
 
 describe("reader 加载（真动态 import）", () => {
   test("当前 main 上 CFG 正式位置没有模块 = 未安装：不给 port（observe），诊断写明", async () => {
-    expect(CFG_READER.pathname).toBe(join(import.meta.dir, "..", "src", "lib", "recovery-policy.ts"));
+    expect(cfgReaderPath()).toBe(join(import.meta.dir, "..", "src", "lib", "recovery-policy.ts"));
     const r = await materialsPolicyPort();
     expect(r.reader).toBe("missing");
     expect(r.policy).toBeUndefined();
@@ -136,20 +136,24 @@ describe("reader 加载（真动态 import）", () => {
 });
 
 describe("打包后的入口（bun build --target=bun）", () => {
-  test("打包产物不静态带入 reader；按 SRC_DIR 定位：没有模块 = observe，放上模块后现读出模式", async () => {
-    const root = mkdtempSync(join(tmpdir(), "matw-build-")), out = join(root, "out");
-    const entry = join(root, "entry.ts");
-    writeFileSync(entry, `import { CFG_READER, materialsPolicyPort } from ${JSON.stringify(join(import.meta.dir, "../src/lib/recovery-materials-wiring.ts"))};
-const r = await materialsPolicyPort();
-console.log(JSON.stringify({ at: CFG_READER.pathname, reader: r.reader, mode: r.policy ? r.policy("p", "materials").mode : null }));\n`);
-    const build = Bun.spawnSync([process.execPath, "build", entry, "--target=bun", "--outdir", out]);
+  test("入口照两个 manager 的写法以 macro 取 reader 位置：产物仍指源码树的 src/lib，没有模块 = observe，装上后现读出模式", async () => {
+    // 源码树副本（wiring + repo-root）；reviewer 复现的错位：产物里 SRC_DIR = <outdir>/..，无参 port 会去找 <root>/lib
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "matw-build-"))), lib = join(root, "src", "lib"), out = join(root, "dist");
+    mkdirSync(lib, { recursive: true });
+    for (const f of ["recovery-materials-wiring.ts", "repo-root.ts"]) copyFileSync(join(import.meta.dir, "../src/lib", f), join(lib, f));
+    writeFileSync(join(root, "src", "entry.ts"), `import { materialsPolicyPort } from "./lib/recovery-materials-wiring.js";
+import { cfgReaderPath } from "./lib/recovery-materials-wiring.js" with { type: "macro" };
+const at = cfgReaderPath(), r = await materialsPolicyPort(at), bare = await materialsPolicyPort();
+const bareAt = ${JSON.stringify(join(root, "lib", "recovery-policy.ts"))};
+console.log(JSON.stringify({ at, reader: r.reader, mode: r.policy ? r.policy("p", "materials").mode : null, bare: bare.diag?.includes(bareAt) ?? false }));\n`);
+    const build = Bun.spawnSync([process.execPath, "build", join(root, "src", "entry.ts"), "--target=bun", "--outdir", out]);
     expect(build.exitCode).toBe(0);
-    const runIt = () => JSON.parse(Bun.spawnSync([process.execPath, join(out, "entry.js")], { stderr: "pipe" }).stdout.toString().trim().split("\n").at(-1)!);
-    const first = runIt();
-    expect(first).toEqual({ at: join(root, "lib", "recovery-policy.ts"), reader: "missing", mode: null }); // SRC_DIR = <outdir>/..
-    mkdirSync(join(root, "lib"));
-    writeFileSync(join(root, "lib", "recovery-policy.ts"), "export const recoveryPolicy = (p, m) => ({ mode: m === 'materials' ? 'on' : 'off', manualAfterMs: null });\n");
-    expect(runIt()).toEqual({ at: first.at, reader: "loaded", mode: "on" });
+    const runIt = (file: string) => JSON.parse(Bun.spawnSync([process.execPath, file], { stderr: "pipe" }).stdout.toString().trim().split("\n").at(-1)!);
+    const formal = join(lib, "recovery-policy.ts");
+    expect(runIt(join(out, "entry.js"))).toEqual({ at: formal, reader: "missing", mode: null, bare: true });
+    writeFileSync(formal, "export const recoveryPolicy = (p, m) => ({ mode: m === 'materials' ? 'on' : 'off', manualAfterMs: null });\n");
+    expect(runIt(join(out, "entry.js"))).toEqual({ at: formal, reader: "loaded", mode: "on", bare: true });
+    expect(runIt(join(root, "src", "entry.ts"))).toEqual({ at: formal, reader: "loaded", mode: "on", bare: false });
   });
 });
 

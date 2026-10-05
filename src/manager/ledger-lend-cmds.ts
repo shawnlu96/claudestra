@@ -16,6 +16,8 @@ import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
 import { materialsPolicyPort } from "../lib/recovery-materials-wiring.js";
+// macro: the reader location is fixed when Bun transpiles / bundles this entry (a bundle keeps the source tree's src/lib path)
+import { cfgReaderPath } from "../lib/recovery-materials-wiring.js" with { type: "macro" };
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
 import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, reclaimLend, refuse, reofferLend, sweepLend, type LendNotice,
@@ -55,7 +57,7 @@ export interface LendCliDeps {
   relay?: (target: string, text: string) => Promise<RelaySend>;
   /** lend-relay：卡此刻的规格原文；不给 = 读本机规格文件 */
   readSpec?: (task: LedgerTask) => string | null;
-  /** 修复单材料的 CFG recoveryPolicy 模块位置（dispatch-recovery-MATW）；不给 = CFG 的正式位置，没装就 observe */
+  /** 修复单材料的 CFG recoveryPolicy 模块位置（dispatch-recovery-MATW，单测用）；不给 = CFG 的正式位置（macro 在转译 / 打包时定下的 src/lib），没装就 observe */
   recoveryReader?: URL;
 }
 
@@ -137,7 +139,7 @@ function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null):
 async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<{ input: OfferInput; materialsDiag?: string }> {
   const step = stepOfStage(task.stage);
   if (step !== "write" && step !== "fix") return { input };
-  const { policy, diag } = step === "fix" ? await materialsPolicyPort(c.deps.lend?.recoveryReader) : { policy: undefined, diag: null };
+  const { policy, diag } = step === "fix" ? await materialsPolicyPort(c.deps.lend?.recoveryReader ?? cfgReaderPath()) : { policy: undefined, diag: null };
   const write = await writeMaterials(c.db, task, { peer: input.peer, repo: input.repo, base: c.p.flags.base ?? "main" }, writeDeps(c), policy);
   return { input: write ? { ...input, write } : input, ...(diag ? { materialsDiag: diag } : {}) };
 }
