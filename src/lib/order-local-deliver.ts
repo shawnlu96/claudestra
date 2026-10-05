@@ -2,9 +2,8 @@
  * 本人正式交付后的受控自动派审（dispatch-recovery-DEL，设计 docs/design/local-delivery-flow.md §3）：
  * 普通 manual 卡照旧归 PM；只有真 PM 用 `ledger resume-grant` 明确授予一次资格（G，绑定此刻的执行者 / 会话 / spec / 分支 / 正式单号 / 轮次），
  * 之后执行者本人经 MCP deliver 交了新 head、紧邻 stage→review，调度服务才把卡交回 auto，由原审查派单接着走。
- * 「经 MCP」不看 dedup 键（那是调用方能自己写的幂等键）：bridge 的 deliverOrder 核过当前单 / 会话 / origin / PR 之后，只经子进程环境
- * ORDER_TOOL_ENV 交来源记录，CLI 在交付同一事务里记一条 order_tool_deliver（单号 / head / 已验证会话 / 交付 seq），判定要它与授予逐项对上。
- * 裸 CLI 交付（带不带同一个 dedup）都没有这条，照常交付但不触发交回。台账身份本是自报的（manager/ledger-identity.ts），这里防的是借公开单号就能触发。
+ * 「经 MCP」只认已验证 bridge 在交付成功后确认的来源事件；CLI 参数、环境与 dedup 都不能生成它。
+ * bridge 确认时在事务中重核交付回执、卡与当前作者绑定；确认失败或进程中断就保留 manual，重放不补认 CLI 交付。
  * 授予与交回各自在一个事务里先查后写（CAS，写入在 ledger-autostart-resume.ts），G 不另记「已用」：交回本身是更晚的 mode 事件，G 不再是最近一条，重复 / 重启不会再交回。
  * 开关来自注入的恢复策略 port（CFG 的 recoveryPolicy，mechanism=localDelivery）；缺 port = observe（只记日志），坏值 / 抛错 = off。
  * tests/order-local-deliver*.test.ts。
@@ -12,12 +11,12 @@
 import type { Database } from "bun:sqlite";
 import { getIntent, type TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getMeta, LedgerError, type LedgerErrorCode } from "./ledger-store.js";
+import { getMeta, listEvents, LedgerError, type LedgerErrorCode } from "./ledger-store.js";
 import { isRealPmRole } from "./ledger-team-config.js";
 import { listAsks } from "./ledger-asks.js";
 import { deliverDedupKey } from "./memory-tools-refs.js";
 import { currentOrders } from "./order-take.js";
-import { HOLD_OP } from "./scheduler-review-swap.js";
+import { openSafetyHold } from "./scheduler-review-swap.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 
 type RecoveryMode = "on" | "observe" | "off";
@@ -44,35 +43,11 @@ export function localDeliveryPolicy(port: LocalDeliveryPolicyPort | undefined, p
 
 export const RESUME_GRANT_OP = "resume_grant";
 export const ORDER_TOOL_OP = "order_tool_deliver";
-/** bridge → manager 子进程的来源记录；只由 lib/order-deliver.ts 设，agent 的 shell 与工具参数都没有 */
-export const ORDER_TOOL_ENV = "CLAUDESTRA_ORDER_TOOL_CALL";
+interface OrderToolCall { tool: "deliver"; orderId: string; head: string; session: string }
 
-export interface OrderToolCall { tool: "deliver"; orderId: string; head: string; session: string }
-
-/** 没有已验证会话就不给来源（这次交付照常写，只是不能触发交回） */
-export function orderToolEnv(c: { orderId: string; head: string; session: string | null }): Record<string, string> | undefined {
-  if (!c.session) return undefined;
-  const v: OrderToolCall = { tool: "deliver", orderId: c.orderId, head: c.head, session: c.session };
-  return { [ORDER_TOOL_ENV]: JSON.stringify(v) };
-}
-
-/**
- * CLI 侧：环境里的来源记录必须与这次写的 dedup 键（单号 + head）、--head 与执行者本人逐项一致，否则拒写（不是 bridge 的正常调用）。
- * 没有 = null（普通 CLI 交付）。
- */
-export function orderToolCall(raw: string | undefined, w: { dedup?: string; head?: string; actor: string; agent: string | null }): OrderToolCall | null {
-  if (raw === undefined || raw === "") return null;
-  let v: Partial<OrderToolCall> | null = null;
-  try { v = JSON.parse(raw); } catch { /* 下面按不合法拒 */ }
-  const ok = !!v && v.tool === "deliver" && typeof v.orderId === "string" && typeof v.head === "string" && typeof v.session === "string" && !!v.session
-    && w.head === v.head && w.dedup === deliverDedupKey(v.orderId, v.head) && w.actor === w.agent;
-  if (!ok) throw new LedgerError("forbidden", `${ORDER_TOOL_ENV} 与这次交付对不上（只给 bridge 的 MCP deliver 用）`);
-  return { tool: "deliver", orderId: v!.orderId!, head: v!.head!, session: v!.session! };
-}
-
-/** 交付事件 d 对应的来源记录（同一事务紧跟 d 写下，data.deliverSeq = d.seq） */
+/** 交付事件 d 对应的来源记录（bridge 确认事务写下，旧版 CLI 自报来源永不采信） */
 function orderToolOf(events: LedgerEvent[], d: LedgerEvent): OrderToolCall | null {
-  const e = events.find((x) => x.seq > d.seq && x.kind === "scheduler" && x.data.op === ORDER_TOOL_OP && x.data.deliverSeq === d.seq && x.actor === d.actor);
+  const e = events.find((x) => x.seq > d.seq && x.kind === "scheduler" && x.data.op === ORDER_TOOL_OP && x.data.confirmedBy === "bridge" && x.data.deliverSeq === d.seq && x.actor === d.actor);
   const c = e?.data.call as OrderToolCall | undefined;
   return c && typeof c === "object" ? c : null;
 }
@@ -131,6 +106,7 @@ export function grantFacts(db: Database, task: LedgerTask, wf: TaskWorkflow | nu
   if (!wf || wf.mode !== "manual") throw bad("invalid", "流程不是 manual（先接管）");
   if (task.rev !== input.taskRev || wf.rev !== input.workflowRev) throw new LedgerError("conflict", "任务或流程已被改过，先重读再授予", { taskRev: task.rev, workflowRev: wf.rev });
   if (!task.agent || !task.branch) throw bad("invalid", "卡上没有执行者或分支");
+  if (openSafetyHold(listEvents(db, { target: task.id }))) throw bad("conflict", "有未处置的模型安全拒绝挂起");
   const author = activeAuthor(db, task.id);
   if (!author || author.agent !== task.agent) throw bad("invalid", "没有与执行者一致的 active 作者会话绑定（换会话要先走交接）");
   if (author.family !== wf.authorFamily) throw bad("invalid", `作者绑定家族 ${author.family} 与流程 ${wf.authorFamily} 不一致，先对账`);
@@ -199,7 +175,7 @@ export function grantVerdict(db: Database, task: LedgerTask, wf: TaskWorkflow | 
     const i = getIntent(db, g.orderId);
     if (!i || i.taskId !== task.id || i.node !== g.step || i.specRev !== g.specRev || i.status === "cancelled" || !(i.eventSeq > g.stageSeq)) return no("授予绑定的派单已不成立");
   }
-  if (after.some((e) => e.kind === "scheduler" && e.data.op === HOLD_OP)) return no("授予后有模型安全拒绝挂起");
+  if (openSafetyHold(events)) return no("有未处置的模型安全拒绝挂起");
   if (openBlocker(db, task, g.agent)) return no("执行者有未答的 blocker ask");
   const open = openIntents(db, task.id).filter((x) => !x.endsWith(":pending"));
   if (open.length) return no(`有结果未定的调度意图（${open.join("，")}）`);

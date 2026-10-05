@@ -10,8 +10,8 @@
  *    （换分支、PM 收回等）就抛 conflict，台账不动；阶段与执行者 CLI 也会再核一次。
  * 6. 远端 head 核对过后查这个分支的 open PR（lib/order-deliver-pr.ts）：0 个 / 多个 / 跨仓 / base 不是 main / head 不一致 / gh 失败都拒，不写；
  *    通过的 URL 以 --pr 交给 CLI，在同一事务里写进空的或非完整的 task.pr；卡上已是另一个完整 URL 就拒（PR 换了要 PM 处理）。
- * 7. 通过上面全部核对的这次写，带上来源记录（ORDER_TOOL_ENV：单号 / head / 已验证的会话，只经子进程环境、不是参数）：
- *    CLI 在交付的同一事务里记一条 order_tool_deliver，PM 一次性授予的自动交回只认它（lib/order-local-deliver.ts）；裸 CLI 带同一个 dedup 也没有。
+ * 7. 只有本次 CLI 新写入成功后，已验证的 bridge 回调才确认来源；确认事务重核回执、卡与会话。
+ *    CLI 自报参数/环境不产生来源，重放不补确认；确认前崩溃也保持 manual。
  * 回执只由单号与交付事件决定（阶段固定是交付推到的 review），重试每次一样，不随卡后来的阶段变。
  */
 import type { Database } from "bun:sqlite";
@@ -23,7 +23,7 @@ import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-ro
 import { parseDeliverWire } from "./order-wire.js";
 import { deliveredScope } from "./order-deliver-scope.js";
 import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
-import { orderToolEnv } from "./order-local-deliver.js";
+import type { confirmOrderDelivery } from "./ledger-autostart-resume.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -38,6 +38,8 @@ export interface DeliverDeps {
   /** 这个分支在 origin 上 open 的 PR（bridge 在调用方工作目录跑 gh，lib/order-deliver-pr.ts findPrRows）；必填，没有就不让交付 */
   findPr(call: VerifiedCall, branch: string): Promise<PrRows>;
   run: LedgerRun;
+  /** Bridge-owned confirmation; absent means delivery succeeds without automatic handback eligibility. */
+  confirmSource?(call: VerifiedCall, input: Parameters<typeof confirmOrderDelivery>[2]): boolean;
 }
 
 export { deliverDedupKey }; // 定义在 memory-tools-refs.ts（memoryRefs 认同一个键；放那边免得两文件互相 import 成环）
@@ -95,8 +97,12 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   if (!pr.ok) return refuse(pr.code, pr.error);
   if (prConflict(cur.task.pr, pr.url)) return refuse("pr_mismatch", `台账里 ${cur.task.id} 的 PR 是 ${cur.task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
   const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url, ...(disputes ? { disputes: JSON.stringify(disputes) } : {}) };
-  const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key, orderToolEnv({ orderId, head, session: call.sessionId }));
+  const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;
+  const eventSeq = (r.event as { seq?: number } | undefined)?.seq, deliveredRev = (r.task as { rev?: number } | undefined)?.rev;
+  if (r.duplicate === false && Number.isInteger(eventSeq) && Number.isInteger(deliveredRev)) {
+    deps.confirmSource?.(call, { before: cur.task, orderId, head, eventSeq: eventSeq!, deliveredRev: deliveredRev! });
+  }
   await deliveredScope(deps.db, cur.task.id, head); // 规格外文件登记：异步、不抛，失败只记事件（order-deliver-scope.ts）
   return withMemoryRefs(receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null), call, deps.run, orderId, head, memoryRefs);
 }

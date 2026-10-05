@@ -10,13 +10,15 @@ import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { resumeCore } from "./ledger-scheduler-resume.js";
-import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
-import type { LedgerEvent } from "./ledger-stages.js";
+import { getEventByDedup, getTask, listEvents, LedgerError } from "./ledger-store.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { ServiceFacts } from "./scheduler-autostart.js";
-import { deliver } from "./ledger-write.js";
+import { getSchedulerSession } from "./scheduler-sessions.js";
+import type { VerifiedCall } from "./order-tool-route.js";
+import { deliverDedupKey } from "./memory-tools-refs.js";
 import {
-  grantFacts, grantOf, localDeliveryPolicy, ORDER_TOOL_OP, RESUME_GRANT_OP, type GrantInput, type LocalDeliveryPolicyPort, type OrderToolCall, type ResumeGrant,
+  grantFacts, grantOf, localDeliveryPolicy, ORDER_TOOL_OP, RESUME_GRANT_OP, type GrantInput, type LocalDeliveryPolicyPort, type ResumeGrant,
 } from "./order-local-deliver.js";
 import { resumeVerdict, serviceBlock } from "./scheduler-autostart-resume.js";
 
@@ -83,19 +85,29 @@ export function grantResume(db: Database, ctx: WriteCtx, input: GrantInput): { e
   });
 }
 
-/**
- * `ledger deliver`：带 bridge 来源记录（MCP deliver，order-local-deliver.ts orderToolCall 已核过）时，交付与 order_tool_deliver 同一事务写下；
- * 重放（同 dedup）原样返回、不补记——第一次没记的（裸 CLI 先交）之后也补不上。没有来源 = 原样的 deliver。
+/** Only the verified bridge handler calls this; no CLI route or environment can request confirmation.
+ * Check and insert share a transaction. A lost/duplicate receipt cannot bless an earlier CLI delivery.
+ * Crashes before confirmation leave manual intact; retries never backfill provenance.
  */
-export function deliverWithSource(db: Database, ctx: WriteCtx, input: Parameters<typeof deliver>[2], via: OrderToolCall | null): ReturnType<typeof deliver> {
-  if (!via) return deliver(db, ctx, input);
+export function confirmOrderDelivery(db: Database, call: VerifiedCall, input: {
+  before: LedgerTask; orderId: string; head: string; eventSeq: number; deliveredRev: number;
+}): boolean {
   return tx(db, () => {
-    const r = deliver(db, ctx, input);
-    if (r.duplicate) return r;
-    insertEvent(db, ctx, {
-      project: r.row.project, target: r.row.id, kind: "scheduler", text: `经派单工具交付 ${via.orderId}`,
-      data: { op: ORDER_TOOL_OP, deliverSeq: r.event.seq, call: via },
+    const { before, orderId, head, eventSeq, deliveredRev } = input;
+    const task = getTask(db, before.id), author = getSchedulerSession(db, before.id, "author");
+    if (!call.sessionId || !author || author.state !== "active" || author.agent !== call.agent || author.sessionId !== call.sessionId) return false;
+    if (!task || task.rev !== deliveredRev || task.stage !== "review" || task.headSHA !== head || task.agent !== call.agent
+      || task.agent !== before.agent || task.specRev !== before.specRev || task.branch !== before.branch || task.round !== before.round + 1) return false;
+    const d = getEventByDedup(db, deliverDedupKey(orderId, head));
+    if (!d || d.seq !== eventSeq || d.kind !== "deliver" || d.actor !== call.agent || d.target !== task.id || d.data.headSHA !== head) return false;
+    const events = listEvents(db, { target: task.id });
+    const stage = events.find((e) => e.seq === d.seq - 1);
+    if (!stage || stage.kind !== "stage" || stage.actor !== call.agent || stage.data.from !== before.stage || stage.data.to !== "review") return false;
+    if (events.some((e) => e.data.op === ORDER_TOOL_OP && e.data.deliverSeq === d.seq)) return false;
+    insertEvent(db, { actor: call.agent }, {
+      project: task.project, target: task.id, kind: "scheduler", text: `经 bridge 确认派单工具交付 ${orderId}`,
+      data: { op: ORDER_TOOL_OP, confirmedBy: "bridge", deliverSeq: d.seq, call: { tool: "deliver", orderId, head, session: call.sessionId } },
     }, false);
-    return r;
+    return true;
   });
 }

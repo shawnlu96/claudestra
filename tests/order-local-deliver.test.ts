@@ -2,25 +2,27 @@
  * dispatch-recovery-DEL：真 PM 一次性授予 → 执行者本人经正式单（MCP deliverOrder）交新 head → 调度 tick 交回 auto，恰好一次。
  * 写入都走进程内的真实 ledger CLI（runLedger）；交付走真实 deliverOrder（origin / PR 查询注入）；tick 是真实 autoResumeTick。
  * 反例：缺 port / observe / off、过期、hold、PM 代交、CLI 交付、换会话、head 未变或 origin 不符、blocker ask、未结意图 / 出借单、非真 PM 授予；
- * 裸 CLI 自带 mcp-deliver dedup（审查 P1 DEL-mcp-source-spoof）与来源记录对不上 / 会话不符。
+ * 裸 CLI 自带 mcp-deliver dedup / 伪造环境来源（包括正确会话），均不能冒充 bridge 确认。
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { autoResume } from "../src/lib/ledger-autostart-resume.js";
+import { autoResume, confirmOrderDelivery } from "../src/lib/ledger-autostart-resume.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, setMeta } from "../src/lib/ledger-write.js";
 import { deliverOrder } from "../src/lib/order-deliver.js";
-import type { LedgerRun } from "../src/lib/order-ledger-exit.js";
-import { localDeliveryPolicy, ORDER_TOOL_ENV, ORDER_TOOL_OP, type LocalDeliveryPolicyPort, type RecoveryPolicy } from "../src/lib/order-local-deliver.js";
+import { localDeliveryPolicy, ORDER_TOOL_OP, type LocalDeliveryPolicyPort, type RecoveryPolicy } from "../src/lib/order-local-deliver.js";
 import { currentOrders } from "../src/lib/order-take.js";
 import type { VerifiedCall } from "../src/lib/order-tool-route.js";
 import { autoResumeTick, resumeVerdict, type ResumeTickEnv } from "../src/lib/scheduler-autostart-resume.js";
+import { recordModelOutcome, resolveSafetyHold } from "../src/lib/scheduler-model-outcome.js";
+import { openSafetyHold } from "../src/lib/scheduler-review-swap.js";
 import type { ServiceFacts } from "../src/lib/scheduler-autostart.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 
+const ORDER_TOOL_ENV = "CLAUDESTRA_ORDER_TOOL_CALL"; // retired transport: shell input must never establish provenance
 const P = "p1", T = "DEL1", PM = "agent-lead", DISP = "agent-disp", DEV = "agent-task-del1", BR = "feat/del1";
 const NEW = "a".repeat(40), NEW2 = "b".repeat(40), INTENT = "disp:DEL1:write:a0";
 const PR = "https://github.com/o/r/pull/9";
@@ -35,13 +37,13 @@ const ledger = (actor: string, ...args: string[]) => {
     autoDispatch: () => svc.autoDispatch, autoProjects: () => [...svc.projects],
   }) as Promise<Record<string, any>>;
 };
-/** 带环境跑一次进程内 CLI（bridge 的 ledgerRun 只给子进程加环境，这里临时设上、跑完还原） */
+/** 带旧版来源环境跑真实 CLI，验证这些自报字段再也不能生成来源 */
 async function withEnv<T>(extra: Record<string, string> | undefined, fn: () => Promise<T>): Promise<T> {
   const was = process.env[ORDER_TOOL_ENV];
   if (extra?.[ORDER_TOOL_ENV] !== undefined) process.env[ORDER_TOOL_ENV] = extra[ORDER_TOOL_ENV];
   try { return await fn(); } finally { if (was === undefined) delete process.env[ORDER_TOOL_ENV]; else process.env[ORDER_TOOL_ENV] = was; }
 }
-const viaCli: LedgerRun = (args, ch, extra) => withEnv(extra, () => ledger(channels[ch] ?? "unknown", ...args.slice(1)));
+const viaCli = (args: string[], ch: string, extra?: Record<string, string>) => withEnv(extra, () => ledger(channels[ch] ?? "unknown", ...args.slice(1)));
 const sources = () => listEvents(db, { target: T }).filter((e) => e.data.op === ORDER_TOOL_OP);
 const forged = (session: string, o: Partial<{ orderId: string; head: string }> = {}) =>
   ({ [ORDER_TOOL_ENV]: JSON.stringify({ tool: "deliver", orderId: o.orderId ?? INTENT, head: o.head ?? NEW, session }) });
@@ -50,7 +52,8 @@ const policy: LocalDeliveryPolicyPort = () => (mode ? { mode, manualAfterMs: nul
 
 const mcpDeliver = (head = NEW, orderId = INTENT, call = me) =>
   deliverOrder(call, { v: 1, orderId, head, evidence: "docs/tasks/DEL1.md", summary: "交付", selfCheck: "过" }, {
-    db, run: viaCli, remoteHead: async () => ({ ok: true, head }), findPr: async () => ({ ok: true, rows: [{ url: PR, headRefOid: head, baseRefName: "main", isCrossRepository: false }] }),
+    db, run: viaCli, confirmSource: (c, input) => confirmOrderDelivery(db, c, input), remoteHead: async () => ({ ok: true, head }),
+    findPr: async () => ({ ok: true, rows: [{ url: PR, headRefOid: head, baseRefName: "main", isCrossRepository: false }] }),
   });
 
 /** 已接线的执行端：与 CLI 同一事务函数，带同一 policy 与核过的 head */
@@ -303,7 +306,7 @@ describe("不交回", () => {
     expect(wf().mode).toBe("manual");
   });
 
-  test("MCP 交付在同一事务记一条来源（单号 / head / 已验证会话 / 交付 seq）；重放不另记", async () => {
+  test("MCP 交付由 bridge 确认事务记一条来源（单号 / head / 已验证会话 / 交付 seq）；重放不另记", async () => {
     await grant();
     const r = (await mcpDeliver()) as { eventSeq?: number };
     const [src] = sources();
@@ -316,20 +319,31 @@ describe("不交回", () => {
     await grant();
     const r = await viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW, `--dedup=mcp-deliver:${INTENT}:${NEW}`], "c-dev", forged("s9"));
     expect(r).toMatchObject({ ok: true });
-    expect(resumeVerdict(db, card(), wf(), now)).toMatchObject({ ok: false, why: expect.stringContaining("会话") });
+    expect(resumeVerdict(db, card(), wf(), now)).toMatchObject({ ok: false, why: expect.stringContaining("MCP 来源") });
     await autoResumeTick(env());
     expect(wf().mode).toBe("manual");
   });
 
-  test("来源记录与 dedup / head / 执行者对不上 → forbidden，台账不动", async () => {
+  for (const [name, extra, dedup] of [
+    ["错误 head", forged("s1", { head: NEW2 })], ["错误 order", forged("s1", { orderId: "other" })],
+    ["错误 dedup", forged("s1"), "x1"], ["不合法 JSON", { [ORDER_TOOL_ENV]: "{" }],
+  ] as const) {
+    test(`CLI 忽略旧来源环境：${name}，交付不产生可信来源`, async () => {
+      await grant();
+      expect(await viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW,
+        `--dedup=${dedup ?? `mcp-deliver:${INTENT}:${NEW}`}`], "c-dev", extra)).toMatchObject({ ok: true });
+      expect(card().stage).toBe("review");
+      expect(sources()).toEqual([]);
+      await autoResumeTick(env());
+      expect(wf().mode).toBe("manual");
+      expect(resumes()).toEqual([]);
+    });
+  }
+
+  test("PM 的伪造来源仍然不能冒充本人正式交付", async () => {
     await grant();
-    const key = `--dedup=mcp-deliver:${INTENT}:${NEW}`;
-    const run = (actorCh: string, extra: Record<string, string>, dedup = key) => viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW, dedup], actorCh, extra);
-    expect(await run("c-dev", forged("s1", { head: NEW2 }))).toMatchObject({ ok: false, code: "forbidden" });
-    expect(await run("c-dev", forged("s1", { orderId: "other" }))).toMatchObject({ ok: false, code: "forbidden" });
-    expect(await run("c-dev", forged("s1"), "--dedup=x1")).toMatchObject({ ok: false, code: "forbidden" });
-    expect(await run("c-dev", { [ORDER_TOOL_ENV]: "{" })).toMatchObject({ ok: false, code: "forbidden" });
-    expect(await run("c-lead", forged("s1"))).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW,
+      `--dedup=mcp-deliver:${INTENT}:${NEW}`], "c-lead", forged("s1"))).toMatchObject({ ok: false, code: "forbidden" });
     expect(card().stage).toBe("build");
     expect(sources()).toEqual([]);
   });
@@ -341,5 +355,127 @@ describe("不交回", () => {
     const sameAgentNewSession: VerifiedCall = { ...me, sessionId: "s2" };
     expect(await mcpDeliver(NEW, INTENT, sameAgentNewSession)).toMatchObject({ ok: false, code: "not_current_order" });
     expect(card().stage).toBe("build");
+  });
+});
+
+const safetyHold = () => {
+  const result = recordModelOutcome(db, { actor: "scheduler", now: now++ }, {
+    intentId: INTENT, signal: { failure: { kind: "error", message: "violates our Usage Policy" } },
+    failed: { family: "claude", machine: "local", agent: DEV }, authorized: [], ended: true,
+  }, () => ({ mode: "on", manualAfterMs: null }));
+  expect(result.kind).toBe("recorded");
+  expect(openSafetyHold(listEvents(db, { target: T }))).toMatchObject({ kind: "escalate" });
+};
+
+describe("审查回归：真实入口", () => {
+  test("正确 session / order / head 的 shell 环境伪造也不能留下可信来源", async () => {
+    await grant();
+    expect(await viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW,
+      `--dedup=mcp-deliver:${INTENT}:${NEW}`], "c-dev", forged("s1"))).toMatchObject({ ok: true });
+    expect(sources()).toEqual([]);
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    expect(resumes()).toEqual([]);
+  });
+
+  test("真实模型拒绝发生在 grant 之前：拒绝授予", async () => {
+    safetyHold();
+    expect(await grant()).toMatchObject({ ok: false });
+    expect(listEvents(db, { target: T }).some((e) => e.data.op === "resume_grant")).toBe(false);
+  });
+
+  test("旧版本曾在未解除 hold 后授予：兑现仍检查 grant 前的全历史", async () => {
+    const original = await grant();
+    safetyHold();
+    // Model an already-persisted grant from the old version, which allowed granting over a hold.
+    db.query("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, ?, ?, ?, 'scheduler', '', ?)")
+      .run(now++, PM, P, T, JSON.stringify(original.event.data));
+    expect(await mcpDeliver()).toMatchObject({ ok: true });
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    expect(resumes()).toEqual([]);
+  });
+
+  test("真实模型拒绝发生在 grant 之后：交付仍不恢复", async () => {
+    await grant();
+    safetyHold();
+    expect(await mcpDeliver()).toMatchObject({ ok: true });
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    expect(resumes()).toEqual([]);
+  });
+
+  test("PM 明确 resolve 后才允许恢复，worker 不能解除", async () => {
+    await grant();
+    safetyHold();
+    expect(() => resolveSafetyHold(db, { actor: DEV }, { taskId: T, text: "继续" })).toThrow();
+    await mcpDeliver();
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    resolveSafetyHold(db, { actor: PM, now: now++ }, { taskId: T, text: "已核实并处置" });
+    expect(openSafetyHold(listEvents(db, { target: T }))).toBeNull();
+    await autoResumeTick(env());
+    expect(resumes()).toHaveLength(1);
+  });
+});
+
+describe("bridge 来源确认边界", () => {
+  test("旧版环境生成的来源事件不会在升级后被采信", async () => {
+    await grant();
+    const r = await ledger(DEV, "deliver", T, "--from", "build", "--head", NEW, `--dedup=mcp-deliver:${INTENT}:${NEW}`);
+    const data = { op: ORDER_TOOL_OP, deliverSeq: r.event.seq, call: { tool: "deliver", orderId: INTENT, head: NEW, session: "s1" } };
+    db.query("INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (?, ?, ?, ?, 'scheduler', '', ?)")
+      .run(now++, DEV, P, T, JSON.stringify(data));
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    expect(resumes()).toEqual([]);
+  });
+
+  test("来源确认期间卡或绑定被改过：原子拒绝，不补写", async () => {
+    await grant();
+    const before = card();
+    const r = await ledger(DEV, "deliver", T, "--from", "build", "--head", NEW, `--dedup=mcp-deliver:${INTENT}:${NEW}`);
+    const input = { before, orderId: INTENT, head: NEW, eventSeq: r.event.seq, deliveredRev: r.task.rev };
+    expect(confirmOrderDelivery(db, me, { ...input, eventSeq: r.event.seq + 1 })).toBe(false);
+    db.query("UPDATE scheduler_sessions SET sessionId = 's2' WHERE taskId = ?").run(T);
+    expect(confirmOrderDelivery(db, me, input)).toBe(false);
+    db.query("UPDATE scheduler_sessions SET sessionId = 's1' WHERE taskId = ?").run(T);
+    db.query("UPDATE tasks SET rev = rev + 1 WHERE id = ?").run(T);
+    expect(confirmOrderDelivery(db, me, input)).toBe(false);
+    expect(sources()).toEqual([]);
+    await autoResumeTick(env());
+    expect(resumes()).toEqual([]);
+  });
+
+  test("CLI 提交后 bridge 缺确认端：CLI 交付可用，但重试不补来源", async () => {
+    await grant();
+    const wire = { v: 1, orderId: INTENT, head: NEW, evidence: "docs/tasks/DEL1.md", summary: "交付", selfCheck: "过" };
+    const result = await deliverOrder(me, wire, {
+      db, run: viaCli, remoteHead: async () => ({ ok: true, head: NEW }),
+      findPr: async () => ({ ok: true, rows: [{ url: PR, headRefOid: NEW, baseRefName: "main", isCrossRepository: false }] }),
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(sources()).toEqual([]);
+    expect(await mcpDeliver()).toMatchObject({ ok: true, duplicate: true });
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    expect(sources()).toEqual([]);
+  });
+
+  test("授予前历史 hold resolve 后可以授予；兑现事务仍会重查全历史 hold", async () => {
+    safetyHold();
+    expect(await grant()).toMatchObject({ ok: false });
+    resolveSafetyHold(db, { actor: PM, now: now++ }, { taskId: T, text: "处置完成" });
+    expect(await grant()).toMatchObject({ ok: true });
+    await mcpDeliver();
+    await autoResumeTick(env({ remoteHead: async () => {
+      // A concurrent safety escalation between the tick read and its write must still win.
+      appendEvent(db, { actor: "scheduler", now: now++ }, {
+        project: P, target: T, kind: "escalate", data: { op: "model_safety_hold" }, text: "安全挂起",
+      });
+      return { ok: true, head: NEW };
+    } }));
+    expect(wf().mode).toBe("manual");
+    expect(resumes()).toEqual([]);
   });
 });
