@@ -44,6 +44,7 @@ export type LendCheckInput = {
   directory: string;
   config?: LendCheckConfig;
   action: "acquire" | "release" | "cancel";
+  // IDs identify individual check attempts; allocate a fresh ID for each rerun (same ID only polls that attempt).
   // Call from the check executor itself; it must supervise/reap its check tree. Descendants must not outlive this holder.
   // A short-lived broker or whole LLM worker is not a check executor. Its exit would not prove the check has stopped.
   request: LendCheckRequest;
@@ -53,7 +54,8 @@ type Dependencies = {
   // Trusted executor dependencies, never deserialized from worker requests. Verify against one host-wide owner policy.
   verifyOwnerApproval?: (approval: NonNullable<LendCheckConfig["ownerApproval"]>) => boolean;
   // "absent" certifies the entire supervised tree is sealed (cannot spawn again) and reaped, not just a PID missing.
-  // Future wiring must use a durable supervisor/cgroup or equivalent; unknown or missing evidence retains active slots.
+  // Required for enforcement. Observe-only release trusts the executor when this dependency is absent.
+  // Future wiring must use a durable supervisor/cgroup or equivalent; unknown evidence retains active slots.
   observeCheckTree?: (entry: Readonly<Entry>) => "absent" | "present" | "unknown";
 };
 class PermitError extends Error {
@@ -70,6 +72,9 @@ function policyOf(config: LendCheckConfig = {}, deps: Dependencies): Policy {
   const provenance = JSON.stringify([text.parse(approval.approvedBy), text.parse(approval.reference)]);
   if (deps.verifyOwnerApproval?.({ maxConcurrentFullChecks: max, approvedBy: approval.approvedBy, reference: approval.reference }) !== true) {
     throw new PermitError("approval_unverified", "owner approval was not verified by host authority");
+  }
+  if (mode === "on" && typeof deps.observeCheckTree !== "function") {
+    throw new PermitError("tree_unconfirmed", "on mode requires a host check-tree observer before admission");
   }
   return { mode, max, approval: provenance };
 }
@@ -160,10 +165,13 @@ function sweep(state: State, samples: Map<string, Sample>): void {
   }
 }
 
-function apply(state: State, input: LendCheckInput, owner: Entry["owner"], policy: Policy, samples: Map<string, Sample>): LendCheckResult {
+function apply(state: State, input: LendCheckInput, owner: Entry["owner"], policy: Policy, samples: Map<string, Sample>, deps: Dependencies): LendCheckResult {
   if (JSON.stringify(state.policy) !== JSON.stringify(policy)) {
-    // Pin even an idle store: a worker must not silently raise capacity or overwrite the shared policy.
-    throw new PermitError("policy_conflict", "host permit policy differs; drain all executors before an owner-controlled migration");
+    // Only a host-verified approval may replace an idle policy. Stale/unconfigured workers cannot downgrade it.
+    if (state.entries.some(pending) || policy.approval === null) {
+      throw new PermitError("policy_conflict", "host permit policy differs; drain existing attempts before applying a verified owner policy");
+    }
+    state.policy = policy;
   }
   const request = requestSchema.parse(input.request);
   let entry = state.entries.find((item) => item.id === request.id);
@@ -175,13 +183,14 @@ function apply(state: State, input: LendCheckInput, owner: Entry["owner"], polic
     if (!pending(entry)) return { retryable: false, allowed: false, mode: policy.mode, status: "closed" };
     if (input.action === "cancel" && entry.status === "active") throw new Error("active check must exit before release; cancel only withdraws queued requests");
     const sampled = samples.get(entry.id);
-    if (entry.status === "active" && (!sampled || sampled.entry !== JSON.stringify(entry) || sampled.tree !== "absent")) {
+    const executorAttested = policy.mode === "observe" && !deps.observeCheckTree;
+    if (entry.status === "active" && !executorAttested && (!sampled || sampled.entry !== JSON.stringify(entry) || sampled.tree !== "absent")) {
       throw new PermitError("tree_unconfirmed", "check tree exit has not been confirmed by the supervisor");
     }
     entry.status = input.action === "release" ? "released" : "cancelled";
     return { retryable: false, allowed: false, mode: policy.mode, status: entry.status };
   }
-  if (entry && !pending(entry)) return { retryable: false, allowed: false, mode: policy.mode, status: "closed" };
+  if (entry && !pending(entry)) return { retryable: false, allowed: policy.mode === "observe", mode: policy.mode, status: "closed" };
   if (!entry) { entry = { ...request, owner, status: "waiting" }; state.entries.push(entry); }
   const active = state.entries.filter((item) => item.status === "active").length;
   const waiting = state.entries.filter((item) => item.status === "waiting");
@@ -202,7 +211,7 @@ function apply(state: State, input: LendCheckInput, owner: Entry["owner"], polic
 // Sole lifecycle API: acquire (same ID polls), cancel (queued only), release (after the check tree has exited).
 // Proposed command boundary: package.json scripts.check/test and .github/workflows/ci.yml's direct bun test/build commands.
 // A host-owned loader must validate approval provenance/limit against its owner-approved record, never worker strings.
-// Every executor uses the SAME directory and policy. Changes require quiescing all workers and owner-controlled migration.
+// Every executor uses the SAME directory/policy. After drain, acquire atomically installs a new host-verified approval.
 // A supervisor acquires before spawning; observeCheckTree must prove sealed/reaped descendants even after executor SIGKILL.
 // claudeWorkerPlan in lend-claude-worker.ts can propagate shared directory/config, but worker spawn is not a full check.
 
@@ -235,7 +244,7 @@ export function lendCheckPermit(input: LendCheckInput, probe = observeLendCheckP
     db.exec("BEGIN IMMEDIATE"); transaction = true;
     const state = loadState(db, policy, input.request.id);
     sweep(state, samples);
-    const result = apply(state, input, { ...self.process, incarnation }, policy, samples);
+    const result = apply(state, input, { ...self.process, incarnation }, policy, samples, deps);
     persist(db, state);
     db.exec("COMMIT"); transaction = false;
     return result;

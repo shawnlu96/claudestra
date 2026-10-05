@@ -49,7 +49,7 @@ afterEach(async () => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-async function worker(dir: string) {
+async function worker(dir: string, treeObserver = true) {
   const script = `
 import { createInterface } from "node:readline";
 import { existsSync } from "node:fs";
@@ -73,7 +73,8 @@ for await (const line of createInterface({input: process.stdin})) {
     console.log(JSON.stringify({locked:true})); continue;
   }
   const probe = pid => message.unknown === pid ? {kind:"unknown",reason:"fixture read failure"} : observeLendCheckProcess(pid);
-  const deps = { verifyOwnerApproval: ${authority.toString()}, observeCheckTree: () => "absent" };
+  const deps = { verifyOwnerApproval: ${authority.toString()},
+    ...(${treeObserver} ? { observeCheckTree: () => "absent" } : {}) };
   console.log(JSON.stringify(lendCheckPermit(message.input, probe, deps)));
 }`;
   const home = join(dir, `child-${nextWorker++}`);
@@ -287,7 +288,7 @@ test("own identity read failure cannot mint enforced permits", () => {
 });
 
 
-test("authority is mandatory and policy cannot be overwritten even after all entries close", () => {
+test("authority is mandatory; verified capacity changes apply after all entries close", () => {
   const dir = root();
   expect(permit(input(dir, "raw"))).toMatchObject({ allowed: false, reasonCode: "approval_unverified", retryable: false });
   expect(existsSync(database(dir))).toBe(false);
@@ -295,10 +296,10 @@ test("authority is mandatory and policy cannot be overwritten even after all ent
   expect(lendCheckPermit({ ...input(dir, "forged"), config: forged })).toMatchObject({ reasonCode: "approval_unverified", retryable: false });
   expect(lendCheckPermit(input(dir, "a")).status).toBe("granted");
   expect(lendCheckPermit(input(dir, "a", "release")).status).toBe("released");
-  const before = state(dir);
   const changed = { ...config, ownerApproval: { ...config.ownerApproval!, maxConcurrentFullChecks: 2 } };
-  expect(lendCheckPermit({ ...input(dir, "b"), config: changed })).toMatchObject({ status: "policy_conflict", retryable: false });
-  expect(state(dir)).toEqual(before);
+  expect(lendCheckPermit({ ...input(dir, "b"), config: changed })).toMatchObject({ status: "granted", retryable: false });
+  expect(state(dir).policy.max).toBe(2);
+  expect(state(dir).entries[0].status).toBe("released");
 });
 
 test("observe/on drift is explicit, non-retryable and preserves the shared policy", () => {
@@ -359,7 +360,7 @@ test("unknown tree evidence prevents release and reclaim, even with a dead execu
   const dir = root(), a = await worker(dir);
   expect((await a.call(input(dir, "a"))).status).toBe("granted");
   a.proc.kill("SIGKILL"); await a.proc.exited;
-  const deps = { verifyOwnerApproval: authority };
+  const deps = { verifyOwnerApproval: authority, observeCheckTree: () => "unknown" as const };
   expect(permit(input(dir, "b"), observeLendCheckProcess, deps).status).toBe("queued");
   expect(state(dir).entries[0].status).toBe("active");
   expect(lendCheckPermit(input(dir, "b")).status).toBe("granted");
@@ -435,4 +436,101 @@ test("missing terminal table in a migrated store fails closed and is not recreat
   const before = readFileSync(database(dir));
   expect(lendCheckPermit(input(dir, "a"))).toMatchObject({ allowed: false, status: "blocked", retryable: false });
   expect(readFileSync(database(dir))).toEqual(before);
+});
+
+
+test("missing tree observer rejects enforcement before admission; default release closes diagnostic history", () => {
+  const dir = root(), deps = { verifyOwnerApproval: authority };
+  expect(permit(input(dir, "on"), observeLendCheckProcess, deps)).toMatchObject({
+    allowed: false, status: "blocked", reasonCode: "tree_unconfirmed", retryable: false,
+  });
+  expect(existsSync(database(dir))).toBe(false);
+  const self = observeLendCheckProcess(process.pid);
+  let probes = 0;
+  const probe = () => { probes++; return self; };
+  for (let i = 0; i < 50; i++) {
+    const value = { ...input(dir, `observe-${i}`), config: {} };
+    expect(permit(value, probe).status).toBe("observed");
+    expect(permit({ ...value, action: "release" }, probe).status).toBe("released");
+  }
+  probes = 0;
+  expect(permit({ ...input(dir, "next"), config: {} }, probe).status).toBe("observed");
+  expect(probes).toBe(1); // Closed diagnostic history is never sampled again.
+  expect(state(dir).entries.filter((entry: { status: string }) => entry.status === "active")).toHaveLength(1);
+});
+
+test("observe terminal IDs diagnose without denying or reopening released, cancelled and exited attempts", () => {
+  for (const status of ["released", "cancelled", "exited"] as const) {
+    const dir = root(), value = { ...input(dir, status), config: {} };
+    expect(permit(value).allowed).toBe(true);
+    if (status === "released") expect(permit({ ...value, action: "release" }).status).toBe(status);
+    else alter(dir, (body) => { body.entries[0].status = status; });
+    expect(permit(value)).toMatchObject({ allowed: true, mode: "observe", status: "closed", retryable: false });
+    expect(state(dir).entries[0].status).toBe(status);
+    expect(permit({ ...value, action: "release" })).toMatchObject({ allowed: false, status: "closed" });
+  }
+});
+
+test("observe release still preserves explicit unknown tree evidence and mismatched owners", () => {
+  const dir = root(), value = { ...input(dir, "observe"), config: {} };
+  expect(permit(value).allowed).toBe(true);
+  const before = state(dir);
+  expect(permit({ ...value, action: "release" }, observeLendCheckProcess, { observeCheckTree: () => "unknown" })).toMatchObject({
+    status: "blocked", reasonCode: "tree_unconfirmed",
+  });
+  expect(permit({ ...value, action: "release", request: { ...value.request, workerId: "other" } }).status).toBe("blocked");
+  expect(state(dir)).toEqual(before);
+  expect(permit({ ...value, action: "release" }).status).toBe("released");
+});
+
+test("idle observe rollout to on is atomic across processes and preserves terminal IDs", async () => {
+  const dir = root(), observer = await worker(dir, false);
+  const value = { ...input(dir, "observation"), config: {} };
+  expect((await observer.call(value)).status).toBe("observed");
+  expect((await observer.call({ ...value, action: "release" })).status).toBe("released");
+  const clients = await Promise.all([worker(dir), worker(dir)]);
+  const results = await Promise.all(clients.map((client, i) => uncontended(client, input(dir, `on-${i}`))));
+  expect(results.filter((result) => result.status === "granted")).toHaveLength(1);
+  expect(results.filter((result) => result.status === "queued")).toHaveLength(1);
+  expect(state(dir).policy.mode).toBe("on");
+  expect(state(dir).entries[0].status).toBe("released");
+  const before = state(dir);
+  expect(await observer.call(value)).toMatchObject({ allowed: true, status: "policy_conflict", retryable: false });
+  expect(state(dir)).toEqual(before);
+});
+
+test("idle approval renewal is host-verified; stale unapproved observers cannot downgrade the store", () => {
+  const dir = root();
+  expect(lendCheckPermit(input(dir, "a")).status).toBe("granted");
+  expect(lendCheckPermit(input(dir, "a", "release")).status).toBe("released");
+  const before = state(dir), renewed = { ...config, ownerApproval: { ...config.ownerApproval!, reference: "renewed" } };
+  expect(lendCheckPermit({ ...input(dir, "renew"), config: renewed }).reasonCode).toBe("approval_unverified");
+  expect(permit({ ...input(dir, "stale"), config: {} })).toMatchObject({ allowed: true, status: "policy_conflict" });
+  expect(state(dir)).toEqual(before);
+  const deps = { ...fixtureDeps, verifyOwnerApproval: (approval: NonNullable<LendCheckConfig["ownerApproval"]>) =>
+    approval.reference === "renewed" && authority({ ...approval, reference: "test-only" }) };
+  expect(permit({ ...input(dir, "renew"), config: renewed }, observeLendCheckProcess, deps).status).toBe("granted");
+  expect(state(dir).policy.approval).toContain("renewed");
+  expect(state(dir).entries[0].status).toBe("released");
+});
+
+test("observe executor release clears pressure without a tree observer", () => {
+  const dir = root(), deps = { verifyOwnerApproval: authority }, observing = { ...config, mode: "observe" as const };
+  const value = (id: string, action: LendCheckInput["action"] = "acquire") => ({ ...input(dir, id, action), config: observing });
+  expect(permit(value("a"), observeLendCheckProcess, deps).wouldWait).toBe(false);
+  expect(permit(value("b"), observeLendCheckProcess, deps)).toMatchObject({ allowed: true, wouldWait: true });
+  for (const id of ["a", "b"]) expect(permit(value(id, "release"), observeLendCheckProcess, deps).status).toBe("released");
+  expect(permit(value("c"), observeLendCheckProcess, deps)).toMatchObject({ allowed: true, wouldWait: false });
+});
+
+test("failed policy migration preserves the idle policy and terminal history", () => {
+  const dir = root(), value = { ...input(dir, "old"), config: {} };
+  expect(permit(value).status).toBe("observed");
+  expect(permit({ ...value, action: "release" }).status).toBe("released");
+  const before = state(dir);
+  chmodSync(dir, 0o500);
+  try { expect(lendCheckPermit(input(dir, "new"))).toMatchObject({ allowed: false, status: "blocked" }); }
+  finally { chmodSync(dir, 0o700); }
+  expect(state(dir)).toEqual(before);
+  expect(lendCheckPermit(input(dir, "new")).status).toBe("granted");
 });
