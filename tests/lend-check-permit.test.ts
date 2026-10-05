@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { lendCheckPermit, type LendCheckConfig, type LendCheckInput, type LendCheckResult } from "../src/lib/lend-check-permit.ts";
+import { lendCheckPermit as permit, type LendCheckConfig, type LendCheckInput, type LendCheckResult } from "../src/lib/lend-check-permit.ts";
 import { observeLendCheckProcess } from "../src/lib/lend-check-observation.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -11,6 +11,11 @@ const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 let nextWorker = 0;
 const config: LendCheckConfig = { mode: "on", ownerApproval: { maxConcurrentFullChecks: 1, approvedBy: "fixture-owner", reference: "test-only" } };
+// Fixtures own no check descendants unless explicitly created below; their host approval record is synthetic.
+const authority = (approval: NonNullable<LendCheckConfig["ownerApproval"]>) =>
+  approval.approvedBy === "fixture-owner" && approval.reference === "test-only" && [1, 2].includes(approval.maxConcurrentFullChecks);
+const fixtureDeps = { verifyOwnerApproval: authority, observeCheckTree: () => "absent" as const };
+const lendCheckPermit = (value: LendCheckInput, probe = observeLendCheckProcess) => permit(value, probe, fixtureDeps);
 function root() { const dir = mkdtempSync(join(tmpdir(), "check-permit-")); roots.push(dir); return dir; }
 function request(id: string, cost: "full" | "focused" = "full") { return { id, orderId: "order-a", workerId: "worker-a", cost }; }
 function input(directory: string, id: string, action: LendCheckInput["action"] = "acquire"): LendCheckInput {
@@ -19,13 +24,21 @@ function input(directory: string, id: string, action: LendCheckInput["action"] =
 function database(dir: string) { return join(dir, "lend-check-permit.sqlite"); }
 function state(dir: string) {
   const db = new Database(database(dir));
-  try { return JSON.parse((db.query("SELECT body FROM check_permit").get() as { body: string }).body); }
+  try {
+    const body = JSON.parse((db.query("SELECT body FROM check_permit").get() as { body: string }).body);
+    const closed = db.query("SELECT body FROM check_permit_closed ORDER BY rowid").all() as { body: string }[];
+    body.entries = [...closed.map((row) => JSON.parse(row.body)), ...body.entries];
+    return body;
+  }
   finally { db.close(); }
 }
 function alter(dir: string, mutate: (body: ReturnType<typeof state>) => void) {
-  const body = state(dir); mutate(body);
   const db = new Database(database(dir));
-  try { db.query("UPDATE check_permit SET body=?").run(JSON.stringify(body)); }
+  try {
+    const body = JSON.parse((db.query("SELECT body FROM check_permit").get() as { body: string }).body);
+    mutate(body);
+    db.query("UPDATE check_permit SET body=?").run(JSON.stringify(body));
+  }
   finally { db.close(); }
 }
 afterEach(async () => {
@@ -39,6 +52,7 @@ afterEach(async () => {
 async function worker(dir: string) {
   const script = `
 import { createInterface } from "node:readline";
+import { existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { lendCheckPermit } from ${JSON.stringify(resolve(import.meta.dir, "../src/lib/lend-check-permit.ts"))};
 import { observeLendCheckProcess } from ${JSON.stringify(resolve(import.meta.dir, "../src/lib/lend-check-observation.ts"))};
@@ -47,13 +61,20 @@ let held;
 for await (const line of createInterface({input: process.stdin})) {
   const message = JSON.parse(line);
   if (message.exit) process.exit(0);
+  if (message.tree) {
+    const child = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", "-e",
+      'import {existsSync} from "node:fs"; setInterval(() => { if (existsSync(process.argv[1])) process.exit(0); }, 10);', message.tree],
+      { env: process.env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    console.log(JSON.stringify({pid:child.pid})); continue;
+  }
   if (message.lock) {
     held = new Database(message.lock); held.exec("BEGIN IMMEDIATE");
     held.query("UPDATE check_permit SET body=?").run("uncommitted-corruption");
     console.log(JSON.stringify({locked:true})); continue;
   }
   const probe = pid => message.unknown === pid ? {kind:"unknown",reason:"fixture read failure"} : observeLendCheckProcess(pid);
-  console.log(JSON.stringify(lendCheckPermit(message.input, probe)));
+  const deps = { verifyOwnerApproval: ${authority.toString()}, observeCheckTree: () => "absent" };
+  console.log(JSON.stringify(lendCheckPermit(message.input, probe, deps)));
 }`;
   const home = join(dir, `child-${nextWorker++}`);
   for (const sub of ["home", "state", "runtime", "tmp"]) mkdirSync(join(home, sub), { recursive: true });
@@ -83,7 +104,8 @@ for await (const line of createInterface({input: process.stdin})) {
 async function uncontended(client: Awaited<ReturnType<typeof worker>>, value: LendCheckInput) {
   for (let attempt = 0; attempt < 100; attempt++) {
     const result = await client.call(value);
-    if (result.status !== "blocked" || !result.reason?.includes("locked")) return result;
+    if (!result.retryable) return result;
+    expect(result.status).toBe("busy");
     await Bun.sleep(10);
   }
   throw new Error("fixture could not enter transaction");
@@ -221,7 +243,7 @@ test("crash while writing rolls back; busy/failed preservation never grants or c
   expect((await a.call(input(dir, "a"))).status).toBe("granted");
   const before = state(dir);
   expect(await b.send({ lock: database(dir) })).toEqual({ locked: true });
-  expect((await a.call(input(dir, "a", "release"))).status).toBe("blocked");
+  expect(await a.call(input(dir, "a", "release"))).toMatchObject({ status: "busy", retryable: true, reasonCode: "store_busy" });
   b.proc.kill("SIGKILL"); await b.proc.exited;
   expect(state(dir)).toEqual(before);
   expect((await a.call(input(dir, "a"))).status).toBe("granted");
@@ -262,4 +284,155 @@ test("own identity read failure cannot mint enforced permits", () => {
   expect(lendCheckPermit(input(dir, "a"), () => ({ kind: "unknown", reason: "test" })).allowed).toBe(false);
   expect(existsSync(database(dir))).toBe(false);
   expect(observeLendCheckProcess(process.pid).kind).toBe("present");
+});
+
+
+test("authority is mandatory and policy cannot be overwritten even after all entries close", () => {
+  const dir = root();
+  expect(permit(input(dir, "raw"))).toMatchObject({ allowed: false, reasonCode: "approval_unverified", retryable: false });
+  expect(existsSync(database(dir))).toBe(false);
+  const forged = { ...config, ownerApproval: { ...config.ownerApproval!, reference: "forged" } };
+  expect(lendCheckPermit({ ...input(dir, "forged"), config: forged })).toMatchObject({ reasonCode: "approval_unverified", retryable: false });
+  expect(lendCheckPermit(input(dir, "a")).status).toBe("granted");
+  expect(lendCheckPermit(input(dir, "a", "release")).status).toBe("released");
+  const before = state(dir);
+  const changed = { ...config, ownerApproval: { ...config.ownerApproval!, maxConcurrentFullChecks: 2 } };
+  expect(lendCheckPermit({ ...input(dir, "b"), config: changed })).toMatchObject({ status: "policy_conflict", retryable: false });
+  expect(state(dir)).toEqual(before);
+});
+
+test("observe/on drift is explicit, non-retryable and preserves the shared policy", () => {
+  const dir = root();
+  expect(lendCheckPermit({ ...input(dir, "observe"), config: {} }).allowed).toBe(true);
+  const before = state(dir);
+  expect(lendCheckPermit(input(dir, "on"))).toMatchObject({ allowed: false, status: "policy_conflict", reasonCode: "policy_conflict", retryable: false });
+  expect(state(dir)).toEqual(before);
+});
+
+test("slow probes do not hold the write lock; concurrent new entries survive stale sampling", async () => {
+  const dir = root(), a = await worker(dir);
+  expect((await a.call(input(dir, "a"))).status).toBe("granted");
+  let checked = false;
+  const probe = (pid: number) => {
+    if (pid === a.pid && !checked) {
+      checked = true;
+      const db = new Database(database(dir));
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        const body = JSON.parse((db.query("SELECT body FROM check_permit").get() as { body: string }).body);
+        // Same ID changes incarnation during sampling; the obsolete absent result must not release the new owner.
+        body.entries[0].owner.incarnation = "new-incarnation";
+        db.query("UPDATE check_permit SET body=?").run(JSON.stringify(body));
+        db.exec("COMMIT");
+      } finally { db.close(); }
+      return { kind: "absent" as const };
+    }
+    return observeLendCheckProcess(pid);
+  };
+  expect(lendCheckPermit(input(dir, "b"), probe).status).toBe("queued");
+  expect(checked).toBe(true);
+  expect(state(dir).entries[0].status).toBe("active");
+});
+
+test("terminal history is indexed separately; old IDs stay closed without growing the hot blob", () => {
+  const dir = root();
+  const self = observeLendCheckProcess(process.pid);
+  const probe = () => self;
+  for (let i = 0; i < 150; i++) {
+    expect(lendCheckPermit(input(dir, `history-${i}`), probe).status).toBe("granted");
+    expect(lendCheckPermit(input(dir, `history-${i}`, "release"), probe).status).toBe("released");
+  }
+  const db = new Database(database(dir));
+  try {
+    const body = (db.query("SELECT body FROM check_permit").get() as { body: string }).body;
+    expect(JSON.parse(body).entries).toEqual([]);
+    expect(body.length).toBeLessThan(300);
+    expect(db.query("SELECT count(*) AS n FROM check_permit_closed").get()).toEqual({ n: 150 });
+  } finally { db.close(); }
+  expect(lendCheckPermit(input(dir, "history-0"), probe).status).toBe("closed");
+  expect(lendCheckPermit(input(dir, " history-0 "), probe).status).toBe("closed");
+  expect(lendCheckPermit(input(dir, "history-0", "release"), probe).status).toBe("closed");
+  expect(lendCheckPermit({ ...input(dir, "history-0"), request: { ...request("history-0"), workerId: "other" } }, probe).status).toBe("blocked");
+});
+
+test("unknown tree evidence prevents release and reclaim, even with a dead executor", async () => {
+  const dir = root(), a = await worker(dir);
+  expect((await a.call(input(dir, "a"))).status).toBe("granted");
+  a.proc.kill("SIGKILL"); await a.proc.exited;
+  const deps = { verifyOwnerApproval: authority };
+  expect(permit(input(dir, "b"), observeLendCheckProcess, deps).status).toBe("queued");
+  expect(state(dir).entries[0].status).toBe("active");
+  expect(lendCheckPermit(input(dir, "b")).status).toBe("granted");
+  const before = state(dir);
+  expect(permit(input(dir, "b", "release"), observeLendCheckProcess, deps)).toMatchObject({ reasonCode: "tree_unconfirmed", retryable: false });
+  expect(state(dir)).toEqual(before);
+});
+
+
+test("SIGKILL of a real executor cannot free its slot while an orphan check descendant is alive", async () => {
+  const dir = root(), a = await worker(dir), stop = join(dir, "stop-child");
+  expect((await a.call(input(dir, "a"))).status).toBe("granted");
+  const child = await a.send({ tree: stop });
+  const tree = () => observeLendCheckProcess(child.pid).kind;
+  const deps = { verifyOwnerApproval: authority, observeCheckTree: tree };
+  try {
+    expect(tree()).toBe("present");
+    a.proc.kill("SIGKILL"); await a.proc.exited;
+    expect(observeLendCheckProcess(a.pid).kind).toBe("absent");
+    expect(tree()).toBe("present");
+    expect(permit(input(dir, "b"), observeLendCheckProcess, deps).status).toBe("queued");
+    expect(state(dir).entries[0].status).toBe("active");
+  } finally {
+    // Only the owned fixture's explicit stop file is touched; no process-name scans or host-wide signals.
+    writeFileSync(stop, "stop");
+    for (let attempt = 0; attempt < 200 && tree() !== "absent"; attempt++) await Bun.sleep(10);
+  }
+  expect(tree()).toBe("absent");
+  expect(permit(input(dir, "b"), observeLendCheckProcess, deps).status).toBe("granted");
+}, 10000);
+
+test("legacy mutable Darwin identity is retained until explicit tree-confirmed exit", async () => {
+  const dir = root(), a = await worker(dir);
+  expect((await a.call(input(dir, "a"))).status).toBe("granted");
+  alter(dir, (body) => { body.entries[0].owner.start = "darwin:{ sec = 123, usec = 0 }:Mon Oct 5 12:34:56 2026"; });
+  expect(lendCheckPermit(input(dir, "b")).status).toBe("queued");
+  expect(state(dir).entries[0].status).toBe("active");
+  a.proc.kill("SIGKILL"); await a.proc.exited;
+  expect(lendCheckPermit(input(dir, "b")).status).toBe("granted");
+});
+
+test("legacy terminal entries migrate atomically and cannot be reacquired", () => {
+  const dir = root();
+  expect(lendCheckPermit(input(dir, "legacy")).status).toBe("granted");
+  alter(dir, (body) => { body.version = 1; body.entries[0].status = "released"; });
+  expect(lendCheckPermit(input(dir, "legacy")).status).toBe("closed");
+  const db = new Database(database(dir));
+  try {
+    expect(JSON.parse((db.query("SELECT body FROM check_permit").get() as { body: string }).body)).toMatchObject({ version: 2, entries: [] });
+    expect(db.query("SELECT id FROM check_permit_closed").all()).toEqual([{ id: "legacy" }]);
+  } finally { db.close(); }
+});
+
+
+test("conflicting legacy tombstones roll back instead of discarding corrupt state", () => {
+  const dir = root();
+  expect(lendCheckPermit(input(dir, "a")).status).toBe("granted");
+  expect(lendCheckPermit(input(dir, "a", "release")).status).toBe("released");
+  const closed = state(dir).entries[0];
+  alter(dir, (body) => { body.version = 1; body.entries.push({ ...closed, workerId: "conflicting-worker" }); });
+  const before = readFileSync(database(dir));
+  expect(lendCheckPermit(input(dir, "b"))).toMatchObject({ allowed: false, status: "blocked", retryable: false });
+  expect(readFileSync(database(dir))).toEqual(before);
+});
+
+
+test("missing terminal table in a migrated store fails closed and is not recreated", () => {
+  const dir = root();
+  expect(lendCheckPermit(input(dir, "a")).status).toBe("granted");
+  expect(lendCheckPermit(input(dir, "a", "release")).status).toBe("released");
+  const db = new Database(database(dir));
+  try { db.exec("DROP TABLE check_permit_closed"); } finally { db.close(); }
+  const before = readFileSync(database(dir));
+  expect(lendCheckPermit(input(dir, "a"))).toMatchObject({ allowed: false, status: "blocked", retryable: false });
+  expect(readFileSync(database(dir))).toEqual(before);
 });

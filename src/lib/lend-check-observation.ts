@@ -21,19 +21,21 @@ function command(file: string, args: string[]): string {
 
 // Read only OS identity, never command lines, owner configuration or credentials. A failed read is not death.
 // Darwin's second-resolution start time can retain a reused PID conservatively; it must never free it speculatively.
-export function observeLendCheckProcess(pid: number): CheckProcessObservation {
+export function observeLendCheckProcess(pid: number, os = { platform: process.platform, command }): CheckProcessObservation {
   if (!Number.isSafeInteger(pid) || pid <= 0) return { kind: "unknown", reason: "invalid pid" };
   try {
     let start: string;
-    if (process.platform === "linux") {
+    if (os.platform === "linux") {
       const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19];
       if (!boot || !ticks || !/^\d+$/.test(ticks)) throw new Error("invalid process identity");
       start = `linux:${boot}:${ticks}`;
-    } else if (process.platform === "darwin") {
-      const boot = command("/usr/sbin/sysctl", ["-n", "kern.boottime"]);
-      const birth = command("/bin/ps", ["-p", String(pid), "-o", "lstart="]);
+    } else if (os.platform === "darwin") {
+      // Unlike kern.boottime, the boot session UUID does not change when the wall clock is stepped.
+      const boot = os.command("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"]);
+      if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(boot)) throw new Error("invalid boot session");
+      const birth = os.command("/bin/ps", ["-p", String(pid), "-o", "lstart="]);
       if (!Number.isFinite(Date.parse(birth))) throw new Error("invalid process start time");
       start = `darwin:${boot}:${birth}`;
     } else return { kind: "unknown", reason: "unsupported process identity platform" };

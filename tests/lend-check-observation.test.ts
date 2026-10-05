@@ -44,3 +44,22 @@ test("resource snapshot is diagnostic only and has no quota, permit or family de
   expect(observed.totalMemoryBytes).toBeGreaterThan(0);
   expect(Object.keys(observed).sort()).toEqual(["freeMemoryBytes", "loadAverage", "sampledAt", "totalMemoryBytes"]);
 });
+
+
+test("Darwin identity uses immutable boot session, never the wall-clock-dependent boottime", () => {
+  const calls: string[][] = [];
+  const command = (_file: string, args: string[]) => {
+    calls.push(args);
+    if (args.includes("kern.bootsessionuuid")) return "11111111-2222-3333-4444-555555555555";
+    if (args.includes("lstart=")) return "Mon Oct  5 12:34:56 2026";
+    throw new Error("mutable clock source must not be used");
+  };
+  const first = observeLendCheckProcess(process.pid, { platform: "darwin", command });
+  expect(first).toEqual(observeLendCheckProcess(process.pid, { platform: "darwin", command }));
+  expect(first).toEqual({ kind: "present", process: {
+    pid: process.pid, start: "darwin:11111111-2222-3333-4444-555555555555:Mon Oct  5 12:34:56 2026",
+  } });
+  expect(calls).toHaveLength(4);
+  expect(calls.some((args) => args.includes("kern.boottime"))).toBe(false);
+  expect(observeLendCheckProcess(process.pid, { platform: "darwin", command: () => "invalid" }).kind).toBe("unknown");
+});
