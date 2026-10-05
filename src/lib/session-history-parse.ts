@@ -178,7 +178,7 @@ export function parseHistoryLines(
       if (queued) {
         const msg = channelUserMessage(queued, seq, ts);
         const mid = channelMessageId(queued);
-        if (msg && (!mid || !seenChannelIds.has(mid)) && inbox.fresh(mid, msg)) all.push(msg);
+        if (msg && (!mid || !seenChannelIds.has(mid)) && inbox.fresh(mid, msg)) all.push(Object.assign(msg, { midTurn: true }));
       }
       continue;
     }

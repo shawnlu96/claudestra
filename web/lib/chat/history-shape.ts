@@ -42,6 +42,8 @@ export interface NeutralMessage {
   wire?: string;
   /** bridge 真收下的附件路径（服务端只取 channel 头属性，lib/inbound-body.ts channelAttachments）：外源的附件卡片只认它 */
   attachments?: string[];
+  /** CC 忙时队列吸收、并进当前回合的入站（服务端按 queued_command 记录标）：回合切分不把它当边界 */
+  midTurn?: boolean;
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -189,7 +191,7 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   // 附件行也留在正文里、卡片只是附加预览——否则外人写一行 [attachment: 任意路径]，owner 只看到一个文件名，agent 拿到的是路径
   const { content, attachments } = foreignAware(click?.text ?? own, untrusted, m.attachments);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
-  const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
+  const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}), ...(m.midTurn ? { midTurn: true } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };
 }
 

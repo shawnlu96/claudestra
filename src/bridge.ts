@@ -576,6 +576,7 @@ import { originFooter } from "./lib/instance-tag.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("bridge");
+(await import("./lib/sandbox-parent-watchdog.js")).startSandboxParentWatchdog(); // 沙箱：启动方被硬杀就跟着退；生产空操作
 
 // v2.19.0 日志落点从 /tmp 搬到 ~/.claude-orchestrator/logs（见 lib/log-paths.ts）
 import { initDaemonLogs } from "./lib/log-paths.js";
