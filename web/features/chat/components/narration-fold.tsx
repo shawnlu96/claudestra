@@ -1,7 +1,10 @@
 "use client";
-import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useChatStore } from "../chat-store";
 import { getFold, isFolded, setFoldAll, setFoldOne, subscribeFold } from "../narration-fold";
+import { foldsInbound } from "../inbound-fold";
+import { useIsExport } from "../export-context";
+import { Domd } from "@/components/domd";
 import { useT } from "@/lib/i18n";
 
 /**
@@ -85,5 +88,31 @@ export function NarrationFolded({ text, foldKey }: { text: string; foldKey: stri
     >
       {first}
     </div>
+  );
+}
+
+/**
+ * 外源入站气泡的正文：agent 发来的长消息默认折成两行预览（规则 ../inbound-fold.ts），样式同旁白收起；
+ * 展开态只活在本组件（不进 localStorage），导出稿一律展开。按钮 stopPropagation：别连带触发气泡的长按 / 引用手势。
+ */
+export function InboundBody({ from, body }: { from?: string; body: string }) {
+  const t = useT();
+  const exporting = useIsExport();
+  const [open, setOpen] = useState(false);
+  const md = <Domd initMd={body} bodyClassName="chat-domd" />;
+  if (exporting || !foldsInbound(from, body)) return md;
+  return (
+    <>
+      {open ? md : (
+        <div className="line-clamp-2 cursor-pointer whitespace-pre-line text-[12.5px] italic opacity-70" onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
+          {body}
+        </div>
+      )}
+      <div className="mt-1 flex select-none justify-end" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className={BTN} onClick={() => setOpen(!open)}>
+          {open ? t("▴ 收起") : t("▾ 展开")}
+        </button>
+      </div>
+    </>
   );
 }
