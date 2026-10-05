@@ -18,7 +18,7 @@ import { requestContextOf, setRequestContext, type RequestSource } from "../src/
 import { toB64url, utf8 } from "../src/lib/e2e/encoding.ts";
 import { generateEcdh } from "../src/lib/e2e/primitives.ts";
 import { SIG_HEADERS, signedHeaders } from "../src/lib/instance-key.ts";
-import { STATE_DIR } from "../src/lib/paths.ts";
+import { RUNTIME_DIR, STATE_DIR } from "../src/lib/paths.ts";
 import { e2ePeerOf, localE2e, peerE2eRefusal, peerForUrl, type LocalE2e } from "../src/lib/peer-e2e-local.ts";
 import { sealRedeemRequest } from "../src/lib/peer-e2e-redeem.ts";
 import { encodeHello, isE2eFrame } from "../src/lib/peer-e2e-wire.ts";
@@ -92,7 +92,7 @@ beforeAll(async () => {
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
   // 父入口凭这一行核：身份在本进程私有目录生成且已清理、deriveBits 已复原
-  const receipt = { state: STATE_DIR, tmp: tmpdir(), fps: [a, b, carl, stranger].map((x) => x?.fp), dirs, cleaned: dirs.every((d) => !existsSync(d)),
+  const receipt = { state: STATE_DIR, runtime: RUNTIME_DIR, tmp: tmpdir(), fps: [a, b, carl, stranger].map((x) => x?.fp), dirs, cleaned: dirs.every((d) => !existsSync(d)),
     restored: crypto.subtle.deriveBits === subtleDeriveBits };
   process.stdout.write("E2E_GATES_RESULT " + JSON.stringify(receipt) + "\n");
 });
