@@ -235,6 +235,10 @@ Peer collaboration deliberately routed cross-instance conversations through `#ag
 
 An agent may `end_turn` without calling `reply()` (on Discord, the watcher's 💬 stream covers this). If the API's synchronous waiter only waits for a `reply`, it will sit there until it times out. **When handling the Stop hook, check for an API waiter belonging to that agent's ws**: still pending → resolve it with the `assistant_text` captured by the drain, marking the response `{ viaFallback: true }`; no text at all → resolve as `{ done: true, reply: null }`. This hangs off the existing per-ws pending cleanup point in the Stop hook, structurally identical to the `pendingPeerInbound` fallback.
 
+Several requests from one token waiting at once (update 2026-10-04): a reply with `reply_to` settles only that request; without it, the reply goes to the newest request the agent has seen, and the reply result lists the other waiting message ids.
+Requests left without their own answer get a bridge-written sentence at Stop (`viaFallback: true` + `siblingThreadId`) instead of `reply: null`; `reply: null` still means "the agent said nothing to this caller this turn".
+`reply_to` pointing at an already settled request: if its result has neither text nor files, the reply is written back to that thread (the caller is still polling; same `peerSeesAnswer` predicate as the peer receiver); otherwise a peer token gets an error and nothing is sent, other tokens still get the SSE event plus a warning. Rules: `lib/pending-reply-scope.ts` `claimApiReply`.
+
 ### 5.6 Inbound attachments (gap R5)
 
 Sending a screenshot or a file to an agent is a frequent operation, so it ships in v1: `POST /api/v1/agents/:name/messages` accepts `multipart/form-data` (a `text` field + `files`, ≤ 5 files, ≤ 10MB each), lands them in the existing inbox directory, and then rides the Envelope's `meta.attachments` — the same path as Discord attachments.

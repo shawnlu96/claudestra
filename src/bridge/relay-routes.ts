@@ -4,7 +4,7 @@
  *   GET  /relay/status                  中继连接状态 + 联系人在线（relay-link.ts）
  *   POST /relay/pair/new {grant…}       签配对码 → { code, display, url, link, base, slug, fp, grant, expiresAt }（`claudestra pair`，bridge/devices.ts）
  *   GET  /relay/pair/approvals          手输短码后等 Mac 确认的设备
- *   POST /relay/pair/approve {id,approve}
+ *   POST /relay/pair/approve {id,approve} 手输短码的待确认；{code,approve} 本机浏览器的一键配对（码 = 浏览器上显示的，`claudestra pair approve`）
  *   POST /relay/pair/redeem {code}      旧 Web 的 /api/auth/pair 拿用户输入的码来换会话 → { ok, username }（兼容期）
  *   POST /relay/request {to,…}          manager 的 peer 命令经中继调对方（bridge 才有中继连接，manager 是另一个进程）
  */
@@ -24,7 +24,7 @@ export { socketTrust } from "./relay-inbound.js";
 export { localProbeResponse } from "./local-probe.js";
 import { relayClient, relayInfo } from "./relay-link.js";
 import { activePairingCodeList, activePairingCodes, redeemPairingCode } from "./relay-pairing.js";
-import { decideApproval, issuePairing, pendingApprovals } from "./devices.js";
+import { decideApproval, decideLocalByCode, issuePairing, pendingApprovals } from "./devices.js";
 
 const MAX_CLI_RESPONSE = 8 * 1024 * 1024;
 
@@ -69,9 +69,14 @@ async function pairRedeem(req: Request): Promise<Response> {
 
 async function pairApprove(req: Request): Promise<Response> {
   const body = await readJson(req);
-  if (typeof body.id !== "string") return json(400, { ok: false, error: '"id" required' });
-  const r = await decideApproval(body.id, body.approve === true);
-  return json(!r ? 404 : r.ok === false ? 403 : 200, r ?? { ok: false, error: "approval not found or already decided" }); // 403：本机全权请求回环批不了
+  const approve = body.approve === true;
+  if (typeof body.code === "string") {
+    const r = await decideLocalByCode(body.code, approve);
+    return json(r ? 200 : 404, r ?? { ok: false, error: "没有这个码的本机配对请求（核对浏览器上的码；过期了就在网页上再点一次一键配对）" });
+  }
+  if (typeof body.id !== "string") return json(400, { ok: false, error: '"id" or "code" required' });
+  const r = await decideApproval(body.id, approve);
+  return json(!r ? 404 : r.ok === false ? 403 : 200, r ?? { ok: false, error: "approval not found or already decided" }); // 403：本机全权请求按编号批不了
 }
 
 /** manager 经中继调对方：正文 base64 进出，整读（CLI 的响应都是小 JSON） */

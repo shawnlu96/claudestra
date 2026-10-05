@@ -9,6 +9,7 @@ import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import { runLedger } from "../src/manager/ledger.js";
 
 const ctx = { actor: "owner", now: 1000 };
 
@@ -82,10 +83,13 @@ test.each([1, 200])("maximum-length key with %i DAG nodes builds or informs PM",
     if (size === 200) {
       expect(getFeature(db, f.id)?.currentVersion).toBe(1);
       expect(getEventByDedup(db, followUpKey(task.id, 1))?.data.followUpFailure).toContain("后续节点没开成");
-      await followUpFailureNotice(db, task, async () => { throw new Error("offline"); });
       const sent: string[] = [];
-      await followUpFailureNotice(db, task, async (_, text) => { sent.push(text); });
-      await followUpFailureNotice(db, task, async (_, text) => { sent.push(text); });
+      const manager = (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: ["p"], now: () => 2000,
+        loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} });
+      const deps = (notifyPm: (t: unknown, text: string) => Promise<void>) => ({ notifyPm, manager, now: () => 2000 });
+      await followUpFailureNotice(db, task, deps(async () => { throw new Error("offline"); }));
+      await followUpFailureNotice(db, task, deps(async (_, text) => { sent.push(text); }));
+      await followUpFailureNotice(db, task, deps(async (_, text) => { sent.push(text); }));
       expect(sent).toHaveLength(1);
       expect(sent[0]).toContain(report);
       return;

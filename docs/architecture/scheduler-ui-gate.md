@@ -8,8 +8,8 @@ paths, `extra.screenshotsDigest` = their sha256). Who looks depends on the card.
 | default | the card's PM | `ledger ui-approve <task> --head <sha> --digest <digest> [--text]` / `ledger ui-reject <task> --text <意见>` |
 | `ownerVisual` (global palette, theme tokens, redesign) | the owner | the scheduler's screenshot ask (`scheduler_ui_screenshot`), answered with the authenticated owner mark |
 
-Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, merge-write check, PM notice), `src/lib/ledger-ui-approve.ts`
-(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`.
+Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, PM notice), `src/lib/scheduler-ui-merge-refusal.ts` (merge-write / merge-run check), `src/lib/ledger-ui-approve.ts`
+(writes), `src/lib/ledger-ui-approve-verdict.ts` (PM's verdict read back + the fix order it makes), `src/manager/ledger-ui-cmds.ts` (CLI). Tests: `tests/scheduler-ui-pm-gate.test.ts`, `tests/scheduler-ui-owner-visual.test.ts`, `tests/scheduler-ui-merge-begin.test.ts`.
 
 ## Flow after a passing review
 
@@ -30,7 +30,10 @@ Code: `src/lib/scheduler-ui-gate.ts` (projection, planner step, merge-write chec
 - Writers: a manager other than the team dispatcher (`actorMayConfigure`). The gate re-checks the event's actor on read, so an
   event that got past the CLI by another path still does not count.
 - The merge write (`requireReviewedMerge` → `uiMergeRefusal`) re-reads the ledger inside its transaction: an owner-answered
-  scheduler ask bound to the card, or — only when the card is not `ownerVisual` — a bound PM approval.
+  scheduler ask bound to the card, or — only when the card is not `ownerVisual` — a bound PM approval. The merge run re-reads the
+  same check when it starts (`beginMergeRun`), before every GitHub step (`mergeRunDrift`) and once more after the `merging` claim
+  returns, right before the merge call (`driveMerge` recheck): an approval that went stale, was replaced, was raised to ownerVisual
+  or does not cover a carried head stops the run as unknown ("合并未发出") before anything is sent.
 
 ## ownerVisual
 

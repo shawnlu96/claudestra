@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "./ask-bind.js";
+import { canonicalJson } from "./canonical-json.js";
 import {
   SharedLedgerError, type SharedLedgerImport, type SharedLedgerImportManifest,
   type SharedLedgerProjection, type SharedLedgerTaskProjection,

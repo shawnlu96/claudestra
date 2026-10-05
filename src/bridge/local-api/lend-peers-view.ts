@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import { canReadLedger } from "../../lib/devices.js";
 import { LEND_LIVE } from "../../lib/ledger-lend-schema.js";
 import { getTask } from "../../lib/ledger-store.js";
-import { getLendPeer, peerCapacity, type PeerCapacity } from "../../lib/ledger-lend-peers.js";
+import { getLendPeer, peerCapacity, unifiedPeerCapacity, type PeerCapacity, type UnifiedPeerCapacity } from "../../lib/ledger-lend-peers.js";
 import { isPriority, LEND_PATH, MAX_OPEN, readLend, type BorrowEntry, type Priority } from "../../lib/lend-config.js";
 import { placementOf } from "../../lib/lend-placement-view.js";
 import { effectiveLend, isPersonalProject, readLendContext, type LendContact } from "../../lib/lend-policy.js";
@@ -67,8 +67,12 @@ export interface PeerView {
   peer: string;
   maxOpen: number;
   projects: string[];
-  /** peerCapacity 原样；台账或 lend 表还不存在时 null */
+  /** 条目有统一池（agents）项目时 = unifiedPeerCapacity（与 placement / 工作看板同口径），全是 legacy 时 = peerCapacity(maxOpen)；台账或 lend 表还不存在时 null */
   capacity: PeerCapacity | null;
+  /** capacity 适用的项目：有统一项目时只列它们，否则列 legacy 项目；scheduler.json 读不了或台账不在时 [] */
+  capacityProjects: string[];
+  /** 仅混合条目：legacy 项目仍受 maxOpen 的读数与适用项目；其余 null。与 capacity 是同一台机器的两种计数上界，不能相加 */
+  legacyCapacity: { projects: string[]; capacity: PeerCapacity } | null;
   reported: Record<string, { total: number; busy: number }> | null;
   paused: { reason: string; until: number } | null;
   grant: { roles: string[]; repos: string[]; until: number; ordersLeftToday: number } | null;
@@ -147,13 +151,34 @@ function openDb(): Database | null {
   }
 }
 
-function peerView(db: Database | null, b: BorrowEntry, now: number): PeerView {
-  const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects, roles: b.roles, priority: b.priority ?? "balance", quota: peerQuota(b.peer, now) };
-  if (!db || !hasTable(db, "lend_orders")) return { ...base, capacity: null, reported: null, paused: null, grant: null };
+/**
+ * A peer's capacity is read the way placement counts it, per project of the entry: a project scheduler.json runs on the agents
+ * pool sees the unified figure (no borrow.maxOpen); any other project still sees the legacy maxOpen cap. A mixed entry reports
+ * both, each with the projects it applies to. Each figure is per peer, never summed per project: two projects share one set of seats.
+ */
+const splitProjects = (b: BorrowEntry, cfg: SchedulerConfig | null): { unified: string[]; legacy: string[] } => {
+  // scheduler.json unreadable: which project runs which policy is unknown, so no scope is claimed (capacity keeps the legacy figure)
+  if (!cfg) return { unified: [], legacy: [] };
+  const known = b.projects.filter((id) => cfg.projects[id]);
+  return { unified: known.filter((id) => !!cfg.projects[id]!.agents), legacy: known.filter((id) => !cfg.projects[id]!.agents) };
+};
+
+/** The wire keeps PeerCapacity's shape: totals / busy are already in `reported`. */
+const peerCapacityOf = ({ totals: _t, busy: _b, ...cap }: UnifiedPeerCapacity): PeerCapacity => cap;
+
+function peerView(db: Database | null, b: BorrowEntry, now: number, cfg: SchedulerConfig | null): PeerView {
+  const { unified, legacy } = splitProjects(b, cfg);
+  const mixed = unified.length > 0 && legacy.length > 0;
+  const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects, roles: b.roles, priority: b.priority ?? "balance", quota: peerQuota(b.peer, now),
+    capacityProjects: unified.length > 0 ? unified : legacy };
+  // no ledger: no figure, so no scope either
+  if (!db || !hasTable(db, "lend_orders")) return { ...base, capacityProjects: [], capacity: null, legacyCapacity: null, reported: null, paused: null, grant: null };
   const p = getLendPeer(db, b.peer);
   const g = p?.grant;
+  const legacyCap = (): PeerCapacity => peerCapacity(db, b.peer, b.maxOpen, now);
   return {
-    ...base, capacity: peerCapacity(db, b.peer, b.maxOpen, now), reported: p?.slots ?? null, paused: p?.paused ?? null,
+    ...base, capacity: unified.length > 0 ? peerCapacityOf(unifiedPeerCapacity(db, b.peer, now)) : legacyCap(),
+    legacyCapacity: mixed ? { projects: legacy, capacity: legacyCap() } : null, reported: p?.slots ?? null, paused: p?.paused ?? null,
     grant: g ? { roles: g.roles, repos: g.repos, until: g.until, ordersLeftToday: g.ordersLeftToday } : null,
   };
 }
@@ -208,7 +233,7 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
       maxOpenLimit: MAX_OPEN,
     },
     ledger: !!db && hasTable(db, "lend_orders"),
-    peers: eff.borrow.map((b) => peerView(db, b, now)),
+    peers: eff.borrow.map((b) => peerView(db, b, now, cfg)),
     remote: remoteRows(db, (d, id) => placementView(d, id, cfg, eff.borrow, now)),
   };
 }

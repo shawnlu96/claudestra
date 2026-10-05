@@ -351,7 +351,7 @@ class Card {
     return left > 0 ? `连续 ${streak} 次派单未投递（${oneLine(recent[0].receipt ?? "")}），${Math.ceil(left / 1000)}s 后再派` : null;
   }
 
-  async step(): Promise<CardOutcome> { await (await import("./review-converge-notice.js")).followUpFailureNotice(this.db, this.task, this.deps.notifyPm);
+  async step(): Promise<CardOutcome> {
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
@@ -366,7 +366,7 @@ class Card {
     const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
     const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
     await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
-    if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps.notifyPm, (r) => this.escalate(r));
+    if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
@@ -385,6 +385,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
+  out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
   for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;

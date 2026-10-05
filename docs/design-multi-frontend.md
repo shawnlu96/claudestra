@@ -266,6 +266,10 @@ waiter**：还挂着 → 用 drain 捕获的 assistant_text resolve，响应标
 `{ viaFallback: true }`；连文本都没有 → resolve 成 `{ done: true, reply: null }`。
 挂靠现有 Stop hook 的 per-ws pending 清理点，与 pendingPeerInbound 兜底同构。
 
+同一 token 有几条请求同时在等（Update 2026-10-04）：reply 带 `reply_to` 只解开那一条；不带就记到 agent 看到过的最新一条，reply 结果里列出其余还在等的 message_id。
+没被单独答复的那几条，Stop 时回 bridge 写的一句说明（`viaFallback: true` + `siblingThreadId`），不再回 `reply: null`；`reply: null` 仍只表示「这一回合对这个调用方一句都没说」。
+`reply_to` 指向已结掉的请求：结果既没正文也没附件就写回原 thread（调用方还在轮询；判据与 peer 接收端同一个 `peerSeesAnswer`），否则 peer token 报错不投、其它 token 照旧走事件流并给 warning。判据：`lib/pending-reply-scope.ts` `claimApiReply`。
+
 ### 5.6 入站附件（遗漏补遗 R5）
 
 发截图/文件给 agent 是高频操作，v1 就做：`POST /api/v1/agents/:name/messages`

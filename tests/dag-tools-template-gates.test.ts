@@ -80,7 +80,7 @@ describe("ui v3: restate like code v3, merge still behind the owner screenshot g
     expect(f.task().stage).toBe("build");
   });
 
-  test("merge-begin still refuses a ui v3 card outright", () => {
+  test("merge-begin refuses a ui v3 card without a bound screenshot approval", () => {
     const dir = mkdtempSync(join(tmpdir(), "i28-n4-merge-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
     try {
       const ctx = { actor: "owner", now: 100 };
@@ -90,7 +90,7 @@ describe("ui v3: restate like code v3, merge still behind the owner screenshot g
         .run(H2, "https://github.com/example/repo/pull/42", JSON.stringify({ screenshotsDigest: "d".repeat(64) }));
       db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,
         templateVersion,status,reason,createdAt,updatedAt) VALUES ('merge-one','T1','p','merge_deploy','merge',3,4,2,1,?,3,'submitted','ready',100,100)`).run(H2);
-      expect(() => beginMergeRun(db, ctx, "merge-one", ["check"])).toThrow(/UI 截图 owner 许可/);
+      expect(() => beginMergeRun(db, ctx, "merge-one", ["check"])).toThrow(/PM 截图验收/);
     } finally {
       closeLedger(path);
       rmSync(dir, { recursive: true, force: true });

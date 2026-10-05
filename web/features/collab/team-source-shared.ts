@@ -8,9 +8,16 @@ import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
 import { teamOverview, teamTaskDetail, type TeamOverview } from "./team-source-adapter";
-import type { CollabSource, FollowOpts } from "./team-source";
+import type { UnknownMetric } from "./collab-model";
+import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
 
 export const POLL_MS = 5_000;
+
+/** 团队键对不上本机 registry / asks / last-seen / 谁在干活 / 成员卡：这些本机接口一律不调，界面显示「暂无」或隐藏 */
+const UNAVAILABLE: ReadonlySet<CollabUnavailable> = new Set(["lastSeen", "workBoard", "presence", "ownerWaits", "teamPanel"]);
+const HOME_ONLY: ReadonlySet<CollabHomeOnly> = new Set(["events.text", "review.text", "sessions", "say", "spec.full", "replay"]);
+/** 投影里没有完成时刻 / 轮次 / 审查计数 / 等复核时长（observedAt 只是镜像刷新时刻）：四项都按未知给 */
+const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", "fixed", "reviewWait"];
 
 export interface SharedSource extends CollabSource {
   /** 最近一次转好的总览与原始数据（团队操作按卡号找回 feature） */
@@ -58,16 +65,17 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
   };
   return {
     label,
-    unknownMetrics: true,
+    unavailable: UNAVAILABLE,
+    homeOnly: HOME_ONLY,
     dag: {
       board,
       feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
       diff: async () => { throw new Error('Shared version comparisons are unavailable'); },
     },
-    product: async () => { const got = last ?? await read(); return sharedProductBoard(got.list, got.team.ov.now, got.team.ov.tasks); },
+    product: async () => { const got = last ?? await read(); return sharedProductBoard(got.list, got.team.ov.now, got.team.ov.tasks, got.details); },
     last: () => last,
     poke: () => { for (const p of pokes) p(); },
-    overview: async () => (await read()).team.ov,
+    overview: async () => ({ ...(await read()).team.ov, unknownMetrics: UNKNOWN_METRICS }),
     task: async (id) => {
       const got = last ?? (await read());
       const d = teamTaskDetail(got.team, id, Date.now());

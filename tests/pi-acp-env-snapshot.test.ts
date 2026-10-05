@@ -9,6 +9,8 @@ import { join } from "node:path";
 
 type Handler = (e: unknown, ctx: unknown) => unknown;
 const dir = mkdtempSync(join(tmpdir(), "pi-snap-acp-"));
+// 还原成 preload 的临时目录而不是删掉：删了之后同一次 bun test 里后面起的子进程会回落到真实 home 下的默认目录
+const savedStateDir = process.env.CLAUDESTRA_STATE_DIR;
 let mod: typeof import("../src/lib/acp/pi-adapter/pi-env-snapshot.ts");
 
 beforeAll(async () => {
@@ -18,7 +20,8 @@ beforeAll(async () => {
 });
 afterAll(() => {
   delete process.env.CLAUDESTRA_AGENT;
-  delete process.env.CLAUDESTRA_STATE_DIR;
+  if (savedStateDir === undefined) delete process.env.CLAUDESTRA_STATE_DIR;
+  else process.env.CLAUDESTRA_STATE_DIR = savedStateDir;
   delete process.env.PI_VERSION;
 });
 

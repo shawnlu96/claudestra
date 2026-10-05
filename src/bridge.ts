@@ -8,7 +8,8 @@ import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-deliv
 
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { requestStillHeld } from "./lib/held-pac.js";
-import { copyOutboundToInbox } from "./bridge/local-api/media-refresh.js";
+import { missingReplyFiles, stageApiReplyFiles } from "./bridge/api-reply-files.js";
+import { stageLocalReplyFiles, withLocalAttachments } from "./bridge/local-reply-files.js";
 import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inline-buttons.js";
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
@@ -169,7 +170,7 @@ import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
-import { dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy, takeApiPending } from "./lib/pending-reply-scope.js";
+import { claimApiReply, dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
 import { holdAtWallWait, quotaWall, rearmResume, resumeStillWanted, startQuotaWall } from "./bridge/quota-wall-wiring.js";
 import { sessionGone } from "./lib/route-session.js";
 import { onCodexTypeInFailed } from "./bridge/codex-menu-hold.js";
@@ -463,18 +464,19 @@ function nudgeAmbiguousCallers(cid: string): void {
 /** target 的答复推回 caller。caller 的 ws 按 channelId 现取(回程簿落盘不存 ws,caller 重连 / bridge 重启后旧连接已失效);
  *  caller 此刻不在线就进押后队列,它连上后的每分钟扫描会投。fromChannel = 推回的 meta.chat_id(见 originalReplyChannel)。 */
 async function pushBackToCaller(
-  pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string, intent: "response" | "notification" = "response",
+  pac: PendingAgentCall, fromWs: ServerWebSocket<unknown> | undefined, fromChannel: string, content: string, idPrefix: string,
+  intent: "response" | "notification" = "response", attachments: readonly string[] = [], // inbox 副本路径（bridge/local-reply-files.ts）
 ) {
   const live = clients.get(pac.callerChannelId);
   // 不在线时没有可用的 ws:押后队列落盘本来就剥掉 ws、投递时换最新连接,这里同样留空
   const callerWs = live?.ws as ServerWebSocket<unknown>;
-  const env: RouterEnvelope = {
+  const env = withLocalAttachments({
     from: { kind: "local", agentName: pac.targetName, channelId: fromChannel, ws: fromWs ?? callerWs },
     to: { kind: "local", agentName: pac.callerName, channelId: pac.callerChannelId, ws: callerWs, cwd: live?.cwd },
     intent,
     content,
     meta: { messageId: newMessageId(idPrefix), triggerKind: "agent_tool", ts: new Date().toISOString(), threadId: newThreadId() },
-  };
+  }, attachments);
   if (live || pmClientFor(pac.callerName, clients, pac.targetName)) return (await deliver(env)).outcome; // 前任 PM 离线：当班 PM 接它的答复
   heldLocalMsgs.holdEnv(env);
   console.log(`⏸ ${pac.callerName} 不在线,${pac.targetName} 的答复进押后队列,连上后投`);
@@ -562,7 +564,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -686,20 +688,16 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
+  const missing = await missingReplyFiles(env.meta.files || []); // 附件不在就整条报错、请求不出队，别回一个看似成功的空结果
+  if (missing) return { envelope: env, outcome: { kind: "error", error: new Error(missing) } };
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
-  const queue = pendingApiRequests.get(key);
-  const pending = queue ? takeApiPending(queue, env.meta.inReplyTo) : undefined; // 作废回显只对它自己那条请求
-  if (queue && queue.length === 0) pendingApiRequests.delete(key);
-
-  // 附件登记 → 下载 URL（属主 = 该 token，GET /api/v1/files/:id 校验）
-  const files = (env.meta.files || []).map((p) => {
-    const id = `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const name = p.split("/").pop() || "file";
-    apiFiles.set(id, { path: p, tokenId: to.tokenId, name });
-    return { name, url: `/api/v1/files/${id}` };
-  });
-  const threadId = pending?.threadId || env.meta.threadId;
+  const queue = pendingApiRequests.get(key) ?? [];
+  const claim = claimApiReply(queue, apiThreadResults, { ...to, channelId: fromChannelId, inReplyTo: env.meta.inReplyTo, replyTo: env.meta.replyTo,
+    unseen: new Set(heldFromOf(fromChannelId)?.map((i) => i.messageId)) });
+  if (!queue.length) pendingApiRequests.delete(key);
+  if (claim.error) return { envelope: env, outcome: { kind: "error", error: new Error(claim.error) } };
+  const pending = claim.taken, threadId = pending?.threadId || claim.threadId || env.meta.threadId;
   const agentName = pending?.agentName ||
     (env.from.kind === "local" ? env.from.agentName : undefined) ||
     agentNameForChannel(fromChannelId) ||
@@ -709,16 +707,18 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // "?" 的幽灵会话，用户在正确的会话里什么也看不到（owner 两次实报「问号频道」，
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
-  // reply 的附件（常在临时目录）拷进 inbox 供网页内联显示，并记账「谁、哪个原路径 → 哪个副本」（媒体索引按账认领，见 lib/media-outbound.ts）
-  const eventFiles = (env.meta.sentFiles = await copyOutboundToInbox(env.meta.files || [], agentName)); // ask-reply.ts 把它记进作答附件
+  // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles });
+  const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
-    files: files.length ? files : undefined,
+    files: staged.files.length ? staged.files : undefined,
     threadId,
     agent: agentName,
   };
-  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: pending?.tokenId ?? (env.to.kind === "api" ? env.to.tokenId : undefined) });
+  const req = pending ?? apiThreadResults.get(threadId); // 答的是哪条请求（写回旧 thread 时沿用它的）
+  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: to.tokenId, messageId: req?.messageId, agentChannelId: req?.agentChannelId });
   pending?.resolve?.(result);
 
   emitEvent({
@@ -731,7 +731,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
   // R2 审计镜像（fire-and-forget，走 bridge→user 的 UI 类通道）
   mirrorApiExchange(to, fromChannelId, `[🌐 API→${to.name}] ${env.content}`).catch(() => {});
 
-  return { envelope: env, outcome: { kind: "sent" } };
+  return { envelope: env, outcome: { kind: "sent", warning: [claim.warning, staged.warning].filter(Boolean).join("；") || undefined } };
 }
 
 /** R2：API 对话镜像到 agent 的 Discord 频道（principal.mirror === false 时不发） */
@@ -991,25 +991,22 @@ async function deliverToUser(env: RouterEnvelope, to: RouterUserEndpoint): Promi
       components,
       files: env.meta.files,
     });
-    // v2.0.15+ cross-agent forward —— 见函数注释（Discord 专属：clients 的 key
-    // 是 Discord channel id，别的 transport 没有"用户频道=agent 频道"的重合）
+    // cross-agent forward 见函数注释（Discord 专属：clients 的 key 是 Discord channel id，别的 transport 没有「用户频道=agent 频道」的重合）
+    let warning: string | undefined;
     if (env.from.kind === "local" && dest.transport === "discord") {
       const fromLocal = env.from;
       const isFromMaster = isMasterWs(fromLocal.ws);
       const targetClient = clients.get(to.channelId);
-      // v2.5.5: fromLocal.channelId 为空 = 发送方不是任何已注册的 agent，而是
-      // manager/cron 的临时 bridge-client 连接（restart 完成通知、cron 播报这类
-      // **给用户看的管理消息**）。这类只发 Discord，不 forward 进目标 agent 的
-      // 上下文 —— 否则 agent 收到"你自己已重启"的通知，判断一轮不用回应（内心戏
-      // 被 jsonl-watcher 以 💬 播到频道），ia-watchdog 又 nudge 一轮，一条通知
-      // 变三条噪音 + 两轮 LLM 消耗（owner 2026-07-08 报的"重启后一堆乱七八糟
-      // bridge 消息"）。真 agent reply 到别的 agent 频道时 channelId 非空，不受影响。
+      // channelId 为空 = manager/cron 的临时 bridge-client（重启完成、cron 播报这类给用户看的管理消息）：只发 Discord；
+      // forward 进对方上下文会让它白跑一轮、再被看门狗 nudge 一轮。真 agent reply 到别的 agent 频道时 channelId 非空
       if (!isFromMaster && fromLocal.channelId && targetClient && targetClient.ws !== fromLocal.ws) {
-        forwardReplyToAgentClaude(fromLocal, env.content, to.channelId, targetClient)
+        const files = await stageLocalReplyFiles(env.meta.files, agentLabelForChannel(fromLocal.channelId)); // 转发不等，拷不过去要现在写进 reply 结果
+        warning = files.warning;
+        forwardReplyToAgentClaude(fromLocal, env.content, to.channelId, targetClient, files.attachments)
           .catch((e) => console.error("reply→别agent频道 forward 异常:", e));
       }
     }
-    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids } };
+    return { envelope: env, outcome: { kind: "sent", discordMessageIds: ids, warning } };
   } catch (e) {
     return { envelope: env, outcome: { kind: "error", error: e as Error } };
   }
@@ -1025,6 +1022,7 @@ async function forwardReplyToAgentClaude(
   content: string,
   targetChannelId: string,
   targetClient: ClientInfo,
+  attachments: readonly string[],
 ): Promise<void> {
   let fromAgentName = fromEndpoint.agentName;
   let targetAgentName: string | undefined;
@@ -1040,7 +1038,7 @@ async function forwardReplyToAgentClaude(
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
   const answering = exactPac(fromEndpoint.channelId, targetChannelId);
   const text = content.replace(/<@!?\d+>\s*/g, "").trim();
-  const fwdEnv: RouterEnvelope = {
+  const fwdEnv = withLocalAttachments({
     from: { kind: "local", agentName: fromAgentName, channelId: fromEndpoint.channelId, ws: fromEndpoint.ws },
     to: { kind: "local", agentName: targetAgentName, channelId: targetChannelId, ws: targetClient.ws, cwd: targetClient.cwd },
     intent: answering ? "response" : "notification",
@@ -1051,7 +1049,7 @@ async function forwardReplyToAgentClaude(
       ts: new Date().toISOString(),
       threadId: newThreadId(),
     },
-  };
+  }, attachments);
   const fwd = await deliver(fwdEnv);
   if (fwd.outcome.kind === "sent") {
     if (answering) pendingAgentCalls.consume(fromEndpoint.channelId, targetChannelId, answering);
@@ -1839,8 +1837,13 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: errMsg }));
           break;
         }
-        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId); // edit_message 只准改自己发的（bridge/edit-guard.ts）
-        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId: env.meta.askId, askHash: env.meta.askHash, held: heldLocalMsgs.stat(fromChannelId) } }));
+        // target 在自己频道答复等它的 caller：同时推回 caller（pushBackToCaller → deliver，「[🤖 来自 X]」抬头），caller 不用轮询。
+        // ⚠ 必须是 target 本人发的：按频道取 pending 的话，任何 agent reply 到 target 的频道都会被当成 target 的答复推给 caller（判据 lib/pushback-scope.ts）
+        const pending = isTargetsOwnReply(msg.chatId, fromChannelId, ws, clients.get(msg.chatId)?.ws) ? answerablePac(msg.chatId) : undefined;
+        const pbFiles = await stageLocalReplyFiles(pending ? msg.files : undefined, pending?.targetName ?? ""); // 推回带附件：拷不过去的要写进这次 reply 结果
+        const warning = [delivery.outcome.warning, pbFiles.warning].filter(Boolean).join("；") || undefined;
+        const ids = noteReplySent(delivery.outcome.discordMessageIds || [], fromChannelId), { askId, askHash } = env.meta; // edit_message 只准改自己发的（bridge/edit-guard.ts）
+        ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result: { messageIds: ids, askId, askHash, held: heldLocalMsgs.stat(fromChannelId), warning } }));
 
         // v2.6.0+ 事件埋点：agent 的正式回复镜像（out）
         // api: 目的地跳过——deliverToApi 已统一埋点（带 threadId/api 标记），
@@ -1850,37 +1853,12 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           emitEvent({ agent: evAgent, chatId: msg.chatId, type: "chat_message", data: { direction: "out", from: evAgent, text, threadId: env.meta.threadId, ...(msg.components ? { components: msg.components } : {}), ...(env.meta.askId ? { askId: env.meta.askId } : {}) } });
         }
 
-        // v1.9.21+ send_to_agent 推回机制：
-        // 如果 reply 的 chat_id 正好是某个 pending send_to_agent 的 target agent 的
-        // channel，说明 agent 在它自己的 channel 里发了答案（discord 看得到，供审计）；
-        // bridge 同时把这段 text push 回 caller 的 ws 作为合成消息，caller 不用再轮询。
-        //
-        // 推回走 pushBackToCaller → deliver(envelope)，caller 的 ws 现取。
-        // from=local(target agent), to=local(caller agent), intent=response。
-        // renderContentForLocal 的 from.kind==="local" 分支会拼 "[🤖 来自 <name>]"
-        // 前缀（原来写的是 "[🤖 target 回复]"，语义等价 —— 都是标识"这条是别的
-        // agent 发来的 response"）。
-        // ⚠ 必须确认「发这条 reply 的就是 target 本人」。原先只按 msg.chatId 取 pending，
-        // 于是**任何** agent 只要 reply 到 target 的频道，它自己那条就会被当成 target 的
-        // 答复推回给 caller——带 intent=response、带「对方答复如下，请按计划继续」、还附上
-        // caller 自己填的 expecting（owner 2026-09-18 实报，一晚上撞十几次：
-        // 「正文逐字是我自己写的答复」「它一度以为我回了并准备据此动手」）。
-        // 判据见 lib/pushback-scope.ts：key 就是 target 的 channelId，所以
-        // 「发送方自己的频道 == 这条 reply 的目的频道」才成立。
-        const pending = isTargetsOwnReply(msg.chatId, fromChannelId, ws, clients.get(msg.chatId)?.ws)
-          ? answerablePac(msg.chatId)
-          : undefined;
         if (pending) {
           try {
-            // v2.0.1+: from.channelId 用 originalReplyChannel（caller 手头的
-            // 原 inbound 请求频道）而不是 target 的私频。
-            // resolveReplyBackChannel 对 from.kind=local 返回 from.channelId，
-            // pushback 的 meta.chat_id 就会是原频道，caller LLM 顺手回就对了。
-            // 没有 originalReplyChannel 时回退到 msg.chatId（target 私频）—
-            // 这是旧行为，保守兜底。
+            // 推回的 meta.chat_id 用 caller 手头那条请求的频道（originalReplyChannel），caller 顺手回就对了；没有才退回 target 私频
             const replyBackHint = pending.originalReplyChannel || msg.chatId;
             const cleanedReply = text.replace(/<@!?\d+>\s*/g, "").trim();
-            const outcome = await pushBackToCaller(pending, ws, replyBackHint, withExpecting(pending, cleanedReply), "agent_reply");
+            const outcome = await pushBackToCaller(pending, ws, replyBackHint, withExpecting(pending, cleanedReply), "agent_reply", "response", pbFiles.attachments);
             if (outcome.kind === "sent") {
               lastMessageSource.set(pending.callerChannelId, "agent");
               console.log(`📨 AGENT PUSH-BACK: ${pending.targetName} 回复 → push 给 caller=${pending.callerChannelId} (免去 fetch_messages 轮询)`);
@@ -2556,6 +2534,7 @@ async function resolveReplyTarget(chatId: string): Promise<RouterUserEndpoint | 
       const file = await readPrincipals();
       const p = findByTokenId(file, parsed.id);
       if (p?.name) name = p.name;
+      if (p?.peer) return { kind: "api", tokenId: parsed.id, name, peer: p.peer }; // peer 收不到没在等的回复：deliverToApi 据此报错而不是假装送到
     } catch { /* 名字仅展示用，查不到就用 tokenId */ }
     return { kind: "api", tokenId: parsed.id, name };
   }
@@ -2848,11 +2827,11 @@ async function handleHookRequest(req: Request): Promise<Response> {
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);
             for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
-              apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId });
+              apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId, messageId: p.messageId, agentChannelId: p.agentChannelId });
               p.resolve?.(result);
-              const data = { direction: "out", from: p.agentName, text: result.reply || "", threadId: p.threadId, api: true, viaFallback: true, ...(result.apiError ? { apiError: true } : {}) };
+              const { data, label } = apiFallbackEvent(p, result);
               emitEvent({ agent: p.agentName, chatId: `api:${p.tokenId}`, type: "chat_message", data });
-              console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${result.apiError ? `API 错误 ${result.error}` : result.reply ? result.reply.length + " chars" : "no-text"}）`);
+              console.log(`🌐 API waiter drain 兜底: ${p.agentName} → token ${p.tokenId}（${label}）`);
             }
 
             // inter-agent 看门狗: 这一轮结束时 cid 还挂着 inter-agent 消息（agent 既没 reply 也没 send_to_agent），

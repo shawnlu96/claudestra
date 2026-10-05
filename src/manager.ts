@@ -2664,6 +2664,7 @@ switch (cmd) {
   case "ai-inventory": await (await import("./manager/ai-inventory.js")).cmdAiInventory(args); break; // 本机 AI 能力清单（只读，T91）
   case "lend": case "borrow": await (await import("./manager/lend.js")).cmdLend(cmd, args); break; // 出借 / 借入声明 lend.json（lib/lend-config.ts）
   case "codex-sub-archive": await (await import("./manager/codex-sub-archive.js")).cmdCodexSubArchive(args); break; // Codex 子线程自动归档开关（缺省关）
+  case "state-backup": await (await import("./manager/state-backup.js")).cmdStateBackup(args); break; // 关键状态文件快照 list|now|restore（lib/state-backup.ts）
 
   case "invite-link": await cmdInviteLink(args); break;
 

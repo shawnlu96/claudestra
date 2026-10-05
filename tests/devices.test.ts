@@ -151,4 +151,20 @@ describe("ChallengeStore / Approvals", () => {
     expect(q.pending()).toEqual([]);
     expect(q.take(e.id)).toEqual({ state: "expired" });
   });
+  test("批准了但过期前没人取走 → onUnclaimed（调用方收回凭据）；取走的、拒绝的、没批的过期都不报", () => {
+    let now = T0.getTime();
+    const unclaimed: string[] = [];
+    const q = new Approvals(() => now, random, 1000, (a) => unclaimed.push(a.result!.credentialId));
+    const result = (id: string) => ({ token: "dev_t", credentialId: id, principalId: OWNER_PRINCIPAL_ID, expiresAt: "2027-01-01T00:00:00.000Z" });
+    const add = () => q.add({ code: "ABCD2345", deviceName: "d", clientIp: null, grant: fullGrant() });
+    const [left, taken, denied] = [add(), add(), add()];
+    add(); // 没人批
+    q.decide(left.id, true, result("dev_left"));
+    q.decide(taken.id, true, result("dev_taken"));
+    q.take(taken.id);
+    q.decide(denied.id, false);
+    now += 1001;
+    expect(q.pending()).toEqual([]);
+    expect(unclaimed).toEqual(["dev_left"]);
+  });
 });

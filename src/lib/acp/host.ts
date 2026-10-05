@@ -12,8 +12,8 @@ import { HostHeartbeat } from "./host-heartbeat.js";
 import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
-import { AcpTurnLoop, type StopReport } from "./turn.js";
-import { createAcpTranslator } from "./updates.js";
+import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
+import { createAcpTranslator, type AcpTranslator } from "./updates.js";
 
 export interface HostConfig {
   channelId: string;
@@ -53,6 +53,8 @@ const ENTRY_BATCH_MAX = 200, ENTRY_OUTBOX_MAX = 5_000, ENTRY_ACK_MS = 15_000, EN
 const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number } = { retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** 适配器认 /compact 的写法（codex-acp parseCommand：首块去空白后 /名字，名字不分大小写） */
+const COMPACT_COMMAND = /^\s*\/compact(\s|$)/i;
 
 export class AcpHost {
   private session: AcpSession | null = null;
@@ -82,7 +84,9 @@ export class AcpHost {
   private drainWaiters: (() => void)[] = [];
   private readonly permits = new Map<string, { frame: Record<string, unknown>; resolve: (optionId: string | null) => void; timer: ReturnType<typeof setTimeout> }>();
   private permSeq = 0;
-  private translator = createAcpTranslator();
+  private translator: AcpTranslator;
+  /** 在跑的这一轮是宿主发的 /compact：其间到的压缩完成算 manual，否则是适配器自己的自动压缩 */
+  private compactCommand = false;
   private readonly beat = new HostHeartbeat(() => ({ agent: this.cfg.agentName, sessionId: this.cfg.sessionId }), (m) => this.deps.log(m)); // 监护判卡住的回合心跳
   private readonly dedup = new FailureDedup();
   private readonly proxy: ToolProxy;
@@ -92,6 +96,7 @@ export class AcpHost {
   constructor(private readonly cfg: HostConfig, private readonly deps: HostDeps) {
     this.preamblePending = cfg.preamble;
     this.rt = cfg.runtime ?? acpRuntime();
+    this.translator = this.makeTranslator();
     this.proxy = deps.startProxy({ channelId: cfg.channelId, toBridge: (f) => this.link.send(f), log: (m) => deps.log(m) });
     this.link = deps.makeLink({
       registerFrame: () => ({
@@ -117,11 +122,13 @@ export class AcpHost {
         this.beat.turn();
         const s = await this.waitSession();
         if (!s) return { kind: "failed", failure: this.lastStartError ?? { kind: "error", key: `nosession#${++this.startSeq}`, message: "ACP 适配器没起来" } };
-        return s.prompt(text);
+        this.compactCommand = COMPACT_COMMAND.test(text);
+        return s.prompt(text).finally(() => (this.compactCommand = false));
       },
       steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
+      onSlotEnd: (e) => deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`),
       log: deps.log,
     });
   }
@@ -201,6 +208,12 @@ export class AcpHost {
     if (this.readyMarked || !this.registered || !(this.session || this.lastStartError?.kind === "auth")) return;
     this.readyMarked = true;
     await this.deps.markReady().catch((e) => this.deps.log(`标窗口就绪失败：${errText(e)}`));
+  }
+
+  /** 压缩完成只认本运行时的来源（updates.ts 文件头）：Pi 是 _meta.claudestra.compacted，Codex 是 ACP compaction_update */
+  private makeTranslator(): AcpTranslator {
+    const from = this.rt.id === "pi" ? "claudestra-meta" : "compaction-update";
+    return createAcpTranslator(undefined, { from, trigger: () => (this.compactCommand ? "manual" : "auto") });
   }
 
   private onUpdate(u: Record<string, unknown>): void {
@@ -354,7 +367,8 @@ export class AcpHost {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
     if (m.op === "clear") return void reply(await this.clearSession());
     if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
-    if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
+    const slot = acpSlotCall(this.loop, m, this.hostId); // slash / op_turn / slot_status / cancel_slot（turn.ts）
+    if (slot) return void slot.then(reply);
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);
       return void reply(ok ? { ok: true } : { ok: false, error: "这个权限请求已经不在等了（超时或适配器重起过）" });
@@ -380,7 +394,7 @@ export class AcpHost {
       },
       committed: (id, session) => commitAcpClear({
         sessionId: id, previousSessionId: this.cfg.sessionId, channelId: this.cfg.channelId, request: (f, ms) => this.link.request<boolean>(f, ms),
-        update: () => { this.cfg.sessionId = id; this.translator = createAcpTranslator(); },
+        update: () => { this.cfg.sessionId = id; this.translator = this.makeTranslator(); },
         ready: () => { if (this.session) this.publishConfig(this.session); if (!this.rotating) this.loop.resume(); },
         alive: () => !this.stopping && this.cfg.sessionId === id,
       }),

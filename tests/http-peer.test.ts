@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { encodePeerHandshake, parsePeerHandshake, type PeerHandshake } from "../src/lib/peers";
-import { extractReplyText } from "../src/bridge/http-peer";
+import { extractReplyText } from "../src/lib/peer-reply-files";
 
 describe("peer handshake encode/parse", () => {
   const good: PeerHandshake = {

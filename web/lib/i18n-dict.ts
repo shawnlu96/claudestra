@@ -675,10 +675,10 @@ export const DICT: Record<string, string> = {
     " — scan the QR code to get in directly; a typed 8-character code needs one confirmation on the computer. Valid for 10 minutes, single use.",
   "等待电脑确认": "Waiting for the computer to confirm",
   "等待已配对的设备批准": "Waiting for approval on a paired device",
-  "在手机等已配对的设备上核对这个码并允许。确认后这里会自动进入。":
-    "Check this code on a paired device (such as your phone) and allow it. This page continues automatically.",
+  "在手机等已配对的设备上核对这个码并允许，或在这台电脑的终端运行下面这条命令。确认后这里会自动进入。":
+    "Check this code on a paired device (such as your phone) and allow it, or run the command below in this computer's terminal. This page continues automatically.",
   "确认超时，请再点一次一键配对": "Approval timed out — tap one-tap pairing again",
-  "还没有能批准的已配对设备：在电脑终端运行 claudestra pair": "No paired device can approve this yet — run claudestra pair in the computer's terminal",
+  "在这台电脑的终端运行下面这条命令批准。确认后这里会自动进入。": "Run the command below in this computer's terminal to approve. This page continues automatically.",
   "回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。":
     "Confirm this device in the terminal running claudestra pair (or in the web app on the computer). This page continues automatically.",
   "链接已过期，请重新生成二维码": "The link has expired — generate a new QR code",

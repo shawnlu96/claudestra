@@ -17,10 +17,15 @@ import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
 import type { PromptOutcome, SteerResult } from "./turn.js";
 import { threadStatusOf, turnEndOf } from "./updates.js";
 
-/** initialize 时声明的客户端能力：AIR 的 sessionFailure（结构化失败）+ 终端输出增量（声明了 AIR 不声明它，命令输出就收不到） */
+/**
+ * initialize 时声明的客户端能力：AIR 的 sessionFailure（结构化失败）+ 终端输出增量（声明了 AIR 不声明它，命令输出就收不到）；
+ * session.compaction（ACP unstable）：codex-acp 才按 compaction_update 报压缩的开始 / 完成 / 失败（updates.ts 认 completed 出边界），
+ * 不声明它只给一个「Compact conversation」工具调用，宿主分不出压缩成没成。核对见 docs/runtimes/codex-acp.md「压缩完成信号」
+ */
 export const CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false,
+  session: { compaction: {} },
   _meta: { terminal_output_delta: true, jetbrains: { air: { version: 1, capabilities: ["sessionFailure"] } } },
 };
 

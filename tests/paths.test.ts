@@ -3,7 +3,7 @@
  * 且只有设了才会进启动前缀（不设 = 启动命令逐字节不变）。
  */
 import { describe, expect, test } from "bun:test";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import {
@@ -72,16 +72,18 @@ describe("pathOverrideEnv", () => {
 
 describe("override 生效（子进程里验证，模块常量在加载时求值）", () => {
   test("STATE_DIR / RUNTIME_DIR / 派生路径都跟着走", () => {
+    // 测试进程里不在临时目录下的 override 会被 lib/test-guard.ts 换掉，所以用临时目录
+    const sbx = join(tmpdir(), "paths-override-sbx");
     const script =
       `import * as p from ${JSON.stringify(join(import.meta.dir, "../src/lib/paths.ts"))};` +
       `console.log(JSON.stringify([p.STATE_DIR, p.RUNTIME_DIR, p.TMUX_SOCK, p.statePath("x.json"), p.LOG_DIR]));`;
     const r = spawnSync(process.execPath, ["-e", script], {
-      env: { ...process.env, CLAUDESTRA_STATE_DIR: "/sbx/state", CLAUDESTRA_RUNTIME_DIR: "/sbx/run" },
+      env: { ...process.env, CLAUDESTRA_STATE_DIR: join(sbx, "state"), CLAUDESTRA_RUNTIME_DIR: join(sbx, "run") },
       encoding: "utf-8",
     });
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout.trim())).toEqual([
-      "/sbx/state", "/sbx/run", "/sbx/run/master.sock", "/sbx/state/x.json", "/sbx/state/logs",
+      join(sbx, "state"), join(sbx, "run"), join(sbx, "run/master.sock"), join(sbx, "state/x.json"), join(sbx, "state/logs"),
     ]);
   });
 });

@@ -6,7 +6,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { configuredBridgePort, DEFAULT_BRIDGE_PORT, dotenvBridgePort, resolveBridgePort, resolveBridgeUrl, testBridgeProblem } from "../src/lib/bridge-url.js";
 import { readDotenvFileSync, repoEnvVar } from "../src/lib/env-file.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
-import { assertNoRepoEnvWriteInTest, isRepoEnvFile, isTestProcess, testSafeStateDir } from "../src/lib/test-guard.js";
+import { pathsOverlap } from "../src/lib/sandbox.js";
+import { assertNoRepoEnvWriteInTest, isRepoEnvFile, isTestProcess, isUnderTempDir, testSafeRuntimeDir, testSafeStateDir } from "../src/lib/test-guard.js";
 import { clearTestStateDir } from "./state-files.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -119,21 +120,67 @@ describe("仓库 .env", () => {
 });
 
 describe("状态目录", () => {
-  test("默认推出来的目录不在临时目录下（真实 ~/.claude-orchestrator）→ 换成临时目录；临时 HOME 下的、显式指定的非默认目录照用", () => {
-    const env: Record<string, string | undefined> = { CLAUDESTRA_TEST: "1" };
+  test("不在临时目录下的一律换成临时目录（默认推出来的、显式设的都换）；临时 HOME 下的照用；非测试进程不管", () => {
     const real = "/Users/someone/.claude-orchestrator";
-    const got = testSafeStateDir(real, real, env);
-    try {
-      expect(got).not.toBe(real);
-      expect(got.startsWith(tmpdir()) || got.startsWith("/tmp") || got.includes("/var/folders/")).toBe(true);
-      expect(env.CLAUDESTRA_STATE_DIR).toBe(got);
-    } finally {
-      rmSync(got, { recursive: true, force: true });
+    for (const dir of [real, "/sbx/state"]) {
+      const env: Record<string, string | undefined> = { CLAUDESTRA_TEST: "1", CLAUDESTRA_STATE_DIR: dir };
+      const got = testSafeStateDir(dir, env);
+      try {
+        expect(got).not.toBe(dir);
+        expect(isUnderTempDir(got)).toBe(true);
+        expect(env.CLAUDESTRA_STATE_DIR).toBe(got);
+      } finally {
+        rmSync(got, { recursive: true, force: true });
+      }
     }
     const fake = join(tmpdir(), "fakehome", ".claude-orchestrator");
-    expect(testSafeStateDir(fake, fake, { CLAUDESTRA_TEST: "1" })).toBe(fake);
-    expect(testSafeStateDir("/sbx/state", real, { CLAUDESTRA_TEST: "1" })).toBe("/sbx/state");
-    expect(testSafeStateDir(real, real, {})).toBe(real);
+    expect(testSafeStateDir(fake, { CLAUDESTRA_TEST: "1" })).toBe(fake);
+    expect(testSafeStateDir(real, {})).toBe(real);
+  });
+
+  test("10-03 事故：HOME 改到沙箱、继承来的 CLAUDESTRA_STATE_DIR 指向「真实 home」下的状态目录 → 换掉，真目录里的文件不动", () => {
+    // 临时目录扮演真实 home：isTemp 把它当成非临时目录，其余照真实判定
+    const realHome = mkdtempSync(join(tmpdir(), "tg-realhome-"));
+    const sbHome = mkdtempSync(join(tmpdir(), "tg-sbhome-"));
+    const prod = join(realHome, ".claude-orchestrator");
+    mkdirSync(prod);
+    writeFileSync(join(prod, "principals.json"), "{}");
+    const env: Record<string, string | undefined> = { CLAUDESTRA_TEST: "1", HOME: sbHome, CLAUDESTRA_STATE_DIR: prod };
+    const got = testSafeStateDir(prod, env, (p) => !pathsOverlap(p, realHome) && isUnderTempDir(p));
+    try {
+      expect(got).not.toBe(prod);
+      expect(pathsOverlap(got, realHome)).toBe(false);
+      expect(isUnderTempDir(got)).toBe(true);
+      expect(env.CLAUDESTRA_STATE_DIR).toBe(got);
+      expect(existsSync(join(prod, "principals.json"))).toBe(true);
+    } finally {
+      for (const d of [got, realHome, sbHome]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("运行目录（tmux 的 master.sock）", () => {
+  test("和生产运行目录重叠（含软链、`..`、末尾 /、子目录）或不在临时目录下 → 换成临时目录；测试自己的临时目录照用", () => {
+    // 临时目录扮演生产的 /tmp/claude-orchestrator（生产那个本身就在 /tmp 下，扮演得一模一样）
+    const prod = mkdtempSync(join(tmpdir(), "tg-prodrun-"));
+    const link = `${prod}-link`;
+    symlinkSync(prod, link);
+    const mine = mkdtempSync(join(tmpdir(), "tg-run-"));
+    try {
+      for (const dir of [prod, `${prod}/`, `${prod}/sub/..`, link, join(prod, "sub"), "/tmpfoo/run", "/sbx/run"]) {
+        const env: Record<string, string | undefined> = { CLAUDESTRA_TEST: "1", CLAUDESTRA_RUNTIME_DIR: dir };
+        const got = testSafeRuntimeDir(dir, prod, env);
+        try {
+          expect([dir, got !== dir, pathsOverlap(got, prod), isUnderTempDir(got), env.CLAUDESTRA_RUNTIME_DIR === got]).toEqual([dir, true, false, true, true]);
+        } finally {
+          rmSync(got, { recursive: true, force: true });
+        }
+      }
+      expect(testSafeRuntimeDir(mine, prod, { CLAUDESTRA_TEST: "1" })).toBe(mine);
+      expect(testSafeRuntimeDir(prod, prod, {})).toBe(prod);
+    } finally {
+      for (const d of [link, prod, mine]) rmSync(d, { recursive: true, force: true });
+    }
   });
 });
 

@@ -68,6 +68,39 @@ export interface LedgerTaskView {
   stepLine?: unknown;
   /** 挡着它的前置任务（src/lib/ledger-deps.ts blockedBy）；老 bridge 没有 = 不挡 */
   blockedBy?: string[];
+  /** 团队数据才有（team-source-adapter.ts）；本机 bridge 不发 */
+  team?: TeamTaskFacts;
+}
+
+/**
+ * 团队执行镜像带过来的事实：成员代号、执行实例、head 都是中心给的原值（显示时再缩短 / 遮住像 id 的，v4-props.tsx TeamFactsSec），
+ * 不是本机 agent 名，不能拿去开会话；blockingAsks = 主场开着的阻塞提问数；mirror / freshUntil = 这张卡实际显示的那份详情的镜像证据（MirrorFact）
+ */
+export interface TeamTaskFacts extends MirrorFact {
+  assigneeCode: string | null;
+  executorInstanceId: string | null;
+  head: string | null;
+  blockingAsks: number;
+}
+
+/**
+ * 镜像新鲜度的证据：mirror = 读到时的判定（null = 没有执行镜像，未知，不是最新）；freshUntil = 读到时新鲜的话新鲜到哪一刻
+ * （observedAt + 30 秒，shared-model.ts stale 同口径），过期 / 未知时为 null。主场停了就不会有新水位来触发重拉，
+ * 所以显示时一律经 mirrorAt(…, now) 随时间重判，不直接读 mirror。
+ */
+export interface MirrorFact {
+  mirror: "stale" | "fresh" | null;
+  freshUntil: number | null;
+}
+
+/** 此刻的镜像状态：读到时新鲜、但已经过了 freshUntil 的算过期 */
+export const mirrorAt = (m: MirrorFact, now: number): MirrorFact["mirror"] =>
+  m.mirror === "fresh" && (m.freshUntil === null || now > m.freshUntil) ? "stale" : m.mirror;
+
+/** 各 feature 此刻的镜像新鲜度计数（none = 还没有执行镜像） */
+export function mirrorCounts(ms: readonly MirrorFact[], now: number): { stale: number; fresh: number; none: number } {
+  const at = ms.map((m) => mirrorAt(m, now));
+  return { stale: at.filter((m) => m === "stale").length, fresh: at.filter((m) => m === "fresh").length, none: at.filter((m) => m === null).length };
 }
 
 /** 依赖边（src/lib/ledger-deps.ts DepView）：effective = PM 定死的 state，没定就按前置阶段推导的 derived */
@@ -80,10 +113,14 @@ export interface LedgerDepView {
   derived: "waiting" | "active" | "done";
   effective: "waiting" | "active" | "done";
   fromCancelled?: boolean;
-  createdBy: string;
-  createdAt: number;
-  updatedAt: number;
+  /** 团队数据没有边级元数据：三项都是 null（不拿 feature 的修改人 / 时间冒充）；本机 bridge 照旧给值 */
+  createdBy: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
 }
+
+/** 这次总览里不知道的指标（不是 0）：本机 bridge 从不发 = 全都已知 */
+export type UnknownMetric = "todayDone" | "reviewRounds" | "fixed" | "reviewWait";
 
 export interface LedgerOverview {
   exists: boolean;
@@ -96,6 +133,10 @@ export interface LedgerOverview {
   /** 已完成卡只带窗口时（i28-V1p）更早的从这里翻，null = 没有更早的；窗口外的计数在 doneRest。老 bridge 没有 = tasks 是全量 */
   doneCursor?: string | null;
   doneRest?: DoneRest;
+  /** 按每次总览给；缺省 = 全部已知。团队数据没有完成时刻时 todayDone 在这里，updatedAt 不能当完成时刻 */
+  unknownMetrics?: readonly UnknownMetric[];
+  /** 团队数据才有：每个 feature 的镜像证据（显示时 mirrorCounts(…, now) 随时间重判）；本机 bridge 不发 */
+  mirror?: readonly MirrorFact[];
 }
 
 /** 首页 7 列；审查与返工同一列（⇄） */
@@ -294,6 +335,14 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
   return "";
 }
 
+/** 团队卡多带的一句：主场镜像过期（数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
+export function teamNote(t: Pick<LedgerTaskView, "team">, now: number, tr: Tr = zh): string {
+  const bits: string[] = [];
+  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(tr("主场镜像过期"));
+  if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
+  return bits.join(" · ");
+}
+
 function toneOf(att: Attention): Tone {
   if (att === "problem") return "red";
   if (att === "stuck" || att === "owner" || att === "waiting") return "amber";
@@ -337,7 +386,7 @@ export function lineOf(
     dwellMs: dwell,
     dwellApprox: t.stageSinceApprox === true,
     stuck: att === "stuck",
-    reason: att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr),
+    reason: [att === "owner" && wait ? tr("等你：{t}", { t: wait.title }) : reasonOf(t, att, dwell, frozen, tr), teamNote(t, now, tr)].filter(Boolean).join(" · "),
     agent: bareAgent(t.agent),
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
@@ -374,7 +423,7 @@ export function homeView(ov: LedgerOverview, now: number, tr: Tr = zh, waits: re
       stuck: lines.filter((l) => l.attention === "stuck").length,
       owner: lines.filter((l) => l.attention === "owner").length,
     },
-    todayDone: ov.tasks
+    todayDone: ov.unknownMetrics?.includes("todayDone") ? [] : ov.tasks
       .filter((t) => (t.stage === "done" || t.stage === "verified") && (t.metrics?.endTs ?? t.updatedAt) >= midnight)
       .sort((a, b) => (a.metrics?.endTs ?? a.updatedAt) - (b.metrics?.endTs ?? b.updatedAt))
       .map((t) => t.id),
