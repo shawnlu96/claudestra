@@ -48,6 +48,8 @@ export interface HistoryMessage extends AskAnswerRef, InboundAttachmentsRef {
   from?: string;
   /** 发送者 id（user_id 属性：api:<tokenId> / Discord 用户 id）——web 据此认出「本人的所有来源」 */
   fromId?: string;
+  /** CC 忙时队列吸收、并进当前回合的入站（attachment queued_command）：不是新回合的开头 */
+  midTurn?: boolean;
 }
 
 export interface HistoryPage {
