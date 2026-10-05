@@ -6,8 +6,9 @@
  *   between refuses the plan; one live intent per card and the intent key make a duplicate tick or a restarted service a replay, never a
  *   second author; `scheduler-settle` pending→submitted is the claim;
  * - the claim is the ordering point, so the takeover's own eligibility is proven again right after it and before any external effect
- *   (afterClaim): no foreign project event since the plan's seq (a PM freeze, a lease / order / spec event, …), the queue not frozen,
- *   the spec file byte-identical to the text the plan was assessed on and free of holds, the policy port still on. Anything else
+ *   (afterClaim): no foreign project event since the plan's seq (a PM freeze, a lease / order / spec / config event, …), the queue not
+ *   frozen, the spec file byte-identical to the text the plan was assessed on and free of holds, the policy port still on, the local
+ *   grant as configured now identical to the one the plan was proven on. Anything else
  *   voids the claim (submitted→cancelled, nothing sent or created) and the next pass re-plans from scratch;
  * - the existing ensure (ensureLocalAuthor: worktree, `manager create`, `scheduler-autostart step local-author`), `scheduler-session-bind`,
  *   and driveDispatch for the work order. A failed step settles cancelled (nothing went out) or unknown (never retried, PM checks).
@@ -15,7 +16,10 @@
  * adding a seat, switching model, writing ledger state outside the CLI. Those come back as an exact block (PM told once per process).
  * Policy: the injected CFG port (LocalFallbackPolicyPort); no port = nothing read, nothing written; observe only records the would-be
  * action (CFG's recordObserved, one dedup note per round / trigger / outcome, via the injected observe); off does nothing.
- * Wired after the auto tick (scheduler-autostart-deps.ts). tests/scheduler-dispatch-recovery*.test.ts.
+ * Grant: the injected grant port (scheduler.json as configured now) is read for every assessment, after each await and after the claim;
+ * the pass's policy copy is never the proof, and no port = no_grant.
+ * Wired after the auto tick (scheduler-autostart-deps.ts), on the same TickPace: an update waiting or the budget spent stops it before the
+ * next card, and the next pass resumes after the last card handled. tests/scheduler-dispatch-recovery*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { InventoryQuota } from "./ai-quota.js";
@@ -36,6 +40,7 @@ import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "./scheduler-plan.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { workOrderFor } from "./scheduler-work-order.js";
+import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { deliveryFor, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { specHolds } from "./recovery-plan-gap.js";
@@ -58,6 +63,12 @@ export interface TakeoverDeps {
    * else localAuthorRuntime). Asked before a new author is claimed; anything but codex, or absent, blocks: no model switch by takeover.
    */
   authorRuntime?(task: LedgerTask): "claude" | "codex";
+  /**
+   * The project's local write grant as configured right now (production: scheduler.json read again, null when the project is gone or
+   * auto dispatch is off). The pass's policy copy is no grant proof: the owner may revoke a seat mid-pass. Read for every assessment
+   * and once more after the claim; absent / null / throwing = no_grant.
+   */
+  grant?(project: string): LiveGrant | null;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   /** observe mode's one record per would-be action (recovery-policy.ts recordObserved); absent = nothing recorded. */
   observe?(a: ObservedAction): void;
@@ -71,6 +82,8 @@ export interface TakeoverDeps {
   /** Notices already sent in this process (task + code + reason); a restart re-sends a standing block at most once. */
   told?: Set<string>;
 }
+
+export interface LiveGrant { remote?: RemotePolicy; maxActiveWorkers: number }
 
 export interface TakeoverOutcome { taskId: string; step: string; detail: string }
 
@@ -111,8 +124,10 @@ function localDecision(s: PlannerSnapshot): Planned | string {
   return `本机规划是 ${d.action} ${d.node}，不是 Codex 作者或开工 / 修复派单`;
 }
 
-/** What the plan was decided on, re-proven after the claim: the project seq read before the fresh facts, and the spec text they held. */
-interface ClaimGuard { seq: number; specText: string }
+/** What the plan was decided on, re-proven after the claim: the project seq read before the fresh facts, the spec text and grant they held. */
+interface ClaimGuard { seq: number; specText: string; grant: string }
+
+type Live = { opts: SnapshotOpts; grant: string };
 
 const triggerText = (p: EligiblePlan): string =>
   p.trigger.kind === "gate_refused" ? `外发闸拒收 #${p.trigger.seq}` : `无可安全投递 peer（${oneLine(p.trigger.reason).slice(0, 120)}）`;
@@ -133,9 +148,27 @@ class Takeover {
     catch (e) { if (e instanceof SchedulerStopped) throw e; console.error(`⚠️ [scheduler] 本机接管通知没发出去（下轮重发）：${(e as Error).message}`); }
   }
 
-  async facts(task: LedgerTask, quota: Proof): Promise<LocalFallbackFacts> {
-    const f = (this.deps.readFacts ?? readLocalFallbackFacts)(this.deps.db, task, this.opts, { slot: { ok: true }, quota });
+  /** The pass's opts with the project's grant as configured now, or why there is no grant to prove. */
+  live(): Live | string {
+    let g: LiveGrant | null;
+    try { g = this.deps.grant ? this.deps.grant(this.task.project) : null; } catch (e) { return `读不到当前本机授权（${oneLine((e as Error).message)}）`; }
+    if (!this.deps.grant) return "没接实时本机授权读取，本轮的配置副本不算授权证明";
+    if (!g?.remote) return "当前配置里项目没有本机写位策略（已移出 / 关了自动派单 / 没有 remote）";
+    const borrow = g.remote.mode === "off" ? [] : this.opts.pool?.borrow ?? [];
+    return { opts: { ...this.opts, maxWorkers: g.maxActiveWorkers, pool: { remote: g.remote, borrow } }, grant: JSON.stringify([g.remote, g.maxActiveWorkers]) };
+  }
+
+  async facts(task: LedgerTask, quota: Proof, live: Live): Promise<LocalFallbackFacts> {
+    const f = (this.deps.readFacts ?? readLocalFallbackFacts)(this.deps.db, task, live.opts, { slot: { ok: true }, quota });
     return { ...f, slot: localCodexSlotProof(f.snapshot) };
+  }
+
+  /** The grant read again after an await; a missing one is the exact no_grant block (told once, and only when on: observe never tells). */
+  async grantOr(on: boolean): Promise<Live | TakeoverOutcome> {
+    const live = this.live();
+    if (typeof live !== "string") return live;
+    if (on) await this.tell("no_grant", `no_grant：${live}`);
+    return this.out(on ? "blocked" : "observe", `no_grant：${live}`);
   }
 
   async quota(): Promise<Proof> {
@@ -162,11 +195,19 @@ class Takeover {
     if (!this.deps.policy) return this.out("off", "没接本机接管策略端口：不读、不记、不做");
     const policy = localFallbackPolicy(this.deps.policy, this.task.project);
     if (policy.mode === "off") return this.out("off", policy.diag ?? "本机接管策略 off");
-    const cheap = await this.facts(this.task, { ok: false, why: "未读" });
+    const live0 = await this.grantOr(policy.mode === "on");
+    if ("step" in live0) return live0;
+    const cheap = await this.facts(this.task, { ok: false, why: "未读" }, live0);
     const first = planLocalFallback(cheap, this.deps.policy);
     const pre = first.kind === "observe" ? first.would : first;
-    // Everything but the quota proof decided without I/O: read quota only for a case that could still be eligible.
-    const facts = pre.kind === "blocked" && pre.code !== "no_quota" ? cheap : await this.facts(this.task, await this.quota());
+    // Everything but the quota proof decided without I/O: read quota only for a case that could still be eligible; the grant is read
+    // again after that await (an owner may revoke the seat meanwhile, before the seq below is taken).
+    let facts = cheap;
+    if (!(pre.kind === "blocked" && pre.code !== "no_quota")) {
+      const q = await this.quota(), live1 = await this.grantOr(policy.mode === "on");
+      if ("step" in live1) return live1;
+      facts = await this.facts(this.task, q, live1);
+    }
     const plan = planLocalFallback(facts, this.deps.policy);
     if (plan.kind === "observe") return this.observe(plan.would, facts);
     if (plan.kind === "blocked") {
@@ -197,7 +238,9 @@ class Takeover {
     const seq = (this.deps.db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(this.task.project) as { seq: number }).seq;
     const task = getTask(this.deps.db, this.task.id), workflow = getWorkflow(this.deps.db, this.task.id);
     if (!task || !workflow) return this.out("replan", "卡或流程读不到");
-    const fresh = await this.facts(task, await this.quota());
+    const q = await this.quota(), live = await this.grantOr(true);
+    if ("step" in live) return live;
+    const fresh = await this.facts(task, q, live);
     const stale = staleBasis(plan.basis, fresh, this.deps.policy);
     if (stale.length) return this.out("replan", `接管前重核不过：${stale.join("、")}`);
     const again = localDecision(fresh.snapshot);
@@ -210,7 +253,7 @@ class Takeover {
     const intent = r.intent as SchedulerIntent;
     if (intent.status !== "pending") return this.out("lost_race", `意图 ${intent.id} 已是 ${intent.status}`);
     if (fresh.specText === null) return this.out("replan", "规格读不到");
-    const guard: ClaimGuard = { seq, specText: fresh.specText };
+    const guard: ClaimGuard = { seq, specText: fresh.specText, grant: live.grant };
     const preserve = `branch=${plan.preserve.branch ?? "-"}; head=${plan.preserve.head ?? "-"}; specRev=${plan.preserve.specRev}; round=${plan.preserve.round}`;
     if (local.action === "ensure_session") {
       const done = await this.author(task, intent, plan, preserve, guard);
@@ -222,7 +265,7 @@ class Takeover {
 
   /**
    * After the claim, before any send / create: why the takeover no longer stands, or null. Ledger facts are ordered by the claim
-   * (every event committed before it is visible now); the spec file and the policy port have no ledger version, so they are read
+   * (every event committed before it is visible now); the spec file, the policy port and the local grant have no ledger version, so they are read
    * again here, after the claim — a change made before this read is seen, one made later is after the decision, as with any send.
    */
   async voided(intent: SchedulerIntent, guard: ClaimGuard): Promise<string | null> {
@@ -241,6 +284,10 @@ class Takeover {
     if (h.manual || h.superseded || h.localOnly) return "规格写明人工验收 / 已替代 / 本机限定";
     const policy = localFallbackPolicy(this.deps.policy, project);
     if (policy.mode !== "on") return `本机接管策略已是 ${policy.mode}${policy.diag ? `（${policy.diag}）` : ""}`;
+    // The grant has no ledger version when edited by hand (no audit event): read it again, it must be the one the plan was proven on.
+    const live = this.live();
+    if (typeof live === "string") return `本机授权已不在：${live}`;
+    if (live.grant !== guard.grant) return "本机授权（写位 / 档位 / 并发）在计划后改过";
     return null;
   }
 
@@ -340,24 +387,30 @@ export async function driveLocalTakeover(deps: TakeoverDeps, task: LedgerTask, o
   return new Takeover(deps, task, opts).run();
 }
 
-/** One pass over the enabled projects; without a policy port it returns at once, before reading anything. */
-export async function localTakeoverTick(deps: TakeoverDeps, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>):
+/**
+ * One pass over the enabled projects; without a policy port it returns at once, before reading anything. With a pace (production) it
+ * checks yieldNow before every card and walks the cards in rotation after `cursor.takeover`, as the auto tick does.
+ */
+export async function localTakeoverTick(deps: TakeoverDeps, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, pace?: TickPace):
   Promise<{ cards: TakeoverOutcome[]; failed: { taskId: string; error: string }[] }> {
   const out = { cards: [] as TakeoverOutcome[], failed: [] as { taskId: string; error: string }[] };
   if (!deps.policy) return out;
   if (!deps.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   let borrow: Promise<readonly BorrowEntry[]> | null = null;
-  for (const [project, policy] of Object.entries(projects)) {
-    if (!policy.remote) continue; // no pool, no peer: neither trigger can exist
-    for (const task of candidates(deps.db, project)) {
-      try {
-        borrow ??= deps.borrow().catch((e: unknown) => { console.error(`⚠️ [scheduler] 本机接管读借入名单失败，本轮没有 peer 事实：${(e as Error).message}`); return []; });
-        const pool = policy.remote.mode === "off" ? { remote: policy.remote, borrow: [] } : { remote: policy.remote, borrow: await borrow };
-        out.cards.push(await driveLocalTakeover(deps, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }));
-      } catch (e) {
-        if (e instanceof SchedulerStopped) throw e;
-        out.failed.push({ taskId: task.id, error: oneLine((e as Error).message) });
-      }
+  // No pool, no peer: neither trigger can exist.
+  const all = Object.entries(projects).flatMap(([project, policy]) => (policy.remote ? candidates(deps.db, project).map((task) => ({ project, policy, task })) : []));
+  const cards = pace ? rotateAfter(all, (c) => `${c.project}/${c.task.id}`, pace.cursor.takeover) : all;
+  for (const { project, policy, task } of cards) {
+    if (pace?.yieldNow()) break;
+    if (pace) pace.cursor.takeover = `${project}/${task.id}`;
+    const remote = policy.remote!;
+    try {
+      borrow ??= deps.borrow().catch((e: unknown) => { console.error(`⚠️ [scheduler] 本机接管读借入名单失败，本轮没有 peer 事实：${(e as Error).message}`); return []; });
+      const pool = remote.mode === "off" ? { remote, borrow: [] } : { remote, borrow: await borrow };
+      out.cards.push(await driveLocalTakeover(deps, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }));
+    } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      out.failed.push({ taskId: task.id, error: oneLine((e as Error).message) });
     }
   }
   return out;

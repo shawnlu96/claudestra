@@ -7,6 +7,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -19,7 +20,11 @@ import { driveLocalTakeover, localCodexSlotProof, localTakeoverTick, type Takeov
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import type { EnsureResult } from "../src/lib/worker-session.js";
-import { blockFixture, E2E_MS, MIN, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
+import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { parseSchedulerConfig, readSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { liveGrant } from "../src/lib/scheduler-autostart-deps.js";
+import { setLocalSlots } from "../src/lib/scheduler-config-write.js";
+import { blockFixture, E2E_MS, FREE, MIN, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
 const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 secret ${randomBytes(32).toString("hex")}`;
 const BORROW = [{ peer: "mate", projects: ["p"], roles: ["review", "write"] as ("review" | "write")[], maxOpen: 3 }];
@@ -77,7 +82,7 @@ function harness(p: Fx, policy: LocalFallbackPolicyPort | undefined,
   const deps: TakeoverDeps = {
     db: p.f.db, policy, manager: (...args) => p.cli("scheduler", ...args.slice(1)),
     ensure: async (task, role, family) => { ensured.push(`${task.id}/${role}/${family}`); return (over.create ?? create)(); },
-    worker: p.f.tickDeps.worker, authorRuntime: () => "codex",
+    worker: p.f.tickDeps.worker, authorRuntime: () => "codex", grant: () => ({ remote: p.policy.remote, maxActiveWorkers: 2 }),
     notifyPm: async (_t, text) => { notices.push(text); }, observe: (a) => { observed.push(a.actionKey); recordObserved(p.f.db, a, p.f.tickDeps.now()); },
     codexQuota: async () => quota(10), borrow: async () => BORROW, now: p.f.tickDeps.now, told: new Set(),
     ...(over.ended ? { readFacts: (...a: Parameters<typeof readLocalFallbackFacts>) => ({ ...readLocalFallbackFacts(...a), lease: null }) } : {}), ...over,
@@ -416,4 +421,113 @@ describe("FB2 slot proof", () => {
       expect(listEvents(p.f.db, { target: "T1" }).length).toBe(p.events().length);
     } finally { p.f.close(); }
   }, E2E_MS);
+});
+
+/**
+ * grant-stale (review r2): the owner revokes this machine's Codex write seat through the formal config write (setLocalSlots: file +
+ * project audit event) while the takeover is mid-pass. The pass's copy of the policy is no grant proof: the takeover reads the
+ * project's grant from scheduler.json again (the `grant` port, production: readSchedulerConfig) for the eligibility facts, for the
+ * fresh re-assessment, and once more after the claim. Real ledger CLI, real fact reader (no readFacts seam, no lease), real config write.
+ */
+describe("FB2 grant-stale: a revoked local grant is seen before and after the claim", () => {
+  type When = "first-quota" | "fresh-quota" | "after-claim-unaudited";
+  async function revoke(when: When) {
+    const p = await blockFixture({ mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "o/r", agents: { claude: 0, codex: 1 } });
+    const db = p.f.db;
+    db.run("UPDATE scheduler_sessions SET family = 'codex', transport = 'acp' WHERE taskId = 'T1' AND role = 'author'");
+    db.run("UPDATE task_workflows SET authorFamily = 'codex' WHERE taskId = 'T1'");
+    const reg = JSON.parse(readFileSync(p.f.registryPath, "utf8"));
+    reg.agents["agent-task-one"] = { ...reg.agents["agent-task-one"], runtime: "codex", transport: "acp" };
+    writeFileSync(p.f.registryPath, JSON.stringify(reg));
+    writeFileSync(getTask(db, "T1")!.spec!, `规格：只改 src/lib/x.ts\nsecret ${randomBytes(32).toString("hex")}`);
+    p.hello();
+    expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+    recordHello(db, "mate2", null, { v: 1, proto: 2, boot: "mate2", seq: 1, slots: FREE, paused: null,
+      grant: { until: p.f.tickDeps.now() + 3_600_000, roles: ["review", "write"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, p.f.tickDeps.now());
+    const configPath = join(p.f.dir, "scheduler.json");
+    writeFileSync(configPath, JSON.stringify({ enabled: true, pollMs: 6000, autoDispatch: true, projects: { p: { agents: { claude: 0, codex: 1 }, maxActiveWorkers: 2,
+      requiredChecks: ["ci"], repoDir: p.f.dir, remote: { mode: "balance", roles: ["review", "write"], repo: "o/r" } } } }));
+    const config = () => readSchedulerConfig(configPath);
+    const remote = config().projects.p!.remote!;
+    const borrow = ["mate", "mate2"].map((peer) => ({ peer, projects: ["p"], roles: ["review", "write"] as ("review" | "write")[], maxOpen: 3 }));
+    const formal = async () => {
+      const r = await setLocalSlots(db, p.f.at("owner"), { project: "p", set: { agents: { claude: 0, codex: 0 } }, reason: "owner revokes local write seat" }, { path: configPath });
+      expect(r.event).toBeGreaterThan(0);
+    };
+    let q = 0;
+    const h = harness(p, on, {
+      borrow: async () => borrow,
+      grant: (project) => { const c = config(); const pr = c.projects[project]; return pr ? { remote: pr.remote, maxActiveWorkers: pr.maxActiveWorkers } : null; },
+      codexQuota: async () => {
+        q++;
+        if ((when === "first-quota" && q === 1) || (when === "fresh-quota" && q === 2)) await formal();
+        return quota(10);
+      },
+      ensure: async () => { throw new Error("bound author: no ensure expected"); },
+    });
+    if (when === "after-claim-unaudited") {
+      h.deps.manager = async (...args) => {
+        const r = await p.cli("scheduler", ...args.slice(1));
+        if (r.ok === true && args[1] === "scheduler-settle" && args[6] === "submitted") {
+          // A hand edit of scheduler.json: no audit event, so only a re-read of the grant after the claim can see it.
+          const doc = JSON.parse(readFileSync(configPath, "utf8"));
+          doc.projects.p.agents.codex = 0;
+          writeFileSync(configPath, JSON.stringify(doc));
+        }
+        return r;
+      };
+    }
+    const sent = p.f.sent.length;
+    const out = await driveLocalTakeover(h.deps, getTask(db, "T1")!, { registry: [], maxWorkers: 2, now: p.f.tickDeps.now(), pool: { remote, borrow } });
+    return { p, h, out, sends: p.f.sent.length - sent, codex: config().projects.p!.agents!.codex };
+  }
+
+  for (const when of ["first-quota", "fresh-quota", "after-claim-unaudited"] as const) {
+    test(`grant revoked at ${when}: no work order goes out, the card is not taken over`, async () => {
+      const { p, out, sends, codex } = await revoke(when);
+      try {
+        expect(codex).toBe(0);
+        expect(sends).toBe(0);
+        expect(out.step).not.toBe("sent");
+        expect(p.f.intents().filter((i) => i.node === "write" && i.status !== "cancelled" && i.recipient === "agent-task-one")).toEqual([]);
+      } finally { p.f.close(); }
+    }, E2E_MS);
+  }
+
+  test("no grant port: blocked no_grant before any ledger write — the pass's policy copy is not a grant proof", async () => {
+    const p = await stuck("author");
+    try {
+      const h = harness(p, on, { ended: true, grant: undefined });
+      const before = state(p);
+      expect(await drive(p, h)).toMatchObject({ step: "blocked", detail: expect.stringContaining("no_grant") });
+      expect(state(p)).toEqual(before);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+});
+
+describe("FB2 maintenance-yield and the production grant reader", () => {
+  test("the takeover pass checks yieldNow before every card: an update waiting stops it before the next card; the cursor resumes after the last one handled", async () => {
+    const p = await ready();
+    try {
+      const h = harness(p, observe, { ended: true });
+      const yielding = { cursor: {} as Record<string, string | undefined>, yieldNow: () => true };
+      const before = state(p);
+      expect(await localTakeoverTick(h.deps, { p: p.policy }, yielding)).toEqual({ cards: [], failed: [] });
+      expect([state(p), h.observed, yielding.cursor]).toEqual([before, [], {}]);
+      let asked = 0;
+      const once = { cursor: {} as Record<string, string | undefined>, yieldNow: () => asked++ > 0 };
+      expect((await localTakeoverTick(h.deps, { p: p.policy }, once)).cards).toEqual([expect.objectContaining({ taskId: "T1", step: "observe" })]);
+      expect([asked, once.cursor.takeover]).toEqual([1, "p/T1"]);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("liveGrant reads the config each call; auto dispatch off, a missing project or a bad file give no grant", () => {
+    const base = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { agents: { claude: 0, codex: 1 }, maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: "/r",
+      remote: { mode: "balance", roles: ["review", "write"], repo: "o/r" } } } });
+    expect(liveGrant("p", () => base)).toMatchObject({ maxActiveWorkers: 1, remote: { agents: { claude: 0, codex: 1 } } });
+    expect(liveGrant("q", () => base)).toBeNull();
+    expect(liveGrant("p", () => ({ ...base, autoDispatch: false }))).toBeNull();
+    expect(liveGrant("p", () => ({ ...base, enabled: false }))).toBeNull();
+    expect(() => liveGrant("p", () => { throw new Error("bad json"); })).toThrow("bad json"); // the takeover turns a throw into no_grant
+  });
 });

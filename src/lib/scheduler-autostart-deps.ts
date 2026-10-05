@@ -25,10 +25,10 @@ import { autoResumeTick } from "./scheduler-autostart-resume.js";
 import { autostartTick, type StartTickEnv } from "./scheduler-autostart-run.js";
 import { autoTickDeps } from "./scheduler-auto-deps.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
-import { localTakeoverTick } from "./scheduler-dispatch-recovery.js";
+import { localTakeoverTick, type LiveGrant } from "./scheduler-dispatch-recovery.js";
 import { poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
 import { localAuthorRuntime } from "./scheduler-local-runtime.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -128,16 +128,22 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   };
 }
 
-/** 本机接管在开卡之后、同一份预算：没接策略端口就直接返回（auto tick 的 ensure / worker 只在接了时才建） */
+/** 本机接管的授权证明：每次现读 scheduler.json（不是这一轮的配置副本）；坏配置 / 关了自动派单 / 项目不在 = null，即 no_grant */
+export function liveGrant(project: string, read: () => SchedulerConfig = readSchedulerConfig): LiveGrant | null {
+  const c = read(), p = c.enabled && c.autoDispatch === true ? c.projects[project] : undefined;
+  return p ? { remote: p.remote, maxActiveWorkers: p.maxActiveWorkers } : null;
+}
+
+/** 本机接管在开卡之后、同一份预算：没接策略端口就直接返回；逐卡查让出（localTakeoverTick 用同一个 pace） */
 async function takeover(o: WireOpts, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string) => Promise<unknown>): Promise<Failed> {
-  if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true || pace.yieldNow()) return [];
+  if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true) return [];
   const auto = autoTickDeps(o.db, { active: o.active, lease: o.lease });
   return (await localTakeoverTick({
     db: o.db, policy: o.takeoverPolicy, manager: o.ledger, ensure: (task, role, family) => whileOwned(o.active, () => auto.ensure(task, role, family)),
-    worker: auto.worker, authorRuntime: (task) => {
+    worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
       const agents = config.projects[task.project]?.agents;
       return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
     }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: (a) => { recordObserved(o.db, a, Date.now()); },
     codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
-  }, config.projects)).failed;
+  }, config.projects, pace)).failed;
 }
