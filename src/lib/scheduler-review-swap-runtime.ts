@@ -18,7 +18,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { assertSchedulerLease, forwardSchedulerLease, SCHEDULER_LEASE_ENV } from "./scheduler-lease-env.js";
 import { localReviewerCount } from "./scheduler-pool-facts.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
-import { latestReviewerSwap, swappedSession } from "./scheduler-review-swap.js";
+import { latestReviewerSwap, openRefusal, swappedSession } from "./scheduler-review-swap.js";
 import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
@@ -146,6 +146,16 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   return null;
 }
 
+/** Revalidate after each external await: a retired binding alone does not authorize effects for a moved card. */
+function assertSwapCurrent(db: Database, intent: SchedulerIntent): void {
+  const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
+  if (task.stage !== "review" || task.rev !== intent.taskRev || task.specRev !== intent.specRev || task.headSHA !== intent.head ||
+    workflow?.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "换审查会话期间卡已变化，先重算");
+  if (openRefusal(listEvents(db, { project: task.project, target: task.id }))) {
+    throw new LedgerError("conflict", "本卡有未处置的模型安全拒绝，不自动更换审查员");
+  }
+}
+
 /** Narrow manager command: no arbitrary lifecycle target; it comes only from a validated ledger intent. */
 export async function reviewSwapStep(db: Database, ctx: WriteCtx, id: string, maxWorkers: number,
   deps: ReviewSwapDeps = productionDeps(db)): Promise<Record<string, unknown>> {
@@ -156,6 +166,9 @@ export async function reviewSwapStep(db: Database, ctx: WriteCtx, id: string, ma
   if (!Number.isInteger(maxWorkers) || maxWorkers < 0 || maxWorkers > 32) throw new LedgerError("invalid", "审查名额需在 0–32");
   if (intent.status === "done") return { ok: true, step: "session", detail: "审查会话处理已完成" };
   if (!["pending", "submitted"].includes(intent.status)) return { ok: true, step: "held", detail: "意图结果未定或已取消" };
+  const active = deps.active;
+  deps = { ...deps, active: () => { active(); assertSwapCurrent(db, intent); } };
+  deps.active();
   const wait = intent.action === "review_swap" ? await stopOld(db, ctx, intent, deps) : await ensureNew(db, ctx, intent, maxWorkers, deps);
   deps.active();
   if (wait) return { ok: true, step: "waiting", detail: wait };

@@ -25,15 +25,37 @@ function independentReviewer(s: PlannerSnapshot): boolean {
     r.agent !== s.author?.agent && r.agent !== s.task.agent && (s.workflow?.template !== "security" || r.source === "local");
 }
 
-type SwapSnapshot = Pick<PlannerSnapshot, "task" | "workflow" | "events" | "reviewer"> & { author: { agent: string } | null };
+type SwapSnapshot = Pick<PlannerSnapshot, "task" | "workflow" | "events" | "reviewer"> & {
+  author: { agent: string; family: string } | null;
+};
+
+/** A validated binding may follow manual reviews; those reports remain history, not an unapproved session replacement. */
+export function reviewerHistory(s: Pick<PlannerSnapshot, "events" | "reviewer">): LedgerEvent[] {
+  const r = s.reviewer;
+  const bind = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "session_bind" && e.data.role === "reviewer" &&
+    e.data.agent === r?.agent && e.data.sessionId === r?.sessionId && e.data.family === r?.family);
+  return reviewsAfterSwap(s.events).filter((e) => e.seq > (bind?.seq ?? 0) && !String(e.data.reviewer ?? "").startsWith("peer:"));
+}
+
+function newAuthorDelivery(s: SwapSnapshot): boolean {
+  const deliveries = s.events.filter((e) => e.kind === "deliver" && typeof e.data.headSHA === "string");
+  const delivered = deliveries.at(-1), previous = deliveries.at(-2);
+  if (!delivered || !previous || delivered.data.headSHA !== s.task.headSHA || previous.data.headSHA === s.task.headSHA ||
+    !/^[a-f0-9]{40}$/i.test(s.task.headSHA ?? "")) return false;
+  const reviewStage = s.events.findLast((e) => e.kind === "stage" && e.data.to === "review");
+  if (!reviewStage || reviewStage.data.round !== s.task.round || reviewStage.data.specRev !== s.task.specRev || previous.seq >= reviewStage.seq) return false;
+  // Local delivery is tied to the actual bound author; peer delivery is rechecked against the done order in the writer.
+  if (delivered.actor === s.author?.agent && s.author.family === s.workflow?.authorFamily && delivered.data.round === s.task.round) return true;
+  return !!delivered.dedupKey?.match(/^lend-(deliver|takeover-deliver):/);
+}
 
 function swapNeeded(s: SwapSnapshot): boolean {
   const r = s.reviewer;
   if (!r || r.source !== "local" || r.taskId !== s.task.id || !r.agent || !r.sessionId || s.task.round < 2) return false;
-  const prior = reviewsAfterSwap(s.events).find((e) => !String(e.data.reviewer ?? "").startsWith("peer:"));
+  const prior = reviewerHistory(s)[0];
   // A different, unapproved session is still reviewer_replaced, not permission to start another epoch.
   if (prior && (prior.data.reviewer !== r.agent || prior.data.reviewerSessionId !== r.sessionId)) return false;
-  return r.family === s.workflow?.authorFamily || (r.agent === s.author?.agent || r.agent === s.task.agent);
+  return newAuthorDelivery(s) && (r.family === s.workflow?.authorFamily || r.agent === s.author?.agent || r.agent === s.task.agent);
 }
 
 /** Keep invalid legacy bindings on sessionGate's existing error path; only a swap may release a bound reviewer to the pool. */
@@ -104,9 +126,13 @@ export function applyReviewerSwap(db: Database, ctx: WriteCtx, id: string, row: 
     throw new LedgerError("conflict", "换人计划已过期，先重算");
   }
   const events = listEvents(db, { project: task.project, target: task.id });
-  const family = remoteHeadFamily(db, task) ?? workflow.authorFamily;
-  const author = db.query("SELECT agent FROM scheduler_sessions WHERE taskId = ? AND role = 'author' AND state != 'retired'")
-    .get(task.id) as { agent: string } | null;
+  const remoteFamily = remoteHeadFamily(db, task), family = remoteFamily ?? workflow.authorFamily;
+  const delivery = events.findLast((e) => e.kind === "deliver" && typeof e.data.headSHA === "string");
+  if (delivery?.dedupKey?.match(/^lend-(deliver|takeover-deliver):/) && !remoteFamily) {
+    throw new LedgerError("conflict", "远端交付缺已完成写单的家族证据");
+  }
+  const author = db.query("SELECT agent, family FROM scheduler_sessions WHERE taskId = ? AND role = 'author' AND state != 'retired'")
+    .get(task.id) as { agent: string; family: string } | null;
   const s: SwapSnapshot = { task, workflow: { ...workflow, authorFamily: family }, events, author,
     reviewer: row?.state === "active" ? { ...row, source: row.transport === "peer" ? "peer_claim" : "local" } : null };
   if (!row || !swapNeeded(s) || latestReviewerSwap(events)?.data.round === task.round) throw new LedgerError("conflict", "本轮不允许再次更换审查员");
@@ -117,7 +143,7 @@ export function applyReviewerSwap(db: Database, ctx: WriteCtx, id: string, row: 
   write({ ...ctx, dedupKey: swapKey(id) }, { project: task.project, target: task.id, kind: "scheduler",
     text: `作者家族由 ${fromFamily} 变成 ${family}，旧审查会话不再独立`,
     data: { op: "reviewer_swap", intentId: id, fromFamily, toFamily: family, agent: row.agent, sessionId: row.sessionId,
-      round: task.round, head: task.headSHA, specRev: task.specRev } });
+      round: task.round, head: task.headSHA, specRev: task.specRev, deliverySeq: delivery!.seq } });
   db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE sessionId = ?")
     .run(id, ctx.now ?? Date.now(), row.sessionId);
   return swappedSession(db, id);
