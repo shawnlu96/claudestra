@@ -37,6 +37,20 @@ beforeAll(async () => {
 });
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
+/** 抽取之后有意改过的地方：[声明, 抽取前片段, 现在的片段]。套到抽取前原文上再逐字节比，其余字节照样锁死 */
+const AMENDED: [string, string, string][] = [
+  // NAR1：CC 忙时队列吸收的入站标 midTurn，网页不把它当回合边界（web/features/chat/reply-echo.ts）
+  ["parseHistoryLines", "inbox.fresh(mid, msg)) all.push(msg);", "inbox.fresh(mid, msg)) all.push(Object.assign(msg, { midTurn: true }));"],
+  ["HistoryMessage", "  fromId?: string;\n}", "  fromId?: string;\n  /** CC 忙时队列吸收、并进当前回合的入站（attachment queued_command）：不是新回合的开头 */\n  midTurn?: boolean;\n}"],
+];
+
+function amended(name: string, body: string): string {
+  return AMENDED.filter(([n]) => n === name).reduce((b, [, from, to]) => {
+    expect(b.split(from)).toHaveLength(2); // 片段在原文里恰好一处，登记错了直接红
+    return b.replace(from, to);
+  }, body);
+}
+
 function declarations(source: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const node of parseSync("history.ts", source).program.body) {
@@ -124,7 +138,7 @@ describe("history extraction against immutable original", () => {
     const remaining = declarations(readFileSync(join(root, "src/lib/session-history.ts"), "utf8"));
     for (const [name, body] of old) {
       expect([parse, types, remaining].filter(m => m.has(name))).toHaveLength(1);
-      expect(parse.get(name) ?? types.get(name) ?? remaining.get(name)).toBe(body);
+      expect(parse.get(name) ?? types.get(name) ?? remaining.get(name)).toBe(amended(name, body));
     }
     expect([...parse.keys()]).toContain("parseHistoryLines");
     expect([...types.keys()]).toContain("HistoryMessage");
