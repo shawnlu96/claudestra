@@ -15,6 +15,7 @@ import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/len
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
+import { materialsPolicyPort } from "../lib/recovery-materials-wiring.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
 import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, reclaimLend, refuse, reofferLend, sweepLend, type LendNotice,
@@ -54,6 +55,8 @@ export interface LendCliDeps {
   relay?: (target: string, text: string) => Promise<RelaySend>;
   /** lend-relay：卡此刻的规格原文；不给 = 读本机规格文件 */
   readSpec?: (task: LedgerTask) => string | null;
+  /** 修复单材料的 CFG recoveryPolicy 模块位置（dispatch-recovery-MATW）；不给 = CFG 的正式位置，没装就 observe */
+  recoveryReader?: URL;
 }
 
 function realLendDeps(c: LedgerCli): LendCliDeps {
@@ -131,11 +134,12 @@ function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null):
 }
 
 /** 写单材料（lib/lend-write-materials.ts，调度服务挂池同一份）：查远端 / 读文件失败一律拒挂，不带半张单出去 */
-async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<OfferInput> {
+async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<{ input: OfferInput; materialsDiag?: string }> {
   const step = stepOfStage(task.stage);
-  if (step !== "write" && step !== "fix") return input;
-  const write = await writeMaterials(c.db, task, { peer: input.peer, repo: input.repo, base: c.p.flags.base ?? "main" }, writeDeps(c));
-  return write ? { ...input, write } : input;
+  if (step !== "write" && step !== "fix") return { input };
+  const { policy, diag } = step === "fix" ? await materialsPolicyPort(c.deps.lend?.recoveryReader) : { policy: undefined, diag: null };
+  const write = await writeMaterials(c.db, task, { peer: input.peer, repo: input.repo, base: c.p.flags.base ?? "main" }, writeDeps(c), policy);
+  return { input: write ? { ...input, write } : input, ...(diag ? { materialsDiag: diag } : {}) };
 }
 
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
@@ -143,12 +147,12 @@ async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
   await ensureReviewScope(c.db, task.id); // 规格外文件在挂池事务外先登记，事务里的审查单只读（i28-ASK2）
   const peer = offerPeer(c, task).peer;
-  const input = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
+  const { input, materialsDiag } = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
   const reason = c.p.flags.reason ?? "";
   if (again && !reason.trim()) throw new LedgerError("invalid", "重挂要写 --reason（核对了什么）");
   const o = again ? reofferLend(c.db, c.ctx(), { ...input, reason }) : offerLend(c.db, c.ctx(), input);
   return { ok: true, orderId: o.orderId, step: o.step, peer: o.peer, family: o.family, sha256: o.sha256, supersedes: o.supersedes,
-    ...(o.branch ? { branch: o.branch, base: o.base } : {}) };
+    ...(o.branch ? { branch: o.branch, base: o.base } : {}), ...(materialsDiag ? { materialsDiag } : {}) };
 }
 
 function reclaim(c: LedgerCli): Result {
