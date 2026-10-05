@@ -207,6 +207,27 @@ describe("bg-activity-watcher · 后台 shell", () => {
     for (const id of stock) expect(f.of(id)).toEqual([]);
   });
 
+  test("消失后同名 .output 换成软链（后台 subagent 的对话记录）→ 不恢复、不收尾，原任务保持 unknown", async () => {
+    const f = fixture("relink");
+    await f.poll();
+    writeFileSync(f.out("s1"), "working\n");
+    f.confirmBg("s1");
+    await f.poll(10_000);
+    unlinkSync(f.out("s1"));
+    await f.poll(10_000);
+    await f.poll(2 * MIN);
+    const statuses = () => f.completed("s1").map((e) => (e.data as { status: string }).status);
+    expect(statuses()).toEqual(["unknown"]);
+    writeFileSync(join(f.tasks, "agent-s1.jsonl"), '{"type":"assistant"}\n[killed]\n');
+    symlinkSync(join(f.tasks, "agent-s1.jsonl"), f.out("s1"));
+    await f.poll(10_000);
+    await f.poll(10_000);
+    expect(statuses()).toEqual(["unknown"]);
+    expect(f.of("s1").filter((e) => e.type === "bg_task_started")).toHaveLength(1);
+    expect(f.active("s1")).toBe(false);
+    expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "s1")).toMatchObject({ end: { status: "unknown", exitCode: null } });
+  });
+
   test("被结束：末行独立 [killed]（前面可有 SIGTERM 行）→ status stopped、exitCode null，快照还原成已停止；输出里提到 [killed] 不算", async () => {
     const f = fixture("killed");
     await f.poll();

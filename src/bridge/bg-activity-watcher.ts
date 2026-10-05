@@ -467,6 +467,8 @@ async function tickInner(): Promise<void> {
     // 先接回消失后又出现的已确认 shell：startActivity 把它放回 seen，下面数新文件就不会把它算进洪水闸
     for (const f of shellFiles) {
       if (!missingShells.delete(f)) continue;
+      // 同名 .output 换成了软链 = 后台 subagent 的对话记录（同下方首次筛查），不是原 shell 的输出：不恢复，路径留在 seen 不再看
+      if ((await lstat(f).catch(() => null))?.isSymbolicLink()) continue; // lstat 失败 = 又被删了，照常恢复，消失由宽限期处理
       await startActivity("shell", agent, f).catch((e) => console.error(`🧵 bg shell 恢复跟踪失败 (${agent.name}):`, (e as Error).message));
     }
     // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
