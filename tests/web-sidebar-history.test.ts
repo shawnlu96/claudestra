@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { entryMembers, filterAndRankWorkers } from "@/features/chat/sidebar-entries";
-import { buildSidebarDirectory, isHistoryAgent } from "@/features/chat/sidebar-history";
+import { buildSidebarDirectory, DIRECTORY_FOLD_KEYS, isHistoryAgent } from "@/features/chat/sidebar-history";
 import type { AgentSession } from "@/features/chat/type";
 
 const NOW = 1_800_000_000_000;
@@ -67,5 +67,13 @@ describe("live sidebar directory", () => {
       expect(directory(list).historyCount).toBe(status === "stopped" ? 1 : 0);
       expect(JSON.stringify(list)).toBe(before);
     }
+  });
+});
+
+describe("directory fold namespaces", () => {
+  test("active keeps the original keys; history has its own, distinct ones", () => {
+    expect(DIRECTORY_FOLD_KEYS.active).toEqual({ projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed" });
+    const keys = [...Object.values(DIRECTORY_FOLD_KEYS.active), ...Object.values(DIRECTORY_FOLD_KEYS.history)];
+    expect(new Set(keys).size).toBe(4);
   });
 });
