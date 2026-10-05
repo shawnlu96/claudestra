@@ -73,6 +73,16 @@ describe("ACP 窗口会话", () => {
     expect(transcriptOfFailure({ kind: "error", key: "e", message: `bad ${SECRET}` })).not.toContain(SECRET);
   });
 
+  test("正文、reply 也有上限：超长只留开头并注明总行数", () => {
+    const long = Array.from({ length: 300 }, (_, i) => `第 ${i} 行`).join("\n");
+    const [text] = transcriptOfEntry({ type: "assistant", message: { content: [{ type: "text", text: long }] } });
+    expect(text!.split("\n")).toHaveLength(200);
+    expect(text).toEndWith("…（共 300 行）");
+    const [reply] = transcriptOfEntry({ type: "assistant", message: { content: [{ type: "tool_use", id: "r", name: "mcp__claudestra__reply", input: { text: "x".repeat(20_000) } }] } });
+    expect(reply!.length).toBeLessThan(6_100);
+    expect(reply).toEndWith("…（共 1 行）");
+  });
+
   test("入站消息剥掉 bridge 的来源头，用户自己打的方括号照留", () => {
     const head = "[🌐 来自 Web 端用户「dev」（HTTP API 接入，非 Discord）。\n用 reply() 回答到本 chat_id。]\n\n你好";
     expect(transcriptOfInbound(head, { user: "dev" })).toBe("👤 dev：你好");

@@ -244,7 +244,6 @@ export class AcpHost {
   /** 流式条目进出站队列，按序号送（pump）；队列满了丢最老的并记数，这一轮结束按 StopFailure 报 */
   private pushEntries(entries: Record<string, unknown>[]): void {
     for (const entry of entries) this.outbox.push({ seq: ++this.entrySeq, entry });
-    if (this.deps.show) for (const item of entries.flatMap(transcriptOfEntry)) this.deps.show(item);
     const over = this.outbox.length - ENTRY_OUTBOX_MAX;
     if (over > 0) {
       this.outbox.splice(0, over);
@@ -252,6 +251,17 @@ export class AcpHost {
       this.deps.log(`bridge 太久没确认，出站条目超过 ${ENTRY_OUTBOX_MAX} 条：丢掉最老的 ${over} 条`);
     }
     void this.pump();
+    for (const entry of entries) this.show(() => transcriptOfEntry(entry));
+  }
+
+  /** 窗口里的会话只是旁路：渲染出错（如工具入参形状不对）只记日志，不能挡住出站、出卡 */
+  private show(render: () => string | string[]): void {
+    if (!this.deps.show) return;
+    try {
+      for (const item of [render()].flat()) this.deps.show(item);
+    } catch (e) {
+      this.deps.log(`窗口会话渲染出错：${errText(e)}`);
+    }
   }
 
   /** 队首一批一批送，bridge 回 true 才出队；false / 断线 / 超时就停下退避重送（登记上了也会接着送） */
@@ -312,7 +322,7 @@ export class AcpHost {
     for (const id of [...this.permits.keys()]) this.endPermission(id, null, "回合已结束");
     const rest = this.translator.flush();
     if (rest.length) this.pushEntries(rest);
-    this.deps.show?.(transcriptOfStop(r));
+    this.show(() => transcriptOfStop(r));
     // 这一轮的条目 bridge 全部确认处理完才报 Stop：Stop 的 drain 要看到收尾文字（ws 与 HTTP 两条路没有先后保证）。
     // 等不到确认、或 bridge 太久不在丢过条目：不能当成功报，按 StopFailure 报；没确认的留在队列里，连上了照样补送
     const ok = await this.drained(this.timing("drainMs"));
@@ -326,7 +336,7 @@ export class AcpHost {
   }
 
   private fail(f: AcpFailure): void {
-    this.deps.show?.(transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
+    this.show(() => transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
@@ -380,7 +390,7 @@ export class AcpHost {
     const wrapped = wrapChannelContent(content, shown, this.cfg.mcpName, codexReplyHint(this.cfg.mcpName));
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
-    this.deps.show?.(transcriptOfInbound(content, meta));
+    this.show(() => transcriptOfInbound(content, meta));
     const how = await this.loop.submit(text, meta.message_id);
     this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${how === "steer" ? "插进当前回合" : how === "prompt" ? "开一轮" : "排队"}`);
   }

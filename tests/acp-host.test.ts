@@ -94,7 +94,7 @@ function start(
 }
 
 describe("ACP 宿主整条链（stub）", () => {
-  test("窗口会话只读条目：推给 bridge 的条目有没有 show 都逐条一致，窗口拿到可读会话", async () => {
+  test("窗口会话只读条目：推给 bridge 的条目有没有 show（含 show 抛错）都逐条一致，窗口拿到可读会话", async () => {
     const norm = (es: unknown[]) => JSON.parse(JSON.stringify(es).replace(/"timestamp":"[^"]+"/g, '"timestamp":"T"').replace(/(call|mcp)-[0-9a-f]{8}/g, "$1-X"));
     const run = async (show?: (item: string) => void) => {
       const h = start({}, undefined, undefined, undefined, show);
@@ -102,14 +102,18 @@ describe("ACP 宿主整条链（stub）", () => {
       h.inbound("你好", { chat_id: "api:owner", message_id: "msg1", user: "owner" });
       await until(() => h.stops.length === 1);
       const es = norm(h.entries());
+      expect(h.stops[0]).toMatchObject({ event: "Stop" });
       host!.stop();
       host = null;
       procs.splice(0).forEach((p) => p.stop());
-      return es;
+      return { es, logs: h.logs };
     };
     const shown: string[] = [];
-    const plain = await run();
-    expect(await run((item) => shown.push(item))).toEqual(plain);
+    const plain = (await run()).es;
+    expect((await run((item) => shown.push(item))).es).toEqual(plain);
+    const broken = await run(() => { throw new Error("渲染炸了"); }); // 窗口只是旁路：显示出错不能挡出站、回合收尾
+    expect(broken.es).toEqual(plain);
+    expect(broken.logs.some((m) => m.includes("窗口会话渲染出错") && m.includes("渲染炸了"))).toBe(true);
     expect(plain).toEqual(STUB_TURN_ENTRIES);
     expect(shown).toEqual([
       "👤 owner：你好",

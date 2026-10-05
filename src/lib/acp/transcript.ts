@@ -12,7 +12,8 @@ import type { StopReport } from "./turn.js";
 
 type Rec = Record<string, any>;
 
-const RESULT_LINES = 4, RESULT_CHARS = 400, USER_CHARS = 2_000, ONE_LINE = 200;
+/** 正文 / reply 也设上限：一条消息可以是几百 KB（长报告），整段灌进 pane 会挤爆历史 */
+const RESULT_LINES = 4, RESULT_CHARS = 400, USER_CHARS = 2_000, TEXT_LINES = 200, TEXT_CHARS = 6_000, ONE_LINE = 200;
 /** 先脱敏再截断：只扫开头这么多，远大于截断后的长度，截断处不会留下半个密钥 */
 const SCAN_CHARS = 8_000;
 const STAMP_WIDTH = "[00:00:00] ".length;
@@ -31,7 +32,7 @@ const oneLine = (s: unknown): string => clip(String(s ?? "").replace(/\s*\n\s*/g
 const PLAN_MARK: Record<string, string> = { completed: "✓", in_progress: "▸" };
 
 function toolLine(name: string, input: Rec): string {
-  if (name === "reply" || name.endsWith("__reply")) return `💬 回复：${redactSecrets(String(input?.text ?? ""))}`;
+  if (name === "reply" || name.endsWith("__reply")) return `💬 回复：${clip(String(input?.text ?? ""), TEXT_LINES, TEXT_CHARS)}`;
   if (name === "Bash") return `💻 ${oneLine(input?.command)}`; // formatTool 只留第一个 && 之前，终端里要看整条命令的开头
   if (name === "update_plan") {
     const steps = (Array.isArray(input?.plan) ? input.plan : []).map((p: Rec) => `  ${PLAN_MARK[p?.status] ?? "·"} ${oneLine(p?.step)}`);
@@ -51,7 +52,7 @@ function resultLine(b: Rec): string[] {
 function blockLines(b: Rec): string[] {
   switch (b?.type) {
     case "text":
-      return typeof b.text === "string" && b.text.trim() ? [`🤖 ${redactSecrets(b.text.trim())}`] : [];
+      return typeof b.text === "string" && b.text.trim() ? [`🤖 ${clip(b.text, TEXT_LINES, TEXT_CHARS)}`] : [];
     case "thinking":
       return typeof b.thinking === "string" && b.thinking.trim() ? [`💭 ${oneLine(b.thinking)}`] : [];
     case "tool_use":
