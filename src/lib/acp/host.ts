@@ -54,6 +54,7 @@ const ENTRY_BATCH_MAX = 200, ENTRY_OUTBOX_MAX = 5_000, ENTRY_ACK_MS = 15_000, EN
 const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number } = { retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000 };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const INBOUND_HOW = { steer: "插进当前回合", prompt: "开一轮", queued: "排队", unknown: "steer 投递结果不明（没重发，已出卡）" } as const;
 /** 适配器认 /compact 的写法（codex-acp parseCommand：首块去空白后 /名字，名字不分大小写） */
 const COMPACT_COMMAND = /^\s*\/compact(\s|$)/i;
 
@@ -371,7 +372,7 @@ export class AcpHost {
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
     const how = await this.loop.submit(text, meta.message_id);
-    this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${how === "steer" ? "插进当前回合" : how === "prompt" ? "开一轮" : "排队"}`);
+    this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${INBOUND_HOW[how]}`);
   }
 
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */

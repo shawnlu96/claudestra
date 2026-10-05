@@ -8,10 +8,12 @@
  * - idle 带了这一轮的结局（Pi 适配器的 _meta.claudestra.turn）就按它兑现：steering 另起的回合失败了也得出卡、报 StopFailure。
  * - 适配器自己开的回合（Pi 的异步子任务回调 triggerTurn、压缩后续跑）：线程从非 active 变 active 时既没有 prompt 在途、也没有
  *   steer 另起的回合在等，就当自发回合交给宿主（onSelfTurn），等到下一个 idle。codex-acp 只在宿主的 prompt / steer 期间变 active，不受影响。
+ * - prompt / steer 的输入写出后拿不到可信结果（failures.ts deliveryUnknownCause）：prompt 以不可重试的失败收尾，steer 回 deliveredUnknown，
+ *   都不 reject——调度器的 catch 会把 reject 的 steer 改回 prompt 重发（turn.ts）。没写出的失败照旧抛 / 照旧分类。
  * 规矩与形状见 docs/runtimes/codex-acp.md；tests/acp-session.test.ts。
  */
 import { configRefusal, parseConfigOptions, resolveConfigValue, type ConfigOption } from "./config.js";
-import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError } from "./failures.js";
+import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError, deliveryUnknownCause, deliveryUnknownFailure } from "./failures.js";
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
 import { ACP_PROTOCOL_VERSION, AcpIncompatibleError, checkInitialize, type AgentInfo } from "./protocol.js";
 import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
@@ -137,7 +139,8 @@ export class AcpSession {
       if (air) return { kind: "failed", failure: classifyAirFailure(air, this.label) };
       return r?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
     } catch (e) {
-      return { kind: "failed", failure: classifyPromptError(e, turnKey) };
+      const lost = deliveryUnknownCause(e);
+      return { kind: "failed", failure: lost ? deliveryUnknownFailure(`unknown:${turnKey}`, lost, text) : classifyPromptError(e, turnKey) };
     } finally {
       settled();
     }
@@ -155,9 +158,18 @@ export class AcpSession {
       tracked = this.waiters.some((w) => w.selfTurn);
       if (!tracked) done = this.waitEndAfter(this.statusSeq);
     };
-    const r = await this.rpc.request("_session/steering", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { onResult });
+    const unknown = (cause: string): SteerResult => ({ outcome: "deliveredUnknown", failure: deliveryUnknownFailure(`unknown:${this.sessionId}#${++this.turnSeq}`, cause, text) });
+    let r: any;
+    try {
+      r = await this.rpc.request("_session/steering", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { onResult });
+    } catch (e) {
+      const lost = deliveryUnknownCause(e);
+      if (lost) return unknown(lost);
+      throw e;
+    }
     if (r?.outcome === "injected" || tracked) return { outcome: "injected" };
     if (r?.outcome === "startedNewTurn") return { outcome: "startedNewTurn", done: done ?? this.waitEndAfter(this.statusSeq) };
+    if (r?.outcome === "deliveredUnknown") return unknown(typeof r.message === "string" && r.message ? r.message : "适配器报投递结果不明");
     return { outcome: "failed" };
   }
 

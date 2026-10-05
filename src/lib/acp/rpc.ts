@@ -5,6 +5,7 @@
  * - 入站先分清 request / notification / response，形状不合规的不算数：畸形响应让对应请求失败，不当成功（`{"id":1}` 不是 result:undefined）。
  * - 单行与未收完的半行都有字节上限（maxLineBytes）：超了就整条连接作废、在途请求全部失败，日志只留截断摘要，不截断后接着解析。
  * - 流断了（适配器退出）同样全部失败，调用方据此重启宿主。tests/acp-rpc.test.ts。
+ * - 请求失败带投递状态（RpcLostError.sent）：带用户输入的请求据此判断能不能重发（session.ts）。
  */
 
 export const METHOD_NOT_FOUND = -32601;
@@ -20,6 +21,17 @@ export class RpcError extends Error {
   constructor(readonly code: number, message: string, readonly data?: unknown) {
     super(message);
     this.name = "RpcError";
+  }
+}
+
+/**
+ * 请求没拿到可信结果。sent=true：已经尝试写给对端（之后断线、超时、回包不合规，或写入时抛错——可能写了一半），对端可能已经执行；
+ * sent=false：连接早就断了，一个字节都没写。用户输入只有 sent=false 才能重发，否则会重复执行（session.ts）。
+ * message 与以前的普通 Error 逐字相同、name 不改（String(e) 仍是 "Error: …"），按文字认错误的调用方不受影响。
+ */
+export class RpcLostError extends Error {
+  constructor(message: string, readonly sent: boolean) {
+    super(message);
   }
 }
 
@@ -133,7 +145,7 @@ function classify(line: string): Inbound {
 function rejectAll(pending: Map<number, Pending>, why: string): void {
   for (const [, p] of pending) {
     if (p.timer) clearTimeout(p.timer);
-    p.reject(new Error(`acp 连接断了（${why}）`));
+    p.reject(new RpcLostError(`acp 连接断了（${why}）`, true));
   }
   pending.clear();
 }
@@ -145,7 +157,7 @@ function settleResponse(pending: Map<number, Pending>, m: Record<string, any>, l
   pending.delete(m.id);
   if (p.timer) clearTimeout(p.timer);
   const problem = responseProblem(m);
-  if (problem) return p.reject(new Error(`acp 对端回了不合规的响应（${problem}）`));
+  if (problem) return p.reject(new RpcLostError(`acp 对端回了不合规的响应（${problem}）`, true));
   if ("error" in m) return p.reject(new RpcError(m.error.code, m.error.message, m.error.data));
   try {
     p.onResult?.(m.result);
@@ -168,8 +180,9 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
   const pending = new Map<number, Pending>();
   const requests = new Map<string, Handler>();
   const notifications = new Map<string, Handler>();
+  const frame = (msg: object) => JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n";
   const send = (msg: object) => {
-    if (!closed) wire.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+    if (!closed) wire.write(frame(msg));
   };
 
   const closedListeners: ((why: string) => void)[] = [];
@@ -228,18 +241,25 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
       return closed;
     },
     request(method, params, ropts) {
-      if (closed) return Promise.reject(new Error(`acp 连接已断，${method} 发不出去`));
+      if (closed) return Promise.reject(new RpcLostError(`acp 连接已断，${method} 发不出去`, false));
       const id = nextId++;
       return new Promise((resolve, reject) => {
+        const line = frame({ id, method, ...(params === undefined ? {} : { params }) }); // 序列化抛错 = 还没写：普通错误交出去
         const p: Pending = { resolve, reject, onResult: ropts?.onResult };
         if (ropts?.timeoutMs) {
           p.timer = setTimeout(() => {
             pending.delete(id);
-            reject(new Error(`${method} 超时（${ropts.timeoutMs}ms）`));
+            reject(new RpcLostError(`${method} 超时（${ropts.timeoutMs}ms）`, true));
           }, ropts.timeoutMs);
         }
         pending.set(id, p);
-        send({ id, method, ...(params === undefined ? {} : { params }) });
+        try {
+          wire.write(line);
+        } catch (e) {
+          pending.delete(id);
+          if (p.timer) clearTimeout(p.timer);
+          reject(new RpcLostError(`${method} 写出时出错（${e instanceof Error ? e.message : String(e)}）`, true));
+        }
       });
     },
     notify(method, params) {

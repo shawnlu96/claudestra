@@ -71,13 +71,13 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 
 | 文件 | 职责 |
 |------|------|
-| `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。<br>• 没注册处理器的请求回 -32601，绝不悬着不答。<br>• 入站先分清 request / notification / response；畸形响应（缺 jsonrpc、result/error 不是恰好一个）让请求失败，不算成功。<br>• 单行和未收完的半行都有字节上限（缺省 32 MiB，可配）：超了整条连接作废，日志只留截断摘要。<br>• 流断了，在途请求全部失败 |
-| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、斜杠命令、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序；steer 不设短超时，超过 30 秒仍等待原请求，不因本地超时重复投递。<br>• 斜杠命令独占下一轮 prompt，不走 steering。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
+| `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。<br>• 没注册处理器的请求回 -32601，绝不悬着不答。<br>• 入站先分清 request / notification / response；畸形响应（缺 jsonrpc、result/error 不是恰好一个）让请求失败，不算成功。<br>• 单行和未收完的半行都有字节上限（缺省 32 MiB，可配）：超了整条连接作废，日志只留截断摘要。<br>• 流断了，在途请求全部失败<br>• 失败带投递状态：已经尝试写出之后断线、超时、回包不合规、写入抛错是 `RpcLostError{sent:true}`，连接早就断了没写是 `sent:false` |
+| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、斜杠命令、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序；steer 不设短超时，超过 30 秒仍等待原请求，不因本地超时重复投递。<br>• 例外：`deliveredUnknown`（已经写给适配器、拿不到可信结果）不变回 prompt，只出一张不可重试的卡，附原文，由人决定要不要重发。<br>• 斜杠命令独占下一轮 prompt，不走 steering。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
 | `updates.ts` | `session/update` 翻成 Claude Code 形状的条目，和 rollout 翻译同形 |
-| `failures.ts` | 两种失败形态：AIR `sessionFailure` 按 id 去重；legacy 的 `usageLimitExceeded` JSON-RPC 错误按回合去重。另外处理 `-32000` 未登录；失败会翻成错误条目 |
+| `failures.ts` | 两种失败形态：AIR `sessionFailure` 按 id 去重；legacy 的 `usageLimitExceeded` JSON-RPC 错误按回合去重。另外处理 `-32000` 未登录；失败会翻成错误条目。<br>• 用户输入写出后拿不到可信结果（`deliveryUnknownCause`）：`retry:false` + `deliveryUnknown`，不触发 60 秒自动续跑 |
 | `config.ts` | configOptions 的解析和本地校验，顶栏要的 `model_state`，额度卡的选项 |
 | `permissions.ts` | `session/request_permission` ↔「待你处理」卡。fail closed：取消、超时、答了不认识的 id，一律回 cancelled |
-| `session.ts` | 一条 ACP 会话：initialize（声明 AIR + 终端输出）、接线程、prompt / steer / cancel / 改配置、权限请求转宿主。线程状态按序号缓存，steer 回包那一刻（rpc 同步钩子）登记外部回合的结束；适配器退出时所有等待以失败结束 |
+| `session.ts` | 一条 ACP 会话：initialize（声明 AIR + 终端输出）、接线程、prompt / steer / cancel / 改配置、权限请求转宿主。线程状态按序号缓存，steer 回包那一刻（rpc 同步钩子）登记外部回合的结束；适配器退出时所有等待以失败结束。<br>• prompt / steer 的输入写出后断线、超时、回包不合规、写入抛错，或适配器回 `deliveredUnknown` / `data.deliveryUnknown`（Pi 适配器写给 pi 后超时）：prompt 以投递不明的失败收尾，steer 回 `deliveredUnknown`，都不 reject（reject 会被调度器改回 prompt 重发） |
 | `host.ts` | 宿主本体：连 bridge、起适配器（退出就退避重起、接回同一个线程）、入站渲染（与 CodexQueueSink 同款）、流式条目按序号送（确认才出队）、回合末全部确认才报 Stop、失败 / 权限转卡、改配置 |
 | `adapter-proc.ts` | 起哪个 ACP agent（codex-acp / 沙箱里固定的本仓 stub，见 `stub.ts`）、它的环境（CODEX_PATH、full access、CODEX_CONFIG 挂 channel-server）、stdio 接成线路 |
 | `bridge-link.ts` | 宿主到 bridge 的 ws：register 带 transport=acp、abort:true；断了退避重连，被顶替也不退出 |
