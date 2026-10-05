@@ -163,6 +163,50 @@ describe("bg-activity-watcher · 后台 shell", () => {
     expect(snaps[0]).toMatchObject({ end: { status: "done", exitCode: 0 } });
   });
 
+  test("批量恢复：已确认的 31 个 shell 全部消失超过宽限期后同时重现 → 按原身份接着跟、全部更正为 done，不计入洪水闸；真正的新文件照旧受闸", async () => {
+    const f = fixture("bulk");
+    await f.poll();
+    const ids = Array.from({ length: 31 }, (_, i) => `bulk${i}`);
+    for (const batch of [ids.slice(0, 16), ids.slice(16)]) { // 分两批起：单轮新增都不超过洪水闸
+      for (const id of batch) {
+        writeFileSync(f.out(id), "working\n");
+        f.confirmBg(id);
+      }
+      await f.poll(10_000);
+    }
+    expect(ids.every((id) => f.active(id))).toBe(true);
+    for (const id of ids) unlinkSync(f.out(id));
+    await f.poll(10_000);
+    await f.poll(2 * MIN);
+    const statuses = (id: string) => f.completed(id).map((e) => (e.data as { status: string }).status);
+    expect(ids.map(statuses)).toEqual(ids.map(() => ["unknown"]));
+
+    // 31 个恢复 + 20 个真新文件同一轮出现：恢复不算新文件，20 个新文件不触发洪水闸
+    const fresh = Array.from({ length: 20 }, (_, i) => `fresh${i}`);
+    for (const id of ids) writeFileSync(f.out(id), "\n[exited with code 0]\n");
+    for (const id of fresh) {
+      writeFileSync(f.out(id), "serving\n");
+      f.confirmBg(id);
+    }
+    await f.poll(10_000);
+    expect(ids.map(statuses)).toEqual(ids.map(() => ["unknown", "done"]));
+    for (const id of ids) expect(f.completed(id)[1].data).toMatchObject({ exitCode: 0 });
+    expect(fresh.every((id) => f.active(id))).toBe(true);
+    const ended = activeBgTasksFor(f.agent.name).filter((t) => t.end);
+    expect(ended).toHaveLength(8);
+    expect(ended.every((t) => (t.end as { status: string }).status === "done")).toBe(true);
+
+    // 真正的存量洪水（单轮 31 个新文件）照旧按存量处理，不开流
+    const stock = Array.from({ length: 31 }, (_, i) => `stock${i}`);
+    for (const id of stock) {
+      writeFileSync(f.out(id), "old\n");
+      f.confirmBg(id);
+    }
+    await f.poll(10_000);
+    await f.poll(10_000);
+    for (const id of stock) expect(f.of(id)).toEqual([]);
+  });
+
   test("被结束：末行独立 [killed]（前面可有 SIGTERM 行）→ status stopped、exitCode null，快照还原成已停止；输出里提到 [killed] 不算", async () => {
     const f = fixture("killed");
     await f.poll();

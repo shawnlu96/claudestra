@@ -1,4 +1,5 @@
 import type { BgEndStatus } from "@/lib/chat/events";
+import { shellEndOf } from "@/lib/chat/shell-end-line";
 import type { BgTaskView } from "./type";
 
 /**
@@ -22,20 +23,13 @@ export type BgShellEnd = { kind: "exited"; code: number } | { kind: "stopped" };
  *  unreadable = 仍在跟踪但输出文件读不到（权限 / IO，bridge 继续重试，读通即恢复） */
 export type BgShellUnknown = "untracked" | "unreadable";
 
-const EXIT_LINE = /^\[exited with code (-?\d+)\]$/;
-const KILLED_LINE = "[killed]";
-
-const lastLine = (lines: readonly string[]) => (lines[lines.length - 1] ?? "").replace(/\r$/, "");
-
-/** 渲染行里的最后一行恰为独立退出行 → 退出码 */
-function exitCodeOfLines(lines: readonly string[]): number | null {
-  const m = EXIT_LINE.exec(lastLine(lines));
-  return m ? Number(m[1]) : null;
-}
+/** 渲染行的最后一行按终止行规则解析（lib/chat/shell-end-line.ts，与 bridge 共用的 twin） */
+const lastLineEnd = (lines: readonly string[]) => shellEndOf(lines[lines.length - 1] ?? "");
 
 /** bg_task_completed 到达：只有 bridge 判 done 且末行是退出行才算「已退出」，否则（idle / 文件消失 / 老 bridge）null */
 export function shellExitOnDone(lines: readonly string[], status: BgEndStatus | undefined): number | null {
-  return status === "done" ? exitCodeOfLines(lines) : null;
+  const end = status === "done" ? lastLineEnd(lines) : null;
+  return end?.status === "done" ? end.exitCode : null;
 }
 
 /** 已确认结局（退出 / 被结束）的 shell：结局定了，replay / 重连再来的 start / update 不能把它拉回运行中（也不重复堆行） */
@@ -45,9 +39,9 @@ export function shellExited(t: BgTaskView): boolean {
 
 /** bg_task_completed 到达时的 shell 结局：done + 末行退出行 → 已退出；stopped + 末行 [killed] → 已停止；其余 null */
 function shellEndOnDone(lines: readonly string[], status: BgEndStatus | undefined): BgShellEnd | null {
-  const code = shellExitOnDone(lines, status);
-  if (code !== null) return { kind: "exited", code };
-  return status === "stopped" && lastLine(lines) === KILLED_LINE ? { kind: "stopped" } : null;
+  const end = lastLineEnd(lines);
+  if (!end || end.status !== status) return null; // bridge 判的结局必须与末行对得上，老 bridge / 不一致都按不可确认
+  return end.status === "done" ? { kind: "exited", code: end.exitCode } : { kind: "stopped" };
 }
 
 /** bg_task_completed 落到卡上：subagent 原样记 bridge 的收尾状态；shell 只有读到退出行 / [killed] 才进「已结束」，

@@ -29,7 +29,7 @@
 
 import { constants as fsConstants, existsSync } from "fs";
 import { access, lstat, readdir, stat } from "fs/promises";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
 import { readActiveAgents } from "../lib/registry.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
@@ -39,7 +39,8 @@ import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
-import { feedShellChunk, newShellProgress, settleShellTail, type ShellEnd, type ShellProgress } from "../lib/bg-shell-progress.js";
+import { feedShellChunk, newShellProgress, settleShellTail, type ShellProgress } from "../lib/bg-shell-progress.js";
+import type { ShellEnd } from "../lib/shell-end-line.js";
 import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress } from "../lib/subagent-progress.js";
 
 const POLL_MS = 10_000;
@@ -98,6 +99,9 @@ const activities = new Map<string, Activity>();
 const seen = new Set<string>();
 /** shell 候选（等待 jsonl 确认是真 bg 任务）：filePath → 首见时间 */
 const shellCandidates = new Map<string, number>();
+/** 因输出文件消失判了 unknown 的已确认 shell：文件再出现就按原身份接着跟——不算新文件（不过洪水闸），也不再做真 bg 确认
+ *  （首次跟踪时确认过）。所在会话目录被清理就不会再出现，每小时随 seen 瘦身一起清掉 */
+const missingShells = new Set<string>();
 const SHELL_CONFIRM_TIMEOUT_MS = 60_000;
 /** 按 agent-session 记「首次进入监视」——见文件头「重启防重放」 */
 const baseline = new BaselineKeys();
@@ -261,8 +265,8 @@ async function consume(act: Activity): Promise<void> {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
       // 刚启动 / 刚有输出就不见：多半还没建出来或正被重建（磁盘满时实见），宽限期内只算没出现，免得一闪就判死
       if (deps.now() - act.lastGrowth < SHELL_MISSING_GRACE_MS) return;
-      // 判了 unknown 之后文件若又出现，tick 会把它当新文件重新跟一遍、按真实终止行更正结局；一直不出现就停在 unknown
-      seen.delete(act.filePath);
+      // 判了 unknown 之后文件若又出现，tick 按原身份重新跟一遍、按真实终止行更正结局；一直不出现就停在 unknown
+      missingShells.add(act.filePath);
     }
     await finalize(act, act.kind === "shell" ? "unknown" : "idle", "文件已消失");
     return;
@@ -460,6 +464,11 @@ async function tickInner(): Promise<void> {
     await shellResults.select(agent.name, agent.sessionId);
     const subFiles = await listFiles(subagentsDir(agent.cwd, agent.sessionId), ".jsonl");
     const shellFiles = await listFiles(deps.shellDir(agent.cwd, agent.sessionId), ".output");
+    // 先接回消失后又出现的已确认 shell：startActivity 把它放回 seen，下面数新文件就不会把它算进洪水闸
+    for (const f of shellFiles) {
+      if (!missingShells.delete(f)) continue;
+      await startActivity("shell", agent, f).catch((e) => console.error(`🧵 bg shell 恢复跟踪失败 (${agent.name}):`, (e as Error).message));
+    }
     // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
     const fresh = [...subFiles, ...shellFiles].filter((f) => !seen.has(f));
     const suppressBurst = !first && fresh.length > BURST_LIMIT;
@@ -527,6 +536,7 @@ async function tickInner(): Promise<void> {
   // seen 集合瘦身（约每小时一次）：源文件已被清理的条目不会再出现，安全移除
   if (++tickCount % 360 === 0) {
     for (const f of seen) if (!existsSync(f)) seen.delete(f);
+    for (const f of missingShells) if (!existsSync(dirname(f))) missingShells.delete(f);
     // baseline key 同步瘦身:按 registry 在册 agent 名过滤(不按 session,见 BaselineKeys.prune)
     try {
       baseline.prune((await readActiveAgents()).map((a) => a.name));
