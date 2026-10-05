@@ -67,6 +67,8 @@ class FakeClock implements AgentListClock {
 interface Pending { signal?: AbortSignal; aborted: boolean; settled: boolean; ok(agents: unknown[]): void; status(code: number): void }
 const pending: Pending[] = [];
 const otherCalls: string[] = [];
+/** GET /api/v1/projects 的排队回包（空 = 走 404 兜底）：fail = 503，数组 = 成功 */
+const projectsReplies: Array<"fail" | unknown[]> = [];
 const realFetch = globalThis.fetch;
 // 倒计时 / Splash 的真时钟在 act 外触发的提交只是噪音（它们会打印整棵 DOM），其余 console.error 照常
 const realConsoleError = console.error;
@@ -75,6 +77,11 @@ function fakeFetch(input: string | URL | Request, init?: RequestInit): Promise<R
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
   const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
   if (url.pathname === "/app-config.json") return Promise.resolve(json({ mode: "direct", fp: "local", machineName: "fixture", version: "" }));
+  if (url.pathname === "/api/v1/projects" && projectsReplies.length) {
+    otherCalls.push(url.pathname);
+    const r = projectsReplies.shift()!;
+    return Promise.resolve(r === "fail" ? json({ ok: false, error: "fixture 503" }, 503) : json({ ok: true, projects: r }));
+  }
   if (url.pathname !== "/api/v1/agents") {
     otherCalls.push(url.pathname);
     return Promise.resolve(json({ ok: false, error: "not in fixture" }, 404));
@@ -105,7 +112,7 @@ let ui: {
 };
 interface Store {
   startAgentList(): () => void; loadAgents(r?: string): Promise<void>; refreshAgents(r?: string): Promise<void>; resetForMachine(): void;
-  state: { agents: AgentSession[]; agentList: { failures: number; loaded: boolean } };
+  state: { agents: AgentSession[]; projects: { id: string; name: string }[]; agentList: { failures: number; loaded: boolean } };
 }
 let clock: FakeClock;
 let store: Store | null = null;
@@ -150,6 +157,7 @@ beforeEach(() => {
   storage.clear();
   pending.length = 0;
   otherCalls.length = 0;
+  projectsReplies.length = 0;
   clock = new FakeClock();
   setClock(clock);
   i18n.setLang("zh");
@@ -370,5 +378,32 @@ test("403：不自动重试，侧栏说清楚，Splash 退场让配对横幅露�
   expect(pending).toHaveLength(1);
   await waitReal(1_300);
   expect(u.splash()).toBe(false);
+  await u.unmount();
+});
+
+test("同 roster 的显式刷新照旧整表写入并重拉 projects：/projects 首次失败，手动重试补回；轮询同签名不重拉", async () => {
+  const P = [{ id: "p", name: "Proj", emoji: "🧪", dirs: [] }];
+  projectsReplies.push("fail", P);
+  const u = await mount();
+  await answer((p) => p.ok(TWO));
+  const projectCalls = () => otherCalls.filter((c) => c === "/api/v1/projects").length;
+  expect(projectCalls()).toBe(1);
+  expect(store!.state.projects).toEqual([]); // /projects 瞬时失败：组头退化为裸 id
+  await act(async () => { void store!.loadAgents("manual"); });
+  await answer((p) => p.ok(TWO)); // roster 一字不差
+  expect(projectCalls()).toBe(2);
+  expect(store!.state.projects.map((p) => p.name)).toEqual(["Proj"]);
+  // 签名外字段（purpose）的变化：显式刷新要接住
+  await act(async () => { void store!.loadAgents("action"); });
+  await answer((p) => p.ok([wire("lead", { purpose: "new" }), TWO[1]]));
+  expect(store!.state.agents[0]!.purpose).toBe("new");
+  expect(projectCalls()).toBe(3);
+  // 静默轮询同签名：不替换、不重拉
+  const ref = store!.state.agents;
+  await act(async () => { void store!.refreshAgents("poll"); });
+  await answer((p) => p.ok([wire("lead", { purpose: "new" }), TWO[1]]));
+  expect(store!.state.agents).toBe(ref);
+  expect(projectCalls()).toBe(3);
+  expect(u.shown()).toEqual(["lead", "kid"]);
   await u.unmount();
 });

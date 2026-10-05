@@ -353,7 +353,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return this.agentList.attach(window);
   }
 
-  /** 一次成功响应落地。仅列表实际变化才 produce,避免轮询每拍替换数组引用导致侧栏空转 re-render。 */
+  /**
+   * 一次成功响应落地。静默节拍(poll/event)仅列表实际变化才 produce,避免每拍替换数组引用导致侧栏空转 re-render;
+   * 显式刷新(action/manual)照旧整表写入 + 重拉 projects——签名不含 purpose/cwd 等字段,且同 roster 的手动重试
+   * 也要能把上次失败的 projects 补回来。
+   */
   private applyAgents(next: AgentSession[], reason: AgentListReason) {
     // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
     // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁。
@@ -364,11 +368,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       });
     }
     if (reason === "poll" || reason === "event") this.checkStreamHealth(cur);
-    if (agentsSignature(next) === agentsSignature(this.state.agents)) return;
+    const explicit = reason === "action" || reason === "manual";
+    if (!explicit && agentsSignature(next) === agentsSignature(this.state.agents)) return;
     // v2.17.2 交互期冻结顺序(peer 补刀:pointerdown 意图捕获只覆盖「按下→click」的后半窗口,
     // 「视觉锁定→手指落下」这段更长的窗口里重排照样让手指落在错行上)。侧栏 2s 内有过触碰/滚动 →
     // 本拍只更新字段不重排,顺序等下一拍(≤15s)再应用;成员增删仍立即生效(新增排尾)。操作后的拉取不冻结。
-    const frozen = reason !== "action" && reason !== "manual" && Date.now() - lastSidebarTouchAt < SIDEBAR_FREEZE_MS;
+    const frozen = !explicit && Date.now() - lastSidebarTouchAt < SIDEBAR_FREEZE_MS;
     this.produce((s) => {
       s.agents = frozen ? keepRosterOrder(s.agents, next) : next;
     });
