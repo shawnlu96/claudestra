@@ -65,7 +65,7 @@ export function SidebarDirectory({ activeEntries, historyEntries, historyCount, 
   activeFolds: DirectoryFolds;
   renderEntry: (e: SidebarEntry, folds: DirectoryFolds) => ReactNode;
 }) {
-  const historyFolds = activeFolds; // 原样搬出：历史与活目录仍共用一套折叠
+  const historyFolds = useDirectoryFolds("history");
   const [openHistory, toggleHistory] = usePersistedSet("cstra_directory_history_open");
   return (
     <ul className="flex w-full list-none flex-col gap-0.5 p-0">

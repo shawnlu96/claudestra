@@ -18,10 +18,15 @@ interface Host extends El { remove(): void }
 interface Doc { createElement(tag: string): Host; body: El & { appendChild(c: Host): void } }
 interface Folds { projects: Set<string>; toggleProject(id: string): void; teams: Set<string>; toggleTeam(id: string): void }
 
-mock.module("@/features/chat/contacts-data", () => ({ useFullScope: () => false }));
-mock.module("@/features/chat/host-info", () => ({ useHostInfo: () => ({ local: false, platform: "darwin", openers: [] }), openLocal: async () => ({ ok: true }) }));
-mock.module("@/features/chat/components/agent-dnd", () => ({ useAgentDrop: () => ({ over: false, handlers: {} }) }));
-mock.module("@/features/collab/collab-entry", () => ({ CollabEntry: () => null }));
+// mock.module 对整个 bun test 进程生效：先取真模块再只覆盖用到的导出，别让后面的文件拿到缺导出的空壳
+const partial = async (path: string, over: Record<string, unknown>) => {
+  const real = await import(path);
+  mock.module(path, () => ({ ...real, ...over }));
+};
+await partial("@/features/chat/contacts-data", { useFullScope: () => false });
+await partial("@/features/chat/host-info", { useHostInfo: () => ({ local: false, platform: "darwin", openers: [] }) });
+await partial("@/features/chat/components/agent-dnd", { useAgentDrop: () => ({ over: false, handlers: {} }) });
+await partial("@/features/collab/collab-entry", { CollabEntry: () => null });
 
 const mod = (p: string) => new URL(`../web/features/chat/${p}`, import.meta.url).href;
 let React: ReactNS;
