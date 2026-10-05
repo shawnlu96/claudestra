@@ -91,12 +91,39 @@ export function adoptStrandedTransfers(held: HeldQueue): Set<HeldItem> {
   return unresolved;
 }
 
+/**
+ * 频道 → 押在它队里的一封按 PM 角色该归哪位当班 PM（null = 留在本频道）。规则同 deliverPmLocal（人类直聊、前任自己请求的回程不转），
+ * 由 bridge/local-api/project-pm-delivery.ts 注册；每个频道判一次只读一次台账 / 注册表，没有候选条目就不读
+ */
+type PmRoleRoute = (channelId: string) => (env: Envelope) => string | null;
+let pmRoleRoute: PmRoleRoute = () => () => null;
+export function setPmRoleRoute(fn: PmRoleRoute): PmRoleRoute {
+  const prev = pmRoleRoute;
+  pmRoleRoute = fn;
+  return prev;
+}
+
+/**
+ * channelId 队里归当班 PM 的角色消息：旧版已转过（信封指向别的频道）的，和切换前押进旧 PM 队、信封还指着旧 PM 的。
+ * 旧 PM 的收件箱不领不 ack，flush 不等旧 PM 在线 / 空闲就交给当班 PM（tests/project-pm-held-inbox.test.ts retired-offline-stranded）
+ */
+export function roleHandoffs(held: HeldQueue, channelId: string, unresolved: Set<HeldItem>): Set<HeldItem> {
+  const away = new Set<HeldItem>();
+  let route: ReturnType<PmRoleRoute> | undefined;
+  for (const item of held.get(channelId) ?? []) {
+    const to = item.env.to;
+    if (unresolved.has(item) || isHumanDirect(item.env) || to.kind !== "local") continue;
+    if (to.channelId !== channelId || (route ??= pmRoleRoute(channelId))(item.env)) away.add(item);
+  }
+  return away;
+}
+
 /** Inbox reads, acknowledgements and reply tallies must use the same ownership recovery as flush, including leased entries. */
 export function ownedHeldItems(held: HeldQueue, channelId: string): HeldItem[] {
   const unresolved = adoptStrandedTransfers(held);
-  // A stranded role copy still needs flush's authorized handoff; an old inbox must not consume or ack it before that succeeds.
-  return (held.get(channelId) ?? []).filter((item) => !unresolved.has(item)
-    && (isHumanDirect(item.env) || item.env.to.kind !== "local" || item.env.to.channelId === channelId));
+  // A role copy the active PM owns still needs flush's authorized handoff; an old inbox must not consume or ack it before that succeeds.
+  const away = roleHandoffs(held, channelId, unresolved);
+  return (held.get(channelId) ?? []).filter((item) => !unresolved.has(item) && !away.has(item));
 }
 
 /** Missing / conflicting original queue addresses are not recoverable from body headers. Never fabricate a deleted original. */

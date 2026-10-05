@@ -6,7 +6,7 @@ import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } fr
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
-import { isHumanDirect, markPmTransfer, retryLater, undoPmTransfer } from "../pm-held-transfer.js";
+import { isHumanDirect, markPmTransfer, retryLater, setPmRoleRoute, undoPmTransfer } from "../pm-held-transfer.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
 interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile> }
@@ -30,8 +30,10 @@ export async function deliverPmLocal<P extends Receipt>(
     // pmClientFor may have lent another PM's socket under an older pointer; never deliver this channel's message through it.
     const borrowed = agents.some((a) => a.projectId === original.projectId && a.channelId && a.channelId !== to.channelId
       && clients.get(a.channelId)?.ws === to.ws);
-    if (borrowed && !own) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } });
-    const via: LocalEndpoint = borrowed && own ? { ...to, ws: own.ws, cwd: own.cwd } : to;
+    // A held letter replayed while its addressee is offline carries no socket at all: keep it queued, never send on an empty one.
+    const lent = borrowed || !to.ws;
+    if (lent && !own) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } });
+    const via: LocalEndpoint = lent && own ? { ...to, ws: own.ws, cwd: own.cwd } : to;
     // Whether or not the role would have redirected it, a direct API chat with a PM is re-checked against its exact credential.
     if (direct && getMeta(db, original.projectId).pms.includes(original.name)) {
       const refused = await finalScopeRefusal(env, original.name, facts);
@@ -132,6 +134,27 @@ function isCallerPushback(env: Envelope): boolean {
   return env.from.kind === "local" && env.meta.triggerKind === "agent_tool" && PUSHBACK_ID.test(env.meta.messageId)
     && (env.intent === "response" || !env.meta.messageId.startsWith("reply_fwd_"));
 }
+
+/**
+ * 押后队列的归属判定（收件箱领取 / 计数、flush 交给当班 PM）：同 deliverPmLocal 的转交规则，但前任自己请求的回程不看在不在线——
+ * 押着的就留给它本人，不从正文猜身份。台账读不出来按「留在原频道」，和改动前一样
+ */
+export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: Envelope) => string | null {
+  return (channelId) => {
+    const { db, agents } = facts ?? { db: ledgerDb(), agents: readRegistryAgentsSync() };
+    const original = agents.find((a) => a.channelId === channelId);
+    return (env) => {
+      if (!db || !original?.projectId || isHumanDirect(env) || isCallerPushback(env)) return null;
+      try {
+        return pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+      } catch (e) {
+        console.error("[pm-role] held ownership check failed", (e as Error).message);
+        return null;
+      }
+    };
+  };
+}
+setPmRoleRoute(pmRoleRoute());
 
 /** After an API delivery, typing / source / handoff bookkeeping belongs to whoever actually received it. */
 export function followPmDelivery(agent: { name: string; channelId: string }, delivery: { envelope: Envelope }): void {

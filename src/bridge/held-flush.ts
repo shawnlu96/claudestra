@@ -15,7 +15,7 @@ import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { senderTrigger, turnStartedAt } from "./stop-settle.js";
 import { controlFor } from "../lib/runtimes/index.js";
-import { adoptStrandedTransfers, handedOver, shouldRetry } from "./pm-held-transfer.js";
+import { adoptStrandedTransfers, handedOver, roleHandoffs, shouldRetry } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
   held: HeldQueue;
@@ -143,6 +143,8 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
     const unresolved = adoptStrandedTransfers(d.held); // 全队归并：角色通知留新 PM，直聊留原目标；原目标不明的保留待诊断
+    // 归当班 PM 的角色消息（旧 PM 队里的）：不看旧 PM 在不在线、忙不忙、闸没闸，先交出去；当班 PM 忙 / 闸内由 deliverToLocal 押进它的队
+    const away = roleHandoffs(d.held, channelId, unresolved);
     const working = await d.working(channelId, evAgent);
     if (!working) openedBy.delete(channelId);
     let first: HeldItem | undefined;
@@ -153,14 +155,20 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     // check_inbox 现在也领人类消息：租约内的一律不投（忙时也一样）。押满时限的 owner 答复忙时也投、排最前，不被前面等画面静止的外人挡住
     const now = (d.now ?? Date.now)();
     const late = new Set(q.filter((i) => ownerLate(i, now)));
-    const due = q.filter((i) => !leaseActive(i) && (!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)));
-    for (const item of [...due.filter((i) => late.has(i)), ...due.filter((i) => !late.has(i))]) {
+    const due = q.filter((i) => !leaseActive(i) && (away.has(i)
+      || ((!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)))));
+    const mine = due.filter((i) => !away.has(i));
+    for (const item of [...due.filter((i) => away.has(i)), ...mine.filter((i) => late.has(i)), ...mine.filter((i) => !late.has(i))]) {
       if (unresolved.has(item)) continue;
+      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
+      if (!d.held.get(channelId)?.includes(item)) continue;
+      if (away.has(item)) {
+        await handOver(d, channelId, item, reason);
+        continue;
+      }
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);
       if (!fresh) break;
-      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
-      if (!d.held.get(channelId)?.includes(item)) continue;
       if (!(await mayJoin(d, item, channelId, working, first, late.has(item)))) break;
       if (late.has(item) && item.env.meta.waitForIdle) delete item.env.meta.waitForIdle; // 只有卡片答复走到这里（见 ownerLate）
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
@@ -190,6 +198,26 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   } finally {
     d.held.release(channelId);
   }
+}
+
+/**
+ * 旧 PM 队里归当班 PM 的一封：deliverPmLocal 按角色转交（抬头、回程槽、API 回执、最终收件人凭据范围都在那边每次重核）。
+ * 不占旧 PM 这一轮（不记 openedBy、不加旧 PM 的叫停抬头），送达 / 押进对方队才出队，没送到（对方离线等）留着下次再试
+ */
+async function handOver(d: FlushDeps, channelId: string, item: HeldItem, reason: string): Promise<void> {
+  // 旧 PM 离线时没有它的连接：deliverPmLocal 转交时换成当班 PM 的；判定不转的按离线留着（不会拿空连接发）
+  const ws = (d.client(channelId)?.ws ?? item.to.ws) as LocalEndpoint["ws"];
+  const r = await d.deliver(item.env, { ...item.to, ws }, () => !!d.held.get(channelId)?.includes(item));
+  const to = r.envelope.to;
+  if (r.outcome.kind === "error" || shouldRetry(r)) return;
+  if (r.outcome.kind === "sent" && !handedOver(d.held, channelId, item, r) && r.outcome.note === "queued") return;
+  if (r.outcome.kind === "sent" && r.outcome.note !== "queued" && to.kind === "local") {
+    d.touch(to.channelId, item.env);
+    notifyHeldSettled(item.env, "delivered");
+    for (const fn of deliveredHooks) fn(to.channelId, item.env);
+  }
+  d.held.remove(channelId, item);
+  if (r.outcome.kind === "sent") console.log(`↪️ 押后消息转交(${reason}): ${fromLabel(item.env)} → ${to.kind === "local" ? to.agentName : to.kind}（${item.env.meta.messageId}）`);
 }
 
 /**

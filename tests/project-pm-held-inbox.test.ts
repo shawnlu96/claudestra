@@ -7,7 +7,8 @@ import { subscribeEvents } from "../src/bridge/event-bus.js";
 import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
-import { deliverPmLocal } from "../src/bridge/local-api/project-pm-delivery.js";
+import { deliverPmLocal, pmRoleRoute } from "../src/bridge/local-api/project-pm-delivery.js";
+import { setPmRoleRoute } from "../src/bridge/pm-held-transfer.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { switchProjectPm } from "../src/lib/pm-role-switch.js";
 import { A, B, P, pmFixture } from "./pm-role-fixture.test.js";
@@ -26,6 +27,8 @@ async function inboxWorld() {
   await switchProjectPm(fixture.db, P, B, { actor: "owner" }, fixture.deps);
   const state = await fixture.deps.read();
   state.principals.push({ id: "token:tok_owner", role: "owner", agents: ["*"], createdAt: "2026-01-01" } as never);
+  const prev = setPmRoleRoute(pmRoleRoute({ db: fixture.db, agents: state.agents }));
+  cleanups.push(() => { setPmRoleRoute(prev); });
   const dir = mkdtempSync(join(tmpdir(), "pm-held-inbox-")), path = join(dir, "held.json");
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   let held = new HeldQueue(path);
@@ -63,7 +66,8 @@ async function inboxWorld() {
   };
   const restart = () => { held = new HeldQueue(path); init(); };
   const q = (c: string) => held.get(c) ?? [];
-  return { get held() { return held; }, take, flush, restart, q, clients, calls, busy, sent, rendered, mirrors };
+  const scope = (agents: string[]) => { Object.assign(state.principals.find((p) => p.id === "token:tok_peer")!, { agents }); };
+  return { get held() { return held; }, take, flush, restart, q, scope, clients, calls, busy, sent, rendered, mirrors };
 }
 
 function ownerLetter(text = BODY): Envelope {
@@ -331,4 +335,152 @@ test("stranded-role-inbox: two legitimate same-messageId role clicks remain dist
   await w.flush(CA); await w.flush(CB);
   expect(w.sent).toEqual([{ channel: CB, text: first.env.content }, { channel: CB, text: "second click" }]);
   expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+});
+
+// followup-reliability-PMSWR：切换前押进旧 PM A 队、信封仍指向 A 的角色消息（未转交过）；A 离线 / 忙 / 在线领收件箱
+function preSwitchRole(w: World, text = "  pre-switch role body\n\nunchanged  ", patch: (env: Envelope) => void = () => {}): HeldItem {
+  const env = ownerLetter(text);
+  env.intent = "notification";
+  env.to = target(CA);
+  env.from = { kind: "local", agentName: "agent-task-1", channelId: "executor", ws: ws("exec") };
+  patch(env);
+  w.held.set(CA, [...w.q(CA), { env, to: target(CA), heldAt: 100 }]);
+  w.restart(); // 旧数据从盘上读回
+  return w.q(CA).at(-1)!;
+}
+const HEADER = `[系统转交：原收件人 ${A}；当班 PM ${B}]`;
+
+for (const b of ["idle", "busy", "offline"] as const) {
+  for (const evidence of ["pre-switch", "old-transfer"] as const) {
+    test(`retired-offline-stranded: A offline, B ${b}, ${evidence} role letter follows the active PM`, async () => {
+      const w = await inboxWorld();
+      const item = evidence === "pre-switch" ? preSwitchRole(w) : strandedRole(w);
+      const body = evidence === "pre-switch" ? `${HEADER}\n${item.env.content}` : item.env.content;
+      const bClient = w.clients.get(CB)!;
+      w.clients.delete(CA);
+      if (b === "busy") w.busy.add(CB);
+      if (b === "offline") w.clients.delete(CB);
+      await w.flush(CA);
+      if (b === "idle") {
+        expect(w.sent).toEqual([{ channel: CB, text: body }]);
+        expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+        return;
+      }
+      expect(w.sent).toEqual([]);
+      if (b === "busy") {
+        expect(w.q(CA)).toEqual([]);
+        expect(w.q(CB)).toHaveLength(1);
+      } else {
+        expect(w.q(CA)).toHaveLength(1);
+        expect(w.q(CA)[0]!.heldAt).toBe(100);
+      }
+      w.busy.clear(); w.clients.set(CB, bClient); w.restart();
+      await Promise.all([w.flush(CA), w.flush(CB)]);
+      await w.flush(CA); await w.flush(CB);
+      expect(w.sent).toEqual([{ channel: CB, text: body }]);
+      expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+    });
+  }
+}
+
+test("retired-offline-stranded: owner direct chat and A's own request answer keep A as destination while A is offline", async () => {
+  const w = await inboxWorld();
+  const direct = ownerLetter("direct owner A");
+  direct.to = target(CA);
+  const answer = preSwitchRole(w, "answer to A's own question", (env) => {
+    env.intent = "response";
+    env.meta = { ...env.meta, messageId: "agent_reply_1", triggerKind: "agent_tool" };
+  });
+  w.held.set(CA, [...w.q(CA), { env: direct, to: target(CA), heldAt: 150 }]);
+  w.restart();
+  const a = w.clients.get(CA)!;
+  w.clients.delete(CA);
+  for (let i = 0; i < 2; i++) { await w.flush(CA); await w.flush(CB); w.restart(); }
+  expect(w.sent).toEqual([]);
+  expect(w.q(CA).map((i) => i.env.content)).toEqual([answer.env.content, "direct owner A"]);
+  expect(w.q(CA).every((i) => (i.env.to as LocalEndpoint).channelId === CA)).toBe(true);
+  expect(w.q(CB)).toEqual([]);
+  w.clients.set(CA, a);
+  await w.flush(CA); await w.flush(CA); // 不同发送人各开一轮
+  expect(w.sent).toEqual([{ channel: CA, text: "answer to A's own question" }, { channel: CA, text: "direct owner A" }]);
+});
+
+test("retired-offline-stranded: two legitimate same-messageId role clicks are both handed over, none deduplicated", async () => {
+  const w = await inboxWorld();
+  preSwitchRole(w, "click 1");
+  preSwitchRole(w, "click 2", (env) => { env.meta = { ...env.meta, ts: "2026-10-01T00:00:01Z" }; });
+  w.clients.delete(CA);
+  await w.flush(CA);
+  expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\nclick 1` }, { channel: CB, text: `${HEADER}\nclick 2` }]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+});
+
+test("retired-offline-stranded: API credential scope is re-checked against the final PM every attempt; refusal leaks no body", async () => {
+  const w = await inboxWorld();
+  const scoped = (env: Envelope) => { env.from = { kind: "api", tokenId: "tok_peer", peer: "remote", name: "remote" }; };
+  preSwitchRole(w, "secret for A only", scoped);
+  w.clients.delete(CA);
+  w.scope([A]);
+  await w.flush(CA);
+  expect(w.sent).toHaveLength(1);
+  expect(w.sent[0]).toMatchObject({ channel: CB });
+  expect(w.sent[0]!.text).toContain("被拒收");
+  expect(w.sent[0]!.text).not.toContain("secret for A only");
+  expect(w.q(CA)).toEqual([]);
+  w.sent.length = 0;
+  preSwitchRole(w, "allowed now", scoped);
+  w.scope([A, B]);
+  await w.flush(CA);
+  expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\nallowed now` }]);
+});
+
+for (const a of ["idle", "busy"] as const) {
+  for (const mode of ["take", "read", "read-thread"]) {
+    test(`pre-switch-role-inbox: A ${a} cannot ${mode}/tally the pre-switch role letter; flush hands it to B`, async () => {
+      const w = await inboxWorld(), item = preSwitchRole(w);
+      if (a === "busy") w.busy.add(CA);
+      const opts = mode === "take" ? {} : { read: mode === "read" ? item.env.meta.messageId : item.env.meta.threadId };
+      const r = await w.take(CA, opts);
+      expect(r.n).toBe(0);
+      expect(r.text).not.toContain("pre-switch role body");
+      expect(w.held.stat(CA)).toEqual({});
+      expect(item.lease).toBeUndefined();
+      expect(w.rendered).toEqual([]);
+      await w.flush(CA);
+      expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\n  pre-switch role body\n\nunchanged  ` }]);
+      expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+    });
+  }
+}
+
+test("pre-switch-role-inbox: A's pre-switch lease cannot ack after the switch; expiry hands it to B once", async () => {
+  const w = await inboxWorld(), item = preSwitchRole(w);
+  item.lease = { batchId: "inbox_pre_A", at: Date.now() };
+  w.held.persist(); w.restart();
+  expect((await w.take(CA, { ack: "inbox_pre_A" })).n).toBe(0);
+  expect(w.q(CA)).toHaveLength(1);
+  await w.flush(CA);
+  expect(w.sent).toEqual([]);
+  w.q(CA)[0]!.lease!.at -= INBOX_LEASE_MS + 1;
+  await w.flush(CA); await w.flush(CA); await w.flush(CB);
+  expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\n  pre-switch role body\n\nunchanged  ` }]);
+  expect([...w.q(CA), ...w.q(CB)]).toEqual([]);
+});
+
+test("pre-switch-role-inbox: A's own direct chat and request answer stay takeable by A next to a handed-over role letter", async () => {
+  const w = await inboxWorld();
+  preSwitchRole(w, "role for B");
+  preSwitchRole(w, "answer to A", (env) => {
+    env.intent = "response";
+    env.meta = { ...env.meta, messageId: "agent_reply_2", triggerKind: "agent_tool" };
+  });
+  const direct = ownerLetter("direct owner A");
+  direct.to = target(CA); direct.meta = { ...direct.meta, messageId: "other-owner" };
+  w.held.set(CA, [...w.q(CA), { env: direct, to: target(CA), heldAt: 150 }]);
+  w.restart();
+  const r = await w.take(CA);
+  expect(r.n).toBe(2);
+  expect(r.text).toContain("answer to A");
+  expect(r.text).toContain("direct owner A");
+  expect(r.text).not.toContain("role for B");
 });
