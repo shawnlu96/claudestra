@@ -74,7 +74,8 @@ function claimedBefore(db: Database, agent: string, at: number): { id: string } 
  * login cards (account-wide, so an unattributed one still matters) and failed-turn cards (bridge/acp-link.ts, only their own turn).
  * A failed-turn card is tied by when and where the host says it failed (extra.failedAt / extra.sessionId, lib/acp/host.ts), not by
  * when the bridge wrote it: a late frame from an earlier turn or session must not land on the order claimed since. A card without
- * failedAt (older host) cannot be tied to any order: unknown (afterKey null) once some order was claimed, so PM looks at it.
+ * failedAt (older host) or without sessionId (host failed before its session existed) cannot be tied to any order: unknown
+ * (afterKey null) once some order was claimed, so PM looks at it.
  */
 export function codexFailure(db: Database, agent: string, sessionId?: string): AcpTurnState["lastFailure"] {
   const card = listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -84,9 +85,12 @@ export function codexFailure(db: Database, agent: string, sessionId?: string): A
   if (card.extra.failure === "error") {
     // 回合失败只关那一轮：归不到任何单（派单前的旧失败）就不算，免得把之后派的单也当成失败交 PM
     const failure = { kind: "error" as const, key: card.id, message: `${card.title}：${card.context}` };
-    const failedAt = card.extra.failedAt;
-    if (typeof failedAt !== "number" || !Number.isFinite(failedAt)) return claimedBefore(db, agent, card.createdAt) ? { failure, afterKey: null } : undefined;
-    if (sessionId && typeof card.extra.sessionId === "string" && card.extra.sessionId !== sessionId) return undefined; // 换会话前的失败：不是这个会话上的单
+    const { failedAt, sessionId: failedIn } = card.extra;
+    // 两项缺一就证明不了是哪张单（老宿主不报时刻；宿主没建会话就失败不报 sessionId）：unknown 交 PM，不猜
+    if (typeof failedAt !== "number" || !Number.isFinite(failedAt) || typeof failedIn !== "string" || !failedIn) {
+      return claimedBefore(db, agent, card.createdAt) ? { failure, afterKey: null } : undefined;
+    }
+    if (sessionId && failedIn !== sessionId) return undefined; // 换会话前的失败：不是这个会话上的单
     const at = claimedBefore(db, agent, failedAt);
     return at ? { failure, afterKey: at.id } : undefined;
   }

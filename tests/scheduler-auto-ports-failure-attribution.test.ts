@@ -66,8 +66,15 @@ describe("回合失败卡按宿主报的失败时刻 / 会话归单", () => {
     });
   }
 
-  test("老宿主不报失败时刻：unknown（afterKey null），交 PM 写明归不到派单，不说成本单回合失败", async () => {
-    const f = await reviewSent(() => ({ failure: "error" }));
+  const unattributed: [string, (claimedAt: number) => Record<string, unknown>][] = [
+    ["老宿主不报失败时刻", () => ({ failure: "error" })],
+    // 宿主 initialize / attach 失败时会话还没建（lib/acp/host.ts fail → sendFailure）：有 failedAt 无 sessionId，证明不了是绑定会话上的
+    ["宿主未建会话就失败：有失败时刻、缺 sessionId（时刻在认领之后）", (claimedAt) => ({ failure: "error", failedAt: claimedAt + 500 })],
+    ["sessionId 为空串", (claimedAt) => ({ failure: "error", sessionId: "", failedAt: claimedAt + 500 })],
+    ["有会话、缺失败时刻", () => ({ failure: "error", sessionId: "s-rv" })],
+  ];
+  for (const [name, extra] of unattributed) test(`${name}：unknown（afterKey null），交 PM 写明归不到派单，不说成本单回合失败`, async () => {
+    const f = await reviewSent(extra);
     try {
       expect(codexFailure(f.db, "agent-rv-t1", "s-rv")).toMatchObject({ failure: { kind: "error" }, afterKey: null });
       expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("归不到派单上的失败") });
