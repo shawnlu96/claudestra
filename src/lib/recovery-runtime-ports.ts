@@ -5,7 +5,7 @@
  * no algorithm, threshold, config, store, tick or second mechanism list. Every leaf call reads the port afresh (no snapshot cache).
  * Without a port each leaf keeps its own observe default (manualAfterMs null = unset); a port that throws or answers an illegal
  * value reaches every leaf as a throw, so each falls back to off through its own path, and the reason goes to `onDiag`.
- * MODEL gets no refusal-approval port: a provider safety refusal stays evidence + manual hold, never a retry or family switch.
+ * REFA optionally supplies MODEL's read-only refusal approval port (recovery-refusal-approval.ts); absent = manual hold.
  * Not called in production: AUD injects CFG's recoveryPolicy and wires these exits; until then nothing here runs.
  * tests/recovery-runtime-ports.test.ts.
  */
@@ -15,7 +15,7 @@ import type { WriteCtx } from "./ledger-checks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { writeMaterials, type WriteMaterial, type WriteProbe } from "./lend-write-materials.js";
 import { planGapTick, type PlanGapDeps, type PlanGapOutcome } from "./recovery-plan-gap.js";
-import { recordModelOutcome, type OutcomeInput, type OutcomeRecord, type RecoveryPolicy, type RecoveryPolicyPort } from "./scheduler-model-outcome.js";
+import { recordModelOutcome, type OutcomeInput, type OutcomeRecord, type RecoveryPolicy, type RecoveryPolicyPort, type RefusalApprovalPort } from "./scheduler-model-outcome.js";
 
 /** The mechanism keys as MODEL's port already names them (not a second list). */
 export type RecoveryMechanism = Parameters<RecoveryPolicyPort>[1];
@@ -24,6 +24,8 @@ export interface RecoveryPolicyDiag { project: string; mechanism: RecoveryMechan
 export interface RecoveryRuntimeOptions {
   /** CFG's recoveryPolicy; absent = every leaf observes as it does today. */
   policy?: RecoveryPolicyPort;
+  /** REFA's read-only approval; MODEL still owns continuation and CFG still owns execution mode. */
+  refusalApproval?: RefusalApprovalPort;
   /** Told whenever the port throws or answers an illegal value (the leaf then runs off); a throwing sink is ignored. */
   onDiag?: (d: RecoveryPolicyDiag) => void;
 }
@@ -31,7 +33,7 @@ export interface RecoveryRuntimeOptions {
 export interface RecoveryRuntimePorts {
   /** MAT: a lent write / fix order's materials (lend-write-materials.ts), `materials` policy. */
   writeMaterials(db: Database, task: LedgerTask, q: { peer: string; repo: string; base: string }, probe: WriteProbe): Promise<WriteMaterial | null>;
-  /** MODEL: record a dispatched order's model outcome (scheduler-model-outcome.ts), `modelOutcome` policy, no approval port. */
+  /** MODEL: record a dispatched order's model outcome, using the configured policy and optional refusal approval. */
   recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeInput): OutcomeRecord;
   /** ASKR: the ports for ask-expire's setAskReminderPorts / noticeBlocker / noticeGateNow, `askReminder` policy; a passed policy is dropped. */
   askReminderPorts(base: Omit<ReminderPorts, "policy">): ReminderPorts;
@@ -80,7 +82,7 @@ export function createRecoveryRuntimePorts(opts: RecoveryRuntimeOptions = {}): R
   };
   return {
     writeMaterials: (db, task, q, probe) => writeMaterials(db, task, q, probe, policy),
-    recordModelOutcome: (db, ctx, input) => recordModelOutcome(db, ctx, input, policy),
+    recordModelOutcome: (db, ctx, input) => recordModelOutcome(db, ctx, input, policy, opts.refusalApproval),
     askReminderPorts,
     sweepAskReminders: (db, base, now) => sweepReminders(db, askReminderPorts(base), now),
     planGapTick: (deps) => planGapTick({ ...deps, policy }),
