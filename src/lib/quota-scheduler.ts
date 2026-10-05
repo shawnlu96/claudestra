@@ -11,6 +11,7 @@
  * 单测 tests/quota-scheduler.test.ts（假 fetch / 时钟 / 凭据 / 存储）。
  */
 
+import { consumeCodexResetCredit, type ConsumeFetch, type ConsumeResult, type ConsumeRun } from "./quota-consume.js";
 import type { CredErrorCode, CredResult, QuotaCredential, QuotaProvider } from "./quota-credentials.js";
 import { claudeClientHeaders, getQuota, QUOTA_ENDPOINTS, type FetchErrorCode, type QuotaEndpoint, type QuotaFetch } from "./quota-providers.js";
 import { pruneLedger, type ReminderLedger } from "./quota-reminder-rules.js";
@@ -39,6 +40,8 @@ export interface QuotaSchedulerDeps {
   claudeBackground?(): boolean;
   /** 本机实际装的 Claude Code 版本（拼客户端身份头，不带就看不到重置卡）；探不到 null，这时一个身份头都不带 */
   claudeClientVersion?(): Promise<string | null>;
+  /** 使用重置卡的 POST（真实消费）；不给 = 这个调度器不能用卡（单测缺省如此，bridge 生产接线才给） */
+  consumeFetch?: ConsumeFetch;
 }
 
 interface EndpointView<E extends QuotaEndpoint = QuotaEndpoint> {
@@ -94,6 +97,8 @@ export class QuotaScheduler {
   private chains = new Map<QuotaProvider, Promise<unknown>>();
   private saving: Promise<void> = Promise.resolve();
   private lastWritten: string | null = null;
+  /** 使用重置卡在途：连点 / 多个标签页同时点只发一次 */
+  private consuming = false;
 
   constructor(private deps: QuotaSchedulerDeps) {}
 
@@ -241,6 +246,57 @@ export class QuotaScheduler {
     } else applyFailure(acct, h, out, { now: at, fingerprint: cred.fingerprint, random: this.deps.random() });
     await this.save();
     return out.ok ? { status: "fetched" } : { status: "failed", code: out.code };
+  }
+
+  /**
+   * 使用一张 Codex 重置卡（lib/quota-consume.ts）：排进 Codex 的串行链、凭据走同一条读取路径，不走 60 秒间隔闸（owner 确认过的一次性动作）。
+   * 已有一次在途就直接回 busy，不排队——排在后面的那次核对可能照样通过，等于再扣一张。现拉到的数据入库，看板下一拉就是新数。
+   */
+  async consumeCodexReset(creditKey: string | null): Promise<ConsumeResult | { status: "busy" }> {
+    if (this.consuming) return { status: "busy" };
+    const post = this.deps.consumeFetch;
+    if (!post || !this.deps.isEnabled()) return { status: "refused", code: "disabled" };
+    this.consuming = true;
+    try {
+      const task = (this.chains.get("codex") ?? Promise.resolve()).then(() => this.consumeOnce(creditKey, post)).catch((e): ConsumeResult => {
+        // 能抛的只有 POST 之前那几步（读凭据、算 HMAC）；POST 及之后都不抛，所以这里一定没扣
+        console.error(`[quota] 使用重置卡前置步骤出错（${(e as Error)?.name ?? "unknown"}），没有发出请求`);
+        return { status: "refused", code: "internal" };
+      });
+      this.chains.set("codex", task);
+      return await task;
+    } finally {
+      this.consuming = false;
+    }
+  }
+
+  private async consumeOnce(creditKey: string | null, post: ConsumeFetch): Promise<ConsumeResult> {
+    const gen = this.gen;
+    const cr = await this.deps.readCredential("codex");
+    if (!cr.ok) return { status: "refused", code: cr.code };
+    const cred = cr.cred;
+    const run = await consumeCodexResetCredit(cred, creditKey, {
+      fetch: this.deps.fetch, post, now: this.deps.now, hashCreditId: (raw) => this.deps.hashCreditId(cred.accountKey, raw),
+    });
+    try {
+      if (gen === this.gen && this.deps.isEnabled() && (await this.deps.confirmCredential(cred))) await this.storeFresh(cred.accountKey, run);
+    } catch (e) {
+      // 入库失败不能吞掉消费结果（卡可能已经扣了）：看板等下一次查询再更新
+      console.error(`[quota] 使用重置卡后入库失败（${(e as Error)?.name ?? "unknown"}），结果照常返回`);
+    }
+    return run.result;
+  }
+
+  private async storeFresh(accountKey: string, run: ConsumeRun): Promise<void> {
+    const st = await this.load();
+    const at = this.deps.now();
+    const acct = this.account(st, "codex", accountKey, at);
+    for (const [e, data] of [["codex_usage", run.usage], ["codex_reset_credits", run.credits]] as const) {
+      if (!data) continue;
+      (acct.snapshots as Record<string, unknown>)[e] = { data, observedAt: at };
+      acct.health[e] = { ...freshHealth(), lastAttemptAt: at }; // 记一次尝试：紧接着的普通查询照样守 60 秒间隔
+    }
+    await this.save();
   }
 
   /** 开关关掉：在途请求回来一律丢弃（不入库、不触发提醒），排队的也不再发 */

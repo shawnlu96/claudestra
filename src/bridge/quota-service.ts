@@ -36,7 +36,7 @@ export const QUOTA_CADENCE = {
   openWaitMs: 6_000,
 } as const;
 
-type SchedulerApi = Pick<QuotaScheduler, "tick" | "refresh" | "refreshResetCredits" | "view" | "health" | "onDisabled" | "withReminders">;
+type SchedulerApi = Pick<QuotaScheduler, "tick" | "refresh" | "refreshResetCredits" | "view" | "health" | "onDisabled" | "withReminders" | "consumeCodexReset">;
 
 export interface QuotaServiceDeps {
   now(): number;
@@ -141,6 +141,8 @@ export function createQuotaService(d: QuotaServiceDeps) {
 
   return {
     snapshot, retry, setEnabled,
+    /** 用一张 Codex 重置卡（真实消费，路由已验过 owner 设备凭据）：开关关着调度器自己回 disabled；busy = 另一次还在途 */
+    consumeCodexReset: (creditKey: string | null) => scheduler.consumeCodexReset(creditKey),
     claudeWall: (refresh: boolean) => (syncEnabled(), claudeWallView(scheduler, enabled, d.now(), refresh)),
     isEnabled: () => enabled,
     isViewing: viewing,
@@ -208,6 +210,7 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
     isEnabled,
     claudeBackground: () => readConfigSync().quotaClaudeBackground !== false,
     claudeClientVersion,
+    consumeFetch: (url, init) => fetch(url, init),
   });
 }
 
