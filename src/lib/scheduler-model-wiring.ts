@@ -6,7 +6,7 @@
  * off / none / manual plans and every wiring error (logged as one diagnostic line). Mode on with a retry_same / exempt_review /
  * redispatch plan appends "MODEL 计划：<kind>（批准 <approvalId>），执行路径待 MODELX": executing these plans (a new reviewer
  * session, an exemption review bound to another family, a redispatch of a sent order) is dispatch-recovery-MODELX, so this card
- * never stops the escalate on a plan no one runs. The record is deduped per intent by MODEL's key; the escalate by its own.
+ * never stops the escalate on a plan no one runs; failedReason shortens a long host message so the plan survives the cap. The record is deduped per intent by MODEL's key; the escalate by its own.
  * tests/scheduler-model-wiring*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -88,5 +88,19 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
   if (r.kind !== "recorded" || r.mode !== "on" || r.plan.kind === "manual") return "";
   const p = r.plan, owner = p.kind === "exempt_review" && p.notifyOwner ? `；${p.exemption}，按批准需告知 owner` : "";
   const basis = p.kind === "redispatch" ? `→ ${p.to.machine}（${p.to.family}），无现成正式路径` : `批准 ${p.approvalId}`;
-  return `；MODEL 计划：${p.kind}（${basis}），执行路径待 MODELX（台账 #${r.event.seq}，未执行）：${p.reason}${owner}`;
+  return `；MODEL 计划：${p.kind}（${basis}），执行路径待 MODELX（台账 #${r.event.seq}，未执行）${owner}：${p.reason}`;
+}
+
+/** The auto tick's oneLine cap on an escalate reason (ledger event, PM notice, detail). */
+const REASON_MAX = 560, MESSAGE_FLOOR = 120;
+const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
+
+/**
+ * The failed turn's escalate reason. No plan = today's text exactly. With a plan, the host message is shortened first so the
+ * plan's kind, approval and "pending MODELX" (the suffix's head) survive the cap; MODEL's reason, last, is what gets cut.
+ */
+export function failedReason(head: string, message: string, plan: string): string {
+  if (!plan) return `${head}：${message}`;
+  const msg = flat(message), room = REASON_MAX - head.length - 1 - flat(plan).length;
+  return `${head}：${msg.length <= room ? msg : `${msg.slice(0, Math.max(room, MESSAGE_FLOOR) - 1)}…`}${plan}`;
 }

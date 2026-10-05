@@ -113,6 +113,34 @@ describe("on", () => {
     expect(f.intents()).toHaveLength(sends);
   });
 
+  test("a long host message is shortened, never the plan: PM notice, fallback_manual and detail all keep kind, approval and pending MODELX", async () => {
+    setModelOutcomeReader(CFG);
+    g.__modelwPolicy = mode("on");
+    approve();
+    const long = `${CYBER}. ${"Additional diagnostic context. ".repeat(20)}`;
+    expect(long.length).toBeGreaterThan(560);
+    failWith(long);
+    const { step, detail } = (await f.tick())!;
+    expect(step).toBe("manual");
+    const fallback = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.data.op === "fallback_manual");
+    for (const text of [detail, f.notices.at(-1)!, String(fallback?.data.reason)]) {
+      expect(text).toContain(`agent-rv-t1 回合失败：${CYBER}`);
+      expect(text).toMatch(/MODEL 计划：retry_same（批准 [^）]+），执行路径待 MODELX（台账 #\d+，未执行）/);
+    }
+    expect(detail.length).toBeLessThanOrEqual(560);
+  });
+
+  test("observe with a long host message: today's text and cut, untouched", async () => {
+    setModelOutcomeReader(CFG);
+    g.__modelwPolicy = mode("observe");
+    approve();
+    const long = `${CYBER}. ${"Additional diagnostic context. ".repeat(20)}`;
+    failWith(long);
+    const cut = `agent-rv-t1 回合失败：${long}`.trim().slice(0, 560);
+    expect(await f.tick()).toMatchObject({ step: "manual", detail: cut });
+    expect(f.notices.at(-1)).toBe(`[调度引擎] T1 退回人工，请接手：${cut}`);
+  });
+
   test("no approval: MODEL's hold escalate plus today's manual fallback", async () => {
     setModelOutcomeReader(CFG);
     g.__modelwPolicy = mode("on");
