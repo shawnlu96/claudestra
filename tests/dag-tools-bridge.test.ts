@@ -314,12 +314,15 @@ describe("r1：提交了但结果丢了，按本次 dedup 查库接着走", () =
     });
   }
 
-  test("没提交的失败照旧回滚；create 已建好但结果丢了：kill 掉，卡取消，不留半截", async () => {
+  test("没提交的失败照旧回滚；create 已建好但结果丢了：归属不明留 unknown 不 kill，卡取消", async () => {
     await plan();
     spec("i28-a");
     lose = (a) => a[0] === "create";
-    expect(await start("a")).toMatchObject({ ok: false, failedStep: "agent", leftovers: [] });
-    expect(agents["agent-task-i28-a"]).toBeUndefined();
+    const r = await start("a");
+    expect(r).toMatchObject({ ok: false, failedStep: "agent" });
+    expect(r.leftovers).toEqual([expect.stringContaining("agent-task-i28-a 归属不明（unknown）")]);
+    expect(agents["agent-task-i28-a"]).toBeDefined();
+    expect(calls.some((c) => c[0] === "kill")).toBe(false);
     expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });

@@ -199,12 +199,13 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
       name: "agent",
       run: async () => {
         if (io.agentExists(p.agent)) return `agent ${p.agent} 已存在（预检之后才出现，不是这次建的）`;
-        // 传规范全名：manager normalizeName 只吃掉第一个 agent- 片段，裸名里含 agent-（AGL1 卡号）会被改名
-        const r = await io.manager(["create", p.agent, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS);
+        // manager normalizeName 吃掉名字里第一个 agent- 片段：短名自带 agent-（AGL1 卡号）时传规范全名，它只去掉开头那层，落成的就是 p.agent
+        const r = await io.manager(["create", p.agentName.includes("agent-") ? p.agent : p.agentName, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS);
         const got = typeof r?.agent === "string" ? r.agent : p.agent;
-        if (r?.ok && got === p.agent && io.agentExists(p.agent)) { owned = p.agent; return null; }
-        if (io.agentExists(got)) unknown = got;
-        return r?.ok ? `manager create 回执 agent ${got} 与规范名 ${p.agent} 不一致或不在 registry` : failed(r);
+        if (r?.ok && got === p.agent) { owned = p.agent; return null; }
+        // 回执名对不上（可能是 manager 复用的同名历史会话）或结果丢了却在 registry 里：归属不明，不绑也不 kill
+        if (r?.ok || io.agentExists(got)) unknown = got;
+        return r?.ok ? `manager create 回执的 agent ${got} 与预检规范名 ${p.agent} 不一致` : failed(r);
       },
       undo: async () => {
         if (owned && io.agentExists(owned)) return failed(await io.manager(["kill", owned]));
