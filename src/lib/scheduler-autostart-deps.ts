@@ -4,6 +4,7 @@
  * git 每次调用都包在 whileOwned 里，服务停了或丢了租约，排着的 git 什么都不做。进程内去重表跨轮保留（模块级），重启清空。
  */
 import { startPlacement } from "./scheduler-placement-start.js";
+import { placementReservationPort } from "./scheduler-placement-reservations.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
@@ -82,6 +83,7 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
       branchExists: async (repo, branch) => (await git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).ok,
       autoReady: (project) => (config.enabled && config.autoDispatch && Object.hasOwn(config.projects, project) ? null : `调度服务没对项目 ${project} 开自动派单`),
       placement: (db, q) => startPlacement(db, {
+        reservations: placementReservationPort,
         policy: (project) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; },
         borrow: readEffectiveBorrow, now: Date.now,
         originRepo: async (dir) => {

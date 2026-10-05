@@ -1,20 +1,21 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { dagToolHandlers, type DagToolDeps } from "../src/bridge/dag-tools.js";
+import { dirname, join } from "node:path";
+import { dagToolHandlers, livePlacementIO, type DagToolDeps } from "../src/bridge/dag-tools.js";
 import { openLedger, closeLedger, getTask } from "../src/lib/ledger-store.js";
 import { createTask, setMeta, setFrozen } from "../src/lib/ledger-write.js";
-import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { recordHello, peerCapacity } from "../src/lib/ledger-lend-peers.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { startPlacement, type StartPlacementIO } from "../src/lib/scheduler-placement-start.js";
 import { borrowPeers } from "../src/lib/scheduler-pool-facts.js";
 import { specResumeTick } from "../src/lib/scheduler-spec-resume.js";
 import { localAgentPool } from "../src/lib/scheduler-agent-pool-ledger.js";
+import { placementReservationPort } from "../src/lib/scheduler-placement-reservations.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import type { RemotePolicy } from "../src/lib/scheduler-config.js";
+import { SCHEDULER_CONFIG_PATH, type RemotePolicy } from "../src/lib/scheduler-config.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) { closeLedger(join(dir, "ledger.sqlite")); rmSync(dir, { recursive: true, force: true }); } });
@@ -130,6 +131,49 @@ test("observe is default, reports shadow choices, off produces no reservations; 
   expect(f.task(1).extra.placementReservation).toBeUndefined();
 });
 
+test("production livePlacementIO observes formal starts with bounded logs and no capacity mutation", async () => {
+  const f = fixture(); await f.plan();
+  const old = existsSync(SCHEDULER_CONFIG_PATH) ? readFileSync(SCHEDULER_CONFIG_PATH) : null;
+  mkdirSync(dirname(SCHEDULER_CONFIG_PATH), { recursive: true });
+  writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: {
+    p: { maxActiveWorkers: 0, requiredChecks: ["ci"], repoDir: f.dir, remote: f.remote },
+  } }));
+  const live = livePlacementIO(async () => ({ ok: true, out: "https://github.com/o/r.git" }));
+  // Only borrow transport and the clock are fake; policy and reservation wiring are production code.
+  delete f.io.reservations;
+  Object.assign(f.io, live, { borrow: f.io.borrow, now: f.io.now });
+  const logs: string[] = [], log = spyOn(console, "error").mockImplementation((msg) => { logs.push(String(msg)); });
+  try {
+    for (let i = 0; i < 8; i++) expect(await f.start(i)).toMatchObject({ ok: true, placement: "peer:a" });
+    expect(f.task(0).extra.placementReservation).toMatchObject({ mode: "observe" });
+    const before = f.db.query("SELECT COUNT(*) AS n FROM events").get();
+    for (let i = 0; i < 100; i++) await startPlacement(f.db, f.io, { project: "p", repoDir: f.dir, fileGlobs: ["src/free.ts"], want: "auto" });
+    const observed = logs.filter((line) => line.includes("placement-reservations"));
+    expect(observed.some((line) => line.includes('"actual":"peer:a"') && line.includes('"proposed":"peer:b"'))).toBe(true);
+    expect(observed.length).toBeLessThanOrEqual(20);
+    expect(f.db.query("SELECT COUNT(*) AS n FROM events").get()).toEqual(before);
+    expect(f.peers().map((p) => p.open)).toEqual([0, 0]);
+  } finally {
+    log.mockRestore();
+    if (old) writeFileSync(SCHEDULER_CONFIG_PATH, old); else rmSync(SCHEDULER_CONFIG_PATH, { force: true });
+  }
+});
+
+test("CFG reader contract carries project and canonical key; injected on balances and off has no receipt", async () => {
+  const f = fixture(); await f.plan(); await f.plan("other", "q");
+  const reads: string[][] = [];
+  f.io.reservations = (project) => placementReservationPort(project, (p, key) => {
+    reads.push([p, key]); return { mode: p === "p" ? "on" : "off", manualAfterMs: null };
+  });
+  for (let i = 0; i < 8; i++) expect(await f.start(i)).toMatchObject({ ok: true, placement: `peer:${i % 2 ? "b" : "a"}` });
+  expect(reads).toEqual(Array(8).fill(["p", "placementReservations"]));
+  f.hello("a", 5);
+  expect(await f.start(0, {}, "other")).toMatchObject({ ok: true });
+  expect(reads.at(-1)).toEqual(["q", "placementReservations"]);
+  expect(getTask(f.db, "other-n0")!.extra.placementReservation).toBeUndefined();
+  expect(f.peers().map((p) => p.open)).toEqual([4, 4]);
+});
+
 test("on preparations become pooled/claimed/unknown exactly once; withdrawal never recreates a reservation", async () => {
   const f = fixture("on", [1, 0]); await f.plan();
   expect(await f.start(0)).toMatchObject({ ok: true });
@@ -140,6 +184,7 @@ test("on preparations become pooled/claimed/unknown exactly once; withdrawal nev
     .run("1".repeat(40));
   for (const status of ["pooled", "claimed", "unknown"]) {
     f.db.query("UPDATE lend_orders SET status=? WHERE orderId='order'").run(status);
+    f.db.query("UPDATE tasks SET specRev=specRev+1 WHERE id='batch-n0'").run();
     expect(f.peers()[0].open).toBe(1);
     expect(f.peers()[0].v2!.slots.codex).toBe(0);
     f.restart();
@@ -151,6 +196,56 @@ test("on preparations become pooled/claimed/unknown exactly once; withdrawal nev
   f.db.query("UPDATE tasks SET extra=json_remove(extra,'$.placementReservation') WHERE id='batch-n0'").run();
   // A first on-mode preparation must also see the real family load of pre-policy orders.
   expect(await f.start(1)).toMatchObject({ ok: false });
+});
+
+test("legacy observe changes only prepared load even when hello underreports live work", async () => {
+  const f = fixture("observe"); await f.plan();
+  expect(await f.start(0)).toMatchObject({ ok: true });
+  f.db.query(`INSERT INTO lend_orders (orderId, taskId, project, peer, step, family, repo, pr, head, round, specRev,
+    status, leaseMs, createdBy, wire, text, sha256, createdAt, updatedAt)
+    VALUES ('old', 'batch-n0', 'p', 'a', 'write', 'codex', 'o/r', 0, '', 0, 1, 'claimed', 60000, 'scheduler', '{}', '', '', 1000, 1000)`).run();
+  expect(peerCapacity(f.db, "a", 20, 2000, { observe: true })).toEqual(peerCapacity(f.db, "a", 20, 2000));
+  expect(await f.start(1)).toMatchObject({ ok: true, placement: "peer:b" });
+  // Move the prepared card beside old work to distinguish prepared subtraction from a busy-basis change.
+  f.db.query("UPDATE tasks SET extra=json_set(extra,'$.placement','peer:a') WHERE id='batch-n1'").run();
+  expect(peerCapacity(f.db, "a", 20, 2000).slots.codex).toBe(4);
+  expect(peerCapacity(f.db, "a", 20, 2000, { observe: true }).slots.codex).toBe(3);
+  expect(peerCapacity(f.db, "a", 20, 2000, { enforce: true }).slots.codex).toBe(3);
+});
+
+test("manual takeover releases unbound task-set preparation in every author stage", async () => {
+  const f = fixture(); await f.plan();
+  expect(await f.start(0, { placement: "local" })).toMatchObject({ ok: true });
+  for (const stage of ["spec", "restate", "build", "fix"]) {
+    f.db.query("UPDATE tasks SET stage=? WHERE id='batch-n0'").run(stage);
+    f.db.query("UPDATE task_workflows SET mode='auto' WHERE taskId='batch-n0'").run();
+    expect(localAgentPool(f.db, "p", { claude: 4, codex: 4 }).running.claude).toBe(1);
+    for (const mode of ["manual", "observe"]) {
+      f.db.query("UPDATE task_workflows SET mode=? WHERE taskId='batch-n0'").run(mode);
+      expect(localAgentPool(f.db, "p", { claude: 4, codex: 4 }).running.claude).toBe(0);
+    }
+  }
+});
+
+test("restate ensure keeps one seat through submitted, unknown and binding; cancellation releases manual work", async () => {
+  const f = fixture(); await f.plan();
+  expect(await f.start(0, { placement: "local" })).toMatchObject({ ok: true });
+  f.db.query("UPDATE tasks SET stage='restate' WHERE id='batch-n0'").run();
+  f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,taskRev,specRev,templateVersion,status,receipt,reason,createdAt,updatedAt)
+    VALUES ('ensure','batch-n0','p','restate','ensure_session',0,1,1,1,'submitted','ensure author claude','test',1000,1000)`).run();
+  for (const status of ["submitted", "unknown"]) {
+    f.db.query("UPDATE scheduler_intents SET status=? WHERE id='ensure'").run(status);
+    f.db.query("UPDATE task_workflows SET mode='manual' WHERE taskId='batch-n0'").run();
+    expect(localAgentPool(f.db, "p", { claude: 4, codex: 4 }).running.claude).toBe(1);
+    f.restart();
+  }
+  f.db.query(`INSERT INTO scheduler_sessions (taskId,role,agent,sessionId,family,transport,state,createIntentId,createdAt,updatedAt)
+    VALUES ('batch-n0','author','bound','session','claude','acp','active','ensure',1000,1000)`).run();
+  expect(localAgentPool(f.db, "p", { claude: 4, codex: 4 }).running.claude).toBe(1);
+  f.db.query("UPDATE scheduler_sessions SET state='retired'").run();
+  f.db.query("UPDATE scheduler_intents SET status='cancelled' WHERE id='ensure'").run();
+  f.db.query("UPDATE task_workflows SET mode='manual' WHERE taskId='batch-n0'").run();
+  expect(localAgentPool(f.db, "p", { claude: 4, codex: 4 }).running.claude).toBe(0);
 });
 
 test("legacy priority/role gates and current grant/repo/hello/paused gates stay effective", async () => {

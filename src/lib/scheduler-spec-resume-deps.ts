@@ -11,6 +11,7 @@ import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { startPlacement } from "./scheduler-placement-start.js";
+import { placementReservationPort } from "./scheduler-placement-reservations.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { specResumeTick } from "./scheduler-spec-resume.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -28,7 +29,7 @@ export function specResumeStep(db: Database, config: SchedulerConfig, ledger: Le
   const policy = (project: string) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; };
   return specResumeTick({
     db, projects: config.enabled && config.autoDispatch === true ? Object.keys(config.projects) : [], ledger,
-    place: (d, q) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now }, q, true),
+    place: (d, q) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now, reservations: placementReservationPort }, q, true),
     repoDir: async (project) => (await readProjects()).projects.find((p) => p.id === project)?.dirs.find((d) => existsSync(join(d, ".git"))) ?? null,
     notifyPm: (project, text) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }),
   }, pace);

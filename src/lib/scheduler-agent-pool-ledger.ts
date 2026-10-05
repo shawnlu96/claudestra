@@ -26,7 +26,7 @@ export function localAgentPool(db: Database, project: string, totals: AgentLimit
     const creating = db.query(`SELECT i.taskId, i.node, i.receipt, w.authorFamily FROM scheduler_intents i
       JOIN tasks t ON t.id=i.taskId JOIN task_workflows w ON w.taskId=t.id
       WHERE t.project=? AND t.id!=? AND i.action='ensure_session' AND i.status IN ('submitted','unknown')
-      AND t.stage IN ('spec','build','fix','review') AND NOT EXISTS
+      AND t.stage IN ('spec','restate','build','fix','review') AND NOT EXISTS
       (SELECT 1 FROM scheduler_sessions s WHERE s.createIntentId=i.id AND s.state!='retired')`)
       .all(project, exceptTask ?? "") as { taskId: string; node: string; receipt: string | null; authorFamily: AuthorFamily }[];
     for (const r of creating) {
@@ -41,7 +41,7 @@ export function localAgentPool(db: Database, project: string, totals: AgentLimit
       ON t.id=CASE WHEN json_extract(e.data,'$.op')='autostart_claim' THEN json_extract(e.data,'$.taskId') ELSE e.target END
       JOIN task_workflows w ON w.taskId=t.id WHERE e.project=? AND t.id!=?
       AND ((json_extract(e.data,'$.op')='autostart_claim' AND json_extract(e.data,'$.peer') IS NULL)
-        OR (e.kind='task' AND json_extract(e.data,'$.op')='set' AND e.dedupKey LIKE 'dag-start:%:task-set'))
+        OR (w.mode='auto' AND e.kind='task' AND json_extract(e.data,'$.op')='set' AND e.dedupKey LIKE 'dag-start:%:task-set'))
       AND t.stage IN ('spec','restate','build','fix') AND t.agent IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId=t.id AND s.role='author')
       AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId=t.id AND i.action='ensure_session'

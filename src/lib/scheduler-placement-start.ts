@@ -30,7 +30,7 @@ export interface StartPlacementIO {
   originRepo(dir: string): Promise<string | null>;
   now(): number;
   /** One injected policy source; observe computes shadow placement without consuming a seat. */
-  reservations?: ReservationPort;
+  reservations?: ReservationPort | ((project: string) => ReservationPort);
 }
 
 const PEER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -61,6 +61,7 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
   q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}`; taskId?: string }, finishFirst = false): Promise<StartPlacement> {
   const pin = q.want === "auto" ? null : q.want;
   const policy = io.policy(q.project);
+  const reservations = typeof io.reservations === "function" ? io.reservations(q.project) : io.reservations;
   let borrow: readonly BorrowEntry[] = [];
   let repo: string | null = null;
   try {
@@ -75,17 +76,17 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
   }
   const facts: PlacementFacts = {
     remote: policy?.remote ?? null,
-    peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, enforce: io.reservations?.mode === "on" }).map(peerFacts),
+    peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, enforce: reservations?.mode === "on" }).map(peerFacts),
     repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null,
     locksFree: locksFree(db, q.project, q.fileGlobs, q.taskId),
   };
   // Only automatic admission opts in; the PM's manual start_node placement keeps its explicit choice.
   const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");
-  const mode = io.reservations?.mode ?? "observe";
+  const mode = reservations?.mode ?? "observe";
   if (mode === "observe") {
     const shadow = { ...facts, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, observe: true }).map(peerFacts) };
     const proposed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(shadow, reserveFinishing(db, q.project, shadow)) : placeFor(shadow, "write", "claude");
-    io.reservations?.observe?.({ actual: placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind,
+    reservations?.observe?.({ actual: placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind,
       proposed: proposed.kind === "peer" ? `peer:${proposed.peer}` : proposed.kind });
   }
   if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason,

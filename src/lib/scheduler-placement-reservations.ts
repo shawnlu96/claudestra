@@ -18,6 +18,23 @@ export interface ReservationPort {
   mode: "on" | "observe" | "off";
   observe?(result: { actual: string; proposed: string }): void;
 }
+/** CFG owns the key registration and the only production policy source. */
+export type ReservationPolicyReader = (project: string, mechanism: "placementReservations") => {
+  mode: ReservationPort["mode"]; manualAfterMs: number | null;
+};
+
+let observeWindow = 0, observeCount = 0;
+/** Shared by all production entry points; at most twenty records per minute and constant memory per process. */
+export function placementReservationPort(project: string, policy?: ReservationPolicyReader): ReservationPort {
+  // CFG has not landed on this baseline: no alternative JSON/env switch may activate reservations.
+  return { mode: policy?.(project, "placementReservations").mode ?? "observe", observe: (result) => {
+    const now = Date.now();
+    if (now - observeWindow >= 60_000 || now < observeWindow) { observeWindow = now; observeCount = 0; }
+    if (observeCount >= 20) return;
+    observeCount++;
+    console.error(`[scheduler] placement-reservations ${JSON.stringify({ project, ...result })}`);
+  } };
+}
 
 /** The internal CLI transports the typed receipt as JSON; malformed receipts cannot activate a hold. */
 export function parsePlacementReservation(raw: string | undefined): PlacementReservation | null {
@@ -36,19 +53,20 @@ export function preparedPeerWrites(db: Database, peer: string, read: Reservation
   }
   const managed = !!db.query(`SELECT 1 FROM lend_orders o JOIN tasks t ON t.id=o.taskId
     WHERE o.peer=? AND o.status IN ('pooled','claimed','unknown') AND json_extract(t.extra, '$.placementReservation.mode')='on' LIMIT 1`).get(peer);
-  const rows = db.query(`SELECT json_extract(t.extra, '$.placementReservation.family') AS family FROM tasks t
+  const rows = db.query(`SELECT json_extract(t.extra, '$.placementReservation.family') AS family,
+    json_extract(t.extra, '$.placementReservation.mode') AS mode FROM tasks t
     WHERE json_extract(t.extra, '$.placement') = ? AND t.id != ? AND t.kind='code'
     AND t.stage IN ('spec','restate','build','fix')
     AND (json_extract(t.extra, '$.placementReservation.mode')='on'
       OR (? AND json_extract(t.extra, '$.placementReservation.mode')='observe'))
-    AND NOT EXISTS (SELECT 1 FROM lend_orders o WHERE o.taskId=t.id AND o.specRev=t.specRev AND o.step IN ('write','fix'))`)
-    .all(`peer:${peer}`, read.exceptTask ?? "", read.observe ? 1 : 0) as { family: string }[];
+    AND NOT EXISTS (SELECT 1 FROM lend_orders o WHERE o.taskId=t.id AND o.step IN ('write','fix'))`)
+    .all(`peer:${peer}`, read.exceptTask ?? "", read.observe ? 1 : 0) as { family: string; mode: string }[];
   const families = { claude: 0, codex: 0 };
   for (const row of rows) {
     if (row.family === "claude" || row.family === "codex") families[row.family]++;
     else { families.claude++; families.codex++; } // A malformed persisted hold cannot manufacture free family capacity.
   }
-  return { total: rows.length, families, managed };
+  return { total: rows.length, families, managed: managed || rows.some((r) => r.mode === "on") };
 }
 
 /** Called inside createTask's immediate transaction, after replay detection and before any insertion. */
@@ -120,7 +138,7 @@ export function peerCapacity(db: Database, peer: string, maxOpen: number | null,
   for (const f of LEND_FAMILIES) {
     const live = (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer=? AND family=? AND status IN ('pooled','claimed','unknown')`)
       .get(peer, f) as { n: number }).n;
-    const managed = maxOpen === null || read.enforce || read.observe || prepared.total > 0 || prepared.managed;
+    const managed = maxOpen === null || read.enforce || prepared.managed;
     const busy = managed ? Math.max(p.slots[f].busy, live) : p.slots[f].busy;
     slots[f] = pausedFamily(p.paused, f, now) ? 0 : Math.min(room, Math.max(0, p.slots[f].total - busy - prepared.families[f]));
   }

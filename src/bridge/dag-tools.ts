@@ -1,4 +1,5 @@
 import { setFeatureDeps } from "../lib/ledger-feature-deps-tool.js";
+import { placementReservationPort } from "../lib/scheduler-placement-reservations.js";
 /**
  * 子 DAG 与开卡的 MCP 工具（i28-L5，docs/architecture/dag-tools.md），挂进 bridge/order-tools.ts 的 HANDLERS。
  * 身份门（requireVerified）已在 routeOrderTool 过了；写类工具（plan_feature / rewrite_dag / start_node）再按台账角色拒：只有该项目 PM 名单里的 agent
@@ -241,8 +242,9 @@ function showDag(deps: DagToolDeps, args: unknown): OrderToolResult {
 }
 
 /** 槽池放置要读的：scheduler.json 的项目策略、生效的借入名单、项目目录 origin 的 GitHub 坐标 */
-function livePlacementIO(git: (cwd: string, args: string[]) => Promise<{ ok: boolean; out: string }>): StartPlacementIO {
+export function livePlacementIO(git: (cwd: string, args: string[]) => Promise<{ ok: boolean; out: string }>): StartPlacementIO {
   return {
+    reservations: placementReservationPort,
     policy: (project) => {
       const p = readSchedulerConfig().projects[project];
       return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null;
