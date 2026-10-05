@@ -3,6 +3,12 @@
  *   SIDEBAR_HISTORY_BROWSER=1 bun test tests/web-sidebar-history-folds-browser.test.ts
  * 可选：SIDEBAR_HISTORY_SHOTS_DIR=<仓库外私密目录> 存 1200 / 390 × 浅 / 深的前后 PNG 和 manifest.json（含 sha256）；
  * SIDEBAR_HISTORY_BASELINE=<sha> 指定「修前」的 sidebar-history.ts/.tsx（默认是本卡把旧接线原样抽成 SidebarDirectory 的那次提交）。
+ * 对照基准（manifest.basis 原样写出，供 PM 认可 / 核对）：
+ *   before = BASELINE 解析出的完整 sha，其父提交即开卡时的 main；该提交只把 sidebar.tsx 里的旧接线原样抽出，历史仍用活目录的
+ *            cstra_proj_collapsed / cstra_team_collapsed（beforeAll 里核实，不是就判失败——基点不能悄悄换成别的东西）；
+ *   after  = 当前 HEAD 的工作区；
+ *   同输入 = 同一份合成夹具（manifest 记 sha256）+ 同一组操作 + 同视口 / DPR；对照范围 = 1200 / 390 × 浅 / 深 × 三步。
+ *   main 上旧代码没有 SidebarDirectory，夹具挂不上，所以基点取这次「原样抽出」而不是 main 本身。
  * 页面是合成夹具（顶部标「合成夹具 · 非生产页面」），真组件 SidebarDirectory + ProjectGroup + TeamGroup + HistoryFold + 真 Tailwind/daisyUI 样式；
  * 行是简化行（不是 AgentRow），拖拽 / 菜单 / 本机探测 / 协作入口在构建时换成空壳；只经回环 127.0.0.1 提供页面，非回环请求一律拦下并判失败。
  * 同一组操作：打开历史 → 折叠历史里的 project p → 刷新。修前必须红（活组跟着收起），修后必须绿（活组仍展开、历史组仍收起）。
@@ -24,6 +30,11 @@ type Variant = "before" | "after";
 const servers: Partial<Record<Variant, ReturnType<typeof Bun.serve>>> = {};
 const manifest: { file: string; variant: Variant; width: number; theme: string; step: string; sha256: string; source: string; fixture: true }[] = [];
 let browser: Browser;
+let basis: Record<string, unknown> | undefined;
+const STEPS = ["1-history-open", "2-history-p-collapsed", "3-after-reload"] as const;
+const VIEWPORT = { height: 844, deviceScaleFactor: 2 };
+const WIDTHS = [1200, 390] as const;
+const THEMES = ["light", "dark"] as const;
 
 async function git(...args: string[]) {
   const p = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -128,8 +139,30 @@ async function serve(v: Variant) {
   } finally { for (const p of tmp) unlinkSync(p); }
 }
 
+/** 核实「修前」基点确实是旧的共用 key 接线、「修后」确实是独立命名空间，并写出对照基准 */
+async function resolveBasis() {
+  const before = await git("rev-parse", "--verify", `${BASELINE}^{commit}`);
+  const keys = (src: string) => /history:\s*\{\s*projects:\s*"([^"]+)",\s*teams:\s*"([^"]+)"/.exec(src)?.slice(1);
+  const beforeKeys = keys(await git("show", `${before}:web/features/chat/sidebar-history.ts`));
+  const afterKeys = keys(readFileSync(join(web, "features/chat/sidebar-history.ts"), "utf8"));
+  if (beforeKeys?.join() !== "cstra_proj_collapsed,cstra_team_collapsed")
+    throw new Error(`baseline ${before} is not the shared-key wiring: history keys = ${beforeKeys}`);
+  if (afterKeys?.join() !== "cstra_history_proj_collapsed,cstra_history_team_collapsed")
+    throw new Error(`working tree history keys = ${afterKeys}`);
+  return {
+    approval: "proposed by executor; spec specRev 1 has no '## 对照基准' — PM to accept or replace",
+    before: { commit: before, parent: await git("rev-parse", `${before}^`), historyKeys: beforeKeys,
+      note: "old sidebar.tsx wiring extracted verbatim into SidebarDirectory; history shares the active fold keys" },
+    after: { commit: await git("rev-parse", "HEAD"), source: "working tree", historyKeys: afterKeys },
+    sameInput: { fixture: "synthetic, not a production page", fixtureSha256: createHash("sha256").update(fixture).digest("hex"),
+      steps: STEPS, viewport: VIEWPORT },
+    scope: { widths: WIDTHS, themes: THEMES, variants: ["before", "after"] },
+  };
+}
+
 beforeAll(async () => {
   if (!enabled) return;
+  basis = await resolveBasis();
   servers.before = await serve("before");
   servers.after = await serve("after");
   browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
@@ -138,18 +171,18 @@ afterAll(async () => {
   await browser?.close(); servers.before?.stop(true); servers.after?.stop(true);
   if (!shots || !manifest.length) return;
   writeFileSync(join(shots, "manifest.json"), JSON.stringify({ card: "followup-reliability-SBH2", fixture: "synthetic, not a production page",
-    baseline: BASELINE, after: await git("rev-parse", "HEAD"), afterDirty: (await git("status", "--porcelain", "--", "web")) !== "", shots: manifest }, null, 2));
+    basis, afterDirty: (await git("status", "--porcelain", "--", "web")) !== "", shots: manifest }, null, 2));
 });
 
 const LOOPBACK = /^(https?|wss?):\/\/127\.0\.0\.1(:\d+)?\//;
 
-async function shot(p: Page, v: Variant, width: number, theme: string, step: string) {
+async function shot(p: Page, v: Variant, width: number, theme: string, step: (typeof STEPS)[number]) {
   if (!shots) return;
   mkdirSync(shots, { recursive: true });
   const file = `${v}-${width}-${theme}-${step}.png`;
   await p.screenshot({ path: join(shots, file), fullPage: true });
   manifest.push({ file, variant: v, width, theme, step, sha256: createHash("sha256").update(readFileSync(join(shots, file))).digest("hex"),
-    source: v === "before" ? BASELINE : "working tree", fixture: true });
+    source: v === "before" ? (basis?.before as { commit: string }).commit : "working tree", fixture: true });
 }
 
 const shown = (p: Page) => p.$$eval("[data-agent]", (els) => els.map((e) => e.getAttribute("data-agent")));
@@ -157,7 +190,7 @@ const heads = (p: Page) => p.locator("button", { hasText: "Same project" });
 
 /** 打开历史 → 折叠历史里的 p → 刷新；返回刷新前后可见的会话 */
 async function run(v: Variant, width: number, theme: "light" | "dark") {
-  const ctx = await browser.newContext({ viewport: { width, height: 844 }, deviceScaleFactor: 2, colorScheme: theme });
+  const ctx = await browser.newContext({ viewport: { width, height: VIEWPORT.height }, deviceScaleFactor: VIEWPORT.deviceScaleFactor, colorScheme: theme });
   const blocked: string[] = [], errors: string[] = [];
   await ctx.route((u) => !LOOPBACK.test(u.toString()), (r) => { blocked.push(r.request().url()); return r.abort(); });
   const page = await ctx.newPage();
@@ -167,22 +200,20 @@ async function run(v: Variant, width: number, theme: "light" | "dark") {
   await load();
   const initial = await shown(page);
   await page.getByRole("button", { name: /历史/ }).click();
-  await shot(page, v, width, theme, "1-history-open");
+  await shot(page, v, width, theme, STEPS[0]);
   await heads(page).nth(1).click();
   const afterClick = await shown(page);
-  await shot(page, v, width, theme, "2-history-p-collapsed");
+  await shot(page, v, width, theme, STEPS[1]);
   await page.reload();
   await load();
   const afterReload = await shown(page);
   const headCount = await heads(page).count();
-  await shot(page, v, width, theme, "3-after-reload");
+  await shot(page, v, width, theme, STEPS[2]);
   const overflow = await page.evaluate("document.documentElement.scrollWidth > innerWidth");
   await ctx.close();
   return { initial, afterClick, afterReload, headCount, overflow, blocked, errors };
 }
 
-const WIDTHS = [1200, 390] as const;
-const THEMES = ["light", "dark"] as const;
 const LIVE = ["lead", "kid", "dev", "fresh"];
 
 test.skipIf(!enabled)("old red: collapsing p in history also collapses the live p group (shared fold key)", async () => {
