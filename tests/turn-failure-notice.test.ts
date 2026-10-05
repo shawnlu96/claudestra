@@ -31,10 +31,11 @@ function harness() {
   const book = new AgentCallBook(null);
   const notes: { to: string; body: string }[] = [];
   const pushed: { to: string; body: string }[] = [];
+  const rearmed: string[] = [];
   const deps: CallerSettleDeps = {
     answerable: (c) => book.answerable(c, () => false),
     waiting: (c) => book.waiting(c, () => false),
-    rearmResume: () => {},
+    rearmResume: (c) => void rearmed.push(c),
     consume: (c, pac) => void book.consume(c, pac.callerChannelId, pac),
     pushBack: async (pac, _c, body) => void pushed.push({ to: pac.callerChannelId, body }),
     nudgeAmbiguous: () => {},
@@ -57,7 +58,7 @@ function harness() {
   const turn = (event: string, drain: StopTurn["drain"]): StopTurn =>
     ({ cid, stopChannelId: cid, stopWs: ws, candidateWs: ws, event, runtime: "codex", drain });
   const stop = (event = "StopFailure", drain: StopTurn["drain"] = { text: `API Error: ${CYBER}`, apiError: false }) => settleStopTurn(deps, turn(event, drain));
-  return { cid, book, notes, pushed, ask, fail, cyber, turn, stop, deps, now, slot: (caller = X) => book.slot(cid, caller) };
+  return { cid, book, notes, pushed, rearmed, ask, fail, cyber, turn, stop, deps, now, slot: (caller = X) => book.slot(cid, caller) };
 }
 
 describe("请求方收到失败回推", () => {
@@ -192,6 +193,47 @@ describe("不推给不相干的人", () => {
     h.ask(X, Date.now() + 1000);
     await h.stop();
     expect(h.notes).toEqual([]);
+  });
+});
+
+describe("外人参与开的一轮（PR715-r1 P1 failure-notice-cross-principal-drain）", () => {
+  const PRIVATE = "PRIVATE_PEER_RESPONSE";
+  test("本机请求 + peer 消息同一批开轮、槽带等续跑标记：只推通用说明，peer 那段话不外泄，槽留着、续跑重挂", async () => {
+    const h = harness();
+    h.ask(X, h.now - 2000);
+    h.book.markApiError(h.cid, () => false, null, X); // 上一轮撞过 API 错误、等续跑的槽
+    noteDelivered(h.cid, { kind: "api", peer: "remote" }, h.now - 1500, false); // 3 秒批次内送到：这一轮按 stranger 算
+    await h.cyber();
+    await h.stop("StopFailure", { text: `${PRIVATE}\nAPI Error: ${CYBER}`, apiError: false });
+    expect(h.notes).toHaveLength(1);
+    expect(h.notes[0].body).toContain(CYBER);
+    expect(h.notes[0].body).not.toContain(PRIVATE);
+    expect(h.pushed).toEqual([]);
+    expect(h.slot()).toBeDefined();
+    expect(h.rearmed).toEqual([h.cid]);
+  });
+
+  test("没有等续跑标记也一样：外人参与的一轮不消化槽、不带话", async () => {
+    const h = harness();
+    h.ask(X, h.now - 2000);
+    noteDelivered(h.cid, { kind: "api" }, h.now - 1500, false); // guest / scoped token（不是 owner:self）
+    await h.cyber();
+    await h.stop("StopFailure", { text: `${PRIVATE}\nAPI Error: ${CYBER}`, apiError: false });
+    expect(h.notes).toHaveLength(1);
+    expect(h.notes[0].body).not.toContain(PRIVATE);
+    expect(h.pushed).toEqual([]);
+    expect(h.slot()).toBeDefined();
+  });
+
+  test("owner 的消息和本机请求同一批开轮：照推说明、消化槽，但出错前的话归属不明、不带", async () => {
+    const h = harness();
+    h.ask(X, h.now - 2000);
+    noteDelivered(h.cid, { kind: "user", owner: true }, h.now - 1500, false);
+    await h.cyber();
+    await h.stop("StopFailure", { text: `答 owner 的话\nAPI Error: ${CYBER}`, apiError: false });
+    expect(h.notes).toHaveLength(1);
+    expect(h.notes[0].body).not.toContain("答 owner 的话");
+    expect(h.slot()).toBeUndefined();
   });
 });
 

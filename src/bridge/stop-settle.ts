@@ -198,6 +198,7 @@ async function settleOwn(d: CallerSettleDeps, t: StopTurn, mine: boolean): Promi
  * 它中途 reply 过一句就把槽消化了，靠槽就是静默。有槽的推完就消化，不再拿「API Error: …」当答复兜底推一遍；
  * 以 API 错误结束、等续跑的槽（适配器没说能不能重试）留给 onApiErrorTurn 那句「回程保留」，不说两遍。
  * 自己续跑的一轮（at = -Infinity，按上一轮建出来的）不算谁开的；owner 有回合失败卡，peer 走 API 请求的兜底结算，都不在 askers 里。
+ * 出错前说的话只在这一轮完全是它一个自己人开的时候带上；外人参与开的一轮只推通用说明、不消化槽（留给下面 strangerTurn 那道保护）。
  */
 async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   const rec = turnTrigger.get(t.cid);
@@ -206,7 +207,9 @@ async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
   if (!f || t.event !== "StopFailure") return false;
   const waiting = d.waiting(t.cid);
   const askers = opened?.askers ?? [];
-  const said = askers.length === 1 && !ranIntoApiError(t) ? spokenBefore(t.drain.text, f) : undefined;
+  const stranger = strangerTurn(t);
+  const sole = !stranger && opened?.who === "insider" && opened.callers.length === 1 && askers.length === 1 && !ranIntoApiError(t);
+  const said = sole ? spokenBefore(t.drain.text, f) : undefined;
   for (const caller of askers) {
     const slot = waiting.find((p) => p.callerChannelId === caller);
     if (slot && ranIntoApiError(t)) continue;
@@ -214,7 +217,7 @@ async function failedTurn(d: CallerSettleDeps, t: StopTurn): Promise<boolean> {
     const r = await d.notify(pac, t.cid, turnFailureNotice(f, !slot, said)).catch((e: Error) => ({ kind: "error", error: e }));
     const kind = (r as { kind?: string } | undefined)?.kind;
     if (kind === "error" || kind === "dropped") console.error(`⚠️ ${f.agent} 回合失败的说明没推到 ${pac.callerName}（${kind}），回程照旧留着`);
-    else if (slot) d.consume(t.cid, slot);
+    else if (slot && !stranger) d.consume(t.cid, slot);
     console.log(`⚠️ ${f.agent} 这一轮以不可重试的错误中止 → 告诉请求方 ${pac.callerName}${slot ? "" : "（回程已被更早的回复消化）"}`);
   }
   return true;
