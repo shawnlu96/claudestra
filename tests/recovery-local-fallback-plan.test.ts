@@ -17,7 +17,8 @@ import { specPathFor } from "../src/lib/task-spec.js";
 import { recordModelOutcome } from "../src/lib/scheduler-model-outcome.js";
 import { blockFixture, E2E_MS, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
-const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 ${randomBytes(32).toString("hex")}`;
+// A 64-hex on a line naming a secret: GATE4 never cuts it, so the gate still refuses it (a bare 64-hex digest is now cut and goes out).
+const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 secret ${randomBytes(32).toString("hex")}`;
 const on: LocalFallbackPolicyPort = () => ({ mode: "on", manualAfterMs: null });
 const OK = { ok: true } as const;
 const BORROW = [{ peer: "mate", projects: ["p"], roles: ["review", "write"] as ("review" | "write")[], maxOpen: 3 }];
