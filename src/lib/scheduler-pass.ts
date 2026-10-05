@@ -45,6 +45,9 @@ export interface PassOpts {
   deployJobs?: DeployJobs;
   /** The merge train's GitHub port and state store; tests inject fakes (default: the guarded gh and the state-dir file, none in a test process). */
   train?: TrainContext;
+  /** The in-pass train tick (default mergeTrainPass: guarded gh, PM notices, required checks from scheduler.json); tests hand in
+   *  mergeTrainTick with fake ports and their own required checks, still called here, between trainProjects and mergeTick. */
+  trainTick?: (db: Database, projects: readonly string[], active: Active) => Promise<void>;
   autoDeps?: (active: Active) => AutoTickDeps;
   /** Tests point this at a private lock / update marker / update request. */
   maintenance?: { path?: string; marker?: string; request?: string };
@@ -112,7 +115,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
       const trains = opts.train?.store, projects = Object.keys(config.projects);
-      await mergeTrainPass(db, trainProjects(db, projects, trains), active, opts.train); // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
+      // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
+      const trainTick = opts.trainTick ?? ((d, ps, a) => mergeTrainPass(d, ps, a, opts.train));
+      await trainTick(db, trainProjects(db, projects, trains), active);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass

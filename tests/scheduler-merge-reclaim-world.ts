@@ -1,9 +1,11 @@
 /**
- * MTR1 fixture: a temporary ledger driven by the real schedulerPass (train step → mergeTick → deployTick → reclaim → auto tick,
+ * MTR1 fixture: a temporary ledger driven by the real schedulerPass (train tick → mergeTick → deployTick → reclaim → auto tick,
  * whose merge planning goes through the real ledger CLI `scheduler-plan`), with GitHub and the deploy jobs faked. No network,
- * no launchctl. `store`: "memory" / "file" are injected through PassOpts.train; "default" injects nothing, so every step uses
- * defaultTrainStore() — only a non-test child process has one (scheduler-merge-reclaim.test.ts runs this file as that child).
- * The train is stepped right before each pass, as mergeTrainPass would (its own tick reads scheduler.json, absent here).
+ * no launchctl. The train is formed and stepped only by the pass's own train tick: PassOpts.trainTick is the real mergeTrainTick
+ * (real candidates and member outcomes from the ledger) with the fake gh, a PM-notice recorder and this world's required checks
+ * in place of scheduler.json. `store`: "memory" / "file" are also injected through PassOpts.train; "default" injects no store,
+ * so trainProjects / mergeTick / reclaim use defaultTrainStore() — only a non-test child process has one
+ * (scheduler-merge-reclaim.test.ts runs this file as that child) — and the tick gets that same state-dir file.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,17 +17,18 @@ import { insertEvent, type EventDraft } from "../src/lib/ledger-tx.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import type { DeployJobs } from "../src/lib/scheduler-deploy-job.js";
 import { DEPLOY_LABEL_PREFIX } from "../src/lib/scheduler-deploy.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
-import { formTrain, stepTrain, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
+import type { TrainEvent, TrainGh, TrainState, TrainStore } from "../src/lib/scheduler-merge-train.js";
 import { trainHolds } from "../src/lib/scheduler-merge-train-hold.js";
-import { fileTrainStore, memberStatusOf, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
+import { fileTrainStore, mergeTrainTick, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
 
-const REPO = "example/repo";
+let worlds = 0; // a repo per world: the train tick caches PR file lists by PR URL and head for the whole process
 
 export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string }
 
@@ -38,11 +41,17 @@ export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef:
   let shaSeq = 0;
   const newSha = o.newSha ?? (() => (++shaSeq).toString(16).padStart(40, "0")); // one counter with the caller's card heads
   const hub = { main: newSha(), parents: new Map<string, string[]>(), heads: new Map<string, string>(), merged: new Map<string, string>(),
-    synced: new Map<string, string>(), pending: false, calls: [] as string[] };
+    synced: new Map<string, string>(), pending: false, calls: [] as string[],
+    /** The service stops while this card's merge call is out (GitHub merged it or not): the journal stays at `merging`. */
+    stopIn: null as { name: string; merged: boolean } | null };
   const mergeInto = (prRef: string, head: string, call: string) => {
+    const stop = hub.stopIn?.name === o.name(prRef) ? hub.stopIn : null;
+    if (stop) hub.stopIn = null;
+    if (stop && !stop.merged) throw new SchedulerStopped("服务在合并调用途中停止");
     const sha = newSha();
     hub.parents.set(sha, [hub.main, head]); hub.main = sha; hub.merged.set(prRef, sha);
     hub.calls.push(`${call}:${o.name(prRef)}`);
+    if (stop) throw new SchedulerStopped("服务在合并调用途中停止");
     return sha;
   };
   const gh: TrainGh = {
@@ -83,6 +92,7 @@ export function memoryTrainStore(): { store: TrainStore; events: TrainEvent[] } 
 }
 
 export function reclaimWorld(opts: WorldOpts) {
+  const REPO = `example/mtr1-${++worlds}`;
   const dir = mkdtempSync(join(tmpdir(), "mtr1-")), path = join(dir, "ledger.sqlite");
   let db = openLedger(path);
   const config = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
@@ -122,7 +132,9 @@ export function reclaimWorld(opts: WorldOpts) {
   const memory = memoryTrainStore(), events = memory.events;
   // "default" reads the very file defaultTrainStore() reads (state dir); "file" a private one handed in through PassOpts.train
   const store = opts.store === "memory" ? memory.store : opts.store === "file" ? fileTrainStore(join(dir, "merge-train")) : fileTrainStore();
-  const deps: TrainDeps = { gh, store, now: Date.now, requiredChecks: ["check"], memberStatus: (id, head) => memberStatusOf(db, id, head), notify: async () => {} };
+  /** PM notices the train tick sent, as "taskId: text". */
+  const notices: string[] = [];
+  const checks = (p: string) => config.projects[p]?.requiredChecks ?? null;
   /** One launchd job per deploy: it is seen finished (ok) on the pass after its submit, so the slot is released in deployTick. */
   const jobs = new Map<string, "submitted" | "done">();
   const deployJobs: DeployJobs = {
@@ -150,12 +162,14 @@ export function reclaimWorld(opts: WorldOpts) {
   let cursor: Record<string, string | undefined> = {};
   /** A daemon restart: a new ledger connection and pass cursor; only the ledger file, the train store and fake GitHub carry over. */
   const restart = () => { closeLedger(path); db = openLedger(path); cursor = {}; };
-  /** `arrive` runs right after the train step, where a card the train no longer holds would reach this pass's auto tick. */
+  /** `arrive` runs right after the in-pass train tick, where a card the train no longer holds would reach this pass's auto tick. */
   const pass = async (o: { budgetMs?: number; arrive?: () => void } = {}) => {
-    const before = hub.calls.length, live = store.load("p");
-    if (live && live.phase !== "done") await stepTrain(live, deps);
-    o.arrive?.();
-    const r = await schedulerPass(db, config, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000,
+    const before = hub.calls.length;
+    const trainTick = async (d: typeof db, projects: readonly string[]) => {
+      await mergeTrainTick(d, projects, { now: Date.now, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
+      o.arrive?.();
+    };
+    const r = await schedulerPass(db, config, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
       external: () => withMergeTrain(base, { gh, store }), deployJobs, autoDeps: autoDeps as never, peerPr: noop,
       autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [],
       ...(opts.store === "default" ? {} : { train: { gh, store } }) });
@@ -167,7 +181,6 @@ export function reclaimWorld(opts: WorldOpts) {
   const phase = (id: string) => { const i = intentOf(id); return i ? getMergeRun(db, i)?.phase ?? null : null; };
   const slot = () => (db.query("SELECT taskId FROM scheduler_resources WHERE project='p' AND resource='merge:p'").get() as { taskId: string } | null)?.taskId ?? null;
   const turns = (id: string) => listEvents(db, { project: "p", target: id }).filter((e) => e.data.op === "merge_slot").map((e) => String(e.data.turn));
-  const form = (ids: string[]) => formTrain("p", ids.map((id) => cards.find((c) => c.taskId === id)!), deps);
   /** Take the slot and begin the merge run as the auto tick + mergeTick do, without driving it: the card sits at ready holding the slot. */
   const begin = async (id: string) => {
     const task = getTask(db, id)!, intent = `merge-${id}`;
@@ -180,31 +193,38 @@ export function reclaimWorld(opts: WorldOpts) {
     return intent;
   };
   const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(mstr, { recursive: true, force: true }); };
-  return { get db() { return db; }, hub, store, events, deps, manager, card, pass, restart, phase, slot, turns, form, begin, intentOf, close };
+  return { get db() { return db; }, hub, store, events, notices, manager, card, pass, restart, phase, slot, turns, begin, intentOf, close };
 }
 export type ReclaimWorld = ReturnType<typeof reclaimWorld>;
 
 /**
  * The starvation scenario (MT1 FB1P): T3 (overlapping T1, so never in its car) holds the slot at ready and lends it to the
- * T1+T2 train; the members merge and deploy one by one; from the pass the train is done on, one fresh card arrives per pass.
- * Returns the GitHub / deploy effects in order and whether T3 merged within `passes`.
+ * T1+T2 train the pass's own tick formed; the members merge and deploy one by one; from the pass the train stops holding on,
+ * one fresh card arrives per pass. A pass the service is stopped in (SchedulerStopped) is followed by a daemon restart.
+ * Returns the GitHub / deploy effects in order ("stopped" for a stopped pass), the train's PM notices (ids masked) and
+ * whether T3 merged within `passes`.
  */
 export async function starvation(w: ReclaimWorld, o: { passes?: number; budgetMs?: number; between?: (i: number) => void } = {}):
-  Promise<{ calls: string[]; t3: string | null; turns: string[]; trainDone: boolean }> {
+  Promise<{ calls: string[]; t3: string | null; turns: string[]; trainDone: boolean; trainLog: string[]; fresh: number }> {
   for (const id of ["T1", "T2", "T3"]) w.card(id);
   await w.begin("T3");
   w.hub.pending = true;
-  await w.form(["T1", "T2", "T3"]);
-  await w.pass(); // T3 lends the slot to the testing train
+  await w.pass(); // the pass's train tick forms T1+T2 (T3 overlaps T1), then mergeTick has T3 lend the slot to the testing train
   w.hub.pending = false;
   let fresh = 0;
   // one fresh card per pass from the moment the train stops holding (cleanup / done / void / past its limit)
   const arrive = () => { const s = w.store.load("p"); if (s && !trainHolds(s, Date.now())) w.card(`F${++fresh}`); };
   for (let i = 0; i < (o.passes ?? 14) && w.phase("T3") !== "merged"; i++) {
     o.between?.(i);
-    await w.pass({ budgetMs: o.budgetMs, arrive });
+    try { await w.pass({ budgetMs: o.budgetMs, arrive }); }
+    catch (e) {
+      if (!(e instanceof SchedulerStopped)) throw e;
+      w.hub.calls.push("stopped");
+      w.restart();
+    }
   }
-  return { calls: w.hub.calls, t3: w.phase("T3"), turns: w.turns("T3"), trainDone: w.store.load("p")?.phase === "done" };
+  const trainLog = w.notices.map((n) => n.replace(/\[合并列车\] 第 \d+ 辆车 [\w-]+：/, "").replace(/\b\d+-[a-z0-9]{4,}\b/g, "<train>"));
+  return { calls: w.hub.calls, t3: w.phase("T3"), turns: w.turns("T3"), trainDone: w.store.load("p")?.phase === "done", trainLog, fresh };
 }
 
 // The non-test child (default store path): `bun --no-env-file tests/scheduler-merge-reclaim-world.ts` prints the scenario as JSON.

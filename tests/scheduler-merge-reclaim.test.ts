@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { HOLD_LIMIT_MS, SLOT_YIELD } from "../src/lib/scheduler-merge-train-hold.js";
 import { reclaimLentSlots } from "../src/lib/scheduler-merge-reclaim.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
+import { listEvents } from "../src/lib/ledger-store.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
 import { reclaimWorld, starvation, type ReclaimWorld, type WorldOpts } from "./scheduler-merge-reclaim-world.ts";
 import { testChildEnv } from "./test-env.ts";
@@ -18,6 +19,10 @@ import { testChildEnv } from "./test-env.ts";
 const overlapT1 = (n: number) => (n === 3 ? "src/1.ts" : `src/${n}.ts`); // T3 overlaps T1, so it can't share the train's car
 const world = (o: Partial<WorldOpts> = {}) => reclaimWorld({ store: "memory", deploy: true, files: overlapT1, ...o });
 const WITH_DEPLOY = ["match-head:T1", "deploy:T1", "match-head:T2", "deploy:T2", "update:T3", "serial-merge:T3", "deploy:T3"];
+/** The PM notices of the T1+T2 train the pass's own tick formed, tested green and settled (ids masked). */
+const TRAIN_MERGED = ["T1: 组车 2 张：T1、T2，起点 main 000000000000", "T1: 车厢 <train>（T1、T2）CI 绿",
+  "T1: 结束（merged）：合并 T1、T2，退回 （无），串行 （无），CI 1 次"];
+const core = ({ calls, t3, turns, trainDone }: Awaited<ReturnType<typeof starvation>>) => ({ calls, t3, turns, trainDone });
 const merges = (calls: string[]) => calls.filter((c) => /^(serial-merge|match-head):/.test(c)).map((c) => c.split(":")[1]);
 
 describe("MTR1 a lender takes its slot back before fresh merge plans (full pass)", () => {
@@ -25,7 +30,9 @@ describe("MTR1 a lender takes its slot back before fresh merge plans (full pass)
     const w = world();
     try {
       const r = await starvation(w);
-      expect(r).toEqual({ calls: WITH_DEPLOY, t3: "merged", turns: ["yield", "reclaim"], trainDone: true });
+      expect(core(r)).toEqual({ calls: WITH_DEPLOY, t3: "merged", turns: ["yield", "reclaim"], trainDone: true });
+      expect([r.trainLog, r.fresh > 0]).toEqual([TRAIN_MERGED, true]); // the in-pass tick formed and settled the train; fresh cards were waiting
+      expect(w.events.slice(0, 8).map((e) => e.kind)).toEqual(["form", "hold", "ci", "hold", "merge", "merge", "cleanup", "done"]);
       for (let i = 0; i < 12 && w.phase("F2") !== "merged"; i++) await w.pass();
       expect(merges(w.hub.calls)).toEqual(["T1", "T2", "T3", "F1", "F2"]); // fresh arrivals are served after it, in their own order
     } finally { w.close(); }
@@ -34,7 +41,7 @@ describe("MTR1 a lender takes its slot back before fresh merge plans (full pass)
   test("merge without deploy: the member settles inside mergeTick after the lender's turn, and the reclaim still comes before the auto tick", async () => {
     const w = world({ deploy: false });
     try {
-      expect(await starvation(w)).toEqual({ calls: ["match-head:T1", "match-head:T2", "update:T3", "serial-merge:T3"], t3: "merged",
+      expect(core(await starvation(w))).toEqual({ calls: ["match-head:T1", "match-head:T2", "update:T3", "serial-merge:T3"], t3: "merged",
         turns: ["yield", "reclaim"], trainDone: true });
     } finally { w.close(); }
   });
@@ -43,7 +50,7 @@ describe("MTR1 a lender takes its slot back before fresh merge plans (full pass)
     for (const at of [2, 4, 5]) {
       const w = world({ store: "file" });
       try {
-        expect(await starvation(w, { between: (i) => { if (i === at) w.restart(); } })).toEqual({ calls: WITH_DEPLOY, t3: "merged",
+        expect(core(await starvation(w, { between: (i) => { if (i === at) w.restart(); } }))).toEqual({ calls: WITH_DEPLOY, t3: "merged",
           turns: ["yield", "reclaim"], trainDone: true });
       } finally { w.close(); }
     }
@@ -72,10 +79,92 @@ describe("MTR1 a lender takes its slot back before fresh merge plans (full pass)
       const r = Bun.spawnSync({ cmd: [process.execPath, "--no-env-file", join(REPO_ROOT, "tests/scheduler-merge-reclaim-world.ts")], cwd: REPO_ROOT, env });
       const out = r.stdout.toString().trim().split("\n").at(-1)!;
       expect([r.exitCode, r.stderr.toString()]).toEqual([0, ""]);
-      expect(JSON.parse(out)).toEqual({ calls: WITH_DEPLOY, t3: "merged", turns: ["yield", "reclaim"], trainDone: true });
+      const got = JSON.parse(out);
+      expect(core(got)).toEqual({ calls: WITH_DEPLOY, t3: "merged", turns: ["yield", "reclaim"], trainDone: true });
+      expect(got.trainLog).toEqual(TRAIN_MERGED); // the train was formed and stepped by the pass's own tick on the default state-dir file
       expect(existsSync(join(root, "state", "merge-train", "p.json"))).toBe(true); // the default file store under the temp state dir
       expect(existsSync(stubLog) ? readFileSync(stubLog, "utf8") : "").toBe(""); // nothing leaked to GitHub or launchd
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("MTR1 full pass: train void / timeout, a merge in flight, a changed head, a paused workflow", () => {
+  const intentStatus = (w: ReclaimWorld, id: string) =>
+    (w.db.query("SELECT status FROM scheduler_intents WHERE id = ?").get(w.intentOf(id)) as { status: string } | null)?.status ?? null;
+
+  test("train void (a member's head moved): the tick voids it, the slot holder goes serial, then the lender reclaims before the fresh cards", async () => {
+    const w = world();
+    try {
+      const r = await starvation(w, { between: (i) => { if (i === 0) w.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T2'").run("f".repeat(40)); } });
+      expect(core(r)).toEqual({ calls: ["serial-merge:T1", "deploy:T1", "update:T3", "serial-merge:T3", "deploy:T3"], t3: "merged",
+        turns: ["yield", "reclaim"], trainDone: true });
+      expect(r.trainLog[1]).toContain("作废：T2 已离开合并队列：head 变成 ffffffffffff");
+      expect([r.fresh > 0, w.phase("T2"), merges(r.calls)]).toEqual([true, null, ["T1", "T3"]]); // T2 waits for a review of its new head
+    } finally { w.close(); }
+  });
+
+  test("train past its hold limit while settling: the deploy frees the slot and the lender reclaims it ahead of the member and fresh cards; the gate voids the train", async () => {
+    const w = world();
+    try {
+      const r = await starvation(w, { between: (i) => { if (i === 1) w.store.save({ ...w.store.load("p")!, startedAt: Date.now() - HOLD_LIMIT_MS - 60_000 }); } });
+      expect(core(r)).toEqual({ calls: ["match-head:T1", "deploy:T1", "update:T3", "serial-merge:T3", "deploy:T3"], t3: "merged",
+        turns: ["yield", "reclaim"], trainDone: true });
+      expect(w.events.filter((e) => e.kind === "void").map((e) => e.text)).toEqual([expect.stringContaining("列车超时")]); // the lender's own gate voided it
+      expect(r.fresh > 0).toBe(true);
+    } finally { w.close(); }
+  });
+
+  test("a member's merge in flight when the service stops: the slot stays with it (no reclaim, no cancel); the restart verifies it, its deploy frees the slot, the lender reclaims", async () => {
+    const w = world();
+    const seen: unknown[] = [];
+    try {
+      const r = await starvation(w, { between: (i) => {
+        if (i === 0) w.hub.stopIn = { name: "T2", merged: true };
+        if (w.phase("T2") === "merging") seen.push([w.slot(), w.turns("T3"), intentStatus(w, "T2")]);
+      } });
+      expect(seen).toEqual([["T2", ["yield"], "submitted"]]);
+      expect(core(r)).toEqual({ calls: ["match-head:T1", "deploy:T1", "match-head:T2", "stopped", "deploy:T2", "update:T3", "serial-merge:T3", "deploy:T3"],
+        t3: "merged", turns: ["yield", "reclaim"], trainDone: true });
+      expect(r.trainLog).toEqual(TRAIN_MERGED);
+    } finally { w.close(); }
+  });
+
+  test("a merge in flight GitHub never confirms: the run goes unknown and keeps the slot, the queue freezes; the lender is not reclaimed, merged or cancelled", async () => {
+    const w = world();
+    try {
+      const r = await starvation(w, { between: (i) => { if (i === 0) w.hub.stopIn = { name: "T2", merged: false }; } });
+      expect(core(r)).toEqual({ calls: ["match-head:T1", "deploy:T1", "stopped"], t3: "unknown", turns: ["yield"], trainDone: false });
+      expect([w.slot(), w.phase("T2"), intentStatus(w, "T2"), intentStatus(w, "T3")]).toEqual(["T2", "unknown", "submitted", "submitted"]);
+    } finally { w.close(); }
+  });
+
+  test("the lender's head changes while it is lent: mergeTick freezes it (old review void), the queue freezes; it is never reclaimed or merged at either head", async () => {
+    const w = world();
+    try {
+      const r = await starvation(w, { between: (i) => { if (i === 0) w.db.query("UPDATE tasks SET headSHA = ? WHERE id = 'T3'").run("e".repeat(40)); } });
+      expect(core(r)).toEqual({ calls: [], t3: "unknown", turns: ["yield"], trainDone: false });
+      expect(w.slot()).toBe("T1"); // the member's merge intent, held by the frozen queue, not taken by the lender
+      expect(w.hub.calls.filter((c) => c.endsWith(":T3"))).toEqual([]);
+    } finally { w.close(); }
+  });
+
+  test("the lender's workflow paused (manual) and resumed: its unsent merge is cancelled, never reclaimed; the members still merge; on resume no automatic re-plan", async () => {
+    const w = world();
+    try {
+      for (const id of ["T1", "T2", "T3"]) w.card(id);
+      await w.begin("T3");
+      w.hub.pending = true;
+      await w.pass();
+      w.hub.pending = false;
+      w.db.query("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'T3'").run();
+      for (let i = 0; i < 3; i++) await w.pass();
+      expect([w.phase("T3"), intentStatus(w, "T3"), w.turns("T3")]).toEqual(["resolved", "cancelled", ["yield"]]);
+      w.db.query("UPDATE task_workflows SET mode = 'auto' WHERE taskId = 'T3'").run();
+      for (let i = 0; i < 5; i++) await w.pass();
+      expect([w.hub.calls, w.slot(), w.turns("T3"), w.store.load("p")?.phase]).toEqual([["match-head:T1", "deploy:T1", "match-head:T2", "deploy:T2"], null, ["yield"], "done"]);
+      const rejected = listEvents(w.db, { project: "p", target: "T3" }).filter((e) => e.data.op === "plan_rejected").map((e) => e.data.reason);
+      expect(rejected.at(-1)).toContain("请 PM 手动核对并接管");
+    } finally { w.close(); }
   });
 });
 
@@ -85,8 +174,7 @@ async function lent(o: Partial<WorldOpts> = {}): Promise<ReclaimWorld & { free()
   for (const id of ["T1", "T2", "T3"]) w.card(id);
   await w.begin("T3");
   w.hub.pending = true;
-  await w.form(["T1", "T2", "T3"]);
-  await w.pass();
+  await w.pass(); // the in-pass train tick forms T1+T2; T3 lends its slot
   expect([w.slot(), w.turns("T3")]).toEqual(["T1", ["yield"]]);
   const free = () => {
     w.db.query("DELETE FROM scheduler_resources WHERE resource='merge:p'").run();
