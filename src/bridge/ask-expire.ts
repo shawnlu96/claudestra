@@ -5,11 +5,12 @@
  *   每条只发一次（expired 只会结一次）；PM 不在线就不投、不改投大总管，在线但这一下没投进去的照 sendCalm 进押后队列等它空下来；PM 据此 ask-reopen 或改派；
  * - 其余人 / 系统发起的：只有 SSE。
  * 扫完再看过期的要不要再提示一次（lib/ask-recovery.ts）：策略 port 没接上（等 CFG）时是 observe，只记一次日志、不开卡；
- * 开出的卡发 SSE / 告诉发起方按台账里的 remindNotice 待办来，没发完的（批里别条出错、重启）下一分钟补。
+ * 开出的卡发 SSE / 告诉发起方按台账里的 remindNotice 待办来，没发完的（批里别条出错、重启）下一分钟补；补发同样要策略 on、没暂停、owner 活跃，
+ * 不满足就留着待办等（off / observe / 没证据时不推、不告诉发起方 owner 在线）。
  */
 import { isHumanNodeAsk } from "../lib/human-node.js";
 import { t } from "../lib/i18n.js";
-import { markReminderNoticed, pendingReminderNotices, sweepReminders, type ReminderPorts } from "../lib/ask-recovery.js";
+import { markReminderNoticed, noticeBlocker, pendingReminderNotices, sweepReminders, type ReminderPorts } from "../lib/ask-recovery.js";
 import { closeAsk, dueAsks, hasAsksTable, type Ask } from "../lib/ledger-asks.js";
 import { isCurrentAssignment } from "../lib/ledger-human.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
@@ -79,11 +80,14 @@ const DEFAULT_PORTS: ReminderPorts = {
 };
 let reminderPorts: ReminderPorts = DEFAULT_PORTS;
 const observed = new Set<string>();
+/** 通知待办被闸住的日志每条每个理由只记一次（off / observe 时每分钟都会过一遍） */
+const held = new Set<string>();
 
 /** 组合接线（CFG 的 recoveryPolicy 等）与单测换 port；undefined 还原默认 */
 export function setAskReminderPorts(p: Partial<ReminderPorts> | undefined): void {
   reminderPorts = p ? { ...DEFAULT_PORTS, ...p } : DEFAULT_PORTS;
   observed.clear();
+  held.clear();
 }
 
 let reminding: Promise<void> | null = null;
@@ -102,10 +106,16 @@ async function runReminders(db: Parameters<typeof sweepReminders>[0], now: numbe
       console.log(`[askReminder observe] ${r.id} 满足再提示条件（${r.evidence}），observe 模式不开卡`);
     }
   }
-  // 这一轮开出的和以前没发完的一起：台账里的待办才算数，「卡已存在」不等于「通知已发」
+  // 这一轮开出的和以前没发完的一起：台账里的待办才算数，「卡已存在」不等于「通知已发」；补发也过闸，不满足就留着等
   for (const n of pendingReminderNotices(db)) {
     try {
-      if (!reminderPorts.paused?.(n)) publishAsk(n); // owner 后来暂停了：卡已在收件箱，不再推 / 弹；发起方照样要知道新 id
+      const why = await noticeBlocker(n, reminderPorts, now);
+      if (why) {
+        if (!held.has(`${n.id}:${why}`)) console.log(`[askReminder] ${n.id} 的通知待办先不发（${why}），卡已在收件箱，满足了再补`);
+        held.add(`${n.id}:${why}`);
+        continue;
+      }
+      publishAsk(n);
       await noticeReminded(n, String(n.extra.recoveryOf));
       markReminderNoticed(db, n.id, now);
     } catch (e) {

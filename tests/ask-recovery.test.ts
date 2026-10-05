@@ -1,7 +1,7 @@
 /** 决定过期后的再提示（lib/ask-recovery.ts）：真实台账上的状态机——资格、等待、至多一次、重绑定、并发复核、原过期记录不动 */
 import { afterEach, describe, expect, test } from "bun:test";
 import { bindHash, checkAsk } from "../src/lib/ask-bind.js";
-import { markReminderNoticed, pendingReminderNotices, reminderDedupKey, remindOne, sweepReminders, type ReminderPorts } from "../src/lib/ask-recovery.js";
+import { markReminderNoticed, noticeBlocker, pendingReminderNotices, reminderDedupKey, remindOne, sweepReminders, type ReminderPorts } from "../src/lib/ask-recovery.js";
 import { answerAsk, closeAsk, getAsk, listAsks, openAsk, patchAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
@@ -206,6 +206,26 @@ describe("再提示：检查 + 写入原子", () => {
     expect((await remindOne(db(), a, { ...ON, paused: () => paused }, a.expiresAt + 2)).result).toBe("opened");
   });
 
+  test("等发起方查询期间 owner 变不活跃 / 证据没了 → 不拿旧证据开卡，wait；之后又活跃了照开", async () => {
+    const a = expired();
+    for (const gone of [{ active: false, evidence: "presence away" }, null]) {
+      let act: { active: boolean; evidence: string } | null = { active: true, evidence: "heartbeat" };
+      const race: ReminderPorts = { ...ON, ownerActive: () => act, askerLive: async () => ((act = gone), true) };
+      expect(await remindOne(db(), a, race, a.expiresAt + 1)).toMatchObject({ result: "wait" });
+    }
+    expect(reminders()).toEqual([]);
+    expect((await remindOne(db(), a, ON, a.expiresAt + 2)).result).toBe("opened");
+  });
+
+  test("写锁内再问一次 owner 活跃（同步 port）：判定后、写入前证据没了 → wait，不开", async () => {
+    const a = expired();
+    let calls = 0;
+    const flip: ReminderPorts = { ...ON, ownerActive: () => (calls++ === 0 ? { active: true, evidence: "heartbeat" } : null) };
+    expect(await remindOne(db(), a, flip, a.expiresAt + 1)).toMatchObject({ result: "wait", reason: "no owner activity evidence" });
+    expect(calls).toBe(2);
+    expect(reminders()).toEqual([]);
+  });
+
   test("原卡在判定后被改过（如 owner 隐藏）→ 放弃", async () => {
     const a = expired();
     const hide: ReminderPorts = { ...ON, askerLive: () => (patchAsk(db(), a.id, { extra: { hidden: { by: "owner:self", at: 1 } } }, a.expiresAt + 5), true) };
@@ -219,7 +239,8 @@ describe("再提示：批量与通知待办", () => {
     const a = expired({ askKey: "a" });
     const b = expired({ askKey: "b" });
     let calls = 0;
-    const flaky: ReminderPorts = { ...ON, ownerActive: () => { if (calls++ === 1) throw new Error("presence temporarily down"); return { active: true, evidence: "heartbeat" }; } };
+    // 每条问两次 owner 活跃（判定 + 写锁内复核）：第 3 次 = 第二条
+    const flaky: ReminderPorts = { ...ON, ownerActive: () => { if (calls++ === 2) throw new Error("presence temporarily down"); return { active: true, evidence: "heartbeat" }; } };
     const res = await sweepReminders(db(), flaky, b.expiresAt + 1);
     expect(res.map((r) => r.result).sort()).toEqual(["opened", "wait"]);
     expect(res.find((r) => r.result === "wait")).toMatchObject({ reason: "check failed: presence temporarily down" });
@@ -232,5 +253,23 @@ describe("再提示：批量与通知待办", () => {
     answerAsk(db(), pend[1].id, answer(b.expiresAt + 60_002));
     expect(pendingReminderNotices(db())).toEqual([]);
     expect(getAsk(db(), pend[0].id)!.state).toBe("open");
+  });
+});
+
+describe("再提示：待办通知重放的闸", () => {
+  test("off / observe / 缺策略 / 暂停 / 无活跃证据 / owner 不在 → 不放行（待办留着）；on + 未暂停 + owner 活跃才放行", async () => {
+    const a = expired();
+    const r = await remindOne(db(), a, ON, a.expiresAt + 1);
+    if (r.result !== "opened") throw new Error("expected opened");
+    const n = r.reminder;
+    expect(await noticeBlocker(n, { ...ON, policy: () => ({ mode: "off", manualAfterMs: null }) }, 1)).toBe("mode=off");
+    expect(await noticeBlocker(n, { ...ON, policy: () => ({ mode: "observe", manualAfterMs: null }) }, 1)).toBe("mode=observe");
+    expect(await noticeBlocker(n, { ownerActive: ON.ownerActive }, 1)).toBe("mode=observe");
+    expect(await noticeBlocker(n, { ...ON, paused: () => true }, 1)).toBe("paused by owner");
+    expect(await noticeBlocker(n, { ...ON, ownerActive: () => null }, 1)).toBe("no owner activity evidence");
+    expect(await noticeBlocker(n, { ...ON, ownerActive: async () => ({ active: false, evidence: "away" }) }, 1)).toBe("owner not active (away)");
+    expect(await noticeBlocker(n, { ...ON, ownerActive: () => { throw new Error("down"); } }, 1)).toBe("check failed: down");
+    expect(await noticeBlocker(n, ON, 1)).toBeNull();
+    expect(pendingReminderNotices(db()).map((x) => x.id)).toEqual([n.id]);
   });
 });

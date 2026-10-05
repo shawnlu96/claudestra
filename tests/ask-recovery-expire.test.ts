@@ -53,6 +53,20 @@ async function expiringAuthorize(content = "发 v2.32.0 吗", messageId = "reply
 }
 const reminders = () => listAsks(openLedger(s.path)).filter((a) => a.extra.recoveryOf);
 
+/** 模拟「落库后、发布前进程没了」：缺策略的扫描把原卡结成 expired，再直接开出一张带 pending 待办、还没发过的再提示卡 */
+async function pendingReminder(): Promise<Ask> {
+  const a = await expiringAuthorize();
+  await sweepExpired();
+  const on = { policy: () => ({ mode: "on" as const, manualAfterMs: null }), ownerActive: () => ({ active: true, evidence: "t" }), askerLive: () => true };
+  const r = await remindOne(openLedger(s.path), getAsk(openLedger(s.path), a.id)!, on, Date.now());
+  expect(r.result).toBe("opened");
+  const n = reminders()[0];
+  expect(n.extra.remindNotice).toBe("pending");
+  expect(s.asks.some((e) => (e.data as { askId: string }).askId === n.id)).toBe(false);
+  expect(s.sent.some((e) => e.content.includes(n.id))).toBe(false);
+  return n;
+}
+
 describe("过期扫描里的再提示", () => {
   test("缺策略（CFG 还没接）= observe：只发原有的过期通知，不开卡；observe 日志每条只记一次", async () => {
     const log = spyOn(console, "log");
@@ -101,7 +115,8 @@ describe("过期扫描里的再提示", () => {
     let calls = 0;
     setAskReminderPorts({
       policy: () => ({ mode: "on", manualAfterMs: null }),
-      ownerActive: () => { if (calls++ === 1) throw new Error("presence temporarily down"); return { active: true, evidence: "test" }; },
+      // 每条问两次 owner 活跃（判定 + 写锁内复核）：第 3 次 = 第二条
+      ownerActive: () => { if (calls++ === 2) throw new Error("presence temporarily down"); return { active: true, evidence: "test" }; },
     });
     await sweepExpired();
     const [first] = reminders();
@@ -114,18 +129,40 @@ describe("过期扫描里的再提示", () => {
     expect(s.sent.filter((e) => e.content.includes("新卡"))).toHaveLength(2);
   });
 
-  test("落库后、发布前进程没了（卡带 pending 待办）：下一次扫描补发 SSE + 发起方通知，补一次就记 done", async () => {
-    const a = await expiringAuthorize();
-    await sweepExpired(); // 结成 expired（缺策略 = observe，不开）
-    const on = { policy: () => ({ mode: "on" as const, manualAfterMs: null }), ownerActive: () => ({ active: true, evidence: "t" }), askerLive: () => true };
-    const r = await remindOne(openLedger(s.path), getAsk(openLedger(s.path), a.id)!, on, Date.now());
-    expect(r.result).toBe("opened");
-    const n = reminders()[0];
-    expect(s.sent.some((e) => e.content.includes(n.id))).toBe(false);
-    await sweepExpired(); // 重启后的第一次扫描：策略仍缺（observe），待办照补
+  test("落库后、发布前进程没了（卡带 pending 待办）：策略 on + owner 活跃时下一次扫描补发 SSE + 发起方通知，补一次就记 done", async () => {
+    const n = await pendingReminder();
+    setAskReminderPorts({ policy: () => ({ mode: "on", manualAfterMs: null }) });
+    await sweepExpired();
     expect(s.asks.some((e) => (e.data as { askId: string }).askId === n.id)).toBe(true);
     expect(s.sent.filter((e) => e.content.includes(`新卡 ${n.id}`))).toHaveLength(1);
+    expect(getAsk(openLedger(s.path), n.id)!.extra.remindNotice).toBe("done");
     await sweepExpired();
     expect(s.sent.filter((e) => e.content.includes(`新卡 ${n.id}`))).toHaveLength(1);
+  });
+
+  test("待办重放也过闸：缺策略 / observe / off、owner 无证据 / 不在 → 不推不告诉、待办留着；之后 on + 活跃了补一次，不丢不重", async () => {
+    const n = await pendingReminder();
+    const published = () => s.asks.filter((e) => (e.data as { askId: string }).askId === n.id).length;
+    const told = () => s.sent.filter((e) => e.content.includes(`新卡 ${n.id}`)).length;
+    let queries = 0;
+    const gates: Parameters<typeof setAskReminderPorts>[0][] = [
+      undefined,
+      { policy: () => ({ mode: "observe", manualAfterMs: null }) },
+      { policy: () => ({ mode: "off", manualAfterMs: null }) },
+      { policy: () => ({ mode: "on", manualAfterMs: null }), ownerActive: () => (queries++, null) },
+      { policy: () => ({ mode: "on", manualAfterMs: null }), ownerActive: async () => (queries++, { active: false, evidence: "away" }) },
+    ];
+    for (const g of gates) {
+      setAskReminderPorts(g);
+      await sweepExpired();
+      expect([published(), told()]).toEqual([0, 0]);
+      expect(getAsk(openLedger(s.path), n.id)!.extra.remindNotice).toBe("pending");
+    }
+    expect(queries).toBe(2);
+    setAskReminderPorts({ policy: () => ({ mode: "on", manualAfterMs: null }), ownerActive: async () => ({ active: true, evidence: "later" }) });
+    await sweepExpired();
+    await sweepExpired();
+    expect([published(), told()]).toEqual([1, 1]);
+    expect(getAsk(openLedger(s.path), n.id)!.extra.remindNotice).toBe("done");
   });
 });

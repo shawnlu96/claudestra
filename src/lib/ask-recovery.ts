@@ -4,8 +4,10 @@
  * 没有活跃证据就等下一次扫描，不猜在线。owner 删过 / 隐藏过 / 暂停了 / 答过一部分、发起 agent 已重新问过的，永不再提示。
  * 开关与阈值来自注入的策略 port（CFG 的 recoveryPolicy 形状）；缺 port 按 observe：只记日志、无副作用。manualAfterMs=null = owner 没设
  * 停止等待的期限 → 一直等（不拿原卡有效期顶替：审批有效期不是恢复等待期限）。
- * 并发 / 重复 tick / 重启：dedupKey 唯一 + 写锁内复核（openAskFull.beforeWrite：原卡、去重、暂停、策略仍是 on），同一条最多开出一张。
- * 通知：新卡落库时带 remindNotice=pending，发完 SSE / 告诉发起方才记 done；没发完（批里别条出错、进程重启）的由 pendingReminderNotices 下次重放。
+ * 并发 / 重复 tick / 重启：dedupKey 唯一 + 写锁内复核（openAskFull.beforeWrite：原卡、去重、暂停、策略仍是 on、owner 仍活跃），同一条最多开出一张；
+ * owner 活跃最后问（之后到写入不再 await），同步 port 在写锁内再问一次，证据没了就 wait。
+ * 通知：新卡落库时带 remindNotice=pending，发完 SSE / 告诉发起方才记 done；没发完（批里别条出错、进程重启）的由 pendingReminderNotices 下次重放，
+ * 重放同样过闸（noticeBlocker：策略 on、没暂停、owner 有活跃证据），不满足就留着待办等，不推、不告诉发起方 owner 在线。
  * 单测 tests/ask-recovery.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -95,9 +97,14 @@ export type ReminderOutcome =
   | { id: string; result: "observe"; evidence: string }
   | { id: string; result: "opened"; reminder: Ask; evidence: string };
 
+/** owner 活跃证据不成立的理由；null = 有证据且活跃 */
+const inactiveReason = (act: OwnerActivity): string | null =>
+  !act ? "no owner activity evidence" : !act.active ? `owner not active (${act.evidence})` : null;
+
 /**
  * 写锁内复核：原卡仍是 expired 且没被改过、没有更晚的同 key / 已开的再提示、owner 没在这期间暂停、策略仍是 on
- * （扫描与开卡之间别的连接动过、或等活跃 / 发起方查询时 owner 暂停 / 关了，就放弃）
+ * （扫描与开卡之间别的连接动过、或等活跃 / 发起方查询时 owner 暂停 / 关了，就放弃）；
+ * owner 活跃 port 是同步的就在锁内再问一次（证据没了 → wait）；异步的用刚 resolve 的那次（之后到这里没有 await）
  */
 function recheck(db: Database, a: Ask, ports: ReminderPorts, now: number): void {
   const pol = policyOf(ports.policy, a.project);
@@ -107,8 +114,13 @@ function recheck(db: Database, a: Ask, ports: ReminderPorts, now: number): void 
     : ports.paused?.(cur) ? "paused by owner"
     : skipReason(cur, laterAsks(db, cur), now, pol.manualAfterMs);
   if (why) throw new ReminderAbort(why);
+  const act = ports.ownerActive?.(a.project, now);
+  if (act instanceof Promise) return void act.catch(() => {});
+  const inactive = inactiveReason(act ?? null);
+  if (inactive) throw new ReminderWait(inactive);
 }
 class ReminderAbort extends Error {}
+class ReminderWait extends Error {}
 
 /** 判定一条过期 ask 并（on 时）开再提示卡；不抛：库忙 / 复核失败都算 wait / skip，下一次扫描再看 */
 export async function remindOne(db: Database, a: Ask, ports: ReminderPorts, now: number): Promise<ReminderOutcome> {
@@ -117,10 +129,11 @@ export async function remindOne(db: Database, a: Ask, ports: ReminderPorts, now:
   const skip = skipReason(a, laterAsks(db, a), now, pol.manualAfterMs);
   if (skip) return { id: a.id, result: "skip", reason: skip };
   if (ports.paused?.(a)) return { id: a.id, result: "skip", reason: "paused by owner" };
-  const act = ports.ownerActive ? await ports.ownerActive(a.project, now) : null;
-  if (!act) return { id: a.id, result: "wait", reason: "no owner activity evidence" };
-  if (!act.active) return { id: a.id, result: "wait", reason: `owner not active (${act.evidence})` };
   if (!ports.askerLive || !(await ports.askerLive(a))) return { id: a.id, result: "wait", reason: "asker not known to be live" };
+  // owner 活跃放最后：从拿到证据到写锁内复核之间不再 await，别的查询期间 owner 走了不会拿旧证据开卡
+  const act = ports.ownerActive ? await ports.ownerActive(a.project, now) : null;
+  const inactive = inactiveReason(act);
+  if (inactive || !act) return { id: a.id, result: "wait", reason: inactive ?? "no owner activity evidence" };
   if (pol.mode === "observe") return { id: a.id, result: "observe", evidence: act.evidence };
   try {
     const r = openAskFull(db, reminderDraft(a, now), now, { beforeWrite: () => recheck(db, a, ports, now) });
@@ -128,6 +141,7 @@ export async function remindOne(db: Database, a: Ask, ports: ReminderPorts, now:
     return { id: a.id, result: "opened", reminder: r.ask, evidence: act.evidence };
   } catch (e) {
     if (e instanceof ReminderAbort) return { id: a.id, result: "skip", reason: e.message };
+    if (e instanceof ReminderWait) return { id: a.id, result: "wait", reason: e.message };
     return { id: a.id, result: "wait", reason: `write failed: ${(e as Error).message}` };
   }
 }
@@ -148,6 +162,21 @@ export async function sweepReminders(db: Database, ports: ReminderPorts, now = D
 /** 开出了但 SSE / 告诉发起方还没做完的再提示卡（仍 open 的；已答 / 已结的答复或结案通知已经走了，不再补） */
 export function pendingReminderNotices(db: Database): Ask[] {
   return listAsks(db, { states: ["open"], source: "reply" }).filter((a) => isReminder(a) && a.extra.remindNotice === "pending");
+}
+
+/**
+ * 待办通知现在能不能发（SSE / 推送 + 告诉发起方 owner 在线）：策略 on、owner 没暂停、owner 有活跃证据，跟开卡同一道闸；
+ * 返回不能发的理由，null = 放行。不抛（port 出错算不放行）。不放行时待办留着，满足了再补——卡本身已在 owner 收件箱里
+ */
+export async function noticeBlocker(r: Ask, ports: ReminderPorts, now = Date.now()): Promise<string | null> {
+  const pol = policyOf(ports.policy, r.project);
+  if (pol.mode !== "on") return `mode=${pol.mode}`;
+  try {
+    if (ports.paused?.(r)) return "paused by owner";
+    return inactiveReason(ports.ownerActive ? await ports.ownerActive(r.project, now) : null);
+  } catch (e) {
+    return `check failed: ${(e as Error).message}`;
+  }
 }
 
 /** 通知做完了：记 done，下次不重放（至少一次：记 done 前进程没了会再发一次通知，通知不是执行） */
