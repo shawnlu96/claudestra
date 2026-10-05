@@ -1,11 +1,13 @@
 /**
  * 回合失败卡的受众判定（lib/runtime-failure-audience.ts）在真实台账 / registry / 出借 journal 文件上：只认台账绑定、在途的调度单，且宿主帧报的
- * 会话 / 失败时刻证明失败属于这张单；退人工、已交、迟到的旧帧、出借 worker（没有 error 消费者）、读不出来（含 registry 损坏）都照原路推 owner。
+ * 会话 / 失败时刻证明失败属于这张单；出借 worker 只在出借服务认得这次失败（lend-turn-failure.ts，停单回执借入方）时 quiet。
+ * 退人工、已交、迟到的旧帧、出借服务认不了的失败、读不出来（含 registry 损坏）都照原路推 owner。
  * 监护恢复次数用完后仍由派活方接手。
  * 整条接线（onAcpFrame → ask → 推送 → 调度退人工）见 tests/runtime-failure-audience-wiring.test.ts。
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { failureCardQuiet, type BridgeView } from "../src/lib/agent-supervisor-bridge.js";
 import { recordSupervise } from "../src/lib/agent-supervisor-ledger.js";
@@ -34,7 +36,7 @@ async function atReview() {
   await f.tick();
   expect(await f.tick()).toMatchObject({ step: "sent" });
   const lend = join(f.dir, "lend.sqlite");
-  const view = audienceView({ registry: f.registryPath, ledger: join(f.dir, "ledger.sqlite") });
+  const view = audienceView({ registry: f.registryPath, ledger: join(f.dir, "ledger.sqlite"), lend });
   return { f, view, lend };
 }
 
@@ -64,16 +66,41 @@ test("归属证明不了：老宿主不报会话 / 时刻、别的会话、早�
   expect(failureAudience("ch-rv", NOW(), view).quiet).toBe(true);
 });
 
-test("出借 worker：出借服务不消费回合 error 卡，kind=worker + journal 在跑也不 quiet", async () => {
+test("出借 worker：出借服务认得这次失败（本单开跑后、会话对得上、之后没再开回合）才 quiet；认不了 / 读不出来照原路推并留诊断", async () => {
   const { f, view, lend } = await atReview();
   const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
   reg.agents["agent-lend-aa"] = { runtime: "codex", transport: "acp", sessionId: "s-l", channelId: "ch-l", kind: "worker" };
   writeFileSync(f.registryPath, JSON.stringify(reg));
   const j = openLendJournal(lend);
   cleanup.push(() => j.close());
-  j.query(`INSERT INTO lend_orders (orderId, peer, fp, family, state, preview, agent, sessionId, createdAt, updatedAt)
-    VALUES ('lend:o:s1:r0:a0', 'peer:A', NULL, 'codex', 'started', '{}', 'agent-lend-aa', 's-l', 1, 1)`).run();
-  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: Date.now() }, view)).toEqual({ quiet: false });
+  const started = Date.now() - 60_000;
+  j.query(`INSERT INTO lend_orders (orderId, peer, fp, family, state, preview, agent, sessionId, startedAt, createdAt, updatedAt)
+    VALUES ('lend:o:s1:r0:a0', 'peer:A', NULL, 'codex', 'started', '{}', 'agent-lend-aa', 's-l', ?, 1, 1)`).run(started);
+  const dir = mkdtempSync(join(tmpdir(), "rtf-rollout-"));
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  const rollout = join(dir, "r.jsonl");
+  const turnAt = (at: number) => writeFileSync(rollout, `${JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg", payload: { type: "task_started" } })}\n`);
+  const v = { ...view, sessionPath: (id: string) => (id === "s-l" ? rollout : null) };
+  turnAt(started + 10_000);
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started + 20_000 }, v)).toMatchObject({ quiet: true, who: "agent-lend-aa" });
+  // 失败之后又开过回合 / 早于本单开跑 / 找不到 rollout：出借服务不停单 → 照推，留诊断
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started + 5_000 }, v)).toMatchObject({ quiet: false, diag: expect.stringContaining("新回合") });
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started - 1 }, v)).toMatchObject({ quiet: false, diag: expect.stringContaining("开跑之前") });
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started + 20_000 }, { ...v, sessionPath: () => null })).toMatchObject({ quiet: false, diag: expect.stringContaining("rollout") });
+  // 老宿主不报 / 会话对不上 / journal 不在跑 / 名字像但 registry 不是 worker：照推
+  expect(failureAudience("ch-l", {}, v)).toEqual({ quiet: false });
+  expect(failureAudience("ch-l", { sessionId: "s-x", failedAt: started + 20_000 }, v)).toEqual({ quiet: false });
+  j.query("UPDATE lend_orders SET state = 'result_pending'").run();
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started + 20_000 }, v)).toEqual({ quiet: false });
+  j.query("UPDATE lend_orders SET state = 'started'").run();
+  delete reg.agents["agent-lend-aa"].kind;
+  writeFileSync(f.registryPath, JSON.stringify(reg));
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started + 20_000 }, v)).toEqual({ quiet: false });
+  reg.agents["agent-lend-aa"].kind = "worker";
+  writeFileSync(f.registryPath, JSON.stringify(reg));
+  // journal 读坏：不 quiet、留诊断
+  expect(failureAudience("ch-l", { sessionId: "s-l", failedAt: started + 20_000 }, { ...v, lendOrder: () => { throw new Error("journal locked"); } }))
+    .toMatchObject({ quiet: false, diag: expect.stringContaining("journal locked") });
 });
 
 test("读不出来：不 quiet、留诊断，接线照原路推 owner", async () => {
