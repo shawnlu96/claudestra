@@ -25,3 +25,10 @@ export function buildSidebarDirectory(list: AgentSession[], meta: Map<string, Pr
     historyCount: history.length,
   };
 }
+
+export type DirectoryScope = "active" | "history";
+/** Fold preferences per directory. */
+export const DIRECTORY_FOLD_KEYS: Record<DirectoryScope, { projects: string; teams: string }> = {
+  active: { projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed" },
+  history: { projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed" },
+};
