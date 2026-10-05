@@ -1,5 +1,5 @@
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
-import { fileScopeLedger, fileScopeRegistry } from "./ledger-resource-scope-cmds.js";
+import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
@@ -88,7 +88,6 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS, ...RECOVERY_CMDS,
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
-
 export function ledgerUsage(): string {
   return ["ledger <子命令>（全部支持 --project <id>；写命令支持 --dedup <key> 幂等）", ...Object.values(COMMANDS).map((s) => `  ledger ${s.usage}`)].join("\n");
 }
@@ -113,7 +112,10 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   }
 }
 
-/** Identity and read/write classification use the same rules as manager's ownership guard. */
+/**
+ * 真实依赖：registry、projects.json、环境里的频道号 → actor。认不出的频道只许读（actor 记 "unknown"，没有任何角色）；
+ * 读写的划分与 manager 的认主守卫同一张表（write-commands.ts），不另列一份。
+ */
 async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
   const fileScope = args[0] === "scheduler-file-scope", reg = fileScope ? fileScopeRegistry() : await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
@@ -147,15 +149,13 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
   };
 }
-
 export async function cmdLedger(args: string[]): Promise<void> {
-  const deps = await realDeps(args);
-  if ("error" in deps) return output({ ok: false, code: "forbidden", error: deps.error });
+  const deps = await withFileScopeErrors(args, () => realDeps(args));
+  if ("error" in deps) return output({ ok: false, code: "code" in deps ? deps.code : "forbidden", error: deps.error });
   const r = await runLedger(args, deps);
   output(r);
   if (r.ok === false) process.exitCode = 1;
 }
-
 /**
  * manager rename 的钩子：台账里的执行者 / PM / PM 名单跟着改名，否则改名后 roleOf 认不出人。
  * 台账库还没建（没用过台账）就什么都不做，免得 rename 顺手建出空库；同步失败只报 stderr，不让 rename 本身失败（registry 已改完）。

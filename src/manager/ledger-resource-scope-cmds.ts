@@ -39,3 +39,13 @@ export const FILE_SCOPE_COMMAND: CommandSpec = {
       reason: c.need("reason"), apply: c.p.bools.has("apply"), registryPath: c.deps.registryPath });
   },
 };
+
+/** Dependency failures precede runLedger's catch; preserve structured errors without changing other commands. */
+export async function withFileScopeErrors<T>(args: string[], resolve: () => Promise<T>): Promise<T | { error: string; code: string }> {
+  if (args[0] !== "scheduler-file-scope") return resolve();
+  try { return await resolve(); }
+  catch (error) {
+    process.exitCode = 1;
+    return { error: (error as Error).message, code: error instanceof LedgerError ? error.code : "invalid" };
+  }
+}

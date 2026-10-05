@@ -82,17 +82,23 @@ function writers(db: Database, task: LedgerTask, intents: SchedulerIntent[], eve
 }
 
 /** Replay only real dispatch plans and this operation's audits to detect lost claims, including after a full release. */
-function provenance(db: Database, task: LedgerTask, events: LedgerEvent[], intents: SchedulerIntent[], p: Plan): Map<string, string> {
+function provenance(db: Database, task: LedgerTask, events: LedgerEvent[], intents: SchedulerIntent[], p: Plan, own: Claim[]): Map<string, string> {
   let expected = new Map<string, string>();
-  let lastAnchor: string | undefined;
+  const planned = new Map<string, Set<string>>();
+  const historical = new Map<string, string>();
   for (const e of events) {
     if (e.kind === "scheduler" && e.data.op === "plan" && e.data.action === "dispatch") {
       const i = intents.find(i => i.id === e.data.id && i.eventSeq === e.seq && i.project === task.project && i.action === "dispatch");
       if (!i || !Array.isArray(e.data.resources)) { p.reasons.push("派单来源锚点损坏"); continue; }
-      lastAnchor = i.id;
+      planned.set(i.id, new Set());
       for (const r of e.data.resources) {
         if (typeof r !== "string" || resourceKey(r) !== r) { p.reasons.push("派单资源记录损坏"); continue; }
-        if (file(r) && !expected.has(r)) expected.set(r, i.id);
+        if (!file(r)) continue;
+        planned.get(i.id)!.add(r);
+        historical.set(r, i.id);
+        // planIntent retains an existing claim; only an actual acquisition carries the later intent and timestamp.
+        const acquired = own.some(c => c.resource === r && c.intentId === i.id && c.acquiredAt === i.createdAt);
+        if (!expected.has(r) || acquired) expected.set(r, i.id);
       }
     } else if (e.kind === "decision" && e.data.op === OP) {
       if (!actorMayConfigure(db, e.actor, task.project) || !Array.isArray(e.data.target) || !object(e.data.anchors)) {
@@ -101,15 +107,19 @@ function provenance(db: Database, task: LedgerTask, events: LedgerEvent[], inten
       const next = new Map<string, string>();
       for (const r of fileList(e.data.target)) {
         const anchor = e.data.anchors[r];
-        if (typeof anchor !== "string" || !intents.some(i => i.id === anchor && i.project === task.project && i.action === "dispatch")) {
+        if (typeof anchor !== "string" || !planned.get(anchor)?.has(r)) {
           p.reasons.push("对账来源锚点缺失");
         } else next.set(r, anchor);
       }
       expected = next;
     }
   }
-  if (!lastAnchor) p.reasons.push("缺真实 dispatch 来源锚点；禁止伪造旧 intent");
-  for (const r of p.target) if (expected.has(r) || lastAnchor) p.anchors[r] = expected.get(r) ?? lastAnchor!;
+  if (!planned.size) p.reasons.push("缺真实 dispatch 来源锚点；禁止伪造旧 intent");
+  for (const r of p.target) {
+    const anchor = expected.get(r) ?? historical.get(r);
+    if (anchor) p.anchors[r] = anchor;
+    else p.reasons.push(`文件缺真实 dispatch 来源：${r}`);
+  }
   return expected;
 }
 
@@ -130,7 +140,7 @@ function inspect(db: Database, task: LedgerTask, input: FileScopeInput): Plan {
     { orderId: string; project: string; status: string }[];
   for (const o of orders) if (o.project !== task.project || !["done", "cancelled", "released"].includes(o.status)) p.reasons.push(`出借单 ${o.orderId} 未结或状态不明`);
   writers(db, task, intents, events, input, p);
-  const expected = provenance(db, task, events, intents, p);
+  const expected = provenance(db, task, events, intents, p, own);
   for (const [resource, anchor] of expected) if (!own.some(r => r.resource === resource && r.intentId === anchor)) p.reasons.push(`失锁或来源被换：${resource}`);
   for (const r of own) if (r.project !== task.project || expected.get(r.resource) !== r.intentId) p.reasons.push(`文件锁缺匹配来源：${r.resource}`);
   for (const r of rows) {

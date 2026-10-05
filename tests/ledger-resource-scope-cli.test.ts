@@ -11,7 +11,7 @@ import { isWriteInvocation } from "../src/manager/write-commands.js";
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const f of cleanup.splice(0)) f(); });
-function cliFixture() {
+function cliFixture(ran = false) {
   const state = mkdtempSync(join(tmpdir(), "rlock-cli-")), path = join(state, "ledger.sqlite");
   const db = openLedger(path), owner = { actor: "owner", now: 500 };
   cleanup.push(() => { closeLedger(path); rmSync(state, { recursive: true, force: true }); });
@@ -24,8 +24,11 @@ function cliFixture() {
   setWorkflow(db, owner, { ...w, mode: "auto" });
   const causalSeq = (db.query("SELECT MAX(seq) AS seq FROM events").get() as { seq: number }).seq;
   planIntent(db, owner, { ...w, id: "claim", workflowRev: 1, causalSeq, node: "write", action: "dispatch", reason: "reserved",
-    resources: ["old.ts", "keep.ts", "slot:p:0"] });
-  settleIntent(db, owner, { id: "claim", from: "pending", to: "cancelled" });
+    recipient: ran ? "agent-w" : undefined, resources: ["old.ts", "keep.ts", "slot:p:0"] });
+  if (ran) {
+    settleIntent(db, owner, { id: "claim", from: "pending", to: "submitted" });
+    settleIntent(db, owner, { id: "claim", from: "submitted", to: "done" });
+  } else settleIntent(db, owner, { id: "claim", from: "pending", to: "cancelled" });
   setWorkflow(db, owner, { ...w, workflowRev: 1, mode: "manual", reason: "explicit pause" });
   setTask(db, owner, { id: "MQ", rev: 1, patch: { extra: { fileGlobs: ["keep.ts"] } } });
   const home = join(state, "home"); mkdirSync(home);
@@ -75,15 +78,15 @@ test("read classification, old schema and missing registry/database never initia
   const f = cliFixture();
   f.db.exec("PRAGMA user_version = 1");
   const before = f.snapshot();
-  for (const flags of [[], ["--dry-run"], ["--apply"]]) expect(await f.cli(flags)).toMatchObject({ ok: false });
+  for (const flags of [[], ["--dry-run"], ["--apply"]]) expect(await f.cli(flags)).toMatchObject({ ok: false, code: "conflict" });
   expect(f.db.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
   expect(f.snapshot()).toEqual(before);
   rmSync(join(f.state, "registry.json"));
-  expect(await f.cli()).toMatchObject({ ok: false });
+  expect(await f.cli()).toMatchObject({ ok: false, code: "conflict" });
   expect(existsSync(join(f.state, "registry.json"))).toBe(false);
   writeFileSync(join(f.state, "registry.json"), '{"agents":{"agent-pm":{"channelId":"111","projectId":"p"}}}');
   closeLedger(f.path); rmSync(f.path);
-  expect(await f.cli()).toMatchObject({ ok: false });
+  expect(await f.cli()).toMatchObject({ ok: false, code: "not_found" });
   expect(existsSync(f.path)).toBe(false);
 });
 
@@ -148,5 +151,28 @@ test.each(["local", "peer", "peer-step", "registry-io", "conflict"])("real CLI %
   }
   const before = f.snapshot();
   expect(await f.cli(["--apply"])).toMatchObject({ ok: false });
+  expect(f.snapshot()).toEqual(before);
+});
+
+test("real CLI refuses a dispatched paused author with no formal retirement, even with empty registry", async () => {
+  const f = cliFixture(true), before = f.snapshot();
+  expect(await f.cli()).toMatchObject({ ok: true, executable: false, reasons: ["旧作者绑定 agent-w 缺正式退役依据"] });
+  expect(await f.cli(["--apply"])).toMatchObject({ ok: false, code: "conflict" });
+  expect(f.snapshot()).toEqual(before);
+});
+
+test.each(["{", "[]"])("real CLI corrupt registry %s reports structured conflict", async raw => {
+  const f = cliFixture(), before = f.snapshot();
+  writeFileSync(join(f.state, "registry.json"), raw);
+  expect(await f.cli()).toMatchObject({ ok: false, code: "conflict" });
+  expect(f.snapshot()).toEqual(before);
+});
+
+test("real CLI refuses a registered file never planned by a dispatch", async () => {
+  const f = cliFixture();
+  setTask(f.db, { actor: "owner" }, { id: "MQ", rev: 2, patch: { extra: { fileGlobs: ["new.ts"] } } });
+  const before = f.snapshot();
+  expect(await f.cli(["--rev", "3"])).toMatchObject({ ok: true, executable: false, reasons: ["文件缺真实 dispatch 来源：new.ts"] });
+  expect(await f.cli(["--rev", "3", "--apply"])).toMatchObject({ ok: false, code: "conflict" });
   expect(f.snapshot()).toEqual(before);
 });

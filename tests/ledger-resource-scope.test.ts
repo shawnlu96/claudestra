@@ -8,11 +8,11 @@ import { createTask, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
-import { beginRetire, recordSessionRetirement } from "../src/lib/scheduler-sessions.js";
+import { beginRetire } from "../src/lib/scheduler-sessions.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const f of cleanups.splice(0)) f(); });
-function fixture() {
+function fixture(ran = false) {
   const dir = mkdtempSync(join(tmpdir(), "rlock-unit-")), path = join(dir, "ledger.sqlite"), registryPath = join(dir, "registry.json");
   const db = openLedger(path), ctx = { actor: "owner", now: 100 };
   cleanups.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
@@ -24,8 +24,11 @@ function fixture() {
   configure("auto", 0);
   const seq = (db.query("SELECT MAX(seq) AS n FROM events").get() as { n: number }).n;
   planIntent(db, ctx, { id: "real-plan", taskId: "T", taskRev: 1, workflowRev: 1, causalSeq: seq, action: "dispatch", node: "write", reason: "claim",
-    resources: ["a.ts", "b.ts", "c.ts", "slot:p:0", "merge:p", "deploy:p", "task:t"] });
-  settleIntent(db, ctx, { id: "real-plan", from: "pending", to: "cancelled" });
+    recipient: ran ? "agent-w" : undefined, resources: ["a.ts", "b.ts", "c.ts", "slot:p:0", "merge:p", "deploy:p", "task:t"] });
+  if (ran) {
+    settleIntent(db, ctx, { id: "real-plan", from: "pending", to: "submitted" });
+    settleIntent(db, ctx, { id: "real-plan", from: "submitted", to: "done" });
+  } else settleIntent(db, ctx, { id: "real-plan", from: "pending", to: "cancelled" });
   configure("manual", 1);
   const scope = (files: string[]) => setTask(db, ctx, { id: "T", rev: getTask(db, "T")!.rev, patch: { extra: { fileGlobs: files } } });
   const input = () => ({ taskId: "T", project: "p", taskRev: getTask(db, "T")!.rev, workflowRev: 2, reason: "PM approved scope", registryPath });
@@ -128,26 +131,14 @@ test.each(["agent", "peer"])("%s step author without a scheduler session is stil
   expect(f.snapshot()).toEqual(before);
 });
 
-test("formal archived and killed session can remain bound; registry resurrection still blocks", () => {
-  const f = fixture(); f.scope([]);
-  f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
-    VALUES ('T', 'author', 'agent-old', 'retired-session', 'claude', 'tmux', 'active', 'real-plan', 1, 2)`).run();
-  // Synthetic reopened history: generate retirement receipts through the real APIs, then return to the paused fixture.
-  f.db.query("UPDATE tasks SET stage = 'done', agent = 'agent-old', assigneeKind = 'agent', assignee = 'agent-old' WHERE id = 'T'").run();
-  const { intent } = beginRetire(f.db, f.ctx, "T");
-  for (const effect of ["archive", "kill"] as const) recordSessionRetirement(f.db, f.ctx, {
-    taskId: "T", role: "author", intentId: intent.id, effect, receipt: `verified ${effect}`,
-  });
-  settleIntent(f.db, f.ctx, { id: intent.id, from: "submitted", to: "done" });
-  f.db.query("UPDATE tasks SET stage = 'spec' WHERE id = 'T'").run();
-  // Terminal settlement released the old claims: restore the fixture's original acquisition, not a new intent.
-  for (const resource of ["a.ts", "b.ts", "c.ts"]) f.db.query(`INSERT INTO scheduler_resources
-    (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', ?, 'T', 'real-plan', 100, 'card')`).run(resource);
-  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: true });
-  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-old": { status: "active", sessionId: "retired-session" } } }));
-  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
-  writeFileSync(f.registryPath, '{"agents":{}}');
-  expect(reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toMatchObject({ ok: true, remove: ["a.ts", "b.ts", "c.ts"] });
+test("a dispatched paused author has no legal retirement path: preserve locks pending PM resolution", () => {
+  const f = fixture(true); f.scope([]);
+  const before = f.snapshot();
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false,
+    reasons: ["旧作者绑定 agent-w 缺正式退役依据"] });
+  expect(() => beginRetire(f.db, f.ctx, "T")).toThrow(/没收尾/);
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/正式退役/);
+  expect(f.snapshot()).toEqual(before);
 });
 
 test("lost claims cannot be silently reconstructed; a foreign overlapping claim blocks even release", () => {
@@ -164,9 +155,11 @@ test("lost claims cannot be silently reconstructed; a foreign overlapping claim 
 });
 
 test.each(["delete", "insert", "audit"])("%s fault rolls back deletions, insertions and audit together", fault => {
-  const f = fixture(); f.scope(["new.ts"]);
+  const f = fixture(); f.scope(["a.ts"]);
+  reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true });
+  f.scope(["b.ts"]);
   const table = fault === "audit" ? "events" : "scheduler_resources";
-  const trigger = fault === "delete" ? `DELETE ON ${table} WHEN OLD.resource = 'b.ts'` : `INSERT ON ${table}`;
+  const trigger = fault === "delete" ? `DELETE ON ${table} WHEN OLD.resource = 'a.ts'` : `INSERT ON ${table}`;
   f.db.exec(`CREATE TRIGGER fail_scope BEFORE ${trigger} BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
   const before = f.snapshot();
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/injected failure/);
@@ -212,4 +205,38 @@ test("missing provenance, existing overlaps, new overlaps and same-card intent l
   f.db.query("DELETE FROM scheduler_resources WHERE taskId = 'U'").run();
   f.db.query("UPDATE scheduler_intents SET eventSeq = 0").run();
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/锚点/);
+});
+
+test("a newly approved file must not borrow an unrelated dispatch anchor", () => {
+  const f = fixture(); f.scope(["new.ts"]);
+  const before = f.snapshot();
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false, add: ["new.ts"] });
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/来源/);
+  expect(f.snapshot()).toEqual(before);
+});
+
+test.each([false, true])("later dispatch preserves held anchors or records actual reacquisition: released=%j", released => {
+  const f = fixture();
+  // Model a prior release; planIntent itself must acquire the replacement, never hand-insert a claim.
+  if (released) f.db.query("DELETE FROM scheduler_resources WHERE scope = 'card'").run();
+  setWorkflow(f.db, f.ctx, { taskId: "T", taskRev: 1, workflowRev: 2, template: "code", templateVersion: 2,
+    mode: "auto", authorFamily: "claude", fallback: "wait", reason: "resume" });
+  const causalSeq = (f.db.query("SELECT MAX(seq) AS n FROM events").get() as { n: number }).n;
+  planIntent(f.db, { ...f.ctx, now: 200 }, { id: "reacquire", taskId: "T", taskRev: 1, workflowRev: 3, causalSeq,
+    action: "dispatch", node: "write", reason: "new acquisition", resources: ["a.ts", "b.ts", "c.ts"] });
+  settleIntent(f.db, f.ctx, { id: "reacquire", from: "pending", to: "cancelled" });
+  setWorkflow(f.db, f.ctx, { taskId: "T", taskRev: 1, workflowRev: 3, template: "code", templateVersion: 2,
+    mode: "manual", authorFamily: "claude", fallback: "wait", reason: "pause again" });
+  f.scope(["a.ts"]);
+  const input = { ...f.input(), workflowRev: 4 };
+  if (released) {
+    f.db.query("UPDATE scheduler_resources SET acquiredAt = 201 WHERE resource = 'a.ts'").run();
+    const before = f.snapshot();
+    expect(() => reconcileFileScope(f.db, f.ctx, { ...input, apply: true })).toThrow(/来源/);
+    expect(f.snapshot()).toEqual(before);
+    f.db.query("UPDATE scheduler_resources SET acquiredAt = 200 WHERE resource = 'a.ts'").run();
+  }
+  expect(reconcileFileScope(f.db, f.ctx, input)).toMatchObject({ executable: true,
+    anchors: { "a.ts": released ? "reacquire" : "real-plan" } });
+  expect(reconcileFileScope(f.db, f.ctx, { ...input, apply: true })).toMatchObject({ ok: true });
 });

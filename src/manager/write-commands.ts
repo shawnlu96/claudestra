@@ -93,7 +93,6 @@ export function needsWriteLock(cmd: string | undefined, args: readonly string[])
   if (cmd === "migrate") return false; // ACP 迁移也短锁改 registry，放锁后子进程逐个 restart
   return isWriteInvocation(cmd, args);
 }
-
 /** 这次调用会不会改状态（→ 认主守卫 + 命令级写锁） */
 export function isWriteInvocation(cmd: string | undefined, args: readonly string[]): boolean {
   if (!cmd) return false;
@@ -106,6 +105,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
   if (cmd === "ledger" && sub === "scheduler-file-scope") return args.includes("--apply");
+  // 巡检默认把结果写进 audit_findings；feature-migrate 不带 --dry-run 就是正式迁移
   if (cmd === "ledger" && DRY_RUN_READS.has(sub)) return !args.includes("--dry-run");
   if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir|team|dispatcher)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
