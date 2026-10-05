@@ -10,7 +10,6 @@ import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.j
  * deliver（统一投递）、镜像 / typing / 完成通知抑制、SSE 处理器。
  * 其余依赖（manager 调用、principals、session-history……）都是无状态模块，直接 import。
  */
-
 import { sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
@@ -49,8 +48,6 @@ import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from ".
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
 import { inboundFor } from "./inbound-event.js";
-import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
-import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
@@ -72,20 +69,18 @@ import {
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
 import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
-import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
 import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
-import { sessionTailInfo, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
-import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
-import { ctxBoundaryViewFor } from "./ctx-boundary.js";
+import { handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { handleAgentsList } from "./agents-list-route.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { lendScopeAllows } from "./lend-scope.js";
@@ -100,9 +95,7 @@ import { peerE2eRoute } from "./peer-e2e-route.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { revocable } from "./credential-revocation.js";
-import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
-import { displayModelEffort } from "../lib/display-model.js";
-import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
+import { rememberSwitchOverride } from "./switch-override.js";
 import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
@@ -317,173 +310,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (dev) return dev;
   const path = url.pathname.slice("/api/v1".length);
 
-  // GET /api/v1/agents —— scope 内的 agent 快照
-  if (path === "/agents" && req.method === "GET") {
-    try {
-      const listResult = await runManager("list");
-      const extras = await agentListExtras(principal); // external / 显示名 / 已归档 / 共享数（bridge/agent-info-routes.ts）
-      const agents = ((listResult.agents || []) as any[])
-        .filter((a) => agentInScope(principal, a.name))
-        .map((a) => ({
-          name: a.name,
-          status: a.status,
-          idle: a.idle,
-          purpose: a.purpose, cwd: principal.peer ? undefined : a.cwd, // cwd 给 web「在 Finder 中显示」用；peer 拿不到我方本机路径
-          created: a.created,
-        }));
-      // busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
-      // thinking 同源——manager list 的 tmux idle 探测在回合中也常报 idle，
-      // 不可靠，只作 OR 兜底）。web 列表的黄色状态点数据源。
-      // 第三信号(2026-07-16「两个 working 只有点进去过的才黄」):event-bus 状态
-      // 随 bridge 重启清零且回合中途不再有新事件——重启后正在跑的 agent 状态
-      // undefined、idle 探测又误报空闲 → 黄标失灵。对这类状态不明的 active
-      // agent 补一发 pane spinner 探测(与 deliverToLocal 抢占判据同款三信号)。
-      await Promise.all(
-        (agents as any[]).map(async (a) => {
-          const st = getAgentStatus(a.name) ?? getAgentStatus(String(a.name).replace(/^agent-/, ""));
-          a.busy = isBusyStatus(st) || a.idle === false;
-          // v2.23+ 已归档标记（真正的列表构建器在这里 —— 上面那个 map 不是生效路径，
-          // 2026-09-14 我改错过一次）：归档区里有它的目录 ⇒ 网页把它从工作列表隐藏。
-          try {
-            const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-            const { existsSync: ex } = await import("node:fs");
-            (a as any).archived = ex(`${USER_ARCHIVE_ROOT}/${String(a.name).replace(/^agent-/, "")}`);
-          } catch {
-            /* 归档区读不到就当作未归档 */
-          }
-          // v2.21.2+ 正在压缩上下文(侧栏/列表可区分于普通忙碌)
-          a.compacting = st === "compacting";
-          if (!a.busy && st === undefined && a.status !== "stopped") {
-            try {
-              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"])).split("\n").slice(-10).join("\n");
-              if (paneLooksWorking(tail)) a.busy = true;
-            } catch {
-              /* 窗口不存在等,保持不忙 */
-            }
-          }
-        })
-      );
-      // lastActivityTs：agent 最后一条真实对话的时间（不是 mtime——见
-      // sessionTailInfo 注释）。contextTokens:当前上下文占用(web 端超标提示)。
-      {
-        const { readRegistryAgents } = await import("../lib/registry.js");
-        const regs = await readRegistryAgents();
-        const regByName = new Map(regs.map((r) => [r.name, r]));
-        const bySessions = new Map<string, SessionTailInfo>();
-        for (const r of regs) {
-          if (!r.cwd || !r.sessionId) continue;
-          // 按运行时找会话文件（Pi 在 ~/.pi/agent/sessions/；Codex 的 rollout 路径推不出来、按 id 找，有缓存）
-          const path = sessionJsonlPath(r.runtime, r.cwd, r.sessionId) ?? (r.runtime === "codex" ? findSessionJsonlBySessionId(r.runtime, r.sessionId) : null);
-          if (!path) continue;
-          const info = await sessionTailInfo(path);
-          if (info) bySessions.set(r.name, info);
-        }
-        // model/effort 兜底链末端:全局默认(settings.json)
-        let gModel: string | null = null;
-        let gEffort: string | null = null;
-        try {
-          const s = JSON.parse(await Bun.file(`${process.env.HOME}/.claude/settings.json`).text());
-          if (typeof s.model === "string") gModel = s.model;
-          if (typeof s.effortLevel === "string") gEffort = s.effortLevel;
-        } catch { /* 无全局默认 */ }
-        for (const a of agents) {
-          const info = bySessions.get(a.name);
-          const r = regByName.get(a.name);
-          (a as any).lastActivityTs = info?.convTs ?? null;
-          (a as any).contextTokens = info?.ctxTokens ?? null;
-          (a as any).ctxBoundary = r ? ctxBoundaryViewFor(r, info?.ctxTokens ?? null) : null; // 命中的上下文边界 + 余量（bridge/ctx-boundary.ts）
-          // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
-          (a as any).projectId = r?.projectId ?? null;
-          Object.assign(a, { ...extras(a.name, r), archived: (a as any).archived }); // archived 以上面 Promise.all 那段为准（生效路径）
-          // 运行时徽章 + 顶栏挂哪种切换器的数据源：如实透传（未知/缺失 = claude-code），只认 pi 的话 Codex 会拿到 CC 面板
-          (a as any).runtime = sourceFor(r?.runtime).id;
-          // 当前模型 / 档位的兜底链按运行时分叉（lib/display-model.ts）；Codex 的窗口随会话记录走（258K 之类）
-          (a as any).contextWindow = info?.ctxWindow ?? null;
-          Object.assign(a as any, displayModelEffort({
-            runtime: (a as any).runtime,
-            override: pickSwitchOverride(a.name, info),
-            tail: info,
-            reg: r,
-            claudeGlobal: { model: gModel, effort: gEffort },
-            piSnapThinking: r?.runtime === "pi" ? (readPiRuntimeSnapshot(a.name)?.thinking ?? null) : null,
-            codex: r?.runtime === "codex" ? { catalog: cachedCodexCatalog(), config: readCodexConfigDefaults() } : undefined,
-            resolveAlias: resolveModelAlias,
-          }));
-        }
-        // 「该重启/该 pi update」提示：不给 peer（不向别的实例透露本机确切版本）；出任何错都只少个提示，不能让整张列表 500
-        if (!principal.peer) await import("../lib/update-hints.js").then((m) => m.attachUpdateHints(agents as any[], regByName))
-          .catch((e) => console.warn("⚠️ [api] 更新提示附加失败（列表照常返回）:", e));
-      }
-      // ?include=stopped：registry 里已停止的 agent 也入列（additive；
-      // web 侧栏保留 stopped 会话入口，其历史经归档仍可读——正是归档的意义）。
-      if (url.searchParams.get("include") === "stopped") {
-        const { readRegistryAgents } = await import("../lib/registry.js");
-        const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
-        const listed = new Set(agents.map((a) => a.name));
-        for (const r of await readRegistryAgents()) {
-          if (listed.has(r.name) || !agentInScope(principal, r.name)) continue;
-          let ts: number | null = null;
-          if (r.cwd && r.sessionId) {
-            ts = (await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId)))?.convTs ?? null;
-          }
-          // ⚠ 已停止的 agent 走这条**独立路径**进来（不在 manager list 里），
-          // 归档标记必须在这也带一份 —— 上一版只在上面的 .map() 里加了，结果灰点的
-          // 归档 agent 照样留在列表里（owner「被归档，但是还是在列表里」，2026-09-14）。
-          agents.push({
-            name: r.name,
-            status: "stopped",
-            idle: undefined,
-            purpose: r.purpose,
-            lastActivityTs: ts,
-            created: (r as any).created,
-            projectId: r.projectId ?? null,
-            runtime: sourceFor(r.runtime).id,
-            ...extras(r.name, r),
-          } as any);
-        }
-      }
-      // master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
-      // web 前端的「大总管」置顶入口靠它。
-      if (CONTROL_CHANNEL_ID && agentInScope(principal, "master")) {
-        // master 的 model/effort:probe 其 cwd 最新 jsonl(master 不在 registry)
-        let mInfo: SessionTailInfo | null = null;
-        try {
-          const mCwd = deps.clients.get(CONTROL_CHANNEL_ID)?.cwd || MASTER_DIR;
-          const mSid = latestSessionIdForCwd(mCwd);
-          if (mCwd && mSid) {
-            const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
-            mInfo = await sessionTailInfo(projectJsonlPath(mCwd, mSid));
-          }
-        } catch { /* master 会话 probe 失败不影响列表 */ }
-        // master 不在 registry:jsonl 实测之外只剩全局默认这级兜底
-        let mgModel: string | null = null;
-        let mgEffort: string | null = null;
-        try {
-          const s = JSON.parse(await Bun.file(`${process.env.HOME}/.claude/settings.json`).text());
-          if (typeof s.model === "string") mgModel = s.model;
-          if (typeof s.effortLevel === "string") mgEffort = s.effortLevel;
-        } catch { /* 无全局默认 */ }
-        const mShown = displayModelEffort({
-          runtime: "claude-code", override: pickSwitchOverride("master", mInfo), tail: mInfo, reg: undefined,
-          claudeGlobal: { model: mgModel, effort: mgEffort }, resolveAlias: resolveModelAlias,
-        });
-        agents.unshift({
-          name: "master",
-          status: deps.clients.has(CONTROL_CHANNEL_ID) ? "active" : "stopped",
-          idle: undefined,
-          purpose: "master orchestrator (大总管)",
-          busy: isBusyStatus(getAgentStatus("master")),
-          compacting: getAgentStatus("master") === "compacting",
-          runtime: "claude-code",
-          contextTokens: mInfo?.ctxTokens ?? null,
-          ...mShown, ...extras("master"), // 附加字段（Autopilot 等，agent-info-routes.ts）；master 不在 registry，external / 显示名恒为空
-        } as any);
-      }
-      return apiJson(200, { ok: true, agents });
-    } catch (e) {
-      return apiJson(500, { ok: false, error: (e as Error).message });
-    }
-  }
+  // GET /api/v1/agents —— scope 内的 agent 快照（热点逻辑在 bridge/agents-list-route.ts：先 scope 后尾读、已停 worker 不读尾、有界并发 + 短缓存）
+  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。

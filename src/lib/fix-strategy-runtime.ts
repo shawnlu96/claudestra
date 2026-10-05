@@ -10,7 +10,7 @@ import { statePath } from "./paths.js";
 import { runBounded } from "./run-bounded.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { bindFixReplacement, getSchedulerSession } from "./scheduler-sessions.js";
-import { currentReviewFacts } from "./scheduler-review.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview } from "./review-converge.js";
 import { fixHistory, fixStrategy, FIX_STRATEGY_RULE, DISPUTE_RULE } from "./fix-strategy.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
@@ -24,7 +24,7 @@ export { zeroSlotLifecycle } from "./fix-strategy-remote-context.js";
 async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent, source: string, deps: ConvergenceLifecycle) {
   const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id)!;
   const events = listEvents(db, { project: task.project, target: task.id });
-  const read = currentReviewFacts(task, events);
+  const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts") throw new LedgerError("conflict", "修复缺结构化审查报告");
   const configured = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
   const firstRound = events.find((e) => e.kind === "review" && e.seq > configured)?.data.round;

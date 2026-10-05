@@ -9,7 +9,9 @@ import { deliveredHead } from "./scheduler-review-rebase.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
-export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string; basis?: FindingBasis; pitfall?: true }
+export interface ReviewFinding { findingId: string; family: string; severity: FindingSeverity; probe: string; basis?: FindingBasis; pitfall?: true;
+  /** The reviewer's own description as the MCP verdict carried it (dispatch-recovery-MATW); older records and CLI rows have none. */
+  description?: string }
 export interface ReviewFacts {
   eventSeq: number;
   round: number;

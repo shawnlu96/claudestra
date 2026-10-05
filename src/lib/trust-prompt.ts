@@ -7,16 +7,14 @@
  * 默认高亮 **No, exit**——Enter 就退出。编排器起的 agent 目录都是 owner 指定或出借流程自建的，本来就跑 bypassPermissions，
  * 自动信任与现有安全模型一致。单测 tests/trust-prompt.test.ts（生产抓屏）、tests/modal-parser.test.ts。
  */
-import { trimTrailingBlank } from "./tmux-helper.js";
-
-const tailOf = (pane: string, n: number) => trimTrailingBlank(pane.split("\n")).slice(-n);
+import { paneTail } from "./pane-tail.js";
 
 /**
  * 画面上有信任框的痕迹——半帧、CC 选了 No 退出后留在 shell 上方的残留都算：通用自动 Enter（isAutoConfirmableModal）一律不碰。
  * 看最后 30 行 = parseModalOptions / parseChoicePrompt 两个窗口的并集，它们能认出选项时这里一定也看得到。
  */
 export function looksLikeTrustPrompt(pane: string): boolean {
-  return tailOf(pane, 30).some((l) => /Quick safety check|trust this folder/i.test(l));
+  return paneTail(pane, 30).some((l) => /Quick safety check|trust this folder/i.test(l));
 }
 
 /**
@@ -25,7 +23,7 @@ export function looksLikeTrustPrompt(pane: string): boolean {
  * （2026-10-02 出借 worker 实抓：直到 ❯ 行滚出 25 行窗口才停，连按约 20 次）。
  */
 export function trustPromptMoves(pane: string): number | null {
-  const tail = tailOf(pane, 25);
+  const tail = paneTail(pane, 25);
   if (!/trust this folder/i.test(tail.join("\n")) || !/Enter to confirm/i.test(tail.at(-1) ?? "")) return null;
   const opts: Array<{ yes: boolean; selected: boolean }> = [];
   for (const raw of tail) {

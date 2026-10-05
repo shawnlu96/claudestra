@@ -77,7 +77,9 @@ describe("正常路径", () => {
       reviewerSessionId: "sess-agent-y", reviewerFamily: "codex", orderId: "T50:review:r1", sameFamily: false, via: "mcp",
       author: "agent-x", authorCheck: true,
     });
-    expect(e!.data.findings).toEqual([{ findingId: "F1", family: "gate", severity: "P1", probe: "复现 F1" }, { findingId: "F2", family: "gate", severity: "P2", probe: "复现 F2" }]);
+    // description 是审查方原文（dispatch-recovery-MATW），修复材料只认它
+    expect(e!.data.findings).toEqual([{ findingId: "F1", family: "gate", severity: "P1", probe: "复现 F1", description: "说明 F1" },
+      { findingId: "F2", family: "gate", severity: "P2", probe: "复现 F2", description: "说明 F2" }]);
     expect(getTask(db, "T50")!.stage).toBe("review");
     expect(listSteps(db, "T50").find((s) => s.step === "review")!.verdict).toBe("changes");
   });

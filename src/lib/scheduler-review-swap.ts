@@ -25,15 +25,48 @@ function independentReviewer(s: PlannerSnapshot): boolean {
     r.agent !== s.author?.agent && r.agent !== s.task.agent && (s.workflow?.template !== "security" || r.source === "local");
 }
 
-type SwapSnapshot = Pick<PlannerSnapshot, "task" | "workflow" | "events" | "reviewer"> & { author: { agent: string } | null };
+type SwapSnapshot = Pick<PlannerSnapshot, "task" | "workflow" | "events" | "reviewer" | "remoteAuthorFamily"> & {
+  author: { agent: string; family: string } | null;
+};
+
+/** Only acknowledged, unbound manual history may precede an automatic bind without establishing session continuity. */
+export function reviewerHistory(s: Pick<PlannerSnapshot, "events" | "reviewer">): LedgerEvent[] {
+  const r = s.reviewer;
+  const bind = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "session_bind" && e.data.role === "reviewer" &&
+    e.data.agent === r?.agent && e.data.sessionId === r?.sessionId && e.data.family === r?.family);
+  return reviewsAfterSwap(s.events).filter((e) => {
+    if (String(e.data.reviewer ?? "").startsWith("peer:")) return false;
+    if (!bind || e.seq > bind.seq) return true;
+    if (bind.data.manual === true) return false;
+    const workflow = s.events.findLast((w) => w.seq < e.seq && w.kind === "scheduler" && ["workflow", "workflow_resume"].includes(String(w.data.op)));
+    const acknowledged = s.events.some((w) => w.seq > e.seq && w.seq < bind.seq && w.kind === "scheduler" &&
+      w.data.op === "workflow_resume" && w.data.manual === true);
+    const bound = s.events.some((w) => w.seq < e.seq && w.kind === "scheduler" && w.data.op === "session_bind" && w.data.role === "reviewer");
+    return workflow?.data.mode !== "manual" || !acknowledged || bound;
+  });
+}
+
+const remoteDelivery = (events: readonly LedgerEvent[]): boolean =>
+  !!events.findLast((e) => e.kind === "deliver" && typeof e.data.headSHA === "string")?.dedupKey?.match(/^lend-(deliver|takeover-deliver):/);
+
+function newAuthorDelivery(s: SwapSnapshot): boolean {
+  const deliveries = s.events.filter((e) => e.kind === "deliver" && typeof e.data.headSHA === "string");
+  const delivered = deliveries.at(-1), previous = deliveries.at(-2);
+  if (!delivered || !previous || delivered.data.headSHA !== s.task.headSHA || previous.data.headSHA === s.task.headSHA ||
+    !/^[a-f0-9]{40}$/i.test(s.task.headSHA ?? "")) return false;
+  const reviewStage = s.events.findLast((e) => e.kind === "stage" && e.data.to === "review");
+  if (!reviewStage || reviewStage.data.round !== s.task.round || reviewStage.data.specRev !== s.task.specRev || previous.seq >= reviewStage.seq) return false;
+  if (remoteDelivery(s.events)) return !!s.remoteAuthorFamily && s.remoteAuthorFamily === s.workflow?.authorFamily;
+  return delivered.actor === s.author?.agent && s.author.family === s.workflow?.authorFamily && delivered.data.round === s.task.round;
+}
 
 function swapNeeded(s: SwapSnapshot): boolean {
   const r = s.reviewer;
   if (!r || r.source !== "local" || r.taskId !== s.task.id || !r.agent || !r.sessionId || s.task.round < 2) return false;
-  const prior = reviewsAfterSwap(s.events).find((e) => !String(e.data.reviewer ?? "").startsWith("peer:"));
+  const prior = reviewerHistory(s)[0];
   // A different, unapproved session is still reviewer_replaced, not permission to start another epoch.
   if (prior && (prior.data.reviewer !== r.agent || prior.data.reviewerSessionId !== r.sessionId)) return false;
-  return r.family === s.workflow?.authorFamily || (r.agent === s.author?.agent || r.agent === s.task.agent);
+  return newAuthorDelivery(s) && (r.family === s.workflow?.authorFamily || r.agent === s.author?.agent || r.agent === s.task.agent);
 }
 
 /** Keep invalid legacy bindings on sessionGate's existing error path; only a swap may release a bound reviewer to the pool. */
@@ -42,7 +75,12 @@ export const keepsReviewer = (s: PlannerSnapshot): boolean => !!s.reviewer && (i
 /** Runs before placement and again at sessionGate: retiring the old session must precede any peer/local dispatch. */
 export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof reviewPlacement): PlannerDecision | null {
   const swap = latestReviewerSwap(s.events);
-  if (swapNeeded(s)) {
+  const missingFamily = remoteDelivery(s.events) && !s.remoteAuthorFamily;
+  if (missingFamily || swapNeeded(s)) {
+    // A model safety refusal outranks the family switch: swapping in would fetch the refused content from another model.
+    const hold = openRefusal(s.events);
+    if (hold) return { kind: "escalate", code: "model_safety_hold", reason: `本卡有未处置的模型安全拒绝（#${hold.seq}），不自动换家族审查，等 PM / owner 处置或批准的接续审查完成` };
+    if (missingFamily) return { kind: "wait", code: "author_family_evidence", reason: "远端交付缺已完成写单的家族证据，等待对账后重算" };
     if (swap?.data.round === s.task.round) return { kind: "escalate", code: "reviewer_independence", reason: "本轮已换过审查员，新会话仍与当前作者不独立" };
     const born = s.events.find((e) => e.kind === "task")?.seq ?? 0;
     return { kind: "intent", id: `review-swap:s${born}:r${s.task.round}`, node, action: "review_swap", recipient: null,
@@ -59,6 +97,24 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
   if (s.pool?.remote.agents) return null;
   return (s.pool?.localReviewers ?? 0) >= s.maxWorkers
     ? { kind: "wait", code: "reviewer_capacity", reason: "另一家族的 peer 无可用审查槽，本机审查名额也已满，等待空位后自动续派" } : null;
+}
+
+export const HOLD_OP = "model_safety_hold", RESOLVE_OP = "model_safety_resolved";
+export const RETRY_OP = "model_refusal_retry", EXEMPT_OP = "model_refusal_exempt";
+
+/** A hold, or an approved refusal continuation still waiting for its review: either way no automatic family switch. */
+export function openRefusal(events: readonly LedgerEvent[]): LedgerEvent | null {
+  const hold = openSafetyHold(events);
+  if (hold) return hold;
+  const cont = events.findLast((e) => e.data.op === RETRY_OP || e.data.op === EXEMPT_OP);
+  return cont && !events.some((e) => e.seq > cont.seq && e.kind === "review") ? cont : null;
+}
+
+/** The task's unresolved model safety hold (scheduler-model-outcome.ts writes it), or null. Only a manager's resolve lifts it. */
+export function openSafetyHold(events: readonly LedgerEvent[]): LedgerEvent | null {
+  const hold = events.findLast((e) => e.data.op === HOLD_OP);
+  if (!hold) return null;
+  return events.some((e) => e.seq > hold.seq && e.data.op === RESOLVE_OP && e.data.holdSeq === hold.seq) ? null : hold;
 }
 
 const swapKey = (id: string): string => `scheduler:${id}:reviewer-swap`;
@@ -83,19 +139,24 @@ export function applyReviewerSwap(db: Database, ctx: WriteCtx, id: string, row: 
     throw new LedgerError("conflict", "换人计划已过期，先重算");
   }
   const events = listEvents(db, { project: task.project, target: task.id });
-  const family = remoteHeadFamily(db, task) ?? workflow.authorFamily;
-  const author = db.query("SELECT agent FROM scheduler_sessions WHERE taskId = ? AND role = 'author' AND state != 'retired'")
-    .get(task.id) as { agent: string } | null;
-  const s: SwapSnapshot = { task, workflow: { ...workflow, authorFamily: family }, events, author,
+  const remoteFamily = remoteHeadFamily(db, task), family = remoteFamily ?? workflow.authorFamily;
+  const delivery = events.findLast((e) => e.kind === "deliver" && typeof e.data.headSHA === "string");
+  if (remoteDelivery(events) && !remoteFamily) {
+    throw new LedgerError("conflict", "远端交付缺已完成写单的家族证据");
+  }
+  const author = db.query("SELECT agent, family FROM scheduler_sessions WHERE taskId = ? AND role = 'author' AND state != 'retired'")
+    .get(task.id) as { agent: string; family: string } | null;
+  const s: SwapSnapshot = { task, workflow: { ...workflow, authorFamily: family }, remoteAuthorFamily: remoteFamily, events, author,
     reviewer: row?.state === "active" ? { ...row, source: row.transport === "peer" ? "peer_claim" : "local" } : null };
   if (!row || !swapNeeded(s) || latestReviewerSwap(events)?.data.round === task.round) throw new LedgerError("conflict", "本轮不允许再次更换审查员");
+  if (openRefusal(events)) throw new LedgerError("conflict", "本卡有未处置的模型安全拒绝，不自动更换审查员");
   migrate();
   settleIntent(db, ctx, { id, from: "pending", to: "submitted", receipt: "claimed; 更换不独立的审查员" });
   const fromFamily = row.family === "claude" ? "codex" : "claude";
   write({ ...ctx, dedupKey: swapKey(id) }, { project: task.project, target: task.id, kind: "scheduler",
     text: `作者家族由 ${fromFamily} 变成 ${family}，旧审查会话不再独立`,
     data: { op: "reviewer_swap", intentId: id, fromFamily, toFamily: family, agent: row.agent, sessionId: row.sessionId,
-      round: task.round, head: task.headSHA, specRev: task.specRev } });
+      round: task.round, head: task.headSHA, specRev: task.specRev, deliverySeq: delivery!.seq } });
   db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE sessionId = ?")
     .run(id, ctx.now ?? Date.now(), row.sessionId);
   return swappedSession(db, id);

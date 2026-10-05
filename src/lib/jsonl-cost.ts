@@ -6,8 +6,9 @@
  * cache_read_input_tokens, output_tokens }`。按 model 分类累加。
  */
 
-import { existsSync, readdirSync, realpathSync } from "fs";
+import { existsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
+import { realpathCached } from "./realpath-cache.js";
 import { runtimeForSessionPath, translateSessionLine } from "./session-source.js";
 
 export interface Usage {
@@ -112,12 +113,7 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
  * （2026-07-09 agent-temp 实例：流式输出全程静默）。
  */
 export function projectsSlug(cwd: string): string {
-  let resolved = cwd;
-  try {
-    resolved = realpathSync(cwd);
-  } catch {
-    /* 目录已不存在 → 按原样算，让上层走 findJsonlBySessionId 兜底 */
-  }
+  const resolved = realpathCached(cwd); // 目录已不存在 → 按原样算，让上层走 findJsonlBySessionId 兜底
   // v2.16.1 对齐 Claude Code 的真实 slug 规则:**所有**非字母数字都转 `-`,
   // 不只是 `/`。此前保留 `_` 导致 cwd 含下划线的 agent 整条链路失明——live
   // 历史读不出、归档 sweeper 定位失败(数据丢失风险)、cost 漏计(2026-08-02
@@ -129,10 +125,7 @@ export function projectsSlug(cwd: string): string {
 
 /** 旧版 slug(只转 `/`)——projectJsonlPath 的兼容回退用,勿新增调用方。 */
 function legacySlug(cwd: string): string {
-  let resolved = cwd;
-  try {
-    resolved = realpathSync(cwd);
-  } catch { /* 同上 */ }
+  const resolved = realpathCached(cwd);
   return "-" + resolved.replace(/^\//, "").replace(/\//g, "-");
 }
 
