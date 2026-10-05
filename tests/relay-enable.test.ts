@@ -1,54 +1,17 @@
 /**
  * Peer 面板「一键接入中继」（bridge/relay-link.ts enableRelay / parseRelaySetup）：写 .env 的 RELAY_URL 后当场连；
  * 连不了就把 .env 恢复原样、撤副作用；同一时刻只有一次在做；地址里的 $ 不收（Bun 读 .env 会展开）。
- * .env 都写在临时目录，Bun 读回用真的 `bun --env-file` 子进程，环境是 testChildEnv 的最小集。
+ * .env 都写在临时目录，Bun 读回用真的 `bun --no-env-file --env-file` 同步子进程（tests/relay-enable-fixture.ts）；
+ * 并发用例是 start 的到达 / 释放握手 + 受控调度扰动，并带锁失效的反向故障。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { enableRelay, parseRelaySetup, type EnableRelayDeps, type RelayStart } from "../src/bridge/relay-link.js";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { enableRelay, parseRelaySetup } from "../src/bridge/relay-link.js";
 import { readDotenvFileSync } from "../src/lib/env-file.js";
 import { DEFAULT_RELAY_URL } from "../src/lib/setup-remote-access.js";
-import { testChildEnv } from "./test-env.js";
+import { bunReads, cleanupDirs, contentionViolations, harness, LAUNCHES, ORIGINAL, runContention } from "./relay-enable-fixture.js";
 
-const dirs: string[] = [];
-afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-});
-
-const ORIGINAL = "# Claudestra 运行时配置\nDISCORD_BOT_TOKEN=abc\nBRIDGE_PORT=3847\n";
-
-function harness(over: { env?: string | null; start?: () => Promise<RelayStart>; state?: string | null; sandbox?: string | null; current?: string } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "relay-enable-"));
-  dirs.push(dir);
-  const envPath = join(dir, ".env");
-  const env = over.env === undefined ? ORIGINAL : over.env;
-  if (env !== null) {
-    writeFileSync(envPath, env);
-    chmodSync(envPath, 0o600);
-  }
-  let starts = 0, undos = 0;
-  const d: EnableRelayDeps = {
-    envPath, lockPath: join(dir, "env-write.lock"),
-    sandbox: () => over.sandbox ?? null,
-    current: () => over.current ?? readDotenvFileSync(envPath)?.RELAY_URL?.trim() ?? "",
-    start: async () => (starts++, over.start ? over.start() : { ok: true }),
-    undo: async () => void undos++,
-    state: () => over.state ?? "online",
-  };
-  return { d, dir, envPath, starts: () => starts, undos: () => undos, text: () => (existsSync(envPath) ? readFileSync(envPath, "utf8") : null) };
-}
-
-/** 真的让 Bun 读这份 .env：cwd 放在空目录里，免得 Bun 顺手再读别的 .env */
-function bunReads(envPath: string, key: string, extraEnv: Record<string, string> = {}): string {
-  const cwd = mkdtempSync(join(tmpdir(), "relay-env-read-"));
-  dirs.push(cwd);
-  const r = Bun.spawnSync([process.execPath, `--env-file=${envPath}`, "--print", `process.env.${key}`], {
-    cwd, env: testChildEnv(extraEnv),
-  });
-  return r.stdout.toString().trim();
-}
+afterEach(cleanupDirs);
 
 describe("enableRelay", () => {
   test("不给地址 = 官方中继：写进 .env 后当场连，其余配置逐字节不动", async () => {
@@ -98,16 +61,21 @@ describe("连不了就回滚", () => {
 });
 
 describe("并发", () => {
-  test("两个请求同时进来：只有一个写、一个连，另一个 409", async () => {
-    let open!: () => void;
-    const barrier = new Promise<void>((r) => (open = r));
-    const h = harness({ start: async () => (await barrier, { ok: true }) });
-    const both = Promise.all([enableRelay(undefined, h.d), enableRelay("relay.other.example", h.d)]);
-    open();
-    const rs = await both;
-    expect(rs.map((r) => (r.ok ? 200 : r.status)).sort()).toEqual([200, 409]);
-    expect(h.starts()).toBe(1);
-    expect(readDotenvFileSync(h.envPath)?.RELAY_URL).toBe(DEFAULT_RELAY_URL);
+  const relayUrlOf = (tag: string) => (tag === "A" ? DEFAULT_RELAY_URL : "wss://relay.other.example");
+  const label = (l: (typeof LAUNCHES)[number]) => (l.at === "sync" ? "同一 tick" : `${l.at}+${l.n}`);
+  test("两个请求同时进来：先发的卡在 start 里时后发的因锁 409；只写一次、连一次（每种调度、谁先都一样）", async () => {
+    for (const order of ["AB", "BA"] as const) {
+      for (const launch of LAUNCHES) {
+        const o = await runContention(launch, order);
+        expect({ order, launch: label(launch), bad: contentionViolations(o, relayUrlOf) }).toEqual({ order, launch: label(launch), bad: [] });
+      }
+    }
+  });
+  test("反向故障：锁失效（两个调用各拿一把锁）时，每种调度下上面的断言都判红", async () => {
+    for (const launch of LAUNCHES) {
+      const o = await runContention(launch, "AB", "broken");
+      expect({ launch: label(launch), red: contentionViolations(o, relayUrlOf).length > 0 }).toEqual({ launch: label(launch), red: true });
+    }
   });
   test("锁在上一次结束后释放；锁里重读 .env，已经配上的第二次 409", async () => {
     const h = harness();
