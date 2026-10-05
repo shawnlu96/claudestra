@@ -49,6 +49,8 @@ export interface Step {
   landed?(): boolean;
   /** 只撤本次确认建的东西；失败的那一步也会被调（可能做了一半），自己判断有没有要撤的 */
   undo?(): Promise<string | null>;
+  /** 失败后返回非空 = 留着的执行者可能还在用前面各步建的东西（worktree / 分支 / 说明 / 卡）：那些一概不撤，列为残留 */
+  holds?(): string | null;
 }
 
 export type StartOutcome =
@@ -202,16 +204,20 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
         // manager normalizeName 吃掉名字里第一个 agent- 片段：短名自带 agent-（AGL1 卡号）时传规范全名，它只去掉开头那层，落成的就是 p.agent
         const name = p.agentName.includes("agent-") ? p.agent : p.agentName;
         const r = await io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS);
-        const got = typeof r?.agent === "string" ? r.agent : p.agent;
-        if (r?.ok && got === p.agent) { owned = p.agent; return null; }
-        // 回执名对不上（可能是 manager 复用的同名历史会话）或结果丢了却在 registry 里：归属不明，不绑也不 kill
-        if (r?.ok || io.agentExists(got)) unknown = got;
-        return r?.ok ? `manager create 回执的 agent ${got} 与预检规范名 ${p.agent} 不一致` : failed(r);
+        // 回执没给名字不拿计划名充数：改由 registry 核实（create 前已确认没有），核实不了留 unknown
+        const got = typeof r?.agent === "string" ? r.agent : null;
+        if (r?.ok && (got === null ? io.agentExists(p.agent) : got === p.agent)) { owned = p.agent; return null; }
+        // 回执名对不上（可能是 manager 复用的同名历史会话）、成功却查无此名、或结果丢了却在 registry 里：归属不明，不绑也不 kill
+        const who = got ?? p.agent;
+        if (r?.ok || io.agentExists(who)) unknown = who;
+        if (!r?.ok) return failed(r);
+        return got === null ? `manager create 回执没给 agent 名，registry 里也查不到 ${p.agent}` : `manager create 回执的 agent ${got} 与预检规范名 ${p.agent} 不一致`;
       },
       undo: async () => {
         if (owned && io.agentExists(owned)) return failed(await io.manager(["kill", owned]));
         return unknown ? `agent ${unknown} 归属不明（unknown），没 kill，等 PM 核对` : null;
       },
+      holds: () => unknown && `agent ${unknown} 归属不明，可能还在 ${p.worktree}（分支 ${p.branch}）里干活，核对后再清`,
     },
     {
       name: "task-set",
@@ -282,7 +288,9 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
     if (err && s.landed?.()) reconciled.push(s.name);
     else if (err) {
       // 失败的这一步也交给 undo（可能做了一半）；各步的 undo 只撤本次确认建的
-      const { rolledBack, leftovers } = await rollback([s, ...done.reverse()]);
+      const held = s.holds?.();
+      const { rolledBack, leftovers } = await rollback(held ? [s] : [s, ...done.reverse()]);
+      if (held) leftovers.push(...done.reverse().filter((d) => d.undo).map((d) => `${d.name}：没撤（${held}）`));
       return { ok: false, code: "start_failed", error: err, failedStep: s.name, rolledBack, leftovers };
     }
     done.push(s);

@@ -314,17 +314,19 @@ describe("r1：提交了但结果丢了，按本次 dedup 查库接着走", () =
     });
   }
 
-  test("没提交的失败照旧回滚；create 已建好但结果丢了：归属不明留 unknown 不 kill，卡取消", async () => {
+  test("create 已建好但结果丢了：归属不明留 unknown 不 kill，它可能在用的 worktree / 分支 / 说明 / 卡一概不撤，列为残留", async () => {
     await plan();
     spec("i28-a");
     lose = (a) => a[0] === "create";
     const r = await start("a");
-    expect(r).toMatchObject({ ok: false, failedStep: "agent" });
-    expect(r.leftovers).toEqual([expect.stringContaining("agent-task-i28-a 归属不明（unknown）")]);
+    expect(r).toMatchObject({ ok: false, failedStep: "agent", rolledBack: [] });
+    expect(r.leftovers[0]).toContain("agent-task-i28-a 归属不明（unknown）");
+    expect(r.leftovers.slice(1).map((l: string) => l.split("：")[0])).toEqual(["prompt", "worktree", "spec", "task-new"]);
+    expect(r.leftovers.slice(1).every((l: string) => l.includes("没撤") && l.includes(join(dir, "wt", "i28-a")))).toBe(true);
     expect(agents["agent-task-i28-a"]).toBeDefined();
-    expect(calls.some((c) => c[0] === "kill")).toBe(false);
-    expect(getTask(db, "i28-a")?.stage).toBe("cancelled");
-    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+    expect(calls.some((c) => c[0] === "kill" || (c[0] === "git" && (c[2] === "remove" || c[1] === "branch")))).toBe(false);
+    expect(getTask(db, "i28-a")?.stage).not.toBe("cancelled");
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(true);
   });
 
   test("registry 里有只差大小写 / 全角的同名会话：预检就拒，不建卡、不碰 git、不 create / kill", async () => {
