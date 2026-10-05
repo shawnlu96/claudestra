@@ -6,6 +6,7 @@ import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { placeFor, peerFamily, type PlacementFacts, type PlaceRole } from "./scheduler-family-pick.js";
 import { peerRefusal, type PeerFacts, type Placement } from "./scheduler-placement.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
+import type { LedgerEvent } from "./ledger-stages.js";
 import { startRetried } from "./lend-fix-start.js";
 
 /** Only the exact unclaimed push-withdrawal receipt qualifies; arbitrary cancellation text or a claimed order does not. */
@@ -28,10 +29,19 @@ function refusedAt(s: PlannerSnapshot, i: SchedulerIntent, peer: string): number
   return isTemporaryLendRefusal(code) ? cancelled.ts : null;
 }
 
+/** cancelLend's note is `{ lend: { orderId, peer, op, from } }` and nothing else; peer-pr-push-record always adds op/key/result. */
+function cancelLendShape(e: LedgerEvent): boolean {
+  const keys = (o: object) => Object.keys(o).sort().join(",");
+  const lend = e.data.lend;
+  return keys(e.data) === "lend" && typeof lend === "object" && lend !== null && keys(lend) === "from,op,orderId,peer";
+}
+
 /**
  * PM's own lend-cancel of an order nobody claimed, which the scheduler then settled: not a spent attempt (PC1). Only structure counts:
- * cancelLend is manager-gated and its note alone carries no withdrawnBy / stale (refusals, TTL and timeouts all go through
- * withdrawPooledLend), the link must name this intent, peer, head and round, and the settle event must follow the cancel.
+ * cancelLend is manager-gated, needs a live order and writes exactly cancelLend's shape with no withdrawnBy / stale (refusals, TTL and
+ * timeouts all go through withdrawPooledLend), so it must be the order's only cancel note; any other cancel (an earlier refusal, a
+ * look-alike written after the order ended) or a claim vetoes. The link must name this intent, peer, head and round, and the settle
+ * event must follow the cancel.
  */
 function pmCancelled(s: PlannerSnapshot, i: SchedulerIntent, peer: string): boolean {
   if (i.status !== "cancelled") return false;
@@ -41,12 +51,13 @@ function pmCancelled(s: PlannerSnapshot, i: SchedulerIntent, peer: string): bool
   if (typeof orderId !== "string") return false;
   const notes = s.events.filter((e) => e.kind === "note" && e.target === i.taskId &&
     (e.data.lend as Record<string, unknown> | undefined)?.orderId === orderId);
-  const lend = notes.at(-1)?.data.lend as Record<string, unknown> | undefined;
-  if (notes.some((e) => (e.data.lend as Record<string, unknown>).op === "claim") || !lend || notes.at(-1)!.actor === "scheduler" ||
-    lend.op !== "cancel" || lend.from !== "pooled" || lend.peer !== peer || "withdrawnBy" in lend || "stale" in lend) return false;
-  const cancelSeq = notes.at(-1)!.seq;
+  const lendOf = (e: LedgerEvent) => e.data.lend as Record<string, unknown>;
+  const cancels = notes.filter((e) => lendOf(e).op === "cancel");
+  const last = notes.at(-1);
+  if (notes.some((e) => lendOf(e).op === "claim") || cancels.length !== 1 || cancels[0] !== last || last.actor === "scheduler" ||
+    !cancelLendShape(last) || lendOf(last).from !== "pooled" || lendOf(last).peer !== peer) return false;
   return s.events.some((e) => e.kind === "scheduler" && e.dedupKey === `scheduler:${i.id}:cancelled` && e.data.op === "settle" &&
-    e.data.id === i.id && e.data.to === "cancelled" && e.seq > cancelSeq);
+    e.data.id === i.id && e.data.to === "cancelled" && e.seq > last.seq);
 }
 
 interface Retry { peer: string; gate: string | null }

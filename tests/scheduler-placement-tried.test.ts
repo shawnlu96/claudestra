@@ -252,6 +252,13 @@ test("PC1: forged, mismatched, unsettled or live cancels keep the peer spent", (
     settledOther: (s) => { s.events.at(-1)!.data.id = "other"; },
     settledBefore: (s) => { s.events.at(-1)!.seq = s.events.at(-2)!.seq - 1; },
     settledDone: (s) => { s.events.at(-1)!.data.to = "done"; },
+    // peer-pr-push-record --data can mimic the lend object, but its note always carries op/key/result beside it (review cancel-note-source).
+    peerPrRecord: (s) => { s.events.at(-2)!.data = { op: "peer_pr_push", key: "k", result: "sent", ...s.events.at(-2)!.data }; },
+    extraLendKey: (s) => { (s.events.at(-2)!.data.lend as Record<string, unknown>).reason = "依赖未就绪"; },
+    priorWithdrawal: (s) => { s.events = [...s.events.slice(0, -2), event(13, "note", { lend: { peer: "mate", orderId: "order-pm-mate", op: "cancel",
+      from: "pooled", withdrawnBy: "owner" } }), ...s.events.slice(-2)]; },
+    laterCancel: (s) => { s.events = [...s.events.slice(0, -1), { ...event(98, "note", { lend: { peer: "mate", orderId: "order-pm-mate", op: "cancel",
+      from: "pooled" } }), actor: "pm" }, { ...s.events.at(-1)!, seq: 99 }]; },
     laterRelease: (s) => { s.events = [...s.events, event(99, "note", { lend: { peer: "mate", orderId: "order-pm-mate", op: "release" } })]; },
     ...Object.fromEntries((["pending", "submitted", "unknown", "done"] as const).map((st) => [st, (s: PlannerSnapshot) => { s.intents[0].status = st; }])),
   };

@@ -257,3 +257,25 @@ test("PC1: lend-cancel stays a PM write — the executor and the peer cannot rel
     expect(p.orders()[0].status).toBe("pooled");
   } finally { p.f.close(); }
 });
+
+test("PC1: a peer-pr-push-record note shaped like a PM cancel cannot erase a real content_policy refusal (review cancel-note-source)", async () => {
+  const p = await ready("review");
+  try {
+    expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_pooled" });
+    const orderId = p.orders()[0].orderId;
+    expect(p.refuse("content_policy").withdrawn).toHaveLength(1);
+    const peerPr = { peer: "mate", fp: "abcd-ef01-2345-6789", agent: "agent-x", login: "mate", number: 7, url: "https://github.com/o/r/pull/7", base: "main" };
+    expect(await p.f.cli("pm", "task-set", "T1", "--rev", String(p.f.task().rev), "--assignee-kind", "peer_agent",
+      "--assignee", `${peerPr.fp}/${peerPr.agent}`, "--extra", JSON.stringify({ ...p.f.task().extra, peerPr }))).toMatchObject({ ok: true });
+    expect(await p.f.cli("pm", "peer-pr-push-record", "T1", "--key", "k1", "--result", "sent", "--text", "出借：撤单（原状态 pooled）：依赖未就绪",
+      "--data", JSON.stringify({ lend: { orderId, peer: "mate", op: "cancel", from: "pooled" } }))).toMatchObject({ ok: true });
+    expect((await p.tick()).cards[0]).toMatchObject({ step: "pool_returned" });
+    expect(p.f.intents().filter((i) => i.recipient === "peer:mate").map((i) => i.status)).toEqual(["cancelled"]);
+    p.f.advance(120_000);
+    p.hello();
+    expect(p.plan()).not.toMatchObject({ recipient: "peer:mate" });
+    await p.tick();
+    expect(p.orders()).toHaveLength(1);
+    expect(p.orders()[0]).toMatchObject({ status: "cancelled", reason: expect.stringContaining("content_policy") });
+  } finally { p.f.close(); }
+});
