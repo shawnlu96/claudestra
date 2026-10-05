@@ -49,7 +49,7 @@ import { findSessionJsonlBySessionId, translateSessionLine } from "./session-sou
 import { quotaViewOf, type LendWorkerFailure } from "./lend-health.js";
 import { keepLendEvidence } from "./lend-evidence.js";
 import { listAsks } from "./ledger-asks.js";
-import { isCurrentTurnFailure } from "./lend-turn-failure.js";
+import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 
@@ -245,6 +245,9 @@ async function workerExcerpt(row: LendRow): Promise<{ text: string; at: number }
   } finally { await fh.close(); }
 }
 
+/** 已经记过「不自动停单」的卡：每 30 秒一轮，同一张卡只记一次（进程内，重启再记一次无妨） */
+const doubted = new Set<string>();
+
 /**
  * bridge 为这个 worker 开的最新一张 Codex 卡；台账读不了 = 不知道，当没有（存活探测照常兜底）。额度 / 登录同 scheduler-auto-ports codexFailure；
  * 回合失败卡要证明是 row 这一单当前回合的（lend-turn-failure.ts），证明不了按改动前处理：交给 codexFailure，没派单可归就是没有
@@ -254,8 +257,10 @@ function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined
   if (!db) return undefined;
   try {
     const card = listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).sort((a, b) => b.createdAt - a.createdAt)[0];
-    if (card?.extra.failure === "error" && row && isCurrentTurnFailure(card, row, (id) => findSessionJsonlBySessionId("codex", id))) {
-      return { kind: "error", askId: card.id, message: card.context }; // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）
+    if (card?.extra.failure === "error" && row) {
+      const doubt = turnFailureDoubt(card, row, (id) => findSessionJsonlBySessionId("codex", id));
+      if (!doubt) return { kind: "error", askId: card.id, message: card.context }; // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）
+      if (!doubted.has(card.id)) doubted.add(card.id), console.error(`[lend] ${agent} 的回合失败卡 ${card.id} 不自动停单：${doubt}；卡留在看板上由人处理`);
     }
     const f = codexFailure(db, agent)?.failure;
     return f && (f.kind === "quota" || f.kind === "auth") ? { kind: f.kind, askId: f.key, message: f.message.slice(0, 200) } : undefined;

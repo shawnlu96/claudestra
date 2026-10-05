@@ -4,7 +4,7 @@
  * 卡走真台账文件 + 生产 failureOf（lendDeps(...).failure）+ 临时 CODEX_HOME 里的真 rollout；worker / 网络 / tmux 都是 lend-harness 的假依赖。
  * 只认本单当前回合的卡（lend-turn-failure.ts，按宿主报的失败时刻，不按写卡时刻）；回执只带类别不带原文；证据文件 0600（PR624 r1/r2）。
  */
-import { afterEach, beforeAll, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,11 +163,17 @@ test("不是本单当前回合的回合失败卡不停单：开跑前失败的�
     ["没有 rollout", () => runningWith(null, turnFail(CYBER))],
     ["rollout 里没有 task_started", () => runningWith(rolloutLine(CARD_AT - 5_000, "token_count"), turnFail(CYBER))],
   ];
-  for (const [name, start] of cases) {
-    const { h, kept } = await start();
-    for (let i = 0; i < 3; i++) { h.advanceTime(30_000); await h.tick(); }
-    expect([name, getOrder(h.db, "o1")!.state, h.log.killed, kept, releases(h)]).toEqual([name, "started", [], [], []]);
-  }
+  const err = spyOn(console, "error");
+  try {
+    for (const [name, start] of cases) {
+      err.mockClear();
+      const { h, kept } = await start();
+      for (let i = 0; i < 3; i++) { h.advanceTime(30_000); await h.tick(); }
+      expect([name, getOrder(h.db, "o1")!.state, h.log.killed, kept, releases(h)]).toEqual([name, "started", [], [], []]);
+      const said = err.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("不自动停单"));
+      expect([name, said.length]).toEqual([name, 1]); // 证明不了：不停单，但留一条可见的诊断，同一张卡只记一次
+    }
+  } finally { err.mockRestore(); }
 });
 
 // ── bridge 一侧的约定：只有不能重试的回合失败才开 extra.failure = error 卡（acp-link.ts onFailure），出借停单只认这张 ──
