@@ -176,3 +176,18 @@ test("real CLI refuses a registered file never planned by a dispatch", async () 
   expect(await f.cli(["--rev", "3", "--apply"])).toMatchObject({ ok: false, code: "conflict" });
   expect(f.snapshot()).toEqual(before);
 });
+
+test.each(["author", "reviewer"])("real CLI residual %s binding lacks retirement facts: preview and apply are zero-write", async role => {
+  const f = cliFixture();
+  f.db.query(`INSERT INTO scheduler_sessions
+    (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES ('MQ', ?, 'agent-bound', 'residual-session', 'claude', 'tmux', 'active', 'claim', 1, 1)`).run(role);
+  const before = f.snapshot();
+  const preview = await f.cli();
+  expect(preview).toMatchObject({ ok: true, executable: false });
+  const reasons = preview.reasons.join("；");
+  for (const fact of ["residual-session", "done retire 意图", "archive 回执", "kill 回执", "retired 状态"]) expect(reasons).toContain(fact);
+  expect(f.snapshot()).toEqual(before);
+  expect(await f.cli(["--apply"])).toMatchObject({ ok: false, code: "conflict" });
+  expect(f.snapshot()).toEqual(before);
+});

@@ -131,7 +131,7 @@ test.each(["agent", "peer"])("%s step author without a scheduler session is stil
   expect(f.snapshot()).toEqual(before);
 });
 
-test("a dispatched paused author has no legal retirement path: preserve locks pending PM resolution", () => {
+test("a dispatched paused author has no legal retirement path: preserve locks under the revised acceptance rule", () => {
   const f = fixture(true); f.scope([]);
   const before = f.snapshot();
   expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false,
@@ -239,4 +239,16 @@ test.each([false, true])("later dispatch preserves held anchors or records actua
   expect(reconcileFileScope(f.db, f.ctx, input)).toMatchObject({ executable: true,
     anchors: { "a.ts": released ? "reacquire" : "real-plan" } });
   expect(reconcileFileScope(f.db, f.ctx, { ...input, apply: true })).toMatchObject({ ok: true });
+});
+
+test.each(["active", "retiring", "retired"])("reviewer binding %s needs formal retirement proof, not stored receipt strings", state => {
+  const f = fixture(); f.scope([]);
+  f.db.query(`INSERT INTO scheduler_sessions
+    (taskId, role, agent, sessionId, family, transport, state, createIntentId, archiveReceipt, killReceipt, createdAt, updatedAt)
+    VALUES ('T', 'reviewer', 'agent-review', 'review-session', 'codex', 'peer', ?, 'real-plan', 'archive', 'kill', 1, 1)`).run(state);
+  const before = f.snapshot(), preview = reconcileFileScope(f.db, f.ctx, f.input());
+  expect(preview).toMatchObject({ executable: false });
+  for (const fact of ["review-session", "done retire 意图", "archive 审计", "kill 审计"]) expect(preview.reasons.join("；")).toContain(fact);
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/退役/);
+  expect(f.snapshot()).toEqual(before);
 });

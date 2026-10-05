@@ -47,28 +47,43 @@ function paused(db: Database, task: LedgerTask, input: FileScopeInput, events: L
   } else p.pauseSeq = pause.seq;
 }
 
-/** Every surviving binding needs durable archive AND stop receipts; an empty registry is never retirement proof. */
+/** A name or registry absence cannot substitute for durable, role-matched retirement evidence. */
+function retirementGaps(s: SchedulerSession, intents: SchedulerIntent[], events: LedgerEvent[], project: string): string[] {
+  const gaps: string[] = [];
+  const intent = intents.find(i => i.id === s.retireIntentId && i.project === project && i.action === "retire" && i.status === "done");
+  if (!["author", "reviewer"].includes(s.role)) gaps.push("已知 session 角色");
+  if (!["acp", "tmux", "peer"].includes(s.transport) || !["claude", "codex"].includes(s.family)) gaps.push("已知 transport / family");
+  if (s.state !== "retired") gaps.push(`retired 状态（当前 ${s.state}）`);
+  if (!intent) gaps.push("done retire 意图");
+  for (const effect of ["archive", "kill"] as const) {
+    const receipt = effect === "archive" ? s.archiveReceipt : s.killReceipt;
+    if (!receipt) gaps.push(`${effect} 回执`);
+    else if (!intent || !events.some(e => e.kind === "scheduler" && e.data.op === "session_retire" && e.data.role === s.role &&
+      e.ts >= s.createdAt && e.data.intentId === intent.id && e.data.effect === effect && e.data.receipt === receipt)) gaps.push(`${effect} 审计`);
+  }
+  return gaps;
+}
+
+/** Every surviving author or reviewer binding needs retirement proof; this command never retires either role. */
 function writers(db: Database, task: LedgerTask, intents: SchedulerIntent[], events: LedgerEvent[], input: FileScopeInput, p: Plan): void {
-  const sessions = db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? AND role = 'author'").all(task.id) as SchedulerSession[];
-  const retired = (s: SchedulerSession): boolean => {
-    const intent = intents.find(i => i.id === s.retireIntentId && i.project === task.project && i.action === "retire" && i.status === "done");
-    return ["acp", "tmux", "peer"].includes(s.transport) && ["claude", "codex"].includes(s.family) &&
-      s.state === "retired" && !!intent && !!s.archiveReceipt && !!s.killReceipt && ["archive", "kill"].every(effect =>
-      events.some(e => e.kind === "scheduler" && e.data.op === "session_retire" && e.data.role === "author" && e.ts >= s.createdAt &&
-        e.data.intentId === intent.id && e.data.effect === effect && e.data.receipt === (effect === "archive" ? s.archiveReceipt : s.killReceipt)));
-  };
-  for (const s of sessions) if (!retired(s)) p.reasons.push(`作者 session ${s.sessionId} 未有完整正式退役事实`);
+  const sessions = db.query("SELECT * FROM scheduler_sessions WHERE taskId = ?").all(task.id) as SchedulerSession[];
+  const facts = new Map(sessions.map(s => [s, retirementGaps(s, intents, events, task.project)]));
+  const retired = (s: SchedulerSession): boolean => facts.get(s)!.length === 0;
+  for (const s of sessions) if (!retired(s)) {
+    const role = s.role === "author" ? "作者" : s.role === "reviewer" ? "审查员" : s.role;
+    p.reasons.push(`${role} session ${s.sessionId} 缺正式退役事实：${facts.get(s)!.join("、")}`);
+  }
   const writingSteps = stepsOf(db, task).filter(s => ["restate", "write", "fix"].includes(s.step));
   for (const s of writingSteps) if (!["assigned", "delivered", "done"].includes(s.state)) p.reasons.push("作者步骤状态未知");
-  const names = new Set([task.agent, task.assignee, ...writingSteps.map(s => s.executor), ...sessions.map(s => s.agent),
+  const names = new Set([task.agent, task.assignee, ...writingSteps.map(s => s.executor), ...sessions.filter(s => s.role === "author").map(s => s.agent),
     ...intents.filter(i => i.action === "dispatch" && !isPoolIntent(i) && (i.status === "done" || i.attempts > 0)).map(i => i.recipient)]
     .filter((n): n is string => !!n));
-  for (const n of names) if (!sessions.some(s => bareCanonicalName(s.agent) === bareCanonicalName(n) && retired(s))) {
+  for (const n of names) if (!sessions.some(s => s.role === "author" && bareCanonicalName(s.agent) === bareCanonicalName(n) && retired(s))) {
     p.reasons.push(`旧作者绑定 ${n} 缺正式退役依据`);
   }
   const state = readJsonStateSync(input.registryPath ?? REGISTRY_PATH, v => object(v) && object(v.agents) && Object.values(v.agents).every(object));
   if (state.status !== "ok") { p.reasons.push(`registry 无法核实：${state.status}`); return; }
-  const wanted = new Set([...names].map(bareCanonicalName));
+  const wanted = new Set([...names, ...sessions.map(s => s.agent)].map(bareCanonicalName));
   for (const a of normalizeRegistryAgents(state.data)) {
     if (a.task !== task.id && !wanted.has(bareCanonicalName(a.name))) continue;
     if (!sessions.some(s => s.sessionId === a.sessionId && bareCanonicalName(s.agent) === bareCanonicalName(a.name) && retired(s)) ||
