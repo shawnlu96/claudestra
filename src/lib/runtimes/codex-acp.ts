@@ -89,8 +89,7 @@ async function bootstrapThread(spec: LaunchSpec, deps: CodexAdapterDeps): Promis
   const s = new AcpSession(proc.wire, { onUpdate: () => {}, onPermission: async () => null, log: (m) => logs.push(m) });
   const timer = setTimeout(() => proc.stop(), BOOTSTRAP_TIMEOUT_MS);
   try {
-    const caps = await s.initialize();
-    if (spec.mode === "fork" && !caps.fork) throw new Error("ACP 适配器没有声明 session/fork 能力");
+    const caps = await s.initialize({ fork: spec.mode === "fork" }); // 协议不兼容 / 缺 fork 能力在这里就抛（lib/acp/protocol.ts）
     const sid = spec.mode === "fork" ? await s.fork(spec.sessionId, spec.cwd) : await s.create(spec.cwd);
     if (spec.mode === "fork") await s.attach(sid, spec.cwd, caps.resume); // codex-acp 2.0.0 fork 后会取消订阅，先重新接上
     for (const [id, v] of [["model", codexModel(spec.model)], ["reasoning_effort", codexEffort(spec.effort)]] as const) if (v) await s.setConfig(id, v);

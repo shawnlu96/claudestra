@@ -10,7 +10,7 @@ import { acquireLock } from "../src/lib/file-lock.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
-import { cleanupDaemons, dispatched, intents, setup, start, until, type Svc } from "./scheduler-daemon-harness.js";
+import { cleanupDaemons, dispatched, intents, owners, ready, setup, start, stopSeen, tick, until, type Svc } from "./scheduler-daemon-harness.js";
 
 afterEach(cleanupDaemons);
 
@@ -19,12 +19,14 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
     const s = setup(["T1"]);
     const update = await acquireLock(s.lockPath, 0);
     expect(update).not.toBeNull();
-    start(s);
-    await Bun.sleep(3500);
-    expect(update!.held()).toBe(true);
-    expect(s.frames).toEqual([]);
-    expect(intents(s)).toEqual([]);
-    update!.release();
+    try {
+      start(s);
+      expect(await ready(s)).toBe(true);
+      expect(await tick(s)).toBe(true); // a whole pass ran while update held the lease
+      expect(update!.held()).toBe(true);
+      expect(s.frames).toEqual([]);
+      expect(intents(s)).toEqual([]);
+    } finally { update!.release(); }
     expect(await until(() => dispatched(s).length > 0, 20_000)).toBe(true);
     expect(dispatched(s)[0]).toMatchObject({ targetName: "agent-task-0" });
   }, 40_000);
@@ -32,8 +34,9 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
   test("losing the lease mid-submit ends the pass: the next card is not dispatched and the daemon stops", async () => {
     const s = setup(["T1", "T2"]);
     s.onDispatch = async () => {
+      const before = owners(s);
       writeFileSync(join(s.lockPath, "owner"), "update-took-over");
-      await Bun.sleep(300);
+      expect(stopSeen(s, before)).toBe(true);
     };
     start(s);
     expect(await until(() => dispatched(s).length > 0, 20_000)).toBe(true);
@@ -46,8 +49,9 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
   test("a stop signal mid-submit ends the pass the same way", async () => {
     const s = setup(["T1", "T2"]);
     s.onDispatch = async () => {
+      const before = owners(s);
       s.child!.kill("SIGTERM");
-      await Bun.sleep(300);
+      expect(await until(() => stopSeen(s, before), 5_000)).toBe(true); // the daemon handled the signal: it gave scheduler.pid up
     };
     start(s);
     expect(await until(() => dispatched(s).length > 0, 20_000)).toBe(true);
@@ -72,8 +76,9 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
       if (stopped) return;
       stopped = true;
       expect(s.frames).toEqual([]);
+      const before = owners(s);
       stop(s);
-      await Bun.sleep(300);
+      expect(await until(() => stopSeen(s, before), 5_000)).toBe(true); // the stop reached the lease files before the upgrade completes
     };
     start(s);
     expect(await until(() => stopped, 20_000)).toBe(true);
@@ -99,7 +104,8 @@ describe("the scheduler daemon's whole pass lives under the maintenance lease", 
   test("with autoDispatch absent the real daemon drives no auto card: no session, no plan, no order", async () => {
     const s = setup(["T1"], { autoDispatch: false });
     start(s);
-    await Bun.sleep(3500);
+    expect(await ready(s)).toBe(true);
+    expect(await tick(s)).toBe(true); // a whole pass under the autoDispatch-less config ran
     expect(s.child!.exitCode).toBeNull();
     expect(s.frames).toEqual([]);
     expect(intents(s)).toEqual([]);
