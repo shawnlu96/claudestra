@@ -126,12 +126,14 @@ export type RecoveryPlan =
 
 const safetyHold = (why: string): RecoveryPlan => ({ kind: "manual", code: "model_safety_hold", reason: `模型安全策略拒绝：${why}；停止自动重试和换模型，交 PM / owner 人工处置` });
 
+/** The port's answer is checked field by field: a safety flag must be an explicit false, never a missing one read as false. */
 function approvalGap(a: RefusalApproval | null, diag?: string): string | null {
   if (diag) return `批准读取失败（${diag}）`;
-  if (!a || !a.approvalId || !a.source || a.scope !== "routine_readonly_review") return "不在 owner 已批准的常规只读审查范围";
-  if (a.revoked) return "批准已撤销";
-  if (a.ownerHold) return "owner 已挂起";
-  if (a.content !== "allowed") return a.content === "uncertain" ? "内容是否允许尚未确定" : "内容不允许";
+  if (!a || typeof a !== "object" || typeof a.approvalId !== "string" || !a.approvalId || typeof a.source !== "string" || !a.source ||
+    a.scope !== "routine_readonly_review") return "不在 owner 已批准的常规只读审查范围";
+  if (a.revoked !== false) return a.revoked === true ? "批准已撤销" : "批准缺撤销状态，按不可用";
+  if (a.ownerHold !== false) return a.ownerHold === true ? "owner 已挂起" : "批准缺 owner 挂起状态，按不可用";
+  if (a.content !== "allowed") return a.content === "uncertain" ? "内容是否允许尚未确定" : a.content === "disallowed" ? "内容不允许" : "内容许可状态不合法，按不允许";
   return null;
 }
 
@@ -237,19 +239,24 @@ export function recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeIn
     const role = intent.action === "review" ? "reviewer" : "author";
     const authorFamily = (role === "reviewer" ? remoteHeadFamily(db, task) : null) ?? (db.query("SELECT authorFamily FROM task_workflows WHERE taskId = ?")
       .get(task.id) as { authorFamily: AuthorFamily } | null)?.authorFamily ?? input.failed.family;
-    // A different head or spec is a new window: the attempt count restarts there, never across it.
-    const window = `${task.specRev}:${task.headSHA ?? ""}`;
+    // A different head or spec is a new window: the attempt count restarts there, never across it. The window is the
+    // ticket's own (immutable head / spec at planning), so a late refusal of an obsolete ticket never lands in the current one.
+    const window = `${intent.specRev}:${intent.head ?? ""}`;
+    const stale = c.cls === "safety" && role === "reviewer" && (intent.specRev !== task.specRev || (intent.head ?? "") !== (task.headSHA ?? ""));
     const refusal = c.cls === "safety" && role === "reviewer" ? refusalFacts(events, mode, window, intent, input, approvalPort, task) : undefined;
-    const plan = planModelRecovery(c.cls, c.recoverable, { role, authorFamily,
-      failed: input.failed, authorized: input.authorized, noResult: true, ended: input.ended || intent.status === "cancelled", ...(refusal ? { refusal } : {}) });
+    const plan: RecoveryPlan = stale ? { kind: "manual", code: "model_recovery_manual",
+      reason: "过期审查票据（head / spec 已变）的迟到拒绝：只在原窗口留证，不接续、不占当前窗口；当前 head 由正式新审查票据处理" }
+      : planModelRecovery(c.cls, c.recoverable, { role, authorFamily,
+        failed: input.failed, authorized: input.authorized, noResult: true, ended: input.ended || intent.status === "cancelled", ...(refusal ? { refusal } : {}) });
     const a = refusal?.approval;
-    const data = { op: mode === "observe" ? "model_outcome" : OUTCOME_OP[plan.kind] ?? (c.cls === "safety" ? HOLD_OP : "model_outcome"), mode, cls: c.cls,
+    const op = mode === "observe" ? "model_outcome" : stale ? STALE_OP : OUTCOME_OP[plan.kind] ?? (c.cls === "safety" ? HOLD_OP : "model_outcome");
+    const data = { op, mode, cls: c.cls, stale,
       intentId: intent.id, action: intent.action, role, window, agent: input.failed.agent, family: input.failed.family, machine: input.failed.machine,
-      round: task.round, head: task.headSHA, specRev: task.specRev, noResult: true, noReport: true, verdict: null,
+      round: task.round, head: intent.head, specRev: intent.specRev, currentHead: task.headSHA, currentSpecRev: task.specRev, noResult: true, noReport: true, verdict: null,
       evidence: c.message.slice(0, 600), plan, ...(policy.diag ? { diag: policy.diag } : {}),
       ...(refusal ? { session: refusal.sessionId, materialDigest: refusal.materialDigest, approvalId: a?.approvalId ?? null, approvalSource: a?.source ?? null,
         oldSession: refusal.prior.at(-1)?.session ?? null, attempt: refusal.prior.length + 1, ...(refusal.approvalDiag ? { approvalDiag: refusal.approvalDiag } : {}) } : {}) };
-    const kind = mode === "observe" || plan.kind === "redispatch" || plan.kind === "retry_same" ? "note" : "escalate";
+    const kind = mode === "observe" || stale || plan.kind === "redispatch" || plan.kind === "retry_same" ? "note" : "escalate";
     const text = `${mode === "observe" ? "[观察] " : ""}${CLASS_LABEL[c.cls]}：${plan.reason}`;
     const { event } = appendEvent(db, { ...ctx, dedupKey: key }, { project: task.project, target: task.id, kind, text, data });
     return recorded(mode, c.cls, plan, event, false);
@@ -258,11 +265,13 @@ export function recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeIn
 
 /** on-mode op per plan; a manual safety plan falls through to the hold. The exemption escalates so PM / owner are told. */
 const OUTCOME_OP: Partial<Record<RecoveryPlan["kind"], string>> = { retry_same: RETRY_OP, exempt_review: EXEMPT_OP };
+/** Evidence of an obsolete ticket's refusal: kept, but neither a hold nor a continuation (openRefusal ignores it). */
+const STALE_OP = "model_refusal_stale";
 
 /** Reads the window's earlier reviewer refusals of this mode and the approval port; a broken port counts as no approval. */
 function refusalFacts(events: readonly LedgerEvent[], mode: RecoveryMode, window: string, intent: SchedulerIntent, input: OutcomeInput,
   port: RefusalApprovalPort | undefined, task: LedgerTask): RefusalFacts {
-  const prior = events.filter((e) => e.data.cls === "safety" && e.data.mode === mode && e.data.role === "reviewer" && e.data.window === window)
+  const prior = events.filter((e) => e.data.cls === "safety" && e.data.mode === mode && e.data.role === "reviewer" && e.data.window === window && !e.data.stale)
     .map((e): PriorRefusal => {
       const k = (e.data.plan as RecoveryPlan).kind;
       return { step: k === "retry_same" || k === "exempt_review" ? k : "manual", family: e.data.family as AuthorFamily,

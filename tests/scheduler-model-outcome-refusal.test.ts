@@ -167,6 +167,47 @@ describe("approved refusal continuation (real ledger)", () => {
     } finally { f.close(); }
   });
 
+  test("late refusal of an old head must not open a retry window on the current head", async () => {
+    const { f, first, ticket, input, events } = await reviewing();
+    try {
+      const H2 = "c".repeat(40), rec = (i: OutcomeInput) => recordModelOutcome(f.db, f.at("scheduler"), i, on, approve());
+      f.db.run("UPDATE tasks SET headSHA = ? WHERE id = 'T1'", [H2]);
+      // The H1 ticket's refusal arrives after the head moved: evidence stays in H1's window, nothing is continued.
+      const late = rec(input(first.id, "s-rv"));
+      expect(late).toMatchObject({ plan: { kind: "manual", code: "model_recovery_manual", reason: expect.stringContaining("过期") },
+        event: { kind: "note", data: { op: "model_refusal_stale", head: H1, window: `${f.task().specRev}:${H1}`, evidence: REFUSAL, session: "s-rv", noReport: true } } });
+      expect(openRefusal(events())).toBeNull();
+      const t = ticket("refusal-h2");
+      expect(recordModelOutcome(f.db, f.at("scheduler"), { ...input(t.id, "s-new-head"), review: { sessionId: "s-new-head", materialDigest: "sha256:actual-new-materials" } }, on, approve()))
+        .toMatchObject({ plan: { kind: "retry_same" }, event: { data: { op: "model_refusal_retry", attempt: 1, head: H2,
+          window: `${f.task().specRev}:${H2}`, materialDigest: "sha256:actual-new-materials" } } });
+    } finally { f.close(); }
+  });
+
+  test("late refusal of an old spec revision is stale too", async () => {
+    const { f, first, input, events } = await reviewing();
+    try {
+      const spec = f.task().specRev;
+      f.db.run("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'");
+      expect(recordModelOutcome(f.db, f.at("scheduler"), input(first.id, "s-rv"), on, approve()))
+        .toMatchObject({ plan: { kind: "manual", code: "model_recovery_manual" },
+          event: { kind: "note", data: { op: "model_refusal_stale", specRev: spec, currentSpecRev: spec + 1, window: `${spec}:${H1}` } } });
+      expect(openRefusal(events())).toBeNull();
+    } finally { f.close(); }
+  });
+
+  test("malformed approval with missing safety flags must fail closed", async () => {
+    const shapes = [{ approvalId: APPROVED.approvalId, source: APPROVED.source, scope: "routine_readonly_review", content: "allowed" },
+      { ...APPROVED, revoked: "false" }, { ...APPROVED, ownerHold: 0 }, { ...APPROVED, approvalId: 42 }, { ...APPROVED, content: "maybe" }];
+    for (const shape of shapes) {
+      const { f, first, input } = await reviewing();
+      try {
+        expect(recordModelOutcome(f.db, f.at("scheduler"), input(first.id, "s-rv"), on, () => shape as unknown as RefusalApproval))
+          .toMatchObject({ plan: { kind: "manual", code: "model_safety_hold" } });
+      } finally { f.close(); }
+    }
+  });
+
   test("observe only reports the step on would take; off records nothing", async () => {
     const { f, first, ticket, input, events, outcomes } = await reviewing();
     try {
