@@ -1,7 +1,7 @@
 /**
  * memory-auto-verdict 的每条用例自带一套私有资源：临时根目录下的文件台账（ledger-store 按路径缓存连接，
  * 共用 ":memory:" 键就会接手别的用例/文件没关的连接）、显式目录里新生成的实例钥匙（不碰默认 STATE_DIR 的那把）、
- * 审查报告目录。dispose 关连接、删目录，错误汇总抛出；setup 半路失败也先收拾干净再把原错误抛出。
+ * 审查报告目录。dispose 关连接、删目录，错误汇总抛出；setup 半路失败也先收拾干净再把原错误抛出，清理再失败就把两者一起抛（原错误在前）。
  */
 import { expect } from "bun:test";
 import type { Database } from "bun:sqlite";
@@ -56,9 +56,12 @@ export function verdictFixture(opts: { seed?: (db: Database, root: string) => vo
     assignStep(db, { actor: "owner" }, { taskId: "A", step: "review", executor: "agent-y", executorKind: "agent" });
     opts.seed?.(db, root);
     return { root, dir, report, ledgerPath, db, key, dispose, ...chain(db, dir, report, key) };
-  } catch (e) {
-    dispose();
-    throw e;
+  } catch (setupError) {
+    // 清理也失败时两个都要：原 setup 错误在前，cleanup 的 AggregateError 在后，谁也不盖住谁
+    try { dispose(); } catch (cleanupError) {
+      throw new AggregateError([setupError, cleanupError], "memory-auto-verdict fixture setup failed and cleanup failed", { cause: setupError });
+    }
+    throw setupError;
   }
 }
 
