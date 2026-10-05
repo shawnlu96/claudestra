@@ -314,6 +314,42 @@ describe("轮询游标（手动 tick）", () => {
     expect(ids(f.got)).toEqual([z]);
   });
 
+  test("换库：跨过一拍未提交的写事务（读侧照样读成功），提交后、下拍前换成同源副本——那条关闭照发一次（复现 ask-sse r5）", async () => {
+    const hist = ask();
+    settle(hist);
+    const x = ask(); // 读侧基线里看见它开着
+    const f = start();
+    f.tick();
+    db.exec("BEGIN IMMEDIATE");
+    settle(x); // writtenAt = 此刻，写事务还没提交
+    await Bun.sleep(25);
+    f.tick(); // 读连接看提交前的快照：读成功、没有新关闭
+    expect(f.got).toEqual([]);
+    db.exec("COMMIT");
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    const alt = tempLedgerPath("askt-sse-alt-");
+    copyFileSync(path, alt); // 同源副本（已含这条提交）换到原路径
+    swapIn(alt);
+    f.tick();
+    f.tick();
+    expect(ids(f.got)).toEqual([x]);
+    expect(db.query("SELECT state FROM asks WHERE id = ?").get(x)).toEqual({ state: "cancelled" });
+  });
+
+  test("换库：读侧从没见过开着、关闭写在上次读之前的历史仍不发，哪怕旧库里同时有别的开着的提问（ask-sse r5 对照）", async () => {
+    const { alt, hist } = await historyAlt();
+    const live = ask(); // 旧库里开着、替换库里没有
+    const f = start();
+    f.tick();
+    await Bun.sleep(30);
+    swapIn(alt);
+    f.tick();
+    f.tick();
+    expect(f.got).toEqual([]);
+    expect(hist.length).toBe(3);
+    expect(live).toBeTruthy();
+  });
+
   test("换库：emit 中途抛了，下拍只补没发出去的，不重发、不跳过", () => {
     const f = start();
     f.tick();

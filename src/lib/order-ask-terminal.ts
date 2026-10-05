@@ -46,7 +46,7 @@ const reasonOf = (o: AskOrderRef): string => `出借单 ${o.orderId} 已结清�
 /**
  * 关一条；调用方已在事务里核过 askNotClosable。closeAsk 自己再核 open，重复调只关一次。
  * settledOrder.at = 写锁内取的此刻（调用方已改过 lend_orders / 本函数在 BEGIN IMMEDIATE 里，锁已拿到），不是调用方先取的业务 now：
- * bridge feed 换库时按它逐条分历史 / 新提交（settledAskClosuresSince）
+ * bridge feed 换库时按它（连同读侧见过开着的提问）逐条分历史 / 新提交（settledAskClosuresSince）
  */
 function closeOne(db: Database, a: Ask, o: AskOrderRef, now: number, by: string): string | null {
   return closeAsk(db, a.id, "cancelled", reasonOf(o), now, { settledOrder: { orderId: o.orderId, status: o.status, by, at: Date.now() } })?.id ?? null;
@@ -120,7 +120,8 @@ export function applySettledAskSweep(db: Database, project: string, now: number,
 
 /**
  * 随出借单结清关掉的一条 ask，给 bridge 发 ask SSE（project…chatId 与 bridge/asks.ts publishAsk 同形；seq = 那条 ask_cancel 事件，给游标逐条推进；
- * writtenAt = 写锁内记的写入时刻 settledOrder.at，没有就退回事件 ts，只给 feed 换库时分历史用，不进 SSE data）
+ * writtenAt = 写锁内记的写入时刻 settledOrder.at，没有就退回事件 ts，只给 feed 换库时分历史用，不进 SSE data。它在 COMMIT 之前取，
+ * 只说明「这条在此刻之前还没写」，不说明此刻已提交——feed 不能单凭它认定读侧早已看过，见 openAskIds）
  */
 export interface SettledAskClosure { seq: number; writtenAt: number; project: string; askId: string; state: string; fromAgent: string | null; assignee: string | null; chatId: string }
 
@@ -130,19 +131,25 @@ const maxSeq = (db: Database, where = "", ...args: number[]): number =>
 /**
  * bridge ledger feed 的轮询读（bridge/ledger-feed.ts）：seq 之后**已提交**的「随出借单结清关闭」事件（ask_cancel 且带 extra.settledOrder）。
  * 结清点多在 CLI / 调度进程里，调不到 bridge 的 publishAsk；读已提交的事件 = 回滚的不会发。lastSeq = 读时库里最大 seq（没有可发的也推进到这）。
+ * openAskIds = 同一读快照里还开着、可能随单关的 worker 提问（via=mcp_ask 且绑了单号）：feed 记下「读侧此刻确实看见它开着」，
+ * 换库后它的关闭不论 writtenAt 早晚都是新的（未提交的写事务跨过这拍也一样）。整次读在一个读事务里，几处查询看的是同一快照
  */
-export function settledAskClosuresSince(db: Database, afterSeq: number): { lastSeq: number; closures: SettledAskClosure[] } {
-  const lastSeq = maxSeq(db);
-  if (lastSeq <= afterSeq) return { lastSeq, closures: [] };
-  if (!hasAsksTable(db)) return { lastSeq: afterSeq, closures: [] }; // 这拍读不到 asks：游标不动，下拍再读
-  const rows = db.query(`SELECT seq, json_extract(data, '$.askId') AS askId, COALESCE(json_extract(data, '$.extra.settledOrder.at'), ts) AS writtenAt
-    FROM events WHERE seq > ? AND seq <= ? AND kind = 'ask_cancel'
-    AND json_extract(data, '$.extra.settledOrder') IS NOT NULL ORDER BY seq`).all(afterSeq, lastSeq) as { seq: number; askId: string | null; writtenAt: number }[];
-  const closures = rows.flatMap((r) => {
-    const a = r.askId ? getAsk(db, r.askId) : null;
-    if (!a) return [];
-    return [{ seq: r.seq, writtenAt: Number(r.writtenAt), project: a.project, askId: a.id, state: a.state, fromAgent: a.fromAgent, assignee: a.assignee,
-      chatId: a.chatId || a.fromChannelId || "" }];
-  });
-  return { lastSeq, closures };
+export function settledAskClosuresSince(db: Database, afterSeq: number): { lastSeq: number; closures: SettledAskClosure[]; openAskIds: string[] | null } {
+  return db.transaction(() => {
+    const lastSeq = maxSeq(db);
+    if (!hasAsksTable(db)) return { lastSeq: afterSeq, closures: [], openAskIds: null }; // 这拍读不到 asks：游标不动、没看见什么开着（null），下拍再读
+    const openAskIds = (db.query(`SELECT id FROM asks WHERE state = 'open' AND json_extract(extra, '$.via') = 'mcp_ask'
+      AND json_extract(extra, '$.orderId') IS NOT NULL`).all() as { id: string }[]).map((r) => r.id);
+    if (lastSeq <= afterSeq) return { lastSeq, closures: [], openAskIds };
+    const rows = db.query(`SELECT seq, json_extract(data, '$.askId') AS askId, COALESCE(json_extract(data, '$.extra.settledOrder.at'), ts) AS writtenAt
+      FROM events WHERE seq > ? AND seq <= ? AND kind = 'ask_cancel'
+      AND json_extract(data, '$.extra.settledOrder') IS NOT NULL ORDER BY seq`).all(afterSeq, lastSeq) as { seq: number; askId: string | null; writtenAt: number }[];
+    const closures = rows.flatMap((r) => {
+      const a = r.askId ? getAsk(db, r.askId) : null;
+      if (!a) return [];
+      return [{ seq: r.seq, writtenAt: Number(r.writtenAt), project: a.project, askId: a.id, state: a.state, fromAgent: a.fromAgent, assignee: a.assignee,
+        chatId: a.chatId || a.fromChannelId || "" }];
+    });
+    return { lastSeq, closures, openAskIds };
+  })();
 }

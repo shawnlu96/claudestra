@@ -35,16 +35,20 @@ export function ledgerDb(): ReturnType<LedgerReader["get"]> {
  * 同一拍里多笔提交 / 批量取消都在 seq 之后），逐条发、逐条推进游标——读库出错游标不动、下拍重读；某条 emit 抛了停在它前面、下拍从它重发，
  * 已发的不重复。首次启动（含 bridge 重启）只取基线不补发（网页连上就全量重拉），基线里的关闭记进 seen。
  * 换了库文件（generation 变）：seq 是各库自己的，不能当交界；也不看整份文件的修改时间（一次无关写入不说明里面每条关闭何时写）。
- * 改为逐条看关闭自己的写入时刻 writtenAt（写锁内记的 settledOrder.at）与 lastOldAt 比：lastOldAt = 最近一拍「开头取的时刻」，那拍随后核文件身份
- * 时原路径上还是旧库——所以凡写进换上来那份文件、且早于 lastOldAt 的，写时它还不在台账路径上（备份 / 另一台机器的库），是历史，一条不发、只记 seen；
- * 不早于的按身份（askId）发 seen 里没有的（旧库已有 / 已发过的除外）。换库那拍及之后在路径上新提交的，writtenAt 必晚于 lastOldAt，
- * 与读到它时是否碰上别的写入、是 stat 前还是后提交都无关。这一代在读通过之前 lastOldAt 不动，中途 emit 抛了下拍按 seen 只补没发的；
- * 读通过才认这一代、之后回到 seq 游标
+ * 换上来那份里 seen 没有的关闭，满足任一条就是新的、照发：
+ * ① 读侧见过它开着——lastOpen = 上次读成功那拍、同一读快照里还开着的 worker 提问（已观察的事实）。写事务在 COMMIT 前取 writtenAt，
+ *   可以跨过一拍（读连接看的是提交前的快照，照样读成功）；那拍看见它开着，它之后的关闭不论 writtenAt 多早都在那拍之后提交。
+ *   旧路径上它还开着、换上来的库里已关，对看过它开着的订阅者也是一次真实的状态变化，条数以当时开着的为限，不是历史洪泛；
+ * ② writtenAt 不早于 lastOldAt（上次读成功那拍「开头取的时刻」）——那拍快照里还没有的提问，若在快照之后才提交开出，关它的写事务
+ *   只能在那之后拿锁、取 writtenAt，必晚于 lastOldAt（换上来的库里开、关都在读之后，如迁移后接着写）。
+ * 两条都不满足 = 读侧从没见过它开着、关闭也写在上次读之前：备份 / 另一台机器的库里的历史，一条不发、只记 seen。
+ * 这一代在读通过之前 lastOldAt / lastOpen 不动，中途 emit 抛了下拍按 seen 只补没发的；读通过才认这一代、之后回到 seq 游标
  */
 function settledAskTicker(): (at: number) => void {
   let seq: number | null = null;
   let gen = -1;
   let lastOldAt = 0;
+  let lastOpen = new Set<string>();
   const seen = new Set<string>();
   let failing = false;
   return (at) => {
@@ -55,12 +59,13 @@ function settledAskTicker(): (at: number) => void {
         const base = settledAskClosuresSince(db, 0);
         for (const c of base.closures) seen.add(c.askId);
         seq = base.lastSeq;
+        if (base.openAskIds) lastOpen = new Set(base.openAskIds);
         gen = reader.generation;
       }
       const swapped = reader.generation !== gen;
       const r = settledAskClosuresSince(db, swapped ? 0 : seq);
       for (const c of r.closures) {
-        if (swapped && (c.writtenAt < lastOldAt || seen.has(c.askId))) {
+        if (swapped && (seen.has(c.askId) || (!lastOpen.has(c.askId) && c.writtenAt < lastOldAt))) {
           seen.add(c.askId);
           continue;
         }
@@ -70,7 +75,10 @@ function settledAskTicker(): (at: number) => void {
       }
       seq = r.lastSeq;
       gen = reader.generation;
-      lastOldAt = at;
+      if (r.openAskIds) { // 读不到 asks 的那拍什么都没看见：两条边界都不推进
+        lastOldAt = at;
+        lastOpen = new Set(r.openAskIds);
+      }
       if (failing) console.log("📒 出借单结清关问的推送检测恢复");
       failing = false;
     } catch (e) {
