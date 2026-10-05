@@ -13,6 +13,7 @@
 import { configRefusal, parseConfigOptions, resolveConfigValue, type ConfigOption } from "./config.js";
 import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError } from "./failures.js";
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
+import { ACP_PROTOCOL_VERSION, AcpIncompatibleError, checkInitialize, type AgentInfo } from "./protocol.js";
 import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
 import type { PromptOutcome, SteerResult } from "./turn.js";
 import { threadStatusOf, turnEndOf } from "./updates.js";
@@ -52,6 +53,8 @@ export class AcpSession {
   sessionId = "";
   configOptions: ConfigOption[] = [];
   steering = false;
+  /** 适配器在 initialize 回包里报的名字和版本（没报是 null）：宿主接上线程时记进日志 */
+  agentInfo: AgentInfo | null = null;
   /** 适配器的 cancel 会先清掉排队消息并把正文交回来（Pi 适配器 _claudestra/cancel）；codex-acp 没有，照旧发 session/cancel 通知 */
   private cancelReturnsQueue = false;
   private statusSeq = 0;
@@ -81,12 +84,16 @@ export class AcpSession {
     this.rpc.onClosed((why) => this.endAll(why));
   }
 
-  /** initialize，返回适配器声明的会话能力 */
-  async initialize(): Promise<{ resume: boolean; fork: boolean }> {
-    const r = await this.rpc.request("initialize", { protocolVersion: 1, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "claudestra-acp-host", version: "1" } }, { timeoutMs: 60_000 });
+  /** initialize：回包先过协议版本与必要能力检查（protocol.ts，不过就抛 AcpIncompatibleError），返回接线程要用的会话能力。need.fork = 要 fork */
+  async initialize(need: { fork?: boolean } = {}): Promise<{ resume: boolean; fork: boolean }> {
+    const params = { protocolVersion: ACP_PROTOCOL_VERSION, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "claudestra-acp-host", version: "1" } };
+    const r = await this.rpc.request("initialize", params, { timeoutMs: 60_000 });
+    const verdict = checkInitialize(r, need);
+    if (!verdict.ok) throw new AcpIncompatibleError(verdict.reason);
+    this.agentInfo = verdict.agentInfo;
     this.steering = r?._meta?.steering?.supported === true;
     this.cancelReturnsQueue = r?._meta?.claudestra?.cancelReturnsQueue === true;
-    return { resume: !!r?.agentCapabilities?.sessionCapabilities?.resume, fork: !!r?.agentCapabilities?.sessionCapabilities?.fork };
+    return { resume: verdict.resume, fork: verdict.fork };
   }
 
   /** 接上已有线程：支持 resume 就用它（不回放历史），否则 session/load（回放的历史更新宿主不需要，照样只进 onUpdate） */
