@@ -27,6 +27,7 @@ import { composeView, droppedBlobUrls, revokeBlobUrls, sendCursor } from "./view
 import { claimEcho, findEchoTarget, type HeldState } from "./held-echo";
 import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
+import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell, shellExited } from "./bg-shell-state";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
@@ -2204,8 +2205,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       const existing = s.bgTasks.find((t) => t.id === id);
       if (existing) {
+        if (shellExited(existing)) return; // 已确认退出的 shell 结局已定（replay 会再发一遍 start）
         // 同 id 重开（restart 后 baseline 再触发 / 连流 replay）→ 重置为 running，带上最新的类型/进度
-        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined }, meta);
+        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined, shellUntracked: undefined }, meta);
       } else {
         s.bgTasks.push({ id, kind, title, lines: [], status: "running", lastEventAt: Date.now(), ...meta });
       }
@@ -2213,14 +2215,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   public bgTaskUpdate(id: string, items: string[], progress?: BgProgress) {
-    if (!id || !items.length) return;
+    if (!id || (!items.length && !progress)) return; // 空 items 只在 shell 读不到 / 恢复可读时来，带进度
     this.produce((s) => {
       let t = s.bgTasks.find((x) => x.id === id);
+      if (t && shellExited(t)) return;
       if (!t) {
+        if (!items.length) return;
         // update 早于 start（事件乱序/连流后补）→ 建一个占位任务
         t = { id, kind: "subagent", title: id, lines: [], status: "running" };
         s.bgTasks.push(t);
       }
+      reviveUnknownShell(t);
       t.lastEventAt = Date.now();
       if (progress) t.progress = progress;
       t.lines.push(...items);
@@ -2235,33 +2240,29 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       const t = s.bgTasks.find((x) => x.id === id);
       if (t) {
-        t.status = "done";
-        t.durationMs = durationMs;
-        t.endStatus = status;
+        markBgDone(t, durationMs, status);
       }
       ChatStore.trimDoneBgTasks(s);
     });
   }
 
-  /** 活跃任务全集快照（连流后 BFF 下发）：不在 ids 里的 running 卡标完成。
-   *  bridge 重启会丢 bg_task_completed 事件——幽灵「working」卡靠这里收敛
+  /** 活跃任务全集快照（连流后 BFF 下发）：不在 ids 里的 running 卡收敛——subagent 标完成，shell 标状态未知
+   *  （bg-shell-state.ts）。bridge 重启会丢 bg_task_completed 事件——幽灵「working」卡靠这里收敛
    *  （owner 2026-07-14:「为什么还有一个 Background task 在 working」）。 */
   public bgTaskSync(ids: string[]) {
     const live = new Set(ids);
     this.produce((s) => {
       for (const t of s.bgTasks) {
-        if (t.status === "running" && !live.has(t.id)) t.status = "done";
+        if (t.status === "running" && !live.has(t.id)) applySnapshotMissing(t);
       }
       ChatStore.trimDoneBgTasks(s);
     });
   }
 
-  /** bg 卡陈旧收敛：completed 事件在断档/冻结窗口漏收时的兜底，镜像 bridge 的收尾规则再多给 1 分钟——
-   *  后台 shell 3min 无活动即完成；subagent 只在 30min 完全无动静时收尾
-   *  （等 CI 时十几分钟不写一行是正常的，按 4min 收会把还在跑的 subagent 标成完成）。
-   *  搭 15s 轮询便车，零新计时器。 */
+  /** bg 卡陈旧收敛：completed 事件在断档/冻结窗口漏收时的兜底——只收 subagent（30min 完全无动静再多给 1 分钟）；
+   *  后台 shell 静默再久也不收（bg-shell-state.ts：只有退出行算结束）。搭 15s 轮询便车，零新计时器。 */
   public sweepStaleBgTasks() {
-    const stale = (t: BgTaskView) => t.status === "running" && (t.lastEventAt ?? 0) < Date.now() - (t.kind === "subagent" ? 31 : 4) * 60_000;
+    const stale = (t: BgTaskView) => bgSweepable(t, Date.now());
     if (!this.state.bgTasks.some(stale)) return;
     this.produce((s) => {
       for (const t of s.bgTasks) {

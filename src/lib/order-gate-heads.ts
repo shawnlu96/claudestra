@@ -155,14 +155,15 @@ export function gateOfferTransaction<T>(db: Database, ctx: WriteCtx, task: Pick<
  * One scheduler event per card + reason when the peer gate refused an order: PM's watch sees why the card is not moving and what
  * it waits for. The gate is not loosened, so the round waits for a local worker (or PM fixing the material and offering again).
  */
-export function recordGateRefused(db: Database, ctx: WriteCtx, task: Pick<LedgerTask, "project" | "id" | "stage">, message: string):
-  { event: LedgerEvent; duplicate: boolean } {
+export function recordGateRefused(db: Database, ctx: WriteCtx, task: Pick<LedgerTask, "project" | "id" | "stage">, message: string,
+  facts?: Record<string, unknown> & { intentId: string }): { event: LedgerEvent; duplicate: boolean } {
   const reason = message.replace(/\s+/g, " ").trim().slice(0, 560);
-  const key = `scheduler:gate-refused:${task.id}:${createHash("sha256").update(reason).digest("hex").slice(0, 24)}`;
+  // With facts (the scheduler's pool path, scheduler-dispatch-block.ts) one event per offer: a re-offer after a material change is a new block.
+  const key = `scheduler:gate-refused:${task.id}:${createHash("sha256").update(reason).digest("hex").slice(0, 24)}${facts ? `:${facts.intentId}` : ""}`;
   const prior = getEventByDedup(db, key);
   if (prior) return { event: prior, duplicate: true };
-  const waiting = `卡停在 ${task.stage}：外发闸不放宽，这一轮等本机执行者接手，或 PM 处理材料后重挂`;
+  const waiting = `卡停在 ${task.stage}：外发闸不放宽，这一轮等本机执行者接手，或 PM 处理材料后重挂${facts ? "；同一份材料不再外发，材料或外发闸处理器版本变了自动再试一次（仍完整过闸）" : ""}`;
   const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, { project: task.project, target: task.id,
-    kind: "scheduler", text: `出借单被外发闸拒收：${reason}。${waiting}`, data: { op: "gate_refused", reason, waiting } }, true);
+    kind: "scheduler", text: `出借单被外发闸拒收：${reason}。${waiting}`, data: { op: "gate_refused", reason, waiting, ...facts } }, true);
   return { event, duplicate: false };
 }
