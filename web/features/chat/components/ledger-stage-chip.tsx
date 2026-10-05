@@ -1,8 +1,8 @@
 "use client";
 import type { ReactNode } from "react";
-import type { LedgerTaskRef } from "@/lib/chat/agents";
+import type { LedgerReviewRef, LedgerTaskRef } from "@/lib/chat/agents";
 import { useLang, useT } from "@/lib/i18n";
-import { stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind, type StageTone } from "../ledger-stage";
+import { reviewChipView, stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind, type StageTone } from "../ledger-stage";
 
 /**
  * 侧栏 agent 行尾的台账阶段小标（ledger-stage.ts 出标签与色调）。宽度按行按钮的 @container 分三档，名字优先：
@@ -27,40 +27,69 @@ const MID_TIER = { zh: "hidden @[11rem]:inline", en: "hidden @[13rem]:inline" } 
 
 export function LedgerStageChip({ task, names }: { task: LedgerTaskRef; names: (string | null | undefined)[] }) {
   const t = useT();
-  const lang = useLang();
-  const v = stageChipView(task, lang);
-  const tone = TONE[v.tone];
-  const mid = MID_TIER[lang];
-  const sentence = stageSentence(v, t);
-  return (
-    <span
-      className={`flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10.5px] font-medium leading-4 ${tone.bg} ${tone.fg}`}
-      title={sentence}
-      data-ledger-stage={task.stage}
-    >
-      <span className="sr-only">{sentence}</span>
-      <span aria-hidden className={`size-1.5 shrink-0 rounded-full @[18rem]:hidden ${tone.dot}`} />
-      <StageIcon kind={v.icon} className="hidden size-3 @[18rem]:block" />
-      {!taskIdInName(names, v.id) && <span aria-hidden className="hidden font-mono @[18rem]:inline">{v.id}</span>}
-      <span aria-hidden className={mid}>{v.short}</span>
-      {v.round !== null && <span aria-hidden className={`font-mono tabular-nums ${mid}`}>R{v.round}</span>}
-    </span>
-  );
+  const v = stageChipView(task, useLang());
+  return <Chip v={v} sentence={stageSentence(v, t)} names={names} data={{ "data-ledger-stage": task.stage }} />;
 }
 
 /** 长按菜单标题下的一行：「T5 · 返工中 · 第 1 轮」 */
 export function LedgerStageLine({ task }: { task: LedgerTaskRef }) {
   const t = useT();
   const v = stageChipView(task, useLang());
+  return <ChipLine tone={v.tone} icon={v.icon} sentence={stageSentence(v, t)} />;
+}
+
+/** 审查员的审查小标：分档同执行者小标，但卡号从中间档就显示（审查员名字里不会带卡号，「在审哪张」是这枚小标的主信息）；最宽一档多带不为 0 的 P 数 */
+export function LedgerReviewChip({ review, names }: { review: LedgerReviewRef; names: (string | null | undefined)[] }) {
+  const v = reviewChipView(review, useLang(), useT());
+  return <Chip v={v} sentence={v.sentence} names={names} extra={v.counts} idMid data={{ "data-ledger-review": review.verdict ?? "reviewing" }} />;
+}
+
+/** 长按菜单标题下的一行：「审完 CLR1 · 第 2 轮 · 要改 · P0 0 / P1 1 / P2 3」 */
+export function LedgerReviewLine({ review }: { review: LedgerReviewRef }) {
+  const v = reviewChipView(review, useLang(), useT());
+  return <ChipLine tone={v.tone} icon={v.icon} sentence={v.sentence} />;
+}
+
+type ChipView = { id: string; short: string; tone: StageTone; icon: IconKind; round: number | null };
+
+interface ChipProps {
+  v: ChipView;
+  sentence: string;
+  names: (string | null | undefined)[];
+  /** 最宽一档追加的一段（审查的 P 数） */
+  extra?: string;
+  /** 卡号从中间档就显示（默认只在最宽一档） */
+  idMid?: boolean;
+  data: Record<string, string>;
+}
+
+function Chip({ v, sentence, names, extra, idMid, data }: ChipProps) {
+  const tone = TONE[v.tone];
+  const mid = MID_TIER[useLang()];
+  const idTier = idMid ? mid : "hidden @[18rem]:inline";
   return (
-    <span className={`mt-0.5 flex items-center gap-1 ${TONE[v.tone].fg}`}>
-      <StageIcon kind={v.icon} className="size-3 shrink-0" />
-      <span className="truncate">{stageSentence(v, t)}</span>
+    <span className={`flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10.5px] font-medium leading-4 ${tone.bg} ${tone.fg}`} title={sentence} {...data}>
+      <span className="sr-only">{sentence}</span>
+      <span aria-hidden className={`size-1.5 shrink-0 rounded-full @[18rem]:hidden ${tone.dot}`} />
+      <StageIcon kind={v.icon} className="hidden size-3 @[18rem]:block" />
+      {!taskIdInName(names, v.id) && <span aria-hidden className={`font-mono ${idTier}`}>{v.id}</span>}
+      <span aria-hidden className={mid}>{v.short}</span>
+      {v.round !== null && <span aria-hidden className={`font-mono tabular-nums ${mid}`}>R{v.round}</span>}
+      {extra && <span aria-hidden className="hidden font-mono tabular-nums @[18rem]:inline">{extra}</span>}
     </span>
   );
 }
 
-/** lucide 线条图标（不用 emoji）：file-text / hourglass / code / rotate-ccw / ban / circle-check / x */
+function ChipLine({ tone, icon, sentence }: { tone: StageTone; icon: IconKind; sentence: string }) {
+  return (
+    <span className={`mt-0.5 flex items-center gap-1 ${TONE[tone].fg}`}>
+      <StageIcon kind={icon} className="size-3 shrink-0" />
+      <span className="truncate">{sentence}</span>
+    </span>
+  );
+}
+
+/** lucide 线条图标（不用 emoji）：file-text / hourglass / code / rotate-ccw / ban / circle-check / x / eye */
 function StageIcon({ kind, className }: { kind: IconKind; className: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -114,6 +143,12 @@ const ICON_PATHS: Record<IconKind, ReactNode> = {
     <>
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />
+    </>
+  ),
+  review: (
+    <>
+      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+      <circle cx="12" cy="12" r="3" />
     </>
   ),
 };

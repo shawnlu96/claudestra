@@ -5,6 +5,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { agentListExtras, handleAgentInfoRoutes, type AgentInfoIo } from "../src/bridge/agent-info-routes";
 import type { Principal } from "../src/lib/principals";
+import type { LedgerReviewRef } from "../src/lib/ledger-read";
 
 const now = "2026-09-27T00:00:00.000Z";
 const owner: Principal = { id: "token:tok_owner", role: "owner", agents: ["*", "master"], createdAt: now };
@@ -223,6 +224,21 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     for (const p of [scoped, peerStar, partialOwner]) {
       expect((await agentListExtras(p, withLedger))("agent-t8c", {}).ledgerTask).toBeUndefined();
     }
+    expect(calls).toBe(1);
+  });
+  test("ledgerReview（审查员在审 / 审完的卡）同一道门；既执行又审查时两个字段都给", async () => {
+    let calls = 0;
+    const rv: LedgerReviewRef = { id: "ACPV1", round: 2, verdict: "pass", p0: 0, p1: 0, p2: 1 };
+    const withLedger = {
+      ...io,
+      ledgerTasks: () => new Map([["dual", { id: "E1", stage: "build" as const, round: 0 }]]),
+      ledgerReviews: () => (calls++, new Map([["review-pi", rv], ["dual", { ...rv, id: "R1", verdict: null }]])),
+    };
+    const own = await agentListExtras(owner, withLedger);
+    expect(own("agent-review-pi", {})).toMatchObject({ ledgerReview: rv });
+    expect("ledgerTask" in own("agent-review-pi", {})).toBe(false);
+    expect(own("dual", {})).toMatchObject({ ledgerTask: { id: "E1" }, ledgerReview: { id: "R1", verdict: null } });
+    for (const p of [scoped, peerStar]) expect((await agentListExtras(p, withLedger))("agent-review-pi", {}).ledgerReview).toBeUndefined();
     expect(calls).toBe(1);
   });
   test("读台账出错：列表照常出，只是不带 ledgerTask；库坏着时反复刷列表只报一次，恢复再报一次", async () => {

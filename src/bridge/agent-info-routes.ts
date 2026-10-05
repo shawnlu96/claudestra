@@ -15,7 +15,7 @@ import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
 import { heldAgentCounts } from "./held-queue.js";
 import { canReadLedger } from "../lib/devices.js";
-import { activeTasksByAgent, type LedgerTaskRef } from "../lib/ledger-read.js";
+import { activeReviewsByAgent, activeTasksByAgent, type LedgerReviewRef, type LedgerTaskRef } from "../lib/ledger-read.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { lpField } from "./fleet/lp-monitor.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
@@ -31,12 +31,18 @@ export interface AgentInfoIo {
   heldCounts?: () => Record<string, number>;
   /** 裸名 → 执行中的台账任务（lib/ledger-read.ts）；单测不给 = 台账里没有 */
   ledgerTasks?: () => Map<string, LedgerTaskRef>;
+  /** 裸名 → 它在审 / 审完的卡（审查员不绑卡，按事件推）；单测不给 = 没有 */
+  ledgerReviews?: () => Map<string, LedgerReviewRef>;
 }
 const defaultIo: AgentInfoIo = {
   readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals(), readMissions: () => readMissions(), heldCounts: () => heldAgentCounts(),
   ledgerTasks: () => {
     const db = ledgerDb();
     return db ? activeTasksByAgent(db) : new Map();
+  },
+  ledgerReviews: () => {
+    const db = ledgerDb();
+    return db ? activeReviewsByAgent(db) : new Map();
   },
 };
 
@@ -47,7 +53,9 @@ export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" 
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
  * 不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。sharedPeers 对 peer / 受限 token 不给——谁在共享是 owner 的事。
  */
-export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks"> = defaultIo): Promise<AgentListExtras> {
+type ExtrasIo = Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks" | "ledgerReviews">;
+
+export async function agentListExtras(principal: Principal, io: ExtrasIo = defaultIo): Promise<AgentListExtras> {
   const full = isFullScope(principal) && !principal.peer;
   const principals = full ? (await io.readPrincipals()).principals : [];
   const missions = principal.peer ? {} : ((await io.readMissions?.()) ?? {});
@@ -87,10 +95,15 @@ function teamField(principal: Principal, r?: Pick<RegistryAgent, "parent" | "tas
 /** 上一次读台账任务是否失败：日志只在「正常 → 出错」和恢复时各打一次，库坏着时每次刷列表不重复报 */
 let ledgerFailing = false;
 
-/** 执行者行尾的阶段小标（docs 10-ledger §4；与 T4 的 task 字符串不同名）。台账读不了只是少了小标，列表照常出 */
-function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks">): Map<string, LedgerTaskRef> | null {
+interface LedgerRows {
+  tasks: Map<string, LedgerTaskRef> | null;
+  reviews: Map<string, LedgerReviewRef> | null;
+}
+
+/** 执行者行尾的阶段小标（docs 10-ledger §4；与 T4 的 task 字符串不同名）+ 审查员的审查小标。台账读不了只是少了小标，列表照常出 */
+function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks" | "ledgerReviews">): LedgerRows | null {
   try {
-    const r = io.ledgerTasks?.() ?? null;
+    const r = { tasks: io.ledgerTasks?.() ?? null, reviews: io.ledgerReviews?.() ?? null };
     if (ledgerFailing) console.log("📒 GET /agents 读台账任务恢复");
     ledgerFailing = false;
     return r;
@@ -101,9 +114,12 @@ function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks">): Map<string, Ledg
   }
 }
 
-function ledgerField(ledger: Map<string, LedgerTaskRef> | null, name: string): { ledgerTask?: LedgerTaskRef } {
-  const t = ledger?.get(name.replace(/^agent-/, ""));
-  return t ? { ledgerTask: t } : {};
+/** 两个字段各管各的：同一 agent 既执行又审查时两个都给，怎么摆由网页定（features/chat/ledger-stage.ts） */
+function ledgerField(ledger: LedgerRows | null, name: string): { ledgerTask?: LedgerTaskRef; ledgerReview?: LedgerReviewRef } {
+  const bare = name.replace(/^agent-/, "");
+  const t = ledger?.tasks?.get(bare);
+  const r = ledger?.reviews?.get(bare);
+  return { ...(t ? { ledgerTask: t } : {}), ...(r ? { ledgerReview: r } : {}) };
 }
 
 /** 进行中的 Autopilot（侧栏 / 顶栏「Autopilot → 11:00」、菜单切换「开启 / 关闭 Autopilot」）；peer 看不到 */

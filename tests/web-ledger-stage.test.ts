@@ -1,7 +1,7 @@
 /** web/features/chat/ledger-stage.ts：侧栏行尾台账阶段小标的标签 / 色调 / 整句；lib/chat/agents.ts 的 ledgerTask 守卫与轮询签名 */
 import { describe, expect, test } from "bun:test";
-import { stageChipView, stageSentence, taskIdInName } from "@/features/chat/ledger-stage";
-import { agentExtraSig, parseLedgerTask } from "@/lib/chat/agents";
+import { reviewChipView, stageChipView, stageSentence, taskIdInName } from "@/features/chat/ledger-stage";
+import { agentExtraSig, parseLedgerReview, parseLedgerTask } from "@/lib/chat/agents";
 import { DICT } from "@/lib/i18n-dict";
 import { fillParams } from "@/lib/i18n-fill";
 import { STAGES } from "../src/lib/ledger-stages";
@@ -97,5 +97,32 @@ describe("列表轮询签名", () => {
     expect(sig({ id: "T6", stage: "fix", round: 1 })).not.toBe(a);
     expect(sig(null)).not.toBe(a);
     expect(sig(null)).toBe(sig(undefined));
+  });
+});
+
+describe("reviewChipView / parseLedgerReview", () => {
+  const rv = (verdict: "pass" | "changes" | "block" | null, p = [0, 0, 0], round = 2) => ({ id: "CLR1", round, verdict, p0: p[0], p1: p[1], p2: p[2] });
+  test("在审：主色、带轮次、没有 P 数；整句「在审 CLR1 · 第 2 轮」", () => {
+    expect(reviewChipView(rv(null), "zh", zh)).toEqual({ id: "CLR1", short: "在审", tone: "primary", icon: "review", round: 2, counts: "", sentence: "在审 CLR1 · 第 2 轮" });
+    expect(reviewChipView(rv(null), "en", en).sentence).toBe("Reviewing CLR1 · round 2");
+  });
+  test("审完：通过绿、要改 / 拦下红；行上只带不为 0 的 P 数，整句三个都写", () => {
+    expect(reviewChipView(rv("pass", [0, 0, 1]), "zh", zh)).toMatchObject({ short: "通过", tone: "success", counts: "P2·1" });
+    const c = reviewChipView(rv("changes", [0, 1, 3]), "zh", zh);
+    expect(c).toMatchObject({ short: "要改", tone: "error", counts: "P1·1 P2·3" });
+    expect(c.sentence).toBe("审完 CLR1 · 第 2 轮 · 要改 · P0 0 / P1 1 / P2 3");
+    expect(reviewChipView(rv("block", [1, 0, 0]), "en", en)).toMatchObject({ short: "Blocked", sentence: "Reviewed CLR1 · round 2 · Blocked · P0 1 / P1 0 / P2 0" });
+    expect(reviewChipView(rv("pass"), "zh", zh).counts).toBe("");
+    expect(reviewChipView(rv(null, [0, 0, 0], 0), "zh", zh).round).toBeNull(); // 进 review 前就派审：行上不挂 R0
+  });
+  test("守卫：id 不是字符串当没有；认不出的 verdict 当在审；计数不是非负整数按 0", () => {
+    expect(parseLedgerReview(null)).toBeNull();
+    expect(parseLedgerReview({ id: 3, round: 1 })).toBeNull();
+    expect(parseLedgerReview({ id: "X", round: 1.5, verdict: "maybe", p0: -1, p1: "2", p2: 4 })).toEqual({ id: "X", round: 0, verdict: null, p0: 0, p1: 0, p2: 4 });
+  });
+  test("轮询签名带上审查状态：从在审到审完、P 数变了都要重渲染", () => {
+    const base = { name: "review-pi", displayName: "review-pi", purpose: "", cwd: "", status: "active" as const };
+    const sig = (r: ReturnType<typeof rv> | null) => agentExtraSig({ ...base, ledgerReview: r });
+    expect(new Set([sig(null), sig(rv(null)), sig(rv("changes", [0, 1, 0])), sig(rv("changes", [0, 1, 2]))]).size).toBe(4);
   });
 });
