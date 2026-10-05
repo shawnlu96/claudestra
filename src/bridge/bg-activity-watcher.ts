@@ -15,7 +15,10 @@
  * web 前端可以不依赖 Discord 自行渲染进度线）。
  *
  * 结束判定：subagent 认记录里的真信号（答复 / 中断 / meta 的 stoppedByUser，规则见 lib/subagent-progress.ts），
- * 在跑工具时静默再久也不收尾；后台 shell 仍是 IDLE_DONE_MS 不增长即结束。
+ * 在跑工具时静默再久也不收尾；后台 shell 只认 CC 追加的独立末行 `[exited with code N]`（lib/bg-shell-progress.ts），
+ * 静默再久也不收尾（重定向日志的 bun test 可以十几分钟不写一字）；输出文件消失 = 状态未知，不当成功；
+ * 输出读不到（权限 / IO）不收尾、照旧重试，但经事件 / 快照的 progress.unreadable 告诉前端「状态未知」。
+ * 已跟踪 shell 的最小结局按 agent-session 持久化，web 刷新 / bridge 重启后据此还原。
  *
  * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 只记 baseline（已存在的
  * 文件全部标记 seen 不开流），之后只对新出现的文件开活动 —— bridge 重启不会把历史
@@ -24,8 +27,8 @@
  * registry 的 agent，22 分钟后进入列表时存量 109 个 subagent jsonl 全被开成「运行中」）。
  */
 
-import { existsSync } from "fs";
-import { lstat, readdir, stat } from "fs/promises";
+import { constants as fsConstants, existsSync } from "fs";
+import { access, lstat, readdir, stat } from "fs/promises";
 import { basename, join } from "path";
 import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
 import { readActiveAgents } from "../lib/registry.js";
@@ -34,12 +37,13 @@ import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
 import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
+import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
+import { feedShellChunk, newShellProgress, settleShellTail, type ShellProgress } from "../lib/bg-shell-progress.js";
 import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress } from "../lib/subagent-progress.js";
 
 const POLL_MS = 10_000;
 const FLUSH_MS = 2_500; // 子区推送 debounce（Discord 限速友好）
-const IDLE_DONE_MS = 3 * 60_000; // 后台 shell：文件 3min 不增长 → 活动结束
 const SUBAGENT_SILENT_LIMIT_MS = 30 * 60_000; // subagent 既没交答复也没被停止（在跑工具 / 等模型）、却 30min 一行不写 → 按「无动静」收尾
 const MAX_MSG_LEN = 1900;
 const MAX_ACTIVE_PER_AGENT = 8; // 防 thread 轰炸（workflow 大扇出时超出的只发事件）
@@ -54,6 +58,7 @@ interface Activity {
   id: string;
   kind: BgActivityKind;
   agentName: string;
+  sessionId: string;
   ownerChatId: string;
   filePath: string;
   threadId: string | null; // 建 thread 失败 → null，只发事件
@@ -70,6 +75,12 @@ interface Activity {
   recent: string[];
   meta: SubagentMeta; // subagent 才有内容（描述 / 类型 / 模型 / 是否被停止），每轮 tick 重读
   progress: SubagentProgress;
+  /** shell 才用：跨读的半行 / 流式解码状态 */
+  shell: ShellProgress;
+  /** shell 读到独立退出行后的退出码（0 / 非 0 都是「进程已结束」） */
+  exitCode: number | null;
+  /** shell 输出文件当前读不了（权限 / IO）：照旧每轮重试，同时经事件 / 快照告诉前端「状态未知」，读通后清掉 */
+  unreadable: boolean;
 }
 
 const RECENT_MAX = 100;
@@ -89,6 +100,12 @@ const shellCandidates = new Map<string, number>();
 const SHELL_CONFIRM_TIMEOUT_MS = 60_000;
 /** 按 agent-session 记「首次进入监视」——见文件头「重启防重放」 */
 const baseline = new BaselineKeys();
+/** 测试接缝：时钟 / agent 列表 / shell 任务目录（默认即生产行为；tests/bg-activity-shell*.test.ts 用真实文件 + 可控时钟驱动） */
+interface WatcherDeps {
+  now: () => number;
+  agents: () => Promise<AgentLite[]>;
+  shellDir: (cwd: string, sessionId: string) => string;
+}
 let ticking = false; // tick 重入保护：首轮 baseline 超过 POLL_MS 时 interval 会并发进入
 let tickCount = 0;
 
@@ -131,6 +148,14 @@ async function watchableAgents(): Promise<AgentLite[]> {
   return (await readActiveAgents())
     .filter((a) => a.channelId && a.sessionId && a.cwd)
     .map((a) => ({ name: a.name, channelId: a.channelId!, cwd: a.cwd!, sessionId: a.sessionId! }));
+}
+
+const deps: WatcherDeps = { now: () => Date.now(), agents: watchableAgents, shellDir: shellTasksDirFor };
+
+/** 测试用：换掉部分依赖后跑一轮 poll（与 setInterval 那轮同一个 tick） */
+export function pollBgActivitiesForTest(over: Partial<WatcherDeps>): Promise<void> {
+  Object.assign(deps, over);
+  return tick();
 }
 
 // ── 活动生命周期 ───────────────────────────────────────────────────────
@@ -189,13 +214,14 @@ async function startActivity(
     id: basename(filePath).replace(/\.(jsonl|output)$/, ""),
     kind,
     agentName: agent.name,
+    sessionId: agent.sessionId,
     ownerChatId: agent.channelId,
     filePath,
     threadId,
     adapter,
     offset: 0,
-    lastGrowth: Date.now(),
-    startedAt: Date.now(),
+    lastGrowth: deps.now(),
+    startedAt: deps.now(),
     queue: [],
     flushTimer: null,
     eventCount: 0,
@@ -203,8 +229,12 @@ async function startActivity(
     recent: [],
     meta,
     progress: EMPTY_PROGRESS,
+    shell: newShellProgress(),
+    exitCode: null,
+    unreadable: false,
   };
   activities.set(filePath, act);
+  if (kind === "shell") await shellResults.remember(act);
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
@@ -214,7 +244,7 @@ async function startActivity(
     agent: agent.name,
     chatId: agent.channelId,
     type: "bg_task_started",
-    data: { kind, id: act.id, threadId, title, agentType: meta.agentType, model: meta.model },
+    data: { kind, id: act.id, threadId, title, agentType: meta.agentType, model: meta.model, ...(kind === "shell" ? { progress: progressView(act) } : {}) },
   });
 }
 
@@ -223,51 +253,94 @@ async function consume(act: Activity): Promise<void> {
   let size = 0;
   try {
     size = (await stat(act.filePath)).size;
-  } catch {
-    // 文件消失（session 清理）→ 直接收尾
-    await finalize(act, "idle", "文件已消失");
+  } catch (e) {
+    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到退出行就不知道进程是否结束 → 状态未知（不是成功）。
+    // shell 的其它读失败（权限 / IO）不下结论（下轮再读），但要让前端知道已看不到它了
+    if (act.kind === "shell" && (e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
+    await finalize(act, act.kind === "shell" ? "unknown" : "idle", "文件已消失");
     return;
   }
+  if (act.kind === "shell") return consumeShell(act, size);
   if (size <= act.offset) return;
   const buf = new Uint8Array(await Bun.file(act.filePath).slice(act.offset, size).arrayBuffer());
   // jsonl 只消费到最后一个换行（字节偏移）：CC 可能正写到半行，跳过它会丢掉恰好是收尾信号的那条记录
-  const used = act.kind === "shell" ? buf.length : buf.lastIndexOf(10) + 1;
+  const used = buf.lastIndexOf(10) + 1;
   const chunk = new TextDecoder().decode(buf.subarray(0, used));
   act.offset += used;
-  if (used) act.lastGrowth = Date.now(); // 只剩同一段半行残尾不算增长，否则崩溃留下的残行会让静默计时永远归零
+  if (used) act.lastGrowth = deps.now(); // 只剩同一段半行残尾不算增长，否则崩溃留下的残行会让静默计时永远归零
 
-  if (act.kind === "shell") {
-    for (const line of chunk.split("\n")) {
-      if (line.trim()) act.queue.push(line.slice(0, 300));
+  for (const line of chunk.split("\n")) {
+    if (!line.trim()) continue;
+    let rec: any;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
     }
-  } else {
-    for (const line of chunk.split("\n")) {
-      if (!line.trim()) continue;
-      let rec: any;
-      try {
-        rec = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      act.progress = nextProgress(act.progress, rec);
-      if (rec.type !== "assistant") continue;
-      const content = rec.message?.content;
-      if (!Array.isArray(content)) continue;
-      for (const b of content) {
-        if (b?.type === "tool_use" && b.name) {
-          act.queue.push(`-# 🔧 ${formatTool(b.name, b.input)}`);
-          act.eventCount++;
-        } else if (b?.type === "text" && b.text?.trim()) {
-          const t = b.text.trim();
-          act.queue.push(`💬 ${t.length > MAX_TEXT_PER_ITEM ? t.slice(0, MAX_TEXT_PER_ITEM) + "…" : t}`);
-          act.eventCount++;
-        }
+    act.progress = nextProgress(act.progress, rec);
+    if (rec.type !== "assistant") continue;
+    const content = rec.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b?.type === "tool_use" && b.name) {
+        act.queue.push(`-# 🔧 ${formatTool(b.name, b.input)}`);
+        act.eventCount++;
+      } else if (b?.type === "text" && b.text?.trim()) {
+        const t = b.text.trim();
+        act.queue.push(`💬 ${t.length > MAX_TEXT_PER_ITEM ? t.slice(0, MAX_TEXT_PER_ITEM) + "…" : t}`);
+        act.eventCount++;
       }
     }
   }
+  scheduleFlush(act);
+}
+
+function scheduleFlush(act: Activity): void {
   if (act.queue.length && !act.flushTimer) {
     act.flushTimer = setTimeout(() => void flush(act), FLUSH_MS);
   }
+}
+
+/** shell：增量读字节，半行 / 多字节靠 ShellProgress 拼回；读到独立退出行记下退出码（tick 里收尾）。
+ *  本轮没增长且残尾恰是完整退出行（CC 没补换行）→ 也认 */
+async function consumeShell(act: Activity, size: number): Promise<void> {
+  if (size > act.offset) {
+    let buf: Uint8Array;
+    try {
+      buf = new Uint8Array(await Bun.file(act.filePath).slice(act.offset, size).arrayBuffer());
+    } catch {
+      return setUnreadable(act, true); // 读失败不推进 offset、不下结论，只标「读不到」
+    }
+    setUnreadable(act, false);
+    act.offset += buf.length;
+    act.lastGrowth = deps.now();
+    const r = feedShellChunk(act.shell, buf);
+    act.queue.push(...r.lines);
+    act.exitCode = r.exitCode;
+  } else {
+    // 没新字节时 stat 照样成功，「读得到」要单独确认，否则 chmod 000 的文件会被误报恢复
+    setUnreadable(act, !(await access(act.filePath, fsConstants.R_OK).then(() => true, () => false)));
+    if (act.unreadable) return;
+    const tail = settleShellTail(act.shell);
+    if (tail) {
+      act.queue.push(tail.line);
+      act.exitCode = tail.exitCode;
+    }
+  }
+  scheduleFlush(act);
+}
+
+/** 「读不到」状态切换时立刻发一条空 items 的 update（只变化时发），进度里带 unreadable；快照走 progressView 同一字段 */
+function setUnreadable(act: Activity, v: boolean): void {
+  if (act.unreadable === v) return;
+  act.unreadable = v;
+  console.log(`🧵 bg shell 输出${v ? "读不到（状态未知，继续重试）" : "恢复可读"}: ${act.agentName} ${basename(act.filePath)}`);
+  emitEvent({
+    agent: act.agentName,
+    chatId: act.ownerChatId,
+    type: "bg_task_update",
+    data: { kind: act.kind, id: act.id, lines: 0, items: [], threadId: act.threadId, progress: progressView(act) },
+  });
 }
 
 async function flush(act: Activity): Promise<void> {
@@ -304,19 +377,24 @@ async function flush(act: Activity): Promise<void> {
   }
 }
 
-/** 卡片进度（web 渲染耗时 / 上下文 / 静默时长用）；shell 没有这些，只给 null */
+/** 卡片进度（web 渲染耗时 / 上下文 / 静默时长用）；shell 只有开始时刻与最后一次输出时刻（刷新后「已多久无输出」靠它），
+ *  读不到输出时多带 unreadable */
 function progressView(act: Activity) {
   const p = act.progress;
-  return act.kind === "subagent" ? { startedTs: p.firstTs ?? act.startedAt, lastTs: p.lastTs, ctxTokens: p.ctxTokens, toolCount: p.toolCount } : null;
+  if (act.kind === "subagent") return { startedTs: p.firstTs ?? act.startedAt, lastTs: p.lastTs, ctxTokens: p.ctxTokens, toolCount: p.toolCount };
+  return { startedTs: act.startedAt, lastTs: act.lastGrowth, ...(act.unreadable ? { unreadable: true } : {}) };
 }
 
-async function finalize(act: Activity, status: "done" | "stopped" | "idle" = "idle", reason: string = status): Promise<void> {
+/** 收尾状态：subagent 沿用 done / stopped / idle；shell 只有 done（读到退出行，退出码另带）与 unknown（输出文件消失，不知结局） */
+type FinalStatus = "done" | "stopped" | "idle" | "unknown";
+
+async function finalize(act: Activity, status: FinalStatus = "idle", reason: string = status): Promise<void> {
   if (act.finished) return;
   act.finished = true;
   await flush(act).catch(() => {});
   activities.delete(act.key);
   const t0 = act.progress.firstTs ?? act.startedAt;
-  const durationMs = (status === "done" ? (act.progress.lastTs ?? Date.now()) : Date.now()) - t0;
+  const durationMs = (status === "done" ? (act.progress.lastTs ?? deps.now()) : deps.now()) - t0;
   const mins = (durationMs / 60_000).toFixed(1);
   console.log(`🧵 bg 活动结束: ${act.agentName} ${basename(act.filePath)}（${mins}min, ${reason}）`);
   recordMetric("bg_activity_completed", { agent: act.agentName, meta: { kind: act.kind } });
@@ -324,12 +402,19 @@ async function finalize(act: Activity, status: "done" | "stopped" | "idle" = "id
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_completed",
-    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status },
+    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, ...(act.kind === "shell" ? { exitCode: act.exitCode } : {}) },
   });
+  if (act.kind === "shell") await shellResults.remember(act, durationMs, status === "done" ? "done" : "unknown");
   if (act.threadId && act.adapter) {
+    const head =
+      act.kind === "subagent"
+        ? `${{ done: "✅", stopped: "⏹", idle: "⏸", unknown: "❔" }[status]} subagent 结束`
+        : act.exitCode === null
+          ? "❔ 后台任务状态未知（输出文件已消失，无法确认是否结束）"
+          : `${act.exitCode === 0 ? "✅" : "❌"} 后台任务已退出 · exit ${act.exitCode}`;
     try {
       await act.adapter.send(act.threadId, {
-        text: `${{ done: "✅", stopped: "⏹", idle: "⏸" }[status]} ${act.kind === "subagent" ? "subagent 结束" : "后台任务结束"} · ${mins}min${act.eventCount ? ` · ${act.eventCount} 条动态` : ""}`,
+        text: `${head} · ${mins}min${act.eventCount ? ` · ${act.eventCount} 条动态` : ""}`,
       });
       await act.adapter.archiveThread?.(act.threadId);
     } catch { /* non-critical */ }
@@ -356,13 +441,14 @@ async function tick(): Promise<void> {
 const BURST_LIMIT = 30;
 
 async function tickInner(): Promise<void> {
-  const agents = await watchableAgents();
+  const agents = await deps.agents();
 
   for (const agent of agents) {
     // 该 agent-session 首次被扫到 → 本轮只记存量(baseline),不开流
     const first = baseline.first(agent.name, agent.sessionId);
+    await shellResults.select(agent.name, agent.sessionId);
     const subFiles = await listFiles(subagentsDir(agent.cwd, agent.sessionId), ".jsonl");
-    const shellFiles = await listFiles(shellTasksDirFor(agent.cwd, agent.sessionId), ".output");
+    const shellFiles = await listFiles(deps.shellDir(agent.cwd, agent.sessionId), ".output");
     // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
     const fresh = [...subFiles, ...shellFiles].filter((f) => !seen.has(f));
     const suppressBurst = !first && fresh.length > BURST_LIMIT;
@@ -390,9 +476,9 @@ async function tickInner(): Promise<void> {
         if (kind === "shell") {
           const taskId = basename(f).replace(/\.output$/, "");
           if (!(await isRealBgTask(agent, taskId))) {
-            const t0 = shellCandidates.get(f) ?? Date.now();
+            const t0 = shellCandidates.get(f) ?? deps.now();
             shellCandidates.set(f, t0);
-            if (Date.now() - t0 > SHELL_CONFIRM_TIMEOUT_MS) {
+            if (deps.now() - t0 > SHELL_CONFIRM_TIMEOUT_MS) {
               seen.add(f); // 超时确认不了 = 前台瞬时文件，永久跳过
               shellCandidates.delete(f);
             }
@@ -416,9 +502,14 @@ async function tickInner(): Promise<void> {
   for (const act of [...activities.values()]) {
     await consume(act).catch(() => {});
     if (act.finished) continue;
-    const silentMs = Date.now() - act.lastGrowth;
-    if (act.kind === "subagent") act.meta = readSubagentMeta(act.filePath); // 停止是事后写进 meta 的
-    const end = act.kind === "subagent" ? subagentEndStatus(act.progress, act.meta, silentMs, SUBAGENT_SILENT_LIMIT_MS) : silentMs > IDLE_DONE_MS ? "idle" : null;
+    if (act.kind === "shell") {
+      // 只认退出行；静默多久都保持跟踪（不按时间收尾）
+      if (act.exitCode !== null) await finalize(act, "done", `exit ${act.exitCode}`).catch(() => {});
+      continue;
+    }
+    const silentMs = deps.now() - act.lastGrowth;
+    act.meta = readSubagentMeta(act.filePath); // 停止是事后写进 meta 的
+    const end = subagentEndStatus(act.progress, act.meta, silentMs, SUBAGENT_SILENT_LIMIT_MS);
     if (end) await finalize(act, end).catch(() => {});
   }
 
@@ -452,11 +543,15 @@ export function activeBgActivities(): number {
   return activities.size;
 }
 
-/** web 连流后的 replay：某 agent 当前活跃（未 finalize）的 bg 任务快照。
+/** web 连流后的 replay：某 agent 当前活跃（未 finalize）的 bg 任务快照，外加近期已收尾的 shell（带 end）。
  *  lines = 已 flush 的尾部行（≤RECENT_MAX）;刷新后前端据此重建面板。 */
 type BgTaskSnapshot = { id: string; kind: BgActivityKind; title: string; startedAt: number; lines: string[] } & Record<string, unknown>;
+
+const shellResults = new ShellResults();
+
 export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
-  const out: BgTaskSnapshot[] = [];
+  const liveIds = new Set([...activities.values()].filter((a) => a.agentName === agentName).map((a) => a.id));
+  const out: BgTaskSnapshot[] = shellResults.snapshots(agentName).filter((s) => !liveIds.has(s.id));
   for (const act of activities.values()) {
     if (act.agentName !== agentName || act.finished) continue;
     if (act.kind === "subagent" && !act.meta.description) act.meta = readSubagentMeta(act.filePath); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员

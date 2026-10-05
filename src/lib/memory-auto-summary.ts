@@ -9,6 +9,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { autoClip, autoDecisionAllowed, autoFiles, autoSource, taskEvents } from "./memory-auto-common.js";
 import { isTestProcess } from "./test-guard.js";
 import { readStreamCapped } from "./quota-keychain.js";
+import { normalizedFamily } from "./scheduler-review.js";
 
 export interface SummaryDeps {
   files?(task: LedgerTask): Promise<string[] | null>;
@@ -38,15 +39,35 @@ export async function configuredLesson(prompt: string, env = process.env,
   } catch { console.warn("[memory-auto] lesson request failed; facts only"); return null; }
 }
 
-function reviewLessons(events: readonly LedgerEvent[]): string {
-  const rounds = new Map<number, { family: string; probe: string }[]>();
+interface RoundP1 { families: Map<string, string>; partial: boolean }
+
+/** Every review of a round counts: P1 families union under the canonical name; an unreadable report keeps the round unproven. */
+function reviewRounds(events: readonly LedgerEvent[]): Map<number, RoundP1> {
+  const rounds = new Map<number, RoundP1>();
   for (const e of events.filter((e) => e.kind === "review")) {
-    const rows = Array.isArray(e.data.findings) ? e.data.findings as { severity: string; family: string; probe: string }[] : [];
-    rounds.set(Number(e.data.round), rows.filter((f) => f.severity === "P1"));
+    const n = e.data.round;
+    if (typeof n !== "number" || !Number.isInteger(n)) continue;
+    const round = rounds.get(n) ?? { families: new Map<string, string>(), partial: false };
+    rounds.set(n, round);
+    const rows = Array.isArray(e.data.findings) ? e.data.findings as { severity?: unknown; family?: unknown }[] : null;
+    const p1 = rows?.filter((f) => !!f && f.severity === "P1") ?? [];
+    if (!rows || p1.some((f) => typeof f.family !== "string" || !normalizedFamily(f.family)) ||
+      (e.data.p1 !== undefined && Number(e.data.p1) !== p1.length)) round.partial = true;
+    for (const f of p1) if (typeof f.family === "string" && normalizedFamily(f.family) && !round.families.has(normalizedFamily(f.family))) {
+      round.families.set(normalizedFamily(f.family), f.family);
+    }
   }
-  return [...rounds].sort(([a], [b]) => a - b).map(([n, rows]) => {
+  return rounds;
+}
+
+function reviewLessons(events: readonly LedgerEvent[]): string {
+  const rounds = reviewRounds(events);
+  return [...rounds].sort(([a], [b]) => a - b).map(([n, { families, partial }]) => {
     const next = rounds.get(n + 1);
-    return `r${n}: ${rows.map((f) => `${f.family}(${next ? next.some((r) => r.family === f.family) ? "持续" : "下一轮消失" : "无下一轮"})`).join(",") || "无P1"}`;
+    const fate = (key: string) => !next ? "无下一轮" : next.families.has(key) ? "持续" : next.partial ? "下一轮不明" : "下一轮消失";
+    const rows = [...families].map(([key, name]) => `${name}(${fate(key)})`);
+    if (partial) rows.push("审查不全");
+    return `r${n}: ${rows.join(",") || "无P1"}`;
   }).join("; ");
 }
 
