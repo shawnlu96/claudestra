@@ -43,6 +43,53 @@ describe("分块与 pump", () => {
     await expect(pumpBody(slow, (c) => seen.push(c ? dec(c) : null), ac.signal)).rejects.toThrow(/aborted/);
     expect(seen).toEqual(["x"]);
   });
+
+  /** 推流源（SSE 那种：start 里推、之后由定时器推）：记下 cancel 有没有被调 */
+  const pushSource = () => {
+    const s = { cancelled: false, push: (_: string) => {} };
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        s.push = (t) => c.enqueue(enc(t));
+        c.enqueue(enc("hello"));
+      },
+      cancel() {
+        s.cancelled = true;
+      },
+    });
+    return { s, stream };
+  };
+
+  test("pumpBody：read 挂着时 abort → 源流立刻被 cancel、不补发 end", async () => {
+    const { s, stream } = pushSource();
+    const ac = new AbortController();
+    const seen: (string | null)[] = [];
+    const done = pumpBody(stream, (c) => seen.push(c ? dec(c) : null), ac.signal);
+    await Bun.sleep(10); // 第一块已发，第二次 read 挂着等下一块
+    ac.abort();
+    await expect(done).rejects.toThrow(/aborted/);
+    expect(s.cancelled).toBe(true);
+    expect(seen).toEqual(["hello"]);
+  });
+
+  test("pumpBody：emit 抛错 → 源流被 cancel、错误原样抛出", async () => {
+    const { s, stream } = pushSource();
+    await expect(pumpBody(stream, () => { throw new Error("send failed"); })).rejects.toThrow(/send failed/);
+    expect(s.cancelled).toBe(true);
+  });
+
+  test("pumpBody：正常读完不 cancel 源流，abort 监听已摘掉", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(enc("ab")); c.close(); },
+      cancel() { cancelled = true; },
+    });
+    const ac = new AbortController();
+    const seen: (string | null)[] = [];
+    await pumpBody(stream, (c) => seen.push(c ? dec(c) : null), ac.signal);
+    ac.abort(); // 读完后的 abort 不该再碰源流
+    expect(seen).toEqual(["ab", null]);
+    expect(cancelled).toBe(false);
+  });
 });
 
 describe("streamSink 与 collectBody", () => {
