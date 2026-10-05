@@ -4,10 +4,7 @@ import { reportBasis, storedBasis } from "../src/lib/review-converge-report.js";
 import { convergeReview } from "../src/lib/review-converge.js";
 import type { ReviewFacts, ReviewFinding } from "../src/lib/scheduler-review.js";
 
-/**
- * followup-reliability-MIX1: PR624 r1 named unbound-old-failed-turn a regression P1 under 「[回归;验收线 6]」. The public
- * submit schema carries no `basis`, so the report text is the only basis; a mixed marker read as none demoted the P1 as no_basis.
- */
+/** The public submit schema carries no `basis`: for a remote verdict the report's marker text is the only basis a P1 has. */
 const PR624_REPORT = [
   "# PR624 r1 审查",
   "",
@@ -40,6 +37,27 @@ describe("markers that mix several complete labels", () => {
     expect(basisFromText("[验收线 0] 另见 [回归;验收线 6]")).toBe("acceptance:6");
   });
 
+  test("a marker closes with its own bracket", () => {
+    for (const t of ["[回归;验收线 6)", "(回归;验收线 6]", "[回归;验收线 6）", "（回归;验收线 6]", "【验收线 6］", "［验收线 6】", "（回归】"])
+      expect(basisFromText(t)).toBeNull();
+    expect(basisFromText("[回归;验收线 6） 另见 （验收线 3）")).toBe("acceptance:3");
+  });
+
+  test("a long acceptance list has no length cap", () => {
+    const list = Array.from({ length: 80 }, (_, i) => i + 1).join(",");
+    expect(basisFromText(`[验收线 ${list}]`)).toBe("acceptance:1");
+    expect(basisFromText(`[回归; 验收线 ${list}, 1000]`)).toBeNull();
+  });
+
+  test("the bare field only counts in a heading, outside any bracket, with a clean right edge", () => {
+    for (const t of ["[regression; acceptance:6oops]", "[regression; acceptance:6; acceptance:0]", "Ordinary prose refers to acceptance:6oops.",
+      "Ordinary prose refers to acceptance:6.", "## F acceptance:6oops", "## F [regression; acceptance:6)", "## F [note acceptance:6]",
+      "## F （x acceptance:6", "## F acceptance:6]"]) expect(basisFromText(t)).toBeNull();
+    expect(basisFromText("[regression; acceptance:6; acceptance:0]\n[回归]")).toBe("regression");
+    expect(basisFromText("说明\n## F acceptance:6. 槽位")).toBe("acceptance:6");
+    expect(basisFromText("## F [note] acceptance:6")).toBe("acceptance:6");
+  });
+
   test("the structured field still outranks any marker", () => {
     expect(findingBasis({ findingId: "F", family: "f", probe: "[回归;验收线 6] x", basis: "regression" })).toBe("regression");
     expect(findingBasis({ findingId: "F", family: "f", probe: "[验收线 2;验收线 6] x", basis: "acceptance:3" })).toBe("acceptance:3");
@@ -69,6 +87,15 @@ describe("PR624 unbound-old-failed-turn keeps its P1 through the report path", (
     const c = convergeReview([], facts([own, storedBare]), null);
     expect(c.facts.findings.map((x) => x.severity)).toEqual(["P1", "P2"]);
     expect(c.downgrade?.items).toEqual([{ findingId: "card-copy-wording", family: "copy", probe: "文案措辞", why: "no_basis" }]);
+  });
+
+  test("malformed markers and prose fields leave a no-typed-basis P1 to demote; a long list keeps it", () => {
+    const list = Array.from({ length: 80 }, (_, i) => i + 1).join(",");
+    const probes = ["[回归;验收线 6) x", "(回归;验收线 6] x", "[regression; acceptance:6oops] x", "[regression; acceptance:6; acceptance:0] x",
+      "Ordinary prose refers to acceptance:6oops.", `[验收线 ${list}] x`];
+    const c = convergeReview([], facts(probes.map((probe, i) => ({ findingId: `m${i}`, family: "f", severity: "P1", probe }))), null);
+    expect(c.facts.findings.map((x) => x.severity)).toEqual(["P2", "P2", "P2", "P2", "P2", "P1"]);
+    expect(c.downgrade?.items.map((x) => [x.findingId, x.why])).toEqual([0, 1, 2, 3, 4].map((i) => [`m${i}`, "no_basis"]));
   });
 
   test("a mixed marker stays with its own finding: the next heading and a neighbour's line do not inherit it", () => {

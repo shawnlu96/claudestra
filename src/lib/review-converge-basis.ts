@@ -8,13 +8,16 @@
 export type FindingBasis = `acceptance:${number}` | "regression";
 
 const FIELD = /^(?:acceptance:([1-9]\d{0,2})|regression)$/;
-/** A bracketed marker: ASCII / full-width square brackets, 【】 or full-width parentheses, on one line. */
-const MARK = /[[【［（]([^[\]【】［］（）\r\n]{1,200})[\]】］）]/g;
+/** A bracketed marker on one line, closed by its own bracket: [ ], 【 】, ［ ］ or （ ）. A mismatched pair is no marker. */
+const MARK = /\[([^[\]【】［］（）\r\n]+)\]|【([^[\]【】［］（）\r\n]+)】|［([^[\]【】［］（）\r\n]+)］|（([^[\]【】［］（）\r\n]+)）/g;
+/** Any bracketed span, paired or not (an unclosed one runs to the line end): its content is never read as a bare field. */
+const SPAN = /[[【［（][^[\]【】［］（）\r\n]*(?:[\]】］）]|$)/gm;
 /** One label inside a marker: 「验收线 N」 (any spelling), 「回归」, or a bare N continuing an acceptance list. */
 const ITEM = /\s*(?:(?:验收线|验收|acceptance)\s*[#:：]?\s*([1-9]\d{0,2})(?!\d)|(回归|regression)(?![a-z])|#?\s*([1-9]\d{0,2})(?!\d))\s*/iy;
 const SEP = /(?:[、,，;；/&]|和|及|与|and(?![a-z]))\s*/iy;
-/** The field spelling written bare in a report heading (「acceptance:1 and acceptance:2」): the first one counts. */
-const MARK_FIELD = /(?<![\w-])acceptance:([1-9]\d{0,2})(?!\d)/i;
+/** The field spelling written bare in a Markdown heading (「## F1 acceptance:1 and acceptance:2」): the first one counts. */
+const MARK_FIELD = /(?<![\w-])acceptance:([1-9]\d{0,2})(?![\w\-\]】］）])/i;
+const HEADING = /^\s*#{1,6}\s.*$/gm;
 
 /**
  * A marker's labels, or null unless the whole content is labels: 「[验收线 1、2]」「[回归;验收线 6]」「[验收线 2 / 验收线 6]」.
@@ -47,12 +50,14 @@ export function basisField(v: unknown): FindingBasis | null {
 export function basisFromText(text: string): FindingBasis | null {
   let regression = false;
   for (const m of text.matchAll(MARK)) {
-    const labels = markLabels(m[1]);
+    const labels = markLabels(m[1] ?? m[2] ?? m[3] ?? m[4]);
     if (labels?.lines.length) return `acceptance:${labels.lines[0]}`;
     regression ||= !!labels?.regression;
   }
-  const n = MARK_FIELD.exec(text)?.[1];
-  if (n) return `acceptance:${Number(n)}`;
+  for (const [heading] of text.matchAll(HEADING)) {
+    const n = MARK_FIELD.exec(heading.replace(SPAN, " "))?.[1];
+    if (n) return `acceptance:${Number(n)}`;
+  }
   return regression ? "regression" : null;
 }
 
