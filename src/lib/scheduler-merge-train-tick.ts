@@ -14,6 +14,7 @@ import { stateDir } from "./state-dir.js";
 import { isTestProcess } from "./test-guard.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
@@ -73,27 +74,37 @@ const SHA = /^[a-f0-9]{40}$/i;
 const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/;
 
 /**
- * Auto, non-ui code cards in `merge` that either wait for the project merge slot or hold it in ready / updating, with a
- * passing review on the current head. A frozen queue, a manual / observe card (PM hold) or an unknown merge intent is never a candidate.
+ * Auto code cards in `merge` that either wait for the project merge slot or hold it in ready / updating, with a passing review on the
+ * current head. A frozen queue, a manual / observe card (PM hold) or an unknown merge intent is never a candidate. Trains never carry
+ * ui cards (`ui` null); the manual merge queue's fairness check (manual-merge-queue.ts owedToAuto) passes `{ now }` to also see the ui
+ * cards whose screenshot acceptance holds (uiMergeRefusal) — every card the auto tick may legally merge — so no legal auto card
+ * starves behind a run of manual requests.
  */
-export function trainCandidates(db: Database, project: string): TrainCandidate[] {
+export function mergeCandidates(db: Database, project: string, ui: { now: number } | null): TrainCandidate[] {
   if (getMeta(db, project).queueFrozen.frozen) return [];
-  const rows = db.query(`SELECT t.id FROM tasks t JOIN task_workflows w ON w.taskId = t.id WHERE t.project = ? AND t.stage = 'merge'
-    AND t.kind = 'code' AND w.mode = 'auto' AND w.template != 'ui' AND w.specRev = t.specRev ORDER BY t.updatedAt, t.id`).all(project) as { id: string }[];
+  const rows = db.query(`SELECT t.id, w.template FROM tasks t JOIN task_workflows w ON w.taskId = t.id WHERE t.project = ? AND t.stage = 'merge'
+    AND t.kind = 'code' AND w.mode = 'auto' AND w.specRev = t.specRev ${ui ? "" : "AND w.template != 'ui'"} ORDER BY t.updatedAt, t.id`).all(project) as
+    { id: string; template: string }[];
   const out: TrainCandidate[] = [];
-  for (const { id } of rows) {
+  for (const { id, template } of rows) {
     const task = getTask(db, id);
     if (!task || !SHA.test(task.headSHA ?? "") || !PR_URL.test(task.pr ?? "") || !task.branch) continue;
     const open = db.query(`SELECT i.id, i.status, m.phase FROM scheduler_intents i LEFT JOIN scheduler_merges m ON m.intentId = i.id
       WHERE i.taskId = ? AND i.action = 'merge' AND i.status IN ('pending','submitted','unknown')`).all(id) as { status: string; phase: string | null }[];
     if (open.some((i) => i.status === "unknown" || (i.phase && !["ready", "updating"].includes(i.phase)))) continue;
+    // merged at this head already (a card without auto deploy stays in `merge` for the PM): not waiting for anything
+    if (db.query("SELECT 1 FROM scheduler_merges WHERE taskId = ? AND lower(reviewedHead) = lower(?) AND phase = 'merged'").get(id, task.headSHA!)) continue;
     const review = currentReviewFacts(task, listEvents(db, { project, target: id }));
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) continue;
+    if (ui && template === "ui" && uiMergeRefusal(db, task, ui.now)) continue;
     out.push({ taskId: id, prRef: task.pr!, head: task.headSHA! });
   }
   return out;
 }
+
+/** The train's candidates: the auto, non-ui cards above. */
+export const trainCandidates = (db: Database, project: string): TrainCandidate[] => mergeCandidates(db, project, null);
 
 /** merged = its own merge run recorded the merge at this head; gone = it left the train's reach (head, stage, PM hold). */
 export function memberStatusOf(db: Database, taskId: string, head: string): MemberStatus {

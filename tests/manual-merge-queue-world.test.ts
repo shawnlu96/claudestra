@@ -5,6 +5,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bindHash } from "../src/lib/ask-bind.js";
+import { answerAsk, openAskFull } from "../src/lib/ledger-asks.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -47,3 +49,28 @@ export const manualReviewArgs = (id: string, head: string, findings: string, rev
 
 export const requestArgs = (c: { taskId: string; head: string; reviewSeq: number }, ...extra: string[]) =>
   ["manual-merge-request", c.taskId, "--head", c.head, "--spec-rev", "1", "--round", "1", "--review-seq", String(c.reviewSeq), "--reason", "人工审过，排队合并", ...extra];
+
+/** An owner authorization on the card, bound like every authorize ask (approve = the "go" button); `action` groups re-asks of one decision. */
+export function authorize(world: ReclaimWorld, taskId: string, action = "manual_merge") {
+  const binding = { action, params: { task: taskId }, approve: ["go"] };
+  return openAskFull(world.db, { project: "p", taskId, source: "system", kind: "authorize", title: "可以合吗", fromAgent: "scheduler",
+    options: [{ type: "buttons", buttons: [{ id: "go", label: "合" }, { id: "no", label: "不合" }] }],
+    bind: { ...binding, paramsHash: bindHash(binding, "scheduler") } } as never, Date.now()).ask;
+}
+
+export const answer = (world: ReclaimWorld, id: string, button: string) => answerAsk(world.db, id, { choices: [`[button:${button}]`], labels: [button], text: "",
+  principal: "owner:self", via: "web_card", at: Date.now(), owner: true });
+
+/**
+ * An auto ui card the planner may merge: the world's reviewed card with template ui, a screenshots digest, and PM's `ledger ui-approve`
+ * (the real CLI, recorded in review as in production) before it sits in merge. Not a train candidate (trains never carry ui cards).
+ */
+export async function uiAutoCard(world: ReclaimWorld, id: string, pm = "agent-pm") {
+  const c = world.card(id), digest = "ab".repeat(32);
+  world.db.query("UPDATE task_workflows SET template = 'ui' WHERE taskId = ?").run(id);
+  world.db.query("UPDATE tasks SET stage = 'review', extra = json_set(extra, '$.screenshotsDigest', ?), rev = rev + 1 WHERE id = ?").run(digest, id);
+  const r = await ledgerAs(world, pm, "ui-approve", id, "--head", c.head, "--digest", digest);
+  if (r.ok !== true) throw new Error(`ui-approve CLI: ${String(r.error)}`);
+  world.db.query("UPDATE tasks SET stage = 'merge', rev = rev + 1 WHERE id = ?").run(id);
+  return c;
+}

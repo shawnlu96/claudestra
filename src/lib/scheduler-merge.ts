@@ -17,7 +17,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
 import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
-import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer } from "./manual-merge-queue-facts.js";
+import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -36,6 +36,9 @@ export interface MergeRun {
   unknownSince?: number | null;
   createdAt: number;
   updatedAt: number;
+  /** Never stored. The merge driver sets it on the run of its last recheck before the merge call (scheduler-merge-driver.ts
+   *  claimAndMerge): the one read that must still treat the committed `merging` claim as unsent (manual-merge-queue-facts.ts). */
+  beforeSend?: true;
 }
 
 const sha = (v: string | null | undefined): v is string => !!v && /^[a-f0-9]{40}$/i.test(v);
@@ -61,7 +64,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
   if (!workflow || workflow.mode !== (manual ? "manual" : "auto") || workflow.specRev !== task.specRev || intent?.status !== "submitted") {
     return "流程被暂停、规格已变或合并意图不再有效";
   }
-  const request = manual ? manualRunDrift(db, intent, now, run.phase) : null;
+  const request = manual ? manualRunDrift(db, intent, now, run.phase, run.beforeSend === true) : null;
   if (request) return request;
   if (task.headSHA !== run.reviewedHead) return "任务 head 已变化，旧审查失效";
   if (task.pr !== run.prRef || task.branch !== run.expectedBranch) return "任务 PR 或分支已变化";
@@ -206,7 +209,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     }
     // Every road to unknown passes here: once the PM took the card over and no merge was sent, whatever made the driver
     // give up (a refused claim, a red optional check, a drift) ends the run as cancelled instead of freezing the queue.
-    if (input.to === "unknown" && manualCancel(db, row)) {
+    if (input.to === "unknown" && (manualCancel(db, row) || manualUnsentAtSend(db, row, input.receipt))) {
       cancelMergeRun(db, ctx, row, text(input.receipt, "回执"));
       return getMergeRun(db, row.intentId) as MergeRun;
     }

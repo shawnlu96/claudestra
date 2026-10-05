@@ -1,7 +1,8 @@
 /**
  * MQ1 round-2 regressions (the four P1s of review a1), on the real ledger + real schedulerPass (tests/scheduler-merge-reclaim-world.ts,
  * fake GitHub), manual reviews recorded through the real `ledger review` CLI (manual-merge-queue-world.test.ts manualCard):
- * - an authorization that expires / is cancelled / is answered without approval never lets a queued request merge;
+ * - an authorization that expires / is cancelled / is answered without approval never lets a queued request merge, and queuing
+ *   again is not the lift (r2 review): only the owner approving a re-ask of that decision is;
  * - the official manual review path (PM records the actual reviewer) is accepted, other recorders are not;
  * - a request committed after the pass's pre-read but before the new train is saved stops that train (formFence);
  * - a policy that is no longer on stops an unsent claimed run (cancelled, slot freed, no merge), and the claim itself.
@@ -10,15 +11,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bindHash } from "../src/lib/ask-bind.js";
-import { answerAsk, closeAsk, openAskFull } from "../src/lib/ledger-asks.js";
+import { closeAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { claimManualMerge, recordRequest } from "../src/lib/manual-merge-queue.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { reclaimWorld, type ReclaimWorld } from "./scheduler-merge-reclaim-world.js";
-import { ledgerAs, manualCard, manualReviewArgs, requestArgs, writePolicy } from "./manual-merge-queue-world.test.js";
+import { answer as answerIn, authorize as authorizeIn, ledgerAs, manualCard, manualReviewArgs, requestArgs, writePolicy } from "./manual-merge-queue-world.test.js";
 
 const PM = "agent-pm", DISP = "agent-disp";
 let w: ReclaimWorld;
@@ -36,19 +36,12 @@ function setup(mode: "on" | "observe" | "off" = "on") {
   writePolicy(mode);
 }
 
-/** An owner authorization on the card, bound like every authorize ask (approve = the "go" button). */
-function authorize(taskId: string) {
-  const binding = { action: "manual_merge", params: { task: taskId }, approve: ["go"] };
-  return openAskFull(w.db, { project: "p", taskId, source: "system", kind: "authorize", title: "可以合吗", fromAgent: "scheduler",
-    options: [{ type: "buttons", buttons: [{ id: "go", label: "合" }, { id: "no", label: "不合" }] }],
-    bind: { ...binding, paramsHash: bindHash(binding, "scheduler") } } as never, Date.now()).ask;
-}
-const answer = (id: string, button: string) => answerAsk(w.db, id, { choices: [`[button:${button}]`], labels: [button], text: "", principal: "owner:self",
-  via: "web_card", at: Date.now(), owner: true });
+const authorize = (taskId: string) => authorizeIn(w, taskId);
+const answer = (id: string, button: string) => answerIn(w, id, button);
 
 describe("P1 approval-expiry: closing an authorization is not approving it", () => {
   for (const close of ["expired", "cancelled", "answered-no"] as const) {
-    test(`${close}: the waiting request goes void, the real pass sends nothing; a new request after that is the explicit lift`, async () => {
+    test(`${close}: the request waits, the real pass sends nothing, requesting again is the same request; the owner's approval lifts it`, async () => {
       setup();
       const m = await manualCard(w, "M");
       const ask = authorize("M");
@@ -59,9 +52,13 @@ describe("P1 approval-expiry: closing an authorization is not approving it", () 
       for (let i = 0; i < 3; i++) await w.pass();
       expect([w.intentOf("M"), merges("M")]).toEqual([null, 0]);
       const view = JSON.stringify(await as(PM, "merge-queue", "--project", "p"));
-      expect(view).toMatch(/M｜已失效.*不是批准/);
-      // PM read the outcome and queues again: allowed (the closed ask predates this request), and it merges
-      expect(await as(PM, ...requestArgs(m, "--reason", "owner 已当面同意"))).toMatchObject({ ok: true, state: "queued", duplicate: false });
+      expect(view).toMatch(/M｜等前置.*不是批准/);
+      // r2 P1 approval-expiry: queuing again is not the lift — same binding = the same waiting request, whatever the reason says
+      expect(await as(PM, ...requestArgs(m, "--reason", "owner 已当面同意"))).toMatchObject({ ok: true, duplicate: true, state: "waiting", why: expect.stringMatching(/不是批准/) });
+      for (let i = 0; i < 2; i++) await w.pass();
+      expect([w.intentOf("M"), merges("M")]).toEqual([null, 0]);
+      // the lift: the owner approves a re-asked authorization of the same decision; the request merges from its place
+      answer(authorize("M").id, "go");
       for (let i = 0; i < 4 && w.phase("M") !== "merged"; i++) await w.pass();
       expect([w.phase("M"), merges("M")]).toEqual(["merged", 1]);
     }, 30_000);

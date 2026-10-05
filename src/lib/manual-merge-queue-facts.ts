@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { blockedBy, depViews } from "./ledger-deps.js";
-import { getAsk, type Ask } from "./ledger-asks.js";
+import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { getFeature } from "./ledger-feature.js";
 import { getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
@@ -18,7 +18,7 @@ import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
-import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
+import { UI_ASK_ACTION, uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 export const MANUAL_MERGE_NODE = "manual_merge";
 export const REQUEST_OP = "manual_merge_request", REVOKE_OP = "manual_merge_revoke", CLAIM_OP = "manual_merge_claim";
@@ -114,25 +114,46 @@ function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEv
   return null;
 }
 
-/** Approved = answered with a button its binding lists as approval (lib/ask-bind.ts checkAsk's rule, minus the caller / hash). */
-const approvedAsk = (a: Ask): boolean => {
-  if (a.state !== "answered" || !a.bind) return false;
+/** The answer picked a button the binding lists as approval (lib/ask-bind.ts checkAsk's button rule). */
+const pickedApprove = (a: Ask): boolean => {
   const picked = new Set((a.answer?.choices ?? []).map((c) => /^\[button:(.+)\]$/.exec(c)?.[1]).filter(Boolean));
-  return a.bind.approve.some((id) => picked.has(id));
+  return !!a.bind && a.bind.approve.some((id) => picked.has(id));
 };
+/** Approved = answered with an approve button and still inside the approval window (checkAsk's rule, minus the caller / hash). */
+const approvedAsk = (a: Ask, now: number): boolean => a.state === "answered" && a.expiresAt > now && pickedApprove(a);
 
 /**
- * An authorization (kind authorize / owner_action) that was still open when the request was made, or opened since, and has been
- * closed without a verifiable approval (expired, cancelled, superseded, or answered with no approve button): expiry is not
- * approval, so the request can never merge as made. The owner answers, then a PM requests again (the explicit lift); one closed
- * before the request was made is that PM's own reading and does not void it.
+ * One owner decision across its re-asks: an authorize ask by its bound action; an owner_action (no binding: the owner's answer is the
+ * act) by its ask key, else the asking agent and title. The scheduler's screenshot ask is the UI gate's business (uiMergeRefusal reads
+ * it, expiry included), not a second judgement here.
  */
-function authorizationRefusal(db: Database, taskId: string, since: number): string | null {
-  const rows = db.query(`SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') AND state != 'open' AND updatedAt >= ?
-    ORDER BY createdAt, id`).all(taskId, since) as { id: string }[];
+const decisionKey = (a: Ask): string | null => a.bind?.action === UI_ASK_ACTION ? null
+  : `${a.kind}:${a.kind === "authorize" ? a.bind?.action ?? a.askKey ?? a.id : a.askKey ?? `${a.fromAgent ?? a.createdBy ?? "-"}:${a.title}`}`;
+
+/** The latest version of the decision stands: approved inside its window (authorize) or answered by the owner (owner_action). */
+const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_action" ? a.state === "answered" && ownerAnswered(a.answer) : approvedAsk(a, now);
+
+/**
+ * Every owner decision ever asked on the card (authorize / owner_action) must stand in its latest version. A closed version without
+ * a verifiable approval — expired, cancelled, superseded, answered without an approve button, or approved but past its window
+ * (checkAsk's rule: the window runs from the ask, an answer does not extend it) — is a wait, however old the ask is and whenever PM
+ * queued: the request keeps its place, nothing merges, and the lift is the owner approving a re-ask of that decision (authorize) or
+ * answering it (owner_action) — never a newer request or its reason (a request with the same binding is the same request). An open
+ * version is the ordinary open-ask wait (requestRefusal).
+ */
+function authorizationRefusal(db: Database, taskId: string, now: number): string | null {
+  const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, id").all(taskId) as { id: string }[];
+  const latest = new Map<string, Ask>(); // createdAt order: the last version seen of each decision is its newest
   for (const { id } of rows) {
-    const a = getAsk(db, id);
-    if (a && !approvedAsk(a)) return `授权 ${id} ${a.state === "answered" ? "的答复不是批准" : `未获答复即 ${a.state}`}（过期 / 撤销不是批准）：owner 批准后要 PM 重新排队`;
+    const a = getAsk(db, id), key = a && decisionKey(a);
+    if (a && key) latest.set(key, a);
+  }
+  for (const a of latest.values()) {
+    if (a.state === "open" || decisionStands(a, now)) continue;
+    if (a.state === "answered" && a.kind === "authorize" && pickedApprove(a)) {
+      return `授权 ${a.id} 的批准已过有效期（有效期从开出算，答了也不延长）：等 owner 在重新问的授权上批准`;
+    }
+    return `授权 ${a.id} ${a.state === "answered" ? "的答复不是批准" : `未获答复即 ${a.state}`}（过期 / 撤销不是批准）：等 owner 在重新问的授权上批准`;
   }
   return null;
 }
@@ -169,8 +190,6 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
     const ui = uiMergeRefusal(db, task, now);
     if (ui) return { kind: "void", why: `UI 验收：${ui}` };
   }
-  const auth = authorizationRefusal(db, task.id, req.ts);
-  if (auth) return { kind: "void", why: auth };
   const frozen = getMeta(db, task.project).queueFrozen;
   if (frozen.frozen) return { kind: "wait", why: `项目合并队列已冻结：${frozen.reason || "无原因"}` };
   const hold = holdOf(events);
@@ -181,6 +200,8 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   if (feature?.status === "paused") return { kind: "wait", why: `feature ${feature.id} 已暂停` };
   const asks = db.query("SELECT id FROM asks WHERE taskId = ? AND state = 'open'").all(task.id) as { id: string }[];
   if (asks.length) return { kind: "wait", why: `审批未答：${asks.map((a) => a.id).join("、")}` };
+  const auth = authorizationRefusal(db, task.id, now);
+  if (auth) return { kind: "wait", why: auth };
   const open = (db.query("SELECT id, status FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')")
     .all(task.id) as { id: string; status: string }[]).filter((i) => !(run && i.id === id));
   if (open.length) return { kind: "wait", why: `卡有未结调度意图：${open.map((i) => `${i.id}(${i.status})`).join("、")}` };
@@ -189,25 +210,37 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   return null;
 }
 
-/** Phases in which nothing irreversible was sent: a policy that stopped being on ends such a run (manualCancel) instead of acting. */
+/** Phases in which nothing irreversible was sent. The `merging` claim is unsent too, but only its sender knows (`beforeSend`). */
 const UNSENT: readonly string[] = ["ready", "updating", "await_ci"];
+/** The driver's receipt prefix when its last check before the merge call refused: nothing went out (scheduler-merge-driver.ts). */
+export const MERGE_NOT_SENT = "合并未发出";
 
 /**
  * mergeRunDrift's manual branch: the run stops (and, before any merge was sent, ends cancelled) once its request no longer holds,
- * or — while nothing irreversible is out (`phase` ready / updating / await_ci, which covers the `merging` claim) — once the
- * manualMergeQueue policy is no longer on (off, observe, or unreadable = off). A merge already sent keeps its journal: never
- * re-sent, an unknown result stays unknown.
+ * or — while nothing irreversible is out: `phase` ready / updating / await_ci, and the committed `merging` claim on the driver's last
+ * check before the merge call (`beforeSend`, the only read that still knows nothing was sent) — once the manualMergeQueue policy is no
+ * longer on (off, observe, or unreadable = off). A `merging` row seen anywhere else (restart, receipt) may have sent: its journal is
+ * only verified, never re-sent, an unknown result stays unknown, and the policy is not asked.
  */
-export function manualRunDrift(db: Database, intent: Pick<SchedulerIntent, "id">, now: number, phase?: string): string | null {
+export function manualRunDrift(db: Database, intent: Pick<SchedulerIntent, "id">, now: number, phase?: string, beforeSend = false): string | null {
   const seq = requestSeqOf(intent.id), req = seq === null ? null : requestAt(db, seq);
   if (!req) return "人工合并请求缺失";
   const r = requestRefusal(db, req, now, true);
   if (r) return `人工合并请求已失效：${r.why}`;
-  if (phase !== undefined && UNSENT.includes(phase)) {
+  if (phase !== undefined && (UNSENT.includes(phase) || (phase === "merging" && beforeSend))) {
     const mode = manualQueueMode(req.project);
     if (mode !== "on") return `人工合并排队策略已是 ${mode}（不是 on），未发出的合并不再执行`;
   }
   return null;
+}
+
+/**
+ * advanceMergeRun's `merging → unknown` on a manual card: a MERGE_NOT_SENT receipt is the sending controller itself saying its last
+ * check refused and nothing went out, so the run ends cancelled with the slot freed (as any unsent manual run) instead of freezing the
+ * queue. Any other receipt at `merging` is a result it could not verify and stays unknown.
+ */
+export function manualUnsentAtSend(db: Database, row: { phase: string; taskId: string }, receipt: string | undefined): boolean {
+  return row.phase === "merging" && !!receipt?.startsWith(MERGE_NOT_SENT) && getWorkflow(db, row.taskId)?.mode === "manual";
 }
 
 /** beginMergeRun's reviewer for a manual run: the one its request bound, only while the request is valid. */

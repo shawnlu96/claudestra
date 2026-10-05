@@ -28,7 +28,7 @@ import { beginMergeRun, getMergeRun } from "./scheduler-merge.js";
 import { HOLD_LIMIT_MS, trainHolds } from "./scheduler-merge-train-hold.js";
 import { lentSlotPending } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
-import { trainCandidates } from "./scheduler-merge-train-tick.js";
+import { mergeCandidates } from "./scheduler-merge-train-tick.js";
 
 /** What the pass read from the train file (its only writer is the same scheduler, so the claim child is handed it). */
 export const TRAIN_SIGNALS = ["none", "holds", "cleanup", "corrupt"] as const;
@@ -79,10 +79,13 @@ export type Turn =
 const manualIntents = (db: Database, project: string): SchedulerIntent[] => db.query(`SELECT * FROM scheduler_intents WHERE project = ?
   AND node = ? AND action = 'merge' ORDER BY eventSeq`).all(project, MANUAL_MERGE_NODE) as SchedulerIntent[];
 
-/** The last manual run ended while auto cards wait and none of them has had a merge intent since: they go first. */
+/**
+ * The last manual run ended while auto cards wait and none of them has had a merge intent since: they go first. "Auto cards" are
+ * every card the auto tick may legally merge — ui cards with their screenshot acceptance included, not only the train's candidates.
+ */
 function owedToAuto(db: Database, project: string, now: number): string | null {
   const last = manualIntents(db, project).at(-1);
-  if (!last || now - last.updatedAt >= OWED_LIMIT_MS || !trainCandidates(db, project).length) return null;
+  if (!last || now - last.updatedAt >= OWED_LIMIT_MS || !mergeCandidates(db, project, { now }).length) return null;
   const since = db.query(`SELECT 1 FROM scheduler_intents WHERE project = ? AND action = 'merge' AND node != ? AND eventSeq > ? LIMIT 1`)
     .get(project, MANUAL_MERGE_NODE, last.eventSeq);
   return since ? null : `上一张人工合并（${last.taskId}）刚结束，等候中的自动卡先轮一趟`;

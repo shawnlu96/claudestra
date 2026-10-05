@@ -18,15 +18,23 @@ waiting (frozen queue, explicit hold, safety hold, paused feature, open ask, uns
 review / UI digest / mode / stage moved, or the review fails: same family, P0/P1, the requester or the author as reviewer,
 or recorded by anyone other than the reviewer itself, the scheduler (pool) or — the official manual path, `ledger review
 <task> --reviewer … --session … --family … --findings … --path …`, which on a manual card only PM / master / owner may run —
-a project PM other than the dispatcher / master / owner; or an authorization ask (authorize / owner_action) that was open at
-the request or opened since was closed without a bound approve answer: expired / cancelled / superseded / answered "no" is
-not approval, the owner answers and a PM requests again), revoked, running, merged, ended, unknown. One open request per card; the same
+a project PM other than the dispatcher / master / owner), revoked, running, merged, ended, unknown. One open request per card; the same
 binding again answers the existing one.
+
+Owner decisions on the card (asks of kind authorize / owner_action, the scheduler's screenshot ask excepted — the UI gate judges that
+one) are grouped into one decision per bound action (authorize) or ask key / asker + title (owner_action), and the latest version of
+each must stand: an authorize answered with an approve button and still inside its window (`checkAsk`'s rule: the window runs from
+the ask, an answer does not extend it), an owner_action answered by the owner. Anything else closed — expired, cancelled, superseded,
+answered "no", approved but past the window — is a **wait**, however old the ask and whenever PM queued: the request keeps its place,
+nothing merges (a claimed run ends cancelled with its slot freed), and the only lift is the owner approving / answering a re-ask of
+that decision. A new request with the same binding is the same request (duplicate), so neither its time nor its reason lifts anything.
 
 ## The one decision: `manualTurn` (lib/manual-merge-queue.ts)
 
 `active` (a claimed run is pending / submitted) → `owed` (the last manual run just ended and an auto candidate has had no
-merge intent since: auto goes first, at most `OWED_LIMIT_MS`) → `due` with a wait reason (train holds, train file unreadable,
+merge intent since: auto goes first, at most `OWED_LIMIT_MS`; "auto candidate" is every card the auto tick may legally merge —
+`mergeCandidates` with ui cards whose screenshot acceptance holds, minus cards already merged at their head — not only the
+train's non-ui candidates) → `due` with a wait reason (train holds, train file unreadable,
 slot held, a run that lent its slot to the last train still to take it back) or claimable. Read by:
 
 1. `trainProjects` at the top of the pass (on only): no new train forms while the head is `due` or `active`. A live train is
@@ -48,11 +56,13 @@ inspect, freshness / update-branch, CI, final re-check, one head-pinned merge, `
 re-sent; `scheduler-merge-resolve` is the only exit). `mergeRunDrift` / `beginMergeRun` take the manual branch for node
 `manual_merge`: workflow must be `manual` and the request still valid (a head moved by this run's own carried update-branch
 counts as bound). A request that stops holding before any merge was sent ends the run cancelled with the slot freed
-(`manualCancel`); nothing is faked as done. While nothing irreversible is out (ready / updating / await_ci,
-which includes the `merging` claim's own transaction) the manual drift also re-reads the policy: off, observe or unreadable
-ends the run cancelled with the slot freed, nothing sent; the claim child re-reads it too. A merge already sent keeps its
-journal (never re-sent, unknown stays unknown). A manual merge is not auto-deployed (`deployDrift` wants auto): the intent settles
-"待 PM 部署".
+(`manualCancel`); nothing is faked as done. While nothing irreversible is out the manual drift also re-reads the policy: in ready /
+updating / await_ci (which includes the `merging` claim's own transaction), and once more on the driver's last recheck before the
+merge call — the driver marks that run `beforeSend`, the one read that still knows the committed `merging` claim went nowhere — so off,
+observe or unreadable ends the run cancelled with the slot freed, nothing sent (the driver's `MERGE_NOT_SENT` receipt lets
+`advanceMergeRun` end a manual `merging` row cancelled instead of freezing the queue); the claim child re-reads it too. A `merging` row
+seen anywhere else (after a restart, on a receipt) may have sent: it is only verified, never re-sent, unknown stays unknown, and the
+policy is not asked. A manual merge is not auto-deployed (`deployDrift` wants auto): the intent settles "待 PM 部署".
 
 ## Policy
 
