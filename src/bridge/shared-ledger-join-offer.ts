@@ -14,7 +14,8 @@ import { STATE_DIR } from "../lib/paths.js";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import {
-  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, sharedLedgerOfferProjectId, sharedLedgerEligibleProjects, type SharedLedgerLocalProject,
+  readSharedLedgerLocalProjects, sharedLedgerProjectChoices, sharedLedgerOfferBinding, sharedLedgerEligibleProjects, type SharedLedgerLocalProject,
+  type SharedLedgerOfferProject,
 } from "../lib/shared-ledger-local-project.js";
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
 import { sweepSharedLedgerRebinds, onSharedLedgerRebindAnswered, liveRebindDeps } from "./shared-ledger-rebind.js";
@@ -42,7 +43,8 @@ export interface JoinOfferDeps {
   getAsk: (id: string) => Ask | null;
   closeAsk: (id: string) => void;
   projects: () => Promise<SharedLedgerLocalProject[]>;
-  sharedProject?: (centerId: string) => string | undefined;
+  /** The shared project this offer explicitly names, when known; the card hint then needs an exact binding (none: old-offer inference). */
+  sharedProject?: (centerId: string) => SharedLedgerOfferProject | string | undefined;
   bindings?: () => SharedLedgerBinding[];
   join: (url: string, code: string, localProjectId: string) => Promise<SharedLedgerJoinResult>;
   /** The inform card: a notification to the owner (no buttons). */
@@ -76,16 +78,18 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
   if (!limiter.tryAcquire(peer.name, now)) return refuse(429, "rate_limited");
   const parsed = parseJoinOffer(body, now);
   if (!parsed.ok) return refuse(400, parsed.error);
-  let projects: SharedLedgerLocalProject[], bindings: SharedLedgerBinding[], sharedProjectId: string | undefined;
+  let projects: SharedLedgerLocalProject[], bindings: SharedLedgerBinding[], hint: SharedLedgerBinding | undefined;
   try {
     bindings = d.bindings?.() ?? [];
-    sharedProjectId = d.sharedProject?.(parsed.offer.centerId);
+    const explicit = d.sharedProject?.(parsed.offer.centerId);
+    hint = sharedLedgerOfferBinding(parsed.offer.centerId, bindings, typeof explicit === "string" ? { projectId: explicit } : explicit);
     projects = await d.projects();
   } catch (e) {
     console.error(`⚠️ [join-offer] 本机项目状态不可用: ${(e as Error).name}`);
     return refuse(503, "local_project_state_unavailable");
   }
-  const target = sharedProjectId ? { centerId: parsed.offer.centerId, projectId: sharedProjectId } : undefined;
+  const sharedProjectId = hint?.projectId;
+  const target = hint ? { centerId: hint.centerId, teamId: hint.teamId, projectId: hint.projectId } : undefined;
   const projectChoices = sharedLedgerProjectChoices(sharedLedgerEligibleProjects(projects, bindings, target), sharedProjectId, JOIN_BUTTON, JOIN_BUTTON);
   if (!projectChoices.length) return refuse(409, "no_local_projects");
   const pending: PendingJoinOffer = { ...parsed.offer, peer: peer.name, receivedAt: now, projectChoices, sharedProjectId };
@@ -212,7 +216,6 @@ const liveDeps: JoinOfferDeps = {
   },
   projects: () => readSharedLedgerLocalProjects(),
   bindings: () => readSharedLedgerBindings(),
-  sharedProject: centerId => sharedLedgerOfferProjectId(centerId, readSharedLedgerBindings()),
   join: (url, code, localProjectId) => {
     const key = instanceKeySync();
     const instanceId = instanceIdSync();
