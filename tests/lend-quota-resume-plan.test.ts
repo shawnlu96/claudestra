@@ -170,18 +170,20 @@ describe("planQuotaResume：截止、出借方现状、结果优先、一次资�
     }
   });
 
-  test("当前家族额度未知（quota 省略 / 空对象 / 只有别的家族）或满额读数已过 reset → wait；明确有余量 → plan", () => {
+  test("当前家族额度未知（quota 省略 / 空对象 / 只有别的家族）或读数已过 reset → wait；明确有余量 → plan", () => {
     const s = stop(), o = snap(orderDb()), at = RESET;
     const withQuota = (quota: HelloQuota | undefined) => {
       const value: NonNullable<ResumeInput["hello"]>["value"] = { grant: grant(), paused: null, ...(quota === undefined ? {} : { quota }) };
       return planQuotaResume(input(s, o, at, { hello: { value, source: "hello#44", observedAt: at } }), at);
     };
-    for (const q of [undefined, {}, { codex: { weekUsedPct: 0, resetAt: at + 60_000 } }, { claude: { weekUsedPct: 100, resetAt: at } }]) {
+    // reset 已过（含恰好到点）的读数属于旧窗口：满额、99%、0% 都不算有余量
+    for (const q of [undefined, {}, { codex: { weekUsedPct: 0, resetAt: at + 60_000 } }, { claude: { weekUsedPct: 100, resetAt: at } },
+      { claude: { weekUsedPct: 99, resetAt: at - 1 } }, { claude: { weekUsedPct: 99, resetAt: at } }, { claude: { weekUsedPct: 0, resetAt: at - 1 } }]) {
       expect(withQuota(q)).toMatchObject({ kind: "wait", until: null });
     }
     expect(withQuota({ claude: { weekUsedPct: 100, resetAt: at + 60_000 } })).toMatchObject({ kind: "wait", until: at + 60_000 });
     expect(withQuota({ claude: { weekUsedPct: 10, resetAt: at + 60_000 } }).kind).toBe("plan");
-    expect(withQuota({ claude: { weekUsedPct: 99, resetAt: at - 1 }, codex: { weekUsedPct: 100, resetAt: at + 60_000 } }).kind).toBe("plan");
+    expect(withQuota({ claude: { weekUsedPct: 99, resetAt: at + 1 }, codex: { weekUsedPct: 100, resetAt: at + 60_000 } }).kind).toBe("plan");
   });
 
   test("hello 缺失 / 早于停止 / 过期 → wait", () => {

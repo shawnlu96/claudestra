@@ -82,10 +82,9 @@ function helloBlock(i: ResumeInput, now: number): ResumePlan | null {
   // 额度停的单，恢复要正面看到该家族有余量；quota 省略 / 空对象 / 只有别的家族（读失败时 hello 就这么发）都是不知道，不是可用
   const q = quota?.[i.stop.family];
   if (!q || !Number.isFinite(q.weekUsedPct) || !Number.isFinite(q.resetAt)) return { kind: "wait", why: "出借方该家族额度读数缺失", until: null };
-  if (q.weekUsedPct >= 100) {
-    // 满额且 reset 已过 = 读数过期或自相矛盾，等下一份 hello，不放行
-    return q.resetAt > now ? { kind: "wait", why: "出借方该家族额度仍满", until: q.resetAt } : { kind: "wait", why: "出借方该家族额度读数过期", until: null };
-  }
+  // reset 已过的读数说的是旧窗口，新窗口用了多少没人知道（同 quota-week dropPassed），不论占用多少都等新读数
+  if (q.resetAt <= now) return { kind: "wait", why: "出借方该家族额度读数过期", until: null };
+  if (q.weekUsedPct >= 100) return { kind: "wait", why: "出借方该家族额度仍满", until: q.resetAt };
   return null;
 }
 
