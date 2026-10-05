@@ -1,6 +1,6 @@
 # delivery-flow-P1 · 本人正式交付与受控接管自动派审（设计）
 
-状态：设计稿（specRev 1，基线 head `61f24b83c2998e0f5aa75a34f8945eb28c73e146`）。本卡只出方案，不改产品、配置、安全规则，不启用任何机制。
+状态：设计稿（specRev 1，基线 head `61f24b83c2998e0f5aa75a34f8945eb28c73e146`；第 2 版按 a0 审查修 resume-session / resume-order 两条 P1）。本卡只出方案，不改产品、配置、安全规则，不启用任何机制。
 目标：执行者做完后**本人**直接走正式交付并进入正式审查派单，PM 不再做常规代码交付中转；PM 只在接管时显式授予一次「交付后自动交回派审」资格，其余仍按现有人工流程。
 
 ---
@@ -21,6 +21,8 @@
 
 - 调度派的：orderId = 当前阶段的 dispatch intent id；
 - **PM 手动派的：orderId = `manualOrderId(task, step, round)` = `<task>:<step>:r<round>`**。
+
+注意单号**不按 workflow.mode 选**：`currentIntent`（`order-take.ts:50-55`）取进入本阶段后、同 specRev、`status != 'cancelled'` 的最新 write/fix dispatch（**含 done**），有就用它的 id（`:92`），没有才用 `manualOrderId`。而接管 `setWorkflow`（`ledger-scheduler-write.ts:113-117`）只取消 `pending` 意图，`done` 的 dispatch 保留。所以 auto 卡在 build/fix 被接管后，同一执行者 `take_order` 拿到的仍是原 dispatch id——这是正常状态，§3 的资格必须兼容它（a0 审查 resume-order）。
 
 所以手动派、当前执行者本人、会话没换的 manual 卡**今天就能**用 MCP `take_order` + `deliver` 正式交付。真正交不了的只有这几种（「手动本机接续」落在这里）：
 
@@ -52,7 +54,8 @@
 |---|---|---|
 | 当前执行者本人、会话未换的 manual 卡 MCP 交付 | **已能做**，只需在 roles 文档写明走 `take_order`+`deliver` | 0.2 `manualOrderId` |
 | 当前执行者 CLI 交付 | **已能做**（但不核 origin / PR / 会话，不能作为自动交回依据） | 0.1 |
-| 接管后换会话的本人 MCP 交付 | **需小改**：授予时由 PM 原子换绑 author 会话（§2） | `bindingAllows` |
+| 接管后换会话的本人 MCP 交付 | **需新模块** `author-handoff.ts`：PM 驱动的在途卡交接（归档 + 停止回执 → 单事务换绑，§2.4）；现有退役流程不支持在途卡 | `bindingAllows`、`RETIRE_STAGES`、`applyFixReplacement` 先例 |
+| 接管时保留 done dispatch 的单号 | **需小改**：授予绑定实际正式单号（§3.2 `formalOrderFor`） | `order-take.ts:50-55,92` |
 | 接管后交付自动派审 | **需新模块** `scheduler-resume-grant.ts` + 扩 verdict（§3） | 0.3 |
 | on / observe / off 开关 | **需小改**：`meta.autostart` 加字段（§4） | `readSwitch` |
 | 结构化 fix 材料 | **已大半具备**（`fixContext`/`wireFindings`），只补来源引用（§5） | `order-take.ts` `fixContext` |
@@ -67,13 +70,13 @@
 
 ### 2.1 接续的唯一合法形态
 
-人工接续的单号沿用 `manualOrderId(task, step, round)`，`currentOrders` 产出它的条件不放宽，仍需同时满足：
+人工接续的单号就是 `currentOrders` 此刻给的那一张：本阶段保留的 dispatch id（接管前已派、含 done），否则 `manualOrderId(task, step, round)`；产出条件不放宽，仍需同时满足：
 
 - 卡在 `build/fix`；当前步 `executorKind=agent` 且 `executor = call.agent`（来自已验证身份，不来自参数）；
 - 未退役的 author 绑定 = `call.agent` + `call.sessionId`（会话为空则拒，与现状一致）；
 - 无未结出借单。
 
-换会话的接续不由 worker 自己解决，而由 PM 在接管授予时**换绑**（§3.2 `grant` 同事务内插入新 author 绑定）。`scheduler_sessions` 有唯一索引 `(taskId, role) WHERE state != 'retired'`（`src/lib/scheduler-sessions.ts:215`），旧会话的退役归 `scheduler-retire.ts`（归档 / kill 回执），所以授予**不**直接改旧行：旧绑定未到 `retired` 时带新会话的授予直接拒（`conflict`，提示先走现有退役），已退役才插入新绑定。PM 不授予时，接续仍可走 CLI（现状），只是不会自动派审。
+换会话的接续不由 worker 自己解决，也**不能**借现有退役流程：`RETIRE_STAGES` 只有 `verified/done/cancelled`（`scheduler-sessions.ts:17`），`beginRetire`（同文件 `:177-187`）对 build/fix 卡返回「没收尾的卡不退役」，`scheduler-retire.ts:87-95` 候选也排除在途卡（a0 审查 resume-session）。在途卡换绑由 §2.4 新的受控交接协议完成；授予（§3.2）本身不换绑、只绑定交接**完成后**的当前 active 绑定。PM 不走交接时，接续仍可走 CLI（现状），只是不会自动派审。
 
 ### 2.2 MCP deliver 保持的检查（不改顺序，`src/lib/order-deliver.ts` 头注释 1–6 条）
 
@@ -83,6 +86,28 @@ wire 校验 → dedup 回放（必须本人事件）→ 当前单 → origin `ls
 
 `deliverOrder` 调 `ledgerWrite` 时追加两项，只取自 `VerifiedCall`：`--order=<orderId>`、`--session=<call.sessionId>`；`deliverCmd` 接收后原样写进 deliver 事件 `data.orderId / data.session / data.via="order_tool"`。CLI 直接调用不带这些字段（字段缺失 = 不是正式单路径），所以 CLI 交付**永不**满足 §3 的自动交回条件。
 说明：本机 agent 都是同用户 shell，CLI 旗标可被伪造（`src/lib/caller-witness.ts` 已写明同一前提）；因此 §3 不单信这两个字段，还要求调度服务在交回前**自己**再 `ls-remote` 核 origin head（§3.4），并在事务里核绑定与 dedup 键 `deliverDedupKey(orderId, head)` 存在且 actor 一致。
+
+### 2.4 在途卡受控 author 交接（新，`author_handoff`）
+
+先例：`fix_swap` 已在 fix 阶段做在途换会话——`stopConvergenceAuthor`（`fix-strategy-lifecycle.ts:62-89`）先归档、再确认旧会话停止，各记一条 dedup 回执事件；`applyFixReplacement`（`fix-strategy-session.ts:12-47`）在**一个事务**里核回执、把旧行置 `retired`（保留行与两条回执）、插入新 active 行、改 `task.agent` 与当前步执行者。但它只给 `scheduler`、只在 `mode=auto`、只在 `fix`、只认 `fix_swap` 意图，manual 卡用不上。本协议是它的 manual / PM 版本，**不改** `fix_swap` 与 `beginRetire` 的语义，不放宽 `RETIRE_STAGES`。
+
+约束来自 schema：`scheduler_sessions.createIntentId / retireIntentId REFERENCES scheduler_intents(id)`（`ledger-scheduler-schema.ts:59`，`foreign_keys=ON`），所以交接要有一条真意图行；`INTENT_ACTIONS`（`ledger-scheduler.ts:14`）增 `author_handoff`。普通 `planIntent`（`ledger-scheduler-write.ts:174`）要求 auto，故交接意图由交接模块自己插入，不走调度规划。
+
+状态转移（意图 id = `handoff:<task>:<eventSeq>`）：
+
+```
+begin  (真 PM, tx) ──▶ intent pending   事件 op:"author_handoff_begin"{from:{agent,session}, to:{agent,session,family,transport}, taskRev, workflowRev, stage, specRev, branch, head, round}
+step   (真 PM, 幂等) ─▶ intent submitted → 记 handoff:<id>:archive 回执 → 复核停止 → 记 handoff:<id>:kill 回执
+complete(真 PM, tx) ─▶ 旧行 retired(retireIntentId=id, 两条回执) + 新行 active(createIntentId=id) + intent done   事件 op:"author_handoff"
+cancel (真 PM, tx) ─▶ intent cancelled（仅在 complete 前；已有的回执事件不删）
+效果不确定（归档 / kill 结果未回、会话状态不可核） ─▶ intent unknown，停住，只能 PM 对账后 cancel
+```
+
+- **begin 前置**（同一事务、`--rev/--workflow-rev` CAS）：卡 `code`、`workflow=manual`、`stage ∈ build/fix`、非终态；有 active（非 retiring）author 旧绑定且 `transport ≠ peer`（peer 旧会话无法本机停止，沿用 `stopConvergenceAuthor` 的拒绝口径，报阻塞）；卡上无 `pending/submitted/unknown` 意图；无 `pooled/claimed/unknown` 出借单；新会话 `requireSessionIdentity`（registry 核 runtime / 家族 / 完整名、不得是长驻 PM，`scheduler-session-identity.ts`）；新 sessionId ≠ 旧 sessionId 且未绑在任何卡上。没有旧绑定（从未 auto 过的卡）→ begin 直接写 complete（`applyFixReplacement` 的 `old=null` 分支同理），不需要回执。
+- **step**：复用 `scheduler-retire.ts` 已导出的 `readLiveAgents / archiveReceipt / killOutcome` 与 `stopConvergenceAuthor` 同序检查——旧 agent 还被别的卡 / 审查绑定则拒；registry 里旧 agent 的 sessionId 必须仍等于 `from.session`，否则不归档、不停止；先 `manager archive` 记回执，下一次 step 再复核 `stopped && !pending && !window`（必要时 `manager kill`）后记 kill 回执。回执事件 dedup 键 `handoff:<id>:archive|kill`，重放无副作用。执行者是真 PM 的 CLI 进程（manual 卡不交给调度服务驱动）。
+- **complete 事务**：意图 `submitted`；`task.rev/stage/specRev/branch/headSHA/round` 与 begin 快照一致、`workflow.mode=manual` 且 `workflow.rev` 一致（旧会话在交接期间交付或 PM 改卡 → `conflict`，交接作废需重来）；两条回执存在且 `sessionId = from.session`；当前 active 行仍是 `from`；再跑一次 `requireSessionIdentity(to)`；`preserveSessionHistory`；更新旧行 / 插入新行；`task.agent` 与**当前步**（`stepAtStage` 的 write 或 fix、当前 round）执行者改为 `to.agent`；`task_workflows.rev+1`；事件 dedup `handoff:<id>:done`。不改任何既有事件、不推 stage、不派单。
+- **共存**：开放中的 `author_handoff` 意图本身就让 `resumeCore` 拒（它拒 `submitted/unknown`），也让 `beginRetire` 拒（未结意图）；`currentIntent` 只看 `action='dispatch'`，所以不影响单号；hold（manual→manual）按现规则只取消 `pending`。
+- 交接完成后新会话 `take_order`：`bindingAllows` 认新行；旧会话 `not_current_order`。单号不变（仍是保留的 dispatch id 或 manualOrderId），§3 按实际单号绑定。
 
 ---
 
@@ -104,17 +129,23 @@ review/manual[G] ──scheduler-auto-resume（同一事务判定+resumeCore）�
 
 ### 3.2 授予接口（只给真 PM：`requireRealPm`，调度助理 / scheduler / 执行者都不行）
 
-- `ledger workflow-set <task> --mode manual --reason <r> --resume-grant [--grant-session <sid>] [--grant-ttl-h <n>]`（auto→manual 时）
-- `ledger workflow-grant <task> --rev <taskRev> --workflow-rev <wfRev> --reason <r> [--grant-session <sid>] [--grant-ttl-h <n>]`（已 manual 时）
+- `ledger workflow-set <task> --mode manual --reason <r> --resume-grant [--grant-ttl-h <n>]`（auto→manual 时；不换会话的场景）
+- `ledger workflow-grant <task> --rev <taskRev> --workflow-rev <wfRev> --reason <r> [--grant-ttl-h <n>]`（已 manual 时；换会话须先完成 §2.4 交接再授予）
 
-事务内写入事件 `data.resumeGrant`：
+授予**不换绑**（取消第 1 版的 `--grant-session`）。事务内用与 `currentOrders` 同一套选单逻辑算出**此刻实际的正式单**，写入事件 `data.resumeGrant`：
 
 ```
-{ id: "grant:<task>:<eventSeq>", agent: task.agent, session: <sid|当前 author 绑定>, specRev: task.specRev,
-  branch: task.branch, priorHead: task.headSHA, round: task.round, expiresAt: now + ttl(默认 24h, 上限 72h) }
+{ id: "grant:<task>:<eventSeq>", agent: task.agent, session: <当前 active author 绑定的 sessionId>,
+  specRev, branch, priorHead: task.headSHA, round: task.round, stage: task.stage, step: "write"|"fix",
+  stageSeq: stageEnteredSeq(task),                       // 本阶段起点，防跨阶段串单
+  orderId: currentIntent(task, step)?.id ?? manualOrderId(task, step, round),
+  orderKind: "dispatch" | "manual", orderIntentStatus: <dispatch 时的 status，通常 done>,
+  expiresAt: now + ttl(默认 24h, 上限 72h) }
 ```
 
-前置：卡 `code`、非终态、有 `task.agent`/`branch`；无 `submitted/unknown` 意图；无 `pooled/claimed/unknown` 出借单；`--rev/--workflow-rev` CAS。若给了 `--grant-session` 且与现绑定不同，同事务换绑（§2.1）。授予不改 stage、不派单。
+实现：`order-take.ts` 抽出并导出纯函数 `formalOrderFor(db, task): { step, orderId, intent, stageSeq } | null`（`currentIntent ?? manualOrderId`，不含调用方过滤），`scanOrders` 与授予共用，保证二者口径永远一致。
+
+前置（同一事务）：卡 `code`、非终态、`stage ∈ build/fix`（停在 review/blocked 的卡由 PM 先按现有命令退回 fix 再授予）、有 `task.agent`/`branch`；有 active author 绑定且 `agent = task.agent`、当前步 `executorKind=agent` 且 `executor = task.agent`；无 `pending/submitted/unknown` 意图（含开放中的 `author_handoff`）；无 `pooled/claimed/unknown` 出借单；`--rev/--workflow-rev` CAS。授予不改 stage、不派单、不改任何 dispatch 行。
 
 ### 3.3 判定 `grantVerdict`（新，纯函数，`src/lib/scheduler-resume-grant.ts`）
 
@@ -123,8 +154,8 @@ review/manual[G] ──scheduler-auto-resume（同一事务判定+resumeCore）�
 1. workflow=manual，卡在 review，非 done/cancelled；
 2. T 的 actor 在授予时已核为真 PM（写入时核；判定再核 actor ∈ 项目 PM 名单且非 team 调度助理，防名单变化后过期身份）；
 3. `now < expiresAt`；
-4. `task.specRev / branch / agent` 与 G 一致；author 未退役绑定 = `G.agent + G.session`；
-5. T 之后最新 deliver d：`actor = G.agent`、`data.via="order_tool"`、`data.session = G.session`、`data.orderId = manualOrderId(task, step, G.round)`（同一轮）、该 dedup 键的事件就是 d；
+4. `task.specRev / branch / agent / round` 与 G 一致；author 未退役绑定 = `G.agent + G.session`（T 之后若发生 §2.4 交接，`workflow.rev` 变化不算 mode 事件，但绑定不再等于 G.session → 拒；换会话的正确顺序是先交接、后授予）；
+5. T 之后最新 deliver d：`actor = G.agent`、`data.via="order_tool"`、`data.session = G.session`、**`data.orderId = G.orderId`**（G 里记的实际正式单号，dispatch id 与 manual id 一视同仁）、该 dedup 键 `deliverDedupKey(G.orderId, d.headSHA)` 的事件就是 d；`G.orderKind="dispatch"` 时再核该意图行仍存在、`taskId/node=G.step/specRev` 一致、`eventSeq > G.stageSeq` 且未 `cancelled`（只读核对，不改写历史派单来凑人工单号）；d 紧前的 stage 事件 `from = G.stage`，且 T 与 d 之间没有别的 stage 事件（同阶段同一张单）；
 6. `d.headSHA ≠ G.priorHead` 且 `= task.headSHA`；紧前一条 stage 事件 `seq = d.seq-1`、`to=review`、同 actor（复用原检查）；
 7. T 之后没有：别人的 deliver / stage、`resume_grant` 以外的 mode 事件、新的 lend `refused`/`unknown`、未答的 `class=blocker` ask（「模型拒绝」/需要人：执行者以 blocker 报拒做或安全阻塞时不自动恢复）；
 8. 无 `pooled/claimed/unknown` 出借单（unknown 副作用未对账）。
@@ -176,12 +207,13 @@ PM 职责收窄为：决定是否授予、处理异常（rejected 通知、block
 | 节点 | 唯一 owner 文件 | 测试 globs |
 |---|---|---|
 | I1 交付事件记来源 | `src/lib/order-deliver.ts`、`src/manager/ledger-write-cmds.ts`（`deliverCmd` 收 `--order/--session`）、`src/lib/ledger-write.ts`（`deliver` data） | `tests/order-deliver.test.ts`（新） |
-| I2 授予与换绑 | `src/lib/scheduler-resume-grant.ts`（新：grant 写入、`grantVerdict`）、`src/lib/ledger-scheduler-write.ts`（`--resume-grant`）、`src/manager/ledger-scheduler-cmds.ts`（旗标与 `workflow-grant`） | `tests/scheduler-resume-grant.test.ts`（新） |
+| I2a 在途交接 | `src/lib/author-handoff.ts`（新：begin / step / complete / cancel，复用 `scheduler-retire.ts` 已导出 helper，不改它）、`src/manager/ledger-handoff-cmds.ts`（新：`ledger author-handoff` 子命令，`requireRealPm`）、`src/lib/ledger-scheduler.ts`（`INTENT_ACTIONS` 加 `author_handoff`） | `tests/author-handoff.test.ts`（新） |
+| I2 授予 | `src/lib/scheduler-resume-grant.ts`（新：grant 写入、`grantVerdict`）、`src/lib/ledger-scheduler-write.ts`（`--resume-grant`）、`src/manager/ledger-scheduler-cmds.ts`（旗标与 `workflow-grant`）、`src/lib/order-take.ts`（仅抽出导出 `formalOrderFor`，行为不变） | `tests/scheduler-resume-grant.test.ts`（新）、`tests/order-take.test.ts`（新） |
 | I3 判定与执行 | `src/lib/scheduler-autostart-resume.ts`、`src/lib/ledger-autostart-resume.ts`、`src/manager/ledger-autostart-cmds.ts`（`--checked-head`）、`src/lib/scheduler-autostart.ts`（开关字段） | `tests/scheduler-autostart-resume.test.ts` |
-| I4 fix 材料来源 | `src/lib/order-take.ts`（`fixContext` 的 inputs 行） | `tests/order-take.test.ts`（新）、`tests/order-wire-render.test.ts` |
+| I4 fix 材料来源 | `src/lib/order-take.ts`（`fixContext` 的 inputs 行；在 I2 之后改同一文件，串行） | `tests/order-take.test.ts`、`tests/order-wire-render.test.ts` |
 | I5 文档 | `roles/executor.md`（本人 MCP 交付说明） | — |
 
-依赖：I1 → I3；I2 → I3；I4 独立。每节点只动自己的 owner 文件；不动 `src/lib/dispatch-redact.ts`、`order-wire-render.ts` 规则、任何配置。
+依赖：I1 → I3；I2a → I2 → I3；I2 → I4（`order-take.ts` 同文件串行）。每节点只动自己的 owner 文件；不动 `src/lib/dispatch-redact.ts`、`order-wire-render.ts` 规则、`fix-strategy-*.ts`、`scheduler-retire.ts`、`RETIRE_STAGES`、任何配置。
 
 ---
 
@@ -194,7 +226,15 @@ PM 职责收窄为：决定是否授予、处理异常（rejected 通知、block
 | 1 | 执行者本人、会话未换、manual 卡 MCP deliver | 成功，事件带 `via/orderId/session` | 现（单）+新 I1 |
 | 2 | 他人 agent 用对方 orderId deliver | `not_current_order`，台账不动 | 现 `currentOrders` + 新 |
 | 3 | 同 agent 换会话（未授予换绑） | `not_current_order` | 现 `bindingAllows` + 新 |
-| 4 | 旧会话已退役，PM 授予时绑新会话，新会话 deliver | 成功；旧会话再交 `not_current_order`；旧会话未退役时授予 `conflict` | 新 I2 |
+| 4 | build 卡、旧 author **active**，auto→manual 接管；`beginRetire` 仍 `conflict`（现状不变）；PM `author-handoff begin` → step(archive) → step(kill) → complete | 旧行 retired 带两条回执、新行 active、`task.agent`/当前步执行者=新；新会话 `take_order` 拿到原单号，旧会话 `not_current_order`；历史事件不变 | 现 `scheduler-retire.test.ts` + 新 I2a |
+| 4a | 交接 begin 后、complete 前旧会话交付（stage 前进） | complete `conflict`，不换绑；意图留 submitted，PM cancel | 新 I2a |
+| 4b | archive / kill 结果不确定或 registry 里旧 sessionId 已变 | 不记回执、不换绑；超时转 `unknown`；授予与 auto-resume 都拒 | 新 I2a |
+| 4c | 旧会话是 peer / 被别的卡共用 / 新会话是长驻 PM 或家族不符 / 新 sessionId 已绑别卡 | begin 或 step 拒，无副作用 | 新 I2a |
+| 4d | step / complete 重放、重启后重跑 | 回执与换绑各只发生一次（dedup 键） | 新 I2a |
+| 4e | 非真 PM（调度助理 / 执行者 / scheduler）调 `author-handoff` | `forbidden` | 新 I2a |
+| 4f | 交接完成后授予，新会话 fresh head 交付 | 交回一次；若授予在交接前（G.session=旧）→ 不交回 | 新 I2 + I3 |
+| 4g | 本阶段已有 **done** write dispatch，auto→manual 接管 `--resume-grant`，同一执行者同会话 `take_order` 得原 dispatch id，fresh head MCP 交付 | `G.orderId = dispatch id`，恰好一次交回；再次 deliver / tick 不二次交回；dispatch 行未被改写 | 新 I2 + I3 |
+| 4h | 同上但交付走的是 manualOrderId 或别的单号 / 意图行被取消 / 交付前 stage 被 PM 改过 | 不交回 | 新 I3 |
 | 5 | 卡分支被 PM 改（wrong branch）期间交付 | CLI CAS `conflict`，不写 | 现 `deliver` expect |
 | 6 | stale rev / specRev 变化后 | 交付 CAS 拒；grant 判定 specRev 不符不交回 | 现 + 新 I3 |
 | 7 | 同 orderId+head 重复 deliver | 回放同一事件；不二次交回 | 现 dedup + 新 |
