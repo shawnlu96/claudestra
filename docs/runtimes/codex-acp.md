@@ -84,8 +84,41 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `tool-proxy.ts` | 回环工具代理：127.0.0.1 随机端口 + 一次性 token（在 BRIDGE_URL 里），吞 register、只转白名单请求类型，requestId 按连接改写 |
 | `resolve.ts` | 读 registry 元数据，挑能配本机 Codex 的最高正式版（≥ 2.0.0、tarball 只认 registry.npmjs.org、范围只认 `^`/`~`/精确） |
 | `install.ts` | 适配器安装：按 registry 的 `dist.integrity` 验包，装进 `codex-acp-<版本>/`，`current.json` 指针决定用哪个 |
+| `protocol.ts` | ACP 协议版本常量（宿主、Pi 适配器、stub 共用）与 initialize 回包判定：版本、必要能力、`agentInfo`；不兼容抛 `AcpIncompatibleError`（见下节） |
 
 bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 / 配置；卡上的按钮经 `POST /agents/:name/answer {kind:"acp"}` 回宿主）、`bridge/acp-state.ts`（哪些频道此刻由宿主登记：打断走 abort 帧、watcher 不尾读 rollout、权限巡检 / Codex 回合失败收尾 / Stop 的屏幕复核都跳过它的窗口）。
+
+## 协议版本与能力（`lib/acp/protocol.ts`）
+
+宿主只讲 ACP v1（`ACP_PROTOCOL_VERSION`；规范里 V2 还是草案）。initialize 回包由 `checkInitialize` 判：
+
+| 回包 | 结果 |
+|------|------|
+| `protocolVersion` 不是 1，或者没回 | 不兼容 |
+| `agentCapabilities.sessionCapabilities.resume` 和 `agentCapabilities.loadSession` 都没有 | 不兼容：接不回已有线程 |
+| fork 操作，而没声明 `sessionCapabilities.fork` | 不兼容；fork 只在 fork 时才要求 |
+| 带了 `agentInfo.{name, version}` | 记进会话（`AcpSession.agentInfo`）；宿主「已接上线程」那行日志、拒起原因里都带上 |
+
+不兼容时走现有的启动失败通路，不另开一条：
+- 宿主出一张「<运行时> 回合失败」卡（`acp_failure`：不可重试的 error、固定 key `incompatible`，正文写明原因）；拒起那一刻 bridge 还没登记上，就登记后补发（bridge 按题面去重）。
+- 宿主不标就绪、不再重起适配器（重起换不来别的结果），排着的和之后的回合当场按失败收尾：报 StopFailure，错误条目不触发自动续跑。
+- manager 等不到就绪（就绪超时），`recoverFailedAcpLaunch` 按接线程失败处理：退回 tmux（沙箱除外）。
+- create / fork 的引导（`runtimes/codex-acp.ts` 的 `bootstrapThread`）在 initialize 就失败，原因原样带出。
+
+### 可选能力缺失时怎么降级
+
+可选能力缺了不拒起，按下表降级。表里每一行在 `tests/acp-protocol.test.ts`「可选能力缺失时怎么降级」都有一条：对真的宿主，有和没有这项能力各跑一遍。改了行为，表和测试要一起改。
+
+| 能力 | 怎么判定有没有 | 缺了怎么办 |
+|------|----------------|------------|
+| steering | initialize 的 `_meta.steering.supported === true` | 忙时的消息排队，等这一轮结束再当下一轮 prompt 发（不发 `_session/steering`） |
+| cancelReturnsQueue | initialize 的 `_meta.claudestra.cancelReturnsQueue === true`（Pi 适配器有，codex-acp 没有） | 叫停改发 `session/cancel` 通知，回执里的作废列表为空 |
+| compaction_update | 适配器在回合里发 `compaction_update`（宿主总是声明 `session.compaction`；只管 Codex，Pi 的压缩边界走 `_meta.claudestra.compacted`） | 压缩照样由适配器做，但不出压缩边界，只看到一个「Compact conversation」工具调用 |
+| AIR sessionFailure | prompt 回包带 `_meta.jetbrains.air.sessionFailure` | 按 legacy 认：只有额度用完（JSON-RPC 错误带 `usageLimitExceeded`）认得出，按回合去重；其它失败只是一段正文 |
+| terminal_output_delta | `tool_call_update` 带 `_meta.terminal_output_delta` | 看不到命令输出，工具结果只剩适配器收尾时给的内容或退出码 |
+| `promptCapabilities.image` | initialize 的 `agentCapabilities.promptCapabilities.image` | 附件只以本地路径（`[attachment: …]` 行）写进正文。有这项能力也一样：宿主还不发图片块 |
+
+共享契约测试 `tests/acp-contract/`：同一组场景（initialize 与协议检查、接回线程、一轮文字回复、叫停、失败上报）按驱动跑，现在有 stub 和 Pi 回放两个驱动；新驱动照 `drivers.ts` 的 `ContractDriver` 实现、加进 `DRIVERS` 即可。维护流程见 [acp-maintenance.md](./acp-maintenance.md)。
 
 ## 和 tmux 的行为差异
 
@@ -145,7 +178,7 @@ bun run sandbox up --port <N> --static web/out
 bun scripts/sandbox.ts manager create acpx <沙箱里的目录> 测试 --runtime codex --transport acp --port <N>
 ```
 
-stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quota]` = 撞额度（结构化失败），`[stub:noreply]` = 这轮不调 reply（测补 reply）；起宿主时环境变量 `STUB_AUTH_REQUIRED=1` = 没登录（出登录卡）。`/compact` 后面带 `[stub:compact-fail]` = 压缩失败，`[stub:compact-slow]` = 压缩等打断，`[stub:compact-dup]` = 完成信号连发两次；缺省压缩成功（形状见下节）。
+stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quota]` = 撞额度（结构化失败），`[stub:noreply]` = 这轮不调 reply（测补 reply）；起宿主时环境变量 `STUB_AUTH_REQUIRED=1` = 没登录（出登录卡），`STUB_INITIALIZE=<JSON>` = 按 JSON merge patch 改 initialize 回包（`null` 删键，测协议不兼容和可选能力缺失）。`/compact` 后面带 `[stub:compact-fail]` = 压缩失败，`[stub:compact-slow]` = 压缩等打断，`[stub:compact-dup]` = 完成信号连发两次；缺省压缩成功（形状见下节）。
 
 ## 压缩完成信号（codex-compact-N2 核对）
 
