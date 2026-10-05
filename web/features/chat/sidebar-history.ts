@@ -29,8 +29,8 @@ export function buildSidebarDirectory(list: AgentSession[], meta: Map<string, Pr
 export type DirectoryScope = "active" | "history";
 /** Fold preferences per directory: a project can be live and in history at once, and each group folds on its own.
  * Active keeps the original keys so existing preferences survive; history gets its own namespace (nothing is migrated or cleared).
- * projects / teams record what the user collapsed (default open); teamsOpen / workersOpen record what the user opened
- * (dispatchers with worker kids and the worker folds start collapsed). */
+ * projects / teams record what the user collapsed, teamsOpen / workersOpen what the user opened. A dispatcher click writes
+ * both teams sets, so the latest explicit choice holds whether or not it has worker kids; untouched ones default by kids. */
 export const DIRECTORY_FOLD_KEYS: Record<DirectoryScope, { projects: string; teams: string; teamsOpen: string; workersOpen: string }> = {
   active: { projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed", teamsOpen: "cstra_team_open", workersOpen: "cstra_worker_fold_open" },
   history: {

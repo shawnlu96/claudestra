@@ -16,7 +16,7 @@ export interface Fold {
 export interface DirectoryFolds {
   projects: Set<string>;
   toggleProject: (id: string) => void;
-  /** 派发者开合：挂着 worker 的默认收起（记展开过的），其余默认展开（记收起过的）——worker 进出不会把用户收起的又弹开 */
+  /** 派发者开合：用户点过就按最近一次点的（两种模式共用这一份意图）；没点过的，挂着 worker 默认收起、否则默认展开 */
   team: (name: string, kids: AgentSession[]) => Fold;
   /** 「出借」/「worker」组，默认收起 */
   workers: (id: string) => Fold;
@@ -25,15 +25,18 @@ export interface DirectoryFolds {
 export function useDirectoryFolds(scope: DirectoryScope): DirectoryFolds {
   const keys = DIRECTORY_FOLD_KEYS[scope];
   const [projects, toggleProject] = usePersistedSet(keys.projects);
-  const [teams, toggleTeam] = usePersistedSet(keys.teams);
-  const [teamsOpen, toggleTeamOpen] = usePersistedSet(keys.teamsOpen);
+  // teams = 明确收起过、teamsOpen = 明确展开过；一次点击两边一起写，同一个名字不会同时在两边（老数据两边都有时按收起算）
+  const [teams, , putTeam] = usePersistedSet(keys.teams);
+  const [teamsOpen, , putTeamOpen] = usePersistedSet(keys.teamsOpen);
   const [workersOpen, toggleWorkersOpen] = usePersistedSet(keys.workersOpen);
+  const team = (name: string, kids: AgentSession[]): Fold => {
+    const collapsed = teams.has(name) || (!teamsOpen.has(name) && hasWorkers(kids));
+    return { collapsed, toggle: () => { putTeam(name, !collapsed); putTeamOpen(name, collapsed); } };
+  };
   return {
     projects,
     toggleProject,
-    team: (name, kids) => hasWorkers(kids)
-      ? { collapsed: !teamsOpen.has(name), toggle: () => toggleTeamOpen(name) }
-      : { collapsed: teams.has(name), toggle: () => toggleTeam(name) },
+    team,
     workers: (id) => ({ collapsed: !workersOpen.has(id), toggle: () => toggleWorkersOpen(id) }),
   };
 }

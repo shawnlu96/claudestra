@@ -217,4 +217,35 @@ describe("worker 会话（WKV1）：默认收起、展开可达、按设备记�
     expect(u.text("lead2")).toContain("派出 2");
     await u.unmount();
   });
+
+  // 审查 PR712-r1 worker-fold-preference-switch：两种模式共用最近一次明确的开合，不各记各的
+  const mixed = [ag("pm"), ag("review", { parent: "pm" }), w("task-a", { parent: "pm" })];
+  const normalOnly = [ag("pm"), ag("review", { parent: "pm" }), w("task-a", { parent: "pm", status: "stopped" })];
+  const kidsShown = async (agents: AgentSession[], act?: (u: Awaited<ReturnType<typeof mount>>) => Promise<void>) => {
+    const u = await mount(agents);
+    if (act) await act(u);
+    const shown = u.shown().includes("review");
+    await u.unmount();
+    return shown;
+  };
+  const clickPm = (u: Awaited<ReturnType<typeof mount>>) => u.click(u.teamBtn("pm"));
+
+  test("worker 模式展开过、worker 走后再收起 → worker 回来仍是收起", async () => {
+    expect(await kidsShown(mixed)).toBe(false);
+    expect(await kidsShown(mixed, clickPm)).toBe(true);
+    expect(await kidsShown(normalOnly)).toBe(true);
+    expect(await kidsShown(normalOnly, clickPm)).toBe(false);
+    expect(await kidsShown(mixed)).toBe(false);
+    expect(JSON.parse(storage.getItem("cstra_team_collapsed")!)).toEqual(["pm"]);
+    expect(JSON.parse(storage.getItem("cstra_team_open")!)).toEqual([]);
+  });
+
+  test("worker 模式展开再收起 → 最后一个 worker 停掉后剩下的普通子项仍收起；再展开，worker 回来也展开", async () => {
+    expect(await kidsShown(mixed, async (u) => { await clickPm(u); await clickPm(u); })).toBe(false);
+    expect(await kidsShown(normalOnly)).toBe(false);
+    expect(await kidsShown(normalOnly, clickPm)).toBe(true);
+    expect(await kidsShown(mixed)).toBe(true);
+    expect(JSON.parse(storage.getItem("cstra_team_collapsed")!)).toEqual([]);
+    expect(JSON.parse(storage.getItem("cstra_team_open")!)).toEqual(["pm"]);
+  });
 });
