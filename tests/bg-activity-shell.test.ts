@@ -108,7 +108,7 @@ describe("bg-activity-watcher · 后台 shell", () => {
     expect(f.completed("m1")[0].data).toMatchObject({ status: "done", exitCode: 0 });
   });
 
-  test("输出文件被清理 → status unknown（不是 done / 成功），exitCode null", async () => {
+  test("输出文件被清理：宽限期内只算还没出现、照旧跟踪；一直不出现才收尾 unknown（不是 done / 成功），exitCode null", async () => {
     const f = fixture("gone");
     await f.poll();
     writeFileSync(f.out("g1"), "working\n");
@@ -116,10 +116,72 @@ describe("bg-activity-watcher · 后台 shell", () => {
     await f.poll(10_000);
     unlinkSync(f.out("g1"));
     await f.poll(10_000);
+    await f.poll(10_000);
+    expect(f.completed("g1")).toEqual([]);
+    expect(f.active("g1")).toBe(true);
+    await f.poll(MIN);
     expect(f.completed("g1")).toHaveLength(1);
     expect(f.completed("g1")[0].data).toMatchObject({ status: "unknown", exitCode: null });
     // 刷新后快照仍带着「状态未知」的结局（不是消失、不是成功）
     expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "g1")).toMatchObject({ kind: "shell", end: { status: "unknown", exitCode: null } });
+    await f.poll(10 * MIN);
+    expect(f.completed("g1")).toHaveLength(1);
+  });
+
+  test("刚启动输出文件就不见了（磁盘满时还没建出来）：宽限期内又出现、只有退出行 → 照常收尾 done exit 0", async () => {
+    const f = fixture("late");
+    await f.poll();
+    writeFileSync(f.out("l1"), "");
+    f.confirmBg("l1");
+    await f.poll(10_000);
+    unlinkSync(f.out("l1"));
+    await f.poll(10_000);
+    expect(f.completed("l1")).toEqual([]);
+    writeFileSync(f.out("l1"), "\n[exited with code 0]\n");
+    await f.poll(10_000);
+    expect(f.completed("l1")).toHaveLength(1);
+    expect(f.completed("l1")[0].data).toMatchObject({ status: "done", exitCode: 0 });
+  });
+
+  test("已判 unknown 之后输出文件才出现、末尾是退出行 → 重新跟上并更正为 done exit 0（快照同步更正）", async () => {
+    const f = fixture("revive");
+    await f.poll();
+    writeFileSync(f.out("v1"), "");
+    f.confirmBg("v1");
+    await f.poll(10_000);
+    unlinkSync(f.out("v1"));
+    await f.poll(10_000);
+    await f.poll(2 * MIN);
+    const statuses = () => f.completed("v1").map((e) => (e.data as { status: string }).status);
+    expect(statuses()).toEqual(["unknown"]);
+    writeFileSync(f.out("v1"), "\n[exited with code 0]\n");
+    await f.poll(10_000);
+    expect(statuses()).toEqual(["unknown", "done"]);
+    expect(f.completed("v1")[1].data).toMatchObject({ status: "done", exitCode: 0 });
+    const snaps = activeBgTasksFor(f.agent.name).filter((t) => t.id === "v1");
+    expect(snaps).toHaveLength(1);
+    expect(snaps[0]).toMatchObject({ end: { status: "done", exitCode: 0 } });
+  });
+
+  test("被结束：末行独立 [killed]（前面可有 SIGTERM 行）→ status stopped、exitCode null，快照还原成已停止；输出里提到 [killed] 不算", async () => {
+    const f = fixture("killed");
+    await f.poll();
+    writeFileSync(f.out("k1"), "serving\n");
+    writeFileSync(f.out("k2"), "x\n");
+    f.confirmBg("k1");
+    f.confirmBg("k2");
+    await f.poll(10_000);
+    appendFileSync(f.out("k1"), "SIGTERM (Polite quit request)\n\n[killed]\n");
+    appendFileSync(f.out("k2"), "echo [killed]\n[killed]\nstill running\n");
+    await f.poll(10_000);
+    await f.poll(10_000);
+    expect(f.completed("k1")).toHaveLength(1);
+    expect(f.completed("k1")[0].data).toMatchObject({ kind: "shell", status: "stopped", exitCode: null });
+    const lastUpdate = f.of("k1").filter((e) => e.type === "bg_task_update").pop()!;
+    expect((lastUpdate.data as { items: string[] }).items.at(-1)).toBe("[killed]");
+    expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "k1")).toMatchObject({ end: { status: "stopped", exitCode: null }, lines: ["[killed]"] });
+    expect(f.completed("k2")).toEqual([]);
+    expect(f.active("k2")).toBe(true);
   });
 
   test("已确认的退出结果留在快照里（刷新 / 新连接据此还原），按 agent 封顶 8 个、31 分钟后仍保留", async () => {
