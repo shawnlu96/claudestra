@@ -17,12 +17,21 @@ import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { placementOf } from "../src/lib/lend-placement-view.js";
-import { recordGateRefused } from "../src/lib/order-gate-heads.js";
+import { recordGateRefused, shortenShas } from "../src/lib/order-gate-heads.js";
+import { fold } from "../src/lib/order-wire-render.js";
+import { peerSecretHit } from "../src/lib/peer-secret-gate.js";
 import { gateBlock } from "../src/lib/scheduler-dispatch-block.js";
 import { blockFixture, E2E_MS, FREE, MIN, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
-const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 ${randomBytes(32).toString("hex")}`;
+// A 64-hex on a line naming a secret: GATE4 never cuts it, so the gate still refuses it (a bare 64-hex digest is now cut and goes out).
+const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 secret ${randomBytes(32).toString("hex")}`;
 const CLEAN = "# 审查报告\nP1：两个 tick 抢同一个意图（复现见 tests/x.test.ts）";
+
+test("fixture: leaked() stays a secret the outbound gate refuses (长十六进制) after GATE4's SHA cutting", () => {
+  const text = leaked();
+  expect(shortenShas(text, new Set())).toEqual({ text, cut: 0 });
+  expect(peerSecretHit(fold(text))).toBe("长十六进制");
+});
 
 const view = (p: Fx, db: Database = p.f.db) =>
   placementOf(db, getTask(db, "T1")!, p.policy, [{ peer: "mate", projects: ["p"], roles: ["review", "write"], maxOpen: 3 }], p.f.tickDeps.now());
