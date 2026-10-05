@@ -5,8 +5,9 @@
  * without --card is refused before anything is created; ordinary user agents are unaffected. tests/agent-lifecycle-create.test.ts.
  * Only the session this create started is registered: the create's own result must say ok with this agent and a session id the
  * registry now holds and did not hold before. Ledger row first, worker tag second, so a failure leaves the agent untagged.
- * A registration that fails never removes, archives or kills anything: the agent is kept, create returns ok:false saying it is
- * left for PM, and one ledger event (agent, session, reason) records it; doctor counts the unresolved ones as 登记失败 N.
+ * A registration that fails at any step never removes, archives or kills anything: the agent is kept, create returns ok:false saying
+ * it is left for PM, and one ledger event (agent, session, reason) records it — in the same transaction that closes a row the attempt
+ * already inserted, so no active registration is left for the lifecycle to collect; doctor counts the unresolved ones as 登记失败 N.
  * (An undo by name could not be made safe: between any check and the remove the name may come to run another session.)
  */
 import { isWorkerRole, checkCard, recordRegisterFailure, registerWorker, type RegisterFailure, type WorkerRole } from "../lib/agent-lifecycle-store.js";

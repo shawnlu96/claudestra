@@ -134,16 +134,29 @@ export function registerWorker(db: Database, input: RegisterInput): WorkerRegist
   });
 }
 
-/** A create whose registration failed: the agent is kept (never undone by name) and left for PM; one event records it. */
+/**
+ * A create whose registration failed at any step: the agent is kept (never undone by name) and left for PM; one event records it.
+ * A row the failed attempt already inserted (registry re-read / kind save failed after the INSERT) is closed in the same
+ * transaction as the event — state retired, reason REGISTER_FAILED — so no active registration outlives the failure: the planner
+ * and runner only act on active rows, and the failure only counts as 登记失败 N until PM registers and tags the session again.
+ */
 export interface RegisterFailure { agent: string; sessionId: string; taskId: string; role: WorkerRole; createdBy: string; reason: string; now?: number }
+
+const REGISTER_FAILED = "register_failed:";
 
 export function recordRegisterFailure(db: Database, f: RegisterFailure): void {
   const task = getTask(db, f.taskId);
   if (!task) throw new LedgerError("not_found", checkCard(db, f.taskId) ?? "");
   const now = f.now ?? Date.now();
-  tx(db, () => insertEvent(db, { actor: f.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler",
-    text: `${f.role} agent ${f.agent} 已建但登记失败，未打 worker 标签，需 PM 处理：${f.reason}`.slice(0, 400),
-    data: { op: "worker_register_failed", agent: f.agent, sessionId: f.sessionId, role: f.role, createdBy: f.createdBy, reason: f.reason.slice(0, 300) } }, false));
+  tx(db, () => {
+    if (hasTable(db, "worker_agents")) {
+      db.prepare(`UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = ? WHERE agent = ? AND sessionId = ? AND state = 'active' AND ${NOT_PENDING}`)
+        .run(now, `${REGISTER_FAILED} ${f.reason}`.slice(0, 300), f.agent, f.sessionId);
+    }
+    insertEvent(db, { actor: f.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler",
+      text: `${f.role} agent ${f.agent} 已建但登记失败，未打 worker 标签，需 PM 处理：${f.reason}`.slice(0, 400),
+      data: { op: "worker_register_failed", agent: f.agent, sessionId: f.sessionId, role: f.role, createdBy: f.createdBy, reason: f.reason.slice(0, 300) } }, false);
+  });
 }
 
 /** Every recorded registration failure (agent + the session the create started); the planner counts the ones still unresolved. */

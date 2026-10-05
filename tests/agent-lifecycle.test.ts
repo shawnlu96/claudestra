@@ -11,6 +11,8 @@
  * recent guards; a retry closes only its own pending row (agent + regAt), other sessions' debts stay owed.
  * r5 review fixes: a holder is anyone not `stopped` (scheduler-retire.ts: status, pending and window together), in the planner and in
  * the executor's temp folder step, also when the checkout is already gone; unresolved registration failures show as 登记失败 N.
+ * r6 review fix: a registration failing after its INSERT (registry re-read / kind save) closes that row with the failure event, so a
+ * full tick never archives / removes the kept agent and it counts as 登记失败 N.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -22,6 +24,8 @@ import { DEFAULT_LIFECYCLE, parseLifecycle, type LifecyclePolicy } from "../src/
 import { activeWorkers, cardWorkerIndex, pendingCleanups, recordRegisterFailure, recordWorkerRetire, registerFailures, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { BOUND_WAIT, planLifecycle, lifecycleLine, type AgentFacts, type PlanInput } from "../src/lib/agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
+import { registerCreated, type RegisterDeps } from "../src/manager/create-lifecycle.js";
+import type { Registry } from "../src/manager/core.js";
 import { ledgerFacts, lendAgents } from "../src/lib/agent-lifecycle-deps.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -216,6 +220,32 @@ describe("run", () => {
     expect(activeWorkers(db)).toEqual([]);
     await runLifecycle(plan, on, deps); // PM already removed it / second pass: no throw, still one closed row
     expect(activeWorkers(db)).toEqual([]);
+  });
+
+  test("r6: ledger INSERT ok, then the registry re-read or kind save fails: no active row; planner and runner never archive / remove it; 登记失败 +1", async () => {
+    for (const step of ["reload", "save"] as const) {
+      const { db, dir, card } = ledger();
+      card("H1", "verified");
+      const reg = { socket: "", agents: { "agent-review": { sessionId: "s", channelId: "9" } } } as unknown as Registry;
+      let loads = 0;
+      const regDeps: RegisterDeps = { ledgerPath: join(dir, "ledger.sqlite"), createdBy: async () => "agent-pm",
+        loadRegistry: async () => { if (step === "reload" && ++loads === 2) throw new Error("synthetic registry re-read failure"); return reg; },
+        saveRegistry: async () => { if (step === "save") throw new Error("synthetic registry save failure"); },
+        recordFailure: (f) => recordRegisterFailure(db, f) };
+      const out = await registerCreated("agent-review", { taskId: "H1", role: "reviewer" }, { ok: true, agent: "agent-review", sessionId: "s" }, null, regDeps);
+      expect(out).toMatchObject({ ok: false, registered: false, kept: true });
+      expect(activeWorkers(db)).toEqual([]);
+      const row = db.query("SELECT state, reason FROM worker_agents WHERE agent = 'agent-review'").get() as { state: string; reason: string };
+      expect([row.state, row.reason.startsWith("register_failed:")]).toEqual(["retired", true]);
+      // the untagged session runs on, idle past the recent-turn guard, its card verified: a full tick leaves it alone
+      const facts = agent("agent-review", 1);
+      const plan = planLifecycle(input(db, [facts], { registerFailed: registerFailures(db) }));
+      expect([plan.actions, plan.memory, plan.registerFailed]).toEqual([[], [], 1]);
+      expect(lifecycleLine(plan, "on")).toContain("登记失败 1");
+      const { deps, calls } = fakeDeps(db, join(dir, "worktrees"));
+      expect(await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, deps)).toEqual({ done: [], failed: [] });
+      expect(calls).toEqual([]);
+    }
   });
 
   test("observe and off: no manager call, no ledger write", async () => {
@@ -417,15 +447,16 @@ describe("registration failures (create kept the agent for PM)", () => {
     expect(plan.actions).toEqual([]); // never collected by the lifecycle: PM's to handle
   });
 
-  test("ledger registered but the registry tag failed: verified card, idle 1h, still kept for PM and never collected; tagging it releases it", () => {
+  test("ledger registered but the registry tag failed: the row closes with the failure; verified card, idle 1h, never collected; PM re-registering and tagging releases it", () => {
     const { db, card } = ledger();
     card("E2", "verified");
     registerWorker(db, { agent: "agent-half", sessionId: "s", taskId: "E2", role: "reviewer", createdBy: "agent-pm", now: 5 });
     recordRegisterFailure(db, { agent: "agent-half", sessionId: "s", taskId: "E2", role: "reviewer", createdBy: "agent-pm", reason: "saveRegistry failed" });
+    expect(activeWorkers(db)).toEqual([]);
     const plan = planLifecycle(input(db, [agent("agent-half", 1)], { registerFailed: registerFailures(db) }));
     expect([plan.actions, plan.memory, plan.registerFailed]).toEqual([[], [], 1]);
-    expect(plan.kept.map((k) => k.agent)).toEqual(["agent-half"]);
-    // PM tagged it: the failure is resolved and the verified card's agent is collected as usual
+    // PM registered and tagged it: the failure is resolved and the verified card's agent is collected as usual
+    registerWorker(db, { agent: "agent-half", sessionId: "s", taskId: "E2", role: "reviewer", createdBy: "agent-pm", now: 6 });
     const fixed = planLifecycle(input(db, [agent("agent-half", 1, { kind: "worker" })], { registerFailed: registerFailures(db) }));
     expect([fixed.registerFailed, fixed.actions.map((a) => a.agent)]).toEqual([0, ["agent-half"]]);
   });
