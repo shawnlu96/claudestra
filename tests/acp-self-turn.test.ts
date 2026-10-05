@@ -57,10 +57,14 @@ function fakePi() {
         const c = JSON.parse(line);
         cmds.push(c);
         const ok = (data: unknown = {}) => emit({ id: c.id, type: "response", command: c.type, success: true, data });
-        if (c.type === "clear_queue") return ok({ steering: queue.splice(0), followUp: [] });
+        const update = () => emit({ type: "queue_update", steering: [...queue], followUp: [] }); // 同真 pi：队列每变一次先报，再回包
+        if (c.type === "clear_queue") {
+          const cleared = queue.splice(0);
+          return update(), ok({ steering: cleared, followUp: [] });
+        }
         if (c.type !== "prompt") return ok();
         if (c.message.includes("/handled")) return ok({ disposition: "handled" });
-        if (running) return queue.push(c.message), ok({ disposition: "queued" });
+        if (running) return queue.push(c.message), update(), ok({ disposition: "queued" });
         ok({ disposition: "started" }), start(), settle();
       },
       onData: (cb) => void (onData = cb as (c: string) => void),

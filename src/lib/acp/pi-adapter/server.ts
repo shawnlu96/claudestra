@@ -71,9 +71,10 @@ interface Gen {
   steered: { text: string; id?: string }[];
   /** 插话一条一条发的链（见 steer） */
   steerChain: Promise<unknown>;
-  /** pi 最近一次 queue_update 的 steering 条数，和最近一次变长时新增的队尾（见 queueChanged） */
+  /** pi 最近一次 queue_update 的 steering 条数、累计新增过几条、最近新增的队尾（见 queueChanged） */
   queueLen: number;
-  appended?: { text: string };
+  appended: number;
+  tail?: string;
 }
 
 const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断开），这一轮作废";
@@ -155,7 +156,7 @@ export class PiAcpServer {
     const env: Record<string, string> = names.length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
     const link = this.deps.openPi({ sessionId: id, cwd, env });
     const g: Gen = { link, sessionId: id, mapper: createPiEventMapper(), waiters: [], options: [], running: false, inflight: 0, cancelRequested: false,
-      steered: [], steerChain: Promise.resolve(), queueLen: 0 };
+      steered: [], steerChain: Promise.resolve(), queueLen: 0, appended: 0 };
     this.gen = g;
     link.onRecord((rec) => {
       if (g === this.gen) this.onRecord(g, rec); // 被 /clear 换下的旧 pi 收尾时的输出不算
@@ -242,9 +243,12 @@ export class PiAcpServer {
     if (i >= 0) g.steered.splice(i, 1);
   }
 
-  /** pi 每增删一条都报一次 queue_update：变长 = 刚入队一条，队尾就是它（input hook / 模板展开改写后的正文），由在途插话认领（steerNow） */
+  /** pi 每增删一条都报一次 queue_update：变长 = 有新入队的，队尾是它（input hook / 模板展开改写后的正文）；在途插话按新增条数认领（steerNow） */
   private queueChanged(g: Gen, steering: string[]): void {
-    if (steering.length > g.queueLen) g.appended = { text: steering[steering.length - 1]! };
+    if (steering.length > g.queueLen) {
+      g.appended += steering.length - g.queueLen;
+      g.tail = steering[steering.length - 1];
+    }
     g.queueLen = steering.length;
   }
 
@@ -327,10 +331,9 @@ export class PiAcpServer {
   }
 
   /**
-   * pi 回 queued 才记账，正文取回包之前那次 queue_update 新增的队尾（pi 消费、clear_queue 用的都是改写后的这个）。
-   * handled / started 没入队，不记；超时的不记，它之后才入队的话叫停时对不上身份、不报作废（宿主日志会记一句）。
-   * pi-link 一行一个宏任务地交付，回包之后的 message_start 一定排在这里记完之后，不会漏对。
-   * 上限：pi 在这条入队和回包之间（一个 microtask）恰好有扩展也往 steering 塞了一条，那条的正文会被记到这条头上。
+   * 只认能证明是这条的：回 queued（它自己入了一条）且发出到回包之间 steering 正好新增一条，才按那条的正文记账（pi 消费、clear_queue 用的都是它）。
+   * 新增不止一条（扩展在回包前塞的、超时那条晚到的）就认不出：不记身份，叫停时清掉也不报作废，只记日志——宁可漏报，不把已执行的报成「不会执行」。
+   * handled / started 没入队、超时的，都不记。pi-link 一行一个宏任务地交付，回包之后的 message_start 一定排在这里记完之后。
    */
   private async steerNow(g: Gen, p: Rec): Promise<Rec> {
     this.stillLive(g);
@@ -340,10 +343,12 @@ export class PiAcpServer {
     const before = g.appended;
     const r = await g.link.command({ type: "prompt", message: text, streamingBehavior: "steer" }, this.deps.steerTimeoutMs ?? COMMAND_TIMEOUT_MS);
     this.stillLive(g);
-    if (r?.disposition !== "handled" && r?.disposition !== "started") {
-      g.steered.push({ text: g.appended !== before && g.appended ? g.appended.text : text, ...(typeof id === "string" && id ? { id } : {}) });
-    }
-    return { outcome: r?.disposition === "started" ? "startedNewTurn" : "injected" };
+    if (r?.disposition === "started") return { outcome: "startedNewTurn" };
+    if (r?.disposition === "handled") return { outcome: "injected" };
+    const added = g.appended - before;
+    if (added === 1) g.steered.push({ text: g.tail!, ...(typeof id === "string" && id ? { id } : {}) });
+    else this.deps.log(`插话入队期间 pi 的 steering 队列新增了 ${added} 条，认不出哪条是它：不记身份（叫停时清掉也不报作废）`);
+    return { outcome: "injected" };
   }
 
   private async setOption(p: Rec): Promise<Rec> {
