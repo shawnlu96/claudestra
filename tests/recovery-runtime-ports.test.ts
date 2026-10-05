@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bindHash, checkAsk } from "../src/lib/ask-bind.js";
-import { noticeBlocker, noticeGateNow, reminderDedupKey } from "../src/lib/ask-recovery.js";
+import { noticeBlocker, noticeGateNow, reminderDedupKey, type ReminderOutcome } from "../src/lib/ask-recovery.js";
 import { fixMaterials } from "../src/lib/fix-materials.js";
 import { closeAsk, getAsk, listAsks, openAsk, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -338,6 +338,70 @@ describe("ASKR exit → sweepReminders / notice gate", () => {
     expect(await noticeBlocker(n, ports)).toBe("mode=off");
     set("pa", "askReminder", pol("on"));
     expect(await noticeBlocker(n, ports)).toBeNull();
+  });
+
+  test("owner hold with policy on: paused, inactive, missing evidence or no activity port open nothing", async () => {
+    const { db, expired, reminders } = asks();
+    const a = expired();
+    const { rt, set } = policyTable();
+    set("pa", "askReminder", pol("on"));
+    const now = a.expiresAt + 1;
+    const cases: [Parameters<typeof rt.askReminderPorts>[0], string, string][] = [
+      [{ ...LIVE, paused: () => true }, "skip", "paused by owner"],
+      [{ ...LIVE, ownerActive: () => ({ active: false, evidence: "idle 3h" }) }, "wait", "owner not active (idle 3h)"],
+      [{ ...LIVE, ownerActive: () => null }, "wait", "no owner activity evidence"],
+      [{ ...LIVE, ownerActive: async () => null }, "wait", "no owner activity evidence"],
+      [{ askerLive: () => true }, "wait", "no owner activity evidence"],
+    ];
+    for (const [base, result, reason] of cases) {
+      expect((await rt.sweepAskReminders(db, base, now))[0]).toEqual({ id: a.id, result, reason } as ReminderOutcome);
+      expect(reminders()).toHaveLength(0);
+    }
+    expect(getAsk(db, a.id)!.state).toBe("expired");
+    // The hold lifted, the same ask opens: the negatives above were the owner boundary, not something else.
+    expect((await rt.sweepAskReminders(db, LIVE, now))[0]).toMatchObject({ result: "opened" });
+  });
+
+  test("owner pauses while the activity read is awaited: the in-lock recheck aborts, nothing opened", async () => {
+    const { db, expired, reminders } = asks();
+    const a = expired();
+    const { rt, set } = policyTable();
+    set("pa", "askReminder", pol("on"));
+    let held = false;
+    const base = { askerLive: () => true, paused: () => held,
+      ownerActive: async () => { held = true; return { active: true, evidence: "heartbeat" }; } };
+    expect((await rt.sweepAskReminders(db, base, a.expiresAt + 1))[0]).toEqual({ id: a.id, result: "skip", reason: "paused by owner" });
+    expect(reminders()).toHaveLength(0);
+  });
+
+  test("returned ports keep the caller's owner boundary: a pending notice stays blocked while held, inactive or unproven", async () => {
+    const { db, expired, reminders } = asks();
+    const a = expired();
+    const { rt, set } = policyTable();
+    set("pa", "askReminder", pol("on"));
+    await rt.sweepAskReminders(db, LIVE, a.expiresAt + 1);
+    const n = reminders()[0];
+    expect(n.extra.remindNotice).toBe("pending");
+    const base = { ...LIVE, paused: () => true };
+    const ports = rt.askReminderPorts(base);
+    expect([ports.paused, ports.ownerActive, ports.askerLive]).toEqual([base.paused, base.ownerActive, base.askerLive]);
+    expect(noticeGateNow(n, ports)).toBe("paused by owner");
+    expect(await noticeBlocker(n, ports)).toBe("paused by owner");
+    expect(await noticeBlocker(n, rt.askReminderPorts({ ...LIVE, ownerActive: () => ({ active: false, evidence: "away" }) }))).toBe("owner not active (away)");
+    expect(await noticeBlocker(n, rt.askReminderPorts({ ...LIVE, ownerActive: async () => null }))).toBe("no owner activity evidence");
+    expect(await noticeBlocker(n, rt.askReminderPorts({ askerLive: () => true }))).toBe("no owner activity evidence");
+    // Pause lands during the awaited activity read: the gate looks again afterwards and keeps the notice.
+    let held = false;
+    const racing = rt.askReminderPorts({ askerLive: () => true, paused: () => held,
+      ownerActive: async () => { held = true; return { active: true, evidence: "heartbeat" }; } });
+    expect(await noticeBlocker(n, racing)).toBe("paused by owner");
+    // Activity flips to inactive between two notice attempts: read live, not cached.
+    let active = true;
+    const flipping = rt.askReminderPorts({ askerLive: () => true, ownerActive: () => ({ active, evidence: active ? "heartbeat" : "left" }) });
+    expect(await noticeBlocker(n, flipping)).toBeNull();
+    active = false;
+    expect(await noticeBlocker(n, flipping)).toBe("owner not active (left)");
+    expect(getAsk(db, n.id)!.extra.remindNotice).toBe("pending");
   });
 
   test("no port observes: nothing opened", async () => {
