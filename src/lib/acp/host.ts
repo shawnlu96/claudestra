@@ -66,6 +66,7 @@ export class AcpHost {
   /** 起适配器 / 等不到会话的失败键用单调序号（同一毫秒两次失败不能被合成一张卡） */
   private startSeq = 0;
   private lastStartError: AcpFailure | null = null;
+  private lastStartErrorAt = 0;
   /** 适配器协议不兼容（protocol.ts）：重起换不来别的结果，不再重起、回合当场按失败收尾；换了适配器或宿主要 restart */
   private refused = false;
   private sessionWaiters: ((s: AcpSession | null) => void)[] = [];
@@ -179,6 +180,7 @@ export class AcpHost {
     } catch (e) {
       const f = classifyPromptError(e, `start#${++this.startSeq}`);
       this.lastStartError = f;
+      this.lastStartErrorAt = Date.now();
       this.refused = e instanceof AcpIncompatibleError;
       this.deps.log(`适配器接不上线程：${f.message}${this.refused ? "（不再重起；不标就绪，manager 按启动失败处理）" : ""}`);
       this.fail(f);
@@ -233,7 +235,7 @@ export class AcpHost {
   /** 在 bridge 登记上了（首次 / 重连 / bridge 重启）：还在等的权限请求补发出卡，拒起的卡补发一次（bridge 按题面去重），出站条目接着送 */
   private resync(): void {
     for (const p of this.permits.values()) this.link.send(p.frame);
-    if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError); // 拒起时 bridge 可能还没登记上，那一帧就丢了
+    if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError, this.lastStartErrorAt); // 拒起时 bridge 可能还没登记上，那一帧就丢了
     void this.pump();
   }
 
@@ -323,11 +325,13 @@ export class AcpHost {
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
-    this.sendFailure(f);
+    this.sendFailure(f, Date.now());
   }
 
-  private sendFailure(f: AcpFailure): void {
-    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label });
+  /** sessionId / failedAt：出借停单据此认这张卡是不是当前会话、当前回合的（lend-turn-failure.ts）；failedAt 取失败那一刻，补发沿用原值，bridge 写卡的时刻不能代替它 */
+  private sendFailure(f: AcpFailure, failedAt: number): void {
+    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label,
+      sessionId: this.session?.sessionId || undefined, failedAt });
   }
 
   /** 权限请求：按 permId 交 bridge 出卡，等 owner 答（bridge 经 acp_call 回来）；到点按取消回适配器 */
