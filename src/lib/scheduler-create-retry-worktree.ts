@@ -73,11 +73,14 @@ function treeFiles(out: string): Map<string, TreeFile> {
   return files;
 }
 
-/** Compare raw Git blob bytes, including symlink targets and execute bits; filters cannot erase hidden user edits. */
+/**
+ * Compare raw blob bytes: autocrlf/eol, ident and filters may conservatively reject even a Git-clean checkout.
+ * Applying clean filters here could erase hidden user edits. Git file modes use only the owner execute bit.
+ */
 function sameBlob(path: string, file: TreeFile): boolean {
   const stat = lstatSync(path);
   if (file.mode === "120000" ? !stat.isSymbolicLink() : !stat.isFile()) return false;
-  if (file.mode !== "120000" && (stat.mode & 0o111 ? "100755" : "100644") !== file.mode) return false;
+  if (file.mode !== "120000" && (stat.mode & 0o100 ? "100755" : "100644") !== file.mode) return false;
   const bytes = file.mode === "120000" ? readlinkSync(path, { encoding: "buffer" }) : readFileSync(path);
   const hash = createHash(file.oid.length === 64 ? "sha256" : "sha1");
   return hash.update(`blob ${bytes.length}\0`).update(bytes).digest("hex") === file.oid;
@@ -118,7 +121,8 @@ export async function retryWorktreeDirty(git: Git, worktree: string, repo?: stri
     if (changed.length) return dirty();
     const tree = await git(["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
     if (tree.code !== 0) return `worktree ${worktree} 读不了 Git tree：${tree.out}`.slice(0, 400);
-    // Generated caches have no provenance guarantee either: only the two exact dependency links are exempt.
+    // Generated caches and .review-tmp/.review-env have no content provenance guarantee, even in review worktrees.
+    // Their contents deliberately hold retries for inspection; only the two exact dependency links are exempt.
     changed.push(...diskChanges(worktree, treeFiles(tree.out), allowed));
     return changed.length ? dirty() : null;
   } catch (e) {

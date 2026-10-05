@@ -327,7 +327,7 @@ describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktr
     expect(readFileSync(join(checkout, "a.ts"), "utf8")).toBe("patched\n");
   });
 
-  for (const change of ["tracked", "hidden untracked", "wrong branch", "wrong head", "dependency directory"]) {
+  for (const change of ["tracked", "hidden untracked", "wrong branch", "wrong head", "dependency directory", "review scratch"]) {
     test(`reviewer clean-failure retry preserves and holds ${change}`, async () => {
       const { f, creates, checkout, repo, run } = await reviewerFixture();
       let edited: string | null = null;
@@ -337,7 +337,12 @@ describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktr
         await run(repo, "config", "status.showUntrackedFiles", "no");
         if (change === "dependency directory") mkdirSync(join(checkout, "node_modules"));
         edited = join(checkout, change === "tracked" ? "a.ts" : change === "dependency directory" ? "node_modules/human-edits" : "new.ts");
+        if (change === "review scratch") {
+          mkdirSync(join(checkout, ".review-tmp", "home"), { recursive: true });
+          edited = join(checkout, ".review-tmp", "home", "notes");
+        }
         writeFileSync(edited, "keep me\n");
+        if (change === "review scratch") expect(await run(checkout, "status", "--porcelain")).toBe("");
       }
       const head = await run(checkout, "rev-parse", "HEAD");
       const held = await f.tick();
@@ -400,6 +405,45 @@ describe("SC1H hidden edits cannot authorize clean reuse", () => {
         if (change === "missing") expect(existsSync(file)).toBe(false);
       });
     }
+  }
+
+  for (const flag of ["assume-unchanged", "skip-worktree"]) {
+    test(`${flag}: only the owner execute bit determines Git file mode`, async () => {
+      const f = await hiddenFixture(), file = join(f.worktree, "a.ts");
+      await f.run(f.worktree, "config", "core.filemode", "true");
+      chmodSync(file, 0o755);
+      await f.run(f.worktree, "add", "a.ts");
+      await f.run(f.worktree, "commit", "-qm", "executable");
+      chmodSync(file, 0o655); // Group/other execution cannot substitute for S_IXUSR.
+      expect(await f.run(f.worktree, "status", "--porcelain")).toContain("M a.ts");
+      await f.run(f.worktree, "update-index", `--${flag}`, "a.ts");
+      const flags = await f.run(f.worktree, "ls-files", "-v");
+      expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("a.ts");
+      expect(lstatSync(file).mode & 0o777).toBe(0o655);
+      chmodSync(file, 0o744); // Changing only group/other bits is clean in Git.
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toBeNull();
+      expect(await f.run(f.worktree, "ls-files", "-v")).toBe(flags);
+    });
+  }
+
+  for (const conversion of ["autocrlf", "eol", "ident"]) {
+    test(`raw bytes conservatively reject a Git-clean ${conversion} checkout`, async () => {
+      const f = await hiddenFixture(), file = join(f.worktree, "a.ts");
+      if (conversion === "autocrlf") await f.run(f.worktree, "config", "core.autocrlf", "true");
+      else {
+        writeFileSync(join(f.worktree, ".gitattributes"), `a.ts ${conversion === "eol" ? "text eol=crlf" : "ident"}\n`);
+        if (conversion === "ident") writeFileSync(file, "$Id$\n");
+        await f.run(f.worktree, "add", ".");
+        await f.run(f.worktree, "commit", "-qm", "checkout conversion");
+      }
+      rmSync(file); await f.run(f.worktree, "checkout", "--", "a.ts");
+      const bytes = readFileSync(file);
+      expect(bytes.toString()).toContain(conversion === "ident" ? "$Id: " : "\r\n");
+      expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("a.ts");
+      expect(readFileSync(file)).toEqual(bytes);
+    });
   }
 
   test("binary bytes and tracked symlink targets are compared without text trimming or following links", async () => {
