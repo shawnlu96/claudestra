@@ -34,6 +34,7 @@ const TURN = { id: "T1", items: [], status: "inProgress" };
 const START = {
   threadId: "th",
   input: [{ type: "text" as const, text: "hi", text_elements: [] as [] }],
+  clientUserMessageId: "cum-1",
   approvalPolicy: "never" as const,
   approvalsReviewer: "user" as const,
   sandboxPolicy: { type: "dangerFullAccess" as const },
@@ -104,8 +105,8 @@ describe("调用", () => {
   test("调用超时按 USED 的缺省值或覆盖值失败", async () => {
     const f = fakeServer();
     const app = createAppServer(f.wire, { timeouts: { "thread/read": 15 } });
-    await expect(app.call("thread/read", { threadId: "th" })).rejects.toThrow("thread/read 超时（15ms）");
-    await expect(app.call("thread/read", { threadId: "th" }, { timeoutMs: 5 })).rejects.toThrow("超时（5ms）");
+    await expect(app.call("thread/read", { threadId: "th", includeTurns: false })).rejects.toThrow("thread/read 超时（15ms）");
+    await expect(app.call("thread/read", { threadId: "th", includeTurns: false }, { timeoutMs: 5 })).rejects.toThrow("超时（5ms）");
   });
 });
 
