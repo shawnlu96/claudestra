@@ -488,7 +488,8 @@ function ChatInner() {
   }, [agents, activeAgent, store]);
 
   useEffect(() => {
-    store.loadAgents();
+    const stopAgentList = store.startAgentList();
+    void store.loadAgents();
     void store.loadProfile();
     // Web Push 的 Service Worker(sw.js 只做推送,不拦资源缓存);注册失败静默
     // ——非 HTTPS/不支持的环境本来就没有推送,设置页开关那里会给明确提示
@@ -513,7 +514,7 @@ function ChatInner() {
       if (now - lastAlign < 5_000) return;
       lastAlign = now;
       store.maybeReconnect();
-      store.refreshAgents();
+      void store.refreshAgents("event"); // 失败退避中也提前重试
       // iOS PWA 从后台回来偶发合成层黑屏（GPU 层被回收后未重绘,2026-07-13
       // 真机）——需要强制一次重绘。⚠ 不能用 display:none 切换:那会拆掉整棵
       // 布局树,iOS 重建后触摸滚动区域经常注册失败,整页卡死不能滚(2026-07-21
@@ -539,7 +540,7 @@ function ChatInner() {
     // 太密会把额度打爆 → Bridge 429 → BFF 转 502 → SSE 流被掐断（实时推送失效）+ 列表间歇 502。
     // 4s(=15/min) 曾把额度吃掉一半引发此故障；15s(=4/min) 留足 26/min 给交互。别再调低。
     const poll = setInterval(() => {
-      if (document.visibilityState === "visible") store.refreshAgents();
+      if (document.visibilityState === "visible") void store.refreshAgents("poll"); // 在途时合流,失败退避期内跳过
     }, 15_000);
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
@@ -547,6 +548,7 @@ function ChatInner() {
       window.removeEventListener("pageshow", onVisible);
       window.removeEventListener("cstra-resume", onVisible);
       clearInterval(poll);
+      stopAgentList();
     };
   }, [store]);
 
