@@ -12,6 +12,7 @@
  * tests/pi-acp-replay.test.ts（录制的 pi 0.99.1 事件流回放）、tests/pi-acp-shell.test.ts。
  */
 import { redactSecrets } from "../../redact-secrets.js";
+import { ACP_PROTOCOL_VERSION } from "../protocol.js";
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
   compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate,
@@ -82,7 +83,7 @@ export class PiAcpServer {
   constructor(wire: RpcWire, private readonly deps: PiServerDeps) {
     const acp = (this.acp = createRpcPeer(wire, { log: deps.log }));
     acp.onRequest("initialize", () => ({
-      protocolVersion: 1,
+      protocolVersion: ACP_PROTOCOL_VERSION,
       agentInfo: { name: "claudestra-pi-acp", version: "1" },
       agentCapabilities: { loadSession: false, sessionCapabilities: { resume: {} }, mcpCapabilities: { http: false, sse: false } },
       authMethods: [],
