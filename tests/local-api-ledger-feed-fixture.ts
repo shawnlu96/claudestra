@@ -9,6 +9,7 @@
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { BridgeEvent } from "../src/bridge/event-bus.js";
 import type { Principal } from "../src/lib/principals.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 import { testChildEnv } from "./test-env.js";
@@ -75,7 +76,7 @@ async function runChild(scenario: FeedScenario): Promise<unknown> {
   setLedgerFeedForTest({ path }); // 不给 emit = 真发到 event-bus
   probe.s.armed = true;
   if (scenario.kind === "agent") {
-    const ev = (agent: string) => ({ seq: 1, ts: "2026-09-28T00:00:00Z", agent, chatId: "c", type: "assistant_text", data: {} });
+    const ev = (agent: string): BridgeEvent => ({ seq: 1, ts: "2026-09-28T00:00:00Z", agent, chatId: "c", type: "assistant_text", data: {} });
     return Object.fromEntries(scenario.conns.map((c) => [c.name, scenario.agents.map((a) => sseEventAllow(c.principal)(ev(a)))]));
   }
   const got: Record<string, unknown[]> = {};
