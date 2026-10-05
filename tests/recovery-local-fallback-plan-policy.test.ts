@@ -4,7 +4,8 @@
  * mate whose hello is missing or whose grant expired qualifies; mate merely full is capacity and never does.
  */
 import { describe, expect, test } from "bun:test";
-import type { InventoryQuota } from "../src/lib/ai-quota.js";
+import { readInventoryQuota, type InventoryQuota, type QuotaReadDeps } from "../src/lib/ai-quota.js";
+import { emptyQuotaState } from "../src/lib/quota-state.js";
 import { getTask } from "../src/lib/ledger-store.js";
 import { assessLocalFallback, localCodexQuotaProof, localFallbackPolicy, planLocalFallback, readLocalFallbackFacts, type EligiblePlan,
   type LocalFallbackFacts, type LocalFallbackPolicyPort } from "../src/lib/recovery-local-fallback-plan.js";
@@ -90,5 +91,25 @@ describe("FB2P Codex quota proof (existing quota reader + line)", () => {
     expect(await localCodexQuotaProof(async () => quota(99))).toMatchObject({ ok: false, why: expect.stringContaining("weekly") });
     expect(await localCodexQuotaProof(async () => quota(null, "unknown"))).toMatchObject({ ok: false, why: expect.stringContaining("未知") });
     expect(await localCodexQuotaProof(async () => { throw new Error("keychain locked"); })).toMatchObject({ ok: false, why: expect.stringContaining("keychain") });
+  });
+
+  test("the real reader: a known 5h window beside an unknown / reset-passed / missing weekly window is no proof", async () => {
+    const NOW = Date.UTC(2026, 9, 5, 6, 0), H = 3600_000;
+    type W = { id: string; windowMinutes: number; pct: number | null; resetsAtMs: number; resetPassed: boolean };
+    const read = (windows: W[]) => async () => (await readInventoryQuota({ now: NOW, enabled: () => true, loadState: async () => emptyQuotaState(),
+      claudeCache: () => null, codexRollout: async () => ({ source: "codex-rollout", plan: "prolite", credits: null, limitReached: null,
+        observedAt: NOW - 6 * 24 * H, sessionId: "s", cwd: null, agent: null, windows: windows.map((w) => ({ ...w, resets: "" })) }) } as QuotaReadDeps)).codex;
+    const session: W = { id: "5h", windowMinutes: 300, pct: 20, resetsAtMs: NOW + 2 * H, resetPassed: false };
+    const resetWeekly = read([session, { id: "7d", windowMinutes: 10080, pct: 30, resetsAtMs: NOW - H, resetPassed: false }]);
+    const q = await resetWeekly();
+    expect(q.status).toBe("known");
+    expect(q.windows.find((w) => w.kind === "weekly")).toMatchObject({ usedPct: null, resetPassed: true });
+    expect(await localCodexQuotaProof(resetWeekly, NOW)).toMatchObject({ ok: false, why: expect.stringContaining("7d") });
+    expect(await localCodexQuotaProof(read([session]), NOW)).toMatchObject({ ok: false, why: expect.stringContaining("周额度") });
+    expect(await localCodexQuotaProof(read([session, { id: "7d", windowMinutes: 10080, pct: 30, resetsAtMs: NOW + 24 * H, resetPassed: false }]), NOW))
+      .toEqual({ ok: true });
+    // A window whose reset time has come since the snapshot is unconfirmed too, even if the reader still shows a number.
+    expect(await localCodexQuotaProof(async () => ({ ...quota(10), windows: [{ id: "weekly", kind: "weekly", usedPct: 10, resetsAtMs: 5, resetPassed: false }] }), 10))
+      .toMatchObject({ ok: false });
   });
 });

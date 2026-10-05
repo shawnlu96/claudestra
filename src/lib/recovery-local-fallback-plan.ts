@@ -3,7 +3,7 @@
  * Only two triggers count — this window's outbound-gate block (scheduler-dispatch-block.ts, state blocked) and "no peer it may
  * safely go to" (the planner's own peer_unavailable). Safety holds, owner freezes, private / local-only bans, any delivery that is
  * not proven undelivered or formally ended, a missing grant / slot / quota proof or a family switch all block. Pure and read-only:
- * no session, SQL write, order change or model call happens here; FB2 runs the steps and CAS (revalidate first, in its transaction).
+ * no session, SQL write, order change or model call happens here; FB2 runs the steps and CAS (staleBasis with fresh facts and the policy port first, in its transaction).
  * FB2 call site: the auto tick's build / fix card whose decision is a wait (scheduler-auto-tick / scheduler-autostart-deps), via
  * readLocalFallbackFacts → planLocalFallback. tests/recovery-local-fallback-plan*.test.ts.
  */
@@ -38,15 +38,23 @@ export function localFallbackPolicy(port: LocalFallbackPolicyPort | undefined, p
 /** A proof is positive or it is a reason; nothing here reads "unknown" as fine. */
 export type Proof = { ok: true } | { ok: false; why: string };
 
+const WEEKLY = ["weekly", "weekly_scoped"];
+
 /**
- * Codex weekly quota as a positive proof: a known snapshot under the project's line. codexQuotaWait lets an unreadable or
- * unknown snapshot through (scheduling never stalls on it); a takeover needs the opposite, so those are no proof here.
+ * Codex weekly quota as a positive proof: every weekly window observed now (finite usage, reset not passed or due) and under the
+ * project's line. codexQuotaWait lets an unreadable / unknown snapshot or an unknown / just-reset weekly window through
+ * (scheduling never stalls on it); a takeover needs the opposite, so none of those is proof here — "known" alone only means some
+ * window (maybe the 5h one) has a number.
  */
 export async function localCodexQuotaProof(read: () => Promise<InventoryQuota> = async () => (await readInventoryQuota()).codex, now = Date.now(),
   at: { project?: string; ledgerPath?: string } = {}): Promise<Proof> {
   let q: InventoryQuota;
   try { q = await read(); } catch (e) { return { ok: false, why: `Codex 额度读不到：${(e as Error).message}`.slice(0, 300) }; }
   if (q.status !== "known") return { ok: false, why: `Codex 额度未知（${q.reason ?? "无快照"}），不算额度证明` };
+  const weekly = q.windows.filter((w) => WEEKLY.includes(w.kind));
+  if (!weekly.length) return { ok: false, why: "Codex 没有周额度窗口观测，不算额度证明" };
+  const unsure = weekly.find((w) => w.resetPassed || w.usedPct === null || !Number.isFinite(w.usedPct) || (w.resetsAtMs !== null && w.resetsAtMs <= now));
+  if (unsure) return { ok: false, why: `Codex 周额度 ${unsure.id} 用量未知或应已重置未确认，不算额度证明` };
   const over = await codexQuotaWait(async () => q, now, at);
   return over ? { ok: false, why: over.reason } : { ok: true };
 }
@@ -77,6 +85,12 @@ type BlockCode = "policy_off" | "not_auto" | "stage" | "not_candidate" | "safety
 export interface PlanBasis {
   taskId: string; stage: string; round: number; specRev: number; head: string | null; branch: string | null; lastSeq: number;
   intents: string[]; orders: string[]; lease: string | null; author: string | null; trigger: string;
+  /** Digest of the spec text (null = unreadable): an edited spec (manual / local-only / superseded) voids the plan. */
+  spec: string | null;
+  /** The local write grant as read (agents / localPriority / localAuthorRuntime / localFamilies / mode / maxWorkers). */
+  grant: string;
+  /** Slot / quota proofs, the outbound ban and the unpushed work the plan was built on. */
+  proofs: string;
 }
 
 type Trigger = { kind: "gate_refused"; seq: number; material: string; reason: string } | { kind: "peer_unavailable"; reason: string };
@@ -107,13 +121,18 @@ const ENDED_ORDER = ["cancelled", "released"];
 const windowOf = (s: PlannerSnapshot): number =>
   s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? s.events.find((e) => e.kind === "task")?.seq ?? 0;
 
+const digest = (v: unknown): string => createHash("sha256").update(JSON.stringify(v)).digest("hex").slice(0, 16);
+
 function basisOf(f: LocalFallbackFacts, trigger: string): PlanBasis {
-  const s = f.snapshot, t = s.task;
+  const s = f.snapshot, t = s.task, r = s.pool?.remote ?? null;
   return { taskId: t.id, stage: t.stage, round: t.round, specRev: t.specRev, head: t.headSHA ?? null, branch: t.branch ?? null,
     lastSeq: s.events.at(-1)?.seq ?? 0, intents: s.intents.map((i) => `${i.id}:${i.status}`),
     orders: f.orders.map((o) => `${o.orderId}:${o.status}:${o.leaseGen}`),
     lease: f.lease ? `${f.lease.peer}:${f.lease.branch}:${f.lease.state}` : null,
-    author: s.author ? `${s.author.agent}:${s.author.sessionId}:${s.author.source}` : null, trigger };
+    author: s.author ? `${s.author.agent}:${s.author.sessionId}:${s.author.source}` : null, trigger,
+    spec: f.specText === null ? null : digest(f.specText),
+    grant: digest(r && [r.mode, r.agents ?? null, r.localPriority ?? null, r.localAuthorRuntime ?? null, r.localFamilies ?? null, s.maxWorkers]),
+    proofs: digest([f.slot, f.quota, f.outboundBan ?? null, f.unpushed ?? []]) };
 }
 
 const keyOf = (b: PlanBasis, extra: unknown): string => createHash("sha256").update(JSON.stringify([b, extra])).digest("hex").slice(0, 24);
@@ -163,9 +182,15 @@ function deliveryGap(f: LocalFallbackFacts, since: number): { code: BlockCode; w
   return null;
 }
 
-/** The project policy must already seat a local Codex writer; this never suggests adding one or switching model. */
-function grantGap(remote: RemotePolicy | null | undefined): string | null {
+/**
+ * The project policy must already seat a local Codex writer; this never suggests adding one or switching model. localPriority
+ * off is "this machine writes no code" (placement's tiers, recovery-plan-gap's localRoom), whatever pool shape; a legacy pool
+ * with maxActiveWorkers 0 has no local worker at all.
+ */
+function grantGap(remote: RemotePolicy | null | undefined, maxWorkers: number): string | null {
   if (!remote) return "项目没有本机写位策略";
+  if (remote.localPriority === "off") return "localPriority=off：本机不写代码";
+  if (!remote.agents && maxWorkers <= 0) return "maxActiveWorkers=0：本机没有写作者";
   if (remote.agents) return localFamilyRefusal({ remote }, "write", "codex") ? "项目没给本机 Codex 写位" : null;
   return remote.localAuthorRuntime === "codex" && !localFamilyRefusal({ remote }, "write", "codex") ? null : "本机写作者不是 Codex";
 }
@@ -186,7 +211,7 @@ export function assessLocalFallback(f: LocalFallbackFacts): Assessment {
   if (gap) return block(gap.code, gap.why);
   const author = s.workflow.authorFamily;
   if (author !== "codex") return block("family_switch", `现任作者家族 ${author}，本机 Codex 接管会换模型`);
-  const grant = grantGap(s.pool?.remote);
+  const grant = grantGap(s.pool?.remote, s.maxWorkers);
   if (grant) return block("no_grant", grant);
   const missing = [...(f.slot.ok ? [] : [f.slot.why]), ...(f.quota.ok ? [] : [f.quota.why])];
   if (missing.length) return block(f.slot.ok ? "no_quota" : "no_slot", ...missing);
@@ -216,10 +241,20 @@ export function planLocalFallback(f: LocalFallbackFacts, port: LocalFallbackPoli
   return policy.mode === "observe" ? { kind: "observe", key: a.key, would: a, diag: policy.diag } : a;
 }
 
-/** Fields of an old plan's basis that changed since; empty = the plan still stands (compare inside FB2's CAS transaction). */
-export function staleBasis(old: PlanBasis, fresh: LocalFallbackFacts): (keyof PlanBasis)[] {
-  const now = assessLocalFallback(fresh).basis;
-  return (Object.keys(old) as (keyof PlanBasis)[]).filter((k) => JSON.stringify(old[k]) !== JSON.stringify(now[k]));
+export type StaleReason = keyof PlanBasis | "policy" | "eligibility";
+
+/**
+ * Why an old plan no longer stands, on facts FB2 re-reads inside its CAS transaction (snapshot, orders, lease, spec, and fresh
+ * slot / quota proofs) and the policy port re-asked there: changed basis fields, the policy no longer on, or the fresh assessment
+ * no longer eligible. Empty = every check passed again — never compare bases alone: a matching basis is not a re-assessment.
+ */
+export function staleBasis(old: PlanBasis, fresh: LocalFallbackFacts, port: LocalFallbackPolicyPort | undefined): StaleReason[] {
+  const now = planLocalFallback(fresh, port);
+  const basis = now.kind === "observe" ? now.would.basis : now.basis;
+  const changed: StaleReason[] = (Object.keys(old) as (keyof PlanBasis)[]).filter((k) => JSON.stringify(old[k]) !== JSON.stringify(basis[k]));
+  if (now.kind === "observe" || (now.kind === "blocked" && now.code === "policy_off")) changed.push("policy");
+  else if (now.kind !== "eligible") changed.push("eligibility");
+  return changed;
 }
 
 /** The existing fact readers, composed: auto snapshot + planner decision + lend orders + write lease + spec text. */

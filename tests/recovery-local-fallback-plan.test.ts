@@ -8,10 +8,12 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { getTask } from "../src/lib/ledger-store.js";
+import { writeFileSync } from "node:fs";
+import { getMeta, getTask } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { assessLocalFallback, planLocalFallback, readLocalFallbackFacts, staleBasis, type EligiblePlan, type LocalFallbackFacts,
   type LocalFallbackPolicyPort } from "../src/lib/recovery-local-fallback-plan.js";
+import { specPathFor } from "../src/lib/task-spec.js";
 import { recordModelOutcome } from "../src/lib/scheduler-model-outcome.js";
 import { blockFixture, E2E_MS, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
@@ -64,16 +66,16 @@ describe("FB2P eligible: only the proven gate-refused fix", () => {
       expect(planLocalFallback(facts(p), on)).toEqual(first);
       const reopened = new Database(join(p.f.dir, "ledger.sqlite"), { readonly: true });
       try { expect(planLocalFallback(facts(p, {}, reopened), on)).toEqual(first); } finally { reopened.close(); }
-      expect(staleBasis(first.basis, facts(p))).toEqual([]);
+      expect(staleBasis(first.basis, facts(p), on)).toEqual([]);
       // A plain PM note is a new event: the old plan is void even though the decision would not change.
       insertEvent(p.f.db, p.f.at("pm"), { project: "p", target: "T1", kind: "note", text: "看了一下", data: {} }, true);
-      expect(staleBasis(first.basis, facts(p))).toEqual(["lastSeq"]);
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["lastSeq"]);
       const second = planLocalFallback(facts(p), on) as EligiblePlan;
       expect(second.kind).toBe("eligible");
       expect(second.key).not.toBe(first.key);
       // Head / branch moved under the plan.
       p.f.db.run("UPDATE tasks SET headSHA = ?, branch = ? WHERE id = 'T1'", ["3".repeat(40), "lend/T1-other"]);
-      expect(staleBasis(second.basis, facts(p))).toEqual(expect.arrayContaining(["head", "branch"]));
+      expect(staleBasis(second.basis, facts(p), on)).toEqual(expect.arrayContaining(["head", "branch"]));
     } finally { p.f.close(); }
   }, E2E_MS);
 
@@ -82,10 +84,34 @@ describe("FB2P eligible: only the proven gate-refused fix", () => {
     try {
       const first = planLocalFallback(facts(p), on) as EligiblePlan;
       p.f.db.run("UPDATE scheduler_sessions SET sessionId = 's-two' WHERE taskId = 'T1' AND role = 'author'");
-      expect(staleBasis(first.basis, facts(p))).toEqual(["author"]);
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["author"]);
       p.rereview("# 审查报告\nP1：两个 tick 抢同一个意图（复现见 tests/x.test.ts）");
-      expect(staleBasis(first.basis, facts(p))).toEqual(expect.arrayContaining(["lastSeq", "trigger", "author"]));
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(expect.arrayContaining(["lastSeq", "trigger", "author"]));
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "not_candidate" });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("revoked grant, an edited spec, a lost proof or the policy turned off void an old plan; a matching basis alone is never enough", async () => {
+    const p = await refused();
+    try {
+      const first = planLocalFallback(facts(p), on) as EligiblePlan;
+      expect(first.kind).toBe("eligible");
+      p.policy.remote.agents = { claude: 1, codex: 0 };
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "no_grant" });
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["grant", "eligibility"]);
+      p.policy.remote.agents = { claude: 1, codex: 1 };
+      expect(staleBasis(first.basis, facts(p), on)).toEqual([]);
+      // The spec file itself edited to manual acceptance, read back through the real fact reader.
+      const task = getTask(p.f.db, "T1")!, path = specPathFor(task, getMeta(p.f.db, "p").docsDir)!;
+      const original = facts(p).specText!;
+      writeFileSync(path, `人工验收：是\n\n${original}`);
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "owner_hold" });
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["spec", "eligibility"]);
+      writeFileSync(path, original);
+      expect(staleBasis(first.basis, facts(p), on)).toEqual([]);
+      expect(staleBasis(first.basis, facts(p, { quota: { ok: false, why: "Codex 周额度 7d 用量未知" } }), on)).toEqual(["proofs", "eligibility"]);
+      expect(staleBasis(first.basis, facts(p), () => ({ mode: "off", manualAfterMs: null }))).toEqual(["policy"]);
+      expect(staleBasis(first.basis, facts(p), undefined)).toEqual(["policy"]);
     } finally { p.f.close(); }
   }, E2E_MS);
 });
@@ -155,6 +181,9 @@ describe("FB2P blocked: undelivered is proven, never assumed", () => {
       p.policy.remote.agents = { claude: 1, codex: 0 };
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "no_grant" });
       p.policy.remote.agents = { claude: 1, codex: 1 };
+      p.policy.remote.localPriority = "off";
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "no_grant", reasons: [expect.stringContaining("localPriority=off")] });
+      delete p.policy.remote.localPriority;
       expect(assessLocalFallback(facts(p, { slot: { ok: false, why: "Codex 全机会话已达 6" } })))
         .toMatchObject({ code: "no_slot", reasons: ["Codex 全机会话已达 6"] });
       expect(assessLocalFallback(facts(p, { quota: { ok: false, why: "Codex 额度未知" } }))).toMatchObject({ code: "no_quota" });
@@ -164,6 +193,22 @@ describe("FB2P blocked: undelivered is proven, never assumed", () => {
       expect(assessLocalFallback(facts(p, { specText: "人工验收：是\n\n规格" }))).toMatchObject({ code: "owner_hold" });
       const blockedText = JSON.stringify(assessLocalFallback(facts(p, { slot: { ok: false, why: "满" } })));
       expect(/加位|换模型|扩容/.test(blockedText)).toBe(false);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("legacy pool (no agents): localPriority off or maxActiveWorkers 0 is no grant even with Codex as the local runtime", async () => {
+    const p = await refused();
+    try {
+      delete p.policy.remote.agents;
+      Object.assign(p.policy.remote, { localAuthorRuntime: "codex", localFamilies: ["codex"] });
+      expect(assessLocalFallback(facts(p)).kind).toBe("eligible");
+      p.policy.remote.localPriority = "off";
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "no_grant", reasons: [expect.stringContaining("localPriority=off")] });
+      p.policy.remote.localPriority = "low";
+      expect(assessLocalFallback(facts(p)).kind).toBe("eligible");
+      const noWorker = readLocalFallbackFacts(p.f.db, getTask(p.f.db, "T1")!, { registry: [], maxWorkers: 0, now: p.f.tickDeps.now(),
+        pool: { remote: p.policy.remote, borrow: BORROW } }, { slot: OK, quota: OK });
+      expect(assessLocalFallback(noWorker)).toMatchObject({ kind: "blocked", reasons: [expect.stringContaining("maxActiveWorkers=0")] });
     } finally { p.f.close(); }
   }, E2E_MS);
 
