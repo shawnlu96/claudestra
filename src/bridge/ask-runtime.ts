@@ -85,7 +85,10 @@ interface RuntimeAskInput {
   /** 回合失败发生在哪个会话、什么时刻（宿主报的）：落在 extra，出借停单只认当前会话当前回合的卡（lib/lend-turn-failure.ts） */
   sessionId?: string;
   failedAt?: number;
-  /** 监护在处置、恢复次数还没用完（lib/agent-supervisor-bridge.ts failureCardQuiet）：卡照开、留在看板上，但不卡活、不推 owner */
+  /**
+   * 监护在处置（lib/agent-supervisor-bridge.ts failureCardQuiet）或派单会话的失败由派活方接手（lib/runtime-failure-audience.ts）：
+   * 卡照开、留在看板上，但不卡活、不推 owner
+   */
   quiet?: true;
   /**
    * 用户输入投递结果不明（lib/acp/failures.ts）：落在 extra.deliveryUnknown，只能由人结——后来的卡顶不掉、不按正文里的时间过期、
