@@ -85,7 +85,7 @@ describe("decideRecovery: table", () => {
 });
 
 describe("observe: dedup-able record only", () => {
-  const A: ObservedAction = { project: "p", key: "localFallback", target: "", actionKey: "T1:r0", action: "重派 T1 的 build" };
+  const A: ObservedAction = { project: "p", mechanism: "localFallback", target: "", actionKey: "T1:r0", action: "重派 T1 的 build" };
   const notes = (db: Database) => listEvents(db, { project: "p" }).filter((e) => e.kind === "note");
 
   test("same would-be action → one event; a different actionKey → a second one", () => {
@@ -93,9 +93,9 @@ describe("observe: dedup-able record only", () => {
     expect(recordObserved(db, A, 10).recorded).toBe(true);
     expect(recordObserved(db, A, 20).recorded).toBe(false);
     expect(recordObserved(db, { ...A, actionKey: "T1:r1" }, 30).recorded).toBe(true);
-    expect(notes(db).map((e) => [e.actor, e.data.op, e.data.key, e.data.actionKey])).toEqual([
+    expect(notes(db).map((e) => [e.actor, e.data.op, e.data.mechanism, e.data.actionKey])).toEqual([
       ["scheduler", "recovery_observe", "localFallback", "T1:r0"], ["scheduler", "recovery_observe", "localFallback", "T1:r1"]]);
-    expect(observedRecent(db, "p", 1).map((x) => [x.key, x.text])).toEqual([["localFallback", "恢复观察（localFallback）：本会 重派 T1 的 build"]]);
+    expect(observedRecent(db, "p", 1).map((x) => [x.mechanism, x.text])).toEqual([["localFallback", "恢复观察（localFallback）：本会 重派 T1 的 build"]]);
     expect(observedRecent(db, "q", 5)).toEqual([]);
   });
 
@@ -108,7 +108,7 @@ describe("observe: dedup-able record only", () => {
 
   test("unknown key / bad actionKey / bad target are refused, nothing written", () => {
     const db = openLedger(tempLedgerPath("recovery-obs-bad-"));
-    for (const bad of [{ key: "nudge" as RecoveryKey }, { actionKey: "" }, { actionKey: "a b" }, { actionKey: "x".repeat(121) }, { target: "T 1" }]) {
+    for (const bad of [{ mechanism: "nudge" as RecoveryKey }, { actionKey: "" }, { actionKey: "a b" }, { actionKey: "x".repeat(121) }, { target: "T 1" }]) {
       expect(() => recordObserved(db, { ...A, ...bad }, 1)).toThrow();
     }
     expect(notes(db)).toEqual([]);
@@ -130,7 +130,7 @@ console.log(JSON.stringify(recordObserved(openLedger(process.argv[2]), ${JSON.st
 });
 
 describe("gateRecovery: the wrapper every mechanism uses", () => {
-  const A: ObservedAction = { project: "p", key: "planGap", target: "", actionKey: "T9", action: "重派 T9" };
+  const A: ObservedAction = { project: "p", mechanism: "planGap", target: "", actionKey: "T9", action: "重派 T9" };
   const port = (mode: RecoveryPolicy["mode"], manualAfterMs: number | null = null): RecoveryPolicyPort => () => ({ mode, manualAfterMs, source: "config" });
   for (const [mode, outcome, acts, events] of [["on", "acted", 1, 0], ["observe", "observed", 0, 1], ["off", "skipped", 0, 0]] as const) {
     test(`${mode}: ${outcome}, act called ${acts}× per call, ${events} observe event across two calls`, async () => {
@@ -146,7 +146,7 @@ describe("gateRecovery: the wrapper every mechanism uses", () => {
     });
   }
 
-  test("the port is asked with the mechanism's own key; file-backed policy is re-read each call (corrupt → stop)", async () => {
+  test("the port is asked (project, mechanism); file-backed policy is re-read each call (corrupt → stop)", async () => {
     const db = openLedger(tempLedgerPath("recovery-gate-file-"));
     const asked: string[] = [];
     await gateRecovery(db, A, () => 0, { now: 1, policy: (p, k) => { asked.push(`${p}/${k}`); return { mode: "off", manualAfterMs: null, source: "config" }; } });
@@ -163,9 +163,9 @@ describe("gateRecovery: the wrapper every mechanism uses", () => {
   test("manual card without the owner threshold is never acted on, even under on", async () => {
     const db = openLedger(tempLedgerPath("recovery-gate-manual-"));
     let called = 0;
-    const r = await gateRecovery(db, { ...A, key: "manualStall", manualStalledMs: 500 * H }, () => ++called, { now: 1, policy: port("on") });
+    const r = await gateRecovery(db, { ...A, mechanism: "manualStall", manualStalledMs: 500 * H }, () => ++called, { now: 1, policy: port("on") });
     expect(r).toMatchObject({ outcome: "skipped", reason: expect.stringContaining("manualStallHours") });
-    expect((await gateRecovery(db, { ...A, key: "manualStall", manualStalledMs: 500 * H }, () => ++called, { now: 1, policy: port("on", 6 * H) })).outcome).toBe("acted");
+    expect((await gateRecovery(db, { ...A, mechanism: "manualStall", manualStalledMs: 500 * H }, () => ++called, { now: 1, policy: port("on", 6 * H) })).outcome).toBe("acted");
     expect(called).toBe(1);
   });
 });

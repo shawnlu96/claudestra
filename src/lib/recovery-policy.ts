@@ -69,16 +69,16 @@ export interface RecoveryPolicy {
   diagnostic?: string;
 }
 /** What mechanisms are handed (tests inject a fake); recoveryPolicy is the file-backed one. */
-export type RecoveryPolicyPort = (project: string, key: RecoveryKey) => RecoveryPolicy;
+export type RecoveryPolicyPort = (project: string, mechanism: RecoveryKey) => RecoveryPolicy;
 const stopped = (diagnostic: string): RecoveryPolicy => ({ mode: "off", manualAfterMs: null, source: "error", diagnostic });
 
-/** Read every time, never throws. Effective mode: keys[key] → project mode → observe. */
-export function recoveryPolicy(project: string, key: RecoveryKey, path = RECOVERY_POLICY_PATH): RecoveryPolicy {
-  if (!isRecoveryKey(key)) return stopped(`未知恢复键 ${String(key)}（只认 ${RECOVERY_KEYS.join(" / ")}）`);
+/** Read every time, never throws. Effective mode: keys[mechanism] → project mode → observe. */
+export function recoveryPolicy(project: string, mechanism: RecoveryKey, path = RECOVERY_POLICY_PATH): RecoveryPolicy {
+  if (!isRecoveryKey(mechanism)) return stopped(`未知恢复键 ${String(mechanism)}（只认 ${RECOVERY_KEYS.join(" / ")}）`);
   const r = readRecoveryFile(path);
   if (r.status === "corrupt") return stopped(`${path} 读不了，恢复停手：${r.error}`);
   const cfg = r.status === "ok" && Object.hasOwn(r.data.projects, project) ? r.data.projects[project] : undefined;
-  return { mode: cfg?.keys?.[key] ?? cfg?.mode ?? DEFAULT_RECOVERY_MODE, manualAfterMs: cfg?.manualStallHours ? cfg.manualStallHours * HOUR_MS : null,
+  return { mode: cfg?.keys?.[mechanism] ?? cfg?.mode ?? DEFAULT_RECOVERY_MODE, manualAfterMs: cfg?.manualStallHours ? cfg.manualStallHours * HOUR_MS : null,
     source: cfg ? "config" : "default" };
 }
 
@@ -99,15 +99,15 @@ export function decideRecovery(policy: RecoveryPolicy, candidate: { manualStalle
 }
 
 const PART = /^[\w.:@/-]{1,120}$/;
-/** What observe records; dedup = project + key + target + actionKey, so the same would-be action is one event. */
-export interface ObservedAction { project: string; key: RecoveryKey; target: string; actionKey: string; action: string; data?: Record<string, unknown> }
+/** What observe records; dedup = project + mechanism + target + actionKey, so the same would-be action is one event. */
+export interface ObservedAction { project: string; mechanism: RecoveryKey; target: string; actionKey: string; action: string; data?: Record<string, unknown> }
 
-export function observeDedupKey(a: Pick<ObservedAction, "project" | "key" | "target" | "actionKey">): string {
-  if (!isRecoveryKey(a.key)) throw new LedgerError("invalid", `未知恢复键 ${String(a.key)}`);
+export function observeDedupKey(a: Pick<ObservedAction, "project" | "mechanism" | "target" | "actionKey">): string {
+  if (!isRecoveryKey(a.mechanism)) throw new LedgerError("invalid", `未知恢复键 ${String(a.mechanism)}`);
   if (!PART.test(a.actionKey) || (a.target && !PART.test(a.target))) {
     throw new LedgerError("invalid", `恢复观察的 actionKey / target 要是 1..120 个 [\\w.:@/-] 字符，收到 ${JSON.stringify([a.actionKey, a.target])}`);
   }
-  return `recovery-observe:${a.project}:${a.key}:${a.target || "-"}:${a.actionKey}`;
+  return `recovery-observe:${a.project}:${a.mechanism}:${a.target || "-"}:${a.actionKey}`;
 }
 
 /**
@@ -116,9 +116,9 @@ export function observeDedupKey(a: Pick<ObservedAction, "project" | "key" | "tar
  */
 export function recordObserved(db: Database, a: ObservedAction, now: number): { recorded: boolean; seq: number } {
   const dedupKey = observeDedupKey(a);
-  const text = textOneLine(`恢复观察（${a.key}）：本会 ${a.action}`, "观察说明", 600);
+  const text = textOneLine(`恢复观察（${a.mechanism}）：本会 ${a.action}`, "观察说明", 600);
   const r = appendEvent(db, { actor: "scheduler", now, dedupKey },
-    { project: a.project, target: a.target, kind: "note", text, data: { ...a.data, op: RECOVERY_OBSERVE_OP, key: a.key, actionKey: a.actionKey } });
+    { project: a.project, target: a.target, kind: "note", text, data: { ...a.data, op: RECOVERY_OBSERVE_OP, mechanism: a.mechanism, actionKey: a.actionKey } });
   return { recorded: !r.duplicate, seq: r.event.seq };
 }
 
@@ -129,7 +129,7 @@ export type GateOutcome<T> = { outcome: "acted"; value: T } | { outcome: "observ
  */
 export async function gateRecovery<T>(db: Database, a: ObservedAction & { manualStalledMs?: number }, act: () => Promise<T> | T,
   opts: { now: number; policy?: RecoveryPolicyPort }): Promise<GateOutcome<T>> {
-  const d = decideRecovery((opts.policy ?? recoveryPolicy)(a.project, a.key), a);
+  const d = decideRecovery((opts.policy ?? recoveryPolicy)(a.project, a.mechanism), a);
   if (d.kind === "skip") return { outcome: "skipped", reason: d.reason };
   if (d.kind === "observe") return { outcome: "observed", recorded: recordObserved(db, a, opts.now).recorded };
   return { outcome: "acted", value: await act() };
@@ -236,7 +236,7 @@ export function observedRecent(db: Database, project: string, last: number) {
   const rows = db.prepare("SELECT seq, ts, target, text, data FROM events WHERE project = ? AND kind = 'note' AND dedupKey LIKE ? ESCAPE '\\' ORDER BY seq DESC LIMIT ?")
     .all(project, `recovery-observe:${project.replace(/[%_\\]/g, "\\$&")}:%`, last) as { seq: number; ts: number; target: string; text: string; data: string }[];
   return rows.map((r) => {
-    const d = JSON.parse(r.data) as { key?: string };
-    return { seq: r.seq, at: new Date(r.ts).toISOString(), target: r.target, key: d.key ?? "", text: r.text };
+    const d = JSON.parse(r.data) as { mechanism?: string };
+    return { seq: r.seq, at: new Date(r.ts).toISOString(), target: r.target, mechanism: d.mechanism ?? "", text: r.text };
   });
 }
