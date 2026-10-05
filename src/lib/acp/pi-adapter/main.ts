@@ -7,7 +7,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { spawnAdapter } from "../adapter-proc.js";
-import type { RpcWire } from "../rpc.js";
+import { stdioWire } from "../stdio-wire.js";
 import { piBinName } from "../../pi-env.js";
 import { piAgentDirOf } from "../../pi-path.js";
 import { sandboxPiAgentDirProblem } from "../../sandbox.js";
@@ -49,17 +49,8 @@ export function piChildEnv(env: Env, extra: Record<string, string>, cwd: string)
 
 function run(baseArgs: string[]): void {
   const log = (msg: string) => void process.stderr.write(`${msg}\n`);
-  const wire: RpcWire = {
-    write: (line) => void process.stdout.write(line),
-    onData: (cb) => void process.stdin.on("data", cb),
-    onClose: (cb) => void process.stdin.on("end", () => cb("stdin 关闭")),
-    close: (why) => {
-      log(`ACP 线路作废（${why}），退出`);
-      process.exit(1);
-    },
-  };
   const env = process.env;
-  new PiAcpServer(wire, {
+  new PiAcpServer(stdioWire(log), {
     openPi: (o) => piLinkOver(spawnAdapter([piBinName(), ...piRpcArgs(o.sessionId, baseArgs)], piChildEnv(env, o.env, o.cwd), o.cwd, log, "pi"), log),
     newSessionId: () => Bun.randomUUIDv7(),
     mountProblem: (names, cwd) => piMountProblem(names, cwd, baseArgs, env),
