@@ -35,8 +35,8 @@ export function activeWorkers(db: Database): WorkerRegistration[] {
   return db.query("SELECT * FROM worker_agents WHERE state = 'active' ORDER BY createdAt").all() as WorkerRegistration[];
 }
 
-export type CardWorkerSource = "worker_agents" | "scheduler_sessions" | "tasks.agent";
-export interface CardWorkerLink { taskId: string | null; role: WorkerRole; source: CardWorkerSource }
+type CardWorkerSource = "worker_agents" | "scheduler_sessions" | "tasks.agent";
+interface CardWorkerLink { taskId: string | null; role: WorkerRole; source: CardWorkerSource }
 /** The primary link (registration, then scheduler binding, then an unfinished card naming it as executor) plus every link. */
 export interface CardWorker extends CardWorkerLink { links: CardWorkerLink[] }
 
