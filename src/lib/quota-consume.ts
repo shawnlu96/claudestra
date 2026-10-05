@@ -8,7 +8,7 @@
  * 同一路径与字段名），请求头与只读 GET 同一份（cred.authHeaders()）。
  *
  * POST 之前现拉两份只读数据核对：额度里「此刻可用」≥ 1、明细里这张卡（HMAC 键对得上）仍可用，任何一步不过就不发；
- * 发之前最后再由调用方复验一次开关 / 代际 / 当前凭据（beforePost）。
+ * 发之前最后再由调用方复验一次开关 / 代际 / 当前凭据（beforePost），发送回调里再同步核一次开关与代际（liveNow）。
  * 发出去之后不管成败都再拉一次两份数据交给调用方入库。POST 从不自动重发：换个请求号重发就是再扣一张。
  * 单测 tests/quota-consume.test.ts（全部假 fetch）。
  */
@@ -44,11 +44,13 @@ export interface ConsumeDeps {
   now(): number;
   /** HMAC(本机密钥, 账户键 + credit.id)，与看板里的 key 同一口径 */
   hashCreditId(rawId: string): string;
-  /**
-   * 不可逆的 POST 紧前复验（开关、代际、当前凭据）：核对那两次 GET 期间开关可能被关、账户可能被换。
-   * 返回拒绝码就不发；它返回之后到 POST 发出之间没有别的 await。
-   */
+  /** 不可逆的 POST 紧前复验（开关、代际、当前凭据）：核对那两次 GET 期间开关可能被关、账户可能被换。返回拒绝码就不发 */
   beforePost(): Promise<"disabled" | "identity_changed" | null>;
+  /**
+   * 发送回调里同步再核一次开关与代际（不碰凭据）：await beforePost 的续体排在微任务队列里，排队期间也可能被关掉。
+   * 它与真正调 post 之间没有 await；返回 false 就不发。
+   */
+  liveNow(): boolean;
 }
 
 export interface ConsumeRun {
@@ -75,10 +77,16 @@ function pickRawId(json: unknown, credits: CodexResetCreditsDto, key: string | n
 async function postConsume(cred: QuotaCredential, rawId: string, deps: ConsumeDeps): Promise<ConsumeResult> {
   const body = JSON.stringify({ redeem_request_id: randomUUID(), credit_id: rawId });
   const headers = { Accept: "application/json", "Content-Type": "application/json", ...cred.authHeaders() };
-  const r = await requestJsonCapped(
-    (signal) => deps.post(CODEX_CONSUME_URL, { method: "POST", headers, body, redirect: "manual", signal }),
-    { now: deps.now, timeoutMs: CONSUME_TIMEOUT_MS },
-  );
+  let stopped = false;
+  const send = (signal: AbortSignal): Promise<Response> => {
+    if (!deps.liveNow()) {
+      stopped = true;
+      return Promise.reject(new Error("consume stopped before send")); // 只用来退出 requestJsonCapped，下面按 stopped 报「没发」
+    }
+    return deps.post(CODEX_CONSUME_URL, { method: "POST", headers, body, redirect: "manual", signal });
+  };
+  const r = await requestJsonCapped(send, { now: deps.now, timeoutMs: CONSUME_TIMEOUT_MS });
+  if (stopped) return { status: "refused", code: "disabled" };
   if (!r.ok) return { status: "failed", code: r.code };
   const j = r.data as { code?: unknown; windows_reset?: unknown } | null;
   const code = UPSTREAM_CODES.find((c) => c === j?.code);

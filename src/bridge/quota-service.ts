@@ -41,7 +41,8 @@ type SchedulerApi = Pick<QuotaScheduler, "tick" | "refresh" | "refreshResetCredi
 export interface QuotaServiceDeps {
   now(): number;
   /** 调度器由服务来建：它的 isEnabled 必须读服务里的开关 */
-  makeScheduler(isEnabled: () => boolean): SchedulerApi;
+  /** enabledNow = 现读开关的真实来源（config），只给不可逆的使用重置卡复验用；isEnabled 是缓存值，普通查询用它 */
+  makeScheduler(isEnabled: () => boolean, enabledNow: () => boolean): SchedulerApi;
   readEnabled(): boolean;
   writeEnabled(v: boolean): Promise<void>;
   /** live = 实时读取开着：Pi 接入商的套餐 / 余额也只在这时去查（lib/quota-pi-plans.ts） */
@@ -62,7 +63,7 @@ export interface QuotaView {
 export function createQuotaService(d: QuotaServiceDeps) {
   const log = d.log ?? ((m: string) => console.error(m));
   let enabled = d.readEnabled();
-  const scheduler = d.makeScheduler(() => enabled);
+  const scheduler = d.makeScheduler(() => enabled, () => (syncEnabled(), enabled));
   let lastViewedAt: number | null = null;
   let timer: unknown = null;
   let running = false;
@@ -191,7 +192,7 @@ async function claudeClientVersion(): Promise<string | null> {
 }
 
 /** 生产依赖：真凭据、真 fetch、quota-state.json、config.json */
-function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
+function productionScheduler(isEnabled: () => boolean, enabledNow: () => boolean): QuotaScheduler {
   const cred = defaultCredDeps();
   return new QuotaScheduler({
     now: Date.now,
@@ -208,6 +209,7 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
     },
     store: fileQuotaStore(),
     isEnabled,
+    enabledNow,
     claudeBackground: () => readConfigSync().quotaClaudeBackground !== false,
     claudeClientVersion,
     consumeFetch: (url, init) => fetch(url, init),

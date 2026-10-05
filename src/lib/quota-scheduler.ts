@@ -36,6 +36,11 @@ export interface QuotaSchedulerDeps {
   hashCreditId(accountKey: string, rawId: string): string;
   store: QuotaStore;
   isEnabled(): boolean;
+  /**
+   * 开关的真实来源现读（bridge 里是重读 config.json，不走服务缓存）：只在不可逆的使用重置卡复验时用，入口之后手改配置关掉的也要认。
+   * 不给 = 用 isEnabled。
+   */
+  enabledNow?(): boolean;
   /** 没人看时也查 Claude（要读 Keychain）：开时与 Codex 明细同一 6 小时后台节奏。不传 = 关（库的缺省保守；bridge 按配置传，缺省开） */
   claudeBackground?(): boolean;
   /** 本机实际装的 Claude Code 版本（拼客户端身份头，不带就看不到重置卡）；探不到 null，这时一个身份头都不带 */
@@ -255,7 +260,7 @@ export class QuotaScheduler {
   async consumeCodexReset(creditKey: string | null): Promise<ConsumeResult | { status: "busy" }> {
     if (this.consuming) return { status: "busy" };
     const post = this.deps.consumeFetch;
-    if (!post || !this.deps.isEnabled()) return { status: "refused", code: "disabled" };
+    if (!post || !this.enabledNow()) return { status: "refused", code: "disabled" };
     this.consuming = true;
     const gen = this.gen; // 入队时绑定代际：关过一次（onDisabled）这次意图就作废，再打开也不复活
     try {
@@ -280,7 +285,7 @@ export class QuotaScheduler {
 
   /** 出队、POST 紧前、入库前各复验一次：开关还开着、代际没变、凭据还是入队时那份（账户与指纹都比） */
   private async consumeOnce(creditKey: string | null, post: ConsumeFetch, gen: number, cred: QuotaCredential): Promise<ConsumeResult> {
-    const live = () => gen === this.gen && this.deps.isEnabled();
+    const live = () => this.enabledNow() && gen === this.gen; // 先现读开关（可能触发 onDisabled 改代际），再比代际
     const recheck = async (): Promise<"disabled" | "identity_changed" | null> => {
       if (!live()) return "disabled";
       const same = await this.deps.confirmCredential(cred);
@@ -290,7 +295,7 @@ export class QuotaScheduler {
     const stop = await recheck();
     if (stop) return { status: "refused", code: stop };
     const run = await consumeCodexResetCredit(cred, creditKey, {
-      fetch: this.deps.fetch, post, now: this.deps.now, hashCreditId: (raw) => this.deps.hashCreditId(cred.accountKey, raw), beforePost: recheck,
+      fetch: this.deps.fetch, post, now: this.deps.now, hashCreditId: (raw) => this.deps.hashCreditId(cred.accountKey, raw), beforePost: recheck, liveNow: live,
     });
     try {
       if ((await recheck()) === null) await this.storeFresh(cred.accountKey, run);
@@ -299,6 +304,10 @@ export class QuotaScheduler {
       console.error(`[quota] 使用重置卡后入库失败（${(e as Error)?.name ?? "unknown"}），结果照常返回`);
     }
     return run.result;
+  }
+
+  private enabledNow(): boolean {
+    return this.deps.enabledNow ? this.deps.enabledNow() : this.deps.isEnabled();
   }
 
   private async storeFresh(accountKey: string, run: ConsumeRun): Promise<void> {

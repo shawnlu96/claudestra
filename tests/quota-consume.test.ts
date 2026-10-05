@@ -242,6 +242,32 @@ describe("开关 / 代际 / 凭据在不可逆的 POST 之前复验（审查 #68
     expect(post.calls).toHaveLength(1);
   });
 
+  test("微任务窗口：beforePost 最后一次复验通过后、它的续体执行前关掉开关 + onDisabled → 发送回调里同步拦下，POST 0（审查 #687 P2）", async () => {
+    const { h, post } = setup();
+    // auth.json 第 3 次读 = POST 紧前那次凭据复验（1 入队读凭据、2 出队复验）；之后下一次读开关就是 beforePost 的最后一次 live()
+    let reads = 0;
+    let armed = false;
+    const readText = h.cd.readText.bind(h.cd);
+    h.cd.readText = async (path) => {
+      if (path === AUTH && ++reads === 3) armed = true;
+      return readText(path);
+    };
+    let on = true;
+    Object.defineProperty(h, "enabled", {
+      get: () => {
+        if (armed) {
+          armed = false;
+          queueMicrotask(() => disable(h)); // 排在「beforePost 返回 null」的续体前面
+        }
+        return on;
+      },
+      set: (v: boolean) => void (on = v),
+    });
+    expect(await h.scheduler.consumeCodexReset(null)).toEqual({ status: "refused", code: "disabled" });
+    expect(reads).toBe(3);
+    expect(post.calls).toHaveLength(0);
+  });
+
   test("POST 已经发出后才关开关：结果照真实答复返回（卡已扣），只是不入库", async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));

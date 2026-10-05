@@ -44,7 +44,7 @@ beforeAll(() => {
   const cd = fakeCredDeps();
   const svc = createQuotaService({
     now: () => T0,
-    makeScheduler: (isEnabled) => new QuotaScheduler({
+    makeScheduler: (isEnabled, enabledNow) => new QuotaScheduler({
       now: () => T0, random: () => 0.5, fetch,
       readCredential: (p) => (p === "claude" ? readClaudeCredential(cd) : readCodexCredential(cd)),
       peekAccountKey: (p) => peekAccountKey(p, cd),
@@ -52,6 +52,7 @@ beforeAll(() => {
       hashCreditId: (a, id) => hmacHex(SECRET, a, id),
       store: memoryQuotaStore(),
       isEnabled,
+      enabledNow,
       consumeFetch: post,
     }),
     readEnabled: () => cfgEnabled,
