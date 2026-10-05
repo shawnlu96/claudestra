@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { testChildEnv } from "./test-env.ts";
 import * as helper from "../src/lib/tmux-helper.ts";
+import type { ModalOption as HelperModalOption } from "../src/lib/tmux-helper.ts";
 import * as pure from "../src/lib/modal-numbered-options.ts";
 import { isAutoConfirmableModal } from "../src/lib/modal-confirm.ts";
 
@@ -81,6 +82,13 @@ const CONFIRM: Record<string, string> = {
 describe("modal-numbered-options 迁出等价", () => {
   test("tmux-helper 旧入口就是新模块同一函数", () => {
     expect(helper.parseModalOptions).toBe(pure.parseModalOptions);
+  });
+
+  test("tmux-helper 旧入口仍导出 ModalOption 类型，且与新模块同型（tsc 编译期把关）", () => {
+    const viaOld: HelperModalOption = { key: "1", label: "Yes", selected: true };
+    const viaNew: pure.ModalOption = viaOld;
+    const back: HelperModalOption[] | null = pure.parseModalOptions(" ❯ 1. Yes\n   2. No");
+    expect(back).toEqual([viaNew, { key: "2", label: "No", selected: false }]);
   });
 
   for (const [name, pane] of Object.entries(CASES)) {

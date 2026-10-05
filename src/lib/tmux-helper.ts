@@ -19,7 +19,7 @@ import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; exp
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
 import { endsInModal, paneTail, trimTrailingBlank } from "./pane-tail.js";
-export { parseModalOptions } from "./modal-numbered-options.js";
+export { parseModalOptions, type ModalOption } from "./modal-numbered-options.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
