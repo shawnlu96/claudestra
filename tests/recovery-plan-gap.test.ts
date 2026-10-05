@@ -109,7 +109,8 @@ describe("capacity is the real local room and peer refusal", () => {
     hello("mate");
     const f = facts();
     expect(f.localRoom).toBe(2);
-    expect(f.peers).toEqual([{ peer: "mate", seats: 2, why: null }]); // writeFamilies default codex: 3 total − 1 busy
+    // writeFamilies default codex: 3 total − 1 busy
+    expect(f.peers).toEqual([{ peer: "mate", seats: 2, why: null, free: { codex: 2 }, allowed: ["codex"] }]);
     remote = { ...WRITE, writeFamilies: ["codex", "claude"] };
     expect(facts().peers[0].seats).toBe(4);
   });
@@ -127,7 +128,13 @@ describe("capacity is the real local room and peer refusal", () => {
     arrange();
     const p = facts().peers[0];
     expect(p.seats).toBe(0);
+    expect(p.allowed).toEqual([]);
     expect(p.why ?? "").toMatch(why);
+  });
+
+  test("a refusal removes this project's edge, not the peer's physical free slots", () => {
+    hello("mate"); borrow = [{ ...borrow[0], priority: "off" }];
+    expect(facts().peers[0]).toMatchObject({ seats: 0, allowed: [], free: { codex: 2 } });
   });
 
   test("local room: maxWorkers, localPriority off, blocked runtime", () => {

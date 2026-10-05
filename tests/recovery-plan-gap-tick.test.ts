@@ -1,7 +1,9 @@
 /**
  * dispatch-recovery-PLAN tick: off / observe / on through the injected policy port (missing port = observe, broken = off),
  * the owner's manualAfterMs threshold (null = never send), one notice per blocking picture claimed in the ledger before sending
- * (two connections racing send once), a cooldown for changed pictures, and peer seats shared by projects counted once.
+ * (two connections racing send once), delivery state kept in the ledger (an unsent claim retries with bounded backoff, a sent
+ * picture never re-sends), a cooldown for changed pictures, and peer seats matched by max flow over per-project permission edges
+ * (one physical pool per peer, a refused project never shrinks it, project order never changes the answer).
  * Temp ledger only; notifyPm is a recorder, no bridge.
  */
 import { Database } from "bun:sqlite";
@@ -13,8 +15,9 @@ import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import {
-  assessPlanGap, fleetIdle, gapFingerprint, planGapKey, planGapPolicy, planGapText, planGapTick, readPlanGapFacts,
-  type PlanGapDeps, type PlanGapPolicyPort, type ProjectFacts, type RecoveryPolicy, type WorkItem,
+  assessPlanGap, fleetIdle, gapFingerprint, PLAN_GAP_RETRY_BASE_MS, PLAN_GAP_RETRY_MAX_MS, planGapKey, planGapPolicy, planGapRetryAfter,
+  planGapText, planGapTick, readPlanGapFacts, type PeerSeats, type PlanGapDeps, type PlanGapPolicyPort, type ProjectFacts, type RecoveryPolicy,
+  type WorkItem,
 } from "../src/lib/recovery-plan-gap.js";
 import { SPEC_SETTLE_MS } from "../src/lib/scheduler-autostart.js";
 
@@ -23,9 +26,12 @@ let dir: string, path: string, db: Database, sent: { project: string; text: stri
 
 const item = (key: string, over: Partial<WorkItem> = {}): WorkItem =>
   ({ featureId: "f1", key, taskId: `t-${key}`, version: 1, state: "ready", external: true, why: "就绪", ...over });
+/** A peer with `free` physical codex slots; allowed = this project may use them (else seats 0 with a refusal). */
+const peer = (name: string, free: number, allowed = true): PeerSeats =>
+  ({ peer: name, seats: allowed ? free : 0, why: allowed ? null : "借入名单对该项目不允许 write", free: { codex: free }, allowed: allowed && free > 0 ? ["codex"] : [] });
 const pf = (project: string, over: Partial<ProjectFacts> = {}): ProjectFacts =>
   ({ project, work: [item("a"), item("b", { state: "blocked", gate: "lanes", why: "依赖没满足：a" })], drafts: [], localRoom: 1, localWhy: null,
-    peers: [{ peer: "mate", seats: 3, why: null }], ...over });
+    peers: [peer("mate", 3)], ...over });
 const on = (manualAfterMs: number | null = 5 * MIN): PlanGapPolicyPort => () => ({ mode: "on", manualAfterMs });
 
 function deps(over: Partial<PlanGapDeps> = {}, store = db): PlanGapDeps {
@@ -93,7 +99,7 @@ describe("modes and threshold", () => {
 
   test("no idle seat or nothing stuck: no gap, and the persistence clock resets", async () => {
     const seen = new Map();
-    await planGapTick(deps({ seen, policy: on(0), facts: (p) => pf(p, { localRoom: 0, peers: [{ peer: "mate", seats: 0, why: "hello 过期" }] }) }));
+    await planGapTick(deps({ seen, policy: on(0), facts: (p) => pf(p, { localRoom: 0, peers: [{ ...peer("mate", 3, false), why: "hello 过期" }] }) }));
     await planGapTick(deps({ seen, policy: on(0), facts: (p) => pf(p, { work: [item("a")] }) }));
     expect(sent).toEqual([]);
     expect(seen.size).toBe(0);
@@ -104,14 +110,16 @@ describe("dedupe", () => {
   test("same picture is sent once across ticks; ticks a minute apart do not re-send", async () => {
     for (let i = 0; i < 5; i++) await planGapTick(deps({ policy: on(0), now: 1_000_000 + i * MIN }));
     expect(sent).toHaveLength(1);
-    expect(notes()).toHaveLength(1);
+    const key = planGapKey(P, gapFingerprint(pf(P)));
+    expect(notes().map((n) => n.dedupKey)).toEqual([key, `${key}:sent`]); // one claimed attempt, marked sent after notifyPm
   });
 
   test("two connections racing on the same ledger send once", async () => {
     const other = new Database(path);
     try {
       const out = await Promise.all([planGapTick(deps({ policy: on(0) })), planGapTick(deps({ policy: on(0) }, other))]);
-      expect(out.map((o) => (o[0] as { action: string }).action).sort()).toEqual(["deduped", "notified"]);
+      // the second tick sees the first one's attempt in flight (claimed, not yet marked sent) and waits instead of sending
+      expect(out.map((o) => (o[0] as { action: string }).action).sort()).toEqual(["notified", "retry_wait"]);
       expect(sent).toHaveLength(1);
     } finally { other.close(); }
   });
@@ -132,11 +140,45 @@ describe("dedupe", () => {
     expect(gapFingerprint(pf(P, { work: [item("a"), item("b", { state: "blocked", gate: "lanes", why: "x", version: 2 })] }))).not.toBe(base);
   });
 
-  test("a failed send keeps the claim: no per-minute retry of the same picture", async () => {
-    const fail = deps({ policy: on(0), notifyPm: async () => { throw new Error("bridge 不在"); } });
+  test("a failed send is not a delivered notice: no per-minute retry, bounded backoff retries it, then dedup", async () => {
+    let down = true;
+    const fail = deps({ policy: on(0), notifyPm: async (project, text) => { if (down) throw new Error("bridge 不在"); sent.push({ project, text }); } });
+    const key = planGapKey(P, gapFingerprint(pf(P)));
     expect((await planGapTick(fail))[0]).toMatchObject({ action: "failed", why: "bridge 不在" });
-    expect((await planGapTick({ ...fail, now: fail.now + MIN }))[0]).toMatchObject({ action: "deduped" });
-    expect(notes().map((n) => n.dedupKey)).toEqual([planGapKey(P, gapFingerprint(pf(P)))]);
+    expect((await planGapTick({ ...fail, now: fail.now + MIN }))[0]).toMatchObject({ action: "retry_wait" });
+    expect((await planGapTick({ ...fail, now: fail.now + PLAN_GAP_RETRY_BASE_MS }))[0]).toMatchObject({ action: "failed" });
+    expect((await planGapTick({ ...fail, now: fail.now + PLAN_GAP_RETRY_BASE_MS + MIN }))[0]).toMatchObject({ action: "retry_wait" });
+    down = false;
+    // a restarted process (fresh seen map) reads the same delivery state from the ledger
+    const later = fail.now + PLAN_GAP_RETRY_BASE_MS + planGapRetryAfter(2);
+    expect((await planGapTick({ ...fail, now: later, seen: new Map() }))[0]).toMatchObject({ action: "notified" });
+    expect((await planGapTick({ ...fail, now: later + 7 * PLAN_GAP_RETRY_MAX_MS }))[0]).toMatchObject({ action: "deduped" });
+    expect(sent).toHaveLength(1);
+    expect(notes().map((n) => n.dedupKey)).toEqual([key, `${key}#2`, `${key}#3`, `${key}:sent`]);
+  });
+
+  test("a claim whose process died before sending is retried after the backoff, across a restart", async () => {
+    const hang = deps({ policy: on(0), notifyPm: () => new Promise<void>(() => {}) });
+    void planGapTick(hang); // claims attempt 1, then never returns: the process is gone
+    await Promise.resolve();
+    expect(notes()).toHaveLength(1);
+    const again = deps({ policy: on(0), seen: new Map() });
+    expect((await planGapTick({ ...again, now: again.now + MIN }))[0]).toMatchObject({ action: "retry_wait" });
+    expect((await planGapTick({ ...again, now: again.now + PLAN_GAP_RETRY_BASE_MS }))[0]).toMatchObject({ action: "notified" });
+    expect(sent).toHaveLength(1);
+  });
+
+  test("retry backoff doubles and is capped", () => {
+    expect([1, 2, 3].map(planGapRetryAfter)).toEqual([PLAN_GAP_RETRY_BASE_MS, 2 * PLAN_GAP_RETRY_BASE_MS, 4 * PLAN_GAP_RETRY_BASE_MS]);
+    expect(planGapRetryAfter(50)).toBe(PLAN_GAP_RETRY_MAX_MS);
+  });
+
+  test("an unsent claim does not start the cooldown for a changed picture", async () => {
+    await planGapTick(deps({ policy: on(MIN), now: 0, seen: new Map([[P, { fp: gapFingerprint(pf(P)), since: -MIN }]]),
+      notifyPm: async () => { throw new Error("bridge 不在"); } }));
+    const changed = (p: string) => pf(p, { work: [item("a"), item("c", { state: "blocked", gate: "spec", why: "缺规格" })] });
+    const seen = new Map([[P, { fp: gapFingerprint(changed(P)), since: -MIN }]]);
+    expect((await planGapTick(deps({ policy: on(MIN), now: 30_000, facts: changed, seen })))[0]).toMatchObject({ action: "notified" });
   });
 });
 
@@ -152,6 +194,37 @@ describe("assessment", () => {
     const [c, d] = assessPlanGap([one(P), one(Q)]);
     expect([c.idle, d.idle]).toEqual([1, 1]); // the same leftover seat, visible to both
     expect(fleetIdle([one(P), one(Q)])).toBe(1);
+  });
+
+  test("a project refused by a shared peer does not zero the pool for the project that is allowed", () => {
+    const gap = (p: string, allowed: boolean) => pf(p, { localRoom: 0, work: [item("x", { state: "blocked", gate: "spec", why: "缺规格" })], peers: [peer("mate", 3, allowed)] });
+    for (const order of [[gap(P, true), gap(Q, false)], [gap(Q, false), gap(P, true)]]) {
+      const byP = Object.fromEntries(assessPlanGap(order).map((g) => [g.project, g]));
+      expect(byP[P]).toMatchObject({ idle: 3, peerSeats: 3, sharedPeers: [] });
+      expect(byP[Q]).toMatchObject({ idle: 0, peerSeats: 0 });
+      expect(fleetIdle(order)).toBe(3);
+    }
+  });
+
+  test("ready work is matched, not placed greedily: project order never invents a shortage", () => {
+    const stuck = item("x", { state: "blocked", gate: "spec", why: "缺规格" });
+    const a = pf(P, { localRoom: 0, work: [item("a"), stuck], peers: [peer("shared", 1), peer("only-a", 1)] });
+    const b = pf(Q, { localRoom: 0, work: [item("b"), stuck], peers: [peer("shared", 1)] });
+    for (const order of [[a, b], [b, a]]) {
+      expect(fleetIdle(order)).toBe(0);
+      expect(assessPlanGap(order).map((g) => g.idle)).toEqual([0, 0]);
+    }
+  });
+
+  test("per-project idle: seats the project could still fill with every other project's ready work placed", () => {
+    const stuck = item("x", { state: "blocked", gate: "spec", why: "缺规格" });
+    const a = pf(P, { localRoom: 0, work: [item("a"), stuck], peers: [peer("x", 1), peer("y", 1)] });
+    const b = pf(Q, { localRoom: 0, work: [stuck], peers: [peer("y", 1)] });
+    for (const order of [[a, b], [b, a]]) {
+      const byP = Object.fromEntries(assessPlanGap(order).map((g) => [g.project, g.idle]));
+      expect(byP).toEqual({ [P]: 1, [Q]: 1 });
+      expect(fleetIdle(order)).toBe(1);
+    }
   });
 
   test("local-only ready work uses local room first; it never takes a peer seat", () => {

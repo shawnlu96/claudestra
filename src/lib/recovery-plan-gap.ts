@@ -2,8 +2,9 @@
  * Plan-gap recovery (dispatch-recovery-PLAN): when real write capacity sits idle because too little work is truly ready,
  * tell the project's PM once, with the list of what blocks each piece of planned work and which drafts are not yet in a DAG.
  * Readiness is the autostart gate itself (featureGate / nodeCandidate: spec file, deps / files / locks lanes, claims, arm);
- * capacity is local write room plus peers that peerRefusal accepts for a write. A peer's seats are one pool however many
- * projects borrow it, so assessPlanGap consumes them once across projects. Nothing here picks scope or edits a DAG.
+ * capacity is local write room plus peers that peerRefusal accepts for a write. A peer's free slots are one physical pool however
+ * many projects borrow it; each project only adds permission edges to it, so assessPlanGap matches ready work to seats by max
+ * flow (order-independent, a refused project never shrinks the pool). Nothing here picks scope or edits a DAG.
  * Policy comes through an injected port (CFG's recoveryPolicy); without one the tick observes. tests/recovery-plan-gap*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -63,7 +64,8 @@ export interface WorkItem {
 type DraftFlag = "missing_spec" | "missing_deps" | "duplicate" | "stale";
 export interface DraftCandidate { name: string; title: string | null; flags: DraftFlag[]; why: string[] }
 export interface DraftFile { name: string; mtimeMs: number; text: string }
-interface PeerSeats { peer: string; seats: number; why: string | null }
+/** seats = free slots this project may use; free = the peer's physical free slots per write family; allowed = families it may use */
+export interface PeerSeats { peer: string; seats: number; why: string | null; free: Partial<Record<AuthorFamily, number>>; allowed: AuthorFamily[] }
 
 export interface ProjectFacts {
   project: string;
@@ -180,9 +182,12 @@ function peerSeats(db: Database, project: string, pool: SlotPool, now: number): 
   return peers.map((p) => {
     const refused = families.map((fam) => peerRefusal(facts, p, "write", fam));
     const ok = refused.some((r) => r === null);
-    const seats = ok ? families.reduce((n, fam, i) => n + (refused[i] === null ? Math.max(0, p.v2?.slots[fam] ?? 0) : 0), 0) : 0;
+    const free: Partial<Record<AuthorFamily, number>> = {};
+    for (const fam of families) free[fam] = Math.max(0, p.v2?.slots[fam] ?? 0);
+    const allowed = families.filter((fam, i) => refused[i] === null && (free[fam] ?? 0) > 0);
+    const seats = allowed.reduce((n, fam) => n + (free[fam] ?? 0), 0);
     // peerRefusal accepts any family's free seat for a write; placement then keeps only writeFamilies, so seats can still be 0.
-    return { peer: p.peer, seats, why: !ok ? refused[0] : seats ? null : `写单家族 ${families.join(" / ")} 没有空位` };
+    return { peer: p.peer, seats, why: !ok ? refused[0] : seats ? null : `写单家族 ${families.join(" / ")} 没有空位`, free, allowed };
   });
 }
 
@@ -210,7 +215,7 @@ export interface ProjectGap {
   project: string;
   ready: number; readyExternal: number; readyLocalOnly: number;
   localRoom: number; peerSeats: number;
-  /** seats left idle after every project placed its ready work; a shared peer's leftover appears in each project using it */
+  /** seats this project could still fill with more ready work while every other project's ready work stays placed (max flow) */
   idle: number;
   sharedPeers: string[];
   blocked: WorkItem[];
@@ -220,46 +225,97 @@ export interface ProjectGap {
 }
 
 /**
- * Place ready work on local room first (local-only before external), then external work on peer seats taken from one shared
- * pool in project order; idle is read only after every project has placed. A peer borrowed by two projects keeps one set of
- * seats (two different reports keep the smaller): both projects may list its leftover seats, and fleetIdle counts them once.
+ * The seat graph: source → each project's local-only / external ready work → its local room or the (peer, family) seats it is
+ * allowed → sink. A (peer, family) node holds the peer's physical free slots once (two reports of one hello keep the smaller);
+ * projects only add edges, so a project refused by a peer leaves the pool intact for the projects that are allowed.
+ */
+const BIG = 1 << 30;
+interface Graph { cap: number[][]; n: number }
+const seatKey = (peer: string, fam: AuthorFamily) => `${peer}\u0000${fam}`;
+function physicalSeats(facts: readonly ProjectFacts[]): Map<string, number> {
+  const seats = new Map<string, number>();
+  for (const f of facts) for (const p of f.peers) for (const fam of Object.keys(p.free) as AuthorFamily[]) {
+    seats.set(seatKey(p.peer, fam), Math.min(seats.get(seatKey(p.peer, fam)) ?? BIG, p.free[fam] ?? 0));
+  }
+  return seats;
+}
+function seatGraph(facts: readonly ProjectFacts[], unbounded: number | null): Graph {
+  const seats = physicalSeats(facts);
+  const seatIx = new Map([...seats.keys()].map((k, i) => [k, i]));
+  // 0 source, 1 sink, then per project [local-only, external, local room], then seat nodes
+  const n = 2 + facts.length * 3 + seats.size;
+  const cap = Array.from({ length: n }, () => new Array<number>(n).fill(0));
+  const seatNode = (k: string) => 2 + facts.length * 3 + (seatIx.get(k) as number);
+  for (const [k, free] of seats) cap[seatNode(k)][1] = free;
+  facts.forEach((f, i) => {
+    const lo = 2 + i * 3, ext = lo + 1, local = lo + 2;
+    const ready = f.work.filter((w) => w.state === "ready");
+    const e = ready.filter((w) => w.external).length;
+    cap[0][lo] = unbounded === i ? BIG : ready.length - e;
+    cap[0][ext] = unbounded === i ? BIG : e;
+    cap[lo][local] = BIG; cap[ext][local] = BIG; cap[local][1] = Math.max(0, f.localRoom);
+    for (const p of f.peers) for (const fam of p.allowed) if (seats.has(seatKey(p.peer, fam))) cap[ext][seatNode(seatKey(p.peer, fam))] = BIG;
+  });
+  return { cap, n };
+}
+
+/** Edmonds-Karp; the graphs are a few dozen nodes and the flow is bounded by the free seats. */
+function maxFlow({ cap, n }: Graph): number {
+  let flow = 0;
+  for (;;) {
+    const prev = new Array<number>(n).fill(-1);
+    prev[0] = 0;
+    const queue = [0];
+    while (queue.length && prev[1] < 0) {
+      const u = queue.shift() as number;
+      for (let v = 0; v < n; v++) if (prev[v] < 0 && cap[u][v] > 0) { prev[v] = u; queue.push(v); }
+    }
+    if (prev[1] < 0) return flow;
+    let push = BIG;
+    for (let v = 1; v !== 0; v = prev[v]) push = Math.min(push, cap[prev[v]][v]);
+    for (let v = 1; v !== 0; v = prev[v]) { cap[prev[v]][v] -= push; cap[v][prev[v]] += push; }
+    flow += push;
+  }
+}
+
+/** Seats some project may use: local room is per project; a peer's (family) seats count once if any project is allowed them. */
+function usableSeats(facts: readonly ProjectFacts[]): number {
+  const seats = physicalSeats(facts);
+  const allowed = new Set(facts.flatMap((f) => f.peers.flatMap((p) => p.allowed.map((fam) => seatKey(p.peer, fam)))));
+  return facts.reduce((n, f) => n + Math.max(0, f.localRoom), 0) + [...allowed].reduce((n, k) => n + (seats.get(k) ?? 0), 0);
+}
+
+/**
+ * Idle is order-independent: placed = the max flow of every project's ready work; a project's idle is how many more seats it
+ * could fill with more ready work while every other project's ready work stays placed.
  */
 function place(facts: readonly ProjectFacts[]) {
-  const pool = new Map<string, number>();
-  for (const f of facts) for (const p of f.peers) pool.set(p.peer, Math.min(pool.get(p.peer) ?? Infinity, p.seats));
-  const placed = facts.map((f) => {
-    const ready = f.work.filter((w) => w.state === "ready");
-    const ext = ready.filter((w) => w.external).length, lo = ready.length - ext;
-    const onLocal = Math.min(f.localRoom, lo + ext);
-    let rest = Math.max(0, ext - Math.max(0, onLocal - lo));
-    for (const p of f.peers) {
-      const take = Math.min(rest, pool.get(p.peer) ?? 0);
-      pool.set(p.peer, (pool.get(p.peer) ?? 0) - take);
-      rest -= take;
-    }
-    return { f, ready: ready.length, ext, lo, localIdle: f.localRoom - onLocal };
-  });
-  return { pool, placed };
+  const placed = maxFlow(seatGraph(facts, null));
+  const idle = facts.map((_, i) => maxFlow(seatGraph(facts, i)) - placed);
+  return { placed, idle };
 }
 
 export function assessPlanGap(facts: readonly ProjectFacts[]): ProjectGap[] {
-  const { pool, placed } = place(facts);
+  const { idle } = place(facts);
   const users = new Map<string, number>();
-  for (const f of facts) for (const p of f.peers) users.set(p.peer, (users.get(p.peer) ?? 0) + 1);
-  return placed.map(({ f, ready, ext, lo, localIdle }) => ({
-    project: f.project, ready, readyExternal: ext, readyLocalOnly: lo, localRoom: f.localRoom,
-    peerSeats: f.peers.reduce((n, p) => n + p.seats, 0),
-    idle: localIdle + f.peers.reduce((n, p) => n + (pool.get(p.peer) ?? 0), 0),
-    sharedPeers: f.peers.filter((p) => (users.get(p.peer) ?? 0) > 1).map((p) => p.peer),
-    blocked: f.work.filter((w) => w.state === "blocked"), holds: f.work.filter((w) => w.state === "hold"), drafts: f.drafts,
-    fingerprint: gapFingerprint(f),
-  }));
+  for (const f of facts) for (const p of f.peers) if (p.seats > 0) users.set(p.peer, (users.get(p.peer) ?? 0) + 1);
+  return facts.map((f, i) => {
+    const ready = f.work.filter((w) => w.state === "ready");
+    const ext = ready.filter((w) => w.external).length;
+    return {
+      project: f.project, ready: ready.length, readyExternal: ext, readyLocalOnly: ready.length - ext, localRoom: f.localRoom,
+      peerSeats: f.peers.reduce((n, p) => n + p.seats, 0),
+      idle: idle[i],
+      sharedPeers: f.peers.filter((p) => p.seats > 0 && (users.get(p.peer) ?? 0) > 1).map((p) => p.peer),
+      blocked: f.work.filter((w) => w.state === "blocked"), holds: f.work.filter((w) => w.state === "hold"), drafts: f.drafts,
+      fingerprint: gapFingerprint(f),
+    };
+  });
 }
 
-/** Idle write seats across projects with each peer counted once (the per-project idle may list a shared peer twice). */
+/** Idle write seats across projects with each peer seat counted once: seats anyone may use minus the max placement. */
 export function fleetIdle(facts: readonly ProjectFacts[]): number {
-  const { pool, placed } = place(facts);
-  return placed.reduce((n, x) => n + x.localIdle, 0) + [...pool.values()].reduce((n, v) => n + v, 0);
+  return usableSeats(facts) - place(facts).placed;
 }
 
 /** Identity of the blocking picture: work items with their DAG version and gate, plus drafts and their flags; seat counts are excluded. */
@@ -295,7 +351,13 @@ export function planGapText(g: ProjectGap, cap = 20): string {
 // ── tick ──
 
 export const planGapKey = (project: string, fp: string): string => `recovery:planGap:${project}:${fp}`;
-const KEY_PREFIX = "recovery:planGap:";
+/** Delivery state of one picture lives in the ledger: attempt 1 claims planGapKey, attempt n ≥ 2 claims `…#n`, success adds `…:sent`. */
+const attemptKey = (key: string, n: number): string => n === 1 ? key : `${key}#${n}`;
+const sentKey = (key: string): string => `${key}:sent`;
+/** An unsent picture (send threw, or the process died after the claim) is retried after 5 min, doubling, capped at 6 h. */
+export const PLAN_GAP_RETRY_BASE_MS = 5 * 60_000;
+export const PLAN_GAP_RETRY_MAX_MS = 6 * 3600_000;
+export const planGapRetryAfter = (attempts: number): number => Math.min(PLAN_GAP_RETRY_MAX_MS, PLAN_GAP_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
 
 export interface PlanGapDeps {
   db: Database;
@@ -310,18 +372,32 @@ export interface PlanGapDeps {
 
 export type PlanGapOutcome =
   | { project: string; mode: "off"; diag: string | null }
-  | { project: string; mode: "observe" | "on"; diag: string | null; gap: ProjectGap; action: "none" | "would_notify" | "notified" | "deduped" | "cooldown" | "failed"; why: string };
+  | { project: string; mode: "observe" | "on"; diag: string | null; gap: ProjectGap;
+    action: "none" | "would_notify" | "notified" | "deduped" | "cooldown" | "retry_wait" | "failed"; why: string };
 
+/** When PM last actually received a plan-gap notice for this project (sent markers only; an unsent claim is not a notice). */
 const lastNotice = (db: Database, project: string): number | null =>
-  (db.query("SELECT MAX(ts) AS ts FROM events WHERE project = ? AND kind = 'note' AND dedupKey LIKE ?").get(project, `${KEY_PREFIX}${project}:%`) as { ts: number | null }).ts;
+  (db.query("SELECT MAX(ts) AS ts FROM events WHERE project = ? AND target = '' AND kind = 'note' AND json_extract(data, '$.recovery.op') = 'planGapSent'")
+    .get(project) as { ts: number | null }).ts;
+
+/** Attempts claimed so far for this picture and when the last one was claimed. */
+function attempts(db: Database, key: string): { n: number; lastTs: number } | null {
+  let last = getEventByDedup(db, key);
+  if (!last) return null;
+  let n = 1;
+  for (let next = getEventByDedup(db, attemptKey(key, n + 1)); next; next = getEventByDedup(db, attemptKey(key, n + 1))) { last = next; n++; }
+  return { n, lastTs: last.ts };
+}
 
 /** Not enough planned work: some seat is idle while something planned is still not ready (blocked, held, or only drafted). */
 const insufficient = (g: ProjectGap): boolean => g.idle > 0 && (g.blocked.length + g.holds.length + g.drafts.length) > 0;
 
 /**
- * One pass over the projects. off reads nothing; observe assesses and reports what it would send; on claims the notice in the
- * ledger (dedupKey per project + fingerprint, UNIQUE inside appendEvent's transaction) before sending, so concurrent ticks
- * send once. The same picture never re-sends, and a changed picture waits manualAfterMs after the last notice.
+ * One pass over the projects. off reads nothing; observe assesses and reports what it would send; on claims each send attempt in
+ * the ledger (dedupKey per project + fingerprint + attempt, UNIQUE inside appendEvent's transaction) before sending, so
+ * concurrent ticks send once, and marks the picture sent only after notifyPm returns. A sent picture never re-sends; an unsent
+ * one (send threw, or the process died after claiming) retries with bounded backoff, also across restarts; a changed picture
+ * waits manualAfterMs after the last delivered notice.
  */
 export async function planGapTick(d: PlanGapDeps): Promise<PlanGapOutcome[]> {
   const live: { project: string; policy: ReturnType<typeof planGapPolicy> }[] = [];
@@ -342,22 +418,31 @@ export async function planGapTick(d: PlanGapDeps): Promise<PlanGapOutcome[]> {
     if (policy.manualAfterMs === null) { done("none", "owner 未设 manualAfterMs 阈值，只观察"); continue; }
     if (d.now - since < policy.manualAfterMs) { done("none", `不足持续 ${d.now - since}ms，未到阈值 ${policy.manualAfterMs}ms`); continue; }
     if (mode === "observe") { done("would_notify", planGapText(gap)); continue; }
-    const last = lastNotice(d.db, project);
     const key = planGapKey(project, gap.fingerprint);
-    if (last !== null && d.now - last < policy.manualAfterMs && !getEventByDedup(d.db, key)) {
-      done("cooldown", `上次提醒在 ${d.now - last}ms 前`); continue;
+    const sent = getEventByDedup(d.db, sentKey(key));
+    if (sent) { done("deduped", `同一阻塞清单已提醒过（seq ${sent.seq}）`); continue; }
+    const tried = attempts(d.db, key);
+    if (!tried) {
+      const last = lastNotice(d.db, project);
+      if (last !== null && d.now - last < policy.manualAfterMs) { done("cooldown", `上次提醒在 ${d.now - last}ms 前`); continue; }
+    } else if (d.now - tried.lastTs < planGapRetryAfter(tried.n)) {
+      done("retry_wait", `第 ${tried.n} 次发送未确认送达，${planGapRetryAfter(tried.n) - (d.now - tried.lastTs)}ms 后重试`); continue;
     }
+    const n = (tried?.n ?? 0) + 1;
     const text = planGapText(gap);
-    const claim = appendEvent(d.db, { actor: "scheduler", dedupKey: key, now: d.now },
-      { project, target: "", kind: "note", text: "计划不足提醒", data: { recovery: { op: "planGap", fingerprint: gap.fingerprint, idle: gap.idle, ready: gap.ready } } });
-    if (claim.duplicate) { done("deduped", `同一阻塞清单已提醒过（seq ${claim.event.seq}）`); continue; }
+    const recovery = { op: "planGap", fingerprint: gap.fingerprint, idle: gap.idle, ready: gap.ready, attempt: n };
+    const claim = appendEvent(d.db, { actor: "scheduler", dedupKey: attemptKey(key, n), now: d.now },
+      { project, target: "", kind: "note", text: n === 1 ? "计划不足提醒" : `计划不足提醒（第 ${n} 次发送）`, data: { recovery } });
+    if (claim.duplicate) { done("deduped", `另一路已认领这次发送（seq ${claim.event.seq}）`); continue; }
     try {
       await d.notifyPm(project, text);
-      done("notified", text);
     } catch (e) {
-      // The claim stays: this picture is not re-sent (no per-minute retries); a changed picture after the cooldown sends again.
-      done("failed", e instanceof Error ? e.message : String(e));
+      // No sent marker: the claim only spaces the next attempt (planGapRetryAfter), it never stands for a delivered notice.
+      done("failed", e instanceof Error ? e.message : String(e)); continue;
     }
+    appendEvent(d.db, { actor: "scheduler", dedupKey: sentKey(key), now: d.now },
+      { project, target: "", kind: "note", text: "计划不足提醒已送达", data: { recovery: { ...recovery, op: "planGapSent" } } });
+    done("notified", text);
   }
   return out;
 }
