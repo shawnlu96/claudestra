@@ -107,6 +107,38 @@ describe("memory attribution is numeric and conservative", () => {
     }
   });
 
+  test("noisy sub-tolerance growth stays unknown while a balanced plateau is observable", () => {
+    for (const values of [
+      [1000, 1002, 1004, 1003, 1006, 1008, 1007, 1010],
+      [1000, 1003, 1002, 1005, 1004, 1007, 1006, 1009],
+    ]) {
+      for (const metric of ["rss", "heapUsed", "external", "arrayBuffers"] as const) {
+        const points = series("plateau", 13);
+        for (const p of points) {
+          p.phase = p.index === 0 ? "baseline" : p.index <= 4 ? "warmup" : "measure";
+          p.memory = memoryValues({ [metric]: values[Math.max(0, p.index - 5)] * 1024 * 1024 });
+        }
+        const report = analyzeMemory(points);
+        expect(report.memory[metric].kind).toBe("unknown");
+        expect(report.memory[metric].perSecond).toBeGreaterThan(1024 * 1024);
+        expect(report.classification).toBe("unknown");
+        expect(report.limitations).toContain("sub_tolerance_growth_requires_longer_window");
+        expect(report.leakProven).toBe(false);
+      }
+    }
+    const plateau = series("plateau", 13), values = [1000, 1001, 1000, 1001, 1001, 1000, 1001, 1000];
+    for (const p of plateau) {
+      p.phase = p.index === 0 ? "baseline" : p.index <= 4 ? "warmup" : "measure";
+      p.memory = memoryValues({ rss: values[Math.max(0, p.index - 5)] * 1024 * 1024 });
+    }
+    expect(analyzeMemory(plateau).classification).toBe("plateau_observed");
+    // A final GC dip can erase the endpoint gain while the last third still sits above the first.
+    const raisedTail = [1000, 1000, 1000, 1001, 1002, 1003, 1004, 1000];
+    for (const p of plateau) p.memory.rss = raisedTail[Math.max(0, p.index - 5)] * 1024 * 1024;
+    expect(analyzeMemory(plateau).memory.rss.delta).toBe(0);
+    expect(analyzeMemory(plateau).classification).toBe("unknown");
+  });
+
   test("oscillation, missing metrics, gaps, identity replacement and clock reversal stay uncertain", () => {
     const oscillating = series();
     for (const p of oscillating) p.memory.rss = (p.index % 2 ? 100 : 20) * 1024 * 1024;
@@ -204,6 +236,76 @@ describe("real isolated processes", () => {
     } finally { box.cleanup(); }
   }, 15_000);
 
+  test("offline replay/comparison analysis preserves nested interval, failures and safe provenance", async () => {
+    const box = sandbox(), path = join(box.dir, "report.json");
+    const version = { commit: "b".repeat(40), dirty: false, eventBusSha256: TOKEN,
+      bun: "1.3.14", platform: "darwin", arch: "arm64" };
+    const worker = { kind: "replay", points: series(), version: { ...version, secret: box.dir },
+      workload: { intervalMs: 25, secret: box.dir }, status: "complete", scenario: "steady" };
+    try {
+      writeFileSync(path, JSON.stringify(worker));
+      const single = await cli(["analyze", "--input", path], box);
+      expect(single.code).toBe(0);
+      expect(single.result.intervalMs).toBe(25);
+      expect(single.result.version).toEqual(version);
+      expect(single.result.analysis.classification).toBe("plateau_observed");
+      const comparison = { kind: "comparison", comparisonScope: "event_bus_only", status: "complete", secret: box.dir,
+        workload: worker.workload, runs: [{ side: "old", scenario: "steady", result: worker },
+          { side: "new", scenario: "steady", result: { ...worker, points: series("growth") } }] };
+      writeFileSync(path, JSON.stringify(comparison));
+      const pair = await cli(["analyze", "--input", path], box);
+      expect(pair.code).toBe(0);
+      expect(pair.result.comparisonScope).toBe("event_bus_only");
+      expect(pair.result.productionAttribution).toBe("unknown");
+      expect(pair.result.runs).toHaveLength(2);
+      expect(pair.result.runs[0].result.intervalMs).toBe(25);
+      expect(pair.result.runs[0].result.version).toEqual(version);
+      expect(pair.result.runs[0].result.analysis.classification).toBe("plateau_observed");
+      expect(pair.result.runs[1].result.analysis.classification).toBe("retention_growth_observed");
+      expect(pair.result.limitations).toContain("event_bus_plateau_does_not_establish_bridge_plateau");
+      for (const output of [single.stdout, pair.stdout]) {
+        expect(output).not.toContain(box.dir); expect(output).not.toContain("secret");
+      }
+      writeFileSync(path, JSON.stringify({ ...comparison, runs: [comparison.runs[0],
+        { side: "new", scenario: "steady", failure: "worker_failed", secret: box.dir }] }));
+      const partial = await cli(["analyze", "--input", path], box);
+      expect(partial.code).toBe(1);
+      expect(partial.result.status).toBe("failed");
+      expect(partial.result.runs[0].result.analysis.classification).toBe("plateau_observed");
+      expect(partial.result.runs[1].failure).toBe("worker_failed");
+      expect(partial.stdout).not.toContain(box.dir);
+      writeFileSync(path, JSON.stringify({ ...comparison, runs: [comparison.runs[0],
+        { side: "new", scenario: "steady", result: { ...worker, status: "failed", failure: "identity_changed" } }] }));
+      const failedChild = await cli(["analyze", "--input", path], box);
+      expect(failedChild.code).toBe(1);
+      expect(failedChild.result.runs[1].result.sourceFailure).toBe("identity_changed");
+      writeFileSync(path, failedChild.stdout);
+      const repeated = await cli(["analyze", "--input", path], box);
+      expect(repeated.code).toBe(1);
+      expect(repeated.result.runs[1].result.sourceFailure).toBe("identity_changed");
+      writeFileSync(path, JSON.stringify({ ...comparison, runs: [comparison.runs[0],
+        { side: "new", scenario: "steady", failure: box.dir }] }));
+      const unknownFailure = await cli(["analyze", "--input", path], box);
+      expect(unknownFailure.code).toBe(1);
+      expect(unknownFailure.result.runs[1].failure).toBe("probe_failed");
+      expect(unknownFailure.stdout).not.toContain(box.dir);
+      writeFileSync(path, JSON.stringify({ ...comparison, status: "failed", runs: comparison.runs }));
+      expect((await cli(["analyze", "--input", path], box)).code).toBe(1);
+      for (const run of [{ side: box.dir, scenario: "steady", result: worker },
+        { side: "old", scenario: box.dir, result: worker },
+        { side: "old", scenario: "steady", result: { ...worker, points: [{}] } }]) {
+        writeFileSync(path, JSON.stringify({ ...comparison, runs: [run] }));
+        const invalid = await cli(["analyze", "--input", path], box);
+        expect(invalid.code).toBe(1); expect(invalid.stdout).not.toContain(box.dir);
+      }
+      for (const runs of [[], [comparison.runs[0], comparison.runs[0]], Array(7).fill(comparison.runs[0])]) {
+        writeFileSync(path, JSON.stringify({ ...comparison, runs }));
+        const invalid = await cli(["analyze", "--input", path], box);
+        expect(invalid.result.failure).toBe("invalid_report");
+      }
+    } finally { box.cleanup(); }
+  }, 15_000);
+
   test("same old/new checkout replays real event bus with bounded and growing controls", async () => {
     const box = sandbox();
     try {
@@ -240,6 +342,15 @@ describe("real isolated processes", () => {
       expect(pids.size).toBe(6);
       expect(r.stdout).not.toContain(ROOT); expect(r.stdout).not.toContain(box.dir);
       expect(r.stdout).not.toContain("synthetic-0"); expect(r.stderr).toBe("");
+      const path = join(box.dir, "comparison.json");
+      writeFileSync(path, r.stdout);
+      const analyzed = await cli(["analyze", "--input", path], box);
+      expect(analyzed.code).toBe(0); expect(analyzed.result.runs).toHaveLength(6);
+      for (let i = 0; i < r.result.runs.length; i++) {
+        expect(analyzed.result.runs[i].result.analysis).toEqual(r.result.runs[i].result.analysis);
+        expect(analyzed.result.runs[i].result.intervalMs).toBe(r.result.workload.intervalMs);
+      }
+      expect(analyzed.stdout).not.toContain(ROOT); expect(analyzed.stdout).not.toContain(box.dir);
     } finally { box.cleanup(); }
   }, 30_000);
 });

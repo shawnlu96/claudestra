@@ -17,7 +17,7 @@ import {
 const HELP = `Read-only bridge memory diagnostics (JSON; bytes and seconds).
   identity --pid PID
   sample --pid PID --identity TOKEN [--version COMMIT] [--count 12] [--interval-ms 1000] [--warmup 4]
-  analyze --input REPORT_JSON
+  analyze --input REPORT_JSON (sample, replay worker or comparison)
   replay --old-root CHECKOUT --new-root CHECKOUT
   All commands accept --mode observe|on|off (default observe; on also only observes).
 Use --no-env-file --config=/dev/null. identity must be captured for the intended process at start.
@@ -250,27 +250,61 @@ function reportVersion(value: unknown) {
 }
 
 function reportProvenance(input: Record<string, unknown>) {
+  const workload = input.workload && typeof input.workload === "object" ? input.workload as Record<string, unknown> : {};
+  const interval = input.intervalMs ?? workload.intervalMs;
   return {
     version: reportVersion(input.version),
     versionSource: input.versionSource === "operator_supplied_not_verified" ? input.versionSource : "unknown",
-    intervalMs: typeof input.intervalMs === "number" && Number.isSafeInteger(input.intervalMs)
-      && input.intervalMs > 0 && input.intervalMs <= 60_000 ? input.intervalMs : null,
+    intervalMs: typeof interval === "number" && Number.isSafeInteger(interval)
+      && interval > 0 && interval <= 60_000 ? interval : null,
     identityPrecision: typeof input.identityPrecision === "string"
       && ["kernel_ticks", "one_second", "one_second_pid_reuse_within_second_not_excluded"].includes(input.identityPrecision)
       ? input.identityPrecision : "unknown",
   };
 }
 
+function reportObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_report");
+  return value as Record<string, unknown>;
+}
+
+function analyzeReport(value: unknown) {
+  const input = reportObject(value);
+  if (!Array.isArray(input.points) || input.points.length > 1000) throw new Error("invalid_report");
+  const points = input.points.map(parseMemoryPoint);
+  return { schema: 1, kind: "analysis", status: input.status === "failed" ? "failed" : "analyzed",
+    sourceFailure: input.status === "failed" ? safeError(new Error(String(input.failure ?? input.sourceFailure))) : null,
+    ...reportProvenance(input), points, analysis: analyzeMemory(points) };
+}
+
+/** Each child retains its own PID, source and failure; never merge old/new points into one trend. */
+function analyzeComparison(input: Record<string, unknown>) {
+  if (!Array.isArray(input.runs) || !input.runs.length || input.runs.length > SCENARIOS.length * 2) throw new Error("invalid_report");
+  const seen = new Set<string>();
+  const runs = input.runs.map((value: unknown) => {
+    const run = reportObject(value);
+    if ((run.side !== "old" && run.side !== "new") || !SCENARIOS.includes(run.scenario as Scenario)) throw new Error("invalid_report");
+    const key = `${run.side}:${run.scenario}`;
+    if (seen.has(key)) throw new Error("invalid_report");
+    seen.add(key);
+    const meta = { side: run.side, scenario: run.scenario as Scenario };
+    if (run.failure !== undefined) return { ...meta, failure: safeError(new Error(String(run.failure))) };
+    return { ...meta, result: analyzeReport(run.result) };
+  });
+  return { schema: 1, kind: "comparison_analysis", comparisonScope: input.comparisonScope === "event_bus_only" ? "event_bus_only" : "unknown",
+    ...reportProvenance(input), runs,
+    status: input.status === "failed" || runs.some((run) => "failure" in run || run.result.status === "failed") ? "failed" : "analyzed",
+    productionAttribution: "unknown",
+    limitations: ["event_bus_only", "synthetic_load", "sequential_order_effect_possible", "external_process_influence_unmeasured",
+      "event_bus_plateau_does_not_establish_bridge_plateau"] };
+}
+
 function analyzeFile(path: string | undefined) {
   if (!path) throw new Error("invalid_option");
   const file = Bun.file(path);
   if (file.size > 8 * 1024 * 1024) throw new Error("invalid_report");
-  const input = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  if (!Array.isArray(input.points) || input.points.length > 1000) throw new Error("invalid_report");
-  const points = input.points.map(parseMemoryPoint);
-  return { schema: 1, kind: "analysis", status: input.status === "failed" ? "failed" : "analyzed",
-    sourceFailure: input.status === "failed" ? safeError(new Error(String(input.failure))) : null,
-    ...reportProvenance(input), points, analysis: analyzeMemory(points) };
+  const input = reportObject(JSON.parse(readFileSync(path, "utf8")));
+  return input.kind === "comparison" || input.kind === "comparison_analysis" ? analyzeComparison(input) : analyzeReport(input);
 }
 
 const ALLOWED: Record<string, string[]> = {

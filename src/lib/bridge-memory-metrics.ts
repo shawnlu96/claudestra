@@ -72,11 +72,13 @@ function trend(points: MemoryPoint[], get: (p: MemoryPoint) => number | null, fl
   const tolerance = Math.max(floor, v[0] * 0.02);
   const half = Math.floor(v.length / 2);
   const rises = v.slice(1).filter((n, i) => n > v[i]).length;
-  const rising = delta > 0 && v[half - 1] > v[0] && v.at(-1)! > v[half]
-    && (rises >= Math.ceil((v.length - 1) * 0.75) || v.slice(1).every((n, i) => n >= v[i]));
+  const third = Math.ceil(v.length / 3);
+  const headTotal = v.slice(0, third).reduce((sum, n) => sum + n, 0);
+  const tailTotal = v.slice(-third).reduce((sum, n) => sum + n, 0);
+  const rising = delta > 0 || tailTotal > headTotal;
   const growth = delta > tolerance && v[half - 1] - v[0] > tolerance / 4
     && v.at(-1)! - v[half] > tolerance / 4 && rises >= Math.ceil((v.length - 1) * 0.75);
-  // A short window can hide a large rate inside the amplitude tolerance. Keep rising traces unresolved.
+  // GC dips can hide growth inside the amplitude tolerance. A net gain or elevated tail prevents a plateau verdict.
   const kind = growth ? "sustained_growth" : rising ? "unknown"
     : Math.max(...v) - Math.min(...v) <= tolerance ? "plateau" : "variable";
   return { kind, delta, perSecond: delta / duration };
