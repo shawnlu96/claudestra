@@ -4,7 +4,9 @@
  * node_modules and build output go with it) → its Claude Code temp folder; park = archive → `manager kill` (registry and checkout
  * kept for resume). The agent's paths are measured before and after and the difference goes into the ledger event.
  * Repeating a step is harmless: archive of a gone agent, remove of a removed one and a worktree already gone all count as done.
+ * Nothing is stopped when the archive failed (the chat record must be kept first), and a checkout that is a symlink is never touched.
  */
+import { lstatSync } from "node:fs";
 import { join, sep } from "node:path";
 import type { LifecyclePolicy } from "./agent-lifecycle-config.js";
 import type { RetireRecord } from "./agent-lifecycle-store.js";
@@ -39,9 +41,14 @@ function ownedCheckouts(a: Action, root: string): string[] {
   return [...dirs];
 }
 
+const isSymlink = (p: string): boolean => {
+  try { return lstatSync(p).isSymbolicLink(); } catch { return false; /* not there: removeCleanWorktree counts it as done */ }
+};
+
 async function cleanDisk(a: Action, deps: LifecycleDeps, dirs: string[], steps: string[]): Promise<void> {
   const agents = (await deps.agents()).filter((x) => x.name !== a.agent);
   for (const dir of dirs) {
+    if (isSymlink(dir)) { steps.push(`worktree 没删 ${dir}：是符号链接，不跟`); continue; }
     const why = await removeCleanWorktree(deps, dir, agents);
     steps.push(why ? `worktree 没删 ${dir}：${why}` : `worktree 已清 ${dir}`);
   }
@@ -60,7 +67,12 @@ async function collect(a: Action, deps: LifecycleDeps): Promise<{ freed: number 
   const dirs = a.mode === "retire" ? ownedCheckouts(a, deps.worktreeRoot) : [];
   const measure = (dirs.length && deps.tmp?.root && a.cwd) ? [...dirs, claudeTmpDirFor(a.cwd, deps.tmp.root)] : dirs;
   const before = measure.length ? await deps.du(measure) : null;
-  const steps = [archiveReceipt(await deps.manager("archive", a.agent))];
+  const archived = await deps.manager("archive", a.agent);
+  // gone from the registry, or no session file left to copy: nothing to keep; any other archive failure keeps the agent
+  if (archived.ok !== true && !/不在 registry|不存在/.test(String(archived.error ?? archived.note ?? ""))) {
+    return { error: `${a.agent} 归档没成，先不收（聊天记录要先保全）：${String(archived.error ?? archived.note ?? "?")}` };
+  }
+  const steps = [archiveReceipt(archived)];
   const stop = killOutcome(await deps.manager(a.mode === "retire" ? "remove" : "kill", a.agent));
   if (!("receipt" in stop)) return { error: "busy" in stop ? `${a.agent} 正忙，下轮再收：${stop.busy}` : stop.failed };
   steps.push(stop.receipt);

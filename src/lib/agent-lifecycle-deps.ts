@@ -8,8 +8,8 @@ import type { Database } from "bun:sqlite";
 import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "./agent-lifecycle-config.js";
-import { activeWorkers } from "./agent-lifecycle-store.js";
-import { planLifecycle, lifecycleLine, type AgentFacts, type BoundSession, type CardFacts, type Plan } from "./agent-lifecycle.js";
+import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { planLifecycle, lifecycleLine, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
 import { readActivity } from "./agent-supervisor-activity.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
@@ -29,9 +29,7 @@ import { git } from "./scheduler-review-worktree.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { readMemory } from "./sys-memory.js";
 
-const hasTable = (db: Database, name: string): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
-
-export function ledgerFacts(db: Database): { cards: CardFacts[]; bound: BoundSession[]; pms: Set<string> } {
+export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string> } {
   const last = (kind: string) => new Map((db.query("SELECT target, MAX(ts) AS ts FROM events WHERE kind = ? AND target != '' GROUP BY target").all(kind) as
     { target: string; ts: number }[]).map((r) => [r.target, r.ts]));
   const stageAt = last("stage"), reviewAt = last("review");
@@ -42,9 +40,7 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; bound: BoundSes
     return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra.frozen === true,
       stageAt: stageAt.get(r.id) ?? null, reviewAt: reviewAt.get(r.id) ?? null };
   });
-  const bound = hasTable(db, "scheduler_sessions")
-    ? db.query("SELECT agent, taskId, role FROM scheduler_sessions WHERE state != 'retired'").all() as BoundSession[] : [];
-  return { cards, bound, pms: new Set([...pmsByProject(db).values()].flat()) };
+  return { cards, pms: new Set([...pmsByProject(db).values()].flat()) };
 }
 
 /** Idle from the ACP host's turn record when it matches the session, else the session file's last write. */
@@ -75,7 +71,7 @@ function lendAgents(path = LEND_JOURNAL_PATH): Set<string> {
 export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = DEFAULT_LIFECYCLE, now = Date.now()): Promise<Plan> {
   const [agents, memory] = await Promise.all([agentFacts(now), readMemory()]);
   const master = new Set(agents.filter((a) => isMasterName(a.name)).map((a) => a.name));
-  return planLifecycle({ now, policy, agents, registrations: activeWorkers(db), ...ledgerFacts(db), foreign: lendAgents(), master, swapPct: memory.swapPct });
+  return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master, swapPct: memory.swapPct });
 }
 
 async function du(paths: string[]): Promise<number | null> {
@@ -100,11 +96,12 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     if (e instanceof SchedulerStopped) throw e;
     return [{ taskId: "lifecycle", error: (e as Error).message }];
   }
-  const report = JSON.stringify({ a: plan.actions.map((x) => [x.agent, x.rule, x.mode]), m: plan.memory.map((x) => x.agent), f: plan.frozen });
+  const report = JSON.stringify({ a: plan.actions.map((x) => [x.agent, x.rule, x.mode]), m: plan.memory.map((x) => x.agent), f: plan.frozen, k: plan.kept });
   if (report !== lastObserved) {
     lastObserved = report;
     console.log(`[lifecycle] ${lifecycleLine(plan, policy.mode)}；应收 ${plan.actions.map((x) => `${x.agent}(${x.rule}/${x.mode}：${x.reason})`).join("、") || "无"}` +
-      `${plan.memory.length ? `；内存候选 ${plan.memory.map((x) => x.agent).join("、")}` : ""}${plan.frozen.length ? `；冻结卡不收 ${plan.frozen.map((x) => `${x.agent}@${x.taskId}`).join("、")}` : ""}`);
+      `${plan.memory.length ? `；内存候选 ${plan.memory.map((x) => x.agent).join("、")}` : ""}${plan.frozen.length ? `；冻结卡不收 ${plan.frozen.map((x) => `${x.agent}@${x.taskId}`).join("、")}` : ""}` +
+      `${plan.kept.length ? `；记录不一致保留 ${plan.kept.map((x) => `${x.agent}（${x.reason}）`).join("、")}` : ""}`);
   }
   if (policy.mode !== "on") return [];
   const manager: LifecycleDeps["manager"] = async (...args) => {

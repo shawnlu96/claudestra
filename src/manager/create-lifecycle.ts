@@ -2,7 +2,7 @@
  * `manager create --card <taskId> [--card-role author|reviewer|other]`: register a card worker at create time (LIFE1,
  * lib/agent-lifecycle-store.ts) and tag it kind=worker (lib/worker-kind.ts setWorkerKind), so the lifecycle can collect it
  * when its card finishes. The registration is the one label every reader uses; names decide nothing. An executor (--role executor)
- * without --card is refused before anything is created; ordinary user agents are unaffected. tests/manager-create-lifecycle.test.ts.
+ * without --card is refused before anything is created; ordinary user agents are unaffected. tests/agent-lifecycle-create.test.ts.
  */
 import { isWorkerRole, checkCard, registerWorker, type WorkerRole } from "../lib/agent-lifecycle-store.js";
 import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";

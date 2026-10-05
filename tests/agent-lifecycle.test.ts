@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, parseLifecycle, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
-import { activeWorkers, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
+import { activeWorkers, cardWorkerIndex, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { planLifecycle, lifecycleLine, type AgentFacts, type PlanInput } from "../src/lib/agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
 import { ledgerFacts } from "../src/lib/agent-lifecycle-deps.js";
@@ -38,7 +38,7 @@ const agent = (name: string, idleH: number | null, more: Partial<AgentFacts> = {
   ({ name, status: "active", running: true, idleMs: idleH === null ? null : idleH * H, turnActive: false, ...more });
 
 function input(db: ReturnType<typeof ledger>["db"], agents: AgentFacts[], over: Partial<PlanInput> = {}): PlanInput {
-  return { now: NOW, policy: { ...DEFAULT_LIFECYCLE }, agents, registrations: activeWorkers(db), ...ledgerFacts(db), foreign: new Set(),
+  return { now: NOW, policy: { ...DEFAULT_LIFECYCLE }, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
     master: new Set(["master"]), swapPct: 10, ...over };
 }
 
