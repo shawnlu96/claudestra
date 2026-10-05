@@ -152,11 +152,11 @@ describe("read-only view: ledger lend-orders shows where the current node goes a
       p.hello("mate");
       p.hello("b");
       expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "peer:mate",
-        reason: "挂池：对抗式跨模型审查挂给 mate 的 codex worker（在跑：mate 0 / b 0 / 本机 0；选最少，平手按 复审回上次的 peer > peer 先于本机 > 借入顺序）" });
+        reason: "挂池：对抗式跨模型审查挂给 mate 的 codex worker（在跑：mate 0 / b 0 / 本机 0；选最少，平手按 复审回上次的 peer > peer 先于本机 > 借入顺序）", category: "dispatchable", block: null });
       p.f.advance(10 * MIN);
-      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "没有可用的 peer，放本机" });
+      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "没有可用的 peer，放本机", category: "dispatchable", block: null });
       p.policy.remote = { ...REMOTE, mode: "off" };
-      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "scheduler.json remote.mode = off，只用本机" });
+      expect((await p.cli("pm", "lend-orders", "T1")).placement).toEqual({ role: "review", where: "local", reason: "scheduler.json remote.mode = off，只用本机", category: "dispatchable", block: null });
     } finally { p.f.close(); }
   });
 });

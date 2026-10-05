@@ -8,6 +8,7 @@
 import { controlFor } from "./runtimes/index.js";
 import { CC_BUSY_RE, paneIdleVerdict, probeTuiContract } from "./tmux-helper.js";
 import { inputBox } from "./input-box.js";
+import { paneTail } from "./pane-tail.js";
 export { inputBox };
 
 type MainTurn = "busy" | "idle" | "compacting" | "unknown";
@@ -87,7 +88,7 @@ export function paneMainTurnBusy(pane: string): boolean {
  * 底栏 agents 行「◯ general-purpose  Anal… 1m 13s · ↓ 58.1k tokens」。空闲态的「✻ Worked for 46s · done」不含任何信号。
  */
 export function paneLooksWorking(pane: string): boolean {
-  const tail = pane.split("\n").slice(-14).join("\n");
+  const tail = paneTail(pane, 14).join("\n");
   return paneMainTurnBusy(pane) || /Waiting for \d+ background/i.test(tail) || /\b(\d+m\s*)?\d+s\s*·\s*[↓↑]\s*[\d.]+k?\s*tokens/i.test(tail);
 }
 
@@ -125,7 +126,7 @@ function stuckThinkingIdle(i: Pick<TurnInput, "pane" | "paneAgain" | "quietMs">)
 }
 
 export function turnState(input: TurnInput): TurnState {
-  // capture-pane 在窗口 resize 后会带出成片尾部空行，把 spinner 挤出「尾部 14 行」（见 tmux-helper trimTrailingBlank）；
+  // capture-pane 在窗口 resize 后会带出成片尾部空行，把 spinner 挤出「尾部 14 行」（见 lib/pane-tail.ts）；
   // 剪完是空串 = 没抓到画面（tmuxRaw 出错也返回空串），按 null 算，否则会被判成 idle
   const i = { ...input, pane: input.pane?.replace(/\s+$/, "") || null, paneAgain: input.paneAgain?.replace(/\s+$/, "") || null };
   const main = mainTurn(i);

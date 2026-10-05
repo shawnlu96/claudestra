@@ -3,7 +3,7 @@
  * the failed try prepared. Real ensureLocalAuthor / createReviewer + retryCleanCreate over real git; only `manager create` is fake.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownQuota } from "../src/lib/ai-quota.js";
@@ -19,6 +19,7 @@ import { readRegistryAgentsSync } from "../src/lib/registry.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { readSchedulerConfig, type RemotePolicy } from "../src/lib/scheduler-config.js";
+import { retryWorktreeDirty } from "../src/lib/scheduler-create-retry-worktree.js";
 import { createRetryDelay, retryCleanCreate } from "../src/lib/scheduler-create-retry.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "../src/lib/scheduler-local-author.js";
 import { writeLocalAuthor } from "../src/lib/scheduler-local-author-write.js";
@@ -326,7 +327,7 @@ describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktr
     expect(readFileSync(join(checkout, "a.ts"), "utf8")).toBe("patched\n");
   });
 
-  for (const change of ["tracked", "hidden untracked", "wrong branch", "wrong head", "dependency directory"]) {
+  for (const change of ["tracked", "hidden untracked", "wrong branch", "wrong head", "dependency directory", "review scratch"]) {
     test(`reviewer clean-failure retry preserves and holds ${change}`, async () => {
       const { f, creates, checkout, repo, run } = await reviewerFixture();
       let edited: string | null = null;
@@ -336,7 +337,12 @@ describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktr
         await run(repo, "config", "status.showUntrackedFiles", "no");
         if (change === "dependency directory") mkdirSync(join(checkout, "node_modules"));
         edited = join(checkout, change === "tracked" ? "a.ts" : change === "dependency directory" ? "node_modules/human-edits" : "new.ts");
+        if (change === "review scratch") {
+          mkdirSync(join(checkout, ".review-tmp", "home"), { recursive: true });
+          edited = join(checkout, ".review-tmp", "home", "notes");
+        }
         writeFileSync(edited, "keep me\n");
+        if (change === "review scratch") expect(await run(checkout, "status", "--porcelain")).toBe("");
       }
       const head = await run(checkout, "rev-parse", "HEAD");
       const held = await f.tick();
@@ -347,4 +353,172 @@ describe("i28-SC1f1 the backoff retry is not held by the failed try's own worktr
       if (edited) expect(readFileSync(edited, "utf8")).toBe("keep me\n");
     });
   }
+});
+
+
+/** Small real Git fixtures make status-invisible edits explicit without changing index flags during inspection. */
+async function hiddenFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "sc1h-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const { repo, run } = await gitRepo(dir);
+  const worktree = join(dir, "checkout");
+  await run(repo, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+  const exclude = await run(repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude");
+  writeFileSync(exclude, "private*\nnode_modules\n.next/\nout/\n*.tsbuildinfo\n.review-tmp/\n");
+  return { repo, run, worktree };
+}
+
+describe("SC1H hidden edits cannot authorize clean reuse", () => {
+  for (const path of ["private.env", "private-dir/notes.txt", "private \nnotes.txt", "web/.next/cache/data", "web/out/index.html",
+    "web/tsconfig.tsbuildinfo", ".review-tmp/notes.txt"]) {
+    test(`ignored user files and generated artifacts are preserved: ${path}`, async () => {
+      const f = await hiddenFixture(), file = join(f.worktree, path);
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(file, "keep these bytes\n");
+      expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("worktree 有改动");
+      expect(readFileSync(file, "utf8")).toBe("keep these bytes\n");
+    });
+  }
+
+  for (const flag of ["assume-unchanged", "skip-worktree"]) {
+    for (const change of ["none", "bytes", "missing", "mode", "symlink"]) {
+      test(`${flag}: ${change}, flags and stash remain intact`, async () => {
+        const f = await hiddenFixture(), file = join(f.worktree, "a.ts");
+        writeFileSync(file, "stashed work\n");
+        await f.run(f.worktree, "stash", "push", "-qm", "keep stash");
+        const stash = await f.run(f.worktree, "rev-parse", "refs/stash");
+        await f.run(f.worktree, "update-index", `--${flag}`, "a.ts");
+        const flags = await f.run(f.worktree, "ls-files", "-v");
+        if (change === "bytes") writeFileSync(file, "two\n"); // same size as HEAD's one\n
+        if (change === "missing" || change === "symlink") rmSync(file);
+        if (change === "symlink") symlinkSync(join(f.repo, "a.ts"), file); // target bytes are unchanged
+        if (change === "mode") chmodSync(file, 0o755);
+        expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+        const dirty = await retryWorktreeDirty(git, f.worktree, f.repo);
+        if (change === "none") expect(dirty).toBeNull();
+        else expect(dirty).toContain("worktree 有改动");
+        expect(await f.run(f.worktree, "ls-files", "-v")).toBe(flags);
+        expect(await f.run(f.worktree, "rev-parse", "refs/stash")).toBe(stash);
+        if (change === "bytes") expect(readFileSync(file, "utf8")).toBe("two\n");
+        if (change === "symlink") expect(readlinkSync(file)).toBe(join(f.repo, "a.ts"));
+        if (change === "missing") expect(existsSync(file)).toBe(false);
+      });
+    }
+  }
+
+  for (const flag of ["assume-unchanged", "skip-worktree"]) {
+    test(`${flag}: only the owner execute bit determines Git file mode`, async () => {
+      const f = await hiddenFixture(), file = join(f.worktree, "a.ts");
+      await f.run(f.worktree, "config", "core.filemode", "true");
+      chmodSync(file, 0o755);
+      await f.run(f.worktree, "add", "a.ts");
+      await f.run(f.worktree, "commit", "-qm", "executable");
+      chmodSync(file, 0o655); // Group/other execution cannot substitute for S_IXUSR.
+      expect(await f.run(f.worktree, "status", "--porcelain")).toContain("M a.ts");
+      await f.run(f.worktree, "update-index", `--${flag}`, "a.ts");
+      const flags = await f.run(f.worktree, "ls-files", "-v");
+      expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("a.ts");
+      expect(lstatSync(file).mode & 0o777).toBe(0o655);
+      chmodSync(file, 0o744); // Changing only group/other bits is clean in Git.
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toBeNull();
+      expect(await f.run(f.worktree, "ls-files", "-v")).toBe(flags);
+    });
+  }
+
+  for (const conversion of ["autocrlf", "eol", "ident"]) {
+    test(`raw bytes conservatively reject a Git-clean ${conversion} checkout`, async () => {
+      const f = await hiddenFixture(), file = join(f.worktree, "a.ts");
+      if (conversion === "autocrlf") await f.run(f.worktree, "config", "core.autocrlf", "true");
+      else {
+        writeFileSync(join(f.worktree, ".gitattributes"), `a.ts ${conversion === "eol" ? "text eol=crlf" : "ident"}\n`);
+        if (conversion === "ident") writeFileSync(file, "$Id$\n");
+        await f.run(f.worktree, "add", ".");
+        await f.run(f.worktree, "commit", "-qm", "checkout conversion");
+      }
+      rmSync(file); await f.run(f.worktree, "checkout", "--", "a.ts");
+      const bytes = readFileSync(file);
+      expect(bytes.toString()).toContain(conversion === "ident" ? "$Id: " : "\r\n");
+      expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("a.ts");
+      expect(readFileSync(file)).toEqual(bytes);
+    });
+  }
+
+  test("binary bytes and tracked symlink targets are compared without text trimming or following links", async () => {
+    const f = await hiddenFixture(), file = join(f.worktree, "bytes"), link = join(f.worktree, "link");
+    writeFileSync(file, Buffer.from([0, 255, 32, 10]));
+    symlinkSync("a.ts", link);
+    await f.run(f.worktree, "add", "bytes", "link");
+    await f.run(f.worktree, "commit", "-qm", "binary and link");
+    await f.run(f.worktree, "update-index", "--skip-worktree", "bytes", "link");
+    expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toBeNull();
+    writeFileSync(file, Buffer.from([0, 254, 32, 10]));
+    expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("bytes");
+    writeFileSync(file, Buffer.from([0, 255, 32, 10]));
+    rmSync(link); symlinkSync("web/a.ts", link);
+    expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("link");
+    expect(readlinkSync(link)).toBe("web/a.ts");
+  });
+
+  for (const sub of ["node_modules", "web/node_modules"]) {
+    test(`only the exact ignored dependency link is exempt: ${sub}`, async () => {
+      const f = await hiddenFixture(), dest = join(f.worktree, sub);
+      symlinkSync(join(f.repo, sub), dest);
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toBeNull();
+      expect(await retryWorktreeDirty(git, f.worktree)).toContain("worktree 有改动");
+      rmSync(dest); symlinkSync(join(f.repo, "a.ts"), dest);
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("worktree 有改动");
+      expect(readlinkSync(dest)).toBe(join(f.repo, "a.ts"));
+    });
+  }
+
+  test("ignored arbitrary symlinks and nested repositories do not inherit the dependency exemption", async () => {
+    const f = await hiddenFixture(), dest = join(f.worktree, "private-link");
+    symlinkSync(join(f.repo, "node_modules"), dest);
+    expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("private-link");
+    rmSync(dest);
+    const nested = join(f.worktree, "private-repo"); mkdirSync(nested);
+    await f.run(nested, "init", "-q");
+    expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("private-repo");
+    expect(existsSync(join(nested, ".git"))).toBe(true);
+  });
+
+  test("tracked dependency links never bypass blob comparison even when changed to the allowed target", async () => {
+    const f = await hiddenFixture(), link = join(f.worktree, "node_modules");
+    symlinkSync("web", link);
+    await f.run(f.worktree, "add", "-f", "node_modules");
+    await f.run(f.worktree, "commit", "-qm", "tracked link");
+    await f.run(f.worktree, "update-index", "--skip-worktree", "node_modules");
+    rmSync(link); symlinkSync(join(f.repo, "node_modules"), link);
+    expect(await f.run(f.worktree, "status", "--porcelain")).toBe("");
+    expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("node_modules");
+  });
+
+  test("object listing failures and truncated records refuse reuse with diagnostics", async () => {
+    const f = await hiddenFixture();
+    for (const result of [{ code: 1, out: "tree unavailable" }, { code: 0, out: "100644 blob truncated" }]) {
+      const reason = await retryWorktreeDirty((args) => args.includes("ls-tree") ? Promise.resolve(result) : git(args), f.worktree, f.repo);
+      expect(reason).toContain("读不了");
+      expect(reason).toContain(result.code ? "tree unavailable" : "不完整");
+    }
+    expect(await retryWorktreeDirty(async () => { throw new Error("spawn failed"); }, f.worktree, f.repo)).toContain("spawn failed");
+  });
+
+  test("read failures and failed Git status have diagnostic reasons", async () => {
+    const f = await hiddenFixture(), hidden = join(f.worktree, "private-dir");
+    mkdirSync(hidden); writeFileSync(join(hidden, "notes"), "keep me"); chmodSync(hidden, 0);
+    try {
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("读不了");
+    } finally { chmodSync(hidden, 0o755); }
+    const file = join(f.worktree, "a.ts");
+    await f.run(f.worktree, "update-index", "--skip-worktree", "a.ts");
+    chmodSync(file, 0);
+    try {
+      expect(await retryWorktreeDirty(git, f.worktree, f.repo)).toContain("读不了");
+    } finally { chmodSync(file, 0o644); }
+    const failure = await retryWorktreeDirty(async () => ({ code: 1, out: "status deliberately unavailable" }), f.worktree, f.repo);
+    expect(failure).toContain("读不了工作区状态"); expect(failure).toContain("status deliberately unavailable");
+  });
 });

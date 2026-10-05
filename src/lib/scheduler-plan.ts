@@ -5,9 +5,10 @@ import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, typ
 import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
-import { remoteWork, reviewPlacement } from "./scheduler-placement-plan.js";
+import { reviewPlacement } from "./scheduler-placement-plan.js";
+import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
-import { reviewSwapPlan, reviewsAfterSwap } from "./scheduler-review-swap.js";
+import { reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 import { escalationDowngrade, convergeReview, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
@@ -42,6 +43,8 @@ interface ReviewDispatchProof {
 export interface PlannerSnapshot {
   task: LedgerTask;
   workflow: TaskWorkflow | null;
+  /** Latest delivered head's done remote write/fix evidence; absent/null is unknown, never a workflow default. */
+  remoteAuthorFamily?: AuthorFamily | null;
   events: readonly LedgerEvent[];
   intents: readonly SchedulerIntent[];
   blockedBy: readonly string[];
@@ -143,7 +146,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
     }
     if (role === "reviewer") { const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap; }
     // A pooled round's reviewer is a one-shot peer worker, not a session this card could keep: a local session may follow it.
-    const priorReviewer = reviewsAfterSwap(s.events).find((e) => e.kind === "review" && !String(e.data.reviewer ?? "").startsWith(POOL_RECIPIENT));
+    const priorReviewer = reviewerHistory(s)[0];
     if (role === "reviewer" && priorReviewer && (priorReviewer.data.reviewerSessionId !== session.sessionId ||
       priorReviewer.data.reviewer !== session.agent)) return escalate("reviewer_replaced", "同卡复验必须沿用原审查 session");
     if (role === "reviewer" && (session.agent === s.author?.agent || session.family === s.workflow?.authorFamily ||
@@ -160,7 +163,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
 function dispatchWork(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   const prior = liveIntent(s, node, "dispatch");
   if (prior) return prior;
-  const away = remoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write");
+  const away = blockedRemoteWork(s, latestSeq(s.events, s.task), node.stage === "fix" ? "fix" : "write"); // a gate-refused material waits (dispatch-recovery-R1)
   if (away && "wait" in away) return wait(away.code ?? "placement", away.wait);
   if (away && "escalate" in away) return escalate("placement_lease", away.escalate);
   const fix = node.stage === "fix" ? bouncePackage(fixBounce(s.events, s.task.stage)) ?? uiFixPackage(s, () => fixPackage(s)) : null;
@@ -259,9 +262,11 @@ function reviewPass(s: PlannerSnapshot, node: FlowNode, facts: ReviewFacts, down
 }
 
 function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean {
+  const swap = latestReviewerSwap(s.events);
   const entered = s.events.findLast((e) => e.kind === "stage" && e.data.to === "review" && e.data.round === facts.round)?.seq ?? 0;
   const dispatched = s.intents.findLast((i) => i.node === "adversarial_review" && i.action === "review" &&
     i.eventSeq > entered && i.eventSeq < facts.eventSeq &&
+    i.eventSeq > (swap?.seq ?? 0) && (!swap || i.specRev === s.task.specRev) &&
     i.head === facts.head && i.recipient === facts.reviewer && (i.status === "submitted" || i.status === "done"));
   return !!dispatched && s.reviewDispatches.some((p) => p.intentId === dispatched.id && p.round === facts.round &&
     p.head === facts.head && p.reviewer === facts.reviewer && p.reviewerSessionId === facts.reviewerSessionId &&
@@ -274,8 +279,13 @@ function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
     !(s.workflow?.template === "security" && s.reviewer.source !== "local");
 }
 
+function epochReviewFacts(s: PlannerSnapshot) {
+  const after = latestReviewerSwap(s.events)?.seq ?? 0;
+  return currentReviewFacts(s.task, s.events.filter((e) => e.kind !== "review" || e.seq > after));
+}
+
 function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
-  const found = currentReviewFacts(s.task, s.events);
+  const found = epochReviewFacts(s);
   if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
   const facts = convergeReview(s.events, found.facts, s.fixDiff).facts;
   if (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts)) {
@@ -291,7 +301,7 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
 }
 
 function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
-  const found = currentReviewFacts(s.task, s.events);
+  const found = epochReviewFacts(s);
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);

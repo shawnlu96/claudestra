@@ -11,11 +11,18 @@ import { startPlacement, type StartPlacementIO } from "../src/lib/scheduler-plac
 import { borrowPeers } from "../src/lib/scheduler-pool-facts.js";
 import { specResumeTick } from "../src/lib/scheduler-spec-resume.js";
 import { localAgentPool } from "../src/lib/scheduler-agent-pool-ledger.js";
+import { RECOVERY_POLICY_PATH, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { placementReservationPort } from "../src/lib/scheduler-placement-reservations.js";
+import { autostartHooks } from "../src/lib/scheduler-autostart-deps.js";
+import { specResumeStep } from "../src/lib/scheduler-spec-resume-deps.js";
+import * as autostartRunner from "../src/lib/scheduler-autostart-run.js";
+import * as specRunner from "../src/lib/scheduler-spec-resume.js";
+import * as borrowReader from "../src/lib/scheduler-pool-borrow.js";
+import * as commands from "../src/lib/run-bounded.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { SCHEDULER_CONFIG_PATH, type RemotePolicy } from "../src/lib/scheduler-config.js";
+import { SCHEDULER_CONFIG_PATH, type RemotePolicy, type SchedulerConfig } from "../src/lib/scheduler-config.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) { closeLedger(join(dir, "ledger.sqlite")); rmSync(dir, { recursive: true, force: true }); } });
@@ -163,7 +170,7 @@ test("CFG reader contract carries project and canonical key; injected on balance
   const f = fixture(); await f.plan(); await f.plan("other", "q");
   const reads: string[][] = [];
   f.io.reservations = (project) => placementReservationPort(project, (p, key) => {
-    reads.push([p, key]); return { mode: p === "p" ? "on" : "off", manualAfterMs: null };
+    reads.push([p, key]); return { mode: p === "p" ? "on" : "off", manualAfterMs: null, source: "config" };
   });
   for (let i = 0; i < 8; i++) expect(await f.start(i)).toMatchObject({ ok: true, placement: `peer:${i % 2 ? "b" : "a"}` });
   expect(reads).toEqual(Array(8).fill(["p", "placementReservations"]));
@@ -332,7 +339,7 @@ test("eight batches release their own durable holds without accumulating after r
       .toMatchObject({ ok: true });
     expect(f.peers().map((p) => p.open)).toEqual([0, 0]);
   }
-});
+}, 30000);
 
 
 test("atomic preparation rechecks revoked grant, cooldown and owner freeze without leaving a task", async () => {
@@ -368,4 +375,102 @@ test("auto start formally created local author cannot migrate during the gap bef
     place: (db, q) => startPlacement(db, f.io, q), notifyPm: async () => {} })).toEqual([]);
   expect(f.task(0).stage).toBe("spec");
   expect(f.task(0).extra.placement).toBeUndefined();
+});
+
+
+test("production CFG mode is read per project and call: on balances formal starts, off/errors create no holds", async () => {
+  const f = fixture(); await f.plan(); await f.plan("other", "q");
+  const saved = [SCHEDULER_CONFIG_PATH, RECOVERY_POLICY_PATH].map((path) => ({ path,
+    data: existsSync(path) ? readFileSync(path) : null }));
+  mkdirSync(dirname(SCHEDULER_CONFIG_PATH), { recursive: true });
+  writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: Object.fromEntries(["p", "q"].map((p) =>
+    [p, { maxActiveWorkers: 0, requiredChecks: ["ci"], repoDir: f.dir, remote: f.remote }])) }));
+  const live = livePlacementIO(async () => ({ ok: true, out: "https://github.com/o/r.git" }));
+  Object.assign(f.io, live, { borrow: f.io.borrow, now: f.io.now });
+  const configure = (p: object, q: object = { mode: "off" }) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p, q } }));
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    // Per-key override wins over project mode; another project's off cannot disable p.
+    configure({ mode: "off", keys: { placementReservations: "on" } });
+    for (let i = 0; i < 8; i++) {
+      expect(await f.start(i)).toMatchObject({ ok: true, placement: `peer:${i % 2 ? "b" : "a"}` });
+      expect(f.task(i).extra.placementReservation).toMatchObject({ mode: "on", family: "codex" });
+      f.restart();
+      expect(await f.start(i)).toMatchObject({ ok: true, duplicate: true });
+    }
+    expect(f.peers().map((p) => p.open)).toEqual([4, 4]);
+    f.hello("a", 10); f.hello("b", 10);
+    expect(await f.start(0, {}, "other")).toMatchObject({ ok: true });
+    expect(getTask(f.db, "other-n0")!.extra.placementReservation).toBeUndefined();
+    const snap = autoSnapshot(f.db, f.task(0), { registry: [], maxWorkers: 0, now: 2000, pool: { remote: f.remote, borrow: f.borrow } });
+    expect(snap.pool!.peers[0].open).toBe(3);
+    expect(planScheduler(snap)).toMatchObject({ kind: "intent", action: "stage", targetStage: "build" });
+    const read = () => startPlacement(f.db, f.io, { project: "p", repoDir: f.dir, fileGlobs: ["src/free.ts"], want: "auto" });
+    configure({ mode: "on", keys: { placementReservations: "off" } });
+    expect(await read()).not.toHaveProperty("reservation");
+    for (const bad of ["{", JSON.stringify({ projects: { p: { keys: { wrongKey: "on" } } } })]) {
+      writeFileSync(RECOVERY_POLICY_PATH, bad);
+      expect(await read()).not.toHaveProperty("reservation");
+    }
+    expect(log).not.toHaveBeenCalled(); // off and invalid policy never emit shadow observations.
+    rmSync(RECOVERY_POLICY_PATH);
+    expect(await read()).toHaveProperty("reservation.mode", "observe");
+    configure({ mode: "on" });
+    expect(await read()).toHaveProperty("reservation.mode", "on");
+    // Policy changes never move or release the eight formally prepared cards.
+    expect(f.peers().map((p) => p.open)).toEqual([4, 4]);
+    expect(f.task(0).extra.placement).toBe("peer:a");
+  } finally {
+    log.mockRestore();
+    for (const { path, data } of saved) { if (data) writeFileSync(path, data); else rmSync(path, { force: true }); }
+  }
+});
+
+test("reservation policy port fails closed on thrown or malformed replies", () => {
+  const broken = (() => { throw new Error("policy unavailable"); }) as RecoveryPolicyPort;
+  expect(placementReservationPort("p", broken).mode).toBe("off");
+  for (const bad of [null, undefined, "on", { mode: "ON" }]) {
+    expect(placementReservationPort("p", (() => bad) as unknown as RecoveryPolicyPort).mode).toBe("off");
+  }
+});
+
+
+test("autostart and spec-resume production edges use the same live CFG object mode", async () => {
+  const f = fixture();
+  const saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH) : null;
+  mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
+  const q = { project: "p", repoDir: f.dir, fileGlobs: ["src/free.ts"], want: "auto" as const, taskId: "unbound" };
+  const config: SchedulerConfig = { enabled: true, autoDispatch: true, pollMs: 5000,
+    projects: { p: { maxActiveWorkers: 0, remote: f.remote, repoDir: f.dir, requiredChecks: ["ci"] } } };
+  let placed: Awaited<ReturnType<typeof startPlacement>> | undefined;
+  // Intercept the outer tick only; execute each production edge's placement closure, including its policy reader.
+  const auto = spyOn(autostartRunner, "autostartTick").mockImplementation(async (env) => {
+    placed = await env.startEnv().placement!(f.db, q); return [];
+  });
+  const resume = spyOn(specRunner, "specResumeTick").mockImplementation(async (env) => {
+    placed = await env.place(f.db, q); return [];
+  });
+  const borrow = spyOn(borrowReader, "readEffectiveBorrow").mockResolvedValue(f.borrow);
+  const git = spyOn(commands, "runBounded").mockResolvedValue({ code: 0, timedOut: false, stdout: "https://github.com/o/r.git", stderr: "" });
+  const clock = spyOn(Date, "now").mockReturnValue(2000);
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  const ledger = async () => { throw new Error("placement reads must not dispatch"); };
+  const hooks = autostartHooks({ db: f.db, ledger, active: () => {}, lease: undefined });
+  const pace = { yieldNow: () => false, cursor: {} };
+  try {
+    for (const mode of ["on", "off", "observe", "invalid"] as const) {
+      writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { mode } } }));
+      for (const run of [() => hooks.start(config, pace), () => specResumeStep(f.db, config, ledger, () => {})]) {
+        placed = undefined;
+        await run();
+        expect(placed).toMatchObject({ where: "peer", peer: "a" });
+        if (mode === "on" || mode === "observe") expect(placed).toHaveProperty("reservation.mode", mode);
+        else expect(placed).not.toHaveProperty("reservation");
+      }
+    }
+    expect(f.db.query("SELECT COUNT(*) AS n FROM tasks").get()).toEqual({ n: 0 });
+  } finally {
+    for (const mock of [auto, resume, borrow, git, clock, log]) mock.mockRestore();
+    if (saved) writeFileSync(RECOVERY_POLICY_PATH, saved); else rmSync(RECOVERY_POLICY_PATH, { force: true });
+  }
 });

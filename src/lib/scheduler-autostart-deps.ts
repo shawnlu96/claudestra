@@ -1,3 +1,4 @@
+import { recoveryPolicy } from "./recovery-policy.js";
 /**
  * 自动开卡 / 自动交回（i28-A1）的生产接线：schedulerPass 在 autoDispatch 块里先 resume（auto tick 之前）、后 start（之后）。
  * 台账写走传进来的调度身份 CLI（已套租约守卫）；create / kill 走不带调度身份、带服务租约的 manager（同 scheduler-auto-deps.ts 建审查员）；
@@ -83,7 +84,7 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
       branchExists: async (repo, branch) => (await git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).ok,
       autoReady: (project) => (config.enabled && config.autoDispatch && Object.hasOwn(config.projects, project) ? null : `调度服务没对项目 ${project} 开自动派单`),
       placement: (db, q) => startPlacement(db, {
-        reservations: placementReservationPort,
+        reservations: (project) => placementReservationPort(project, recoveryPolicy),
         policy: (project) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; },
         borrow: readEffectiveBorrow, now: Date.now,
         originRepo: async (dir) => {

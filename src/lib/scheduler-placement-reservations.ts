@@ -1,5 +1,6 @@
 /** Prepared writes are durable task facts, never registry/name guesses or writes from a placement read. */
 import type { Database } from "bun:sqlite";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
 import { HELLO_FRESH_MS, type Grant, type Paused, type Slots } from "./lend-wire-v2.js";
@@ -18,16 +19,19 @@ export interface ReservationPort {
   mode: "on" | "observe" | "off";
   observe?(result: { actual: string; proposed: string }): void;
 }
-/** CFG owns the key registration and the only production policy source. */
-export type ReservationPolicyReader = (project: string, mechanism: "placementReservations") => {
-  mode: ReservationPort["mode"]; manualAfterMs: number | null;
-};
 
 let observeWindow = 0, observeCount = 0;
 /** Shared by all production entry points; at most twenty records per minute and constant memory per process. */
-export function placementReservationPort(project: string, policy?: ReservationPolicyReader): ReservationPort {
-  // CFG has not landed on this baseline: no alternative JSON/env switch may activate reservations.
-  return { mode: policy?.(project, "placementReservations").mode ?? "observe", observe: (result) => {
+export function placementReservationPort(project: string, policy?: RecoveryPolicyPort): ReservationPort {
+  // Inject the reader at the production edges: ledger-write imports these facts, so a runtime CFG import would cycle.
+  let mode: ReservationPort["mode"] = "observe";
+  if (policy) {
+    try {
+      const read = policy(project, "placementReservations")?.mode;
+      mode = ["on", "observe", "off"].includes(read) ? read : "off";
+    } catch { mode = "off"; /* A failed policy port disables this mechanism; it must never fall back to active reservations. */ }
+  }
+  return { mode, observe: (result) => {
     const now = Date.now();
     if (now - observeWindow >= 60_000 || now < observeWindow) { observeWindow = now; observeCount = 0; }
     if (observeCount >= 20) return;

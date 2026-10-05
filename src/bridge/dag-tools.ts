@@ -1,3 +1,4 @@
+import { recoveryPolicy } from "../lib/recovery-policy.js";
 import { setFeatureDeps } from "../lib/ledger-feature-deps-tool.js";
 import { placementReservationPort } from "../lib/scheduler-placement-reservations.js";
 /**
@@ -244,7 +245,7 @@ function showDag(deps: DagToolDeps, args: unknown): OrderToolResult {
 /** 槽池放置要读的：scheduler.json 的项目策略、生效的借入名单、项目目录 origin 的 GitHub 坐标 */
 export function livePlacementIO(git: (cwd: string, args: string[]) => Promise<{ ok: boolean; out: string }>): StartPlacementIO {
   return {
-    reservations: placementReservationPort,
+    reservations: (project) => placementReservationPort(project, recoveryPolicy),
     policy: (project) => {
       const p = readSchedulerConfig().projects[project];
       return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null;

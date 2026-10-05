@@ -1,3 +1,4 @@
+import { recoveryPolicy } from "./recovery-policy.js";
 /**
  * spec 阶段 auto 卡放置（i28-RSM1，scheduler-spec-resume.ts）的生产接线：放置走自动开卡同一个 startPlacement（finishFirst），
  * 策略取 scheduler.json、借入名单取 readEffectiveBorrow、仓库坐标取项目目录 origin；git 包在 whileOwned 里，服务停了就什么都不做。
@@ -29,7 +30,8 @@ export function specResumeStep(db: Database, config: SchedulerConfig, ledger: Le
   const policy = (project: string) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; };
   return specResumeTick({
     db, projects: config.enabled && config.autoDispatch === true ? Object.keys(config.projects) : [], ledger,
-    place: (d, q) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now, reservations: placementReservationPort }, q, true),
+    place: (d, q) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now,
+      reservations: (project) => placementReservationPort(project, recoveryPolicy) }, q, true),
     repoDir: async (project) => (await readProjects()).projects.find((p) => p.id === project)?.dirs.find((d) => existsSync(join(d, ".git"))) ?? null,
     notifyPm: (project, text) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }),
   }, pace);
