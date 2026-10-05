@@ -55,11 +55,13 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   if (!task.pr || !task.headSHA) return c.escalate("合并要交给仓库方，但卡上没有 PR 或 head");
   if (!c.deps.prState) return c.out("held", "没有读 PR 状态的通道，合并交接暂停");
   const handed = handoffOf(c.db, task)?.data.evidence as HandoffEvidence | undefined;
+  // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge
+  if (handed && handed.pr !== task.pr) return c.escalate(`卡上的 PR 已不是交接的那个（${handed.pr} → ${task.pr}），交接证据不覆盖新 PR`);
   const seen = polled.get(c.db) ?? polled.set(c.db, new Map()).get(c.db)!;
   const last = seen.get(task.id);
   if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS) return c.out("waiting", "已交仓库方合并，等 PR 结果");
   let pr: HandoffPr;
-  try { pr = await c.deps.prState(task.pr); } catch (e) {
+  try { pr = await c.deps.prState(handed?.pr ?? task.pr); } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return c.out("held", `读 PR 状态失败，下轮再试：${(e as Error).message}`);
   }

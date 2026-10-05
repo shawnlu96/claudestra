@@ -117,6 +117,35 @@ describe("MHO1 merge handoff (auto tick)", () => {
     }
   });
 
+  test("a PR changed on the card after the handoff goes to PM; the new PR is never read, even merged at the same head", async () => {
+    const h = await handoffFixture(), { f } = h;
+    const other = "https://github.com/example/other/pull/8";
+    try {
+      expect(await h.hand()).toMatchObject({ step: "handoff" });
+      expect((await f.cli("pm", "task-set", "T1", "--rev", String(f.task().rev), "--pr", other)).ok).toBe(true);
+      h.setPr({ state: "MERGED", head: H1, mergeSha: M });
+      f.advance(HANDOFF_POLL_MS);
+      expect(await h.hand()).toMatchObject({ step: "manual", detail: expect.stringContaining("卡上的 PR 已不是交接的那个") });
+      expect(h.reads).toEqual([PR]);
+      expect(f.task()).toMatchObject({ stage: "merge", pr: other });
+      expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
+    } finally { f.close(); }
+  });
+
+  test("landing rechecks the handed PR itself: a merge reported for another PR at the same head is refused", async () => {
+    const h = await handoffFixture(), { f } = h;
+    const other = "https://github.com/example/other/pull/8";
+    try {
+      expect(await h.hand()).toMatchObject({ step: "handoff" });
+      f.db.query("UPDATE tasks SET pr = ? WHERE id = 'T1'").run(other);
+      expect(await f.tickDeps.manager("ledger", "scheduler-merge-handoff", "T1", "--head", H1, "--pr", other, "--merged", M))
+        .toMatchObject({ ok: false, code: "conflict", error: "这个 PR 和 head 没有交接记录" });
+      expect(await f.tickDeps.manager("ledger", "scheduler-merge-handoff", "T1", "--head", H1, "--pr", PR, "--merged", M))
+        .toMatchObject({ ok: false, code: "conflict" }); // the handed PR is no longer the card's either
+      expect(f.task().stage).toBe("merge");
+    } finally { f.close(); }
+  });
+
   test("an unreadable PR holds the card without writing; the next pass reads again", async () => {
     const h = await handoffFixture(), { f } = h;
     try {
@@ -149,7 +178,7 @@ describe("MHO1 merge handoff (auto tick)", () => {
       const as = (...args: string[]) => f.tickDeps.manager("ledger", "scheduler-merge-handoff", "T1", ...args);
       expect(await as("--head", H2, "--pr", PR)).toMatchObject({ ok: false, code: "conflict" });
       expect(await as("--head", H1, "--pr", `${PR}0`)).toMatchObject({ ok: false, code: "conflict" });
-      expect(await as("--head", H1, "--pr", PR, "--merged", M)).toMatchObject({ ok: false, code: "conflict", error: "这个 head 没有交接记录" });
+      expect(await as("--head", H1, "--pr", PR, "--merged", M)).toMatchObject({ ok: false, code: "conflict", error: "这个 PR 和 head 没有交接记录" });
       const first = await as("--head", H1, "--pr", PR);
       expect(first).toMatchObject({ ok: true, duplicate: false });
       expect(await as("--head", H1, "--pr", PR)).toMatchObject({ ok: true, duplicate: true });

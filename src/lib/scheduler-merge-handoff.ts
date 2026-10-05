@@ -83,8 +83,8 @@ export function recordMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId:
 export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; mergeSha: string }): LedgerTask {
   return tx(db, () => {
     const { task } = handoffCard(db, ctx, input);
-    const handoff = handoffOf(db, task);
-    if ((handoff?.data.evidence as HandoffEvidence | undefined)?.head !== input.head) throw new LedgerError("conflict", "这个 head 没有交接记录");
+    const handoff = handoffOf(db, task), evidence = handoff?.data.evidence as HandoffEvidence | undefined;
+    if (evidence?.head !== input.head || evidence.pr !== input.pr) throw new LedgerError("conflict", "这个 PR 和 head 没有交接记录");
     if (!SHA.test(input.mergeSha)) throw new LedgerError("invalid", "合并提交必须是完整 SHA");
     const move = canTransition(task, "live", "pm");
     if (!move.ok) throw new LedgerError("conflict", move.reason);
