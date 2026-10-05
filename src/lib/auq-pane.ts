@@ -17,6 +17,7 @@
  *   解析时剔除；Review 段只有 `1. Submit answers` 一个选项，靠"真实选项 ≥2"
  *   的门槛自然判非弹窗。
  */
+import { trimTrailingBlank } from "./pane-tail.js";
 
 export interface AuqPaneOption {
   label: string;
@@ -163,7 +164,7 @@ export const CODEX_FOOTER_RE = /^\s*Press enter to confirm or esc to (go back|ca
 const CODEX_OPTION_RE = /^\s*(›\s+)?\d+\.\s+(.*\S)\s*$/;
 
 export function parseCodexSelectPane(pane: string): AuqPaneParse | null {
-  const lines = pane.split("\n");
+  const lines = trimTrailingBlank(pane.split("\n")); // 页脚窗口从最后一行有字处数，不从可见区底部数
   let footerIdx = -1;
   for (let i = lines.length - 1; i >= 0 && lines.length - i <= MAX_SCAN_LINES; i--) {
     if (CODEX_FOOTER_RE.test(lines[i])) {
