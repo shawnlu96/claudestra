@@ -2,9 +2,12 @@
  * dispatch-recovery-MODELW: the one production caller of MODEL's recordModelOutcome — the auto tick's "turn failed" branch.
  * The record goes through createRecoveryRuntimePorts with REFA's ledger approval port and CFG's recoveryPolicy, loaded at
  * run time from CFG's frozen location (no file = no port, MODEL observes; a broken module = a throwing port, MODEL turns off).
- * Answering null keeps the caller's escalate exactly as before: observe / off / none / manual plans and every wiring error
- * (logged as one diagnostic line). Only mode on with a retry_same / exempt_review / redispatch plan stops the escalate; the
- * plan itself is MODEL's ledger record (deduped per intent by MODEL's key). tests/scheduler-model-wiring*.test.ts.
+ * The caller always escalates as before; this step only answers a suffix for its reason. "" = today's text exactly: observe /
+ * off / none / manual plans and every wiring error (logged as one diagnostic line). Mode on with a retry_same / exempt_review /
+ * redispatch plan appends "MODEL 计划：<kind>（批准 <approvalId>），执行路径待 MODELX": executing these plans (a new reviewer
+ * session, an exemption review bound to another family, a redispatch of a sent order) is dispatch-recovery-MODELX, so this card
+ * never stops the escalate on a plan no one runs. The record is deduped per intent by MODEL's key; the escalate by its own.
+ * tests/scheduler-model-wiring*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -24,8 +27,7 @@ export interface ModelWiringCard {
   readonly db: Database;
   readonly task: LedgerTask;
   readonly opts: { pool?: { remote: LocalFamilies } };
-  readonly deps: { notifyPm(task: LedgerTask, text: string): Promise<void>; now(): number };
-  out(step: string, detail: string): { taskId: string; step: string; detail: string };
+  readonly deps: { now(): number };
 }
 
 type Failure = NonNullable<OutcomeSignal["failure"]>;
@@ -65,11 +67,10 @@ const materialDigest = (task: LedgerTask, sent: SchedulerIntent): string =>
   `sha256:${createHash("sha256").update(JSON.stringify([task.project, task.id, sent.node, sent.head ?? "", sent.specRev])).digest("hex")}`;
 
 /**
- * Record the failed turn with MODEL. null = the caller escalates as it does today; a CardOutcome = mode on took over with a
- * retry_same / exempt_review / redispatch plan, PM told once on the first (non-replayed) record, the owner flagged when the plan asks.
+ * Record the failed turn with MODEL; answers the suffix for the caller's escalate reason ("" = unchanged). Under on, a
+ * retry_same / exempt_review / redispatch plan is named, marked pending MODELX, with its ledger seq (owner flagged when the plan asks).
  */
-export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure):
-  Promise<ReturnType<ModelWiringCard["out"]> | null> {
+export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure): Promise<string> {
   let r: ReturnType<ReturnType<typeof createRecoveryRuntimePorts>["recordModelOutcome"]>;
   try {
     const policy = await loadPolicy();
@@ -81,14 +82,11 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
       ...(ref.role === "reviewer" ? { review: { sessionId: ref.sessionId, materialDigest: materialDigest(card.task, sent) } } : {}) });
   } catch (e) {
     diag(`${card.task.id} 意图 ${sent.id} 记模型结果失败，照旧退人工：${e instanceof Error ? e.message : String(e)}`);
-    return null;
+    return "";
   }
-  if (r.kind === "off") { if (r.diag) diag(`${card.task.id} 模型结果按 off：${r.diag}`); return null; }
-  if (r.kind !== "recorded" || r.mode !== "on" || r.plan.kind === "manual") return null;
-  if (!r.duplicate) {
-    const seq = r.event.seq, owner = r.plan.kind === "exempt_review" && r.plan.notifyOwner ? "（按批准需告知 owner）" : "";
-    await card.deps.notifyPm(card.task, `[调度引擎] ${card.task.id} 模型结果按规矩接续${owner}：\n${r.materials}`)
-      .catch((e: unknown) => diag(`${card.task.id} 接续通知没发出去（台账已记 #${seq}）：${(e as Error).message}`));
-  }
-  return card.out("recovery", `${r.plan.kind}：${r.plan.reason}`);
+  if (r.kind === "off") { if (r.diag) diag(`${card.task.id} 模型结果按 off：${r.diag}`); return ""; }
+  if (r.kind !== "recorded" || r.mode !== "on" || r.plan.kind === "manual") return "";
+  const p = r.plan, owner = p.kind === "exempt_review" && p.notifyOwner ? `；${p.exemption}，按批准需告知 owner` : "";
+  const basis = p.kind === "redispatch" ? `→ ${p.to.machine}（${p.to.family}），无现成正式路径` : `批准 ${p.approvalId}`;
+  return `；MODEL 计划：${p.kind}（${basis}），执行路径待 MODELX（台账 #${r.event.seq}，未执行）：${p.reason}${owner}`;
 }

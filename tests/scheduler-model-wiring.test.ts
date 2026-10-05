@@ -91,20 +91,26 @@ describe("observe (default)", () => {
 });
 
 describe("on", () => {
-  test("approved first refusal: no escalate, MODEL's retry decision on the ledger, PM told once; a replayed tick adds nothing", async () => {
+  test("approved first refusal: MODEL's retry decision on the ledger, escalated once with the plan for PM; later ticks never stall", async () => {
     setModelOutcomeReader(CFG);
     g.__modelwPolicy = mode("on");
     approve();
     failWith(CYBER);
-    const before = f.notices.length;
-    expect(await f.tick()).toMatchObject({ step: "recovery", detail: expect.stringContaining("retry_same") });
+    const before = f.notices.length, sends = f.intents().length;
+    const { step, detail } = (await f.tick())!;
+    expect(step).toBe("manual");
+    expect(detail).toStartWith(`agent-rv-t1 回合失败：${CYBER}；MODEL 计划：retry_same（批准 `);
+    expect(detail).toContain("retry_same");
+    expect(detail).toContain("执行路径待 MODELX");
     expect(outcomes()).toMatchObject([{ kind: "note", data: { op: "model_refusal_retry", mode: "on" } }]);
     expect(f.notices.slice(before)).toHaveLength(1);
-    expect(f.notices.at(-1)).toContain("不是 pass");
-    expect(f.notices.join("\n")).not.toContain("退回人工");
-    expect(await f.tick()).toMatchObject({ step: "recovery" });
+    expect(f.notices.at(-1)).toStartWith(today(CYBER));
+    expect(f.notices.at(-1)).toContain("retry_same");
+    // The card is PM's now: repeated ticks neither replay a "recovery" nor add records, notices or new orders.
+    for (let n = 0; n < 4; n++) expect((await f.tick())?.step).not.toBe("recovery");
     expect(outcomes()).toHaveLength(1);
     expect(f.notices.slice(before)).toHaveLength(1);
+    expect(f.intents()).toHaveLength(sends);
   });
 
   test("no approval: MODEL's hold escalate plus today's manual fallback", async () => {

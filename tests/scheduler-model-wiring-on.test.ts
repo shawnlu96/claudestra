@@ -1,6 +1,6 @@
 /**
  * dispatch-recovery-MODELW · modelOutcomeStep against the real ledger: the approved refusal sequence under on, MODEL's
- * capacity / host classes, and a throwing MODEL call. null = the auto tick escalates as it always has.
+ * capacity / host classes, and a throwing MODEL call. The tick always escalates; "" = today's reason, else the on plan for PM.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -41,9 +41,7 @@ beforeEach(async () => {
 afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); delete g.__modelwOn; });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-const notices: string[] = [];
-const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { notifyPm: async (_t, text) => { notices.push(text); }, now: () => f.at("x").now! },
-  out: (step, detail) => ({ taskId: "T1", step, detail }) });
+const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { now: () => f.at("x").now! } });
 const rv = (sessionId: string, over: Partial<SessionRef> = {}): SessionRef =>
   ({ taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId, family: "codex", transport: "acp", ...over });
 const step = (intent: SchedulerIntent, ref: SessionRef, message = CYBER, kind: "error" | "quota" | "auth" = "error") =>
@@ -64,33 +62,32 @@ function ticket(id: string): SchedulerIntent {
 describe("on: the approved refusal sequence", () => {
   test("retry_same → (same materials, new session) exempt_review to another family with exemption + owner notice → manual", async () => {
     approve();
-    notices.length = 0;
-    expect(await step(first, rv("s-rv"))).toMatchObject({ step: "recovery", detail: expect.stringContaining("retry_same") });
-    // A replayed tick on the same intent: MODEL's dedup key, no second record, no second notice.
-    expect(await step(first, rv("s-rv"))).toMatchObject({ step: "recovery" });
+    const once = await step(first, rv("s-rv"));
+    expect(once).toContain("MODEL 计划：retry_same（批准 ");
+    expect(once).toContain("执行路径待 MODELX");
+    // A replayed tick on the same intent: MODEL's dedup key, no second record, the same suffix.
+    expect(await step(first, rv("s-rv"))).toBe(once);
     expect(outcomes()).toHaveLength(1);
-    expect(notices).toHaveLength(1);
 
     const second = ticket("refusal-retry-1");
-    expect(await step(second, rv("s-rv-2"))).toMatchObject({ step: "recovery", detail: expect.stringContaining("exempt_review") });
+    const exempt = await step(second, rv("s-rv-2"));
+    expect(exempt).toContain("MODEL 计划：exempt_review（批准 ");
+    expect(exempt).toContain(EXEMPTION_TEXT);
+    expect(exempt).toContain("告知 owner");
     expect(outcomes().at(-1)).toMatchObject({ kind: "escalate", data: { op: "model_refusal_exempt", attempt: 2, session: "s-rv-2", oldSession: "s-rv",
       plan: { kind: "exempt_review", to: { family: "claude", machine: "local" }, exemption: EXEMPTION_TEXT, notifyOwner: true } } });
-    expect(notices).toHaveLength(2);
-    expect(notices[1]).toContain(EXEMPTION_TEXT);
-    expect(notices[1]).toContain("告知 owner");
 
     settleIntent(f.db, f.at("scheduler"), { id: second.id, from: "pending", to: "cancelled", receipt: "拒审，原单终止" });
     const third = ticket("refusal-exempt-1");
-    expect(await step(third, rv("s-claude", { agent: "agent-claude-bk", family: "claude", transport: "tmux" }))).toBeNull();
+    expect(await step(third, rv("s-claude", { agent: "agent-claude-bk", family: "claude", transport: "tmux" }))).toBe("");
     expect(outcomes().map((e) => e.data.op)).toEqual(["model_refusal_retry", "model_refusal_exempt", "model_safety_hold"]);
     expect(outcomes().at(-1)!.data.plan).toMatchObject({ kind: "manual", reason: expect.stringContaining("不再换提供方") });
-    expect(notices).toHaveLength(2);
   });
 
   test("same session on the retry (not a new session) holds instead of exempting", async () => {
     approve();
     await step(first, rv("s-rv"));
-    expect(await step(ticket("refusal-retry-1"), rv("s-rv"))).toBeNull();
+    expect(await step(ticket("refusal-retry-1"), rv("s-rv"))).toBe("");
     expect(outcomes().at(-1)).toMatchObject({ data: { op: "model_safety_hold" } });
   });
 });
@@ -98,29 +95,30 @@ describe("on: the approved refusal sequence", () => {
 describe("capacity / host go through MODEL's own classes", () => {
   const peer = rv("s-peer", { agent: "peer-rv", transport: "peer" });
   test("quota on a peer reviewer: redispatch to an authorized local placement of a non-author family", async () => {
-    expect(await step(first, peer, "You've hit your usage limit", "quota")).toMatchObject({ step: "recovery", detail: expect.stringContaining("redispatch") });
+    expect(await step(first, peer, "You've hit your usage limit", "quota"))
+      .toContain("MODEL 计划：redispatch（→ local（codex），无现成正式路径），执行路径待 MODELX");
     expect(outcomes()).toMatchObject([{ kind: "note", data: { cls: "capacity", machine: "peer-rv", plan: { kind: "redispatch", to: { family: "codex", machine: "local" } } } }]);
   });
 
-  test("host error with no other placement: manual (null, the tick escalates)", async () => {
-    expect(await step(first, rv("s-rv"), "ECONNRESET: socket hang up")).toBeNull();
+  test("host error with no other placement: manual (\"\", the tick escalates as today)", async () => {
+    expect(await step(first, rv("s-rv"), "ECONNRESET: socket hang up")).toBe("");
     expect(outcomes()).toMatchObject([{ kind: "escalate", data: { cls: "host", plan: { kind: "manual", code: "model_recovery_manual" } } }]);
   });
 
   test("auth failure is never auto-recovered", async () => {
-    expect(await step(first, peer, "Please run /login", "auth")).toBeNull();
+    expect(await step(first, peer, "Please run /login", "auth")).toBe("");
     expect(outcomes()).toMatchObject([{ data: { cls: "host", plan: { kind: "manual" } } }]);
   });
 
-  test("observe records the redispatch it would do and still answers null", async () => {
+  test("observe records the redispatch it would do and still answers \"\"", async () => {
     g.__modelwOn = "observe";
-    expect(await step(first, peer, "529 overloaded")).toBeNull();
+    expect(await step(first, peer, "529 overloaded")).toBe("");
     expect(outcomes()).toMatchObject([{ kind: "note", data: { op: "model_outcome", mode: "observe", plan: { kind: "redispatch" } } }]);
   });
 });
 
-test("MODEL itself throws: one diagnostic line, null so the tick escalates", async () => {
-  expect(await step({ ...first, id: "no-such-intent" }, rv("s-rv"))).toBeNull();
+test("MODEL itself throws: one diagnostic line, \"\" so the tick escalates as today", async () => {
+  expect(await step({ ...first, id: "no-such-intent" }, rv("s-rv"))).toBe("");
   expect(outcomes()).toEqual([]);
   const lines = errors.mock.calls.map((c: unknown[]) => String(c[0])).filter((l: string) => l.startsWith("[model-outcome]"));
   expect(lines).toHaveLength(1);
