@@ -3,6 +3,9 @@
  * Ordinary failures may be re-dispatched formally to an already authorized family + machine once the original order is
  * proven result-less and ended; a safety refusal keeps one real refusal as evidence, holds the card for PM/owner, and
  * blocks every automatic retry or family switch (scheduler-review-swap.ts reads the hold) until a manager resolves it.
+ * The one exception is owner approval ask_muumcchk8d0596d05d: an allowed, routine read-only code review refused with no
+ * report retries once on the same model in a new session with unchanged materials; a second refusal goes once to another
+ * family under a recorded exemption; anything after that, or anything not approved / allowed, stays a manual hold.
  * The mode comes from an injected recovery-policy port; no port = observe (records only, changes nothing).
  * tests/scheduler-model-outcome.test.ts.
  */
@@ -14,7 +17,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
-import { HOLD_OP, openSafetyHold, RESOLVE_OP } from "./scheduler-review-swap.js";
+import { EXEMPT_OP, HOLD_OP, openSafetyHold, RESOLVE_OP, RETRY_OP } from "./scheduler-review-swap.js";
 
 type RecoveryMode = "on" | "observe" | "off";
 type RecoveryKey = "materials" | "localFallback" | "localDelivery" | "modelOutcome" | "askReminder" | "manualStall" | "planGap" | "audit";
@@ -82,11 +85,84 @@ export interface RecoveryFacts {
   noResult: boolean;
   /** The original turn is over (failed, refused before send, or the intent cancelled). */
   ended: boolean;
+  /** Only for a reviewer's safety refusal: the approved-continuation facts; absent = manual hold. */
+  refusal?: RefusalFacts;
 }
+
+/** The owner's approval as the injected port answers it for one card; content must be positively allowed, never assumed. */
+export interface RefusalApproval {
+  approvalId: string;
+  source: string;
+  scope: "routine_readonly_review";
+  content: "allowed" | "disallowed" | "uncertain";
+  revoked: boolean;
+  ownerHold: boolean;
+}
+/** Answers null when the card is outside any approval; this module never decides content eligibility itself. */
+export type RefusalApprovalPort = (project: string, taskId: string) => RefusalApproval | null;
+
+/** An earlier reviewer refusal in the same window (same head + spec), as recorded on the ledger. */
+interface PriorRefusal { step: "retry_same" | "exempt_review" | "manual"; family: AuthorFamily; digest: string | null; session: string | null; seq: number }
+
+interface RefusalFacts {
+  approval: RefusalApproval | null;
+  /** Why the approval port could not be read (thrown / garbage); any diag is treated as no approval. */
+  approvalDiag?: string;
+  /** Reviewer refusals already recorded in this window, oldest first. */
+  prior: readonly PriorRefusal[];
+  materialDigest: string | null;
+  sessionId: string | null;
+  /** This review ticket was planned after the last continuation record (a formal new ticket, not the old one replayed). */
+  newTicket: boolean;
+}
+
+export const EXEMPTION_TEXT = "跨模型审查豁免:原审查模型策略拒审";
 
 export type RecoveryPlan =
   | { kind: "redispatch"; to: Placement; reason: string }
+  | { kind: "retry_same"; to: Placement; attempt: 1; newSession: true; approvalId: string; reason: string }
+  | { kind: "exempt_review"; to: Placement; attempt: 2; exemption: typeof EXEMPTION_TEXT; crossModel: boolean; approvalId: string; notifyOwner: true; reason: string }
   | { kind: "manual"; code: "model_safety_hold" | "model_recovery_manual"; reason: string };
+
+const safetyHold = (why: string): RecoveryPlan => ({ kind: "manual", code: "model_safety_hold", reason: `模型安全策略拒绝：${why}；停止自动重试和换模型，交 PM / owner 人工处置` });
+
+function approvalGap(a: RefusalApproval | null, diag?: string): string | null {
+  if (diag) return `批准读取失败（${diag}）`;
+  if (!a || !a.approvalId || !a.source || a.scope !== "routine_readonly_review") return "不在 owner 已批准的常规只读审查范围";
+  if (a.revoked) return "批准已撤销";
+  if (a.ownerHold) return "owner 已挂起";
+  if (a.content !== "allowed") return a.content === "uncertain" ? "内容是否允许尚未确定" : "内容不允许";
+  return null;
+}
+
+/**
+ * Pure, the approved bounded continuation for a reviewer refusal. First refusal → same placement, new session, one retry;
+ * second refusal of that same model on the same materials in a new session → once to another family under the recorded
+ * exemption; everything else (third refusal, changed materials, same session, not approved / allowed) → manual hold.
+ */
+function planRefusal(f: RecoveryFacts): RecoveryPlan {
+  const r = f.refusal;
+  if (f.role !== "reviewer" || !r) return safetyHold("不在已批准的审查接续范围");
+  const gap = approvalGap(r.approval, r.approvalDiag);
+  if (gap) return safetyHold(gap);
+  if (!f.noResult || !f.ended) return safetyHold("原审查回合未确认无结果且已终止");
+  if (!r.materialDigest || !r.sessionId) return safetyHold("缺材料摘要或会话，无法证明原样接续");
+  const approvalId = r.approval!.approvalId, last = r.prior.at(-1);
+  const authorized = (p: Placement) => f.authorized.some((a) => a.family === p.family && a.machine === p.machine);
+  if (!last) {
+    if (!authorized(f.failed)) return safetyHold("原审查位置不在已授权配置内");
+    return { kind: "retry_same", to: f.failed, attempt: 1, newSession: true, approvalId,
+      reason: `审查被误拒且无报告：按 owner 批准 ${approvalId}，同一模型新会话、原材料不改，正式新票据只重试一次` };
+  }
+  if (last.step !== "retry_same" || r.prior.length !== 1) return safetyHold(last.step === "exempt_review" ? "豁免审查后再次拒绝，不再换提供方" : "本窗口已按人工处置");
+  if (last.family !== f.failed.family) return safetyHold("第二次拒绝不是同一模型的重试");
+  if (last.digest !== r.materialDigest) return safetyHold("重试材料与原审查材料摘要不一致");
+  if (last.session === r.sessionId || !r.newTicket) return safetyHold("重试未在新会话 / 新审查票据上进行");
+  const to = f.authorized.find((p) => p.family !== f.failed.family);
+  if (!to) return safetyHold("已授权配置里没有另一家族可做豁免审查");
+  return { kind: "exempt_review", to, attempt: 2, exemption: EXEMPTION_TEXT, crossModel: to.family !== f.authorFamily, approvalId, notifyOwner: true,
+    reason: `同一模型新会话再次误拒：${EXEMPTION_TEXT}（批准 ${approvalId}），由 ${to.machine}（${to.family}）独立审查一次${to.family === f.authorFamily ? "，与作者同家族，不算跨模型" : ""}，通知 owner` };
+}
 
 /**
  * Pure: the one next step for a classified outcome. An author keeps its family (a new family would silently move the
@@ -94,7 +170,7 @@ export type RecoveryPlan =
  * cross-model. The failed placement itself is skipped, since its host or account just failed.
  */
 export function planModelRecovery(cls: ModelOutcomeClass, recoverable: boolean, f: RecoveryFacts): RecoveryPlan {
-  if (cls === "safety") return { kind: "manual", code: "model_safety_hold", reason: "模型安全策略拒绝：停止自动重试和换模型，交 PM / owner 人工处置" };
+  if (cls === "safety") return planRefusal(f);
   if (!recoverable) return { kind: "manual", code: "model_recovery_manual", reason: "这类故障不能自动恢复（需登录或投递结果不明）" };
   if (!f.noResult || !f.ended) return { kind: "manual", code: "model_recovery_manual", reason: "原单未确认无结果且已终止，不能重派" };
   const fits = (p: Placement) => (f.role === "author" ? p.family === f.authorFamily : p.family !== f.authorFamily) &&
@@ -123,6 +199,8 @@ export interface OutcomeInput {
   authorized: readonly Placement[];
   /** The caller saw the turn end (failed result / refused send / offline); a cancelled intent also counts. */
   ended: boolean;
+  /** A review turn's session and the digest of its complete materials; required for the approved refusal continuation. */
+  review?: { sessionId: string; materialDigest: string };
 }
 
 export type OutcomeRecord =
@@ -135,7 +213,7 @@ export type OutcomeRecord =
  * first record instead of adding a second. observe writes a note of what on would do; on writes the escalate (hold or
  * manual) or the recovery decision the formal planner re-dispatches from. A task already held gets no new evidence.
  */
-export function recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeInput, port?: RecoveryPolicyPort): OutcomeRecord {
+export function recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeInput, port?: RecoveryPolicyPort, approvalPort?: RefusalApprovalPort): OutcomeRecord {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "模型结果只由调度服务记录");
   const pre = getIntent(db, input.intentId);
   if (!pre) throw new LedgerError("not_found", "缺原调度意图");
@@ -159,17 +237,45 @@ export function recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeIn
     const role = intent.action === "review" ? "reviewer" : "author";
     const authorFamily = (role === "reviewer" ? remoteHeadFamily(db, task) : null) ?? (db.query("SELECT authorFamily FROM task_workflows WHERE taskId = ?")
       .get(task.id) as { authorFamily: AuthorFamily } | null)?.authorFamily ?? input.failed.family;
+    // A different head or spec is a new window: the attempt count restarts there, never across it.
+    const window = `${task.specRev}:${task.headSHA ?? ""}`;
+    const refusal = c.cls === "safety" && role === "reviewer" ? refusalFacts(events, mode, window, intent, input, approvalPort, task) : undefined;
     const plan = planModelRecovery(c.cls, c.recoverable, { role, authorFamily,
-      failed: input.failed, authorized: input.authorized, noResult: true, ended: input.ended || intent.status === "cancelled" });
-    const data = { op: mode === "on" && c.cls === "safety" ? HOLD_OP : "model_outcome", mode, cls: c.cls, intentId: intent.id,
-      action: intent.action, agent: input.failed.agent, family: input.failed.family, machine: input.failed.machine,
+      failed: input.failed, authorized: input.authorized, noResult: true, ended: input.ended || intent.status === "cancelled", ...(refusal ? { refusal } : {}) });
+    const a = refusal?.approval;
+    const data = { op: mode === "observe" ? "model_outcome" : OUTCOME_OP[plan.kind] ?? (c.cls === "safety" ? HOLD_OP : "model_outcome"), mode, cls: c.cls,
+      intentId: intent.id, action: intent.action, role, window, agent: input.failed.agent, family: input.failed.family, machine: input.failed.machine,
       round: task.round, head: task.headSHA, specRev: task.specRev, noResult: true, noReport: true, verdict: null,
-      evidence: c.message.slice(0, 600), plan, ...(policy.diag ? { diag: policy.diag } : {}) };
-    const kind = mode === "observe" ? "note" : plan.kind === "manual" ? "escalate" : "note";
+      evidence: c.message.slice(0, 600), plan, ...(policy.diag ? { diag: policy.diag } : {}),
+      ...(refusal ? { session: refusal.sessionId, materialDigest: refusal.materialDigest, approvalId: a?.approvalId ?? null, approvalSource: a?.source ?? null,
+        oldSession: refusal.prior.at(-1)?.session ?? null, attempt: refusal.prior.length + 1, ...(refusal.approvalDiag ? { approvalDiag: refusal.approvalDiag } : {}) } : {}) };
+    const kind = mode === "observe" || plan.kind === "redispatch" || plan.kind === "retry_same" ? "note" : "escalate";
     const text = `${mode === "observe" ? "[观察] " : ""}${CLASS_LABEL[c.cls]}：${plan.reason}`;
     const { event } = appendEvent(db, { ...ctx, dedupKey: key }, { project: task.project, target: task.id, kind, text, data });
     return recorded(mode, c.cls, plan, event, false);
   });
+}
+
+/** on-mode op per plan; a manual safety plan falls through to the hold. The exemption escalates so PM / owner are told. */
+const OUTCOME_OP: Partial<Record<RecoveryPlan["kind"], string>> = { retry_same: RETRY_OP, exempt_review: EXEMPT_OP };
+
+/** Reads the window's earlier reviewer refusals of this mode and the approval port; a broken port counts as no approval. */
+function refusalFacts(events: readonly LedgerEvent[], mode: RecoveryMode, window: string, intent: SchedulerIntent, input: OutcomeInput,
+  port: RefusalApprovalPort | undefined, task: LedgerTask): RefusalFacts {
+  const prior = events.filter((e) => e.data.cls === "safety" && e.data.mode === mode && e.data.role === "reviewer" && e.data.window === window)
+    .map((e): PriorRefusal => {
+      const k = (e.data.plan as RecoveryPlan).kind;
+      return { step: k === "retry_same" || k === "exempt_review" ? k : "manual", family: e.data.family as AuthorFamily,
+        digest: (e.data.materialDigest as string | null) ?? null, session: (e.data.session as string | null) ?? null, seq: e.seq };
+    });
+  let approval: RefusalApproval | null = null, approvalDiag: string | undefined;
+  if (!port) approvalDiag = "缺批准 port";
+  else {
+    try { approval = port(task.project, task.id); } catch (e) { approvalDiag = `读批准失败：${(e as Error).message}`.slice(0, 300); }
+  }
+  const last = prior.at(-1);
+  return { approval, ...(approvalDiag ? { approvalDiag } : {}), prior, materialDigest: input.review?.materialDigest || null,
+    sessionId: input.review?.sessionId || null, newTicket: !last || intent.eventSeq > last.seq };
 }
 
 const CLASS_LABEL: Record<ModelOutcomeClass, string> = { capacity: "容量不足", host: "宿主或运输故障", safety: "模型安全策略拒绝" };
@@ -184,7 +290,9 @@ function outcomeMaterials(e: LedgerEvent): string {
   return [`${e.target} ${CLASS_LABEL[d.cls as ModelOutcomeClass]}（${d.mode}）：${d.agent} / ${d.family} @ ${d.machine}，意图 ${d.intentId}`,
     `第 ${d.round} 轮，head ${String(d.head ?? "（无）").slice(0, 12)}；原单无交付 / 无审查报告，没有结论（不是 pass）`,
     `原文：${String(d.evidence)}`,
-    plan.kind === "redispatch" ? `下一步：${plan.reason}` : `下一步：人工处置——${plan.reason}${d.op === HOLD_OP ? "；处置后用 resolve 解除" : ""}`,
+    ...(d.role === "reviewer" && d.cls === "safety" ? [`第 ${d.attempt} 次拒审；材料摘要 ${d.materialDigest ?? "（缺）"}；` +
+      `本次会话 ${d.session ?? "（缺）"}，上次会话 ${d.oldSession ?? "（无）"}；批准 ${d.approvalId ?? "（无）"}${d.approvalSource ? ` / ${d.approvalSource}` : ""}`] : []),
+    plan.kind === "manual" ? `下一步：人工处置——${plan.reason}${d.op === HOLD_OP ? "；处置后用 resolve 解除" : ""}` : `下一步：${plan.reason}`,
   ].join("\n");
 }
 
