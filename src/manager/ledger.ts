@@ -1,4 +1,5 @@
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
+import { fileScopeLedger, fileScopeRegistry } from "./ledger-resource-scope-cmds.js";
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
@@ -112,12 +113,9 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
   }
 }
 
-/**
- * 真实依赖：registry、projects.json、环境里的频道号 → actor。认不出的频道只许读（actor 记 "unknown"，没有任何角色）；
- * 读写的划分与 manager 的认主守卫同一张表（write-commands.ts），不另列一份。
- */
+/** Identity and read/write classification use the same rules as manager's ownership guard. */
 async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
-  const reg = await loadRegistry();
+  const fileScope = args[0] === "scheduler-file-scope", reg = fileScope ? fileScopeRegistry() : await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
   if (service && (process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK])) return { error: "agent 频道 / 出借 worker 不能冒用调度服务身份" };
   if (service && !SCHEDULER_SERVICE_COMMANDS.has(args[0] ?? "")) {
@@ -133,7 +131,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   const readOnly = readInvocation ? new LedgerReader().get() : undefined;
   if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
-    db: readOnly ?? openLedger(),
+    db: fileScope ? fileScopeLedger(args.includes("--apply")) : readOnly ?? openLedger(),
     actor,
     actorProject: reg.agents[actor]?.projectId,
     projectIds: projects.projects.map((x) => x.id),

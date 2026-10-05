@@ -105,7 +105,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
-  // 巡检默认把结果写进 audit_findings；feature-migrate 不带 --dry-run 就是正式迁移
+  if (cmd === "ledger" && sub === "scheduler-file-scope") return args.includes("--apply");
   if (cmd === "ledger" && DRY_RUN_READS.has(sub)) return !args.includes("--dry-run");
   if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir|team|dispatcher)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
   return false;
