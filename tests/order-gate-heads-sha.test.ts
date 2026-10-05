@@ -65,10 +65,10 @@ describe("shortenShas", () => {
     }
   });
 
-  test("acceptance 2: secret shapes are never cut — 64-hex, 41+ hex, mixed / upper case 40, prefixed tokens", () => {
+  test("acceptance 2: secret shapes are never cut — upper-case 64-hex, 62 / 66 / 41+ hex, mixed / upper case 40, prefixed tokens", () => {
     const a = sha();
     const mixed = `Ab${a.slice(2)}`;
-    for (const s of [sha(32), `${a}${sha(1)}`, mixed, a.toUpperCase(), `ghp_${a}`, `sk-${a}`, `tok_${a}`]) {
+    for (const s of [sha(32).toUpperCase(), sha(31), sha(33), `${a}${sha(1)}`, mixed, a.toUpperCase(), `ghp_${a}`, `sk-${a}`, `tok_${a}`]) {
       const r = shortenShas(`粘来的 ${s} 一段`, new Set());
       expect(r).toEqual({ text: `粘来的 ${s} 一段`, cut: 0 });
       expect(peerSecretHit(r.text)).not.toBeNull();
@@ -120,7 +120,7 @@ describe("peer orders", () => {
 
   test("acceptance 2: real secret shapes beside a SHA still refuse the whole order; no note is left behind", () => {
     const a = sha();
-    for (const bad of [sha(32), `Ab${sha().slice(2)}`, `ghp_${sha()}`, `${sha()}${sha(1)}`]) {
+    for (const bad of [sha(32).toUpperCase(), sha(31), `Ab${sha().slice(2)}`, `ghp_${sha()}`, `${sha()}${sha(1)}`]) {
       const e = refusal(`# Review\n基线 ${a}，另见 ${bad}`);
       expect(e).toBeInstanceOf(LedgerError);
       expect(e.message).toContain(REFUSED);

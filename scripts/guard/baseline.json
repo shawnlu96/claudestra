@@ -388,6 +388,12 @@
       "key": "guard:scripts/guard/knip.json",
       "from": 0,
       "to": 0,
+      "why": "CX-0：knip 入口加 scripts/codex-probe.ts（手动运行的真实 codex app-server 实测脚本，bun 直接按路径跑、不被 import，和 scripts/acp-stub.ts 同类）；只加入口，规则不变"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
       "why": "Remove the migrated private ledger-center entry; preserve every existing guard threshold and strict rule."
     }
   ]

@@ -7,8 +7,10 @@
  * - 没声明：只有额度用完会变成 JSON-RPC 错误（-32603，data.codexErrorInfo = "usageLimitExceeded"），同一回合只认一次；
  *   其它错误只是一段正文、照常 end_turn（看不出来）。
  * - 没登录：-32000 Authentication required（session/new|load 与 prompt 都可能），出「需要 owner 登录」的卡。
+ * - 协议不兼容（protocol.ts，initialize 时判）：不可重试的 error、固定 key——一个宿主只出一张卡，之后的回合按同一个失败收尾。
  * 重置时间 ACP 不给，照旧从 rollout 读（codex-usage.ts）。tests/acp-failures.test.ts。
  */
+import { AcpIncompatibleError } from "./protocol.js";
 import { RpcError } from "./rpc.js";
 
 const AUTH_REQUIRED_CODE = -32000;
@@ -70,6 +72,7 @@ export function classifyNeutralFailure(kind: unknown, key: string, message: stri
 
 /** session/prompt（或 session/new|load）抛的错 → 分类；认不出的一律 error。turnKey = 宿主给这一轮的编号（同一回合只出一次） */
 export function classifyPromptError(e: unknown, turnKey: string): AcpFailure {
+  if (e instanceof AcpIncompatibleError) return { kind: "error", key: "incompatible", message: e.message, retry: false };
   if (e instanceof RpcError) {
     if (e.code === AUTH_REQUIRED_CODE) return { kind: "auth", key: `auth:${turnKey}`, message: e.message || "Authentication required" };
     const data = (e.data ?? {}) as Record<string, unknown>;

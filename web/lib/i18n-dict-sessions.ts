@@ -50,4 +50,13 @@ export const SESSIONS_DICT: Record<string, string> = {
   "这是「{parent}」的子会话，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？":
     "This is a sub-session of “{parent}” and usually doesn't need adopting on its own — it follows the main session. Adopt it as a separate agent anyway?",
   "仍然收编": "Adopt anyway",
+  "会话列表加载较慢，仍在连接…": "The session list is loading slowly — still connecting…",
+  "会话列表加载失败，正在重试…": "Couldn't load the session list — retrying…",
+  "会话列表加载失败，{s} 秒后自动重试": "Couldn't load the session list — retrying automatically in {s}s",
+  "会话列表加载失败": "Couldn't load the session list",
+  "没有权限读取会话列表，可能需要重新配对": "Not allowed to read the session list — this device may need to be paired again",
+  "列表刷新失败，显示的是上次的结果": "Refresh failed — showing the last loaded list",
+  "列表刷新失败，显示的是上次的结果 · {s} 秒后重试": "Refresh failed — showing the last loaded list · retrying in {s}s",
+  "正在重试…": "Retrying…",
+  "先进入": "Continue anyway",
 };

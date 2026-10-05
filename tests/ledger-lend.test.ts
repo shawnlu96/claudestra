@@ -95,9 +95,101 @@ describe("lend-offer", () => {
     expect(await offer()).toMatchObject({ ok: false, code: "conflict" });
   });
 
-  test("this slice lends to Codex only: --family claude is refused (r1 P2-4)", async () => {
-    expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "invalid" });
+  // r1 P2-4 的「只借 Codex」被 dispatch-recovery-FAM1b 替代：审查单可显式借 Claude，缺省仍是 Codex；Claude 写单另须作者与 v3 授权证明
+  test("a manual card with no known author family refuses --family claude; an unknown family is refused; the default stays codex", async () => {
+    expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await offer("T9", "--family", "gemini")).toMatchObject({ ok: false, code: "invalid" });
     expect(listLendOrders(db, "T9")).toEqual([]);
+    expect(await offer("T9", "--family", "codex")).toMatchObject({ ok: true, family: "codex" });
+  });
+});
+
+describe("lend-offer --family（dispatch-recovery-FAM1b）", () => {
+  const workflow = (id: string, author: "claude" | "codex", template = "code") =>
+    db.run(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES ('${id}', '${P}', '${template}', 2, 'manual', '${author}', '退回人工', 1, 1, 1)`);
+  const claudePoll = (over: Record<string, unknown> = {}) => poll({ families: { claude: 1 }, ...over });
+  const claudeResult = (orderId: string, family = "claude") => ({
+    v: 1, orderId, gen: 1, report: "## 结论\n通过", session: { id: "sess-c", family },
+    verdict: { v: 1, orderId, head: H, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "report.md" },
+  });
+
+  test("a Codex-written card goes to the peer's Claude end to end: pool → poll (Claude slot) → claim → receipt; the verdict is recorded as Claude", async () => {
+    workflow("T9", "codex");
+    const r = await offer("T9", "--family", "claude");
+    expect(r).toMatchObject({ ok: true, orderId: "lend:T9:s1:r1:a0", step: "review", family: "claude" });
+    expect((await poll()).orders).toEqual([]); // 只报 Codex 空位的 peer 看不到 Claude 单：留在池里等
+    expect((await claudePoll({ busy: { claude: 1 } })).orders).toEqual([]);
+    expect((await claudePoll({ repos: ["x/y"] })).orders).toEqual([]);
+    expect((await claudePoll({ roles: ["write"] })).orders).toEqual([]);
+    expect((await claudePoll()).orders).toEqual([expect.objectContaining({ orderId: r.orderId, family: "claude", step: "review" })]);
+    expect((await claim(r.orderId)).ok).toBe(true);
+    refusedWith(await call("write", claudeResult(r.orderId, "codex")), "invalid"); // 报错家族的结论不入账
+    const w = await call("write", claudeResult(r.orderId));
+    expect(w).toMatchObject({ ok: true, receipt: { orderId: r.orderId, taskId: "T9" } });
+    const [ev] = db.query("SELECT data FROM events WHERE target = 'T9' AND kind = 'review'").all() as { data: string }[];
+    expect(JSON.parse(ev!.data)).toMatchObject({ reviewer: "peer:mate", verdict: "pass", reviewerFamily: "claude", lend: { claim: { family: "claude" } } });
+  });
+
+  test("a Claude-written card refuses a Claude reviewer and still goes to Codex by default; a Codex-written card refuses a Codex reviewer", async () => {
+    workflow("T9", "claude");
+    expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("跨模型") });
+    expect(listLendOrders(db, "T9")).toEqual([]);
+    expect(await offer()).toMatchObject({ ok: true, family: "codex" });
+    card("T12");
+    workflow("T12", "codex");
+    expect(await offer("T12")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("跨模型") });
+    expect(await offer("T12", "--family", "codex")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(listLendOrders(db, "T12")).toEqual([]);
+    expect(await offer("T12", "--family", "claude")).toMatchObject({ ok: true, family: "claude" });
+  });
+
+  test("a security card's review stays local for both families, the default Codex included; nothing is pooled", async () => {
+    workflow("T9", "claude", "security");
+    for (const args of [[], ["--family", "codex"], ["--family", "claude"]]) {
+      expect(await offer("T9", ...args)).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("security") });
+    }
+    expect(listLendOrders(db, "T9")).toEqual([]);
+  });
+
+  test("the author is the family that wrote the head when a lender did: a Codex lender's delivery beats the workflow's claude", async () => {
+    workflow("T9", "claude");
+    const seq = Number(db.query(`INSERT INTO events (ts, actor, project, target, kind, data) VALUES (1, 'peer:mate', ?, 'T9', 'deliver', ?) RETURNING seq`)
+      .get(P, JSON.stringify({ headSHA: H }))!["seq" as never]);
+    expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
+    const { orderId } = await offer();
+    db.run(`UPDATE lend_orders SET step = 'write', status = 'done', eventSeq = ${seq} WHERE orderId = '${orderId}'`);
+    expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: true, family: "claude" });
+    expect(await run(["lend-reoffer", "T9", "--peer", "mate", "--repo", REPO, "--family", "codex", "--reason", "换家族"])).toMatchObject({ ok: false, code: "forbidden" });
+  });
+
+  test("no review role in borrow, a security card, or a build / fix card without author evidence refuse --family claude; nothing is pooled", async () => {
+    workflow("T9", "codex");
+    borrow = [{ peer: "mate", projects: [P], roles: ["write"], maxOpen: 1 }];
+    expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
+    borrow = [{ peer: "mate", projects: [P], roles: ["review", "write"], maxOpen: 1 }];
+    card("T13");
+    workflow("T13", "claude", "security");
+    expect(await offer("T13", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("security") });
+    card("T14");
+    db.run("UPDATE tasks SET stage = 'build', headSHA = NULL WHERE id = 'T14'");
+    expect(await offer("T14", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("作者家族") });
+    card("T15");
+    db.run("UPDATE tasks SET stage = 'fix' WHERE id = 'T15'");
+    expect(await offer("T15", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("作者家族") });
+    for (const id of ["T9", "T13", "T14", "T15"]) expect(listLendOrders(db, id)).toEqual([]);
+  });
+
+  test("lend-reoffer takes --family too and keeps the same gates; usage names both families", async () => {
+    workflow("T9", "claude");
+    expect((await offer()).ok).toBe(true);
+    expect(await run(["lend-reoffer", "T9", "--peer", "mate", "--repo", REPO, "--family", "claude", "--reason", "换家族"])).toMatchObject({ ok: false, code: "forbidden" });
+    expect(listLendOrders(db, "T9").map((o) => o.status)).toEqual(["pooled"]); // 被拒的重挂不撤旧单
+    db.run("UPDATE task_workflows SET authorFamily = 'codex' WHERE taskId = 'T9'");
+    expect(await run(["lend-reoffer", "T9", "--peer", "mate", "--repo", REPO, "--family", "claude", "--reason", "换家族"])).toMatchObject({ ok: true, family: "claude" });
+    const { LEND_CMDS } = await import("../src/manager/ledger-lend-cmds.js");
+    expect(LEND_CMDS["lend-offer"]!.usage).toContain("--family codex|claude");
+    expect(LEND_CMDS["lend-reoffer"]!.usage).toContain("--family codex|claude");
   });
 });
 

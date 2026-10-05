@@ -14,7 +14,7 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
-import { cleanupDaemons, intents, setup, start, until, type Svc } from "./scheduler-daemon-harness.js";
+import { cleanupDaemons, intents, owners, setup, start, stopSeen, until, type Svc } from "./scheduler-daemon-harness.js";
 
 afterEach(cleanupDaemons);
 
@@ -81,18 +81,21 @@ describe("a ledger child queued on the write lock re-checks the service's lease 
       const s = setup(["T1"]);
       start(s);
       const lock = await queueBind(s);
-      const bind = children(s.child!.pid).find((k) => k.args.includes("scheduler-session-bind"))!;
-      expect(bindings(s)).toEqual([]);
-      expect(kindOf(s)).toBeUndefined();
-      stop(s);
-      await Bun.sleep(300);
-      lock.release();
-      expect(await until(() => gone(bind.pid), 20_000)).toBe(true);
-      expect(await until(() => s.child!.exitCode !== null, 20_000)).toBe(true);
-      expect(bindings(s)).toEqual([]);
-      expect(kindOf(s)).toBeUndefined();
-      expect(intents(s).find((i) => i.action === "ensure_session")?.status).toBe("submitted");
-      untouched(s);
+      try {
+        const bind = children(s.child!.pid).find((k) => k.args.includes("scheduler-session-bind"))!;
+        expect(bindings(s)).toEqual([]);
+        expect(kindOf(s)).toBeUndefined();
+        const before = owners(s);
+        stop(s);
+        expect(await until(() => stopSeen(s, before), 5_000)).toBe(true); // the stop reached the lease files the bind re-checks
+        lock.release();
+        expect(await until(() => gone(bind.pid), 20_000)).toBe(true);
+        expect(await until(() => s.child!.exitCode !== null, 20_000)).toBe(true);
+        expect(bindings(s)).toEqual([]);
+        expect(kindOf(s)).toBeUndefined();
+        expect(intents(s).find((i) => i.action === "ensure_session")?.status).toBe("submitted");
+        untouched(s);
+      } finally { lock.release(); }
     }, 90_000);
   }
 
@@ -100,10 +103,12 @@ describe("a ledger child queued on the write lock re-checks the service's lease 
     const s = setup(["T1"]);
     start(s);
     const lock = await queueBind(s);
-    lock.release();
-    expect(await until(() => bindings(s).length > 0, 20_000)).toBe(true);
-    expect(bindings(s)).toEqual([{ agent: "agent-task-0" }]);
-    expect(await until(() => kindOf(s) === "worker", 5_000)).toBe(true);
+    try {
+      lock.release();
+      expect(await until(() => bindings(s).length > 0, 20_000)).toBe(true);
+      expect(bindings(s)).toEqual([{ agent: "agent-task-0" }]);
+      expect(await until(() => kindOf(s) === "worker", 5_000)).toBe(true);
+    } finally { lock.release(); }
   }, 90_000);
 
   test("a lease-lost answer ends the pass as SchedulerStopped even if the parent has not noticed yet: no card failure, no fallback, no PM notice", async () => {

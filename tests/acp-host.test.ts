@@ -247,6 +247,7 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(f.length).toBe(1);
     expect(f[0].failure).toMatchObject({ kind: "quota" });
     expect(f[0].configOptions.length).toBeGreaterThan(0);
+    expect([typeof f[0].sessionId, typeof f[0].failedAt]).toEqual(["string", "number"]); // 出借停单按它们认当前会话、当前回合（lend-turn-failure.ts）
     expect(h.entries().some((e) => e.error && e.isApiErrorMessage === false)).toBe(true);
     expect(h.stops[0].event).toBe("StopFailure");
   }, 30_000);
@@ -321,6 +322,31 @@ describe("ACP 宿主整条链（stub）", () => {
     await until(() => h.stops.length === 1);
     expect(h.stops[0].event).toBe("StopFailure");
   }, 20_000);
+
+  const incompatible: [string, object, string][] = [
+    ["protocolVersion 2", { protocolVersion: 2 }, "protocolVersion 是 2"],
+    ["没有 protocolVersion", { protocolVersion: null }, "没回 protocolVersion"],
+    ["resume 与 loadSession 都没有", { agentCapabilities: { loadSession: false, sessionCapabilities: { resume: null } } }, "接不回已有线程"],
+  ];
+  for (const [what, patch, why] of incompatible) {
+    test(`协议不兼容（${what}）：拒起——一张写明原因的卡、不标就绪、不重起，回合当场按失败收尾`, async () => {
+      const h = start({ STUB_INITIALIZE: JSON.stringify(patch) });
+      await until(() => h.sent.some((f) => f.type === "acp_failure"));
+      const { failure } = h.sent.find((f) => f.type === "acp_failure");
+      expect(failure).toMatchObject({ kind: "error", key: "incompatible", retry: false }); // 不带匹配器：bun 的 toMatchObject 会把匹配器写回被测对象
+      expect(failure.message).toContain("协议不兼容，拒绝启动");
+      expect(failure.message).toContain(why);
+      await procs[0]!.exited;
+      await until(() => h.logs.some((l) => l.includes("协议不兼容，不再重起")));
+      h.inbound("在吗");
+      await until(() => h.stops.length === 1);
+      expect(h.stops[0]!.event).toBe("StopFailure");
+      expect(h.entries().some((e) => e.error === failure.message && e.isApiErrorMessage === false)).toBe(true); // 不触发 60s 自动续跑
+      expect(h.sent.filter((f) => f.type === "acp_failure")).toHaveLength(1);
+      expect(h.isReady()).toBe(false); // manager 等不到就绪 → recoverFailedAcpLaunch 按启动失败处理
+      expect(procs).toHaveLength(1);
+    }, 20_000);
+  }
 
   test("适配器被杀：在途回合以失败收尾，退避后重起、接回同一个线程", async () => {
     const h = start();
