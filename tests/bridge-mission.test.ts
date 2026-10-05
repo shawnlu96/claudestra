@@ -544,10 +544,26 @@ describe("P2-9：只有人类信号和真实的新回合才放行待命", () => 
   });
   test("人类消息之后的回合结束放行", async () => {
     await intoStandby();
-    await sleep(5); // 人类消息要严格晚于 lastRun.endedAt：同一毫秒会被判成 run 结束前的消息、不放行（CI 偶发超时）
+    // 人类消息要严格晚于 lastRun.endedAt 才算「之后」：等时钟真走过它再发，同一毫秒发会偶发不放行（CI 超时）
+    const endedAt = Date.parse((await cur()).lastRun!.endedAt);
+    await until(() => Date.now() > endedAt);
     ev("chat_message", { direction: "in", srcKind: "user", text: "有新活了" });
     done();
     await until(async () => (await cur()).wake?.hold === undefined);
+  });
+  test("和 run 结束同一毫秒的人类消息不算之后，回合结束不放行", async () => {
+    await intoStandby();
+    const endedAt = Date.parse((await cur()).lastRun!.endedAt);
+    const realNow = Date.now;
+    Date.now = () => endedAt;
+    try {
+      ev("chat_message", { direction: "in", srcKind: "user", text: "有新活了" });
+    } finally {
+      Date.now = realNow;
+    }
+    done();
+    await settle();
+    expect((await cur()).wake?.hold).toBe("standby");
   });
   test("待命期间 watcher 缺位：人类消息挂在「?」名下，照样让位", async () => {
     await intoStandby();
