@@ -14,7 +14,7 @@ import type { Principal } from "../src/lib/principals.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
 import { testChildEnv } from "./test-env.js";
 
-export type FeedConn = { name: string; principal: Principal };
+type FeedConn = { name: string; principal: Principal };
 /**
  * e2e：conns 全部订阅好后写一条 p 的事件；lazy：先只订 denied、写 p，再订 reader、写 q；
  * agent：只建过滤器，看各 agent 的 assistant_text 放不放行。
