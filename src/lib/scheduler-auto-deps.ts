@@ -30,7 +30,7 @@ import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./schedul
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
-import type { SessionRole } from "./scheduler-sessions.js";
+import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.js";
@@ -99,6 +99,10 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
 async function existingAuthor(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult | null> {
   const row = task.agent ? env.registryRow(task.agent) : undefined;
   if (!row || runtimeFamily(row.runtime) !== family) return ensure(env, task, "author", family);
+  const bound = getSchedulerSession(env.db, task.id, "author");
+  if (bound && bound.state !== "retired" && (bound.agent !== row.name || bound.sessionId !== row.sessionId)) {
+    return { kind: "unknown", reason: `本卡已绑定另一个作者 session（${bound.agent}/${bound.sessionId}），不换会话` };
+  }
   const id = await existingAuthorIdentity(task, row, family, env.git);
   if (id.kind === "unproven") return null;
   return id.kind === "conflict" ? { kind: "unknown", reason: `既存作者会话身份核对不过，不猜绑定：${id.reason}` } : refOf(task, "author", row, family);

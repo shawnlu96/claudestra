@@ -19,7 +19,8 @@ const run = (cmd: string[], cwd: string) => {
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "local1-existing-")), state = join(dir, "state"), repo = join(dir, "wt");
-  mkdirSync(state); mkdirSync(repo);
+  const home = join(dir, "home"), runtime = join(dir, "runtime"), tmp = join(dir, "tmp");
+  for (const d of [state, repo, home, runtime, tmp]) mkdirSync(d);
   run(["git", "init", "-q", "-b", "lend/t1"], repo);
   run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"], repo);
   const ledgerPath = join(dir, "ledger.sqlite"), db = openLedger(ledgerPath);
@@ -49,13 +50,19 @@ function fixture() {
       const first = await deps.ensure(getTask(db, "T1"), "author", "claude");
       const again = await deps.ensure(getTask(db, "T1"), "author", "claude");
       console.log(JSON.stringify({ first, again, creates }));`;
-    const child = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: state },
+    // Isolated HOME / state / runtime / tmp, and a bridge address nothing listens on: no production auth, registry or bridge.
+    const child = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env, HOME: home, TMPDIR: tmp,
+      CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: runtime, BRIDGE_URL: "http://127.0.0.1:9", BRIDGE_PORT: "9" },
       stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     expect(code, err).toBe(0);
     return JSON.parse(out.trim().split("\n").at(-1)!) as { first: Record<string, unknown>; again: Record<string, unknown>; creates: number };
   };
-  return { dir, repo, registry, ensure, close: () => rmSync(dir, { recursive: true, force: true }) };
+  const sql = (q: string) => { const db = openLedger(ledgerPath); db.run("PRAGMA foreign_keys=OFF"); db.query(q).run(); closeLedger(ledgerPath); };
+  const bindOther = () => sql(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES ('T1', 'author', 'agent-task-one', 's-one', 'claude', 'tmux', 'active', 'i1', 0, 0)`);
+  const unbind = () => sql("DELETE FROM scheduler_sessions WHERE taskId='T1'");
+  return { dir, repo, registry, ensure, bindOther, unbind, close: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 test("verified owner-created author is reconciled with the seat full: no gate, no create, same session every time", async () => {
@@ -94,6 +101,10 @@ test("identity conflicts, unreadable checkouts and wrong family stay unknown / m
       expect(r.first).toMatchObject({ kind, reason: expect.stringContaining(reason) });
       expect(r.creates).toBe(0);
     }
+    f.registry({ sessionId: "s-new" }); // the bound session below is a different live one
+    f.bindOther();
+    expect((await f.ensure()).first).toMatchObject({ kind: "unknown", reason: expect.stringContaining("已绑定另一个作者 session") });
+    f.unbind();
     run(["git", "switch", "-q", "-c", "other"], f.repo);
     f.registry();
     expect((await f.ensure()).first).toMatchObject({ kind: "unknown", reason: expect.stringContaining("不是本卡 lend/t1") });
