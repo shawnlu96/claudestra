@@ -7,6 +7,10 @@
  * 手机和别的电脑都不算（tests/same-host.test.ts）。
  */
 import { networkInterfaces } from "node:os";
+import { isLoopbackAddress } from "./address-predicates.js";
+
+// 纯回环谓词已移入 address-predicates.ts（中心协议只依赖那里）；旧 import 路径保留兼容
+export { isLoopbackAddress };
 
 /** 去掉 [ ]、IPv4 端口、IPv6 zone、IPv4-mapped 前缀，统一小写 */
 export function normalizeIp(ip: string): string {
@@ -17,23 +21,6 @@ export function normalizeIp(ip: string): string {
   if (zone > 0) v = v.slice(0, zone);
   if (v.startsWith("::ffff:") && v.includes(".")) v = v.slice(7);
   return v;
-}
-
-/** 对端地址是不是回环（控制面闸门 bridge/web-gateway.ts 与 peer 入口 bridge/peer-ingress.ts 共用） */
-export function isLoopbackAddress(addr: string | null | undefined): boolean {
-  if (!addr) return false;
-  // normalize(review nit-c):大写/十六进制压缩形态也归一。miss 方向本就是
-  // 误拒不是误放(安全无洞),补齐只为不误伤边角形态。Bun requestIP 规范化
-  // 输出下只会是 127.x / ::1 / ::ffff:127.x,后两条是防御性冗余。
-  const a = addr.toLowerCase();
-  return (
-    a === "::1" ||
-    a === "::ffff:127.0.0.1" ||
-    a === "::ffff:7f00:1" ||
-    a === "0:0:0:0:0:ffff:7f00:1" ||
-    a.startsWith("127.") ||
-    a.startsWith("::ffff:127.")
-  );
 }
 
 /**
