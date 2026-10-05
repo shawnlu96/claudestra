@@ -4,7 +4,7 @@
  *   再来一次 session/new（/clear）就停掉旧 pi、换新 id 重起。
  * - session/prompt → prompt（followUp：pi 还在跑也能排上），等到 agent_settled 才回 stopReason。
  *   _session/steering → 带 steer 的 prompt：排进在跑的回合 = injected，pi 另起一轮 = startedNewTurn（结束只靠 idle）。
- * - 叫停（session/cancel，或宿主要回清掉的排队正文时的 _claudestra/cancel）→ 先 clear_queue 再 abort，叫停中 pi 续跑的轮再中止（见 cancel）。
+ * - 叫停（session/cancel，或宿主要回清掉的排队消息时的 _claudestra/cancel）→ 先 clear_queue 再 abort，叫停中 pi 续跑的轮再中止（见 cancel）。
  * - pi 自己开的回合（扩展 triggerTurn、压缩后续跑）照样报 active / idle，宿主当自发回合跟（session.ts）。
  * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消，通知 / 状态栏进日志；pi 意外退出 = 适配器退出，由宿主重起。
  * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在 session_start
@@ -65,6 +65,8 @@ interface Gen {
   stoppedAt?: number;
   /** 挂载扩展在 session_start 报的状态（MOUNT_STATUS_KEY）；没挂 server 的会话不看 */
   mount?: string;
+  /** 发进 pi、还没出现在上下文里的插话（按发出先后），id = 宿主的 deliveryId：叫停时把 clear_queue 交回的正文对回身份（见 cancel） */
+  steered: { text: string; id?: string }[];
 }
 
 const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断开），这一轮作废";
@@ -145,7 +147,7 @@ export class PiAcpServer {
     if (after) throw new RpcError(INVALID_PARAMS, after, hadOld ? CLOSED_OLD : undefined);
     const env: Record<string, string> = names.length ? { [PI_MCP_SERVERS_ENV]: JSON.stringify(mcp.servers) } : {};
     const link = this.deps.openPi({ sessionId: id, cwd, env });
-    const g: Gen = { link, sessionId: id, mapper: createPiEventMapper(), waiters: [], options: [], running: false, inflight: 0, cancelRequested: false };
+    const g: Gen = { link, sessionId: id, mapper: createPiEventMapper(), waiters: [], options: [], running: false, inflight: 0, cancelRequested: false, steered: [] };
     this.gen = g;
     link.onRecord((rec) => {
       if (g === this.gen) this.onRecord(g, rec); // 被 /clear 换下的旧 pi 收尾时的输出不算
@@ -199,6 +201,7 @@ export class PiAcpServer {
     }
     if (rec.type === "extension_error") return this.deps.log(`pi 扩展出错（${rec.extensionPath} / ${rec.event}）：${rec.error}`);
     for (const u of g.mapper.push(rec)) this.update(g, u);
+    if (rec.type === "message_start" && rec.message?.role === "user") this.consumed(g, rec.message.content);
     if (rec.type === "agent_start" && this.stopping(g)) this.abortPi(g, "叫停后 pi 又续跑了一轮（重试 / 压缩后继续 / 排队消息）：再中止");
     if (rec.type === "agent_start" && !g.running) {
       g.running = true;
@@ -223,9 +226,17 @@ export class PiAcpServer {
     return g.stoppedAt !== undefined && Date.now() - g.stoppedAt < STOP_HOLD_MS;
   }
 
+  /** pi 把一条 user 消息注入了上下文：插话里第一条同正文的不再算排队（pi 按先后消费，正文相同时先发的先出） */
+  private consumed(g: Gen, content: unknown): void {
+    const text = typeof content === "string" ? content : textOf(content);
+    const i = g.steered.findIndex((e) => e.text === text);
+    if (i >= 0) g.steered.splice(i, 1);
+  }
+
   private settle(g: Gen): void {
     g.running = false;
     g.stoppedAt = undefined;
+    g.steered = []; // 停稳时 pi 的队列已空；没对上 message_start 的（模板展开改了正文）不留到下一轮
     const s: Settled = { outcome: g.mapper.takeOutcome(), cancelled: g.cancelRequested };
     g.cancelRequested = false;
     this.update(g, threadStatus("idle", turnEnd(s.outcome, s.cancelled))); // steering 另起的回合只能从这里知道结局
@@ -292,7 +303,14 @@ export class PiAcpServer {
   private async steer(p: Rec): Promise<Rec> {
     const g = this.live(p);
     if (this.stopping(g)) return { outcome: "deferred" }; // 不是 injected / startedNewTurn：宿主把它排回队列，这轮停稳后另起一轮
-    const r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS);
+    const id = p?._meta?.claudestra?.deliveryId;
+    // 发之前登记：pi 的 message_start 可能和回包同一批到，登记晚了就对不上、留下陈旧的一条
+    const entry = { text: textOf(p.prompt), ...(typeof id === "string" && id ? { id } : {}) };
+    g.steered.push(entry);
+    const r = await g.link.command({ type: "prompt", message: entry.text, streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS).catch((e) => {
+      g.steered = g.steered.filter((x) => x !== entry); // 没发进去（超时 / pi 报错）：不留着冒充排队的那条
+      throw e;
+    });
     this.stillLive(g);
     return { outcome: r?.disposition === "started" ? "startedNewTurn" : "injected" };
   }
@@ -314,17 +332,25 @@ export class PiAcpServer {
 
   /**
    * 叫停：先 clear_queue 再 abort——pi 的 abort 会接着跑还排着的消息，回合中 steer 进去的那几条会在「停」之后照跑。
-   * 清掉的正文交回宿主（_claudestra/cancel 的结果，宿主对回 message_id 填进回执的 voided）；abort 不等（它要等回合停稳才回）。
+   * 清掉的正文交回宿主（_claudestra/cancel 的结果）；clearedIds = 其中能对回宿主 deliveryId 的那几条，宿主按它填回执的 voided。
+   * 正文按先后对：排队里同正文的取最早发的那条（先发的先被消费，剩下的就是后发的）。abort 不等（它要等回合停稳才回）。
    * 只有真有回合（在跑 / 在等 / 正在提交）才记「被打断」，否则会错记到下一回合头上；pi 在跑才进叫停中。空闲时发 abort 也无害
    */
   private async cancel(p: Rec): Promise<Rec> {
     const g = this.gen;
-    if (!g || p?.sessionId !== g.sessionId) return { cleared: [] };
+    if (!g || p?.sessionId !== g.sessionId) return { cleared: [], clearedIds: [] };
     if (g.running || g.waiters.length || g.inflight) g.cancelRequested = true;
     if (g.running) g.stoppedAt = Date.now();
     const q = await g.link.command({ type: "clear_queue" }, CLEAR_QUEUE_TIMEOUT_MS).catch((e) => (this.deps.log(`clear_queue 失败（排队的消息可能在停之后照跑）：${errText(e)}`), null));
     if (g === this.gen) this.abortPi(g);
-    return { cleared: [...strings(q?.steering), ...strings(q?.followUp)] };
+    const cleared = [...strings(q?.steering), ...strings(q?.followUp)];
+    const left = g.steered;
+    g.steered = [];
+    const clearedIds = cleared.flatMap((t) => {
+      const i = left.findIndex((e) => e.text === t);
+      return i < 0 ? [] : (left.splice(i, 1)[0]!.id ?? []);
+    });
+    return { cleared, clearedIds };
   }
 
   private abortPi(g: Gen, why?: string): void {

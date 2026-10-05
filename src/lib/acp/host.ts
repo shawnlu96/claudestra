@@ -129,7 +129,7 @@ export class AcpHost {
         this.compactCommand = COMPACT_COMMAND.test(text);
         return s.prompt(text).finally(() => (this.compactCommand = false));
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
+      steer: (text, deliveryId) => (this.session?.steering ? this.session.steer(text, deliveryId).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       onSlotEnd: (e) => deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`),
