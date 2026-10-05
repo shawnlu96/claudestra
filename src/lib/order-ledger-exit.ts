@@ -9,8 +9,11 @@
  */
 import type { OrderToolResult, VerifiedCall } from "./order-tool-route.js";
 
-/** 注入：以 channelId 为 DISCORD_CHANNEL_ID 跑 manager，返回它的 JSON 结果（lib/run-manager.ts interpretManagerRun 的形状） */
-export type LedgerRun = (args: string[], channelId: string) => Promise<any>;
+/**
+ * 注入：以 channelId 为 DISCORD_CHANNEL_ID 跑 manager，返回它的 JSON 结果（lib/run-manager.ts interpretManagerRun 的形状）。
+ * env：只给这一次子进程追加的环境变量（MCP deliver 的来源记录，lib/order-local-deliver.ts ORDER_TOOL_ENV）；工具参数进不来。
+ */
+export type LedgerRun = (args: string[], channelId: string, env?: Record<string, string>) => Promise<any>;
 
 export type LedgerFlags = Record<string, string | undefined>;
 
@@ -35,9 +38,11 @@ export function ledgerArgs(sub: string, target: string, flags: LedgerFlags, dedu
 }
 
 /** 跑一次写命令；manager 的 {ok:false, code, error} 原样转成拒绝（code 缺省记 ledger） */
-export async function ledgerWrite(call: VerifiedCall, run: LedgerRun, sub: string, target: string, flags: LedgerFlags, dedup: string): Promise<OrderToolResult> {
+export async function ledgerWrite(
+  call: VerifiedCall, run: LedgerRun, sub: string, target: string, flags: LedgerFlags, dedup: string, env?: Record<string, string>,
+): Promise<OrderToolResult> {
   if (!call.channelId) return { ok: false, code: "identity_unverified", error: "没有调用方频道，不以 owner 身份写台账" };
-  const r = await run(ledgerArgs(sub, target, flags, dedup), call.channelId);
+  const r = await (env ? run(ledgerArgs(sub, target, flags, dedup), call.channelId, env) : run(ledgerArgs(sub, target, flags, dedup), call.channelId));
   if (r?.ok) return { ...(r as Record<string, unknown>), ok: true };
   return { ok: false, code: typeof r?.code === "string" ? r.code : "ledger", error: typeof r?.error === "string" ? r.error : "台账写入失败" };
 }

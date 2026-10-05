@@ -10,6 +10,7 @@ import { appendEvent } from "../lib/ledger-write.js";
 import { isLendCaller } from "../lib/lend-tools.js";
 import { askOrder } from "../lib/order-ask.js";
 import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
+import { ORDER_TOOL_ENV } from "../lib/order-local-deliver.js";
 import { findPrRows } from "../lib/order-deliver-pr.js";
 import type { LedgerRun } from "../lib/order-ledger-exit.js";
 import { markingTakes, recordTaken } from "../lib/order-mark.js";
@@ -30,8 +31,11 @@ import { reviewToolHandlers } from "./review-tools.js";
 import { sendLedgerNotice } from "./team-router.js";
 
 /** manager 以调用方频道为身份跑：actor 由 CLI 按 DISCORD_CHANNEL_ID 算（manager/ledger-identity.ts）。handler 经 lib/order-ledger-exit.ts ledgerWrite 用它 */
-const ledgerRun: LedgerRun = (args, channelId) =>
-  runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: { ...ENV_WITH_BUN, DISCORD_CHANNEL_ID: channelId }, timeoutMs: 30_000 });
+/** extra 只是这一次子进程的环境（MCP deliver 的来源记录）；基底里同名变量先删掉，bridge 自己的环境带不进去 */
+const ledgerRun: LedgerRun = (args, channelId, extra) => {
+  const { [ORDER_TOOL_ENV]: _inherited, ...base } = ENV_WITH_BUN as Record<string, string | undefined>;
+  return runManagerProcess(args, { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: { ...base, ...extra, DISCORD_CHANNEL_ID: channelId }, timeoutMs: 30_000 });
+};
 
 /** 调用方的工作目录（查 origin 用）：只按身份里的 agent 取 registry，大总管取 MASTER_DIR */
 const cwdOf = (agent: string): string | undefined => (agent === "master" ? MASTER_DIR : readRegistryAgentsSync().find((a) => a.name === agent)?.cwd);

@@ -13,7 +13,6 @@ import {
   appendEvent,
   createItem,
   createTask,
-  deliver,
   moveStage,
   recordReview,
   setFrozen,
@@ -29,7 +28,8 @@ import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
 import { witnessMismatch } from "../lib/caller-witness.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
-import { grantResume } from "../lib/ledger-autostart-resume.js";
+import { deliverWithSource, grantResume } from "../lib/ledger-autostart-resume.js";
+import { ORDER_TOOL_ENV, orderToolCall } from "../lib/order-local-deliver.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -238,7 +238,10 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   checkTaskRefs({ head: c.p.flags.head });
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
-  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom, pr: c.p.flags.pr, expect, disputes: c.p.flags.disputes });
+  // bridge 核过当前单 / 会话 / origin / PR 后经子进程环境交来的来源（不是参数）；对不上就拒，没有 = 普通交付，不能触发授予的自动交回
+  const via = orderToolCall(process.env[ORDER_TOOL_ENV], { dedup: c.p.flags.dedup, head: c.p.flags.head, actor: c.deps.actor, agent: task.agent });
+  const f = c.p.flags;
+  const r = deliverWithSource(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes }, via);
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };

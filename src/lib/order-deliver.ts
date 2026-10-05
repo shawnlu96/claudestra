@@ -10,6 +10,8 @@
  *    （换分支、PM 收回等）就抛 conflict，台账不动；阶段与执行者 CLI 也会再核一次。
  * 6. 远端 head 核对过后查这个分支的 open PR（lib/order-deliver-pr.ts）：0 个 / 多个 / 跨仓 / base 不是 main / head 不一致 / gh 失败都拒，不写；
  *    通过的 URL 以 --pr 交给 CLI，在同一事务里写进空的或非完整的 task.pr；卡上已是另一个完整 URL 就拒（PR 换了要 PM 处理）。
+ * 7. 通过上面全部核对的这次写，带上来源记录（ORDER_TOOL_ENV：单号 / head / 已验证的会话，只经子进程环境、不是参数）：
+ *    CLI 在交付的同一事务里记一条 order_tool_deliver，PM 一次性授予的自动交回只认它（lib/order-local-deliver.ts）；裸 CLI 带同一个 dedup 也没有。
  * 回执只由单号与交付事件决定（阶段固定是交付推到的 review），重试每次一样，不随卡后来的阶段变。
  */
 import type { Database } from "bun:sqlite";
@@ -21,6 +23,7 @@ import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-ro
 import { parseDeliverWire } from "./order-wire.js";
 import { deliveredScope } from "./order-deliver-scope.js";
 import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
+import { orderToolEnv } from "./order-local-deliver.js";
 import type { BoundedResult } from "./run-bounded.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -92,7 +95,7 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   if (!pr.ok) return refuse(pr.code, pr.error);
   if (prConflict(cur.task.pr, pr.url)) return refuse("pr_mismatch", `台账里 ${cur.task.id} 的 PR 是 ${cur.task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
   const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url, ...(disputes ? { disputes: JSON.stringify(disputes) } : {}) };
-  const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
+  const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key, orderToolEnv({ orderId, head, session: call.sessionId }));
   if (!r.ok) return r;
   await deliveredScope(deps.db, cur.task.id, head); // 规格外文件登记：异步、不抛，失败只记事件（order-deliver-scope.ts）
   return withMemoryRefs(receipt(r.duplicate === true, orderId, cur.task.id, (r.event as { seq?: number } | undefined)?.seq ?? null), call, deps.run, orderId, head, memoryRefs);

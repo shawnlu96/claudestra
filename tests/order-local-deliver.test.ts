@@ -1,7 +1,8 @@
 /**
  * dispatch-recovery-DEL：真 PM 一次性授予 → 执行者本人经正式单（MCP deliverOrder）交新 head → 调度 tick 交回 auto，恰好一次。
  * 写入都走进程内的真实 ledger CLI（runLedger）；交付走真实 deliverOrder（origin / PR 查询注入）；tick 是真实 autoResumeTick。
- * 反例：缺 port / observe / off、过期、hold、PM 代交、CLI 交付、换会话、head 未变或 origin 不符、blocker ask、未结意图 / 出借单、非真 PM 授予。
+ * 反例：缺 port / observe / off、过期、hold、PM 代交、CLI 交付、换会话、head 未变或 origin 不符、blocker ask、未结意图 / 出借单、非真 PM 授予；
+ * 裸 CLI 自带 mcp-deliver dedup（审查 P1 DEL-mcp-source-spoof）与来源记录对不上 / 会话不符。
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -12,7 +13,7 @@ import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-
 import { setMeta } from "../src/lib/ledger-write.js";
 import { deliverOrder } from "../src/lib/order-deliver.js";
 import type { LedgerRun } from "../src/lib/order-ledger-exit.js";
-import { localDeliveryPolicy, type LocalDeliveryPolicyPort, type RecoveryPolicy } from "../src/lib/order-local-deliver.js";
+import { localDeliveryPolicy, ORDER_TOOL_ENV, ORDER_TOOL_OP, type LocalDeliveryPolicyPort, type RecoveryPolicy } from "../src/lib/order-local-deliver.js";
 import { currentOrders } from "../src/lib/order-take.js";
 import type { VerifiedCall } from "../src/lib/order-tool-route.js";
 import { autoResumeTick, resumeVerdict, type ResumeTickEnv } from "../src/lib/scheduler-autostart-resume.js";
@@ -34,7 +35,16 @@ const ledger = (actor: string, ...args: string[]) => {
     autoDispatch: () => svc.autoDispatch, autoProjects: () => [...svc.projects],
   }) as Promise<Record<string, any>>;
 };
-const viaCli: LedgerRun = (args, ch) => ledger(channels[ch] ?? "unknown", ...args.slice(1));
+/** 带环境跑一次进程内 CLI（bridge 的 ledgerRun 只给子进程加环境，这里临时设上、跑完还原） */
+async function withEnv<T>(extra: Record<string, string> | undefined, fn: () => Promise<T>): Promise<T> {
+  const was = process.env[ORDER_TOOL_ENV];
+  if (extra?.[ORDER_TOOL_ENV] !== undefined) process.env[ORDER_TOOL_ENV] = extra[ORDER_TOOL_ENV];
+  try { return await fn(); } finally { if (was === undefined) delete process.env[ORDER_TOOL_ENV]; else process.env[ORDER_TOOL_ENV] = was; }
+}
+const viaCli: LedgerRun = (args, ch, extra) => withEnv(extra, () => ledger(channels[ch] ?? "unknown", ...args.slice(1)));
+const sources = () => listEvents(db, { target: T }).filter((e) => e.data.op === ORDER_TOOL_OP);
+const forged = (session: string, o: Partial<{ orderId: string; head: string }> = {}) =>
+  ({ [ORDER_TOOL_ENV]: JSON.stringify({ tool: "deliver", orderId: o.orderId ?? INTENT, head: o.head ?? NEW, session }) });
 const me: VerifiedCall = { agent: DEV, sessionId: "s1", family: "claude-code", channelId: "c-dev" };
 const policy: LocalDeliveryPolicyPort = () => (mode ? { mode, manualAfterMs: null } : (undefined as never));
 
@@ -273,6 +283,55 @@ describe("不交回", () => {
     const r = await ledger(PM, "deliver", T, "--from", "build", "--head", NEW, `--dedup=mcp-deliver:${INTENT}:${NEW}`);
     expect(r).toMatchObject({ ok: false, code: "forbidden" });
     expect(card().stage).toBe("build");
+  });
+
+  // 审查 P1 DEL-mcp-source-spoof：dedup 只是幂等键；不经 deliverOrder 的裸 CLI 带同一个键，交付照常但不交回
+  test("probe: raw CLI forged MCP dedup from unverified session resumes", async () => {
+    await grant();
+    const r = await ledger(DEV, "deliver", T, "--from", "build", "--head", NEW, "--dedup", `mcp-deliver:${INTENT}:${NEW}`);
+    expect(r).toMatchObject({ ok: true });
+    expect(card()).toMatchObject({ stage: "review", headSHA: NEW });
+    expect(sources()).toEqual([]);
+    expect(resumeVerdict(db, card(), wf(), now)).toMatchObject({ ok: false, why: expect.stringContaining("MCP 来源") });
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+    expect(resumes()).toEqual([]);
+    // 之后真 MCP 同单号同 head 重试只回放第一次（裸 CLI 那条），补不上来源，仍不交回
+    expect(await mcpDeliver()).toMatchObject({ ok: true, duplicate: true });
+    expect(sources()).toEqual([]);
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+  });
+
+  test("MCP 交付在同一事务记一条来源（单号 / head / 已验证会话 / 交付 seq）；重放不另记", async () => {
+    await grant();
+    const r = (await mcpDeliver()) as { eventSeq?: number };
+    const [src] = sources();
+    expect(src).toMatchObject({ actor: DEV, data: { deliverSeq: r.eventSeq, call: { tool: "deliver", orderId: INTENT, head: NEW, session: "s1" } } });
+    await mcpDeliver();
+    expect(sources()).toHaveLength(1);
+  });
+
+  test("来源会话不是授予绑定的会话 → 不交回", async () => {
+    await grant();
+    const r = await viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW, `--dedup=mcp-deliver:${INTENT}:${NEW}`], "c-dev", forged("s9"));
+    expect(r).toMatchObject({ ok: true });
+    expect(resumeVerdict(db, card(), wf(), now)).toMatchObject({ ok: false, why: expect.stringContaining("会话") });
+    await autoResumeTick(env());
+    expect(wf().mode).toBe("manual");
+  });
+
+  test("来源记录与 dedup / head / 执行者对不上 → forbidden，台账不动", async () => {
+    await grant();
+    const key = `--dedup=mcp-deliver:${INTENT}:${NEW}`;
+    const run = (actorCh: string, extra: Record<string, string>, dedup = key) => viaCli(["ledger", "deliver", T, "--from", "build", "--head", NEW, dedup], actorCh, extra);
+    expect(await run("c-dev", forged("s1", { head: NEW2 }))).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("c-dev", forged("s1", { orderId: "other" }))).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("c-dev", forged("s1"), "--dedup=x1")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("c-dev", { [ORDER_TOOL_ENV]: "{" })).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await run("c-lead", forged("s1"))).toMatchObject({ ok: false, code: "forbidden" });
+    expect(card().stage).toBe("build");
+    expect(sources()).toEqual([]);
   });
 
   test("别人用这张单号交付 → not_current_order，台账不动", async () => {

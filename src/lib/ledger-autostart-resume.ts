@@ -14,7 +14,10 @@ import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { ServiceFacts } from "./scheduler-autostart.js";
-import { grantFacts, grantOf, localDeliveryPolicy, RESUME_GRANT_OP, type GrantInput, type LocalDeliveryPolicyPort, type ResumeGrant } from "./order-local-deliver.js";
+import { deliver } from "./ledger-write.js";
+import {
+  grantFacts, grantOf, localDeliveryPolicy, ORDER_TOOL_OP, RESUME_GRANT_OP, type GrantInput, type LocalDeliveryPolicyPort, type OrderToolCall, type ResumeGrant,
+} from "./order-local-deliver.js";
 import { resumeVerdict, serviceBlock } from "./scheduler-autostart-resume.js";
 
 export interface AutoResumeInput {
@@ -77,5 +80,22 @@ export function grantResume(db: Database, ctx: WriteCtx, input: GrantInput): { e
       data: { op: RESUME_GRANT_OP, reason, taskRev: task.rev, workflowRev: (wf as TaskWorkflow).rev, resumeGrant: g },
     }, true);
     return { event, grant: g, duplicate: false };
+  });
+}
+
+/**
+ * `ledger deliver`：带 bridge 来源记录（MCP deliver，order-local-deliver.ts orderToolCall 已核过）时，交付与 order_tool_deliver 同一事务写下；
+ * 重放（同 dedup）原样返回、不补记——第一次没记的（裸 CLI 先交）之后也补不上。没有来源 = 原样的 deliver。
+ */
+export function deliverWithSource(db: Database, ctx: WriteCtx, input: Parameters<typeof deliver>[2], via: OrderToolCall | null): ReturnType<typeof deliver> {
+  if (!via) return deliver(db, ctx, input);
+  return tx(db, () => {
+    const r = deliver(db, ctx, input);
+    if (r.duplicate) return r;
+    insertEvent(db, ctx, {
+      project: r.row.project, target: r.row.id, kind: "scheduler", text: `经派单工具交付 ${via.orderId}`,
+      data: { op: ORDER_TOOL_OP, deliverSeq: r.event.seq, call: via },
+    }, false);
+    return r;
   });
 }
