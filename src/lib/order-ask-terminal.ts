@@ -6,7 +6,8 @@
  * 不当作 answered、不按默认批准；已不是 open 的跳过，同一条只关一次。
  * 结清点在各自事务里改完 lend_orders 状态后调 closeSettledOrderAsks（ledger-lend.ts / ledger-lend-result.ts / lend-arbiter-result.ts /
  * lend-pr-takeover-ledger.ts / lend-reclaim-scheduler.ts）；新问在 asks 写锁内用 assertOrderTakesAsks 复核单子没结清（order-ask.ts）；
- * 历史回收走 `ledger lend-terminal-asks`（manager/ledger-lend-ask-cmd.ts，先 dry-run，--apply 在写锁内按同一套核对重来）。
+ * 历史回收走 `ledger lend-terminal-asks`（manager/ledger-lend-ask-cmd.ts，PM 或调度服务；先 dry-run，--apply 在写锁内重核身份 / 租约与同一套核对）。
+ * 关闭提交后 bridge ledger feed 轮询读事件发 ask SSE（settledAskClosuresSince，bridge/ledger-feed.ts）。
  * tests/ledger-lend-terminal-asks{,-paths}.test.ts、tests/order-ask.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -98,7 +99,7 @@ export function planSettledAskSweep(db: Database, project: string): AskSweepPlan
 
 /**
  * --apply：拿写锁（BEGIN IMMEDIATE，同 ledger-asks 的 tx）后按同一套核对重算再关，预览之后变了的以此刻为准；
- * beforeWrite 在拿到锁之后、写入之前调（调度身份核租约），抛了就一条都不关
+ * beforeWrite 在拿到锁之后、写入之前调（调用方重核身份 / 租约），抛了就一条都不关
  */
 export function applySettledAskSweep(db: Database, project: string, now: number, by: string, opts: { beforeWrite?: () => void } = {}):
   AskSweepPlan & { closed: string[] } {
@@ -112,3 +113,29 @@ export function applySettledAskSweep(db: Database, project: string, now: number,
     return { ...plan, closed };
   }).immediate());
 }
+
+/** 随出借单结清关掉的一条 ask，给 bridge 发 ask SSE（project…chatId 与 bridge/asks.ts publishAsk 同形；seq = 那条 ask_cancel 事件，给游标逐条推进） */
+export interface SettledAskClosure { seq: number; project: string; askId: string; state: string; fromAgent: string | null; assignee: string | null; chatId: string }
+
+const maxSeq = (db: Database, where = "", ...args: number[]): number =>
+  (db.query(`SELECT COALESCE(MAX(seq), 0) AS m FROM events ${where}`).get(...args) as { m: number }).m;
+
+/**
+ * bridge ledger feed 的轮询读（bridge/ledger-feed.ts）：seq 之后**已提交**的「随出借单结清关闭」事件（ask_cancel 且带 extra.settledOrder）。
+ * 结清点多在 CLI / 调度进程里，调不到 bridge 的 publishAsk；读已提交的事件 = 回滚的不会发。lastSeq = 读时库里最大 seq（没有可发的也推进到这）。
+ */
+export function settledAskClosuresSince(db: Database, afterSeq: number): { lastSeq: number; closures: SettledAskClosure[] } {
+  const lastSeq = maxSeq(db);
+  if (lastSeq <= afterSeq) return { lastSeq, closures: [] };
+  if (!hasAsksTable(db)) return { lastSeq: afterSeq, closures: [] }; // 这拍读不到 asks：游标不动，下拍再读
+  const rows = db.query(`SELECT seq, json_extract(data, '$.askId') AS askId FROM events WHERE seq > ? AND seq <= ? AND kind = 'ask_cancel'
+    AND json_extract(data, '$.extra.settledOrder') IS NOT NULL ORDER BY seq`).all(afterSeq, lastSeq) as { seq: number; askId: string | null }[];
+  const closures = rows.flatMap((r) => {
+    const a = r.askId ? getAsk(db, r.askId) : null;
+    return a ? [{ seq: r.seq, project: a.project, askId: a.id, state: a.state, fromAgent: a.fromAgent, assignee: a.assignee, chatId: a.chatId || a.fromChannelId || "" }] : [];
+  });
+  return { lastSeq, closures };
+}
+
+/** 换了库文件（恢复备份 / 换盘）时的游标：上次读成功那一刻之前写的事件当历史不补发，之后提交的照发 */
+export const settledAskSeqBefore = (db: Database, ts: number): number => maxSeq(db, "WHERE ts < ?", ts);

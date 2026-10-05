@@ -3,19 +3,22 @@
  * claimed / unknown、别的单 / 别的 peer / owner 审批 / 本机提问不动；结清后新问被拒；事务回滚只关一次；历史回收 lend-terminal-asks 先预览后 apply。
  * 全部跑临时文件 SQLite，出借状态经 `ledger lend-*` CLI（runLedger），提问经 openOrderAsk（远端 lend/ask 同一入口）开。
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { setLedgerFeedForTest } from "../src/bridge/ledger-feed.js";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { getAsk, openAsk, openAskFull, type Ask } from "../src/lib/ledger-asks.js";
+import { closeAsk, getAsk, openAsk, openAskFull, type Ask } from "../src/lib/ledger-asks.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { RemoteHead } from "../src/lib/order-deliver.js";
+import type { SettledAskClosure } from "../src/lib/order-ask-terminal.js";
+import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
 import { openOrderAsk } from "../src/lib/order-ask.js";
 import { runLedger } from "../src/manager/ledger.js";
 
@@ -36,8 +39,9 @@ let remote: Record<string, RemoteHead>;
 const dir = mkdtempSync(join(tmpdir(), "lend-askt-test-"));
 const key = instanceKeySync(dir);
 
-const deps = (actor: string) => ({
-  db, actor, projectIds: [P, "other-proj"], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {}, now: () => now,
+const deps = (actor: string, extra: { now?: () => number; assertLease?: () => void } = {}) => ({
+  db, actor, assertLease: extra.assertLease, projectIds: [P, "other-proj"], loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {},
+  now: extra.now ?? (() => now),
   lend: {
     borrow: async () => borrow,
     notifyPm: async () => {},
@@ -283,5 +287,105 @@ describe("历史回收 ledger lend-terminal-asks", () => {
     expect((await run(["lend-terminal-asks", "--project", P, "--apply"])).closed).toEqual([]);
     expect(cancels()).toBe(n);
     expect((getAsk(db, ids.done) as Ask).state).toBe("answered");
+  });
+});
+
+describe("历史回收的身份：调度服务入口、写锁内重核 PM", () => {
+  test("调度服务能预览 / apply（入口与写锁内都核租约）；锁内失租一条不关", async () => {
+    const { orderId } = await offer();
+    await claim(orderId);
+    const q = await askId(orderId);
+    db.run("UPDATE lend_orders SET status = 'done' WHERE orderId = ?", [orderId]);
+    let leaseCalls = 0;
+    const sched = (args: string[], lostAfter = Infinity) => runLedger(args, deps("scheduler", {
+      assertLease: () => { if (++leaseCalls > lostAfter) throw new SchedulerLeaseLost("lost"); },
+    })) as Promise<Record<string, any>>;
+    const dry = await sched(["lend-terminal-asks", "--project", P]);
+    expect(dry).toMatchObject({ ok: true, apply: false, closable: [{ askId: q, orderId, status: "done" }] });
+    leaseCalls = 0;
+    expect(await sched(["lend-terminal-asks", "--project", P, "--apply"], 2)).toMatchObject({ ok: false, code: "lease-lost" }); // 入口 + 命令内两次通过，写锁内第三次失租
+    expect(leaseCalls).toBe(3);
+    expect(state(q)).toBe("open");
+    expect(cancels()).toBe(0);
+    leaseCalls = 0;
+    const r = await sched(["lend-terminal-asks", "--project", P, "--apply"]);
+    expect(r).toMatchObject({ ok: true, apply: true, closed: [q] });
+    expect(getAsk(db, q)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "scheduler" });
+    // 调度服务身份照旧只能跑调度专用命令
+    expect(await sched(["lend-cancel", "T9", "--reason", "x"])).toMatchObject({ ok: false, code: "forbidden" });
+  });
+
+  test("PM 在核过权限之后、拿写锁之前被撤（另一条连接提交）：apply 在锁内重核拒掉，一条不关", async () => {
+    const { orderId } = await offer();
+    await claim(orderId);
+    const q = await askId(orderId);
+    db.run("UPDATE lend_orders SET status = 'done' WHERE orderId = ?", [orderId]);
+    const other = new Database(path);
+    other.exec("PRAGMA busy_timeout = 5000");
+    let revoked = false;
+    // deps.now 在命令里核完 isManager 之后、applySettledAskSweep 申请 BEGIN IMMEDIATE 之前调（与审查复现同一个时点）
+    const revokeOnce = () => {
+      if (!revoked) {
+        revoked = true;
+        setMeta(other, { actor: "owner", now }, { project: P, key: "pms", value: ["agent-pm2"] });
+      }
+      return now;
+    };
+    try {
+      const r = await runLedger(["lend-terminal-asks", "--project", P, "--apply"], deps("agent-pm", { now: revokeOnce })) as Record<string, any>;
+      expect(revoked).toBe(true);
+      expect(r).toMatchObject({ ok: false, code: "forbidden" });
+      expect(state(q)).toBe("open");
+      expect(cancels()).toBe(0);
+      expect((await run(["lend-terminal-asks", "--project", P, "--apply"], "agent-pm2")).closed).toEqual([q]);
+    } finally {
+      other.close();
+    }
+  });
+});
+
+describe("结清关问提交后发 ask SSE（bridge ledger feed 读已提交事件）", () => {
+  test("自动结清与历史 apply 都发 ask cancelled；回滚不发；别的关闭不发；首轮只取基线", async () => {
+    const got: SettledAskClosure[] = [];
+    const tick = setLedgerFeedForTest({ path, emit: () => {}, emitAsk: (c) => got.push(c) })!;
+    try {
+      const { orderId } = await offer();
+      await claim(orderId);
+      const q = await askId(orderId);
+      const old = openAsk(db, { project: P, taskId: "T9", source: "reply", kind: "decide", title: "x", fromAgent: `${W(1)}@mate`, extra: { via: "mcp_ask", orderId: "lend:T9:old" } }, now).id;
+      closeAsk(db, old, "cancelled", "别的原因"); // 不是随单结清的关闭
+      tick(); // 基线：之前的事件不补发
+      expect(got).toEqual([]);
+
+      remote[BR] = { ok: true, head: H2 };
+      db.run("CREATE TRIGGER fail_cancel BEFORE INSERT ON events WHEN NEW.kind = 'ask_cancel' BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+      expect((await call("write", delivery(orderId))).ok).toBe(false);
+      db.run("DROP TRIGGER fail_cancel");
+      tick();
+      expect(got).toEqual([]); // 回滚：没有已提交的关闭，不发
+
+      const by = bystanders(orderId);
+      closeAsk(db, by.local, "cancelled", "本机问别的原因关");
+      expect((await call("write", delivery(orderId))).ok).toBe(true);
+      tick();
+      expect(got).toEqual([{ seq: expect.any(Number), project: P, askId: q, state: "cancelled", fromAgent: `${W(1)}@mate`, assignee: "agent-pm", chatId: "" }]); // worker 的问指给 PM
+      tick();
+      expect(got).toHaveLength(1); // 同一条只发一次
+      expect((await call("write", delivery(orderId))).ok).toBe(true); // 幂等重发：不再关、不再发
+      tick();
+      expect(got).toHaveLength(1);
+
+      card("T10"); const b = await offer("T10"); await claim(b.orderId, W(2));
+      const q2 = await askId(b.orderId, W(2));
+      db.run("UPDATE lend_orders SET status = 'cancelled' WHERE orderId = ?", [b.orderId]);
+      tick();
+      expect(got).toHaveLength(1);
+      expect((await run(["lend-terminal-asks", "--project", P, "--apply"])).closed).toEqual([q2]);
+      tick();
+      expect(got.map((c) => c.askId)).toEqual([q, q2]);
+      expect(JSON.stringify(got)).not.toContain(SECRET_Q);
+    } finally {
+      setLedgerFeedForTest(undefined);
+    }
   });
 });
