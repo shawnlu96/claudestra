@@ -33,6 +33,7 @@ import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
 import { specResumeStep } from "./scheduler-spec-resume-deps.js";
+import { lifecycleStep } from "./agent-lifecycle-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -64,6 +65,7 @@ export interface PassOpts {
   /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
   autostart?: (active: Active, manager: Manager) => AutostartHooks;
   retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
+  lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -143,6 +145,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
       // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
       failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
+      failed.push(...(await (opts.lifecycle ?? lifecycleStep)(db, config, manager, active, held))); // 收尾之后：PM 工具 / 手动建的 worker 按生命周期收（LIFE1）
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
     return { ran: true, failed };

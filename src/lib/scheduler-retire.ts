@@ -105,7 +105,7 @@ function agentStillInUse(db: Database, agent: string, taskId: string): string | 
 }
 
 /** dir itself or a path inside it, both resolved through symlinks (macOS tmp dirs live behind /private). */
-function within(path: string, dir: string): boolean {
+export function within(path: string, dir: string): boolean {
   const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); /* gone or unreadable: compare as written */ } };
   const p = real(path), d = real(dir);
   return p === d || p.startsWith(d + sep);
@@ -116,6 +116,26 @@ export function worktreeDirs(root: string, taskId: string): string[] {
   const low = taskId.toLowerCase();
   if (!/^[\w.-]+$/.test(low) || /^\.+$/.test(low)) return []; // never build a path from a name that could leave the root
   return [join(root, low), join(root, `rv-${low}`)];
+}
+
+/**
+ * Remove one linked worktree if it is clean and no running agent works in it: null = removed or not there; otherwise why it stays
+ * (with porcelain lines when dirty). Shared with the worker lifecycle (agent-lifecycle-run.ts). Never --force, never rm.
+ */
+export async function removeCleanWorktree(deps: Pick<RetireDeps, "git" | "exists">, dir: string, agents: LiveAgent[]): Promise<string | null> {
+  if (!deps.exists(dir)) return null;
+  const holder = agents.find((a) => !stopped(a) && a.cwd && within(a.cwd, dir));
+  if (holder) return `${holder.name} 还在这里工作（agent 没停）`;
+  const g = (...args: string[]) => deps.git(["-C", dir, ...args]);
+  const where = await g("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir");
+  const [gitDir, common] = where.out.split("\n");
+  if (where.code !== 0 || !gitDir || !common) return `读不出是不是 git worktree：${where.out}`;
+  if (gitDir === common) return "是主仓库而不是 linked worktree，不碰";
+  const st = await g("status", "--porcelain");
+  if (st.code !== 0) return `读不了工作区状态：${st.out}`;
+  if (st.out) return `有未提交改动：${st.out.split("\n").slice(0, 5).join("; ")}`;
+  const rm = await g("worktree", "remove", dir);
+  return rm.code === 0 ? null : `git worktree remove 失败：${rm.out}`;
 }
 
 export const archiveReceipt = (r: Record<string, unknown>): string => {
@@ -191,22 +211,7 @@ class RetireCard {
     return null;
   }
 
-  /** null = removed or not there; otherwise why the checkout stays (with porcelain lines when dirty). */
-  async worktree(dir: string, agents: Awaited<ReturnType<RetireDeps["agents"]>>): Promise<string | null> {
-    if (!this.deps.exists(dir)) return null;
-    const holder = agents.find((a) => !stopped(a) && a.cwd && within(a.cwd, dir));
-    if (holder) return `${holder.name} 还在这里工作（agent 没停）`;
-    const g = (...args: string[]) => this.deps.git(["-C", dir, ...args]);
-    const where = await g("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir");
-    const [gitDir, common] = where.out.split("\n");
-    if (where.code !== 0 || !gitDir || !common) return `读不出是不是 git worktree：${where.out}`;
-    if (gitDir === common) return "是主仓库而不是 linked worktree，不碰";
-    const st = await g("status", "--porcelain");
-    if (st.code !== 0) return `读不了工作区状态：${st.out}`;
-    if (st.out) return `有未提交改动：${st.out.split("\n").slice(0, 5).join("; ")}`;
-    const rm = await g("worktree", "remove", dir);
-    return rm.code === 0 ? null : `git worktree remove 失败：${rm.out}`;
-  }
+  worktree(dir: string, agents: LiveAgent[]): Promise<string | null> { return removeCleanWorktree(this.deps, dir, agents); }
 
   owe(outcome: RetireOutcome, to: Owed["to"], receipt: string, notice: string): Owed {
     return { outcome, task: this.task, intentId: this.intent.id, to, receipt, notice: oneLine(notice) };

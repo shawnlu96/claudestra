@@ -59,8 +59,28 @@ export function checkSchedulerPool(reader = new LedgerReader()): Check[] {
   } finally { reader.close(); }
 }
 
+/** 卡 worker 生命周期（LIFE1）：活 N / 应收 M / swap x%，与调度器每轮算的是同一份计划；应收不为 0 且开关不是 on 时报 warn */
+export async function checkWorkerLifecycle(reader = new LedgerReader()): Promise<Check[]> {
+  const base = { group: "launchd daemon", name: "worker 生命周期" };
+  try {
+    const db = reader.get();
+    if (!db) return [{ ...base, status: "ok", detail: "还没有台账" }];
+    let policy;
+    try { policy = readSchedulerConfig().lifecycle; } catch { policy = undefined; /* bad config is reported by 调度引擎配置; plan with defaults */ }
+    const { lifecycleSnapshot } = await import("./agent-lifecycle-deps.js");
+    const { lifecycleLine } = await import("./agent-lifecycle.js");
+    const plan = await lifecycleSnapshot(db, policy);
+    const mode = policy?.mode ?? "observe";
+    const warn = (plan.actions.length > 0 && mode !== "on") || plan.memory.length > 0;
+    return [{ ...base, status: warn ? "warn" : "ok", detail: lifecycleLine(plan, mode),
+      ...(warn ? { fix: "核对 scheduler 日志里的 [lifecycle] 清单后，在 scheduler.json 设 lifecycle: \"on\"" } : {}) }];
+  } catch (e) {
+    return [{ ...base, status: "warn", detail: `算不出：${(e as Error).message}` }];
+  } finally { reader.close(); }
+}
+
 /** 出借循环也跑在 scheduler 服务里（设计稿 remote-capacity §2.3），出借声明一行跟着这里出 */
 export async function checkScheduler(): Promise<Check[]> {
   const { checkLend, checkLendLoop } = await import("./doctor-lend.js");
-  return [...checkSchedulerConfig(), ...checkSchedulerJournal(), ...checkSchedulerPool(), ...await checkLend(), ...await checkLendLoop()];
+  return [...checkSchedulerConfig(), ...checkSchedulerJournal(), ...checkSchedulerPool(), ...await checkWorkerLifecycle(), ...await checkLend(), ...await checkLendLoop()];
 }

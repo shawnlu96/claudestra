@@ -198,7 +198,8 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
       run: async () => {
         if (io.agentExists(p.agent)) return `agent ${p.agent} 已存在（预检之后才出现，不是这次建的）`;
         mine = true;
-        return failed(await io.manager(["create", p.agentName, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS));
+        return failed(await io.manager(["create", p.agentName, p.worktree, "--purpose", p.purpose, "--task", p.taskId,
+          "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS));
       },
       // create 超时可能已建好：registry 里有、且是本次 create 之前没有的，才 kill
       undo: async () => (mine && io.agentExists(p.agent) ? failed(await io.manager(["kill", p.agent])) : null),
