@@ -1,6 +1,7 @@
 /**
- * cloud-PP3 纯地址谓词：isPrivateAddr / isTailscaleAddr 搬进无 import 的叶子 address-predicates.ts，
- * 中心 artifacts/urls.ts 只依赖它，不再经 net-addr 把网卡查询 / tailscale CLI（动态 import）带进闭包。
+ * cloud-PP3 纯地址谓词：isPrivateAddr / isTailscaleAddr / isLoopbackAddress 搬进无 import 的叶子 address-predicates.ts，
+ * 中心 artifacts/urls.ts 只依赖它，不再经 net-addr / same-host 把网卡查询（node:os）/ tailscale CLI（动态 import）带进闭包。
+ * collectEdges 只给仓库内边，builtin / 包导入另行逐文件扫：闭包里非相对导入只许白名单（纯计算的 node:crypto）。
  * 图用 guard 的真实 import 边（scripts/guard/rules/deps.ts collectEdges，含 type-only 与动态 import）；
  * 同一规则在把 urls 改回旧 import 的合成图上判红，证明扫描器认得出；新旧谓词在固定语料上逐项相同；旧 import 路径仍可用。
  */
@@ -11,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { collectEdges, type Edge } from "../scripts/guard/rules/deps.js";
 import * as pure from "../src/lib/address-predicates.js";
 import * as legacy from "../src/lib/net-addr.js";
+import * as legacyHost from "../src/lib/same-host.js";
 import { withoutPublicWebLinks } from "../src/shared-ledger/artifacts/urls.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -18,7 +20,7 @@ const ROOT = resolve(import.meta.dir, "..");
 const ENTRY = "src/lib/address-predicates.ts";
 const URLS = "src/shared-ledger/artifacts/urls.ts";
 /** 网卡查询 / tailscale CLI / 本机状态 / 配置 / 中心 / bridge：纯谓词与中心 URL 规则的闭包里一个都不许有 */
-const FORBIDDEN_LIB = "net-addr|tailscale|paths|state-dir|registry|config-store|ledger-store|shared-ledger-client|shared-ledger-mode|bridge-[\\w-]+";
+const FORBIDDEN_LIB = "net-addr|same-host|tailscale|paths|state-dir|registry|config-store|ledger-store|shared-ledger-client|shared-ledger-mode|bridge-[\\w-]+";
 const FORBIDDEN = new RegExp(`^src/(?:lib/(?:${FORBIDDEN_LIB})\\.ts|(?:bridge|manager)\\.ts|(?:bridge|manager)/)`);
 
 function loadSrc(): Map<string, string> {
@@ -43,6 +45,17 @@ function closure(edges: Edge[], entry: string): Set<string> {
 }
 const violations = (edges: Edge[], entry: string): string[] => [...closure(edges, entry)].filter((f) => FORBIDDEN.test(f)).sort();
 
+/** 闭包里允许的非相对导入：只有纯计算、不碰本机环境的 builtin */
+const ALLOWED_EXTERNAL = new Set(["node:crypto"]);
+const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g;
+function externalEdges(files: Map<string, string>, edges: Edge[], entry: string): string[] {
+  const out: string[] = [];
+  for (const f of closure(edges, entry)) {
+    for (const m of (files.get(f) ?? "").matchAll(SPECIFIER)) if (!m[1]!.startsWith(".") && !ALLOWED_EXTERNAL.has(m[1]!)) out.push(`${f} -> ${m[1]}`);
+  }
+  return out.sort();
+}
+
 const FILES = loadSrc();
 const EDGES = collectEdges(FILES);
 
@@ -53,9 +66,14 @@ describe("import 图边界（runtime + type 闭包）", () => {
     expect(src.match(/^\s*(?:import|export)\b[^\n]*\bfrom\b|\bimport\(|\brequire\(|\bprocess\.|\bBun\./gm)).toBeNull();
   });
 
-  test("中心 urls.ts 闭包不再含 net-addr / tailscale / 本机状态", () => {
+  test("中心 urls.ts 闭包不再含 net-addr / same-host / tailscale / 本机状态", () => {
     expect(closure(EDGES, URLS).has(ENTRY)).toBe(true);
     expect(violations(EDGES, URLS)).toEqual([]);
+  });
+
+  test("中心 urls.ts 闭包里没有本机环境 builtin 边（node:os / child_process / fs 等）", () => {
+    expect(externalEdges(FILES, EDGES, URLS)).toEqual([]);
+    expect(externalEdges(FILES, EDGES, ENTRY)).toEqual([]);
   });
 
   test("规则不是摆设：旧 net-addr 闭包含 tailscale；把 urls 改回旧 import，同一规则立刻判红", () => {
@@ -63,6 +81,14 @@ describe("import 图边界（runtime + type 闭包）", () => {
     const files = new Map(FILES);
     files.set(URLS, FILES.get(URLS)!.replace('"../../lib/address-predicates.js"', '"../../lib/net-addr.js"'));
     expect(violations(collectEdges(files), URLS)).toEqual(expect.arrayContaining(["src/lib/net-addr.ts", "src/lib/tailscale.ts"]));
+  });
+
+  test("规则不是摆设：把 urls 的环回谓词改回 same-host，禁用列表与 builtin 边检查都判红", () => {
+    const files = new Map(FILES);
+    files.set(URLS, `import { isLoopbackAddress as _legacyLoopback } from "../../lib/same-host.js";\n${FILES.get(URLS)!}`);
+    const edges = collectEdges(files);
+    expect(violations(edges, URLS)).toEqual(["src/lib/same-host.ts"]);
+    expect(externalEdges(files, edges, URLS)).toEqual(["src/lib/same-host.ts -> node:os"]);
   });
 });
 
@@ -80,6 +106,24 @@ describe("行为不变", () => {
     "169.254.1.1", "::1", "::ffff:192.168.1.1", "fc00::1", "", " 10.0.0.1", "10.0.0.1 ", "peer-a.local", "localhost",
   ];
 
+  // 搬移前 same-host.ts 里的原环回算法
+  const oldLoopback = (addr: string | null | undefined): boolean => {
+    if (!addr) return false;
+    const a = addr.toLowerCase();
+    return a === "::1" || a === "::ffff:127.0.0.1" || a === "::ffff:7f00:1" || a === "0:0:0:0:0:ffff:7f00:1" || a.startsWith("127.") || a.startsWith("::ffff:127.");
+  };
+  const LOOPBACK_CORPUS = [
+    "127.0.0.1", "127.255.255.254", "127.", "::1", "::ffff:127.0.0.1", "::FFFF:127.0.0.1", "::ffff:7f00:1", "::FFFF:7F00:1",
+    "0:0:0:0:0:ffff:7f00:1", "::ffff:127.1.2.3", "128.0.0.1", "1.127.0.0", "::2", "::ffff:7f00:2", "0:0:0:0:0:0:0:1", " 127.0.0.1",
+    "localhost", "10.0.0.1", "", null, undefined,
+  ];
+
+  test("环回谓词与原算法在固定正负语料上逐项相同", () => {
+    for (const ip of LOOPBACK_CORPUS) expect({ ip, lo: pure.isLoopbackAddress(ip) }).toEqual({ ip, lo: oldLoopback(ip) });
+    expect(LOOPBACK_CORPUS.filter(pure.isLoopbackAddress).length).toBeGreaterThan(0);
+    expect(LOOPBACK_CORPUS.filter((ip) => !pure.isLoopbackAddress(ip)).length).toBeGreaterThan(0);
+  });
+
   test("新谓词与原算法在固定正负语料上逐项相同", () => {
     for (const ip of CORPUS) {
       expect({ ip, ts: pure.isTailscaleAddr(ip), lan: pure.isPrivateAddr(ip) }).toEqual({ ip, ts: oldTailscale(ip), lan: oldPrivate(ip) });
@@ -88,9 +132,10 @@ describe("行为不变", () => {
     expect(CORPUS.filter(pure.isPrivateAddr).length).toBeGreaterThan(0);
   });
 
-  test("旧 import 路径兼容：net-addr 导出的就是同一函数", () => {
+  test("旧 import 路径兼容：net-addr / same-host 导出的就是同一函数", () => {
     expect(legacy.isTailscaleAddr).toBe(pure.isTailscaleAddr);
     expect(legacy.isPrivateAddr).toBe(pure.isPrivateAddr);
+    expect(legacyHost.isLoopbackAddress).toBe(pure.isLoopbackAddress);
   });
 
   test("中心 URL 规则：公共放行，私有 / 环回 / 映射 / 控制字符 / 登录信息仍拒绝", () => {
