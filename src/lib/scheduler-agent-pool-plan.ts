@@ -31,11 +31,16 @@ export function agentPoolReview(s: PlannerSnapshot, since: number): Exclude<Away
 export function agentPoolWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">, locksFree: boolean): Away {
   if (!s.workflow) return null;
   const facts = agentPoolFacts(s, since, role, locksFree);
+  if (facts.pin === "local" && facts.writeLeasePeer) facts.pin = `peer:${facts.writeLeasePeer}`;
   if (s.task.stage === "spec") {
-    const local = placeAgentPool({ ...facts, peers: [], pin: null }, "fix", s.workflow.authorFamily);
+    const local = placeAgentPool({ ...facts, peers: [], pin: null }, "fix", s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
   }
   if (!["build", "fix"].includes(s.task.stage)) return null;
+  if (!facts.writeLeasePeer && !facts.pin?.startsWith("peer:") && facts.pin === "local") {
+    const local = placeAgentPool({ ...facts, peers: [], pin: null }, "fix", s.author?.family ?? s.workflow.authorFamily);
+    return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
+  }
   const placed: Placement = placeWithRetries(facts, role, s.workflow.authorFamily);
   return placed.kind === "peer" ? { peer: placed.peer, reason: `挂池：${role} 给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` }
     : placed.kind === "wait" ? { wait: placed.reason, code: "placement" } : null;

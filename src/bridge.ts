@@ -1,3 +1,4 @@
+import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
 import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
 /**
  * Discord Bridge Service — 主入口
@@ -574,6 +575,7 @@ import { originFooter } from "./lib/instance-tag.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("bridge");
+(await import("./lib/sandbox-parent-watchdog.js")).startSandboxParentWatchdog(); // 沙箱：启动方被硬杀就跟着退；生产空操作
 
 // v2.19.0 日志落点从 /tmp 搬到 ~/.claude-orchestrator/logs（见 lib/log-paths.ts）
 import { initDaemonLogs } from "./lib/log-paths.js";
