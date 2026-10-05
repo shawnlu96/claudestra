@@ -5,11 +5,14 @@
  *   rule) is no approval, whether the request is still queued or its run already holds the slot;
  * - policy-after-claim: the policy is read once more on the last check before the merge call, after the `merging` claim committed
  *   (nothing sent: the run ends cancelled, the slot is freed, the queue is not frozen); a merge already sent is only verified, never redone;
- * - ui-auto-starvation: a legal auto ui card gets the turn between two manual merges like any other waiting auto card.
+ * - ui-auto-starvation: a legal auto ui card gets the turn between two manual merges like any other waiting auto card;
+ * - approval-expiry (r3): a decision is its asker + ask key + binding hash; an approval of another decision (other key / params /
+ *   asker) lifts nothing, only the owner approving the same decision re-asked does, and the ledger's own supersede (same asker +
+ *   key, old one still open) hands an undecided version to its recorded replacement.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
-import { answerAsk, closeAsk, openAskFull } from "../src/lib/ledger-asks.js";
+import { answerAsk, closeAsk, getAsk, openAskFull } from "../src/lib/ledger-asks.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { claimManualMerge } from "../src/lib/manual-merge-queue.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -25,7 +28,7 @@ afterEach(() => { w?.close(); rmSync(RECOVERY_POLICY_PATH, { force: true }); });
 const as = (actor: string, ...args: string[]) => ledgerAs(w, actor, ...args);
 const merges = (id: string) => w.hub.calls.filter((c) => c.endsWith(`merge:${id}`)).length;
 const claim = () => claimManualMerge(w.db, { actor: "scheduler", now: Date.now() }, { project: "p", mode: "on", train: "none", requiredChecks: ["check"] });
-const authorize = (taskId: string) => authorizeIn(w, taskId);
+const authorize = (taskId: string, o?: { askKey?: string; params?: unknown; fromAgent?: string }) => authorizeIn(w, taskId, "manual_merge", o);
 const answer = (id: string, button: string) => answerIn(w, id, button);
 /** The approval window of an answered ask ends (checkAsk: the window runs from the ask, an answer does not extend it). */
 const windowEnds = (id: string) => w.db.query("UPDATE asks SET expiresAt = ? WHERE id = ?").run(Date.now() - 1, id);
@@ -173,4 +176,41 @@ describe("P1 ui-auto-starvation: a legal auto ui card is owed its turn like any 
     for (let i = 0; i < 12 && ["M1", "M2"].some((id) => w.phase(id) !== "merged"); i++) await w.pass();
     expect([w.phase("M1"), w.phase("M2"), merges(c.taskId)]).toEqual(["merged", "merged", 0]);
   }, 60_000);
+});
+
+describe("P1 approval-expiry (r3): a decision is its asker + key + binding; only its own re-ask lifts the wait", () => {
+  const current = (head: string) => ({ askKey: "merge-current", params: { task: "M", head } });
+
+  test("reviewer's probe: the current-head authorization expired; approving another key / head, another asker, or the same key with other params lifts nothing", async () => {
+    setup();
+    const m = await manualCard(w, "M");
+    const d1 = authorize("M", current(m.head));
+    expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "waiting" }); // the ask is open
+    closeAsk(w.db, d1.id, "expired", "到期", Date.now());
+    expect(await as(PM, ...requestArgs(m, "--reason", "再排"))).toMatchObject({ ok: true, duplicate: true, state: "waiting", why: expect.stringMatching(/不是批准/) });
+    answer(authorize("M", { askKey: "merge-other-head", params: { task: "M", head: "other" } }).id, "go"); // another key, another head
+    answer(authorize("M", { ...current(m.head), fromAgent: "agent-other" }).id, "go"); // another asker, same key and params
+    answer(authorize("M", current("other")).id, "go"); // same asker and key, other params
+    expect(await as(PM, ...requestArgs(m, "--reason", "又排"))).toMatchObject({ ok: true, duplicate: true, state: "waiting", why: expect.stringMatching(/不是批准/) });
+    for (let i = 0; i < 3; i++) await w.pass();
+    expect([w.intentOf("M"), merges("M"), frozen()]).toEqual([null, 0, null]);
+    expect(await view()).toMatch(/M｜等前置.*不是批准/);
+    answer(authorize("M", current(m.head)).id, "go"); // the same decision, re-asked and approved
+    for (let i = 0; i < 4 && w.phase("M") !== "merged"; i++) await w.pass();
+    expect([w.phase("M"), merges("M")]).toEqual(["merged", 1]);
+  }, 30_000);
+
+  test("an open authorization re-asked under the same key with changed params is superseded by the ledger: its recorded replacement decides", async () => {
+    setup();
+    const m = await manualCard(w, "M");
+    const d1 = authorize("M", current("stale"));
+    expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "waiting" });
+    const d2 = authorize("M", current(m.head));
+    expect([getAsk(w.db, d1.id)?.state, d2.supersedes]).toEqual(["superseded", d1.id]);
+    for (let i = 0; i < 2; i++) await w.pass();
+    expect([w.intentOf("M"), merges("M")]).toEqual([null, 0]);
+    answer(d2.id, "go");
+    for (let i = 0; i < 4 && w.phase("M") !== "merged"; i++) await w.pass();
+    expect([w.phase("M"), merges("M")]).toEqual(["merged", 1]);
+  }, 30_000);
 });

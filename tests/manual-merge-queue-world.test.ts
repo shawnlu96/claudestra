@@ -50,12 +50,15 @@ export const manualReviewArgs = (id: string, head: string, findings: string, rev
 export const requestArgs = (c: { taskId: string; head: string; reviewSeq: number }, ...extra: string[]) =>
   ["manual-merge-request", c.taskId, "--head", c.head, "--spec-rev", "1", "--round", "1", "--review-seq", String(c.reviewSeq), "--reason", "人工审过，排队合并", ...extra];
 
-/** An owner authorization on the card, bound like every authorize ask (approve = the "go" button); `action` groups re-asks of one decision. */
-export function authorize(world: ReclaimWorld, taskId: string, action = "manual_merge") {
-  const binding = { action, params: { task: taskId }, approve: ["go"] };
-  return openAskFull(world.db, { project: "p", taskId, source: "system", kind: "authorize", title: "可以合吗", fromAgent: "scheduler",
+/**
+ * An owner authorization on the card, bound like every authorize ask (approve = the "go" button). The decision it belongs to is its
+ * asker + ask key (the action when none) + binding hash: the same arguments again = the same decision re-asked.
+ */
+export function authorize(world: ReclaimWorld, taskId: string, action = "manual_merge", o: { askKey?: string; params?: unknown; fromAgent?: string } = {}) {
+  const from = o.fromAgent ?? "scheduler", binding = { action, params: o.params ?? { task: taskId }, approve: ["go"] };
+  return openAskFull(world.db, { project: "p", taskId, source: "system", kind: "authorize", title: "可以合吗", fromAgent: from, askKey: o.askKey,
     options: [{ type: "buttons", buttons: [{ id: "go", label: "合" }, { id: "no", label: "不合" }] }],
-    bind: { ...binding, paramsHash: bindHash(binding, "scheduler") } } as never, Date.now()).ask;
+    bind: { ...binding, paramsHash: bindHash(binding, from) } } as never, Date.now()).ask;
 }
 
 export const answer = (world: ReclaimWorld, id: string, button: string) => answerAsk(world.db, id, { choices: [`[button:${button}]`], labels: [button], text: "",

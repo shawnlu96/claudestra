@@ -123,30 +123,40 @@ const pickedApprove = (a: Ask): boolean => {
 const approvedAsk = (a: Ask, now: number): boolean => a.state === "answered" && a.expiresAt > now && pickedApprove(a);
 
 /**
- * One owner decision across its re-asks: an authorize ask by its bound action; an owner_action (no binding: the owner's answer is the
- * act) by its ask key, else the asking agent and title. The scheduler's screenshot ask is the UI gate's business (uiMergeRefusal reads
- * it, expiry included), not a second judgement here.
+ * One owner decision across its re-asks is its asker + ask key (the bound action when none, as reply defaults it) + binding hash
+ * (action, version, asker and the complete params — ask-bind.ts bindHash, what checkAsk compares): an ask under another key, with
+ * other params or from another asker is another decision, whose approval says nothing about this one. An owner_action has no
+ * binding (the owner's answer is the act): asker + ask key, else asker + title. The scheduler's screenshot ask is the UI gate's
+ * business (uiMergeRefusal reads it, expiry included), not a second judgement here.
  */
-const decisionKey = (a: Ask): string | null => a.bind?.action === UI_ASK_ACTION ? null
-  : `${a.kind}:${a.kind === "authorize" ? a.bind?.action ?? a.askKey ?? a.id : a.askKey ?? `${a.fromAgent ?? a.createdBy ?? "-"}:${a.title}`}`;
+const decisionKey = (a: Ask): string | null => {
+  if (a.bind?.action === UI_ASK_ACTION) return null;
+  const by = a.fromAgent ?? a.createdBy ?? "-";
+  if (a.kind !== "authorize") return `${a.kind}:${by}:${a.askKey ?? a.title}`;
+  return a.bind ? `authorize:${by}:${a.askKey ?? a.bind.action}:${a.bind.paramsHash}` : `authorize:${a.id}`;
+};
 
 /** The latest version of the decision stands: approved inside its window (authorize) or answered by the owner (owner_action). */
 const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_action" ? a.state === "answered" && ownerAnswered(a.answer) : approvedAsk(a, now);
 
 /**
  * Every owner decision ever asked on the card (authorize / owner_action) must stand in its latest version. A closed version without
- * a verifiable approval — expired, cancelled, superseded, answered without an approve button, or approved but past its window
- * (checkAsk's rule: the window runs from the ask, an answer does not extend it) — is a wait, however old the ask is and whenever PM
- * queued: the request keeps its place, nothing merges, and the lift is the owner approving a re-ask of that decision (authorize) or
- * answering it (owner_action) — never a newer request or its reason (a request with the same binding is the same request). An open
- * version is the ordinary open-ask wait (requestRefusal).
+ * a verifiable approval — expired, cancelled, answered without an approve button, or approved but past its window (checkAsk's rule:
+ * the window runs from the ask, an answer does not extend it) — is a wait, however old the ask is and whenever PM queued: the
+ * request keeps its place, nothing merges, and the lift is the owner approving that same decision re-asked (authorize: same asker,
+ * key and binding) or answering it (owner_action) — never a newer request, its reason, or the approval of another decision. A
+ * version the ledger superseded (same asker + key re-asked while it was still open: ledger-asks supersedeIn) was never decided;
+ * the ask recorded as its replacement is judged in its place, as checkAsk says ("use the new one"). An open version is the
+ * ordinary open-ask wait (requestRefusal).
  */
 function authorizationRefusal(db: Database, taskId: string, now: number): string | null {
   const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, id").all(taskId) as { id: string }[];
+  const asks = rows.map(({ id }) => getAsk(db, id)).filter((a): a is Ask => !!a);
+  const replaced = new Set(asks.filter((a) => a.state === "superseded").map((a) => a.id));
   const latest = new Map<string, Ask>(); // createdAt order: the last version seen of each decision is its newest
-  for (const { id } of rows) {
-    const a = getAsk(db, id), key = a && decisionKey(a);
-    if (a && key) latest.set(key, a);
+  for (const a of asks) {
+    const key = decisionKey(a);
+    if (key && !(replaced.has(a.id) && asks.some((b) => b.supersedes === a.id))) latest.set(key, a);
   }
   for (const a of latest.values()) {
     if (a.state === "open" || decisionStands(a, now)) continue;

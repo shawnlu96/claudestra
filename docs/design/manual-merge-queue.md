@@ -22,12 +22,15 @@ a project PM other than the dispatcher / master / owner), revoked, running, merg
 binding again answers the existing one.
 
 Owner decisions on the card (asks of kind authorize / owner_action, the scheduler's screenshot ask excepted — the UI gate judges that
-one) are grouped into one decision per bound action (authorize) or ask key / asker + title (owner_action), and the latest version of
-each must stand: an authorize answered with an approve button and still inside its window (`checkAsk`'s rule: the window runs from
-the ask, an answer does not extend it), an owner_action answered by the owner. Anything else closed — expired, cancelled, superseded,
+one) are grouped into decisions — an authorize by its asker + ask key (the bound action when none) + binding hash (`bindHash`:
+action, version, asker, complete params — what `checkAsk` compares), an owner_action by asker + ask key / title — and the latest
+version of each must stand: an authorize answered with an approve button and still inside its window (`checkAsk`'s rule: the window
+runs from the ask, an answer does not extend it), an owner_action answered by the owner. Anything else closed — expired, cancelled,
 answered "no", approved but past the window — is a **wait**, however old the ask and whenever PM queued: the request keeps its place,
-nothing merges (a claimed run ends cancelled with its slot freed), and the only lift is the owner approving / answering a re-ask of
-that decision. A new request with the same binding is the same request (duplicate), so neither its time nor its reason lifts anything.
+nothing merges (a claimed run ends cancelled with its slot freed), and the only lift is the owner approving / answering that same
+decision re-asked. An approval of another decision (another key, other params, another asker) lifts nothing. A version the ledger
+superseded (same asker + key re-asked while still open) was never decided: its recorded replacement is judged instead. A new request
+with the same binding is the same request (duplicate), so neither its time nor its reason lifts anything.
 
 ## The one decision: `manualTurn` (lib/manual-merge-queue.ts)
 
