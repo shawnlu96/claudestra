@@ -109,10 +109,21 @@ export interface AdapterProc {
   exited: Promise<number>;
 }
 
-/** 起子进程；stderr 按行加 label 前缀交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS）。Pi 适配器也用它起 pi */
-export function spawnAdapter(cmd: string[], env: Record<string, string>, cwd: string, log: (msg: string) => void, label = "codex-acp"): AdapterProc {
+/**
+ * 起子进程；stderr 按行加 label 前缀交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS）。Pi 适配器也用它起 pi。
+ * detached：子进程自成一个进程组（setsid），收尾时可以按组连孙进程一起清掉；不传就和原来一样留在本进程组里。
+ */
+export function spawnAdapter(
+  cmd: string[],
+  env: Record<string, string>,
+  cwd: string,
+  log: (msg: string) => void,
+  label = "codex-acp",
+  opts: { detached?: boolean } = {},
+): AdapterProc {
   if (isSandbox(env) && env.HOME) mkdirSync(env.HOME, { recursive: true }); // 沙箱里隔离出来的 HOME（adapterEnv）第一次用时还不存在
-  const proc: Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn(cmd, { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  const detached = opts.detached ? { detached: true } : {};
+  const proc: Subprocess<"pipe", "pipe", "pipe"> = Bun.spawn(cmd, { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "pipe", ...detached });
   const closeCbs: ((why: string) => void)[] = [];
   const pump = async (stream: ReadableStream<Uint8Array>, cb: (c: Uint8Array) => void) => {
     for await (const chunk of stream) cb(chunk);

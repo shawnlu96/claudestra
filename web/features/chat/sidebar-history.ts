@@ -25,3 +25,11 @@ export function buildSidebarDirectory(list: AgentSession[], meta: Map<string, Pr
     historyCount: history.length,
   };
 }
+
+export type DirectoryScope = "active" | "history";
+/** Fold preferences per directory: a project can be live and in history at once, and each group folds on its own.
+ * Active keeps the original keys so existing preferences survive; history gets its own namespace (nothing is migrated or cleared). */
+export const DIRECTORY_FOLD_KEYS: Record<DirectoryScope, { projects: string; teams: string }> = {
+  active: { projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed" },
+  history: { projects: "cstra_history_proj_collapsed", teams: "cstra_history_team_collapsed" },
+};

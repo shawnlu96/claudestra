@@ -247,6 +247,7 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(f.length).toBe(1);
     expect(f[0].failure).toMatchObject({ kind: "quota" });
     expect(f[0].configOptions.length).toBeGreaterThan(0);
+    expect([typeof f[0].sessionId, typeof f[0].failedAt]).toEqual(["string", "number"]); // 出借停单按它们认当前会话、当前回合（lend-turn-failure.ts）
     expect(h.entries().some((e) => e.error && e.isApiErrorMessage === false)).toBe(true);
     expect(h.stops[0].event).toBe("StopFailure");
   }, 30_000);
