@@ -44,20 +44,21 @@ export const shortenHeads = (text: string, heads: ReadonlySet<string>): string =
   text.replace(HEAD_RUN, (m) => (heads.has(m.toLowerCase()) ? m.slice(0, 12) : m));
 
 /**
- * A whole 40-char lowercase hex run: neither side a word char or `-`, not a path segment (`/` `\` before or after), not a file
- * name (a single `.` before, `.x` after). A sentence-ending `.` and a git range `a..b` / `a...b` are still boundaries.
+ * A whole 40- or 64-char lowercase hex run (a commit SHA, a SHA-256 digest): neither side a word char or `-`, not a path segment
+ * (`/` `\` before or after), not a file name (a single `.` before, `.x` after). A sentence-ending `.` and a git range `a..b` /
+ * `a...b` are still boundaries.
  */
-const COMMIT_SHA = /(?<![\w/\\-])(?<!(?<!\.)\.)[0-9a-f]{40}(?![\w/\\-]|\.\w)/g;
+const COMMIT_SHA = /(?<![\w/\\-])(?<!(?<!\.)\.)(?:[0-9a-f]{64}|[0-9a-f]{40})(?![\w/\\-]|\.\w)/g;
 
 /**
- * A line naming a secret: a 40-hex there may be an old-style access token, so it is not cut and the gate judges it. Plain substring
+ * A line naming a secret: a 40 / 64-hex there may be an access token, so it is not cut and the gate judges it. Plain substring
  * match, case-insensitive (`author` counts as `auth`: refusal first); covers `name=value` / `name: value`.
  */
 const SECRET_WORD = /credential|secret|token|passw(?:or)?d|api[\s_-]*key|auth|bearer|private[\s_-]*key/i;
 
-/** Private-use, so neither NFKC nor the gate's folding touches it; stands for one cut SHA when checking what the gate would see. */
+/** Private-use, so neither NFKC nor the gate's folding touches it; stands for the SHA being judged in the gate's view. */
 const MARK = "\uE000";
-/** One unbroken hex run the gate would read once whitespace is removed, holding at least one cut SHA. */
+/** One unbroken hex run the gate would read once whitespace is removed, holding the SHA being judged. */
 const HEX_RUN = new RegExp(`[0-9a-f${MARK}]*${MARK}[0-9a-f${MARK}]*`, "gi");
 /** A cut SHA's run is safe only alone with < 8 hex (the gate's own joinable fragment size) on each side. */
 const joinsHex = (run: string): boolean => run.split(MARK).length > 2 || run.split(MARK).some((part) => part.length >= 8);
@@ -66,23 +67,46 @@ const TOUCHES = new RegExp(`[\\w/\\\\-]${MARK}|(?<!\\.)\\.${MARK}|${MARK}(?:[\\w
 /** Same letter / digit shape as the SHA but not hex: the gate's other rules (prefix, field name, random) see the same text. */
 const unhex = (m: string): string => m.replace(/[a-fA-F]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 16));
 
+/** Card heads (any case) and commit / digest shaped runs, each once, in text order. */
+function shaSpans(text: string, heads: ReadonlySet<string>): { at: number; sha: string }[] {
+  const at = new Map<number, string>();
+  for (const m of text.matchAll(HEAD_RUN)) if (heads.has(m[0].toLowerCase())) at.set(m.index, m[0]);
+  for (const m of text.matchAll(COMMIT_SHA)) if (!at.has(m.index)) at.set(m.index, m[0]);
+  return [...at].sort((a, b) => a[0] - b[0]).map(([i, sha]) => ({ at: i, sha }));
+}
+
 /**
- * Card heads (GATE2), then commit-shaped SHAs → 12-char prefixes; `cut` counts both. Judged on the gate's folded view (NFKC,
- * zero-width dropped, blanks joined): if a SHA sits on a line naming a secret, touches a word char or a path / file-name boundary,
- * shares one hex run with 8+ hex or another SHA once whitespace is removed, or the text with the SHAs made non-hex would still trip the gate (`sk- ` / `ghp_` before it, a field
- * name…), nothing in this text is cut and the gate gets it unchanged. Any other hex stays for the gate.
+ * Card heads (GATE2), then commit SHAs and SHA-256 digests (40 / 64 lowercase hex) → 12-char prefixes; `cut` counts them. Each SHA is
+ * judged on its own (GATE4) on the gate's folded view (NFKC, zero-width dropped, blanks joined): one on a line naming a secret, touching
+ * a word char or a path / file-name boundary, or sharing one hex run with 8+ hex once whitespace is removed stays whole, and so does
+ * one the gate would still read as part of a secret once made non-hex (`sk- ` / `ghp_` before it, a field name…). A whole SHA left in
+ * the text still makes the gate refuse the order. If the text trips the gate without any SHA, or only through several SHAs together,
+ * nothing in it is cut and the gate gets it unchanged. Any other hex stays for the gate.
  */
 export function shortenShas(text: string, heads: ReadonlySet<string>, ledgerHead: string | null = null): { text: string; cut: number } {
-  let cut = 0;
-  const each = (rep: (m: string) => string) => text.replace(HEAD_RUN, (m) => (heads.has(m.toLowerCase()) ? rep(m) : m)).replace(COMMIT_SHA, rep);
-  const out = each((m) => { cut++; return m.slice(0, 12); });
-  if (!cut) return { text, cut };
-  const marked = fold(each(() => MARK));
-  const unsafe = marked.split("\n").some((line) => line.includes(MARK) && SECRET_WORD.test(line))
-    || TOUCHES.test(marked)
-    || (marked.replace(/\s+/g, "").match(HEX_RUN) ?? []).some(joinsHex)
-    || peerSecretHit(fold(each(unhex)), ledgerHead) !== null;
-  return unsafe ? { text, cut: 0 } : { text: out, cut };
+  const spans = shaSpans(text, heads);
+  if (!spans.length) return { text, cut: 0 };
+  const swap = (rep: (sha: string, i: number) => string): string => {
+    let out = "";
+    let end = 0;
+    spans.forEach(({ at, sha }, i) => { out += text.slice(end, at) + rep(sha, i); end = at + sha.length; });
+    return out + text.slice(end);
+  };
+  const gate = (rep: (sha: string, i: number) => string): string | null => peerSecretHit(fold(swap(rep)), ledgerHead);
+  const held = new Set<number>();
+  if (gate(unhex) !== null) {
+    if (gate(() => MARK) !== null) return { text, cut: 0 };
+    spans.forEach((_, i) => { if (gate((s, j) => (j === i ? unhex(s) : MARK)) !== null) held.add(i); });
+    if (!held.size) return { text, cut: 0 };
+  }
+  spans.forEach((_, i) => {
+    if (held.has(i)) return;
+    const marked = fold(swap((s, j) => (j === i ? MARK : s)));
+    if (marked.split("\n").some((line) => line.includes(MARK) && SECRET_WORD.test(line)) || TOUCHES.test(marked)
+      || (marked.replace(/\s+/g, "").match(HEX_RUN) ?? []).some(joinsHex)) held.add(i);
+  });
+  const cut = spans.length - held.size;
+  return cut ? { text: swap((s, i) => (held.has(i) ? s : s.slice(0, 12))), cut } : { text, cut: 0 };
 }
 
 /** The gate refuses an id that masking would change or that reads as a secret (order-wire-render.ts gatePeer). */
