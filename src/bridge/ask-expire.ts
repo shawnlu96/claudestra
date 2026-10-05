@@ -10,7 +10,7 @@
  */
 import { isHumanNodeAsk } from "../lib/human-node.js";
 import { t } from "../lib/i18n.js";
-import { markReminderNoticed, noticeBlocker, pendingReminderNotices, sweepReminders, type ReminderPorts } from "../lib/ask-recovery.js";
+import { markReminderNoticed, noticeBlocker, noticeGateNow, pendingReminderNotices, sweepReminders, type ReminderPorts } from "../lib/ask-recovery.js";
 import { closeAsk, dueAsks, hasAsksTable, type Ask } from "../lib/ledger-asks.js";
 import { isCurrentAssignment } from "../lib/ledger-human.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
@@ -109,7 +109,8 @@ async function runReminders(db: Parameters<typeof sweepReminders>[0], now: numbe
   // 这一轮开出的和以前没发完的一起：台账里的待办才算数，「卡已存在」不等于「通知已发」；补发也过闸，不满足就留着等
   for (const n of pendingReminderNotices(db)) {
     try {
-      const why = await noticeBlocker(n, reminderPorts, now);
+      // 异步活跃查询之后、发布之前同步再过一次策略 / 暂停（两者之间不夹 await）
+      const why = (await noticeBlocker(n, reminderPorts, now)) ?? noticeGateNow(n, reminderPorts);
       if (why) {
         if (!held.has(`${n.id}:${why}`)) console.log(`[askReminder] ${n.id} 的通知待办先不发（${why}），卡已在收件箱，满足了再补`);
         held.add(`${n.id}:${why}`);

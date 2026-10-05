@@ -165,4 +165,34 @@ describe("过期扫描里的再提示", () => {
     expect([published(), told()]).toEqual([1, 1]);
     expect(getAsk(openLedger(s.path), n.id)!.extra.remindNotice).toBe("done");
   });
+  test("活跃查询悬着时 owner 改 on→off / on→observe / 暂停：回来不推不告诉、待办留着；恢复后补一次，原卡仍 expired", async () => {
+    const n = await pendingReminder();
+    const orig = String(n.extra.recoveryOf);
+    const published = () => s.asks.filter((e) => (e.data as { askId: string }).askId === n.id).length;
+    const told = () => s.sent.filter((e) => e.content.includes(`新卡 ${n.id}`)).length;
+    const flips: { mode: "off" | "observe" | "on"; paused: boolean }[] = [
+      { mode: "off", paused: false },
+      { mode: "observe", paused: false },
+      { mode: "on", paused: true },
+    ];
+    for (const flip of flips) {
+      const st = { mode: "on" as "on" | "off" | "observe", paused: false };
+      setAskReminderPorts({
+        policy: () => ({ mode: st.mode, manualAfterMs: null }),
+        paused: () => st.paused,
+        // 查询悬着的这段时间里 owner 动了手，然后才返回「活跃」
+        ownerActive: async () => (await Promise.resolve(), Object.assign(st, flip), { active: true, evidence: "heartbeat" }),
+      });
+      await sweepExpired();
+      expect([published(), told()]).toEqual([0, 0]);
+      expect(getAsk(openLedger(s.path), n.id)!.extra.remindNotice).toBe("pending");
+    }
+    setAskReminderPorts({ policy: () => ({ mode: "on", manualAfterMs: null }), paused: () => false, ownerActive: async () => ({ active: true, evidence: "later" }) });
+    await sweepExpired();
+    await sweepExpired();
+    expect([published(), told()]).toEqual([1, 1]);
+    expect(getAsk(openLedger(s.path), n.id)!.extra.remindNotice).toBe("done");
+    expect(getAsk(openLedger(s.path), orig)!.state).toBe("expired");
+    expect(reminders()).toHaveLength(1);
+  });
 });

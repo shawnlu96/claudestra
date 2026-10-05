@@ -169,11 +169,27 @@ export function pendingReminderNotices(db: Database): Ask[] {
  * 返回不能发的理由，null = 放行。不抛（port 出错算不放行）。不放行时待办留着，满足了再补——卡本身已在 owner 收件箱里
  */
 export async function noticeBlocker(r: Ask, ports: ReminderPorts, now = Date.now()): Promise<string | null> {
+  const before = noticeGateNow(r, ports);
+  if (before) return before;
+  try {
+    const why = inactiveReason(ports.ownerActive ? await ports.ownerActive(r.project, now) : null);
+    if (why) return why;
+  } catch (e) {
+    return `check failed: ${(e as Error).message}`;
+  }
+  // 活跃查询是异步的：等它的时候 owner 可能刚暂停 / 改了模式，回来再看一眼当前的
+  return noticeGateNow(r, ports);
+}
+
+/**
+ * 同步那半道闸：策略此刻是 on、owner 此刻没暂停。不抛（策略读失败已按 off；暂停 port 抛错算不放行）。
+ * 调用方在发布前、中间不夹 await 再调一次，保证真正推出去的那一刻仍在当前模式 / 暂停的边界内
+ */
+export function noticeGateNow(r: Ask, ports: ReminderPorts): string | null {
   const pol = policyOf(ports.policy, r.project);
   if (pol.mode !== "on") return `mode=${pol.mode}`;
   try {
-    if (ports.paused?.(r)) return "paused by owner";
-    return inactiveReason(ports.ownerActive ? await ports.ownerActive(r.project, now) : null);
+    return ports.paused?.(r) ? "paused by owner" : null;
   } catch (e) {
     return `check failed: ${(e as Error).message}`;
   }
