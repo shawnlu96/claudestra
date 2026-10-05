@@ -295,7 +295,8 @@ class Card {
     }
     if (seen.state === "result" && seen.outcome === "failed") {
       const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
-      return this.escalate(`${ref.agent} ${what}：${seen.failure.message}`, sent.id);
+      const model = await (await import("./scheduler-model-wiring.js")).modelOutcomeStep(this, sent, ref, seen.failure); // MODELW：默认 observe，只多记一条
+      return model ?? this.escalate(`${ref.agent} ${what}：${seen.failure.message}`, sent.id);
     }
     const alarm = await this.unclaimed(sent, ref);
     if (alarm) return alarm;
