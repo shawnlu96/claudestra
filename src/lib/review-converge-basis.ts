@@ -8,16 +8,42 @@
 export type FindingBasis = `acceptance:${number}` | "regression";
 
 const FIELD = /^(?:acceptance:([1-9]\d{0,2})|regression)$/;
-/** A bracketed marker on one line, closed by its own bracket: [ ], 【 】, ［ ］ or （ ）. A mismatched pair is no marker. */
-const MARK = /\[([^[\]【】［］（）\r\n]+)\]|【([^[\]【】［］（）\r\n]+)】|［([^[\]【】［］（）\r\n]+)］|（([^[\]【】［］（）\r\n]+)）/g;
-/** Any bracketed span, paired or not (an unclosed one runs to the line end): its content is never read as a bare field. */
-const SPAN = /[[【［（][^[\]【】［］（）\r\n]*(?:[\]】］）]|$)/gm;
+/** A bracketed marker closed by its own bracket: [ ], 【 】, ［ ］ or （ ）. A mismatched pair is no marker; the labels may wrap lines. */
+const MARK = /\[([^[\]【】［］（）]+)\]|【([^[\]【】［］（）]+)】|［([^[\]【】［］（）]+)］|（([^[\]【】［］（）]+)）/g;
+const PAIRS: Record<string, string> = { "[": "]", "【": "】", "［": "］", "（": "）", "(": ")" };
+const CLOSERS = new Set(Object.values(PAIRS));
 /** One label inside a marker: 「验收线 N」 (any spelling), 「回归」, or a bare N continuing an acceptance list. */
 const ITEM = /\s*(?:(?:验收线|验收|acceptance)\s*[#:：]?\s*([1-9]\d{0,2})(?!\d)|(回归|regression)(?![a-z])|#?\s*([1-9]\d{0,2})(?!\d))\s*/iy;
 const SEP = /(?:[、,，;；/&]|和|及|与|and(?![a-z]))\s*/iy;
 /** The field spelling written bare in a Markdown heading (「## F1 acceptance:1 and acceptance:2」): the first one counts. */
 const MARK_FIELD = /(?<![\w-])acceptance:([1-9]\d{0,2})(?![\w\-\]】］）])/i;
 const HEADING = /^\s*#{1,6}\s.*$/gm;
+
+/**
+ * A heading line with every bracketed span blanked, nested ones whole and a mismatched or unclosed one to the line end, so a
+ * bare field never leaks out of a broken marker. Only a flat 「(…)」 holding nothing but labels keeps its text.
+ */
+function outsideBrackets(line: string): string {
+  const out = line.split("");
+  const stack: string[] = [];
+  let start = 0, nested = false, broken = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (PAIRS[c]) {
+      if (stack.length) nested = true;
+      else [start, nested, broken] = [i, false, false];
+      stack.push(c);
+    } else if (stack.length && CLOSERS.has(c)) {
+      if (PAIRS[stack[stack.length - 1]] !== c) { broken = true; continue; }
+      stack.pop();
+      if (stack.length) continue;
+      const keep = line[start] === "(" && !nested && !broken && !!markLabels(line.slice(start + 1, i))?.lines.length;
+      if (!keep) out.fill(" ", start, i + 1);
+    }
+  }
+  if (stack.length) out.fill(" ", start);
+  return out.join("");
+}
 
 /**
  * A marker's labels, or null unless the whole content is labels: 「[验收线 1、2]」「[回归;验收线 6]」「[验收线 2 / 验收线 6]」.
@@ -55,7 +81,7 @@ export function basisFromText(text: string): FindingBasis | null {
     regression ||= !!labels?.regression;
   }
   for (const [heading] of text.matchAll(HEADING)) {
-    const n = MARK_FIELD.exec(heading.replace(SPAN, " "))?.[1];
+    const n = MARK_FIELD.exec(outsideBrackets(heading))?.[1];
     if (n) return `acceptance:${Number(n)}`;
   }
   return regression ? "regression" : null;

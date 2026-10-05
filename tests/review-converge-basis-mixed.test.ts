@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { basisFromText, findingBasis } from "../src/lib/review-converge-basis.js";
+import { basisFromText, findingBasis, type FindingBasis } from "../src/lib/review-converge-basis.js";
 import { reportBasis, storedBasis } from "../src/lib/review-converge-report.js";
 import { convergeReview } from "../src/lib/review-converge.js";
 import type { ReviewFacts, ReviewFinding } from "../src/lib/scheduler-review.js";
@@ -32,7 +32,7 @@ describe("markers that mix several complete labels", () => {
   test("only a bounded, fully-formed marker counts", () => {
     for (const t of ["回归;验收线 6 没加括号", "这是回归,违反验收线 6", "[验收线 0]", "[回归;验收线 0]", "[验收线 -1]", "[验收线 1000]",
       "[回归; 6]", "[验收线 ]", "[验收线 2; 验收]", "[回归 xx 验收线 6]", "[回归验收线 6]", "[regressions]", "[P1] 参见 #6 与 1、2",
-      "[1, 2]", "[回归;验收线 6", "(回归;验收线 6)", "[验收线 2;\n验收线 6]"]) expect(basisFromText(t)).toBeNull();
+      "[1, 2]", "[回归;验收线 6", "(回归;验收线 6)", "[验收线 2;\n## B 验收线 6]"]) expect(basisFromText(t)).toBeNull();
     // a void marker does not hide a valid one elsewhere
     expect(basisFromText("[验收线 0] 另见 [回归;验收线 6]")).toBe("acceptance:6");
   });
@@ -41,6 +41,14 @@ describe("markers that mix several complete labels", () => {
     for (const t of ["[回归;验收线 6)", "(回归;验收线 6]", "[回归;验收线 6）", "（回归;验收线 6]", "【验收线 6］", "［验收线 6】", "（回归】"])
       expect(basisFromText(t)).toBeNull();
     expect(basisFromText("[回归;验收线 6） 另见 （验收线 3）")).toBe("acceptance:3");
+  });
+
+  test("a marker may wrap across lines, as the old list form did", () => {
+    for (const t of ["[验收线 1、\n2]", "[验收线 1,\r\n 2]", "[验收线\n1]", "【验收线 1\n】"]) expect(basisFromText(t)).toBe("acceptance:1");
+    expect(basisFromText("[回归\n]")).toBe("regression");
+    expect(basisFromText("[回归;\n验收线 6]")).toBe("acceptance:6");
+    expect(basisFromText("[验收线 2;\n验收线 6]")).toBe("acceptance:2");
+    for (const t of ["[验收线 1、\n说明 2]", "[验收线 6\n## B ]", "[回归;\n验收线 6)"]) expect(basisFromText(t)).toBeNull();
   });
 
   test("a long acceptance list has no length cap", () => {
@@ -52,7 +60,10 @@ describe("markers that mix several complete labels", () => {
   test("the bare field only counts in a heading, outside any bracket, with a clean right edge", () => {
     for (const t of ["[regression; acceptance:6oops]", "[regression; acceptance:6; acceptance:0]", "Ordinary prose refers to acceptance:6oops.",
       "Ordinary prose refers to acceptance:6.", "## F acceptance:6oops", "## F [regression; acceptance:6)", "## F [note acceptance:6]",
-      "## F （x acceptance:6", "## F acceptance:6]"]) expect(basisFromText(t)).toBeNull();
+      "## F （x acceptance:6", "## F acceptance:6]", "## F (regression; acceptance:6; acceptance:0)", "## F (regression; acceptance:6 ]",
+      "## F [note [x] acceptance:6 ]", "## F (note acceptance:6)", "## F (a (b) acceptance:6)", "## F [x (acceptance:6) y]"]) expect(basisFromText(t)).toBeNull();
+    expect(basisFromText("## F (regression; acceptance:6)")).toBe("acceptance:6");
+    expect(basisFromText("## F (x) acceptance:6")).toBe("acceptance:6");
     expect(basisFromText("[regression; acceptance:6; acceptance:0]\n[回归]")).toBe("regression");
     expect(basisFromText("说明\n## F acceptance:6. 槽位")).toBe("acceptance:6");
     expect(basisFromText("## F [note] acceptance:6")).toBe("acceptance:6");
@@ -96,6 +107,30 @@ describe("PR624 unbound-old-failed-turn keeps its P1 through the report path", (
     const c = convergeReview([], facts(probes.map((probe, i) => ({ findingId: `m${i}`, family: "f", severity: "P1", probe }))), null);
     expect(c.facts.findings.map((x) => x.severity)).toEqual(["P2", "P2", "P2", "P2", "P2", "P1"]);
     expect(c.downgrade?.items.map((x) => [x.findingId, x.why])).toEqual([0, 1, 2, 3, 4].map((i) => [`m${i}`, "no_basis"]));
+  });
+
+  test("a marker wrapped across lines keeps a no-typed-basis P1 through finding text and the report", () => {
+    const wrapped = ["[验收线 1、\n2]", "[验收线\n6]", "[回归\n]"];
+    const want: FindingBasis[] = ["acceptance:1", "acceptance:6", "regression"];
+    const own = wrapped.map((m, i): ReviewFinding => ({ findingId: `w${i}`, family: "f", severity: "P1", probe: `${m} x` }));
+    expect(own.map((x) => findingBasis(x))).toEqual(want);
+    const report = wrapped.map((m, i) => `## w${i}\n说明 ${m}`).join("\n") + "\n## w3 [验收线 4、\n5]\n说明";
+    const bare = [0, 1, 2, 3].map((i): ReviewFinding => ({ findingId: `w${i}`, family: "f", severity: "P1", probe: "src/a.ts" }));
+    const stored = bare.map((x) => ({ ...x, ...storedBasis(x, report) }));
+    expect(stored.map((x) => x.basis)).toEqual([...want, "acceptance:4" as const]);
+    const c = convergeReview([], facts([...own, ...stored]), null);
+    expect(c.facts.findings.every((x) => x.severity === "P1")).toBe(true);
+    expect(c.downgrade).toBeNull();
+  });
+
+  test("a bare heading field inside a broken or nested bracket leaves the P1 to demote", () => {
+    const heads = ["## F (regression; acceptance:6; acceptance:0)", "## F (regression; acceptance:6 ]", "## F [note [x] acceptance:6 ]"];
+    const f: ReviewFinding = { findingId: "F", family: "f", severity: "P1", probe: "src/a.ts" };
+    const rows = heads.map((h) => ({ ...f, ...storedBasis(f, `${h}\n说明`) }));
+    expect(rows.map((x) => x.basis)).toEqual([undefined, undefined, undefined]);
+    const c = convergeReview([], facts(rows), null);
+    expect(c.facts.findings.map((x) => x.severity)).toEqual(["P2", "P2", "P2"]);
+    expect(c.downgrade?.items.map((x) => x.why)).toEqual(["no_basis", "no_basis", "no_basis"]);
   });
 
   test("a mixed marker stays with its own finding: the next heading and a neighbour's line do not inherit it", () => {
