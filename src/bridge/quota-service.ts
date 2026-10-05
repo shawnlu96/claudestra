@@ -141,8 +141,8 @@ export function createQuotaService(d: QuotaServiceDeps) {
 
   return {
     snapshot, retry, setEnabled,
-    /** 用一张 Codex 重置卡（真实消费，路由已验过 owner 设备凭据）：开关关着调度器自己回 disabled；busy = 另一次还在途 */
-    consumeCodexReset: (creditKey: string | null) => scheduler.consumeCodexReset(creditKey),
+    /** 用一张 Codex 重置卡（真实消费，路由已验过 owner 设备凭据）：先现读开关（手改 config 关掉的也认），关着调度器回 disabled；busy = 另一次还在途 */
+    consumeCodexReset: (creditKey: string | null) => (syncEnabled(), scheduler.consumeCodexReset(creditKey)),
     claudeWall: (refresh: boolean) => (syncEnabled(), claudeWallView(scheduler, enabled, d.now(), refresh)),
     isEnabled: () => enabled,
     isViewing: viewing,

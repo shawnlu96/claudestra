@@ -10,7 +10,7 @@ import type { FetchErrorCode } from "../src/lib/quota-providers.js";
 import { hmacHex } from "../src/lib/quota-credentials.js";
 import { memoryQuotaStore } from "../src/lib/quota-state.js";
 import {
-  CODEX_ACCOUNT, CODEX_TOKEN, CREDIT_IDS, SECRET, expectNoSentinel, fakePost, jsonResponse, usableRoutes, type PostCall,
+  CODEX_ACCOUNT, CODEX_TOKEN, CREDIT_IDS, SECRET, codexAuth, expectNoSentinel, fakePost, jsonResponse, usableRoutes, type PostCall,
 } from "./quota-fixtures.js";
 import { harness } from "./quota-scheduler-harness.js";
 
@@ -156,5 +156,119 @@ describe("并发连点", () => {
     expect(post.calls).toHaveLength(1);
     expect(await h.scheduler.consumeCodexReset(null)).toEqual({ status: "refused", code: "not_applicable" }); // 刚用掉，此刻可用已是 0
     expect(post.calls).toHaveLength(1);
+  });
+});
+
+describe("开关 / 代际 / 凭据在不可逆的 POST 之前复验（审查 #687 P1：reset-disabled-race / reset-account-race）", () => {
+  type H = ReturnType<typeof setup>["h"];
+  const AUTH = "/home/u/.codex/auth.json";
+  /** 让第一个匹配的 GET 挂住，直到 release()：在「排队中」「核对中」两个窗口里动开关 / 换账户 */
+  function holdGet(h: H, match: (url: string) => boolean) {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    let held = 0;
+    const route = h.route;
+    h.route = async (u, sig) => {
+      if (match(u) && held++ === 0) await gate;
+      return route(u, sig);
+    };
+    return { release, reached: () => held > 0 };
+  }
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 500 && !cond(); i++) await Bun.sleep(1);
+    expect(cond()).toBe(true);
+  };
+
+  /** 审查方探针：先让一个普通查询的 GET 挂住，消费排在它后面；挂住期间动手脚，再放开 */
+  async function queuedProbe(mutate: (h: H) => void, key: string | null) {
+    const { h, post } = setup();
+    const g = holdGet(h, (u) => u.endsWith("/wham/usage"));
+    const pending = h.scheduler.refresh("codex", "view");
+    await until(g.reached);
+    const consume = h.scheduler.consumeCodexReset(key);
+    mutate(h);
+    g.release();
+    const r = await consume;
+    await pending;
+    return { r, posts: post.calls.length };
+  }
+  /** 消费自己核对用的明细 GET 挂住（usage 已核过），这时动手脚，再放开：下一步就是 POST */
+  async function precheckProbe(mutate: (h: H) => void, key: string | null) {
+    const { h, post } = setup();
+    const g = holdGet(h, (u) => u.endsWith("/wham/rate-limit-reset-credits"));
+    const consume = h.scheduler.consumeCodexReset(key);
+    await until(g.reached);
+    mutate(h);
+    g.release();
+    return { r: await consume, posts: post.calls.length };
+  }
+
+  const disable = (h: H) => {
+    h.enabled = false;
+    h.scheduler.onDisabled();
+  };
+  const MUTATIONS: [string, (h: H) => void, "disabled" | "identity_changed"][] = [
+    ["关开关 + onDisabled", disable, "disabled"],
+    ["关了又开（旧意图不复活）", (h) => (disable(h), (h.enabled = true)), "disabled"],
+    ["只改开关（手改 config，没有 onDisabled）", (h) => (h.enabled = false), "disabled"],
+    ["切账户", (h) => h.cd.files.set(AUTH, codexAuth("new-fake-token", "new-fake-account")), "identity_changed"],
+    ["同账户换了 token（凭据指纹变）", (h) => h.cd.files.set(AUTH, codexAuth("refreshed-fake-token")), "identity_changed"],
+  ];
+  const PROBES = [["排队时", queuedProbe], ["核对中（POST 紧前）", precheckProbe]] as const;
+  for (const [stage, probe] of PROBES) {
+    for (const [name, mutate, code] of MUTATIONS) {
+      for (const key of [keyOf(CREDIT_IDS[0]), null]) {
+        test(`${stage}${name}，${key ? "指定" : "不指定"} creditKey → refused ${code}，POST 0`, async () => {
+          const { r, posts } = await probe(mutate, key);
+          expect(r).toEqual({ status: "refused", code });
+          expect(posts).toBe(0);
+        });
+      }
+    }
+  }
+
+  test("关过一次再打开：旧意图作废，但新发起的使用照常", async () => {
+    const { h, post } = setup();
+    const g = holdGet(h, (u) => u.endsWith("/wham/usage"));
+    const pending = h.scheduler.refresh("codex", "view");
+    await until(g.reached);
+    const stale = h.scheduler.consumeCodexReset(null);
+    disable(h);
+    h.enabled = true;
+    g.release();
+    expect(await stale).toEqual({ status: "refused", code: "disabled" });
+    await pending;
+    expect((await h.scheduler.consumeCodexReset(null)).status).toBe("done");
+    expect(post.calls).toHaveLength(1);
+  });
+
+  test("POST 已经发出后才关开关：结果照真实答复返回（卡已扣），只是不入库", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const { h, post } = setup(async () => {
+      await gate;
+      return RESET();
+    });
+    const consume = h.scheduler.consumeCodexReset(null);
+    await until(() => post.calls.length === 1);
+    disable(h);
+    release();
+    expect(await consume).toEqual({ status: "done", code: "reset", windowsReset: 2 });
+    h.enabled = true;
+    expect((await h.scheduler.view()).codex.endpoints.codex_usage).toBeUndefined();
+  });
+
+  test("POST 已经发出后网络断了：报「结果不明」（failed），不报成没扣", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const { h, post } = setup(async () => {
+      await gate;
+      throw new Error("socket hang up");
+    });
+    const consume = h.scheduler.consumeCodexReset(null);
+    await until(() => post.calls.length === 1);
+    disable(h);
+    release();
+    expect(await consume).toEqual({ status: "failed", code: "network" });
   });
 });

@@ -7,7 +7,8 @@
  * 形状照官方 codex CLI（openai/codex codex-rs/backend-client/src/client/rate_limit_resets.rs；本机 codex 0.159.3 二进制里
  * 同一路径与字段名），请求头与只读 GET 同一份（cred.authHeaders()）。
  *
- * POST 之前现拉两份只读数据核对：额度里「此刻可用」≥ 1、明细里这张卡（HMAC 键对得上）仍可用，任何一步不过就不发。
+ * POST 之前现拉两份只读数据核对：额度里「此刻可用」≥ 1、明细里这张卡（HMAC 键对得上）仍可用，任何一步不过就不发；
+ * 发之前最后再由调用方复验一次开关 / 代际 / 当前凭据（beforePost）。
  * 发出去之后不管成败都再拉一次两份数据交给调用方入库。POST 从不自动重发：换个请求号重发就是再扣一张。
  * 单测 tests/quota-consume.test.ts（全部假 fetch）。
  */
@@ -43,6 +44,11 @@ export interface ConsumeDeps {
   now(): number;
   /** HMAC(本机密钥, 账户键 + credit.id)，与看板里的 key 同一口径 */
   hashCreditId(rawId: string): string;
+  /**
+   * 不可逆的 POST 紧前复验（开关、代际、当前凭据）：核对那两次 GET 期间开关可能被关、账户可能被换。
+   * 返回拒绝码就不发；它返回之后到 POST 发出之间没有别的 await。
+   */
+  beforePost(): Promise<"disabled" | "identity_changed" | null>;
 }
 
 export interface ConsumeRun {
@@ -101,6 +107,8 @@ export async function consumeCodexResetCredit(cred: QuotaCredential, creditKey: 
   if (!credits) return { result: { status: "refused", code: "bad_shape" }, usage: usage.data, credits: null };
   const rawId = pickRawId(raw.data, credits, creditKey, deps);
   if (!rawId) return { result: { status: "refused", code: "credit_unavailable" }, usage: usage.data, credits };
+  const stop = await deps.beforePost();
+  if (stop) return { result: { status: "refused", code: stop }, usage: null, credits: null }; // 开关已关 / 换了号：这份数据也不该入库
   const result = await postConsume(cred, rawId, deps);
   return { result, ...(await refreshAfter(cred, deps)) };
 }

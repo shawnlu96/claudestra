@@ -195,6 +195,18 @@ describe("POST /quota/codex/reset-credit（使用重置卡，真实消费）", (
     expect(post.calls.length).toBe(n + 1);
   });
 
+  test("手改 config 关掉开关（没走 PUT）：消费入口现读开关 → refused disabled，POST 0（审查 #687）", async () => {
+    usable = 1;
+    const n = post.calls.length;
+    cfgEnabled = false;
+    try {
+      expect(await (await call(PATH, OWNER, "POST", {})).json()).toEqual({ ok: true, result: { status: "refused", code: "disabled" } });
+      expect(post.calls.length).toBe(n);
+    } finally {
+      cfgEnabled = true;
+    }
+  });
+
   test("参数与方法：creditKey 只收 32 位 hex 或不给；坏 JSON 400；GET 405；服务没起来时门先于 503", async () => {
     const n = post.calls.length;
     for (const bad of [{ creditKey: 1 }, { creditKey: "xyz" }, { creditKey: CREDIT_IDS[0] }]) expect((await call(PATH, OWNER, "POST", bad)).status).toBe(400);

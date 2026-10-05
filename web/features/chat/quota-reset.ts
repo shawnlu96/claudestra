@@ -45,7 +45,8 @@ const DONE: Record<string, Omit<ResetOutcome, "params">> = {
 const REFUSED: Record<string, string> = {
   not_applicable: "此刻没有可用的卡，没有发出使用请求",
   credit_unavailable: "这张卡已不在可用列表里，没有发出使用请求",
-  disabled: "实时读取已关闭，没有发出使用请求",
+  disabled: "实时读取已关闭（或刚被关过），没有发出使用请求",
+  identity_changed: "账号或登录凭据刚变过，没有发出使用请求；刷新后重新确认",
 };
 
 const out = (tone: ResetOutcome["tone"], key: string, params: Record<string, string> = {}): ResetOutcome => ({ tone, key, params });

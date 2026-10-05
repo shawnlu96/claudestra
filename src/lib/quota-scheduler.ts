@@ -257,29 +257,43 @@ export class QuotaScheduler {
     const post = this.deps.consumeFetch;
     if (!post || !this.deps.isEnabled()) return { status: "refused", code: "disabled" };
     this.consuming = true;
+    const gen = this.gen; // 入队时绑定代际：关过一次（onDisabled）这次意图就作废，再打开也不复活
     try {
-      const task = (this.chains.get("codex") ?? Promise.resolve()).then(() => this.consumeOnce(creditKey, post)).catch((e): ConsumeResult => {
-        // 能抛的只有 POST 之前那几步（读凭据、算 HMAC）；POST 及之后都不抛，所以这里一定没扣
+      return await this.consumeBound(creditKey, post, gen).catch((e): ConsumeResult => {
+        // 能抛的只有 POST 之前那几步（读 / 复验凭据、算 HMAC）；POST 及之后都不抛，所以这里一定没扣
         console.error(`[quota] 使用重置卡前置步骤出错（${(e as Error)?.name ?? "unknown"}），没有发出请求`);
         return { status: "refused", code: "internal" };
       });
-      this.chains.set("codex", task);
-      return await task;
     } finally {
       this.consuming = false;
     }
   }
 
-  private async consumeOnce(creditKey: string | null, post: ConsumeFetch): Promise<ConsumeResult> {
-    const gen = this.gen;
+  /** 入队时就读凭据：这次确认只属于此刻的账户与凭据指纹，排队 / 核对期间换了号或换了 token 都不转给新的，要用户刷新后重新确认 */
+  private async consumeBound(creditKey: string | null, post: ConsumeFetch, gen: number): Promise<ConsumeResult> {
     const cr = await this.deps.readCredential("codex");
     if (!cr.ok) return { status: "refused", code: cr.code };
-    const cred = cr.cred;
+    const task = (this.chains.get("codex") ?? Promise.resolve()).then(() => this.consumeOnce(creditKey, post, gen, cr.cred));
+    this.chains.set("codex", task.catch(() => undefined)); // 链上只关心上一个结束了，异常由 consumeCodexReset 接住
+    return task;
+  }
+
+  /** 出队、POST 紧前、入库前各复验一次：开关还开着、代际没变、凭据还是入队时那份（账户与指纹都比） */
+  private async consumeOnce(creditKey: string | null, post: ConsumeFetch, gen: number, cred: QuotaCredential): Promise<ConsumeResult> {
+    const live = () => gen === this.gen && this.deps.isEnabled();
+    const recheck = async (): Promise<"disabled" | "identity_changed" | null> => {
+      if (!live()) return "disabled";
+      const same = await this.deps.confirmCredential(cred);
+      if (!live()) return "disabled";
+      return same ? null : "identity_changed";
+    };
+    const stop = await recheck();
+    if (stop) return { status: "refused", code: stop };
     const run = await consumeCodexResetCredit(cred, creditKey, {
-      fetch: this.deps.fetch, post, now: this.deps.now, hashCreditId: (raw) => this.deps.hashCreditId(cred.accountKey, raw),
+      fetch: this.deps.fetch, post, now: this.deps.now, hashCreditId: (raw) => this.deps.hashCreditId(cred.accountKey, raw), beforePost: recheck,
     });
     try {
-      if (gen === this.gen && this.deps.isEnabled() && (await this.deps.confirmCredential(cred))) await this.storeFresh(cred.accountKey, run);
+      if ((await recheck()) === null) await this.storeFresh(cred.accountKey, run);
     } catch (e) {
       // 入库失败不能吞掉消费结果（卡可能已经扣了）：看板等下一次查询再更新
       console.error(`[quota] 使用重置卡后入库失败（${(e as Error)?.name ?? "unknown"}），结果照常返回`);

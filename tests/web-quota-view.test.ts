@@ -167,6 +167,8 @@ describe("Codex「使用一次重置」（quota-reset.ts）", () => {
     expect(ok({ status: "done", code: "already_redeemed" }).tone).toBe("success");
     expect(ok({ status: "done", code: "no_credit" })).toMatchObject({ tone: "info", key: "这张卡已经不能用了，没有扣卡" });
     expect(ok({ status: "refused", code: "not_applicable" })).toMatchObject({ tone: "info", key: "此刻没有可用的卡，没有发出使用请求" });
+    expect(ok({ status: "refused", code: "identity_changed" })).toMatchObject({ tone: "info", key: "账号或登录凭据刚变过，没有发出使用请求；刷新后重新确认" });
+    expect(ok({ status: "refused", code: "disabled" }).key).toBe("实时读取已关闭（或刚被关过），没有发出使用请求");
     expect(ok({ status: "refused", code: "http_429" })).toEqual({ tone: "error", key: "核对数据失败（{why}），没有发出使用请求", params: { why: reasonText("http_429")! } });
     expect(ok({ status: "failed", code: "network" })).toMatchObject({ tone: "error", params: { why: "网络不通" } });
     expect(ok({ status: "done", code: "brand_new" }).key).toBe("请求没完成，扣没扣以刷新后的数字为准");
