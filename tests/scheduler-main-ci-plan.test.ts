@@ -245,3 +245,89 @@ describe("freshness and durable PM notification plans", () => {
     expect(planMainCi({ ...input(null), readFailureSince: 0 }).notification).toBeNull();
   });
 });
+
+describe("masked failures and persistent unknown PM alerts", () => {
+  test.each([
+    { label: "missing", rows: [{ name: "a", conclusion: "failure" }] },
+    { label: "pending", rows: [{ name: "a", conclusion: "failure" }, { name: "b", conclusion: null }] },
+    { label: "ambiguous", rows: [{ name: "a", conclusion: "failure" }, { name: "b", conclusion: "success" }, { name: "b", conclusion: "success" }] },
+  ])("red-masked-silent: failure plus $label notifies PM with SHA-level dedup", ({ rows }) => {
+    const i = multiInput(rows);
+    expect(i.health.state).toBe("unknown");
+    const first = planMainCi(i);
+    expect(first).toMatchObject({ actions: allPaused, repair: null, notification: {
+      kind: "main_red", recipient: "project-pm", state: "unknown", mainSha: MAIN,
+    } });
+    expect(first.notification!.key).toBe(planMainCi(input()).notification!.key);
+    const later = multiInput([{ name: "a", conclusion: "failure" }, { name: "b", conclusion: "success" }]);
+    later.notificationClaims = JSON.parse(JSON.stringify([first.notification!.key]));
+    expect(planMainCi(later).notification).toBeNull();
+    expect(planMainCi({ ...i, currentMainSha: NEXT }).notification).toBeNull();
+    expect(planMainCi({ ...i, now: NOW + 60_001 }).notification).toBeNull();
+  });
+
+  test("notify-lacks-faultkey: notification carries exact binding; refreshed evidence requires fresh approval", () => {
+    const i = multiInput([{ name: "a", conclusion: "failure" }, { name: "b", conclusion: null }]);
+    const first = planMainCi(i).notification!;
+    expect(first?.faultKey).toBe(mainCiFaultKey(i.health));
+    const a = approval(i);
+    a.binding.faultKey = first.faultKey!;
+    expect(planMainCi({ ...i, approvals: [a] }).repair).not.toBeNull();
+    const next = multiInput([{ name: "a", conclusion: "failure" }, { name: "b", conclusion: "success" }]);
+    next.approvals = [a];
+    next.notificationClaims = [first.key];
+    expect(planMainCi(next)).toMatchObject({ repair: null, notification: null, faultKey: mainCiFaultKey(next.health) });
+    expect(planMainCi(next).faultKey).not.toBe(first.faultKey);
+    next.approvals = [approval(next)];
+    expect(planMainCi(next).repair).not.toBeNull();
+  });
+
+  function uncertain(code: "missing_check" | "ambiguous_check" | "invalid_checks" | "scope_mismatch"): MainCiPlanInput {
+    const i = multiInput([]);
+    const main = { project: target.project, repo: target.repo, ref: "refs/heads/main", sha: MAIN };
+    const runs = code === "ambiguous_check" ? [1, 2].map((id) => ({ id, name: "a", head_sha: MAIN, status: "completed", conclusion: "success" })) : [];
+    i.health = evaluateMainCi(i.target, { before: main, after: main, observedAt: NOW, checks: { ...main,
+      repo: code === "scope_mismatch" ? "other/repo" : target.repo, total_count: code === "invalid_checks" ? 7 : runs.length,
+      check_runs: runs, commit_status: { sha: MAIN, total_count: 0, statuses: [] } } });
+    expect(i.health.reasons.some((r) => r.code === code)).toBe(true);
+    i.uncertainty = { project: target.project, repo: target.repo, mainSha: MAIN, since: NOW };
+    return i;
+  }
+
+  test.each(["missing_check", "ambiguous_check", "invalid_checks", "scope_mismatch"] as const)(
+    "persistent-unknown-silent: %s escalates after 15 minutes with durable hourly dedup", (code) => {
+      const i = uncertain(code);
+      const tick = (elapsed: number) => {
+        i.now = NOW + elapsed;
+        i.health = { ...i.health, observedAt: i.now };
+        return planMainCi(i);
+      };
+      expect(tick(15 * 60_000 - 1).notification).toBeNull();
+      const first = tick(15 * 60_000).notification!;
+      expect(first).toMatchObject({ recipient: "project-pm", kind: "checks_unavailable", state: "unknown", mainSha: MAIN,
+        faultKey: mainCiFaultKey(i.health) });
+      expect(planMainCi(i).actions).toEqual(allPaused);
+      i.notificationClaims = JSON.parse(JSON.stringify([first.key]));
+      expect(tick(75 * 60_000 - 1).notification).toBeNull();
+      expect(tick(75 * 60_000).notification?.key).not.toBe(first.key);
+      expect(planMainCi({ ...i, uncertainty: null }).notification).toBeNull();
+      expect(planMainCi({ ...input("success"), uncertainty: i.uncertainty }).notification).toBeNull();
+    });
+
+  test("uncertainty timer never crosses main/scope or promotes pending/drift/stale evidence", () => {
+    const i = uncertain("missing_check");
+    i.uncertainty!.since = 0;
+    expect(planMainCi(i).notification?.kind).toBe("checks_unavailable");
+    for (const fields of [{ project: "other" }, { repo: "other/repo" }, { mainSha: NEXT }, { mainSha: "short" },
+      { since: -1 }, { since: NaN }, { since: NOW + 1 }]) {
+      expect(planMainCi({ ...i, uncertainty: { ...i.uncertainty!, ...fields } }).notification).toBeNull();
+    }
+    for (const fields of [{ currentMainSha: NEXT }, { currentMainSha: null }, { now: NOW + 60_001 }]) {
+      expect(planMainCi({ ...i, ...fields }).notification).toBeNull();
+    }
+    expect(planMainCi({ ...input(null), uncertainty: i.uncertainty }).notification).toBeNull();
+    const main = { project: target.project, repo: target.repo, ref: "refs/heads/main", sha: NEXT };
+    const drift = evaluateMainCi(i.target, { before: { ...main, sha: MAIN }, after: main, checks: null, observedAt: NOW });
+    expect(planMainCi({ ...i, health: drift, currentMainSha: NEXT, uncertainty: { ...i.uncertainty!, mainSha: NEXT } }).notification).toBeNull();
+  });
+});

@@ -17,6 +17,8 @@ export interface MainCiPlanInput {
   maxAgeMs: number;
   /** Persisted start of consecutive read failures for this target, reset on any completed read. */
   readFailureSince: number | null;
+  /** Persisted consecutive check-evidence uncertainty, scoped to this main. Reset on recovery, pending-only, read error or drift. */
+  uncertainty?: { project: string; repo: string; mainSha: string; since: number } | null;
   candidate: MainCiCandidate;
   /** Trusted project metadata and active, persisted PM approvals; MAINCIW supplies these after normal authorization, never from task text. */
   projectPms: readonly string[];
@@ -33,10 +35,12 @@ export interface MainCiPlan {
   continue: readonly ["write", "independent-review"];
   preserve: readonly ["reviews", "rounds", "resources", "unknown-side-effects"];
   cancelExistingCi: false;
+  /** Current exact approval binding, even when notification is deduped. MAINCIW must refresh before asking PM; changed evidence requires new approval. */
+  faultKey: string | null;
   repair: { requestId: string; taskId: string; head: string; requires: readonly ["review", "ui", "ci", "authorization"] } | null;
   /** Integration must atomically persist this claim before sending to this project's PM; a lost claim means no send. */
   notification: { recipient: "project-pm"; project: string; key: string; mainSha: string | null; state: "red" | "unknown";
-    kind: "main_red" | "read_unavailable" } | null;
+    kind: "main_red" | "read_unavailable" | "checks_unavailable"; faultKey: string | null } | null;
 }
 
 /** Exact repair identity; notification dedup deliberately excludes volatile check progress. */
@@ -68,10 +72,22 @@ function recentObservation(i: MainCiPlanInput): boolean {
     Number.isSafeInteger(i.maxAgeMs) && i.maxAgeMs > 0 && i.now >= i.health.observedAt && i.now - i.health.observedAt <= i.maxAgeMs;
 }
 
-function notification(i: MainCiPlanInput, current: boolean): MainCiPlan["notification"] {
+function uncertaintyWindow(i: MainCiPlanInput): number | null {
+  const u = i.uncertainty, h = i.health;
+  if (!u || !mainCiTargetValid({ ...u, requiredChecks: i.target.requiredChecks }) || !sameScope(u, i.target) ||
+    !mainCiSha(u.mainSha) || u.mainSha.toLowerCase() !== h.mainSha?.toLowerCase() ||
+    !Number.isSafeInteger(u.since) || u.since < 0 || u.since > h.observedAt || i.now - u.since < 15 * 60_000) return null;
+  const faults = ["invalid_checks", "scope_mismatch", "stale_checks", "missing_check", "ambiguous_check"];
+  if (h.state !== "unknown" || !h.reasons.some((r) => faults.includes(r.code)) ||
+    !h.reasons.every((r) => faults.includes(r.code) || r.code === "pending_check")) return null;
+  return Math.floor((i.now - u.since - 15 * 60_000) / (60 * 60_000));
+}
+
+function notification(i: MainCiPlanInput, current: boolean, faultKey: string | null): MainCiPlan["notification"] {
   const h = i.health;
-  let key: string, kind: "main_red" | "read_unavailable";
-  if (current && h.state === "red") {
+  const uncertainWindow = current ? uncertaintyWindow(i) : null;
+  let key: string, kind: NonNullable<MainCiPlan["notification"]>["kind"];
+  if (current && (h.state === "red" || h.reasons.some((r) => r.code === "unsuccessful_check"))) {
     // One red claim per main commit: even failed/cancelled jobs finishing at different times must not spam PM.
     key = JSON.stringify([i.target.project, i.target.repo.toLowerCase(), h.mainSha!.toLowerCase(), "red"]);
     kind = "main_red";
@@ -82,9 +98,12 @@ function notification(i: MainCiPlanInput, current: boolean): MainCiPlan["notific
     const window = Math.floor((i.now - i.readFailureSince! - 15 * 60_000) / (60 * 60_000));
     key = JSON.stringify([i.target.project, i.target.repo.toLowerCase(), "read_unavailable", i.readFailureSince, window]);
     kind = "read_unavailable";
+  } else if (uncertainWindow !== null) {
+    key = JSON.stringify([i.target.project, i.target.repo.toLowerCase(), h.mainSha!.toLowerCase(), "checks_unavailable", i.uncertainty!.since, uncertainWindow]);
+    kind = "checks_unavailable";
   } else return null;
   return i.notificationClaims.includes(key) ? null :
-    { recipient: "project-pm", project: i.target.project, key, mainSha: h.mainSha, state: h.state as "red" | "unknown", kind };
+    { recipient: "project-pm", project: i.target.project, key, mainSha: h.mainSha, state: h.state as "red" | "unknown", kind, faultKey };
 }
 
 /** A pause is an overlay, never a ledger transition. No rounds/failures are charged and no in-flight effect is retried. */
@@ -107,7 +126,8 @@ export function planMainCi(input: MainCiPlanInput): MainCiPlan {
       green ? "healthy" : repair ? "pm_repair_candidate" : "main_unhealthy",
     actions: { formTrain: normal, updateBranch: serial, rerun: serial, merge: serial, bounce: normal },
     continue: ["write", "independent-review"], preserve: ["reviews", "rounds", "resources", "unknown-side-effects"], cancelExistingCi: false,
+    faultKey: current ? fault : null,
     repair: repair ? { requestId: repair.requestId, taskId: c.taskId, head: c.head, requires: ["review", "ui", "ci", "authorization"] } : null,
-    notification: scopeOk && recent ? notification(input, current) : null,
+    notification: scopeOk && recent ? notification(input, current, current ? fault : null) : null,
   };
 }
