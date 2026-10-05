@@ -2,16 +2,17 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, setMeta, setTask } from "../src/lib/ledger-write.js";
+import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { createTask, deliver, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { testChildEnv } from "./test-env.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const f of cleanup.splice(0)) f(); });
-function cliFixture(ran = false) {
+function cliFixture(ran = false, delivered = false) {
   const state = mkdtempSync(join(tmpdir(), "rlock-cli-")), path = join(state, "ledger.sqlite");
   const db = openLedger(path), owner = { actor: "owner", now: 500 };
   cleanup.push(() => { closeLedger(path); rmSync(state, { recursive: true, force: true }); });
@@ -29,12 +30,19 @@ function cliFixture(ran = false) {
     settleIntent(db, owner, { id: "claim", from: "pending", to: "submitted" });
     settleIntent(db, owner, { id: "claim", from: "submitted", to: "done" });
   } else settleIntent(db, owner, { id: "claim", from: "pending", to: "cancelled" });
-  setWorkflow(db, owner, { ...w, workflowRev: 1, mode: "manual", reason: "explicit pause" });
-  setTask(db, owner, { id: "MQ", rev: 1, patch: { extra: { fileGlobs: ["keep.ts"] } } });
+  if (delivered) {
+    moveStage(db, owner, { taskId: "MQ", from: "spec", to: "restate" });
+    moveStage(db, owner, { taskId: "MQ", from: "restate", to: "build" });
+    assignStep(db, owner, { taskId: "MQ", step: "write", executor: "writer@fake-peer", executorKind: "peer" });
+    deliver(db, owner, { taskId: "MQ", headSHA: "a".repeat(40), moveFrom: "build" });
+  }
+  setWorkflow(db, owner, { ...w, taskRev: getTask(db, "MQ")!.rev, workflowRev: 1, mode: "manual", reason: "explicit pause" });
+  setTask(db, owner, { id: "MQ", rev: getTask(db, "MQ")!.rev, patch: { extra: { fileGlobs: ["keep.ts"] } } });
+  const taskRev = String(getTask(db, "MQ")!.rev);
   const home = join(state, "home"); mkdirSync(home);
   const cli = async (flags: string[] = [], extra: Record<string, string | undefined> = {}) => {
     const proc = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", join(import.meta.dir, "../src/manager.ts"), "ledger",
-      "scheduler-file-scope", "MQ", "--project", "p", "--rev", "2", "--workflow-rev", "2", "--reason", "approved narrowing", ...flags], {
+      "scheduler-file-scope", "MQ", "--project", "p", "--rev", taskRev, "--workflow-rev", "2", "--reason", "approved narrowing", ...flags], {
       cwd: state, env: testChildEnv({ HOME: home, CODEX_HOME: join(home, ".codex"), CLAUDESTRA_STATE_DIR: state,
         CLAUDESTRA_RUNTIME_DIR: join(state, "runtime"), DISCORD_CHANNEL_ID: "111", ...extra }), stdout: "pipe", stderr: "pipe",
     });
@@ -156,10 +164,15 @@ test.each(["local", "peer", "peer-step", "registry-io", "conflict"])("real CLI %
 });
 
 test("real CLI releases and reacquires scope after dispatch with historical names but no session binding", async () => {
-  const f = cliFixture(true);
+  const f = cliFixture(true, true);
   f.db.query("UPDATE tasks SET agent = 'agent-old', assignee = 'agent-w', assigneeKind = 'agent' WHERE id = 'MQ'").run();
-  f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
-    VALUES ('MQ', 'write', 'writer@fake-peer', 'peer', 'done', 1, 1)`).run();
+  expect(f.db.query("SELECT step, state, executor FROM task_steps").all())
+    .toEqual([{ step: "write", state: "delivered", executor: "writer@fake-peer" }]);
+  writeFileSync(join(f.state, "registry.json"), JSON.stringify({ agents: {
+    "agent-pm": { channelId: "111", projectId: "p" },
+    "agent-old": { status: "active", task: "other", sessionId: "unrelated" }, w: { status: "active" },
+    "writer@fake-peer": { status: "active", task: "other" },
+  } }));
   const before = f.snapshot();
   expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
   expect(await f.cli()).toMatchObject({ ok: true, executable: true, reasons: [], remove: ["old.ts"] });
@@ -167,14 +180,14 @@ test("real CLI releases and reacquires scope after dispatch with historical name
   expect(await f.cli(["--apply"])).toMatchObject({ ok: true, duplicate: false });
   const stable = () => ["tasks", "task_steps", "scheduler_intents", "scheduler_sessions", "lend_write_leases"]
     .map(table => f.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
-  setTask(f.db, { actor: "owner" }, { id: "MQ", rev: 2, patch: { extra: { fileGlobs: ["old.ts", "keep.ts"] } } });
-  const preserved = stable();
-  expect(await f.cli(["--rev", "3", "--apply"])).toMatchObject({ ok: true, add: ["old.ts"], remove: [] });
+  setTask(f.db, { actor: "owner" }, { id: "MQ", rev: getTask(f.db, "MQ")!.rev, patch: { extra: { fileGlobs: ["old.ts", "keep.ts"] } } });
+  const restoredRev = String(getTask(f.db, "MQ")!.rev), preserved = stable();
+  expect(await f.cli(["--rev", restoredRev, "--apply"])).toMatchObject({ ok: true, add: ["old.ts"], remove: [] });
   expect(stable()).toEqual(preserved);
   expect(f.db.query("SELECT resource FROM scheduler_resources ORDER BY resource").all())
-    .toEqual(["keep.ts", "old.ts", "slot:p:0"].map(resource => ({ resource })));
+    .toEqual(["keep.ts", "old.ts"].map(resource => ({ resource })));
   const applied = f.snapshot();
-  expect(await f.cli(["--rev", "3", "--apply"])).toMatchObject({ ok: true, duplicate: true });
+  expect(await f.cli(["--rev", restoredRev, "--apply"])).toMatchObject({ ok: true, duplicate: true });
   expect(f.snapshot()).toEqual(applied);
 });
 
@@ -195,7 +208,7 @@ test("real CLI refuses a registered file never planned by a dispatch", async () 
 });
 
 test.each(["author", "reviewer"])("real CLI residual %s binding lacks retirement facts: preview and apply are zero-write", async role => {
-  const f = cliFixture();
+  const f = cliFixture(true, true);
   f.db.query(`INSERT INTO scheduler_sessions
     (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
     VALUES ('MQ', ?, 'agent-bound', 'residual-session', 'claude', 'tmux', 'active', 'claim', 1, 1)`).run(role);

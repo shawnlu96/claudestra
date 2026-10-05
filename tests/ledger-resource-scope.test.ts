@@ -4,21 +4,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reconcileFileScope } from "../src/lib/ledger-resource-scope.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, setMeta, setTask } from "../src/lib/ledger-write.js";
+import { createTask, deliver, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
+import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const f of cleanups.splice(0)) f(); });
-function fixture(ran = false) {
+function fixture(ran = false, deliveredStep?: "write" | "fix") {
   const dir = mkdtempSync(join(tmpdir(), "rlock-unit-")), path = join(dir, "ledger.sqlite"), registryPath = join(dir, "registry.json");
   const db = openLedger(path), ctx = { actor: "owner", now: 100 };
   cleanups.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
   writeFileSync(registryPath, JSON.stringify({ agents: {} }));
   createTask(db, ctx, { project: "p", id: "T", title: "paused", kind: "code", extra: { fileGlobs: ["a.ts", "b.ts", "c.ts"] } });
   const configure = (mode: "auto" | "manual", workflowRev: number) => setWorkflow(db, ctx, {
-    taskId: "T", taskRev: 1, workflowRev, template: "code", templateVersion: 2, mode, authorFamily: "claude", fallback: "wait", reason: "PM pause",
+    taskId: "T", taskRev: getTask(db, "T")!.rev, workflowRev, template: "code", templateVersion: 2, mode, authorFamily: "claude", fallback: "wait", reason: "PM pause",
   });
   configure("auto", 0);
   const seq = (db.query("SELECT MAX(seq) AS n FROM events").get() as { n: number }).n;
@@ -28,10 +29,21 @@ function fixture(ran = false) {
     settleIntent(db, ctx, { id: "real-plan", from: "pending", to: "submitted" });
     settleIntent(db, ctx, { id: "real-plan", from: "submitted", to: "done" });
   } else settleIntent(db, ctx, { id: "real-plan", from: "pending", to: "cancelled" });
+  if (deliveredStep) {
+    moveStage(db, ctx, { taskId: "T", from: "spec", to: "restate" });
+    moveStage(db, ctx, { taskId: "T", from: "restate", to: "build" });
+    assignStep(db, ctx, { taskId: "T", step: "write", executor: "writer@fake-peer", executorKind: "peer" });
+    deliver(db, ctx, { taskId: "T", headSHA: "a".repeat(40), moveFrom: "build" });
+    if (deliveredStep === "fix") {
+      moveStage(db, ctx, { taskId: "T", from: "review", to: "fix" });
+      assignStep(db, ctx, { taskId: "T", step: "fix", executor: "agent-fixer", executorKind: "agent" });
+      deliver(db, ctx, { taskId: "T", headSHA: "b".repeat(40), moveFrom: "fix" });
+    }
+  }
   configure("manual", 1);
   const scope = (files: string[]) => setTask(db, ctx, { id: "T", rev: getTask(db, "T")!.rev, patch: { extra: { fileGlobs: files } } });
   const input = () => ({ taskId: "T", project: "p", taskRev: getTask(db, "T")!.rev, workflowRev: 2, reason: "PM approved scope", registryPath });
-  const snapshot = () => ["tasks", "task_workflows", "scheduler_intents", "scheduler_resources", "scheduler_sessions", "lend_orders", "lend_write_leases", "events"]
+  const snapshot = () => ["tasks", "task_steps", "task_workflows", "scheduler_intents", "scheduler_resources", "scheduler_sessions", "lend_orders", "lend_write_leases", "events"]
     .map(table => db.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
   return { db, dir, path, registryPath, ctx, scope, input, snapshot };
 }
@@ -105,7 +117,7 @@ test("project mismatch, stale CAS, malformed scope and missing registry fail clo
 });
 
 test.each(["active", "creating", "stopped", "unknown"])("registry author %s cannot be dismissed by status alone", status => {
-  const f = fixture(); f.scope([]);
+  const f = fixture(true, "write"); f.scope([]);
   writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-writer": { task: "T", status, sessionId: "s" } } }));
   const before = f.snapshot();
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
@@ -130,12 +142,12 @@ test.each(["agent", "peer"])("unfinished %s step without a scheduler session sti
   expect(f.snapshot()).toEqual(before);
 });
 
-test.each(["recipient", "agent", "assignee", "done-step", "attempted-cancelled"])(
+test.each(["recipient", "agent", "assignee", "delivered-write", "delivered-fix", "attempted-cancelled"])(
   "historical %s without session bindings permits reconciliation", source => {
-    const f = fixture(true); f.scope([]);
+    const f = fixture(true, source === "delivered-write" ? "write" : source === "delivered-fix" ? "fix" : undefined); f.scope([]);
     if (source === "agent" || source === "assignee") f.db.query(`UPDATE tasks SET ${source} = 'agent-w' WHERE id = 'T'`).run();
-    if (source === "done-step") f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
-      VALUES ('T', 'write', 'writer@fake-peer', 'peer', 'done', 1, 1)`).run();
+    if (source.startsWith("delivered-")) expect(f.db.query("SELECT state FROM task_steps").all())
+      .toEqual(Array(source === "delivered-fix" ? 2 : 1).fill({ state: "delivered" }));
     if (source === "attempted-cancelled") f.db.query("UPDATE scheduler_intents SET status = 'cancelled' WHERE id = 'real-plan'").run();
     const before = f.snapshot();
     expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
@@ -145,7 +157,7 @@ test.each(["recipient", "agent", "assignee", "done-step", "attempted-cancelled"]
   },
 );
 
-test.each(["assigned", "delivered", "unknown"])("explicit author step %s is not merely a historical name", state => {
+test.each(["assigned", "unknown"])("explicit author step %s is not merely a historical name", state => {
   const f = fixture(true); f.scope([]);
   f.db.exec("PRAGMA ignore_check_constraints = ON");
   f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
@@ -156,11 +168,26 @@ test.each(["assigned", "delivered", "unknown"])("explicit author step %s is not 
   expect(f.snapshot()).toEqual(before);
 });
 
-test.each(["active", "creating", "stopped", "unknown"])("historical recipient still checks registry liveness: %s", status => {
-  const f = fixture(true); f.scope([]);
-  writeFileSync(f.registryPath, JSON.stringify({ agents: { w: { status, sessionId: "old-session" } } }));
+test.each(["active", undefined])("historical names alone do not bind a registry agent: %s", status => {
+  const f = fixture(true, "fix"); f.scope([]);
+  setTask(f.db, f.ctx, { id: "T", rev: f.input().taskRev, patch: { assigneeKind: "agent", assignee: "agent-pm" } });
+  writeFileSync(f.registryPath, JSON.stringify({ agents: {
+    w: { status, sessionId: "new-session", task: "other" }, pm: { status },
+    "agent-fixer": { status, task: "other" }, "writer@fake-peer": { status, task: "other" },
+  } }));
   const before = f.snapshot();
-  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false });
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: true });
+  expect(f.snapshot()).toEqual(before);
+  expect(reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toMatchObject({ ok: true });
+});
+
+test("registry session association survives a changed task label or agent name", () => {
+  const f = fixture(true); f.scope([]);
+  f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES ('T', 'author', 'agent-old', 'bound-session', 'claude', 'tmux', 'active', 'real-plan', 1, 2)`).run();
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { renamed: { task: "other", status: "active", sessionId: "bound-session" } } }));
+  const before = f.snapshot(), dry = reconcileFileScope(f.db, f.ctx, f.input());
+  expect(dry.reasons).toContain("registry 作者 renamed 仍可写或状态未知");
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
   expect(f.snapshot()).toEqual(before);
 });
