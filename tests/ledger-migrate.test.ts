@@ -326,6 +326,7 @@ describe("写事件的底座只给写入模块", () => {
   // ledger-scheduler-pool.ts：调度身份把审查挂进共享池（i28-R9），事务内重算计划核对后才出单，之后只按出借单状态 CAS 结算意图
   // scheduler-apply.ts：调度身份按模板推自动卡（只许 restate→build、review→fix / merge），事务内重算计划核对后才 applyMove（T68f）
   // scheduler-deploy.ts：部署 journal（T68g），只有调度身份推进，deployed 才把本卡 merge→live，结清只 PM / master / owner
+  // scheduler-merge-handoff.ts：合并交仓库方（MHO1），只有调度身份记交接事件、按 GitHub 已合并把本卡 merge→live，事务内重核阶段 / head / PR / 审查
   // ledger-lend-peers.ts：借算力 v2（i28-W2）的 hello 入账、beat 续租 / 收回、推送应答，CAS 在它的事务里，写事件只经 ledger-lend.ts 的 leaseLend / withdrawPooledLend
   // ledger-lend-relay.ts：出借写单持单期间的规格追加 / 复述答复转发队列（i28-RS1），只写自己的两张表和一条 lend relay note，不推阶段
   // order-mark.ts：只写两种按意图去重的 scheduler 事件（领单留痕 = 收件人本人本会话、未领单报警 = 调度身份），不推阶段（i28-M4b）
@@ -365,7 +366,7 @@ describe("写事件的底座只给写入模块", () => {
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts",
       "lib/memory-retrieve-order.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts", "lib/recovery-policy.ts",
       "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts", "lib/review-converge-notice.ts",
-      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts",
+      "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge-handoff.ts",
       "lib/scheduler-merge-train-hold.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
       "lib/scheduler-sessions.ts"]);

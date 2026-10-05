@@ -5,7 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { ControlBar } from "./control-bar";
 import { useT } from "@/lib/i18n";
-import { isShellTarget, terminalInput, terminalResize, terminalStream } from "@/lib/api/terminal";
+import { isShellTarget, startTermKeepalive, terminalInput, terminalResize, terminalStream } from "@/lib/api/terminal";
 import { postClientLog } from "@/lib/client-log";
 import { createOpenSettle, revealStatus, streamEndStatus, streamErrorStatus, type TermStatus } from "./open-settle";
 
@@ -288,7 +288,6 @@ export function TerminalView({
       };
       settle(6);
     };
-
     term.onData((data) => queueInputRef.current(data));
     term.onBinary((data) => queueInputRef.current(data));
 
@@ -310,6 +309,7 @@ export function TerminalView({
     const stallTimer = window.setInterval(() => {
       if (!disposed && Date.now() - lastByteAt > 15_000) abort.abort();
     }, 5_000);
+    const stopAlive = startTermKeepalive(() => (disposed ? null : termIdRef.current)); // 反方向的看门狗：bridge 靠它判这边还在
     async function connect() {
       let res: Response;
       try {
@@ -534,7 +534,7 @@ export function TerminalView({
       disposed = true;
       settle.cancel();
       clearTimeout(connectTimer); // dev 双 effect：首个 effect 的连接在 fire 前取消
-      clearInterval(stallTimer);
+      clearInterval(stallTimer); stopAlive();
       ro.disconnect();
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
