@@ -2,7 +2,7 @@
  * 出借 worker 的「回合失败」卡（bridge/acp-link.ts，extra.failure = error：内容策略 / 请求被拒 / 上下文耗尽）也停单，
  * 和额度 / 登录卡走同一条 finish 路径。之前 lend-deps.ts failureOf 只认额度 / 登录，被内容策略拦下的单一直挂在 started、续租占位。
  * 卡走真台账文件 + 生产 failureOf（lendDeps(...).failure）+ 临时 CODEX_HOME 里的真 rollout；worker / 网络 / tmux 都是 lend-harness 的假依赖。
- * 只认本单当前回合的卡（lend-turn-failure.ts）；回执只带类别不带原文；证据文件 0600（PR624 r1 三条 P1）。
+ * 只认本单当前回合的卡（lend-turn-failure.ts，按宿主报的失败时刻，不按写卡时刻）；回执只带类别不带原文；证据文件 0600（PR624 r1/r2）。
  */
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -37,8 +37,9 @@ afterEach(() => {
 interface Card { agent?: string; kind?: "owner_action" | "decide"; title?: string; context: string; extra: Record<string, unknown>; at?: number }
 
 const CARD_AT = Date.parse("2026-10-05T03:00:00Z");
-/** 当前回合的回合失败卡：带宿主报的会话 id，开在 rollout 最后一个 task_started 之后 */
-const turnFail = (context: string, extra: Record<string, unknown> = {}): Card => ({ context, extra: { failure: "error", sessionId: SID, ...extra } });
+/** 当前回合的回合失败卡：带宿主报的会话 id 和失败时刻（写卡前 1 秒），失败在 rollout 最后一个 task_started 之后 */
+const turnFail = (context: string, extra: Record<string, unknown> = {}): Card =>
+  ({ context, extra: { failure: "error", sessionId: SID, failedAt: CARD_AT - 1_000, ...extra } });
 const rolloutLine = (at: number, type: string) => JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg", payload: { type } });
 
 /**
@@ -150,10 +151,13 @@ test("报错原文里的本机路径 / 凭据不出本机：release detail、jou
   expect(kept[0]!.why).toContain(raw);
 });
 
-test("不是本单当前回合的回合失败卡不停单：开跑前开的、没带 / 带错会话、卡后又开过回合、找不到 rollout 或 task_started", async () => {
+test("不是本单当前回合的回合失败卡不停单：开跑前失败的、没带 / 带错会话或失败时刻、失败后又开过回合（含写卡晚到）、找不到 rollout 或 task_started", async () => {
+  const late = [rolloutLine(CARD_AT - 10_000, "task_started"), rolloutLine(CARD_AT - 8_000, "task_complete"), rolloutLine(CARD_AT - 2_000, "task_started")].join("\n");
   const cases: [string, () => ReturnType<typeof running>][] = [
-    ["开跑前", () => runningWith(rolloutLine(0, "task_started"), { ...turnFail(CYBER), at: 500 })],
+    ["开跑前", () => runningWith(rolloutLine(0, "task_started"), { ...turnFail(CYBER, { failedAt: 400 }), at: 500 })],
     ["老宿主没带会话", () => running(turnFail(CYBER, { sessionId: undefined }))],
+    ["老宿主没带失败时刻", () => running(turnFail(CYBER, { failedAt: undefined }))],
+    ["旧失败晚到：写卡前新回合已开始", () => runningWith(late, turnFail(CYBER, { failedAt: CARD_AT - 9_000 }))],
     ["会话不对", () => running(turnFail(CYBER, { sessionId: "01a1b2c3-0000-7000-8000-0000000000ff" }))],
     ["卡后又开了一轮", () => runningWith(`${rolloutLine(CARD_AT - 5_000, "task_started")}\n${rolloutLine(CARD_AT + 2_000, "task_started")}`, turnFail(CYBER))],
     ["没有 rollout", () => runningWith(null, turnFail(CYBER))],
@@ -176,16 +180,16 @@ beforeAll(() => {
   });
 });
 
-test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.failure=error 卡并记下宿主报的会话；没有在跑的出借单，生产 failureOf 不认", async () => {
+test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.failure=error 卡并记下宿主报的会话和失败时刻；没有在跑的出借单，生产 failureOf 不认", async () => {
   const ch = "local-lend-turnfail";
   const s = { send: () => {} };
   sockets.set(ch, s);
   const cards = () => listAsks(askDb(), { states: ["open"] }).filter((a) => a.fromChannelId === ch);
   await onAcpFrame({ type: "acp_failure", channelId: ch, failure: { kind: "error", key: "air:r1", message: "Rate limit reached", retry: true } }, s, {} as never);
-  await onAcpFrame({ type: "acp_failure", channelId: ch, sessionId: SID, failure: { kind: "error", key: "air:c1", message: CYBER, retry: false } }, s, {} as never);
+  await onAcpFrame({ type: "acp_failure", channelId: ch, sessionId: SID, failedAt: 1234, failure: { kind: "error", key: "air:c1", message: CYBER, retry: false } }, s, {} as never);
   for (let i = 0; i < 100 && !cards().length; i++) await Bun.sleep(10);
   const open = cards();
-  expect(open.map((a) => [a.context, a.extra.failure, a.extra.sessionId])).toEqual([[CYBER, "error", SID]]);
+  expect(open.map((a) => [a.context, a.extra.failure, a.extra.sessionId, a.extra.failedAt])).toEqual([[CYBER, "error", SID, 1234]]);
   const journal = harness();
   journals.push(journal);
   const seen = lendDeps(journal.db, new LedgerReader(askDb().filename), () => {}, undefined).failure(open[0]!.fromAgent!);

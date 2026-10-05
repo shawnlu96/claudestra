@@ -1,8 +1,9 @@
 /**
  * 回合失败卡算不算出借单「当前回合」的失败（lend-deps.ts failureOf）。worker 名按单固定、卡在结单时才关，单凭「这个 agent 有张开着的卡」
- * 会把开跑前的旧失败、换会话前的失败、已被后续回合接上的失败都算到这一单头上。三条都满足才认：卡开在本单开跑之后；
- * 卡上的会话（宿主报的 extra.sessionId）= journal 记的会话；卡开出之后这个会话没再开过回合（Codex rollout 的 event_msg task_started）。
- * 读不准一律不认，交回存活探测兜底（老宿主的卡没有 sessionId 也是不认）。tests/lend-turn-failure.test.ts。
+ * 会把开跑前的旧失败、换会话前的失败、已被后续回合接上的失败都算到这一单头上。按宿主报的失败时刻 extra.failedAt（不是 bridge 写卡的
+ * createdAt：写卡要先等 registry，晚到的旧失败会被当成新回合的）三条都满足才认：失败在本单开跑之后；卡上的会话（extra.sessionId）=
+ * journal 记的会话；失败之后这个会话没再开过回合（Codex rollout 的 event_msg task_started）。读不准一律不认，交回存活探测兜底
+ * （老宿主的卡没有这两个字段也是不认）。tests/lend-turn-failure.test.ts。
  */
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Ask } from "./ledger-asks.js";
@@ -33,10 +34,11 @@ function lastTurnStartAt(path: string): number | null {
   } finally { closeSync(fd); }
 }
 
-export function isCurrentTurnFailure(card: Pick<Ask, "createdAt" | "extra">, row: Pick<LendRow, "sessionId" | "startedAt">,
+export function isCurrentTurnFailure(card: Pick<Ask, "extra">, row: Pick<LendRow, "sessionId" | "startedAt">,
   sessionPath: (sessionId: string) => string | null): boolean {
-  if (!row.sessionId || row.startedAt === null || card.createdAt < row.startedAt || card.extra.sessionId !== row.sessionId) return false;
+  const failedAt = card.extra.failedAt;
+  if (typeof failedAt !== "number" || !row.sessionId || row.startedAt === null || failedAt < row.startedAt || card.extra.sessionId !== row.sessionId) return false;
   const path = sessionPath(row.sessionId);
   const turnAt = path ? lastTurnStartAt(path) : null;
-  return turnAt !== null && turnAt <= card.createdAt;
+  return turnAt !== null && turnAt <= failedAt;
 }

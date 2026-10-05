@@ -314,9 +314,9 @@ export class AcpHost {
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
-    // sessionId：出借停单按它认这张卡是不是当前会话的（lend-turn-failure.ts）
+    // sessionId / failedAt：出借停单据此认这张卡是不是当前会话、当前回合的（lend-turn-failure.ts）；bridge 写卡的时刻会晚于失败，不能代替 failedAt
     this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label,
-      sessionId: this.session?.sessionId || undefined });
+      sessionId: this.session?.sessionId || undefined, failedAt: Date.now() });
   }
 
   /** 权限请求：按 permId 交 bridge 出卡，等 owner 答（bridge 经 acp_call 回来）；到点按取消回适配器 */
