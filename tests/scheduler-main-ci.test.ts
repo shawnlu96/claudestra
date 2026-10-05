@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { evaluateMainCi, readMainCi, type MainCiReadPort, type MainCiTarget } from "../src/lib/scheduler-main-ci.js";
 
+const OBSERVED = 1_000_000;
 const OLD = "a".repeat(40), HEAD = "b".repeat(40), NEW = "c".repeat(40);
 const target: MainCiTarget = { project: "p", repo: "example/repo", requiredChecks: ["tests", "web", "desktop"] };
 const main = (sha = HEAD) => ({ project: target.project, repo: target.repo, ref: "refs/heads/main", sha });
 const run = (name: string, id: number, head_sha = HEAD) => ({ id, name, head_sha, status: "completed", conclusion: "success" as string | null });
-const checks = (sha = HEAD) => ({ project: target.project, repo: target.repo, sha, total_count: 3,
+const checks = (sha = HEAD) => ({ project: target.project, repo: target.repo, sha, total_count: 3, commit_status: { sha, total_count: 0, statuses: [] },
   check_runs: target.requiredChecks.map((name, i) => run(name, i + 1, sha)) });
 const evaluate = (batch: unknown = checks(), before: unknown = main(), after: unknown = main(), policy = target) =>
-  evaluateMainCi(policy, { before, after, checks: batch });
+  evaluateMainCi(policy, { before, after, checks: batch, observedAt: OBSERVED });
 
 describe("exact main CI health from synthetic GitHub check-runs", () => {
   test("requires complete, successful checks at both reads of the same full main commit", () => {
@@ -90,7 +91,7 @@ describe("exact main CI health from synthetic GitHub check-runs", () => {
   });
 
   test("input snapshot is not mutated", () => {
-    const snapshot = { before: main(), after: main(), checks: checks() };
+    const snapshot = { before: main(), after: main(), checks: checks(), observedAt: OBSERVED };
     const original = JSON.stringify(snapshot);
     evaluateMainCi(target, snapshot);
     expect(JSON.stringify(snapshot)).toBe(original);
@@ -135,7 +136,7 @@ describe("injected read port has no live default", () => {
     const port: MainCiReadPort = { main: async () => { throw new Error("must not read"); }, checks: async () => checks() };
     for (const bad of [null, {}, { ...target, repo: 123 }, { ...target, requiredChecks: null }, { ...target, requiredChecks: "ci" }]) {
       const policy = bad as unknown as MainCiTarget;
-      expect(evaluateMainCi(policy, { before: main(), after: main(), checks: checks() }).reasons).toEqual([{ code: "invalid_target" }]);
+      expect(evaluateMainCi(policy, { before: main(), after: main(), checks: checks(), observedAt: OBSERVED }).reasons).toEqual([{ code: "invalid_target" }]);
       expect((await readMainCi(policy, port)).reasons).toEqual([{ code: "invalid_target" }]);
     }
   });
@@ -147,5 +148,48 @@ describe("injected read port has no live default", () => {
       return { ...checks(), total_count: 2, check_runs: checks().check_runs.slice(0, 2) };
     } };
     expect(await readMainCi(policy, port)).toMatchObject({ state: "unknown", reasons: [{ code: "missing_check", check: "desktop" }] });
+  });
+});
+
+describe("combined commit-status evidence", () => {
+  const external = (state = "success", sha = HEAD) => ({ ...checks(sha), total_count: 2, check_runs: checks(sha).check_runs.slice(0, 2),
+    commit_status: { sha, total_count: 1, statuses: [{ id: 1, context: "desktop", state }] } });
+
+  test("external required CI joins check-runs; aggregate state alone cannot prove success", () => {
+    expect(evaluate(external()).state).toBe("green");
+    for (const state of ["failure", "error", "pending"]) {
+      expect(evaluate(external(state))).toMatchObject({ state: state === "pending" ? "unknown" : "red",
+        reasons: [{ code: state === "pending" ? "pending_check" : "unsuccessful_check", check: "desktop" }] });
+    }
+    const stale = external("success", OLD);
+    expect(evaluate({ ...external(), commit_status: stale.commit_status }).state).toBe("unknown");
+    expect(evaluate({ ...external(), commit_status: { sha: HEAD, total_count: 0, statuses: [], state: "success" } }).reasons)
+      .toEqual([{ code: "missing_check", check: "desktop" }]);
+  });
+
+  test("missing, malformed, truncated and conflicting status evidence fails closed", () => {
+    for (const commit_status of [undefined, null, {}, { sha: HEAD, total_count: 0, statuses: {} },
+      { ...external().commit_status, total_count: 2 }, { ...external().commit_status, sha: "short" }]) {
+      expect(evaluate({ ...checks(), commit_status }).state).toBe("unknown");
+    }
+    for (const row of [null, {}, { id: 0, context: "desktop", state: "success" }, { id: 1, context: "", state: "success" },
+      { id: 1, context: "desktop", state: "SUCCESS" }, { id: 1, context: "desktop", state: null }]) {
+      expect(evaluate({ ...external(), commit_status: { sha: HEAD, total_count: 1, statuses: [row] } }).state).toBe("unknown");
+    }
+    const rows = external().commit_status.statuses;
+    expect(evaluate({ ...external(), commit_status: { sha: HEAD, total_count: 2, statuses: [...rows, ...rows] } }).state).toBe("unknown");
+    expect(evaluate({ ...external(), commit_status: { sha: HEAD, total_count: 2, statuses: [...rows, { ...rows[0]!, id: 2 }] } }).reasons)
+      .toEqual([{ code: "ambiguous_check", check: "desktop" }]);
+    expect(evaluate({ ...checks(), commit_status: external("failure").commit_status }).reasons)
+      .toEqual([{ code: "ambiguous_check", check: "desktop" }]);
+  });
+
+  test("observation time is captured before I/O and invalid timestamps cannot prove health", async () => {
+    let now = OBSERVED;
+    const result = await readMainCi(target, { main: async () => main(), checks: async () => { now += 120_000; return checks(); } }, () => now);
+    expect(result).toMatchObject({ state: "green", observedAt: OBSERVED });
+    for (const observedAt of [NaN, Infinity, -1, 1.5]) {
+      expect(evaluateMainCi(target, { before: main(), after: main(), checks: checks(), observedAt }).state).toBe("unknown");
+    }
   });
 });
