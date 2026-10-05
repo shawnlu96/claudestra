@@ -4,7 +4,7 @@
  * 端口此刻确实被别人占着时，才清理后换端口重来（次数与截止时间都有界）；其余任何启动失败原样抛出，不重跑。
  * 成功时核验：pid 文件里的 bridge 活着、是本次起的、（有 lsof 时）正是它在监听这个端口。
  */
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync, rmSync, statSync } from "fs";
 import { join } from "path";
 import { SANDBOX_MARKER } from "../src/lib/sandbox.ts";
 import { sandboxLayout } from "../src/lib/sandbox-env.ts";
@@ -48,7 +48,7 @@ export class StartFailure extends Error {
 }
 
 /** 这个端口此刻能不能在回环上绑：能绑 → null；被占 → "EADDRINUSE"；别的错误原样抛（不当成被占） */
-export function bindProbe(port: number): "EADDRINUSE" | null {
+function bindProbe(port: number): "EADDRINUSE" | null {
   try {
     Bun.listen({ hostname: "127.0.0.1", port, socket: { data() {} } }).stop(true);
     return null;
@@ -221,4 +221,54 @@ export async function startSandbox(spec: StartSpec): Promise<Started> {
     await cleanupAttempt(spec, port, fresh);
   }
   throw new StartFailure(`连续 ${max} 次端口被抢，放弃：${attempts.map((a) => a.port).join(", ")}`, attempts);
+}
+
+/** 夹具起成功的沙箱登记表：正常收尾 stop 摘掉；测试断言中途失败时 stopAll 兜底 down（detached bridge 不会随测试进程退出） */
+export class Fleet {
+  private live = new Map<string, { spec: StartSpec; port: number; pid: number }>();
+
+  async start(spec: StartSpec): Promise<Started> {
+    const up = await startSandbox(spec);
+    this.live.set(spec.root, { spec, port: up.port, pid: up.pid });
+    return up;
+  }
+
+  /** down 并核验：本次 bridge 已退、bridge.pid 已删、端口已释放；问题逐条返回，不吞 */
+  async stop(root: string): Promise<string[]> {
+    const it = this.live.get(root);
+    if (!it) return [`${root} 没登记，无从 down`];
+    this.live.delete(root);
+    const d = Bun.spawnSync(it.spec.argv("down", it.port), { cwd: it.spec.cwd, env: it.spec.env(), stdout: "pipe", stderr: "pipe" });
+    const bad = d.exitCode === 0 ? [] : [`${root} down 失败：${d.stdout.toString()}${d.stderr.toString()}`];
+    for (let i = 0; pidAlive(it.pid) && i < 20; i++) await Bun.sleep(100);
+    if (pidAlive(it.pid)) bad.push(`${root} 的 bridge（pid ${it.pid}）down 后仍活着`);
+    if (existsSync(sandboxLayout(root).pidFile)) bad.push(`${root} down 后 bridge.pid 还在`);
+    if (bindProbe(it.port) !== null) bad.push(`${root} down 后端口 ${it.port} 仍被占`);
+    return bad;
+  }
+
+  async stopAll(): Promise<string[]> {
+    const bad: string[] = [];
+    for (const root of [...this.live.keys()]) bad.push(...(await this.stop(root)));
+    return bad;
+  }
+}
+
+/**
+ * 测试可确认的同步点：闸门文件 gate 在时，嵌进 shim 的这段 sh 记下 `${gate}.hit` 后停住，等 gate 被删（有界 15 秒）。
+ * 嵌在 tmux shim 前头 = 停在 up 的 ensure-tmux（预检之后、起 bridge 之前）
+ */
+export const gateShell = (gate: string) =>
+  `if [ -e '${gate}' ]; then : > '${gate}.hit'; i=0; while [ -e '${gate}' ] && [ $i -lt 300 ]; do sleep 0.05; i=$((i+1)); done; fi`;
+
+/** 等子进程停在闸门上 → 做 act（如抢端口）→ 放行；等不到（ms 内）或 act 抛错都原样抛出，闸门总会删 */
+export async function atGate(gate: string, ms: number, act: () => void): Promise<void> {
+  try {
+    for (const end = Date.now() + ms; !existsSync(`${gate}.hit`); await Bun.sleep(20)) {
+      if (Date.now() > end) throw new Error(`子进程没走到闸门 ${gate}`);
+    }
+    act();
+  } finally {
+    rmSync(gate, { force: true });
+  }
 }
