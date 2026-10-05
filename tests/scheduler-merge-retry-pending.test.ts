@@ -75,6 +75,7 @@ describe("MRRESTP a still-pending merge intent cancelled by PM's pause", () => {
         [pause, {}, { actor: "scheduler" }], [pause, { takeover: undefined }],
         [resume, { workflowRev: 999 }], [resume, { manual: false }], [resume, {}, { actor: "scheduler" }], [resume, { imported: true }],
         [plan, {}, { actor: "pm" }], [plan, { action: "stage" }], [plan, {}, { dedupKey: null }],
+        [plan, { template: undefined }], [plan, { template: "security" }], [plan, { version: 3 }], [pause, { template: "security" }],
       ] as [typeof pause, Record<string, unknown>, Record<string, unknown>?][]) expect(release(patch(target, p, top))).toBe(false);
       expect(release(s.events.filter((e) => e !== pause))).toBe(false);
       const last = s.events.at(-1)!;
@@ -97,5 +98,25 @@ describe("MRRESTP a still-pending merge intent cancelled by PM's pause", () => {
       expect(await resumeCli(f)).toMatchObject({ ok: false });
       expect(getTask(f.db, "T1")!.headSHA).toBeTruthy();
     } finally { f.close(); }
+  });
+
+  test("[验收线 1,3] PM's official pause that switches workflow template does not carry the pending cancellation's handback", async () => {
+    for (const phase of ["pending", "await_ci"] as const) {
+      const f = await pauseFixture(phase);
+      try {
+        const w = getWorkflow(f.db, "T1")!;
+        expect(w.template).toBe("code");
+        expect(await f.cli("pm", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(w.rev), "--template", "security",
+          "--version", String(w.templateVersion), "--mode", "manual", "--author-family", w.authorFamily, "--fallback", w.fallback,
+          "--reason", "change template during handoff")).toMatchObject({ ok: true });
+        if (phase !== "pending") expect(f.step("resolved", "cancelled before send")).toMatchObject({ phase: "resolved" });
+        expect(getIntent(f.db, f.id)!.status).toBe("cancelled");
+        expect(await resumeCli(f)).toMatchObject({ ok: true });
+        expect(getWorkflow(f.db, "T1")!.template).toBe("security");
+        expect(f.released()).toBe(false);
+        expect(() => f.plan()).toThrow();
+        expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE action='merge'").get()).toEqual({ n: 1 });
+      } finally { f.close(); }
+    }
   });
 });

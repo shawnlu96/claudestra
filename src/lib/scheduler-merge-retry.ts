@@ -27,10 +27,22 @@ function enteredThisRound(task: LedgerTask, events: readonly LedgerEvent[], inte
     !events.some((e) => e.seq > intent.eventSeq && (e.kind === "stage" || e.kind === "deliver"));
 }
 
-/** PM's own manual takeover through workflow-set (the writer checks PM / master / owner); never a hold, the scheduler or an import. */
-function pmPause(pause: LedgerEvent | undefined, intent: SchedulerIntent): pause is LedgerEvent {
+/** The scheduler's own plan record of this merge intent: it carries the workflow template and version the intent was planned under. */
+function planOf(events: readonly LedgerEvent[], intent: SchedulerIntent): LedgerEvent | undefined {
+  const plan = events.find((e) => e.seq === intent.eventSeq);
+  if (!plan || plan.kind !== "scheduler" || plan.actor !== "scheduler" || plan.data.op !== "plan" || plan.data.id !== intent.id ||
+    plan.data.action !== "merge" || plan.dedupKey !== `scheduler:${intent.id}` || typeof plan.data.template !== "string" ||
+    plan.data.version !== intent.templateVersion) return;
+  return plan;
+}
+
+/**
+ * PM's own manual takeover through workflow-set (the writer checks PM / master / owner); never a hold, the scheduler or an import.
+ * workflow-set may switch template while pausing: the takeover must keep the plan's template identity and version.
+ */
+function pmPause(pause: LedgerEvent | undefined, intent: SchedulerIntent, plan: LedgerEvent): pause is LedgerEvent {
   return !!pause && pause.data.op === "workflow" && pause.data.mode === "manual" && pause.data.manual === true &&
-    pause.data.specRev === intent.specRev && pause.data.templateVersion === intent.templateVersion &&
+    pause.data.specRev === intent.specRev && pause.data.template === plan.data.template && pause.data.templateVersion === plan.data.version &&
     Number.isInteger(pause.data.workflowRev) && typeof pause.data.takeover === "string" && pause.data.hold === undefined &&
     pause.actor !== "scheduler" && pause.data.imported !== true;
 }
@@ -62,12 +74,10 @@ function handedBack(events: readonly LedgerEvent[], intent: SchedulerIntent, pau
  * otherwise referenced afterwards, cancelled by that pause itself (cancelledIntents), then handed back.
  */
 function pendingCancellation(task: LedgerTask, events: readonly LedgerEvent[], intent: SchedulerIntent): LedgerEvent | undefined {
-  const plan = events.find((e) => e.seq === intent.eventSeq);
-  if (!plan || plan.kind !== "scheduler" || plan.actor !== "scheduler" || plan.data.op !== "plan" || plan.data.id !== intent.id ||
-    plan.data.action !== "merge" || plan.dedupKey !== `scheduler:${intent.id}`) return;
-  if (!enteredThisRound(task, events, intent)) return;
+  const plan = planOf(events, intent);
+  if (!plan || !enteredThisRound(task, events, intent)) return;
   const pause = events.find((e) => e.seq > plan.seq && modeEvent(e));
-  if (!pmPause(pause, intent) || !Array.isArray(pause.data.cancelledIntents) || !pause.data.cancelledIntents.includes(intent.id)) return;
+  if (!pmPause(pause, intent, plan) || !Array.isArray(pause.data.cancelledIntents) || !pause.data.cancelledIntents.includes(intent.id)) return;
   const names = (v: unknown) => v === intent.id || (Array.isArray(v) && v.includes(intent.id));
   if (events.some((e) => e.seq > plan.seq && e !== pause && Object.values(e.data).some(names))) return;
   if (!intent.head || !task.headSHA || !sameSha(intent.head, task.headSHA)) return;
@@ -91,9 +101,10 @@ function pausedCancellation(task: LedgerTask, events: readonly LedgerEvent[], in
   if (!settled || settled.kind !== "scheduler" || settled.actor !== "scheduler" || settled.data.op !== "settle" ||
     settled.dedupKey !== `scheduler:${intent.id}:cancelled` || settled.data.id !== intent.id ||
     settled.data.from !== "submitted" || settled.data.to !== "cancelled" || settled.seq + 1 !== terminal.seq) return;
-  if (!enteredThisRound(task, events, intent)) return;
+  const plan = planOf(events, intent);
+  if (!plan || !enteredThisRound(task, events, intent)) return;
   const pause = own.findLast(modeEvent);
-  if (!pmPause(pause, intent) || !handedBack(events, intent, pause, terminal.seq)) return;
+  if (!pmPause(pause, intent, plan) || !handedBack(events, intent, pause, terminal.seq)) return;
   let head = intent.head;
   for (const c of own.filter((e) => e.kind === "scheduler" && e.data.op === "review_carry" && e.data.intentId === intent.id)) {
     const paired = phases.some((e) => e.seq === c.seq + 1 && e.data.carrySeq === c.seq && e.data.to === "await_ci");
