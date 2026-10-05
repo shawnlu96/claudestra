@@ -14,7 +14,7 @@ import { pausedUntil, pauseForQuota } from "../src/lib/lend-health.js";
 import { advance, getMeta, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import {
   COOLDOWN_MS, GAP_KEY, gapHolds, launcherBeginUpdate, launcherGapStep, launcherUpdateExited, READY_MAX_MS, readGap, SETTLE_MS,
-  type GapMode, type GapPort, type UpdateTarget,
+  type GapMode, type GapPort, type UpdateState, type UpdateTarget,
 } from "../src/lib/lend-update-gap.js";
 import { ENTRY, harness, polled, sha, toStarted } from "./lend-harness.js";
 
@@ -26,8 +26,8 @@ function gapHarness(mode: GapMode = "on") {
   const path = join(mkdtempSync(join(tmpdir(), "lend-gap-")), "journal.sqlite");
   const db = openLendJournal(path);
   h.d.db = db;
-  const knobs = { mode, reached: false as boolean | null, live: false };
-  const port: GapPort = { policy: async () => ({ mode: knobs.mode }), reached: async () => knobs.reached, updateLive: () => knobs.live };
+  const knobs = { mode, reached: false as boolean | null, state: { kind: "none" } as UpdateState };
+  const port: GapPort = { policy: async () => ({ mode: knobs.mode }), reached: async () => knobs.reached, updateState: async () => knobs.state };
   h.d.updateGap = port;
   return Object.assign(h, { db, path, knobs, port, want: (busy = ["agent-lend-o1"]) => launcherGapStep(db, T, busy, h.d.now()) });
 }
@@ -108,10 +108,13 @@ describe("on: drain, then update", () => {
     expect(launcherBeginUpdate(h.db, T, h.d.now())).toEqual({ go: true, flipped: true });
     expect(readGap(h.db)!.phase).toBe("updating");
     expect(h.want([]).go).toBe(false); // never a second update
-    h.knobs.live = true;
+    h.knobs.state = { kind: "running" };
     await h.tick();
     expect(gapHolds(h.db)).toBe(true);
-    h.knobs.reached = true; // the new code is running
+    h.knobs.reached = true; // checked out, tail still running
+    await h.tick();
+    expect(gapHolds(h.db)).toBe(true);
+    h.knobs.state = { kind: "none" }; // marker cleared after the full reload
     await h.tick();
     expect(readGap(h.db)).toBeNull();
     expect((await push(h, "o9")).accepted).toEqual(["o9"]);
@@ -147,11 +150,11 @@ describe("issued update: verified outcomes only", () => {
     h.advanceTime(SETTLE_MS - 1);
     await h.tick();
     expect(gapHolds(h.db)).toBe(true);
-    h.knobs.live = true;
+    h.knobs.state = { kind: "running" };
     h.advanceTime(SETTLE_MS);
     await h.tick();
     expect(gapHolds(h.db)).toBe(true);
-    h.knobs.live = false;
+    h.knobs.state = { kind: "none" };
     await h.tick();
     expect(readGap(h.db)).toBeNull();
   });
@@ -172,6 +175,63 @@ describe("issued update: verified outcomes only", () => {
     g.want();
     await g.tick();
     expect(readGap(g.db)).toBeNull(); // off starts no new gap
+  });
+
+  test("checked out is not done: a running, unfinished, abandoned or unreadable update keeps intake held whatever HEAD says", async () => {
+    const h = gapHarness();
+    await updating(h);
+    h.knobs.reached = true;
+    launcherUpdateExited(h.db, T.ref, 1, h.d.now());
+    const states: [UpdateState, string][] = [
+      [{ kind: "running" }, "进行中"],
+      [{ kind: "unfinished", step: "built" }, "停在「built」没做完"],
+      [{ kind: "abandoned", why: "HEAD 被改到别处" }, "补完被放弃"],
+      [{ kind: "unknown", why: "m.json 读不了" }, "标记核不了"],
+    ];
+    for (const [state, says] of states) {
+      h.knobs.state = state;
+      h.advanceTime(SETTLE_MS);
+      expect((await h.tick(), readGap(h.db))!.phase).toBe("updating");
+      expect((await push(h, `p-${state.kind}`)).accepted).toEqual([]);
+      expect(h.log.lines.some((l) => l.includes("恢复接单"))).toBe(false);
+      const line = (JSON.parse(getMeta(h.db, "status")!) as { updateGap?: string }).updateGap ?? "";
+      expect([says, line.includes(says), line.includes("卡住") === (state.kind !== "running")]).toEqual([says, true, true]);
+    }
+    h.knobs.state = { kind: "none" };
+    await h.tick();
+    expect(readGap(h.db)).toBeNull();
+    expect(h.log.lines.some((l) => l.includes("更新尾段已做完"))).toBe(true);
+  });
+
+  test("an unreadable version is never a resume: exited and past SETTLE_MS still held, closed once a verified answer arrives", async () => {
+    const h = gapHarness();
+    await updating(h);
+    h.knobs.reached = null;
+    launcherUpdateExited(h.db, T.ref, 1, h.d.now());
+    for (let i = 0; i < 3; i++) {
+      h.advanceTime(SETTLE_MS);
+      await h.tick();
+      expect(readGap(h.db)!.phase).toBe("updating");
+    }
+    expect(h.log.lines.some((l) => l.includes("恢复接单"))).toBe(false);
+    h.knobs.reached = false; // git readable again: still on the old version, nothing owed → verified failure
+    await h.tick();
+    expect(readGap(h.db)).toBeNull();
+    expect(h.log.lines.some((l) => l.includes("已验证失败"))).toBe(true);
+  });
+
+  test("draining, already at the target (manual update) but its tail still running: not closed until it is done", async () => {
+    const h = gapHarness();
+    await toStarted(h);
+    h.want();
+    await h.tick();
+    h.knobs.reached = true;
+    h.knobs.state = { kind: "unfinished", step: "installed" };
+    await h.tick();
+    expect(readGap(h.db)!.phase).toBe("draining");
+    h.knobs.state = { kind: "none" };
+    await h.tick();
+    expect(readGap(h.db)).toBeNull();
   });
 
   test("restart: the gap survives reopening the journal (a new scheduler process) and resolves from there", async () => {

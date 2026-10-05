@@ -1,6 +1,7 @@
 /**
  * Production ports of the lender update gap (lend-update-gap.ts): the CFG updateGap read for this host, the "has the checkout
- * reached the target" probe and the launcher's thin calls. The policy project is the registered project whose dirs hold this
+ * reached the target" probe, manager update's completion record (update-inflight marker judged by its own updateVerdict) and
+ * the launcher's thin calls. The policy project is the registered project whose dirs hold this
  * checkout (REPO_ROOT, real paths), never an order's project or a worker cwd: one gap drains every project's orders.
  * CFG's reader is loaded from its frozen location (recovery-materials-wiring cfgReaderPath) on every read; a missing project,
  * a missing / broken reader or any answer that is not a plain configured mode observes with a diagnostic (PM ruling UPDW).
@@ -11,13 +12,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { getLocalVersion, isNewer } from "./github-release.js";
 import { LEND_JOURNAL_PATH, openLendJournal } from "./lend-journal.js";
-import { gapAwaitsLauncher, launcherBeginUpdate, launcherGapStep, launcherUpdateExited, type GapMode, type GapPolicy, type GapPort, type LauncherGo, type UpdateTarget } from "./lend-update-gap.js";
+import {
+  gapAwaitsLauncher, launcherBeginUpdate, launcherGapStep, launcherUpdateExited, type GapMode, type GapPolicy, type GapPort, type LauncherGo, type UpdateState,
+  type UpdateTarget,
+} from "./lend-update-gap.js";
 import { UPDATE_LOCK } from "./paths.js";
 import { pidAlive } from "./pending-ops.js";
 import { readProjects, resolveProjectForRealDir } from "./projects.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js";
 import { REPO_ROOT } from "./repo-root.js";
-import { UPDATE_INFLIGHT } from "./update-inflight.js";
+import { launchdStartedAt, readUpdateMarker, UPDATE_ABANDONED, UPDATE_INFLIGHT, updateVerdict, type DaemonState } from "./update-inflight.js";
 
 export const GAP_MECHANISM = "updateGap";
 const MODES: readonly unknown[] = ["on", "observe", "off"];
@@ -47,9 +51,14 @@ export function gapPolicyPort(o: GapPolicyDeps = {}): GapPolicy {
 }
 
 async function git(repo: string, ...args: string[]): Promise<number | null> {
+  return (await gitOut(repo, ...args))?.code ?? null;
+}
+
+async function gitOut(repo: string, ...args: string[]): Promise<{ code: number; out: string } | null> {
   try {
-    const p = Bun.spawn(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "ignore" });
-    return await p.exited;
+    const p = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "ignore" });
+    const [code, out] = await Promise.all([p.exited, new Response(p.stdout).text()]);
+    return { code, out: out.trim() };
   } catch { return null; /* git not runnable: "cannot tell", the gap waits and the caller words it as unverifiable */ }
 }
 
@@ -62,16 +71,49 @@ export async function reachedTarget(t: UpdateTarget, repo = REPO_ROOT, local = g
   return code === 0 ? true : code === 1 ? false : null;
 }
 
-/** A `manager update` is alive: its in-flight marker exists, or update.lock names a live pid. */
-export function updateLive(marker = UPDATE_INFLIGHT, lock = UPDATE_LOCK): boolean {
-  if (existsSync(marker)) return true;
-  try {
-    const pid = parseInt(readFileSync(lock, "utf8").trim(), 10);
-    return pid > 0 && pidAlive(pid);
-  } catch { return false; /* no lock file = no update holding it */ }
+export interface UpdateStateDeps {
+  marker?: string; abandoned?: string; lock?: string; repo?: string; now?: () => number; alive?: (pid: number) => boolean;
+  daemonStarts?: () => Promise<Record<string, DaemonState>>;
 }
 
-export const gapPort = (o: GapPolicyDeps = {}): GapPort => ({ policy: gapPolicyPort(o), reached: (t) => reachedTarget(t, o.repoRoot), updateLive: () => updateLive() });
+async function launchdStarts(): Promise<Record<string, DaemonState>> {
+  const { DAEMONS } = await import("./cli-wrapper.js");
+  return Object.fromEntries(DAEMONS.map((x) => [x.label, launchdStartedAt(x.label)]));
+}
+
+/**
+ * manager update's completion record, judged the way its own resume (update.ts resumeUpdate) judges it: a live update.lock
+ * holder = running; an in-flight marker goes through updateVerdict (live / clear = done / finish-* = tail owed / report =
+ * cannot be finished); an abandoned marker for this target = given up on. Unreadable marker or HEAD = unknown, never none.
+ */
+export async function updateState(t: UpdateTarget, o: UpdateStateDeps = {}): Promise<UpdateState> {
+  const marker = o.marker ?? UPDATE_INFLIGHT, alive = o.alive ?? pidAlive;
+  try {
+    const pid = parseInt(readFileSync(o.lock ?? UPDATE_LOCK, "utf8").trim(), 10);
+    if (pid > 0 && alive(pid)) return { kind: "running" };
+  } catch { /* no lock file = no update holding it */ }
+  if (existsSync(marker)) {
+    const m = readUpdateMarker(marker);
+    if (!m) return { kind: "unknown", why: `${marker} 读不了` };
+    const repo = o.repo ?? REPO_ROOT;
+    const head = await gitOut(repo, "rev-parse", "HEAD");
+    if (!head || head.code !== 0 || !head.out) return { kind: "unknown", why: "git rev-parse HEAD 失败" };
+    const ahead = head.out !== m.target && (await git(repo, "merge-base", "--is-ancestor", m.target, "HEAD")) === 0;
+    let starts: Record<string, DaemonState>;
+    try { starts = await (o.daemonStarts ?? launchdStarts)(); } catch (e) { return { kind: "unknown", why: `daemon 状态读不了：${(e as Error).message.slice(0, 120)}` }; }
+    const v = updateVerdict(m, head.out, (o.now ?? Date.now)(), alive, starts, ahead);
+    if (v.action === "live") return { kind: "running" };
+    if (v.action === "report") return { kind: "abandoned", why: v.why };
+    if (v.action !== "clear") return { kind: "unfinished", step: m.step };
+  }
+  const ab = readUpdateMarker(o.abandoned ?? UPDATE_ABANDONED);
+  if (ab && (ab.targetLabel === t.label || ab.target === t.ref)) return { kind: "abandoned", why: ab.abandonReason ?? `停在「${ab.step}」` };
+  return { kind: "none" };
+}
+
+export const gapPort = (o: GapPolicyDeps = {}): GapPort => ({
+  policy: gapPolicyPort(o), reached: (t) => reachedTarget(t, o.repoRoot), updateState: (t) => updateState(t, { repo: o.repoRoot }),
+});
 
 /**
  * The launcher's access: only when this host has a lend journal (it never lent = nothing to drain, behaviour unchanged).

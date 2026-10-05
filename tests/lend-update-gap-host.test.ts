@@ -1,17 +1,19 @@
 /**
  * UPDW production ports (src/lib/lend-update-gap-host.ts) and the launcher ↔ tick race across two real processes on one
  * temporary journal: the CFG updateGap read for the project owning this checkout (missing project / reader / unknown key all
- * observe), the reached probe (release version, beta ancestry in a scratch git repo), update liveness, the no-journal launcher
+ * observe), the reached probe (release version, beta ancestry in a scratch git repo), the update completion record (real
+ * update-inflight marker files judged by updateVerdict against a scratch git repo), the no-journal launcher
  * path, and a launcher flip landing between the tick's read and its close never being undone.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
-import { gapPolicyPort, launcherBeginGapUpdate, launcherGapWaiting, launcherUpdateGate, reachedTarget, updateLive } from "../src/lib/lend-update-gap-host.js";
+import { gapPolicyPort, launcherBeginGapUpdate, launcherGapWaiting, launcherUpdateGate, reachedTarget, updateState } from "../src/lib/lend-update-gap-host.js";
 import { gapTick, launcherGapStep, readGap, type GapPort, type UpdateTarget } from "../src/lib/lend-update-gap.js";
 import { cfgReaderPath } from "../src/lib/recovery-materials-wiring.js";
+import { RECOVERY_KEYS, RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { testChildEnv } from "./test-env.js";
 
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
@@ -52,14 +54,32 @@ describe("gapPolicyPort: CFG updateGap for the project owning REPO_ROOT", () => 
     }
   });
 
-  test("the real CFG reader on this tree never answers on for an unconfigured host", async () => {
+  // updateGap is registered by UGCFG (PM ruling UPDW), not by this card. Until it is on main the real chain can only observe
+  // with the unknown-key diagnostic; this pins that state instead of hiding it, so landing UGCFG fails here and forces the
+  // real on / observe / off proof below to run.
+  const registered = (RECOVERY_KEYS as readonly string[]).includes("updateGap");
+  test.if(!registered)("the real CFG reader without UGCFG: updateGap is an unknown key, so the host only observes and says why", async () => {
     const s = setup(null);
     const p = await gapPolicyPort({ projectsPath: s.projectsPath, repoRoot: s.repo, reader: cfgReaderPath() })();
-    expect(p.mode).toBe("observe"); // default observe, or observe-with-diagnostic until UGCFG registers the key
+    expect(p.mode).toBe("observe");
+    expect(p.diag).toContain("未知恢复键 updateGap");
+  });
+
+  test.if(registered)("the real CFG reader with UGCFG: recovery-policy.json on / observe / off for the owning project reach the gap", async () => {
+    const s = setup(null);
+    const read = () => gapPolicyPort({ projectsPath: s.projectsPath, repoRoot: s.repo, reader: cfgReaderPath() })();
+    rmSync(RECOVERY_POLICY_PATH, { force: true });
+    expect(await read()).toEqual({ mode: "observe" }); // absent = observe, no diagnostic
+    for (const mode of ["on", "off", "observe"] as const) {
+      mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
+      writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { cstra: { mode: "off", keys: { updateGap: mode } }, other: { mode: "on" } } }));
+      expect(await read()).toEqual({ mode });
+    }
+    rmSync(RECOVERY_POLICY_PATH, { force: true });
   });
 });
 
-describe("reachedTarget / updateLive", () => {
+describe("reachedTarget / updateState", () => {
   test("release compares versions; beta checks ancestry in a real git repo; unreadable = null", async () => {
     expect(await reachedTarget(T, "/", async () => "9.9.9")).toBe(true);
     expect(await reachedTarget(T, "/", async () => "9.9.8")).toBe(false);
@@ -77,15 +97,48 @@ describe("reachedTarget / updateLive", () => {
     expect(await reachedTarget({ channel: "beta", ref: "f".repeat(40), label: "?" }, repo)).toBeNull();
   });
 
-  test("marker present or update.lock held by a live pid = live; dead pid / nothing = not live", () => {
-    const d = tmp("gap-live-"), marker = join(d, "m.json"), lock = join(d, "update.lock");
-    expect(updateLive(marker, lock)).toBe(false);
+  test("update.lock live = running; the marker is judged like manager update's resume; only a finished / spent one is none", async () => {
+    const d = tmp("gap-state-"), marker = join(d, "m.json"), abandoned = join(d, "ab.json"), lock = join(d, "update.lock");
+    const repo = join(d, "repo");
+    mkdirSync(repo);
+    const git = (...a: string[]) => Bun.spawnSync(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...a], { env: testChildEnv() });
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "a");
+    const from = git("rev-parse", "HEAD").stdout.toString().trim();
+    git("commit", "-q", "--allow-empty", "-m", "b");
+    const target = git("rev-parse", "HEAD").stdout.toString().trim();
+    const now = Date.parse("2026-10-05T12:00:00Z"), reloadAt = "2026-10-05T11:50:00.000Z";
+    let starts: Record<string, number | null | "unloaded"> = { bridge: now - 60_000, launcher: now - 60_000 };
+    const st = (o: { repo?: string } = {}) => updateState(T, { marker, abandoned, lock, repo: o.repo ?? repo, now: () => now, alive: (pid) => pid === process.pid, daemonStarts: async () => starts });
+    const base = { pid: 99999999, channel: "release", target, targetLabel: "v9.9.9", fromHead: from, startedAt: "2026-10-05T11:40:00.000Z" };
+    const mark = (m: Record<string, unknown>) => writeFileSync(marker, JSON.stringify({ ...base, ...m }));
+
+    expect(await st()).toEqual({ kind: "none" });
     writeFileSync(lock, String(process.pid));
-    expect(updateLive(marker, lock)).toBe(true);
-    writeFileSync(lock, "99999999");
-    expect(updateLive(marker, lock)).toBe(false);
-    writeFileSync(marker, "{}");
-    expect(updateLive(marker, lock)).toBe(true);
+    expect(await st()).toEqual({ kind: "running" });
+    writeFileSync(lock, "99999999"); // dead holder
+    mark({ step: "built" });
+    expect(await st()).toEqual({ kind: "unfinished", step: "built" }); // HEAD at target, tail owed
+    mark({ step: "reloading", reloadAt });
+    starts = { bridge: now - 60_000, launcher: Date.parse(reloadAt) - 3_600_000 }; // launcher not restarted since the reload
+    expect(await st()).toEqual({ kind: "unfinished", step: "reloading" });
+    starts = { bridge: now - 60_000, launcher: now - 60_000 }; // every daemon restarted after reloadAt = done (launcher bootout killed update)
+    expect(await st()).toEqual({ kind: "none" });
+    mark({ step: "checkout", pid: process.pid, startedAt: new Date(now - 60_000).toISOString() });
+    expect(await st()).toEqual({ kind: "running" });
+    git("checkout", "-q", from);
+    mark({ step: "installed" });
+    expect(await st()).toEqual({ kind: "none" }); // rolled back / never switched: the old code runs, nothing owed
+    git("commit", "-q", "--allow-empty", "-m", "elsewhere");
+    expect((await st()).kind).toBe("abandoned"); // HEAD moved elsewhere: cannot be finished
+    expect((await st({ repo: join(d, "nowhere") })).kind).toBe("unknown");
+    writeFileSync(marker, "{torn");
+    expect((await st()).kind).toBe("unknown");
+    rmSync(marker);
+    writeFileSync(abandoned, JSON.stringify({ pid: 1, target, targetLabel: "v1.0.0", fromHead: from, step: "reloading", abandonReason: "x" }));
+    expect(await st()).toEqual({ kind: "none" }); // an older, unrelated target
+    writeFileSync(abandoned, JSON.stringify({ pid: 1, target, targetLabel: "v9.9.9", fromHead: from, step: "reloading", abandonReason: "补过 reload 仍没起来" }));
+    expect(await st()).toEqual({ kind: "abandoned", why: "补过 reload 仍没起来" });
   });
 });
 
@@ -134,7 +187,7 @@ describe("two processes: launcher flip vs tick close", () => {
     const path = readyJournal();
     const db = openLendJournal(path);
     const now = Date.now(), noop = () => {};
-    const on: GapPort = { policy: async () => ({ mode: "on" }), reached: async () => false, updateLive: () => false };
+    const on: GapPort = { policy: async () => ({ mode: "on" }), reached: async () => false, updateState: async () => ({ kind: "none" }) };
     await gapTick(db, on, now, noop); // opens draining
     db.query("UPDATE lend_orders SET state = 'acked' WHERE orderId = 'o1'").run();
     await gapTick(db, on, now, noop); // drained → ready
@@ -152,7 +205,7 @@ describe("two processes: launcher flip vs tick close", () => {
     const path = readyJournal();
     const db = openLendJournal(path);
     const now = Date.now(), noop = () => {};
-    const on: GapPort = { policy: async () => ({ mode: "on" }), reached: async () => false, updateLive: () => false };
+    const on: GapPort = { policy: async () => ({ mode: "on" }), reached: async () => false, updateState: async () => ({ kind: "none" }) };
     await gapTick(db, on, now, noop);
     await gapTick(db, { ...on, policy: async () => ({ mode: "off" }) }, now, noop);
     expect(readGap(db)).toBeNull();

@@ -5,8 +5,10 @@
  * - The launcher records what it wants (WANT_KEY, refreshed every check) and only spawns `manager update` from a ready gap
  *   (or, with no gap, exactly as before). The lend tick, under the scheduler lease, opens / advances / closes the gap.
  * - Policy is the injected CFG reader for key updateGap: off opens nothing, observe records the plan once per target with no
- *   effect, on opens the gap. An issued update (phase updating) is never withdrawn: it ends only when the target is reached
- *   or the failure is verified (the update process exited / is gone and the target was not reached).
+ *   effect, on opens the gap. An issued update (phase updating) is never withdrawn: it ends only when the update left nothing
+ *   behind (no live holder, no unfinished / abandoned update-inflight marker: manager update's own completion record) and the
+ *   checkout is at the target (success) or verifiably not (failure: never switched, or rolled back). A version that cannot be
+ *   read, or an update left half done, keeps intake held with a diagnostic until the existing update recovery settles it.
  * - The gap is its own row: closing it never clears lend.json grants, revocations, the Codex quota pause or Claude auth pause.
  * tests/lend-update-gap*.test.ts.
  */
@@ -37,12 +39,19 @@ export type GapMode = "on" | "observe" | "off";
 /** CFG's updateGap read for this host; diag set when the mode is not a plain read of the configured value. */
 export type GapPolicy = () => Promise<{ mode: GapMode; diag?: string }>;
 
+/**
+ * What `manager update` left behind (update-inflight.ts): running = a live holder; unfinished = its marker says the tail
+ * (install / build / migrate / reload) is still owed; abandoned = the marker for this target was given up on; unknown = the
+ * marker or HEAD cannot be read; none = nothing in flight or owed (a marker whose reload provably finished counts as none).
+ */
+export type UpdateState = { kind: "none" } | { kind: "running" } | { kind: "unfinished"; step: string } | { kind: "abandoned" | "unknown"; why: string };
+
 export interface GapPort {
   policy: GapPolicy;
-  /** Has this checkout reached (or passed) the target? null = could not tell (treated as not reached). */
+  /** Has this checkout reached (or passed) the target? null = could not tell. */
   reached(t: UpdateTarget): Promise<boolean | null>;
-  /** Is a `manager update` still holding update.lock or the in-flight marker? */
-  updateLive(): boolean;
+  /** The update's completion record for this target; only none lets the gap judge success / failure. */
+  updateState(t: UpdateTarget): Promise<UpdateState>;
 }
 
 function readJson<T>(db: Database, key: string): T | null {
@@ -96,13 +105,30 @@ function close(put: Put, why: string, log: (m: string) => void): GapView {
   return { held: false, line: null };
 }
 
-/** An issued update: wait for the target or a verified failure; never withdrawn by policy. */
-function settleUpdating(put: Put, g: Gap, port: GapPort, reached: false | null, now: number, log: (m: string) => void): GapView {
-  if (port.updateLive()) return { held: true, line: `出借更新空档：更新到 ${g.target.label} 进行中` };
+/** Held lines of an issued update; stuck (needs the owner, or past DRAIN_DIAG_MS) lines say 卡住 so doctor warns. */
+function heldUpdating(g: Gap, now: number, what: string, stuck = false): GapView {
+  const t = now - (g.updatingAt ?? g.since);
+  return { held: true, line: `出借更新空档：${stuck || t >= DRAIN_DIAG_MS ? `已等 ${ago(t)}，卡住：` : ""}更新到 ${g.target.label} ${what}` };
+}
+
+/**
+ * An issued update: never withdrawn by policy. Closes only on manager update's own evidence: nothing running or owed
+ * (marker cleared after a full reload, or after a rollback) plus a checkout that is verifiably at the target (success) or
+ * verifiably not, once the process is gone (failure: never switched or rolled back, the old code still runs). Anything else
+ * (live, tail owed, abandoned, unreadable marker / HEAD / version) stays held and says what the owner has to do.
+ */
+async function settleUpdating(put: Put, g: Gap, port: GapPort, now: number, log: (m: string) => void): Promise<GapView> {
+  const u = await port.updateState(g.target);
+  if (u.kind === "running") return heldUpdating(g, now, "进行中");
+  if (u.kind === "unfinished") return heldUpdating(g, now, `停在「${u.step}」没做完（进程已不在）：跑 bun src/manager.ts update 补完，补完前暂停接单`, true);
+  if (u.kind === "abandoned") return heldUpdating(g, now, `的补完被放弃（${u.why}）：按 doctor 的 update 检查人工处理，处理前暂停接单`, true);
+  if (u.kind === "unknown") return heldUpdating(g, now, `的进行中标记核不了（${u.why}）：不猜结果，暂停接单`, true);
+  const reached = await port.reached(g.target);
+  if (reached === true) return close(put, `已到 ${g.target.label}，更新尾段已做完（无进行中 / 待补完标记）`, log);
+  if (reached === null) return heldUpdating(g, now, "后核不了版本（git / 版本读不了）：不猜结果，暂停接单，等能读到版本再判", true);
   const gone = g.exited ? `更新进程已退出（code ${g.exited.code ?? "?"}）` : now - (g.updatingAt ?? g.since) >= SETTLE_MS ? `更新发出 ${ago(SETTLE_MS)} 后已不在` : null;
-  if (!gone) return { held: true, line: `出借更新空档：更新到 ${g.target.label} 已发出，等它开始` };
-  if (reached === false) return close(put, `${gone}，版本没到 ${g.target.label}：按已验证失败处理`, log);
-  return close(put, `${gone}，但核不了版本到没到 ${g.target.label}（git / 版本读不了）：不再挡接单，doctor 的 update 检查会报残局`, log);
+  if (!gone) return heldUpdating(g, now, "已发出，等它开始");
+  return close(put, `${gone}，版本没到 ${g.target.label} 且没有待补完标记（没切换或已回退，仍跑原版本）：按已验证失败处理`, log);
 }
 
 /** draining / ready: no update issued yet, so a policy change or a lost want can still withdraw it honestly. */
@@ -157,9 +183,9 @@ async function maybeOpen(db: Database, put: Put, port: GapPort, now: number, log
 export async function gapTick(db: Database, port: GapPort, now: number, log: (m: string) => void): Promise<GapView> {
   const raw = getMeta(db, GAP_KEY) ?? "", g = readGap(db), put = casPut(db, raw);
   if (!g) return maybeOpen(db, put, port, now, log);
-  const reached = await port.reached(g.target);
-  if (reached) return close(put, `已到 ${g.target.label}`, log);
-  if (g.phase === "updating") return settleUpdating(put, g, port, reached, now, log);
+  if (g.phase === "updating") return settleUpdating(put, g, port, now, log);
+  // Not issued by the gap, yet already there (a manual update): close only once that update has finished its tail too.
+  if ((await port.reached(g.target)) === true && (await port.updateState(g.target)).kind === "none") return close(put, `已到 ${g.target.label}`, log);
   return advanceOpen(db, put, g, port, now, log);
 }
 
