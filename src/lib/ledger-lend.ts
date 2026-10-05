@@ -161,7 +161,8 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings, repo: input.repo, pr: input.pr, bounce, restate };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
   if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
-  const made = (split: InputSplit) => sendsItems(m) ? withMaterials(writeOrderWire(task, o, split), m, findings, split) : writeOrderWire(task, o, split);
+  // whole (gate scan only) carries descriptions unquoted, as stored: a line prefix must not split a wrapped key the gate would join.
+  const made = (split: InputSplit) => sendsItems(m) ? withMaterials(writeOrderWire(task, o, split), m, findings, split, split === wholeInputs) : writeOrderWire(task, o, split);
   return { wire: made(chunkInputs), whole: made(wholeInputs), branch, base: input.write.base, ...(m ? { materials: m } : {}) };
 }
 

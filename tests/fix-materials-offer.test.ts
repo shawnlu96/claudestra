@@ -224,6 +224,26 @@ describe("正式远端审查入账后的修复单（上一轮 P1 description-los
     expect(listLendOrders(db, "T9").filter((o) => o.step === "fix")).toEqual([]);
   });
 
+  test("description 里换行折开的密钥（上一轮 P1 gate-wrapped-description）：引用前的原样说明过闸，off 与 on 都拒，on 明确本机阻塞且不出单", async () => {
+    const wrapped = `${SECRET.slice(0, 12)}\n${SECRET.slice(12)}`; // prefix + 8 chars, newline, the other 24
+    await builtCard();
+    const path = join(dir, "wrapped.md");
+    const findings = join(dir, "wrapped.json");
+    writeFileSync(path, `# 审查报告\nP1 race-1：${wrapped}`);
+    writeFileSync(findings, JSON.stringify([{ ...LENT[0], probe: "跑一遍复现", description: wrapped }]));
+    expect(await run(["review", "T9", "--reviewer", "agent-rev", "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0", "--head", H2,
+      "--session", "s-rev", "--family", "claude", "--findings", findings, "--path", path])).toMatchObject({ ok: true }); // the PM records it through the formal CLI
+    db.run("UPDATE tasks SET stage = 'fix', round = 1 WHERE id = 'T9'");
+    const report = readFileSync(path, "utf8");
+    for (const mode of ["off", "on"]) {
+      const err = await offerWith(mode).then(() => null, (e: Error) => e);
+      expect(isGateRefusal(err!.message)).toBe(true);
+      expect(err!.message.startsWith(MATERIALS_BLOCKED)).toBe(mode === "on");
+    }
+    expect(listLendOrders(db, "T9").filter((o) => o.step === "fix")).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(report);
+  });
+
   test("本机审查（事件与报告都没有结构化 description）：on 不拿 probe 充当说明，照原全文路径挂，offer 记录写明回退", async () => {
     await fixCard("## P1\n- race-1：并发写丢数据\n", FINDINGS.map(({ description: _, ...f }) => f));
     const o = await offerWith("on");

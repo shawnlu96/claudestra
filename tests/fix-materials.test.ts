@@ -101,6 +101,12 @@ describe("materialsText / withMaterials", () => {
     expect(() => materialsText(undescribed, findings)).toThrow("不拿复现步骤充当说明");
   });
 
+  test("raw（只给外发闸整段扫描用）：说明按存的原样，不加引用符", () => {
+    const two = { ...m, items: m.items.map((i) => ({ ...i, description: `${i.description}\n第二行` })) };
+    expect(materialsText(two, findings, true)).toContain("问题说明（审查方原文）：\n调用方拿到 undefined\n第二行");
+    expect(materialsText(two, findings)).toContain("问题说明（审查方原文）：\n> 调用方拿到 undefined\n> 第二行");
+  });
+
   test("插在标准答复（最后一个输入）之前，其余输入不动", () => {
     const wire = { inputs: ["规格原文：\nx", "标准答复"] } as OrderWire;
     const out = withMaterials(wire, m, findings, chunkInputs);

@@ -5,7 +5,8 @@
  * Only real stored fields are read: a finding without file / line says so, never a path guessed from its probe. The description
  * is a finding's `description` field, or for a lent review (writeLendResult keeps it only in the report) the code-built
  * 「逐项说明」entry with the same number, id and severity; never the probe. Any item without one keeps the full-text path
- * (fallback "undescribed"). The input still passes the same peer gate whole; a refusal blocks the order locally.
+ * (fallback "undescribed"). The input still passes the same peer gate whole, with each description as stored (the `> ` quoting
+ * would split a key wrapped across lines that the gate joins); a refusal blocks the order locally.
  * observe / off / no port send the full text as before.
  * tests/fix-materials.test.ts, tests/fix-materials-offer.test.ts.
  */
@@ -110,14 +111,17 @@ export const materialsNote = (m: FixMaterials): Record<string, unknown> => ({ mo
 const LABEL = "修复材料（结构化必需项，不是审查报告原文）";
 const basisText = (b: FindingBasis | null): string => (b === "regression" ? "回归" : b ? `验收线 ${b.slice("acceptance:".length)}` : "审查结论未标");
 
-/** The input text; `findings` is the order's findings field before aliasing, so item N names its row by position, not by id. */
-export function materialsText(m: FixMaterials, findings: readonly ReviewFinding[]): string {
+/**
+ * The input text; `findings` is the order's findings field before aliasing, so item N names its row by position, not by id.
+ * `raw` leaves descriptions unquoted: only for the gate's whole scan, never stored or sent.
+ */
+export function materialsText(m: FixMaterials, findings: readonly ReviewFinding[], raw = false): string {
   const lines = m.items.map((item) => {
     const at = findings.findIndex((f) => f.findingId === item.findingId);
     if (at < 0) throw new LedgerError("invalid", `修复材料：必需项 ${item.findingId} 对不上派单的逐项结论，本机阻塞（不改发报告全文）`);
     if (!item.description) throw new LedgerError("invalid", `修复材料：必需项 ${item.findingId} 没有问题说明，本机阻塞（不拿复现步骤充当说明）`);
     const where = item.file ? `${item.file}${item.line ? `:${item.line}` : ""}` : "审查结论未给结构化 file / line（按说明与复现步骤定位，不要猜路径）";
-    const said = item.description.split("\n").map((l) => `> ${l}`).join("\n");
+    const said = raw ? item.description : item.description.split("\n").map((l) => `> ${l}`).join("\n");
     return `- 上一轮审查第 ${at + 1} 条（${item.severity}）· 位置：${where} · 验收对应：${basisText(item.basis)}\n问题说明（审查方原文）：\n${said}`;
   });
   return [`来源：本机台账审查事件 #${m.source.eventSeq}，报告 sha256 前 12 位 ${m.source.sha256.slice(0, 12)}、${m.source.bytes} 字节；报告全文留在本机，本单不含它，也不是删改过的原文。`,
@@ -126,8 +130,8 @@ export function materialsText(m: FixMaterials, findings: readonly ReviewFinding[
 }
 
 /** The fix wire with the material input placed before the standard answers (the last input), split like every other source. */
-export function withMaterials(wire: OrderWire, m: FixMaterials, findings: readonly ReviewFinding[], split: InputSplit): OrderWire {
-  const parts = split([[LABEL, materialsText(m, findings)]]);
+export function withMaterials(wire: OrderWire, m: FixMaterials, findings: readonly ReviewFinding[], split: InputSplit, raw = false): OrderWire {
+  const parts = split([[LABEL, materialsText(m, findings, raw)]]);
   return { ...wire, inputs: [...wire.inputs.slice(0, -1), ...parts, ...wire.inputs.slice(-1)] };
 }
 
