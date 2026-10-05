@@ -1,10 +1,11 @@
 /**
  * 出借 worker 的「回合失败」卡（bridge/acp-link.ts，extra.failure = error：内容策略 / 请求被拒 / 上下文耗尽）也停单，
  * 和额度 / 登录卡走同一条 finish 路径。之前 lend-deps.ts failureOf 只认额度 / 登录，被内容策略拦下的单一直挂在 started、续租占位。
- * 卡走真台账文件 + 生产 failureOf（lendDeps(...).failure）；worker / 网络 / tmux 都是 lend-harness 的假依赖。
+ * 卡走真台账文件 + 生产 failureOf（lendDeps(...).failure）+ 临时 CODEX_HOME 里的真 rollout；worker / 网络 / tmux 都是 lend-harness 的假依赖。
+ * 只认本单当前回合的卡（lend-turn-failure.ts）；回执只带类别不带原文；证据文件 0600（PR624 r1 三条 P1）。
  */
 import { afterEach, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { onAcpFrame } from "../src/bridge/acp-link.ts";
@@ -22,27 +23,46 @@ import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
 import { harness, toStarted } from "./lend-harness.js";
 
 const W = workerName("o1");
+const SID = "01a1b2c3-0000-7000-8000-00000000c0de";
 const CYBER = "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.";
 const ledgers: string[] = [];
 const journals: ReturnType<typeof harness>[] = [];
+const codexHome = process.env.CODEX_HOME;
 afterEach(() => {
+  if (codexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = codexHome;
   for (const p of ledgers.splice(0)) closeLedger(p);
   for (const h of journals.splice(0)) h.db.close();
 });
 
-interface Card { agent?: string; kind?: "owner_action" | "decide"; title?: string; context: string; extra: Record<string, unknown> }
+interface Card { agent?: string; kind?: "owner_action" | "decide"; title?: string; context: string; extra: Record<string, unknown>; at?: number }
 
-/** 走到 started，台账里按需开一张 Codex 运行时卡，failure 换成生产接线；keepEvidence 换成记账的假实现 */
-async function running(...cards: Card[]) {
+const CARD_AT = Date.parse("2026-10-05T03:00:00Z");
+/** 当前回合的回合失败卡：带宿主报的会话 id，开在 rollout 最后一个 task_started 之后 */
+const turnFail = (context: string, extra: Record<string, unknown> = {}): Card => ({ context, extra: { failure: "error", sessionId: SID, ...extra } });
+const rolloutLine = (at: number, type: string) => JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg", payload: { type } });
+
+/**
+ * 走到 started（journal 会话改成 SID），临时 CODEX_HOME 写 SID 的 rollout（默认这一轮在卡前 5 秒开始），台账里按需开 Codex 运行时卡，
+ * failure 换成生产接线；keepEvidence 换成记账的假实现
+ */
+async function running(...cards: Card[]) { return runningWith(rolloutLine(CARD_AT - 5_000, "task_started"), ...cards); }
+async function runningWith(rollout: string | null, ...cards: Card[]) {
   const h = harness();
   journals.push(h);
   await toStarted(h);
+  h.db.run("UPDATE lend_orders SET sessionId = ? WHERE orderId = 'o1'", [SID]);
+  const home = mkdtempSync(join(tmpdir(), "lend-turnfail-codex-"));
+  process.env.CODEX_HOME = home;
+  if (rollout !== null) {
+    mkdirSync(join(home, "sessions", "2026", "10", "05"), { recursive: true });
+    writeFileSync(join(home, "sessions", "2026", "10", "05", `rollout-2026-10-05T10-00-00-${SID}.jsonl`), `${rolloutLine(CARD_AT - 60_000, "session_meta")}\n${rollout}\n`);
+  }
   const path = join(mkdtempSync(join(tmpdir(), "lend-turnfail-")), "ledger.sqlite");
   ledgers.push(path);
   const ledger = openLedger(path);
   for (const c of cards) {
     openAsk(ledger, { project: "lend", fromAgent: c.agent ?? W, source: "codex", kind: c.kind ?? "owner_action", title: c.title ?? "Codex 回合失败",
-      context: c.context, extra: c.extra });
+      context: c.context, extra: c.extra }, c.at ?? CARD_AT);
   }
   h.d.failure = lendDeps(h.db, new LedgerReader(path), () => {}, undefined).failure;
   const kept: { orderId: string; why: string }[] = [];
@@ -51,15 +71,16 @@ async function running(...cards: Card[]) {
 }
 const releases = (h: ReturnType<typeof harness>) => h.calls.filter((c) => c.op === "lease" && c.body.action === "release");
 
-test("内容策略拦下的回合失败：当轮停单，回执带原文前段与类别，停前存证据，kill 并关卡；不暂停借单、不重派", async () => {
-  const { h, kept } = await running({ context: CYBER, extra: { failure: "error" } });
+test("内容策略拦下的回合失败：当轮停单，回执只带类别，停前存证据（原文只进证据），kill 并关卡；不暂停借单、不重派", async () => {
+  const { h, kept } = await running(turnFail(CYBER));
   await h.tick();
   expect(getOrder(h.db, "o1")!.state).toBe("stopped");
   expect(releases(h).map((c) => c.body.reason)).toEqual(["stopped"]);
   const detail = String(releases(h)[0]!.body.detail);
-  for (const s of ["worker 回合失败", "flagged for possible cybersecurity risk", "内容策略", "不自动重试", "现场已在出借方本机留存"]) expect(detail).toContain(s);
+  for (const s of ["worker 回合失败", "内容策略拦截", "不自动重试", "现场已在出借方本机留存", "报错原文只留在出借方本机"]) expect(detail).toContain(s);
+  expect(detail).not.toContain("flagged for possible cybersecurity risk");
   expect(Buffer.byteLength(detail)).toBeLessThanOrEqual(500);
-  expect(kept).toEqual([{ orderId: "o1", why: expect.stringContaining("worker 回合失败") }]);
+  expect(kept).toEqual([{ orderId: "o1", why: expect.stringContaining(`报错原文（只留本机）：${CYBER}`) }]);
   expect(h.log.killed).toEqual([W]);
   expect(h.log.closedAsks).toEqual([W]);
   expect(h.log.notices.at(-1)?.kind).toBe("stopped");
@@ -71,17 +92,17 @@ test("内容策略拦下的回合失败：当轮停单，回执带原文前段�
 });
 
 test("别的回合失败（请求被拒 / 上下文耗尽之类）：同样停单，类别写成非内容策略", async () => {
-  const { h, kept } = await running({ context: "context window exceeded: start a new thread", extra: { failure: "error" } });
+  const { h, kept } = await running(turnFail("context window exceeded: start a new thread"));
   await h.tick();
   const detail = String(releases(h)[0]!.body.detail);
-  expect(detail).toContain("context window exceeded");
+  expect(detail).not.toContain("context window exceeded");
   expect(detail).toContain("请求被拒 / 上下文耗尽");
   expect(detail).not.toContain("内容策略拦截");
   expect(kept).toHaveLength(1);
 });
 
 test("证据没存成（返回 null）也照样停单，回执不说留存了现场", async () => {
-  const { h } = await running({ context: CYBER, extra: { failure: "error" } });
+  const { h } = await running(turnFail(CYBER));
   h.d.keepEvidence = () => null;
   await h.tick();
   expect(getOrder(h.db, "o1")!.state).toBe("stopped");
@@ -99,7 +120,7 @@ test("没有卡（retry 类失败 bridge 不开卡）、或只有别的 Codex �
 });
 
 test("非出借 agent 不受影响：别人的回合失败卡不停这张单；调度器那边没归属的回合失败卡照旧不算", async () => {
-  const { h, ledger, kept } = await running({ agent: "agent-task-x", context: CYBER, extra: { failure: "error" } });
+  const { h, ledger, kept } = await running({ ...turnFail(CYBER), agent: "agent-task-x" });
   for (let i = 0; i < 2; i++) { h.advanceTime(30_000); await h.tick(); }
   expect(getOrder(h.db, "o1")!.state).toBe("started");
   expect(kept).toEqual([]);
@@ -119,6 +140,32 @@ test("额度 / 登录卡的原有行为不变：照旧停单、额度暂停借�
   expect(auth.kept).toEqual([]);
 });
 
+test("报错原文里的本机路径 / 凭据不出本机：release detail、journal reason、日志都只有类别，原文只进本机证据", async () => {
+  const raw = "request rejected\nfile=/Users/someone/private/report.txt\nAuthorization: Bearer sk-test-not-a-real-token";
+  const { h, kept } = await running(turnFail(raw));
+  await h.tick();
+  expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+  const out = [String(releases(h)[0]!.body.detail), getOrder(h.db, "o1")!.reason ?? "", h.log.lines.join("\n"), JSON.stringify(h.log.notices)];
+  for (const leak of ["/Users/someone", "Bearer", "sk-test-not-a-real-token", "request rejected"]) for (const s of out) expect(s).not.toContain(leak);
+  expect(kept[0]!.why).toContain(raw);
+});
+
+test("不是本单当前回合的回合失败卡不停单：开跑前开的、没带 / 带错会话、卡后又开过回合、找不到 rollout 或 task_started", async () => {
+  const cases: [string, () => ReturnType<typeof running>][] = [
+    ["开跑前", () => runningWith(rolloutLine(0, "task_started"), { ...turnFail(CYBER), at: 500 })],
+    ["老宿主没带会话", () => running(turnFail(CYBER, { sessionId: undefined }))],
+    ["会话不对", () => running(turnFail(CYBER, { sessionId: "01a1b2c3-0000-7000-8000-0000000000ff" }))],
+    ["卡后又开了一轮", () => runningWith(`${rolloutLine(CARD_AT - 5_000, "task_started")}\n${rolloutLine(CARD_AT + 2_000, "task_started")}`, turnFail(CYBER))],
+    ["没有 rollout", () => runningWith(null, turnFail(CYBER))],
+    ["rollout 里没有 task_started", () => runningWith(rolloutLine(CARD_AT - 5_000, "token_count"), turnFail(CYBER))],
+  ];
+  for (const [name, start] of cases) {
+    const { h, kept } = await start();
+    for (let i = 0; i < 3; i++) { h.advanceTime(30_000); await h.tick(); }
+    expect([name, getOrder(h.db, "o1")!.state, h.log.killed, kept, releases(h)]).toEqual([name, "started", [], [], []]);
+  }
+});
+
 // ── bridge 一侧的约定：只有不能重试的回合失败才开 extra.failure = error 卡（acp-link.ts onFailure），出借停单只认这张 ──
 
 const sockets = new Map<string, { send(d: string): void }>();
@@ -129,20 +176,20 @@ beforeAll(() => {
   });
 });
 
-test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.failure=error 卡，生产 failureOf 认成回合失败", async () => {
+test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.failure=error 卡并记下宿主报的会话；没有在跑的出借单，生产 failureOf 不认", async () => {
   const ch = "local-lend-turnfail";
   const s = { send: () => {} };
   sockets.set(ch, s);
   const cards = () => listAsks(askDb(), { states: ["open"] }).filter((a) => a.fromChannelId === ch);
   await onAcpFrame({ type: "acp_failure", channelId: ch, failure: { kind: "error", key: "air:r1", message: "Rate limit reached", retry: true } }, s, {} as never);
-  await onAcpFrame({ type: "acp_failure", channelId: ch, failure: { kind: "error", key: "air:c1", message: CYBER, retry: false } }, s, {} as never);
+  await onAcpFrame({ type: "acp_failure", channelId: ch, sessionId: SID, failure: { kind: "error", key: "air:c1", message: CYBER, retry: false } }, s, {} as never);
   for (let i = 0; i < 100 && !cards().length; i++) await Bun.sleep(10);
   const open = cards();
-  expect(open.map((a) => [a.context, a.extra.failure])).toEqual([[CYBER, "error"]]);
+  expect(open.map((a) => [a.context, a.extra.failure, a.extra.sessionId])).toEqual([[CYBER, "error", SID]]);
   const journal = harness();
   journals.push(journal);
   const seen = lendDeps(journal.db, new LedgerReader(askDb().filename), () => {}, undefined).failure(open[0]!.fromAgent!);
-  expect(seen).toMatchObject({ kind: "error", askId: open[0]!.id, message: CYBER });
+  expect(seen).toBeUndefined();
 });
 
 // ── 证据保全（lend-evidence.ts）：真文件系统，临时目录 ──
@@ -188,4 +235,18 @@ test("证据：工作副本已不在只写 index；落点写不了返回 null �
   const lines: string[] = [];
   expect(keepLendEvidence(row, "x", join(base, "file-not-dir"), (m) => void lines.push(m))).toBeNull();
   expect(lines[0]).toContain("存 o9 的证据失败");
+});
+
+test("证据文件一律 0600、目录 0700：源文件 0644 也收紧，重做覆盖时同样", () => {
+  const startedAt = Date.now() - 10_000;
+  const { base, work } = workCopy(startedAt);
+  chmodSync(join(work, "report.md"), 0o644);
+  const row = { orderId: "o7", agent: "agent-lend-0123456789", sessionId: SID, dir: work, startedAt, createdAt: startedAt } as LendRow;
+  for (let i = 0; i < 2; i++) {
+    const dest = keepLendEvidence(row, "x", join(base, "evidence"), () => {})!;
+    for (const f of ["work/report.md", "work/.review/notes.md", "index.txt"]) expect([f, statSync(join(dest, f)).mode & 0o777]).toEqual([f, 0o600]);
+    expect(statSync(dest).mode & 0o777).toBe(0o700);
+    chmodSync(join(dest, "work", "report.md"), 0o644); // 重做前被放宽：再存一次要收回 0600
+    chmodSync(join(dest, "index.txt"), 0o644);
+  }
 });

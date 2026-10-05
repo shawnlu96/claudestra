@@ -56,10 +56,10 @@ function sessionTail(path: string): string {
 }
 
 /** The journal's session identity is authoritative: a recycled registry name cannot select another session. */
-export function lendWorkerFailureOf(db: Database, agent: string, codex: () => LendWorkerFailure | undefined,
+export function lendWorkerFailureOf(db: Database, agent: string, codex: (row: LendRow | undefined) => LendWorkerFailure | undefined,
   now = Date.now(), pathOf = claudeWorkerSessionPath): LendWorkerFailure | undefined {
   const row = liveOrders(db).find((r) => r.agent === agent && r.state === "started");
-  if (row?.family !== "claude") return codex();
+  if (row?.family !== "claude") return codex(row);
   if (!row?.sessionId) return undefined;
   let signal: ReturnType<typeof claudeSessionSignal>;
   try {

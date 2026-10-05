@@ -390,7 +390,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
       // stopped 的工作副本只留 24 小时（lend-work-retention.ts）：回合失败交回 A 定夺，worker 写到一半的产物先另存
-      const kept = failed.kind === "error" ? d.keepEvidence?.(cur, failureReason(failed)) : null;
+      const kept = failed.kind === "error" ? d.keepEvidence?.(cur, `${failureReason(failed)}\n报错原文（只留本机）：${failed.message}`) : null;
       const why = failureReason(failed, kept ? "现场已在出借方本机留存" : undefined);
       d.log(`${cur.orderId} ${why}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}${kept ? `，证据 ${kept}` : ""}）`);
       return finish(cur, "stopped", why, d, true);

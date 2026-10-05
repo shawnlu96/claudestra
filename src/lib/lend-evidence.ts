@@ -50,6 +50,7 @@ export function keepLendEvidence(row: Pick<LendRow, "orderId" | "agent" | "sessi
     for (const f of files) {
       mkdirSync(dirname(join(dest, "work", f)), { recursive: true, mode: 0o700 });
       copyFileSync(join(row.dir!, f), join(dest, "work", f));
+      chmodSync(join(dest, "work", f), 0o600); // copyFile 照搬源文件权限（常见 0644）；重做覆盖时也要再收紧
     }
     const agent = row.agent ?? "?";
     writeFileSync(join(dest, "index.txt"), [
@@ -58,6 +59,7 @@ export function keepLendEvidence(row: Pick<LendRow, "orderId" | "agent" | "sessi
       `工作副本: ${row.dir ?? "?"}${present ? "（stopped 后 24 小时清掉）" : "（已不在）"}`,
       `worker 开跑后写过的文件 ${files.length} 个，复制在 work/ 下（单个 > 1 MiB 或累计超 16 MiB 的没复制）:`, ...files.map((f) => `- ${f}`), "",
     ].join("\n"), { mode: 0o600 });
+    chmodSync(join(dest, "index.txt"), 0o600); // mode 只管新建：重做时覆盖已有的 index 不改权限
     return dest;
   } catch (e) {
     log(`存 ${row.orderId} 的证据失败（停单照常）：${(e as Error).message}`);
