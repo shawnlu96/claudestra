@@ -13,9 +13,14 @@ import { cosine } from "./memory-vectors.js";
 export const IMPORT_ISSUES = ["format", "redaction", "duplicate", "anchor", "lint"] as const;
 type IssueKind = (typeof IMPORT_ISSUES)[number];
 interface ImportIssue { line: number; kind: IssueKind; reason: string; duplicateOf?: string }
-interface ImportRow { line: number; key: string; input: MemoryInput; memory: Memory; replay: boolean }
-export interface ImportPlan { project: string; digest: string; rows: ImportRow[]; issues: ImportIssue[] }
+interface ImportRow { line: number; key: string; input: MemoryInput; memory: Memory; replay: boolean; gap?: SemanticGap }
+/** A row whose semantic check ran incompletely: its own vector (self) or some active memories' vectors were not precomputed. */
+export interface SemanticGap { line: number; self: boolean; missing: string[] }
+export interface ImportPlan { project: string; digest: string; rows: ImportRow[]; issues: ImportIssue[]; semanticGaps: SemanticGap[] }
 export type ImportVectors = ReadonlyMap<string, Float32Array>;
+/** Present only when vectors were supplied; "degraded" lists rows whose semantic check skipped unvectorized memories. */
+export type SemanticReport = { status: "complete" } | { status: "degraded"; gaps: SemanticGap[]; reason: string };
+export interface ImportResult { backup: string | null; imported: string[]; replayed: string[]; semantic?: SemanticReport }
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 export const importVectorKey = (m: Memory) => JSON.stringify([m.project, m.digest, m.visibility]);
 const TABLES = ["ledger_instance", "events", "tasks", "features", "dag_versions", "lend_peers", "memories", "memory_marks"];
@@ -142,16 +147,20 @@ function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, 
     return db.transaction(() => {
       const memory = writeRow(db, ctx, key, input);
       const vec = vectors.get(importVectorKey(memory));
+      // Vectors are precomputed outside the write lock; a memory that appeared since then has none and is reported, not silently skipped.
+      const missing: string[] = [];
       if (vec) {
         for (const r of db.query("SELECT id FROM memories WHERE project = ? AND id <> ?").all(project, memory.id) as { id: string }[]) {
           const other = getMemory(db, r.id)!;
           const status = memoryState(db, r.id)?.status;
           if (status === "retracted" || status === "superseded") continue;
           const v = vectors.get(importVectorKey(other));
-          if (v && cosine(vec, v) >= 0.92) throw new LedgerError("conflict", `语义重复：与 ${other.id} 余弦 ≥0.92`, { duplicateOf: other.id });
+          if (!v) missing.push(other.id);
+          else if (cosine(vec, v) >= 0.92) throw new LedgerError("conflict", `语义重复：与 ${other.id} 余弦 ≥0.92`, { duplicateOf: other.id });
         }
       }
-      return { line, key, input, memory, replay: false };
+      const gap = vectors.size && (!vec || missing.length) ? { line, self: !vec, missing } : undefined;
+      return { line, key, input, memory, replay: false, ...(gap ? { gap } : {}) };
     })();
   } catch (e) {
     const kind = e instanceof LedgerError && e.code === "not_found" ? "anchor"
@@ -164,7 +173,7 @@ function inspectRow(db: Database, ctx: MemoryCtx, project: string, raw: string, 
 export function planMemoryImport(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors = new Map()): ImportPlan {
   const copy = snapshot(db);
   try {
-    const plan: ImportPlan = { project, digest: hash(raw), rows: [], issues: [] };
+    const plan: ImportPlan = { project, digest: hash(raw), rows: [], issues: [], semanticGaps: [] };
     const seen = new Set<string>();
     raw.split(/\r?\n/).forEach((text, i) => {
       if (!text.trim()) return;
@@ -177,13 +186,16 @@ export function planMemoryImport(db: Database, ctx: MemoryCtx, project: string, 
         if (earlier) r.reason = `与清单行 ${earlier.line} 重复（内容 / family 与文件 / 语义近邻）`;
         plan.issues.push(r);
       }
-      else plan.rows.push(r);
+      else {
+        plan.rows.push(r);
+        if (r.gap) plan.semanticGaps.push(r.gap);
+      }
     });
     return plan;
   } finally { copy.close(); }
 }
 
-export function applyMemoryImport(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors = new Map(), authorize?: () => void) {
+export function applyMemoryImport(db: Database, ctx: MemoryCtx, project: string, raw: string, vectors: ImportVectors = new Map(), authorize?: () => void): ImportResult {
   const first = planMemoryImport(db, ctx, project, raw, vectors);
   const clean = (p: ImportPlan) => {
     if (p.issues.length) throw new LedgerError("invalid", "清单有问题，整批不写；先跑 --dry-run", { issues: p.issues });
@@ -205,6 +217,12 @@ export function applyMemoryImport(db: Database, ctx: MemoryCtx, project: string,
       if (r.replay) replayed.push(r.memory.id);
       else imported.push(writeRow(db, { ...ctx, now }, r.key, r.input).id);
     }
-    return { backup, imported, replayed };
+    // No vector service call under the write lock: gaps from memories added after precomputation are reported conservatively.
+    if (!vectors.size) return { backup, imported, replayed };
+    const semantic: SemanticReport = plan.semanticGaps.length
+      ? { status: "degraded", gaps: plan.semanticGaps,
+        reason: "向量在拿锁前预计算，之后新出现的记忆没有向量、锁内不调向量服务：这些行与它们之间未做语义判重；精确内容与 family + 文件判重已在锁内执行" }
+      : { status: "complete" };
+    return { backup, imported, replayed, semantic };
   }).immediate());
 }
