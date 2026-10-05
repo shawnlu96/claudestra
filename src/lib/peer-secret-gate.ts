@@ -7,7 +7,7 @@
 import { redactFields } from "./redact-fields.js";
 
 const RULES: readonly (readonly [string, RegExp])[] = [
-  ["密钥前缀", /sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|tok_[A-Za-z0-9]{8,}/],
+  ["密钥前缀", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|tok_[A-Za-z0-9]{8,}/],
   ["Bearer", /Bearer[A-Za-z0-9._~+/=-]{8,}/i],
   ["私钥块", /-----BEGIN[A-Z]*PRIVATEKEY-----/],
 ];
@@ -59,6 +59,8 @@ export function peerSecretHit(folded: string, ledgerHead?: string | null): strin
   const flat = folded.replace(/\s+/g, "");
   const hit = RULES.find(([, re]) => re.test(flat))?.[0];
   if (hit) return hit;
+  // Deleting whitespace can attach a real sk prefix to the preceding word; retain its original left boundary too.
+  if (/(?<![A-Za-z0-9])s\s*k\s*-\s*(?:[A-Za-z0-9_-]\s*){16,}/.test(folded)) return "密钥前缀";
   const text = typeof ledgerHead === "string" && /^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(ledgerHead)
     ? folded.replace(new RegExp(`(?<![\\w-])${ledgerHead}(?![\\w-])`, "g"), SENTINEL) : folded;
   if (/[0-9a-f]{32,}/i.test(text.replace(/\s+/g, ""))) return "长十六进制";
