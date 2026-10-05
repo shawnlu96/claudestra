@@ -6,12 +6,13 @@
  * 隔离：HOME / shell 任务目录都是本文件的临时目录，不碰真实 ~/.claude 或 /tmp/claude-<uid>。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, appendFileSync, writeFileSync, rmSync, symlinkSync, unlinkSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, appendFileSync, writeFileSync, rmSync, symlinkSync, unlinkSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { activeBgTasksFor, hasActiveBgActivities, pollBgActivitiesForTest } from "../src/bridge/bg-activity-watcher";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus";
 import { projectJsonlPath } from "../src/lib/jsonl-cost";
+import { ShellResults } from "../src/lib/bg-shell-results";
 
 const MIN = 60_000;
 let root = "";
@@ -333,5 +334,58 @@ describe("bg-activity-watcher · 后台 shell", () => {
     await f.poll(10_000);
     await f.poll(2 * MIN); // 超过确认超时
     for (const id of ["old", "fg", "lnk"]) expect(f.of(id)).toEqual([]);
+  });
+});
+
+/** bridge 重启前留下的 unknown 记录：与 watcher 首次跟踪时写的是同一份持久化（这个 agent-session 还没被扫过 = 冷启动） */
+const persistUnknown = (f: ReturnType<typeof fixture>, id: string, startedAt: number) =>
+  new ShellResults().remember({ agentName: f.agent.name, sessionId: f.agent.sessionId, id, startedAt, lastGrowth: startedAt, exitCode: null });
+
+describe("bg-activity-watcher · 重启前结局记成 unknown 的 shell", () => {
+  test("冷启动：输出已以 [exited with code 0] 写完 → 首轮更正为 done exit 0，时长截到文件最后写入；不发开始事件、不当新任务", async () => {
+    const f = fixture("resume-done");
+    const end = Math.floor(Date.now() / 1000) * 1000;
+    await persistUnknown(f, "r1", end - 14 * MIN);
+    writeFileSync(f.out("r1"), "building\n[exited with code 0]\n");
+    utimesSync(f.out("r1"), end / 1000, end / 1000);
+    await f.poll();
+    expect(f.completed("r1")).toHaveLength(1);
+    expect(f.completed("r1")[0].data).toMatchObject({ status: "done", exitCode: 0, durationMs: 14 * MIN, threadId: null });
+    expect(f.of("r1").filter((e) => e.type === "bg_task_started")).toEqual([]);
+    expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "r1")).toMatchObject({ startedAt: end - 14 * MIN, end: { status: "done", exitCode: 0 } });
+    await f.poll(10_000);
+    expect(f.completed("r1")).toHaveLength(1);
+  });
+
+  test("重启时还在跑：接着跟（不建子区、只发进度把卡拉回跟踪），之后真实退出行到达才收尾", async () => {
+    const f = fixture("resume-run");
+    await persistUnknown(f, "r2", clock - 5 * MIN);
+    writeFileSync(f.out("r2"), "still compiling\n");
+    await f.poll();
+    expect(f.completed("r2")).toEqual([]);
+    expect(f.active("r2")).toBe(true);
+    expect(f.of("r2").filter((e) => e.type === "bg_task_started")).toEqual([]);
+    expect(f.of("r2").find((e) => e.type === "bg_task_update")?.data).toMatchObject({ items: [], threadId: null, progress: { startedTs: clock - 5 * MIN } });
+    await f.poll(10 * MIN);
+    expect(f.completed("r2")).toEqual([]);
+    appendFileSync(f.out("r2"), "[exited with code 2]\n");
+    await f.poll(10_000);
+    expect(f.completed("r2")).toHaveLength(1);
+    expect(f.completed("r2")[0].data).toMatchObject({ status: "done", exitCode: 2 });
+  });
+
+  test("文件不在 / 换成软链 → 保持 unknown、不发任何事件；末行 [killed] → 更正为已停止", async () => {
+    const f = fixture("resume-skip");
+    for (const id of ["gone", "lnk", "k1"]) await persistUnknown(f, id, clock - MIN);
+    writeFileSync(join(f.tasks, "agent-lnk.jsonl"), '{"type":"assistant"}\n[killed]\n');
+    symlinkSync(join(f.tasks, "agent-lnk.jsonl"), f.out("lnk"));
+    writeFileSync(f.out("k1"), "SIGTERM (Polite quit request)\n\n[killed]\n");
+    await f.poll();
+    await f.poll(10_000);
+    expect(f.of("gone")).toEqual([]);
+    expect(f.of("lnk")).toEqual([]);
+    expect(f.completed("k1")[0]?.data).toMatchObject({ status: "stopped", exitCode: null });
+    const end = (id: string) => activeBgTasksFor(f.agent.name).find((t) => t.id === id)?.end;
+    expect([end("gone"), end("lnk"), end("k1")]).toMatchObject([{ status: "unknown" }, { status: "unknown" }, { status: "stopped" }]);
   });
 });

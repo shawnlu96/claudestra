@@ -188,6 +188,39 @@ function titleFor(kind: BgActivityKind, filePath: string): string {
   return kind === "subagent" ? `🤖 subagent ${base.replace(/^agent-/, "").slice(0, 20)}` : `🐚 bg shell ${base}`;
 }
 
+/** 活动的初始状态（新开 / 重启后接着读共用）；startedAt 不给就是现在 */
+function newActivity(
+  kind: BgActivityKind,
+  agent: AgentLite,
+  filePath: string,
+  o: Pick<Activity, "threadId" | "adapter" | "meta"> & { startedAt?: number },
+): Activity {
+  return {
+    key: filePath,
+    id: basename(filePath).replace(/\.(jsonl|output)$/, ""),
+    kind,
+    agentName: agent.name,
+    sessionId: agent.sessionId,
+    ownerChatId: agent.channelId,
+    filePath,
+    threadId: o.threadId,
+    adapter: o.adapter,
+    offset: 0,
+    lastGrowth: deps.now(),
+    startedAt: o.startedAt ?? deps.now(),
+    queue: [],
+    flushTimer: null,
+    eventCount: 0,
+    finished: false,
+    recent: [],
+    meta: o.meta,
+    progress: EMPTY_PROGRESS,
+    shell: newShellProgress(),
+    end: null,
+    unreadable: false,
+  };
+}
+
 async function startActivity(
   kind: BgActivityKind,
   agent: AgentLite,
@@ -214,30 +247,7 @@ async function startActivity(
     }
   }
 
-  const act: Activity = {
-    key: filePath,
-    id: basename(filePath).replace(/\.(jsonl|output)$/, ""),
-    kind,
-    agentName: agent.name,
-    sessionId: agent.sessionId,
-    ownerChatId: agent.channelId,
-    filePath,
-    threadId,
-    adapter,
-    offset: 0,
-    lastGrowth: deps.now(),
-    startedAt: deps.now(),
-    queue: [],
-    flushTimer: null,
-    eventCount: 0,
-    finished: false,
-    recent: [],
-    meta,
-    progress: EMPTY_PROGRESS,
-    shell: newShellProgress(),
-    end: null,
-    unreadable: false,
-  };
+  const act = newActivity(kind, agent, filePath, { threadId, adapter, meta });
   activities.set(filePath, act);
   if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });
   console.log(
@@ -251,6 +261,28 @@ async function startActivity(
     type: "bg_task_started",
     data: { kind, id: act.id, threadId, title, agentType: meta.agentType, model: meta.model, ...(kind === "shell" ? { progress: progressView(act) } : {}) },
   });
+}
+
+/**
+ * bridge 重启前在跟踪、结局记成 unknown 的 shell（多半是重启时进程还在跑）：首轮 baseline 会把它的输出当存量不再读，结局就永远停在
+ * unknown。输出还在且是普通文件（软链是 subagent 对话记录）就接着读：已写完的按末行更正（时长截到文件最后写入时刻），没写完的继续跟到
+ * 终止行。不建子区、不发开始事件——前端已有这张「状态未知」卡，只发进度 / 结局把它更正过来；文件不在就保持 unknown。
+ */
+async function resumeUnknownShells(agent: AgentLite, shellFiles: string[]): Promise<void> {
+  const dir = deps.shellDir(agent.cwd, agent.sessionId);
+  for (const r of shellResults.snapshots(agent.name)) {
+    const filePath = join(dir, `${r.id}.output`);
+    if (r.end.status !== "unknown" || !shellFiles.includes(filePath) || activities.has(filePath)) continue;
+    const st = await lstat(filePath).catch(() => null); // lstat 失败 = 刚被删，和文件不在一样保持 unknown
+    if (!st?.isFile()) continue;
+    seen.add(filePath);
+    const act = newActivity("shell", agent, filePath, { threadId: null, adapter: null, meta: {}, startedAt: r.startedAt });
+    activities.set(filePath, act);
+    console.log(`🧵 bg shell 重启前结局未知、输出仍在，接着读: ${agent.name} ${act.id}`);
+    await consume(act).catch((e) => console.error(`🧵 bg shell 重启后读取失败 (${agent.name} ${act.id}):`, (e as Error).message));
+    if (act.end) await finalize(act, act.end.status, "重启后按末行更正", st.mtimeMs);
+    else emitProgress(act);
+  }
 }
 
 /** 消费一个活动文件的新增字节，渲染进 queue */
@@ -346,6 +378,11 @@ function setUnreadable(act: Activity, v: boolean): void {
   if (act.unreadable === v) return;
   act.unreadable = v;
   console.log(`🧵 bg shell 输出${v ? "读不到（状态未知，继续重试）" : "恢复可读"}: ${act.agentName} ${basename(act.filePath)}`);
+  emitProgress(act);
+}
+
+/** 只带进度的空 update：前端据此切换「读不到」/ 把不再跟踪的卡拉回跟踪（stream-shape 对 shell 放行空 items + progress） */
+function emitProgress(act: Activity): void {
   emitEvent({
     agent: act.agentName,
     chatId: act.ownerChatId,
@@ -400,13 +437,14 @@ function progressView(act: Activity) {
  *  unknown（输出文件消失，不知结局） */
 type FinalStatus = "done" | "stopped" | "idle" | "unknown";
 
-async function finalize(act: Activity, status: FinalStatus = "idle", reason: string = status): Promise<void> {
+/** endTs：已知的真实结束时刻（重启后才读到的终止行用文件最后写入时刻），不给就按现在 / subagent 的最后记录 */
+async function finalize(act: Activity, status: FinalStatus = "idle", reason: string = status, endTs?: number): Promise<void> {
   if (act.finished) return;
   act.finished = true;
   await flush(act).catch(() => {});
   activities.delete(act.key);
   const t0 = act.progress.firstTs ?? act.startedAt;
-  const durationMs = (status === "done" ? (act.progress.lastTs ?? deps.now()) : deps.now()) - t0;
+  const durationMs = (endTs ?? (status === "done" ? (act.progress.lastTs ?? deps.now()) : deps.now())) - t0;
   const mins = (durationMs / 60_000).toFixed(1);
   const exitCode = act.end?.exitCode ?? null;
   console.log(`🧵 bg 活动结束: ${act.agentName} ${basename(act.filePath)}（${mins}min, ${reason}）`);
@@ -464,6 +502,7 @@ async function tickInner(): Promise<void> {
     await shellResults.select(agent.name, agent.sessionId);
     const subFiles = await listFiles(subagentsDir(agent.cwd, agent.sessionId), ".jsonl");
     const shellFiles = await listFiles(deps.shellDir(agent.cwd, agent.sessionId), ".output");
+    if (first) await resumeUnknownShells(agent, shellFiles); // 先于下面的 baseline：接着读的不能被当存量
     // 先接回消失后又出现的已确认 shell：startActivity 把它放回 seen，下面数新文件就不会把它算进洪水闸
     for (const f of shellFiles) {
       if (!missingShells.delete(f)) continue;
