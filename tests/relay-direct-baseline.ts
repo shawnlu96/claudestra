@@ -6,13 +6,13 @@
  * 直接运行（loopback 子命令）只测隔离回环 fixture，产物标 source=loopback-fixture，不能当生产读数。
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, chmodSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const PHASES = ["start", "hello", "send", "headers", "verified"] as const;
 type Phase = (typeof PHASES)[number];
 type PathKind = "direct" | "relay";
-type Session = "handshake" | "reused";
+type Session = "handshake" | "reused" | "unavailable";
 export type ClockUnit = "ms" | "us" | "ns";
 /** 外部读样本每轮上限：只量延迟，不做 bulk 压测 */
 export const ROUND_MAX = 20;
@@ -48,8 +48,8 @@ export type ExcludeReason = "bad_sample" | "phase_order" | "transport" | "status
 /** 各段时长（ms）：connect 只有握手样本且 port 报了 hello 才有 */
 interface PhaseDurations {
   connect?: number;
-  ttfb: number;
-  body: number;
+  ttfb?: number;
+  body?: number;
   total: number;
 }
 const DURATION_KEYS = ["connect", "ttfb", "body", "total"] as const;
@@ -64,22 +64,38 @@ export function toMs(v: number, unit: ClockUnit): number {
 
 /** 样本能不能进 RTT：失败类单列，绝不混进分位数 */
 export function classify(s: Sample): { ok: true; d: PhaseDurations } | { ok: false; reason: ExcludeReason } {
-  const m = s.marks ?? {};
-  const need = [m.start, m.send, m.headers, m.verified];
-  if (!UNIT_DIV[s.unit] || !(s.session === "handshake" || s.session === "reused")) return { ok: false, reason: "bad_sample" };
+  if (!validSample(s)) return { ok: false, reason: "bad_sample" };
+  const m = s.marks;
   if (s.status === 0) return { ok: false, reason: "transport" };
-  if (need.some((v) => typeof v !== "number" || !Number.isFinite(v)) || (m.hello !== undefined && !Number.isFinite(m.hello))) {
-    return { ok: false, reason: "bad_sample" };
-  }
   if (s.status < 200 || s.status > 299) return { ok: false, reason: "status" };
-  if (!s.shapeOk) return { ok: false, reason: "shape" };
   if (!s.verifyOk) return { ok: false, reason: "verify" };
+  if (!s.shapeOk) return { ok: false, reason: "shape" };
+  if (m.verified === undefined) return { ok: false, reason: "bad_sample" };
   const seq = PHASES.map((p) => m[p]).filter((v): v is number => v !== undefined);
   if (seq.some((v, i) => i > 0 && v < seq[i - 1]!)) return { ok: false, reason: "phase_order" };
   const ms = (a: number, b: number) => toMs(b - a, s.unit);
-  const d: PhaseDurations = { ttfb: ms(m.send!, m.headers!), body: ms(m.headers!, m.verified!), total: ms(m.start!, m.verified!) };
+  const d: PhaseDurations = { total: ms(m.start!, m.verified!) };
+  if (m.send !== undefined && m.headers !== undefined) d.ttfb = ms(m.send, m.headers);
+  if (m.headers !== undefined) d.body = ms(m.headers, m.verified!);
   if (s.session === "handshake" && m.hello !== undefined) d.connect = ms(m.start!, m.hello);
   return { ok: true, d };
+}
+
+/** Validate identity before bucketing: matching missing fields would invent a shared responder. */
+function validSample(value: unknown): value is Sample {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const s = value as Sample;
+  const text = [s.responder, s.endpoint, s.principal, s.responseVersion, s.encoding];
+  if (text.some(v => typeof v !== "string" || !v.trim())) return false;
+  if (typeof s.bodyHash !== "string" || (s.verifyOk && !/^[0-9a-f]{64}$/.test(s.bodyHash))) return false;
+  if (!["direct", "relay"].includes(s.path) || !["handshake", "reused", "unavailable"].includes(s.session)) return false;
+  if (!Number.isSafeInteger(s.status) || (s.status !== 0 && (s.status < 100 || s.status > 599))) return false;
+  if (!Number.isSafeInteger(s.round) || s.round < 1 || !Number.isSafeInteger(s.bytes) || s.bytes < 0) return false;
+  if (typeof s.shapeOk !== "boolean" || typeof s.verifyOk !== "boolean" || !Object.hasOwn(UNIT_DIV, s.unit)) return false;
+  if (!s.marks || typeof s.marks !== "object" || Array.isArray(s.marks) || !Number.isFinite(s.marks.start)) return false;
+  if (s.status !== 0 && s.marks.verified === undefined) return false;
+  if (Object.entries(s.marks).some(([k, v]) => !PHASES.includes(k as Phase) || typeof v !== "number" || !Number.isFinite(v))) return false;
+  return s.cliStartup === undefined || (typeof s.cliStartup === "number" && Number.isFinite(s.cliStartup) && s.cliStartup >= 0);
 }
 
 export interface Stat {
@@ -111,7 +127,7 @@ interface MatchedGroup {
   session: Session;
   status: "matched" | "unavailable";
   /** unavailable 的原因：某一侧没有有效样本；body_mismatch = 同 responder/端点/principal 但两侧响应版本、压缩或正文不同 */
-  reason?: "no_direct" | "no_relay" | "body_mismatch";
+  reason?: "no_direct" | "no_relay" | "body_mismatch" | "session_unavailable";
   direct: SideStats;
   relay: SideStats;
 }
@@ -151,6 +167,7 @@ export function summarize(samples: Sample[], meta: { date: string; source: strin
   const all = [...buckets.values()];
   const groups = all.map((b): MatchedGroup => {
     const g: MatchedGroup = { key: b.key, session: b.session, status: "matched", direct: sideStats(b.direct), relay: sideStats(b.relay) };
+    if (b.session === "unavailable") return { ...g, status: "unavailable", reason: "session_unavailable" };
     if (b.direct.length && b.relay.length) return g;
     const missing: PathKind = b.direct.length ? "relay" : "direct";
     const sibling = all.some((o) => o !== b && o.session === b.session && baseOf(o.key) === baseOf(b.key) && o[missing].length > 0);
@@ -169,9 +186,9 @@ function pickKey(s: MatchKey): MatchKey {
 interface PortResponse {
   status: number;
   headers: Record<string, string>;
-  /** 头到了就返回；正文另取，headers→verified 才量得出来 */
+  /** Body reading must include client verification; throw on authentication/body failure. */
   readBody(): Promise<Uint8Array>;
-  /** port 确知连接是新握手还是复用时填；不填按「本次采集每个 port 的第一条 = handshake」 */
+  /** Only report observed client state; absence means unavailable. */
   session?: Session;
 }
 
@@ -181,7 +198,7 @@ export interface ReadonlyRequestPort {
   /** PM 本地给的 responder 标识，公开汇总里只出匿名代号 */
   responder: string;
   principal: string;
-  get(endpoint: string, hooks: { mark(phase: "hello" | "send"): void; signal: AbortSignal }): Promise<PortResponse>;
+  get(endpoint: string, hooks: { mark(phase: "hello" | "send" | "headers"): void; signal: AbortSignal }): Promise<PortResponse>;
 }
 
 export interface Probe {
@@ -194,6 +211,7 @@ export interface Probe {
 
 export interface CollectOpts {
   rounds?: number;
+  /** Total requests across every port; must divide evenly to keep path/probe pairs. */
   perRound?: number;
   now?: () => number;
   unit?: ClockUnit;
@@ -207,24 +225,23 @@ export async function collect(ports: ReadonlyRequestPort[], probes: Probe[], opt
   const rounds = opts.rounds ?? 1;
   const perRound = opts.perRound ?? ROUND_MAX;
   if (!probes.length) throw new Error("至少一个 probe");
-  if (perRound < 1 || perRound > ROUND_MAX) throw new Error(`每轮样本数要在 1..${ROUND_MAX}`);
+  if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("rounds 必须是有限正整数");
+  if (!Number.isSafeInteger(perRound) || perRound < 1 || perRound > ROUND_MAX) throw new Error(`每轮样本数要在 1..${ROUND_MAX}`);
+  if (!ports.length || perRound % ports.length !== 0) throw new Error("总预算必须能完整分配到所有 port");
   const now = opts.now ?? (() => performance.now());
   const unit = opts.unit ?? "ms";
   const out: Sample[] = [];
-  const seen = new Set<ReadonlyRequestPort>();
   for (let round = 1; round <= rounds; round++) {
-    for (let i = 0; i < perRound; i++) {
+    for (let i = 0; i < perRound / ports.length; i++) {
       for (const port of ports) {
-        const first = !seen.has(port);
-        seen.add(port);
-        out.push(await sampleOnce(port, probes[i % probes.length]!, { round, first, now, unit, timeoutMs: opts.timeoutMs ?? 15_000 }));
+        out.push(await sampleOnce(port, probes[i % probes.length]!, { round, now, unit, timeoutMs: opts.timeoutMs ?? 15_000 }));
       }
     }
   }
   return out;
 }
 
-type OnceCtx = { round: number; first: boolean; now: () => number; unit: ClockUnit; timeoutMs: number };
+type OnceCtx = { round: number; now: () => number; unit: ClockUnit; timeoutMs: number };
 
 async function sampleOnce(port: ReadonlyRequestPort, probe: Probe, c: OnceCtx): Promise<Sample> {
   const marks: Sample["marks"] = { start: c.now() };
@@ -232,15 +249,14 @@ async function sampleOnce(port: ReadonlyRequestPort, probe: Probe, c: OnceCtx): 
   const blank = { responseVersion: "unknown", encoding: "unknown", bytes: 0, bodyHash: "", shapeOk: false, verifyOk: false };
   let res: PortResponse;
   try {
-    const mark = (p: "hello" | "send") => void (marks[p] ??= c.now());
+    const mark = (p: "hello" | "send" | "headers") => void (marks[p] ??= c.now());
     res = await port.get(probe.endpoint, { mark, signal: AbortSignal.timeout(c.timeoutMs) });
-    marks.headers = c.now();
   } catch {
     // 传输失败本身就是要记的结果（status 0 → excluded.transport），错误原文可能带地址，不进记录
-    return { ...base, ...blank, session: c.first ? "handshake" : "reused", status: 0, marks };
+    return { ...base, ...blank, session: "unavailable", status: 0, marks };
   }
   const headers = Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k.toLowerCase(), v]));
-  const session: Session = res.session ?? (c.first ? "handshake" : "reused");
+  const session: Session = res.session ?? "unavailable";
   let body: Uint8Array = new Uint8Array();
   let json: unknown;
   let shapeOk = false;
@@ -254,7 +270,6 @@ async function sampleOnce(port: ReadonlyRequestPort, probe: Probe, c: OnceCtx): 
     // 读正文失败 → verifyOk=false；能读但不是 JSON → shapeOk=false。两者都按原因单列，不丢样本
   }
   marks.verified = c.now();
-  if (marks.send === undefined) marks.send = marks.start; // port 不报 send 时退化为 start：ttfb 含建连，文档里写明
   const responseVersion = shapeOk ? (probe.version?.(json, headers) ?? headers.etag ?? "unversioned") : "invalid";
   const encoding = headers["content-encoding"] ?? "identity";
   return { ...base, session, status: res.status, shapeOk, verifyOk, responseVersion, encoding, bytes: body.byteLength, bodyHash: sha256(body), marks };
@@ -273,7 +288,6 @@ export function fetchPort(
     async get(endpoint, hooks) {
       const url = o.baseUrl.replace(/\/+$/, "") + endpoint;
       const headers = o.headersFor?.(url) ?? {};
-      hooks.mark("send");
       const r = await o.fetchLike(url, { method: "GET", headers, signal: hooks.signal });
       return { status: r.status, headers: Object.fromEntries(r.headers), readBody: async () => new Uint8Array(await r.arrayBuffer()) };
     },
@@ -305,18 +319,29 @@ export interface StartupGroup {
 
 const LABELS = { platform: ["desktop", "ios"], temperature: ["cold", "warm"], visibility: ["foreground", "background"] } as const;
 
+/** Imported device records may carry arbitrary JSON; validate labels and numeric phase values before publishing. */
+function validStartup(value: unknown): value is StartupRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const r = value as StartupRecord;
+  const labelsOk = (Object.keys(LABELS) as (keyof typeof LABELS)[]).every(k => (LABELS[k] as readonly string[]).includes(r[k]));
+  if (!labelsOk || !Object.hasOwn(UNIT_DIV, r.unit) || !["device", "pending", "simulated"].includes(r.source)) return false;
+  if (r.networkSwitch !== undefined && typeof r.networkSwitch !== "string") return false;
+  if (!r.phases || typeof r.phases !== "object" || Array.isArray(r.phases)) return false;
+  return Object.entries(r.phases).every(([k, v]) => STARTUP_PHASES.includes(k as typeof STARTUP_PHASES[number])
+    && typeof v === "number" && Number.isFinite(v) && v >= 0);
+}
+
 /** 冷暖、前后台、平台各自成组；没有真机读数的组只列「PM/owner 待测」 */
-export function summarizeStartup(records: StartupRecord[]): { groups: StartupGroup[]; rejected: number; networkSwitches: string[] } {
+export function summarizeStartup(records: StartupRecord[]): { groups: StartupGroup[]; rejected: number; networkSwitches: { kind: "observed"; detail: "unavailable" }[] } {
   const groups = new Map<string, { r: StartupRecord; device: StartupRecord[] }>();
   let rejected = 0;
-  const networkSwitches: string[] = [];
+  const networkSwitches: { kind: "observed"; detail: "unavailable" }[] = [];
   for (const r of records) {
-    const labelsOk = (Object.keys(LABELS) as (keyof typeof LABELS)[]).every((k) => (LABELS[k] as readonly string[]).includes(r[k]));
-    if (!labelsOk || !UNIT_DIV[r.unit] || (r.source !== "device" && r.source !== "pending")) {
+    if (!validStartup(r) || r.source === "simulated") {
       rejected++;
       continue;
     }
-    if (r.networkSwitch) networkSwitches.push(redact(r.networkSwitch));
+    if (r.networkSwitch) networkSwitches.push({ kind: "observed", detail: "unavailable" });
     const id = `${r.platform}|${r.temperature}|${r.visibility}`;
     let g = groups.get(id);
     if (!g) groups.set(id, (g = { r, device: [] }));
@@ -353,32 +378,64 @@ export interface PublicSummary extends Omit<BaselineSummary, "groups"> {
   startup?: ReturnType<typeof summarizeStartup>;
 }
 
-/** 匿名：responder / principal 换成按出现顺序的代号，端点去掉 query；版本与正文哈希不公开（可能指纹化对端） */
+function publicSide(side: SideStats): SideStats {
+  const field = (v: Stat): Stat => ({ n: v.n, p50: v.p50, p95: v.p95, unit: "ms" });
+  return { connect: field(side.connect), ttfb: field(side.ttfb), body: field(side.body), total: field(side.total), cliStartup: field(side.cliStartup) };
+}
+
+function publicExcluded(input: BaselineSummary["excluded"]): BaselineSummary["excluded"] {
+  const out: BaselineSummary["excluded"] = {};
+  for (const k of ["bad_sample", "phase_order", "transport", "status", "shape", "verify"] as const) {
+    if (input[k] !== undefined) out[k] = input[k];
+  }
+  return out;
+}
+
+/** Publish only enumerated fields; local free text may contain short credentials with no detectable pattern. */
 export function publicSummary(s: BaselineSummary, manifestSha256: string, startup?: StartupRecord[]): PublicSummary {
+  if (!/^[0-9a-f]{64}$/.test(manifestSha256)) throw new Error("manifest sha256 无效");
   const alias = (prefix: string) => {
     const m = new Map<string, string>();
     return (v: string) => m.get(v) ?? (m.set(v, `${prefix}${m.size + 1}`), m.get(v)!);
   };
   const resp = alias("R");
   const prin = alias("P");
-  const groups = s.groups.map(({ key, ...g }) => ({
-    ...g, responder: resp(key.responder), principal: prin(key.principal), endpoint: redact(key.endpoint.split("?")[0]!),
-    bytes: key.bytes, encoding: key.encoding,
+  const endpoint = alias("E");
+  const encoding = alias("C");
+  const groups = s.groups.map(({ key, session, status, reason, direct, relay }) => ({
+    session, status, ...(reason ? { reason } : {}), direct: publicSide(direct), relay: publicSide(relay),
+    responder: resp(key.responder), principal: prin(key.principal), endpoint: endpoint(key.endpoint),
+    bytes: key.bytes, encoding: encoding(key.encoding),
   }));
-  return { ...s, groups, manifestSha256, ...(startup ? { startup: summarizeStartup(startup) } : {}) };
+  return {
+    date: /^\d{4}-\d{2}-\d{2}$/.test(s.date) ? s.date : "unavailable", source: "S1",
+    units: "ms", quantile: "nearest-rank", samples: s.samples, excluded: publicExcluded(s.excluded), groups, manifestSha256,
+    ...(startup ? { startup: summarizeStartup(startup) } : {}),
+  };
 }
 
 /** 私密记录必须落在仓库外：repo 路径可参数化，在其内就拒绝写 */
 export function writePrivateManifest(dir: string, repoRoot: string, payload: unknown): { file: string; sha256: string } {
   const abs = resolve(dir);
-  const real = (p: string) => (existsSync(p) ? realpathSync(p) : resolve(p));
-  const rel = relative(real(repoRoot), real(existsSync(abs) ? abs : dirname(abs)));
-  if (!rel || (!rel.startsWith("..") && !isAbsolute(rel))) throw new Error("私密 manifest 不能写进仓库目录");
+  const realDestination = (p: string): string => {
+    const tail: string[] = [];
+    let ancestor = resolve(p);
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw new Error("无法解析私密目录祖先");
+      tail.unshift(relative(parent, ancestor));
+      ancestor = parent;
+    }
+    return resolve(realpathSync(ancestor), ...tail);
+  };
+  const rel = relative(realpathSync(repoRoot), realDestination(abs));
+  if (!rel || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) throw new Error("私密 manifest 不能写进仓库目录");
   mkdirSync(abs, { recursive: true, mode: 0o700 });
+  chmodSync(abs, 0o700);
   const text = JSON.stringify(payload);
   const hash = sha256(text);
   const file = join(abs, `relay-direct-${hash.slice(0, 12)}.json`);
-  writeFileSync(file, text, { mode: 0o600 });
+  writeFileSync(file, text, { mode: 0o600, flag: "wx" });
   return { file, sha256: hash };
 }
 
@@ -387,7 +444,14 @@ export function readPrivateManifest(file: string): { samples: Sample[]; meta: { 
   const text = readFileSync(file, "utf8");
   const want = /relay-direct-([0-9a-f]{12})\.json$/.exec(file)?.[1];
   if (!want || sha256(text).slice(0, 12) !== want) throw new Error("manifest 哈希对不上");
-  return JSON.parse(text);
+  const payload = JSON.parse(text);
+  if (!payload || !Array.isArray(payload.samples) || !payload.samples.every(validSample)
+    || !payload.meta || typeof payload.meta.date !== "string" || !payload.meta.date.trim()
+    || typeof payload.meta.source !== "string" || !payload.meta.source.trim()) throw new Error("manifest schema 无效");
+  if (payload.startup !== undefined && (!Array.isArray(payload.startup) || !payload.startup.every(validStartup))) {
+    throw new Error("startup schema 无效");
+  }
+  return payload;
 }
 
 // ───────────────────── 回环 fixture（CLI） ─────────────────────

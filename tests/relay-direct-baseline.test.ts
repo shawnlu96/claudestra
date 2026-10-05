@@ -11,7 +11,7 @@ import {
 
 const REPO = resolve(import.meta.dir, "..");
 const META = { date: "2026-10-05", source: "unit-fixture" };
-const BASE_KEY = { responder: "peer-alpha", endpoint: "/api/v1/agents", principal: "p-synthetic", responseVersion: "v1", encoding: "identity", bytes: 42, bodyHash: "h1" };
+const BASE_KEY = { responder: "peer-alpha", endpoint: "/api/v1/agents", principal: "p-synthetic", responseVersion: "v1", encoding: "identity", bytes: 42, bodyHash: "a".repeat(64) };
 
 /** 一条合成样本：total = ms，send 紧跟 start，headers 在中间 */
 function mk(path: "direct" | "relay", ms: number, over: Partial<Sample> = {}): Sample {
@@ -45,7 +45,7 @@ describe("样本分类：失败单列不进 RTT", () => {
     ["phase_order", { marks: { start: 10, send: 12, headers: 11, verified: 13 } }],
     ["phase_order", { marks: { start: 10, hello: 9, send: 12, headers: 13, verified: 14 } }],
     ["bad_sample", { marks: { start: 10, send: 11, headers: NaN, verified: 12 } }],
-    ["bad_sample", { marks: { start: 10, headers: 11, verified: 12 } }],
+    ["bad_sample", { marks: { start: 10, headers: 11 } }],
     ["bad_sample", { unit: "sec" as never }],
     ["bad_sample", { session: "warm" as never }],
     ["transport", { status: 0 }],
@@ -87,7 +87,7 @@ describe("matched 汇总", () => {
   });
 
   test("正文 / 压缩 / 版本不同 → body_mismatch unavailable，不跨 key 比较", () => {
-    const s = summarize([mk("direct", 10), mk("relay", 20, { bytes: 99, bodyHash: "h2" }), mk("relay", 20, { encoding: "gzip" })], META);
+    const s = summarize([mk("direct", 10), mk("relay", 20, { bytes: 99, bodyHash: "b".repeat(64) }), mk("relay", 20, { encoding: "gzip" })], META);
     expect(s.groups.every((g) => g.status === "unavailable" && g.reason === "body_mismatch")).toBe(true);
     expect(s.groups).toHaveLength(3);
   });
@@ -128,8 +128,9 @@ function fakePort(path: "direct" | "relay", script: { body?: string; status?: nu
       await Bun.sleep(1);
       st.inflight--;
       if (script.fail) throw new Error("connect ECONNREFUSED 10.1.2.3 token=SEKRET");
+      hooks.mark("headers");
       const body = new TextEncoder().encode(script.body ?? '{"agents":[]}');
-      return { status: script.status ?? 200, headers: { ETag: "\"v7\"" }, readBody: async () => body };
+      return { session: st.calls === 1 ? "handshake" : "reused", status: script.status ?? 200, headers: { ETag: "\"v7\"" }, readBody: async () => body };
     },
   };
   return { port, st };
@@ -141,10 +142,10 @@ const clock = () => {
 };
 
 describe("采集器", () => {
-  test("严格串行、每个 port 第一条为 handshake、阶段单调", async () => {
+  test("严格串行、port 明确报告合成会话、阶段单调", async () => {
     const a = fakePort("direct", { hello: true });
     const b = fakePort("relay");
-    const samples = await collect([a.port, b.port], [PROBE], { perRound: 3, rounds: 2, now: clock() });
+    const samples = await collect([a.port, b.port], [PROBE], { perRound: 6, rounds: 2, now: clock() });
     expect(samples).toHaveLength(12);
     expect(a.st.maxInflight + b.st.maxInflight).toBe(2);
     expect(samples.filter((s) => s.session === "handshake").map((s) => s.path)).toEqual(["direct", "relay"]);
@@ -167,7 +168,7 @@ describe("采集器", () => {
       fakePort("relay", { fail: true }).port,
       fakePort("relay", { status: 401 }).port,
     ];
-    const samples = await collect(ports, [PROBE], { perRound: 1, now: clock() });
+    const samples = await collect(ports, [PROBE], { perRound: 4, now: clock() });
     expect(summarize(samples, META).excluded).toEqual({ shape: 2, transport: 1, status: 1 });
     expect(JSON.stringify(samples)).not.toContain("SEKRET");
   });
@@ -210,16 +211,16 @@ describe("desktop / iOS 启动", () => {
     expect(r.groups[1]!.phases.firstUsableRender!.p50).toBe(90);
     expect(r.groups[2]!.phases.firstUsableRender!.n).toBe(0);
     expect(r.groups[3]!.phases.api!.p50).toBe(5);
-    expect(r.networkSwitches).toEqual(["wifi→cellular via <redacted> token=<redacted>"]);
+    expect(r.networkSwitches).toEqual([{ kind: "observed", detail: "unavailable" }]);
   });
 });
 
 describe("secret 不输出 / 私密 manifest", () => {
-  test("公开汇总匿名化 responder / principal、去 query、不带版本与正文哈希", () => {
+  test("公开汇总匿名化身份与端点、不带版本与正文哈希", () => {
     const secret = "tok_" + "A".repeat(40);
     const s = summarize([mk("direct", 10, { endpoint: `/api/v1/agents?token=${secret}` }), mk("relay", 20, { endpoint: `/api/v1/agents?token=${secret}` })], META);
     const pub = JSON.stringify(publicSummary(s, "f".repeat(64)));
-    for (const leak of [secret, "peer-alpha", "p-synthetic", "h1", "responseVersion"]) expect(pub).not.toContain(leak);
+    for (const leak of [secret, "peer-alpha", "p-synthetic", "a".repeat(64), "responseVersion"]) expect(pub).not.toContain(leak);
     expect(pub).toContain('"responder":"R1"');
     expect(redact(`Authorization: Bearer ${secret}`)).toBe("Authorization: Bearer <redacted>");
   });
@@ -239,28 +240,28 @@ describe("secret 不输出 / 私密 manifest", () => {
 });
 
 describe("回环 fixture", () => {
-  test("进程内回环：direct 与回环中继同 key 配对", async () => {
-    const { samples, summary } = await runLoopback({ perRound: 3 });
+  test("进程内回环：同 key，未知 session 明确 unavailable", async () => {
+    const { samples, summary } = await runLoopback({ perRound: 6 });
     expect(samples).toHaveLength(6);
     expect(summary.source).toBe("loopback-fixture");
     expect(summary.excluded).toEqual({});
-    expect(summary.groups.map((g) => [g.session, g.status])).toEqual([["handshake", "matched"], ["reused", "matched"]]);
+    expect(summary.groups.map((g) => [g.session, g.status])).toEqual([["unavailable", "unavailable"]]);
   });
 
   test("文档里的 CLI 命令能跑通（临时 HOME、--no-env-file、repo 路径参数化），stdout 不带原始标识", () => {
     const tmp = mkdtempSync(join(tmpdir(), "rdb-cli-"));
     const out = join(tmp, "private");
     const r = Bun.spawnSync([process.execPath, "--no-env-file", join(REPO, "tests/relay-direct-baseline.ts"), "loopback", "--out", out, "--repo", REPO], {
-      cwd: tmp, env: testChildEnv({ HOME: tmp, TMPDIR: tmp }),
+      cwd: tmp, env: testChildEnv({ HOME: tmp, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: join(tmp, "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "run") }),
     });
     expect(r.exitCode).toBe(0);
     const stdout = r.stdout.toString();
     const res = JSON.parse(stdout) as { manifest: string; summary: { source: string; groups: { status: string }[]; manifestSha256: string } };
-    expect(res.summary.source).toBe("loopback-fixture");
-    expect(res.summary.groups.every((g) => g.status === "matched")).toBe(true);
+    expect(res.summary.source).toBe("S1");
+    expect(res.summary.groups.every((g) => g.status === "unavailable")).toBe(true);
     expect(stdout).not.toContain("loopback-responder");
     const again = Bun.spawnSync([process.execPath, "--no-env-file", join(REPO, "tests/relay-direct-baseline.ts"), "summarize", res.manifest], {
-      cwd: tmp, env: testChildEnv({ HOME: tmp, TMPDIR: tmp }),
+      cwd: tmp, env: testChildEnv({ HOME: tmp, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: join(tmp, "state"), CLAUDESTRA_RUNTIME_DIR: join(tmp, "run") }),
     });
     expect(again.exitCode).toBe(0);
     expect(JSON.parse(again.stdout.toString()).manifestSha256).toBe(res.summary.manifestSha256);
