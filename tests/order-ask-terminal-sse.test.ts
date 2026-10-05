@@ -6,7 +6,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, renameSync } from "node:fs";
+import { copyFileSync, existsSync, renameSync } from "node:fs";
 import { onAsk } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
 import { setLedgerFeedForTest, sseEventAllow } from "../src/bridge/ledger-feed.js";
@@ -144,28 +144,72 @@ describe("轮询游标（手动 tick）", () => {
     expect(ids(f2.got)).toEqual([b]);
   });
 
-  test("换了库文件（generation 变）：上次读成功之前的当历史不发，之后提交的照发", () => {
-    const f = start();
-    f.tick();
-    const t0 = Date.now();
-    // 备用库：一条很早以前的关闭（历史）+ 一条上次读之后才提交的关闭
-    const alt = tempLedgerPath("askt-sse-alt-");
-    const keep = db;
-    db = openLedger(alt);
-    const hist = ask({ now: t0 - 60_000 });
-    settle(hist, t0 - 60_000);
-    const fresh = ask({ now: t0 + 5_000 });
-    settle(fresh, t0 + 5_000);
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    closeLedger(alt);
-    db = keep;
+  /** 把当前库换成 alt（checkpoint、旧文件挪开、alt 改名到原路径），db 指向换上来的库 */
+  const swapIn = (alt: string) => {
     closeLedger(path);
     for (const x of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(x)) renameSync(x, `${x}.old`);
     renameSync(alt, path);
     db = openLedger(path);
+  };
+  /** 在 alt 库上做 fn 再关掉它（db 临时指过去） */
+  const onAlt = (alt: string, fn: () => void) => {
+    const keep = db;
+    db = openLedger(alt);
+    fn();
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    closeLedger(alt);
+    db = keep;
+  };
+
+  test("换库（同源副本）：事件 ts 早于上次读成功、但没发过的关闭照发；旧库里已有 / 已发的不重发（复现 ask-sse r2）", () => {
+    const hist = ask();
+    settle(hist); // 首拍前的历史
+    const f = start();
+    const requestStartedAt = Date.now() - 60_000; // 结清请求先取时间、后等锁提交：事件 ts 早于下面的基线读
     f.tick();
-    expect(ids(f.got)).toEqual([fresh]);
+    const a = ask();
+    settle(a);
     f.tick();
-    expect(f.got).toHaveLength(1);
+    expect(ids(f.got)).toEqual([a]);
+    const y = ask();
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    const alt = tempLedgerPath("askt-sse-alt-");
+    copyFileSync(path, alt); // 备份 / 迁移出来的同源库
+    let x = "";
+    onAlt(alt, () => {
+      x = ask({ now: requestStartedAt });
+      settle(x, requestStartedAt);
+    });
+    swapIn(alt);
+    f.tick();
+    expect(ids(f.got)).toEqual([a, x]);
+    f.tick();
+    expect(f.got).toHaveLength(2);
+    settle(y); // 换上来的库里接着关：seq 游标照常
+    f.tick();
+    expect(ids(f.got)).toEqual([a, x, y]);
+  });
+
+  test("换库：emit 中途抛了，下拍只补没发出去的，不重发、不跳过", () => {
+    const f = start();
+    f.tick();
+    const alt = tempLedgerPath("askt-sse-alt-");
+    let b = "", c = "";
+    onAlt(alt, () => {
+      const t = Date.now() - 60_000;
+      b = ask({ now: t });
+      c = ask({ now: t });
+      settle(b, t);
+      settle(c, t);
+    });
+    swapIn(alt);
+    f.failOn((z) => z.askId === c);
+    f.tick();
+    expect(ids(f.got)).toEqual([b]);
+    f.failOn(null);
+    f.tick();
+    expect(ids(f.got)).toEqual([b, c]);
+    f.tick();
+    expect(f.got).toHaveLength(2);
   });
 });

@@ -4,7 +4,7 @@
  * 全部跑临时文件 SQLite，出借状态经 `ledger lend-*` CLI（runLedger），提问经 openOrderAsk（远端 lend/ask 同一入口）开。
  */
 import { Database } from "bun:sqlite";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -386,6 +386,35 @@ describe("结清关问提交后发 ask SSE（bridge ledger feed 读已提交事�
       expect(JSON.stringify(got)).not.toContain(SECRET_Q);
     } finally {
       setLedgerFeedForTest(undefined);
+    }
+  });
+
+  test("换库：替换库里先取时间、后提交的历史 apply（事件 ts 早于 feed 上次读成功）换上来后照发一次（复现 ask-sse r2）", async () => {
+    const live = join(mkdtempSync(join(tmpdir(), "lend-askt-live-")), "ledger.sqlite");
+    openLedger(live); // 先有一份在用的库（空台账）
+    closeLedger(live);
+    const got: SettledAskClosure[] = [];
+    const tick = setLedgerFeedForTest({ path: live, emit: () => {}, emitAsk: (c) => got.push(c) })!;
+    try {
+      tick(); // 在用库的基线
+      // 待替换库（本测试的 db）：精确绑定的 done 单 + 还开着的 worker 提问；apply 的 now 早于上面那次读
+      const { orderId } = await offer();
+      await claim(orderId);
+      const q = await askId(orderId);
+      db.run("UPDATE lend_orders SET status = 'done' WHERE orderId = ?", [orderId]);
+      tick();
+      expect(now).toBeLessThan(Date.now());
+      expect((await run(["lend-terminal-asks", "--project", P, "--apply"])).closed).toEqual([q]);
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      closeLedger(path);
+      renameSync(path, live);
+      tick();
+      tick();
+      expect(got.map((c) => c.askId)).toEqual([q]);
+      expect(got[0]).toMatchObject({ project: P, state: "cancelled" });
+    } finally {
+      setLedgerFeedForTest(undefined);
+      db = openLedger(path = live);
     }
   });
 });

@@ -7,7 +7,7 @@
 import { askWhoOf, canSeeAsk } from "../lib/ask-access.js";
 import { canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
-import { settledAskClosuresSince, settledAskSeqBefore, type SettledAskClosure } from "../lib/order-ask-terminal.js";
+import { settledAskClosuresSince, type SettledAskClosure } from "../lib/order-ask-terminal.js";
 import { agentInScope, canRunFleet, type Principal } from "../lib/principals.js";
 import { emitEvent, type BridgeEvent } from "./event-bus.js";
 import { talkEventAllowed } from "./talk.js";
@@ -33,29 +33,35 @@ export function ledgerDb(): ReturnType<LedgerReader["get"]> {
 /**
  * followup-reliability-ASKT：读已提交的「随出借单结清关闭」事件发 ask SSE（lib/order-ask-terminal.ts）。每拍按 seq 游标读（不看 data_version：
  * 同一拍里多笔提交 / 批量取消都在 seq 之后），逐条发、逐条推进游标——读库出错游标不动、下拍重读；某条 emit 抛了停在它前面、下拍从它重发，
- * 已发的不重复。首次启动（含 bridge 重启）只取基线不补发（网页连上就全量重拉）；换了库文件（generation 变）以上次读成功那一刻为界：
- * 之前的当历史不洪泛，之后提交的照发
+ * 已发的不重复。首次启动（含 bridge 重启）只取基线不补发（网页连上就全量重拉），基线里的关闭记进 seen。
+ * 换了库文件（generation 变）：seq 是各库自己的，事件 ts 是调用方先取的业务时间（可早于提交），都不能当交界——按事件身份（askId）认：
+ * 新库里所有结清关闭中 seen 里没有的（旧库基线已有 / 已发过的除外）照发，发完才认这一代；中途 emit 抛了下拍按 seen 只补没发的
  */
 function settledAskTicker(): () => void {
   let seq: number | null = null;
   let gen = -1;
-  let okAt = 0;
+  const seen = new Set<string>();
   let failing = false;
   return () => {
     try {
       const db = reader.get();
       if (!db) return;
-      if (seq === null || reader.generation !== gen) {
-        seq = seq === null ? settledAskClosuresSince(db, Number.MAX_SAFE_INTEGER).lastSeq : settledAskSeqBefore(db, okAt);
+      if (seq === null) {
+        const base = settledAskClosuresSince(db, 0);
+        for (const c of base.closures) seen.add(c.askId);
+        seq = base.lastSeq;
         gen = reader.generation;
       }
-      const r = settledAskClosuresSince(db, seq);
+      const swapped = reader.generation !== gen;
+      const r = settledAskClosuresSince(db, swapped ? 0 : seq);
       for (const c of r.closures) {
+        if (swapped && seen.has(c.askId)) continue;
         emitAsk(c);
-        seq = c.seq;
+        seen.add(c.askId);
+        if (!swapped) seq = c.seq;
       }
       seq = r.lastSeq;
-      okAt = Date.now();
+      gen = reader.generation;
       if (failing) console.log("📒 出借单结清关问的推送检测恢复");
       failing = false;
     } catch (e) {

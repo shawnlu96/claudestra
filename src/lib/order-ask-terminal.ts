@@ -136,6 +136,3 @@ export function settledAskClosuresSince(db: Database, afterSeq: number): { lastS
   });
   return { lastSeq, closures };
 }
-
-/** 换了库文件（恢复备份 / 换盘）时的游标：上次读成功那一刻之前写的事件当历史不补发，之后提交的照发 */
-export const settledAskSeqBefore = (db: Database, ts: number): number => maxSeq(db, "WHERE ts < ?", ts);
