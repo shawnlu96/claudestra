@@ -17,6 +17,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
 import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
+import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer } from "./manual-merge-queue-facts.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -56,9 +57,12 @@ export function getMergeRun(db: Database, intentId: string): MergeRun | null {
 /** Re-read the ledger before every external effect; a PM pause or changed head invalidates the old run. */
 export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): string | null {
   const task = mustTask(db, run.taskId), workflow = getWorkflow(db, run.taskId), intent = getIntent(db, run.intentId);
-  if (!workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev || intent?.status !== "submitted") {
+  const manual = intent?.node === MANUAL_MERGE_NODE; // a PM's manual merge request holds the run (manual-merge-queue.ts)
+  if (!workflow || workflow.mode !== (manual ? "manual" : "auto") || workflow.specRev !== task.specRev || intent?.status !== "submitted") {
     return "流程被暂停、规格已变或合并意图不再有效";
   }
+  const request = manual ? manualRunDrift(db, intent, now) : null;
+  if (request) return request;
   if (task.headSHA !== run.reviewedHead) return "任务 head 已变化，旧审查失效";
   if (task.pr !== run.prRef || task.branch !== run.expectedBranch) return "任务 PR 或分支已变化";
   if (task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
@@ -88,11 +92,11 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
       if (old.requiredChecks !== checks.join(",")) throw new LedgerError("dedup_mismatch", "本卡合并检查清单已固定");
       return { run: old, duplicate: true };
     }
-    if (intent.status !== "submitted" || task.stage !== "merge" || workflow?.mode !== "auto" ||
+    const manual = intent.node === MANUAL_MERGE_NODE, now = ctx.now ?? Date.now();
+    if (intent.status !== "submitted" || task.stage !== "merge" || workflow?.mode !== (manual ? "manual" : "auto") ||
       workflow.specRev !== task.specRev || task.rev !== intent.taskRev || !sha(task.headSHA) || task.headSHA !== intent.head) {
       throw new LedgerError("conflict", "合并意图、阶段、规格、任务版本或完整 head 不一致");
     }
-    const now = ctx.now ?? Date.now();
     // Same gate as the merge intent's write (requireReviewedMerge), re-read here: PM acceptance, or the owner's for ownerVisual.
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) throw new LedgerError("conflict", ui);
@@ -102,7 +106,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     if (!lock) throw new LedgerError("conflict", "本意图未占项目合并槽");
     const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
     // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
-    const reviewer = currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
+    // A manual run's reviewer is the one its still-valid request bound; it never borrows the engine's session rows.
+    const reviewer = manual ? manualRunReviewer(db, intent, now) : currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
     if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
       review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
       review.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) ||
