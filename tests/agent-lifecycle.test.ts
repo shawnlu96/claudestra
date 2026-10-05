@@ -6,6 +6,9 @@
  * r3 review fixes: session identity (a reused name is kept), recent turn protects stopped agents too, scheduler-bound sessions are the
  * scheduler's, an unreadable card extra is skipped, no park (every collection retires), a kept checkout keeps its temp folder and
  * leaves a pending cleanup that later passes retry, observe reads the lend journal without writing it.
+ * r4 review fixes: a due scheduler-bound session is listed in kept with BOUND_WAIT and counted (应收 / 调度绑定待收 K) until LIFE3;
+ * a cleanup retry checks every current holder of its checkouts (a same-name new session included) and keeps the frozen / protected /
+ * recent guards; a retry closes only its own pending row (agent + regAt), other sessions' debts stay owed.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -15,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, parseLifecycle, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
 import { activeWorkers, cardWorkerIndex, pendingCleanups, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
-import { planLifecycle, lifecycleLine, type AgentFacts, type PlanInput } from "../src/lib/agent-lifecycle.js";
+import { BOUND_WAIT, planLifecycle, lifecycleLine, type AgentFacts, type PlanInput } from "../src/lib/agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
 import { ledgerFacts, lendAgents } from "../src/lib/agent-lifecycle-deps.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -97,15 +100,23 @@ describe("plan", () => {
     expect(planLifecycle(input(db, [agent("agent-personal", 7, { sessionId: "personal-session" })])).actions.map((a) => a.agent)).toEqual(["agent-personal"]);
   });
 
-  test("scheduler-bound sessions stay the scheduler's: due ones are reported, never collected or parked", () => {
+  test("scheduler-bound sessions on unfinished cards: due by idle or memory → kept with BOUND_WAIT and counted as K, until LIFE3", () => {
     const { db, card } = ledger();
-    card("B1", "merge");
+    card("B1", "merge"); card("B2", "blocked"); card("B3", "build");
     db.exec("PRAGMA foreign_keys = OFF");
-    db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, createIntentId, state, createdAt, updatedAt)
-      VALUES ('B1', 'author', 'bound1', 's', 'claude', 'tmux', 'i1', 'active', 1, 1)`).run();
-    const plan = planLifecycle(input(db, [agent("bound1", 9)], { swapPct: 99 }));
+    const bind = (task: string, a: string) => db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, createIntentId, state, createdAt, updatedAt)
+      VALUES (?, 'author', ?, ?, 'claude', 'tmux', ?, 'active', 1, 1)`).run(task, a, `s-${a}`, `i-${a}`);
+    bind("B1", "bound1"); bind("B2", "bound2"); bind("B3", "bound3");
+    // bound1: merge, idle 9h (idle rule due); bound2: blocked, idle 2h (only the memory backstop); bound3: in-progress card, never
+    const plan = planLifecycle(input(db, [agent("bound1", 9), agent("bound2", 2), agent("bound3", 9)], { swapPct: 99 }));
     expect([plan.actions, plan.memory]).toEqual([[], []]);
-    expect(plan.kept[0].reason).toContain("调度器");
+    expect(plan.kept.map((k) => [k.agent, k.bound])).toEqual([["bound1", true], ["bound2", true]]);
+    for (const k of plan.kept) expect(k.reason).toContain(BOUND_WAIT);
+    expect(plan.kept[1].reason).toContain("swap 99%");
+    expect(lifecycleLine(plan, "on")).toBe("worker agent：活 3 / 应收 2（调度绑定待收 2） / swap 99%（lifecycle on）");
+    // swap fine and idle short: nothing due, nothing counted
+    const calm = planLifecycle(input(db, [agent("bound1", 1), agent("bound2", 2)], { swapPct: 10 }));
+    expect([calm.kept, lifecycleLine(calm, "on")]).toEqual([[], "worker agent：活 2 / 应收 0 / swap 10%（lifecycle on）"]);
   });
 
   test("a card whose extra cannot be parsed is skipped and reported (frozen unknown), not read as unfrozen", () => {
@@ -282,6 +293,78 @@ describe("run", () => {
     expect(replay).toEqual({ done: [], failed: [] });
     const evs = listEvents(db, { project: "p" }).filter((e) => (e.data as { op?: string }).op === "worker_retire");
     expect(evs.map((e) => (e.data as { pending: unknown[] }).pending.length)).toEqual([1, 1, 0]);
+  });
+
+  /** One linked worktree in a fresh repo under `root`. */
+  function worktree(dir: string, name: string) {
+    const repo = join(dir, "repo"), root = join(dir, "worktrees"), wt = join(root, name);
+    if (!existsSync(repo)) {
+      mkdirSync(repo); mkdirSync(root);
+      sh(repo, "init", "-q"); sh(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
+    }
+    sh(repo, "worktree", "add", "-q", "--detach", wt);
+    return { root, wt };
+  }
+  const debt = (db: ReturnType<typeof ledger>["db"], agent: string, sessionId: string, taskId: string, checkout: string) =>
+    recordWorkerRetire(db, "scheduler", { agent, sessionId, taskId, role: "author", rule: "card_finished", reason: "t", idleMs: 1,
+      bytesBefore: 1, bytesAfter: 1, steps: [], now: NOW, pending: [{ checkout, tmp: null }], retry: false });
+
+  test("stale-session-ownership: a same-name new session working in the old checkout keeps it (plan and executor both check holders)", async () => {
+    const { db, dir, card } = ledger();
+    card("R1", "verified");
+    const { root, wt } = worktree(dir, "r1");
+    registerWorker(db, { agent: "agent-r1", sessionId: "old", taskId: "R1", role: "author", createdBy: "pm", now: 1 });
+    debt(db, "agent-r1", "old", "R1", wt);
+    const newcomer = agent("agent-r1", 0, { sessionId: "new", cwd: wt, turnActive: true });
+    // planner: the name is recent, and something works in the checkout → kept, not retried
+    const plan = planLifecycle(input(db, [newcomer], { pending: pendingCleanups(db) }));
+    expect([plan.cleanups, plan.kept.map((k) => k.agent)]).toEqual([[], ["agent-r1"]]);
+    // executor, fed a stale plan made before the newcomer existed: it re-reads live agents, no name is excluded on a retry
+    const stale = planLifecycle(input(db, [], { pending: pendingCleanups(db) }));
+    expect(stale.cleanups.map((c) => c.rule)).toEqual(["cleanup_retry"]);
+    const { deps } = fakeDeps(db, root, [], [{ name: "agent-r1", status: "active", sessionId: "new", cwd: wt, pending: false, window: true }]);
+    const r = await runLifecycle(stale, { ...DEFAULT_LIFECYCLE, mode: "on" }, deps);
+    expect([existsSync(wt), r.done, r.failed.map((f) => f.agent)]).toEqual([true, [], ["agent-r1"]]);
+    expect(pendingCleanups(db).length).toBe(1); // still owed
+  });
+
+  test("a cleanup retry keeps the frozen / protected / recent guards", () => {
+    const { db, dir, card } = ledger();
+    card("F1", "verified", { frozen: true }); card("G1", "verified");
+    const { wt } = worktree(dir, "f1");
+    debt(db, "agent-f1", "s", "F1", wt);
+    debt(db, "agent-pm", "s", "G1", join(dir, "worktrees", "gone"));
+    debt(db, "agent-g1", "s", "G1", join(dir, "worktrees", "gone2"));
+    const plan = planLifecycle(input(db, [agent("agent-pm", 9, { sessionId: "pm-s" }), agent("agent-g1", 0.1, { sessionId: "x", running: false })],
+      { pending: pendingCleanups(db) }));
+    expect(plan.cleanups).toEqual([]);
+    expect(plan.frozen).toEqual([{ agent: "agent-f1", taskId: "F1" }]);
+    expect(plan.kept.map((k) => k.agent).sort()).toEqual(["agent-g1", "agent-pm"]);
+  });
+
+  test("cleanup-failure-finalized: two sessions' debts under one name; finishing one leaves the other owed and retried", async () => {
+    const { db, dir, card } = ledger();
+    card("M1", "verified");
+    const { root, wt: a } = worktree(dir, "m1a");
+    const { wt: b } = worktree(dir, "m1b");
+    registerWorker(db, { agent: "agent-m", sessionId: "old", taskId: "M1", role: "author", createdBy: "pm", now: 1 });
+    debt(db, "agent-m", "old", "M1", a);
+    registerWorker(db, { agent: "agent-m", sessionId: "new", taskId: "M1", role: "author", createdBy: "pm", now: 2 });
+    debt(db, "agent-m", "new", "M1", b);
+    expect(pendingCleanups(db).map((p) => [p.sessionId, p.createdAt])).toEqual([["old", 1], ["new", 2]]);
+    writeFileSync(join(b, "dirty.txt"), "x"); // the new session's debt cannot finish yet
+    const { deps } = fakeDeps(db, root);
+    const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
+    const r = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
+    expect([r.done.map((d) => d.agent), r.failed.map((f) => f.agent)]).toEqual([["agent-m"], ["agent-m"]]);
+    expect(pendingCleanups(db).map((p) => [p.sessionId, p.entries.map((e) => e.checkout)])).toEqual([["new", [b]]]);
+    // the store itself: a retry names its row; without regAt it is refused rather than closing every debt of the name
+    expect(() => recordWorkerRetire(db, "scheduler", { agent: "agent-m", sessionId: "new", taskId: "M1", role: "author", rule: "cleanup_retry",
+      reason: "t", idleMs: null, bytesBefore: null, bytesAfter: null, steps: [], now: NOW, pending: [], retry: true })).toThrow("regAt");
+    expect(pendingCleanups(db).length).toBe(1);
+    rmSync(join(b, "dirty.txt"));
+    const fin = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
+    expect([fin.done.length, existsSync(a), existsSync(b), pendingCleanups(db)]).toEqual([1, false, false, []]);
   });
 });
 

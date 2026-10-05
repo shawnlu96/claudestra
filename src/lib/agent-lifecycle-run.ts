@@ -56,9 +56,13 @@ const isSymlink = (p: string): boolean => {
   try { return lstatSync(p).isSymbolicLink(); } catch { return false; /* not there: removeCleanWorktree counts it as done */ }
 };
 
-/** Cleans what it may; returns what is left (a kept checkout keeps its temp folder with it). */
-async function cleanDisk(entries: CleanupEntry[], deps: LifecycleDeps, self: string, steps: string[]): Promise<CleanupEntry[]> {
-  const agents = (await deps.agents()).filter((x) => x.name !== self);
+/**
+ * Cleans what it may; returns what is left (a kept checkout keeps its temp folder with it). Every current agent counts as a holder
+ * except `self`, the session this retire just stopped (name and session both); a retry has no self, so a same-name agent running
+ * another session in the checkout keeps it.
+ */
+async function cleanDisk(entries: CleanupEntry[], deps: LifecycleDeps, self: { name: string; sessionId: string } | null, steps: string[]): Promise<CleanupEntry[]> {
+  const agents = (await deps.agents()).filter((x) => !self || x.name !== self.name || x.sessionId !== self.sessionId);
   const left: CleanupEntry[] = [];
   for (const e of entries) {
     const why = isSymlink(e.checkout) ? "是符号链接，不跟" : await removeCleanWorktree(deps, e.checkout, agents);
@@ -111,10 +115,11 @@ async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
     if (!("receipt" in stop)) return { error: "busy" in stop ? `${a.agent} 正忙，下轮再收：${stop.busy}` : stop.failed };
     steps.push(stop.receipt);
   }
-  const left = entries.length ? await cleanDisk(entries, deps, a.agent, steps) : [];
+  const self = !retry && a.sessionId ? { name: a.agent, sessionId: a.sessionId } : null;
+  const left = entries.length ? await cleanDisk(entries, deps, self, steps) : [];
   const after = paths.length ? await deps.du(paths) : null;
   await deps.record({ agent: a.agent, sessionId: a.sessionId ?? null, taskId: a.taskId, role: a.role, rule: a.rule, reason: a.reason, idleMs: a.idleMs,
-    bytesBefore: before, bytesAfter: after, steps, now: deps.now(), pending: left, retry });
+    bytesBefore: before, bytesAfter: after, steps, now: deps.now(), pending: left, retry, ...(retry ? { regAt: a.regAt ?? null } : {}) });
   return { freed: before !== null && after !== null ? Math.max(0, before - after) : null, left: left.length };
 }
 

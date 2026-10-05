@@ -29,13 +29,13 @@ function parseRetireWire(raw: string, now: number): RetireRecord {
   return { agent: text(w.agent, "agent", 120), sessionId: w.sessionId === null || w.sessionId === undefined ? null : text(w.sessionId, "sessionId", 200),
     taskId: w.taskId === null || w.taskId === undefined ? null : text(w.taskId, "taskId", 80), role,
     rule: text(w.rule, "rule", 40), reason: text(w.reason, "reason"), idleMs: num(w.idleMs), bytesBefore: num(w.bytesBefore),
-    bytesAfter: num(w.bytesAfter), steps, now, pending: entries, retry: w.retry === true };
+    bytesAfter: num(w.bytesAfter), steps, now, pending: entries, retry: w.retry === true, regAt: num(w.regAt) };
 }
 
 export const WORKER_CMDS: Record<string, CommandSpec> = {
   "scheduler-worker-retire": {
     valued: ["wire"], bools: [],
-    usage: "scheduler-worker-retire --wire '<json {agent,sessionId,taskId,role,rule,reason,idleMs,bytesBefore,bytesAfter,steps,pending,retry}>'（卡 worker 生命周期收回记录，LIFE1）",
+    usage: "scheduler-worker-retire --wire '<json {agent,sessionId,taskId,role,rule,reason,idleMs,bytesBefore,bytesAfter,steps,pending,retry,regAt}>'（卡 worker 生命周期收回记录，LIFE1）",
     run(c) {
       const ctx = c.ctx(), r = parseRetireWire(c.need("wire"), ctx.now ?? Date.now());
       if (ctx.actor !== "scheduler") {

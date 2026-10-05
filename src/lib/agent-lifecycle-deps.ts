@@ -112,7 +112,7 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     console.log(`[lifecycle] ${lifecycleLine(plan, policy.mode)}；应收 ${plan.actions.map((x) => `${x.agent}(${x.rule}：${x.reason})`).join("、") || "无"}` +
       `${plan.cleanups.length ? `；待补清 ${plan.cleanups.map((x) => `${x.agent}（${x.entries?.map((e) => e.checkout).join(" ")}）`).join("、")}` : ""}` +
       `${plan.memory.length ? `；内存候选 ${plan.memory.map((x) => x.agent).join("、")}` : ""}${plan.frozen.length ? `；冻结卡不收 ${plan.frozen.map((x) => `${x.agent}@${x.taskId}`).join("、")}` : ""}` +
-      `${plan.kept.length ? `；记录不一致保留 ${plan.kept.map((x) => `${x.agent}（${x.reason}）`).join("、")}` : ""}`);
+      `${plan.kept.length ? `；保留不收 ${plan.kept.map((x) => `${x.agent}（${x.reason}）`).join("、")}` : ""}`);
   }
   if (policy.mode !== "on") return [];
   const manager: LifecycleDeps["manager"] = async (...args) => {

@@ -11,8 +11,11 @@
  * - stock: unregistered agents a record links to a finished card, idle long enough.
  * - memory: swap above the threshold → idle-longest-first among agents not on in-progress cards, until it drops back (executor re-reads).
  * Sessions the scheduler bound (scheduler_sessions) stay the scheduler's: it collects them when the card finishes
- * (scheduler-retire.ts) and resumes them for the next round, so removing one under it would break its binding; one that is due is
- * reported as kept. Disk a retire could not clean is retried every pass (pendingCleanups).
+ * (scheduler-retire.ts) and resumes them for the next round. Retiring a binding on an unfinished card needs an entry point the
+ * scheduler does not have yet (LIFE3), so one that is due (idle rule or memory backstop) goes into `kept` marked `bound` with
+ * BOUND_WAIT, and the summary line counts it into 应收 and separately as 调度绑定待收 K: visible, not silently exempt.
+ * Disk a retire could not clean is retried every pass (pendingCleanups), one pending row at a time (its key: agent + regAt), with
+ * the same frozen / protected / recent-activity guards as a retire, and kept while any agent now works in one of its checkouts.
  * Never: master, PM, kind=main, lend workers (lend_orders; the lend service collects them), frozen cards (only reported), a card whose
  * extra cannot be read (reported), a live turn, a turn within recentTurnMin (running or not), an agent another unfinished card still uses.
  */
@@ -83,6 +86,8 @@ export interface Action {
   cwd?: string;
   /** cleanup_retry only: what is still on disk */
   entries?: CleanupEntry[];
+  /** cleanup_retry only: the pending row's createdAt, its key with the agent name */
+  regAt?: number;
 }
 export interface Plan {
   actions: Action[];
@@ -92,13 +97,16 @@ export interface Plan {
   cleanups: Action[];
   frozen: { agent: string; taskId: string }[];
   /** kept although a rule would apply (sources disagree, session changed, scheduler-bound, unreadable card): reported, not collected */
-  kept: { agent: string; reason: string }[];
+  kept: { agent: string; reason: string; bound?: true }[];
   /** running worker agents */
   live: number;
   swapPct: number | null;
 }
 
 interface Worker { facts: AgentFacts; taskId: string | null; role: WorkerRole | "stock"; bound: boolean; links: CardWorker["links"] }
+
+/** The reason a due scheduler-bound session is kept: retiring the binding belongs to LIFE3. */
+export const BOUND_WAIT = "调度绑定，待 LIFE3";
 
 const hours = (ms: number | null): string => (ms === null ? "?" : `${(ms / 3_600_000).toFixed(1)}h`);
 
@@ -170,8 +178,9 @@ export function planLifecycle(input: PlanInput): Plan {
   const recentMs = input.policy.recentTurnMin * MIN;
   // a stopped agent whose activity is unknown (no session file left) cannot have had a turn; a running one might
   const recent = (f: AgentFacts) => f.turnActive || (f.idleMs !== null ? f.idleMs < recentMs : f.running);
-  const spare: Worker[] = [];
+  const spare: Worker[] = [], spareBound: Worker[] = [];
   const keep = (w: Worker, reason: string) => plan.kept.push({ agent: w.facts.name, reason });
+  const keepBound = (w: Worker, why: string) => plan.kept.push({ agent: w.facts.name, reason: `${BOUND_WAIT}（${why}）`, bound: true });
   for (const w of all) {
     const card = w.taskId ? cards.get(w.taskId) : undefined;
     if (card?.frozen) { plan.frozen.push({ agent: w.facts.name, taskId: card.id }); continue; }
@@ -182,13 +191,14 @@ export function planLifecycle(input: PlanInput): Plan {
     const act = decide(input, w, card);
     if (act && w.bound) {
       // finished cards: scheduler-retire.ts is collecting it already, nothing to report
-      if (!card || !FINISHED_STAGES.includes(card.stage)) keep(w, `调度器绑定的会话，由调度器按 scheduler_sessions 收（${act.reason}）`);
+      if (!card || !FINISHED_STAGES.includes(card.stage)) keepBound(w, act.reason);
       continue;
     }
     if (act) plan.actions.push(act);
-    else if (w.facts.running && !w.bound && !(card && IN_PROGRESS_STAGES.includes(card.stage))) spare.push(w);
+    else if (w.facts.running && !(card && IN_PROGRESS_STAGES.includes(card.stage))) (w.bound ? spareBound : spare).push(w);
   }
   if (input.swapPct !== null && input.swapPct > input.policy.swapPct) {
+    for (const w of spareBound) keepBound(w, `内存兜底：swap ${input.swapPct.toFixed(0)}% 超过 ${input.policy.swapPct}%，闲置 ${hours(w.facts.idleMs)}`);
     plan.memory = spare.sort((x, y) => (y.facts.idleMs ?? 0) - (x.facts.idleMs ?? 0)).map((w) => ({
       agent: w.facts.name, taskId: w.taskId, role: w.role, rule: "memory" as const, idleMs: w.facts.idleMs,
       reason: `swap ${input.swapPct!.toFixed(0)}% 超过 ${input.policy.swapPct}%，闲置 ${hours(w.facts.idleMs)}`,
@@ -196,15 +206,39 @@ export function planLifecycle(input: PlanInput): Plan {
     }));
   }
   for (const p of input.pending ?? []) {
-    if (p.error) { plan.kept.push({ agent: p.agent, reason: p.error }); continue; }
+    const why = p.error ?? retryBlocked(input, p, cards.get(p.taskId ?? ""), recent);
+    if (why === "frozen") { plan.frozen.push({ agent: p.agent, taskId: p.taskId! }); continue; }
+    if (why) { plan.kept.push({ agent: p.agent, reason: `待补清先不动：${why}` }); continue; }
     plan.cleanups.push({ agent: p.agent, taskId: p.taskId, role: p.role, rule: "cleanup_retry", idleMs: null, sessionId: p.sessionId,
-      reason: `上次收回没清完的 ${p.entries.length} 处`, entries: p.entries });
+      regAt: p.createdAt, reason: `上次收回没清完的 ${p.entries.length} 处`, entries: p.entries });
   }
   return plan;
 }
 
-/** The one-line health summary doctor / ledger audit show. */
-export function lifecycleLine(plan: Pick<Plan, "live" | "actions" | "swapPct" | "cleanups">, mode: string): string {
-  return `worker agent：活 ${plan.live} / 应收 ${plan.actions.length} / swap ${plan.swapPct === null ? "?" : `${plan.swapPct.toFixed(0)}%`}` +
+const inside = (path: string, dir: string): boolean => path === dir || path.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+
+/**
+ * Why a pending cleanup may not be retried this pass ("frozen" = its card is frozen), null = it may. The retry acts on disk only,
+ * but under the same guards as a retire: frozen / unreadable card, the name now held by a protected or recently active agent, and
+ * any agent (whatever its name or session) working in one of the checkouts. The executor re-checks holders against live agents.
+ */
+function retryBlocked(input: PlanInput, p: PendingCleanup, card: CardFacts | undefined, recent: (f: AgentFacts) => boolean): string | null {
+  if (card?.frozen) return "frozen";
+  if (card?.extraError) return `卡 ${card.id} 的 extra 读不出（${card.extraError}），冻结与否不明`;
+  const same = input.agents.find((a) => a.name === p.agent);
+  if (same && (same.kind === "main" || same.role === "pm" || same.role === "dispatcher" || input.pms.has(same.name) || input.master.has(same.name)
+    || input.foreign.has(same.name))) return `${p.agent} 现在是受保护的 agent`;
+  if (same && recent(same)) return `同名 agent ${p.agent} 最近有活动`;
+  const holder = input.agents.find((a) => a.status !== "stopped" && a.cwd && p.entries.some((e) => inside(a.cwd!, e.checkout)));
+  return holder ? `${holder.name}（会话 ${holder.sessionId ?? "?"}）正在 ${holder.cwd} 工作` : null;
+}
+
+/** Distinct scheduler-bound sessions that are due but wait for LIFE3 (an agent due by idle and memory counts once). */
+const boundDue = (plan: Pick<Plan, "kept">): number => new Set(plan.kept.filter((k) => k.bound).map((k) => k.agent)).size;
+
+/** The one-line health summary doctor / ledger audit show: 应收 includes the bound ones, also shown on their own as K. */
+export function lifecycleLine(plan: Pick<Plan, "live" | "actions" | "swapPct" | "cleanups" | "kept">, mode: string): string {
+  const k = boundDue(plan);
+  return `worker agent：活 ${plan.live} / 应收 ${plan.actions.length + k}${k ? `（调度绑定待收 ${k}）` : ""} / swap ${plan.swapPct === null ? "?" : `${plan.swapPct.toFixed(0)}%`}` +
     `${plan.cleanups.length ? ` / 待补清 ${plan.cleanups.length}` : ""}（lifecycle ${mode}）`;
 }

@@ -102,14 +102,43 @@ describe("registerCreated: only the session this create started, a failed regist
     expect([removed, activeWorkers(db)]).toEqual([["agent-r"], []]);
   });
 
-  test("a protected agent (PM) is never registered as a worker; a failed undo is reported with the manual step", async () => {
+  test("a protected agent (PM) is never registered as a worker and never removed by the undo", async () => {
     const { db, path } = ledger();
-    const { deps } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9", role: "pm" } });
-    deps.remove = async () => ({ ok: false, error: "tmux gone" });
+    const { deps, removed } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9", role: "pm" } });
+    const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
+    expect(out).toMatchObject({ ok: false, rolledBack: false });
+    expect([removed, activeWorkers(db)]).toEqual([[], []]);
+  });
+
+  test("rollback-replacement: the name now runs another session → not registered, nothing removed (the replacement is kept)", async () => {
+    const { db, path } = ledger();
+    const { deps, removed, reg } = fake(path, { "agent-reused": { sessionId: "replacement-user-session", channelId: "9" } });
+    const out = await registerCreated("agent-reused", card, { ok: true, agent: "agent-reused", sessionId: "created-session" }, null, deps);
+    expect(out).toMatchObject({ ok: false, rolledBack: false });
+    expect(String(out.error)).toContain("不是本次建的会话");
+    expect([removed, activeWorkers(db), reg.agents["agent-reused"]?.sessionId]).toEqual([[], [], "replacement-user-session"]);
+  });
+
+  test("registration fails and the name is replaced before the undo: the undo checks the expected session and removes nothing", async () => {
+    const { db, path } = ledger();
+    db.exec("CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END");
+    const { deps, removed, reg } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    deps.saveRegistry = async () => { reg.agents["agent-r"] = { sessionId: "someone-else", channelId: "9" } as never; };
     const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
     expect(out).toMatchObject({ ok: false, rolledBack: false });
     expect(String(out.error)).toContain("manager remove agent-r");
-    expect(activeWorkers(db)).toEqual([]);
+    expect([removed, reg.agents["agent-r"]?.sessionId]).toEqual([[], "someone-else"]);
+  });
+
+  test("registration fails and the undo itself fails: reported with the manual step", async () => {
+    const { db, path } = ledger();
+    db.exec("CREATE TRIGGER no_reg BEFORE INSERT ON worker_agents BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END");
+    const { deps } = fake(path, { "agent-r": { sessionId: "new-s", channelId: "9" } });
+    deps.remove = async () => ({ ok: false, error: "tmux gone" });
+    const out = await registerCreated("agent-r", card, { ok: true, agent: "agent-r", sessionId: "new-s" }, null, deps);
+    expect(out).toMatchObject({ ok: false, rolledBack: false });
+    expect(String(out.error)).toContain("tmux gone");
+    expect(String(out.error)).toContain("manager remove agent-r");
   });
 });
 

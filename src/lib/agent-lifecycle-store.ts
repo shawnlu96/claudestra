@@ -141,21 +141,27 @@ export interface RetireRecord {
   pending: CleanupEntry[];
   /** a retry of an earlier pending cleanup (the agent itself is already gone) */
   retry: boolean;
+  /** retry only: the createdAt of the one pending row it retries ((agent, createdAt) is the row's key) */
+  regAt?: number | null;
 }
 
 /**
  * Idempotent. Cleanup finished: the agent's row is closed (an agent with no row, stock, gets a retired row so the ledger keeps a
  * record even when its card is unknown). Cleanup not finished: the row stays active as a pending cleanup with what is left, so the
  * next pass retries it. The event goes to the card's project when the card is known.
+ * Only the one row this retire is about changes: a first retire the active registration of its session, a retry the pending row
+ * by its key (agent, regAt). A name re-created since keeps other sessions' debts, which stay owed until their own retry finishes.
  */
 export function recordWorkerRetire(db: Database, actor: string, r: RetireRecord): void {
   tx(db, () => {
     const freed = r.bytesBefore !== null && r.bytesAfter !== null ? Math.max(0, r.bytesBefore - r.bytesAfter) : null;
     const done = r.pending.length === 0;
     const reason = done ? `${r.rule}: ${r.reason}`.slice(0, 300) : CLEANUP_PENDING + JSON.stringify(r.pending);
-    const which = r.retry ? `reason LIKE '${CLEANUP_PENDING}%'` : NOT_PENDING;
+    if (r.retry && typeof r.regAt !== "number") throw new LedgerError("invalid", "补清要带 regAt（待补清记录的 createdAt），不按 agent 名批量结清");
+    const which = r.retry ? `reason LIKE '${CLEANUP_PENDING}%' AND createdAt = ?` : `${NOT_PENDING} AND (? IS NULL OR sessionId = ?)`;
+    const key = r.retry ? [r.regAt!] : [r.sessionId, r.sessionId];
     const hit = db.prepare(`UPDATE worker_agents SET state = ?, retiredAt = ?, reason = ? WHERE agent = ? AND state = 'active' AND ${which}`)
-      .run(done ? "retired" : "active", done ? r.now : null, reason, r.agent);
+      .run(done ? "retired" : "active", done ? r.now : null, reason, r.agent, ...key);
     if (hit.changes === 0 && !r.retry) {
       db.prepare(`INSERT OR IGNORE INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state, retiredAt, reason)
         VALUES (?, ?, ?, 'other', 'lifecycle-stock', ?, ?, ?, ?)`).run(r.agent, r.sessionId ?? "", r.taskId, r.now, done ? "retired" : "active", done ? r.now : null, reason);
@@ -165,6 +171,7 @@ export function recordWorkerRetire(db: Database, actor: string, r: RetireRecord)
     insertEvent(db, { actor, now: r.now }, { project: task.project, target: task.id, kind: "scheduler",
       text: `${r.retry ? "补清" : "收"} ${r.role} agent ${r.agent}：${r.reason}${done ? "" : `；还剩 ${r.pending.length} 处没清，下轮再试`}`.slice(0, 400),
       data: { op: "worker_retire", agent: r.agent, sessionId: r.sessionId, role: r.role, rule: r.rule, reason: r.reason, idleMs: r.idleMs, retry: r.retry,
+        ...(r.retry ? { regAt: r.regAt } : {}),
         bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, bytesFreed: freed, steps: r.steps, pending: r.pending } }, false);
   });
 }
