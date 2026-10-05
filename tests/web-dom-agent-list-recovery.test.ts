@@ -22,7 +22,7 @@ interface El {
 }
 interface Host extends El { remove(): void }
 interface Doc { createElement(tag: string): Host; body: El & { appendChild(c: Host): void } }
-interface Folds { projects: Set<string>; toggleProject(id: string): void; teams: Set<string>; toggleTeam(id: string): void }
+interface Folds { projects: Set<string>; toggleProject(id: string): void; team(name: string, kids: AgentSession[]): { collapsed: boolean; toggle(): void } }
 
 // mock.module 对整个 bun test 进程生效：先取真模块再只覆盖用到的导出
 const partial = async (path: string, over: Record<string, unknown>) => {
@@ -179,7 +179,7 @@ function Harness() {
   const d = ui.buildSidebarDirectory(agents, new Map());
   const row = (a: AgentSession, s?: { lead?: unknown }) => h("li", { key: a.name, "data-agent": a.name }, (s?.lead as never) ?? null, a.name);
   const team = (n: TeamNode, f: Folds) =>
-    h(ui.TeamGroup as never, { key: `t:${n.a.name}`, node: n, collapsed: f.teams.has(n.a.name), busy: false, onToggle: () => f.toggleTeam(n.a.name), row });
+    h(ui.TeamGroup as never, { key: `t:${n.a.name}`, node: n, collapsed: f.team(n.a.name, n.children).collapsed, busy: false, onToggle: f.team(n.a.name, n.children).toggle, row });
   const renderEntry = (e: SidebarEntry, f: Folds) => e.kind === "row" ? team(e, f)
     : h(ui.ProjectGroup as never, { key: `g:${e.id}`, e, collapsed: f.projects.has(e.id), groupBusy: false, onToggle: () => f.toggleProject(e.id) },
       e.nodes.map((n) => team(n, f)));

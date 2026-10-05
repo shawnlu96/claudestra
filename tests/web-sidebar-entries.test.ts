@@ -7,7 +7,9 @@ import {
   directCount,
   entryMembers,
   filterAndRankWorkers,
+  hasWorkers,
   isDormantAgent,
+  isWorker,
   splitDormant,
   splitMasterKids,
 } from "@/features/chat/sidebar-entries";
@@ -24,10 +26,10 @@ const ag = (name: string, p: Partial<AgentSession> = {}): AgentSession =>
     ...p,
   }) as AgentSession;
 const names = (xs: AgentSession[]) => xs.map((a) => a.name);
-/** 行 = 名字，挂了执行者的行 = 名字{子,子}；组 = [id:顶层节点…] */
+/** 行 = 名字，挂了执行者的行 = 名字{子,子}；组 = [id:顶层节点…]；worker 组 = [w:id:顶层节点…] */
 const node = (n: { a: AgentSession; children: AgentSession[] }) => (n.children.length ? `${n.a.name}{${names(n.children).join(",")}}` : n.a.name);
 const shape = (es: ReturnType<typeof buildSidebarEntries>) =>
-  es.map((e) => (e.kind === "row" ? node(e) : `[${e.id}:${e.nodes.map(node).join(",")}]`));
+  es.map((e) => (e.kind === "row" ? node(e) : `[${e.kind === "workers" ? "w:" : ""}${e.id}:${e.nodes.map(node).join(",")}]`));
 
 describe("filterAndRankWorkers（侧栏排序）", () => {
   test("只按置顶分层，层内保持原（最近活动）顺序", () => {
@@ -43,10 +45,11 @@ describe("filterAndRankWorkers（侧栏排序）", () => {
     expect(names(filterAndRankWorkers(ws, "car", new Set()))).toEqual(["beta"]);
     expect(names(filterAndRankWorkers(ws, "web", new Set()))).toEqual(["alpha"]);
   });
-  test("worker 从默认列表与名称搜索隐藏，store 仍保留它供直接打开", () => {
+  test("worker 不进名称搜索（平铺结果会刷屏）；默认列表留着它，交给分组挂到派发者下 / 收进 worker 组", () => {
     const ws = [ag("pm"), ag("task-68", { kind: "worker", task: "T68 调度" }), ag("codex")];
-    expect(names(filterAndRankWorkers(ws, "", new Set()))).toEqual(["pm", "codex"]);
+    expect(names(filterAndRankWorkers(ws, "", new Set()))).toEqual(["pm", "task-68", "codex"]);
     expect(names(filterAndRankWorkers(ws, "调度", new Set()))).toEqual([]);
+    expect(names(filterAndRankWorkers(ws, "task-68", new Set()))).toEqual([]);
     expect(names(ws)).toEqual(["pm", "task-68", "codex"]);
   });
   test("不改输入数组", () => {
@@ -184,5 +187,62 @@ describe("派发关系构树（parent → 执行者挂在派发者下面）", ()
     expect(build(ranked)).toEqual(["x", "pm{t1}"]);
     // 置顶派发者 = 整组上去
     expect(build(filterAndRankWorkers(ws, "", new Set(["pm"])))).toEqual(["pm{t1}", "x"]);
+  });
+});
+
+describe("worker 会话（WKV1：可达但不刷屏）", () => {
+  const MASTER = "__master__";
+  const meta = new Map<string, ProjectMeta>();
+  const w = (name: string, p: Partial<AgentSession> = {}) => ag(name, { kind: "worker", ...p });
+  const build = (ws: AgentSession[], masterName?: string) => shape(buildSidebarEntries(filterAndRankWorkers(ws, "", new Set(), masterName), "", meta, masterName));
+  /** T69 不回退：任何顶层行 / project 组里的顶层节点都不是 worker */
+  const topLevel = (ws: AgentSession[]) =>
+    buildSidebarEntries(ws, "", meta).flatMap((e) => (e.kind === "row" ? [e.a] : e.kind === "group" ? e.nodes.map((n) => n.a) : []));
+  test("有派发者的 worker 挂在派发者下面，和普通执行者混排；派出 N 全算", () => {
+    const ws = [ag("pm", { projectId: "p" }), w("task-a", { parent: "pm", projectId: "p" }), ag("review", { parent: "pm", projectId: "p" }),
+      w("task-b", { parent: "pm", projectId: "p" }), ag("codex", { projectId: "p" })];
+    expect(build(ws)).toEqual(["[p:pm{task-a,review,task-b},codex]"]);
+    const [n] = buildTeams(ws).nodes;
+    expect(hasWorkers(n.children)).toBe(true);
+    expect(directCount(n.a.name, n.children)).toBe(3);
+    expect(topLevel(ws).filter(isWorker)).toEqual([]);
+  });
+  test("只挂普通执行者的派发者不算带 worker（照旧默认展开）", () => {
+    const [n] = buildTeams([ag("pm"), ag("review", { parent: "pm" })]).nodes;
+    expect(hasWorkers(n.children)).toBe(false);
+  });
+  test("没有可见派发者的 worker 收进底部：出借一组、其余一组，先 worker 后出借；出借的 project 不成组", () => {
+    const ws = [w("lend-1", { projectId: "lend" }), ag("x"), w("task-z", { parent: "gone", projectId: "p" }), w("lend-2", { projectId: "lend" }),
+      ag("y", { projectId: "p" }), w("task-q", { projectId: "p" })];
+    expect(build(ws)).toEqual(["x", "y", "[w:worker:task-z,task-q]", "[w:lend:lend-1,lend-2]"]);
+    expect(topLevel(ws).filter(isWorker)).toEqual([]);
+    const folds = buildSidebarEntries(ws, "", meta).filter((e) => e.kind === "workers");
+    expect(folds.map((e) => [e.id, names(e.items)])).toEqual([["worker", ["task-z", "task-q"]], ["lend", ["lend-1", "lend-2"]]]);
+  });
+  test("没有派发者的 worker 自己派了人：带着它的执行者整棵进 worker 组", () => {
+    const ws = [w("dispatch-1"), w("task-k", { parent: "dispatch-1" }), ag("x")];
+    expect(build(ws)).toEqual(["x", "[w:worker:dispatch-1{task-k}]"]);
+  });
+  test("大总管派出的 worker 挂在大总管卡片下（交给 MasterTeam，带 worker 默认收起）", () => {
+    const ws = [w("task-m", { parent: MASTER }), ag("helper", { parent: MASTER }), ag("x")];
+    expect(build(ws, MASTER)).toEqual(["x"]);
+    const kids = buildTeams(filterAndRankWorkers(ws, "", new Set(), MASTER), MASTER).underMaster;
+    expect(names(kids)).toEqual(["task-m", "helper"]);
+    expect(hasWorkers(kids)).toBe(true);
+  });
+  test("活 / 历史分开：派发者在线、worker 已停 → 历史里进 worker 组；停掉的出借 worker 收在历史的出借组", () => {
+    const ws = [ag("pm"), w("task-done", { parent: "pm", status: "stopped" }), w("lend-old", { status: "stopped", projectId: "lend" }),
+      w("lend-live", { projectId: "lend" })];
+    const d = buildSidebarDirectory(filterAndRankWorkers(ws, "", new Set()), meta);
+    expect(shape(d.activeEntries)).toEqual(["pm", "[w:lend:lend-live]"]);
+    expect(shape(d.historyEntries)).toEqual(["[w:worker:task-done]", "[w:lend:lend-old]"]);
+    expect(d.historyCount).toBe(2);
+  });
+  test("沉寂判断把 worker 组当一个条目：全员沉寂才下沉", () => {
+    const old = NOW - DORMANT_MS * 2;
+    const es = buildSidebarEntries([w("lend-1", { lastActivityTs: old }), w("lend-2", { lastActivityTs: old }), w("task-1")], "", meta);
+    const { activeEntries, dormantEntries } = splitDormant(es, NOW);
+    expect(shape(activeEntries)).toEqual(["[w:worker:task-1]"]);
+    expect(shape(dormantEntries)).toEqual(["[w:lend:lend-1,lend-2]"]);
   });
 });

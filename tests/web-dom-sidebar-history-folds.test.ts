@@ -4,7 +4,7 @@
  * 同一 project id 同时出现在活目录与历史目录里：两组各自开合、各自记住；活目录沿用原 key（老偏好不丢），历史目录另起命名空间。
  * 拖拽 / 菜单 / 协作入口跟本卡无关，换成空壳。纯逻辑见 tests/web-sidebar-history.test.ts。
  */
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { createRequire } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { SidebarEntry, TeamNode } from "../web/features/chat/sidebar-entries";
@@ -16,7 +16,8 @@ const webRequire = createRequire(new URL("../web/package.json", import.meta.url)
 interface El { textContent: string | null; getAttribute(n: string): string | null; click(): void; querySelector(s: string): El | null; querySelectorAll(s: string): ArrayLike<El> }
 interface Host extends El { remove(): void }
 interface Doc { createElement(tag: string): Host; body: El & { appendChild(c: Host): void } }
-interface Folds { projects: Set<string>; toggleProject(id: string): void; teams: Set<string>; toggleTeam(id: string): void }
+interface Fold { collapsed: boolean; toggle(): void }
+interface Folds { projects: Set<string>; toggleProject(id: string): void; team(name: string, kids: AgentSession[]): Fold; workers(id: string): Fold }
 
 // mock.module 对整个 bun test 进程生效：先取真模块再只覆盖用到的导出，别让后面的文件拿到缺导出的空壳
 const partial = async (path: string, over: Record<string, unknown>) => {
@@ -35,7 +36,7 @@ let doc: Doc;
 let storage: { getItem(k: string): string | null; setItem(k: string, v: string): void; clear(): void; readonly length: number; key(i: number): string | null };
 let ui: {
   SidebarDirectory: unknown; useDirectoryFolds: (s: "active" | "history") => Folds;
-  ProjectGroup: unknown; TeamGroup: unknown;
+  ProjectGroup: unknown; TeamGroup: unknown; WorkerFold: unknown;
   buildSidebarDirectory: typeof import("../web/features/chat/sidebar-history").buildSidebarDirectory;
   isHistoryAgent: typeof import("../web/features/chat/sidebar-history").isHistoryAgent;
   filterAndRankWorkers: typeof import("../web/features/chat/sidebar-entries").filterAndRankWorkers;
@@ -62,7 +63,7 @@ beforeAll(async () => {
   const tg = await import(mod("components/team-group.tsx"));
   const sh = await import(mod("sidebar-history.ts"));
   const se = await import(mod("sidebar-entries.ts"));
-  ui = { SidebarDirectory: dir.SidebarDirectory, useDirectoryFolds: dir.useDirectoryFolds, ProjectGroup: pg.ProjectGroup, TeamGroup: tg.TeamGroup,
+  ui = { SidebarDirectory: dir.SidebarDirectory, useDirectoryFolds: dir.useDirectoryFolds, ProjectGroup: pg.ProjectGroup, TeamGroup: tg.TeamGroup, WorkerFold: tg.WorkerFold,
     buildSidebarDirectory: sh.buildSidebarDirectory, isHistoryAgent: sh.isHistoryAgent, filterAndRankWorkers: se.filterAndRankWorkers };
 });
 
@@ -73,35 +74,47 @@ afterAll(async () => {
 
 beforeEach(() => storage.clear()); // 只清测试自己的 happy-dom 存储，不碰真实浏览器
 
-/** 与 sidebar.tsx renderEntry 同形：组头 / 派发者开合按传入的 folds 走 */
-function Harness() {
+/** 与 sidebar.tsx renderEntry 同形：组头 / 派发者 / worker 组开合按传入的 folds 走 */
+function Harness({ agents }: { agents: AgentSession[] }) {
   const h = React.createElement;
   const activeFolds = ui.useDirectoryFolds("active");
-  const d = ui.buildSidebarDirectory(AGENTS, new Map());
-  const row = (a: AgentSession, s?: { lead?: unknown }) => h("li", { key: a.name, "data-agent": a.name }, (s?.lead as never) ?? null, a.name);
-  const team = (n: TeamNode, f: Folds) =>
-    h(ui.TeamGroup as never, { key: `t:${n.a.name}`, node: n, collapsed: f.teams.has(n.a.name), busy: false, onToggle: () => f.toggleTeam(n.a.name), row });
-  const renderEntry = (e: SidebarEntry, f: Folds) => e.kind === "row" ? team(e, f)
-    : h(ui.ProjectGroup as never, { key: `g:${e.id}`, e, collapsed: f.projects.has(e.id), groupBusy: false, onToggle: () => f.toggleProject(e.id) },
-      e.nodes.map((n) => team(n, f)));
+  const d = ui.buildSidebarDirectory(ui.filterAndRankWorkers(agents, "", new Set()), new Map());
+  const row = (a: AgentSession, s?: { lead?: unknown; tail?: unknown }) =>
+    h("li", { key: a.name, "data-agent": a.name }, (s?.lead as never) ?? null, a.name, (s?.tail as never) ?? null);
+  const team = (n: TeamNode, f: Folds) => {
+    const t = f.team(n.a.name, n.children);
+    return h(ui.TeamGroup as never, { key: `t:${n.a.name}`, node: n, collapsed: t.collapsed, busy: false, onToggle: t.toggle, row });
+  };
+  const renderEntry = (e: SidebarEntry, f: Folds) => {
+    if (e.kind === "row") return team(e, f);
+    const kids = e.nodes.map((n) => team(n, f));
+    if (e.kind === "workers") {
+      const w = f.workers(e.id);
+      return h(ui.WorkerFold as never, { key: `w:${e.id}`, id: e.id, count: e.items.length, collapsed: w.collapsed, busy: false, onToggle: w.toggle }, kids);
+    }
+    return h(ui.ProjectGroup as never, { key: `g:${e.id}`, e, collapsed: f.projects.has(e.id), groupBusy: false, onToggle: () => f.toggleProject(e.id) }, kids);
+  };
   return h(ui.SidebarDirectory as never, { activeEntries: d.activeEntries, historyEntries: d.historyEntries, historyCount: d.historyCount, activeFolds, renderEntry });
 }
 
-async function mount() {
+async function mount(agents = AGENTS) {
   const host = doc.createElement("div");
   doc.body.appendChild(host);
   const root = createRoot(host as never);
-  await React.act(async () => root.render(React.createElement(Harness)));
+  await React.act(async () => root.render(React.createElement(Harness, { agents })));
   const all = () => Array.from(host.querySelectorAll("button"));
   /** 组头按钮：文本以 project id 开头（无 meta 时显示 id）；第 0 个在活目录，第 1 个在历史目录 */
   const heads = () => all().filter((b) => /^(📁|📂)p\d/.test((b.textContent ?? "").trim()));
   const historyBtn = () => all().find((b) => (b.textContent ?? "").includes("历史"))!;
   const teamBtn = (name: string) => host.querySelector(`[data-agent="${name}"] button[aria-expanded]`);
+  /** worker 组头（活目录在前、历史目录在后） */
+  const foldBtns = (label: string) => all().filter((b) => b.getAttribute("aria-expanded") !== null && (b.textContent ?? "").includes(label));
   return {
     shown: () => Array.from(host.querySelectorAll("[data-agent]")).map((e) => e.getAttribute("data-agent")),
+    text: (name: string) => host.querySelector(`[data-agent="${name}"]`)?.textContent ?? "",
     heads,
     click: async (b: El | null) => { await React.act(async () => b!.click()); },
-    historyBtn, teamBtn,
+    historyBtn, teamBtn, foldBtns,
     unmount: async () => { await React.act(async () => root.unmount()); host.remove(); },
   };
 }
@@ -163,4 +176,45 @@ test("active / creating 默认可达，stopped 仍可搜索 / 在历史里找到
   await u.unmount();
   expect(ui.filterAndRankWorkers(AGENTS, "olddev", new Set()).map((a) => a.name)).toEqual(["olddev"]);
   expect(AGENTS.filter(ui.isHistoryAgent).map((a) => a.name)).toEqual(["old", "oldkid", "olddev"]);
+});
+
+describe("worker 会话（WKV1）：默认收起、展开可达、按设备记住", () => {
+  const w = (name: string, p: Partial<AgentSession> = {}) => ag(name, { kind: "worker", ...p });
+  const WS = [ag("pm", { projectId: "q" }), ag("review", { parent: "pm", projectId: "q" }), w("task-a", { parent: "pm", projectId: "q" }),
+    ag("lead2", { projectId: "s" }), ag("kid2", { parent: "lead2", projectId: "s" }),
+    w("lend-1", { projectId: "lend" }), w("lend-2", { projectId: "lend" }), w("lend-old", { projectId: "lend", status: "stopped" })];
+
+  test("带 worker 的派发者只占一行「派出 2」，出借组收起；展开后每个 worker 都有自己的行", async () => {
+    const u = await mount(WS);
+    expect(u.shown()).toEqual(["pm", "lead2", "kid2"]);
+    expect(u.text("pm")).toContain("派出 2");
+    expect(u.foldBtns("出借")[0].textContent).toContain("2");
+    await u.click(u.teamBtn("pm"));
+    await u.click(u.foldBtns("出借")[0]);
+    expect(u.shown()).toEqual(["pm", "review", "task-a", "lead2", "kid2", "lend-1", "lend-2"]);
+    expect(JSON.parse(storage.getItem("cstra_team_open")!)).toEqual(["pm"]);
+    expect(JSON.parse(storage.getItem("cstra_worker_fold_open")!)).toEqual(["lend"]);
+    expect(storage.getItem("cstra_team_collapsed")).toBeNull();
+    await u.unmount();
+    const again = await mount(WS);
+    expect(again.shown()).toEqual(["pm", "review", "task-a", "lead2", "kid2", "lend-1", "lend-2"]);
+    // 停掉的出借 worker 在历史里另有一组，历史的折叠自成命名空间
+    await again.click(again.historyBtn());
+    expect(again.shown()).not.toContain("lend-old");
+    await again.click(again.foldBtns("出借")[1]);
+    expect(again.shown()).toContain("lend-old");
+    expect(JSON.parse(storage.getItem("cstra_history_worker_fold_open")!)).toEqual(["lend"]);
+    await again.unmount();
+  });
+
+  test("用户收起的派发者，来了 worker 也不会被弹开；没有 worker 的照旧默认展开", async () => {
+    let u = await mount(WS);
+    await u.click(u.teamBtn("lead2"));
+    expect(u.shown()).not.toContain("kid2");
+    await u.unmount();
+    u = await mount([...WS, w("task-b", { parent: "lead2", projectId: "s" })]);
+    expect(u.shown()).toEqual(["pm", "lead2"]);
+    expect(u.text("lead2")).toContain("派出 2");
+    await u.unmount();
+  });
 });

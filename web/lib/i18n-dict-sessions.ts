@@ -1,7 +1,11 @@
 /**
- * 侧栏「未纳管会话」与归档的 i18n 词条，由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
+ * 侧栏「未纳管会话」、归档与 worker 分区的 i18n 词条，由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
  */
 export const SESSIONS_DICT: Record<string, string> = {
+  // 侧栏底部的 worker 分区（team-group.tsx WorkerFold）
+  "出借": "Lent out",
+  "别的 Claudestra 借本机跑的 worker 会话": "Worker sessions another Claudestra runs on this machine",
+  "派发者不在列表里的 worker 会话": "Worker sessions whose dispatcher is not in the list",
   "主管 PM": "Lead PM",
   "切到 {name}": "Switch to {name}",
   "主管 PM 已切到 {name}": "Lead PM switched to {name}",

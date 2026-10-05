@@ -5,6 +5,8 @@
  *  - 单成员 project 不成组（组头 = 同名冗余噪音），平铺在自身活动位次上；
  *  - 整组全员沉寂才下沉「💤 沉寂」；忙碌的永不算沉寂。
  *  - 派发关系（parent）先挂树再分组：执行者跟着派发者走，只挂一层，组头按顶层条目数算。
+ *  - worker（T69 kind）不当顶层行：有派发者的挂在它下面（带 worker 的派发者默认收起），
+ *    没有的收进底部默认收起的「出借」/「worker」组；搜索仍不出 worker。
  */
 import type { AgentSession, ProjectMeta } from "./type";
 
@@ -47,14 +49,18 @@ export function teamRoots(list: AgentSession[], masterName?: string): Map<string
   return roots;
 }
 
-/** 搜索过滤（q 已小写，任务名也参与匹配）+ 只按「置顶」分层的稳定排序；不搜索时置顶只对顶层行生效（执行者留在派发者下面） */
+export const isWorker = (a: AgentSession): boolean => a.kind === "worker";
+/** 带 worker 的派发者默认收起：调度器每张卡都起执行者 / 审查会话，默认展开就刷满侧栏（T69 的初衷） */
+export const hasWorkers = (kids: AgentSession[]): boolean => kids.some(isWorker);
+
+/** 搜索过滤（q 已小写，任务名也参与匹配）+ 只按「置顶」分层的稳定排序；不搜索时置顶只对顶层行生效（执行者留在派发者下面）。
+ *  worker 只在不搜索时留着（交给 buildSidebarEntries 挂到派发者下 / 收进 worker 组）；搜索是平铺结果，放进来会刷屏 */
 export function filterAndRankWorkers(workers: AgentSession[], q: string, pinSet: Set<string>, masterName?: string): AgentSession[] {
-  const visible = workers.filter((a) => a.kind !== "worker");
-  const roots = q ? null : teamRoots(visible, masterName);
+  const roots = q ? null : teamRoots(workers, masterName);
   return (
     q
-      ? visible.filter((a) => `${a.displayName} ${a.name} ${a.purpose} ${a.task ?? ""}`.toLowerCase().includes(q))
-      : visible
+      ? workers.filter((a) => !isWorker(a) && `${a.displayName} ${a.name} ${a.purpose} ${a.task ?? ""}`.toLowerCase().includes(q))
+      : workers
   )
     .slice()
     .sort((a, b) => {
@@ -74,8 +80,12 @@ export interface TeamNode {
   children: AgentSession[];
 }
 
+/** 没有可见派发者的 worker 收成的组：出借来的（agent-lend-*）单独一组，其余（派发者已停 / 不在列表里）一组 */
+export type WorkerFoldId = "lend" | "worker";
+
 export type SidebarEntry =
   | { kind: "group"; id: string; meta?: ProjectMeta; items: AgentSession[]; nodes: TeamNode[] }
+  | { kind: "workers"; id: WorkerFoldId; items: AgentSession[]; nodes: TeamNode[] }
   | ({ kind: "row" } & TeamNode);
 
 /** 「派出 N」只数直接派出的：孙辈虽然提升到同一组里显示，但不是这个派发者派的 */
@@ -93,7 +103,7 @@ export function splitMasterKids(kids: AgentSession[], now: number = Date.now()):
 
 /** 一个条目里的全部 agent（派发者在前）：组忙碌、沉寂判断与计数用 */
 export function entryMembers(e: SidebarEntry): AgentSession[] {
-  return e.kind === "group" ? e.items : [e.a, ...e.children];
+  return e.kind === "row" ? [e.a, ...e.children] : e.items;
 }
 
 /**
@@ -139,7 +149,8 @@ export function buildSidebarEntries(
   const entries: SidebarEntry[] = [];
   if (!q) {
     // 先挂树：执行者跟着派发者进它的 project（owner 定的 Q3），组头按顶层节点数算
-    const { nodes } = buildTeams(filtered, masterName);
+    const all = buildTeams(filtered, masterName).nodes;
+    const nodes = all.filter((n) => !isWorker(n.a));
     const byId = new Map<string, TeamNode[]>();
     for (const n of nodes) {
       const key = n.a.projectId || "";
@@ -160,8 +171,18 @@ export function buildSidebarEntries(
         entries.push({ kind: "row", ...n });
       }
     }
+    entries.push(...workerFolds(all.filter((n) => isWorker(n.a))));
   }
   return entries;
+}
+
+/** 顶层的 worker（没有可见派发者）收进底部的折叠组，组序固定：先「worker」后「出借」。名字是前端去掉 agent- 后的 */
+function workerFolds(nodes: TeamNode[]): SidebarEntry[] {
+  const lend = (n: TeamNode) => /^lend-/i.test(n.a.name);
+  return (["worker", "lend"] as const).flatMap((id) => {
+    const grp = nodes.filter((n) => lend(n) === (id === "lend"));
+    return grp.length ? [{ kind: "workers" as const, id, nodes: grp, items: grp.flatMap((x) => [x.a, ...x.children]) }] : [];
+  });
 }
 
 /** 方案 A(owner 2026-08-28):>30 天没动静的 agent 收进底部默认折叠的「💤 沉寂」

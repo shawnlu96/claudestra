@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { AgentSession } from "../type";
-import { directCount, type TeamNode } from "../sidebar-entries";
+import { directCount, type TeamNode, type WorkerFoldId } from "../sidebar-entries";
 import { Chevron } from "./project-group";
 
 /**
@@ -108,5 +108,41 @@ export function MasterTeam({ masterName, kids, collapsed, busy, onToggle, row }:
       </button>
       {!collapsed && <ul className="flex w-full list-none flex-col gap-0.5 p-0"><Kids kids={kids} row={row} dropProjectId={null} /></ul>}
     </div>
+  );
+}
+
+const WORKER_FOLD = {
+  lend: { icon: "🤝", label: "出借", title: "别的 Claudestra 借本机跑的 worker 会话" },
+  worker: { icon: "🧰", label: "worker", title: "派发者不在列表里的 worker 会话" },
+} as const;
+
+/** 没有可见派发者的 worker 收成的底部分区（默认收起，组头样式同 project 组）；展开后每个仍是可点进的行 */
+export function WorkerFold({ id, count, collapsed, busy, onToggle, children }: {
+  id: WorkerFoldId;
+  count: number;
+  collapsed: boolean;
+  busy: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const t = useT();
+  const f = WORKER_FOLD[id];
+  return (
+    <li className="rounded-xl bg-base-300/15 p-1">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] font-medium tracking-wide text-base-content/55 transition-colors hover:text-base-content/85"
+        aria-expanded={!collapsed}
+        title={t(f.title)}
+        onClick={onToggle}
+      >
+        <Chevron open={!collapsed} className="text-base-content/40" />
+        <span className="shrink-0 text-[13px] opacity-80">{f.icon}</span>
+        <span className="truncate">{t(f.label)}</span>
+        <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{count}</span>
+        {collapsed && busy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
+      </button>
+      {!collapsed && <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">{children}</ul>}
+    </li>
   );
 }

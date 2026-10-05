@@ -72,8 +72,8 @@ describe("live sidebar directory", () => {
 
 describe("directory fold namespaces", () => {
   test("active keeps the original keys; history has its own, distinct ones", () => {
-    expect(DIRECTORY_FOLD_KEYS.active).toEqual({ projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed" });
+    expect(DIRECTORY_FOLD_KEYS.active).toMatchObject({ projects: "cstra_proj_collapsed", teams: "cstra_team_collapsed" });
     const keys = [...Object.values(DIRECTORY_FOLD_KEYS.active), ...Object.values(DIRECTORY_FOLD_KEYS.history)];
-    expect(new Set(keys).size).toBe(4);
+    expect(new Set(keys).size).toBe(8);
   });
 });

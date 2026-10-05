@@ -71,7 +71,9 @@ const row = (a, s) => <li key={a.name} data-agent={a.name}>
 function App() {
   const activeFolds = useDirectoryFolds("active");
   const d = buildSidebarDirectory(AGENTS, META);
-  const team = (n, f) => <TeamGroup key={"t:" + n.a.name} node={n} collapsed={f.teams.has(n.a.name)} busy={false} onToggle={() => f.toggleTeam(n.a.name)} row={row} />;
+  // 修前的 folds 只有 teams / toggleTeam；修后（WKV1）换成 team(name, kids)
+  const tf = (n, f) => f.team ? f.team(n.a.name, n.children) : { collapsed: f.teams.has(n.a.name), toggle: () => f.toggleTeam(n.a.name) };
+  const team = (n, f) => <TeamGroup key={"t:" + n.a.name} node={n} collapsed={tf(n, f).collapsed} busy={false} onToggle={tf(n, f).toggle} row={row} />;
   const renderEntry = (e, f) => e.kind === "row" ? team(e, f)
     : <ProjectGroup key={"g:" + e.id} e={e} collapsed={f.projects.has(e.id)} groupBusy={false} onToggle={() => f.toggleProject(e.id)}>{e.nodes.map((n) => team(n, f))}</ProjectGroup>;
   return <div className="min-h-screen bg-base-100 text-base-content">

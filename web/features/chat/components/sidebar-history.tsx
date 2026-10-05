@@ -1,23 +1,41 @@
 "use client";
 import type { ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import type { SidebarEntry } from "../sidebar-entries";
+import { hasWorkers, type SidebarEntry } from "../sidebar-entries";
 import { DIRECTORY_FOLD_KEYS, type DirectoryScope } from "../sidebar-history";
+import type { AgentSession } from "../type";
 import { usePersistedSet } from "../use-persisted-set";
 import { Chevron } from "./project-group";
 
-/** 一个目录（活 / 历史）的 project 组与派发者折叠状态，按设备记住 */
+export interface Fold {
+  collapsed: boolean;
+  toggle: () => void;
+}
+
+/** 一个目录（活 / 历史）的 project 组、派发者、worker 组折叠状态，按设备记住 */
 export interface DirectoryFolds {
   projects: Set<string>;
   toggleProject: (id: string) => void;
-  teams: Set<string>;
-  toggleTeam: (id: string) => void;
+  /** 派发者开合：挂着 worker 的默认收起（记展开过的），其余默认展开（记收起过的）——worker 进出不会把用户收起的又弹开 */
+  team: (name: string, kids: AgentSession[]) => Fold;
+  /** 「出借」/「worker」组，默认收起 */
+  workers: (id: string) => Fold;
 }
 
 export function useDirectoryFolds(scope: DirectoryScope): DirectoryFolds {
-  const [projects, toggleProject] = usePersistedSet(DIRECTORY_FOLD_KEYS[scope].projects);
-  const [teams, toggleTeam] = usePersistedSet(DIRECTORY_FOLD_KEYS[scope].teams);
-  return { projects, toggleProject, teams, toggleTeam };
+  const keys = DIRECTORY_FOLD_KEYS[scope];
+  const [projects, toggleProject] = usePersistedSet(keys.projects);
+  const [teams, toggleTeam] = usePersistedSet(keys.teams);
+  const [teamsOpen, toggleTeamOpen] = usePersistedSet(keys.teamsOpen);
+  const [workersOpen, toggleWorkersOpen] = usePersistedSet(keys.workersOpen);
+  return {
+    projects,
+    toggleProject,
+    team: (name, kids) => hasWorkers(kids)
+      ? { collapsed: !teamsOpen.has(name), toggle: () => toggleTeamOpen(name) }
+      : { collapsed: teams.has(name), toggle: () => toggleTeam(name) },
+    workers: (id) => ({ collapsed: !workersOpen.has(id), toggle: () => toggleWorkersOpen(id) }),
+  };
 }
 
 /** lucide history */

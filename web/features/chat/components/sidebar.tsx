@@ -12,7 +12,7 @@ import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { SidebarExtraGroups } from "./sidebar-extra-groups";
 import { filterAndRankWorkers, type SidebarEntry, type TeamNode } from "../sidebar-entries";
-import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
+import { MasterTeam, TeamGroup, WorkerFold, type RowSlots } from "./team-group";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
@@ -200,10 +200,13 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   });
   const busyOf = (i: AgentSession) => i.busy || (active === i.name && streaming);
   const row = (a: AgentSession, s?: RowSlots & { projEmoji?: string }) => <AgentRow key={a.name} {...rowProps(a)} {...s} />;
-  const team = (n: TeamNode, folds: DirectoryFolds, projEmoji?: string) => (
-    <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={folds.teams.has(n.a.name)} busy={n.children.some(busyOf)}
-      onToggle={() => folds.toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
-  );
+  // inFold：worker 组里的行不当「转到 project」的放置目标——拖上去会进它那个看不见的 project
+  const team = (n: TeamNode, folds: DirectoryFolds, projEmoji?: string, inFold = false) => {
+    const f = folds.team(n.a.name, n.children);
+    const slots = (a: AgentSession, s?: RowSlots) => ({ ...s, ...(a === n.a ? { projEmoji } : {}), ...(inFold ? { dropProjectId: null } : {}) });
+    return <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={f.collapsed} busy={n.children.some(busyOf)} onToggle={f.toggle} row={(a, s) => row(a, slots(a, s))} />;
+  };
+  const masterFold = master ? activeFolds.team(master.name, underMaster) : null;
 
   return (
     <aside
@@ -401,8 +404,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             )}
           </button>
         )}
-        {master && (
-          <MasterTeam masterName={master.name} kids={underMaster} collapsed={activeFolds.teams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => activeFolds.toggleTeam(master.name)} row={(a) => row(a)} />
+        {master && masterFold && (
+          <MasterTeam masterName={master.name} kids={underMaster} collapsed={masterFold.collapsed} busy={underMaster.some(busyOf)} onToggle={masterFold.toggle} row={(a) => row(a)} />
         )}
         {agents.length > 0 && filtered.length === 0 && (
           <div className="px-2 py-4 text-sm opacity-50">{t("没有匹配「")}{query.trim()}{t("」的会话")}</div>
@@ -421,6 +424,14 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           (() => {
             const renderEntry = (e: SidebarEntry, folds: DirectoryFolds) => {
               if (e.kind === "row") return team(e, folds, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
+              if (e.kind === "workers") {
+                const f = folds.workers(e.id);
+                return (
+                  <WorkerFold key={`w:${e.id}`} id={e.id} count={e.items.length} collapsed={f.collapsed} busy={e.items.some(busyOf)} onToggle={f.toggle}>
+                    {e.nodes.map((n) => team(n, folds, undefined, true))}
+                  </WorkerFold>
+                );
+              }
               // 组头 / 组块样式与拖拽放置在 project-group.tsx
               return (
                 <ProjectGroup
