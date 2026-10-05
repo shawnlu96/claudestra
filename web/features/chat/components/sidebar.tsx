@@ -13,7 +13,6 @@ import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { SidebarExtraGroups } from "./sidebar-extra-groups";
 import { filterAndRankWorkers, type SidebarEntry, type TeamNode } from "../sidebar-entries";
 import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
-import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
@@ -23,12 +22,13 @@ import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
 import { ProjectGroup } from "./project-group";
-import { HistoryFold } from "./sidebar-history";
+import { SidebarDirectory, useDirectoryFolds, type DirectoryFolds } from "./sidebar-history";
 import { buildSidebarDirectory, isHistoryAgent } from "../sidebar-history";
 import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
 import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
@@ -42,8 +42,6 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const t = useT();
   const agents = useChatStore((s) => s.state.agents);
   const projects = useChatStore((s) => s.state.projects);
-  const loading = useChatStore((s) => s.state.loadingAgents);
-  const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   const compactingLive = useChatStore((s) => s.state.compacting);
@@ -183,9 +181,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
   // 组序 = 组内最近活动(filtered 已按活动排,Map 插入序即组的活动序);未分组沉底。
   const [showProjects, setShowProjects] = useState(false);
-  const [collapsedProjects, toggleProjectCollapse] = usePersistedSet("cstra_proj_collapsed");
-  const [collapsedTeams, toggleTeam] = usePersistedSet("cstra_team_collapsed"); // 派发者（及大总管）下挂的执行者
-  const [openHistory, toggleHistory] = usePersistedSet("cstra_directory_history_open");
+  // 活目录的 project / 派发者（及大总管）折叠；历史目录另有一套（SidebarDirectory 内）
+  const activeFolds = useDirectoryFolds("active");
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
   const { activeEntries, underMaster, historyEntries, historyCount } = buildSidebarDirectory(q ? [] : filtered, projMeta, master?.name);
   // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
@@ -203,9 +200,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   });
   const busyOf = (i: AgentSession) => i.busy || (active === i.name && streaming);
   const row = (a: AgentSession, s?: RowSlots & { projEmoji?: string }) => <AgentRow key={a.name} {...rowProps(a)} {...s} />;
-  const team = (n: TeamNode, projEmoji?: string) => (
-    <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={collapsedTeams.has(n.a.name)} busy={n.children.some(busyOf)}
-      onToggle={() => toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
+  const team = (n: TeamNode, folds: DirectoryFolds, projEmoji?: string) => (
+    <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={folds.teams.has(n.a.name)} busy={n.children.some(busyOf)}
+      onToggle={() => folds.toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
   );
 
   return (
@@ -335,14 +332,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           }
         }}
       >
-        {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
-            是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}
-        {(!ready || loading) && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("加载中…")}</div>
-        )}
-        {ready && !loading && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("暂无会话")}</div>
-        )}
+        {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
+        <AgentListNotice count={agents.length} />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">
@@ -411,7 +402,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
         )}
         {master && (
-          <MasterTeam masterName={master.name} kids={underMaster} collapsed={collapsedTeams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => toggleTeam(master.name)} row={(a) => row(a)} />
+          <MasterTeam masterName={master.name} kids={underMaster} collapsed={activeFolds.teams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => activeFolds.toggleTeam(master.name)} row={(a) => row(a)} />
         )}
         {agents.length > 0 && filtered.length === 0 && (
           <div className="px-2 py-4 text-sm opacity-50">{t("没有匹配「")}{query.trim()}{t("」的会话")}</div>
@@ -428,28 +419,24 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
              出组头(树形缩进),单人项目合并为一行(自定义 emoji 前缀);
              已停止的会话只在底部历史展开后显示 */
           (() => {
-            const renderEntry = (e: SidebarEntry) => {
-              if (e.kind === "row") return team(e, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
+            const renderEntry = (e: SidebarEntry, folds: DirectoryFolds) => {
+              if (e.kind === "row") return team(e, folds, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
               // 组头 / 组块样式与拖拽放置在 project-group.tsx
               return (
                 <ProjectGroup
                   key={`g:${e.id}`}
                   e={e}
-                  collapsed={collapsedProjects.has(e.id)}
+                  collapsed={folds.projects.has(e.id)}
                   groupBusy={e.items.some(busyOf)}
-                  onToggle={() => toggleProjectCollapse(e.id)}
+                  onToggle={() => folds.toggleProject(e.id)}
                 >
-                  {e.nodes.map((n) => team(n))}
+                  {e.nodes.map((n) => team(n, folds))}
                 </ProjectGroup>
               );
             };
             return (
-              <ul className="flex w-full list-none flex-col gap-0.5 p-0">
-                {activeEntries.map(renderEntry)}
-                <HistoryFold count={historyCount} open={openHistory.has("all")} onToggle={() => toggleHistory("all")}>
-                  {historyEntries.map(renderEntry)}
-                </HistoryFold>
-              </ul>
+              <SidebarDirectory activeEntries={activeEntries} historyEntries={historyEntries} historyCount={historyCount}
+                activeFolds={activeFolds} renderEntry={renderEntry} />
             );
           })()
         )}

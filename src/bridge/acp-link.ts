@@ -23,6 +23,7 @@ import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
 import { isAcpChannel } from "./acp-state.js";
 import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
+import { dispatchedFailureQuiet, type FailureAt } from "../lib/runtime-failure-audience.js";
 
 type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
@@ -91,7 +92,10 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (authCards.delete(channelId)) settleRuntimeAsk("codex", channelId); // 登好了、接上线程了：登录卡结掉
       return;
     case "acp_failure":
-      return onFailure(channelId, msg.failure as AcpFailure, msg.configOptions, typeof msg.label === "string" && msg.label ? msg.label : "Codex");
+      return onFailure(channelId, msg.failure as AcpFailure, msg.configOptions, typeof msg.label === "string" && msg.label ? msg.label : "Codex", {
+        sessionId: typeof msg.sessionId === "string" && msg.sessionId ? msg.sessionId : undefined,
+        failedAt: Number.isFinite(msg.failedAt) ? Number(msg.failedAt) : undefined,
+      });
     case "acp_permission":
       return onPermission(channelId, ws, msg);
     case "acp_call_result": {
@@ -132,8 +136,8 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
   return lost ? { ok: true, lost, bridgeEpoch } : true;
 }
 
-/** label：宿主报的运行时称呼（Codex / Pi，老宿主不带 = Codex），只进卡片标题 */
-function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string): void {
+/** label：宿主报的运行时称呼（Codex / Pi，老宿主不带 = Codex），只进卡片标题；at：失败发生在哪个会话、什么时刻（老宿主不带），回合失败卡记进 extra，派单会话据此认归属 */
+function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string, at: FailureAt = {}): void {
   const agentName = agentNameForChannel(channelId) ?? channelId;
   if (f?.kind === "quota") {
     const opts = parseConfigOptions(rawConfig);
@@ -157,8 +161,9 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
   } else if (f?.kind === "error" && f.retry !== true) {
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
+    const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId, at); // 监护在处置 / 派单会话由派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
-      failure: "error", instance: f.key, ...(failureCardQuiet(agentName, f.message, Date.now()) ? { quiet: true as const } : {}) }); // 监护在处置：不推 owner
+      failure: "error", instance: f.key, ...at, ...(quiet ? { quiet: true as const } : {}) });
   }
 }
 

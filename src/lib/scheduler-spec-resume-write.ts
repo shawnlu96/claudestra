@@ -13,6 +13,8 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, applyMove } from "./ledger-write.js";
 import { peerRestateSkip } from "./scheduler-spec-resume-text.js";
+import { getSchedulerSession } from "./scheduler-sessions.js";
+import { checkPreparedPeerPlacement, parsePlacementReservation } from "./scheduler-placement-reservations.js";
 
 const SPEC_WAIT_OP = "spec_place_wait";
 
@@ -34,7 +36,13 @@ export function specPlaceBlock(db: Database, task: LedgerTask, wf: TaskWorkflow 
   if (!wf || wf.mode !== "auto") return "不是 auto 卡";
   if (task.stage !== "spec") return `卡在 ${task.stage}，不在 spec`;
   if (task.kind !== "code" || wf.specRev !== task.specRev) return "流程与规格版本不一致";
-  if (String(task.extra.placement ?? "").startsWith("peer:")) return "start_node 已固定放置";
+  if (task.extra.placement === "local" || String(task.extra.placement ?? "").startsWith("peer:")) return "start_node 已固定放置";
+  const author = getSchedulerSession(db, task.id, "author");
+  if (author && author.transport !== "peer" && author.state !== "retired") return "已有本机作者绑定";
+  if (!author && task.agent && db.query(`SELECT 1 FROM events WHERE target=? AND kind='task'
+    AND json_extract(data,'$.op')='set' AND dedupKey LIKE 'dag-start:%:task-set' LIMIT 1`).get(task.id)) return "start_node 已创建本机作者";
+  if (db.query("SELECT 1 FROM lend_write_leases WHERE taskId=? AND state='held'").get(task.id)) return "已有 peer 写租约";
+  if (db.query("SELECT 1 FROM lend_orders WHERE taskId=? AND status IN ('claimed','unknown') LIMIT 1").get(task.id)) return "已有领取或结果不明的单";
   if (getMeta(db, task.project).queueFrozen.frozen) return "项目队列已冻结";
   if (liveClaimOn(db, task.id)) return "自动开卡还没结清";
   const since = specSince(listEvents(db, { project: task.project, target: task.id }));
@@ -51,10 +59,14 @@ interface PlaceCommand {
 function placePeer(c: PlaceCommand, ctx: WriteCtx, task: LedgerTask): Record<string, unknown> {
   const peer = c.need("peer"), repo = c.need("repo"), reason = c.need("reason").replace(/\s+/g, " ").trim().slice(0, 400);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(peer) || !/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo)) throw new LedgerError("invalid", "--peer / --repo 不合法");
+  const reservation = parsePlacementReservation(c.p.flags.reservation);
+  const extra = { ...task.extra, repo: task.extra.repo ?? repo, placement: `peer:${peer}`,
+    ...(reservation ? { placementReservation: reservation } : {}) };
+  checkPreparedPeerPlacement(c.db, { ...task, extra }, ctx.now ?? Date.now());
   const w = peerRestateSkip(`交回自动时卡还在 spec，按容量池放到 peer:${peer}（${reason}）；复述环节跳过，开工单由放置结果派给它`);
   const decision = appendEvent(c.db, ctx, { project: task.project, target: task.id, kind: "decision", text: w.decision,
     data: { op: "spec_placement", placement: `peer:${peer}`, repo, specRev: task.specRev, transcribed: false } }).event;
-  updateTask(c.db, ctx, task, { extra: { ...task.extra, repo: task.extra.repo ?? repo, placement: `peer:${peer}` } });
+  updateTask(c.db, ctx, task, { extra });
   const fresh = c.task(task.id);
   const moved = applyMove(c.db, ctx, fresh, { from: "spec", to: "restate" }, true, w.stage.text, "pm");
   return { ok: true, placed: `peer:${peer}`, decision, event: moved.event, task: moved.task };
@@ -73,7 +85,7 @@ function recordWait(c: PlaceCommand, ctx: WriteCtx, task: LedgerTask): Record<st
 }
 
 export const specPlaceCommand = {
-  valued: ["rev", "workflow-rev", "peer", "repo", "reason", "wait", "notified"], bools: [],
+  valued: ["rev", "workflow-rev", "peer", "repo", "reason", "wait", "notified", "reservation"], bools: [],
   usage: "scheduler-spec-place <task> --rev N --workflow-rev N (--peer <名> --repo <owner/repo> --reason <理由> | --wait <原因>)（调度服务专用：spec 阶段 auto 卡的放置）",
   run(c: PlaceCommand): Record<string, unknown> {
     return c.db.transaction(() => {

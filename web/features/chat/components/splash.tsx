@@ -6,14 +6,17 @@ import { useT } from "@/lib/i18n";
 import { CLIENT_COMMIT, CLIENT_VERSION, CLIENT_WEB_COMMIT } from "@/lib/build-info";
 import { bundleStale } from "@/lib/version-check";
 import { useVersionInfo } from "../../machines/use-version";
+import { SplashListStatus } from "./agent-list-status";
+import { agentListView } from "../agent-list-state";
 
 /**
  * 全屏启动页：landing + 加载一体（2026-07-13 owner：进入先卡「暂无会话」很久、
  * 加载文字太丑 → 全屏盖住整个入场过程）。
  *
- * - SSR 首帧就在场（agentsReady 初始 false），JS 加载/水合/首拉期间用户看到的
+ * - SSR 首帧就在场（agentList.loaded 初始 false），JS 加载/水合/首拉期间用户看到的
  *   是品牌页而不是空态文字；
- * - agents 首拉完成（ready）且展示满最短时长后淡出卸载——加载快时也不闪屏；
+ * - agents 首拉成功（或 401/403 要去配对）且展示满最短时长后淡出卸载——加载快时也不闪屏；
+ * - 首拉慢 / 失败不当作成功：底下说明 + 重试 / 先进入（SplashListStatus），进入后侧栏接着显示同一状态；
  * - bg-base-100 + token 配色，明暗主题自动跟随。
  */
 const MIN_SHOW_MS = 600;
@@ -21,11 +24,14 @@ const FADE_MS = 500;
 
 export function Splash() {
   const t = useT();
-  const ready = useChatStore((s) => s.state.agentsReady);
-  // 首屏就绪:记一条 [boot] 计时 + 壳里收掉原生启动图(见 boot-report.ts)
+  const [skipped, setSkipped] = useState(false);
+  const ready = useChatStore((s) => s.state.agentList.loaded || s.state.agentList.denied) || skipped;
+  // 首屏就绪:记一条 [boot] 计时 + 壳里收掉原生启动图(见 boot-report.ts)。首拉慢 / 失败也要收:
+  // 原生启动图盖在上面时「重试 / 先进入」点不到
+  const stuck = useChatStore((s) => ["slow", "retrying"].includes(agentListView(s.state.agentList, 0)));
   useEffect(() => {
-    if (ready) reportBootAndHideSplash();
-  }, [ready]);
+    if (ready || stuck) reportBootAndHideSplash();
+  }, [ready, stuck]);
   // 用 lazy initializer 而不是 useRef(Date.now())：后者在每次 render 都会求值
   // （虽然只有首次生效），属于 render 期调用非纯函数；useState 的惰性初始化是
   // React 明确支持的写法，只在首次挂载执行一次。
@@ -51,12 +57,11 @@ export function Splash() {
   if (gone) return null;
   return (
     <div
-      aria-hidden
       className={`fixed inset-0 z-[60] grid place-items-center bg-base-100 transition-opacity duration-500 ${
         fading ? "pointer-events-none opacity-0" : "opacity-100"
       }`}
     >
-      <div className="splash-in flex flex-col items-center">
+      <div className="splash-in flex flex-col items-center" aria-hidden>
         <div className="relative grid place-items-center">
           <span className="absolute size-20 rounded-full bg-primary/25 blur-2xl" />
           <span className="splash-mark relative text-[56px] leading-none text-primary">✦</span>
@@ -76,6 +81,9 @@ export function Splash() {
             />
           ))}
         </div>
+      </div>
+      <div className="absolute inset-x-4 flex justify-center" style={{ top: "calc(50% + 120px)" }}>
+        <SplashListStatus onSkip={() => setSkipped(true)} />
       </div>
       {ver && (
         <div

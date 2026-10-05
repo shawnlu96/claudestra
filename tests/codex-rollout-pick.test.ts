@@ -3,11 +3,12 @@
  * 同 id 多份时才按 registry cwd 分，分不开就拒；rollout 根认 CODEX_HOME。全部在临时目录里造假 rollout，不碰真实 ~/.codex。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pickCodexRolloutForArchive } from "../src/lib/codex-rollout-pick.js";
 import { codexSessionsRoot } from "../src/lib/codex-session.js";
+import { realpathCached } from "../src/lib/realpath-cache.js";
 
 const base = mkdtempSync(join(tmpdir(), "rollout-pick-"));
 afterAll(() => rmSync(base, { recursive: true, force: true }));
@@ -92,6 +93,38 @@ describe("pickCodexRolloutForArchive", () => {
     symlinkSync(real, link);
     const p = rollout(root, { id: SID, cwd: real });
     expect(await pickCodexRolloutForArchive(SID, `${link}/`, root)).toEqual({ path: p });
+  });
+});
+
+describe("归属判断用实时 realpath，不吃热路径的缓存", () => {
+  test("cwd 是软链，被周期任务缓存过旧指向 A，之后删掉重建指向 B：按现在的 B 挑", async () => {
+    const root = freshRoot();
+    const [a, b, link] = ["tgt-a", "tgt-b", "agent-link"].map((x) => join(base, x));
+    mkdirSync(a);
+    mkdirSync(b);
+    symlinkSync(a, link);
+    rollout(root, { id: SID, cwd: a });
+    const ofB = rollout(root, { id: SID, cwd: b }, { day: "28" });
+    expect(realpathCached(link)).toBe(realpathSync(a)); // bg 活动追踪这类热路径先把旧指向记住了
+    unlinkSync(link);
+    symlinkSync(b, link);
+    expect(await pickCodexRolloutForArchive(SID, link, root)).toEqual({ path: ofB });
+  });
+
+  test.skipIf(process.getuid?.() === 0)("同 id 两份、cwd 现在解不开（无权限）：认不准就拒，不按字面猜", async () => {
+    const root = freshRoot();
+    const locked = join(base, "locked");
+    const inside = join(locked, "agent");
+    mkdirSync(inside, { recursive: true });
+    rollout(root, { id: SID, cwd: inside });
+    rollout(root, { id: SID, cwd: "/agent/two" }, { day: "28" });
+    chmodSync(locked, 0o000);
+    try {
+      const r = await pickCodexRolloutForArchive(SID, inside, root);
+      expect("error" in r && r.error).toContain("解不开");
+    } finally {
+      chmodSync(locked, 0o755);
+    }
   });
 });
 

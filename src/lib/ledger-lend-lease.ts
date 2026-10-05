@@ -17,6 +17,7 @@ import type { ReviewFinding } from "./scheduler-review.js";
 import type { bounceWork } from "./scheduler-merge-conflict.js";
 import { lendFixEnv } from "./lend-fix-env.js";
 import { relayTarget } from "./lend-fix-reassign-event.js";
+import { orderFileScope } from "./order-wire-file-scope.js";
 /** i28-GATE2：出借单外发前把本卡历史 head 截短、敏感问题编号换别名（逻辑在 order-gate-heads.ts） */
 export { forPeer } from "./order-gate-heads.js";
 
@@ -109,7 +110,8 @@ export const RESTATE_PENDING_LINE = "复述答复会随后推送，收到前遇�
 export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: InputSplit = chunkInputs): OrderWire {
   const bounce = o.step === "fix" ? o.bounce : null;
   const restate = o.step === "write" && o.restate ? o.restate : null;
-  const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...(restate ? [["本机复述原文（PM 还没答复）", restate] as const] : []),
+  const scope = orderFileScope(task);
+  const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...scope.sources, ...(restate ? [["本机复述原文（PM 还没答复）", restate] as const] : []),
     ...(o.step === "fix" && !bounce && o.report ? [["上一轮审查报告原文", o.report] as const] : [])]);
   // head 只放在 head 字段里：外发闸扫全部自由文本，别处再写一遍 40 位十六进制会被当成疑似密钥整单拒掉
   const start = o.step === "write" ? `从基线 ${o.base} 切出分支 ${o.branch}（起点是标题里的 head）` : `在分支 ${o.branch} 上接着改（起点是标题里的 head）`;
@@ -117,7 +119,7 @@ export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: Inpu
     taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId,
     inputs: [...inputs, ...(bounce?.inputs ?? []), standardAnswers("author")],
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
-    acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交`, `只动这一个分支：推送由出借服务做，只推 ${o.branch}，不推 ${o.base}、不改别的分支`,
+    acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交；${scope.acceptance}`, `只动这一个分支：推送由出借服务做，只推 ${o.branch}，不推 ${o.base}、不改别的分支`,
       ...(bounce?.acceptance ?? [o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"]),
       ...(restate ? [RESTATE_PENDING_LINE] : [])],
     writeBack: "提交后用 deliver（M2 前是 lend submit）交一行摘要和自查，单号见标题",
