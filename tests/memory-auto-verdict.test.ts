@@ -1,46 +1,22 @@
 /** The real local/peer verdict intake persists pitfall before the automatic observer reads it. */
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { ledgerOrigin } from "../src/lib/ledger-origin.js";
-import { createTask, deliver, setMeta } from "../src/lib/ledger-write.js";
-import { assignStep } from "../src/lib/ledger-steps-write.js";
-import { submitVerdict } from "../src/lib/review-verdict.js";
+import { createTask } from "../src/lib/ledger-write.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
 import { getTask } from "../src/lib/ledger-store.js";
-import { runLedger } from "../src/manager/ledger.js";
-import { observeMemory } from "../src/lib/memory-auto.js";
-import { projectMemories } from "../src/lib/memory-auto-common.js";
-import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
+import { verifyPurpose } from "../src/lib/instance-signature.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
+import type { LendReceipt } from "../src/lib/lend-wire.js";
+import { P, verdictFixture, type VerdictFixture } from "./memory-auto-verdict-fixture.ts";
 
-const P = "demo", H = "a".repeat(40), NOW = 1_000_000;
-let db: Database, dir: string, report: string;
-const f = { findingId: "tx", family: "widget-tx", severity: "P1", probe: "读 revision 跳号，写入未包含事务", description: "[验收线 1] 事务边界" };
-const wire = (orderId: string, pitfall?: unknown) => ({ v: 1, orderId, head: H, verdict: "changes", p0: 0, p1: 1, p2: 0,
-  findings: [{ ...f, ...(pitfall !== undefined ? { pitfall } : {}) }], reportPath: report });
-const run = () => observeMemory(db, "scheduler", P, { assertLease: () => {} });
-const pitfalls = () => projectMemories(db, P).filter((m) => m.kind === "pitfall");
-const local = (pitfall?: unknown) => submitVerdict(db,
-  { agent: "agent-y", sessionId: "sess-y", family: "codex", verified: true }, wire("A:review:r1", pitfall),
-  { reviewsDir: join(dir, "reviews"), registry: [{ name: "agent-x", runtime: "claude-code" }], now: NOW });
-
-beforeEach(() => {
-  db = openLedger(":memory:"); ledgerOrigin(db, () => "ab12");
-  dir = mkdtempSync(join(tmpdir(), "memory-verdict-")); mkdirSync(join(dir, "reviews"));
-  report = join(dir, "reviews", "A.md"); writeFileSync(report, "## tx [验收线 1]\nTransaction boundary evidence\n");
-  setMeta(db, { actor: "owner" }, { project: P, key: "pms", value: ["agent-pm"] });
-  createTask(db, { actor: "owner" }, { project: P, id: "A", title: "Atomic revision writes", kind: "code", spec: report,
-    extra: { fileGlobs: ["src/lib/widget-store.ts"] } });
-  assignStep(db, { actor: "owner" }, { taskId: "A", step: "write", executor: "agent-x", executorKind: "agent" });
-  db.query("UPDATE tasks SET stage = 'build' WHERE id = 'A'").run();
-  deliver(db, { actor: "owner", now: NOW - 1 }, { taskId: "A", headSHA: H, moveFrom: "build" });
-  assignStep(db, { actor: "owner" }, { taskId: "A", step: "review", executor: "agent-y", executorKind: "agent" });
-});
-afterEach(() => { closeLedger(":memory:"); rmSync(dir, { recursive: true, force: true }); });
+// Every test owns its ledger file, temp dir and generated instance key (see the fixture); nothing rides on ":memory:" or STATE_DIR.
+let fx: VerdictFixture | undefined, db: Database;
+let run: VerdictFixture["run"], pitfalls: VerdictFixture["pitfalls"], local: VerdictFixture["local"], peerOrder: VerdictFixture["peerOrder"];
+beforeEach(() => { fx = verdictFixture(); ({ db, run, pitfalls, local, peerOrder } = fx); });
+afterEach(() => { const own = fx; fx = undefined; own?.dispose(); });
 
 test("submit_verdict pitfall survives persisted findings/read path; replay never creates another pitfall", async () => {
   expect(local(true)).toMatchObject({ ok: true, duplicate: false });
@@ -57,22 +33,6 @@ test("local legacy client without pitfall still works; invalid fields stay rejec
   expect(local(1)).toMatchObject({ ok: false, error: "invalid_wire" });
   expect(local()).toMatchObject({ ok: true }); await run(); expect(pitfalls()).toEqual([]);
 });
-
-async function peerOrder() {
-  const key = instanceKeySync(dir);
-  const deps = { db, actor: "agent-pm", projectIds: [P], now: () => NOW,
-    loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {},
-    lend: { borrow: async () => [{ peer: "mate", projects: [P], roles: ["review" as const], maxOpen: 1 }],
-      notifyPm: async () => {}, result: { reportDir: () => join(dir, "reviews"), writeReport: (p: string, body: string) => writeFileSync(p, body),
-        sign: (fields: string[]) => signPurpose(RECEIPT_PURPOSE, fields, key) } } };
-  const offered = await runLedger(["lend-offer", "A", "--peer", "mate", "--repo", "demo/widget", "--pr", "12"], deps);
-  expect(offered.ok).toBe(true); const orderId = offered.orderId as string;
-  const call = (ep: string, body: unknown) => runLedger([`lend-${ep}`, "--", "mate", JSON.stringify(body)], { ...deps, actor: "owner" });
-  expect((await call("claim", { v: 1, orderId, worker: "w1" })).ok).toBe(true);
-  const result = (pitfall?: unknown) => ({ v: 1, orderId, gen: 1, verdict: wire(orderId, pitfall),
-    report: "## tx [验收线 1]\nUse one transaction for revision and writes", session: { id: "peer-session", family: "codex" } });
-  return { call, result };
-}
 
 test("peer result through lend wire/lease/signature intake retains pitfall in stored events; resend is idempotent", async () => {
   const { call, result } = await peerOrder();
@@ -96,4 +56,61 @@ test("legacy persisted pitfall:false reads as an ordinary finding and does not i
   const events = listEvents(db, { project: P, target: "A" }).map((e) => e.kind === "review" ? { ...e, data: { ...e.data,
     findings: (e.data.findings as object[]).map((f) => ({ ...f, pitfall: false })) } } : e);
   expect(currentReviewFacts(getTask(db, "A")!, events)).toMatchObject({ kind: "facts", facts: { findings: [{ family: "widget-tx" }] } });
+});
+
+/** Full peer chain on one fixture; the receipt must be signed by that fixture's own generated key. */
+async function peerChain(x: VerdictFixture) {
+  const { call, result } = await x.peerOrder();
+  const first = await call("write", result(true)); expect(first.ok).toBe(true);
+  const r = first.receipt as LendReceipt;
+  expect(r.key).toBe(x.key.publicKey);
+  expect(verifyPurpose(x.key.publicKey, RECEIPT_PURPOSE, [r.orderId, r.sha256, String(r.eventSeq), r.taskId], r.sig)).toBe(true);
+  await x.run(); expect(x.pitfalls()).toHaveLength(1);
+  return r;
+}
+
+test("isolation probe: a polluted shared :memory: ledger and a broken neighbour key do not leak into this fixture", async () => {
+  // A neighbour may already have leaked task A into ":memory:"; then the pollution is real and the handle is not ours to close.
+  const shared = openLedger(":memory:"), ours = !getTask(shared, "A");
+  try {
+    if (ours) createTask(shared, { actor: "owner" }, { project: P, id: "A", title: "left open by a neighbour", kind: "code" });
+    // The legacy setup reopened ":memory:" and got this very handle back, so its createTask("A") went red.
+    expect(openLedger(":memory:")).toBe(shared);
+    expect(() => createTask(openLedger(":memory:"), { actor: "owner" }, { project: P, id: "A", title: "legacy setup", kind: "code" })).toThrow();
+    const neighbour = verdictFixture();
+    const neighbourKey = neighbour.key.publicKey;
+    writeFileSync(join(neighbour.root, "identity", "instance-key.pem"), "not a pem");
+    neighbour.dispose();
+    expect(fx!.key.publicKey).not.toBe(neighbourKey);
+    expect(getTask(db, "A")!.title).toBe("Atomic revision writes");
+    await peerChain(fx!);
+    expect(getTask(shared, "A")).not.toBeNull();
+  } finally {
+    if (ours) closeLedger(":memory:");
+  }
+});
+
+test("isolation probe: two fixtures run the peer chain in parallel; disposing one leaves the other intact", async () => {
+  const other = verdictFixture();
+  try {
+    const [mine, theirs] = await Promise.all([peerChain(fx!), peerChain(other)]);
+    expect(mine.key).not.toBe(theirs.key);
+    expect(other.ledgerPath).not.toBe(fx!.ledgerPath);
+    other.dispose();
+    expect(existsSync(other.root)).toBe(false);
+    expect(() => other.db.query("SELECT 1").get()).toThrow();
+    await run(); expect(pitfalls()).toHaveLength(1);
+    expect(listEvents(db, { project: P, target: "A" }).filter((e) => e.kind === "review")).toHaveLength(1);
+  } finally {
+    other.dispose();
+  }
+});
+
+test("isolation probe: a setup failure after resources exist closes the ledger, removes the temp root and rethrows", () => {
+  let root = "", seeded: Database | undefined;
+  expect(() => verdictFixture({ seed: (d, r) => { seeded = d; root = r; throw new Error("seed boom"); } })).toThrow("seed boom");
+  expect(root).not.toBe("");
+  expect(existsSync(root)).toBe(false);
+  expect(() => seeded!.query("SELECT 1").get()).toThrow();
+  expect(db.query("SELECT COUNT(*) AS n FROM tasks").get()).toEqual({ n: 1 });
 });
