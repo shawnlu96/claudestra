@@ -206,6 +206,32 @@ describe("轮询游标（手动 tick）", () => {
     expect(ids(f.got)).toEqual([a, x, y]);
   });
 
+  test("换库：替换库独有、在 feed 基线之前就已提交完的历史关闭一条不发；换上来之后新提交的照发（复现 ask-sse r3）", async () => {
+    const alt = tempLedgerPath("askt-sse-alt-");
+    const hist: string[] = [];
+    onAlt(alt, () => {
+      for (let i = 0; i < 3; i++) {
+        const t = Date.now() - 60_000;
+        const id = ask({ now: t });
+        settle(id, t);
+        hist.push(id);
+      }
+    });
+    await Bun.sleep(20); // 历史提交（含 checkpoint、关库）确实早于下面的基线读
+    const f = start();
+    f.tick(); // 当前库基线：不含替换库的任何历史
+    f.tick();
+    swapIn(alt);
+    f.tick();
+    f.tick();
+    expect(f.got).toEqual([]);
+    const z = ask();
+    settle(z);
+    f.tick();
+    expect(ids(f.got)).toEqual([z]);
+    expect(hist.every((id) => !ids(f.got).includes(id))).toBe(true);
+  });
+
   test("换库：emit 中途抛了，下拍只补没发出去的，不重发、不跳过", () => {
     const f = start();
     f.tick();

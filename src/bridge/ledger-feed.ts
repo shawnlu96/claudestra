@@ -4,6 +4,7 @@
  * 轮询懒启动：第一条能读台账的 /api/v1/events 连接建过滤器时起，之后常驻——没人能收 ledger 事件时不查库，
  * 也不用往 bridge.ts（热点在上限）加启动行。单测经 setLedgerFeedForTest 换库路径、换 emit，并手动 tick。
  */
+import { statSync } from "node:fs";
 import { askWhoOf, canSeeAsk } from "../lib/ask-access.js";
 import { canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
@@ -30,19 +31,42 @@ export function ledgerDb(): ReturnType<LedgerReader["get"]> {
   return reader.get();
 }
 
+/** 库文件身份与最后写入时刻：主库与非空 -wal 取晚的（读连接只会建空 -wal；提交落在 -wal，checkpoint 落主库）；at = 看之前的时刻 */
+interface FileProbe { at: number; id: string; modifiedAt: number }
+function probeFile(path: string): FileProbe | null {
+  const at = Date.now();
+  try {
+    const st = statSync(path);
+    let modifiedAt = st.mtimeMs;
+    try {
+      const wal = statSync(`${path}-wal`);
+      if (wal.size > 0) modifiedAt = Math.max(modifiedAt, wal.mtimeMs);
+    } catch {
+      // 没有 -wal：只看主库
+    }
+    return { at, id: `${st.dev}:${st.ino}`, modifiedAt };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * followup-reliability-ASKT：读已提交的「随出借单结清关闭」事件发 ask SSE（lib/order-ask-terminal.ts）。每拍按 seq 游标读（不看 data_version：
  * 同一拍里多笔提交 / 批量取消都在 seq 之后），逐条发、逐条推进游标——读库出错游标不动、下拍重读；某条 emit 抛了停在它前面、下拍从它重发，
  * 已发的不重复。首次启动（含 bridge 重启）只取基线不补发（网页连上就全量重拉），基线里的关闭记进 seen。
- * 换了库文件（generation 变）：seq 是各库自己的，事件 ts 是调用方先取的业务时间（可早于提交），都不能当交界——按事件身份（askId）认：
- * 新库里所有结清关闭中 seen 里没有的（旧库基线已有 / 已发过的除外）照发，发完才认这一代；中途 emit 抛了下拍按 seen 只补没发的
+ * 换了库文件（generation 变）：seq 是各库自己的，事件 ts 是调用方先取的业务时间（可早于提交），都不能当交界。改看换上来那份文件本身的
+ * 最后写入时刻（probeFile，在本拍谁都还没打开它之前取）：早于上次读成功那拍的开头 = 里面全是那之前就提交好的历史，一条不发、只记进 seen；
+ * 否则其后有过提交，按事件身份（askId）发 seen 里没有的（旧库基线已有 / 已发过的除外）。这一代只判一次（本进程打开后会建 -wal，
+ * 不能再看时间），发完才认这一代；中途 emit 抛了下拍按 seen 只补没发的
  */
-function settledAskTicker(): () => void {
+function settledAskTicker(): (probe: FileProbe | null) => void {
   let seq: number | null = null;
   let gen = -1;
+  let okAt = 0;
+  let swap: { gen: number; fresh: boolean } | null = null;
   const seen = new Set<string>();
   let failing = false;
-  return () => {
+  return (probe) => {
     try {
       const db = reader.get();
       if (!db) return;
@@ -53,15 +77,21 @@ function settledAskTicker(): () => void {
         gen = reader.generation;
       }
       const swapped = reader.generation !== gen;
+      // 看的不是这次打开的那份（stat 与打开之间又换了）/ 没看到：说不清何时写的，宁可按身份补发也不漏
+      if (swapped && swap?.gen !== reader.generation) swap = { gen: reader.generation, fresh: !probe || probe.id !== reader.file || probe.modifiedAt >= okAt };
       const r = settledAskClosuresSince(db, swapped ? 0 : seq);
       for (const c of r.closures) {
-        if (swapped && seen.has(c.askId)) continue;
+        if (swapped && (!swap!.fresh || seen.has(c.askId))) {
+          seen.add(c.askId);
+          continue;
+        }
         emitAsk(c);
         seen.add(c.askId);
         if (!swapped) seq = c.seq;
       }
       seq = r.lastSeq;
       gen = reader.generation;
+      if (probe) okAt = probe.at;
       if (failing) console.log("📒 出借单结清关问的推送检测恢复");
       failing = false;
     } catch (e) {
@@ -75,8 +105,9 @@ function makeTick(): () => void {
   const ledgerTick = ledgerFeedTicker({ reader, emit: (p) => emit(p), log: (m) => console.log(m) });
   const askTick = settledAskTicker();
   return () => {
+    const probe = probeFile(reader.path); // 赶在 ledgerTick 打开换上来的文件之前
     ledgerTick();
-    askTick();
+    askTick(probe);
   };
 }
 
