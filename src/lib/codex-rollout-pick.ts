@@ -7,21 +7,16 @@
  * resume 换了目录，registry cwd 会变、rollout 首行不会）。多份时才拿 registry cwd 区分，还分不开就拒，
  * 列出候选由调用方报 ok:false（tests/codex-rollout-pick.test.ts）。
  */
-import { realpathSync } from "node:fs";
 import { basename } from "node:path";
 import { codexSessionIdFromFilename, codexSessionsRoot, listCodexSessionFiles, readCodexMetaPayload } from "./codex-session.js";
 import { sandboxCodexHomeProblem } from "./sandbox.js";
+import { realpathCached } from "./realpath-cache.js";
 
 export type RolloutPick = { path: string; note?: string } | { error: string };
 
 /** 比较用的目录形态：解开符号链接（macOS 的 /tmp → /private/tmp，Codex 记的是 getcwd 的结果），去掉末尾斜杠 */
 function canonicalDir(dir: string): string {
-  let d = dir;
-  try {
-    d = realpathSync(dir);
-  } catch {
-    /* 目录已经删了：按字面比，删掉的目录两边写法通常一致 */
-  }
+  const d = realpathCached(dir); // 目录已经删了：按字面比，删掉的目录两边写法通常一致
   return d.length > 1 ? d.replace(/\/+$/, "") : d;
 }
 
