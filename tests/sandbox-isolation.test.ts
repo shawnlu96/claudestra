@@ -24,12 +24,15 @@ import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
 import { fakePiSource } from "./sandbox-fake-pi.ts";
 import { testChildEnv } from "./test-env.ts";
+import { pickPort, pidAlive as alive, StartFailure, startSandbox, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
 
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
 const BUN = process.execPath;
 const REAL_TMUX = Bun.which("tmux");
 const PROD_SID = "11111111-2222-4333-8444-555555555555";
+/** 候选端口禁用表：生产端口与下面拒连负例用的固定端口 */
+const AVOID_PORTS = [DEFAULT_BRIDGE_PORT, 23998, 23999];
 
 let tmp = "";
 let home = "";
@@ -140,17 +143,12 @@ function sandbox(...args: string[]): { code: number; out: string } {
   return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
 }
 
-async function freePort(): Promise<number> {
-  for (let i = 0; i < 50; i++) {
-    const p = 20000 + Math.floor(Math.random() * 9000);
-    try {
-      Bun.listen({ hostname: "127.0.0.1", port: p, socket: { data() {} } }).stop(true);
-      return p;
-    } catch {
-      continue; // 被占了，换一个
-    }
-  }
-  throw new Error("找不到空闲端口");
+/** 经原入口 scripts/sandbox.ts up 起沙箱的夹具参数（端口竞争由 startSandbox 协调）；deadline 取调用方现有 timeout 之内 */
+function upSpec(r: string, ms: number, extra: Partial<StartSpec> = {}): StartSpec {
+  return {
+    root: r, cwd: REPO, env: callerEnv, avoid: AVOID_PORTS, deadline: Date.now() + ms,
+    argv: (sub, p) => [BUN, SCRIPT, sub, "--port", String(p), "--root", r], ...extra,
+  };
 }
 
 /** 进程当前打开的文件路径（有 lsof 时）：用来断言沙箱 bridge 没开着任何生产目录里的文件 */
@@ -341,7 +339,6 @@ beforeAll(async () => {
   writeShims(join(tmp, "shim"));
   proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) { hits.proxy.push(`${req.method} ${req.url}`); return new Response("no", { status: 502 }); } });
   decoy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) { hits.decoy.push(`${req.method} ${req.url}`); return new Response("no", { status: 502 }); } });
-  port = await freePort();
 });
 
 afterAll(() => {
@@ -355,9 +352,10 @@ describe("沙箱 bridge 无副作用", () => {
   test("启动 → 使用 → 重启 → 退出：假生产 home 零改动、不碰 launchd、不出站、只用沙箱 socket 与端口", async () => {
     const before = snapshot(home);
 
-    const up = sandbox("up");
-    expect(up.code, up.out).toBe(0);
+    const up = await startSandbox(upSpec(root, 45_000));
+    port = up.port;
     const pid = Number(readFileSync(join(root, "bridge.pid"), "utf8"));
+    expect(pid).toBe(up.pid);
     const ports = listeningPorts(pid);
     if (ports) expect(ports.every((p) => p === port), `监听端口 ${ports}`).toBe(true);
     expect(port).not.toBe(DEFAULT_BRIDGE_PORT);
@@ -371,8 +369,7 @@ describe("沙箱 bridge 无副作用", () => {
     if (open) expect(open.filter((f) => f.includes("claude-orchestrator"))).toEqual([]);
 
     expect(sandbox("down").code).toBe(0);
-    const again = sandbox("up");
-    expect(again.code, again.out).toBe(0);
+    port = (await startSandbox(upSpec(root, 45_000, { firstPort: port }))).port; // 重启沿用原端口，确认被抢才换
     await exercise();
     expect(sandbox("down").code).toBe(0);
 
@@ -403,7 +400,7 @@ describe("沙箱 bridge 无副作用", () => {
     const stateDir = join(tmp, "direct", "state");
     const base = {
       PATH: process.env.PATH ?? "", HOME: home, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_STATE_DIR: stateDir,
-      CLAUDESTRA_RUNTIME_DIR: join(tmp, "direct", "run"), BRIDGE_PORT: String(await freePort()), BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+      CLAUDESTRA_RUNTIME_DIR: join(tmp, "direct", "run"), BRIDGE_PORT: String(pickPort(AVOID_PORTS)), BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
     };
     const cases: Array<[string, Record<string, string>]> = [
       ["DISCORD_BOT_TOKEN", { DISCORD_BOT_TOKEN: "decoy-token" }],
@@ -532,4 +529,68 @@ describe("沙箱 bridge 无副作用", () => {
       fake.stop(true);
     }
   }, 60_000);
+});
+
+describe("启动夹具：端口竞争（受控扰动）", () => {
+  const held: Array<{ stop(force?: boolean): void }> = [];
+  const hold = (p: number) => held.push(Bun.listen({ hostname: "127.0.0.1", port: p, socket: { data() {} } }));
+  /** 收尾核验：down 成功、本次 bridge 已退、pid 文件已删；假 home 零改动、零出站 */
+  const downAndVerify = (r: string, p: number, pid: number, before: Map<string, string>) => {
+    const d = Bun.spawnSync([BUN, SCRIPT, "down", "--port", String(p), "--root", r], { cwd: REPO, env: callerEnv(), stdout: "pipe", stderr: "pipe" });
+    expect(d.exitCode, d.stderr.toString()).toBe(0);
+    expect(alive(pid)).toBe(false);
+    expect(existsSync(join(r, "bridge.pid"))).toBe(false);
+    expect(diff(before, snapshot(home))).toEqual([]);
+    expect(hits).toEqual({ proxy: [], decoy: [] });
+  };
+  afterAll(() => held.splice(0).forEach((l) => l.stop(true)));
+
+  test("候选端口在 up 前被抢：原路径拒绝启动；夹具确认本端口 EADDRINUSE、无活宿主后换端口，归属与清理核验", async () => {
+    const before = snapshot(home);
+    const r = join(tmp, "race-pre");
+    const p0 = pickPort(AVOID_PORTS);
+    hold(p0); // 原路径：探测关占位 → 别人抢到 → up
+    const old = Bun.spawnSync([BUN, SCRIPT, "up", "--port", String(p0), "--root", r], { cwd: REPO, env: callerEnv(), stdout: "pipe", stderr: "pipe" });
+    expect(old.exitCode).not.toBe(0);
+    expect(old.stderr.toString()).toContain(`端口 ${p0} 已被占用`);
+    const up = await startSandbox(upSpec(r, 45_000, { onPicked: (p, i) => void (i === 0 && hold(p)) }));
+    expect(up.attempts.map((a) => a.outcome)).toEqual(["port-race", "started"]);
+    expect(up.port).not.toBe(up.attempts[0]!.port);
+    expect((await fetch(`http://127.0.0.1:${up.port}/stats`)).ok).toBe(true);
+    downAndVerify(r, up.port, up.pid, before);
+  }, 60_000);
+
+  test("预检之后、bridge 绑定之前被抢：bridge 因 EADDRINUSE 退出，夹具不等 20 秒就绪超时，清理后换端口", async () => {
+    const before = snapshot(home);
+    const r = join(tmp, "race-bind");
+    let won = null as boolean | null;
+    const race = async (p: number) => { // bridge.pid 一出现（child 刚起、还在加载）就抢端口
+      for (const end = Date.now() + 15_000; Date.now() < end && won === null; await Bun.sleep(1)) {
+        if (!existsSync(join(r, "bridge.pid"))) continue;
+        try { hold(p); won = true; } catch (e) { won = false; console.error(`扰动没抢到（bridge 先绑上），下面 expect(won) 报红：${e}`); }
+      }
+    };
+    const t0 = Date.now();
+    const up = await startSandbox(upSpec(r, 45_000, { onPicked: (p, i) => void (i === 0 && race(p)) }));
+    expect(won, "扰动没抢到端口（bridge 先绑上了）").toBe(true);
+    expect(up.attempts.map((a) => a.outcome)).toEqual(["port-race", "started"]);
+    expect(Date.now() - t0).toBeLessThan(20_000);
+    downAndVerify(r, up.port, up.pid, before);
+  }, 60_000);
+
+  test("反向故障照常失败、不重跑：非端口原因、端口被本沙箱活宿主占着、候选是生产端口", async () => {
+    const before = snapshot(home);
+    const bad = await startSandbox(upSpec(join(home, ".claude-orchestrator", "sbx"), 30_000)).catch((e) => e);
+    expect(bad).toBeInstanceOf(StartFailure);
+    expect((bad as StartFailure).attempts.map((a) => a.outcome)).toEqual(["failed"]);
+    expect(String(bad.message)).toContain("重叠");
+    const r = join(tmp, "race-live");
+    const up = await startSandbox(upSpec(r, 45_000));
+    const twice = await startSandbox(upSpec(r, 30_000, { firstPort: up.port })).catch((e) => e);
+    expect((twice as StartFailure).attempts?.map((a) => a.outcome)).toEqual(["failed"]);
+    expect(alive(up.pid)).toBe(true);
+    const prod = await startSandbox(upSpec(r, 30_000, { firstPort: DEFAULT_BRIDGE_PORT })).catch((e) => e);
+    expect((prod as StartFailure).attempts).toEqual([]);
+    downAndVerify(r, up.port, up.pid, before);
+  }, 90_000);
 });
