@@ -327,6 +327,17 @@ describe("r1：提交了但结果丢了，按本次 dedup 查库接着走", () =
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
 
+  test("registry 里有只差大小写 / 全角的同名会话：预检就拒，不建卡、不碰 git、不 create / kill", async () => {
+    await plan();
+    spec("i28-a");
+    agents["agent-TASK-ｉ28-a"] = { channelId: "ch-old", projectId: P };
+    calls = [];
+    expect(await start("a")).toMatchObject({ ok: false, code: "conflict" });
+    expect(writes()).toEqual([]);
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(agents["agent-TASK-ｉ28-a"]).toBeDefined();
+  });
+
   test("同名卡是别人建的（本次 task-new 没落库）：回滚不碰它", async () => {
     await plan();
     spec("i28-a");
