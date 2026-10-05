@@ -29,6 +29,7 @@ export interface ClearRotationDeps {
  * 认领新会话：manager set-session（归档 + registry 切换）→ 重挂 watcher → 给网页发 session_rotated（提示 + 重拉历史 + 刷 ctx）。
  * clear 端点的轮转和 Stop 自愈（session-heal.ts）都走这里，网页只认这一种事件。registry 已经是 to（另一条路先认领了）
  * 时 set-session 原样返回 previousSessionId === to：不再重挂、不再发事件，否则网页会看到两条「已清空」。
+ * 带 --expected from：两条路并发、各自读到旧 registry 又挑了不同的 sid 时，后到的那次被拒（「会话已变化」），不会后写者赢。
  */
 export async function claimRotatedSession(
   deps: Pick<ClearRotationDeps, "runManager" | "rewatch">,
@@ -36,7 +37,7 @@ export async function claimRotatedSession(
   from: string | undefined,
   to: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const r = await deps.runManager("set-session", a.name, to);
+  const r = await deps.runManager("set-session", a.name, to, ...(from ? ["--expected", from] : []));
   if (!r?.ok) return { ok: false, error: r?.error };
   if (r.previousSessionId === to) return { ok: true };
   deps.rewatch(a.name, a.cwd, to, a.channelId, a.runtime);

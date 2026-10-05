@@ -53,7 +53,7 @@ describe("Stop hook 带 session_id 的确定性判定", () => {
   test("复现 CLR1：hook sid ≠ registry、旧文件 1 分钟前刚写过 → 窗口确认后照样认领新会话", async () => {
     const h = harness({ channelId: "c1", mtimes: { [OLD]: now - 60_000, [NEW]: now - 1_000 }, windowSid: NEW });
     await maybeHealRotatedSession("c1", NEW, h.deps);
-    expect(h.manager).toEqual([["set-session", "agent-c1", NEW]]);
+    expect(h.manager).toEqual([["set-session", "agent-c1", NEW, "--expected", OLD]]);
     expect(h.rewatched).toEqual([NEW]);
     expect(events.map((e) => [e.agent, e.chatId, e.data])).toEqual([["agent-c1", "c1", { from: OLD, to: NEW }]]);
   });
@@ -74,11 +74,30 @@ describe("Stop hook 带 session_id 的确定性判定", () => {
     expect(events).toEqual([]);
   });
 
-  test("Bash 里嵌套的 claude -p 带着自己的 sid 打来 Stop：窗口登记仍是旧会话 → 不认领、落回 mtime（旧文件新鲜 → 不动）", async () => {
+  test("Bash 里嵌套的 claude -p 带着自己的 sid 打来 Stop：窗口登记仍是旧会话 → 不认领", async () => {
     const h = harness({ channelId: "c4", mtimes: { [OLD]: now - 5_000, [CHILD]: now - 1_000 }, windowSid: OLD });
     await maybeHealRotatedSession("c4", CHILD, h.deps);
     expect(h.manager).toEqual([]);
     expect(events).toEqual([]);
+  });
+
+  test("嵌套 claude -p 跑了 >3 分钟、主文件已陈旧：查得到窗口登记就不落回 mtime，不认领子会话（审查 r2 P1-1）", async () => {
+    const h = harness({ channelId: "c8", mtimes: { [OLD]: now - 600_000, [CHILD]: now - 1_000 }, windowSid: OLD });
+    await maybeHealRotatedSession("c8", CHILD, h.deps);
+    expect(h.manager).toEqual([]);
+    expect(h.mtimeCalls).toEqual([]);
+  });
+
+  test("窗口登记是第三个 sid（这次 Stop 来自子进程，窗口也换了会话）→ 不动，留给主会话下一次 Stop", async () => {
+    const h = harness({ channelId: "c9", mtimes: { [OLD]: now - 600_000, [NEW]: now - 1_000, [CHILD]: now - 500 }, windowSid: NEW });
+    await maybeHealRotatedSession("c9", CHILD, h.deps);
+    expect(h.manager).toEqual([]);
+  });
+
+  test("查不到窗口登记（tmux 不可达 / 登记还没更新）→ 落回 mtime 兜底", async () => {
+    const h = harness({ channelId: "c10", mtimes: { [OLD]: now - 600_000, [NEW]: now - 1_000 }, windowSid: null });
+    await maybeHealRotatedSession("c10", NEW, h.deps);
+    expect(h.manager).toEqual([["set-session", "agent-c10", NEW, "--expected", OLD]]);
   });
 
   test("新旧两版 hook 并发打到（一个不带 sid、一个带）：带 sid 的不被 mtime 那次的去重挡掉", async () => {
@@ -86,7 +105,7 @@ describe("Stop hook 带 session_id 的确定性判定", () => {
     const read = h.deps.readAgents!;
     h.deps.readAgents = async () => (await Bun.sleep(30), read());
     await Promise.all([maybeHealRotatedSession("c7", undefined, h.deps), maybeHealRotatedSession("c7", NEW, h.deps)]);
-    expect(h.manager).toEqual([["set-session", "agent-c7", NEW]]);
+    expect(h.manager).toEqual([["set-session", "agent-c7", NEW, "--expected", OLD]]);
   });
 
   test("非法形状的 sid 当作没带", async () => {
@@ -107,13 +126,19 @@ describe("老 hook 不带 session_id → 原 mtime 兜底", () => {
   test("旧文件陈旧、新文件本回合在写 → 认领", async () => {
     const h = harness({ channelId: "m1", mtimes: { [OLD]: now - 600_000, [NEW]: now - 1_000 } });
     await maybeHealRotatedSession("m1", undefined, h.deps);
-    expect(h.manager).toEqual([["set-session", "agent-m1", NEW]]);
+    expect(h.manager).toEqual([["set-session", "agent-m1", NEW, "--expected", OLD]]);
     expect(events.map((e) => e.data)).toEqual([{ from: OLD, to: NEW }]);
   });
 
   test("旧文件 3 分钟内写过 → 不动（CLR1 修前就是卡在这里）", async () => {
     const h = harness({ channelId: "m2", mtimes: { [OLD]: now - 60_000, [NEW]: now - 1_000 } });
     await maybeHealRotatedSession("m2", undefined, h.deps);
+    expect(h.manager).toEqual([]);
+  });
+
+  test("主文件陈旧、最新文件是嵌套 claude -p 的子会话：窗口登记仍是旧会话 → 不认领（老 hook 也一样，审查 r2 P1-1）", async () => {
+    const h = harness({ channelId: "m4", mtimes: { [OLD]: now - 600_000, [CHILD]: now - 1_000 }, windowSid: OLD });
+    await maybeHealRotatedSession("m4", undefined, h.deps);
     expect(h.manager).toEqual([]);
   });
 
@@ -134,6 +159,20 @@ describe("claimRotatedSession", () => {
     );
     expect(r.ok).toBe(true);
     expect(rewatched).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  test("带 --expected from：并发的另一条路已把 registry 换走 → set-session 拒绝，不重挂、不发事件（审查 r2 P2-1）", async () => {
+    const calls: string[][] = [];
+    const r = await claimRotatedSession(
+      {
+        runManager: async (...args) => (calls.push(args), { ok: false, error: `会话已变化：预期 ${OLD}，当前 ${CHILD}` }),
+        rewatch: () => { throw new Error("不该重挂"); },
+      },
+      { name: "agent-z", cwd: "/w", channelId: "z", runtime: undefined }, OLD, NEW,
+    );
+    expect(calls).toEqual([["set-session", "agent-z", NEW, "--expected", OLD]]);
+    expect(r.ok).toBe(false);
     expect(events).toEqual([]);
   });
 

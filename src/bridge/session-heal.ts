@@ -58,24 +58,30 @@ export async function maybeHealRotatedSession(channelId: string, rawHookSid: str
     if (!me?.cwd || !me.sessionId) return;
     const cwd = me.cwd.replace(/^~/, process.env.HOME || "~");
     const at = { name: me.name, cwd, channelId, runtime: me.runtime };
-    // 确定性判定：Stop hook 带着本回合所在的 session_id（CC hook 契约）。等于 registry = 没轮转，不再按 mtime 猜；
-    // 不等 = 窗口里换了会话（/clear 从哪进来都一样）。但 agent 在 Bash 里跑的 claude -p 等子进程继承同一个
-    // DISCORD_CHANNEL_ID，它们的 Stop 也带着自己的 sid 打进来——只信 hook 会把 registry 劫持到子会话上，所以再按
-    // tmux 窗口问 CC 自己的登记确认一次；确认不了（非 CC / 登记还没更新 / tmux 不可达）落回下面的老判定
-    // （tests/session-heal.test.ts）。
-    if (hookSid && hookSid === me.sessionId) return;
-    if (hookSid && (me.runtime ?? "claude-code") === "claude-code" && !agents.some((a) => a.name !== me.name && a.sessionId === hookSid)) {
-      const live = await (deps.windowSession ?? ccWindowSession)(me.name, cwd).catch(() => null); // 查不到 = 确认不了，落回下面的老判定
-      if (live === hookSid) {
-        const r = await claimRotatedSession(deps, at, me.sessionId, hookSid);
-        if (r.ok) {
-          recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: hookSid, reason: "stop_hook_sid" } });
-          console.log(`🩹 session 轮转自愈(Stop hook) agent=${me.name} ${me.sessionId.slice(0, 8)}->${hookSid.slice(0, 8)}`);
-        } else {
-          console.error(`🩹 session 轮转自愈(Stop hook) set-session 失败 agent=${me.name}:`, r.error);
-        }
-        return;
-      }
+    const from = me.sessionId;
+    const ownedByOther = (sid: string) => agents.some((a) => a.name !== me.name && a.sessionId === sid);
+    const claim = async (to: string, reason: string, label: string) => {
+      const r = await claimRotatedSession(deps, at, from, to);
+      if (!r.ok) return void console.error(`🩹 session 轮转自愈(${label}) set-session 失败 agent=${me.name}:`, r.error);
+      recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from, to, reason } });
+      console.log(`🩹 session 轮转自愈(${label}) agent=${me.name} ${from.slice(0, 8)}->${to.slice(0, 8)}`);
+    };
+    // 这个窗口顶层 CC 进程当前的会话（CC 自己的 ~/.claude/sessions 登记，嵌套 claude -p 已按进程祖先剔除）。
+    // 非 CC 运行时 / 查不到 = null（确认不了）。一次 Stop 最多查一次
+    let liveP: Promise<string | null> | undefined;
+    const isCc = (me.runtime ?? "claude-code") === "claude-code";
+    const lookup = deps.windowSession ?? ccWindowSession;
+    const windowLive = () => (liveP ??= isCc ? lookup(me.name, cwd).catch(() => null) : Promise.resolve(null)); // 查不到 = 确认不了，按下面的老判定走
+    // 确定性判定：Stop hook 带着本回合所在的 session_id（CC hook 契约）。等于 registry = 没轮转，不再按 mtime 猜。
+    // 不等的话，agent 在 Bash 里跑的 claude -p 等子进程继承同一个 DISCORD_CHANNEL_ID，它们的 Stop 也带着自己的 sid
+    // 打进来，所以以窗口登记为准：登记 = hook 的 sid 才认领；登记 = registry 说明这次 Stop 来自子进程；登记是第三个
+    // sid 就留给主会话下一次 Stop。查得到登记就不再落回 mtime（子进程跑久了主文件会陈旧，mtime 会挑中子会话）。
+    // 查不到登记才落回下面的老判定（tests/session-heal.test.ts）
+    if (hookSid === from) return;
+    const live = hookSid ? await windowLive() : null;
+    if (live) {
+      if (live === hookSid && !ownedByOther(hookSid)) await claim(hookSid, "stop_hook_sid", "Stop hook");
+      return;
     }
     // v2.23.2+ fork 源 id 共用:registry 记的 session 同时是另一个活 agent 的(resume --fork
     // 探测失败时暂记的源 id)。源文件一直"新鲜"(是别人在写),下面的快路径永远放行,两个频道
@@ -85,15 +91,7 @@ export async function maybeHealRotatedSession(channelId: string, rawHookSid: str
     const discover = managedFor(me.runtime)?.discoverSessionId;
     if (sharedWith && discover) {
       const viaCc = await discover({ windowName: me.name, cwd, exclude: me.sessionId, timeoutMs: 1_500 }).catch(() => null);
-      if (viaCc && !agents.some((a) => a.name !== me.name && a.sessionId === viaCc.sessionId)) {
-        const r = await claimRotatedSession(deps, at, me.sessionId, viaCc.sessionId);
-        if (r.ok) {
-          recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: viaCc.sessionId, reason: "shared_fork_source" } });
-          console.log(`🩹 session 自愈(fork 源 id 共用) agent=${me.name} ${me.sessionId.slice(0, 8)}->${viaCc.sessionId.slice(0, 8)}（与 ${sharedWith.name} 共用源 id，按 CC sessions 登记纠正）`);
-        } else {
-          console.error(`🩹 session 自愈(fork 源 id 共用) set-session 失败 agent=${me.name}:`, r.error);
-        }
-      }
+      if (viaCc && !ownedByOther(viaCc.sessionId)) await claim(viaCc.sessionId, "shared_fork_source", `fork 源 id 与 ${sharedWith.name} 共用`);
       return;
     }
     // 快路径（绝大多数回合）：registry session 本回合有写入 → 一切正常
@@ -110,14 +108,11 @@ export async function maybeHealRotatedSession(channelId: string, rawHookSid: str
       newestMtime = mtimeOf(newestPath);
     } catch { return; }
     if (Date.now() - newestMtime > ROTATION_FRESH_MS) return; // 没有本回合在写的新文件
-    if (agents.some((a) => a.name !== me.name && a.sessionId === newest)) return; // ownedByOther
-    const r = await claimRotatedSession(deps, at, me.sessionId, newest);
-    if (r.ok) {
-      recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: newest } });
-      console.log(`🩹 session 轮转自愈 agent=${me.name} ${me.sessionId.slice(0, 8)}->${newest.slice(0, 8)}（原生 /clear 类轮转，registry 未跟上）`);
-    } else {
-      console.error(`🩹 session 轮转自愈 set-session 失败 agent=${me.name}:`, r.error);
-    }
+    if (ownedByOther(newest)) return;
+    // 窗口登记指着别的会话：newest 是嵌套 claude -p 之类的子会话（主回合在等它，主文件因此陈旧），不是轮转
+    const liveNow = await windowLive();
+    if (liveNow && liveNow !== newest) return;
+    await claim(newest, "mtime", "mtime");
   } catch { /* 自愈失败不影响 Stop 主流程 */ } finally {
     rotationHealInflight.delete(inflightKey);
   }
