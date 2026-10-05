@@ -31,7 +31,6 @@ export interface StreamSink {
   setReplyText(text: string, components?: WebComponentRow[], attachments?: { name: string; kind: "image" | "file"; url: string }[], askId?: string): void;
   setStatus(status: "running" | "done" | "compacting"): void;
   /** Chat Guard 拦下 / 丢弃了一条入站消息（原文 text）：若正是本端在等的那条，解掉「思考中」。 */
-  guardSettled(text?: string): void;
   /** v2.20.2+「✍️ 正在回复…」——watcher 见到 reply 工具调用。 */
   setReplying(): void;
   endTurn(interrupted?: boolean, bgPending?: boolean, preempted?: boolean): void;
@@ -62,8 +61,7 @@ export interface StreamSink {
 export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
   switch (evt.t) {
     case "guard":
-      applyGuardEvent(evt); // 待放行卡有自己的小 store，不进 chat-store
-      if (evt.action !== "released") sink.guardSettled(evt.fullText); // 放行 = 消息这才进 agent，回合由 status 事件正常开
+      applyGuardEvent(evt); // 待放行卡有自己的小 store，不进 chat-store；本端被拦的那条由发送接口的 guarded 解锁（chat-store send）
       break;
     case "tool":
       sink.addToolCall(evt.name, evt.summary, evt.state, evt.detail, evt.id, { seq: evt.seq, sid: evt.sid });

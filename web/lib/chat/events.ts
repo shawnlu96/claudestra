@@ -80,7 +80,7 @@ export type WebStreamEvent =
   /** Chat Guard（bridge/chat-guard.ts）：一条入站消息被隔离 / 放行 / 丢弃——features/chat/guard-store.ts 维护待放行卡 */
   | {
       t: "guard"; action: "quarantined" | "released" | "dropped"; id: string; agent: string;
-      from?: string; trust?: string; text?: string; fullText?: string; probe?: string; score?: number; at?: string;
+      from?: string; trust?: string; text?: string; probe?: string; score?: number; at?: string;
     }
   /** reply() 的最终回复（挂到当前 assistant 气泡的 replyText，与叙述分区渲染）。
    *  components：reply 附带的按钮/选单（点击回投 [button:<id>] / [select:<id>:<value>]）。

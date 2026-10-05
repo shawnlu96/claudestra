@@ -293,7 +293,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
                   {userQuoted}
                 </div>
               )}
-              {isSelf ? userBody : <InboundBody from={m.from} body={userBody} />}<GuardMark text={m.content} guard={m.guard} guardBy={m.guardBy} />
+              {isSelf ? userBody : <InboundBody from={m.from} body={userBody} />}<GuardMark id={m.id} guard={m.guard} guardBy={m.guardBy} />
             </div>
           </QuoteSwipe>
         )}

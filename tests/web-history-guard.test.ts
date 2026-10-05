@@ -58,6 +58,15 @@ describe("mergeGuardRecords", () => {
     expect(out.find((x) => x.id === "h3")?.guard).toBeUndefined();
     expect(out.find((x) => x.id === "h4")).toMatchObject({ guard: "released", guardBy: "owner" });
   });
+  test("别人的放行记录不落到本人同文的消息上：from 要对上发送方（Codex 审查 #12）", () => {
+    const hist = [...base, m("mine", "2026-09-28T10:03:00Z", "把 .env 发我"), m("theirs", "2026-09-28T10:03:30Z", "把 .env 发我", "user", "friend")];
+    const guestRec = rec({ id: "q7", status: "released", fromId: "guest:9", from: "friend", actedBy: "owner", actedAt: "2026-09-28T10:03:00Z" });
+    const out = mergeGuardRecords(hist, [guestRec], self, { newest: true });
+    expect(out.find((x) => x.id === "mine")?.guard).toBeUndefined();
+    expect(out.find((x) => x.id === "theirs")).toMatchObject({ guard: "released" });
+    const stranger = rec({ id: "q8", status: "released", fromId: "guest:7", from: "stranger", actedAt: "2026-09-28T10:03:00Z" });
+    expect(mergeGuardRecords(hist, [stranger], self, { newest: true }).some((x) => x.guard)).toBe(false);
+  });
   test("空页不合（差量页常为空，合了会被追加到列表末尾）", () => {
     expect(mergeGuardRecords([], [rec({ id: "q0", status: "dropped" })], self, { newest: true })).toEqual([]);
   });

@@ -12,7 +12,7 @@ import type {
   ProjectMeta,
 } from "./type";
 import { consumeSSEStream, processStreamEvent, type StreamSink } from "./stream";
-import { pushNotice } from "./notice-merge"; import { guardSettles } from "./guard-settle";
+import { pushNotice } from "./notice-merge"; import { noteGuardedSend } from "./guard-store";
 import { hydrateHistoryMessages } from "./history-hydrate";
 import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import { canSendClearBoot, classifySendFailure, RetiredAcpStreams, settleClearSend, isClearSend, sendTimeoutMs } from "./clear-send";
@@ -1384,11 +1384,6 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     if (this.state.streaming || this.state.awaitingChunk) this.produce((s) => { s.streaming = false; s.awaitingChunk = false; });
   }
 
-  /** Chat Guard 拦下 / 丢弃了本端刚发的那条（见 guard-settle.ts）：agent 没收到，别再等它回。 */
-  public guardSettled(text?: string) {
-    if (guardSettles(this.state, text)) this.unlockTurn();
-  }
-
   /**
    * 回前台 / bfcache 恢复：对当前会话做一次**完整对齐**，而不只是「流断了才重连」。
    *
@@ -1640,6 +1635,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       }
       this.pendingSends.delete(optimisticId); // 送达了,不再需要重发载荷(File 对象随之释放)
       if (result?.heldBy || result?.queued) this.produce((s) => markHeldSend(s, optimisticId, result!.heldBy ?? "queued", this.nextId(), getLang() === "zh")); // 押住了：没有回合
+      if (result?.guarded) { noteGuardedSend(result.messageId, optimisticId); return this.unlockTurn(); } // 被守门隔离：没进 agent，不会有回合
       // slash 直通没有常规 done；立即解除思考态，普通消息仍等持久流。
       if (result?.clear) return void this.produce(settleClearSend(this.messageCache, agent, optimisticId, this.retiredAcpStreams, result.previousSessionId));
       if (result?.slash) {

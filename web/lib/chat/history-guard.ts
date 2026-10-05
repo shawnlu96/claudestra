@@ -37,7 +37,9 @@ export function mergeGuardRecords(messages: ChatMessage[], records: GuardItem[],
       let idx = -1;
       let best = RELEASE_WINDOW_MS + 1;
       out.forEach((m, i) => {
-        if (m.role !== "user" || m.guard || taken.has(m.id) || m.content !== r.text || (isSelf && m.from)) return;
+        // 同一发送方：本人发的不带 from；别人发的 from 要对上记录里的发送方（否则 owner 同文的一条会被标成「放行过」）
+        const sameSender = isSelf ? !m.from : m.from === r.from;
+        if (m.role !== "user" || m.guard || taken.has(m.id) || m.content !== r.text || !sameSender) return;
         const d = Math.abs(Date.parse(m.ts ?? "") - acted);
         if (d <= RELEASE_WINDOW_MS && d < best) { best = d; idx = i; }
       });

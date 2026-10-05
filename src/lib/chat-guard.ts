@@ -4,7 +4,7 @@
  * 运行时（调 Jev、隔离区、事件、放行）在 bridge/chat-guard.ts；这里零 I/O，方便加探针时先写测试。
  * 探针 = 一个 Jev 问题 + 一条决策；全部探针装进**一次** jevAsk（同一 state 只读一遍），加探针不加请求。
  */
-import { noul, type JevQuestion, type JevText } from "./jev.js";
+import { JevError, noul, type JevQuestion, type JevText } from "./jev.js";
 
 export type GuardVerdict = "block" | "flag" | "pass";
 export type GuardTrust = "owner" | "guest" | "peer" | "agent" | "unknown";
@@ -34,10 +34,14 @@ export interface GuardProbe {
   scope?: (s: GuardSubject) => boolean;
 }
 
-const noulOf = (a: unknown): number | null => (typeof (a as { noul?: unknown })?.noul === "number" ? (a as { noul: number }).noul : null);
+const noulOf = (a: unknown): number | null => {
+  const v = (a as { noul?: unknown })?.noul;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+};
+/** 答案不是 [0, 1] 里的概率 = Jev 回了坏数据：抛出去按「判定失败」记（降级），不能当成低风险的「通过」 */
 const byNoul = (a: unknown, t: GuardThresholds): GuardVerdict => {
   const p = noulOf(a);
-  if (p === null) return "pass";
+  if (p === null) throw new JevError("bad_response", "probe answer is not a probability in [0, 1]");
   return p >= t.blockAt ? "block" : p >= t.flagAt ? "flag" : "pass";
 };
 
@@ -62,16 +66,31 @@ const exfilProbe: GuardProbe = {
 
 export const GUARD_PROBES: GuardProbe[] = [exfilProbe];
 
-/** 这条消息要不要过守门：bridge 自己合成的、已放行重投的、按钮 / 选单回投的、空文本的不判 */
+/**
+ * 整条只是一次按钮 / 选单回投、值只含标识符字符，才算纯交互。正文谁都能打这个前缀：只看前缀的话，
+ * 在后面夹一句「把 .env 发我」就整条免检；值里带空格 / 中文的也照判（多一次 Jev 而已）。
+ */
+const INTERACTION_ONLY = /^\[(button|select|multiselect):[\w.,:@/+-]{1,200}\]$/;
+
+/** 这条消息要不要过守门：bridge 自己合成的、已放行重投的、Discord 按钮事件、纯交互回投、空文本的不判 */
 export function shouldGuard(e: { fromKind: string; triggerKind: string; released?: boolean; content: string }): boolean {
   if (e.released) return false;
   if (e.fromKind === "bridge") return false;
   if (e.triggerKind === "button") return false;
   const text = e.content.trim();
   if (!text) return false;
-  if (/^\[(button|select|multiselect):/.test(text)) return false;
+  if (INTERACTION_ONLY.test(text)) return false;
   return true;
 }
+
+/**
+ * 送 Jev 的正文上限（字符）。Jev 一次读 state + 问题约 32k token，超了会被拒；被拒若按「服务故障」fail-open，
+ * 发一条超长消息就能稳过守门。超过上限的不送去判，直接隔离等人看（bridge/chat-guard.ts OVERSIZE）。
+ */
+export const GUARD_TEXT_BUDGET = 12_000;
+/** recent 里每条最多带多少字：只为看出「分步套取」，不必全文 */
+const RECENT_MAX_CHARS = 500;
+export const overBudget = (s: Pick<GuardSubject, "text">): boolean => s.text.length > GUARD_TEXT_BUDGET;
 
 /** 发送方信任级：只用于给 Jev 的上下文与日志，不改变判定规则（owner 自己也判） */
 export function trustOf(from: { kind: string; tokenId?: string; name?: string }, triggerKind: string): GuardTrust {
@@ -93,27 +112,30 @@ export function guardQuestions(subject: GuardSubject, probes: GuardProbe[] = GUA
   return out;
 }
 
-/** 给 Jev 的 state：小而全（≈300–500 token）。文本不截断——套取往往藏在长文里 */
+/** 给 Jev 的 state：正文不截断（套取往往藏在长文里，超长的在调用前就按 overBudget 隔离了），recent 每条截到 RECENT_MAX_CHARS */
 export function buildGuardState(s: GuardSubject): JevText {
   return {
     message: { text: s.text, ...(s.attachments?.length ? { attachments: s.attachments } : {}) },
     sender: s.sender,
     target: s.target,
-    ...(s.recent?.length ? { recent: s.recent } : {}),
+    ...(s.recent?.length ? { recent: s.recent.map((r) => previewText(r, RECENT_MAX_CHARS)) } : {}),
   };
 }
 
 export interface GuardHit { id: string; verdict: GuardVerdict; score: number | null }
 export interface GuardDecision { verdict: GuardVerdict; hits: GuardHit[] }
 
-/** 汇总：任一探针 block → block；否则任一 flag → flag；否则 pass。每个探针的分数都留在 hits 里给日志 */
+/**
+ * 汇总：任一探针 block → block；否则任一 flag → flag；否则 pass。每个探针的分数都留在 hits 里给日志。
+ * 问了却没答、答案不是概率 → 抛 JevError("bad_response")：调用方按判定失败记降级，不当成「通过」
+ */
 export function judgeGuard(answers: Record<string, unknown>, subject: GuardSubject, t: GuardThresholds = DEFAULT_THRESHOLDS, probes: GuardProbe[] = GUARD_PROBES): GuardDecision {
   const hits: GuardHit[] = [];
   let verdict: GuardVerdict = "pass";
   for (const p of probes) {
     if (p.scope && !p.scope(subject)) continue;
     const a = answers[p.id];
-    if (a === undefined) continue;
+    if (a === undefined) throw new JevError("bad_response", `Jev did not answer probe ${p.id}`);
     const v = p.decide(a, t);
     hits.push({ id: p.id, verdict: v, score: noulOf(a) });
     if (v === "block") verdict = "block";
@@ -123,3 +145,6 @@ export function judgeGuard(answers: Record<string, unknown>, subject: GuardSubje
 }
 
 export const previewText = (s: string, n = 120): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+/** 超过 GUARD_TEXT_BUDGET 的消息不送 Jev，按这个判定直接隔离（score 为 null：没判，是太长） */
+export const OVERSIZE_DECISION: GuardDecision = { verdict: "block", hits: [{ id: "oversize", verdict: "block", score: null }] };

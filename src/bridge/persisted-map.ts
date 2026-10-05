@@ -56,6 +56,13 @@ export class PersistedMap<V> extends Map<string, V> {
     super.delete(key);
   }
 
+  /** 一批写入 / 删除只落一次盘（逐条 set 会整表重写 N 次） */
+  update(sets: Iterable<[string, V]>, deletes: Iterable<string> = []): void {
+    for (const [k, v] of sets) super.set(k, v);
+    for (const k of deletes) super.delete(k);
+    this.persist();
+  }
+
   persist(): void {
     if (!this.path) return;
     const strip = (k: string, v: unknown) => (this.stripKeys.includes(k) ? undefined : v);

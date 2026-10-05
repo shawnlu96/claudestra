@@ -14,6 +14,7 @@ function Row({ item }: { item: GuardItem }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const top = item.hits.find((h) => h.verdict === "block") ?? item.hits[0];
+  const oversize = top?.id === "oversize";
   const act = async (fn: () => Promise<void>) => {
     setBusy(true);
     setErr("");
@@ -35,18 +36,20 @@ function Row({ item }: { item: GuardItem }) {
         </span>
         {top && (
           <span className="font-mono text-[11px] text-base-content/50">
-            {top.id} {typeof top.score === "number" ? top.score.toFixed(2) : ""}
+            {oversize ? t("过长，未送 Jev 判定") : `${top.id} ${typeof top.score === "number" ? top.score.toFixed(2) : ""}`}
           </span>
         )}
         <span className="font-mono text-[11px] text-base-content/40">{fmtTs(item.at)}</span>
       </div>
-      <div className="mt-1 whitespace-pre-wrap break-words text-base-content/85">{item.text}</div>
+      {/* 全文、可滚动：放行的是整条消息，必须看得到整条（Codex 审查 #11） */}
+      <div className="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap break-words text-base-content/85">{item.text}</div>
+      {item.partial && <div className="mt-1 text-[11px] text-base-content/50">{t("正在取全文，取到之前不能放行…")}</div>}
       <div className="mt-2 flex items-center justify-end gap-2">
         {err && <span className="mr-auto text-[12px] text-error">{err}</span>}
         <button className="btn btn-ghost btn-xs" disabled={busy} onClick={() => void act(() => dropGuard(item.id))}>
           {t("丢弃")}
         </button>
-        <button className="btn btn-warning btn-xs" disabled={busy} onClick={() => void act(() => releaseGuard(item.id))}>
+        <button className="btn btn-warning btn-xs" disabled={busy || item.partial} onClick={() => void act(() => releaseGuard(item.id))}>
           {t("放行")}
         </button>
       </div>

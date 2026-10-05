@@ -15,9 +15,11 @@ export interface GuardItem {
   fromId?: string;
   /** 消息原时间（env.meta.ts） */
   ts?: string;
-  status?: "pending" | "released" | "dropped";
+  status?: "pending" | "releasing" | "released" | "dropped";
   actedBy?: string | null;
   actedAt?: string | null;
+  /** 只有流里事件的预览、还没取到全文：卡片不许放行（web/features/chat/guard-store.ts） */
+  partial?: boolean;
 }
 /** all=false 只回 pending（待放行卡）；all=true 连 released / dropped 也回（历史视图里的守门记录） */
 export function listGuard(agent?: string, all = false): Promise<GuardItem[]> {

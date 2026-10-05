@@ -1,17 +1,15 @@
 "use client";
 import { useT } from "@/lib/i18n";
-import { useChatStore } from "../chat-store";
 import { useGuardMark } from "../guard-store";
 
 /**
  * 用户气泡底部的守门标记（owner 2026-09-28）。两个来源：
- * - 本页实时：guard 事件带原文，乐观气泡逐字对上 → 拦下等放行 / 已丢弃（guard-store marks）；
+ * - 本页实时：发送接口回 guarded 时按气泡 id 记下，之后的 guard 事件按 messageId 认回这个气泡 → 拦下等放行 / 已丢弃（guard-store marks）；
  * - 持久记录：历史加载时 lib/chat/history-guard.ts 把隔离区的 dropped 合成气泡、给放行过的消息打 guard="released"。
  */
-export function GuardMark({ text, guard, guardBy }: { text: string; guard?: "dropped" | "released"; guardBy?: string }) {
+export function GuardMark({ id, guard, guardBy }: { id: string; guard?: "dropped" | "released"; guardBy?: string }) {
   const t = useT();
-  const agent = useChatStore((s) => s.state.activeAgent);
-  const live = useGuardMark(agent ?? undefined, text);
+  const live = useGuardMark(id);
   const state = live ?? guard ?? null;
   if (!state) return null;
   const by = guardBy ? ` · ${guardBy}` : "";

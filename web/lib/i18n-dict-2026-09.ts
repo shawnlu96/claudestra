@@ -43,6 +43,8 @@ export const DICT_2026_09: Record<string, string> = {
   "来自": "from",
   "放行": "Release",
   "丢弃": "Discard",
+  "过长，未送 Jev 判定": "Too long — not sent to Jev",
+  "正在取全文，取到之前不能放行…": "Loading the full text — release is disabled until it arrives…",
   "入站守门（Chat Guard）": "Inbound guard (Chat Guard)",
   "消息进入 agent 前先用 Jev 判定是否在套取敏感信息或要求破坏性操作；命中即隔离，需你放行。未配 Jev 时不生效。":
     "Jev screens messages for secret extraction or destructive requests before they reach an agent; hits wait for your release. Needs a Jev key.",

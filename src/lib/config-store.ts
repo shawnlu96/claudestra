@@ -208,9 +208,10 @@ export function readConfigSync(): AppConfig {
 /**
  * 原子写（tmp + rename，lib/state-file）。磁盘上的 config.json 已损坏时拒写并备份
  * `<file>.corrupt-<ts>`：set* 是读改写，读到的是安全默认，照写就会把其余设置一并抹掉。
+ * 0600：里面有 API key（Groq / Jev），不给本机其他用户读；rename 覆盖后旧文件的 0644 也随之收紧。
  */
 export async function writeConfig(cfg: AppConfig): Promise<void> {
-  await writeJsonStateGuarded(CONFIG_PATH, cfg);
+  await writeJsonStateGuarded(CONFIG_PATH, cfg, { mode: 0o600 });
 }
 
 /** 设置归档保留天数（0 = 永不自动清理） */

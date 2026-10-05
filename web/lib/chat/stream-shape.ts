@@ -165,7 +165,7 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
       const str = (v: unknown) => (typeof v === "string" ? v : undefined);
       return {
         t: "guard", action, id: String(d.id ?? ""), agent: String(d.agent ?? evt.agent).replace(/^agent-/, ""),
-        from: str(d.from), trust: str(d.trust), text: str(d.text), fullText: str(d.fullText), probe: str(d.probe),
+        from: str(d.from), trust: str(d.trust), text: str(d.text), probe: str(d.probe),
         score: typeof d.score === "number" ? d.score : undefined, at: str(d.at) ?? evt.ts,
       };
     }
