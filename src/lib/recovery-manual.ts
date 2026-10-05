@@ -2,10 +2,12 @@
  * Stalled manual cards (dispatch-recovery-MANUAL): a workflow-manual card with no event for longer than the owner's manualAfterMs
  * gets one prepared PM / owner action card per state version (task rev, workflow rev, last card event; changed evidence re-sends).
  * Normal waits (open ask, order in flight, deps), explicit holds (PM / owner hold, paused feature) and a frozen queue are never a
- * stall. The only hand-back to auto is the formal `ledger scheduler-auto-resume` entry (scheduler identity, CAS on both revs,
- * verdict and switches re-checked in its transaction), and only with this mechanism `on` and every proof present; PM's
- * workflow-resume and any owner approval stay with them. Policy comes through CFG's port; missing = observe, broken = off, a null
- * threshold only observes. observe never writes. tests/recovery-manual*.test.ts.
+ * stall. This mechanism never hands a card back itself: a merge-revoked card with every proof is handed back by the existing
+ * autoResumeTick (`ledger scheduler-auto-resume`); one still manual past the threshold gets a PM card instead, and PM's
+ * workflow-resume and any owner approval stay with them. The claim re-reads the card and re-decides in its transaction (a freeze /
+ * hold / ask that lands after the read means no card); a send in flight in this process is never re-sent, and the notice key
+ * handed to notify is stable per version + evidence so the delivery side can drop a cross-process repeat. Policy comes through
+ * CFG's port; missing = observe, broken = off, a null threshold only observes. observe never writes. tests/recovery-manual*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -128,7 +130,6 @@ export interface ActionCard {
 export type ManualDecision =
   | { kind: "wait"; why: string }
   | { kind: "fresh"; why: string }
-  | { kind: "resume" }
   | { kind: "card"; card: ActionCard };
 
 const stateVersion = (f: Pick<ManualFacts, "taskRev" | "workflowRev" | "lastSeq">): string => `t${f.taskRev}:w${f.workflowRev}:e${f.lastSeq}`;
@@ -136,7 +137,7 @@ const stateVersion = (f: Pick<ManualFacts, "taskRev" | "workflowRev" | "lastSeq"
 const resumeCmd = (f: ManualFacts) => `ledger workflow-resume ${f.taskId} --rev ${f.taskRev} --workflow-rev ${f.workflowRev} --reason <核对结论>`;
 
 /** The concrete next step for a stalled card; never an approval, never a choice the addressee has not made. */
-function nextStep(f: ManualFacts, rejected: string | null): Pick<ActionCard, "audience" | "step" | "command"> {
+function nextStep(f: ManualFacts): Pick<ActionCard, "audience" | "step" | "command"> {
   if (f.unknownIntents.length) {
     return { audience: "pm", step: `先对账结果不明的意图 ${f.unknownIntents.join("、")}（核外部结果后 scheduler-settle），对完再推进本卡`, command: `ledger scheduler-settle ${f.unknownIntents[0]} …` };
   }
@@ -144,10 +145,12 @@ function nextStep(f: ManualFacts, rejected: string | null): Pick<ActionCard, "au
     return { audience: "owner", step: "看拒绝留证与材料，决定换审 / 豁免（豁免须 owner 自己批准）/ 放弃；处置后解除留证。系统不重试、不代批", command: null };
   }
   if (f.cls === "merge_revoked") {
-    if (rejected) return { audience: "pm", step: `自动交回被台账拒绝：${rejected}；对完账后由 PM 手动交回`, command: resumeCmd(f) };
-    if (f.resume.ok && f.block) return { audience: "pm", step: `交回证明齐全，但开关不允许自动交回（${f.block}）；由 PM 核对后手动交回，或 owner 决定开开关`, command: resumeCmd(f) };
+    if (f.resume.ok && !f.block) {
+      return { audience: "pm", step: "交回证明齐全、开关允许，过了阈值仍是 manual：既有自动交回（scheduler-auto-resume）没有交回成功（多半被台账拒绝，见当时给 PM 的自动交回通知）；PM 对完账后手动交回", command: resumeCmd(f) };
+    }
+    if (f.resume.ok) return { audience: "pm", step: `交回证明齐全，但开关不允许自动交回（${f.block}）；由 PM 核对后手动交回，或 owner 决定开开关`, command: resumeCmd(f) };
     const who = f.agent ?? "执行者";
-    return { audience: "pm", step: f.resume.ok ? "交回证明齐全，等调度服务自动交回" : `交回条件未满足（${f.resume.why}）：催 ${who} 在 ${f.stage} 交付新 head，或 PM 改派 / 取消本卡`, command: null };
+    return { audience: "pm", step: `交回条件未满足（${f.resume.why}）：催 ${who} 在 ${f.stage} 交付新 head，或 PM 改派 / 取消本卡`, command: null };
   }
   if (f.cls === "pm_takeover") {
     return { audience: "pm", step: `PM 接管后卡停在 ${f.stage}：推进本阶段（执行者 ${f.agent ?? "未指定"}），或核对接管原因已消除后交回自动`, command: resumeCmd(f) };
@@ -156,22 +159,17 @@ function nextStep(f: ManualFacts, rejected: string | null): Pick<ActionCard, "au
   return { audience: "pm", step: "找不到可信的转人工来历，系统不自动交回；PM 核对卡的来历后决定推进、交回或取消", command: null };
 }
 
-/**
- * Pure: is this card stalled under the policy, and what card / action follows. A null threshold or a waiting class is never a
- * stall; an automatic hand-back needs mode on, a merge-revoked card whose verdict holds, and switches that allow it.
- */
-export function decideManual(f: ManualFacts, policy: RecoveryPolicy, now: number, rejected: string | null = null): ManualDecision {
+/** Pure: is this card stalled under the policy, and what card follows. A null threshold or a waiting class is never a stall. */
+export function decideManual(f: ManualFacts, policy: RecoveryPolicy, now: number): ManualDecision {
   if (isWaiting(f.cls)) return { kind: "wait", why: `${CLASS_WORD[f.cls]}：${f.why}` };
   if (policy.manualAfterMs === null) return { kind: "fresh", why: "owner 未设 manualAfterMs 阈值，只观察、不判停滞" };
   const idleMs = Math.max(0, now - f.lastTs);
   if (idleMs < policy.manualAfterMs) return { kind: "fresh", why: `${idleMs}ms 无新事件，未到阈值 ${policy.manualAfterMs}ms` };
-  if (!rejected && f.cls === "merge_revoked" && f.resume.ok && !f.block && !f.unknownIntents.length) return { kind: "resume" };
-  const n = nextStep(f, rejected);
+  const n = nextStep(f);
   const evidence = [`${CLASS_WORD[f.cls]}：${f.why}`, f.origin ? `转人工事件 #${f.origin.seq}（${f.origin.op}）：${f.origin.reason}` : "无转人工事件",
     `最近事件 #${f.lastSeq}${f.lastActor ? `（${f.lastActor}）` : ""}，${Math.floor(idleMs / 60_000)} 分钟无新事件`,
     f.resume.ok ? `交回证明：合并撤销 #${f.resume.facts.trigger}，新交付 #${f.resume.facts.deliver}` : `交回判定：${f.resume.why}`,
-    ...(f.block ? [`开关：${f.block}`] : []), ...(f.unknownIntents.length ? [`结果不明意图：${f.unknownIntents.join("、")}`] : []),
-    ...(rejected ? [`自动交回被拒：${rejected}`] : [])];
+    ...(f.block ? [`开关：${f.block}`] : []), ...(f.unknownIntents.length ? [`结果不明意图：${f.unknownIntents.join("、")}`] : [])];
   const version = stateVersion(f);
   const fingerprint = createHash("sha256").update(JSON.stringify([f.taskId, version, f.cls, n.audience, n.step, evidence.filter((e) => !/分钟无新事件/.test(e))]))
     .digest("hex").slice(0, 16);
@@ -196,15 +194,14 @@ export interface ManualStallDeps {
   now: number;
   svc: ServiceFacts;
   policy?: ManualStallPolicyPort;
-  /** the scheduler identity's ledger CLI (lease-guarded), as autoResumeTick uses it */
-  ledger(...args: string[]): Promise<Record<string, unknown>>;
-  notify(project: string, audience: "pm" | "owner", text: string): Promise<void>;
+  /** noticeKey is the same for every attempt at one version + evidence: the delivery side drops a key it has already delivered */
+  notify(project: string, audience: "pm" | "owner", text: string, noticeKey: string): Promise<void>;
 }
 
 export type ManualStallOutcome =
   | { project: string; mode: "off"; diag: string | null }
   | { project: string; taskId: string; mode: "observe" | "on"; diag: string | null; cls: ManualClass;
-    action: "none" | "would_resume" | "would_notify" | "resumed" | "notified" | "deduped" | "retry_wait" | "raced" | "failed"; why: string; card?: ActionCard };
+    action: "none" | "would_notify" | "notified" | "deduped" | "retry_wait" | "raced" | "failed"; why: string; card?: ActionCard };
 
 /** Claims for this card version so far (attempt n ≥ 2 is `key#n`) and when the last one was made. */
 function claims(db: Database, key: string): { n: number; lastTs: number } {
@@ -216,13 +213,18 @@ function claims(db: Database, key: string): { n: number; lastTs: number } {
 type Claim = { ok: true; attempt: number } | { ok: false; action: "deduped" | "retry_wait" | "raced"; why: string };
 
 /**
- * Re-read the card and claim this attempt in one immediate transaction: a card that moved since the read (rev / workflow rev /
- * new event) is raced, a sent version is deduped, and two ticks racing on one version claim it once (the dedup key is UNIQUE).
+ * Re-read the card, re-decide and claim this attempt in one immediate transaction: a card that moved since the read (rev / workflow
+ * rev / new event) or whose decision changed (frozen, held, an ask, an order out — none of which bump the revs) is raced, a sent
+ * version is deduped, and two ticks racing on one version claim it once (the dedup key is UNIQUE).
  */
-function claimNotice(d: ManualStallDeps, f: ManualFacts, card: ActionCard): Claim {
+function claimNotice(d: ManualStallDeps, f: ManualFacts, card: ActionCard, policy: RecoveryPolicy): Claim {
   return busyAsLedgerError("写入", () => d.db.transaction((): Claim => {
     const cur = readManualFacts(d.db, f.taskId, d.svc);
     if (!cur || stateVersion(cur) !== card.version) return { ok: false, action: "raced", why: "卡在读和认领之间被改过，下一轮重读" };
+    const again = decideManual(cur, policy, d.now);
+    if (again.kind !== "card" || again.card.fingerprint !== card.fingerprint) {
+      return { ok: false, action: "raced", why: `读和认领之间判定变了（${again.kind === "card" ? "证据变了" : again.why}），下一轮重读` };
+    }
     const key = manualStallKey(card);
     const sent = getEventByDedup(d.db, `${key}:sent`);
     if (sent) return { ok: false, action: "deduped", why: `同一状态版本与证据已提醒过（#${sent.seq}）` };
@@ -238,45 +240,36 @@ function claimNotice(d: ManualStallDeps, f: ManualFacts, card: ActionCard): Clai
 const cardData = (c: ActionCard) => ({ taskId: c.taskId, cls: c.cls, audience: c.audience, version: c.version, fingerprint: c.fingerprint, step: c.step,
   command: c.command, originSeq: c.origin?.seq ?? null, lastSeq: c.lastSeq });
 
-/** The formal hand-back; raced / not_eligible are quiet (next tick re-reads), rejected becomes evidence on a PM card. */
-async function formalResume(d: ManualStallDeps, f: ManualFacts): Promise<{ done: true } | { done: false; rejected: string | null; why: string }> {
-  const r = await d.ledger("ledger", "scheduler-auto-resume", f.taskId, "--rev", String(f.taskRev), "--workflow-rev", String(f.workflowRev),
-    "--max-workers", String(d.svc.maxWorkers(f.project)));
-  if (r.ok === true) return { done: true };
-  const why = String(r.error ?? r.code);
-  return { done: false, rejected: ["raced", "not_eligible", "busy"].includes(String(r.code)) ? null : why, why };
-}
+/** Notice keys whose send is still out in this process (the scheduler tick runs under one lease holder). */
+const IN_FLIGHT = new Set<string>();
 
 type Live = Extract<ManualStallOutcome, { taskId: string }>;
 
 async function onCard(d: ManualStallDeps, f: ManualFacts, policy: RecoveryPolicy & { diag: string | null }): Promise<Live> {
   const base = { project: f.project, taskId: f.taskId, mode: policy.mode as "observe" | "on", diag: policy.diag, cls: f.cls };
-  let decision = decideManual(f, policy, d.now);
-  if (decision.kind === "wait" || decision.kind === "fresh") return { ...base, action: "none", why: decision.why };
-  if (decision.kind === "resume") {
-    if (policy.mode === "observe") return { ...base, action: "would_resume", why: "证明齐全，on 时经 scheduler-auto-resume 交回" };
-    const r = await formalResume(d, f);
-    if (r.done) return { ...base, action: "resumed", why: "已经 scheduler-auto-resume 交回自动" };
-    if (!r.rejected) return { ...base, action: "raced", why: r.why };
-    decision = decideManual(f, policy, d.now, r.rejected);
-    if (decision.kind !== "card") return { ...base, action: "none", why: "交回被拒后无卡可发" };
-  }
-  const { card } = decision, text = actionCardText(card);
+  const decision = decideManual(f, policy, d.now);
+  if (decision.kind !== "card") return { ...base, action: "none", why: decision.why };
+  const { card } = decision, text = actionCardText(card), key = manualStallKey(card);
   if (policy.mode === "observe") return { ...base, action: "would_notify", why: text, card };
-  const claim = claimNotice(d, f, card);
+  // Checked and set with no await in between: a send still out in this process holds its version past any backoff.
+  if (IN_FLIGHT.has(key)) return { ...base, action: "retry_wait", why: "同一状态版本的上一次发送还没返回，不重发", card };
+  const claim = claimNotice(d, f, card, policy);
   if (!claim.ok) return { ...base, action: claim.action, why: claim.why, card };
+  IN_FLIGHT.add(key);
   try {
-    await d.notify(f.project, card.audience, text);
+    await d.notify(f.project, card.audience, text, key);
   } catch (e) {
     // No sent marker: the claim only spaces the retry (manualStallRetryAfter), it never stands for a delivered card.
     return { ...base, action: "failed", why: e instanceof Error ? e.message : String(e), card };
+  } finally {
+    IN_FLIGHT.delete(key);
   }
-  appendEvent(d.db, { actor: "scheduler", dedupKey: `${manualStallKey(card)}:sent`, now: d.now }, { project: f.project, target: "", kind: "note",
+  appendEvent(d.db, { actor: "scheduler", dedupKey: `${key}:sent`, now: d.now }, { project: f.project, target: "", kind: "note",
     text: `manual 停滞行动卡已送达：${f.taskId}`, data: { recovery: { op: "manualStallSent", ...cardData(card), attempt: claim.attempt } } });
   return { ...base, action: "notified", why: text, card };
 }
 
-/** One pass: off reads nothing; observe classifies and reports without writing; on claims, sends, or hands back formally. */
+/** One pass: off reads nothing; observe classifies and reports without writing; on claims and sends. */
 export async function manualStallTick(d: ManualStallDeps): Promise<ManualStallOutcome[]> {
   const out: ManualStallOutcome[] = [];
   for (const project of d.svc.projects) {

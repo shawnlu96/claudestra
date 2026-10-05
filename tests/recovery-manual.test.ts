@@ -73,14 +73,15 @@ describe("decideManual", () => {
     expect(c.step).toContain("不代批");
   });
 
-  test("merge revoked: every proof + open switches → resume; switch off, unknown intent or rejection → PM card", () => {
+  test("merge revoked: never handed back here; still manual past N with every proof → PM card with the formal resume command", () => {
     const ok = { ok: true as const, facts: { trigger: 30, deliver: 39, head: "b".repeat(40), revoked: "a".repeat(40) } };
     const f = facts({ cls: "merge_revoked", resume: ok });
-    expect(decideManual(f, ON, NOW)).toEqual({ kind: "resume" });
+    const stuck = card(decideManual(f, ON, NOW));
+    expect(stuck).toMatchObject({ audience: "pm", command: expect.stringContaining("ledger workflow-resume t1 --rev 3") });
+    expect(stuck.step).toContain("既有自动交回（scheduler-auto-resume）没有交回成功");
     expect(card(decideManual({ ...f, block: "调度服务没对项目 p 开自动派单" }, ON, NOW)).step).toContain("开关不允许");
     const unknown = card(decideManual({ ...f, unknownIntents: ["i9"] }, ON, NOW));
     expect(unknown.step).toContain("先对账结果不明的意图 i9");
-    expect(card(decideManual(f, ON, NOW, "还有结果未定的调度意图")).step).toContain("自动交回被台账拒绝");
     const waiting = card(decideManual(facts({ cls: "merge_revoked", resume: { ok: false, why: "撤销后还没有交付" } }), ON, NOW));
     expect(waiting.step).toContain("催 agent-x 在 build 交付新 head");
   });

@@ -1,8 +1,8 @@
 /**
  * dispatch-recovery-MANUAL tick on a temp ledger, through the real write paths (setWorkflow takeover / hold, fallbackToManual,
- * deliver) and the real `ledger scheduler-auto-resume` command via in-process runLedger (scheduler identity, CAS on both revs).
- * Covers off / observe / on, waiting vs stalled classes, one card per state version, retry after a failed send, two
- * connections racing on one version, and a card that moves between the read and the claim. notify is a recorder; no bridge.
+ * deliver, setFrozen). Covers off / observe / on, waiting vs stalled classes, one card per state version, retry after a failed
+ * send, a send still in flight past the backoff, two connections racing on one version, and a card that moves or is frozen
+ * between the read and the claim. The module never hands back itself. notify is a recorder; no bridge.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -13,27 +13,36 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, deliver, moveStage, setFrozen, setMeta } from "../src/lib/ledger-write.js";
-import { manualStallRetryAfter, manualStallTick, type ManualStallDeps, type RecoveryPolicy } from "../src/lib/recovery-manual.js";
+import { manualStallRetryAfter, manualStallTick, type ManualStallDeps } from "../src/lib/recovery-manual.js";
 import { MERGE_RETRY_PREFIX } from "../src/lib/scheduler-autostart-resume.js";
 import type { ServiceFacts } from "../src/lib/scheduler-autostart.js";
 import { fallbackToManual } from "../src/lib/scheduler-fallback.js";
-import { runLedger } from "../src/manager/ledger.js";
 
 const P = "proj-m", T = "m-1", PM = "agent-pm", EXEC = "agent-exec", MIN = 60_000, N = 30 * MIN;
 const OLD = "1".repeat(40), NEW = "2".repeat(40);
 
-let dir: string, path: string, db: Database, now: number, sent: { project: string; audience: string; text: string }[], calls: string[][];
+let dir: string, path: string, db: Database, now: number, sent: { project: string; audience: string; text: string; key: string }[];
 let svc: ServiceFacts;
 
 const at = (actor: string) => ({ actor, now: now++ });
 const on = (manualAfterMs: number | null = N): ManualStallDeps["policy"] => () => ({ mode: "on", manualAfterMs });
-const ledger = async (...args: string[]) => {
-  calls.push(args);
-  return runLedger(args.slice(1), { db, actor: "scheduler", projectIds: [P], loadRegistry: async () => ({}) as never, saveRegistry: async () => {},
-    now: () => now++, autoDispatch: () => svc.autoDispatch, autoProjects: () => [...svc.projects] });
-};
-const deps = (over: Partial<ManualStallDeps> = {}): ManualStallDeps =>
-  ({ db, now: now + 2 * N, svc, policy: on(), ledger, notify: async (project, audience, text) => void sent.push({ project, audience, text }), ...over });
+const record: ManualStallDeps["notify"] = async (project, audience, text, key) => void sent.push({ project, audience, text, key });
+const deps = (over: Partial<ManualStallDeps> = {}): ManualStallDeps => ({ db, now: now + 2 * N, svc, policy: on(), notify: record, ...over });
+/** The tick's db, with `before` run on a second connection right before the claim's transaction opens (another writer between read and claim). */
+function writerBeforeClaim(before: (other: Database) => void): Database {
+  let done = false;
+  return new Proxy(db, { get(t, k) {
+    const v = Reflect.get(t, k, t);
+    if (k !== "transaction" || done) return typeof v === "function" ? v.bind(t) : v;
+    return (fn: () => unknown) => {
+      done = true;
+      const other = new Database(path);
+      try { before(other); } finally { other.close(); }
+      return t.transaction(fn);
+    };
+  } });
+}
+const workflowEvents = () => listEvents(db, { target: T }).filter((e) => e.data.op === "workflow_resume");
 const eventCount = (store = db) => (store.query("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
 const claims = () => db.query("SELECT dedupKey FROM events WHERE dedupKey LIKE 'recovery:manualStall:%' ORDER BY seq").all() as { dedupKey: string }[];
 const only = async (d: ManualStallDeps) => {
@@ -67,7 +76,6 @@ function mergeRevoked(delivered = true): void {
 beforeEach(() => {
   now = 1_000;
   sent = [];
-  calls = [];
   svc = { autoDispatch: true, projects: [P], maxWorkers: () => 4 };
   dir = mkdtempSync(join(tmpdir(), "recovery-manual-tick-"));
   path = join(dir, "ledger.sqlite");
@@ -84,7 +92,7 @@ describe("modes", () => {
     takeover();
     const before = eventCount();
     expect(await manualStallTick(deps({ policy: () => ({ mode: "off", manualAfterMs: 0 }) }))).toEqual([{ project: P, mode: "off", diag: null }]);
-    expect([eventCount(), sent.length, calls.length]).toEqual([before, 0, 0]);
+    expect([eventCount(), sent.length]).toEqual([before, 0]);
   });
 
   test("missing port: observe with no threshold — classifies, judges nothing stalled, writes nothing", async () => {
@@ -106,7 +114,7 @@ describe("modes", () => {
     const r = await only(deps({ policy: () => ({ mode: "observe", manualAfterMs: N }) }));
     expect(r).toMatchObject({ action: "would_notify", card: { audience: "pm", cls: "pm_takeover" } });
     expect(r.why).toContain("worker 会话丢了");
-    expect([eventCount(), sent.length, calls.length]).toEqual([before, 0, 0]);
+    expect([eventCount(), sent.length]).toEqual([before, 0]);
   });
 });
 
@@ -140,7 +148,7 @@ describe("on: one prepared card per state version", () => {
     takeover();
     const r = await only(deps());
     expect(r).toMatchObject({ action: "notified", card: { audience: "pm", command: expect.stringContaining(`workflow-resume ${T} --rev`) } });
-    expect(sent).toEqual([{ project: P, audience: "pm", text: expect.stringContaining("下一步：") }]);
+    expect(sent).toEqual([{ project: P, audience: "pm", text: expect.stringContaining("下一步："), key: expect.stringMatching(/^recovery:manualStall:/) }]);
     expect(claims().map((c) => c.dedupKey.endsWith(":sent"))).toEqual([false, true]);
     expect(await only(deps())).toMatchObject({ action: "deduped" });
     expect(sent).toHaveLength(1);
@@ -163,7 +171,6 @@ describe("on: one prepared card per state version", () => {
     const r = await only(deps());
     expect(r).toMatchObject({ cls: "provider_refusal", action: "notified", card: { audience: "owner", command: null } });
     expect(sent[0].audience).toBe("owner");
-    expect(calls).toEqual([]);
     expect(getWorkflow(db, T)!.mode).toBe("manual");
   });
 
@@ -175,6 +182,37 @@ describe("on: one prepared card per state version", () => {
     expect(await only(deps({ now: t0 + manualStallRetryAfter(1) }))).toMatchObject({ action: "notified" });
     expect(claims().map((c) => c.dedupKey.replace(/^.*:/, ""))).toEqual([expect.any(String), expect.stringMatching(/#2$/), "sent"]);
     expect(sent).toHaveLength(1);
+    // attempt 2 hands notify the same key as attempt 1 (the claim row without #n), so the delivery side can drop a repeat
+    expect(sent[0].key).toBe(claims()[0].dedupKey);
+  });
+
+  test("a send still out past the backoff is not re-sent by the next tick (one card per version)", async () => {
+    takeover();
+    const t0 = now + 2 * N;
+    let release!: () => void;
+    const hanging: ManualStallDeps["notify"] = (...a) => new Promise<void>((r) => { release = r; }).then(() => record(...a));
+    const first = manualStallTick(deps({ now: t0, notify: hanging }));
+    await Promise.resolve();
+    expect(claims()).toHaveLength(1);
+    expect(await only(deps({ now: t0 + manualStallRetryAfter(1) }))).toMatchObject({ action: "retry_wait", why: expect.stringContaining("还没返回") });
+    release();
+    expect((await first)[0]).toMatchObject({ action: "notified" });
+    expect(await only(deps({ now: t0 + manualStallRetryAfter(2) }))).toMatchObject({ action: "deduped" });
+    expect(sent).toHaveLength(1);
+    expect(claims().map((c) => c.dedupKey.endsWith(":sent"))).toEqual([false, true]);
+  });
+
+  test("frozen, held or asked between the read and the claim: the claim re-decides and sends nothing", async () => {
+    takeover();
+    const freeze = writerBeforeClaim((o) => setFrozen(o, at(PM), { project: P, frozen: true, reason: "owner pause during dispatch" }));
+    expect(await only(deps({ db: freeze }))).toMatchObject({ action: "raced", why: expect.stringContaining("项目队列冻结") });
+    expect([sent.length, claims().length]).toEqual([0, 0]);
+    expect(await only(deps())).toMatchObject({ cls: "frozen", action: "none" });
+    setFrozen(db, at(PM), { project: P, frozen: false });
+    const ask = writerBeforeClaim((o) => o.query(`INSERT INTO asks (id, project, taskId, fromAgent, fromChannelId, source, kind, title, expiresAt, state, createdAt, updatedAt)
+      VALUES ('ask-2', ?, ?, ?, 'c', 'reply', 'authorize', '要不要放行', 9e15, 'open', 1, 1)`).run(P, T, EXEC));
+    expect(await only(deps({ db: ask, now: now + 4 * N }))).toMatchObject({ action: "raced", why: expect.stringContaining("审批等待") });
+    expect([sent.length, claims().length]).toEqual([0, 0]);
   });
 
   test("two connections racing on one version send one card", async () => {
@@ -192,54 +230,49 @@ describe("on: one prepared card per state version", () => {
   });
 });
 
-describe("hand-back to auto only through the formal entry", () => {
-  test("every proof present, switches open, mode on → scheduler-auto-resume hands it back (CAS revs passed)", async () => {
+describe("never hands back itself", () => {
+  test("every proof present, switches open, mode on, still manual past N → a PM card with the formal resume command; mode stays manual", async () => {
     mergeRevoked();
     const t = getTask(db, T)!, w = getWorkflow(db, T)!;
-    expect(await only(deps())).toMatchObject({ cls: "merge_revoked", action: "resumed" });
-    expect(calls).toEqual([["ledger", "scheduler-auto-resume", T, "--rev", String(t.rev), "--workflow-rev", String(w.rev), "--max-workers", "4"]]);
-    expect(getWorkflow(db, T)!.mode).toBe("auto");
-    expect(listEvents(db, { target: T }).filter((e) => e.data.op === "workflow_resume")).toEqual([expect.objectContaining({ actor: "scheduler", data: expect.objectContaining({ auto: true }) })]);
-    expect(sent).toEqual([]);
+    const r = await only(deps());
+    expect(r).toMatchObject({ cls: "merge_revoked", action: "notified", card: { audience: "pm", command: `ledger workflow-resume ${T} --rev ${t.rev} --workflow-rev ${w.rev} --reason <核对结论>` } });
+    expect(r.card!.step).toContain("既有自动交回");
+    expect([getWorkflow(db, T)!.mode, workflowEvents().length]).toEqual(["manual", 0]);
   });
 
-  test("observe only says it would hand back; the card stays manual", async () => {
+  test("frozen while the proofs are all present: waiting, no card, no hand-back", async () => {
     mergeRevoked();
-    expect(await only(deps({ policy: () => ({ mode: "observe", manualAfterMs: N }) }))).toMatchObject({ action: "would_resume" });
-    expect([calls.length, getWorkflow(db, T)!.mode]).toEqual([0, "manual"]);
+    const freeze = writerBeforeClaim((o) => setFrozen(o, at(PM), { project: P, frozen: true, reason: "owner pause during dispatch" }));
+    expect(await only(deps({ db: freeze }))).toMatchObject({ action: "raced" });
+    expect(await only(deps())).toMatchObject({ cls: "frozen", action: "none" });
+    expect([sent.length, getWorkflow(db, T)!.mode, workflowEvents().length]).toEqual([0, "manual", 0]);
   });
 
-  test("auto-dispatch off → no hand-back, a PM card naming the switch", async () => {
+  test("observe reports the card it would send; the card stays manual", async () => {
     mergeRevoked();
-    svc.autoDispatch = false;
-    svc = { ...svc, projects: [P] };
+    expect(await only(deps({ policy: () => ({ mode: "observe", manualAfterMs: N }) }))).toMatchObject({ action: "would_notify" });
+    expect([sent.length, getWorkflow(db, T)!.mode]).toEqual([0, "manual"]);
+  });
+
+  test("auto-dispatch off → a PM card naming the switch", async () => {
+    mergeRevoked();
+    svc = { ...svc, autoDispatch: false };
     const r = await only(deps());
     expect(r).toMatchObject({ action: "notified", card: { audience: "pm" } });
     expect(r.card!.step).toContain("开关不允许");
-    expect([calls.length, getWorkflow(db, T)!.mode]).toEqual([0, "manual"]);
+    expect(getWorkflow(db, T)!.mode).toBe("manual");
   });
 
-  test("no new delivery yet → a PM card that names the executor, no ledger call", async () => {
+  test("no new delivery yet → a PM card that names the executor", async () => {
     mergeRevoked(false);
     const r = await only(deps());
     expect(r.card!.step).toContain(`催 ${EXEC}`);
-    expect(calls).toEqual([]);
   });
 
-  test("a rejection from the formal entry becomes PM card evidence; a card that moved meanwhile is raced, not sent", async () => {
-    mergeRevoked();
-    const rejecting: ManualStallDeps["ledger"] = async (...args) => (calls.push(args), { ok: false, code: "rejected", error: "还有结果未定的调度意图" });
-    const r = await only(deps({ ledger: rejecting }));
-    expect(r).toMatchObject({ action: "notified" });
-    expect(r.card!.evidence.join("\n")).toContain("自动交回被拒：还有结果未定的调度意图");
-    expect(getWorkflow(db, T)!.mode).toBe("manual");
-    // The second time PM writes on the card while the CLI call is out: the claim re-reads the version and backs off.
-    const moving: ManualStallDeps["ledger"] = async (...args) => {
-      appendEvent(db, at(PM), { project: P, target: T, kind: "note", text: "PM 在对账" });
-      return rejecting(...args);
-    };
-    const policy: RecoveryPolicy = { mode: "on", manualAfterMs: 0 };
-    expect(await only(deps({ ledger: moving, policy: () => policy }))).toMatchObject({ action: "raced" });
-    expect(sent).toHaveLength(1);
+  test("a card that moved between the read and the claim is raced, not sent", async () => {
+    takeover();
+    const moved = writerBeforeClaim((o) => appendEvent(o, at(PM), { project: P, target: T, kind: "note", text: "PM 在对账" }));
+    expect(await only(deps({ db: moved }))).toMatchObject({ action: "raced" });
+    expect(sent).toEqual([]);
   });
 });
