@@ -1,3 +1,4 @@
+import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
 import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
 /**
  * Discord Bridge Service — 主入口

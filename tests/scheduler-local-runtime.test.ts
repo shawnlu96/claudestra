@@ -143,7 +143,7 @@ test("actual start_node steps create ACP Codex and persist the Codex workflow fl
       repo: f.dir, worktree: join(f.dir, "worktree"), agentName: "task-t", agent: "agent-task-t", fileGlobs: ["src/x.ts"],
       specPath: join(f.dir, "spec.md"), specText: null, promptPath: join(f.dir, "prompt.md"), promptText: "work", purpose: "T" } as StartPlan;
     const io: StepIO = {
-      db: () => db, manager: async (args) => { calls.push(args); return { ok: true }; },
+      db: () => db, manager: async (args) => { calls.push(args); return args[0] === "create" ? { ok: true, agent: `agent-${args[1]}` } : { ok: true }; },
       git: async (_cwd, args) => ({ ok: true, out: args[0] === "rev-parse" && args.includes("main^{commit}") ? "a".repeat(40) : "" }),
       exists: () => false, read: () => null, write: () => {}, remove: () => {}, symlink: () => {}, agentExists: () => false, attempt: "probe",
     };
@@ -303,6 +303,7 @@ async function realQueuedFixture() {
         const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
         reg.agents[`agent-${args[1]}`] = { runtime: "codex", transport: "acp", status: "active", sessionId: "new" };
         writeFileSync(f.registryPath, JSON.stringify(reg));
+        return { ok: true, agent: `agent-${args[1]}` };
       }
       return { ok: true };
     } };
