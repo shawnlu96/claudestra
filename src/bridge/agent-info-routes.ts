@@ -87,7 +87,7 @@ export async function agentListExtras(
 
 /** Reuse the ledger's PM reader; never infer worker bindings or turn a failed read into permission to hide. */
 function readProtectedPms(principal: Principal, io: Pick<AgentInfoIo, "protectedPms">): readonly string[] | null {
-  if (!canReadLedger(principal)) return null;
+  if (!canReadLedger(principal)) return []; // No ledger access: honor registry tags without reading or disclosing PM identities.
   try {
     return io.protectedPms?.() ?? null;
   } catch (e) {

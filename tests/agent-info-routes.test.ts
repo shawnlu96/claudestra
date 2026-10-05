@@ -165,9 +165,13 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
   });
   test("PM protection is not read or disclosed to peer/scoped callers", async () => {
     let reads = 0;
-    for (const p of [peerStar, scoped]) {
+    for (const p of [peerStar, scoped, { ...owner, manage: false }]) {
       const extras = await agentListExtras(p, { ...io, protectedPms: () => (reads++, ["secret-pm"]) });
-      expect(extras("agent-rv-x", { kind: "worker" }).kind).toBeNull();
+      expect(extras("agent-rv-x", { kind: "worker" }).kind).toBe("worker");
+      expect(extras("agent-rv-x", { kind: "main" }).kind).toBe("main");
+      expect(extras("agent-rv-x", {}).kind).toBeNull();
+      expect(extras("master", { kind: "worker" }).kind).toBeNull();
+      expect(extras("agent-pm", { role: "pm", kind: "worker" }).kind).toBeNull();
       expect(JSON.stringify(extras("agent-rv-x", {}))).not.toContain("secret-pm");
     }
     expect(reads).toBe(0);

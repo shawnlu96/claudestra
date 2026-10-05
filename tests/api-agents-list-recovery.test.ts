@@ -76,6 +76,7 @@ async function childSuite(): Promise<void> {
   const MISSING_TAIL = "agent-s03"; // 会话文件不存在：unknown，不记日志（已归档 / 清理过的会话是常态）
   const ACTIVE_WORKER = "agent-lend-active-worker";
   const SAME_NAME_MAIN = "agent-lend-samename-main";
+  const META_PM = "agent-s05"; // 只有 meta.pms 声明的 PM：旧 worker 标签不能阻止读尾
   ACTIVE.forEach((n, i) => regs.push(reg(n, "active", 100 + i)));
   regs.push(reg(ACTIVE_WORKER, "active", 199, { kind: "worker" }));
   STOPPED_NORMAL.forEach((n, i) => regs.push(reg(n, "stopped", 300 + i)));
@@ -85,6 +86,7 @@ async function childSuite(): Promise<void> {
   const byName = new Map(regs.map((r) => [r.name, r]));
   const stoppedWorkers = regs.filter((r) => r.status === "stopped" && r.kind === "worker");
   expect(stoppedWorkers.length).toBe(380);
+  byName.get(META_PM)!.kind = "worker";
 
   const { REGISTRY_PATH } = await import("../src/lib/registry.ts");
   const { projectsSlug } = await import("../src/lib/jsonl-cost.ts");
@@ -92,6 +94,13 @@ async function childSuite(): Promise<void> {
   const writeRegistry = () => writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: Object.fromEntries(regs.map((r) => [r.name, r])) }));
   mkdirSync(join(home, ".claude-orchestrator"), { recursive: true });
   writeRegistry();
+  const { openLedger, closeLedger } = await import("../src/lib/ledger-store.ts");
+  const { setLedgerFeedForTest } = await import("../src/bridge/ledger-feed.ts");
+  const ledgerPath = join(home, ".claude-orchestrator", "fixture-ledger.sqlite");
+  const db = openLedger(ledgerPath);
+  db.query("INSERT INTO meta(project, key, value) VALUES (?, 'pms', ?)").run("p1", JSON.stringify([META_PM]));
+  closeLedger(ledgerPath);
+  setLedgerFeedForTest({ path: ledgerPath });
   for (const r of regs) {
     if (r.runtime === "codex" || r.name === MISSING_TAIL) continue; // Codex 的 rollout 文件路径推不出来：老实现会按 id 全库找
     mkdirSync(join(sessionFile(r), ".."), { recursive: true });
@@ -218,6 +227,7 @@ async function childSuite(): Promise<void> {
       expect(rows.get("agent-arbitrary-worker")).toMatchObject({ kind: "worker", lastActivityTs: null });
       expect(rows.get("agent-task-manual")).toMatchObject({ kind: null, lastActivityTs: 1_760_000_000_000 + 305 });
       expect(rows.get("agent-lend-manual")).toMatchObject({ kind: null, lastActivityTs: 1_760_000_000_000 + 306 });
+      expect(rows.get(META_PM)).toMatchObject({ kind: null, lastActivityTs: 1_760_000_000_000 + 304 });
       expect(rows.get(SAME_NAME_MAIN)!.lastActivityTs).toBe(1_760_000_000_000 + 399); // 名字像 worker 但 kind=main：照常读尾
       expect(rows.get("agent-s01")!.lastActivityTs).toBe(1_760_000_000_000 + 300);
       expect(rows.get(STOPPED_CODEX)).toMatchObject({ status: "stopped", runtime: "codex", lastActivityTs: 1_760_000_000_000 + 390 }); // 已停普通 Codex 不误跳
@@ -287,7 +297,8 @@ async function childSuite(): Promise<void> {
       const [f, s] = await Promise.all([get(full.secret!), get(scoped.secret!)]);
       expect(f.body.agents!.length).toBe(400);
       expect([...s.rows.keys()].sort()).toEqual(["agent-a01", "agent-s01", ACTIVE_WORKER, SCOPED_WORKER].sort());
-      expect(s.rows.get(SCOPED_WORKER)).toMatchObject({ status: "stopped", lastActivityTs: null });
+      expect(s.rows.get(SCOPED_WORKER)).toMatchObject({ status: "stopped", kind: "worker", lastActivityTs: null });
+      expect(s.rows.get(ACTIVE_WORKER)!.kind).toBe("worker");
       expect(workerReads()).toBe(before);
     }, 60_000);
 

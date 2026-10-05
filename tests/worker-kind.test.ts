@@ -1,7 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { markWorkerKinds, setWorkerKind, visibleInDefaultSearch, workerKind } from "../src/lib/worker-kind.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { requireSessionIdentity } from "../src/lib/scheduler-session-identity.js";
+import type { LedgerTask } from "../src/lib/ledger-stages.js";
 
 describe("worker registry kind", () => {
+  test("session identity rejects a meta-only PM before a worker binding can be written", () => {
+    const root = mkdtempSync(join(tmpdir(), "worker-pm-")), path = join(root, "ledger.sqlite"), db = openLedger(path);
+    const registryPath = join(root, "registry.json"), name = "agent-project-pm";
+    writeFileSync(registryPath, JSON.stringify({ agents: { [name]: { runtime: "codex" } } }));
+    const input = { taskId: "fixture", role: "reviewer" as const, intentId: "fixture", agent: name,
+      sessionId: "fixture", family: "codex" as const, transport: "acp" as const, registryPath };
+    try {
+      expect(() => requireSessionIdentity(db, {} as LedgerTask, input, name)).not.toThrow();
+      db.query("INSERT INTO meta(project, key, value) VALUES (?, 'pms', ?)").run("fixture", JSON.stringify(["project-pm"]));
+      expect(() => requireSessionIdentity(db, {} as LedgerTask, input, name)).toThrow(/PM/);
+    } finally { closeLedger(path); rmSync(root, { recursive: true, force: true }); }
+  });
   test("task labels alone leave long-lived agents visible; explicit worker evidence tags only workers", () => {
     expect(workerKind("agent-build", { task: "T68" })).toBeNull();
     expect(workerKind("agent-build", { task: "T68", parent: "agent-pm" })).toBeNull();

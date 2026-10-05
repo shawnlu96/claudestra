@@ -6,9 +6,15 @@
  * 同一把锁在同一进程里再 acquire 会自己等满 20s。纯函数单测见 tests/manager-team.test.ts。
  */
 import { isMasterAgent } from "../lib/registry.js";
+import { existsSync } from "node:fs";
 import { hasUnsafeDisplayChars } from "../lib/display-text.js";
 import { isTeamRole, TEAM_ROLES } from "../lib/team-roles.js";
 import { markWorkerKinds, workerKind } from "../lib/worker-kind.js";
+import { LedgerReader } from "../lib/ledger-read.js";
+import { pmsByProject } from "../lib/ledger-store.js";
+import { LEND_ORDER_ENV } from "../lib/lend-grant-spawn.js";
+import { lendStopReason } from "../lib/lend-watchdog.js";
+import { ORDER_ID } from "../lib/lend-wire-v2-schema.js";
 import { loadRegistry, saveRegistry, normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 
 export { cmdTeam } from "./team-up.js"; // 编排班子 up / down / status，与 team-link 同一个 manager 入口
@@ -119,9 +125,28 @@ export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamF
 
 /** cmdCreate 用：读 registry + 环境后定派发字段；出错直接 output 并返回 null（manager.ts 一行调用） */
 export async function teamFieldsForCreate(child: string, flags: TeamFlags): Promise<TeamFields | null> {
-  const r = resolveTeamFields((await loadRegistry()).agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
-  if ("error" in r) output({ ok: false, error: r.error });
-  return "error" in r ? null : { ...r, ...(workerKind(child, r) === "worker" ? { kind: "worker" as const } : {}) };
+  const agents = (await loadRegistry()).agents;
+  const r = resolveTeamFields(agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
+  if ("error" in r) { output({ ok: false, error: r.error }); return null; }
+  const order = process.env[LEND_ORDER_ENV];
+  if (order !== undefined) {
+    const denied = ORDER_ID.test(order) ? lendStopReason(child, undefined, undefined, undefined, order) : "出借订单号无效";
+    if (denied) { output({ ok: false, error: denied }); return null; }
+  }
+  if (agents[child]?.kind === "main") return { ...r, kind: "main" };
+  if (!order && r.role !== "executor" && r.role !== "dispatcher") return r;
+  const reader = new LedgerReader();
+  try {
+    const db = reader.get();
+    if (!db && existsSync(reader.path)) throw new Error("台账尚不可读");
+    const pms = db ? [...pmsByProject(db).values()].flat() : [];
+    const kind = workerKind(child, { ...r, kind: "worker", role: agents[child]?.role === "pm" ? "pm" : r.role }, pms);
+    return { ...r, ...(kind ? { kind } : {}) };
+  } catch (e) {
+    // Creating without known PM protection could hide a PM or leave an untagged card worker; retry after the read recovers.
+    output({ ok: false, error: `创建时无法核对 PM 保护：${(e as Error).message}` });
+    return null;
+  } finally { reader.close(); }
 }
 
 /**
