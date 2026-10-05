@@ -1,4 +1,4 @@
-import { isPrivateAddr, isTailscaleAddr } from "../../lib/net-addr.js";
+import { isPrivateAddr, isTailscaleAddr } from "../../lib/address-predicates.js";
 import { isLoopbackAddress } from "../../lib/same-host.js";
 import { fail } from "../../lib/shared-ledger-contract-v2.js";
 
