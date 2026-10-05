@@ -9,7 +9,7 @@
  * Mechanisms take a RecoveryPolicyPort injected at wiring time instead of binding this file. tests/recovery-policy*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
@@ -24,7 +24,7 @@ type RecoveryMode = "on" | "observe" | "off";
 const RECOVERY_MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
 const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.includes(v as RecoveryMode);
 /** One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it. */
-export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit"] as const;
+export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit", "placementReservations"] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
 const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";
@@ -33,6 +33,8 @@ const HOUR_MS = 3_600_000;
 const validHours = (h: unknown): h is number => Number.isInteger(h) && (h as number) >= 1 && (h as number) <= MANUAL_STALL_HOURS_MAX;
 const RECOVERY_OP = "scheduler_recovery";
 const RECOVERY_OBSERVE_OP = "recovery_observe";
+const RECOVERY_VOID_OP = "scheduler_recovery_void";
+const voidKey = (seq: number) => `recovery-void:${seq}`;
 
 interface ProjectRecovery { mode?: RecoveryMode; manualStallHours?: number; keys?: Partial<Record<RecoveryKey, RecoveryMode>> }
 interface RecoveryFile { projects: Record<string, ProjectRecovery> }
@@ -174,15 +176,18 @@ function replayed(db: Database, ctx: WriteCtx, project: string) {
   if (prev.project !== project || prev.target !== "" || prev.kind !== "decision" || prev.data.op !== RECOVERY_OP) {
     throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已被别的动作用过`);
   }
+  if (getEventByDedup(db, voidKey(prev.seq))) throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 那次改动没生效（审计 #${prev.seq} 已作废），换个 dedupKey 重试`);
   return { from: prev.data.from as RecoveryState, to: prev.data.to as RecoveryState, event: prev.seq };
 }
 
 /**
  * Modes: same permission as every scheduler switch (actorMayConfigure: PM other than the dispatcher / master / owner).
  * manualStallHours is the owner's number and is never delegated: anyone else touching it is refused before the lock.
- * Check (fast fail) → lock → immediate ledger tx { re-check actor → read → edit → audit event → atomic write (only while
- * the lock is ours) } → COMMIT. The permission read and the write are atomic against setMeta, and the file is published
- * only after the audit is in, so a busy ledger leaves the old policy visible. A corrupt file is refused, never overwritten.
+ * Check (fast fail) → lock → immediate ledger tx { re-check actor → read → edit → audit event } → COMMIT → atomic write
+ * (only while the lock is ours). The permission read and the audit are atomic against setMeta; the file is published
+ * only after COMMIT returned, so a mode whose audit is not committed is never readable (readers read only the file).
+ * If publishing then fails, a void note marks the committed audit as not in effect and the old policy stays.
+ * A crash between COMMIT and publish likewise leaves the old (conservative) file. A corrupt file is refused, never overwritten.
  */
 export async function setRecovery(db: Database, ctx: WriteCtx, input: { project: string; set: RecoverySet; reason: string },
   opts: { path?: string; lockMs?: number } = {}) {
@@ -195,36 +200,36 @@ export async function setRecovery(db: Database, ctx: WriteCtx, input: { project:
   const lockMs = opts.lockMs ?? 10_000;
   const lock = await acquireLock(`${path}.lock`, lockMs);
   if (!lock) throw new LedgerError("busy", `${path} 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没改，稍后重试`);
-  let published: { before: string | null } | null = null;
   try {
-    // One immediate ledger tx around re-check → read → audit → publish: setMeta (pms / dispatcher) is serialized against
-    // it, the actor is re-checked with the lock held, and the file is written last, after every fallible ledger step,
-    // so readers never see a mode whose audit could still fail. Only COMMIT of the already-reserved tx follows.
-    return tx(db, () => {
+    let text: string | null = null;
+    // setMeta (pms / dispatcher) is serialized against this tx and the actor is re-checked with the lock held.
+    const r = tx(db, () => {
       if (!actorMayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}，等锁期间权限已变）`);
       const dup = replayed(db, ctx, project);
       if (dup) return { project, ...dup, changed: false, duplicate: true, event: dup.event, path };
-      const r = readRecoveryFile(path);
-      if (r.status === "corrupt") throw new LedgerError("invalid", `${path} 坏了（${r.error}），恢复已按 off 停手；没写，先手动修好`);
-      const doc = r.status === "ok" ? r.data : { projects: {} };
+      const f = readRecoveryFile(path);
+      if (f.status === "corrupt") throw new LedgerError("invalid", `${path} 坏了（${f.error}），恢复已按 off 停手；没写，先手动修好`);
+      const doc = f.status === "ok" ? f.data : { projects: {} };
       const next = applySet(Object.hasOwn(doc.projects, project) ? doc.projects[project] : undefined, set);
       const from = stateOf(doc.projects[project]), to = stateOf(next);
       if (JSON.stringify(from) === JSON.stringify(to)) return { project, from, to, changed: false, duplicate: false, event: null, path };
       const ev = appendEvent(db, ctx, { project, target: "", kind: "decision", text: reason, data: { op: RECOVERY_OP, from, to } });
       if (ev.duplicate) throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已被别的动作用过`);
-      const before = r.status === "ok" ? r.raw : null;
-      commit(path, JSON.stringify({ projects: { ...doc.projects, [project]: next } }, null, 2) + "\n", lock);
-      published = { before };
+      if (!lock.held()) throw new LedgerError("busy", `提交前发现 ${path} 的锁已被别人回收，这次没改，重试即可`);
+      text = JSON.stringify({ projects: { ...doc.projects, [project]: next } }, null, 2) + "\n";
       return { project, from, to, changed: true, duplicate: false, event: ev.event.seq, path };
     });
-  } catch (e) {
-    // Reached with the file published only if COMMIT itself failed (the audit row was already inserted under the lock).
-    const pub = published as { before: string | null } | null;
-    if (pub) {
-      try { if (pub.before === null) rmSync(path, { force: true }); else commit(path, pub.before, lock); }
-      catch (re) { console.error(`⚠️ 恢复策略审计没提交成，${path} 也没能还原（${(re as Error).message}）：请手动核对`); }
+    if (text === null) return r;
+    try { commit(path, text, lock); }
+    catch (e) {
+      try {
+        appendEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey: voidKey(r.event!) },
+          { project, target: "", kind: "note", text: `恢复策略审计 #${r.event} 已记但文件没写成，未生效`, data: { op: RECOVERY_VOID_OP, voids: r.event } });
+      } catch (ve) { console.error(`⚠️ 恢复策略审计 #${r.event} 已提交但 ${path} 没写成，作废记录也没记上（${(ve as Error).message}）：策略仍是旧的，请手动核对`); }
+      if (e instanceof LedgerError) throw e;
+      throw new LedgerError("busy", `审计 #${r.event} 已提交但 ${path} 没写成（${(e as Error).message}），策略仍是旧的；已记作废，重试即可`);
     }
-    throw e;
+    return r;
   } finally {
     lock.release();
   }

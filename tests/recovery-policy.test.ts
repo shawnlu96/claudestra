@@ -42,6 +42,15 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("c", "manualStall", path)).toEqual({ mode: "observe", manualAfterMs: null, source: "config" });
   });
 
+  test("placementReservations (PLACE): registered key; inherits the project mode, takes an override, bad override value → off", () => {
+    expect(RECOVERY_KEYS).toContain("placementReservations");
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { placementReservations: "off" } } } });
+    expect(recoveryPolicy("a", "placementReservations", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "placementReservations", path).mode, recoveryPolicy("b", "audit", path).mode]).toEqual(["off", "on"]);
+    expect(recoveryPolicy("z", "placementReservations", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "placementReservations", file({ projects: { a: { keys: { placementReservations: "yes" } } } })).source).toBe("error");
+  });
+
   test("unknown key → off with a diagnostic, even when the file says on", () => {
     const r = recoveryPolicy("a", "nudge" as RecoveryKey, file({ projects: { a: { mode: "on" } } }));
     expect(r).toMatchObject({ mode: "off", manualAfterMs: null, source: "error", diagnostic: expect.stringContaining("未知恢复键") });

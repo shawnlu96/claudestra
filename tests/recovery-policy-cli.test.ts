@@ -47,7 +47,7 @@ describe("show", () => {
     const r = await run(EXEC, "a");
     expect(r).toMatchObject({ ok: true, project: "a", observed: [] });
     expect(r.policies.materials).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
-    expect(Object.keys(r.policies)).toHaveLength(8);
+    expect(Object.keys(r.policies)).toHaveLength(9);
     expect([snap(), decisions()]).toEqual([null, []]);
     expect((await run(EXEC, "zz")).code).toBe("not_found");
   });
@@ -92,6 +92,14 @@ describe("per-key override", () => {
     expect(await run(PM_A, "a", "inherit", "--key", "planGap", "--reason", "撤掉")).toMatchObject({ ok: true, changed: true });
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "off" } } });
     expect((await run(EXEC, "a", "on", "--key", "audit", "--reason", "r")).code).toBe("forbidden");
+  });
+
+  test("--key placementReservations: PM overrides and inherits like the other keys; an unknown --key is invalid", async () => {
+    expect(await run(PM_A, "a", "off", "--key", "placementReservations", "--reason", "r")).toMatchObject({ ok: true, changed: true });
+    expect([recoveryPolicy("a", "placementReservations", path).mode, recoveryPolicy("a", "audit", path).mode]).toEqual(["off", "observe"]);
+    expect(await run(PM_A, "a", "inherit", "--key", "placementReservations", "--reason", "r")).toMatchObject({ ok: true, changed: true });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: {} } });
+    expect(await run(PM_A, "a", "on", "--key", "placement", "--reason", "r")).toMatchObject({ ok: false, code: "invalid" });
   });
 });
 
@@ -228,6 +236,75 @@ describe("real CLI races (review r1)", () => {
     expect([acted, [...seen], recoveryPolicy("a", "audit", t.file).mode]).toEqual([0, ["off"], "off"]);
     expect(ledgerDecisions(t.ledger)).toHaveLength(1);
   }, 60_000);
+});
+
+/** Review r2: audit INSERT succeeds, COMMIT is refused (DELETE journal + an outside shared read lock), in a separate setter process. */
+describe("COMMIT busy (review r2)", () => {
+  test("the uncommitted mode is never readable: no recovery runs while COMMIT waits, setter busy, file and audit stay old", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "recovery-commit-busy-"));
+    const ledger = join(dir, "ledger.sqlite"), file = join(dir, "recovery-policy.json"), go = join(dir, "go");
+    writeFileSync(file, JSON.stringify({ projects: { a: { mode: "off" } } }));
+    const lib = join(import.meta.dir, "../src/lib");
+    const script = join(dir, "setter.ts");
+    writeFileSync(script, `
+      import { existsSync } from "node:fs";
+      import { openLedger, LedgerError } from ${JSON.stringify(join(lib, "ledger-store.ts"))};
+      import { setRecovery } from ${JSON.stringify(join(lib, "recovery-policy.ts"))};
+      const db = openLedger(${JSON.stringify(ledger)});
+      db.exec("PRAGMA journal_mode = DELETE");
+      console.log("ready");
+      while (!existsSync(${JSON.stringify(go)})) await Bun.sleep(20);
+      try { await setRecovery(db, { actor: "owner", now: 5 }, { project: "a", set: { mode: "on" }, reason: "probe" }, { path: ${JSON.stringify(file)} }); console.log(JSON.stringify({ ok: true })); }
+      catch (e) { console.log(JSON.stringify({ ok: false, code: e instanceof LedgerError ? e.code : String(e) })); }
+    `);
+    const proc = Bun.spawn([process.execPath, "--no-env-file", script], { env: testChildEnv({ CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: join(dir, "run") }), stdout: "pipe", stderr: "pipe" });
+    const out = new Response(proc.stdout).text();
+    while (!existsSync(ledger) || !(await Bun.file(ledger).exists())) await Bun.sleep(20);
+    await Bun.sleep(1_500); // child opened the ledger and switched to DELETE
+    const reader = new Database(ledger);
+    reader.exec("BEGIN");
+    reader.prepare("SELECT count(*) FROM events").get(); // shared lock: the setter's RESERVED is fine, its COMMIT is not
+    writeFileSync(go, "");
+    let acted = 0, done = false;
+    const seen = new Set<string>();
+    proc.exited.finally(() => { done = true; });
+    const gdb = new Database(":memory:");
+    while (!done) {
+      seen.add(recoveryPolicy("a", "audit", file).mode);
+      await gateRecovery(gdb, { project: "a", mechanism: "audit", target: "", actionKey: "probe", action: "probe" }, () => ++acted,
+        { now: 1, policy: (p, m) => recoveryPolicy(p, m, file) });
+      await Bun.sleep(20);
+    }
+    reader.exec("ROLLBACK");
+    reader.close();
+    expect(JSON.parse((await out).trim().split("\n").at(-1)!)).toEqual({ ok: false, code: "busy" });
+    expect([acted, [...seen], recoveryPolicy("a", "audit", file).mode]).toEqual([0, ["off"], "off"]);
+    expect(listEvents(openLedger(ledger), {}).filter((e) => e.data.op === "scheduler_recovery")).toHaveLength(0);
+  }, 60_000);
+
+  test("publish fails after COMMIT → busy, old file kept, the committed audit is voided and its --dedup can't replay as done", async () => {
+    writeFileSync(path, JSON.stringify({ projects: { a: { mode: "off" } } }));
+    const { chmodSync } = await import("node:fs");
+    const dir = join(path, "..");
+    // after the audit tx committed the directory turns read-only (the atomic write's temp file cannot be created);
+    // the next tx (the void note) gives it back so the lock can be released
+    let txs = 0;
+    const faulty = new Proxy(db, { get: (t, k) => k !== "transaction" ? Reflect.get(t, k, t).bind?.(t) ?? Reflect.get(t, k, t)
+      : (fn: () => unknown) => ({ immediate: () => { if (txs) chmodSync(dir, 0o700); const v = t.transaction(fn).immediate(); if (!txs++) chmodSync(dir, 0o500); return v; } }) });
+    let r: Record<string, any>;
+    try {
+      r = await setRecovery(faulty, { actor: "owner", now: 5, dedupKey: "k1" }, { project: "a", set: { mode: "on" }, reason: "x" }, { path })
+        .catch((e) => ({ ok: false, code: (e as LedgerError).code }));
+    } finally { chmodSync(dir, 0o700); }
+    expect(r).toMatchObject({ ok: false, code: "busy" });
+    expect(recoveryPolicy("a", "audit", path).mode).toBe("off");
+    const ev = decisions().filter((e) => e.data.op === "scheduler_recovery");
+    expect(ev).toHaveLength(1);
+    expect(listEvents(db, {}).filter((e) => e.data.op === "scheduler_recovery_void").map((e) => e.data.voids)).toEqual([ev[0]!.seq]);
+    expect(await run("owner", "a", "on", "--reason", "x", "--dedup", "k1")).toMatchObject({ ok: false, code: "dedup_mismatch" });
+    expect(await run("owner", "a", "on", "--reason", "x", "--dedup", "k2")).toMatchObject({ ok: true, changed: true });
+    expect(recoveryPolicy("a", "audit", path).mode).toBe("on");
+  });
 });
 
 describe("registered in the ledger command family", () => {
