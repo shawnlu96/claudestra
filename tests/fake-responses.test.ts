@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { connect } from "node:net";
 import { type FakeResponses, inputTexts, replyFrames, requestKind, startFakeResponses, toolNames } from "./helpers/fake-responses.ts";
 
 /** 把 SSE 文本拆成 [{event, data}]；每帧必须是 event 行 + data 行 + 空行，data.type 与 event 一致 */
@@ -85,5 +86,27 @@ describe("fake-responses 服务", () => {
     expect(requestKind(second!)).toBeUndefined();
     expect(toolNames(first!.body)).toEqual(["exec_command"]);
     expect(inputTexts(first!.body)).toEqual(["hi"]);
+  });
+
+  test("并发请求的 seq 不重复：序号在读正文之前就占住（慢正文的请求先到，仍是 1 号）", async () => {
+    fake = startFakeResponses(() => ({ type: "text", text: "ok" }));
+    const port = Number(new URL(fake.baseUrl).port);
+    // 用裸 TCP 先发请求头、过一会儿再发正文：服务端先进 handler，正文要等
+    const rawPost = (body: string, bodyDelayMs: number) =>
+      new Promise<void>((ok, fail) => {
+        const s = connect(port, "127.0.0.1", () => {
+          s.write(`POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n`);
+          setTimeout(() => s.write(body), bodyDelayMs);
+        });
+        s.on("data", () => {});
+        s.on("end", () => ok());
+        s.on("error", fail);
+      });
+    const slow = rawPost(JSON.stringify({ n: "slow" }), 100);
+    await new Promise((r) => setTimeout(r, 30));
+    await Promise.all([slow, rawPost(JSON.stringify({ n: "fast" }), 0)]);
+    expect(fake.requests.map((r) => r.seq).sort()).toEqual([1, 2]);
+    expect(fake.requests.find((r) => (r.body as { n: string }).n === "slow")!.seq).toBe(1);
+    expect(fake.requests.find((r) => (r.body as { n: string }).n === "fast")!.seq).toBe(2);
   });
 });

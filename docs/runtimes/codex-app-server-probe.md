@@ -11,11 +11,14 @@ bun scripts/codex-probe.ts --out <临时目录> [--only a,b] [--repeat N] [--cod
 ```
 
 - 场景定义在 `scripts/codex-probe-scenarios.ts`，每个场景一份目录：`rpc.jsonl`（`{t, dir: out|in|note, line}`，line 是线路上的原文）、
-  `http.jsonl`（假 provider 收到的请求）、`egress.jsonl`（外网访问记录）、`result.json`（场景的观察结果）。
+  `http.jsonl`（假 provider 收到的请求）、`egress.jsonl`（外网访问记录）、`result.json`（场景的观察结果，场景抛错时是 `{error}`）、
+  `probe.json`（app-server 的 userAgent 和收尾报告）。运行目录下的 `meta.json` 记 codex 路径和各场景 initialize 回包里的版本号。
 - 假 Responses 服务：`tests/helpers/fake-responses.ts`（单测 `tests/fake-responses.test.ts`）。剧本是 `(请求) => Reply`，
   Reply 有 text（可分段、段间延时）、tool（function_call）、hang（只发 `response.created` 然后挂住）、fail（流内 `response.failed`
   或 HTTP 错误码）、json（非 SSE）。`requestKind(req)` 读 `x-codex-turn-metadata` 头里的 `request_kind`，区分普通采样和压缩。
-- 全套 31 个场景一次约 3 分钟；不进 `bun test`（要真的 codex）。
+- 场景数按 `SCENARIOS` 的键算：29 个，不带 `--repeat` 跑一次全套就是 29 份记录，约 3 分钟。结论里的计数还包括调研期间
+  针对单个场景的重复运行（比如 `clientid_track` 前后共跑了 6 次），各条写的是实际样本数。不进 `bun test`（要真的 codex）；
+  收尾逻辑和假服务有离线单测（`tests/codex-probe.test.ts`、`tests/fake-responses.test.ts`）。
 
 ### 隔离与安全
 
@@ -24,7 +27,10 @@ bun scripts/codex-probe.ts --out <临时目录> [--only a,b] [--repeat N] [--cod
 - 子进程 env 只有白名单：`PATH`、`HOME`（临时）、`CODEX_HOME`、`TMPDIR`、`LANG`，外加把 `HTTP(S)_PROXY` / `ALL_PROXY` 指向本地一个
   「记录目标后回 403」的代理（`NO_PROXY=127.0.0.1,localhost`）。没有 `OPENAI_API_KEY` / `CODEX_API_KEY`，外网访问只留记录、不放行。
 - 记录到的外网访问（全套一次，均被拒，均不影响功能）：`chatgpt.com:443` 57 次、`github.com:443` 30 次、`api.github.com:443` 27 次。
-- app-server 用 `Bun.spawn({detached: true})` 起在自己的进程组，场景结束时整组 SIGKILL 兜底。
+- app-server 用 `Bun.spawn({detached: true})` 起在自己的进程组。运行中每 500ms（以及场景主动 EOF / 发信号之前）用 `ps` 登记它的
+  所有后代，包括改过进程组的 MCP server 和命令（Q0-6）。场景结束或中途抛错都走同一个收尾：先写 `result.json`，再
+  EOF 等 2s → 对 app-server 进程组和每个还活着的后代（各自的进程组 + pid）SIGTERM 等 1s → SIGKILL 等 1s，每步之后的存活者记进
+  `probe.json`。kill 前核对 pgid 和命令名防 pid 复用，不碰探针自己所在的组。活不到 500ms、又在收尾前就脱离 app-server 的后代不保证抓到。
 
 ### 假 provider 的配置（0.159.3 实测）
 

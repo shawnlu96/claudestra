@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * CX-0：直接驱动真实 `codex app-server`（不经任何适配器），在 stdio 上接 tap 原样记录 JSON-RPC，回答自研 Codex 适配器的设计问题。
- * 每个场景一份记录：<out>/<runId>/<场景>/{rpc.jsonl, http.jsonl, egress.jsonl, stderr.log, result.json}。
+ * 每个场景一份记录：<out>/<runId>/<场景>/{rpc.jsonl, http.jsonl, egress.jsonl, stderr.log, result.json, probe.json}。
  * 不碰真实凭据：每个场景 mkdtemp 一个隔离 HOME + CODEX_HOME，model provider 指向只绑 127.0.0.1 的假 Responses 服务
  * （tests/helpers/fake-responses.ts）；env 只给白名单，另把 HTTP(S)_PROXY 指向本地「记录后拒绝」的代理，外网访问只留记录不放行。
  * 用法：bun scripts/codex-probe.ts --out <目录> [--only a,b] [--codex <codex 可执行文件>] [--repeat N]
@@ -34,6 +34,19 @@ export interface ProbeOptions {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+type PsRow = { pid: number; ppid: number; pgid: number; comm: string };
+type Subprocess = ReturnType<typeof Bun.spawn>;
+/** 运行期间扫后代的间隔：比这还短命的后代可能漏登记（只在收尾前那次扫描里还活着才抓得到） */
+const SCAN_MS = 500;
+
+async function waitUntil(pred: () => boolean, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) return false;
+    await sleep(20);
+  }
+  return true;
+}
 const REAL_HOME = userInfo().homedir;
 const FORBIDDEN_ROOTS = [join(REAL_HOME, ".codex"), stateDirIn(REAL_HOME), stateDir()];
 
@@ -89,8 +102,14 @@ export class Probe {
   readonly dir: string;
   readonly work: string;
   readonly codexHome: string;
-  proc!: ReturnType<typeof Bun.spawn>;
   fake!: FakeResponses;
+  /** 从 initialize 回包的 userAgent 里取（`<client>/<codex 版本> (...)`）；没起成就是 null */
+  userAgent: string | null = null;
+  serverVersion: string | null = null;
+  private child: Subprocess | null = null;
+  /** app-server 的后代（含改过进程组的），运行中每 SCAN_MS 登记一次；app-server 死后它们的 ppid 变 1，只能靠这里找回 */
+  private readonly tracked = new Map<number, PsRow>();
+  private scanTimer: ReturnType<typeof setInterval> | null = null;
   exitedAt: number | null = null;
   exitCode: number | null = null;
   private nextId = 1;
@@ -116,6 +135,12 @@ export class Probe {
 
   now(): number {
     return Date.now() - this.t0;
+  }
+
+  /** 当前的 app-server 子进程；还没起（比如启动前就被拒跑）时抛错，收尾路径用 child 判断 */
+  get proc(): Subprocess {
+    if (!this.child) throw new Error("app-server 还没起");
+    return this.child;
   }
 
   private tap(dir: "out" | "in" | "err" | "note", line: string): void {
@@ -163,11 +188,15 @@ export class Probe {
       ALL_PROXY: proxy,
       NO_PROXY: "127.0.0.1,localhost",
     };
-    this.proc = Bun.spawn([this.codexBin, "app-server"], { cwd: this.work, env, stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
-    void this.proc.exited.then((code) => {
+    const child = Bun.spawn([this.codexBin, "app-server"], { cwd: this.work, env, stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
+    this.child = child;
+    void child.exited.then((code) => {
+      // restart() 之后旧进程的退出事件不能盖掉新进程的状态
+      if (this.child !== child) return;
       this.exitedAt = this.now();
       this.exitCode = code;
     });
+    this.scanTimer ??= setInterval(() => this.scan(), SCAN_MS);
     void this.pump(this.proc.stdout as ReadableStream<Uint8Array>, (l) => this.onLine(l));
     void this.pump(this.proc.stderr as ReadableStream<Uint8Array>, (l) => this.tap("err", l + "\n"));
     const init = await this.request("initialize", {
@@ -175,6 +204,8 @@ export class Probe {
       capabilities: { experimentalApi: this.opts.experimentalApi ?? true, requestAttestation: false },
     });
     if (init.error) throw new Error(`initialize 失败：${JSON.stringify(init.error)}`);
+    this.userAgent = init.result?.userAgent ?? null;
+    this.serverVersion = this.userAgent?.match(/^[^/\s]+\/(\S+)/)?.[1] ?? null;
   }
 
   private async pump(stream: ReadableStream<Uint8Array>, onLine: (l: string) => void): Promise<void> {
@@ -264,6 +295,7 @@ export class Probe {
 
   /** 关 stdin，量退出耗时；超过 limitMs 还活着就 SIGKILL 整组（记一笔） */
   async closeAndWait(limitMs = 10_000): Promise<number | null> {
+    this.scan();
     const at = this.now();
     (this.proc.stdin as import("bun").FileSink).end();
     const deadline = Date.now() + limitMs;
@@ -276,20 +308,114 @@ export class Probe {
     return this.exitedAt - at;
   }
 
-  killGroup(sig: NodeJS.Signals): void {
+  /**
+   * 场景主动停 app-server（整组信号）前先登记一次后代：停完它们就成了 ppid=1 的孤儿，再找不回来。
+   * 返回信号发出时刻（相对 t0），量退出耗时要从这里算，别把 ps 扫描的时间算进去
+   */
+  killGroup(sig: NodeJS.Signals): number {
+    if (this.child) this.scan();
+    const at = this.now();
+    if (this.child) this.kill(-this.child.pid, sig);
+    return at;
+  }
+
+  /** 只给 app-server 本身发信号（不是整组），同样先登记后代；返回信号发出时刻 */
+  signalServer(sig: NodeJS.Signals): number {
+    if (this.child) this.scan();
+    const at = this.now();
+    if (this.child) this.kill(this.child.pid, sig);
+    return at;
+  }
+
+  private kill(target: number, sig: NodeJS.Signals): void {
     try {
-      process.kill(-this.proc.pid, sig);
+      process.kill(target, sig);
     } catch (e) {
-      // 组已经没了（ESRCH）正是想要的结果，记一笔就行
-      this.note(`kill(-${this.proc.pid}, ${sig}): ${(e as Error).message}`);
+      // 目标已经没了（ESRCH）正是想要的结果，记一笔就行
+      this.note(`kill(${target}, ${sig}): ${(e as Error).message}`);
     }
   }
 
-  finish(result: unknown): void {
+  /** 把 app-server 的后代登记进 tracked：从 app-server 和已登记且仍是原进程的 pid 往下找 */
+  private scan(): void {
+    if (!this.child) return;
+    const rows = psSnapshot();
+    const roots = new Set([this.child.pid, ...this.liveTracked(rows).map((x) => x.pid)]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const x of rows) {
+        if (roots.has(x.pid) || !roots.has(x.ppid)) continue;
+        roots.add(x.pid);
+        this.tracked.set(x.pid, x);
+        grew = true;
+      }
+    }
+  }
+
+  /** 登记过、现在还活着、且 pgid 和命令名都没变（防 pid 复用）的后代 */
+  private liveTracked(rows = psSnapshot()): PsRow[] {
+    const byPid = new Map(rows.map((x) => [x.pid, x]));
+    return [...this.tracked.values()].filter((t) => {
+      const now = byPid.get(t.pid);
+      return !!now && now.pgid === t.pgid && now.comm === t.comm && now.comm !== "<defunct>";
+    });
+  }
+
+  private survivors(): string[] {
+    const self = this.child && this.exitedAt === null ? [`${this.child.pid}:app-server`] : [];
+    return [...self, ...this.liveTracked().map((x) => `${x.pid}:${x.comm.split("/").pop()}`)];
+  }
+
+  /** 对 app-server 的进程组，以及每个还活着的后代（它自己的进程组 + pid）发信号；不碰探针自己所在的组 */
+  private signalAll(sig: NodeJS.Signals, ownPgid: number | undefined): void {
+    if (this.child) this.kill(-this.child.pid, sig);
+    for (const x of this.liveTracked()) {
+      if (x.pgid > 1 && x.pgid !== ownPgid) this.kill(-x.pgid, sig);
+      this.kill(x.pid, sig);
+    }
+  }
+
+  /**
+   * 统一收尾（场景正常结束或中途抛错都走这里）：先登记一次后代 → EOF 等 2s → SIGTERM 等 1s → SIGKILL 等 1s。
+   * 每一步都覆盖 app-server 进程组和登记过的后代（MCP server、命令各在自己的进程组，Q0-6），返回每一步之后的存活者。
+   */
+  async cleanup(): Promise<Record<string, unknown>> {
+    if (this.scanTimer) clearInterval(this.scanTimer);
+    this.scanTimer = null;
+    if (!this.child) return { spawned: false };
+    this.scan();
+    const tracked = [...this.tracked.values()].map((x) => `${x.pid}:${x.comm.split("/").pop()}:pgid=${x.pgid}`);
+    const ownPgid = psSnapshot().find((x) => x.pid === process.pid)?.pgid;
+    if (this.exitedAt === null) {
+      try {
+        (this.child.stdin as import("bun").FileSink).end();
+      } catch (e) {
+        // stdin 已经关了：照样往下走信号步骤
+        this.note(`收尾关 stdin：${(e as Error).message}`);
+      }
+      await waitUntil(() => this.exitedAt !== null, 2_000);
+    }
+    const afterEof = this.survivors();
+    if (afterEof.length) this.signalAll("SIGTERM", ownPgid);
+    await waitUntil(() => this.survivors().length === 0, 1_000);
+    const afterTerm = this.survivors();
+    if (afterTerm.length) this.signalAll("SIGKILL", ownPgid);
+    await waitUntil(() => this.survivors().length === 0, 1_000);
+    return { spawned: true, tracked, afterEof, afterTerm, afterKill: this.survivors() };
+  }
+
+  /** 先落 result.json（原始结果 / 错误绝不因收尾出错而丢），再收尾，收尾报告进 probe.json */
+  async finish(result: unknown): Promise<void> {
+    writeFileSync(join(this.dir, "result.json"), JSON.stringify(result, null, 2) + "\n");
+    let cleanup: unknown;
+    try {
+      cleanup = await this.cleanup();
+    } catch (e) {
+      cleanup = { error: String((e as Error).stack ?? e) };
+    }
     this.fake?.stop();
     this.egress?.close();
-    if (this.exitedAt === null) this.killGroup("SIGKILL");
-    writeFileSync(join(this.dir, "result.json"), JSON.stringify(result, null, 2) + "\n");
+    writeFileSync(join(this.dir, "probe.json"), JSON.stringify({ userAgent: this.userAgent, cleanup }, null, 2) + "\n");
   }
 }
 
@@ -304,7 +430,7 @@ export function timeline(msgs: Msg[], from = 0): string[] {
 }
 
 /** ps 快照：pid、ppid、pgid、命令名 */
-export function psSnapshot(): Array<{ pid: number; ppid: number; pgid: number; comm: string }> {
+export function psSnapshot(): PsRow[] {
   const out = Bun.spawnSync(["ps", "-A", "-o", "pid=,ppid=,pgid=,comm="]).stdout.toString();
   return out
     .split("\n")
@@ -343,24 +469,32 @@ async function main(): Promise<void> {
   mkdirSync(runDir);
   const codexBin = arg("--codex") ?? Bun.which("codex");
   if (!codexBin) throw new Error("找不到 codex（PATH 里没有，也没给 --codex）");
-  const version = Bun.spawnSync([codexBin, "--version"], { env: { PATH: process.env.PATH ?? "" } }).stdout.toString().trim();
   const only = arg("--only")?.split(",");
   const repeat = Number(arg("--repeat") ?? "1");
-  writeFileSync(join(runDir, "meta.json"), JSON.stringify({ codexBin, version, only, repeat, startedAt: new Date().toISOString() }, null, 2));
-  console.log(`codex: ${codexBin} (${version}) → ${runDir}`);
+  // 版本号不另起 `codex --version`（那次启动不在隔离环境里）：取每个场景 initialize 回包里的 userAgent
+  const versions = new Set<string>();
+  const writeMeta = () =>
+    writeFileSync(join(runDir, "meta.json"), JSON.stringify({ codexBin, versions: [...versions], only, repeat, startedAt }, null, 2) + "\n");
+  const startedAt = new Date().toISOString();
+  writeMeta();
+  console.log(`codex: ${codexBin} → ${runDir}`);
   for (const [name, run] of Object.entries(SCENARIOS)) {
     if (only && !only.includes(name)) continue;
     for (let i = 0; i < repeat; i++) {
       const label = repeat > 1 ? `${name}-${i + 1}` : name;
       const p = new Probe(label, runDir, codexBin);
+      let result: unknown;
+      let ok = true;
       try {
-        const result = await run(p);
-        p.finish(result);
-        console.log(`✓ ${label}`, JSON.stringify(result).slice(0, 300));
+        result = await run(p);
       } catch (e) {
-        p.finish({ error: String((e as Error).stack ?? e) });
-        console.log(`✗ ${label}`, (e as Error).message);
+        ok = false;
+        result = { error: String((e as Error).stack ?? e) };
       }
+      await p.finish(result);
+      if (p.serverVersion) versions.add(p.serverVersion);
+      writeMeta();
+      console.log(`${ok ? "✓" : "✗"} ${label}`, JSON.stringify(result).slice(0, 300));
     }
   }
 }

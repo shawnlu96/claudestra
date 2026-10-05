@@ -38,6 +38,10 @@ type Responder = (req: RecordedRequest) => Reply | Promise<Reply>;
 
 export interface FakeResponses {
   baseUrl: string;
+  /**
+   * 已读完正文的请求，按**正文读完的先后**排列（剧本拿到的就是这条记录）。
+   * seq 是**到达顺序**（进 handler、读正文之前就分配，从 1 起、不重复）；并发时两者可能不同，要按到达排就按 seq 排序。
+   */
   requests: RecordedRequest[];
   stop(): void;
 }
@@ -128,20 +132,17 @@ async function readBody(req: Request): Promise<unknown> {
 
 export function startFakeResponses(responder: Responder, opts: { port?: number } = {}): FakeResponses {
   const requests: RecordedRequest[] = [];
+  let arrived = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: opts.port ?? 0,
     idleTimeout: 0,
     async fetch(req) {
+      // 序号必须在第一个 await 之前占住：读正文期间别的请求也会进来
+      const seq = ++arrived;
+      const at = Date.now();
       const url = new URL(req.url);
-      const rec: RecordedRequest = {
-        seq: requests.length + 1,
-        at: Date.now(),
-        method: req.method,
-        path: url.pathname + url.search,
-        headers: readHeaders(req.headers),
-        body: await readBody(req),
-      };
+      const rec: RecordedRequest = { seq, at, method: req.method, path: url.pathname + url.search, headers: readHeaders(req.headers), body: await readBody(req) };
       requests.push(rec);
       const reply = await responder(rec);
       if (reply.type === "json") return Response.json(reply.body, { status: reply.status ?? 200 });

@@ -379,8 +379,7 @@ async function eofRun(p: Probe, c: EofCase) {
   let exitMs: number | null;
   if (c.stop === "eof") exitMs = await p.closeAndWait(10_000);
   else {
-    const t = p.now();
-    p.killGroup(c.stop === "sigkill-group" ? "SIGKILL" : "SIGTERM");
+    const t = p.killGroup(c.stop === "sigkill-group" ? "SIGKILL" : "SIGTERM");
     await until(() => p.exitedAt !== null, 5_000);
     exitMs = p.exitedAt === null ? null : p.exitedAt - t;
   }
@@ -390,7 +389,6 @@ async function eofRun(p: Probe, c: EofCase) {
     await sleep(wait);
     survivors[`+${wait}ms`] = tree.filter((x) => alive(x.pid)).map((x) => `${x.pid}:${x.comm.split("/").pop()}`);
   }
-  for (const x of tree) if (alive(x.pid)) process.kill(x.pid, "SIGKILL");
   const self = before.find((x) => x.pid === p.proc.pid);
   return {
     ...c,
@@ -419,8 +417,7 @@ const sigterm_busy: Scenario = async (p) => {
   p.send("turn/start", { threadId, input: input("busy turn") });
   await p.waitFor((m) => m.method === "turn/started", 10_000);
   await sleep(300);
-  const at = p.now();
-  process.kill(p.proc.pid, "SIGTERM");
+  const at = p.signalServer("SIGTERM");
   for (let i = 0; i < 500 && p.exitedAt === null; i++) await sleep(20);
   return { exitAfterSigtermMs: p.exitedAt === null ? null : p.exitedAt - at, exitCode: p.exitCode };
 };
