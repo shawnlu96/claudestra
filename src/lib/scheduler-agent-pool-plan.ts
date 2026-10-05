@@ -7,13 +7,14 @@ import { peerFacts } from "./scheduler-agent-pool-peer.js";
 import { placementHistory, placeWithRetries } from "./scheduler-placement-tried.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
 import type { Away } from "./scheduler-placement-plan.js";
+import { LOCAL_LEASE_WAIT, LOCAL_PLACEMENT, placementPin } from "./scheduler-local-pin.js";
 
 function agentPoolFacts(s: PlannerSnapshot, since: number, role: PlaceRole, locksFree: boolean): PlacementFacts & { retries: ReturnType<typeof placementHistory>["retries"] } {
   const p = s.pool!;
   const pool = (p as typeof p & { localPool?: AgentPoolLoad }).localPool;
   return { remote: p.remote, peers: p.peers.map(peerFacts), repo: p.repo,
     local: { running: p.localWriters ?? s.workerCount, room: true, pool, ...(role !== "review" && s.author?.source === "local" ? { family: s.author.family } : {}) },
-    pin: typeof s.task.extra.placement === "string" ? s.task.extra.placement : null,
+    pin: placementPin(s.task.extra),
     lastPeer: p.lastPeer, writeLeasePeer: p.writeLeasePeer ?? null, locksFree, ...placementHistory(s, since) };
 }
 
@@ -31,14 +32,16 @@ export function agentPoolReview(s: PlannerSnapshot, since: number): Exclude<Away
 export function agentPoolWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">, locksFree: boolean): Away {
   if (!s.workflow) return null;
   const facts = agentPoolFacts(s, since, role, locksFree);
-  if (facts.pin === "local" && facts.writeLeasePeer) facts.pin = `peer:${facts.writeLeasePeer}`;
+  const pinnedHere = facts.pin === LOCAL_PLACEMENT;
   if (s.task.stage === "spec") {
     const local = placeAgentPool({ ...facts, peers: [], pin: null }, "fix", s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
   }
   if (!["build", "fix"].includes(s.task.stage)) return null;
-  if (!facts.writeLeasePeer && !facts.pin?.startsWith("peer:") && facts.pin === "local") {
-    const local = placeAgentPool({ ...facts, peers: [], pin: null }, "fix", s.author?.family ?? s.workflow.authorFamily);
+  if (pinnedHere) {
+    // An explicit local card is never sent out, and a peer's write lease is not relaxed into a second local writer either.
+    if (facts.writeLeasePeer) return { wait: LOCAL_LEASE_WAIT(facts.writeLeasePeer), code: "placement_pinned" };
+    const local = placeAgentPool({ ...facts, peers: [] }, "fix", s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
   }
   const placed: Placement = placeWithRetries(facts, role, s.workflow.authorFamily);

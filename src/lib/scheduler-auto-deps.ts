@@ -20,6 +20,7 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
+import { existingAuthorIdentity } from "./scheduler-existing-author.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
@@ -89,6 +90,18 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
     await Bun.sleep(3000);
   }
   return { kind: "unknown", reason: `${name} 已建，90 秒内没等到 session id` };
+}
+
+/**
+ * The card's named author is found, never created, so it takes no creation seat: missing, wrong family, proven identity
+ * or a proven conflict answer here; null = the row lacks identity fields and the full new-session gate still applies.
+ */
+async function existingAuthor(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult | null> {
+  const row = task.agent ? env.registryRow(task.agent) : undefined;
+  if (!row || runtimeFamily(row.runtime) !== family) return ensure(env, task, "author", family);
+  const id = await existingAuthorIdentity(task, row, family, env.git);
+  if (id.kind === "unproven") return null;
+  return id.kind === "conflict" ? { kind: "unknown", reason: `既存作者会话身份核对不过，不猜绑定：${id.reason}` } : refOf(task, "author", row, family);
 }
 
 async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
@@ -166,8 +179,9 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
-    ensure: (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
-      : localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
+    ensure: async (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
+      : (role === "author" ? await existingAuthor(env, task, family) : null)
+      ?? localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
       { registryPath, ledgerPath: db.filename, project: task.project, taskId: task.id }),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },

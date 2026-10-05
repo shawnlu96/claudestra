@@ -1,9 +1,10 @@
 import { quotaPoolTotals } from "./scheduler-agent-pool-quota.js";
-/** Bindings and formally created authors reserve project capacity; registry names alone cannot consume it. */
+/** Bindings, formally created authors and ticketed manual authors reserve project capacity; registry names alone cannot consume it. */
 import type { Database } from "bun:sqlite";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { zeroAgentCounts, type AgentPoolLoad } from "./scheduler-agent-pool.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
+import { hasStepsTable, MANUAL_TICKET } from "./scheduler-manual-author.js";
 
 const hasTable = (db: Database, name: string): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -48,6 +49,15 @@ export function localAgentPool(db: Database, project: string, totals: AgentLimit
         AND i.node IN ('restate','write','fix') AND i.status IN ('submitted','unknown'))`)
       .all(project, exceptTask ?? "") as { agent: string; family: AuthorFamily }[];
     for (const r of starts) if (!agents.has(r.agent)) { agents.add(r.agent); running[r.family]++; }
+  }
+  // An unbound manual author working the card holds one seat on its manager-written step ticket; other manual agents hold none.
+  if (hasStepsTable(db) && hasTable(db, "task_workflows")) {
+    const manual = db.query(`SELECT DISTINCT t.agent, w.authorFamily AS family FROM tasks t JOIN task_workflows w ON w.taskId=t.id
+      WHERE t.project=? AND t.id!=? AND t.agent IS NOT NULL AND t.agent!='' AND (t.assigneeKind IS NULL OR t.assigneeKind='agent')
+      AND t.stage IN ('spec','restate','build','fix') AND ${MANUAL_TICKET}
+      AND NOT EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId=t.id AND s.role='author' AND s.state!='retired')`)
+      .all(project, exceptTask ?? "") as { agent: string; family: AuthorFamily }[];
+    for (const r of manual) if (!agents.has(r.agent)) { agents.add(r.agent); running[r.family]++; }
   }
   return { totals, running };
 }
