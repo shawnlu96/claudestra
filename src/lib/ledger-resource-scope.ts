@@ -75,12 +75,13 @@ function writers(db: Database, task: LedgerTask, intents: SchedulerIntent[], eve
   }
   const writingSteps = stepsOf(db, task).filter(s => ["restate", "write", "fix"].includes(s.step));
   for (const s of writingSteps) if (!["assigned", "delivered", "done"].includes(s.state)) p.reasons.push("作者步骤状态未知");
+  // Derived steps only repeat historical task names. Explicit unfinished work still needs a retired author binding.
+  for (const s of writingSteps) if (!s.derived && s.state !== "done" && !sessions.some(binding => binding.role === "author" &&
+    bareCanonicalName(binding.agent) === bareCanonicalName(s.executor) && retired(binding))) p.reasons.push(`作者步骤未结：${s.step} / ${s.executor}`);
+  // Historical names select registry entries to inspect; absence of a session row does not invent a retirement obligation.
   const names = new Set([task.agent, task.assignee, ...writingSteps.map(s => s.executor), ...sessions.filter(s => s.role === "author").map(s => s.agent),
     ...intents.filter(i => i.action === "dispatch" && !isPoolIntent(i) && (i.status === "done" || i.attempts > 0)).map(i => i.recipient)]
     .filter((n): n is string => !!n));
-  for (const n of names) if (!sessions.some(s => s.role === "author" && bareCanonicalName(s.agent) === bareCanonicalName(n) && retired(s))) {
-    p.reasons.push(`旧作者绑定 ${n} 缺正式退役依据`);
-  }
   const state = readJsonStateSync(input.registryPath ?? REGISTRY_PATH, v => object(v) && object(v.agents) && Object.values(v.agents).every(object));
   if (state.status !== "ok") { p.reasons.push(`registry 无法核实：${state.status}`); return; }
   const wanted = new Set([...names, ...sessions.map(s => s.agent)].map(bareCanonicalName));

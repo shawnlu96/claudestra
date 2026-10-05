@@ -8,7 +8,6 @@ import { createTask, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
-import { beginRetire } from "../src/lib/scheduler-sessions.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const f of cleanups.splice(0)) f(); });
@@ -38,7 +37,7 @@ function fixture(ran = false) {
 }
 
 test("pause, narrow, release all, restore registered scope and replay: only file claims change", () => {
-  const f = fixture();
+  const f = fixture(true);
   f.scope(["a.ts"]);
   const before = f.snapshot(), dry = reconcileFileScope(f.db, f.ctx, f.input());
   expect(dry).toMatchObject({ dryRun: true, executable: true, old: ["a.ts", "b.ts", "c.ts"], target: ["a.ts"], remove: ["b.ts", "c.ts"] });
@@ -122,22 +121,47 @@ test.each(["tmux", "peer"])("active %s author and fake retired binding refuse", 
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/退役/);
 });
 
-test.each(["agent", "peer"])("%s step author without a scheduler session is still a binding", kind => {
+test.each(["agent", "peer"])("unfinished %s step without a scheduler session still prevents release", kind => {
   const f = fixture(); f.scope([]);
   f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
     VALUES ('T', 'write', 'writer', ?, 'assigned', 1, 1)`).run(kind);
   const before = f.snapshot();
-  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/旧作者绑定/);
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/作者步骤未结/);
   expect(f.snapshot()).toEqual(before);
 });
 
-test("a dispatched paused author has no legal retirement path: preserve locks under the revised acceptance rule", () => {
+test.each(["recipient", "agent", "assignee", "done-step", "attempted-cancelled"])(
+  "historical %s without session bindings permits reconciliation", source => {
+    const f = fixture(true); f.scope([]);
+    if (source === "agent" || source === "assignee") f.db.query(`UPDATE tasks SET ${source} = 'agent-w' WHERE id = 'T'`).run();
+    if (source === "done-step") f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
+      VALUES ('T', 'write', 'writer@fake-peer', 'peer', 'done', 1, 1)`).run();
+    if (source === "attempted-cancelled") f.db.query("UPDATE scheduler_intents SET status = 'cancelled' WHERE id = 'real-plan'").run();
+    const before = f.snapshot();
+    expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
+    expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: true, reasons: [] });
+    expect(f.snapshot()).toEqual(before);
+    expect(reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toMatchObject({ ok: true, remove: ["a.ts", "b.ts", "c.ts"] });
+  },
+);
+
+test.each(["assigned", "delivered", "unknown"])("explicit author step %s is not merely a historical name", state => {
   const f = fixture(true); f.scope([]);
+  f.db.exec("PRAGMA ignore_check_constraints = ON");
+  f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
+    VALUES ('T', 'fix', 'agent-w', 'agent', ?, 1, 1)`).run(state);
   const before = f.snapshot();
-  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false,
-    reasons: ["旧作者绑定 agent-w 缺正式退役依据"] });
-  expect(() => beginRetire(f.db, f.ctx, "T")).toThrow(/没收尾/);
-  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/正式退役/);
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false });
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/作者步骤/);
+  expect(f.snapshot()).toEqual(before);
+});
+
+test.each(["active", "creating", "stopped", "unknown"])("historical recipient still checks registry liveness: %s", status => {
+  const f = fixture(true); f.scope([]);
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { w: { status, sessionId: "old-session" } } }));
+  const before = f.snapshot();
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false });
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
   expect(f.snapshot()).toEqual(before);
 });
 

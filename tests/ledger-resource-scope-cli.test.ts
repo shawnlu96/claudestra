@@ -49,7 +49,7 @@ function cliFixture(ran = false) {
 }
 
 test("real CLI: default preview, explicit preview, PM apply, idempotent replay", async () => {
-  const f = cliFixture(), before = f.snapshot();
+  const f = cliFixture(true), before = f.snapshot();
   for (const flags of [[], ["--dry-run"]]) {
     expect(await f.cli(flags)).toMatchObject({ ok: true, dryRun: true, executable: true, remove: ["old.ts"], add: [] });
     expect(f.snapshot()).toEqual(before);
@@ -66,8 +66,9 @@ test.each([false, true])("explicit preview %j never repairs unrelated assignee d
   const before = f.snapshot();
   await f.cli(explicit ? ["--dry-run"] : []);
   expect(f.snapshot()).toEqual(before);
-  expect(await f.cli(["--apply"])).toMatchObject({ ok: false });
-  expect(f.snapshot()).toEqual(before);
+  expect(await f.cli(["--apply"])).toMatchObject({ ok: true });
+  expect(f.db.query("SELECT assigneeKind, assignee FROM tasks WHERE id = 'MQ'").get())
+    .toEqual({ assigneeKind: "agent", assignee: "stale" });
 });
 
 test("read classification, old schema and missing registry/database never initialize state", async () => {
@@ -154,11 +155,27 @@ test.each(["local", "peer", "peer-step", "registry-io", "conflict"])("real CLI %
   expect(f.snapshot()).toEqual(before);
 });
 
-test("real CLI refuses a dispatched paused author with no formal retirement, even with empty registry", async () => {
-  const f = cliFixture(true), before = f.snapshot();
-  expect(await f.cli()).toMatchObject({ ok: true, executable: false, reasons: ["旧作者绑定 agent-w 缺正式退役依据"] });
-  expect(await f.cli(["--apply"])).toMatchObject({ ok: false, code: "conflict" });
+test("real CLI releases and reacquires scope after dispatch with historical names but no session binding", async () => {
+  const f = cliFixture(true);
+  f.db.query("UPDATE tasks SET agent = 'agent-old', assignee = 'agent-w', assigneeKind = 'agent' WHERE id = 'MQ'").run();
+  f.db.query(`INSERT INTO task_steps (taskId, step, executor, executorKind, state, createdAt, updatedAt)
+    VALUES ('MQ', 'write', 'writer@fake-peer', 'peer', 'done', 1, 1)`).run();
+  const before = f.snapshot();
+  expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
+  expect(await f.cli()).toMatchObject({ ok: true, executable: true, reasons: [], remove: ["old.ts"] });
   expect(f.snapshot()).toEqual(before);
+  expect(await f.cli(["--apply"])).toMatchObject({ ok: true, duplicate: false });
+  const stable = () => ["tasks", "task_steps", "scheduler_intents", "scheduler_sessions", "lend_write_leases"]
+    .map(table => f.db.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
+  setTask(f.db, { actor: "owner" }, { id: "MQ", rev: 2, patch: { extra: { fileGlobs: ["old.ts", "keep.ts"] } } });
+  const preserved = stable();
+  expect(await f.cli(["--rev", "3", "--apply"])).toMatchObject({ ok: true, add: ["old.ts"], remove: [] });
+  expect(stable()).toEqual(preserved);
+  expect(f.db.query("SELECT resource FROM scheduler_resources ORDER BY resource").all())
+    .toEqual(["keep.ts", "old.ts", "slot:p:0"].map(resource => ({ resource })));
+  const applied = f.snapshot();
+  expect(await f.cli(["--rev", "3", "--apply"])).toMatchObject({ ok: true, duplicate: true });
+  expect(f.snapshot()).toEqual(applied);
 });
 
 test.each(["{", "[]"])("real CLI corrupt registry %s reports structured conflict", async raw => {
