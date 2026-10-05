@@ -192,8 +192,9 @@ function mapAgent(a: ApiAgent): AgentSession {
  * 大总管在桥接侧有多个来源（历史条目 agent-master、注入的 master、cmdList 补条目）——只留一条：丢掉带前缀的历史条目，
  * 同名只保留第一个带 runtime 的（注入条目排最前、带实测字段）。已归档的不进工作列表。bridge 不可达时抛错（无 mock 回退）。
  */
-export async function loadAgents(): Promise<AgentSession[]> {
-  const json = await api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs: 5000 });
+/** signal / timeoutMs 由 features/chat/agent-list-loader.ts 给（可取消、超时见 AGENT_LIST_TIMEOUT_MS）；缺省保持原 5s */
+export async function loadAgents(signal?: AbortSignal, timeoutMs = 5000): Promise<AgentSession[]> {
+  const json = await api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal });
   const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
   const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
   const keepMaster = all.find((a) => isMaster(a) && typeof a.runtime === "string" && a.runtime) ?? all.find(isMaster);

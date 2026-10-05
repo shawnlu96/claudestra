@@ -15,7 +15,7 @@
  * web 前端可以不依赖 Discord 自行渲染进度线）。
  *
  * 结束判定：subagent 认记录里的真信号（答复 / 中断 / meta 的 stoppedByUser，规则见 lib/subagent-progress.ts），
- * 在跑工具时静默再久也不收尾；后台 shell 只认 CC 追加的独立末行 `[exited with code N]`（lib/bg-shell-progress.ts），
+ * 在跑工具时静默再久也不收尾；后台 shell 只认 CC 追加的独立末行 `[exited with code N]` / `[killed]`（lib/bg-shell-progress.ts），
  * 静默再久也不收尾（重定向日志的 bun test 可以十几分钟不写一字）；输出文件消失 = 状态未知，不当成功；
  * 输出读不到（权限 / IO）不收尾、照旧重试，但经事件 / 快照的 progress.unreadable 告诉前端「状态未知」。
  * 已跟踪 shell 的最小结局按 agent-session 持久化，web 刷新 / bridge 重启后据此还原。
@@ -39,7 +39,7 @@ import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
-import { feedShellChunk, newShellProgress, settleShellTail, type ShellProgress } from "../lib/bg-shell-progress.js";
+import { feedShellChunk, newShellProgress, settleShellTail, type ShellEnd, type ShellProgress } from "../lib/bg-shell-progress.js";
 import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress } from "../lib/subagent-progress.js";
 
 const POLL_MS = 10_000;
@@ -48,6 +48,7 @@ const SUBAGENT_SILENT_LIMIT_MS = 30 * 60_000; // subagent 既没交答复也没�
 const MAX_MSG_LEN = 1900;
 const MAX_ACTIVE_PER_AGENT = 8; // 防 thread 轰炸（workflow 大扇出时超出的只发事件）
 const MAX_TEXT_PER_ITEM = 400; // subagent 单条文本进子区的截断长度
+const SHELL_MISSING_GRACE_MS = 60_000; // shell 启动 / 上次有输出后这么久内输出文件不见了，只算「还没出现」（见 consume）
 
 type BgActivityKind = "subagent" | "shell";
 
@@ -77,8 +78,8 @@ interface Activity {
   progress: SubagentProgress;
   /** shell 才用：跨读的半行 / 流式解码状态 */
   shell: ShellProgress;
-  /** shell 读到独立退出行后的退出码（0 / 非 0 都是「进程已结束」） */
-  exitCode: number | null;
+  /** shell 读到独立终止行后的结局：退出行（0 / 非 0 都是「进程已结束」）或 [killed]（被结束） */
+  end: ShellEnd | null;
   /** shell 输出文件当前读不了（权限 / IO）：照旧每轮重试，同时经事件 / 快照告诉前端「状态未知」，读通后清掉 */
   unreadable: boolean;
 }
@@ -230,11 +231,11 @@ async function startActivity(
     meta,
     progress: EMPTY_PROGRESS,
     shell: newShellProgress(),
-    exitCode: null,
+    end: null,
     unreadable: false,
   };
   activities.set(filePath, act);
-  if (kind === "shell") await shellResults.remember(act);
+  if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
@@ -254,9 +255,15 @@ async function consume(act: Activity): Promise<void> {
   try {
     size = (await stat(act.filePath)).size;
   } catch (e) {
-    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到退出行就不知道进程是否结束 → 状态未知（不是成功）。
+    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到终止行就不知道进程是否结束 → 状态未知（不是成功）。
     // shell 的其它读失败（权限 / IO）不下结论（下轮再读），但要让前端知道已看不到它了
-    if (act.kind === "shell" && (e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
+    if (act.kind === "shell") {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
+      // 刚启动 / 刚有输出就不见：多半还没建出来或正被重建（磁盘满时实见），宽限期内只算没出现，免得一闪就判死
+      if (deps.now() - act.lastGrowth < SHELL_MISSING_GRACE_MS) return;
+      // 判了 unknown 之后文件若又出现，tick 会把它当新文件重新跟一遍、按真实终止行更正结局；一直不出现就停在 unknown
+      seen.delete(act.filePath);
+    }
     await finalize(act, act.kind === "shell" ? "unknown" : "idle", "文件已消失");
     return;
   }
@@ -301,8 +308,8 @@ function scheduleFlush(act: Activity): void {
   }
 }
 
-/** shell：增量读字节，半行 / 多字节靠 ShellProgress 拼回；读到独立退出行记下退出码（tick 里收尾）。
- *  本轮没增长且残尾恰是完整退出行（CC 没补换行）→ 也认 */
+/** shell：增量读字节，半行 / 多字节靠 ShellProgress 拼回；读到独立终止行记下结局（tick 里收尾）。
+ *  本轮没增长且残尾恰是完整终止行（CC 没补换行）→ 也认 */
 async function consumeShell(act: Activity, size: number): Promise<void> {
   if (size > act.offset) {
     let buf: Uint8Array;
@@ -316,7 +323,7 @@ async function consumeShell(act: Activity, size: number): Promise<void> {
     act.lastGrowth = deps.now();
     const r = feedShellChunk(act.shell, buf);
     act.queue.push(...r.lines);
-    act.exitCode = r.exitCode;
+    act.end = r.end;
   } else {
     // 没新字节时 stat 照样成功，「读得到」要单独确认，否则 chmod 000 的文件会被误报恢复
     setUnreadable(act, !(await access(act.filePath, fsConstants.R_OK).then(() => true, () => false)));
@@ -324,7 +331,7 @@ async function consumeShell(act: Activity, size: number): Promise<void> {
     const tail = settleShellTail(act.shell);
     if (tail) {
       act.queue.push(tail.line);
-      act.exitCode = tail.exitCode;
+      act.end = tail.end;
     }
   }
   scheduleFlush(act);
@@ -385,7 +392,8 @@ function progressView(act: Activity) {
   return { startedTs: act.startedAt, lastTs: act.lastGrowth, ...(act.unreadable ? { unreadable: true } : {}) };
 }
 
-/** 收尾状态：subagent 沿用 done / stopped / idle；shell 只有 done（读到退出行，退出码另带）与 unknown（输出文件消失，不知结局） */
+/** 收尾状态：subagent 沿用 done / stopped / idle；shell 有 done（读到退出行，退出码另带）、stopped（读到 [killed]）、
+ *  unknown（输出文件消失，不知结局） */
 type FinalStatus = "done" | "stopped" | "idle" | "unknown";
 
 async function finalize(act: Activity, status: FinalStatus = "idle", reason: string = status): Promise<void> {
@@ -396,22 +404,25 @@ async function finalize(act: Activity, status: FinalStatus = "idle", reason: str
   const t0 = act.progress.firstTs ?? act.startedAt;
   const durationMs = (status === "done" ? (act.progress.lastTs ?? deps.now()) : deps.now()) - t0;
   const mins = (durationMs / 60_000).toFixed(1);
+  const exitCode = act.end?.exitCode ?? null;
   console.log(`🧵 bg 活动结束: ${act.agentName} ${basename(act.filePath)}（${mins}min, ${reason}）`);
   recordMetric("bg_activity_completed", { agent: act.agentName, meta: { kind: act.kind } });
   emitEvent({
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_completed",
-    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, ...(act.kind === "shell" ? { exitCode: act.exitCode } : {}) },
+    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, ...(act.kind === "shell" ? { exitCode } : {}) },
   });
-  if (act.kind === "shell") await shellResults.remember(act, durationMs, status === "done" ? "done" : "unknown");
+  if (act.kind === "shell") await shellResults.remember({ ...act, exitCode }, durationMs, act.end?.status ?? "unknown");
   if (act.threadId && act.adapter) {
     const head =
       act.kind === "subagent"
         ? `${{ done: "✅", stopped: "⏹", idle: "⏸", unknown: "❔" }[status]} subagent 结束`
-        : act.exitCode === null
-          ? "❔ 后台任务状态未知（输出文件已消失，无法确认是否结束）"
-          : `${act.exitCode === 0 ? "✅" : "❌"} 后台任务已退出 · exit ${act.exitCode}`;
+        : act.end?.status === "stopped"
+          ? "⏹ 后台任务已停止（被结束）"
+          : exitCode === null
+            ? "❔ 后台任务状态未知（输出文件已消失，无法确认是否结束）"
+            : `${exitCode === 0 ? "✅" : "❌"} 后台任务已退出 · exit ${exitCode}`;
     try {
       await act.adapter.send(act.threadId, {
         text: `${head} · ${mins}min${act.eventCount ? ` · ${act.eventCount} 条动态` : ""}`,
@@ -503,8 +514,8 @@ async function tickInner(): Promise<void> {
     await consume(act).catch(() => {});
     if (act.finished) continue;
     if (act.kind === "shell") {
-      // 只认退出行；静默多久都保持跟踪（不按时间收尾）
-      if (act.exitCode !== null) await finalize(act, "done", `exit ${act.exitCode}`).catch(() => {});
+      // 只认终止行；静默多久都保持跟踪（不按时间收尾）
+      if (act.end) await finalize(act, act.end.status, act.end.status === "done" ? `exit ${act.end.exitCode}` : "killed").catch(() => {});
       continue;
     }
     const silentMs = deps.now() - act.lastGrowth;
