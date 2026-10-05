@@ -146,12 +146,14 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   return null;
 }
 
-/** Revalidate after each external await: a retired binding alone does not authorize effects for a moved card. */
+/** A committed retirement survives card drift; replacement creation still needs current CAS and safety authorization. */
 function assertSwapCurrent(db: Database, intent: SchedulerIntent): void {
   const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
-  if (task.stage !== "review" || task.rev !== intent.taskRev || task.specRev !== intent.specRev || task.headSHA !== intent.head ||
-    workflow?.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "换审查会话期间卡已变化，先重算");
-  if (openRefusal(listEvents(db, { project: task.project, target: task.id }))) {
+  const events = listEvents(db, { project: task.project, target: task.id });
+  const retiring = intent.action === "review_swap" && latestReviewerSwap(events)?.data.intentId === intent.id;
+  if (workflow?.mode !== "auto" || (!retiring && (task.stage !== "review" || task.rev !== intent.taskRev || task.specRev !== intent.specRev ||
+    task.headSHA !== intent.head || workflow.specRev !== task.specRev))) throw new LedgerError("conflict", "换审查会话期间卡已变化，先重算");
+  if (openRefusal(events)) {
     throw new LedgerError("conflict", "本卡有未处置的模型安全拒绝，不自动更换审查员");
   }
 }

@@ -43,7 +43,9 @@ try {
   return JSON.parse(out.trim());
 }
 
-const baseEnv = () => ({ PATH: process.env.PATH, TMPDIR: process.env.TMPDIR });
+const baseEnv = () => ({ PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: process.env.HOME,
+  CLAUDESTRA_STATE_DIR: process.env.CLAUDESTRA_STATE_DIR, CLAUDESTRA_RUNTIME_DIR: process.env.CLAUDESTRA_RUNTIME_DIR,
+  BRIDGE_URL: process.env.BRIDGE_URL });
 
 test("archive / kill / create receive exactly the adopted parent lease; the created agent inherits none", async () => {
   const w = await world();

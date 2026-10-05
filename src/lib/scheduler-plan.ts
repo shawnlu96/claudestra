@@ -43,6 +43,8 @@ interface ReviewDispatchProof {
 export interface PlannerSnapshot {
   task: LedgerTask;
   workflow: TaskWorkflow | null;
+  /** Latest delivered head's done remote write/fix evidence; absent/null is unknown, never a workflow default. */
+  remoteAuthorFamily?: AuthorFamily | null;
   events: readonly LedgerEvent[];
   intents: readonly SchedulerIntent[];
   blockedBy: readonly string[];

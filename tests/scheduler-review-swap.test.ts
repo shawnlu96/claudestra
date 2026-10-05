@@ -73,7 +73,7 @@ async function newWriter(f: ReturnType<typeof autoFixture>, family: "claude" | "
   return agent;
 }
 
-async function scenario(security = false, history = false, to: "claude" | "codex" = "claude", author = "agent-task-one") {
+export async function scenario(security = false, history = false, to: "claude" | "codex" = "claude", author = "agent-task-one", remote = false) {
   const from = to === "claude" ? "codex" : "claude";
   const runtime = (family: string) => ({ runtime: family === "codex" ? "codex" : "claude-code", transport: family === "codex" ? "acp" : "tmux" });
   const f = autoFixture({ reviewerRuntime: runtime(to).runtime });
@@ -115,7 +115,8 @@ async function scenario(security = false, history = false, to: "claude" | "codex
     editRegistry((r) => { Object.assign(r.agents[author], runtime(to)); });
   }
   await f.tick();
-  expect(await f.cli(author, "deliver", "T1", "--from", "fix", "--head", H2, "--text", "复现测试：FAM1a 先红后绿")).toMatchObject({ ok: true });
+  expect(await f.cli(author, "deliver", "T1", "--from", "fix", "--head", H2,
+    "--dedup", remote ? `lend-deliver:remote-write:${H2}` : "local-delivery", "--text", "复现测试：FAM1a 先红后绿")).toMatchObject({ ok: true });
   if (history) await resume(f);
   expect(f.task().round).toBe(history ? 4 : 2);
 
@@ -163,7 +164,7 @@ async function scenario(security = false, history = false, to: "claude" | "codex
   return { f, verdict, effects, effectsDeps, state, cli, tick, hello, snapshot, swaps, peer, policy, editRegistry };
 }
 
-async function finishSwap(p: Awaited<ReturnType<typeof scenario>>) {
+export async function finishSwap(p: Awaited<ReturnType<typeof scenario>>) {
   expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("已归档") });
   expect(taskWorkerRefs(p.f.db, "T1").reviewer).toBeNull();
   expect(await p.tick()).toMatchObject({ step: "session", detail: "旧审查已更换" });
@@ -497,22 +498,6 @@ for (const missing of ["slots", "grant", "repo", "expired"] as const) {
       expect(p.effects).toEqual(["archive:agent-rv-t1", "kill:agent-rv-t1"]);
       p.hello("Sekai");
       expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
-    } finally { p.f.close(); }
-  });
-}
-
-for (const field of ["headSHA", "specRev", "rev"] as const) {
-  test(`FAM1a: ${field} drift after archive cannot confirm retirement or dispatch`, async () => {
-    const p = await scenario(false, true, "codex");
-    try {
-      expect(await p.tick()).toMatchObject({ step: "waiting" });
-      const id = String(p.swaps()[0].data.intentId);
-      p.f.db.query(`UPDATE tasks SET ${field} = ? WHERE id = 'T1'`).run(field === "headSHA" ? H1 : p.f.task()[field] + 1);
-      await expect(reviewSwapStep(p.f.db, p.f.at("scheduler"), id, 2, p.effectsDeps)).rejects.toThrow(/已变化/);
-      expect(swappedSession(p.f.db, id).killReceipt).toBeNull();
-      expect(getIntent(p.f.db, id)?.status).toBe("submitted");
-      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
-      expect(p.effects).toEqual(["archive:agent-rv-t1"]);
     } finally { p.f.close(); }
   });
 }
