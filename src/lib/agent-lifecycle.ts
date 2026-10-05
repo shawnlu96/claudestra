@@ -182,7 +182,9 @@ export function planLifecycle(input: PlanInput): Plan {
   const cards = new Map(input.cards.map((c) => [c.id, c]));
   const all = workers(input);
   const plan: Plan = { actions: [], memory: [], cleanups: [], frozen: [], kept: [], live: all.filter((w) => w.facts.running).length, swapPct: input.swapPct,
-    registerFailed: unresolvedRegisterFailures(input) };
+    registerFailed: 0 };
+  const failed = unresolvedRegisterFailures(input);
+  plan.registerFailed = failed.size;
   const recentMs = input.policy.recentTurnMin * MIN;
   // a stopped agent whose activity is unknown (no session file left) cannot have had a turn; a running one might
   const recent = (f: AgentFacts) => f.turnActive || (f.idleMs !== null ? f.idleMs < recentMs : f.running);
@@ -193,6 +195,7 @@ export function planLifecycle(input: PlanInput): Plan {
     const card = w.taskId ? cards.get(w.taskId) : undefined;
     if (card?.frozen) { plan.frozen.push({ agent: w.facts.name, taskId: card.id }); continue; }
     if (card?.extraError) { keep(w, `卡 ${card.id} 的 extra 读不出（${card.extraError}），冻结与否不明，跳过`); continue; }
+    if (w.facts.sessionId && failed.has(`${w.facts.name}\0${w.facts.sessionId}`)) { keep(w, "登记失败，未打 worker 标签，留给 PM 处理，不自动收"); continue; }
     if (recent(w.facts)) continue;
     const conflict = usedElsewhere(w, cards) ?? sessionMismatch(w);
     if (conflict) { keep(w, conflict); continue; }
@@ -224,14 +227,13 @@ export function planLifecycle(input: PlanInput): Plan {
 }
 
 /** A failure stays PM's until the agent no longer runs that session, or runs it registered (worker_agents) and tagged kind=worker. */
-function unresolvedRegisterFailures(input: PlanInput): number {
-  const open = new Set((input.registerFailed ?? []).filter((f) => {
+function unresolvedRegisterFailures(input: PlanInput): Set<string> {
+  return new Set((input.registerFailed ?? []).filter((f) => {
     const a = input.agents.find((x) => x.name === f.agent && x.sessionId === f.sessionId);
     if (!a) return false;
     const registered = input.index.get(a.name)?.links.some((l) => l.source === "worker_agents" && l.sessionId === f.sessionId);
     return !registered || a.kind !== "worker";
   }).map((f) => `${f.agent}\0${f.sessionId}`));
-  return open.size;
 }
 
 /** scheduler-retire.ts's one definition of "stopped for good", fed from planner facts (a window or ACP host running = not stopped). */

@@ -416,6 +416,19 @@ describe("registration failures (create kept the agent for PM)", () => {
     expect(lifecycleLine(plan, "observe")).toContain("/ 登记失败 1（lifecycle observe）");
     expect(plan.actions).toEqual([]); // never collected by the lifecycle: PM's to handle
   });
+
+  test("ledger registered but the registry tag failed: verified card, idle 1h, still kept for PM and never collected; tagging it releases it", () => {
+    const { db, card } = ledger();
+    card("E2", "verified");
+    registerWorker(db, { agent: "agent-half", sessionId: "s", taskId: "E2", role: "reviewer", createdBy: "agent-pm", now: 5 });
+    recordRegisterFailure(db, { agent: "agent-half", sessionId: "s", taskId: "E2", role: "reviewer", createdBy: "agent-pm", reason: "saveRegistry failed" });
+    const plan = planLifecycle(input(db, [agent("agent-half", 1)], { registerFailed: registerFailures(db) }));
+    expect([plan.actions, plan.memory, plan.registerFailed]).toEqual([[], [], 1]);
+    expect(plan.kept.map((k) => k.agent)).toEqual(["agent-half"]);
+    // PM tagged it: the failure is resolved and the verified card's agent is collected as usual
+    const fixed = planLifecycle(input(db, [agent("agent-half", 1, { kind: "worker" })], { registerFailed: registerFailures(db) }));
+    expect([fixed.registerFailed, fixed.actions.map((a) => a.agent)]).toEqual([0, ["agent-half"]]);
+  });
 });
 
 describe("observe reads without writing", () => {
