@@ -101,11 +101,12 @@ function readManualFacts(db: Database, taskId: string, svc: ServiceFacts): Manua
     if (frozen.frozen) return { cls: "frozen", why: frozen.reason || "项目合并队列冻结" };
     if (o.cls === "held") return o;
     if (feature?.status === "paused") return { cls: "held", why: `feature ${feature.id} 已暂停` };
-    if (hold) return { cls: "provider_refusal", why: `模型安全拒绝留证 #${hold.seq} 未处置：${hold.text}`.slice(0, 300) };
     if (asks.length) return { cls: "approval_wait", why: `待审批 ask：${asks.map((a) => a.id).join("、")}` };
     const out = intents.filter((i) => i.status === "submitted");
     if (out.length) return { cls: "external_wait", why: `在途意图：${out.map((i) => i.id).join("、")}` };
     if (blocked.length) return { cls: "deps_wait", why: `等待前置任务：${blocked.join("、")}` };
+    // After every normal wait: a refusal record with an approval ask / order / dep still pending is that wait, not an unattended refusal.
+    if (hold) return { cls: "provider_refusal", why: `模型安全拒绝留证 #${hold.seq} 未处置：${hold.text}`.slice(0, 300) };
     return o;
   };
   return { project: task.project, taskId: task.id, stage: task.stage, agent: task.agent ?? null, taskRev: task.rev, workflowRev: wf.rev,

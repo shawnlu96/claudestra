@@ -141,6 +141,28 @@ describe("waiting is not unattended", () => {
     expect(await only(deps())).toMatchObject({ cls: "frozen", action: "none", why: expect.stringContaining("发版冻结") });
     expect(sent).toEqual([]);
   });
+  test("an open refusal record does not outrank a normal wait: an ask or an order out is still waiting (wait-race r2)", async () => {
+    takeover();
+    appendEvent(db, at("scheduler"), { project: P, target: T, kind: "escalate", text: "审查模型拒审", data: { op: "model_safety_hold" } });
+    db.query(`INSERT INTO asks (id, project, taskId, fromAgent, fromChannelId, source, kind, title, expiresAt, state, createdAt, updatedAt)
+      VALUES ('ask-r', ?, ?, ?, 'c', 'reply', 'authorize', '拒审后要不要换审', 9e15, 'open', 1, 1)`).run(P, T, PM);
+    expect(await only(deps())).toMatchObject({ cls: "approval_wait", action: "none" });
+    db.query("UPDATE asks SET state = 'answered'").run();
+    db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES ('ri-1', ?, ?, 'review', 'dispatch', 1, 1, 1, 1, NULL, 2, 'submitted', 'd', 1, 1)`).run(T, P);
+    expect(await only(deps())).toMatchObject({ cls: "external_wait", action: "none" });
+    expect([sent.length, claims().length]).toEqual([0, 0]);
+  });
+
+  test("an approval ask that lands between the read and the claim on a refused card: raced, nothing sent (wait-race r2)", async () => {
+    takeover();
+    appendEvent(db, at("scheduler"), { project: P, target: T, kind: "escalate", text: "审查模型拒审", data: { op: "model_safety_hold" } });
+    const ask = writerBeforeClaim((o) => o.query(`INSERT INTO asks (id, project, taskId, fromAgent, fromChannelId, source, kind, title, expiresAt, state, createdAt, updatedAt)
+      VALUES ('ask-r2', ?, ?, ?, 'c', 'reply', 'authorize', '拒审后要不要豁免', 9e15, 'open', 1, 1)`).run(P, T, PM));
+    expect(await only(deps({ db: ask }))).toMatchObject({ action: "raced", why: expect.stringContaining("审批等待") });
+    expect([sent.length, claims().length]).toEqual([0, 0]);
+    expect(await only(deps())).toMatchObject({ cls: "approval_wait", action: "none" });
+  });
 });
 
 describe("on: one prepared card per state version", () => {
