@@ -48,7 +48,7 @@ export class StartFailure extends Error {
 }
 
 /** 这个端口此刻能不能在回环上绑：能绑 → null；被占 → "EADDRINUSE"；别的错误原样抛（不当成被占） */
-function bindProbe(port: number): "EADDRINUSE" | null {
+export function bindProbe(port: number): "EADDRINUSE" | null {
   try {
     Bun.listen({ hostname: "127.0.0.1", port, socket: { data() {} } }).stop(true);
     return null;
