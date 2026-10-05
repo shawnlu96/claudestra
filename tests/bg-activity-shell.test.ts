@@ -11,7 +11,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { activeBgTasksFor, hasActiveBgActivities, pollBgActivitiesForTest } from "../src/bridge/bg-activity-watcher";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus";
-import { projectJsonlPath } from "../src/lib/jsonl-cost";
+import { projectJsonlPath, subagentsDir } from "../src/lib/jsonl-cost";
 import { ShellResults } from "../src/lib/bg-shell-results";
 
 const MIN = 60_000;
@@ -50,11 +50,14 @@ function fixture(name: string) {
     appendFileSync(jsonl, JSON.stringify({ type: "user", message: { content: [result] } }) + "\n");
   };
   const out = (id: string) => join(tasks, `${id}.output`);
+  const subs = subagentsDir(agent.cwd, agent.sessionId);
+  mkdirSync(subs, { recursive: true });
+  const sub = (id: string) => join(subs, `agent-${id}.jsonl`);
   const of = (id: string) => events.filter((e) => e.agent === agent.name && (e.data as { id?: string }).id === id);
   const completed = (id: string) => of(id).filter((e) => e.type === "bg_task_completed");
   /** 仍在跟踪（快照里近期已收尾的 shell 带 end，不算） */
   const active = (id: string) => activeBgTasksFor(agent.name).some((t) => t.id === id && !t.end);
-  return { agent, tasks, poll, confirmBg, out, of, completed, active };
+  return { agent, tasks, poll, confirmBg, out, sub, of, completed, active };
 }
 
 describe("bg-activity-watcher · 后台 shell", () => {
@@ -387,5 +390,105 @@ describe("bg-activity-watcher · 重启前结局记成 unknown 的 shell", () =>
     expect(f.completed("k1")[0]?.data).toMatchObject({ status: "stopped", exitCode: null });
     const end = (id: string) => activeBgTasksFor(f.agent.name).find((t) => t.id === id)?.end;
     expect([end("gone"), end("lnk"), end("k1")]).toMatchObject([{ status: "unknown" }, { status: "unknown" }, { status: "stopped" }]);
+  });
+});
+
+/** subagent 记录：user 提问 / 在跑工具 / 交回答复（end_turn），时间戳取可控时钟 */
+const rec = (type: string, content: unknown[], extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ type, timestamp: new Date(clock).toISOString(), message: { role: type, content, ...extra } }) + "\n";
+const ask = (text: string) => rec("user", [{ type: "text", text }]);
+const working = (id: string) => rec("assistant", [{ type: "tool_use", name: "Bash", input: { command: `bun test ${id}` } }], { id, stop_reason: "tool_use" });
+const answer = (id: string, text: string) => rec("assistant", [{ type: "text", text }], { id, stop_reason: "end_turn" });
+const setMtime = (p: string, ms: number) => utimesSync(p, ms / 1000, ms / 1000);
+const started = (f: ReturnType<typeof fixture>, id: string) => f.of(id).filter((e) => e.type === "bg_task_started");
+const items = (f: ReturnType<typeof fixture>, id: string) => f.of(id).flatMap((e) => (e.data as { items?: string[] }).items ?? []);
+
+describe("bg-activity-watcher · 重启首轮只吞不活跃的文件、续跑的 subagent 按身份接回", () => {
+  test("冷启动：刚写过、还在跑的 subagent / shell 照常开流；mtime 很早的旧记录、刚交完答复的记录仍当存量", async () => {
+    const f = fixture("cold-sub");
+    writeFileSync(f.sub("live1"), ask("go") + working("m1"));
+    writeFileSync(f.sub("old1"), ask("go") + working("m2"));
+    writeFileSync(f.sub("fin1"), ask("go") + answer("m3", "final answer of fin1"));
+    writeFileSync(f.out("s1"), "running\n");
+    f.confirmBg("s1");
+    setMtime(f.sub("live1"), clock - 30_000);
+    setMtime(f.sub("old1"), clock - 60 * MIN);
+    setMtime(f.sub("fin1"), clock - 30_000);
+    setMtime(f.out("s1"), clock - 10_000);
+    await f.poll(); // 这个 agent-session 首次被扫到 = bridge 重启后的首轮
+    expect(started(f, "agent-live1")).toHaveLength(1);
+    expect(f.active("agent-live1")).toBe(true);
+    expect(f.active("s1")).toBe(true);
+    expect(f.of("agent-old1")).toEqual([]);
+    expect(f.of("agent-fin1")).toEqual([]);
+  });
+
+  test("当存量的旧记录被续跑（长出 user 记录）→ 按身份接回，只推续跑部分；只多了 attachment 不算续跑", async () => {
+    const f = fixture("wake-old");
+    writeFileSync(f.sub("w1"), ask("first run") + answer("m1", "answer of the first run"));
+    setMtime(f.sub("w1"), clock - 60 * MIN);
+    await f.poll();
+    expect(f.of("agent-w1")).toEqual([]);
+    appendFileSync(f.sub("w1"), JSON.stringify({ type: "attachment", timestamp: new Date(clock).toISOString() }) + "\n");
+    await f.poll(10_000);
+    expect(f.of("agent-w1")).toEqual([]);
+    appendFileSync(f.sub("w1"), ask("continue please") + working("m2"));
+    await f.poll(10_000);
+    expect(started(f, "agent-w1")).toHaveLength(1);
+    expect(f.active("agent-w1")).toBe(true);
+    appendFileSync(f.sub("w1"), answer("m3", "answer of the second run"));
+    await f.poll(10_000);
+    expect(f.completed("agent-w1")).toHaveLength(1);
+    expect(f.completed("agent-w1")[0].data).toMatchObject({ status: "done" });
+    expect(items(f, "agent-w1").some((l) => l.includes("second run"))).toBe(true);
+    expect(items(f, "agent-w1").some((l) => l.includes("first run"))).toBe(false);
+  });
+
+  test("已收尾的 subagent 被 SendMessage 续跑 → 重新开始跟踪、交回答复后再收尾一次", async () => {
+    const f = fixture("wake-ended");
+    await f.poll();
+    writeFileSync(f.sub("e1"), ask("task") + answer("m1", "first answer"));
+    await f.poll(10_000);
+    expect(f.completed("agent-e1")).toHaveLength(1);
+    appendFileSync(f.sub("e1"), ask("follow-up") + working("m2"));
+    await f.poll(10_000);
+    expect(started(f, "agent-e1")).toHaveLength(2);
+    expect(f.active("agent-e1")).toBe(true);
+    appendFileSync(f.sub("e1"), answer("m3", "second answer"));
+    await f.poll(10_000);
+    expect(f.completed("agent-e1")).toHaveLength(2);
+  });
+
+  test("上一轮被停过的 subagent 续跑：meta 里旧的 stoppedByUser 不让它一接回就收尾，交回答复才 done", async () => {
+    const f = fixture("wake-stopped");
+    await f.poll();
+    writeFileSync(f.sub("st1"), ask("task") + working("m1"));
+    await f.poll(10_000);
+    writeFileSync(f.sub("st1").replace(/\.jsonl$/, ".meta.json"), JSON.stringify({ description: "review", stoppedByUser: true }));
+    appendFileSync(f.sub("st1"), ask("[Request interrupted by user for tool use]"));
+    await f.poll(10_000);
+    expect(f.completed("agent-st1").map((e) => (e.data as { status: string }).status)).toEqual(["stopped"]);
+    appendFileSync(f.sub("st1"), ask("please continue") + working("m2"));
+    await f.poll(10_000);
+    await f.poll(10_000);
+    expect(f.active("agent-st1")).toBe(true);
+    appendFileSync(f.sub("st1"), answer("m3", "finished after the stop"));
+    await f.poll(10_000);
+    expect(f.completed("agent-st1").map((e) => (e.data as { status: string }).status)).toEqual(["stopped", "done"]);
+  });
+
+  test("冷启动时一次冒出 31 个在跑的记录 → 照样受洪水闸按存量处理；其中一个之后被续跑仍能接回", async () => {
+    const f = fixture("cold-flood");
+    const ids = Array.from({ length: 31 }, (_, i) => `fl${i}`);
+    for (const id of ids) {
+      writeFileSync(f.sub(id), ask("go") + working(id));
+      setMtime(f.sub(id), clock - 10_000);
+    }
+    await f.poll();
+    for (const id of ids) expect(f.of(`agent-${id}`)).toEqual([]);
+    appendFileSync(f.sub("fl7"), ask("continue") + working("fl7b"));
+    await f.poll(10_000);
+    expect(started(f, "agent-fl7")).toHaveLength(1);
+    expect(ids.filter((id) => id !== "fl7").every((id) => f.of(`agent-${id}`).length === 0)).toBe(true);
   });
 });

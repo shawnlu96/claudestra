@@ -126,3 +126,24 @@ export function subagentEndStatus(p: SubagentProgress, meta: SubagentMeta, silen
   if (quiet !== null && silentMs >= quiet) return "done";
   return silentMs > silentLimitMs ? "idle" : null;
 }
+
+/** 逐行 JSON.parse，坏行（半行 / 非 JSON）记 null：与 watcher 消费口径一致 */
+function parseLines(text: string): unknown[] {
+  return text.split("\n").filter((l) => l.trim()).map((l) => {
+    try {
+      return JSON.parse(l) as unknown;
+    } catch {
+      return null; // 坏行跳过：收尾信号只在完整记录里，半行等下次读到完整的再算
+    }
+  });
+}
+
+/** 一段 jsonl 文本折叠成进度——bridge 重启后首轮扫描判一个已有的 subagent 记录是不是已经收尾 */
+export function foldProgress(text: string, p: SubagentProgress = EMPTY_PROGRESS): SubagentProgress {
+  return parseLines(text).reduce<SubagentProgress>(nextProgress, p);
+}
+
+/** 新长出的记录里有 user 记录 = 被 SendMessage 续跑 / 工具结果回来了；只多了别的记录（attachment 等）不算续跑 */
+export function hasUserRecord(text: string): boolean {
+  return parseLines(text).some((r) => (r as { type?: unknown } | null)?.type === "user");
+}
