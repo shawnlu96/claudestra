@@ -11,7 +11,7 @@ PM已裁定由PP3最小公共抽取；CL1等待CL1P+PP3真正verified，不接�
 - `git ls-remote origin refs/heads/main` 与 `origin/main` 同值，2026-10-05 本机实核。
 - 准备分支：`feat/cloud-cl1-prep`；初始 HEAD：`2f7fa09adf43e1f1c892eb1ca9f317260e3a0c62`。
 - origin：`https://github.com/shawnlu96/claudestra.git`。
-- 正式 CLI `ledger show cloud-CL1P`：build、rev5、specRev1、manual/code3、作者 agent-task-cloud-cl1p/Codex。
+- 初次正式 CLI `ledger show cloud-CL1P`：build、rev5、specRev1、manual/code3、作者 agent-task-cloud-cl1p/Codex。
 - 当前 main 相对准备分支的变化是 PR595 后台 shell 修复；中心、协议和所列消费者文件没有变化。
 - 私仓 `floka-ai/cloud` 仍空、无默认分支/refs是派单方刚核的事实，本卡未自行访问私仓验证。
 - 未读取生产认证、Keychain、原始生产 DB/peers/principals；未 clone/push 私仓、迁移、部署或启 V2。
@@ -36,9 +36,7 @@ AST递归识别 import/export from、字面量 import()、TSImportType；混合�
 - 图的29项不等于29项都是纯函数模块。net-addr动态import tailscale仍在图内，见第3节。
 - 去重后的 protocol named exports 共122个；使用精确显式导出，无 export *。
 
-临时解析器`/tmp/cl1p-scan.ts`与JSON`/tmp/cl1p-scan.json`作为本机复算证据；生成摘要：
-`8e8c6fecb7c99cc3b85a30b83afa44a43bfe20bf971b04f860fd8e6f7baeb2b8`。
-复现时按以上AST规则及第3节五个入口替换生成集合，再与下表逐项比；
+附录提供可移植完整复算与named-export生成步骤，输出计数/集合/符号直接与正文比较；
 不能用不区分类型的文本正则或仅测试新入口存在来替代闭包。已有边界测试实现可复用：
 `tests/cloud-protocol-core-boundary.test.ts`、`tests/cloud-protocol-lend-boundary.test.ts`。
 它们同规则证明旧入口穿透、新纯入口干净，并隔离导入检查无本机状态落盘。
@@ -554,8 +552,27 @@ tsconfig.json
 CL1正式依赖CL1P+PP3；PP1/PP2为verified。本清单没有自动扩大DAG写锁。
 当前CL1 globs尚不覆盖表中46个旧测试的删除/拆分、公共新增纯消费者fixture，或私仓repo+目录。
 派实施写单前必须把逐文件测试操作与私仓实际repo/globs登记成两仓范围；
+还缺`scripts/guard/knip.json`及`scripts/guard/baseline.json`两项精确写锁：
+knip第6行仍注册src/shared-ledger.ts；公共删除时必须移除该entry，不能留悬空入口。
+这是受guard保护的配置变更，实施前登记CL1范围并按PM批准的具体方案留痕，不能越锁。
+baseline仅为raised[]增加新的{key:"guard:scripts/guard/knip.json",from:0,to:0,why}记录，
+why≥10字符并在提交说明重述；旧i28-C2记录不能复用。不提高计数/阈值、不改其它guard规则。
+删除前后分别留存GUARD_STRICT=1 guard/knip输出与未用符号差集，
+特别核第3节公共协议仅供中心消费的导出；新增未用项要调整真实公共消费/归属，不能ignore或扩baseline消红。
 这是具体范围缺口，不能用上述单仓生产globs或本准备卡文档锁冒称双仓已锁。
 A–F第4节范围是r2展开后的实施合同；当前cloud DAG没有A–F任务写锁，不能把合同等同活锁。
+
+派CL1写单前逐项执行并留证（本卡未执行）：
+
+1. PP3真正verified并合并后固定新公共完整SHA，复算协议入口/闭包；不沿用预计28项。
+2. 将第2节68个源→目标登记为私仓新增、公共待删除，公共删除等待私仓构建产物。
+3. 测试逐文件登记：P整份移到services/ledger-center/<source>；M私仓保留中心断言片段，公共原路径保留消费者断言；
+   U原路径保留浏览器断言，仅替换中心fixture依赖。各行的fixture支持操作一并登记，不用shared-ledger*宽锁代替。
+4. 明确公共合成HTTP/纯fixture新增路径后补该路径锁，先等JN4H再拆join-offer；不把fixture中心算法复制回公共仓。
+5. 登记knip.json/baseline.json精确范围与新raised留痕方案，保存严格删除前后knip差集；未用项保持真失败。
+6. 同一本机作者建立第6节两独立Git目录/分支，复核私仓仍空，记录两仓实际HEAD/目录/活写锁；任一事实未知仍阻塞。
+7. 将私仓src/scripts/tests/deploy/package/锁文件/tsconfig/CI实际globs写入私仓repo锁；
+   公共迁移和薄接线另锁，完成兼容SHA矩阵后才派实施写单，不凭本准备卡doc锁开工。
 
 ## 5. 当前followup/恢复卡交叉与锁
 
@@ -590,6 +607,8 @@ A–F第4节范围是r2展开后的实施合同；当前cloud DAG没有A–F任�
   空仓initial main只README/规范/ignore；产品迁移分支`feat/ledger-center-move`。
 - 上述目录/分支尚未创建。原空仓计划需要在私仓git操作前复核仍空，出现任何他人提交就停止对齐。
 - 公共root运行部署pack closure入口会因删中心而变化，须由CL1唯一作者改package/tsconfig/CI薄接线；
+  另精确包含scripts/guard/knip.json中心entry删除，以及baseline.json仅raised[]的强制留痕。
+  前后严格guard/knip对照不可省；未用导出失败必须修真实归属，禁止扩阈值/ignore。
   不加私仓认证，不放宽guard、不修改baseline掩盖删除后失败。
 - 私仓新增service package.json/bun.lock/tsconfig.json/bunfig.toml与CI：
   安装、严格typecheck、center/admin build、迁移域测试、隔离升级/回滚fixture。
@@ -614,16 +633,20 @@ CL1P只交本公共文档分支；正式deliver须本人CLI带rev/branch/PR/full
   仅证明树摇后的符号闭包，不覆盖模块级残留边界。
 - 本准备worktree `bun run check`通过：tsc、13,271 tests/0 fail、GUARD_STRICT=1 guard均exit0。
 - bridge/channel-server/manager/launcher/cron/setup六入口Bun build均exit0。
-- 验证日志根：`/var/folders/g6/j4_mfcfx14vdp0ffl9p5k_xc0000gn/T/cl1p-verify-9j1ha52r/`；
+- 验证日志根：`/var/folders/g6/j4_mfcfx14vdp0ffl9p5k_xc0000gn/T/cl1p-verify-yc4s2t46/`；
   run-0.log为纯协议定向测试，run-1.log为全量check，run-2…7.log为上述六入口build。
-- 结果索引：`/tmp/cl1p-validation.json`；strict协议TS配置：`/tmp/cl1p-tsconfig.json`。
+- 结果索引及strict协议TS配置为作者本机临时记录；跨机复现以附录和PR同head CI为准。
 - 本文附录扫描器已在隔离HOME/STATE/RUNTIME/TMPDIR实际复跑，exit0，输出57/68/33/51。
 - 当前main的私仓干净clone/CI/迁移域测试未跑；公开PR同head CI由正式合并闸核，不假填CI通过。
+- r1返修只补knip精确范围/raised留痕和完整可移植生成器；复现guard-scope-1文档检查旧红新绿。
+- r1完整生成器已隔离复跑：57/68/33/51、23入口、29/29闭包、122导出名和type标签逐项一致。
+  生成入口再经strict TS（skipLibCheck=false）及dry bundle验证通过。
+- r1提交前重新执行全量check（13,271 tests/0 fail、strict guard）及六入口build，全部exit0。
 - 私仓CI、真实切换、升级回滚演练均未执行；不能写作通过。
 
-## 附录：可重算静态图的核心步骤
+## 附录：可移植静态图与named-export完整生成器
 
-以下在安装了本仓锁定oxc-parser的隔离临时目录执行；ROOT指向本公开worktree。
+以下代码保存为公开clone根的临时脚本，安装本仓锁定oxc-parser；argv[2]传公开clone绝对路径。
 只读Git对象，无中心启动或网络查询。扫描基准固定为正文完整SHA，不使用浮动main。
 named-export生成只收中心/admin直接import的说明符，逐说明符区分type；
 按第3节五项替换、去重后输出精确列表。closure与test闭包可用下面核心重新复算。
@@ -631,7 +654,7 @@ named-export生成只收中心/admin直接import的说明符，逐说明符区�
 ```ts
 import { parseSync } from "oxc-parser";
 import { resolve, dirname, relative } from "node:path";
-const ROOT = "/Users/shawn/.claude-orchestrator/worktrees/cloud-cl1-prep";
+const ROOT = resolve(process.argv[2] ?? process.cwd());
 const SHA = "6ee0a4eafe378c9d8375f17d61e997e8b615b8b0";
 const git = (...args: string[]) => {
   const p = Bun.spawnSync(["git", "-C", ROOT, ...args]);
@@ -641,14 +664,15 @@ const git = (...args: string[]) => {
 const files = git("ls-tree", "-r", "--name-only", SHA).trim().split("\n");
 const sources = new Map(files.filter(f => /\.tsx?$/.test(f))
   .map(f => [f, git("show", `${SHA}:${f}`)]));
-type Edge = { to: string; type: boolean };
+type Symbol = { name: string; type: boolean };
+type Edge = { to: string; type: boolean; symbols: Symbol[] };
 const cache = new Map<string, Edge[]>();
 function edges(f: string): Edge[] {
   if (cache.has(f)) return cache.get(f)!;
   const parsed = parseSync(f, sources.get(f)!);
   if (parsed.errors.length) throw Error(f);
   const out: Edge[] = [];
-  const add = (spec: unknown, type: boolean) => {
+  const add = (spec: unknown, type: boolean, node?: any) => {
     if (typeof spec !== "string" || !spec.startsWith(".")) return;
     const b = relative(ROOT, resolve(ROOT, dirname(f), spec));
     const to = [b.replace(/\.js$/, ".ts"), b.replace(/\.js$/, ".tsx"),
@@ -657,7 +681,11 @@ function edges(f: string): Edge[] {
       if (b.includes("/node_modules/")) return;
       throw Error(`${f}:${spec}`);
     }
-    out.push({ to, type });
+    const symbols = (node?.specifiers ?? []).map((s: any) => ({
+      name: s.imported?.name ?? s.imported?.value ?? s.local?.name,
+      type: type || s.importKind === "type",
+    }));
+    out.push({ to, type, symbols });
   };
   function walk(n: any): void {
     if (!n || typeof n !== "object") return;
@@ -667,7 +695,7 @@ function edges(f: string): Edge[] {
       const onlyType = n.type === "TSImportType" || n.importKind === "type" ||
         n.exportKind === "type" || !!n.specifiers?.length &&
         n.specifiers.every((s: any) => (s.importKind ?? s.exportKind) === "type");
-      add(n.source?.value ?? n.argument?.value ?? n.argument?.literal?.value, onlyType);
+      add(n.source?.value ?? n.argument?.value ?? n.argument?.literal?.value, onlyType, n);
     }
     if (n.type === "CallExpression" && n.callee?.name === "require") {
       add(n.arguments?.[0]?.value, false);
@@ -704,7 +732,38 @@ while (changed) {
   }
 }
 console.log(center.length, moved.length, direct.length, fixture.size);
-// 57 68 33 51；第3节23个public源分别closure(false)/closure(true)得到29/29。
+const replacements: Record<string, string> = {
+  "src/lib/ask-bind.ts": "src/lib/canonical-json.ts",
+  "src/lib/instance-key.ts": "src/lib/instance-signature.ts",
+  "src/lib/shared-ledger-join.ts": "src/lib/shared-ledger-join-protocol.ts",
+  "src/lib/lend-wire.ts": "src/lib/lend-wire-types.ts",
+  "src/lib/lend-wire-v2.ts": "src/lib/lend-offer-protocol.ts",
+};
+const entries = new Map<string, { runtime: Set<string>; types: Set<string> }>();
+for (const f of [...center, "src/lib/shared-ledger-member-admin.ts"]) {
+  for (const e of edges(f)) {
+    if (!e.to.startsWith("src/lib/") || e.to.endsWith("shared-ledger-member-admin.ts")) continue;
+    const to = replacements[e.to] ?? e.to;
+    if (!entries.has(to)) entries.set(to, { runtime: new Set(), types: new Set() });
+    const d = entries.get(to)!;
+    for (const symbol of e.symbols) {
+      const name = to.endsWith("lend-offer-protocol.ts") && symbol.name === "parseV2Request"
+        ? "parseOfferRequest" : symbol.name;
+      (symbol.type ? d.types : d.runtime).add(name);
+    }
+  }
+}
+const roots = [...entries.keys()].sort(), seen = new Set<string>(), protocol: string[] = [];
+for (const f of roots) for (const kind of ["runtime", "types"] as const) {
+  const names = [...entries.get(f)![kind]].sort().filter(n => !seen.has(n));
+  names.forEach(n => seen.add(n));
+  if (names.length) protocol.push(`export ${kind === "types" ? "type " : ""}{\n` +
+    names.map(n => `  ${n},`).join("\n") + `\n} from "../../../vendor/claudestra/${f}";`);
+}
+console.log(JSON.stringify({ roots, runtime: closure(roots, false),
+  type: closure(roots, true), namedExports: seen.size, direct, fixture: [...fixture].sort() }));
+console.log(protocol.join("\n"));
+// 57/68/33/51；roots=23，runtime/type=29/29，namedExports=122。
 ```
 
 扫描整个模块保留静态动态import边，所以会检出net-addr→tailscale，
