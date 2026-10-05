@@ -102,6 +102,7 @@ function callerEnv(): Record<string, string> {
     NO_PROXY: "127.0.0.1,localhost",
     // 测试驱动本身（相当于执行者的终端）跑 bun 也会写转译缓存：关掉，免得把它算成沙箱的写入
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+    CLAUDESTRA_SANDBOX_PARENT_PID: String(process.pid), // runner 被硬杀（收尾不跑）时沙箱 bridge 跟着退（lib/sandbox-parent-watchdog.ts）
     // 执行者 agent 自己的环境长这样——脚本必须一个都不带进沙箱
     BRIDGE_URL: `ws://localhost:${DEFAULT_BRIDGE_PORT}`,
     BRIDGE_PORT: String(DEFAULT_BRIDGE_PORT),
