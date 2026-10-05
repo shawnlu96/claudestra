@@ -1,8 +1,13 @@
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { FIX_START_MOVED_OP } from "./lend-fix-start.js";
 import { currentReviewFacts, type ReviewRead } from "./scheduler-review.js";
 
-/** Fix dispatch may retain its report across verified start moves; this is never evidence for review or merge. */
+/** lend-fix-start.ts FIX_START_MOVED_OP, spelled out here: importing it would close a module cycle through order-take.ts. */
+const FIX_START_MOVED_OP = "fix_start_moved";
+
+/**
+ * Fix-only finding reader: fix dispatch (fixPackage), the fix strategy and its swap materials, and the local take_order keep the
+ * original report across a verified start-move chain. This is never evidence for review or merge (those keep currentReviewFacts).
+ */
 export function fixStartReviewFacts(task: LedgerTask, events: readonly LedgerEvent[]): ReviewRead {
   const read = currentReviewFacts(task, events);
   if (read.kind === "facts" || task.stage !== "fix") return read;
