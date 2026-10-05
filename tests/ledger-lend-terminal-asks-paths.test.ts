@@ -44,7 +44,7 @@ describe("仲裁结论（lend-arbiter-result）", () => {
       const req = verdictRequest(remoteOrder(f.db, intent.id)!);
       const first = writeLendResult(f.db, f.at("peer:Peer"), "Peer", req, "same", resultDeps);
       expect(getLendOrder(f.db, o.orderId)!.status).toBe("done");
-      expect(getAsk(f.db, mine)).toMatchObject({ state: "cancelled", extra: expect.objectContaining({ settledOrder: { orderId: o.orderId, status: "done", by: "lend" } }) });
+      expect(getAsk(f.db, mine)).toMatchObject({ state: "cancelled", extra: expect.objectContaining({ settledOrder: { orderId: o.orderId, status: "done", by: "lend", at: expect.any(Number) } }) });
       expect(getAsk(f.db, other)!.state).toBe("open");
       const n = cancels(f.db);
       expect(writeLendResult(f.db, f.at("peer:Peer"), "Peer", req, "same", resultDeps)).toEqual(first);
@@ -75,7 +75,7 @@ describe("CONV3 换家族撤旧写单（lend-reclaim-scheduler）", () => {
       const mine = workerAskRow(f.db, o, "old-worker@Peer");
       expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting" });
       expect(getLendOrder(f.db, "old-running")!.status).toBe("cancelled");
-      expect(getAsk(f.db, mine)!.extra.settledOrder).toEqual({ orderId: "old-running", status: "cancelled", by: "lend" });
+      expect(getAsk(f.db, mine)!.extra.settledOrder).toEqual({ orderId: "old-running", status: "cancelled", by: "lend", at: expect.any(Number) });
       const legacy = workerAskRow(f.db, o, "old-worker@Peer", "修复前漏关的一条"); // 只为验证取消确认那条路径不收尾
       const n = cancels(f.db);
       const req: ResultRequest = { v: 1, orderId: "old-running", gen: 1, cancelAck: { clean: true }, report: "exited without publication",
@@ -127,7 +127,7 @@ describe("借入方接管（lend-pr-takeover-ledger）", () => {
       expect(getAsk(db, mine)!.state).toBe("open"); // 第一次看到这个 head：等一轮，单子还是 claimed
       await step();
       expect(getLendOrder(db, orderId)!.status).toBe("done");
-      expect(getAsk(db, mine)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "lend" });
+      expect(getAsk(db, mine)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "lend", at: expect.any(Number) });
     } finally {
       takeoverDeps.make = prevMake;
       closeLedger(path);

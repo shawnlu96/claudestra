@@ -43,9 +43,13 @@ function askNotClosable(a: Ask, o: AskOrderRef | null): string | null {
 
 const reasonOf = (o: AskOrderRef): string => `出借单 ${o.orderId} 已结清（${o.status}），执行者的旧提问随单关闭；未作答，不按默认批准`;
 
-/** 关一条；调用方已在事务里核过 askNotClosable。closeAsk 自己再核 open，重复调只关一次 */
+/**
+ * 关一条；调用方已在事务里核过 askNotClosable。closeAsk 自己再核 open，重复调只关一次。
+ * settledOrder.at = 写锁内取的此刻（调用方已改过 lend_orders / 本函数在 BEGIN IMMEDIATE 里，锁已拿到），不是调用方先取的业务 now：
+ * bridge feed 换库时按它逐条分历史 / 新提交（settledAskClosuresSince）
+ */
 function closeOne(db: Database, a: Ask, o: AskOrderRef, now: number, by: string): string | null {
-  return closeAsk(db, a.id, "cancelled", reasonOf(o), now, { settledOrder: { orderId: o.orderId, status: o.status, by } })?.id ?? null;
+  return closeAsk(db, a.id, "cancelled", reasonOf(o), now, { settledOrder: { orderId: o.orderId, status: o.status, by, at: Date.now() } })?.id ?? null;
 }
 
 /** 绑这个单号、还开着的提问（宽筛，逐条再按 askNotClosable 精确核） */
@@ -114,8 +118,11 @@ export function applySettledAskSweep(db: Database, project: string, now: number,
   }).immediate());
 }
 
-/** 随出借单结清关掉的一条 ask，给 bridge 发 ask SSE（project…chatId 与 bridge/asks.ts publishAsk 同形；seq = 那条 ask_cancel 事件，给游标逐条推进） */
-export interface SettledAskClosure { seq: number; project: string; askId: string; state: string; fromAgent: string | null; assignee: string | null; chatId: string }
+/**
+ * 随出借单结清关掉的一条 ask，给 bridge 发 ask SSE（project…chatId 与 bridge/asks.ts publishAsk 同形；seq = 那条 ask_cancel 事件，给游标逐条推进；
+ * writtenAt = 写锁内记的写入时刻 settledOrder.at，没有就退回事件 ts，只给 feed 换库时分历史用，不进 SSE data）
+ */
+export interface SettledAskClosure { seq: number; writtenAt: number; project: string; askId: string; state: string; fromAgent: string | null; assignee: string | null; chatId: string }
 
 const maxSeq = (db: Database, where = "", ...args: number[]): number =>
   (db.query(`SELECT COALESCE(MAX(seq), 0) AS m FROM events ${where}`).get(...args) as { m: number }).m;
@@ -128,11 +135,14 @@ export function settledAskClosuresSince(db: Database, afterSeq: number): { lastS
   const lastSeq = maxSeq(db);
   if (lastSeq <= afterSeq) return { lastSeq, closures: [] };
   if (!hasAsksTable(db)) return { lastSeq: afterSeq, closures: [] }; // 这拍读不到 asks：游标不动，下拍再读
-  const rows = db.query(`SELECT seq, json_extract(data, '$.askId') AS askId FROM events WHERE seq > ? AND seq <= ? AND kind = 'ask_cancel'
-    AND json_extract(data, '$.extra.settledOrder') IS NOT NULL ORDER BY seq`).all(afterSeq, lastSeq) as { seq: number; askId: string | null }[];
+  const rows = db.query(`SELECT seq, json_extract(data, '$.askId') AS askId, COALESCE(json_extract(data, '$.extra.settledOrder.at'), ts) AS writtenAt
+    FROM events WHERE seq > ? AND seq <= ? AND kind = 'ask_cancel'
+    AND json_extract(data, '$.extra.settledOrder') IS NOT NULL ORDER BY seq`).all(afterSeq, lastSeq) as { seq: number; askId: string | null; writtenAt: number }[];
   const closures = rows.flatMap((r) => {
     const a = r.askId ? getAsk(db, r.askId) : null;
-    return a ? [{ seq: r.seq, project: a.project, askId: a.id, state: a.state, fromAgent: a.fromAgent, assignee: a.assignee, chatId: a.chatId || a.fromChannelId || "" }] : [];
+    if (!a) return [];
+    return [{ seq: r.seq, writtenAt: Number(r.writtenAt), project: a.project, askId: a.id, state: a.state, fromAgent: a.fromAgent, assignee: a.assignee,
+      chatId: a.chatId || a.fromChannelId || "" }];
   });
   return { lastSeq, closures };
 }

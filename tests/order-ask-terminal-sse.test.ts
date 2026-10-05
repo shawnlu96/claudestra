@@ -30,7 +30,9 @@ function ask(opts: { assignee?: string; now?: number } = {}): string {
     ...(opts.assignee ? { assignee: opts.assignee } : {}), extra: { via: "mcp_ask", orderId: `lend:T1:${++seq}` },
   }, opts.now ?? Date.now()).id;
 }
-const settle = (id: string, now = Date.now()) => closeAsk(db, id, "cancelled", "出借单已结清", now, { settledOrder: { orderId: "lend:T1:x", status: "done", by: "lend" } })!;
+/** closeOne 同形：settledOrder.at = 写入此刻（写锁内取），now = 调用方的业务时间（可更早） */
+const settle = (id: string, now = Date.now()) =>
+  closeAsk(db, id, "cancelled", "出借单已结清", now, { settledOrder: { orderId: "lend:T1:x", status: "done", by: "lend", at: Date.now() } })!;
 
 beforeEach(() => {
   path = tempLedgerPath("askt-sse-");
@@ -78,11 +80,17 @@ describe("轮询游标（手动 tick）", () => {
   const start = () => {
     const got: SettledAskClosure[] = [];
     let fail: ((c: SettledAskClosure) => boolean) | null = null;
-    const tick = setLedgerFeedForTest({ path, emit: () => {}, emitAsk: (c) => {
+    let onLedger: (() => void) | null = null;
+    const tick = setLedgerFeedForTest({ path, emit: () => {
+      const f = onLedger;
+      onLedger = null;
+      f?.();
+    }, emitAsk: (c) => {
       if (fail?.(c)) throw new Error("emit 坏了");
       got.push(c);
     } })!;
-    return { got, tick, failOn: (f: typeof fail) => void (fail = f) };
+    /** duringTick：下一次 ledger 变更 emit 时（本拍取完时刻、核过文件身份之后，ask 读库之前）同步跑一次 */
+    return { got, tick, failOn: (f: typeof fail) => void (fail = f), duringTick: (f: () => void) => void (onLedger = f) };
   };
   const ids = (xs: SettledAskClosure[]) => xs.map((c) => c.askId);
 
@@ -230,6 +238,80 @@ describe("轮询游标（手动 tick）", () => {
     f.tick();
     expect(ids(f.got)).toEqual([z]);
     expect(hist.every((id) => !ids(f.got).includes(id))).toBe(true);
+  });
+
+  /** 替换库：feed 起来之前就关好的 3 条历史（业务时间也更早），checkpoint、关库 */
+  const historyAlt = async () => {
+    const alt = tempLedgerPath("askt-sse-alt-");
+    const hist: string[] = [];
+    onAlt(alt, () => {
+      for (let i = 0; i < 3; i++) {
+        const t = Date.now() - 60_000;
+        const id = ask({ now: t });
+        settle(id, t);
+        hist.push(id);
+      }
+    });
+    await Bun.sleep(30);
+    return { alt, hist };
+  };
+
+  test("换库：历史与新关闭在换库后的同一拍——只发新关闭（复现 ask-sse r4 场景 2）", async () => {
+    const { alt } = await historyAlt();
+    const f = start();
+    f.tick();
+    await Bun.sleep(30);
+    swapIn(alt);
+    const z = ask();
+    settle(z); // 换上来之后、首拍之前提交
+    f.tick();
+    expect(ids(f.got)).toEqual([z]);
+    f.tick();
+    expect(ids(f.got)).toEqual([z]);
+  });
+
+  test("换库：之后只有无关写入（普通新问）不重放历史；再关一条只发那条（复现 ask-sse r4 场景 3）", async () => {
+    const { alt } = await historyAlt();
+    const f = start();
+    f.tick();
+    await Bun.sleep(30);
+    swapIn(alt);
+    const z = ask(); // 只开、不关：替换库文件因此有新写入
+    f.tick();
+    expect(f.got).toEqual([]);
+    settle(z);
+    f.tick();
+    expect(ids(f.got)).toEqual([z]);
+  });
+
+  test("换库：本拍取完时刻 / 核过文件之后、读关闭之前另一写者提交的新关闭照发，游标不越过它（复现 ask-sse r4 场景 4）", async () => {
+    const { alt, hist } = await historyAlt();
+    const f = start();
+    f.tick();
+    await Bun.sleep(30);
+    swapIn(alt);
+    const z = ask();
+    let fired = false;
+    f.duringTick(() => {
+      fired = true;
+      settle(z); // 真 closeAsk，落在 ask 读库之前
+    });
+    f.tick();
+    expect(fired).toBe(true);
+    expect(ids(f.got)).toEqual([z]);
+    f.tick();
+    expect(ids(f.got)).toEqual([z]);
+    expect(hist.some((id) => ids(f.got).includes(id))).toBe(false);
+  });
+
+  test("同库：本拍核过文件之后、读关闭之前提交的照发一次", () => {
+    const f = start();
+    f.tick();
+    const z = ask(); // 这笔写入让下一拍 ledger 有变更可 emit
+    f.duringTick(() => settle(z));
+    f.tick();
+    f.tick();
+    expect(ids(f.got)).toEqual([z]);
   });
 
   test("换库：emit 中途抛了，下拍只补没发出去的，不重发、不跳过", () => {

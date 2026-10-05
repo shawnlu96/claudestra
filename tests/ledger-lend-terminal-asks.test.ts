@@ -130,7 +130,7 @@ describe("结清点自动关旧提问", () => {
     expect(r).toMatchObject({ ok: true });
     expect(status()).toBe("done");
     expect(getAsk(db, mine)).toMatchObject({ state: "cancelled", answer: null, body: SECRET_Q, extra: expect.objectContaining({ via: "mcp_ask", orderId,
-      settledOrder: { orderId, status: "done", by: "lend" } }) });
+      settledOrder: { orderId, status: "done", by: "lend", at: expect.any(Number) } }) });
     expect(JSON.stringify(db.query("SELECT text FROM events WHERE kind = 'ask_cancel'").all())).toContain(`出借单 ${orderId} 已结清（done）`);
     expect(db.query("SELECT 1 FROM events WHERE kind = 'ask' AND json_extract(data, '$.askId') = ?").get(mine)).toBeTruthy(); // 开提问的事件还在
     expect([state(otherOrder), state(by.otherPeer), state(by.owner), state(by.local)]).toEqual(["open", "open", "open", "open"]);
@@ -147,7 +147,7 @@ describe("结清点自动关旧提问", () => {
     const bound = openAsk(db, { project: P, taskId: "T20", source: "reply", kind: "decide", title: "x", fromAgent: "w1@mate", extra: { via: "mcp_ask", orderId } }, now).id;
     const r = await call("write", verdict(orderId));
     expect(r.ok).toBe(true);
-    expect(getAsk(db, bound)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "lend" });
+    expect(getAsk(db, bound)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "lend", at: expect.any(Number) });
     const n = cancels();
     expect((await call("write", verdict(orderId))).receipt).toEqual(r.receipt);
     expect(cancels()).toBe(n);
@@ -158,7 +158,7 @@ describe("结清点自动关旧提问", () => {
     await claim(a.orderId);
     const q1 = await askId(a.orderId);
     expect(await run(["lend-cancel", "T9", "--reason", "换人做"])).toMatchObject({ ok: true, status: "cancelled" });
-    expect(getAsk(db, q1)!.extra.settledOrder).toEqual({ orderId: a.orderId, status: "cancelled", by: "lend" });
+    expect(getAsk(db, q1)!.extra.settledOrder).toEqual({ orderId: a.orderId, status: "cancelled", by: "lend", at: expect.any(Number) });
 
     const b = await offer();
     expect(b.ok).toBe(true);
@@ -274,7 +274,7 @@ describe("历史回收 ledger lend-terminal-asks", () => {
     db.run("UPDATE lend_orders SET status = 'claimed' WHERE taskId = 'T10'"); // 预览之后单子变了：apply 以此刻为准
     const r = await run(["lend-terminal-asks", "--project", P, "--apply"]);
     expect(r).toMatchObject({ ok: true, apply: true, closed: [ids.done] });
-    expect(getAsk(db, ids.done)!.extra.settledOrder).toEqual({ orderId: ids.doneOrder, status: "done", by: "agent-pm" });
+    expect(getAsk(db, ids.done)!.extra.settledOrder).toEqual({ orderId: ids.doneOrder, status: "done", by: "agent-pm", at: expect.any(Number) });
     for (const id of [ids.cancelled, ids.unknown, ids.claimed, ids.peerMismatch, ids.local, ids.owner, ids.foreign]) expect(state(id)).toBe("open");
     expect((await run(["lend-terminal-asks", "--project", P, "--apply"])).closed).toEqual([]);
   });
@@ -310,7 +310,7 @@ describe("历史回收的身份：调度服务入口、写锁内重核 PM", () =
     leaseCalls = 0;
     const r = await sched(["lend-terminal-asks", "--project", P, "--apply"]);
     expect(r).toMatchObject({ ok: true, apply: true, closed: [q] });
-    expect(getAsk(db, q)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "scheduler" });
+    expect(getAsk(db, q)!.extra.settledOrder).toEqual({ orderId, status: "done", by: "scheduler", at: expect.any(Number) });
     // 调度服务身份照旧只能跑调度专用命令
     expect(await sched(["lend-cancel", "T9", "--reason", "x"])).toMatchObject({ ok: false, code: "forbidden" });
   });
@@ -368,7 +368,8 @@ describe("结清关问提交后发 ask SSE（bridge ledger feed 读已提交事�
       closeAsk(db, by.local, "cancelled", "本机问别的原因关");
       expect((await call("write", delivery(orderId))).ok).toBe(true);
       tick();
-      expect(got).toEqual([{ seq: expect.any(Number), project: P, askId: q, state: "cancelled", fromAgent: `${W(1)}@mate`, assignee: "agent-pm", chatId: "" }]); // worker 的问指给 PM
+      expect(got).toEqual([{ seq: expect.any(Number), writtenAt: expect.any(Number), project: P, askId: q, state: "cancelled",
+        fromAgent: `${W(1)}@mate`, assignee: "agent-pm", chatId: "" }]); // worker 的问指给 PM
       tick();
       expect(got).toHaveLength(1); // 同一条只发一次
       expect((await call("write", delivery(orderId))).ok).toBe(true); // 幂等重发：不再关、不再发
