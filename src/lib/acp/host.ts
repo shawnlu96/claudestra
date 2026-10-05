@@ -13,6 +13,7 @@ import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpIncompatibleError } from "./protocol.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
+import { transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "./transcript.js";
 import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
 import { createAcpTranslator, type AcpTranslator } from "./updates.js";
 
@@ -43,6 +44,8 @@ export interface HostDeps {
   markReady(): Promise<void>;
   rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
   log(msg: string): void;
+  /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
+  show?(item: string): void;
 }
 
 const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
@@ -241,6 +244,7 @@ export class AcpHost {
   /** 流式条目进出站队列，按序号送（pump）；队列满了丢最老的并记数，这一轮结束按 StopFailure 报 */
   private pushEntries(entries: Record<string, unknown>[]): void {
     for (const entry of entries) this.outbox.push({ seq: ++this.entrySeq, entry });
+    if (this.deps.show) for (const item of entries.flatMap(transcriptOfEntry)) this.deps.show(item);
     const over = this.outbox.length - ENTRY_OUTBOX_MAX;
     if (over > 0) {
       this.outbox.splice(0, over);
@@ -308,6 +312,7 @@ export class AcpHost {
     for (const id of [...this.permits.keys()]) this.endPermission(id, null, "回合已结束");
     const rest = this.translator.flush();
     if (rest.length) this.pushEntries(rest);
+    this.deps.show?.(transcriptOfStop(r));
     // 这一轮的条目 bridge 全部确认处理完才报 Stop：Stop 的 drain 要看到收尾文字（ws 与 HTTP 两条路没有先后保证）。
     // 等不到确认、或 bridge 太久不在丢过条目：不能当成功报，按 StopFailure 报；没确认的留在队列里，连上了照样补送
     const ok = await this.drained(this.timing("drainMs"));
@@ -321,6 +326,7 @@ export class AcpHost {
   }
 
   private fail(f: AcpFailure): void {
+    this.deps.show?.(transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
@@ -374,6 +380,7 @@ export class AcpHost {
     const wrapped = wrapChannelContent(content, shown, this.cfg.mcpName, codexReplyHint(this.cfg.mcpName));
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
+    this.deps.show?.(transcriptOfInbound(content, meta));
     const how = await this.loop.submit(text, meta.message_id);
     this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${how === "steer" ? "插进当前回合" : how === "prompt" ? "开一轮" : "排队"}`);
   }

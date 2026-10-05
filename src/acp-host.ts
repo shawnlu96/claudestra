@@ -1,7 +1,8 @@
 /**
- * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口只显示这里打的可读日志
- * （owner 在这里打字不起作用）。逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、
- * 接真实依赖、处理信号。启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；手动排障：`tmux -S … attach` 看这个窗口。
+ * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口只显示可读的会话
+ * （lib/acp/transcript.ts；只看，owner 在这里打字不起作用），连接 / 生命周期日志只写 host.log。
+ * 逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、接真实依赖、处理信号。
+ * 启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；排障：连接日志看 host.log，会话看这个窗口（`tmux -S … attach`）。
  */
 import { rmSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import { BridgeLink } from "./lib/acp/bridge-link.js";
 import { AcpHost } from "./lib/acp/host.js";
 import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
+import { stampTranscript } from "./lib/acp/transcript.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
@@ -41,11 +43,11 @@ const agentName = need("CLAUDESTRA_AGENT");
 const sessionId = need("CLAUDESTRA_SESSION_ID");
 const logsDir = acpLogDir(agentName);
 const hostLogFile = join(logsDir, "host.log");
-// 窗口被 kill 日志就没了（出借 worker 自停的原因曾因此丢掉），每行再追加一份到磁盘
+// 连接日志只落盘：窗口留给会话，日志进窗口会把会话淹掉；落盘也不怕窗口被 kill（出借 worker 自停的原因曾因此丢掉）
 const log = (msg: string) => {
-  console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`);
-  appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`);
+  if (!appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`)) console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`); // 写不进盘就退回窗口，别丢
 };
+const show = (item: string) => console.log(stampTranscript(item));
 const bridgeUrl = resolveBridgeUrl();
 const bunBin = resolveBunPath();
 // 出借 worker：codex 本体（和它的 shell）用专属状态 / 运行目录，宿主自己留生产目录给看门狗（runtimes/clean-env.ts workerPrivateDirs）
@@ -122,6 +124,7 @@ const host = new AcpHost(
       return current === newId ? { ok: true } : { ok: false, error: r.error ?? "registry 轮转失败" };
     },
     log,
+    show,
   },
 );
 
@@ -147,4 +150,5 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
 }
 
 log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : runtime.logLabel} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
+show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（只看；连接日志在 ${hostLogFile}）`);
 host.start();
