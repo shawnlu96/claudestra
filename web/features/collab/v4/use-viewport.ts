@@ -82,11 +82,14 @@ export function useViewport(canvas: ViewCanvas, port: { w: number; h: number }, 
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
-    if (d.moved) suppress.current = true;
+    // Cancellation produces no click; retaining suppression would swallow the next activation.
+    suppress.current = d.moved && e.type === "pointerup";
+    if (d.moved) return;
     else if (!d.onButton && e.type === "pointerup") onBackground();
   };
   const onClickCapture = (e: React.MouseEvent) => {
-    if (!suppress.current) return;
+    // Keyboard activation has no pointer click count and must remain usable after a drag.
+    if (!suppress.current || e.detail === 0) return;
     suppress.current = false;
     e.stopPropagation();
     e.preventDefault();

@@ -377,3 +377,35 @@ test.skipIf(!enabled)("the loopback guard really blocks: a non-loopback fetch an
   expect(o.blocked.some((u) => u.startsWith("wss://example.com/ws"))).toBe(true);
   await o.page.context().close();
 }, 60_000);
+
+// A cancelled touch has no derived pointer click; keyboard activation must work on its first attempt.
+test.skipIf(!enabled)("cancel-click: home / team — cancelled drag allows first Enter / Space activation", async () => {
+  const results: unknown[] = [];
+  for (const src of SOURCES) for (const key of ["Enter", "Space"]) {
+    const o = await open("after", src, 1200, "dark", true), p = o.page;
+    const b = (await blank(p))!, initial = await view(p);
+    const cdp = await p.context().newCDPSession(p);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...b, id: 1 }] });
+    for (let i = 1; i <= 6; i++) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: b.x + i * 10, y: b.y + i * 5, id: 1 }] });
+      await p.waitForTimeout(30);
+    }
+    await p.waitForTimeout(200);
+    const moved = await view(p);
+    expect([Math.round(moved.x - initial.x), Math.round(moved.y - initial.y)]).toEqual([60, 30]);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+    await p.mouse.move(b.x + 200, b.y + 100, { steps: 4 });
+    expect(await view(p)).toEqual(moved);
+    expect(await p.evaluate("window.clicks.splice(0)") as string[]).toEqual([]);
+    await p.getByRole("button", { name: "版本" }).first().focus();
+    await p.keyboard.press(key);
+    const first = await p.evaluate("window.clicks.splice(0)") as string[];
+    console.log(`[drag1] cancel-click ${src}/${key} first=${JSON.stringify(first)}`);
+    await shot(p, `cancel-click-${src}-${key}`);
+    results.push([src, key, first.length, first[0]?.startsWith("v:")]);
+    expect(o.blocked).toEqual([]);
+    expect(o.logs.filter((l) => l.startsWith("pageerror"))).toEqual([]);
+    await p.context().close();
+  }
+  expect(results).toEqual(SOURCES.flatMap((src) => ["Enter", "Space"].map((key) => [src, key, 1, true])));
+}, 60_000);
