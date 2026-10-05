@@ -117,6 +117,24 @@ describe("FB2P eligible: only the proven gate-refused fix", () => {
 });
 
 describe("FB2P blocked: undelivered is proven, never assumed", () => {
+  test("the gate-refused fix whose file another card has since locked: lock_busy, and the old plan is void", async () => {
+    const p = await refused();
+    try {
+      const first = planLocalFallback(facts(p), on) as EligiblePlan;
+      expect(first.kind).toBe("eligible");
+      const t1 = p.f.db.query("SELECT * FROM tasks WHERE id = 'T1'").get() as Record<string, unknown>;
+      const row = { ...t1, id: "T2" };
+      p.f.db.run(`INSERT INTO tasks (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`, Object.values(row) as never[]);
+      const first1 = p.f.db.query("SELECT * FROM scheduler_intents WHERE taskId = 'T1' ORDER BY eventSeq").get() as Record<string, unknown>;
+      const intent = { ...first1, id: "t2:s1:r0:build:a0", taskId: "T2", status: "submitted" };
+      p.f.db.run(`INSERT INTO scheduler_intents (${Object.keys(intent).join(",")}) VALUES (${Object.keys(intent).map(() => "?").join(",")})`, Object.values(intent) as never[]);
+      p.f.db.run("DELETE FROM scheduler_resources WHERE taskId = 'T1' AND resource = 'src/lib/x.ts'");
+      p.f.db.run("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'src/lib/x.ts', 'T2', ?, 1, 'intent')", [intent.id]);
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "lock_busy", reasons: [expect.stringContaining("src/lib/x.ts@T2")] });
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["locks", "eligibility"]);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
   test("submitted without a sent receipt, unknown or pending intents block; a cancelled one is the proof", async () => {
     const p = await refused();
     try {

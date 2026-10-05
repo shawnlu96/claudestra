@@ -2,7 +2,8 @@
  * Local takeover eligibility (dispatch-recovery-FB2P): may this machine's Codex take over a write / fix that cannot go out?
  * Only two triggers count — this window's outbound-gate block (scheduler-dispatch-block.ts, state blocked) and "no peer it may
  * safely go to" (the planner's own peer_unavailable). Safety holds, owner freezes, private / local-only bans, any delivery that is
- * not proven undelivered or formally ended, a missing grant / slot / quota proof or a family switch all block. Pure and read-only:
+ * not proven undelivered or formally ended, another card's file lock on this card's globs (the planner shows that wait as
+ * peer_unavailable too, yet a local author is held by the same lock), a missing grant / slot / quota proof or a family switch all block. Pure and read-only:
  * no session, SQL write, order change or model call happens here; FB2 runs the steps and CAS (staleBasis with fresh facts and the policy port first, in its transaction).
  * FB2 call site: the auto tick's build / fix card whose decision is a wait (scheduler-auto-tick / scheduler-autostart-deps), via
  * readLocalFallbackFacts → planLocalFallback. tests/recovery-local-fallback-plan*.test.ts.
@@ -12,7 +13,7 @@ import { createHash } from "node:crypto";
 import { readInventoryQuota, type InventoryQuota } from "./ai-quota.js";
 import { listLendOrders, type LendOrder } from "./ledger-lend.js";
 import { getWriteLease, type WriteLease } from "./ledger-lend-lease.js";
-import type { AuthorFamily } from "./ledger-scheduler.js";
+import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import { getMeta } from "./ledger-store.js";
 import { planGapPolicy, specHolds, type RecoveryPolicy } from "./recovery-plan-gap.js";
 import type { RemotePolicy } from "./scheduler-config.js";
@@ -79,7 +80,7 @@ export interface LocalFallbackFacts {
 }
 
 type BlockCode = "policy_off" | "not_auto" | "stage" | "not_candidate" | "safety_hold" | "owner_hold" | "private_ban" | "spec_unreadable" |
-  "delivery_unproven" | "result_exists" | "no_grant" | "no_slot" | "no_quota" | "family_switch";
+  "delivery_unproven" | "result_exists" | "lock_busy" | "no_grant" | "no_slot" | "no_quota" | "family_switch";
 
 /** Everything whose change makes an old plan void (intent / head / spec / branch / session / any new event / orders / lease). */
 export interface PlanBasis {
@@ -89,6 +90,8 @@ export interface PlanBasis {
   spec: string | null;
   /** The local write grant as read (agents / localPriority / localAuthorRuntime / localFamilies / mode / maxWorkers). */
   grant: string;
+  /** Other cards' file locks overlapping this card's globs (empty when the plan is eligible). */
+  locks: string[];
   /** Slot / quota proofs, the outbound ban and the unpushed work the plan was built on. */
   proofs: string;
 }
@@ -129,10 +132,22 @@ function basisOf(f: LocalFallbackFacts, trigger: string): PlanBasis {
     lastSeq: s.events.at(-1)?.seq ?? 0, intents: s.intents.map((i) => `${i.id}:${i.status}`),
     orders: f.orders.map((o) => `${o.orderId}:${o.status}:${o.leaseGen}`),
     lease: f.lease ? `${f.lease.peer}:${f.lease.branch}:${f.lease.state}` : null,
-    author: s.author ? `${s.author.agent}:${s.author.sessionId}:${s.author.source}` : null, trigger,
+    author: s.author ? `${s.author.agent}:${s.author.sessionId}:${s.author.source}` : null, trigger, locks: lockConflicts(s),
     spec: f.specText === null ? null : digest(f.specText),
     grant: digest(r && [r.mode, r.agents ?? null, r.localPriority ?? null, r.localAuthorRuntime ?? null, r.localFamilies ?? null, s.maxWorkers]),
     proofs: digest([f.slot, f.quota, f.outboundBan ?? null, f.unpushed ?? []]) };
+}
+
+/**
+ * The card's file globs against every lock another card holds, the planner's own resource rule (resourceKey + resourcesOverlap,
+ * as scheduler-plan's resourceGate and placement's locksFree). An unparseable or missing glob is a conflict: nothing can be locked.
+ */
+function lockConflicts(s: PlannerSnapshot): string[] {
+  const mine = s.fileGlobs.map(resourceKey);
+  if (!mine.length || mine.includes(null)) return [`本卡文件范围无法加锁（${JSON.stringify(s.fileGlobs)}）`];
+  return s.heldResources.filter((h) => h.taskId !== s.task.id &&
+    mine.some((r) => resourcesOverlap(r as string, resourceKey(h.resource) ?? h.resource.toLowerCase())))
+    .map((h) => `${h.resource}@${h.taskId}`).sort();
 }
 
 const keyOf = (b: PlanBasis, extra: unknown): string => createHash("sha256").update(JSON.stringify([b, extra])).digest("hex").slice(0, 24);
@@ -207,6 +222,8 @@ export function assessLocalFallback(f: LocalFallbackFacts): Assessment {
   const hold = holdOf(f);
   if (hold) return block(hold.code, hold.why);
   if (typeof trig === "string") return block("not_candidate", trig);
+  // A lock wait is classified peer_unavailable by the placement view; moving the card to this machine does not free the lock.
+  if (basis.locks.length) return block("lock_busy", `文件锁被别的卡占着：${basis.locks.join("、")}，本机接管同样受限`);
   const gap = deliveryGap(f, windowOf(s));
   if (gap) return block(gap.code, gap.why);
   const author = s.workflow.authorFamily;

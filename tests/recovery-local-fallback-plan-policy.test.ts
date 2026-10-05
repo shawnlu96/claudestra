@@ -1,13 +1,14 @@
 /**
  * dispatch-recovery-FB2P, second half: the policy port (on / observe / off, missing, throwing, garbage), the Codex quota proof
  * built on the existing quota reader, and the "no peer it may safely go to" trigger on a real temp ledger — a build pinned to
- * mate whose hello is missing or whose grant expired qualifies; mate merely full is capacity and never does.
+ * mate whose hello is missing or whose grant expired qualifies; mate merely full is capacity and never does, nor does another
+ * card's file lock (the placement view files that wait as peer_unavailable, yet a local author would wait on the same lock).
  */
 import { describe, expect, test } from "bun:test";
 import { readInventoryQuota, type InventoryQuota, type QuotaReadDeps } from "../src/lib/ai-quota.js";
 import { emptyQuotaState } from "../src/lib/quota-state.js";
 import { getTask } from "../src/lib/ledger-store.js";
-import { assessLocalFallback, localCodexQuotaProof, localFallbackPolicy, planLocalFallback, readLocalFallbackFacts, type EligiblePlan,
+import { assessLocalFallback, localCodexQuotaProof, localFallbackPolicy, planLocalFallback, readLocalFallbackFacts, staleBasis, type EligiblePlan,
   type LocalFallbackFacts, type LocalFallbackPolicyPort } from "../src/lib/recovery-local-fallback-plan.js";
 import { blockFixture, E2E_MS, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
@@ -22,6 +23,21 @@ async function pinnedBuild(): Promise<Fx> {
   p.policy.remote.agents = { claude: 1, codex: 1 };
   return p;
 }
+
+/** T2, a second card of the project, takes a real intent row and the file lock `glob` (T1 drops its own lock on src/lib/x.ts). */
+function lockByOtherCard(p: Fx, glob: string) {
+  const db = p.f.db;
+  const task = db.query("SELECT * FROM tasks WHERE id = 'T1'").get() as Record<string, unknown>;
+  const row = { ...task, id: "T2", title: "另一张卡" };
+  db.run(`INSERT INTO tasks (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`, Object.values(row) as never[]);
+  const intent = { ...(db.query("SELECT * FROM scheduler_intents WHERE taskId = 'T1' ORDER BY eventSeq").get() as Record<string, unknown>),
+    id: "t2:s1:r0:build:a0", taskId: "T2", status: "submitted" };
+  db.run(`INSERT INTO scheduler_intents (${Object.keys(intent).join(",")}) VALUES (${Object.keys(intent).map(() => "?").join(",")})`, Object.values(intent) as never[]);
+  db.run("DELETE FROM scheduler_resources WHERE taskId = 'T1' AND resource = 'src/lib/x.ts'");
+  db.run("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', ?, 'T2', ?, 1, 'intent')", [glob, intent.id]);
+}
+
+const on: LocalFallbackPolicyPort = () => ({ mode: "on", manualAfterMs: null });
 
 const facts = (p: Fx): LocalFallbackFacts =>
   readLocalFallbackFacts(p.f.db, getTask(p.f.db, "T1")!, { registry: [], maxWorkers: 2, now: p.f.tickDeps.now(), pool: { remote: p.policy.remote, borrow: BORROW } },
@@ -70,6 +86,50 @@ describe("FB2P peer_unavailable trigger", () => {
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "not_candidate", reasons: [expect.stringContaining("capacity")] });
       p.hello(undefined, { until: p.f.tickDeps.now() - 1 });
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "eligible", trigger: { reason: expect.stringContaining("授权已到期") } });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("peer healthy but another card holds the file lock: the planner's placement wait is no takeover (local waits on it too)", async () => {
+    const p = await pinnedBuild();
+    try {
+      p.hello();
+      lockByOtherCard(p, "src/lib/*.ts");
+      const f = facts(p);
+      expect(f.decision).toMatchObject({ kind: "wait", code: "placement", reason: "文件锁被别的卡占着" });
+      expect(assessLocalFallback(f)).toMatchObject({ kind: "blocked", code: "lock_busy", reasons: [expect.stringContaining("src/lib/*.ts@T2")] });
+      expect(planLocalFallback(f, on)).toMatchObject({ kind: "blocked", code: "lock_busy" });
+      // An unrelated lock of T2 leaves T1 free again: mate is healthy, so it is plain dispatch, not a takeover.
+      p.f.db.run("UPDATE scheduler_resources SET resource = 'docs/*.md' WHERE taskId = 'T2'");
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "not_candidate" });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("peer gone but the file locked by another card: still lock_busy; an old no-hello plan is void once mate is back and T2 locks the file", async () => {
+    const p = await pinnedBuild();
+    try {
+      const first = assessLocalFallback(facts(p)) as EligiblePlan;
+      expect(first).toMatchObject({ kind: "eligible", basis: { locks: [] } });
+      lockByOtherCard(p, "src/lib/*.ts");
+      // No hello at all: the trigger stands, the lock alone blocks.
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "lock_busy" });
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(expect.arrayContaining(["locks", "eligibility"]));
+      p.hello();
+      const fresh = facts(p);
+      expect(fresh.decision).toMatchObject({ kind: "wait", code: "placement", reason: "文件锁被别的卡占着" });
+      expect(assessLocalFallback(fresh).kind).toBe("blocked");
+      const stale = staleBasis(first.basis, fresh, on);
+      expect(stale).toEqual(expect.arrayContaining(["locks", "eligibility"]));
+      // The lock released (T2 done): mate is healthy, so the old plan is still void — now as plain dispatch.
+      p.f.db.run("DELETE FROM scheduler_resources WHERE taskId = 'T2'");
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(expect.arrayContaining(["eligibility"]));
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("an unparseable file scope can never be locked, so it is no takeover either", async () => {
+    const p = await pinnedBuild();
+    try {
+      p.f.db.run(`UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json('["../escape.ts"]')) WHERE id = 'T1'`);
+      expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "lock_busy", reasons: [expect.stringContaining("无法加锁")] });
     } finally { p.f.close(); }
   }, E2E_MS);
 
