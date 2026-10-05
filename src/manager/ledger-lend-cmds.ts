@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { keyFingerprint, signPurpose } from "../lib/instance-key.js";
-import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/lend-config.js";
+import { LEND_FAMILIES, readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/lend-config.js";
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
@@ -24,6 +24,8 @@ import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, 
   type OfferInput } from "../lib/ledger-lend.js";
 
 import { heldLease } from "../lib/ledger-lend-lease.js";
+import { getWorkflow } from "../lib/ledger-scheduler.js";
+import { remoteHeadFamily } from "../lib/scheduler-head-family.js";
 import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
@@ -122,17 +124,35 @@ function offerPeer(c: LedgerCli, task: LedgerTask): { peer: string; repo: string
   return { peer, repo };
 }
 
-function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null): OfferInput {
+/**
+ * 审查单的家族（dispatch-recovery-FAM1b）：缺省 codex；显式 claude 只给审查单，写 / 修复单仍只借 Codex（租约与家族约束不变）。
+ * Claude 审查要证明跨模型独立：作者家族 = 出借方写的 head 记下的家族（remoteHeadFamily），否则卡流程上的 authorFamily，
+ * 须是 Codex（Claude 写的、认不出作者的都拒），security 模板的审查只在本机做。Codex 这条与旧 CLI 一致，不加新闸。
+ * 对方剩余的家族空位、仓库授权在 poll 时按对方报的 capacity 过滤（没空位就留在池里等），交结论时再核会话家族。
+ */
+function offerFamily(c: LedgerCli, task: LedgerTask): LendFamily {
   const { family = "codex" } = c.p.flags;
+  if (!(LEND_FAMILIES as readonly string[]).includes(family)) throw new LedgerError("invalid", `--family 只能是 ${LEND_FAMILIES.join(" / ")}（不是 ${family}）`);
+  const step = stepOfStage(task.stage);
+  if (family !== "codex" && step !== "review") throw new LedgerError("invalid", `写 / 修复单只借 Codex，--family ${family} 只给审查单`);
+  if (family !== "claude") return family as LendFamily;
+  const wf = getWorkflow(c.db, task.id);
+  if (wf?.template === "security") throw new LedgerError("forbidden", "security 卡的审查只在本机做，不借出去");
+  const author = remoteHeadFamily(c.db, task) ?? wf?.authorFamily ?? null;
+  if (author === "claude") throw new LedgerError("forbidden", "这张卡的代码是 claude 写的，不能再借 claude 审（要跨模型独立审查）");
+  if (!author) throw new LedgerError("forbidden", "认不出这张卡的作者家族，证明不了 Claude 审查是跨模型的（作者是 Codex 才能借 Claude 审）");
+  return "claude";
+}
+
+function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null): OfferInput {
   const { peer, repo } = offerPeer(c, task);
-  // 表和接口按两家留了位置，这一切片只借 Codex（T93 规格；r1 P2-4）
-  if (family !== "codex") throw new LedgerError("invalid", `这一版只借 Codex，--family 只能是 codex（不是 ${family}）`);
+  const family = offerFamily(c, task);
   const prFlag = c.p.flags.pr ?? task.pr?.match(/(\d+)\/?$/)?.[1];
   const pr = prFlag === undefined ? null : Number(prFlag);
   if (pr !== null && (!Number.isInteger(pr) || pr < 1)) throw new LedgerError("invalid", "--pr 要是 PR 编号");
   const spec = readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir));
   if (!spec) throw new LedgerError("invalid", `找不到 ${task.id} 的规格卡原文（对方读不到本机文件，要内联进派单）`);
-  return { taskId: task.id, peer, family: family as LendFamily, repo, pr: stepOfStage(task.stage) === "write" ? null : pr, spec, borrow };
+  return { taskId: task.id, peer, family, repo, pr: stepOfStage(task.stage) === "write" ? null : pr, spec, borrow };
 }
 
 /** 写单材料（lib/lend-write-materials.ts，调度服务挂池同一份）：查远端 / 读文件失败一律拒挂，不带半张单出去 */
@@ -281,11 +301,11 @@ const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
 export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-offer": {
     valued: OFFER_FLAGS,
-    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方）",
+    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex|claude] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；--family 缺省 codex，claude 只给审查单且作者须是 Codex）",
     run: (c) => offer(c, false),
   },
   "lend-reoffer": {
-    valued: OFFER_FLAGS, usage: "lend-reoffer <task> --peer <名> --repo <owner/name> --reason <核对了什么>（撤掉未结的单、换新单号重挂）",
+    valued: OFFER_FLAGS, usage: "lend-reoffer <task> --peer <名> --repo <owner/name> [--family codex|claude] --reason <核对了什么>（撤掉未结的单、换新单号重挂）",
     run: (c) => offer(c, true),
   },
   "lend-cancel": { valued: ["reason", "project"], usage: "lend-cancel <task> --reason <原因>（撤掉未结的出借单，之后到的结论一律不入账）", run: cancel },
