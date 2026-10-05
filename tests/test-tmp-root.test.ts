@@ -58,6 +58,8 @@ for (const failing of [false, true]) {
         const asyncChild = Bun.spawn([process.execPath, "-e", script]);
         expect(await asyncChild.exited).toBe(0);
         expect(dirname((await new Response(asyncChild.stdout).text()).trim())).toBe(root);
+        const viaNode = require("node:child_process").execFileSync(process.execPath, ["-e", script]).toString().trim();
+        expect(dirname(viaNode)).toBe(root);
         const explicit = join(root, "explicit");
         mkdirSync(explicit);
         const overridden = Bun.spawnSync([process.execPath, "-e", script], { env: { ...process.env, TMPDIR: explicit } });
@@ -147,6 +149,34 @@ test("startup reaps only old prefixed directories of dead owners, never symlinks
   ].sort());
   expect(readFileSync(join(outside, "keep"), "utf8")).toBe("untouched");
   expect(warnings).toContain("not a real directory");
+});
+
+test("startup reaps old scattered leftovers of this repo's test prefixes only: mkdtemp-shaped real dirs over 6 h old", async () => {
+  const f = fixture();
+  const outside = join(f.dir, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "keep"), "untouched");
+  const at = (name: string) => join(f.parent, name);
+  const reaped = ["asks-bridge-Ab12Cd", "cstra-test-state-Zz99Yy", "ledger-audit-cmd-db-q1W2e3"];
+  const kept = ["hist-Ab12Cd", "other-app-Ab12Cd", "asks-bridge-Ab12Cd9", "asks-bridge-old"];
+  for (const name of [...reaped, ...kept]) mkdirSync(at(name));
+  symlinkSync(outside, join(at("cstra-test-state-Zz99Yy"), "inner-link"));
+  symlinkSync(outside, at("state-file-Ln4kQ0"));
+  writeFileSync(at("ledger-read-Fi1e00"), "keep");
+  const old = new Date(Date.now() - 7 * 60 * 60 * 1_000);
+  const recent = new Date(Date.now() - 60 * 60 * 1_000);
+  for (const name of [...reaped, ...kept, "ledger-read-Fi1e00"]) utimesSync(at(name), old, old);
+  utimesSync(at("hist-Ab12Cd"), recent, recent);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const root = createTestTmpRoot(f.parent);
+  try {
+    await root.swept;
+  } finally {
+    warn.mockRestore();
+  }
+  root.cleanup();
+  expect(readdirSync(f.parent).sort()).toEqual([...kept, "state-file-Ln4kQ0", "ledger-read-Fi1e00"].sort());
+  expect(readFileSync(join(outside, "keep"), "utf8")).toBe("untouched");
 });
 
 test("a short bun test run finishes the background stale sweep before it exits", () => {
