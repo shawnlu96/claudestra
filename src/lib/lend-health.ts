@@ -3,6 +3,7 @@
  * - 存活：一次否定只记下（meta `alive:<orderId>`，带 agent / session / leaseGen，重启不丢），隔 ≥ MISS_GAP_MS 的下一轮、同一身份仍否定才判死；
  *   running / unknown 清零，身份变了按第一次算。
  *   一次读失败曾让正在审查的 worker 被当成「窗口没了」杀掉（ledger/reviews/i28-R5a-rootcause.md），所以单次否定不算数。
+ * - 回合失败（内容策略 / 请求被拒 / 上下文耗尽）：认 bridge 开的回合失败卡，同额度 / 登录一样停单，不暂停借单（lend-deps.ts failureOf）。
  * - 撞额度 / 登录失败：认 bridge 为这个 worker 开的 Codex 运行时卡（scheduler-auto-ports codexFailure 同一信号）；撞额度的同时
  *   本机暂停借单（meta `pause:codex`），启动失败也认报错中的重置时刻，均读不到就 PAUSE_FALLBACK_MS；之后观测到每个窗口都明确不满才提前恢复。
  * tests/lend-health.test.ts、tests/lend-loop.test.ts。
@@ -13,6 +14,7 @@ import { getMeta, setMeta, type LendRow } from "./lend-journal.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { classifyAirFailure } from "./acp/failures.js";
 import { lendQuotaResetAt } from "./lend-quota-reset.js";
+import { isCyberPolicy } from "./agent-supervisor-policy.js";
 
 export type WorkerDown = "no_window" | "no_host";
 export const MISS_GAP_MS = 5_000;
@@ -59,8 +61,18 @@ export function noteLiveness(db: Database, row: LendRow, v: WorkerLiveness, now:
 }
 
 export interface CodexFailureSeen { kind: "quota" | "auth"; askId: string; message: string }
+/** 加上回合失败卡（bridge/acp-link.ts，extra.failure = error）：回合已停、不会自己续跑，停单交回 A */
+export type LendWorkerFailure = CodexFailureSeen | { kind: "error"; askId: string; message: string };
 
-export function failureReason(f: CodexFailureSeen): string {
+/**
+ * journal reason 与给 A 的 release detail 都用它。回合失败写明 B 不重试，由 A 决定撤单还是重派；
+ * 类别和 note 放在原文前面：detail 按 500 字节截尾（lend-drive detailOf），长原文只丢自己的尾巴
+ */
+export function failureReason(f: LendWorkerFailure, note?: string): string {
+  if (f.kind === "error") {
+    const why = isCyberPolicy(f.message) ? "内容策略拦截" : "请求被拒 / 上下文耗尽之类";
+    return `worker 回合失败（${why}；出借方不自动重试、不换家族${note ? `；${note}` : ""}），没交结论：${f.message}`;
+  }
   return f.kind === "quota" ? `worker 撞了 Codex 额度，没交结论：${f.message}` : `worker 的 Codex 没登录或登录失效，没交结论：${f.message}`;
 }
 

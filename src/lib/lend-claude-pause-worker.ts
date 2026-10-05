@@ -6,7 +6,7 @@ import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
 import { translateSessionLine } from "./session-source.js";
 import { liveOrders, type LendRow } from "./lend-journal.js";
 import type { LendDeps } from "./lend-drive.js";
-import type { CodexFailureSeen } from "./lend-health.js";
+import type { LendWorkerFailure } from "./lend-health.js";
 import { parseWallText } from "./quota-wall-text.js";
 import { CLAUDE_AUTH_FAILURE, claudeWorkerRecovered, pauseClaude, type ClaudeFailure } from "./lend-claude-pause.js";
 
@@ -56,8 +56,8 @@ function sessionTail(path: string): string {
 }
 
 /** The journal's session identity is authoritative: a recycled registry name cannot select another session. */
-export function lendWorkerFailureOf(db: Database, agent: string, codex: () => CodexFailureSeen | undefined,
-  now = Date.now(), pathOf = claudeWorkerSessionPath): ClaudeFailure | undefined {
+export function lendWorkerFailureOf(db: Database, agent: string, codex: () => LendWorkerFailure | undefined,
+  now = Date.now(), pathOf = claudeWorkerSessionPath): LendWorkerFailure | undefined {
   const row = liveOrders(db).find((r) => r.agent === agent && r.state === "started");
   if (row?.family !== "claude") return codex();
   if (!row?.sessionId) return undefined;
@@ -77,9 +77,9 @@ export function lendWorkerFailureOf(db: Database, agent: string, codex: () => Co
 type Finish = (row: LendRow, to: "stopped", why: string, d: LendDeps, notify: boolean) => Promise<void>;
 
 /** Keep drive's existing Codex branch intact, and use the same stop/release settlement for Claude. */
-export async function leasedWorkerFailure(row: LendRow, d: LendDeps, finish: Finish): Promise<CodexFailureSeen | true | undefined> {
+export async function leasedWorkerFailure(row: LendRow, d: LendDeps, finish: Finish): Promise<LendWorkerFailure | true | undefined> {
   const f = d.failure(row.agent!);
-  if (row.family !== "claude" || !f) return f;
+  if (row.family !== "claude" || !f || f.kind === "error") return f; // 回合失败没有 Claude 暂停可记，交 drive 的通用停单
   const until = pauseClaude(d.db, row, f, d.now());
   const message = f.kind === "quota" && until !== null ? `You've hit your usage limit. try again at ${new Date(until).toISOString()}` : f.message;
   const reason = `worker 的 Claude ${f.kind === "auth" ? "登录失效" : "额度已满"}，没交结论：${message}`;
