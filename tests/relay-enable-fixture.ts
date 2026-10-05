@@ -70,7 +70,7 @@ async function yieldTimes(n: number): Promise<void> {
   for (let i = 0; i < n; i++) await macrotask();
 }
 
-export interface Arrival { tag: string; env: string | null; lockHeld: boolean; listing: string[] }
+interface Arrival { tag: string; env: string | null; lockHeld: boolean; listing: string[] }
 export interface Observed {
   first: string;
   second: string;
