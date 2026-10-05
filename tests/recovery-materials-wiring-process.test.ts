@@ -38,9 +38,14 @@ const FINDINGS = [{ findingId: "race-1", family: "concurrency", severity: "P1", 
   { findingId: "api-2", family: "api", severity: "P2", probe: "返回值没校验", description: "调用方拿到 undefined", file: "src/lib/x.ts", line: 12 }];
 const LEND_CLI: Record<string, string> = { claim: "lend-claim", result: "lend-write" };
 
-/** CFG 替身，装在正式位置：同一导出名，每次调用现读策略文件（不缓存），调用记进日志 */
+/**
+ * CFG 替身，装在正式位置：同一导出名，每次调用现读策略文件（不缓存），调用记进日志。CFG（#597）已在 main 上，manager 静态 import
+ * 它的其余导出（observedRecent / setRecovery …），所以真模块原样放在旁边（recovery-policy-cfg.ts），替身 re-export 它、只覆盖 recoveryPolicy。
+ */
+const REAL_CFG = "recovery-policy-cfg.ts";
 const READER_SRC = `import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+export * from "./${REAL_CFG}";
 export function recoveryPolicy(project, mechanism) {
   const state = process.env.CLAUDESTRA_STATE_DIR;
   appendFileSync(join(state, "matw-calls.log"), process.pid + " " + project + ":" + mechanism + "\\n");
@@ -56,6 +61,8 @@ export function deployment(opts: { bundle?: boolean; state?: string } = {}) {
   symlinkSync(join(import.meta.dir, "..", "node_modules"), join(root, "node_modules"));
   cpSync(join(import.meta.dir, "..", "package.json"), join(root, "package.json"));
   const reader = join(root, "src", "lib", "recovery-policy.ts");
+  const realCfg = readFileSync(reader, "utf8");
+  writeFileSync(join(root, "src", "lib", REAL_CFG), realCfg);
   writeFileSync(reader, READER_SRC);
   let manager = join(root, "src", "manager.ts");
   if (opts.bundle) {
@@ -116,9 +123,13 @@ exit 1
     return { status: res.status, text, json: JSON.parse(text) };
   };
   const calls = (): string[] => (existsSync(join(state, "matw-calls.log")) ? readFileSync(join(state, "matw-calls.log"), "utf8").trim().split("\n") : []);
-  const hideReader = () => renameSync(reader, `${reader}.away`);
+  /** Bundle only: the dist keeps CFG's static exports, so moving the source-tree reader away leaves the run-time read "not installed". */
+  const hideReader = () => { if (!opts.bundle) throw new Error("源码部署 manager 静态 import CFG，挪走就起不来"); renameSync(reader, `${reader}.away`); };
   const restoreReader = () => renameSync(`${reader}.away`, reader);
-  return { root, state, reader, manager, mateFp: keyFingerprint(mateKey.publicKey), run, peer, wire, policy, setRemote, calls, hideReader, restoreReader, env, close: () => server.stop(true) };
+  /** Source deployment: the formal location holds main's real CFG module (no stub, reads the real recovery-policy.json). */
+  const realReader = () => { renameSync(reader, `${reader}.away`); writeFileSync(reader, realCfg); };
+  return { root, state, reader, manager, mateFp: keyFingerprint(mateKey.publicKey), run, peer, wire, policy, setRemote, calls,
+    hideReader, restoreReader, realReader, env, close: () => server.stop(true) };
 }
 type Deployment = ReturnType<typeof deployment>;
 
@@ -217,16 +228,15 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
     }, 60_000);
   }
 
-  test("reader 从正式位置挪走 = 未安装：observe，全文照发，命令结果带诊断；放回后下一个进程又读到", async () => {
+  test("正式位置是 main 上真的 CFG 模块、没有 recovery-policy.json = 默认 observe，全文照发；换回替身后下一个进程又读到", async () => {
     d.policy({ [P]: "on" });
     await fixCard(d, "T-missing", P, "## P1\n- race-1\n", FINDINGS);
-    d.hideReader();
+    d.realReader();
     try {
       const before = d.calls().length;
       const { out } = await d.run(["ledger", "lend-offer", "T-missing"]);
       expect(out).toMatchObject({ ok: true, step: "fix" });
-      expect(out.materialsDiag).toContain("未安装");
-      expect(out.materialsDiag).toContain(d.reader);
+      expect(out.materialsDiag).toBeUndefined();
       expect(d.calls().length).toBe(before);
       expect((await claimFix(d, "T-missing")).inputs.some((s) => s.startsWith(FULL))).toBe(true);
       expect(materialsOf(d, "T-missing")).toEqual([expect.objectContaining({ mode: "observe" })]);
@@ -433,11 +443,11 @@ describe("调度服务 scheduler-pool：调度服务身份的 manager 进程挂�
     } finally { p.close(); }
   }, 120_000);
 
-  test("reader 不在正式位置 = observe：全文照发（与改动前同一条路），reader 没被调用", async () => {
+  test("正式位置是 main 上真的 CFG 模块、没有策略文件 = 默认 observe：全文照发（与改动前同一条路），替身没被调用", async () => {
     const p = await ready({ p: "on" });
     try {
       await toFix(p, "# 审查报告\nP1：两个 tick 抢同一个意图", [DESCRIBED]);
-      p.d.hideReader();
+      p.d.realReader();
       const got = await pooledFix(p);
       expect(got.inputs.some((s) => s.startsWith(FULL))).toBe(true);
       expect(notes(p)).toEqual([expect.objectContaining({ mode: "observe" })]);

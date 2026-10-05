@@ -102,12 +102,11 @@ beforeEach(() => {
 afterEach(() => closeLedger(":memory:"));
 
 describe("reader 加载（真动态 import）", () => {
-  test("当前 main 上 CFG 正式位置没有模块 = 未安装：不给 port（observe），诊断写明", async () => {
+  test("CFG（#597）已在 main 上：无参 port 读到正式位置的真模块，给出合法模式；位置不存在的「未安装」由下面 MISSING 各条覆盖", async () => {
     expect(cfgReaderPath()).toBe(join(import.meta.dir, "..", "src", "lib", "recovery-policy.ts"));
     const r = await materialsPolicyPort();
-    expect(r.reader).toBe("missing");
-    expect(r.policy).toBeUndefined();
-    expect(r.diag).toContain("未安装");
+    expect(r).toMatchObject({ reader: "loaded", diag: null });
+    expect(["on", "observe", "off"]).toContain(r.policy!(P, "materials").mode);
   });
 
   test("装好：每次调用现读；非法值 / 抛错 / 缺导出 / 加载失败 都让 port 抛（fix-materials 据此按 off）", async () => {
