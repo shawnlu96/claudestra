@@ -9,11 +9,13 @@
  * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消，通知 / 状态栏进日志；pi 意外退出 = 适配器退出，由宿主重起。
  * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在 session_start
  *   再报一次（撞名、reply 进没进模型的工具表，MOUNT_STATUS_KEY）；任何一处不过就拒这个会话，不让宿主把没有 reply 的会话当成接通。
+ * - 用户输入写给 pi 之后拿不到确认（超时 / pi 退出）：steer 回 deliveredUnknown、prompt 的错误带 data.deliveryUnknown，宿主据此不重发
+ *   （tests/pi-acp-steer-failure.test.ts）。写出之前的失败、pi 明确拒绝（success:false）照旧回错误，宿主照旧改回 prompt。
  * tests/pi-acp-replay.test.ts（录制的 pi 0.99.1 事件流回放）、tests/pi-acp-shell.test.ts。
  */
 import { redactSecrets } from "../../redact-secrets.js";
 import { ACP_PROTOCOL_VERSION } from "../protocol.js";
-import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
+import { createRpcPeer, RpcError, RpcLostError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
   compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate,
   type TurnOutcome,
@@ -71,6 +73,8 @@ const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断�
 /** 旧会话已经停掉后新会话又起不来：错误带上它，宿主据此重起适配器、接回 registry 里的旧会话（lib/acp/clear.ts） */
 const CLOSED_OLD = { previousSessionClosed: true };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** 命令已经写给 pi、却没拿到确认：pi 可能已经收下并执行了这条输入 */
+const lostAfterWrite = (e: unknown): e is RpcLostError => e instanceof RpcLostError && e.sent;
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
 export class PiAcpServer {
@@ -250,7 +254,9 @@ export class PiAcpServer {
     let wait: Promise<Settled> | null = null;
     g.inflight++;
     try {
-      const r = await g.link.command({ type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
+      const r = await g.link.command({ type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS).catch((e) => {
+        throw lostAfterWrite(e) ? new RpcError(INTERNAL_ERROR, e.message, { message: e.message, deliveryUnknown: true }) : e;
+      });
       this.stillLive(g); // 确认回来前被 /clear 换下了：等待既不该挂到新会话上，也不会再有人兑现
       // handled 但扩展当场开了一轮（agent_start 先于回包到）也等它停稳；回包之后才开的由宿主当自发回合跟（session.ts）
       if (r?.disposition !== "handled" || g.running) wait = new Promise((resolve, reject) => g.waiters.push({ resolve, reject }));
@@ -292,7 +298,13 @@ export class PiAcpServer {
   private async steer(p: Rec): Promise<Rec> {
     const g = this.live(p);
     if (this.stopping(g)) return { outcome: "deferred" }; // 不是 injected / startedNewTurn：宿主把它排回队列，这轮停稳后另起一轮
-    const r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS);
+    let r: Rec;
+    try {
+      r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS);
+    } catch (e) {
+      if (lostAfterWrite(e)) return { outcome: "deliveredUnknown", message: e.message };
+      throw e;
+    }
     this.stillLive(g);
     return { outcome: r?.disposition === "started" ? "startedNewTurn" : "injected" };
   }

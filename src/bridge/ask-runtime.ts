@@ -21,6 +21,8 @@ interface Held {
   /** askId；"" = 正在建；"~<id>" = 同指纹删过 / 额度卡到期、弹框还在，不开 */
   id: string;
   fp: string;
+  /** 投递结果不明的卡（RuntimeAskInput.deliveryUnknown）：让出这个槽时只从内存里拿掉，库里照样开着 */
+  pinned?: true;
 }
 /** 每个频道每种来源同时只有一个弹框、一条开着的 */
 const runtimeOpen = new Map<string, Held>();
@@ -82,6 +84,11 @@ interface RuntimeAskInput {
   failure?: "error";
   /** 监护在处置、恢复次数还没用完（lib/agent-supervisor-bridge.ts failureCardQuiet）：卡照开、留在看板上，但不卡活、不推 owner */
   quiet?: true;
+  /**
+   * 用户输入投递结果不明（lib/acp/failures.ts）：落在 extra.deliveryUnknown，只能由人结——后来的卡顶不掉、不按正文里的时间过期、
+   * 监护的恢复关卡也跳过（agent-supervisor-bridge.ts cardsToClose）。它说的是「这条消息可能执行过、没重发」，被悄悄关掉就等于吞了这条消息
+   */
+  deliveryUnknown?: true;
 }
 
 export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
@@ -92,34 +99,37 @@ export async function openRuntimeAsk(r: RuntimeAskInput): Promise<void> {
   if (held?.fp === fp) return;
   if (held) settleRuntimeAsk(r.source, r.channelId); // 同一频道换成了另一个弹框：上一个结掉（记消失）再看这个
   clearChecked.delete(key);
-  const slot: Held = { id: "", fp };
+  const pinned = r.deliveryUnknown ? { pinned: true as const } : {};
+  const slot: Held = { id: "", fp, ...pinned };
   runtimeOpen.set(key, slot);
   try {
     // 跨重启认领、删过压住只给 Codex / 权限卡（owner 要的是额度卡别反复冒）；AUQ 重启后一律开新卡，旧的由 supersede / noteAbsent 撤
     const prior = r.source === "auq" ? null : priorByFingerprint(askDb(), r.source, r.channelId, fp);
     const reuse = reuseOf(prior);
     supersede(r.source, r.channelId, reuse === "adopt" ? prior!.id : "");
-    if (reuse !== "new") return void runtimeOpen.set(key, { id: reuse === "adopt" ? prior!.id : `~${prior!.id}`, fp });
+    if (reuse !== "new") return void runtimeOpen.set(key, { id: reuse === "adopt" ? prior!.id : `~${prior!.id}`, fp, ...pinned });
     const who = (await whoIs(r.channelId)) ?? { name: r.agentName, project: MASTER_PROJECT, channelId: r.channelId };
     // 卡住的是整个回合；有下游挂在它名下（registry parent）就算急
     const urgent = (await registry()).some((x) => x.parent === who.name && x.status === "active");
     const now = Date.now();
-    const expiresAt = r.source === "codex" ? codexExpiry(r.context, now) : undefined;
+    const expiresAt = r.source === "codex" && !r.deliveryUnknown ? codexExpiry(r.context, now) : undefined; // 投递不明的正文含用户原文，里面的时间不是重置时间
     const a = openAsk(askDb(), {
       project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId: r.channelId, source: r.source, kind: r.kind, blocking: !r.quiet,
       urgency: urgent ? "urgent" : "normal", title: r.title, context: r.quota ? codexQuotaText(expiresAt, now) : r.context, options: r.options, allowText: false,
       chatId: r.channelId, expiresAt, extra: {
         ...parentExtra(who).extra, fp, ...(r.quota ? { quota: true, raw: r.context } : {}), ...(r.acp ? { acp: true } : {}), ...(r.failure ? { failure: r.failure } : {}),
+        ...(r.deliveryUnknown ? { deliveryUnknown: true } : {}),
       },
     }, now);
     publishAsk(a);
     // 建的途中弹框已经没了、或换成了另一个（占位被 settle 拿走）：立刻结案，别留一条永远开着的
     if (runtimeOpen.get(key) !== slot) {
+      if (r.deliveryUnknown) return; // 只能由人结：建的途中被后来的卡顶了也留在库里
       const c = closeAsk(askDb(), a.id, "cancelled", t("弹框已关闭", "dialog closed"), Date.now(), { clearedAt: Date.now() });
       if (c) publishAsk(c);
       return;
     }
-    runtimeOpen.set(key, { id: a.id, fp });
+    runtimeOpen.set(key, { id: a.id, fp, ...pinned });
   } catch (e) {
     if (runtimeOpen.get(key) === slot) runtimeOpen.delete(key);
     console.error(`⚠️ 运行时弹框建 ask 失败: ${(e as Error).message}`);
@@ -135,7 +145,7 @@ export function settleRuntimeAsk(source: RuntimeSource, channelId: string, answe
   const held = runtimeOpen.get(key);
   if (held === undefined) return;
   runtimeOpen.delete(key);
-  if (!held.id) return;
+  if (!held.id || held.pinned) return;
   const id = held.id.replace(/^~/, "");
   try {
     const db = askDb();
@@ -168,7 +178,7 @@ function markCleared(id: string): void {
 function supersede(source: RuntimeSource, channelId: string, keep: string): void {
   const db = askDb();
   for (const a of listAsks(db, { source, states: ["open"] })) {
-    if (a.fromChannelId !== channelId || a.id === keep) continue;
+    if (a.fromChannelId !== channelId || a.id === keep || a.extra.deliveryUnknown === true) continue;
     const c = closeAsk(db, a.id, "cancelled", t("换成了另一个弹框", "replaced by another dialog"), Date.now(), { clearedAt: Date.now() });
     if (c) publishAsk(c);
   }
@@ -186,6 +196,7 @@ function noteAbsent(source: RuntimeSource, channelId: string): void {
     try {
       const db = askDbIfExists();
       for (const a of db && hasAsksTable(db) ? unclearedRuntimeAsks(db, source, channelId) : []) {
+        if (a.extra.deliveryUnknown === true) continue; // 只能由人结（RuntimeAskInput.deliveryUnknown）：屏上有没有弹框和它无关，也不记消失
         const c = a.state === "open" ? closeAsk(db!, a.id, "cancelled", t("弹框已关闭", "dialog closed"), Date.now(), { clearedAt: Date.now() }) : null;
         if (c) publishAsk(c);
         else markCleared(a.id);
