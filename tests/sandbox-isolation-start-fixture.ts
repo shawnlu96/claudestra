@@ -125,7 +125,7 @@ function spawnUp(spec: StartSpec, port: number): Child {
 }
 
 /** 等 up child 退出；本次起的 bridge 日志已报本端口 EADDRINUSE 时不必等脚本 20 秒的就绪超时，提前收掉 child */
-async function settle(spec: StartSpec, child: Child, port: number, prevPid: number | null, offset: number): Promise<"exited" | "bridge-in-use"> {
+async function settle(spec: StartSpec, child: Child, port: number, prevPid: number | null, offset: number): Promise<"exited" | "bridge-in-use" | "deadline"> {
   while (true) {
     if (child.proc.exitCode !== null || child.proc.signalCode !== null) return "exited";
     const pid = readPid(spec.root);
@@ -137,7 +137,7 @@ async function settle(spec: StartSpec, child: Child, port: number, prevPid: numb
     if (Date.now() > spec.deadline) {
       child.proc.kill("SIGKILL");
       await child.proc.exited;
-      throw new Error(`沙箱 up 超过截止时间仍未结束（端口 ${port}）：${await child.out()}`);
+      return "deadline";
     }
     await Bun.sleep(50);
   }
@@ -173,6 +173,19 @@ function portRaced(spec: StartSpec, port: number, out: string, fresh: number | n
   return !(listeners(port) ?? []).includes(fresh);
 }
 
+/** 非端口竞争的失败：本次起过的东西（bridge / 新建的沙箱）先 down 收掉并核验，再连同清理结果原样抛出，不重跑 */
+async function failAttempt(spec: StartSpec, port: number, fresh: number | null, created: boolean, msg: string, attempts: Attempt[]): Promise<never> {
+  let cleanup = "";
+  if (fresh !== null || created) {
+    try {
+      await cleanupAttempt(spec, port, fresh);
+    } catch (e) {
+      cleanup = `\n（清理本次尝试也失败了：${(e as Error).message}）`; // 并进下面抛出的错误里，不吞
+    }
+  }
+  throw new StartFailure(msg + cleanup, attempts);
+}
+
 /** 经原入口起沙箱 bridge；只在确认端口被抢时有界换端口，其余失败原样抛出 */
 export async function startSandbox(spec: StartSpec): Promise<Started> {
   const attempts: Attempt[] = [];
@@ -183,18 +196,26 @@ export async function startSandbox(spec: StartSpec): Promise<Started> {
     await spec.onPicked?.(port, i);
     const prevPid = readPid(spec.root);
     const offset = logSize(spec.root);
+    const hadMarker = existsSync(join(spec.root, SANDBOX_MARKER));
     const child = spawnUp(spec, port);
     const kind = await settle(spec, child, port, prevPid, offset);
     const out = await child.out();
     const pid = readPid(spec.root);
     const fresh = pid !== null && pid !== prevPid ? pid : null;
+    const created = !hadMarker && existsSync(join(spec.root, SANDBOX_MARKER));
     if (kind === "exited" && child.proc.exitCode === 0) {
       attempts.push({ port, outcome: "started", out });
-      return { port, pid: verifyOwned(spec, port, prevPid, out), out, attempts };
+      try {
+        return { port, pid: verifyOwned(spec, port, prevPid, out), out, attempts };
+      } catch (e) {
+        attempts[attempts.length - 1]!.outcome = "failed";
+        return failAttempt(spec, port, fresh, created, (e as Error).message, attempts);
+      }
     }
-    if (!portRaced(spec, port, out, fresh, offset)) {
+    if (kind === "deadline" || !portRaced(spec, port, out, fresh, offset)) {
       attempts.push({ port, outcome: "failed", out });
-      throw new StartFailure(`沙箱 up 失败（端口 ${port}，非端口竞争，不重跑）：\n${out}\n${logSince(spec.root, offset)}`, attempts);
+      const why = kind === "deadline" ? "超过截止时间仍未结束" : "非端口竞争";
+      return failAttempt(spec, port, fresh, created, `沙箱 up 失败（端口 ${port}，${why}，不重跑）：\n${out}\n${logSince(spec.root, offset)}`, attempts);
     }
     attempts.push({ port, outcome: "port-race", out });
     await cleanupAttempt(spec, port, fresh);

@@ -584,11 +584,12 @@ describe("启动夹具：端口竞争（受控扰动）", () => {
     expect(bad).toBeInstanceOf(StartFailure);
     expect((bad as StartFailure).attempts.map((a) => a.outcome)).toEqual(["failed"]);
     expect(String(bad.message)).toContain("重叠");
+    const cut = await startSandbox(upSpec(join(tmp, "race-cut"), 300)).catch((e) => e); // 起到一半撞截止：不重跑，本次起的收干净
+    expect([(cut as StartFailure).attempts?.map((a) => a.outcome), existsSync(join(tmp, "race-cut", "bridge.pid"))]).toEqual([["failed"], false]);
     const r = join(tmp, "race-live");
     const up = await startSandbox(upSpec(r, 45_000));
     const twice = await startSandbox(upSpec(r, 30_000, { firstPort: up.port })).catch((e) => e);
-    expect((twice as StartFailure).attempts?.map((a) => a.outcome)).toEqual(["failed"]);
-    expect(alive(up.pid)).toBe(true);
+    expect([(twice as StartFailure).attempts?.map((a) => a.outcome), alive(up.pid)]).toEqual([["failed"], true]);
     const prod = await startSandbox(upSpec(r, 30_000, { firstPort: DEFAULT_BRIDGE_PORT })).catch((e) => e);
     expect((prod as StartFailure).attempts).toEqual([]);
     downAndVerify(r, up.port, up.pid, before);
