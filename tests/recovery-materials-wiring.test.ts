@@ -8,7 +8,7 @@
 import type { Database } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
@@ -23,6 +23,9 @@ import type { RemoteHead } from "../src/lib/order-deliver.js";
 import { cfgReaderPath, materialsPolicyPort } from "../src/lib/recovery-materials-wiring.js";
 import { RECOVERY_POLICY_PATH, setRecovery } from "../src/lib/recovery-policy.js";
 import { runLedger } from "../src/manager/ledger.js";
+import { canonicalPath } from "../src/lib/sandbox.js";
+import { isUnderTempDir } from "../src/lib/test-guard.js";
+import { testChildEnv } from "./test-env.js";
 
 const P = "claude-orchestrator", Q = "other-project";
 const BASE = "b".repeat(40), H2 = "c".repeat(40);
@@ -107,8 +110,9 @@ afterEach(() => closeLedger(":memory:"));
 describe("reader 加载（真动态 import）", () => {
   test("当前 main：CFG 正式位置是真 recoveryPolicy，经正式 API 写的临时配置每次现读；坏配置 = off", async () => {
     expect(cfgReaderPath()).toBe(join(import.meta.dir, "..", "src", "lib", "recovery-policy.ts"));
-    // 真 CFG 读的是本测试进程的临时状态目录（tests/preload.ts），跑完还原
-    expect(RECOVERY_POLICY_PATH.startsWith(realpathSync(tmpdir())) || RECOVERY_POLICY_PATH.startsWith(tmpdir())).toBe(true);
+    // 真 CFG 读的是本测试进程的临时状态目录（tests/preload.ts 分配或显式传入的系统临时目录，与 test-guard 同一判定），跑完还原
+    expect(canonicalPath(dirname(RECOVERY_POLICY_PATH))).toBe(canonicalPath(process.env.CLAUDESTRA_STATE_DIR!));
+    expect(isUnderTempDir(RECOVERY_POLICY_PATH)).toBe(true);
     const saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null;
     try {
       rmSync(RECOVERY_POLICY_PATH, { force: true });
@@ -171,10 +175,21 @@ describe("打包后的入口（bun build --target=bun）", () => {
 import { cfgReaderPath } from "./lib/recovery-materials-wiring.js" with { type: "macro" };
 const at = cfgReaderPath(), r = await materialsPolicyPort(at), bare = await materialsPolicyPort();
 const bareAt = ${JSON.stringify(join(root, "lib", "recovery-policy.ts"))};
-console.log(JSON.stringify({ at, reader: r.reader, mode: r.policy ? r.policy("p", "materials").mode : null, bare: bare.diag?.includes(bareAt) ?? false }));\n`);
-    const build = Bun.spawnSync([process.execPath, "build", join(root, "src", "entry.ts"), "--target=bun", "--outdir", out]);
+console.log(JSON.stringify({ at, reader: r.reader, mode: r.policy ? r.policy("p", "materials").mode : null, bare: bare.diag?.includes(bareAt) ?? false,
+  canary: process.env.MATWC1_CANARY ?? null, home: process.env.HOME }));\n`);
+    // 子进程一律最小 env（临时 HOME / STATE / RUNTIME / TMPDIR、拒连 bridge）+ cwd = 副本根 + --no-env-file；根下放 .env 金丝雀证明没被加载
+    for (const d of ["home", "state", "run", "tmp"]) mkdirSync(join(root, d));
+    writeFileSync(join(root, ".env"), "MATWC1_CANARY=leaked\n");
+    const child = { cwd: root, stdout: "pipe", stderr: "pipe", env: testChildEnv({ PATH: "/usr/bin:/bin", HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
+      CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "run") }) } as const;
+    const build = Bun.spawnSync([process.execPath, "--no-env-file", "build", join(root, "src", "entry.ts"), "--target=bun", "--outdir", out], child);
     expect(build.exitCode).toBe(0);
-    const runIt = (file: string) => JSON.parse(Bun.spawnSync([process.execPath, file], { stderr: "pipe" }).stdout.toString().trim().split("\n").at(-1)!);
+    const runIt = (file: string) => {
+      const r = Bun.spawnSync([process.execPath, "--no-env-file", file], child);
+      const { canary, home, ...rest } = JSON.parse(r.stdout.toString().trim().split("\n").at(-1)!);
+      expect({ canary, home }).toEqual({ canary: null, home: join(root, "home") });
+      return rest;
+    };
     const formal = join(lib, "recovery-policy.ts");
     expect(runIt(join(out, "entry.js"))).toEqual({ at: formal, reader: "missing", mode: null, bare: true });
     writeFileSync(formal, "export const recoveryPolicy = (p, m) => ({ mode: m === 'materials' ? 'on' : 'off', manualAfterMs: null });\n");

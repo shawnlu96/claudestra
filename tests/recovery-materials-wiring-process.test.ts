@@ -61,17 +61,18 @@ export function deployment(opts: { bundle?: boolean; state?: string } = {}) {
   symlinkSync(join(import.meta.dir, "..", "node_modules"), join(root, "node_modules"));
   cpSync(join(import.meta.dir, "..", "package.json"), join(root, "package.json"));
   const reader = join(root, "src", "lib", "recovery-policy.ts");
+  const state = opts.state ?? join(root, "state");
+  for (const d of ["home", "run", "tmp", "bin", "remote", "proj-p", "proj-q"]) mkdirSync(join(root, d), { recursive: true });
+  mkdirSync(state, { recursive: true });
   let manager = join(root, "src", "manager.ts");
-  if (opts.bundle) { // 产物按 main 原样打包（含真 CFG），之后才在源码树装包装
-    const b = Bun.spawnSync([process.execPath, "build", manager, "--target=bun", "--outdir", join(root, "dist")], { stdout: "pipe", stderr: "pipe" });
+  if (opts.bundle) { // 产物按 main 原样打包（含真 CFG），之后才在源码树装包装；打包进程同样最小 env + --no-env-file
+    const b = Bun.spawnSync([process.execPath, "--no-env-file", "build", manager, "--target=bun", "--outdir", join(root, "dist")], { cwd: root, stdout: "pipe", stderr: "pipe",
+      env: testChildEnv({ PATH: "/usr/bin:/bin", HOME: join(root, "home"), TMPDIR: join(root, "tmp"), CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(root, "run") }) });
     if (b.exitCode !== 0) throw new Error(`bundle failed: ${b.stderr.toString()}`);
     manager = join(root, "dist", "manager.js");
   }
   renameSync(reader, join(root, "src", "lib", "recovery-policy-cfg.ts"));
   writeFileSync(reader, wrapperSrc());
-  const state = opts.state ?? join(root, "state");
-  for (const d of ["home", "run", "tmp", "bin", "remote", "proj-p", "proj-q"]) mkdirSync(join(root, d), { recursive: true });
-  mkdirSync(state, { recursive: true });
   // 替身 git：只答 ls-remote <url> refs/heads/<branch>，head 取 remote/<branch 的 / 换成 _>
   writeFileSync(join(root, "bin", "git"), `#!/bin/sh
 [ "$1" = "ls-remote" ] || exit 2
