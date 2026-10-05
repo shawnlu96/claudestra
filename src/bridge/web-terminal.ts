@@ -58,7 +58,7 @@ async function resolveWindowRef(agentParam: string): Promise<string | null> {
  * 路由入口。匹配不到终端路径时返回 null（调用方 fallthrough 到 handleApiRequest）。
  *   GET  /api/v1/agents/:name/terminal?cols=&rows=   → SSE 输出流（创建 PTY）
  *   POST /api/v1/terminal/:termId/input  {d: base64} → 写 PTY
- *   POST /api/v1/terminal/:termId/resize {cols,rows} → resize + SIGWINCH
+ *   POST /api/v1/terminal/:termId/resize {cols,rows} → resize + SIGWINCH；/alive → 续命（ka=1 打开的，term-liveness.ts）
  *   /api/v1/shells…                                 → 宿主 shell（web-shell.ts）
  */
 export async function handleTerminalApi(req: Request, url: URL): Promise<Response | null> {
@@ -69,8 +69,8 @@ export async function handleTerminalApi(req: Request, url: URL): Promise<Respons
     return openAgentTerminal(req, url, decodeURIComponent(openMatch[1]));
   }
 
-  const ioMatch = path.match(/^\/terminal\/([^/]+)\/(input|resize)$/);
-  if (ioMatch && req.method === "POST") return handleTermIo(req, ioMatch[1], ioMatch[2] as "input" | "resize");
+  const ioMatch = path.match(/^\/terminal\/([^/]+)\/(input|resize|alive)$/);
+  if (ioMatch && req.method === "POST") return handleTermIo(req, ioMatch[1], ioMatch[2] as "input" | "resize" | "alive");
 
   if (path === "/shells" || path.startsWith("/shells/")) return handleShellApi(req, url, path);
   return null;
