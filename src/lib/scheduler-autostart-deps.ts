@@ -1,4 +1,4 @@
-import { recoveryPolicy } from "./recovery-policy.js";
+import { recordObserved, recoveryPolicy } from "./recovery-policy.js";
 /**
  * 自动开卡 / 自动交回（i28-A1）的生产接线：schedulerPass 在 autoDispatch 块里先 resume（auto tick 之前）、后 start（之后）。
  * 台账写走传进来的调度身份 CLI（已套租约守卫）；create / kill 走不带调度身份、带服务租约的 manager（同 scheduler-auto-deps.ts 建审查员）；
@@ -23,6 +23,11 @@ import { runManagerProcess } from "./run-manager.js";
 import type { ServiceFacts, SpecFile } from "./scheduler-autostart.js";
 import { autoResumeTick } from "./scheduler-autostart-resume.js";
 import { autostartTick, type StartTickEnv } from "./scheduler-autostart-run.js";
+import { autoTickDeps } from "./scheduler-auto-deps.js";
+import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
+import { localTakeoverTick } from "./scheduler-dispatch-recovery.js";
+import { poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
+import { localAuthorRuntime } from "./scheduler-local-runtime.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
@@ -44,6 +49,8 @@ const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
 
 /** 跨轮的去重表：额度窗口、被核心拒绝的交付（重启后各最多再发一次） */
 const MEMO = new Set<string>();
+/** 本机接管（dispatch-recovery-FB2）已发过的阻塞通知，进程内去重 */
+const TOLD = new Set<string>();
 
 /**
  * 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它。用 resolve 而非 join：CLAUDESTRA_STATE_DIR 可以是相对值，
@@ -60,7 +67,11 @@ function readSpec(path: string): SpecFile | null {
   }
 }
 
-interface WireOpts { db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined }
+interface WireOpts {
+  db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined;
+  /** 本机接管的 CFG 策略端口（localFallback），由 MATW / AUD 在 CFG 合法可用后接入；不给 = 接管什么都不读、不记、不做 */
+  takeoverPolicy?: LocalFallbackPolicyPort;
+}
 
 /** start_node 要的读环境与执行 IO：路径、registry、项目目录从生产位置现读；git 套 whileOwned */
 function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
@@ -109,10 +120,24 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   const notifyPm = (project: string, text: string) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", stillActive: alive });
   return {
     resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO }, pace),
-    start: (config, pace) => autostartTick({
+    start: async (config, pace) => [...await autostartTick({
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
       readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
       quota: async () => (await readInventoryQuota()).claude, attempt: () => randomBytes(4).toString("hex"),
-    }, pace),
+    }, pace), ...await takeover(o, config, pace, notifyPm)],
   };
+}
+
+/** 本机接管在开卡之后、同一份预算：没接策略端口就直接返回（auto tick 的 ensure / worker 只在接了时才建） */
+async function takeover(o: WireOpts, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string) => Promise<unknown>): Promise<Failed> {
+  if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true || pace.yieldNow()) return [];
+  const auto = autoTickDeps(o.db, { active: o.active, lease: o.lease });
+  return (await localTakeoverTick({
+    db: o.db, policy: o.takeoverPolicy, manager: o.ledger, ensure: (task, role, family) => whileOwned(o.active, () => auto.ensure(task, role, family)),
+    worker: auto.worker, authorRuntime: (task) => {
+      const agents = config.projects[task.project]?.agents;
+      return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
+    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: (a) => { recordObserved(o.db, a, Date.now()); },
+    codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
+  }, config.projects)).failed;
 }
