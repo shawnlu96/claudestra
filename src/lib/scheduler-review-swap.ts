@@ -43,6 +43,9 @@ export const keepsReviewer = (s: PlannerSnapshot): boolean => !!s.reviewer && (i
 export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof reviewPlacement): PlannerDecision | null {
   const swap = latestReviewerSwap(s.events);
   if (swapNeeded(s)) {
+    // A model safety refusal outranks the family switch: swapping in would fetch the refused content from another model.
+    const hold = openRefusal(s.events);
+    if (hold) return { kind: "escalate", code: "model_safety_hold", reason: `本卡有未处置的模型安全拒绝（#${hold.seq}），不自动换家族审查，等 PM / owner 处置或批准的接续审查完成` };
     if (swap?.data.round === s.task.round) return { kind: "escalate", code: "reviewer_independence", reason: "本轮已换过审查员，新会话仍与当前作者不独立" };
     const born = s.events.find((e) => e.kind === "task")?.seq ?? 0;
     return { kind: "intent", id: `review-swap:s${born}:r${s.task.round}`, node, action: "review_swap", recipient: null,
@@ -59,6 +62,24 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
   if (s.pool?.remote.agents) return null;
   return (s.pool?.localReviewers ?? 0) >= s.maxWorkers
     ? { kind: "wait", code: "reviewer_capacity", reason: "另一家族的 peer 无可用审查槽，本机审查名额也已满，等待空位后自动续派" } : null;
+}
+
+export const HOLD_OP = "model_safety_hold", RESOLVE_OP = "model_safety_resolved";
+export const RETRY_OP = "model_refusal_retry", EXEMPT_OP = "model_refusal_exempt";
+
+/** A hold, or an approved refusal continuation still waiting for its review: either way no automatic family switch. */
+export function openRefusal(events: readonly LedgerEvent[]): LedgerEvent | null {
+  const hold = openSafetyHold(events);
+  if (hold) return hold;
+  const cont = events.findLast((e) => e.data.op === RETRY_OP || e.data.op === EXEMPT_OP);
+  return cont && !events.some((e) => e.seq > cont.seq && e.kind === "review") ? cont : null;
+}
+
+/** The task's unresolved model safety hold (scheduler-model-outcome.ts writes it), or null. Only a manager's resolve lifts it. */
+export function openSafetyHold(events: readonly LedgerEvent[]): LedgerEvent | null {
+  const hold = events.findLast((e) => e.data.op === HOLD_OP);
+  if (!hold) return null;
+  return events.some((e) => e.seq > hold.seq && e.data.op === RESOLVE_OP && e.data.holdSeq === hold.seq) ? null : hold;
 }
 
 const swapKey = (id: string): string => `scheduler:${id}:reviewer-swap`;
@@ -89,6 +110,7 @@ export function applyReviewerSwap(db: Database, ctx: WriteCtx, id: string, row: 
   const s: SwapSnapshot = { task, workflow: { ...workflow, authorFamily: family }, events, author,
     reviewer: row?.state === "active" ? { ...row, source: row.transport === "peer" ? "peer_claim" : "local" } : null };
   if (!row || !swapNeeded(s) || latestReviewerSwap(events)?.data.round === task.round) throw new LedgerError("conflict", "本轮不允许再次更换审查员");
+  if (openRefusal(events)) throw new LedgerError("conflict", "本卡有未处置的模型安全拒绝，不自动更换审查员");
   migrate();
   settleIntent(db, ctx, { id, from: "pending", to: "submitted", receipt: "claimed; 更换不独立的审查员" });
   const fromFamily = row.family === "claude" ? "codex" : "claude";
