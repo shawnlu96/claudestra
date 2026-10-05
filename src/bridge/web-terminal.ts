@@ -94,5 +94,5 @@ async function openAgentTerminal(req: Request, url: URL, agentParam: string): Pr
       const ref = await resolveWindowRef(agentParam);
       return ref === null ? null : windowTarget(ref);
     },
-  });
+  }, req.signal);
 }

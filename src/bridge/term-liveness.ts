@@ -31,6 +31,18 @@ export function pickEvictee<T extends { tokenId: string; createdAt: number }>(se
   return oldest;
 }
 
+/**
+ * 客户端在 openTerminal 还在建 tmux / PTY 时就走了：Bun（中继入站同理）拿到 Response 时请求已中止，既不读也不 cancel
+ * 它的 body，源流的 cancel → destroy 永远不跑。请求一 abort 就自己 cancel body；body 正被读（锁着）时 cancel 被拒，
+ * 那条路上断开由读的一方 cancel。
+ */
+export function cancelOnAbort(res: Response, signal?: AbortSignal): Response {
+  const cancel = () => void res.body?.cancel().catch(() => { /* 正被读（锁着）：断开时读的一方会 cancel 源流 */ });
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  return res;
+}
+
 /** 建 viewer 时的时间戳：ka=1 才从此刻开始计存活 */
 export const viewerStamps = (keepalive: boolean, now = Date.now()): { createdAt: number; lastSeen?: number } =>
   keepalive ? { createdAt: now, lastSeen: now } : { createdAt: now };

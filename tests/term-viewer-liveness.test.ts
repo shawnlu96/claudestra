@@ -134,3 +134,32 @@ test("满额且全是别人的 → 照旧 429，谁都不动；Bearer token 满�
   expect((await open(bearer("tok_a"))).status).toBe(429);
   for (const m of mine) expect(destroys(m.id!)).toBe(0);
 });
+
+test("请求在 Response 交出去之前 / 之后没人读时 abort（客户端在建 PTY 的那一秒走了）：body 被 cancel，destroy 一次", async () => {
+  const early = new AbortController();
+  early.abort();
+  const a = await tv.openTerminal(bearer("tok_a"), new URL("http://x/t?cols=80&rows=24"), target, early.signal);
+  const late = new AbortController();
+  const b = await tv.openTerminal(bearer("tok_a"), new URL("http://x/t?cols=80&rows=24"), target, late.signal);
+  late.abort();
+  await Bun.sleep(20);
+  const ids = tmuxCalls.filter((c) => c[0] === "kill-session").map((c) => c[2]);
+  expect(ids).toHaveLength(2); // 两个都没人读：各 destroy 一次（不带 ka，存活巡检管不到，只能靠这条）
+  expect(new Set(ids).size).toBe(2);
+  expect([a.status, b.status]).toEqual([200, 200]);
+});
+
+test("正被读的流上 abort：cancel 被拒、不抛不 destroy；之后读端断开照常 destroy 一次", async () => {
+  const ac = new AbortController();
+  const res = await tv.openTerminal(bearer("tok_a"), new URL("http://x/t?cols=80&rows=24"), target, ac.signal);
+  const reader = res.body!.getReader();
+  let buf = "";
+  while (!buf.includes('"t":"open"')) buf += new TextDecoder().decode((await reader.read()).value);
+  const id = /"id":"([0-9a-f]+)"/.exec(buf)![1];
+  ac.abort();
+  await Bun.sleep(20);
+  expect(destroys(id)).toBe(0);
+  await reader.cancel();
+  await Bun.sleep(20);
+  expect(destroys(id)).toBe(1);
+});

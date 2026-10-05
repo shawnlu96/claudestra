@@ -10,7 +10,7 @@ import { terminalIoDenied, terminalOwnerKey } from "./terminal-auth.js";
 import { authenticateApi } from "./api-auth.js";
 import { revocable } from "./credential-revocation.js";
 import { clampInt, fitWindow, restoreControlClamp, tmuxArgs, tmuxRun, type ClampLift } from "./term-fit.js";
-import { pickEvictee, TERM_ALIVE_CHECK_MS, TERM_ALIVE_TIMEOUT_MS, viewerIdle, viewerStamps } from "./term-liveness.js";
+import { cancelOnAbort, pickEvictee, TERM_ALIVE_CHECK_MS, TERM_ALIVE_TIMEOUT_MS, viewerIdle, viewerStamps } from "./term-liveness.js";
 
 // ---------- 会话表 ----------
 
@@ -156,8 +156,8 @@ export interface ViewTarget {
   resolve: () => Promise<string | null>;
 }
 
-/** GET …/terminal?cols=&rows= —— 建 PTY + SSE 输出流（agent 终端与宿主 shell 共用） */
-export async function openTerminal(principal: Principal, url: URL, target: ViewTarget): Promise<Response> {
+/** GET …/terminal?cols=&rows=&ka= —— 建 PTY + SSE 输出流（agent 终端与宿主 shell 共用）；signal = 请求的 abort（见 cancelOnAbort） */
+export async function openTerminal(principal: Principal, url: URL, target: ViewTarget, signal?: AbortSignal): Promise<Response> {
   // Bun.Terminal（PTY）是 Bun 1.3.5 起才有的 API。老 runtime 必须在这里挡住——
   // 否则要等到 fitWindow 已把 master window 缩成 viewer 尺寸之后才在 spawn 抛错，
   // 前端拿不到可读错误就重连，桌面端窗口反复被缩小（2026-07-27 peer 实例实况）。
@@ -334,13 +334,13 @@ export async function openTerminal(principal: Principal, url: URL, target: ViewT
     },
   });
 
-  return revocable(new Response(stream, { // 设备凭据一撤，终端流立刻断（credential-revocation.ts）
+  return cancelOnAbort(revocable(new Response(stream, { // 设备凭据一撤，终端流立刻断（credential-revocation.ts）
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     },
-  }), principal);
+  }), principal), signal);
 }
 
 /** 满额时先让同一设备凭据最早的 viewer 让位（规则见 term-liveness.ts pickEvictee）；仍满才算没位置 */
