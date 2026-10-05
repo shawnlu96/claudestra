@@ -77,6 +77,7 @@ async function probe(kind: string, mode: string): Promise<void> {
     return result;
   };
   const deliveryEvents = () => listEvents(db, { project: "demo" }).filter((e) => e.data.op === "memory_retrieve");
+  const rankEvents = () => listEvents(db, { project: "demo" }).filter((e) => e.data.op === "memory_rank");
   if (mode.startsWith("preview")) {
     const { unpullableReason } = await import("../src/lib/order-pullable.js");
     const { getIntent } = await import("../src/lib/ledger-scheduler.js");
@@ -84,13 +85,24 @@ async function probe(kind: string, mode: string): Promise<void> {
     const orderId = kind === "write" ? currentOrders(db, { ...identity, channelId: "test" })[0]!.orderId : "test";
     const intent = { ...getIntent(db, "test")!, id: orderId };
     const ref = { agent: "agent-x", sessionId: "s1", role: kind === "write" ? "author" : "reviewer" } as any;
+    db.exec("PRAGMA query_only = ON");
     expect(unpullableReason(db, ref, intent)).toBeNull();
     expect(deliveryEvents()).toEqual([]);
+    expect(rankEvents()).toEqual([]);
     if (mode === "preview-text") {
       const { takeOrderResult } = await import("../src/lib/order-take.js");
       const { takeReview } = await import("../src/lib/review-order.js");
       const full = kind === "write" ? takeOrderResult(db, { ...identity, channelId: "test" }) : takeReview(db, identity);
       expect(JSON.stringify(full)).toContain("项目记忆");
+      expect(deliveryEvents()).toEqual([]);
+      expect(rankEvents()).toEqual([]);
+    }
+    if (mode === "preview-denied") {
+      identity.agent = "agent-other";
+      const denied = await invoke();
+      expect(kind === "write" ? denied.order : denied.orders?.length ?? 0).toBe(kind === "write" ? null : 0);
+      expect(calls).toBe(0);
+      expect(rankEvents()).toEqual([]);
       expect(deliveryEvents()).toEqual([]);
     }
     // 唤醒失败或无人领取：只有预检，没有真实工具领取，不能生成领取回执。
@@ -121,6 +133,12 @@ async function probe(kind: string, mode: string): Promise<void> {
   }
   const result = await pending;
   await checkResult(kind, mode, result, deliveryEvents(), calls, db, head);
+  if (mode === "unauthorized" || mode === "empty") expect(rankEvents()).toEqual([]);
+  if (mode === "preview-claim") {
+    expect(rankEvents()).toHaveLength(1);
+    expect(rankEvents()[0]!.dedupKey).toEndWith(":prepared");
+    expect(deliveryEvents()[0]!.data.rankingSeq).toBe(rankEvents()[0]!.seq);
+  }
   db.close();
 }
 
@@ -128,7 +146,7 @@ if (process.argv.includes("--probe")) {
   await probe(process.argv.at(-2)!, process.argv.at(-1)!);
 } else {
   const modes = ["first", "concurrent", "session", "head", "claim", "dispute", "unauthorized", "empty", "no-model", "failure", "timeout", "fallback", "registered",
-    "preview-claim", "preview-unclaimed", "preview-failed-wake", "preview-text"];
+    "preview-claim", "preview-unclaimed", "preview-failed-wake", "preview-text", "preview-denied"];
   for (const kind of ["write", "review"]) for (const mode of [...modes, ...(kind === "write" ? ["lease"] : [])]) {
     test(`真实工具 ${kind}: ${mode}`, async () => {
       const dir = mkdtempSync(join(tmpdir(), "memory-tool-"));

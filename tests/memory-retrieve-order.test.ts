@@ -6,12 +6,12 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { markMemory, recordMemory, type MemoryInput } from "../src/lib/ledger-memory.js";
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { MEMORY_CAPS } from "../src/lib/memory-retrieve.js";
-import { memoryDedupKey, memorySection, withMemory as previewMemory } from "../src/lib/memory-retrieve-order.js";
+import { ensureMemoryRetrieval, memoryDedupKey, memorySection, withMemory as previewMemory } from "../src/lib/memory-retrieve-order.js";
 import { orderWireFor } from "../src/lib/order-take.js";
 import { WIRE_MAX_BYTES } from "../src/lib/order-wire.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
@@ -171,6 +171,54 @@ describe("字节上限（验收线 3）", () => {
 
 
 describe("审查回归：实际注入与当前状态", () => {
+  test("已有 fallback 时 prepared 仍优先，预览命中缓存不写事件", async () => {
+    recordMemory(db, { actor: "pm", now: 1 }, fat(1, "pitfall"));
+    writeOrder();
+    const key = memoryDedupKey(task(), HEAD, "write");
+    expect(getEventByDedup(db, `${key}:fallback`)!.data.items).toHaveLength(1);
+    recordMemory(db, { actor: "pm", now: 2 }, fat(2, "pitfall"));
+    await ensureMemoryRetrieval(db, task(), "write", HEAD, { embedder: null, headFiles: null });
+    expect(getEventByDedup(db, `${key}:prepared`)!.data.items).toHaveLength(2);
+    const before = listEvents(db, { project: P });
+    expect(memorySection(db, task(), "write", HEAD)).toContain("ab12-m2");
+    expect(previewMemory(db, task(), "write", HEAD, { inputs: ["原文"] }).inputs.at(-1)).toContain("ab12-m2");
+    expect(listEvents(db, { project: P })).toEqual(before);
+    expect(writeOrder().inputs.at(-1)).toContain("ab12-m2");
+    expect(memEvents().at(-1)!.data.rankingSeq).toBe(getEventByDedup(db, `${key}:prepared`)!.seq);
+  });
+
+  test.each(["write", "review"] as const)("%s 预览 cache miss 只在内存排名，不开写事务或写事件", (kind) => {
+    recordMemory(db, { actor: "pm", now: 1 }, fat(1, "pitfall"));
+    const before = listEvents(db, { project: P });
+    const transaction = spyOn(db, "transaction");
+    try {
+      expect(memorySection(db, task(), kind, HEAD)).toContain("ab12-m1");
+      expect(previewMemory(db, task(), kind, HEAD, { inputs: ["原文"] }).inputs.at(-1)).toContain("ab12-m1");
+      expect(transaction).not.toHaveBeenCalled();
+      expect(listEvents(db, { project: P })).toEqual(before);
+    } finally { transaction.mockRestore(); }
+  });
+
+  test.each([false, true])("只读预览保留记忆且无旁路写入：query_only=%s", (queryOnly) => {
+    closeLedger(":memory:");
+    tmp = mkdtempSync(join(tmpdir(), "mret-preview-"));
+    setup(join(tmp, "ledger.sqlite"));
+    recordMemory(db, { actor: "pm", now: 1 }, fat(1, "pitfall"));
+    const before = listEvents(db, { project: P });
+    const ro = new Database(path, { readonly: true });
+    if (queryOnly) ro.exec("PRAGMA query_only = ON");
+    // 持有写锁：另开连接偷写会失败；真实只读预览仍须保留记忆。
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      expect(memorySection(ro, task(), "write", HEAD)).toContain("ab12-m1");
+      expect(previewMemory(ro, task(), "review", HEAD, { inputs: ["原文"] }).inputs.at(-1)).toContain("ab12-m1");
+      expect(listEvents(ro, { project: P })).toEqual(before);
+    } finally {
+      db.exec("ROLLBACK");
+      ro.close();
+    }
+  });
+
   test("预算不够时不得记录未推出的 memoryIds", () => {
     recordMemory(db, { actor: "pm", now: 1 }, fat(1, "pitfall"));
     const wire = { inputs: ["x"], pad: "" };

@@ -7,6 +7,7 @@
 import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
+import { blockFindings } from "./scheduler-dispatch-block.js";
 
 const MIN = 60_000;
 
@@ -39,6 +40,7 @@ export const AUDIT_THRESHOLDS = {
 const AUDIT_RULES = [
   "review_no_reviewer", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
+  "dispatch_blocked",
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -353,6 +355,9 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   evaluated.push("merge_unknown");
   witnessMismatches(ts, emit);
   evaluated.push("review_witness_mismatch");
+  // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
+  for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
+  evaluated.push("dispatch_blocked");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);
     evaluated.push("pm_held");

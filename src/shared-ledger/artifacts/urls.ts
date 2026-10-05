@@ -1,5 +1,4 @@
-import { isPrivateAddr, isTailscaleAddr } from "../../lib/net-addr.js";
-import { isLoopbackAddress } from "../../lib/same-host.js";
+import { isLoopbackAddress, isPrivateAddr, isTailscaleAddr } from "../../lib/address-predicates.js";
 import { fail } from "../../lib/shared-ledger-contract-v2.js";
 
 function machineHost(host: string): boolean {
