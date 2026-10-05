@@ -7,12 +7,17 @@
 type Json = any;
 export type Defs = Record<string, Json>;
 
+/** 标量上的收窄约束（长度、正则、格式、数值范围）：出站时 codex 有、我们没有同等约束，就可能发出它不收的值 */
+const LIMIT_KEYS = ["minLength", "maxLength", "pattern", "format", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"] as const;
+type Limits = Partial<Record<(typeof LIMIT_KEYS)[number], number | string>>;
+
 /** 我们这一侧在这条路径上的约定：in 方向是「我们收什么」，out 方向是「我们会发什么」 */
 export interface OursDesc {
   required: boolean;
   nullable: boolean;
   types: string[];
   values?: string[];
+  limits?: Limits;
   /** 判别分支里的判别字段：值由分支决定，不算我们声明的枚举 */
   disc?: true;
 }
@@ -32,6 +37,7 @@ export interface PNode {
   members?: string[];
   /** 登记为封闭的枚举 / 联合（USED.closed） */
   closed?: true;
+  limits?: Limits;
   ours: OursDesc;
 }
 export type Projection = Record<string, Record<string, PNode>>;
@@ -76,13 +82,22 @@ function resolve(defs: Defs, start: Json): View {
       nullable = true;
       const rest = node.anyOf.filter((a: Json) => !isNull(a));
       node = rest.length === 1 ? rest[0] : { ...node, anyOf: rest };
-    } else if (Array.isArray(node.type) && node.type.includes("null")) {
+    } else if (Array.isArray(node.enum) && node.enum.includes(null)) {
+      nullable = true;
+      node = { ...node, enum: node.enum.filter((v: unknown) => v !== null) };
+    } else if (node.const === null) node = { type: "null" };
+    else if (Array.isArray(node.type) && node.type.includes("null")) {
       nullable = true;
       const t = node.type.filter((x: string) => x !== "null");
       node = { ...node, type: t.length === 1 ? t[0] : t };
     } else return { node, ref, nullable: nullable || node.type === "null" };
   }
   throw new Error("$ref 链过长");
+}
+
+function limitsOf(n: Json): Limits | undefined {
+  const found = LIMIT_KEYS.filter((k) => n[k] !== undefined);
+  return found.length ? Object.fromEntries(found.map((k) => [k, n[k]])) : undefined;
 }
 
 const alts = (n: Json): Json[] | null => (Array.isArray(n.oneOf) ? n.oneOf : Array.isArray(n.anyOf) ? n.anyOf : null);
@@ -187,7 +202,15 @@ export function oursPaths(schema: Json): { segs: Seg[]; path: string; ours: Ours
     const members = alts(node);
     const key = members && members.every((m) => m.properties) ? discOf({}, members)?.key : undefined;
     const values = key ? uniq(members!.map((m) => String(m.properties[key].const))) : valuesOf({}, node);
-    const ours: OursDesc = { required, nullable: nullable || isAny(node), types: typesOf({}, node), ...(values ? { values } : {}), ...(disc ? { disc: true } : {}) };
+    const limits = limitsOf(node);
+    const ours: OursDesc = {
+      required,
+      nullable: nullable || isAny(node),
+      types: typesOf({}, node),
+      ...(values ? { values } : {}),
+      ...(limits ? { limits } : {}),
+      ...(disc ? { disc: true } : {}),
+    };
     out.push({ segs, path: render(segs), ours });
     if (key) {
       for (const m of members!) visit(m, [...segs, { key, value: String(m.properties[key].const) }], true, false);
@@ -218,6 +241,8 @@ export function project(defs: Defs, root: string, oursSchema: Json, closed: Read
     if (view.ref && closed.has(view.ref)) n.closed = true;
     const values = valuesOf(defs, view.node);
     if (values) n.values = values;
+    const limits = limitsOf(view.node);
+    if (limits) n.limits = limits;
     const ov = objectView(defs, view.node);
     if (ov?.disc) Object.assign(n, { discriminator: ov.disc.key, members: ov.disc.values });
     else if (ov) n.keys = Object.fromEntries(Object.keys(ov.props).sort().map((k) => [k, ov.required.has(k)]));
@@ -242,6 +267,55 @@ function inboundProblems(n: PNode): string[] {
   return out;
 }
 
+const SCALARS = new Set(["string", "number", "integer", "boolean"]);
+const LOWER = new Set(["minLength", "minimum", "exclusiveMinimum"]);
+const UPPER = new Set(["maxLength", "maximum", "exclusiveMaximum"]);
+
+/** 我们这一侧的约束 mine 是否至少和 codex 的 theirs 一样严（没有 = 不受限 = 不够严） */
+function asStrict(k: string, mine: number | string | undefined, theirs: number | string): boolean {
+  if (mine === undefined) return false;
+  if (LOWER.has(k)) return Number(mine) >= Number(theirs);
+  if (UPPER.has(k)) return Number(mine) <= Number(theirs);
+  if (k === "multipleOf") return Number(mine) % Number(theirs) === 0;
+  return mine === theirs; // pattern、format：判断不了包含关系，只认完全相同
+}
+
+/** 一个我们会发的字面量是否满足 codex 的约束 */
+function fits(v: string, t: Limits, numeric: boolean): boolean {
+  if (!numeric) {
+    if (t.minLength !== undefined && [...v].length < Number(t.minLength)) return false;
+    if (t.maxLength !== undefined && [...v].length > Number(t.maxLength)) return false;
+    return t.pattern === undefined || new RegExp(String(t.pattern), "u").test(v);
+  }
+  const x = Number(v);
+  const bad = [t.minimum !== undefined && x < Number(t.minimum), t.maximum !== undefined && x > Number(t.maximum)];
+  const strictBad = [t.exclusiveMinimum !== undefined && x <= Number(t.exclusiveMinimum), t.exclusiveMaximum !== undefined && x >= Number(t.exclusiveMaximum)];
+  return ![...bad, ...strictBad].some(Boolean) && (t.multipleOf === undefined || x % Number(t.multipleOf) === 0);
+}
+
+/**
+ * 标量收窄：我们的取值不受限（没有枚举 / const）而 codex 只收有限个值，或者 codex 有长度 / 正则 / 格式 / 范围约束而我们没有同等约束，
+ * 都可能发出它不收的值。我们只发 null（没有标量类型）时不查。数值类型上的 format（int64、uint32）只是位宽注记，范围靠 minimum / maximum。
+ */
+function narrowingProblems(n: PNode): string[] {
+  const o = n.ours;
+  if (!o.types.some((t) => SCALARS.has(t))) return [];
+  const numeric = !o.types.includes("string");
+  const out: string[] = [];
+  if (n.values && !o.values) out.push(`我们发的取值不受限（${o.types}），schema 只收 ${n.values}`);
+  const t = n.limits ?? {};
+  if (o.values) {
+    const bad = o.values.filter((v) => !fits(v, t, numeric));
+    if (bad.length) out.push(`我们会发的值 ${bad} 不满足 schema 的约束 ${JSON.stringify(t)}`);
+    return out;
+  }
+  for (const [k, theirs] of Object.entries(t)) {
+    if (k === "format" && numeric) continue;
+    if (!asStrict(k, o.limits?.[k as keyof Limits], theirs!)) out.push(`schema 限制 ${k}=${theirs}，我们没有同等约束`);
+  }
+  return out;
+}
+
 function outboundProblems(n: PNode, path: string, nodes: Record<string, PNode>): string[] {
   const o = n.ours;
   const theirs = n.members ?? n.values;
@@ -251,7 +325,7 @@ function outboundProblems(n: PNode, path: string, nodes: Record<string, PNode>):
   if (!accepts(n.types ?? [], o.types)) out.push(`我们发的类型 ${o.types} schema 不收（收 ${n.types}）`);
   const extra = theirs ? (o.values ?? []).filter((v) => !theirs.includes(v)) : [];
   if (extra.length) out.push(`我们会发的值 ${extra} schema 不认`);
-  return out;
+  return [...out, ...narrowingProblems(n)];
 }
 
 /** 投影是否自洽：in = 我们能收下 codex 会发的一切；out = codex 能收下我们会发的一切。返回问题列表，空 = 兼容 */

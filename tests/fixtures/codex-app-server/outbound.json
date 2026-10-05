@@ -4254,6 +4254,10 @@
         ]
       },
       "limit": {
+        "limits": {
+          "format": "uint32",
+          "minimum": 0
+        },
         "nullable": true,
         "ours": {
           "nullable": true,
@@ -4820,8 +4824,14 @@
         ]
       },
       "effort": {
+        "limits": {
+          "minLength": 1
+        },
         "nullable": true,
         "ours": {
+          "limits": {
+            "minLength": 1
+          },
           "nullable": true,
           "required": true,
           "types": [

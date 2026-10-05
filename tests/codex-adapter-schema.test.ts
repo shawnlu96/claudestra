@@ -5,7 +5,7 @@ import { z } from "zod";
 import { USED } from "../src/lib/acp/codex-adapter/protocol.ts";
 import { classify, type LockSet } from "../scripts/codex-schema/drift.ts";
 import { buildOutbound, generateLockSet, lockProblems, overlayInbound, readLockSet } from "../scripts/codex-schema/lock.ts";
-import { compat, type Defs, type PNode } from "../scripts/codex-schema/project.ts";
+import { compat, type Defs, type PNode, project } from "../scripts/codex-schema/project.ts";
 
 const LOCK = readLockSet();
 const OUT_ROOTS: [string, z.ZodType][] = [
@@ -188,6 +188,56 @@ describe("漂移分级（9 个合成变异）", () => {
     expect(r.level).toBe("yellow");
     expect(r.findings.map((f) => f.why)).toContain("只改了描述文字");
   });
+
+  test("10 出站收窄：TurnStartParams.model 从任意字符串收窄成枚举或 const → 红，锁也写不进去", () => {
+    for (const model of [{ type: ["string", "null"], enum: ["only-allowed-model", null] }, { type: "string", const: "only-allowed-model" }]) {
+      const s = mutateOut("v2/TurnStartParams", (d) => void (d.properties.model = model));
+      expect(lockProblems(s).join("\n")).toContain("v2/TurnStartParams model：我们发的取值不受限");
+      expect(run(s).level).toBe("red");
+    }
+  });
+
+  test("11 出站收窄：model 加 pattern / maxLength、ReasoningEffort 的 minLength 收紧 → 红", () => {
+    const pattern = mutateOut("v2/TurnStartParams", (d) => void (d.properties.model = { type: "string", pattern: "^gpt-" }));
+    expect(reds(pattern).join("\n")).toContain("model：schema 限制 pattern=^gpt-");
+    const maxLength = mutateOut("v2/TurnStartParams", (d) => void (d.properties.model = { type: "string", maxLength: 8 }));
+    expect(reds(maxLength).join("\n")).toContain("model：schema 限制 maxLength=8");
+    const effort = mutateOut("v2/ReasoningEffort", (d) => void (d.minLength = 2));
+    expect(reds(effort).join("\n")).toContain("effort：schema 限制 minLength=2");
+  });
+});
+
+/** 合成一个只有字段 v 的出站定义，按我们的 zod 类型投影后查兼容：覆盖各种标量收窄 */
+function narrowing(ours: z.ZodType, theirs: object): string[] {
+  const defs: Defs = { X: { type: "object", properties: { v: theirs }, required: ["v"] } };
+  return compat({ X: project(defs, "X", z.toJSONSchema(z.strictObject({ v: ours })), new Set()) }, "out");
+}
+
+describe("出站标量收窄（合成定义）", () => {
+  const cases: [string, z.ZodType, object, boolean][] = [
+    ["number 对 enum", z.number(), { type: "number", enum: [1, 2] }, false],
+    ["integer 对 const", z.number().int(), { type: "integer", const: 3 }, false],
+    ["integer 对 minimum（uint32）", z.number().int(), { type: "integer", format: "uint32", minimum: 0 }, false],
+    ["有同等范围的 integer", z.number().int().min(0).max(10), { type: "integer", format: "uint32", minimum: 0 }, true],
+    ["枚举里的数字字面量", z.literal(1), { type: "number", enum: [1, 2] }, true],
+    ["数字字面量超出范围", z.literal(-1), { type: "number", minimum: 0 }, false],
+    ["boolean 对 const false", z.boolean(), { type: "boolean", const: false }, false],
+    ["false 字面量对 const false", z.literal(false), { type: "boolean", const: false }, true],
+    ["string 对 const", z.string(), { type: "string", const: "x" }, false],
+    ["string 对 pattern", z.string(), { type: "string", pattern: "^a" }, false],
+    ["枚举里有值不满足 pattern", z.enum(["ab", "b"]), { type: "string", pattern: "^a" }, false],
+    ["枚举全部满足 pattern", z.enum(["ab"]), { type: "string", pattern: "^a" }, true],
+    ["string 对 format", z.string(), { type: "string", format: "uri" }, false],
+    ["同等 minLength", z.string().min(1), { type: "string", minLength: 1 }, true],
+    ["只发 null 时不看数值约束", z.null(), { type: ["integer", "null"], minimum: 0 }, true],
+  ];
+  for (const [name, ours, theirs, ok] of cases) {
+    test(`${name} → ${ok ? "兼容" : "不兼容"}`, () => {
+      const problems = narrowing(ours, theirs);
+      if (ok) expect(problems).toEqual([]);
+      else expect(problems.length).toBeGreaterThan(0);
+    });
+  }
 });
 
 describe("本机重新生成（设了 CODEX_SCHEMA_CLI 才跑）", () => {

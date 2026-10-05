@@ -59,7 +59,7 @@ export function methodProblems(m: Methods): string[] {
   return out;
 }
 
-const FIELDS = ["types", "nullable", "required", "values", "keys", "members", "discriminator", "ref", "closed"] as const;
+const FIELDS = ["types", "nullable", "required", "values", "limits", "keys", "members", "discriminator", "ref", "closed"] as const;
 const same = (a: unknown, b: unknown) => canon(a ?? null) === canon(b ?? null);
 const changed = (x: PNode, y: PNode) => FIELDS.filter((k) => !same(x[k], y[k]));
 
