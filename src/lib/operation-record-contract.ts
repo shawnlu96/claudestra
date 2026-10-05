@@ -23,12 +23,15 @@ const parseOperationReceipt = refine(object({
   observedAt: timestamp, proof: text(4096, 1),
 }), r => r.outcome !== "unknown" || r.payloadDigest === null);
 export type OperationReceipt = Infer<typeof parseOperationReceipt>;
+/** 成功必须带 payload 摘要。真伪（ReceiptAuthority）证明不了完整性，两者分开要求；回执与记录共用这一条。 */
+function completes(r: OperationReceipt): boolean { return r.outcome !== "succeeded" || r.payloadDigest !== null; }
 
-/** 确认态必有与之同结果、同请求绑定的回执；pending/unknown 不存回执（unknown 回执不构成结算）。 */
+/** 确认态必有与之同结果、同请求绑定且完整的回执；pending/unknown 不存回执（unknown 回执不构成结算）。
+ * 完整性放在记录不变量里，合并、读回、admit/observe/apply 读快照时都会拒绝「成功但无 payload 摘要」的记录。 */
 const parseOperationRecord = refine(object({
   ...request, state: choice(["pending", "unknown", ...settled]), receipt: nullable(parseOperationReceipt),
 }), r => r.receipt === null ? r.state === "pending" || r.state === "unknown"
-  : r.receipt.outcome === r.state && sameRequest(r, r.receipt));
+  : r.receipt.outcome === r.state && sameRequest(r, r.receipt) && completes(r.receipt));
 export type OperationRecord = Infer<typeof parseOperationRecord>;
 
 /** 注入 port：由现有签名/权威校验实现。抛错或非 true 一律按「无法证明」拒绝。 */
@@ -85,7 +88,7 @@ export function applyReceipt(snapshot: unknown, evidence: ReceiptEvidence, autho
   if (!record || !receipt) return reject("invalid");
   if (!sameRequest(record, receipt)) return reject("conflict");
   if (!authentic(authority, receipt)) return reject("unverified");
-  if (receipt.outcome === "succeeded" && receipt.payloadDigest === null) return reject("incomplete");
+  if (!completes(receipt)) return reject("incomplete");
   if (receipt.payloadDigest !== null
     && (!Object.hasOwn(evidence, "body") || v2ObjectDigest(evidence.body) !== receipt.payloadDigest)) return reject("incomplete");
   if (receipt.outcome === "unknown") return record.state === "pending" ? move({ ...record, state: "unknown" }) : keep(record);

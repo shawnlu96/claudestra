@@ -171,6 +171,20 @@ describe("mergeOperationSnapshots：乱序并发快照", () => {
     expect(mergeOperationSnapshots(forged, done, AUTH)).toEqual({ ok: false, reason: "unverified" });
   });
 
+  test("成功但无 payload 摘要的快照（回执真伪已过）合并前拒绝：两种顺序、pending/unknown/自身都不能升级", () => {
+    const incomplete = { ...REQ, state: "succeeded" as const, receipt: receipt("succeeded", { payloadDigest: null }) };
+    expect(AUTH.isAuthentic(incomplete.receipt)).toBe(true);
+    for (const base of [pending, unknown]) {
+      expect(mergeOperationSnapshots(base, incomplete, AUTH)).toEqual({ ok: false, reason: "invalid" });
+      expect(mergeOperationSnapshots(incomplete, base, AUTH)).toEqual({ ok: false, reason: "invalid" });
+    }
+    expect(mergeOperationSnapshots(incomplete, incomplete, AUTH)).toEqual({ ok: false, reason: "invalid" });
+    expect(mergeOperationSnapshots(done, incomplete, AUTH)).toEqual({ ok: false, reason: "invalid" });
+    expect(admitOperation(incomplete, REQ)).toEqual({ ok: false, reason: "invalid" });
+    expect(observeWithoutProof(incomplete)).toEqual({ ok: false, reason: "invalid" });
+    expect(settle(incomplete, receipt("succeeded"))).toEqual({ ok: false, reason: "invalid" });
+  });
+
   test("与自己合并幂等（changed=false）", () => {
     for (const r of [pending, unknown, done]) expect(mergeOperationSnapshots(r, r, AUTH)).toEqual({ ok: true, record: r, changed: false });
   });
@@ -192,6 +206,14 @@ describe("重启：保存后读回相同 JSON", () => {
     expect(() => readOperationRecord(saved.slice(0, -5))).toThrow();
     expect(() => readOperationRecord(saved.replace('"state":"succeeded"', '"state":"failed"'))).toThrow();
     expect(() => readOperationRecord(saved.replace('"principal":"agent-x"', '"principal":"agent-y"'))).toThrow();
+  });
+
+  test("重启读回「成功但 payloadDigest=null」的记录直接拒绝，序列化也不接受", () => {
+    const incomplete = { ...REQ, state: "succeeded" as const, receipt: receipt("succeeded", { payloadDigest: null }) };
+    expect(() => readOperationRecord(JSON.stringify(incomplete))).toThrow();
+    expect(() => serializeOperationRecord(incomplete as OperationRecord)).toThrow();
+    const saved = serializeOperationRecord(okRecord(settle(fresh(), receipt("succeeded"))));
+    expect(() => readOperationRecord(saved.replace(/"payloadDigest":"[0-9a-f]+"/, '"payloadDigest":null'))).toThrow();
   });
 });
 
