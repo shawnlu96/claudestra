@@ -216,7 +216,7 @@ async function codexSession() {
     return { method: "session/update", params: { sessionId: "cx", update: { sessionUpdate: "session_info_update", _meta: { codex: { threadStatus } } } } };
   };
   const init = session.initialize();
-  reply("initialize", { agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } });
+  reply("initialize", { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } });
   await init;
   const attach = session.attach("cx", "/w", true);
   reply("session/resume", {});
@@ -298,7 +298,7 @@ function fakeCodexWire(sig: ReturnType<typeof signals>) {
       const m = JSON.parse(line);
       const text = m.params?.prompt?.[0]?.text;
       sig.push(m.method === "session/prompt" || m.method === "_session/steering" ? `${m.method}:${text}` : String(m.method));
-      if (m.method === "initialize") send({ id: m.id, result: { agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } } });
+      if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } } });
       else if (m.method === "session/resume") send({ id: m.id, result: {} });
       else if (m.method === "_session/steering") send({ id: m.id, result: { outcome: "injected" } });
       else if (m.method === "session/prompt") prompts.set(text, m.id);
