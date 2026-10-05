@@ -186,16 +186,19 @@ const validDir = (x: unknown) => isStr((x as OwnedDir)?.path) && isAbsolute((x a
 
 function validRecord(d: unknown): d is SandboxOwnerRecord {
   const o = d as SandboxOwnerRecord;
-  if (!o || o.v !== 1 || !o.key || keyProblem(o.key) !== null || !isStr(o.root) || !isNum(o.createdAt)) return false;
+  if (!o || o.v !== 1 || !o.key || keyProblem(o.key) !== null || !isStr(o.root) || !isAbsolute(o.root) || !isNum(o.createdAt)) return false;
   if (!Array.isArray(o.resources) || !o.resources.every(validResource) || !Array.isArray(o.dirs) || !o.dirs.every(validDir)) return false;
+  const c = o.cleanup;
+  if (c !== undefined && (!c || typeof c !== "object" || !Number.isSafeInteger(c.attempts) || c.attempts < 1 || !isNum(c.lastAt) || typeof c.done !== "boolean" ||
+    !Array.isArray(c.outcomes) || !c.outcomes.every((x) => typeof x === "string"))) return false;
   return o.resources.length + o.dirs.length > 0;
 }
 
 const sameKey = (a: SandboxOwnerKey, b: SandboxOwnerKey) => ownerRecordId(a) === ownerRecordId(b) && a.orderId === b.orderId &&
   a.worker === b.worker && a.generation === b.generation && a.scope === b.scope;
 
-/** 读单个记录文件：不是普通文件 / 软链 / 解析失败 / 结构不对 / 根目录变了，都是 unknown */
-function readRecordFile(file: string): OwnerRead {
+/** 结构损坏一律 unknown；本单核根，完成记录允许根已被创建端移除，结构列举仍保留未完成的资源声明。 */
+function readRecordFile(file: string, requireRoot = true): OwnerRead {
   const st = lstatSync(file, { throwIfNoEntry: false });
   if (!st) return { status: "unknown", reason: "没有属主记录" };
   if (st.isSymbolicLink() || !st.isFile()) return { status: "unknown", reason: "属主记录不是普通文件（软链？）" };
@@ -205,6 +208,7 @@ function readRecordFile(file: string): OwnerRead {
   if (parsed.status !== "ok") return { status: "unknown", reason: `属主记录损坏：${parsed.status === "corrupt" ? parsed.error : "缺失"}` };
   const record = parsed.data as SandboxOwnerRecord;
   if (basename(file) !== `${ownerRecordId(record.key)}.json`) return { status: "unknown", reason: "属主记录文件名与内容的 key 对不上" };
+  if (!requireRoot || (record.cleanup?.done && !lstatSync(record.root, { throwIfNoEntry: false }))) return { status: "ok", record };
   try {
     if (realDir(record.root, "沙箱根") !== record.root) return { status: "unknown", reason: "沙箱根的真实路径变了" };
   } catch (e) {
@@ -224,7 +228,7 @@ export function readSandboxOwner(dir: string, key: SandboxOwnerKey): OwnerRead {
 
 export interface OwnerListing { id: string; read: OwnerRead }
 
-/** 列出全部记录（含坏的）；目录本身读不了是 unknown，绝不当成空列表 */
+/** 列举保留结构完整的历史资源声明；本单根活性由 readSandboxOwner 核，根缺失不能毒化无关订单。 */
 export function listSandboxOwners(dir: string): { status: "ok"; entries: OwnerListing[] } | { status: "unknown"; reason: string } {
   let records: string;
   let names: string[];
@@ -234,7 +238,7 @@ export function listSandboxOwners(dir: string): { status: "ok"; entries: OwnerLi
   } catch (e) {
     return { status: "unknown", reason: `属主目录读不了：${(e as Error).message}` };
   }
-  const entries = names.filter((n) => !n.endsWith(".tmp")).sort().map((n) => ({ id: n.replace(/\.json$/, ""), read: readRecordFile(join(records, n)) }));
+  const entries = names.filter((n) => !n.endsWith(".tmp")).sort().map((n) => ({ id: n.replace(/\.json$/, ""), read: readRecordFile(join(records, n), false) }));
   return { status: "ok", entries };
 }
 
@@ -243,6 +247,27 @@ export async function lockSandboxOwner(dir: string, key: SandboxOwnerKey): Promi
   const lock = await acquireLock(join(ownerArea(dir, "locks", true), "ownership.lock"), LOCK_WAIT_MS);
   if (!lock) throw new Error(`属主记录 ${key.orderId} 正被别的进程占用`);
   return lock;
+}
+
+/** 清理长流程的 per-key 锁；共享归属锁只在冻结/写回短事务内拿，不能跨停进程等待。 */
+export async function lockSandboxCleanupKey(dir: string, key: SandboxOwnerKey): Promise<LockHandle> {
+  const bad = keyProblem(key);
+  if (bad) throw new Error(bad);
+  const lock = await acquireLock(join(ownerArea(dir, "locks", true), `${ownerRecordId(key)}.lock`), LOCK_WAIT_MS);
+  if (!lock) throw new Error(`属主记录 ${key.orderId} 正在清理`);
+  return lock;
+}
+
+/** 原子冻结当前资源快照；补登记同样用共享锁并拒绝 cleanup 标记，重试保留已登记资源。 */
+export async function beginSandboxCleanup(dir: string, key: SandboxOwnerKey, now: number, keyLock: LockHandle): Promise<SandboxOwnerRecord> {
+  const lock = await lockSandboxOwner(dir, key);
+  try {
+    const read = readSandboxOwner(dir, key);
+    if (read.status !== "ok") throw new Error(read.reason);
+    if (!keyLock.held()) throw new Error("清理记录锁已失，不冻结");
+    const record = { ...read.record, cleanup: { attempts: (read.record.cleanup?.attempts ?? 0) + 1, lastAt: now, done: false, outcomes: [] } };
+    return await commitRecord(dir, record, lock);
+  } finally { lock.release(); }
 }
 
 async function writeRecord(dir: string, record: SandboxOwnerRecord, lock: LockHandle): Promise<void> {
@@ -261,14 +286,15 @@ async function commitRecord(dir: string, record: SandboxOwnerRecord, lock: LockH
 }
 
 /** 另一份记录也声称拥有同一个根 / socket / 进程：谁的都说不清 */
-export function ownershipConflict(record: SandboxOwnerRecord, others: OwnerListing[]): string | null {
+function ownershipConflict(record: SandboxOwnerRecord, others: OwnerListing[]): string | null {
   const id = ownerRecordId(record.key);
   for (const o of others) {
     if (o.id === id) continue;
     if (o.read.status !== "ok") return `属主目录里有说不清的记录 ${o.id}：${o.read.reason}`;
     const other = o.read.record;
-    const mine = [record.root, ...record.dirs.map((x) => x.path)];
-    if ([other.root, ...other.dirs.map((x) => x.path)].some((p) => mine.some((m) => pathsOverlap(p, m)))) return `沙箱根 / 目录与 ${other.key.orderId} 的记录重叠`;
+    const mine = claimedPaths(record);
+    if (claimedPaths(other).some((p) => mine.some((m) => pathsOverlap(p, m)))) return `沙箱根 / 目录与 ${other.key.orderId} 的记录重叠`;
+    if (other.cleanup?.done) continue;
     for (const r of record.resources) {
       if (other.resources.some((x) => (x.pid === r.pid && x.startedAt === r.startedAt) || (r.socket && x.socket === r.socket))) {
         return `${r.kind} pid ${r.pid} 也登记在 ${other.key.orderId} 名下`;
@@ -276,6 +302,12 @@ export function ownershipConflict(record: SandboxOwnerRecord, others: OwnerListi
     }
   }
   return null;
+}
+
+/** 完成记录的已消失路径不再保留预订；现存日志根/保留目录仍不能被另一单覆盖。 */
+function claimedPaths(record: SandboxOwnerRecord): string[] {
+  const paths = [record.root, ...record.dirs.map((d) => d.path)];
+  return record.cleanup?.done ? paths.filter((p) => lstatSync(p, { throwIfNoEntry: false })) : paths;
 }
 
 interface OwnedSpawn { kind: OwnedKind; pid: number; socket?: string }
@@ -303,7 +335,11 @@ async function captureResource(s: OwnedSpawn, root: string): Promise<OwnedResour
   if (!s.socket) throw new Error("tmux 必须给私有 socket");
   const bad = socketProblem(s.socket, root);
   if (bad) throw new Error(bad);
-  if (p.entry !== "tmux" || ![s.socket, canonicalPath(s.socket)].some((x) => p.command.includes(`-S ${x}`))) {
+  // ps 不保留 argv 引号：含空白的路径不能凭命令文字推断，按无法绑定拒绝。
+  const argv = p.command.split(/\s+/);
+  const i = argv.indexOf("-S");
+  const bound = i >= 0 && [s.socket, canonicalPath(s.socket)].includes(argv[i + 1] ?? "");
+  if (p.entry !== "tmux" || !bound) {
     throw new Error(`pid ${s.pid} 不是这个 socket 上的 tmux server`);
   }
   return { ...base, socket: canonicalPath(s.socket) };
@@ -311,7 +347,7 @@ async function captureResource(s: OwnedSpawn, root: string): Promise<OwnedResour
 
 export interface RegisterInput { key: SandboxOwnerKey; root: string; resources: OwnedSpawn[]; dirs?: string[] }
 
-/** producer：登记一个新沙箱。同一 key 已有记录就拒绝（追加子进程用 addSandboxChild），不覆盖历史 */
+/** producer：登记一个新沙箱。探测不持共享锁，冲突检查/写回在锁内；同一 key 拒覆盖历史 */
 export async function registerSandboxOwner(dir: string, input: RegisterInput, now = Date.now()): Promise<SandboxOwnerRecord> {
   const bad = keyProblem(input.key);
   if (bad) throw new Error(bad);
@@ -321,43 +357,43 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
   const ownerDir = dirname(ownerArea(dir, "records", true));
   const problem = rootProblem(root, ownerDir);
   if (problem) throw new Error(problem);
+  const resources: OwnedResource[] = [];
+  for (const child of input.resources) resources.push(await captureResource(child, root));
+  const dirs = (input.dirs ?? []).map((d) => captureDir(d, ownerDir));
+  if (new Set(dirs.map((d) => d.path)).size !== dirs.length) throw new Error("自有目录重复登记");
+  const record: SandboxOwnerRecord = { v: 1, key: { ...input.key }, root, createdAt: now, resources, dirs };
   const lock = await lockSandboxOwner(dir, input.key);
   try {
     if (lstatSync(join(ownerArea(dir, "records", false), `${ownerRecordId(input.key)}.json`), { throwIfNoEntry: false })) {
       throw new Error(`${input.key.orderId} 这一代已经登记过`);
     }
-    const resources: OwnedResource[] = [];
-    for (const s of input.resources) resources.push(await captureResource(s, root));
-    const dirs = (input.dirs ?? []).map((d) => captureDir(d, ownerDir));
-    if (new Set(dirs.map((d) => d.path)).size !== dirs.length) throw new Error("自有目录重复登记");
-    const record: SandboxOwnerRecord = { v: 1, key: { ...input.key }, root, createdAt: now, resources, dirs };
     return await commitRecord(dir, record, lock);
-  } finally {
-    lock.release();
-  }
+  } finally { lock.release(); }
 }
 
 /** producer：后起的子进程 / 临时目录补登记（同样自己探测身份、核绑定根目录） */
 export async function addSandboxOwned(dir: string, key: SandboxOwnerKey, item: { pid: number } | { dir: string }): Promise<SandboxOwnerRecord> {
+  const before = readSandboxOwner(dir, key);
+  if (before.status !== "ok") throw new Error(before.reason);
+  if (before.record.cleanup) throw new Error("已经开始清理，不再登记新资源");
+  const child = "pid" in item ? await captureResource({ kind: "child", pid: item.pid }, before.record.root) : undefined;
+  const addedDir = "dir" in item ? captureDir(item.dir, dirname(ownerArea(dir, "records", false))) : undefined;
   const lock = await lockSandboxOwner(dir, key);
   try {
     const cur = readSandboxOwner(dir, key);
     if (cur.status !== "ok") throw new Error(cur.reason);
     if (cur.record.cleanup) throw new Error("已经开始清理，不再登记新资源");
+    if (cur.record.root !== before.record.root) throw new Error("沙箱根已变，不补登记");
     let record: SandboxOwnerRecord;
-    if ("pid" in item) {
-      const added = await captureResource({ kind: "child", pid: item.pid }, cur.record.root);
-      if (cur.record.resources.some((r) => r.pid === added.pid)) throw new Error(`pid ${item.pid} 已在这份记录里`);
-      record = { ...cur.record, resources: [...cur.record.resources, added] };
+    if (child) {
+      if (cur.record.resources.some((r) => r.pid === child.pid)) throw new Error(`pid ${child.pid} 已在这份记录里`);
+      record = { ...cur.record, resources: [...cur.record.resources, child] };
     } else {
-      const added = captureDir(item.dir, dirname(ownerArea(dir, "records", false)));
-      if (cur.record.dirs.some((d) => d.path === added.path)) throw new Error(`目录 ${added.path} 已在这份记录里`);
-      record = { ...cur.record, dirs: [...cur.record.dirs, added] };
+      if (cur.record.dirs.some((d) => d.path === addedDir!.path)) throw new Error(`目录 ${addedDir!.path} 已在这份记录里`);
+      record = { ...cur.record, dirs: [...cur.record.dirs, addedDir!] };
     }
     return await commitRecord(dir, record, lock);
-  } finally {
-    lock.release();
-  }
+  } finally { lock.release(); }
 }
 
 /** 清理前的证据保全：记录 + 本次探测摘要写进 archive/，读回逐字比对；任何一步失败都抛，清理方据此零动作 */

@@ -8,12 +8,13 @@
  */
 import { lstatSync, rmSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
+import type { LockHandle } from "./file-lock.js";
 import type { LendState } from "./lend-journal.js";
 import { statePath } from "./paths.js";
 import { pathsOverlap } from "./sandbox.js";
 import {
-  addSandboxOwned, archiveOwnerEvidence, dirIdentity, identityVerdict, listSandboxOwners, lockSandboxOwner, markSandboxCleanup, ownerReviewDue,
-  ownershipConflict, probeProcess, readSandboxOwner, registerSandboxOwner, socketProblem,
+  addSandboxOwned, archiveOwnerEvidence, beginSandboxCleanup, dirIdentity, identityVerdict, listSandboxOwners, lockSandboxCleanupKey, lockSandboxOwner, markSandboxCleanup, ownerReviewDue,
+  probeProcess, readSandboxOwner, registerSandboxOwner, socketProblem,
   type OwnedDir, type OwnedResource, type OwnerListing, type ProcessProbe, type RegisterInput, type SandboxOwnerKey, type SandboxOwnerRecord,
 } from "./sandbox-order-owner.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
@@ -213,63 +214,86 @@ function removeDir(d: OwnedDir): ResourceReport {
   }
 }
 
-/** consumer 入口：见文件头。持记录锁跑完全程，与登记 / 补登记互斥 */
+/** 已完成记录只回放历史退出证据；不再把 PID/目录重新认领，仍核保留目录的真实身份。 */
+function completedReport(record: SandboxOwnerRecord): CleanupReport {
+  const resources: ResourceReport[] = record.resources.map((r) => ({ kind: r.kind, pid: r.pid, outcome: "already_exited" }));
+  for (const d of record.dirs) {
+    const v = dirVerdict(d);
+    if (v !== "gone" && (v !== "same" || !pathsOverlap(d.path, record.root))) return refused(`完成记录目录不再可信：${d.path}`);
+    resources.push({ kind: "dir", path: d.path, outcome: v === "gone" ? "already_removed" : "retained" });
+  }
+  return { status: "done", resources, signals: 0 };
+}
+
+/** consumer 持生命周期/per-key 锁；共享锁只冻结资源及写回，不跨 TERM/KILL 等待。 */
 async function cleanupSandboxOrder(dir: string, key: SandboxOwnerKey, deps: CleanupDeps): Promise<CleanupReport> {
   if (!deps.withOrderCleanupLease) return refused("缺少订单生命周期清理租约");
-  try { return await deps.withOrderCleanupLease(key, (held) => cleanupLeased(dir, key, deps, held)); }
-  catch (e) { return refused(`清理租约失败：${(e as Error).message}`); }
+  let completed: CleanupReport | undefined;
+  try { return await deps.withOrderCleanupLease(key, async (held) => (completed = await cleanupLeased(dir, key, deps, held))); }
+  catch (e) {
+    const reason = `清理租约失败：${(e as Error).message}`;
+    return completed ? { ...completed, status: completed.status === "refused" ? "refused" : "partial", reason } : refused(reason);
+  }
 }
 
 async function cleanupLeased(dir: string, key: SandboxOwnerKey, deps: CleanupDeps, held: () => boolean): Promise<CleanupReport> {
+  let lock;
+  try { lock = await lockSandboxCleanupKey(dir, key); } catch (e) { return refused((e as Error).message); }
+  let report: CleanupReport;
+  try { report = await cleanupFrozen(dir, key, deps, held, lock); } catch (e) { report = refused((e as Error).message); }
+  try { lock.release(); } catch (e) {
+    report = { ...report, status: report.status === "refused" ? "refused" : "partial", reason: `记录锁释放失败：${(e as Error).message}` };
+  }
+  return report;
+}
+
+async function cleanupFrozen(dir: string, key: SandboxOwnerKey, deps: CleanupDeps, held: () => boolean, lock: LockHandle): Promise<CleanupReport> {
   const d = { probe: probeProcess, signal: (pid: number, sig: NodeJS.Signals) => void process.kill(pid, sig), graceMs: 5_000, killWaitMs: 3_000, ...deps };
   const now = (deps.now ?? Date.now)();
-  let lock;
-  try { lock = await lockSandboxOwner(dir, key); } catch (e) { return refused((e as Error).message); }
-  try {
-    const read = readSandboxOwner(dir, key);
-    if (read.status !== "ok") return refused(read.reason);
-    const record = read.record;
-    const authorize = async () => {
-      for (const r of record.resources) {
-        const v = identityVerdict(r, await d.probe(r.pid));
-        if (v === "reused" || v === "unknown") throw new Error(`pid ${r.pid} 身份已变：${v}`);
-      }
-      const bad = await evidenceProblem(record, d);
-      if (bad) throw new Error(bad);
-      if (!held() || !lock.held()) throw new Error("清理租约已失");
-    };
-    const evidence = await evidenceProblem(record, d);
-    if (evidence) return refused(evidence);
-    const all = listSandboxOwners(dir);
-    if (all.status !== "ok") return refused(all.reason);
-    const conflict = ownershipConflict(record, all.entries);
-    if (conflict) return refused(conflict);
-    const plan = await planResources(record, d.probe);
-    if (typeof plan === "string") return refused(plan);
-    for (const dir of record.dirs) {
-      if (pathsOverlap(dir.path, record.root)) continue;
-      const bad = await directoryProblem(dir, record.resources.map((r) => r.pid));
-      if (bad) return refused(bad);
+  const read = readSandboxOwner(dir, key);
+  if (read.status !== "ok") return refused(read.reason);
+  if (read.record.cleanup?.done) return completedReport(read.record);
+  const evidence = await evidenceProblem(read.record, d);
+  if (evidence) return refused(evidence);
+  let record: SandboxOwnerRecord;
+  try { record = await beginSandboxCleanup(dir, key, now, lock); } catch (e) { return refused((e as Error).message); }
+  const authorize = async () => {
+    for (const r of record.resources) {
+      const v = identityVerdict(r, await d.probe(r.pid));
+      if (v === "reused" || v === "unknown") throw new Error(`pid ${r.pid} 身份已变：${v}`);
     }
-    let archive: string;
-    try {
-      archive = await archiveOwnerEvidence(dir, record, plan.map((p) => ({ kind: p.r.kind, pid: p.r.pid, verdict: p.verdict })), now);
-    } catch (e) {
-      return refused(`属主证据保全失败：${(e as Error).message}`);
-    }
-    try { await authorize(); } catch (e) { return refused((e as Error).message); }
-    const { resources, signals } = await stopAll(record, plan, { ...d, authorize });
-    const done = resources.every((r) => r.outcome !== "stop_failed" && r.outcome !== "kept");
-    const mark = { attempts: (record.cleanup?.attempts ?? 0) + 1, lastAt: now, done, outcomes: resources.map((r) => `${r.kind}:${r.pid ?? r.path}:${r.outcome}`) };
-    try {
-      await markSandboxCleanup(dir, record, mark, lock);
-    } catch (e) {
-      return { status: "partial", reason: `清理结果没记上：${(e as Error).message}`, resources, signals, archive };
-    }
-    return done ? { status: "done", resources, signals, archive } : { status: "partial", reason: "有进程 / socket 没清掉，稍后重试", resources, signals, archive };
-  } finally {
-    lock.release();
+    const bad = await evidenceProblem(record, d);
+    if (bad) throw new Error(bad);
+    if (!held() || !lock.held()) throw new Error("清理租约已失");
+  };
+  const plan = await planResources(record, d.probe);
+  if (typeof plan === "string") return refused(plan);
+  for (const dir of record.dirs) {
+    if (pathsOverlap(dir.path, record.root)) continue;
+    const bad = await directoryProblem(dir, record.resources.map((r) => r.pid));
+    if (bad) return refused(bad);
   }
+  let archive: string;
+  try {
+    archive = await archiveOwnerEvidence(dir, record, plan.map((p) => ({ kind: p.r.kind, pid: p.r.pid, verdict: p.verdict })), now);
+  } catch (e) {
+    return refused(`属主证据保全失败：${(e as Error).message}`);
+  }
+  try { await authorize(); } catch (e) { return refused((e as Error).message); }
+  const { resources, signals } = await stopAll(record, plan, { ...d, authorize });
+  const done = resources.every((r) => r.outcome !== "stop_failed" && r.outcome !== "kept");
+  const mark = { attempts: record.cleanup!.attempts, lastAt: now, done, outcomes: resources.map((r) => `${r.kind}:${r.pid ?? r.path}:${r.outcome}`) };
+  try {
+    const ownerLock = await lockSandboxOwner(dir, key);
+    try {
+      if (!held() || !lock.held()) throw new Error("清理租约已失，不写回");
+      await markSandboxCleanup(dir, record, mark, ownerLock);
+    } finally { ownerLock.release(); }
+  } catch (e) {
+    return { status: "partial", reason: `清理结果没记上：${(e as Error).message}`, resources, signals, archive };
+  }
+  return done ? { status: "done", resources, signals, archive } : { status: "partial", reason: "有进程 / socket 没清掉，稍后重试", resources, signals, archive };
+
 }
 
 interface OwnerReview {
@@ -286,10 +310,11 @@ function reviewSandboxOwners(dir: string, now: number, ttlMs: number): OwnerRevi
   const all = listSandboxOwners(dir);
   if (all.status !== "ok") return { status: "unknown", reason: all.reason, due: [], unknown: [] };
   const ok = (e: OwnerListing): e is OwnerListing & { read: { status: "ok"; record: SandboxOwnerRecord } } => e.read.status === "ok";
+  const entries = all.entries.map((e) => e.read.status === "ok" ? { ...e, read: readSandboxOwner(dir, e.read.record.key) } : e);
   return {
     status: "ok",
-    due: all.entries.filter(ok).filter((e) => ownerReviewDue(e.read.record, now, ttlMs)).map((e) => e.read.record.key),
-    unknown: all.entries.flatMap((e) => (e.read.status === "ok" ? [] : [{ id: e.id, reason: e.read.reason }])),
+    due: entries.filter(ok).filter((e) => ownerReviewDue(e.read.record, now, ttlMs)).map((e) => e.read.record.key),
+    unknown: entries.flatMap((e) => (e.read.status === "ok" ? [] : [{ id: e.id, reason: e.read.reason }])),
   };
 }
 
@@ -297,7 +322,7 @@ function reviewSandboxOwners(dir: string, now: number, ttlMs: number): OwnerRevi
  * SBXC2 唯一接线入口：register 在 producer 启动后、报 started 前调用；失败则 producer 停自己的新资源。
  * addChild/addDir 补登记，开始清理后拒绝；未知历史只由 review 上报，TTL 不授权删除。
  * cleanup 在终态/结果回执后调用，必须注入与换代、恢复、资源创建共用的 withOrderCleanupLease。
- * 锁顺序是生命周期锁→共享属主锁；resolve 确认退出或报告 partial，refused 零动作。
+ * 锁顺序是生命周期锁→per-key 锁→短共享事务；先冻结补登记，再释放共享锁停进程，最后短事务写回。
  * root 及重叠目录保留日志并报告 retained；本模块尚未接生产启动或结单路径。
  */
 export interface SandboxOrderOwnership {

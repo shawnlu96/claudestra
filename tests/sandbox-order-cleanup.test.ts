@@ -6,8 +6,9 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { sandboxOrderOwnership, type CleanupDeps, type OrderFacts, type SandboxOrderOwnership } from "../src/lib/sandbox-order-cleanup.ts";
-import { ownerRecordId, probeProcess, readSandboxOwner, type SandboxOwnerKey } from "../src/lib/sandbox-order-owner.ts";
+import { lockSandboxOwner, ownerRecordId, probeProcess, readSandboxOwner, type SandboxOwnerKey } from "../src/lib/sandbox-order-owner.ts";
 import type { WorkerLiveness } from "../src/lib/worker-liveness.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -374,4 +375,96 @@ test("stale-facts: 缺少生命周期租约或预检期间失租零动作", asyn
   await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }] });
   await expectRefused(h, [pid], key(), "租约已失");
   await expectRefused(harness(undefined, "no_window", { withOrderCleanupLease: undefined }), [pid], key(), "生命周期");
+});
+
+
+test("poison-root: 已完成根删除不毒化无关订单；未完成缺根只拒本单", async () => {
+  const h = harness(), a = key("a"), b = key("b");
+  const rootA = join(base, "A"), rootB = join(base, "B"), rootC = join(base, "C");
+  for (const r of [rootA, rootB, rootC]) mkdirSync(r);
+  const pidA = spawnIn(["perl", "-e", "sleep 300"], rootA);
+  const pidB = spawnIn(["perl", "-e", "sleep 300"], rootB);
+  await h.own.register({ key: a, root: rootA, resources: [{ kind: "child", pid: pidA }] });
+  await h.own.register({ key: b, root: rootB, resources: [{ kind: "child", pid: pidB }] });
+  expect((await h.own.cleanup(a)).status).toBe("done");
+  rmSync(rootA, { recursive: true }); // 只模拟本测试已退出 child 的创建端删除自己的工作副本。
+  expect((await h.own.cleanup(b)).status).toBe("done");
+  expect(alive(pidB)).toBe(false);
+  expect((await h.own.cleanup(a))).toMatchObject({ status: "done", signals: 0 });
+  expect(readSandboxOwner(owners, a).status).toBe("ok");
+  await h.own.register({ key: key("c"), root: rootC, resources: [], dirs: [rootC] });
+  expect(h.own.review(Date.now() + 1000, 0).unknown).toEqual([]);
+  const rootD = join(base, "D"); mkdirSync(rootD);
+  await h.own.register({ key: key("d"), root: rootD, resources: [], dirs: [rootD] });
+  rmSync(rootD, { recursive: true }); // 无进程的合成目录；未完成记录仍须保守拒本单。
+  expect((await h.own.cleanup(key("d"))).status).toBe("refused");
+  expect((await h.own.cleanup(key("c"))).status).toBe("done");
+  expect(h.own.review(Date.now() + 1000, 0).unknown).toEqual([{ id: ownerRecordId(key("d")), reason: expect.stringContaining("不存在") }]);
+}, 30_000);
+
+test("lock-hold: 慢清理不阻塞无关登记，冻结本单补登记", async () => {
+  let firstTerm!: () => void;
+  const term = new Promise<void>((resolve) => { firstTerm = resolve; });
+  const h = harness(undefined, "no_window", {
+    graceMs: 6_000, killWaitMs: 6_000,
+    signal: (pid, sig) => { process.kill(pid, sig); if (sig === "SIGTERM") firstTerm(); },
+  });
+  const pids = [stubborn(), stubborn()];
+  await Bun.sleep(100);
+  await h.own.register({ key: key(), root, resources: pids.map((pid) => ({ kind: "child" as const, pid })) });
+  const cleaning = h.own.cleanup(key());
+  await term;
+  const rootC = join(base, "C"); mkdirSync(rootC);
+  try {
+    const started = Date.now();
+    await h.own.register({ key: key("c"), root: rootC, resources: [], dirs: [rootC] });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    const extra = join(base, "extra"); mkdirSync(extra);
+    await expect(h.own.addDir(key(), extra)).rejects.toThrow("已经开始清理");
+  } finally { expect((await cleaning).status).toBe("done"); }
+}, 40_000);
+
+test("tmux-socket-prefix: sock2 server 不能登记为 sock", async () => {
+  const h = harness(), tmux = await privateTmux();
+  const prefix = tmux.socket.slice(0, -1), listener = createServer();
+  await new Promise<void>((resolve, reject) => { listener.once("error", reject); listener.listen(prefix, resolve); });
+  try {
+    await expect(h.own.register({ key: key(), root, resources: [{ kind: "tmux", pid: tmux.pid, socket: prefix }] }))
+      .rejects.toThrow("不是这个 socket");
+    expect(alive(tmux.pid)).toBe(true);
+  } finally { await new Promise<void>((resolve) => listener.close(() => resolve())); }
+});
+
+
+test("lock-hold: 等共享写回锁期间失租不能写完成", async () => {
+  let held = true;
+  let blocker: Promise<void> | undefined;
+  const h = harness(undefined, "no_window", {
+    withOrderCleanupLease: async (_key, run) => run(() => held),
+    signal: (pid, sig) => {
+      process.kill(pid, sig);
+      blocker = lockSandboxOwner(owners, key()).then(async (lock) => {
+        try { await Bun.sleep(1_500); held = false; } finally { lock.release(); }
+      });
+    },
+  });
+  const pid = sleeper();
+  await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }] });
+  const rep = await h.own.cleanup(key());
+  await blocker;
+  expect(rep).toMatchObject({ status: "partial", signals: 1 });
+  expect(alive(pid)).toBe(false);
+  const record = readSandboxOwner(owners, key());
+  if (record.status !== "ok") throw new Error(record.reason);
+  expect(record.record.cleanup?.done).toBe(false);
+});
+
+test("lock-hold: 生命周期租约收尾失败仍保留真实动作报告", async () => {
+  const h = harness(undefined, "no_window", {
+    withOrderCleanupLease: async (_key, run) => { await run(() => true); throw new Error("lease release failed"); },
+  });
+  const pid = sleeper();
+  await h.own.register({ key: key(), root, resources: [{ kind: "child", pid }] });
+  expect((await h.own.cleanup(key()))).toMatchObject({ status: "partial", signals: 1 });
+  expect(alive(pid)).toBe(false);
 });

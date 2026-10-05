@@ -229,3 +229,21 @@ test("owner-race: 不同 key 同时补登记同一目录只能成功一个", asy
   const results = await Promise.allSettled(["first", "second"].map((id) => addSandboxOwned(owners, key(id), { dir: place })));
   expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
 });
+
+
+test("poison-root: 未完成缺根仍保留结构声明，损坏的完成标记不能当惰性历史", async () => {
+  await registerSandboxOwner(owners, { key: key(), root, resources: [], dirs: [root] });
+  const file = recordFile(key()), good = readFileSync(file, "utf8");
+  for (const cleanup of [false, null, { attempts: 1, lastAt: 1, done: "yes", outcomes: [] }]) {
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(good), cleanup }));
+    expect(readSandboxOwner(owners, key()).status).toBe("unknown");
+  }
+  writeFileSync(file, good);
+  rmSync(root, { recursive: true }); // 只有本测试创建的空目录，没有进程。
+  expect(readSandboxOwner(owners, key()).status).toBe("unknown");
+  const listing = listSandboxOwners(owners);
+  expect(listing.status).toBe("ok");
+  if (listing.status === "ok") expect(listing.entries[0].read.status).toBe("ok");
+  const root2 = join(base, "root2"); mkdirSync(root2);
+  await registerSandboxOwner(owners, { key: key("next"), root: root2, resources: [], dirs: [root2] });
+});
