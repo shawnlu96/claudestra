@@ -2,9 +2,9 @@
  * 网页收到 session_rotated（/clear 轮转、Stop 自愈）：ctx 先置空 → 重拉历史 → 历史落地后插「已清空」提示 → 刷 agent 列表（CLR1）。
  */
 import { describe, expect, test } from "bun:test";
+import { fullLoadHasMore, rotationNotice, toChatMessages } from "@/lib/chat/history-shape";
 import { translate, type BridgeEvent } from "@/lib/chat/stream-shape";
-import { rotationNotice, settleRotation, type RotationHost } from "@/features/chat/session-rotated";
-import { fullLoadHasMore } from "@/lib/api/history";
+import { settleRotation, type RotationHost } from "@/features/chat/session-rotated";
 
 const NEW = "b10e3ff1-0000-4000-8000-000000000002";
 const ev = (data: Record<string, unknown>): BridgeEvent => ({ seq: 1, ts: "t", agent: "agent-w", chatId: "c", type: "session_rotated", data });
@@ -53,7 +53,25 @@ describe("settleRotation", () => {
     expect(st.messages).toEqual([]);
   });
 
+  test("重拉回来的历史里已有同一句（CC 在新会话开头记的 /clear）→ 不再插第二条", async () => {
+    const { h, st } = host();
+    h.reload = async () => void (st.messages = [{ id: "h9", role: "system", content: rotationNotice(NEW, "zh") }]);
+    await settleRotation(h, NEW);
+    expect(st.messages.map((m) => m.id)).toEqual(["h9"]);
+  });
+
   test("英文文案", () => expect(rotationNotice(NEW, "en")).toBe("🧹 Context cleared — new session b10e3ff1"));
+});
+
+describe("刷新后走历史：两个会话接缝处也有「已清空」分隔", () => {
+  test("新会话开头那条 /clear 记录 → 同一句提示；别的系统记录照旧", () => {
+    const items = [
+      { seq: 9, ts: "t1", role: "system" as const, text: "/clear" },
+      { seq: 12, ts: "t2", role: "system" as const, text: "/model opus" },
+    ];
+    expect(toChatMessages(items, { sid: NEW, lang: "zh" }).map((m) => m.content)).toEqual(["🧹 已清空上下文，新会话 b10e3ff1", "/model opus"]);
+    expect(toChatMessages(items.slice(0, 1), { sid: NEW, lang: "en" })[0].content).toBe("🧹 Context cleared — new session b10e3ff1");
+  });
 });
 
 describe("全量加载后能否往上翻（clear 前的记录接得上）", () => {

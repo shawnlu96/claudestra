@@ -8,7 +8,8 @@
  */
 import type { ChatMessage } from "@/features/chat/type";
 import { apiAgentName } from "@/lib/chat/agents";
-import { selfIdsFrom, toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
+import { fullLoadHasMore, selfIdsFrom, toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
+import { getLang } from "@/lib/i18n";
 import { machines } from "@/lib/machines";
 import { api, ApiError } from "./client";
 
@@ -85,14 +86,6 @@ async function hiddenPredicate(agentKey: string, sid: string): Promise<((seq: nu
   return (seq) => mine.some((r) => seq >= r.fromSeq && seq <= r.toSeq);
 }
 
-/**
- * 全量页之后还能不能往上翻：本 session 没拿满一页，也要看清单里还有没有更旧的 session（翻到头会接上它，见 before 分支）。
- * 只按条数判的话，/clear 后不满 500 条的新会话会报 false，「加载更早」不出现，clear 前的记录整段接不上（CLR1）。
- */
-export function fullLoadHasMore(count: number, sids: string[], sid: string): boolean {
-  return count >= 500 || sids.indexOf(sid) + 1 < sids.length;
-}
-
 export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise<HistoryPage> {
   const agentKey = apiAgentName(agent);
   const name = encodeURIComponent(agentKey);
@@ -100,7 +93,7 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
   const page = (sid: string, qs: string) => api<Page>(`/agents/${name}/history/${encodeURIComponent(sid)}${qs}`, { timeoutMs: 10_000, signal: q.signal });
   const sessions = () => api<SessionList>(`/agents/${name}/history`, { timeoutMs: 8000, signal: q.signal }).then((l) => (l.sessions ?? []).map((s) => s.sessionId));
   const shape = async (items: NeutralMessage[], sid: string, tail?: boolean) =>
-    toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids });
+    toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids, lang: getLang() });
   try {
     if (q.after !== undefined && q.session) {
       if (!q.browse) {
