@@ -14,7 +14,7 @@ import { readJsonCapped } from "./body-reader.js";
 import { IDENTITY_UNVERIFIED, requireVerified, type CallerIdentity } from "./caller-identity.js";
 import { roleOfStep } from "./lend-git.js";
 import { notV2, peerProto } from "./lend-hello.js";
-import { getOrder, liveOrders, orderOf, type LendRow } from "./lend-journal.js";
+import { getOrder, liveOrders, orderOf, WORKER_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_ORDER_TOOLS } from "./lend-mcp-profile.js";
 import { signedFor } from "./instance-key.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
@@ -103,7 +103,7 @@ function boundOrder(db: Database | null, identity: CallerIdentity, tool: string,
   if (!row.sessionId || row.sessionId !== identity.sessionId) return no("session_mismatch", `${identity.agent} 的当前会话不是这张单记的会话，不收`);
   const given = (args as { orderId?: unknown } | null | undefined)?.orderId;
   if (given !== undefined && given !== row.orderId) return no("order_mismatch", `参数里的 orderId 不是你这张单（${row.orderId}）`);
-  if (row.state !== "started" && row.state !== "result_pending") return no("not_started", `${row.orderId} 当前是 ${row.state}，不收派单工具调用`);
+  if (!WORKER_STATES.includes(row.state)) return no("not_started", `${row.orderId} 当前是 ${row.state}，不收派单工具调用`);
   const role = roleOfStep(String(orderOf(row)?.step ?? ""));
   if (!role) return no("invalid_order", `${row.orderId} 的步骤认不出，不收`);
   const write = role === "write";
