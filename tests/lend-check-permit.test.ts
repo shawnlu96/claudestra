@@ -534,3 +534,48 @@ test("failed policy migration preserves the idle policy and terminal history", (
   expect(state(dir)).toEqual(before);
   expect(lendCheckPermit(input(dir, "new")).status).toBe("granted");
 });
+
+test("stale approved observers cannot downgrade an idle on store or obstruct later enforced admission", async () => {
+  const dir = root(), enforcer = await worker(dir), observer = await worker(dir, false);
+  expect((await enforcer.call(input(dir, "a"))).status).toBe("granted");
+  expect((await enforcer.call(input(dir, "a", "release"))).status).toBe("released");
+  const before = state(dir), observing = { ...config, mode: "observe" as const };
+  for (const id of ["x", "y"]) {
+    expect(await observer.call({ ...input(dir, id), config: observing })).toMatchObject({
+      allowed: true, status: "policy_conflict", reasonCode: "policy_conflict", retryable: false,
+    });
+    expect(state(dir)).toEqual(before);
+  }
+  expect((await enforcer.call(input(dir, "b"))).status).toBe("granted");
+  expect(lendCheckPermit(input(dir, "d")).status).toBe("queued");
+  expect(state(dir).policy).toEqual(before.policy);
+  expect(state(dir).entries.filter((entry: { status: string }) => entry.status === "active")).toHaveLength(1);
+});
+
+test("owner-assisted drain of an observe crash requires exact tree evidence before installing on", async () => {
+  const dir = root(), observer = await worker(dir, false), stop = join(dir, "stop-child");
+  expect((await observer.call({ ...input(dir, "old"), config: {} })).status).toBe("observed");
+  const child = await observer.send({ tree: stop }), retained = state(dir).entries[0];
+  const tree = () => observeLendCheckProcess(child.pid).kind;
+  observer.proc.kill("SIGKILL"); await observer.proc.exited;
+  const unknown = { verifyOwnerApproval: authority, observeCheckTree: () => "unknown" as const };
+  const before = state(dir);
+  try {
+    expect(permit(input(dir, "blocked"), observeLendCheckProcess, unknown)).toMatchObject({
+      allowed: false, reasonCode: "policy_conflict", retryable: false,
+    });
+    expect(state(dir)).toEqual(before);
+    expect(tree()).toBe("present");
+  } finally {
+    writeFileSync(stop, "stop");
+    for (let attempt = 0; attempt < 200 && tree() !== "absent"; attempt++) await Bun.sleep(10);
+  }
+  expect(tree()).toBe("absent");
+  // This fixture owns the entire tree: the dead executor and its only descendant cannot spawn again.
+  const certified = { verifyOwnerApproval: authority, observeCheckTree: (entry: typeof retained) =>
+    JSON.stringify(entry) === JSON.stringify(retained) ? tree() : "unknown" as const };
+  expect(permit(input(dir, "after-drain"), observeLendCheckProcess, certified).status).toBe("granted");
+  expect(state(dir).policy.mode).toBe("on");
+  expect(state(dir).entries[0]).toEqual({ ...retained, status: "exited" });
+  expect(state(dir).entries.filter((entry: { status: string }) => entry.status === "active")).toHaveLength(1);
+}, 10000);

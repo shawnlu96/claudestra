@@ -167,9 +167,9 @@ function sweep(state: State, samples: Map<string, Sample>): void {
 
 function apply(state: State, input: LendCheckInput, owner: Entry["owner"], policy: Policy, samples: Map<string, Sample>, deps: Dependencies): LendCheckResult {
   if (JSON.stringify(state.policy) !== JSON.stringify(policy)) {
-    // Only a host-verified approval may replace an idle policy. Stale/unconfigured workers cannot downgrade it.
-    if (state.entries.some(pending) || policy.approval === null) {
-      throw new PermitError("policy_conflict", "host permit policy differs; drain existing attempts before applying a verified owner policy");
+    // Approval authenticates the limit, not the worker's mode. An idle on policy must never regress to observe.
+    if (state.entries.some(pending) || policy.approval === null || (state.policy.mode === "on" && policy.mode !== "on")) {
+      throw new PermitError("policy_conflict", "host policy differs; drain attempts and apply verified approval without downgrading enforcement");
     }
     state.policy = policy;
   }
@@ -211,9 +211,16 @@ function apply(state: State, input: LendCheckInput, owner: Entry["owner"], polic
 // Sole lifecycle API: acquire (same ID polls), cancel (queued only), release (after the check tree has exited).
 // Proposed command boundary: package.json scripts.check/test and .github/workflows/ci.yml's direct bun test/build commands.
 // A host-owned loader must validate approval provenance/limit against its owner-approved record, never worker strings.
-// Every executor uses the SAME directory/policy. After drain, acquire atomically installs a new host-verified approval.
+// Every executor uses the SAME directory/policy. After drain, acquire installs verified approval; on cannot become observe.
 // A supervisor acquires before spawning; observeCheckTree must prove sealed/reaped descendants even after executor SIGKILL.
 // claudeWorkerPlan in lend-claude-worker.ts can propagate shared directory/config, but worker spawn is not a full check.
+
+// Owner drain proposal (no CLI wired): pause new check admission, inventory retained attempt/owner identities, then
+// have the host supervisor seal/reap each exact check tree and record durable evidence for observeCheckTree.
+// A deliberate fresh acquire with the approved policy sweeps dead holders and installs it atomically once all drain.
+// Legacy observe crashes may require owner-assisted tree identification; missing PID alone is never tree evidence.
+// If any tree remains unknown, keep the store/history and escalate for that evidence; never delete/reset the database.
+// This is an explicit owner maintenance workflow, not an automatic retry of policy_conflict or a family switch.
 
 // No scripts, package.json or production paths are wired here. Policy denials must not retry or switch family.
 export function lendCheckPermit(input: LendCheckInput, probe = observeLendCheckProcess, deps: Dependencies = {}): LendCheckResult {
