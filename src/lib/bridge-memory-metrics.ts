@@ -72,9 +72,13 @@ function trend(points: MemoryPoint[], get: (p: MemoryPoint) => number | null, fl
   const tolerance = Math.max(floor, v[0] * 0.02);
   const half = Math.floor(v.length / 2);
   const rises = v.slice(1).filter((n, i) => n > v[i]).length;
+  const rising = delta > 0 && v[half - 1] > v[0] && v.at(-1)! > v[half]
+    && (rises >= Math.ceil((v.length - 1) * 0.75) || v.slice(1).every((n, i) => n >= v[i]));
   const growth = delta > tolerance && v[half - 1] - v[0] > tolerance / 4
     && v.at(-1)! - v[half] > tolerance / 4 && rises >= Math.ceil((v.length - 1) * 0.75);
-  const kind = growth ? "sustained_growth" : Math.max(...v) - Math.min(...v) <= tolerance ? "plateau" : "variable";
+  // A short window can hide a large rate inside the amplitude tolerance. Keep rising traces unresolved.
+  const kind = growth ? "sustained_growth" : rising ? "unknown"
+    : Math.max(...v) - Math.min(...v) <= tolerance ? "plateau" : "variable";
   return { kind, delta, perSecond: delta / duration };
 }
 
@@ -92,18 +96,24 @@ export function analyzeMemory(points: MemoryPoint[]) {
   const retainedGrowth = ["bufferedEvents", "controlObjects", "controlBytes"].some((k) => counters[k as CounterKey].kind === "sustained_growth");
   const heapGrowth = ["heapUsed", "external", "arrayBuffers"].some((k) => memory[k as MemoryKey].kind === "sustained_growth");
   const known = MEMORY_KEYS.filter((k) => memory[k].kind !== "unknown");
+  const unresolvedGrowth = MEMORY_KEYS.some((k) => memory[k].kind === "unknown" && memory[k].delta !== null);
   const classification = !valid || measured.length < 6 ? "unknown"
     : retainedGrowth && heapGrowth ? "retention_growth_observed"
     : retainedGrowth ? "retained_counts_growing"
+    : heapGrowth ? "heap_growth_unattributed"
+    : memory.rss.kind === "sustained_growth" ? "rss_growth_unattributed"
+    : unresolvedGrowth || !known.length ? "unknown"
     : known.length && known.every((k) => memory[k].kind === "plateau") ? "plateau_observed"
-    : memory.rss.kind === "sustained_growth" && !heapGrowth ? "rss_growth_unattributed" : "inconclusive";
+    : "inconclusive";
   return {
     classification, identityConsistent: valid, measuredPoints: measured.length,
     windowMs: measured.length ? measured.at(-1)!.elapsedMs - measured[0].elapsedMs : 0,
     baseline: points.find((p) => p.phase === "baseline")?.memory ?? null,
     memory, counters, leakProven: false,
     limitations: ["window_only", "external_process_influence_unmeasured", "allocator_and_gc_may_affect_rss",
+      ...(unresolvedGrowth ? ["sub_tolerance_growth_requires_longer_window"] : []),
       ...(points.some((p) => p.host.swapUsedBytes === null) ? ["swap_unknown"] : []),
-      ...(known.length < MEMORY_KEYS.length ? ["some_runtime_metrics_unavailable"] : [])],
+      ...(!measured.length || measured.some((p) => MEMORY_KEYS.some((k) => p.memory[k] === null))
+        ? ["some_runtime_metrics_unavailable"] : [])],
   };
 }

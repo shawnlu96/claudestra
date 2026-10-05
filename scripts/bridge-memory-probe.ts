@@ -26,9 +26,11 @@ macOS identity has one-second resolution; Linux identity uses boot ID + start ti
 Replay: event-bus only, fixed workload v1, sequential old/new children, forced GC in children only.
 Scenarios: steady, churn-cleanup, retention-control (intentional synthetic retention).
 No scenario starts the bridge, opens sockets, reads real state or constitutes field attribution.
+An event-bus plateau does not establish a bridge plateau or explain an old/new production RSS gap.
 Report includes runtime/source hashes, baseline/warmup/measurement points and host swap/load.
 Use identical runtime and repeat with old/new roots swapped to assess order/host interference.
-Six measured points minimum for trend; unknown/failure is retained. No report proves a leak.`;
+Six measured points minimum; sub-tolerance rising traces need a longer window and remain unknown.
+Unknown/failure is retained. No report proves a leak.`;
 const HASH = /^[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{40}$/;
 const SCENARIOS = ["steady", "churn-cleanup", "retention-control"] as const;
@@ -225,22 +227,50 @@ async function replay(flags: Record<string, string>) {
     return { scenario, comparable: Boolean(old && next), old: old?.analysis.classification ?? "unknown",
       new: next?.analysis.classification ?? "unknown", sameSource: old && next ? old.version.eventBusSha256 === next.version.eventBusSha256 : null };
   });
-  return { schema: 1, kind: "comparison", mode: probeMode(flags.mode), workload: WORKLOAD, runs, comparisons,
+  return { schema: 1, kind: "comparison", comparisonScope: "event_bus_only", mode: probeMode(flags.mode), workload: WORKLOAD, runs, comparisons,
     status: runs.some((r) => r.failure) ? "failed" : "complete", productionAttribution: "unknown",
     limitations: ["event_bus_only", "synthetic_load", "sequential_order_effect_possible", "external_process_influence_unmeasured",
-      "rss_includes_allocator_and_runtime", "field_evidence_not_collected", "no_product_fix_proposed"] };
+      "rss_includes_allocator_and_runtime", "field_evidence_not_collected", "no_product_fix_proposed",
+      "event_bus_plateau_does_not_establish_bridge_plateau"] };
+}
+
+/** Version objects come from replay reports; validate each leaf instead of reflecting arbitrary source text. */
+function reportVersion(value: unknown) {
+  if (typeof value === "string") return SHA.test(value) ? value : null;
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  return {
+    commit: typeof v.commit === "string" && SHA.test(v.commit) ? v.commit : null,
+    dirty: typeof v.dirty === "boolean" ? v.dirty : null,
+    eventBusSha256: typeof v.eventBusSha256 === "string" && HASH.test(v.eventBusSha256) ? v.eventBusSha256 : null,
+    bun: typeof v.bun === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(v.bun) ? v.bun : null,
+    platform: typeof v.platform === "string" && ["darwin", "linux"].includes(v.platform) ? v.platform : null,
+    arch: typeof v.arch === "string" && ["arm64", "x64"].includes(v.arch) ? v.arch : null,
+  };
+}
+
+function reportProvenance(input: Record<string, unknown>) {
+  return {
+    version: reportVersion(input.version),
+    versionSource: input.versionSource === "operator_supplied_not_verified" ? input.versionSource : "unknown",
+    intervalMs: typeof input.intervalMs === "number" && Number.isSafeInteger(input.intervalMs)
+      && input.intervalMs > 0 && input.intervalMs <= 60_000 ? input.intervalMs : null,
+    identityPrecision: typeof input.identityPrecision === "string"
+      && ["kernel_ticks", "one_second", "one_second_pid_reuse_within_second_not_excluded"].includes(input.identityPrecision)
+      ? input.identityPrecision : "unknown",
+  };
 }
 
 function analyzeFile(path: string | undefined) {
   if (!path) throw new Error("invalid_option");
   const file = Bun.file(path);
   if (file.size > 8 * 1024 * 1024) throw new Error("invalid_report");
-  const input = JSON.parse(readFileSync(path, "utf8")) as { points?: unknown[]; status?: unknown; failure?: unknown };
+  const input = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   if (!Array.isArray(input.points) || input.points.length > 1000) throw new Error("invalid_report");
   const points = input.points.map(parseMemoryPoint);
   return { schema: 1, kind: "analysis", status: input.status === "failed" ? "failed" : "analyzed",
     sourceFailure: input.status === "failed" ? safeError(new Error(String(input.failure))) : null,
-    points, analysis: analyzeMemory(points) };
+    ...reportProvenance(input), points, analysis: analyzeMemory(points) };
 }
 
 const ALLOWED: Record<string, string[]> = {

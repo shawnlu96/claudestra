@@ -75,6 +75,38 @@ describe("memory attribution is numeric and conservative", () => {
     expect(analyzeMemory(points).classification).toBe("retained_counts_growing");
   });
 
+  test("monotonic growth below amplitude tolerance cannot establish a plateau", () => {
+    for (const [metric, base, step, interval] of [
+      ["rss", 1000 * 1024 * 1024, 3 * 1024 * 1024, 1000],
+      ["heapUsed", 10 * 1024 * 1024, 64 * 1024, 25],
+    ] as const) {
+      const points = series("plateau", 12);
+      for (const p of points) {
+        p.phase = p.index === 0 ? "baseline" : p.index <= 4 ? "warmup" : "measure";
+        p.memory[metric] = base + p.index * step;
+        p.elapsedMs = p.index * interval;
+      }
+      const report = analyzeMemory(points);
+      expect(report.memory[metric].kind).toBe("unknown");
+      expect(report.memory[metric].perSecond).toBe(step * 1000 / interval);
+      expect(report.classification).toBe("unknown");
+      expect(report.limitations).toContain("sub_tolerance_growth_requires_longer_window");
+      expect(report.limitations).not.toContain("some_runtime_metrics_unavailable");
+      expect(report.leakProven).toBe(false);
+    }
+    const staircase = series();
+    for (const p of staircase) p.memory.rss = (1000 + Math.floor(p.index / 2)) * 1024 * 1024;
+    expect(analyzeMemory(staircase).classification).toBe("unknown");
+  });
+
+  test("heap, external and array buffer growth remain visible without retained counters", () => {
+    for (const metric of ["heapUsed", "external", "arrayBuffers"] as const) {
+      const points = series();
+      for (const p of points) p.memory[metric] = p.index * 2 * 1024 * 1024;
+      expect(analyzeMemory(points).classification).toBe("heap_growth_unattributed");
+    }
+  });
+
   test("oscillation, missing metrics, gaps, identity replacement and clock reversal stay uncertain", () => {
     const oscillating = series();
     for (const p of oscillating) p.memory.rss = (p.index % 2 ? 100 : 20) * 1024 * 1024;
@@ -141,12 +173,45 @@ describe("real isolated processes", () => {
     } finally { box.cleanup(); }
   }, 15_000);
 
+  test("offline analysis preserves only validated source provenance", async () => {
+    const box = sandbox(), path = join(box.dir, "report.json");
+    const replayVersion = { commit: "b".repeat(40), dirty: false, eventBusSha256: TOKEN,
+      bun: "1.3.14", platform: "darwin", arch: "arm64" };
+    try {
+      for (const version of ["b".repeat(40), replayVersion]) {
+        const provenance = { version, versionSource: "operator_supplied_not_verified", intervalMs: 1000, identityPrecision: "kernel_ticks" };
+        writeFileSync(path, JSON.stringify({ points: series(), ...provenance }));
+        const r = await cli(["analyze", "--input", path], box);
+        expect(r.code).toBe(0);
+        expect(r.result).toMatchObject(provenance);
+      }
+      writeFileSync(path, JSON.stringify({ points: series(), version: { ...replayVersion, secret: box.dir },
+        versionSource: box.dir, identityPrecision: box.dir, intervalMs: "secret" }));
+      const safe = await cli(["analyze", "--input", path], box);
+      expect(safe.result.version).toEqual(replayVersion);
+      expect(safe.result.versionSource).toBe("unknown");
+      expect(safe.result.identityPrecision).toBe("unknown");
+      expect(safe.result.intervalMs).toBeNull();
+      expect(safe.stdout).not.toContain(box.dir); expect(safe.stdout).not.toContain("secret");
+      writeFileSync(path, JSON.stringify({ points: series(), version: box.dir }));
+      expect((await cli(["analyze", "--input", path], box)).result.version).toBeNull();
+      writeFileSync(path, JSON.stringify({ points: series(), version: Object.fromEntries(
+        Object.keys(replayVersion).map((key) => [key, box.dir])), identityPrecision: ["kernel_ticks"] }));
+      const invalid = await cli(["analyze", "--input", path], box);
+      expect(Object.values(invalid.result.version).every((v) => v === null)).toBe(true);
+      expect(invalid.result.identityPrecision).toBe("unknown");
+      expect(invalid.stdout).not.toContain(box.dir);
+    } finally { box.cleanup(); }
+  }, 15_000);
+
   test("same old/new checkout replays real event bus with bounded and growing controls", async () => {
     const box = sandbox();
     try {
       const r = await cli(["replay", "--old-root", ROOT, "--new-root", ROOT], box);
       expect(r.code).toBe(0); expect(r.result.runs).toHaveLength(6);
       expect(r.result.productionAttribution).toBe("unknown");
+      expect(r.result.comparisonScope).toBe("event_bus_only");
+      expect(r.result.limitations).toContain("event_bus_plateau_does_not_establish_bridge_plateau");
       expect(r.result.comparisons.every((p: { sameSource: boolean }) => p.sameSource)).toBe(true);
       const pids = new Set<number>();
       for (const run of r.result.runs) {
@@ -163,6 +228,11 @@ describe("real isolated processes", () => {
           expect(result.analysis.counters.controlObjects.kind).toBe("sustained_growth");
           expect(result.points[12].counters.controlBytes).toBe(24 * 1024 * 1024);
         } else {
+          // Bounded event counts cannot prove the runtime settled during this short observation window.
+          expect(["plateau_observed", "unknown"]).toContain(result.analysis.classification);
+          if (result.analysis.classification === "unknown") {
+            expect(result.analysis.limitations).toContain("sub_tolerance_growth_requires_longer_window");
+          }
           expect(result.analysis.counters.bufferedEvents.kind).toBe("plateau");
           expect(result.points[12].counters.bufferedEvents).toBe(run.scenario === "steady" ? 2000 : 0);
         }
