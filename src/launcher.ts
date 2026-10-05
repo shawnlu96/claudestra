@@ -309,17 +309,18 @@ let lastReleaseAttemptAt = 0;
 let lastReleaseDirtyNotified = "";
 const RELEASE_UPDATE_LOG = `${LOG_DIR}/update.log`;
 
-/** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
- *  manager update(其内部走 beta 前进流程)。 */
 const gapHost = () => import("./lib/lend-update-gap-host.js");
 let lastGapPeek = 0;
 /** At most once a minute: is a drained lend gap waiting for us (intake paused until we update)? */
 async function gapPeekDue(): Promise<boolean> {
   if (Date.now() - lastGapPeek < 60_000 || Date.now() - lastUpdateCheck < 60_000) return false;
   lastGapPeek = Date.now();
-  return (await gapHost()).launcherGapWaiting();
+  // 读不了就当没在等：最坏回到每 30 分钟查一次，不能让主循环抛出
+  return gapHost().then((m) => m.launcherGapWaiting()).catch((e) => (console.error(`[update-gap] 查空档失败: ${(e as Error).message}`), false));
 }
 
+/** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
+ *  manager update(其内部走 beta 前进流程)。 */
 async function checkBetaUpdates(autoOn: boolean) {
   const g = async (...a: string[]) => {
     const p = Bun.spawn(["git", "-C", REPO_ROOT, ...a], { stdout: "pipe", stderr: "ignore" });
