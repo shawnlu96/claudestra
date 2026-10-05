@@ -544,6 +544,7 @@ describe("P2-9：只有人类信号和真实的新回合才放行待命", () => 
   });
   test("人类消息之后的回合结束放行", async () => {
     await intoStandby();
+    await sleep(5); // 人类消息要严格晚于 lastRun.endedAt：同一毫秒会被判成 run 结束前的消息、不放行（CI 偶发超时）
     ev("chat_message", { direction: "in", srcKind: "user", text: "有新活了" });
     done();
     await until(async () => (await cur()).wake?.hold === undefined);
