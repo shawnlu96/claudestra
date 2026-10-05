@@ -13,6 +13,7 @@ import { getIntent, type AuthorFamily, type SchedulerIntent } from "./ledger-sch
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
+import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { HOLD_OP, openSafetyHold, RESOLVE_OP } from "./scheduler-review-swap.js";
 
 type RecoveryMode = "on" | "observe" | "off";
@@ -106,7 +107,8 @@ export function planModelRecovery(cls: ModelOutcomeClass, recoverable: boolean, 
 /** Read + appendEvent in one immediate transaction; events go only through appendEvent, never the raw ledger-tx writer. */
 const atomic = <T>(db: Database, fn: () => T): T => busyAsLedgerError("写入", () => db.transaction(fn).immediate());
 
-const outcomeKey = (intentId: string, mode: RecoveryMode) => `model-outcome:${intentId}:${mode}`;
+/** A refusal has its own key: an earlier ordinary record of the same intent must not swallow the first real refusal. */
+const outcomeKey = (intentId: string, mode: RecoveryMode, cls: ModelOutcomeClass) => `model-outcome:${intentId}:${mode}${cls === "safety" ? ":safety" : ""}`;
 
 /** Any deliver / review written for the order's round after it was planned counts as a result. */
 function orderHasResult(db: Database, task: LedgerTask, intent: SchedulerIntent): boolean {
@@ -143,17 +145,21 @@ export function recordModelOutcome(db: Database, ctx: WriteCtx, input: OutcomeIn
   const c = classifyModelOutcome(input.signal);
   if (!c) return { kind: "none", reason: "没有可分类的失败" };
   return atomic(db, () => {
-    const intent = getIntent(db, input.intentId)!, task = mustTask(db, intent.taskId), key = outcomeKey(intent.id, mode);
-    const prev = getEventByDedup(db, key);
-    if (prev) return recorded(mode, c.cls, prev.data.plan as RecoveryPlan, prev, true);
+    const intent = getIntent(db, input.intentId)!, task = mustTask(db, intent.taskId), key = outcomeKey(intent.id, mode, c.cls);
+    // The intent's refusal outranks everything; an ordinary record replays only for another ordinary failure.
+    const prev = getEventByDedup(db, outcomeKey(intent.id, mode, "safety")) ?? (c.cls === "safety" ? null : getEventByDedup(db, key));
+    if (prev) return recorded(mode, prev.data.cls as ModelOutcomeClass, prev.data.plan as RecoveryPlan, prev, true);
     if (intent.action !== "dispatch" && intent.action !== "review") throw new LedgerError("invalid", "只处理派单 / 派审意图的模型结果");
     const events = listEvents(db, { project: task.project, target: task.id });
     const held = mode === "on" ? openSafetyHold(events) : null;
     if (held) return { kind: "none", reason: `本卡已有未处置的安全拒绝留证（#${held.seq}），不再追加、不自动重试` };
     if (orderHasResult(db, task, intent)) return { kind: "none", reason: "原单已有交付 / 审查结果，不算失败" };
-    const authorFamily = (db.query("SELECT authorFamily FROM task_workflows WHERE taskId = ?").get(task.id) as { authorFamily: AuthorFamily } | null)
-      ?.authorFamily ?? input.failed.family;
-    const plan = planModelRecovery(c.cls, c.recoverable, { role: intent.action === "review" ? "reviewer" : "author", authorFamily,
+    // A reviewer must differ from whoever actually wrote the head (a lender's family first, as the swap / bind / snapshot read it);
+    // an author recovery keeps the workflow's own family.
+    const role = intent.action === "review" ? "reviewer" : "author";
+    const authorFamily = (role === "reviewer" ? remoteHeadFamily(db, task) : null) ?? (db.query("SELECT authorFamily FROM task_workflows WHERE taskId = ?")
+      .get(task.id) as { authorFamily: AuthorFamily } | null)?.authorFamily ?? input.failed.family;
+    const plan = planModelRecovery(c.cls, c.recoverable, { role, authorFamily,
       failed: input.failed, authorized: input.authorized, noResult: true, ended: input.ended || intent.status === "cancelled" });
     const data = { op: mode === "on" && c.cls === "safety" ? HOLD_OP : "model_outcome", mode, cls: c.cls, intentId: intent.id,
       action: intent.action, agent: input.failed.agent, family: input.failed.family, machine: input.failed.machine,

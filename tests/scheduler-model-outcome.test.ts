@@ -130,6 +130,38 @@ describe("dispatch-recovery-MODEL ledger record", () => {
   });
 });
 
+describe("dispatch-recovery-MODEL refusal after an ordinary failure of the same intent", () => {
+  test("the first real refusal still holds: own evidence, manual plan, earlier record kept; replays stay consistent", async () => {
+    const { f, input, outcomes } = await building();
+    try {
+      const ctx = () => f.at("scheduler");
+      const first = recordModelOutcome(f.db, ctx(), input("ECONNRESET"), on);
+      expect(first).toMatchObject({ cls: "host", duplicate: false, plan: { kind: "redispatch" } });
+      const r = recordModelOutcome(f.db, ctx(), input('stop_reason: "refusal"'), on);
+      expect(r).toMatchObject({ kind: "recorded", cls: "safety", duplicate: false, plan: { kind: "manual", code: "model_safety_hold" },
+        event: { kind: "escalate", data: { op: "model_safety_hold", cls: "safety", evidence: 'stop_reason: "refusal"', noResult: true, verdict: null } } });
+      if (r.kind !== "recorded") throw new Error("unreachable");
+      expect(openSafetyHold(listEvents(f.db, { project: "p", target: "T1" }))?.seq).toBe(r.event.seq);
+      // A later ordinary failure or another refusal of the intent replays the hold, never the old redispatch.
+      for (const msg of ["ECONNRESET", CYBER]) {
+        expect(recordModelOutcome(f.db, ctx(), input(msg), on)).toMatchObject({ cls: "safety", duplicate: true, plan: { kind: "manual" }, event: { seq: r.event.seq } });
+      }
+      expect(outcomes().map((e) => [e.data.op, e.data.cls])).toEqual([["model_outcome", "host"], ["model_safety_hold", "safety"]]);
+    } finally { f.close(); }
+  });
+
+  test("observe: the refusal gets its own note too, and nothing holds", async () => {
+    const { f, input, outcomes } = await building();
+    try {
+      recordModelOutcome(f.db, f.at("scheduler"), input("ECONNRESET"), observe);
+      expect(recordModelOutcome(f.db, f.at("scheduler"), input(CLAUDE_REFUSAL), observe))
+        .toMatchObject({ cls: "safety", duplicate: false, event: { kind: "note", data: { op: "model_outcome", cls: "safety" } } });
+      expect(outcomes().map((e) => e.data.cls)).toEqual(["host", "safety"]);
+      expect(openSafetyHold(listEvents(f.db, { project: "p", target: "T1" }))).toBeNull();
+    } finally { f.close(); }
+  });
+});
+
 describe("dispatch-recovery-MODEL outranks the automatic family switch (real tick)", () => {
   test("held card: the takeover's reviewer swap escalates instead of swapping until PM resolves", async () => {
     const { f, input } = await building();
