@@ -46,7 +46,10 @@ import { arbiterFooter, arbiterFullMessage, lendSubmitCmd } from "./lend-arbiter
 import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
-import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
+import { quotaViewOf, type LendWorkerFailure } from "./lend-health.js";
+import { keepLendEvidence } from "./lend-evidence.js";
+import { listAsks } from "./ledger-asks.js";
+import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 
@@ -171,7 +174,8 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
       const r = await svc("ledger", "lend-ask", "--retire", askId);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-ask --retire 失败") };
     },
-    failure: (agent) => lendWorkerFailureOf(journal, agent, () => failureOf(ledger, agent)),
+    failure: (agent) => lendWorkerFailureOf(journal, agent, (row) => failureOf(ledger, agent, row)),
+    keepEvidence: (row, why) => { active(); return keepLendEvidence(row, why); },
     archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`))),
     closeAsks: async (agent) => {
       const r = await svc("ledger", "lend-close-asks", "--agent", agent);
@@ -241,11 +245,23 @@ async function workerExcerpt(row: LendRow): Promise<{ text: string; at: number }
   } finally { await fh.close(); }
 }
 
-/** bridge 为这个 worker 开的 Codex 额度 / 登录卡（同 scheduler-auto-ports codexFailure）；台账读不了 = 不知道，当没有（存活探测照常兜底） */
-function failureOf(ledger: LedgerReader, agent: string): CodexFailureSeen | undefined {
+/** 已经记过「不自动停单」的卡：每 30 秒一轮，同一张卡只记一次（进程内，重启再记一次无妨） */
+const doubted = new Set<string>();
+
+/**
+ * bridge 为这个 worker 开的最新一张 Codex 卡；台账读不了 = 不知道，当没有（存活探测照常兜底）。额度 / 登录同 scheduler-auto-ports codexFailure；
+ * 回合失败卡要证明是 row 这一单当前回合的（lend-turn-failure.ts），证明不了按改动前处理：交给 codexFailure，没派单可归就是没有
+ */
+function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined): LendWorkerFailure | undefined {
   const db = ledger.get();
   if (!db) return undefined;
   try {
+    const card = listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (card?.extra.failure === "error" && row) {
+      const doubt = turnFailureDoubt(card, row, (id) => findSessionJsonlBySessionId("codex", id));
+      if (!doubt) return { kind: "error", askId: card.id, message: card.context }; // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）
+      if (!doubted.has(card.id)) doubted.add(card.id), console.error(`[lend] ${agent} 的回合失败卡 ${card.id} 不自动停单：${doubt}；卡留在看板上由人处理`);
+    }
     const f = codexFailure(db, agent)?.failure;
     return f && (f.kind === "quota" || f.kind === "auth") ? { kind: f.kind, askId: f.key, message: f.message.slice(0, 200) } : undefined;
   } catch (e) {

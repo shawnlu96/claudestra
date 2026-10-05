@@ -56,7 +56,8 @@ async function placeOne(env: SpecResumeEnv, project: string, id: string): Promis
   if (placed.where === "local") return null;
   const cas = ["--rev", String(task.rev), "--workflow-rev", String(wf.rev)];
   const r = placed.where === "peer"
-    ? await env.ledger("ledger", "scheduler-spec-place", id, ...cas, "--peer", placed.peer, "--repo", placed.repo, "--reason", placed.reason)
+    ? await env.ledger("ledger", "scheduler-spec-place", id, ...cas, "--peer", placed.peer, "--repo", placed.repo, "--reason", placed.reason,
+      ...(placed.reservation ? ["--reservation", JSON.stringify(placed.reservation)] : []))
     : await env.ledger("ledger", "scheduler-spec-place", id, ...cas, "--wait", `等写代码的空位：${placed.reason}`);
   if (r.ok !== true) return QUIET.has(String(r.code)) ? null : String(r.error ?? r.code);
   if (placed.where === "refused" && r.notified !== true) {

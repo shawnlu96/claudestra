@@ -23,7 +23,7 @@ import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
+import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type LendWorkerFailure, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
@@ -84,8 +84,10 @@ export interface LendDeps {
   writeReceipt(row: LendRow): Promise<void>;
   /** worker 的首条派单尾注（怎么交结论） */
   footer(row: LendRow): string;
-  /** bridge 为这个 worker 开着的 Codex 额度 / 登录卡（lend-health.ts）；没有 = undefined */
-  failure(agent: string): CodexFailureSeen | undefined;
+  /** bridge 为这个 worker 开着的 Codex 额度 / 登录 / 回合失败卡（lend-health.ts）；没有 = undefined */
+  failure(agent: string): LendWorkerFailure | undefined;
+  /** 回合失败停单前把 worker 产物另存（lend-evidence.ts）：返回存放处，没存成 = null；不设 = 不存 */
+  keepEvidence?(row: LendRow, why: string): string | null;
   /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
   closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** 结单收尾全做完后把 worker 的会话收进 archived/（lend-session-archive.ts，自己兜错只记日志）；不设 = 不归档 */
@@ -387,8 +389,11 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     const failed = await leasedWorkerFailure(cur, d, finish); if (failed === true) return;
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
-      d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);
-      return finish(cur, "stopped", failureReason(failed), d, true);
+      // stopped 的工作副本只留 24 小时（lend-work-retention.ts）：回合失败交回 A 定夺，worker 写到一半的产物先另存
+      const kept = failed.kind === "error" ? d.keepEvidence?.(cur, `${failureReason(failed)}\n报错原文（只留本机）：${failed.message}`) : null;
+      const why = failureReason(failed, kept ? "现场已在出借方本机留存" : undefined);
+      d.log(`${cur.orderId} ${why}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}${kept ? `，证据 ${kept}` : ""}）`);
+      return finish(cur, "stopped", why, d, true);
     }
     const down = noteLiveness(d.db, cur, await d.worker.alive(cur.agent!), d.now(), d.log);
     if (down) return finish(cur, "stopped", DOWN_REASON[down], d, true);

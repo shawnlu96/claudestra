@@ -92,10 +92,10 @@ afterEach(() => closeLedger(":memory:"));
 /** The reviewer's P1 path end to end: a lent review through `ledger lend-offer → lend-claim → lend-write`, the card then in fix. */
 async function lentReviewCard(findings: Record<string, unknown>[]): Promise<string> {
   await builtCard();
-  const { orderId } = await run(["lend-offer", "T9", "--peer", "mate", "--repo", REPO]);
+  const { orderId } = await run(["lend-offer", "T9", "--peer", "mate", "--repo", REPO, "--family", "claude"]); // Codex 写的卡跨模型借 Claude 审
   expect(await call("claim", { v: 1, orderId, worker: "agent-lend-9876543210" })).toMatchObject({ ok: true }); // not the build worker
   const p1 = findings.filter((f) => f.severity === "P1").length;
-  expect(await call("write", { v: 1, orderId, gen: 1, report: "## 结论\n见逐项", session: { id: "s-2", family: "codex" },
+  expect(await call("write", { v: 1, orderId, gen: 1, report: "## 结论\n见逐项", session: { id: "s-2", family: "claude" },
     verdict: { v: 1, orderId, head: H2, verdict: "changes", p0: 0, p1, p2: findings.length - p1, findings, reportPath: "r.md" } })).toMatchObject({ ok: true });
   db.run("UPDATE tasks SET stage = 'fix', round = 1 WHERE id = 'T9'");
   return listEvents(db, { target: "T9" }).findLast((e) => e.kind === "review")!.data.path as string;
