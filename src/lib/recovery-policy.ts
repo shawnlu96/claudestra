@@ -34,9 +34,13 @@ const validHours = (h: unknown): h is number => Number.isInteger(h) && (h as num
 const RECOVERY_OP = "scheduler_recovery";
 const RECOVERY_OBSERVE_OP = "recovery_observe";
 const RECOVERY_VOID_OP = "scheduler_recovery_void";
-const voidKey = (seq: number) => `recovery-void:${seq}`;
+const RECOVERY_PUBLISHED_OP = "scheduler_recovery_published";
+const VOID_PREFIX = "recovery-void:", PUBLISHED_PREFIX = "recovery-published:";
+const voidKey = (seq: number) => `${VOID_PREFIX}${seq}`;
+const publishedKey = (seq: number) => `${PUBLISHED_PREFIX}${seq}`;
 
-interface ProjectRecovery { mode?: RecoveryMode; manualStallHours?: number; keys?: Partial<Record<RecoveryKey, RecoveryMode>> }
+/** rev = seq of the audit whose change this entry is; written in the same atomic rename, so it is the proof of publish. */
+interface ProjectRecovery { mode?: RecoveryMode; manualStallHours?: number; keys?: Partial<Record<RecoveryKey, RecoveryMode>>; rev?: number }
 interface RecoveryFile { projects: Record<string, ProjectRecovery> }
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -44,7 +48,8 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 function parseRecoveryFile(data: unknown): RecoveryFile {
   if (!isObj(data) || !isObj(data.projects) || Object.keys(data).some((k) => k !== "projects")) throw new Error("顶层要是 { projects: {...} }");
   for (const [id, p] of Object.entries(data.projects)) {
-    if (!isObj(p) || Object.keys(p).some((k) => !["mode", "manualStallHours", "keys"].includes(k))) throw new Error(`项目 ${id} 只能有 mode / manualStallHours / keys`);
+    if (!isObj(p) || Object.keys(p).some((k) => !["mode", "manualStallHours", "keys", "rev"].includes(k))) throw new Error(`项目 ${id} 只能有 mode / manualStallHours / keys / rev`);
+    if (p.rev !== undefined && !(Number.isSafeInteger(p.rev) && (p.rev as number) >= 1)) throw new Error(`项目 ${id} 的 rev 要是正整数`);
     if (p.mode !== undefined && !isRecoveryMode(p.mode)) throw new Error(`项目 ${id} 的 mode 要是 ${RECOVERY_MODES.join(" / ")}`);
     if (p.manualStallHours !== undefined && !validHours(p.manualStallHours)) throw new Error(`项目 ${id} 的 manualStallHours 要是 1..${MANUAL_STALL_HOURS_MAX} 的整数`);
     if (p.keys !== undefined && (!isObj(p.keys) || Object.entries(p.keys).some(([k, m]) => !isRecoveryKey(k) || !isRecoveryMode(m)))) {
@@ -168,7 +173,33 @@ function applySet(cur: ProjectRecovery | undefined, set: RecoverySet): ProjectRe
   return next;
 }
 
-/** --dedup replay: the same key already recorded this op for this project → report it, touch nothing. */
+/**
+ * An audit carries publish: "prepared" and is settled by exactly one of two notes: published (the file's entry has
+ * rev = its seq) or void (it never reached the file). A setter that crashed or failed between COMMIT and both notes leaves
+ * it pending; the next setter of the project, holding the file lock (so that publish can no longer happen), settles it
+ * from the file's rev — never from comparing modes — before anything else, so later changes always see settled history.
+ */
+function settlePending(db: Database, ctx: WriteCtx, project: string, path: string): void {
+  const pending = db.prepare(`SELECT seq FROM events e WHERE project = ? AND kind = 'decision' AND json_extract(data, '$.op') = ?
+    AND json_extract(data, '$.publish') = 'prepared' AND NOT EXISTS (SELECT 1 FROM events s WHERE s.dedupKey IN (? || e.seq, ? || e.seq)) ORDER BY seq`)
+    .all(project, RECOVERY_OP, VOID_PREFIX, PUBLISHED_PREFIX) as { seq: number }[];
+  if (!pending.length) return;
+  const f = readRecoveryFile(path);
+  if (f.status === "corrupt") throw new LedgerError("invalid", `${path} 坏了（${f.error}），审计 #${pending.map((p) => p.seq).join(" / ")} 生没生效核不了；没写，先手动修好`);
+  const rev = f.status === "ok" && Object.hasOwn(f.data.projects, project) ? f.data.projects[project]!.rev : undefined;
+  tx(db, () => {
+    if (!actorMayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}，等锁期间权限已变）`);
+    for (const { seq } of pending) settleNote(db, ctx, project, seq, rev === seq);
+  });
+}
+
+function settleNote(db: Database, ctx: WriteCtx, project: string, seq: number, published: boolean): void {
+  appendEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey: published ? publishedKey(seq) : voidKey(seq) }, published
+    ? { project, target: "", kind: "note", text: `恢复策略审计 #${seq} 已写进文件，已生效`, data: { op: RECOVERY_PUBLISHED_OP, publishes: seq } }
+    : { project, target: "", kind: "note", text: `恢复策略审计 #${seq} 已记但文件没写成，未生效`, data: { op: RECOVERY_VOID_OP, voids: seq } });
+}
+
+/** --dedup replay: the same key already recorded this op for this project → report it, touch nothing. Runs after settlePending. */
 function replayed(db: Database, ctx: WriteCtx, project: string) {
   if (ctx.dedupKey === "") throw new LedgerError("invalid", "dedupKey 不能是空字符串（不要幂等就别传）");
   const prev = ctx.dedupKey ? getEventByDedup(db, ctx.dedupKey) : null;
@@ -177,17 +208,22 @@ function replayed(db: Database, ctx: WriteCtx, project: string) {
     throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已被别的动作用过`);
   }
   if (getEventByDedup(db, voidKey(prev.seq))) throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 那次改动没生效（审计 #${prev.seq} 已作废），换个 dedupKey 重试`);
+  if (prev.data.publish === "prepared" && !getEventByDedup(db, publishedKey(prev.seq))) {
+    throw new LedgerError("busy", `dedupKey ${ctx.dedupKey} 那次改动（审计 #${prev.seq}）生没生效还没核定，稍后重试`);
+  }
   return { from: prev.data.from as RecoveryState, to: prev.data.to as RecoveryState, event: prev.seq };
 }
 
 /**
  * Modes: same permission as every scheduler switch (actorMayConfigure: PM other than the dispatcher / master / owner).
  * manualStallHours is the owner's number and is never delegated: anyone else touching it is refused before the lock.
- * Check (fast fail) → lock → immediate ledger tx { re-check actor → read → edit → audit event } → COMMIT → atomic write
- * (only while the lock is ours). The permission read and the audit are atomic against setMeta; the file is published
- * only after COMMIT returned, so a mode whose audit is not committed is never readable (readers read only the file).
- * If publishing then fails, a void note marks the committed audit as not in effect and the old policy stays.
- * A crash between COMMIT and publish likewise leaves the old (conservative) file. A corrupt file is refused, never overwritten.
+ * Check (fast fail) → lock → settle pending audits → immediate ledger tx { re-check actor → read → edit → prepared audit }
+ * → COMMIT → atomic write of the entry with rev = audit seq (only while the lock is ours) → published note. The permission
+ * read and the audit are atomic against setMeta; the file is published only after COMMIT returned, so a mode whose audit
+ * is not committed is never readable (readers read only the file). A failed publish appends a void note. If the setter
+ * dies (or the note can't be written) in between, the audit stays pending and a --dedup retry never reports it done: the
+ * next setter settles it from the file's rev (settlePending) and the retry then answers done or "not in effect".
+ * A corrupt file is refused, never overwritten.
  */
 export async function setRecovery(db: Database, ctx: WriteCtx, input: { project: string; set: RecoverySet; reason: string },
   opts: { path?: string; lockMs?: number } = {}) {
@@ -201,6 +237,7 @@ export async function setRecovery(db: Database, ctx: WriteCtx, input: { project:
   const lock = await acquireLock(`${path}.lock`, lockMs);
   if (!lock) throw new LedgerError("busy", `${path} 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没改，稍后重试`);
   try {
+    settlePending(db, ctx, project, path);
     let text: string | null = null;
     // setMeta (pms / dispatcher) is serialized against this tx and the actor is re-checked with the lock held.
     const r = tx(db, () => {
@@ -213,22 +250,22 @@ export async function setRecovery(db: Database, ctx: WriteCtx, input: { project:
       const next = applySet(Object.hasOwn(doc.projects, project) ? doc.projects[project] : undefined, set);
       const from = stateOf(doc.projects[project]), to = stateOf(next);
       if (JSON.stringify(from) === JSON.stringify(to)) return { project, from, to, changed: false, duplicate: false, event: null, path };
-      const ev = appendEvent(db, ctx, { project, target: "", kind: "decision", text: reason, data: { op: RECOVERY_OP, from, to } });
+      const ev = appendEvent(db, ctx, { project, target: "", kind: "decision", text: reason, data: { op: RECOVERY_OP, from, to, publish: "prepared" } });
       if (ev.duplicate) throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已被别的动作用过`);
       if (!lock.held()) throw new LedgerError("busy", `提交前发现 ${path} 的锁已被别人回收，这次没改，重试即可`);
-      text = JSON.stringify({ projects: { ...doc.projects, [project]: next } }, null, 2) + "\n";
+      text = JSON.stringify({ projects: { ...doc.projects, [project]: { ...next, rev: ev.event.seq } } }, null, 2) + "\n";
       return { project, from, to, changed: true, duplicate: false, event: ev.event.seq, path };
     });
     if (text === null) return r;
     try { commit(path, text, lock); }
     catch (e) {
-      try {
-        appendEvent(db, { actor: ctx.actor, now: ctx.now, dedupKey: voidKey(r.event!) },
-          { project, target: "", kind: "note", text: `恢复策略审计 #${r.event} 已记但文件没写成，未生效`, data: { op: RECOVERY_VOID_OP, voids: r.event } });
-      } catch (ve) { console.error(`⚠️ 恢复策略审计 #${r.event} 已提交但 ${path} 没写成，作废记录也没记上（${(ve as Error).message}）：策略仍是旧的，请手动核对`); }
+      try { settleNote(db, ctx, project, r.event!, false); }
+      catch (ve) { console.error(`⚠️ 恢复策略审计 #${r.event} 已提交但 ${path} 没写成，作废记录也没记上（${(ve as Error).message}）：策略仍是旧的，下次改该项目时按文件 rev 核定`); }
       if (e instanceof LedgerError) throw e;
-      throw new LedgerError("busy", `审计 #${r.event} 已提交但 ${path} 没写成（${(e as Error).message}），策略仍是旧的；已记作废，重试即可`);
+      throw new LedgerError("busy", `审计 #${r.event} 已提交但 ${path} 没写成（${(e as Error).message}），策略仍是旧的；这次没生效，换个 dedupKey 重试`);
     }
+    try { settleNote(db, ctx, project, r.event!, true); }
+    catch (pe) { console.error(`⚠️ 恢复策略审计 #${r.event} 已写进 ${path}，已生效记录没记上（${(pe as Error).message}）：下次改该项目时按文件 rev 补记`); }
     return r;
   } finally {
     lock.release();

@@ -51,6 +51,12 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("a", "placementReservations", file({ projects: { a: { keys: { placementReservations: "yes" } } } })).source).toBe("error");
   });
 
+  test("rev (the publishing audit's seq) is bookkeeping only: readers ignore it, a non-positive-integer rev makes the file invalid", () => {
+    expect(recoveryPolicy("a", "audit", file({ projects: { a: { mode: "on", rev: 7 } } }))).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect(recoveryPolicy("a", "audit", file({ projects: { a: { rev: 7 } } }))).toEqual({ mode: "observe", manualAfterMs: null, source: "config" });
+    for (const rev of [0, -1, 1.5, "7"]) expect(recoveryPolicy("a", "audit", file({ projects: { a: { mode: "on", rev } } })).source).toBe("error");
+  });
+
   test("unknown key → off with a diagnostic, even when the file says on", () => {
     const r = recoveryPolicy("a", "nudge" as RecoveryKey, file({ projects: { a: { mode: "on" } } }));
     expect(r).toMatchObject({ mode: "off", manualAfterMs: null, source: "error", diagnostic: expect.stringContaining("未知恢复键") });

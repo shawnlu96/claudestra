@@ -5,7 +5,7 @@
  */
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -31,6 +31,8 @@ async function run(actor: string, ...args: string[]): Promise<Record<string, any
   catch (e) { if (e instanceof LedgerError) return { ok: false, code: e.code, error: e.message }; throw e; }
 }
 const snap = () => (existsSync(path) ? { bytes: readFileSync(path, "utf8"), mtime: statSync(path).mtimeMs } : null);
+/** each published entry carries rev = seq of the audit that wrote it (proof of publish, review r4) */
+const REV = expect.any(Number);
 const decisions = () => listEvents(db, {}).filter((e) => e.kind === "decision");
 
 beforeEach(() => {
@@ -57,7 +59,7 @@ describe("mode: PM / master / owner", () => {
   test("PM switches; audited decision; file holds only recovery; no-op is not an event", async () => {
     const r = await run(PM_A, "a", "on", "--reason", "实测");
     expect(r).toMatchObject({ ok: true, changed: true, from: { mode: null, manualStallHours: null, keys: {} }, to: { mode: "on", manualStallHours: null, keys: {} } });
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "on" } } });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "on", rev: decisions().at(-1)!.seq } } });
     expect(recoveryPolicy("a", "audit", path).mode).toBe("on");
     expect(recoveryPolicy("b", "audit", path).mode).toBe("observe");
     expect(decisions().map((e) => [e.actor, e.project, e.text, e.data.op])).toEqual([[PM_A, "a", "实测", "scheduler_recovery"]]);
@@ -90,7 +92,7 @@ describe("per-key override", () => {
     expect(await run(PM_A, "a", "off", "--reason", "全停，planGap 仍覆盖")).toMatchObject({ ok: true });
     expect([recoveryPolicy("a", "planGap", path).mode, recoveryPolicy("a", "audit", path).mode]).toEqual(["on", "off"]);
     expect(await run(PM_A, "a", "inherit", "--key", "planGap", "--reason", "撤掉")).toMatchObject({ ok: true, changed: true });
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "off" } } });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "off", rev: REV } } });
     expect((await run(EXEC, "a", "on", "--key", "audit", "--reason", "r")).code).toBe("forbidden");
   });
 
@@ -98,7 +100,7 @@ describe("per-key override", () => {
     expect(await run(PM_A, "a", "off", "--key", "placementReservations", "--reason", "r")).toMatchObject({ ok: true, changed: true });
     expect([recoveryPolicy("a", "placementReservations", path).mode, recoveryPolicy("a", "audit", path).mode]).toEqual(["off", "observe"]);
     expect(await run(PM_A, "a", "inherit", "--key", "placementReservations", "--reason", "r")).toMatchObject({ ok: true, changed: true });
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: {} } });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { rev: REV } } });
     expect(await run(PM_A, "a", "on", "--key", "placement", "--reason", "r")).toMatchObject({ ok: false, code: "invalid" });
   });
 });
@@ -115,7 +117,7 @@ describe("manualStallHours: owner only", () => {
     expect(await run(PM_A, "a", "on", "--reason", "r")).toMatchObject({ ok: true }); // PM's mode switch keeps the owner's number
     expect(recoveryPolicy("a", "manualStall", path)).toEqual({ mode: "on", manualAfterMs: 6 * 3_600_000, source: "config" });
     expect(await run("owner", "a", "--manual-stall-hours", "none", "--reason", "清掉")).toMatchObject({ ok: true, to: { mode: "on", manualStallHours: null } });
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "on" } } });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { mode: "on", rev: REV } } });
   });
 });
 
@@ -141,7 +143,7 @@ describe("bad input / bad file", () => {
   test("other projects' entries are kept untouched", async () => {
     writeFileSync(path, JSON.stringify({ projects: { b: { mode: "off", manualStallHours: 3 } } }));
     expect(await run(PM_A, "a", "on", "--reason", "r")).toMatchObject({ ok: true });
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { b: { mode: "off", manualStallHours: 3 }, a: { mode: "on" } } });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { b: { mode: "off", manualStallHours: 3 }, a: { mode: "on", rev: REV } } });
   });
 });
 
@@ -153,7 +155,7 @@ describe("concurrency", () => {
       setRecovery(db, { actor: PM_B, now: 3 }, { project: "b", set: { mode: "off" }, reason: "3" }, { path }),
     ]);
     expect(results.every((r) => r.changed)).toBe(true);
-    expect(JSON.parse(readFileSync(path, "utf8")).projects).toEqual({ a: { mode: "on", manualStallHours: 4 }, b: { mode: "off" } });
+    expect(JSON.parse(readFileSync(path, "utf8")).projects).toEqual({ a: { mode: "on", manualStallHours: 4, rev: REV }, b: { mode: "off", rev: REV } });
     expect(decisions()).toHaveLength(3);
   });
 
@@ -307,6 +309,109 @@ describe("COMMIT busy (review r2)", () => {
   });
 });
 
+/**
+ * Review r4 publish-gap-dedup: the audit is committed but the file is not (yet) published — the setter process dies in
+ * between, or the publish fails and so does its void note. A --dedup retry through the real manager CLI must not answer
+ * "done, to=off" while the file still says on; the next setter settles the audit from the file's rev, not by comparing modes.
+ */
+describe("publish gap after COMMIT (review r4)", () => {
+  const setup = () => {
+    const state = mkdtempSync(join(tmpdir(), "recovery-gap-"));
+    writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "a", name: "A", dirs: [state] }] }));
+    const env = { CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
+    const file = join(state, "recovery-policy.json"), ledger = join(state, "ledger.sqlite");
+    const cli = async (...args: string[]) => {
+      const proc = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), "ledger", "scheduler-recovery", ...args],
+        { env: testChildEnv(env), stdout: "pipe", stderr: "pipe" });
+      const out = JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "{}");
+      await proc.exited;
+      return out as Record<string, any>;
+    };
+    /** a setter process that dies (exit 9, lock left behind) right after its crashAfter-th top-level ledger tx returned */
+    const crashingSetter = async (crashAfter: number, args: { mode: string; dedupKey: string }) => {
+      const lib = join(import.meta.dir, "../src/lib"), script = join(state, "crash.ts");
+      writeFileSync(script, `
+        import { openLedger } from ${JSON.stringify(join(lib, "ledger-store.ts"))};
+        import { setRecovery } from ${JSON.stringify(join(lib, "recovery-policy.ts"))};
+        const db = openLedger(${JSON.stringify(ledger)});
+        let depth = 0, txs = 0;
+        const crashy = new Proxy(db, { get: (t, k) => k !== "transaction" ? Reflect.get(t, k, t).bind?.(t) ?? Reflect.get(t, k, t)
+          : (fn) => ({ immediate: () => { depth++; try { return t.transaction(fn).immediate(); } finally { if (!--depth && ++txs === ${crashAfter}) process.exit(9); } } }) });
+        await setRecovery(crashy, { actor: "owner", now: 5, dedupKey: ${JSON.stringify(args.dedupKey)} },
+          { project: "a", set: { mode: ${JSON.stringify(args.mode)} }, reason: "crash probe" }, { path: ${JSON.stringify(file)} });
+        process.exit(0);
+      `);
+      const proc = Bun.spawn([process.execPath, "--no-env-file", script], { env: testChildEnv(env), stdout: "pipe", stderr: "pipe" });
+      const code = await proc.exited;
+      // the dead holder's lock: age it past the stale window so the next setter reclaims it, as it would in production
+      if (existsSync(`${file}.lock`)) utimesSync(`${file}.lock`, new Date(0), new Date(0));
+      return code;
+    };
+    const acted = async () => {
+      let n = 0;
+      await gateRecovery(new Database(":memory:"), { project: "a", mechanism: "audit", target: "", actionKey: "probe", action: "probe" }, () => ++n,
+        { now: 1, policy: (p, m) => recoveryPolicy(p, m, file) });
+      return n;
+    };
+    const ops = () => listEvents(openLedger(ledger), {}).map((e) => e.data.op).filter((o) => String(o).startsWith("scheduler_recovery"));
+    return { cli, crashingSetter, acted, file, ops };
+  };
+
+  test("crash between COMMIT and publish: the --dedup retry is refused as not in effect, the file stays on, a new key then applies", async () => {
+    const { cli, crashingSetter, acted, file, ops } = setup();
+    expect(await cli("a", "on", "--reason", "start")).toMatchObject({ ok: true, changed: true });
+    expect(await crashingSetter(1, { mode: "off", dedupKey: "k1" })).toBe(9);
+    expect(recoveryPolicy("a", "audit", file).mode).toBe("on");
+    const retry = await cli("a", "off", "--reason", "retry", "--dedup", "k1");
+    expect(retry).toMatchObject({ ok: false, code: "dedup_mismatch" });
+    expect([recoveryPolicy("a", "audit", file).mode, await acted()]).toEqual(["on", 1]); // honestly on, and nobody was told off
+    expect(ops()).toEqual(["scheduler_recovery", "scheduler_recovery_published", "scheduler_recovery", "scheduler_recovery_void"]);
+    expect(await cli("a", "off", "--reason", "retry", "--dedup", "k2")).toMatchObject({ ok: true, changed: true, to: { mode: "off" } });
+    expect([recoveryPolicy("a", "audit", file).mode, await acted()]).toEqual(["off", 0]);
+  }, 60_000);
+
+  test("crash after publish, before the published note: the retry settles it as done (file rev), duplicate with the file really off", async () => {
+    const { cli, crashingSetter, acted, file, ops } = setup();
+    expect(await cli("a", "on", "--reason", "start")).toMatchObject({ ok: true, changed: true });
+    expect(await crashingSetter(2, { mode: "off", dedupKey: "k1" })).toBe(9);
+    expect(await cli("a", "off", "--reason", "retry", "--dedup", "k1")).toMatchObject({ ok: true, duplicate: true, to: { mode: "off" } });
+    expect([recoveryPolicy("a", "audit", file).mode, await acted()]).toEqual(["off", 0]);
+    expect(ops()).toEqual(["scheduler_recovery", "scheduler_recovery_published", "scheduler_recovery", "scheduler_recovery_published"]);
+  }, 60_000);
+
+  test("a later change of the project first settles the pending audit; the old --dedup retry can't then claim it", async () => {
+    const { cli, crashingSetter, file, ops } = setup();
+    expect(await cli("a", "on", "--reason", "start")).toMatchObject({ ok: true, changed: true });
+    expect(await crashingSetter(1, { mode: "off", dedupKey: "k1" })).toBe(9);
+    expect(await cli("a", "observe", "--key", "audit", "--reason", "later")).toMatchObject({ ok: true, changed: true, from: { mode: "on" } });
+    expect(await cli("a", "off", "--reason", "retry", "--dedup", "k1")).toMatchObject({ ok: false, code: "dedup_mismatch" });
+    expect([recoveryPolicy("a", "audit", file).mode, recoveryPolicy("a", "materials", file).mode]).toEqual(["observe", "on"]);
+    expect(ops().filter((o) => o === "scheduler_recovery_void")).toHaveLength(1);
+  }, 60_000);
+
+  test("publish fails and the void note fails too: the retry is refused (settled void from the file), never ok/duplicate", async () => {
+    writeFileSync(path, JSON.stringify({ projects: { a: { mode: "on" } } }));
+    const { chmodSync } = await import("node:fs");
+    const dir = join(path, "..");
+    // after the audit tx the directory turns read-only (publish fails); the next tx of this setter (the void note) throws
+    let depth = 0, txs = 0;
+    const faulty = new Proxy(db, { get: (t, k) => k !== "transaction" ? Reflect.get(t, k, t).bind?.(t) ?? Reflect.get(t, k, t)
+      : (fn: () => unknown) => ({ immediate: () => {
+        if (!depth && txs) { chmodSync(dir, 0o700); throw new Error("void write failed (injected)"); } // perms back so the lock can be released
+        depth++;
+        try { return t.transaction(fn).immediate(); } finally { if (!--depth && !txs++) chmodSync(dir, 0o500); }
+      } }) });
+    const r = await setRecovery(faulty, { actor: "owner", now: 5, dedupKey: "k1" }, { project: "a", set: { mode: "off" }, reason: "x" }, { path })
+      .catch((e) => ({ ok: false, code: (e as LedgerError).code })).finally(() => chmodSync(dir, 0o700));
+    expect(r).toMatchObject({ ok: false, code: "busy" });
+    expect(listEvents(db, {}).map((e) => e.data.op).filter((o) => String(o).startsWith("scheduler_recovery"))).toEqual(["scheduler_recovery"]);
+    expect(await run("owner", "a", "off", "--reason", "x", "--dedup", "k1")).toMatchObject({ ok: false, code: "dedup_mismatch" });
+    expect(recoveryPolicy("a", "audit", path).mode).toBe("on");
+    expect(await run("owner", "a", "off", "--reason", "x", "--dedup", "k2")).toMatchObject({ ok: true, changed: true });
+    expect(recoveryPolicy("a", "audit", path).mode).toBe("off");
+  });
+});
+
 describe("registered in the ledger command family", () => {
   test("runLedger knows it; the scheduler service identity is refused before anything runs", async () => {
     const r = await runLedger(["scheduler-recovery", "a", "on", "--reason", "r"], deps("scheduler"));
@@ -335,7 +440,7 @@ describe("registered in the ledger command family", () => {
     expect(existsSync(file)).toBe(false);
     expect((await cli(base, "zz", "on", "--reason", "r")).out).toMatchObject({ ok: false, code: "not_found" });
     expect((await cli(base, "a", "on", "--manual-stall-hours", "6", "--reason", "owner 实测")).out).toMatchObject({ ok: true, changed: true });
-    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ projects: { a: { mode: "on", manualStallHours: 6 } } });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ projects: { a: { mode: "on", manualStallHours: 6, rev: 1 } } });
     expect(existsSync(join(state, "scheduler.json"))).toBe(false); // the scheduler config is never touched
   }, 60_000);
 });
