@@ -55,9 +55,9 @@ function tempDb(prefix: string): { db: Database; dir: string } {
 }
 
 describe("factory shape", () => {
-  test("only the four leaf exits; no approval port, tick or diagnose-and-run helper", () => {
+  test("only the four leaf exits; approval is configured at construction, no tick or diagnose-and-run helper", () => {
     expect(Object.keys(createRecoveryRuntimePorts()).sort()).toEqual(["askReminderPorts", "planGapTick", "recordModelOutcome", "sweepAskReminders", "writeMaterials"]);
-    // recordModelOutcome's exit takes exactly db, ctx, input: no port slot a caller could pass an approval through.
+    // Per-call signature stays db, ctx, input; approval is an optional factory dependency.
     expect(createRecoveryRuntimePorts().recordModelOutcome.length).toBe(3);
   });
 });
@@ -216,7 +216,7 @@ describe("MODEL exit → recordModelOutcome", () => {
     } finally { f.close(); }
   });
 
-  test("reviewer refusal: the exit injects no approval port, so even a fresh refusal is a hold, not the approved same-model retry", async () => {
+  test("reviewer refusal: without an approval option, a fresh refusal keeps the existing hold", async () => {
     const f = autoFixture();
     try {
       await toBuild(f);
