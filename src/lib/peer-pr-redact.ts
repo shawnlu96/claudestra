@@ -78,8 +78,9 @@ function fieldAudit(text: string): string {
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j]!;
       if (!next.trim()) continue;
-      if (next.match(/^[ \t]*/)![0].length > indent && !/^\s*["']?[\w.-]+["']?\s*[:=]/.test(next)) return match;
-      break;
+      if (next.match(/^[ \t]*/)![0].length <= indent || /^\s*["']?[\w.-]+["']?\s*[:=]/.test(next)) break;
+      // The redactor masks each bare continuation separately; every row must be a complete mask, not only the first one.
+      if (next.trim() !== marker) return match;
     }
     return key + REDACTED.secret;
   })).join("\n");

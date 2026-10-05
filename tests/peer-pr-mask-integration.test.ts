@@ -59,6 +59,38 @@ describe("PRMASK synthetic mask → render → gate → bridge", () => {
     expect((await bridge(text)).result).toEqual({ result: { status: 202 } });
   });
 
+  test("crossline-1 reproduction: fully masked bare continuations pass sender and bridge gates", async () => {
+    const values = ["synthval-aaa", "synthval-bbb", "synthval-ccc"];
+    for (const body of [`password: ${values[0]}\n ${values[1]}`,
+      `password: ${values[0]}\n ${values[1]}\n\n ${values[2]}\nsecret: ${values[0]}`]) {
+      const raw = `P1 finding crossline-1\n${body}\nhead ${HEAD}`;
+      const digest = hash(raw);
+      const masked = redactPeerPr(raw, ID, COMMITS).text;
+      expect(masked).toContain(`password: ${REDACTED.secret}\n ${REDACTED.secret}`);
+      expect(peerPrSecretHit(masked, COMMITS)).toBeNull();
+      const text = render(raw);
+      expect(text).toContain("P1 finding crossline-1");
+      expect(peerPrSecretHit(text, COMMITS)).toBeNull();
+      const sent = await bridge(text);
+      expect(sent.result).toEqual({ result: { status: 202 } });
+      expect(sent.posts).toEqual([text]);
+      for (const value of values) expect(sent.posts[0]).not.toContain(value);
+      expect(hash(raw)).toBe(digest);
+    }
+  });
+
+  test("masked continuation rows never exempt a later raw or partial continuation", async () => {
+    const mask = REDACTED.secret;
+    for (const bad of [VALUE, `${mask}${VALUE}`, `${VALUE}${mask}`, `[已脱敏:伪造]`,
+      `${mask}\u200b${VALUE}`, `${mask}\\n${VALUE}`, `"${mask}" + "${VALUE}"`]) {
+      const text = `P1 finding crossline-negative\npassword: ${mask}\n ${mask}\n\n ${bad}`;
+      expect(peerPrSecretHit(text, COMMITS)).toBe("敏感字段名");
+      const sent = await bridge(text);
+      expect(sent.result).toMatchObject({ rejected: GATE_REJECTED });
+      expect(sent.posts).toHaveLength(0);
+    }
+  });
+
   test("JSON, single/double quotes, YAML and bare values preserve report evidence after masking", async () => {
     for (const fields of [`{"password": "${VALUE}"}`, `secret: '${VALUE}'`, `outToken="${VALUE}"`,
       `password: ${VALUE}`, `--api-key ${VALUE}`]) {
