@@ -27,6 +27,7 @@ import { quoteExternal } from "./quote-text.js";
 import { storedBasis } from "./review-converge-report.js";
 import { convergenceResult, deliveryBranchMatches, assertConvergenceDeliveryLease, completeConvergenceDelivery } from "./lend-arbiter-result.js";
 import { withOriginalIds } from "./order-gate-heads.js";
+import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -105,6 +106,7 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
     const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, key: signed.key, sig: signed.sig };
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, o.orderId);
+    closeSettledOrderAsks(db, o.orderId, now); // 结清：worker 的旧提问同一事务里关（order-ask-terminal.ts）
     return receipt;
   });
 }
@@ -203,6 +205,7 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, key: signed.key, sig: signed.sig };
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, cur.orderId);
+    closeSettledOrderAsks(db, cur.orderId, now);
     return completeConvergenceDelivery(db, ctx, cur, req, receipt);
   });
 }

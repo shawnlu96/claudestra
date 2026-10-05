@@ -85,10 +85,12 @@ async function remoteAsk(body: string, peer: string): Promise<Response> {
   const task = getTask(db, who.taskId);
   if (!task) return refused("not_held", "这一单的卡已不在台账里");
   const r = await openOrderAsk(db, {
-    open: (input) => openAskFull(askDb(), input), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
+    open: (input, beforeWrite) => openAskFull(askDb(), input, Date.now(), { beforeWrite }), notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }),
     markHanded: (id) => patchAsk(askDb(), id, { extra: { notice: "handed" } }), record: (ctx, input) => void appendEvent(askDb(), ctx, input),
-  }, { task, orderId: who.orderId, from: `${who.worker}@${who.peer}`, keyPrefix: `lend-ask:g${who.gen}` }, req.value);
-  if ("refused" in r) return refused("unavailable", r.refused);
+  }, { task, orderId: who.orderId, from: `${who.worker}@${who.peer}`, keyPrefix: `lend-ask:g${who.gen}`,
+    // 拿到 asks 写锁后再核一遍持单（等锁期间可能结清 / 失租）：结清时已关过这一单的提问，不能再开出新的
+    recheck: () => { const again = remoteCaller(db, peer, req.value, Date.now()); return "refused" in again ? again.refused : null; } }, req.value);
+  if ("refused" in r) return refused(r.code === "not_held" ? "not_held" : "unavailable", r.refused);
   // 审查单不转 PM：旧版对方只把拒绝原因给审查员看，规则原文放在 error 里它就能读到（lend-tools.ts askPeer）
   if ("answered" in r) return apiJson(409, { ok: false, code: "review_ask_answered", error: r.answered });
   return apiJson(200, { ok: true, v: V2_BODY_VERSION, askId: r.askId });

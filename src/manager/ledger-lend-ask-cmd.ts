@@ -1,8 +1,11 @@
 /**
  * 出借方 B 的台账写入（调度服务身份）：给 owner 发开跑 / 交付 / 停止通知（lend-inform，lib/lend-notice.ts）、关升级前遗留的逐单确认 ask
  * （lend-ask --retire，lib/lend-ask.ts）、出借单结束后关 worker 开出的 Codex 卡。出借单本身记在 lend journal（lib/lend-journal.ts）。
+ * 借入方 A 的历史回收：lend-terminal-asks 关已结清出借单上 worker 的旧提问（lib/order-ask-terminal.ts），给项目 PM 用，缺省只预览。
  */
 import { cancelAsksWhere } from "../lib/ledger-asks.js";
+import { isManager } from "../lib/ledger-checks.js";
+import { applySettledAskSweep, planSettledAskSweep } from "../lib/order-ask-terminal.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
 import { retireLendAsk } from "../lib/lend-ask.js";
@@ -59,6 +62,17 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
       // 拿到写锁后再核一次租约：等锁期间可能失租
       const closed = cancelAsksWhere(c.db, { fromAgent: agent, source: "codex" }, "出借单已结束，worker 已停", c.deps.now(), { beforeWrite: () => c.deps.assertLease?.() });
       return { ok: true, closed };
+    },
+  },
+  "lend-terminal-asks": {
+    valued: ["project"], bools: ["apply"],
+    usage: "lend-terminal-asks --project <id> [--apply]（项目 PM：已结清出借单上 worker 的旧提问；缺省只预览 askId / 单号 / 状态 / 原因，--apply 在写锁内重核后关闭）",
+    run(c) {
+      const project = c.project();
+      if (!isManager(c.db, c.deps.actor, { agent: null, project })) throw new LedgerError("forbidden", `回收要项目 ${project} 的 PM / master / owner（你是 ${c.deps.actor}）`);
+      if (!c.p.bools.has("apply")) return { ok: true, apply: false, project, ...planSettledAskSweep(c.db, project) };
+      const r = applySettledAskSweep(c.db, project, c.deps.now(), c.deps.actor, { beforeWrite: () => c.deps.assertLease?.() });
+      return { ok: true, apply: true, project, ...r };
     },
   },
 };
