@@ -4,7 +4,8 @@
  * 是真模块，manager 也静态导入它（RECOVERY_KEYS / observedRecent / setRecovery…）。副本里真 CFG 原样挪到同目录 recovery-policy-cfg.ts，
  * 正式位置换成薄包装：`export *` 全部真导出，只把 recoveryPolicy 包一层——把 pid + project:mechanism 记进 matw-calls.log 后原样调真函数
  * （不复制算法、不改返回）。策略经正式 CLI `ledger scheduler-recovery <p> <mode> --key materials` 写进临时状态目录的 recovery-policy.json。
- * 「未安装」只在 bun build 产物部署里制造：产物已静态打进真 CFG，挪走源码树正式位置的文件只让动态 reader 缺席；源码部署里它是静态依赖，不挪。
+ * 「未安装」只在 bun build 产物部署里制造：产物已静态打进真 CFG，挪走源码树正式位置的文件只让动态 reader 缺席；
+ * 源码部署里它是静态依赖，不挪。
  * 每条 manager 命令都是一个新进程（`bun --no-env-file <src/manager.ts | dist/manager.js> ledger …`），台账是状态目录里的 sqlite 文件：
  * 一条命令一次「重启」。子进程 env 只有 testChildEnv 的最小集合 + 临时 HOME / STATE / RUNTIME / TMPDIR，bridge 指向拒连端口，
  * PATH 里的 git 是替身（ls-remote 读 tmp/remote/<branch>）。对方收到的单子取自假网络：一个 HTTP 服务照 bridge/local-api/lend.ts
@@ -136,7 +137,8 @@ exit 1
     renameSync(reader, `${reader}.away`);
   };
   const restoreReader = () => renameSync(`${reader}.away`, reader);
-  return { root, state, reader, manager, mateFp: keyFingerprint(mateKey.publicKey), run, peer, wire, policy, setRemote, calls, hideReader, restoreReader, env, answering, close: () => server.stop(true) };
+  return { root, state, reader, manager, mateFp: keyFingerprint(mateKey.publicKey), run, peer, wire, policy, setRemote, calls, hideReader, restoreReader, env,
+    answering, close: () => server.stop(true) };
 }
 type Deployment = ReturnType<typeof deployment>;
 
