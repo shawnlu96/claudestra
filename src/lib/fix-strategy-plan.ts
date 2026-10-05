@@ -1,6 +1,7 @@
 /** Convergence intercepts only validated review exits and repair dispatches; all other gates remain the base planner's. */
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { currentReviewFacts, normalizedFamily } from "./scheduler-review.js";
+import { normalizedFamily } from "./scheduler-review.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview, MAX_REVIEW_ROUND } from "./review-converge.js";
 import { fixStrategy, FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import { arbitrationResults } from "./review-arbiter.js";
@@ -38,7 +39,7 @@ export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) =
       reason: `独立新会话仲裁 finding ${dispute.data.findingId}（争议事件 ${dispute.seq}）` };
   }
   if (s.task.stage !== "fix" || switched || decision.kind !== "intent" || !["dispatch", "ensure_session"].includes(decision.action)) return decision;
-  const read = currentReviewFacts(s.task, s.events);
+  const read = fixStartReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return decision;
   const configured = s.events.findLast((e) => e.data.op === "workflow" && e.data.specRev === s.task.specRev)?.seq ?? 0;
   const min = s.events.find((e) => e.kind === "review" && e.seq > configured)?.data.round;
