@@ -28,6 +28,7 @@ import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
 import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
@@ -41,8 +42,6 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const t = useT();
   const agents = useChatStore((s) => s.state.agents);
   const projects = useChatStore((s) => s.state.projects);
-  const loading = useChatStore((s) => s.state.loadingAgents);
-  const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   const compactingLive = useChatStore((s) => s.state.compacting);
@@ -333,14 +332,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           }
         }}
       >
-        {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
-            是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}
-        {(!ready || loading) && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("加载中…")}</div>
-        )}
-        {ready && !loading && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("暂无会话")}</div>
-        )}
+        {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
+        <AgentListNotice count={agents.length} />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">
