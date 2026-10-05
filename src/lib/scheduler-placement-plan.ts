@@ -120,6 +120,10 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   }
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
   const facts = snapshotPlacementFacts(s, since, role);
+  if (!facts.writeLeasePeer && !pinned && s.task.extra.placement === "local") {
+    const local = placeFor({ ...facts, peers: [] }, role, s.author?.family ?? s.workflow.authorFamily);
+    return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
+  }
   const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
   const placed = placeFor(facts, role, s.workflow.authorFamily);
   const relay = lease && !pinned && placed.kind === "wait" ? relayAway(s, since, facts, lease, placed.reason) : null; // i28-RA1：先于 tried 升级

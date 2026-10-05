@@ -148,3 +148,26 @@ test("real pool CLI offers and claims a Claude review despite legacy borrow role
     expect(result.claim).toMatchObject({ ok: true, lease: { gen: 1 }, order: { step: "review" } });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }, 30000);
+
+test("persisted local placement keeps the bound writer family through build; review stays cross-model", async () => {
+  const f = autoFixture();
+  try {
+    await f.tick();
+    f.db.query("UPDATE scheduler_intents SET status='done'").run();
+    f.db.query("UPDATE tasks SET stage='build', extra=json_set(extra,'$.placement','local') WHERE id='T1'").run();
+    f.db.query("UPDATE scheduler_sessions SET family='codex' WHERE taskId='T1' AND role='author'").run();
+    f.db.query("UPDATE task_workflows SET authorFamily='codex' WHERE taskId='T1'").run();
+    recordHello(f.db, "mate", null, { v: 1, proto: 2, boot: "b", seq: 1, paused: null,
+      slots: { claude: { total: 5, busy: 0 }, codex: { total: 5, busy: 0 } },
+      grant: { until: 100000, repos: ["o/r"], roles: ["review", "write"], ordersPerDay: 50, ordersLeftToday: 50 } }, 1000);
+    const borrow = [{ peer: "mate", projects: ["p"], maxOpen: 5, roles: ["review", "write"] as ("review" | "write")[] }];
+    const policy = { ...remote, repo: "o/r" };
+    const snap = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 5, now: 1000, pool: { remote: policy, borrow } });
+    const decision = planScheduler(snap);
+    expect(decision).toMatchObject({ kind: "intent", action: "dispatch", recipient: "agent-task-one" });
+    expect(snap.author?.family).toBe("codex");
+    f.db.query("UPDATE tasks SET stage='review', headSHA=?, pr='https://github.com/o/r/pull/7' WHERE id='T1'").run(H1);
+    expect(planScheduler(autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 5, now: 1000, pool: { remote: policy, borrow } })))
+      .toMatchObject({ kind: "intent", action: "review", recipient: "peer:mate" });
+  } finally { f.close(); }
+});

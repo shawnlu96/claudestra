@@ -17,8 +17,10 @@ import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers, localReviewerCount, localWriterCount } from "./scheduler-pool-facts.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { newLocalWriteRoom } from "./scheduler-slot-hold.js";
+import type { PlacementReservation, ReservationPort } from "./scheduler-placement-reservations.js";
 
-export type StartPlacement = { where: "local"; reason: string } | { where: "peer"; peer: string; repo: string; reason: string } | { where: "refused"; reason: string };
+export type StartPlacement = { where: "local"; reason: string } |
+  { where: "peer"; peer: string; repo: string; reason: string; reservation?: PlacementReservation } | { where: "refused"; reason: string };
 
 export interface StartPlacementIO {
   /** scheduler.json's policy for the project; null = not listed. */
@@ -27,6 +29,8 @@ export interface StartPlacementIO {
   /** GitHub owner/repo of the project directory's origin; null = not a GitHub remote. */
   originRepo(dir: string): Promise<string | null>;
   now(): number;
+  /** One injected policy source; observe computes shadow placement without consuming a seat. */
+  reservations?: ReservationPort;
 }
 
 const PEER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -70,13 +74,22 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     return { where: "local", reason: `读借入名单 / 仓库地址失败，放本机：${(e as Error).message}` };
   }
   const facts: PlacementFacts = {
-    remote: policy?.remote ?? null, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents).map(peerFacts),
+    remote: policy?.remote ?? null,
+    peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, enforce: io.reservations?.mode === "on" }).map(peerFacts),
     repo, local: localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null), pin, tried: [], lastPeer: null, writeLeasePeer: null,
     locksFree: locksFree(db, q.project, q.fileGlobs, q.taskId),
   };
   // Only automatic admission opts in; the PM's manual start_node placement keeps its explicit choice.
   const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");
-  if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason };
+  const mode = io.reservations?.mode ?? "observe";
+  if (mode === "observe") {
+    const shadow = { ...facts, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, observe: true }).map(peerFacts) };
+    const proposed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(shadow, reserveFinishing(db, q.project, shadow)) : placeFor(shadow, "write", "claude");
+    io.reservations?.observe?.({ actual: placed.kind === "peer" ? `peer:${placed.peer}` : placed.kind,
+      proposed: proposed.kind === "peer" ? `peer:${proposed.peer}` : proposed.kind });
+  }
+  if (placed.kind === "peer" && repo) return { where: "peer", peer: placed.peer, repo, reason: placed.reason,
+    ...(mode === "off" ? {} : { reservation: { mode, family: placed.family, maxOpen: policy?.remote?.agents ? null : borrow.find((b) => b.peer === placed.peer)!.maxOpen } }) };
   if (placed.kind === "wait") return { where: "refused", reason: placed.reason };
   if ((!policy?.remote?.agents && policy?.remote?.localPriority === "off") || !localLoad(db, q.project, policy?.maxWorkers ?? 0, policy?.remote ?? null).room) {
     return { where: "refused", reason: "本机不写代码或写槽已满，peer 写单名额已满或不可用" };

@@ -57,6 +57,8 @@ export interface StartEnv {
 }
 
 export interface StartPlan {
+  /** Explicit local survives recovery before a scheduler session has been bound. */
+  localOnly?: boolean;
   feature: Feature;
   key: string;
   taskId: string;
@@ -80,7 +82,7 @@ export interface StartPlan {
   promptText: string;
   purpose: string;
   /** 放到 peer（i28-W5）：不建 worktree、不起本机 agent；null = 本机，步骤与 W5 之前逐字一样 */
-  peer?: { name: string; repo: string; reason: string } | null;
+  peer?: { name: string; repo: string; reason: string; reservation?: Extract<StartPlacement, { where: "peer" }>["reservation"] } | null;
   /** workflow-set 写的模板与版本，本机卡、peer 卡同一步。preflightStart 总是填；只有手拼的计划（测试）不带，按 code 最高版 */
   workflow?: { template: WorkflowTemplate; version: number };
 }
@@ -176,7 +178,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       feature: f, key: node.key, taskId, title, project: f.project, item, pm: env.caller, base, branch, repo, worktree, agentName, agent: `agent-${agentName}`,
       fileGlobs: node.fileGlobs, specRel, specPath, specText: hasSpec ? null : (args.spec as string), promptPath, promptText,
       purpose: `${taskId} 执行者（自动卡）：${title}。先读 ${promptPath}`,
-      peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason } : null,
+      ...(want === "local" ? { localOnly: true } : {}),
+      peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason, reservation: placed.reservation } : null,
       workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
     },
   };

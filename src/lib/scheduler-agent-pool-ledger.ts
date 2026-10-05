@@ -1,5 +1,5 @@
 import { quotaPoolTotals } from "./scheduler-agent-pool-quota.js";
-/** Only scheduler bindings reserve project capacity; hand-created registry agents cannot consume it. */
+/** Bindings and formally created authors reserve project capacity; registry names alone cannot consume it. */
 import type { Database } from "bun:sqlite";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { zeroAgentCounts, type AgentPoolLoad } from "./scheduler-agent-pool.js";
@@ -35,16 +35,19 @@ export function localAgentPool(db: Database, project: string, totals: AgentLimit
       if (!agents.has(key)) { agents.add(key); running[family ?? r.authorFamily]++; }
     }
   }
-  // Automatically created authors have a durable claim before ensure can bind them. Manual agents have no such claim.
+  // start_node's task-set is written only after create succeeds; autostart has its own durable claim.
   if (hasTable(db, "events")) {
     const starts = db.query(`SELECT DISTINCT t.agent, w.authorFamily AS family FROM events e JOIN tasks t
-      ON t.id=json_extract(e.data,'$.taskId') JOIN task_workflows w ON w.taskId=t.id
-      WHERE e.project=? AND t.id!=? AND json_extract(e.data,'$.op')='autostart_claim'
-      AND json_extract(e.data,'$.peer') IS NULL AND t.stage IN ('spec','restate','build','fix')
-      AND t.agent IS NOT NULL AND NOT EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId=t.id AND s.role='author')`)
+      ON t.id=CASE WHEN json_extract(e.data,'$.op')='autostart_claim' THEN json_extract(e.data,'$.taskId') ELSE e.target END
+      JOIN task_workflows w ON w.taskId=t.id WHERE e.project=? AND t.id!=?
+      AND ((json_extract(e.data,'$.op')='autostart_claim' AND json_extract(e.data,'$.peer') IS NULL)
+        OR (e.kind='task' AND json_extract(e.data,'$.op')='set' AND e.dedupKey LIKE 'dag-start:%:task-set'))
+      AND t.stage IN ('spec','restate','build','fix') AND t.agent IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId=t.id AND s.role='author')
+      AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId=t.id AND i.action='ensure_session'
+        AND i.node IN ('restate','write','fix') AND i.status IN ('submitted','unknown'))`)
       .all(project, exceptTask ?? "") as { agent: string; family: AuthorFamily }[];
     for (const r of starts) if (!agents.has(r.agent)) { agents.add(r.agent); running[r.family]++; }
   }
   return { totals, running };
 }
-
