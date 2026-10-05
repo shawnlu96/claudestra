@@ -28,12 +28,13 @@
  * 哪天消费者改成中立的中间层，删掉翻译层即可。
  */
 
-import { existsSync, readFileSync, readdirSync, realpathSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { hasInboundHeader } from "./inbound-body.js";
 import { piAgentDirOf } from "./pi-path.js";
 import { isSandbox, sandboxPiAgentDir, SANDBOX_ROOT_ENV } from "./sandbox.js";
 import { realInside } from "./sandbox-pi-fs.js";
+import { realpathCached } from "./realpath-cache.js";
 
 /**
  * Pi 的 agent 目录（`~/.pi/agent`），可用环境变量覆盖；`~` / file:// 的展开与 Pi 自身一致（lib/pi-path.ts）。沙箱里只认从沙箱根
@@ -51,11 +52,7 @@ export function piSessionPathAllowed(p: string): boolean {
 
 /** 解析软链；路径不存在时原样返回（不抛） */
 export function resolveCwd(cwd: string): string {
-  try {
-    return realpathSync(cwd);
-  } catch {
-    return cwd;
-  }
+  return realpathCached(cwd);
 }
 
 /** 会话目录名编码：`--<去掉开头斜杠、分隔符换 ->--`（纯函数，便于单测） */

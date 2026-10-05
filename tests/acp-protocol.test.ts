@@ -174,10 +174,13 @@ describe("拒起：bridge 还没登记上时那张卡不丢", () => {
   test("拒起那一刻连接没好 → 登记后补发同一张卡；不标就绪，回合当场按失败收尾", async () => {
     const h = boot(fakeAgent({ protocolVersion: 2, agentCapabilities: RESUMABLE }), { register: false });
     await until(() => h.logs.some((l) => l.includes("协议不兼容，拒绝启动")), "宿主拒起");
+    const refusedBy = Date.now();
     expect(h.frames.filter((f) => f.type === "acp_failure")).toEqual([]);
+    await new Promise((r) => setTimeout(r, 30));
     h.register();
     await until(() => h.frames.some((f) => f.type === "acp_failure"), "登记后补发的卡");
     expect(h.frames.find((f) => f.type === "acp_failure")!.failure).toMatchObject({ kind: "error", key: "incompatible", retry: false });
+    expect(h.frames.find((f) => f.type === "acp_failure")!.failedAt).toBeLessThanOrEqual(refusedBy); // 补发沿用拒起那一刻，不是登记时刻（lend-turn-failure.ts 按它认回合）
     h.inbound("在吗");
     await until(() => h.stops.length === 1, "回合收尾");
     expect(h.stops[0]).toMatchObject({ event: "StopFailure" });
