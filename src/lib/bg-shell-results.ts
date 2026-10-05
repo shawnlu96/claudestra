@@ -5,11 +5,13 @@ import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { readJsonState, reportCorrupt, writeJsonStateGuarded } from "./state-file.js";
 
+/** stopped = 读到 [killed]（被结束，没有退出码）；旧记录只有 done / unknown，照读 */
+type ShellResultStatus = "done" | "stopped" | "unknown";
 interface ShellResult {
   id: string;
   startedAt: number;
   lastGrowth: number;
-  status: "done" | "unknown";
+  status: ShellResultStatus;
   exitCode: number | null;
   durationMs: number;
 }
@@ -17,12 +19,12 @@ interface ShellIdentity { agentName: string; sessionId: string; id: string; star
 export interface ShellResultSnapshot extends Record<string, unknown> {
   id: string; kind: "shell"; title: string; startedAt: number; lines: string[];
   progress: { startedTs: number; lastTs: number };
-  end: { status: "done" | "unknown"; exitCode: number | null; durationMs: number };
+  end: { status: ShellResultStatus; exitCode: number | null; durationMs: number };
 }
 const LIMIT = 8;
 const valid = (data: unknown): data is ShellResult[] => Array.isArray(data) && data.length <= LIMIT && data.every((r) =>
   r && Object.keys(r).length === 6 && typeof r.id === "string" && r.id.length <= 200 && Number.isFinite(r.startedAt) && Number.isFinite(r.lastGrowth) &&
-  Number.isFinite(r.durationMs) && (r.status === "unknown" && r.exitCode === null || r.status === "done" && Number.isSafeInteger(r.exitCode)),
+  Number.isFinite(r.durationMs) && ((r.status === "unknown" || r.status === "stopped") && r.exitCode === null || r.status === "done" && Number.isSafeInteger(r.exitCode)),
 );
 const resultPath = (agent: string, session: string) => statePath("bg-shell-results", createHash("sha256").update(JSON.stringify([agent, session])).digest("hex") + ".json");
 
@@ -45,7 +47,7 @@ export class ShellResults {
     this.scopes.set(path, r.status === "ok" ? r.data as ShellResult[] : []);
   }
 
-  async remember(act: ShellIdentity, durationMs = 0, status: "done" | "unknown" = "unknown"): Promise<void> {
+  async remember(act: ShellIdentity, durationMs = 0, status: ShellResultStatus = "unknown"): Promise<void> {
     const row: ShellResult = { id: act.id, startedAt: act.startedAt, lastGrowth: act.lastGrowth, status, exitCode: status === "done" ? act.exitCode : null, durationMs };
     const path = resultPath(act.agentName, act.sessionId);
     const rows = this.scopes.get(path) ?? [];
@@ -72,7 +74,7 @@ export class ShellResults {
   snapshots(agent: string): ShellResultSnapshot[] {
     return (this.scopes.get(this.current.get(agent) ?? "") ?? []).map((r) => ({
       id: r.id, kind: "shell", title: `🐚 bg shell ${r.id}`, startedAt: r.startedAt,
-      lines: r.status === "done" ? [`[exited with code ${r.exitCode}]`] : [],
+      lines: r.status === "done" ? [`[exited with code ${r.exitCode}]`] : r.status === "stopped" ? ["[killed]"] : [],
       progress: { startedTs: r.startedAt, lastTs: r.lastGrowth },
       end: { status: r.status, exitCode: r.exitCode, durationMs: r.durationMs },
     }));

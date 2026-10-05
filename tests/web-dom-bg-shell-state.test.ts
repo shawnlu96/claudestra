@@ -240,9 +240,11 @@ describe("后台 shell 全链路：静默不等于结束", () => {
     expect(task("lost").shellUntracked).toBeUndefined();
     expect(host.querySelectorAll("summary .loading").length).toBe(1);
 
-    // 输出文件被清理：bridge 报 unknown，前端也是状态未知（运行组）；刷新后从快照还原同样的状态
+    // 输出文件被清理：宽限期内仍在跟踪；一直不出现 bridge 才报 unknown，前端也是状态未知（运行组）；刷新后从快照还原同样的状态
     unlinkSync(out("lost"));
     await poll(10_000);
+    expect(task("lost").shellUntracked).toBeUndefined();
+    await poll(MIN);
     expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
     host = await refresh(host);
     expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
@@ -372,6 +374,30 @@ describe("后台 shell 全链路：静默不等于结束", () => {
     await frontendSweepAndReplay();
     expect(rowText(host, "en1")).toContain("no output 5m · may still be running");
     expect(btnLabel(host)).toContain("Background tasks · Running");
+    await React.act(async () => ui.setLang("zh"));
+    await host.unmount();
+  });
+
+  test("被结束（SIGTERM + [killed]）→ 已停止：进已结束组，不显示成功 / 失败 / 状态未知（含刷新后、英文）", async () => {
+    let host = await mount();
+    writeFileSync(out("kill1"), "serving\n");
+    confirmBg("kill1");
+    await poll(10_000);
+    appendFileSync(out("kill1"), "SIGTERM (Polite quit request)\n\n[killed]\n");
+    await poll(10_000);
+    expect(task("kill1")).toMatchObject({ status: "done", shellEnd: { kind: "stopped" } });
+    expect(doneRow(host)?.textContent).toContain("1 个已结束"); // 不是「已完成」、不画绿勾
+    expect(doneRow(host)?.textContent).not.toContain("✓");
+    await expandDone(host);
+    const row = rowText(host, "kill1");
+    expect(row).toContain("⏹ 已停止");
+    for (const s of ["✓", "✗", "exit", "状态未知"]) expect(row).not.toContain(s);
+    host = await refresh(host);
+    expect(task("kill1")).toMatchObject({ status: "done", shellEnd: { kind: "stopped" } });
+    await expandDone(host);
+    expect(rowText(host, "kill1")).toContain("⏹ 已停止");
+    await React.act(async () => ui.setLang("en"));
+    expect(rowText(host, "kill1")).toContain("stopped");
     await React.act(async () => ui.setLang("zh"));
     await host.unmount();
   });
