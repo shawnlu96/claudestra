@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { addDep } from "../src/lib/ledger-deps-write.js";
+import { addDep, removeDep } from "../src/lib/ledger-deps-write.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, moveStage, recordVerify, setFrozen } from "../src/lib/ledger-write.js";
@@ -136,6 +136,69 @@ describe("on: the release node must really be main/verified, then exactly one wo
       expect(await wfSet(h, ["--reason-code", "deps_not_live", "--reason", "等外部"])).toMatchObject({ ok: true });
       expect(manualResumeVerdict(h.db, h.task(), wf(h))).toMatchObject({ ok: false, why: expect.stringContaining("没有前置边") });
     } finally { h.close(); }
+  }));
+});
+
+describe("on: the release is bound to the manual entry's own nodes and condition", () => {
+  /** T0 and T2 both block T1; T1 goes manual with a deps reason carrying the given `解除：…`. */
+  async function twoDeps(f: F, release: string): Promise<void> {
+    for (const id of ["T0", "T2"]) {
+      createTask(f.db, f.at("owner"), { project: "p", id, title: id, kind: "code" });
+      addDep(f.db, f.at("owner"), { from: id, to: "T1", kind: "blocks", when: `${id} verified` });
+    }
+    expect(await wfSet(f, ["--reason-code", "deps_not_live", "--reason", `等前置上线；解除：${release}`])).toMatchObject({ ok: true });
+    await policy(f, "on");
+  }
+  const refusesWithNothingWritten = async (f: F, why: string) => {
+    expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: false, why: expect.stringContaining(why) });
+    const before = state(f);
+    expect((await tick(f)).filter((o) => o.action === "resumed")).toEqual([]);
+    await f.tick();
+    expect(state(f)).toEqual(before);
+    expect(wf(f)).toMatchObject({ mode: "manual" });
+  };
+
+  test("a custom release with a condition beyond verified nodes (owner go-ahead) is never lifted", () => run(autoFixture(), async (f) => {
+    await twoDeps(f, "T0 和 T2 verified 后还须 owner 明确放行");
+    verify(f, "T0"); verify(f, "T2");
+    await refusesWithNothingWritten(f, "无法结构化核验");
+  }));
+
+  test("removing the unreleased predecessor the reason is bound to never shifts the reason onto the remaining edge", () => run(autoFixture(), async (f) => {
+    await twoDeps(f, "T0 verified");
+    verify(f, "T2");
+    expect(manualResumeVerdict(f.db, f.task(), wf(f)).ok).toBe(false);
+    removeDep(f.db, f.at("owner"), { from: "T0", to: "T1", rev: 1 });
+    await refusesWithNothingWritten(f, "T0 已被删边");
+    addDep(f.db, f.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 verified" }); // re-added: still bound to T0, still in spec
+    await refusesWithNothingWritten(f, "T0 在 spec");
+  }));
+
+  test("a default release whose entry edge was removed after its node verified still needs a new authorization", () => run(autoFixture(), async (f) => {
+    await depsManual(f);
+    await policy(f, "on");
+    verify(f);
+    removeDep(f.db, f.at("owner"), { from: "T0", to: "T1", rev: 1 });
+    await refusesWithNothingWritten(f, "需 PM 重新授权");
+  }));
+
+  test("a custom release naming a node that was not an entry edge is refused", () => run(autoFixture(), async (f) => {
+    await twoDeps(f, "T9 verified");
+    verify(f, "T0"); verify(f, "T2");
+    await refusesWithNothingWritten(f, "进 manual 时不是本卡前置");
+  }));
+
+  test("an edge added after the entry must be verified too; a checkable custom release resumes once when all of it holds", () => run(autoFixture(), async (f) => {
+    await twoDeps(f, "T0、T2 verified");
+    verify(f, "T0"); verify(f, "T2");
+    createTask(f.db, f.at("owner"), { project: "p", id: "T3", title: "T3", kind: "code" });
+    addDep(f.db, f.at("owner"), { from: "T3", to: "T1", kind: "blocks", when: "T3 verified" });
+    await refusesWithNothingWritten(f, "前置 T3 在 spec");
+    verify(f, "T3");
+    await tick(f);
+    expect(resumes(f.db)).toHaveLength(1);
+    expect(resumes(f.db)[0].data.manualResume).toMatchObject({ deps: [{ id: "T0" }, { id: "T2" }, { id: "T3" }] });
+    expect(wf(f)).toMatchObject({ mode: "auto" });
   }));
 });
 

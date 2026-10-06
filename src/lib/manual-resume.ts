@@ -3,7 +3,9 @@
  * that has really happened goes back to auto through the existing `ledger workflow-resume` only (resumeCore, its CAS, pool / intent
  * checks and event); this file adds no second writer. Liftable today: deps_not_live, released only when every predecessor is really
  * verified (code: verified, or done after verified; ops / investigate: done) — planned, CI green, merge, live, cancelled or a PM-pinned
- * edge state never count. Safety refusals, owner / PM holds, questionnaires, materials and every other code stay with people.
+ * edge state never count — and only for the nodes bound to the manual entry: its edges at entry (a removed one needs a new
+ * authorization) and a custom `解除：` that names nothing but those ids; any other condition in it (an owner go-ahead, …) stays manual.
+ * Safety refusals, owner / PM holds, questionnaires, materials and every other code stay with people.
  * Mode comes from CFG's one RecoveryPolicyPort (key manualStall): off = old behaviour, observe = one would-resume note per state
  * version (recordObserved), on = the scheduler identity runs the workflow-resume transaction with an authorization fingerprint, which
  * re-runs the whole check and the same port inside it (manualResumeGate) and refuses a drifted one; CAS + that re-check make two
@@ -16,7 +18,7 @@ import { getFeature } from "./ledger-feature.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, LedgerError, listDeps, listEvents } from "./ledger-store.js";
-import { manualEntry, type ManualReasonCode } from "./manual-reason.js";
+import { manualEntry, manualReasonRecord, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSwitch, switchOff } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -45,10 +47,56 @@ function reallyVerified(db: Database, t: LedgerTask): boolean {
   return t.stage === "done" && listEvents(db, { project: t.project, target: t.id }).some((e) => e.kind === "stage" && e.data.to === "verified");
 }
 
-/** Every incoming edge must be a blocks edge whose predecessor is really verified and whose effective state is not pinned back. */
-function depsReleased(db: Database, task: LedgerTask): { ok: true; deps: ManualResumeFacts["deps"] } | { ok: false; why: string } {
+/** The card's incoming edges as of the manual entry, replayed from its own dep events (add / set / rm, all targeted at the card). */
+function edgesAtEntry(events: readonly LedgerEvent[], entrySeq: number): Map<string, string> {
+  const edges = new Map<string, string>();
+  for (const e of events) {
+    if (e.seq >= entrySeq) break;
+    if (e.kind !== "dep" || typeof e.data.from !== "string") continue;
+    if (e.data.op === "rm") edges.delete(e.data.from);
+    else if (e.data.op === "add" || e.data.op === "set") edges.set(e.data.from, String(e.data.kind));
+  }
+  return edges;
+}
+
+/** Task ids joined by 、/，/和/与/及/and, optionally followed by verified / 上线 and 后 — nothing else is a checkable release. */
+const RELEASE_IDS = /^([A-Za-z0-9][\w.-]*(?:\s*(?:、|,|，|和|与|及|以及|and|&)\s*[A-Za-z0-9][\w.-]*)*)\s*(?:都|均|全部)?\s*(?:已|真实)?\s*(?:main\s*\/\s*verified|verified|上线)?\s*(?:后)?$/i;
+
+/**
+ * The release nodes the manual entry is bound to. The code's default release binds the entry's own blocks edges; a custom
+ * `解除：…` must be nothing but entry-edge task ids (+ verified / 上线), else it carries a condition this file cannot check (an
+ * owner go-ahead, a date, …) and stays with people.
+ */
+function releaseNodes(db: Database, task: LedgerTask, rec: ManualReasonRecord, atEntry: Map<string, string>):
+  { ok: true; ids: string[] } | { ok: false; why: string } {
+  const bound = [...atEntry.keys()];
+  if (rec.release === manualReasonRecord(db, task, `${rec.code}: -`, []).release) return { ok: true, ids: bound };
+  const m = RELEASE_IDS.exec(rec.release.trim());
+  if (!m) return { ok: false, why: `自定义解除条件「${rec.release}」含无法结构化核验的条件，留人工` };
+  const ids = m[1].split(/\s*(?:、|,|，|和|与|以及|及|and|&)\s*/i).filter(Boolean);
+  const stray = ids.filter((id) => !atEntry.has(id));
+  if (stray.length) return { ok: false, why: `解除条件点名的 ${stray.join("、")} 进 manual 时不是本卡前置，交 PM 核对` };
+  return { ok: true, ids };
+}
+
+/**
+ * Bound to the manual entry: every edge the card had at entry must still be there (a removed / replaced predecessor needs a new
+ * authorization, it never shifts the old reason onto the rest), every release node it names must be really verified, and every
+ * current incoming edge must be a blocks edge whose predecessor is really verified and whose effective state is not pinned back.
+ */
+function depsReleased(db: Database, task: LedgerTask, rec: ManualReasonRecord, events: readonly LedgerEvent[], entrySeq: number):
+  { ok: true; deps: ManualResumeFacts["deps"] } | { ok: false; why: string } {
+  const atEntry = edgesAtEntry(events, entrySeq);
+  if (!atEntry.size) return { ok: false, why: "进 manual 时没有前置边（依赖理由却无依赖，交 PM 核对）" };
+  const nodes = releaseNodes(db, task, rec, atEntry);
+  if (!nodes.ok) return nodes;
   const edges = listDeps(db, task.project).filter((d) => d.to === task.id);
-  if (!edges.length) return { ok: false, why: "没有前置边可核（依赖理由却无依赖，交 PM 核对）" };
+  const gone = [...atEntry.keys()].filter((id) => !edges.some((e) => e.from === id));
+  if (gone.length) return { ok: false, why: `进 manual 时的前置 ${gone.join("、")} 已被删边 / 替换，旧理由不再授权，需 PM 重新授权` };
+  for (const id of nodes.ids) {
+    const n = getTask(db, id);
+    if (!n || !reallyVerified(db, n)) return { ok: false, why: `解除节点 ${id} 在 ${n?.stage ?? "台账外"}，还没真实 main/verified` };
+  }
   const deps: ManualResumeFacts["deps"] = [];
   for (const e of edges) {
     if (e.kind !== "blocks") return { ok: false, why: `${e.from} 是分叉边，走哪条由 PM 选` };
@@ -99,7 +147,7 @@ export function manualResumeVerdict(db: Database, task: LedgerTask, wf: TaskWork
   if ((rec.uiDigest ?? null) !== uiDigest(task)) return no("UI 截图摘要已变");
   const block = cardBlock(db, task, events, entry.event.seq);
   if (block) return no(block);
-  const deps = depsReleased(db, task);
+  const deps = depsReleased(db, task, rec, events, entry.event.seq);
   if (!deps.ok) return no(deps.why);
   const last = events.findLast((e) => !(e.kind === "note" && e.data.op === OBSERVE_OP))?.seq ?? 0;
   const fingerprint = createHash("sha256").update(JSON.stringify([task.id, task.rev, wf.rev, task.specRev, task.headSHA ?? null, task.round,
