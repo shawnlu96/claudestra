@@ -2,7 +2,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { getLendOrder } from "../src/lib/ledger-lend.ts";
-import { LEND_SCHEMA } from "../src/lib/ledger-lend-schema.ts";
+import { openLedger } from "../src/lib/ledger-store.ts";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,9 +18,9 @@ const PEER = "peer:B";
 const OKQ = { claude: { weekUsedPct: 10, resetAt: RESET + 7 * 86_400_000 } };
 const ORDER = "lend:demo:s1:r0:a1";
 
+/** 每次一份独立临时台账：走正式 openLedger 全量迁移（events 等 getLendOrder 依赖的表都在），只插旧单，不造事件/票据 */
 function orderDb(over: Record<string, unknown> = {}): Database {
-  const db = new Database(":memory:");
-  LEND_SCHEMA(db);
+  const db = openLedger(join(mkdtempSync(join(tmpdir(), "qstop-ledger-")), "ledger.sqlite"));
   const row: Record<string, unknown> = {
     orderId: ORDER, taskId: "demo", project: "p", peer: PEER, family: "claude", step: "write", specRev: 1, round: 0, head: "a".repeat(40),
     repo: "o/r", pr: null, wire: "{}", text: "", sha256: "x", status: "unknown", worker: "w1", leaseGen: 1, leaseMs: 60_000, leaseUntil: null,
