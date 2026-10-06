@@ -9,8 +9,9 @@ import {
   requestSharedLedger, SharedLedgerRemoteError, SharedLedgerUnavailable, type SharedLedgerTransportOptions,
 } from "./shared-ledger-client-transport.js";
 
-/** Selection metadata only. N2/N4 must resolve this credential under their verified local caller context;
- * neither these tags nor the public caller DTO authenticate a person. The center verifies bearer and signature.
+/** Selection metadata only. N4 must authenticate the local Principal and use resolveSharedLedgerCredential
+ * for its original approved person binding before constructing this client. These tags and the public caller
+ * DTO do not authenticate a person; the center verifies bearer and signature.
  */
 export interface SharedLedgerProjectOwner extends SharedLedgerConnection { localSubject: "owner:self"; kind: "person" }
 export type SharedLedgerProjectsProtocol = Pick<typeof import("./shared-ledger-contract-v2-projects.js"),

@@ -94,6 +94,11 @@ describe("N3 fixed public N1C producer with injected signed transport", () => {
     await expect(c.client.removeProjectMember(f.identity.projectId, "person/other")).rejects.toThrow("invalid shared ledger project request");
     await expect(c.client.inviteProjectMember(f.identity.projectId, { ...invite, code: "another" }))
       .rejects.toThrow("invalid shared ledger project request");
+    for (const declaration of [{ subject: "owner:self" }, { personId: "another" }, { instanceId: "another" }]) {
+      await expect(c.client.createProject({ ...create, ...declaration })).rejects.toThrow("invalid shared ledger project request");
+      await expect(c.client.recoverProjectCreatorCredential(f.identity.projectId, { ...recover, ...declaration }))
+        .rejects.toThrow("invalid shared ledger project request");
+    }
     expect(c.calls()).toBe(0);
   });
 
