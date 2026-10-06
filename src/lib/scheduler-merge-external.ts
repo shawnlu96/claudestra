@@ -1,5 +1,5 @@
 /** gh commands are structured argv, never interpolated into a shell string. */
-import { singleMainCarryProof } from "./review-main-carry-proof.js";
+import { reviewMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
@@ -76,10 +76,14 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
     },
     /** Local git, not the compare API: GitHub caps listed files and patches, and a truncated pair could hide a smuggled change. */
     async carryReview(prRef, oldHead, newHead): Promise<ReviewCarry> {
-      repoOf(prRef);
+      const repository = repoOf(prRef);
       if (!SHA.test(oldHead) || !SHA.test(newHead)) return { ok: false, reason: "head 不是完整 SHA" };
       await git("fetch", "--no-tags", "--quiet", "origin", newHead, `+refs/heads/main:${MAIN_REF}`);
-      const proof = await singleMainCarryProof(cwd, oldHead, newHead, command);
+      // MAINP2: the canonical multi-hop proof (at most 16 pure-main merges), bound to the PR's repository and the main just fetched;
+      // it re-reads main at both ends. Git evidence only: the run's own PASS / drift / slot / train gates still decide.
+      const fetched = (await git("rev-parse", "--verify", `${MAIN_REF}^{commit}`)).trim().toLowerCase();
+      if (!SHA.test(fetched)) return { ok: false, reason: "main 不是完整 SHA" };
+      const proof = await reviewMainCarryProof({ repoDir: cwd, repository, base: "main", mainHead: fetched, oldHead, newHead }, command);
       if (!proof.ok) return proof;
       const { reason, mainParent, mainHead, diffHash } = proof;
       return { ok: true, reason, mainParent, mainHead, diffHash };
