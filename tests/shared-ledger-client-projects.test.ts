@@ -197,7 +197,7 @@ describe("N3 project client injection boundary (not N1C wire integration)", () =
     const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: protocol });
     expect(inspect(await failure(c.projects()))).not.toContain(invitationCode);
     const encoder = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: { ...protocol,
-      requests: { ...protocol.requests, create: secretError } } });
+      requests: { ...protocol.requests, create: (_input: Parameters<typeof protocol.requests.create>[0]) => secretError() } } });
     const error = await failure(encoder.createProject(create));
     expect(error).toBeInstanceOf(SharedLedgerUnavailable);
     expect(inspect(error)).not.toContain(invitationCode);

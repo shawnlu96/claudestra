@@ -43,8 +43,8 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
   constructor(private projectConnection: SharedLedgerConnection, private projectKey: InstanceKey,
     private projectOptions: SharedLedgerProjectsOptions<P>) {}
 
-  private scope(selected: Partial<SharedLedgerProjectScope>): SharedLedgerProjectScope {
-    const c = this.projectConnection as Partial<SharedLedgerProjectOwner>;
+  private scope(connection: SharedLedgerConnection, selected: Partial<SharedLedgerProjectScope>): SharedLedgerProjectScope {
+    const c = connection as Partial<SharedLedgerProjectOwner>;
     if (c.localSubject !== "owner:self" || c.kind !== "person") throw new Error("shared ledger projects require owner:self person credential");
     try {
       for (const value of [c.centerId, c.teamId, c.personId, c.instanceId, selected.operationId, selected.targetPersonId]) {
@@ -58,8 +58,10 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
 
   private async projectRequest<K extends Operation>(operation: K, method: string, path: string, selected: Partial<SharedLedgerProjectScope>,
     input?: unknown, signal?: AbortSignal): Promise<Output<P, K>> {
-    const scope = this.scope(selected);
-    const protocol = this.projectOptions.projectsProtocol;
+    const connection = { ...this.projectConnection };
+    const options = { ...this.projectOptions };
+    const scope = this.scope(connection, selected);
+    const protocol = options.projectsProtocol;
     if (!protocol) throw new Error("shared ledger projects contract unavailable");
     let requestInput: unknown;
     try { requestInput = structuredClone(input); }
@@ -77,7 +79,7 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
       try { return canonicalJson(protocol.requests[operation as Write](requestInput as never, scope, nonce)); }
       catch { throw new SharedLedgerUnavailable(); } // Encoders are injected; even a custom error must not retain their input.
     };
-    const raw = await requestSharedLedger(this.projectConnection, this.projectKey, this.projectOptions, method, path, requestInput, signal, reject, encode);
+    const raw = await requestSharedLedger(connection, this.projectKey, options, method, path, requestInput, signal, reject, encode);
     try { return protocol.responses[operation](raw, scope, requestInput) as Output<P, K>; }
     catch { throw new SharedLedgerUnavailable(); } // The protocol parser may mention secrets in a rejected response; never attach its cause.
   }

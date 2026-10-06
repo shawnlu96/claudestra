@@ -1,5 +1,7 @@
 import { SharedLedgerProjectsClient, type SharedLedgerProjectsProtocol, type SharedLedgerProjectsOptions } from "./shared-ledger-client-projects.js";
-import { requestSharedLedger, SharedLedgerRemoteError, SharedLedgerRollback, SharedLedgerUnavailable } from "./shared-ledger-client-transport.js";
+import {
+  requestSharedLedger, sharedLedgerCenterUrl, SharedLedgerRemoteError, SharedLedgerRollback, SharedLedgerUnavailable,
+} from "./shared-ledger-client-transport.js";
 export { SharedLedgerRemoteError, SharedLedgerRollback, SharedLedgerUnavailable } from "./shared-ledger-client-transport.js";
 import { hostname, userInfo } from "node:os";
 import { sharedLedgerCommandDigest } from "./shared-ledger-auth.js";
@@ -32,11 +34,7 @@ export class SharedLedgerClient<P extends SharedLedgerProjectsProtocol = SharedL
   private now: () => number;
   constructor(readonly connection: SharedLedgerConnection, private key: InstanceKey, private options: ClientOptions<P> = {}) {
     super(connection, key, options);
-    const url = new URL(connection.baseUrl);
-    if (url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("invalid center URL");
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
-      throw new Error("center requires HTTPS");
-    }
+    sharedLedgerCenterUrl(connection.baseUrl);
     this.now = options.now ?? Date.now;
   }
   private async request(method: string, resource: string, payload?: unknown, signal?: AbortSignal): Promise<unknown> {
