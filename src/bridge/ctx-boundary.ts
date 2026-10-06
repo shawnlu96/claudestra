@@ -171,12 +171,14 @@ function maybeAlert(a: BoundaryAgent, now: number, deps: CtxBoundaryDeps, text: 
 
 /** 过救命线却被草稿 / 排队 / 对话框挡住：挡是对的（不能把 owner 的字连着命令提交），但得让 owner 知道，否则只能等 CC 在 ~967K 裸压 */
 function alertBlocked(a: BoundaryAgent & { ctx: number }, b: Boundary, reason: SkipReason, now: number, deps: CtxBoundaryDeps): void {
-  if (deps.dryRun || b.hardCap === null || a.ctx < b.hardCap || !ALERT_ON.has(reason)) return;
+  const rescue = b.policy === "card-worker" ? globalBoundary(deps.autoCompact(), a.realWindow).hardCap : null;
+  const cap = rescue === null ? b.hardCap : b.hardCap === null ? rescue : Math.min(rescue, b.hardCap);
+  if (deps.dryRun || cap === null || a.ctx < cap || !ALERT_ON.has(reason)) return;
   const text = b.policy === "card-worker"
-    ? `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)} 已达卡片硬线，但${SKIP_REASON_TEXT[reason]}；忙时原生封顶尚未提供，闲置满3分钟后仍走软线。`
-    : `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)}，过了救命线 ${formatTokens(b.hardCap)}，但${SKIP_REASON_TEXT[reason]}，自动压缩发不出去。` +
+    ? `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)} 已达${rescue !== null && a.ctx >= rescue ? "原全局救命线" : "卡片硬线"}，但${SKIP_REASON_TEXT[reason]}；原生300K封顶尚未提供，保留旧救命线与闲置软线。`
+    : `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)}，过了救命线 ${formatTokens(cap)}，但${SKIP_REASON_TEXT[reason]}，自动压缩发不出去。` +
     "请去这个窗口处理一下，不然会一直涨到 Claude Code 自己在 ~967K 裸压（记忆全丢）。";
-  maybeAlert(a, now, deps, text, { ctx: a.ctx, cap: b.hardCap, reason });
+  maybeAlert(a, now, deps, text, { ctx: a.ctx, cap, reason });
 }
 
 async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: CtxBoundaryDeps): Promise<Omit<TickOutcome, "gated">> {
@@ -196,7 +198,8 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
   let verdict: BoundaryVerdict = boundaryDecision({
     ctx: a.ctx,
     window: b.window,
-    hardCap: b.policy === "card-worker" ? null : b.hardCap,
+    // Keep the pre-existing runtime rescue line; it is not enforcement of the separate 300K card cap.
+    hardCap: b.policy === "card-worker" ? globalBoundary(deps.autoCompact(), a.realWindow).hardCap : b.hardCap,
     idle: idleEnough(a, b, pane, now),
     pane: pane === null ? null : paneGateOf(pane, deps.readPane(pane.plain, pane.esc)),
     injectedRecently: compactInjectedRecently(a.target, now),
@@ -230,7 +233,9 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     maybeAlert(a, now, deps, `⚠️ ${a.name} 该压缩了（${formatTokens(a.ctx)}），但${inject.text}。`, { ctx: a.ctx, cap: b.hardCap, reason: "window-small" });
   }
   const why = inject.status === "failed" ? `（${inject.error}）` : inject.status === "skipped" ? `（${inject.text}）` : inject.note ? `（${inject.note}）` : "";
-  deps.log(`🧹 上下文边界 ${verdict.kind === "hard-cap" ? "硬上限" : "闲置"}触发 ${tag}：${b.action} → ${inject.status}${why}`);
+  const trigger = verdict.kind === "hard-cap"
+    ? b.policy === "card-worker" ? "原全局救命线（非300K原生封顶）" : "硬上限" : "闲置";
+  deps.log(`🧹 上下文边界 ${trigger}触发 ${tag}：${b.action} → ${inject.status}${why}`);
   return { ...base, inject };
 }
 
@@ -267,7 +272,9 @@ export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise
     const master = isMasterAgent(a.name);
     const b = boundaryFor(a, p, on);
     const ctx = a.ctx;
-    if (ctx === null || (master && !on) || !overLine(ctx, b)) {
+    const rescue = b.policy === "card-worker" ? globalBoundary(p.ac, a.realWindow).hardCap : null;
+    const overRescue = ctx !== null && rescue !== null && ctx >= rescue;
+    if (ctx === null || (master && !on) || (!overLine(ctx, b) && !overRescue)) {
       if (!deps.dryRun) lastTrig.delete(a.name);
       lastSkip.delete(a.name);
       continue;

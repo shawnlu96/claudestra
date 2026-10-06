@@ -164,3 +164,65 @@ test("r1 tick-save-compact: unreadable ledger never sends save-compact to an arb
   expect(r.status).toBe(0);
   expect(JSON.parse(r.stdout).some((s: {line: string}) => s.line === "/save-compact")).toBe(false);
 });
+
+test("r2 busy-rescue-bypass: on preserves observe rescue at 950K of a real 1M window", async () => {
+  for (const mode of ["observe", "on"]) {
+    resetCtxBoundaryState();
+    const worker = boundaryAgent({ name: "rescue-reviewer", kind: "worker", status: "active", ctx: 950_000, realWindow: 1_000_000 });
+    const h = harness([worker], { autoCompact: { cardWorkers: mode, inject: true } });
+    worker.usage = { path: "fixture", sessionId: worker.sessionId, tokens: worker.ctx!, observedAt: h.now, usageTs: h.now, size: 1, mtime: 1 };
+    h.deps.verifyCard = async () => true;
+    h.win(worker.target).pane = BUSY_PANE;
+    const [result] = await ctxBoundaryTick(h.deps);
+    expect(result.verdict).toEqual({ fire: true, kind: "hard-cap" });
+    expect(h.sent.length).toBe(1);
+    if (mode === "on") expect(h.sent[0].line.startsWith("/compact ")).toBe(true);
+  }
+});
+
+test("r2 rescue adjacency and actual smaller windows retain all safety gates", async () => {
+  const cases = [
+    { ctx: 929_999, window: 1_000_000, send: false },
+    { ctx: 930_000, window: 1_000_000, send: true },
+    { ctx: 371_999, window: 400_000, send: false },
+    { ctx: 372_000, window: 400_000, send: true },
+    { ctx: 162_749, window: 175_000, send: false },
+    { ctx: 162_750, window: 175_000, send: true },
+    { ctx: 950_000, window: null, send: false },
+    { ctx: 950_000, window: 1_000_000, send: false, emergency: false },
+  ];
+  for (const c of cases) {
+    resetCtxBoundaryState();
+    const worker = boundaryAgent({ name: "small-window-reviewer", kind: "worker", status: "active", ctx: c.ctx, realWindow: c.window });
+    const h = harness([worker], { autoCompact: { cardWorkers: "on", emergency: c.emergency } });
+    worker.usage = { path: "fixture", sessionId: worker.sessionId, tokens: c.ctx, observedAt: h.now, usageTs: h.now, size: 1, mtime: 1 };
+    h.deps.verifyCard = async () => true;
+    h.win(worker.target).pane = BUSY_PANE;
+    await ctxBoundaryTick(h.deps);
+    expect(h.sent.length).toBe(c.send ? 1 : 0);
+  }
+  for (const gate of ["draft", "menu", "compacting", "wall", "session", "usage", "acp"]) {
+    resetCtxBoundaryState();
+    const worker = boundaryAgent({ name: "gated-reviewer", kind: "worker", status: "active", ctx: 950_000, realWindow: 1_000_000 });
+    const h = harness([worker], { autoCompact: { cardWorkers: "on" } });
+    worker.usage = gate === "usage" ? null
+      : { path: "fixture", sessionId: worker.sessionId, tokens: worker.ctx!, observedAt: h.now, usageTs: h.now, size: 1, mtime: 1 };
+    if (gate === "acp") worker.transport = "acp";
+    h.deps.verifyCard = async () => gate !== "session";
+    h.win(worker.target).pane = BUSY_PANE;
+    if (["draft", "menu", "compacting", "wall"].includes(gate)) Object.assign(h.state, { [gate]: true });
+    await ctxBoundaryTick(h.deps);
+    expect(h.sent).toEqual([]);
+  }
+});
+
+test("r2 rescue below the card soft line alerts rather than bypassing a draft", async () => {
+  resetCtxBoundaryState();
+  const worker = boundaryAgent({ name: "tiny-window-reviewer", kind: "worker", status: "active", ctx: 162_750, realWindow: 175_000 });
+  const h = harness([worker], { autoCompact: { cardWorkers: "on" }, state: { draft: true } });
+  worker.usage = { path: "fixture", sessionId: worker.sessionId, tokens: worker.ctx!, observedAt: h.now, usageTs: h.now, size: 1, mtime: 1 };
+  h.win(worker.target).pane = BUSY_PANE;
+  await ctxBoundaryTick(h.deps);
+  expect(h.sent).toEqual([]);
+  expect(h.alerts[0].data.cap).toBe(162_750);
+});
