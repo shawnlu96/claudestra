@@ -20,6 +20,11 @@ describe("parseManualReason", () => {
     for (const r of [undefined, null, "", "   ", "x", "随便", "safety_refusal:", "deps_not_live：；解除：x", "foo: bar"]) expect(parseManualReason(r)).toBeNull();
   });
 
+  test("an explicit unknown code is null even when the text has table keywords; inherited names are not codes", () => {
+    for (const r of ["bogus_code: owner 等待", "xyz：依赖 T0", "nope: PM 接管", "constructor: 依赖", "toString：owner"]) expect(parseManualReason(r)).toBeNull();
+    expect(parseManualReason("owner 等待")?.code).toBe("owner_hold"); // no code head: the existing callers' sentence table still applies
+  });
+
   test("planner escalations `<code>：<reason>` map through the fixed table", () => {
     const cases: [string, string][] = [
       ["model_safety_hold：本卡有未处置的模型安全拒绝", "safety_refusal"],
@@ -92,8 +97,9 @@ const toManual = (r: ManualReasonRecord | null, extra: Record<string, unknown> =
   ev("scheduler", { op: "workflow", mode: "manual", takeover: r?.text ?? "x", ...(r ? { manualReason: r } : {}), ...extra });
 
 describe("manualEntry / diagnoseManual", () => {
-  test("a card manual from the start never entered manual; auto→manual and resume→fallback do", () => {
-    expect(manualEntry([ev("scheduler", { op: "workflow", mode: "manual" })])).toBeNull();
+  test("a first configuration into manual is an entry too (no reason = alarmable); auto→manual and resume→fallback do", () => {
+    expect(manualEntry([ev("scheduler", { op: "workflow", mode: "manual" })])).toMatchObject({ code: null, record: null });
+    expect(manualEntry([toManual(rec("pm_takeover"))])).toMatchObject({ code: "pm_takeover" });
     const e = [auto(), toManual(rec("deps_not_live"))];
     expect(manualEntry(e)?.code).toBe("deps_not_live");
     expect(manualEntry([...e, ev("scheduler", { op: "workflow_resume" })])).toBeNull();
@@ -150,8 +156,8 @@ describe("manualEntry / diagnoseManual", () => {
 });
 
 describe("manualResumeMode", () => {
-  test("absent port = observe; on is only observe here (MAN2 executes); broken / invalid = off", () => {
-    expect(manualResumeMode(undefined, "p")).toBe("observe");
+  test("on is only observe here (MAN2 executes); off, a throwing port, CFG's unreadable answer or an unknown mode = off", () => {
+    expect(manualResumeMode(() => ({ mode: "off", manualAfterMs: null, source: "error", diagnostic: "读不了" }), "p")).toBe("off");
     expect(manualResumeMode(() => ({ mode: "observe" }), "p")).toBe("observe");
     expect(manualResumeMode(() => ({ mode: "on" }), "p")).toBe("observe");
     expect(manualResumeMode(() => ({ mode: "off" }), "p")).toBe("off");

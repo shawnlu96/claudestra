@@ -3,6 +3,8 @@
  * the patrol (collectAuditSnapshots → auditLedger → reconcileFindings). A missing / unknown reason refuses the whole write (no pool,
  * intent or workflow change); the patrol only reports, and every scenario ends with zero actions on intents, workflow or events.
  */
+import { rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { auditLedger, type AuditSnapshot } from "../src/lib/ledger-audit.js";
@@ -11,6 +13,7 @@ import { reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { addDep } from "../src/lib/ledger-deps-write.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { createTask, moveStage } from "../src/lib/ledger-write.js";
 import type { Database } from "bun:sqlite";
 import { autoFixture } from "./scheduler-auto-helpers.js";
@@ -41,6 +44,12 @@ const sources = (dir: string): SnapshotSources => ({
   registry: async () => [], windows: async () => ["master"], turn: async () => "idle",
   fileTimes: async () => ({ lastWriteAt: null, startedAt: null }), reviewers: () => [], heldPath: join(dir, "held-messages.json"),
 });
+/** The formal patrol entry (`ledger audit`): snapshots → auditLedger with CFG's file-backed policy port → reconcile. */
+const auditCli = async (f: F) => {
+  const r = await f.cliWith({ auditSources: sources(f.dir) }, "owner", "audit", "--project", "p", "--json") as Record<string, any>;
+  expect(r).toMatchObject({ ok: true });
+  return r.projects[0] as { open: { rule: string; taskId: string }[]; skipped: { rule: string; reason: string }[] };
+};
 const audit = async (db: Database, dir: string, now: number, over: Partial<AuditSnapshot> = {}) => {
   const [snap] = await collectAuditSnapshots(db, ["p"], now, sources(dir));
   return auditLedger({ ...snap, ...over }, now);
@@ -61,6 +70,41 @@ describe("workflow-set: entering manual needs a recognised reason; refusal write
       expect(await wfSet(f, ["--reason-code", "deps_not_live", "--reason", "等 T0"], f.task().rev + 7)).toMatchObject({ ok: false, code: "conflict" });
       expect(state(f.db)).toEqual(before);
       expect(before.intents).toEqual([{ id: "k:write", status: "pending" }]);
+    } finally { f.close(); }
+  });
+
+  test("a first configuration straight into manual is a new manual write: no / unknown reason refused, nothing written", async () => {
+    const f = autoFixture();
+    try {
+      createTask(f.db, f.at("owner"), { project: "p", id: "NEW", title: "新卡", kind: "code" });
+      const set = (...extra: string[]) => f.cli("pm", "workflow-set", "NEW", "--rev", "1", "--template", "code", "--version", "2", "--mode", "manual",
+        "--author-family", "claude", "--fallback", "人工", ...extra);
+      const row = () => f.db.query("SELECT mode, rev FROM task_workflows WHERE taskId = 'NEW'").get();
+      const seq = projectSeq(f.db);
+      expect(await set()).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("进入 manual 要带理由") });
+      expect(await set("--reason", "随便")).toMatchObject({ ok: false, code: "invalid" });
+      expect(await set("--reason", "bogus_code: owner 等待")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("理由码不认识：bogus_code") });
+      expect(await set("--reason-code", "bogus", "--reason", "owner 等待")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("理由码不认识") });
+      expect([row(), projectSeq(f.db)]).toEqual([null, seq]);
+      expect(await set("--reason", "pm_takeover: PM 亲自推进；解除：PM 交回")).toMatchObject({ ok: true });
+      expect(row()).toEqual({ mode: "manual", rev: 1 });
+      expect(listEvents(f.db, { project: "p", target: "NEW" }).at(-1)!.data).toMatchObject({ op: "workflow", mode: "manual",
+        manualReason: { code: "pm_takeover", text: "PM 亲自推进", release: "PM 交回", approval: false } });
+    } finally { f.close(); }
+  });
+
+  test("an explicit unknown code is refused even when its text has known keywords (no keyword fallback)", async () => {
+    const f = autoFixture();
+    try {
+      await pending(f);
+      const before = state(f.db);
+      expect(await wfSet(f, ["--reason", "bogus_code: owner 等待"])).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("理由码不认识：bogus_code") });
+      expect(await wfSet(f, ["--reason", "xyz：依赖 T0"])).toMatchObject({ ok: false, code: "invalid" });
+      expect(await f.cli("scheduler", "scheduler-fallback-manual", "T1", "--reason", "bogus_code: owner 等待", "--intent", "k:write"))
+        .toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("理由码不认识：bogus_code") });
+      expect(await f.cli("pm", "scheduler-fallback-manual", "T1", "--reason", "nope：PM 接管")).toMatchObject({ ok: false, code: "invalid" });
+      expect(state(f.db)).toEqual(before);
+      expect(wfRow(f.db)).toMatchObject({ mode: "auto" });
     } finally { f.close(); }
   });
 
@@ -105,7 +149,7 @@ describe("system fallback: classified before any pool / intent / workflow write"
 });
 
 describe("patrol: observe reports once, off is silent, nothing ever acts", () => {
-  test("deps planned / CI green → no report; live → one would-resume, deduped across ticks and a restart; off → none; zero actions", async () => {
+  test("deps planned / CI green → no report; live → one would-resume, deduped across ticks and a restart; zero actions", async () => {
     const f = autoFixture();
     try {
       const owner = f.at("owner");
@@ -134,13 +178,43 @@ describe("patrol: observe reports once, off is silent, nothing ever acts", () =>
       const db2 = openLedger(join(f.dir, "ledger.sqlite"));
       const r2 = await audit(db2, f.dir, t0 + 10 * MIN);
       expect(reconcileFindings(db2, "p", r2.findings, r2.evaluated, t0 + 10 * MIN).opened).toEqual([]);
-      const off = await audit(db2, f.dir, t0 + 11 * MIN, { manualResume: "off" });
-      expect(manualFindings(off)).toEqual([]);
-      expect(off.skipped).toContainEqual({ rule: "manual_would_resume", reason: "manual 恢复观察为 off" });
       expect(state(db2)).toEqual(before);
       expect(wfRow(db2)).toMatchObject({ mode: "manual" });
       closeLedger(join(f.dir, "ledger.sqlite"));
     } finally { f.close(); }
+  });
+
+  test("formal CFG policy via `ledger scheduler-recovery` + `ledger audit`: off and an unreadable policy file report nothing; default observe reports", async () => {
+    // RECOVERY_POLICY_PATH sits in the test run's temp state dir (tests/preload.ts), never the real one
+    expect(RECOVERY_POLICY_PATH.startsWith(join(homedir(), ".claude-orchestrator"))).toBe(false);
+    const f = autoFixture();
+    try {
+      createTask(f.db, f.at("owner"), { project: "p", id: "T0", title: "前置", kind: "code" });
+      addDep(f.db, f.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" });
+      expect(await wfSet(f, ["--reason-code", "deps_not_live", "--reason", "等 T0 上线"])).toMatchObject({ ok: true });
+      for (const [from, to] of [["spec", "restate"], ["restate", "build"], ["build", "review"], ["review", "merge"], ["merge", "live"]] as const) {
+        moveStage(f.db, f.at("owner"), { taskId: "T0", from, to });
+      }
+      expect(await f.cli("pm", "scheduler-recovery", "p", "off", "--key", "manualStall", "--reason", "MAN1 负例：恢复观察关")).toMatchObject({ ok: true, changed: true });
+      const before = state(f.db);
+      const would = (o: Awaited<ReturnType<typeof auditCli>>) => o.open.filter((x) => x.rule === "manual_would_resume");
+      const skippedOff = { rule: "manual_would_resume", reason: expect.stringContaining("manual 恢复观察为 off") };
+      for (let i = 0; i < 2; i++) { // repeated ticks under off
+        const off = await auditCli(f);
+        expect(would(off)).toEqual([]);
+        expect(off.skipped).toContainEqual(skippedOff);
+      }
+      writeFileSync(RECOVERY_POLICY_PATH, "{ not json"); // 失读: CFG answers off
+      const broken = await auditCli(f);
+      expect(would(broken)).toEqual([]);
+      expect(broken.skipped).toContainEqual(skippedOff);
+      expect(state(f.db)).toEqual(before);
+      rmSync(RECOVERY_POLICY_PATH, { force: true }); // absent = default observe: the same formal path now reports, once
+      expect(would(await auditCli(f))).toEqual([expect.objectContaining({ taskId: "T1" })]);
+      expect(would(await auditCli(f))).toHaveLength(1);
+      expect(state(f.db)).toEqual(before);
+      expect(wfRow(f.db)).toMatchObject({ mode: "manual" });
+    } finally { rmSync(RECOVERY_POLICY_PATH, { force: true }); f.close(); }
   });
 
   test("a sticky reason (owner hold) and an unknown merge never report would-resume, whatever else is clear", async () => {

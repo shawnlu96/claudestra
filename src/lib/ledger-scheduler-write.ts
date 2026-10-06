@@ -108,10 +108,11 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
     const hold = existing?.mode === "manual" && input.mode === "manual" && !!input.reason?.trim();
     const unchanged = !hold && existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);
     if (unchanged) return { workflow: existing, duplicate: true };
-    // Entering manual (from auto / observe, or a hold) needs a recognised reason; checked before any intent / pool / workflow write.
+    // Entering manual (first configuration, from auto / observe, or a hold) needs a recognised reason; checked before any intent / pool / workflow write.
     if (input.reasonCode !== undefined && !isManualReasonCode(input.reasonCode)) throw new LedgerError("invalid", `理由码不认识：${input.reasonCode}（${MANUAL_REASON_CODES.join(" / ")}）`);
     const reasonText = input.reasonCode && input.reason?.trim() ? `${input.reasonCode}: ${input.reason}` : input.reasonCode ? "" : input.reason;
-    const entering = !!existing && input.mode === "manual" && (existing.mode !== "manual" || hold);
+    // a first configuration straight into manual is a new manual write too: it needs the same recognised reason
+    const entering = input.mode === "manual" && (!existing || existing.mode !== "manual" || hold);
     const manualReason = entering || (input.mode === "manual" && (input.reason?.trim() || input.reasonCode)) ? manualReasonRecord(db, task, reasonText) : null;
     if (task.rev !== input.taskRev || (existing?.rev ?? 0) !== (input.workflowRev ?? 0)) {
       throw new LedgerError("conflict", "任务或流程已被改过，先重读再设置", { taskRev: task.rev, workflowRev: existing?.rev ?? 0 });

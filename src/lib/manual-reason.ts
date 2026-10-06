@@ -80,13 +80,13 @@ export const isManualReasonCode = (v: string): v is ManualReasonCode => (MANUAL_
 export interface ParsedReason { code: ManualReasonCode; text: string; release: string | null; eventSeq: number | null; explicit: boolean }
 
 /**
- * `<code>: 说明[；解除：…][；事件：#seq]` with a manual code or a planner escalation code; otherwise the whole line through the
- * keyword table (the existing callers' fixed sentences). null = missing / not recognised.
+ * `<code>: 说明[；解除：…][；事件：#seq]` with a manual code or a planner escalation code; a line with no code head goes through the
+ * keyword table (the existing callers' fixed sentences). null = missing / not recognised, including an unknown explicit code.
  */
 export function parseManualReason(raw: string | undefined | null): ParsedReason | null {
   const line = (raw ?? "").replace(/\s+/g, " ").trim();
   if (!line) return null;
-  const head = /^([a-z0-9_]+)\s*[:：]\s*(.*)$/.exec(line);
+  const head = /^([A-Za-z0-9_]+)\s*[:：]\s*(.*)$/.exec(line);
   const parts = (head ? head[2] : line).split(/[；;]\s*/);
   const field = (re: RegExp) => parts.map((p) => re.exec(p)?.[1]?.trim()).find(Boolean) ?? null;
   const release = field(/^(?:解除|release)\s*[:：]\s*(.+)$/i);
@@ -94,7 +94,9 @@ export function parseManualReason(raw: string | undefined | null): ParsedReason 
   const text = parts.filter((p) => !/^(?:解除|release|事件|event)\s*[:：]/i.test(p)).join("；").trim();
   const eventSeq = ev ? Number(ev) : null;
   if (head && isManualReasonCode(head[1])) return text ? { code: head[1], text, release, eventSeq, explicit: true } : null;
-  if (head && PLAN_CODES[head[1]] && text) return { code: PLAN_CODES[head[1]], text: line, release, eventSeq, explicit: true };
+  if (head && Object.hasOwn(PLAN_CODES, head[1]) && text) return { code: PLAN_CODES[head[1]], text: line, release, eventSeq, explicit: true };
+  // an explicit code nobody knows is refused outright: the keyword table is only for the existing callers' code-less sentences
+  if (head) return null;
   const code = MANUAL_REASON_CODES.find((c) => MANUAL_REASONS[c].words.test(line));
   return code ? { code, text: line, release, eventSeq, explicit: false } : null;
 }
@@ -125,7 +127,10 @@ const usage = () => `用「<理由码>: 说明[；解除：…][；事件：#seq
 export function manualReasonRecord(db: Database, task: LedgerTask, reason: string | undefined, events?: readonly LedgerEvent[]): ManualReasonRecord {
   if (!reason?.trim()) throw new LedgerError("invalid", `进入 manual 要带理由（--reason），manual 不是批准；${usage()}`);
   const p = parseManualReason(reason);
-  if (!p) throw new LedgerError("invalid", `manual 理由不认识，拒绝写入：${reason.slice(0, 120)}；${usage()}`);
+  if (!p) {
+    const head = /^\s*([A-Za-z0-9_]+)\s*[:：]/.exec(reason)?.[1];
+    throw new LedgerError("invalid", `${head && !isManualReasonCode(head) && !Object.hasOwn(PLAN_CODES, head) ? `理由码不认识：${head}` : "manual 理由不认识"}，拒绝写入：${reason.slice(0, 120)}；${usage()}`);
+  }
   const own = events ?? listEvents(db, { project: task.project, target: task.id });
   const ref = p.eventSeq === null ? own.at(-1) : own.find((e) => e.seq === p.eventSeq);
   if (p.eventSeq !== null && !ref) throw new LedgerError("invalid", `理由引用的事件 #${p.eventSeq} 不在 ${task.id} 上`);
@@ -155,8 +160,8 @@ const legacyText = (e: LedgerEvent): string =>
   String(e.data.takeover ?? e.data.hold ?? e.data.reason ?? e.data.receipt ?? "").replace(/\s+/g, " ").trim();
 
 /**
- * The event that put the card into its current manual, or null when the card is not manual or was manual from the start (a card
- * PM runs by hand never entered manual from automation).
+ * The event that put the card into its current manual (its first configuration included: since MAN1 that write carries a reason
+ * too), or null when the card is not manual.
  */
 export function manualEntry(events: readonly LedgerEvent[]): ManualEntry | null {
   let mode: string | null = null, entry: LedgerEvent | null = null;
@@ -169,7 +174,7 @@ export function manualEntry(events: readonly LedgerEvent[]): ManualEntry | null 
     else if (op === "workflow_resume") next = "auto";
     else if ((e.data.outcome === "failed" || e.data.outcome === "cancelled") && mode === "auto") next = "manual";
     else continue;
-    const entering = next === "manual" && mode !== null && (mode !== "manual" || (op === "workflow" && !!e.data.hold));
+    const entering = next === "manual" && (mode !== "manual" || (op === "workflow" && !!e.data.hold));
     if (entering) entry = e;
     else if (next !== "manual") entry = null;
     mode = next;
@@ -222,7 +227,7 @@ function openIntents(events: readonly LedgerEvent[]): string[] {
   return [...open.keys()];
 }
 
-/** One manual card's diagnosis; null when it is not in a manual it entered from automation. Contains no credentials. */
+/** One manual card's diagnosis; null when it is not manual (or terminal). Contains no credentials. */
 export function diagnoseManual(f: ManualFactsIn): ManualDiagnosis | null {
   const { task, events } = f;
   if (TERMINAL_STAGES.includes(task.stage)) return null;
@@ -273,11 +278,11 @@ export function diagnoseManual(f: ManualFactsIn): ManualDiagnosis | null {
 export type ManualResumeMode = "on" | "observe" | "off";
 
 /**
- * The would-resume report's mode from CFG's port (mechanism manualStall). Absent port = observe, broken / invalid = off. on is
- * read as observe: real recovery belongs to MAN2 and this card has no execution entry.
+ * The would-resume report's mode from CFG's RecoveryPolicyPort (mechanism manualStall; the patrol wires the file-backed one).
+ * A throwing port, an unreadable / invalid policy (CFG answers off) or a mode it does not know = off. on is read as observe: real
+ * recovery belongs to MAN2 and this card has no execution entry.
  */
-export function manualResumeMode(port: ((project: string, mechanism: "manualStall") => { mode: string }) | undefined, project: string): ManualResumeMode {
-  if (!port) return "observe";
+export function manualResumeMode(port: (project: string, mechanism: "manualStall") => { mode: string }, project: string): ManualResumeMode {
   try {
     const m = port(project, "manualStall")?.mode;
     return m === "off" ? "off" : m === "observe" || m === "on" ? "observe" : "off";

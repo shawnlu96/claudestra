@@ -9,7 +9,8 @@ import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { blockFindings } from "./scheduler-dispatch-block.js";
-import { diagnoseManual, type ManualResumeMode } from "./manual-reason.js";
+import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
+import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 
 const MIN = 60_000;
 
@@ -107,8 +108,6 @@ export interface AuditSnapshot {
   unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
-  /** manual 卡「解除条件看似已满足」的只读报告（CFG manualStall 的模式，manual-reason.ts manualResumeMode）；缺省 observe，off 不报 */
-  manualResume?: ManualResumeMode;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
   unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
@@ -294,7 +293,7 @@ function witnessMismatches(ts: readonly TaskFacts[], emit: Emit): void {
  * manual 理由与恢复观察（MAN1）：只产出巡检发现（落库去重 / 推 PM），不改流程、不派单、不碰容量或合并。
  * 没有可用理由的 manual 超 30 分钟报一次；observe 下解除条件在只读事实上看似满足，按状态版本报一次 would-resume。
  */
-function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], now: number, emit: Emit): void {
+function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], resume: ManualResumeMode, now: number, emit: Emit): void {
   const unknown = s.mergeUnknown?.map((r) => r.taskId);
   for (const t of ts) {
     const d = diagnoseManual({ task: t.task, events: t.events, blockedBy: t.blockedBy, mergeUnknown: unknown });
@@ -307,7 +306,7 @@ function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], now: number, em
         detail: `${t.task.id} 进 manual（#${d.entrySeq}）已 ${mins(now - since)}，理由：${d.text || "（空）"}；解除节点：${d.node}；证据缺口：${gaps}（只报警，不改模式、不派单）`,
         suggestion: d.next });
     }
-    if (d.wouldResume && s.manualResume !== "off") {
+    if (d.wouldResume && resume !== "off") {
       emit({ rule: "manual_would_resume", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq, d.fingerprint],
         detail: `${t.task.id} manual（${d.label}：${d.text}）的解除条件「${d.release}」在只读事实上看似已满足（观察报告，本巡检不执行恢复）`,
         suggestion: d.next });
@@ -381,8 +380,8 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
   }
 }
 
-/** 一个项目一轮巡检 */
-export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
+/** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
+export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -415,9 +414,11 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
-  manualRules(s, ts, now, emit);
+  // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
+  const resume = manualResumeMode(policy, s.project);
+  manualRules(s, ts, resume, now, emit);
   evaluated.push("manual_reason_missing");
-  if (s.manualResume === "off") skip("manual 恢复观察为 off", "manual_would_resume");
+  if (resume === "off") skip("manual 恢复观察为 off（恢复策略 manualStall 为 off 或读不了）", "manual_would_resume");
   else evaluated.push("manual_would_resume");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);
