@@ -13,6 +13,17 @@ import { readJsonStateSync } from "../lib/state-file.js";
 import { emitHeldToWeb } from "./held-web.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
+import { heldIdleBatches, heldIdleScopeKey, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
+
+export interface HeldIdleControl {
+  mode: "on" | "observe" | "off";
+  /** Resolve from authenticated routing/registry state. Undefined means no proof; labels and body text confer no permission. */
+  scope: (item: HeldItem) => HeldIdleScope | undefined;
+  /** Recheck session, project permission, quota, compaction and stopped notices at the point of use. Busy alone is allowed for inbox reads. */
+  canTake: (item: HeldItem, scope: HeldIdleScope) => boolean;
+  /** Supply the existing real-delivery callback (e.g. team notice provenance); called once per acknowledged message. */
+  delivered: (channelId: string, env: Envelope) => void;
+}
 
 export interface HeldItem {
   env: Envelope;
@@ -21,7 +32,7 @@ export interface HeldItem {
   /** 已经告诉过发送方「还在排队」的时刻 */
   notifiedAt?: number;
   /** 被 check_inbox 领走、还没确认（bridge/inbox.ts）：租约内 Stop 不再投，过期后照常投 */
-  lease?: { batchId: string; at: number };
+  lease?: { batchId: string; at: number; idleScope?: HeldIdleScope };
   /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
   reason?: "quota_wall";
 }
@@ -90,11 +101,92 @@ export function notifyHeldSettled(env: Envelope, outcome: HeldOutcome): void {
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
 export class HeldQueue extends PersistedMap<HeldItem[]> {
-  constructor(path: string | null = HELD_PATH) {
+  constructor(path: string | null = HELD_PATH, private idleControl?: HeldIdleControl) {
     super(path, "押后消息", isQueue);
     for (const [ch, items] of [...this.entries()]) if (!items.length) this.deleteQuiet(ch);
     const n = [...this.values()].reduce((s, q) => s + q.length, 0);
     if (n) console.log(`♻️ 恢复押后消息 ${n} 条（bridge 重启前没投出去的）`);
+  }
+
+  /** Explicit, instance-local opt-in; reuse the held store and leases without introducing production configuration. */
+  configureIdleBatch(control?: HeldIdleControl): void { this.idleControl = control; }
+
+  private idleScope(item: HeldItem): HeldIdleScope | undefined {
+    if (!this.idleControl || this.idleControl.mode === "off" || item.reason === "quota_wall" || !isInternalIdleNotice(item)) return undefined;
+    try {
+      const scope = this.idleControl.scope(item);
+      return validHeldIdleScope(item, scope) && this.inboxAckable(item) && this.idleControl.canTake(item, scope) ? scope : undefined;
+    } catch (e) {
+      console.error(`⚠️ 内部通知权限核对失败，保留原消息: ${String(e)}`);
+      return undefined;
+    }
+  }
+
+  /** Known-but-stale or gated internal sources must not fall through to the legacy agent allowance. */
+  idleInboxAllowed(item: HeldItem): boolean | undefined {
+    if (this.idleControl?.mode !== "on" || !isInternalIdleNotice(item)) return undefined;
+    try {
+      const scope = this.idleControl.scope(item);
+      if (!scope) return item.lease?.idleScope ? false : undefined;
+      return item.reason !== "quota_wall" && validHeldIdleScope(item, scope) && this.inboxAckable(item) && this.idleControl.canTake(item, scope);
+    } catch (e) {
+      console.error(`⚠️ 内部通知领取核对失败，保留原消息: ${String(e)}`);
+      return false;
+    }
+  }
+
+  inboxLease(item: HeldItem, batchId: string, at: number): void {
+    const scope = this.idleControl?.mode === "on" ? this.idleScope(item) : undefined;
+    item.lease = { batchId, at, ...(scope ? { idleScope: scope } : {}) };
+  }
+
+  /** An internal lease is tied to its original authority/session, including after queue recovery. */
+  inboxAckable(item: HeldItem): boolean {
+    const original = item.lease?.idleScope;
+    if (!original) return true;
+    try {
+      const current = this.idleControl?.scope(item);
+      return validHeldIdleScope(item, current) && heldIdleScopeKey(current) === heldIdleScopeKey(original);
+    } catch (e) {
+      console.error(`⚠️ 内部通知确认权限核对失败，保留原消息: ${String(e)}`);
+      return false;
+    }
+  }
+
+  /** Observe constructs the same candidate batches without acquiring or changing messages. */
+  idleBatches(channelId: string, now = Date.now()): HeldIdleBatch<HeldItem>[] {
+    return heldIdleBatches((this.get(channelId) ?? []).filter((i) => !leaseActive(i, now)), (i) => this.idleScope(i));
+  }
+
+  /** Use the same partition in inbox and release construction. Legacy inbox kinds retain their existing path. */
+  inboxPartition(items: HeldItem[]): HeldItem[] {
+    if (this.idleControl?.mode !== "on" || !items.length) return items;
+    const groups = heldIdleBatches(items, (i) => this.idleScope(i));
+    const first = groups.find((g) => g.items.includes(items[0]));
+    return first ? first.items : items.filter((i) => !groups.some((g) => g.items.includes(i)));
+  }
+
+  /** A release adapter owns this existing channel lock through its final send. It must use stillWanted after every await. */
+  async withIdleBatch<T>(channelId: string, release: (batch: HeldIdleBatch<HeldItem>, stillWanted: () => boolean) => Promise<T>, now = Date.now()): Promise<T | undefined> {
+    if (this.idleControl?.mode !== "on" || !this.claim(channelId)) return undefined;
+    try {
+      const batch = this.idleBatches(channelId, now)[0];
+      if (!batch) return undefined;
+      const key = heldIdleScopeKey(batch.scope);
+      const wanted = () => this.idleControl?.mode === "on" && batch.items.every((i) => {
+        const scope = this.idleScope(i);
+        return this.get(channelId)?.includes(i) && !leaseActive(i, now) && !!scope && heldIdleScopeKey(scope) === key;
+      });
+      return await release(batch, wanted);
+    } finally { this.release(channelId); }
+  }
+
+  /** Ack is the receipt, not lease acquisition. Callback failure cannot justify delivering the same receipt twice. */
+  inboxDelivered(channelId: string, item: HeldItem): void {
+    notifyHeldSettled(item.env, "delivered");
+    if (!item.lease?.idleScope) return;
+    try { this.idleControl?.delivered(channelId, item.env); }
+    catch (e) { console.error(`⚠️ 内部通知送达回调失败（消息已确认）: ${String(e)}`); }
   }
 
   override set(channelId: string, items: HeldItem[]): this {
