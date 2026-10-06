@@ -9,6 +9,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode } from "./shared-ledger-join.js";
+import { parseV2ProjectDisplay } from "./shared-ledger-contract-v2-projects.js";
 import type { SharedLedgerProjectChoice } from "./shared-ledger-local-project.js";
 import { writeJsonAtomic } from "./state-file.js";
 
@@ -56,18 +57,17 @@ function offerNote(v: unknown): string | null | undefined {
   return v.trim() || undefined;
 }
 
-export interface JoinOfferProject { teamId: string; projectId: string; name: string }
+export type JoinOfferProject = ReturnType<typeof parseV2ProjectDisplay>;
 
-/** Display data is untrusted; reject secret-shaped and control-bearing labels before any persistence or card rendering. */
-export function parseJoinOfferProject(value: unknown): JoinOfferProject | null {
-  const p = value as Record<string, unknown> | null;
-  if (!p || typeof p !== "object" || Array.isArray(p)
-    || Object.keys(p).some(k => !["teamId", "projectId", "name"].includes(k))) return null;
-  if (typeof p.teamId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(p.teamId)
-    || typeof p.projectId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(p.projectId)) return null;
-  if (typeof p.name !== "string" || !p.name.trim() || Array.from(p.name).length > 64
-    || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(p.name) || looksLikeSharedLedgerJoinCode(p.name)) return null;
-  return { teamId: p.teamId, projectId: p.projectId, name: p.name };
+/** The wire structure comes only from N1C; card hygiene also excludes controls and credential-shaped labels. */
+export function joinOfferProjectDisplay(value: unknown): JoinOfferProject | null {
+  try {
+    const p = parseV2ProjectDisplay(value);
+    if (Object.values(p).some(v => /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(v) || looksLikeSharedLedgerJoinCode(v))) return null;
+    return p;
+  } catch {
+    return null; // A producer rejection has fixed wording; never reflect its input or error.
+  }
 }
 
 export interface JoinOffer { project?: JoinOfferProject; offerId: string; url: string; host: string; centerId: string; code: string; note?: string; expiresAt: number }
@@ -84,7 +84,7 @@ export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: J
   if (!center) return { ok: false, error: "invalid_url" };
   const code = typeof b.code === "string" && b.code === b.code.trim() ? parseSharedLedgerJoinCode(b.code) : null;
   if (!code) return { ok: false, error: "invalid_code" };
-  const project = b.project === undefined ? undefined : parseJoinOfferProject(b.project);
+  const project = b.project === undefined ? undefined : joinOfferProjectDisplay(b.project);
   if (project === null) return { ok: false, error: "invalid_offer" };
   const note = offerNote(b.note);
   if (note === null || (note && note.includes(code.secret)) || (project && Object.values(project).some(v => v.includes(code.secret)))) return { ok: false, error: "invalid_offer" };

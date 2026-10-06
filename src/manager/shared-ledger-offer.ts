@@ -12,7 +12,7 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode, SharedLedgerJoinError } from "../lib/shared-ledger-join.js";
-import { centerOfferUrl, JOIN_OFFER_MAX_TTL_MS, JOIN_OFFER_PATH, parseJoinOfferProject, saveSentOffer } from "../lib/shared-ledger-join-offer.js";
+import { centerOfferUrl, JOIN_OFFER_MAX_TTL_MS, JOIN_OFFER_PATH, joinOfferProjectDisplay, saveSentOffer } from "../lib/shared-ledger-join-offer.js";
 import { output } from "./core.js";
 import { peerCliFetch, peerE2eOnlyFetch } from "./relay.js";
 import { readJoinCodeFile } from "./shared-ledger-join-cmd.js";
@@ -79,7 +79,7 @@ const live = (): OfferDeps => ({
 /** The center-to-peer path calls this with an in-memory code; the CLI file reader is only an operational fallback. */
 export async function sendSharedLedgerOffer(flags: Record<string, string>, code: string, d: OfferDeps): Promise<Record<string, unknown>> {
   const hasProject = [flags.team, flags["shared-project"], flags.name].some(v => v !== undefined);
-  const sharedProject = hasProject ? parseJoinOfferProject({ teamId: flags.team, projectId: flags["shared-project"], name: flags.name }) : undefined;
+  const sharedProject = hasProject ? joinOfferProjectDisplay({ teamId: flags.team, projectId: flags["shared-project"], name: flags.name }) : undefined;
   if (sharedProject === null) return { ok: false, error: "团队项目信息不完整或不合法" };
   const center = centerOfferUrl(flags.url);
   if (!center) return { ok: false, error: "--url 要是中心根地址：https://<主机名>/（不带路径、查询、账号）" };

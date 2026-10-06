@@ -1,7 +1,7 @@
 import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { canManage } from "../../lib/devices.js";
 import { readBoundedRequestBody, RequestBodyError } from "../../lib/request-body.js";
-import { parseJoinOfferProject } from "../../lib/shared-ledger-join-offer.js";
+import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
 import { authenticateApi } from "../api-auth.js";
 import { apiJson } from "../api-respond.js";
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
@@ -26,7 +26,7 @@ function keys(b: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(b).some(k => !allowed.includes(k))) throw new SharedProjectsError(400, "invalid_body");
 }
 function name(value: unknown): string {
-  const p = parseJoinOfferProject({ teamId: "team", projectId: "project", name: value });
+  const p = joinOfferProjectDisplay({ teamId: "team", projectId: "project", name: value });
   if (!p) throw new SharedProjectsError(400, "invalid_name");
   return p.name;
 }
@@ -48,7 +48,7 @@ function createInput(b: Record<string, unknown>): ProjectCreate {
 
 /** Only public project fields leave the bridge, even when an injected center adapter returns extra fields. */
 function publicProject(p: Awaited<ReturnType<SharedProjectsPorts["list"]>>[number], d: SharedProjectsPorts) {
-  const display = parseJoinOfferProject({ teamId: p.teamId, projectId: p.projectId, name: p.name });
+  const display = joinOfferProjectDisplay({ teamId: p.teamId, projectId: p.projectId, name: p.name });
   if (!display || !Number.isSafeInteger(p.rev) || !["active", "archived"].includes(p.status)) throw new SharedProjectsError(503, "invalid_center_response");
   const bindings = d.bindings().filter(b => b.centerId === p.centerId && b.teamId === p.teamId && b.projectId === p.projectId);
   return { ...display, centerId: p.centerId, rev: p.rev, status: p.status, localProjectIds: bindings.map(b => b.localProjectId ?? b.projectId) };
