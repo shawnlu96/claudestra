@@ -185,10 +185,11 @@ const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_actio
  * row retains its decision's wait. Otherwise approval would depend on scan order. An open version waits in requestRefusal.
  */
 function authorizationRefusal(db: Database, taskId: string, head: string, now: number): string | null {
-  const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, id").all(taskId) as { id: string }[];
+  // Creation order: openAskFull inserts one row per transaction, so rowid breaks a same-millisecond tie; the id's suffix is random.
+  const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, rowid").all(taskId) as { id: string }[];
   const asks = rows.map(({ id }) => getAsk(db, id)).filter((a): a is Ask => !!a);
   const replaced = new Set(asks.filter((a) => a.state === "superseded" && a.updatedAt < a.expiresAt && handedOn(a, head)).map((a) => a.id));
-  const latest = new Map<string, Ask>(); // createdAt order: the last version seen of each decision is its newest
+  const latest = new Map<string, Ask>(); // creation order: the last version seen of each decision is its newest
   for (const a of asks) {
     const key = decisionKey(a);
     if (key && !(replaced.has(a.id) && asks.some((b) => b.supersedes === a.id))) latest.set(key, a);

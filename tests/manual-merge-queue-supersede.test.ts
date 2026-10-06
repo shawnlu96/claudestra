@@ -6,7 +6,7 @@
  * (tests/scheduler-merge-reclaim-world.ts); every negative is zero merge calls, no intent and no slot. Positives: B's own request (the
  * card at B's head) and A's own binding re-asked and approved each merge exactly once.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { checkAsk } from "../src/lib/ask-bind.js";
 import { closeAsk, getAsk } from "../src/lib/ledger-asks.js";
@@ -88,6 +88,19 @@ describe("P1 supersede: B's approval never covers A's request", () => {
     const a2 = authorize("M", m.head);
     await stillWaits(m); // A' open
     answer(a2.id, "go");
+    await mergesOnce();
+  }, 30_000);
+
+  test("A → B → A' opened in one millisecond with ids sorting A', B, A: A' approved merges once (creation order, not the random id)", async () => {
+    const m = await setup();
+    const ms = Date.now(), uuids = ["cccccccc-cccc-4ccc-8ccc-cccccccccccc", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"];
+    const clock = spyOn(Date, "now").mockReturnValue(ms), uuid = spyOn(crypto, "randomUUID").mockImplementation(() => uuids.shift() as never);
+    let a, b, a2;
+    try { a = authorize("M", m.head); b = authorize("M", OTHER); a2 = authorize("M", m.head); } finally { clock.mockRestore(); uuid.mockRestore(); }
+    expect([a.createdAt, b.createdAt, a2.createdAt]).toEqual([ms, ms, ms]);
+    expect([a2.id < b.id, b.id < a.id, getAsk(w.db, a.id)?.state, getAsk(w.db, b.id)?.state, a2.supersedes]).toEqual([true, true, "superseded", "superseded", b.id]);
+    answer(a2.id, "go");
+    expect(await ledgerAs(w, PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "queued" });
     await mergesOnce();
   }, 30_000);
 
