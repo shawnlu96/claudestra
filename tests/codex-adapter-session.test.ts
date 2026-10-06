@@ -168,7 +168,8 @@ describe("会话代际（B56、I11、R24）", () => {
     const h2 = harness();
     await h2.session.initialize();
     h2.f.on("thread/start", () => undefined);
-    // 故意不回 thread/start：这条约 100s 后被适配器按超时拒掉。不接住就成了未处理的 rejection，记到同进程那时在跑的别的用例头上
+    // 故意不回 thread/start：这条约 100s 后被适配器按超时拒掉。本用例只断言第二个 session/new 回 -32600，这条的结局本来就是预期内的超时、
+    // 不在断言范围，丢掉无害；不接住反而成了未处理的 rejection，记到同进程那时在跑的别的用例头上
     rpc(h2.session).request("session/new", NEW).catch(() => undefined);
     await until(() => h2.f.calls("thread/start").length === 1, "第一个 thread/start");
     await expect(rpc(h2.session).request("session/new", NEW)).rejects.toMatchObject({ code: -32600 });
