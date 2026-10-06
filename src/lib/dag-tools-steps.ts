@@ -49,6 +49,8 @@ export interface Step {
   landed?(): boolean;
   /** 只撤本次确认建的东西；失败的那一步也会被调（可能做了一半），自己判断有没有要撤的 */
   undo?(): Promise<string | null>;
+  /** 失败后返回非空 = 留着的执行者可能还在用前面各步建的东西（worktree / 分支 / 说明 / 卡）：那些一概不撤，列为残留 */
+  holds?(): string | null;
 }
 
 export type StartOutcome =
@@ -190,23 +192,40 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
 }
 
 function agentSteps(io: StepIO, p: StartPlan): Step[] {
-  let mine = false;
+  // owned：回执名 = 预检规范名、registry 里有、create 前没有，才算本次建的；只有它会被绑定 / kill。结果不明的留 unknown，不 kill
+  let owned: string | null = null;
+  let unknown: string | null = null;
   return [
     fileStep("prompt", io, p.promptPath, () => p.promptText, true),
     {
       name: "agent",
       run: async () => {
         if (io.agentExists(p.agent)) return `agent ${p.agent} 已存在（预检之后才出现，不是这次建的）`;
-        mine = true;
-        return failed(await io.manager(["create", p.agentName, p.worktree, "--purpose", p.purpose, "--task", p.taskId,
-          "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS));
+        // manager normalizeName 吃掉名字里第一个 agent- 片段：短名自带 agent-（AGL1 卡号）时传规范全名，它只去掉开头那层，落成的就是 p.agent
+        const name = p.agentName.includes("agent-") ? p.agent : p.agentName;
+        // 取结果时抛异常（读输出 / 等退出出错）也可能已建好：与失败回执同样走下面的 registry 分类，别直接跳到回滚
+        const r = await Promise.resolve()
+          .then(() => io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId,
+            "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS))
+          .catch((e: unknown) => ({ ok: false, error: `manager create 异常：${(e as Error)?.message ?? e}` }));
+        // 回执没给名字不拿计划名充数：改由 registry 核实（create 前已确认没有），核实不了留 unknown
+        const got = typeof r?.agent === "string" ? r.agent : null;
+        if (r?.ok && (got === null ? io.agentExists(p.agent) : got === p.agent)) { owned = p.agent; return null; }
+        // 回执名对不上（可能是 manager 复用的同名历史会话）、成功却查无此名、或结果丢了却在 registry 里：归属不明，不绑也不 kill
+        const who = got ?? p.agent;
+        if (r?.ok || io.agentExists(who)) unknown = who;
+        if (!r?.ok) return failed(r);
+        return got === null ? `manager create 回执没给 agent 名，registry 里也查不到 ${p.agent}` : `manager create 回执的 agent ${got} 与预检规范名 ${p.agent} 不一致`;
       },
-      // create 超时可能已建好：registry 里有、且是本次 create 之前没有的，才 kill
-      undo: async () => (mine && io.agentExists(p.agent) ? failed(await io.manager(["kill", p.agent])) : null),
+      undo: async () => {
+        if (owned && io.agentExists(owned)) return failed(await io.manager(["kill", owned]));
+        return unknown ? `agent ${unknown} 归属不明（unknown），没 kill，等 PM 核对` : null;
+      },
+      holds: () => unknown && `agent ${unknown} 归属不明，可能还在 ${p.worktree}（分支 ${p.branch}）里干活，核对后再清`,
     },
     {
       name: "task-set",
-      run: async () => failed(await ledger(io, p, "task-set", p.taskId, { rev: rev(io, p.taskId), agent: p.agent }, "task-set")),
+      run: async () => failed(await ledger(io, p, "task-set", p.taskId, { rev: rev(io, p.taskId), agent: owned ?? p.agent }, "task-set")),
       landed: () => ours(io, p, "task-set"),
     },
   ];
@@ -273,7 +292,9 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
     if (err && s.landed?.()) reconciled.push(s.name);
     else if (err) {
       // 失败的这一步也交给 undo（可能做了一半）；各步的 undo 只撤本次确认建的
-      const { rolledBack, leftovers } = await rollback([s, ...done.reverse()]);
+      const held = s.holds?.();
+      const { rolledBack, leftovers } = await rollback(held ? [s] : [s, ...done.reverse()]);
+      if (held) leftovers.push(...done.reverse().filter((d) => d.undo).map((d) => `${d.name}：没撤（${held}）`));
       return { ok: false, code: "start_failed", error: err, failedStep: s.name, rolledBack, leftovers };
     }
     done.push(s);
