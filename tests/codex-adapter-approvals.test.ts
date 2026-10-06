@@ -120,6 +120,30 @@ describe("审批经授权卡（真宿主 AcpSession 在环）", () => {
     expect(await done).toEqual({ kind: "done" });
   });
 
+  test("approval-lifetime：session/cancel 之后、turn/completed 之前新到的审批，不出卡，直接 cancel", async () => {
+    const cards: PermissionCard[] = [];
+    const { h, turnId, done } = await running({ onPermission: async (c) => (cards.push(c), "accept") });
+    await h.session.cancel();
+    await until(() => h.f.calls("turn/interrupt").length === 1, "turn/interrupt");
+    expect((await h.f.request("item/commandExecution/requestApproval", commandApproval(turnId))).result).toEqual({ decision: "cancel" });
+    expect((await h.f.request("item/fileChange/requestApproval", { threadId: "th-1", turnId, itemId: "fc_1" })).result).toEqual({ decision: "cancel" });
+    expect(cards).toHaveLength(0);
+    h.f.complete(turnId, "interrupted");
+    expect(await done).toEqual({ kind: "cancelled" });
+  });
+
+  test("approval-lifetime：等卡期间 turn/completed 到了，之后迟到的「允许」回 cancel", async () => {
+    let answer: (v: string | null) => void = () => {};
+    const { h, turnId, done } = await running({ onPermission: () => new Promise((r) => (answer = r)) });
+    const pending = h.f.request("item/commandExecution/requestApproval", commandApproval(turnId));
+    await until(() => h.out().some((m) => m.method === "session/request_permission"), "出卡");
+    h.f.complete(turnId);
+    await done;
+    expect(h.server.turns.owns("th-1", turnId)).toBe(false);
+    answer("accept");
+    expect((await pending).result).toEqual({ decision: "cancel" });
+  });
+
   test("approval-hidden-extra-permissions：带 additionalPermissions 的命令审批卡上说不清范围，不出卡，直接 cancel", async () => {
     const cards: PermissionCard[] = [];
     const { h, turnId } = await running({ onPermission: async (c) => (cards.push(c), "accept") });

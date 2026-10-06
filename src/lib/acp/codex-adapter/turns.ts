@@ -137,9 +137,10 @@ export class Turns {
     this.t = { ...TIMINGS, ...deps.timings };
   }
 
-  /** 这条审批属于当前会话里正在跑、还没收尾的那一轮（approvals.ts 据此把过期的审批直接 cancel） */
+  /** 这条审批属于当前会话里正在跑、没收尾、也没被叫停的那一轮；适配器在收尾也不算（approvals.ts 据此把过期的审批直接 cancel） */
   owns(threadId: string, turnId: string): boolean {
-    return threadId === this.deps.session.current && this.cur?.id === turnId && !this.cur.finished;
+    const t = this.cur;
+    return !this.stopped && threadId === this.deps.session.current && t?.id === turnId && !t.finished && !t.cancelRequested;
   }
 
   get busy(): boolean {

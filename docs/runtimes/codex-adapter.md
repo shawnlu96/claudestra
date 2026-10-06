@@ -102,7 +102,7 @@ prompt 的回包都带 `usage` 和 `_meta.quota`（当前会话最近一次 `thr
 - `session/request_permission` 请求失败（宿主断开、线路作废）；
 - 适配器自己的兜底时限到了（11 分钟，比宿主的 10 分钟长，正常由宿主先回 cancelled）；
 - 宿主发 `session/cancel`、这一轮收尾，或者适配器开始收尾：还在等的审批当场按 cancel 答，app-server 才停得下这一轮；
-- 审批不属于当前会话正在跑的那一轮（旧 turnId、别的线程），或者参数过不了校验：不出卡，直接 cancel；
+- 审批不属于当前会话正在跑的那一轮（旧 turnId、别的线程、这一轮已被 session/cancel 叫停还没收尾、适配器在收尾），或者参数过不了校验：不出卡，直接 cancel；
 - 宿主答「允许」时这一轮已经不是当前在跑的那一轮（答复时再核对一次）：回 cancel；
 - 带 `additionalPermissions`：不出卡，直接 cancel。
 
