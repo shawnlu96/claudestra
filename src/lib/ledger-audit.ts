@@ -9,6 +9,7 @@ import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { blockFindings } from "./scheduler-dispatch-block.js";
+import { diagnoseManual, type ManualResumeMode } from "./manual-reason.js";
 
 const MIN = 60_000;
 
@@ -38,12 +39,14 @@ export const AUDIT_THRESHOLDS = {
   orphanGraceMs: 15 * MIN,
   /** 画面认不出时，会话文件这么久内写过就当它在回合中（押后规则不报） */
   recentWriteMs: 3 * MIN,
+  /** 从自动进了 manual、却没有可用理由（manual-reason.ts）：只报警，不改模式 */
+  manualReasonMissingMs: 30 * MIN,
 } as const;
 
 const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
-  "dispatch_blocked",
+  "dispatch_blocked", "manual_reason_missing", "manual_would_resume",
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -104,6 +107,8 @@ export interface AuditSnapshot {
   unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
+  /** manual 卡「解除条件看似已满足」的只读报告（CFG manualStall 的模式，manual-reason.ts manualResumeMode）；缺省 observe，off 不报 */
+  manualResume?: ManualResumeMode;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
   unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
@@ -285,6 +290,31 @@ function witnessMismatches(ts: readonly TaskFacts[], emit: Emit): void {
   }
 }
 
+/**
+ * manual 理由与恢复观察（MAN1）：只产出巡检发现（落库去重 / 推 PM），不改流程、不派单、不碰容量或合并。
+ * 没有可用理由的 manual 超 30 分钟报一次；observe 下解除条件在只读事实上看似满足，按状态版本报一次 would-resume。
+ */
+function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], now: number, emit: Emit): void {
+  const unknown = s.mergeUnknown?.map((r) => r.taskId);
+  for (const t of ts) {
+    const d = diagnoseManual({ task: t.task, events: t.events, blockedBy: t.blockedBy, mergeUnknown: unknown });
+    if (!d) continue;
+    const entry = t.events.find((e) => e.seq === d.entrySeq);
+    const since = entry?.ts ?? now;
+    const gaps = d.gaps.join("；").slice(0, 300) || "无";
+    if (!d.code && now - since > AUDIT_THRESHOLDS.manualReasonMissingMs) {
+      emit({ rule: "manual_reason_missing", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq],
+        detail: `${t.task.id} 进 manual（#${d.entrySeq}）已 ${mins(now - since)}，理由：${d.text || "（空）"}；解除节点：${d.node}；证据缺口：${gaps}（只报警，不改模式、不派单）`,
+        suggestion: d.next });
+    }
+    if (d.wouldResume && s.manualResume !== "off") {
+      emit({ rule: "manual_would_resume", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq, d.fingerprint],
+        detail: `${t.task.id} manual（${d.label}：${d.text}）的解除条件「${d.release}」在只读事实上看似已满足（观察报告，本巡检不执行恢复）`,
+        suggestion: d.next });
+    }
+  }
+}
+
 function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
   const skip = (name: string) => s.pms.includes(name) || name === "master" || name === "owner";
   const byAgent = new Map<string, TaskFacts[]>();
@@ -385,6 +415,10 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
+  manualRules(s, ts, now, emit);
+  evaluated.push("manual_reason_missing");
+  if (s.manualResume === "off") skip("manual 恢复观察为 off", "manual_would_resume");
+  else evaluated.push("manual_would_resume");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);
     evaluated.push("pm_held");
