@@ -1,4 +1,5 @@
-import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow-provider.js";
+import type { ReborrowProviderPort } from "./lend-reborrow-provider.js";
+import { recoveryClaimProblem, type Reborrow2ProviderPort } from "./lend-reborrow2-provider.js";
 /**
  * 出借单逐状态推进（docs/design/remote-capacity.md §2.3、§6）：lend 循环每轮对 journal 里每张活着的单调一次 driveOrder，按状态做下一步。
  * 规矩：先写 journal 再做外部效果；同一件外部效果重启后只会重做幂等的那几种（claim 同 orderId、result 同原始字节、续租），
@@ -56,6 +57,8 @@ interface WorkerPort {
 
 export interface LendDeps {
   reborrowCheckpoints?: ReborrowProviderPort["reborrowCheckpoints"];
+  reborrow2Checkpoints?: Reborrow2ProviderPort["reborrow2Checkpoints"];
+  reborrow2Remote?: Reborrow2ProviderPort["reborrow2Remote"];
   db: Database;
   now: () => number;
   call: LendCall;
@@ -150,7 +153,7 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const claimed = advance(d.db, row.orderId, "asked", "claimed",
     { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}) }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
   if (mismatch) return release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
-  const recoveryProblem = await reborrowClaimProblem(claimed, d);
+  const recoveryProblem = await recoveryClaimProblem(claimed, d);
   if (recoveryProblem) await release(claimed, "claimed", recoveryProblem, d);
 }
 
@@ -372,7 +375,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   if (!cur) return;
   const o = orderOf(cur);
   if (cur.state === "claimed" || cur.state === "cloned") {
-    const recoveryProblem = await reborrowClaimProblem(cur, d);
+    const recoveryProblem = await recoveryClaimProblem(cur, d);
     if (recoveryProblem) return release(cur, cur.state, recoveryProblem, d);
   }
   if (cur.state === "claimed") {

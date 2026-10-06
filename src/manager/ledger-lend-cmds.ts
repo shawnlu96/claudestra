@@ -4,6 +4,8 @@ import { prepareReborrowContext } from "../lib/lend-reborrow-context.js";
 import { reborrowKey, replayReborrow } from "../lib/lend-reborrow-event.js";
 import { reborrowSourceProbe } from "../lib/lend-reborrow-probe.js";
 import { prepareReborrowSource, type ReborrowSource, type ReborrowSourceProbe } from "../lib/lend-reborrow-source.js";
+import { reborrow2Family, runReborrow2 } from "../lib/lend-reborrow2-cli.js";
+import { reborrow2SourceProbe, type Reborrow2SourceProbe } from "../lib/lend-reborrow2-source.js";
 /**
  * `ledger lend-*`（T93，docs/design/remote-capacity.md §2.2、§3）：
  * - PM：lend-offer / lend-cancel / lend-reoffer 挂单、撤单、重挂；lend-orders 查这张卡的出借单；lend-reclaim 收回写代码（i28-R6）。
@@ -53,6 +55,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 /** Tests inject all three; production reads lend.json + peers + projects fresh on every call (a revoked borrow applies at once). */
 export interface LendCliDeps {
   reborrowSource?: ReborrowSourceProbe;
+  reborrow2Source?: Reborrow2SourceProbe;
   borrow(): Promise<BorrowEntry[]>;
   notifyPm(project: string, text: string): Promise<void>;
   /** 审查结论与写单交付共用（报告目录、写报告、签回执）；写单另要查远端 head 与对方指纹（只测审查的注入可以不给） */
@@ -189,9 +192,27 @@ async function reborrow(c: LedgerCli): Promise<Result> {
     branch: o.branch, base: o.base, providerVerification: "required_at_claim", materialsDiag };
 }
 
+/** REBOR2 (lend-reborrow2-cli.ts): any canonical ended lease, adopted as terminal fact; dry-run unless --apply. */
+async function reborrow2(c: LedgerCli): Promise<Result> {
+  const task = c.task(c.p.pos[1]);
+  c.requireRealPm(task.project, "终态接续写租约");
+  const { peer, repo } = offerPeer(c, task), endedOrder = c.p.flags["ended-order"], family = c.p.flags.family ?? "";
+  if (!endedOrder || !family || c.p.flags.pr || c.p.flags.reclaim || (c.p.flags.base && c.p.flags.base !== "main")) {
+    throw new LedgerError("invalid", "终态接续必填 --ended-order <原写单> --family，PR 取自来源核验，base 只能 main");
+  }
+  const deps = lendDeps(c), wd = writeDeps(c);
+  return runReborrow2({ db: c.db, actor: c.deps.actor, now: () => c.deps.now(), ctx: () => c.ctx(), peerFp: (p) => wd.peerFp(p),
+    borrow: async () => (await borrowOf(c, peer))(task.project), probe: deps.reborrow2Source ?? reborrow2SourceProbe(wd),
+    materials: async (original) => withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project), original)),
+    refresh: (input) => refreshCliOffer(input, task.project, deps),
+  }, { taskId: task.id, peer, repo, family: reborrow2Family(family), endedOrder, apply: c.p.bools.has("apply") }) as Promise<Result>;
+}
+
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
+  if (c.p.bools.has("reborrow") && c.p.bools.has("reborrow2")) throw new LedgerError("invalid", "--reborrow 与 --reborrow2 不能同时用");
   if (c.p.bools.has("reborrow")) return reborrow(c);
-  if (c.p.bools.has("apply") || c.p.flags.reclaim) throw new LedgerError("invalid", "--apply / --reclaim 仅用于 --reborrow");
+  if (c.p.bools.has("reborrow2")) return reborrow2(c);
+  if (c.p.bools.has("apply") || c.p.flags.reclaim || c.p.flags["ended-order"]) throw new LedgerError("invalid", "--apply / --reclaim / --ended-order 仅用于 --reborrow / --reborrow2");
   const task = c.task(c.p.pos[1]);
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
   await ensureReviewScope(c.db, task.id); // 规格外文件在挂池事务外先登记，事务里的审查单只读（i28-ASK2）
@@ -328,9 +349,9 @@ const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
 
 export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-offer": {
-    valued: [...OFFER_FLAGS, "reclaim"], bools: ["reborrow", "apply"],
+    valued: [...OFFER_FLAGS, "reclaim", "ended-order"], bools: ["reborrow", "reborrow2", "apply"],
     usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex|claude] [--base main] " +
-      "[--reborrow --reclaim seq [--apply]]（续借默认 dry-run；把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；" +
+      "[--reborrow --reclaim seq [--apply]] [--reborrow2 --ended-order <原写单> --family F [--apply]]（续借 / 终态接续默认 dry-run；把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；" +
       "--family 缺省 codex，claude 写单须有作者记录及有效 v3 授权；审查须跨模型，security 卡只在本机审）",
     run: (c) => offer(c, false),
   },
