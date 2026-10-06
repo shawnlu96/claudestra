@@ -1,15 +1,15 @@
 /**
- * dispatch-recovery-POOLRV1: a pooled review is a merge source only with its real tickets. Real temp ledger, real lend CLI
- * (claim / write), the production auto tick planning the merge: a normally answered pool order lets the merge be planned and
- * the merge run's proof hold; a wrong head / round / specRev, a non-review / claimed / unknown / cancelled order, a missing
- * claim or receipt, a non-scheduler order, a same-family reviewer, a CLI copy (no_order) are all refused with zero merge intents.
+ * dispatch-recovery-POOLRV1: a pooled review is a merge source only with its real tickets. Real temp ledger and lend CLI on A, a
+ * real lending side B (journal + lend-tools take_review / submit_verdict, synthetic key; pool-review-proof-helpers.ts), the
+ * production auto tick planning the merge. Refused with zero merge intents: drifted head / round / specRev / gen, non-review /
+ * claimed / unknown / cancelled orders, missing receipts, CLI or legacy results without a ticket, no take, wrong / late / no pin,
+ * tampered body, missing or altered archive, same family, no_order.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
+import { instanceKeySync } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
@@ -19,24 +19,28 @@ import { autoReviewWriter } from "../src/lib/scheduler-auto-review.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
 import { claimsPoolReview, poolReviewRefusal } from "../src/lib/pool-review-proof.js";
+import { aResultDeps, B_WORKER, lendSide } from "./pool-review-proof-helpers.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
+const FINDING = { findingId: "note-1", family: "storage", severity: "P2", probe: "raw probe", description: "machine description" };
+const REPORT = "〔原始报告〕\r\nsecond line【通过】\n";
 
-/** An auto card whose round-1 review was pooled to mate, claimed and answered `pass` through the lend CLI; the card sits in merge. */
-async function answered() {
+type Opts = { pinned?: "b" | "other" | "late" | "none"; take?: boolean; legacy?: boolean; tamper?: boolean };
+
+/** An auto card whose round-1 review was pooled to mate and answered by B's real worker tools; the card sits in merge. */
+async function pooledReview(o: Opts = {}) {
   const f = autoFixture();
   const spec = join(f.dir, "T1.md");
   writeFileSync(spec, "规格：只改 src/lib/x.ts\n验收：单测全绿");
   f.db.run("UPDATE tasks SET spec = ?, pr = 'https://github.com/o/r/pull/7' WHERE id = 'T1'", [spec]);
   const borrow: BorrowEntry[] = [{ peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 1 }];
-  const reports = join(f.dir, "reports");
-  mkdirSync(reports);
-  const key = instanceKeySync(mkdtempSync(join(f.dir, "key-")));
-  const lend = {
-    borrow: async () => borrow, notifyPm: async () => {},
-    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key) },
-  };
+  const b = lendSide(f.dir);
+  const pin = o.pinned ?? "b";
+  const pinned = pin === "none" ? null : pin === "other" ? { publicKey: instanceKeySync(join(f.dir, "other-key"))!.publicKey, pinnedAt: b.pinned.pinnedAt }
+    : pin === "late" ? { ...b.pinned, pinnedAt: new Date(8.64e15).toISOString() } : b.pinned;
+  const a = aResultDeps(f.dir, pinned);
+  const lend = { borrow: async () => borrow, notifyPm: async () => {}, result: a.result };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
   const deps = { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow };
   const tick = async () => {
@@ -44,20 +48,21 @@ async function answered() {
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
-  const peer = (ep: string, body: unknown) => cli("owner", `lend-${ep}`, "--", "mate", JSON.stringify(body));
-  const verdictBody = (orderId: string) => ({
-    v: 1, orderId, gen: 1, report: "## 结论", session: { id: "sess-1", family: "codex" },
-    verdict: { v: 1, orderId, head: H1, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" },
-  });
+  const peer = (ep: string, body: unknown) => cli("owner", `lend-${ep}`, "--", "mate", typeof body === "string" ? body : JSON.stringify(body));
   await toBuild(f);
   await f.tick();
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
   expect(await tick()).toMatchObject({ step: "pool_pooled" });
-  const [o] = listLendOrders(f.db, "T1");
-  expect((await peer("claim", { v: 1, orderId: o.orderId, worker: "w1" })).ok).toBe(true);
-  expect(await peer("write", verdictBody(o.orderId))).toMatchObject({ ok: true });
-  expect(await tick()).toMatchObject({ step: "pool_done" });
-  expect(await tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+  const [order] = listLendOrders(f.db, "T1");
+  const claim = await peer("claim", { v: 1, orderId: order.orderId, worker: B_WORKER });
+  expect(claim.ok).toBe(true);
+  const send = (body: Record<string, unknown>) => {
+    let out = body;
+    if (o.legacy) { const { ticket: _t, ...rest } = body; out = rest; }
+    if (o.tamper) out = { ...out, report: "## 改过的报告" };
+    return peer("write", out);
+  };
+  const answer = await b.answer(claim as never, { verdict: "changes", findings: [FINDING], report: REPORT }, send, { take: o.take });
   const merges = () => (f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE action = 'merge'").get() as { n: number }).n;
   const facts = () => {
     const r = currentReviewFacts(f.task(), listEvents(f.db, { project: "p", target: "T1" }));
@@ -65,7 +70,17 @@ async function answered() {
     return r.facts;
   };
   const proof = () => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!);
-  return { f, o, tick, merges, facts, proof, resend: () => peer("write", verdictBody(o.orderId)) };
+  const lendData = () => listEvents(f.db, { project: "p", target: "T1" }).find((e) => e.kind === "review")?.data.lend as Record<string, any> | undefined;
+  return { f, o: order, b, a, answer, tick, merges, facts, proof, lendData, peer, resend: () => peer("write", answer.sent[0]) };
+}
+
+/** Answered normally; P2 changes don't block the gate, so the card moves to merge on the next ticks. */
+async function answered(o: Opts = {}) {
+  const p = await pooledReview(o);
+  expect(p.answer.r).toMatchObject({ ok: true });
+  expect(await p.tick()).toMatchObject({ step: "pool_done" });
+  expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+  return p;
 }
 
 describe("POOLRV1 pool review proof on a real ledger and the production planner", () => {
@@ -84,6 +99,83 @@ describe("POOLRV1 pool review proof on a real ledger and the production planner"
       expect(p.merges()).toBe(1);
       expect(p.proof().eventSeq).toBe(p.facts().eventSeq);
       expect(receipt).toBe(listLendOrders(p.f.db, "T1")[0].orderId);
+    } finally { p.f.close(); }
+  });
+
+  test("the archive holds the received request byte for byte: report (CRLF, brackets), finding description and ticket, bound to the event", async () => {
+    const p = await answered();
+    try {
+      const lend = p.lendData()!;
+      expect(lend.ticketRefusal).toBeUndefined();
+      expect(lend.ticket).toMatchObject({ orderId: p.o.orderId, worker: B_WORKER, session: "b-sess-1", key: p.b.key.publicKey });
+      expect(lend.raw.sha256).toBe(listLendOrders(p.f.db, "T1")[0].resultSha);
+      expect(lend.raw.path).toBe(join(p.a.rawDir, `${lend.raw.sha256}.json`));
+      const bytes = readFileSync(lend.raw.path, "utf8");
+      expect(bytes).toBe(JSON.stringify(p.answer.sent[0])); // exactly what B sent, not rebuilt
+      const body = JSON.parse(bytes);
+      expect(body.report).toBe(REPORT);
+      expect(body.verdict.findings[0].description).toBe("machine description");
+      expect(body.ticket).toEqual(lend.ticket);
+    } finally { p.f.close(); }
+  });
+
+  const refused: [string, Opts, RegExp][] = [
+    ["a legacy / CLI result without a ticket enters but is no AUTO source", { legacy: true }, /缺 submit_verdict 票据/],
+    ["a ticket checked against another pinned key", { pinned: "other" }, /钉住的对方钥匙/],
+    ["a key pinned only after the claim (re-pinned)", { pinned: "late" }, /晚于这一单的领单/],
+    ["no pinned key readable", { pinned: "none" }, /读不到这个 peer 钉住的钥匙/],
+    ["a body changed after signing (same ticket)", { tamper: true }, /payloadSha/],
+  ];
+  for (const [why, o, msg] of refused) {
+    test(`${why} → refused, zero merge intents`, async () => {
+      const p = await answered(o);
+      try {
+        expect(poolReviewRefusal(p.f.db, p.f.task(), getWorkflow(p.f.db, "T1")!, p.facts())).toMatch(msg);
+        const out = await p.tick();
+        expect(["replan", "manual"]).toContain(out.step);
+        expect(p.merges()).toBe(0);
+        expect(p.proof).toThrow();
+      } finally { p.f.close(); }
+    });
+  }
+
+  test("no take_review → B sends no ticket; A enters the verdict as before but it is no AUTO source, no merge", async () => {
+    const p = await answered({ take: false });
+    try {
+      expect(p.answer.sent[0]).not.toHaveProperty("ticket");
+      expect(poolReviewRefusal(p.f.db, p.f.task(), getWorkflow(p.f.db, "T1")!, p.facts())).toMatch(/缺 submit_verdict 票据/);
+      await p.tick();
+      expect(p.merges()).toBe(0);
+      expect(p.proof).toThrow();
+    } finally { p.f.close(); }
+  });
+
+  const archive: [string, (path: string) => void, RegExp][] = [
+    ["archive deleted", (path) => unlinkSync(path), /原件缺失/],
+    ["archive altered", (path) => writeFileSync(path, readFileSync(path, "utf8").replace("second", "SECOND")), /原件缺失、被改/],
+    ["archive readable by others", (path) => chmodSync(path, 0o644), /原件缺失、被改/],
+  ];
+  for (const [why, hurt, msg] of archive) {
+    test(`${why} → refused, zero merge intents`, async () => {
+      const p = await answered();
+      try {
+        hurt(p.lendData()!.raw.path);
+        expect(poolReviewRefusal(p.f.db, p.f.task(), getWorkflow(p.f.db, "T1")!, p.facts())).toMatch(msg);
+        await p.tick();
+        expect(p.merges()).toBe(0);
+        expect(p.proof).toThrow();
+      } finally { p.f.close(); }
+    });
+  }
+
+  test("the same body resent twice at once after entry: one review event, one receipt, one merge", async () => {
+    const p = await pooledReview({ take: true });
+    try {
+      const [x, y] = await Promise.all([p.resend(), p.resend()]);
+      expect(x.receipt).toEqual(y.receipt);
+      expect(listEvents(p.f.db, { project: "p", target: "T1" }).filter((e) => e.kind === "review")).toHaveLength(1);
+      await p.tick(); await p.tick(); await p.tick(); await p.tick();
+      expect(p.merges()).toBe(1);
     } finally { p.f.close(); }
   });
 

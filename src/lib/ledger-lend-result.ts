@@ -8,7 +8,8 @@
  * The peer's report and finding text are foreign data: folded and masked (T87), quoted line by line under a code-built
  * heading, before this machine stores them; the peer's session id is masked the same way. The report file is per order and
  * written only once the receipt is signed, still inside the transaction (a refusal leaves no file). A resend with the same
- * body bytes returns the original signed receipt.
+ * body bytes returns the original signed receipt. POOLRV1: the received request text and a submit_verdict ticket checked against the
+ * peer's pinned key are bound to the review event here, in the same transaction (pool-review-proof-admit.ts).
  * Write orders (i28-R6) deliver instead of reviewing: writeLendDeliver below, same receipt and idempotency.
  * tests/ledger-lend.test.ts「lend-write」, tests/ledger-lend-write.test.ts.
  */
@@ -27,6 +28,8 @@ import { quoteExternal } from "./quote-text.js";
 import { storedBasis } from "./review-converge-report.js";
 import { convergenceResult, deliveryBranchMatches, assertConvergenceDeliveryLease, completeConvergenceDelivery } from "./lend-arbiter-result.js";
 import { withOriginalIds } from "./order-gate-heads.js";
+import { admitPoolEvidence, type PinnedKey, type ReceivedResult } from "./pool-review-proof-admit.js";
+import type { RawRef } from "./pool-review-proof-raw.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -34,6 +37,10 @@ export interface LendResultDeps {
   writeReport(path: string, body: string): void;
   /** Instance-key signature over the receipt fields in order; null = no key, and nothing is recorded. */
   sign(fields: string[]): { key: string; sig: string } | null;
+  /** POOLRV1: keep the received request text under an A-chosen content-hash path; not given = no archive (the result enters, never as an AUTO source) */
+  saveRaw?(text: string): RawRef;
+  /** POOLRV1: the key this machine pinned for the peer and when; read-only, null = none */
+  pinnedKey?(peer: string): Promise<PinnedKey | null>;
 }
 
 export const RECEIPT_PURPOSE = "claudestra-lend-receipt-v1" as const;
@@ -65,7 +72,8 @@ function probeOf(p: string): string {
   return s.length > PROBE_MAX ? refuse("invalid", `脱敏后的 probe 超过 ${PROBE_MAX} 字`) : s;
 }
 
-export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps): LendReceipt {
+export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps,
+  received: ReceivedResult = {}): LendReceipt {
   req = withOriginalIds(db, req); // aliased finding ids back to this machine's originals (i28-GATE2)
   const convergence = convergenceResult(db, ctx, peer, req, bodySha, deps); if (convergence) return convergence;
   return tx(db, () => {
@@ -91,12 +99,13 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
     const path = join(deps.reportDir(o), lendReportName(o));
     const session = sanitizeForeign(req.session.id);
     const v = req.verdict;
+    const evidence = admitPoolEvidence(db, o, req, bodySha, received, deps.saveRaw);
     const review = recordReview(db, { ...ctx, dedupKey: `lend:${o.orderId}` }, {
       taskId: o.taskId, reviewer: `peer:${peer}`, verdict: v.verdict, p0: v.p0, p1: v.p1, p2: v.p2, path, text: `远端审查（${peer}，单号 ${o.orderId}）：${v.verdict}`,
       head: o.head, reviewerSessionId: `lend:${peer}:${o.orderId}`, reviewerFamily: o.family,
       findings: v.findings.map((f) => ({ findingId: f.findingId, family: f.family, severity: f.severity, probe: probeOf(f.probe),
         ...storedBasis(f, req.report), ...(f.pitfall ? { pitfall: true } : {}) })),
-      ...{ lend: { orderId: o.orderId, peer, gen: o.leaseGen, sha256: bodySha, claim: { family: req.session.family, session } } },
+      ...{ lend: { orderId: o.orderId, peer, gen: o.leaseGen, sha256: bodySha, claim: { family: req.session.family, session }, ...evidence } },
     });
     const eventSeq = review.event.seq;
     const signed = deps.sign([o.orderId, bodySha, String(eventSeq), o.taskId]);

@@ -1,8 +1,9 @@
 /**
  * dispatch-recovery-POOLRV1: a lend-pool verdict counts as a merge source only when the ledger proves the engine's own pool round
- * (scheduler intent → done review order on this head/specRev/round → peer claim → signed receipt) and a cross-family reviewer.
+ * (scheduler intent → done review order on this head/specRev/round → peer claim → signed receipt → B's submit_verdict ticket, checked
+ * against the pinned key at entry → the intact received request it came in) and a cross-family reviewer.
  * No same-family exemption (no MODELX record). CLI / no_order / bare `peer:` verdicts stay manual; nothing is written or backfilled.
- * Read-only; callers run it inside their own BEGIN IMMEDIATE. tests/pool-review-proof*.test.ts.
+ * Read-only; callers run it in their own BEGIN IMMEDIATE. tests/pool-review-proof*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { TaskWorkflow } from "./ledger-scheduler.js";
@@ -10,6 +11,8 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import type { ReviewFacts } from "./scheduler-review.js";
+import { readRawResult, type RawRef } from "./pool-review-proof-raw.js";
+import { logicalSha, parseReviewTicket, ticketProblem } from "./pool-review-proof-ticket.js";
 
 /** The session id writeLendResult gives a pool verdict; a claimed reviewer session with this shape is a pool claim. */
 const LEND_SESSION = /^lend:/;
@@ -49,7 +52,7 @@ export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "p
   if (o.head !== task.headSHA || facts.head !== o.head || o.round !== task.round || facts.round !== o.round || o.specRev !== task.specRev) {
     return why(`出借单 ${orderId} 的 head / 轮次 / specRev 与卡上当前的不一致`);
   }
-  // submit_verdict: the receipt writeLendResult signed in the verdict's own transaction, naming this very event.
+  // The receipt writeLendResult signed in the verdict's own transaction, naming this very event.
   const receipt = parse(o.receipt);
   if (o.eventSeq !== ev.seq || ev.dedupKey !== `lend:${orderId}` || !o.resultSha || lend.sha256 !== o.resultSha || !receipt ||
     receipt.orderId !== orderId || receipt.taskId !== task.id || receipt.eventSeq !== ev.seq || receipt.sha256 !== o.resultSha ||
@@ -62,7 +65,9 @@ export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "p
     typeof claim.session !== "string" || !claim.session) {
     return why(`结论的提供方 / 会话 / 家族 / 租约代数与出借单 ${orderId} 不一致`);
   }
-  // take_review: the peer's claim of this order with the worker and lease generation the verdict was entered under.
+  const evidence = ticketEvidence(lend, o, task);
+  if (evidence) return why(`出借单 ${orderId} ${evidence}`);
+  // The claim of this order with the worker and lease generation the verdict was entered under.
   const claimed = db.query(`SELECT seq FROM events WHERE target = ? AND kind = 'note' AND seq < ? AND json_extract(data, '$.lend.orderId') = ?
     AND json_extract(data, '$.lend.op') = 'claim' AND json_extract(data, '$.lend.peer') = ? AND json_extract(data, '$.lend.worker') = ?
     AND json_extract(data, '$.lend.gen') = ? ORDER BY seq DESC LIMIT 1`).get(task.id, ev.seq, orderId, o.peer, o.worker, o.leaseGen) as { seq: number } | null;
@@ -80,4 +85,23 @@ export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "p
   const author = remoteHeadFamily(db, task) ?? workflow.authorFamily;
   if (o.family === author) return why(`审查家族 ${o.family} 与实际作者家族相同（无正式 MODELX 豁免记录）`);
   return null;
+}
+
+/** B's submit_verdict ticket as the writer admitted it, re-checked against the archived received request (its bytes, ticket and digest). */
+function ticketEvidence(lend: Record<string, unknown>, o: OrderRow, task: Pick<LedgerTask, "id">): string | null {
+  if (typeof lend.ticketRefusal === "string") return `的票据入账时没通过（${lend.ticketRefusal}）`;
+  const ticket = parseReviewTicket(lend.ticket);
+  if (!ticket) return "缺 submit_verdict 票据（旧版 peer 或 CLI lend submit 交的）";
+  const ref = obj(lend.raw) as RawRef | null;
+  if (!ref || ref.sha256 !== o.resultSha) return `缺收到的原件（${typeof lend.rawRefusal === "string" ? lend.rawRefusal : "没有记录"}）`;
+  const text = readRawResult(ref);
+  const body = text === null ? null : parse(text);
+  if (!body) return "的原件缺失、被改或读不到";
+  const session = obj(body.session)?.id;
+  if (body.orderId !== o.orderId || JSON.stringify(parseReviewTicket(body.ticket)) !== JSON.stringify(ticket) || typeof session !== "string") {
+    return "的原件与入账的票据不一致";
+  }
+  const bad = ticketProblem(ticket, { orderId: o.orderId, gen: o.leaseGen, taskId: task.id, head: o.head, specRev: o.specRev, round: o.round,
+    family: o.family, worker: o.worker ?? "", session, payloadSha: logicalSha(body) }, ticket.key);
+  return bad ? `的票据不成立（${bad}）` : null;
 }
