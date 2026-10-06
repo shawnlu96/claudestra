@@ -1,5 +1,8 @@
 /** Codex / Pi 的 ACP 健康检查；doctor 只读，不试图安装或重启。 */
 import { checkAcpReady, probePiAcp, type AcpReady } from "./acp/readiness.js";
+import { identityLine } from "./acp/codex-compat.js";
+import { adapterFor, readAdapterChoice, type AdapterChoice, type CodexAdapterId } from "./acp/codex-compat-switch.js";
+import { readCodexRunningAdapter } from "./codex-version.js";
 import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { rangeAllows } from "./acp/resolve.js";
 import { probeClaudeVersion } from "./claude-binary.js";
@@ -40,7 +43,7 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
   const group = "Codex ACP";
   const checks: Check[] = [{
     group, name: "适配器和 app-server", status: ready.ok ? "ok" : activeAcp.length ? "fail" : "warn",
-    detail: ready.ok ? `${adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub"} 校验通过，Codex CLI 有 app-server` : ready.reason,
+    detail: ready.ok ? `${ready.adapter === "self" ? "自研 Codex 适配器" : adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub"} 校验通过，Codex CLI 有 app-server` : ready.reason,
     ...(!ready.ok ? { fix: "运行 bun src/manager.ts migrate --acp；下载仍失败时现有 Codex 留在 tmux" } : {}),
   }];
   checks.push({ group, name: "registry 迁移", status: unmigrated.length ? "warn" : "ok",
@@ -55,11 +58,40 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
   return checks;
 }
 
+/**
+ * 自研适配器（选择开关里全局或任一 agent 选了 self 才报）：组合身份 + 协议判定，和每个选了自研的 ACP agent 实际在跑哪个。
+ * ready 是按「选了自研」跑的那一次就绪判定：adapter=self 即本机 codex 判兼容；upstream + selfRefused 即判不过、宿主会退回上游。
+ */
+export function selfAdapterChecks(agents: RegistryAgent[], ready: AcpReady, choice: AdapterChoice, running: (agent: string) => CodexAdapterId | undefined): Check[] {
+  const chosen = agents.filter((a) => a.runtime === "codex" && adapterFor(choice, a.name) === "self");
+  if (choice.default !== "self" && !chosen.length) return [];
+  const group = "Codex ACP";
+  const scope = choice.default === "self" ? "全局选了自研" : `${chosen.map((a) => a.name).join(", ")} 选了自研`;
+  const checks: Check[] = [];
+  if (ready.ok && ready.compat?.identity) {
+    const diff = ready.compat.reasons.length ? `；协议差异 ${ready.compat.reasons.length} 条：${ready.compat.reasons.slice(0, 3).join("；")}` : "";
+    checks.push(ready.adapter === "self"
+      ? { group, name: "自研适配器组合", status: "ok", detail: `${scope}：${identityLine(ready.compat.identity)}，按 app-server 协议判兼容${diff}` }
+      : { group, name: "自研适配器组合", status: "warn", detail: `${scope}，但用不了、宿主会起上游：${ready.selfRefused}（${identityLine(ready.compat.identity)}）`,
+        fix: "等自研适配器跟上这版 codex（锁文件见 docs/runtimes/codex-adapter.md），或 bun src/manager.ts codex-adapter rollback 切回上游" });
+  } else if (ready.ok) {
+    checks.push({ group, name: "自研适配器组合", status: "warn", detail: `${scope}，但${ready.selfRefused ?? "判不出组合身份"}；宿主会起上游`,
+      fix: "bun src/manager.ts codex-adapter rollback 切回上游，或修好 codex 后重启这些 agent" });
+  }
+  const fell = chosen.filter((a) => a.transport === "acp" && running(a.name) === "upstream");
+  if (fell.length) checks.push({ group, name: "自研适配器回退", status: "warn", detail: `${fell.map((a) => a.name).join(", ")} 选了自研，宿主上一次实际起的是上游（自研起不来已退回）`,
+    fix: "看这些 agent 的 host.log 里「自研 Codex 适配器用不了」那一行；修好后 restart，或 codex-adapter rollback 不再试自研" });
+  return checks;
+}
+
 async function checkCodexAcp(): Promise<Check[]> {
-  const [agents, ready] = await Promise.all([readRegistryAgents(), checkAcpReady(false)]);
+  const choice = readAdapterChoice();
+  const agents = await readRegistryAgents();
+  const anySelf = choice.default === "self" || agents.some((a) => a.runtime === "codex" && adapterFor(choice, a.name) === "self");
+  const ready = await checkAcpReady(false, anySelf ? { selected: () => "self" } : {});
   const bin = ready.ok ? ready.codexBin : undefined; // 沙箱 stub 没有 codexBin：不探
   const version = bin ? await probeClaudeVersion(defaultRunner, bin).catch(() => null) : undefined; // 探失败 = 「读不出版本」照样报 warn
-  return acpDoctorChecks(agents, ready, version);
+  return [...acpDoctorChecks(agents, ready, version), ...selfAdapterChecks(agents, ready, choice, (a) => readCodexRunningAdapter(a))];
 }
 
 const isPiAcp = (a: RegistryAgent) => a.runtime === "pi" && a.transport === "acp";

@@ -6,11 +6,15 @@ import { probeClaudeVersion } from "../claude-binary.js";
 import { piBinName } from "../pi-env.js";
 import { isNewerVersion } from "../update-hints.js";
 import { codexAcpInstalled, codexPairsWithAdapter, reconcileCodexAcp } from "./install.js";
-import { identityLine, probeCodexCompat, selectedCodexAdapter, type CodexCompat } from "./codex-compat.js";
+import { selectedCodexAdapter, selfAdapterVerdict, type CodexCompat } from "./codex-compat.js";
+import type { CodexAdapterId } from "./codex-compat-switch.js";
 import { repoStubPath } from "./stub.js";
 
-/** compat：自研适配器生效时本机 codex 的协议判定（含组合身份） */
-export type AcpReady = { ok: true; codexBin?: string; compat?: CodexCompat } | { ok: false; reason: string };
+/**
+ * compat：选了自研时本机 codex 的协议判定（含组合身份）；adapter：宿主会起哪一个（选了自研但判不过 = upstream，
+ * selfRefused 写原因）。没选自研时两者都不带。
+ */
+export type AcpReady = { ok: true; codexBin?: string; compat?: CodexCompat; adapter?: CodexAdapterId; selfRefused?: string } | { ok: false; reason: string };
 
 export interface AcpReadyDeps {
   env?: Record<string, string | undefined>;
@@ -21,7 +25,8 @@ export interface AcpReadyDeps {
   install?: (codexVersion: () => Promise<string | undefined>) => ReturnType<typeof reconcileCodexAcp>;
   pairs?: (codexVersion: string | undefined) => boolean;
   stub?: () => string | null;
-  selected?: () => "upstream" | "self";
+  /** 缺省全局选择；按 agent 判的调用方传 () => selectedCodexAdapter(name) */
+  selected?: () => CodexAdapterId;
   compat?: (codexBin: string) => CodexCompat;
 }
 
@@ -50,7 +55,15 @@ export async function probeAcpCli(deps: AcpReadyDeps = {}): Promise<AcpReady> {
 export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
   const cli = await probeAcpCli(deps);
   if (!cli.ok || isSandbox(deps.env ?? process.env)) return cli;
-  if ((deps.selected ?? selectedCodexAdapter)() === "self") return selfAdapterReady(cli, deps);
+  // 选了自研：兼容才用；不兼容 / 判不出都退回上游（codex-compat.ts selfAdapterVerdict 写了为什么），宿主起之前按同一判据再判一次
+  const self = (deps.selected ?? selectedCodexAdapter)() === "self" ? selfAdapterVerdict(cli.codexBin, deps.compat) : null;
+  if (self?.ok) return { ...cli, compat: self.compat, adapter: "self" };
+  const up = await upstreamReady(cli, autoInstall, deps);
+  if (!self) return up;
+  return up.ok ? { ...up, compat: self.compat, adapter: "upstream", selfRefused: self.why } : { ok: false, reason: `${self.why}；上游 codex-acp 也不可用：${up.reason}` };
+}
+
+async function upstreamReady(cli: { ok: true; codexBin?: string }, autoInstall: boolean, deps: AcpReadyDeps): Promise<AcpReady> {
   const have = (deps.installed ?? codexAcpInstalled)();
   if (!autoInstall) return have.ok ? cli : { ok: false, reason: have.hint };
   const bin = cli.codexBin;
@@ -64,19 +77,6 @@ export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}
     return cli;
   }
   return { ok: false, reason: installed.error };
-}
-
-/**
- * 自研适配器在仓库里、不用装，也不看上游指针：只按协议判本机 codex。不兼容 = 未就绪；判不出照常就绪只告警
- * （和上游离线时不把能跑的机器判成未就绪同一个取舍）。组合身份打进日志，换了就是没验证过的组合。
- */
-function selfAdapterReady(cli: { ok: true; codexBin?: string }, deps: AcpReadyDeps): AcpReady {
-  if (!cli.codexBin) return cli;
-  const c = (deps.compat ?? probeCodexCompat)(cli.codexBin);
-  if (c.verdict === "incompatible") return { ok: false, reason: `本机 codex ${c.codexVersion} 按 app-server 协议判定和自研适配器不兼容：${c.reasons.slice(0, 3).join("；")}` };
-  if (c.identity) console.log(`[acp] ${identityLine(c.identity)}${c.reasons.length ? `；协议差异 ${c.reasons.length} 条，需真实组合验证` : ""}`);
-  else console.warn(`⚠️ [acp] 判不出本机 codex 和自研适配器是否兼容，照常就绪：${c.reasons.join("；")}`);
-  return { ...cli, compat: c };
 }
 
 /** Pi 走 acp 的最低版本：内置 MCP（挂载扩展借它的 createMcpExtension 连 channel-server）是 0.99.0 才有（pi CHANGELOG） */

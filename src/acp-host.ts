@@ -10,6 +10,7 @@ import { resolveBunPath } from "./lib/bun-path.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { decodePreambleEnv } from "./lib/codex-thread.js";
 import { noteAcpCodexRunning } from "./lib/codex-version.js";
+import { pickCodexAdapter } from "./lib/acp/codex-compat.js";
 import { spawnAdapter } from "./lib/acp/adapter-proc.js";
 import { BridgeLink } from "./lib/acp/bridge-link.js";
 import { AcpHost } from "./lib/acp/host.js";
@@ -68,9 +69,11 @@ if ("error" in agent) {
   process.exit(3);
 }
 const codexPath = process.env.CLAUDESTRA_CODEX_BIN?.trim() || undefined;
+// 选了自研：起之前按协议判本机 codex（和 readiness 同一判据），判不过就用上游；起来后接不上线程再退一次（codex-compat-switch.ts）
+const pick = runtime.id === "codex" ? pickCodexAdapter(agent, codexPath, log) : null;
 /** 每次起适配器前记一次（含退避重起）：app-server 跑的是那一刻磁盘上的 codex，网页「重启生效」提示读这条记录 */
 const warned = new Set<string>();
-const noteCodex = async () => void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned }));
+const noteCodex = async () => void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned, adapter: pick?.adapter }));
 
 const host = new AcpHost(
   {
@@ -83,7 +86,7 @@ const host = new AcpHost(
     clearPreamble: decodePreambleEnv(process.env.CLAUDESTRA_ACP_CLEAR_PREAMBLE),
     model: process.env.CLAUDESTRA_ACP_MODEL?.trim() || undefined,
     effort: process.env.CLAUDESTRA_ACP_EFFORT?.trim() || undefined,
-    agentCmd: agent.cmd,
+    agentCmd: pick?.cmd ?? agent.cmd,
     runtime,
     env: {
       base: process.env,
@@ -100,6 +103,7 @@ const host = new AcpHost(
   {
     spawn: (cmd, env, cwd) => spawnAdapter(cmd, env, cwd, log, runtime.logLabel),
     beforeSpawn: runtime.id === "codex" ? noteCodex : undefined, // Pi 的适配器在仓库里，没有要对账的外部版本
+    fallback: pick ? (why, kind) => pick.fallback(why, kind) : undefined,
     makeLink: (deps) => new BridgeLink({ ...deps, url: bridgeUrl, registerFrame: () => ({ ...deps.registerFrame(), ...(callerCred ? { callerCred } : {}) }) }),
     startProxy: (deps) => startToolProxy(deps),
     postHook: async (body) => {
@@ -151,6 +155,6 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
   }, WATCHDOG_EVERY_MS);
 }
 
-log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : runtime.logLabel} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
+log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : pick?.adapter === "self" ? "自研 Codex 适配器" : runtime.logLabel} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
 show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（只看；连接日志在 ${hostLogFile}）`);
 host.start();

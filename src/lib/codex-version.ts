@@ -13,6 +13,7 @@ import { resolveCodexBinary } from "./codex-launch.js";
 import { defaultRunner, type Runner } from "./codex-thread.js";
 import { STATE_DIR } from "./paths.js";
 import { BROKEN_HINT, codexPairsWithAdapter, currentCodexAcp } from "./acp/install.js";
+import type { CodexAdapterId } from "./acp/codex-compat-switch.js";
 
 /** npm 全局装的 @openai/codex：解析出的路径落在包目录里（bin/codex.js 壳，或包内的原生二进制） */
 export function isNpmGlobalCodex(path: string | undefined): boolean {
@@ -33,12 +34,25 @@ export async function fetchLatestCodex(): Promise<string | undefined> {
 
 const runningPath = (agent: string, dir: string) => join(dir, "codex-running", `${agent}.json`);
 
-/** 启动时记下这次用的版本；探不出来也写（空记录），免得沿用上一次启动的旧值误报「该重启」 */
-export function recordCodexRunning(agent: string, version: string | undefined, dir: string = STATE_DIR): void {
+/**
+ * 启动时记下这次用的版本；探不出来也写（空记录），免得沿用上一次启动的旧值误报「该重启」。
+ * adapter：ACP 宿主这次实际起的 Codex 适配器（选了自研但退回上游时记 upstream），doctor 据此报「选了自研、实际在跑上游」。
+ */
+export function recordCodexRunning(agent: string, version: string | undefined, dir: string = STATE_DIR, adapter?: CodexAdapterId): void {
   const p = runningPath(agent, dir);
   mkdirSync(join(dir, "codex-running"), { recursive: true });
-  writeFileSync(`${p}.tmp`, JSON.stringify({ version, at: new Date().toISOString() }));
+  writeFileSync(`${p}.tmp`, JSON.stringify({ version, ...(adapter ? { adapter } : {}), at: new Date().toISOString() }));
   renameSync(`${p}.tmp`, p);
+}
+
+/** 宿主上一次实际起的 Codex 适配器；没记录 / tmux / 老宿主 = undefined */
+export function readCodexRunningAdapter(agent: string, dir: string = STATE_DIR): CodexAdapterId | undefined {
+  try {
+    const v = JSON.parse(readFileSync(runningPath(agent, dir), "utf8"))?.adapter;
+    return v === "self" || v === "upstream" ? v : undefined;
+  } catch {
+    return undefined; // 没记录 / 坏文件：doctor 只少一条「实际在跑哪个」
+  }
 }
 
 export function readCodexRunning(agent: string, dir: string = STATE_DIR): string | undefined {
@@ -70,6 +84,8 @@ export async function noteAcpCodexRunning(o: {
   warned?: Set<string>;
   /** 适配器状态目录；缺省 statePath("acp")，单测注入 */
   acpRoot?: string;
+  /** 这次起的是哪个 Codex 适配器（选择开关 + 回退之后的结果），记进运行记录 */
+  adapter?: CodexAdapterId;
 }): Promise<string | undefined> {
   if (!o.codexPath) return undefined;
   const ms = o.timeoutMs ?? ACP_PROBE_MS;
@@ -87,13 +103,13 @@ export async function noteAcpCodexRunning(o: {
     clearTimeout(timer);
   }
   const key = v ?? "读不出版本";
-  const cur = currentCodexAcp(o.acpRoot);
+  const cur = o.adapter === "self" ? null : currentCodexAcp(o.acpRoot); // 自研不看上游的配套范围（组合身份已在起之前打过）
   if (cur && !codexPairsWithAdapter(v, o.acpRoot) && !o.warned?.has(key)) {
     o.warned?.add(key);
     o.log(cur === "broken"
       ? `⚠️ 本机 codex 是「${key}」，但 ${BROKEN_HINT}（网页此时不给「更新并重启」）`
       : `⚠️ 本机 codex 是「${key}」，codex-acp ${cur.version} 配套的是 ${cur.codexRange}：网页「更新并重启」或 \`manager acp-install\` 会换上配套的适配器（docs/runtimes/codex-acp.md）`);
   }
-  try { recordCodexRunning(o.agent, v, o.dir); } catch (e) { o.log(`⚠️ 记不下 codex 运行版本（网页少一条「重启生效」提示）：${String(e)}`); }
+  try { recordCodexRunning(o.agent, v, o.dir, o.adapter); } catch (e) { o.log(`⚠️ 记不下 codex 运行版本（网页少一条「重启生效」提示）：${String(e)}`); }
   return v;
 }

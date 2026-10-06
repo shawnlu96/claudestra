@@ -38,6 +38,8 @@ export interface HostConfig {
 export interface HostDeps {
   spawn(cmd: string[], env: Record<string, string>, cwd: string): AdapterProc;
   beforeSpawn?(): Promise<void>; // 每次起适配器前等它跑完（含退避重起）；自己负责超时，reject 了宿主只记日志照常起
+  /** 起适配器接不上线程时问一次：返回新命令 = 换适配器重起（清掉「不再重起」），null = 照旧（Codex 自研退上游，codex-compat-switch.ts） */
+  fallback?(why: string, kind: string): string[] | null;
   makeLink(deps: Omit<BridgeLinkDeps, "url">): Pick<BridgeLink, "connect" | "send" | "request" | "close" | "up">;
   startProxy(deps: Omit<ToolProxyDeps, "port">): ToolProxy;
   postHook(body: { channelId: string } & StopReport): Promise<{ block?: boolean; reason?: string }>;
@@ -79,6 +81,7 @@ export class AcpHost {
   private rotating = false;
   private restartDeferred = false;
   private readonly hostId = randomBytes(6).toString("hex");
+  private agentCmd: string[];
   private readonly rt: AcpRuntime;
   private outbox: { seq: number; entry: Record<string, unknown> }[] = [];
   private entrySeq = 0;
@@ -103,6 +106,7 @@ export class AcpHost {
 
   constructor(private readonly cfg: HostConfig, private readonly deps: HostDeps) {
     this.preamblePending = cfg.preamble;
+    this.agentCmd = cfg.agentCmd;
     this.rt = cfg.runtime ?? acpRuntime();
     this.translator = this.makeTranslator();
     this.proxy = deps.startProxy({ channelId: cfg.channelId, toBridge: (f) => this.link.send(f), log: (m) => deps.log(m) });
@@ -162,7 +166,7 @@ export class AcpHost {
     await this.deps.beforeSpawn?.().catch((e) => this.deps.log(`⚠️ 起适配器前的版本探测失败，按未知照常起：${String(e)}`));
     if (this.stopping || this.rotating) return void (this.restartDeferred ||= this.rotating); // 停机中不再起；/clear 轮换中等它换完再起
     const spec = { ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } };
-    const proc = (this.proc = this.deps.spawn(this.cfg.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
+    const proc = (this.proc = this.deps.spawn(this.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
     const session = new AcpSession(proc.wire, {
       onUpdate: (u) => (this.rotating || this.beat.update(), this.onUpdate(u)), onPermission: (card) => (this.beat.update(), this.askPermission(card)), // /clear 引导不算动静
       onSelfTurn: (done) => (this.beat.turn(), this.loop.track(done)), log: this.deps.log, label: this.rt.label,
@@ -182,6 +186,8 @@ export class AcpHost {
       void this.maybeReady();
     } catch (e) {
       const f = classifyPromptError(e, `start#${++this.startSeq}`);
+      const next = this.deps.fallback?.(f.message, f.kind);
+      if (next) return void ((this.agentCmd = next), (this.restarts = 0), proc.stop()); // 换适配器重起：在途 prompt 接着等会话，不出卡
       this.lastStartError = f;
       this.lastStartErrorAt = Date.now();
       this.refused = e instanceof AcpIncompatibleError;
