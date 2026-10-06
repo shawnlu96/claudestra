@@ -8,14 +8,14 @@ import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 const oldId = "lend:T93:s1:r0:a0", nextId = "lend:T93:s1:r1:a0", branch = "lend/T93-abcd";
 const opened: ReturnType<typeof harness>[] = [];
 afterEach(() => { for (const h of opened.splice(0)) h.db.close(); });
-function setup() {
+function setup(old = oldId) {
   const h = harness({ entry: { roles: ["write"] }, writeOpen: true }); opened.push(h);
-  const order = { ...wire(oldId), node: "write", step: "write" };
-  const binding = reborrowMarker({ orderId: oldId, gen: 1, reclaimSeq: 9 });
+  const order = { ...wire(old), node: "write", step: "write" };
+  const binding = reborrowMarker({ orderId: old, gen: 1, reclaimSeq: 9 });
   const next = { ...order, orderId: nextId, node: "fix", step: "fix", acceptance: [binding] };
-  recordAsked(h.db, { orderId: oldId, peer: "team-a", fp: FP, family: "codex", preview: { ...polled(oldId), step: "write" } });
-  advance(h.db, oldId, "asked", "claimed", { leaseGen: 1, wire: { order, text: TEXT, write: { branch, base: "main" } } });
-  advance(h.db, oldId, "claimed", "cancelled", {});
+  recordAsked(h.db, { orderId: old, peer: "team-a", fp: FP, family: "codex", preview: { ...polled(old), step: "write" } });
+  advance(h.db, old, "asked", "claimed", { leaseGen: 1, wire: { order, text: TEXT, write: { branch, base: "main" } } });
+  advance(h.db, old, "claimed", "cancelled", {});
   recordAsked(h.db, { orderId: nextId, peer: "team-a", fp: FP, family: "codex", preview: { ...polled(nextId), step: "fix" } });
   h.A.claim = () => ({ status: 200, body: { ok: true, v: 1, order: next, text: TEXT, sha256: sha(TEXT),
     write: { branch, base: "main" }, lease: { gen: 1, expiresAt: 9e15, ms: 600_000 } } });
@@ -91,3 +91,33 @@ test("cancelled journal cannot hide an unresolved provider refusal", async () =>
   expect(getOrder(h.db, nextId)).toMatchObject({ state: "released", reason: expect.stringContaining("不自动重试") });
   expect(h.log.created).toHaveLength(0);
 });
+
+// MQ1-shaped history: the cancelled source was a remote convergence order `lend:<task>:cv:<eventSeq>` (synthetic data).
+const cvId = "lend:T93:cv:35704";
+test("historical cv journal binds by its real id/gen and reaches start", async () => {
+  const { h, next } = setup(cvId);
+  expect(next.acceptance).toEqual([`[lend-reborrow:v1 old=${cvId} gen=1 reclaim=9]`]);
+  await claimOrder(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)?.state).toBe("started");
+  expect(getOrder(h.db, cvId)).toMatchObject({ state: "cancelled", leaseGen: 1 });
+});
+test.each(["gen", "unknown-cv", "sra-alias", "live-worker", "pending-result", "upper", "zero-pad", "newline"])(
+  "cv %s refuses before clone/start with zero half-lease", async (bad) => {
+    const { h, next } = setup(cvId);
+    const raw = (id: string, gen = 1) => `[lend-reborrow:v1 old=${id} gen=${gen} reclaim=9]`;
+    if (bad === "gen") next.acceptance = [raw(cvId, 2)];
+    if (bad === "unknown-cv") next.acceptance = [raw("lend:T93:cv:35705")];
+    if (bad === "sra-alias") next.acceptance = [raw(oldId)];
+    if (bad === "live-worker") h.liveness.set(workerName(cvId), "running");
+    if (bad === "pending-result") patchOrder(h.db, cvId, ["cancelled"], { payload: { pending: true } });
+    if (bad === "upper") next.acceptance = [raw("lend:T93:CV:35704")];
+    if (bad === "zero-pad") next.acceptance = [raw("lend:T93:cv:035704")];
+    if (bad === "newline") next.acceptance = [raw("lend:T93:cv:35704\n")];
+    await claimOrder(getOrder(h.db, nextId)!, h.d);
+    expect(getOrder(h.db, nextId)).toMatchObject({ state: "released", reason: expect.stringContaining("续借拒领") });
+    expect(h.calls.at(-1)?.body).toMatchObject({ action: "release", reason: "not_started" });
+    expect(h.log.created).toHaveLength(0);
+    expect(getOrder(h.db, cvId)).toMatchObject({ state: "cancelled", leaseGen: 1 });
+  });
