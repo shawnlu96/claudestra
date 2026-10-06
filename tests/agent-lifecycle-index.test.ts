@@ -168,15 +168,16 @@ describe("disk (验收线 8)", () => {
     expect(pendingCleanups(db)).toMatchObject([{ agent: "agent-l2", entries: [{ checkout: join(root, "l2") }] }]);
     const ev = listEvents(db, { project: "p" }).find((e) => (e.data as { op?: string; agent?: string }).op === "worker_retire")!;
     expect(String((ev.data as { steps: string[] }).steps)).toContain("符号链接");
-    // retried every pass, never followed: the target stays, the debt stays, repeating is harmless
+    // never followed; LIFE3: the same debt is not re-reported every pass (it backs off), the target stays, the debt stays
     for (let i = 0; i < 2; i++) {
       const again = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
         master: new Set(), swapPct: 10, agents: [], pending: pendingCleanups(db) });
       const rr = await runLifecycle(again, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
         manager: async (...args) => { calls.push(args); return { ok: true }; }, git, exists: existsSync, worktreeRoot: root, agents: async () => [],
         du: async () => 0, swapPct: async () => 0, record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW });
-      expect(rr.failed.map((f) => f.agent)).toEqual(["agent-l2"]);
+      expect(rr.failed.map((f) => f.agent)).toEqual([]);
     }
     expect([existsSync(join(real, "keep")), pendingCleanups(db).length, calls.length]).toEqual([true, 1, 3]);
+    expect(listEvents(db, { project: "p" }).filter((e) => (e.data as { op?: string; agent?: string }).op === "worker_retire" && (e.data as { agent?: string }).agent === "agent-l2").length).toBe(1);
   });
 });
