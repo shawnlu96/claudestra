@@ -12,6 +12,7 @@
  */
 
 import { mapPiToolCall } from "../../pi-session.js";
+import { redactSecrets } from "../../redact-secrets.js";
 
 type Rec = Record<string, any>;
 
@@ -121,7 +122,7 @@ function compactionEnd(ev: Rec): Rec[] {
 function retryNotice(ev: Rec): Rec {
   const wait = typeof ev.delayMs === "number" ? `${Math.max(1, Math.round(ev.delayMs / 1000))} 秒后` : "";
   const nth = typeof ev.attempt === "number" ? `（${ev.attempt}${typeof ev.maxAttempts === "number" ? `/${ev.maxAttempts}` : ""}）` : "";
-  return notice(`请求出错：${str(ev.errorMessage).slice(0, 200) || "未说明原因"}，${wait}自动重试${nth}`);
+  return notice(`请求出错：${redactSecrets(str(ev.errorMessage)).slice(0, 200) || "未说明原因"}，${wait}自动重试${nth}`); // 先打码再截：截剩的半个密钥匹配不上
 }
 
 function toolDone(ev: Rec): Rec {

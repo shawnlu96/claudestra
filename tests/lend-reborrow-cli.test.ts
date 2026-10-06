@@ -1,5 +1,5 @@
 /** Real manager processes plus isolated git and a fake network adapter connecting the provider to canonical borrower CLI. */
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -14,6 +14,21 @@ import { claimOrder } from "../src/lib/lend-drive.js";
 let resources: ReturnType<typeof writeResources>, lab: ReturnType<typeof writeLab>;
 let db: ReturnType<typeof openLedger>, dbPath: string, fp: string, reclaimSeq: number, reviewed: string, remote: string, branch: string, oldId: string;
 const manager = join(import.meta.dir, "../src/manager.ts");
+let cvSeq: number | null = null;
+/** Synthetic MQ1 history: re-id the fresh fix order as a remote convergence order `lend:<task>:cv:<eventSeq>` before claim/reclaim. */
+function asConvergenceOrder(id: string, seq: number): string {
+  const cvId = `lend:T1:cv:${seq}`;
+  db.exec("PRAGMA foreign_keys = OFF");
+  const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'lend_%'").all() as { name: string }[];
+  for (const { name } of tables) {
+    for (const c of db.query(`PRAGMA table_info(${name})`).all() as { name: string; type: string }[]) {
+      if (c.type.toUpperCase() === "TEXT") db.run(`UPDATE ${name} SET ${c.name} = replace(${c.name}, ?, ?) WHERE instr(${c.name}, ?) > 0`, [id, cvId, id]);
+    }
+  }
+  db.exec("PRAGMA foreign_keys = ON");
+  expect(getLendOrder(db, id)).toBeNull();
+  return cvId;
+}
 function parse(r: { stdout: Buffer; stderr: Buffer }) {
   const line = r.stdout.toString().trim().split("\n").at(-1);
   if (!line) throw new Error(r.stderr.toString());
@@ -71,7 +86,7 @@ beforeEach(() => {
   })]);
   db.run("UPDATE tasks SET stage = 'fix', round = 1 WHERE id = 'T1'");
   const fix = cli("lend-offer", "T1", "--peer", "mate", "--repo", "o/r"); expect(fix.ok).toBe(true);
-  oldId = fix.orderId; expect(claim(oldId).ok).toBe(true);
+  oldId = cvSeq === null ? fix.orderId : asConvergenceOrder(fix.orderId, cvSeq); expect(claim(oldId).ok).toBe(true);
   remote = lab.commit(lab.seed, "unsubmitted-checkpoint.txt"); lab.git(lab.seed, "push", "-q", lab.bare, branch);
   expect(cli("lend-reclaim", "T1", "--reason", "PM recovery").ok).toBe(true);
   reclaimSeq = listEvents(db, { target: "T1" }).findLast((e) => (e.data.lend as any)?.op === "reclaim")!.seq;
@@ -185,3 +200,36 @@ test.each(["clean", "dirty", "unpublished", "unsubmitted-report"])("real provide
     expect(deliver(next.orderId, head).ok).toBe(true);
   }
 }, 30_000);
+
+
+describe("historical cv source (MQ1 shape)", () => {
+  beforeAll(() => { cvSeq = 35704; });
+  afterAll(() => { cvSeq = null; });
+
+  test("real CLI signs a successor for a cv source without touching review or the old binding", () => {
+    expect(oldId).toBe("lend:T1:cv:35704");
+    expect(getLendOrder(db, oldId)).toMatchObject({ status: "cancelled", step: "fix" });
+    const reclaim = listEvents(db, { target: "T1" }).findLast((e) => (e.data.lend as any)?.op === "reclaim")!;
+    expect(reclaim.data.lend).toMatchObject({ orderId: oldId, cancelled: oldId });
+    const review = () => listEvents(db, { target: "T1" }).filter((e) => e.kind === "review").map((e) => e.data);
+    const reviews = JSON.stringify(review()), old = JSON.stringify(getLendOrder(db, oldId));
+    expect(recovery()).toMatchObject({ ok: true, dryRun: true, reviewedHead: reviewed, remoteHead: remote, gen: 1 });
+    const r = recovery("--apply"); expect(r).toMatchObject({ ok: true, head: remote, supersedes: oldId, base: "main" });
+    const o = getLendOrder(db, r.orderId)!;
+    expect(o.wire.acceptance).toContain(`[lend-reborrow:v1 old=${oldId} gen=1 reclaim=${reclaimSeq}]`);
+    expect(getTask(db, "T1")).toMatchObject({ headSHA: reviewed, stage: "fix", round: 1 });
+    expect(JSON.stringify(review())).toBe(reviews);
+    expect(review()).toEqual([expect.objectContaining({ head: reviewed, reviewerSessionId: "original-review-session" })]);
+    expect(JSON.stringify(getLendOrder(db, oldId))).toBe(old);
+    expect(claim(o.orderId)).toMatchObject({ ok: true, order: { head: remote, pr: 7 }, write: { base: "main" } });
+    expect(recovery("--apply")).toMatchObject({ ok: true, duplicate: true, orderId: o.orderId });
+  }, 30_000);
+
+  test.each(["active", "unknown", "wrong-basis"])("real CLI cv source %s still refuses with zero partial order or lease", (bad) => {
+    if (bad !== "wrong-basis") db.run("UPDATE lend_orders SET status = ? WHERE orderId = ?", [bad === "active" ? "claimed" : "unknown", oldId]);
+    if (bad === "wrong-basis") db.run("UPDATE tasks SET headSHA = ? WHERE id='T1'", ["f".repeat(40)]);
+    const before = snapshot();
+    expect(recovery("--apply").ok).toBe(false);
+    expect(snapshot()).toBe(before);
+  }, 30_000);
+});
