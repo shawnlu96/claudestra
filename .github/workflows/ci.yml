@@ -8,6 +8,12 @@ on:
     branches: [main]
   pull_request:
 
+# 同一 PR 的新 head 取消旧运行；不同 PR / main / 列车临时 PR 各自分组，互不取消。
+# 仅 pull_request 事件取消，main push 不会被取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: typecheck + test + guard
