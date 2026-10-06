@@ -6,7 +6,8 @@
  *   EPERM / ps 读不到 / uid 不符 = 未知,按占用处理直到超时。接管者之间用 file-lock 的接管锁互斥,确认已死后重读仍是它才删。
  * - 部署进程树:wrapper 把部署命令起在独立进程组(组长是执行闸),组号随子进程身份落盘;组里还有任何进程(含孙进程)= 仍持有。
  *   身份落盘前执行闸不放行,身份查不到 / 不是组长都 fail-closed。
- * - 受控重入:只有拿着持有者 token、且持有者进程确是自己祖先的进程才放行(card-merge 嵌套调 deploy-full);光有 env 不够。
+ * - 受控重入:只有拿着持有者 token、持有者与执行闸确是自己祖先、且自己就在外层监管的进程组里才放行(card-merge 嵌套调 deploy-full);
+ *   光有 env 不够,出了组(detached / setsid)的嵌套调用明确拒绝。
  * 持锁不是授权:这里不提供任何远程 / HTTP 入口,只在本机串行。
  */
 import { linkSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -282,17 +283,36 @@ export async function acquireDeployLock(opts: AcquireOpts): Promise<AcquireResul
   }
 }
 
+export type Reentry =
+  | { kind: "none" }
+  | { kind: "nested"; record: DeployLockRecord }
+  | { kind: "rejected"; reason: string };
+
 /**
- * 受控重入:env 里的 token 正是当前持有者的,且持有者活着、确是本进程的祖先(ppid 链)→ 返回持有记录,调用方不再取锁直接执行。
- * 任何一项核不上(包括 ps 读不到)→ null,调用方走正常取锁(嵌套时会有界等到超时,零部署)。
+ * 受控重入:env 里的 token 正是当前持有者的,且持有者活着、确是本进程的祖先(ppid 链)→ 再核本进程确在外层监管的进程组里:
+ * 记录里有执行闸(组长)身份且仍活着、闸是本进程祖先、本进程 pgid === 闸的组号。都核上 → nested,调用方不再取锁、在这个组里执行
+ * (外层整组转发信号、等整组退完才释放)。持有者是祖先但组核不上(detached / setsid 出组、ps 读不到)→ rejected,调用方 fail-closed:
+ * 出了组的进程外层既转发不到信号、也不会等它,放行就会在外层释放后与下一份重叠。
+ * token / 持有者 / 祖先关系核不上(包括 ps 读不到)→ none,调用方走正常取锁(冒用者照样互斥,有界等到超时,零部署)。
  */
-export function reentrantHolder(envToken: string | undefined, opts: { path?: string; probe?: ProcProbe } = {}): DeployLockRecord | null {
-  if (!envToken) return null;
+export function reentrantHolder(envToken: string | undefined, opts: { path?: string; probe?: ProcProbe } = {}): Reentry {
+  const none = { kind: "none" } as const;
+  if (!envToken) return none;
   const probe = opts.probe ?? realProbe;
   const cur = readDeployLock(opts.path ?? deployLockPath());
-  if (cur.status !== "ok" || cur.record.token !== envToken) return null;
-  if (procState(cur.record.holder, probe) !== "live" || cur.record.uid !== probe.uid()) return null;
-  return ancestorPids(process.pid, (p) => probe.ppidOf(p)).has(cur.record.holder.pid) ? cur.record : null;
+  if (cur.status !== "ok" || cur.record.token !== envToken) return none;
+  const rec = cur.record;
+  if (procState(rec.holder, probe) !== "live" || rec.uid !== probe.uid()) return none;
+  const ancestors = ancestorPids(process.pid, (p) => probe.ppidOf(p));
+  if (!ancestors.has(rec.holder.pid)) return none;
+  const gate = rec.child;
+  const reject = (why: string): Reentry => ({ kind: "rejected", reason: `嵌套部署不在外层监管的进程组里:${why}` });
+  if (gate?.pgid === undefined) return reject("锁记录没有外层执行闸的进程组");
+  if (procState(gate, probe) !== "live") return reject(`外层执行闸 ${gate.pid} 已不在`);
+  if (!ancestors.has(gate.pid)) return reject(`外层执行闸 ${gate.pid} 不是本进程祖先`);
+  const mine = probe.pgidOf(process.pid);
+  if (mine !== gate.pgid) return reject(`本进程组=${mine ?? "读不到"},外层监管组=${gate.pgid}(detached / setsid 起的嵌套调用)`);
+  return { kind: "nested", record: rec };
 }
 
 /** 诊断行:持有者 label / pid / 代次 / 获取时间 / 死活判断 */

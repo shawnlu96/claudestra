@@ -56,7 +56,7 @@ function signalExit(sig: string): number {
 const childEnv = (token: string) => ({ ...process.env, [DEPLOY_LOCK_TOKEN_ENV]: token });
 const childExit = (child: { signalCode: string | null }, code: number) => (child.signalCode ? signalExit(child.signalCode) : code);
 
-/** 受控重入:外层已持锁,内层命令直接起在外层的进程组里(外层整组转发信号、等整组退完) */
+/** 受控重入:外层已持锁,reentrantHolder 已核本进程在外层监管组里;内层命令不 detached,同组(外层整组转发信号、等整组退完) */
 async function runNested(argv: string[], token: string): Promise<number> {
   let child: ReturnType<typeof Bun.spawn>;
   try {
@@ -149,9 +149,11 @@ async function runGated(argv: string[], handle: DeployLockHandle, drainMs: numbe
 export async function runLocked(args: string[]): Promise<number> {
   const parsed = parseRunArgs(args);
   if (typeof parsed === "string") return log(`${parsed}\n${USAGE}`), EXIT.usage;
-  const outer = reentrantHolder(process.env[DEPLOY_LOCK_TOKEN_ENV]);
-  if (outer) {
-    log(`受控重入:外层 ${outer.label}(pid ${outer.holder.pid})持锁,${parsed.label} 在同一次部署内执行`);
+  const re = reentrantHolder(process.env[DEPLOY_LOCK_TOKEN_ENV]);
+  if (re.kind === "rejected") return log(`${re.reason};拒绝重入(未执行)`), EXIT.lockError;
+  if (re.kind === "nested") {
+    const outer = re.record;
+    log(`受控重入:外层 ${outer.label}(pid ${outer.holder.pid})持锁,${parsed.label} 在同一次部署、同一进程组内执行`);
     return runNested(parsed.argv, outer.token);
   }
   const pending: string[] = [];
