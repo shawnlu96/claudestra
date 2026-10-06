@@ -8,7 +8,7 @@ import type { Principal } from "../src/lib/principals.js";
 import { readSentOffer, sentOfferDir, type SentJoinOffer } from "../src/lib/shared-ledger-join-offer.js";
 import { joinOfferLiveDeps } from "../src/bridge/shared-ledger-join-offer.js";
 import { handleJoinOfferApi, type JoinOfferRouteDeps } from "../src/bridge/local-api/shared-ledger-join-offer.js";
-import { cmdSharedLedgerOffer, parseOfferArgs, type OfferDeps } from "../src/manager/shared-ledger-offer.js";
+import { cmdSharedLedgerOffer, sendSharedLedgerOffer, parseOfferArgs, type OfferDeps } from "../src/manager/shared-ledger-offer.js";
 
 const MARK = "JN3MARKERJN3MARKERJN3MARKERJN3MARKERJN3MARK";
 const hex = () => randomBytes(16).toString("hex");
@@ -79,6 +79,21 @@ describe("sender CLI (验收 5)", () => {
     expect(readSentOffer(s.deps.stateDir, r.offerId as string)).toMatchObject({ peer: "peer-a", host: "ledger-a.example", project: "proj-local", target: "JN3" });
   });
 
+  test("center response code goes directly from memory to peer without a code file", async () => {
+    const s = sender();
+    const r = await sendSharedLedgerOffer({ peer: "peer-a", url: "https://ledger-a.example/" }, code, s.deps);
+    expect(r).toMatchObject({ ok: true, accepted: true, joined: false });
+    expect(s.posts).toHaveLength(1);
+    expect(JSON.parse(s.posts[0]!.body).code).toBe(code);
+    expect(readdirSync(s.deps.stateDir)).toEqual(["shared-ledger-join-offers-sent"]);
+    const file = join(sentOfferDir(s.deps.stateDir), `${r.offerId}.json`);
+    expect(readFileSync(file, "utf8")).not.toContain(MARK);
+    expect(JSON.stringify([out, r])).not.toContain(MARK);
+    const rejected = await sendSharedLedgerOffer({ peer: "peer-a", url: "https://ledger-a.example/", note: code }, code, s.deps);
+    expect(rejected.ok).toBe(false);
+    expect(s.posts).toHaveLength(1);
+  });
+
   test("http center URL, a plaintext peer, or a peer that refuses → not sent / reported as not accepted", async () => {
     const http = sender();
     await cmdSharedLedgerOffer(["--peer", "peer-a", "--url", "http://ledger-a.example/", "--code-file", codeFile(0o600)], http.deps);
@@ -145,4 +160,16 @@ describe("receipt from the peer (回执)", () => {
     }
     expect(existsSync(w.dir) && readdirSync(sentOfferDir(w.dir))).toHaveLength(1);
   });
+});
+
+test("CLI cannot turn declared project metadata into a verified center invite", async () => {
+  const s = sender();
+  await cmdSharedLedgerOffer(["--peer", "peer-a", "--url", "https://ledger-a.example", "--code-file", codeFile(0o600),
+    "--team", "team-a", "--shared-project", "project-b", "--name", "Project B"], s.deps);
+  expect(lastOutput().ok).toBe(false);
+  expect(s.posts).toEqual([]);
+  const incomplete = sender();
+  await cmdSharedLedgerOffer(["--peer", "peer-a", "--url", "https://ledger-a.example", "--code-file", codeFile(0o600), "--team", "team-a"], incomplete.deps);
+  expect(lastOutput().ok).toBe(false);
+  expect(incomplete.posts).toEqual([]);
 });

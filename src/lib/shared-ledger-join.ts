@@ -4,6 +4,9 @@
  * Neither the join code nor the issued bearer is ever returned, logged or written outside the 0600 credential file.
  */
 import { sharedLedgerJoinPinsMatch } from "./shared-ledger-gate-proxy-join-pins.js";
+import { requireSharedLedgerProject } from "./shared-ledger-project-link.js";
+import { sharedLedgerExpectedProject, sharedLedgerOfferedGrant, type SharedLedgerExpectedProject } from "./shared-ledger-project-link-grant.js";
+import { saveSharedLedgerProjectJoin } from "./shared-ledger-project-link-save.js";
 import { signPurpose, isPublicKey, type InstanceKey } from "./instance-key.js";
 import { STATE_DIR } from "./paths.js";
 import {
@@ -11,8 +14,7 @@ import {
   type SharedLedgerJoinGrant, type SharedLedgerJoinRequest,
 } from "./shared-ledger-join-protocol.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
-import { readSharedLedgerBindings, setSharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
-import { resolveSharedLedgerCredential, writeSharedLedgerCredential, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
+import { type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 
 /** The pure protocol lives in shared-ledger-join-protocol.ts; these names stay importable from here. */
 export {
@@ -56,7 +58,10 @@ function centerBaseUrl(raw: string): string {
 export interface SharedLedgerJoinInput {
   url: string; code: string; key: InstanceKey; instanceId?: string;
   /** Local principal the credential is resolved for (owner:self by default for people). */
-  subject: string; localProjectId?: string; stateDir?: string; fetch?: typeof fetch; timeoutMs?: number;
+  subject: string; localProjectId?: string;
+  /** Explicit owner selection; create requires the offer's center project display. */
+  create?: boolean; expectedProject?: SharedLedgerExpectedProject;
+  stateDir?: string; fetch?: typeof fetch; timeoutMs?: number;
 }
 export interface SharedLedgerJoinResult {
   centerId: string; teamId: string; personId: string; projectId: string; localProjectId: string;
@@ -79,23 +84,56 @@ async function redeem(input: SharedLedgerJoinInput, req: SharedLedgerJoinRequest
   } finally { clearTimeout(timer); }
   if (response.status === 429) throw new SharedLedgerJoinError("join rate limited; retry later");
   if (!response.ok) throw new SharedLedgerJoinError("join rejected");
-  try { return parseGrant(await response.json(), centerId, req.instanceId); }
+  let value: unknown;
+  try { value = await response.json(); }
   catch { throw new SharedLedgerJoinError("center returned an invalid join grant"); } // Never surface a body that may hold a bearer.
+  if (input.expectedProject) {
+    try { return sharedLedgerOfferedGrant(value, input.expectedProject, req.instanceId); }
+    catch (error) { throw new SharedLedgerJoinError((error as Error).message); } // The adapter emits fixed messages only.
+  }
+  try { return parseGrant(value, centerId, req.instanceId); }
+  catch { throw new SharedLedgerJoinError("center returned an invalid join grant"); } // Keep legacy V1 grants independent of project metadata.
 }
 
 /** Confirm the center accepts the bearer before replacing any local credential or binding. */
 export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<SharedLedgerJoinResult> {
+  const dir = input.stateDir ?? STATE_DIR;
+  if ((input.expectedProject && !input.localProjectId && input.create !== true) || (input.localProjectId && input.create)) {
+    throw new SharedLedgerJoinError("select an existing local project or explicitly create one");
+  }
+  if (input.create && !input.expectedProject) throw new SharedLedgerJoinError("new local project requires center project display");
+  try { if (input.localProjectId) requireSharedLedgerProject(input.localProjectId, dir); }
+  catch { throw new SharedLedgerJoinError("local project missing or personal; nothing was saved"); }
+  const { credential, expiresAt, display } = await redeemCredential(input);
+  const project = credential.projects[0]!;
+  if (input.localProjectId && !sharedLedgerJoinPinsMatch(credential, input.localProjectId, project.projectId, dir)) {
+    throw new SharedLedgerJoinError("center or project does not match the pinned center; nothing was saved");
+  }
+  let saved: { localProjectId: string; identities: number };
+  try {
+    saved = await saveSharedLedgerProjectJoin(credential, { centerId: credential.centerId, teamId: credential.teamId,
+      projectId: project.projectId, localProjectId: input.localProjectId ?? project.projectId }, input.create ? display : undefined, dir);
+  } catch { throw new SharedLedgerJoinError("local project enrollment failed; nothing was saved"); }
+  return { centerId: credential.centerId, teamId: credential.teamId, personId: credential.personId, projectId: project.projectId, ...saved,
+    kind: credential.kind, expiresAt };
+}
+
+async function redeemCredential(input: SharedLedgerJoinInput): Promise<{ credential: SharedLedgerLocalCredential; expiresAt: number; display?: SharedLedgerExpectedProject }> {
   const parsed = parseSharedLedgerJoinCode(input.code);
   if (!parsed) throw new SharedLedgerJoinError("invalid join code");
-  if (!ID_RE.test(input.subject) || (input.localProjectId !== undefined && !ID_RE.test(input.localProjectId))) {
+  if (!ID_RE.test(input.subject)) {
     throw new SharedLedgerJoinError("invalid local subject or project");
   }
   const baseUrl = centerBaseUrl(input.url);
   if (!isPublicKey(input.key.publicKey)) throw new SharedLedgerJoinError("instance key unavailable");
-  const grant = await redeem(input, signSharedLedgerJoin(input.code, input.instanceId ?? sharedLedgerInstanceId(input.key.publicKey), input.key), parsed.centerId);
-  const dir = input.stateDir ?? STATE_DIR;
+  const instanceId = input.instanceId ?? sharedLedgerInstanceId(input.key.publicKey);
+  let display: SharedLedgerExpectedProject | undefined;
+  if (input.expectedProject) {
+    try { display = sharedLedgerExpectedProject(input.expectedProject, parsed.centerId, instanceId); }
+    catch (error) { throw new SharedLedgerJoinError((error as Error).message); } // The adapter emits fixed messages only.
+  }
+  const grant = await redeem({ ...input, expectedProject: display }, signSharedLedgerJoin(input.code, instanceId, input.key), parsed.centerId);
   const kind = grant.role === "service" ? "service" : "person";
-  const project = grant.projects[0]!;
   const credential: SharedLedgerLocalCredential = { localSubject: input.subject, kind, centerId: grant.centerId, baseUrl,
     teamId: grant.teamId, personId: grant.personId, instanceId: grant.instanceId, bearer: grant.bearer, projects: grant.projects };
   try {
@@ -105,17 +143,15 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
     // Client errors may carry response detail. Retrying the same code revokes the bearer this attempt was issued.
     throw new SharedLedgerJoinError("code redeemed, but the center did not accept the new credential; nothing was saved — retry the same code before it expires");
   }
-  const localProjectId = input.localProjectId ?? project.projectId;
-  if (!sharedLedgerJoinPinsMatch(credential, localProjectId, project.projectId, dir)) {
-    throw new SharedLedgerJoinError("center or project does not match the pinned center; nothing was saved");
-  }
-  await writeSharedLedgerCredential(credential, dir);
-  await setSharedLedgerBinding({ centerId: grant.centerId, teamId: grant.teamId, projectId: project.projectId, localProjectId }, dir);
-  const identities = readSharedLedgerBindings(dir).filter((b) =>
-    resolveSharedLedgerCredential(input.subject, kind, b.centerId, b.teamId, b.projectId, "read", dir));
-  if (!identities.some((b) => b.centerId === grant.centerId && b.projectId === project.projectId)) {
-    throw new SharedLedgerJoinError("joined, but the local identity did not read back");
-  }
-  return { centerId: grant.centerId, teamId: grant.teamId, personId: grant.personId, projectId: project.projectId, localProjectId,
-    kind, expiresAt: grant.expiresAt, identities: identities.length };
+  return { credential, expiresAt: grant.expiresAt, display };
+}
+
+/** Internal port for an owner-approved creator operation. Returns a bearer to the caller only; never persists local state. */
+export async function redeemSharedLedgerProjectCredential(
+  input: Omit<SharedLedgerJoinInput, "create" | "localProjectId" | "expectedProject"> & {
+    expectedProject: SharedLedgerExpectedProject;
+  },
+): Promise<{ credential: SharedLedgerLocalCredential; expiresAt: number }> {
+  if (!input.expectedProject) throw new SharedLedgerJoinError("expected project required");
+  return redeemCredential(input);
 }
