@@ -8,7 +8,9 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "@/lib/api/client";
 import { fetchQuotaLines, postQuotaLines } from "./lend-quota-api";
 import { useQuotaT } from "./lend-quota-i18n";
-import { barWidth, draftOf, draftProblem, isDirty, lineBody, stateBadge, usedText, type FamilyLine, type LineDraft, type LineMode, type QuotaLinesView } from "./lend-quota-model";
+import {
+  barWidth, configErrorText, draftOf, draftProblem, isDirty, lineBody, slotsText, stateBadge, usedText, warningText, type FamilyLine, type LineDraft, type LineMode, type QuotaLinesView,
+} from "./lend-quota-model";
 import css from "./lend-quota-settings.module.css";
 
 const MODES: { mode: LineMode; label: string }[] = [{ mode: "on", label: "执行" }, { mode: "observe", label: "只观察" }, { mode: "off", label: "关闭" }];
@@ -35,7 +37,7 @@ function FamilyRow({ f, onSaved }: { f: FamilyLine; onSaved: (v: QuotaLinesView)
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">{f.family}</span>
         <span className={`badge badge-sm ${TONE[badge.tone]}`} data-state={f.state}>{t(badge.text)}</span>
-        <span className="ml-auto text-[11px] tabular-nums text-base-content/60">{t("可接")} {f.slots}/{f.granted}</span>
+        <span className="ml-auto text-[11px] tabular-nums text-base-content/60">{t("可接")} {t(slotsText(f))}/{f.granted}</span>
       </div>
       <div className={css.bar} aria-label={`${t("本周已用")} ${usedText(f)}`}>
         {width !== null && <div className={`${css.fill} ${f.state === "stop" ? css.fillStop : f.state === "warn" ? css.fillWarn : ""}`} style={{ width: `${width}%` }} />}
@@ -62,7 +64,7 @@ function FamilyRow({ f, onSaved }: { f: FamilyLine; onSaved: (v: QuotaLinesView)
         </button>
       </div>
       {problem && isDirty(f, draft) && <p className="text-[11px] text-warning">{t(problem)}</p>}
-      {err && <p className="break-words text-[11px] text-error" role="alert">{t("保存失败")}：{err}</p>}
+      {err && <p className="break-words text-[11px] text-error" role="alert">{t("保存失败")}：{t(err)}</p>}
     </div>
   );
 }
@@ -96,10 +98,10 @@ export function LendQuotaSettings() {
         </div>
       </div>
       <p className="text-[11px] text-base-content/50">{t("本机该家族本周用量达到停接线后不再接新单，在跑的单不受影响")}</p>
-      {!view.warnZoneApproved && <p className="text-[11px] text-base-content/50">{t("提醒区间的缩减比例尚待批准，目前只提示")}</p>}
-      {view.config.status === "invalid" && <p className="text-[11px] text-error" role="alert">{t("配置文件损坏，正按默认 70/80 执行；保存一次即修复")}</p>}
-      {view.warning && <p className="break-words text-[11px] text-warning">{view.warning}</p>}
-      {modeErr && <p className="break-words text-[11px] text-error" role="alert">{t("保存失败")}：{modeErr}</p>}
+      <p className="text-[11px] text-base-content/50">{t("达到提醒线后可接名额减半（至少留 1，原 0 仍 0）")}</p>
+      {configErrorText(view.config) && <p className="text-[11px] text-error" role="alert">{t(configErrorText(view.config)!)}</p>}
+      {warningText(view.warning) && <p className="break-words text-[11px] text-warning">{t(warningText(view.warning)!)}</p>}
+      {modeErr && <p className="break-words text-[11px] text-error" role="alert">{t("保存失败")}：{t(modeErr)}</p>}
       {loadErr && <p className="break-words text-[11px] text-error">{t("加载失败")}：{loadErr}</p>}
       <div className="grid gap-2">{view.families.map((f) => <FamilyRow key={`${f.family}:${f.warnPct}:${f.stopPct}`} f={f} onSaved={setView} />)}</div>
     </div>

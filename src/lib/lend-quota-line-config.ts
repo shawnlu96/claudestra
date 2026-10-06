@@ -18,7 +18,8 @@ export interface FamilyLine { warnPct: number; stopPct: number }
 export interface QuotaLinesFile { v: 1; mode: QuotaLineMode; families: Record<LendFamily, FamilyLine> }
 export type QuotaLinesRead =
   | { status: "missing"; file: QuotaLinesFile }
-  | { status: "invalid"; error: string; file: QuotaLinesFile }
+  /** unreadable = 读不了 / 不是 JSON；否则是内容不合法。error 是本机原因（可能带路径、字段名），只进本机日志，不出 bridge */
+  | { status: "invalid"; error: string; unreadable: boolean; file: QuotaLinesFile }
   | { status: "ok"; file: QuotaLinesFile };
 
 const DEFAULT_LINE: FamilyLine = { warnPct: 70, stopPct: 80 };
@@ -61,9 +62,9 @@ export function quotaLinesProblem(v: unknown): string | null {
 
 function toRead(r: StateRead): QuotaLinesRead {
   if (r.status === "missing") return { status: "missing", file: defaultQuotaLines() };
-  if (r.status === "corrupt") return { status: "invalid", error: r.error, file: defaultQuotaLines() };
+  if (r.status === "corrupt") return { status: "invalid", error: r.error, unreadable: true, file: defaultQuotaLines() };
   const p = quotaLinesProblem(r.data);
-  return p ? { status: "invalid", error: p, file: defaultQuotaLines() } : { status: "ok", file: r.data as QuotaLinesFile };
+  return p ? { status: "invalid", error: p, unreadable: false, file: defaultQuotaLines() } : { status: "ok", file: r.data as QuotaLinesFile };
 }
 
 export const readQuotaLines = async (path = QUOTA_LINES_PATH): Promise<QuotaLinesRead> => toRead(await readJsonState(path));

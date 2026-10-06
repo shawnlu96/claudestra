@@ -13,11 +13,11 @@ const enabled = process.env.LEND_QUOTA_BROWSER === "1";
 const out = resolve(".playwright-mcp/qline1");
 let browser: Browser, server: Server, url: string;
 const RESET = Date.parse("2026-10-09T01:41:00Z");
-const fam = (family: string, over: Record<string, unknown>) => ({ family, warnPct: 70, stopPct: 80, weekUsedPct: 50, resetAt: RESET, readAt: RESET - 86_400_000,
-  freshness: "fresh", state: "below", mode: "on", limit: "none", wouldLimit: "none", granted: 2, slots: 2, ...over });
-const view = (over: Record<string, unknown> = {}) => ({ ok: true, config: { status: "ok", error: null, mode: "on" }, warnZoneApproved: false, at: RESET - 1,
+const fam = (family: string, over: Record<string, unknown>) => ({ family, warnPct: 70, stopPct: 80, weekUsedPct: 50, resetAt: RESET, observedAt: RESET - 86_400_000,
+  source: "live", freshness: "fresh", state: "below", mode: "on", limit: "none", wouldLimit: "none", granted: 2, lineCap: 2, available: 2, slots: 2, ...over });
+const view = (over: Record<string, unknown> = {}) => ({ ok: true, config: { status: "ok", error: null, mode: "on" }, at: RESET - 1,
   families: [fam("codex", { weekUsedPct: 82, state: "stop", limit: "zero", wouldLimit: "zero", slots: 0 }),
-    fam("claude", { weekUsedPct: null, resetAt: null, readAt: null, freshness: null, state: "unknown" })], ...over });
+    fam("claude", { weekUsedPct: null, resetAt: null, observedAt: null, source: null, freshness: null, state: "unknown", available: null, slots: null })], ...over });
 const fixture = `
 import React from "react";
 import { createRoot } from "react-dom/client";
@@ -77,6 +77,8 @@ test.skipIf(!enabled)("停接 / 未知显示、窄屏不横滚", async () => {
   expect(await p.locator('[data-family="claude"] [data-state="unknown"]').innerText()).toBe("用量未知");
   expect(await p.locator('[data-family="claude"]').innerText()).toContain("未知");
   expect(await p.locator('[data-family="claude"]').innerText()).not.toContain("0%");
+  expect(await p.locator('[data-family="claude"]').innerText()).toContain("可接 未知/2");
+  expect(await p.locator('[data-family="codex"]').innerText()).toContain("可接 0/2");
   expect(await noHScroll(p)).toBe(true);
   await p.screenshot({ path: resolve(out, "qline1-390-stop-unknown.png"), fullPage: true });
   await p.close();
@@ -111,9 +113,9 @@ test.skipIf(!enabled)("保存失败：原因可见、输入保留；非法输入
 }, 30_000);
 
 test.skipIf(!enabled)("坏配置提示；403 整块不渲染；读失败可见", async () => {
-  const bad = await pageWith({ status: 200, json: view({ config: { status: "invalid", error: "JSON 解析失败", mode: "on" } }) });
+  const bad = await pageWith({ status: 200, json: view({ config: { status: "invalid", error: "config_unreadable", mode: "on" } }) });
   await bad.getByTestId("lend-quota-settings").waitFor();
-  expect(await bad.getByTestId("lend-quota-settings").innerText()).toContain("配置文件损坏");
+  expect(await bad.getByTestId("lend-quota-settings").innerText()).toContain("配置文件读不了");
   await bad.screenshot({ path: resolve(out, "qline1-390-invalid.png"), fullPage: true });
   await bad.close();
   const denied = await pageWith({ status: 403, json: { ok: false, error: "forbidden" } });

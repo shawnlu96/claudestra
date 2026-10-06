@@ -1,40 +1,41 @@
 /**
- * lib/lend-quota-line.ts（QLINE1）：两个家族各自 69/70/79/80/100 的边界、停线 = 0、提醒区间未批不收窄、
- * 批准后的缩法（取整、单槽、0 仍 0、不超过原值）、unknown 不收窄、observe / off、跨家族独立、重置后自动恢复。
+ * lib/lend-quota-line.ts（QLINE1）：两个家族各自 69/70/79/80/100 的边界、停线 = 0、提醒区间按 06:44 批准的缩法
+ * （取整、单槽、0 仍 0、不超过原值、奇偶）、unknown 不收窄、freshness 按来源与真实观测时刻、observe / off、跨家族独立、重置后自动恢复。
  */
 import { describe, expect, test } from "bun:test";
 import { defaultQuotaLines, type QuotaLinesFile } from "../src/lib/lend-quota-line-config.js";
-import { capSlots, familyLine, lendQuotaLineCap, lendQuotaLineSlots, limitFor, lineStateOf, warnSlots, WARN_ZONE_APPROVED, type LineInputs } from "../src/lib/lend-quota-line.js";
+import { capSlots, familyLine, lendQuotaLineCap, lendQuotaLineSlots, limitFor, lineStateOf, warnSlots, type LineInputs } from "../src/lib/lend-quota-line.js";
 import type { QuotaFacts } from "../src/lib/lend-quota-line-facts.js";
 
 const NOW = Date.parse("2026-10-06T06:00:00Z");
 const RESET = NOW + 3 * 86_400_000;
-const fact = (pct: number, resetAt = RESET) => ({ weekUsedPct: pct, resetAt, readAt: NOW - 1_000 });
+const fact = (pct: number, resetAt = RESET) => ({ weekUsedPct: pct, resetAt, observedAt: NOW - 1_000, source: "live" as const });
 const inputs = (facts: QuotaFacts, file: QuotaLinesFile = defaultQuotaLines()): LineInputs => ({ lines: { status: "ok", file }, facts });
 
 describe("边界（默认 70 / 80，>= 判）", () => {
   for (const family of ["codex", "claude"] as const) {
-    const cases: [number, string, number][] = [[69, "below", 4], [70, "warn", 4], [79, "warn", 4], [80, "stop", 0], [100, "stop", 0]];
-    for (const [pct, state, slots] of cases) {
-      test(`${family} ${pct}% → ${state}，4 槽 → ${slots}（提醒区间未批不收窄）`, () => {
-        const v = familyLine(family, inputs({ [family]: fact(pct) }), NOW);
-        expect(v.state).toBe(state as never);
-        expect(lendQuotaLineCap(family, 4, NOW, inputs({ [family]: fact(pct) }))).toBe(slots);
+    // [用量, 状态, 4 槽 →, 5 槽 →, 1 槽 →]
+    const cases: [number, string, number, number, number][] = [[69, "below", 4, 5, 1], [70, "warn", 2, 2, 1], [79, "warn", 2, 2, 1], [80, "stop", 0, 0, 0], [100, "stop", 0, 0, 0]];
+    for (const [pct, state, s4, s5, s1] of cases) {
+      test(`${family} ${pct}% → ${state}，4/5/1 槽 → ${s4}/${s5}/${s1}`, () => {
+        const inp = inputs({ [family]: fact(pct) });
+        expect(familyLine(family, inp, NOW).state).toBe(state as never);
+        expect([4, 5, 1, 0].map((n) => lendQuotaLineCap(family, n, NOW, inp))).toEqual([s4, s5, s1, 0]);
       });
     }
   }
-  test("未批准常量为 false：提醒区间只报 warn，wouldLimit 也是 none", () => {
-    expect(WARN_ZONE_APPROVED).toBe(false);
-    expect(familyLine("codex", inputs({ codex: fact(75) }), NOW)).toMatchObject({ state: "warn", limit: "none", wouldLimit: "none" });
+  test("提醒区间：limit = wouldLimit = half", () => {
+    expect(familyLine("codex", inputs({ codex: fact(75) }), NOW)).toMatchObject({ state: "warn", limit: "half", wouldLimit: "half" });
   });
 });
 
-describe("提醒区间缩法（候选，批准后启用）", () => {
+describe("提醒区间缩法（监工 06:44 批准）", () => {
   test("取整：0→0 1→1 2→1 3→1 4→2 5→2 9→4", () => {
     expect([0, 1, 2, 3, 4, 5, 9].map(warnSlots)).toEqual([0, 1, 1, 1, 2, 2, 4]);
   });
-  test("批准后 warn → half；单槽保持 1，原 0 仍 0", () => {
-    expect(limitFor("warn", "on", true)).toBe("half");
+  test("warn → half；单槽保持 1，原 0 仍 0", () => {
+    expect(limitFor("warn", "on")).toBe("half");
+    expect(limitFor("warn", "observe")).toBe("none");
     expect(capSlots("half", 1)).toBe(1);
     expect(capSlots("half", 0)).toBe(0);
     expect(capSlots("half", 6)).toBe(3);
@@ -59,13 +60,15 @@ describe("unknown / 模式 / 自定义线", () => {
   test("重置后读到新窗口低用量：自动恢复，无需按钮", () => {
     expect(lendQuotaLineCap("codex", 3, NOW, inputs({ codex: fact(90) }))).toBe(0);
     const later = RESET + 60_000;
-    expect(lendQuotaLineCap("codex", 3, later, inputs({ codex: { weekUsedPct: 2, resetAt: later + 7 * 86_400_000, readAt: later } }))).toBe(3);
+    expect(lendQuotaLineCap("codex", 3, later, inputs({ codex: { weekUsedPct: 2, resetAt: later + 7 * 86_400_000, observedAt: later, source: "live" } }))).toBe(3);
   });
-  test("读数超过两个刷新周期：标 last_known，仍按本代读数判（不当 0%）", () => {
-    const old = { weekUsedPct: 85, resetAt: RESET, readAt: NOW - 10 * 60_000 };
-    expect(familyLine("codex", inputs({ codex: old }), NOW)).toMatchObject({ freshness: "last_known", state: "stop", limit: "zero" });
+  test("freshness 按来源与真实观测时刻：live_stale 或观测超过 15 分钟 = last_known，仍按本代读数判（不当 0%）", () => {
+    const old = { weekUsedPct: 85, resetAt: RESET, observedAt: NOW - 16 * 60_000, source: "live" as const };
+    expect(familyLine("codex", inputs({ codex: old }), NOW)).toMatchObject({ freshness: "last_known", state: "stop", limit: "zero", observedAt: old.observedAt, source: "live" });
+    expect(familyLine("codex", inputs({ codex: { ...fact(85), source: "live_stale" } }), NOW)).toMatchObject({ freshness: "last_known", state: "stop" });
     expect(familyLine("codex", inputs({ codex: fact(85) }), NOW).freshness).toBe("fresh");
-    expect(familyLine("codex", inputs({}), NOW).freshness).toBeNull();
+    expect(familyLine("codex", inputs({ codex: { ...fact(85), source: "local_cache" } }), NOW).freshness).toBe("fresh");
+    expect(familyLine("codex", inputs({}), NOW)).toMatchObject({ freshness: null, observedAt: null, source: null });
   });
   test("observe 只报告、off 不收窄", () => {
     const f = defaultQuotaLines();
@@ -89,8 +92,12 @@ describe("跨家族独立 / hello slots", () => {
     expect(s).toEqual({ codex: { total: 0, busy: 2 }, claude: { total: 2, busy: 1 } });
   });
   test("claude 停接不影响 codex", () => {
-    const s = lendQuotaLineSlots({ codex: { total: 3, busy: 0 }, claude: { total: 2, busy: 2 } }, NOW, inputs({ codex: fact(79), claude: fact(80) }));
+    const s = lendQuotaLineSlots({ codex: { total: 3, busy: 0 }, claude: { total: 2, busy: 2 } }, NOW, inputs({ codex: fact(69), claude: fact(80) }));
     expect(s).toEqual({ codex: { total: 3, busy: 0 }, claude: { total: 0, busy: 2 } });
+  });
+  test("提醒区间忙槽：4 槽忙 3 → total 2、busy 照实 3（不撤单，借入方按 busy >= total 不再派）", () => {
+    const s = lendQuotaLineSlots({ codex: { total: 4, busy: 3 }, claude: { total: 2, busy: 0 } }, NOW, inputs({ codex: fact(75), claude: fact(10) }));
+    expect(s).toEqual({ codex: { total: 2, busy: 3 }, claude: { total: 2, busy: 0 } });
   });
   test("原有效容量已是 0（暂停 / 收回 / 过期）：本规则不恢复", () => {
     expect(lendQuotaLineCap("codex", 0, NOW, inputs({ codex: fact(1) }))).toBe(0);

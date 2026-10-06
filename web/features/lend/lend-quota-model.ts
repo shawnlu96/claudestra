@@ -9,16 +9,18 @@ export type LineLimit = "none" | "half" | "zero";
 export type LineMode = "on" | "observe" | "off";
 
 export interface FamilyLine {
-  family: QuotaFamily; warnPct: number; stopPct: number; weekUsedPct: number | null; resetAt: number | null; readAt: number | null;
-  freshness: "fresh" | "last_known" | null; state: LineState; mode: LineMode; limit: LineLimit; wouldLimit: LineLimit; granted: number; slots: number;
+  family: QuotaFamily; warnPct: number; stopPct: number; weekUsedPct: number | null; resetAt: number | null;
+  observedAt: number | null; source: "live" | "live_stale" | "local_cache" | null;
+  freshness: "fresh" | "last_known" | null; state: LineState; mode: LineMode; limit: LineLimit; wouldLimit: LineLimit;
+  /** granted = 授权名额；lineCap = 只按额度线收窄的理论上限；available / slots = 实际可接（未套 / 已套额度线），null = 读不到 */
+  granted: number; lineCap: number; available: number | null; slots: number | null;
 }
 export interface QuotaLinesView {
   ok: true;
-  config: { status: "ok" | "missing" | "invalid"; error: string | null; mode: LineMode };
-  warnZoneApproved: boolean;
+  config: { status: "ok" | "missing" | "invalid"; error: "config_unreadable" | "config_invalid" | null; mode: LineMode };
   at: number;
   families: FamilyLine[];
-  warning?: string;
+  warning?: "replaced_invalid";
 }
 
 export interface LineDraft { warn: string; stop: string }
@@ -54,3 +56,12 @@ export const usedText = (f: Pick<FamilyLine, "weekUsedPct">): string => (f.weekU
 
 /** 进度条宽度（0..100）；unknown = null（不画条） */
 export const barWidth = (f: Pick<FamilyLine, "weekUsedPct">): number | null => (f.weekUsedPct === null ? null : Math.min(100, Math.max(0, f.weekUsedPct)));
+
+/** 实际可接：读不到显示「未知」，不当 0 也不当满 */
+export const slotsText = (f: Pick<FamilyLine, "slots">): string => (f.slots === null ? "未知" : String(f.slots));
+
+/** bridge 的固定错误码 → 文案（中文原文，界面经 i18n 翻译） */
+export const configErrorText = (c: QuotaLinesView["config"]): string | null =>
+  c.status !== "invalid" ? null : c.error === "config_unreadable" ? "配置文件读不了或不是合法 JSON，正按默认 70/80 执行；保存一次即修复"
+    : "配置文件内容不合法，正按默认 70/80 执行；保存一次即修复";
+export const warningText = (w: QuotaLinesView["warning"]): string | null => (w === "replaced_invalid" ? "原配置文件损坏，已另存备份后按这次保存的内容重写" : null);
