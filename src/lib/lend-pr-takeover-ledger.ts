@@ -14,6 +14,7 @@ import { stepsOf } from "./ledger-steps.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { deliver, moveStage, setTask } from "./ledger-write.js";
 import type { RemoteHead } from "./order-deliver.js";
+import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 
 export interface TakeoverInput { orderId: string; head: string; pr: number }
 export interface TakeoverDeps {
@@ -104,6 +105,7 @@ export async function takeoverLend(db: Database, ctx: WriteCtx, input: TakeoverI
     moveStage(db, { actor: `peer:${cur.peer}`, now, dedupKey: `lend-takeover-stage:${cur.orderId}:${input.head}` }, { taskId: task.id, from: task.stage, to: "review" });
     const eventSeq = r.event.seq;
     db.prepare("UPDATE lend_orders SET status = 'done', reason = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'").run(why, eventSeq, now, cur.orderId);
+    closeSettledOrderAsks(db, cur.orderId, now); // 接管即结清：worker 的旧提问同一事务里关（order-ask-terminal.ts）
     insertEvent(db, { actor: ctx.actor, now, dedupKey: `lend-takeover:${cur.orderId}` }, { project: cur.project, target: cur.taskId, kind: "note",
       text: `出借：${why}，按 ${pr} 记交付（head ${input.head.slice(0, 12)}），之后出借方交来的结论不入账`,
       data: { lend: { orderId: cur.orderId, peer: cur.peer, op: "takeover", branch: cur.branch, head: input.head, pr } } }, true); // 主事件：去重键落库，同一单接管不了第二次

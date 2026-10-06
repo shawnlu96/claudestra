@@ -3,7 +3,7 @@
  * 持有者崩了（不再续租）过期后照样回收。回归：T13a wf2 esc-keys-1（Esc 锁 5 秒过期、卡住的 tmux 调用超过它，锁被回收后两发 Esc 挨在一起）。
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -103,5 +103,41 @@ setInterval(() => console.log(l!.held() ? "held" : "lost"), 40);`);
     process.kill(p.pid, "SIGCONT");
     p.kill();
     await reader.catch(() => undefined); // 子进程被杀、管道断：这里只收它的输出
+  }
+});
+
+// 在子进程里跑：旧实现在这里是同步死循环，连测试超时都触发不了，只能从外面杀
+test.skipIf(process.getuid?.() === 0)("锁陈旧但改名一直失败（父目录只读，LCK1）：waitMs 左右返回 null，等待期间让出事件循环", async () => {
+  const ro = join(dir, "ro");
+  const stuck = join(ro, "x.lock");
+  mkdirSync(stuck, { recursive: true });
+  writeFileSync(join(stuck, "owner"), "dead.1");
+  const old = new Date(Date.now() - 10_000);
+  utimesSync(stuck, old, old);
+  chmodSync(ro, 0o555); // rename 要父目录写权限：回收的改名一直 EACCES
+  const child = join(dir, "waiter.ts");
+  const mod = join(import.meta.dir, "../src/lib/file-lock.ts");
+  writeFileSync(child, `import { acquireLock } from ${JSON.stringify(mod)};
+let ticks = 0;
+setInterval(() => ticks++, 20);
+const t0 = Date.now();
+const l = await acquireLock(${JSON.stringify(stuck)}, 400, 100);
+console.log(JSON.stringify({ got: l !== null, ms: Date.now() - t0, ticks }));
+process.exit(0);`);
+  const p = Bun.spawn(["bun", child], { stdout: "pipe" });
+  const killer = setTimeout(() => p.kill(), 2_500); // 短于 bun test 默认 5 秒超时：卡死时走断言失败 + finally 恢复权限
+  try {
+    const out = await new Response(p.stdout).text();
+    expect(out).not.toBe(""); // 空 = 被兜底杀掉，即卡死
+    const r = JSON.parse(out);
+    expect(r.got).toBe(false);
+    expect(r.ms).toBeGreaterThanOrEqual(400);
+    expect(r.ms).toBeLessThan(2_000);
+    expect(r.ticks).toBeGreaterThan(0); // 等待期间定时器跑得动
+    expect(existsSync(stuck)).toBe(true);
+  } finally {
+    clearTimeout(killer);
+    p.kill();
+    chmodSync(ro, 0o755); // afterEach 要删得掉
   }
 });

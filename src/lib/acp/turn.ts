@@ -7,6 +7,7 @@
  * 2. 有 external 就先等它：它在适配器里已经在跑，不管排在哪；
  * 3. 否则按队首：nudge / command / op 单独一轮，连续的 prompt 拼成一轮。
  * 忙时到的消息先试 steering（插进当前回合，和 Pi 的 steer 一样即时生效），插不进就在原位置变回 prompt——并发失败也不乱序。
+ * 例外：deliveredUnknown（已经写给适配器、结果不明，可能执行过）不变回 prompt，只出卡，由人决定要不要重发。
  * 例外：在跑的是 command / op（独占槽，如 /compact）时不 steer，消息按到达顺序排在它后面——插进压缩那一轮会被并进压缩前的历史。
  * 带 opId 的独占槽有单调代次 gen，可查（slotStatus / waitSlot）、可撤（cancelSlot 只撤排队的）；在跑的一律 uncancellable：
  * codex-acp 2.1.1 回包后才到的 session/cancel 会不会落到下一轮未证实（docs/runtimes/codex-acp.md 末节），所以不发任何取消。
@@ -29,16 +30,24 @@ export interface StopReport {
 /**
  * _session/steering 的结果。startedNewTurn 必须带上那一轮的结束信号：IO 在处理回包的同一刻就挂上等待（按回包之后的
  * 线程状态 idle 认），所以那一轮哪怕在调度器排到它之前就结束了，done 也已经记下，不会漏等、也不会等错一轮。
+ * failed = 确定没投递（宿主改回 prompt）；deliveredUnknown = 写出后没拿到可信结果，failure 是要出的那张卡。
  */
 export type SteerResult =
   | { outcome: "injected" }
   | { outcome: "failed" }
+  | { outcome: "deliveredUnknown"; failure: AcpFailure }
   | { outcome: "startedNewTurn"; done: Promise<PromptOutcome> };
+
+/** 适配器叫停时清掉的排队消息（_claudestra/cancel 的结果）：cleared = 正文；clearedIds = 其中带宿主 deliveryId 的那几条（老适配器不给） */
+export interface ClearedQueue {
+  cleared: readonly string[];
+  clearedIds?: readonly string[];
+}
 
 export interface TurnIO {
   prompt(text: string): Promise<PromptOutcome>;
-  /** 插进正在跑的回合。必须有结果（宿主给请求设超时）：在途期间调度器不开新回合。不支持 steering 就不给 */
-  steer?(text: string): Promise<SteerResult>;
+  /** 插进正在跑的回合。必须有结果（宿主给请求设超时）：在途期间调度器不开新回合。不支持 steering 就不给。deliveryId = 这条的宿主身份 */
+  steer?(text: string, deliveryId: string): Promise<SteerResult>;
   reportStop(r: StopReport): Promise<{ block?: boolean; reason?: string }>;
   /** 回合失败（额度 / 未登录 / 其它）：宿主转成结构化帧给 bridge 出卡 */
   onFailure(f: AcpFailure): void;
@@ -90,8 +99,8 @@ const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure:
 
 export class AcpTurnLoop {
   private slots: Slot[] = [];
-  /** steer 进在跑回合（injected）的消息，正文 → message_id，只留最近 50 条：叫停时适配器清掉的排队正文按它对回 id（voided） */
-  private steered: { text: string; id: string }[] = [];
+  /** steer 进在跑回合（injected）的消息，只留最近 50 条：叫停时适配器清掉的按 deliveryId（老适配器按正文）对回 message_id（voided） */
+  private steered: { text: string; id: string; deliveryId: string }[] = [];
   /** 调度器正在跑一轮（含上报）。steer 在途、调度器停着等它时为 false，但 busy 仍为 true */
   private pumping = false;
   private suspended = false;
@@ -197,13 +206,17 @@ export class AcpTurnLoop {
     this.pump();
   }
 
-  /** 适配器叫停时清掉的排队正文里，宿主 steer 进去的那几条的 message_id（abort_ack 的 voided） */
-  voided(cleared: readonly string[]): string[] {
-    return this.steered.filter((s) => cleared.includes(s.text)).map((s) => s.id);
+  /**
+   * 适配器叫停时清掉的排队消息里，宿主 steer 进去的那几条的 message_id（abort_ack 的 voided）。带了 clearedIds 就只认身份：
+   * 正文相同的两条一条已执行、一条被清掉时只报被清掉的（tests/acp-self-turn.test.ts「R18」）；没带（老适配器）才按正文对
+   */
+  voided({ cleared, clearedIds }: ClearedQueue): string[] {
+    const hit = clearedIds ? (s: { deliveryId: string }) => clearedIds.includes(s.deliveryId) : (s: { text: string }) => cleared.includes(s.text);
+    return this.steered.filter(hit).map((s) => s.id);
   }
 
-  /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用）；messageId 记下来供叫停时对回作废的消息 */
-  async submit(text: string, messageId?: string): Promise<"prompt" | "steer" | "queued"> {
+  /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用；unknown = steer 投递结果不明、已出卡）；messageId 记下来供叫停时对回作废的消息 */
+  async submit(text: string, messageId?: string): Promise<"prompt" | "steer" | "queued" | "unknown"> {
     const steering = this.io.steer && !owned(this.current) && (this.pumping || this.slots.some((s) => s.kind === "steer"));
     if (!steering) {
       const idle = !this.busy;
@@ -214,17 +227,21 @@ export class AcpTurnLoop {
     // 先占位（到达顺序），再发 steer；落定之前调度器不会开新回合
     const slot: Slot = { kind: "steer" };
     this.slots.push(slot);
-    const r = await call(() => this.io.steer!(text)).catch((e): SteerResult => (this.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
+    const deliveryId = crypto.randomUUID();
+    const r = await call(() => this.io.steer!(text, deliveryId)).catch((e): SteerResult => (this.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
     const at = this.slots.indexOf(slot);
     if (r.outcome === "injected") {
       this.slots.splice(at, 1);
-      if (messageId) this.steered = [...this.steered.slice(-49), { text, id: messageId }];
+      if (messageId) this.steered = [...this.steered.slice(-49), { text, id: messageId, deliveryId }];
     } else if (r.outcome === "startedNewTurn") {
       // done 登记时就接住：排到它之前就 reject 的话，不能变成 unhandled rejection（Bun 进程会以 1 退出）
       this.slots[at] = { kind: "external", done: call(() => r.done).catch(failedOutcome) };
+    } else if (r.outcome === "deliveredUnknown") {
+      this.slots.splice(at, 1);
+      this.fail(r.failure);
     } else this.slots[at] = { kind: "prompt", text };
     this.pump();
-    return r.outcome === "failed" ? "queued" : "steer";
+    return r.outcome === "failed" ? "queued" : r.outcome === "deliveredUnknown" ? "unknown" : "steer";
   }
 
   /** 按规则挑下一轮；null = 没东西可开，或者要等 steer 落定 */
@@ -237,6 +254,15 @@ export class AcpTurnLoop {
     const n = this.slots.findIndex((s) => s.kind !== "prompt");
     const batch = this.slots.splice(0, n < 0 ? this.slots.length : n) as { kind: "prompt"; text: string }[];
     return { kind: "prompt", text: batch.map((b) => b.text).join("\n\n") };
+  }
+
+  /** 出卡失败不能连带吞掉后面的上报 / 调度：bridge 收不到 StopFailure，这个 agent 就一直显示「思考中」 */
+  private fail(f: AcpFailure): void {
+    try {
+      this.io.onFailure(f);
+    } catch (e) {
+      this.log(`失败出卡出错：${errText(e)}`);
+    }
   }
 
   /** 日志本身坏了也不能连带卡住调度（它在各个 catch 里被调用） */
@@ -271,14 +297,7 @@ export class AcpTurnLoop {
 
   private async run(p: Pick): Promise<PromptOutcome["kind"]> {
     const outcome = await call(() => (p.kind === "external" ? p.done : this.io.prompt(p.text))).catch(failedOutcome);
-    if (outcome.kind === "failed") {
-      // 出卡失败不能连带吞掉下面的上报：bridge 收不到 StopFailure，这个 agent 就一直显示「思考中」
-      try {
-        this.io.onFailure(outcome.failure);
-      } catch (e) {
-        this.log(`失败出卡出错：${errText(e)}`);
-      }
-    }
+    if (outcome.kind === "failed") this.fail(outcome.failure);
     const nudge = p.kind === "nudge";
     const report: StopReport =
       outcome.kind === "done"
