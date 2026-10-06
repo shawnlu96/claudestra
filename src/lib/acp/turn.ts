@@ -35,10 +35,16 @@ export type SteerResult =
   | { outcome: "failed" }
   | { outcome: "startedNewTurn"; done: Promise<PromptOutcome> };
 
+/** 适配器叫停时清掉的排队消息（_claudestra/cancel 的结果）：cleared = 正文；clearedIds = 其中带宿主 deliveryId 的那几条（老适配器不给） */
+export interface ClearedQueue {
+  cleared: readonly string[];
+  clearedIds?: readonly string[];
+}
+
 export interface TurnIO {
   prompt(text: string): Promise<PromptOutcome>;
-  /** 插进正在跑的回合。必须有结果（宿主给请求设超时）：在途期间调度器不开新回合。不支持 steering 就不给 */
-  steer?(text: string): Promise<SteerResult>;
+  /** 插进正在跑的回合。必须有结果（宿主给请求设超时）：在途期间调度器不开新回合。不支持 steering 就不给。deliveryId = 这条的宿主身份 */
+  steer?(text: string, deliveryId: string): Promise<SteerResult>;
   reportStop(r: StopReport): Promise<{ block?: boolean; reason?: string }>;
   /** 回合失败（额度 / 未登录 / 其它）：宿主转成结构化帧给 bridge 出卡 */
   onFailure(f: AcpFailure): void;
@@ -90,8 +96,8 @@ const failedOutcome = (e: unknown): PromptOutcome => ({ kind: "failed", failure:
 
 export class AcpTurnLoop {
   private slots: Slot[] = [];
-  /** steer 进在跑回合（injected）的消息，正文 → message_id，只留最近 50 条：叫停时适配器清掉的排队正文按它对回 id（voided） */
-  private steered: { text: string; id: string }[] = [];
+  /** steer 进在跑回合（injected）的消息，只留最近 50 条：叫停时适配器清掉的按 deliveryId（老适配器按正文）对回 message_id（voided） */
+  private steered: { text: string; id: string; deliveryId: string }[] = [];
   /** 调度器正在跑一轮（含上报）。steer 在途、调度器停着等它时为 false，但 busy 仍为 true */
   private pumping = false;
   private suspended = false;
@@ -197,9 +203,13 @@ export class AcpTurnLoop {
     this.pump();
   }
 
-  /** 适配器叫停时清掉的排队正文里，宿主 steer 进去的那几条的 message_id（abort_ack 的 voided） */
-  voided(cleared: readonly string[]): string[] {
-    return this.steered.filter((s) => cleared.includes(s.text)).map((s) => s.id);
+  /**
+   * 适配器叫停时清掉的排队消息里，宿主 steer 进去的那几条的 message_id（abort_ack 的 voided）。带了 clearedIds 就只认身份：
+   * 正文相同的两条一条已执行、一条被清掉时只报被清掉的（tests/acp-self-turn.test.ts「R18」）；没带（老适配器）才按正文对
+   */
+  voided({ cleared, clearedIds }: ClearedQueue): string[] {
+    const hit = clearedIds ? (s: { deliveryId: string }) => clearedIds.includes(s.deliveryId) : (s: { text: string }) => cleared.includes(s.text);
+    return this.steered.filter(hit).map((s) => s.id);
   }
 
   /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用）；messageId 记下来供叫停时对回作废的消息 */
@@ -214,11 +224,12 @@ export class AcpTurnLoop {
     // 先占位（到达顺序），再发 steer；落定之前调度器不会开新回合
     const slot: Slot = { kind: "steer" };
     this.slots.push(slot);
-    const r = await call(() => this.io.steer!(text)).catch((e): SteerResult => (this.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
+    const deliveryId = crypto.randomUUID();
+    const r = await call(() => this.io.steer!(text, deliveryId)).catch((e): SteerResult => (this.log(`steering 出错，改排队：${errText(e)}`), { outcome: "failed" }));
     const at = this.slots.indexOf(slot);
     if (r.outcome === "injected") {
       this.slots.splice(at, 1);
-      if (messageId) this.steered = [...this.steered.slice(-49), { text, id: messageId }];
+      if (messageId) this.steered = [...this.steered.slice(-49), { text, id: messageId, deliveryId }];
     } else if (r.outcome === "startedNewTurn") {
       // done 登记时就接住：排到它之前就 reject 的话，不能变成 unhandled rejection（Bun 进程会以 1 退出）
       this.slots[at] = { kind: "external", done: call(() => r.done).catch(failedOutcome) };
