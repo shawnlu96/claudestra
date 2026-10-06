@@ -216,6 +216,16 @@ describe("真实子进程", () => {
     return [pid!, pgid!];
   }
 
+  test("spawnAdapter：stderr 先打码再截 300 字，密钥跨在截断处也不留前缀", async () => {
+    const logs: string[] = [];
+    const line = `${"z".repeat(290)} sk-abcdefghijklmnopqrstuvwxyz123456`;
+    const proc = spawnAdapter(["sh", "-c", `echo '${line}' >&2`], testChildEnv(), dir, (m) => logs.push(m), "t");
+    await proc.exited;
+    await tick(50);
+    expect(logs.join("\n")).toContain("zzzz");
+    expect(logs.join("\n")).not.toContain("sk-abc");
+  });
+
   test("spawnAdapter：detached 起在独立进程组，缺省不变", async () => {
     const [pid, pgid] = await pidAndGroup(true);
     expect(pgid).toBe(pid);
