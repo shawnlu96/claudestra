@@ -15,10 +15,12 @@ import { runManagerProcess } from "./run-manager.js";
 import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import { CLAIM_LEASE_MS } from "./scheduler-dispatch.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { swapAuthorFamily } from "./lend-author-family.js";
 import { assertSchedulerLease, forwardSchedulerLease, SCHEDULER_LEASE_ENV } from "./scheduler-lease-env.js";
 import { localReviewerCount } from "./scheduler-pool-facts.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
-import { latestReviewerSwap, swappedSession } from "./scheduler-review-swap.js";
+import { reviewMaterialCheck } from "./scheduler-model-wiring.js";
+import { latestReviewerSwap, openRefusal, refusalEpochLapse, swappedSession } from "./scheduler-review-swap.js";
 import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
@@ -27,7 +29,8 @@ type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
   agent: Manager;
   agents: RetireDeps["agents"];
-  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession): Promise<EnsureResult>;
+  /** tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX). */
+  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: string): Promise<EnsureResult>;
   active(): void;
   registryPath?: string;
 }
@@ -48,25 +51,26 @@ function productionDeps(db: Database): ReviewSwapDeps {
     assertSchedulerLease();
     return r;
   };
-  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old) => createReplacement(db, task, family, old, agent) };
+  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag) => createReplacement(db, task, family, old, agent, tag) };
 }
 
-async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager): Promise<EnsureResult> {
-  const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
+async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager, tag = ""): Promise<EnsureResult> {
+  const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}${tag}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
   if (existing && (existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
     return { kind: "unknown", reason: `${name} 被其他会话占用，不能覆盖` };
   }
   const author = getSchedulerSession(db, task.id, "author");
   const source = peerPrRepoDir(task) ?? rows.find((r) => r.name === (author?.agent ?? task.agent))?.cwd;
   if (!source) return { kind: "manual", reason: "找不到作者工作目录，无法建立新的审查 worktree" };
-  const dir = join(statePath("worktrees"), `rv-${task.id.toLowerCase()}`);
+  const dir = join(statePath("worktrees"), `rv-${task.id.toLowerCase()}${tag}`);
   assertSchedulerLease();
   const opened = await openReviewWorktree(source, dir, task.headSHA, async (args) => {
     assertSchedulerLease(); const result = await git(args); assertSchedulerLease(); return result;
   });
   assertSchedulerLease();
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
-  const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--purpose", "作者家族变更后的独立复验"];
+  const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
+    "--purpose", "作者家族变更后的独立复验"];
   if (family === "codex") args.push("--runtime", "codex", "--transport", "acp");
   const r = await agent(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
@@ -124,7 +128,11 @@ async function stopOld(db: Database, ctx: WriteCtx, intent: SchedulerIntent, dep
 async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, maxWorkers: number, deps: ReviewSwapDeps): Promise<string | null> {
   const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
   const swap = latestReviewerSwap(listEvents(db, { project: task.project, target: task.id }));
-  if (!swap || typeof swap.data.intentId !== "string" || getIntent(db, swap.data.intentId)?.status !== "done") throw new LedgerError("conflict", "旧审查尚未完成换人");
+  // A refusal epoch has no review_swap intent: its own event is the completed retirement (scheduler-review-swap.ts).
+  const refusal = !!swap?.data.refusal;
+  if (!swap || typeof swap.data.intentId !== "string" || (!refusal && getIntent(db, swap.data.intentId)?.status !== "done")) {
+    throw new LedgerError("conflict", "旧审查尚未完成换人");
+  }
   if (getSchedulerSession(db, task.id, "reviewer")?.createIntentId === intent.id) return null;
   if (intent.status === "submitted") {
     if ((ctx.now ?? Date.now()) - intent.updatedAt < CLAIM_LEASE_MS) return "新的审查会话已认领创建，等待绑定回执";
@@ -134,16 +142,35 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   if (intent.status !== "pending" || intent.node !== "adversarial_review" || task.stage !== "review" || task.headSHA !== intent.head ||
     task.specRev !== intent.specRev || task.rev !== intent.taskRev || workflow?.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "新审查会话的创建意图已过期");
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return "本机另一家族审查名额已满，等待空位后自动续派";
-  const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily;
+  const lapse = refusal ? refusalEpochLapse(db, task, { check: reviewMaterialCheck(db) }) : null; // MODELX: hold / revoked approval / changed materials since the epoch
+  if (lapse) throw new LedgerError("conflict", `不建豁免审查会话，退人工：${lapse}`);
+  // A FAM1a epoch's toFamily is the author family it retired for (FAMW check); a MODELX refusal epoch's toFamily is the reviewer's target.
+  const wrote = refusal ? remoteHeadFamily(db, task) ?? workflow.authorFamily : swapAuthorFamily(db, task, workflow, swap);
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
-  const got = await deps.ensure(task, wrote === "claude" ? "codex" : "claude", swappedSession(db, swap.data.intentId));
+  const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
+  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : undefined);
   deps.active();
   if (got.kind !== "ready") {
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: oneLine(got.reason) });
     return got.reason;
   }
-  bindSchedulerSession(db, ctx, { ...got.ref, taskId: task.id, role: "reviewer", intentId: intent.id, registryPath: deps.registryPath });
+  bindSchedulerSession(db, ctx, { ...got.ref, taskId: task.id, role: "reviewer", intentId: intent.id, registryPath: deps.registryPath,
+    ...(refusal ? { refusalCheck: reviewMaterialCheck(db) } : {}) });
   return null;
+}
+
+/** A committed retirement survives card drift; replacement creation still needs current CAS and safety authorization. */
+function assertSwapCurrent(db: Database, intent: SchedulerIntent): void {
+  const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
+  const events = listEvents(db, { project: task.project, target: task.id });
+  const retiring = intent.action === "review_swap" && latestReviewerSwap(events)?.data.intentId === intent.id;
+  if (workflow?.mode !== "auto" || (!retiring && (task.stage !== "review" || task.rev !== intent.taskRev || task.specRev !== intent.specRev ||
+    task.headSHA !== intent.head || workflow.specRev !== task.specRev))) throw new LedgerError("conflict", "换审查会话期间卡已变化，先重算");
+  if (openRefusal(events)) {
+    throw new LedgerError("conflict", "本卡有未处置的模型安全拒绝，不自动更换审查员");
+  }
+  const lapse = intent.action === "ensure_session" ? refusalEpochLapse(db, task, { check: reviewMaterialCheck(db) }) : null; // after every async effect, before the next
+  if (lapse) throw new LedgerError("conflict", `豁免审查接续已失效，停止后续效果，退人工：${lapse}`);
 }
 
 /** Narrow manager command: no arbitrary lifecycle target; it comes only from a validated ledger intent. */
@@ -156,6 +183,9 @@ export async function reviewSwapStep(db: Database, ctx: WriteCtx, id: string, ma
   if (!Number.isInteger(maxWorkers) || maxWorkers < 0 || maxWorkers > 32) throw new LedgerError("invalid", "审查名额需在 0–32");
   if (intent.status === "done") return { ok: true, step: "session", detail: "审查会话处理已完成" };
   if (!["pending", "submitted"].includes(intent.status)) return { ok: true, step: "held", detail: "意图结果未定或已取消" };
+  const active = deps.active;
+  deps = { ...deps, active: () => { active(); assertSwapCurrent(db, intent); } };
+  deps.active();
   const wait = intent.action === "review_swap" ? await stopOld(db, ctx, intent, deps) : await ensureNew(db, ctx, intent, maxWorkers, deps);
   deps.active();
   if (wait) return { ok: true, step: "waiting", detail: wait };

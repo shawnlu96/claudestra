@@ -1,3 +1,4 @@
+import { FILE_SCOPE_COMMAND } from "./ledger-resource-scope-cmds.js";
 import { poolRemotePolicy } from "../lib/scheduler-agent-pool-context.js";
 import { convergenceSpec } from "../lib/fix-strategy-order.js";
 import { convergenceCommands } from "../lib/review-arbiter-commands.js";
@@ -16,6 +17,10 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
 import { schedulerPoolStep, type PoolStepInput } from "../lib/ledger-scheduler-pool.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
+import { materialsPolicyPort } from "../lib/recovery-materials-wiring.js";
+// macro: same build-time reader location as lend-offer (ledger-lend-cmds.ts)
+import { cfgReaderPath } from "../lib/recovery-materials-wiring.js" with { type: "macro" };
+import { stepOfStage } from "../lib/lend-git.js";
 import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
 import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
 import { ghFixStartProbe, withFixStart } from "../lib/lend-fix-start.js";
@@ -57,7 +62,9 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
   try {
     const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);
     const startProbe = c.deps.lend ? probe : ghFixStartProbe(probe, c.deps.relayGh);
-    const write = await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe), startProbe);
+    // 与 lend-offer 同一份 CFG materials 策略（dispatch-recovery-MATW）：没装 = observe，读坏 = off，诊断进 stderr
+    const policy = stepOfStage(task.stage) === "fix" ? (await materialsPolicyPort(c.deps.lend?.recoveryReader ?? cfgReaderPath())).policy : undefined;
+    const write = await withLeaseHead(c.db, task, peer, await writeMaterials(c.db, task, { peer, repo, base: "main" }, probe, policy), startProbe);
     return await withFixStart(c.db, task, peer, write, startProbe, c.deps.relayGh);
   } catch (e) {
     if (e instanceof LedgerError) return { error: e.message };
@@ -66,8 +73,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
 }
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
-  ...convergenceCommands,
-  ...CONVERGE_NOTICE_CMDS,
+  ...convergenceCommands, ...CONVERGE_NOTICE_CMDS, "scheduler-file-scope": FILE_SCOPE_COMMAND,
   "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
     run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
   "scheduler-family-wait": familyWaitCommand,
@@ -75,9 +81,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "scheduler-sec-review-alarm": secReviewAlarmCommand,
   "scheduler-spec-place": specPlaceCommand,
   "workflow-set": {
-    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
+    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason", "reason-code"], bools: [],
     usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
-      " [--reason <auto 退回人工时必填>]",
+      " [--reason <进入 manual 时必填>] [--reason-code <manual 理由码，见 manual-reason.ts>]",
     run(c) {
       const template = c.need("template"), mode = c.need("mode"), family = c.need("author-family");
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
@@ -93,6 +99,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         workflowRev: c.p.flags["workflow-rev"] === undefined ? undefined : integer(c, "workflow-rev"),
         template: template as "code" | "ui" | "security", templateVersion: integer(c, "version"),
         mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"), reason: c.p.flags.reason,
+        reasonCode: c.p.flags["reason-code"],
       });
       return { ok: true, ...r };
     },

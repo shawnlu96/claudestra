@@ -57,7 +57,7 @@ const alarms = (p: Awaited<ReturnType<typeof pooled>>) => listEvents(p.f.db, { t
 
 describe("i28-GATE2 on the pool path", () => {
   test("gate refusal → one alarm event saying what the card waits for; the same refusal again adds no second alarm (acceptance 3)", async () => {
-    const p = await pooled(`规格：只改 src/lib/x.ts\n别处粘来的 ${randomBytes(32).toString("hex")}`);
+    const p = await pooled(`规格：只改 src/lib/x.ts\n别处粘来的 ${randomBytes(33).toString("hex")}`);
     try {
       const first = await p.tick();
       expect(first.detail).toContain("外发闸");
@@ -96,5 +96,26 @@ describe("i28-GATE2 on the pool path", () => {
       const review = listEvents(p.f.db, { target: "T1" }).filter((e) => e.kind === "review").at(-1)!;
       expect((review.data.findings as { findingId: string }[]).map((f) => f.findingId)).toEqual([SENSITIVE]);
     } finally { p.f.close(); }
+  });
+
+  test("GATE4: a spec quoting head / 父提交 / merge-base / SHA256 lines goes to the pool with each SHA cut; a secret beside them still refuses", async () => {
+    const hex = (n: number) => randomBytes(n).toString("hex");
+    const [p40, b40, d64] = [hex(20), hex(20), hex(32)];
+    const ok = await pooled(`规格：只改 src/lib/x.ts\nhead: ${H1}\n父提交: ${p40}\nmerge-base: ${b40}\nSHA256: ${d64}`);
+    try {
+      expect(await ok.tick()).toMatchObject({ step: "pool_pooled" });
+      const [o] = ok.orders();
+      for (const s of [p40, b40, d64]) {
+        expect(o!.text).not.toContain(s);
+        expect(o!.text).toContain(s.slice(0, 12));
+      }
+      expect(alarms(ok)).toEqual([]);
+    } finally { ok.f.close(); }
+    const bad = await pooled(`规格：只改 src/lib/x.ts\nSHA256: ${hex(32)}\ntoken: ${hex(32)}`);
+    try {
+      expect((await bad.tick()).detail).toContain("外发闸");
+      expect(bad.orders()).toEqual([]);
+      expect(alarms(bad)).toHaveLength(1);
+    } finally { bad.f.close(); }
   });
 });

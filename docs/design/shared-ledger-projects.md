@@ -1,5 +1,22 @@
 # i28-PRJ1 · 共享项目中心化：团队在中心建项目，成员加入
 
+> **cloud-CL1 迁移后定位说明（2026-10-05 补记；只加此说明，正文历史结论未改）**
+>
+> 本稿正文中的 `src/shared-ledger.ts`、`src/shared-ledger/**`、`scripts/shared-ledger-admin.ts`、
+> `src/lib/shared-ledger-member-admin.ts`、`deploy/shared-ledger/**` 是写作时公共仓库里的**历史路径**，正文保持原样。
+> 按公开迁移 PR [shawnlu96/claudestra#636](https://github.com/shawnlu96/claudestra/pull/636) 的映射（该 PR 删除的 68 项源资源与 [cloud-migration-ready.md §2](cloud-migration-ready.md#2-source--target-完整manifest) 逐项一致），cloud-CL1 迁移后中心实现位于私有仓库 `floka-ai/cloud`：
+>
+> - 中心入口与各域：`src/shared-ledger.ts`、`src/shared-ledger/**` → `services/ledger-center/src/shared-ledger.ts`、`services/ledger-center/src/shared-ledger/**`（相对结构不变）；
+> - admin 入口：`scripts/shared-ledger-admin.ts` → `services/ledger-center/scripts/shared-ledger-admin.ts`；`src/lib/shared-ledger-member-admin.ts` → `services/ledger-center/src/admin/member-admin.ts`；
+> - 部署资源：`deploy/shared-ledger/**` → `deploy/ledger-center/**`。
+>
+> 只有中心实现与部署/admin 迁走，**不是整个 shared-ledger 闭源**：公共协议（`src/lib/shared-ledger-contract*.ts` 等纯协议模块，
+> 私仓经固定 gitlink `vendor/claudestra` 消费、由 `services/ledger-center/src/protocol.ts` 精确导出）与公共客户端
+> （`src/lib/shared-ledger-client.ts`、cache/mode、`src/bridge/local-api/shared-ledger*.ts`、manager、`web/`）继续留在本公开仓库。
+>
+> 截至本说明，PR #636 **尚未合入**，生产**未**迁移；上述是迁移后的定位，不是已完成事实。合入后，公共仓库里的旧路径只作历史引用，
+> 正文里涉及它们的部署 / 运维 / admin 命令不再是公共仓库的可执行入口。V1/V2 权威、X12 后续设计、部署数据 / 中心身份 / 端口 / 证书均不因本说明改变。
+
 状态：设计稿，specRev 1，第 2 轮审查后修订（保留首轮修复；补 owner-bootstrap / creator-credential / deploy-routes / mutation-ownership）；代码核对基线 `2bb679d3`。只出设计，不改代码。
 **结论：共享项目的唯一身份是团队在中心建的项目记录（`centerId + teamId + projectId`），不用 git remote，也不靠名字或目录推断。**
 **本机 projects.json 只管「这台机器上的代码在哪」；本机项目和中心项目的对应关系只记在 `shared-ledger-bindings.json`，一对一，由 owner 在卡上点选决定。**

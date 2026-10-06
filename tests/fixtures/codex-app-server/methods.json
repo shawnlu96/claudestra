@@ -1,0 +1,267 @@
+{
+  "allNotifications": [
+    "account/gatewayOAuth/changed",
+    "account/login/completed",
+    "account/rateLimits/updated",
+    "account/updated",
+    "app/list/updated",
+    "autoApprovalReview/strictReviewRequired",
+    "command/exec/outputDelta",
+    "configWarning",
+    "deprecationNotice",
+    "error",
+    "externalAgentConfig/import/completed",
+    "externalAgentConfig/import/progress",
+    "fs/changed",
+    "fuzzyFileSearch/sessionCompleted",
+    "fuzzyFileSearch/sessionUpdated",
+    "guardianWarning",
+    "hook/completed",
+    "hook/started",
+    "item/agentMessage/delta",
+    "item/autoApprovalReview/completed",
+    "item/autoApprovalReview/started",
+    "item/commandExecution/outputDelta",
+    "item/commandExecution/terminalInteraction",
+    "item/completed",
+    "item/fileChange/outputDelta",
+    "item/fileChange/patchUpdated",
+    "item/mcpToolCall/progress",
+    "item/plan/delta",
+    "item/reasoning/summaryPartAdded",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/textDelta",
+    "item/started",
+    "mcpServer/event/stream/notification",
+    "mcpServer/oauthLogin/completed",
+    "mcpServer/startupStatus/updated",
+    "model/rerouted",
+    "model/safetyBuffering/updated",
+    "model/verification",
+    "modelProvider/authRecoveryCompleted",
+    "modelProvider/authRecoveryStarted",
+    "process/exited",
+    "process/outputDelta",
+    "project/changed",
+    "remoteControl/status/changed",
+    "serverRequest/resolved",
+    "skills/changed",
+    "thread/archived",
+    "thread/attachment/updated",
+    "thread/closed",
+    "thread/compacted",
+    "thread/deleted",
+    "thread/environment/connected",
+    "thread/environment/disconnected",
+    "thread/goal/cleared",
+    "thread/goal/updated",
+    "thread/name/updated",
+    "thread/project/updated",
+    "thread/queue/changed",
+    "thread/realtime/closed",
+    "thread/realtime/error",
+    "thread/realtime/item/completed",
+    "thread/realtime/item/started",
+    "thread/realtime/item/transcript/delta",
+    "thread/realtime/itemAdded",
+    "thread/realtime/outputAudio/delta",
+    "thread/realtime/sdp",
+    "thread/realtime/started",
+    "thread/realtime/transcript/delta",
+    "thread/realtime/transcript/done",
+    "thread/reverted",
+    "thread/settings/updated",
+    "thread/started",
+    "thread/status/changed",
+    "thread/tokenUsage/updated",
+    "thread/unarchived",
+    "turn/completed",
+    "turn/diff/updated",
+    "turn/moderationMetadata",
+    "turn/plan/updated",
+    "turn/started",
+    "warning",
+    "windows/worldWritableWarning",
+    "windowsSandbox/setupCompleted"
+  ],
+  "allServerRequests": [
+    "account/chatgptAuthTokens/refresh",
+    "applyPatchApproval",
+    "attestation/generate",
+    "currentTime/read",
+    "execCommandApproval",
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/call",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request"
+  ],
+  "client": {
+    "account/read": {
+      "params": "v2/GetAccountParams",
+      "result": "v2/GetAccountResponse",
+      "resultExists": true,
+      "schemaParams": "v2/GetAccountParams"
+    },
+    "config/read": {
+      "params": "v2/ConfigReadParams",
+      "result": "v2/ConfigReadResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ConfigReadParams"
+    },
+    "initialize": {
+      "params": "InitializeParams",
+      "result": "InitializeResponse",
+      "resultExists": true,
+      "schemaParams": "InitializeParams"
+    },
+    "model/list": {
+      "params": "v2/ModelListParams",
+      "result": "v2/ModelListResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ModelListParams"
+    },
+    "thread/compact/start": {
+      "params": "v2/ThreadCompactStartParams",
+      "result": "v2/ThreadCompactStartResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadCompactStartParams"
+    },
+    "thread/fork": {
+      "params": "v2/ThreadForkParams",
+      "result": "v2/ThreadForkResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadForkParams"
+    },
+    "thread/items/list": {
+      "params": "v2/ThreadItemsListParams",
+      "result": "v2/ThreadItemsListResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadItemsListParams"
+    },
+    "thread/read": {
+      "params": "v2/ThreadReadParams",
+      "result": "v2/ThreadReadResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadReadParams"
+    },
+    "thread/resume": {
+      "params": "v2/ThreadResumeParams",
+      "result": "v2/ThreadResumeResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadResumeParams"
+    },
+    "thread/start": {
+      "params": "v2/ThreadStartParams",
+      "result": "v2/ThreadStartResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadStartParams"
+    },
+    "thread/unsubscribe": {
+      "params": "v2/ThreadUnsubscribeParams",
+      "result": "v2/ThreadUnsubscribeResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadUnsubscribeParams"
+    },
+    "turn/interrupt": {
+      "params": "v2/TurnInterruptParams",
+      "result": "v2/TurnInterruptResponse",
+      "resultExists": true,
+      "schemaParams": "v2/TurnInterruptParams"
+    },
+    "turn/start": {
+      "params": "v2/TurnStartParams",
+      "result": "v2/TurnStartResponse",
+      "resultExists": true,
+      "schemaParams": "v2/TurnStartParams"
+    },
+    "turn/steer": {
+      "params": "v2/TurnSteerParams",
+      "result": "v2/TurnSteerResponse",
+      "resultExists": true,
+      "schemaParams": "v2/TurnSteerParams"
+    }
+  },
+  "clientNotifications": {
+    "initialized": true
+  },
+  "notifications": {
+    "error": {
+      "params": "v2/ErrorNotification",
+      "schemaParams": "v2/ErrorNotification"
+    },
+    "item/agentMessage/delta": {
+      "params": "v2/AgentMessageDeltaNotification",
+      "schemaParams": "v2/AgentMessageDeltaNotification"
+    },
+    "item/commandExecution/outputDelta": {
+      "params": "v2/CommandExecutionOutputDeltaNotification",
+      "schemaParams": "v2/CommandExecutionOutputDeltaNotification"
+    },
+    "item/completed": {
+      "params": "v2/ItemCompletedNotification",
+      "schemaParams": "v2/ItemCompletedNotification"
+    },
+    "item/started": {
+      "params": "v2/ItemStartedNotification",
+      "schemaParams": "v2/ItemStartedNotification"
+    },
+    "thread/compacted": {
+      "params": "v2/ContextCompactedNotification",
+      "schemaParams": "v2/ContextCompactedNotification"
+    },
+    "thread/status/changed": {
+      "params": "v2/ThreadStatusChangedNotification",
+      "schemaParams": "v2/ThreadStatusChangedNotification"
+    },
+    "thread/tokenUsage/updated": {
+      "params": "v2/ThreadTokenUsageUpdatedNotification",
+      "schemaParams": "v2/ThreadTokenUsageUpdatedNotification"
+    },
+    "turn/completed": {
+      "params": "v2/TurnCompletedNotification",
+      "schemaParams": "v2/TurnCompletedNotification"
+    },
+    "turn/plan/updated": {
+      "params": "v2/TurnPlanUpdatedNotification",
+      "schemaParams": "v2/TurnPlanUpdatedNotification"
+    },
+    "turn/started": {
+      "params": "v2/TurnStartedNotification",
+      "schemaParams": "v2/TurnStartedNotification"
+    }
+  },
+  "server": {
+    "item/commandExecution/requestApproval": {
+      "params": "CommandExecutionRequestApprovalParams",
+      "result": "CommandExecutionRequestApprovalResponse",
+      "resultExists": true,
+      "schemaParams": "CommandExecutionRequestApprovalParams"
+    },
+    "item/fileChange/requestApproval": {
+      "params": "FileChangeRequestApprovalParams",
+      "result": "FileChangeRequestApprovalResponse",
+      "resultExists": true,
+      "schemaParams": "FileChangeRequestApprovalParams"
+    },
+    "item/permissions/requestApproval": {
+      "params": "PermissionsRequestApprovalParams",
+      "result": "PermissionsRequestApprovalResponse",
+      "resultExists": true,
+      "schemaParams": "PermissionsRequestApprovalParams"
+    },
+    "item/tool/requestUserInput": {
+      "params": "ToolRequestUserInputParams",
+      "result": "ToolRequestUserInputResponse",
+      "resultExists": true,
+      "schemaParams": "ToolRequestUserInputParams"
+    },
+    "mcpServer/elicitation/request": {
+      "params": "McpServerElicitationRequestParams",
+      "result": "McpServerElicitationRequestResponse",
+      "resultExists": true,
+      "schemaParams": "McpServerElicitationRequestParams"
+    }
+  }
+}

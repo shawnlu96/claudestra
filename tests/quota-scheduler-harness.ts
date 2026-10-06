@@ -2,6 +2,7 @@
  * 订阅额度调度测试的共用夹具：真实 QuotaScheduler + 假时钟 / 凭据 / fetch / 存储（tests/quota-scheduler*.test.ts）。
  */
 
+import type { ConsumeFetch } from "../src/lib/quota-consume.js";
 import { confirmCredential, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential } from "../src/lib/quota-credentials.js";
 import { QuotaScheduler } from "../src/lib/quota-scheduler.js";
 import { memoryQuotaStore, type QuotaStore } from "../src/lib/quota-state.js";
@@ -26,7 +27,8 @@ export interface Harness {
   fresh(): QuotaScheduler;
 }
 
-export function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore()): Harness {
+/** consumeFetch：使用重置卡的假 POST（tests/quota-consume.test.ts）；不给 = 调度器不能用卡，与生产以外的缺省一致 */
+export function harness(route: Route = okRoutes, store: QuotaStore = memoryQuotaStore(), consumeFetch?: ConsumeFetch): Harness {
   const h: Harness = {
     now: T0,
     enabled: true,
@@ -56,6 +58,7 @@ export function harness(route: Route = okRoutes, store: QuotaStore = memoryQuota
           if (h.ccVersion === "throw") throw new Error("probe failed");
           return h.ccVersion;
         },
+        consumeFetch,
       });
       return h.scheduler;
     },

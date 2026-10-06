@@ -1,3 +1,4 @@
+import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow-provider.js";
 /**
  * 出借单逐状态推进（docs/design/remote-capacity.md §2.3、§6）：lend 循环每轮对 journal 里每张活着的单调一次 driveOrder，按状态做下一步。
  * 规矩：先写 journal 再做外部效果；同一件外部效果重启后只会重做幂等的那几种（claim 同 orderId、result 同原始字节、续租），
@@ -23,13 +24,14 @@ import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type CodexFailureSeen, type QuotaView } from "./lend-health.js";
+import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type LendWorkerFailure, type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
 import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 import { resultReplayPending } from "./lend-result-retry.js";
+import { noteStartConfigFailure, startConfigRefusal } from "./lend-config-failure.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -54,6 +56,7 @@ interface WorkerPort {
 }
 
 export interface LendDeps {
+  reborrowCheckpoints?: ReborrowProviderPort["reborrowCheckpoints"];
   db: Database;
   now: () => number;
   call: LendCall;
@@ -84,8 +87,10 @@ export interface LendDeps {
   writeReceipt(row: LendRow): Promise<void>;
   /** worker 的首条派单尾注（怎么交结论） */
   footer(row: LendRow): string;
-  /** bridge 为这个 worker 开着的 Codex 额度 / 登录卡（lend-health.ts）；没有 = undefined */
-  failure(agent: string): CodexFailureSeen | undefined;
+  /** bridge 为这个 worker 开着的 Codex 额度 / 登录 / 回合失败卡（lend-health.ts）；没有 = undefined */
+  failure(agent: string): LendWorkerFailure | undefined;
+  /** 回合失败停单前把 worker 产物另存（lend-evidence.ts）：返回存放处，没存成 = null；不设 = 不存 */
+  keepEvidence?(row: LendRow, why: string): string | null;
   /** 关掉这个 worker 开出的 Codex 运行时卡（`ledger lend-close-asks`）；单结束收尾时调 */
   closeAsks(agent: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** 结单收尾全做完后把 worker 的会话收进 archived/（lend-session-archive.ts，自己兜错只记日志）；不设 = 不归档 */
@@ -145,7 +150,9 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
     : convergenceWriteMismatch(o, w?.branch, () => writeMismatch(o.step, o.taskId, w, d));
   const claimed = advance(d.db, row.orderId, "asked", "claimed",
     { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}) }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
-  if (mismatch) await release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
+  if (mismatch) return release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
+  const recoveryProblem = await reborrowClaimProblem(claimed, d);
+  if (recoveryProblem) await release(claimed, "claimed", recoveryProblem, d);
 }
 
 /** 写单必须带订单分支，且它正是 lend/<任务>-<本机指纹前 4 位>：A 给别的分支名（比如 main）一律不领；审查单不许带 */
@@ -215,11 +222,14 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const o = orderOf(row);
     let denied: string | null = null;
     const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    const cf = startConfigRefusal(d, row);
+    if (cf) return release(row, "cloned", cf, d);
     const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
     if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
     if (!found && !made.ok) {
       await pauseForStartFailure(d.db, row, made.error, d.codexQuota, d.now(), d.log);
+      await noteStartConfigFailure(d, row, made.error);
       return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
     }
   }
@@ -365,6 +375,10 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
   const cur = kept && (await heartbeat(kept, d));
   if (!cur) return;
   const o = orderOf(cur);
+  if (cur.state === "claimed" || cur.state === "cloned") {
+    const recoveryProblem = await reborrowClaimProblem(cur, d);
+    if (recoveryProblem) return release(cur, cur.state, recoveryProblem, d);
+  }
   if (cur.state === "claimed") {
     const w = cur.wire?.write;
     const who = w ? d.identity() : null;
@@ -387,8 +401,11 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     const failed = await leasedWorkerFailure(cur, d, finish); if (failed === true) return;
     if (failed) {
       if (failed.kind === "quota") pauseForQuota(d.db, cur.orderId, await d.codexQuota(), d.now(), d.log);
-      d.log(`${cur.orderId} ${failureReason(failed)}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}）`);
-      return finish(cur, "stopped", failureReason(failed), d, true);
+      // stopped 的工作副本只留 24 小时（lend-work-retention.ts）：回合失败交回 A 定夺，worker 写到一半的产物先另存
+      const kept = failed.kind === "error" ? d.keepEvidence?.(cur, `${failureReason(failed)}\n报错原文（只留本机）：${failed.message}`) : null;
+      const why = failureReason(failed, kept ? "现场已在出借方本机留存" : undefined);
+      d.log(`${cur.orderId} ${why}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}${kept ? `，证据 ${kept}` : ""}）`);
+      return finish(cur, "stopped", why, d, true);
     }
     const down = noteLiveness(d.db, cur, await d.worker.alive(cur.agent!), d.now(), d.log);
     if (down) return finish(cur, "stopped", DOWN_REASON[down], d, true);

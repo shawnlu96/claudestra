@@ -35,6 +35,7 @@ function start(
   rotate: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: true }),
   rebind: () => Promise<boolean> = async () => true,
   beforeSpawn?: () => Promise<void>,
+  show?: (item: string) => void,
 ) {
   const sent: any[] = [];
   const requests: any[] = [];
@@ -83,6 +84,7 @@ function start(
       markReady: async () => void (ready = true),
       rotateSession: rotate,
       log: (m) => logs.push(m),
+      show,
     },
   );
   host.start();
@@ -92,6 +94,38 @@ function start(
 }
 
 describe("ACP 宿主整条链（stub）", () => {
+  test("窗口会话只读条目：推给 bridge 的条目有没有 show（含 show 抛错）都逐条一致，窗口拿到可读会话", async () => {
+    const norm = (es: unknown[]) => JSON.parse(JSON.stringify(es).replace(/"timestamp":"[^"]+"/g, '"timestamp":"T"').replace(/(call|mcp)-[0-9a-f]{8}/g, "$1-X"));
+    const run = async (show?: (item: string) => void) => {
+      const h = start({}, undefined, undefined, undefined, show);
+      await until(h.isReady);
+      h.inbound("你好", { chat_id: "api:owner", message_id: "msg1", user: "owner" });
+      await until(() => h.stops.length === 1);
+      const es = norm(h.entries());
+      expect(h.stops[0]).toMatchObject({ event: "Stop" });
+      host!.stop();
+      host = null;
+      procs.splice(0).forEach((p) => p.stop());
+      return { es, logs: h.logs };
+    };
+    const shown: string[] = [];
+    const plain = (await run()).es;
+    expect((await run((item) => shown.push(item))).es).toEqual(plain);
+    const broken = await run(() => { throw new Error("渲染炸了"); }); // 窗口只是旁路：显示出错不能挡出站、回合收尾
+    expect(broken.es).toEqual(plain);
+    expect(broken.logs.some((m) => m.includes("窗口会话渲染出错") && m.includes("渲染炸了"))).toBe(true);
+    expect(plain).toEqual(STUB_TURN_ENTRIES);
+    expect(shown).toEqual([
+      "👤 owner：你好",
+      "🤖 stub 收到了，看一眼再回。",
+      "💻 echo stub",
+      "  ↳ stub",
+      "💬 回复：stub 回复（stub-luna / medium）：[claudestra:context] 前言\n\n\n你好",
+      '  ↳ Sent message(s): ["m1"]',
+      "── 回合结束 ──",
+    ]);
+  }, 60_000); // 串行起三次宿主 + stub，机器忙时 20 秒不够
+
   test("beforeSpawn（探 codex 版本）等完才起适配器；等的时候宿主被停了就不再起", async () => {
     let release!: () => void;
     const gate = () => new Promise<void>((r) => { release = r; });
@@ -247,6 +281,7 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(f.length).toBe(1);
     expect(f[0].failure).toMatchObject({ kind: "quota" });
     expect(f[0].configOptions.length).toBeGreaterThan(0);
+    expect([typeof f[0].sessionId, typeof f[0].failedAt]).toEqual(["string", "number"]); // 出借停单按它们认当前会话、当前回合（lend-turn-failure.ts）
     expect(h.entries().some((e) => e.error && e.isApiErrorMessage === false)).toBe(true);
     expect(h.stops[0].event).toBe("StopFailure");
   }, 30_000);
@@ -322,6 +357,31 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(h.stops[0].event).toBe("StopFailure");
   }, 20_000);
 
+  const incompatible: [string, object, string][] = [
+    ["protocolVersion 2", { protocolVersion: 2 }, "protocolVersion 是 2"],
+    ["没有 protocolVersion", { protocolVersion: null }, "没回 protocolVersion"],
+    ["resume 与 loadSession 都没有", { agentCapabilities: { loadSession: false, sessionCapabilities: { resume: null } } }, "接不回已有线程"],
+  ];
+  for (const [what, patch, why] of incompatible) {
+    test(`协议不兼容（${what}）：拒起——一张写明原因的卡、不标就绪、不重起，回合当场按失败收尾`, async () => {
+      const h = start({ STUB_INITIALIZE: JSON.stringify(patch) });
+      await until(() => h.sent.some((f) => f.type === "acp_failure"));
+      const { failure } = h.sent.find((f) => f.type === "acp_failure");
+      expect(failure).toMatchObject({ kind: "error", key: "incompatible", retry: false }); // 不带匹配器：bun 的 toMatchObject 会把匹配器写回被测对象
+      expect(failure.message).toContain("协议不兼容，拒绝启动");
+      expect(failure.message).toContain(why);
+      await procs[0]!.exited;
+      await until(() => h.logs.some((l) => l.includes("协议不兼容，不再重起")));
+      h.inbound("在吗");
+      await until(() => h.stops.length === 1);
+      expect(h.stops[0]!.event).toBe("StopFailure");
+      expect(h.entries().some((e) => e.error === failure.message && e.isApiErrorMessage === false)).toBe(true); // 不触发 60s 自动续跑
+      expect(h.sent.filter((f) => f.type === "acp_failure")).toHaveLength(1);
+      expect(h.isReady()).toBe(false); // manager 等不到就绪 → recoverFailedAcpLaunch 按启动失败处理
+      expect(procs).toHaveLength(1);
+    }, 20_000);
+  }
+
   test("适配器被杀：在途回合以失败收尾，退避后重起、接回同一个线程", async () => {
     const h = start();
     await until(h.isReady);
@@ -336,3 +396,15 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(h.stops[1].event).toBe("Stop");
   }, 45_000);
 });
+
+/** stub 一轮（acp-stub.ts turn）推给 bridge 的条目，改窗口显示前后逐条一致；时间戳、调用 id 归一 */
+const STUB_TURN_ENTRIES: unknown[] = [
+  { type: "system", subtype: "model_state", timestamp: "T", model: "stub-luna", effort: "medium" },
+  { type: "assistant", timestamp: "T", message: { content: [{ type: "text", text: "stub 收到了，看一眼再回。" }] } },
+  { type: "assistant", timestamp: "T", message: { content: [{ type: "tool_use", id: "call-X", name: "Bash", input: { command: "echo stub" } }] } },
+  { type: "user", timestamp: "T", message: { content: [{ type: "tool_result", tool_use_id: "call-X", content: "stub\n" }] } },
+  { type: "assistant", timestamp: "T", message: { content: [{ type: "tool_use", id: "mcp-X", name: "mcp__claudestra__reply",
+    input: { chat_id: "api:owner", text: "stub 回复（stub-luna / medium）：[claudestra:context] 前言\n\n\n你好" } }] } },
+  { type: "user", timestamp: "T", message: { content: [{ type: "tool_result", tool_use_id: "mcp-X", content: 'Sent message(s): ["m1"]' }] } },
+  { type: "system", subtype: "context_usage", timestamp: "T", tokens: 1407, window: 272000 },
+];

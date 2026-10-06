@@ -1,4 +1,5 @@
 import { PM_SWITCH_CMDS } from "./pm-switch.js";
+import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledger-resource-scope-cmds.js";
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
@@ -53,8 +54,11 @@ import { PEER_PR_CMDS } from "./ledger-peer-pr-cmds.js";
 import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
 import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
 import { MERGE_TRAIN_SWITCH_CMDS } from "./ledger-merge-train-switch.js";
+import { RECOVERY_CMDS } from "./ledger-recovery-cmds.js";
 import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
+import { WORKER_CMDS } from "./ledger-worker-cmds.js";
+import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -83,10 +87,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_OBSERVE_CMDS,
   ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS,
   ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
-  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
+  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS, ...RECOVERY_CMDS, ...REVIEW_EXPORT_CMDS,
+  ...WORKER_CMDS, // 卡 worker 生命周期（LIFE1）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
-
 export function ledgerUsage(): string {
   return ["ledger <子命令>（全部支持 --project <id>；写命令支持 --dedup <key> 幂等）", ...Object.values(COMMANDS).map((s) => `  ledger ${s.usage}`)].join("\n");
 }
@@ -116,7 +120,7 @@ export async function runLedger(args: string[], deps: LedgerDeps): Promise<Resul
  * 读写的划分与 manager 的认主守卫同一张表（write-commands.ts），不另列一份。
  */
 async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }> {
-  const reg = await loadRegistry();
+  const fileScope = args[0] === "scheduler-file-scope", reg = fileScope ? fileScopeRegistry() : await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
   if (service && (process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK])) return { error: "agent 频道 / 出借 worker 不能冒用调度服务身份" };
   if (service && !SCHEDULER_SERVICE_COMMANDS.has(args[0] ?? "")) {
@@ -132,7 +136,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   const readOnly = readInvocation ? new LedgerReader().get() : undefined;
   if (readOnly === null) return { error: "台账库还不存在（或正在建），只读命令没东西可看" };
   return {
-    db: readOnly ?? openLedger(),
+    db: fileScope ? fileScopeLedger(args.includes("--apply")) : readOnly ?? openLedger(),
     actor,
     actorProject: reg.agents[actor]?.projectId,
     projectIds: projects.projects.map((x) => x.id),
@@ -148,15 +152,13 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
     notifyOwner: (text) => notify({ source: "ledger", chatId: repoEnvVar("CONTROL_CHANNEL_ID"), text }),
   };
 }
-
 export async function cmdLedger(args: string[]): Promise<void> {
-  const deps = await realDeps(args);
-  if ("error" in deps) return output({ ok: false, code: "forbidden", error: deps.error });
+  const deps = await withFileScopeErrors(args, () => realDeps(args));
+  if ("error" in deps) return output({ ok: false, code: "code" in deps ? deps.code : "forbidden", error: deps.error });
   const r = await runLedger(args, deps);
   output(r);
   if (r.ok === false) process.exitCode = 1;
 }
-
 /**
  * manager rename 的钩子：台账里的执行者 / PM / PM 名单跟着改名，否则改名后 roleOf 认不出人。
  * 台账库还没建（没用过台账）就什么都不做，免得 rename 顺手建出空库；同步失败只报 stderr，不让 rename 本身失败（registry 已改完）。
