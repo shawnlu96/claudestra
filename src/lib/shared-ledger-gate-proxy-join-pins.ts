@@ -13,6 +13,8 @@ export function sharedLedgerJoinPinsMatch(next: SharedLedgerLocalCredential, loc
   if (state.status === "corrupt") throw new Error("shared ledger local state invalid; nothing was saved");
   const credentials = state.status === "missing" ? [] : (state.data as { credentials: SharedLedgerLocalCredential[] }).credentials;
   return !credentials.some((c) => c.centerId === next.centerId && c.baseUrl !== next.baseUrl)
-    && !readSharedLedgerBindings(dir).some((b) => b.localProjectId === localProjectId
-      && (b.centerId !== next.centerId || b.teamId !== next.teamId || b.projectId !== projectId));
+    && !readSharedLedgerBindings(dir).some((b) => (b.localProjectId ?? b.projectId) === localProjectId
+      && (b.centerId !== next.centerId || b.teamId !== next.teamId || b.projectId !== projectId))
+    && !readSharedLedgerBindings(dir).some((b) => b.centerId === next.centerId && b.teamId === next.teamId
+      && b.projectId === projectId && (b.localProjectId ?? b.projectId) !== localProjectId);
 }

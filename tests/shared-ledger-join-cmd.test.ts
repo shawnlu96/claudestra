@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/shared-ledger/store.js";
@@ -18,11 +18,13 @@ beforeAll(() => {
   url = `http://127.0.0.1:${server.port}/`;
 });
 afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
-const stateFiles = ["shared-ledger-bindings.json", "shared-ledger-credentials.json"].map((name) => join(STATE_DIR, name));
+const stateFiles = ["shared-ledger-bindings.json", "shared-ledger-credentials.json", "projects.json"].map((name) => join(STATE_DIR, name));
 let savedState: { content: Buffer; mode: number }[];
 beforeEach(() => {
+  mkdirSync(STATE_DIR, { recursive: true });
   savedState = stateFiles.map((path) => existsSync(path)
     ? { content: readFileSync(path), mode: statSync(path).mode & 0o777 } : { content: Buffer.alloc(0), mode: 0 });
+  writeFileSync(join(STATE_DIR, "projects.json"), JSON.stringify({ projects: [{ id: "project-a", name: "Project A", dirs: [] }] }));
 });
 afterEach(() => {
   for (const [i, path] of stateFiles.entries()) {
@@ -45,10 +47,17 @@ describe("manager shared-ledger-join", () => {
     const code = mint("peer-argv");
     expect(parseJoinArgs(["--url", url, "--code", code])).toContain("命令行");
     expect(parseJoinArgs(["--url", url, code])).toContain("命令行");
-    const r = await run(["--url", url, "--code", code]);
+    const r = await run(["--project", "project-a", "--url", url, "--code", code]);
     expect(r.result.ok).toBe(false);
     expect(r.text.includes(code)).toBe(false);
     expect(parseJoinArgs([])).toContain("usage");
+  });
+
+  test("missing project fails before reading or redeeming code", async () => {
+    let reads = 0;
+    const r = await run(["--url", url], async () => { reads++; return mint("not-redeemed"); });
+    expect(r.result.ok).toBe(false);
+    expect(reads).toBe(0);
   });
 
   test("code files must be 0600", () => {
@@ -62,21 +71,21 @@ describe("manager shared-ledger-join", () => {
 
   test("stdin join writes a 0600 credential and prints neither code nor bearer", async () => {
     const code = mint("peer-a");
-    const r = await run(["--url", url], async () => `${code}\n`);
+    const r = await run(["--project", "project-a", "--url", url], async () => `${code}\n`);
     expect(r.result).toMatchObject({ ok: true, teamId: "team-a", personId: "peer-a", projectId: "project-a", kind: "person" });
     const cred = resolveSharedLedgerCredential("owner:self", "person", String(r.result.centerId), "team-a", "project-a", "read")!;
     expect(statSync(join(STATE_DIR, "shared-ledger-credentials.json")).mode & 0o777).toBe(0o600);
     for (const s of [code, cred.bearer]) expect(r.text.includes(s)).toBe(false);
-    const again = await run(["--url", url], async () => code); // Same instance key retrying its redeemed code is idempotent (i28-JN2).
+    const again = await run(["--project", "project-a", "--url", url], async () => code); // Same instance key retrying its redeemed code is idempotent (i28-JN2).
     expect(again.result).toMatchObject({ ok: true, personId: "peer-a" });
   });
 
   test("code file path joins; a rejected code yields a fixed error", async () => {
     const file = join(root, "code.txt");
     writeFileSync(file, mint("peer-a"), { mode: 0o600 }); // Same instance re-enrolls as the same person.
-    const viaFile = await run(["--url", url, "--code-file", file]);
+    const viaFile = await run(["--project", "project-a", "--url", url, "--code-file", file]);
     expect(viaFile.result).toMatchObject({ ok: true });
-    expect((await run(["--url", url], async () => "not-a-code")).result).toEqual({ ok: false, error: "invalid join code" });
-    expect((await run(["--url", "http://example.com/"], async () => mint("peer-c"))).result).toEqual({ ok: false, error: "center requires HTTPS" });
+    expect((await run(["--project", "project-a", "--url", url], async () => "not-a-code")).result).toEqual({ ok: false, error: "invalid join code" });
+    expect((await run(["--project", "project-a", "--url", "http://example.com/"], async () => mint("peer-c"))).result).toEqual({ ok: false, error: "center requires HTTPS" });
   });
 });

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/shared-ledger/store.js";
@@ -32,6 +32,14 @@ beforeAll(() => {
 });
 afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
 
+
+function localState(name: string): string {
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: ["project-a", "project-b"].map(id => ({ id, name: id, dirs: [] })) }));
+  return dir;
+}
+
 const loose = () => joinHandler(store, { perSourcePerMinute: 100_000, perCodePer10Minutes: 100_000 });
 async function redeem(h: ReturnType<typeof joinHandler>, code: string, key: InstanceKey, instanceId = sharedLedgerInstanceId(key.publicKey), remote = "peer") {
   const r = h("POST", JSON.stringify(signSharedLedgerJoin(code, instanceId, key)), remote, Date.now());
@@ -62,9 +70,9 @@ describe("instance id squatting", () => {
   });
 
   test("the member-side join uses the key-derived id by default", async () => {
-    const key = newKey(), dir = join(root, "derived");
+    const key = newKey(), dir = localState("derived");
     const code = createJoinCode(store, invite({ personId: "derived", memberCode: "derived" })).code;
-    const r = await joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir });
+    const r = await joinSharedLedger({ localProjectId: "project-a", url, code, key, subject: "owner:self", stateDir: dir });
     expect(resolveSharedLedgerCredential("owner:self", "person", r.centerId, "team-a", "project-a", "read", dir)!.instanceId)
       .toBe(sharedLedgerInstanceId(key.publicKey));
   });
@@ -127,18 +135,18 @@ describe("lost confirmation", () => {
   });
 
   test("a confirmation dropped by the network reports accurately, writes nothing, and the same code then succeeds", async () => {
-    const key = newKey(), dir = join(root, "flaky");
+    const key = newKey(), dir = localState("flaky");
     const code = createJoinCode(store, invite({ personId: "flaky", memberCode: "flaky" })).code;
     let calls = 0;
     const flaky = (async (input: string | URL | Request, init?: RequestInit) => {
       if (++calls === 2) throw new TypeError("network connection lost");
       return fetch(input, init);
     }) as typeof fetch;
-    const err = await joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir, fetch: flaky }).catch((e: Error) => e);
+    const err = await joinSharedLedger({ localProjectId: "project-a", url, code, key, subject: "owner:self", stateDir: dir, fetch: flaky }).catch((e: Error) => e);
     expect((err as Error).message).toContain("nothing was saved");
     expect((err as Error).message).not.toContain("joined,");
     expect(existsSync(join(dir, "shared-ledger-credentials.json"))).toBe(false);
-    const r = await joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir });
+    const r = await joinSharedLedger({ localProjectId: "project-a", url, code, key, subject: "owner:self", stateDir: dir });
     const credential = resolveSharedLedgerCredential("owner:self", "person", r.centerId, "team-a", "project-a", "read", dir)!;
     expect(read(credential.bearer, credential.instanceId, key)).toBe(200);
     // The bearer dropped with the lost confirmation no longer holds authority: only one live credential remains.
@@ -183,9 +191,9 @@ describe("member remove / readd", () => {
 
 describe("center identity pinning", () => {
   test("a different URL answering for the pinned center id, confirmation included, cannot replace local credentials", async () => {
-    const key = newKey(), dir = join(root, "pinned");
+    const key = newKey(), dir = localState("pinned");
     const code = createJoinCode(store, invite({ personId: "pinned", memberCode: "pinned" })).code;
-    const joined = await joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir });
+    const joined = await joinSharedLedger({ localProjectId: "project-a", url, code, key, subject: "owner:self", stateDir: dir });
     const credential = resolveSharedLedgerCredential("owner:self", "person", joined.centerId, "team-a", "project-a", "read", dir)!;
     const features = await new SharedLedgerClient(credential, key).features();
     const files = ["shared-ledger-credentials.json", "shared-ledger-bindings.json"].map((name) => join(dir, name));
@@ -197,7 +205,7 @@ describe("center identity pinning", () => {
         bearer: randomBytes(32).toString("base64url"), expiresAt: Date.now() + 60_000, role: "member",
         projects: [{ projectId: "project-a", actions: ["read"] }] })
       : Response.json(features)) as unknown as typeof fetch;
-    await expect(joinSharedLedger({ url: "https://evil.example/", code: next, key, subject: "owner:self", stateDir: dir, fetch: evil }))
+    await expect(joinSharedLedger({ localProjectId: "project-a", url: "https://evil.example/", code: next, key, subject: "owner:self", stateDir: dir, fetch: evil }))
       .rejects.toThrow("does not match the pinned center");
     expect(files.map((path) => readFileSync(path, "utf8"))).toEqual(before);
   });
@@ -237,9 +245,9 @@ describe("P1 enrollment regressions", () => {
   });
 
   test("a service grant with a changed team cannot bypass center and local project pins", async () => {
-    const key = newKey(), dir = join(root, "service-pin");
+    const key = newKey(), dir = localState("service-pin");
     const code = createJoinCode(store, invite({ personId: "service-pin", memberCode: "service-pin" })).code;
-    const joined = await joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir });
+    const joined = await joinSharedLedger({ localProjectId: "project-a", url, code, key, subject: "owner:self", stateDir: dir });
     const files = ["shared-ledger-credentials.json", "shared-ledger-bindings.json"].map((name) => join(dir, name));
     const before = files.map((path) => readFileSync(path));
     const credential = resolveSharedLedgerCredential("owner:self", "person", joined.centerId, "team-a", "project-a", "read", dir)!;

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/shared-ledger/store.js";
@@ -28,20 +28,28 @@ beforeAll(() => {
 });
 afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
 
+
+function localState(name: string): string {
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: ["project-a", "project-b"].map(id => ({ id, name: id, dirs: [] })) }));
+  return dir;
+}
+
 const admin = (...a: string[]) => runAdmin(["invite", "--db", db, "--team", "team-a", "--project", "project-a", "--ttl", "1h", ...a]);
 
 describe("shared ledger enrollment end to end", () => {
   test("failed center confirmation preserves existing credentials and bindings", async () => {
-    const dir = join(root, "state-confirm"), key = newKey(), instanceId = "instance-confirm", subject = "owner:self";
+    const dir = localState("state-confirm"), key = newKey(), instanceId = "instance-confirm", subject = "owner:self";
     const first = admin("--person", "peer-confirm", "--code", "peer-confirm", "--role", "member", "--actions", "read");
-    const joined = await joinSharedLedger({ url, code: String(first.joinCode), key, instanceId, subject, stateDir: dir });
+    const joined = await joinSharedLedger({ localProjectId: "project-a", url, code: String(first.joinCode), key, instanceId, subject, stateDir: dir });
     const files = ["shared-ledger-credentials.json", "shared-ledger-bindings.json"].map((name) => join(dir, name));
     const before = files.map((path) => readFileSync(path, "utf8"));
     let calls = 0;
     const fakeFetch = (async () => ++calls === 1 ? Response.json({ centerId: joined.centerId, teamId: "team-a", personId: "peer-other",
       instanceId, bearer: randomBytes(32).toString("base64url"), expiresAt: Date.now() + 60_000, role: "member",
       projects: [{ projectId: "project-a", actions: ["read"] }] }) : Response.json({}, { status: 403 })) as unknown as typeof fetch;
-    await expect(joinSharedLedger({ url: "https://other.example/", code: String(first.joinCode), key, instanceId, subject,
+    await expect(joinSharedLedger({ localProjectId: "project-a", url: "https://other.example/", code: String(first.joinCode), key, instanceId, subject,
       stateDir: dir, fetch: fakeFetch })).rejects.toThrow("center did not accept");
     expect(calls).toBe(2);
     expect(files.map((path) => readFileSync(path, "utf8"))).toEqual(before);
@@ -63,13 +71,13 @@ describe("shared ledger enrollment end to end", () => {
   });
 
   test("same subject joins A then B and reads both while unjoined C is refused", async () => {
-    const dir = join(root, "state-multi"), key = newKey(), subject = "owner:self", instanceId = "instance-multi";
+    const dir = localState("state-multi"), key = newKey(), subject = "owner:self", instanceId = "instance-multi";
     let centerId = "";
     const features: string[] = [];
     for (const projectId of ["project-a", "project-b"]) {
       const invite = admin("--project", projectId, "--person", "peer-multi", "--code", "peer-multi",
         "--role", "member", "--actions", "read,plan");
-      const result = await joinSharedLedger({ url, code: String(invite.joinCode), key, instanceId, subject, stateDir: dir });
+      const result = await joinSharedLedger({ localProjectId: projectId, url, code: String(invite.joinCode), key, instanceId, subject, stateDir: dir });
       centerId = result.centerId;
       const credential = resolveSharedLedgerCredential(subject, "person", centerId, "team-a", projectId, "plan", dir)!;
       const created = await new SharedLedgerClient(credential, key, { scrub }).command({ type: "feature.new", projectId,
@@ -100,8 +108,8 @@ describe("shared ledger enrollment end to end", () => {
       for (const c of codes) expect(listed.includes(parseSharedLedgerJoinCode(c)!.secret)).toBe(false);
 
       const members = await Promise.all(["a", "b"].map(async (n, i) => {
-        const dir = join(root, `state-${n}`), key = newKey(), instanceId = `instance-${n}`;
-        const result = await joinSharedLedger({ url, code: codes[i]!, key, instanceId, subject: "owner:self", stateDir: dir });
+        const dir = localState(`state-${n}`), key = newKey(), instanceId = `instance-${n}`;
+        const result = await joinSharedLedger({ localProjectId: "project-a", url, code: codes[i]!, key, instanceId, subject: "owner:self", stateDir: dir });
         return { dir, key, instanceId, result };
       }));
       const bearers: string[] = [];
@@ -125,9 +133,9 @@ describe("shared ledger enrollment end to end", () => {
       expect(resolveSharedLedgerCredential("owner:self", "person", mb.result.centerId, "team-a", "project-a", "plan", mb.dir)).toBeNull();
 
       // Third instance: no join code. Reusing peer A's code (already redeemed) and a forged code both fail.
-      const third = join(root, "state-c");
+      const third = localState("state-c");
       for (const code of [codes[0]!, `sljoin1.${ma.result.centerId}.${"a".repeat(32)}.${"A".repeat(43)}`]) {
-        await expect(joinSharedLedger({ url, code, key: newKey(), instanceId: "instance-c", subject: "owner:self", stateDir: third }))
+        await expect(joinSharedLedger({ localProjectId: "project-a", url, code, key: newKey(), instanceId: "instance-c", subject: "owner:self", stateDir: third }))
           .rejects.toThrow("join rejected");
       }
       const forged = new SharedLedgerClient({ ...credB, instanceId: "instance-c", bearer: randomBytes(32).toString("base64url") }, newKey());
@@ -145,8 +153,8 @@ describe("shared ledger enrollment end to end", () => {
 
   test("owner service identity enrolls through the same join path", async () => {
     const s = admin("--person", "owner-service", "--code", "owner-svc", "--role", "service", "--actions", "read,plan,import,project");
-    const dir = join(root, "state-svc");
-    const r = await joinSharedLedger({ url, code: String(s.joinCode), key: newKey(), instanceId: "instance-svc", subject: "importer", stateDir: dir });
+    const dir = localState("state-svc");
+    const r = await joinSharedLedger({ localProjectId: "project-a", url, code: String(s.joinCode), key: newKey(), instanceId: "instance-svc", subject: "importer", stateDir: dir });
     expect(r.kind).toBe("service");
     expect(resolveSharedLedgerCredential("importer", "service", r.centerId, "team-a", "project-a", "import", dir)).not.toBeNull();
     expect(() => admin("--person", "owner-x", "--code", "owner-x", "--role", "owner", "--actions", "read")).toThrow();

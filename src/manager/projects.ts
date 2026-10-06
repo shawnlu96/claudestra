@@ -5,6 +5,9 @@
  *
  * 从 manager.ts 搬出；能改目录归属的 add / edit --dirs / merge 另有目录校验（lib/project-dirs.ts）和角色校验（project-guard.ts）。
  */
+import { withSharedLedgerProjectMutation } from "../lib/shared-ledger-project-link-save.js";
+import { sharedLedgerProjectMutationError } from "../lib/shared-ledger-project-link.js";
+import { readSharedLedgerBindings } from "../lib/shared-ledger-gate-bindings.js";
 import { readProjects, writeProjects, PROJECT_ID_RE, type ProjectDef } from "../lib/projects.js";
 import { validateProjectDirs } from "../lib/project-dirs.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
@@ -93,6 +96,8 @@ async function cmdProjectEdit(
   }
   if (opts.personal === true) p.personal = true;
   else if (opts.personal === false) delete p.personal;
+  const denied = sharedLedgerProjectMutationError(readSharedLedgerBindings(), [id], p);
+  if (denied) return output({ ok: false, error: denied });
   await writeProjects(data);
   if (p.name !== oldName) await renameProjectCategory(id, oldName, p.name);
   output({ ok: true, project: p });
@@ -129,6 +134,8 @@ async function cmdProjectRemove(id: string) {
     });
     return;
   }
+  const denied = sharedLedgerProjectMutationError(readSharedLedgerBindings(), [id]);
+  if (denied) return output({ ok: false, error: denied });
   data.projects = data.projects.filter((p) => p.id !== id);
   await writeProjects(data);
   output({ ok: true, removed: id });
@@ -209,10 +216,10 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
     if (denied) return output({ ok: false, code: "forbidden", ...denied });
   }
   if (cmd === "project-add") return cmdProjectAdd(a, opts);
-  if (cmd === "project-edit") return cmdProjectEdit(a, opts);
-  if (cmd === "project-remove") return cmdProjectRemove(a);
+  if (cmd === "project-edit") return withSharedLedgerProjectMutation(() => cmdProjectEdit(a, opts));
+  if (cmd === "project-remove") return withSharedLedgerProjectMutation(() => cmdProjectRemove(a));
   if (cmd === "project-assign") return cmdProjectAssign(a, b);
-  if (cmd === "project-merge") return cmdProjectMerge(a, b);
+  if (cmd === "project-merge") return withSharedLedgerProjectMutation(() => cmdProjectMerge(a, b));
 }
 
 /**
@@ -232,6 +239,8 @@ async function cmdProjectMerge(srcId: string, dstId: string) {
   if (!checked.ok) return output(checked);
   dst.dirs = checked.dirs;
   if (src.personal) dst.personal = true; // 个人项目的目录并进来，合并后的项目也得是个人项目，否则等于放开外借
+  const denied = sharedLedgerProjectMutationError(readSharedLedgerBindings(), [srcId, dstId], dst);
+  if (denied) return output({ ok: false, error: denied });
   const reg = await loadRegistry();
   const moved = Object.entries(reg.agents).filter(([, a]) => a.projectId === srcId);
   for (const [, a] of moved) a.projectId = dstId;
