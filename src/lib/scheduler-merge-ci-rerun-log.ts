@@ -21,30 +21,71 @@ const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
 /** The one runner error every red bun step ends with. */
 const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
 
-function stripLines(log: string): { lines: string[]; steps: Set<string> } | null {
-  const steps = new Set<string>();
-  const lines: string[] = [];
+/**
+ * The sharded workflow's gate (ci.yml job `typecheck + test + guard`, step `All shards succeeded`) fails with exactly this when a
+ * shard did not succeed; the shard's own step carries the failures, so that one step is skipped. Only that job + step, and only
+ * the runner's `Run` echo block plus this line and the exit code: any other text there (or the line in any other step) is read
+ * as a failed step and makes the log unaccountable.
+ */
+const GATE = { job: "typecheck + test + guard", step: "All shards succeeded" };
+const GATE_VERDICT = /^##\[error\]分片没有全部成功：\w+\s*$/;
+const RUN_ECHO = /^##\[group\]Run /;
+
+interface FailedStep { job: string; step: string; lines: string[] }
+
+/** Lines without the gh prefix and timestamp, grouped by failed step; unprefixed lines stay with the step before. */
+function stepLines(log: string): FailedStep[] | null {
+  const steps = new Map<string, FailedStep>();
+  let key = "";
   for (const raw of log.split(/\r?\n/)) {
     const p = PREFIX.exec(raw);
-    if (p) steps.add(`${p[1]}\t${p[2]}`);
-    lines.push((p ? raw.slice(p[0].length) : raw).replace(STAMP, ""));
+    if (p) key = `${p[1]}\t${p[2]}`;
+    const step = steps.get(key) ?? steps.set(key, { job: p?.[1] ?? "", step: p?.[2] ?? "", lines: [] }).get(key)!;
+    step.lines.push((p ? raw.slice(p[0].length) : raw).replace(STAMP, ""));
   }
-  return lines.some((l) => l.trim()) ? { lines, steps } : null;
+  const real = [...steps.values()].filter((s) => s.lines.some((l) => l.trim()));
+  return real.length ? real : null;
+}
+
+function isGateVerdict(s: FailedStep): boolean {
+  if (s.job !== GATE.job || s.step !== GATE.step) return false;
+  let inEcho = false;
+  let verdict = false;
+  for (const line of s.lines) {
+    if (inEcho) { inEcho = !line.startsWith("##[endgroup]"); continue; }
+    if (RUN_ECHO.test(line)) { inEcho = true; continue; }
+    if (GATE_VERDICT.test(line)) { verdict = true; continue; }
+    if (line.trim() && !STEP_EXIT.test(line)) return false;
+  }
+  return verdict && !inEcho;
 }
 
 const nextText = (lines: string[], from: number): string => lines.slice(from).find((l) => l.trim()) ?? "";
 
 /**
  * Every `(fail)` of the log with its test file (the `##[group]tests/x.test.ts:` it sits in) and whether bun said it timed out.
- * Null when: the log is empty, spans more than one failed step, has a failure outside a file group that is not a repeat of one
- * inside, an error outside any test, an `error:` in a file group that no `(fail)` of that group claims, any error line outside
- * the file groups other than the step's exit code, no `N fail` total, or a total that differs from the failures found.
- * A `(fail)` with an `error:` printed for it is not a timeout, whatever follows it.
+ * A sharded run fails one bun test step per red shard plus the gate's verdict step: each bun step is read on its own and the
+ * verdict is skipped. Null when: the log is empty, has no bun step, or any failed step does not read as one bun test step.
  */
 export function parseFailedLog(log: string): CiFailure[] | null {
-  const stripped = stripLines(log);
-  if (!stripped || stripped.steps.size > 1) return null;
-  const { lines } = stripped;
+  const steps = stepLines(log)?.filter((s) => !isGateVerdict(s));
+  if (!steps?.length) return null;
+  const found: CiFailure[] = [];
+  for (const { lines } of steps) {
+    const step = parseStep(lines);
+    if (!step) return null;
+    found.push(...step);
+  }
+  return found;
+}
+
+/**
+ * One failed bun test step. Null when it has a failure outside a file group that is not a repeat of one inside, an error
+ * outside any test, an `error:` in a file group that no `(fail)` of that group claims, any error line outside the file groups
+ * other than the step's exit code, no `N fail` total, or a total that differs from the failures found.
+ * A `(fail)` with an `error:` printed for it is not a timeout, whatever follows it.
+ */
+function parseStep(lines: string[]): CiFailure[] | null {
   const found: CiFailure[] = [];
   const totals: number[] = [];
   let file: string | null = null;
