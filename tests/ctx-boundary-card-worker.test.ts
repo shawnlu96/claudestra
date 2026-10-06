@@ -47,7 +47,7 @@ test("unknown, stale and different-session usage cannot become zero", () => {
 });
 
 import { ctxBoundaryTick, resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
-import { agent as boundaryAgent, harness } from "./ctx-boundary-harness.js";
+import { agent as boundaryAgent, harness, BUSY_PANE } from "./ctx-boundary-harness.js";
 
 test("on card identity wins conflicting policy; observe and off preserve ordinary action", async () => {
   for (const mode of ["on", "observe", "off"]) {
@@ -70,8 +70,10 @@ test("on card hard line reports missing capability without typing or claiming co
   const worker = boundaryAgent({ name: "reviewer", kind: "worker", status: "active", ctx: 300_000 });
   const h = harness([worker], { autoCompact: { cardWorkers: "on" } });
   worker.usage = {path: "fixture", sessionId: worker.sessionId, tokens: worker.ctx!, observedAt: h.now, usageTs: h.now, size: 1, mtime: 1};
+  h.win(worker.target).pane = BUSY_PANE;
   const result = await ctxBoundaryTick(h.deps);
   expect(result[0].verdict).toEqual({ fire: false, reason: "blocked-capability" });
+  expect(h.alerts.length).toBe(1);
   expect(h.sent).toEqual([]);
 });
 
@@ -128,4 +130,37 @@ test("fresh registry and active registration generation are part of the identity
   }) });
   expect(r.status).toBe(0);
   expect(JSON.parse(r.stdout)).toEqual([true, true, true, null]);
+});
+
+test("r1 idle-above-cap: trusted idle TUI worker still compacts above 300K", async () => {
+  resetCtxBoundaryState();
+  const worker = boundaryAgent({ name: "idle-reviewer", kind: "worker", status: "active", ctx: 300_001 });
+  const h = harness([worker], { autoCompact: { cardWorkers: "on" } });
+  worker.usage = { path: "fixture", sessionId: worker.sessionId, tokens: worker.ctx!, observedAt: h.now, usageTs: h.now, size: 1, mtime: 1 };
+  h.deps.verifyCard = async () => true;
+  await ctxBoundaryTick(h.deps);
+  expect(h.sent.length).toBe(1);
+});
+
+test("r1 tick-save-compact: unreadable ledger never sends save-compact to an arbitrary reviewer", () => {
+  const root = mkdtempSync(join(tmpdir(), "ctx1-r1-unreadable-"));
+  const service = join(import.meta.dir, "../src/bridge/ctx-boundary.ts");
+  const fixture = join(import.meta.dir, "ctx-boundary-harness.ts");
+  const script = `
+    import {ctxBoundaryTick} from ${JSON.stringify(service)};
+    import {agent,harness} from ${JSON.stringify(fixture)};
+    import {mkdirSync,writeFileSync} from "node:fs";
+    const p=process.env.CLAUDESTRA_STATE_DIR;mkdirSync(p,{recursive:true});
+    writeFileSync(p+"/ledger.sqlite","not a database");
+    writeFileSync(p+"/config.json",JSON.stringify({autoCompact:{cardWorkers:"on"}}));
+    writeFileSync(p+"/registry.json",JSON.stringify({agents:{reviewer:{status:"active",sessionId:"current"}}}));
+    const h=harness([agent({name:"reviewer",status:"active",sessionId:"current",executor:false,ctx:600000})],
+      {autoCompact:{cardWorkers:"on",inject:false}});
+    await ctxBoundaryTick(h.deps);console.log(JSON.stringify(h.sent));
+  `;
+  const r = spawnSync(process.execPath, ["--no-env-file", "-e", script], { encoding: "utf8", env: testChildEnv({
+    HOME: join(root, "home"), CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "run"), TMPDIR: root,
+  }) });
+  expect(r.status).toBe(0);
+  expect(JSON.parse(r.stdout).some((s: {line: string}) => s.line === "/save-compact")).toBe(false);
 });

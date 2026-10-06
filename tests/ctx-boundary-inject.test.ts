@@ -336,7 +336,7 @@ test("session fence is checked before typing and again before Enter", async () =
   expect(h.win(t.target).box).toBe("");
   let calls = 0;
   const after = await injectCompact(t, { action: "compact", validate: async () => ++calls === 1 }, h.deps);
-  expect(after.status).toBe("skipped");
+  expect(after).toMatchObject({ status: "failed", leftover: true });
   expect(h.sent).toEqual([]);
   expect(h.win(t.target).box).not.toBe("");
 });
@@ -345,8 +345,9 @@ test("a pending card echo is discarded without erasing when its session fence fa
   const t = tgt("arbitrary-reviewer", true);
   const h = harness([]);
   let valid = true;
+  h.deps.validateIdentity = async () => valid;
   h.win(t.target).onType = (w) => { w.pane = "[menu]"; };
-  const result = await injectCompact(t, { action: "compact", validate: async () => valid }, h.deps);
+  const result = await injectCompact(t, { action: "compact", identity: "original", validate: async () => valid }, h.deps);
   expect(result.status).toBe("failed");
   const text = h.win(t.target).box;
   valid = false;
@@ -354,4 +355,49 @@ test("a pending card echo is discarded without erasing when its session fence fa
   await sweepPendingEcho(h.deps, () => {});
   expect(h.win(t.target).box).toBe(text);
   expect(h.sent).toEqual([]);
+});
+
+test("r1 echo-leftover: changed usage retains original identity cleanup beyond 60s", async () => {
+  const t = tgt("r1-reviewer", true), h = harness([]);
+  let usageFresh = true;
+  h.deps.validateIdentity = async () => true;
+  h.win(t.target).onType = (w) => { usageFresh = false; };
+  const result = await injectCompact(t, { action: "compact", identity: "original", validate: async () => usageFresh }, h.deps);
+  expect(result).toMatchObject({ status: "failed", leftover: true });
+  h.advance(60_001);
+  await sweepPendingEcho(h.deps, () => {});
+  expect(h.win(t.target).box).toBe("");
+  expect(h.sent).toEqual([]);
+});
+
+test("r1 echo-leftover: persisted identity survives restart and unknown reads without erasing a new draft", async () => {
+  rmSync(PENDING_FILE, { force: true });
+  rmSync(GUARD_FILE, { force: true });
+  loadInjectState("live");
+  const t = tgt("restart-reviewer", true), h = harness([]);
+  let identity: boolean | null = true;
+  h.deps.validateIdentity = async () => identity;
+  h.win(t.target).onType = (w) => { w.pane = "[menu]"; };
+  expect(await injectCompact(t, { action: "compact", identity: "original", validate: async () => true }, h.deps))
+    .toMatchObject({ status: "failed", leftover: true });
+  expect(JSON.parse(readFileSync(PENDING_FILE, "utf8"))[t.target].identity).toBe("original");
+  resetInjectState();
+  loadInjectState("live");
+  bindCompactSession(t.target, "current");
+  h.win(t.target).pane = "some output\n❯ \n";
+  identity = null;
+  await sweepPendingEcho(h.deps, () => {});
+  expect(h.win(t.target).box).not.toBe("");
+  expect(readFileSync(PENDING_FILE, "utf8")).toContain("original");
+  identity = true;
+  h.advance(180_000);
+  await sweepPendingEcho(h.deps, () => {});
+  expect(h.win(t.target).box).toBe("");
+  // Repeat with an owner draft: exact original echo matching must protect it even with trusted same-session identity.
+  h.win(t.target).onType = (w) => { w.pane = "[menu]"; };
+  await injectCompact(t, { action: "compact", identity: "original", validate: async () => true }, h.deps);
+  h.win(t.target).pane = "some output\n❯ \n";
+  h.win(t.target).box = "owner new draft";
+  await sweepPendingEcho(h.deps, () => {});
+  expect(h.win(t.target).box).toBe("owner new draft");
 });

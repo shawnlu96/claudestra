@@ -138,8 +138,9 @@ export function cardSoftDecision(agent: CardSession, usage: CardUsage | null, no
     || !Number.isFinite(usage.observedAt) || now < usage.observedAt || now - usage.observedAt > maxAgeMs) {
     return { fire: false, reason: "usage-unknown" };
   }
-  if (usage.tokens >= CARD_BOUNDARY.hardCap!) return { fire: false, reason: "blocked-capability" };
   if (usage.tokens < CARD_BOUNDARY.window) return { fire: false, reason: "under" };
-  if (busy !== false || idleSince === null || now - idleSince < CARD_BOUNDARY.idleMs) return { fire: false, reason: "busy" };
+  if (busy !== false || idleSince === null || now - idleSince < CARD_BOUNDARY.idleMs) {
+    return { fire: false, reason: usage.tokens >= CARD_BOUNDARY.hardCap! ? "blocked-capability" : "busy" };
+  }
   return { fire: true, kind: "idle" };
 }

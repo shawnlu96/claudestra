@@ -99,10 +99,11 @@ export interface BoundaryInput {
 }
 
 export type PaneBlock = "not-cc" | "copy-mode" | "compacting" | "api-retry" | "quota-wall" | "menu" | "queued" | "draft";
-export type SkipReason = "blocked-capability" | "usage-unknown" | "session-changed" | PaneBlock | "under" | "recent" | "retry-wait" | "pane-unknown" | "busy" | "gated";
+export type SkipReason = "blocked-capability" | "usage-unknown" | "identity-unknown" | "session-changed" | PaneBlock | "under" | "recent" | "retry-wait" | "pane-unknown" | "busy" | "gated";
 export type BoundaryVerdict = { fire: true; kind: "idle" | "hard-cap" } | { fire: false; reason: SkipReason };
 
 export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
+  "identity-unknown": "卡片身份失读，禁止发送",
   "session-changed": "会话或代次已变，不能发给旧目标",
   "usage-unknown": "usage来源未知、已变化或落后于最新对话",
   "blocked-capability": "运行时尚无忙时硬封顶能力",
