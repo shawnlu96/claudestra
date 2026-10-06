@@ -1,7 +1,7 @@
 /**
- * ACPB-1：ACP agent 回合结束（Stop → done）后，宿主又推来一条晚于 done 的条目，jsonl-watcher 按 isPostTurnActivity 把事件态
- * 点回 thinking。ACP 没有画面兜底，probeTurn 原先恒判忙，押后消息卡到 24 小时放弃。现在事件态 thinking 时问宿主（AcpTurnLoop.busy）：
- * 宿主说闲 = 收成 done、判闲；宿主说忙 / 不答 = 照旧判忙。CC 不走这条（它有画面兜底），也不去问宿主。
+ * probeTurnAt 对没有画面判据的 ACP agent：事件态 thinking 时问宿主（AcpTurnLoop.busy）。宿主说闲 = 收成 done、判闲；
+ * 宿主说忙 / 不答 = 判忙；查询途中有新活动不收。CC 不走这条（它有画面兜底），也不去问宿主。
+ * 场景：Stop 收成 done 后宿主又推来晚于 done 的条目，jsonl-watcher 把事件态点回 thinking。
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 import { __resetEventBusForTest, emitEvent, getAgentStatus, isPostTurnActivity } from "../src/bridge/event-bus.js";
@@ -63,6 +63,18 @@ describe("probeTurnAt：ACP 事件态卡 thinking 时以宿主为准", () => {
     replayIncident();
     const t = await probeTurnAt(null, "codex", AGENT, CH, async () => {
       status("thinking", "delivery", new Date(Date.now() + 1_000).toISOString());
+      return false;
+    });
+    expect(t.main).toBe("busy");
+    expect(getAgentStatus(AGENT)).toBe("thinking");
+  });
+
+  test("查询途中的新活动和上一条活动同一毫秒：照样认出，不收成 done", async () => {
+    const ts = "2026-10-06T15:00:00.123Z";
+    status("done", "stop_hook", "2026-10-06T15:00:00.000Z");
+    status("thinking", "jsonl_activity", ts);
+    const t = await probeTurnAt(null, "codex", AGENT, CH, async () => {
+      status("thinking", "delivery", ts);
       return false;
     });
     expect(t.main).toBe("busy");
