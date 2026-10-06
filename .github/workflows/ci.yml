@@ -15,11 +15,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: typecheck + test + guard
+  # 单元测试拆成 4 片并行（单片串行要 14 分钟左右）。scripts/ci-test-shard.ts 按耗时把测试文件分片，各片在同一 head、
+  # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
+  # 这些分片不是合并闸——必需检查是下面的 `typecheck + test + guard` 汇总作业。
+  tests:
+    name: test shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
+    strategy:
+      # 一片红不取消其它片：每片的失败都看得到
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
-      # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史
+      # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史；有 6 个测试 `git show` 固定的历史提交，
+      # 所以各片也不能浅克隆
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -44,11 +53,18 @@ jobs:
       # 只查真正有意义的不同步：package.json 的依赖声明与锁文件根节点记的不一致（加了依赖没更新锁）。
       # 不比锁文件逐字——不同版本的 npm 排法本来就不一样（main 自己的锁在 CI 的 npm 10 下也会被重排），比了只剩噪音。
       - name: Web lockfile in sync with package.json (warning only)
+        if: matrix.shard == 1
         run: >-
           node -e "const p=require('./web/package.json'),l=require('./web/package-lock.json').packages[''];
           const k=(o)=>JSON.stringify(Object.entries(o||{}).sort());
           if(k(p.dependencies)!==k(l.dependencies)||k(p.devDependencies)!==k(l.devDependencies))
           console.log('::warning file=web/package-lock.json::web/package.json 的依赖与锁文件不一致（改了依赖没更新锁文件）——在 web/ 下执行 npm install --package-lock-only 后提交')"
+
+      # node_modules 按锁文件缓存，之后照样 npm install（缓存只省下载解包；锁文件一变 key 就变）
+      - uses: actions/cache@v4
+        with:
+          path: web/node_modules
+          key: web-node-modules-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
 
       # 用 npm install 而不是 npm ci：用户装网页走的就是 npm install（setup / update）；npm ci 会因为贡献者本机
       # npm 版本不同、重排了锁文件而整个作业失败（#29 / #31 实遇，代码一行没错）。
@@ -57,14 +73,33 @@ jobs:
         working-directory: web
 
       - name: Typecheck (tsc --noEmit)
+        if: matrix.shard == 1
         run: bun run typecheck
 
-      # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）
+      # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）。
+      # 先不 apt-get update（占这一步的大头），装不上再 update 重装
       - name: Install tmux
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux || { sudo apt-get update -qq && sudo apt-get install -y -qq tmux; }
 
-      - name: Unit tests
-        run: bun test
+      # 日志另存一份给汇总作业核对：开头记 head 和 bun 自己发现的测试文件总数（--shard=99999/99999 一个文件都不跑），
+      # 之后 Bun 在 Actions 里给每个跑过的文件打一行 `::group::<路径>:`。shell: bash 带 -o pipefail，tee 吞不掉退出码。
+      - name: Unit tests (shard ${{ matrix.shard }}/4)
+        shell: bash
+        run: |
+          bun run --silent test:shard ${{ matrix.shard }}/4 > "$RUNNER_TEMP/files.txt"
+          mapfile -t files < "$RUNNER_TEMP/files.txt"
+          discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
+          printf 'head=%s\ndiscovered=%s\n' "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
+          bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard.log
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
 
       # 防腐棘轮（scripts/guard）：超 baseline 即红；baseline 变大、改闸门本身都必须在 raised[] 写理由。
       # 比较基准：PR 取 base.sha，push 取推送前的 before（新分支首推是全 0 / force push 取不到时，
@@ -72,6 +107,7 @@ jobs:
       # GUARD_STRICT：CI 是最后一道闸，knip / oxc-parser 缺席导致规则被跳过也算失败（本地才降级）。
       # 这一步和 GUARD_STRICT 由 guard 自己校验（scripts/guard/self.ts），删掉或改名会让 guard 失败。
       - name: Guard (ratchets)
+        if: matrix.shard == 1
         run: bun run guard
         env:
           GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -79,11 +115,55 @@ jobs:
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
       - name: Build entrypoints
+        if: matrix.shard == 1
         run: |
           for entry in bridge channel-server manager launcher cron setup relay scheduler; do
             echo "── building src/$entry.ts"
             bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
           done
+
+  # 合并闸（必需检查，名字不能改）：4 片全部成功、且合起来恰好覆盖全部测试文件才绿。
+  # if: always()——分片失败 / 取消 / 被跳过时这里照样跑并且变红；不加的话它会跟着被跳过，
+  # 而被跳过的必需检查在 GitHub 上算通过。
+  check:
+    name: typecheck + test + guard
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # 这一行的措辞是调度器 CI 自动重跑认的固定结论（src/lib/scheduler-merge-ci-rerun-log.ts GATE_VERDICT），改了要一起改
+      - name: All shards succeeded
+        run: |
+          [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-shard-*
+          path: shards
+
+      # 不漏不重：各片同一 head、同一 Bun；bun 自己发现的总数 = 入库测试文件数（发现规则一致）；各片 `::group::` 文件行
+      # 合起来恰好等于入库的测试文件，没有一个文件被两片跑。Bun 改了输出格式会让这里整体对不上而变红，不会静默放行。
+      - name: Shards cover every test file exactly once
+        shell: bash
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          logs=(shards/*/shard.log)
+          [ -f "${logs[0]}" ] || fail "没有下载到任何分片日志"
+          heads=$(sed -n 's/^head=//p' "${logs[@]}" | sort -u)
+          [ "$heads" = "$GITHUB_SHA" ] || fail "各片应都跑在 $GITHUB_SHA 上，实际：$heads"
+          bunv=$(grep -h '^bun test v' "${logs[@]}" | sort -u)
+          [ "$(wc -l <<<"$bunv")" -eq 1 ] || fail "各片 Bun 版本不一致：$bunv"
+          git ls-files | grep -E '(\.|_)(test|spec)\.(c|m)?[jt]sx?$' | LC_ALL=C sort > "$RUNNER_TEMP/expected.txt"
+          want=$(grep -c "" "$RUNNER_TEMP/expected.txt")
+          disc=$(sed -n 's/^discovered=//p' "${logs[@]}" | sort -u)
+          [ "$disc" = "$want" ] || fail "bun 自己发现的测试文件数（$disc）与入库清单（$want）对不上：发现规则不一致"
+          sed -n 's/^::group::\(.*\):$/\1/p' "${logs[@]}" | LC_ALL=C sort > "$RUNNER_TEMP/ran.txt"
+          dup=$(uniq -d "$RUNNER_TEMP/ran.txt")
+          [ -z "$dup" ] || fail "这些测试文件被不止一片跑了：$dup"
+          diff "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/ran.txt" || fail "各片跑过的文件和入库的测试文件对不上（< 没跑到，> 不在入库清单里）"
+          echo "${#logs[@]} 片 · $bunv · head $heads · bun 发现 $disc 个 · 实跑 $(grep -c "" "$RUNNER_TEMP/ran.txt") 个测试文件，不漏不重"
 
   web:
     name: web typecheck + lint
