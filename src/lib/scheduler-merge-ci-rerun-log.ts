@@ -29,7 +29,14 @@ const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
  */
 const GATE = { job: "typecheck + test + guard", step: "All shards succeeded" };
 const GATE_VERDICT = /^##\[error\]分片没有全部成功：\w+\s*$/;
-const RUN_ECHO = /^##\[group\]Run /;
+const RUN_ECHO = "##[group]Run ";
+/**
+ * The runner echoes that step's own command (ci.yml) and its shell inside the Run group; nothing else may sit there.
+ * The command copy is colored, and gh prints the ESC of that color as the two characters `^[`.
+ */
+const GATE_COMMAND = /^\[ "\w+" = success \] \|\| \{ echo "::error::分片没有全部成功：\w+"; exit 1; \}$/;
+const isGateEcho = (line: string): boolean => /^shell: \/usr\/bin\/bash -e \{0\}$/.test(line) ||
+  GATE_COMMAND.test(line.replace(/^(?:\u001b|\^\[)\[36;1m/, "").replace(/(?:\u001b|\^\[)\[0m$/, ""));
 
 interface FailedStep { job: string; step: string; lines: string[] }
 
@@ -52,8 +59,16 @@ function isGateVerdict(s: FailedStep): boolean {
   let inEcho = false;
   let verdict = false;
   for (const line of s.lines) {
-    if (inEcho) { inEcho = !line.startsWith("##[endgroup]"); continue; }
-    if (RUN_ECHO.test(line)) { inEcho = true; continue; }
+    if (inEcho) {
+      if (line.startsWith("##[endgroup]")) inEcho = false;
+      else if (!isGateEcho(line)) return false;
+      continue;
+    }
+    if (line.startsWith(RUN_ECHO)) {
+      if (!GATE_COMMAND.test(line.slice(RUN_ECHO.length))) return false;
+      inEcho = true;
+      continue;
+    }
     if (GATE_VERDICT.test(line)) { verdict = true; continue; }
     if (line.trim() && !STEP_EXIT.test(line)) return false;
   }
