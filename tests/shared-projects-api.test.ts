@@ -62,7 +62,7 @@ describe("owner-only shared project routes", () => {
     w.d.person = async () => { throw new Error("must not resolve identities"); };
     const principals: (Principal | Response)[] = [
       { ...owner, id: "guest:a" }, { ...owner, peer: "peer-a" }, { ...owner, disabled: true }, { ...owner, agents: ["a"] },
-      { ...owner, manage: false }, Response.json({}, { status: 401 }),
+      { ...owner, manage: false }, { ...owner, role: "external" }, { ...owner, id: "token:old", name: "web-ui" }, Response.json({}, { status: 401 }),
     ];
     for (const p of principals) for (const [method, path] of [["GET", ""], ["POST", ""], ["PATCH", "/b"], ["POST", "/b/invite"], ["POST", "/owner-bootstrap"]]) {
       expect((await w.request(method!, path!, {}, p))!.status).toBe(403);
@@ -313,4 +313,25 @@ test("recovery preserves original creation parameters, local selection and canon
   w.d.operation = async () => ({ project, operation: { ...operation, paramsDigest: "c".repeat(64) } });
   expect((await answerSharedProject(approve(a), w.d))!.available).toBe(false);
   expect(w.calls).toEqual([]);
+});
+
+
+test("project adapter factory receives actual authenticated principal only after the full owner gate", async () => {
+  const w = fixture(), url = new URL("http://fixture/api/v1/shared-projects");
+  const seen: Principal[] = [];
+  const ports = async (principal: Principal) => { seen.push(principal); return w.d; };
+  const guest: Principal = { ...owner, id: "guest:test" };
+  expect((await handleSharedProjectsApi(new Request(url.toString()), url, { auth: async () => guest, ports }))!.status).toBe(403);
+  expect(seen).toEqual([]);
+  expect((await handleSharedProjectsApi(new Request(url.toString()), url, { auth: async () => owner, ports }))!.status).toBe(200);
+  expect(seen).toEqual([owner]);
+});
+
+
+test("adapter resolution failures never echo credential or transport data", async () => {
+  const url = new URL("http://fixture/api/v1/shared-projects");
+  const response = await handleSharedProjectsApi(new Request(url.toString()), url, { auth: async () => owner,
+    ports: async () => { throw new Error("SECRET_CREDENTIAL"); } });
+  expect(response!.status).toBe(503);
+  expect(await response!.text()).not.toContain("SECRET_CREDENTIAL");
 });

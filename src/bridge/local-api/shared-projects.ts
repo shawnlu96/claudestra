@@ -1,5 +1,5 @@
-import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
-import { canManage } from "../../lib/devices.js";
+import type { Principal } from "../../lib/principals.js";
+import { sharedProjectOwnerPrincipal } from "./shared-projects-auth.js";
 import { readBoundedRequestBody, RequestBodyError } from "../../lib/request-body.js";
 import { parseV2ProjectRecord, parseV2ProjectsRequest, parseV2ProjectsResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
@@ -15,7 +15,8 @@ const ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const OP = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 export interface SharedProjectsRouteDeps {
   auth: (req: Request, url: URL) => Promise<Principal | Response>;
-  ports?: SharedProjectsPorts;
+  /** The factory receives only the authenticated effective principal; it selects original scope from trusted local state. */
+  ports?: SharedProjectsPorts | ((principal: Principal) => Promise<SharedProjectsPorts | undefined>);
   localSnapshot?: () => Promise<SharedProjectsLocalSnapshot>;
 }
 /** Explicit seam until N1–N3 land. Never fabricate a person or call the old grant-writing join path as a fallback. */
@@ -144,10 +145,11 @@ export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedP
   if (url.pathname !== ROOT && !url.pathname.startsWith(`${ROOT}/`)) return null;
   const p = await d.auth(req, url);
   if (p instanceof Response) return p.status === 429 ? p : apiJson(403, { ok: false, code: "owner_required" });
-  if (!isOwnerPrincipal(p) || !canManage(p)) return apiJson(403, { ok: false, code: "owner_required" });
-  const ports = d.ports ?? sharedProjectsPorts();
-  if (!ports) return apiJson(503, { ok: false, code: "shared_projects_adapter_unavailable" });
+  if (!sharedProjectOwnerPrincipal(p)) return apiJson(403, { ok: false, code: "owner_required" });
+  let ports: SharedProjectsPorts | undefined;
   try {
+    ports = typeof d.ports === "function" ? await d.ports(p) : d.ports ?? sharedProjectsPorts();
+    if (!ports) return apiJson(503, { ok: false, code: "shared_projects_adapter_unavailable" });
     if (url.search) throw new SharedProjectsError(400, "invalid_query");
     if (url.pathname === `${ROOT}/snapshot` && req.method === "GET") {
       const snapshot: SharedProjectsSnapshot = await sharedProjectsSnapshot(ports, await (d.localSnapshot ?? readSharedProjectsLocalSnapshot)());
@@ -159,7 +161,7 @@ export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedP
     // No arbitrary center/transport exception or body is reflected to the caller.
     const status = error instanceof SharedProjectsError ? error.status : error instanceof RequestBodyError ? error.status : error instanceof SyntaxError ? 400 : 503;
     let current: unknown;
-    if (status === 409 && error instanceof SharedProjectsError && error.current) {
+    if (ports && status === 409 && error instanceof SharedProjectsError && error.current) {
       try { current = publicProject(error.current, ports); }
       catch { /* A malformed current value cannot be shown; preserve the conflict status without echoing the response. */ }
     }
