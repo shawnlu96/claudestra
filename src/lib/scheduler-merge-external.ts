@@ -1,5 +1,5 @@
 /** gh commands are structured argv, never interpolated into a shell string. */
-import { createHash } from "node:crypto";
+import { singleMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
@@ -23,8 +23,6 @@ const repoOf = (prRef: string): string => {
   if (!repo) throw new Error("PR URL 不合法");
   return repo;
 };
-/** runBounded silently stops reading at 1 MiB; anything near that may be cut, and two cut diffs could compare equal. */
-const DIFF_LIMIT = 900 * 1024;
 const MAIN_REF = "refs/remotes/origin/main";
 
 /** External data is bounded and checked before it can become a durable receipt. */
@@ -37,13 +35,6 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
   };
   const gh = (...args: string[]) => run(["gh", ...args]);
   const git = (...args: string[]) => run(["git", ...args]);
-  /** Net diff exactly as `git diff main...head` prints it, with every knob that could vary between calls pinned. */
-  const netDiff = async (head: string) => {
-    const out = await git("-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
-      "--binary", "--full-index", `${MAIN_REF}...${head}`);
-    if (Buffer.byteLength(out) >= DIFF_LIMIT) throw new Error("净 diff 太大，无法逐字核对");
-    return out;
-  };
   return withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
@@ -88,19 +79,10 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       repoOf(prRef);
       if (!SHA.test(oldHead) || !SHA.test(newHead)) return { ok: false, reason: "head 不是完整 SHA" };
       await git("fetch", "--no-tags", "--quiet", "origin", newHead, `+refs/heads/main:${MAIN_REF}`);
-      const mainHead = (await git("rev-parse", "--verify", `${MAIN_REF}^{commit}`)).trim();
-      const [self, ...parents] = (await git("rev-list", "--parents", "-n", "1", newHead)).trim().split(/\s+/);
-      if (self?.toLowerCase() !== newHead.toLowerCase()) throw new Error("新 head 读不到");
-      const others = parents.filter((p) => p.toLowerCase() !== oldHead.toLowerCase());
-      if (parents.length !== 2 || others.length !== 1) return { ok: false, reason: `新 head 不是「原审查 head + main 提交」的合并提交（父提交 ${parents.length} 个）` };
-      const mainParent = others[0]!;
-      const onMain = await command(["git", "merge-base", "--is-ancestor", mainParent, MAIN_REF],
-        { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
-      if (onMain.timedOut || (onMain.code !== 0 && onMain.code !== 1)) throw new Error(`git merge-base 失败：${oneLine(onMain.stderr)}`);
-      if (onMain.code !== 0) return { ok: false, reason: `另一个父提交 ${mainParent.slice(0, 12)} 不在 main 上` };
-      const [before, after] = [await netDiff(oldHead), await netDiff(newHead)];
-      if (before !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead }; // parents verified: scheduler-review-rebase.ts scopes the re-review on it
-      return { ok: true, reason: "净 diff 一致", mainParent, mainHead, diffHash: createHash("sha256").update(after).digest("hex") };
+      const proof = await singleMainCarryProof(cwd, oldHead, newHead, command === runBounded ? undefined : command);
+      if (!proof.ok) return proof;
+      const { reason, mainParent, mainHead, diffHash } = proof;
+      return { ok: true, reason, mainParent, mainHead, diffHash };
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },
     async merge(prRef, expectedHead) {
