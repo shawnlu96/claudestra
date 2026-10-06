@@ -8,7 +8,7 @@ import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
-import type { Stage } from "./ledger-stages.js";
+import type { Stage, LedgerEvent } from "./ledger-stages.js";
 import {
   applyRefusalEpoch, applyReviewerSwap, type MaterialCheck, type Placement, applyReviewerSwapEffect, mayRebindReviewer, refusalBindMarks, refusalRebind, reviewerReuseNote,
 } from "./scheduler-review-swap.js";
@@ -232,6 +232,13 @@ export function beginRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, p
     () => preserveSessionHistory(db), (c, e) => insertEvent(db, c, e, true)));
 }
 
+export function beginLegacyReviewRetire<T>(db: Database, taskId: string, intentId: string,
+  apply: (write: (ctx: WriteCtx, e: Pick<LedgerEvent, "project" | "target" | "kind" | "text" | "data">) => LedgerEvent) => T): T {
+  return apply((ctx, e) => {
+    if (ctx.actor !== "scheduler" || e.kind !== "scheduler" || e.target !== taskId || e.project !== mustTask(db, taskId).project ||
+      e.data.op !== "reviewer_swap" || e.data.legacy !== true || e.data.intentId !== intentId || "refusal" in e.data) throw new LedgerError("forbidden", "仅限本卡旧审查单退休");
+    return insertEvent(db, ctx, e, true); });
+}
 export function recordReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill" | "reuse", receipt: string): void {
   tx(db, () => applyReviewerSwapEffect(db, ctx, id, effect, receipt, (c, e) => { insertEvent(db, c, e, true); }));
 }

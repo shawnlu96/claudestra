@@ -11,6 +11,7 @@ import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
+import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
 import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
@@ -233,7 +234,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project) };
+    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project) };
   });
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）、各项目 PM 名单（押后规则）、review 派给的本机审查员
   const want = new Set<string>();
@@ -248,7 +249,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
-  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown }) => {
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -270,6 +271,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       mergeUnknown,
       held: held.value,
       ownerInbox: inbox.value,
+      ...wait,
       unavailable,
     };
   });

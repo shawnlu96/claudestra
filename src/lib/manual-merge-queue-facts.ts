@@ -15,6 +15,7 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, listDeps, listEvents, listTasks, toEvent } from "./ledger-store.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { readSchedulerConfig } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
@@ -38,6 +39,21 @@ export function manualQueueMode(project: string, policy: RecoveryPolicyPort = re
     return "off";
   }
 }
+
+/** Whether a project's PRs are merged by the repository owner (scheduler.json mergeHandoff, MHO1); injected by tests. */
+export type HandoffPort = (project: string) => boolean;
+/** scheduler.json read right before each use; an unreadable file says nothing about handoff (the scheduler is idle then anyway). */
+const configHandoff: HandoffPort = (project) => {
+  try {
+    return readSchedulerConfig().projects[project]?.mergeHandoff === true;
+  } catch (e) {
+    console.error(`⚠️ [manual-merge] 读 scheduler.json 失败，按非交接项目：${(e as Error).message}`);
+    return false;
+  }
+};
+/** The reason a handoff project's request never queues here (the pass never claims for it either: manual-merge-queue-pass.ts). */
+const handoffWhy = (project: string): string =>
+  `项目 ${project} 是仓库方交接（mergeHandoff）：PR 由仓库方在 GitHub 合并，本机不排人工合并、不占合并槽、不发合并`;
 
 export interface ManualRequest {
   seq: number; ts: number; project: string; taskId: string; requestedBy: string; reason: string;
@@ -136,6 +152,24 @@ const decisionKey = (a: Ask): string | null => {
   return a.bind ? `authorize:${by}:${a.askKey ?? a.bind.action}:${a.bind.paramsHash}` : `authorize:${a.id}`;
 };
 
+/** The head an authorization's params name (`params.head`), null when they name none. */
+const boundHead = (a: Ask): string | null => {
+  const p = a.bind?.params;
+  return p && typeof p === "object" && typeof (p as Record<string, unknown>).head === "string" ? String((p as Record<string, unknown>).head) : null;
+};
+
+/**
+ * A version superseded before its deadline is handed to its recorded replacement only when it was not this request's own
+ * authorization: an owner_action (its replacement is the same decision), or an authorize whose params name another head. An
+ * authorize naming the request's head (or no head: nothing proves it is about something else) keeps its own complete binding —
+ * a replacement with other params is another decision and its approval does not cover it (MQ1S).
+ */
+const handedOn = (a: Ask, head: string): boolean => {
+  if (a.kind !== "authorize") return true;
+  const h = boundHead(a);
+  return h !== null && h !== head;
+};
+
 /** The latest version of the decision stands: approved inside its window (authorize) or answered by the owner (owner_action). */
 const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_action" ? a.state === "answered" && ownerAnswered(a.answer) : approvedAsk(a, now);
 
@@ -145,15 +179,17 @@ const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_actio
  * the window runs from the ask, an answer does not extend it) — is a wait, however old the ask is and whenever PM queued: the
  * request keeps its place, nothing merges, and the lift is the owner approving that same decision re-asked (authorize: same asker,
  * key and binding) or answering it (owner_action) — never a newer request, its reason, or the approval of another decision. A
- * version superseded before its deadline was never decided; its recorded replacement is judged in its place. supersedeIn can
+ * version superseded before its deadline was never decided; its recorded replacement is judged in its place only when that version
+ * was not the request's own authorization (handedOn): one naming the request's head waits for its own binding re-asked. supersedeIn can
  * supersede an already overdue open row before the expiry scan runs: its terminal updatedAt records that transition, so such a
  * row retains its decision's wait. Otherwise approval would depend on scan order. An open version waits in requestRefusal.
  */
-function authorizationRefusal(db: Database, taskId: string, now: number): string | null {
-  const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, id").all(taskId) as { id: string }[];
+function authorizationRefusal(db: Database, taskId: string, head: string, now: number): string | null {
+  // Creation order: openAskFull inserts one row per transaction, so rowid breaks a same-millisecond tie; the id's suffix is random.
+  const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, rowid").all(taskId) as { id: string }[];
   const asks = rows.map(({ id }) => getAsk(db, id)).filter((a): a is Ask => !!a);
-  const replaced = new Set(asks.filter((a) => a.state === "superseded" && a.updatedAt < a.expiresAt).map((a) => a.id));
-  const latest = new Map<string, Ask>(); // createdAt order: the last version seen of each decision is its newest
+  const replaced = new Set(asks.filter((a) => a.state === "superseded" && a.updatedAt < a.expiresAt && handedOn(a, head)).map((a) => a.id));
+  const latest = new Map<string, Ask>(); // creation order: the last version seen of each decision is its newest
   for (const a of asks) {
     const key = decisionKey(a);
     if (key && !(replaced.has(a.id) && asks.some((b) => b.supersedes === a.id))) latest.set(key, a);
@@ -162,6 +198,10 @@ function authorizationRefusal(db: Database, taskId: string, now: number): string
     if (a.state === "open" || decisionStands(a, now)) continue;
     if (a.state === "answered" && a.kind === "authorize" && pickedApprove(a)) {
       return `授权 ${a.id} 的批准已过有效期（有效期从开出算，答了也不延长）：等 owner 在重新问的授权上批准`;
+    }
+    if (a.state === "superseded") {
+      const why = a.updatedAt >= a.expiresAt ? "取代时已过有效期" : "替代版本的参数 / head 不同";
+      return `授权 ${a.id} 被取代（${why}），替代版本的批准不覆盖本请求：等 owner 在按原绑定重新问的授权上批准`;
     }
     return `授权 ${a.id} ${a.state === "answered" ? "的答复不是批准" : `未获答复即 ${a.state}`}（过期 / 撤销不是批准）：等 owner 在重新问的授权上批准`;
   }
@@ -180,12 +220,14 @@ const carriedTo = (events: readonly LedgerEvent[], intentId: string, head: strin
 
 /**
  * Why this request may not merge now; null = it may. `run` = the request's own claimed intent is asking (begin / drift): its own
- * intent is not "another open intent", and a head its run carried counts as the bound head. Re-read on every call.
+ * intent is not "another open intent", and a head its run carried counts as the bound head. Re-read on every call. A mergeHandoff
+ * project's request is void with that reason (refused at request time, shown in merge-queue in every mode): never silent.
  */
-export function requestRefusal(db: Database, req: ManualRequest, now: number, run = false): Refusal | null {
+export function requestRefusal(db: Database, req: ManualRequest, now: number, run = false, handoff: HandoffPort = configHandoff): Refusal | null {
   const task = getTask(db, req.taskId), wf = task ? getWorkflow(db, task.id) : null;
   if (!task || task.project !== req.project) return { kind: "void", why: "卡不存在或已换项目" };
   if (revokeOf(db, req)) return { kind: "void", why: "请求已撤销" };
+  if (handoff(task.project)) return { kind: "void", why: handoffWhy(task.project) };
   if (!wf || wf.mode !== "manual") return { kind: "void", why: `流程是 ${wf?.mode ?? "缺流程"}，不是 manual（自动卡走自动合并闸）` };
   if (task.kind !== "code" || task.stage !== "merge") return { kind: "void", why: `卡在 ${task.stage}（${task.kind}），不在 merge` };
   const events = listEvents(db, { project: task.project, target: task.id });
@@ -210,7 +252,7 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   if (feature?.status === "paused") return { kind: "wait", why: `feature ${feature.id} 已暂停` };
   const asks = db.query("SELECT id FROM asks WHERE taskId = ? AND state = 'open'").all(task.id) as { id: string }[];
   if (asks.length) return { kind: "wait", why: `审批未答：${asks.map((a) => a.id).join("、")}` };
-  const auth = authorizationRefusal(db, task.id, now);
+  const auth = authorizationRefusal(db, task.id, req.head, now);
   if (auth) return { kind: "wait", why: auth };
   const open = (db.query("SELECT id, status FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')")
     .all(task.id) as { id: string; status: string }[]).filter((i) => !(run && i.id === id));

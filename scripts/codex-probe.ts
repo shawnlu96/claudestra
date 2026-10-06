@@ -44,7 +44,7 @@ const REAL_HOME = userInfo().homedir;
 const FORBIDDEN_ROOTS = [join(REAL_HOME, ".codex"), stateDirIn(REAL_HOME), stateDir()];
 
 /** 拒绝运行的三种情况：路径里有软链、落在真实 ~/.codex 或 Claudestra 状态目录下、CODEX_HOME 里已有 auth.json */
-function assertIsolatedHome(dir: string): void {
+export function assertIsolatedHome(dir: string): void {
   const abs = resolve(dir);
   const real = realpathSync(abs);
   if (real !== abs) throw new Error(`拒绝运行：${abs} 的路径里有软链（realpath=${real}）`);
