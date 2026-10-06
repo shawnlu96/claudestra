@@ -8,14 +8,15 @@
  * 结论写在 docs/runtimes/codex-adapter.md「和 2.1.0 的差异」。
  */
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { spawnAdapter } from "../src/lib/acp/adapter-proc.ts";
 import { CODEX_ACP_ADAPTER_MAIN } from "../src/lib/acp/codex-adapter/main.ts";
-import { codexAcpInstalled } from "../src/lib/acp/install.ts";
 import type { PermissionCard } from "../src/lib/acp/permissions.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import { createAcpTranslator, threadStatusOf, turnEndOf } from "../src/lib/acp/updates.ts";
+import { stateDir } from "../src/lib/state-dir.ts";
+import { assertIsolatedHome } from "./codex-probe.ts";
 import { inputTexts, type Reply, startFakeResponses, toolNames } from "../tests/helpers/fake-responses.ts";
 
 type Rec = Record<string, any>;
@@ -28,8 +29,8 @@ if (!OUT) {
 }
 const CODEX = arg("--codex") ?? Bun.which("codex");
 const MODEL = arg("--model") ?? "fake-model";
-const installed = codexAcpInstalled();
-const UPSTREAM = arg("--codex-acp") ?? (installed.ok ? installed.path : undefined);
+/** 对照用的上游：本机已装好的 2.1.0 入口，只读，不改不装 */
+const UPSTREAM = arg("--codex-acp") ?? join(stateDir(), "acp", "codex-acp-2.1.0", "index.js");
 if (!CODEX) throw new Error("找不到 codex，用 --codex 指定");
 
 const text = (t: string): Reply => ({ type: "text", text: t });
@@ -58,11 +59,13 @@ const TURNS: Turn[] = [
   { name: "interrupt", prompt: "think forever", replies: [{ type: "hang" }], cancelAfterMs: 1_500 },
 ];
 
-/** mkdtemp 出来的新目录：不会有 auth.json；再按真实路径确认它不在真实 ~/.codex 下 */
+/** 每个适配器一个新根；CODEX_HOME 按 codex-probe 的规矩查：有软链、落在 ~/.codex 或 Claudestra 状态目录下、已有 auth.json 都拒绝运行 */
 function isolatedRoot(): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "cx3-compare-")));
-  if ((root + sep).startsWith(join(realpathSync(homedir()), ".codex") + sep)) throw new Error(`拒绝运行：${root} 在 ~/.codex 下`);
+  const base = realpathSync(tmpdir());
+  assertIsolatedHome(base); // 先查父目录：落在禁区里就连临时目录都不建
+  const root = mkdtempSync(join(base, "cx3-compare-"));
   for (const d of ["home", "codex-home", "tmp", "work"]) mkdirSync(join(root, d));
+  for (const d of [root, join(root, "codex-home"), join(root, "home")]) assertIsolatedHome(d);
   writeFileSync(join(root, "work", "a.txt"), "needle in a file\n");
   return root;
 }
