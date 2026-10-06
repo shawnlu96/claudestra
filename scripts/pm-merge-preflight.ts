@@ -19,7 +19,7 @@ import { resolveActor } from "../src/manager/ledger-identity.js";
 
 export const USAGE = `用法：
   bun scripts/pm-merge-preflight.ts --task <卡号> --pr <PR URL> --expected-head <sha> --actual-main <sha>
-    [--reviewed-head <sha> --repo-dir <dir>]  head 不是审过的 head：本地 fetch 后独立跑 canonical 多跳证明（≤16 跳纯 main）
+    [--repo-dir <dir>]                        head 不是台账审过的 head 时必需：本地 fetch 后从台账审查 head 独立跑 canonical 多跳证明（≤16 跳纯 main）
     [--update-branch]                         钉 expected head 更新分支；等 PR head 真的变成新 head（202 只是受理）、新 head 的必需 run 出现后按新 head 检查
     [--merge]                                 过闸后再核一遍，sha=<最终 head> 原子钉住合并（GitHub 对变了的 head 回 409）
     [--step '<JSON argv>' ...]                合并成功后依次执行（ff / deploy 等），任何一步非 0 立即停并以该步 exit 退出
@@ -87,7 +87,7 @@ export async function preflight(input: PreflightInput, run: Run, prove: Prove = 
   const main = await json(run, ["gh", "api", `repos/${repo}/git/ref/heads/main`], "gh main ref") as { object?: { sha?: unknown } };
   if (main.object?.sha !== input.actualMain) return refuse(`actual main 已漂移：${String(main.object?.sha).slice(0, 12)}`);
   if (input.reviewedHead && input.reviewedHead !== input.expectedHead) {
-    if (!input.repoDir || !SHA.test(input.reviewedHead)) return refuse("head 动过：要 --reviewed-head 完整 SHA 与 --repo-dir 跑独立证明");
+    if (!input.repoDir || !SHA.test(input.reviewedHead)) return refuse("head 不是台账审过的 head：要 --repo-dir 跑独立证明");
     const f = await run(["git", "fetch", "--no-tags", "--quiet", "origin", input.expectedHead, "+refs/heads/main:refs/remotes/origin/main"],
       { cwd: input.repoDir, timeoutMs: 120_000 });
     if (f.timedOut || f.code !== 0) return refuse(`git fetch 失败：exit ${f.code ?? "timeout"}`);
@@ -178,6 +178,7 @@ function parseArgs(argv: string[]): { flags: Record<string, string>; bools: Set<
     if (!a.startsWith("--") || v === undefined) return `参数不对：${a}`;
     i++;
     if (a === "--checks") return "必需 CI 由卡所在项目的 requiredChecks 定，不收 --checks";
+    if (a === "--reviewed-head") return "审过的 head 由台账（本轮 PASS + 正式沿用链）定，不收 --reviewed-head";
     if (a === "--step") {
       let parsed: unknown;
       try { parsed = JSON.parse(v); } catch { return `--step 要是 JSON argv 数组：${v}`; }
@@ -226,17 +227,20 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     if (need.length) return { exit: 2, lines: [`缺 --${need.join(" --")}`] };
     const checks = requiredChecksFor((deps.ledger ?? realLedger)(), flags.task!, flags.pr!, deps.checksOf ?? ((p) => projectOf(p)?.requiredChecks));
     let head = flags["expected-head"]!;
-    const actor = (deps.actor ?? realActor)(), now = deps.now ?? Date.now;
-    // the ledger gate, re-read from the read-only ledger right before each GitHub write (r2 merge-auth)
-    const authorize = (at: string): Verdict => {
-      if (!actor) return refuse("认不出你的身份（ledger 同一规则），不授权");
+    const actor = (deps.actor ?? realActor)(), now = deps.now ?? Date.now, tag = bools.has("merge") ? "合并未发出：" : "";
+    // the ledger gate, re-read from the read-only ledger right before each GitHub write (r2 merge-auth); it also names the reviewed head
+    const authorize = (at: string): { ok: true; detail: string; base: string } | { ok: false; exit: 2; reason: string } => {
+      if (!actor) return { ok: false, exit: 2, reason: "认不出你的身份（ledger 同一规则），不授权" };
       const a = manualMergeAuth((deps.ledger ?? realLedger)(), actor, { taskId: flags.task!, pr: flags.pr!, head: at }, now());
-      return a.ok ? { ok: true, detail: `台账合并门通过：审查 #${a.auth.reviewSeq}（${a.auth.sourceKind}，经 ${a.auth.carries} 次正式沿用）` } : refuse(a.reason);
+      return a.ok ? { ok: true, base: a.auth.base, detail: `台账合并门通过：审查 #${a.auth.reviewSeq}（${a.auth.sourceKind}，经 ${a.auth.carries} 次正式沿用）` }
+        : { ok: false, exit: 2, reason: a.reason };
     };
+    // r3 merge-proof: the proof's oldHead is the ledger's reviewed head, never a caller flag; read before any GitHub call
+    const first = authorize(head);
+    if (!first.ok) return { exit: first.exit, lines: [`${bools.has("update-branch") ? "更新分支未发出：" : tag}${first.reason}`] };
+    const reviewed = first.base;
     const timing = { timeoutMs: 10 * 60_000, intervalMs: 15_000, sleep: deps.sleep, now: deps.now };
     if (bools.has("update-branch")) {
-      const pre = authorize(head);
-      if (!pre.ok) return { exit: pre.exit, lines: [`更新分支未发出：${pre.reason}`] };
       const moved = await updateBranch(run, flags.pr!, head, timing);
       if (moved === "timeout") return { exit: 3, lines: [`更新分支已受理，但 PR head 仍是 ${head.slice(0, 12)}：新 head 不明，不合并`] };
       head = moved;
@@ -244,21 +248,21 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
       const seen = await waitForHeadRuns(run, parsePr(flags.pr!).repo, head, checks, timing);
       if (seen === "timeout") return { exit: 3, lines: [...lines, "新 head 的必需 CI run 还没出现，不能当绿"] };
     }
-    // after an update the head always differs from the reviewed one, so the independent proof always runs
-    const input = { pr: flags.pr!, expectedHead: head, actualMain: flags["actual-main"]!, checks,
-      reviewedHead: bools.has("update-branch") ? flags["reviewed-head"] ?? flags["expected-head"] : flags["reviewed-head"], repoDir: flags["repo-dir"] };
+    // whenever the final head is not the reviewed one, preflight runs the canonical proof reviewed → final head on the actual main
+    const input = { pr: flags.pr!, expectedHead: head, actualMain: flags["actual-main"]!, checks, reviewedHead: reviewed, repoDir: flags["repo-dir"] };
     const v = await preflight(input, run, deps.prove);
-    if (!v.ok) return { exit: v.exit, lines: [...lines, v.reason] };
+    if (!v.ok) return { exit: v.exit, lines: [...lines, `${tag}${v.reason}`] };
     lines.push(v.detail);
     if (bools.has("update-branch") && !bools.has("merge")) return { exit: 0, lines: [...lines, "新 head 要先 `ledger main-carry` 写正式沿用，再跑本脚本"] };
     const auth = authorize(head);
-    if (!auth.ok) return { exit: auth.exit, lines: [...lines, bools.has("merge") ? `合并未发出：${auth.reason}` : auth.reason] };
+    if (!auth.ok) return { exit: auth.exit, lines: [...lines, `${tag}${auth.reason}`] };
     lines.push(auth.detail);
     if (!bools.has("merge")) return { exit: 0, lines };
     const again = await preflight(input, run, deps.prove); // the last read right before the irreversible call
     if (!again.ok) return { exit: again.exit, lines: [...lines, `合并未发出：${again.reason}`] };
     const last = authorize(head);
     if (!last.ok) return { exit: last.exit, lines: [...lines, `合并未发出：${last.reason}`] };
+    if (last.base !== reviewed) return { exit: 2, lines: [...lines, `合并未发出：台账审查 head 变了（${last.base.slice(0, 12)}），证明作废`] };
     const m = await pinnedMerge(run, flags.pr!, head);
     if (!m.ok) return { exit: m.exit, lines: [...lines, m.reason] };
     lines.push(m.detail);

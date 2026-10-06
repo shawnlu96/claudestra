@@ -301,9 +301,18 @@ describe("review r2 · merge-auth: every GitHub write is bound to the ledger's r
     applyManualCarry(db, { actor: "pm", now: ++clock }, { taskId: "A7", oldHead: HEAD, newHead: NEW, mainHead: MAIN, specRev: t.specRev, round: 1,
       reviewSeq, rev: t.rev }, { ok: true, reason: "ok", oldHead: HEAD, newHead: NEW, mainHead: MAIN, mainParent: MAIN, diffHash: "f".repeat(64),
       chain: [{ previousHead: HEAD, head: NEW, mainParent: MAIN }] }, { policy: on });
-    const r = await go("A7", merge(NEW), g.run);
+    // r3 merge-proof: a carried head never merges without the canonical proof from the ledger's reviewed head on the actual main
+    expect((await go("A7", merge(NEW), g.run)).lines.join()).toContain("--repo-dir");
+    expect((await go("A7", [...merge(NEW), "--reviewed-head", NEW, "--repo-dir", "/r"], g.run)).lines.join()).toContain("不收 --reviewed-head");
+    expect((await go("A7", [...merge(NEW), "--repo-dir", "/r"], g.run, { prove: async () => ({ ok: false, reason: "merge-base 不唯一" }) })).lines.join())
+      .toContain("合并未发出：纯 main 合并证明不成立");
+    expect(g.merges()).toEqual([]);
+    const proofs: unknown[] = [];
+    const r = await go("A7", [...merge(NEW), "--repo-dir", "/r"], g.run, { prove: async (i) => { proofs.push(i); return { ok: true, reason: "ok" }; } });
     expect(r.exit).toBe(0);
     expect(r.lines.join()).toContain("经 1 次正式沿用");
+    const want = expect.objectContaining({ oldHead: HEAD, newHead: NEW, mainHead: MAIN });
+    expect(proofs).toEqual([want, want]); // and once more right before the PUT
     expect(g.merges()).toEqual([["gh", "api", "-X", "PUT", "repos/o/r/pulls/7/merge", "-f", `sha=${NEW}`, "-f", "merge_method=merge"]]);
   });
 });
