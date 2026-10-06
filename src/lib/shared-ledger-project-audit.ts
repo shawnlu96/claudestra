@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalJson } from "./canonical-json.js";
 import type { SharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
 import type { SharedLedgerProjectChoice } from "./shared-ledger-local-project.js";
 
@@ -69,7 +70,7 @@ export function auditSharedLedgerProjects(state: ProjectAuditState, select: Audi
 interface ReplaceAuditBindingsInput { expected: SharedLedgerBinding[]; next: SharedLedgerBinding }
 export interface ProjectAuditMutationPorts {
   read: () => Promise<ProjectAuditState>;
-  /** N4 supplies its shared create/existing selection model; the default is the isolated frozen-design fixture. */
+  /** N4 supplies its shared selection model; the default is synthetic pending its formal interface. */
   projectChoices?: AuditProjectSelection;
   /** N2 replaceSharedLedgerBindings only: backup 0600 + CAS + validation + replace under the bindings lock. */
   replaceSharedLedgerBindings: (input: ReplaceAuditBindingsInput) => Promise<void>;
@@ -80,10 +81,14 @@ export interface ProjectAuditMutationPorts {
 /** Preflight precedes project creation; N2 repeats CAS/target checks under lock to close the write race. */
 export async function applyProjectAuditChoice(audit: ProjectAudit, choice: AuditProjectChoice, ports: ProjectAuditMutationPorts): Promise<SharedLedgerBinding> {
   const current = await ports.read();
-  if (auditVersion(auditRows(current.bindings, audit.target)) !== audit.version) throw new Error("audit_stale");
+  if (auditVersion(audit.expected) !== audit.version
+    || auditVersion(auditRows(current.bindings, audit.target)) !== audit.version) throw new Error("audit_stale");
   if (!current.credentials.some(c => auditTargetKey(c) === auditTargetKey(audit.target))) throw new Error("audit_credential_missing");
   const approved = audit.choices.find(c => c.button === choice.button);
-  if (!approved || JSON.stringify(approved) !== JSON.stringify(choice)) throw new Error("audit_choice_changed");
+  const fresh = auditSharedLedgerProjects(current, ports.projectChoices).find(a => auditTargetKey(a.target) === auditTargetKey(audit.target));
+  const available = fresh?.choices.find(c => c.button === choice.button);
+  if (!approved || canonicalJson(approved) !== canonicalJson(choice)) throw new Error("audit_choice_changed");
+  if (!fresh || fresh.status === "normal" || !available || canonicalJson(available) !== canonicalJson(approved)) throw new Error("audit_target_changed");
   if (choice.kind === "existing" && !choicesFor(current, audit.target).choices.some(c => c.kind === "existing" && c.localProjectId === choice.localProjectId)) {
     throw new Error("audit_target_changed");
   }

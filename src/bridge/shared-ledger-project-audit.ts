@@ -13,7 +13,7 @@ export interface ProjectAuditPorts extends ProjectAuditMutationPorts {
   now: () => number;
   asks: () => Ask[];
   openAsk: (input: CreateAskInput) => Ask;
-  closeAsk: (id: string) => void;
+  closeAsk: (id: string, state: "cancelled" | "expired") => void;
   /** Atomically mark the persisted answered card consumed before performing any side effect. */
   claim: (id: string) => boolean;
   inform: (text: string) => Promise<void>;
@@ -22,7 +22,8 @@ const bindOf = (audit: ProjectAudit): Omit<AskBind, "paramsHash"> => ({
   action: "shared_ledger_project_audit", params: audit, version: audit.version, approve: audit.choices.map(c => c.button),
 });
 const snapshot = (a: Ask): ProjectAudit | undefined => a.extra.projectAudit as ProjectAudit | undefined;
-const issueKey = (a: ProjectAudit): string => `${auditTargetKey(a.target)}:${a.version}`;
+// Rows alone cannot detect lost credentials, personal projects or a changed N4 choice model.
+const issueKey = (a: ProjectAudit): string => bindHash(bindOf(a), CREATOR);
 
 function card(audit: ProjectAudit, previous: Ask[], now: number): CreateAskInput {
   const bind = bindOf(audit);
@@ -67,15 +68,24 @@ export class SharedLedgerProjectAuditor {
 
   private async scan(): Promise<void> {
     const d = this.ports, audits = auditSharedLedgerProjects(await d.read(), d.projectChoices);
+    const latest = new Map(audits.map(a => [auditTargetKey(a.target), a]));
+    for (const a of d.asks().filter(a => a.createdBy === CREATOR && snapshot(a))) {
+      const old = snapshot(a)!, current = latest.get(auditTargetKey(old.target));
+      const changed = !current || current.status === "normal" || issueKey(current) !== issueKey(old);
+      if (changed) this.offered.delete(issueKey(old));
+      if (a.state !== "open") continue;
+      if (changed) d.closeAsk(a.id, "cancelled");
+      else if (a.expiresAt <= d.now()) {
+        d.closeAsk(a.id, "expired");
+        // Only cards offered in this process stay quiet; a restarted controller reoffers expired persisted cards.
+      }
+    }
     for (const audit of audits) {
       const previous = d.asks().filter(a => a.createdBy === CREATOR && snapshot(a)
         && auditTargetKey(snapshot(a)!.target) === auditTargetKey(audit.target));
-      for (const a of previous.filter(a => a.state === "open")) {
-        if (audit.status === "normal" || snapshot(a)!.version !== audit.version) d.closeAsk(a.id);
-      }
       if (audit.status === "normal") continue;
       const key = issueKey(audit);
-      const existing = previous.find(a => a.state === "open" && a.expiresAt > d.now() && snapshot(a)!.version === audit.version);
+      const existing = previous.find(a => a.state === "open" && a.expiresAt > d.now() && issueKey(snapshot(a)!) === key);
       if (existing || this.offered.has(key)) { this.offered.add(key); continue; }
       d.openAsk(card(audit, previous, d.now()));
       this.offered.add(key);

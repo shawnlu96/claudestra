@@ -20,7 +20,7 @@ const binding = { centerId: target.centerId, teamId: target.teamId, projectId: t
 const local = { id: "claudestra", name: "Claudestra", personal: false };
 const initial = (): ProjectAuditState => ({ bindings: [{ ...binding }], credentials: [{ ...target }], projects: [{ ...local }] });
 
-/** Frozen N2 contract fixture, NOT production replacement coverage. N2 integration must rerun with its actual writer. */
+/** Synthetic replacement port, NOT frozen N2 or production writer coverage. N6W must rerun with the actual writer. */
 function world(state = initial()) {
   const dir = mkdtempSync(join(tmpdir(), "sl-project-audit-")); roots.push(dir);
   const db = openLedger(join(dir, "ledger.sqlite")), file = join(dir, "shared-ledger-bindings.json");
@@ -34,7 +34,7 @@ function world(state = initial()) {
   const ports: ProjectAuditPorts = {
     now: () => now, read: async () => structuredClone({ ...state, bindings: JSON.parse(readFileSync(file, "utf8")) }),
     asks: () => listAsks(db), openAsk: input => openAsk(db, input),
-    closeAsk: id => { closeAsk(db, id, "cancelled", "new audit snapshot", now); },
+    closeAsk: (id, status) => { closeAsk(db, id, status, "new audit snapshot or expiration", now); },
     claim: id => db.transaction(() => {
       const a = getAsk(db, id);
       if (!a || a.state !== "answered" || a.extra.projectAuditSettled) return false;
@@ -140,6 +140,8 @@ test("ignore and expiration do not write; restart reoffers once with a new persi
     const restarted = new SharedLedgerProjectAuditor(w.ports);
     await Promise.all([restarted.run(), restarted.run(), new SharedLedgerProjectAuditor(w.ports).run()]);
     expect(w.ports.asks()).toHaveLength(2);
+    expect(w.ports.asks().filter(a => a.state === "open")).toHaveLength(1);
+    if (mode === "expire") expect(w.ports.asks().find(a => a.dedupKey === oldKey)!.state).toBe("expired");
     expect(w.ports.asks().some(a => a.dedupKey !== oldKey)).toBe(true);
     expect(readFileSync(w.file)).toEqual(before);
     expect(w.counts().replacements).toBe(0);
@@ -255,4 +257,76 @@ test("exact expected row snapshot including duplicates reaches N2; unrelated ide
   await w.auditor.onAnswered(w.answer("sl_audit_0", true, a));
   expect(seen).toEqual(state.bindings.slice(0, 2));
   expect((await w.ports.read()).bindings).toEqual([unrelated, { ...binding, localProjectId: local.id }]);
+});
+
+test("status and credential changes invalidate an open card even when expected binding rows are unchanged", async () => {
+  for (const mode of ["personal", "credential", "choices"]) {
+    const w = world(); await w.auditor.run();
+    const old = w.current(), before = readFileSync(w.file);
+    if (mode === "personal") w.state.projects.push({ id: binding.localProjectId, name: "Private", personal: true });
+    if (mode === "credential") w.state.credentials = [];
+    if (mode === "choices") w.ports.projectChoices = () => ({
+      choices: [{ kind: "create", button: "n4_create", name: target.name }], selected: "n4_create",
+    });
+    await w.auditor.run();
+    const fresh = w.current();
+    expect(fresh.id).not.toBe(old.id);
+    expect(getAsk(w.db, old.id)!.state).toBe("cancelled");
+    expect((fresh.extra.projectAudit as ProjectAudit).version).toBe((old.extra.projectAudit as ProjectAudit).version);
+    expect(w.ports.asks().filter(a => a.state === "open")).toHaveLength(1);
+    expect(readFileSync(w.file)).toEqual(before);
+    expect(w.counts()).toEqual({ replacements: 0, creations: 0 });
+  }
+});
+
+test("withdrawn unbound credential closes its card without touching binding or credential bytes", async () => {
+  const state = initial(); state.bindings = [];
+  const w = world(state); await w.auditor.run();
+  const old = w.current(), bindings = readFileSync(w.file), credentials = readFileSync(w.credentialFile);
+  w.state.credentials = [];
+  await w.auditor.run();
+  expect(getAsk(w.db, old.id)!.state).toBe("cancelled");
+  expect(w.ports.asks().filter(a => a.state === "open")).toHaveLength(0);
+  expect(readFileSync(w.file)).toEqual(bindings);
+  expect(readFileSync(w.credentialFile)).toEqual(credentials);
+});
+
+test("persisted open card expired while offline is closed and reoffered exactly once on restart", async () => {
+  const w = world(); await w.auditor.run();
+  const old = w.current(), before = readFileSync(w.file);
+  w.advance();
+  const restarted = new SharedLedgerProjectAuditor(w.ports);
+  await Promise.all([restarted.run(), restarted.run(), new SharedLedgerProjectAuditor(w.ports).run()]);
+  expect(getAsk(w.db, old.id)!.state).toBe("expired");
+  expect(w.ports.asks()).toHaveLength(2);
+  expect(w.ports.asks().filter(a => a.state === "open")).toHaveLength(1);
+  expect(w.current().dedupKey).not.toBe(old.dedupKey);
+  expect(readFileSync(w.file)).toEqual(before);
+});
+
+test("a resolved anomaly returning during the same controller lifetime receives a fresh card", async () => {
+  const w = world(); await w.auditor.run();
+  const old = w.current();
+  w.state.projects.push({ id: binding.localProjectId, name: "Valid local project", personal: false });
+  await w.auditor.run();
+  expect(w.ports.asks().filter(a => a.state === "open")).toHaveLength(0);
+  w.state.projects.pop();
+  await w.auditor.run();
+  expect(w.current().id).not.toBe(old.id);
+  expect(w.ports.asks().filter(a => a.state === "open")).toHaveLength(1);
+  expect(w.counts()).toEqual({ replacements: 0, creations: 0 });
+});
+
+test("N4 selection model drift before confirmation rejects both existing and create choices", async () => {
+  for (const mode of ["existing", "create"]) {
+    const state = initial(); if (mode === "create") state.projects = [];
+    const w = world(state); await w.auditor.run();
+    const answered = w.answer(), before = readFileSync(w.file);
+    w.ports.projectChoices = () => ({ choices: [{ kind: "create", button: "new_n4_button", name: target.name }], selected: "new_n4_button" });
+    await w.auditor.onAnswered(answered);
+    expect(w.counts()).toEqual({ replacements: 0, creations: 0 });
+    expect(readFileSync(w.file)).toEqual(before);
+    expect(w.messages.join(" ")).not.toContain("已绑定");
+    expect((w.current().extra.projectAudit as ProjectAudit).selected).toBe("new_n4_button");
+  }
 });

@@ -15,8 +15,8 @@ export async function initSharedLedgerProjectAudit(ports: ProjectAuditMutationPo
       return db ? listAsks(db, { project: MASTER_PROJECT, source: "system" }) : [];
     },
     openAsk: input => createAsk(input),
-    closeAsk: id => {
-      const a = closeAsk(askDb(), id, "cancelled", "shared project audit snapshot changed");
+    closeAsk: (id, state) => {
+      const a = closeAsk(askDb(), id, state, "shared project audit snapshot changed or expired");
       if (a) publishAsk(a);
     },
     claim: id => {
