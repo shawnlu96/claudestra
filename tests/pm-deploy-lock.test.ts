@@ -29,8 +29,8 @@ function fakeRecord(over: Partial<DeployLockRecord> = {}): DeployLockRecord {
 async function take(label = "deploy-full", waitMs = 0, probe?: ProcProbe) {
   return acquireDeployLock({ label, waitMs, path: lock, pollMs: 20, probe });
 }
-async function held(label = "deploy-full") {
-  const r = await take(label);
+async function held(label = "deploy-full", probe?: ProcProbe) {
+  const r = await take(label, 0, probe);
   if (r.kind !== "acquired") throw new Error(`没拿到锁:${JSON.stringify(r)}`);
   return r.handle;
 }
@@ -80,6 +80,30 @@ describe("获取 / 释放", () => {
     expect(() => h1.recordChild(process.pid)).toThrow();
     expect(readDeployLock(lock)).toMatchObject({ status: "ok", record: { token: h2.record.token } });
     h2.release();
+  });
+
+  test("recordChild:子进程活着但启动代次查不到 → 抛错,记录不写入 startId=null", async () => {
+    const h = await held("deploy-full", { ...realProbe, startOf: (pid) => (pid === process.pid ? myStart() : null) });
+    const child = Bun.spawn(["sleep", "5"]);
+    try {
+      expect(() => h.recordChild(child.pid)).toThrow();
+      expect(readDeployLock(lock)).toMatchObject({ status: "ok", record: { token: h.record.token } });
+      if (readDeployLock(lock).status === "ok") expect((readDeployLock(lock) as { record: DeployLockRecord }).record.child).toBeUndefined();
+    } finally {
+      child.kill("SIGKILL");
+      h.release();
+    }
+  });
+
+  test("recordChild(group):子进程不是自己进程组组长 → 抛错", async () => {
+    const h = await held();
+    const child = Bun.spawn(["sleep", "5"]);
+    try {
+      expect(() => h.recordChild(child.pid, { group: true })).toThrow();
+    } finally {
+      child.kill("SIGKILL");
+      h.release();
+    }
   });
 
   test("label 不合法 → error(零部署),不建锁", async () => {
@@ -132,6 +156,19 @@ describe("死活判断与接管", () => {
     const rec = fakeRecord({ holder: { pid: deadPid(), startId: "x" }, child: { pid: process.pid, startId: myStart() } });
     writeFileSync(lock, JSON.stringify(rec));
     expect(await take("deploy-full", 100)).toMatchObject({ kind: "timeout", state: "live" });
+  });
+
+  test("部署子进程组:组长已退但组里还有进程 → live;整组退完 → dead", async () => {
+    const leader = Bun.spawn(["sh", "-c", "sleep 2 & exit 0"], { detached: true, stdio: ["ignore", "ignore", "ignore"] } as Parameters<typeof Bun.spawn>[1]);
+    await leader.exited;
+    const rec = fakeRecord({ holder: { pid: deadPid(), startId: "x" }, child: { pid: leader.pid, startId: "Thu Jan 1 00:00:00 1998", pgid: leader.pid } });
+    expect(holderLiveness(rec)).toBe("live");
+    writeFileSync(lock, JSON.stringify(rec));
+    expect(await take("deploy-full", 100)).toMatchObject({ kind: "timeout", state: "live" });
+    process.kill(-leader.pid, "SIGKILL");
+    await Bun.sleep(200);
+    expect(holderLiveness(rec)).toBe("dead");
+    expect((await take()).kind).toBe("acquired");
   });
 
   test("死活未知(EPERM / ps 读不到 / 代次没记 / uid 不符)→ 不接管,有界超时", async () => {

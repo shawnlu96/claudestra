@@ -29,6 +29,20 @@ if (mode === "nest") {
   appendFileSync(log, "exit " + name + "\\n");
   process.exit(r.exitCode ?? 99);
 }
+if (mode === "tree" || mode === "tree-ignore" || mode === "bg") {
+  // 部署脚本再起下一级命令(孙进程):tree 同步等它,bg 不等直接退出
+  const gc = Bun.spawn([process.execPath, import.meta.path, log, name + "/gc", holdMs, mode === "tree-ignore" ? "ignore" : "0", wrapper],
+    { stdio: ["ignore", "ignore", "ignore"] });
+  if (mode === "bg") {
+    gc.unref();
+    appendFileSync(log, "exit " + name + "\\n");
+    process.exit(0);
+  }
+  const code = await gc.exited;
+  appendFileSync(log, "exit " + name + "\\n");
+  process.exit(code);
+}
+if (mode === "ignore") process.on("SIGTERM", () => {});
 await Bun.sleep(Number(holdMs));
 if (mode === "sigkill") process.kill(process.pid, "SIGKILL");
 appendFileSync(log, "exit " + name + "\\n");
@@ -51,8 +65,8 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 interface Proc { proc: ReturnType<typeof Bun.spawn>; done: Promise<{ code: number; err: string }> }
-function wrap(label: string, waitSec: number, cmd: string[], extraEnv: Record<string, string> = {}): Proc {
-  const proc = Bun.spawn([BUN, WRAPPER, "run", "--label", label, "--wait-sec", String(waitSec), "--", ...cmd], {
+function wrap(label: string, waitSec: number, cmd: string[], extraEnv: Record<string, string> = {}, extraArgs: string[] = []): Proc {
+  const proc = Bun.spawn([BUN, WRAPPER, "run", "--label", label, "--wait-sec", String(waitSec), ...extraArgs, "--", ...cmd], {
     env: testChildEnv({ ...paths, ...extraEnv }), stdout: "pipe", stderr: "pipe",
   });
   const done = (async () => {
@@ -72,6 +86,14 @@ async function until(cond: () => boolean, ms = 10_000) {
 }
 const lockHeld = () => existsSync(lockFile);
 const record = () => JSON.parse(readFileSync(lockFile, "utf8"));
+/** PATH 里垫一个 ps:对 wrapper 自身的查询原样走 /bin/ps;查别的 pid(部署子进程身份)时先留标记再按 behavior 处理 */
+function psShim(behavior: "sleep 1.5" | "exit 1"): { PATH: string; marker: string } {
+  const dir = join(root, "shim");
+  mkdirSync(dir, { recursive: true });
+  const marker = join(root, "ps-child-query");
+  writeFileSync(join(dir, "ps"), `#!/bin/sh\nif [ "$4" != "$PPID" ]; then : > '${marker}'; ${behavior}; fi\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  return { PATH: `${dir}:${process.env.PATH}`, marker };
+}
 
 describe("两份部署入口真实并发", () => {
   test("3 个独立 wrapper(两个 label)同时起:关键区严格串行,全部完成", async () => {
@@ -169,6 +191,78 @@ describe("退出 / 信号传播与释放", () => {
     expect((await wrap("deploy-full", 1, deploy(evil, 10)).done).code).toBe(0);
     expect(lines()).toEqual([`enter ${evil}`, `exit ${evil}`]);
     expect(existsSync(join(root, "PWNED"))).toBe(false);
+  }, 30_000);
+});
+
+describe("部署进程树生命周期(孙进程 / 启动窗口 / 身份未知)", () => {
+  test("wrapper 收到 SIGTERM:整组转发,孙进程也停;第二份进关键区时上一份进程树已全部结束", async () => {
+    const w = wrap("deploy-full", 1, deploy("tree", 1500, "tree"));
+    await until(() => lines().includes("enter tree/gc") && lockHeld() && !!record().child);
+    w.proc.kill("SIGTERM");
+    expect((await w.done).code).toBe(143);
+    expect((await wrap("card-merge", 5, deploy("second", 10)).done).code).toBe(0);
+    await Bun.sleep(1700); // 孙进程若还活着,这时已写出 exit
+    expect(lines()).toEqual(["enter tree", "enter tree/gc", "enter second", "exit second"]);
+  }, 30_000);
+
+  test("孙进程忽略 SIGTERM:直接子进程已退,锁仍持有到孙进程退出,第二份等锁后才进", async () => {
+    const w = wrap("deploy-full", 1, deploy("tree", 1500, "tree-ignore"));
+    await until(() => lines().includes("enter tree/gc") && lockHeld() && !!record().child);
+    w.proc.kill("SIGTERM");
+    await Bun.sleep(100);
+    const second = wrap("card-merge", 10, deploy("second", 10));
+    expect((await w.done).code).toBe(143);
+    expect((await second.done).code).toBe(0);
+    const l = lines();
+    expect(l.indexOf("exit tree/gc")).toBeGreaterThan(-1);
+    expect(l.indexOf("enter second")).toBeGreaterThan(l.indexOf("exit tree/gc"));
+  }, 30_000);
+
+  test("部署脚本正常退出但留下仍在跑的下级进程:锁不释放,第二份超时零部署", async () => {
+    const w = wrap("deploy-full", 1, deploy("bg", 1500, "bg"));
+    await until(() => lines().includes("exit bg") && lines().includes("enter bg/gc"));
+    const second = await wrap("card-merge", 0.3, deploy("second", 10)).done;
+    expect(second.code).toBe(75);
+    expect((await w.done).code).toBe(0);
+    expect(lines()).not.toContain("enter second");
+    expect(lines()).toContain("exit bg/gc");
+    expect(lockHeld()).toBe(false);
+  }, 30_000);
+
+  test("下级进程超过 --drain-sec 仍在:wrapper 退出但不释放,锁按进程组算活,组空后才被接管", async () => {
+    const w = wrap("deploy-full", 1, deploy("bg", 1500, "bg"), {}, ["--drain-sec", "0.2"]);
+    await until(() => lines().includes("enter bg/gc"));
+    expect((await w.done).code).toBe(0);
+    expect(lockHeld()).toBe(true);
+    const blocked = await wrap("card-merge", 0.3, deploy("blocked", 10)).done;
+    expect(blocked.code).toBe(75);
+    expect(blocked.err).toContain("判定=live");
+    await until(() => lines().includes("exit bg/gc"));
+    expect((await wrap("card-merge", 5, deploy("after", 10)).done).code).toBe(0);
+    expect(lines()).not.toContain("enter blocked");
+    expect(lines().slice(-2)).toEqual(["enter after", "exit after"]);
+  }, 30_000);
+
+  test("启动窗口:子进程身份落盘前 wrapper 被 SIGKILL → 部署命令一步都没执行,第二份正常拿锁", async () => {
+    const shim = psShim("sleep 1.5");
+    const w = wrap("deploy-full", 1, deploy("child", 1500), { PATH: shim.PATH });
+    await until(() => existsSync(shim.marker));
+    expect(lockHeld() && !record().child).toBe(true);
+    w.proc.kill("SIGKILL");
+    await w.proc.exited;
+    expect((await wrap("card-merge", 5, deploy("second", 10)).done).code).toBe(0);
+    await Bun.sleep(800);
+    expect(lines()).toEqual(["enter second", "exit second"]);
+  }, 30_000);
+
+  test("部署子进程身份查不到(ps 失败):fail-closed,命令不执行,退出 70,锁释放", async () => {
+    const shim = psShim("exit 1");
+    const r = await wrap("deploy-full", 1, deploy("child", 300), { PATH: shim.PATH }).done;
+    expect(r.code).toBe(70);
+    expect(r.err).toContain("未执行");
+    await Bun.sleep(500);
+    expect(lines()).toEqual([]);
+    expect(lockHeld()).toBe(false);
   }, 30_000);
 });
 
