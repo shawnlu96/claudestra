@@ -152,18 +152,18 @@ test("祖先目录是软链（/x/link -> /x/real，root=/x/link/lend）：拒绝
   expect(lines.every((l) => l.includes("软链"))).toBe(true);
 });
 
-test("兜底：node_modules 等任何子树里覆写已有文件也算新近写入，不回收", async () => {
-  const f = fixture();
-  const dir = f.add("old", "stopped");
-  for (const sub of ["node_modules", join(".git", "objects")]) {
-    mkdirSync(join(dir, sub), { recursive: true });
-    writeFileSync(join(dir, sub, "active.log"), "a");
+test("兜底：node_modules / 任意 objects 子树里覆写已有文件也算新近写入，不回收", async () => {
+  for (const file of [join("node_modules", "active.log"), join("objects", "data"), join(".git", "objects", "pack")]) {
+    const f = fixture();
+    const dir = f.add("old", "stopped");
+    mkdirSync(join(dir, file, ".."), { recursive: true });
+    writeFileSync(join(dir, file), "a");
+    age(dir);
+    writeFileSync(join(dir, file), "b"); // 只改文件 mtime，父目录不变
+    const { ports, sent } = fakePorts([proc(10, dir)]);
+    expect(await reapOrphans(f.db, { root: f.root, ports, log: () => {}, now: NOW })).toBe(0);
+    expect(sent).toEqual([]);
   }
-  age(dir);
-  writeFileSync(join(dir, "node_modules", "active.log"), "b"); // 只改文件 mtime，父目录不变
-  const { ports, sent } = fakePorts([proc(10, dir)]);
-  expect(await reapOrphans(f.db, { root: f.root, ports, log: () => {}, now: NOW })).toBe(0);
-  expect(sent).toEqual([]);
 });
 
 test("stopped 到期：回收批次与删除批次一致（库内顺序与停止时间相反、超过 5 张）", async () => {
