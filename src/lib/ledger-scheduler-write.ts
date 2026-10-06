@@ -23,6 +23,7 @@ import { autostartGrant } from "./ledger-autostart-grant.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { poolReviewRefusal } from "./pool-review-proof.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -45,6 +46,8 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     throw new LedgerError("conflict", "合并前缺本轮同 head 的通过审查");
   }
   if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily)) throw new LedgerError("conflict", "合并前缺跨模型审查");
+  const pool = poolReviewRefusal(db, task, workflow, read.facts);
+  if (pool) throw new LedgerError("conflict", pool);
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
