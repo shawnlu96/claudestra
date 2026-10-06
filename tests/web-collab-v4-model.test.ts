@@ -1,7 +1,7 @@
 /** 协作视图 v4 的指标条、大纲筛选、手机分组、因果线（web/features/collab/v4/v4-model.ts） */
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
-import { blockLine, causeOf, edgeBasis, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { blockLine, causeOf, DEFAULT_FILTER, edgeBasis, FILTERS, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
 import { edgeSel, memberSel, narrowPane, resolveSelection } from "../web/features/collab/v4/v4-selection";
 
@@ -40,6 +40,12 @@ describe("大纲筛选", () => {
     expect(ids("done")).toEqual(["C"]);
     expect(ids("p0")).toEqual(["D"]);
     expect(ids("all")).not.toContain("F");
+  });
+  test("未完成 = 排除 done / verified / cancelled，其余阶段（含 ops 卡）都留；排第一且是默认", () => {
+    const all = [...tasks, task("G", "verified"), task("H", "fix"), task("I", "build", { kind: "ops" })];
+    expect(all.filter((t) => matchFilter(t, "undone")).map((t) => t.id)).toEqual(["A", "B", "D", "E", "H", "I"]);
+    expect(FILTERS[0]).toBe("undone");
+    expect(DEFAULT_FILTER).toBe("undone");
   });
   test("按事项分组，没归事项的放最后，空组不出", () => {
     const g = outlineOf({ tasks, items: [{ id: "I1", title: "事项一", oneLine: "" }, { id: "I2", title: "空的", oneLine: "" }] }, "runnable");

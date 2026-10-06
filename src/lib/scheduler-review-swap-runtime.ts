@@ -55,6 +55,11 @@ function productionDeps(db: Database): ReviewSwapDeps {
 }
 
 async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager, tag = ""): Promise<EnsureResult> {
+  const active = () => {
+    assertSchedulerLease();
+    const lapse = refusalEpochLapse(db, mustTask(db, task.id), { check: reviewMaterialCheck(db) });
+    if (lapse) throw new LedgerError("conflict", `停止新审查会话效果：${lapse}`);
+  };
   const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}${tag}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
   if (existing && (existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
     return { kind: "unknown", reason: `${name} 被其他会话占用，不能覆盖` };
@@ -63,11 +68,11 @@ async function createReplacement(db: Database, task: LedgerTask, family: AuthorF
   const source = peerPrRepoDir(task) ?? rows.find((r) => r.name === (author?.agent ?? task.agent))?.cwd;
   if (!source) return { kind: "manual", reason: "找不到作者工作目录，无法建立新的审查 worktree" };
   const dir = join(statePath("worktrees"), `rv-${task.id.toLowerCase()}${tag}`);
-  assertSchedulerLease();
+  active();
   const opened = await openReviewWorktree(source, dir, task.headSHA, async (args) => {
-    assertSchedulerLease(); const result = await git(args); assertSchedulerLease(); return result;
+    active(); const result = await git(args); active(); return result;
   });
-  assertSchedulerLease();
+  active();
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
   const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
     "--purpose", "作者家族变更后的独立复验"];
@@ -75,7 +80,7 @@ async function createReplacement(db: Database, task: LedgerTask, family: AuthorF
   const r = await agent(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
   for (let n = 0; n < 20; n++) {
-    assertSchedulerLease();
+    active();
     const row = readRegistryAgentsSync().find((a) => a.name === name);
     if (row?.sessionId && row.sessionId !== old.sessionId) {
       return { kind: "ready", created: true,
@@ -142,13 +147,14 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   if (intent.status !== "pending" || intent.node !== "adversarial_review" || task.stage !== "review" || task.headSHA !== intent.head ||
     task.specRev !== intent.specRev || task.rev !== intent.taskRev || workflow?.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "新审查会话的创建意图已过期");
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return "本机另一家族审查名额已满，等待空位后自动续派";
-  const lapse = refusal ? refusalEpochLapse(db, task, { check: reviewMaterialCheck(db) }) : null; // MODELX: hold / revoked approval / changed materials since the epoch
+  const lapse = refusalEpochLapse(db, task, { check: reviewMaterialCheck(db) }); // legacy replacements retain the same authorization checks
   if (lapse) throw new LedgerError("conflict", `不建豁免审查会话，退人工：${lapse}`);
   // A FAM1a epoch's toFamily is the author family it retired for (FAMW check); a MODELX refusal epoch's toFamily is the reviewer's target.
   const wrote = refusal ? remoteHeadFamily(db, task) ?? workflow.authorFamily : swapAuthorFamily(db, task, workflow, swap);
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
-  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : undefined);
+  // MODELXW: a legacy refused ticket's reviewer may still be running too, so its successor gets its own name
+  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : swap.data.legacy === true ? "-re" : undefined);
   deps.active();
   if (got.kind !== "ready") {
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: oneLine(got.reason) });
