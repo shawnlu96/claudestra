@@ -16,6 +16,7 @@ import type { RemoteConvergenceContext } from "./fix-strategy-remote-context.js"
 import { getLendPeer } from "./ledger-lend-peers.js";
 import { updateTask } from "./fix-strategy-task-write.js";
 import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js";
+import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
@@ -59,8 +60,11 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
       for (const o of running) {
         const needsAck = (o.leaseGen > 0 || o.status !== "pooled") && !cleanExit(db, o.orderId, o.leaseGen);
         waiting ||= needsAck || o.status === "pooled";
-        if (o.status !== "cancelled") db.query("UPDATE lend_orders SET status = 'cancelled', reason = ?, updatedAt = ? WHERE orderId = ? AND status = ?")
-          .run(`CONV3 family swap ${id}`, ctx.now ?? Date.now(), o.orderId, o.status);
+        if (o.status !== "cancelled") {
+          db.query("UPDATE lend_orders SET status = 'cancelled', reason = ?, updatedAt = ? WHERE orderId = ? AND status = ?")
+            .run(`CONV3 family swap ${id}`, ctx.now ?? Date.now(), o.orderId, o.status);
+          closeSettledOrderAsks(db, o.orderId, ctx.now ?? Date.now());
+        }
         db.query("DELETE FROM task_steps WHERE taskId = ? AND step = ? AND round = ? AND executorKind = 'peer' AND executor = ? AND state = 'assigned'")
           .run(task.id, o.step, o.round, `${o.worker}@${o.peer}`);
         insertEvent(db, { ...ctx, dedupKey: `scheduler:${id}:cancel:${o.orderId}` }, { project: task.project, target: task.id,

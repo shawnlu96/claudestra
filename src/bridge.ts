@@ -585,6 +585,8 @@ initDaemonLogs("bridge");
 // v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { saveDiscordDownload } from "./lib/media-outbound.js";
+import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
+armSpecPreflight();
 await assertPrimaryOrExit("bridge");
 
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
@@ -871,7 +873,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
+    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog); // 谁开的这一轮（stop-settle）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
@@ -1150,7 +1152,7 @@ discord.once("ready", async () => {
   cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
 
   // v2.4.25+ 用量看板：启动后确保只读频道 + 常驻消息存在，并刷一次。延迟几秒等
-  // channel-server 重连、master TUI 稳定，再抓 /status。
+  // channel-server 重连再刷（只读缓存）。
   setTimeout(() => void initStatsDashboard(discord), 6000);
 
   // 扫 skill + 为已有 active agent 扫项目级
@@ -3289,6 +3291,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 sweepStaleTerminalSessions().catch(() => {});
 void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
+void import("./bridge/account-usage-startup.js").then((m) => m.startAccountUsage(deliver)); // statusLine 批准卡 + 遗留用量探测清扫：Discord / web-only 都跑
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

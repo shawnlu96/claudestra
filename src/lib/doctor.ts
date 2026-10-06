@@ -17,6 +17,7 @@ import { readDotenvFileSync } from "./env-file.js";
 import { STATE_DIR, TMUX_SOCK } from "./paths.js";
 import { checkStateFiles, checkUndeliveredAlerts, reservedAgentNameChecks, staleInstallEnvCheck } from "./doctor-state.js";
 import { hasRecallHook, recallAvailable } from "./session-recall.js";
+import { checkUsageCache } from "./statusline-usage-doctor.js";
 import { resolveLogPath } from "./log-paths.js";
 import { existsSync, statSync } from "fs";
 import { readFile, stat } from "fs/promises";
@@ -534,7 +535,7 @@ export async function runDoctor(repoRoot: string): Promise<Check[]> {
     checkDaemons(), import("./doctor-scheduler.js").then((m) => m.checkScheduler()),
     checkUndeliveredAlerts(), checkStateFiles(), import("./doctor-peers.js").then((m) => m.checkLegacyPeers()), // 截止日前还没签名记录的老 peer
     checkBridge(repoRoot),
-    checkIntegration(repoRoot),
+    checkIntegration(repoRoot), Promise.resolve(checkUsageCache()), // 只读：statusline 用量缓存有 / 没有 / 陈旧
     checkAgents(), import("./doctor-pending.js").then((m) => m.checkPendingOps(repoRoot)), // 做到一半的 create / kill / rename / update 与孤儿窗口、频道
     import("./doctor-acp.js").then((m) => m.checkAcp()), import("./doctor-review-worktrees.js").then((m) => m.checkReviewWorktrees()), // 审查 worktree 残留
     checkGitHead(repoRoot),

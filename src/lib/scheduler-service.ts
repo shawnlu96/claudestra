@@ -52,6 +52,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace, trains?: TrainStore | null): Promise<number> {
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {
+    if (policy.mergeHandoff) continue; // the repository owner merges: no merge run is begun or driven here (MHO1)
     const intents = db.query(`SELECT id, status FROM scheduler_intents WHERE project=? AND action='merge'
       AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string }[];
     for (const intent of intents) {
