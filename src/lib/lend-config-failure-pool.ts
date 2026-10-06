@@ -27,8 +27,6 @@ const START_FAILURE = "起 worker 失败：";
 export interface PeerConfigFailure { seq: number; at: number; orderId: string; family: LendFamily; category: typeof CONFIG_FAILURE_CATEGORY; text: string }
 /** gen = the lender's declared fault generation last accepted (monotonic); orders = the A-side orders declarations covered. */
 interface Recovery { gen: number; orders: string[]; boot: string; at: number }
-/** Covered orders kept per peer + family (each declaration names at most 20; generations are owner actions, so this is ample). */
-const COVERED_MAX = 500;
 /** The order a lender refusal names as its fault's root (startConfigRefusal's detail). */
 const REFUSAL_ROOT = /配置故障未恢复，没有再启动（第 \d+ 代，单 ([^）\s]+)）/;
 const recoveryKey = (peer: string, family: LendFamily): string => `lend:config-recovery:${JSON.stringify([peer, family])}`;
@@ -96,7 +94,8 @@ export function recoverOnRedeclare(db: Database, peer: string, _prev: LendPeer |
     if (decl.gen <= (r?.gen ?? 0)) continue;
     const mine = decl.orders.filter((id) => db.query("SELECT 1 FROM lend_orders WHERE orderId = ? AND peer = ? AND family = ?").get(id, peer, family));
     if (!mine.length) continue;
-    const orders = [...new Set([...(r?.orders ?? []), ...mine])].slice(-COVERED_MAX);
+    // Release evidence is append-only and refusals can arrive late, so coverage must not expire or evict old roots.
+    const orders = [...new Set([...(r?.orders ?? []), ...mine])];
     recoverCas(db, peer, family, raw, { gen: decl.gen, orders, boot: req.boot, at: now });
   }
 }

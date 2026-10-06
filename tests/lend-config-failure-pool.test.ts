@@ -1,6 +1,9 @@
 /** dispatch-recovery-LCFG1, borrower side: real ledger + pool planner + recordHello; per peer + family pause, explicit re-declaration recovery. */
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { claimLend, getLendOrder, leaseLend, offerLend, type OfferInput } from "../src/lib/ledger-lend.js";
@@ -333,4 +336,55 @@ test("r3 probe: declaration order vs release order — late old release after a 
     expect(activeConfigFailures(db, "mate")).toEqual({});
     expect(slots()?.codex).toBe(4);
   } finally { bdb.close(); }
+});
+
+test("r4 probe: 501 covered orders retain old recovery and refusal roots across ledger reopen", async () => {
+  setMode("on");
+  const dir = mkdtempSync(join(tmpdir(), "lcfg1-coverage-"));
+  const path = join(dir, "ledger.sqlite");
+  const bdb = openJournal(":memory:");
+  closeLedger(":memory:");
+  db = openLedger(path);
+  try {
+    hello("mate");
+    const root = held("mate");
+    const refused = held("mate");
+    const delayed = held("mate");
+    const row = (orderId: string) => ({ orderId, peer: "mate", family: "codex" }) as LendRow;
+    const d = { db: bdb, now: () => NOW, notify: async () => ({ ok: true as const }), log: () => {} };
+    await noteStartConfigFailure(d, row(root), MODEL_400);
+    const refusal = startConfigRefusal(d, row(root))!;
+    release("mate", root);
+    release("mate", refused, refusal);
+    expect(recoverProviderConfigFailure(bdb, "mate", "codex", 1, NOW)).toBe(true);
+    const first = configRecoveredDecl(bdb, "mate")!;
+    // Root coverage also recovers refusals absent from the bounded declaration.
+    expect(first.codex!.orders).toEqual([root]);
+    hello("mate", "boot-0001", { recovered: first });
+    expect(activeConfigFailures(db, "mate")).toEqual({});
+    for (let gen = 2; gen <= 26; gen++) {
+      const orders: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        const id = held("mate");
+        release("mate", id);
+        orders.push(id);
+      }
+      hello("mate", "boot-0001", { recovered: { codex: { gen, orders } } });
+    }
+    expect(configRecoveryGen(db, "mate", "codex")).toBe(26);
+    expect(activeConfigFailures(db, "mate")).toEqual({});
+    expect(slots()?.codex).toBe(4);
+    closeLedger(path);
+    db = openLedger(path);
+    release("mate", delayed, refusal); // late refusal still refers to the oldest recovered root
+    hello("mate", "boot-0002", { recovered: first }); // replay must neither be needed nor lower gen
+    expect(configRecoveryGen(db, "mate", "codex")).toBe(26);
+    expect(activeConfigFailures(db, "mate")).toEqual({});
+    expect(slots()?.codex).toBe(4);
+    const fresh = held("mate");
+    release("mate", fresh);
+    hello("mate", "boot-0002", { recovered: first });
+    expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(fresh);
+    expect(slots()?.codex).toBe(0);
+  } finally { closeLedger(path); bdb.close(); rmSync(dir, { recursive: true, force: true }); }
 });
