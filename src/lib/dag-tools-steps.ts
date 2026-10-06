@@ -205,7 +205,8 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
         const name = p.agentName.includes("agent-") ? p.agent : p.agentName;
         // 取结果时抛异常（读输出 / 等退出出错）也可能已建好：与失败回执同样走下面的 registry 分类，别直接跳到回滚
         const r = await Promise.resolve()
-          .then(() => io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS))
+          .then(() => io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId,
+            "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS))
           .catch((e: unknown) => ({ ok: false, error: `manager create 异常：${(e as Error)?.message ?? e}` }));
         // 回执没给名字不拿计划名充数：改由 registry 核实（create 前已确认没有），核实不了留 unknown
         const got = typeof r?.agent === "string" ? r.agent : null;
