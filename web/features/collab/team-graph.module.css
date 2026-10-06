@@ -7,7 +7,8 @@
 .canvas { position: relative; width: 100%; }
 .embedded { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; background: var(--color-base-100); color: var(--color-base-content); }
 .slot { position: absolute; width: 270px; }
-.node { display: flex; flex-direction: column; gap: 8px; width: 100%; height: 170px; padding: 12px 14px; text-align: left; border: 1px solid var(--color-base-300); }
+/* 高度跟 team-graph-model.ts TEAM_NODE_HEIGHT 一致（连线起点、行距按它算） */
+.node { display: flex; flex-direction: column; gap: 8px; width: 100%; height: 216px; padding: 12px 14px; text-align: left; border: 1px solid var(--color-base-300); }
 .node { min-width: 0; border-radius: 10px; background: var(--color-base-100); box-shadow: 0 3px 10px #0001; }
 .node[aria-pressed="true"] { border-color: var(--color-primary); box-shadow: 0 0 0 2px var(--color-primary); }
 .node:focus-visible, .link:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; }

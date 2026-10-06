@@ -2,7 +2,7 @@
 import { TeamWorkerContext } from "./team-worker-context";
 import { useEffect, useId, useRef } from "react";
 import { contextText, peerWorkState, quotaTier, workState, type TeamQuota } from "./team-panel-model";
-import type { Interaction, TeamNode } from "./team-graph-model";
+import { TEAM_NODE_HEIGHT, type Interaction, type TeamNode } from "./team-graph-model";
 import { useTeamT } from "./team-panel-i18n";
 import s from "./team-graph.module.css";
 import { claimTeamAnimation, teamEdgeLane } from "./team-animation";
@@ -53,7 +53,7 @@ export function TeamGraphEdges({ events, positions, height, width, scope, now }:
     {edges.map((e) => {
       const a = positions.get(e.from), b = positions.get(e.to!);
       if (!a || !b) return null;
-      const x1 = a.x + a.width / 2, y1 = a.y + 170, x2 = b.x + b.width / 2, y2 = b.y;
+      const x1 = a.x + a.width / 2, y1 = a.y + TEAM_NODE_HEIGHT, x2 = b.x + b.width / 2, y2 = b.y;
       const lane = Math.max(y1, y2) + 22 + teamEdgeLane(e.id) * 15;
       return <TeamEdge key={e.id} event={e} scope={scope} now={now}>
         <path d={`M ${x1} ${y1} C ${x1} ${lane}, ${x2} ${lane}, ${x2} ${y2}`} markerEnd={`url(#${arrow})`} />
