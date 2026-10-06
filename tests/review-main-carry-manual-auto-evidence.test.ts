@@ -12,6 +12,7 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { autoCarryEvidence, carryChainOf, MAX_AUTO_HOPS, carryChainSuffix, type CarryHop, type ReviewProof } from "../src/lib/review-main-carry-manual-auto.js";
 import { carryReceipt, parseCarryReceipt } from "../src/lib/scheduler-merge.js";
+import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import type { ReviewFacts } from "../src/lib/scheduler-review.js";
 
 const h = (n: number) => n.toString(16).padStart(40, "0");
@@ -84,5 +85,18 @@ describe("autoCarryEvidence inside the write transaction", () => {
     expect(() => autoCarryEvidence(db, task(), evOf(c), raw(c), revoked, () => 16)).toThrow(/来源 \/ 家族 \/ 豁免已变.*豁免/);
     createTask(db, { actor: "owner", now: 5 }, { project: "p", id: "T3", title: "T3", kind: "code", agent: "a" });
     expect(() => autoCarryEvidence(db, task("T3"), evOf(c), raw(c), proof, () => 16)).toThrow(/没有流程记录/);
+  });
+  test("review r6 manual-carry-1: the run's own intent picks the source gate; a missing or another card's intent refuses", () => {
+    const c = chainOf(1), seen: unknown[] = [];
+    const watch: ReviewProof = (d, t, w, manual) => { seen.push(manual ? [manual.intent.id, manual.now] : "auto"); return proof(d, t, w); };
+    const intent = (id: string, node: string, taskId = "T1") => ({ id, taskId, node } as SchedulerIntent);
+    expect(autoCarryEvidence(db, task(), evOf(c), raw(c), watch, () => 1, { intent: intent("mq", "manual_merge"), now: 77 })).toMatchObject({ sourceReviewSeq: reviewSeq });
+    autoCarryEvidence(db, task(), evOf(c), raw(c), watch, () => 1, { intent: intent("auto", "merge_deploy"), now: 78 });
+    autoCarryEvidence(db, task(), evOf(c), raw(c), watch, () => 1);
+    expect(seen).toEqual([["mq", 77], "auto", "auto"]);
+    for (const source of [{ intent: null, now: 1 }, { intent: intent("mq", "manual_merge", "T2"), now: 1 }]) {
+      expect(() => autoCarryEvidence(db, task(), evOf(c), raw(c), watch, () => 1, source)).toThrow(/找不到本 run 的合并意图/);
+    }
+    expect(seen).toHaveLength(3);
   });
 });
