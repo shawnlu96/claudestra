@@ -11,7 +11,8 @@ import {
   type SharedLedgerJoinGrant, type SharedLedgerJoinRequest,
 } from "./shared-ledger-join-protocol.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
-import { readSharedLedgerBindings, setSharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
+import { readSharedLedgerBindings, requireSharedLedgerBindingAddition, setSharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
+import { requireSharedLedgerLinkTarget } from "./shared-ledger-project-link-target.js";
 import { resolveSharedLedgerCredential, writeSharedLedgerCredential, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 
 /** The pure protocol lives in shared-ledger-join-protocol.ts; these names stay importable from here. */
@@ -85,6 +86,10 @@ async function redeem(input: SharedLedgerJoinInput, req: SharedLedgerJoinRequest
 
 /** Confirm the center accepts the bearer before replacing any local credential or binding. */
 export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<SharedLedgerJoinResult> {
+  if (!input.localProjectId) throw new SharedLedgerJoinError("choose a local project before redeeming the invitation");
+  const dir = input.stateDir ?? STATE_DIR;
+  try { requireSharedLedgerLinkTarget(input.localProjectId, dir); }
+  catch { throw new SharedLedgerJoinError("local project unavailable or personal; nothing was saved"); }
   const parsed = parseSharedLedgerJoinCode(input.code);
   if (!parsed) throw new SharedLedgerJoinError("invalid join code");
   if (!ID_RE.test(input.subject) || (input.localProjectId !== undefined && !ID_RE.test(input.localProjectId))) {
@@ -93,7 +98,6 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
   const baseUrl = centerBaseUrl(input.url);
   if (!isPublicKey(input.key.publicKey)) throw new SharedLedgerJoinError("instance key unavailable");
   const grant = await redeem(input, signSharedLedgerJoin(input.code, input.instanceId ?? sharedLedgerInstanceId(input.key.publicKey), input.key), parsed.centerId);
-  const dir = input.stateDir ?? STATE_DIR;
   const kind = grant.role === "service" ? "service" : "person";
   const project = grant.projects[0]!;
   const credential: SharedLedgerLocalCredential = { localSubject: input.subject, kind, centerId: grant.centerId, baseUrl,
@@ -105,17 +109,21 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
     // Client errors may carry response detail. Retrying the same code revokes the bearer this attempt was issued.
     throw new SharedLedgerJoinError("code redeemed, but the center did not accept the new credential; nothing was saved — retry the same code before it expires");
   }
-  const localProjectId = input.localProjectId ?? project.projectId;
+  const localProjectId = input.localProjectId;
   if (!sharedLedgerJoinPinsMatch(credential, localProjectId, project.projectId, dir)) {
     throw new SharedLedgerJoinError("center or project does not match the pinned center; nothing was saved");
   }
+  const binding = { centerId: grant.centerId, teamId: grant.teamId, projectId: project.projectId, localProjectId };
+  requireSharedLedgerBindingAddition(binding, readSharedLedgerBindings(dir), dir);
+  // Validate old security state and the new read identity before either writer is invoked.
+  const identities = readSharedLedgerBindings(dir).filter(b => !(b.centerId === grant.centerId && b.teamId === grant.teamId && b.projectId === project.projectId)
+    && resolveSharedLedgerCredential(input.subject, kind, b.centerId, b.teamId, b.projectId, "read", dir)).length + 1;
+  resolveSharedLedgerCredential(input.subject, kind, grant.centerId, grant.teamId, project.projectId, "read", dir);
+  if (!project.actions.includes("read")) throw new SharedLedgerJoinError("center did not grant a readable project; nothing was saved");
+  await setSharedLedgerBinding(binding, dir, () => {
+    if (!sharedLedgerJoinPinsMatch(credential, localProjectId, project.projectId, dir)) throw new SharedLedgerJoinError("pins changed; nothing was saved");
+  });
   await writeSharedLedgerCredential(credential, dir);
-  await setSharedLedgerBinding({ centerId: grant.centerId, teamId: grant.teamId, projectId: project.projectId, localProjectId }, dir);
-  const identities = readSharedLedgerBindings(dir).filter((b) =>
-    resolveSharedLedgerCredential(input.subject, kind, b.centerId, b.teamId, b.projectId, "read", dir));
-  if (!identities.some((b) => b.centerId === grant.centerId && b.projectId === project.projectId)) {
-    throw new SharedLedgerJoinError("joined, but the local identity did not read back");
-  }
   return { centerId: grant.centerId, teamId: grant.teamId, personId: grant.personId, projectId: project.projectId, localProjectId,
-    kind, expiresAt: grant.expiresAt, identities: identities.length };
+    kind, expiresAt: grant.expiresAt, identities };
 }

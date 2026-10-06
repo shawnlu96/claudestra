@@ -1,15 +1,10 @@
-/**
- * project 管理命令（project-add/list/edit/remove/assign/merge），manager.ts 的 switch 整组交给 runProjectCommand。
- * project-migrate 与 resolveOrCreateProject / buildProjectContext 仍在 manager.ts：
- * 它们挂在 create/resume 的启动路径上（生命周期区，另一条线在改），等那边落地再一起搬。
- *
- * 从 manager.ts 搬出；能改目录归属的 add / edit --dirs / merge 另有目录校验（lib/project-dirs.ts）和角色校验（project-guard.ts）。
- */
+/** Project commands delegate directory, role and shared-binding constraints to small modules. */
 import { readProjects, writeProjects, PROJECT_ID_RE, type ProjectDef } from "../lib/projects.js";
 import { validateProjectDirs } from "../lib/project-dirs.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { loadRegistry, saveRegistry, normalizeName, output } from "./core.js";
 import { requireOwnerOrMaster, requireProjectWriter } from "./project-guard.js";
+import { sharedLedgerProjectMutationError } from "../lib/shared-ledger-project-link.js";
 
 async function cmdProjectAdd(
   id: string,
@@ -93,6 +88,8 @@ async function cmdProjectEdit(
   }
   if (opts.personal === true) p.personal = true;
   else if (opts.personal === false) delete p.personal;
+  const blocked = sharedLedgerProjectMutationError("edit", [id], p);
+  if (blocked) return output({ ok: false, error: blocked });
   await writeProjects(data);
   if (p.name !== oldName) await renameProjectCategory(id, oldName, p.name);
   output({ ok: true, project: p });
@@ -113,6 +110,8 @@ async function renameProjectCategory(id: string, from: string, to: string) {
 }
 
 async function cmdProjectRemove(id: string) {
+  const blocked = sharedLedgerProjectMutationError("remove", [id]);
+  if (blocked) return output({ ok: false, error: blocked });
   const data = await readProjects();
   if (!data.projects.some((p) => p.id === id)) {
     output({ ok: false, error: `project "${id}" 不存在` });
@@ -215,11 +214,10 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
   if (cmd === "project-merge") return cmdProjectMerge(a, b);
 }
 
-/**
- * 把 src 并进 dst（台账 i08 1.1）：目录并进去（按真实路径去重，照 add 校验绝对路径）、成员 projectId 改成 dst 并把 Discord 频道挪到 dst 的 category、删 src。
- * 旧 category 空了留在 Discord（bridge 没有删分类的通道），输出里报出来。合不合、合哪几个是 owner 拍板的事，这里只提供工具。
- */
+/** Merge directories and agent assignments into dst, then remove src. Report the old empty category. */
 async function cmdProjectMerge(srcId: string, dstId: string) {
+  const blocked = sharedLedgerProjectMutationError("merge", [srcId, dstId]);
+  if (blocked) return output({ ok: false, error: blocked });
   const data = await readProjects();
   const src = data.projects.find((p) => p.id === srcId);
   const dst = data.projects.find((p) => p.id === dstId);
