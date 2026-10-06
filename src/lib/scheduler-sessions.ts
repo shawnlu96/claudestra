@@ -10,7 +10,7 @@ import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
 import type { Stage } from "./ledger-stages.js";
 import {
-  applyRefusalEpoch, applyReviewerSwap, type MaterialDigest, type Placement, applyReviewerSwapEffect, mayRebindReviewer, refusalBindMarks, refusalRebind, reviewerReuseNote,
+  applyRefusalEpoch, applyReviewerSwap, type MaterialCheck, type Placement, applyReviewerSwapEffect, mayRebindReviewer, refusalBindMarks, refusalRebind, reviewerReuseNote,
 } from "./scheduler-review-swap.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 
@@ -78,8 +78,8 @@ export interface BindSessionInput {
   transport: SessionTransport;
   /** Test injection only; production reads the canonical registry path inside the ledger write transaction. */
   registryPath?: string;
-  /** MODELX: a reviewer bound under a refusal epoch re-checks the epoch's materials in this transaction; none = no such bind. */
-  refusalDigest?: MaterialDigest;
+  /** MODELX: a reviewer bound under a refusal epoch re-checks the refused ticket's frozen materials in this transaction; none = no such bind. */
+  refusalCheck?: MaterialCheck;
 }
 
 /** A dispatched ensure_session intent is the only authority; unknown effects can bind after reconciliation. */
@@ -95,7 +95,7 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
     requireSessionIdentity(db, task, input, agent);
     const prior = getSchedulerSession(db, task.id, input.role);
-    const epoch = prior && input.role === "reviewer" ? refusalRebind(db, prior, input.intentId, input.refusalDigest) : null; // MODELX: once, after a refusal epoch
+    const epoch = prior && input.role === "reviewer" ? refusalRebind(db, prior, input.intentId, input.refusalCheck) : null; // MODELX: once, after a refusal epoch
     if (prior && !epoch && !mayRebindReviewer(db, prior, input.intentId)) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||
         prior.createIntentId !== input.intentId) throw new LedgerError("conflict", "本卡角色已绑定另一个 session；不能换审查上下文");
@@ -227,8 +227,8 @@ export function beginReviewerSwap(db: Database, ctx: WriteCtx, id: string): Sche
 }
 
 /** MODELX: the refusal epoch for MODEL's recorded plan event; the swap module holds every guard (scheduler-review-swap.ts). */
-export function beginRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, planSeq: number, authorized: readonly Placement[], digest: MaterialDigest) {
-  return tx(db, () => applyRefusalEpoch(db, ctx, taskId, planSeq, getSchedulerSession(db, taskId, "reviewer"), authorized, digest,
+export function beginRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, planSeq: number, authorized: readonly Placement[], check: MaterialCheck) {
+  return tx(db, () => applyRefusalEpoch(db, ctx, taskId, planSeq, getSchedulerSession(db, taskId, "reviewer"), authorized, check,
     () => preserveSessionHistory(db), (c, e) => insertEvent(db, c, e, true)));
 }
 

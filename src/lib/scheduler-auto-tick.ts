@@ -225,6 +225,9 @@ class Card {
       await this.settle(intent.id, "pending", "cancelled", `未投递：${lapse}`);
       return this.escalate(lapse, intent.id);
     }
+    if (ref.role === "reviewer" && intent.status === "pending") { // MODELX r4：正式派审前冻结材料快照，拒审接续只和它比
+      (await import("./scheduler-model-wiring.js")).freezeReviewMaterials(this.db, this.task, intent, plan, this.deps.now());
+    }
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
@@ -365,7 +368,7 @@ class Card {
 
   /** MODELX: the round's refusal epoch in flight may no longer run (hold, revoked approval, changed materials, family no longer allowed). */
   async refusalLapse(order?: { intent: SchedulerIntent; plan: Planned | null }): Promise<string | null> {
-    const lapse = refusalEpochLapse(this.db, getTask(this.db, this.task.id) ?? this.task, { digest: (await import("./scheduler-model-wiring.js")).reviewMaterialDigest(this.db),
+    const lapse = refusalEpochLapse(this.db, getTask(this.db, this.task.id) ?? this.task, { check: (await import("./scheduler-model-wiring.js")).reviewMaterialCheck(this.db),
       families: this.opts.pool?.remote.localFamilies ?? ["claude", "codex"], ...(order ? { order } : {}) });
     return lapse && `豁免审查接续已失效，不再建会话 / 绑定 / 派单，退人工（已执行的效果留在台账）：${lapse}`;
   }

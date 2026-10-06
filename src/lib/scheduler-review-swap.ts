@@ -286,11 +286,14 @@ export function exemptVerdict(db: Database, task: LedgerTask, f: VerdictFacts): 
 }
 
 export type Placement = { family: AuthorFamily; machine: string };
+/** The plan an order is built from (its workOrder carries a merge bounce); undefined = rebuild it from the ledger. */
+export type OrderPlan = Pick<Extract<PlannerDecision, { kind: "intent" }>, "workOrder"> | null;
 /**
- * The review materials of a ticket (scheduler-model-wiring.ts reviewMaterialDigest: the full order with only the ticket's own
- * identity replaced, plus the bytes of the files it names). Injected: the order builder sits above the session writer.
+ * Why a ticket's materials are no longer the snapshot frozen when it was dispatched, or null (scheduler-model-wiring.ts
+ * reviewMaterialCheck: normalized order + every listed file re-hashed). want: the digest MODEL recorded for the refusal; order: a
+ * new order (the exempt ticket) that must match the same snapshot. Injected: the order builder sits above the session writer.
  */
-export type MaterialDigest = (task: LedgerTask, sent: SchedulerIntent, plan?: Pick<Extract<PlannerDecision, { kind: "intent" }>, "workOrder"> | null) => string;
+export type MaterialCheck = (task: LedgerTask, sent: SchedulerIntent, want: unknown, order?: { intent: SchedulerIntent; plan: OrderPlan }) => string | null;
 
 /** Order material that appeared after the refused ticket was planned: that ticket never saw it, so a resend is not the same. */
 const materialAfter = (events: readonly LedgerEvent[], task: Window, sent: Pick<SchedulerIntent, "eventSeq">): boolean =>
@@ -326,7 +329,7 @@ function exemptPlacement(plan: LedgerEvent, oldFamily: AuthorFamily, authorized:
 }
 
 /** Every precondition, re-read inside the writer's transaction: the plan event, window, holds, approval, materials, binding, placement. */
-function epochFacts(db: Database, task: LedgerTask, planSeq: number, row: SchedulerSession | null, authorized: readonly Placement[], digest: MaterialDigest) {
+function epochFacts(db: Database, task: LedgerTask, planSeq: number, row: SchedulerSession | null, authorized: readonly Placement[], check: MaterialCheck) {
   const events = listEvents(db, { project: task.project, target: task.id });
   const plan = events.find((e) => e.seq === planSeq), d = plan?.data;
   if (!d || (d.op !== RETRY_OP && d.op !== EXEMPT_OP) || d.mode !== "on" || d.cls !== "safety" || d.role !== "reviewer" || d.stale) {
@@ -339,8 +342,9 @@ function epochFacts(db: Database, task: LedgerTask, planSeq: number, row: Schedu
   const lapse = approvalLapse(db, task, d.approvalId);
   if (lapse) refuseEpoch(lapse);
   const sent = getIntent(db, String(d.intentId));
-  if (!sent || sent.head !== task.headSHA || sent.specRev !== task.specRev || materialAfter(events, task, sent) ||
-    digest(task, sent) !== d.materialDigest) refuseEpoch("材料摘要不一致");
+  const drift = !sent || sent.head !== task.headSHA || sent.specRev !== task.specRev ? "原审查单不是本轮当前 head / specRev"
+    : materialAfter(events, task, sent) ? "原派单后新增了 fix_strategy 材料" : check(task, sent, d.materialDigest);
+  if (drift) refuseEpoch(`材料摘要不一致：${drift}`);
   if (!row || row.state !== "active" || row.transport === "peer" || row.sessionId !== d.session || row.family !== d.family) refuseEpoch("被拒的审查员已不是本卡当前绑定");
   return { plan: plan!, approvalId: String(d.approvalId), workflow: workflow!, row: row!, sent: sent!, to: exemptPlacement(plan!, row!.family, authorized) };
 }
@@ -350,13 +354,13 @@ function epochFacts(db: Database, task: LedgerTask, planSeq: number, row: Schedu
  * authorized: the placements this service may use now (the bound one and this machine's configured families).
  */
 export function applyRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, planSeq: number, row: SchedulerSession | null,
-  authorized: readonly Placement[], digest: MaterialDigest, migrate: () => void,
+  authorized: readonly Placement[], check: MaterialCheck, migrate: () => void,
   write: (ctx: WriteCtx, event: { project: string; target: string; kind: "scheduler"; text: string; data: Record<string, unknown> }) => LedgerEvent):
   { event: LedgerEvent; duplicate: boolean } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "拒审接续只由调度服务执行");
   const id = refusalEpochId(planSeq), done = getEventByDedup(db, id);
   if (done) return { event: done, duplicate: true };
-  const task = mustTask(db, taskId), { plan, approvalId, workflow, row: old, sent, to } = epochFacts(db, task, planSeq, row, authorized, digest);
+  const task = mustTask(db, taskId), { plan, approvalId, workflow, row: old, sent, to } = epochFacts(db, task, planSeq, row, authorized, check);
   const author = remoteHeadFamily(db, task) ?? workflow.authorFamily, toFamily = to.family, crossModel = toFamily !== author;
   const planKind = (plan.data.plan as { kind: string }).kind, text = `${EXEMPT_MARK}(批准 ${approvalId})`;
   const owner1445 = planKind === "retry_same" ? "（MODEL 计划 retry_same：owner 14:45 去掉同模型重试，按 exempt_review 执行）" : "";
@@ -374,12 +378,12 @@ export function applyRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, p
 /**
  * Re-checked before every effect of an epoch still in flight (creating the reviewer, after each async lifecycle step, inside the
  * bind transaction, right before the order goes out, and at each tick): why the round's refusal epoch may no longer run, or
- * null. Holds, a revoked / replaced approval, changed materials (digest of the order as it would go out now, plus the order's
- * own plan when given), and — with families — a destination this machine no longer allows. Once the exempt review has a
+ * null. Holds, a revoked / replaced approval, materials no longer the refused ticket's frozen snapshot (and, when given, the new
+ * order not matching it either), and — with families — a destination this machine no longer allows. Once the exempt review has a
  * verdict, or MODEL already held its refusal, the epoch is finished and this answers null (the merge gates take over).
  */
-export function refusalEpochLapse(db: Database, task: LedgerTask, opts: { digest: MaterialDigest; families?: readonly AuthorFamily[];
-  order?: { intent: SchedulerIntent; plan: Parameters<MaterialDigest>[2] } }): string | null {
+export function refusalEpochLapse(db: Database, task: LedgerTask, opts: { check: MaterialCheck; families?: readonly AuthorFamily[];
+  order?: { intent: SchedulerIntent; plan: OrderPlan } }): string | null {
   const events = listEvents(db, { project: task.project, target: task.id });
   const epoch = refusalEpoch(events, task), r = refusalOf(epoch ?? undefined);
   if (!epoch || !r || events.some((e) => e.seq > epoch.seq && (e.kind === "review" || e.data.op === HOLD_OP))) return null;
@@ -388,23 +392,24 @@ export function refusalEpochLapse(db: Database, task: LedgerTask, opts: { digest
   const lapse = approvalLapse(db, task, r.approvalId);
   if (lapse) return lapse;
   const sent = getIntent(db, String(epoch.data.intentId));
-  if (!sent || materialAfter(events, task, sent) || opts.digest(task, sent) !== r.materialDigest) return "材料摘要不一致";
-  if (opts.order && opts.digest(task, opts.order.intent, opts.order.plan) !== r.materialDigest) return "新审查单的材料与原派单摘要不一致";
+  const drift = !sent ? "缺原审查单" : materialAfter(events, task, sent) ? "原派单后新增了 fix_strategy 材料"
+    : opts.check(task, sent, r.materialDigest) ?? (opts.order ? opts.check(task, sent, r.materialDigest, opts.order) : null);
+  if (drift) return `材料摘要不一致：${drift}`;
   const to = epoch.data.toFamily as AuthorFamily;
   if (opts.families && !opts.families.includes(to)) return `豁免审查家族 ${to} 已不在本机授权配置内`;
   return null;
 }
 
 /** The epoch that retired this reviewer binding, when a new ensure_session (planned after it) may bind the other family once. */
-export function refusalRebind(db: Database, prior: SchedulerSession, intentId: string, digest: MaterialDigest | undefined): LedgerEvent | null {
+export function refusalRebind(db: Database, prior: SchedulerSession, intentId: string, check: MaterialCheck | undefined): LedgerEvent | null {
   if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId) return null;
   const intent = getIntent(db, intentId), epoch = intent && latestReviewerSwap(listEvents(db, { project: intent.project, target: intent.taskId }));
   if (!epoch || !refusalOf(epoch) || epoch.data.intentId !== prior.retireIntentId || epoch.data.sessionId !== prior.sessionId ||
     intent.eventSeq <= epoch.seq) return null;
   const task = mustTask(db, intent.taskId);
   if (!inWindow(epoch, task)) return null;
-  if (!digest) throw new LedgerError("conflict", "豁免审查员的绑定缺材料摘要核对，退人工");
-  const lapse = refusalEpochLapse(db, task, { digest });
+  if (!check) throw new LedgerError("conflict", "豁免审查员的绑定缺材料快照核对，退人工");
+  const lapse = refusalEpochLapse(db, task, { check });
   if (lapse) throw new LedgerError("conflict", `不绑定豁免审查员，退人工：${lapse}`);
   return epoch;
 }

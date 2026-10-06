@@ -20,7 +20,7 @@ import { createRefusalApprovalPort } from "../src/lib/recovery-refusal-approval.
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { EXEMPTION_TEXT, recordModelOutcome } from "../src/lib/scheduler-model-outcome.js";
-import { modelOutcomeStep, reviewMaterialDigest, setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
+import { modelOutcomeStep, reviewMaterialCheck, reviewMaterialDigest, setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
 import { refusalEpochLapse } from "../src/lib/scheduler-review-swap.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { beginRefusalEpoch, bindSchedulerSession, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
@@ -49,6 +49,8 @@ beforeEach(async () => {
   created = [];
   onEnsure = null;
   f = autoFixture();
+  writeFileSync(join(f.dir, "T1.md"), "# T1\n验收：原文\n");
+  f.db.run("UPDATE tasks SET spec = ? WHERE id = 'T1'", [join(f.dir, "T1.md")]); // the spec body is frozen with every review order
   await toBuild(f);
   await f.tick();
   expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).ok).toBe(true);
@@ -189,7 +191,7 @@ describe("the exempt review refused too → manual (test 3)", () => {
     const plan = insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "escalate", text: "x", data: {
       op: "model_refusal_exempt", mode: "on", cls: "safety", role: "reviewer", stale: false, intentId: sent.id, head: H1, specRev: f.task().specRev,
       round: 1, session: "s-ex", family: "claude", approvalId: askId, materialDigest: reviewMaterialDigest(f.db)(f.task(), sent), plan: { kind: "exempt_review" } } }, true);
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq, AUTH, reviewMaterialDigest(f.db))).toThrow("本轮已做过豁免审查");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq, AUTH, reviewMaterialCheck(f.db))).toThrow("本轮已做过豁免审查");
   });
 });
 
@@ -216,14 +218,14 @@ describe("guards: nothing runs, the card goes to PM (test 4)", () => {
     test(`${name}: refused, no epoch, binding kept`, () => {
       const seq = record();
       change();
-      expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toThrow(why);
+      expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialCheck(f.db))).toThrow(why);
       untouched();
     });
   }
 
   test("material digest differs from the order's: refused, no epoch, binding kept", () => {
     const seq = record(`sha256:${"0".repeat(64)}`);
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toThrow("材料摘要不一致");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialCheck(f.db))).toThrow("材料摘要不一致");
     untouched();
   });
 
@@ -237,8 +239,8 @@ describe("guards: nothing runs, the card goes to PM (test 4)", () => {
 
   test("only the scheduler runs it, and only MODEL's recorded continuation events", () => {
     const seq = record();
-    expect(() => beginRefusalEpoch(f.db, f.at("pm"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toThrow("只由调度服务");
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq - 1, AUTH, reviewMaterialDigest(f.db))).toThrow("不是 MODEL 记下的拒审接续计划");
+    expect(() => beginRefusalEpoch(f.db, f.at("pm"), "T1", seq, AUTH, reviewMaterialCheck(f.db))).toThrow("只由调度服务");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq - 1, AUTH, reviewMaterialCheck(f.db))).toThrow("不是 MODEL 记下的拒审接续计划");
     untouched();
   });
 
@@ -258,7 +260,7 @@ describe("one run per plan event (test 5)", () => {
     failWith(CYBER);
     await tick();
     const seq = Number(epochs()[0].data.refusal && (epochs()[0].data.refusal as { planSeq: number }).planSeq);
-    expect(beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toMatchObject({ duplicate: true, event: { seq: epochs()[0].seq } });
+    expect(beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialCheck(f.db))).toMatchObject({ duplicate: true, event: { seq: epochs()[0].seq } });
     failWith(null);
     for (let n = 0; n < 4; n++) await tick();
     expect(epochs()).toHaveLength(1);
@@ -355,7 +357,7 @@ describe("r3: the exemption runs only at an authorized placement", () => {
       round: 1, session: "s-rv", family: "codex", approvalId: askId, materialDigest: reviewMaterialDigest(f.db)(f.task(), first),
       plan: { kind: "exempt_review", to: { family: "claude", machine: "agent-peer" } } } }, true);
     const auth = [...AUTH, { family: "claude" as const, machine: "agent-peer" }];
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq, auth, reviewMaterialDigest(f.db))).toThrow("不是本机");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq, auth, reviewMaterialCheck(f.db))).toThrow("不是本机");
     expect(epochs()).toEqual([]);
   });
 
@@ -363,8 +365,8 @@ describe("r3: the exemption runs only at an authorized placement", () => {
     failWith(CYBER);
     expect(await tick()).toMatchObject({ step: "refusal_epoch" });
     expect(epochs()[0].data.refusal).toMatchObject({ placement: { family: "claude", machine: "local" } });
-    expect(refusalEpochLapse(f.db, f.task(), { digest: reviewMaterialDigest(f.db), families: ["codex"] })).toContain("已不在本机授权配置内");
-    expect(refusalEpochLapse(f.db, f.task(), { digest: reviewMaterialDigest(f.db), families: ["codex", "claude"] })).toBeNull();
+    expect(refusalEpochLapse(f.db, f.task(), { check: reviewMaterialCheck(f.db), families: ["codex"] })).toContain("已不在本机授权配置内");
+    expect(refusalEpochLapse(f.db, f.task(), { check: reviewMaterialCheck(f.db), families: ["codex", "claude"] })).toBeNull();
   });
 });
 
@@ -423,7 +425,7 @@ describe("r3: holds and revocations are re-read before every later effect", () =
     settleIntent(f.db, f.at("scheduler"), { id: ensure.id, from: "pending", to: "submitted", receipt: "claimed" });
     editRegistry((r) => { r.agents[EX] = { runtime: "claude-code", sessionId: "s-ex", cwd: join(f.dir, "rv-ex") }; });
     const bind = () => bindSchedulerSession(f.db, f.at("scheduler"), { taskId: "T1", role: "reviewer", intentId: ensure.id, agent: EX,
-      sessionId: "s-ex", family: "claude", transport: "tmux", registryPath: f.registryPath, refusalDigest: reviewMaterialDigest(f.db) });
+      sessionId: "s-ex", family: "claude", transport: "tmux", registryPath: f.registryPath, refusalCheck: reviewMaterialCheck(f.db) });
     hold();
     expect(bind).toThrow("不绑定豁免审查员，退人工：owner 已按卡挂起");
     noExempt();
@@ -432,35 +434,30 @@ describe("r3: holds and revocations are re-read before every later effect", () =
   });
 });
 
-describe("r3: the material digest covers the order's real material", () => {
+describe("r3 → r4: the refused ticket's materials are checked against its frozen snapshot", () => {
   const material = (text: string) => { const at = join(f.dir, "prior-reports.md"); writeFileSync(at, text); return at; };
   const strategy = (at: string) => insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "scheduler",
     text: "fix strategy", data: { op: "fix_strategy", specRev: f.task().specRev, round: f.task().round, material: at } }, true);
 
-  test("the same ticket identity with prior-report material added after the refusal: digest differs, refused", () => {
+  test("prior-report material added after the order went out: the list no longer matches, refused", () => {
     const before = reviewMaterialDigest(f.db)(f.task(), first);
+    expect(before).toMatch(/^sha256:[0-9a-f]{64}$/);
     const r = recordModelOutcome(f.db, f.at("scheduler"), { intentId: first.id, signal: { failure: { kind: "error", message: CYBER } },
       failed: { family: "codex", machine: "local", agent: "agent-rv-t1" }, authorized: [...AUTH], ended: true,
       review: { sessionId: "s-rv", materialDigest: before } }, () => ({ mode: "on", manualAfterMs: null }), createRefusalApprovalPort(f.db));
     strategy(material("round 1 reports"));
-    expect(reviewMaterialDigest(f.db)(f.task(), first)).not.toBe(before);
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", (r as { event: { seq: number } }).event.seq, AUTH, reviewMaterialDigest(f.db))).toThrow("材料摘要不一致");
+    expect(reviewMaterialDigest(f.db)(f.task(), first)).toBe(before); // the snapshot is frozen; the check is what sees the change
+    expect(reviewMaterialCheck(f.db)(f.task(), first, before)).toContain("与原派单快照不一致");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", (r as { event: { seq: number } }).event.seq, AUTH, reviewMaterialCheck(f.db))).toThrow("材料摘要不一致");
     expect(epochs()).toEqual([]);
   });
 
-  test("the digest hashes the referenced file's bytes, not just its path", () => {
-    const at = material("v1");
-    strategy(at);
-    const one = reviewMaterialDigest(f.db)(f.task(), first);
-    writeFileSync(at, "v2");
-    expect(reviewMaterialDigest(f.db)(f.task(), first)).not.toBe(one);
-    writeFileSync(at, "v1");
-    expect(reviewMaterialDigest(f.db)(f.task(), first)).toBe(one);
-  });
-
-  test("the digest ignores only the ticket's identity: another order id / reviewer / session gives the same digest", () => {
-    expect(reviewMaterialDigest(f.db)(f.task(), { ...first, id: "other-order" })).toBe(reviewMaterialDigest(f.db)(f.task(), first));
-    expect(reviewMaterialDigest(f.db)(f.task(), { ...first, head: "e".repeat(40) })).not.toBe(reviewMaterialDigest(f.db)(f.task(), first));
+  test("the check ignores only the ticket's identity: another order id passes, another head does not", () => {
+    const want = reviewMaterialDigest(f.db)(f.task(), first), check = reviewMaterialCheck(f.db);
+    expect(check(f.task(), first, want)).toBeNull();
+    expect(check(f.task(), first, want, { intent: { ...first, id: "other-order" }, plan: null })).toBeNull();
+    expect(check(f.task(), first, want, { intent: { ...first, id: "other-order", head: "e".repeat(40) }, plan: null })).toBe("新审查单正文与原派单快照不一致");
+    expect(check(f.task(), first, `sha256:${"0".repeat(64)}`)).toBe("MODEL 记下的材料摘要不是原派单快照");
   });
 
   test("material changed after the epoch, before the order goes out: manual, nothing sent", async () => {

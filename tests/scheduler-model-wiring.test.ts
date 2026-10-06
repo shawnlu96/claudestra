@@ -32,6 +32,8 @@ let errors: ReturnType<typeof spyOn>;
 beforeEach(async () => {
   errors = spyOn(console, "error").mockImplementation(() => {});
   f = autoFixture();
+  writeFileSync(join(f.dir, "T1.md"), "# T1\n");
+  f.db.run("UPDATE tasks SET spec = ? WHERE id = 'T1'", [join(f.dir, "T1.md")]); // MODELX r4: the review order's frozen spec body
   await toBuild(f);
   await f.tick();
   expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).ok).toBe(true);
