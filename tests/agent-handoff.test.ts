@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.ts";
@@ -125,19 +125,53 @@ describe("agent-handoff：链接与逃逸", () => {
     expect(readdirSync(`${dir}-original`)).toEqual([]);
   });
 
-  test("持锁重定位之后、rename 之前目录被换成软链 → 提交前核验拦下，外部不留 tmp、不被覆盖", async () => {
+  test("持锁重定位之后、写 tmp 之前目录被换成软链 → 写前核验拦下，外部目录连 tmp 都没落过（mtime 不变）、不被覆盖", async () => {
     const outside = join(home, ".claude", "projects", "x", "memory");
     const dir = join(stateDir, "handoff", A);
     await save({ opId: "op-old", text: "旧交接" });
+    const outsideMtime = statSync(outside).mtimeMs;
     const now = () => { // now() 在重定位之后、写 tmp 之前调用：借它在这个窗口里换目录
       renameSync(dir, `${dir}-original`);
       symlinkSync(outside, dir);
       return new Date();
     };
-    await expect(save({ opId: "op-race", text: "attacker content", now })).rejects.toThrow("提交前核验没通过");
+    await expect(save({ opId: "op-race", text: "attacker content", now })).rejects.toThrow("写入前被替换");
     expect(readFileSync(join(outside, "HANDOFF.md"), "utf8")).toBe("PM 的交接");
     expect(readdirSync(outside)).toEqual(["HANDOFF.md"]);
+    expect(statSync(outside).mtimeMs).toBe(outsideMtime); // 建过再删的 tmp 也会改目录 mtime
     expect(readFileSync(join(`${dir}-original`, "HANDOFF.md"), "utf8")).toContain("旧交接");
+  });
+
+  test("持锁重定位之后整个 handoff 根被挪到 ~/.claude 下、原位换成软链 → 拒，旧交接逐字不变、外部没落 tmp（root-swap）", async () => {
+    const hroot = join(stateDir, "handoff");
+    const moved = join(home, ".claude", "moved-handoff");
+    await save({ opId: "op-old", text: "旧交接" });
+    const before = readFileSync(join(hroot, A, "HANDOFF.md"), "utf8");
+    let movedMtime = 0;
+    const now = () => { // agent 目录 inode 和锁都跟着根一起搬过去，只有根 / 祖先的身份变了
+      renameSync(hroot, moved);
+      symlinkSync(moved, hroot);
+      movedMtime = statSync(join(moved, A)).mtimeMs;
+      return new Date();
+    };
+    await expect(save({ opId: "race", text: "outside content", now })).rejects.toThrow("写入前被替换");
+    expect(lstatSync(hroot).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(moved, A, "HANDOFF.md"), "utf8")).toBe(before);
+    expect(readdirSync(join(moved, A))).toEqual(["HANDOFF.md"]);
+    expect(statSync(join(moved, A)).mtimeMs).toBe(movedMtime);
+  });
+
+  test("STATE_DIR 整个被挪走、原位换成软链（祖先替换）→ 拒，旧交接逐字不变", async () => {
+    const elsewhere = join(home, ".claude", "moved-state");
+    await save({ opId: "op-old", text: "旧交接" });
+    const now = () => {
+      renameSync(stateDir, elsewhere);
+      symlinkSync(elsewhere, stateDir);
+      return new Date();
+    };
+    await expect(save({ opId: "race", text: "outside content", now })).rejects.toThrow("写入前被替换");
+    expect(readFileSync(join(elsewhere, "handoff", A, "HANDOFF.md"), "utf8")).toContain("旧交接");
+    expect(readdirSync(join(elsewhere, "handoff", A))).toEqual(["HANDOFF.md"]);
   });
 });
 

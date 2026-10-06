@@ -5,9 +5,11 @@
  * - 名字必须在 registry 里、且是一段安全的目录名（registry 的建名黑名单：没有 / . : ~ 空白 控制符）；
  * - 目录 0700（组 / 其他人有权限位就收紧）、文件 0600；handoff 根、agent 目录、HANDOFF.md 任一是软链（或不是目录 / 普通文件）就拒，realpath 再核一次不出根；
  * - 写入走 lib/state-file.ts 的原子写（tmp + rename，noFollow），同 agent 的写者经 lib/file-lock.ts 串行；
- *   拿到锁之后整套定位校验重做一遍（等锁期间目录可能被换成软链），并记下 agent 目录的 dev/ino，
- *   rename 前（commitIf）再核锁 + 目录仍是同一个真目录且 realpath 不出根，不对就删 tmp、不提交；
- *   Node 没有 openat/renameat，commitIf 与 rename 两次系统调用之间的同步间隙无法再收窄（同 UID 进程恰在其中换目录）。
+ *   入口先记下 STATE_DIR 的 canonical 位置；拿到锁之后整套定位校验重做一遍（等锁期间目录可能被换成软链），
+ *   钉住 handoff 根和 agent 目录两级的 dev/ino 与 canonical 路径（根必须正好是 canonical STATE_DIR/handoff）；
+ *   写 tmp 之前、rename 之前（commitIf）各核一次：锁还在、两级都不是软链且 dev/ino 没换、realpath 仍是钉住的位置——
+ *   整根被挪走换成软链、任一祖先被换都会让 realpath 变掉而被拒，不对就不写 tmp / 删 tmp、不提交；
+ *   Node 没有 openat/renameat，核验与下一次系统调用之间的同步间隙无法再收窄（同 UID 进程恰在其中换目录）。
  * - 文件首行是一行 HTML 注释的元数据（opId / savedAt / agent / bytes），N4 据它和文件时间核这次保存的结果。
  * 保存成功只代表交接落盘，不代表压缩完成。tests/agent-handoff.test.ts。
  */
@@ -99,14 +101,24 @@ function locate(stateDir: string, agent: string): { lock: string; dir: string; r
   return { lock: join(root, `${agent}.lock`), dir, root, file }; // 锁放在根下：agent 名里没有「.」，撞不上别的 agent 目录
 }
 
-/** dir 此刻仍是 pinned 那个真目录（不是软链、dev/ino 没换） */
-function sameDirectory(dir: string, pinned: Stats): boolean {
+/** path 此刻仍是 pinned 那个真目录（不是软链、dev/ino 没换）且 realpath 仍是 canonical */
+function sameDirectory(path: string, pinned: Stats, canonical: string): boolean {
   try {
-    const st = lstatSync(dir);
-    return st.isDirectory() && !st.isSymbolicLink() && st.dev === pinned.dev && st.ino === pinned.ino;
+    const st = lstatSync(path);
+    return st.isDirectory() && !st.isSymbolicLink() && st.dev === pinned.dev && st.ino === pinned.ino && realpathSync(path) === canonical;
   } catch {
     return false;
   }
+}
+
+/** 钉住 handoff 根和 agent 目录（dev/ino + canonical 路径），返回「两级都还是原样」的核验；根不在 canonical STATE_DIR 下就拒 */
+function pinLocation(canonicalState: string, root: string, dir: string, agent: string): () => boolean {
+  const rootCanon = join(canonicalState, "handoff");
+  const dirCanon = join(rootCanon, agent);
+  if (realpathSync(root) !== rootCanon || realpathSync(dir) !== dirCanon) throw new HandoffError(`${dir} 解析后跑出了 handoff 目录，拒绝写`);
+  const rootSt = lstatSync(root);
+  const dirSt = lstatSync(dir);
+  return () => sameDirectory(root, rootSt, rootCanon) && sameDirectory(dir, dirSt, dirCanon);
 }
 
 function renderHandoff(meta: HandoffMeta, text: string): string {
@@ -118,15 +130,19 @@ export async function saveAgentHandoff(input: SaveHandoffInput): Promise<Handoff
   const { opId, text, bytes } = checkHandoffArgs(input.opId, input.text);
   const agent = safeAgentName(input.agent, input.registered);
   const stateDir = input.stateDir ?? STATE_DIR;
-  const lock = await acquireLock(locate(stateDir, agent).lock, LOCK_WAIT_MS);
+  const first = locate(stateDir, agent);
+  const canonicalState = realpathSync(stateDir); // 入口就记下：之后 STATE_DIR 或任一祖先被换都对不上
+  const lock = await acquireLock(first.lock, LOCK_WAIT_MS);
   if (!lock) throw new HandoffError(`${agent} 的交接正在被另一个写者占用，没写，稍后再试`);
   try {
-    // 等锁期间 agent 目录可能被挪走、原位放上软链：持锁后重新定位，之后只认这一刻的那个目录
+    // 等锁期间 agent 目录 / 根可能被挪走、原位放上软链：持锁后重新定位，之后只认这一刻的根和目录
     const { dir, root, file } = locate(stateDir, agent);
-    const pinned = lstatSync(dir);
+    const intact = pinLocation(canonicalState, root, dir, agent);
     const meta: HandoffMeta = { opId, savedAt: (input.now?.() ?? new Date()).toISOString(), agent, bytes };
-    const sameDir = () => sameDirectory(dir, pinned) && realpathSync(dir) === join(realpathSync(root), agent);
-    writeTextAtomicSync(file, renderHandoff(meta, text), { mode: 0o600, noFollow: true, commitIf: () => lock.held() && sameDir() });
+    const guard = () => lock.held() && intact();
+    // 先核再写 tmp：被换到外部的父目录里连 tmp 都不落；rename 前 commitIf 再核一次
+    if (!guard()) throw new HandoffError(`${agent} 的 handoff 目录在写入前被替换（软链 / 挪走），没写`);
+    writeTextAtomicSync(file, renderHandoff(meta, text), { mode: 0o600, noFollow: true, commitIf: guard });
     return { ...meta, path: file };
   } finally {
     lock.release();
