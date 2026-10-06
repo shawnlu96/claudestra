@@ -6,10 +6,11 @@ import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } fr
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
+import { pmDirectedVerdict, type CallerOf } from "../pm-directed-agent.js";
 import { isCallerPushback, isHumanDirect, markPmTransfer, pmTargetDrift, retryLater, setPmRoleRoute, undoPmTransfer, type PmTarget } from "../pm-held-transfer.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
-interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile> }
+interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile>; callerOf?: CallerOf }
 type Client = { ws: LocalEndpoint["ws"]; cwd?: string };
 type Send = (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;
 
@@ -25,7 +26,10 @@ export async function deliverPmLocal<P extends Receipt>(
   // A human who picked this agent keeps talking to it, online or not: the PM role never answers in its place.
   const pushback = isCallerPushback(env), own = original.channelId ? clients.get(original.channelId) : undefined;
   const direct = isHumanDirect(env);
-  const name = (pushback && own) || direct ? null : pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+  // The verified active PM naming an agent of its own project (e.g. its predecessor acting as supervisor) is never redirected back to itself.
+  const directed = pmDirectedVerdict(env, original, db, agents, facts.callerOf);
+  if (directed === "refused") return { envelope: env, outcome: { kind: "dropped", reason: "sender is no longer the verified active PM that addressed it" } };
+  const name = (pushback && own) || direct || directed ? null : pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
   if (!name) {
     // pmClientFor may have lent another PM's socket under an older pointer; never deliver this channel's message through it.
     const borrowed = agents.some((a) => a.projectId === original.projectId && a.channelId && a.channelId !== to.channelId
@@ -145,6 +149,7 @@ export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: En
     return (env) => {
       if (!db || !original?.projectId || isHumanDirect(env) || isCallerPushback(env)) return null;
       try {
+        if (pmDirectedVerdict(env, original, db, agents, facts?.callerOf)) return null; // stays with the named agent; a refusal is settled by deliverPmLocal
         const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
         return name ? { agentName: name, channelId: agents.find((a) => a.name === name && a.projectId === original.projectId)?.channelId } : null;
       } catch (e) {
