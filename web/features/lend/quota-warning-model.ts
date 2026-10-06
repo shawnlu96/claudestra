@@ -4,8 +4,8 @@
  * - 只有 warn / stop 出提醒；unknown（读不到、已过重置）不出肯定提醒，也不当 0 或「已恢复」；below 不出。
  * - 模式 off = 没有生效的线，不出；observe 照出但写明「只观察、未执行」。
  * - 两族各一条，互不顶替。
- * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记关掉过的 key，key 里含周窗口世代（resetAt）、状态 + 收窄档、
- * 两条线（阈值版本）与模式：同一条线不再弹；提醒→停接、改线 / 改模式、新的一周 key 变了就再出现。tests/web-quota-warning.test.ts。
+ * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记，只认最近一个线世代（周窗口 resetAt + 两条线 + 模式，带开始时刻）里
+ * 关掉过的状态 + 收窄档：同一条线不再弹；提醒→停接、改线 / 改模式（改回旧值也算新一代）、新的一周就再出现。tests/web-quota-warning-*.test.ts。
  */
 import type { FamilyLine, QuotaFamily, QuotaLinesView } from "./lend-quota-model";
 
@@ -58,14 +58,25 @@ export function warnTexts(it: WarnItem): { title: string; status: string } {
 
 export const DISMISS_KEY = "cstra_quota_warning_dismissed";
 const MAX_SCOPES = 32;
-/** 同实例同家族记几条关掉过的 key（一周里提醒 / 停接 / 改线最多几代，留余量） */
-const MAX_KEYS = 8;
+/** 同一世代里记几种关掉过的状态（实际只有 warn / stop 各一种，留余量） */
+const MAX_STATES = 8;
 
-/** 实例|家族 → 关掉过的提醒 key（按关掉先后，旧的在前）。存多条而非只留最新一条：合并两份记录时取并集，
- * 旧代（如本页存不下、只在内存的 warn）不会顶掉别的 tab 已落盘的新代（stop），反之亦然。 */
-export type DismissMap = Record<string, string[]>;
+/** 实例|家族 → 只记最近一个线世代的关掉记录。gen = 周窗口（resetAt）+ 两条线（阈值版本）+ 模式；since = 这一代开始被关掉的时刻
+ * （同设备各 tab 同一时钟），把「70/80 → 60/80 → 改回 70/80」的两次 70/80 区分成两代；states = 本代关掉过的「状态:收窄档」。
+ * 世代一变，旧世代的关掉整条作废、不会因为数值改回来而复活（settings-return-1）；合并两份记录时同一代取并集，
+ * 不同代取 since 新的那代，旧内存里再多旧代也挤不掉别的 tab 已落盘的当前代（dismiss-memory-1）。 */
+export interface DismissRec { gen: string; since: number; states: string[] }
+export type DismissMap = Record<string, DismissRec>;
 
 const scopeOf = (instance: string, family: QuotaFamily) => `${instance}|${family}`;
+/** key = resetAt|状态:收窄档|warn/stop|模式 → [世代, 状态] */
+const splitKey = (key: string): [string, string] => {
+  const [reset, state, line, mode] = key.split("|");
+  return [[reset, line, mode].join("|"), state ?? ""];
+};
+
+const isRec = (v: unknown): v is DismissRec => !!v && typeof v === "object" && typeof (v as DismissRec).gen === "string"
+  && typeof (v as DismissRec).since === "number" && Number.isFinite((v as DismissRec).since) && Array.isArray((v as DismissRec).states);
 
 export function parseDismissed(raw: string | null): DismissMap {
   if (!raw) return {};
@@ -73,10 +84,15 @@ export function parseDismissed(raw: string | null): DismissMap {
     const v = JSON.parse(raw) as unknown;
     if (!v || typeof v !== "object" || Array.isArray(v)) return {};
     const out: DismissMap = {};
-    for (const [scope, keys] of Object.entries(v)) {
-      const list = typeof keys === "string" ? [keys] // 旧格式（每 scope 一条）照认
-        : Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
-      if (list.length) out[scope] = list.slice(-MAX_KEYS);
+    for (const [scope, r] of Object.entries(v)) {
+      if (isRec(r)) {
+        const states = r.states.filter((k): k is string => typeof k === "string").slice(-MAX_STATES);
+        if (states.length) out[scope] = { gen: r.gen, since: r.since, states };
+        continue;
+      }
+      // 旧格式（每 scope 一条 key / 多条 key 数组）：只认最后一条，按最旧的一代（since 0）收进来
+      const last = typeof r === "string" ? r : Array.isArray(r) ? r.filter((k): k is string => typeof k === "string").at(-1) : undefined;
+      if (last) { const [gen, state] = splitKey(last); out[scope] = { gen, since: 0, states: [state] }; }
     }
     return out;
   } catch {
@@ -84,21 +100,42 @@ export function parseDismissed(raw: string | null): DismissMap {
   }
 }
 
-export const isDismissed = (m: DismissMap, instance: string, it: WarnItem): boolean => m[scopeOf(instance, it.family)]?.includes(it.key) ?? false;
+export function isDismissed(m: DismissMap, instance: string, it: WarnItem): boolean {
+  const r = m[scopeOf(instance, it.family)];
+  if (!r) return false;
+  const [gen, state] = splitKey(it.key);
+  return r.gen === gen && r.states.includes(state);
+}
 
-const capScopes = (entries: [string, string[]][]): DismissMap => Object.fromEntries(entries.slice(-MAX_SCOPES));
+const capScopes = (entries: [string, DismissRec][]): DismissMap => Object.fromEntries(entries.slice(-MAX_SCOPES));
 
-/** 两份关掉记录取并集（每个 scope 的 key 去重、保序，b 的新记录排后），总数封顶 */
+/** 同一 scope 两条记录合并：同一代（gen 与 since 都同）状态取并集；否则留 since 新的那代（同刻再按 gen 定，结果与先后无关） */
+function mergeRec(x: DismissRec, y: DismissRec): DismissRec {
+  if (x.gen === y.gen && x.since === y.since) return { ...x, states: [...x.states.filter((k) => !y.states.includes(k)), ...y.states].slice(-MAX_STATES) };
+  if (x.since !== y.since) return x.since > y.since ? x : y;
+  return x.gen > y.gen ? x : y;
+}
+
+/** 两份关掉记录合并（b 动过的 scope 排后），总数封顶 */
 export function mergeDismissed(a: DismissMap, b: DismissMap): DismissMap {
-  const out = new Map<string, string[]>(Object.entries(a));
-  for (const [scope, keys] of Object.entries(b)) {
-    const prev = (out.get(scope) ?? []).filter((k) => !keys.includes(k));
+  const out = new Map<string, DismissRec>(Object.entries(a));
+  for (const [scope, r] of Object.entries(b)) {
+    const prev = out.get(scope);
     out.delete(scope);
-    out.set(scope, [...prev, ...keys].slice(-MAX_KEYS));
+    out.set(scope, prev ? mergeRec(prev, r) : r);
   }
   return capScopes([...out.entries()]);
 }
 
-/** 记下这一条被关掉（追加到该实例该家族的记录，最近动过的 scope 排最后；每 scope / 总数封顶，旧的先丢） */
-export const withDismissed = (m: DismissMap, instance: string, it: WarnItem): DismissMap =>
-  mergeDismissed(m, { [scopeOf(instance, it.family)]: [it.key] });
+/** 记下这一条被关掉：当前就是这一代则追加状态，否则以 at 开新一代（旧代作废）；最近动过的 scope 排最后，总数封顶 */
+export function withDismissed(m: DismissMap, instance: string, it: WarnItem, at: number = Date.now()): DismissMap {
+  const scope = scopeOf(instance, it.family);
+  const [gen, state] = splitKey(it.key);
+  const cur = m[scope];
+  const rec: DismissRec = cur && cur.gen === gen ? { ...cur, states: [...cur.states.filter((k) => k !== state), state].slice(-MAX_STATES) }
+    : { gen, since: Math.max(at, cur ? cur.since + 1 : at), states: [state] };
+  const out = new Map<string, DismissRec>(Object.entries(m));
+  out.delete(scope);
+  out.set(scope, rec);
+  return capScopes([...out.entries()]);
+}

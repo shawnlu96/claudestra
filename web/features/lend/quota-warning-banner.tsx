@@ -104,8 +104,8 @@ export function QuotaWarningBanner() {
     return halt;
   }, [fp]);
 
-  /** 存储写不进去的关掉记录（只在本页内存里）：和持久记录取并集（mergeDismissed），不被下一次关掉 / 别的 tab 的 storage 事件抹掉，
-   * 也不顶掉别的 tab 已落盘的新代关掉记录 */
+  /** 存储写不进去的关掉记录（只在本页内存里）：和持久记录合并（mergeDismissed：同代并集、异代留新），不被下一次关掉 / 别的 tab 的
+   * storage 事件抹掉，也不顶掉别的 tab 已落盘的新代关掉记录 */
   const unsaved = useRef<DismissMap>({});
 
   useEffect(() => {
@@ -120,7 +120,7 @@ export function QuotaWarningBanner() {
       localStorage.setItem(DISMISS_KEY, JSON.stringify(next));
       unsaved.current = {}; // 都已随 next 落盘
     } catch {
-      unsaved.current = withDismissed(unsaved.current, fp, it); // 存不下：只在这次页面里关掉（刷新后会再出现），多族先后关掉都保留
+      unsaved.current = next; // 存不下：只在这次页面里关掉（刷新后会再出现），多族先后关掉都保留；带着各代 since，合并时旧代挤不掉新代
     }
     setDismissed(next);
   }, [fp]);

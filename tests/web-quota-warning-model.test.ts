@@ -78,35 +78,56 @@ describe("关掉", () => {
     expect(isDismissed(m, "fp2", warn)).toBe(false);
     expect(isDismissed(m, "fp1", { ...warn, family: "claude" })).toBe(false);
   });
-  test("同实例同家族记多代关掉的 key（各 scope、总数封顶）", () => {
+  test("同一代先后关掉提醒、停接都记；scope 总数封顶", () => {
     const m2 = withDismissed(m, "fp1", item(STOP));
     expect(Object.keys(m2)).toEqual(["fp1|codex"]);
     expect(isDismissed(m2, "fp1", warn) && isDismissed(m2, "fp1", item(STOP))).toBe(true);
-    let many = m;
-    for (let i = 0; i < 20; i++) many = withDismissed(many, "fp1", item(f({ weekUsedPct: 72, warnPct: 30 + i, state: "warn", limit: "half" })));
-    expect(many["fp1|codex"]).toHaveLength(8);
-    expect(isDismissed(many, "fp1", warn)).toBe(false); // 最旧的先丢
     let big = {};
     for (let i = 0; i < 50; i++) big = withDismissed(big, `fp${i}`, warn);
     expect(Object.keys(big)).toHaveLength(32);
     expect(isDismissed(big, "fp49", warn)).toBe(true);
   });
-  test("dismiss-memory-1：合并取并集，旧代（内存里的 warn）不顶掉别处已落盘的新代（stop），反之亦然", () => {
+  test("settings-return-1：70/80 关掉 → 实际改 60/80 关掉 → 改回 70/80：再出现（旧代关掉不复活）", () => {
+    const w60 = item(f({ weekUsedPct: 72, warnPct: 60, state: "warn", limit: "half" }));
+    const m1 = withDismissed({}, "fp1", warn, 1000);
+    const m2 = withDismissed(m1, "fp1", w60, 2000);
+    expect(isDismissed(m2, "fp1", w60)).toBe(true);
+    expect(isDismissed(m2, "fp1", warn)).toBe(false);
+    // 另一 tab 内存里还留着第一次 70/80 的旧代：合并后仍不复活
+    for (const merged of [mergeDismissed(m2, m1), mergeDismissed(m1, m2)]) expect(isDismissed(merged, "fp1", warn)).toBe(false);
+    // 改回 70/80 后再关掉：是新的一代
+    const m3 = withDismissed(m2, "fp1", warn, 3000);
+    expect(isDismissed(m3, "fp1", warn)).toBe(true);
+    expect(isDismissed(mergeDismissed(m3, m1), "fp1", item(STOP))).toBe(false);
+  });
+  test("dismiss-memory-1：合并同代取并集；旧内存里多少旧代都挤不掉别处已落盘的当前代（stop），反之亦然", () => {
     const stop = item(STOP);
-    const persisted = withDismissed({}, "fp1", stop);
-    const unsaved = withDismissed({}, "fp1", warn);
-    for (const merged of [mergeDismissed(persisted, unsaved), mergeDismissed(unsaved, persisted)]) {
-      expect(isDismissed(merged, "fp1", stop)).toBe(true);
-      expect(isDismissed(merged, "fp1", warn)).toBe(true);
+    const sameGen = withDismissed({}, "fp1", warn, 1000);
+    const persistedSame = withDismissed(sameGen, "fp1", stop, 1500);
+    for (const merged of [mergeDismissed(persistedSame, sameGen), mergeDismissed(sameGen, persistedSame)]) {
+      expect(isDismissed(merged, "fp1", stop) && isDismissed(merged, "fp1", warn)).toBe(true);
     }
-    const written = withDismissed(mergeDismissed(persisted, unsaved), "fp1", { ...warn, family: "claude" });
-    expect(isDismissed(parseDismissed(JSON.stringify(written)), "fp1", stop)).toBe(true);
+    // 审查复现：A 存不下，依次关掉 60…67 八代 warn（只在内存）；升停接改线 70/80 后 B 落盘关掉 stop
+    let unsaved = {};
+    for (let i = 0; i < 8; i++) unsaved = withDismissed(unsaved, "fp1", item(f({ weekUsedPct: 74, warnPct: 60 + i, state: "warn", limit: "half" })), 1000 + i);
+    const stop70 = item(f({ ...STOP, warnPct: 70 }));
+    const persisted = withDismissed(parseDismissed(null), "fp1", stop70, 5000);
+    for (const merged of [mergeDismissed(persisted, unsaved), mergeDismissed(unsaved, persisted)]) expect(isDismissed(merged, "fp1", stop70)).toBe(true);
+    const written = withDismissed(mergeDismissed(persisted, unsaved), "fp1", { ...warn, family: "claude" }, 6000);
+    expect(isDismissed(parseDismissed(JSON.stringify(written)), "fp1", stop70)).toBe(true);
   });
   test("存储里的坏数据当没关过", () => {
     expect(parseDismissed(null)).toEqual({});
     expect(parseDismissed("{bad")).toEqual({});
     expect(parseDismissed("[1]")).toEqual({});
-    expect(parseDismissed('{"a":1,"b":"k","c":["x",2],"d":[]}')).toEqual({ b: ["k"], c: ["x"] }); // 旧格式单条字符串照认
+    expect(parseDismissed('{"a":1,"d":[],"e":{"gen":"g","since":"x","states":["s"]},"f":{"gen":"g","since":1,"states":[2]}}')).toEqual({});
+    expect(parseDismissed('{"r":{"gen":"g","since":5,"states":["warn:half",3]}}')).toEqual({ r: { gen: "g", since: 5, states: ["warn:half"] } });
+  });
+  test("旧格式（单条 key / key 数组）照认最后一条", () => {
+    const old = parseDismissed(JSON.stringify({ "fp1|codex": [item(STOP).key, warn.key], "fp1|claude": warn.key }));
+    expect(isDismissed(old, "fp1", warn)).toBe(true);
+    expect(isDismissed(old, "fp1", item(STOP))).toBe(false);
+    expect(isDismissed(old, "fp1", { ...warn, family: "claude" })).toBe(true);
   });
 });
 
