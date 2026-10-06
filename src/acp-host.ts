@@ -17,6 +17,7 @@ import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
 import { stampTranscript } from "./lib/acp/transcript.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
+import { redactSecrets } from "./lib/redact-secrets.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
 import { readRegistryAgents } from "./lib/registry.js";
@@ -45,7 +46,8 @@ const logsDir = acpLogDir(agentName);
 const hostLogFile = join(logsDir, "host.log");
 // 连接日志只落盘：窗口留给会话，日志进窗口会把会话淹掉；落盘也不怕窗口被 kill（出借 worker 自停的原因曾因此丢掉）
 const log = (msg: string) => {
-  if (!appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`)) console.log(`[${new Date().toTimeString().slice(0, 8)}] ${msg}`); // 写不进盘就退回窗口，别丢
+  // 写不进盘就退回窗口，别丢；日志里有适配器 stderr 原文，进窗口前脱敏（窗口有终端授权就能看）
+  if (!appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`)) console.log(`[${new Date().toTimeString().slice(0, 8)}] ${redactSecrets(msg)}`);
 };
 const show = (item: string) => console.log(stampTranscript(item));
 const bridgeUrl = resolveBridgeUrl();

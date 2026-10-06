@@ -83,6 +83,19 @@ describe("ACP 窗口会话", () => {
     expect(reply).toEndWith("…（共 1 行）");
   });
 
+  test("凭据类字段不进窗口：认证头、URL 账号密码、curl -u、cookie、credential（命令、结果、正文、reply、失败原因各一处）", () => {
+    const out = render([
+      { sessionUpdate: "tool_call", toolCallId: "c1", kind: "execute", title: "curl -u admin:hunter2 https://bob:s3cretpw@x.example/api", status: "in_progress" },
+      { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed",
+        _meta: { terminal_output_delta: { data: "> Authorization: Basic dXNlcjpodW50ZXIy\n< Set-Cookie: sid=abcdef123; Path=/\n" } } },
+      chunk("m1", '配置里是 {"credential": "c0ffee-1234"}'),
+      { sessionUpdate: "tool_call", toolCallId: "c2", status: "completed", _meta: { is_mcp_tool_call: true },
+        rawInput: { server: "claudestra", tool: "reply", arguments: { text: "用 https://bob:s3cretpw@x.example 拉" } } },
+    ]).join("\n") + transcriptOfFailure({ kind: "error", key: "e", message: "401 for Authorization: Bearer abc.def.ghi" });
+    for (const s of ["hunter2", "s3cretpw", "dXNlcjpodW50ZXIy", "abcdef123", "c0ffee-1234", "abc.def.ghi"]) expect(out).not.toContain(s);
+    expect(out).toContain("Authorization: Basic [redacted]");
+  });
+
   test("入站消息剥掉 bridge 的来源头，用户自己打的方括号照留", () => {
     const head = "[🌐 来自 Web 端用户「dev」（HTTP API 接入，非 Discord）。\n用 reply() 回答到本 chat_id。]\n\n你好";
     expect(transcriptOfInbound(head, { user: "dev" })).toBe("👤 dev：你好");
