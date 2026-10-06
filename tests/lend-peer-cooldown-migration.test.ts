@@ -15,7 +15,7 @@ test("version 18 migrates to durable family cooldowns; reopening preserves them"
     closeLedger(path);
     const migrated = openLedger(path);
     expect(migrated.query("PRAGMA user_version").get()).toEqual({ user_version: LEDGER_SCHEMA_VERSION });
-    migrated.run("INSERT INTO lend_peer_cooldowns VALUES ('mate', 'codex', 5000, 'quota', 1000)");
+    migrated.run("INSERT INTO lend_peer_cooldowns (peer, family, until, reason, startedAt) VALUES ('mate', 'codex', 5000, 'quota', 1000)");
     closeLedger(path);
     const reopened = openLedger(path);
     expect(cooldownPeerSlots(reopened, "mate", { codex: 4, claude: 2 }, 2000)).toEqual({ codex: 0, claude: 2 });

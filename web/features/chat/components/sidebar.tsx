@@ -11,9 +11,8 @@ import { StatsPanel } from "./stats-panel";
 import { useT, getLang } from "@/lib/i18n";
 import { ChatHitRow, type ChatSearchHit } from "./search-hits";
 import { SidebarExtraGroups } from "./sidebar-extra-groups";
-import { buildSidebarEntries, buildTeams, entryMembers, filterAndRankWorkers, splitDormant, splitMasterKids, type SidebarEntry, type TeamNode } from "../sidebar-entries";
+import { filterAndRankWorkers, type SidebarEntry, type TeamNode } from "../sidebar-entries";
 import { MasterTeam, TeamGroup, type RowSlots } from "./team-group";
-import { usePersistedSet } from "../use-persisted-set";
 import { AgentRow } from "./agent-row";
 import { AgentMenu } from "./agent-menu";
 import { ProjectMenu } from "./project-menu";
@@ -22,12 +21,16 @@ import { MachineSwitcher } from "../../machines/machine-switcher";
 import { useVersionInfo } from "../../machines/use-version";
 import { searchHistory } from "@/lib/api/chat";
 import { InviteIntake } from "./invite-intake";
-import { Chevron, ProjectGroup } from "./project-group";
+import { ProjectGroup } from "./project-group";
+import { SidebarDirectory, useDirectoryFolds, type DirectoryFolds } from "./sidebar-history";
+import { buildSidebarDirectory, isHistoryAgent } from "../sidebar-history";
 import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
+import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
 
 /**
@@ -39,8 +42,6 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const t = useT();
   const agents = useChatStore((s) => s.state.agents);
   const projects = useChatStore((s) => s.state.projects);
-  const loading = useChatStore((s) => s.state.loadingAgents);
-  const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   const compactingLive = useChatStore((s) => s.state.compacting);
@@ -171,24 +172,19 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const pinSet = new Set(pinnedList);
   // 大总管独立入口(owner 2026-07-14:「跟普通 agent 区分开」)——不进列表、
   // 不参与搜索过滤,常驻列表区顶部的边框卡片
-  const master = agents.find((a) => a.pinnedMaster);
+  const master = agents.find((a) => a.pinnedMaster && !isHistoryAgent(a));
   // 大总管卡不走 AgentRow，【草稿】标单独订阅一份（agent-row.tsx 同款）
   const masterDraft = useSyncExternalStore(subscribeDrafts, () => (master ? hasDraft(master.name) : false), () => false);
-  const workers = agents.filter((a) => !a.pinnedMaster);
+  const workers = agents.filter((a) => a !== master);
   // 只按「置顶」分层,⚠ 未读不参与排序——规则与缘由见 sidebar-entries.ts
   const filtered = filterAndRankWorkers(workers, q, pinSet, master?.name);
   // v2.21+ project 分组(owner 2026-08-28)。搜索时退回平铺(结果直给,不折叠)。
   // 组序 = 组内最近活动(filtered 已按活动排,Map 插入序即组的活动序);未分组沉底。
   const [showProjects, setShowProjects] = useState(false);
-  const [collapsedProjects, toggleProjectCollapse] = usePersistedSet("cstra_proj_collapsed");
-  const [collapsedTeams, toggleTeam] = usePersistedSet("cstra_team_collapsed"); // 派发者（及大总管）下挂的执行者
-  // 「💤 沉寂」组的展开态:默认折叠,会话内记忆即可(不持久化——每次进来先收起)
-  const [dormantOpen, setDormantOpen] = useState(false);
+  // 活目录的 project / 派发者（及大总管）折叠；历史目录另有一套（SidebarDirectory 内）
+  const activeFolds = useDirectoryFolds("active");
   const projMeta = new Map(projects.map((p) => [p.id, p] as const));
-  // 单成员 project 不成组;整组全员沉寂才下沉「💤 沉寂」——规则见 sidebar-entries.ts
-  const entries = buildSidebarEntries(filtered, q, projMeta, master?.name); // 先按 parent 挂树再分组
-  const { awake: underMaster, dormantRows } = splitMasterKids(q ? [] : buildTeams(filtered, master?.name).underMaster);
-  const { activeEntries, dormantEntries } = splitDormant([...entries, ...dormantRows]);
+  const { activeEntries, underMaster, historyEntries, historyCount } = buildSidebarDirectory(q ? [] : filtered, projMeta, master?.name);
   // 三处列表（搜索平铺 / 单人行 / 组内行）共用一份行 props
   const rowProps = (a: AgentSession) => ({
     a,
@@ -204,9 +200,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   });
   const busyOf = (i: AgentSession) => i.busy || (active === i.name && streaming);
   const row = (a: AgentSession, s?: RowSlots & { projEmoji?: string }) => <AgentRow key={a.name} {...rowProps(a)} {...s} />;
-  const team = (n: TeamNode, projEmoji?: string) => (
-    <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={collapsedTeams.has(n.a.name)} busy={n.children.some(busyOf)}
-      onToggle={() => toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
+  const team = (n: TeamNode, folds: DirectoryFolds, projEmoji?: string) => (
+    <TeamGroup key={`t:${n.a.name}`} node={n} collapsed={folds.teams.has(n.a.name)} busy={n.children.some(busyOf)}
+      onToggle={() => folds.toggleTeam(n.a.name)} row={(a, s) => row(a, a === n.a ? { ...s, projEmoji } : s)} />
   );
 
   return (
@@ -233,11 +229,10 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
             onPeers={() => setSettingsPage("peers")}
             onStats={() => setShowStats(true)}
           />
-          <SidebarMediaButton />
+          <SidebarShellButton /><SidebarMediaButton />
           <button
             className="flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"
-            title={t("设置")}
-            aria-label={t("设置")}
+            title={t("设置")} aria-label={t("设置")}
             onClick={() => setSettingsPage("general")}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -337,14 +332,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           }
         }}
       >
-        {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
-            是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}
-        {(!ready || loading) && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("加载中…")}</div>
-        )}
-        {ready && !loading && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("暂无会话")}</div>
-        )}
+        {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
+        <AgentListNotice count={agents.length} />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">
@@ -413,7 +402,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           </button>
         )}
         {master && (
-          <MasterTeam masterName={master.name} kids={underMaster} collapsed={collapsedTeams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => toggleTeam(master.name)} row={(a) => row(a)} />
+          <MasterTeam masterName={master.name} kids={underMaster} collapsed={activeFolds.teams.has(master.name)} busy={underMaster.some(busyOf)} onToggle={() => activeFolds.toggleTeam(master.name)} row={(a) => row(a)} />
         )}
         {agents.length > 0 && filtered.length === 0 && (
           <div className="px-2 py-4 text-sm opacity-50">{t("没有匹配「")}{query.trim()}{t("」的会话")}</div>
@@ -428,47 +417,26 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         ) : (
           /* v2.21+ 方案 A(owner 2026-08-28):统一两级树——仅 ≥2 成员的 project
              出组头(树形缩进),单人项目合并为一行(自定义 emoji 前缀);
-             >30 天沉寂的整体收进底部默认折叠的「💤 沉寂」 */
+             已停止的会话只在底部历史展开后显示 */
           (() => {
-            const renderEntry = (e: SidebarEntry) => {
-              if (e.kind === "row") return team(e, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
+            const renderEntry = (e: SidebarEntry, folds: DirectoryFolds) => {
+              if (e.kind === "row") return team(e, folds, (e.a.projectId && projMeta.get(e.a.projectId)?.emoji) || undefined);
               // 组头 / 组块样式与拖拽放置在 project-group.tsx
               return (
                 <ProjectGroup
                   key={`g:${e.id}`}
                   e={e}
-                  collapsed={collapsedProjects.has(e.id)}
+                  collapsed={folds.projects.has(e.id)}
                   groupBusy={e.items.some(busyOf)}
-                  onToggle={() => toggleProjectCollapse(e.id)}
+                  onToggle={() => folds.toggleProject(e.id)}
                 >
-                  {e.nodes.map((n) => team(n))}
+                  {e.nodes.map((n) => team(n, folds))}
                 </ProjectGroup>
               );
             };
             return (
-              <ul className="flex w-full list-none flex-col gap-0.5 p-0">
-                {activeEntries.map(renderEntry)}
-                {dormantEntries.length > 0 && (
-                  <li key="__dormant__" className="mt-1 rounded-xl bg-base-300/15 p-1">
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left text-[12px] font-medium text-base-content/45 transition-colors hover:bg-base-300/40 hover:text-base-content/70"
-                      onClick={() => setDormantOpen((v) => !v)}
-                    >
-                      <Chevron open={dormantOpen} />
-                      <span>💤 {t("沉寂")}</span>
-                      <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/35">
-                        {dormantEntries.reduce((n, e) => n + entryMembers(e).length, 0)}
-                      </span>
-                    </button>
-                    {dormantOpen && (
-                      <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5 opacity-75">
-                        {dormantEntries.map(renderEntry)}
-                      </ul>
-                    )}
-                  </li>
-                )}
-              </ul>
+              <SidebarDirectory activeEntries={activeEntries} historyEntries={historyEntries} historyCount={historyCount}
+                activeFolds={activeFolds} renderEntry={renderEntry} />
             );
           })()
         )}

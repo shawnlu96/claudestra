@@ -7,13 +7,17 @@
  *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复），
  *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
  *   [stub:call:<工具>:<base64url 的 JSON 参数>] = 先调这个 MCP 工具、结果写进回复（T96 派单工具实测，可写多个，按顺序调）；
- *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）。
+ *   [stub:policy] = reply 之后被提供方策略拦下（AIR 给 request 类、不带动作的 sessionFailure，没声明给 legacy 的 cyberPolicy 错误；ACPE1）；
+ *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）；STUB_INITIALIZE=<JSON> = 按 JSON merge patch 改 initialize 回包
+ *   （null 删键：{"protocolVersion":2}、{"protocolVersion":null} 测协议不兼容，{"_meta":{"steering":null}} 测可选能力降级，见 lib/acp/protocol.ts）。
+ * - /compact：见 compact()，照 codex-acp 2.1.1 的形状（docs/runtimes/codex-acp.md「压缩完成信号」）。
  * 沙箱里 acp 固定起它（lib/acp/stub.ts，不用也不认 CLAUDESTRA_ACP_AGENT）；沙箱外单测 / 排查可用 CLAUDESTRA_ACP_AGENT='["bun","<repo>/scripts/acp-stub.ts"]'。
  */
 import { randomUUID } from "node:crypto";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ACP_PROTOCOL_VERSION } from "../src/lib/acp/protocol.ts";
 
 type Rec = Record<string, any>;
 const out = (m: Rec) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
@@ -21,6 +25,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let sessionId = "";
 let air = false;
+/** 宿主声明了 clientCapabilities.session.compaction（ACP unstable）：压缩按 compaction_update 报，不再当工具调用 */
+let compaction = false;
 let mcp: { client: Client; server: string } | null = null;
 let running: { cancelled: boolean; steered: string[] } | null = null;
 const config: Rec[] = [
@@ -37,6 +43,14 @@ const requestHost = (method: string, params: Rec) => new Promise<Rec>((resolve) 
   out({ id, method, params });
 });
 
+/** RFC 7386 JSON merge patch：对象逐键合并，null 删键，其它值整个替换（STUB_INITIALIZE 用） */
+function mergePatch(base: unknown, patch: unknown): unknown {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
+  const out: Rec = base && typeof base === "object" && !Array.isArray(base) ? { ...base } : {};
+  for (const [k, v] of Object.entries(patch)) if (v === null) delete out[k]; else out[k] = mergePatch(out[k], v);
+  return out;
+}
+
 const update = (u: Rec) => out({ method: "session/update", params: { sessionId, update: u } });
 const status = (type: string) => update({ sessionUpdate: "session_info_update", _meta: { codex: { threadStatus: { type, ...(type === "active" ? { activeFlags: [] } : {}) } } } });
 
@@ -49,7 +63,7 @@ async function startMcp(): Promise<void> {
   const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
   for (const k of (s.env_vars ?? []) as string[]) if (process.env[k] !== undefined) env[k] = process.env[k]!;
   // 测试 / 沙箱标记和目录照带（CLAUDESTRA_*：状态 / 运行目录、沙箱开关、测试标记）：真 Codex 只给 env_vars 白名单，但 stub 起的
-  // channel-server 丢了它们就会按生产规则跑（lib/test-guard.ts、沙箱闸）。stub 自己不引 src/lib：沙箱闸会在加载时查 bridge 地址
+  // channel-server 丢了它们就会按生产规则跑（lib/test-guard.ts、沙箱闸）。stub 只引零依赖的 lib/acp/protocol.ts：别的 src/lib 模块会在加载时过沙箱闸、查 bridge 地址
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && (k.startsWith("CLAUDESTRA_") || k === "NODE_ENV" || k === "TMPDIR")) env[k] ??= v;
   const client = new Client({ name: "acp-stub", version: "1" });
   await client.connect(new StdioClientTransport({ command: s.command, args: s.args ?? [], env, stderr: "ignore" }));
@@ -104,6 +118,40 @@ function lendWork(bun: string, manager: string, orderId: string): string {
   return `（lend submit：${(r.stdout.toString() || r.stderr.toString()).trim().slice(0, 200)}）`;
 }
 
+/**
+ * /compact 独占的一轮，照 codex-acp 2.1.1（CodexAgent.tryHandleCommand → runCompact）：压缩真的结束才回 session/prompt。
+ * 声明了 session.compaction → compaction_update（in_progress → completed / failed / cancelled，同一个 compactionId）；
+ * 没声明 → 「Compact conversation」工具调用（只有开始和完成，失败 / 取消没有专门的更新）。
+ * 注入：[stub:compact-fail] = 失败（failed + JSON-RPC 错误），[stub:compact-slow] = 等 session/cancel（30 秒没等到照常完成），
+ * [stub:compact-dup] = completed 连发两次（测宿主去重）；缺省成功。
+ */
+async function compact(text: string): Promise<Rec> {
+  const run = (running = { cancelled: false, steered: [] });
+  status("active");
+  const id = `cmp-${randomUUID().slice(0, 8)}`;
+  const mark = (state: string, error?: string) => {
+    if (compaction) return update({ sessionUpdate: "compaction_update", compactionId: id, status: state, ...(error ? { error } : {}) });
+    if (state === "in_progress") update({ sessionUpdate: "tool_call", toolCallId: id, title: "Compact conversation", kind: "think", status: state });
+    else if (state === "completed") update({ sessionUpdate: "tool_call_update", toolCallId: id, status: state });
+  };
+  try {
+    mark("in_progress");
+    if (text.includes("[stub:compact-slow]")) for (let i = 0; i < 300 && !run.cancelled; i++) await sleep(100);
+    if (run.cancelled) return mark("cancelled"), { stopReason: "cancelled" };
+    if (text.includes("[stub:compact-fail]")) {
+      mark("failed", "Codex ended the turn before compaction completed. (stub)");
+      throw { code: -32603, message: "Internal error", data: { message: "compaction failed (stub)" } };
+    }
+    mark("completed");
+    if (text.includes("[stub:compact-dup]")) mark("completed");
+    update({ sessionUpdate: "usage_update", used: 321, size: 272000 });
+    return { stopReason: "end_turn" };
+  } finally {
+    running = null;
+    status("idle");
+  }
+}
+
 /** 一轮：正文 → 命令 → （慢回合等打断）→ reply → 用量 */
 async function turn(text: string): Promise<Rec> {
   running = { cancelled: false, steered: [] };
@@ -143,6 +191,13 @@ async function turn(text: string): Promise<Rec> {
     const extra = `${perm}${who}${lend}${calls}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
     const reply = `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`;
     if (chatId && !text.includes("[stub:noreply]")) await callMcp("reply", { chat_id: chatId, text: reply });
+    if (text.includes("[stub:policy]")) {
+      await sleep(2_000); // 现场是 reply 之后 4 秒才被拦：等那句回复把回程槽消化完再失败
+      const title = "This content was flagged for possible cybersecurity risk. (stub)";
+      const failure = { id: `${randomUUID()}:error`, revision: 1, category: "request", severity: "error", title, actions: [] };
+      if (air) return { stopReason: "end_turn", _meta: { jetbrains: { air: { version: 1, sessionFailure: failure } } } };
+      throw { code: -32603, message: "Internal error", data: { message: title, codexErrorInfo: "cyberPolicy" } };
+    }
     const sendTo = /\[stub:send:([^\]\s]+)\]/.exec(text)?.[1];
     if (sendTo) await callMcp("send_to_agent", { target: sendTo, text: `stub ${sessionId.slice(0, 8)} 跨实例问候（lab）` });
     update({ sessionUpdate: "usage_update", used: 1234 + text.length, size: 272000 });
@@ -157,13 +212,14 @@ async function handle(m: Rec): Promise<Rec | undefined> {
   const p = m.params ?? {};
   switch (m.method) {
     case "initialize":
+      compaction = p.clientCapabilities?.session?.compaction != null;
       air = Array.isArray(p.clientCapabilities?._meta?.jetbrains?.air?.capabilities) && p.clientCapabilities._meta.jetbrains.air.capabilities.includes("sessionFailure");
-      return {
-        protocolVersion: 1,
+      return mergePatch({
+        protocolVersion: ACP_PROTOCOL_VERSION,
         agentInfo: { name: "acp-stub", version: "0" },
         agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {}, fork: {} } },
         _meta: { steering: { supported: true } },
-      };
+      }, JSON.parse(process.env.STUB_INITIALIZE || "{}")) as Rec;
     case "session/new":
       sessionId = randomUUID();
       return { sessionId, configOptions: config };
@@ -177,8 +233,10 @@ async function handle(m: Rec): Promise<Rec | undefined> {
       sessionId = String(p.sessionId);
       await startMcp();
       return { configOptions: config };
-    case "session/prompt":
-      return turn((p.prompt ?? []).map((b: Rec) => b.text ?? "").join("\n"));
+    case "session/prompt": {
+      const text = (p.prompt ?? []).map((b: Rec) => b.text ?? "").join("\n");
+      return /^\/compact(\s|$)/i.test(text.trim()) ? compact(text) : turn(text); // 认命令同 codex-acp parseCommand：首块去空白后 /名字
+    }
     case "_session/steering": {
       const text = (p.prompt ?? []).map((b: Rec) => b.text ?? "").join("\n");
       if (running) return running.steered.push(text), update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "（收到插话）" } }), { outcome: "injected" };

@@ -14,6 +14,9 @@ import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
+import { mergeTrainPass, type TrainContext } from "./scheduler-merge-train-tick.js";
+import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
+import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
@@ -29,6 +32,7 @@ import { autostartHooks, type AutostartHooks } from "./scheduler-autostart-deps.
 import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
+import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -39,6 +43,11 @@ export interface PassOpts {
   manager?: Manager;
   external?: (project: SchedulerConfig["projects"][string]) => MergeExternal;
   deployJobs?: DeployJobs;
+  /** The merge train's GitHub port and state store; tests inject fakes (default: the guarded gh and the state-dir file, none in a test process). */
+  train?: TrainContext;
+  /** The in-pass train tick (default mergeTrainPass: guarded gh, PM notices, required checks from scheduler.json); tests hand in
+   *  mergeTrainTick with fake ports and their own required checks, still called here, between trainProjects and mergeTick. */
+  trainTick?: (db: Database, projects: readonly string[], active: Active) => Promise<void>;
   autoDeps?: (active: Active) => AutoTickDeps;
   /** Tests point this at a private lock / update marker / update request. */
   maintenance?: { path?: string; marker?: string; request?: string };
@@ -87,6 +96,7 @@ function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
   return {
     manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now, borrow: d.borrow && guard(active, d.borrow),
+    prState: d.prState && guard(active, d.prState),
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
 }
@@ -105,11 +115,18 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
+      // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
+      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
+      // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
+      const trainTick = opts.trainTick ?? ((d, ps, a) => mergeTrainPass(d, ps, a, opts.train));
+      await trainTick(db, trainProjects(db, localMerge, trains), active);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
-      await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase());
+      await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
+      // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
+      failed.push(...(await reclaimLentSlots(db, localMerge, manager, trains)).failed);
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       // 监护先于自动派单：它认领了恢复的回合失败，auto-tick 这一轮就让开（agent-supervisor-hold.ts）；关着时两步都不碰
@@ -118,6 +135,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       if (config.autoDispatch === true) {
         const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
+        failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
         const deps = supervising ? withSupervisorHold(base, db) : base;
         const autoPace = pace.phase();

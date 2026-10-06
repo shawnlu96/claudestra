@@ -7,6 +7,8 @@
  * 判错一次就是「该催的不催」或「该欠的被别人销掉」。
  */
 
+import { peerSeesAnswer } from "./peer-reply-files.js";
+
 /**
  * 这条 envelope 要不要挂 pendingReply。
  *
@@ -158,14 +160,56 @@ export function dropVoidedPendings(books: VoidableBooks, channelId: string, void
   return n;
 }
 
+/** 认领要看的字段；siblingThreadId = 它等着时 agent 的回复记到了同一调用方的另一条（那条的 threadId），Stop 兜底据此说明「没单独答复」 */
+type ApiQueued = { messageId?: string; threadId: string; siblingThreadId?: string };
+/** 已结掉的 API 请求（apiThreadResults 的条目，按形状收）：peerSeesAnswer 为假 = 调用方还在轮询这个 thread 等补答（peer 空回合后盯 2 小时） */
+type ApiSettled = { result: { reply: string | null; files?: unknown }; ts: number; tokenId?: string; agentChannelId?: string; messageId?: string };
+export interface ApiReplyClaim<T> { taken?: T; threadId?: string; warning?: string; error?: string }
+
 /**
- * 出站回复认领挂着的哪条 API 请求（队列按 token + agent 频道分）：普通回复先来先答；带 inReplyTo 的（作废回显）只认它回的那一条，
- * 对不上就谁也不认——按先来先答会把「你那条已作废」塞给同一 token 在等的另一条同步请求，那条自己的等待反而拿到空结果（adv5）。
+ * 出站回复认领挂着的哪条 API 请求（队列按 token + agent 频道分、按到达顺序）。inReplyTo（bridge 的作废回显）/ replyTo（agent 的 reply_to）
+ * 只认那一条，对不上谁也不认：落到同一 token 的另一条上，那条的等待就拿到了别人的答复（adv5）。都没给：认 agent 看到过的最新一条——
+ * 它答的通常是最近那条，押着还没送到它手上的（unseen）不算；一条都没看到过才退回最早一条（单条时与改前一致）。waiting = 剩下看到过的。
  */
-export function takeApiPending<T extends { messageId?: string }>(queue: T[], inReplyTo?: string): T | undefined {
-  if (!inReplyTo) return queue.shift();
-  const k = queue.findIndex((p) => p.messageId === inReplyTo);
-  return k >= 0 ? queue.splice(k, 1)[0] : undefined;
+function takeApiPending<T extends ApiQueued>(queue: T[], id: string | undefined, unseen?: ReadonlySet<string | undefined>): { taken?: T; waiting: T[] } {
+  const seen = (p: T) => !p.messageId || !unseen?.has(p.messageId);
+  const newestSeen = queue.findLastIndex(seen);
+  const k = id ? queue.findIndex((p) => p.messageId === id) : newestSeen >= 0 ? newestSeen : queue.length ? 0 : -1;
+  const taken = k >= 0 ? queue.splice(k, 1)[0] : undefined;
+  return { taken, waiting: queue.filter(seen) };
+}
+
+/**
+ * agent 发往 api:<token> 的回复记到哪：认领到在等的请求（同一调用方还有别的在等时给它们记 siblingThreadId，没指明回哪条就在 warning 里列出）；
+ * reply_to 指向已结掉、对方还没当答复收下的那条（peerSeesAnswer：没正文也没附件）→ 写回它的 thread（调用方还在轮询，能真正送到）；都不是 → peer 只收它在等的请求的答复，报错不投；
+ * 网页 / API 调用方经事件流也收得到主动消息，照投，reply_to 对不上时提醒没记到请求上。tests/api-reply-claim.test.ts。
+ */
+export function claimApiReply<T extends ApiQueued>(queue: T[], settled: Map<string, ApiSettled>, by: {
+  tokenId: string; channelId: string; peer?: string; inReplyTo?: string; replyTo?: string; unseen?: ReadonlySet<string | undefined>; now?: number;
+}): ApiReplyClaim<T> {
+  const { taken, waiting } = takeApiPending(queue, by.inReplyTo ?? by.replyTo, by.unseen);
+  if (by.inReplyTo) return { taken }; // 作废回显不是 agent 的答复：不记、不提醒
+  const ids = waiting.map((w) => w.messageId ?? w.threadId).join("、");
+  if (taken) {
+    // 就地写：条目同时被 HTTP 那头的同步等待（entry.resolve）和 Stop 快照（按对象认）引用，换成副本它们就看不到了
+    for (const w of waiting) w.siblingThreadId = taken.threadId;
+    if (by.replyTo || !waiting.length) return { taken };
+    return { taken, warning: `同一调用方有 ${waiting.length + 1} 条请求在等，这条回复记到了最新的 ${taken.messageId}；还在等：${ids}。`
+      + `已经一并答了就不用再做什么（回合结束时它们会收到「本回合没有单独答复」的说明）；要分别答复就带 reply_to=<message_id> 再 reply` };
+  }
+  const mine = [...settled].filter(([, s]) => s.messageId && s.tokenId === by.tokenId && s.agentChannelId === by.channelId);
+  const prev = by.replyTo ? mine.find(([, s]) => s.messageId === by.replyTo) : undefined;
+  if (prev && !peerSeesAnswer(prev[1].result)) return { threadId: prev[0] };
+  const ago = prev ? `${Math.max(1, Math.round(((by.now ?? Date.now()) - prev[1].ts) / 60_000))} 分钟前` : "";
+  const why = !by.replyTo ? `api:${by.tokenId} 现在没有在等你答复的请求`
+    : prev ? `reply_to=${by.replyTo} 那条请求${ago}已经回过（agent 的答复或 bridge 兜底），对方已取走、不再等待`
+    : `reply_to=${by.replyTo} 对不上 api:${by.tokenId} 在等的请求（已答过、已超时被清掉，或不是这个调用方的）`;
+  const owed = mine.filter(([, s]) => !peerSeesAnswer(s.result)).map(([, s]) => s.messageId).join("、");
+  const rest = (waiting.length ? `；还在等：${ids}，要答它们就带 reply_to=<message_id>` : "")
+    + (owed ? `；之前回合没答上、对方还在轮询等补答的：${owed}，带 reply_to=<message_id> 补答能送到` : "");
+  if (by.peer) return { error: `${why}${rest}。peer 只收得到它在等的请求的答复，这次回复对方收不到，没有投递` };
+  if (!by.replyTo) return {}; // 网页 / API 调用方的主动消息经事件流送达，照旧
+  return { warning: `${why}${rest}。这次回复没有记到任何请求上，只经事件流送达：网页看得到，靠 wait / 轮询取答复的调用方收不到` };
 }
 
 type ApiWait = { messageId?: string; waitUntil?: number; resolve?: unknown };

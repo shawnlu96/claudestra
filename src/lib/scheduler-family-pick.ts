@@ -1,3 +1,4 @@
+import { poolPeerFamily } from "./scheduler-agent-pool.js";
 /** Family policy overlays the existing placement gates, tiers and load ranking; it never edits the hello's slot counts. */
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { peerFamily as availableFamily, peerRefusal, placeFor as placeByTier, type PeerFacts, type PlaceRole, type PlacementFacts, type Placement } from "./scheduler-placement.js";
@@ -21,12 +22,14 @@ export function parseWriteFamilies(raw: unknown, where: string): { writeFamilies
 
 /** A fix must keep its author's family even if the preferred writing family has changed since the initial order. */
 export function peerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFamily,
-  writeFamilies: readonly AuthorFamily[] = DEFAULT_WRITE_FAMILIES): AuthorFamily | null {
+  writeFamilies: readonly AuthorFamily[] = DEFAULT_WRITE_FAMILIES, unified = false): AuthorFamily | null {
+  if (unified) return poolPeerFamily(p, role, family);
   if (role !== "write") return availableFamily(p, "review", family);
   return writeFamilies.find((f) => (p.v2?.slots[f] ?? 0) > 0) ?? null;
 }
 
 export function placeFor(facts: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
+  if (facts.remote?.agents) return placeByTier(facts, role, family);
   if (role === "review") return placeByTier(facts, role, family);
   const peers = facts.peers.map((p) => {
     if (!p.v2) return p;

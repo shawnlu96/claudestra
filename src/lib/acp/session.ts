@@ -6,19 +6,27 @@
  *   这个序号之后的第一个 idle。已经来过就立刻兑现——不会「先完成、后挂监听」；序号只增，也不会拿上一轮的 idle 充数。
  * - 适配器退出（rpc 断流）：在途请求由 rpc 全部 reject，挂着的外部回合等待在这里一律以失败兑现，没有永远等不到的调用。
  * - idle 带了这一轮的结局（Pi 适配器的 _meta.claudestra.turn）就按它兑现：steering 另起的回合失败了也得出卡、报 StopFailure。
+ * - 适配器自己开的回合（Pi 的异步子任务回调 triggerTurn、压缩后续跑）：线程从非 active 变 active 时既没有 prompt 在途、也没有
+ *   steer 另起的回合在等，就当自发回合交给宿主（onSelfTurn），等到下一个 idle。codex-acp 只在宿主的 prompt / steer 期间变 active，不受影响。
  * 规矩与形状见 docs/runtimes/codex-acp.md；tests/acp-session.test.ts。
  */
 import { configRefusal, parseConfigOptions, resolveConfigValue, type ConfigOption } from "./config.js";
 import { airFailureOf, classifyAirFailure, classifyNeutralFailure, classifyPromptError } from "./failures.js";
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
+import { ACP_PROTOCOL_VERSION, AcpIncompatibleError, checkInitialize, type AgentInfo } from "./protocol.js";
 import { createRpcPeer, type RpcPeer, type RpcWire } from "./rpc.js";
 import type { PromptOutcome, SteerResult } from "./turn.js";
 import { threadStatusOf, turnEndOf } from "./updates.js";
 
-/** initialize 时声明的客户端能力：AIR 的 sessionFailure（结构化失败）+ 终端输出增量（声明了 AIR 不声明它，命令输出就收不到） */
+/**
+ * initialize 时声明的客户端能力：AIR 的 sessionFailure（结构化失败）+ 终端输出增量（声明了 AIR 不声明它，命令输出就收不到）；
+ * session.compaction（ACP unstable）：codex-acp 才按 compaction_update 报压缩的开始 / 完成 / 失败（updates.ts 认 completed 出边界），
+ * 不声明它只给一个「Compact conversation」工具调用，宿主分不出压缩成没成。核对见 docs/runtimes/codex-acp.md「压缩完成信号」
+ */
 export const CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false,
+  session: { compaction: {} },
   _meta: { terminal_output_delta: true, jetbrains: { air: { version: 1, capabilities: ["sessionFailure"] } } },
 };
 
@@ -30,9 +38,14 @@ export interface SessionDeps {
   log(msg: string): void;
   /** 卡片 / 失败文案里的运行时称呼（缺省 Codex） */
   label?: string;
+  /** 适配器自己开了一轮（见文件头）：done 在这一轮结束时兑现。不给就不跟（create / fork 的短命引导会话） */
+  onSelfTurn?(done: Promise<PromptOutcome>): void;
 }
 
-type Waiter = { after: number; resolve: (o: PromptOutcome) => void; cancelled: boolean };
+/** _claudestra/cancel 等适配器清完队列最多这么久（bridge 等回执 1.5s，过了照样认迟到的作废列表） */
+const CANCEL_TIMEOUT_MS = 5_000;
+
+type Waiter = { after: number; resolve: (o: PromptOutcome) => void; cancelled: boolean; selfTurn?: true };
 type TurnEnd = ReturnType<typeof turnEndOf>;
 
 export class AcpSession {
@@ -40,7 +53,14 @@ export class AcpSession {
   sessionId = "";
   configOptions: ConfigOption[] = [];
   steering = false;
+  /** 适配器在 initialize 回包里报的名字和版本（没报是 null）：宿主接上线程时记进日志 */
+  agentInfo: AgentInfo | null = null;
+  /** 适配器的 cancel 会先清掉排队消息并把正文交回来（Pi 适配器 _claudestra/cancel）；codex-acp 没有，照旧发 session/cancel 通知 */
+  private cancelReturnsQueue = false;
   private statusSeq = 0;
+  private lastStatus: string | null = null;
+  /** 在途的 session/prompt：回包那一刻同步减（rpc onResult），之后到的 active 才可能是自发回合 */
+  private prompting = 0;
   private lastEnd: { seq: number; status: string; end: TurnEnd } | null = null;
   private waiters: Waiter[] = [];
   private turnSeq = 0;
@@ -64,11 +84,16 @@ export class AcpSession {
     this.rpc.onClosed((why) => this.endAll(why));
   }
 
-  /** initialize，返回适配器声明的会话能力 */
-  async initialize(): Promise<{ resume: boolean; fork: boolean }> {
-    const r = await this.rpc.request("initialize", { protocolVersion: 1, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "claudestra-acp-host", version: "1" } }, { timeoutMs: 60_000 });
+  /** initialize：回包先过协议版本与必要能力检查（protocol.ts，不过就抛 AcpIncompatibleError），返回接线程要用的会话能力。need.fork = 要 fork */
+  async initialize(need: { fork?: boolean } = {}): Promise<{ resume: boolean; fork: boolean }> {
+    const params = { protocolVersion: ACP_PROTOCOL_VERSION, clientCapabilities: CLIENT_CAPABILITIES, clientInfo: { name: "claudestra-acp-host", version: "1" } };
+    const r = await this.rpc.request("initialize", params, { timeoutMs: 60_000 });
+    const verdict = checkInitialize(r, need);
+    if (!verdict.ok) throw new AcpIncompatibleError(verdict.reason);
+    this.agentInfo = verdict.agentInfo;
     this.steering = r?._meta?.steering?.supported === true;
-    return { resume: !!r?.agentCapabilities?.sessionCapabilities?.resume, fork: !!r?.agentCapabilities?.sessionCapabilities?.fork };
+    this.cancelReturnsQueue = r?._meta?.claudestra?.cancelReturnsQueue === true;
+    return { resume: verdict.resume, fork: verdict.fork };
   }
 
   /** 接上已有线程：支持 resume 就用它（不回放历史），否则 session/load（回放的历史更新宿主不需要，照样只进 onUpdate） */
@@ -96,35 +121,63 @@ export class AcpSession {
     return this.sessionId;
   }
 
+  /** 线程此刻在跑（最近一次线程状态是 active）：宿主据此答忙、叫停时取消，哪怕这一轮不是它发的 */
+  get running(): boolean {
+    return this.lastStatus === "active";
+  }
+
   async prompt(text: string, timeoutMs?: number): Promise<PromptOutcome> {
     const turnKey = `${this.sessionId}#${++this.turnSeq}`;
+    let open = true;
+    const settled = () => void (open && ((open = false), this.prompting--));
+    this.prompting++;
     try {
-      const r = await this.rpc.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { timeoutMs });
+      const r = await this.rpc.request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { timeoutMs, onResult: settled });
       const air = airFailureOf(r);
       if (air) return { kind: "failed", failure: classifyAirFailure(air, this.label) };
       return r?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
     } catch (e) {
       return { kind: "failed", failure: classifyPromptError(e, turnKey) };
+    } finally {
+      settled();
     }
   }
 
-  /** steering：startedNewTurn 的结束信号在回包那一刻同步登记（见文件头） */
+  /**
+   * steering：startedNewTurn 的结束信号在回包那一刻同步登记（见文件头）。这一轮的 active 先于回包到、已经当自发回合交给宿主了
+   * （回合调度器在报上一轮 Stop 时插的话，codex-acp 可能先报 active）：同一轮不再跟第二次，按「插进了在跑的回合」答
+   */
   async steer(text: string): Promise<SteerResult> {
     let done: Promise<PromptOutcome> | null = null;
-    const r = await this.rpc.request(
-      "_session/steering",
-      { sessionId: this.sessionId, prompt: [{ type: "text", text }] },
-      { onResult: (res: any) => void (res?.outcome === "startedNewTurn" && (done = this.waitEndAfter(this.statusSeq))) },
-    );
-    if (r?.outcome === "injected") return { outcome: "injected" };
+    let tracked = false;
+    const onResult = (res: any) => {
+      if (res?.outcome !== "startedNewTurn") return;
+      tracked = this.waiters.some((w) => w.selfTurn);
+      if (!tracked) done = this.waitEndAfter(this.statusSeq);
+    };
+    const r = await this.rpc.request("_session/steering", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { onResult });
+    if (r?.outcome === "injected" || tracked) return { outcome: "injected" };
     if (r?.outcome === "startedNewTurn") return { outcome: "startedNewTurn", done: done ?? this.waitEndAfter(this.statusSeq) };
     return { outcome: "failed" };
   }
 
-  /** 打断当前回合（通知，不等回）。挂着的外部回合等待记成「被打断」 */
-  cancel(): void {
+  /**
+   * 打断当前回合，挂着的外部回合等待记成「被打断」。返回适配器清掉的排队消息正文（宿主据此在回执里列出作废的消息）：
+   * 适配器支持就发 _claudestra/cancel 等它清完队列（不等回合停下）；不支持（codex-acp）或出错就发 session/cancel 通知、回空。从不 reject
+   */
+  async cancel(): Promise<string[]> {
     for (const w of this.waiters) w.cancelled = true;
-    this.rpc.notify("session/cancel", { sessionId: this.sessionId });
+    const params = { sessionId: this.sessionId };
+    if (this.cancelReturnsQueue) {
+      try {
+        const r = await this.rpc.request("_claudestra/cancel", params, { timeoutMs: CANCEL_TIMEOUT_MS });
+        return (Array.isArray(r?.cleared) ? r.cleared : []).filter((t: unknown): t is string => typeof t === "string");
+      } catch (e) {
+        this.deps.log(`_claudestra/cancel 没成（${e instanceof Error ? e.message : e}），改发 session/cancel`);
+      }
+    }
+    this.rpc.notify("session/cancel", params);
+    return [];
   }
 
   /** 改会话配置（模型 / 推理强度…）：先把值对上选项（resolveConfigValue）再本地校验，再调 set_config_option，成功后更新缓存 */
@@ -154,6 +207,10 @@ export class AcpSession {
 
   private noteStatus(status: string, end: TurnEnd): void {
     const seq = ++this.statusSeq;
+    const started = status === "active" && this.lastStatus !== "active";
+    this.lastStatus = status;
+    const track = this.deps.onSelfTurn;
+    if (started && track && !this.prompting && !this.waiters.length) return this.trackSelfTurn(seq, track);
     if (status !== "idle" && status !== "systemError") return;
     const last = (this.lastEnd = { seq, status, end });
     const due = this.waiters.filter((w) => seq > w.after);
@@ -170,6 +227,13 @@ export class AcpSession {
       return { kind: "failed", failure: classifyNeutralFailure(f.kind, key, message) ?? { kind: "error", key, message } };
     }
     return cancelled || e.end?.stopReason === "cancelled" ? { kind: "cancelled" } : { kind: "done" };
+  }
+
+  /** 适配器自己开的一轮（见文件头）：挂一个等它结束的等待交给宿主，宿主当 external 槽跟到 idle 再报 Stop */
+  private trackSelfTurn(seq: number, track: (done: Promise<PromptOutcome>) => void): void {
+    const done = new Promise<PromptOutcome>((resolve) => this.waiters.push({ after: seq, resolve, cancelled: false, selfTurn: true }));
+    this.deps.log(`${this.label} 自己开了一轮（不是宿主发的 prompt）：跟到它结束再报 Stop`);
+    track(done);
   }
 
   /** 适配器退出：挂着的等待一律以失败兑现（在途请求由 rpc 自己 reject） */

@@ -331,10 +331,16 @@ export interface Approval {
   result?: { token: string; credentialId: string; principalId: string; expiresAt: string };
 }
 
-/** 手输短码的待确认队列：浏览器兑换成功 → pending → Mac 侧 approve/deny → 浏览器轮询取结果 */
+/**
+ * 手输短码的待确认队列：浏览器兑换成功 → pending → Mac 侧 approve/deny → 浏览器轮询取结果。
+ * onUnclaimed：批准了、凭据已签，但过期前没人来取（浏览器离开了配对页）——token 随这条一起丢了，调用方据此收回那张凭据。
+ */
 export class Approvals {
   private readonly items = new Map<string, Approval>();
-  constructor(private readonly now: () => number = Date.now, private readonly random: Random = defaultRandom, private readonly ttlMs = APPROVAL_TTL_MS) {}
+  constructor(
+    private readonly now: () => number = Date.now, private readonly random: Random = defaultRandom, private readonly ttlMs = APPROVAL_TTL_MS,
+    private readonly onUnclaimed: (a: Approval) => void = () => {},
+  ) {}
 
   add(a: { code: string; deviceName: string; clientIp: string | null; grant: Grant; guest?: string; issuer?: string; local?: { claim: string } }): Approval {
     this.prune();
@@ -393,6 +399,10 @@ export class Approvals {
 
   private prune(): void {
     const now = this.now();
-    for (const [id, a] of this.items) if (a.expiresAt <= now) this.items.delete(id);
+    for (const [id, a] of this.items) {
+      if (a.expiresAt > now) continue;
+      this.items.delete(id);
+      if (a.state === "approved" && a.result) this.onUnclaimed(a);
+    }
   }
 }

@@ -13,6 +13,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { isWriteStep } from "./lend-git.js";
 import { advance, getOrder, JournalConflict, orderOf, type LendRow } from "./lend-journal.js";
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
+import { arbiterSubmit } from "./lend-arbiter-submit.js";
+import { lendVerdictForPeer } from "./memory-tools-wire.js";
 
 /** 报告正文与整个请求体的上限（T93 lend wire v1）：超了让 worker 自己精简，不截断 */
 const REPORT_MAX_BYTES = 64 * 1024;
@@ -82,7 +84,7 @@ function buildPayload(row: LendRow, input: SubmitInput): { ok: true; payload: Le
   const bytes = Buffer.byteLength(input.report);
   if (!input.report.trim()) return { ok: false, error: "报告正文不能为空" };
   if (bytes > REPORT_MAX_BYTES) return { ok: false, error: `报告正文 ${bytes} 字节，超过 ${REPORT_MAX_BYTES}，请精简后再交（不截断）` };
-  const payload: LendResultPayload = { v: 1, orderId: row.orderId, gen: row.leaseGen, verdict: parsed.value, report: input.report,
+  const payload: LendResultPayload = { v: 1, orderId: row.orderId, gen: row.leaseGen, verdict: lendVerdictForPeer(parsed.value), report: input.report,
     session: { id: row.sessionId, family: row.family } };
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return { ok: false, error: `结论整体超过 ${BODY_MAX_BYTES} 字节，请精简报告或问题描述后再交` };
@@ -169,7 +171,7 @@ export async function submitLendResult(db: Database, orderId: string, input: Sub
   if (refused) return { ok: false, error: refused };
   const who = await submitterProblem(row, d);
   if (who) return { ok: false, error: who };
-  return commitLendResult(db, row, input, now);
+  return arbiterSubmit(db, row, input, now) ?? commitLendResult(db, row, input, now);
 }
 
 /**

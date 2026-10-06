@@ -5,25 +5,21 @@
  * token 被抄走、或者以后经中转服务器转发时，签名仍然只有私钥持有者做得出来。
  * 接收方对 peer token 强制验签（bridge/peer-signature.ts、lib/peer-trust.ts）；密钥与 instance-id 分开：
  * instance-id 是对方自报的合并标识，这个才是凭据。纯逻辑部分单测在 tests/instance-key.test.ts。
+ * 纯签名 / 验签在 instance-signature.ts（不读本机状态）；这里只管默认本机钥匙与文件，并保留旧导出路径。
  */
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify, type KeyObject } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { join } from "node:path";
+import {
+  signedHeaders as signedHeadersWith, signPurpose as signPurposeWith,
+  type InstanceKey, type SignPurpose,
+} from "./instance-signature.js";
 import { readOrCreateKeyFile } from "./key-file.js";
 import { STATE_DIR } from "./paths.js";
 
-export interface InstanceKey {
-  /** 公钥：Ed25519 原始 32 字节的 base64url（43 个字符） */
-  publicKey: string;
-  privateKey: KeyObject;
-}
-
-/**
- * 协议里收到的公钥只认这种形状，而且只认规范编码：末字符有两位不参与解码，一把钥匙本来能写成四种串，
- * 钉住、比对都按原串做，多种写法会被当成换了钥匙（与签名同口径，见 isCanonicalSig）
- */
-export function isPublicKey(v: unknown): v is string {
-  return typeof v === "string" && /^[A-Za-z0-9_-]{43}$/.test(v) && Buffer.from(v, "base64url").toString("base64url") === v;
-}
+export {
+  isPublicKey, MAX_SKEW_S, SIG_HEADERS, verifyPurpose, verifySigned,
+  type InstanceKey, type SigCheck, type SignPurpose,
+} from "./instance-signature.js";
 
 /** 给人核对用的指纹：公钥 sha256 的前 16 位十六进制，四位一组 */
 export function keyFingerprint(publicKey: string): string {
@@ -52,20 +48,9 @@ export function instanceKeySync(dir: string = STATE_DIR): InstanceKey | null {
   }
 }
 
-/** 签名覆盖的内容：方法、路径（含查询串）、时间戳、正文哈希——换任何一样签名都对不上 */
-function canonical(method: string, path: string, ts: string, body: string | Uint8Array): Buffer {
-  const bodyHash = createHash("sha256").update(body).digest("hex");
-  return Buffer.from(`claudestra-req-v1\n${method.toUpperCase()}\n${path}\n${ts}\n${bodyHash}`);
-}
-
-export const SIG_HEADERS = { key: "x-claudestra-key", ts: "x-claudestra-ts", sig: "x-claudestra-sig" } as const;
-
 /** 出站请求要加的三个头；本机没有密钥时返回空对象 */
 export function signedHeaders(method: string, path: string, body: string | Uint8Array, key = instanceKeySync(), now = Date.now()): Record<string, string> {
-  if (!key) return {};
-  const ts = String(Math.floor(now / 1000));
-  const sig = sign(null, canonical(method, path, ts, body), key.privateKey).toString("base64url");
-  return { [SIG_HEADERS.key]: key.publicKey, [SIG_HEADERS.ts]: ts, [SIG_HEADERS.sig]: sig };
+  return signedHeadersWith(method, path, body, key, now);
 }
 
 /** 按完整 URL 签（对方看到的是 pathname + 查询串）；URL 解析不了就不签 */
@@ -78,63 +63,7 @@ export function signedFor(method: string, url: string, body: string | Uint8Array
   }
 }
 
-/**
- * 实例钥匙按用途签文本时认的用途（白名单）。第一行是用途前缀，签给一种用途的签名挪不到另一种用途，也挪不成请求签名
- * （claudestra-req-v1）或中继登录签名（claudestra-relay-auth-v2）——这两种的原文拼法和这里一样，所以只认登记过的用途，
- * 新用途在这里加一行，首行不能和任何已有签名原文相同。
- */
-const SIGN_PURPOSES = ["claudestra-invite-pop-v1", "claudestra-lend-receipt-v1", "claudestra-shared-ledger-v1"] as const;
-export type SignPurpose = (typeof SIGN_PURPOSES)[number];
-
-/** 字段里不许有换行，否则字段边界能被挪动 */
-function purposeMessage(purpose: string, fields: string[]): Buffer | null {
-  if (!(SIGN_PURPOSES as readonly string[]).includes(purpose) || fields.some((f) => /[\r\n]/.test(f))) return null;
-  return Buffer.from([purpose, ...fields].join("\n"));
-}
-
+/** 不给钥匙时用本机钥匙签；用途白名单与原文拼法见 instance-signature.ts */
 export function signPurpose(purpose: SignPurpose, fields: string[], key = instanceKeySync()): { key: string; sig: string } | null {
-  const msg = purposeMessage(purpose, fields);
-  return key && msg ? { key: key.publicKey, sig: sign(null, msg, key.privateKey).toString("base64url") } : null;
-}
-
-export function verifyPurpose(publicKey: string, purpose: SignPurpose, fields: string[], sig: string): boolean {
-  const msg = purposeMessage(purpose, fields);
-  if (!msg || !isPublicKey(publicKey) || !isCanonicalSig(sig)) return false;
-  try {
-    return verify(null, msg, createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: publicKey }, format: "jwk" }), Buffer.from(sig, "base64url"));
-  } catch {
-    return false; // 公钥解析不了：和签名对不上是一回事
-  }
-}
-
-/** 时间戳允许的偏差：两台机器时钟差 + 网络，超过就当重放 */
-export const MAX_SKEW_S = 300;
-
-export type SigCheck = "ok" | "bad" | "stale";
-
-/** Ed25519 签名 64 字节 = 86 个 base64url 字符（无填充） */
-const SIG_RE = /^[A-Za-z0-9_-]{86}$/;
-
-/**
- * 签名串必须是规范编码：Node 的 base64url 解码很宽松（补 =、夹非法字符、改末字符里用不到的低位都解出同样的字节），
- * 不规范的写法一律当 bad——防重放按签名去重（lib/peer-trust.ts ReplayCache），同一签名只能有一种写法。
- */
-function isCanonicalSig(sig: string): boolean {
-  return SIG_RE.test(sig) && Buffer.from(sig, "base64url").toString("base64url") === sig;
-}
-
-export function verifySigned(
-  publicKey: string,
-  req: { method: string; path: string; ts: string; sig: string; body: string | Uint8Array },
-  now = Date.now(),
-): SigCheck {
-  const ts = Number(req.ts);
-  if (!Number.isFinite(ts) || Math.abs(now / 1000 - ts) > MAX_SKEW_S) return "stale";
-  if (!isCanonicalSig(req.sig)) return "bad";
-  try {
-    const pub = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: publicKey }, format: "jwk" });
-    return verify(null, canonical(req.method, req.path, req.ts, req.body), pub, Buffer.from(req.sig, "base64url")) ? "ok" : "bad";
-  } catch {
-    return "bad"; // 公钥或签名格式坏了：和签名对不上是一回事
-  }
+  return signPurposeWith(purpose, fields, key);
 }

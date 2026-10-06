@@ -53,11 +53,22 @@ function blocks(title: string, rows: readonly string[], cap: number): string[] {
  * The folding quoteExternal does later (drop \p{Cf}, controls and blank runs to one space) plus NFKC, lines kept. Redaction
  * must run on this form: on the raw text a zero-width or full-width split hides a token that quoting then rejoins.
  */
-const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
+export const fold = (s: string): string => s.replace(/\p{Cf}+/gu, "").normalize("NFKC").replace(/\p{Cf}+/gu, "").replace(/\r\n?/g, "\n")
   .split("\n").map((l) => l.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ")).join("\n");
 
 /** Text that came from a peer (a lent review's report and findings) is folded and masked the same way before this machine stores it. */
 export const sanitizeForeign = (s: string): string => redactForPeer(fold(s)).text;
+
+/**
+ * Free text going to a peer outside an order (lend relays, ledger-lend-relay.ts): refuse-first like the order gate, and an address /
+ * personal info that the order path would mask refuses too (a relay is pushed as is, never rewritten). null = may go.
+ */
+export function peerTextRefusal(s: string): string | null {
+  const folded = fold(s);
+  const rule = peerSecretHit(folded, null);
+  if (rule) return `疑似含密钥（${rule}）`;
+  return redactForPeer(folded).count > 0 ? "含内网地址 / 个人信息" : null;
+}
 
 /**
  * Gate for both peer exits. Head must equal the ledger's full SHA; free text can quote that exact whole value.

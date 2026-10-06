@@ -75,6 +75,7 @@ export interface ApiUserEndpoint {
   kind: "api";
   /** token 短 id（"tok_xxx"），虚拟 chat_id 的 id 部分 */
   tokenId: string;
+  credential?: string; // Recheck a device grant after PM redirection, rather than its broader principal.
   /** token 的人类名，渲染进 agent 看到的 header */
   name: string;
   /** v2.11+ HTTP peer 标记(principal.peer 透传):入站注入头渲染成 peer 请求 */
@@ -169,7 +170,9 @@ export interface Envelope {
 // ============================================================
 
 export type DeliveryOutcome =
-  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" | "codex_menu" }   // 成功投递；heldBy = 押后原因（额度闸 / 停在额度菜单，没发键，bridge/quota-wall-wiring.ts）
+  // 成功投递；heldBy = 押后原因（额度闸 / 停在额度菜单，没发键，bridge/quota-wall-wiring.ts）；
+  // warning = 正文送到了但附件没送到（bridge/api-reply-files.ts），reply 结果原样带给 agent，不报成功
+  | { kind: "sent"; discordMessageIds?: string[]; note?: string; heldBy?: "quota_wall" | "wall_menu" | "codex_menu"; warning?: string }
   | { kind: "dropped"; reason: string }                               // 主动丢弃（信任检查 / 目标离线等）
   | { kind: "error"; error: Error };                                  // 失败
 

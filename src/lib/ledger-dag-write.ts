@@ -5,19 +5,22 @@
  * dag-approve 核对 owner 本人批准、哈希按库里的提案行重算、四条规矩按那一刻的卡状态重判，全过才写版本；否则提案作废（这一笔照常提交）。
  * 审批 ask 的 fromAgent 是发起的 PM：owner 作答后 bridge 把答复投回它，由它跑 dag-approve。
  */
+import { reasonOf } from "./shared-ledger-gate-reason.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
-import { diffNodes, nodePhase, planRewrite, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
-import { DAG_REASON_KINDS, type DagReasonKind } from "./ledger-feature-schema.js";
+import { cardContext } from "./ledger-card-names.js";
+import { diffNodes, nodePhase, proposalSha, type DagCancel, type ProposalContent } from "./ledger-dag-rules.js";
 import {
   effectiveNodes, getDagVersion, getPendingProposal, getProposal, type DagNode, type DagProposal, type DagVersion, type Feature,
 } from "./ledger-feature.js";
 import { buildNodes, linkTasks, mustFeature, nodeTask, requireManager } from "./ledger-feature-write.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
+import { dropPageCheck, planPageRewrite, withPageCheck } from "./ui-acceptance.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
 
 const DAG_ACTION = "dag_rewrite";
@@ -25,7 +28,6 @@ const APPROVE = "dag_rewrite_approve";
 const REJECT = "dag_rewrite_reject";
 /** owner 可能隔几天才看：审批窗口给满 7 天（ask-check 从开出算，答了也不延长） */
 const ASK_TTL_MS = 7 * 24 * 3600_000;
-const REASON_MAX = 2000;
 
 const ops = (...names: string[]) => (prev: LedgerEvent) => names.includes(String(prev.data.op));
 
@@ -110,14 +112,6 @@ function closeProposal(db: Database, ctx: WriteCtx, f: Feature, p: DagProposal, 
   return insertEvent(db, ctx, { project: f.project, target: f.id, kind: "feature", text: note, data }, primary);
 }
 
-function reasonOf(kind: string, text: string): { reasonKind: DagReasonKind; reasonText: string } {
-  if (!DAG_REASON_KINDS.slice(1).includes(kind as DagReasonKind)) throw new LedgerError("invalid", `--reason-kind 只能是 ${DAG_REASON_KINDS.slice(1).join(" / ")}`);
-  const t = String(text ?? "").trim();
-  if (!t) throw new LedgerError("invalid", "重写要带 --reason（原因原文：owner 原话或审查结论）");
-  if ([...t].length > REASON_MAX) throw new LedgerError("invalid", `--reason 不超过 ${REASON_MAX} 字`);
-  return { reasonKind: kind as DagReasonKind, reasonText: t };
-}
-
 function openApproval(db: Database, f: Feature, c: ProposalContent, sha: string, why: string[], from: RewriteInput["askFrom"], now: number): Ask {
   const bind = { action: DAG_ACTION, params: { feature: f.id, version: c.version, sha }, approve: [APPROVE] };
   return openAskFull(db, {
@@ -142,6 +136,7 @@ function rewriteReplayed(db: Database, f: Feature, e: LedgerEvent): RewriteOutco
 export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): WriteResult<RewriteOutcome> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
+    requireLocalSharedLedgerPlanning(f.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     const dup = replay(db, ctx, key, () => null, ops("dag-rewrite", "dag-propose"));
     if (dup) return { ...dup, row: rewriteReplayed(db, f, dup.event) };
@@ -150,13 +145,14 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
     checkCas(f, input.rev);
     const now = ctx.now ?? Date.now();
     clearStalePending(db, ctx, f, now);
-    const plan = planRewrite(cur, livePhase(db), buildNodes(db, f, input.nodes), input.cancel, input.scopeChange);
+    const plan = planPageRewrite(cur, livePhase(db), withPageCheck(db, f, buildNodes(db, f, dropPageCheck(input.nodes)), cur.nodes),
+      input.cancel, input.scopeChange, cardContext(db, f));
     const c: ProposalContent = { featureId: f.id, version: cur.version + 1, baseVersion: cur.version, ...reasonOf(input.reasonKind, input.reasonText),
       nodes: plan.nodes, cancels: plan.cancels, scopeChange: input.scopeChange };
     const change = summary(cur.nodes, c);
     if (!plan.needsOwner.length) {
       const rev = applyVersion(db, ctx, f, c, { proposedBy: ctx.actor, approvedBy: "auto", askId: null });
-      const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, rev } }, true);
+      const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, uiPageCheck: true, rev } }, true);
       return { row: { version: getDagVersion(db, f.id, c.version), proposal: null, ask: null, inform: informOf(f, c, change) }, event, duplicate: false };
     }
     const sha = proposalSha(c);
@@ -188,7 +184,7 @@ function approvalProblem(db: Database, f: Feature, p: DagProposal, a: Ask | null
   try {
     const cancel = new Map(p.cancels.map((x: DagCancel) => [x.key, x.reason]));
     const input = p.nodes.map(({ key, taskId, oneLine, deps, estimate, fileGlobs }) => ({ key, taskId, oneLine, deps, estimate, fileGlobs }));
-    planRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange);
+    planPageRewrite(currentDag(db, f), livePhase(db), buildNodes(db, f, input), cancel, p.scopeChange, cardContext(db, f));
   } catch (e) {
     if (e instanceof LedgerError) return { state: "void", why: `卡的状态变了，按现在的规矩不成立：${e.message}` };
     throw e;
@@ -206,6 +202,7 @@ export interface ApproveOutcome {
 export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): WriteResult<ApproveOutcome> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
+    requireLocalSharedLedgerPlanning(f.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     // 重放按事件记下的提案还原，不取最新一份：之后可能又有新的提案
     const dup = replay(db, ctx, key, () => null, ops("dag-approve", "dag-reject", "dag-void"));
@@ -228,7 +225,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     const approvedBy = (a as Ask).answer?.principal || "owner";
     const rev = applyVersion(db, ctx, f, contentOf(p), { proposedBy: p.proposedBy, approvedBy, askId: p.askId });
     db.prepare("UPDATE dag_proposals SET state = 'approved', decidedAt = ?, decidedBy = ? WHERE seq = ?").run(now, approvedBy, p.seq);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-approve", version: p.version, proposal: p.seq, askId: p.askId, approvedBy, rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-approve", version: p.version, proposal: p.seq, askId: p.askId, approvedBy, uiPageCheck: true, rev } }, true);
     return { row: { applied: true, version: getDagVersion(db, f.id, p.version), proposal: getProposal(db, p.seq) as DagProposal, why: null }, event, duplicate: false };
   });
 }
@@ -237,6 +234,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
 export function bindNode(db: Database, ctx: WriteCtx, input: { id: string; rev: number; key: string; taskId: string }): WriteResult<DagNode> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
+    requireLocalSharedLedgerPlanning(f.id);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     const load = () => currentDag(db, mustFeature(db, f.id)).nodes.find((n) => n.key === input.key) as DagNode;
     const dup = replay(db, ctx, key, load, ops("dag-bind"));

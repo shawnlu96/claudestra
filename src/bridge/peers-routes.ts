@@ -77,7 +77,8 @@ async function listPeers(runManager: RunManager): Promise<Response> {
       signature: peerSignatureState(p.name), // 对方请求的验签结果与钉住的指纹（bridge/peer-signature.ts）
     };
   });
-  const localAgents = regAgents.map((a) => ({
+  // Registry kind defines workers; names can also belong to ordinary sessions. Existing peer scopes stay intact.
+  const localAgents = regAgents.filter((a) => a.kind !== "worker").map((a) => ({
     name: a.name.startsWith("agent-") ? a.name.slice(6) : a.name,
     external: !!a.external,
     status: a.status ?? "unknown",

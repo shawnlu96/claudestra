@@ -1,62 +1,34 @@
 /**
  * i28-R6 B 侧：写单副本上锁推不出去、推送只推订单分支（不 force、不推 main / 别的分支、不改写历史）、lab 地址换成本地 bare 仓库（真 git）；
- * lend 循环的写单流程（没开 write 不领、订单分支必须按本机指纹算、试推没权限就退回、交活后推送 + 开 PR 再转交付、推送失败的两种收尾），
+ * lend 循环的写单流程（旧 review 授权也领写单、订单分支必须按本机指纹算、试推没权限就退回、交活后推送 + 开 PR 再转交付、推送失败的两种收尾），
  * 外来原文只进 worker 的派单、不进任何命令行 / 名字；lend submit 的写单形态。A 与 worker 是假的。
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LendEntry } from "../src/lib/lend-config.js";
 import { prepareClone, WRITE_LOCK } from "../src/lib/lend-clone.js";
 import { lendBranch, lendRepoUrl } from "../src/lib/lend-git.js";
-import { advance, getOrder, openLendJournal, patchOrder } from "../src/lib/lend-journal.js";
+import { advance, getOrder, patchOrder } from "../src/lib/lend-journal.js";
 import { lendTick, type LoopDeps } from "../src/lib/lend-loop.js";
 import { ensurePr, probePush, pushWork, type PushResult } from "../src/lib/lend-push.js";
 import type { LendOp } from "../src/lib/lend-remote.js";
 import { submitLendResult, submitLendWork, type SubmitterDeps } from "../src/lib/lend-submit.js";
 import type { HttpPeer } from "../src/lib/peers.js";
-import { testChildEnv } from "./test-env.ts";
+import { writeEnv, writeLab, writeResources } from "./lend-write-fixture.ts";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { DOWN_REASON, MISS_GAP_MS, type CodexFailureSeen } from "../src/lib/lend-health.js";
 import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 
-/** 不读本机全局 / 系统配置（CI 上没有 user.name），提交身份显式给 */
-const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
-  GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
-const git = (cwd: string, ...args: string[]): string => {
-  const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: GIT_ENV });
-  if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
-  return r.stdout.toString().trim();
-};
-const tryGit = (cwd: string, ...args: string[]) => Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: GIT_ENV }).exitCode;
-
-/** lab 根下 git/<owner>/<repo>.git 的 bare 仓库，main 上一个提交 */
-function lab() {
-  const root = mkdtempSync(join(tmpdir(), "lend-lab-"));
-  const env = { PATH: process.env.PATH, HOME: root, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_LAB_ROOT: root }; // HOME 指到空目录：不读本机全局 git 配置
-  const bare = join(root, "git", "o", "r.git");
-  mkdirSync(bare, { recursive: true });
-  git(bare, "init", "-q", "--bare", "-b", "main");
-  const seed = join(root, "seed");
-  mkdirSync(seed);
-  git(seed, "init", "-q", "-b", "main");
-  writeFileSync(join(seed, "a.txt"), "a\n");
-  Bun.spawnSync(["ln", "-s", "/etc/hosts", join(seed, ".env")]);
-  git(seed, "add", "a.txt", ".env");
-  git(seed, "-c", "user.name=s", "-c", "user.email=s@x", "commit", "-q", "-m", "seed");
-  git(seed, "push", "-q", bare, "main");
-  return { root, env, bare, lendRoot: join(root, "lend"), main: git(bare, "rev-parse", "main") };
-}
-
+let resources = writeResources();
+afterEach(async () => {
+  const owned = resources;
+  resources = writeResources();
+  await owned.dispose();
+});
+const lab = () => writeLab(resources);
 const BR = "lend/T1-abcd";
-const commit = (dir: string, file: string) => {
-  writeFileSync(join(dir, file), `${file}\n`);
-  git(dir, "add", file);
-  git(dir, "commit", "-q", "-m", file);
-  return git(dir, "rev-parse", "HEAD");
-};
 
 describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
   test("lab 里仓库地址是本地 bare 仓库；生产（没开沙箱）永远是 GitHub", () => {
@@ -66,7 +38,8 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
 
   test("P1 反例：worker 在副本里 push main / 别的分支 / 任何地址都失败；出借服务只推订单分支，main 不动", async () => {
     const L = lab();
-    const c = await prepareClone({ orderId: "o1", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "lender", email: "l@x" } }, { root: L.lendRoot, env: L.env });
+    const { git, tryGit, commit } = L;
+    const c = await prepareClone({ orderId: "o1", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "lender", email: "l@x" } }, { root: L.lendRoot, env: L.env, run: L.run });
     expect(c.ok).toBe(true);
     const dir = (c as { dir: string }).dir;
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe(BR);
@@ -74,12 +47,12 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     for (const [k, v] of WRITE_LOCK) expect(git(dir, "config", "--get", k) === v || v === "").toBe(true);
     const h = commit(dir, "b.txt");
     for (const target of ["origin", L.bare, `file://${L.bare}`, "../../../git/o/r.git"]) {
-      expect(tryGit(dir, "push", target, "HEAD:main")).not.toBe(0);
-      expect(tryGit(dir, "push", target, `HEAD:${BR}`)).not.toBe(0);
+      expect(tryGit(dir, "push", target, "HEAD:main")).toMatchObject({ code: 128, stderr: expect.stringContaining("not allowed") });
+      expect(tryGit(dir, "push", target, `HEAD:${BR}`)).toMatchObject({ code: 128, stderr: expect.stringContaining("not allowed") });
     }
     expect(git(L.bare, "branch", "--list")).toBe("* main");
     const t = { orderId: "o1", repo: "o/r", branch: BR, base: "main", cloneDir: dir, orderHead: L.main };
-    const opts = { root: L.lendRoot, env: L.env };
+    const opts = { root: L.lendRoot, env: L.env, run: L.run };
     expect(await pushWork({ ...t, head: h }, opts)).toEqual({ ok: true });
     expect(git(L.bare, "rev-parse", BR)).toBe(h);
     expect(git(L.bare, "rev-parse", "main")).toBe(L.main);
@@ -89,30 +62,32 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
 
   test("P1 反例：出借人全局配置里放行了逐协议（protocol.file.allow=always 等）→ 副本里照样盖成 never，worker 直接 push main 失败", async () => {
     const L = lab();
-    writeFileSync(join(L.root, ".gitconfig"), '[protocol "file"]\n\tallow = always\n[protocol "lendtest"]\n\tallow = always\n');
-    const c = await prepareClone({ orderId: "o9", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "lender", email: "l@x" } }, { root: L.lendRoot, env: L.env });
+    const { git, tryGit, commit } = L;
+    L.env.GIT_CONFIG_GLOBAL = join(L.env.HOME, ".gitconfig");
+    writeFileSync(L.env.GIT_CONFIG_GLOBAL, '[protocol "file"]\n\tallow = always\n[protocol "lendtest"]\n\tallow = always\n');
+    const c = await prepareClone({ orderId: "o9", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "lender", email: "l@x" } }, { root: L.lendRoot, env: L.env, run: L.run });
     expect(c.ok).toBe(true);
     const dir = (c as { dir: string }).dir;
     const h = commit(dir, "b.txt");
-    // worker 的 git 照常读出借人的全局配置（HOME 就是 lab 根），不隔离
-    const asWorker = testChildEnv({ HOME: L.root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" });
-    const wGit = (...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe", env: asWorker });
-    expect(wGit("config", "--get", "protocol.lendtest.allow").stdout.toString().trim()).toBe("never");
+    // Only this lab reads the synthetic global config; the clone must override its protocol grants.
+    expect(git(L.root, "config", "--get", "protocol.lendtest.allow")).toBe("always");
+    expect(git(dir, "config", "--get", "protocol.lendtest.allow")).toBe("never");
     for (const target of [L.bare, `file://${L.bare}`]) {
-      expect(wGit("push", target, "HEAD:main").exitCode).not.toBe(0);
-      expect(wGit("push", target, `HEAD:${BR}`).exitCode).not.toBe(0);
+      expect(tryGit(dir, "push", target, "HEAD:main")).toMatchObject({ code: 128, stderr: expect.stringContaining("not allowed") });
+      expect(tryGit(dir, "push", target, `HEAD:${BR}`)).toMatchObject({ code: 128, stderr: expect.stringContaining("not allowed") });
     }
     expect(git(L.bare, "rev-parse", "main")).toBe(L.main);
     expect(git(L.bare, "branch", "--list")).toBe("* main");
     const t = { orderId: "o9", repo: "o/r", branch: BR, base: "main", cloneDir: dir, orderHead: L.main };
-    expect(await pushWork({ ...t, head: h }, { root: L.lendRoot, env: L.env })).toEqual({ ok: true }); // 出借服务照样推订单分支
+    expect(await pushWork({ ...t, head: h }, { root: L.lendRoot, env: L.env, run: L.run })).toEqual({ ok: true }); // 出借服务照样推订单分支
     expect(git(L.bare, "rev-parse", BR)).toBe(h);
     expect(git(L.bare, "rev-parse", "main")).toBe(L.main);
   });
 
   test("P1 反例：订单分支是 main / 别的名字、交的 head 不是新提交、改写了历史、远端被别人推过——一律不推", async () => {
     const L = lab();
-    const opts = { root: L.lendRoot, env: L.env };
+    const { git, tryGit, commit } = L;
+    const opts = { root: L.lendRoot, env: L.env, run: L.run };
     const c = await prepareClone({ orderId: "o2", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "l", email: "l@x" } }, opts);
     const dir = (c as { dir: string }).dir;
     const t = { orderId: "o2", repo: "o/r", branch: BR, base: "main", cloneDir: dir, orderHead: L.main };
@@ -141,7 +116,8 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
 
   test("修复单：在订单分支的 head 上接着改，快进推上去", async () => {
     const L = lab();
-    const opts = { root: L.lendRoot, env: L.env };
+    const { git, tryGit, commit } = L;
+    const opts = { root: L.lendRoot, env: L.env, run: L.run };
     const c1 = await prepareClone({ orderId: "b", repo: "o/r", pr: null, head: L.main, write: { branch: BR, name: "l", email: "l@x" } }, opts);
     const d1 = (c1 as { dir: string }).dir;
     const h1 = commit(d1, "b.txt");
@@ -162,17 +138,110 @@ describe("写单副本与推送（真 git，lab 本地 bare 仓库）", () => {
     const N = "2".repeat(40);
     const run = async (argv: string[], o: { env: Record<string, string> }): Promise<BoundedResult> => {
       seen.push({ argv, env: o.env });
-      const push = argv[1] === "push";
+      const push = argv.includes("push");
       if (push) return { code: 128, stdout: "", stderr: "remote: Permission to o/r.git denied to lender.\nfatal: ... 403", timedOut: false };
       return { code: 0, stdout: argv[1] === "rev-parse" ? N : "", stderr: "", timedOut: false };
     };
-    const root = mkdtempSync(join(tmpdir(), "lend-push-fake-"));
+    const root = resources.temp();
     const r: PushResult = await pushWork({ orderId: "o", repo: "o/r", branch: BR, base: "main", cloneDir: "/c", orderHead: H, head: N },
       { root, run: run as never, env: { PATH: "/usr/bin", HOME: "/h", GH_TOKEN: "ghp_secret", CLAUDESTRA_CONTROL_TOKEN: "x" } });
     expect(r).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("fork") });
-    const pushes = seen.filter((s) => s.argv[1] === "push");
-    expect(pushes.map((s) => s.argv)).toEqual([["git", "push", "--porcelain", "https://github.com/o/r.git", `${N}:refs/heads/${BR}`]]);
+    const pushes = seen.filter((s) => s.argv.includes("push"));
+    expect(pushes.map((s) => s.argv)).toEqual([
+      ["git", "-c", "credential.helper=!gh auth git-credential", "push", "--porcelain", "https://github.com/o/r.git", `${N}:refs/heads/${BR}`],
+    ]);
     for (const s of seen) expect(Object.keys(s.env).filter((k) => /TOKEN|SECRET/.test(k))).toEqual([]);
+  });
+});
+
+describe("write fixture isolation and cleanup", () => {
+  test("inherited synthetic Git config cannot poison the original clone/push entry", async () => {
+    const root = resources.temp();
+    const env = writeEnv(root);
+    const poison = join(root, "poison.gitconfig");
+    writeFileSync(poison, '[protocol "file"]\nallow = never\n');
+    const result = await resources.run([
+      process.execPath, "--no-env-file", "--config=/dev/null", "test", import.meta.path, "-t", "P1 反例：worker 在副本",
+    ], { cwd: process.cwd(), timeoutMs: 4_000, env: {
+      ...env, GIT_CONFIG_GLOBAL: poison, GIT_CONFIG_SYSTEM: poison,
+      GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "protocol.file.allow", GIT_CONFIG_VALUE_0: "never",
+      GIT_CONFIG_PARAMETERS: "'protocol.file.allow=never'", GIT_DIR: join(root, "missing.git"),
+      GIT_WORK_TREE: join(root, "missing-worktree"), GIT_INDEX_FILE: join(root, "foreign-index"),
+    } });
+    expect(result).toMatchObject({ code: 0, timedOut: false, stderr: expect.stringContaining("1 pass") });
+    expect(existsSync(join(root, "foreign-index"))).toBe(false);
+  });
+
+  test("two concurrent labs keep config, refs and cleanup independent", async () => {
+    const left = writeResources();
+    const right = writeResources();
+    try {
+      const a = writeLab(left);
+      const b = writeLab(right);
+      for (const key of ["HOME", "TMPDIR", "CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"]) expect(a.env[key]).not.toBe(b.env[key]);
+      a.git(a.seed, "config", "fixture.owner", "left");
+      expect(b.tryGit(b.seed, "config", "--get", "fixture.owner").code).toBe(1);
+      const results = await Promise.allSettled([a, b].map(async (L, i) => {
+        const opts = { root: L.lendRoot, env: L.env, run: L.run };
+        const c = await prepareClone({ orderId: "same", repo: "o/r", pr: null, head: L.main,
+          write: { branch: BR, name: "test", email: "test@example.invalid" } }, opts);
+        if (!c.ok) throw new Error(c.reason);
+        const head = L.commit(c.dir, `only-${i}.txt`);
+        expect(await pushWork({ orderId: "same", repo: "o/r", branch: BR, base: "main", cloneDir: c.dir, orderHead: L.main, head }, opts)).toEqual({ ok: true });
+        expect(L.git(L.bare, "rev-parse", "main")).toBe(L.main);
+        return head;
+      }));
+      const heads = results.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
+      expect(heads[0]).not.toBe(heads[1]);
+      expect(a.git(a.bare, "rev-parse", BR)).toBe(heads[0]);
+      expect(b.git(b.bare, "rev-parse", BR)).toBe(heads[1]);
+      await left.dispose();
+      expect(existsSync(a.root)).toBe(false);
+      expect(b.git(b.bare, "rev-parse", BR)).toBe(heads[1]);
+      await right.dispose();
+      expect(existsSync(b.root)).toBe(false);
+    } finally {
+      await Promise.all([left.dispose(), right.dispose()]);
+    }
+  });
+
+  test("cleanup awaits its child and preserves the actual failing exit code", async () => {
+    const owned = writeResources();
+    try {
+      const root = owned.temp();
+      const task = owned.run(["/bin/sh", "-c", "printf fixture-stderr >&2; exit 23"], {
+        cwd: root, env: writeEnv(root), timeoutMs: 1_000,
+      });
+      await owned.dispose();
+      expect(await task).toMatchObject({ code: 23, stderr: "fixture-stderr", timedOut: false });
+      expect(existsSync(root)).toBe(false);
+    } finally { await owned.dispose(); }
+  });
+
+  test("real Git failure preserves exit/stderr; thrown setup still releases DB and directories", async () => {
+    const owned = writeResources();
+    const db = owned.journal();
+    let root = "";
+    let failedRoot = "";
+    try {
+      const L = writeLab(owned);
+      root = L.root;
+      // A deliberate local transport failure must remain red after inherited pollution is removed.
+      L.env.GIT_CONFIG_COUNT = "1";
+      L.env.GIT_CONFIG_KEY_0 = "protocol.file.allow";
+      L.env.GIT_CONFIG_VALUE_0 = "never";
+      expect(L.tryGit(L.seed, "push", L.bare, "main")).toMatchObject({ code: 128, stderr: expect.stringContaining("not allowed") });
+      expect(() => L.git(L.seed, "push", L.bare, "main")).toThrow(/exit 128.*fatal: transport/s);
+      expect(() => { failedRoot = owned.temp(); throw new Error("setup failed"); }).toThrow("setup failed");
+    } finally { await owned.dispose(); }
+    expect(existsSync(root)).toBe(false);
+    expect(existsSync(failedRoot)).toBe(false);
+    expect(() => owned.temp()).toThrow("already disposed");
+    expect(() => db.query("SELECT 1").get()).toThrow();
+    await owned.dispose(); // afterEach can safely repeat cleanup after a setup finally.
   });
 });
 
@@ -196,7 +265,7 @@ const wire = { v: 1, orderId: "w1", taskId: "T93", specRev: 1, dagVersion: null,
 
 function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: string; probe?: PushResult; work?: PushResult[]; result?: string[]; anon?: boolean;
   renew?: { refuse: string | null }; writeOpen?: boolean } = {}) {
-  const db = openLendJournal(":memory:");
+  const db = resources.journal();
   const calls: { op: LendOp; body: Record<string, unknown> }[] = [];
   const log = { clones: [] as unknown[], created: [] as string[], sent: [] as string[], pushed: [] as unknown[], prs: [] as { title: string; body: string }[] };
   const results = [...(o.result ?? [])];
@@ -252,12 +321,12 @@ function harness(o: { roles?: LendEntry["roles"]; until?: string; branch?: strin
 }
 
 describe("lend 循环：写单", () => {
-  test("P1 反例：出借声明没开 write，写单不落 journal、不 claim", async () => {
+  test("旧 review 声明照样收写单、claim", async () => {
     const h = harness({ roles: ["review"] });
     await h.tick();
     await h.tick();
-    expect(getOrder(h.db, "w1")).toBeNull();
-    expect(h.ops()).not.toContain("claim");
+    expect(getOrder(h.db, "w1")!.state).toBe("claimed");
+    expect(h.ops()).toContain("claim");
   });
 
   test("P1 反例：授权过期，写单不落 journal、不 claim", async () => {
@@ -268,11 +337,12 @@ describe("lend 循环：写单", () => {
     expect(h.log.clones).toEqual([]);
   });
 
-  test("P1 反例（i28-W1）：写单开关关着（writeOpen=false）时授权里写了 write，整条不生效：不 poll、不 claim、不起 worker", async () => {
+  test("测试关闭写单收单开关：仍 poll，但不 claim、不起 worker", async () => {
     const h = harness({ writeOpen: false });
     for (let i = 0; i < 4; i++) await h.tick();
     expect(getOrder(h.db, "w1")).toBeNull();
-    expect(h.ops()).toEqual([]);
+    expect(h.ops()).toContain("poll");
+    expect(h.ops()).not.toContain("claim");
     expect(h.log.created).toEqual([]);
   });
 

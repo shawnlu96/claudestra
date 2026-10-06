@@ -10,10 +10,9 @@ import { parseLsRemote, type RemoteHead } from "./order-deliver.js";
 import type { BoundedResult } from "./run-bounded.js";
 import { isSandbox } from "./sandbox.js";
 import { LAB_ROOT_ENV } from "./sandbox-lab.js";
+import type { LendStep } from "./lend-wire-types.js";
 
-/** 出借单的步骤：review = 审查；write = 开工单（卡在 build）；fix = 修复单（卡在 fix） */
-const LEND_STEPS = ["review", "write", "fix"] as const;
-export type LendStep = (typeof LEND_STEPS)[number];
+export type { LendStep } from "./lend-wire-types.js";
 const WRITE_STEPS: readonly LendStep[] = ["write", "fix"];
 export const isWriteStep = (s: string): boolean => (WRITE_STEPS as readonly string[]).includes(s);
 

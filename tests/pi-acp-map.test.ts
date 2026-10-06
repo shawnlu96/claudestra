@@ -3,6 +3,7 @@ import {
   configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, stopReasonOf, threadStatus, usageUpdate,
 } from "../src/lib/acp/pi-adapter/map.ts";
 import { createAcpTranslator } from "../src/lib/acp/updates.ts";
+import { piLineToClaudeShape } from "../src/lib/pi-session.ts";
 
 const assistantStart = { type: "message_start", message: { role: "assistant", content: [] } };
 const delta = (text: string) => ({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
@@ -30,7 +31,7 @@ describe("Pi 适配器 · 事件映射", () => {
     expect(m.takeOutcome()).toEqual({});
   });
 
-  test("工具：内置工具按 kind 给标题 / 路径，MCP 拆成 server/tool/arguments；宿主翻出 Bash / Read / mcp__claudestra__reply", () => {
+  test("工具：内置工具按 kind 给标题 / 路径，MCP 拆成 server/tool/arguments；宿主翻出 Bash / Read / mcp__claudestra__reply / LS", () => {
     const m = createPiEventMapper();
     const start = (id: string, toolName: string, args: object) => m.push({ type: "tool_execution_start", toolCallId: id, toolName, args });
     const end = (id: string, text: string, isError = false) => m.push({ type: "tool_execution_end", toolCallId: id, result: { content: [{ type: "text", text }] }, isError });
@@ -48,9 +49,80 @@ describe("Pi 适配器 · 事件映射", () => {
     const t = createAcpTranslator(() => "T");
     const blocks = ups.flatMap((u) => t.push(u)).map((e) => e.message.content[0]);
     expect(blocks.filter((b) => b.type === "tool_use").map((b) => [b.name, b.input])).toEqual([
-      ["Bash", { command: "ls -la" }], ["Read", { file_path: "/w/x.ts" }], ["mcp__claudestra__reply", { chat_id: "api:t", text: "hi" }], ["ls", { path: "/w" }],
+      ["Bash", { command: "ls -la" }], ["Read", { file_path: "/w/x.ts" }], ["mcp__claudestra__reply", { chat_id: "api:t", text: "hi" }], ["LS", { path: "/w" }],
     ]);
     expect(blocks.filter((b) => b.type === "tool_result").map((b) => [b.content, b.is_error ?? false])).toEqual([["total 0", false], ["boom", true], ["sent", false]]);
+  });
+
+  test("工具卡入参与 tmux 版（会话文件 → piLineToClaudeShape）逐字一致：Edit 带 diff、Write 带内容、find 是 Glob", () => {
+    const calls: [string, Record<string, unknown>][] = [
+      ["edit", { path: "/w/a.ts", edits: [{ oldText: "const a = 1;", newText: "const a = 2;" }] }],
+      ["write", { path: "/w/b.md", content: "# 标题\n正文" }],
+      ["find", { pattern: "**/*.ts", path: "/w" }],
+      ["grep", { pattern: "TODO", path: "/w", glob: "*.ts", ignoreCase: true }],
+      ["read", { path: "/w/c.ts", offset: 10, limit: 20 }],
+      ["bash", { command: "ls", timeout: 5 }],
+    ];
+    const m = createPiEventMapper();
+    const t = createAcpTranslator(() => "T");
+    for (const [i, [toolName, args]] of calls.entries()) {
+      const [live] = m.push({ type: "tool_execution_start", toolCallId: `t${i}`, toolName, args }).flatMap((u) => t.push(u));
+      const line = JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: `t${i}`, name: toolName, arguments: args }] } });
+      expect(live.message.content[0], toolName).toEqual(piLineToClaudeShape(line)!.message.content[0]);
+    }
+  });
+
+  test("嵌套调用不带 toolUse：宿主照旧按标题显示，「↳ 」留得住", () => {
+    const m = createPiEventMapper();
+    const t = createAcpTranslator(() => "T");
+    const [e] = m.push({ type: "tool_execution_start", toolCallId: "c1/1", toolName: "bash", args: { command: "ls" }, parentToolCallId: "c1" }).flatMap((u) => t.push(u));
+    expect(e.message.content[0]).toMatchObject({ name: "Bash", input: { command: "↳ ls" } });
+  });
+
+  test("思考：thinking_end 的整块 → 带 display 记号的 agent_thought_chunk，宿主翻成 thinking 块（同 tmux 版 piBlocksToClaude）", () => {
+    const m = createPiEventMapper();
+    const t = createAcpTranslator(() => "T");
+    const ups = [
+      assistantStart, { type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "先" } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "先看看目录" } },
+      delta("好的"), assistantEnd({ content: [{ type: "thinking", thinking: "先看看目录" }, { type: "text", text: "好的" }] }),
+    ].flatMap((e) => m.push(e));
+    expect(ups[0]).toEqual({ sessionUpdate: "agent_thought_chunk", messageId: "msg-1", content: { type: "text", text: "先看看目录" }, _meta: { claudestra: { display: true } } });
+    expect([...ups.flatMap((u) => t.push(u)), ...t.flush()].map((e) => e.message.content[0])).toEqual([{ type: "thinking", thinking: "先看看目录" }, { type: "text", text: "好的" }]);
+  });
+
+  test("provider 不流式：message_end 里的思考先于正文补出", () => {
+    const m = createPiEventMapper();
+    m.push(assistantStart);
+    const ups = m.push(assistantEnd({ content: [{ type: "thinking", thinking: "想一下" }, { type: "thinking", thinking: " " }, { type: "text", text: "答" }] }));
+    expect(ups.map((u) => [u.sessionUpdate, u.content.text])).toEqual([["agent_thought_chunk", "想一下"], ["agent_message_chunk", "答"]]);
+  });
+
+  test("自动压缩：开始给一行提示，完成 → compact_boundary（带前后 tokens、trigger=auto）；手动的归 server 说、被打断的不说、失败给原因", () => {
+    const m = createPiEventMapper();
+    const t = createAcpTranslator(() => "T");
+    const entries = (ev: Record<string, unknown>) => m.push(ev).flatMap((u) => t.push(u));
+    const result = { summary: "s", firstKeptEntryId: "e1", tokensBefore: 150_000, estimatedTokensAfter: 32_000 };
+    expect(entries({ type: "compaction_start", reason: "threshold" })).toEqual([
+      { type: "assistant", timestamp: "T", message: { content: [{ type: "thinking", thinking: "正在自动压缩上下文…" }] } },
+    ]);
+    expect(entries({ type: "compaction_end", reason: "threshold", result, aborted: false, willRetry: false })).toEqual([
+      { type: "system", subtype: "compact_boundary", timestamp: "T", compactMetadata: { preTokens: 150_000, postTokens: 32_000, trigger: "auto" } },
+    ]);
+    expect(entries({ type: "compaction_end", reason: "overflow", result, aborted: false, willRetry: true })[0]).toMatchObject({ subtype: "compact_boundary" });
+    expect(entries({ type: "compaction_start", reason: "manual" })).toEqual([]);
+    expect(entries({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false })).toEqual([]);
+    expect(entries({ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false })).toEqual([]);
+    expect(entries({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false, errorMessage: "Auto-compaction failed: boom" })[0].message.content[0].thinking)
+      .toBe("上下文自动压缩没成：Auto-compaction failed: boom");
+  });
+
+  test("自动重试：auto_retry_start → 一行提示（原因、等几秒、第几次）；auto_retry_end 不说（成了接着出正文，败了按回合失败报）", () => {
+    const m = createPiEventMapper();
+    const [u] = m.push({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "529 overloaded" });
+    expect(u).toEqual({ sessionUpdate: "session_info_update", _meta: { claudestra: { notice: "请求出错：529 overloaded，2 秒后自动重试（1/3）" } } });
+    expect(m.push({ type: "auto_retry_end", success: true, attempt: 2 })).toEqual([]);
+    expect(m.push({ type: "auto_retry_end", success: false, attempt: 3, finalError: "529" })).toEqual([]);
   });
 
   test("tool_execution_update 与 agent/turn 事件不产出 update", () => {

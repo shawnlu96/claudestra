@@ -4,9 +4,13 @@
  * dedupKey 与其它写入同一套（ledger-tx.ts）。只有项目 PM 名单里的人、master、owner 能写。
  * initDag 只建 v1：已有任何版本就拒绝——v2 起只能走 ledger-dag-write.ts 的重写（四条规矩 + owner 审批），不从这里开口子。
  */
+import { checkAcyclic } from "./shared-ledger-gate-acyclic.js";
+import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
+import { cardContext, pinNodes } from "./ledger-card-names.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
+import { dropPageCheck, requirePageCheck, withPageCheck } from "./ui-acceptance.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
 import { ledgerOrigin } from "./ledger-origin.js";
 import { resourceKey } from "./ledger-scheduler.js";
@@ -85,6 +89,7 @@ export function createFeature(db: Database, ctx: WriteCtx, input: NewFeature): W
     const dup = replay(db, ctx, key, () => mustFeature(db, id), sameOp("new"));
     if (dup) return dup;
     requireManager(db, ctx.actor, input.project);
+    requireLocalSharedLedgerPlanning(id);
     const cur = getFeature(db, id);
     if (cur) throw new LedgerError("conflict", `feature ${id} 已存在`, { rev: cur.rev });
     const patch = checkPatch({ title: input.title, ownerWords: input.ownerWords ?? "", status: input.status ?? "active" });
@@ -104,8 +109,10 @@ export function setFeature(db: Database, ctx: WriteCtx, input: { id: string; rev
     const dup = replay(db, ctx, key, () => mustFeature(db, cur.id), sameOp("set"));
     if (dup) return dup;
     requireManager(db, ctx.actor, cur.project);
+    requireLocalSharedLedgerPlanning(cur.id);
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     const patch = checkPatch(input.patch);
+    if (patch.status === "done") requirePageCheck(db, cur);
     const cols = Object.keys(patch) as (keyof FeaturePatch)[];
     if (!cols.length) throw new LedgerError("invalid", "没有要改的字段（--title / --words / --status）");
     if (patch.title !== undefined) checkTitleFree(db, cur.project, patch.title, cur.id);
@@ -115,22 +122,6 @@ export function setFeature(db: Database, ctx: WriteCtx, input: { id: string; rev
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch, rev } }, true);
     return { row: mustFeature(db, cur.id), event, duplicate: false };
   });
-}
-
-/** 依赖只能指向同一版里的节点、不许自环、不许成环（Kahn：剩下排不出去的就在环上） */
-function checkAcyclic(nodes: readonly DagNode[]): void {
-  const indeg = new Map(nodes.map((n) => [n.key, n.deps.length]));
-  const out = new Map<string, string[]>();
-  for (const n of nodes) for (const d of n.deps) out.set(d, [...(out.get(d) ?? []), n.key]);
-  const queue = nodes.filter((n) => n.deps.length === 0).map((n) => n.key);
-  for (let i = 0; i < queue.length; i++) {
-    for (const next of out.get(queue[i]) ?? []) {
-      const left = (indeg.get(next) as number) - 1;
-      indeg.set(next, left);
-      if (left === 0) queue.push(next);
-    }
-  }
-  if (queue.length < nodes.length) throw new LedgerError("invalid", `节点依赖成环：${nodes.filter((n) => !queue.includes(n.key)).map((n) => n.key).join(", ")}`);
 }
 
 /** 节点的任务卡：要在本项目、不属于别的 feature；没绑卡返回 null */
@@ -211,13 +202,16 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const dup = replay(db, ctx, key, () => getDagVersion(db, cur.id, 1) as DagVersion, sameOp("dag-init"));
     if (dup) return dup;
     requireManager(db, ctx.actor, cur.project);
+    requireLocalSharedLedgerPlanning(cur.id);
     const has = db.prepare("SELECT MAX(version) AS v FROM dag_versions WHERE featureId = ?").get(cur.id) as { v: number | null };
     if (cur.currentVersion !== 0 || has.v !== null) {
       const v = Math.max(cur.currentVersion, has.v ?? 0);
       throw new LedgerError("conflict", `feature ${cur.id} 已有 v${v}：dag-init 只建初版，改图用 dag-rewrite`, { currentVersion: cur.currentVersion });
     }
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
-    const nodes = buildNodes(db, cur, input.nodes);
+    // 兄弟校验 + 给未开卡节点固化前缀（初版推断就是 feature id）；已开卡的卡号由 taskId 定，不动
+    const built = withPageCheck(db, cur, buildNodes(db, cur, dropPageCheck(input.nodes)), null), pinned = pinNodes(cardContext(db, cur), built, () => true);
+    const nodes = built.map((n, i) => (n.taskId ? n : pinned[i]));
     const reasonText = input.reasonText === undefined ? "" : String(input.reasonText);
     const now = ctx.now ?? Date.now();
     db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes) VALUES (?, 1, ?, ?, ?, NULL, ?, ?)")
@@ -225,7 +219,7 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
     linkTasks(db, ctx, cur, nodes);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, nodes: nodes.map((n) => n.key), rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
 }
@@ -238,6 +232,7 @@ export function assignFeature(db: Database, ctx: WriteCtx, input: { id: string; 
   return tx(db, () => {
     const cur = mustFeature(db, input.id);
     requireManager(db, ctx.actor, cur.project);
+    requireLocalSharedLedgerPlanning(cur.id);
     const assigned: string[] = [];
     for (const id of new Set(input.taskIds)) {
       const t = nodeTask(db, cur, id, id) as LedgerTask;

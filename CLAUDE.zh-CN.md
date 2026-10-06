@@ -8,9 +8,9 @@
 
 1. **每次提交前跑 `bun run check`**（= `tsc --noEmit` + `bun test` + `bun run guard`）。guard 报红就**改代码，不许为了通过去改 `scripts/guard/baseline.json`**。baseline 唯一允许的自动变更是 `bun run guard:update`（只会收紧）。没有行内 ignore 注释。
 2. **放宽必须留痕**：手改 baseline，并在它的 `raised[]` 里写 `{key, from, to, why}`（why ≥10 字），commit message 再写一遍。改闸门本身（`scripts/guard/` 下除 `baseline.json` 以外的任何文件——上限、`PUBLIC_ROUTES`、twins、`knip.json`）同样要**新增**一条 `{key: "guard:<路径>", from: 0, to: 0, why}`；`package.json` 的 `check`/`guard` 脚本和 CI 的 Guard 步骤也会被校验。guard 拿比较基准版本做 diff（CI：`GUARD_BASE` = PR 的 base / push 的 before；本地：与 `origin/main` 的分叉点），没记录的改动本地侥幸过了，CI 也会红。CI 是严格模式（`GUARD_STRICT=1`）：依赖（knip、oxc-parser）缺席导致规则被跳过也算失败。`--init` 重建基线只给主会话 / owner 在合并后用，agent 不要跑。
-3. **体量上限**：新文件 ≤400 行（tests ≤600），新函数 ≤100 行，单行 ≤200 字符。baseline 里的大文件只许变小：往 `manager.ts` / `bridge.ts` / `api-routes.ts` / `chat-store.ts` 加功能 = 新建模块写逻辑，大文件里只留一行调用。把超长函数或重复块原样搬出去不算违规（这两项按全仓总量计）。
+3. **体量上限**：新文件 ≤800 行（tests ≤600），新函数 ≤100 行，单行 ≤200 字符。baseline 里的大文件只许变小：往 `manager.ts` / `bridge.ts` / `api-routes.ts` / `chat-store.ts` 加功能 = 新建模块写逻辑，大文件里只留一行调用。把超长函数或重复块原样搬出去不算违规（这两项按全仓总量计）。
 4. **写 helper 之前先搜**：`grep -rn "export function" src/lib | grep -i <关键词>`。规范位置：
-   - tmux → `src/lib/tmux-helper.ts`（`windowTarget()`、`tmuxRaw`、`tmuxFire`、`tmuxInterrupt`）；禁止手写 `master:${x}` 和 `Bun.spawn(["tmux", …])`。已知例外：`bridge/web-terminal.ts` 的 PTY 参数、`lib/doctor.ts` 的 `tmux -V` 探测、Pi 扩展里的 `execFile`、`setup.ts`。
+   - tmux → `src/lib/tmux-helper.ts`（`windowTarget()`、`tmuxRaw`、`tmuxFire`、`tmuxInterrupt`）；禁止手写 `master:${x}` 和 `Bun.spawn(["tmux", …])`。已知例外：`bridge/term-fit.ts` 的 PTY 参数、`lib/doctor.ts` 的 `tmux -V` 探测、Pi 扩展里的 `execFile`、`setup.ts`。
    - 启动参数 → `src/lib/claude-launch.ts`、`src/lib/launch-command.ts`、`src/lib/runtimes/`、`src/lib/pi-launch.ts`。
    - 路径 → registry 用 `src/lib/registry.ts`（`REGISTRY_PATH`），日志 `src/lib/log-paths.ts`，bun/npm 可执行文件 `src/lib/bun-path.ts` / `src/lib/npm-path.ts`，会话文件 `src/lib/session-source.ts`。
    - 文件锁 / 原子写 JSON → `src/lib/file-lock.ts`；原子写复用拥有该文件的模块里的 tmp+rename 写法（如 `src/lib/peers.ts`），要出现第三份就先抽到 `src/lib`。
@@ -88,6 +88,7 @@ master/                大总管指令模板（由 setup.ts 渲染）
 - **HTTP peers** — 跨实例协作走 `/api/v1`，scope token + 一键邀请；大总管永不可分享。
 - **上下文边界** — 按项目 / 名字模式的压缩线：[context-boundary.md](./docs/architecture/context-boundary.md)。
 - **子 DAG 工具** — PM 用的 MCP 工具 `plan_feature` / `rewrite_dag` / `start_node` / `show_dag`：[dag-tools.md](./docs/architecture/dag-tools.md)。
+- **网页「新终端」** — 侧栏开持久的宿主登录 shell（tmux session `webshell`，要覆盖 master 的终端授予）：[features.zh-CN.md](./docs/architecture/features.zh-CN.md)。
 
 ## 安全姿态
 

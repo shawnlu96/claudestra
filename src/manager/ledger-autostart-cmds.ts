@@ -1,3 +1,5 @@
+import { requireLocalSharedLedgerPlanning } from "../lib/shared-ledger-gate.js";
+import { liveClaim } from "../lib/ledger-autostart.js";
 /**
  * 自动开卡 / 自动交回（i28-A1，docs/architecture/scheduler-autostart.md）的 ledger 子命令：这里只解析参数，事务与权限在 lib。
  * - `scheduler-autostart claim|step|settle`、`scheduler-auto-resume`：只给调度身份（manager/ledger.ts SCHEDULER_SERVICE_COMMANDS）。
@@ -50,6 +52,7 @@ function claim(c: LedgerCli): Result {
 function step(c: LedgerCli): Result {
   const seq = Number(c.p.pos[2]);
   if (!Number.isInteger(seq) || seq <= 0) throw new LedgerError("invalid", "step <claim> <子命令> <目标> …");
+  if (c.p.pos[3] === "task-new") requireLocalSharedLedgerPlanning(liveClaim(c.db, seq).featureId);
   const flags: Record<string, string | undefined> = { ...c.p.flags };
   return autostartStep(c.db, c.ctx(), { claim: seq, sub: c.p.pos[3] ?? "", pos: c.p.pos.slice(4), flags });
 }
@@ -82,10 +85,11 @@ function autoResumeCmd(c: LedgerCli): Result {
 
 function autostartSet(c: LedgerCli): Result {
   const v = c.p.pos[1];
-  if (v !== "on" && v !== "off") throw new LedgerError("invalid", "autostart-set on|off [--feature <id>] [--line <50–100>] --reason <为什么>");
+  if (v !== "on" && v !== "off") throw new LedgerError("invalid", "autostart-set on|off [--feature <id>] [--line <50–100>] [--codex-line <50–100>] --reason <为什么>");
   const project = c.project();
   const featureId = c.p.flags.feature === undefined ? undefined : resolveFeature(c.db, c.p.flags.feature, storedOrigin(c.db)).id;
-  const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"), reason: c.need("reason") });
+  const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
+    codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason") });
   return { ok: true, project, autostart: value };
 }
 
@@ -127,8 +131,8 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     run: autoResumeCmd,
   },
   "autostart-set": {
-    valued: ["feature", "line", "reason", "project", "dedup"],
-    usage: "autostart-set on|off [--feature <id>] [--line <50–100>] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner）",
+    valued: ["feature", "line", "codex-line", "reason", "project", "dedup"],
+    usage: "autostart-set on|off [--feature <id>] [--line <50–100>] [--codex-line <50–100>] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner）",
     run: autostartSet,
   },
 };

@@ -3,14 +3,15 @@ import { sharedLedgerCredentialHash, type SharedLedgerCredential, type SharedLed
 import { Store, decode, encode } from "./store.js";
 
 /** Provisioning is an offline embedding API, never an unauthenticated HTTP administration route. */
-export function registerCredential(store: Store, credential: SharedLedgerCredential, code: string): void {
+export function registerCredential(store: Store, credential: SharedLedgerCredential, code: string, preserveMember = false): void {
   store.write(() => {
     store.run("INSERT OR IGNORE INTO teams VALUES (?,?)", credential.teamId, credential.teamId);
     for (const grant of credential.projects) {
       if (grant.projectId === "*") throw new SharedLedgerError("forbidden");
       store.run("INSERT OR IGNORE INTO projects VALUES (?,?,?)", credential.teamId, grant.projectId, grant.projectId);
     }
-    store.run("INSERT OR REPLACE INTO members VALUES (?,?,?,?)", credential.teamId, credential.personId, code, credential.membershipStatus);
+    store.run(`INSERT OR ${preserveMember ? "IGNORE" : "REPLACE"} INTO members VALUES (?,?,?,?)`,
+      credential.teamId, credential.personId, code, credential.membershipStatus);
     store.run("INSERT OR REPLACE INTO instance_bindings VALUES (?,?,?,?)",
       credential.teamId, credential.personId, credential.instanceId, credential.publicKey);
     store.run("INSERT OR REPLACE INTO credentials VALUES (?,?,?,?,?,?,?)", credential.credentialHash,

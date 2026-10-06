@@ -65,7 +65,7 @@ export const piAdapter: ManagedRuntimeAdapter = {
   label: "Pi",
   manageable: true,
   control: PI_CONTROL,
-  // 声明了才能 `manager transport <agent> acp`（runtimes/pi-acp.ts）；缺省仍是 tmux，tmux 下的策略还是 PI_CONTROL
+  // 声明了才能走 acp（runtimes/pi-acp.ts；新建 / 收编探测通过就缺省 acp，见 manager/acp-lifecycle.ts）；tmux 下的策略还是 PI_CONTROL
   acp: { control: ACP_CONTROL },
   inbound: "pi-extension",
   turnEnd: "pi-extension",

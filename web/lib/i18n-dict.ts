@@ -2,8 +2,7 @@
  * i18n 字典：中文原文 → 英文。缺失回退中文（见 lib/i18n.tsx）。
  *
  * 维护规则：
- * - key 必须与源码里的原文**逐字一致**（含全角/半角标点、前后空格——拆段
- *   拼接的条目靠空格对齐语序，行尾注释标注了这类条目）。
+ * - key 必须与源码里的原文**逐字一致**（含全角/半角标点、前后空格——拆段拼接的条目靠空格对齐语序，行尾注释标注了这类条目）。
  * - 句中片段（如「重置」「已重启」）英文故意小写、无句号。
  * - 带变量的句子整句做 key，变量写 {name}（t(s, { name })）；译文保留同名占位，tests/web-i18n.test.ts 查。
  * - 英文要分单复数的写成「单数|复数」，按 {n} 选（lib/i18n-fill.ts）；中文原文里别用 |。
@@ -25,9 +24,10 @@ import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
 import { RELAY_DICT } from "./i18n-dict-relay";
 import { BORROW_DICT } from "./i18n-dict-borrow";
+import { SHELL_DICT } from "./i18n-dict-shell";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT, ...SHELL_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...UPDATE_DICT, // 更新提示横幅（lib/i18n-dict-update.ts）
@@ -675,10 +675,10 @@ export const DICT: Record<string, string> = {
     " — scan the QR code to get in directly; a typed 8-character code needs one confirmation on the computer. Valid for 10 minutes, single use.",
   "等待电脑确认": "Waiting for the computer to confirm",
   "等待已配对的设备批准": "Waiting for approval on a paired device",
-  "在手机等已配对的设备上核对这个码并允许。确认后这里会自动进入。":
-    "Check this code on a paired device (such as your phone) and allow it. This page continues automatically.",
+  "在手机等已配对的设备上核对这个码并允许，或在这台电脑的终端运行下面这条命令。确认后这里会自动进入。":
+    "Check this code on a paired device (such as your phone) and allow it, or run the command below in this computer's terminal. This page continues automatically.",
   "确认超时，请再点一次一键配对": "Approval timed out — tap one-tap pairing again",
-  "还没有能批准的已配对设备：在电脑终端运行 claudestra pair": "No paired device can approve this yet — run claudestra pair in the computer's terminal",
+  "在这台电脑的终端运行下面这条命令批准。确认后这里会自动进入。": "Run the command below in this computer's terminal to approve. This page continues automatically.",
   "回到运行 claudestra pair 的终端（或电脑上的网页）确认这台设备。确认后这里会自动进入。":
     "Confirm this device in the terminal running claudestra pair (or in the web app on the computer). This page continues automatically.",
   "链接已过期，请重新生成二维码": "The link has expired — generate a new QR code",

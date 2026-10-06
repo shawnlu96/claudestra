@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
+import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -43,7 +44,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
     if (Buffer.byteLength(out) >= DIFF_LIMIT) throw new Error("净 diff 太大，无法逐字核对");
     return out;
   };
-  return {
+  return withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");
@@ -98,7 +99,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       if (onMain.timedOut || (onMain.code !== 0 && onMain.code !== 1)) throw new Error(`git merge-base 失败：${oneLine(onMain.stderr)}`);
       if (onMain.code !== 0) return { ok: false, reason: `另一个父提交 ${mainParent.slice(0, 12)} 不在 main 上` };
       const [before, after] = [await netDiff(oldHead), await netDiff(newHead)];
-      if (before !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了" };
+      if (before !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead }; // parents verified: scheduler-review-rebase.ts scopes the re-review on it
       return { ok: true, reason: "净 diff 一致", mainParent, mainHead, diffHash: createHash("sha256").update(after).digest("hex") };
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },
@@ -113,5 +114,5 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       }
       return result.sha;
     },
-  };
+  }, trainContext(command));
 }

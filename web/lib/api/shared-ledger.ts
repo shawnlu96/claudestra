@@ -44,13 +44,16 @@ export interface Transport {
   command(command: Command, signal: AbortSignal): Promise<Result>;
   receipt(id: string, signal: AbortSignal): Promise<Receipt>;
 }
-export function sharedLedgerTransport(machine?: MachineRef): Transport {
+export const sharedLedgerProjectHeaders = (project?: string) => project ? { "X-Shared-Ledger-Project": project } : undefined;
+/** `project` (center project id) selects the bridge binding when this machine joined several projects. */
+export function sharedLedgerTransport(machine?: MachineRef, project?: string): Transport {
   const root = "/shared-ledger";
+  const headers = sharedLedgerProjectHeaders(project);
   return {
-    list: signal => api(`${root}/features`, { signal }, machine),
-    detail: (id, signal) => api(`${root}/features/${encodeURIComponent(id)}`, { signal }, machine),
-    command: (json, signal) => api(`${root}/commands`, { method: "POST", json, signal }, machine),
-    receipt: (id, signal) => api(`${root}/commands/${encodeURIComponent(id)}`, { signal }, machine),
+    list: signal => api(`${root}/features`, { signal, headers }, machine),
+    detail: (id, signal) => api(`${root}/features/${encodeURIComponent(id)}`, { signal, headers }, machine),
+    command: (json, signal) => api(`${root}/commands`, { method: "POST", json, signal, headers }, machine),
+    receipt: (id, signal) => api(`${root}/commands/${encodeURIComponent(id)}`, { signal, headers }, machine),
   };
 }
 /** A session owns its request generation. Late responses cannot mutate any identity's cache. */

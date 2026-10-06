@@ -21,7 +21,7 @@ const ROOT_FILES = ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json", 
 const FILES = [
   "web/package.json", "web/package-lock.json", "web/bun.lock", "web/pnpm-lock.yaml", "web/yarn.lock",
   "tests/preload.ts", "tests/test-env.ts", "src/bridge.ts", "src/relay.ts", "src/setup.ts", "src/launcher.ts", "src/acp-host.ts", "src/channel-server.ts", "src/scheduler.ts", "src/manager.ts",
-  ...["api-routes", "api-auth", "web-terminal", "web-gateway", "caller-identity", "order-tools", "devices", "credential-revocation", "http-peer"]
+  ...["api-routes", "api-auth", "web-terminal", "term-viewer", "term-fit", "web-shell", "web-gateway", "caller-identity", "order-tools", "devices", "credential-revocation", "http-peer"]
     .map((f) => `src/bridge/${f}.ts`),
 ];
 const FILE_PATTERNS: readonly (readonly [string, RegExp])[] = [

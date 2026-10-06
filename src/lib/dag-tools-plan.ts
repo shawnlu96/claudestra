@@ -1,3 +1,4 @@
+import { PAGE_CHECK_KEY } from "./ui-acceptance.js";
 /**
  * plan_feature / rewrite_dag 的参数校验与「下一版节点」拼装（纯函数，bridge/dag-tools.ts 调用后交给 `ledger dag-init / dag-rewrite`）。
  * 工具层比 CLI 多一道：每个新写的节点必须带非空 fileGlobs（CLI 为兼容旧写法可以不带）；删进行中的节点必须走 cancel 带原因。
@@ -47,6 +48,7 @@ const carry = (n: DagNode): NodeInput => ({
 
 /** plan_feature 对已有 DAG：给的是整版节点，同 key 的沿用已绑的卡；没列出来的进行中节点要走 rewrite_dag 的 cancel */
 export function planOverExisting(cur: readonly DagNode[], next: readonly NodeInput[], phase: (n: DagNode) => NodePhase): Parsed<NodeInput[]> {
+  cur = cur.filter((n) => n.key !== PAGE_CHECK_KEY);
   const byKey = new Map(cur.map((n) => [n.key, n]));
   const listed = new Set(next.map((n) => n.key));
   const dropped = cur.filter((n) => !listed.has(n.key) && phase(n) === "active").map((n) => n.key);
@@ -82,6 +84,7 @@ export function parseRewriteOps(args: Record<string, unknown>): Parsed<RewriteOp
 
 /** 当前版 + 改动 → 下一版整版节点。进行中的节点只能经 cancel（带原因）移出，remove 只收没开始 / 计划中的 */
 export function composeRewrite(cur: readonly DagNode[], ops: RewriteOps, phase: (n: DagNode) => NodePhase): Parsed<NodeInput[]> {
+  cur = cur.filter((n) => n.key !== PAGE_CHECK_KEY);
   const byKey = new Map(cur.map((n) => [n.key, n]));
   for (const k of [...ops.remove, ...Object.keys(ops.cancel), ...ops.update.map((n) => n.key)]) {
     if (!byKey.has(k)) return { ok: false, error: `当前版本里没有节点 ${k}` };

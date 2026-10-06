@@ -2,13 +2,17 @@
  * ACP 服务端 ↔ `pi --mode rpc`（路线 a，docs/design/pi-acp-eval.md §1）。一个适配器进程同一时刻只驱动一个 pi 会话：
  * - session/new 自己生成 id、session/resume 用给定 id，都起 `pi --session-id <id>`（open-or-create，不需要引导轮）；
  *   再来一次 session/new（/clear）就停掉旧 pi、换新 id 重起。
- * - session/prompt → prompt（followUp：pi 还在跑也能排上），等到 agent_settled 才回 stopReason；session/cancel → abort。
+ * - session/prompt → prompt（followUp：pi 还在跑也能排上），等到 agent_settled 才回 stopReason。
  *   _session/steering → 带 steer 的 prompt：排进在跑的回合 = injected，pi 另起一轮 = startedNewTurn（结束只靠 idle）。
- * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消；pi 意外退出 = 适配器退出，由宿主重起。
+ * - 叫停（session/cancel，或宿主要回清掉的排队正文时的 _claudestra/cancel）→ 先 clear_queue 再 abort，叫停中 pi 续跑的轮再中止（见 cancel）。
+ * - pi 自己开的回合（扩展 triggerTurn、压缩后续跑）照样报 active / idle，宿主当自发回合跟（session.ts）。
+ * - 回合结束后按 get_session_stats 发 usage_update；扩展弹框一律回取消，通知 / 状态栏进日志；pi 意外退出 = 适配器退出，由宿主重起。
  * - 挂 channel-server 的会话：起 pi 前后各查一次撞名 / reply 能否活下来（deps.mountProblem），pi 里的挂载扩展在 session_start
  *   再报一次（撞名、reply 进没进模型的工具表，MOUNT_STATUS_KEY）；任何一处不过就拒这个会话，不让宿主把没有 reply 的会话当成接通。
  * tests/pi-acp-replay.test.ts（录制的 pi 0.99.1 事件流回放）、tests/pi-acp-shell.test.ts。
  */
+import { redactSecrets } from "../../redact-secrets.js";
+import { ACP_PROTOCOL_VERSION } from "../protocol.js";
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
 import {
   compactCommand, compactNotice, configOptions, createPiEventMapper, dialogCancel, mcpServersForPi, splitModelValue, textOf, threadStatus, turnEnd, usageUpdate,
@@ -26,6 +30,10 @@ const STARTUP_TIMEOUT_MS = 60_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 /** 压缩要跑一次摘要模型调用，长会话可能几分钟 */
 const COMPACT_TIMEOUT_MS = 600_000;
+/** pi 同步答 clear_queue：短超时，pi 卡住时 abort 不跟着拖（宿主那头 _claudestra/cancel 等 5s） */
+const CLEAR_QUEUE_TIMEOUT_MS = 3_000;
+/** 叫停后最多这么久仍算「叫停中」（同 pi/abort-control.ts）：等不到 settle 就放开，别把之后的插话一直挡在 pi 外面 */
+const STOP_HOLD_MS = 60_000;
 
 export interface PiServerDeps {
   openPi(o: { sessionId: string; cwd: string; env: Record<string, string> }): PiLink;
@@ -53,6 +61,8 @@ interface Gen {
   running: boolean;
   inflight: number;
   cancelRequested: boolean;
+  /** 叫停的时刻（pi 在跑时才记，settle 清）：见 stopping */
+  stoppedAt?: number;
   /** 挂载扩展在 session_start 报的状态（MOUNT_STATUS_KEY）；没挂 server 的会话不看 */
   mount?: string;
 }
@@ -61,20 +71,23 @@ const STALE = "会话被换掉或关闭了（session/new、resume 或宿主断�
 /** 旧会话已经停掉后新会话又起不来：错误带上它，宿主据此重起适配器、接回 registry 里的旧会话（lib/acp/clear.ts） */
 const CLOSED_OLD = { previousSessionClosed: true };
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
 export class PiAcpServer {
   private readonly acp: RpcPeer;
   private gen: Gen | null = null;
   private opening: Promise<unknown> = Promise.resolve();
+  /** 扩展状态栏每个 key 最近一次记进日志的文字：没变不重复记 */
+  private readonly statuses = new Map<string, string>();
 
   constructor(wire: RpcWire, private readonly deps: PiServerDeps) {
     const acp = (this.acp = createRpcPeer(wire, { log: deps.log }));
     acp.onRequest("initialize", () => ({
-      protocolVersion: 1,
+      protocolVersion: ACP_PROTOCOL_VERSION,
       agentInfo: { name: "claudestra-pi-acp", version: "1" },
       agentCapabilities: { loadSession: false, sessionCapabilities: { resume: {} }, mcpCapabilities: { http: false, sse: false } },
       authMethods: [],
-      _meta: { steering: { supported: true } },
+      _meta: { steering: { supported: true }, claudestra: { cancelReturnsQueue: true } },
     }));
     acp.onRequest("session/new", async (p: Rec) => {
       const id = deps.newSessionId();
@@ -89,6 +102,7 @@ export class PiAcpServer {
     acp.onRequest("_session/steering", (p: Rec) => this.steer(p));
     acp.onRequest("session/set_config_option", (p: Rec) => this.setOption(p));
     acp.onNotification("session/cancel", (p: Rec) => this.cancel(p));
+    acp.onRequest("_claudestra/cancel", (p: Rec) => this.cancel(p));
     acp.onClosed(() => void this.closePi().finally(() => deps.exit(0)));
   }
 
@@ -179,12 +193,13 @@ export class PiAcpServer {
     }
     if (rec.type === "extension_ui_request") {
       const reply = dialogCancel(rec);
-      if (!reply) return;
+      if (!reply) return this.logUi(rec);
       this.deps.log(`扩展弹框（${rec.method}：${rec.title ?? ""}）按规矩回了取消`);
       return g.link.send(reply);
     }
     if (rec.type === "extension_error") return this.deps.log(`pi 扩展出错（${rec.extensionPath} / ${rec.event}）：${rec.error}`);
     for (const u of g.mapper.push(rec)) this.update(g, u);
+    if (rec.type === "agent_start" && this.stopping(g)) this.abortPi(g, "叫停后 pi 又续跑了一轮（重试 / 压缩后继续 / 排队消息）：再中止");
     if (rec.type === "agent_start" && !g.running) {
       g.running = true;
       this.update(g, threadStatus("active"));
@@ -192,8 +207,25 @@ export class PiAcpServer {
     if (rec.type === "agent_settled") this.settle(g);
   }
 
+  /** 扩展的通知 / 状态栏（不等回复）：脱敏后进日志（适配器 stderr → 宿主的 host.log）；状态栏同一个 key 文字没变就不重复记 */
+  private logUi(rec: Rec): void {
+    if (rec.method === "notify") return this.deps.log(redactSecrets(`Pi 扩展通知（${rec.notifyType ?? "info"}）：${rec.message ?? ""}`));
+    if (rec.method !== "setStatus") return;
+    const key = String(rec.statusKey ?? "");
+    const text = typeof rec.statusText === "string" ? rec.statusText : "";
+    if (this.statuses.get(key) === text) return;
+    this.statuses.set(key, text);
+    this.deps.log(redactSecrets(`Pi 扩展状态栏 ${key}：${text || "（清除）"}`));
+  }
+
+  /** 叫停中 = 叫停到这一代 settle 之间（最多 STOP_HOLD_MS）：pi 自己续跑的轮再中止，插话不进 pi 的队列（会被续跑、再被中止掉） */
+  private stopping(g: Gen): boolean {
+    return g.stoppedAt !== undefined && Date.now() - g.stoppedAt < STOP_HOLD_MS;
+  }
+
   private settle(g: Gen): void {
     g.running = false;
+    g.stoppedAt = undefined;
     const s: Settled = { outcome: g.mapper.takeOutcome(), cancelled: g.cancelRequested };
     g.cancelRequested = false;
     this.update(g, threadStatus("idle", turnEnd(s.outcome, s.cancelled))); // steering 另起的回合只能从这里知道结局
@@ -220,7 +252,8 @@ export class PiAcpServer {
     try {
       const r = await g.link.command({ type: "prompt", message, streamingBehavior: "followUp" }, COMMAND_TIMEOUT_MS);
       this.stillLive(g); // 确认回来前被 /clear 换下了：等待既不该挂到新会话上，也不会再有人兑现
-      if (r?.disposition !== "handled") wait = new Promise((resolve, reject) => g.waiters.push({ resolve, reject }));
+      // handled 但扩展当场开了一轮（agent_start 先于回包到）也等它停稳；回包之后才开的由宿主当自发回合跟（session.ts）
+      if (r?.disposition !== "handled" || g.running) wait = new Promise((resolve, reject) => g.waiters.push({ resolve, reject }));
     } finally {
       g.inflight--;
     }
@@ -258,6 +291,7 @@ export class PiAcpServer {
 
   private async steer(p: Rec): Promise<Rec> {
     const g = this.live(p);
+    if (this.stopping(g)) return { outcome: "deferred" }; // 不是 injected / startedNewTurn：宿主把它排回队列，这轮停稳后另起一轮
     const r = await g.link.command({ type: "prompt", message: textOf(p.prompt), streamingBehavior: "steer" }, COMMAND_TIMEOUT_MS);
     this.stillLive(g);
     return { outcome: r?.disposition === "started" ? "startedNewTurn" : "injected" };
@@ -278,11 +312,23 @@ export class PiAcpServer {
     return { configOptions: g.options };
   }
 
-  /** 只有真有回合（在跑 / 在等 / 正在提交）才记「被打断」，否则会错记到下一回合头上；abort 本身空闲时发也无害 */
-  private cancel(p: Rec): void {
+  /**
+   * 叫停：先 clear_queue 再 abort——pi 的 abort 会接着跑还排着的消息，回合中 steer 进去的那几条会在「停」之后照跑。
+   * 清掉的正文交回宿主（_claudestra/cancel 的结果，宿主对回 message_id 填进回执的 voided）；abort 不等（它要等回合停稳才回）。
+   * 只有真有回合（在跑 / 在等 / 正在提交）才记「被打断」，否则会错记到下一回合头上；pi 在跑才进叫停中。空闲时发 abort 也无害
+   */
+  private async cancel(p: Rec): Promise<Rec> {
     const g = this.gen;
-    if (!g || p?.sessionId !== g.sessionId) return;
+    if (!g || p?.sessionId !== g.sessionId) return { cleared: [] };
     if (g.running || g.waiters.length || g.inflight) g.cancelRequested = true;
+    if (g.running) g.stoppedAt = Date.now();
+    const q = await g.link.command({ type: "clear_queue" }, CLEAR_QUEUE_TIMEOUT_MS).catch((e) => (this.deps.log(`clear_queue 失败（排队的消息可能在停之后照跑）：${errText(e)}`), null));
+    if (g === this.gen) this.abortPi(g);
+    return { cleared: [...strings(q?.steering), ...strings(q?.followUp)] };
+  }
+
+  private abortPi(g: Gen, why?: string): void {
+    if (why) this.deps.log(why);
     g.link.command({ type: "abort" }, COMMAND_TIMEOUT_MS).catch((e) => this.deps.log(`abort 失败：${errText(e)}`));
   }
 }

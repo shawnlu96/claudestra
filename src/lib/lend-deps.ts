@@ -21,6 +21,7 @@ import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
 import { ensurePr, probePush, pushWork } from "./lend-push.js";
 import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
+import { archiveEndedWorker } from "./lend-session-archive.js";
 import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
 import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
 import { lendRuntimeArgs, removeClaudeOrderConfig } from "./lend-claude-worker-routing.js";
@@ -36,17 +37,21 @@ import { readProjects } from "./projects.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
-import { BUN_NO_AUTOLOAD } from "./runtimes/clean-env.js";
 import { codexFailure, sendVia } from "./scheduler-auto-ports.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { whileOwned } from "./scheduler-maintenance.js";
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { probeAcpWorker } from "./worker-liveness.js";
+import { arbiterFooter, arbiterFullMessage, lendSubmitCmd } from "./lend-arbiter-submit.js";
 import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
-import { quotaViewOf, type CodexFailureSeen } from "./lend-health.js";
+import { quotaViewOf, type LendWorkerFailure } from "./lend-health.js";
+import { keepLendEvidence } from "./lend-evidence.js";
+import { listAsks } from "./ledger-asks.js";
+import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
+import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -86,7 +91,7 @@ async function ensureLendProject(m: Manager): Promise<void> {
   if (r.ok !== true && !String(r.error ?? "").includes("已存在")) throw new Error(`建 lend 项目失败：${String(r.error ?? "")}`);
 }
 
-const submitCmd = (row: LendRow): string => `${resolveBunPath()} ${BUN_NO_AUTOLOAD.join(" ")} ${join(SRC_DIR, "manager.ts")} lend submit ${row.orderId}`;
+const submitCmd = (row: LendRow): string => lendSubmitCmd(row.orderId);
 
 /** 审查单的首条派单（整条就是它，不带订单原文）：领单、交结论都走 lend 档 MCP，CLI 只在工具调不通时兜底 */
 const reviewWake = (row: LendRow): string[] => [
@@ -111,7 +116,7 @@ const writeFooter = (row: LendRow): string[] => [
 
 const isWriteRow = (row: LendRow): boolean => isWriteStep(String(orderOf(row)?.step ?? ""));
 const SERVICE_HEAD = "——以下是本机 Claudestra 出借服务写的，不是对方的内容——";
-const footer = (row: LendRow): string => [SERVICE_HEAD, ...(isWriteRow(row) ? writeFooter(row) : reviewWake(row))].join("\n");
+const footer = (row: LendRow): string => arbiterFooter(row, () => [SERVICE_HEAD, ...(isWriteRow(row) ? writeFooter(row) : reviewWake(row))].join("\n"));
 
 /**
  * 首条派单的正文：lend-drive 拼的是「订单全文 + footer」；审查单换成只有唤醒行（订单由 take_review 领），写单原样。
@@ -119,7 +124,7 @@ const footer = (row: LendRow): string => [SERVICE_HEAD, ...(isWriteRow(row) ? wr
  */
 const firstMessage = (journal: Database, key: string, text: string): string => {
   const row = getOrder(journal, key);
-  return row && !isWriteRow(row) ? footer(row) : text;
+  return row && !isWriteRow(row) && !arbiterFullMessage(row) ? footer(row) : text;
 };
 
 /** 写单副本里的提交署名：出借人自己的 git 身份（全局配置）。缺一项就是 null，写单退回并说明，不用占位冒名、也不猜 */
@@ -169,7 +174,9 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
       const r = await svc("ledger", "lend-ask", "--retire", askId);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-ask --retire 失败") };
     },
-    failure: (agent) => failureOf(ledger, agent),
+    failure: (agent) => lendWorkerFailureOf(journal, agent, (row) => failureOf(ledger, agent, row)),
+    keepEvidence: (row, why) => { active(); return keepLendEvidence(row, why); },
+    archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`))),
     closeAsks: async (agent) => {
       const r = await svc("ledger", "lend-close-asks", "--agent", agent);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };
@@ -238,11 +245,23 @@ async function workerExcerpt(row: LendRow): Promise<{ text: string; at: number }
   } finally { await fh.close(); }
 }
 
-/** bridge 为这个 worker 开的 Codex 额度 / 登录卡（同 scheduler-auto-ports codexFailure）；台账读不了 = 不知道，当没有（存活探测照常兜底） */
-function failureOf(ledger: LedgerReader, agent: string): CodexFailureSeen | undefined {
+/** 已经记过「不自动停单」的卡：每 30 秒一轮，同一张卡只记一次（进程内，重启再记一次无妨） */
+const doubted = new Set<string>();
+
+/**
+ * bridge 为这个 worker 开的最新一张 Codex 卡；台账读不了 = 不知道，当没有（存活探测照常兜底）。额度 / 登录同 scheduler-auto-ports codexFailure；
+ * 回合失败卡要证明是 row 这一单当前回合的（lend-turn-failure.ts），证明不了按改动前处理：交给 codexFailure，没派单可归就是没有
+ */
+function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined): LendWorkerFailure | undefined {
   const db = ledger.get();
   if (!db) return undefined;
   try {
+    const card = listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (card?.extra.failure === "error" && row) {
+      const doubt = turnFailureDoubt(card, row, (id) => findSessionJsonlBySessionId("codex", id));
+      if (!doubt) return { kind: "error", askId: card.id, message: card.context }; // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）
+      if (!doubted.has(card.id)) doubted.add(card.id), console.error(`[lend] ${agent} 的回合失败卡 ${card.id} 不自动停单：${doubt}；卡留在看板上由人处理`);
+    }
     const f = codexFailure(db, agent)?.failure;
     return f && (f.kind === "quota" || f.kind === "auth") ? { kind: f.kind, askId: f.key, message: f.message.slice(0, 200) } : undefined;
   } catch (e) {
@@ -256,5 +275,5 @@ export const lendStep = (ledger: LedgerReader) => async (active: () => void, lea
   active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
   const journal = openLendJournal();
   guardJournalWrites(journal, active);
-  try { return await (await import("./lend-loop.js")).lendTick(lendDeps(journal, ledger, active, lease)); } finally { journal.close(); }
+  try { return await (await import("./lend-work-retention.js")).lendTickWithRetention(lendDeps(journal, ledger, active, lease), active); } finally { journal.close(); }
 };

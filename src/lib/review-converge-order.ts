@@ -5,6 +5,7 @@
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 import { prevReviewedHead, SCOPE_ROUND } from "./review-converge.js";
+import { rebaseScopeLines } from "./scheduler-review-rebase.js";
 
 export const BASIS_LINE = "每条 P1 都要挂依据：逐项结论带 basis = \"acceptance:<N>\"（违反规格「验收线」第 N 条）或 \"regression\"" +
   "（本卡 diff 引入的正确性 / 安全 bug，含上一轮修复引入的）；工具没有 basis 字段时在 probe 或说明开头写「[验收线 N]」/「[回归]」。" +
@@ -23,6 +24,8 @@ export function scopeLine(round: number, events: readonly LedgerEvent[], head: s
 
 /** Lines a review order carries, in order: the basis rule, then (from SCOPE_ROUND) the scope. */
 export function convergeOrderLines(round: number, events: readonly LedgerEvent[], head: string): string[] {
+  const rebase = rebaseScopeLines(round, events, head); // merge driver moved the head: scope = PR vs main (i28-RH1)
+  if (rebase) return [BASIS_LINE, ...rebase];
   const scope = scopeLine(round, events, head);
   return scope ? [BASIS_LINE, scope] : [BASIS_LINE];
 }

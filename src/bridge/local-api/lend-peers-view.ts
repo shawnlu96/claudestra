@@ -1,18 +1,16 @@
 /**
- * 借入方管理面（i28-R7b，方案 ledger/docs/remote-pool-v2-plan.md §2.3、§2.6）+ 分配表（i28-Q1）：A 侧 owner 在网页看「借谁的机器」并用按钮改。
- *   GET    /api/v1/borrow                 canReadLedger：项目的 remote（档位 / 角色只读）、borrow 声明 / 生效 / 失效、各 peer 容量与上报额度、本机额度、远端单与放置
- *   PUT    /api/v1/borrow/peers/:peer     canRunFleet：`borrow set --keep-unset [--projects …] [--roles …] [--max-open N] [--priority …] -- <peer>`
- *   DELETE /api/v1/borrow/peers/:peer     canRunFleet：`borrow off --peer <peer>`
- *   PUT    /api/v1/borrow/local/:project  canRunFleet：`ledger scheduler-local <project> [--priority …] [--max-workers N] --reason …`
- * 写只经 manager CLI（准入以 CLI 为准，bridge 只查形状），回包只带固定错误码：CLI 原文里有命令提示，不给网页。
- * PUT 只传改的那格：没传的字段由 CLI 在 lend.json 写锁里沿用（--keep-unset），不在这里读旧值拼全量。
- * 额度只读、只做参考（quota-week.ts），读不到给 null，不影响别的字段。容量原样取 peerCapacity，不另算。tests/web-borrow-view.test.ts、web-borrow-alloc.test.ts。
+ * Owner borrow settings: GET reports project pools, hello capacity/quota and remote orders.
+ * Peer PUT/DELETE and local PUT delegate to the manager CLI, preserving its locking and audit.
+ * Local agents use scheduler-local --agents; legacy tier/role fields remain for older clients.
+ * Errors return fixed codes so CLI command hints are never displayed in the web UI.
+ * Quota is read-only and may be null without preventing slot edits.
  */
+import { parseAgents, type AgentLimits } from "../../lib/scheduler-agent-pool-config.js";
 import type { Database } from "bun:sqlite";
 import { canReadLedger } from "../../lib/devices.js";
 import { LEND_LIVE } from "../../lib/ledger-lend-schema.js";
 import { getTask } from "../../lib/ledger-store.js";
-import { getLendPeer, peerCapacity, type PeerCapacity } from "../../lib/ledger-lend-peers.js";
+import { getLendPeer, peerCapacity, unifiedPeerCapacity, type PeerCapacity, type UnifiedPeerCapacity } from "../../lib/ledger-lend-peers.js";
 import { isPriority, LEND_PATH, MAX_OPEN, readLend, type BorrowEntry, type Priority } from "../../lib/lend-config.js";
 import { placementOf } from "../../lib/lend-placement-view.js";
 import { effectiveLend, isPersonalProject, readLendContext, type LendContact } from "../../lib/lend-policy.js";
@@ -59,9 +57,9 @@ const PEER_RE = /^[\w-]{1,32}$/;
 const PROJECT_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 type RemoteModeView = "balance" | "off";
-/** 本机这一行：档位与并发上限可改；roles / repo / reviewFirst 是项目级配置，只读 */
+/** Explicit per-family pools are editable; legacy fields remain for older clients. */
 interface BorrowProjectView {
-  id: string; mode: RemoteModeView; maxActiveWorkers: number; localPriority: Priority; roles: string[]; repo: string | null; reviewFirst: string[];
+  id: string; agents: AgentLimits | null; mode: RemoteModeView; maxActiveWorkers: number; localPriority: Priority; roles: string[]; repo: string | null; reviewFirst: string[];
 }
 /** 声明里有、生效里没有的条目 / 项目：原因只给固定码，网页按码翻译 */
 interface DroppedView { peer: string; project?: string; code: "contact_gone" | "contact_disabled" | "fp_changed" | "project_gone" | "personal" }
@@ -69,8 +67,12 @@ export interface PeerView {
   peer: string;
   maxOpen: number;
   projects: string[];
-  /** peerCapacity 原样；台账或 lend 表还不存在时 null */
+  /** 条目有统一池（agents）项目时 = unifiedPeerCapacity（与 placement / 工作看板同口径），全是 legacy 时 = peerCapacity(maxOpen)；台账或 lend 表还不存在时 null */
   capacity: PeerCapacity | null;
+  /** capacity 适用的项目：有统一项目时只列它们，否则列 legacy 项目；scheduler.json 读不了或台账不在时 [] */
+  capacityProjects: string[];
+  /** 仅混合条目：legacy 项目仍受 maxOpen 的读数与适用项目；其余 null。与 capacity 是同一台机器的两种计数上界，不能相加 */
+  legacyCapacity: { projects: string[]; capacity: PeerCapacity } | null;
   reported: Record<string, { total: number; busy: number }> | null;
   paused: { reason: string; until: number } | null;
   grant: { roles: string[]; repos: string[]; until: number; ordersLeftToday: number } | null;
@@ -94,7 +96,7 @@ function projectsView(): { projects: BorrowProjectView[]; cfg: SchedulerConfig |
   try {
     const cfg = readSchedulerConfig(deps.schedulerPath);
     const projects = Object.entries(cfg.projects).map(([id, p]) => ({
-      id, mode: modeView(p.remote?.mode), maxActiveWorkers: p.maxActiveWorkers, localPriority: p.remote?.localPriority ?? "balance",
+      id, agents: p.agents ?? null, mode: modeView(p.remote?.mode), maxActiveWorkers: p.maxActiveWorkers, localPriority: p.remote?.localPriority ?? "balance",
       roles: [...(p.remote?.roles ?? [])], repo: p.remote?.repo ?? null, reviewFirst: [...(p.remote?.reviewFirst ?? [])],
     }));
     return { projects, cfg };
@@ -149,13 +151,34 @@ function openDb(): Database | null {
   }
 }
 
-function peerView(db: Database | null, b: BorrowEntry, now: number): PeerView {
-  const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects, roles: b.roles, priority: b.priority ?? "balance", quota: peerQuota(b.peer, now) };
-  if (!db || !hasTable(db, "lend_orders")) return { ...base, capacity: null, reported: null, paused: null, grant: null };
+/**
+ * A peer's capacity is read the way placement counts it, per project of the entry: a project scheduler.json runs on the agents
+ * pool sees the unified figure (no borrow.maxOpen); any other project still sees the legacy maxOpen cap. A mixed entry reports
+ * both, each with the projects it applies to. Each figure is per peer, never summed per project: two projects share one set of seats.
+ */
+const splitProjects = (b: BorrowEntry, cfg: SchedulerConfig | null): { unified: string[]; legacy: string[] } => {
+  // scheduler.json unreadable: which project runs which policy is unknown, so no scope is claimed (capacity keeps the legacy figure)
+  if (!cfg) return { unified: [], legacy: [] };
+  const known = b.projects.filter((id) => cfg.projects[id]);
+  return { unified: known.filter((id) => !!cfg.projects[id]!.agents), legacy: known.filter((id) => !cfg.projects[id]!.agents) };
+};
+
+/** The wire keeps PeerCapacity's shape: totals / busy are already in `reported`. */
+const peerCapacityOf = ({ totals: _t, busy: _b, ...cap }: UnifiedPeerCapacity): PeerCapacity => cap;
+
+function peerView(db: Database | null, b: BorrowEntry, now: number, cfg: SchedulerConfig | null): PeerView {
+  const { unified, legacy } = splitProjects(b, cfg);
+  const mixed = unified.length > 0 && legacy.length > 0;
+  const base = { peer: b.peer, maxOpen: b.maxOpen, projects: b.projects, roles: b.roles, priority: b.priority ?? "balance", quota: peerQuota(b.peer, now),
+    capacityProjects: unified.length > 0 ? unified : legacy };
+  // no ledger: no figure, so no scope either
+  if (!db || !hasTable(db, "lend_orders")) return { ...base, capacityProjects: [], capacity: null, legacyCapacity: null, reported: null, paused: null, grant: null };
   const p = getLendPeer(db, b.peer);
   const g = p?.grant;
+  const legacyCap = (): PeerCapacity => peerCapacity(db, b.peer, b.maxOpen, now);
   return {
-    ...base, capacity: peerCapacity(db, b.peer, b.maxOpen, now), reported: p?.slots ?? null, paused: p?.paused ?? null,
+    ...base, capacity: unified.length > 0 ? peerCapacityOf(unifiedPeerCapacity(db, b.peer, now)) : legacyCap(),
+    legacyCapacity: mixed ? { projects: legacy, capacity: legacyCap() } : null, reported: p?.slots ?? null, paused: p?.paused ?? null,
     grant: g ? { roles: g.roles, repos: g.repos, until: g.until, ordersLeftToday: g.ordersLeftToday } : null,
   };
 }
@@ -210,7 +233,7 @@ export async function borrowView(now = deps.now()): Promise<Record<string, unkno
       maxOpenLimit: MAX_OPEN,
     },
     ledger: !!db && hasTable(db, "lend_orders"),
-    peers: eff.borrow.map((b) => peerView(db, b, now)),
+    peers: eff.borrow.map((b) => peerView(db, b, now, cfg)),
     remote: remoteRows(db, (d, id) => placementView(d, id, cfg, eff.borrow, now)),
   };
 }
@@ -304,16 +327,22 @@ async function readBody(req: Request): Promise<unknown> {
   }
 }
 
-/** 本机这一行：{priority?, maxActiveWorkers?}，至少一个；项目在不在、范围对不对以 scheduler-local 为准 */
+/** Pool writes reuse scheduler-local and its locked, audited setLocalSlots writer. */
 async function writeLocal(req: Request, project: string): Promise<Response> {
   const body = await readBody(req);
-  if (!isObj(body) || Object.keys(body).some((k) => k !== "priority" && k !== "maxActiveWorkers")) return fail(400, "bad_body");
+  if (!isObj(body) || Object.keys(body).some((k) => !["priority", "maxActiveWorkers", "agents"].includes(k))) return fail(400, "bad_body");
   const { priority, maxActiveWorkers: n } = body;
-  if (priority === undefined && n === undefined) return fail(400, "bad_body");
+  let agents: AgentLimits | undefined;
+  try { agents = parseAgents(body.agents).agents; } catch {
+    // Invalid pool shape must be rejected before starting the CLI.
+    return fail(400, "bad_body");
+  }
+  if (priority === undefined && n === undefined && !agents) return fail(400, "bad_body");
   if (priority !== undefined && !isPriority(priority)) return fail(400, "bad_body");
   if (n !== undefined && (!Number.isInteger(n) || (n as number) < 0 || (n as number) > 32)) return fail(400, "bad_body");
   const args = ["ledger", "scheduler-local", project, ...(priority !== undefined ? [`--priority=${priority}`] : []),
-    ...(n !== undefined ? [`--max-workers=${n}`] : []), "--reason=网页分配表"];
+    ...(n !== undefined ? [`--max-workers=${n}`] : []),
+    ...(agents ? [`--agents=claude=${agents.claude},codex=${agents.codex}`] : []), "--reason=网页分配表"];
   return cliResult(await deps.run(args), `scheduler-local ${project}`);
 }
 

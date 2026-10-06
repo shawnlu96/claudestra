@@ -19,7 +19,7 @@ describe("场景 1 推送主路径", () => {
     await L.toReview();
     L.markNow();
     await L.pass(); // B hello → A 调度按 reviewFirst 挂给 mate → A 推送 → B 收下
-    expect(getLendPeer(L.f.db, MATE)).toMatchObject({ proto: 2, grant: expect.objectContaining({ repos: ["o/r"] }), slots: { codex: { total: 2, busy: 0 } } });
+    expect(getLendPeer(L.f.db, MATE)).toMatchObject({ proto: 3, grant: expect.objectContaining({ repos: ["o/r"] }), slots: { codex: { total: 2, busy: 0 } } });
     expect(planText(L).at(-1)).toBe("挂池：对抗式跨模型审查挂给 mate 的 codex worker（scheduler.json remote.reviewFirst 指定先给 mate）");
     const [order] = L.orders();
     expect(order).toMatchObject({ status: "pooled", peer: MATE, family: "codex", step: "review" });
@@ -76,7 +76,8 @@ describe("场景 2 上限", () => {
     await L.toReview(); // 这时自动卡 T1 进审查：reviewFirst 的 mate 没有空位 → 本机
     const shown = await L.aCli("pm", "lend-orders", "T1"); // W5 的只读命令：下一轮会放哪、为什么
     const placement = JSON.stringify(shown.placement);
-    expect(shown.placement).toEqual({ role: "review", where: "local", reason: expect.stringContaining("reviewFirst 里的 peer 都不能接（mate：对方没有空闲的 codex 槽）") });
+    expect(shown.placement).toEqual({ role: "review", where: "local", reason: expect.stringContaining("reviewFirst 里的 peer 都不能接（mate：对方没有空闲的 codex 槽）"),
+      category: "dispatchable", block: null });
     await L.pass();
     expect(L.orders("T1")).toEqual([]);
     expect(intents(L)).toContain("ensure_session:-:done");

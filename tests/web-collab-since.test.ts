@@ -109,7 +109,8 @@ describe("sinceDigest", () => {
 
 describe("回放", () => {
   const events = [
-    ev("T5", "task", { op: "new" }),
+    // 真实 bridge 的建任务事件一律带 patch.stage（src/lib/ledger-write.ts insertTask）；回放只认它定初始阶段
+    ev("T5", "task", { op: "new", patch: { stage: "spec" } }),
     ev("T5", "task", { op: "set" }),
     ev("T5", "stage", { from: "spec", to: "restate" }),
     ev("T5", "stage", { from: "restate", to: "build" }),

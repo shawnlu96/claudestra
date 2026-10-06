@@ -18,6 +18,8 @@ import { sandboxDisabled } from "./sandbox.js";
 import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; export { sandboxTmuxArgv };
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
+import { endsInModal, paneTail, trimTrailingBlank } from "./pane-tail.js";
+export { parseModalOptions, type ModalOption } from "./modal-numbered-options.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -329,17 +331,6 @@ export const CC_MODE_BANNER_RE = /shift\+tab to cycle|bypass permissions/i;
 export const CC_BUSY_RE =
   /esc to interrupt|esc to cancel|^\s*[·✢✳✶✻✽*]\s+\S[^\n]*(?:…|\.\.\.)\s*\([^)\n]*?(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b|^[·✢✳✶✻✽*] \S[^\n]*(?:…|\.\.\.)[^\S\n]*$|^[·✢✳✶✻✽*] [^\n]*\b(?:retrying|will retry)\b/im;
 
-/** 剪掉 capture-pane 输出的尾部空行(v2.17.2 P0,peer 报告)。pane 比 TUI 实绘区
- *  高(窗口 resize 后 CC 未重绘底部)时,capture 会带出成片尾部空行——最多实测
- *  30 行——把页脚整个挤出 slice(-N) 窗口:paneLooksIdle 恒 false = 全体 agent
- *  被误判 busy,用量抓取/wedge/就绪轮询/claude-settings 409 守卫/web busy 态
- *  全部失真。所有「看 pane 尾部」的判定都必须先过这一刀。 */
-function trimTrailingBlank(lines: string[]): string[] {
-  let end = lines.length;
-  while (end > 0 && !lines[end - 1]!.trim()) end--;
-  return lines.slice(0, end);
-}
-
 /** `❯` 判据该看的行:输入框的 `❯` 行(上一行是顶边框 `────`,可带名字标签)到底。按结构找而不数
  *  「最后 5 行」:页脚高度不固定(窄窗口里状态栏 / banner / 右侧通知各折一行),数行会把 `❯` 挤出去
  *  ⇒ 空闲恒判忙。只搜尾部 15 行,找不到退回最后 5 行。用例见 tests/prompt-zone.test.ts。 */
@@ -537,13 +528,13 @@ export const PERMISSION_MODE_CYCLE = [
 
 /** 从 pane 底部 banner 判断当前 permission mode。default 模式没 banner（只有 ❯）。 */
 export function detectPermissionMode(pane: string): string | null {
-  const tail = pane.split("\n").slice(-6).join("\n");
+  const tail = paneTail(pane, 6).join("\n");
   if (/auto mode on/i.test(tail)) return "auto";
   if (/accept edits on/i.test(tail)) return "acceptEdits";
   if (/plan mode on/i.test(tail)) return "plan";
   if (/bypass permissions on/i.test(tail)) return "bypassPermissions";
   // 无 mode banner 但在 ready 提示符 → default 模式（无 banner）
-  if (/❯/.test(pane.split("\n").slice(-5).join("\n"))) return "default";
+  if (/❯/.test(paneTail(pane, 5).join("\n"))) return "default";
   return null;
 }
 
@@ -577,51 +568,12 @@ export function detectBypassConsentPrompt(pane: string): boolean {
 }
 
 /**
- * v2.21.4+ 目录信任弹窗。CC 2.1.259 起在家目录这类敏感目录启动会先问:
- *   Quick safety check: Is this a project you created or one you trust? …
- *   ❯ No, exit
- *     Yes, I trust this folder
- *   Enter to confirm · Esc to cancel
- * 默认高亮 **No, exit**——直接 Enter 等于退出;它又没有数字编号,parseModalOptions
- * 认不出,就绪轮询只会干等到超时(2026-09-04:cron 临时 agent dir=~ 全部「启动超时」)。
- * 返回到达「Yes」要按几次 Down(负数 = Up,0 = 已高亮);不是该弹窗返回 null。
- * 编排器启动的 agent 目录都是 owner 自己指定的(create / cron),且本来就跑
- * bypassPermissions,自动信任与现有安全模型一致。
- */
-export function trustPromptMoves(pane: string): number | null {
-  const tail = trimTrailingBlank(pane.split("\n")).slice(-25);
-  const joined = tail.join("\n");
-  if (!/trust this folder/i.test(joined) || !/Enter to confirm/i.test(joined)) return null;
-  const opts: Array<{ yes: boolean; selected: boolean }> = [];
-  for (const raw of tail) {
-    const m = raw.match(/^\s*(❯)?\s*(No, exit|Yes, I trust this folder)\s*$/i);
-    if (!m) continue;
-    opts.push({ yes: /^yes/i.test(m[2]), selected: !!m[1] });
-  }
-  const yesIdx = opts.findIndex((o) => o.yes);
-  const selIdx = opts.findIndex((o) => o.selected);
-  if (yesIdx < 0 || selIdx < 0) return null;
-  return yesIdx - selIdx;
-}
-
-/** 在信任弹窗上选「Yes, I trust this folder」:按 moves 次 Down/Up 再 Enter。 */
-export async function acceptTrustPrompt(target: string, moves: number): Promise<void> {
-  const key = moves >= 0 ? "Down" : "Up";
-  for (let i = 0; i < Math.abs(moves); i++) {
-    await tmuxRaw(["send-keys", "-t", target, key]);
-    await Bun.sleep(120);
-  }
-  await Bun.sleep(150);
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-}
-
-/**
  * 检测 session 闲置弹窗（resume 时 Claude Code 可能弹这个让用户选）。
  * 区别于 hasClaudePromptToConfirm — 这个弹窗必须让用户主动选，不能自动确认。
  * 返回弹窗描述，没有返回 null。
  */
 export function detectSessionIdlePrompt(pane: string): string | null {
-  const lines = pane.split("\n");
+  const lines = trimTrailingBlank(pane.split("\n"));
   // v2.0.23+: 只看 pane 底部 —— 真 session-idle 弹窗总在最底下。之前 pane.includes
   // 扫**全 pane**，会把 scrollback 里显示的代码 / 输出当成真弹窗误报。实测：owner 编辑
   // 本检测器自己的测试 fixture（"❯ 1. Resume from summary" 之类）时，claudestra 的屏幕
@@ -647,39 +599,6 @@ export function detectSessionIdlePrompt(pane: string): string | null {
   const m = tail.match(/This session is ([\s\S]+?tokens?)\./i)
     || tail.match(/This session is ([^\n]+)/i);
   return m ? m[1].trim().slice(0, 150) : "Session 闲置提示";
-}
-
-/**
- * 解析 Claude Code TUI 里的数字选项 modal（/model 选择器、/mcp 菜单等）。
- * 返回所有可见选项 + 它们对应的按键。超过 25 项会截断（Discord select menu 上限）。
- * 没有检测到选项 modal 返回 null。
- */
-export interface ModalOption {
-  key: string;       // 发给 tmux 的字符（通常是 "1" / "2" ...）
-  label: string;     // ≤80 字符，喂给 Discord button/select 的显示文本
-  selected: boolean; // 是否当前高亮（❯ 前缀）
-}
-
-export function parseModalOptions(pane: string): ModalOption[] | null {
-  // 只看 pane 最后 30 行（modal 总在底部）
-  const tail = pane.split("\n").slice(-30);
-  const seen = new Set<string>();
-  const options: ModalOption[] = [];
-  for (const raw of tail) {
-    // 匹配 "❯ 1. 文本" 或 "  1. 文本"
-    const m = raw.match(/^\s*(❯)?\s*(\d{1,2})\.\s+(.+?)\s*$/);
-    if (!m) continue;
-    const key = m[2];
-    if (seen.has(key)) continue;
-    const label = m[3].replace(/\s+/g, " ").trim().slice(0, 80);
-    if (!label) continue;
-    seen.add(key);
-    options.push({ key, label, selected: !!m[1] });
-  }
-  if (options.length < 2) return null;
-  // 关键：真 modal 一定有一个选中标记 ❯，否则就是 Claude 回复里普通的编号列表
-  if (!options.some((o) => o.selected)) return null;
-  return options.slice(0, 25);
 }
 
 /** 无编号选择弹窗的一个选项（没有可发送的按键：确认只能 Enter 默认项 / 方向键移动） */
@@ -764,7 +683,7 @@ export type ArrowNavKind = "horizontal" | "vertical" | "both";
 
 export function detectArrowNavModal(pane: string): ArrowNavKind | null {
   // 只看最后 20 行
-  const tail = pane.split("\n").slice(-20).join("\n");
+  const tail = paneTail(pane, 20).join("\n");
   const hasHoriz = /←\/→|◀\/▶|[^\s]→ to/.test(tail) || /to change/.test(tail) && /←/.test(tail);
   const hasVert = /↑\/↓|▲\/▼/.test(tail);
   // 还必须有 "Enter to confirm" 或 "Enter to" 暗示确认流程
@@ -1271,7 +1190,8 @@ export async function killPidsEscalating(pids: number[], graceMs = 4000): Promis
  * auto-Enter 会毁掉用户正在交互的 /model 类菜单)。
  */
 export function detectDevChannelsModal(pane: string): boolean {
-  const tail = pane.split("\n").slice(-20).join("\n");
+  if (!endsInModal(pane)) return false; // 框后面已有别的内容 = 残留
+  const tail = paneTail(pane, 20).join("\n");
   if (!/Loading development channels/i.test(tail)) return false;
   if (!/❯\s*1\./.test(tail)) return false;
   return !isAtShell(pane);
@@ -1296,7 +1216,7 @@ export async function ensureSocketDir(): Promise<void> {
  * 「▰▰▱▱… 37%」)。拿不到返回 null。
  */
 export function paneCompactProgress(pane: string): number | null {
-  const tail = pane.split("\n").slice(-12).join("\n");
+  const tail = paneTail(pane, 12).join("\n");
   const m = tail.match(/[▰▱]+\s*(\d{1,3})%/);
   if (!m) return null;
   const n = Number(m[1]);

@@ -14,13 +14,13 @@ import { readJsonCapped } from "./body-reader.js";
 import { IDENTITY_UNVERIFIED, requireVerified, type CallerIdentity } from "./caller-identity.js";
 import { roleOfStep } from "./lend-git.js";
 import { notV2, peerProto } from "./lend-hello.js";
-import { getOrder, liveOrders, orderOf, type LendRow } from "./lend-journal.js";
+import { getOrder, liveOrders, orderOf, WORKER_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_ORDER_TOOLS } from "./lend-mcp-profile.js";
 import { signedFor } from "./instance-key.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import { commitLendResult, payloadSha, readReportIn } from "./lend-submit.js";
 import { refuse, type OrderToolResult } from "./order-tool-route.js";
-import { parseAskWire, parseVerdictWire } from "./order-wire.js";
+import { askScopeExtra, parseAskWire, parseVerdictWire } from "./order-wire.js";
 import { isE2eResponse } from "./peer-e2e-client.js";
 import type { HttpPeer } from "./peers.js";
 import { isLendWorkerName } from "./runtimes/clean-env.js";
@@ -103,7 +103,7 @@ function boundOrder(db: Database | null, identity: CallerIdentity, tool: string,
   if (!row.sessionId || row.sessionId !== identity.sessionId) return no("session_mismatch", `${identity.agent} 的当前会话不是这张单记的会话，不收`);
   const given = (args as { orderId?: unknown } | null | undefined)?.orderId;
   if (given !== undefined && given !== row.orderId) return no("order_mismatch", `参数里的 orderId 不是你这张单（${row.orderId}）`);
-  if (row.state !== "started" && row.state !== "result_pending") return no("not_started", `${row.orderId} 当前是 ${row.state}，不收派单工具调用`);
+  if (!WORKER_STATES.includes(row.state)) return no("not_started", `${row.orderId} 当前是 ${row.state}，不收派单工具调用`);
   const role = roleOfStep(String(orderOf(row)?.step ?? ""));
   if (!role) return no("invalid_order", `${row.orderId} 的步骤认不出，不收`);
   const write = role === "write";
@@ -153,7 +153,8 @@ async function askPeer(row: LendRow, args: unknown, d: LendToolDeps): Promise<Or
   const noAsk = refuse("peer_no_ask", "对方（发起方）的版本不支持 ask，问题没有发出去：把疑问写进报告，或按规格自行判断");
   if (peerProto(d.db!, row.peer) !== 2) return noAsk;
   if (row.leaseGen === null) return refuse("not_started", `${row.orderId} 还没有租约代数，不能提问`);
-  const r = await lendRequest(d.call, row.peer, "ask", { orderId: row.orderId, gen: row.leaseGen, question: w.value.question, options: w.value.options });
+  const r = await lendRequest(d.call, row.peer, "ask", { orderId: row.orderId, gen: row.leaseGen, question: w.value.question, options: w.value.options,
+    ...askScopeExtra(w.value) }); // files / reason 只在有值时发（旧版发起方不认）
   if (notV2(r)) return noAsk;
   if (r.ok) return { ok: true, askId: r.value.askId };
   const unknown = r.code === "transport" || r.code === "bad_response";

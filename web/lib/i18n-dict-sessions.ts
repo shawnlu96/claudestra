@@ -2,6 +2,11 @@
  * 侧栏「未纳管会话」与归档的 i18n 词条，由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
  */
 export const SESSIONS_DICT: Record<string, string> = {
+  "主管 PM": "Lead PM",
+  "切到 {name}": "Switch to {name}",
+  "主管 PM 已切到 {name}": "Lead PM switched to {name}",
+  "体检中…": "Checking…",
+  "主管 PM 切换失败：{reason}": "Lead PM switch failed: {reason}",
   "未纳管会话": "Unmanaged sessions",
   "没有未纳管的会话": "No unmanaged sessions",
   "会话文件 2 分钟内还在写 —— 大概率正在运行（启发式）": "Session file written in the last 2 minutes — probably still running (heuristic)",
@@ -36,6 +41,7 @@ export const SESSIONS_DICT: Record<string, string> = {
   "{n} 个会话": "{n} session|{n} sessions",
   "归档失败:": "Archive failed: ", // 值尾带空格
   "沉寂": "Dormant",
+  "历史": "History", // 侧栏组底收起的用完会话（sidebar-history.tsx）
   // 子会话收编确认（components/adopt-panel.tsx）
   "另一个会话": "another session",
   "确认收编子会话": "Confirm adopting a sub-session",
@@ -44,4 +50,13 @@ export const SESSIONS_DICT: Record<string, string> = {
   "这是「{parent}」的子会话，通常不需要单独收编——它会跟着主会话走。确定要把它单独收编成 agent 吗？":
     "This is a sub-session of “{parent}” and usually doesn't need adopting on its own — it follows the main session. Adopt it as a separate agent anyway?",
   "仍然收编": "Adopt anyway",
+  "会话列表加载较慢，仍在连接…": "The session list is loading slowly — still connecting…",
+  "会话列表加载失败，正在重试…": "Couldn't load the session list — retrying…",
+  "会话列表加载失败，{s} 秒后自动重试": "Couldn't load the session list — retrying automatically in {s}s",
+  "会话列表加载失败": "Couldn't load the session list",
+  "没有权限读取会话列表，可能需要重新配对": "Not allowed to read the session list — this device may need to be paired again",
+  "列表刷新失败，显示的是上次的结果": "Refresh failed — showing the last loaded list",
+  "列表刷新失败，显示的是上次的结果 · {s} 秒后重试": "Refresh failed — showing the last loaded list · retrying in {s}s",
+  "正在重试…": "Retrying…",
+  "先进入": "Continue anyway",
 };

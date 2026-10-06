@@ -7,6 +7,7 @@
  * Removal is only ever `git worktree remove` without --force, which itself refuses dirty trees.
  */
 import type { Database } from "bun:sqlite";
+import { hasUnsettledFinishedWrites } from "./ledger-scheduler-lease-finished.js";
 import { realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
@@ -20,6 +21,7 @@ import { normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./re
 import { readJsonLenient } from "./state-file.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { cleanSessionTmp, type TmpCleaner, type TmpStepInput } from "./scheduler-retire-tmp.js";
+import { stopOwnExecutor } from "./scheduler-retire-owner.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -42,7 +44,7 @@ export interface RetireDeps {
  * An agent as retirement reads it: its registry entry (absent = only a window by that name is left) and whether a tmux window by
  * that name is still open. `pending` = an operation on it (a kill cut off half way, a create) has not finished.
  */
-type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean; window: boolean };
+export type LiveAgent = Pick<RegistryAgent, "name" | "status" | "sessionId" | "cwd"> & { pending: boolean; window: boolean };
 /** Stopped for good: runKill writes `stopped` + pending *before* it closes the window, so neither alone proves the stop. */
 const stopped = (a: LiveAgent): boolean => a.status === "stopped" && !a.pending && !a.window;
 
@@ -79,8 +81,8 @@ const QUEUE_ACTIONS = "('merge','verify')";
 
 /**
  * Finished cards with a session still to retire or a claimed retire intent to finish, by id. A card with another open intent
- * waits (beginRetire would refuse it) unless it was cancelled: nothing drives a cancelled card's dispatch / review intents any
- * more, so the tick closes them itself (closeStray). An unknown intent, retire or not, is PM's to reconcile.
+ * waits (beginRetire would refuse it). Cancelled cards may close non-write strays themselves, but residual writes must first
+ * pass finished-card reconciliation. An unknown non-write intent, retire or not, is PM's to reconcile.
  */
 export function retireCandidates(db: Database, projects: readonly string[]): string[] {
   if (!projects.length || !db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return [];
@@ -91,7 +93,7 @@ export function retireCandidates(db: Database, projects: readonly string[]): str
     AND (EXISTS (SELECT 1 FROM scheduler_sessions s WHERE s.taskId = t.id AND s.state != 'retired')
       OR EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.action = 'retire' AND i.status = 'submitted'))
     ORDER BY t.id`).all(...projects) as { id: string }[];
-  return rows.map((r) => r.id);
+  return rows.filter((r) => !hasUnsettledFinishedWrites(db, r.id)).map((r) => r.id);
 }
 
 /** An unfinished card still using this agent (bound session or named executor): killing it would kill that card's work. */
@@ -220,6 +222,9 @@ class RetireCard {
       const why = `${row.role} session ${row.agent} 收不掉：${stop.failed}`;
       return this.owe(this.out("unknown", why), "unknown", why, `${this.task.id} 收尾卡住，意图转 unknown 待核对：${why}`);
     }
+    const own = await stopOwnExecutor({ ...this.deps, db: this.db, task: this.task, intentId: this.intent.id, archiveFailed: ARCHIVE_FAILED,
+      dirs: worktreeDirs(this.deps.worktreeRoot, this.task.id), stopped, within, archiveReceipt, killOutcome, inUse: (name) => agentStillInUse(this.db, name, this.task.id) }); // i28-RT1
+    if ("busy" in own) return this.out("held", own.busy);
     // re-derived from durable state every time, so a notice resent after a lost one says the same thing
     const kept: string[] = [], agents = await this.deps.agents(), checkouts: TmpStepInput["checkouts"] = [];
     for (const [i, dir] of worktreeDirs(this.deps.worktreeRoot, this.task.id).entries()) {
@@ -228,13 +233,14 @@ class RetireCard {
       checkouts.push({ dir, role: i === 0 ? "author" : "reviewer", kept: !!why });
     }
     const all = this.db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? ORDER BY role").all(this.task.id) as SchedulerSession[];
-    const left = all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
-      .map((x) => `${r.role} ${r.agent}：${x}`));
+    const left = [...own.pm, ...all.flatMap((r) => [r.archiveReceipt, r.killReceipt].filter((x): x is string => !!x && (x.startsWith(ARCHIVE_FAILED) || x.includes(FOR_PM)))
+      .map((x) => `${r.role} ${r.agent}：${x}`))];
     const others = (this.db.query("SELECT id FROM tasks WHERE id != ?").all(this.task.id) as { id: string }[])
       .flatMap((t) => worktreeDirs(this.deps.worktreeRoot, t.id));
     const tmp = await cleanSessionTmp(this.deps.tmp, { stage: getTask(this.db, this.task.id)?.stage ?? "", checkouts, sessions: all,
       liveCwds: agents.flatMap((a) => (!stopped(a) && a.cwd ? [{ name: a.name, cwd: a.cwd }] : [])), otherCheckouts: others });
-    const sessions = (rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役") + (tmp.done.length ? `；临时目录 ${tmp.done.join("、")}` : "");
+    const sessions = (rows.length ? `${rows.length} 个 session 已退役` : "session 早已退役") + own.receipts.map((r) => `；${r}`).join("")
+      + (tmp.done.length ? `；临时目录 ${tmp.done.join("、")}` : "");
     if (!kept.length && !left.length && !tmp.failed.length) {
       return this.out((await settle(this.deps, this.intent.id, "done", `${sessions}；worktree 已清`)) ? "retired" : "held", sessions);
     }
@@ -244,9 +250,10 @@ class RetireCard {
   }
 }
 
-/** For a cancelled card: close its open dispatch / review / ask intents, which nothing will settle once the card is out of work. */
+/** For a cancelled card: close non-write strays only after write reconciliation has removed its writer guard. */
 async function closeStray(db: Database, deps: RetireDeps, task: LedgerTask): Promise<string | null> {
   if (task.stage !== "cancelled") return null;
+  if (hasUnsettledFinishedWrites(db, task.id)) return "仍有未结写意图，等待写方空闲后结清";
   const open = db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND action NOT IN ('retire', 'merge', 'verify')
     AND status IN ('pending','submitted') ORDER BY id`).all(task.id) as { id: string; status: string }[];
   for (const i of open) {

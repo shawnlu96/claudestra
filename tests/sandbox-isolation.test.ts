@@ -1,21 +1,8 @@
 /**
- * 受控测试：真实起一个沙箱 bridge（scripts/sandbox.ts），启动 → 使用 → 重启 → 退出，全程证明没有副作用。
- *
- * 「生产」由临时目录冒充：HOME 指向假 home（里面种好 ~/.claude-orchestrator 与 ~/.claude），调用者环境里
- * 塞满生产地址与身份（BRIDGE_URL=生产端口、Discord token、中继地址），PATH 前面垫一层记账 shim
- * （launchctl / tmux / claude …）。断言：
- *   1. 假 home 下没有任何文件新建 / 修改 / 删除（逐文件比 size + mtime + 内容哈希）；
- *   2. launchctl 一次都没被调；tmux 每次调用都走沙箱 socket；
- *   3. 出站请求 0 次：代理替身、中继替身都没收到请求，bridge 日志里也没有出站闸门拦截记录；
- *   4. bridge 只监听沙箱端口（有 lsof 时）；沙箱状态目录确实收到了写入（证明写入被重定向，而不是没发生）。
- * agent 这一侧（有 tmux 时）：经沙箱 manager 真建一个 agent，`claude` 换成假 Claude Code（tests/sandbox-fake-claude.ts），
- * 它照真的那样跑 settings.json 里的 hooks / statusLine、拉起 channel-server、写会话 jsonl、收消息回 pong。
- * 假 home 里只许出现它自己写进 ~/.claude/projects 的会话文件（Claude Code 自身的写入，已知边界）。
- * Pi 这一侧：`pi` 换成假 pi（tests/sandbox-fake-pi.ts），经 ACP 真建一个 Pi agent，reply 经 channel-server 回到沙箱 bridge，
- * 核对它拿到的 Pi 目录 / HOME / 发现开关是沙箱那一套。
- * 另测：绕过脚本、直接带着 Discord token / 中继地址起沙箱 bridge → 拒绝启动，同样零写入零出站。
+ * 真实 sandbox 生命周期、bridge/ws 与假 agent：假生产 home 的 hash、socket 归属、出站与设施调用均须保持隔离。
+ * 端口竞争及取消由可控钩子注入；失败路径仍核验 child、bridge、pid 文件与监听端口的清理。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { createHash } from "crypto";
 import { join, resolve } from "path";
@@ -24,22 +11,17 @@ import { OUTBOUND_BLOCKED_MARK } from "../src/lib/sandbox-outbound.js";
 import { fakeClaudeSource } from "./sandbox-fake-claude.js";
 import { fakePiSource } from "./sandbox-fake-pi.ts";
 import { testChildEnv } from "./test-env.ts";
-
+import { atGate, Fleet, gateHit, gateShell, pickPort, pidAlive as alive, StartFailure, startSandbox, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
 const REPO = resolve(import.meta.dir, "..");
 const SCRIPT = join(REPO, "scripts", "sandbox.ts");
 const BUN = process.execPath;
 const REAL_TMUX = Bun.which("tmux");
 const PROD_SID = "11111111-2222-4333-8444-555555555555";
-
-let tmp = "";
-let home = "";
-let root = "";
-let shimLog = "";
-let port = 0;
+/** 候选端口禁用表：生产端口与下面拒连负例用的固定端口 */
+const AVOID_PORTS = [DEFAULT_BRIDGE_PORT, 23998, 23999];
+let [tmp, home, root, shimLog, port] = ["", "", "", "", 0];
 const hits: { proxy: string[]; decoy: string[] } = { proxy: [], decoy: [] };
-let proxy: ReturnType<typeof Bun.serve> | null = null;
-let decoy: ReturnType<typeof Bun.serve> | null = null;
-
+let [proxy, decoy]: Array<ReturnType<typeof Bun.serve> | null> = [null, null];
 function snapshot(dir: string): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (d: string) => {
@@ -57,14 +39,12 @@ function snapshot(dir: string): Map<string, string> {
   walk(dir);
   return out;
 }
-
 function diff(a: Map<string, string>, b: Map<string, string>): string[] {
   const out: string[] = [];
   for (const [k, v] of b) if (a.get(k) !== v) out.push(`${a.has(k) ? "改" : "新"} ${k}`);
   for (const k of a.keys()) if (!b.has(k)) out.push(`删 ${k}`);
   return out;
 }
-
 function seedFakeHome(): void {
   const st = join(home, ".claude-orchestrator");
   mkdirSync(join(st, "logs"), { recursive: true });
@@ -93,7 +73,6 @@ function seedFakeHome(): void {
   const rc = `export PATH="${join(tmp, "shim")}:$PATH"\n`;
   for (const f of [".zshenv", ".zshrc", ".bashrc", ".profile"]) writeFileSync(join(home, f), rc);
 }
-
 /** 记账 shim：记下 argv；tmux 透传真 tmux（沙箱 socket 上的真实行为），其余一律失败退出 */
 function writeShims(dir: string): void {
   mkdirSync(dir, { recursive: true });
@@ -102,7 +81,7 @@ function writeShims(dir: string): void {
     writeFileSync(p, `#!/bin/sh\necho "${name} $*" >> '${shimLog}'\n${tail}\n`);
     chmodSync(p, 0o755);
   };
-  shim("tmux", REAL_TMUX ? `exec '${REAL_TMUX}' "$@"` : "exit 1");
+  shim("tmux", `${gateShell(tmuxGate())}\n${REAL_TMUX ? `exec '${REAL_TMUX}' "$@"` : "exit 1"}`); // 闸门只在端口竞争测试里打开
   for (const n of ["launchctl", "codex", "npm", "curl", "open", "osascript", "tailscale"]) shim(n, "exit 1");
   // pi：只答版本探测和 ACP 适配器起的 rpc 模式（交给假 pi），别的（pi update / install …）照旧失败并被下面的断言抓到
   writeFileSync(join(dir, "fake-pi"), fakePiSource(BUN, join(tmp, "fake-pi.log")));
@@ -111,17 +90,19 @@ function writeShims(dir: string): void {
   writeFileSync(join(dir, "claude"), fakeClaudeSource(BUN, join(tmp, "fake-claude.log")));
   chmodSync(join(dir, "claude"), 0o755);
 }
-
+const tmuxGate = () => join(tmp, "tmux-gate");
 function callerEnv(): Record<string, string> {
   return {
     PATH: `${join(tmp, "shim")}:${process.env.PATH}`,
     HOME: home,
     TMPDIR: tmp,
+    LANG: "en_US.UTF-8", // 同生产 launchd plist：没有 UTF-8 locale 时 tmux 把 -F 输出里的 \t 换成 _，按 \t 切的解析（如 web-shell readShells）全落空
     HTTP_PROXY: `http://127.0.0.1:${proxy!.port}`,
     HTTPS_PROXY: `http://127.0.0.1:${proxy!.port}`,
     NO_PROXY: "127.0.0.1,localhost",
     // 测试驱动本身（相当于执行者的终端）跑 bun 也会写转译缓存：关掉，免得把它算成沙箱的写入
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+    CLAUDESTRA_SANDBOX_PARENT_PID: String(process.pid), // runner 被硬杀（收尾不跑）时沙箱 bridge 跟着退（lib/sandbox-parent-watchdog.ts）
     // 执行者 agent 自己的环境长这样——脚本必须一个都不带进沙箱
     BRIDGE_URL: `ws://localhost:${DEFAULT_BRIDGE_PORT}`,
     BRIDGE_PORT: String(DEFAULT_BRIDGE_PORT),
@@ -131,34 +112,25 @@ function callerEnv(): Record<string, string> {
     CLAUDESTRA_STATE_DIR: join(home, ".claude-orchestrator"),
   };
 }
-
 function sandbox(...args: string[]): { code: number; out: string } {
   const r = Bun.spawnSync([BUN, SCRIPT, ...args, "--port", String(port), "--root", root], {
     cwd: REPO, env: callerEnv(), stdout: "pipe", stderr: "pipe",
   });
   return { code: r.exitCode ?? 1, out: r.stdout.toString() + r.stderr.toString() };
 }
-
-async function freePort(): Promise<number> {
-  for (let i = 0; i < 50; i++) {
-    const p = 20000 + Math.floor(Math.random() * 9000);
-    try {
-      Bun.listen({ hostname: "127.0.0.1", port: p, socket: { data() {} } }).stop(true);
-      return p;
-    } catch {
-      continue; // 被占了，换一个
-    }
-  }
-  throw new Error("找不到空闲端口");
+/** 经原入口 scripts/sandbox.ts up 起沙箱的夹具参数（端口竞争由 startSandbox 协调）；deadline 取调用方现有 timeout 之内 */
+function upSpec(r: string, ms: number, extra: Partial<StartSpec> = {}): StartSpec {
+  return {
+    root: r, cwd: REPO, env: callerEnv, avoid: AVOID_PORTS, deadline: Date.now() + ms,
+    argv: (sub, p) => [BUN, SCRIPT, sub, "--port", String(p), "--root", r], ...extra,
+  };
 }
-
 /** 进程当前打开的文件路径（有 lsof 时）：用来断言沙箱 bridge 没开着任何生产目录里的文件 */
 function openFiles(pid: number): string[] | null {
   if (!Bun.which("lsof")) return null;
   const r = Bun.spawnSync(["lsof", "-p", String(pid), "-Fn"], { stdout: "pipe" });
   return r.stdout.toString().split("\n").filter((l) => l.startsWith("n/")).map((l) => l.slice(1));
 }
-
 function listeningPorts(pid: number): number[] | null {
   if (!Bun.which("lsof")) return null;
   const r = Bun.spawnSync(["lsof", "-a", "-p", String(pid), "-iTCP", "-sTCP:LISTEN", "-nP", "-Fn"], { stdout: "pipe" });
@@ -255,6 +227,35 @@ async function agentSide(): Promise<void> {
 
 const firstJson = (out: string) => JSON.parse(out.split("\n").find((l) => l.startsWith("{")) ?? "{}") as Record<string, any>;
 
+/** 网页新终端：登记过的项目目录 stat 是目录但进不去（chmod 000），tmux 会回落 HOME——路由必须报错、不留窗口（new-session / new-window 两条分支） */
+async function webShellSide(): Promise<void> {
+  const noperm = join(root, "work", "sh-noperm");
+  mkdirSync(noperm);
+  expect(sandbox("manager", "project-add", "sbxsh", "--dirs", noperm).out).toContain('"ok":true');
+  const secret = firstJson(sandbox("manager", "token-add", "dev-sh", "--agents", "master", "--force", "--terminal").out).secret;
+  const api = async (method: string, path = "", body?: unknown) => {
+    const r = await fetch(`http://127.0.0.1:${port}/api/v1/shells${path}`, {
+      method, headers: { Authorization: `Bearer ${secret}`, "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: r.status, body: (await r.json()) as Record<string, any> };
+  };
+  chmodSync(noperm, 0o000);
+  try {
+    const first = await api("POST", "", { dir: noperm }); // 还没有 webshell session：new-session
+    expect(first.status, JSON.stringify(first.body)).toBe(500);
+    expect(first.body.error).toContain("已关掉");
+    expect((await api("GET")).body.shells).toEqual([]);
+    const ok = await api("POST", "", { dir: join(root, "work") });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    const second = await api("POST", "", { dir: noperm }); // session 已在：new-window
+    expect(second.status, JSON.stringify(second.body)).toBe(500);
+    expect((await api("GET")).body.shells.map((s: { id: string }) => s.id)).toEqual([ok.body.shell.id]);
+    expect((await api("DELETE", `/${ok.body.shell.id}`)).status).toBe(200);
+  } finally {
+    chmodSync(noperm, 0o755);
+  }
+}
+
 /** Pi 走 ACP（假 pi）：目录钉在沙箱根、HOME 隔离、发现开关全关，reply 经 channel-server 回到沙箱 bridge；切回 tmux 在沙箱里被拒 */
 async function piSide(): Promise<void> {
   const plog = () => (existsSync(join(tmp, "fake-pi.log")) ? readFileSync(join(tmp, "fake-pi.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
@@ -270,8 +271,7 @@ async function piSide(): Promise<void> {
   expect(start).toMatchObject({ HOME: join(root, "acp-home"), PI_CODING_AGENT_DIR: join(root, "pi-agent"), PI_OFFLINE: "1", BRIDGE_PORT: null, DISCORD_CHANNEL_ID: null, mcp: ["claudestra"] });
   expect(start.argv).toEqual(expect.arrayContaining(["--mode", "rpc", "--no-extensions", "--no-skills", "--no-prompt-templates", "-e", "builtin:mcp", "--session-id", info.sessionId]));
   const back = sandbox("manager", "migrate", "--pi", "sbxpi", "--to", "tmux");
-  expect(back.code, back.out).not.toBe(0);
-  expect(back.out).toContain("只走 ACP");
+  expect([back.code === 0, back.out]).toEqual([false, expect.stringContaining("只走 ACP")]);
   expect(sandbox("manager", "kill", "sbxpi").code).toBe(0);
 }
 
@@ -303,21 +303,17 @@ function sandboxEnvOf(): Record<string, string> {
 
 beforeAll(async () => {
   tmp = mkdtempSync("/tmp/sbxi-"); // 短路径：unix socket 上限 104 字节
-  home = join(tmp, "home");
-  root = join(tmp, "sbx");
-  shimLog = join(tmp, "shim.log");
+  [home, root, shimLog] = [join(tmp, "home"), join(tmp, "sbx"), join(tmp, "shim.log")];
   writeFileSync(shimLog, "");
   seedFakeHome();
   writeShims(join(tmp, "shim"));
   proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) { hits.proxy.push(`${req.method} ${req.url}`); return new Response("no", { status: 502 }); } });
   decoy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) { hits.decoy.push(`${req.method} ${req.url}`); return new Response("no", { status: 502 }); } });
-  port = await freePort();
 });
 
 afterAll(() => {
   if (existsSync(join(root, "bridge.pid"))) sandbox("down");
-  proxy?.stop(true);
-  decoy?.stop(true);
+  [proxy, decoy].forEach((s) => s?.stop(true));
   if (tmp) rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -325,9 +321,10 @@ describe("沙箱 bridge 无副作用", () => {
   test("启动 → 使用 → 重启 → 退出：假生产 home 零改动、不碰 launchd、不出站、只用沙箱 socket 与端口", async () => {
     const before = snapshot(home);
 
-    const up = sandbox("up");
-    expect(up.code, up.out).toBe(0);
+    const up = await startSandbox(upSpec(root, 45_000));
+    port = up.port;
     const pid = Number(readFileSync(join(root, "bridge.pid"), "utf8"));
+    expect(pid).toBe(up.pid);
     const ports = listeningPorts(pid);
     if (ports) expect(ports.every((p) => p === port), `监听端口 ${ports}`).toBe(true);
     expect(port).not.toBe(DEFAULT_BRIDGE_PORT);
@@ -335,13 +332,13 @@ describe("沙箱 bridge 无副作用", () => {
     // agent 侧要真 tmux。CI 装了 tmux（.github/workflows/ci.yml）；CI 里没有就失败，免得这段覆盖悄悄没跑
     if (!REAL_TMUX && process.env.CI) throw new Error("CI 里找不到 tmux：agent 侧隔离测试不能跳过");
     if (REAL_TMUX) await agentSide();
+    if (REAL_TMUX) await webShellSide();
     if (REAL_TMUX) await piSide();
     const open = openFiles(pid);
     if (open) expect(open.filter((f) => f.includes("claude-orchestrator"))).toEqual([]);
 
     expect(sandbox("down").code).toBe(0);
-    const again = sandbox("up");
-    expect(again.code, again.out).toBe(0);
+    port = (await startSandbox(upSpec(root, 45_000, { firstPort: port }))).port; // 重启沿用原端口，确认被抢才换
     await exercise();
     expect(sandbox("down").code).toBe(0);
 
@@ -372,7 +369,7 @@ describe("沙箱 bridge 无副作用", () => {
     const stateDir = join(tmp, "direct", "state");
     const base = {
       PATH: process.env.PATH ?? "", HOME: home, CLAUDESTRA_SANDBOX: "1", CLAUDESTRA_STATE_DIR: stateDir,
-      CLAUDESTRA_RUNTIME_DIR: join(tmp, "direct", "run"), BRIDGE_PORT: String(await freePort()), BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+      CLAUDESTRA_RUNTIME_DIR: join(tmp, "direct", "run"), BRIDGE_PORT: String(pickPort(AVOID_PORTS)), BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
     };
     const cases: Array<[string, Record<string, string>]> = [
       ["DISCORD_BOT_TOKEN", { DISCORD_BOT_TOKEN: "decoy-token" }],
@@ -501,4 +498,102 @@ describe("沙箱 bridge 无副作用", () => {
       fake.stop(true);
     }
   }, 60_000);
+});
+
+describe("启动夹具：端口竞争（受控扰动）", () => {
+  const held: Array<{ stop(force?: boolean): void }> = [];
+  const hold = (p: number) => held.push(Bun.listen({ hostname: "127.0.0.1", port: p, socket: { data() {} } }));
+  const fleet = new Fleet(); // 起之前就登记：断言中途失败、起到一半 runner 收尾时 afterEach 兜底收掉并核验，问题汇总抛出
+  /** 正常收尾核验：down 干净（bridge 已退、pid 文件已删、端口已释放）；假 home 零改动、零出站 */
+  const downAndVerify = async (r: string, before: Map<string, string>) =>
+    expect([await fleet.stop(r), diff(before, snapshot(home)), hits]).toEqual([[], [], { proxy: [], decoy: [] }]);
+  afterEach(async () => {
+    for (const f of [tmuxGate(), `${tmuxGate()}.hit`]) rmSync(f, { force: true });
+    held.splice(0).forEach((l) => l.stop(true));
+    expect(await fleet.stopAll(), "兜底清理没收干净").toEqual([]);
+  });
+
+  test("候选端口在 up 前被抢：原路径拒绝启动；夹具确认本端口 EADDRINUSE、无活宿主后换端口，归属与清理核验", async () => {
+    const before = snapshot(home);
+    const r = join(tmp, "race-pre");
+    const p0 = pickPort(AVOID_PORTS);
+    hold(p0); // 原路径：探测关占位 → 别人抢到 → up
+    const old = Bun.spawnSync([BUN, SCRIPT, "up", "--port", String(p0), "--root", r], { cwd: REPO, env: callerEnv(), stdout: "pipe", stderr: "pipe" });
+    expect([old.exitCode === 0, old.stderr.toString()]).toEqual([false, expect.stringContaining(`端口 ${p0} 已被占用`)]);
+    const up = await fleet.start(upSpec(r, 45_000, { onPicked: (p, i) => void (i === 0 && hold(p)) }));
+    expect([up.attempts.map((a) => a.outcome), up.port === up.attempts[0]!.port]).toEqual([["port-race", "started"], false]);
+    expect((await fetch(`http://127.0.0.1:${up.port}/stats`)).ok).toBe(true);
+    await downAndVerify(r, before);
+  }, 60_000);
+
+  test("预检之后、bridge 绑定之前被抢：bridge 因 EADDRINUSE 退出，夹具不等 20 秒就绪超时，清理后换端口", async () => {
+    const before = snapshot(home);
+    const r = join(tmp, "race-bind");
+    // 同步点：up 过了预检、停在 ensure-tmux 的 tmux 闸门上（此时 bridge 还没 spawn）→ 抢下候选端口 → 放行
+    let raced: Promise<unknown> | null = null;
+    writeFileSync(tmuxGate(), "");
+    const t0 = Date.now();
+    const up = await fleet.start(upSpec(r, 45_000, { onPicked: (p, i) => { if (i === 0) raced = atGate(tmuxGate(), 15_000, () => hold(p)).then(() => null, (e: unknown) => e); } }));
+    expect(await raced, "扰动没在闸门处抢到端口").toBeNull();
+    // 冲突发生在 bridge 绑定（而不是脚本预检），且不等 20 秒就绪超时
+    expect([up.attempts.map((a) => a.outcome), up.attempts[0]!.out.includes("已被占用"), Date.now() - t0 < 20_000]).toEqual([["port-race", "started"], false, true]);
+    await downAndVerify(r, before);
+  }, 60_000);
+
+  test("up 的后代攥着输出管道时撞截止 / 起到一半被兜底收：不拖过截止，整组进程有界收掉、本次起的不留", async () => {
+    writeFileSync(tmuxGate(), ""); // up 停在 ensure-tmux 的 tmux shim 里：up 的后代、继承 up 的输出管道，闸门不删就一直占着
+    const t0 = Date.now();
+    const cut = await fleet.start(upSpec(join(tmp, "race-hang"), 1_500)).catch((e) => e);
+    expect([(cut as StartFailure).attempts?.map((a) => a.outcome), alive(await gateHit(tmuxGate(), 0)), Date.now() - t0 < 8_000]).toEqual([["failed"], false, true]);
+    rmSync(`${tmuxGate()}.hit`); // 起到一半时 runner 收尾：起之前就登记过，stopAll 收掉整组进程，启动随之失败
+    const late = fleet.start(upSpec(join(tmp, "race-abort"), 45_000)).catch((e) => e);
+    const shim = await gateHit(tmuxGate(), 15_000);
+    expect([await fleet.stopAll(), await late, alive(shim), existsSync(join(tmp, "race-abort", "bridge.pid")), Date.now() - t0 < 16_000]).toEqual([[], expect.any(StartFailure), false, false, true]);
+  }, 30_000);
+
+  test("onPicked 钩子 await 期间被 stopAll：放行后不再起 child，启动失败、无活 bridge，再收一次也不漏", async () => {
+    const r = join(tmp, "race-hook");
+    let [entered, go, spawned] = [() => {}, () => {}, 0];
+    const inHook = new Promise<void>((ok) => (entered = ok)), gate = new Promise<void>((ok) => (go = ok));
+    const late = fleet.start(upSpec(r, 45_000, { onPicked: async () => { entered(); await gate; }, onSpawn: () => void spawned++ })).catch((e) => e);
+    const first = await inHook.then(() => fleet.stopAll()).finally(go); // 钩子还停着时收：没有 child、没有端口可收；收完放行
+    expect([first, String(await late), await fleet.stopAll(), spawned, existsSync(join(r, "bridge.pid"))]).toEqual([[], expect.stringContaining("起到一半已被收掉"), [], 0, false]);
+  }, 30_000);
+
+  test("onPicked 检查后外层 await 恢复前 stopAll：微任务取消不能再 spawn 或遗留 bridge", async () => {
+    const r = join(tmp, "race-microtask"), before = snapshot(home);
+    let stop: Promise<string[]> | undefined, spawned = 0, picked = 0;
+    const spec = upSpec(r, 45_000, {
+      onPicked: (p) => { picked = p; queueMicrotask(() => queueMicrotask(() => { stop = fleet.stopAll(); })); },
+      onSpawn: () => void spawned++,
+    });
+    try {
+      const result = await fleet.start(spec).catch((e) => e);
+      const pidFile = join(r, "bridge.pid"), pid = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : null;
+      expect([await stop, await fleet.stopAll(), spawned, pid !== null && alive(pid), existsSync(pidFile)])
+        .toEqual([[], [], 0, false, false]);
+      expect(String(result)).toContain("起到一半已被收掉");
+      expect([diff(before, snapshot(home)), hits]).toEqual([[], { proxy: [], decoy: [] }]);
+    } finally {
+      // 原缺陷会摘掉 Fleet 登记却留下 detached bridge；原红复现也必须经原入口收回本次临时资源。
+      if (spawned) {
+        const d = Bun.spawnSync(spec.argv("down", picked), { cwd: REPO, env: spec.env(), stdout: "pipe", stderr: "pipe" });
+        expect([d.exitCode, existsSync(join(r, "bridge.pid"))], d.stderr.toString()).toEqual([0, false]);
+      }
+    }
+  }, 60_000);
+
+  test("反向故障照常失败、不重跑：非端口原因、端口被本沙箱活宿主占着、候选是生产端口", async () => {
+    const before = snapshot(home);
+    const bad = await fleet.start(upSpec(join(home, ".claude-orchestrator", "sbx"), 30_000)).catch((e) => e);
+    expect([bad instanceof StartFailure, (bad as StartFailure).attempts?.map((a) => a.outcome), String(bad.message)]).toEqual([true, ["failed"], expect.stringContaining("重叠")]);
+    const cut = await fleet.start(upSpec(join(tmp, "race-cut"), 300)).catch((e) => e); // 起到一半撞截止：不重跑，本次起的收干净
+    expect([(cut as StartFailure).attempts?.map((a) => a.outcome), existsSync(join(tmp, "race-cut", "bridge.pid"))]).toEqual([["failed"], false]);
+    const r = join(tmp, "race-live");
+    const up = await fleet.start(upSpec(r, 45_000));
+    const twice = await startSandbox(upSpec(r, 30_000, { firstPort: up.port })).catch((e) => e); // 同 root：意外成功也由 live 里这条收
+    expect([(twice as StartFailure).attempts?.map((a) => a.outcome), alive(up.pid)]).toEqual([["failed"], true]);
+    expect(((await startSandbox(upSpec(r, 30_000, { firstPort: DEFAULT_BRIDGE_PORT })).catch((e) => e)) as StartFailure).attempts).toEqual([]); // 生产端口
+    await downAndVerify(r, before);
+  }, 90_000);
 });

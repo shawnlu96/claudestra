@@ -44,7 +44,10 @@ bridge ──ws（channel-server / Pi 扩展同一套协议，register 带 runti
   - 代理只绑 `127.0.0.1` 的随机端口。
   - 宿主生成一次性 token，经环境变量交给 channel-server；连接不带 token 的一律拒绝。
   - 代理吞掉 register，只转发 channel-server 现有的请求类型，其它帧不转发。
-- **打断复用 Pi 扩展的 abort 帧协议**（`abortVia: "extension"`）：宿主收到 `abort` 就调 `session/cancel`，然后回 `abort_ack`。
+- **打断复用 Pi 扩展的 abort 帧协议**（`abortVia: "extension"`）：宿主收到 `abort` 时会话里有回合（调度器在跑 / 排着，或适配器报着 active）就取消，然后回 `abort_ack`（`lib/acp/abort.ts`）。
+  - codex-acp：发 `session/cancel` 通知，`voided` 为空。
+  - Pi 适配器在 initialize 里声明 `_meta.claudestra.cancelReturnsQueue`，宿主改发 `_claudestra/cancel` 请求：适配器先 `clear_queue` 再 `abort`（pi 的 abort 会接着跑排队消息），清掉的正文交回宿主，宿主对回 steer 时记下的 message_id 填进 `voided`。叫停到 settle 之间（最多 60 秒）pi 续跑的轮再中止，这期间的插话不进 pi 的队列，停稳后另起一轮（同 `pi/abort-control.ts`）。
+- **适配器自己开的回合**：线程从非 active 变 active 时宿主既没有 prompt 在途、也没有 steer 另起的回合在等，就当 external 槽跟到下一个 idle：期间升级闸答忙、叫停会取消，结束照常报 Stop / 补 reply（`session.ts` onSelfTurn → `turn.ts` track）。Pi 的扩展 `triggerTurn`、压缩后续跑走这条；codex-acp 只在宿主的 prompt / steer 期间变 active（它的 goal 续跑只经 `_session/goal`，宿主不调），行为不变。Pi 扩展的 notify / setStatus 脱敏后进宿主日志。
 
 ## 开关放在哪
 
@@ -62,7 +65,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
 | `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
 | `modelEnforcement` | `"config-option"` | 经 `session/set_config_option` 改，不重启 |
-| `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start` |
+| `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start`（完成信号见「压缩完成信号」） |
 
 ## 库（`src/lib/acp/`）
 
@@ -81,13 +84,47 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `tool-proxy.ts` | 回环工具代理：127.0.0.1 随机端口 + 一次性 token（在 BRIDGE_URL 里），吞 register、只转白名单请求类型，requestId 按连接改写 |
 | `resolve.ts` | 读 registry 元数据，挑能配本机 Codex 的最高正式版（≥ 2.0.0、tarball 只认 registry.npmjs.org、范围只认 `^`/`~`/精确） |
 | `install.ts` | 适配器安装：按 registry 的 `dist.integrity` 验包，装进 `codex-acp-<版本>/`，`current.json` 指针决定用哪个 |
+| `protocol.ts` | ACP 协议版本常量（宿主、Pi 适配器、stub 共用）与 initialize 回包判定：版本、必要能力、`agentInfo`；不兼容抛 `AcpIncompatibleError`（见下节） |
 
 bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 / 配置；卡上的按钮经 `POST /agents/:name/answer {kind:"acp"}` 回宿主）、`bridge/acp-state.ts`（哪些频道此刻由宿主登记：打断走 abort 帧、watcher 不尾读 rollout、权限巡检 / Codex 回合失败收尾 / Stop 的屏幕复核都跳过它的窗口）。
+
+## 协议版本与能力（`lib/acp/protocol.ts`）
+
+宿主只讲 ACP v1（`ACP_PROTOCOL_VERSION`；规范里 V2 还是草案）。initialize 回包由 `checkInitialize` 判：
+
+| 回包 | 结果 |
+|------|------|
+| `protocolVersion` 不是 1，或者没回 | 不兼容 |
+| `agentCapabilities.sessionCapabilities.resume` 和 `agentCapabilities.loadSession` 都没有 | 不兼容：接不回已有线程 |
+| fork 操作，而没声明 `sessionCapabilities.fork` | 不兼容；fork 只在 fork 时才要求 |
+| 带了 `agentInfo.{name, version}` | 记进会话（`AcpSession.agentInfo`）；宿主「已接上线程」那行日志、拒起原因里都带上 |
+
+不兼容时走现有的启动失败通路，不另开一条：
+- 宿主出一张「<运行时> 回合失败」卡（`acp_failure`：不可重试的 error、固定 key `incompatible`，正文写明原因）；拒起那一刻 bridge 还没登记上，就登记后补发（bridge 按题面去重）。
+- 宿主不标就绪、不再重起适配器（重起换不来别的结果），排着的和之后的回合当场按失败收尾：报 StopFailure，错误条目不触发自动续跑。
+- manager 等不到就绪（就绪超时），`recoverFailedAcpLaunch` 按接线程失败处理：退回 tmux（沙箱除外）。
+- create / fork 的引导（`runtimes/codex-acp.ts` 的 `bootstrapThread`）在 initialize 就失败，原因原样带出。
+
+### 可选能力缺失时怎么降级
+
+可选能力缺了不拒起，按下表降级。表里每一行在 `tests/acp-protocol.test.ts`「可选能力缺失时怎么降级」都有一条：对真的宿主，有和没有这项能力各跑一遍。改了行为，表和测试要一起改。
+
+| 能力 | 怎么判定有没有 | 缺了怎么办 |
+|------|----------------|------------|
+| steering | initialize 的 `_meta.steering.supported === true` | 忙时的消息排队，等这一轮结束再当下一轮 prompt 发（不发 `_session/steering`） |
+| cancelReturnsQueue | initialize 的 `_meta.claudestra.cancelReturnsQueue === true`（Pi 适配器有，codex-acp 没有） | 叫停改发 `session/cancel` 通知，回执里的作废列表为空 |
+| compaction_update | 适配器在回合里发 `compaction_update`（宿主总是声明 `session.compaction`；只管 Codex，Pi 的压缩边界走 `_meta.claudestra.compacted`） | 压缩照样由适配器做，但不出压缩边界，只看到一个「Compact conversation」工具调用 |
+| AIR sessionFailure | prompt 回包带 `_meta.jetbrains.air.sessionFailure` | 按 legacy 认：只有额度用完（JSON-RPC 错误带 `usageLimitExceeded`）认得出，按回合去重；其它失败只是一段正文 |
+| terminal_output_delta | `tool_call_update` 带 `_meta.terminal_output_delta` | 看不到命令输出，工具结果只剩适配器收尾时给的内容或退出码 |
+| `promptCapabilities.image` | initialize 的 `agentCapabilities.promptCapabilities.image` | 附件只以本地路径（`[attachment: …]` 行）写进正文。有这项能力也一样：宿主还不发图片块 |
+
+共享契约测试 `tests/acp-contract/`：同一组场景（initialize 与协议检查、接回线程、一轮文字回复、叫停、失败上报）按驱动跑，现在有 stub 和 Pi 回放两个驱动；新驱动照 `drivers.ts` 的 `ContractDriver` 实现、加进 `DRIVERS` 即可。维护流程见 [acp-maintenance.md](./acp-maintenance.md)。
 
 ## 和 tmux 的行为差异
 
 - **补 reply**：tmux 下 Stop hook 在 Codex 收尾前拦下，同一轮接着答。ACP 没有 hook，宿主在 prompt 返回后上报 Stop；bridge 判定没回复（`lib/reply-nudge.ts`）时，宿主另起一轮很短的 prompt 补发提示，只补一次。所以**网页上会多一个短回合**。提示包成 `<hook_prompt>`，rollout 里和 tmux 的 hook 回灌同形，历史面板照旧显示成系统提示。
 - **撞额度**：不再停在菜单上，所以 T63 的菜单护栏在 acp 下用不上。额度卡的选项是「等重置」加上 configOptions 里的其它模型，不做推荐（owner 的规矩，问题 d）；owner 点了才调 `set_config_option`，绝不自动选。重置时间照旧从 rollout 读（`codex-usage.ts`），ACP 不给这个。
+- **不可重试的回合失败**（策略拦截、请求被拒、上下文耗尽）：除了「<运行时> 回合失败」卡，这一轮的 StopFailure 到时 bridge 给开这一轮的 send_to_agent 请求方各推一条，带失败原文（`bridge/turn-failure.ts` → `stop-settle.ts failedTurn`）；它中途 reply 过一句、回程槽已被消化的也推。owner 开的一轮看卡；peer 开的由挂着的 API 请求带回 `API Error: <原文>`（它已经答过一句、请求结掉了就没有回推通道）；它自己续跑的一轮不推。
 - **思考**：`agent_thought_chunk` 不显示，和 tmux 下 rollout 的 reasoning 一致。
 - **子线程**：试点不声明 subagents 能力。子会话照旧写 rollout，历史扫描不变。
 
@@ -142,4 +179,28 @@ bun run sandbox up --port <N> --static web/out
 bun scripts/sandbox.ts manager create acpx <沙箱里的目录> 测试 --runtime codex --transport acp --port <N>
 ```
 
-stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quota]` = 撞额度（结构化失败），`[stub:noreply]` = 这轮不调 reply（测补 reply）；起宿主时环境变量 `STUB_AUTH_REQUIRED=1` = 没登录（出登录卡）。
+stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quota]` = 撞额度（结构化失败），`[stub:noreply]` = 这轮不调 reply（测补 reply）；起宿主时环境变量 `STUB_AUTH_REQUIRED=1` = 没登录（出登录卡），`STUB_INITIALIZE=<JSON>` = 按 JSON merge patch 改 initialize 回包（`null` 删键，测协议不兼容和可选能力缺失）。`/compact` 后面带 `[stub:compact-fail]` = 压缩失败，`[stub:compact-slow]` = 压缩等打断，`[stub:compact-dup]` = 完成信号连发两次；缺省压缩成功（形状见下节）。
+
+## 压缩完成信号（codex-compact-N2 核对）
+
+只读核对，没起 app-server、没登录、没连模型，也没读本机已装的适配器。2026-10-04 按 `lib/acp/resolve.ts` 的规则在临时目录取包：
+
+- **包**：`@agentclientprotocol/codex-acp` **2.1.1**（registry 元数据 `dist-tags.latest`；配本机记录的 `codex-cli 0.159.3`，`pickAdapterFor` 选中，范围 `^0.159.1`）。tarball `https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-2.1.1.tgz`，sha512 与元数据 `dist.integrity` 一致（`sha512-dppZxW3f…Uibu1qQ==`）。读的是包里的 `dist/index.js`（bundle，下面的名字是其中的源文件段）。
+- **协议**：`compaction_update` 与 `clientCapabilities.session.compaction` 在 ACP 官方 schema 源码（`agentclientprotocol/agent-client-protocol` `20361dd2`，`agent-client-protocol-schema/src/v1/client.rs`）里标着 **UNSTABLE**、feature `unstable_session_compaction`：「不属于正式规范，随时可能改」。
+
+| 问题 | 2.1.1 的实际行为（出处） |
+|------|------------------------|
+| `session/prompt("/compact")` 何时返回 | 压缩**结束后**才回。`AvailableCommands.tryHandleCommand` 的 `compact` 分支 await `CodexAcpClient.runCompact` → `CodexAppServerClient.runCompact`：发 `thread/compact/start` 后一直等到 `item/completed{contextCompaction}`、`thread/compacted`，或这一轮 `turn/completed`（非 inProgress）才 resolve。`/compact` 后面的文字被忽略（保留清单传不进去） |
+| 成功时的回包 | `{stopReason:"end_turn"}`（`CodexAgent.prompt` 的「Prompt handled by a command」分支） |
+| 完成的 `session/update` | 宿主声明了 `session.compaction` → `compaction_update{compactionId, status}`：开始 `in_progress`，结束 `completed`；同一 id 到终态后不再发（`CodexSessionCompactions.finish`）。没声明 → 只有标题「Compact conversation」的 `tool_call` / `tool_call_update completed`（AIR `_meta.jetbrains.air.contextCompaction`），旧版 `thread/compacted` 是一句文字或 notice |
+| 失败 | 声明了能力：`compaction_update{status:"failed", error}`（这一轮 `turn/completed` failed 或不再重试的 `error`）、被打断是 `cancelled`；回包是 JSON-RPC 错误或 AIR `sessionFailure`，打断是 `stopReason:"cancelled"`；连接断开 → 请求失败 |
+
+**宿主的接法**：`session.ts` 的 `CLIENT_CAPABILITIES` 声明 `session.compaction: {}`；`updates.ts` 只在 Codex 上认 `compaction_update`，只有 `completed` 才翻成 `compact_boundary`（同一 `compactionId` 只出一次，`in_progress` / `failed` 是进度句，`cancelled` 和未知状态不出东西）；`compactMetadata.trigger` 由宿主定：这一轮是宿主发的 `/compact` 就是 `manual`，否则 `auto`。Codex 的翻译器不认 `_meta.claudestra.compacted`，Pi 的不认 `compaction_update`，来源只看宿主按运行时认定的那一种。宿主收下 slash（`acp_call` 回 `ok:true`）、命令入队、压缩开始都**不是**完成。没有 token 数（`compaction_update` 不带），watcher 显示「📦 上下文已压缩」。
+
+**核实过的版本清单：仅 2.1.1。** 能力是 unstable 的，换版本要重核这一节；N4 的能力闸按这份清单放行。这不代表 Codex 已经有完整的 save-compact（还缺 N1/N3/N4/N5）。
+
+**空闲时的 `session/cancel`**：
+- 适配器回完 `session/prompt` 之后才到的 cancel：`CodexAgent.cancel` → `interruptSessionTurn` → `getInterruptibleTurnId`。此时 `currentTurnId` 已在 prompt 的 finally 里清空、`pendingTurnStarts` 已删，日志一句「no current turn」就**丢弃**，不记到下一轮。
+- 但「回包还在 stdio 里」的那个窗口（save-compact 方案 §2.4）：prompt 的 finally 里先 await 了几步（`waitForSessionNotifications`、文件变更报告、`dispose`）才清 `currentTurnId`，这期间到的 cancel 会对**已结束的那一轮**发 `turn/interrupt{threadId, turnId}`；报「no active turn」时，只要这个 session 又有 prompt 在跑（下一业务轮）就按 25/50/100/200/400 ms 重试同一个旧 turnId。app-server 会不会把旧 turnId 的 interrupt 落到当前在跑的轮上，取决于 app-server（Rust，不在这个包里），**没核实：unknown**。
+- 结论：**证明不了不会影响下一轮**。N1 的 `cancel_slot` 对在跑的槽只能回 `uncancellable`（「正在压缩，不能中途取消」）；排队中的槽撤掉不发任何东西，照常可用。本卡没有开启任何「运行中取消」的路径。
+

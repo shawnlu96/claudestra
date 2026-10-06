@@ -1,4 +1,5 @@
 import { localCreatedFamily } from "./scheduler-local-runtime-start.js";
+import { writeLocalAuthor } from "./scheduler-local-author-write.js";
 /**
  * 自动开卡（i28-A1）的 step：runStart（dag-tools-steps.ts）发出的每条台账写，由调度服务改写成 `ledger scheduler-autostart step <claim> <子命令> …`
  * 到这里执行。每步一个事务：先核 claim 还活着、目标（卡号 / feature / 节点）和 claim 一致，再调现成的 lib 写函数。
@@ -57,7 +58,7 @@ function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInpu
   if (!globs?.length) return deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
   const r = createTask(db, ctx, {
     id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: autostartSpecPath(c.taskId), pm: c.pm,
-    agent: c.peer ? undefined : c.agent, extra: { fileGlobs: globs, ...(c.peer ? { placement: `peer:${c.peer.name}`, repo: c.peer.repo } : {}), ...(c.ownerVisual ? { ownerVisual: true } : {}) },
+    agent: c.peer ? undefined : c.agent, extra: { fileGlobs: globs, ...(c.peer ? { repo: c.peer.repo } : {}), ...(c.ownerVisual ? { ownerVisual: true } : {}) },
   });
   return { ok: true, task: r.row, duplicate: r.duplicate };
 }
@@ -107,6 +108,7 @@ function bind(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInput) 
 export function autostartStep(db: Database, ctx: WriteCtx, input: StepInput): Record<string, unknown> {
   return tx(db, () => {
     if (ctx.actor !== "scheduler") deny("只有调度服务能跑");
+    if (input.sub === "local-author" || input.sub === "local-author-note") return writeLocalAuthor(db, ctx, input);
     const c = liveClaim(db, input.claim);
     if (input.sub === "task-new") return taskNew(db, ctx, c, input);
     if (input.sub === "task-set") return taskSet(db, c, input);

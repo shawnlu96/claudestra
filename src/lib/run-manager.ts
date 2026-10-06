@@ -52,6 +52,8 @@ export interface RunManagerOpts {
   managerPath: string;
   env?: Record<string, string | undefined>;
   timeoutMs: number;
+  /** 子进程的完整 stderr（成功时也给）：调用方要转进自己的日志时用；不设 = 照旧只在失败时拼进错误信息 */
+  onStderr?: (err: string) => void;
 }
 
 export async function runManagerProcess(args: string[], opts: RunManagerOpts): Promise<any> {
@@ -73,6 +75,7 @@ export async function runManagerProcess(args: string[], opts: RunManagerOpts): P
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ]);
+    opts.onStderr?.(err);
     const exitCode = await proc.exited;
     return interpretManagerRun({ cmd: args[0] ?? "", out, err, exitCode, timedOut, budgetMs: opts.timeoutMs });
   } finally {

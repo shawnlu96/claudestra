@@ -3,34 +3,28 @@ import type { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
-import { getIntent, getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
+import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { runBounded } from "./run-bounded.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { bindFixReplacement, getSchedulerSession } from "./scheduler-sessions.js";
-import { currentReviewFacts } from "./scheduler-review.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview } from "./review-converge.js";
 import { fixHistory, fixStrategy, FIX_STRATEGY_RULE, DISPUTE_RULE } from "./fix-strategy.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { SessionRef } from "./worker-session.js";
+import { convergenceIntent } from "./fix-strategy-remote-intent.js";
+import { remoteAuthorFix, remoteFixFallback, hasRemoteFix } from "./fix-strategy-remote.js";
 
-export function convergenceIntent(db: Database, ctx: WriteCtx, id: string, action: SchedulerIntent["action"]): SchedulerIntent {
-  const intent = getIntent(db, id);
-  if (ctx.actor !== "scheduler" || !intent || intent.action !== action) throw new LedgerError("forbidden", "缺调度服务的收敛意图");
-  const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
-  if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.specRev !== intent.specRev || task.headSHA !== intent.head) {
-    throw new LedgerError("conflict", "收敛意图的规格或 head 已过期");
-  }
-  if (!["pending", "submitted", "done"].includes(intent.status)) throw new LedgerError("conflict", "收敛意图状态不允许执行");
-  return intent;
-}
+export { convergenceIntent } from "./fix-strategy-remote-intent.js";
+export { zeroSlotLifecycle } from "./fix-strategy-remote-context.js";
 
 async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent, source: string, deps: ConvergenceLifecycle) {
   const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id)!;
   const events = listEvents(db, { project: task.project, target: task.id });
-  const read = currentReviewFacts(task, events);
+  const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts") throw new LedgerError("conflict", "修复缺结构化审查报告");
   const configured = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
   const firstRound = events.find((e) => e.kind === "review" && e.seq > configured)?.data.round;
@@ -66,8 +60,8 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps:
   }
   if (task.stage !== "fix" || task.rev !== intent.taskRev) throw new LedgerError("conflict", "修复换会话计划已过期");
   const oldRow = getSchedulerSession(db, task.id, "author");
-  if (oldRow?.transport === "peer" || task.assigneeKind === "peer_agent" || remoteHeadFamily(db, task)) {
-    return { ok: true, step: "waiting", detail: "原作者在 peer；换会话/家族需受限 reclaim，等 CONV3，不自动停止远端会话" };
+  if (oldRow?.transport === "peer" || task.assigneeKind === "peer_agent" || remoteHeadFamily(db, task) || hasRemoteFix(db, id)) {
+    return remoteAuthorFix(db, ctx, intent, deps, materialFor);
   }
   const old: SessionRef | null = oldRow ? { ...oldRow, role: "author" } : null;
   const source = deps.registry().find((r) => r.name === (old?.agent ?? task.agent))?.cwd;
@@ -78,7 +72,7 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps:
   if (wait) return { ok: true, step: "waiting", detail: wait };
   const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps);
   deps.active();
-  if ("wait" in ref) return { ok: true, step: "waiting", detail: `${ref.wait}；首次转 peer 需写租约，等 CONV3` };
+  if ("wait" in ref) return remoteFixFallback(db, ctx, intent, material, deps, ref.wait);
   if (ref.sessionId === old?.sessionId) throw new LedgerError("conflict", "换会话不能复用旧 session id");
   bindFixReplacement(db, ctx, id, ref, material.path, deps.registryPath);
   settleIntent(db, ctx, { id, from: "submitted", to: "done", receipt: "新修复会话已绑定" });

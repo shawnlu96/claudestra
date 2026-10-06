@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawnAdapter, type AdapterProc } from "../src/lib/acp/adapter-proc.ts";
 import type { BridgeLinkDeps } from "../src/lib/acp/bridge-link.ts";
 import { AcpHost } from "../src/lib/acp/host.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import type { StopReport } from "../src/lib/acp/turn.ts";
+import { activityPath, readActivity, stuckSince } from "../src/lib/agent-supervisor-activity.ts";
 
 // 整条宿主链：真的 AcpHost + 真的 stub 子进程（scripts/acp-stub.ts）+ stub 按 CODEX_CONFIG 起的真 channel-server +
 // 真的回环代理；只有 bridge（假的连接）和 /hook 是假的。reply 真的从 channel-server 经代理走到「bridge」。
@@ -245,6 +247,7 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(f.length).toBe(1);
     expect(f[0].failure).toMatchObject({ kind: "quota" });
     expect(f[0].configOptions.length).toBeGreaterThan(0);
+    expect([typeof f[0].sessionId, typeof f[0].failedAt]).toEqual(["string", "number"]); // 出借停单按它们认当前会话、当前回合（lend-turn-failure.ts）
     expect(h.entries().some((e) => e.error && e.isApiErrorMessage === false)).toBe(true);
     expect(h.stops[0].event).toBe("StopFailure");
   }, 30_000);
@@ -255,7 +258,8 @@ describe("ACP 宿主整条链（stub）", () => {
     h.inbound("[stub:slow] 慢慢来");
     await until(() => h.entries().some((e) => e.message?.content?.[0]?.name === "Bash"));
     h.frame({ type: "abort", id: "abort_1" });
-    expect(h.sent.find((f) => f.type === "abort_ack")).toMatchObject({ id: "abort_1", result: "aborted" });
+    await until(() => h.sent.some((f) => f.type === "abort_ack")); // 回执在 cancel 之后发（Pi 适配器要先清队列；codex-acp 只差一个微任务）
+    expect(h.sent.find((f) => f.type === "abort_ack")).toEqual({ type: "abort_ack", id: "abort_1", result: "aborted", voided: [], inEditor: 0 });
     await until(() => h.stops.length === 1);
     expect(h.stops[0]).toMatchObject({ event: "StopFailure", interrupt: true });
   }, 30_000);
@@ -286,6 +290,29 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(await turn("t3")).toMatchObject({ ok: true, busy: false });
   }, 20_000);
 
+  test("回合心跳（i28-S1b）：开一轮写 busy、update 推进、Stop 写 busy=false；/clear 后写新 sessionId，旧 id 不判卡住", async () => {
+    rmSync(activityPath("agent-acp-test"), { force: true });
+    const h = start({}, async () => ({ ok: true }));
+    await until(h.isReady);
+    h.inbound("[stub:pause] 停一下");
+    await until(() => readActivity("agent-acp-test")?.busy === true);
+    const r1 = readActivity("agent-acp-test")!;
+    expect(r1).toMatchObject({ sessionId: SID, hostPid: process.pid });
+    expect(r1.updateAt).toBeGreaterThanOrEqual(r1.turnAt);
+    expect(stuckSince(r1, SID, r1.updateAt + 60_000, 60_000)).toBe(Math.max(r1.updateAt, r1.turnAt));
+    await until(() => h.stops.length === 1);
+    expect(readActivity("agent-acp-test")).toMatchObject({ sessionId: SID, busy: false });
+    h.frame({ type: "acp_call", id: "hb-clear", op: "clear" });
+    await until(() => h.sent.some((f) => f.id === "hb-clear"));
+    const newId = h.sent.find((f) => f.id === "hb-clear").sessionId;
+    expect(newId).not.toBe(SID);
+    h.inbound("[stub:pause] 新会话");
+    await until(() => readActivity("agent-acp-test")?.sessionId === newId && readActivity("agent-acp-test")!.busy);
+    expect(stuckSince(readActivity("agent-acp-test"), SID, Date.now() + 3_600_000, 60_000)).toBeNull();
+    await until(() => h.stops.length === 2);
+    expect(readActivity("agent-acp-test")).toMatchObject({ sessionId: newId, busy: false });
+  }, 30_000);
+
   test("没登录：接线程回 -32000 → 出 auth 卡（不出条目），prompt 按失败收尾", async () => {
     const h = start({ STUB_AUTH_REQUIRED: "1" });
     await until(() => h.sent.some((f) => f.type === "acp_failure"));
@@ -295,6 +322,31 @@ describe("ACP 宿主整条链（stub）", () => {
     await until(() => h.stops.length === 1);
     expect(h.stops[0].event).toBe("StopFailure");
   }, 20_000);
+
+  const incompatible: [string, object, string][] = [
+    ["protocolVersion 2", { protocolVersion: 2 }, "protocolVersion 是 2"],
+    ["没有 protocolVersion", { protocolVersion: null }, "没回 protocolVersion"],
+    ["resume 与 loadSession 都没有", { agentCapabilities: { loadSession: false, sessionCapabilities: { resume: null } } }, "接不回已有线程"],
+  ];
+  for (const [what, patch, why] of incompatible) {
+    test(`协议不兼容（${what}）：拒起——一张写明原因的卡、不标就绪、不重起，回合当场按失败收尾`, async () => {
+      const h = start({ STUB_INITIALIZE: JSON.stringify(patch) });
+      await until(() => h.sent.some((f) => f.type === "acp_failure"));
+      const { failure } = h.sent.find((f) => f.type === "acp_failure");
+      expect(failure).toMatchObject({ kind: "error", key: "incompatible", retry: false }); // 不带匹配器：bun 的 toMatchObject 会把匹配器写回被测对象
+      expect(failure.message).toContain("协议不兼容，拒绝启动");
+      expect(failure.message).toContain(why);
+      await procs[0]!.exited;
+      await until(() => h.logs.some((l) => l.includes("协议不兼容，不再重起")));
+      h.inbound("在吗");
+      await until(() => h.stops.length === 1);
+      expect(h.stops[0]!.event).toBe("StopFailure");
+      expect(h.entries().some((e) => e.error === failure.message && e.isApiErrorMessage === false)).toBe(true); // 不触发 60s 自动续跑
+      expect(h.sent.filter((f) => f.type === "acp_failure")).toHaveLength(1);
+      expect(h.isReady()).toBe(false); // manager 等不到就绪 → recoverFailedAcpLaunch 按启动失败处理
+      expect(procs).toHaveLength(1);
+    }, 20_000);
+  }
 
   test("适配器被杀：在途回合以失败收尾，退避后重起、接回同一个线程", async () => {
     const h = start();

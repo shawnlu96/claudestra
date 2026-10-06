@@ -9,6 +9,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
+import { guardDefaultLendJournal } from "./test-guard.js";
 
 export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
 
@@ -33,6 +34,8 @@ const NEXT: Record<LendState, readonly LendState[]> = {
 export const LIVE_STATES: readonly LendState[] = ["asked", "claimed", "cloned", "started", "result_pending"];
 /** 占着 A 那边租约的状态：要续心跳、到期没续上要自停 */
 export const LEASED_STATES: readonly LendState[] = ["claimed", "cloned", "started", "result_pending"];
+/** worker 已起、单还归 A：派单工具（lend-tools.ts）和 A 发给 worker 的消息（bridge/lend-scope.ts）都只认这两个。交了结论等回执时 worker 还在、还能 ask，答复得进得来 */
+export const WORKER_STATES: readonly LendState[] = ["started", "result_pending"];
 export const isTerminal = (s: LendState): boolean => NEXT[s].length === 0;
 export const canMove = (from: LendState, to: LendState): boolean => NEXT[from].includes(to);
 
@@ -109,6 +112,7 @@ export const guardJournalWrites = (db: Database, check: () => void): void => voi
 const checkWrite = (db: Database): void => writeGuards.get(db)?.();
 
 export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
+  guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path);
   db.exec("PRAGMA busy_timeout = 10000");

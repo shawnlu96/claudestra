@@ -19,12 +19,14 @@ import { cardMoved, getLendOrder, refuse, type LendOrder } from "./ledger-lend.j
 import { currentReview, stepsOf } from "./ledger-steps.js";
 import { tx } from "./ledger-tx.js";
 import { deliver, moveStage, recordReview, setTask } from "./ledger-write.js";
-import { isWriteStep, lendBranch } from "./lend-git.js";
+import { isWriteStep } from "./lend-git.js";
 import type { DeliverRequest, LendReceipt, ResultRequest } from "./lend-wire.js";
 import type { RemoteHead } from "./order-deliver.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { quoteExternal } from "./quote-text.js";
 import { storedBasis } from "./review-converge-report.js";
+import { convergenceResult, deliveryBranchMatches, assertConvergenceDeliveryLease, completeConvergenceDelivery } from "./lend-arbiter-result.js";
+import { withOriginalIds } from "./order-gate-heads.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -64,6 +66,8 @@ function probeOf(p: string): string {
 }
 
 export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps): LendReceipt {
+  req = withOriginalIds(db, req); // aliased finding ids back to this machine's originals (i28-GATE2)
+  const convergence = convergenceResult(db, ctx, peer, req, bodySha, deps); if (convergence) return convergence;
   return tx(db, () => {
     const now = ctx.now ?? Date.now();
     const o = getLendOrder(db, req.orderId);
@@ -91,7 +95,7 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
       taskId: o.taskId, reviewer: `peer:${peer}`, verdict: v.verdict, p0: v.p0, p1: v.p1, p2: v.p2, path, text: `远端审查（${peer}，单号 ${o.orderId}）：${v.verdict}`,
       head: o.head, reviewerSessionId: `lend:${peer}:${o.orderId}`, reviewerFamily: o.family,
       findings: v.findings.map((f) => ({ findingId: f.findingId, family: f.family, severity: f.severity, probe: probeOf(f.probe),
-        ...storedBasis(f, req.report) })),
+        ...storedBasis(f, req.report), ...(f.pitfall ? { pitfall: true } : {}) })),
       ...{ lend: { orderId: o.orderId, peer, gen: o.leaseGen, sha256: bodySha, claim: { family: req.session.family, session } } },
     });
     const eventSeq = review.event.seq;
@@ -132,6 +136,7 @@ const STAGE_OF = { write: "build", fix: "fix" } as const;
 function check(db: Database, o: LendOrder | null, peer: string, req: DeliverRequest, now: number): LendOrder {
   if (!o || o.peer !== peer || !o.worker) return refuse("not_found", "你没有持有这一单");
   if (!isWriteStep(o.step) || !o.branch) return refuse("invalid", "这一单不是开工 / 修复单");
+  assertConvergenceDeliveryLease(db, o, now);
   if (o.status === "unknown") return refuse("lease_expired", "租约已过期或已报停，交付不入账，交 PM 核对");
   if (o.status !== "claimed") return refuse("cancelled", "这一单已撤销，交付不入账");
   if ((o.leaseUntil ?? 0) < now) return refuse("lease_expired", "租约已过期，交付不入账");
@@ -168,7 +173,7 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
   const clock = deps.now ?? (() => ctx.now ?? Date.now());
   const o = check(db, first, peer, req, clock());
   const fp = await deps.peerFp(peer);
-  if (!fp || lendBranch(o.taskId, fp) !== o.branch) return refuse("invalid", "对方钉住的公钥与这一单的出借分支对不上");
+  if (!deliveryBranchMatches(db, o, fp, clock())) return refuse("invalid", "对方钉住的公钥与这一单的出借分支对不上");
   const rev = mustTask(db, o.taskId).rev;
   const remote = await deps.remoteHead(o.repo, o.branch as string);
   if (!remote.ok) return refuse("unavailable", `查不到远端分支 ${o.branch} 的 head（${remote.error}），稍后重发`);
@@ -198,6 +203,6 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, key: signed.key, sig: signed.sig };
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, cur.orderId);
-    return receipt;
+    return completeConvergenceDelivery(db, ctx, cur, req, receipt);
   });
 }

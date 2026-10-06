@@ -1,3 +1,4 @@
+import { checkPreparedPeerPlacement } from "./scheduler-placement-reservations.js";
 /**
  * 内置台账的写入（docs 10-ledger §3）：每个导出函数一个 BEGIN IMMEDIATE 事务，改行与追加事件同进同出。
  * CAS：items / tasks 改字段带 rev，推阶段带 from；不符抛 LedgerError("conflict")，current 里是库里的实际值。
@@ -6,6 +7,7 @@
  * tx / insertEvent / replay 在 ledger-tx.ts，只给写入模块用：直接写事件就绕过了阶段机与 owner 校验；纯校验在 ledger-checks.ts。
  */
 import type { Database } from "bun:sqlite";
+import { requireSharedLedgerTaskPlanning } from "./shared-ledger-mode.js";
 import { updateTask } from "./fix-strategy-task-write.js";
 import { deliverDisputes } from "./review-arbiter-deliver.js";
 import {
@@ -121,9 +123,12 @@ function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boole
 
 export function createTask(db: Database, ctx: WriteCtx, input: NewTask): WriteResult<LedgerTask> {
   return tx(db, () => {
+    requireSharedLedgerTaskPlanning(input.extra);
     const dup = replay(db, ctx, { project: input.project, target: input.id, kind: "task" }, () => mustTask(db, input.id));
     if (dup) return dup;
-    const event = insertTask(db, ctx, input, checkNewTask(db, ctx.actor, input));
+    const imported = checkNewTask(db, ctx.actor, input);
+    checkPreparedPeerPlacement(db, input, ctx.now ?? Date.now());
+    const event = insertTask(db, ctx, input, imported);
     return { row: mustTask(db, input.id), event, duplicate: false };
   });
 }

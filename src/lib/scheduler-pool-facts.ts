@@ -1,3 +1,4 @@
+import { localAgentPool } from "./scheduler-agent-pool-ledger.js";
 /**
  * Ledger reads behind the shared pool (i28-R9): which lend order a pool intent became, when the peer's claim was recorded,
  * who reviewed a pooled round, and the per-card PoolFacts the planner consumes. A pool intent is tied to its order by one
@@ -14,9 +15,10 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { WorkerRef } from "./scheduler-plan.js";
-import { getLendPeer, peerCapacity } from "./ledger-lend-peers.js";
+import { getLendPeer, peerCapacity, unifiedPeerCapacity } from "./ledger-lend-peers.js";
 import type { PeerFacts } from "./scheduler-placement.js";
 import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
+import { preparedPeerWrites, type ReservationRead, type PlacementReservation } from "./scheduler-placement-reservations.js";
 
 export const poolLinkKey = (intentId: string): string => `scheduler:${intentId}:pool`;
 /** The reviewer session id writeLendResult records for an order (ledger-lend-result.ts). */
@@ -83,11 +85,16 @@ export function prCoordinates(pr: string | null): { repo: string; pr: number } |
 }
 
 /** A peer's lend-v2 view (i28-W5): null = no hello on file (proto 1); otherwise what may be placed there now and why not. */
-function peerV2(db: Database, b: BorrowEntry, now: number): PeerFacts["v2"] {
+function peerV2(db: Database, b: BorrowEntry, now: number, unified = false, read: ReservationRead = {}): PeerFacts["v2"] {
   const row = getLendPeer(db, b.peer);
   if (!row || row.proto < 2) return null;
-  const cap = peerCapacity(db, b.peer, b.maxOpen, now);
-  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [] };
+  const grant = { roles: row.grant?.roles ?? [], repos: row.grant?.repos ?? [], familyTotals: { claude: row.slots.claude.total, codex: row.slots.codex.total } };
+  if (unified) {
+    const u = unifiedPeerCapacity(db, b.peer, now, read);
+    return { familyBusy: u.busy, why: u.why, slots: u.slots, ...grant };
+  }
+  const cap = peerCapacity(db, b.peer, b.maxOpen, now, read);
+  return { why: cap.why, slots: cooldownPeerSlots(db, b.peer, cap.slots, now), ...grant };
 }
 
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
@@ -106,19 +113,28 @@ export function localWriterCount(db: Database, project: string, exceptTask: stri
 }
 
 /** The project's borrow entries in lend.json order, each with A's live orders there and its lend-v2 view. */
-export function borrowPeers(db: Database, project: string, borrow: readonly BorrowEntry[], now: number): PoolFacts["peers"] {
+export function borrowPeers(db: Database, project: string, borrow: readonly BorrowEntry[], now: number, unified = false, read: ReservationRead = {}): PoolFacts["peers"] {
   const live = (peer: string): number => hasLendTable(db)
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
   return borrow.filter((b) => b.projects.includes(project))
-    .map((b) => ({ peer: b.peer, open: live(b.peer), maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now), ...(b.priority ? { priority: b.priority } : {}) }));
+    .map((b) => ({ peer: b.peer, open: live(b.peer) + preparedPeerWrites(db, b.peer, read).total,
+      maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now, unified, read),
+      helloAt: getLendPeer(db, b.peer)?.helloAt, ...(b.priority ? { priority: b.priority } : {}) }));
 }
 
 export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done" && o.step === "review")?.peer ?? null;
   // A review needs the PR; writing before one exists goes against the configured repo (set only with remote.roles write).
   const repo = prCoordinates(task.pr)?.repo ?? (task.stage === "review" ? null : cfg.remote.repo ?? null);
-  return { remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), localWriters: localWriterCount(db, task.project, task.id),
-    peers: borrowPeers(db, task.project, cfg.borrow, cfg.now), repo, lastPeer, writeLeasePeer: writeLeasePeer(db, task) };
+  const reservation = task.extra.placementReservation as PlacementReservation | undefined;
+  const peers = borrowPeers(db, task.project, cfg.borrow, cfg.now, !!cfg.remote.agents, { exceptTask: task.id, enforce: reservation?.mode === "on" });
+  if (reservation?.mode === "on" && ["spec", "restate", "build"].includes(task.stage)) {
+    const own = peers.find((p) => `peer:${p.peer}` === task.extra.placement);
+    if (own?.v2) own.v2 = { ...own.v2, slots: { ...own.v2.slots, [reservation.family === "claude" ? "codex" : "claude"]: 0 } };
+  }
+  return { now: cfg.now, remote: cfg.remote, localReviewers: localReviewerCount(db, task.project, task.id), localWriters: localWriterCount(db, task.project, task.id),
+    ...(cfg.remote.agents ? { localPool: localAgentPool(db, task.project, cfg.remote.agents, task.id) } : {}),
+    peers, repo, lastPeer, writeLeasePeer: writeLeasePeer(db, task) };
 }
 
 export interface PoolCounts { pooled: number; claimed: number; done: number; timedOut: number; unknown: number }

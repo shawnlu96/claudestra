@@ -1,3 +1,4 @@
+import { parseAgents, agentLimitSum, agentPoolRemote, type AgentPoolPolicy } from "./scheduler-agent-pool-config.js";
 import { localFamilyPolicy, type LocalFamilyPolicy } from "./scheduler-local-families-placement.js";
 import { parseLocalFamilies, type LocalFamilies } from "./scheduler-local-families-config.js";
 /** Local scheduler policy; missing or invalid config keeps the fourth daemon idle. */
@@ -7,6 +8,8 @@ import { isAbsolute } from "node:path";
 import { isPriority, PRIORITIES, REPO_RE, type Priority } from "./lend-config.js";
 import { statePath } from "./paths.js";
 import { parseWriteFamilies } from "./scheduler-family-pick.js";
+import { mergeTrainField, type MergeTrainMode } from "./scheduler-merge-train-switch-config.js";
+import { parseFixReassign, type FixReassignPolicy } from "./lend-fix-reassign-config.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 /**
@@ -20,7 +23,7 @@ export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 type RemoteMode = "balance" | "off" | "overflow" | "prefer";
 type RemoteRole = "review" | "write";
 /** reviewFirst: peers that get every review they can take, in order, before the tiers (i28-W5c); absent = none. */
-export interface RemotePolicy extends LocalFamilies, LocalFamilyPolicy {
+export interface RemotePolicy extends LocalFamilies, LocalFamilyPolicy, AgentPoolPolicy, FixReassignPolicy {
   mode: RemoteMode; roles: RemoteRole[]; poolTimeoutMin: number; reviewFirst?: string[]; writeFamilies?: ("claude" | "codex")[];
   /** This machine's tier; absent = balance. */
   localPriority?: Priority;
@@ -31,17 +34,20 @@ export interface RemotePolicy extends LocalFamilies, LocalFamilyPolicy {
 export const DEFAULT_REMOTE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15 };
 export const isLegacyRemoteMode = (m: unknown): m is "overflow" | "prefer" => m === "overflow" || m === "prefer";
 
-interface ProjectSchedule {
+interface ProjectSchedule extends AgentPoolPolicy {
   localAuthorRuntime?: LocalAuthorRuntime;
   /** 0 = no local worker at all (every eligible node goes to the pool; nothing else is dispatched). */
   maxActiveWorkers: number;
   /** Always set by parseSchedulerConfig (default DEFAULT_REMOTE); a hand-built policy without it never pools. */
   remote?: RemotePolicy;
   requiredChecks: string[];
+  /** Merge train switch (i28-MT1sw): absent = on; observe = only record what a train would have done; off = no train at all. */ mergeTrain?: MergeTrainMode;
   /** Local clone whose `gh` context must match the PR repository; with `deploy` it is also the tree that gets deployed. */
   repoDir: string;
   /** Absent = merge only, the PM deploys (T68g). */
   deploy?: DeployTarget;
+  /** true = the repository owner merges: auto cards hand the PR over at merge and never merge here (docs/architecture/merge-handoff.md). */
+  mergeHandoff?: boolean;
   /** false = this project's agents are never supervised (i28-S1); absent = follow the global switch */
   supervise?: boolean;
 }
@@ -80,7 +86,8 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
   for (const [id, value] of Object.entries(r.projects)) {
     if (!/^[\w.-]{1,80}$/.test(id) || !value || typeof value !== "object") throw new Error(`invalid scheduler project ${id}`);
     const p = value as Record<string, unknown>;
-    if (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 0 || (p.maxActiveWorkers as number) > 32) {
+    const agents = parseAgents(p.agents);
+    if (!agents.agents && (!Number.isInteger(p.maxActiveWorkers) || (p.maxActiveWorkers as number) < 0 || (p.maxActiveWorkers as number) > 32)) {
       throw new Error(`scheduler project ${id} needs maxActiveWorkers 0..32`);
     }
     const requiredChecks = parseRequiredChecks(p.requiredChecks);
@@ -89,9 +96,14 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       throw new Error(`scheduler project ${id} needs absolute repoDir`);
     }
     if (p.supervise !== undefined && typeof p.supervise !== "boolean") throw new Error(`scheduler project ${id}: supervise must be boolean`);
-    projects[id] = { ...localRuntimeFields(p.localAuthorRuntime), maxActiveWorkers: p.maxActiveWorkers as number, requiredChecks,
-      repoDir: p.repoDir, remote: localFamilyPolicy(parseRemote(id, p.remote), p.localAuthorRuntime), ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
-      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}) };
+    if (p.mergeHandoff !== undefined && typeof p.mergeHandoff !== "boolean") throw new Error(`scheduler project ${id}: mergeHandoff must be boolean`);
+    if (p.mergeHandoff === true && p.deploy !== undefined) throw new Error(`scheduler project ${id}: mergeHandoff cannot deploy (nothing merges here)`);
+    projects[id] = { ...agents, ...localRuntimeFields(p.localAuthorRuntime),
+      maxActiveWorkers: agents.agents ? agentLimitSum(agents.agents) : p.maxActiveWorkers as number, requiredChecks,
+      repoDir: p.repoDir, remote: { ...localFamilyPolicy(parseRemote(id, agentPoolRemote(p.remote, !!agents.agents)), p.localAuthorRuntime), ...agents },
+      ...(p.deploy !== undefined ? { deploy: parseDeployTarget(id, p.deploy) } : {}),
+      ...(p.supervise !== undefined ? { supervise: p.supervise as boolean } : {}), ...mergeTrainField(id, p.mergeTrain),
+      ...(p.mergeHandoff === true ? { mergeHandoff: true } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
   return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise) };
@@ -140,7 +152,8 @@ export function parseRemotePolicy(raw: unknown, where = "remote"): RemotePolicy 
   const note = isLegacyRemoteMode(rawMode) ? `remote.mode "${rawMode}" 是旧写法，按 balance 处理（i28-W5）` : undefined;
   return { mode, roles: (["review", "write"] as const).filter((x) => roles.includes(x)), poolTimeoutMin: timeout as number,
     ...(first.length ? { reviewFirst: first as string[] } : {}), ...(r.localPriority !== undefined ? { localPriority: r.localPriority as Priority } : {}),
-    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}), ...parseWriteFamilies(r.writeFamilies, where), ...parseLocalFamilies(r.localFamilies) };
+    ...(writes ? { repo: r.repo as string } : {}), ...(note ? { note } : {}), ...parseWriteFamilies(r.writeFamilies, where), ...parseLocalFamilies(r.localFamilies),
+    ...parseFixReassign(r.fixReassignMin, where) };
 }
 
 const argv = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 32 &&

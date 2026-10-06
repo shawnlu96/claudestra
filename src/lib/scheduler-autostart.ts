@@ -1,3 +1,8 @@
+import { scanSpecHead } from "./spec-lint-head.js";
+import { activeProjectPm } from "./pm-role.js";
+import { switchOff } from "./shared-ledger-gate-switch.js";
+export { switchOff } from "./shared-ledger-gate-switch.js";
+import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
 /**
  * 自动开卡（i28-A1）的门：判定都是纯函数或只读台账。调度服务选候选、台账 claim 事务里重核、feature-show 列「卡在哪道门」用的是同一份，
  * 三处口径分不了叉。规格卡的文件门（落盘静置、卡首的开关行与模板行）只在调度侧看，claim 事务只重核台账里的门。
@@ -43,33 +48,18 @@ export function readSwitch(db: Database, project: string): AutostartSwitch {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as AutostartSwitch) : {};
 }
 
-/** 项目关了，或这个 feature 关了；featureId 为 null 的卡（不在任何 feature 下）只看项目 */
-export function switchOff(sw: AutostartSwitch, featureId: string | null): string | null {
-  if (sw.off) return `项目的自动开卡关着：${sw.off.reason}`;
-  const f = featureId ? sw.features?.[featureId] : undefined;
-  return f?.off ? `feature ${featureId} 的自动开卡关着：${f.reason}` : null;
-}
-
 export const weeklyLine = (sw: AutostartSwitch): number => sw.weeklyLinePct ?? DEFAULT_WEEKLY_LINE;
 
 export type TemplateDecl = { ok: true; template: AutostartTemplate; version: number } | { ok: false; error: string };
 /** ownerVisual: the card changes the overall look (palette, theme tokens, redesign), so the owner sees its screenshots, not PM */
 export interface SpecHead { off: boolean; template: TemplateDecl; ownerVisual: boolean }
 
-const TEMPLATE_LINE = /^模板\s*[:：]\s*(.*)$/;
 const OFF_LINE = /^自动开卡\s*[:：]\s*关\s*$/;
 const OWNER_VISUAL_LINE = /^owner\s*看截图\s*[:：]\s*是\s*$/i;
 
 /** 卡首 = 标题（第一个 `# ` 行）之后、第一个 `## ` 之前；没有标题行就从第一行算 */
 export function parseSpecHead(text: string): SpecHead {
-  const lines = text.split(/\r?\n/).map((l) => l.trim());
-  const title = lines.findIndex((l) => /^#\s/.test(l));
-  const head: string[] = [];
-  for (const l of lines.slice(title + 1)) {
-    if (/^##\s/.test(l)) break;
-    head.push(l);
-  }
-  const decls = head.map((l) => l.match(TEMPLATE_LINE)?.[1]?.trim()).filter((v): v is string => v !== undefined);
+  const { head, decls } = scanSpecHead(text);
   const off = head.some((l) => OFF_LINE.test(l));
   const ownerVisual = head.some((l) => OWNER_VISUAL_LINE.test(l));
   if (decls.length > 1) return { off, ownerVisual, template: { ok: false, error: `卡首写了 ${decls.length} 行模板声明，只能有一行` } };
@@ -102,10 +92,9 @@ export function quotaOver(q: InventoryQuota, line: number): InventoryQuota["wind
   return q.windows.find((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && w.usedPct !== null && w.usedPct >= line) ?? null;
 }
 
-/** 项目的 PM：PM 名单里第一个不是调度助理的（同 pm-notify.ts）；没有 = 不开 */
+/** 指针优先；未设时取第一个非调度助理的 PM，没有 = 不开。 */
 export function projectPm(db: Database, project: string): string | null {
-  const meta = getMeta(db, project);
-  return meta.pms.find((p) => p !== meta.team?.dispatcher) ?? null;
+  return activeProjectPm(db, project);
 }
 
 /** 调度服务那边的事实：scheduler.json 有没有列这个项目、autoDispatch、这个项目的 maxActiveWorkers */
@@ -128,6 +117,7 @@ const stop = (gate: GateCode, why: string): GateStop => ({ gate, why });
 
 /** feature 级的门（对它的所有节点一样）：服务、开关、状态、提案、冻结、PM、容量 */
 export function featureGate(db: Database, f: Feature, svc: ServiceFacts): GateStop | null {
+  const shared = sharedLedgerPlanningReason(f.id); if (shared) return stop("feature", shared);
   if (!svc.autoDispatch || !svc.projects.includes(f.project)) return stop("service", `调度服务没对项目 ${f.project} 开自动派单（scheduler.json enabled + autoDispatch + 列出项目）`);
   const off = switchOff(readSwitch(db, f.project), f.id);
   if (off) return stop("switch", off);

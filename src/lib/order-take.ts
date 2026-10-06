@@ -17,10 +17,13 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { VerifiedCall } from "./order-tool-route.js";
 import { SRC_DIR } from "./repo-root.js";
 import { clipWire, fitFindings, wireFindings } from "./order-findings.js";
-import { currentReviewFacts } from "./scheduler-review.js";
+import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { bounceWork, fixBounce } from "./scheduler-merge-conflict.js";
 import { uiRejectFixFor } from "./ledger-ui-approve-verdict.js";
 import { standardAnswers } from "./order-standard-answers.js";
+import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
+import { lentAwayText } from "./ledger-lend-relay.js";
+import { withMemory } from "./memory-retrieve-order.js";
 
 type WorkStage = "build" | "fix";
 export interface CurrentOrder {
@@ -58,9 +61,20 @@ function bindingAllows(db: Database, taskId: string, call: VerifiedCall): boolea
   return s.agent === call.agent && !!call.sessionId && s.sessionId === call.sessionId;
 }
 
-export function currentOrders(db: Database, call: VerifiedCall): CurrentOrder[] {
+/** 这张卡这一轮的代码在出借方写（i28-RS1）：有未结的写 / 修出借单，或这一阶段的派单意图挂给了 peer（挂池了、还没出单也算） */
+export interface LentAway { taskId: string; peer: string; orderId: string; note: string }
+
+function lentAway(db: Database, task: LedgerTask, intent: SchedulerIntent | null): LentAway | null {
+  const live = hasTable(db, "lend_orders") ? db.query(`SELECT orderId, peer FROM lend_orders WHERE taskId = ? AND step IN ('write','fix')
+    AND status IN ('pooled','claimed','unknown') ORDER BY createdAt DESC LIMIT 1`).get(task.id) as { orderId: string; peer: string } | null : null;
+  const away = live ?? (intent && isPoolIntent(intent) ? { orderId: intent.id, peer: (intent.recipient as string).slice(POOL_RECIPIENT.length) } : null);
+  return away && { taskId: task.id, ...away, note: lentAwayText(away.peer, away.orderId, task.id) };
+}
+
+function scanOrders(db: Database, call: VerifiedCall): { orders: CurrentOrder[]; away: LentAway[] } {
   const ids = db.query("SELECT id FROM tasks WHERE stage IN ('build', 'fix') ORDER BY updatedAt DESC, id").all() as { id: string }[];
   const out: CurrentOrder[] = [];
+  const away: LentAway[] = [];
   for (const { id } of ids) {
     const task = getTask(db, id);
     if (!task || (task.stage !== "build" && task.stage !== "fix")) continue;
@@ -69,9 +83,31 @@ export function currentOrders(db: Database, call: VerifiedCall): CurrentOrder[] 
     if (!bindingAllows(db, task.id, call)) continue;
     const step = task.stage === "fix" ? "fix" : "write";
     const intent = currentIntent(db, task, step);
+    // 写单挂给了 peer（或已被 peer 领走）：本机会话只做复述，不把这张单发给它，换成说明（i28-RS1）
+    const lent = lentAway(db, task, intent);
+    if (lent) {
+      away.push(lent);
+      continue;
+    }
     out.push({ task, stage: task.stage, step, orderId: intent?.id ?? manualOrderId(task.id, step, task.round), intent });
   }
-  return out;
+  return { orders: out, away };
+}
+
+export const currentOrders = (db: Database, call: VerifiedCall): CurrentOrder[] => scanOrders(db, call).orders;
+
+/**
+ * take_order 的结果（bridge/order-tools.ts）：当前的单，多张时取最近动过的一张、其余单号一并给；没有单但有借出去的卡时，order 为空、
+ * note 是固定说明（「本卡代码由 <peer> 写…」），不是一张空单。
+ */
+export function takeOrderResult(db: Database | null, call: VerifiedCall, recordMemory = false):
+  { ok: true; order: OrderWire | null; otherOrderIds?: string[]; note?: string } | { ok: false; error: string } {
+  if (!db) return { ok: true, order: null };
+  const { orders, away } = scanOrders(db, call);
+  if (!orders.length) return { ok: true, order: null, ...(away.length ? { note: away.map((a) => a.note).join("\n") } : {}) };
+  const w = orderWireFor(db, orders[0], recordMemory);
+  if (!w.ok) return w;
+  return { ok: true, order: w.order, ...(orders.length > 1 ? { otherOrderIds: orders.slice(1).map((o) => o.orderId) } : {}) };
 }
 
 function dagVersionOf(db: Database, task: LedgerTask): number | null {
@@ -83,7 +119,7 @@ function dagVersionOf(db: Database, task: LedgerTask): number | null {
 const CLI = `bun ${SRC_DIR}/manager.ts ledger`;
 
 /**
- * 修复单要带上这一轮审查的逐项结论与报告路径（和调度器 fixPackage 同一口径：currentReviewFacts 取本轮、本 head 的结论）；
+ * 修复单要带上这一轮审查的逐项结论与报告路径（和调度器 fixPackage 同一口径：fixStartReviewFacts 取本轮、本 head 的结论，或经核实起点链迁移前那个 head 的结论）；
  * 唤醒派单时执行者只看得到 take_order 的单，缺了它就只知道「要修」不知道修什么。写单 / 结论不完整时不带。
  */
 function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findings: OrderWire["findings"]; report: string | null; bounce?: ReturnType<typeof bounceWork> } {
@@ -93,12 +129,12 @@ function fixContext(db: Database, t: LedgerTask, step: "write" | "fix"): { findi
   if (bounce) return { findings: [], report: null, bounce: bounceWork(bounce) };
   const ui = uiRejectFixFor(db, t, events, getWorkflow(db, t.id)?.template); // 同一退回来源的代码 findings / 报告与 PM 截图意见一起带上
   if (ui) return { findings: wireFindings(ui.findings), report: ui.reportPath };
-  const read = currentReviewFacts(t, events);
+  const read = fixStartReviewFacts(t, events);
   return read.kind === "facts" ? { findings: wireFindings(read.facts.findings), report: read.facts.reportPath } : { findings: [], report: null };
 }
 
 /** 给执行者的单：字段按 T87 OrderWire，交出去之前过一遍 parseOrderWire（台账里的脏值宁可报错，不发半张单） */
-export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: OrderWire } | { ok: false; error: string } {
+export function orderWireFor(db: Database, o: CurrentOrder, recordMemory = false): { ok: true; order: OrderWire } | { ok: false; error: string } {
   const t = o.task;
   const head = t.headSHA && isFullSha(t.headSHA) ? t.headSHA : null;
   const fix = fixContext(db, t, o.step);
@@ -113,6 +149,7 @@ export function orderWireFor(db: Database, o: CurrentOrder): { ok: true; order: 
     writeBack: `用 deliver 工具回写：orderId ${o.orderId}，head = 本卡分支在 origin 上的完整 SHA（bridge 会核对）。CLI 仍可用：${CLI} deliver ${t.id} --from ${o.stage} --head <完整 SHA> --evidence <报告路径>`,
     findings: fix.findings, fallback: fallback ? clipWire(`再不行退到：${fallback}`, WIRE_LIMITS.fallback) : null,
   };
-  const parsed = parseOrderWire(fitFindings(wire, fix.report));
+  // 项目记忆一节最后放、只用剩余预算（memory-retrieve-order.ts）
+  const parsed = parseOrderWire(withMemory(db, t, "write", head, fitFindings(wire, fix.report), { recordInjection: recordMemory }));
   return parsed.ok ? { ok: true, order: parsed.value } : { ok: false, error: `台账里这张单的字段不合 OrderWire：${parsed.error}` };
 }

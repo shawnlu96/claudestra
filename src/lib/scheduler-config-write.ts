@@ -1,3 +1,4 @@
+import { parseAgents, agentsPatch, type AgentPoolPolicy } from "./scheduler-agent-pool-config.js";
 import { hasLocalFamilies, localFamiliesPatch, type LocalFamiliesSet } from "./scheduler-local-families-config.js";
 /**
  * The only writer of scheduler.json: one project's `remote.mode` (i28-W5b, `ledger scheduler-remote`) and this machine's
@@ -44,7 +45,7 @@ function detectIndent(raw: string): string | number {
 }
 
 /** The raw project object to edit (and the whole doc); throws LedgerError (invalid / not_found). */
-function projectOf(raw: string, project: string): { doc: Record<string, unknown>; p: Record<string, unknown>; remote: Record<string, unknown> | undefined } {
+export function projectOf(raw: string, project: string): { doc: Record<string, unknown>; p: Record<string, unknown>; remote: Record<string, unknown> | undefined } {
   let doc: unknown;
   try { doc = JSON.parse(raw); } catch (e) { throw new LedgerError("invalid", `scheduler.json 不是合法 JSON：${(e as Error).message}`); }
   if (!isObj(doc)) throw new LedgerError("invalid", "scheduler.json 顶层不是对象");
@@ -57,7 +58,7 @@ function projectOf(raw: string, project: string): { doc: Record<string, unknown>
 }
 
 /** Validate the whole edited doc, then serialize in the file's own indent; unchanged = the input text byte for byte. */
-function finish(raw: string, doc: Record<string, unknown>, changed: boolean): { text: string; pollMs: number } {
+export function finish(raw: string, doc: Record<string, unknown>, changed: boolean): { text: string; pollMs: number } {
   let pollMs: number;
   try { pollMs = parseSchedulerConfig(doc).pollMs; }
   catch (e) { throw new LedgerError("invalid", `${changed ? "改完" : "现在"}的 scheduler.json 过不了校验，没写：${(e as Error).message}`); }
@@ -79,12 +80,13 @@ export function patchRemoteMode(raw: string, project: string, mode: SettableRemo
 }
 
 /** What `scheduler-local` may set; an absent key is left exactly as it is in the file. */
-export interface LocalSlots extends LocalFamiliesSet { localPriority?: Priority; maxActiveWorkers?: number; localAuthorRuntime?: LocalAuthorRuntime }
+export interface LocalSlots extends LocalFamiliesSet, AgentPoolPolicy { localPriority?: Priority; maxActiveWorkers?: number; localAuthorRuntime?: LocalAuthorRuntime }
 export interface LocalSlotsPatch { text: string; from: LocalSlots; to: LocalSlots; changed: boolean; pollMs: number }
 
 /** maxActiveWorkers' range is parseSchedulerConfig's (0..32); checked here too so a bad value never takes the lock. */
 function checkLocalSlots(set: LocalSlots): void {
-  if (![hasLocalRuntimeSlot(set), hasLocalFamilies(set)].some(Boolean)) throw new LedgerError("invalid", "至少要改本机档位 / 并发 / 作者运行时 / 家族其中一个");
+  const agents = parseAgents(set.agents);
+  if (![hasLocalRuntimeSlot(set), hasLocalFamilies(set), !!agents.agents].some(Boolean)) throw new LedgerError("invalid", "至少要改本机档位 / 并发 / 作者运行时 / 家族其中一个");
   if (set.localPriority !== undefined && !isPriority(set.localPriority)) throw new LedgerError("invalid", `localPriority 只能是 ${PRIORITIES.join(" / ")}`);
   const n = set.maxActiveWorkers;
   if (n !== undefined && (!Number.isInteger(n) || n < 0 || n > 32)) throw new LedgerError("invalid", `maxActiveWorkers 要是 0..32 的整数，收到 ${String(n)}`);
@@ -94,11 +96,11 @@ function checkLocalSlots(set: LocalSlots): void {
 export function patchLocalSlots(raw: string, project: string, set: LocalSlots): LocalSlotsPatch {
   checkLocalSlots(set);
   const { doc, p, remote } = projectOf(raw, project);
-  const from: LocalSlots = { ...localRuntimePatch(p, set.localAuthorRuntime), ...localFamiliesPatch(p, set),
+  const from: LocalSlots = { ...agentsPatch(p, set), ...localRuntimePatch(p, set.localAuthorRuntime), ...localFamiliesPatch(p, set),
     ...(set.localPriority !== undefined ? { localPriority: (remote?.localPriority ?? "balance") as Priority } : {}),
     ...(set.maxActiveWorkers !== undefined ? { maxActiveWorkers: p.maxActiveWorkers as number } : {}),
   };
-  const changed = Object.entries(set).some(([k, v]) => from[k as keyof LocalSlots] !== v);
+  const changed = Object.entries(set).some(([k, v]) => JSON.stringify(from[k as keyof LocalSlots]) !== JSON.stringify(v));
   if (changed && set.localPriority !== undefined) {
     if (remote) remote.localPriority = set.localPriority;
     else p.remote = { ...(p.remote as Record<string, unknown> | undefined), localPriority: set.localPriority };
@@ -161,7 +163,7 @@ function audit(db: Database, ctx: WriteCtx, path: string, lock: LockHandle, raw:
 }
 
 /** Check → lock → read → patch → write → audit. Every refusal leaves the file untouched (bytes and mtime). */
-async function writeProject<F, T>(db: Database, ctx: WriteCtx, w: Write<F, T>, opts: { path?: string; lockMs?: number }): Promise<WriteResult<F, T>> {
+export async function writeProject<F, T>(db: Database, ctx: WriteCtx, w: Write<F, T>, opts: { path?: string; lockMs?: number }): Promise<WriteResult<F, T>> {
   const path = opts.path ?? SCHEDULER_CONFIG_PATH;
   if (!actorMayConfigure(db, ctx.actor, w.project)) {
     throw new LedgerError("forbidden", `${w.what}要项目 ${w.project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);

@@ -16,6 +16,7 @@ import { pushNotice } from "./notice-merge";
 import { hydrateHistoryMessages } from "./history-hydrate";
 import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import { canSendClearBoot, classifySendFailure, RetiredAcpStreams, settleClearSend, isClearSend, sendTimeoutMs } from "./clear-send";
+import { settleRotation } from "./session-rotated";
 import {
   isHistoryBubble,
   coveredByCursor,
@@ -27,6 +28,7 @@ import { composeView, droppedBlobUrls, revokeBlobUrls, sendCursor } from "./view
 import { claimEcho, findEchoTarget, type HeldState } from "./held-echo";
 import { markHeldSend } from "../quota-wall/held-send";
 import { decideReconnect } from "./reconnect-policy";
+import { applySnapshotMissing, bgSweepable, markBgDone, reviveUnknownShell, shellExited } from "./bg-shell-state";
 import { ReloadScroll, reloadKindFor, type ReloadKind } from "./reload-scroll";
 
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
@@ -34,6 +36,8 @@ import { getLang, t as tr } from "@/lib/i18n";
 import { postClientLog } from "@/lib/client-log";
 import { liveAnswerText, liveUserText, resolveDeltaClicks, resolvePendingClicks } from "./delta-clicks";
 import { agentsSignature } from "./agents-signature";
+import { AgentListLoader } from "./agent-list-loader";
+import { INITIAL_AGENT_LIST, keepRosterOrder, type AgentListReason, type AgentListStatus } from "./agent-list-state";
 import { ApiError, DeviceInvalidError } from "@/lib/api/client";
 import { loadAgents as apiLoadAgents, MASTER_AGENT_NAME } from "@/lib/chat/agents";
 import { createAgent as apiCreateAgent, lifecycleAction as apiLifecycle } from "@/lib/api/agents";
@@ -57,10 +61,8 @@ interface ChatState {
   agents: AgentSession[];
   /** v2.21+ project 元数据（侧栏分组组头 + 管理弹窗数据源），随 agents 一起拉。 */
   projects: ProjectMeta[];
-  loadingAgents: boolean;
-  /** agents 首拉是否已完成（成败均置 true）。false = 入场期，Splash 在场，
-   *  侧栏不许显示「暂无会话」（SSR 首帧就渲染空态是 2026-07-13 的观感 bug）。 */
-  agentsReady: boolean;
+  /** 会话列表加载状态（agent-list-state.ts）：没拿到过成功响应前 Splash 在场、侧栏不许显示「暂无会话」。 */
+  agentList: AgentListStatus;
   /** 历史加载失败且当前无内容可显示 → 渲染「加载失败·重试」而非空会话。 */
   historyError: boolean;
   /** 当前打开的 agent 名（""=未选） */
@@ -174,8 +176,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     super({
       agents: [],
       projects: [],
-      loadingAgents: false,
-      agentsReady: false,
+      agentList: INITIAL_AGENT_LIST,
       activeAgent: "",
       messages: [],
       loadingHistory: false,
@@ -224,7 +225,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     const idx = this.state.messages.findIndex((m) => m.id === id);
     if (idx < 0) return { ok: false, reason: "not-history" };
     const m = this.state.messages[idx];
-    const seqM = m.id.match(/^h(\d+)/);
+    const seqM = m.id.match(/^h(\d+(?:\.\d+)?)/); // 收件箱拆出的 h<行号>.0k 只隐藏它自己
     if (!seqM) return { ok: false, reason: "not-history" };
     const from = Number(seqM[1]);
     const to = typeof m.seqEnd === "number" && m.seqEnd >= from ? m.seqEnd : from;
@@ -324,27 +325,100 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     return `cm${++this.seq}`;
   }
 
-  // ─── agent 列表 ──────────────────────────────────────────
+  // ─── agent 列表（状态 / 单 flight / 退避 / 换源清理在 agent-list-loader.ts）──────
 
-  public async loadAgents() {
+  private readonly agentList = new AgentListLoader<AgentSession[]>({
+    fetch: (signal, timeoutMs) => apiLoadAgents(signal, timeoutMs),
+    onStatus: (st) => this.produce((s) => void (s.agentList = st)),
+    onData: (next, reason) => this.applyAgents(next, reason),
+    log: (m) => this.clientLog(m),
+  });
+
+  /**
+   * 拉会话列表。失败（bridge 重启窗口 / 凭据失效）不清列表——agents 一空,TopBar 的 info 变 undefined,
+   * 已打开的终端页/操作区整体卸载(2026-07-14 实证);也不假装拿到了:首拉没成功前侧栏不显示「暂无会话」(agentListView)。
+   * reason:poll = 15s 轮询(退避期内不插队) / event = 联网·回前台 / manual = 重试按钮 / action = 操作后拉真值。
+   */
+  public async loadAgents(reason: AgentListReason = "action") {
+    await this.agentList.request(reason);
+  }
+
+  /** 同 loadAgents,顺带收敛陈旧 bg 卡(与网络无关,轮询节拍顺带跑)。组件操作后无参调用 = action。 */
+  public async refreshAgents(reason: AgentListReason = "action") {
+    this.sweepStaleBgTasks();
+    await this.agentList.request(reason);
+  }
+
+  /** Chat 挂载期:联网事件提前重试;卸载时中止在途请求、清掉列表的全部计时器。返回清理函数。 */
+  public startAgentList(): () => void {
+    return this.agentList.attach(window);
+  }
+
+  /**
+   * 一次成功响应落地。静默节拍(poll/event)仅列表实际变化才 produce,避免每拍替换数组引用导致侧栏空转 re-render;
+   * 显式刷新(action/manual)照旧整表写入 + 重拉 projects——签名不含 purpose/cwd 等字段,且同 roster 的手动重试
+   * 也要能把上次失败的 projects 补回来。
+   */
+  private applyAgents(next: AgentSession[], reason: AgentListReason) {
+    // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
+    // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁。
+    const cur = next.find((a) => a.name === this.state.activeAgent);
+    if (cur?.status === "active" && cur.busy && !this.state.streaming && !this.state.browsing) {
+      this.produce((s) => {
+        s.streaming = true;
+      });
+    }
+    if (reason === "poll" || reason === "event") this.checkStreamHealth(cur);
+    const explicit = reason === "action" || reason === "manual";
+    if (!explicit && agentsSignature(next) === agentsSignature(this.state.agents)) return;
+    // v2.17.2 交互期冻结顺序(peer 补刀:pointerdown 意图捕获只覆盖「按下→click」的后半窗口,
+    // 「视觉锁定→手指落下」这段更长的窗口里重排照样让手指落在错行上)。侧栏 2s 内有过触碰/滚动 →
+    // 本拍只更新字段不重排,顺序等下一拍(≤15s)再应用;成员增删仍立即生效(新增排尾)。操作后的拉取不冻结。
+    const frozen = !explicit && Date.now() - lastSidebarTouchAt < SIDEBAR_FREEZE_MS;
     this.produce((s) => {
-      s.loadingAgents = true;
+      s.agents = frozen ? keepRosterOrder(s.agents, next) : next;
     });
-    try {
-      // 失败（bridge 重启窗口 / 凭据失效）别把列表清空——agents 一空,TopBar 的 info 变 undefined,
-      // 已打开的终端页/操作区整体卸载(2026-07-14 实证)。保留旧列表等下一轮。
-      const list = await apiLoadAgents();
-      this.produce((s) => {
-        s.agents = list;
-        s.loadingAgents = false;
-        s.agentsReady = true;
-      });
-      void this.loadProjects();
-    } catch {
-      this.produce((s) => {
-        s.loadingAgents = false;
-        s.agentsReady = true; // 失败也算入场结束——Splash 得退场，别永远盖着
-      });
+    void this.loadProjects();
+  }
+
+  /** 轮询 / 回前台节拍上的流健康检查(操作后的拉取不算一拍:「连续两拍」按 15s 粒度算)。 */
+  private checkStreamHealth(cur: AgentSession | undefined) {
+    // 反向对齐(2026-07-24 wechat-bot 事故:iOS 冻结页面错过 reply+done,恢复后
+    // 各事件驱动的恢复路径全都没生效,UI 永远「正在回复」、回复永远不出现):
+    // UI 认为回合进行中而服务端连续两拍(≈30s)说 agent 空闲 → 漏收 done/reply
+    // 实锤,强制全量对齐(重拉历史把漏的 reply 补回 + 重连流)。单拍不动——
+    // 15s 轮询粒度粗,刚起步的回合会瞬时 busy=false,下一拍即清零计数。
+    // 这条自愈只依赖「JS 在跑 + 轮询能通」,不依赖 visibility/focus 事件。
+    if (this.state.streaming && cur?.status === "active" && cur.busy === false) {
+      this.staleStreamStrikes++;
+      if (this.staleStreamStrikes >= 2 && Date.now() - this.lastForcedAlign > 60_000) {
+        this.staleStreamStrikes = 0;
+        this.lastForcedAlign = Date.now();
+        this.clientLog("realign: UI streaming 但服务端连续两拍空闲,强制对齐");
+        this.maybeReconnect();
+      }
+    } else {
+      this.staleStreamStrikes = 0;
+    }
+    // 流失联哨兵(2026-07-29 owner 报「reply 要切换 agent 才显示」:桌面端流
+    // 静默失联 40 分钟,现有自愈全部未命中——看门狗只管已建立的流,反向对齐
+    // 只管 streaming 卡死态,visibility 要等切页)。此处站在与流无关的轮询
+    // 节拍上兜底:本次 /api/agents 已成功 = 服务端可达,而 35s(3 个心跳周期)
+    // 没收到任何流字节 = 流必死或不存在;lastReconnectAt 闸 = 没有别的恢复
+    // 链在跑(自动重连链每 1-10s 会刷新它,链活着就不打扰)。
+    const streamIdle = Date.now() - this.lastStreamByteAt;
+    if (
+      this.state.activeAgent &&
+      !this.state.browsing &&
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible" &&
+      streamIdle > 35_000 &&
+      Date.now() - this.lastReconnectAt > 30_000
+    ) {
+      this.clientLog(
+        `sentinel: 流失联 ${Math.round(streamIdle / 1000)}s 且无恢复链在跑,强制重连 agent=${this.state.activeAgent}`
+      );
+      this.maybeReconnect({ fast: true });
     }
   }
 
@@ -363,84 +437,6 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       });
     } catch {
       /* 静默 */
-    }
-  }
-
-  /**
-   * 静默刷新会话列表（轮询用）。感知本端之外的 roster 变化——master(大总管) /
-   * CLI / 其他浏览器端 创建 / kill / restart 的 agent。
-   * 与 loadAgents 的区别：不 toggle loadingAgents（不触发「加载中…」），且仅在
-   * 列表实际变化时才 produce，避免每轮轮询都替换数组引用导致侧栏空转 re-render。
-   * 401 静默返回（轮询不主动跳登录，交给显式操作处理）。
-   */
-  public async refreshAgents() {
-    this.sweepStaleBgTasks(); // bg 卡陈旧收敛与网络无关,轮询节拍顺带跑
-    try {
-      // 同 loadAgents:失败走 catch 不清列表(否则 15s 轮询撞上 bridge 重启窗口,终端页随 TopBar 卸载而蒸发)
-      const next = await apiLoadAgents();
-      // 会话态校准(2026-07-14 owner:agent 忙不忙是服务端事实,别只依赖流):
-      // 活跃会话在服务端是 busy(hook 真值)而本地没在 streaming → 补锁。
-      const cur = next.find((a) => a.name === this.state.activeAgent);
-      if (cur?.status === "active" && cur.busy && !this.state.streaming && !this.state.browsing) {
-        this.produce((s) => {
-          s.streaming = true;
-        });
-      }
-      // 反向对齐(2026-07-24 wechat-bot 事故:iOS 冻结页面错过 reply+done,恢复后
-      // 各事件驱动的恢复路径全都没生效,UI 永远「正在回复」、回复永远不出现):
-      // UI 认为回合进行中而服务端连续两拍(≈30s)说 agent 空闲 → 漏收 done/reply
-      // 实锤,强制全量对齐(重拉历史把漏的 reply 补回 + 重连流)。单拍不动——
-      // 15s 轮询粒度粗,刚起步的回合会瞬时 busy=false,下一拍即清零计数。
-      // 这条自愈只依赖「JS 在跑 + 轮询能通」,不依赖 visibility/focus 事件。
-      if (this.state.streaming && cur?.status === "active" && cur.busy === false) {
-        this.staleStreamStrikes++;
-        if (this.staleStreamStrikes >= 2 && Date.now() - this.lastForcedAlign > 60_000) {
-          this.staleStreamStrikes = 0;
-          this.lastForcedAlign = Date.now();
-          this.clientLog("realign: UI streaming 但服务端连续两拍空闲,强制对齐");
-          this.maybeReconnect();
-        }
-      } else {
-        this.staleStreamStrikes = 0;
-      }
-      // 流失联哨兵(2026-07-29 owner 报「reply 要切换 agent 才显示」:桌面端流
-      // 静默失联 40 分钟,现有自愈全部未命中——看门狗只管已建立的流,反向对齐
-      // 只管 streaming 卡死态,visibility 要等切页)。此处站在与流无关的轮询
-      // 节拍上兜底:本次 /api/agents 已成功 = 服务端可达,而 35s(3 个心跳周期)
-      // 没收到任何流字节 = 流必死或不存在;lastReconnectAt 闸 = 没有别的恢复
-      // 链在跑(自动重连链每 1-10s 会刷新它,链活着就不打扰)。
-      const streamIdle = Date.now() - this.lastStreamByteAt;
-      if (
-        this.state.activeAgent &&
-        !this.state.browsing &&
-        typeof document !== "undefined" &&
-        document.visibilityState === "visible" &&
-        streamIdle > 35_000 &&
-        Date.now() - this.lastReconnectAt > 30_000
-      ) {
-        this.clientLog(
-          `sentinel: 流失联 ${Math.round(streamIdle / 1000)}s 且无恢复链在跑,强制重连 agent=${this.state.activeAgent}`
-        );
-        this.maybeReconnect({ fast: true });
-      }
-      if (agentsSignature(next) === agentsSignature(this.state.agents)) return;
-      this.produce((s) => {
-        // v2.17.2 交互期冻结顺序(peer 补刀:pointerdown 意图捕获只覆盖「按下→
-        // click」的后半窗口,「视觉锁定→手指落下」这段更长的窗口里重排照样让
-        // 手指落在错行上)。侧栏 2s 内有过触碰/滚动 → 本拍只更新字段不重排,
-        // 顺序等下一拍(≤15s)用户手离开后再应用。成员增删仍立即生效(新增排尾)。
-        if (Date.now() - lastSidebarTouchAt < SIDEBAR_FREEZE_MS && s.agents.length) {
-          const pos = new Map(s.agents.map((x, i) => [x.name, i] as const));
-          s.agents = [...next].sort(
-            (x, y) => (pos.get(x.name) ?? 1e9) - (pos.get(y.name) ?? 1e9),
-          );
-          return;
-        }
-        s.agents = next;
-      });
-      void this.loadProjects();
-    } catch {
-      /* 轮询失败静默，下一轮再试 */
     }
   }
 
@@ -740,7 +736,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     // 本 session 的历史气泡 id 是裸 h<seq>(接上来的更旧 session 带 ~ns 后缀)
     let afterSeq = -1;
     for (const m of this.state.messages) {
-      const mm = /^h(\d+)$/.exec(m.id);
+      const mm = /^h(\d+(?:\.\d+)?)$/.exec(m.id); // 含收件箱拆出的 h<行号>.0k
       if (mm) afterSeq = Math.max(afterSeq, Number(mm[1]));
     }
     if (afterSeq < 0) return;
@@ -1360,12 +1356,12 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.lastEventSeq = 0;
     this.lastEventAgent = "";
     this.deviceInvalid = false;
+    this.agentList.reset(); // 旧机器的在途列表请求 / 退避计时器作废,迟到响应不落进新机器
     this.produce((s) => {
       s.agents = [];
       s.projects = [];
       s.activeAgent = "";
       s.messages = [];
-      s.agentsReady = false;
       s.streaming = false;
       s.awaitingChunk = false;
       s.pendingAsk = null;
@@ -2204,8 +2200,9 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       const existing = s.bgTasks.find((t) => t.id === id);
       if (existing) {
+        if (shellExited(existing)) return; // 已确认退出的 shell 结局已定（replay 会再发一遍 start）
         // 同 id 重开（restart 后 baseline 再触发 / 连流 replay）→ 重置为 running，带上最新的类型/进度
-        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined }, meta);
+        Object.assign(existing, { status: "running", title: title || existing.title, lastEventAt: Date.now(), endStatus: undefined, shellUntracked: undefined }, meta);
       } else {
         s.bgTasks.push({ id, kind, title, lines: [], status: "running", lastEventAt: Date.now(), ...meta });
       }
@@ -2213,14 +2210,17 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
   }
 
   public bgTaskUpdate(id: string, items: string[], progress?: BgProgress) {
-    if (!id || !items.length) return;
+    if (!id || (!items.length && !progress)) return; // 空 items 只在 shell 读不到 / 恢复可读时来，带进度
     this.produce((s) => {
       let t = s.bgTasks.find((x) => x.id === id);
+      if (t && shellExited(t)) return;
       if (!t) {
+        if (!items.length) return;
         // update 早于 start（事件乱序/连流后补）→ 建一个占位任务
         t = { id, kind: "subagent", title: id, lines: [], status: "running" };
         s.bgTasks.push(t);
       }
+      reviveUnknownShell(t);
       t.lastEventAt = Date.now();
       if (progress) t.progress = progress;
       t.lines.push(...items);
@@ -2235,33 +2235,29 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.produce((s) => {
       const t = s.bgTasks.find((x) => x.id === id);
       if (t) {
-        t.status = "done";
-        t.durationMs = durationMs;
-        t.endStatus = status;
+        markBgDone(t, durationMs, status);
       }
       ChatStore.trimDoneBgTasks(s);
     });
   }
 
-  /** 活跃任务全集快照（连流后 BFF 下发）：不在 ids 里的 running 卡标完成。
-   *  bridge 重启会丢 bg_task_completed 事件——幽灵「working」卡靠这里收敛
+  /** 活跃任务全集快照（连流后 BFF 下发）：不在 ids 里的 running 卡收敛——subagent 标完成，shell 标状态未知
+   *  （bg-shell-state.ts）。bridge 重启会丢 bg_task_completed 事件——幽灵「working」卡靠这里收敛
    *  （owner 2026-07-14:「为什么还有一个 Background task 在 working」）。 */
   public bgTaskSync(ids: string[]) {
     const live = new Set(ids);
     this.produce((s) => {
       for (const t of s.bgTasks) {
-        if (t.status === "running" && !live.has(t.id)) t.status = "done";
+        if (t.status === "running" && !live.has(t.id)) applySnapshotMissing(t);
       }
       ChatStore.trimDoneBgTasks(s);
     });
   }
 
-  /** bg 卡陈旧收敛：completed 事件在断档/冻结窗口漏收时的兜底，镜像 bridge 的收尾规则再多给 1 分钟——
-   *  后台 shell 3min 无活动即完成；subagent 只在 30min 完全无动静时收尾
-   *  （等 CI 时十几分钟不写一行是正常的，按 4min 收会把还在跑的 subagent 标成完成）。
-   *  搭 15s 轮询便车，零新计时器。 */
+  /** bg 卡陈旧收敛：completed 事件在断档/冻结窗口漏收时的兜底——只收 subagent（30min 完全无动静再多给 1 分钟）；
+   *  后台 shell 静默再久也不收（bg-shell-state.ts：只有退出行算结束）。搭 15s 轮询便车，零新计时器。 */
   public sweepStaleBgTasks() {
-    const stale = (t: BgTaskView) => t.status === "running" && (t.lastEventAt ?? 0) < Date.now() - (t.kind === "subagent" ? 31 : 4) * 60_000;
+    const stale = (t: BgTaskView) => bgSweepable(t, Date.now());
     if (!this.state.bgTasks.some(stale)) return;
     this.produce((s) => {
       for (const t of s.bgTasks) {
@@ -2284,6 +2280,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         s.awaitingChunk = false;
       }
     });
+  }
+
+  public sessionRotated(to: string) {
+    const host = { state: () => this.state, produce: (f: (s: ChatState) => void) => this.produce(f), nextId: () => this.nextId(), lang: getLang };
+    void settleRotation({ ...host, reload: () => this.loadMessages(this.state.activeAgent, this.openGen, 0, "latest"), refreshAgents: () => this.loadAgents() }, to);
   }
 
   public compactDone(pre: number, post: number) {

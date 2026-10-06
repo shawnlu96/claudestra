@@ -116,6 +116,8 @@ export type WebStreamEvent =
   | { t: "bg-sync"; ids: string[] }
   /** compact 完成（jsonl compact_boundary）：插系统分隔线 + ctx 徽章即时回落。 */
   | { t: "compact"; pre: number; post: number }
+  /** registry 换到新会话（/clear 轮转、Stop 自愈）：提示 + 重拉历史 + ctx 置空再刷（features/chat/session-rotated.ts） */
+  | { t: "rotated"; to: string }
   /** v2.21.2+ 压缩进度百分比(pane 进度条,约 8s 一刷) */
   | { t: "compact-progress"; pct: number }
   /** v2.15+ 思考遥测（TUI 状态行采样,3s 一条,transient）：思考徽章显示

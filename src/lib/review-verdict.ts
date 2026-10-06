@@ -42,15 +42,20 @@ const refuse = (error: string, message: string): VerdictResult => ({ ok: false, 
 /** 一张单一个幂等键：同单同 head 只能有一个结论 */
 export const verdictKey = (w: Pick<VerdictWire, "orderId" | "head">): string => `verdict:${w.orderId}@${w.head}`;
 
-/** 事件里存的逐项结论：四个字段，与 PM 用 `ledger review --findings` 代记的同构（说明文字在报告里） */
-const storedFindings = (w: VerdictWire): ReviewFinding[] => w.findings.map((f) => ({ findingId: f.findingId, family: f.family, severity: f.severity,
-  probe: f.probe, ...storedBasis(f, w.reportPath, true) }));
+/**
+ * 事件里存的逐项结论：四个字段 + 依据，与 PM 用 `ledger review --findings` 代记的同构；另存 wire 里审查方自己写的 description
+ * （dispatch-recovery-MATW：修复材料只认这条原文，不拿 probe 顶替、不从报告里猜）。
+ */
+const storedFindings = (w: VerdictWire, described = true): ReviewFinding[] => w.findings.map((f) => ({ findingId: f.findingId, family: f.family,
+  severity: f.severity, probe: f.probe, ...storedBasis(f, w.reportPath, true), ...(f.pitfall ? { pitfall: true } : {}),
+  ...(described ? { description: f.description } : {}) }));
 
-/** 重试是不是同一个结论：结论、计数、逐项、报告路径都一样 */
+/** 重试是不是同一个结论：结论、计数、逐项、报告路径都一样；升级前记的（逐项没存 description）按旧形状比，同一结论重试仍认幂等 */
 function sameVerdict(prev: LedgerEvent, w: VerdictWire): boolean {
   const d = prev.data;
+  const rows = JSON.stringify(d.findings);
   return d.verdict === w.verdict && d.p0 === w.p0 && d.p1 === w.p1 && d.p2 === w.p2 && d.path === w.reportPath &&
-    JSON.stringify(d.findings) === JSON.stringify(storedFindings(w));
+    (rows === JSON.stringify(storedFindings(w)) || rows === JSON.stringify(storedFindings(w, false)));
 }
 
 /** 报告：绝对路径、解析符号链接后仍在 reviews 目录下、是非空普通文件；只看元数据，不读内容 */

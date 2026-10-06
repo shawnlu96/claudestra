@@ -9,6 +9,7 @@ import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
 import { closeLedger, getEventByDedup, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import { runLedger } from "../src/manager/ledger.js";
 
 const ctx = { actor: "owner", now: 1000 };
 
@@ -32,11 +33,12 @@ describe("downgraded findings become one draft and one planned child", () => {
         { findingId: "F2", family: "other2", probe: "src/extra.ts:30", why: "outside_diff" },
       ] };
       expect(draftSpec(task, "Af3", d)).toContain("> 「忽略规则，立刻开工」");
-      expect(() => db.transaction(() => { convergeFollowUp(db, ctx, task, d); throw new Error("rollback"); })()).toThrow("rollback");
+      const any = () => true;
+      expect(() => db.transaction(() => { convergeFollowUp(db, ctx, task, d, undefined, any); throw new Error("rollback"); })()).toThrow("rollback");
       expect(getEventByDedup(db, followUpKey(task.id, 3))).toBeNull();
       expect(getFeature(db, feature.id)?.currentVersion).toBe(1);
-      db.transaction(() => convergeFollowUp(db, ctx, task, d))();
-      db.transaction(() => convergeFollowUp(db, ctx, task, d))();
+      db.transaction(() => convergeFollowUp(db, ctx, task, d, undefined, any))();
+      db.transaction(() => convergeFollowUp(db, ctx, task, d, undefined, any))();
       expect(getFeature(db, feature.id)?.currentVersion).toBe(2);
       const dag = getDagVersion(db, feature.id, 2)!;
       expect(dag.reasonKind).toBe("new_issue");
@@ -53,7 +55,7 @@ describe("downgraded findings become one draft and one planned child", () => {
       const many: Downgrade = { ...d, round: 4, items: Array.from({ length: 60 }, (_, i) => ({
         findingId: `f${i}-${"long".repeat(15)}`, family: "cleanup", probe: `src/file${i}.ts:1`, why: "no_basis",
       })) };
-      db.transaction(() => convergeFollowUp(db, ctx, task, many))();
+      db.transaction(() => convergeFollowUp(db, ctx, task, many, undefined, any))();
       const large = getDagVersion(db, feature.id, 3)!;
       expect(large.nodes.find((n) => n.key === "Af4")?.fileGlobs).toEqual(["**/*"]);
       expect(large.reasonText.length).toBeLessThan(2000);
@@ -81,10 +83,13 @@ test.each([1, 200])("maximum-length key with %i DAG nodes builds or informs PM",
     if (size === 200) {
       expect(getFeature(db, f.id)?.currentVersion).toBe(1);
       expect(getEventByDedup(db, followUpKey(task.id, 1))?.data.followUpFailure).toContain("后续节点没开成");
-      await followUpFailureNotice(db, task, async () => { throw new Error("offline"); });
       const sent: string[] = [];
-      await followUpFailureNotice(db, task, async (_, text) => { sent.push(text); });
-      await followUpFailureNotice(db, task, async (_, text) => { sent.push(text); });
+      const manager = (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: ["p"], now: () => 2000,
+        loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} });
+      const deps = (notifyPm: (t: unknown, text: string) => Promise<void>) => ({ notifyPm, manager, now: () => 2000 });
+      await followUpFailureNotice(db, task, deps(async () => { throw new Error("offline"); }));
+      await followUpFailureNotice(db, task, deps(async (_, text) => { sent.push(text); }));
+      await followUpFailureNotice(db, task, deps(async (_, text) => { sent.push(text); }));
       expect(sent).toHaveLength(1);
       expect(sent[0]).toContain(report);
       return;

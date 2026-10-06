@@ -3,21 +3,20 @@
  * beat (batched heartbeat that also renews leases), ask (a remote worker's question, relayed by B) — and the offer A pushes
  * to B. The four v1 calls (lib/lend-wire.ts) stay byte-for-byte as they are; v2 only adds endpoints, never fields to v1
  * bodies (tests/lend-wire-v1-golden.test.ts). Both directions parse strictly, the same way: unknown / missing field, wrong
- * type, over-long value = refused, never trimmed. LEND_PROTO is defined here and nowhere else. tests/lend-wire-v2.test.ts.
+ * type, over-long value = refused, never trimmed. The shared helpers and LEND_PROTO / OFFER_MAX / BODY_V live in
+ * lib/lend-wire-v2-schema.ts; the offer body is lib/lend-offer-protocol.ts (pure, no local state). tests/lend-wire-v2.test.ts.
  */
-import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
-import type { OfferSummary } from "./lend-wire.js";
-import { parseAskWire } from "./order-wire.js";
+import { LEND_FAMILIES, type LendFamily } from "./lend-wire-types.js";
+import { offerBody, parseOffer, type OfferRequest } from "./lend-offer-protocol.js";
+import { arrayOf, BODY_V, fields, guard, LEND_PROTO, MAX_TS, no, OFFER_MAX, ORDER_ID, pattern, pick, REPO, version, whole, type Parsed } from "./lend-wire-v2-schema.js";
+import { askScopeExtra, parseAskWire, type AskScopeReason } from "./order-wire.js";
 
-/** The protocol generation this build speaks; hello carries it both ways. A peer with no hello on file is proto 1 (poll only). */
-export const LEND_PROTO = 2;
-const BODY_V = 1;
+export { LEND_PROTO, OFFER_MAX, offerBody, type OfferRequest };
 const HELLO_MS = 60_000;
 const BEAT_MS = 15_000;
 /** A hello older than this counts as zero capacity: B says hello every HELLO_MS, three missed = gone. */
 export const HELLO_FRESH_MS = 180_000;
 const BEAT_MAX = 50;
-export const OFFER_MAX = 20;
 const EXCERPT_MAX = 1024;
 
 const LEND_V2_ENDPOINTS = ["hello", "beat", "ask", "offer"] as const;
@@ -42,44 +41,15 @@ export interface BeatOrder {
   orderId: string; gen: number; phase: (typeof PHASES)[number]; lastActivityAt: number; excerpt: string; ended: { reason: "revoked"; clean: boolean } | null;
 }
 export interface BeatRequest { v: 1; orders: BeatOrder[] }
-const BEAT_VERDICTS = ["ok", "cancelled", "lease_expired", "stale_gen", "not_found", "done"] as const;
+const BEAT_VERDICTS = ["ok", "cancelled", "convergence_cancelled", "lease_expired", "stale_gen", "not_found", "done"] as const;
 type BeatVerdict = (typeof BEAT_VERDICTS)[number];
 interface LeaseV2 { gen: number; expiresAt: number; ms: number }
 export interface BeatAnswer { orderId: string; verdict: BeatVerdict; lease: LeaseV2 | null }
 
-interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[] }
-export interface OfferRequest { v: 1; proto: number; orders: OfferSummary[] }
+interface AskRequest { v: 1; orderId: string; gen: number; question: string; options: string[]; files?: string[]; reason?: AskScopeReason }
 export interface OfferResponse { accepted: string[]; refused: { orderId: string; code: string }[] }
 
-class V2Error extends Error {}
-const no = (path: string, why: string): never => { throw new V2Error(`${path}: ${why}`); };
-
-/** Exactly these keys (optional ones may be absent); anything else is refused. */
-function fields(v: unknown, path: string, keys: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return no(path, "要是对象");
-  const r = v as Record<string, unknown>;
-  const unknownKey = Object.keys(r).find((k) => !keys.includes(k) && !optional.includes(k));
-  if (unknownKey !== undefined) no(path, `不认识的字段 ${unknownKey}`);
-  const absent = keys.filter((k) => !(k in r));
-  if (absent.length) no(path, `缺字段 ${absent.join(", ")}`);
-  return r;
-}
-const whole = (v: unknown, path: string, lo: number, hi: number): number =>
-  Number.isSafeInteger(v) && (v as number) >= lo && (v as number) <= hi ? v as number : no(path, `要是 ${lo}–${hi} 的整数`);
-const pattern = (v: unknown, path: string, re: RegExp): string => (typeof v === "string" && re.test(v) ? v : no(path, "格式不对"));
-const pick = <T extends string>(v: unknown, path: string, all: readonly T[]): T => (all.includes(v as T) ? v as T : no(path, `只认 ${all.join(" / ")}`));
-function arrayOf<T>(v: unknown, path: string, max: number, each: (x: unknown, p: string) => T): T[] {
-  if (!Array.isArray(v) || v.length > max) return no(path, `要是不超过 ${max} 项的数组`);
-  return v.map((x, i) => each(x, `${path}[${i}]`));
-}
-const version = (r: Record<string, unknown>): 1 => (r.v === BODY_V ? BODY_V : no("v", `只认版本 ${BODY_V}`));
-const MAX_TS = 8.64e15;
-
-const ORDER_ID = /^[\w.:-]{1,200}$/;
-const TASK_ID = /^[\w.-]{1,64}$/;
 const BOOT = /^[A-Za-z0-9_-]{8,64}$/;
-const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
-const SHA40 = /^[0-9a-f]{40}$/;
 const CODE = /^[a-z_]{1,40}$/;
 const ASK_ID = /^[\w:-]{1,100}$/;
 
@@ -116,7 +86,7 @@ function quotaOf(v: unknown): HelloQuota {
 function parseHello(raw: unknown): HelloRequest {
   const r = fields(raw, "$", ["v", "proto", "boot", "seq", "grant", "slots", "paused"], ["quota"]);
   const p = r.paused === null ? null : fields(r.paused, "paused", ["reason", "until"]);
-  return { v: version(r), proto: whole(r.proto, "proto", LEND_PROTO, 99), boot: pattern(r.boot, "boot", BOOT), seq: whole(r.seq, "seq", 0, MAX_TS),
+  return { v: version(r), proto: whole(r.proto, "proto", 2, 99), boot: pattern(r.boot, "boot", BOOT), seq: whole(r.seq, "seq", 0, MAX_TS),
     grant: grantOf(r.grant), slots: slotsOf(r.slots), paused: p && { reason: pattern(p.reason, "paused.reason", CODE), until: whole(p.until, "paused.until", 0, MAX_TS) },
     ...(r.quota === undefined ? {} : { quota: quotaOf(r.quota) }) };
 }
@@ -145,40 +115,16 @@ function parseBeat(raw: unknown): BeatRequest {
 
 /** The question and options follow the local ask tool's limits (order-wire parseAskWire); gen pins the lease it is asked under. */
 function parseAsk(raw: unknown): AskRequest {
-  const r = fields(raw, "$", ["v", "orderId", "gen", "question", "options"]);
-  const w = parseAskWire({ v: version(r), orderId: r.orderId, question: r.question, options: r.options });
+  // files / reason（i28-ASK4 测试类扩围）可选：旧版出借方不带，照常解析；不升版本号
+  const r = fields(raw, "$", ["v", "orderId", "gen", "question", "options"], ["files", "reason"]);
+  const scope = Object.fromEntries((["files", "reason"] as const).filter((k) => k in r).map((k) => [k, r[k]]));
+  const w = parseAskWire({ v: version(r), orderId: r.orderId, question: r.question, options: r.options, ...scope });
   if (!w.ok) return no("ask", w.error);
-  return { v: BODY_V, orderId: w.value.orderId, gen: whole(r.gen, "gen", 1, 1e9), question: w.value.question, options: w.value.options };
-}
-
-function summaryOf(v: unknown, path: string): OfferSummary {
-  const s = fields(v, path, ["orderId", "taskId", "step", "family", "repo", "pr", "head", "round", "specRev", "offeredAt"]);
-  return { orderId: pattern(s.orderId, `${path}.orderId`, ORDER_ID), taskId: pattern(s.taskId, `${path}.taskId`, TASK_ID),
-    step: pick(s.step, `${path}.step`, ["review", "write", "fix"] as const), family: pick(s.family, `${path}.family`, LEND_FAMILIES),
-    repo: pattern(s.repo, `${path}.repo`, REPO), pr: s.pr === null ? null : whole(s.pr, `${path}.pr`, 1, 1e9), head: pattern(s.head, `${path}.head`, SHA40),
-    round: whole(s.round, `${path}.round`, 0, 1e6), specRev: whole(s.specRev, `${path}.specRev`, 0, 1e6), offeredAt: whole(s.offeredAt, `${path}.offeredAt`, 0, MAX_TS) };
-}
-
-function parseOffer(raw: unknown): OfferRequest {
-  const r = fields(raw, "$", ["v", "proto", "orders"]);
-  const orders = arrayOf(r.orders, "orders", OFFER_MAX, summaryOf);
-  if (!orders.length) no("orders", "不能是空的");
-  if (new Set(orders.map((o) => o.orderId)).size !== orders.length) no("orders", "同一单出现两次");
-  return { v: version(r), proto: whole(r.proto, "proto", LEND_PROTO, 99), orders };
+  return { v: BODY_V, orderId: w.value.orderId, gen: whole(r.gen, "gen", 1, 1e9), question: w.value.question, options: w.value.options, ...askScopeExtra(w.value) };
 }
 
 const REQUESTS = { hello: parseHello, beat: parseBeat, ask: parseAsk, offer: parseOffer } as const;
 type Requests = { hello: HelloRequest; beat: BeatRequest; ask: AskRequest; offer: OfferRequest };
-
-type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
-function guard<T>(fn: () => T): Parsed<T> {
-  try {
-    return { ok: true, value: fn() };
-  } catch (e) {
-    if (e instanceof V2Error) return { ok: false, error: e.message };
-    throw e;
-  }
-}
 
 export const parseV2Request = <E extends LendV2Endpoint>(endpoint: E, raw: unknown): Parsed<Requests[E]> =>
   guard(() => REQUESTS[endpoint](raw) as Requests[E]);
@@ -220,7 +166,6 @@ export function parseV2Response<E extends LendV2Endpoint>(endpoint: E, raw: unkn
   });
 }
 
-/** The bodies this side sends: A's hello answer and its offer push. */
+/** The bodies this side sends: A's hello answer and its offer push (offerBody, re-exported from lib/lend-offer-protocol.ts). */
 export const helloAnswer = (): HelloResponse => ({ proto: LEND_PROTO, helloMs: HELLO_MS, beatMs: BEAT_MS });
-export const offerBody = (orders: OfferSummary[]): OfferRequest => ({ v: BODY_V, proto: LEND_PROTO, orders: orders.slice(0, OFFER_MAX) });
 export const V2_BODY_VERSION = BODY_V;

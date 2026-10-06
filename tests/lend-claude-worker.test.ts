@@ -3,10 +3,10 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildLendClaudeCommand, claudeWorkerPlan, removeClaudeWorkerConfig, type ClaudeWorkerPlan } from "../src/lib/lend-claude-worker.js";
-import { receiveClaudeToken, serveClaudeToken } from "../src/lib/lend-claude-worker-auth.js";
 import { DEFAULT_DISALLOWED } from "../src/lib/claude-launch.js";
 import { profileRefusal, profileTools } from "../src/lib/lend-mcp-profile.js";
 import { acpHostVerdict } from "../src/lib/worker-liveness.js";
+import { RUNTIME_DIR, STATE_DIR } from "../src/lib/paths.js";
 import type { LaunchSpec } from "../src/lib/runtimes/types.js";
 
 const dirs: string[] = [];
@@ -16,27 +16,47 @@ const spec: LaunchSpec = { mode: "new", channelId: "channel-1", sessionId: "550e
   agentName: "agent-lend-test", callerCredFile: "/caller-once", bridgeUrl: "ws://localhost:4567" };
 const arg = (p: ClaudeWorkerPlan, flag: string) => p.argv[p.argv.indexOf(flag) + 1];
 
-test("干净 argv/env：独立 HOME/config、strict MCP、空 settings sources、沿用权限护栏；不继承 owner 设置", () => {
-  const p = claudeWorkerPlan(spec, "/private/run", "/auth.sock", { PATH: "/bin", HOME: "/owner", GH_TOKEN: "gh-secret", CODEX_HOME: "/codex",
-    CLAUDE_CONFIG_DIR: "/owner/.claude", CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret", ANTHROPIC_API_KEY: "api-secret", HTTP_PROXY: "proxy" }, "/bin/claude");
-  expect(p.env).toMatchObject({ HOME: "/private/run/home", CLAUDE_CONFIG_DIR: "/private/run/config", CLAUDESTRA_MCP_PROFILE: "lend", CLAUDESTRA_LEND_WORKER: "1" });
+test("本机登录口径：HOME / CLAUDE_CONFIG_DIR 照出借方原值，不带 OAuth token / API key / 代理；strict MCP、空 settings sources、沿用权限护栏", () => {
+  const p = claudeWorkerPlan(spec, "/private/run", { PATH: "/bin", HOME: "/owner", GH_TOKEN: "gh-secret", CODEX_HOME: "/codex",
+    CLAUDE_CONFIG_DIR: "/owner/.claude-alt", CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret", ANTHROPIC_API_KEY: "api-secret", HTTP_PROXY: "proxy" }, "/bin/claude");
+  expect(p.env).toMatchObject({ HOME: "/owner", CLAUDE_CONFIG_DIR: "/owner/.claude-alt", CLAUDESTRA_MCP_PROFILE: "lend", CLAUDESTRA_LEND_WORKER: "1",
+    ENABLE_CLAUDEAI_MCP_SERVERS: "false" });
   for (const key of ["GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "HTTP_PROXY", "CODEX_HOME"]) expect(p.env[key]).toBeUndefined();
+  expect(JSON.stringify(p)).not.toMatch(/gh-secret|oauth-secret|api-secret|\/codex/);
   expect(p.argv).toContain("--strict-mcp-config");
   expect(p.argv).toContain("--dangerously-skip-permissions");
   expect(arg(p, "--setting-sources")).toBe("");
   expect(arg(p, "--disallowedTools")).toBe(DEFAULT_DISALLOWED.join(" "));
-  expect(JSON.parse(arg(p, "--settings"))).toMatchObject({ disableAllHooks: true, autoMemoryEnabled: false,
-    claudeMdExcludes: expect.arrayContaining(["/work/CLAUDE.md", "/work/.claude/**", "/AGENTS.md"]) });
-  expect(JSON.stringify(p)).not.toMatch(/gh-secret|oauth-secret|api-secret|\/owner|\/codex/);
-  const strict = claudeWorkerPlan({ ...spec, permissionMode: "plan", extras: { disallowedPreset: "strict" } }, "/run", "/a", {}, "/claude");
+  expect(arg(p, "--append-system-prompt")).toContain("一次性出借 worker agent-lend-test");
+  const settings = JSON.parse(arg(p, "--settings"));
+  expect(settings).toMatchObject({ disableAllHooks: true, autoMemoryEnabled: false });
+  // 祖先目录与用户级（默认配置目录、CLAUDE_CONFIG_DIR）的 CLAUDE.md / rules 都排除；clone 自己不在排除表里
+  expect(settings.claudeMdExcludes).toEqual(expect.arrayContaining(["/work/CLAUDE.md", "/work/.claude/**", "/AGENTS.md",
+    "/owner/.claude/CLAUDE.md", "/owner/.claude/rules/**", "/owner/.claude-alt/CLAUDE.md", "/owner/.claude-alt/rules/**"]));
+  expect(settings.claudeMdExcludes).not.toContain("/work/clone/CLAUDE.md");
+  const plain = claudeWorkerPlan(spec, "/run", { HOME: "/owner" }, "/claude");
+  expect(plain.env.HOME).toBe("/owner");
+  expect("CLAUDE_CONFIG_DIR" in plain.env).toBe(false);
+  const strict = claudeWorkerPlan({ ...spec, permissionMode: "plan", extras: { disallowedPreset: "strict" } }, "/run", {}, "/claude");
   expect(arg(strict, "--permission-mode")).toBe("plan");
   expect(strict.argv).not.toContain("--dangerously-skip-permissions");
   expect(strict.argv).not.toContain("--allow-dangerously-skip-permissions");
   expect(arg(strict, "--disallowedTools")).toContain("Bash(sudo:*)");
 });
 
-test("MCP 只有 lend 服务，env -i 隔断 OAuth；列表和调用同样 fail closed", () => {
-  const p = claudeWorkerPlan(spec, "/run", "/auth", {}, "/claude");
+test("worker 本体（Bash 继承它）的状态 / 运行目录是代次目录下的专属目录、不是生产；只有 MCP（channel-server）那一路是生产目录", () => {
+  for (const base of [{ HOME: "/owner" }, { HOME: "/owner", CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: RUNTIME_DIR }]) {
+    const p = claudeWorkerPlan(spec, "/run-x", base, "/claude");
+    expect(p.env.CLAUDESTRA_STATE_DIR).not.toBe(STATE_DIR);
+    expect(p.env).toMatchObject({ CLAUDESTRA_STATE_DIR: "/run-x/state", CLAUDESTRA_RUNTIME_DIR: "/run-x/runtime" });
+    const m = Object.values(JSON.parse(arg(p, "--mcp-config")).mcpServers as Record<string, { args: string[] }>)[0]!;
+    const mcpEnv = Object.fromEntries(m.args.filter((a) => /^[A-Z_]+=/.test(a)).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+    expect(mcpEnv).toMatchObject({ CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: RUNTIME_DIR });
+  }
+});
+
+test("MCP 只有 lend 服务，env -i 隔断凭据；列表和调用同样 fail closed", () => {
+  const p = claudeWorkerPlan(spec, "/run", { CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret" }, "/claude");
   const servers = JSON.parse(arg(p, "--mcp-config")).mcpServers as Record<string, { command: string; args: string[] }>;
   expect(Object.keys(servers)).toHaveLength(1);
   const m = Object.values(servers)[0];
@@ -57,13 +77,14 @@ test("MCP 只有 lend 服务，env -i 隔断 OAuth；列表和调用同样 fail 
   expect(profileRefusal("take_review", env)?.isError).toBe(true);
 });
 
-test("启动代次不复制 HOME 文件；token 仅一次 socket 交接，不落文件/命令行；每代单独目录", async () => {
+test("不配 setup-token 也能生成启动命令；代次目录只有启动计划和 cwd 记录，不建 HOME / 配置目录、不碰出借方文件", () => {
   const root = temp();
   const owner = join(root, "owner");
   mkdirSync(join(owner, ".claude"), { recursive: true });
-  for (const file of ["CLAUDE.md", "settings.json", "memory.md", "plugins.json", "skills.json"]) writeFileSync(join(owner, ".claude", file), "owner-private");
-  const base = { HOME: owner, PATH: "/bin", CLAUDE_CODE_OAUTH_TOKEN: "fixture-oauth-only" };
-  const options = { base, root: join(root, "configs"), bin: "/fake/claude", authRoot: join(root, "auth") };
+  writeFileSync(join(owner, ".claude", "CLAUDE.md"), "owner-private");
+  // 旧版留下的 token 文件 / 环境变量都不再读：命令和计划里都不出现
+  const base = { HOME: owner, PATH: "/bin", CLAUDE_CODE_OAUTH_TOKEN: "legacy-oauth-ignored" };
+  const options = { base, root: join(root, "configs"), bin: "/fake/claude" };
   const commands = [buildLendClaudeCommand(spec, options), buildLendClaudeCommand(spec, options)];
   expect(commands[0]).not.toBe(commands[1]);
   expect(commands.join("\n")).not.toContain(base.CLAUDE_CODE_OAUTH_TOKEN);
@@ -71,28 +92,24 @@ test("启动代次不复制 HOME 文件；token 仅一次 socket 交接，不落
   const parent = join(options.root, spec.agentName!);
   for (const run of readdirSync(parent)) {
     const dir = join(parent, run);
+    expect(readdirSync(dir).sort()).toEqual(["launch.json", "run.json"]);
     const raw = readFileSync(join(dir, "launch.json"), "utf8");
     const p = JSON.parse(raw) as ClaudeWorkerPlan;
     expect(raw).not.toContain(base.CLAUDE_CODE_OAUTH_TOKEN);
+    expect(p.env.HOME).toBe(owner);
+    expect("authSocket" in p).toBe(false);
+    expect(JSON.parse(readFileSync(join(dir, "run.json"), "utf8"))).toEqual({ cwd: spec.cwd, sessions: join(owner, ".claude", "projects", "-work-clone") });
     expect(lstatSync(join(dir, "launch.json")).mode & 0o777).toBe(0o600);
     expect(lstatSync(dir).mode & 0o777).toBe(0o700);
-    expect(readdirSync(p.env.HOME)).toEqual([]);
-    expect(readdirSync(p.env.CLAUDE_CONFIG_DIR)).toEqual([".claude.json"]);
-    expect(readFileSync(join(p.env.CLAUDE_CONFIG_DIR, ".claude.json"), "utf8")).not.toContain("owner-private");
-    expect(await receiveClaudeToken(p.authSocket)).toBe(base.CLAUDE_CODE_OAUTH_TOKEN);
-    await expect(receiveClaudeToken(p.authSocket)).rejects.toThrow("凭据交接失败");
   }
   removeClaudeWorkerConfig(spec.agentName!, options.root);
   expect(existsSync(parent)).toBe(false);
+  expect(readdirSync(join(owner, ".claude"))).toEqual(["CLAUDE.md"]);
   expect(readFileSync(join(owner, ".claude", "CLAUDE.md"), "utf8")).toBe("owner-private");
-  expect(() => buildLendClaudeCommand(spec, { ...options, base: { HOME: owner } })).toThrow("CLAUDE_CODE_OAUTH_TOKEN");
 });
 
-test("socket 过期不可再领；清理拒绝指向 owner 的软链", async () => {
+test("清理拒绝指向 owner 的软链", () => {
   const root = temp();
-  const auth = serveClaudeToken("fake", root, 5);
-  await Bun.sleep(20);
-  await expect(receiveClaudeToken(auth.path)).rejects.toThrow("凭据交接失败");
   const owner = join(root, "owner"); mkdirSync(owner);
   symlinkSync(owner, join(root, spec.agentName!));
   expect(() => removeClaudeWorkerConfig(spec.agentName!, root)).toThrow("软链");

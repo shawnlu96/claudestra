@@ -1,3 +1,4 @@
+import { projectAgentPolicy } from "./scheduler-agent-pool-context.js";
 import { convergenceSnapshot } from "./fix-strategy-plan.js";
 /**
  * Auto cards: the planner sees only the engine's own facts. Sessions are the ledger bindings (never a registry guess),
@@ -39,6 +40,9 @@ function reviewProofs(db: Database, events: readonly LedgerEvent[], intents: rea
 }
 
 export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts, exclude?: string): PlannerSnapshot {
+  const policy = opts.pool?.remote.agents ? opts.pool.remote : projectAgentPolicy(task.project);
+  if (policy) opts = { ...opts, maxWorkers: policy.agents!.claude + policy.agents!.codex,
+    pool: { remote: policy, borrow: opts.pool?.borrow ?? [] } };
   const base = observeSnapshot(db, task, opts);
   const bound = taskWorkerRefs(db, task.id);
   const intents = base.intents.filter((i) => !i.id.startsWith("pm-dispatch:") && i.id !== exclude);
@@ -47,7 +51,8 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
   // A head a peer delivered was written in that order's family: review placement, reviewer session and gates go across from it.
   const wrote = remoteHeadFamily(db, task);
   const workflow = wrote && base.workflow ? { ...base.workflow, authorFamily: wrote } : base.workflow;
-  return convergenceSnapshot({ ...base, workflow, author: bound.author, reviewer, intents, reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
+  return convergenceSnapshot({ ...base, workflow, remoteAuthorFamily: wrote, author: bound.author, reviewer, intents,
+    reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
     pool: opts.pool ? poolFacts(db, task, { ...opts.pool, now: opts.now ?? Date.now() }) : null, strayPoolOrders: strayPoolOrders(db, task.id).map((o) => o.orderId),
     fixDiff: fixDiffOf(task, base.events) }); // 第 3 轮起的修复 diff（review-converge-scope.ts）
 }

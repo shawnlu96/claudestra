@@ -1,3 +1,5 @@
+import { poolBorrow } from "./scheduler-agent-pool-context.js";
+import { projectAgentPolicy } from "./scheduler-agent-pool-context.js";
 /**
  * `ledger scheduler-pool <intent>` (i28-R9): one BEGIN IMMEDIATE step for a pool intent (a review, or since i28-W9 a build /
  * fix dispatch, addressed to `peer:<name>`). First call: re-plan with the same pool facts inside the transaction (local
@@ -26,6 +28,10 @@ import { orderFamily } from "./scheduler-placement-plan.js";
 import { planScheduler } from "./scheduler-plan.js";
 import { poolLinkKey, poolOrderId, POOL_TIMEOUT_REASON, prCoordinates, strayPoolOrders } from "./scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
+import { relayOffer } from "./lend-fix-reassign-start.js";
+import { adoptFixStart } from "./lend-fix-start.js";
+import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
+import { gateRefusalFacts } from "./scheduler-dispatch-block.js";
 
 export interface PoolStepInput {
   intentId: string;
@@ -54,7 +60,8 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   const refuse = (why: string): PoolStepResult =>
     ({ outcome: "refused", orderId: null, text: why, intent: settleIntent(db, ctx, { id: intent.id, from: "pending", to: "cancelled", receipt: `未投递：${why}` }) });
   if (intent.status !== "pending") throw new LedgerError("conflict", `挂池意图是 ${intent.status}，却没有出借单`);
-  const task = mustTask(db, intent.taskId);
+  let task = mustTask(db, intent.taskId);
+  input = { ...input, remote: projectAgentPolicy(task.project) ?? input.remote };
   const workflow = getWorkflow(db, task.id);
   const step = stepOfStage(task.stage);
   const role = step === "review" ? "review" : step;
@@ -74,10 +81,13 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   const family = orderFamily(snap, peer, role);
   if (!family) return refuse(`${peer} 已没有能接这一单的家族槽`);
   let order: LendOrder;
+  task = adoptFixStart(db, ctx, task, write); // i28-FB1：远端是卡上 head 的后代就换起点，否则报警照旧
   try {
-    order = offerLendCore(db, ctx, { taskId: task.id, peer, family, repo, pr: role === "write" ? null : coords?.pr ?? null, spec: input.spec,
-      borrow: input.borrow.find((b) => b.peer === peer) ?? null, ...(role !== "review" && write ? { write } : {}) });
+    order = relayOffer(db, ctx, task, peer, write, (relay) => offerLendCore(db, ctx, { taskId: task.id, peer, family, repo, pr: role === "write" || relay ? null : coords?.pr ?? null,
+      spec: input.spec!, borrow: poolBorrow(input.borrow.find((b) => b.peer === peer) ?? null, !!input.remote.agents), ...(role !== "review" && write ? { write } : {}) }));
   } catch (e) {
+    // One alarm per offer; its facts scope the standing block and say which material was refused (scheduler-dispatch-block.ts).
+    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message, gateRefusalFacts(mustTask(db, task.id), snap.events, intent.id));
     if (e instanceof LedgerError) return refuse(`出单被拒：${e.message}`);
     throw e;
   }

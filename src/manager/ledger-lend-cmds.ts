@@ -11,22 +11,28 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { keyFingerprint, signPurpose } from "../lib/instance-key.js";
-import { readLend, type BorrowEntry, type LendFamily, REPO_RE } from "../lib/lend-config.js";
+import { readLend, type BorrowEntry, REPO_RE } from "../lib/lend-config.js";
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { remoteHeadAt, stepOfStage } from "../lib/lend-git.js";
 import { writeMaterials } from "../lib/lend-write-materials.js";
+import { materialsPolicyPort } from "../lib/recovery-materials-wiring.js";
+// macro: the reader location is fixed when Bun transpiles / bundles this entry (a bundle keeps the source tree's src/lib path)
+import { cfgReaderPath } from "../lib/recovery-materials-wiring.js" with { type: "macro" };
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { isDeliverRequest, LEND_VERSION, parseLendRequest, type LendEndpoint } from "../lib/lend-wire.js";
-import { cancelLend, claimLend, leaseLend, listLendOrders, offerLend, pollLend, reclaimLend, refuse, reofferLend, sweepLend, type LendNotice,
+import { cancelLend, claimLend, leaseLend, listLendOrders, pollLend, reclaimLend, refuse, sweepLend, type LendNotice,
   type OfferInput } from "../lib/ledger-lend.js";
 
 import { heldLease } from "../lib/ledger-lend-lease.js";
+import { cliOfferFamily, offerWithAuthorFamily, refreshCliOffer } from "../lib/lend-cli-author-family.js";
 import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
 import { readPeers } from "../lib/peers.js";
 import { runBounded } from "../lib/run-bounded.js";
-import { getMeta, LedgerError } from "../lib/ledger-store.js";
+import { getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
+import { scanRelays, settleRelay, takeRelays, type RelaySend } from "../lib/ledger-lend-relay.js";
+import { bridgeSend } from "../lib/bridge-client.js";
 import { appendEvent } from "../lib/ledger-write.js";
 import type { LedgerTask } from "../lib/ledger-stages.js";
 import { statePath } from "../lib/paths.js";
@@ -48,6 +54,12 @@ export interface LendCliDeps {
   branchState?: (repo: string, branch: string) => Promise<BranchState>;
   /** 槽池放置要的项目调度策略（i28-W5）；不给 = 读真 scheduler.json */
   schedulerPolicy?: (project: string) => { remote?: RemotePolicy; maxActiveWorkers: number } | null;
+  /** lend-relay（i28-RS1）：经 send_to_agent 通道发一段（本机 agent 名或 `<worker>@<peer>`）；不给 = 真 bridge route_to_agent 单发 */
+  relay?: (target: string, text: string) => Promise<RelaySend>;
+  /** lend-relay：卡此刻的规格原文；不给 = 读本机规格文件 */
+  readSpec?: (task: LedgerTask) => string | null;
+  /** 修复单材料的 CFG recoveryPolicy 模块位置（dispatch-recovery-MATW，单测用）；不给 = CFG 的正式位置（macro 在转译 / 打包时定下的 src/lib），没装就 observe */
+  recoveryReader?: URL;
 }
 
 function realLendDeps(c: LedgerCli): LendCliDeps {
@@ -112,24 +124,23 @@ function offerPeer(c: LedgerCli, task: LedgerTask): { peer: string; repo: string
 }
 
 function offerInput(c: LedgerCli, task: LedgerTask, borrow: BorrowEntry | null): OfferInput {
-  const { family = "codex" } = c.p.flags;
   const { peer, repo } = offerPeer(c, task);
-  // 表和接口按两家留了位置，这一切片只借 Codex（T93 规格；r1 P2-4）
-  if (family !== "codex") throw new LedgerError("invalid", `这一版只借 Codex，--family 只能是 codex（不是 ${family}）`);
+  const family = cliOfferFamily(c.db, task, c.p.flags.family);
   const prFlag = c.p.flags.pr ?? task.pr?.match(/(\d+)\/?$/)?.[1];
   const pr = prFlag === undefined ? null : Number(prFlag);
   if (pr !== null && (!Number.isInteger(pr) || pr < 1)) throw new LedgerError("invalid", "--pr 要是 PR 编号");
   const spec = readTextSoft(specPathFor(task, getMeta(c.db, task.project).docsDir));
   if (!spec) throw new LedgerError("invalid", `找不到 ${task.id} 的规格卡原文（对方读不到本机文件，要内联进派单）`);
-  return { taskId: task.id, peer, family: family as LendFamily, repo, pr: stepOfStage(task.stage) === "write" ? null : pr, spec, borrow };
+  return { taskId: task.id, peer, family, repo, pr: stepOfStage(task.stage) === "write" ? null : pr, spec, borrow };
 }
 
 /** 写单材料（lib/lend-write-materials.ts，调度服务挂池同一份）：查远端 / 读文件失败一律拒挂，不带半张单出去 */
-async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<OfferInput> {
+async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Promise<{ input: OfferInput; materialsDiag?: string }> {
   const step = stepOfStage(task.stage);
-  if (step !== "write" && step !== "fix") return input;
-  const write = await writeMaterials(c.db, task, { peer: input.peer, repo: input.repo, base: c.p.flags.base ?? "main" }, writeDeps(c));
-  return write ? { ...input, write } : input;
+  if (step !== "write" && step !== "fix") return { input };
+  const { policy, diag } = step === "fix" ? await materialsPolicyPort(c.deps.lend?.recoveryReader ?? cfgReaderPath()) : { policy: undefined, diag: null };
+  const write = await writeMaterials(c.db, task, { peer: input.peer, repo: input.repo, base: c.p.flags.base ?? "main" }, writeDeps(c), policy);
+  return { input: write ? { ...input, write } : input, ...(diag ? { materialsDiag: diag } : {}) };
 }
 
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
@@ -137,12 +148,13 @@ async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
   await ensureReviewScope(c.db, task.id); // 规格外文件在挂池事务外先登记，事务里的审查单只读（i28-ASK2）
   const peer = offerPeer(c, task).peer;
-  const input = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
+  const { input, materialsDiag } = await withWrite(c, task, offerInput(c, task, (await borrowOf(c, peer))(task.project)));
   const reason = c.p.flags.reason ?? "";
   if (again && !reason.trim()) throw new LedgerError("invalid", "重挂要写 --reason（核对了什么）");
-  const o = again ? reofferLend(c.db, c.ctx(), { ...input, reason }) : offerLend(c.db, c.ctx(), input);
+  const fresh = await refreshCliOffer(input, task.project, lendDeps(c));
+  const o = offerWithAuthorFamily(c.db, c.ctx(), task, fresh, again ? reason : undefined);
   return { ok: true, orderId: o.orderId, step: o.step, peer: o.peer, family: o.family, sha256: o.sha256, supersedes: o.supersedes,
-    ...(o.branch ? { branch: o.branch, base: o.base } : {}) };
+    ...(o.branch ? { branch: o.branch, base: o.base } : {}), ...(materialsDiag ? { materialsDiag } : {}) };
 }
 
 function reclaim(c: LedgerCli): Result {
@@ -214,6 +226,38 @@ async function sweep(c: LedgerCli): Promise<Result> {
   return { ok: true, expired: notices.length, notified: await tell(c, notices) };
 }
 
+/** sent=false = 请求没出这个进程或 bridge 明确拒了（可重试）；sent=true 却没回执 = 可能已送到（不重发） */
+async function bridgeRelay(target: string, text: string): Promise<RelaySend> {
+  const r = await bridgeSend({ type: "route_to_agent", targetName: target, text, fromName: "lend", oneShot: true, lendSupplement: target.includes("@") }, { timeoutMs: 30_000 });
+  if (!r.ok) return { ok: false, error: r.error, maybeSent: r.sent && !r.rejected };
+  if (r.result?.ok === false) return r.result as RelaySend;
+  if (target.includes("@") && r.result?.remoteAccepted !== true) return { ok: false, error: "bridge 未返回远端接收回执", maybeSent: true };
+  return { ok: true };
+}
+
+/**
+ * i28-RS1（lib/ledger-lend-relay.ts）：持单期间的规格追加 / 复述答复排队（过外发闸，拒了告诉 PM），再逐段经 send_to_agent 发给持单的出借
+ * worker；开工单挂出去时给本机复述会话的固定说明也走这里。bridge 定时调（owner 身份）。
+ */
+async function relay(c: LedgerCli): Promise<Result> {
+  if (c.deps.actor !== "owner") throw new LedgerError("forbidden", "lend-relay 只给 bridge 用（以 owner 身份调）");
+  const d = lendDeps(c);
+  const readSpec = d.readSpec ?? ((t: LedgerTask) => readTextSoft(specPathFor(t, getMeta(c.db, t.project).docsDir)));
+  let notified = await tell(c, scanRelays(c.db, c.ctx(), readSpec, (id) => getTask(c.db, id)));
+  const sent: string[] = [];
+  for (const row of takeRelays(c.db, c.deps.now())) {
+    let r: RelaySend;
+    try {
+      r = await (d.relay ?? bridgeRelay)(row.target, row.text);
+    } catch (e) {
+      r = { ok: false, error: (e as Error).message, maybeSent: true };
+    }
+    if (r.ok) sent.push(row.key);
+    notified += await tell(c, settleRelay(c.db, c.ctx(), row.key, r));
+  }
+  return { ok: true, sent, notified };
+}
+
 const FP_RE = /^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/;
 
 /** 对方公钥刚钉住：借它算力的每个项目记一条项目级事件（同一把钥匙只记一次）；不借给我们的 peer 不记 */
@@ -237,11 +281,12 @@ const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
 export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-offer": {
     valued: OFFER_FLAGS,
-    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方）",
+    usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex|claude] [--base main]（把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；" +
+      "--family 缺省 codex，claude 写单须有作者记录及有效 v3 授权；审查须跨模型，security 卡只在本机审）",
     run: (c) => offer(c, false),
   },
   "lend-reoffer": {
-    valued: OFFER_FLAGS, usage: "lend-reoffer <task> --peer <名> --repo <owner/name> --reason <核对了什么>（撤掉未结的单、换新单号重挂）",
+    valued: OFFER_FLAGS, usage: "lend-reoffer <task> --peer <名> --repo <owner/name> [--family codex|claude] --reason <核对了什么>（撤掉未结的单、换新单号重挂）",
     run: (c) => offer(c, true),
   },
   "lend-cancel": { valued: ["reason", "project"], usage: "lend-cancel <task> --reason <原因>（撤掉未结的出借单，之后到的结论一律不入账）", run: cancel },
@@ -253,5 +298,6 @@ export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-write": bridgeSpec("result", "对方交审查结论 / 写单交付，核对完才入账"),
   "lend-pin": { valued: [], usage: "lend-pin -- <peer> <指纹> first|repin（bridge 专用：对方公钥刚钉住，记台账）", run: pinned },
   "lend-sweep": { valued: [], usage: "lend-sweep（bridge 定时调：过期租约结成 unknown 并通知 PM，推送超时的池单撤回）", run: sweep },
+  "lend-relay": { valued: [], usage: "lend-relay（bridge 定时调：持单期间的规格追加 / 复述答复转给出借 worker，复述会话的借出说明）", run: relay },
   ...lendPeerCmds({ deps: lendDeps, tell }),
 };

@@ -40,7 +40,9 @@ function fixture(runtime?: string, n = 0) {
   writeFileSync(registryPath, JSON.stringify({ agents }));
   const setRuntime = (runtime: "claude" | "codex") => setLocalAuthorRuntime(db, { actor: "owner", now: Date.now() },
     { project: "p", runtime, reason: "配置测试选择作者运行时" }, { path: configPath });
-  return { db, setRuntime, configPath, projectsPath, registryPath, lockPath, doc, dir, codexQuota: async () => unknownQuota("fixture") };
+  for (let i = 0; i < n; i++) db.query(`INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt)
+    VALUES (?, ?, 'busy', 'code', 'build', ?, 0, 0)`).run(`busy-${i}`, `p${i}`, `agent-${i}`);
+  return { db, ledgerPath, setRuntime, configPath, projectsPath, registryPath, lockPath, doc, dir, codexQuota: async () => unknownQuota("fixture") };
 }
 const p = { project: "p", taskId: "T", peer: null, feature: { id: "F" }, key: "one" } as StartPlan;
 const success: StartOutcome = { ok: true, taskId: "T", placement: "local", branch: "b", steps: [], reconciled: [] };
@@ -141,7 +143,7 @@ test("actual start_node steps create ACP Codex and persist the Codex workflow fl
       repo: f.dir, worktree: join(f.dir, "worktree"), agentName: "task-t", agent: "agent-task-t", fileGlobs: ["src/x.ts"],
       specPath: join(f.dir, "spec.md"), specText: null, promptPath: join(f.dir, "prompt.md"), promptText: "work", purpose: "T" } as StartPlan;
     const io: StepIO = {
-      db: () => db, manager: async (args) => { calls.push(args); return { ok: true }; },
+      db: () => db, manager: async (args) => { calls.push(args); return args[0] === "create" ? { ok: true, agent: `agent-${args[1]}` } : { ok: true }; },
       git: async (_cwd, args) => ({ ok: true, out: args[0] === "rev-parse" && args.includes("main^{commit}") ? "a".repeat(40) : "" }),
       exists: () => false, read: () => null, write: () => {}, remove: () => {}, symlink: () => {}, agentExists: () => false, attempt: "probe",
     };
@@ -301,6 +303,7 @@ async function realQueuedFixture() {
         const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
         reg.agents[`agent-${args[1]}`] = { runtime: "codex", transport: "acp", status: "active", sessionId: "new" };
         writeFileSync(f.registryPath, JSON.stringify(reg));
+        return { ok: true, agent: `agent-${args[1]}` };
       }
       return { ok: true };
     } };

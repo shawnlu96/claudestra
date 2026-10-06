@@ -8,31 +8,20 @@
  */
 import { updatePeerCooldownHello } from "./lend-peer-cooldown.js";
 import type { Database } from "bun:sqlite";
-import { LEND_FAMILIES, type LendFamily } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import type { OfferSummary } from "./lend-wire.js";
-import { HELLO_FRESH_MS, type BeatAnswer, type BeatOrder, type BeatRequest, type Grant, type HelloRequest, type OfferResponse, type Paused, type Slots } from "./lend-wire-v2.js";
+import { HELLO_FRESH_MS, type BeatAnswer, type BeatOrder, type BeatRequest, type HelloRequest, type OfferResponse } from "./lend-wire-v2.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getLendOrder, leaseLend, withdrawPooledLend, type LendNotice, type LendOrder } from "./ledger-lend.js";
 import { queueRefusal, queuedPushReady } from "./ledger-lend-queue.js";
 import { ackPushed } from "./ledger-lend-peers-ttl.js";
 import { phaseSince } from "./lend-pr-takeover.js";
 import { getWorkflow } from "./ledger-scheduler.js";
-import { LEND_LIVE } from "./ledger-lend-schema.js";
 import { tx } from "./ledger-tx.js";
 import { sanitizeForeign } from "./order-wire-render.js";
-
-export interface LendPeer { peer: string; fp: string | null; proto: number; boot: string; seq: number; grant: Grant | null; slots: Slots; paused: Paused | null; helloAt: number }
-
-const hasPeersTable = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_peers'").get();
-
-export function getLendPeer(db: Database, peer: string): LendPeer | null {
-  if (!hasPeersTable(db)) return null;
-  const r = db.query("SELECT * FROM lend_peers WHERE peer = ?").get(peer) as Record<string, unknown> | null;
-  if (!r) return null;
-  const json = <T>(v: unknown): T | null => (typeof v === "string" ? JSON.parse(v) as T : null);
-  return { ...(r as unknown as LendPeer), grant: json<Grant>(r.grant), slots: json<Slots>(r.slots) as Slots, paused: json<Paused>(r.paused) };
-}
+import { convergenceCancelled } from "./lend-reclaim-scheduler-ack.js";
+import { getLendPeer, hasPeersTable, type LendPeer } from "./scheduler-placement-reservations.js";
+export { getLendPeer, peerCapacity, unifiedPeerCapacity, type LendPeer, type PeerCapacity, type UnifiedPeerCapacity } from "./scheduler-placement-reservations.js";
 
 /**
  * One hello. Within one boot of the lender the sequence must grow, so a delayed or replayed hello never rolls the grant back
@@ -47,40 +36,9 @@ export function recordHello(db: Database, peer: string, fp: string | null, req: 
       slots = excluded.slots, paused = excluded.paused, helloAt = excluded.helloAt`).run(
       peer, fp, req.proto, req.boot, req.seq, req.grant ? JSON.stringify(req.grant) : null, JSON.stringify(req.slots),
       req.paused ? JSON.stringify(req.paused) : null, now);
-    updatePeerCooldownHello(db, peer, req.paused, now);
+    updatePeerCooldownHello(db, peer, req.paused, now, req.quota);
     return { applied: true };
   });
-}
-
-export interface PeerCapacity { peer: string; proto: number; helloAt: number | null; open: number; slots: Record<LendFamily, number>; why: string | null }
-
-const zero = (): Record<LendFamily, number> => ({ codex: 0, claude: 0 });
-
-/** Orders A has out with this peer that still hold a place there (pooled, claimed, or stopped for PM). */
-const liveOrdersAt = (db: Database, peer: string): number =>
-  (db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN (${LEND_LIVE.map(() => "?").join(",")})`).get(peer, ...LEND_LIVE) as { n: number }).n;
-
-/** A family paused for its own quota stops only that family; any other pause stops the peer. */
-const pausedFamily = (p: Paused | null, f: LendFamily, now: number): boolean => !!p && p.until > now && (p.reason === `${f}_quota` || !p.reason.endsWith("_quota"));
-
-/**
- * What the scheduler may place on this peer per family now. Zero when there is no hello (proto 1), the hello is older than
- * HELLO_FRESH_MS, the grant is gone, expired or used up for today; otherwise the reported free slots, capped by the room
- * borrow.maxOpen leaves after A's own live orders there.
- */
-export function peerCapacity(db: Database, peer: string, maxOpen: number, now: number): PeerCapacity {
-  const p = getLendPeer(db, peer);
-  const open = liveOrdersAt(db, peer);
-  const base = { peer, proto: p?.proto ?? 1, helloAt: p?.helloAt ?? null, open, slots: zero() };
-  if (!p) return { ...base, why: "没有 hello（按 proto 1，只轮询）" };
-  if (now - p.helloAt > HELLO_FRESH_MS) return { ...base, why: `hello 超过 ${HELLO_FRESH_MS / 1000} 秒没更新` };
-  if (!p.grant) return { ...base, why: "对方没有授权（或已收回）" };
-  if (p.grant.until <= now) return { ...base, why: "对方的授权已到期" };
-  if (p.grant.ordersLeftToday <= 0) return { ...base, why: "对方今天的单数用完了" };
-  const room = Math.max(0, maxOpen - open);
-  const slots = zero();
-  for (const f of LEND_FAMILIES) slots[f] = pausedFamily(p.paused, f, now) ? 0 : Math.min(room, Math.max(0, p.slots[f].total - p.slots[f].busy));
-  return { ...base, slots, why: null };
 }
 
 /** A beat or ask says a revocation happened: the grant counts as gone until the lender's next hello says otherwise. */
@@ -108,6 +66,7 @@ const VERDICT_OF: Partial<Record<LendOrder["status"], BeatAnswer["verdict"]>> = 
 function heldOrder(db: Database, peer: string, b: Pick<BeatOrder, "orderId" | "gen">, now: number): LendOrder | BeatAnswer["verdict"] {
   const o = getLendOrder(db, b.orderId);
   if (!o || o.peer !== peer || !o.worker) return "not_found";
+  if (convergenceCancelled(db, peer, b.orderId, b.gen)) return "convergence_cancelled";
   if (o.status !== "claimed") return VERDICT_OF[o.status] ?? "not_found";
   if ((o.leaseUntil ?? 0) < now) return "lease_expired";
   return o.leaseGen === b.gen ? o : "stale_gen";

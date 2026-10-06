@@ -11,9 +11,10 @@ import {
   detectSessionIdlePrompt,
   parseChoicePrompt,
   parseModalOptions,
-  trustPromptMoves,
 } from "./tmux-helper.js";
 import { inputBox } from "./input-box.js";
+import { endsInModal } from "./pane-tail.js";
+import { looksLikeTrustPrompt } from "./trust-prompt.js";
 
 /**
  * pane 上是否有「可以安全自动按 Enter 确认」的 modal：parseModalOptions 几何识别（❯ 标记的选项菜单），再按负向黑名单排除必须人决定的——
@@ -26,6 +27,8 @@ export function isAutoConfirmableModal(
 ): boolean {
   // 弹窗会盖住输入框；输入框还在，画面上的「❯ 1.」就是草稿或对话内容，按 Enter 会把 owner 没打完的草稿提交掉
   if (inputBox(pane.replace(/\s+$/, "").split("\n"))) return false;
+  // 框后面还有 shell 提示符或别的输出 = 退出前留下的残留，不是活框
+  if (!endsInModal(pane)) return false;
   const modalOpts = parseModalOptions(pane);
   // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用
   const choice = modalOpts ? null : parseChoicePrompt(pane);
@@ -33,15 +36,17 @@ export function isAutoConfirmableModal(
   // 两个解析器都保证恰有 ❯ 高亮项，但显式再校验一次，防未来重构破坏不变量
   if (modalOpts && !modalOpts.some((o) => o.selected)) return false;
   if (choice && !choice.some((o) => o.selected)) return false;
+  // 高亮项是「退出」就绝不是可以代按的默认项（信任框 / Bypass 首启框都默认高亮 No, exit；半帧认不出是哪种框时也拦得住）
+  if ((modalOpts ?? choice)!.some((o) => o.selected && /\bexit\b/i.test(o.label))) return false;
   // 运行时权限弹窗（Do you want to edit / run / allow ...）必须用户决定
   if (detectRuntimePermissionPrompt(pane)) return false;
   // AskUserQuestion 是 agent 在问人：Enter 等于替人选了高亮的第 1 项
   if (parseAuqPane(pane)) return false;
   // session-idle 弹窗除非显式允许
   if (!opts.allowSessionIdle && detectSessionIdlePrompt(pane)) return false;
-  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。它由 trustPromptMoves
-  // 专门处理（先 Down 到 Yes 再 Enter），这里绝不能当普通弹窗自动 Enter
-  if (trustPromptMoves(pane) !== null) return false;
+  // 目录信任弹窗默认高亮「No, exit」——直接 Enter 等于退出。活框由 trustPromptMoves 专门处理（先挪到 Yes、确认挪到了再 Enter）；
+  // 半帧、退到 shell 后留在上方的残留同样一个键都不按（lib/trust-prompt.ts）
+  if (looksLikeTrustPrompt(pane)) return false;
   // Bypass 首启确认同样默认高亮「No, exit」，而且接受与否是用户自己的安全决定——
   // 任何自动化都不替用户按（setup 里征得同意后写 skipDangerousModePermissionPrompt）
   if (detectBypassConsentPrompt(pane)) return false;
