@@ -232,11 +232,17 @@ class Card {
     }
     if (ref.role === "reviewer" && intent.status === "pending") { // MODELX r4：正式派审前冻结材料快照，拒审接续只和它比；经台账写口（MODELXW）
       await (await import("./scheduler-model-wiring.js")).freezeReviewMaterials(this, intent, plan);
+      const late = await this.refusalLapse({ intent, plan });
+      if (late) { await this.settle(intent.id, "pending", "cancelled", `未投递：${late}`); return this.escalate(late, intent.id); }
     }
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
-    return this.fromDrive(await driveDispatch(this.ops(), w, ref, { ...order, delivery }));
+    const guarded = { ...w, submit: async (...args: Parameters<typeof w.submit>) => {
+      const late = ref.role === "reviewer" ? await this.refusalLapse({ intent, plan }) : null;
+      return late ? { status: "rejected" as const, route: w.route, reason: late } : w.submit(...args);
+    } };
+    return this.fromDrive(await driveDispatch(this.ops(), guarded, ref, { ...order, delivery }));
   }
 
   fromDrive(r: DriveOutcome): CardOutcome {

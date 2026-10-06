@@ -21,6 +21,7 @@ import { informKey, snapshotKey } from "../src/lib/scheduler-model-wiring.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { HOLD_OP, openRefusal } from "../src/lib/scheduler-review-swap.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -30,7 +31,8 @@ const MANAGER = resolve("src/manager.ts");
 let cleanup: (() => void)[] = [];
 afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
-async function setup(mode: "on" | "observe" = "on") {
+async function setup(mode: "on" | "observe" = "on", duringEnsure?: (f: ReturnType<typeof autoFixture>) => void,
+  beforeCli?: (command: string, f: ReturnType<typeof autoFixture>) => void) {
   const errors = spyOn(console, "error").mockImplementation(() => {});
   const f = autoFixture();
   const reader = new LedgerReader(join(f.dir, "ledger.sqlite"));
@@ -58,6 +60,7 @@ async function setup(mode: "on" | "observe" = "on") {
   /** The production write path: `bun src/manager.ts ledger <sub> …` as its own process, JSON out. */
   const child: AutoTickDeps["manager"] = async (...args) => {
     calls.push(args[1]);
+    beforeCli?.(args[1], f);
     const p = Bun.spawn([process.execPath, "--no-env-file", MANAGER, ...args], { env, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     await p.exited;
@@ -68,6 +71,7 @@ async function setup(mode: "on" | "observe" = "on") {
     registryPath: f.registryPath, active: () => {}, agents: async () => [], agent: async () => ({ ok: true }),
     ensure: async (task, family, _old, tag) => {
       tags.push(tag ?? "");
+      duringEnsure?.(f);
       const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
       const transport = family === "codex" ? "acp" as const : "tmux" as const;
       r.agents[EX] = { runtime: family === "codex" ? "codex" : "claude-code", sessionId: "s-ex", cwd: join(f.dir, "rv-ex"), ...(family === "codex" ? { transport } : {}) };
@@ -163,12 +167,12 @@ test("调度服务身份闸：别的身份跑四个子命令一律 forbidden", a
 
 /** N3 / PR706 (10-06 23:19): the review went out under the old code — no snapshot; the refusal's MODEL record hit the read-only
  * handle and the card fell back to manual; PM handed it back to auto under on. */
-async function legacyCard(s: Awaited<ReturnType<typeof setup>>) {
+async function legacyCard(s: Awaited<ReturnType<typeof setup>>, outcomeFails = true) {
   s.legacy.add("scheduler-review-snapshot");
   expect(await s.tick()).toMatchObject({ step: "sent" });
   const old = s.reviews().at(-1)!;
   expect(getEventByDedup(s.f.db, snapshotKey(old.id))).toBeNull();
-  s.legacy.add("scheduler-model-outcome");
+  if (outcomeFails) s.legacy.add("scheduler-model-outcome");
   approve(s.f);
   s.refuse(CYBER);
   expect(await s.tick()).toMatchObject({ step: "manual" });
@@ -177,6 +181,124 @@ async function legacyCard(s: Awaited<ReturnType<typeof setup>>) {
   expect(await s.f.cli("pm", "workflow-resume", "T1", "--rev", String(s.f.task().rev), "--workflow-rev", String(w.rev), "--reason", "监工：交回 auto"))
     .toMatchObject({ ok: true });
   return old;
+}
+
+test("legacy-no-snapshot: snapshot-only failure with recorded MODEL plan recovers through continuous readonly ticks", async () => {
+  const s = await setup();
+  const old = await legacyCard(s, false);
+  expect(s.ops("model_refusal_retry").length + s.ops("model_refusal_exempt").length).toBe(1);
+  expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+  s.refuse(null);
+  const next = [];
+  for (let i = 0; i < 3; i++) next.push(await s.tick());
+  expect(next.some((r) => r?.step === "sent")).toBe(true);
+  expect(s.reviews()).toHaveLength(2);
+  expect(s.reviews().at(-1)!.id).not.toBe(old.id);
+  expect(getEventByDedup(s.f.db, snapshotKey(s.reviews().at(-1)!.id))).not.toBeNull();
+  expect(s.ops("reviewer_swap")[0].data.refusal).toBeUndefined();
+  const plan = [...s.ops("model_refusal_retry"), ...s.ops("model_refusal_exempt")][0];
+  expect(s.ops("reviewer_swap")[0].data.replacedPlanSeq).toBe(plan.seq);
+  const events = listEvents(s.f.db, { project: "p", target: "T1" }), swap = s.ops("reviewer_swap")[0];
+  for (const key of ["replacedPlanSeq", "intentId", "sessionId", "sentHead", "sentSpecRev", "round"]) {
+    const mismatched = events.map((e) => e.seq === swap.seq ? { ...e, data: { ...e.data, [key]: "unrelated" } } : e);
+    expect(openRefusal(mismatched)?.seq).toBe(plan.seq);
+  }
+  const safety = { ...plan, seq: events.at(-1)!.seq + 1, data: { op: HOLD_OP } };
+  expect(openRefusal([...events, safety])?.seq).toBe(safety.seq);
+  s.refuse(CYBER);
+  expect(await s.tick()).toMatchObject({ step: "refusal_epoch" });
+}, 120_000);
+
+function hold(f: ReturnType<typeof autoFixture>) {
+  f.db.run("UPDATE tasks SET extra = json_set(extra, '$.refusalHold', json('true')) WHERE id = 'T1'");
+}
+
+test("legacy-owner-hold: writer rereads hold added after readonly retirement check", async () => {
+  const s = await setup("on", undefined, (command, f) => {
+    if (command === "scheduler-legacy-review-retire") hold(f);
+  });
+  await legacyCard(s);
+  await s.tick();
+  expect(s.ops("reviewer_swap")).toEqual([]);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")?.state).toBe("active");
+  expect(s.tags).toEqual([]);
+}, 120_000);
+
+test("legacy-owner-hold: hold added during ensure prevents binding the created session", async () => {
+  const s = await setup("on", (f) => hold(f));
+  await legacyCard(s);
+  expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+  s.refuse(null);
+  await s.tick();
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "retired" });
+  expect(s.reviews()).toHaveLength(1);
+}, 120_000);
+
+for (const command of ["scheduler-review-snapshot", "scheduler-settle"]) {
+  test(`legacy-owner-hold: hold during ${command} await prevents delivery`, async () => {
+    let armed = false;
+    const s = await setup("on", undefined, (sub, f) => { if (armed && sub === command) hold(f); });
+    await legacyCard(s);
+    expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+    s.refuse(null);
+    expect(await s.tick()).toMatchObject({ step: "session" });
+    const sent = s.f.sent.length;
+    armed = true;
+    await s.tick();
+    expect(s.f.sent).toHaveLength(sent);
+  }, 120_000);
+}
+
+test("legacy-owner-hold: hold before retirement blocks all replacement effects", async () => {
+  const s = await setup();
+  await legacyCard(s);
+  hold(s.f);
+  await s.tick();
+  s.refuse(null);
+  await s.tick();
+  await s.tick();
+  expect(s.reviews()).toHaveLength(1);
+  expect(s.ops("reviewer_swap")).toEqual([]);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")?.state).toBe("active");
+  expect(s.tags).toEqual([]);
+}, 120_000);
+
+for (const boundary of ["after-retirement", "before-dispatch"] as const) {
+  test(`legacy-owner-hold: ${boundary} newly added hold blocks next effects`, async () => {
+    const s = await setup();
+    await legacyCard(s);
+    expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+    s.refuse(null);
+    if (boundary === "before-dispatch") expect(await s.tick()).toMatchObject({ step: "session" });
+    hold(s.f);
+    for (let i = 0; i < 3; i++) await s.tick();
+    expect(s.reviews()).toHaveLength(1);
+    expect(s.tags).toHaveLength(boundary === "before-dispatch" ? 1 : 0);
+    expect(s.f.task().extra.refusalHold).toBe(true);
+  }, 120_000);
+}
+
+function revoke(f: ReturnType<typeof autoFixture>) {
+  const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Revoke refusal rule", askKey: "policy-refusal-rule" }, 2001);
+  answerAsk(f.db, ask.id, { choices: ["[button:policy_refusal_rule_stop]"], labels: ["stop"], text: "", principal: OWNER_PRINCIPAL_ID, owner: true,
+    via: "web_card", at: 2002, final: true });
+}
+
+for (const boundary of ["before-retirement", "after-retirement", "during-ensure", "before-dispatch"] as const) {
+  test(`legacy-owner-hold: ${boundary} revoked approval blocks binding and dispatch`, async () => {
+    const s = await setup("on", boundary === "during-ensure" ? revoke : undefined);
+    await legacyCard(s);
+    if (boundary !== "before-retirement") expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+    if (boundary === "before-dispatch") {
+      s.refuse(null);
+      expect(await s.tick()).toMatchObject({ step: "session" });
+    }
+    if (boundary !== "during-ensure") revoke(s.f);
+    for (let i = 0; i < 3; i++) await s.tick();
+    expect(s.reviews()).toHaveLength(1);
+    expect(getSchedulerSession(s.f.db, "T1", "reviewer")?.sessionId).toBe(boundary === "before-dispatch" ? "s-ex" : "s-rv");
+    expect(s.tags).toHaveLength(boundary === "during-ensure" || boundary === "before-dispatch" ? 1 : 0);
+  }, 120_000);
 }
 
 test("旧拒审单接续（验收线 4）：无快照旧单交回 auto → 退休旧绑定（不唤醒、不豁免）→ 新会话 → 按当前 head 派带快照的新单；新单再拒走 MODELX 豁免", async () => {

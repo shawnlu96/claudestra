@@ -44,7 +44,7 @@ import type { SessionRef, WorkerObservation } from "./worker-session.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { insertEvent } from "./ledger-tx.js";
 import { preserveSessionHistory } from "./scheduler-sessions.js";
-import { swapKey } from "./scheduler-review-swap.js";
+import { approvalLapse, EXEMPT_OP, openSafetyHold, RETRY_OP, swapKey } from "./scheduler-review-swap.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js" with { type: "macro" };
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -361,6 +361,11 @@ function legacyFacts(db: Database, task: LedgerTask): { sent: SchedulerIntent; r
   const row = getSchedulerSession(db, task.id, "reviewer");
   if (!row || row.state !== "active" || row.transport === "peer") return "没有在用的本机审查员绑定";
   const events = listEvents(db, { project: task.project, target: task.id });
+  let approval: ReturnType<ReturnType<typeof createRefusalApprovalPort>>;
+  try { approval = createRefusalApprovalPort(db)(task.project, task.id); } catch (e) { return `读批准失败：${(e as Error).message}`; }
+  const lapse = approvalLapse(db, task, approval?.approvalId);
+  if (lapse) return lapse;
+  if (openSafetyHold(events)) return "本卡有未处置的安全拒绝留证";
   if (events.some((e) => e.seq > sent.eventSeq && e.kind === "review")) return "审查单已有结论";
   if (events.some((e) => e.seq > sent.eventSeq && e.kind === "scheduler" && e.data.op === LEGACY_OP)) return "审查单之后已换过审查员";
   if (events.some((e) => e.kind === "scheduler" && e.data.op === LEGACY_OP && !!e.data.refusal && e.data.head === task.headSHA &&
@@ -392,11 +397,16 @@ export async function writeLegacyReviewRetire(db: Database, ctx: WriteCtx, taskI
     if (typeof facts === "string") throw new LedgerError("conflict", `不退休旧审查绑定：${facts}`);
     const { sent, row } = facts;
     if (sent.id !== intentId) throw new LedgerError("conflict", "不是本卡最近一张审查单");
+    const events = listEvents(db, { project: task.project, target: task.id });
+    const plan = events.findLast((e) => (e.data.op === RETRY_OP || e.data.op === EXEMPT_OP) && e.data.intentId === sent.id &&
+      e.data.session === row.sessionId && e.data.head === sent.head && e.data.specRev === sent.specRev && e.data.round === task.round);
+    const approvalId = createRefusalApprovalPort(db)(task.project, task.id)!.approvalId;
     preserveSessionHistory(db);
     const event = insertEvent(db, { ...ctx, dedupKey: swapKey(sent.id) }, { project: task.project, target: task.id, kind: "scheduler",
       text: `旧审查单 ${sent.id} 被提供方策略拒审且没有材料快照：不唤醒旧会话、不豁免，退休 ${row.agent} 的审查绑定，按当前 head 重派带快照的新审查单`,
       data: { op: LEGACY_OP, legacy: true, intentId: sent.id, fromFamily: row.family, agent: row.agent, sessionId: row.sessionId,
-        round: task.round, head: task.headSHA, specRev: task.specRev, sentHead: sent.head, evidence: flat(evidence).slice(0, 400) } }, true);
+        round: task.round, head: task.headSHA, specRev: task.specRev, sentHead: sent.head, sentSpecRev: sent.specRev,
+        approvalId, ...(plan ? { replacedPlanSeq: plan.seq } : {}), evidence: flat(evidence).slice(0, 400) } }, true);
     db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE sessionId = ?").run(sent.id, ctx.now ?? Date.now(), row.sessionId);
     return { event, duplicate: false };
   });
