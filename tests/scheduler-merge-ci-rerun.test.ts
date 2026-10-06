@@ -325,7 +325,7 @@ describe("bun test failed-log parsing", () => {
     const shard = (k: number, log: string) => log.replaceAll("ci\tRun tests\t", `test shard ${k} of 4\tUnit tests\t`);
     const gateStep = (step: string, lines: string[]) => lines.map((l) => `typecheck + test + guard\t${step}\t2026-10-02T11:09:00Z ${l}`).join("\n");
     const VERDICT = ['##[group]Run [ "failure" = success ] || { echo "::error::分片没有全部成功：failure"; exit 1; }',
-      '\x1b[36;1m[ "failure" = success ] || { echo "::error::分片没有全部成功：failure"; exit 1; }\x1b[0m', "shell: /usr/bin/bash -e {0}",
+      '^[[36;1m[ "failure" = success ] || { echo "::error::分片没有全部成功：failure"; exit 1; }^[[0m', "shell: /usr/bin/bash -e {0}",
       "##[endgroup]", "##[error]分片没有全部成功：failure", "##[error]Process completed with exit code 1."];
     const verdict = gateStep("All shards succeeded", VERDICT);
     const B = "tests/b.test.ts";
@@ -339,6 +339,9 @@ describe("bun test failed-log parsing", () => {
       "##[error]Process completed with exit code 1."]);
     for (const log of [verdict, `${third}\n${verdict.replace("##[endgroup]", "##[endgroup]\n##[error]并非分片结论")}`,
       `${third}\n${verdict.replace("##[endgroup]", "##[endgroup]\n不认识的一行")}`, `${third}\n${gateStep("Other step", VERDICT)}`,
+      // r2 P2-02 echo residue: inside the Run echo block only the step's own fixed command is accepted
+      `${third}\n${verdict.replace("shell: ", "src/x.ts(1,7): error TS2322: nope\nshell: ")}`,
+      `${third}\n${verdict.replace("shell: ", "其它回显\nshell: ")}`,
       `${third}\n${gateStep("Shards cover every test file exactly once", ["##[error]各片跑过的文件和入库的测试文件对不上"])}`,
       `${third}\n${tsc}\n${verdict}`, `${third}\n${tscWithVerdict}\n${verdict}`, `${third}\n${tscWithVerdict}`]) {
       expect(parseFailedLog(log)).toBeNull();
