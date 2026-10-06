@@ -22,29 +22,43 @@ const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
 const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
 
 /**
- * The sharded workflow's gate job (ci.yml `check`) prints exactly this when a shard did not succeed; the shard's own step
- * carries the failures, so the verdict step is skipped. Any other line in that step (or another gate step failing) is not.
+ * The sharded workflow's gate (ci.yml job `typecheck + test + guard`, step `All shards succeeded`) fails with exactly this when a
+ * shard did not succeed; the shard's own step carries the failures, so that one step is skipped. Only that job + step, and only
+ * the runner's `Run` echo block plus this line and the exit code: any other text there (or the line in any other step) is read
+ * as a failed step and makes the log unaccountable.
  */
+const GATE = { job: "typecheck + test + guard", step: "All shards succeeded" };
 const GATE_VERDICT = /^##\[error\]分片没有全部成功：\w+\s*$/;
+const RUN_ECHO = /^##\[group\]Run /;
 
-/** Lines without the gh prefix and timestamp, grouped by failed step (`job<TAB>step`); unprefixed lines stay with the step before. */
-function stepLines(log: string): string[][] | null {
-  const steps = new Map<string, string[]>();
+interface FailedStep { job: string; step: string; lines: string[] }
+
+/** Lines without the gh prefix and timestamp, grouped by failed step; unprefixed lines stay with the step before. */
+function stepLines(log: string): FailedStep[] | null {
+  const steps = new Map<string, FailedStep>();
   let key = "";
   for (const raw of log.split(/\r?\n/)) {
     const p = PREFIX.exec(raw);
     if (p) key = `${p[1]}\t${p[2]}`;
-    const lines = steps.get(key) ?? steps.set(key, []).get(key)!;
-    lines.push((p ? raw.slice(p[0].length) : raw).replace(STAMP, ""));
+    const step = steps.get(key) ?? steps.set(key, { job: p?.[1] ?? "", step: p?.[2] ?? "", lines: [] }).get(key)!;
+    step.lines.push((p ? raw.slice(p[0].length) : raw).replace(STAMP, ""));
   }
-  const real = [...steps.values()].filter((lines) => lines.some((l) => l.trim()));
+  const real = [...steps.values()].filter((s) => s.lines.some((l) => l.trim()));
   return real.length ? real : null;
 }
 
-/** The gate's verdict and nothing else that could be a failure: no test output, no other error line. */
-const isGateVerdict = (lines: string[]): boolean => lines.some((l) => GATE_VERDICT.test(l)) &&
-  lines.every((l) => GATE_VERDICT.test(l) || STEP_EXIT.test(l) || !(ERROR.test(l) || OUTSIDE_TEST.test(l) || GROUP.test(l) ||
-    FAIL.test(l) || FAIL_COUNT.test(l)));
+function isGateVerdict(s: FailedStep): boolean {
+  if (s.job !== GATE.job || s.step !== GATE.step) return false;
+  let inEcho = false;
+  let verdict = false;
+  for (const line of s.lines) {
+    if (inEcho) { inEcho = !line.startsWith("##[endgroup]"); continue; }
+    if (RUN_ECHO.test(line)) { inEcho = true; continue; }
+    if (GATE_VERDICT.test(line)) { verdict = true; continue; }
+    if (line.trim() && !STEP_EXIT.test(line)) return false;
+  }
+  return verdict && !inEcho;
+}
 
 const nextText = (lines: string[], from: number): string => lines.slice(from).find((l) => l.trim()) ?? "";
 
@@ -54,10 +68,10 @@ const nextText = (lines: string[], from: number): string => lines.slice(from).fi
  * verdict is skipped. Null when: the log is empty, has no bun step, or any failed step does not read as one bun test step.
  */
 export function parseFailedLog(log: string): CiFailure[] | null {
-  const steps = stepLines(log)?.filter((lines) => !isGateVerdict(lines));
+  const steps = stepLines(log)?.filter((s) => !isGateVerdict(s));
   if (!steps?.length) return null;
   const found: CiFailure[] = [];
-  for (const lines of steps) {
+  for (const { lines } of steps) {
     const step = parseStep(lines);
     if (!step) return null;
     found.push(...step);
