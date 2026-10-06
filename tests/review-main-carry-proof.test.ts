@@ -72,7 +72,7 @@ describe("MAINP1 local immutable main-carry proof", () => {
     expect(r.diffHash).toBe(createHash("sha256").update(`${diff}\n`).digest("hex"));
     expect(await legacy(one)).toMatchObject({ ok: true });
     expect(await proof(one)).toMatchObject({ ok: true });
-    expect(await legacy(two)).toMatchObject({ ok: true, mainParent: main2 }); // MAINP2: the auto adapter now takes the canonical multi-hop proof
+    expect(await legacy(two)).toMatchObject({ ok: false });
     expect(Object.keys(r).sort()).toEqual(["chain", "diffHash", "mainHead", "mainParent", "newHead", "ok", "oldHead", "reason"]);
   });
   test("parent order is immaterial", async () => {

@@ -96,7 +96,7 @@ function card(): { id: string; intent: string } {
 }
 
 /** One merge step the way scheduler-service.ts drives it: run read from the read-only reader, every write through the CLI child. */
-async function drive(intent: string, prHead: string) {
+async function drive(intent: string, prHead: string, hops = 16) {
   const reader = new LedgerReader(ledgerPath), ro = reader.get()!;
   try {
     expect(() => ro.run("UPDATE meta SET value = value")).toThrow(/readonly/);
@@ -110,7 +110,7 @@ async function drive(intent: string, prHead: string) {
       return r.run as MergeRun;
     };
     const project = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: work } } }).projects.p!;
-    const real = mergeExternal(project, gitCommand);
+    const real = mergeExternal(project, gitCommand, () => hops); // hops: what the mainCarry policy allows (16 = on)
     const pr: PrSnapshot = { state: "OPEN", head: prHead, branch: `task/${intent.slice(6)}`, base: "main", draft: false, crossRepository: false,
       mergeState: "CLEAN", mergeSha: null, checks: [{ name: "ci", bucket: "pending" }] };
     const external: MergeExternal = { inspect: async () => pr, freshness: async () => ({ behindBy: 0, mainHead: main2 }), carryReview: real.carryReview,
@@ -142,6 +142,14 @@ describe("MAINP2 auto carry through the production write port", () => {
       expect(carry).toEqual([expect.objectContaining({ actor: "scheduler", data: expect.objectContaining({ from: oldHead, to: two, mainParent: main2, mainHead: main2 }) })]);
       expect(listEvents(db, { project: "p", target: c.id }).filter((e) => e.kind === "decision")).toEqual([]); // not a PM carry
     } finally { closeLedger(ledgerPath); }
+  }, 60_000);
+  test("mainCarry not on (observe default): the same two clean hops are not carried — no wider authority than single hop", async () => {
+    const c = card();
+    await begin(c.intent);
+    expect(await drive(c.intent, two, 1)).toMatchObject({ phase: "await_review", reason: expect.stringContaining("只认单跳") });
+    const db = openLedger(ledgerPath);
+    try { expect(listEvents(db, { project: "p", target: c.id }).filter((e) => e.data.op === "review_carry")).toEqual([]); }
+    finally { closeLedger(ledgerPath); }
   }, 60_000);
   test("an evil hop in the chain: back to review, nothing carried", async () => {
     const c = card();

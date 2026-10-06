@@ -1,7 +1,8 @@
 /** gh commands are structured argv, never interpolated into a shell string. */
+import { mainCarryMode } from "./recovery-main-carry-policy.js";
 import { reviewMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
-import type { SchedulerConfig } from "./scheduler-config.js";
+import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 
@@ -25,8 +26,20 @@ const repoOf = (prRef: string): string => {
 };
 const MAIN_REF = "refs/remotes/origin/main";
 
+/**
+ * MAINP2: how many pure-main hops a carry may span. Multi-hop (≤16) only when every project on this repoDir has the mainCarry
+ * recovery policy on; observe / off / unreadable / unmatched keep the old single hop, so a mode never widens merge authority.
+ */
+export function policyHops(project: ProjectSchedule): number {
+  try {
+    const ids = Object.entries(readSchedulerConfig().projects).filter(([, p]) => p.repoDir === project.repoDir).map(([id]) => id);
+    return ids.length && ids.every((id) => mainCarryMode(id).mode === "on") ? 16 : 1;
+  } catch { return 1; }
+}
+
 /** External data is bounded and checked before it can become a durable receipt. */
-export function mergeExternal(project: ProjectSchedule, command: typeof runBounded = runBounded): MergeExternal {
+export function mergeExternal(project: ProjectSchedule, command: typeof runBounded = runBounded,
+  maxHops: () => number = () => policyHops(project)): MergeExternal {
   const cwd = project.repoDir;
   const run = async (argv: string[], timeoutMs = 120_000) => {
     const r = await command(argv, { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
@@ -86,6 +99,9 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       const proof = await reviewMainCarryProof({ repoDir: cwd, repository, base: "main", mainHead: fetched, oldHead, newHead }, command);
       if (!proof.ok) return proof;
       const { reason, mainParent, mainHead, diffHash } = proof;
+      if (proof.chain.length > maxHops()) {
+        return { ok: false, reason: `新 head 经 ${proof.chain.length} 次纯 main 合并，mainCarry 策略未开只认单跳`, mainParent, mainHead };
+      }
       return { ok: true, reason, mainParent, mainHead, diffHash };
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },
