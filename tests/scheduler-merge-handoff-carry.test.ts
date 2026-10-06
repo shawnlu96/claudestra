@@ -384,4 +384,21 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
       expect(await handoffCarry(join(work, "sub"))(PR, pr, evil, null)).toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了" });
     } finally { await sh("config", "--unset", "diff.relative"); }
   }, GIT_MS);
+  test("diff.submodule=log cannot make two gitlinks with one short prefix read the same: the swapped one is refused", async () => {
+    const link = (n: string) => `abcdef0${n.repeat(33)}`; // three ids, one 7-char prefix, none of them in this object store
+    const pinDep = async (id: string) => { await sh("update-index", "--add", "--cacheinfo", `160000,${id},dep2`); await sh("commit", "-q", "-m", `dep2 @ ${id}`); };
+    await sh("checkout", "-q", "main");
+    await pinDep(link("1"));
+    await sh("push", "-q", "origin", "main");
+    await sh("checkout", "-q", "-b", "log-pr");
+    await pinDep(link("2"));
+    const pr = await sh("rev-parse", "HEAD");
+    await sh("push", "-q", "origin", "log-pr");
+    const main = await mainCommit("later3.txt", "y\n");
+    const evil = await evilMerge("log-pr", main, () => sh("update-index", "--cacheinfo", `160000,${link("3")},dep2`).then(() => {}));
+    await sh("config", "diff.submodule", "log");
+    try {
+      expect(await carry()(PR, pr, evil, null)).toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent: main });
+    } finally { await sh("config", "--unset", "diff.submodule"); }
+  }, GIT_MS);
 });

@@ -21,11 +21,14 @@ export class CarryUndecidable extends Error {}
 
 /**
  * Net diff exactly as `git diff base...head` prints it, with every knob that could vary between calls pinned. `whole` also stops
- * repository config from leaving paths out (`.gitmodules` ignore=all hides a swapped gitlink, `diff.relative` all but one directory).
+ * repository config from leaving paths out (`.gitmodules` ignore=all hides a swapped gitlink, `diff.relative` all but one
+ * directory) or from printing two changes alike (`diff.submodule=log` shows a gitlink by short prefix); the raw records head
+ * the patch so every path's modes and full object ids are in the text, whatever the patch format does.
  */
+const WHOLE = ["--ignore-submodules=none", "--no-relative", "--submodule=short", "--raw", "--patch", "--no-abbrev"];
 async function netDiff(git: Git, base: string, head: string, whole = false): Promise<string> {
   const out = await git("-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
-    "--binary", "--full-index", ...(whole ? ["--ignore-submodules=none", "--no-relative"] : []), `${base}...${head}`);
+    "--binary", "--full-index", ...(whole ? WHOLE : []), `${base}...${head}`);
   if (Buffer.byteLength(out) >= DIFF_LIMIT) throw new CarryUndecidable("净 diff 太大，无法逐字核对");
   return out;
 }

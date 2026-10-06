@@ -49,13 +49,14 @@ shared with the local merge driver's check after its own update-branch):
   - `auto-merge` — the new head's tree is exactly git's own clean merge of the followed head and the main parent
     (`git merge-tree --write-tree`): nothing was added in the merge commit, even when main and the PR changed the same file;
   - `net-diff` — otherwise (a conflict, or this git cannot merge-tree), the net diffs `git diff <main parent>...<followed head>`
-    and `git diff <main parent>...<new head>` (every knob pinned, and `--ignore-submodules=none --no-relative` so neither a
-    `.gitmodules` `ignore` nor `diff.relative` can leave a path out) must be byte-identical. Each starts at its own merge base,
+    and `git diff <main parent>...<new head>` (every knob pinned; `--ignore-submodules=none --no-relative` so neither a
+    `.gitmodules` `ignore` nor `diff.relative` can leave a path out, `--submodule=short` and the `--raw --no-abbrev` records
+    ahead of the patch so `diff.submodule=log` cannot print two gitlinks alike) must be byte-identical. Each starts at its own merge base,
     so this only holds when main did not touch what the PR changed; a resolved conflict therefore goes to PM;
 - `repoDir`'s configured origin (`remote.origin.url` as written) is the PR repository on `github.com` itself — scp form,
   `https://` or `ssh://`, exact host, no port; anything else is refused before the fetch.
 
-The local merge driver keeps only its net-diff test against `origin/main`, unchanged (without the two submodule / relative flags).
+The local merge driver keeps only its net-diff test against `origin/main`, unchanged (without these extra diff flags).
 
 Pass → `merge_handoff_carry` (`from`, `to`, `mainParent`, `mainHead`, `diffHash` = sha256 of the new head's net diff, `basis`,
 `handoffSeq`), written by the scheduler only and checked in its transaction to start at the head followed now; the card stays
