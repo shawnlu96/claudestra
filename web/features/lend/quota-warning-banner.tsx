@@ -16,7 +16,10 @@ import { fetchQuotaLines } from "./lend-quota-api";
 import { finishLoad, newLoadGate, startLoad } from "./lend-model";
 import type { QuotaLinesView } from "./lend-quota-model";
 import { useWarnT } from "./quota-warning-i18n";
-import { DISMISS_KEY, FAMILY_LABEL, isDismissed, mergeDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type DismissMap, type WarnItem } from "./quota-warning-model";
+import {
+  DISMISS_KEY, FAMILY_LABEL, isDismissed, mergeDismissed, observeDismissed, parseDismissed,
+  warnTexts, warningItems, withDismissed, type DismissMap, type WarnItem,
+} from "./quota-warning-model";
 import css from "./quota-warning.module.css";
 
 const POLL_MS = 60_000;
@@ -69,6 +72,17 @@ export function QuotaWarningBanner() {
   const [dismissed, setDismissed] = useState<DismissMap>(readDismissed);
   const [now, setNow] = useState(() => Date.now());
 
+  const unsaved = useRef<DismissMap>({});
+  const persist = useCallback((next: DismissMap) => {
+    try {
+      localStorage.setItem(DISMISS_KEY, JSON.stringify(next));
+      unsaved.current = {};
+    } catch {
+      unsaved.current = next; // 存不下时仍保留本页的关闭和配置失效记录，下一次同步不能撤销它们。
+    }
+    setDismissed(next);
+  }, []);
+
   useEffect(() => {
     let stop = false;
     const gate = newLoadGate(); // 每台机器（每次 effect）一份：旧机器 / 旧请求的回包都落不了地
@@ -85,6 +99,12 @@ export function QuotaWarningBanner() {
       fetchQuotaLines()
         .then((view) => {
           if (stop || !finishLoad(gate, ticket, true)) return; // 比已落地的更旧：丢掉
+          if (view) {
+            const current = mergeDismissed(readDismissed(), unsaved.current);
+            const next = observeDismissed(current, fp, view);
+            if (next !== current) persist(next);
+            else setDismissed(current);
+          }
           setData({ fp, view });
           if (view === null) halt(); // 403 / 404：这台机器不给看，本页不再拉
         })
@@ -102,11 +122,7 @@ export function QuotaWarningBanner() {
     timer = setInterval(load, POLL_MS);
     document.addEventListener("visibilitychange", load);
     return halt;
-  }, [fp]);
-
-  /** 存储写不进去的关掉记录（只在本页内存里）：和持久记录合并（mergeDismissed：同代并集、异代留新），不被下一次关掉 / 别的 tab 的
-   * storage 事件抹掉，也不顶掉别的 tab 已落盘的新代关掉记录 */
-  const unsaved = useRef<DismissMap>({});
+  }, [fp, persist]);
 
   useEffect(() => {
     const onStorage = (e: StorageEvent) => { if (e.key === DISMISS_KEY || e.key === null) setDismissed(mergeDismissed(readDismissed(), unsaved.current)); };
@@ -116,14 +132,8 @@ export function QuotaWarningBanner() {
 
   const dismiss = useCallback((it: WarnItem) => {
     const next = withDismissed(mergeDismissed(readDismissed(), unsaved.current), fp, it);
-    try {
-      localStorage.setItem(DISMISS_KEY, JSON.stringify(next));
-      unsaved.current = {}; // 都已随 next 落盘
-    } catch {
-      unsaved.current = next; // 存不下：只在这次页面里关掉（刷新后会再出现），多族先后关掉都保留；带着各代 since，合并时旧代挤不掉新代
-    }
-    setDismissed(next);
-  }, [fp]);
+    persist(next);
+  }, [fp, persist]);
 
   const items = warningItems(data?.fp === fp ? data.view : null, now).filter((it) => !isDismissed(dismissed, fp, it));
   if (items.length === 0 || typeof document === "undefined") return null;

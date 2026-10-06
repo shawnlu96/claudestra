@@ -4,7 +4,7 @@
  * - 只有 warn / stop 出提醒；unknown（读不到、已过重置）不出肯定提醒，也不当 0 或「已恢复」；below 不出。
  * - 模式 off = 没有生效的线，不出；observe 照出但写明「只观察、未执行」。
  * - 两族各一条，互不顶替。
- * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记，只认最近一个线世代（周窗口 resetAt + 两条线 + 模式，带开始时刻）里
+ * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记，只认最近一个线世代（周窗口 resetAt + 两条线 + 模式，带观察世代）里
  * 关掉过的状态 + 收窄档：同一条线不再弹；提醒→停接、改线 / 改模式（改回旧值也算新一代）、新的一周就再出现。tests/web-quota-warning-*.test.ts。
  */
 import type { FamilyLine, QuotaFamily, QuotaLinesView } from "./lend-quota-model";
@@ -61,11 +61,9 @@ const MAX_SCOPES = 32;
 /** 同一世代里记几种关掉过的状态（实际只有 warn / stop 各一种，留余量） */
 const MAX_STATES = 8;
 
-/** 实例|家族 → 只记最近一个线世代的关掉记录。gen = 周窗口（resetAt）+ 两条线（阈值版本）+ 模式；since = 这一代开始被关掉的时刻
- * （同设备各 tab 同一时钟），把「70/80 → 60/80 → 改回 70/80」的两次 70/80 区分成两代；states = 本代关掉过的「状态:收窄档」。
- * 世代一变，旧世代的关掉整条作废、不会因为数值改回来而复活（settings-return-1）；合并两份记录时同一代取并集，
- * 不同代取 since 新的那代，旧内存里再多旧代也挤不掉别的 tab 已落盘的当前代（dismiss-memory-1）。 */
-export interface DismissRec { gen: string; since: number; states: string[] }
+/** 每个实例/家族只保存当前配置窗口及关闭状态。epoch 只在观察到配置变化时推进；
+ * since 是最近关闭或失效时间，不能把两个 tab 对同一配置的独立关闭误判为不同世代。空 states 也要持久化，防止设置改回后旧关闭复活。 */
+export interface DismissRec { gen: string; since: number; states: string[]; epoch?: number }
 export type DismissMap = Record<string, DismissRec>;
 
 const scopeOf = (instance: string, family: QuotaFamily) => `${instance}|${family}`;
@@ -87,12 +85,19 @@ export function parseDismissed(raw: string | null): DismissMap {
     for (const [scope, r] of Object.entries(v)) {
       if (isRec(r)) {
         const states = r.states.filter((k): k is string => typeof k === "string").slice(-MAX_STATES);
-        if (states.length) out[scope] = { gen: r.gen, since: r.since, states };
+        if (!states.length && !(typeof r.epoch === "number" && Number.isFinite(r.epoch))) continue;
+        out[scope] = { gen: r.gen, since: r.since, states,
+          ...(typeof r.epoch === "number" && Number.isFinite(r.epoch) ? { epoch: r.epoch } : {}) };
         continue;
       }
-      // 旧格式（每 scope 一条 key / 多条 key 数组）：只认最后一条，按最旧的一代（since 0）收进来
-      const last = typeof r === "string" ? r : Array.isArray(r) ? r.filter((k): k is string => typeof k === "string").at(-1) : undefined;
-      if (last) { const [gen, state] = splitKey(last); out[scope] = { gen, since: 0, states: [state] }; }
+      // 旧数组可能包含同配置的 warn 和 stop：保留最后配置所属的全部状态。
+      const keys = typeof r === "string" ? [r] : Array.isArray(r) ? r.filter((k): k is string => typeof k === "string") : [];
+      const last = keys.at(-1);
+      if (last) {
+        const [gen] = splitKey(last);
+        const states = [...new Set(keys.map(splitKey).filter(([g]) => g === gen).map(([, state]) => state))].slice(-MAX_STATES);
+        out[scope] = { gen, since: 0, states };
+      }
     }
     return out;
   } catch {
@@ -109,11 +114,33 @@ export function isDismissed(m: DismissMap, instance: string, it: WarnItem): bool
 
 const capScopes = (entries: [string, DismissRec][]): DismissMap => Object.fromEntries(entries.slice(-MAX_SCOPES));
 
-/** 同一 scope 两条记录合并：同一代（gen 与 since 都同）状态取并集；否则留 since 新的那代（同刻再按 gen 定，结果与先后无关） */
+/** 同配置的关闭取并集，但早于最近一次配置失效的关闭不复活；不同配置保留最新观察/关闭。 */
 function mergeRec(x: DismissRec, y: DismissRec): DismissRec {
-  if (x.gen === y.gen && x.since === y.since) return { ...x, states: [...x.states.filter((k) => !y.states.includes(k)), ...y.states].slice(-MAX_STATES) };
-  if (x.since !== y.since) return x.since > y.since ? x : y;
+  if (x.gen === y.gen) {
+    const epoch = Math.max(x.epoch ?? 0, y.epoch ?? 0);
+    const states = [x, y].flatMap((r) => r.since >= epoch ? r.states : []);
+    return { gen: x.gen, since: Math.max(x.since, y.since), ...(epoch ? { epoch } : {}),
+      states: [...new Set(states)].sort().slice(-MAX_STATES) };
+  }
+  const xt = x.epoch ?? x.since, yt = y.epoch ?? y.since;
+  if (xt !== yt) return xt > yt ? x : y;
   return x.gen > y.gen ? x : y;
+}
+
+/** 成功 GET 的真实配置/窗口变化立即作废旧关闭，含 below/unknown/off；无需关闭中间提醒。 */
+export function observeDismissed(m: DismissMap, instance: string, view: QuotaLinesView, at: number = Date.now()): DismissMap {
+  let out = m;
+  for (const f of view.families) {
+    const scope = scopeOf(instance, f.family);
+    const cur = out[scope];
+    // unknown 不提供窗口时不凭空制造新周；阈值/模式仍按真实设置推进失效。
+    const resetAt = f.resetAt ?? (cur ? cur.gen.split("|")[0] : "noreset");
+    const gen = [resetAt, `${f.warnPct}/${f.stopPct}`, view.config.mode].join("|");
+    if (!cur || cur.gen === gen) continue;
+    const epoch = Math.max(at, (cur.epoch ?? cur.since) + 1);
+    out = capScopes([...Object.entries(out).filter(([k]) => k !== scope), [scope, { gen, since: epoch, epoch, states: [] }]]);
+  }
+  return out;
 }
 
 /** 两份关掉记录合并（b 动过的 scope 排后），总数封顶 */
@@ -132,8 +159,8 @@ export function withDismissed(m: DismissMap, instance: string, it: WarnItem, at:
   const scope = scopeOf(instance, it.family);
   const [gen, state] = splitKey(it.key);
   const cur = m[scope];
-  const rec: DismissRec = cur && cur.gen === gen ? { ...cur, states: [...cur.states.filter((k) => k !== state), state].slice(-MAX_STATES) }
-    : { gen, since: Math.max(at, cur ? cur.since + 1 : at), states: [state] };
+  const rec: DismissRec = cur && cur.gen === gen ? { ...cur, since: Math.max(at, cur.since), states: [...cur.states.filter((k) => k !== state), state].slice(-MAX_STATES) }
+    : { gen, since: Math.max(at, cur ? cur.since + 1 : at), ...(cur ? { epoch: Math.max(at, (cur.epoch ?? cur.since) + 1) } : {}), states: [state] };
   const out = new Map<string, DismissRec>(Object.entries(m));
   out.delete(scope);
   out.set(scope, rec);

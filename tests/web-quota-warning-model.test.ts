@@ -12,7 +12,7 @@ import { effectivePrincipal, type Grant } from "../src/lib/devices.js";
 import type { QuotaFacts } from "../src/lib/lend-quota-line-facts.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { FamilyLine, QuotaLinesView } from "../web/features/lend/lend-quota-model";
-import { isDismissed, mergeDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type WarnItem } from "../web/features/lend/quota-warning-model";
+import { isDismissed, mergeDismissed, observeDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type WarnItem } from "../web/features/lend/quota-warning-model";
 
 const NOW = Date.parse("2026-10-06T06:00:00Z");
 const RESET = NOW + 3 * 86_400_000;
@@ -116,6 +116,46 @@ describe("关掉", () => {
     const written = withDismissed(mergeDismissed(persisted, unsaved), "fp1", { ...warn, family: "claude" }, 6000);
     expect(isDismissed(parseDismissed(JSON.stringify(written)), "fp1", stop70)).toBe(true);
   });
+  test("settings-return-1 r4：成功读取推进失效，未关闭中间线的记录刷新仍有效", () => {
+    const first = withDismissed({}, "fp1", warn, 1000);
+    const changed = observeDismissed(first, "fp1", view([f({ warnPct: 60 })]), 2000);
+    const returned = observeDismissed(changed, "fp1", view([f()]), 3000);
+    expect(isDismissed(parseDismissed(JSON.stringify(returned)), "fp1", warn)).toBe(false);
+    for (const merged of [mergeDismissed(first, returned), mergeDismissed(returned, first)]) {
+      expect(isDismissed(merged, "fp1", warn)).toBe(false);
+    }
+    const closed = withDismissed(returned, "fp1", warn, 4000);
+    expect(isDismissed(observeDismissed(closed, "fp1", view([f()]), 5000), "fp1", warn)).toBe(true);
+    const off = observeDismissed(closed, "fp1", view([f()], "off"), 6000);
+    expect(isDismissed(observeDismissed(off, "fp1", view([f()]), 7000), "fp1", warn)).toBe(false);
+  });
+  test("dismiss-memory-1 r4：独立关闭同代 warn/stop 的时刻不同也保留并集", () => {
+    const a = withDismissed({}, "fp1", warn, 2000);
+    const b = withDismissed({}, "fp1", item(STOP), 1000);
+    for (const merged of [mergeDismissed(a, b), mergeDismissed(b, a)]) {
+      expect(isDismissed(merged, "fp1", warn)).toBe(true);
+      expect(isDismissed(merged, "fp1", item(STOP))).toBe(true);
+    }
+  });
+  test("同配置的新 tab 关闭可合入已观察世代；旧关闭不能复活，unknown 不制造新周", () => {
+    const old = withDismissed({}, "fp1", warn, 1000);
+    const changed = observeDismissed(old, "fp1", view([f({ warnPct: 60 })]), 2000);
+    const returned = observeDismissed(changed, "fp1", view([f()]), 3000);
+    const stop = withDismissed({}, "fp1", item(STOP), 4000);
+    for (const merged of [mergeDismissed(returned, stop), mergeDismissed(stop, returned)]) {
+      expect(isDismissed(merged, "fp1", item(STOP))).toBe(true);
+      expect(isDismissed(mergeDismissed(merged, old), "fp1", warn)).toBe(false);
+    }
+    const unknown = observeDismissed(old, "fp1", view([f({ resetAt: null, state: "unknown", weekUsedPct: null })]), 5000);
+    expect(isDismissed(observeDismissed(unknown, "fp1", view([f()]), 6000), "fp1", warn)).toBe(true);
+  });
+  test("migration-dismiss-1 r4：旧数组保留最后世代的全部关闭状态", () => {
+    for (const keys of [[warn.key, item(STOP).key], [item(STOP).key, warn.key]]) {
+      const migrated = parseDismissed(JSON.stringify({ "fp1|codex": keys }));
+      expect(isDismissed(migrated, "fp1", warn)).toBe(true);
+      expect(isDismissed(migrated, "fp1", item(STOP))).toBe(true);
+    }
+  });
   test("存储里的坏数据当没关过", () => {
     expect(parseDismissed(null)).toEqual({});
     expect(parseDismissed("{bad")).toEqual({});
@@ -123,10 +163,10 @@ describe("关掉", () => {
     expect(parseDismissed('{"a":1,"d":[],"e":{"gen":"g","since":"x","states":["s"]},"f":{"gen":"g","since":1,"states":[2]}}')).toEqual({});
     expect(parseDismissed('{"r":{"gen":"g","since":5,"states":["warn:half",3]}}')).toEqual({ r: { gen: "g", since: 5, states: ["warn:half"] } });
   });
-  test("旧格式（单条 key / key 数组）照认最后一条", () => {
+  test("旧格式（单条 key / key 数组）保留最后世代", () => {
     const old = parseDismissed(JSON.stringify({ "fp1|codex": [item(STOP).key, warn.key], "fp1|claude": warn.key }));
     expect(isDismissed(old, "fp1", warn)).toBe(true);
-    expect(isDismissed(old, "fp1", item(STOP))).toBe(false);
+    expect(isDismissed(old, "fp1", item(STOP))).toBe(true);
     expect(isDismissed(old, "fp1", { ...warn, family: "claude" })).toBe(true);
   });
 });

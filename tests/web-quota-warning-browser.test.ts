@@ -319,3 +319,43 @@ test.skipIf(!enabled)("settings-return-1：70/80 关掉 → 实际设置改 60/8
   expect(d.writes).toEqual([]);
   await d.ctx.close();
 }, 30_000);
+
+test.skipIf(!enabled)("settings-return-1 r4：中间设置不关闭，恢复旧值及刷新都再出现", async () => {
+  const d = await device({ status: 200, json: view(WARN, {}) });
+  const p = await d.open();
+  await bar(p, "codex").waitFor();
+  await bar(p, "codex").getByRole("button", { name: "关闭" }).click();
+  d.reply = { status: 200, json: view({ ...WARN, warnPct: 60 }, {}) };
+  await visible(p); await bar(p, "codex").waitFor(); await settle(p);
+  d.reply = { status: 200, json: view(WARN, {}) };
+  await visible(p); await settle(p);
+  expect(await bar(p, "codex").count()).toBe(1);
+  await p.reload(); await settle(p);
+  expect(await bar(p, "codex").count()).toBe(1);
+  expect(d.writes).toEqual([]);
+  await d.ctx.close();
+}, 30_000);
+
+test.skipIf(!enabled)("dismiss-memory-1 r4：B stop 关闭写失败，A 旧 warn 稍后落盘不能抹掉 stop", async () => {
+  const d = await device({ status: 200, json: view(WARN, {}) });
+  const a = await d.open(), b = await d.open();
+  await bar(a, "codex").waitFor(); await bar(b, "codex").waitFor();
+  await b.evaluate(`{ const set = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(k, v) {
+      if (k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError");
+      return set.call(this, k, v);
+    }; }`);
+  d.reply = { status: 200, json: view(STOP, {}) };
+  await visible(b); await settle(b);
+  expect(await bar(b, "codex").getAttribute("data-level")).toBe("stop");
+  await bar(b, "codex").getByRole("button", { name: "关闭" }).click();
+  expect(await bar(b, "codex").count()).toBe(0);
+  expect(await bar(a, "codex").getAttribute("data-level")).toBe("warn");
+  await bar(a, "codex").getByRole("button", { name: "关闭" }).click();
+  await settle(b);
+  expect(await bar(b, "codex").count()).toBe(0);
+  await visible(b); await settle(b);
+  expect(await bar(b, "codex").count()).toBe(0);
+  expect(d.writes).toEqual([]);
+  await d.ctx.close();
+}, 30_000);
