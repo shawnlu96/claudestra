@@ -4,15 +4,16 @@
  * 所以查询之后开的回合、排的槽、换的接线都会让申请按代次对不上被拒，两个申请最多受理一个（受理的那一刻循环就忙了）。
  * 受理只经 AcpTurnLoop.submitCommand 带 opId 排一个独占槽，不发 session/cancel、不重启、不改模型；同一个 opId 再来只回原记录，
  * 记录淘汰了也只回 op-expired（opId 本身一直留着），不重放。
- * 两段受理（现行登记）：card_compact 核过后槽带 hold 占住调度器（prepared：不开别的回合，宿主状态冻住），回 bridge；bridge 重读台账登记
- * 发 card_commit，这里再核登记 / 接线才放行 /compact，否则作废（槽结局 revoked，不进模型）。等不到确认 commitMs 后作废。
+ * 两段受理（现行登记）：card_compact 核过后槽带 hold 占住调度器（prepared：不开别的回合；usage / 外部排队照收，状态并不冻住），回 bridge；
+ * bridge 重读台账登记发 card_commit，这里把登记、接线、usage、代次、队列全部重核才放行 /compact，否则作废（槽结局 revoked，不进模型）。
+ * 等不到确认 commitMs 后作废。登记撤销和确认之间没有共同序列 / 租约：live-binding 仍是 blocked-capability（见 card-context.ts）。
  * 新回合受理边界（admit）：任何还没开、会进模型的一轮之前（/compact 命令本身除外），硬线以上先压缩一次；这一段超线已经压过一次
  * 还在线上（压缩失败 / 取消 / 没到完成边界）就拒开、给原因，直到预算恢复（线下 usage、压缩完成边界、换会话 / 接线）。
  * 单测 tests/acp-card-context-host.test.ts。
  */
 import {
-  bindingReject, CARD_COMPACT_TEXT, CARD_REJECT_TEXT, cardCompactVerdict, cardStatus, hardLineGate, hardOver, parseBinding, parseCardCompactRequest,
-  type CardCtxMode, type CardReject, type CardCtxSnapshot, type CardIdentity, type CardOpRecord, type UsageSample,
+  bindingReject, CARD_COMPACT_TEXT, usageState, CARD_REJECT_TEXT, cardCompactVerdict, cardStatus, hardLineGate, hardOver, parseBinding, parseCardCompactRequest,
+  type CardBinding, type CardCtxMode, type CardReject, type CardCtxSnapshot, type CardIdentity, type CardOpRecord, type UsageSample,
 } from "./card-context.js";
 import type { AcpTurnLoop, AdmitHead, AdmitResult, SlotEnd } from "./turn.js";
 
@@ -47,6 +48,13 @@ export interface CardHostDeps {
   log(msg: string): void;
 }
 
+/** prepared 那一刻的受理条件（确认时比对） */
+interface PreparedAt {
+  usage: UsageSample | null;
+  turnGen: number;
+  slotGen: number;
+}
+
 export class CardContextHost {
   private attachGen = 0;
   private usage: UsageSample | null = null;
@@ -57,7 +65,7 @@ export class CardContextHost {
   /** 受理过的全部 opId（完整记录淘汰了也留着）：防重放的依据，不随结果缓存一起删 */
   private readonly seen = new Set<string>();
   /** prepared、等 bridge 确认的那一个（受理时调度器空闲，确认前占住调度器，所以最多一个） */
-  private pending: { r: CardOpRecord; release(ok: boolean): void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pending: { r: CardOpRecord; release(ok: boolean): void; timer: ReturnType<typeof setTimeout>; at: PreparedAt } | null = null;
 
   constructor(private readonly d: CardHostDeps) {}
 
@@ -76,7 +84,8 @@ export class CardContextHost {
         this.usage = { used: e.tokens, size, sessionId, attachGen: this.attachGen, turnGen: this.d.loop.turnGen, at: this.d.now() };
       } else if (e.subtype === "compact_boundary") {
         if (this.usage) this.usage = { ...this.usage, compacted: true };
-        for (const r of this.ops.values()) if (r.outcome === null) r.compacted = true;
+        // 只记到真在跑的那一槽：等确认（pending）的还没进模型，这条边界不是它压出来的
+        for (const r of this.ops.values()) if (r.outcome === null && r.commit !== "pending") r.compacted = true;
       }
     }
   }
@@ -132,14 +141,18 @@ export class CardContextHost {
     r.commit = "pending";
     const timer = setTimeout(() => this.settle("commit-timeout"), this.d.commitMs ?? COMMIT_MS);
     (timer as { unref?(): void }).unref?.();
-    this.pending = { r, release, timer };
+    // 受理时的条件快照：确认时逐项比对。usage 比对象本身（之后来的任何 usage / 压缩边界都换掉它）；slotGen 是自己这一槽的代次
+    this.pending = { r, release, timer, at: { usage: this.usage, turnGen: this.d.loop.turnGen, slotGen: this.d.loop.slotGen } };
     this.d.log(`卡片压缩已占住调度器 ${req.opId}（${v.kind}，${s.usage?.used} tokens），等 bridge 按现行登记确认`);
     return { ok: true, accepted: false, prepared: true, kind: v.kind, op: { ...r } };
   }
 
   /**
-   * 确认：bridge 收到 prepared 后在同一段同步代码里重读台账登记带来。宿主状态从 prepared 起冻住（调度器占着），这里再核登记、
-   * 接线 / 会话没换、适配器没自发开回合，才放行；任何一项不对就作废（不压缩）。同一个 opId 再确认只回已定的结论。
+   * 确认：bridge 收到 prepared 后在同一段同步代码里重读台账登记带来。prepared 只占住调度器（不开别的回合），宿主输入并没冻住：
+   * usage / 压缩边界照收、外部命令 / 入站 / 适配器自发回合照排。所以这里把受理条件全部重核一遍，prepare 之后任何一项变了就作废
+   * （fail-closed，不压缩）：登记、接线 / 会话、usage 仍是受理时那一份且没压缩过、回合代次没动、槽代次仍是自己这一槽（之后没人排过）、
+   * 队列里除自己（已出队、在等确认）外没有别的、没在轮换 / 压缩 / 适配器自发跑。同一个 opId 再确认只回已定的结论。
+   * 登记撤销 / 换绑和这里没有共同序列 / 租约（台账没有这个 port）：确认帧发出后到这里之间的撤销仍看不到，见 card-context.ts「现行登记」。
    */
   private commit(m: Record<string, unknown>): Record<string, unknown> {
     const binding = parseBinding(m.binding);
@@ -150,14 +163,29 @@ export class CardContextHost {
     if (r.commit === "committed") return { ok: true, accepted: true, duplicate: true, kind: r.kind, op: { ...r } };
     if (r.commit !== "pending") return { ...reject(r.commit), op: { ...r } };
     const s = this.snapshot();
-    const st = this.d.state();
-    const why: CardReject | null = s.mode === "off" ? "mode-off" : bindingReject(s, binding)
-      ?? (!s.capable ? "no-capability" : !s.registered ? "not-registered" : s.attachGen !== r.attachGen ? "old-attach"
-        : s.sessionId !== r.sessionId ? "old-session" : s.rotating ? "rotating" : st.adapterRunning ? "running" : null);
+    const why = this.pending?.r === r ? this.commitReject(s, binding, this.pending.at, r) : "not-prepared";
     this.settle(why ?? "committed");
     if (why) return { ...reject(why), op: { ...r } };
     this.d.log(`卡片压缩已受理 ${r.opId}（${r.kind}）`);
     return { ok: true, accepted: true, kind: r.kind, op: { ...r } };
+  }
+
+  /** 确认时的重核：prepare 之后变了的任何一项都拒（fail-closed） */
+  private commitReject(s: CardCtxSnapshot, binding: CardBinding | null, at: PreparedAt, r: CardOpRecord): CardReject | null {
+    if (s.mode === "off") return "mode-off";
+    const bound = bindingReject(s, binding);
+    if (bound) return bound;
+    if (!s.capable) return "no-capability";
+    if (!s.registered) return "not-registered";
+    if (s.attachGen !== r.attachGen) return "old-attach";
+    if (s.sessionId !== r.sessionId) return "old-session";
+    if (s.rotating) return "rotating";
+    if (s.compacting) return "compacting";
+    if (this.d.state().adapterRunning) return "running";
+    if (s.turnGen !== at.turnGen || s.slotGen !== at.slotGen) return "turn-drift";
+    if (s.queued > 0) return "queued";
+    if (s.usage !== at.usage || usageState(s) !== "fresh") return s.usage ? "usage-stale" : "usage-unknown";
+    return null;
   }
 
   /** 定下等确认的那一个：committed 放行 /compact，否则作废（槽结局 revoked） */

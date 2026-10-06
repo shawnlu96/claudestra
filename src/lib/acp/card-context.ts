@@ -7,8 +7,10 @@
  * - 现行登记：申请还要带 bridge 在发出前那一刻按 agent-lifecycle-store.ts cardWorkerIndex（唯一读取方）取的本 agent 当前链接
  *   （binding = 卡号 + 链接记录的会话；bridge/acp-link.ts 填，调用方给不了）。没有链接 = 已退休 / 不是卡片 worker → not-bound；
  *   卡号或会话和宿主启动身份 / 此刻会话对不上 = 换绑 → binding-revoked。宿主不读台账。
- *   发帧时的快照不够：两段受理——card_compact 核过一切后先占住调度器（prepared，宿主状态从此冻住），bridge 收到回包后在同一段同步代码里
- *   重读登记、发 card_commit；宿主再核一次登记和接线才放行 /compact。受理的那一刻 = bridge 重读登记的那一刻，宿主状态与登记同时成立。
+ *   两段受理——card_compact 核过一切后先占住调度器（prepared），bridge 收到回包后在同一段同步代码里重读登记、发 card_commit；
+ *   宿主把登记和全部受理条件重核一遍才放行 /compact（prepare 之后变了的一律作废）。这只把窗口缩到「确认帧在途」那一段：
+ *   台账的撤销 / 换绑和宿主受理之间没有共同可核验的序列 / 租约（agent-lifecycle-store.ts 没有这个 port，范围外），
+ *   确认帧发出后才撤销的登记宿主看不到。所以现行登记的原子受理照实报 blocked-capability（状态里 liveBinding），不宣称已满足。
  * - opId 永不重放：完整记录只留最近 50 个，更早的只留 opId，再来回 op-expired（不当新申请）。
  * - usage 只认当前会话、当前接线代次、当前回合代次之内报的、且之后没发生过压缩的那一份；否则 unknown / stale，一律拒。
  * - 忙时：ACP 没有回合中途的预算能力（runtime budget），回合中途超线只能 blocked-capability。新回合受理边界（hardLineGate）：
@@ -263,6 +265,8 @@ export interface CardCtxStatus {
   idleMs: number | null;
   /** 回合中途的预算：ACP 没有这项能力，固定 blocked-capability（验收缺口照实报） */
   busyBudget: "blocked-capability";
+  /** 受理与台账撤销 / 换绑的共同序列 / 租约：台账没有这个 port，固定 blocked-capability（验收缺口照实报） */
+  liveBinding: "blocked-capability";
   verdict: CardVerdict;
   op?: CardOpRecord | null;
 }
@@ -278,6 +282,7 @@ export function cardStatus(s: CardCtxSnapshot, now: number, limits?: { idle?: nu
     usage: { state: st, used: s.usage?.used ?? null, size: s.usage?.size ?? null, idle: line?.idle ?? null, hard: line?.hard ?? null },
     idleMs: s.idleSince === null ? null : Math.max(0, now - s.idleSince),
     busyBudget: "blocked-capability",
+    liveBinding: "blocked-capability",
     verdict: cardCompactVerdict(s, probe, now, limits),
     ...(op === undefined ? {} : { op }),
   };

@@ -336,7 +336,7 @@ export async function acpCardCompact(channelId: string, req: Omit<CardCompactReq
     const r = await acpCall(channelId, { op: "card_compact", ...req, binding: cardBindingOf(channelId) }); // 读登记和发帧同一段同步代码
     const prep = cardCompactReply(r, req);
     if (!prep.ok || !prep.prepared) return lost(prep);
-    // 宿主已占住调度器：此刻重读的登记和宿主冻住的状态同时成立，就在这一刻受理（读登记和发帧同一段同步代码）
+    // 宿主已占住调度器：重读登记和发帧同一段同步代码，宿主再全部重核。确认帧在途时的撤销仍看不到（无共同租约，liveBinding blocked）
     const c = await acpCall(channelId, { op: "card_commit", opId: req.opId, hostId: req.hostId, binding: cardBindingOf(channelId) });
     return lost(cardCompactReply(c, req));
   } finally {

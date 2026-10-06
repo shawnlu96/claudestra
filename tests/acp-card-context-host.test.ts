@@ -176,6 +176,63 @@ describe("两段受理：prepared 占住调度器，确认时再核现行登记"
     expect(o.commit("nope")).toMatchObject({ ok: false, reason: "not-prepared" });
     expect(o.card.call({ op: "card_commit", opId: "p5", hostId: "h-old", binding: { card: "CTXA", sessionId: "s1" } })).toMatchObject({ ok: false, reason: "old-host" });
   });
+
+  // prepared 只占住调度器，宿主输入照收：确认时 prepare 之后变了的受理条件一律作废（fail-closed）
+  test("prepared 之后到了压缩边界：usage 陈旧，作废；边界不记到还没进模型的那一槽", async () => {
+    const r = rig();
+    await r.turn(250_000);
+    r.prepare("p6");
+    r.card.noteEntries([{ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto" } }]);
+    expect(r.status().usage.state).toBe("stale");
+    expect(r.commit("p6")).toMatchObject({ ok: false, reason: "usage-stale", op: { commit: "usage-stale", compacted: false } });
+    await tick();
+    expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(0);
+    expect((r.card.call({ op: "card_context", opId: "p6" }) as any).status.op).toMatchObject({ outcome: "revoked", compacted: false });
+  });
+
+  test("prepared 之后来了新的 usage（哪怕仍过线）：不是受理时那一份，作废", async () => {
+    const r = rig();
+    await r.turn(250_000);
+    r.prepare("p7");
+    r.usage(260_000);
+    expect(r.commit("p7")).toMatchObject({ ok: false, reason: "usage-stale" });
+    await tick();
+    expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(0);
+  });
+
+  test("prepared 之后外部排了 op 槽 / 命令 / 入站：代次或队列变了，作废；排着的照常跑", async () => {
+    for (const add of [
+      (r: ReturnType<typeof rig>) => void r.loop.submitOp("handoff", "op-x"),
+      (r: ReturnType<typeof rig>) => void r.loop.submitCommand("/status"),
+      (r: ReturnType<typeof rig>) => void r.loop.submit("inbound"),
+    ]) {
+      const r = rig();
+      await r.turn(250_000);
+      r.prepare("p8");
+      add(r);
+      expect(r.loop.queued).toBe(1);
+      const res = r.commit("p8");
+      expect(res.ok).toBe(false);
+      expect(["turn-drift", "queued"]).toContain(res.reason);
+      await tick();
+      expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(0);
+      expect(r.prompts).toHaveLength(2); // 排着的那一轮照常开
+    }
+  });
+
+  test("自己那一槽不算排队：prepare 后什么都没变，照常放行", async () => {
+    const r = rig();
+    await r.turn(250_000);
+    r.prepare("p9");
+    expect(r.loop.queued).toBe(0);
+    expect(r.commit("p9")).toMatchObject({ ok: true, accepted: true });
+    await tick();
+    expect(r.prompts.at(-1)).toBe("/compact");
+  });
+
+  test("状态里照实报：现行登记的原子受理 blocked-capability", () => {
+    expect(rig().status().liveBinding).toBe("blocked-capability");
+  });
 });
 
 describe("拒绝（不重放、不降级为普通 slash）", () => {
