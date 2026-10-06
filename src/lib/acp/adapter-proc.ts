@@ -18,6 +18,7 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
+import { redactSecrets } from "../redact-secrets.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
 
@@ -132,7 +133,7 @@ export function spawnAdapter(
   void pump(proc.stdout, (c) => dataCb(c)).catch((e) => log(`适配器 stdout 读取出错：${e}`));
   const dec = new TextDecoder();
   void pump(proc.stderr, (c) => {
-    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[${label}] ${line.slice(0, 300)}`);
+    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[${label}] ${redactSecrets(line).slice(0, 300)}`); // 先打码再截
   }).catch((e) => log(`适配器 stderr 读取出错：${e}`));
   void proc.exited.then((code) => closeCbs.splice(0).forEach((cb) => cb(`exit ${code}`)));
   const stop = () => {

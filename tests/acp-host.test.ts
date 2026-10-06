@@ -124,7 +124,7 @@ describe("ACP 宿主整条链（stub）", () => {
       '  ↳ Sent message(s): ["m1"]',
       "── 回合结束 ──",
     ]);
-  }, 20_000);
+  }, 60_000); // 串行起三次宿主 + stub，机器忙时 20 秒不够
 
   test("beforeSpawn（探 codex 版本）等完才起适配器；等的时候宿主被停了就不再起", async () => {
     let release!: () => void;

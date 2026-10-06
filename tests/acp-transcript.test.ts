@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { classifyAirFailure } from "../src/lib/acp/failures.ts";
 import { stampTranscript, transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "../src/lib/acp/transcript.ts";
-import { createAcpTranslator } from "../src/lib/acp/updates.ts";
+import { createAcpTranslator, OUTPUT_TAIL } from "../src/lib/acp/updates.ts";
 
 // ACP 宿主窗口里的可读会话：session/update 先过真的翻译器（宿主推给 bridge 的同一批条目），再渲染成窗口文本
 const chunk = (messageId: string, text: string) => ({ sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text } });
@@ -94,6 +94,34 @@ describe("ACP 窗口会话", () => {
     ]).join("\n") + transcriptOfFailure({ kind: "error", key: "e", message: "401 for Authorization: Bearer abc.def.ghi" });
     for (const s of ["hunter2", "s3cretpw", "dXNlcjpodW50ZXIy", "abcdef123", "c0ffee-1234", "abc.def.ghi"]) expect(out).not.toContain(s);
     expect(out).toContain("Authorization: Basic [redacted]");
+  });
+
+  test("打码在格式化截断之前：密钥跨在 formatTool 的截断处也不留前缀（TaskCreate 80 字、send_to_agent 200 字）", () => {
+    const secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    const tool = (name: string, input: Record<string, unknown>) =>
+      transcriptOfEntry({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name, input }] } }).join("\n");
+    expect(tool("TaskCreate", { subject: `${"x".repeat(73)} ${secret}` })).not.toContain("sk-abc");
+    expect(tool("mcp__claudestra__send_to_agent", { target: "a", text: `${"y".repeat(193)} ${secret}` })).not.toContain("sk-abc");
+    expect(tool("Read", { file_path: `/tmp/${secret}` })).not.toContain("sk-abc");
+  });
+
+  test("命令输出只留了末尾（updates.ts OUTPUT_TAIL）：开头被截成半行的那行不显示，里面可能是半个密钥", () => {
+    const secretTail = "a1".repeat(30);
+    const filler = "ok line\n".repeat(Math.ceil(OUTPUT_TAIL / 8));
+    const out = render([
+      { sessionUpdate: "tool_call", toolCallId: "c1", kind: "execute", title: "cat big.log", status: "in_progress" },
+      { sessionUpdate: "tool_call_update", toolCallId: "c1", _meta: { terminal_output_delta: { data: `sk-${secretTail}\n${filler}` } } },
+      { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed" },
+    ]);
+    expect(out[1]).toStartWith("  ↳ （输出过长，前面截掉了）\n    ok line");
+    expect(out[1]).not.toContain("a1a1");
+  });
+
+  test("来源标签（meta.user / chat_id）也打码；窗口出口再兜一遍", () => {
+    const secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    expect(transcriptOfInbound("hello", { user: secret })).toBe("👤 [redacted]：hello");
+    expect(transcriptOfInbound("hello", { chat_id: `api:${secret}` })).not.toContain("sk-abc");
+    expect(stampTranscript(`未打码的 ${secret}`, new Date(2026, 9, 6, 9, 5, 7))).toBe("[09:05:07] 未打码的 [redacted]");
   });
 
   test("入站消息剥掉 bridge 的来源头，用户自己打的方括号照留", () => {

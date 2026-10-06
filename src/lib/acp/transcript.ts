@@ -9,13 +9,14 @@ import { redactSecrets } from "../redact-secrets.js";
 import { formatTool } from "../tool-display-format.js";
 import type { AcpFailure } from "./failures.js";
 import type { StopReport } from "./turn.js";
+import { OUTPUT_TAIL } from "./updates.js";
 
 type Rec = Record<string, any>;
 
 /** 正文 / reply 也设上限：一条消息可以是几百 KB（长报告），整段灌进 pane 会挤爆历史 */
 const RESULT_LINES = 4, RESULT_CHARS = 400, USER_CHARS = 2_000, TEXT_LINES = 200, TEXT_CHARS = 6_000, ONE_LINE = 200;
-/** 先脱敏再截断：只扫开头这么多，远大于截断后的长度，截断处不会留下半个密钥 */
-const SCAN_CHARS = 8_000;
+/** 先脱敏再截断：只扫开头这么多，比最长的显示（6000 字）多出一条长 JWT 的余量，截断处不会留下半个密钥 */
+const SCAN_CHARS = 16_000;
 const STAMP_WIDTH = "[00:00:00] ".length;
 
 /** 截到 lines 行、chars 字；截了就注明原本多少行 */
@@ -29,6 +30,12 @@ function clip(raw: string, lines: number, chars: number): string {
 
 const oneLine = (s: unknown): string => clip(String(s ?? "").replace(/\s*\n\s*/g, " "), 1, ONE_LINE);
 
+/** 交给 formatTool 之前逐个字段先打码：它会在 80 / 200 字处截断，截剩的半个密钥匹配不上规则 */
+const redactDeep = (v: unknown): unknown =>
+  typeof v === "string" ? redactSecrets(v.slice(0, SCAN_CHARS))
+    : Array.isArray(v) ? v.map(redactDeep)
+    : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x)])) : v;
+
 const PLAN_MARK: Record<string, string> = { completed: "✓", in_progress: "▸" };
 
 function toolLine(name: string, input: Rec): string {
@@ -38,13 +45,15 @@ function toolLine(name: string, input: Rec): string {
     const steps = (Array.isArray(input?.plan) ? input.plan : []).map((p: Rec) => `  ${PLAN_MARK[p?.status] ?? "·"} ${oneLine(p?.step)}`);
     return ["📋 计划", ...steps].join("\n");
   }
-  return oneLine(formatTool(name, input));
+  return oneLine(formatTool(redactSecrets(name), redactDeep(input)));
 }
 
 function resultLine(b: Rec): string[] {
   if (String(b.tool_use_id ?? "").startsWith("acp-plan-")) return []; // 计划工具的固定回执（updates.ts plan），没有信息量
   const c = b.content;
-  const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: Rec) => (x?.type === "text" ? String(x.text ?? "") : "")).join("\n") : "";
+  const raw = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: Rec) => (x?.type === "text" ? String(x.text ?? "") : "")).join("\n") : "";
+  // 只留了末尾的命令输出（updates.ts），开头那行是截出来的半行，里面可能是半个密钥、规则认不出：整行不显示
+  const text = raw.length >= OUTPUT_TAIL ? `（输出过长，前面截掉了）${raw.includes("\n") ? raw.slice(raw.indexOf("\n")) : ""}` : raw;
   const body = text.trim() ? clip(text, RESULT_LINES, RESULT_CHARS) : "（无输出）";
   return [`  ${b.is_error ? "✗" : "↳"} ${body.replace(/\n/g, "\n    ")}`];
 }
@@ -75,7 +84,7 @@ export function transcriptOfEntry(e: Rec): string[] {
 /** 收到的消息：只显示正文（不含宿主包的 channel 标签和前言；bridge 的来源头、它真加的打断抬头按历史解析的规则剥掉，来源看 👤 后的名字） */
 export function transcriptOfInbound(content: string, meta: Record<string, string>): string {
   const body = hasInboundHeader(content) ? stripChannelHeader(content, meta.interrupt_note === "true") : content.trim();
-  return `👤 ${meta.user || meta.chat_id || "?"}：${clip(body, Number.MAX_SAFE_INTEGER, USER_CHARS)}`;
+  return `👤 ${oneLine(meta.user || meta.chat_id || "?")}：${clip(body, Number.MAX_SAFE_INTEGER, USER_CHARS)}`; // 来源标签也是外来的，同样打码
 }
 
 /** 回合失败：原因原文（脱敏），按种类给前缀 */
@@ -88,7 +97,7 @@ export function transcriptOfStop(r: StopReport): string {
   return r.event === "Stop" ? "── 回合结束 ──" : r.interrupt ? "── 已打断 ──" : "── 回合失败 ──";
 }
 
-/** 一段 → 窗口里的行：首行带时间，续行缩进对齐 */
+/** 一段 → 窗口里的行：首行带时间，续行缩进对齐。进窗口前最后再打一遍码（各段已在截断前打过；兜住以后新加的显示） */
 export function stampTranscript(item: string, at: Date = new Date()): string {
-  return `[${at.toTimeString().slice(0, 8)}] ${item.replace(/\n/g, `\n${" ".repeat(STAMP_WIDTH)}`)}`;
+  return `[${at.toTimeString().slice(0, 8)}] ${redactSecrets(item).replace(/\n/g, `\n${" ".repeat(STAMP_WIDTH)}`)}`;
 }
