@@ -46,7 +46,8 @@ bridge ──ws（channel-server / Pi 扩展同一套协议，register 带 runti
   - 代理吞掉 register，只转发 channel-server 现有的请求类型，其它帧不转发。
 - **打断复用 Pi 扩展的 abort 帧协议**（`abortVia: "extension"`）：宿主收到 `abort` 时会话里有回合（调度器在跑 / 排着，或适配器报着 active）就取消，然后回 `abort_ack`（`lib/acp/abort.ts`）。
   - codex-acp：发 `session/cancel` 通知，`voided` 为空。
-  - Pi 适配器在 initialize 里声明 `_meta.claudestra.cancelReturnsQueue`，宿主改发 `_claudestra/cancel` 请求：适配器先 `clear_queue` 再 `abort`（pi 的 abort 会接着跑排队消息），清掉的正文交回宿主，宿主对回 steer 时记下的 message_id 填进 `voided`。叫停到 settle 之间（最多 60 秒）pi 续跑的轮再中止，这期间的插话不进 pi 的队列，停稳后另起一轮（同 `pi/abort-control.ts`）。
+  - Pi 适配器在 initialize 里声明 `_meta.claudestra.cancelReturnsQueue`，宿主改发 `_claudestra/cancel` 请求：适配器先 `clear_queue` 再 `abort`（pi 的 abort 会接着跑排队消息），清掉的交回宿主，宿主对回 steer 时记下的 message_id 填进 `voided`。叫停到 settle 之间（最多 60 秒）pi 续跑的轮再中止，这期间的插话不进 pi 的队列，停稳后另起一轮（同 `pi/abort-control.ts`）。
+  - 按身份对（R18）：对声明了 `cancelReturnsQueue` 的适配器，宿主每条 `_session/steering` 带 `_meta.claudestra.deliveryId`（宿主生成，每条不同）。适配器按代一条一条发插话（pi 入队前要 await input hook，并发时实际入队顺序可能和发出顺序相反；一条卡住到 steer 超时就放开下一条），pi 回 queued、且发出到回包之间 steering 正好新增一条（`queue_update` 每次入队各报一次）才记账，正文取那条（input hook / 模板展开改写后的）；新增不止一条（扩展在回包前塞的、超时那条晚到的）就认不出，不记身份、只记日志——宁可漏报，不把已执行的报成「不会执行」；handled / started 没入队、超时的都不记。账本里是排在 pi 队列里还没出现在上下文里的插话（pi 的 user `message_start` 按先后销掉），`_claudestra/cancel` 回 `{cleared, clearedIds}`：`cleared` 照旧是正文，`clearedIds` 是其中能对回 deliveryId 的那几条。宿主有 `clearedIds`（数组）就只按身份判作废——正文相同的两条一条已执行、一条被清掉时只报被清掉的；没有（老适配器）才按正文对，行为不变。对不上身份的清掉条目（扩展自己排的、超时后才入队的）不报作废，只在宿主日志记一句「可能没有执行」，发送方收不到提示（要提示得 bridge 侧加通知，另议）。codex-acp 没声明这项，steer 参数和叫停都不变。
 - **适配器自己开的回合**：线程从非 active 变 active 时宿主既没有 prompt 在途、也没有 steer 另起的回合在等，就当 external 槽跟到下一个 idle：期间升级闸答忙、叫停会取消，结束照常报 Stop / 补 reply（`session.ts` onSelfTurn → `turn.ts` track）。Pi 的扩展 `triggerTurn`、压缩后续跑走这条；codex-acp 只在宿主的 prompt / steer 期间变 active（它的 goal 续跑只经 `_session/goal`，宿主不调），行为不变。Pi 扩展的 notify / setStatus 脱敏后进宿主日志。
 
 ## 开关放在哪
