@@ -39,6 +39,9 @@ import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
+import { manualResumeTick } from "./manual-resume.js";
+import { resumeAutoWorkflow } from "./ledger-scheduler-resume.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -58,6 +61,8 @@ export interface AutoTickDeps {
   borrow?(): Promise<BorrowEntry[]>;
   /** A PR's state on GitHub, for mergeHandoff projects (scheduler-merge-handoff-tick.ts); absent = their handoff waits. */
   prState?: ReadPr;
+  /** CFG's RecoveryPolicyPort for MAN2's manual recovery (manual-resume.ts); absent = the file-backed recoveryPolicy. */
+  recoveryPolicy?: RecoveryPolicyPort;
 }
 
 interface CardOutcome { taskId: string; step: string; detail: string }
@@ -414,6 +419,12 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
+  try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
+    await manualResumeTick(db, projects, { resume: resumeAutoWorkflow, notifyPm: deps.notifyPm, now: deps.now, policy: deps.recoveryPolicy, yieldNow: pace?.yieldNow });
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    out.failed.push({ taskId: "manual-resume", error: oneLine((e as Error).message) });
+  }
   for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
