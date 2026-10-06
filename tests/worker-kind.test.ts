@@ -173,7 +173,7 @@ test("historical migration preserves live index semantics and reports remote or 
   const db = new Database(":memory:"), journal = new Database(":memory:");
   db.exec("CREATE TABLE tasks(agent TEXT, id TEXT, stage TEXT); CREATE TABLE meta(project TEXT, key TEXT, value TEXT)");
   db.exec("CREATE TABLE worker_agents(agent TEXT, sessionId TEXT, taskId TEXT, role TEXT, state TEXT, reason TEXT, createdAt INTEGER)");
-  db.exec("CREATE TABLE scheduler_sessions(agent TEXT, taskId TEXT, role TEXT, sessionId TEXT, state TEXT)");
+  db.exec("CREATE TABLE scheduler_sessions(agent TEXT, taskId TEXT, role TEXT, sessionId TEXT, state TEXT, transport TEXT)");
   db.exec("CREATE TABLE lend_orders(worker TEXT, taskId TEXT, status TEXT, orderId TEXT)");
   journal.exec("CREATE TABLE lend_orders(agent TEXT, sessionId TEXT, state TEXT, orderId TEXT)");
   const insert = db.prepare("INSERT INTO worker_agents VALUES (?, ?, 'T1', 'author', ?, ?, 1)");
@@ -184,7 +184,8 @@ test("historical migration preserves live index semantics and reports remote or 
   insert.run("reserved", "old", "retired", "registering");
   insert.run("failed", "old", "retired", "register_failed: fixture");
   db.exec(`INSERT INTO worker_agents VALUES ('debt-unknown', 'old', NULL, 'other', 'active', 'cleanup_pending:[]', 1)`);
-  db.exec("INSERT INTO scheduler_sessions VALUES ('bound-retired', 'T1', 'reviewer', 'old', 'retired')");
+  db.exec("INSERT INTO scheduler_sessions VALUES ('bound-retired', 'T1', 'reviewer', 'old', 'retired', 'acp')");
+  db.exec("INSERT INTO scheduler_sessions VALUES ('peer-namesake', 'T1', 'reviewer', 'old', 'retired', 'peer')");
   db.exec("INSERT INTO tasks VALUES ('task-only', 'T1', 'done')");
   db.exec("INSERT INTO lend_orders VALUES ('remote', 'T1', 'done', 'A-order')");
   journal.exec("INSERT INTO lend_orders VALUES ('foreign-local', 'old', 'acked', 'B-order')");
@@ -196,6 +197,7 @@ test("historical migration preserves live index semantics and reports remote or 
   agents.reused.sessionId = "new";
   agents.remote.kind = "worker";
   agents["debt-unknown"] = { sessionId: "old", kind: "worker" };
+  agents["peer-namesake"] = { sessionId: "old" };
   try {
     const liveBefore = [...cardWorkerIndex(db).keys()];
     expect(liveBefore).toEqual(["task-only"]);
@@ -205,13 +207,14 @@ test("historical migration preserves live index semantics and reports remote or 
     const plan = planWorkerKindMigration(db, agents, journal);
     expect(plan.error).toBeUndefined();
     expect(plan.changes.map((c) => c.agent).sort()).toEqual(["bound-retired", "debt", "foreign-local", "retired"]);
-    expect(plan.uncovered.map((r) => r.agent).sort()).toEqual(["debt-unknown", "missing-sid", "remote", "reused", "task-only"]);
+    expect(plan.uncovered.map((r) => r.agent).sort()).toEqual(["debt-unknown", "missing-sid", "peer-namesake", "remote", "reused", "task-only"]);
     applyWorkerKindMigration(agents, plan);
     expect(agents.master.kind).toBeUndefined();
     expect(agents["agent-project-pm"].kind).toBeUndefined();
     expect(agents.override.kind).toBe("main");
     expect(agents.remote.kind).toBe("worker");
     expect(agents["debt-unknown"].kind).toBe("worker");
+    expect(agents["peer-namesake"].kind).toBeUndefined();
     expect(planWorkerKindMigration(db, agents, journal).changes).toEqual([]);
     expect([...cardWorkerIndex(db).keys()]).toEqual(liveBefore);
     journal.exec("DROP TABLE lend_orders; CREATE TABLE lend_orders(agent TEXT)");
@@ -225,9 +228,9 @@ test("historical migration preserves live index semantics and reports remote or 
 test("migration uses registered session evidence, preserves unknown stock tags and never mutates during planning", () => {
   const db = new Database(":memory:");
   db.exec("CREATE TABLE tasks(agent TEXT, id TEXT, stage TEXT); CREATE TABLE meta(project TEXT, key TEXT, value TEXT)");
-  db.exec("CREATE TABLE scheduler_sessions(agent TEXT, taskId TEXT, role TEXT, sessionId TEXT, state TEXT)");
-  db.prepare("INSERT INTO scheduler_sessions VALUES (?, 'T1', 'author', 'original', 'active')").run("agent-rv-recorded");
-  db.prepare("INSERT INTO scheduler_sessions VALUES (?, 'T1', 'author', 'old', 'active')").run("agent-reused");
+  db.exec("CREATE TABLE scheduler_sessions(agent TEXT, taskId TEXT, role TEXT, sessionId TEXT, state TEXT, transport TEXT)");
+  db.prepare("INSERT INTO scheduler_sessions VALUES (?, 'T1', 'author', 'original', 'active', 'tmux')").run("agent-rv-recorded");
+  db.prepare("INSERT INTO scheduler_sessions VALUES (?, 'T1', 'author', 'old', 'active', 'acp')").run("agent-reused");
   const agents: Record<string, { sessionId?: string; kind?: "worker" | "main" }> = {
     "agent-rv-recorded": { sessionId: "original" }, "agent-reused": { sessionId: "new" },
     "agent-task-manual": {}, "agent-foreign-stock": { kind: "worker" },
@@ -243,6 +246,13 @@ test("migration uses registered session evidence, preserves unknown stock tags a
     expect(agents["agent-task-manual"].kind).toBeUndefined();
     expect(agents["agent-foreign-stock"].kind).toBe("worker");
     expect(planWorkerKindMigration(db, agents).changes).toEqual([]);
+    db.exec("ALTER TABLE scheduler_sessions DROP COLUMN transport");
+    delete agents["agent-rv-recorded"].kind;
+    const unknownTransport = planWorkerKindMigration(db, agents);
+    expect(unknownTransport.error).toBeUndefined();
+    expect(unknownTransport.missingSources).toContain("scheduler_sessions:transport_unknown");
+    expect(unknownTransport.changes).toEqual([]);
+    expect(agents["agent-foreign-stock"].kind).toBe("worker");
     db.exec("DROP TABLE meta");
     const failed = planWorkerKindMigration(db, agents);
     expect(failed.error).toBeDefined();

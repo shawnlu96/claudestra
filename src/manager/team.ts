@@ -234,9 +234,9 @@ export async function cmdWorkerKindMigrate(args: string[] = []): Promise<void> {
       if (!who.ok) throw new Error(who.error);
       const projects = await (await import("../lib/projects.js")).readProjects();
       const { isManagerRole, roleOf } = await import("../lib/ledger-stages.js"), { appendEvent } = await import("../lib/ledger-write.js");
+      (await import("../lib/scheduler-lease-env.js")).assertSchedulerLease();
       if (!projects.projects.some((p) => p.id === project) || !isManagerRole(roleOf(who.actor, { agent: null }, getMeta(db, project).pms)))
         throw new Error(`迁移审计需要项目 ${project} 的 PM / master / owner`);
-      (await import("../lib/scheduler-lease-env.js")).assertSchedulerLease();
       appendEvent(openLedger(reader.path), { actor: who.actor, now: Date.now(), dedupKey: key },
         { project, target: "", kind: "note", text: `Worker kind migration: ${fact.marked} saved changes`, data: fact });
     };

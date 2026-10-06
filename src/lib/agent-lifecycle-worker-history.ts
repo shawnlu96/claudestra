@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 export interface WorkerMigrationEvidence {
   agent: string; sessionId: string | null; taskId: string | null;
   source: "worker_agents" | "scheduler_sessions" | "tasks.agent" | "lend_orders.worker" | "lend_journal";
-  state: string; local: boolean; recordId?: string;
+  state: string; local: boolean; recordId?: string; transport?: string | null;
 }
 
 /** Historical evidence never enters the live index. A-side lend names belong to another instance, even if a local name matches. */
@@ -19,9 +19,12 @@ export function cardWorkerMigrationEvidence(db: Database, journalDb?: Database):
     evidence.push(...rows.map((row) => ({ ...row, source: "worker_agents" as const, local: true })));
   } else missingSources.push("worker_agents");
   if (has(db, "scheduler_sessions")) {
-    const rows = db.query("SELECT agent, sessionId, taskId, state FROM scheduler_sessions").all() as
-      { agent: string; sessionId: string | null; taskId: string; state: string }[];
-    evidence.push(...rows.map((row) => ({ ...row, source: "scheduler_sessions" as const, local: true })));
+    const columns = db.query("PRAGMA table_info(scheduler_sessions)").all() as { name: string }[];
+    const transport = columns.some((c) => c.name === "transport") ? "transport" : "NULL AS transport";
+    if (transport !== "transport") missingSources.push("scheduler_sessions:transport_unknown");
+    const rows = db.query(`SELECT agent, sessionId, taskId, state, ${transport} FROM scheduler_sessions`).all() as
+      { agent: string; sessionId: string | null; taskId: string; state: string; transport: string | null }[];
+    evidence.push(...rows.map((row) => ({ ...row, source: "scheduler_sessions" as const, local: row.transport === "acp" || row.transport === "tmux" })));
   } else missingSources.push("scheduler_sessions");
   if (has(db, "tasks")) {
     const rows = db.query("SELECT agent, id AS taskId, stage AS state FROM tasks WHERE agent IS NOT NULL AND agent != ''").all() as
