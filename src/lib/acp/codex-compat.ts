@@ -15,7 +15,7 @@ import { classify, type LockSet } from "./codex-compat-drift.js";
 import { generateLockSet, readLockSet } from "./codex-compat-lock.js";
 
 /**
- * 当前生效的 Codex 适配器。还没有任何东西选中自研的；切换时只改这里（readiness、doctor、更新闸都只认它）。
+ * 当前生效的 Codex 适配器。还没有任何东西选中自研的；切换时只改这里（readiness、更新闸都只认它；doctor 由切换卡接）。
  * ponytail: 恒为 upstream，切换卡接上真正的选择来源
  */
 export function selectedCodexAdapter(): "upstream" | "self" {
@@ -38,7 +38,7 @@ export interface ComboIdentity {
   schema: string;
 }
 
-export function comboIdentity(codexVersion: string, schemaSha: string, adapter = adapterFingerprint()): ComboIdentity {
+export function codexComboIdentity(codexVersion: string, schemaSha: string, adapter = adapterFingerprint()): ComboIdentity {
   return { id: sha256(`${adapter}\0${codexVersion}\0${schemaSha}`).slice(0, 16), adapter: adapter.slice(0, 12), codex: codexVersion, schema: schemaSha.slice(0, 12) };
 }
 
@@ -62,14 +62,14 @@ export function judgeCodexCompat(base: LockSet, next: LockSet, adapter?: string)
     verdict: r.level === "red" ? "incompatible" : "compatible",
     reasons: r.findings.map((f) => `[${LEVEL[f.level]}] ${f.where}：${f.why}`),
     codexVersion: next.lock.cliVersion,
-    identity: comboIdentity(next.lock.cliVersion, next.lock.schemaFullSha256, adapter),
+    identity: codexComboIdentity(next.lock.cliVersion, next.lock.schemaFullSha256, adapter),
   };
 }
 
 const unknown = (why: string): CodexCompat => ({ verdict: "unknown", reasons: [why] });
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** 对一个已在磁盘上的 codex 判兼容（readiness / doctor 用本机那个） */
+/** 对一个已在磁盘上的 codex 判兼容（readiness 用本机那个） */
 export function probeCodexCompat(cli: string, base?: LockSet): CodexCompat {
   try {
     return judgeCodexCompat(base ?? readLockSet(), generateLockSet(cli));

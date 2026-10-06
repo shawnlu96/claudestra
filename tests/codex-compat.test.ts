@@ -7,10 +7,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { adapterFingerprint, comboIdentity, judgeCodexCompat, probeCodexCompat, probeNpmCodexCompat } from "../src/lib/acp/codex-compat";
+import { adapterFingerprint, codexComboIdentity, judgeCodexCompat, probeCodexCompat, probeNpmCodexCompat } from "../src/lib/acp/codex-compat";
 import { readLockSet } from "../src/lib/acp/codex-compat-lock";
 import type { LockSet } from "../src/lib/acp/codex-compat-drift";
-import { acpDoctorChecks } from "../src/lib/doctor-acp";
 import { checkAcpReady } from "../src/lib/acp/readiness";
 
 const V159 = readLockSet();
@@ -52,15 +51,15 @@ describe("judgeCodexCompat：可解释的结论", () => {
 
 describe("组合身份", () => {
   const adapter = "a".repeat(64);
-  const base = comboIdentity("0.160.1", "s".repeat(64), adapter);
+  const base = codexComboIdentity("0.160.1", "s".repeat(64), adapter);
   test("稳定：同样三项同一个 id", () => {
-    expect(comboIdentity("0.160.1", "s".repeat(64), adapter)).toEqual(base);
+    expect(codexComboIdentity("0.160.1", "s".repeat(64), adapter)).toEqual(base);
     expect(base).toMatchObject({ adapter: "aaaaaaaaaaaa", codex: "0.160.1", schema: "ssssssssssss" });
   });
   test("schema / Codex 版本 / 适配器任一变了，id 就变", () => {
-    expect(comboIdentity("0.160.1", "t".repeat(64), adapter).id).not.toBe(base.id);
-    expect(comboIdentity("0.160.2", "s".repeat(64), adapter).id).not.toBe(base.id);
-    expect(comboIdentity("0.160.1", "s".repeat(64), "b".repeat(64)).id).not.toBe(base.id);
+    expect(codexComboIdentity("0.160.1", "t".repeat(64), adapter).id).not.toBe(base.id);
+    expect(codexComboIdentity("0.160.2", "s".repeat(64), adapter).id).not.toBe(base.id);
+    expect(codexComboIdentity("0.160.1", "s".repeat(64), "b".repeat(64)).id).not.toBe(base.id);
   });
   test("适配器源码指纹：只看 *.ts，改一个字节就变", () => {
     const d = tmp();
@@ -94,7 +93,7 @@ describe("探测失败一律「未知」，不抛", () => {
   });
 });
 
-describe("readiness / doctor 带上组合身份（自研生效时）", () => {
+describe("readiness 带上组合身份（自研生效时）", () => {
   const cliOk = { resolveBin: async () => "/x/codex", run: async () => ({ ok: true, out: "Usage: codex app-server [OPTIONS]", err: "" }), env: {} };
   const compatible = judgeCodexCompat(V159, as160());
   test("自研：只按协议判，不碰上游适配器的安装 / 对账", async () => {
@@ -109,13 +108,5 @@ describe("readiness / doctor 带上组合身份（自研生效时）", () => {
     const r = await checkAcpReady(false, { ...cliOk, selected: () => "self", compat: () => bad });
     expect(r.ok).toBe(false);
     expect(!r.ok && r.reason).toContain("不兼容");
-  });
-  test("doctor：自研换成组合身份那一条；有差异就 warn 提示真实验证", () => {
-    const ready = { ok: true as const, codexBin: "/x/codex", compat: compatible };
-    const clean = acpDoctorChecks([], ready, "0.160.1", null).find((c) => c.name === "自研适配器协议兼容");
-    expect(clean).toMatchObject({ status: "ok" });
-    expect(clean?.detail).toContain(compatible.identity!.id);
-    const yellow = { ...ready, compat: judgeCodexCompat(V159, as160((s) => void s.methods.allNotifications.push("zz/new"))) };
-    expect(acpDoctorChecks([], yellow, "0.160.1", null).find((c) => c.name === "自研适配器协议兼容")).toMatchObject({ status: "warn" });
   });
 });
