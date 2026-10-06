@@ -1152,8 +1152,8 @@ discord.once("ready", async () => {
   cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
 
   // v2.4.25+ 用量看板：启动后确保只读频道 + 常驻消息存在，并刷一次。延迟几秒等
-  // channel-server 重连、master TUI 稳定，再抓 /status。
-  setTimeout(() => void initStatsDashboard(discord), 6000);
+  // channel-server 重连再刷（只读缓存），并贴待批的 statusLine 包装卡。
+  setTimeout(() => void initStatsDashboard(discord, deliver), 6000);
 
   // 扫 skill + 为已有 active agent 扫项目级
   await scanGlobalSkills();
