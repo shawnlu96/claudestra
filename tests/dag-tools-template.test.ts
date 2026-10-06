@@ -120,10 +120,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** sha256 of product() for each path, recorded before N4 (no template parameter yet). */
+/** sha256 of product() for each path, recorded before N4 (no template parameter yet); local paths re-recorded when create gained --card (LIFE1). */
 const TEMPLATE_GOLDEN: Record<string, string> = {
-  normal: "378f7dcc875b5dad31a726ada137990f12634e12681addfe31c03856bebd3ff6",
-  rollback: "5875590e587fea208408d63360a6a9f98d8de330c3ef05ca68a042ae590911cf",
+  normal: "81d33e668bbeea36008dc1061db14e61ada2441eacd36c8e0da2a9d8468ccce2",
+  rollback: "0e1dd43ed558bc8237924410a328334c9bed3f048655894e23813571751adb3b",
   peer: "af265a9224d8e5232700af3223d7844dbbe60a4fcd61131123c128c6e8dc2409",
 };
 

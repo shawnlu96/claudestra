@@ -298,7 +298,8 @@ class Card {
     }
     if (seen.state === "result" && seen.outcome === "failed") {
       const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
-      return this.escalate(`${ref.agent} ${what}：${seen.failure.message}`, sent.id);
+      const m = await import("./scheduler-model-wiring.js"); // MODELW：只多记一条，on 的计划附在原因后（长错误先截，计划不被截掉）
+      return this.escalate(m.failedReason(`${ref.agent} ${what}`, seen.failure.message, await m.modelOutcomeStep(this, sent, ref, seen.failure)), sent.id);
     }
     const alarm = await this.unclaimed(sent, ref);
     if (alarm) return alarm;
