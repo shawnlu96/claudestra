@@ -264,7 +264,8 @@ describe("i28-CIF2 the merged-in head keeps its review only when the PR side did
     work = join(root, "work");
     await runBounded(["git", "init", "-q", "--bare", "-b", "main", join(root, "origin.git")], { timeoutMs: 30_000 });
     await runBounded(["git", "init", "-q", "-b", "main", work], { timeoutMs: 30_000 });
-    await sh("remote", "add", "origin", join(root, "origin.git"));
+    await sh("remote", "add", "origin", "https://github.com/example/repo.git"); // MAINP2: the proof binds origin to the PR's repository
+    await sh("remote", "set-url", "--push", "origin", join(root, "origin.git"));
     await commitFile(STALE, "expect(window).toBe('2026-10-02T19:00')\n", "base");
     await sh("push", "-q", "origin", "main");
     await sh("checkout", "-q", "-b", "feature");
@@ -286,8 +287,11 @@ describe("i28-CIF2 the merged-in head keeps its review only when the PR side did
       FROM events WHERE target='T9' AND kind='review'`).run(reviewed); // events are append-only: the same review, on the real head
     c.setSnap(snapOf(reviewed, "fail"));
   };
+  /** The network fetch is served from the local bare repo; everything else is real local git. */
+  const localFetch: typeof runBounded = (argv, opts) =>
+    runBounded(argv[0] === "git" && argv[1] === "fetch" ? argv.map((a) => (a === "origin" ? join(root, "origin.git") : a)) : argv, opts);
   const carry: MergeExternal["carryReview"] = (pr, oldHead, newHead) =>
-    mergeExternal(parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: work } } }).projects.p!)
+    mergeExternal(parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: work } } }).projects.p!, localFetch)
       .carryReview(pr, oldHead, newHead);
 
   test("first parent = reviewed head, only main merged in → no re-review, the run waits on the new head's CI", async () => {
