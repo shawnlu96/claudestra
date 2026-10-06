@@ -40,7 +40,8 @@ test("missing choice and nonexistent/personal local projects never redeem or alt
   const fetcher = (async () => { calls++; throw new Error("must not redeem"); }) as unknown as typeof fetch;
   const code = responses.invite({ personId: "preflight" }).joinCode;
   for (const localProjectId of [undefined, "missing", "personal"]) {
-    await expect(joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir, localProjectId, fetch: fetcher })).rejects.toThrow();
+    await expect(joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir, localProjectId, fetch: fetcher,
+      expectedProject: { centerId: code.split(".")[1]!, teamId: "team-a", projectId: "project-a", name: "Project A" } })).rejects.toThrow();
     expect(readFileSync(file)).toEqual(before);
     expect(existsSync(join(dir, "shared-ledger-bindings.json"))).toBe(false);
   }
@@ -53,7 +54,7 @@ test("a central-project collision after redemption preserves the original creden
   await joinFixture({ url, code, key, subject: "owner:self", stateDir: dir });
   const files = ["shared-ledger-credentials.json", "shared-ledger-bindings.json"].map(f => join(dir, f));
   const before = files.map(f => readFileSync(f));
-  await expect(joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir, localProjectId: "project-b" })).rejects.toThrow("already bound");
+  await expect(joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir, localProjectId: "project-b" })).rejects.toThrow("pinned center");
   expect(files.map(f => readFileSync(f))).toEqual(before);
 });
 

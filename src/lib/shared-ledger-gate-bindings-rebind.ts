@@ -13,6 +13,6 @@ export async function rebindSharedLedgerBinding(previous: SharedLedgerBinding, l
     if (!current.some(b => sameSharedLedgerBinding(b, previous))) throw new Error("绑定已变化，请重新检查");
     const credential = resolveSharedLedgerCredential("owner:self", "person", previous.centerId, previous.teamId, previous.projectId, "read", dir);
     if (!credential) throw new Error("本机 owner 缺少该共享项目的读取凭据");
-    if (!sharedLedgerJoinPinsMatch(credential, localProjectId, previous.projectId, dir)) throw new Error("所选项目或中心与已有 pins 不符");
+    if (!sharedLedgerJoinPinsMatch(credential, localProjectId, previous.projectId, dir, current.filter(b => !sameSharedLedgerBinding(b, previous)))) throw new Error("所选项目或中心与已有 pins 不符");
   });
 }

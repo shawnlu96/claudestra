@@ -4,6 +4,7 @@ import { validateProjectDirs } from "../lib/project-dirs.js";
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { loadRegistry, saveRegistry, normalizeName, output } from "./core.js";
 import { requireOwnerOrMaster, requireProjectWriter } from "./project-guard.js";
+import { withSharedLedgerProjectMutation } from "../lib/shared-ledger-project-link-save.js";
 import { sharedLedgerProjectMutationError } from "../lib/shared-ledger-project-link.js";
 
 async function cmdProjectAdd(
@@ -207,11 +208,11 @@ export async function runProjectCommand(cmd: string, args: string[]): Promise<vo
     const denied = await requireOwnerOrMaster("取消个人项目标记");
     if (denied) return output({ ok: false, code: "forbidden", ...denied });
   }
-  if (cmd === "project-add") return cmdProjectAdd(a, opts);
-  if (cmd === "project-edit") return cmdProjectEdit(a, opts);
-  if (cmd === "project-remove") return cmdProjectRemove(a);
+  if (cmd === "project-add") return withSharedLedgerProjectMutation(() => cmdProjectAdd(a, opts));
+  if (cmd === "project-edit") return withSharedLedgerProjectMutation(() => cmdProjectEdit(a, opts));
+  if (cmd === "project-remove") return withSharedLedgerProjectMutation(() => cmdProjectRemove(a));
   if (cmd === "project-assign") return cmdProjectAssign(a, b);
-  if (cmd === "project-merge") return cmdProjectMerge(a, b);
+  if (cmd === "project-merge") return withSharedLedgerProjectMutation(() => cmdProjectMerge(a, b));
 }
 
 /** Merge directories and agent assignments into dst, then remove src. Report the old empty category. */

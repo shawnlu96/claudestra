@@ -1,6 +1,6 @@
 import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cmdSharedLedgerJoin, parseJoinArgs, readJoinCodeFile } from "../src/manager/shared-ledger-join-cmd.js";
@@ -50,10 +50,17 @@ describe("manager shared-ledger-join", () => {
     const code = mint("peer-argv");
     expect(parseJoinArgs(["--url", url, "--code", code])).toContain("命令行");
     expect(parseJoinArgs(["--url", url, code])).toContain("命令行");
-    const r = await run(["--url", url, "--code", code]);
+    const r = await run(["--project", "project-a", "--url", url, "--code", code]);
     expect(r.result.ok).toBe(false);
     expect(r.text.includes(code)).toBe(false);
     expect(parseJoinArgs([])).toContain("usage");
+  });
+
+  test("missing project fails before reading or redeeming code", async () => {
+    let reads = 0;
+    const r = await run(["--url", url], async () => { reads++; return mint("not-redeemed"); });
+    expect(r.result.ok).toBe(false);
+    expect(reads).toBe(0);
   });
 
   test("code files must be 0600", () => {

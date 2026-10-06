@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeProjects } from "../src/lib/projects.js";
-import { replaceSharedLedgerBindings, readSharedLedgerBindings, type SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
+import { replaceSharedLedgerBindings, readSharedLedgerBindings, setSharedLedgerBinding, type SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -55,4 +55,59 @@ test("concurrent authorizations cannot both replace the same expected rows", asy
   const result = await Promise.allSettled([1, 2].map(() => replaceSharedLedgerBindings({ expected: [old], next }, dir)));
   expect(result.filter(r => r.status === "fulfilled")).toHaveLength(1);
   expect(readSharedLedgerBindings(dir)).toEqual([next]);
+});
+
+const legacyShared = { centerId: "center", teamId: "team", projectId: "claude-orchestrator" };
+function legacyWorld() {
+  const dir = mkdtempSync(join(tmpdir(), "sl-replace-")); roots.push(dir);
+  const projects = ["claudestra", "second", "personal"].map(id => ({ id, name: id, dirs: [], personal: id === "personal" }));
+  writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects }));
+  const file = join(dir, "shared-ledger-bindings.json");
+  return { dir, file };
+}
+
+test("repair dangling and duplicate center rows with exact 0600 backup; unrelated state survives", async () => {
+  for (const duplicate of [false, true]) {
+    const { dir, file } = legacyWorld();
+    const expected = [{ ...legacyShared, localProjectId: "claude-orchestrator" }];
+    if (duplicate) expected.push({ ...legacyShared, localProjectId: "second" });
+    const before = JSON.stringify(expected, null, 3) + "\n";
+    writeFileSync(file, before, { mode: 0o600 });
+    const credentials = join(dir, "shared-ledger-credentials.json");
+    writeFileSync(credentials, "untouched credentials\n", { mode: 0o600 });
+    const next = { ...legacyShared, localProjectId: "claudestra" };
+    const result = await replaceSharedLedgerBindings({ expected, next }, dir);
+    expect(readSharedLedgerBindings(dir)).toEqual([next]);
+    expect(readFileSync(result.backupPath!, "utf8")).toBe(before);
+    expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    expect(readFileSync(credentials, "utf8")).toBe("untouched credentials\n");
+  }
+});
+
+test("replacement rejects stale expected, personal, missing, and occupied local project without changing bytes", async () => {
+  const { dir, file } = legacyWorld();
+  const old = { ...legacyShared, localProjectId: "gone" };
+  const other = { ...legacyShared, projectId: "other", localProjectId: "second" };
+  writeFileSync(file, JSON.stringify([old, other], null, 1), { mode: 0o600 });
+  const before = readFileSync(file);
+  for (const localProjectId of ["personal", "missing", "second"]) {
+    await expect(replaceSharedLedgerBindings({ expected: [old], next: { ...legacyShared, localProjectId } }, dir)).rejects.toThrow();
+    expect(readFileSync(file)).toEqual(before);
+  }
+  await expect(replaceSharedLedgerBindings({ expected: [], next: { ...legacyShared, localProjectId: "claudestra" } }, dir)).rejects.toThrow("changed");
+  expect(readFileSync(file)).toEqual(before);
+});
+
+test("ordinary setter enforces both unique keys and personal protection, allowing only identical retry", async () => {
+  const { dir, file } = legacyWorld();
+  const first = { ...legacyShared, localProjectId: "claudestra" };
+  await setSharedLedgerBinding(first, dir);
+  const before = readFileSync(file);
+  for (const next of [{ ...legacyShared, localProjectId: "second" }, { ...first, projectId: "another" },
+    { ...first, localProjectId: "personal" }, { ...first, localProjectId: "missing" }]) {
+    await expect(setSharedLedgerBinding(next, dir)).rejects.toThrow();
+    expect(readFileSync(file)).toEqual(before);
+  }
+  await setSharedLedgerBinding(first, dir);
+  expect(readSharedLedgerBindings(dir)).toEqual([first]);
 });
