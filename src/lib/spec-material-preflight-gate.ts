@@ -8,7 +8,7 @@
  * specRev stay as they were. A diagnostic carries only a fixed category, the material's index, the rule version, the content
  * digest and a fixed advice, never the refused text or the gate's message. A pass receipt holds for exactly that rule version,
  * content, specRev and target; it is never a pass for the offer, which runs the full gate again. A preflight that cannot run
- * (no spec file, an unexpected error) is "unavailable": no receipt, no block. tests/spec-material-preflight*.test.ts.
+ * (no spec file, an unexpected error) is "unavailable": no receipt; on refuses it, observe records it (see unavailable()). tests/spec-material-preflight*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -17,6 +17,7 @@ import { restateFacts } from "./ledger-lend-relay.js";
 import { writeOrderWire } from "./ledger-lend-lease.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
+import { appendEvent } from "./ledger-write.js";
 import { redactForPeer } from "./dispatch-redact.js";
 import { lendBranch } from "./lend-git.js";
 import { aliasFindings, cardHeads, shortenShas } from "./order-gate-heads.js";
@@ -160,6 +161,24 @@ function preflightLine(r: Extract<PreflightResult, { status: "blocked" }>): stri
   return `规格写入预检：派单材料过不了外发闸（类别 ${r.category}，材料 ${at}，规则版本 ${r.ruleVersion.slice(0, 16)}，内容摘要 ${r.digest.slice(0, 16)}）`;
 }
 
+const UNAVAILABLE_OP = "spec_preflight_unavailable";
+/**
+ * A preflight that could not run is never a pass and never silent: a card with no spec at all has nothing to check (old path);
+ * otherwise on refuses (the writer rolls back, nothing changes) and observe keeps the write but leaves one readable note per
+ * card + specRev + material + reason + rules (fixed words, no foreign text), so the PM can see this write was not preflighted.
+ */
+function unavailable(db: Database, ctx: WriteCtx, act: boolean, after: LedgerTask, r: Extract<PreflightResult, { status: "unavailable" }>): PreflightResult {
+  if (r.reason === "no_spec" && !after.spec) return r;
+  const line = `规格写入预检不可用（原因 ${r.reason}，规则版本 ${r.ruleVersion.slice(0, 16)}）：无收据、不放行任何外发`;
+  console.error(`[spec-preflight] ${after.id} ${line}`);
+  if (act) throw new LedgerError("invalid", `${line}；on 下不写，规格与版本不变。先让规格文件可读再写。`);
+  const key = createHash("sha256").update(JSON.stringify([after.specRev, after.spec ?? null, after.extra?.fileGlobs ?? null])).digest("hex");
+  appendEvent(db, { actor: "scheduler", now: ctx.now ?? Date.now(), dedupKey: `spec-preflight-unavailable:${after.project}:${after.id}:${r.reason}:${key.slice(0, 24)}:${r.ruleVersion.slice(0, 12)}` },
+    { project: after.project, target: after.id, kind: "note", text: line,
+      data: { op: UNAVAILABLE_OP, mechanism: MECHANISM, preflight: { status: r.status, reason: r.reason, ruleVersion: r.ruleVersion, specRev: after.specRev, actor: ctx.actor } } });
+  return r;
+}
+
 /**
  * The writer's hook, called inside createTask / setTask's transaction after the row is written. off → nothing runs; observe →
  * a would-block note (once per card + content + rules); on → a refusal throws so the transaction rolls back.
@@ -171,7 +190,7 @@ function preflightTaskWrite(db: Database, ctx: WriteCtx, before: LedgerTask | nu
   catch (e) { decision = { kind: "skip", reason: `恢复策略读取失败，按 off：${(e as Error).message}`.slice(0, 200) }; }
   if (decision.kind === "skip") return { status: "skipped", reason: decision.reason };
   const r = preflightSpecMaterial(db, after);
-  if (r.status === "unavailable" && r.reason === "error") console.error(`[spec-preflight] ${after.id} 预检不可用（无收据、不放行任何外发）`);
+  if (r.status === "unavailable") return unavailable(db, ctx, decision.kind === "act", after, r);
   if (r.status !== "blocked") return r;
   if (decision.kind === "act") throw new LedgerError("invalid", `${preflightLine(r)}；没写，规格与版本不变。${r.advice}`);
   recordObserved(db, { project: after.project, mechanism: MECHANISM, target: after.id, actionKey: `spec-preflight:${r.digest.slice(0, 24)}:${r.ruleVersion.slice(0, 12)}`,

@@ -16,7 +16,7 @@ import { recoveryPolicy, type RecoveryPolicyPort } from "../src/lib/recovery-pol
 import {
   preflightSpecMaterial, receiptHolds, ruleVersion, useSpecPreflightPolicy,
 } from "../src/lib/spec-material-preflight-gate.js";
-import { registerSpecPreflight, type PreflightReceipt } from "../src/lib/spec-material-preflight.js";
+import { registerSpecPreflight, runSpecPreflight, type PreflightReceipt } from "../src/lib/spec-material-preflight.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -146,14 +146,47 @@ describe("the writer's hook (createTask / setTask) under the one policy port", (
     expect(observed()).toEqual([]);
   });
 
-  test("a process that never armed the hook keeps the old path even under on (skipped, never a pass)", () => {
+  test("a process that never armed the hook answers unavailable (unarmed), not off and never a pass", () => {
     mode = "on";
     const prev = registerSpecPreflight(null);
     try {
-      newCard(file("unarmed.md", DIRTY));
-      expect(getTask(db, "T1")!.rev).toBe(1);
-      expect(observed()).toEqual([]);
+      const t = newCard(file("unarmed.md", DIRTY));
+      expect(t.row.rev).toBe(1);
+      expect(runSpecPreflight(db, owner, null, t.row)).toEqual({ status: "unavailable", reason: "unarmed", ruleVersion: "" });
     } finally { registerSpecPreflight(prev); }
+  });
+
+  test("observe: a spec that cannot be read keeps the write and leaves one readable unavailable note (fixed words only)", () => {
+    const missing = join(dir, "missing-obs.md");
+    newCard(missing);
+    setTask(db, owner, { id: "T1", rev: 1, patch: { title: "renamed" } as never });
+    newCard(missing, "T2");
+    const notes = listEvents(db, { target: "T1" }).filter((e) => e.kind === "note" && e.data.op === "spec_preflight_unavailable");
+    expect(notes.length).toBe(1);
+    expect(notes[0]!.data.preflight).toMatchObject({ status: "unavailable", reason: "no_spec", ruleVersion: ruleVersion(), specRev: 1 });
+    expect(notes[0]!.text).toContain("无收据");
+    expect(notes[0]!.text).not.toContain(dir);
+    expect(observed()).toEqual([]);
+  });
+
+  test("on: a spec that cannot be read is refused, card and versions unchanged; a card with no spec at all keeps the old path", () => {
+    mode = "on";
+    expect(() => newCard(join(dir, "missing-on.md"))).toThrow(/预检不可用（原因 no_spec/);
+    expect(getTask(db, "T1")).toBeNull();
+    expect(listEvents(db, { target: "T1" })).toEqual([]);
+    createTask(db, owner, { project: P, id: "T3", title: "T3", kind: "code", agent: "agent-dev" } as never);
+    expect(getTask(db, "T3")!.rev).toBe(1);
+    expect(listEvents(db, { target: "T3" }).filter((e) => e.kind === "note")).toEqual([]);
+  });
+
+  test("on: the gate failing unexpectedly is unavailable(error) and refused; off records nothing", () => {
+    mode = "on";
+    newCard(file("err.md", CLEAN));
+    const t = getTask(db, "T1")!;
+    expect(preflightSpecMaterial(db, t, () => { throw new Error("boom"); })).toMatchObject({ status: "unavailable", reason: "error" });
+    mode = "off";
+    setTask(db, owner, { id: "T1", rev: 1, patch: { spec: join(dir, "missing-off.md") } as never });
+    expect(listEvents(db, { target: "T1" }).filter((e) => e.kind === "note")).toEqual([]);
   });
 
   test("CAS conflict is the writer's own answer; the preflight neither runs nor records", () => {

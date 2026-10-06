@@ -18,10 +18,10 @@ const WRITER = `
 const { openLedger, closeLedger } = await import(${JSON.stringify(join(ROOT, "src/lib/ledger-store.ts"))});
 const { setTask } = await import(${JSON.stringify(join(ROOT, "src/lib/ledger-write.ts"))});
 await import(${JSON.stringify(join(ROOT, "src/manager/ledger-write-cmds.ts"))}); // what a \`ledger\` CLI process loads: arms the preflight
-const [path, spec] = process.argv.slice(-2);
+const [path, spec, rev] = process.argv.slice(-3);
 const db = openLedger(path);
 await Bun.sleep(30);
-try { setTask(db, { actor: "owner", now: 3000 }, { id: "T1", rev: 1, patch: { spec } }); console.log("ok"); }
+try { setTask(db, { actor: "owner", now: 3000 }, { id: "T1", rev: Number(rev), patch: { spec } }); console.log("ok"); }
 catch (e) { console.log(e.code ?? "error"); }
 closeLedger(path);
 `;
@@ -41,7 +41,7 @@ function setup(mode: "on" | "observe") {
   createTask(db, { actor: "owner", now: 2000 }, { project: P, id: "T1", title: "T1", kind: "code", spec: start, agent: "agent-dev" } as never);
   closeLedger(path);
   const env = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(dir, "rt") };
-  const spawn = (spec: string) => Bun.spawn(["bun", "-e", WRITER, path, spec], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" });
+  const spawn = (spec: string, rev = 1) => Bun.spawn(["bun", "-e", WRITER, path, spec, String(rev)], { cwd: ROOT, env, stdout: "pipe", stderr: "pipe" });
   return { path, clean, dirty, start, spawn };
 }
 
@@ -54,7 +54,10 @@ describe("two processes, one card, real policy file", () => {
   test("on: the dirty write is refused and rolled back in its own process; the clean one wins the CAS", async () => {
     const s = setup("on");
     const [a, b] = [s.spawn(s.dirty), s.spawn(s.clean)];
-    expect([await out(a), await out(b)]).toEqual(["invalid", "ok"]);
+    // Whichever commits first decides the dirty one's answer: refused (rolled back) before the clean write, CAS conflict after it.
+    expect(["invalid", "conflict"]).toContain(String(await out(a)));
+    expect(await out(b)).toBe("ok");
+    expect(await out(s.spawn(s.dirty, 2))).toBe("invalid");
     const db = openLedger(s.path);
     expect(getTask(db, "T1")).toMatchObject({ spec: s.clean, rev: 2 });
     expect(listEvents(db, { target: "T1" }).filter((e) => e.kind === "task").length).toBe(2);
