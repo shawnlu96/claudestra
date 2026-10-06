@@ -48,13 +48,15 @@ interface SweepOptions {
   active?: () => void;
   log: (message: string) => void;
   removeConfig?: typeof removeClaudeOrderConfig;
+  /** The batch this pass already reaped; recomputing it here could pick an order whose processes were never reaped. */
+  batch?: Candidate[];
 }
 
 type Candidate = { row: Stopped; kept: Retention };
 const ordered = (db: Database): Candidate[] =>
   stoppedRows(db).map((row) => ({ row, kept: retention(db, row) })).sort((a, b) => a.kept.stoppedAt - b.kept.stoppedAt);
 
-/** This pass's deletion batch, oldest first; reapDueStopped and the sweep share it so nothing is deleted unreaped. */
+/** This pass's deletion batch, oldest first; the tick reaps exactly this batch and hands it to the sweep. */
 function dueBatch(rows: Candidate[], now: number, root: string): Candidate[] {
   const gone = (id: string) => { try { return !hasCheckout(id, root); } catch { return false; } }; // 读不了算还在：交给 sweep 去试并记日志
   return rows.filter(({ row, kept }) => Number.isFinite(kept.stoppedAt) && now - kept.stoppedAt >= STOPPED_RETENTION_MS && !(kept.cleaned && gone(row.orderId)))
@@ -70,7 +72,7 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
     // Snapshot before this pass retries settlement; late receipts/notices must not keep extending retention.
     if (getMeta(db, keyOf(row.orderId)) === null) setMeta(db, keyOf(row.orderId), JSON.stringify(kept));
   }
-  const batch = dueBatch(rows, o.now ?? Date.now(), root);
+  const batch = o.batch ?? dueBatch(rows, o.now ?? Date.now(), root);
   for (const { row, kept } of batch) {
     try {
       o.active?.();
@@ -92,17 +94,14 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
   return batch.length;
 }
 
-/** Processes left under a due checkout are reaped before sweepStoppedWork deletes it (same batch, same order). */
-async function reapDueStopped(d: LoopDeps, root: string): Promise<void> {
-  if (!d.reapOrder) return;
-  for (const { row } of dueBatch(ordered(d.db), d.now(), root)) await d.reapOrder(row.orderId);
-}
-
 /** Production entry and tests share the same once-per-pass cleanup, including an idle/disabled lender. */
 export async function lendTickWithRetention(d: LoopDeps, active: () => void, root = LEND_ROOT): Promise<TickResult> {
-  await reapDueStopped(d, root);
+  // One clock read, one batch: re-reading after the reaps (TERM grace takes seconds) lets an order turn due and be deleted unreaped.
+  const now = d.now();
+  const batch = dueBatch(ordered(d.db), now, root);
+  if (d.reapOrder) for (const { row } of batch) await d.reapOrder(row.orderId);
   await d.reapOrphans?.();
-  sweepStoppedWork(d.db, { root, now: d.now(), active, log: d.log });
+  sweepStoppedWork(d.db, { root, now, batch, active, log: d.log });
   return (await import("./lend-loop.js")).lendTick(d);
 }
 

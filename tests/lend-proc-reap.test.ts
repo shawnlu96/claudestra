@@ -181,6 +181,20 @@ test("stopped 到期：回收批次与删除批次一致（库内顺序与停止
   expect(reaped.sort()).toEqual(deleted.sort());
 });
 
+test("stopped 到期：回收与删除之间时钟跨过 24 小时门槛，也不删没回收过的目录", async () => {
+  const f = fixture();
+  f.add("edge", "stopped", NOW - DAY + 1); // 第一次读时钟差 1ms 到期，第二次读刚好到期
+  const h = harness();
+  cleanups.push(() => h.db.close());
+  h.lend.enabled = false;
+  h.lend.lend = [];
+  const clock = [NOW, NOW + 1];
+  const reaped: string[] = [];
+  const d = { ...h.d, db: f.db, now: () => clock.length > 1 ? clock.shift()! : clock[0], reapOrder: async (id: string) => void reaped.push(id) };
+  await lendTickWithRetention(d, () => {}, f.root);
+  expect(existsSync(orderDir("edge", f.root)) ? [] : ["edge"]).toEqual(reaped);
+});
+
 test("兜底：journal 读不到整轮跳过，记一行原因", async () => {
   const f = fixture();
   const dir = f.add("old", "stopped");
