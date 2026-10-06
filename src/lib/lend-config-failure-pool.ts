@@ -8,8 +8,10 @@
  *   shows the would-be pause). No notice is raised on A.
  * - Recovery only from the lender's explicit declaration (hello configRecovered: the owner recovered fault generation gen,
  *   covering these orders), never a restart, slots going back up, a mode switch or elapsed time. Under on only, inside
- *   recordHello's transaction; it records `through` = the newest event seq, CAS on the record; a later failure has a higher
- *   seq and an order no old declaration names.
+ *   recordHello's transaction, CAS on the record. Recovery is per order, not a seq watermark: the record keeps the orders the
+ *   accepted declarations covered, and a fault counts as recovered only when its own order is covered, or it is the lender's
+ *   refusal naming a covered root order. Releases may arrive in any order and a declaration may arrive before them; an
+ *   order no declaration named (a newer generation's fault) stays active whatever arrives late.
  * tests/lend-config-failure*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -23,9 +25,12 @@ import { CONFIG_FAILURE_CATEGORY, classifyConfigFailure, configFailureMode, type
 const START_FAILURE = "起 worker 失败：";
 
 export interface PeerConfigFailure { seq: number; at: number; orderId: string; family: LendFamily; category: typeof CONFIG_FAILURE_CATEGORY; text: string }
-/** gen = the lender's declared fault generation last accepted; through = newest event seq then; order = the fault order it covered. */
-interface Recovery { gen: number; through: number; boot: string; at: number; order: string }
-
+/** gen = the lender's declared fault generation last accepted (monotonic); orders = the A-side orders declarations covered. */
+interface Recovery { gen: number; orders: string[]; boot: string; at: number }
+/** Covered orders kept per peer + family (each declaration names at most 20; generations are owner actions, so this is ample). */
+const COVERED_MAX = 500;
+/** The order a lender refusal names as its fault's root (startConfigRefusal's detail). */
+const REFUSAL_ROOT = /配置故障未恢复，没有再启动（第 \d+ 代，单 ([^）\s]+)）/;
 const recoveryKey = (peer: string, family: LendFamily): string => `lend:config-recovery:${JSON.stringify([peer, family])}`;
 
 const hasTable = (db: Database, name: string): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
@@ -37,18 +42,20 @@ function readRecovery(db: Database, peer: string, family: LendFamily): { raw: st
   try { return { raw, r: raw ? (JSON.parse(raw) as Recovery) : null }; } catch { return { raw, r: null }; }
 }
 
-/** Per family, the newest configuration-class start failure of this peer after its last recovery. */
+/** Per family, the newest configuration-class start failure of this peer whose order no accepted declaration covered. */
 export function activeConfigFailures(db: Database, peer: string): Partial<Record<LendFamily, PeerConfigFailure>> {
   const out: Partial<Record<LendFamily, PeerConfigFailure>> = {};
   if (!hasTable(db, "lend_orders")) return out;
   const q = db.query(`SELECT e.seq, e.ts, e.text, o.orderId FROM events AS e JOIN lend_orders AS o ON o.orderId = json_extract(e.data, '$.lend.orderId')
     WHERE e.kind = 'note' AND json_extract(e.data, '$.lend.op') = 'release' AND json_extract(e.data, '$.lend.reason') = 'not_started'
-    AND json_extract(e.data, '$.lend.peer') = ? AND o.peer = ? AND o.family = ? AND e.seq > ? ORDER BY e.seq DESC`);
+    AND json_extract(e.data, '$.lend.peer') = ? AND o.peer = ? AND o.family = ? ORDER BY e.seq DESC`);
   for (const family of LEND_FAMILIES) {
-    const through = readRecovery(db, peer, family).r?.through ?? 0;
-    for (const r of q.all(peer, peer, family, through) as { seq: number; ts: number; text: string; orderId: string }[]) {
+    const covered = new Set(readRecovery(db, peer, family).r?.orders ?? []);
+    for (const r of q.all(peer, peer, family) as { seq: number; ts: number; text: string; orderId: string }[]) {
       const at = r.text.indexOf(START_FAILURE);
       if (at < 0 || !classifyConfigFailure(r.text.slice(at + START_FAILURE.length))) continue;
+      const root = REFUSAL_ROOT.exec(r.text)?.[1];
+      if (covered.has(r.orderId) || (root && covered.has(root))) continue;
       out[family] = { seq: r.seq, at: r.ts, orderId: r.orderId, family, category: CONFIG_FAILURE_CATEGORY, text: r.text };
       break;
     }
@@ -76,20 +83,21 @@ export function configFailureV2(db: Database, peer: string, v2: PeerFacts["v2"])
  * Inside recordHello's transaction, after the hello was applied; only under on (observe / off write nothing). Recovery only
  * from the lender's explicit declaration (hello configRecovered, sent by B only after its owner's recoverProviderConfigFailure
  * succeeded): for the same peer + family, the declared fault generation must be above the one last accepted (persisted here;
- * an older or repeated generation is refused) and its evidence orders must include this family's newest fault order. So a
- * restart, a mode switch on B, a capacity change or a replayed old hello (whatever its seq or boot) never recovers, and an old
- * declaration never clears a newer fault (a later failure's order is not in it). CAS on the record.
+ * an older or repeated generation is refused), and it covers exactly its listed orders that are this peer + family's orders
+ * on A, whether their releases arrived already or arrive later. Nothing else is cleared: a restart, a mode switch on B, a
+ * capacity change or a replayed hello declares nothing, and an old declaration never covers a newer generation's order.
  */
 export function recoverOnRedeclare(db: Database, peer: string, _prev: LendPeer | null, req: HelloRequest, now: number): void {
-  if (configFailureMode() !== "on" || !req.configRecovered) return;
-  const active = activeConfigFailures(db, peer);
+  if (configFailureMode() !== "on" || !req.configRecovered || !hasTable(db, "lend_orders")) return;
   for (const family of LEND_FAMILIES) {
-    const fault = active[family], decl = req.configRecovered[family];
-    if (!fault || !decl) continue;
+    const decl = req.configRecovered[family];
+    if (!decl) continue;
     const { raw, r } = readRecovery(db, peer, family);
-    if (decl.gen <= (r?.gen ?? 0) || !decl.orders.includes(fault.orderId)) continue;
-    const top = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number | null }).s ?? 0;
-    recoverCas(db, peer, family, raw, { gen: decl.gen, through: top, boot: req.boot, at: now, order: fault.orderId });
+    if (decl.gen <= (r?.gen ?? 0)) continue;
+    const mine = decl.orders.filter((id) => db.query("SELECT 1 FROM lend_orders WHERE orderId = ? AND peer = ? AND family = ?").get(id, peer, family));
+    if (!mine.length) continue;
+    const orders = [...new Set([...(r?.orders ?? []), ...mine])].slice(-COVERED_MAX);
+    recoverCas(db, peer, family, raw, { gen: decl.gen, orders, boot: req.boot, at: now });
   }
 }
 

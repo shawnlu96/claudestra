@@ -66,6 +66,8 @@ export interface ProviderConfigFailure {
   evidence: Evidence[]; notice: { state: "sending" | "sent"; at: number } | null; recoveredAt: number | null;
 }
 const EVIDENCE_MAX = 20;
+/** Bounded evidence that always keeps the generation's root (first) order: refusals name it and declarations carry it. */
+const keepRoot = (ev: Evidence[]): Evidence[] => (ev.length <= EVIDENCE_MAX ? ev : [ev[0], ...ev.slice(-(EVIDENCE_MAX - 1))]);
 const keyOf = (peer: string, family: string): string => `config-failure:${JSON.stringify([peer, family])}`;
 
 export function providerConfigFailure(db: Database, peer: string, family: string): ProviderConfigFailure | null {
@@ -99,7 +101,7 @@ function register(db: Database, row: LendRow, ev: Evidence, now: number): number
     const cur = providerConfigFailure(db, row.peer, row.family);
     if (cur && cur.recoveredAt === null) {
       const claim = cur.notice === null;
-      put(db, { ...cur, lastAt: now, evidence: [...cur.evidence, ev].slice(-EVIDENCE_MAX), notice: claim ? { state: "sending", at: now } : cur.notice });
+      put(db, { ...cur, lastAt: now, evidence: keepRoot([...cur.evidence, ev]), notice: claim ? { state: "sending", at: now } : cur.notice });
       return claim ? cur.gen : null;
     }
     const gen = (cur?.gen ?? 0) + 1;
@@ -196,9 +198,10 @@ export function startConfigRefusal(d: Pick<ConfigFailureDeps, "db" | "log"> & Pa
   if (mode === "observe") return d.log(`配置故障观察（observe）：本会因 ${row.peer} 的 ${row.family} 配置故障（第 ${f.gen} 代）不起 ${row.orderId}`), null;
   const now = d.now?.() ?? Date.now();
   casGen(d.db, row.peer, row.family, f.gen, (cur) => cur.recoveredAt !== null || cur.evidence.some((e) => e.orderId === row.orderId) ? null
-    : { ...cur, lastAt: now, evidence: [...cur.evidence, { orderId: row.orderId, at: now, category: cur.category, excerpt: last?.excerpt ?? cur.category }].slice(-EVIDENCE_MAX) });
+    : { ...cur, lastAt: now, evidence: keepRoot([...cur.evidence, { orderId: row.orderId, at: now, category: cur.category, excerpt: last?.excerpt ?? cur.category }]) });
   if (d.notify && d.now) void retryConfigNotices(d as ConfigFailureDeps, row.peer).catch((e) => d.log(`配置故障通知补发出错：${String(e)}`));
-  return `起 worker 失败：配置故障未恢复，没有再启动（第 ${f.gen} 代，单 ${last?.orderId ?? "?"}）：${last?.excerpt ?? f.category}`.slice(0, 400);
+  // Names the generation's root order, so the borrower ties this refusal to the fault a declaration of that generation covers.
+  return `起 worker 失败：配置故障未恢复，没有再启动（第 ${f.gen} 代，单 ${f.evidence[0]?.orderId ?? "?"}）：${last?.excerpt ?? f.category}`.slice(0, 400);
 }
 
 /** helloBody's slots for one peer: under on, a family registered unavailable reports total 0 (busy kept: live orders go on). */
@@ -210,16 +213,17 @@ export function configFailureSlots<S extends Record<string, { total: number; bus
 
 /**
  * helloBody's configRecovered for one peer: each family whose fault generation the owner explicitly recovered
- * (recoverProviderConfigFailure succeeded), with that generation's evidence orders. The borrower clears its fault only when its
- * newest fault order is in the list (lend-config-failure-pool.ts), so a restart, a mode switch or a capacity change never
- * declares anything and an old declaration never covers a newer fault. off: nothing; undefined when there is nothing to say.
+ * (recoverProviderConfigFailure succeeded), with that generation's evidence orders (root first). The borrower clears exactly
+ * the faults of those orders and of refusals naming them (lend-config-failure-pool.ts), so a restart, a mode switch or a
+ * capacity change never declares anything and an old declaration never covers a newer fault. off: nothing; undefined when
+ * there is nothing to say.
  */
 export function configRecoveredDecl(db: Database, peer: string | undefined): HelloConfigRecovered | undefined {
   if (!peer || configFailureMode() === "off") return undefined;
   const out: HelloConfigRecovered = {};
   for (const family of LEND_FAMILIES) {
     const f = providerConfigFailure(db, peer, family);
-    const orders = [...new Set(f?.evidence.map((e) => e.orderId).filter((id) => ORDER_ID.test(id)))].slice(-EVIDENCE_MAX);
+    const orders = [...new Set(f?.evidence.map((e) => e.orderId).filter((id) => ORDER_ID.test(id)))].slice(0, EVIDENCE_MAX);
     if (f && f.recoveredAt !== null && Number.isSafeInteger(f.gen) && f.gen >= 1 && orders.length) out[family] = { gen: f.gen, orders };
   }
   return Object.keys(out).length ? out : undefined;

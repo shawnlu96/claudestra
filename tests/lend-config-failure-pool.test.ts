@@ -9,7 +9,8 @@ import { borrowPeers } from "../src/lib/scheduler-pool-facts.js";
 import { placeFor, type PlacementFacts } from "../src/lib/scheduler-placement.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import type { HelloRequest } from "../src/lib/lend-wire-v2.js";
-import { recoverProviderConfigFailure, setConfigFailurePolicy } from "../src/lib/lend-config-failure.js";
+import { configRecoveredDecl, noteStartConfigFailure, providerConfigFailure, recoverProviderConfigFailure, setConfigFailurePolicy, startConfigRefusal } from "../src/lib/lend-config-failure.js";
+import { openLendJournal as openJournal, type LendRow } from "../src/lib/lend-journal.js";
 import { helloBody } from "../src/lib/lend-hello.js";
 import { noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import { harness, polled } from "./lend-harness.js";
@@ -121,7 +122,7 @@ test("a plain restart is not recovery: new boots offering the family, quota paus
   expect(slots()).toEqual({ codex: 0, claude: 3 });
 });
 
-test("explicit declaration: the owner-recovered generation naming the newest fault order recovers; others do not", () => {
+test("explicit declaration: clears exactly the faults of the orders it names; other peer / family / unnamed orders stay", () => {
   setMode("on");
   const first = held("mate");
   const id = held("mate");
@@ -129,14 +130,16 @@ test("explicit declaration: the owner-recovered generation naming the newest fau
   release("mate", id);
   hello("mate", "boot-0001", { codexTotal: 0 });
   hello("mate", "boot-0001"); // withdraw → re-offer alone is not a declaration
-  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [first] } } }); // does not name the newest fault order
   hello("mate", "boot-0001", { recovered: { claude: { gen: 1, orders: [id] } } }); // other family
   hello("other", "boot-0001", { recovered: { codex: { gen: 1, orders: [first, id] } } }); // other peer
   expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(id);
   expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
-  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [first, id] } } });
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [id] } } }); // names only the newest: the older fault shows
+  expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(first);
+  expect(slots()?.codex).toBe(0);
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 2, orders: [first] } } });
   expect(activeConfigFailures(db, "mate")).toEqual({});
-  expect(configRecoveryGen(db, "mate", "codex")).toBe(1);
+  expect(configRecoveryGen(db, "mate", "codex")).toBe(2);
   expect(slots()).toEqual({ codex: 4, claude: 3 });
   expect(configRecoveryGen(db, "mate", "claude")).toBe(0); // no fault there, nothing written
   expect(configRecoveryGen(db, "other", "codex")).toBe(0);
@@ -272,4 +275,62 @@ test("r2 probe: replayed hellos of older boots (seq below the high-water mark) n
   expect(hello("mate", "boot-old3", { seq: 3, codexTotal: 2 }).applied).toBe(true);
   expect(activeConfigFailures(db, "mate").codex).toBeDefined();
   expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
+});
+
+test("r3 probe: reordered releases + an early old declaration never clear a newer generation's fault (real B journal)", async () => {
+  setMode("on");
+  const bdb = openJournal(":memory:");
+  try {
+    const old = held("mate");
+    const fresh = held("mate");
+    const row = (orderId: string) => ({ orderId, peer: "mate", family: "codex" }) as LendRow;
+    const d = { db: bdb, now: () => NOW, notify: async () => ({ ok: true as const }), log: () => {} };
+    await noteStartConfigFailure(d, row(old), MODEL_400); // B: generation 1
+    expect(recoverProviderConfigFailure(bdb, "mate", "codex", 1, NOW)).toBe(true);
+    const decl1 = configRecoveredDecl(bdb, "mate")!;
+    expect(decl1).toEqual({ codex: { gen: 1, orders: [old] } });
+    hello("mate", "boot-0001", { recovered: decl1 }); // reaches A before old's release
+    await noteStartConfigFailure(d, row(fresh), MODEL_400); // B: generation 2, unrecovered
+    expect(providerConfigFailure(bdb, "mate", "codex")).toMatchObject({ gen: 2, recoveredAt: null });
+    release("mate", fresh);
+    release("mate", old); // delayed
+    expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(fresh);
+    hello("mate", "boot-0001", { recovered: decl1 }); // the saved generation-1 declaration replayed
+    hello("mate", "boot-0002", { recovered: decl1 });
+    expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(fresh);
+    expect(slots()?.codex).toBe(0);
+    expect(configRecoveryGen(db, "mate", "codex")).toBe(1);
+    expect(recoverProviderConfigFailure(bdb, "mate", "codex", 2, NOW)).toBe(true);
+    hello("mate", "boot-0002", { recovered: configRecoveredDecl(bdb, "mate") });
+    expect(activeConfigFailures(db, "mate")).toEqual({});
+    expect(configRecoveryGen(db, "mate", "codex")).toBe(2);
+  } finally { bdb.close(); }
+});
+
+test("r3 probe: declaration order vs release order — late old release after a late declaration, and B refusals tie to their root", async () => {
+  setMode("on");
+  const bdb = openJournal(":memory:");
+  try {
+    const row = (orderId: string) => ({ orderId, peer: "mate", family: "codex" }) as LendRow;
+    const d = { db: bdb, now: () => NOW, notify: async () => ({ ok: true as const }), log: () => {} };
+    const ids = [held("mate")];
+    await noteStartConfigFailure(d, row(ids[0]), MODEL_400);
+    for (let i = 0; i < 24; i++) { // 24 refusals arrive first, the root's release still pending
+      const id = held("mate");
+      ids.push(id);
+      const refusal = startConfigRefusal(d, row(id))!;
+      expect(refusal).toContain(`单 ${ids[0]}）`); // every refusal names the root order
+      release("mate", id, refusal);
+    }
+    expect(slots()?.codex).toBe(0);
+    expect(recoverProviderConfigFailure(bdb, "mate", "codex", 1, NOW)).toBe(true);
+    const decl = configRecoveredDecl(bdb, "mate")!;
+    expect(decl.codex!.orders).toHaveLength(20); // evidence was truncated, the root is kept first
+    expect(decl.codex!.orders[0]).toBe(ids[0]);
+    hello("mate", "boot-0001", { recovered: decl });
+    expect(activeConfigFailures(db, "mate")).toEqual({});
+    release("mate", ids[0]); // the root's own release arrives after the declaration: covered, still recovered
+    expect(activeConfigFailures(db, "mate")).toEqual({});
+    expect(slots()?.codex).toBe(4);
+  } finally { bdb.close(); }
 });
