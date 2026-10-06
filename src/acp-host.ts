@@ -20,7 +20,7 @@ import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { redactSecrets } from "./lib/redact-secrets.js";
 import { SRC_DIR } from "./lib/repo-root.js";
 import { runManagerProcess } from "./lib/run-manager.js";
-import { readRegistryAgents, readRegistryAgentsSync } from "./lib/registry.js";
+import { readRegistryAgents } from "./lib/registry.js";
 import { CLEAN_ENV_FLAG, makeWorkerRoot } from "./lib/runtimes/clean-env.js";
 import { CODEX_READY_OPTION } from "./lib/runtimes/codex-ready.js";
 import { tmuxRaw } from "./lib/tmux-helper.js";
@@ -127,7 +127,6 @@ const host = new AcpHost(
     },
     log,
     show,
-    stopIntended: () => readRegistryAgentsSync().find((a) => a.name === agentName)?.status === "stopped", // kill / 出借收 worker 关窗口前先置 stopped
   },
 );
 

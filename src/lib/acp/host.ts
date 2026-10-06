@@ -16,6 +16,7 @@ import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
 import { transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "./transcript.js";
 import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
 import { createAcpTranslator, type AcpTranslator } from "./updates.js";
+import { readRegistryAgentsSync } from "../registry.js";
 
 export interface HostConfig {
   channelId: string;
@@ -33,6 +34,8 @@ export interface HostConfig {
   runtime?: AcpRuntime; // 缺省 codex（host-runtime.ts）
   /** 单测注入：出站条目的重送退避、回合末等确认的上限、权限卡等多久（缺省用下面的 TIMINGS） */
   timings?: Partial<typeof TIMINGS>;
+  /** 单测注入：认「本机在收」时读的 registry（缺省 REGISTRY_PATH） */
+  registryPath?: string;
 }
 
 export interface HostDeps {
@@ -46,11 +49,6 @@ export interface HostDeps {
   log(msg: string): void;
   /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
   show?(item: string): void;
-  /**
-   * 本机正在主动收掉这个 agent（manager kill / 出借收 worker 关窗口前先把 registry 置 stopped）：关窗口的 SIGHUP 让适配器先退，
-   * 在途回合按失败收尾——这不是故障，不出卡、不写错误条目（否则 bridge 报「回合失败」、60s 续跑或问要不要重发）。不给 = 从不跳过
-   */
-  stopIntended?(): boolean;
 }
 
 const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
@@ -59,7 +57,10 @@ const AUTH_RETRY_MS = 60_000;
 const SESSION_WAIT_MS = 120_000;
 /** 出站条目：一批最多几条、队列最多攒几条（bridge 太久不在就丢最老的，这一轮按 StopFailure 报）、单批等回包多久 */
 const ENTRY_BATCH_MAX = 200, ENTRY_OUTBOX_MAX = 5_000, ENTRY_ACK_MS = 15_000, ENTRY_RETRY_MAX = 8;
-const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number } = { retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000 };
+/** stopGraceMs：registry 已 stopped 时，失败先压这么久等宿主自己收到停止信号（见 fail()） */
+const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number; stopGraceMs: number } = {
+  retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000, stopGraceMs: 3_000,
+};
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const INBOUND_HOW = { steer: "插进当前回合", prompt: "开一轮", queued: "排队", unknown: "steer 投递结果不明（没重发，已出卡）" } as const;
@@ -70,6 +71,8 @@ export class AcpHost {
   private session: AcpSession | null = null;
   private proc: AdapterProc | null = null;
   private stopping = false;
+  /** registry 已 stopped、等宿主自己停的失败（fail()） */
+  private heldFailures: { f: AcpFailure; timer: ReturnType<typeof setTimeout> }[] = [];
   private restarts = 0;
   /** 起适配器 / 等不到会话的失败键用单调序号（同一毫秒两次失败不能被合成一张卡） */
   private startSeq = 0;
@@ -154,6 +157,7 @@ export class AcpHost {
   /** SIGINT / SIGTERM / SIGHUP：停当前回合、关适配器（带走 app-server）、关代理和连接 */
   stop(): void {
     this.stopping = true;
+    for (const q of this.heldFailures.splice(0)) (clearTimeout(q.timer), this.dropFailure(q.f));
     if (this.loop.busy) void this.session?.cancel();
     for (const id of [...this.permits.keys()]) this.endPermission(id, null);
     this.proc?.stop();
@@ -341,13 +345,38 @@ export class AcpHost {
     return this.deps.postHook({ channelId: this.cfg.channelId, ...r, event: "StopFailure", acpDeliveryWarning: true });
   }
 
+  /**
+   * 本机主动收这个 agent（manager kill / 出借收 worker 关窗口前先把 registry 置 stopped）：关窗口的 SIGHUP 常让适配器先退，
+   * 在途回合按失败收尾——不是故障，不出卡、不写错误条目（否则 bridge 报「回合失败」、60s 续跑或问要不要重发）。
+   * 只有 stopped 不够（关窗没成时它会一直留着）：宿主自己也得在 stopGraceMs 内收到停止信号才算；等不到照旧报，failedAt 用失败那一刻。
+   * tests/runtime-failure-stop-intent.test.ts
+   */
   private fail(f: AcpFailure): void {
+    if (!this.registryStopped()) return this.report(f, Date.now());
+    if (this.stopping) return this.dropFailure(f);
+    const at = Date.now();
+    const timer = setTimeout(() => {
+      this.heldFailures = this.heldFailures.filter((q) => q.timer !== timer);
+      this.report(f, at);
+    }, this.timing("stopGraceMs"));
+    this.heldFailures.push({ f, timer });
+  }
+
+  private registryStopped(): boolean {
+    return readRegistryAgentsSync(this.cfg.registryPath).find((a) => a.name === this.cfg.agentName)?.status === "stopped";
+  }
+
+  private dropFailure(f: AcpFailure): void {
+    this.show(() => "⏹ 本机在收这个 agent：回合中断，不算失败");
+    this.deps.log(`本机在收这个 agent：回合中断不报失败（${f.message.split("\n")[0]}）`);
+  }
+
+  private report(f: AcpFailure, failedAt: number): void {
     this.show(() => transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
-    if (this.deps.stopIntended?.()) return void this.deps.log(`本机在收这个 agent：回合中断不报失败（${f.message.split("\n")[0]}）`);
     if (!this.dedup.admit(f)) return;
-    const entry = failureEntry(f, new Date().toISOString());
+    const entry = failureEntry(f, new Date(failedAt).toISOString());
     if (entry) this.pushEntries([entry]);
-    this.sendFailure(f, Date.now());
+    this.sendFailure(f, failedAt);
   }
 
   /** sessionId / failedAt：出借停单据此认这张卡是不是当前会话、当前回合的（lend-turn-failure.ts）；failedAt 取失败那一刻，补发沿用原值，bridge 写卡的时刻不能代替它 */
