@@ -474,6 +474,23 @@ describe("final launch command (real parser + real Claude Code adapter)", () => 
     expect(applyCardRole(base("author", purpose), {})).toEqual({ error: expect.stringContaining("截了就丢指针") });
   });
 
+  // 复现第 3 轮 purpose-pointer-truncation：路径含空格时不能只留最后一个词，整段指针放不下就诊断
+  test("a pointer path with a space is kept whole or diagnosed, never cut to its last word", () => {
+    const title = "title".repeat(80);
+    const tooLong = `/${"p".repeat(189)} space/exec-prompt.md`;
+    for (const [role, cardRole] of shapes) {
+      const r = applyCardRole(base(cardRole, `T1 执行者（自动卡）：${title}。先读 ${tooLong}`), { role });
+      if (role === "author") expect(r).toEqual({ error: expect.stringContaining(`「${tooLong}」`) });
+      if ("error" in r) expect(r.error).toContain(`「${tooLong}」`);
+      else expect(flagOf(r.args, "--purpose")).toContain(`。先读 ${tooLong}\n\n【卡片角色 card-${role}】`);
+      const fits = "/Users/some one/.claude-orchestrator/ledger/reviews/T1 exec-prompt.md";
+      const ok = applyCardRole(base(cardRole, `T1 执行者（自动卡）：${title}。先读 ${fits}`), { role });
+      if ("error" in ok) throw new Error(ok.error);
+      expect(flagOf(ok.args, "--purpose")).toContain(`…。先读 ${fits}\n\n【卡片角色 card-${role}】`);
+      expectLaunched({ launch: launchOf(ok.args) }, role);
+    }
+  });
+
   test("the registered purpose keeps the caller's head; a blank explicit model never reaches the launcher", () => {
     const r = applyCardRole(base("reviewer", "T1 审查"), {});
     if ("error" in r) throw new Error(r.error);

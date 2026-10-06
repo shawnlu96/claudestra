@@ -104,20 +104,26 @@ function flagValue(args: string[], flag: string): { index: number; value: string
   return null;
 }
 
+/** start_node 的工作单指针：之后到结尾整段是路径（可含空格），不可分 */
+const POINTER = "。先读 ";
+
 /**
  * 调用方原 purpose 截到给职责留足预算，职责接在后面：合起来不超过启动器的截断长度。超长时从中间（标题）截，
- * 结尾那句（start_node 的「。先读 <工作单路径>」）或至少最后一个词（路径）原样保留；连路径都放不下就报错，不悄悄裁掉。
+ * 结尾的「。先读 <工作单路径>」整段原样保留（路径含空格也不拆）；没有这句时保留结尾那句或至少最后一个词。放不下就报错，不悄悄裁掉。
  */
 function withDuties(purpose: string, duties: string): string | { error: string } {
   const room = LAUNCH_PURPOSE_LIMIT - duties.length - 2;
   const head = purpose.trim();
   if (!head) return duties;
   if (head.length <= room) return `${head}\n\n${duties}`;
+  const pointer = head.lastIndexOf(POINTER);
   const lastWord = head.search(/\S+$/);
-  if (lastWord <= 0) return `${head.slice(0, room - 1)}…\n\n${duties}`;
-  const sentence = head.lastIndexOf("。", lastWord);
-  const keep = [sentence, lastWord - 1].find((at) => at > 0 && head.length - at <= room - 2);
-  if (keep === undefined) return { error: `purpose 结尾的「${head.slice(lastWord)}」放不进职责之外的 ${room} 字预算，截了就丢指针` };
+  if (pointer <= 0 && lastWord <= 0) return `${head.slice(0, room - 1)}…\n\n${duties}`;
+  const keep = pointer > 0
+    ? (head.length - pointer <= room - 2 ? pointer : undefined)
+    : [head.lastIndexOf("。", lastWord), lastWord - 1].find((at) => at > 0 && head.length - at <= room - 2);
+  const tail = pointer > 0 ? head.slice(pointer + POINTER.length) : head.slice(lastWord);
+  if (keep === undefined) return { error: `purpose 结尾的「${tail}」放不进职责之外的 ${room} 字预算，截了就丢指针` };
   return `${head.slice(0, room - 1 - (head.length - keep))}…${head.slice(keep)}\n\n${duties}`;
 }
 
