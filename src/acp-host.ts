@@ -155,6 +155,7 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
   }, WATCHDOG_EVERY_MS);
 }
 
-log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${agent.stub ? `stub（${agent.cmd.join(" ")}）` : pick?.adapter === "self" ? "自研 Codex 适配器" : runtime.logLabel} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
+const adapterName = agent.stub ? `stub（${agent.cmd.join(" ")}）` : pick?.adapter === "self" ? "自研 Codex 适配器" : runtime.logLabel;
+log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${adapterName} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
 show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（只看；连接日志在 ${hostLogFile}）`);
 host.start();

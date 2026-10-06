@@ -34,6 +34,10 @@ function pairingCheck(version: string | null | undefined, activeAcp: number, ada
   }];
 }
 
+/** 「适配器和 app-server」里怎么称呼：选了自研且判兼容是自研，否则是装着的 codex-acp（沙箱是 stub） */
+const adapterLabel = (ready: AcpReady, adapter: AdapterNow) =>
+  ready.ok && ready.adapter === "self" ? "自研 Codex 适配器" : adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub";
+
 export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexVersion?: string | null, adapter: AdapterNow = currentCodexAcp()): Check[] {
   const codex = agents.filter((a) => a.runtime === "codex");
   const pending = codex.filter((a) => a.acpPending);
@@ -43,7 +47,7 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
   const group = "Codex ACP";
   const checks: Check[] = [{
     group, name: "适配器和 app-server", status: ready.ok ? "ok" : activeAcp.length ? "fail" : "warn",
-    detail: ready.ok ? `${ready.adapter === "self" ? "自研 Codex 适配器" : adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub"} 校验通过，Codex CLI 有 app-server` : ready.reason,
+    detail: ready.ok ? `${adapterLabel(ready, adapter)} 校验通过，Codex CLI 有 app-server` : ready.reason,
     ...(!ready.ok ? { fix: "运行 bun src/manager.ts migrate --acp；下载仍失败时现有 Codex 留在 tmux" } : {}),
   }];
   checks.push({ group, name: "registry 迁移", status: unmigrated.length ? "warn" : "ok",

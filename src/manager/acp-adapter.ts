@@ -14,15 +14,17 @@ import {
 import { bridgeRequest } from "../lib/bridge-client.js";
 import { resolveBunPath } from "../lib/bun-path.js";
 import { readCodexRunningAdapter } from "../lib/codex-version.js";
-import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
+import { readRegistryAgents } from "../lib/registry.js";
 import { SRC_DIR } from "../lib/repo-root.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { output } from "./core.js";
 
 const RESTART_TIMEOUT_MS = 240_000;
 
+type AgentRow = { name: string; runtime?: string; transport?: string };
+
 export interface SwitchDeps {
-  agents(): Promise<Pick<RegistryAgent, "name" | "runtime" | "transport">[]>;
+  agents(): Promise<AgentRow[]>;
   /** 宿主上一次实际起的适配器（codex-version.ts 的运行记录）；没有记录按选中的算 */
   running(agent: string): CodexAdapterId | undefined;
   /** 这些 agent 的回合态：只有 idle 才重启 */
@@ -48,7 +50,7 @@ const LIVE: SwitchDeps = {
   read: () => readAdapterChoice(),
 };
 
-const acpCodex = (a: Pick<RegistryAgent, "runtime" | "transport">) => a.runtime === "codex" && a.transport === "acp";
+const acpCodex = (a: AgentRow) => a.runtime === "codex" && a.transport === "acp";
 
 export async function adapterStatus(deps: SwitchDeps = LIVE): Promise<Record<string, unknown>> {
   const c = deps.read();

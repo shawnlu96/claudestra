@@ -18,7 +18,7 @@ export interface AdapterChoice {
 
 export const ADAPTER_IDS: readonly CodexAdapterId[] = ["upstream", "self"];
 const isId = (v: unknown): v is CodexAdapterId => v === "upstream" || v === "self";
-export const choiceFile = () => statePath("codex-adapter.json");
+const choiceFile = () => statePath("codex-adapter.json");
 const EMPTY: AdapterChoice = { default: "upstream", agents: {} };
 
 function valid(d: unknown): boolean {

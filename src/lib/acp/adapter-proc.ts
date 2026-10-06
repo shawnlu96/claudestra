@@ -13,17 +13,19 @@
  */
 import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
-import { CODEX_ACP_ADAPTER_MAIN } from "./codex-adapter/main.js";
 import type { CodexAdapterId } from "./codex-compat-switch.js";
 import { redactSecrets } from "../redact-secrets.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
 
+/** 自研适配器入口（= codex-adapter/main.ts 的 CODEX_ACP_ADAPTER_MAIN；直接 import 它会成环：app-server.ts 用本文件的 stderrLines） */
+const SELF_ADAPTER_MAIN = fileURLToPath(new URL("./codex-adapter/main.ts", import.meta.url));
 /** 给 channel-server 的环境白名单：去掉只有 tmux 模式才用得上的（窗口就绪 / 打字投递 / 重启前言） */
 const ACP_MCP_ENV_VARS = CODEX_MCP_ENV_VARS.filter((k) => k !== "TMUX" && k !== "TMUX_PANE" && k !== "CLAUDESTRA_CODEX_PREAMBLE");
 /** 出借 worker 的 channel-server 另带档位变量（丢了也不怕：channel-server 按 agent 名前缀照样开 lend 档） */
@@ -55,7 +57,7 @@ export function acpAgentCommand(env: Record<string, string | undefined>, bunBin:
   }
   const installed = codexAcpInstalled(root);
   const upstream = installed.ok ? [...bun, installed.path] : null;
-  if (selected === "self" && !clean) return { cmd: [...bun, CODEX_ACP_ADAPTER_MAIN], stub: false, adapter: "self", upstream };
+  if (selected === "self" && !clean) return { cmd: [...bun, SELF_ADAPTER_MAIN], stub: false, adapter: "self", upstream };
   return installed.ok ? { cmd: upstream!, stub: false, adapter: "upstream" } : { error: installed.hint };
 }
 

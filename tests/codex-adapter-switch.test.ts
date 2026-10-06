@@ -210,7 +210,8 @@ describe("manager codex-adapter：切换 / 切回只在空闲时重启", () => {
     expect(await cmdCodexAdapter(["use", "both"], t.deps)).toMatchObject({ ok: false });
     expect(await cmdCodexAdapter(["use", "self", "--agent", "nobody"], t.deps)).toMatchObject({ ok: false, error: expect.stringContaining("不存在") });
     expect(await cmdCodexAdapter(["clear"], t.deps)).toMatchObject({ ok: false });
-    expect(await cmdCodexAdapter(["status"], t.deps)).toEqual({ ok: true, default: "upstream", overrides: {}, agents: [{ name: "agent-a", transport: "acp", selected: "upstream", running: "upstream" }] });
+    const agents = [{ name: "agent-a", transport: "acp", selected: "upstream", running: "upstream" }];
+    expect(await cmdCodexAdapter(["status"], t.deps)).toEqual({ ok: true, default: "upstream", overrides: {}, agents });
     for (const sub of ["use", "clear", "rollback"]) expect(isWriteInvocation("codex-adapter", [sub])).toBe(true);
     expect(isWriteInvocation("codex-adapter", ["status"])).toBe(false);
     expect(needsWriteLock("codex-adapter", ["use"])).toBe(false);
