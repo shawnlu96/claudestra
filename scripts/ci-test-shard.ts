@@ -61,7 +61,12 @@ export function planShards(files: string[], n: number): string[][] {
 
 export interface ShardExpect { n: number; head: string; bunVersion: string; files: string[] }
 
-/** 一片的日志：开头三行 shard / head / discovered（ci.yml 的分片步骤写的），第 4 行是 bun test 的版本行，之后每个跑过的文件一行 group。 */
+/**
+ * 一片的日志：开头三行 shard / head / discovered（ci.yml 的分片步骤写的），第 4 行是 bun test 的版本行，之后每个跑过的文件一行 group。
+ * 这四类行在整份日志里各恰好一行、就在这四个位置上：后面再出现一行（重复或冲突的值）都拒，免得拼接 / 改写过的日志混过去。
+ */
+const META = [/^shard=/, /^head=/, /^discovered=/, /^bun test v/];
+
 function checkShard(name: string, log: string, k: number, want: ShardExpect, plan: string[]): string[] {
   const errs: string[] = [];
   const lines = log.split("\n");
@@ -69,6 +74,10 @@ function checkShard(name: string, log: string, k: number, want: ShardExpect, pla
     if (lines[i] !== h) errs.push(`${name} 第 ${i + 1} 行应为「${h}」，实际「${lines[i] ?? ""}」`);
   });
   if (!lines[3]?.startsWith(`bun test v${want.bunVersion} `)) errs.push(`${name} 第 4 行应是 bun test v${want.bunVersion} 的版本行，实际「${lines[3] ?? ""}」`);
+  META.forEach((re, i) => {
+    const at = lines.flatMap((l, j) => (re.test(l) ? [j + 1] : []));
+    if (at.length !== 1 || at[0] !== i + 1) errs.push(`${name} 里 ${re.source.slice(1)} 行应只在第 ${i + 1} 行出现一次，实际在第 ${at.join(", ") || "（无）"} 行`);
+  });
   const ran = lines.flatMap((l) => GROUP.exec(l)?.[1] ?? []);
   const seen = new Set<string>(), mine = new Set(plan);
   const dup = ran.filter((f) => seen.has(f) || !seen.add(f));

@@ -39,6 +39,13 @@ describe("verifyShards", () => {
       expect(verifyShards(edit(3, (l) => l.replace(from!, to!)), want).length).toBeGreaterThan(0);
     }
   });
+  test("a duplicate or conflicting meta line appended after a valid header is refused (r2 P1 residue)", () => {
+    for (const line of [`head=${HEAD}`, "shard=1/4", `discovered=${files.length}`, "bun test v1.3.14 (0d9b296a)",
+      `head=${"b".repeat(40)}`, "shard=4/4", "discovered=0", "bun test v9.9.9 (deadbeef)"]) {
+      expect(verifyShards(edit(1, (l) => `${l}\n${line}`), want).length).toBeGreaterThan(0);
+      expect(verifyShards(edit(1, (l) => l.replace("::endgroup::", `::endgroup::\n${line}`)), want).length).toBeGreaterThan(0);
+    }
+  });
   test("only test-shard-1..4: an extra empty artifact, a missing one, or all four logs in one artifact are refused (r1 P1)", () => {
     const extra = good().set("test-shard-5", "");
     const missing = good();
