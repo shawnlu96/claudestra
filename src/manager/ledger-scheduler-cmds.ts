@@ -1,3 +1,4 @@
+import { FILE_SCOPE_COMMAND } from "./ledger-resource-scope-cmds.js";
 import { poolRemotePolicy } from "../lib/scheduler-agent-pool-context.js";
 import { convergenceSpec } from "../lib/fix-strategy-order.js";
 import { convergenceCommands } from "../lib/review-arbiter-commands.js";
@@ -72,8 +73,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
 }
 
 export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
-  ...convergenceCommands,
-  ...CONVERGE_NOTICE_CMDS,
+  ...convergenceCommands, ...CONVERGE_NOTICE_CMDS, "scheduler-file-scope": FILE_SCOPE_COMMAND,
   "scheduler-review-swap": { valued: ["max-workers"], bools: [], usage: "scheduler-review-swap <intent> --max-workers N",
     run: (c) => reviewSwapStep(c.db, c.ctx(), c.p.pos[1] ?? "", integer(c, "max-workers")) },
   "scheduler-family-wait": familyWaitCommand,
