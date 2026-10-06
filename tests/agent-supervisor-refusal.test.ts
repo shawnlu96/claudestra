@@ -18,7 +18,7 @@ import type { RegistryAgent } from "../src/lib/registry.js";
 import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
 import { boundRef, schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
-import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
+import { refusalBypassesHold, setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
 import { ledgerResult } from "../src/lib/scheduler-work-order.js";
 import { createAcpWorker } from "../src/lib/worker-acp.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
@@ -148,4 +148,49 @@ test("让路只限 on + 调度单审查回合 + 策略拒审：作者回合、�
   expect(refusalYieldsToModel(build, "cyber", "on")).toBe(false);
   expect(refusalYieldsToModel(call, "cyber", "on")).toBe(false);
   for (const fault of ["quota", "auth", "dead", "stuck", "overload"] as const) expect(refusalYieldsToModel(review, fault, "on")).toBe(false);
+});
+
+describe("MODELXW r2：observe 时监护留下的恢复认领，切 on 后不再挡住 MODELX（上轮 supervisor-held-refusal）", () => {
+  test("observe 一轮：监护认领恢复、auto tick 让开；切 on：同一张拒审卡交给 MODELX → epoch，不发新恢复消息、不退人工", async () => {
+    g.__modelxwSup = "observe";
+    await reviewCut();
+    const p = pass();
+    const first = await p.run();
+    expect(first.supervised).toEqual([{ agent: "agent-rv-t1", step: "recover", detail: "第 1 次恢复消息已发" }]);
+    expect(first.card).toMatchObject({ step: "waiting" });
+    expect(supervise().length).toBeGreaterThan(0); // 认领是台账事实，重启也还在
+    g.__modelxwSup = "on";
+    const r = await p.run();
+    expect(r.failed).toEqual([]);
+    expect(r.card).toMatchObject({ step: "refusal_epoch" }); // 旧代码：认领把失败改成 running，永远 waiting，MODEL 看不到拒审
+    expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "reviewer_swap" && e.data.refusal)).toHaveLength(1);
+    expect(p.log.sends).toEqual([CYBER_RECOVERY_TEXT]); // 只有 observe 时那一条，on 下不再同模型重试
+    expect(p.log.escalations).toEqual([]);
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+    expect(f.notices.filter((n) => n.includes("退回人工"))).toEqual([]);
+  });
+
+  test("observe 下认领照旧挡着：连续几轮都等恢复后的那一轮，不退人工、不记 epoch", async () => {
+    g.__modelxwSup = "observe";
+    await reviewCut();
+    const p = pass();
+    for (let i = 0; i < 3; i++) expect((await p.run()).card).toMatchObject({ step: "waiting" });
+    expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "reviewer_swap")).toEqual([]);
+    expect(p.log.escalations).toEqual([]);
+  });
+
+  test("绕过只限 on + 审查员回合 + 提供方策略拒审：作者回合、别的失败、observe / off 都照旧走监护 hold", async () => {
+    g.__modelxwSup = "on";
+    const reviewer = { taskId: "T1", role: "reviewer" as const, agent: "agent-rv-t1", sessionId: "s-rv", family: "codex" as const, transport: "acp" as const };
+    const failed = (message: string) => ({ state: "result" as const, outcome: "failed" as const, failure: { kind: "error" as const, message } });
+    expect(await refusalBypassesHold(f.db, reviewer, failed(CYBER))).toBe(true);
+    expect(await refusalBypassesHold(f.db, reviewer, failed("This request violates our Usage Policy"))).toBe(true);
+    expect(await refusalBypassesHold(f.db, { ...reviewer, role: "author" }, failed(CYBER))).toBe(false);
+    expect(await refusalBypassesHold(f.db, reviewer, failed("socket hang up"))).toBe(false);
+    expect(await refusalBypassesHold(f.db, reviewer, { state: "unknown", reason: "x", failure: { kind: "error", message: CYBER } })).toBe(false);
+    for (const mode of ["observe", "off"]) {
+      g.__modelxwSup = mode;
+      expect(await refusalBypassesHold(f.db, reviewer, failed(CYBER))).toBe(false);
+    }
+  });
 });

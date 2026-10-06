@@ -148,7 +148,8 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   const wrote = refusal ? remoteHeadFamily(db, task) ?? workflow.authorFamily : swapAuthorFamily(db, task, workflow, swap);
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
-  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : undefined);
+  // MODELXW: a legacy refused ticket's reviewer may still be running too, so its successor gets its own name
+  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : swap.data.legacy === true ? "-re" : undefined);
   deps.active();
   if (got.kind !== "ready") {
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: oneLine(got.reason) });

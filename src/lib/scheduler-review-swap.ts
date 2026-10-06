@@ -92,7 +92,7 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
       reason: `作者家族由 ${s.reviewer!.family === "claude" ? "codex" : "claude"} 变成 ${s.workflow!.authorFamily}，更换不独立的审查会话` };
   }
   if (!swap || s.reviewer) return null;
-  if (swap.data.refusal) return null; // a refusal epoch's reviewer is created locally by sessionGate, never placed in the pool
+  if (swap.data.refusal || swap.data.legacy === true) return null; // a refusal epoch's / legacy retirement's reviewer is created locally by sessionGate, never pooled
   const intent = s.intents.find((i) => i.id === swap.data.intentId);
   if (intent?.status !== "done") return { kind: "wait", code: "reviewer_swap", reason: "旧审查会话正在归档、停止，完成后再派跨家族审查" };
   const since = s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? 0;
@@ -125,7 +125,8 @@ export function openSafetyHold(events: readonly LedgerEvent[]): LedgerEvent | nu
   return events.some((e) => e.seq > hold.seq && e.data.op === RESOLVE_OP && e.data.holdSeq === hold.seq) ? null : hold;
 }
 
-const swapKey = (id: string): string => `scheduler:${id}:reviewer-swap`;
+/** Also the dedup key of MODELXW's legacy retirement (scheduler-model-wiring.ts writeLegacyReviewRetire), keyed by the old ticket. */
+export const swapKey = (id: string): string => `scheduler:${id}:reviewer-swap`;
 
 function swapIntent(db: Database, ctx: WriteCtx, id: string): SchedulerIntent {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "更换审查员只由调度服务执行");
@@ -202,8 +203,9 @@ export function applyReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string,
 export function mayRebindReviewer(db: Database, prior: SchedulerSession, intentId: string): boolean {
   if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId) return false;
   const reused = prior.archiveReceipt === `reused_by_author:${prior.agent}`;
-  if (!prior.killReceipt && !reused) return false;
   const swap = getEventByDedup(db, swapKey(prior.retireIntentId));
+  // MODELXW: a legacy refused ticket's reviewer is retired without being woken or killed (as under a refusal epoch)
+  if (!prior.killReceipt && !reused && swap?.data.legacy !== true) return false;
   const intent = getIntent(db, intentId);
   return !!swap && swap.data.sessionId === prior.sessionId && !!intent && intent.eventSeq > swap.seq &&
     getIntent(db, prior.retireIntentId)?.status === "done";

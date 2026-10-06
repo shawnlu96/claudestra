@@ -4,14 +4,15 @@
  * - scheduler-review-snapshot <intent> --round N --data {order}: freeze a pending review order's materials (writeReviewSnapshot);
  * - scheduler-model-outcome <intent> --data {failure, failed, authorized, review?}: MODEL's record (writeModelOutcome);
  * - scheduler-refusal-epoch <task> --plan-seq N --data {authorized}: the refusal epoch (writeRefusalEpoch → beginRefusalEpoch);
- * - scheduler-model-inform <task> --key K --text T --data {op, …}: one owner / PM note per key (writeModelNote).
+ * - scheduler-model-inform <task> --key K --text T --data {op, …}: one owner / PM note per key (writeModelNote);
+ * - scheduler-legacy-review-retire <task> --intent I --data {evidence}: retire a legacy (no snapshot) refused reviewer (writeLegacyReviewRetire).
  * Facts (approval, refusalHold, head, specRev, round, snapshot, binding) are re-read there, never taken from the caller.
  * A guard refusal is a LedgerError (conflict / invalid / not_found); any other failure answers code write_failed, so the
  * service can tell "the rule said no" from "the write did not happen". tests/scheduler-model-wiring-prod*.test.ts.
  */
 import { AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { LedgerError } from "../lib/ledger-store.js";
-import { writeModelNote, writeModelOutcome, writeRefusalEpoch, writeReviewSnapshot, type OutcomeWrite } from "../lib/scheduler-model-wiring.js";
+import { writeLegacyReviewRetire, writeModelNote, writeModelOutcome, writeRefusalEpoch, writeReviewSnapshot, type OutcomeWrite } from "../lib/scheduler-model-wiring.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -97,6 +98,14 @@ export const MODEL_CMDS: Record<string, CommandSpec> = {
     run: schedulerOnly((c) => {
       const r = writeModelNote(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("key"), c.need("text"), data(c));
       return { ok: true, duplicate: r.duplicate, seq: r.event.seq };
+    }),
+  },
+  "scheduler-legacy-review-retire": {
+    valued: ["intent", "data"], bools: [],
+    usage: "scheduler-legacy-review-retire <task> --intent I --data {evidence}（调度服务专用：on 下无材料快照的旧拒审单，事务内重核后退休旧审查绑定、不豁免；按单去重）",
+    run: schedulerOnly(async (c) => {
+      const r = await writeLegacyReviewRetire(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("intent"), str(data(c).evidence, "evidence", 4000));
+      return { ok: true, duplicate: r.duplicate, event: r.event };
     }),
   },
 };

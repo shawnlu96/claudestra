@@ -313,6 +313,8 @@ class Card {
     if (seen.state === "result" && seen.outcome === "failed") {
       const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
       const m = await import("./scheduler-model-wiring.js"); // MODELW：只多记一条，on 的计划附在原因后（长错误先截，计划不被截掉）
+      const legacy = await m.legacyReviewStep(this, sent, ref, seen.failure); // MODELXW：无快照旧拒审单——退休旧绑定，重派带快照的新单
+      if (legacy) return this.out("legacy_review", legacy);
       const plan = await m.modelOutcomeStep(this, sent, ref, seen.failure);
       if (typeof plan !== "string") return this.out("refusal_epoch", plan.epoch); // MODELX：拒审已按豁免开新审查 epoch，不退人工
       return this.escalate(m.failedReason(`${ref.agent} ${what}`, seen.failure.message, plan), sent.id);

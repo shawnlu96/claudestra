@@ -39,8 +39,12 @@ import { reviewAfterBounce } from "./scheduler-merge-conflict.js";
 import type { MaterialCheck, OrderPlan } from "./scheduler-review-swap.js";
 import { workOrderFor } from "./scheduler-work-order.js";
 import { beginRefusalEpoch } from "./scheduler-sessions.js";
-import { modelOutcomePolicy, type OutcomeInput, type OutcomeRecord, type OutcomeSignal, type RecoveryPolicyPort } from "./scheduler-model-outcome.js";
-import type { SessionRef } from "./worker-session.js";
+import { classifyModelOutcome, modelOutcomePolicy, type OutcomeInput, type OutcomeRecord, type OutcomeSignal, type RecoveryPolicyPort } from "./scheduler-model-outcome.js";
+import type { SessionRef, WorkerObservation } from "./worker-session.js";
+import { getWorkflow } from "./ledger-scheduler.js";
+import { insertEvent } from "./ledger-tx.js";
+import { preserveSessionHistory } from "./scheduler-sessions.js";
+import { swapKey } from "./scheduler-review-swap.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js" with { type: "macro" };
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -97,8 +101,9 @@ function authorizedFor(card: ModelWiringCard, failed: Placement): Placement[] {
 }
 
 /** The four writes this step makes, each through its own `ledger` subcommand; labels name them in the unavailable notice. */
-export type WiringWrite = "snapshot" | "outcome" | "epoch" | "inform";
-const WRITE_LABEL: Record<WiringWrite, string> = { snapshot: "审查单材料快照", outcome: "模型结果", epoch: "拒审接续 epoch", inform: "owner 告知" };
+export type WiringWrite = "snapshot" | "outcome" | "epoch" | "inform" | "legacy";
+const WRITE_LABEL: Record<WiringWrite, string> = { snapshot: "审查单材料快照", outcome: "模型结果", epoch: "拒审接续 epoch", inform: "owner 告知",
+  legacy: "旧拒审单退休" };
 export const unavailableKey = (taskId: string, what: WiringWrite): string => `model-wiring-unavailable:${taskId}:${what}`;
 
 type Wrote = { ok: true; r: Record<string, unknown> } | { ok: false; code: string; error: string };
@@ -333,9 +338,101 @@ async function runEpoch(card: ModelWiringCard, planSeq: number, authorized: Plac
   return { error: r.error };
 }
 
+/**
+ * MODELXW 验收线 4 — a refused review ticket sent before snapshots existed (or whose snapshot write failed), on a card handed back
+ * to auto: no snapshot means no exemption, ever. Instead the old reviewer binding is formally retired (row and history kept, the old
+ * session neither woken nor killed) by a reviewer_swap event marked legacy — no refusal field, so no epoch, no exemption, no merge
+ * gate counts it — and the planner sends an ordinary new review on the current head through a new session, which freezes its own
+ * snapshot as it goes out. A refusal of that new ticket is MODELX's ordinary first refusal. Only under modelOutcome on, and only
+ * when the old turn ended in a provider policy refusal; anything else keeps today's path (MODEL records, the card escalates).
+ */
+const LEGACY_OP = "reviewer_swap";
+const isRefusal = (message: string): boolean => classifyModelOutcome({ failure: { kind: "error", message } })?.cls === "safety";
+
+/** The card's last sent review ticket and its active reviewer binding when they are such a legacy refused pair, or why not. */
+function legacyFacts(db: Database, task: LedgerTask): { sent: SchedulerIntent; row: NonNullable<ReturnType<typeof getSchedulerSession>> } | string {
+  const workflow = getWorkflow(db, task.id);
+  if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review") return "卡不在当前规格的自动审查";
+  if (db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(task.id)) return "还有未结意图";
+  const sent = db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
+    ORDER BY eventSeq DESC LIMIT 1`).get(task.id) as SchedulerIntent | null;
+  if (!sent || sent.action !== "review" || sent.node !== "adversarial_review") return "最近一张单不是已派出的审查单";
+  if (getEventByDedup(db, snapshotKey(sent.id))) return "审查单有材料快照（走 MODELX）";
+  const row = getSchedulerSession(db, task.id, "reviewer");
+  if (!row || row.state !== "active" || row.transport === "peer") return "没有在用的本机审查员绑定";
+  const events = listEvents(db, { project: task.project, target: task.id });
+  if (events.some((e) => e.seq > sent.eventSeq && e.kind === "review")) return "审查单已有结论";
+  if (events.some((e) => e.seq > sent.eventSeq && e.kind === "scheduler" && e.data.op === LEGACY_OP)) return "审查单之后已换过审查员";
+  if (events.some((e) => e.kind === "scheduler" && e.data.op === LEGACY_OP && !!e.data.refusal && e.data.head === task.headSHA &&
+    e.data.specRev === task.specRev && e.data.round === task.round)) return "本轮已做过豁免审查";
+  if (!events.some((e) => e.seq > sent.eventSeq && e.kind === "scheduler" && e.data.op === "workflow_resume")) return "审查单派出后卡没有交回过自动";
+  const bind = events.findLast((e) => e.kind === "scheduler" && e.data.op === "session_bind" && e.data.role === "reviewer" && e.data.sessionId === row.sessionId);
+  if (!bind || bind.seq > sent.eventSeq) return "绑定不是派这张审查单时的审查员";
+  return { sent, row };
+}
+
+/**
+ * Writer side of `ledger scheduler-legacy-review-retire`: modelOutcome on (CFG's policy, read now) and the refusal evidence, then in
+ * one transaction re-read every legacy fact, write the legacy reviewer_swap (dedup = the swap key of the old ticket, which the
+ * reviewer bind accepts in place of a kill receipt) and retire the binding. The old session is left alone.
+ */
+export async function writeLegacyReviewRetire(db: Database, ctx: WriteCtx, taskId: string, intentId: string, evidence: string): Promise<{ event: LedgerEvent; duplicate: boolean }> {
+  if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "旧拒审单退休只由调度服务执行");
+  if (!isRefusal(evidence)) throw new LedgerError("invalid", "旧审查回合不是提供方策略拒审");
+  const task0 = getTask(db, taskId);
+  if (!task0) throw new LedgerError("not_found", `没有任务 ${taskId}`);
+  if (modelOutcomePolicy(await loadPolicy(), task0.project).mode !== "on") throw new LedgerError("conflict", "modelOutcome 不是 on，不接续旧拒审单");
+  return atomic(db, () => {
+    const done = getEventByDedup(db, swapKey(intentId));
+    if (done) {
+      if (done.data.op !== LEGACY_OP || done.data.legacy !== true || done.target !== taskId) throw new LedgerError("dedup_mismatch", "该审查单已有别的换人记录");
+      return { event: done, duplicate: true };
+    }
+    const task = getTask(db, taskId)!, facts = legacyFacts(db, task);
+    if (typeof facts === "string") throw new LedgerError("conflict", `不退休旧审查绑定：${facts}`);
+    const { sent, row } = facts;
+    if (sent.id !== intentId) throw new LedgerError("conflict", "不是本卡最近一张审查单");
+    preserveSessionHistory(db);
+    const event = insertEvent(db, { ...ctx, dedupKey: swapKey(sent.id) }, { project: task.project, target: task.id, kind: "scheduler",
+      text: `旧审查单 ${sent.id} 被提供方策略拒审且没有材料快照：不唤醒旧会话、不豁免，退休 ${row.agent} 的审查绑定，按当前 head 重派带快照的新审查单`,
+      data: { op: LEGACY_OP, legacy: true, intentId: sent.id, fromFamily: row.family, agent: row.agent, sessionId: row.sessionId,
+        round: task.round, head: task.headSHA, specRev: task.specRev, sentHead: sent.head, evidence: flat(evidence).slice(0, 400) } }, true);
+    db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE sessionId = ?").run(sent.id, ctx.now ?? Date.now(), row.sessionId);
+    return { event, duplicate: false };
+  });
+}
+
+/**
+ * Service side, from the auto tick's "turn failed" branch before MODEL's record: a legacy refused review ticket (legacyFacts, read on
+ * the service's handle) under on is retired through the ledger CLI; answers the outcome text, or null = not legacy / the writer said
+ * no (the caller goes on to MODEL as before). A failed write is reported once per card (unavailable).
+ */
+export async function legacyReviewStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure): Promise<string | null> {
+  if (ref.role !== "reviewer" || !isRefusal(failure.message)) return null;
+  const facts = legacyFacts(card.db, card.task);
+  if (typeof facts === "string" || facts.sent.id !== sent.id || facts.row.sessionId !== ref.sessionId) return null;
+  if ((await modelOutcomeMode(card.task.project)) !== "on") return null;
+  const r = await ledgerWrite(card, ["scheduler-legacy-review-retire", card.task.id, "--intent", sent.id, "--data", JSON.stringify({ evidence: failure.message.slice(0, 4000) })]);
+  if (r.ok) return `${(r.r.event as LedgerEvent).text}（台账 #${(r.r.event as LedgerEvent).seq}${r.r.duplicate === true ? "，已执行过" : ""}）`;
+  if (!EPOCH_REFUSALS.has(r.code)) await unavailable(card, "legacy", r.error, `旧拒审单 ${sent.id} 退休没记上，照旧退人工`);
+  return null;
+}
+
+/**
+ * MODELXW 验收线 3 — the supervisor hold (agent-supervisor-hold.ts) must not hide a reviewer's provider policy refusal from MODELX
+ * under on, even when the supervisor claimed its recovery earlier (under observe / off, before this rule, or before a restart): the
+ * observed turn is this order's own, so the refusal goes to the auto tick as observed. observe / off, author turns, other failures:
+ * the hold stays as it was.
+ */
+export async function refusalBypassesHold(db: Database, ref: SessionRef, seen: WorkerObservation): Promise<boolean> {
+  if (ref.role !== "reviewer" || seen.state !== "result" || seen.outcome !== "failed" || !isRefusal(seen.failure.message)) return false;
+  const task = getTask(db, ref.taskId);
+  return !!task && (await modelOutcomeMode(task.project)) === "on";
+}
+
 /** Owner / PM notes this step may write: the key names the card, so one card's note never lands on another. */
 const NOTE_KEYS = (taskId: string): string[] => [informKey(taskId, "cyber_policy"), informKey(taskId, "usage_policy"), `model-refusal-manual:${taskId}`,
-  ...(["snapshot", "outcome", "epoch", "inform"] as const).map((w) => unavailableKey(taskId, w))];
+  ...(["snapshot", "outcome", "epoch", "inform", "legacy"] as const).map((w) => unavailableKey(taskId, w))];
 const NOTE_OPS = new Set(["refusal_owner_inform", "refusal_owner_manual", "refusal_wiring_unavailable"]);
 
 /** Writer side of `ledger scheduler-model-inform`: one note per key, deduped in the writer's transaction (MODELX's semantics). */
