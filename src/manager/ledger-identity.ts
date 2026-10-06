@@ -32,8 +32,9 @@ export function resolveActor(
 }
 
 function actorOfAgentMark(name: string, agents: Record<string, unknown>): ActorResult {
-  const key = name in agents ? name : agentKey(name);
-  if (key in agents) return { ok: true, actor: key };
+  // 只认 registry 自己的键：JSON.parse 出来的对象继承 Object.prototype，用 in 会把 constructor / toString 认成 agent
+  const key = Object.hasOwn(agents, name) ? name : agentKey(name);
+  if (Object.hasOwn(agents, key)) return { ok: true, actor: key };
   return { ok: false, error: `认不出身份：CLAUDESTRA_AGENT=${name} 不属于 registry 里任何 agent，拒绝写台账` };
 }
 

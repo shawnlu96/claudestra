@@ -31,6 +31,13 @@ describe("resolveActor", () => {
     expect(resolveActor({ controlChannelId: "999" }, agents, undefined, "master")).toMatchObject({ ok: false });
     expect(resolveActor({ controlChannelId: "999" }, agents, undefined, "  ")).toEqual({ ok: true, actor: "owner" });
   });
+  test("CLAUDESTRA_AGENT 是 Object.prototype 上的名字也拒（registry 是 JSON.parse 出来的普通对象）", () => {
+    const parsed = JSON.parse(JSON.stringify(agents)) as typeof agents;
+    for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(resolveActor({}, parsed, undefined, name)).toMatchObject({ ok: false });
+      expect(resolveActor({}, {}, undefined, name)).toMatchObject({ ok: false });
+    }
+  });
   test("频道号优先于 CLAUDESTRA_AGENT；出借 worker 带着 agent 名也照样拒", () => {
     expect(resolveActor({ channelId: "999", controlChannelId: "999" }, agents, undefined, "agent-task-t8b")).toEqual({ ok: true, actor: "master" });
     expect(resolveActor({ channelId: "111", controlChannelId: "999" }, agents, undefined, "agent-task-t8b")).toEqual({ ok: true, actor: "agent-claudestra" });
