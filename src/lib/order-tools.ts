@@ -28,7 +28,8 @@ export const ORDER_TOOLS = [
     name: "deliver",
     description:
       "Executor: deliver your current order (same effect as `ledger deliver --from build|fix --head`). head must be the full SHA the card's branch " +
-      "has on origin right now — push first; the bridge checks it. Retrying with the same orderId + head returns the same result.",
+      "has on origin right now — push first; the bridge checks it. Retrying with the same orderId + head returns the same result. " +
+      "Only this tool (your own current order, never a taskId) counts for a PM's one-time resume grant; a CLI or PM delivery never auto-returns the card to review dispatch.",
     inputSchema: {
       type: "object" as const,
       properties: {
