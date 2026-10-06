@@ -36,7 +36,7 @@ const PR = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/;
 export const mainCarryKey = (taskId: string, from: string, to: string): string => `main-carry:${taskId}:${from}:${to}`;
 
 /** Where the PASS came from, read from the review event itself — never from a caller's claim. */
-export type CarrySourceKind = "mcp" | "pool" | "cli";
+type CarrySourceKind = "mcp" | "pool" | "cli";
 export interface ManualCarryRequest {
   taskId: string; oldHead: string; newHead: string; mainHead: string; specRev: number; round: number; reviewSeq: number; rev: number;
 }
@@ -115,7 +115,9 @@ function mergeJournalRefusal(db: Database, taskId: string): string | null {
 export function manualCarryGate(db: Database, actor: string, req: ManualCarryRequest, now: number): CarryGate {
   if (actor === "scheduler") throw new LedgerError("forbidden", "调度引擎的沿用只走 scheduler-merge-step，不冒用 PM 正式入口");
   const task = mustTask(db, req.taskId);
-  if (!actorMayConfigure(db, actor, task.project)) throw new LedgerError("forbidden", `正式沿用审查要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${actor}）`);
+  if (!actorMayConfigure(db, actor, task.project)) {
+    throw new LedgerError("forbidden", `正式沿用审查要项目 ${task.project} 的 PM（调度助理除外）/ master / owner（你是 ${actor}）`);
+  }
   for (const [k, v] of [["old", req.oldHead], ["new", req.newHead], ["main", req.mainHead]] as const) {
     if (typeof v !== "string" || !SHA.test(v)) throw new LedgerError("invalid", `--${k} 要是完整小写 40 位 SHA`);
   }
@@ -175,7 +177,7 @@ export type CarryOutcome =
   | { status: "refused"; reason: string }
   | { status: "observe"; plan: CarryPlan }
   | { status: "carried"; plan: CarryPlan; eventSeq: number; taskRev: number; duplicate: boolean };
-export interface CarryPlan {
+interface CarryPlan {
   taskId: string; from: string; to: string; mainHead: string; mainParent: string; diffHash: string; hops: number;
   chain: { head: string; previousHead: string; mainParent: string }[]; sourceReviewSeq: number; sourceKind: CarrySourceKind;
   reviewer: string; reviewerFamily: string; round: number; specRev: number;

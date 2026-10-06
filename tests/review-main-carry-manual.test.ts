@@ -197,7 +197,8 @@ describe("MAINP2 formal PM carry: zero-write refusals", () => {
   });
   test("merge gates: owner hold, frozen queue, merge journal unknown / engine run, slot holder, UI evidence missing", async () => {
     const frozen = card();
-    db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'queueFrozen', '{\"frozen\":true,\"reason\":\"x\",\"since\":1}') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
+    db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'queueFrozen', ?) ON CONFLICT (project, key) DO UPDATE SET value = excluded.value")
+      .run(JSON.stringify({ frozen: true, reason: "x", since: 1 }));
     try { await zeroWrite(frozen.id, () => run(frozen.req(two)), /冻结/); }
     finally { db.query("DELETE FROM meta WHERE project='p' AND key='queueFrozen'").run(); }
     for (const phase of ["unknown", "await_ci"]) {

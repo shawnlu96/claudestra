@@ -36,7 +36,7 @@ async function json(run: Run, argv: string[], what: string): Promise<unknown> {
   try { return JSON.parse(r.stdout); } catch { throw new Error(`${what} 输出不是 JSON`); }
 }
 
-export function parsePr(url: string): { repo: string; number: string } {
+function parsePr(url: string): { repo: string; number: string } {
   const m = PR.exec(url);
   if (!m) throw new Error("PR URL 不合法");
   return { repo: m[1]!, number: m[2]! };
@@ -109,7 +109,7 @@ export async function waitForHeadRuns(run: Run, repo: string, head: string, name
 }
 
 /** Head-pinned update: GitHub refuses when the PR head is no longer `expectedHead`; returns the new head it produced. */
-export async function updateBranch(run: Run, prUrl: string, expectedHead: string): Promise<string> {
+async function updateBranch(run: Run, prUrl: string, expectedHead: string): Promise<string> {
   const { repo, number } = parsePr(prUrl);
   await json(run, ["gh", "api", "-X", "PUT", `repos/${repo}/pulls/${number}/update-branch`, "-f", `expected_head_sha=${expectedHead}`], "gh update-branch");
   const pr = await json(run, ["gh", "pr", "view", prUrl, "--json", "headRefOid"], "gh pr view") as { headRefOid?: unknown };
