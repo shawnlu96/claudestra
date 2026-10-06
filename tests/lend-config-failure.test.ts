@@ -8,7 +8,7 @@ import { pausedUntil } from "../src/lib/lend-health.js";
 import { noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import {
   classifyConfigFailure, configFailureMode, noteStartConfigFailure, providerConfigFailure, providerFamilyUnavailable,
-  configFailureSlots, recoverProviderConfigFailure, setConfigFailurePolicy, startConfigRefusal,
+  configFailureSlots, NOTICE_STALE_MS, recoverProviderConfigFailure, retryConfigNotices, setConfigFailurePolicy, startConfigRefusal,
 } from "../src/lib/lend-config-failure.js";
 import { recoveryPolicy } from "../src/lib/recovery-policy.js";
 import { helloBody } from "../src/lib/lend-hello.js";
@@ -38,6 +38,16 @@ async function failStart(h: ReturnType<typeof harness>, orderId: string, error =
   expect(getOrder(h.db, orderId)?.state).toBe("released");
 }
 const configNotices = (h: ReturnType<typeof harness>) => h.log.notices.filter((n) => n.why?.startsWith("配置不可用"));
+/** Only the first config notice fails (the bridge is briefly down); every other notice goes through. */
+function failFirstConfigNotice(h: ReturnType<typeof harness>) {
+  const real = h.d.notify;
+  const n = { attempts: 0 };
+  h.d.notify = async (p) => {
+    if (!p.why?.startsWith("配置不可用")) return real(p);
+    return ++n.attempts === 1 ? { ok: false, error: "bridge 不在" } : real(p);
+  };
+  return n;
+}
 
 test("classifier: only explicit model-not-enabled; quota, capacity, network, auth and cyber refusals are never config", () => {
   expect(classifyConfigFailure(MODEL_400)).toBe("model_not_enabled");
@@ -98,7 +108,7 @@ test("on: two orders of one family → one start, one registration, exactly one 
   expect(h.log.created).toEqual([]);
   const f = providerConfigFailure(h.db, "team-a", "codex")!;
   expect(f).toMatchObject({ gen: 1, category: "model_not_enabled", notice: { state: "sent" }, recoveredAt: null });
-  expect(f.evidence.map((e) => e.orderId)).toEqual(["o1"]);
+  expect(f.evidence.map((e) => e.orderId)).toEqual(["o1", "o2"]); // the refused order joins the evidence
   expect(f.evidence[0].excerpt).toContain("model_not_enabled");
   expect(configNotices(h)).toHaveLength(1);
   const why = configNotices(h)[0].why!;
@@ -190,6 +200,67 @@ test("on: concurrent failures send one notice; a failed send is retried by the n
   await noteStartConfigFailure(d, row("e"), MODEL_400);
   expect(sent).toEqual(["a", "c"]);
   expect(providerConfigFailure(db, "team-a", "codex")?.evidence.map((e) => e.orderId)).toEqual(["a", "b", "c", "d", "e"]);
+  db.close();
+});
+
+test("on: a failed config notice is retried by the refusal of the next order, without starting it again (r2 probe)", async () => {
+  setMode("on");
+  const h = setup();
+  creates = 0;
+  const n = failFirstConfigNotice(h);
+  await failStart(h, "o1");
+  expect(n.attempts).toBe(1);
+  expect(providerConfigFailure(h.db, "team-a", "codex")?.notice).toBeNull();
+  h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o2")], pollAfterMs: 30_000 } });
+  h.advanceTime(60_000);
+  for (let i = 0; i < 10; i++) await h.tick();
+  expect(creates).toBe(1);
+  expect(getOrder(h.db, "o2")?.state).toBe("released");
+  expect(configNotices(h)).toHaveLength(1);
+  expect(providerConfigFailure(h.db, "team-a", "codex")?.notice).toMatchObject({ state: "sent" });
+  for (let i = 0; i < 4; i++) await h.tick();
+  expect(configNotices(h)).toHaveLength(1); // sent once, never again
+  expect(n.attempts).toBe(2);
+});
+
+test("on: a failed config notice is retried by the hello round with no new order; observe / off never send it", async () => {
+  setMode("on");
+  const h = setup();
+  creates = 0;
+  const n = failFirstConfigNotice(h);
+  await failStart(h, "o1");
+  h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [], pollAfterMs: 30_000 } });
+  h.d.v2 = { boot: "boot-lcfg-0001", call: async () => ({ status: 200, body: { ok: true, v: 1, proto: 2, helloMs: 60_000, beatMs: 15_000 } }) as never };
+  setMode("observe");
+  for (let i = 0; i < 3; i++) (h.advanceTime(61_000), await h.tick());
+  setMode("off");
+  for (let i = 0; i < 3; i++) (h.advanceTime(61_000), await h.tick());
+  expect(configNotices(h)).toEqual([]);
+  expect(n.attempts).toBe(1);
+  setMode("on");
+  for (let i = 0; i < 3; i++) (h.advanceTime(61_000), await h.tick());
+  expect(creates).toBe(1);
+  expect(configNotices(h)).toHaveLength(1);
+  expect(providerConfigFailure(h.db, "team-a", "codex")?.notice).toMatchObject({ state: "sent" });
+});
+
+test("retry: a lost in-flight claim is reclaimed only after NOTICE_STALE_MS; a recovered fault is never noticed", async () => {
+  setMode("on");
+  const db = openLendJournal(":memory:");
+  let t = 100;
+  const sent: string[] = [];
+  const d = { db, now: () => t, log: () => {}, notify: async (p: { orderId: string }) => (sent.push(p.orderId), { ok: true as const }) };
+  const row = (orderId: string) => ({ orderId, peer: "team-a", family: "codex", fp: null, preview: {}, wire: null }) as never;
+  await Promise.race([noteStartConfigFailure({ ...d, notify: () => new Promise(() => {}) }, row("a"), MODEL_400), Bun.sleep(1)]); // never settles
+  expect(providerConfigFailure(db, "team-a", "codex")?.notice).toMatchObject({ state: "sending" });
+  t += NOTICE_STALE_MS - 1;
+  await retryConfigNotices(d, "team-a");
+  expect(sent).toEqual([]);
+  t += 1;
+  await retryConfigNotices(d, "team-a");
+  expect(sent).toEqual(["a"]);
+  await retryConfigNotices(d, "team-a");
+  expect(sent).toEqual(["a"]);
   db.close();
 });
 

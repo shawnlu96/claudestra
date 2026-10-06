@@ -15,7 +15,7 @@ import { LEND_ROLES, type LendEntry } from "./lend-config.js";
 import { liveGrant } from "./lend-grant.js";
 import type { LendDeps } from "./lend-drive.js";
 import { pausedUntil } from "./lend-health.js";
-import { configFailureSlots } from "./lend-config-failure.js";
+import { configFailureSlots, retryConfigNotices } from "./lend-config-failure.js";
 import { claudeHelloSlots } from "./lend-claude-worker-capacity.js";
 import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
@@ -43,7 +43,7 @@ export interface LendRound {
   pollNow: Set<string>;
 }
 
-export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "readLend" | "context"> { v2: V2Port }
+export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "readLend" | "context">, Partial<Pick<LendDeps, "notify">> { v2: V2Port }
 
 export const newBoot = (): string => randomBytes(12).toString("base64url");
 export const protoKey = (peer: string): string => `proto:${peer}`;
@@ -158,6 +158,7 @@ async function compose(d: HelloDeps, peer: string, quota: HelloQuota | undefined
 
 /** 对一个 peer：到点（或状态变了）就发一次 hello，按结果记协议版本与下次时刻。授权现读，读不到 / 失效 = grant:null */
 export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): Promise<void> {
+  if (d.notify) await retryConfigNotices({ ...d, notify: d.notify }, peer); // 配置故障通知的补发（LCFG1）：不靠再起一次错的模型
   const quota = await quotaFor(d, peer); // 在现读授权之前等：读授权到发出之间不能有 await；没授权时 compose 不带
   let c = await compose(d, peer, quota);
   const st = helloState(d.db, peer);

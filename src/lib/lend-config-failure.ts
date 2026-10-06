@@ -14,7 +14,8 @@
  */
 import type { Database } from "bun:sqlite";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
-import { getMeta, setMeta, type LendRow } from "./lend-journal.js";
+import { LEND_FAMILIES } from "./lend-config.js";
+import { getMeta, getOrder, setMeta, type LendRow } from "./lend-journal.js";
 import type { LendNoticeParams } from "./lend-notice.js";
 import { recoveryPolicy, type RecoveryKey, type RecoveryPolicyPort } from "./recovery-policy.js";
 
@@ -115,18 +116,38 @@ export interface ConfigFailureDeps {
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
-function noticeOf(row: LendRow, f: ProviderConfigFailure, excerpt: string): LendNoticeParams {
-  const o = { ...row.preview, ...(row.wire?.order ?? {}) };
-  const text = `配置不可用：本机 ${f.family} 模型未启用（${f.category}），${f.peer} 借的 ${f.family} 位起不来；是否修改模型由你决定。原文：${excerpt}`;
+/** The notice is about the newest evidence order (the order row when the journal still has it, else just its id). */
+function noticeOf(db: Database, f: ProviderConfigFailure): LendNoticeParams {
+  const last = f.evidence[f.evidence.length - 1];
+  const row = last ? getOrder(db, last.orderId) : null;
+  const o = { ...row?.preview, ...(row?.wire?.order ?? {}) };
+  const text = `配置不可用：本机 ${f.family} 模型未启用（${f.category}），${f.peer} 借的 ${f.family} 位起不来；是否修改模型由你决定。原文：${last?.excerpt ?? ""}`;
   const why = oneLine(text, 300);
-  return { orderId: row.orderId, peer: row.peer, fp: row.fp, family: row.family, repo: str(o.repo), pr: typeof o.pr === "number" ? o.pr : null,
+  return { orderId: last?.orderId ?? "", peer: f.peer, fp: row?.fp ?? null, family: f.family, repo: str(o.repo), pr: typeof o.pr === "number" ? o.pr : null,
     head: str(o.head), taskId: str(o.taskId), step: str(o.step), quota: `${f.family} 配置故障（第 ${f.gen} 代）`, kind: "stopped", why };
+}
+
+/** A notice claim older than this is taken as lost (the process died mid-send) and may be claimed again. */
+export const NOTICE_STALE_MS = 15 * 60_000;
+const claimable = (f: ProviderConfigFailure, now: number): boolean =>
+  f.recoveredAt === null && (f.notice === null || (f.notice.state === "sending" && now - f.notice.at >= NOTICE_STALE_MS));
+
+/** Send the claimed notice of generation `gen`, then settle it by CAS: sent, or freed (null) for the next retry; a stale result is dropped. */
+async function sendNotice(d: ConfigFailureDeps, peer: string, family: string, gen: number, claimedAt: number): Promise<void> {
+  const f = providerConfigFailure(d.db, peer, family);
+  if (!f || f.gen !== gen) return;
+  let sent: { ok: true } | { ok: false; error: string };
+  try { sent = await d.notify(noticeOf(d.db, f)); } catch (e) { sent = { ok: false, error: String(e) }; }
+  const settled = casGen(d.db, peer, family, gen, (cur) => cur.notice?.state !== "sending" || cur.notice.at !== claimedAt ? null
+    : { ...cur, notice: sent.ok ? { state: "sent", at: d.now() } : null });
+  if (!sent.ok) d.log(`配置故障通知没交出去（${sent.error}），${peer} 的 ${family} 由下一轮补发`);
+  else if (!settled) d.log(`配置故障通知结果已过期（第 ${gen} 代已不是当前），不改新故障`);
 }
 
 /**
  * Called beside pauseForStartFailure with the real create error. Not the configuration class / off: nothing. observe: log the
  * would-be pause only. on: register per peer + family with the evidence and send the owner notice at most once per generation
- * (concurrent failures see the claimed notice; a failed send frees it for the next failure, a stale result is dropped by CAS).
+ * (concurrent failures see the claimed notice; a failed send frees it for retryConfigNotices, a stale result is dropped by CAS).
  */
 export async function noteStartConfigFailure(d: ConfigFailureDeps, row: LendRow, error: string): Promise<void> {
   const category = classifyConfigFailure(error);
@@ -139,28 +160,42 @@ export async function noteStartConfigFailure(d: ConfigFailureDeps, row: LendRow,
     return d.log(`配置故障观察（observe）：本会把 ${row.peer} 的 ${row.family} 登记为不可接（${category}，单 ${row.orderId}），不写暂停、不通知`);
   }
   const gen = register(d.db, row, ev, now);
-  if (gen === null) return;
-  const f = providerConfigFailure(d.db, row.peer, row.family)!;
-  let sent: { ok: true } | { ok: false; error: string };
-  try { sent = await d.notify(noticeOf(row, f, ev.excerpt)); } catch (e) { sent = { ok: false, error: String(e) }; }
-  const settled = casGen(d.db, row.peer, row.family, gen, (cur) => cur.notice?.state !== "sending" ? null
-    : { ...cur, notice: sent.ok ? { state: "sent", at: d.now() } : null });
-  if (!sent.ok) d.log(`配置故障通知没交出去（${sent.error}），${row.peer} 的 ${row.family} 下次失败再试`);
-  else if (!settled) d.log(`配置故障通知结果已过期（第 ${gen} 代已不是当前），不改新故障`);
+  if (gen !== null) await sendNotice(d, row.peer, row.family, gen, now);
+}
+
+/**
+ * The notice's own retry path, independent of new start failures (startConfigRefusal keeps those from happening): under on,
+ * every unrecovered fault of this peer whose notice is unsent (a failed send freed it, or a claim went stale) is claimed by
+ * CAS and sent once more. Called from the hello round (lend-hello.ts) and beside each refusal; observe / off: nothing.
+ */
+export async function retryConfigNotices(d: ConfigFailureDeps, peer: string): Promise<void> {
+  if (configFailureMode() !== "on") return;
+  for (const family of LEND_FAMILIES) {
+    const f = providerConfigFailure(d.db, peer, family);
+    const now = d.now();
+    if (!f || !claimable(f, now)) continue;
+    const claimed = casGen(d.db, peer, family, f.gen, (cur) => (claimable(cur, now) ? { ...cur, notice: { state: "sending", at: now } } : null));
+    if (claimed) await sendNotice(d, peer, family, f.gen, now);
+  }
 }
 
 /**
  * startWorker, before worker.create (a new order only: started / leased orders never get here): under on, a peer + family this
- * lender registered unavailable is not started again; the answer is the not_started detail, carrying the original category
- * and evidence so the borrower's classifier sees the same fault. observe logs the would-be refusal; off / available: null.
+ * lender registered unavailable is not started again; the refused order joins the fault's evidence, and the answer is the
+ * not_started detail carrying the original category and evidence so the borrower's classifier sees the same fault. An unsent
+ * notice is retried alongside (when the caller has notify). observe logs the would-be refusal; off / available: null.
  */
-export function startConfigRefusal(d: Pick<ConfigFailureDeps, "db" | "log">, row: LendRow): string | null {
+export function startConfigRefusal(d: Pick<ConfigFailureDeps, "db" | "log"> & Partial<Pick<ConfigFailureDeps, "now" | "notify">>, row: LendRow): string | null {
   const mode = configFailureMode();
   if (mode === "off") return null;
   const f = providerConfigFailure(d.db, row.peer, row.family);
   if (!f || f.recoveredAt !== null) return null;
   const last = f.evidence[f.evidence.length - 1];
   if (mode === "observe") return d.log(`配置故障观察（observe）：本会因 ${row.peer} 的 ${row.family} 配置故障（第 ${f.gen} 代）不起 ${row.orderId}`), null;
+  const now = d.now?.() ?? Date.now();
+  casGen(d.db, row.peer, row.family, f.gen, (cur) => cur.recoveredAt !== null || cur.evidence.some((e) => e.orderId === row.orderId) ? null
+    : { ...cur, lastAt: now, evidence: [...cur.evidence, { orderId: row.orderId, at: now, category: cur.category, excerpt: last?.excerpt ?? cur.category }].slice(-EVIDENCE_MAX) });
+  if (d.notify && d.now) void retryConfigNotices(d as ConfigFailureDeps, row.peer).catch((e) => d.log(`配置故障通知补发出错：${String(e)}`));
   return `起 worker 失败：配置故障未恢复，没有再启动（第 ${f.gen} 代，单 ${last?.orderId ?? "?"}）：${last?.excerpt ?? f.category}`.slice(0, 400);
 }
 
