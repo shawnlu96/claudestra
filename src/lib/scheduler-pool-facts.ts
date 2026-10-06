@@ -7,6 +7,7 @@ import { localAgentPool } from "./scheduler-agent-pool-ledger.js";
  * whereas the intent's `submitted` settle only happens on the next scheduler pass. tests/scheduler-pool.test.ts.
  */
 import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
+import { configFailureV2 } from "./lend-config-failure-pool.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
@@ -118,7 +119,7 @@ export function borrowPeers(db: Database, project: string, borrow: readonly Borr
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
   return borrow.filter((b) => b.projects.includes(project))
     .map((b) => ({ peer: b.peer, open: live(b.peer) + preparedPeerWrites(db, b.peer, read).total,
-      maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now, unified, read),
+      maxOpen: b.maxOpen, roles: b.roles, v2: configFailureV2(db, b.peer, peerV2(db, b, now, unified, read)),
       helloAt: getLendPeer(db, b.peer)?.helloAt, ...(b.priority ? { priority: b.priority } : {}) }));
 }
 

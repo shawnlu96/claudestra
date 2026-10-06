@@ -10,6 +10,7 @@ import type { Database } from "bun:sqlite";
 import { getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
+import { claimsPoolReview } from "./pool-review-proof.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { gitDirtySync, gitHeadSync } from "./scheduler-review-worktree.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
@@ -69,6 +70,8 @@ function refusal(db: Database, task: Pick<LedgerTask, "id" | "headSHA">, caller:
 export function autoReviewWriter(db: Database, task: Pick<LedgerTask, "id" | "headSHA">, caller: ReviewCaller,
   claim: { reviewer?: string; session?: string; family?: string; head?: string }): false | BoundReviewer {
   if (getWorkflow(db, task.id)?.mode !== "auto") return false;
+  // A pool verdict enters only through lend-write against its order; a CLI copy of one is no engine receipt (manual queue).
+  if (claimsPoolReview(claim)) throw new LedgerError("forbidden", `${task.id} 是自动卡：出借池审查结论只由 lend-write 凭出借单入账，CLI 代记不算回执；${TAKE_OVER}`);
   const r = refusal(db, task, caller, claim);
   if (typeof r === "string") throw new LedgerError("forbidden", r);
   return r;

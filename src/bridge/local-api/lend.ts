@@ -28,6 +28,7 @@ import { ledgerDb } from "../ledger-feed.js";
 import { onPeerKeyPinned, peerSignatureState } from "../peer-signature.js";
 import { requestContextOf } from "../request-context.js";
 import { sendLedgerNotice } from "../team-router.js";
+import { strictUtf8 } from "../../lib/pool-review-proof-raw.js";
 
 type Endpoint = LendEndpoint | "hello" | "beat" | "ask";
 const CLI: Record<Exclude<Endpoint, "ask">, string> = {
@@ -103,7 +104,8 @@ export async function handleLendApi(req: Request, path: string, principal: Princ
   const why = lendCallerRefusal(req, principal);
   if (why) return refused("unauthorized", why);
   if (Number(req.headers.get("content-length") || 0) > LEND_BODY_MAX) return apiJson(413, { ok: false, code: "invalid", error: `请求体超过 ${LEND_BODY_MAX} 字节` });
-  const body = await req.text();
+  const body = strictUtf8(await req.arrayBuffer()); // POOLRV1: lossless text of the verified bytes; the result archive relies on it
+  if (body === null) return apiJson(400, { ok: false, code: "invalid", error: "请求体不是合法 UTF-8" });
   if (Buffer.byteLength(body) > LEND_BODY_MAX) return apiJson(413, { ok: false, code: "invalid", error: `请求体超过 ${LEND_BODY_MAX} 字节` });
   const endpoint = m[1] as Endpoint;
   if (endpoint === "ask") return remoteAsk(body, principal.peer as string);

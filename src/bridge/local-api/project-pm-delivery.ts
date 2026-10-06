@@ -6,7 +6,7 @@ import { agentInScope, readPrincipalsStrict, tokenIdOf, type PrincipalsFile } fr
 import { ledgerDb } from "../ledger-feed.js";
 import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
-import { isHumanDirect, markPmTransfer, retryLater, undoPmTransfer } from "../pm-held-transfer.js";
+import { isCallerPushback, isHumanDirect, markPmTransfer, pmTargetDrift, retryLater, setPmRoleRoute, undoPmTransfer, type PmTarget } from "../pm-held-transfer.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
 interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile> }
@@ -30,14 +30,20 @@ export async function deliverPmLocal<P extends Receipt>(
     // pmClientFor may have lent another PM's socket under an older pointer; never deliver this channel's message through it.
     const borrowed = agents.some((a) => a.projectId === original.projectId && a.channelId && a.channelId !== to.channelId
       && clients.get(a.channelId)?.ws === to.ws);
-    if (borrowed && !own) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } });
-    const via: LocalEndpoint = borrowed && own ? { ...to, ws: own.ws, cwd: own.cwd } : to;
+    // A held letter replayed while its addressee is offline carries no socket at all: keep it queued, never send on an empty one.
+    const lent = borrowed || !to.ws;
+    if (lent && !own) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `${original.name} is offline` } });
+    const via: LocalEndpoint = lent && own ? { ...to, ws: own.ws, cwd: own.cwd } : to;
+    const drift = pmTargetDrift(env, via.channelId); // flush checked another PM's turn for it: keep it queued, re-check next time
+    if (drift) return drift;
     // Whether or not the role would have redirected it, a direct API chat with a PM is re-checked against its exact credential.
     if (direct && getMeta(db, original.projectId).pms.includes(original.name)) {
       const refused = await finalScopeRefusal(env, original.name, facts);
       if (refused) return refused;
       undoPmTransfer(env, via); // an earlier replay may have pointed it at the active PM
     }
+    // The predecessor's own answer stays its own: an older build / failed retry may have pointed it at the active PM.
+    if (pushback && own) undoPmTransfer(env, via);
     if (borrowed) env.to = via;
     return send(env, via);
   }
@@ -45,22 +51,10 @@ export async function deliverPmLocal<P extends Receipt>(
   const client = agent?.channelId ? clients.get(agent.channelId) : undefined;
   if (!agent?.channelId || !client) return retryLater({ envelope: env, outcome: { kind: "dropped", reason: `active PM ${name} is offline` } });
   const target: LocalEndpoint = { kind: "local", agentName: name, channelId: agent.channelId, ws: client.ws, cwd: client.cwd };
-  if (env.from.kind === "api") {
-    const from = env.from;
-    if (!(await apiScopeAllows(from, name, facts))) {
-      const { pmTransfer: _, ...plain } = env as Envelope & { pmTransfer?: unknown };
-      const notice: Envelope = { ...plain, from: { kind: "bridge", label: "pm-scope-refusal" }, to: target, intent: "notification",
-        content: `前任 PM ${original.name} 的 ${from.peer ? "peer" : "API"} 消息被拒收：令牌范围未包含当班 PM ${name}。`,
-        meta: { messageId: `${env.meta.messageId}:pm-refused`, threadId: `${env.meta.threadId}:pm-refused`,
-          ts: env.meta.ts, triggerKind: "system", skipInterAgentWatchdog: true } };
-      const delivered = await send(notice, target);
-      const refused: Delivery = { envelope: env, outcome: { kind: "dropped", reason: `${from.peer ? "peer token" : "API credential"} scope excludes active PM ${name}` } };
-      if (delivered.outcome.kind === "sent") return refused;
-      // The refusal notice is the only trace of the dropped message; a held original stays queued until that notice gets through.
-      console.error("[pm-role] refusal notice delivery failed", delivered.outcome.kind);
-      return retryLater(refused);
-    }
-  }
+  const drift = pmTargetDrift(env, target.channelId); // before any receipt / return slot moves: flush checked this recipient's turn
+  if (drift) return drift;
+  // A drifted target is caught above, so the refusal notice can only reach the PM flush checked.
+  if (env.from.kind === "api" && !(await apiScopeAllows(env.from, name, facts))) return refuseOutOfScope(env, env.from, original.name, target, send);
   const before = to.channelId;
   // Move only this request's receipt; unrelated old-PM conversations remain with their original target.
   const caller = env.from.kind === "local" ? env.from.channelId : null;
@@ -119,19 +113,48 @@ async function apiScopeAllows(from: ApiFrom, name: string, facts: RouteFacts): P
   return !!p && p.peer === from.peer && agentInScope(p, name);
 }
 
+/** The original is dropped once the active PM gets a refusal notice; it is the only trace, so a held original stays queued until it gets through. */
+async function refuseOutOfScope(env: Envelope, from: ApiFrom, former: string, target: LocalEndpoint, send: Send): Promise<Delivery> {
+  const name = target.agentName;
+  const { pmTransfer: _, ...plain } = env as Envelope & { pmTransfer?: unknown };
+  const notice: Envelope = { ...plain, from: { kind: "bridge", label: "pm-scope-refusal" }, to: target, intent: "notification",
+    content: `前任 PM ${former} 的 ${from.peer ? "peer" : "API"} 消息被拒收：令牌范围未包含当班 PM ${name}。`,
+    meta: { messageId: `${env.meta.messageId}:pm-refused`, threadId: `${env.meta.threadId}:pm-refused`,
+      ts: env.meta.ts, triggerKind: "system", skipInterAgentWatchdog: true } };
+  const delivered = await send(notice, target);
+  const refused: Delivery = { envelope: env, outcome: { kind: "dropped", reason: `${from.peer ? "peer token" : "API credential"} scope excludes active PM ${name}` } };
+  if (delivered.outcome.kind === "sent") return refused;
+  console.error("[pm-role] refusal notice delivery failed", delivered.outcome.kind);
+  return retryLater(refused);
+}
+
 /** A held direct chat replayed after its device lost this agent is dropped quietly: nobody else gets its content. */
 async function finalScopeRefusal(env: Envelope, name: string, facts: RouteFacts): Promise<Delivery | null> {
   if (env.from.kind !== "api" || await apiScopeAllows(env.from, name, facts)) return null;
   return { envelope: env, outcome: { kind: "dropped", reason: `API credential scope excludes ${name}` } };
 }
 
-// Answers pushed back to the agent that asked: local send_to_agent replies / drains / expiries, and HTTP peer replies.
-const PUSHBACK_ID = /^(?:agent_(?:reply|drain|withheld|expired|apierr)|reply_fwd)_/;
-function isCallerPushback(env: Envelope): boolean {
-  if (env.meta.triggerKind === "peer_http") return true;
-  return env.from.kind === "local" && env.meta.triggerKind === "agent_tool" && PUSHBACK_ID.test(env.meta.messageId)
-    && (env.intent === "response" || !env.meta.messageId.startsWith("reply_fwd_"));
+/**
+ * 押后队列的归属判定（收件箱领取 / 计数、flush 交给当班 PM）：同 deliverPmLocal 的转交规则，但前任自己请求的回程不看在不在线——
+ * 押着的就留给它本人，不从正文猜身份。台账读不出来按「留在原频道」，和改动前一样
+ */
+export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: Envelope) => PmTarget | null {
+  return (channelId) => {
+    const { db, agents } = facts ?? { db: ledgerDb(), agents: readRegistryAgentsSync() };
+    const original = agents.find((a) => a.channelId === channelId);
+    return (env) => {
+      if (!db || !original?.projectId || isHumanDirect(env) || isCallerPushback(env)) return null;
+      try {
+        const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
+        return name ? { agentName: name, channelId: agents.find((a) => a.name === name && a.projectId === original.projectId)?.channelId } : null;
+      } catch (e) {
+        console.error("[pm-role] held ownership check failed", (e as Error).message);
+        return null;
+      }
+    };
+  };
 }
+setPmRoleRoute(pmRoleRoute());
 
 /** After an API delivery, typing / source / handoff bookkeeping belongs to whoever actually received it. */
 export function followPmDelivery(agent: { name: string; channelId: string }, delivery: { envelope: Envelope }): void {

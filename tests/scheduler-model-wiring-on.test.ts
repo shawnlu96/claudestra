@@ -1,6 +1,6 @@
 /**
  * dispatch-recovery-MODELW · modelOutcomeStep against the real ledger: the approved refusal sequence under on, MODEL's
- * capacity / host classes, and a throwing MODEL call. The tick always escalates; "" = today's reason, else the on plan for PM.
+ * capacity / host classes, and a throwing MODEL call. "" = today's reason, a string = the on plan for PM, { epoch } = MODELX ran it.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -31,6 +31,8 @@ beforeEach(async () => {
   setModelOutcomeReader(CFG);
   g.__modelwOn = "on";
   f = autoFixture();
+  writeFileSync(join(f.dir, "T1.md"), "# T1\n");
+  f.db.run("UPDATE tasks SET spec = ? WHERE id = 'T1'", [join(f.dir, "T1.md")]); // MODELX r4: the review order's frozen spec body
   await toBuild(f);
   await f.tick();
   expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).ok).toBe(true);
@@ -59,36 +61,33 @@ function ticket(id: string): SchedulerIntent {
     causalSeq: listEvents(f.db, { project: "p" }).at(-1)!.seq, action: "review", node: "adversarial_review", reason: "批准的接续审查" }).intent;
 }
 
-describe("on: the approved refusal sequence", () => {
-  test("retry_same → (same materials, new session) exempt_review to another family with exemption + owner notice → manual", async () => {
+describe("on: the approved refusal sequence (MODELX, owner 10-06 14:45: no same-model retry)", () => {
+  test("first refusal → exemption epoch at once (MODEL's retry_same executed as exempt_review); its refusal → manual", async () => {
     approve();
     const once = await step(first, rv("s-rv"));
-    expect(once).toContain("MODEL 计划：retry_same（批准 ");
-    expect(once).toContain("执行路径待 MODELX");
-    // A replayed tick on the same intent: MODEL's dedup key, no second record, the same suffix.
-    expect(await step(first, rv("s-rv"))).toBe(once);
+    const text = typeof once === "string" ? once : once.epoch;
+    expect(typeof once).toBe("object");
+    expect(text).toContain(`${EXEMPTION_TEXT}(批准 `);
+    expect(text).toContain("owner 14:45 去掉同模型重试");
+    // A replayed tick on the same intent: MODEL's dedup key, the epoch's dedup key, nothing new.
+    const replay = await step(first, rv("s-rv"));
+    expect(typeof replay === "object" && replay.epoch.includes("已执行过")).toBe(true);
     expect(outcomes()).toHaveLength(1);
+    const swaps = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "reviewer_swap");
+    expect(swaps()).toMatchObject([{ data: { fromFamily: "codex", toFamily: "claude", refusal: { crossModel: false, planKind: "retry_same" } } }]);
 
-    const second = ticket("refusal-retry-1");
-    const exempt = await step(second, rv("s-rv-2"));
-    expect(exempt).toContain("MODEL 计划：exempt_review（批准 ");
-    expect(exempt).toContain(EXEMPTION_TEXT);
-    expect(exempt).toContain("告知 owner");
-    expect(outcomes().at(-1)).toMatchObject({ kind: "escalate", data: { op: "model_refusal_exempt", attempt: 2, session: "s-rv-2", oldSession: "s-rv",
-      plan: { kind: "exempt_review", to: { family: "claude", machine: "local" }, exemption: EXEMPTION_TEXT, notifyOwner: true } } });
-
-    settleIntent(f.db, f.at("scheduler"), { id: second.id, from: "pending", to: "cancelled", receipt: "拒审，原单终止" });
-    const third = ticket("refusal-exempt-1");
-    expect(await step(third, rv("s-claude", { agent: "agent-claude-bk", family: "claude", transport: "tmux" }))).toBe("");
-    expect(outcomes().map((e) => e.data.op)).toEqual(["model_refusal_retry", "model_refusal_exempt", "model_safety_hold"]);
-    expect(outcomes().at(-1)!.data.plan).toMatchObject({ kind: "manual", reason: expect.stringContaining("不再换提供方") });
+    const exempt = ticket("refusal-exempt-1");
+    expect(await step(exempt, rv("s-claude", { agent: "agent-claude-bk", family: "claude", transport: "tmux" }))).toBe("");
+    expect(outcomes().map((e) => e.data.op)).toEqual(["model_refusal_retry", "model_safety_hold"]);
+    expect(swaps()).toHaveLength(1);
   });
 
-  test("same session on the retry (not a new session) holds instead of exempting", async () => {
+  test("a late refusal on the retired session after the epoch: MODEL holds, no second epoch", async () => {
     approve();
     await step(first, rv("s-rv"));
     expect(await step(ticket("refusal-retry-1"), rv("s-rv"))).toBe("");
     expect(outcomes().at(-1)).toMatchObject({ data: { op: "model_safety_hold" } });
+    expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "reviewer_swap")).toHaveLength(1);
   });
 });
 

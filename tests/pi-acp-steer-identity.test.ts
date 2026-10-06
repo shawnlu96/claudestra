@@ -10,6 +10,7 @@ import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
 import type { RpcWire } from "../src/lib/acp/rpc.ts";
 import { AcpSession } from "../src/lib/acp/session.ts";
 import { AcpTurnLoop } from "../src/lib/acp/turn.ts";
+import type { AcpFailure } from "../src/lib/acp/failures.ts";
 
 type Rec = Record<string, any>;
 /** input hook：返回改写后的正文，undefined = 扩展当场处理掉（handled，不入队） */
@@ -108,7 +109,9 @@ async function rig(hook: Hook, steerTimeoutMs?: number) {
   await session.initialize();
   await session.create("/w");
   pi.emit({ type: "agent_start" });
-  const loop = new AcpTurnLoop({ prompt: () => new Promise(() => {}), steer: (text, id) => session.steer(text, id), reportStop: async () => ({}), onFailure: () => {}, log });
+  const failures: AcpFailure[] = [];
+  const loop = new AcpTurnLoop({ prompt: () => new Promise(() => {}), steer: (text, id) => session.steer(text, id), reportStop: async () => ({}),
+    onFailure: (f) => failures.push(f), log });
   await loop.submit("busy");
   const ids: string[] = [];
   /** 第 n 条插话的 message_id 是 ids[n - 1]（宿主按到达顺序发 steer，适配器按序发给 pi） */
@@ -117,7 +120,7 @@ async function rig(hook: Hook, steerTimeoutMs?: number) {
     const r = await session.cancel();
     return { ...r, voided: loop.voided(r), truth: pi.cleared().filter((n) => n > 0).map((n) => ids[n - 1]) };
   };
-  return { pi, submit, cancel, logs };
+  return { pi, submit, cancel, logs, failures };
 }
 
 describe("Pi 叫停回执：voided 对上 pi 实际入队的那条", () => {
@@ -172,13 +175,14 @@ describe("Pi 叫停回执：voided 对上 pi 实际入队的那条", () => {
   test("hook 一直不回：到 steer 超时就放开下一条，下一条照常入队、身份对；卡住那条之后才入队的不报作废", async () => {
     const stuck = gate<string>();
     const h = await rig((text, n) => (n === 1 ? stuck.promise : Promise.resolve(text)), 50);
-    expect(await h.submit("卡住的", "m-stuck")).toBe("queued"); // 超时 → 宿主改排队（调度器自己的队列，不进 pi）
-    expect(h.logs.some((l) => l.includes("steering 出错") && l.includes("超时"))).toBe(true);
+    expect(await h.submit("卡住的", "m-stuck")).toBe("unknown"); // 写出后超时 → 投递不明：宿主不重发、出卡（tests/pi-acp-steer-failure.test.ts）
+    expect(h.logs.some((l) => l.includes("steering 出错"))).toBe(false); // 没走改排队
+    expect(h.failures.some((f) => f.kind === "error" && f.deliveryUnknown === true && f.message.includes("超时"))).toBe(true); // 超时文字进了投递不明卡
     expect(await h.submit("下一条", "m-next")).toBe("steer");
     expect(h.pi.queued()).toEqual([2]);
     stuck.open("卡住的");
     await until(() => h.pi.queued().length === 2, "卡住那条晚到入队");
-    expect(await h.cancel()).toMatchObject({ cleared: ["下一条", "卡住的"], voided: ["m-next"] }); // m-stuck 宿主已改排队，本来就不在作废候选里
+    expect(await h.cancel()).toMatchObject({ cleared: ["下一条", "卡住的"], voided: ["m-next"] }); // m-stuck 投递不明、没进 steered 账，本来就不在作废候选里
   });
 
   // 卡住那条在下一条过 hook 期间晚到入队：下一条的窗口里新增了两条，认不出 → 不记身份（否则把卡住那条的正文记到下一条头上，消费它时就错销了下一条）
@@ -186,7 +190,7 @@ describe("Pi 叫停回执：voided 对上 pi 实际入队的那条", () => {
     const stuck = gate<string>();
     const next = gate<string>();
     const h = await rig((_text, n) => (n === 1 ? stuck.promise : next.promise), 50);
-    expect(await h.submit("卡住的", "m-stuck")).toBe("queued");
+    expect(await h.submit("卡住的", "m-stuck")).toBe("unknown");
     const second = h.submit("下一条", "m-next");
     await until(() => h.pi.prompts() === 2, "下一条进 pi");
     stuck.open("卡住的");

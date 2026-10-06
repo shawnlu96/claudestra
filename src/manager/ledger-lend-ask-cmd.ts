@@ -54,7 +54,7 @@ export const LEND_ASK_CMDS: Record<string, CommandSpec> = {
   },
   "lend-close-asks": {
     valued: ["agent"], bools: [],
-    usage: "lend-close-asks --agent <agent-lend-…>（调度服务专用：出借单结束后关掉这个 worker 开出的 Codex 额度 / 登录卡）",
+    usage: "lend-close-asks --agent <agent-lend-…>（调度服务专用：出借单结束后关掉这个 worker 开出的 Codex 卡；投递结果不明的卡留给人结）",
     run(c) {
       onlyScheduler(c, "lend-close-asks");
       const agent = c.p.flags.agent ?? "";

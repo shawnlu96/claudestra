@@ -1,4 +1,5 @@
 "use client";
+import { TeamWorkerContext } from "./team-worker-context";
 import { useEffect, useId, useRef } from "react";
 import { contextText, peerWorkState, quotaTier, workState, type TeamQuota } from "./team-panel-model";
 import type { Interaction, TeamNode } from "./team-graph-model";
@@ -26,6 +27,7 @@ export function TeamGraphNode({ node: n, quotas, selected, onSelect, now }: {
     <span className={s.detail}>{n.agent?.model || n.agent?.runtime || t("未知")}</span>
     <span className={s.detail}>{t("额度")} · {t(STATUS[q ? quotaTier(q, now) : "unknown"])}
       {" / "}{t("上下文")} · {contextText(n.agent?.contextTokens) ?? t("未知")}</span>
+    {n.agent || n.remote ? <TeamWorkerContext agent={n.agent?.name ?? n.name} peer={n.peer} /> : null}
     {n.agent?.ledgerReview && <span className={s.review} data-team-review={n.agent.ledgerReview.verdict ?? "reviewing"}>
       <LedgerReviewLine review={n.agent.ledgerReview} /></span>}
   </button>;
