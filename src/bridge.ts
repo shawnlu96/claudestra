@@ -95,6 +95,7 @@ import { apiErrorResponse } from "./bridge/api-respond.js";
 // clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import { createClearRotation } from "./bridge/clear-rotation.js";
+import { maybeHealRotatedSession } from "./bridge/session-heal.js";
 import {
   corsHeadersFor,
   serveStaticSite, appConfigResponse, startLegacyWebPort, drainingFetch, MAX_HTTP_BODY,
@@ -575,6 +576,7 @@ import { originFooter } from "./lib/instance-tag.js";
 
 // 进程级异常兜底：保证死因一定进 stderr（见 lib/crash-guard.ts）
 installCrashGuard("bridge");
+(await import("./lib/sandbox-parent-watchdog.js")).startSandboxParentWatchdog(); // 沙箱：启动方被硬杀就跟着退；生产空操作
 
 // v2.19.0 日志落点从 /tmp 搬到 ~/.claude-orchestrator/logs（见 lib/log-paths.ts）
 import { initDaemonLogs } from "./lib/log-paths.js";
@@ -583,6 +585,8 @@ initDaemonLogs("bridge");
 // v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { saveDiscordDownload } from "./lib/media-outbound.js";
+import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
+armSpecPreflight();
 await assertPrimaryOrExit("bridge");
 
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
@@ -709,7 +713,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
-  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles });
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
   const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
@@ -869,7 +873,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     const ledgerHold = await inboundLedgerGate(env, clients.get(to.channelId)?.runtime, evAgent, content, meta, heldLocalMsgs); if (ledgerHold) return ledgerHold; // Pi / Codex 入站账
     if (turnCuts.takeAfterInterrupt(to.channelId)) meta.after_interrupt = "true"; // Codex 被打断后 queue 会卡住,这条改打进 TUI
     to.ws.send(JSON.stringify({ type: "message", content, meta }));
-    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle"); // 触发这一轮的是谁（撞错后回程只让「接着做」那一轮结算，bridge/stop-settle.ts）
+    noteDelivered(to.channelId, env.from, Date.now(), turn.main === "idle", env.intent === "request" && !env.meta.skipInterAgentWatchdog); // 谁开的这一轮（stop-settle）
     turnCuts.noteDelivered(env, to.channelId, meta.after_interrupt === "true", turn.main === "busy");
     emitEvent({ agent: evAgent, chatId: to.channelId, type: "chat_message", data: inboundEventData(env, meta) }); // 入站镜像给网页（bridge/inbound-event.ts）
     // watcher 入站自愈(2026-07-24 wechat-bot:创建后 >60s 才来首条消息,pending-start 已放弃 → watcher
@@ -1148,7 +1152,7 @@ discord.once("ready", async () => {
   cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
 
   // v2.4.25+ 用量看板：启动后确保只读频道 + 常驻消息存在，并刷一次。延迟几秒等
-  // channel-server 重连、master TUI 稳定，再抓 /status。
+  // channel-server 重连再刷（只读缓存）。
   setTimeout(() => void initStatsDashboard(discord), 6000);
 
   // 扫 skill + 为已有 active agent 扫项目级
@@ -1598,14 +1602,14 @@ discord.on("channelDelete", async (channel) => {
 // ============================================================
 
 // /clear 后的会话轮转收尾（运行时在模块里按频道推导，bridge/clear-rotation.ts）
-const scheduleClearRotation = createClearRotation({
-  clientRuntime: (cid) => clients.get(cid)?.runtime,
+const rotationDeps = {
   runManager,
-  rewatch: (name, cwd, sid, cid, runtime) => {
+  rewatch: (name: string, cwd: string, sid: string, cid: string, runtime: string | undefined) => {
     stopWatchingByChannel(cid);
     startWatching(name, cwd, sid, cid, discord, { runtime });
   },
-});
+};
+const scheduleClearRotation = createClearRotation({ clientRuntime: (cid) => clients.get(cid)?.runtime, ...rotationDeps });
 
 registerInteractionHandlers(discord, {
   allowedDiscordIds,
@@ -2659,7 +2663,7 @@ function sameWsChannels(channelId: string): string[] {
 
 async function handleHookRequest(req: Request): Promise<Response> {
   try {
-    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean; acpDeliveryWarning?: boolean };
+    const body = await req.json() as { channelId: string; event: string; stopHookActive?: boolean; interrupt?: boolean; acpDeliveryWarning?: boolean; sessionId?: string };
     const { channelId, event } = body;
     if (!channelId || !event) {
       return new Response("Missing channelId or event", { status: 400 });
@@ -2710,7 +2714,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
         emitEvent({ agent: evAgent, chatId: channelId, type: "agent_status", data: { status: "done", ...(bgPending ? { bgPending: true } : {}) } });
         // 回合结束核对 registry session 是否还是活文件——原生 /clear 类
         // 轮转（不经 clear 端点）自愈。后台异步，不阻塞 Stop 主流程。
-        void maybeHealRotatedSession(channelId);
+        void maybeHealRotatedSession(channelId, body.sessionId, rotationDeps);
         // 插话那一回合结束、被打断的事还没续上 → 打断收尾提醒进押后队列,和押后消息一起由同一个投递者投(lib/turn-cuts.ts)
         const cutNotice = turnCuts.onStop(channelId, event === "stop" ? "Stop" : event, evAgent, afterAbort); // 叫停中止引起的 Stop 不清送达记录（⏹ 抬头要列）
         if (cutNotice) heldLocalMsgs.holdEnv(cutNotice);
@@ -3038,80 +3042,6 @@ const STATIC_DIR = process.env.BRIDGE_STATIC_DIR || "";
 // 全拒(fail-closed,当前合法流量 100% 回环,零影响)。
 const CONTROL_TOKEN = process.env.BRIDGE_CONTROL_TOKEN || "";
 
-/**
- * Stop 时的 session 轮转自愈（2026-07-23 用户报：temp 历史停在 7-15）。
- *
- * 原生 /clear 不经 clear 端点也会轮转 session——远程终端里直敲、Discord slash
- * 直通、TUI 里手动打——registry 全程不知情，jsonl-watcher/history 从此盯死文件：
- * 工具流断、历史冻结，而 reply/推送照常（不走 jsonl），故障极隐蔽（temp 断了
- * 整整 7 天才被发现）。回合结束是天然核对点：registry 指向的 jsonl 若整个回合
- * 毫无写入（mtime 陈旧），而同 slug 刚有别的 jsonl 在写 → 真实会话已迁移，按
- * clear 轮转同款流程认领（set-session 归档+registry 切换，watcher 重绑）。
- *
- * 防串台：同 cwd 多 agent 时，候选 sid 是其他 agent 的官方 session 则不认领
- * （scheduleClearRotation 的 ownedByOther 同款）；且候选 mtime 必须落在刚结束
- * 的回合窗口内（<3min），排除认领陈年老文件。
- */
-const ROTATION_FRESH_MS = 3 * 60_000;
-const rotationHealInflight = new Set<string>();
-async function maybeHealRotatedSession(channelId: string) {
-  if (rotationHealInflight.has(channelId)) return;
-  rotationHealInflight.add(channelId);
-  try {
-    const agents = await readRegistryAgents();
-    const me = agents.find((a) => a.channelId === channelId && a.status === "active");
-    if (!me?.cwd || !me.sessionId) return;
-    const cwd = me.cwd.replace(/^~/, process.env.HOME || "~");
-    // v2.23.2+ fork 源 id 共用:registry 记的 session 同时是另一个活 agent 的(resume --fork
-    // 探测失败时暂记的源 id)。源文件一直"新鲜"(是别人在写),下面的快路径永远放行,两个频道
-    // 渲染同一份 transcript(master 2026-09-18 实报)。改按 Claude Code 自己的登记
-    // (~/.claude/sessions/<pid>.json,带 tmux pane id)找这个窗口的真身,不看文件新鲜度。
-    const sharedWith = agents.find((a) => a.name !== me.name && a.status === "active" && a.sessionId === me.sessionId);
-    const discover = managedFor(me.runtime)?.discoverSessionId;
-    if (sharedWith && discover) {
-      const viaCc = await discover({ windowName: me.name, cwd, exclude: me.sessionId, timeoutMs: 1_500 }).catch(() => null);
-      if (viaCc && !agents.some((a) => a.name !== me.name && a.sessionId === viaCc.sessionId)) {
-        const r = await runManager("set-session", me.name, viaCc.sessionId);
-        if (r?.ok) {
-          stopWatchingByChannel(channelId);
-          startWatching(me.name, cwd, viaCc.sessionId, channelId, discord);
-          recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: viaCc.sessionId, reason: "shared_fork_source" } });
-          console.log(`🩹 session 自愈(fork 源 id 共用) agent=${me.name} ${me.sessionId.slice(0, 8)}->${viaCc.sessionId.slice(0, 8)}（与 ${sharedWith.name} 共用源 id，按 CC sessions 登记纠正）`);
-        } else {
-          console.error(`🩹 session 自愈(fork 源 id 共用) set-session 失败 agent=${me.name}:`, r?.error);
-        }
-      }
-      return;
-    }
-    // 快路径（绝大多数回合）：registry session 本回合有写入 → 一切正常
-    const mePath = sessionJsonlPath(me.runtime, cwd, me.sessionId);
-    try {
-      if (mePath && Date.now() - statSync(mePath).mtimeMs < ROTATION_FRESH_MS) return;
-    } catch { /* registry session 文件已消失 → 继续找真身 */ }
-    const newest = listSessionIdsForCwd(cwd, me.runtime).find((s) => s !== me.sessionId); // mtime 降序
-    if (!newest) return;
-    const newestPath = sessionJsonlPath(me.runtime, cwd, newest);
-    let newestMtime = 0;
-    try {
-      if (!newestPath) return;
-      newestMtime = statSync(newestPath).mtimeMs;
-    } catch { return; }
-    if (Date.now() - newestMtime > ROTATION_FRESH_MS) return; // 没有本回合在写的新文件
-    if (agents.some((a) => a.name !== me.name && a.sessionId === newest)) return; // ownedByOther
-    const r = await runManager("set-session", me.name, newest);
-    if (r?.ok) {
-      stopWatchingByChannel(channelId);
-      startWatching(me.name, cwd, newest, channelId, discord);
-      recordMetric("session_selfheal", { channelId, agent: me.name, meta: { from: me.sessionId, to: newest } });
-      console.log(`🩹 session 轮转自愈 agent=${me.name} ${me.sessionId.slice(0, 8)}->${newest.slice(0, 8)}（原生 /clear 类轮转，registry 未跟上）`);
-    } else {
-      console.error(`🩹 session 轮转自愈 set-session 失败 agent=${me.name}:`, r?.error);
-    }
-  } catch { /* 自愈失败不影响 Stop 主流程 */ } finally {
-    rotationHealInflight.delete(channelId);
-  }
-}
-
 async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
     if (url.pathname === "/hook" && req.method === "POST") {
       return handleHookRequest(req);
@@ -3361,6 +3291,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 sweepStaleTerminalSessions().catch(() => {});
 void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
+void import("./bridge/account-usage-startup.js").then((m) => m.startAccountUsage(deliver)); // statusLine 批准卡 + 遗留用量探测清扫：Discord / web-only 都跑
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

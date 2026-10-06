@@ -16,6 +16,7 @@ import { pushNotice } from "./notice-merge";
 import { hydrateHistoryMessages } from "./history-hydrate";
 import { isDuplicateSend, type LastSend } from "./send-dedupe";
 import { canSendClearBoot, classifySendFailure, RetiredAcpStreams, settleClearSend, isClearSend, sendTimeoutMs } from "./clear-send";
+import { settleRotation } from "./session-rotated";
 import {
   isHistoryBubble,
   coveredByCursor,
@@ -2275,6 +2276,11 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
         s.awaitingChunk = false;
       }
     });
+  }
+
+  public sessionRotated(to: string) {
+    const host = { state: () => this.state, produce: (f: (s: ChatState) => void) => this.produce(f), nextId: () => this.nextId(), lang: getLang };
+    void settleRotation({ ...host, reload: () => this.loadMessages(this.state.activeAgent, this.openGen, 0, "latest"), refreshAgents: () => this.loadAgents() }, to);
   }
 
   public compactDone(pre: number, post: number) {

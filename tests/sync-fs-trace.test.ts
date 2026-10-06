@@ -98,6 +98,25 @@ describe("installSyncFsTrace", () => {
 });
 
 describe("真进程：preload 装上后，静态具名导入的 fs 也被追到", () => {
+  test("开关会被子进程继承：默认 spawn（不传 env）拿到的是 1，父进程自己也没把它删掉；启动行写明这一点", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sync-fs-trace-env-"));
+    const script = join(dir, "spawn.ts");
+    try {
+      const src = [
+        `const child = Bun.spawnSync(["/bin/sh", "-c", "printf %s \\"$CLAUDESTRA_SYNC_FS_TRACE\\""]).stdout.toString();`,
+        `console.log(JSON.stringify({ parent: process.env.CLAUDESTRA_SYNC_FS_TRACE ?? null, child }));`,
+      ];
+      writeFileSync(script, src.join("\n") + "\n");
+      const env = { ...process.env, CLAUDESTRA_SYNC_FS_TRACE: "1" };
+      const proc = Bun.spawn([process.execPath, "--preload", resolve(import.meta.dir, "../src/lib/sync-fs-trace.ts"), script], { env, stdout: "pipe", stderr: "pipe" });
+      expect(await proc.exited).toBe(0);
+      expect(JSON.parse(await new Response(proc.stdout).text())).toEqual({ parent: "1", child: "1" });
+      expect(await new Response(proc.stderr).text()).toContain("子进程会继承本开关");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("open 一个没人写的 FIFO 卡 1.5s → stderr 一行带路径和调用方", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sync-fs-trace-"));
     const fifo = join(dir, "pipe");
