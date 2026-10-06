@@ -18,7 +18,8 @@ export function CreateProjectForm({ snapshot, port, refresh, pending, setPending
   const locals = eligibleLocals(snapshot);
   const validLocal = !local || locals.some(p => p.id === local);
   const canCreate = !!selected && validLocal && !!name.trim() && !action.busy && !pending;
-  if (!teams.length) return <p className="text-sm opacity-60">仅团队 owner 可以新建团队项目。</p>;
+  if (!teams.length) return <p className="text-sm opacity-60">{snapshot.teams.some(t => t.teamRole === null)
+    ? "中心暂未提供团队权限，创建项目暂不可用。" : "仅团队 owner 可以新建团队项目。"}</p>;
   const submit = () => {
     if (!selected || !canCreate) return;
     const input: CreateProject = { centerId: selected.centerId, teamId: selected.teamId, name: name.trim(),

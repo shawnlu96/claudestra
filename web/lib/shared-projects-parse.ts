@@ -1,15 +1,16 @@
 import { ProjectFailure, projectKey, teamKey, type ProjectMember, type ProjectSnapshot, type SharedProject } from "./shared-projects-model";
 
 type ObjectValue = Record<string, unknown>;
-function object(value: unknown): ObjectValue {
+export function object(value: unknown): ObjectValue {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ProjectFailure(502);
   return value as ObjectValue;
 }
-function text(value: unknown, max = 256): string {
-  if (typeof value !== "string" || !value.trim() || value.length > max || /[\u0000-\u001f]/.test(value)) throw new ProjectFailure(502);
+export function text(value: unknown, max = 256, multiline = false): string {
+  if (typeof value !== "string" || !value.trim() || value.length > max
+    || /[\u0000-\u001f]/.test(multiline ? value.replace(/\n/g, " ") : value)) throw new ProjectFailure(502);
   return value;
 }
-function list<T>(value: unknown, parse: (v: unknown) => T): T[] {
+export function list<T>(value: unknown, parse: (v: unknown) => T): T[] {
   if (!Array.isArray(value) || value.length > 10_000) throw new ProjectFailure(502);
   return value.map(parse);
 }
@@ -42,7 +43,8 @@ export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
   const data = object(value);
   const teams = list(data.teams, v => {
     const t = object(v);
-    return { ...scope(t), name: text(t.name, 128), personId: text(t.personId), teamRole: choice(t.teamRole, ["owner", "member"]) };
+    return { ...scope(t), name: text(t.name, 128), personId: text(t.personId),
+      teamRole: t.teamRole === null ? null : choice(t.teamRole, ["owner", "member"]) };
   });
   const projects = list(data.projects, parseSharedProject);
   const keys = new Set<string>(), bindings = new Set<string>();

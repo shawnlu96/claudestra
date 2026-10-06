@@ -47,8 +47,8 @@ export function ProjectSettings({ project, port, refresh }: {
   </section>;
 }
 
-export function LocalProjectSettings({ project, port, refresh }: {
-  project: SharedProject; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
+export function LocalProjectSettings({ project, port, refresh, leaveAvailable = true }: {
+  project: SharedProject; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>; leaveAvailable?: boolean;
 }) {
   const [dirs, setDirs] = useState(project.local?.dirs.join("\n") ?? "");
   const [leaving, setLeaving] = useState(false);
@@ -67,7 +67,8 @@ export function LocalProjectSettings({ project, port, refresh }: {
         <p className="text-xs opacity-60">目录仅保存在这台机器；个人项目目录不能用于团队绑定。</p>
         <button className="btn btn-sm" disabled={action.busy}>设置目录</button>
       </form>
-      {!leaving ? <button type="button" className="btn btn-sm btn-outline btn-error" onClick={() => setLeaving(true)}>退出团队项目</button>
+      {!leaveAvailable ? <p className="text-sm opacity-60">这台机器暂不支持退出团队项目。</p>
+        : !leaving ? <button type="button" className="btn btn-sm btn-outline btn-error" onClick={() => setLeaving(true)}>退出团队项目</button>
         : <div className="space-y-2 text-sm">
           <p>确认退出 {project.name}？本机将不再显示此项目的团队 feature。</p>
           <div className="flex gap-2">

@@ -6,6 +6,7 @@ import { ProjectDialog } from "./project-dialog";
 import { ProjectMembers } from "./project-members";
 import { LocalProjectSettings, ProjectSettings } from "./project-settings";
 import { useProjects } from "./use-projects";
+import { ProjectCards } from "./project-cards";
 
 /** Mount once per machine. The port and the navigation callback are both pinned to that machine. */
 export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjectsPort; openFeatures: (project: SharedProject) => void }) {
@@ -41,10 +42,11 @@ export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjec
         {project && <div key={projectKey(project)} className="space-y-5">
           <h3 className="break-words text-lg font-semibold">{project.name}</h3>
           <ProjectSettings project={project} port={port} refresh={refresh} />
-          <LocalProjectSettings project={project} port={port} refresh={refresh} />
+          <LocalProjectSettings project={project} port={port} refresh={refresh} leaveAvailable={snapshot.capabilities?.leave !== false} />
           <ProjectMembers project={project} snapshot={snapshot} port={port} />
         </div>}
       </>}
+      <ProjectCards port={port} refresh={refresh} />
     </ProjectDialog>}
   </section>;
 }

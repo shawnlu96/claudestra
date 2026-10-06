@@ -2,6 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { boundProjects, eligibleLocals, ProjectFailure, projectErrorText, projectKey } from "../web/lib/shared-projects-model";
 import { parseProjectMembers, parseProjectSnapshot, parseSharedProject } from "../web/lib/shared-projects-parse";
 import { projectChoice, projectChoiceWire } from "../web/lib/shared-projects-choice";
+import { projectSourceCards, projectSourceSnapshot } from "../web/lib/shared-projects-source";
+import { sharedProjectsApi, type ProjectRequest } from "../web/lib/shared-projects-api";
+import { ApiError } from "../web/lib/api/client";
+import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures";
+import { sharedProjectsSnapshot } from "../src/bridge/local-api/shared-projects-snapshot";
+import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects";
+import type { SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports";
 
 const project = () => ({ centerId: "center-a", teamId: "team-a", projectId: "app", name: "中心显示名", rev: 3,
   status: "active", role: "owner", availability: "ready", local: { id: "different-local", name: "本机名称", dirs: ["/synthetic/app"] } });
@@ -11,6 +18,107 @@ const snapshot = () => ({
   localProjects: [{ id: "personal", name: "个人", personal: true, bound: false },
     { id: "bound", name: "已绑定", personal: false, bound: true }, { id: "eligible", name: "可绑定", personal: false, bound: false }],
   peers: [{ id: "synthetic-peer", name: "协作伙伴" }],
+});
+
+async function n4Source() {
+  const f = createV2ProjectsFixtures();
+  const local = { projects: [{ id: "different-local", name: "本机名称", dirs: ["/synthetic/app"], personal: false }],
+    peers: [{ name: "transport-only", enabled: true, invitable: true }] };
+  const d = { person: async () => ({ ...f.person, subject: "owner:self", ...f.requests.list }), list: async () => [f.project],
+    members: async () => [f.member, f.responses.invite.member], bindings: () => [{ ...f.identity, localProjectId: "different-local" }] } as unknown as SharedProjectsPorts;
+  return { f, d, local, raw: await sharedProjectsSnapshot(d, local) };
+}
+
+describe("N4 source consumption (synthetic canonical records, actual route)", () => {
+  test("actual producer roles/binding/dirs/capabilities project safely and unknown teamRole cannot create", async () => {
+    const { f, raw } = await n4Source();
+    const next = projectSourceSnapshot(raw);
+    expect(next.teams[0]?.teamRole).toBeNull();
+    expect(next.projects[0]).toMatchObject({ ...f.identity, name: f.project.name, role: "owner",
+      local: { id: "different-local", name: "本机名称", dirs: ["/synthetic/app"] }, personId: f.person.personId });
+    expect(boundProjects(next)).toHaveLength(1);
+    expect(next.capabilities).toEqual({ invite: true, leave: false });
+    expect(JSON.stringify(next)).not.toContain("sourceBinding");
+    expect(() => projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], localProjectIds: ["missing"] }] })).toThrow(ProjectFailure);
+    expect(() => projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], teamId: "other" }] })).toThrow(ProjectFailure);
+    const unavailable = projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], projectRole: { available: false, reason: "missing" } }] });
+    expect(unavailable.projects[0]?.role).toBeNull();
+    expect(boundProjects(unavailable)).toEqual([]);
+  });
+  test("adapter consumes actual N4 snapshot/member route and emits exact recipient/local bodies", async () => {
+    const { f, d, local } = await n4Source();
+    const calls: { path: string; body: unknown; header: string | null }[] = [];
+    d.invite = async (_who, _id, peers, note, recipient) => {
+      expect(peers).toEqual(["transport-only"]); expect(note).toBe("note"); expect(recipient).toEqual({ personId: f.responses.invite.member.personId });
+      return { askId: "actual-card-id" };
+    };
+    d.setDirs = async (_who, _id, id, dirs) => { expect(id).toBe("different-local"); expect(dirs).toEqual(["/synthetic/new"]); };
+    const request: ProjectRequest = async (path, init) => {
+      const url = new URL(`http://fixture/api/v1${path}`), req = new Request(url.toString(), { method: init.method, headers: init.headers,
+        ...(init.json ? { body: JSON.stringify(init.json) } : {}) });
+      calls.push({ path, body: init.json, header: req.headers.get("x-shared-ledger-project") });
+      const response = await handleSharedProjectsApi(req, url, { auth: async () => ({ id: "owner:self", role: "owner", manage: true, agents: ["*"], createdAt: "" }),
+        ports: d, localSnapshot: async () => local });
+      const body = await response!.json();
+      if (!response!.ok) throw new ApiError("synthetic-sensitive-sentinel", response!.status, body as Record<string, unknown>);
+      return body;
+    };
+    const port = sharedProjectsApi({ fp: "synthetic-machine" }, f.project.projectId, request), signal = new AbortController().signal;
+    const next = await port.list(signal), p = next.projects[0]!;
+    expect(await port.members(p, signal)).toHaveLength(2);
+    await port.invite(p, { peers: ["transport-only"], note: "note", recipient: { personId: f.responses.invite.member.personId } }, signal);
+    await port.directories(p, ["/synthetic/new"], signal);
+    expect(calls.every(c => c.header === f.project.projectId)).toBe(true);
+    await expect(port.leave(p, signal)).rejects.toMatchObject({ status: 501 });
+    await expect(port.create({ ...f.requests.list, name: "No inferred team owner", operationId: "op" }, signal)).rejects.toMatchObject({ status: 403 });
+    await expect(port.members({ ...p, teamId: "body-cannot-select-scope" }, signal)).rejects.toMatchObject({ status: 403 });
+    expect(calls.filter(c => c.path.endsWith("/leave"))).toHaveLength(0);
+  });
+  test("real card surface excludes binds/bodies, obeys owner permission/expiry and supplies explicit wires", () => {
+    const card = { id: "card", project: "master", state: "open", source: "system", kind: "authorize", canAnswer: true, expiresAt: 200,
+      createdBy: "system:shared-ledger-join-offer", title: "加入合成项目", context: "中心核验的项目\n原批准信息", body: "synthetic-sensitive-sentinel",
+      bind: { params: { code: "synthetic-sensitive-sentinel" } },
+      extra: { sharedProjectChoice: { selectId: "shared_project_local", recommended: "create" } },
+      options: [{ type: "select", id: "shared_project_local", options: [{ value: "create", label: "新建本机项目" }] },
+        { type: "buttons", buttons: [{ id: "sl_join_accept", label: "加入" }, { id: "sl_join_decline", label: "不加入" }] }] };
+    const projected = projectSourceCards({ asks: [card] }, 100);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?.choice?.recommended).toBe("create");
+    expect(JSON.stringify(projected)).not.toContain("synthetic-sensitive-sentinel");
+    expect(projectSourceCards({ asks: [card] }, 200)).toEqual([]);
+    expect(projectSourceCards({ asks: [{ ...card, canAnswer: undefined }] }, 100)[0]?.canAnswer).toBe(false);
+    expect(projectSourceCards({ asks: [{ ...card, createdBy: "agent:guess" }] }, 100)).toEqual([]);
+    expect(projectSourceCards({ asks: [{ ...card, options: [{ ...card.options[0], id: "changed" }, card.options[1]] }] }, 100)).toEqual([]);
+  });
+  test("CAS current is scoped and secret-free; answered recovery alone never implies completion", async () => {
+    const { f, raw } = await n4Source();
+    const sent: { path: string; json: unknown }[] = [];
+    const port = sharedProjectsApi({ fp: "synthetic-machine" }, f.project.projectId, async (path, init) => {
+      sent.push({ path, json: init.json });
+      if (path.endsWith("/snapshot")) return { ...raw, teamRole: { available: true, value: "owner" } };
+      if (init.method === "PATCH") throw new ApiError("synthetic-sensitive-sentinel", 409,
+        { current: { ...f.project, name: "新版中心名称", rev: 4, bearer: "synthetic-sensitive-sentinel" } });
+      if (path === "/shared-projects") return { ok: true, operationId: "same-operation", available: false, askId: "recovery" };
+      if (path === "/asks/recovery") return { ask: { state: "answered", extra: { sharedProjectExecuted: true } } };
+      return { ok: true };
+    });
+    const signal = new AbortController().signal, next = await port.list(signal), p = next.projects[0]!;
+    let failure: ProjectFailure | undefined;
+    try { await port.patch(p, { rev: 1, name: "计划名称" }, signal); } catch (e) { failure = e as ProjectFailure; }
+    expect(failure?.current).toMatchObject({ name: "新版中心名称", rev: 4, local: { id: "different-local" }, role: "owner" });
+    expect(JSON.stringify(failure)).not.toContain("synthetic-sensitive-sentinel");
+    const input = { ...f.requests.list, name: f.project.name, operationId: "same-operation", localProjectId: "different-local" };
+    await expect(port.create(input, signal)).rejects.toMatchObject({ status: 202 });
+    expect(sent.find(c => c.path === "/shared-projects")?.json).toEqual({ name: f.project.name, operationId: "same-operation",
+      selection: { mode: "existing", localProjectId: "different-local" } });
+    await expect(port.complete(input, signal)).rejects.toMatchObject({ status: 202 });
+    expect(sent.some(c => c.path.endsWith("/continue"))).toBe(false);
+    expect(sent.filter(c => c.path === "/shared-projects")).toHaveLength(1);
+    await port.answer!({ id: "actual-card", project: "master", title: "确认", context: "实际卡片", expiresAt: Date.now() + 10000,
+      canAnswer: true, choice: null, accept: { id: "shared_project_confirm", label: "确认" }, decline: { id: "shared_project_cancel", label: "取消" } },
+    ["[button:shared_project_confirm]"], signal);
+    expect(sent.at(-1)).toEqual({ path: "/ledger/master/asks/actual-card/answer", json: { choices: ["[button:shared_project_confirm]"] } });
+  });
 });
 
 describe("shared project presentation boundary", () => {

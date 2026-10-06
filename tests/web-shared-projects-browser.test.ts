@@ -7,6 +7,12 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { shotIssues } from "./helpers/ui-shot-checks";
+import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures";
+import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects";
+import { answerSharedProject } from "../src/bridge/local-api/shared-projects-actions";
+import { proposeSharedProjectInvite, sendApprovedSharedProjectInvite, type ProjectInvitePorts } from "../src/bridge/local-api/shared-projects-invite";
+import type { SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports";
+import type { Ask } from "../src/lib/ledger-asks";
 
 const scratch = mkdtempSync(join(tmpdir(), "cstra-test-project-ui-"));
 const shots = process.env.SHARED_PROJECTS_SHOTS_DIR ? resolve(process.env.SHARED_PROJECTS_SHOTS_DIR) : join(scratch, "shots");
@@ -14,6 +20,48 @@ const entry = "web/features/collab/shared-projects/fixture-harness.tsx";
 let browser: Browser;
 let server: ReturnType<typeof Bun.serve>;
 const manifest: { file: string; sha256: string }[] = [];
+const n4 = n4UiFixture();
+
+/** Actual N4 route/actions with public N1C fixtures and injected mint/transport; not a signed production center or N2 join. */
+function n4UiFixture() {
+  const f = createV2ProjectsFixtures(), asks: Ask[] = [], sent: unknown[] = [];
+  const who = { ...f.person, ...f.requests.list, subject: "owner:self" as const };
+  const delivery: ProjectInvitePorts = { now: Date.now, stateDir: scratch, receiptProject: "local-app",
+    peers: async () => [{ name: "synthetic-transport", baseUrl: "https://synthetic.example", outToken: "synthetic-token", addedAt: "synthetic" }],
+    project: async () => f.project, members: async () => [f.member, f.responses.invite.member],
+    mint: async () => ({ url: "https://synthetic.example/", project: f.project, member: f.responses.invite.member,
+      invite: { ...f.invite, expiresAt: Date.now() + 60000 } }),
+    post: async (_peer, _url, body) => { sent.push(JSON.parse(body)); return new Response(null, { status: 202 }); },
+  };
+  const d = { now: Date.now, person: async () => who, list: async () => [f.project],
+    members: async () => [f.member, f.responses.invite.member, { ...f.responses.invite.member, personId: "removed-person", code: "removed-code", status: "removed" }],
+    bindings: () => [{ ...f.identity, localProjectId: "local-app" }], authorizeAnswer: async () => true,
+    openAsk: input => {
+      const a = { ...input, id: `synthetic-n4-card-${asks.length}`, state: "open", answer: null, fromAgent: null, extra: input.extra ?? {} } as Ask;
+      asks.push(a); return a;
+    }, getAsk: id => asks.find(a => a.id === id) ?? null,
+    claimAsk: a => { if (a.extra.sharedProjectExecuted) return false; a.extra.sharedProjectExecuted = true; return true; },
+    invite: (person, id, peers, note, recipient) => proposeSharedProjectInvite(person, id, peers, note, recipient, d, delivery),
+    sendInvite: (person, ask) => sendApprovedSharedProjectInvite(person, ask, d, delivery),
+  } satisfies Partial<SharedProjectsPorts> as unknown as SharedProjectsPorts;
+  const handle = async (req: Request): Promise<Response | null> => {
+    const url = new URL(req.url);
+    if (url.pathname === "/api/v1/asks") return Response.json({ asks: asks.map(a => ({ ...a, canAnswer: true })) });
+    if (url.pathname.endsWith("/answer")) {
+      const a = asks.find(a => url.pathname === `/api/v1/ledger/master/asks/${a.id}/answer`);
+      if (!a || a.state !== "open") return Response.json({ ok: false }, { status: 409 });
+      const b = await req.json() as { choices: string[] };
+      a.state = "answered"; a.answer = { choices: b.choices, labels: [], text: "", via: "web_card", owner: true,
+        principal: "owner:self", at: Date.now() };
+      await answerSharedProject(a, d);
+      return Response.json({ ok: true });
+    }
+    return handleSharedProjectsApi(req, url, { auth: async () => ({ id: "owner:self", role: "owner", agents: ["*"], manage: true, createdAt: "" }), ports: d,
+      localSnapshot: async () => ({ projects: [{ id: "local-app", name: "不同本机名称", dirs: ["/synthetic/n4"], personal: false }],
+        peers: [{ name: "synthetic-transport", enabled: true, invitable: true }] }) });
+  };
+  return { handle, sent };
+}
 
 async function git(...args: string[]) {
   const p = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -32,10 +80,11 @@ beforeAll(async () => {
   const tw = req("@tailwindcss/postcss") as (o: { base: string }) => import("../web/node_modules/postcss/lib/postcss").AcceptedPlugin;
   const from = resolve("web/app/globals.css");
   const css = (await postcss([tw({ base: resolve("web") })]).process(readFileSync(from, "utf8"), { from })).css;
-  server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+  server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/fixture.js") return new Response(Bun.file(join(scratch, "fixture-harness.js")));
     if (path === "/style.css") return new Response(css, { headers: { "Content-Type": "text/css" } });
+    if (path.startsWith("/api/v1/")) return await n4.handle(request) ?? new Response(null, { status: 404 });
     if (path !== "/") return new Response(null, { status: 404 });
     return new Response(`<!doctype html><html><head><meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"></head>
@@ -51,10 +100,13 @@ afterAll(async () => {
     ]);
     if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
       head, specRev: 1, round: 0,
-      fixture: "synthetic injected SharedProjectsPort and synthetic choice card; not N1-N4 integration",
-      summary: "Isolated forms, permissions, explicit CAS/local/recipient choices; production combination pending frozen N4 and PM acceptance",
+      fixture: "synthetic injected UI/cards plus actual N4 route/actions with N1C fixture records and injected mint/transport; no production center or N2 join",
+      summary: "Forms, permissions, CAS/local/recipient choices and N4 invitation approval; production composition and PM acceptance unverified",
       dirty: !!dirty,
       fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"), shots: manifest,
+      testSha256: createHash("sha256").update(readFileSync("tests/web-shared-projects-browser.test.ts")).digest("hex"),
+      producerSha256: ["shared-projects.ts", "shared-projects-snapshot.ts", "shared-projects-invite.ts"].map(name => ({ name,
+        sha256: createHash("sha256").update(readFileSync(`src/bridge/local-api/${name}`)).digest("hex") })),
     }, null, 2), { mode: 0o600 });
   } finally {
     server?.stop(true);
@@ -80,6 +132,35 @@ async function newPage(width: number, query = "") {
   await page.goto(`${server.url}${query}`);
   return { page, errors };
 }
+
+test("actual N4 source renders binding and invitation approval without claiming unavailable creation or exit", async () => {
+  const { page, errors } = await newPage(390, "?fixture=n4-source");
+  try {
+    await page.getByRole("button", { name: "合成项目 B", exact: true }).waitFor();
+    await page.getByRole("button", { name: "项目设置", exact: true }).click();
+    await page.getByText("中心暂未提供团队权限，创建项目暂不可用。", { exact: true }).waitFor();
+    expect(await page.getByRole("button", { name: "创建项目", exact: true }).count()).toBe(0);
+    await page.getByRole("button", { name: "合成项目 B", exact: true }).last().click();
+    await page.getByText("这台机器暂不支持退出团队项目。", { exact: true }).waitFor();
+    expect(await page.getByRole("button", { name: "退出团队项目", exact: true }).count()).toBe(0);
+    expect(await page.getByLabel("本机目录（每行一个）").inputValue()).toBe("/synthetic/n4");
+    await page.getByLabel("邀请对象", { exact: true }).selectOption("person-peer");
+    expect(await page.getByLabel("邀请对象", { exact: true }).locator("option[value='removed-person']").count()).toBe(0);
+    expect(await page.getByRole("button", { name: "邀请成员", exact: true }).isDisabled()).toBe(true);
+    await page.getByText("synthetic-transport", { exact: true }).click();
+    await page.getByRole("button", { name: "邀请成员", exact: true }).click();
+    await page.getByText("邀请确认卡已生成，请由本人核对后发送。", { exact: true }).waitFor();
+    await page.getByText("邀请加入团队项目 合成项目 B", { exact: true }).waitFor();
+    expect(n4.sent).toEqual([]);
+    expect(await page.locator("body").innerText()).not.toContain(createV2ProjectsFixtures().invite.code);
+    await screenshot(page, "n4-api-invite-approval-390");
+    await page.getByRole("button", { name: "发送邀请", exact: true }).click();
+    await page.getByText("暂无待确认的项目操作。", { exact: true }).waitFor();
+    expect(n4.sent).toHaveLength(1);
+    expect((n4.sent[0] as { projectInvite: { personId: string } }).projectInvite.personId).toBe("person-peer");
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
 
 for (const width of [390, 1200]) test(`project forms, explicit CAS retry, invite and local actions at ${width}px`, async () => {
   const { page, errors } = await newPage(width);

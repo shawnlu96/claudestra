@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { SharedProjectsPanel } from "./projects-panel";
 import { ProjectChoice } from "./project-choice";
 import { ProjectFailure, type CreateProject, type SharedProject, type ProjectSnapshot, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import { sharedProjectsApi } from "@/lib/shared-projects-api";
 
 const params = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = params.get("theme") ?? "light";
@@ -41,7 +42,7 @@ const port: SharedProjectsPort = {
     Object.assign(p, patch, { rev: p.rev + 1 });
   },
   members: async () => [{ personId: "fixture-owner", code: "项目创建人", role: "owner", status: "active" },
-    { personId: "fixture-existing-person", code: "fixture-existing-code", role: "member", status: "removed" },
+    { personId: "fixture-existing-person", code: "fixture-existing-code", role: "member", status: "invited" },
     ...(joined ? [{ personId: "fixture-person", code: "协作伙伴", role: "member" as const, status: "invited" as const }] : [])],
   invite: async (_, input) => {
     if (Object.keys(input.recipient).length !== 1) throw new Error("synthetic-recipient-shape-mismatch");
@@ -71,6 +72,7 @@ function ChoiceFixture() {
 createRoot(document.getElementById("root")!).render(params.get("fixture") === "choice" ? <ChoiceFixture /> :
   <main className="mx-auto max-w-md p-4">
     <h1 className="mb-4 text-xl font-semibold">团队工作台</h1>
-    <SharedProjectsPanel port={port} openFeatures={p => { document.body.dataset.opened = p.projectId; }} />
+    <SharedProjectsPanel port={params.get("fixture") === "n4-source" ? sharedProjectsApi({ fp: "synthetic-machine" }, "demo-b") : port}
+      openFeatures={p => { document.body.dataset.opened = p.projectId; }} />
   </main>,
 );

@@ -33,7 +33,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
   const action = useProjectAction(refresh);
   const validPeers = peers.filter(id => snapshot.peers.some(p => p.id === id));
   const validRecipient = recipient && (recipient.personId !== undefined
-    ? members.some(m => m.personId === recipient.personId) : !!recipient.code.trim()) ? recipient : null;
+    ? members.some(m => m.personId === recipient.personId && m.status !== "removed") : !!recipient.code.trim()) ? recipient : null;
   return <section className="space-y-3 border-t border-base-300 pt-4">
     <h3 className="font-semibold">成员</h3>
     {loadError && <p role="alert" className="text-sm text-error">{loadError}</p>}
@@ -57,7 +57,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
       <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!validPeers.length || !validRecipient) return; void action.run(async s => {
         await port.invite(project, { peers: validPeers, note: note.trim(), recipient: validRecipient }, s);
         if (!s.aborted) { setPeers([]); setNote(""); setRecipient(null); }
-      }, "邀请已发送，等待对方确认加入。"); }}>
+      }, port.cards ? "邀请确认卡已生成，请由本人核对后发送。" : "邀请已发送，等待对方确认加入。"); }}>
         <fieldset disabled={action.busy} className="space-y-2">
           <legend className="mb-2 font-medium">邀请成员</legend>
           <ProjectRecipientFields members={members} value={recipient} onChange={setRecipient} />
@@ -69,9 +69,9 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
             }} />{p.name}
           </label>)}
           <label className="block text-sm">附言（可选）
-            <input className="input mt-1 w-full" value={note} maxLength={500} onChange={e => setNote(e.target.value)} />
+            <input className="input mt-1 w-full" value={note} maxLength={120} onChange={e => setNote(e.target.value)} />
           </label>
-          <button className="btn btn-primary btn-sm" disabled={!validPeers.length || !validRecipient}>邀请成员</button>
+          <button className="btn btn-primary btn-sm" disabled={!validPeers.length || !validRecipient || snapshot.capabilities?.invite === false}>邀请成员</button>
         </fieldset>
       </form>
     </>}
