@@ -1,0 +1,129 @@
+/**
+ * ACPB-1：ACP agent 回合结束（Stop → done）后，宿主又推来一条晚于 done 的条目，jsonl-watcher 按 isPostTurnActivity 把事件态
+ * 点回 thinking。ACP 没有画面兜底，probeTurn 原先恒判忙，押后消息卡到 24 小时放弃。现在事件态 thinking 时问宿主（AcpTurnLoop.busy）：
+ * 宿主说闲 = 收成 done、判闲；宿主说忙 / 不答 = 照旧判忙。CC 不走这条（它有画面兜底），也不去问宿主。
+ */
+import { beforeEach, describe, expect, test } from "bun:test";
+import { __resetEventBusForTest, emitEvent, getAgentStatus, isPostTurnActivity } from "../src/bridge/event-bus.js";
+import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
+import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
+import { probeTurnAt } from "../src/bridge/turn-probe.js";
+import { agentMsgMustWait } from "../src/lib/turn-state.js";
+
+const AGENT = "agent-rv-x";
+const CH = "c-acp";
+const status = (s: "thinking" | "done", trigger: string, ts?: string) =>
+  emitEvent({ agent: AGENT, chatId: CH, type: "agent_status", data: { status: s, trigger }, ...(ts ? { ts } : {}) });
+
+/** 现场：Stop 收成 done，7 秒后宿主推来子 agent 收尾条目，watcher 把事件态点回 thinking */
+function replayIncident(): void {
+  status("done", "stop_hook");
+  const entryTs = Date.now() + 7_000;
+  expect(isPostTurnActivity(AGENT, entryTs, entryTs)).toBe(true); // 晚于 done 的条目确实会被当成回合后活动
+  status("thinking", "jsonl_activity");
+}
+
+function hostAnswers(v: boolean | null) {
+  const calls: string[] = [];
+  return { calls, hostBusy: async (ch: string) => (calls.push(ch), v) };
+}
+
+beforeEach(() => {
+  __resetEventBusForTest();
+  clearOpenedBy();
+});
+
+describe("probeTurnAt：ACP 事件态卡 thinking 时以宿主为准", () => {
+  test("宿主报空闲：判闲，事件态收成 done（acp_host_idle）", async () => {
+    replayIncident();
+    const h = hostAnswers(false);
+    const t = await probeTurnAt(null, "codex", AGENT, CH, h.hostBusy);
+    expect(h.calls).toEqual([CH]);
+    expect(t.main).toBe("idle");
+    expect(agentMsgMustWait(t)).toBe(false);
+    expect(getAgentStatus(AGENT)).toBe("done");
+  });
+
+  test("宿主真在回合中：照旧判忙，事件态不动", async () => {
+    replayIncident();
+    const t = await probeTurnAt(null, "codex", AGENT, CH, hostAnswers(true).hostBusy);
+    expect(t.main).toBe("busy");
+    expect(getAgentStatus(AGENT)).toBe("thinking");
+  });
+
+  test("宿主不答 / 出错（null）：按现有语义判忙", async () => {
+    replayIncident();
+    const t = await probeTurnAt(null, "codex", AGENT, CH, hostAnswers(null).hostBusy);
+    expect(t.main).toBe("busy");
+    expect(getAgentStatus(AGENT)).toBe("thinking");
+  });
+
+  test("查询途中有新活动（bridge 刚投了消息、点亮新回合）：不收成 done，仍判忙", async () => {
+    replayIncident();
+    const t = await probeTurnAt(null, "codex", AGENT, CH, async () => {
+      status("thinking", "delivery", new Date(Date.now() + 1_000).toISOString());
+      return false;
+    });
+    expect(t.main).toBe("busy");
+    expect(getAgentStatus(AGENT)).toBe("thinking");
+  });
+
+  test("CC 不问宿主（画面兜底照旧）；不给频道也不问", async () => {
+    replayIncident();
+    const h = hostAnswers(false);
+    expect((await probeTurnAt(null, "claude-code", AGENT, CH, h.hostBusy)).main).toBe("busy");
+    expect((await probeTurnAt(null, "codex", AGENT, undefined, h.hostBusy)).main).toBe("busy");
+    expect(h.calls).toEqual([]);
+  });
+
+  test("事件态已是 done：不问宿主，直接判闲", async () => {
+    status("done", "stop_hook");
+    const h = hostAnswers(true);
+    expect((await probeTurnAt(null, "codex", AGENT, CH, h.hostBusy)).main).toBe("idle");
+    expect(h.calls).toEqual([]);
+  });
+});
+
+describe("押后消息：现场复现后扫描能投出去", () => {
+  const ws = { tag: "acp-ws" } as never;
+  const to = { kind: "local", agentName: AGENT, channelId: CH, ws } as LocalEndpoint;
+  const env = {
+    from: { kind: "local", agentName: "agent-scheduler", channelId: "c-s", ws },
+    to, intent: "request", content: "LRP-1 r3 审查唤醒",
+    meta: { messageId: "m-wake", triggerKind: "agent_tool", ts: "2026-10-06T14:37:58Z", threadId: "thr-wake" },
+  } as Envelope;
+
+  function deps(hostBusy: (ch: string) => Promise<boolean | null>) {
+    const held = new HeldQueue(null);
+    held.set(CH, [{ env, to, heldAt: Date.now() }]);
+    const delivered: string[] = [];
+    const d: FlushDeps = {
+      held,
+      compacting: () => false,
+      working: async (ch, agent) => agentMsgMustWait(await probeTurnAt(null, "codex", agent, ch, hostBusy)),
+      isHumanRequest: () => false,
+      client: () => ({ ws }),
+      deliver: async (e) => (delivered.push(String(e.content)), { envelope: e, outcome: { kind: "sent" } }),
+      touch: () => {},
+      settled: async () => true,
+    };
+    return { held, delivered, d };
+  }
+
+  test("宿主空闲：sweep 投出押后的唤醒", async () => {
+    replayIncident();
+    const h = deps(async () => false);
+    await flushHeld(h.d, CH, "sweep");
+    expect(h.delivered).toEqual(["LRP-1 r3 审查唤醒"]);
+    expect(h.held.get(CH) ?? []).toEqual([]);
+  });
+
+  test("宿主真忙：继续押着", async () => {
+    replayIncident();
+    const h = deps(async () => true);
+    await flushHeld(h.d, CH, "sweep");
+    expect(h.delivered).toEqual([]);
+    expect(h.held.get(CH)?.length).toBe(1);
+  });
+});
