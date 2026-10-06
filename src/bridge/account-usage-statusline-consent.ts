@@ -3,6 +3,7 @@
  *   - 按钮只由 bridge 按落盘的计划生成：id 带进程内密钥的 HMAC，绑定 planId、settings 原字节 hash、包装后 hash、有效期和频道；
  *     agent 贴不出这类按钮（lib/reserved-buttons.ts 拦保留前缀），bridge 重启后旧卡片作废（密钥不落盘）。
  *   - 卡片由 bridge 按计划贴到控制频道（Envelope/deliver + 网页 SSE），同一计划本进程只贴一次（重启后密钥换了，旧卡作废、新卡重贴一次）。
+ *     贴卡服务平台无关（startStatuslineConsent）：Web-only 安装没有 Discord 也能拿到网页批准卡，Discord 断线不挡网页批准。
  *   - 点击时必须由可信回调证明点击者就是本机 owner：网页点击在 /api/v1 扩展路由里截下，按 team-confirm 的 canConfirmTeam
  *     （owner 本人设备凭据、全 scope、非 peer）判；Discord 管理按钮入口不带点击者身份，一律拒绝。频道、manage 权限、id 存在都不算。
  *   - 写入本身由 applyWrapPlan 再做一次 CAS 与一次消费：错 hash、漂移、过期、重放都零写。
@@ -95,6 +96,30 @@ export async function postStatuslineConsentCard(
   postedPlans.add(plan.planId);
   emitEvent({ agent: "master", chatId, type: "chat_message", data: { direction: "out", from: FROM, text: card.text, threadId: meta.threadId, components: card.components } });
   return "posted";
+}
+
+const CONSENT_TICK_MS = 60_000;
+let consentTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 平台无关地起批准卡服务（Discord 与 Web-only 都跑，bridge 启动经 bridge/account-usage-startup.ts 调一次）：
+ * 每分钟查一次落盘计划，有未贴过的就贴到控制频道（Web-only 是 local-* 合成频道，网页经 SSE 收到）。
+ * 同计划本进程只贴一次；没贴出去（Discord 还没 ready / 断线）下一轮再试。重复调用不叠定时器。
+ */
+export function startStatuslineConsent(
+  deliver: (env: Envelope) => Promise<Delivery>,
+  deps: ConsentDeps & { chatId?: string; tickMs?: number; firstDelayMs?: number } = {},
+): () => void {
+  const tick = () => void postStatuslineConsentCard(deliver, deps).catch((e) => console.error("⚙️ statusLine 批准卡没贴出去:", (e as Error).message));
+  if (!consentTimer) {
+    setTimeout(tick, deps.firstDelayMs ?? 6000).unref?.();
+    consentTimer = setInterval(tick, deps.tickMs ?? CONSENT_TICK_MS);
+    consentTimer.unref?.();
+  }
+  return () => {
+    if (consentTimer) clearInterval(consentTimer);
+    consentTimer = null;
+  };
 }
 
 const BUTTON_WIRE = /^\s*\[button:(slwrap_ok:[0-9a-f]{16}:[0-9a-f]{32})\]\s*$/;

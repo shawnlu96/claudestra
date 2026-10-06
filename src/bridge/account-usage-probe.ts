@@ -4,16 +4,19 @@
  * 里面跑一个干净启动的 Claude Code（env -i 白名单环境、状态 / 运行目录指向临时目录、strict MCP 空表、
  * 不读 user/project 设置、关 hooks 与自动记忆、禁全部工具、不给 prompt），敲 /status 读 Usage tab，读完关掉。
  * 回收只认自己建出来的那份记录（session id + 名字双核）——永不 kill 别的会话 / 进程，也不向别的窗口发键。
- * 起不来（没有 claude、要确认 bypass、要登录、超时）就明确失败，由闸记 30 分钟退避；绝不降级去抓用户窗口。
+ * 起不来（没有 claude、要确认 bypass、要登录、超时、abort）就明确失败，由闸记 30 分钟退避；绝不降级去抓用户窗口。
+ * bridge 退出（exit / SIGINT / SIGTERM / SIGHUP，含更新重启）时 async finally 跑不到：在途探测登记在 liveProbes，
+ * 退出钩子同步收掉（同样 id + 名字双核）；kill -9 拦不住的，下次启动按闸的落盘记录清扫（recoverInterruptedRefresh）。
  * 单测 tests/account-usage-probe.test.ts（假 tmux，零真实模型调用）。
  */
 import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { shellEscape } from "../lib/claude-launch.js";
 import { envIPrefix, workerPrivateDirs } from "../lib/runtimes/clean-env.js";
 import { runtimePath } from "../lib/paths.js";
-import { detectBypassConsentPrompt, isClaudeReady, tmuxRaw, tmuxRawStrict } from "../lib/tmux-helper.js";
+import { detectBypassConsentPrompt, isClaudeReady, sandboxTmuxArgv, TMUX_SOCK, tmuxRaw, tmuxRawStrict } from "../lib/tmux-helper.js";
 import {
   implausibleSessionReset, parseUsagePanel, typedRecheckOk, usagePanelVisible, type AccountUsage,
 } from "../lib/account-usage-panel.js";
@@ -31,6 +34,9 @@ export interface ProbeTmux {
   /** 该 id 此刻的会话名；不存在返回 null */
   nameOf(id: string): Promise<string | null>;
   kill(id: string): Promise<void>;
+  /** 退出钩子用的同步版（进程要没了，等不了 Promise）：同 nameOf / kill */
+  nameOfSync?(id: string): string | null;
+  killSync?(id: string): void;
 }
 
 export interface ProbeDeps {
@@ -44,6 +50,14 @@ export interface ProbeDeps {
   timeoutMs?: number;
   /** 整次探测的硬上限（默认等就绪上限 + 30 秒），到点判失败并收掉自己 */
   hardTimeoutMs?: number;
+  /** 取消：abort 即判失败（probe_aborted）并收掉自己 */
+  signal?: AbortSignal;
+}
+
+/** 同 tmuxRaw 的 socket / 沙箱闸，同步执行（只给退出钩子用） */
+function tmuxSync(args: string[]) {
+  const argv = sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]);
+  return spawnSync(argv[0]!, argv.slice(1), { timeout: 3000, encoding: "utf8" });
 }
 
 const realTmux: ProbeTmux = {
@@ -54,6 +68,11 @@ const realTmux: ProbeTmux = {
   sendKey: async (id, key) => void (await tmuxRaw(["send-keys", "-t", id, key])),
   nameOf: async (id) => (await tmuxRaw(["display-message", "-p", "-t", id, "#{session_name}"])) || null,
   kill: async (id) => void (await tmuxRaw(["kill-session", "-t", id])),
+  nameOfSync: (id) => {
+    const r = tmuxSync(["display-message", "-p", "-t", id, "#{session_name}"]);
+    return r.status === 0 ? String(r.stdout).trim() || null : null;
+  },
+  killSync: (id) => void tmuxSync(["kill-session", "-t", id]),
 };
 
 /** 干净启动命令：白名单环境 + 临时状态目录，strict MCP 空表、不读设置源、关 hooks、禁工具、不带 prompt */
@@ -76,6 +95,58 @@ export async function cleanupProbe(r: ProbeResource, deps: ProbeDeps = {}): Prom
   } catch (e) {
     console.error(`📊 探测临时目录 ${r.dir} 删除失败:`, (e as Error).message); // 只是残留一个空临时目录，不影响下次探测
   }
+}
+
+/** 在途探测资源 → 它的 deps：退出钩子按这张表同步回收，探测自己收尾后删掉 */
+const liveProbes = new Map<ProbeResource, ProbeDeps>();
+const EXIT_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+
+/** 同步收掉一个自己建的探测资源（退出钩子用）：规则同 cleanupProbe——id 还在且名字仍是记录里那个才 kill */
+export function cleanupProbeSync(r: ProbeResource, deps: ProbeDeps = {}): void {
+  const tmux = deps.tmux ?? realTmux;
+  try {
+    if (r.id && r.session.startsWith(PROBE_SESSION_PREFIX) && tmux.nameOfSync && tmux.killSync && tmux.nameOfSync(r.id) === r.session) tmux.killSync(r.id);
+  } catch (e) {
+    console.error(`📊 退出时探测会话 ${r.session} 回收失败:`, (e as Error).message); // 下次启动按落盘记录再收
+  }
+  try {
+    (deps.removeDir ?? ((d: string) => rmSync(d, { recursive: true, force: true })))(r.dir);
+  } catch {}
+}
+
+function dropLiveProbes(): void {
+  for (const [r, deps] of liveProbes) cleanupProbeSync(r, deps);
+  liveProbes.clear();
+}
+
+/** 信号上只回收、不改退出语义（同 lib/caller-cred.ts）：别的监听者在就交给它；没有 = 本来会被默认动作杀掉，按原信号再杀自己 */
+function onExitSignal(sig: NodeJS.Signals): void {
+  dropLiveProbes();
+  unhookExit();
+  if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+}
+
+function unhookExit(): void {
+  process.off("exit", dropLiveProbes);
+  for (const s of EXIT_SIGNALS) process.off(s, onExitSignal);
+}
+
+function trackLive(r: ProbeResource, deps: ProbeDeps): void {
+  if (!liveProbes.size) {
+    process.on("exit", dropLiveProbes);
+    for (const s of EXIT_SIGNALS) process.on(s, onExitSignal);
+  }
+  liveProbes.set(r, deps);
+}
+
+function untrackLive(r: ProbeResource | null): void {
+  if (r) liveProbes.delete(r);
+  if (!liveProbes.size) unhookExit();
+}
+
+/** 测试用：此刻登记着的在途探测数 */
+export function liveProbeCount(): number {
+  return liveProbes.size;
 }
 
 /** 等 Claude Code 就绪；要人确认的框（bypass 首启确认 / 登录 / 信任）直接判失败，不替用户选 */
@@ -139,6 +210,7 @@ export async function runUsageProbe(onCreated: (r: ProbeResource) => void, deps:
     // 超时已判、收尾已跑过才建出来的会话：自己收掉，不再登记给闸（闸已记失败）
     if (abandoned) return cleanupProbe(mine, deps).then(() => ({ ok: false, reason: "probe_timeout" }));
     res = mine;
+    trackLive(mine, deps);
     onCreated(mine);
     const notReady = await waitReady(tmux, id, d.now() + (deps.timeoutMs ?? 60_000), d);
     if (notReady) return { ok: false, reason: notReady };
@@ -147,8 +219,12 @@ export async function runUsageProbe(onCreated: (r: ProbeResource) => void, deps:
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<ProbeResult>((r) => { timer = setTimeout(() => r({ ok: false, reason: "probe_timeout" }), deps.hardTimeoutMs ?? (deps.timeoutMs ?? 60_000) + 30_000); });
+  const aborted = new Promise<ProbeResult>((r) => {
+    if (deps.signal?.aborted) r({ ok: false, reason: "probe_aborted" });
+    deps.signal?.addEventListener("abort", () => r({ ok: false, reason: "probe_aborted" }), { once: true });
+  });
   try {
-    return await Promise.race([work(), timeout]);
+    return await Promise.race([work(), timeout, aborted]);
   } catch (e) {
     return { ok: false, reason: `probe_error: ${(e as Error).message}`.slice(0, 200) };
   } finally {
@@ -156,6 +232,7 @@ export async function runUsageProbe(onCreated: (r: ProbeResource) => void, deps:
     abandoned = true;
     // 超时后 work() 可能还在跑：会话先被收掉，它后续的发键落在已不存在的 id 上（tmux 的 $N 不复用）
     await cleanupProbe(res ?? { session, id: "", dir }, deps);
+    untrackLive(res);
   }
 }
 

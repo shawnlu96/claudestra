@@ -1,13 +1,14 @@
 /**
  * 后台读账号用量：网页 GET /stats、Discord 看板（hook / 定时 / 刷新按钮）、doctor 都走这里，**只读缓存，永不碰 TUI**。
  * 来源按观测时刻取新：statusline 落盘缓存（lib/usage-cache.ts）与上次手动探测成功的读数（lib/account-usage-refresh.ts）。
- * 缓存缺失 / 损坏 / 过期都不回退抓取：过期给陈旧推算值并标 stale，都没有就是「未知」（pct 为 null，scrapedAt 0）——
+ * 缓存缺失 / 损坏 / 过期都不回退抓取：过期原样给上次真实读数（数值、重置时间、观测时刻都不改）并标 stale——
+ * statusline 停写证明不了账号没在别处消耗，不推算归零；都没有就是「未知」（pct 为 null，scrapedAt 0）——
  * 调用方必须把 null 显示成未知，不能当 0。单测 tests/account-usage-view.test.ts。
  */
 import { readFileSync } from "fs";
 import type { AccountUsage } from "./account-usage-panel.js";
 import { ACCOUNT_USAGE_REFRESH_PATH, lastManualReading, MANUAL_RAW } from "./account-usage-refresh.js";
-import { deriveStaleUsage, parseUsageCache, USAGE_CACHE_MAX_AGE_MS, USAGE_CACHE_PATH } from "./usage-cache.js";
+import { parseUsageCache, USAGE_CACHE_MAX_AGE_MS, USAGE_CACHE_PATH } from "./usage-cache.js";
 
 export interface ViewPaths {
   cache?: string;
@@ -38,7 +39,7 @@ function fromCache(nowMs: number, path: string): { usage: AccountUsage | null; h
     return { usage: null, health: "corrupt" }; // 两次读之间被删 / 换坏：按损坏报，本轮显示未知
   }
   if (!c) return { usage: null, health: "corrupt" };
-  const d = health === "stale" ? deriveStaleUsage(c, nowMs) : c;
+  const d = c; // 过期也不推算（不把重置已过的百分比改成没观测过的 0）：原读数 + stale + 观测时刻
   return {
     health,
     usage: {

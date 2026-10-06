@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readAccountUsageView, usageCacheHealth } from "../src/lib/account-usage-view.ts";
 import { selectQuotaLayers } from "../src/lib/quota-layers.ts";
-import { parseUsageCache } from "../src/lib/usage-cache.ts";
+import { parseUsageCache, readUsageCacheStale } from "../src/lib/usage-cache.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "acct-view-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -45,12 +45,13 @@ describe("readAccountUsageView", () => {
     expect(u).toMatchObject({ sessionPct: 22, weekPct: 77, source: "statusline", stale: false, scrapedAt: NOW - 60_000, raw: "statusline cache" });
     expect(u.sessionResets).toMatch(/^\d+\/\d+ \d{2}:\d{2}$/);
   });
-  test("过期缓存：不抓取，给陈旧推算值并标 stale；过了重置时刻的窗口归零是推算，不是未知", () => {
-    const old = cacheJson(2 * 3600_000, { sessionResets: Math.floor((NOW - 60_000) / 1000) });
+  test("过期缓存：不抓取、不推算——原真实读数（含已过的重置时间）+ 观测时刻 + stale，不把 84% 改成没观测过的 0%", () => {
+    const old = cacheJson(3600_000, { sessionPct: 84, sessionResets: Math.floor((NOW - 60_000) / 1000) });
     const p = paths(old);
     expect(usageCacheHealth(NOW, p.cache)).toBe("stale");
     const u = readAccountUsageView(NOW, p);
-    expect(u).toMatchObject({ source: "statusline", stale: true, reason: "expired", weekPct: 77, sessionPct: 0, raw: "statusline cache (stale)" });
+    expect(u).toMatchObject({ source: "statusline", stale: true, reason: "expired", weekPct: 77, sessionPct: 84, scrapedAt: NOW - 3600_000, raw: "statusline cache (stale)" });
+    expect(u.sessionResets).toMatch(/^\d+\/\d+ \d{2}:\d{2}$/);
   });
   test("手动读数比缓存新 → 用手动读数（source manual），缓存比它新 → 用缓存并沿用 cost", () => {
     const manual = { sessionPct: 50, weekPct: 60, sessionResets: "7pm", weekResets: "", totalCost: "1.00", apiDuration: null, scrapedAt: NOW - 1000 };
@@ -73,5 +74,28 @@ describe("额度消费者：未知不伪装 0", () => {
   test("没有缓存：不出本机 Claude 读数（不是一条 0%）", () => {
     const snap = selectQuotaLayers({ now: NOW, enabled: false, remote: null, local: { claudeCache: null, codexRollout: null } });
     expect(snap.providers.flatMap((p) => p.meters).some((m) => m.used === 0)).toBe(false);
+  });
+});
+
+describe("额度服务的本机读数 = 同一份最新真实读数（readUsageCacheStale）", () => {
+  const st = (lastReading: unknown) => ({ lastAttemptAt: null, lastFailureAt: null, lastFailureReason: null, nextAllowedAt: null, inFlight: null, lastReading });
+  const manual = { sessionPct: 77, weekPct: 34, sessionResets: "7pm", weekResets: "Oct 9", totalCost: null, apiDuration: null, scrapedAt: NOW - 1000 };
+  test("手动读数比缓存新：额度层本机 Claude 用手动读数（77，不是缓存的 12），同窗口沿用缓存的重置时刻", () => {
+    const p = paths(cacheJson(60_000, { sessionPct: 12 }), st(manual));
+    const c = readUsageCacheStale(NOW, p.cache, p.refresh)!;
+    expect(c).toMatchObject({ sessionPct: 77, weekPct: 34, scrapedAt: NOW - 1000, sessionResetsAtMs: NOW + 3600_000 });
+    expect(readAccountUsageView(NOW, p).sessionPct).toBe(77);
+    const snap = selectQuotaLayers({ now: NOW, enabled: false, remote: null, local: { claudeCache: c, codexRollout: null } });
+    expect(snap.providers.flatMap((x) => x.meters).find((m) => m.kind === "session")?.used).toBe(77);
+  });
+  test("没有 statusline 缓存：额度层也有手动读数；缓存更新则用缓存", () => {
+    const p = paths(undefined, st(manual));
+    expect(readUsageCacheStale(NOW, p.cache, p.refresh)).toMatchObject({ sessionPct: 77, sessionResetsAtMs: null, scrapedAt: NOW - 1000 });
+    const q = paths(cacheJson(10, { sessionPct: 12 }), st(manual));
+    expect(readUsageCacheStale(NOW, q.cache, q.refresh)?.sessionPct).toBe(12);
+  });
+  test("过期缓存原样返回观测值（不推算归零）；fixture 缓存路径不跟随真实手动状态", () => {
+    const p = paths(cacheJson(3600_000, { sessionPct: 84, sessionResets: Math.floor((NOW - 60_000) / 1000) }));
+    expect(readUsageCacheStale(NOW, p.cache)).toMatchObject({ sessionPct: 84, scrapedAt: NOW - 3600_000 });
   });
 });

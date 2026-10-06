@@ -39,7 +39,6 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const quotaState = useSubscriptionQuota(open);
 
   const load = (force: boolean) => {
-    if (force) void quotaState.reload();
     if (force) setRefreshing(true);
     // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
     // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
@@ -55,7 +54,11 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         else if (j.global?.source === "none") setRefreshNote({ outcome: "unknown", nextAllowedAt: null, reason: j.global.reason ?? null });
       })
       .catch(() => {})
-      .finally(() => setRefreshing(false));
+      .finally(() => {
+        setRefreshing(false);
+        // 额度卡（/quota 的本机 Claude 读数）与看板读同一份最新真实读数：等探测结束（成功的读数已落盘）再重拉，否则显示的还是探测前的旧数
+        if (force) void quotaState.reload();
+      });
   };
 
   useEffect(() => {

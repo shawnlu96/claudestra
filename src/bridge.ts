@@ -1152,8 +1152,8 @@ discord.once("ready", async () => {
   cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
 
   // v2.4.25+ 用量看板：启动后确保只读频道 + 常驻消息存在，并刷一次。延迟几秒等
-  // channel-server 重连再刷（只读缓存），并贴待批的 statusLine 包装卡。
-  setTimeout(() => void initStatsDashboard(discord, deliver), 6000);
+  // channel-server 重连再刷（只读缓存）。
+  setTimeout(() => void initStatsDashboard(discord), 6000);
 
   // 扫 skill + 为已有 active agent 扫项目级
   await scanGlobalSkills();
@@ -3291,6 +3291,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 sweepStaleTerminalSessions().catch(() => {});
 void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
+void import("./bridge/account-usage-startup.js").then((m) => m.startAccountUsage(deliver)); // statusLine 批准卡 + 遗留用量探测清扫：Discord / web-only 都跑
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

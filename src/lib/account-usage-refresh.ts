@@ -3,7 +3,7 @@
  *   - 失败（含探测中途崩溃 / 重启）后 30 分钟退避：期间再点只回旧读数 / 未知 + 下一可刷新时间，不再探测；
  *   - 同进程并发共用一次探测，跨进程靠锁（抢不到 = 别人在探测，本次不探测）；
  *   - 状态落盘（state 目录 account-usage-refresh.json）：退避和「探测进行中」标记跨重启有效，
- *     上一进程留下的探测会话按记录精确回收（只收自己建的那一个）。
+ *     上一进程留下的探测会话按记录精确回收（只收自己建的那一个）：bridge 启动时 recoverInterruptedRefresh 先收一次，下次手动刷新再兜一次。
  * 落盘的只有解析后的数字与重置时间——不存 pane 原文、不存任何令牌。单测 tests/account-usage-refresh.test.ts。
  */
 import { acquireLock } from "./file-lock.js";
@@ -87,6 +87,27 @@ const asUsage = (r: StoredReading | null): AccountUsage | null =>
 export function lastManualReading(path = ACCOUNT_USAGE_REFRESH_PATH): StoredReading | null {
   const { state, corrupt } = readRefreshState(path);
   return corrupt ? null : state.lastReading;
+}
+
+/**
+ * bridge 启动时调一次：上一进程探测到一半就没了（kill -9 / 崩溃，退出钩子没机会跑）→ 只按它落盘的记录回收那一份资源，
+ * 并按失败记退避（从它开始探测的时刻算 30 分钟，重启绕不过）。本进程自己的在途探测不动；抢不到锁 = 别的进程正在探测，不动。
+ */
+export async function recoverInterruptedRefresh(deps: RefreshDeps): Promise<"recovered" | "none" | "busy" | "corrupt"> {
+  const path = deps.path ?? ACCOUNT_USAGE_REFRESH_PATH;
+  const lock = await acquireLock(`${path}.lock`, 0, 5 * 60_000);
+  if (!lock) return "busy";
+  try {
+    const { state, corrupt } = readRefreshState(path);
+    if (corrupt) return "corrupt";
+    if (!state.inFlight || (state.inFlight.pid === process.pid && inProcess.has(path))) return "none";
+    if (state.inFlight.probe) await deps.probe.cleanup(state.inFlight.probe);
+    markFailed(state, state.inFlight.startedAt, "interrupted");
+    save(path, state);
+    return "recovered";
+  } finally {
+    lock.release();
+  }
 }
 
 const inProcess = new Map<string, Promise<RefreshOutcome>>();

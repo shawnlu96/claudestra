@@ -32,7 +32,6 @@ import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from ".
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
 import { withCodexQuota, type CodexQuotaObservation } from "../lib/codex-usage.js";
 import { lpTag } from "./fleet/lp-monitor.js";
-import type { Delivery, Envelope } from "./router.js";
 
 import {
   fmtResets, sessionResetSuspect, bar, ctxDot, boundaryNote as formatBoundaryNote,
@@ -325,8 +324,8 @@ export function updateStatsDashboard(discord: Client): void {
 
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 
-/** 启动时确保频道 + 消息存在，刷一次，并起一个低频兜底 tick。deliver：bridge 的投递口，用来贴 statusLine 包装批准卡（每 tick 查一次，同计划只贴一次） */
-export async function initStatsDashboard(discord: Client, deliver?: (env: Envelope) => Promise<Delivery>): Promise<void> {
+/** 启动时确保频道 + 消息存在，刷一次，并起一个低频兜底 tick。（statusLine 包装批准卡不归这里：平台无关，见 bridge/account-usage-startup.ts） */
+export async function initStatsDashboard(discord: Client): Promise<void> {
   try {
     await doUpdate(discord);
   } catch (e) {
@@ -334,10 +333,7 @@ export async function initStatsDashboard(discord: Client, deliver?: (env: Envelo
   }
   // 低频兜底：主更新仍是「对话完成」hook，但挂机、没任何 hook 时账号 5h/周 limit 的
   // 重置就反映不出来。这个 tick 每 10min 按缓存重渲染一次（doUpdate 内部有 running 锁，只读缓存）。
-  const consent = () => deliver && void import("./account-usage-statusline-consent.js").then((m) => m.postStatuslineConsentCard(deliver))
-    .catch((e) => console.error("📊 statusLine 批准卡没贴出去:", (e as Error).message)); // 下个 tick 再试
-  consent();
-  if (!tickTimer) tickTimer = setInterval(() => (void doUpdate(discord), consent()), TICK_MS);
+  if (!tickTimer) tickTimer = setInterval(() => void doUpdate(discord), TICK_MS);
 }
 
 /** 网页用户点刷新：唯一允许起 TUI 探测的入口，过 lib/account-usage-refresh.ts 的闸（失败退避 30 分钟、并发只一次、跨重启有效）。
