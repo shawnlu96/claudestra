@@ -2,7 +2,7 @@
  * QWARN1_BROWSER=1 bun test tests/web-quota-warning-browser.test.ts — 顶部额度提醒条的真实浏览器渲染（390px + 桌面），隔离夹具、不连真 bridge。
  * 页面骨架模拟聊天页（56px 顶栏 + 对话 + 底部输入框），挂的是真组件 QuotaWarningBanner，GET /api/v1/lend/quota-lines 由路由按场景回。
  * 覆盖：停接 + 提醒两族同时、unknown 不出、403 / 404 不出且不再拉、只读（零写请求）、关掉后刷新不再出、跨新线（提醒→停接）再出、
- * 跨 tab 同步关掉、英文与本地时区、移动端不遮输入框。截图写到 .playwright-mcp/qwarn1/（已 gitignore，只私存）；有 web/.next 构建时用生产样式。
+ * 跨 tab 同步关掉、英文与本地时区、移动端不遮输入框；读到后 401 清空、存储写不进时两族先后关掉都生效、慢的旧回包不覆盖新状态、portal 到 body。截图写到 .playwright-mcp/qwarn1/（已 gitignore，只私存）；有 web/.next 构建时用生产样式。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -72,14 +72,19 @@ beforeAll(async () => {
 afterAll(async () => { await browser?.close(); server?.closeAllConnections(); server?.close(); });
 
 /** 一个浏览器上下文 = 一台设备（localStorage 共享）；reply 可在测试中途换（模拟 bridge 状态变化），gets / writes 计数 */
-interface Device { ctx: BrowserContext; reply: { status: number; json: unknown }; gets: number; writes: string[]; open: () => Promise<Page> }
+interface Device { ctx: BrowserContext; reply: { status: number; json: unknown }; hold: Promise<void> | null; gets: number; writes: string[]; open: () => Promise<Page> }
 async function device(reply: Device["reply"], opts: { width?: number; height?: number; locale?: string; timezoneId?: string } = {}): Promise<Device> {
   const ctx = await browser.newContext({ viewport: { width: opts.width ?? 390, height: opts.height ?? 844 }, locale: opts.locale ?? "zh-CN", timezoneId: opts.timezoneId ?? "Asia/Shanghai" });
-  const d: Device = { ctx, reply, gets: 0, writes: [], open: async () => { const p = await ctx.newPage(); await p.goto(url); return p; } };
+  const d: Device = { ctx, reply, hold: null, gets: 0, writes: [], open: async () => { const p = await ctx.newPage(); await p.goto(url); return p; } };
   await ctx.route("**/api/v1/**", async (route) => {
     const r = route.request();
     if (r.method() !== "GET") { d.writes.push(`${r.method()} ${r.url()}`); return route.fulfill({ status: 500, json: {} }); }
-    if (r.url().endsWith("/api/v1/lend/quota-lines")) { d.gets++; return route.fulfill(d.reply); }
+    if (r.url().endsWith("/api/v1/lend/quota-lines")) {
+      d.gets++;
+      const reply = d.reply, hold = d.hold; // 发出时的回包；hold 在时先暂挂（模拟慢请求）
+      if (hold) await hold;
+      return route.fulfill(reply);
+    }
     return route.fulfill({ status: 404, json: {} });
   });
   return d;
@@ -178,5 +183,57 @@ test.skipIf(!enabled)("桌面 · 中文两族", async () => {
   const p = await d.open();
   await bar(p, "claude").waitFor();
   await p.screenshot({ path: resolve(out, "qwarn1-desktop-stop-warn.png") });
+  await d.ctx.close();
+}, 30_000);
+
+const visible = (p: Page) => p.evaluate(`document.dispatchEvent(new Event("visibilitychange"))`);
+
+test.skipIf(!enabled)("先读到提醒、再 401（凭据失效）：已显示的读数清掉，且不再拉；横幅 portal 在 body 下", async () => {
+  const d = await device({ status: 200, json: view(STOP, WARN) });
+  const p = await d.open();
+  await bar(p, "codex").waitFor();
+  expect(await p.evaluate<boolean>(`document.querySelector('[data-testid="quota-warning"]').parentElement === document.body`)).toBe(true);
+  d.reply = { status: 401, json: { ok: false, error: "unauthorized" } };
+  await visible(p); await settle(p);
+  expect(await p.getByTestId("quota-warning").count()).toBe(0);
+  const gets = d.gets;
+  d.reply = { status: 200, json: view(STOP, WARN) };
+  await visible(p); await settle(p);
+  expect(d.gets).toBe(gets);
+  expect(await p.getByTestId("quota-warning").count()).toBe(0);
+  await d.ctx.close();
+}, 30_000);
+
+test.skipIf(!enabled)("存储写不进（QuotaExceeded）：两族先后关掉，前一族不会被后一次关掉抹回来", async () => {
+  const d = await device({ status: 200, json: view(WARN, WARN) });
+  await d.ctx.addInitScript(`{ const set = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) { if (k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError"); return set.call(this, k, v); }; }`);
+  const p = await d.open();
+  await bar(p, "codex").waitFor(); await bar(p, "claude").waitFor();
+  await bar(p, "codex").getByRole("button", { name: "关闭" }).click();
+  expect(await bar(p, "codex").count()).toBe(0);
+  await bar(p, "claude").getByRole("button", { name: "关闭" }).click();
+  expect(await bar(p, "claude").count()).toBe(0);
+  expect(await bar(p, "codex").count()).toBe(0);
+  await visible(p); await settle(p); // 同一条线再读一次也不再出
+  expect(await p.getByTestId("quota-warning").count()).toBe(0);
+  await d.ctx.close();
+}, 30_000);
+
+test.skipIf(!enabled)("回包乱序：慢的旧 GET（提醒）晚到，不覆盖已显示的新状态（停接）", async () => {
+  const d = await device({ status: 200, json: view({}, WARN) });
+  const p = await d.open();
+  await bar(p, "claude").waitFor();
+  let release!: () => void;
+  d.hold = new Promise<void>((done) => { release = done; });
+  await visible(p); // 旧请求：回提醒，暂挂
+  await p.waitForTimeout(200);
+  d.hold = null;
+  d.reply = { status: 200, json: view({}, { ...STOP, weekUsedPct: 81 }) };
+  await visible(p); // 新请求：回停接
+  await p.waitForFunction(`document.querySelector('[data-quota-warning="claude"]')?.dataset.level === "stop"`);
+  release(); await settle(p);
+  expect(await bar(p, "claude").getAttribute("data-level")).toBe("stop");
+  expect(await bar(p, "claude").innerText()).toContain("已停止接新单");
   await d.ctx.close();
 }, 30_000);

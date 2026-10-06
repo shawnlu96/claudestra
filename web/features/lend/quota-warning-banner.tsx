@@ -3,13 +3,17 @@
  * 网页顶部额度提醒条（QWARN1）：本机 Claude / Codex 任一族本周用量到了实际提醒线 / 停接线，顶栏下方出一条非模态提醒，
  * 写明家族、已用百分比、重置时间、是否已停止接新单；两族各一行、各自可关。数据只读 QLINE1 的 GET /lend/quota-lines
  * （lend-quota-api.fetchQuotaLines，同一 client / 认证），页面可见时 60 秒拉一次；403（非 owner 全权）/ 404（老 bridge）= null，
- * 整条消失并不再拉；其他错误保留上次显示、下次再试。只显示，不发任何写请求（不改线、不撤单、不动模型 / 额度）。
+ * 整条消失并不再拉；401（凭据失效）同样清空已显示的读数并停拉；其他错误保留上次显示、下次再试。回包按发出顺序落地（LoadGate），
+ * 慢的旧回包不覆盖已显示的新状态。只显示，不发任何写请求（不改线、不撤单、不动模型 / 额度）。
  * 显示与关掉的规则在 quota-warning-model.ts；切机器时清空旧机器的读数，关掉记录按机器 fp 分开。
+ * fixed 浮层按 web/CLAUDE.md 第 4 条 createPortal 到 body。
  */
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { ApiError } from "@/lib/api/client";
 import { machines } from "@/lib/machines";
 import { fetchQuotaLines } from "./lend-quota-api";
+import { finishLoad, newLoadGate, startLoad } from "./lend-model";
 import type { QuotaLinesView } from "./lend-quota-model";
 import { useWarnT } from "./quota-warning-i18n";
 import { DISMISS_KEY, FAMILY_LABEL, isDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type DismissMap, type WarnItem } from "./quota-warning-model";
@@ -67,6 +71,7 @@ export function QuotaWarningBanner() {
 
   useEffect(() => {
     let stop = false;
+    const gate = newLoadGate(); // 每台机器（每次 effect）一份：旧机器 / 旧请求的回包都落不了地
     let timer: ReturnType<typeof setInterval> | null = null;
     const halt = () => {
       stop = true;
@@ -76,14 +81,20 @@ export function QuotaWarningBanner() {
     function load() {
       if (stop || document.visibilityState !== "visible") return;
       setNow(Date.now());
+      const ticket = startLoad(gate);
       fetchQuotaLines()
         .then((view) => {
-          if (stop) return;
+          if (stop || !finishLoad(gate, ticket, true)) return; // 比已落地的更旧：丢掉
           setData({ fp, view });
           if (view === null) halt(); // 403 / 404：这台机器不给看，本页不再拉
         })
         .catch((e) => {
-          if (e instanceof ApiError && e.status === 401) return halt(); // 凭据失效：client 已标需重新配对
+          if (stop) return;
+          if (e instanceof ApiError && e.status === 401) { // 凭据失效（不论先后都生效）：清掉已显示的读数再停拉；client 已标需重新配对
+            setData({ fp, view: null });
+            return halt();
+          }
+          if (!finishLoad(gate, ticket, false)) return;
           console.debug("额度提醒条拉取失败（保持上次显示，下一次轮询再试）:", e);
         });
     }
@@ -93,27 +104,32 @@ export function QuotaWarningBanner() {
     return halt;
   }, [fp]);
 
+  /** 存储写不进去的关掉记录（只在本页内存里）：和持久记录合并时它们优先，不被下一次关掉 / 别的 tab 的 storage 事件抹掉 */
+  const unsaved = useRef<DismissMap>({});
+
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => { if (e.key === DISMISS_KEY || e.key === null) setDismissed(readDismissed()); };
+    const onStorage = (e: StorageEvent) => { if (e.key === DISMISS_KEY || e.key === null) setDismissed({ ...readDismissed(), ...unsaved.current }); };
     window.addEventListener("storage", onStorage); // 别的 tab 关掉的，这里也收起
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const dismiss = useCallback((it: WarnItem) => {
-    const next = withDismissed(readDismissed(), fp, it);
-    setDismissed(next);
+    const next = withDismissed({ ...readDismissed(), ...unsaved.current }, fp, it);
     try {
       localStorage.setItem(DISMISS_KEY, JSON.stringify(next));
+      unsaved.current = {}; // 都已随 next 落盘
     } catch {
-      /* 存不下：只在这次页面里关掉，刷新后会再出现，无害 */
+      unsaved.current = withDismissed(unsaved.current, fp, it); // 存不下：只在这次页面里关掉（刷新后会再出现），多族先后关掉都保留
     }
+    setDismissed(next);
   }, [fp]);
 
   const items = warningItems(data?.fp === fp ? data.view : null, now).filter((it) => !isDismissed(dismissed, fp, it));
-  if (items.length === 0) return null;
-  return (
+  if (items.length === 0 || typeof document === "undefined") return null;
+  return createPortal(
     <div className={css.wrap} aria-label={t("出借额度提醒")} data-testid="quota-warning">
       {items.map((it) => <Row key={it.family} it={it} onDismiss={() => dismiss(it)} />)}
-    </div>
+    </div>,
+    document.body,
   );
 }
