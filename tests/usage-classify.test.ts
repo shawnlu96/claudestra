@@ -91,6 +91,8 @@ describe("triggerSummary：渲染后的正文、脱敏、80 字", () => {
       ["MYSQL_PWD=hunter2 mysql", "MYSQL_PWD=[redacted] mysql"],
       ["GET /api?key=AIzaSyA1234567890abcdefghijklmnopqrstuv&q=1", "GET /api?key=[redacted]&q=1"],
       ["用 AIzaSyA1234567890abcdefghijklmnopqrstuv 调", "用 [redacted] 调"],
+      ['password="hunter2 extra words', 'password="[redacted]"'], // 引号到行尾都没闭合（被截断的行）：遮到行尾
+      ["secret: 'abc def\nnext line", 'secret: "[redacted]"\nnext line'],
     ];
     for (const [raw, want] of cases) expect(redactSecrets(raw)).toBe(want);
     const keep = ["author: Shawn", "git push -u origin main", "credits: 5", "cd $OLDPWD", "see https://github.com/o/r/pull/265?tab=files", "Authorization 失败了"];

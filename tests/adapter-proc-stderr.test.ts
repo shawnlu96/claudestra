@@ -40,14 +40,17 @@ describe("stderrLines", () => {
     expect(lines).toEqual(["中文日志"]);
   });
 
-  test("超长行：只出打码后的开头（≤300 字），剩下的到换行为止都丢，下一行照常", () => {
-    const { lines, s } = collect(64);
-    s.push(enc(`${"z".repeat(60)} ${SECRET.slice(0, 10)}`));
-    s.push(enc(`${SECRET.slice(10)} tail\nok\n`));
-    expect(lines).toHaveLength(2);
-    expect(lines[0]!.startsWith("z".repeat(60))).toBe(true);
-    expect(lines.join("\n")).not.toContain(SECRET.slice(10, 20));
-    expect(lines[1]).toBe("ok");
+  test("超长行没结束：内容一个字都不记（引号没闭合时打码认不出边界），只记占位；剩下的到换行为止都丢，下一行照常", () => {
+    const { lines, s } = collect(32);
+    s.push(enc('password="hunter2 extra-secret-words-here'));
+    s.push(enc(`${SECRET} tail"\nok\n`));
+    expect(lines).toEqual(["[一行超过 32 字还没换行，内容略去]", "ok"]);
+  });
+
+  test("缺省上限下也一样：16KB 的引号没闭合的值不漏（Shawn r4）", () => {
+    const { lines, s } = collect();
+    s.push(enc(`password="hunter2 ${"word ".repeat(4000)}`));
+    expect(lines).toEqual(["[一行超过 16384 字还没换行，内容略去]"]);
   });
 });
 

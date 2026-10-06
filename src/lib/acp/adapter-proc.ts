@@ -110,12 +110,13 @@ export interface AdapterProc {
   exited: Promise<number>;
 }
 
-/** 超过这么长还没换行的 stderr 行：只记打码后的开头，后面到换行为止都丢掉 */
+/** 超过这么长还没换行的 stderr 行：整段不记（只记一句占位），后面到换行为止都丢掉 */
 const STDERR_LINE_MAX = 16_384;
 
 /**
  * stderr 字节流 → 完整的行：缓冲到换行 / EOF 再整行打码、截 300 字（流式 UTF-8 解码，多字节字符跨 chunk 也不乱）。
- * 按 chunk 切会把一个密钥拆成两段日志，每段都匹配不上规则；超长行也不吐没打码的碎片。tests/adapter-proc-stderr.test.ts
+ * 按 chunk 切会把一个密钥拆成两段日志，每段都匹配不上规则。超长行没结束就认不出值的边界（引号还没闭合），
+ * 打码靠不住：一个字都不吐，只记占位。tests/adapter-proc-stderr.test.ts
  */
 export function stderrLines(emit: (line: string) => void, maxLine = STDERR_LINE_MAX): { push(c: Uint8Array): void; end(): void } {
   const dec = new TextDecoder();
@@ -128,7 +129,7 @@ export function stderrLines(emit: (line: string) => void, maxLine = STDERR_LINE_
       pending = parts.pop()!;
       for (const part of parts) skipping ? (skipping = false) : out(part);
       if (pending.length <= maxLine) return;
-      if (!skipping) out(pending);
+      if (!skipping) emit(`[一行超过 ${maxLine} 字还没换行，内容略去]`);
       skipping = true;
       pending = "";
     },

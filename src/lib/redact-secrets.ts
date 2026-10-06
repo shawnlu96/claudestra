@@ -26,8 +26,8 @@ const USER_FLAG_RE = /(\s(?:-u|--user)[\s=]+)[^\s:]+:\S+/g;
 const QUERY_SECRET_RE = /([?&](?:key|sig|signature|code|auth)=)[^&\s#"']+/gi;
 const BEARER_RE = /\b(bearer|token)\s+[A-Za-z0-9._~+/-]{12,}=*/gi;
 const SECRET_KEY = String.raw`\b([\w-]*(?:token|secret|password|passwd|passphrase|[_-]pwd\b|credentials?|cookie|api[_-]?key|access[_-]?key|private[_-]?key)[\w-]*)`;
-/** 引号括起来的值整段遮（值里可以有空格）；没引号的值遇空白 / 分隔符为止 */
-const KV_QUOTED_RE = new RegExp(String.raw`${SECRET_KEY}(["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*')`, "gi");
+/** 引号括起来的值整段遮（值里可以有空格），引号到行尾都没闭合就遮到行尾（被截断的行）；没引号的值遇空白 / 分隔符为止 */
+const KV_QUOTED_RE = new RegExp(String.raw`${SECRET_KEY}(["']?\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|["'][^\n]*(?=\n|$))`, "gi");
 const KV_SECRET_RE = new RegExp(String.raw`${SECRET_KEY}(["']?\s*[:=]\s*["']?)[^\s"',;&]{4,}`, "gi");
 
 /** 把文本里像密钥的片段换成 [redacted]；先整段脱敏再截断，截断不会把半个密钥留下 */
