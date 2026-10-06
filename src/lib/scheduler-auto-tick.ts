@@ -37,6 +37,7 @@ import { drivePool } from "./scheduler-pool-tick.js";
 import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
+import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -54,6 +55,8 @@ export interface AutoTickDeps {
   now(): number;
   /** Effective lend.json borrow list (i28-R9); absent = this service never pools. Read once per pass. */
   borrow?(): Promise<BorrowEntry[]>;
+  /** A PR's state on GitHub, for mergeHandoff projects (scheduler-merge-handoff-tick.ts); absent = their handoff waits. */
+  prState?: ReadPr;
 }
 
 interface CardOutcome { taskId: string; step: string; detail: string }
@@ -97,7 +100,7 @@ export function boundRef(db: Database, taskId: string, role: SessionRole): Sessi
   return s && s.state === "active" ? { taskId, role, agent: s.agent, sessionId: s.sessionId, family: s.family, transport: s.transport } : null;
 }
 class Card {
-  constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps) {}
+  constructor(readonly db: Database, readonly task: LedgerTask, readonly opts: SnapshotOpts, readonly deps: AutoTickDeps, readonly handoff = false) {}
 
   out(step: string, detail: string): CardOutcome { return { taskId: this.task.id, step, detail: oneLine(detail) }; }
 
@@ -355,7 +358,10 @@ class Card {
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
-    if (open?.action === "merge") return this.out("merge_queue", `合并意图 ${open.status}`);
+    if (open?.action === "merge") {
+      return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
+        : this.out("merge_queue", `合并意图 ${open.status}`);
+    }
     if (open && isPoolIntent(open)) return this.drive(open, null);
     if (open?.status === "pending") {
       const again = planScheduler(autoSnapshot(this.db, this.task, this.opts, open.id));
@@ -369,6 +375,7 @@ class Card {
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
+    if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
       : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
       : plan.action === "merge" ? mergeSlotHold(this.task) : null;
@@ -379,7 +386,7 @@ class Card {
     return this.drive(intent, plan);
   }
 }
-export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, deps: AutoTickDeps,
+export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolOf = poolReader(deps);
@@ -393,7 +400,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     if (!task) continue;
     try {
       const pool = await poolOf(policy.remote);
-      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps).step());
+      out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
