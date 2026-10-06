@@ -2,6 +2,7 @@
 import { checkAcpReady, probePiAcp, type AcpReady } from "./acp/readiness.js";
 import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { rangeAllows } from "./acp/resolve.js";
+import { identityLine, selectedCodexAdapter, type CodexCompat } from "./acp/codex-compat.js";
 import { probeClaudeVersion } from "./claude-binary.js";
 import { defaultRunner } from "./codex-thread.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
@@ -31,6 +32,15 @@ function pairingCheck(version: string | null | undefined, activeAcp: number, ada
   }];
 }
 
+/** 自研适配器生效时（readiness 带回了协议判定）：组合身份 + 判定；有差异或判不出就提示做一次真实组合验证 */
+function selfAdapterCheck(c: CodexCompat): Check {
+  const head = c.identity ? identityLine(c.identity) : "组合身份未知";
+  const clean = c.verdict === "compatible" && !c.reasons.length;
+  return { group: "Codex ACP", name: "自研适配器协议兼容", status: clean ? "ok" : "warn",
+    detail: `${head}；${c.verdict === "compatible" ? "按 app-server 协议兼容" : "判不出是否兼容"}${c.reasons.length ? `：${c.reasons.slice(0, 3).join("；")}` : ""}`,
+    ...(clean ? {} : { fix: "这个组合没经过真实验证：先跑一次 Codex agent 的基本回合和工具调用，有问题退回上游适配器" }) };
+}
+
 export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexVersion?: string | null, adapter: AdapterNow = currentCodexAcp()): Check[] {
   const codex = agents.filter((a) => a.runtime === "codex");
   const pending = codex.filter((a) => a.acpPending);
@@ -38,16 +48,18 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
   const restart = codex.filter((a) => a.acpRestartPending);
   const activeAcp = codex.filter((a) => a.transport === "acp");
   const group = "Codex ACP";
+  const upstream = adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub";
+  const which = ready.ok && ready.compat ? "自研 Codex 适配器" : upstream;
   const checks: Check[] = [{
     group, name: "适配器和 app-server", status: ready.ok ? "ok" : activeAcp.length ? "fail" : "warn",
-    detail: ready.ok ? `${adapter && adapter !== "broken" ? `codex-acp ${adapter.version}（配 codex ${adapter.codexRange}）` : "ACP stub"} 校验通过，Codex CLI 有 app-server` : ready.reason,
+    detail: ready.ok ? `${which} 校验通过，Codex CLI 有 app-server` : ready.reason,
     ...(!ready.ok ? { fix: "运行 bun src/manager.ts migrate --acp；下载仍失败时现有 Codex 留在 tmux" } : {}),
   }];
   checks.push({ group, name: "registry 迁移", status: unmigrated.length ? "warn" : "ok",
     detail: unmigrated.length ? `${unmigrated.length} 个旧 Codex agent 缺 transport 字段` : `${codex.length} 个 Codex agent 的 transport 已明确`,
     ...(unmigrated.length ? { fix: "运行 bun src/manager.ts migrate --acp" } : {}),
   });
-  checks.push(...pairingCheck(codexVersion, activeAcp.length, adapter));
+  checks.push(...(ready.ok && ready.compat ? [selfAdapterCheck(ready.compat)] : pairingCheck(codexVersion, activeAcp.length, adapter)));
   if (pending.length) checks.push({ group, name: "tmux 暂退", status: "warn", detail: `${pending.map((a) => a.name).join(", ")} 等待 ACP 条件恢复`,
     fix: "修好上面的适配器或 CLI 后运行 bun src/manager.ts migrate --acp" });
   if (restart.length) checks.push({ group, name: "待重启", status: "warn", detail: `${restart.map((a) => a.name).join(", ")} 尚未以 registry 的 transport 启动`,
@@ -59,7 +71,7 @@ async function checkCodexAcp(): Promise<Check[]> {
   const [agents, ready] = await Promise.all([readRegistryAgents(), checkAcpReady(false)]);
   const bin = ready.ok ? ready.codexBin : undefined; // 沙箱 stub 没有 codexBin：不探
   const version = bin ? await probeClaudeVersion(defaultRunner, bin).catch(() => null) : undefined; // 探失败 = 「读不出版本」照样报 warn
-  return acpDoctorChecks(agents, ready, version);
+  return acpDoctorChecks(agents, ready, version, selectedCodexAdapter() === "self" ? null : undefined);
 }
 
 const isPiAcp = (a: RegistryAgent) => a.runtime === "pi" && a.transport === "acp";
