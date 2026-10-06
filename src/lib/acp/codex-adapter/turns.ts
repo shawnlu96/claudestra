@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { ZodError } from "zod";
 import { RpcError, RpcLostError } from "../rpc.js";
 import type { AppServer, NotificationEvent } from "./app-server.js";
-import { closeTurn, eventState, type EventState, type HostCaps, updatesFor } from "./events.js";
+import { closeTurn, eventState, type EventState, type HostCaps, promptUsage, type TokenUsage, updatesFor } from "./events.js";
 import { deliveryUnknownError, envelopeFailure, failureOf, promptFailureResult, protocolFailure, transportLost, type TurnFailure } from "./failures.js";
 import type { ParamsOf } from "./protocol.js";
 import type { SessionState } from "./session-state.js";
@@ -128,9 +128,16 @@ export class Turns {
   private stopped = false;
   private waiters = new Set<() => void>();
   private warnedThread = false;
+  /** 最近一次 thread/tokenUsage/updated 的 last（跨回合保留，同 2.1.0 的 sessionState.lastTokenUsage）：prompt 回包的 usage 用 */
+  private lastUsage: TokenUsage | null = null;
 
   constructor(private readonly deps: TurnsDeps) {
     this.t = { ...TIMINGS, ...deps.timings };
+  }
+
+  /** 这条审批属于当前会话里正在跑、还没收尾的那一轮（approvals.ts 据此把过期的审批直接 cancel） */
+  owns(threadId: string, turnId: string): boolean {
+    return threadId === this.deps.session.current && this.cur?.id === turnId && !this.cur.finished;
   }
 
   get busy(): boolean {
@@ -421,6 +428,7 @@ export class Turns {
       return;
     }
     if (ev.method === "item/started" && ev.params.item.type === "commandExecution") this.deps.onCommand?.();
+    if (ev.method === "thread/tokenUsage/updated") this.lastUsage = ev.params.tokenUsage.last;
     for (const u of updatesFor(t.ev, ev, this.deps.caps())) this.emitFor(t, u);
   }
 
@@ -476,12 +484,15 @@ export class Turns {
     this.wake();
   }
 
+  /** 回包都带 usage 和 _meta.quota（2.1.0 同款）；失败结果自己的 _meta（AIR sessionFailure）合在一起 */
   private reply(t: Turn, stopped: boolean, fail?: TurnFailure): void {
     if (!t.ctx) return;
-    if (stopped) return t.ctx.respond({ stopReason: "cancelled" });
-    if (!fail) return t.ctx.respond({ stopReason: "end_turn" });
+    const extra = promptUsage(this.lastUsage, this.deps.policy().model);
+    const withUsage = (r: Rec) => ({ ...r, usage: extra.usage, _meta: { ...(extra._meta as Rec), ...(r._meta as Rec | undefined) } });
+    if (stopped) return t.ctx.respond(withUsage({ stopReason: "cancelled" }));
+    if (!fail) return t.ctx.respond(withUsage({ stopReason: "end_turn" }));
     try {
-      t.ctx.respond(promptFailureResult(t.id, fail, this.deps.caps().air));
+      t.ctx.respond(withUsage(promptFailureResult(t.id, fail, this.deps.caps().air)));
     } catch (e) {
       t.ctx.fail(e);
     }

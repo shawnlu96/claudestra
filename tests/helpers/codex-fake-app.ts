@@ -11,7 +11,7 @@ import { CodexAcpServer } from "../../src/lib/acp/codex-adapter/server.ts";
 import { parseAdapterEnv } from "../../src/lib/acp/codex-adapter/session-config.ts";
 import type { FatalCause, TurnTimings } from "../../src/lib/acp/codex-adapter/turns.ts";
 import type { RpcWire } from "../../src/lib/acp/rpc.ts";
-import { AcpSession } from "../../src/lib/acp/session.ts";
+import { AcpSession, type SessionDeps } from "../../src/lib/acp/session.ts";
 import type { PromptOutcome } from "../../src/lib/acp/turn.ts";
 
 export type Rec = Record<string, any>;
@@ -132,6 +132,10 @@ export interface HarnessOpts {
   air?: boolean;
   /** 宿主一侧的线路先过它再交给 AcpSession（共享契约套件用） */
   wrap?: (w: RpcWire) => RpcWire;
+  /** 宿主怎么答授权卡（缺省 null = 没答，同宿主出卡失败） */
+  onPermission?: SessionDeps["onPermission"];
+  /** 适配器等宿主答审批的兜底时限 */
+  approvalTimeoutMs?: number;
 }
 
 export function harness(o: HarnessOpts = {}) {
@@ -150,10 +154,14 @@ export function harness(o: HarnessOpts = {}) {
     queueMicrotask(() => (server.stop(), server.turns.failAll(c, o.tail ?? "")));
   };
   const reconcile = o.reconcile === false ? undefined : createReconciler(app, log, { budgetMs: 400, minDelayMs: 10, retryMs: 10 });
-  server = new CodexAcpServer(pipe.b, { app, cfg: parsed.cfg, log, fatal, version: "test", reconcile, timings: { ...FAST, ...o.timings }, controlMark: ["CLAUDESTRA_ACP_CONTROL", "ctl"] });
+  const timings = { ...FAST, ...o.timings };
+  server = new CodexAcpServer(pipe.b, {
+    app, cfg: parsed.cfg, log, fatal, version: "test", reconcile, timings, controlMark: ["CLAUDESTRA_ACP_CONTROL", "ctl"], approvalTimeoutMs: o.approvalTimeoutMs,
+  });
   const updates: Rec[] = [];
   const selfTurns: Promise<PromptOutcome>[] = [];
-  const session = new AcpSession(o.wrap ? o.wrap(pipe.a) : pipe.a, { onUpdate: (u) => void updates.push(u), onPermission: async () => null, log, onSelfTurn: (d) => void selfTurns.push(d) });
+  const onPermission = o.onPermission ?? (async () => null);
+  const session = new AcpSession(o.wrap ? o.wrap(pipe.a) : pipe.a, { onUpdate: (u) => void updates.push(u), onPermission, log, onSelfTurn: (d) => void selfTurns.push(d) });
   if (o.air === false) (session as any).rpc.request = wrapNoAir((session as any).rpc.request.bind((session as any).rpc));
   return {
     f, app, server, session, updates, selfTurns, causes, logs,
