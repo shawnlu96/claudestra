@@ -144,6 +144,28 @@ export async function noteStartConfigFailure(d: ConfigFailureDeps, row: LendRow,
   else if (!settled) d.log(`配置故障通知结果已过期（第 ${gen} 代已不是当前），不改新故障`);
 }
 
+/**
+ * startWorker, before worker.create (a new order only: started / leased orders never get here): under on, a peer + family this
+ * lender registered unavailable is not started again; the answer is the not_started detail, carrying the original category
+ * and evidence so the borrower's classifier sees the same fault. observe logs the would-be refusal; off / available: null.
+ */
+export function startConfigRefusal(d: Pick<ConfigFailureDeps, "db" | "log">, row: LendRow): string | null {
+  const mode = configFailureMode();
+  if (mode === "off") return null;
+  const f = providerConfigFailure(d.db, row.peer, row.family);
+  if (!f || f.recoveredAt !== null) return null;
+  const last = f.evidence[f.evidence.length - 1];
+  if (mode === "observe") return d.log(`配置故障观察（observe）：本会因 ${row.peer} 的 ${row.family} 配置故障（第 ${f.gen} 代）不起 ${row.orderId}`), null;
+  return `起 worker 失败：配置故障未恢复，没有再启动（第 ${f.gen} 代，单 ${last?.orderId ?? "?"}）：${last?.excerpt ?? f.category}`.slice(0, 400);
+}
+
+/** helloBody's slots for one peer: under on, a family registered unavailable reports total 0 (busy kept: live orders go on). */
+export function configFailureSlots<S extends Record<string, { total: number; busy: number }>>(db: Database, peer: string | undefined, slots: S): S {
+  if (!peer || configFailureMode() !== "on") return slots;
+  const down = Object.keys(slots).filter((f) => slots[f].total > 0 && providerFamilyUnavailable(db, peer, f));
+  return down.length ? { ...slots, ...Object.fromEntries(down.map((f) => [f, { ...slots[f], total: 0 }])) } : slots;
+}
+
 /** The owner's explicit recovery of one fault generation (CAS): an old generation never clears a newer fault. */
 export function recoverProviderConfigFailure(db: Database, peer: string, family: string, gen: number, now: number): boolean {
   return casGen(db, peer, family, gen, (cur) => (cur.recoveredAt === null ? { ...cur, recoveredAt: now } : null));
