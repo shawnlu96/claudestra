@@ -38,7 +38,7 @@ import { PaneLayout } from "./v4/side-pane";
 import { Outline } from "./v4/v4-outline";
 import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
 import { TeamPanel } from "./team-panel";
-import { metricsOf, type Filter, type Metrics } from "./v4/v4-model";
+import { DEFAULT_FILTER, metricsOf, type Filter, type Metrics } from "./v4/v4-model";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
 
@@ -175,7 +175,7 @@ export function CollabView({ project }: { project: string }) {
   const lines = useMemo(() => new Map((view?.lines ?? []).map((l) => [l.id, l])), [view]);
   const digest = useMemo(() => sinceDigest(lastSeen.state.events, ov?.tasks ?? [], tr), [lastSeen.state.events, ov, tr]);
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>(DEFAULT_FILTER);
   const { sel, setSel, focus, pickTask, select, close } = useSheetSelection(openTask, narrow);
   const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr, noWorkBoard: off?.has("workBoard") });
   const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
