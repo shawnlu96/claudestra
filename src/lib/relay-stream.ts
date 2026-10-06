@@ -83,7 +83,7 @@ export function chunkBytes(u: Uint8Array, maxChunk: number = LIMITS.maxChunkByte
 
 /**
  * 把一个正文（字节或流）按块交给 emit（data 帧），最后 emit(null) 表示 end。
- * 流里的每个 chunk 再按 maxChunk 切，保证单帧不超上限。abort 触发后停止读取并抛出。
+ * 流里的每个 chunk 再按 maxChunk 切，保证单帧不超上限。abort 或 emit 抛错：cancel 源流后抛出，不发 end。
  */
 export async function pumpBody(
   body: Uint8Array | ReadableStream<Uint8Array> | null,
@@ -97,6 +97,11 @@ export async function pumpBody(
     return emit(null);
   }
   const reader = body.getReader();
+  // 中止 / emit 失败都要 cancel 源流：只 releaseLock 的话源流的 cancel() 永不触发，SSE 这类推流源（终端、events）
+  // 会一直活着往没人读的队列里堆（tests/relay-stream.test.ts）。abort 时立刻 cancel，挂着的 read 随之返回 done
+  const stop = (why: unknown) => void reader.cancel(why).catch(() => { /* 源流已出错或已关：没有要收尾的了 */ });
+  const onAbort = () => stop(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     while (true) {
       if (signal?.aborted) throw new Error("aborted");
@@ -104,8 +109,13 @@ export async function pumpBody(
       if (done) break;
       if (value) for (const c of chunkBytes(value, maxChunk)) emit(c);
     }
+    if (signal?.aborted) throw new Error("aborted"); // abort 唤醒的 done 不是正文读完：不补发 end
     emit(null);
+  } catch (e) {
+    stop(e);
+    throw e;
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     reader.releaseLock();
   }
 }
