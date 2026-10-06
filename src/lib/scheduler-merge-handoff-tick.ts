@@ -38,6 +38,8 @@ export interface HandoffCard<O> {
 export const HANDOFF_POLL_MS = 60_000;
 const polled = new WeakMap<Database, Map<string, number>>();
 const SHA = /^[a-f0-9]{40}$/i;
+/** Half runBounded's output cap: a changed-file list this long is read as "cannot tell" (no narrowing). */
+const LIST_CAP = 512 * 1024;
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const short = (s: string | null | undefined): string => (s ?? "（无）").slice(0, 12);
 
@@ -123,7 +125,10 @@ export function handoffFiles(repoDir: string, command: typeof runBounded = runBo
   return async (prRef, head) => {
     if (!SHA.test(head) || !(await prRepoIn(git, prRef))) return null;
     await git("fetch", "--no-tags", "--quiet", "origin", head, `+refs/heads/main:${MAIN_REF}`);
-    return (await git("diff", "--name-only", "--no-renames", "-z", `${MAIN_REF}...${head}`)).split("\0").filter(Boolean);
+    const out = await git("diff", "--name-only", "--no-renames", "-z", `${MAIN_REF}...${head}`);
+    // runBounded cuts output at 1 MiB without saying so: a list that may be cut short would give away locks on files it lost
+    if (Buffer.byteLength(out) >= LIST_CAP || (out && !out.endsWith("\0"))) return null;
+    return out.split("\0").filter(Boolean);
   };
 }
 
