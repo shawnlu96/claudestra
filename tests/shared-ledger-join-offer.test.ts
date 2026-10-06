@@ -1,7 +1,7 @@
 import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InstanceKey } from "../src/lib/instance-key.js";
@@ -99,6 +99,8 @@ const offerBody = (code: string, over: Record<string, unknown> = {}) => ({ v: 1,
 async function post(w: World, token: string | null, body: unknown, path = "/api/v1/shared-ledger-join-offer"): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) };
   const url = new URL(`http://127.0.0.1${path}`);
+  const locals = await w.deps.projects();
+  writeFileSync(join(w.joinDir, "projects.json"), JSON.stringify({ projects: locals.map(p => ({ id: p.id, name: p.name, dirs: [] })) }));
   const center = parseSharedLedgerJoinCode((body as { code?: unknown } | null)?.code);
   if (center) w.centers.push(center.centerId);
   return (await handleJoinOfferApi(new Request(url.toString(), { method: "POST", headers, body: JSON.stringify(body) }), url, w.deps))!;

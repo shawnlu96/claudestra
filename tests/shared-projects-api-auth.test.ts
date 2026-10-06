@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Principal } from "../src/lib/principals.js";
@@ -12,6 +12,7 @@ const owner: Principal = { id: "owner:self", role: "owner", agents: ["*"], manag
 test("actual owner scope resolves only the original bound person credential and real instance key without writes", async () => {
   const dir = mkdtempSync(join(tmpdir(), "n4-owner-"));
   try {
+    writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: ["original", "service-only"].map(id => ({ id, name: id, dirs: [] })) }));
     const original = { centerId: "synthetic-center", teamId: "synthetic-team", projectId: "original", localProjectId: "original" };
     await setSharedLedgerBinding(original, dir);
     const credential: SharedLedgerLocalCredential = { localSubject: "owner:self", kind: "person", centerId: original.centerId, teamId: original.teamId,

@@ -1,6 +1,6 @@
 import { testChildEnv } from "./test-env.ts";
 import { expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -48,7 +48,8 @@ test("store copies isolate mutations and state directories; ask attachment canno
 });
 
 test("a fresh process cannot recover the invitation secret from the same state directory", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "offer-restart-"));
+  const root = mkdtempSync(join(tmpdir(), "offer-restart-")), dir = join(root, "state"), home = join(root, "home");
+  mkdirSync(dir); mkdirSync(home);
   try {
     const script = `
       import assert from "node:assert/strict";
@@ -63,11 +64,11 @@ test("a fresh process cannot recover the invitation secret from the same state d
     `;
     for (const first of ["1", "0"]) {
       const p = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
-        cwd: process.cwd(), env: testChildEnv({ HOME: dir, CLAUDESTRA_STATE_DIR: dir, OFFER_FIRST: first }),
+        cwd: process.cwd(), env: testChildEnv({ HOME: home, CLAUDESTRA_STATE_DIR: dir, OFFER_FIRST: first }),
         stdout: "pipe", stderr: "pipe",
       });
       const [exit, stdout, stderr] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()]);
       expect({ exit, stdout, stderr }).toEqual({ exit: 0, stdout: "", stderr: "" });
     }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
