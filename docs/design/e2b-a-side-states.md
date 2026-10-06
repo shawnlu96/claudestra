@@ -1,7 +1,7 @@
 # E2b 讨论输入：A 侧状态对照与负例
 
 > 状态：**讨论输入，不冻结协议、不授权实现**。供监工冻结 P2 时取用；状态名、消息名、原因码都可以改。
-> 基础是 [PR773](https://github.com/shawnlu96/claudestra/pull/773) 的 A 侧设计稿（分支 `feat/e2ba-1`，`docs/design/e2b-a-side.md`，下称「A 稿」）。
+> 基础是 PR #773 的 A 侧设计稿（分支 `feat/e2ba-1`，`docs/design/e2b-a-side.md`，下称「A 稿」）。
 > 本文不改 A 稿；A 稿那两句小修在 §5 写清楚，等 #773 解除 hold 后再合进去。
 > 角色同 [现有入口盘点](./e2b-current-entry-inventory.md)：B = 仓库方（委托方），A = 执行方（接收方）。
 

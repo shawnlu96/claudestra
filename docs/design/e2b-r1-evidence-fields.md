@@ -39,12 +39,17 @@
 | `origin.instance.publicKey` | A 实例 Ed25519 公钥**全文**（base64url） | `instanceKeySync()`（`instance-key.ts`）；v1 只导出 16 位指纹 | — | 与 B 侧钉住的 A 公钥逐字节相等（`peer-keys.ts` `PinnedPeerKey.publicKey`） | 拒收；不接受只给指纹 |
 | `origin.instance.fingerprint` | 公钥 **SHA-256 全 64 位 hex** | **设计，未实现**：现有 `keyFingerprint` 只取前 16 位四位分组（`instance-key.ts:25`） | — | B 用公钥重算 | 只给 16 位短指纹的视为 v1，按 v1 规则人工 |
 | `origin.exporter` | 导出命令的执行者 | `c.deps.actor` | 随 manifest | 只作记录，不作授权依据 | 可空 |
-| `signature` | A 实例私钥对 manifest 原始字节 SHA-256 的签名 | **设计，未实现**：`SIGN_PURPOSES`（`instance-signature.ts:43`）没有证据包用途，需新增用途（如 `claudestra-review-evidence-v2`），由监工拍板 | A 实例 | `verifyPurpose` 同一套原语 | 拒收 |
+| `manifest.sig.json`（**不在 manifest 里**） | detached 签名：A 实例私钥签 `[purpose, bundleId, sha256(manifest.json 原始字节)]` | **设计，未实现**：`SIGN_PURPOSES`（`instance-signature.ts:43`）没有证据包用途，需新增用途（如 `claudestra-review-evidence-v2`），由监工拍板 | A 实例 | B 先对收到的 `manifest.json` 原始字节算 SHA-256，再用钉住的 A 公钥 `verifyPurpose` 验；manifest 本身不含任何签名字段 | 缺文件或验不过 → 拒收 |
+
+签名为什么 detached：签名若放进 manifest，就要签「不含自己的 manifest」，得另定字段排除和确定性序列化（票据就是这么做的：`logicalSha` 去掉 `ticket` 再按键排序，`pool-review-proof-ticket.ts:29`）。
+证据包按原始字节交付、按原始字节哈希，detached 最简单：manifest 字节不变，签名文件只覆盖它的摘要，不进 `artifacts[]` 清单（清单在 manifest 里，签名在其后产生）。
 
 说明：只钉 A 实例，不证明 A 内部哪个 session 干了什么；那部分见 §2.3 的来源链。
 B 现在通过已认证的 peer 附件通道收包时，传输层摘要已能把 manifest 字节和发送方绑定；独立签名是为了包离开通道后（转存、归档、再审）仍可验。
 
 ### 2.2 审查对象：head / base / specRev 分开记
+
+最后一轮只核三件事：`runHead`、`specRev`、审查覆盖范围（`scope.fullPrCovered`）。base 有两个，用途不同，不互相比。
 
 v1 的 `subject.base` 来自 `--base`、`deliver_scope` 记录的 PR baseRefOid、或 `git merge-base`（`review-evidence-collect.ts:98-104`），
 而每轮 `rounds[].base` 是另一次 `merge-base <head> origin/main`（`review-evidence.ts:167`）。两者口径不同却同名，R1 拆开：
@@ -53,12 +58,16 @@ v1 的 `subject.base` 来自 `--base`、`deliver_scope` 记录的 PR baseRefOid�
 |---|---|---|---|---|---|
 | `subject.repo` / `subject.pr` | `owner/repo` 与完整 PR URL | 从 `task.pr` 解析（`review-evidence.ts:223`） | manifest | B 自己查 PR 的仓库与编号 | 拒收 |
 | `subject.runHead` | 交付并被最终审查的 head，完整 40 位 | `task.headSHA` / `--head` | manifest | 等于 PR 当前 head；不等即失效（carry 例外见 §2.6） | 拒收 |
-| `subject.compareBase` | 比较 diff 用的 base，完整 40 位 | `baseOf()`（`review-evidence-collect.ts:98`） | manifest | B 用同一 base 重算 `git diff --name-only` 与 `scope.files` 比 | 拒收 |
+| `subject.compareBase` | 算 `scope.paths` 用的 base，完整 40 位 | `baseOf()`（`review-evidence-collect.ts:98`） | manifest | B 用同一 base 重算 `git diff --name-only --no-renames <compareBase>...<runHead>` 与 `scope.paths` 比 | 拒收 |
 | `subject.compareBaseSource` | base 怎么来的：`pr_base_ref`（deliver_scope 记录的 PR baseRefOid）/ `merge_base_origin_main` / `explicit` | v1 有自由文本 `baseSource`（`review-evidence.ts:220`），R1 改成枚举 | manifest | 只收枚举值；`explicit` 要附理由 | 未知取值拒收 |
-| `rounds[].runHead` / `rounds[].runBase` | 该轮实际审查的 head 与该轮比较 base | v1 `rounds[].head` / `rounds[].base` | manifest | 只有最后一轮通过的必须等于 `subject` 那一对 | 最后一轮缺任一个拒收；历史轮缺可收、标 `incomplete` |
+| `rounds[].runHead` | 该轮实际审查的 head | v1 `rounds[].head` | manifest | 最后一轮通过的 `runHead` 必须等于 `subject.runHead`（或经 §2.6 carries 到达） | 最后一轮缺拒收；历史轮缺可收、标 `incomplete` |
+| `rounds[].runBase` + `runBaseSource` | 该轮 head 与 `origin/main` 的 merge-base，导出时算；来源固定为 `merge_base_origin_main_at_export` | v1 `rounds[].base`（`roundBase`，`review-evidence.ts:167`） | manifest | **只作参考，不与 `compareBase` 比相等**：两者口径不同，显式 base / PR baseRefOid 与 merge-base 不同是正常的 | 缺可收 |
 | `subject.specRev` / `subject.specArtifact` | 规格版本与规格原文 artifact | `task.specRev`；`inputs/spec.md` | manifest + 哈希 | 与 B 卡规格版本、B 发出的规格摘要比对 | 拒收 |
 | `subject.acceptanceArtifact` | 验收线原文 | `acceptanceOf()`（`review-evidence.ts:241`） | 哈希 | 与规格原文同源重算 | 拒收 |
 | `rounds[].specRev` | 该轮进入 review 时的规格版本 | 进 review 的 stage 事件（`review-evidence.ts:168`） | manifest | 最后一轮必须等于 `subject.specRev` | 同上 |
+| `scope.paths` | 改动文件清单（相对仓库根），由 `compareBase...runHead` 算出；**沿用 v1 字段名**，不改名 | v1 `scope.paths`（`review-evidence.ts:229`，来自 `collectSource` 的 `git diff`） | manifest | B 用 `compareBase` 重算后逐项相等 | 拒收 |
+| `scope.fullPrCovered` | 最后一轮是否审的是整个 head（而不是只看修复 diff） | v1 同名（`review-evidence.ts:219`：最后一轮 < `SCOPE_ROUND`、head 一致、文件清单可读） | manifest | B 重算；是声明，不是免审豁免 | `false` → B 对未覆盖部分自审 |
+| `scope.evidenceArtifact` | `scope.json`：`{head, base, baseSource, command, files, reviewScope}` | v1 同名（`review-evidence.ts:220`） | 哈希 | 与 `subject.compareBase` / `scope.paths` 一致 | 拒收 |
 
 ### 2.3 审查者身份与来源链
 
@@ -67,10 +76,19 @@ v1 的 `subject.base` 来自 `--base`、`deliver_scope` 记录的 PR baseRefOid�
 | `rounds[].reviewer.agent` / `sessionId` | 审查者 agent 与会话 | 台账 review 事件 `reviewer` / `reviewerSessionId`（`review-verdict.ts:135`） | A 实例（随 manifest） | 与来源链里的领单、交结论事实一致 | 最后一轮缺任一个拒收 |
 | `rounds[].reviewer.instance` | 审查者所在实例的完整公钥 + 64 位指纹 | **设计，未实现**；本机审查等于 `origin.instance`，出借池审查是出借方实例 | 本机：A；出借：出借方票据 | 出借方公钥要和 A 侧钉住的一致（`pool-review-proof-admit.ts` `readPinnedKey`） | 拒收 |
 | `rounds[].reviewer.verification` | 身份怎么核的：`mcp_bound_session`（结论经 MCP 从绑定 session 写入，`via:"mcp"`）/ `pool_ticket`（出借票据链完整）/ `claim_only` | v1 只有布尔 `verified = via==="mcp"`（`review-evidence.ts:163`）；枚举是设计 | A 实例 | `claim_only` 不能当最终轮 | 最终轮是 `claim_only` → 退人工 |
-| `rounds[].reviewer.provenance` | 来源链，按顺序：派审意图 → 领单事实（`TakeFact{orderId, gen, agent, session, at}`）→ 交结论事件 → 出借时的票据与入账回执 | 本机：`review-order.ts` `takeReview` + `review-verdict.ts` `submitVerdict` 的台账事件；出借：`pool-review-proof-ticket.ts` `ReviewTicket` + `pool-review-proof-admit.ts` | 本机：A 实例；出借：出借方实例签票据（`claudestra-lend-review-ticket-v1`） | 逐环比对 orderId / head / specRev / round / session；票据用出借方钉住公钥 `ticketProblem` 验 | 任一环缺 → 该轮不算自动来源，退人工（同 `poolReviewRefusal` 口径） |
+| `rounds[].reviewer.provenance` | 来源链（**本机与出借两条，形状不同，不混用**），见下方说明 | 见下方 | 本机：A 实例；出借：出借方实例签票据 | 见下方 | 见下方 |
 | `rounds[].reviewer.identityReceipt` | 上面来源链的原件 artifact | v1 `identity.json`（`review-evidence.ts:142`） | 哈希 | 原件字节与哈希一致 | 拒收 |
 | `rounds[].orderId` | 真实存在的审查单 | review 事件 `orderId` 或派审意图 id | manifest | 与来源链一致 | 最终轮缺 → 退人工 |
 | `rounds[].status` | `completed / incomplete / refused / cancelled` | `reviewEntries()`（`review-evidence.ts:94`） | manifest | 只有 `completed` 有 verdict | 不认的值拒收 |
+
+`provenance` 的两条链（现有原料都在，**结构化导出是设计，未实现**；v1 只把原始台账事件整份放进 `inputs/ledger-events.json` 和 `submission.json`，没有串成链）：
+
+| 链 | 环（按顺序） | 每环的现有产出 | 核验 | 缺一环 |
+|---|---|---|---|---|
+| 本机审查 | ① 派审意图 → ② 领单留痕 → ③ 交结论事件 | ① `scheduler_intents` 行（action=review）；② `order_taken` 事件 `{id: 意图 id, sessionId}`，bridge 在 take_review 返回后**异步尽力**记（`order-mark.ts:41-55` `markOrderTaken`、`:98-114` `recordTaken`；`takeReview` 本身只返回订单，`review-order.ts:147`）；③ review 事件 `{orderId, reviewerSessionId, reviewerFamily, via:"mcp"}`（`review-verdict.ts:135`） | ②③ 的 sessionId 与 ① 绑定的 reviewer session 一致；③ 的 orderId = ① 的 id | ① 或 ③ 缺 → 不算自动来源，退人工；② 是尽力留痕（写失败只记日志），缺 ② 不单独拒，但链上标 `take: missing`，B 按自己策略决定 |
+| 出借池审查 | ① 派审意图 → ② 出借单 → ③ 领单事实 `TakeFact{orderId, gen, agent, session, at}` → ④ 签名票据 → ⑤ 入账回执 | ③ `recordTake`（`lend-journal.ts:210`，CAS 只记第一次）；④ `ReviewTicket`（`pool-review-proof-ticket.ts:15`，用途 `claudestra-lend-review-ticket-v1`）；⑤ `admitPoolEvidence`（`pool-review-proof-admit.ts:52`） | 票据用出借方钉住公钥 `ticketProblem` 验；逐环比对 orderId / gen / head / specRev / round / session | 任一环缺 → 退人工（同 `poolReviewRefusal` 口径） |
+
+本机链没有 `gen`（租约代数只属于出借单），不能把本机领单写成 `TakeFact`。
 
 边界：B 能核的只有「这些事实出自 A 实例（或出借方实例）的签名」。A 内部「审查者不是作者」「session 真是那个模型」在实例边界外仍是 A 的声明，R1 只让它可追溯、不让它变成 B 的直接验证。
 
@@ -131,8 +149,8 @@ head 换了且不是被证明的纯 main 合入，整包作废，不按「大部
 |---|---|---|---|
 | 版本 | `version: 1` | 2（或 v1 加新键，§7 Q1） | 改了 base 的含义 |
 | 实例身份 | `origin.instanceFingerprint`：16 位短指纹 | 公钥全文 + 64 位指纹 | Shawn：完整公钥身份；盘点 §2.4 说短指纹不能声称完整身份 |
-| 包签名 | 无；靠传输通道摘要 | A 实例对 manifest 摘要签名（新签名用途） | 包离开通道后仍可验；新用途需批 |
-| base | `subject.base` 与 `rounds[].base` 同名不同口径 | `compareBase` + 枚举来源；`runHead` / `runBase` 分开 | Shawn：compare base 和 run head 分开 |
+| 包签名 | 无；靠传输通道摘要 | detached `manifest.sig.json`，A 实例签 manifest 原始字节摘要（新签名用途） | 包离开通道后仍可验；新用途需批 |
+| base | `subject.base` 与 `rounds[].base` 同名不同口径 | `compareBase`（算 scope）+ 枚举来源；`runHead` 必须一致，`runBase` 只作参考 | Shawn：compare base 和 run head 分开 |
 | 审查者核法 | 布尔 `verified` | `verification` 枚举 + `provenance` 来源链 | Shawn：session 事件 / 票据来源链 |
 | 审查者实例 | 无 | `reviewer.instance` | 出借池审查时审查者不在 A |
 | 家族 | `family` 一个字段 + `model.family` | `runtime` / `ledgerFamily` / `model.family` + `familyMap` | Shawn：family 与 model.family 映射 |
@@ -182,7 +200,7 @@ R1 提案：
     "exporter": "<exporting-agent>"
   },
   "subject": {
-    "repo": "owner/repo", "pr": "https://github.com/owner/repo/pull/123",
+    "repo": "owner/repo", "pr": "<pr-url>",
     "runHead": "<40-hex>", "compareBase": "<40-hex>", "compareBaseSource": "pr_base_ref",
     "specRev": 2, "taskId": "<A-task>", "specArtifact": "spec", "acceptanceArtifact": "acceptance"
   },
@@ -200,7 +218,7 @@ R1 提案：
       "instance": { "fingerprint": "<64-hex>" },
       "model": { "provider": null, "id": "<model-id>", "family": "gpt", "sourceArtifact": "r1-<seq>-model" },
       "verification": "mcp_bound_session",
-      "provenance": ["intent:<intent-id>", "take:<orderId>@gen<n>", "review-event:<seq>"],
+      "provenance": { "chain": "local", "intent": "<intent-id>", "take": { "event": "<seq>", "sessionId": "<session>" }, "review": "<seq>" },
       "identityReceipt": "r1-<seq>-identity"
     },
     "reportArtifact": "r1-<seq>-report", "findingsArtifact": "r1-<seq>-findings", "probeArtifacts": ["r1-<seq>-probe-1"]
@@ -208,18 +226,24 @@ R1 提案：
   "closuresArtifact": "closures",
   "final": { "reviewId": "r1-<seq>", "verdict": "pass", "openCounts": { "p0": 0, "p1": 0, "p2": 1 }, "retainedP2": [] },
   "handoff": {
-    "v": 1, "pr": "https://github.com/owner/repo/pull/123", "head": "<40-hex>", "specRev": 2, "template": "code",
+    "v": 1, "pr": "<pr-url>", "head": "<40-hex>", "specRev": 2, "template": "code",
     "authorFamily": "claude", "eventRef": { "taskId": "<A-task>", "eventSeq": 0 },
     "review": { "round": 1, "verdict": "pass", "reviewerFamily": "codex", "reportArtifact": "r1-<seq>-report", "p2": 1, "reviewSeq": 0 },
     "carries": []
   },
-  "ci": { "head": "<40-hex>", "requiredChecks": [{ "name": "<check>", "bucket": "pass", "url": "https://github.com/owner/repo/actions/runs/<id>" }] },
+  "ci": { "head": "<40-hex>", "requiredChecks": [{ "name": "<check>", "bucket": "pass", "url": "<ci-run-url>" }] },
   "artifacts": [
     { "id": "r1-<seq>-probe-1", "path": "artifacts/r1-<seq>/probe.test.ts", "bytes": 0, "sha256": "<64-hex>",
       "mediaType": "text/plain", "kind": "probe-source", "origin": "reviewer_written", "producedBy": "r1-<seq>-probe-1-run" }
   ],
-  "signature": { "purpose": "<to-be-frozen>", "sig": "<base64url>" }
+  "scope": { "paths": ["src/lib/example.ts"], "fullPrCovered": true, "evidenceArtifact": "scope" }
 }
+```
+
+同目录另有 detached 签名文件 `manifest.sig.json`（不在 manifest 里，也不在 `artifacts[]` 里）：
+
+```json
+{ "purpose": "<to-be-frozen>", "bundleId": "<same-as-manifest>", "manifestSha256": "<64-hex>", "key": "<A-public-key>", "sig": "<base64url>" }
 ```
 
 ## 6. 绝对路径：v1 里会漏出来的位置（R1 要堵）
@@ -243,7 +267,7 @@ R1 自检要加一条：扫描 manifest 与所有文本类 artifact，命中「�
 3. 64 位完整指纹的线格式与和现有 16 位短指纹的兼容期。
 4. `familyMap` 由谁维护，B 的表与 A 的表不一致时的处理（本文倾向以 B 为准）。
 5. canonical 纯 main 净 diff 算法以哪一边为权威（盘点 §2.3：本地 `singleMainCarryProof` 与 MHO1 `mainMergeCarry` 是两套）。
-6. 互认面（哪些改动只需证据核对 + 抽查）——本文不涉及，见 [A 侧设计稿](https://github.com/shawnlu96/claudestra/pull/773) §7。
+6. 互认面（哪些改动只需证据核对 + 抽查）——本文不涉及，见 A 侧设计稿（PR #773，`docs/design/e2b-a-side.md`）§7。
 
 接线点（留给后续实现卡，本卡不做）：R1 导出改 `review-evidence*.ts`；内容级绝对路径扫描加进 `review-evidence-verify.ts`；
 签名用途加进 `instance-signature.ts`；B 侧导入是新入口，不复用 `take_review` / `submit_verdict`。
