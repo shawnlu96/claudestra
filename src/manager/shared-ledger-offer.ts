@@ -80,6 +80,7 @@ const live = (): OfferDeps => ({
 export async function sendSharedLedgerOffer(flags: Record<string, string>, code: string, d: OfferDeps): Promise<Record<string, unknown>> {
   const hasProject = [flags.team, flags["shared-project"], flags.name].some(v => v !== undefined);
   const sharedProject = hasProject ? joinOfferProjectDisplay({ teamId: flags.team, projectId: flags["shared-project"], name: flags.name }) : undefined;
+  if (sharedProject) return { ok: false, error: "项目邀请需要已核验的中心 invite；请通过本人项目邀请接口发送" };
   if (sharedProject === null) return { ok: false, error: "团队项目信息不完整或不合法" };
   const center = centerOfferUrl(flags.url);
   if (!center) return { ok: false, error: "--url 要是中心根地址：https://<主机名>/（不带路径、查询、账号）" };
@@ -90,7 +91,7 @@ export async function sendSharedLedgerOffer(flags: Record<string, string>, code:
   if (Array.from(note).length > 120 || /[\p{Cc}\p{Cf}]/u.test(note) || looksLikeSharedLedgerJoinCode(note)) return { ok: false, error: "--note 只能是一行 120 字以内" };
   const parsed = code === code.trim() ? parseSharedLedgerJoinCode(code) : null;
   if (!parsed) return { ok: false, error: "文件里不是合法的入组码" };
-  if (note.includes(parsed.secret) || (sharedProject && Object.values(sharedProject).some(v => v.includes(parsed.secret)))) {
+  if (note.includes(parsed.secret)) {
     return { ok: false, error: "邀请显示字段不能包含入组码" };
   }
   const peer = await d.findPeer(flags.peer!);
@@ -100,7 +101,7 @@ export async function sendSharedLedgerOffer(flags: Record<string, string>, code:
   const offerId = randomBytes(16).toString("hex");
   const sent = { offerId, peer: peer!.name, host: center.host, centerId: parsed.centerId, project, target: flags.task ?? "", sentAt: d.now, expiresAt };
   await saveSentOffer(d.stateDir, sent); // Before sending: a fast receipt must find it.
-  const body = JSON.stringify({ v: 1, offerId, url: center.url, code, note, expiresAt, ...(sharedProject ? { project: sharedProject } : {}) });
+  const body = JSON.stringify({ v: 1, offerId, url: center.url, code, note, expiresAt });
   let res: Response;
   try {
     res = await d.post(peer!, `${peer!.baseUrl!.replace(/\/+$/, "")}${JOIN_OFFER_PATH}`, body);

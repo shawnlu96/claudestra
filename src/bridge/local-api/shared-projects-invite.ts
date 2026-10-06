@@ -1,20 +1,23 @@
+import { parseV2ProjectInvite, type V2ProjectInvite } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { randomBytes } from "node:crypto";
 import type { HttpPeer } from "../../lib/peers.js";
 import { JOIN_OFFER_PATH, parseJoinOffer, saveSentOffer, type JoinOfferProject } from "../../lib/shared-ledger-join-offer.js";
-import { SharedProjectsError, type ProjectPerson } from "./shared-projects-ports.js";
+import { requireProjectPerson, SharedProjectsError, type ProjectPerson } from "./shared-projects-ports.js";
 
 export interface ProjectInvitePorts {
   now: () => number;
   stateDir: string;
   peers: () => Promise<HttpPeer[]>;
-  /** Resolve the recipient identity from verified peer/center state. Never derive a personId from the caller's JSON or display name. */
-  mint: (who: ProjectPerson, projectId: string, peer: HttpPeer) => Promise<{ url: string; code: string; expiresAt: number; project: JoinOfferProject }>;
+  /** N3 must authenticate the center transport and parse its response; JSON shape alone is not identity proof.
+   * Resolve the recipient identity from verified peer/center state. Never derive a personId from the caller's JSON or display name. */
+  mint: (who: ProjectPerson, projectId: string, peer: HttpPeer) => Promise<{ url: string; invite: V2ProjectInvite; project: JoinOfferProject }>;
   post: (peer: HttpPeer, url: string, body: string) => Promise<Response>;
   receiptProject: string;
 }
 
 /** The join code travels from the N3 response straight to the peer request, never through files, argv, cards or errors. */
 export async function inviteSharedProject(who: ProjectPerson, projectId: string, names: string[], note: string | undefined, d: ProjectInvitePorts) {
+  requireProjectPerson(who);
   const peers = await d.peers();
   const targets = names.map(name => peers.find(p => p.name === name && !p.disabled && p.baseUrl && p.outToken));
   if (targets.some(p => !p || (!p.e2e && !p.baseUrl!.startsWith("https://")))) throw new SharedProjectsError(403, "configured_encrypted_peer_required");
@@ -23,7 +26,8 @@ export async function inviteSharedProject(who: ProjectPerson, projectId: string,
     const offerId = randomBytes(16).toString("hex");
     try {
       const minted = await d.mint(who, projectId, peer);
-      const wire = { v: 1, offerId, url: minted.url, code: minted.code, expiresAt: minted.expiresAt, project: minted.project, ...(note ? { note } : {}) };
+      const invite = parseV2ProjectInvite(minted.invite);
+      const wire = { v: 1, offerId, url: minted.url, code: invite.code, expiresAt: invite.expiresAt, project: minted.project, projectInvite: invite, ...(note ? { note } : {}) };
       const parsed = parseJoinOffer(wire, d.now());
       if (!parsed.ok || parsed.offer.centerId !== who.centerId || minted.project.teamId !== who.teamId || minted.project.projectId !== projectId) {
         throw new SharedProjectsError(503, "invite_response_mismatch");

@@ -162,13 +162,12 @@ describe("receipt from the peer (回执)", () => {
   });
 });
 
-test("CLI carries explicit project metadata without confusing the local receipt project", async () => {
+test("CLI cannot turn declared project metadata into a verified center invite", async () => {
   const s = sender();
   await cmdSharedLedgerOffer(["--peer", "peer-a", "--url", "https://ledger-a.example", "--code-file", codeFile(0o600),
     "--team", "team-a", "--shared-project", "project-b", "--name", "Project B"], s.deps);
-  expect(lastOutput().ok).toBe(true);
-  expect(JSON.parse(s.posts[0]!.body).project).toEqual({ teamId: "team-a", projectId: "project-b", name: "Project B" });
-  expect(lastOutput().receiptProject).toBe("proj-local");
+  expect(lastOutput().ok).toBe(false);
+  expect(s.posts).toEqual([]);
   const incomplete = sender();
   await cmdSharedLedgerOffer(["--peer", "peer-a", "--url", "https://ledger-a.example", "--code-file", codeFile(0o600), "--team", "team-a"], incomplete.deps);
   expect(lastOutput().ok).toBe(false);

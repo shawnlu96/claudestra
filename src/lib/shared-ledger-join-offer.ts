@@ -9,7 +9,8 @@ import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode } from "./shared-ledger-join.js";
-import { parseV2ProjectDisplay } from "./shared-ledger-contract-v2-projects.js";
+import { parseV2ProjectDisplay, parseV2ProjectInvite, type V2ProjectInvite } from "./shared-ledger-contract-v2-projects.js";
+import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import type { SharedLedgerProjectChoice } from "./shared-ledger-local-project.js";
 import { writeJsonAtomic } from "./state-file.js";
 
@@ -70,9 +71,13 @@ export function joinOfferProjectDisplay(value: unknown): JoinOfferProject | null
   }
 }
 
-export interface JoinOffer { project?: JoinOfferProject; offerId: string; url: string; host: string; centerId: string; code: string; note?: string; expiresAt: number }
+export type JoinOfferRecipient = Pick<V2ProjectInvite, "personId" | "instanceId">;
+export interface JoinOffer {
+  recipient?: JoinOfferRecipient; inviteDigest?: string; project?: JoinOfferProject;
+  offerId: string; url: string; host: string; centerId: string; code: string; note?: string; expiresAt: number;
+}
 export type JoinOfferRefusal = "invalid_offer" | "invalid_url" | "invalid_code" | "expired";
-const OFFER_KEYS = new Set(["v", "offerId", "url", "code", "note", "expiresAt", "project"]);
+const OFFER_KEYS = new Set(["v", "offerId", "url", "code", "note", "expiresAt", "project", "projectInvite"]);
 
 /** POST body → offer. Each refusal is a fixed code; nothing from the body is echoed back. */
 export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: JoinOffer } | { ok: false; error: JoinOfferRefusal } {
@@ -86,12 +91,26 @@ export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: J
   if (!code) return { ok: false, error: "invalid_code" };
   const project = b.project === undefined ? undefined : joinOfferProjectDisplay(b.project);
   if (project === null) return { ok: false, error: "invalid_offer" };
+  let recipient: JoinOfferRecipient | undefined, inviteDigest: string | undefined, inviteExpires = Infinity;
+  if (project) {
+    try {
+      const invite = parseV2ProjectInvite(b.projectInvite);
+      if (invite.code !== b.code || invite.centerId !== code.centerId || invite.teamId !== project.teamId || invite.projectId !== project.projectId
+        || [invite.personId, invite.instanceId].some(v => v?.includes(code.secret))) return { ok: false, error: "invalid_offer" };
+      recipient = { personId: invite.personId, instanceId: invite.instanceId };
+      inviteDigest = v2ObjectDigest(invite);
+      inviteExpires = invite.expiresAt;
+    } catch {
+      return { ok: false, error: "invalid_offer" }; // Missing or unscoped canonical invite cannot supply an expected recipient.
+    }
+  } else if (b.projectInvite !== undefined) return { ok: false, error: "invalid_offer" };
   const note = offerNote(b.note);
   if (note === null || (note && note.includes(code.secret)) || (project && Object.values(project).some(v => v.includes(code.secret)))) return { ok: false, error: "invalid_offer" };
   if (b.expiresAt !== undefined && !Number.isSafeInteger(b.expiresAt)) return { ok: false, error: "invalid_offer" };
-  const expiresAt = Math.min((b.expiresAt as number | undefined) ?? Infinity, now + JOIN_OFFER_MAX_TTL_MS);
+  const expiresAt = Math.min((b.expiresAt as number | undefined) ?? Infinity, inviteExpires, now + JOIN_OFFER_MAX_TTL_MS);
   if (expiresAt <= now) return { ok: false, error: "expired" };
-  return { ok: true, offer: { offerId: b.offerId, ...center, centerId: code.centerId, code: b.code as string, ...(note ? { note } : {}), ...(project ? { project } : {}), expiresAt } };
+  return { ok: true, offer: { offerId: b.offerId, ...center, centerId: code.centerId, code: b.code as string,
+    ...(note ? { note } : {}), ...(project ? { project, recipient, inviteDigest } : {}), expiresAt } };
 }
 
 /** Per-peer sliding window (5 per hour); in memory, so a bridge restart forgives — the pending-offer cap still holds. */
@@ -213,12 +232,13 @@ export async function recordSentOfferStatus(stateDir: string, peer: string, offe
 
 const STATUS_ZH: Record<JoinOfferStatus, string> = { joined: "已入组", declined: "对方不加入", expired: "邀请已过期", failed: "入组失败" };
 
-export function joinOfferCard(p: Pick<PendingJoinOffer, "peer" | "host" | "centerId" | "note" | "expiresAt" | "project">): { title: string; context: string } {
+export function joinOfferCard(p: Pick<PendingJoinOffer, "peer" | "host" | "centerId" | "note" | "expiresAt" | "project" | "recipient">): { title: string; context: string } {
   const lines = [
     `邀请方（peer）：${p.peer}`,
     `中心主机：${p.host}`,
     `中心 ID：${p.centerId}`,
     p.project ? `团队：${p.project.teamId}；项目：${p.project.name}（${p.project.projectId}）` : "团队 / 项目：入组后显示",
+    ...(p.recipient ? [`受邀本人：${p.recipient.personId}；实例：${p.recipient.instanceId ?? "由接收本机签名实例固定"}`] : []),
     ...(p.note ? [`对方附言：${p.note}`] : []),
     `有效至：${new Date(p.expiresAt).toISOString().slice(0, 16).replace("T", " ")} UTC`,
   ];

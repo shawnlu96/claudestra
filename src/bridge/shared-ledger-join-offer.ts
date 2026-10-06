@@ -29,7 +29,7 @@ import { joinSharedLedger, type SharedLedgerJoinResult } from "../lib/shared-led
 import {
   attachPendingOfferAsk, claimPendingOffer, isJoinOfferStatus, isOfferId, JOIN_OFFER_RECEIPT_PATH, JoinOfferLimiter, joinOfferCard, joinOfferOutcomeText,
   listPendingOfferIds, parseJoinOffer, readPendingOffer, receiptNoteText, recordSentOfferStatus, savePendingOffer,
-  type JoinOfferProject, type JoinOfferStatus, type PendingJoinOffer, type SentJoinOffer,
+  type JoinOfferProject, type JoinOfferRecipient, type JoinOfferStatus, type PendingJoinOffer, type SentJoinOffer,
 } from "../lib/shared-ledger-join-offer.js";
 import { askDb, askReadDb, asksDeps, createAsk, publishAsk, type CreateAskInput } from "./asks.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
@@ -41,6 +41,8 @@ const BIND_ACTION = "shared_ledger_join";
 export const JOIN_BUTTON = "sl_join_accept";
 export const DECLINE_BUTTON = "sl_join_decline";
 
+/** Recipient comes from the canonical center invite carried by the verified signed peer offer, before redemption. */
+export type JoinOfferExpectedProject = JoinOfferProject & Pick<JoinOfferRecipient, "personId"> & { centerId: string; instanceId?: string };
 export interface JoinOfferDeps {
   stateDir: () => string;
   now: () => number;
@@ -53,8 +55,8 @@ export interface JoinOfferDeps {
   sharedProject?: (centerId: string) => SharedLedgerOfferProject | string | undefined;
   bindings?: () => SharedLedgerBinding[];
   join: (url: string, code: string, localProjectId: string) => Promise<SharedLedgerJoinResult>;
-  /** N2 must verify the displayed center/team/project before saving credentials or bindings. No old-join fallback. */
-  joinProject?: (url: string, code: string, selection: ProjectSelection, expected: JoinOfferProject & { centerId: string }) => Promise<SharedLedgerJoinResult>;
+  /** N2 must verify displayed center/team/project/person and the signed receiving instance before saving credentials or bindings. No old-join fallback. */
+  joinProject?: (url: string, code: string, selection: ProjectSelection, expected: JoinOfferExpectedProject) => Promise<SharedLedgerJoinResult>;
   /** The inform card: a notification to the owner (no buttons). */
   inform: (text: string) => Promise<void>;
   /** POST the receipt to the inviter; resolves with the HTTP status. */
@@ -77,7 +79,7 @@ export async function configuredPeer(name: string | undefined, d: Pick<JoinOffer
 const bindOf = (p: PendingJoinOffer): Omit<AskBind, "paramsHash"> => ({
   action: BIND_ACTION, approve: p.project ? [JOIN_BUTTON] : p.projectChoices?.map(c => c.button) ?? [JOIN_BUTTON],
   params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt,
-    project: p.project, projectOptions: p.projectOptions, recommended: p.recommended, projectChoices: p.projectChoices,
+    project: p.project, recipient: p.recipient, inviteDigest: p.inviteDigest, projectOptions: p.projectOptions, recommended: p.recommended, projectChoices: p.projectChoices,
     sharedProjectId: p.sharedProjectId, codeHash: createHash("sha256").update(p.code).digest("hex") },
 });
 
@@ -193,12 +195,13 @@ async function answerProjectOffer(a: Ask, p: PendingJoinOffer, d: JoinOfferDeps)
   if (wires.includes(`[button:${DECLINE_BUTTON}]`) && !wires.includes(`[button:${JOIN_BUTTON}]`)) return settle(p, "declined", d);
   if (p.expiresAt <= d.now()) return settle(p, "expired", d);
   const selection = selectedProject(wires, (p.projectOptions ?? []) as ProjectChoice[]);
-  if (!selection || !approved(a, p) || !d.joinProject) return settle(p, "failed", d);
+  if (!selection || !p.recipient || !p.inviteDigest || !approved(a, p) || !d.joinProject) return settle(p, "failed", d);
   try {
     if (selection.mode === "existing" && (!(await d.projects()).some(c => c.id === selection.localProjectId)
       || (d.bindings?.() ?? []).some(b => (b.localProjectId ?? b.projectId) === selection.localProjectId))) return settle(p, "failed", d);
-    const joined = await d.joinProject(p.url, p.code, selection, { ...p.project!, centerId: p.centerId });
-    if (joined.centerId !== p.centerId || joined.teamId !== p.project!.teamId || joined.projectId !== p.project!.projectId || joined.kind !== "person") {
+    const joined = await d.joinProject(p.url, p.code, selection, { ...p.project!, centerId: p.centerId, personId: p.recipient.personId,
+      ...(p.recipient.instanceId !== null ? { instanceId: p.recipient.instanceId } : {}) });
+    if (joined.centerId !== p.centerId || joined.teamId !== p.project!.teamId || joined.projectId !== p.project!.projectId || joined.personId !== p.recipient.personId || joined.kind !== "person") {
       return settle(p, "failed", d);
     }
     return settle(p, "joined", d, joined);
