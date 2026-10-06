@@ -66,7 +66,8 @@ async function createReplacement(db: Database, task: LedgerTask, family: AuthorF
   });
   assertSchedulerLease();
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
-  const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--purpose", "作者家族变更后的独立复验"];
+  const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
+    "--purpose", "作者家族变更后的独立复验"];
   if (family === "codex") args.push("--runtime", "codex", "--transport", "acp");
   const r = await agent(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
