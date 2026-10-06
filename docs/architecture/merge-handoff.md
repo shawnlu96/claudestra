@@ -40,7 +40,7 @@ the pass and is read again next pass; nothing is written.
 The owner merges main into nearly every PR right before merging it, so the head almost always moves after the handoff. The PR
 read (`ghPrState`, `lib/scheduler-merge-handoff-tick.ts`) is told which head the handoff follows; when GitHub shows another one,
 it checks in the project's `repoDir` (scheduler.json) whether the move only merged main in (`lib/scheduler-main-merge-carry.ts`,
-shared with the local merge driver's check after its own update-branch):
+the handoff's own check; see the end of this list for why it is not the local driver's):
 
 - the new head has exactly two parents: the followed head and a commit already on main — while the PR is open, `origin/main`;
   once merged, main as it was before that merge (`<merge commit>^1`), since the main that now holds the PR would vouch for any
@@ -56,7 +56,9 @@ shared with the local merge driver's check after its own update-branch):
 - `repoDir`'s configured origin (`remote.origin.url` as written) is the PR repository on `github.com` itself — scp form,
   `https://` or `ssh://`, exact host, no port; anything else is refused before the fetch.
 
-The local merge driver keeps only its net-diff test against `origin/main`, unchanged (without these extra diff flags).
+The local merge driver and review keep their own gate, `lib/review-main-carry-proof.ts` (net diff against the current main),
+untouched by this. The handoff cannot use it: after the owner's merge, current main already holds the PR, and it has no
+auto-merge test for main touching a file the PR changed.
 
 Pass → `merge_handoff_carry` (`from`, `to`, `mainParent`, `mainHead`, `diffHash` = sha256 of the new head's net diff, `basis`,
 `handoffSeq`), written by the scheduler only and checked in its transaction to start at the head followed now; the card stays

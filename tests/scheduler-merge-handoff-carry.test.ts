@@ -307,9 +307,9 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     const merged2 = await sh("rev-parse", "HEAD");
     await sh("push", "-q", "origin", "main", "feature2");
     expect(await carry()(PR, n2, n3, merged2)).toMatchObject({ ok: false, reason: expect.stringContaining("不在 main 上") });
-    // the local driver's form (current main for both) is only sound while the PR is open: here it would pass
+    // checked against current main (which now holds the PR) the same side commit would pass
     const git = async (...a: string[]) => sh(...a).then((s) => `${s}\n`);
-    expect(await mainMergeCarry(git, runBounded, work, n2, n3, { onMain: MAIN_REF, diffBase: MAIN_REF })).toMatchObject({ ok: true });
+    expect(await mainMergeCarry(git, runBounded, work, n2, n3, MAIN_REF)).toMatchObject({ ok: true });
   }, GIT_MS);
 
 
@@ -326,10 +326,6 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     const updated = await sh("rev-parse", "HEAD");
     await sh("push", "-q", "origin", "same-pr");
     expect(await carry()(PR, pr, updated, null)).toMatchObject({ ok: true, mainParent: main, basis: "auto-merge" });
-    // the net diffs alone differ here (each starts at its own merge base): what the local driver's form still refuses
-    const git = async (...a: string[]) => sh(...a).then((out) => `${out}\n`);
-    expect(await mainMergeCarry(git, runBounded, work, pr, updated, { onMain: MAIN_REF, diffBase: MAIN_REF }))
-      .toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了" });
 
     await sh("checkout", "-q", "-b", "same-evil", pr);
     await sh("merge", "-q", "--no-commit", "--no-ff", main);

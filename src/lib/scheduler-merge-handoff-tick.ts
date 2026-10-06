@@ -72,7 +72,7 @@ function githubRepoOf(url: string): string | null {
 }
 
 /**
- * Local git in the project's clone, like the local merge driver's carry (scheduler-merge-external.ts), and only when its origin
+ * Local git in the project's clone (git output is read like the local merge driver's), and only when its origin
  * as configured is the PR repository on github.com itself (checked before any fetch): another repository's main vouches for
  * nothing. Refusals no retry changes are `ok: false`.
  */
@@ -88,7 +88,7 @@ export function handoffCarry(repoDir: string, command: typeof runBounded = runBo
     if (githubRepoOf((await git("config", "--get", "remote.origin.url")).trim()) !== repo) return { ok: false, reason: `repoDir 的 origin 不是 PR 仓库 ${repo}` };
     await git("fetch", "--no-tags", "--quiet", "origin", newHead, ...(mergeSha ? [mergeSha] : []), `+refs/heads/main:${MAIN_REF}`);
     try {
-      return await mainMergeCarry(git, command, repoDir, oldHead, newHead, { onMain: mergeSha ? `${mergeSha}^1` : MAIN_REF, strict: true });
+      return await mainMergeCarry(git, command, repoDir, oldHead, newHead, mergeSha ? `${mergeSha}^1` : MAIN_REF);
     } catch (e) {
       if (e instanceof CarryUndecidable) return { ok: false, reason: e.message };
       throw e;

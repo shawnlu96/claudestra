@@ -1,8 +1,8 @@
 /** gh commands are structured argv, never interpolated into a shell string. */
+import { singleMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
-import { MAIN_REF, mainMergeCarry } from "./scheduler-main-merge-carry.js";
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
@@ -23,6 +23,7 @@ const repoOf = (prRef: string): string => {
   if (!repo) throw new Error("PR URL 不合法");
   return repo;
 };
+const MAIN_REF = "refs/remotes/origin/main";
 
 /** External data is bounded and checked before it can become a durable receipt. */
 export function mergeExternal(project: ProjectSchedule, command: typeof runBounded = runBounded): MergeExternal {
@@ -78,7 +79,10 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       repoOf(prRef);
       if (!SHA.test(oldHead) || !SHA.test(newHead)) return { ok: false, reason: "head 不是完整 SHA" };
       await git("fetch", "--no-tags", "--quiet", "origin", newHead, `+refs/heads/main:${MAIN_REF}`);
-      return mainMergeCarry(git, command, cwd, oldHead, newHead, { onMain: MAIN_REF, diffBase: MAIN_REF });
+      const proof = await singleMainCarryProof(cwd, oldHead, newHead, command);
+      if (!proof.ok) return proof;
+      const { reason, mainParent, mainHead, diffHash } = proof;
+      return { ok: true, reason, mainParent, mainHead, diffHash };
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },
     async merge(prRef, expectedHead) {

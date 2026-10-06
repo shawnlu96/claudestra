@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api/client";
-import { quota, quotaRetry } from "@/lib/api/system";
+import { quota, quotaCodexReset, quotaRetry } from "@/lib/api/system";
+import { resetOutcome, type ResetOutcome } from "./quota-reset";
 import { quotaPanelData, type QuotaPanelData } from "./quota-view";
 
 /**
@@ -28,6 +29,22 @@ export function useSubscriptionQuota(open: boolean) {
       .finally(() => setRetrying(false));
   };
 
+  const [resetRunning, setResetRunning] = useState(false);
+  const [resetResult, setResetResult] = useState<ResetOutcome | null>(null);
+  /** 使用一张 Codex 重置卡：结果留在这里（用掉最后一张后那一行会消失，结果不能跟着丢）；不管成败都重拉快照（bridge 已把事后现拉的数入库） */
+  const consumeReset = (key: string) => {
+    setResetRunning(true);
+    setResetResult(null);
+    quotaCodexReset<unknown>(key)
+      .then((j) => resetOutcome(200, j))
+      .catch((e) => (e instanceof ApiError ? resetOutcome(e.status, e.body) : resetOutcome(0, null)))
+      .then(setResetResult)
+      .finally(() => {
+        setResetRunning(false);
+        void load();
+      });
+  };
+
   useEffect(() => {
     if (!open) return;
     void load();
@@ -42,5 +59,5 @@ export function useSubscriptionQuota(open: boolean) {
     };
   }, [open]);
 
-  return { sub, retrying, retry, reload: load };
+  return { sub, retrying, retry, reload: load, reset: { run: consumeReset, running: resetRunning, outcome: resetResult } };
 }

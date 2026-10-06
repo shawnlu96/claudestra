@@ -21,8 +21,11 @@ import { templateFor } from "./scheduler-template.js";
 import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { exemptVerdict } from "./scheduler-review-swap.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { poolReviewRefusal } from "./pool-review-proof.js";
+import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -44,7 +47,12 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     (read.facts.verdict === "changes" && !read.facts.findings.some((f) => f.severity === "P2"))) {
     throw new LedgerError("conflict", "合并前缺本轮同 head 的通过审查");
   }
-  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily)) throw new LedgerError("conflict", "合并前缺跨模型审查");
+  // MODELX: the author's own family passes only under this round's recorded, still-approved refusal exemption.
+  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) && !exemptVerdict(db, task, read.facts)) {
+    throw new LedgerError("conflict", "合并前缺跨模型审查");
+  }
+  const pool = poolReviewRefusal(db, task, workflow, read.facts);
+  if (pool) throw new LedgerError("conflict", pool);
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
@@ -73,6 +81,8 @@ export interface WorkflowInput {
   fallback: string;
   /** Required when PM takes an auto card back to manual; recorded on the workflow event. */
   reason?: string;
+  /** manual-reason code (manual-reason.ts) for `reason`; same as writing `<code>: <reason>` */
+  reasonCode?: string;
 }
 
 /**
@@ -105,6 +115,12 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
     const hold = existing?.mode === "manual" && input.mode === "manual" && !!input.reason?.trim();
     const unchanged = !hold && existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);
     if (unchanged) return { workflow: existing, duplicate: true };
+    // Entering manual (first configuration, from auto / observe, or a hold) needs a recognised reason; checked before any intent / pool / workflow write.
+    if (input.reasonCode !== undefined && !isManualReasonCode(input.reasonCode)) throw new LedgerError("invalid", `理由码不认识：${input.reasonCode}（${MANUAL_REASON_CODES.join(" / ")}）`);
+    const reasonText = input.reasonCode && input.reason?.trim() ? `${input.reasonCode}: ${input.reason}` : input.reasonCode ? "" : input.reason;
+    // a first configuration straight into manual is a new manual write too: it needs the same recognised reason
+    const entering = input.mode === "manual" && (!existing || existing.mode !== "manual" || hold);
+    const manualReason = entering || (input.mode === "manual" && (input.reason?.trim() || input.reasonCode)) ? manualReasonRecord(db, task, reasonText) : null;
     if (task.rev !== input.taskRev || (existing?.rev ?? 0) !== (input.workflowRev ?? 0)) {
       throw new LedgerError("conflict", "任务或流程已被改过，先重读再设置", { taskRev: task.rev, workflowRev: existing?.rev ?? 0 });
     }
@@ -128,7 +144,7 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
       project: task.project, target: task.id, kind: "scheduler", text: `流程设为 ${input.mode}`,
       data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id),
         ...(pool && (pool.withdrawn.length || pool.stray.length) ? { poolOrders: pool } : {}), ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}),
-        ...(hold ? { hold: textOneLine(input.reason as string, "留人工原因", 600), manual: true } : {}) },
+        ...(hold ? { hold: textOneLine(input.reason as string, "留人工原因", 600), manual: true } : {}), ...(manualReason ? { manualReason } : {}) },
     }, false);
     return { workflow, duplicate: false };
   });
