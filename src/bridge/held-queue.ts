@@ -33,6 +33,8 @@ export interface HeldItem {
   notifiedAt?: number;
   /** 被 check_inbox 领走、还没确认（bridge/inbox.ts）：租约内 Stop 不再投，过期后照常投 */
   lease?: { batchId: string; at: number; idleScope?: HeldIdleScope };
+  /** Successful web mirror for this inbox batch; separate from the authority/ownership lease. */
+  inboxMirrorBatch?: string;
   /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
   reason?: "quota_wall";
 }
@@ -111,11 +113,12 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   /** Explicit, instance-local opt-in; reuse the held store and leases without introducing production configuration. */
   configureIdleBatch(control?: HeldIdleControl): void { this.idleControl = control; }
 
-  private idleScope(item: HeldItem): HeldIdleScope | undefined {
+  private idleScope(item: HeldItem, now = Date.now()): HeldIdleScope | undefined {
     if (!this.idleControl || this.idleControl.mode === "off" || item.reason === "quota_wall" || !isInternalIdleNotice(item)) return undefined;
     try {
       const scope = this.idleControl.scope(item);
-      return validHeldIdleScope(item, scope) && this.inboxAckable(item) && this.idleControl.canTake(item, scope) ? scope : undefined;
+      return validHeldIdleScope(item, scope) && (!leaseActive(item, now) || this.inboxAckable(item))
+        && this.idleControl.canTake(item, scope) ? scope : undefined;
     } catch (e) {
       console.error(`⚠️ 内部通知权限核对失败，保留原消息: ${String(e)}`);
       return undefined;
@@ -123,12 +126,13 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   }
 
   /** Known-but-stale or gated internal sources must not fall through to the legacy agent allowance. */
-  idleInboxAllowed(item: HeldItem): boolean | undefined {
+  idleInboxAllowed(item: HeldItem, now = Date.now()): boolean | undefined {
     if (this.idleControl?.mode !== "on" || !isInternalIdleNotice(item)) return undefined;
     try {
       const scope = this.idleControl.scope(item);
-      if (!scope) return item.lease?.idleScope ? false : undefined;
-      return item.reason !== "quota_wall" && validHeldIdleScope(item, scope) && this.inboxAckable(item) && this.idleControl.canTake(item, scope);
+      if (!scope) return leaseActive(item, now) && item.lease?.idleScope ? false : undefined;
+      return item.reason !== "quota_wall" && validHeldIdleScope(item, scope) && (!leaseActive(item, now) || this.inboxAckable(item))
+        && this.idleControl.canTake(item, scope);
     } catch (e) {
       console.error(`⚠️ 内部通知领取核对失败，保留原消息: ${String(e)}`);
       return false;
@@ -136,11 +140,11 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
   }
 
   inboxLease(item: HeldItem, batchId: string, at: number): void {
-    const scope = this.idleControl?.mode === "on" ? this.idleScope(item) : undefined;
+    const scope = this.idleControl?.mode === "on" ? this.idleScope(item, at) : undefined;
     item.lease = { batchId, at, ...(scope ? { idleScope: scope } : {}) };
   }
 
-  /** An internal lease is tied to its original authority/session, including after queue recovery. */
+  /** Ack stays tied to the original authority even after expiry; only acquisition may replace an expired scope. */
   inboxAckable(item: HeldItem): boolean {
     const original = item.lease?.idleScope;
     if (!original) return true;
@@ -155,13 +159,13 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
 
   /** Observe constructs the same candidate batches without acquiring or changing messages. */
   idleBatches(channelId: string, now = Date.now()): HeldIdleBatch<HeldItem>[] {
-    return heldIdleBatches((this.get(channelId) ?? []).filter((i) => !leaseActive(i, now)), (i) => this.idleScope(i));
+    return heldIdleBatches((this.get(channelId) ?? []).filter((i) => !leaseActive(i, now)), (i) => this.idleScope(i, now));
   }
 
   /** Use the same partition in inbox and release construction. Legacy inbox kinds retain their existing path. */
-  inboxPartition(items: HeldItem[]): HeldItem[] {
+  inboxPartition(items: HeldItem[], now = Date.now()): HeldItem[] {
     if (this.idleControl?.mode !== "on" || !items.length) return items;
-    const groups = heldIdleBatches(items, (i) => this.idleScope(i));
+    const groups = heldIdleBatches(items, (i) => this.idleScope(i, now));
     const first = groups.find((g) => g.items.includes(items[0]));
     return first ? first.items : items.filter((i) => !groups.some((g) => g.items.includes(i)));
   }
@@ -174,7 +178,7 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
       if (!batch) return undefined;
       const key = heldIdleScopeKey(batch.scope);
       const wanted = () => this.idleControl?.mode === "on" && batch.items.every((i) => {
-        const scope = this.idleScope(i);
+        const scope = this.idleScope(i, now);
         return this.get(channelId)?.includes(i) && !leaseActive(i, now) && !!scope && heldIdleScopeKey(scope) === key;
       });
       return await release(batch, wanted);

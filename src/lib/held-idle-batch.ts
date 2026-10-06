@@ -21,9 +21,13 @@ export interface IdleHeldLike {
 
 export interface HeldIdleBatch<T> { scope: HeldIdleScope; items: T[] }
 
+/** Ledger asks already share the legacy priority path with owner requests and card answers. */
+export const isHeldAskNotice = (item: Pick<IdleHeldLike, "env">): boolean =>
+  item.env.from.kind === "bridge" && item.env.from.label === "ledger" && /^ledger-ask:ask_[A-Za-z0-9]+$/.test(item.env.meta.messageId ?? "");
+
 export function isInternalIdleNotice(item: IdleHeldLike): boolean {
   const { from, intent, meta } = item.env;
-  return intent === "notification" && meta.waitForIdle === true
+  return !isHeldAskNotice(item) && intent === "notification" && meta.waitForIdle === true
     && ((from.kind === "local" && meta.triggerKind === "agent_tool")
       || (from.kind === "bridge" && ["system", "bridge_synth"].includes(meta.triggerKind)));
 }

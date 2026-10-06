@@ -309,7 +309,10 @@ test("lost tool result or mirror exception retains the original lease and gives 
   expect(item.lease).toBeDefined();
   expect(s.held.get(to.channelId)).toEqual([item]);
   expect(s.delivered).toEqual([]);
+  initInbox({ held: s.held, clients: s.clients, calls: s.calls, render: async (e) => e.content,
+    stoppedAt: () => undefined, emitIn: (_c, e) => s.mirrored.push(e) });
   const r = await take(11_000);
+  expect(s.mirrored).toEqual([item.env]);
   expect(r.text).toContain("原样重给");
   expect(s.delivered).toEqual([]);
 });
@@ -379,4 +382,127 @@ test("reader replacement while paging keeps the original message unleased", asyn
   s.clients.set(to.channelId, { ws: { tag: "replacement" } as never }); window.resume();
   expect(await pending).toHaveProperty("error");
   expect(item.lease).toBeUndefined(); expect(s.delivered).toEqual([]);
+});
+
+test("ledger ask and owner/card answer retain their shared first batch ahead of idle inspections", async () => {
+  for (const mode of ["off", "on"] as const) {
+    const ask = notice("ledger-ask:ask_abc"), inspection = notice("inspection");
+    const human = notice("human"), answer = notice("answer");
+    human.env.from = { kind: "api", tokenId: "owner", name: "owner", owner: true };
+    human.env.intent = "request"; delete human.env.meta.waitForIdle;
+    answer.env.from = human.env.from; answer.env.meta.triggerKind = "ask_answer";
+    const s = fixture([ask, inspection, human, answer], mode);
+    const r = await take();
+    expect(ids(r.text)).toEqual(["ledger-ask:ask_abc", "human", "answer"]);
+    expect(inspection.lease).toBeUndefined();
+    const next = await take(11_000, { ack: batchId(r.text) });
+    expect(next.n).toBe(mode === "on" ? 1 : 0);
+    expect(s.held.get(to.channelId)).toEqual([inspection]);
+  }
+});
+
+test("expired internal leases can be taken by a replacement session but cannot acknowledge the old scope", async () => {
+  for (const kind of ["bridge", "local"] as const) {
+    for (const field of ["sessionId", "projectId", "ownerId", "permissionSource"] as const) {
+      const item = notice("inspection", kind); delete item.env.meta.expectSession;
+      const s = fixture([item]);
+      const first = await take();
+      const replacement = { ...scope, [field]: "replacement" };
+      s.proofs.set(item, replacement);
+      expect((await take(11_000)).n).toBe(0);
+      const expired = 10_000 + INBOX_LEASE_MS + 1;
+      expect(s.held.idleBatches(to.channelId, expired).map((b) => b.items)).toEqual([[item]]);
+      expect(s.held.inboxAckable(item)).toBe(false);
+      const next = await take(expired, { ack: batchId(first.text) });
+      expect(ids(next.text)).toEqual(["inspection"]);
+      expect(item.lease!.idleScope).toEqual(replacement);
+      expect(batchId(next.text)).not.toBe(batchId(first.text));
+      expect(s.delivered).toEqual([]);
+      await take(expired + 1, { ack: batchId(next.text) });
+      expect(s.delivered).toEqual([item.env]);
+    }
+  }
+});
+
+test("removing idle control reports blocked confirmation without claiming an unread receipt", async () => {
+  const item = notice("inspection"); const s = fixture([item]);
+  const first = await take(); s.held.configureIdleBatch();
+  const ack = await take(11_000, { ack: batchId(first.text) });
+  expect(ack.text).toContain("权限无法核对");
+  expect(ack.text).not.toContain("没有待确认的条目");
+  expect(s.held.get(to.channelId)).toEqual([item]); expect(s.delivered).toEqual([]);
+  s.held.configureIdleBatch(s.control);
+  await take(12_000, { ack: batchId(first.text) });
+  expect(s.delivered).toEqual([item.env]);
+});
+
+test("a partial mirror failure retries only missing mirrors on reread, direct ack, or queue recovery", async () => {
+  for (const retry of ["reread", "ack", "recovery"] as const) {
+    const items = [notice("first", "local"), notice("second", "local"), notice("third", "local")];
+    const s = fixture(items); const mirrored: string[] = [];
+    let fail = true;
+    const init = (held: HeldQueue) => initInbox({ held, clients: s.clients, calls: s.calls, render: async (e) => e.content,
+      stoppedAt: () => undefined, emitIn: (_c, e) => {
+        if (fail && e === items[1].env) throw new Error("injected mid-batch mirror failure");
+        mirrored.push(e.meta.messageId);
+      } });
+    const dir = mkdtempSync(join(tmpdir(), "hb1-mirror-recovery-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, "held.json");
+    const disk = new HeldQueue(path, s.control);
+    items.forEach((i) => disk.hold(to.channelId, i));
+    init(disk);
+    expect(await takeInbox(ws, 10_000)).toHaveProperty("error");
+    const lease = { ...items[0].lease! };
+    expect(mirrored).toEqual(["first"]); expect(s.delivered).toEqual([]);
+    expect(await takeInbox(ws, 10_001, { ack: lease.batchId })).toHaveProperty("error");
+    expect(disk.get(to.channelId)).toEqual(items); expect(s.delivered).toEqual([]);
+    if (retry === "recovery") init(new HeldQueue(path, { ...s.control, scope: () => scope }));
+    fail = false;
+    if (retry !== "ack") {
+      const reread = await take(11_000);
+      expect(batchId(reread.text)).toBe(lease.batchId);
+    }
+    await take(12_000, { ack: lease.batchId });
+    expect(mirrored).toEqual(["first", "second", "third"]);
+    expect(s.delivered.map((e) => e.meta.messageId)).toEqual(["first", "second", "third"]);
+    expect(s.touched).toHaveLength(3);
+  }
+});
+
+test("paging retries a missing mirror on the existing lease without touching or confirming twice", async () => {
+  const item = notice("large", "local"); item.env.content = "x".repeat(30_000);
+  const s = fixture([item]); let fail = true;
+  initInbox({ held: s.held, clients: s.clients, calls: s.calls, render: async (e) => e.content,
+    stoppedAt: () => undefined, emitIn: (_c, e) => {
+      if (fail) throw new Error("injected page mirror failure"); s.mirrored.push(e);
+    } });
+  expect(await takeInbox(ws, 10_000, { read: "large" })).toHaveProperty("error");
+  const lease = { ...item.lease! }; fail = false;
+  expect((await take(11_000, { read: "large", page: 2 })).n).toBe(1);
+  expect(s.mirrored).toEqual([item.env]); expect(s.touched).toEqual([item.env]);
+  expect(item.lease!.batchId).toBe(lease.batchId); expect(item.lease!.at).toBe(lease.at);
+  await take(12_000, { ack: lease.batchId }); expect(s.delivered).toEqual([item.env]);
+});
+
+
+test("expired session scopes can be reacquired by paged reads or the injected release window", async () => {
+  for (const route of ["page", "release"] as const) {
+    const item = notice("inspection"); delete item.env.meta.expectSession;
+    const s = fixture([item]); const first = await take();
+    const replacement = { ...scope, sessionId: "session-b" }; s.proofs.set(item, replacement);
+    const expired = 10_000 + INBOX_LEASE_MS + 1;
+    if (route === "page") {
+      expect((await take(expired, { read: "inspection" })).n).toBe(1);
+      expect(item.lease!.idleScope).toEqual(replacement);
+      expect(item.lease!.batchId).not.toBe(batchId(first.text));
+    } else {
+      const result = await s.held.withIdleBatch(to.channelId, async (batch, wanted) => {
+        expect(wanted()).toBe(true); expect(batch.scope).toEqual(replacement);
+        expect(batch.items).toEqual([item]); return "constructed";
+      }, expired);
+      expect(result).toBe("constructed"); expect(item.lease!.batchId).toBe(batchId(first.text));
+    }
+    expect(s.delivered).toEqual([]);
+  }
 });
