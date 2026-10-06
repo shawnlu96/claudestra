@@ -451,6 +451,29 @@ describe("final launch command (real parser + real Claude Code adapter)", () => 
     }
   }
 
+  // 复现 purpose-pointer-truncation：生产 purpose 公式（dag-tools-start / scheduler-local-author-plan）+ 合法长标题，执行说明路径不能被职责预算裁掉
+  test("a long title is shortened but the exec-prompt pointer after 先读 reaches the launch whole, for every role", () => {
+    const promptPath = "/Users/someone/.claude-orchestrator/ledger/reviews/agent-list-recovery-ROLE1-exec-prompt.md";
+    for (const title of ["title".repeat(22), "很长的标题".repeat(60)]) {
+      const purpose = `agent-list-recovery-ROLE1 执行者（自动卡）：${title}。先读 ${promptPath}`;
+      for (const [role, cardRole] of shapes) {
+        const r = applyCardRole(base(cardRole, purpose), { role });
+        if ("error" in r) throw new Error(r.error);
+        const registered = flagOf(r.args, "--purpose") ?? "";
+        expect(registered).toStartWith(`agent-list-recovery-ROLE1 执行者（自动卡）：${title.slice(0, 5)}`);
+        if (title.length > 200) expect(registered).toContain("…。先读");
+        expect(registered).toContain(`。先读 ${promptPath}\n\n【卡片角色 card-${role}】`);
+        expect(launchArg(launchOf(r.args), "--append-system-prompt")).toContain(`先读 ${promptPath}`);
+        expectLaunched({ launch: launchOf(r.args) }, role);
+      }
+    }
+  });
+
+  test("a trailing pointer that cannot fit next to the duties is a diagnosis and no create, not a silent cut", () => {
+    const purpose = `T1 执行者（自动卡）：标题。先读 /${"p".repeat(300)}/exec-prompt.md`;
+    expect(applyCardRole(base("author", purpose), {})).toEqual({ error: expect.stringContaining("截了就丢指针") });
+  });
+
   test("the registered purpose keeps the caller's head; a blank explicit model never reaches the launcher", () => {
     const r = applyCardRole(base("reviewer", "T1 审查"), {});
     if ("error" in r) throw new Error(r.error);

@@ -104,12 +104,21 @@ function flagValue(args: string[], flag: string): { index: number; value: string
   return null;
 }
 
-/** 调用方原 purpose 截到给职责留足预算，职责接在后面：合起来不超过启动器的截断长度 */
-function withDuties(purpose: string, duties: string): string {
+/**
+ * 调用方原 purpose 截到给职责留足预算，职责接在后面：合起来不超过启动器的截断长度。超长时从中间（标题）截，
+ * 结尾那句（start_node 的「。先读 <工作单路径>」）或至少最后一个词（路径）原样保留；连路径都放不下就报错，不悄悄裁掉。
+ */
+function withDuties(purpose: string, duties: string): string | { error: string } {
   const room = LAUNCH_PURPOSE_LIMIT - duties.length - 2;
   const head = purpose.trim();
   if (!head) return duties;
-  return `${head.length > room ? `${head.slice(0, room - 1)}…` : head}\n\n${duties}`;
+  if (head.length <= room) return `${head}\n\n${duties}`;
+  const lastWord = head.search(/\S+$/);
+  if (lastWord <= 0) return `${head.slice(0, room - 1)}…\n\n${duties}`;
+  const sentence = head.lastIndexOf("。", lastWord);
+  const keep = [sentence, lastWord - 1].find((at) => at > 0 && head.length - at <= room - 2);
+  if (keep === undefined) return { error: `purpose 结尾的「${head.slice(lastWord)}」放不进职责之外的 ${room} 字预算，截了就丢指针` };
+  return `${head.slice(0, room - 1 - (head.length - keep))}…${head.slice(keep)}\n\n${duties}`;
 }
 
 export interface CardRoleOptions {
@@ -153,9 +162,11 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): { arg
     if (taken) return { error: `${def.name} 要用定义里的工具边界，这次 create 已带 ${out[taken.index]}，不覆盖也不放宽；没有建会话` };
     out.push("--disallowed", boundary);
   }
-  if (!purpose) out.push("--purpose", duties);
-  else if (out[purpose.index] === "--purpose") out[purpose.index + 1] = withDuties(purpose.value ?? "", duties);
-  else out[purpose.index] = `--purpose=${withDuties(purpose.value ?? "", duties)}`;
+  const text = purpose ? withDuties(purpose.value ?? "", duties) : duties;
+  if (typeof text !== "string") return { error: `${def.name}：${text.error}；没有建会话` };
+  if (!purpose) out.push("--purpose", text);
+  else if (out[purpose.index] === "--purpose") out[purpose.index + 1] = text;
+  else out[purpose.index] = `--purpose=${text}`;
   return { args: out };
 }
 
