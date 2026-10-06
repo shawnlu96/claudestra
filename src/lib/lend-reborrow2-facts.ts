@@ -2,7 +2,8 @@
  * REBOR2 read-only preparation: any canonical ended write lease may be adopted as terminal fact by a real PM.
  * Nothing here writes; the old lease, the old order's terminal status and its reason/time are only quoted.
  * Same-peer recovery leaves the old provider journal to the provider-side claim check; a different peer is accepted only when
- * the original side never started a worker (never claimed, or its own authenticated not_started release) and that original
+ * the original side never started a worker (never claimed, or a not_started release whose last beat for that gen never left
+ * cloning / starting — the clean-revocation beat also records not_started for a working worker) and that original
  * instance is still authenticated and authorised now — its identity is part of the CAS. tests/lend-reborrow2-facts.test.ts.
  */
 import { createHash } from "node:crypto";
@@ -116,6 +117,24 @@ function authorFamily(raw: Raw, prev: LendOrder, requested: LendFamily, pms: rea
   return { original, epochSeq: epoch!.seq };
 }
 
+/**
+ * A cross-peer not_started must be a real never-started release. The canonical clean-revocation beat (ledger-lend-peers.ts endOrder)
+ * records the same not_started for a worker that ran — its checkout may hold unpushed checkpoints — and writes that line's phase into
+ * lend_orders.beat first. Provider phases never return to cloning / starting once a worker started (lend-beat.ts phaseOf), so only no
+ * beat at all, or a readable beat of the released gen still in cloning / starting, proves nothing ran. Read-only; covered by the CAS digest.
+ */
+function neverStarted(db: Database, prev: LendOrder): boolean {
+  const row = db.query("SELECT beat FROM lend_orders WHERE orderId = ?").get(prev.orderId) as { beat: string | null } | null;
+  if (!row) return false;
+  if (row.beat === null) return true;
+  try {
+    const b = JSON.parse(row.beat) as { gen?: unknown; phase?: unknown };
+    return b.gen === prev.leaseGen && (b.phase === "cloning" || b.phase === "starting");
+  } catch {
+    return false;
+  }
+}
+
 export type Reborrow2Facts = ReturnType<typeof captureReborrow2Facts>;
 
 /** The original instance's stable authenticated identity; per-hello fields (seq / helloAt / grant.until) are checked by authority. */
@@ -148,6 +167,9 @@ export function captureReborrow2Facts(db: Database, taskId: string, target: Rebo
   assertNoSafetyRefusal(raw, previous);
   const end = oldSideEnd(previous, raw.events);
   if (!samePeer && !CROSS_PEER_ENDS.includes(end)) forbidden(`原单结束方式 ${end} 只有原提供方 journal 能证明已停且检查点保全，不能换 peer`);
+  if (!samePeer && end === "not_started" && !neverStarted(db, previous)) {
+    forbidden("原单 not_started 来自收回心跳且 worker 已起过（或心跳失读 / 代数不符），原副本可能留未推检查点，只有原提供方能接续，不能换 peer");
+  }
   const origin = samePeer ? null : originIdentity(db, ended);
   const meta = getMeta(db, task.project);
   const family = authorFamily(raw, previous, target.family, meta.pms, meta);

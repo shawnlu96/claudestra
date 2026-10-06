@@ -64,6 +64,34 @@ describe.each(["checkout", "push", "model400", "reclaim"] as EndKind[])("ended b
   });
 });
 
+describe("cross peer not_started must be a real never-started release", () => {
+  test("clean revocation of a working worker (canonical not_started) refuses cross peer; same peer still allowed", () => {
+    ({ db } = setupLedger("revokedWorking"));
+    const before = rows(db);
+    expect(same().end).toBe("not_started");
+    expect(() => cross()).toThrow("worker 已起过");
+    expect(rows(db)).toBe(before);
+  });
+  test("clean revocation before any worker start may still move peer", () => {
+    ({ db } = setupLedger("revokedStarting"));
+    expect(cross()).toMatchObject({ samePeer: false, end: "not_started" });
+  });
+  test.each([
+    ["beat of another generation", `json_set(beat, '$.gen', 7)`],
+    ["damaged beat", `'{not json'`],
+  ])("%s cannot prove never-started", (_n, sql) => {
+    ({ db } = setupLedger("revokedStarting"));
+    db.run(`UPDATE lend_orders SET beat = ${sql}`);
+    expect(() => cross()).toThrow("不能换 peer");
+  });
+  test("a beat changing after preparation fails the CAS", () => {
+    ({ db } = setupLedger("revokedStarting"));
+    const f = cross();
+    db.run(`UPDATE lend_orders SET beat = json_set(beat, '$.phase', 'working')`);
+    expect(() => db.transaction(() => assertReborrow2Cas(db, f)).immediate()).toThrow();
+  });
+});
+
 describe("cross peer needs the original instance authenticated and authorised now", () => {
   const before = () => { ({ db } = setupLedger("checkout")); return rows(db); };
   test.each([

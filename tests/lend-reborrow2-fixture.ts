@@ -4,7 +4,7 @@ import { openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { cancelLend, claimLend, getLendOrder, leaseLend, offerLend, reclaimLend } from "../src/lib/ledger-lend.js";
 import { endWriteLease } from "../src/lib/ledger-lend-lease.js";
-import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { beatLend, recordHello } from "../src/lib/ledger-lend-peers.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { mustTask } from "../src/lib/ledger-checks.js";
@@ -18,7 +18,8 @@ export const base = "a".repeat(40), pushed = "c".repeat(40);
 export const now = 100_000;
 export const pm = { actor: "agent-pm", now };
 export const borrowOf = (p: string): BorrowEntry => ({ peer: p, projects: [project], roles: ["write"], maxOpen: 4 });
-export type EndKind = "checkout" | "push" | "model400" | "reclaim";
+/** revokedWorking / revokedStarting: the canonical clean-revocation beat (ledger-lend-peers.ts endOrder) also records not_started. */
+export type EndKind = "checkout" | "push" | "model400" | "reclaim" | "revokedWorking" | "revokedStarting";
 
 function hello(db: Database, p: string, f: string, at = now) {
   recordHello(db, p, f, { v: 1, proto: 3, boot: `${p}-boot`, seq: at, paused: null,
@@ -44,6 +45,10 @@ export function setupLedger(end: EndKind) {
     leaseLend(db, { actor: "owner", now: 40 }, peer, { v: 1, orderId: o.orderId, gen: 1, action: "release", reason: "stopped", detail });
     cancelLend(db, { ...pm, now: 45 }, { taskId, reason: `PM 结清：${detail}` });
     endWriteLease(db, taskId, `派不回去：${detail}`, 50);
+  }
+  if (end === "revokedWorking" || end === "revokedStarting") {
+    beatLend(db, { actor: "owner", now: 40 }, peer, { v: 1, orders: [{ orderId: o.orderId, gen: 1, phase: end === "revokedWorking" ? "working" : "starting",
+      lastActivityAt: 39, excerpt: "", ended: { reason: "revoked", clean: true } }] }, new Map([[o.orderId, "clean" as const]]));
   }
   if (end === "reclaim") reclaimLend(db, { ...pm, now: 50 }, { taskId, reason: "PM reclaim" });
   for (const [p, f] of [[peer, fp], [other, fp2]] as const) hello(db, p, f);
