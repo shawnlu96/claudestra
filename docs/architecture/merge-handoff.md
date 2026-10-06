@@ -39,23 +39,30 @@ the pass and is read again next pass; nothing is written.
 
 The owner merges main into nearly every PR right before merging it, so the head almost always moves after the handoff. The PR
 read (`ghPrState`, `lib/scheduler-merge-handoff-tick.ts`) is told which head the handoff follows; when GitHub shows another one,
-it checks in the project's `repoDir` (scheduler.json) whether the move only merged main in — the same test the local merge driver
-applies after its own update-branch (`lib/scheduler-main-merge-carry.ts`):
+it checks in the project's `repoDir` (scheduler.json) whether the move only merged main in (`lib/scheduler-main-merge-carry.ts`,
+shared with the local merge driver's check after its own update-branch):
 
 - the new head has exactly two parents: the followed head and a commit already on main — while the PR is open, `origin/main`;
   once merged, main as it was before that merge (`<merge commit>^1`), since the main that now holds the PR would vouch for any
   commit the PR brought in;
-- the PR's net diff (`git diff <main parent>...<head>`, every knob pinned) is byte-identical for the followed and the new head;
+- only main came in, proved one of two ways (`basis`):
+  - `auto-merge` — the new head's tree is exactly git's own clean merge of the followed head and the main parent
+    (`git merge-tree --write-tree`): nothing was added in the merge commit, even when main and the PR changed the same file;
+  - `net-diff` — otherwise (a conflict, or this git cannot merge-tree), the net diffs `git diff <main parent>...<followed head>`
+    and `git diff <main parent>...<new head>` (every knob pinned) must be byte-identical. Each starts at its own merge base, so
+    this only holds when main did not touch what the PR changed; a resolved conflict therefore goes to PM;
 - `repoDir`'s configured origin is the PR repository.
 
-Pass → `merge_handoff_carry` (`from`, `to`, `mainParent`, `mainHead`, `diffHash`, `handoffSeq`), written by the scheduler only
-and checked in its transaction to start at the head followed now; the card stays in `merge`, keeps its reviewed `headSHA` (the
-review proof binds to it) and is not reviewed again here. Each hop is judged from the head followed so far, so several update-
-branches chain on the ledger; two hops between reads, a changed net diff, a parent off main, a diff too large to compare or a
-project without `repoDir` go to PM as before.
+The local merge driver keeps only the net-diff test against `origin/main`, unchanged.
+
+Pass → `merge_handoff_carry` (`from`, `to`, `mainParent`, `mainHead`, `diffHash` = sha256 of the new head's net diff, `basis`,
+`handoffSeq`), written by the scheduler only and checked in its transaction to start at the head followed now; the card stays
+in `merge`, keeps its reviewed `headSHA` (the review proof binds to it) and is not reviewed again here. Each hop is judged from the head followed so far, so several update-
+branches chain on the ledger; two hops between reads, a merge that brought in more than main, a parent off main, a diff too
+large to compare or a project without `repoDir` go to PM as before.
 
 The owner's own approval of the new head is not read: merging is that approval, and GitHub reviews / checks would not say
-whether this machine's review still covers the PR — the net diff does.
+whether this machine's review still covers the PR — the merge check does.
 
 ## The local merge paths a handoff project never reaches
 

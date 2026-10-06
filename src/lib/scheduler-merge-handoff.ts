@@ -33,6 +33,8 @@ interface HandoffEvidence {
 
 const SHA = /^[a-f0-9]{40}$/i;
 const CARRY_OP = "merge_handoff_carry";
+/** How a carry was proved (scheduler-main-merge-carry.ts): the new tree is git's clean merge, or the net diff is byte-identical. */
+const CARRY_BASIS = ["auto-merge", "net-diff"] as const;
 const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/;
 
 /** The card's latest entry into `merge`: a handoff belongs to one stay there, a card that comes back hands over again. */
@@ -92,12 +94,12 @@ export function recordMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId:
 }
 
 /**
- * After the handoff the owner merged main into the PR (update-branch): the parents and a byte-identical net diff were checked
+ * After the handoff the owner merged main into the PR (update-branch): the parents and that only main came in were checked
  * against the head followed so far (scheduler-main-merge-carry.ts), so this machine's review still covers the PR. The card's own
  * head stays the reviewed one; the PR head followed moves on, and a replay returns the first record.
  */
 export function recordHandoffCarry(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; from: string; to: string;
-  mainParent: string; mainHead: string; diffHash: string }): { event: LedgerEvent; duplicate: boolean } {
+  mainParent: string; mainHead: string; diffHash: string; basis: string }): { event: LedgerEvent; duplicate: boolean } {
   return tx(db, () => {
     const { task } = handoffCard(db, ctx, input);
     const follow = handoffOf(db, task);
@@ -105,14 +107,15 @@ export function recordHandoffCarry(db: Database, ctx: WriteCtx, input: { taskId:
     if (![input.from, input.to, input.mainParent, input.mainHead].every((s) => SHA.test(s)) || !/^[a-f0-9]{64}$/.test(input.diffHash)) {
       throw new LedgerError("invalid", "新 head、main 父提交、main 头要是完整 SHA，净 diff 要是 sha256");
     }
+    if (!(CARRY_BASIS as readonly string[]).includes(input.basis)) throw new LedgerError("invalid", `--basis 只能是 ${CARRY_BASIS.join(" / ")}`);
     const key = `scheduler:${CARRY_OP}:${task.id}:h${follow.event.seq}:${input.from}:${input.to}`;
     const prev = getEventByDedup(db, key);
     if (prev) return { event: prev, duplicate: true };
     if (follow.head !== input.from || input.from === input.to) throw new LedgerError("conflict", `交接后跟的 PR head 是 ${follow.head.slice(0, 12)}，不是 ${input.from.slice(0, 12)}`);
     const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
-      text: `交接后 PR 只合入了 main：${input.from.slice(0, 12)} → ${input.to.slice(0, 12)}，净 diff 不变，继续跟`,
+      text: `交接后 PR 只合入了 main：${input.from.slice(0, 12)} → ${input.to.slice(0, 12)}，${input.basis === "auto-merge" ? "新 head 就是自动合并结果" : "净 diff 不变"}，继续跟`,
       data: { op: CARRY_OP, handoffSeq: follow.event.seq, from: input.from, to: input.to, mainParent: input.mainParent,
-        mainHead: input.mainHead, diffHash: input.diffHash } }, true);
+        mainHead: input.mainHead, diffHash: input.diffHash, basis: input.basis } }, true);
     return { event, duplicate: false };
   });
 }

@@ -17,16 +17,16 @@ const oneOf = <T extends string>(v: string | undefined, xs: readonly T[], flag: 
 
 export const SCHEDULER_DEPLOY_CMDS: Record<string, CommandSpec> = {
   "scheduler-merge-handoff": {
-    valued: ["head", "pr", "merged", "carry", "from", "main-parent", "main-head", "diff-hash"], bools: [],
+    valued: ["head", "pr", "merged", "carry", "from", "main-parent", "main-head", "diff-hash", "basis"], bools: [],
     usage: "scheduler-merge-handoff <task> --head <sha> --pr <url> [--merged <合并提交> | --carry <新 PR head> --from <原 PR head> --main-parent <sha> " +
-      "--main-head <sha> --diff-hash <sha256>]（调度服务专用：合并交给仓库方；--carry = 交接后 PR 只合入 main，继续跟；--merged = 仓库方已合并，进 live）",
+      "--main-head <sha> --diff-hash <sha256> --basis auto-merge|net-diff]（调度服务专用：合并交给仓库方；--carry = 交接后 PR 只合入 main，继续跟；--merged = 仓库方已合并，进 live）",
     run(c) {
       const input = { taskId: c.task(c.p.pos[1]).id, head: c.need("head"), pr: c.need("pr") };
       const { merged, carry } = c.p.flags;
       if (merged !== undefined && carry !== undefined) throw new LedgerError("invalid", "--merged 和 --carry 不能同时给");
       if (carry !== undefined) {
         return { ok: true, ...recordHandoffCarry(c.db, c.ctx(), { ...input, to: carry, from: c.need("from"), mainParent: c.need("main-parent"),
-          mainHead: c.need("main-head"), diffHash: c.need("diff-hash") }) };
+          mainHead: c.need("main-head"), diffHash: c.need("diff-hash"), basis: c.need("basis") }) };
       }
       return merged === undefined ? { ok: true, ...recordMergeHandoff(c.db, c.ctx(), input) }
         : { ok: true, task: landMergeHandoff(c.db, c.ctx(), { ...input, mergeSha: merged }) };

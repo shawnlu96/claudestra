@@ -9,17 +9,16 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { ghEnv } from "./peer-pr-github.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
-import { CarryUndecidable, MAIN_REF, mainMergeCarry } from "./scheduler-main-merge-carry.js";
-import type { ReviewCarry } from "./scheduler-merge-driver.js";
+import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
 import { handoffOf, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 /** `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in. */
-export interface HandoffPr { state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: ReviewCarry }
+export interface HandoffPr { state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: MainMergeCarry }
 /** `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. */
 export type ReadPr = (prRef: string, follow?: { project: string; head: string }) => Promise<HandoffPr>;
 /** `mergeSha` set = the PR is merged: its main parent must be on main before that merge, not on the main that now holds the PR. */
-export type HandoffCarry = (prRef: string, oldHead: string, newHead: string, mergeSha: string | null) => Promise<ReviewCarry>;
+export type HandoffCarry = (prRef: string, oldHead: string, newHead: string, mergeSha: string | null) => Promise<MainMergeCarry>;
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface HandoffCard<O> {
   db: Database;
@@ -78,7 +77,7 @@ export function handoffCarry(repoDir: string, command: typeof runBounded = runBo
     if (origin !== repo) return { ok: false, reason: `repoDir 的 origin 不是 PR 仓库 ${repo}` };
     await git("fetch", "--no-tags", "--quiet", "origin", newHead, ...(mergeSha ? [mergeSha] : []), `+refs/heads/main:${MAIN_REF}`);
     try {
-      return await mainMergeCarry(git, command, repoDir, oldHead, newHead, { onMain: mergeSha ? `${mergeSha}^1` : MAIN_REF });
+      return await mainMergeCarry(git, command, repoDir, oldHead, newHead, { onMain: mergeSha ? `${mergeSha}^1` : MAIN_REF, autoMerge: true });
     } catch (e) {
       if (e instanceof CarryUndecidable) return { ok: false, reason: e.message };
       throw e;
@@ -98,11 +97,12 @@ const tell = (c: HandoffCard<unknown>, text: string): Promise<void> => c.deps.no
  */
 async function followMoved<O>(c: HandoffCard<O>, follow: HandoffFollow, pr: HandoffPr): Promise<O | null> {
   const { carry } = pr, moved = `交接后 PR head 变了（${short(follow.head)} → ${short(pr.head)}）`;
-  if (!carry?.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
+  if (!carry?.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash || !carry.basis) {
     return c.escalate(`${moved}，${carry?.reason ?? "没核对是否只合入了 main"}：本机审查证据只覆盖交接的 head`);
   }
   const r = await c.deps.manager("ledger", "scheduler-merge-handoff", c.task.id, "--head", follow.evidence.head, "--pr", follow.evidence.pr,
-    "--carry", pr.head, "--from", follow.head, "--main-parent", carry.mainParent, "--main-head", carry.mainHead, "--diff-hash", carry.diffHash);
+    "--carry", pr.head, "--from", follow.head, "--main-parent", carry.mainParent, "--main-head", carry.mainHead, "--diff-hash", carry.diffHash,
+    "--basis", carry.basis);
   return r.ok === true ? null : c.out("held", `${moved}，只合入了 main，但没记上：${String(r.error)}`);
 }
 

@@ -12,14 +12,13 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
-import { MAIN_REF, mainMergeCarry } from "../src/lib/scheduler-main-merge-carry.js";
-import type { ReviewCarry } from "../src/lib/scheduler-merge-driver.js";
+import { MAIN_REF, mainMergeCarry, type MainMergeCarry } from "../src/lib/scheduler-main-merge-carry.js";
 import { ghPrState, handoffCarry, HANDOFF_POLL_MS, type HandoffCarry, type HandoffPr } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { autoFixture, H1, H2, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 const PR = "https://github.com/example/repo/pull/7";
 const H3 = "3".repeat(40), M = "a".repeat(40), MP = "b".repeat(40), MH = "c".repeat(40), HASH = "d".repeat(64);
-const pure = (mainParent = MP): ReviewCarry => ({ ok: true, reason: "净 diff 一致", mainParent, mainHead: MH, diffHash: HASH });
+const pure = (mainParent = MP): MainMergeCarry => ({ ok: true, reason: "净 diff 一致", mainParent, mainHead: MH, diffHash: HASH, basis: "net-diff" });
 
 /** The card handed over at H1; `answer` plays GitHub + the carry check for each read and sees what the tick asked to follow. */
 async function handed() {
@@ -56,7 +55,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
       h.set((follow) => ({ state: "OPEN", head: H2, mergeSha: null, carry: follow?.head === H1 ? pure() : undefined }));
       expect(await h.pass()).toMatchObject({ step: "waiting", detail: expect.stringContaining("PR 只合入了 main") });
       expect(h.carries().map((e) => [e.actor, e.data])).toEqual([["scheduler", { op: "merge_handoff_carry", handoffSeq: h.handoffSeq,
-        from: H1, to: H2, mainParent: MP, mainHead: MH, diffHash: HASH }]]);
+        from: H1, to: H2, mainParent: MP, mainHead: MH, diffHash: HASH, basis: "net-diff" }]]);
       expect(f.task()).toMatchObject({ stage: "merge", headSHA: H1 }); // the card keeps its reviewed head
       expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
       expect([reviews(), f.intents().filter((i) => i.action === "merge")]).toEqual([before, []]); // no re-review, no local merge
@@ -103,7 +102,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
   });
 
   test("the PR's own change differs after the merge (or nobody could judge) → PM as before; nothing is carried", async () => {
-    const refusals: [ReviewCarry | undefined, string][] = [
+    const refusals: [MainMergeCarry | undefined, string][] = [
       [{ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent: MP, mainHead: MH }, "净 diff 变了"],
       [{ ok: false, reason: "另一个父提交 bbbbbbbbbbbb 不在 main 上" }, "不在 main 上"],
       [undefined, "没核对是否只合入了 main"],
@@ -153,14 +152,15 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
     const h = await handed(), { f } = h;
     try {
       const flags = (from: string, to: string, extra: string[] = []) => ["T1", "--head", H1, "--pr", PR, "--carry", to, "--from", from,
-        "--main-parent", MP, "--main-head", MH, "--diff-hash", HASH, ...extra];
+        "--main-parent", MP, "--main-head", MH, "--diff-hash", HASH, "--basis", "auto-merge", ...extra];
       const as = (...args: string[]) => f.tickDeps.manager("ledger", "scheduler-merge-handoff", ...args);
       expect(await f.cli("pm", "scheduler-merge-handoff", ...flags(H1, H2))).toMatchObject({ ok: false, code: "forbidden" });
       expect(await as(...flags(H2, H3))).toMatchObject({ ok: false, code: "conflict" }); // not the head followed now
       expect(await as(...flags(H1, H1))).toMatchObject({ ok: false, code: "conflict" });
       expect(await as(...flags(H1, "abc"))).toMatchObject({ ok: false, code: "invalid" });
       expect(await as(...flags(H1, H2, ["--merged", M]))).toMatchObject({ ok: false, code: "invalid" });
-      expect(await as("T1", "--head", H2, "--pr", PR, "--carry", H3, "--from", H2, "--main-parent", MP, "--main-head", MH, "--diff-hash", HASH))
+      expect(await as(...flags(H1, H2, ["--basis", "trust-me"]))).toMatchObject({ ok: false, code: "invalid" });
+      expect(await as("T1", "--head", H2, "--pr", PR, "--carry", H3, "--from", H2, "--main-parent", MP, "--main-head", MH, "--diff-hash", HASH, "--basis", "net-diff"))
         .toMatchObject({ ok: false, code: "conflict" }); // --head is the card's reviewed head, never a followed one
       expect(await as(...flags(H1, H2))).toMatchObject({ ok: true, duplicate: false });
       expect(await as(...flags(H1, H2))).toMatchObject({ ok: true, duplicate: true });
@@ -221,6 +221,7 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
   };
   const carry = () => handoffCarry(work);
 
+  const GIT_MS = 30_000; // real git, several commands per case: a loaded machine overruns bun's 5 s default
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), "hof1-carry-"));
     work = join(root, "work");
@@ -238,16 +239,16 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     n1 = await updateBranch(m1);
     m2 = await mainCommit("third.txt", "t\n");
     n2 = await updateBranch(m2);
-  });
+  }, GIT_MS);
   afterAll(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 
   test("open: each pure update-branch carries from the head before it, and both hops name the same PR diff", async () => {
     const first = await carry()(PR, reviewed, n1, null), second = await carry()(PR, n1, n2, null);
-    expect(first).toMatchObject({ ok: true, mainParent: m1 });
-    expect(second).toMatchObject({ ok: true, mainParent: m2, mainHead: m2 });
+    expect(first).toMatchObject({ ok: true, mainParent: m1, basis: "auto-merge" });
+    expect(second).toMatchObject({ ok: true, mainParent: m2, mainHead: m2, basis: "auto-merge" });
     expect(second.diffHash).toBe(first.diffHash!);
     expect(await carry()(PR, reviewed, n2, null)).toMatchObject({ ok: false, reason: expect.stringContaining("合并提交") }); // two hops at once
-  });
+  }, GIT_MS);
 
   test("open, an evil merge (a change folded into the merge commit) is refused with its main parent; another repository vouches for nothing", async () => {
     await sh("checkout", "-q", "-b", "evil", n1);
@@ -260,7 +261,7 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     expect(await carry()(PR, n1, evil, null)).toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent: m2 });
     expect(await carry()("https://github.com/example/other/pull/7", n1, n2, null)).toMatchObject({ ok: false, reason: expect.stringContaining("origin 不是 PR 仓库") });
     await expect(handoffCarry(join(root, "missing"))(PR, n1, n2, null)).rejects.toThrow(); // no clone: held, read again
-  });
+  }, GIT_MS);
 
   test("after the owner merges, the check still isolates the PR's own diff against main as it was before that merge", async () => {
     await sh("checkout", "-q", "main");
@@ -269,7 +270,7 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     await sh("push", "-q", "origin", "main");
     expect(await carry()(PR, n1, n2, merged)).toMatchObject({ ok: true, mainParent: m2, mainHead: m2 });
     expect(await carry()(PR, reviewed, n1, merged)).toMatchObject({ ok: true, mainParent: m1, mainHead: m2 });
-  });
+  }, GIT_MS);
 
   test("a side commit smuggled in through the PR is refused after the merge, where current main would have vouched for it", async () => {
     await sh("checkout", "-q", "-b", "side", m2);
@@ -285,6 +286,40 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     // the local driver's form (current main for both) is only sound while the PR is open: here it would pass
     const git = async (...a: string[]) => sh(...a).then((s) => `${s}\n`);
     expect(await mainMergeCarry(git, runBounded, work, n2, n3, { onMain: MAIN_REF, diffBase: MAIN_REF })).toMatchObject({ ok: true });
-  });
+  }, GIT_MS);
 
+
+  test("main and the PR changed the same file: a clean update-branch is followed (its tree is git's merge), an evil one is not", async () => {
+    const body = (first: string, eighth: string) => ["one", "2", "3", "4", "5", "6", "7", "eight", "9", "10"]
+      .map((l, i) => i === 0 ? first : i === 7 ? eighth : l).join("\n") + "\n";
+    await mainCommit("same.txt", body("one", "eight"));
+    await sh("checkout", "-q", "-b", "same-pr");
+    const pr = await commitFile("same.txt", body("one", "EIGHT (reviewed)"), "PR edits line 8");
+    await sh("push", "-q", "origin", "same-pr");
+    const main = await mainCommit("same.txt", body("ONE (main)", "eight"));
+    await sh("checkout", "-q", "same-pr");
+    await sh("merge", "-q", "--no-edit", main);
+    const updated = await sh("rev-parse", "HEAD");
+    await sh("push", "-q", "origin", "same-pr");
+    expect(await carry()(PR, pr, updated, null)).toMatchObject({ ok: true, mainParent: main, basis: "auto-merge" });
+    // the net diffs alone differ here (each starts at its own merge base): what the local driver's form still refuses
+    const git = async (...a: string[]) => sh(...a).then((out) => `${out}\n`);
+    expect(await mainMergeCarry(git, runBounded, work, pr, updated, { onMain: MAIN_REF, diffBase: MAIN_REF }))
+      .toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了" });
+
+    await sh("checkout", "-q", "-b", "same-evil", pr);
+    await sh("merge", "-q", "--no-commit", "--no-ff", main);
+    writeFileSync(join(work, "same.txt"), body("ONE (main)", "EIGHT (reviewed) + smuggled"));
+    await sh("add", "same.txt");
+    await sh("commit", "-q", "--no-edit");
+    const evil = await sh("rev-parse", "HEAD");
+    await sh("push", "-q", "origin", "same-evil");
+    expect(await carry()(PR, pr, evil, null)).toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent: main });
+
+    await sh("checkout", "-q", "main");
+    await sh("merge", "-q", "--no-ff", "--no-edit", updated);
+    const landed = await sh("rev-parse", "HEAD");
+    await sh("push", "-q", "origin", "main");
+    expect(await carry()(PR, pr, updated, landed)).toMatchObject({ ok: true, mainParent: main, mainHead: main, basis: "auto-merge" });
+  }, GIT_MS);
 });
