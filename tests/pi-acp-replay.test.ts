@@ -68,7 +68,7 @@ describe("Pi 适配器 · 回放 pi 0.99.1 录制流（契约）", () => {
     const t5 = updates.length;
     const turn3 = session.prompt("Run `sleep 30` with the bash tool, then answer with exactly the word: finished");
     await until(() => updates.slice(t5).some((u) => u.sessionUpdate === "tool_call"), "sleep 30 的工具调用");
-    expect(await session.cancel()).toEqual([]);
+    expect(await session.cancel()).toEqual({ cleared: [], clearedIds: [] });
     expect(await turn3).toEqual({ kind: "cancelled" });
     expect(updates.slice(t5).find((u) => u.sessionUpdate === "tool_call_update")).toMatchObject({ status: "failed", content: [{ content: { text: "Command aborted" } }] });
 

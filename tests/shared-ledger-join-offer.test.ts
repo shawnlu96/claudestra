@@ -1,12 +1,9 @@
+import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAdmin } from "../scripts/shared-ledger-admin.js";
-import { LedgerService } from "../src/shared-ledger/service.js";
-import { startServer } from "../src/shared-ledger/server.js";
-import { Store } from "../src/shared-ledger/store.js";
 import type { InstanceKey } from "../src/lib/instance-key.js";
 import type { Ask } from "../src/lib/ledger-asks.js";
 import type { HttpPeer } from "../src/lib/peers.js";
@@ -25,18 +22,15 @@ const newKey = (): InstanceKey => {
   return { privateKey: pair.privateKey, publicKey: String(pair.publicKey.export({ format: "jwk" }).x) };
 };
 
-let root: string, centerDb: string, store: Store, server: ReturnType<typeof startServer>, centerHttp: string;
+let root: string, responses: EnrollmentResponses, centerHttp: string;
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "sl-join-offer-"));
-  centerDb = join(root, "center.sqlite");
-  store = new Store(centerDb);
-  server = startServer(new LedgerService(store));
-  centerHttp = `http://127.0.0.1:${server.port}`;
+  root = mkdtempSync(join(tmpdir(), "sl-migration-http-"));
+  responses = new EnrollmentResponses();
+  centerHttp = responses.url.replace(/\/$/, "");
 });
-afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { responses.close(); rmSync(root, { recursive: true, force: true }); });
 
-const mint = (person: string) => String(runAdmin(["invite", "--db", centerDb, "--team", "team-a", "--project", "project-a", "--person", person,
-  "--code", person, "--role", "member", "--actions", "read,plan", "--ttl", "24h"]).joinCode);
+const mint = (person: string) => responses.invite({ personId: person }).joinCode;
 
 /** Log capture: everything any console method printed during a test, for the "no secret in logs" checks. */
 let logs: string[] = [];
