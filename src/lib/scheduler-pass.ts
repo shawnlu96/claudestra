@@ -14,9 +14,11 @@ import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
-import { mergeTrainPass, type TrainContext } from "./scheduler-merge-train-tick.js";
+import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
+import { manualMergeGate } from "./manual-merge-queue-pass.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
@@ -48,7 +50,7 @@ export interface PassOpts {
   train?: TrainContext;
   /** The in-pass train tick (default mergeTrainPass: guarded gh, PM notices, required checks from scheduler.json); tests hand in
    *  mergeTrainTick with fake ports and their own required checks, still called here, between trainProjects and mergeTick. */
-  trainTick?: (db: Database, projects: readonly string[], active: Active) => Promise<void>;
+  trainTick?: (db: Database, projects: readonly string[], active: Active, formFence?: FormFence) => Promise<void>;
   autoDeps?: (active: Active) => AutoTickDeps;
   /** Tests point this at a private lock / update marker / update request. */
   maintenance?: { path?: string; marker?: string; request?: string };
@@ -65,6 +67,8 @@ export interface PassOpts {
   /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
   autostart?: (active: Active, manager: Manager) => AutostartHooks;
   retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
+  /** CFG's recovery policy read (manualMergeQueue key for the manual merge queue); default the recovery-policy.json reader. */
+  recoveryPolicy?: RecoveryPolicyPort;
   lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
 }
 
@@ -120,8 +124,10 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
       const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
-      const trainTick = opts.trainTick ?? ((d, ps, a) => mergeTrainPass(d, ps, a, opts.train));
-      await trainTick(db, trainProjects(db, localMerge, trains), active);
+      const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
+      // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
+      const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
+      await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
@@ -129,6 +135,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         assertActive: active, now: Date.now }, pace.phase());
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
       failed.push(...(await reclaimLentSlots(db, localMerge, manager, trains)).failed);
+      failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       // 监护先于自动派单：它认领了恢复的回合失败，auto-tick 这一轮就让开（agent-supervisor-hold.ts）；关着时两步都不碰

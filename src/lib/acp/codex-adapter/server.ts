@@ -4,12 +4,13 @@
  * - session/new|resume|fork：共用会话变更闸（session-state.ts），new / resume 提交后进入待确认；失败带 previousSessionClosed（B56）；
  *   new / resume 在回合没收尾时直接回 -32600、不自动停旧回合：换掉线程后旧回合的收尾事件被线程过滤丢掉，旧 prompt 永远兑现不了、busy 也清不掉；
  * - session/prompt / _session/steering：回包经 ctx 在收尾时写（turns.ts），处理器返回的 promise 等到写完才兑现；
- * - 其余 ACP 方法回 -32601（rpc 缺省）；app-server 的反向请求在 CX-3 接授权卡之前一律按拒绝答，绝不挂起。
+ * - 其余 ACP 方法回 -32601（rpc 缺省）；app-server 的命令 / 改文件审批转 session/request_permission，fail closed（approvals.ts）。
  * 线程过滤（B51、I7）：threadId 不是当前会话的通知不进回合状态机；缺 threadId 作废连接（I10）。tests/codex-adapter-session.test.ts。
  */
 import { ACP_PROTOCOL_VERSION } from "../protocol.js";
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "../rpc.js";
 import type { AppServer, NotificationEvent } from "./app-server.js";
+import { Approvals } from "./approvals.js";
 import type { HostCaps } from "./events.js";
 import type { ResultOf } from "./protocol.js";
 import { type AdapterConfig, applyConfig, configOptions, type ModelState, modelStateOf, threadConfig } from "./session-config.js";
@@ -31,6 +32,8 @@ export interface ServerDeps {
   timings?: Partial<TurnTimings>;
   /** agentInfo.version：源码树短哈希（main.ts） */
   version: string;
+  /** 等宿主答审批的兜底时限（approvals.ts，单测注入短值） */
+  approvalTimeoutMs?: number;
 }
 
 const AUTH_REQUIRED = -32000;
@@ -44,6 +47,7 @@ const str = (v: unknown) => (typeof v === "string" ? v : "");
 export class CodexAcpServer {
   readonly turns: Turns;
   private readonly acp: RpcPeer;
+  private readonly approvals: Approvals;
   private readonly session = new SessionState();
   private caps: HostCaps = { air: false, outputDelta: false, compaction: false };
   private handshake: Promise<unknown> | null = null;
@@ -55,7 +59,7 @@ export class CodexAcpServer {
     this.turns = new Turns({
       app: deps.app, session: this.session, caps: () => this.caps, emit: (u) => this.emit(u), fatal: deps.fatal, log: deps.log,
       policy: () => ({ ...deps.cfg.policy, summary: "auto", effort: this.session.models?.effort ?? null, model: this.session.models?.model ?? "" }),
-      reconcile: deps.reconcile, onCommand: deps.onCommand, timings: deps.timings,
+      reconcile: deps.reconcile, onCommand: deps.onCommand, timings: deps.timings, onFinish: (turnId) => this.approvals.cancelTurn(turnId),
     });
     acp.onRequest("initialize", (p: Rec) => this.initialize(p));
     acp.onRequest("session/new", (p: Rec) => this.open("new", p));
@@ -68,13 +72,15 @@ export class CodexAcpServer {
     acp.onClosed((why) => deps.fatal({ kind: "stop", why: `宿主断开了（${why}）` }));
     deps.app.onNotification((ev) => this.onAppEvent(ev));
     deps.app.onExit((why) => deps.fatal({ kind: "exit", why: `app-server 退出了（${why}）` }));
-    this.refuseReverseRequests();
+    const owns = (threadId: string, turnId: string) => this.turns.owns(threadId, turnId);
+    this.approvals = new Approvals({ app: deps.app, acp, owns, log: deps.log, timeoutMs: deps.approvalTimeoutMs });
   }
 
-  /** I12 ①：之后的请求一律 -32603 */
+  /** I12 ①：之后的请求一律 -32603；还在等宿主的审批按 cancel 答 */
   stop(): void {
     this.stopped = true;
     this.turns.stop();
+    this.approvals.cancelAll();
   }
 
   private live(): void {
@@ -206,6 +212,7 @@ export class CodexAcpServer {
   /** cancel 通知不算会话表态；不是当前会话的直接丢 */
   private cancel(p: Rec): void {
     if (this.stopped || p?.sessionId !== this.session.current) return void this.deps.log(`忽略 session/cancel（${str(p?.sessionId) || "缺 sessionId"} 不是当前会话）`);
+    this.approvals.cancelAll();
     this.turns.cancel();
   }
 
@@ -220,16 +227,5 @@ export class CodexAcpServer {
     if (threadId === this.session.previous) return;
     if (!this.warnedThreads) this.deps.log(`丢掉不是当前会话的线程事件（${ev.method}，子线程等，之后同类不再记）`);
     this.warnedThreads = true;
-  }
-
-  /** CX-3 之前没有授权卡：审批一律 cancel（fail closed），其余反向请求按「不给」答（§2.4） */
-  private refuseReverseRequests(): void {
-    const app = this.deps.app;
-    const refuse = (what: string) => this.deps.log(`app-server 要${what}：这一版还没有授权卡，按拒绝（cancel）答`);
-    app.handle("item/commandExecution/requestApproval", () => (refuse("执行命令的授权"), { decision: "cancel" as const }));
-    app.handle("item/fileChange/requestApproval", () => (refuse("改文件的授权"), { decision: "cancel" as const }));
-    app.handle("item/permissions/requestApproval", () => ({ permissions: {}, scope: "turn" as const, strictAutoReview: false as const }));
-    app.handle("mcpServer/elicitation/request", () => ({ action: "cancel" as const, content: null, _meta: null }));
-    app.handle("item/tool/requestUserInput", () => ({ answers: {} }));
   }
 }
