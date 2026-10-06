@@ -24,7 +24,7 @@ import { bareCanonicalName, normalizeRegistryAgents, REGISTRY_PATH } from "./reg
 import { poolOrderId } from "./scheduler-pool-facts.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
 import { readJsonStateSync } from "./state-file.js";
-import { orderBinding, SCOPE_EXTEND_OP, type ScopeExtendAudit } from "./ledger-writer-scope-extend-audit.js";
+import { offerIdentityGap, orderBinding, SCOPE_EXTEND_OP, type ScopeExtendAudit } from "./ledger-writer-scope-extend-audit.js";
 
 export interface LiveExtendInput {
   taskId: string; project: string; taskRev: number; workflowRev: number; reason: string; apply?: boolean;
@@ -73,6 +73,8 @@ function liveWriter(db: Database, task: LedgerTask, input: LiveExtendInput, even
   const lease = heldLease(db, task);
   if (!lease || lease.project !== task.project || lease.peer !== input.peer) return fail("写租约不在这个 peer 名下或已结束");
   if (!order.branch || lease.branch !== order.branch || lendBranch(task.id, lease.fp) !== lease.branch) return fail("写租约分支与出借单 / 指纹不符");
+  const offerGap = offerIdentityGap(events, task.id, order.orderId, input.peer, order.step, lease.fp.toLowerCase(), lease.branch);
+  if (offerGap) return fail(offerGap);
   // The peer's current fingerprint (its pinned hello) is the identity proof; a missing one is unverifiable, not a pass.
   const known = getLendPeer(db, input.peer)?.fp;
   if (typeof known !== "string" || !known) return fail("peer 当前指纹缺失，无法核实写租约身份");

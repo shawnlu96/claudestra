@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { extendLiveWriterScope, type LiveExtendInput } from "../src/lib/ledger-writer-scope-extend.js";
 import { reconcileFileScope } from "../src/lib/ledger-resource-scope.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
+import { createTask, deliver, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
@@ -30,7 +30,7 @@ const cleanups: (() => void)[] = [];
 afterEach(() => { for (const f of cleanups.splice(0)) f(); });
 
 /** One auto card in build, written by `peer`'s worker w1 under a held lease; fileGlobs then approved wider than the dispatch. */
-function liveCard(db: Database, id: string, planned: string[], approved: string[], now = NOW): { intentId: string; orderId: string } {
+function liveCard(db: Database, id: string, planned: string[], approved: string[], now = NOW, offerFp = fp): { intentId: string; orderId: string } {
   const owner = { actor: "owner", now }, pm = { actor: "agent-pm", now }, sched = { actor: "scheduler", now };
   createTask(db, owner, { project: "p", id, title: id, kind: "code", extra: { fileGlobs: planned } });
   setWorkflow(db, owner, { taskId: id, taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "manual" });
@@ -41,7 +41,7 @@ function liveCard(db: Database, id: string, planned: string[], approved: string[
   planIntent(db, pm, { id: intentId, taskId: id, taskRev: getTask(db, id)!.rev, workflowRev: getWorkflow(db, id)!.rev, causalSeq, node: "write",
     action: "dispatch", recipient: `peer:${peer}`, reason: "pool write", resources: planned });
   const order = offerLendCore(db, sched, { taskId: id, peer, family: "codex", repo, pr: null, spec: "spec text", borrow,
-    write: { fp, base: "main", baseSha: "b".repeat(40), report: null } });
+    write: { fp: offerFp, base: "main", baseSha: "b".repeat(40), report: null } });
   insertEvent(db, { ...sched, dedupKey: poolLinkKey(intentId) }, { project: "p", target: id, kind: "scheduler", text: "pool",
     data: { op: "pool_offer", id: intentId, orderId: order.orderId, peer, family: "codex", round: order.round, head: null, step: order.step } }, true);
   claimLend(db, owner, peer, { v: 1, orderId: order.orderId, worker: "w1" }, () => borrow);
@@ -380,13 +380,13 @@ test("an author session is the claimed worker only with a done ensure_session an
   refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "绑定记录");
 });
 
-test("a legitimate reclaim + re-lend keeps past extension provenance for the new author and the paused narrowing", () => {
+function rollover(peer2 = "next", fp2 = "dcba-4321-5678-9000") {
   const f = fixture();
   extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true });
   reclaimLend(f.db, pm, { taskId: "WX", reason: "PM ends former author" });
   settleIntent(f.db, pm, { id: f.card.intentId, from: "submitted", to: "cancelled" });
-  const peer2 = "next", fp2 = "dcba-4321-5678-9000", borrow2 = { ...borrow, peer: peer2 };
-  recordHello(f.db, peer2, fp2, { v: 1, proto: 3, boot: "b", seq: 1, grant: { until: NOW * 10, repos: [repo], roles: ["write"], ordersPerDay: 9, ordersLeftToday: 9 },
+  const borrow2 = { ...borrow, peer: peer2 };
+  recordHello(f.db, peer2, fp2, { v: 1, proto: 3, boot: "b", seq: 2, grant: { until: NOW * 10, repos: [repo], roles: ["write"], ordersPerDay: 9, ordersLeftToday: 9 },
     slots: { codex: { total: 4, busy: 0 }, claude: { total: 4, busy: 0 } }, paused: null }, NOW);
   const causalSeq = (f.db.query("SELECT MAX(seq) AS n FROM events WHERE project = 'p'").get() as { n: number }).n;
   planIntent(f.db, pm, { id: "replacement", taskId: "WX", taskRev: getTask(f.db, "WX")!.rev, workflowRev: getWorkflow(f.db, "WX")!.rev, causalSeq,
@@ -397,6 +397,11 @@ test("a legitimate reclaim + re-lend keeps past extension provenance for the new
     data: { op: "pool_offer", id: "replacement", orderId: order.orderId, peer: peer2, family: "codex", round: order.round, head: null, step: order.step } }, true);
   claimLend(f.db, owner, peer2, { v: 1, orderId: order.orderId, worker: "w2" }, () => borrow2);
   settleIntent(f.db, sched, { id: "replacement", from: "pending", to: "submitted", receipt: "claimed" });
+  return { f, order, peer2, fp2 };
+}
+
+test("a legitimate reclaim + re-lend keeps past extension provenance for the new author and the paused narrowing", () => {
+  const { f, order, peer2, fp2 } = rollover();
   widen(f);
   const next = extendLiveWriterScope(f.db, pm, { ...f.input({ orderId: order.orderId, peer: peer2 }), apply: true });
   expect(next).toMatchObject({ duplicate: false, added: ["docs/x.md"], held: ["docs/x.md", "src/a.ts", "src/b/*", "tests/b.test.ts"],
@@ -410,4 +415,95 @@ test("a legitimate reclaim + re-lend keeps past extension provenance for the new
     workflowRev: getWorkflow(f.db, "WX")!.rev, reason: "narrow after finished", registryPath: f.registryPath, apply: true });
   expect(paused).toMatchObject({ remove: ["docs/x.md", "src/b/*", "tests/b.test.ts"], reasons: [] });
   expect(f.files().map(r => r.resource)).toEqual(["src/a.ts"]);
+});
+
+test("historical fingerprint tail corruption after real rollover refuses with zero writes", () => {
+  const { f, order, peer2 } = rollover();
+  widen(f);
+  tamper(f, `UPDATE events SET data = json_set(data, '$.fp', 'abcd-0000-0000-0000') WHERE ${extendAudit}`);
+  const input = f.input({ orderId: order.orderId, peer: peer2 }), before = f.snapshot();
+  expect(extendLiveWriterScope(f.db, pm, input).executable).toBe(false);
+  expect(f.snapshot()).toEqual(before);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...input, apply: true }));
+});
+
+for (const [label, expression] of [
+  ["missing legacy evidence", "json_remove(data, '$.lend.fp')"],
+  ["damaged full fingerprint", "json_set(data, '$.lend.fp', 'abcd-0000-0000-0000')"],
+  ["malformed fingerprint", "json_set(data, '$.lend.fp', 7)"],
+]) test(`original offer ${label} after rollover refuses with zero writes`, () => {
+  const { f, order, peer2 } = rollover();
+  widen(f);
+  tamper(f, `UPDATE events SET data = ${expression} WHERE json_extract(data, '$.lend.orderId') = '${f.card.orderId}'
+    AND json_extract(data, '$.lend.op') = 'offer'`);
+  const input = f.input({ orderId: order.orderId, peer: peer2 }), before = f.snapshot();
+  expect(extendLiveWriterScope(f.db, pm, input).executable).toBe(false);
+  expect(f.snapshot()).toEqual(before);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...input, apply: true }));
+});
+
+test("a legacy offer without immutable fingerprint fails closed even before rollover", () => {
+  const f = fixture();
+  tamper(f, "UPDATE events SET data = json_remove(data, '$.lend.fp') WHERE json_extract(data, '$.lend.op') = 'offer'");
+  const before = f.snapshot();
+  expect(extendLiveWriterScope(f.db, pm, f.input()).executable).toBe(false);
+  expect(f.snapshot()).toEqual(before);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "原租期完整指纹证据缺失");
+});
+
+test("same peer and branch prefix rollover uses original offer identity rather than the overwritten lease", () => {
+  const { f, order, peer2, fp2 } = rollover(peer, "abcd-0000-1111-2222");
+  widen(f);
+  expect(extendLiveWriterScope(f.db, pm, { ...f.input({ orderId: order.orderId, peer: peer2 }), apply: true }))
+    .toMatchObject({ added: ["docs/x.md"], lease: { peer: peer2, fp: fp2, branch: "lend/WX-abcd" } });
+});
+
+test("formal offer persists the full lease identity in append-only evidence", () => {
+  const f = fixture();
+  const offer = f.db.query("SELECT data FROM events WHERE json_extract(data, '$.lend.op') = 'offer'").get() as { data: string };
+  expect(JSON.parse(offer.data).lend).toMatchObject({ orderId: f.card.orderId, peer, fp, branch: "lend/WX-abcd", step: "write" });
+  refuses(f, () => f.db.run("UPDATE events SET data = '{}' WHERE json_extract(data, '$.lend.op') = 'offer'"));
+});
+
+for (const mode of ["missing", "duplicate"]) test(`original offer ${mode} is zero-write after rollover`, () => {
+  const { f, order, peer2 } = rollover();
+  widen(f);
+  const where = `json_extract(data, '$.lend.orderId') = '${f.card.orderId}' AND json_extract(data, '$.lend.op') = 'offer'`;
+  tamper(f, mode === "missing" ? `DELETE FROM events WHERE ${where}` :
+    `INSERT INTO events (ts, actor, project, target, kind, text, data) SELECT ts, actor, project, target, kind, text, data FROM events WHERE ${where}`);
+  const input = f.input({ orderId: order.orderId, peer: peer2 }), before = f.snapshot();
+  expect(extendLiveWriterScope(f.db, pm, input).executable).toBe(false);
+  expect(f.snapshot()).toEqual(before);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...input, apply: true }));
+});
+
+test("review offer without write input remains valid and records no write fingerprint", () => {
+  const f = fixture();
+  reclaimLend(f.db, pm, { taskId: "WX", reason: "finish author" });
+  settleIntent(f.db, pm, { id: f.card.intentId, from: "submitted", to: "cancelled" });
+  deliver(f.db, owner, { taskId: "WX", moveFrom: "build", headSHA: "c".repeat(40), evidence: "synthetic result" });
+  const review = offerLendCore(f.db, sched, { taskId: "WX", peer, family: "codex", repo, pr: null, spec: "spec text",
+    borrow: { ...borrow, roles: ["review"] } });
+  const offers = f.db.query("SELECT data FROM events WHERE json_extract(data, '$.lend.orderId') = ? AND json_extract(data, '$.lend.op') = 'offer'")
+    .all(review.orderId) as { data: string }[];
+  expect(offers).toHaveLength(1);
+  expect(JSON.parse(offers[0]!.data).lend).toEqual({ orderId: review.orderId, peer, op: "offer", step: "review" });
+});
+
+test("formal producer normalizes its full fingerprint from the same write input", () => {
+  const f = fixture();
+  const card = liveCard(f.db, "UP", ["src/u.ts"], ["src/u.ts"], NOW, fp.toUpperCase());
+  const offer = f.db.query("SELECT data FROM events WHERE json_extract(data, '$.lend.orderId') = ? AND json_extract(data, '$.lend.op') = 'offer'")
+    .get(card.orderId) as { data: string };
+  expect(JSON.parse(offer.data).lend.fp).toBe(fp);
+  expect(f.db.query("SELECT fp FROM lend_write_leases WHERE taskId = 'UP'").get()).toEqual({ fp });
+});
+
+test("formal producer rejects invalid write fingerprint without an offer or lease", () => {
+  const f = fixture();
+  createTask(f.db, owner, { project: "p", id: "BAD", title: "bad fingerprint", kind: "code" });
+  moveStage(f.db, owner, { taskId: "BAD", from: "spec", to: "restate" });
+  moveStage(f.db, owner, { taskId: "BAD", from: "restate", to: "build" });
+  refuses(f, () => offerLendCore(f.db, sched, { taskId: "BAD", peer, family: "codex", repo, pr: null, spec: "spec text", borrow,
+    write: { fp: "invalid", base: "main", baseSha: "b".repeat(40), report: null } }));
 });

@@ -45,6 +45,19 @@ export function orderBinding(events: LedgerEvent[], intentId: string, orderId: s
   return { link, claim };
 }
 
+/** Immutable original offer identity; missing legacy evidence is refused rather than inferred from a mutable lease. */
+export function offerIdentityGap(events: LedgerEvent[], taskId: string, orderId: string, peer: string, step: string,
+  fp: string, branch: string, before = Infinity): string | null {
+  const offers = events.filter(x => x.kind === "note" && object(x.data.lend) &&
+    x.data.lend.orderId === orderId && x.data.lend.op === "offer");
+  if (offers.length !== 1 || offers[0]!.seq >= before) return "扩范围审计的原租期挂单缺失或重复";
+  const offer = offers[0]!.data.lend as Record<string, unknown>;
+  if (!text(offer.fp)) return "扩范围审计的原租期完整指纹证据缺失（旧挂单不可补猜）";
+  if (offer.peer !== peer || offer.step !== step || offer.branch !== branch || offer.fp !== fp ||
+    fp !== fp.toLowerCase() || lendBranch(taskId, fp) !== branch) return "扩范围审计的完整指纹与原租期挂单不符";
+  return null;
+}
+
 /** The approval the audit cites: the task rev it was written at and the fileGlobs that rev carried, from the card's own task events. */
 function approvedAt(events: LedgerEvent[], before: number): { rev: number | null; fileGlobs: unknown } {
   const tasks = events.filter(x => x.kind === "task" && x.seq < before);
@@ -99,15 +112,10 @@ function bindingGap(db: Database, project: string, e: LedgerEvent, d: ScopeExten
   if (!order || order.taskId !== e.target || order.project !== project || order.peer !== d.peer || order.worker !== d.worker ||
     order.step !== stepOfStage(d.stage) || order.specRev !== d.specRev || order.round !== d.round || order.branch !== d.branch ||
     order.leaseGen < d.gen) return "扩范围审计与出借单记录不符";
-  const offers = events.filter(x => x.kind === "note" && x.seq < e.seq && object(x.data.lend) && x.data.lend.orderId === d.orderId && x.data.lend.op === "offer");
-  if (offers.length !== 1 || (offers[0]!.data.lend as Record<string, unknown>).branch !== d.branch) return "扩范围审计的出借分支与挂单记录不符";
-  // The full lease was checked live when the audit was written. History is bound to the order / offer branch its fingerprint derives;
-  // the lease row still proves the full fingerprint only while it is that same tenancy (same peer and branch). A later legitimate
-  // reclaim + re-lend to another peer overwrites the row and must not turn a real past audit into a lost one.
-  if (d.fp !== d.fp.toLowerCase() || lendBranch(e.target, d.fp) !== d.branch) return "扩范围审计的指纹与出借分支不符";
+  const offerGap = offerIdentityGap(events, e.target, d.orderId, d.peer, order.step, d.fp, d.branch, e.seq);
+  if (offerGap) return offerGap;
   const lease = getWriteLease(db, e.target);
   if (!lease || lease.project !== project) return "扩范围审计的写租约记录缺失";
-  if (lease.peer === d.peer && lease.branch === d.branch && lease.fp.toLowerCase() !== d.fp) return "扩范围审计的指纹与同一写租约不符";
   return null;
 }
 
