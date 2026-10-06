@@ -35,6 +35,8 @@ import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
 import { readPeers } from "../lib/peers.js";
+import { readPinnedKey } from "../lib/pool-review-proof-admit.js";
+import { saveRawResult } from "../lib/pool-review-proof-raw.js";
 import { runBounded } from "../lib/run-bounded.js";
 import { getEventByDedup, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { scanRelays, settleRelay, takeRelays, type RelaySend } from "../lib/ledger-lend-relay.js";
@@ -83,6 +85,8 @@ function realLendDeps(c: LedgerCli): LendCliDeps {
         writeTextAtomicSync(path, body);
       },
       sign: (fields) => signPurpose(RECEIPT_PURPOSE, fields),
+      saveRaw: (text) => saveRawResult(statePath("ledger", "lend-raw"), text),
+      pinnedKey: readPinnedKey,
       remoteHead: (repo, branch) => remoteHeadAt(repo, branch, runBounded),
       peerFp: async (peer) => {
         const rec = ((await readPeers()).httpPeers ?? []).find((p) => p.name === peer && !p.disabled);
@@ -264,7 +268,8 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
   const sha = createHash("sha256").update(raw as string, "utf8").digest("hex");
   const payload = req.value as Parameters<typeof isDeliverRequest>[0];
   const receipt = isDeliverRequest(payload) ? await writeLendDeliver(c.db, c.ctx(), peer, payload, sha, writeDeps(c))
-    : writeLendResult(c.db, { actor: `peer:${peer}`, now: c.deps.now() }, peer, payload, sha, lendDeps(c).result);
+    : writeLendResult(c.db, { actor: `peer:${peer}`, now: c.deps.now() }, peer, payload, sha, lendDeps(c).result,
+      { raw, pinned: await lendDeps(c).result.pinnedKey?.(peer) ?? null });
   return { ok: true, v, receipt };
 }
 
