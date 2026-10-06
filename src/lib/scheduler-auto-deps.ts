@@ -35,6 +35,7 @@ import { createAcpWorker } from "./worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.js";
 import type { AdapterDeps } from "./worker-ports.js";
 import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
+import { ghPrState } from "./scheduler-merge-handoff-tick.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -174,5 +175,6 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
     notifyPm: (task, text) => notifyPm(env, task, text),
     now: () => Date.now(),
     borrow: readEffectiveBorrow,
+    prState: ghPrState(),
   };
 }

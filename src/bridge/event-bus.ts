@@ -22,6 +22,9 @@ export type BridgeEventType =
   | "compact_done"
   // v2.21.2+ 压缩进度(pane 进度条百分比,8s 一刷;transient 不进环)
   | "compact_progress"
+  // registry 换到了新会话（/clear 轮转、Stop 自愈，bridge/clear-rotation.ts claimRotatedSession）：data {from, to}；
+  // 网页插「已清空」提示、重拉历史（watcher 从新文件末尾起读，新会话首回合没直播过）、刷 ctx
+  | "session_rotated"
   // v2.7+ 会话对账异常：bg 分身出现 / 链路掉线 / 收编与清理结果（agents 模式适配）
   | "session_anomaly"
   // v2.8+ bg 活动生命周期（subagent / 后台 shell 任务），data.kind 区分
