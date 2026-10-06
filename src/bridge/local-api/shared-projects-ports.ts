@@ -1,19 +1,17 @@
 import type { Ask } from "../../lib/ledger-asks.js";
 import type { CreateAskInput } from "../asks.js";
 import type { SharedLedgerBinding } from "../../lib/shared-ledger-gate-bindings.js";
-import type { JoinOfferProject } from "../../lib/shared-ledger-join-offer.js";
+import type { V2ProjectRecord, V2ProjectMember, V2ProjectOperation } from "../../lib/shared-ledger-contract-v2-projects.js";
 
 /** N1–N3 adapters must verify signatures and grants before exposing these secret-free records. */
 export interface ProjectPerson {
   subject: "owner:self"; kind: "person"; centerId: string; teamId: string; personId: string; instanceId: string;
 }
-interface SharedProjectRecord extends JoinOfferProject {
-  centerId: string; rev: number; status: "active" | "archived";
-}
+type SharedProjectRecord = V2ProjectRecord;
 export type ProjectSelection = { mode: "create" } | { mode: "existing"; localProjectId: string };
 export interface ProjectCreate { operationId: string; id?: string; name: string; selection?: ProjectSelection }
 export interface CreatorOperation {
-  operationId: string; version: number; project: SharedProjectRecord;
+  operation: V2ProjectOperation; project: SharedProjectRecord;
 }
 export interface BootstrapPreflight {
   centerId: string; teamId: string; personId: string; instanceId: string; instanceKeyDigest: string;
@@ -29,19 +27,22 @@ export interface SharedProjectsPorts {
   /** N3 mints and delivers in memory; output contains no code or response body. */
   invite: (who: ProjectPerson, projectId: string, peers: string[], note?: string) => Promise<{ peer: string; offerId: string; accepted: boolean }[]>;
   operation: (who: ProjectPerson, operationId: string) => Promise<CreatorOperation>;
-  /** N3 recovery uses the operation version; N2 validates identity before saving B, without touching A. */
+  /** N3 recovery uses the canonical operation revision; N2 validates identity before saving B, without touching A. */
   saveCreatorCredential: (who: ProjectPerson, operation: CreatorOperation) => Promise<void>;
   credentialSaved: (who: ProjectPerson, project: SharedProjectRecord) => Promise<boolean>;
   bind: (who: ProjectPerson, project: SharedProjectRecord, selection: ProjectSelection) => Promise<string>;
   /** Must read B via the real gate proxy, after credential readback and binding. */
   gateRead: (who: ProjectPerson, project: SharedProjectRecord, localProjectId: string) => Promise<boolean>;
-  members: (who: ProjectPerson, projectId: string) => Promise<{ personId: string; code: string; role: "owner" | "member"; status: "invited" | "active" | "removed" }[]>;
+  members: (who: ProjectPerson, projectId: string) => Promise<V2ProjectMember[]>;
   remove: (who: ProjectPerson, projectId: string, personId: string) => Promise<void>;
   setDirs: (who: ProjectPerson, projectId: string, localProjectId: string, dirs: string[]) => Promise<void>;
   leave: (who: ProjectPerson, projectId: string, localProjectId: string) => Promise<void>;
   bindings: () => SharedLedgerBinding[];
   eligible: () => Promise<{ id: string; name: string }[]>;
   openAsk: (input: CreateAskInput) => Ask;
+  getAsk: (id: string) => Ask | null;
+  /** Durable, synchronous one-time claim after the stored card and its approval have been checked. */
+  claimAsk: (ask: Ask) => boolean;
   /** Deployment authorization is separate from local owner authority, and cannot come from an agent. */
   deploymentAuthorized: () => Promise<boolean>;
   preflight: (who: ProjectPerson, operationId: string) => Promise<BootstrapPreflight>;

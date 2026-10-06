@@ -1,10 +1,14 @@
 import type { Ask } from "../../lib/ledger-asks.js";
 import type { SharedProjectsPorts } from "./shared-projects-ports.js";
+import { sharedProjectAskPorts } from "./shared-projects-asks.js";
 import { answerSharedProject } from "./shared-projects-actions.js";
 
 let ports: SharedProjectsPorts | undefined;
 /** N4 production adapter registration; absence must remain a visible 503 rather than fabricated project success. */
-export function configureSharedProjects(adapter: SharedProjectsPorts | undefined): void { ports = adapter; }
+export function configureSharedProjects(adapter: (Omit<SharedProjectsPorts, "openAsk" | "getAsk" | "claimAsk">
+  & Partial<Pick<SharedProjectsPorts, "openAsk" | "getAsk" | "claimAsk">>) | undefined): void {
+  ports = adapter ? { ...sharedProjectAskPorts(), ...adapter } : undefined;
+}
 export function sharedProjectsPorts(): SharedProjectsPorts | undefined { return ports; }
 export async function onSharedProjectAnswered(ask: Ask): Promise<void> {
   if (!ports || ask.extra.sharedProjectAction !== true) return;

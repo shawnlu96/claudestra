@@ -1,3 +1,4 @@
+import { parseV2ProjectsResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { bindHash, checkAsk } from "../../lib/ask-bind.js";
 import { MASTER_PROJECT, ownerAnswered, type Ask } from "../../lib/ledger-asks.js";
 import { projectChoices, selectedProject, type ProjectChoice } from "./shared-projects-choice.js";
@@ -40,10 +41,11 @@ export async function proposeSharedProject(input: ProjectCreate, d: SharedProjec
     `建议新建团队项目 ${input.name}`, `中心 ${who.centerId}；团队 ${who.teamId}；本人 ${who.personId}；实例 ${who.instanceId}`);
 }
 
-function requireOperation(who: ProjectPerson, operation: CreatorOperation, operationId: string) {
-  if (operation.operationId !== operationId || operation.project.centerId !== who.centerId || operation.project.teamId !== who.teamId) {
-    throw new SharedProjectsError(403, "operation_mismatch");
-  }
+function requireOperation(who: ProjectPerson, value: CreatorOperation, operationId: string): CreatorOperation {
+  const parsed = parseV2ProjectsResponse("operation", 200, { ok: true, v: 2, ...value },
+    { centerId: who.centerId, teamId: who.teamId, personId: who.personId, instanceId: who.instanceId, operationId });
+  if (!parsed.ok || parsed.operation.state === "revoked") throw new SharedProjectsError(403, "operation_mismatch");
+  return { project: parsed.project, operation: parsed.operation };
 }
 
 async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operationId: string, selection?: ProjectSelection) {
@@ -53,11 +55,10 @@ async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operatio
 }
 
 /** The only success path reads the saved B credential, then binds, then reads B through the gate proxy. */
-export async function completeSharedProject(who: ProjectPerson, operationId: string, selection: ProjectSelection | undefined,
+async function completeSharedProject(who: ProjectPerson, operationId: string, selection: ProjectSelection | undefined,
   d: SharedProjectsPorts, created?: CreatorOperation): Promise<Record<string, unknown>> {
   try {
-    const operation = created ?? await d.operation(who, operationId);
-    requireOperation(who, operation, operationId);
+    const operation = requireOperation(who, created ?? await d.operation(who, operationId), operationId);
     if (!await d.credentialSaved(who, operation.project)) await d.saveCreatorCredential(who, operation);
     if (!await d.credentialSaved(who, operation.project)) throw new SharedProjectsError(503, "credential_not_saved");
     if (!selection) {
@@ -107,31 +108,49 @@ function requirePreflight(who: ProjectPerson, operationId: string, p: BootstrapP
     throw new SharedProjectsError(403, "bootstrap_preflight_rejected");
   }
 }
-const running = new Set<string>();
+/** HTTP recovery uses the original stored approval; the request cannot replace its local selection. */
+export async function continueSharedProject(operationId: string, askId: string, d: SharedProjectsPorts) {
+  const ask = d.getAsk(askId);
+  if (!ask || ask.state !== "answered" || ask.createdBy !== CREATOR || (ask.bind?.params as ProjectAction | undefined)?.operationId !== operationId) {
+    throw new SharedProjectsError(403, "ask_check_failed");
+  }
+  return answerSharedProject(ask, d);
+}
 /** Ask parameters, owner identity and expiry are rechecked even when the caller bypasses the HTTP UI. */
 export async function answerSharedProject(a: Ask, d: SharedProjectsPorts): Promise<Record<string, unknown> | null> {
   if (a.createdBy !== CREATOR || a.extra.sharedProjectAction !== true || a.state !== "answered") return null;
+  const stored = d.getAsk(a.id);
+  if (!stored || stored.state !== "answered" || stored.createdBy !== CREATOR
+    || !stored.bind || !a.bind || stored.bind.paramsHash !== a.bind.paramsHash
+    || bindHash(stored.bind, CREATOR) !== bindHash(a.bind, CREATOR)) throw new SharedProjectsError(403, "ask_check_failed");
+  a = stored;
   const action = a.bind?.params as ProjectAction | undefined;
   if (!action || !a.bind || bindHash(a.bind, CREATOR) !== a.bind.paramsHash || !ownerAnswered(a.answer)
     || !checkAsk({ ...a, fromAgent: CREATOR }, bindHash(binding(action), CREATOR), CREATOR, d.now()).ok) {
     throw new SharedProjectsError(403, "ask_check_failed");
   }
-  if (running.has(a.id)) throw new SharedProjectsError(409, "operation_in_progress");
-  running.add(a.id);
-  try {
-    const who = await d.person();
-    requireProjectPerson(who);
-    if (!samePerson(who, action.who)) throw new SharedProjectsError(403, "person_changed");
-    if (action.kind === "bootstrap") {
-      if (!await d.deploymentAuthorized() || !action.preflight) throw new SharedProjectsError(403, "deployment_authorization_required");
-      requirePreflight(who, action.operationId, action.preflight, d.now());
-      await d.confirmOwner(who, action.preflight);
-      return { ok: true };
+  const who = await d.person();
+  requireProjectPerson(who);
+  if (!samePerson(who, action.who)) throw new SharedProjectsError(403, "person_changed");
+  if (action.kind === "bootstrap") {
+    if (!await d.deploymentAuthorized() || !action.preflight) throw new SharedProjectsError(403, "deployment_authorization_required");
+    requirePreflight(who, action.operationId, action.preflight, d.now());
+    const current = await d.preflight(who, action.operationId);
+    requirePreflight(who, action.operationId, current, d.now());
+    if (current.summaryDigest !== action.preflight.summaryDigest || current.instanceKeyDigest !== action.preflight.instanceKeyDigest) {
+      throw new SharedProjectsError(403, "bootstrap_preflight_changed");
     }
-    if (action.kind === "create" && action.input) return createSharedProject(action.input, d);
-    if (action.kind !== "complete") throw new SharedProjectsError(400, "invalid_action");
-    const selection = action.choices ? selectedProject(a.answer?.choices ?? [], action.choices) : action.selection;
-    if (action.choices && !selection) throw new SharedProjectsError(400, "local_project_required");
-    return completeSharedProject(who, action.operationId, selection ?? undefined, d);
-  } finally { running.delete(a.id); }
+    if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
+    await d.confirmOwner(who, action.preflight);
+    return { ok: true };
+  }
+  if (action.kind === "create" && action.input) {
+    if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
+    return createSharedProject(action.input, d);
+  }
+  if (action.kind !== "complete") throw new SharedProjectsError(400, "invalid_action");
+  const selection = action.choices ? selectedProject(a.answer?.choices ?? [], action.choices) : action.selection;
+  if (action.choices && !selection) throw new SharedProjectsError(400, "local_project_required");
+  if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
+  return completeSharedProject(who, action.operationId, selection ?? undefined, d);
 }

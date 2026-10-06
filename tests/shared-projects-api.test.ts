@@ -1,3 +1,5 @@
+import { sharedProjectsSnapshot } from "../src/bridge/local-api/shared-projects-snapshot.js";
+import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures.js";
 import { describe, expect, test } from "bun:test";
 import type { Ask } from "../src/lib/ledger-asks.js";
 import type { Principal } from "../src/lib/principals.js";
@@ -9,21 +11,24 @@ import { SharedProjectsError, type SharedProjectsPorts, type ProjectPerson } fro
 const owner: Principal = { id: "owner:self", role: "owner", agents: ["*"], manage: true, createdAt: "" };
 const operationId = "operation_123456789";
 const person: ProjectPerson = { subject: "owner:self", kind: "person", centerId: "center-a", teamId: "team-a", personId: "alice", instanceId: "machine-a" };
-const project = { centerId: "center-a", teamId: "team-a", projectId: "b", name: "Project B", status: "active" as const, rev: 1 };
+const canonical = createV2ProjectsFixtures();
+const project = { ...canonical.project, centerId: person.centerId, teamId: person.teamId, projectId: "b", name: "Project B", createdBy: person.personId };
+const operation = { ...canonical.operation, centerId: project.centerId, teamId: project.teamId, projectId: project.projectId, operationId, personId: person.personId, instanceId: person.instanceId };
 function fixture() {
   const calls: string[] = [], asks: Ask[] = [];
   let saved = false;
+  const claimed = new Set<string>();
   const d: SharedProjectsPorts = {
     now: () => Date.now(), person: async () => person, list: async () => [project],
-    create: async () => { calls.push("create"); return { operationId, version: 1, project }; },
+    create: async () => { calls.push("create"); return { operation, project }; },
     patch: async (_who, id, b) => ({ ...project, projectId: id, ...b }),
     invite: async (_who, _id, peers) => peers.map(peer => ({ peer, offerId: "a".repeat(32), accepted: true })),
-    operation: async () => { calls.push("query"); return { operationId, version: 1, project }; },
+    operation: async () => { calls.push("query"); return { operation, project }; },
     saveCreatorCredential: async () => { calls.push("save-b"); saved = true; },
     credentialSaved: async () => { calls.push("read-b"); return saved; },
     bind: async () => { calls.push("bind-b"); return "local-b"; },
     gateRead: async () => { calls.push("gate-b"); return true; },
-    members: async () => [{ personId: "alice", code: "Alice", role: "owner", status: "active" }],
+    members: async (_who, projectId) => [{ ...canonical.member, centerId: person.centerId, teamId: person.teamId, projectId, personId: "alice", code: "Alice", role: "owner", status: "active" }],
     remove: async () => { calls.push("remove"); }, setDirs: async () => { calls.push("dirs"); }, leave: async () => { calls.push("leave"); },
     bindings: () => [{ centerId: "center-a", teamId: "team-a", projectId: "a", localProjectId: "local-a" }],
     eligible: async () => [{ id: "local-b", name: "Project B" }],
@@ -31,6 +36,8 @@ function fixture() {
       const a = { ...input, id: `ask_${asks.length}`, state: "open", answer: null, fromAgent: null, extra: input.extra ?? {} } as Ask;
       asks.push(a); return a;
     },
+    getAsk: id => asks.find(a => a.id === id) ?? null,
+    claimAsk: a => { if (claimed.has(a.id)) return false; claimed.add(a.id); return true; },
     deploymentAuthorized: async () => true,
     preflight: async () => ({ ...person, operationId, instanceKeyDigest: "a".repeat(64), summaryDigest: "b".repeat(64),
       expiresAt: Date.now() + 60000, ownerCount: 0, memberActive: true }),
@@ -44,8 +51,8 @@ function fixture() {
   return { d, calls, asks, request };
 }
 function approve(a: Ask, changes: Partial<Ask> = {}): Ask {
-  return { ...a, state: "answered", answer: { choices: ["[button:shared_project_confirm]"], labels: ["confirm"], text: "", principal: "owner:self",
-    owner: true, via: "web_card", at: Date.now() }, ...changes };
+  return Object.assign(a, { state: "answered" as const, answer: { choices: ["[button:shared_project_confirm]"], labels: ["confirm"], text: "", principal: "owner:self",
+    owner: true, via: "web_card" as const, at: Date.now() }, ...changes });
 }
 const create = { operationId, name: "Project B", selection: { mode: "create" as const } };
 
@@ -68,13 +75,16 @@ describe("owner-only shared project routes", () => {
     const other = new URL("http://fixture/api/v1/other");
     expect(await handleSharedProjectsApi(new Request(other.toString()), other, { auth: async () => owner })).toBeNull();
   });
-  test("list joins local binding and strips arbitrary response fields", async () => {
+  test("list joins local binding and rejects unknown canonical response fields", async () => {
     const w = fixture();
-    w.d.list = async () => [{ ...project, projectId: "a", bearer: "DO_NOT_SHOW" } as typeof project];
+    w.d.list = async () => [{ ...project, projectId: "a" }];
     const response = await w.request("GET");
     const body = await response!.json() as { projects: { localProjectIds: string[] }[] };
     expect(body.projects[0].localProjectIds).toEqual(["local-a"]);
-    expect(JSON.stringify(body)).not.toContain("DO_NOT_SHOW");
+    w.d.list = async () => [{ ...project, projectId: "a", bearer: "DO_NOT_SHOW" } as typeof project];
+    const malformed = await w.request("GET");
+    expect(malformed!.status).toBe(503);
+    expect(await malformed!.text()).not.toContain("DO_NOT_SHOW");
   });
   test("request cannot choose person or service; malformed and oversized bodies are rejected", async () => {
     const w = fixture();
@@ -217,7 +227,10 @@ test("members, remove, dirs and leave delegate only after explicit binding check
 
 test("HTTP continue queries the existing creator operation and never creates again", async () => {
   const w = fixture();
-  const response = await w.request("POST", `/operations/${operationId}/continue`, { selection: { mode: "create" } });
+  w.d.saveCreatorCredential = async () => { throw new Error("synthetic persistence failure"); };
+  await createSharedProject(create, w.d);
+  const a = approve(w.asks[0]!); w.asks[0] = a; w.calls.length = 0;
+  const response = await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id });
   expect(response!.status).toBe(200);
   expect(w.calls[0]).toBe("query");
   expect(w.calls).not.toContain("create");
@@ -233,4 +246,55 @@ test("retry after a successful bind and failed gate read reuses B's binding", as
   w.d.gateRead = async () => true;
   expect((await answerSharedProject(approve(w.asks[0]!), w.d))!.available).toBe(true);
   expect(w.calls.filter(c => c === "bind-b")).toHaveLength(1);
+});
+
+
+test("continue cannot replace selection, consume an unapproved card or replay an executed approval", async () => {
+  const w = fixture();
+  w.d.gateRead = async () => false;
+  await createSharedProject(create, w.d);
+  const a = w.asks[0]!;
+  expect((await w.request("POST", `/operations/${operationId}/continue`, { selection: { mode: "existing", localProjectId: "local-a" } }))!.status).toBe(400);
+  expect((await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id }))!.status).toBe(403);
+  const approved = approve(a);
+  await answerSharedProject(approved, w.d);
+  const before = [...w.calls];
+  await expect(answerSharedProject(approved, w.d)).rejects.toThrow();
+  expect(w.calls).toEqual(before);
+});
+
+test("foreign person/instance or revoked creator operation cannot save or bind", async () => {
+  for (const mutation of [{ personId: "other" }, { instanceId: "other" }, { state: "revoked" as const }]) {
+    const w = fixture();
+    w.d.create = async () => ({ project, operation: { ...operation, ...mutation } });
+    expect((await createSharedProject(create, w.d)).available).toBe(false);
+    expect(w.calls).toEqual([]);
+  }
+});
+
+test("bootstrap rechecks current owners and approved digests before invoking the executor", async () => {
+  for (const mutation of [{ ownerCount: 1 }, { summaryDigest: "c".repeat(64) }, { instanceKeyDigest: "c".repeat(64) }]) {
+    const w = fixture(); const a = await bootstrapSharedProject(operationId, w.d), preflight = w.d.preflight;
+    w.d.preflight = async (...args) => ({ ...await preflight(...args), ...mutation });
+    await expect(answerSharedProject(approve(a), w.d)).rejects.toThrow();
+    expect(w.calls).toEqual([]);
+  }
+});
+
+test("N5 snapshot reads canonical members and actual local state; team authority remains explicitly unavailable", async () => {
+  const w = fixture();
+  const local = { projects: [{ id: "local-a", name: "A", dirs: ["/synthetic/a"], personal: false },
+    { id: "local-b", name: "B", dirs: [], personal: false }, { id: "personal", name: "Mine", dirs: [], personal: true }],
+    peers: [{ name: "synthetic-peer", enabled: true, invitable: true, outToken: "DO_NOT_SHOW" }] };
+  const snapshot = await sharedProjectsSnapshot(w.d, local);
+  expect(snapshot.identity).toEqual(person);
+  expect(snapshot.teamRole).toEqual({ available: false, reason: "center_team_role_read_contract_unavailable" });
+  expect(snapshot.projects[0]!.projectRole).toEqual({ available: true, value: "owner" });
+  expect(snapshot.localProjects.map(p => p.eligible)).toEqual([false, true, false]);
+  expect(snapshot.localProjects[0]!.dirs).toEqual(["/synthetic/a"]);
+  expect(JSON.stringify(snapshot)).not.toContain("DO_NOT_SHOW");
+  w.d.members = async () => { throw new Error("SECRET_RESPONSE"); };
+  const failed = await sharedProjectsSnapshot(w.d, local);
+  expect(failed.projects[0]!.projectRole.available).toBe(false);
+  expect(JSON.stringify(failed)).not.toContain("SECRET_RESPONSE");
 });

@@ -1,19 +1,22 @@
 import { isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { canManage } from "../../lib/devices.js";
 import { readBoundedRequestBody, RequestBodyError } from "../../lib/request-body.js";
+import { parseV2ProjectRecord, parseV2ProjectsRequest, parseV2ProjectsResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
 import { authenticateApi } from "../api-auth.js";
 import { apiJson } from "../api-respond.js";
+import { sharedProjectsSnapshot, readSharedProjectsLocalSnapshot, type SharedProjectsLocalSnapshot, type SharedProjectsSnapshot } from "./shared-projects-snapshot.js";
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
-import { bootstrapSharedProject, createSharedProject, completeSharedProject } from "./shared-projects-actions.js";
-import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
+import { bootstrapSharedProject, createSharedProject, continueSharedProject } from "./shared-projects-actions.js";
+import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const ROOT = "/api/v1/shared-projects";
 const ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const OP = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/;
+const OP = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 export interface SharedProjectsRouteDeps {
   auth: (req: Request, url: URL) => Promise<Principal | Response>;
   ports?: SharedProjectsPorts;
+  localSnapshot?: () => Promise<SharedProjectsLocalSnapshot>;
 }
 /** Explicit seam until N1–N3 land. Never fabricate a person or call the old grant-writing join path as a fallback. */
 const live: SharedProjectsRouteDeps = { auth: (req, url) => authenticateApi(req, url, { rateLimit: true }) };
@@ -38,16 +41,19 @@ function selection(value: unknown): ProjectSelection | undefined {
   if (b.mode === "existing" && typeof b.localProjectId === "string" && ID.test(b.localProjectId)) return { mode: "existing", localProjectId: b.localProjectId };
   throw new SharedProjectsError(400, "invalid_selection");
 }
-function createInput(b: Record<string, unknown>): ProjectCreate {
+function createInput(b: Record<string, unknown>, who: ProjectPerson): ProjectCreate {
   keys(b, ["operationId", "id", "name", "selection"]);
   if (typeof b.operationId !== "string" || !OP.test(b.operationId) || (b.id !== undefined && (typeof b.id !== "string" || !ID.test(b.id)))) {
     throw new SharedProjectsError(400, "invalid_body");
   }
-  return { operationId: b.operationId, name: name(b.name), ...(b.id ? { id: b.id as string } : {}), selection: selection(b.selection) };
+  const input = parseV2ProjectsRequest("create", { centerId: who.centerId, teamId: who.teamId,
+    operationId: b.operationId, name: name(b.name), ...(b.id !== undefined ? { id: b.id } : {}) });
+  return { operationId: input.operationId, name: input.name, ...(input.id ? { id: input.id } : {}), selection: selection(b.selection) };
 }
 
 /** Only public project fields leave the bridge, even when an injected center adapter returns extra fields. */
 function publicProject(p: Awaited<ReturnType<SharedProjectsPorts["list"]>>[number], d: SharedProjectsPorts) {
+  p = parseV2ProjectRecord(p);
   const display = joinOfferProjectDisplay({ teamId: p.teamId, projectId: p.projectId, name: p.name });
   if (!display || !Number.isSafeInteger(p.rev) || !["active", "archived"].includes(p.status)) throw new SharedProjectsError(503, "invalid_center_response");
   const bindings = d.bindings().filter(b => b.centerId === p.centerId && b.teamId === p.teamId && b.projectId === p.projectId);
@@ -59,7 +65,11 @@ async function memberAndLocalRoute(req: Request, path: string, b: Record<string,
   const who = await d.person();
   requireProjectPerson(who);
   if (m[2] === "members" && req.method === "GET") {
-    const members = await d.members(who, m[1]!);
+    const result = parseV2ProjectsResponse("members", 200,
+      { ok: true, v: 2, centerId: who.centerId, teamId: who.teamId, projectId: m[1], members: await d.members(who, m[1]!) },
+      { centerId: who.centerId, teamId: who.teamId, projectId: m[1] });
+    if (!result.ok) throw new SharedProjectsError(503, "invalid_center_response");
+    const members = result.members;
     return apiJson(200, { ok: true, members: members.map(p => ({ personId: p.personId, code: p.code, role: p.role, status: p.status })) });
   }
   if (m[3] && req.method === "POST") {
@@ -88,17 +98,18 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
   if (other) return other;
   const who = await d.person();
   requireProjectPerson(who);
-  const continuing = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9_-]{16,128})\/continue$/.exec(path);
+  const continuing = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})\/continue$/.exec(path);
   if (continuing && req.method === "POST") {
-    keys(b, ["selection"]);
-    return apiJson(200, await completeSharedProject(who, continuing[1]!, selection(b.selection), d));
+    keys(b, ["askId"]);
+    if (typeof b.askId !== "string") throw new SharedProjectsError(400, "invalid_body");
+    return apiJson(200, await continueSharedProject(continuing[1]!, b.askId, d));
   }
   if (path === ROOT && req.method === "GET") {
     const projects = await d.list(who);
     if (projects.some(p => p.centerId !== who.centerId || p.teamId !== who.teamId)) throw new SharedProjectsError(503, "invalid_center_response");
     return apiJson(200, { ok: true, projects: projects.map(p => publicProject(p, d)) });
   }
-  if (path === ROOT && req.method === "POST") return apiJson(200, await createSharedProject(createInput(b), d));
+  if (path === ROOT && req.method === "POST") return apiJson(200, await createSharedProject(createInput(b, who), d));
   if (path === `${ROOT}/owner-bootstrap` && req.method === "POST") {
     keys(b, ["operationId"]);
     if (typeof b.operationId !== "string" || !OP.test(b.operationId)) throw new SharedProjectsError(400, "invalid_body");
@@ -138,6 +149,10 @@ export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedP
   if (!ports) return apiJson(503, { ok: false, code: "shared_projects_adapter_unavailable" });
   try {
     if (url.search) throw new SharedProjectsError(400, "invalid_query");
+    if (url.pathname === `${ROOT}/snapshot` && req.method === "GET") {
+      const snapshot: SharedProjectsSnapshot = await sharedProjectsSnapshot(ports, await (d.localSnapshot ?? readSharedProjectsLocalSnapshot)());
+      return apiJson(200, snapshot);
+    }
     const b = req.method === "GET" ? {} : record(JSON.parse(new TextDecoder().decode(await readBoundedRequestBody(req, 8192))));
     return await route(req, url.pathname, b, ports);
   } catch (error) {
