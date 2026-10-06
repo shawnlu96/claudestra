@@ -3,8 +3,9 @@
 代替上游 [codex-acp](https://github.com/agentclientprotocol/codex-acp) 2.1.0 的自研适配器：stdin/stdout 对宿主讲 ACP v1，子进程跑
 `$CODEX_PATH app-server`（独立进程组）。为什么自研、上线门槛见 2026-10-05 的决定（mem0 b1986816）。
 
-**现状：不接入生产。** `host-runtime.ts` 不会选它，只能用 `CLAUDESTRA_ACP_AGENT='["bun","<仓库>/src/lib/acp/codex-adapter/main.ts"]'` 手工起。
-选择逻辑、版本闸和切换归 CXF-S。
+**现状：可选，缺省不用。** 选择开关（`manager codex-adapter`，[codex-acp.md「适配器选择开关」](./codex-acp.md#适配器选择开关上游-codex-acp-还是自研cxf-s)）
+缺省全体上游；单个 agent 或全局切到自研，一条 `codex-adapter rollback` 切回。手工覆盖
+`CLAUDESTRA_ACP_AGENT='["bun","<仓库>/src/lib/acp/codex-adapter/main.ts"]'` 照旧可用。
 
 代码注释里的 B / I / R / D 编号、「设计 §2.1 / §2.4」指的是 CX-0 前的设计稿。那份稿子不在仓库里，也没在台账、mem0 里找到。
 本文按现有代码（CX-1、CX-2、CX2B、CX-3）整理，下文和代码不一致时以代码和测试为准。CX-0 实测结论在
@@ -135,3 +136,23 @@ prompt 的回包都带 `usage` 和 `_meta.quota`（当前会话最近一次 `thr
   provider 指向本机假 Responses，代理指到死端口；不碰 `~/.codex`，不连生产 bridge。场景：文本、命令、读、搜、列目录、plan、
   审批允许 / 拒绝 / 等卡时叫停、打断。
 - schema 漂移：`bun scripts/codex-schema/lock.ts --check`。
+- 切换上线（下节）：`bun scripts/codex-adapter-relay.ts --out <目录> [--npm 0.159.3,0.160.1]`；
+  单测 `tests/codex-adapter-switch*.test.ts`、`tests/acp-host-runtime-switch.test.ts`。
+
+## 切换上线实测（CXF-S）
+
+门槛（2026-10-05 审计定）：独立契约 + 故障竞争 + 真实 CLI 组合实测（含 2.1.0 → 自研 → 2.1.0 线程接力）+ 可撤回切换。
+2026-10-07 实测：codex-cli 0.159.3、上游 codex-acp 2.1.0、自研指纹 `fe72de94167a`，组合身份 `6470667c55a0e5c2`。
+
+| 门槛 | 怎么验的 | 结果 |
+|------|------|------|
+| 独立契约 | `tests/codex-adapter-*.test.ts`（假 app-server + 宿主真用的 `AcpSession`）；CX-3 的 `codex-acp-compare.ts` 对照 | 全绿；和 2.1.0 的差异见上节 |
+| 线程接力 | `scripts/codex-adapter-relay.ts`：真 ACP 宿主 + 真 codex app-server + 假 Responses，隔离 CODEX_HOME。2.1.0 建线程 → 2.1.0 一轮 → 切自研一轮（带命令）→ 切回 2.1.0 一轮 | 三段都按 session/resume 接回同一线程；每段发给模型的请求里都有之前所有回合（含自研段的命令输出）；rollout 只有一份；真 `~/.codex` 前后指纹一致 |
+| 切换时宿主在回合中 | 同一个脚本（回合挂着时切）+ `tests/codex-adapter-switch.test.ts` | 开关照改、不重启、列进 deferred；打断收尾后再切才重启 |
+| 起不来退回上游 | `tests/acp-host-runtime-switch.test.ts`（真宿主 + stub）、`tests/codex-adapter-switch.test.ts` | 起来就退、initialize 被拒 → 换上游接回同一线程、标就绪、不出失败卡，先到的消息照常答；没装上游时照旧拒起；协议判不过（不兼容 / unknown）在起之前就换上游 |
+| app-server 崩溃 | relay 脚本在自研回合中 SIGKILL app-server；`codex-adapter-shutdown.test.ts` R8 R23 | 那一轮按失败收尾（StopFailure），适配器退出码 1，宿主退避后重起的还是自研、接回同一线程，下一轮历史还在 |
+| 打断和插话同时到达 | `tests/codex-adapter-switch-races.test.ts` | 只 interrupt 一次。先插话后打断：插话注入后按「已丢弃」提示，或失败，不另起回合；先打断后插话：不往被叫停的回合里塞，收尾后作为新一轮开始；打断撞上自己收尾：只收尾一次 |
+| 可撤回 | relay 脚本里的 `rollback`；`tests/codex-adapter-switch.test.ts` | 一条命令：全局上游、清覆盖，只重启实际在跑自研的 agent |
+| npm 候选（更新闸） | `scripts/codex-adapter-relay.ts --npm 0.159.3,0.160.1,0.999.0`：真 npm 装进临时目录 + 生成 schema | 0.159.3、0.160.1 兼容（schema 指纹相同 `345a8d9bb98a`）；不存在的版本判 unknown（npm notarget）；全局 Codex 和 `~/.codex` 没动 |
+
+还没做的：生产上单个非关键 agent 的观察期（合入后由 PM 安排，切之前先报 PM）；全局默认改成自研（等 owner 点按钮）。

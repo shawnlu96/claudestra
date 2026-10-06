@@ -68,6 +68,44 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 | `modelEnforcement` | `"config-option"` | 经 `session/set_config_option` 改，不重启 |
 | `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start`（完成信号见「压缩完成信号」） |
 
+## 适配器选择开关：上游 codex-acp 还是自研（CXF-S）
+
+宿主起哪个 Codex 适配器由开关定：`upstream` = 上游 codex-acp（缺省，`acp-install` 装的那份），`self` = 仓库里的自研适配器
+（`src/lib/acp/codex-adapter/`，[codex-adapter.md](./codex-adapter.md)）。**缺省全体上游，不动开关行为和以前一样。**
+
+- **存在哪**：`<STATE_DIR>/codex-adapter.json`，`{ default, agents: { <agent>: upstream|self } }`；全局一处，单个 agent 覆盖（`lib/acp/codex-compat-switch.ts`）。
+  没文件 = 全体上游；文件坏了读者按全体上游、写者拒写。
+- **谁不归它管**：`CLAUDESTRA_ACP_AGENT` 手工覆盖仍最优先；沙箱永远是 stub；出借 worker 永远上游；create / fork 的引导轮固定用上游
+  （新线程两边都是 `thread/start`，建好后宿主按开关接回）。
+- **怎么切**（只在重启时生效：宿主启动时读一次）：
+
+```bash
+bun src/manager.ts codex-adapter                                  # 看全局、覆盖、每个 Codex agent 选中的和宿主上一次实际起的
+bun src/manager.ts codex-adapter use self --agent <agent>         # 只把一个 agent 切到自研（先报 PM）
+bun src/manager.ts codex-adapter use self                         # 全局切到自研（owner 拍板）
+bun src/manager.ts codex-adapter clear --agent <agent>            # 删掉这个 agent 的覆盖，跟随全局
+bun src/manager.ts codex-adapter rollback                         # 一条命令切回：全局上游、清掉所有覆盖
+```
+
+  改完只重启「宿主实际在跑的适配器 ≠ 新选择」的 transport=acp agent，走 `restart` 接旧线程那条路（session/resume，线程 id 不变）。
+  **回合在跑的不切**：先经 bridge `turn_status` 问宿主（和升级闸同一个问法），只有明确答空闲的才重启；在跑或查不到的列进 `deferred`，
+  开关已改，它下次重启时生效。`--no-restart` 只改开关。
+- **选了自研时宿主怎么起**（`acp-host.ts` → `codex-compat.ts pickCodexAdapter`）：
+  1. 起之前按 app-server 协议判本机 codex（`selfAdapterVerdict`，readiness 用同一判据），兼容就把组合身份打进 host.log
+     （`组合身份 <id>（自研适配器 <指纹> + codex <版本> + schema <指纹>）`）；
+  2. **不兼容和判不出（unknown）都不用自研，直接起上游**。和更新闸遇到 unknown 回 409 是同一个取舍：自研是没验证够的那一边，
+     判不出就回到一直在用的上游（readiness 也照此：选了自研但判不过时按上游判就绪，`selfRefused` 写原因，不会因此暂退 tmux）；
+  3. 起了自研但接不上线程（起来就退、initialize 被拒、resume 失败）→ 本宿主换上游再起一次（只换一次、不换回，没登录不换）；
+     没装上游就照旧用自研并告警。接上之后崩溃（app-server 被杀把适配器带走）不算起不来，退避后重起的还是自研。
+  宿主每次起适配器前把实际起的那个记进 `codex-running/<agent>.json` 的 `adapter`；doctor 据此报「选了自研、实际在跑上游」。
+- **更新闸**：Codex 升级只看全局选择（单个 agent 的覆盖不改升级判据）；全局选了自研时按协议判 npm 候选，兼容才装。
+  选了自研的单个 agent 碰上不兼容的新 Codex，重启时按上面第 2 条自己退回上游。
+- **doctor**：有人选了自研才多两项——「自研适配器组合」（组合身份 + 协议判定；判不过时是 warn，带原因和 `rollback`），
+  「自研适配器回退」（选了自研、宿主上一次实际起的是上游的 agent）。
+
+上线门槛（独立契约、故障竞争、真 CLI 组合实测含 2.1.0 → 自研 → 2.1.0 线程接力、可撤回切换）的实测结果见
+[codex-adapter.md「切换上线实测」](./codex-adapter.md#切换上线实测cxf-s)。
+
 ## 库（`src/lib/acp/`）
 
 | 文件 | 职责 |
@@ -169,6 +207,7 @@ bun src/manager.ts migrate --acp                                 # bridge 启动
 bun src/manager.ts doctor                                        # 看适配器、CLI、暂退与待重启
 bun src/manager.ts transport <agent> tmux                         # 一键回退、记住人工选择
 bun src/manager.ts transport <agent> acp                          # 条件恢复后手动切回（自动 restart）
+bun src/manager.ts codex-adapter rollback                         # 自研适配器出问题：一条命令全体切回上游 codex-acp
 ```
 
 模型 / 推理强度：网页设置里照常切，acp 下经宿主调 `set_config_option`，**不重启**、回合进行中也能改；registry 同时记一份，重启后照样生效。

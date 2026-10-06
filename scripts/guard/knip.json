@@ -5,6 +5,7 @@
     "scripts/acp-stub.ts",
     "scripts/codex-probe.ts",
     "scripts/codex-acp-compare.ts",
+    "scripts/codex-adapter-relay.ts",
     "src/hooks/*.ts",
     "src/pi/claudestra-extension.ts",
     "src/cli/*.ts",
