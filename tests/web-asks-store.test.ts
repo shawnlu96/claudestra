@@ -16,7 +16,10 @@ let serverList: A[] = [];
 const queue: { resolve: (v: unknown) => void; snapshot: A[] }[] = [];
 let manual = false;
 let failWith: unknown = null;
+// mock.module 对整个进程生效、本文件结束也不撤：同进程后面的文件（web-dom-* 经 asks.ts 用 takeAskHint 等）要拿到其余真导出
+const realAsks = await import("@/lib/api/asks");
 mock.module("@/lib/api/asks", () => ({
+  ...realAsks,
   fetchAsks: () => {
     if (failWith) return Promise.reject(failWith);
     const snapshot = structuredClone(serverList);
