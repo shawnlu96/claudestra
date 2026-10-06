@@ -70,7 +70,13 @@ if ("error" in agent) {
 }
 const codexPath = process.env.CLAUDESTRA_CODEX_BIN?.trim() || undefined;
 // 选了自研：起之前按协议判本机 codex（和 readiness 同一判据），判不过就用上游；起来后接不上线程再退一次（codex-compat-switch.ts）
-const pick = runtime.id === "codex" ? pickCodexAdapter(agent, codexPath, log) : null;
+const picked = runtime.id === "codex" ? pickCodexAdapter(agent, codexPath, log) : null;
+if (picked && "error" in picked) {
+  log(`❌ ${picked.error}`);
+  console.error(`❌ ${picked.error}`);
+  process.exit(3);
+}
+const pick = picked;
 /** 每次起适配器前记一次（含退避重起）：app-server 跑的是那一刻磁盘上的 codex，网页「重启生效」提示读这条记录 */
 const warned = new Set<string>();
 const noteCodex = async () =>

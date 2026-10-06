@@ -128,16 +128,19 @@ export function selfAdapterVerdict(codexBin: string | undefined, compat: (bin: s
 
 /**
  * 宿主起适配器之前定用哪个（acp-host.ts）：只管带了 adapter 的命令（沙箱 stub、手工覆盖、Pi 不归开关管，返回 null）。
- * 选了自研先判协议，判不过且装了上游就直接换上游；判过了起自研，接不上线程再由 AdapterPick.fallback 退一次。
+ * 起之前和起之后分开：起之前判协议，判不过（不兼容 / unknown）有上游就直接换上游，没上游就返回 error 拒起宿主——判不过还硬起自研，
+ * 等于把没验证过的组合放上生产；判过了起自研，起来后接不上线程再由 AdapterPick.fallback 退一次（没上游时那一步只告警、照旧重起）。
  */
 export function pickCodexAdapter(
   agent: { cmd: string[]; adapter?: CodexAdapterId; upstream?: string[] | null }, codexBin: string | undefined, log: Log,
   compat: (bin: string) => CodexCompat = probeCodexCompat,
-): AdapterPick | null {
+): AdapterPick | { error: string } | null {
   if (!agent.adapter) return null;
   const pick = new AdapterPick(agent.adapter, agent.cmd, agent.upstream ?? null, log);
   if (agent.adapter !== "self") return pick;
   const v = selfAdapterVerdict(codexBin, compat, log);
-  if (!v.ok) pick.fallback(v.why);
+  if (v.ok) return pick;
+  if (!agent.upstream) return { error: `选了自研 Codex 适配器但用不了（${v.why}），也没装上游 codex-acp 可退：不起宿主（manager acp-install 装上游，或 codex-adapter rollback）` };
+  pick.fallback(v.why);
   return pick;
 }

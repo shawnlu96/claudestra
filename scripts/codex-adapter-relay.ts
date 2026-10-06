@@ -21,7 +21,7 @@ import { AcpSession } from "../src/lib/acp/session.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import type { StopReport } from "../src/lib/acp/turn.ts";
 import { stateDir } from "../src/lib/state-dir.ts";
-import { applySwitch, type Retire } from "../src/manager/acp-adapter.ts";
+import { applySwitch } from "../src/manager/acp-adapter.ts";
 import { ROLLBACK, updateAdapterChoice, withAgent, readAdapterChoice } from "../src/lib/acp/codex-compat-switch.ts";
 import { assertIsolatedHome } from "./codex-probe.ts";
 import { inputTexts, type Reply, startFakeResponses } from "../tests/helpers/fake-responses.ts";
@@ -111,7 +111,8 @@ function startHost(sid: string, name: string): Leg {
   const logs: string[] = [];
   const log = (m: string) => void logs.push(m);
   const selected = selectedCodexAdapter(AGENT, CHOICE);
-  const pick = pickCodexAdapter({ cmd: CMD[selected], adapter: selected, upstream: CMD.upstream }, CODEX!, log)!;
+  const pick = pickCodexAdapter({ cmd: CMD[selected], adapter: selected, upstream: CMD.upstream }, CODEX!, log);
+  if (!pick || "error" in pick) throw new Error(`宿主起不来：${pick?.error ?? "没选适配器"}`);
   const stops: StopReport[] = [];
   const sent: Rec[] = [];
   let link!: { onFrame(m: Rec): void };
@@ -233,9 +234,10 @@ async function main(): Promise<void> {
   const deps = (l: () => Leg) => ({
     agents: async () => [{ name: AGENT, runtime: "codex", transport: "acp" }],
     running: () => l().adapter() as "upstream" | "self",
-    // 同 acp-host.ts 的 SIGUSR2：宿主自己判空闲并停机，同一段同步代码
-    retire: async (): Promise<Retire> => (l().host.retireIfIdle() ? (await stopHost(l()), "exited") : "busy"),
+    // 同 restart 子进程在重启锁里做的（manager/acp-retire.ts → acp-host.ts 的 SIGUSR2）：宿主自己判空闲并停机，同一段同步代码；退了才重起
     restart: async () => {
+      if (!l().host.retireIfIdle()) return { ok: false, deferred: "回合在跑" };
+      await stopHost(l());
       leg = startHost(sid, `leg-${selectedCodexAdapter(AGENT, CHOICE)}`);
       await until(leg.ready, "重起后就绪");
       return { ok: true };

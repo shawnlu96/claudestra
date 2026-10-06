@@ -4,9 +4,9 @@
  * - `codex-adapter use self|upstream [--agent <a>] [--no-restart]`：改全局或一个 agent 的覆盖；`clear --agent <a>` 删覆盖。
  * - `codex-adapter rollback`：一条命令切回——全局 upstream、清掉所有覆盖。
  * 改完只重启「实际在跑的适配器 ≠ 新选择」、在跑的（status=active）transport=acp agent，走 restart 接旧线程那条路。
- * 回合中不切：先给宿主发 SIGUSR2，宿主在同一段同步代码里判空闲并退出（host.ts retireIfIdle），退了才 restart；
- * 先问回合态再 restart 的话，问完到 restart 掐宿主之间新入站能开出一轮。宿主在跑回合、老宿主（运行记录里没 pid，
- * 不认这个信号——缺省动作是直接退出，不能发）、认不出的都不重启，列进 deferred：开关已改，它下次重启时生效。
+ * 回合中不切：restart 子进程拿到重启锁后先给宿主发 SIGUSR2，宿主在同一段同步代码里判空闲并退出（host.ts retireIfIdle），退了才重起
+ * （manager/acp-retire.ts）。先问回合态、或先在锁外让宿主退再 restart，中间新入站 / 另一个 restart 起的宿主都会被掐。
+ * 宿主在跑回合、认不出（老宿主不认这个信号，pid 被复用，记录过期）都不重启，列进 deferred：开关已改，它下次重启时生效。
  * 不拿命令级写锁（write-commands.ts）：开关文件有自己的锁，restart 子进程要拿那把锁。tests/codex-adapter-switch.test.ts。
  */
 import {
@@ -17,51 +17,34 @@ import { readCodexRunningHost } from "../lib/codex-version.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { SRC_DIR } from "../lib/repo-root.js";
 import { runManagerProcess } from "../lib/run-manager.js";
-import { pidAlive } from "../lib/tmux-helper.js";
+import { DEFER_MARK, RETIRE_ENV } from "./acp-retire.js";
 import { output } from "./core.js";
 
 const RESTART_TIMEOUT_MS = 240_000;
 
 type AgentRow = { name: string; runtime?: string; transport?: string; status?: string };
-/** 让宿主退出的结果：exited = 空闲、已退；absent = 宿主本来就不在（重启无回合可掐）；busy = 回合在跑；unknown = 老宿主 / 认不出 */
-export type Retire = "exited" | "absent" | "busy" | "unknown";
 
 export interface SwitchDeps {
   agents(): Promise<AgentRow[]>;
   /** 宿主上一次实际起的适配器（codex-version.ts 的运行记录）；没有记录按选中的算 */
   running(agent: string): CodexAdapterId | undefined;
-  /** 让宿主空闲时自己退出（SIGUSR2）；只有 exited / absent 才 restart */
-  retire(agent: string): Promise<Retire>;
-  restart(name: string): Promise<{ ok: boolean; error?: string }>;
+  /** 条件重启：宿主空闲退出了才重起（acp-retire.ts，在 restart 的重启锁里判）；deferred = 没重起的原因 */
+  restart(name: string): Promise<{ ok: boolean; error?: string; deferred?: string }>;
   update(change: (c: AdapterChoice) => AdapterChoice): Promise<AdapterChoice>;
   read(): AdapterChoice;
-}
-
-/** 宿主收到 SIGUSR2 后 1.5s 退出（acp-host.ts）；等这么久还活着 = 在跑回合，没退 */
-const RETIRE_WAIT_MS = 6_000;
-
-function isAcpHost(pid: number): boolean {
-  const r = Bun.spawnSync(["ps", "-o", "command=", "-p", String(pid)]);
-  return r.exitCode === 0 && r.stdout.toString().includes("acp-host.ts");
-}
-
-export async function retireHost(agent: string, wait = RETIRE_WAIT_MS): Promise<Retire> {
-  const pid = readCodexRunningHost(agent).hostPid;
-  if (!pid) return "unknown";
-  if (!pidAlive(pid) || !isAcpHost(pid)) return "absent"; // 记录里的宿主已经不在了（pid 也可能被别的进程复用）
-  process.kill(pid, "SIGUSR2");
-  for (const end = Date.now() + wait; Date.now() < end; await Bun.sleep(100)) if (!pidAlive(pid)) return "exited";
-  return "busy";
 }
 
 const LIVE: SwitchDeps = {
   agents: readRegistryAgents,
   running: (a) => readCodexRunningHost(a).adapter,
-  retire: (a) => retireHost(a),
   restart: async (name) => {
-    const r = await runManagerProcess(["restart", "--", name], { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs: RESTART_TIMEOUT_MS });
+    const env = { ...process.env, [RETIRE_ENV]: "1" }; // 只在宿主空闲退出后重起，退不了不碰窗口（acp-retire.ts）
+    const r = await runManagerProcess(["restart", "--", name], { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`, timeoutMs: RESTART_TIMEOUT_MS, env });
     const failed = Array.isArray(r?.results) ? r.results.find((x: { ok?: boolean }) => x?.ok === false) : undefined;
-    return r?.ok !== false && !failed ? { ok: true } : { ok: false, error: failed?.error ?? r?.error ?? "未知原因" };
+    if (r?.ok !== false && !failed) return { ok: true };
+    const error: string = failed?.error ?? r?.error ?? "未知原因";
+    const at = error.indexOf(DEFER_MARK);
+    return at >= 0 ? { ok: false, deferred: error.slice(at + DEFER_MARK.length) } : { ok: false, error };
   },
   update: (change) => updateAdapterChoice(change),
   read: () => readAdapterChoice(),
@@ -77,8 +60,6 @@ export async function adapterStatus(deps: SwitchDeps = LIVE): Promise<Record<str
   return { ok: true, default: c.default, overrides: c.agents, agents };
 }
 
-const DEFER_WHY: Record<Exclude<Retire, "exited" | "absent">, string> = { busy: "回合在跑", unknown: "宿主不认切换信号（老宿主或没有运行记录），手动 restart 后生效" };
-
 /** 改开关，然后让实际在跑的和新选择对不上的 ACP Codex agent 空闲时退出、重启 */
 export async function applySwitch(change: (c: AdapterChoice) => AdapterChoice, restart: boolean, deps: SwitchDeps = LIVE): Promise<Record<string, unknown>> {
   const before = deps.read();
@@ -91,10 +72,9 @@ export async function applySwitch(change: (c: AdapterChoice) => AdapterChoice, r
   const deferred: { agent: string; why: string }[] = [];
   const failed: { agent: string; error?: string }[] = [];
   for (const n of stale) {
-    const r = await deps.retire(n);
-    if (r === "busy" || r === "unknown") { deferred.push({ agent: n, why: DEFER_WHY[r] }); continue; }
     const res = await deps.restart(n);
     if (res.ok) restarted.push(n);
+    else if (res.deferred) deferred.push({ agent: n, why: res.deferred });
     else failed.push({ agent: n, error: res.error });
   }
   return { ...base, ok: failed.length === 0, restarted, deferred, ...(failed.length ? { failed } : {}) };

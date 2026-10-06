@@ -27,6 +27,7 @@ import { gracefulExitWindow } from "../lib/runtimes/graceful-exit.js";
 import { piAcpClash } from "../lib/runtimes/pi-acp.js";
 import { tmuxWindowOps } from "../lib/runtimes/window-ops.js";
 import { killPidsEscalating, listWindowIdsByName, MASTER_SESSION, sessionTarget, tmuxRaw, tmuxRawStrict, windowChildPids } from "../lib/tmux-helper.js";
+import { retireForSwitch } from "./acp-retire.js";
 import { assertCreatable, loadRegistry, output, patchRegistryAgent, saveRegistry } from "./core.js";
 
 const RESTART_TIMEOUT_MS = 240_000;
@@ -164,6 +165,7 @@ export async function prepareAcpResume(spec: LaunchSpec, adapter: ManagedRuntime
 
 /** 已记 acp 的 agent 若升级后丢了适配器或 CLI 太旧，restart 仍可从同一线程走 tmux。 */
 export async function managedForRestart(name: string, info: { runtime?: string; transport?: string }): Promise<ManagedRuntimeAdapter | null> {
+  await retireForSwitch(name, info); // 切适配器发起的重启：宿主空闲退出了才往下走（acp-retire.ts）
   if (info.runtime === "codex" && info.transport !== "acp" && isSandbox()) return null;
   if (info.runtime === "codex" && info.transport === "acp") {
     const ready = await checkAcpReady(true, { selected: () => selectedCodexAdapter(name) });

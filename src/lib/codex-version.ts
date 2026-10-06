@@ -12,6 +12,7 @@ import { probeClaudeVersion } from "./claude-binary.js";
 import { resolveCodexBinary } from "./codex-launch.js";
 import { defaultRunner, type Runner } from "./codex-thread.js";
 import { STATE_DIR } from "./paths.js";
+import { realProbe } from "./pm-deploy-lock.js";
 import { BROKEN_HINT, codexPairsWithAdapter, currentCodexAcp } from "./acp/install.js";
 import type { CodexAdapterId } from "./acp/codex-compat-switch.js";
 
@@ -37,12 +38,14 @@ const runningPath = (agent: string, dir: string) => join(dir, "codex-running", `
 /**
  * 启动时记下这次用的版本；探不出来也写（空记录），免得沿用上一次启动的旧值误报「该重启」。
  * host：ACP 宿主这次实际起的 Codex 适配器（选了自研但退回上游时记 upstream）和宿主 pid——doctor 据此报「选了自研、实际在跑上游」，
- * 切换命令只给记了 pid 的宿主发 SIGUSR2（老宿主不认这个信号，缺省动作是退出，manager/acp-adapter.ts）。
+ * 切换命令只给记了 pid 且启动代次（ps lstart）对得上的宿主发 SIGUSR2：宿主退出后记录不清，pid 可能被别的 agent 的宿主复用
+ * （老宿主不认这个信号，缺省动作是退出，manager/acp-adapter.ts）。
  */
 export function recordCodexRunning(agent: string, version: string | undefined, dir: string = STATE_DIR, host: { adapter?: CodexAdapterId; hostPid?: number } = {}): void {
   const p = runningPath(agent, dir);
   mkdirSync(join(dir, "codex-running"), { recursive: true });
-  writeFileSync(`${p}.tmp`, JSON.stringify({ version, ...host, at: new Date().toISOString() }));
+  const hostStart = host.hostPid ? realProbe.startOf(host.hostPid) ?? undefined : undefined;
+  writeFileSync(`${p}.tmp`, JSON.stringify({ version, ...host, hostStart, at: new Date().toISOString() }));
   renameSync(`${p}.tmp`, p);
 }
 
@@ -55,13 +58,14 @@ export function readCodexRunning(agent: string, dir: string = STATE_DIR): string
   }
 }
 
-/** 宿主上一次实际起的 Codex 适配器和宿主 pid；没记录 / tmux / 老宿主 = 空对象 */
-export function readCodexRunningHost(agent: string, dir: string = STATE_DIR): { adapter?: CodexAdapterId; hostPid?: number } {
+/** 宿主上一次实际起的 Codex 适配器、宿主 pid 和启动代次；没记录 / tmux / 老宿主 = 空对象 */
+export function readCodexRunningHost(agent: string, dir: string = STATE_DIR): { adapter?: CodexAdapterId; hostPid?: number; hostStart?: string } {
   try {
     const r = JSON.parse(readFileSync(runningPath(agent, dir), "utf8"));
     const adapter = r?.adapter === "self" || r?.adapter === "upstream" ? (r.adapter as CodexAdapterId) : undefined;
     const hostPid = Number.isInteger(r?.hostPid) && r.hostPid > 1 ? (r.hostPid as number) : undefined;
-    return { ...(adapter ? { adapter } : {}), ...(hostPid ? { hostPid } : {}) };
+    const hostStart = typeof r?.hostStart === "string" && r.hostStart ? r.hostStart : undefined;
+    return { ...(adapter ? { adapter } : {}), ...(hostPid ? { hostPid } : {}), ...(hostStart ? { hostStart } : {}) };
   } catch {
     return {}; // 没记录 / 坏文件：doctor 少一条「实际在跑哪个」，切换命令按不认这个宿主处理（不发信号、deferred）
   }

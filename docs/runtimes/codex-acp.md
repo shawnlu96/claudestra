@@ -88,17 +88,20 @@ bun src/manager.ts codex-adapter rollback                         # 一条命令
 ```
 
   改完只重启「宿主实际在跑的适配器 ≠ 新选择」、在跑的 transport=acp agent，走 `restart` 接旧线程那条路（session/resume，线程 id 不变）。
-  **回合在跑的不切**：先给宿主发 SIGUSR2，宿主在同一段同步代码里判空闲并停机（`host.ts retireIfIdle`），退了 manager 才 restart；
-  在跑回合就不退，列进 `deferred`。不用「先问回合态再 restart」：问完到 restart 掐宿主之间，新入站能开出一轮被掐掉。
-  宿主 pid 记在 `codex-running/<agent>.json`（`hostPid`），没记 pid 的老宿主不认这个信号（缺省动作是退出），不发、也列进 `deferred`；
+  **回合在跑的不切**：restart 子进程（带 `CLAUDESTRA_RESTART_RETIRE_IDLE=1`）拿到该 agent 的重启锁后、碰窗口前，先给宿主发 SIGUSR2，
+  宿主在同一段同步代码里判空闲并停机（`host.ts retireIfIdle`），退了才重起；在跑回合就不退，列进 `deferred`（`manager/acp-retire.ts`）。
+  不用「先问回合态再 restart」，也不在锁外先让宿主退：问完 / 退完到 restart 掐窗口之间，新入站或另一个 restart 起的宿主都会被掐。
+  **只给认得出的宿主发**：agent 窗口 shell 的直接子进程里，pid 和启动代次（`codex-running/<agent>.json` 的 `hostPid` + `hostStart`，
+  宿主自己写的 ps lstart）都对得上才发。记录在宿主退出时不清：pid 被别的 agent 的宿主复用、记录比窗口里的宿主旧、
+  老宿主（没写记录，不认这个信号——缺省动作是退出）、同名窗口不止一个，都认不出，不发、不重启，也列进 `deferred`；窗口里没有进程才算宿主不在、直接重起。
   开关已改，这些 agent 下次重启时生效。停着的 agent 不碰。`--no-restart` 只改开关。
 - **选了自研时宿主怎么起**（`acp-host.ts` → `codex-compat.ts pickCodexAdapter`）：
   1. 起之前按 app-server 协议判本机 codex（`selfAdapterVerdict`，readiness 用同一判据），兼容就把组合身份打进 host.log
      （`组合身份 <id>（自研适配器 <指纹> + codex <版本> + schema <指纹>）`）；
-  2. **不兼容和判不出（unknown）都不用自研，直接起上游**。和更新闸遇到 unknown 回 409 是同一个取舍：自研是没验证够的那一边，
+  2. **不兼容和判不出（unknown）都不用自研**：装了上游就直接起上游，没装上游就拒起宿主（退出码 3，host.log 写原因）——判不过不硬起自研。和更新闸遇到 unknown 回 409 是同一个取舍：自研是没验证够的那一边，
      判不出就回到一直在用的上游（readiness 也照此：选了自研但判不过时按上游判就绪，`selfRefused` 写原因，不会因此暂退 tmux）；
   3. 起了自研但接不上线程（起来就退、initialize 被拒、resume 失败）→ 本宿主换上游再起一次（只换一次、不换回，没登录不换）；
-     没装上游就照旧用自研并告警。接上之后崩溃（app-server 被杀把适配器带走）不算起不来，退避后重起的还是自研。
+     （这一步没装上游时只告警、照旧重起自研——它已经过了起之前的协议判定）。接上之后崩溃（app-server 被杀把适配器带走）不算起不来，退避后重起的还是自研。
   宿主每次起适配器前把实际起的那个记进 `codex-running/<agent>.json` 的 `adapter`；doctor 据此报「选了自研、实际在跑上游」。
 - **更新闸**：Codex 升级只看全局选择（单个 agent 的覆盖不改升级判据）；全局选了自研时按协议判 npm 候选，兼容才装。
   选了自研的单个 agent 碰上不兼容的新 Codex，重启时按上面第 2 条自己退回上游。

@@ -148,8 +148,8 @@ prompt 的回包都带 `usage` 和 `_meta.quota`（当前会话最近一次 `thr
 |------|------|------|
 | 独立契约 | `tests/codex-adapter-*.test.ts`（假 app-server + 宿主真用的 `AcpSession`）；CX-3 的 `codex-acp-compare.ts` 对照 | 全绿；和 2.1.0 的差异见上节 |
 | 线程接力 | `scripts/codex-adapter-relay.ts`：真 ACP 宿主 + 真 codex app-server + 假 Responses，隔离 CODEX_HOME。2.1.0 建线程 → 2.1.0 一轮 → 切自研一轮（带命令）→ 切回 2.1.0 一轮 | 三段都按 session/resume 接回同一线程；每段发给模型的请求里都有之前所有回合（含自研段的命令输出）；rollout 只有一份；真 `~/.codex` 前后指纹一致 |
-| 切换时宿主在回合中 | 同一个脚本（回合挂着时切）+ `tests/codex-adapter-switch.test.ts`（retireHost 发 SIGUSR2）+ `tests/acp-host-runtime-switch.test.ts`（retireIfIdle） | 宿主在跑回合就不退：开关照改、不重启、列进 deferred，那一轮没被掐；空闲时判完即停机，紧跟着到的入站开不出回合；打断收尾后再切才重启 |
-| 起不来退回上游 | `tests/acp-host-runtime-switch.test.ts`（真宿主 + stub）、`tests/codex-adapter-switch.test.ts` | 起来就退、initialize 被拒 → 换上游接回同一线程、标就绪、不出失败卡，先到的消息照常答；没装上游时照旧拒起；协议判不过（不兼容 / unknown）在起之前就换上游 |
+| 切换时宿主在回合中 | 同一个脚本（回合挂着时切）+ `tests/codex-adapter-switch-retire.test.ts`（重启锁里认宿主、发 SIGUSR2；pid 被别的宿主复用 / 老宿主 / 记录过期 / 并发 restart 都不发）+ `tests/acp-host-runtime-switch.test.ts`（retireIfIdle） | 宿主在跑回合就不退：开关照改、不重启、列进 deferred，那一轮没被掐；认不出的宿主不发信号、不重启；空闲时判完即停机，紧跟着到的入站开不出回合；打断收尾后再切才重启 |
+| 起不来退回上游 | `tests/acp-host-runtime-switch.test.ts`（真宿主 + stub）、`tests/codex-adapter-switch.test.ts` | 起来就退、initialize 被拒 → 换上游接回同一线程、标就绪、不出失败卡，先到的消息照常答；没装上游时照旧拒起；协议判不过（不兼容 / unknown）在起之前就换上游，没装上游就拒起宿主（四种组合都有用例） |
 | app-server 崩溃 | relay 脚本在自研回合中 SIGKILL app-server；`codex-adapter-shutdown.test.ts` R8 R23 | 那一轮按失败收尾（StopFailure），适配器退出码 1，宿主退避后重起的还是自研、接回同一线程，下一轮历史还在 |
 | 打断和插话同时到达 | `tests/codex-adapter-switch-races.test.ts` | 只 interrupt 一次。先插话后打断：插话注入后按「已丢弃」提示，或失败，不另起回合；先打断后插话：不往被叫停的回合里塞，收尾后作为新一轮开始；打断撞上自己收尾：只收尾一次 |
 | 可撤回 | relay 脚本里的 `rollback`；`tests/codex-adapter-switch.test.ts` | 一条命令：全局上游、清覆盖，只重启实际在跑自研的 agent |
