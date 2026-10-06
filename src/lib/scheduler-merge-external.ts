@@ -1,8 +1,8 @@
 /** gh commands are structured argv, never interpolated into a shell string. */
-import { mainCarryMode } from "./recovery-main-carry-policy.js";
+import { policyHops } from "./review-main-carry-manual-auto.js";
 import { reviewMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
-import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
+import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 
@@ -25,17 +25,6 @@ const repoOf = (prRef: string): string => {
   return repo;
 };
 const MAIN_REF = "refs/remotes/origin/main";
-
-/**
- * MAINP2: how many pure-main hops a carry may span. Multi-hop (≤16) only when every project on this repoDir has the mainCarry
- * recovery policy on; observe / off / unreadable / unmatched keep the old single hop, so a mode never widens merge authority.
- */
-export function policyHops(project: ProjectSchedule): number {
-  try {
-    const ids = Object.entries(readSchedulerConfig().projects).filter(([, p]) => p.repoDir === project.repoDir).map(([id]) => id);
-    return ids.length && ids.every((id) => mainCarryMode(id).mode === "on") ? 16 : 1;
-  } catch { return 1; }
-}
 
 /** External data is bounded and checked before it can become a durable receipt. */
 export function mergeExternal(project: ProjectSchedule, command: typeof runBounded = runBounded,

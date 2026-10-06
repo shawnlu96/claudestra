@@ -49,7 +49,7 @@ describe("MAINP2 mainCarry policy", () => {
 describe("MAINP2 auto carry hop limit follows mainCarry", () => {
   test("16 hops only when every project on the repoDir is on; observe / off / unmatched / unreadable stay single-hop", async () => {
     const { writeFileSync: write, rmSync: rm, existsSync } = await import("node:fs");
-    const { policyHops } = await import("../src/lib/scheduler-merge-external.js");
+    const { policyHops } = await import("../src/lib/review-main-carry-manual-auto.js");
     const { SCHEDULER_CONFIG_PATH, parseSchedulerConfig } = await import("../src/lib/scheduler-config.js");
     const { RECOVERY_POLICY_PATH } = await import("../src/lib/recovery-policy.js");
     expect(existsSync(SCHEDULER_CONFIG_PATH) || existsSync(RECOVERY_POLICY_PATH)).toBe(false); // the test guard's private state dir
