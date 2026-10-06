@@ -131,6 +131,19 @@ describe("AcpTurnLoop · 基本", () => {
     expect(f.loop.busy).toBe(false);
   });
 
+  test("steer 回 deliveredUnknown（已写给适配器、结果不明）：删掉占位、不改回 prompt，交出那张卡，busy 照常回落", async () => {
+    const f = fixture();
+    await f.loop.submit("A");
+    const b = f.loop.submit("B");
+    const failure: AcpFailure = { kind: "error", key: "unknown:s#2", message: "可能已经被执行", retry: false, deliveryUnknown: true };
+    f.steers.get("B")!({ outcome: "deliveredUnknown", failure });
+    expect(await b).toBe("unknown");
+    await f.finish();
+    expect(f.prompts).toEqual(["A"]);
+    expect(f.failures).toEqual([failure]);
+    expect(f.loop.busy).toBe(false);
+  });
+
   test("steering 出错按插不进处理：在原位置变回 prompt", async () => {
     const f = fixture();
     f.io.steer = () => Promise.reject(new Error("rpc down"));

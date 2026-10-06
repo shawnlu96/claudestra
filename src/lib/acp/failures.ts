@@ -8,10 +8,11 @@
  *   其它错误只是一段正文、照常 end_turn（看不出来）。
  * - 没登录：-32000 Authentication required（session/new|load 与 prompt 都可能），出「需要 owner 登录」的卡。
  * - 协议不兼容（protocol.ts，initialize 时判）：不可重试的 error、固定 key——一个宿主只出一张卡，之后的回合按同一个失败收尾。
+ * - 用户输入写出后拿不到可信结果（deliveryUnknownCause）：不可重试的 error、带 deliveryUnknown，宿主不重排、不续跑，卡上附原文。
  * 重置时间 ACP 不给，照旧从 rollout 读（codex-usage.ts）。tests/acp-failures.test.ts。
  */
 import { AcpIncompatibleError } from "./protocol.js";
-import { RpcError } from "./rpc.js";
+import { RpcError, RpcLostError } from "./rpc.js";
 
 const AUTH_REQUIRED_CODE = -32000;
 
@@ -20,8 +21,8 @@ export type AcpFailure =
   | { kind: "quota"; key: string; message: string }
   /** 没登录：出「需要 owner 登录」的卡 */
   | { kind: "auth"; key: string; message: string }
-  /** 其它：retry = 适配器说能不能重试（只有 AIR 给，legacy 不知道 = undefined）；newSession = 上下文 / 预算耗尽 */
-  | { kind: "error"; key: string; message: string; retry?: boolean; newSession?: boolean };
+  /** 其它：retry = 适配器说能不能重试（只有 AIR 给，legacy 不知道 = undefined）；newSession = 上下文 / 预算耗尽；deliveryUnknown 见 deliveryUnknownCause */
+  | { kind: "error"; key: string; message: string; retry?: boolean; newSession?: boolean; deliveryUnknown?: true };
 
 export interface AirSessionFailure {
   id: string;
@@ -81,6 +82,27 @@ export function classifyPromptError(e: unknown, turnKey: string): AcpFailure {
     return classifyNeutralFailure(data.failureKind, turnKey, detail) ?? { kind: "error", key: `rpc:${turnKey}`, message: detail };
   }
   return { kind: "error", key: `rpc:${turnKey}`, message: e instanceof Error ? e.message : String(e) };
+}
+
+/**
+ * 用户输入（prompt / steering）已经写给适配器、却没拿到可信结果时返回原因，否则 null：写出后断线 / 超时 / 回包不合规 / 写入抛错
+ * （rpc.ts RpcLostError sent:true），或适配器自己说投递不明（Pi 的 data.deliveryUnknown）。这时输入可能已经执行，重排或续跑都会重复执行；
+ * 没写出（sent:false）和适配器明确的错误返回 null，照旧处理。tests/acp-session.test.ts「CX-H」。
+ */
+export function deliveryUnknownCause(e: unknown): string | null {
+  const marked = e instanceof RpcLostError ? e.sent : e instanceof RpcError && (e.data as { deliveryUnknown?: unknown } | undefined)?.deliveryUnknown === true;
+  return marked ? (e as Error).message || "对端没说明原因" : null; // 调用方按 !== null 判：标记看的是 sent / data，不看 message 是否为空
+}
+
+/** 卡上附的原文上限：够人工核对、重发，又不让一条贴了整份日志的消息撑爆卡片和流里的错误条目 */
+const UNKNOWN_TEXT_MAX = 4_000;
+
+/** 投递不明的失败：retry:false 不触发 60s 续跑（failureEntry），卡片文案就是 message（bridge 不用改） */
+export function deliveryUnknownFailure(key: string, cause: string, text: string): AcpFailure {
+  // 留尾不留头：用户的消息在最后（前面可能是重启后首条消息带的上下文前言），人工重发要的是它
+  const shown = text.length > UNKNOWN_TEXT_MAX ? `…（前面截掉了 ${text.length - UNKNOWN_TEXT_MAX} 字）${text.slice(-UNKNOWN_TEXT_MAX)}` : text;
+  const message = `这条消息可能已经被执行，没有自动重发，需要人决定要不要重发（${cause}）。消息原文：\n${shown}`;
+  return { kind: "error", key, message, retry: false, deliveryUnknown: true };
 }
 
 /** 同一个失败只出一张卡：记住见过的 key（AIR 的后续 revision、legacy 的同一回合重复上报都挡住） */
