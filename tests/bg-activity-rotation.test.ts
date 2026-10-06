@@ -12,6 +12,7 @@ import { join } from "path";
 import { activeBgTasksFor, pollBgActivitiesForTest } from "../src/bridge/bg-activity-watcher";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus";
 import { projectJsonlPath, subagentsDir } from "../src/lib/jsonl-cost";
+import { ShellResults } from "../src/lib/bg-shell-results";
 
 const MIN = 60_000;
 let root = "";
@@ -267,6 +268,37 @@ describe("bg-activity-watcher · 轮转后新开的 shell 写在旧会话的 tas
     appendFileSync(lag, "[exited with code 0]\n");
     await f.poll(10_000);
     expect(f.typed("lag1", "bg_task_completed")[0]?.data).toMatchObject({ status: "done", exitCode: 0 });
+  });
+
+  test("轮转前开始、轮转后才结束的 shell：结局记进当前会话，刷新快照里能看到（不是只写进旧会话的结果）", async () => {
+    const f = fixture("shell-scope");
+    mkdirSync(f.tasks("shell-scope-A"), { recursive: true });
+    await f.poll();
+    const s0 = join(f.tasks("shell-scope-A"), "keep1.output");
+    writeFileSync(s0, "running\n");
+    f.launched("keep1", s0);
+    await f.poll(10_000);
+    expect(f.typed("keep1", "bg_task_started")).toHaveLength(1);
+    f.rotate("shell-scope-B");
+    await f.poll(10_000);
+    appendFileSync(s0, "[exited with code 0]\n");
+    await f.poll(10_000);
+    expect(f.typed("keep1", "bg_task_completed")[0]?.data).toMatchObject({ status: "done", exitCode: 0 });
+    const snap = activeBgTasksFor(f.agent.name).find((t) => t.id === "keep1");
+    expect(snap?.end).toMatchObject({ status: "done", exitCode: 0 });
+  });
+
+  test("bridge 重启：当前会话记成 unknown、输出在旧会话 tasks/ 且没被报过 → 按 id 在同根的会话目录里找回，按末行更正", async () => {
+    const f = fixture("shell-find", { session: "shell-find-B" });
+    const dirA = f.tasks("shell-find-A");
+    mkdirSync(dirA, { recursive: true });
+    const out = join(dirA, "lost1.output");
+    writeFileSync(out, "work\n[exited with code 0]\n");
+    await new ShellResults().remember({ agentName: f.agent.name, sessionId: f.agent.sessionId, id: "lost1", startedAt: clock - 20 * MIN, lastGrowth: clock - 5 * MIN, exitCode: null });
+    await f.poll(); // 冷启动：这个 agent-session 首次被扫到
+    expect(f.typed("lost1", "bg_task_completed")[0]?.data).toMatchObject({ status: "done", exitCode: 0 });
+    expect(activeBgTasksFor(f.agent.name).find((t) => t.id === "lost1")?.end).toMatchObject({ status: "done", exitCode: 0 });
+    expect(f.typed("lost1", "bg_task_started")).toEqual([]);
   });
 
   test("bridge 重启后才见到新会话：CC 报过的旧 tasks 目录按首轮分拣——在跑的开流，40 个旧文件不回放、不冲洪水闸", async () => {

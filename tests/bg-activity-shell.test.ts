@@ -423,6 +423,17 @@ describe("bg-activity-watcher · 重启首轮只吞不活跃的文件、续跑�
     expect(f.of("agent-fin1")).toEqual([]);
   });
 
+  test("冷启动：还没收尾、只是静默了几分钟（在想 / 在跑长工具）的 subagent 照常开流；之后只追加最终答复也能收成 done", async () => {
+    const f = fixture("cold-quiet");
+    writeFileSync(f.sub("q1"), ask("go") + rec("assistant", [{ type: "thinking", thinking: "…" }], { id: "m1" }));
+    setMtime(f.sub("q1"), clock - 3 * MIN);
+    await f.poll();
+    expect(started(f, "agent-q1")).toHaveLength(1);
+    appendFileSync(f.sub("q1"), answer("m1", "final answer after a long think"));
+    await f.poll(10_000);
+    expect(f.completed("agent-q1").map((e) => (e.data as { status: string }).status)).toEqual(["done"]);
+  });
+
   test("当存量的旧记录被续跑（长出 user 记录）→ 按身份接回，只推续跑部分；只多了 attachment 不算续跑", async () => {
     const f = fixture("wake-old");
     writeFileSync(f.sub("w1"), ask("first run") + answer("m1", "answer of the first run"));

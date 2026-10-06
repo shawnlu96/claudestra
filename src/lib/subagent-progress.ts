@@ -147,3 +147,15 @@ export function foldProgress(text: string, p: SubagentProgress = EMPTY_PROGRESS)
 export function hasUserRecord(text: string): boolean {
   return parseLines(text).some((r) => (r as { type?: unknown } | null)?.type === "user");
 }
+
+/** jsonl 首条记录（会话轮转后换绑前认身份用）；首行还没写完 = null（读失败同样当没写完，下轮再看）；坏首行 = 空对象 */
+export async function readFirstRecord(path: string): Promise<{ agentId?: unknown; timestamp?: unknown } | null> {
+  const head = await Bun.file(path).slice(0, 64_000).text().catch(() => ""); // 读失败当首行还没写完：调用方扣下，下轮再读
+  const nl = head.indexOf("\n");
+  if (nl < 0) return null;
+  try {
+    return (JSON.parse(head.slice(0, nl)) as { agentId?: unknown; timestamp?: unknown } | null) ?? {};
+  } catch {
+    return {}; // 坏首行：认不出身份，调用方不换绑、按原规则处理
+  }
+}

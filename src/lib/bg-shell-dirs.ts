@@ -5,7 +5,9 @@
  * 只取会话段、由调用方按自己的根目录拼回：同一个文件不会因 /tmp 与 /private/tmp 两种写法被当成两个，也列不到根外的目录。
  * 同一批记录里的任务 id 也是权威的「真后台」确认（tests/bg-shell-dirs.test.ts、tests/bg-activity-rotation.test.ts）。
  */
-import { stat } from "fs/promises";
+import { existsSync } from "fs";
+import { readdir, stat } from "fs/promises";
+import { join } from "path";
 
 const OUT_RE = /Output is being written to: (\S+)\.output/;
 const SEG_RE = /^[\w-]+$/;
@@ -62,4 +64,10 @@ export class ReportedShellDirs {
     const keep = new Set(jsonlPaths);
     for (const p of this.scans.keys()) if (!keep.has(p)) this.scans.delete(p);
   }
+}
+
+/** shell 根（`<…>/<slug>`）下各会话的 tasks/ 里找 `<id>.output`：只给调用方自己持久化过的任务找，任务 id 是 CC 随机生成的，不会认错 */
+export async function findSessionOutput(root: string, id: string): Promise<string | undefined> {
+  const segs = await readdir(root).catch(() => [] as string[]); // 根目录读不到：没有可找的，调用方保持 unknown
+  return segs.filter((seg) => SEG_RE.test(seg)).map((seg) => join(root, seg, "tasks", `${id}.output`)).find((p) => existsSync(p));
 }
