@@ -8,10 +8,11 @@ import { pausedUntil } from "../src/lib/lend-health.js";
 import { noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import {
   classifyConfigFailure, configFailureMode, noteStartConfigFailure, providerConfigFailure, providerFamilyUnavailable,
-  configFailureSlots, NOTICE_STALE_MS, recoverProviderConfigFailure, retryConfigNotices, setConfigFailurePolicy, startConfigRefusal,
+  configFailureSlots, configRecoveredDecl, NOTICE_STALE_MS, recoverProviderConfigFailure, retryConfigNotices, setConfigFailurePolicy, startConfigRefusal,
 } from "../src/lib/lend-config-failure.js";
 import { recoveryPolicy } from "../src/lib/recovery-policy.js";
 import { helloBody } from "../src/lib/lend-hello.js";
+import { parseV2Request } from "../src/lib/lend-wire-v2.js";
 import { harness, polled, toStarted } from "./lend-harness.js";
 
 const MODEL_400 = "创建失败: Codex（ACP）引导轮失败：400 Bad Request {\"error\":{\"code\":\"model_not_enabled\",\"message\":\"The model `gpt-9` is not enabled for this account.\"}}";
@@ -330,4 +331,59 @@ test("ordinary start failures stay out of the mechanism under on", async () => {
   await failStart(h, "o3", "You've hit your usage limit. Try again later."); // last: it pauses Codex claims
   expect(providerConfigFailure(h.db, "team-a", "codex")).toBeNull();
   expect(configNotices(h)).toEqual([]);
+});
+
+test("hello configRecovered: only after the owner's explicit recovery; restart / observe switch / capacity declare nothing; off sends nothing", async () => {
+  setMode("on");
+  const h = setup();
+  const entry = h.lend.lend[0];
+  await failStart(h, "o1");
+  await failStart(h, "o2"); // refused: joins the evidence
+  expect(helloBody(h.db, entry, h.d.now()).configRecovered).toBeUndefined();
+  setMode("observe");
+  expect(helloBody(h.db, entry, h.d.now())).not.toHaveProperty("configRecovered"); // positive slots, but no declaration
+  expect(helloBody(h.db, { ...entry, families: { codex: 5, claude: 1 } }, h.d.now())).not.toHaveProperty("configRecovered");
+  setMode("on");
+  expect(recoverProviderConfigFailure(h.db, "team-a", "codex", 1, h.d.now())).toBe(true);
+  const body = helloBody(h.db, entry, h.d.now());
+  expect(body.configRecovered).toEqual({ codex: { gen: 1, orders: ["o1", "o2"] } });
+  expect(parseV2Request("hello", { v: 1, boot: "boot-lcfg-0001", seq: 1, ...body }).ok).toBe(true);
+  expect(configRecoveredDecl(h.db, "team-b")).toBeUndefined(); // other peer
+  setMode("off");
+  expect(helloBody(h.db, entry, h.d.now())).not.toHaveProperty("configRecovered");
+});
+
+test("hello configRecovered to an old A: only its 400 on that field strips it and resends once, remembered for this boot; other 400s are not swallowed", async () => {
+  setMode("on");
+  const h = setup();
+  await failStart(h, "o1");
+  recoverProviderConfigFailure(h.db, "team-a", "codex", 1, h.d.now());
+  h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [], pollAfterMs: 30_000 } });
+  const sent: Record<string, unknown>[] = [];
+  let old = true, broken = false;
+  h.d.v2 = { boot: "boot-lcfg-0001", call: async (_p, _op, body) => {
+    sent.push(body as Record<string, unknown>);
+    if (broken) return { status: 400, body: { ok: false, code: "invalid", error: "$: slots 坏了" } } as never;
+    if (old && "configRecovered" in (body as object)) return { status: 400, body: { ok: false, code: "invalid", error: "$: 不认识的字段 configRecovered" } } as never;
+    return { status: 200, body: { ok: true, v: 1, proto: 2, helloMs: 60_000, beatMs: 15_000 } } as never;
+  } };
+  h.advanceTime(61_000);
+  await h.tick();
+  expect(sent.map((b) => "configRecovered" in b)).toEqual([true, false]);
+  expect((sent[1].seq as number) > (sent[0].seq as number)).toBe(true);
+  h.advanceTime(61_000);
+  await h.tick();
+  expect(sent.slice(2).every((b) => !("configRecovered" in b))).toBe(true); // same boot: not offered again
+  h.d.v2 = { ...h.d.v2!, boot: "boot-lcfg-0002" };
+  old = false;
+  sent.length = 0;
+  h.advanceTime(61_000);
+  await h.tick();
+  expect(sent.map((b) => "configRecovered" in b)).toEqual([true]); // a new boot tries again; a new A takes it
+  broken = true;
+  sent.length = 0;
+  h.d.v2 = { ...h.d.v2!, boot: "boot-lcfg-0003" };
+  h.advanceTime(61_000);
+  await h.tick();
+  expect(sent).toHaveLength(1); // an unrelated 400 is a failure, never a silent strip-and-resend
 });

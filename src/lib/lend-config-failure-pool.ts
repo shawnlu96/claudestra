@@ -6,11 +6,10 @@
  * - Placement: under on, configFailureV2 zeroes that family's slots on that peer before the planner sees them; other families
  *   and peers are untouched, live orders are never touched. observe / off return the facts unchanged (configFailureView
  *   shows the would-be pause). No notice is raised on A.
- * - Recovery only from the lender's own re-declaration, never a restart or elapsed time: after the fault the lender's hello
- *   withdraws the family (total 0 under a live grant; B does this itself while its fault stands, lend-hello.ts via
- *   configFailureSlots), then a later hello (higher seq) offers it again — on B that only follows its owner's explicit
- *   recovery. Under on only, inside recordHello's transaction; it records `through` = the newest event seq, CAS on its
- *   generation; a later failure has a higher seq and needs its own withdrawal, a replayed old hello is not a re-declaration.
+ * - Recovery only from the lender's explicit declaration (hello configRecovered: the owner recovered fault generation gen,
+ *   covering these orders), never a restart, slots going back up, a mode switch or elapsed time. Under on only, inside
+ *   recordHello's transaction; it records `through` = the newest event seq, CAS on the record; a later failure has a higher
+ *   seq and an order no old declaration names.
  * tests/lend-config-failure*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -24,8 +23,8 @@ import { CONFIG_FAILURE_CATEGORY, classifyConfigFailure, configFailureMode, type
 const START_FAILURE = "起 worker 失败：";
 
 export interface PeerConfigFailure { seq: number; at: number; orderId: string; family: LendFamily; category: typeof CONFIG_FAILURE_CATEGORY; text: string }
-/** withdrawn = the lender withdrew the family (total 0) while fault `fault` (its event seq) was active; boot + seq of that hello. */
-interface Recovery { gen: number; through: number; boot: string; at: number; withdrawn?: { fault: number; boot: string; seq: number; at: number } | null }
+/** gen = the lender's declared fault generation last accepted; through = newest event seq then; order = the fault order it covered. */
+interface Recovery { gen: number; through: number; boot: string; at: number; order: string }
 
 const recoveryKey = (peer: string, family: LendFamily): string => `lend:config-recovery:${JSON.stringify([peer, family])}`;
 
@@ -73,32 +72,24 @@ export function configFailureV2(db: Database, peer: string, v2: PeerFacts["v2"])
   return { ...v2, slots: { ...v2.slots, ...Object.fromEntries(down.map((f) => [f, 0])) } };
 }
 
-const offers = (req: HelloRequest, f: LendFamily): boolean =>
-  req.slots[f].total > 0 && !(req.paused && (req.paused.reason === `${f}_quota` || !req.paused.reason.endsWith("_quota")));
-
 /**
- * Inside recordHello's transaction, after the hello was applied; only under on (observe / off write nothing). A restart is
- * not a recovery: the lender must first withdraw the family (slots total 0 under a live grant, its own declaration that it
- * is unavailable) after the fault, then offer it again. The lender's hello seq only grows, across its restarts too, so each
- * step must carry a seq above every hello seen before it: a delayed or replayed old hello never withdraws or re-declares.
- * The withdrawal is bound to the fault's event seq, so a newer fault needs a newer withdrawal; each step is a CAS.
+ * Inside recordHello's transaction, after the hello was applied; only under on (observe / off write nothing). Recovery only
+ * from the lender's explicit declaration (hello configRecovered, sent by B only after its owner's recoverProviderConfigFailure
+ * succeeded): for the same peer + family, the declared fault generation must be above the one last accepted (persisted here;
+ * an older or repeated generation is refused) and its evidence orders must include this family's newest fault order. So a
+ * restart, a mode switch on B, a capacity change or a replayed old hello (whatever its seq or boot) never recovers, and an old
+ * declaration never clears a newer fault (a later failure's order is not in it). CAS on the record.
  */
-export function recoverOnRedeclare(db: Database, peer: string, prev: LendPeer | null, req: HelloRequest, now: number): void {
-  if (configFailureMode() !== "on" || (prev && req.seq <= prev.seq)) return;
+export function recoverOnRedeclare(db: Database, peer: string, _prev: LendPeer | null, req: HelloRequest, now: number): void {
+  if (configFailureMode() !== "on" || !req.configRecovered) return;
   const active = activeConfigFailures(db, peer);
   for (const family of LEND_FAMILIES) {
-    const fault = active[family];
-    if (!fault) continue;
+    const fault = active[family], decl = req.configRecovered[family];
+    if (!fault || !decl) continue;
     const { raw, r } = readRecovery(db, peer, family);
-    const base: Recovery = r ?? { gen: 0, through: 0, boot: "", at: 0, withdrawn: null };
-    if (req.grant && req.slots[family].total <= 0) { // no grant = 0 slots for every family: a revoke is not a withdrawal
-      if (base.withdrawn?.fault !== fault.seq) recoverCas(db, peer, family, raw, { ...base, withdrawn: { fault: fault.seq, boot: req.boot, seq: req.seq, at: now } });
-      continue;
-    }
-    const w = base.withdrawn;
-    if (!w || w.fault !== fault.seq || req.seq <= w.seq || !offers(req, family)) continue;
+    if (decl.gen <= (r?.gen ?? 0) || !decl.orders.includes(fault.orderId)) continue;
     const top = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number | null }).s ?? 0;
-    recoverCas(db, peer, family, raw, { gen: base.gen + 1, through: top, boot: req.boot, at: now, withdrawn: null });
+    recoverCas(db, peer, family, raw, { gen: decl.gen, through: top, boot: req.boot, at: now, order: fault.orderId });
   }
 }
 
@@ -111,5 +102,5 @@ function recoverCas(db: Database, peer: string, family: LendFamily, expected: st
   return r.changes === 1;
 }
 
-/** The recovery generation on file (0 = never recovered). */
+/** The lender's fault generation last accepted as recovered (0 = never recovered). */
 export const configRecoveryGen = (db: Database, peer: string, family: LendFamily): number => readRecovery(db, peer, family).r?.gen ?? 0;

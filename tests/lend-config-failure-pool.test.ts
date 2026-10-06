@@ -12,7 +12,7 @@ import type { HelloRequest } from "../src/lib/lend-wire-v2.js";
 import { recoverProviderConfigFailure, setConfigFailurePolicy } from "../src/lib/lend-config-failure.js";
 import { helloBody } from "../src/lib/lend-hello.js";
 import { noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
-import { harness } from "./lend-harness.js";
+import { harness, polled } from "./lend-harness.js";
 import { activeConfigFailures, configFailureView, configRecoveryGen } from "../src/lib/lend-config-failure-pool.js";
 
 const NOW = Date.parse("2026-10-06T05:00:00Z");
@@ -23,10 +23,11 @@ const borrow = (peer: string): BorrowEntry => ({ peer, projects: ["p"], roles: [
 let db: Database;
 const seqs = new Map<string, number>();
 const ctx = (now = NOW) => ({ actor: "owner", now });
-function hello(peer: string, boot = "boot-0001", opts: { paused?: HelloRequest["paused"]; codexTotal?: number; claudeTotal?: number; seq?: number; noGrant?: boolean } = {}) {
+type HelloOpts = { paused?: HelloRequest["paused"]; codexTotal?: number; claudeTotal?: number; seq?: number; noGrant?: boolean; recovered?: HelloRequest["configRecovered"] };
+function hello(peer: string, boot = "boot-0001", opts: HelloOpts = {}) {
   const seq = opts.seq ?? (seqs.get(peer) ?? 0) + 1; // the lender's hello seq grows across its restarts (journal meta)
   seqs.set(peer, Math.max(seq, seqs.get(peer) ?? 0));
-  return recordHello(db, peer, null, { v: 1, proto: 2, boot, seq, paused: opts.paused ?? null,
+  return recordHello(db, peer, null, { v: 1, proto: 2, boot, seq, paused: opts.paused ?? null, ...(opts.recovered ? { configRecovered: opts.recovered } : {}),
     slots: { codex: { total: opts.codexTotal ?? 4, busy: 0 }, claude: { total: opts.claudeTotal ?? 3, busy: 0 } },
     grant: opts.noGrant ? null : { until: NOW + 7 * 86400_000, roles: ["write", "review"], repos: ["org/repo"], ordersPerDay: 50, ordersLeftToday: 50 } }, NOW);
 }
@@ -120,52 +121,43 @@ test("a plain restart is not recovery: new boots offering the family, quota paus
   expect(slots()).toEqual({ codex: 0, claude: 3 });
 });
 
-test("explicit re-declaration: withdraw (total 0) after the fault, then offer again recovers; a delayed pre-withdrawal hello does not", () => {
+test("explicit declaration: the owner-recovered generation naming the newest fault order recovers; others do not", () => {
   setMode("on");
-  release("mate", held("mate"));
-  hello("mate", "boot-0001", { seq: 10 });
-  hello("mate", "boot-0001", { seq: 11, codexTotal: 0 }); // the lender withdraws codex
-  expect(activeConfigFailures(db, "mate").codex).toBeDefined();
-  hello("mate", "boot-0000", { seq: 5 }); // an older boot's hello replayed late (applied: different boot)
-  expect(getLendPeerBoot("mate")).toBe("boot-0000");
-  hello("mate", "boot-0001", { seq: 10 }); // the withdrawing boot's own older hello, applied after the boot switch
-  expect(activeConfigFailures(db, "mate").codex).toBeDefined();
-  hello("mate", "boot-0001", { seq: 12, paused: { reason: "codex_quota", until: NOW + 3600_000 } }); // offered but paused for it
-  expect(activeConfigFailures(db, "mate").codex).toBeDefined();
-  hello("mate", "boot-0001", { seq: 13 });
+  const first = held("mate");
+  const id = held("mate");
+  release("mate", first);
+  release("mate", id);
+  hello("mate", "boot-0001", { codexTotal: 0 });
+  hello("mate", "boot-0001"); // withdraw → re-offer alone is not a declaration
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [first] } } }); // does not name the newest fault order
+  hello("mate", "boot-0001", { recovered: { claude: { gen: 1, orders: [id] } } }); // other family
+  hello("other", "boot-0001", { recovered: { codex: { gen: 1, orders: [first, id] } } }); // other peer
+  expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(id);
+  expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [first, id] } } });
   expect(activeConfigFailures(db, "mate")).toEqual({});
   expect(configRecoveryGen(db, "mate", "codex")).toBe(1);
   expect(slots()).toEqual({ codex: 4, claude: 3 });
   expect(configRecoveryGen(db, "mate", "claude")).toBe(0); // no fault there, nothing written
+  expect(configRecoveryGen(db, "other", "codex")).toBe(0);
 });
 
-test("re-declaration from a fresh boot after the withdrawal also counts; the withdrawal alone does not", () => {
-  setMode("on");
-  release("mate", held("mate"));
-  hello("mate", "boot-0002", { codexTotal: 0 });
-  hello("mate", "boot-0002", { codexTotal: 0 });
-  expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
-  hello("mate", "boot-0003");
-  expect(configRecoveryGen(db, "mate", "codex")).toBe(1);
-  expect(slots()?.codex).toBe(4);
-});
-
-test("recovery generations: a failure after recovery is new and needs its own withdrawal; an old withdrawal never clears it", () => {
+test("recovery generations: a failure after recovery needs a newer declared generation naming it; old or repeated declarations are refused", () => {
   setMode("on");
   const late = held("mate");
-  release("mate", held("mate"));
-  hello("mate", "boot-0001", { codexTotal: 0 });
-  hello("mate", "boot-0001");
+  const a = held("mate");
+  release("mate", a);
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 3, orders: [a] } } });
   expect(slots()?.codex).toBe(4);
   release("mate", late); // started before the recovery, its release lands after: a fresh fault, not cleared
   expect(slots()?.codex).toBe(0);
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 3, orders: [a] } } }); // the old declaration keeps coming
+  hello("mate", "boot-0005", { recovered: { codex: { gen: 3, orders: [a, late] } } }); // same generation again: refused
+  hello("mate", "boot-0005", { recovered: { codex: { gen: 2, orders: [late] } } }); // older generation: refused
   expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(late);
-  hello("mate", "boot-0001");
-  hello("mate", "boot-0005"); // new boot without a withdrawal of this fault
-  expect(configRecoveryGen(db, "mate", "codex")).toBe(1);
-  hello("mate", "boot-0005", { codexTotal: 0 });
-  hello("mate", "boot-0005");
-  expect(configRecoveryGen(db, "mate", "codex")).toBe(2);
+  expect(configRecoveryGen(db, "mate", "codex")).toBe(3);
+  hello("mate", "boot-0005", { recovered: { codex: { gen: 4, orders: [late] } } });
+  expect(configRecoveryGen(db, "mate", "codex")).toBe(4);
   expect(slots()?.codex).toBe(4);
 });
 
@@ -173,20 +165,20 @@ test("two orders, other peer and other family keep separate state", () => {
   setMode("on");
   release("mate", held("mate"));
   release("mate", held("mate"));
-  release("other", held("other", "claude"));
+  const c = held("other", "claude");
+  release("other", c);
   expect(slots()).toEqual({ codex: 0, claude: 3 });
   expect(slots("other")).toEqual({ codex: 4, claude: 0 });
-  hello("other", "boot-0001", { claudeTotal: 0 });
-  hello("other", "boot-0001");
+  hello("other", "boot-0001", { recovered: { claude: { gen: 1, orders: [c] } } });
   expect(slots("other")).toEqual({ codex: 4, claude: 3 });
   expect(slots()).toEqual({ codex: 0, claude: 3 });
 });
 
-test("observe: withdraw → re-offer writes nothing and recovers nothing; switching to on still pauses the old fault", () => {
+test("observe: a declaration writes nothing and recovers nothing; switching to on still pauses the old fault", () => {
   const id = held("mate");
   release("mate", id);
   hello("mate", "boot-0001", { codexTotal: 0 });
-  hello("mate", "boot-0001");
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [id] } } });
   hello("mate", "boot-0002");
   expect(db.query("SELECT COUNT(*) AS n FROM meta WHERE key LIKE 'lend:config-%'").get()).toEqual({ n: 0 });
   expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(id);
@@ -197,23 +189,25 @@ test("observe: withdraw → re-offer writes nothing and recovers nothing; switch
 
 test("off: recordHello records no recovery bookkeeping", () => {
   setMode("off");
-  release("mate", held("mate"));
-  hello("mate", "boot-0001", { codexTotal: 0 });
+  const id = held("mate");
+  release("mate", id);
+  hello("mate", "boot-0001", { recovered: { codex: { gen: 1, orders: [id] } } });
   hello("mate", "boot-0002");
   expect(db.query("SELECT COUNT(*) AS n FROM meta WHERE key LIKE 'lend:config-%'").get()).toEqual({ n: 0 });
 });
 
-test("end to end: lender's real release → borrower pause; one start, one notice; restart keeps it, owner recovery re-declares", async () => {
+test("end to end: lender's real release → borrower pause; one start, one notice; restart keeps it, owner recovery declares", async () => {
   setMode("on");
   noteClaudeReadiness({ ready: true, reason: null, at: Date.now() });
   const h = harness({ entry: { families: { codex: 2, claude: 1 }, ordersPerDay: 20 } });
   try {
     let starts = 0;
+    const id = held("mate"); // A's order is the one B polls (same order id on both sides)
+    h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled(id)], pollAfterMs: 30_000 } });
     h.d.worker.create = async () => (starts++, { ok: false, error: MODEL_400 });
     for (let i = 0; i < 4; i++) await h.tick();
     const rel = h.calls.find((c) => c.op === "lease" && c.body.action === "release")!;
-    expect(rel.body.reason).toBe("not_started");
-    const id = held("mate");
+    expect(rel.body).toMatchObject({ orderId: id, reason: "not_started" });
     release("mate", id, String(rel.body.detail));
     expect(slots()).toEqual({ codex: 0, claude: 3 });
     expect(starts).toBe(1);
@@ -226,11 +220,56 @@ test("end to end: lender's real release → borrower pause; one start, one notic
     fromB("b-boot-2");
     expect(bSlots()).toMatchObject({ slots: { codex: 0, claude: 1 }, familyTotals: { codex: 0, claude: 1 } });
     expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
-    // Only B's owner's explicit recovery makes B offer codex again, which A takes as the re-declaration.
+    // Only B's owner's explicit recovery makes B declare it (configRecovered naming the fault order), which A accepts.
+    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).configRecovered).toBeUndefined();
     expect(recoverProviderConfigFailure(h.db, "team-a", "codex", 1, h.d.now())).toBe(true);
+    expect(helloBody(h.db, h.lend.lend[0], h.d.now()).configRecovered).toEqual({ codex: { gen: 1, orders: [id] } });
     fromB("b-boot-2");
     expect(configRecoveryGen(db, "mate", "codex")).toBe(1);
     expect(activeConfigFailures(db, "mate")).toEqual({});
     expect(bSlots()?.slots).toEqual({ codex: 2, claude: 1 });
   } finally { h.db.close(); noteClaudeReadiness(null); }
+});
+
+test("r2 probe: B switching on→observe re-offers without owner recovery; A (on) keeps the fault", async () => {
+  setMode("on");
+  noteClaudeReadiness({ ready: true, reason: null, at: Date.now() });
+  const h = harness({ entry: { families: { codex: 2, claude: 1 }, ordersPerDay: 20 } });
+  try {
+    h.d.worker.create = async () => ({ ok: false, error: MODEL_400 });
+    for (let i = 0; i < 4; i++) await h.tick();
+    const rel = h.calls.find((c) => c.op === "lease" && c.body.action === "release")!;
+    release("mate", held("mate"), String(rel.body.detail));
+    let seq = 100;
+    const fromB = () => recordHello(db, "mate", null, { v: 1, boot: "b-boot-1", seq: ++seq, ...helloBody(h.db, h.lend.lend[0], h.d.now()) }, h.d.now());
+    fromB(); // on: B withdraws codex (total 0)
+    setMode("observe");
+    const body = helloBody(h.db, h.lend.lend[0], h.d.now()); // B under observe: positive slots, no owner recovery
+    expect(body.slots.codex.total).toBe(2);
+    setMode("on"); // A is a different instance and stays on
+    recordHello(db, "mate", null, { v: 1, boot: "b-boot-1", seq: ++seq, ...body }, h.d.now());
+    expect(activeConfigFailures(db, "mate").codex).toBeDefined();
+    expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
+  } finally { h.db.close(); noteClaudeReadiness(null); }
+});
+
+test("r2 probe: a static capacity change (family set to 0, later back) is not owner recovery", () => {
+  setMode("on");
+  release("mate", held("mate"));
+  hello("mate", "boot-0001", { codexTotal: 0 }); // owner set codex to 0 for an unrelated reason
+  hello("mate", "boot-0001", { codexTotal: 2 });
+  hello("mate", "boot-0002", { codexTotal: 3 });
+  expect(activeConfigFailures(db, "mate").codex).toBeDefined();
+  expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
+});
+
+test("r2 probe: replayed hellos of older boots (seq below the high-water mark) never clear a current fault", () => {
+  setMode("on");
+  hello("mate", "boot-cur1", { seq: 100, codexTotal: 2 });
+  release("mate", held("mate"));
+  expect(hello("mate", "boot-old1", { seq: 1, codexTotal: 2 }).applied).toBe(true);
+  expect(hello("mate", "boot-old2", { seq: 2, codexTotal: 0 }).applied).toBe(true);
+  expect(hello("mate", "boot-old3", { seq: 3, codexTotal: 2 }).applied).toBe(true);
+  expect(activeConfigFailures(db, "mate").codex).toBeDefined();
+  expect(configRecoveryGen(db, "mate", "codex")).toBe(0);
 });

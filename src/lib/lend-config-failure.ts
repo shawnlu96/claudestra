@@ -17,6 +17,8 @@ import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { LEND_FAMILIES } from "./lend-config.js";
 import { getMeta, getOrder, setMeta, type LendRow } from "./lend-journal.js";
 import type { LendNoticeParams } from "./lend-notice.js";
+import type { HelloConfigRecovered } from "./lend-wire-v2.js";
+import { ORDER_ID } from "./lend-wire-v2-schema.js";
 import { recoveryPolicy, type RecoveryKey, type RecoveryPolicyPort } from "./recovery-policy.js";
 
 export const CONFIG_FAILURE_CATEGORY = "model_not_enabled";
@@ -204,6 +206,23 @@ export function configFailureSlots<S extends Record<string, { total: number; bus
   if (!peer || configFailureMode() !== "on") return slots;
   const down = Object.keys(slots).filter((f) => slots[f].total > 0 && providerFamilyUnavailable(db, peer, f));
   return down.length ? { ...slots, ...Object.fromEntries(down.map((f) => [f, { ...slots[f], total: 0 }])) } : slots;
+}
+
+/**
+ * helloBody's configRecovered for one peer: each family whose fault generation the owner explicitly recovered
+ * (recoverProviderConfigFailure succeeded), with that generation's evidence orders. The borrower clears its fault only when its
+ * newest fault order is in the list (lend-config-failure-pool.ts), so a restart, a mode switch or a capacity change never
+ * declares anything and an old declaration never covers a newer fault. off: nothing; undefined when there is nothing to say.
+ */
+export function configRecoveredDecl(db: Database, peer: string | undefined): HelloConfigRecovered | undefined {
+  if (!peer || configFailureMode() === "off") return undefined;
+  const out: HelloConfigRecovered = {};
+  for (const family of LEND_FAMILIES) {
+    const f = providerConfigFailure(db, peer, family);
+    const orders = [...new Set(f?.evidence.map((e) => e.orderId).filter((id) => ORDER_ID.test(id)))].slice(-EVIDENCE_MAX);
+    if (f && f.recoveredAt !== null && Number.isSafeInteger(f.gen) && f.gen >= 1 && orders.length) out[family] = { gen: f.gen, orders };
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** The owner's explicit recovery of one fault generation (CAS): an old generation never clears a newer fault. */
