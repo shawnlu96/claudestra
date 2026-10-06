@@ -11,7 +11,7 @@ const usage = (why: string): never => {
 const TEST_FILE = /(\.|_)(test|spec)\.(c|m)?[jt]sx?$/;
 
 /**
- * CI（ubuntu，Bun 1.3.14，run 37387535298）里单文件 ≥ 5 s 的测试的秒数；其余按 LIGHT（同一 run 其余 1133 个文件的均值）。
+ * CI（ubuntu，Bun 1.3.14，run 37387535298）里单文件 ≥ 5 s 的测试（main 上还在的）的秒数；其余按 LIGHT（同一 run 其余 1133 个文件的均值）。
  * 文件明显变慢 / 变快时改这里，不改也只是各片不那么均衡。
  */
 const SECONDS: Record<string, number> = {
@@ -19,7 +19,6 @@ const SECONDS: Record<string, number> = {
   "tests/bridge-mission.test.ts": 41,
   "tests/acp-host.test.ts": 39,
   "tests/scheduler-service-lease.test.ts": 37,
-  "tests/shared-ledger-deploy.test.ts": 31,
   "tests/recovery-materials-wiring-process.test.ts": 25,
   "tests/lend-cli-author-family.test.ts": 25,
   "tests/recovery-policy-cli.test.ts": 23,
