@@ -5,6 +5,7 @@
  * - 入站先分清 request / notification / response，形状不合规的不算数：畸形响应让对应请求失败，不当成功（`{"id":1}` 不是 result:undefined）。
  * - 单行与未收完的半行都有字节上限（maxLineBytes）：超了就整条连接作废、在途请求全部失败，日志只留截断摘要，不截断后接着解析。
  * - 流断了（适配器退出）同样全部失败，调用方据此重启宿主。tests/acp-rpc.test.ts。
+ * - 请求失败带投递状态（RpcLostError.sent）：带用户输入的请求据此判断能不能重发（session.ts）。
  */
 
 export const METHOD_NOT_FOUND = -32601;
@@ -23,6 +24,17 @@ export class RpcError extends Error {
   }
 }
 
+/**
+ * 请求没拿到可信结果。sent=true：已经尝试写给对端（之后断线、超时、回包不合规，或写入时抛错——可能写了一半），对端可能已经执行；
+ * sent=false：连接早就断了，一个字节都没写。用户输入只有 sent=false 才能重发，否则会重复执行（session.ts）。
+ * message 与以前的普通 Error 逐字相同、name 不改（String(e) 仍是 "Error: …"），按文字认错误的调用方不受影响。
+ */
+export class RpcLostError extends Error {
+  constructor(message: string, readonly sent: boolean) {
+    super(message);
+  }
+}
+
 /** 线路：写一行、收字节、断开。宿主接子进程 stdio，单测接内存管道 */
 export interface RpcWire {
   write(line: string): void;
@@ -32,7 +44,19 @@ export interface RpcWire {
   close(why: string): void;
 }
 
-type Handler = (params: any) => unknown;
+/**
+ * 请求处理器的第二个参数：respond / fail 当场同步写出这条请求的响应，之后处理器的返回值或抛错一律忽略（每个请求只写一次）。
+ * 用途：在别的请求的 onResult 同步钩子里回包，保证这个回包先于同一个 chunk 里随后那行引出的通知写出（tests/acp-rpc-ctx.test.ts）。
+ * 不调就按返回值回，和没有 ctx 时一样。
+ */
+interface ReplyCtx {
+  respond(result: unknown): void;
+  fail(e: unknown): void;
+}
+type Handler = (params: any, ctx: ReplyCtx) => unknown;
+type NoteHandler = (params: any) => unknown;
+/** jsonrpc2：收发都要 jsonrpc:"2.0"（ACP）。app-server：codex app-server 的报文不带这个字段，写出不带、读入缺了也收 */
+type RpcDialect = "jsonrpc2" | "app-server";
 
 export interface RpcPeer {
   /**
@@ -44,7 +68,7 @@ export interface RpcPeer {
   /** 对端发来的请求（要回结果）。处理器抛 RpcError 原样回，抛别的回 -32603 */
   onRequest(method: string, h: Handler): void;
   /** 对端发来的通知（不回）。同名只留最后一个 */
-  onNotification(method: string, h: Handler): void;
+  onNotification(method: string, h: NoteHandler): void;
   readonly closed: boolean;
   /** 连接作废（对端退出 / 超长行）之后调，在途请求已经全部 reject。线路只有一个 onClose 槽，别人要听断开都走这里 */
   onClosed(cb: (why: string) => void): void;
@@ -114,8 +138,11 @@ type Inbound =
   | { t: "response"; m: Record<string, any> }
   | { t: "drop"; why: string };
 
-/** 一行 → 哪一类消息。合不合规在这里分清：缺 jsonrpc 的请求要回 -32600，缺 jsonrpc 的通知丢掉，响应的形状由 settle 查 */
-function classify(line: string): Inbound {
+/**
+ * 一行 → 哪一类消息。合不合规在这里分清：缺 jsonrpc 的请求要回 -32600，缺 jsonrpc 的通知丢掉，响应的形状由 settle 查。
+ * lenient（app-server 方言）：完全没有 jsonrpc 字段的按 2.0 收；带了但不是 "2.0" 的照样不合规。
+ */
+function classify(line: string, lenient: boolean): Inbound {
   let m: Record<string, any>;
   try {
     m = JSON.parse(line);
@@ -123,6 +150,7 @@ function classify(line: string): Inbound {
     return { t: "drop", why: "不是 JSON" }; // 没有 id 可回，只能记下
   }
   if (!m || typeof m !== "object" || Array.isArray(m)) return { t: "drop", why: "不是对象" };
+  if (lenient && !("jsonrpc" in m)) m = { jsonrpc: "2.0", ...m };
   if (typeof m.method !== "string") return "id" in m ? { t: "response", m } : { t: "drop", why: "既不是请求、通知也不是响应" };
   const bad = m.jsonrpc !== "2.0";
   if (!("id" in m) || m.id === null) return bad ? { t: "drop", why: "通知缺 jsonrpc:\"2.0\"" } : { t: "notification", method: m.method, params: m.params };
@@ -133,7 +161,7 @@ function classify(line: string): Inbound {
 function rejectAll(pending: Map<number, Pending>, why: string): void {
   for (const [, p] of pending) {
     if (p.timer) clearTimeout(p.timer);
-    p.reject(new Error(`acp 连接断了（${why}）`));
+    p.reject(new RpcLostError(`acp 连接断了（${why}）`, true));
   }
   pending.clear();
 }
@@ -145,7 +173,7 @@ function settleResponse(pending: Map<number, Pending>, m: Record<string, any>, l
   pending.delete(m.id);
   if (p.timer) clearTimeout(p.timer);
   const problem = responseProblem(m);
-  if (problem) return p.reject(new Error(`acp 对端回了不合规的响应（${problem}）`));
+  if (problem) return p.reject(new RpcLostError(`acp 对端回了不合规的响应（${problem}）`, true));
   if ("error" in m) return p.reject(new RpcError(m.error.code, m.error.message, m.error.data));
   try {
     p.onResult?.(m.result);
@@ -155,21 +183,57 @@ function settleResponse(pending: Map<number, Pending>, m: Record<string, any>, l
   p.resolve(m.result);
 }
 
+/**
+ * 登记并写出一条请求。line() 在登记之前调：序列化抛错 = 还没写，普通错误交出去；写入时抛错 = 可能写了一半，
+ * 撤掉在途记录、按 RpcLostError(sent:true) 失败。超时同样是 sent:true（tests/acp-rpc.test.ts「投递状态」）
+ */
+function startRequest(wire: RpcWire, pending: Map<number, Pending>, id: number, method: string, line: () => string,
+  ropts?: { timeoutMs?: number; onResult?: (result: any) => void }): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const text = line();
+    const p: Pending = { resolve, reject, onResult: ropts?.onResult };
+    if (ropts?.timeoutMs) {
+      p.timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new RpcLostError(`${method} 超时（${ropts.timeoutMs}ms）`, true));
+      }, ropts.timeoutMs);
+    }
+    pending.set(id, p);
+    try {
+      wire.write(text);
+    } catch (e) {
+      pending.delete(id);
+      if (p.timer) clearTimeout(p.timer);
+      reject(new RpcLostError(`${method} 写出时出错（${e instanceof Error ? e.message : String(e)}）`, true));
+    }
+  });
+}
+
 /** 处理器抛的错 → 回给对端的 error 对象 */
 function errorBody(e: unknown): { code: number; message: string; data?: unknown } {
   const err = e instanceof RpcError ? e : new RpcError(INTERNAL_ERROR, e instanceof Error ? e.message : String(e));
   return { code: err.code, message: err.message, ...(err.data === undefined ? {} : { data: err.data }) };
 }
 
-export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void; maxLineBytes?: number } = {}): RpcPeer {
+interface RpcPeerOpts {
+  log?: (msg: string) => void;
+  maxLineBytes?: number;
+  dialect?: RpcDialect;
+  /** 没注册处理器的通知到了：缺省照旧静默丢掉；codex 适配器用它给不认识的通知计数、每种告警一次 */
+  onUnhandledNotification?: (method: string) => void;
+}
+
+export function createRpcPeer(wire: RpcWire, opts: RpcPeerOpts = {}): RpcPeer {
   const log = opts.log ?? console.error;
+  const appServer = opts.dialect === "app-server";
   let nextId = 1;
   let closed = false;
   const pending = new Map<number, Pending>();
   const requests = new Map<string, Handler>();
-  const notifications = new Map<string, Handler>();
+  const notifications = new Map<string, NoteHandler>();
+  const frame = (msg: object) => JSON.stringify(appServer ? msg : { jsonrpc: "2.0", ...msg }) + "\n";
   const send = (msg: object) => {
-    if (!closed) wire.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+    if (!closed) wire.write(frame(msg));
   };
 
   const closedListeners: ((why: string) => void)[] = [];
@@ -183,10 +247,17 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
   const answer = async (id: string | number, method: string, params: unknown) => {
     const h = requests.get(method);
     if (!h) return send({ id, error: { code: METHOD_NOT_FOUND, message: `method not found: ${method}` } });
+    let done = false;
+    const once = (body: object) => {
+      if (done) return;
+      done = true;
+      send({ id, ...body });
+    };
+    const ctx: ReplyCtx = { respond: (r) => once({ result: r ?? null }), fail: (e) => once({ error: errorBody(e) }) };
     try {
-      send({ id, result: (await h(params)) ?? null });
+      ctx.respond(await h(params, ctx));
     } catch (e) {
-      send({ id, error: errorBody(e) });
+      ctx.fail(e);
     }
   };
 
@@ -194,7 +265,7 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
 
   const notified = (method: string, params: unknown) => {
     const h = notifications.get(method);
-    if (!h) return;
+    if (!h) return opts.onUnhandledNotification?.(method);
     try {
       void Promise.resolve(h(params)).catch((e) => log(`acp rpc: 通知 ${method} 处理出错：${e}`));
     } catch (e) {
@@ -203,7 +274,7 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
   };
 
   const onLine = (line: string) => {
-    const c = classify(line);
+    const c = classify(line, appServer);
     if (c.t === "request") void answer(c.id, c.method, c.params);
     else if (c.t === "bad-request") send({ id: c.id, error: { code: INVALID_REQUEST, message: "Invalid Request: jsonrpc must be \"2.0\"" } });
     else if (c.t === "notification") notified(c.method, c.params);
@@ -228,19 +299,9 @@ export function createRpcPeer(wire: RpcWire, opts: { log?: (msg: string) => void
       return closed;
     },
     request(method, params, ropts) {
-      if (closed) return Promise.reject(new Error(`acp 连接已断，${method} 发不出去`));
+      if (closed) return Promise.reject(new RpcLostError(`acp 连接已断，${method} 发不出去`, false));
       const id = nextId++;
-      return new Promise((resolve, reject) => {
-        const p: Pending = { resolve, reject, onResult: ropts?.onResult };
-        if (ropts?.timeoutMs) {
-          p.timer = setTimeout(() => {
-            pending.delete(id);
-            reject(new Error(`${method} 超时（${ropts.timeoutMs}ms）`));
-          }, ropts.timeoutMs);
-        }
-        pending.set(id, p);
-        send({ id, method, ...(params === undefined ? {} : { params }) });
-      });
+      return startRequest(wire, pending, id, method, () => frame({ id, method, ...(params === undefined ? {} : { params }) }), ropts);
     },
     notify(method, params) {
       send({ method, ...(params === undefined ? {} : { params }) });

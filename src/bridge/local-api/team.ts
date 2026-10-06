@@ -1,4 +1,5 @@
 /** Owner-only, read-only cache projection; never returns account identifiers or credentials. */
+import { teamWorkerContext } from "../team-worker-context.js";
 import { canReadLedger } from "../../lib/devices.js";
 import type { Principal } from "../../lib/principals.js";
 import { fileQuotaStore } from "../../lib/quota-state.js";
@@ -10,9 +11,10 @@ import { readTeamActivity } from "../team-activity.js";
 import { apiJson, forbidden } from "../api-respond.js";
 
 export async function handleTeamApi(req: Request, path: string, principal: Principal): Promise<Response | null> {
-  if (!["/team/quota", "/team/tasks", "/team/activity"].includes(path)) return null;
+  if (!["/team/quota", "/team/tasks", "/team/activity", "/team/worker-context"].includes(path)) return null;
   if (!canReadLedger(principal)) return forbidden("team requires a full-scope owner credential");
   if (req.method !== "GET") return apiJson(405, { ok: false, error: "method not allowed" });
+  if (path === "/team/worker-context") return teamWorkerContext(req);
   if (path === "/team/activity") return activity(req);
   if (path === "/team/tasks") return executorCards(req);
   try {

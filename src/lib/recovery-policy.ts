@@ -24,7 +24,8 @@ type RecoveryMode = "on" | "observe" | "off";
 const RECOVERY_MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
 const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.includes(v as RecoveryMode);
 /** One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it. */
-export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit", "placementReservations", "manualMergeQueue"] as const;
+export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit",
+  "placementReservations", "manualMergeQueue", "updateGap", "lendConfigFailure"] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
 const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";

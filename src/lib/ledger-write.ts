@@ -48,6 +48,7 @@ import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { schedulerCanVerify } from "./scheduler-verify-gate.js";
 import { checkStructuredReview } from "./scheduler-review.js";
 import { refuseAutoReviewMove } from "./scheduler-auto-review.js";
+import { runSpecPreflight } from "./spec-material-preflight.js";
 
 export type { AppendableKind, ImportTaskInput, NewItem, NewTask, ReviewInput, StageMove, WriteCtx, WriteResult };
 
@@ -129,6 +130,7 @@ export function createTask(db: Database, ctx: WriteCtx, input: NewTask): WriteRe
     const imported = checkNewTask(db, ctx.actor, input);
     checkPreparedPeerPlacement(db, input, ctx.now ?? Date.now());
     const event = insertTask(db, ctx, input, imported);
+    runSpecPreflight(db, ctx, null, mustTask(db, input.id));
     return { row: mustTask(db, input.id), event, duplicate: false };
   });
 }
@@ -171,6 +173,7 @@ export function setTask(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const full = { ...patch, ...resolveAssignee(cur, patch) };
     const rev = updateTask(db, ctx, cur, full);
     const event = insertEvent(db, ctx, { ...key, data: { op: "set", patch: full, rev } }, true);
+    runSpecPreflight(db, ctx, cur, mustTask(db, input.id));
     return { row: mustTask(db, input.id), event, duplicate: false };
   });
 }

@@ -383,6 +383,30 @@
       "from": 0,
       "to": 0,
       "why": "owner 10-03 00:38 定代码文件行数上限 400→800（原话「你数量放到800行吧」）；400 是 09-23 建闸门时 PM 自选的数，没经 owner 确认，在 MT1f2 上因多 2 行挡住合并"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "CX-0：knip 入口加 scripts/codex-probe.ts（手动运行的真实 codex app-server 实测脚本，bun 直接按路径跑、不被 import，和 scripts/acp-stub.ts 同类）；只加入口，规则不变"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "Remove the migrated private ledger-center entry; preserve every existing guard threshold and strict rule."
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "CIS1（owner 10-06「让 Shawn 想办法提高 ci 效率」）：单元测试拆 4 片并行，必需检查 typecheck + test + guard 改成汇总闸（任一片失败/取消/跳过都红，并核对各片合起来恰好跑每个测试文件一次）；Guard 步骤与 GUARD_STRICT 原样保留在第 1 片，不放宽任何规则"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 新增 src/lib/shell-end-line.ts ↔ web/lib/chat/shell-end-line.ts：后台 shell 终止行（[exited with code N] / [killed]）的解析规则 bridge 与网页各需一份，按防腐规则 5 登记成 twin（#685 审计 P2）"
     }
   ]
 }

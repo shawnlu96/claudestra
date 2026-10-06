@@ -30,7 +30,8 @@ import type { Registry } from "../src/manager/core.js";
 
 let worlds = 0; // a repo per world: the train tick caches PR file lists by PR URL and head for the whole process
 
-export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string }
+/** handoff: scheduler.json mergeHandoff on (MHO1): the auto tick reads PRs from the same fake GitHub and hands them over. */
+export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string; handoff?: boolean }
 
 /**
  * GitHub as the train and the merge driver see it (shared with scheduler-merge-train-hold.test.ts): one main that moves on each
@@ -96,7 +97,7 @@ export function reclaimWorld(opts: WorldOpts) {
   const dir = mkdtempSync(join(tmpdir(), "mtr1-")), path = join(dir, "ledger.sqlite");
   let db = openLedger(path);
   const config = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
-    repoDir: "/tmp/p", ...(opts.deploy ? { deploy: { restartLabels: ["x.fake"], timeoutMs: 60_000 } } : {}) } } });
+    repoDir: "/tmp/p", ...(opts.deploy ? { deploy: { restartLabels: ["x.fake"], timeoutMs: 60_000 } } : {}), ...(opts.handoff ? { mergeHandoff: true } : {}) } } });
   const prNum = (prRef: string) => prRef.split("/").pop()!;
   const idOf = (prRef: string) => cards.find((c) => c.prRef === prRef)!.taskId;
   const { hub, gh, base, newSha } = fakeGitHub({ name: idOf, branch: (pr) => `task/${idOf(pr)}`,
@@ -156,7 +157,7 @@ export function reclaimWorld(opts: WorldOpts) {
   const mstr = mkdtempSync(join(tmpdir(), "mtr1-maint-"));
   const maintenance = { path: join(mstr, "m.lock"), marker: join(mstr, "u.marker"), request: join(mstr, "m.req") };
   const autoDeps = () => ({ manager, now: Date.now, worker: () => ({ manual: "测试里不开会话" }), ensure: async () => { throw new Error("测试里不开会话"); },
-    pinReview: async () => ({ manual: "x" }), reviewDirty: async () => null, notifyPm: async () => {} });
+    pinReview: async () => ({ manual: "x" }), reviewDirty: async () => null, notifyPm: async () => {}, prState: base.inspect });
   const noop = async () => ({ failed: [] });
   /** One production pass; `budgetMs` small makes every phase yield after its first card (the pace keeps its cursor across passes). */
   let cursor: Record<string, string | undefined> = {};
@@ -173,7 +174,7 @@ export function reclaimWorld(opts: WorldOpts) {
     };
     const r = await schedulerPass(db, config, { assertOwner: () => {}, manager: mgr, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
       external: () => withMergeTrain(base, { gh, store }), deployJobs, autoDeps: autoDeps as never, peerPr: noop,
-      autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [],
+      autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [], lifecycle: async () => [],
       ...(opts.store === "default" ? {} : { train: { gh, store } }) });
     if (r.failed.length) hub.calls.push(...r.failed.map((f) => `failed:${f.taskId}:${f.error}`));
     return hub.calls.slice(before);

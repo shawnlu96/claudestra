@@ -35,6 +35,7 @@ import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
 import { specResumeStep } from "./scheduler-spec-resume-deps.js";
+import { lifecycleStep } from "./agent-lifecycle-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -68,6 +69,7 @@ export interface PassOpts {
   retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
   /** CFG's recovery policy read (manualMergeQueue key for the manual merge queue); default the recovery-policy.json reader. */
   recoveryPolicy?: RecoveryPolicyPort;
+  lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -100,6 +102,7 @@ function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
   return {
     manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now, borrow: d.borrow && guard(active, d.borrow),
+    prState: d.prState && guard(active, d.prState),
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
 }
@@ -118,19 +121,20 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
-      const trains = opts.train?.store, projects = Object.keys(config.projects);
+      // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
+      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
-      await trainTick(db, trainProjects(db, projects, trains, manual.blocks), active, manual.formFence);
+      await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
-      failed.push(...(await reclaimLentSlots(db, projects, manager, trains)).failed);
+      failed.push(...(await reclaimLentSlots(db, localMerge, manager, trains)).failed);
       failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
@@ -150,6 +154,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
       // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
       failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
+      failed.push(...(await (opts.lifecycle ?? lifecycleStep)(db, config, manager, active, held))); // 收尾之后：PM 工具 / 手动建的 worker 按生命周期收（LIFE1）
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
     return { ran: true, failed };

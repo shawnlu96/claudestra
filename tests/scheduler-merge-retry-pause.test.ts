@@ -12,7 +12,7 @@ import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 /** All journal, pause, resume and review evidence comes from the existing writers on a temporary SQLite ledger. */
-export async function pauseFixture(phase: "ready" | "updating" | "await_ci" = "ready") {
+export async function pauseFixture(phase: "pending" | "ready" | "updating" | "await_ci" = "ready") {
   const f = autoFixture();
   try {
     await toBuild(f);
@@ -26,13 +26,15 @@ export async function pauseFixture(phase: "ready" | "updating" | "await_ci" = "r
       "--branch", "task/T1")).toMatchObject({ ok: true });
     expect(await f.tick()).toMatchObject({ step: "merge_queue" });
     const id = f.intents().at(-1)!.id;
-    settleIntent(f.db, f.at("scheduler"), { id, from: "pending", to: "submitted", receipt: "controller began journal" });
-    beginMergeRun(f.db, f.at("scheduler"), id, ["check"]);
+    if (phase !== "pending") {
+      settleIntent(f.db, f.at("scheduler"), { id, from: "pending", to: "submitted", receipt: "controller began journal" });
+      beginMergeRun(f.db, f.at("scheduler"), id, ["check"]);
+    }
     const step = (to: MergePhase, receipt?: string, newHead?: string) => {
       const run = getMergeRun(f.db, id)!;
       return advanceMergeRun(f.db, f.at("scheduler"), { intentId: id, from: run.phase, to, rev: run.rev, receipt, newHead });
     };
-    if (phase !== "ready") step(phase, phase === "await_ci" ? "same head; CI pending" : undefined);
+    if (phase === "updating" || phase === "await_ci") step(phase, phase === "await_ci" ? "same head; CI pending" : undefined);
     const pause = (actor = "pm", reason = "temporary resource handoff") => {
       const w = getWorkflow(f.db, "T1")!;
       return setWorkflow(f.db, f.at(actor), { taskId: "T1", taskRev: f.task().rev, workflowRev: w.rev,

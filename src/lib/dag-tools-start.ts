@@ -14,6 +14,7 @@ import { cardNames } from "./ledger-card-names.js";
 import { storedOrigin } from "./ledger-origin.js";
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { getItem, getTask } from "./ledger-store.js";
+import { canonicalTwinError } from "./registry.js";
 import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { uiSpecGate } from "./spec-lint.js";
@@ -70,7 +71,7 @@ export interface StartPlan {
   branch: string;
   repo: string;
   worktree: string;
-  /** manager create 的名字（不带 agent- 前缀）与 registry 里的全名 */
+  /** 不带 agent- 前缀的短名与 registry 规范全名；manager create 收全名（dag-tools-steps.ts agentSteps） */
   agentName: string;
   agent: string;
   fileGlobs: string[];
@@ -149,7 +150,11 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const low = taskId.toLowerCase();
   const agentName = agentNameFor(taskId);
   const pinned = want.startsWith("peer:");
-  if (!pinned && env.agentNames().includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
+  // 同名或只差大小写 / 全角的已有会话都算撞（registry 的 canonicalTwinError）：在任何 create / worktree 之前拒，不碰历史会话
+  const names = pinned ? [] : env.agentNames();
+  if (names.includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
+  const twin = canonicalTwinError(`agent-${agentName}`, names);
+  if (twin) return no("conflict", twin);
   const base = args.base ?? "origin/main";
   const branch = args.branch ?? `feat/${low}`;
   if (!REF.test(base) || !REF.test(branch)) return no("invalid", "base / branch 只能是普通分支名（字母数字 . _ / -，不含 .. 与 //）");

@@ -47,7 +47,7 @@ export function manualMergeGate(db: Database, store: TrainStore | null | undefin
     async claim(manager: Manager, config: SchedulerConfig): Promise<{ claimed: string[]; failed: { taskId: string; error: string }[] }> {
       const out = { claimed: [] as string[], failed: [] as { taskId: string; error: string }[] };
       for (const [project, cfg] of Object.entries(config.projects)) {
-        if (!listOpenRequests(db, project).length) continue;
+        if (cfg.mergeHandoff || !listOpenRequests(db, project).length) continue;
         const mode = manualQueueMode(project, policy);
         if (mode === "off") continue;
         const r = await manager("ledger", "manual-merge-claim", project, "--mode", mode, "--train", trainSignal(trains, project, Date.now()),

@@ -145,14 +145,14 @@ const decisionStands = (a: Ask, now: number): boolean => a.kind === "owner_actio
  * the window runs from the ask, an answer does not extend it) — is a wait, however old the ask is and whenever PM queued: the
  * request keeps its place, nothing merges, and the lift is the owner approving that same decision re-asked (authorize: same asker,
  * key and binding) or answering it (owner_action) — never a newer request, its reason, or the approval of another decision. A
- * version the ledger superseded (same asker + key re-asked while it was still open: ledger-asks supersedeIn) was never decided;
- * the ask recorded as its replacement is judged in its place, as checkAsk says ("use the new one"). An open version is the
- * ordinary open-ask wait (requestRefusal).
+ * version superseded before its deadline was never decided; its recorded replacement is judged in its place. supersedeIn can
+ * supersede an already overdue open row before the expiry scan runs: its terminal updatedAt records that transition, so such a
+ * row retains its decision's wait. Otherwise approval would depend on scan order. An open version waits in requestRefusal.
  */
 function authorizationRefusal(db: Database, taskId: string, now: number): string | null {
   const rows = db.query("SELECT id FROM asks WHERE taskId = ? AND kind IN ('authorize','owner_action') ORDER BY createdAt, id").all(taskId) as { id: string }[];
   const asks = rows.map(({ id }) => getAsk(db, id)).filter((a): a is Ask => !!a);
-  const replaced = new Set(asks.filter((a) => a.state === "superseded").map((a) => a.id));
+  const replaced = new Set(asks.filter((a) => a.state === "superseded" && a.updatedAt < a.expiresAt).map((a) => a.id));
   const latest = new Map<string, Ask>(); // createdAt order: the last version seen of each decision is its newest
   for (const a of asks) {
     const key = decisionKey(a);

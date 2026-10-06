@@ -11,9 +11,10 @@
  * 120s 后静默超时（tests/clear-rotation.test.ts）。
  */
 import { runtimeOfWindow } from "../lib/codex-key-guard.js";
+import { emitEvent } from "./event-bus.js";
 import { listSessionIdsForCwd } from "./session-ids.js";
 
-type ManagerResult = { ok?: boolean; error?: string; agents?: { name: string; sessionId?: string }[] };
+type ManagerResult = { ok?: boolean; error?: string; previousSessionId?: string; agents?: { name: string; sessionId?: string }[] };
 
 export interface ClearRotationDeps {
   /** 已注册连接自报的运行时（Pi 扩展 / Codex channel-server 会报，CC 不报） */
@@ -22,6 +23,26 @@ export interface ClearRotationDeps {
   /** 停掉该频道的 watcher 并按新 sid 重挂 */
   rewatch: (agentName: string, cwd: string, sid: string, channelId: string, runtime: string | undefined) => void;
   listSessionIds?: (cwd: string, runtime?: string) => string[];
+}
+
+/**
+ * 认领新会话：manager set-session（归档 + registry 切换）→ 重挂 watcher → 给网页发 session_rotated（提示 + 重拉历史 + 刷 ctx）。
+ * clear 端点的轮转和 Stop 自愈（session-heal.ts）都走这里，网页只认这一种事件。registry 已经是 to（另一条路先认领了）
+ * 时 set-session 原样返回 previousSessionId === to：不再重挂、不再发事件，否则网页会看到两条「已清空」。
+ * 带 --expected from：两条路并发、各自读到旧 registry 又挑了不同的 sid 时，后到的那次被拒（「会话已变化」），不会后写者赢。
+ */
+export async function claimRotatedSession(
+  deps: Pick<ClearRotationDeps, "runManager" | "rewatch">,
+  a: { name: string; cwd: string; channelId: string; runtime: string | undefined },
+  from: string | undefined,
+  to: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const r = await deps.runManager("set-session", a.name, to, ...(from ? ["--expected", from] : []));
+  if (!r?.ok) return { ok: false, error: r?.error };
+  if (r.previousSessionId === to) return { ok: true };
+  deps.rewatch(a.name, a.cwd, to, a.channelId, a.runtime);
+  emitEvent({ agent: a.name, chatId: a.channelId, type: "session_rotated", data: { from: from ?? null, to } });
+  return { ok: true };
 }
 
 const DEADLINE_MS = 120_000;
@@ -43,12 +64,11 @@ export function createClearRotation(deps: ClearRotationDeps) {
           const listResult = await deps.runManager("list");
           const ownedByOther = (listResult.agents || []).some((a) => a.name !== agentName && a.sessionId === sid);
           if (!ownedByOther) {
-            const r = await deps.runManager("set-session", agentName, sid);
-            if (r?.ok) {
-              deps.rewatch(agentName, cwd, sid, channelId, runtime);
+            const r = await claimRotatedSession(deps, { name: agentName, cwd, channelId, runtime }, oldSid, sid);
+            if (r.ok) {
               console.log(`🧹 clear 轮转完成 agent=${agentName} ${oldSid?.slice(0, 8) ?? "?"}->${sid.slice(0, 8)}`);
             } else {
-              console.error(`🧹 clear 轮转 set-session 失败 agent=${agentName}:`, r?.error);
+              console.error(`🧹 clear 轮转 set-session 失败 agent=${agentName}:`, r.error);
             }
             return;
           }

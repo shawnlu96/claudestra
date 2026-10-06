@@ -27,11 +27,16 @@ export interface EntryView {
   balance: { amount: string; currency: string | null } | null;
   /** expiries：每张卡 / 每条 credit 的截止；left = 这张卡剩几次（Claude 一张卡可含多次），requiresLimit = 到限额才能用 */
   /** ineligibleReason：接口说这个入口看不到重置卡（如 surface），界面写原因，不显示成 0 张 */
-  resetCredits: { held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean; ineligibleReason: string | null } | null;
+  /** limitReached：Codex 额度是否已撞上限（此刻可用为 0 时据此写「为什么现在用不了」）；没给 = null */
+  resetCredits: {
+    held: number; applicableNow: number; expiries: CreditExpiry[] | null; stale: boolean; ineligibleReason: string | null; limitReached: boolean | null;
+  } | null;
   source: { layer: LayerSource; observedAt: number | null; reason: string | null; needsUserRetry: boolean };
 }
 
 export interface CreditExpiry {
+  /** bridge 给的卡键（HMAC，不是原始 id）：使用重置卡时按它指定用哪张；没给 / 形状不对 = null */
+  key: string | null;
   /** null = 没有截止日（Claude 的卡可以没有） */
   at: number | null;
   left: number | null;
@@ -64,11 +69,13 @@ function creditsOf(v: unknown): EntryView["resetCredits"] {
     if (!o) return null;
     const at = num(o.expiresAtMs);
     if (at === null && o.expiresAtMs !== null) return null; // 缺字段 / 坏值丢掉；明确的 null 才是「无截止日」
-    return { at, left: num(o.left), requiresLimit: o.requiresLimit === true };
+    const key = typeof o.key === "string" && /^[0-9a-f]{32}$/.test(o.key) ? o.key : null;
+    return { key, at, left: num(o.left), requiresLimit: o.requiresLimit === true };
   };
   const list = Array.isArray(c.credits) ? c.credits.map(expiry).filter((x): x is CreditExpiry => x !== null) : null;
   const why = str(c.ineligibleReason);
-  return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true, ineligibleReason: why && /^[a-z_]{1,32}$/.test(why) ? why : null };
+  const limitReached = typeof c.limitReached === "boolean" ? c.limitReached : null;
+  return { held: num(c.held) ?? 0, applicableNow: num(c.applicableNow) ?? 0, expiries: list, stale: c.stale === true, ineligibleReason: why && /^[a-z_]{1,32}$/.test(why) ? why : null, limitReached };
 }
 
 function balanceOf(v: unknown): EntryView["balance"] {
