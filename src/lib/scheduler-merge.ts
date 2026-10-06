@@ -165,13 +165,12 @@ function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);
   if (task.stage !== "merge" || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
-  const auto = autoCarryEvidence(db, task, ev, chainRaw); // MAINP2: chain, policy re-read in this transaction, source PASS seq
   db.prepare("UPDATE tasks SET headSHA=?, rev=rev+1, updatedAt=? WHERE id=?").run(newHead, now, task.id);
   db.prepare("UPDATE scheduler_merges SET reviewedHead=? WHERE intentId=?").run(newHead, row.intentId);
   return insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
     project: row.project, target: row.taskId, kind: "scheduler", text: `沿用审查到新 head ${newHead.slice(0, 12)}`,
     data: { op: "review_carry", intentId: row.intentId, from: row.reviewedHead, to: newHead, round: task.round, specRev: task.specRev,
-      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...auto },
+      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...autoCarryEvidence(db, task, ev, chainRaw, mergeReviewProof) },
   }, true).seq;
 }
 
@@ -222,8 +221,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     }
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
     if (drift && input.to !== "unknown" && input.to !== "await_review") throw new LedgerError("conflict", `合并运行已失效：${drift}`);
-    const chain = carryChainOf(input.receipt); // MAINP2: the carry chain rides after the receipt (review-main-carry-manual-auto.ts)
-    if (chain) input = { ...input, receipt: chain.base };
+    const chain = carryChainOf(input.receipt); if (chain) input = { ...input, receipt: chain.base }; // MAINP2 chain after the receipt
     const receipt = input.receipt ? text(input.receipt, "回执") : null;
     if (["await_ci", "merged", "unknown", "await_review"].includes(input.to) && !receipt) {
       throw new LedgerError("invalid", `${input.to} 需要可核对回执或原因`);

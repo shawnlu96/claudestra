@@ -30,7 +30,7 @@ export interface SnapshotSources {
   fileTimes(agent: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }>;
   reviewers(agent: RegistryAgent, now: number): ReviewerRef[] | { error: string };
   heldPath: string;
-  mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number): Promise<Record<string, MergeCiFact> | null>; // MAINP2 live current-head CI
+  mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
 }
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
@@ -58,7 +58,6 @@ const realSources: SnapshotSources = {
   fileTimes,
   reviewers: runningReviewers,
   heldPath: HELD_MESSAGES_PATH,
-  mergeCi: liveMergeCi,
 };
 
 type HeldRaw = { env?: { from?: Record<string, unknown>; meta?: { messageId?: string } }; heldAt?: number; lease?: { at?: number } };
@@ -251,7 +250,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
-  const ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await src.mergeCi?.(p.project, p.tasks, now)] as const)));
+  const get = src.mergeCi ?? (src === realSources ? liveMergeCi : null), ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await get?.(p.project, p.tasks, now, db)] as const)));
   return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);

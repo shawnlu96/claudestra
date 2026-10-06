@@ -174,6 +174,25 @@ describe("MAINP2 auto carry through the production write port", () => {
     } finally { policy("on"); }
     expect(snap()).toEqual(before);
   }, 60_000);
+  test("review r2 exempt-drift: the source review stops holding after begin → the CLI write transaction re-proves it, zero writes", async () => {
+    const c = card();
+    await begin(c.intent);
+    const snap = () => {
+      const db = openLedger(ledgerPath);
+      try { return { task: getTask(db, c.id), n: listEvents(db, { project: "p", target: c.id }).length }; } finally { closeLedger(ledgerPath); }
+    };
+    // the reviewer session the PASS is bound to is replaced (as a withdrawn exemption / swapped source would): mergeRunDrift only
+    // reads the verdict, so only the formal review gate inside the carry write can see it
+    const db = openLedger(ledgerPath);
+    db.query("UPDATE scheduler_sessions SET sessionId='rs-swapped' WHERE taskId=? AND role='reviewer'").run(c.id);
+    closeLedger(ledgerPath);
+    const before = snap();
+    await expect(drive(c.intent, two)).rejects.toThrow(/正式来源审查门不成立/);
+    expect(snap()).toEqual(before);
+    const after = openLedger(ledgerPath);
+    try { expect(listEvents(after, { project: "p", target: c.id }).filter((e) => e.data.op === "review_carry")).toEqual([]); }
+    finally { closeLedger(ledgerPath); }
+  }, 60_000);
   test("an evil hop in the chain: back to review, nothing carried", async () => {
     const c = card();
     await begin(c.intent);

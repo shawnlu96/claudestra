@@ -3,11 +3,15 @@
  * 卡所在项目的配置；update-branch 202 只是受理。失败的 deploy 步骤 exit 原样返回且后续不跑。真实 GitHub / 部署一律不碰。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
+import { statePath } from "../src/lib/paths.js";
+import { applyManualCarry } from "../src/lib/review-main-carry-manual.js";
 import { headChecks, main as cli, pinnedMerge, preflight, requiredChecksFor, runStrict, updateBranch, waitForHeadRuns, USAGE, type CliDeps, type Prove,
   type Run } from "../scripts/pm-merge-preflight.js";
 
@@ -17,12 +21,26 @@ type CheckRun = { id: number; name: string; head_sha: string; status: string; co
 const green = (head = HEAD, names = CHECKS): CheckRun[] => names.map((name, i) => ({ id: i + 1, name, head_sha: head, status: "completed", conclusion: "success" }));
 
 const dir = mkdtempSync(join(tmpdir(), "mainp2-preflight-")), ledgerPath = join(dir, "ledger.sqlite"), db = openLedger(ledgerPath);
-createTask(db, { actor: "owner", now: 1 }, { project: "p", id: "T1", title: "T1", kind: "code", agent: "a" });
-db.query("UPDATE tasks SET pr=? WHERE id='T1'").run(PR);
+let clock = 10;
+db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"pm\"]') ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run();
+/** A real merge card: manual workflow (author claude), this round's PASS by a codex reviewer at `head`, with its report on disk. */
+function mergeCard(id: string, o: { head?: string; stage?: string; review?: false; reviewerFamily?: string; pr?: string } = {}) {
+  const head = o.head ?? HEAD;
+  createTask(db, { actor: "owner", now: ++clock }, { project: "p", id, title: id, kind: "code", agent: "agent-author" });
+  setWorkflow(db, { actor: "owner", now: ++clock }, { taskId: id, taskRev: 1, template: "code", templateVersion: 2, mode: "manual",
+    authorFamily: "claude", fallback: "人工", reason: "pm_takeover: PM 手动推进合并" });
+  db.query("UPDATE tasks SET stage=?, round=1, headSHA=?, pr=?, branch=?, updatedAt=? WHERE id=?").run(o.stage ?? "merge", head, o.pr ?? PR, `task/${id}`, ++clock, id);
+  mkdirSync(statePath("ledger", "reviews"), { recursive: true });
+  writeFileSync(statePath("ledger", "reviews", `pf-${id}.md`), `# 审查 ${id}\n\nhead ${head}\n\nPASS\n`);
+  if (o.review !== false) insertEvent(db, { actor: "agent-rv", now: ++clock }, { project: "p", target: id, kind: "review", text: "",
+    data: { round: 1, head, verdict: "pass", reviewer: "agent-rv", reviewerSessionId: "rs-1", reviewerFamily: o.reviewerFamily ?? "codex",
+      path: `reviews/pf-${id}.md`, findings: [], p0: 0, p1: 0, p2: 0 } }, false);
+}
+mergeCard("T1");
 afterAll(() => { closeLedger(ledgerPath); rmSync(dir, { recursive: true, force: true }); });
 const main = (argv: string[], run: Run, prove?: Prove, more: CliDeps = {}) =>
   cli(argv[0] === "verify" ? argv : ["--task", "T1", ...argv], { run, prove, ledger: () => db, checksOf: (p) => (p === "p" ? CHECKS : undefined),
-    sleep: async () => {}, ...more });
+    sleep: async () => {}, actor: () => "pm", ...more });
 
 function fakeGh(o: { head?: string; main?: string; runs?: (head: string) => CheckRun[]; merged?: boolean; total?: number; steps?: Record<string, number>;
   afterUpdate?: string; lag?: number } = {}) {
@@ -156,15 +174,16 @@ describe("review r1 · async update: 202 is only accepted, the new head is the o
     expect(proofs).toEqual([]);
     expect(g.calls.some((c) => c.some((a) => a.includes("/check-runs")))).toBe(false);
   });
-  test("head moves after a few views: proof from the old head, CI only on the new head, one pinned merge on the new head", async () => {
+  test("head moves after a few views: proof from the old head, CI only on the new head; the merge waits for the formal carry", async () => {
     const g = fakeGh({ lag: 3 });
     const proofs: unknown[] = [];
     const r = await main(["--pr", PR, "--expected-head", HEAD, "--actual-main", MAIN, "--update-branch", "--repo-dir", "/r", "--merge"], g.run,
       async (i) => { proofs.push(i); return { ok: true, reason: "ok" }; });
-    expect(r).toMatchObject({ exit: 0 });
-    expect(proofs).toEqual([expect.objectContaining({ oldHead: HEAD, newHead: NEW }), expect.objectContaining({ oldHead: HEAD, newHead: NEW })]);
+    expect(r.exit).toBe(2); // r2 merge-auth: the moved head is not in the ledger yet, so no flag / Git proof authorizes it
+    expect(r.lines.join()).toContain("main-carry");
+    expect(proofs).toEqual([expect.objectContaining({ oldHead: HEAD, newHead: NEW })]);
     expect(g.calls.filter((c) => c.some((a) => a.includes("/check-runs"))).every((c) => c.some((a) => a.includes(NEW)))).toBe(true);
-    expect(g.merges()).toEqual([["gh", "api", "-X", "PUT", "repos/o/r/pulls/7/merge", "-f", `sha=${NEW}`, "-f", "merge_method=merge"]]);
+    expect(g.merges()).toEqual([]);
     expect(await updateBranch(fakeGh({ lag: 1 }).run, PR, HEAD, { timeoutMs: 1000, intervalMs: 1, sleep: async () => {} })).toBe(NEW);
   });
   test("after an update the proof is mandatory: no --repo-dir refuses before any merge", async () => {
@@ -187,7 +206,7 @@ describe("review r1 · required CI comes from the card's project policy, never t
   test("missing task / other PR / missing, empty or duplicated project list / unreadable ledger refuse", async () => {
     const g = fakeGh();
     const go = (more: CliDeps, task = "T1") => cli(["--task", task, "--pr", PR, "--expected-head", HEAD, "--actual-main", MAIN, "--merge"],
-      { run: g.run, ledger: () => db, checksOf: () => CHECKS, ...more });
+      { run: g.run, ledger: () => db, checksOf: () => CHECKS, actor: () => "pm", ...more });
     expect((await go({}, "T9")).lines.join()).toContain("没有 T9");
     expect((await go({ checksOf: () => undefined })).exit).toBe(2);
     expect((await go({ checksOf: () => [] })).exit).toBe(2);
@@ -224,5 +243,67 @@ describe("review r1 · verify subcommand: GitHub facts live, ledger read-only", 
     expect(seen).toEqual([{ taskId: "T1", deploy: true, facts: { pr: { state: "MERGED", baseRefName: "main", headRefOid: HEAD, mergeSha: MERGE }, actualMain: MAIN, mainContainsMerge: true } }]);
     expect(calls.some((c) => c.includes("-X"))).toBe(false);
     expect((await main(["verify", "--task", "T1"], run)).exit).toBe(2);
+  });
+});
+
+describe("review r2 · merge-auth: every GitHub write is bound to the ledger's real PASS on that very head", () => {
+  const on = () => ({ mode: "on" as const, manualAfterMs: null, source: "config" as const });
+  const go = (task: string, argv: string[], run: Run, more: CliDeps = {}) => cli(["--task", task, ...argv],
+    { run, ledger: () => db, checksOf: () => CHECKS, sleep: async () => {}, actor: () => "pm", prove: async () => ({ ok: true, reason: "ok" }), ...more });
+  const merge = (head = HEAD) => ["--pr", PR, "--expected-head", head, "--actual-main", MAIN, "--merge"];
+
+  test("the r2 probe: card in build, ledger head ≠ expected head, no review, seven checks green → refused, zero merge calls", async () => {
+    mergeCard("A1", { stage: "build", head: REVIEWED, review: false });
+    const g = fakeGh();
+    const r = await go("A1", merge(), g.run);
+    expect(r.exit).toBe(2);
+    expect(r.lines.join()).toContain("合并未发出");
+    expect(g.merges()).toEqual([]);
+    mergeCard("A2", { head: REVIEWED }); // in merge with a PASS, but on another head: an arbitrary --expected-head is not authorized
+    expect((await go("A2", merge(), g.run)).lines.join()).toContain("main-carry");
+    mergeCard("A3", { review: false });
+    expect((await go("A3", merge(), g.run)).lines.join()).toContain("本轮没有审查结论");
+    mergeCard("A4", { reviewerFamily: "claude" });
+    expect((await go("A4", merge(), g.run)).lines.join()).toContain("同家族");
+    expect(g.merges()).toEqual([]);
+  });
+  test("only the project's real PM / master / owner; an unknown identity refuses; update-branch is refused before it is sent", async () => {
+    const g = fakeGh();
+    expect((await go("T1", merge(), g.run, { actor: () => "agent-author" })).lines.join()).toContain("PM");
+    expect((await go("T1", merge(), g.run, { actor: () => null })).lines.join()).toContain("认不出");
+    expect((await go("T1", merge(), g.run, { actor: () => "scheduler" })).exit).toBe(2);
+    expect((await go("T1", merge(), g.run, { ledger: () => null })).exit).toBe(2);
+    expect(g.merges()).toEqual([]);
+    mergeCard("A5", { stage: "build" });
+    const r = await go("A5", ["--pr", PR, "--expected-head", HEAD, "--actual-main", MAIN, "--update-branch", "--repo-dir", "/r"], g.run);
+    expect(r.exit).toBe(2);
+    expect(g.calls.some((c) => c.includes("repos/o/r/pulls/7/update-branch"))).toBe(false);
+  });
+  test("the gate is re-read right before the API: a ledger change after the first preflight sends nothing", async () => {
+    mergeCard("A6");
+    const g = fakeGh();
+    let views = 0;
+    const run: Run = async (argv, opts) => {
+      if (argv[1] === "pr" && argv[2] === "view" && ++views === 2) db.query("UPDATE tasks SET stage='review' WHERE id='A6'").run();
+      return g.run(argv, opts);
+    };
+    const r = await go("A6", merge(), run);
+    expect(r.exit).toBe(2);
+    expect(r.lines.at(-1)).toContain("不在 merge");
+    expect(g.merges()).toEqual([]);
+  });
+  test("moved head: no merge until the formal carry is in the ledger (observe / off write none); then one merge pinned on it", async () => {
+    mergeCard("A7");
+    const g = fakeGh({ head: NEW });
+    expect((await go("A7", merge(NEW), g.run)).lines.join()).toContain("main-carry");
+    expect(g.merges()).toEqual([]);
+    const t = getTask(db, "A7")!, reviewSeq = listEvents(db, { project: "p", target: "A7" }).findLast((e) => e.kind === "review")!.seq;
+    applyManualCarry(db, { actor: "pm", now: ++clock }, { taskId: "A7", oldHead: HEAD, newHead: NEW, mainHead: MAIN, specRev: t.specRev, round: 1,
+      reviewSeq, rev: t.rev }, { ok: true, reason: "ok", oldHead: HEAD, newHead: NEW, mainHead: MAIN, mainParent: MAIN, diffHash: "f".repeat(64),
+      chain: [{ previousHead: HEAD, head: NEW, mainParent: MAIN }] }, { policy: on });
+    const r = await go("A7", merge(NEW), g.run);
+    expect(r.exit).toBe(0);
+    expect(r.lines.join()).toContain("经 1 次正式沿用");
+    expect(g.merges()).toEqual([["gh", "api", "-X", "PUT", "repos/o/r/pulls/7/merge", "-f", `sha=${NEW}`, "-f", "merge_method=merge"]]);
   });
 });

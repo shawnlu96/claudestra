@@ -139,6 +139,15 @@ export function manualCarryGate(db: Database, actor: string, req: ManualCarryReq
   if (task.rev !== req.rev) conflict(`任务 rev 已是 ${task.rev}（你带的是 ${req.rev}）`);
   if (task.headSHA !== req.oldHead) conflict(`台账 head 是 ${task.headSHA?.slice(0, 12) ?? "空"}，不是原 head ${req.oldHead.slice(0, 12)}`);
   if (task.specRev !== req.specRev || task.round !== req.round) conflict(`规格 / 轮次已变（specRev ${task.specRev} round ${task.round}）`);
+  return reviewGate(db, task, now, req.reviewSeq);
+}
+
+/**
+ * The ledger side of every merge gate for the task as it stands (no request CAS): PR, workflow, freeze, engine journal / slot,
+ * owner hold, the round's PASS through formal carries, auto review proof, family / exemption, source kind, report, UI.
+ * manualCarryGate and the PM merge preflight (review-main-carry-manual-merge.ts) both end here.
+ */
+export function reviewGate(db: Database, task: LedgerTask, now: number, reviewSeq?: number): CarryGate {
   const repository = PR.exec(task.pr ?? "")?.[1];
   if (!repository) conflict("任务没有合法的 GitHub PR");
   const workflow = getWorkflow(db, task.id);
@@ -152,7 +161,7 @@ export function manualCarryGate(db: Database, actor: string, req: ManualCarryReq
   const read = carriedReview(task, events);
   if (read.kind !== "facts") return conflict(read.reason);
   const { facts, base, carries } = read;
-  if (facts.eventSeq !== req.reviewSeq) conflict(`本轮当前审查结论是 #${facts.eventSeq}，不是 #${req.reviewSeq}`);
+  if (reviewSeq !== undefined && facts.eventSeq !== reviewSeq) conflict(`本轮当前审查结论是 #${facts.eventSeq}，不是 #${reviewSeq}`);
   if (facts.verdict !== "pass") conflict(`来源审查结论是 ${facts.verdict}，不是 pass`);
   if (facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) conflict("来源审查仍有 P0/P1");
   const at = { ...task, headSHA: base }; // the head the PASS was written for: every review gate below reads it there

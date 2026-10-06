@@ -4,13 +4,18 @@
  * tests/pm-merge-preflight*.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { existsSync, readFileSync } from "node:fs";
+import { repoEnvVar } from "../src/lib/env-file.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { getTask } from "../src/lib/ledger-store.js";
+import { REGISTRY_PATH } from "../src/lib/registry.js";
+import { manualMergeAuth } from "../src/lib/review-main-carry-manual-merge.js";
 import { verifyMergedCarry, type VerifyReport } from "../src/lib/review-main-carry-manual-verify.js";
 import { reviewMainCarryProof, type MainCarryInput } from "../src/lib/review-main-carry-proof.js";
 import { ghJson, headChecks, type CheckState, type Run } from "../src/lib/review-main-carry-manual-ci.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { parseRequiredChecks, readSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { resolveActor } from "../src/manager/ledger-identity.js";
 
 export const USAGE = `用法：
   bun scripts/pm-merge-preflight.ts --task <卡号> --pr <PR URL> --expected-head <sha> --actual-main <sha>
@@ -19,6 +24,10 @@ export const USAGE = `用法：
     [--merge]                                 过闸后再核一遍，sha=<最终 head> 原子钉住合并（GitHub 对变了的 head 回 409）
     [--step '<JSON argv>' ...]                合并成功后依次执行（ff / deploy 等），任何一步非 0 立即停并以该步 exit 退出
   bun scripts/pm-merge-preflight.ts verify --task <卡号> --repo-dir <dir>   合入后只读核对（LedgerReader + GitHub 现查 + 每条沿用重跑证明 + 部署记录）
+台账合并门：每次 GitHub 写（update-branch / merge）前用只读台账现核：你是项目真实 PM / master / owner、卡在 merge、
+  台账 head 就是要动的 head（动过的 head 先 \`ledger main-carry\` 在 mainCarry=on 下写正式沿用；observe / off、任何 flag 或 Git 证明都不授权）、
+  本轮真实 PASS（无 P0/P1、来源 / 家族 / 豁免 / 报告原件）、UI 截图、owner hold、冻结、引擎 journal / 合并槽。--update-branch 与 --merge
+  同一次调用时新 head 一定还没沿用，合并不发。
 必需 CI：卡所在项目 scheduler.json 的 requiredChecks（--task 读台账定项目，并核卡的 PR 就是 --pr）；不收 --checks。
 退出码：0 通过 / 已合并且各步成功 / 核对一致；2 拒绝（head / main 漂移、证明不成立、CI 失败 / 取消 / skipped / 缺、核对不一致）；
   3 等待（CI 未完成、新 head 或新 run 没出现）；4 合并未确认；
@@ -146,11 +155,18 @@ export interface CliDeps {
   run?: Run; prove?: Prove; sleep?: (ms: number) => Promise<void>; now?: () => number;
   /** read-only ledger (LedgerReader query_only); tests hand a temporary one */
   ledger?: () => Database | null;
+  /** who runs this (the ledger CLI's own identity rule); tests hand one */
+  actor?: () => string | null;
   checksOf?: (project: string) => unknown;
   deployConfigured?: (project: string) => boolean;
   verify?: typeof verifyMergedCarry;
 }
 const realLedger = (): Database | null => new LedgerReader().get();
+function realActor(): string | null {
+  const agents = existsSync(REGISTRY_PATH) ? (JSON.parse(readFileSync(REGISTRY_PATH, "utf-8")) as { agents?: Record<string, { channelId?: string }> }).agents ?? {} : {};
+  const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, agents);
+  return who.ok ? who.actor : null;
+}
 const projectOf = (project: string) => readSchedulerConfig().projects[project];
 
 function parseArgs(argv: string[]): { flags: Record<string, string>; bools: Set<string>; steps: string[][] } | string {
@@ -210,8 +226,17 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     if (need.length) return { exit: 2, lines: [`缺 --${need.join(" --")}`] };
     const checks = requiredChecksFor((deps.ledger ?? realLedger)(), flags.task!, flags.pr!, deps.checksOf ?? ((p) => projectOf(p)?.requiredChecks));
     let head = flags["expected-head"]!;
+    const actor = (deps.actor ?? realActor)(), now = deps.now ?? Date.now;
+    // the ledger gate, re-read from the read-only ledger right before each GitHub write (r2 merge-auth)
+    const authorize = (at: string): Verdict => {
+      if (!actor) return refuse("认不出你的身份（ledger 同一规则），不授权");
+      const a = manualMergeAuth((deps.ledger ?? realLedger)(), actor, { taskId: flags.task!, pr: flags.pr!, head: at }, now());
+      return a.ok ? { ok: true, detail: `台账合并门通过：审查 #${a.auth.reviewSeq}（${a.auth.sourceKind}，经 ${a.auth.carries} 次正式沿用）` } : refuse(a.reason);
+    };
     const timing = { timeoutMs: 10 * 60_000, intervalMs: 15_000, sleep: deps.sleep, now: deps.now };
     if (bools.has("update-branch")) {
+      const pre = authorize(head);
+      if (!pre.ok) return { exit: pre.exit, lines: [`更新分支未发出：${pre.reason}`] };
       const moved = await updateBranch(run, flags.pr!, head, timing);
       if (moved === "timeout") return { exit: 3, lines: [`更新分支已受理，但 PR head 仍是 ${head.slice(0, 12)}：新 head 不明，不合并`] };
       head = moved;
@@ -225,9 +250,15 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     const v = await preflight(input, run, deps.prove);
     if (!v.ok) return { exit: v.exit, lines: [...lines, v.reason] };
     lines.push(v.detail);
+    if (bools.has("update-branch") && !bools.has("merge")) return { exit: 0, lines: [...lines, "新 head 要先 `ledger main-carry` 写正式沿用，再跑本脚本"] };
+    const auth = authorize(head);
+    if (!auth.ok) return { exit: auth.exit, lines: [...lines, bools.has("merge") ? `合并未发出：${auth.reason}` : auth.reason] };
+    lines.push(auth.detail);
     if (!bools.has("merge")) return { exit: 0, lines };
     const again = await preflight(input, run, deps.prove); // the last read right before the irreversible call
     if (!again.ok) return { exit: again.exit, lines: [...lines, `合并未发出：${again.reason}`] };
+    const last = authorize(head);
+    if (!last.ok) return { exit: last.exit, lines: [...lines, `合并未发出：${last.reason}`] };
     const m = await pinnedMerge(run, flags.pr!, head);
     if (!m.ok) return { exit: m.exit, lines: [...lines, m.reason] };
     lines.push(m.detail);

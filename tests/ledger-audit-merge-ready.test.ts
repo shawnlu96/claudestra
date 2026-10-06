@@ -35,10 +35,20 @@ describe("merge_ready_idle", () => {
     const f = ready(snap([card(NOW - 61 * MIN)]));
     expect(f).toHaveLength(1);
     expect(f[0]).toMatchObject({ taskId: "T1", notify: PM, key: expect.stringContaining(H) });
-    expect(f[0]!.detail).toContain("台账里看不出");
-    const blocked = ready(snap([{ ...card(NOW - 61 * MIN), blockedBy: ["T0"] }], { queueFrozen: true, mergeBlockers: { T1: ["UI 截图验收缺", "测量输入缺"] },
+    expect(f[0]!.detail).toContain("台账合并门没采集，不可核实"); // this fact carries no gate read: never "nothing blocks"
+    const blocked = ready(snap([{ ...card(NOW - 61 * MIN), blockedBy: ["T0"] }], { queueFrozen: true,
+      mergeCi: { T1: ci({ blockers: ["UI 截图验收：UI 前后截图摘要缺失", "正式合并门：项目合并队列已冻结"] }) },
       mergeUnknown: [{ intentId: "i", taskId: "T1", reason: "x", since: 1 }] }));
-    expect(blocked[0]!.detail).toMatch(/合并队列冻结.*依赖未上线：T0.*合并 journal 结果不明.*UI 截图验收缺；测量输入缺/);
+    expect(blocked[0]!.detail).toMatch(/合并队列冻结.*依赖未上线：T0.*合并 journal 结果不明.*UI 截图验收：UI 前后截图摘要缺失；mainCarry/);
+    expect(blocked[0]!.detail).not.toContain("已冻结"); // the gate's freeze line is the one already listed
+  });
+  test("review r2 audit-unwired: the ledger merge gates ride with the CI fact; none / unread / not collected are told apart", () => {
+    const say = (blockers: MergeCiFact["blockers"]) => ready(snap([card(NOW - 61 * MIN)], { mergeCi: { T1: ci(blockers === undefined ? {} : { blockers }) } }))[0]!;
+    expect(say([])).toMatchObject({ detail: expect.stringContaining("台账合并门全过（台账外的测量输入等不可核实）"), suggestion: expect.stringContaining("正式合并入口") });
+    expect(say(["正式合并门：审查员与作者同家族且没有 owner 当前有效的豁免"])).toMatchObject({ detail: expect.stringContaining("同家族"),
+      suggestion: expect.stringContaining("先解掉") });
+    expect(say(null)).toMatchObject({ detail: expect.stringContaining("读取失败，不可核实"), suggestion: expect.stringContaining("不可核实") });
+    expect(say(undefined).detail).toContain("没采集，不可核实");
   });
   test("threshold: exactly 60 min idle is quiet; any later event resets the clock", () => {
     expect(ready(snap([card(NOW - MERGE_READY_IDLE_MS)]))).toEqual([]);

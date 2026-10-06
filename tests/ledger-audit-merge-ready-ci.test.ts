@@ -1,10 +1,14 @@
 /** MAINP2 验收线 7（审查 r1 audit-unwired）：audit 的 CI 来源按当前 head 现查必需检查；fake gh 记调用，读失败整项目 null；经 `ledger audit` 写口跑真流程。 */
 import { describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuditSnapshot } from "../src/lib/ledger-audit.js";
-import { collectMergeCi, type MergeCiDeps } from "../src/lib/ledger-audit-merge-ready.js";
+import { collectAuditSnapshots } from "../src/lib/ledger-audit-snapshot.js";
+import { auditLedger } from "../src/lib/ledger-audit.js";
+import { collectMergeCi, mergeBlockersOf, type MergeCiDeps } from "../src/lib/ledger-audit-merge-ready.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import type { EventKind, LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
@@ -73,7 +77,7 @@ describe("collectAuditSnapshots → auditLedger → ledger audit write port, wit
       const g = gh(() => (down ? "fail" : ok()));
       const auditSources = { registry: async () => [], windows: async () => ["master"], turn: async () => "idle" as const,
         fileTimes: async () => ({ lastWriteAt: null, startedAt: null }), reviewers: () => [], heldPath: join(dir, "held.json"),
-        mergeCi: (p: string, t: AuditSnapshot["tasks"], n: number) => collectMergeCi(p, t, n, deps(g.run)) };
+        mergeCi: (p: string, t: AuditSnapshot["tasks"], n: number, d: Database) => collectMergeCi(p, t, n, { ...deps(g.run), blockersOf: (x) => mergeBlockersOf(d, x, n) }) };
       const audit = () => runLedger(["audit", "--project", "p", "--json"], { db, actor: "owner", projectIds: ["p"], now: () => NOW2, auditSources,
         loadRegistry: async () => ({ agents: {} }) as never, saveRegistry: async () => {} }) as Promise<Record<string, any>>;
       const first = await audit();
@@ -85,6 +89,39 @@ describe("collectAuditSnapshots → auditLedger → ledger audit write port, wit
       expect(second.projects[0].skipped).toContainEqual({ rule: "merge_ready_idle", reason: expect.stringContaining("CI") });
       expect(second.projects[0].resolved).toBe(0);
       expect(second.projects[0].open.map((f: { rule: string }) => f.rule)).toContain("merge_ready_idle");
+    } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("review r2 audit-unwired: real blockers from the same ledger, through collectAuditSnapshots → auditLedger", () => {
+  test("a UI card missing its screenshots names it; an unreadable gate is 'not verifiable', never 'nothing blocks'", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mainp2-audit-ui-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
+    try {
+      const T0 = 1_000 * 60_000, NOW2 = T0 + 3 * 60 * 60_000;
+      db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"agent-pm\"]')").run();
+      createTask(db, { actor: "owner", now: T0 }, { project: "p", id: "U1", title: "U1", kind: "code", agent: "a" });
+      setWorkflow(db, { actor: "owner", now: T0 }, { taskId: "U1", taskRev: 1, template: "ui", templateVersion: 2, mode: "manual", authorFamily: "claude",
+        fallback: "人工", reason: "pm_takeover: 测试" });
+      db.query("UPDATE tasks SET stage='merge', round=1, headSHA=?, pr='https://github.com/o/r/pull/1' WHERE id='U1'").run(H);
+      insertEvent(db, { actor: "rv", now: T0 + 1 }, { project: "p", target: "U1", kind: "review", text: "", data: { round: 1, head: H, verdict: "pass",
+        reviewer: "rv", reviewerSessionId: "s", reviewerFamily: "codex", path: "r.md", findings: [], p0: 0, p1: 0, p2: 0 } }, false);
+      insertEvent(db, { actor: "pm", now: T0 + 2 }, { project: "p", target: "U1", kind: "stage", text: "", data: { from: "review", to: "merge" } }, false);
+      const g = gh(() => ok());
+      let seenDb: unknown = null, broken = false;
+      const sources = { registry: async () => [], windows: async () => ["master"], turn: async () => "idle" as const,
+        fileTimes: async () => ({ lastWriteAt: null, startedAt: null }), reviewers: () => [], heldPath: join(dir, "held.json"),
+        mergeCi: (p: string, t: AuditSnapshot["tasks"], n: number, d: Database) => {
+          seenDb = d;
+          return collectMergeCi(p, t, n, { ...deps(g.run), blockersOf: (x) => { if (broken) throw new Error("库读不了"); return mergeBlockersOf(d, x, n); } });
+        } };
+      const finding = async () => auditLedger((await collectAuditSnapshots(db, ["p"], NOW2, sources))[0]!, NOW2).findings.find((f) => f.rule === "merge_ready_idle")!;
+      const f = await finding();
+      expect(seenDb).toBe(db); // the snapshot hands its own ledger to the source
+      expect(f.detail).toContain("UI 截图验收：UI 前后截图摘要缺失");
+      expect(f.detail).not.toContain("台账合并门全过");
+      expect(f.suggestion).toContain("先解掉");
+      broken = true;
+      expect((await finding()).detail).toContain("台账合并门读取失败，不可核实");
     } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
   });
 });
