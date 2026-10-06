@@ -1,7 +1,7 @@
 /**
  * REBOR2 same-peer checkpoint retention. Every local checkpoint of the old copy (HEAD, branches, checkpoint refs, stash, reflog,
  * the recorded unpushed work head) goes into a verified bundle; heads already in the new start head and unpushed heads are
- * recorded separately. A dirty tree, a removed copy whose work is not on the remote, or any git failure refuses the claim.
+ * recorded separately. A dirty tree, a removed copy of an order that ever started, or any git failure refuses the claim.
  */
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -49,19 +49,13 @@ async function snapshot(git: Git, dir: string, old: LendRow, priorHead: string) 
   return heads;
 }
 
-/** Old copy already removed: only a fully pushed (or never started) old order is provably lossless. */
-async function removedCopy(git: Git, old: LendRow, repo: string, branch: string, head: string): Promise<void> {
-  if (old.state === "released" && !old.startedAt && !old.work) return;
-  if (!old.work?.head || !sha.test(old.work.head)) refuse("原副本已清理且没有已记录的提交，无法证明检查点不丢");
-  if (old.work!.head === head) return;
-  const scratch = mkdtempSync(join(tmpdir(), "lend-reborrow2-"));
-  try {
-    await git(scratch, ["init", "--bare", "-q"]);
-    await git(scratch, ["fetch", "--no-tags", lendRepoUrl(repo), `refs/heads/${branch}:refs/heads/remote`]);
-    if ((await git(scratch, ["merge-base", "--is-ancestor", old.work!.head, "refs/heads/remote"], [0, 1, 128])).code !== 0) refuse("原副本已清理且未推送的提交不在远端");
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
+/**
+ * Old copy already removed: no archive of its refs / stash / reflog exists anywhere, and a pushed work head says nothing about
+ * other checkpoints, so only an old order that never started a worker (nothing could have been made) is provably lossless.
+ */
+function removedCopy(old: LendRow): void {
+  if (old.state === "released" && !old.startedAt && !old.work && !old.payload && !old.payloadSha) return;
+  refuse("原副本已清理，没有完整检查点归档可核（已推 head 不能证明其它分支 / stash / reflog 已保全）");
 }
 
 export async function preserveReborrow2Git(old: LendRow, next: LendRow, git: Git = gitRunner()): Promise<void> {
@@ -69,7 +63,7 @@ export async function preserveReborrow2Git(old: LendRow, next: LendRow, git: Git
   if (!sha.test(head) || !branch || !sha.test(priorHead)) refuse("订单起点或分支失读");
   const remote = await remoteState(repo, branch!);
   if (remote !== null ? remote !== head : head !== priorHead) refuse("订单起点不是远端分支 head（或未推送时的原起点）");
-  if (!old.dir || !existsSync(old.dir)) return removedCopy(git, old, repo, branch!, head);
+  if (!old.dir || !existsSync(old.dir)) return removedCopy(old);
   const dir = realpathSync(old.dir);
   if (firstSymlink(dir)) refuse("原副本含符号链接");
   const before = await snapshot(git, dir, old, priorHead);

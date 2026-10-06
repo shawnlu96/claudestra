@@ -1,8 +1,9 @@
 /**
  * REBOR2 read-only preparation: any canonical ended write lease may be adopted as terminal fact by a real PM.
  * Nothing here writes; the old lease, the old order's terminal status and its reason/time are only quoted.
- * Same-peer recovery leaves the old provider journal to the provider-side claim check; a different peer is accepted
- * only when the borrower ledger itself proves the old side never started or fully delivered. tests/lend-reborrow2-facts.test.ts.
+ * Same-peer recovery leaves the old provider journal to the provider-side claim check; a different peer is accepted only when
+ * the original side never started a worker (never claimed, or its own authenticated not_started release) and that original
+ * instance is still authenticated and authorised now — its identity is part of the CAS. tests/lend-reborrow2-facts.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -17,6 +18,7 @@ import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { roleOf, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { isRealPmRole } from "./ledger-team-config.js";
 import { lendBranch } from "./lend-git.js";
+import { CROSS_PEER_ENDS } from "./lend-reborrow2-marker.js";
 import type { BorrowEntry, LendFamily } from "./lend-config.js";
 import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
 import { HELLO_FRESH_MS } from "./lend-wire-v2.js";
@@ -30,11 +32,11 @@ const conflict = (message: string): never => { throw new LedgerError("conflict",
 const forbidden = (message: string): never => { throw new LedgerError("forbidden", `终态接续：${message}`); };
 
 /**
- * How the borrower ledger proves the old provider side stopped. Only `never_claimed`, `not_started` and `delivered`
- * leave nothing unsubmitted on the old peer; `stopped` / `cancelled` need the same provider's own journal at claim.
+ * How the borrower ledger proves the old provider side stopped. Only `never_claimed` and `not_started` (the original peer's own
+ * authenticated release before any worker start) leave no worker-made checkpoint on the old peer. `delivered` may still leave
+ * unpushed checkpoints in the old copy, so it and `stopped` / `cancelled` need the same provider's own journal and copy at claim.
  */
 export type OldSideEnd = "never_claimed" | "not_started" | "delivered" | "stopped" | "cancelled";
-const CROSS_PEER_ENDS: readonly OldSideEnd[] = ["never_claimed", "not_started", "delivered"];
 
 export interface Reborrow2Target { peer: string; fp: string; repo: string; family: LendFamily }
 
@@ -116,6 +118,14 @@ function authorFamily(raw: Raw, prev: LendOrder, requested: LendFamily, pms: rea
 
 export type Reborrow2Facts = ReturnType<typeof captureReborrow2Facts>;
 
+/** The original instance's stable authenticated identity; per-hello fields (seq / helloAt / grant.until) are checked by authority. */
+function originIdentity(db: Database, ended: { peer: string; fp: string; repo: string }) {
+  const h = getLendPeer(db, ended.peer);
+  if (!h || !h.fp || h.fp !== ended.fp) forbidden("原提供方实例当前没有经认证的 hello，或实例指纹已变，不能证明原侧已停，拒绝换 peer");
+  if (!h!.grant?.roles.includes("write") || !h!.grant.repos.includes(ended.repo)) forbidden("原提供方已撤销写授权，原侧状态无授权核验，拒绝换 peer");
+  return { peer: h!.peer, fp: h!.fp!, proto: h!.proto, boot: h!.boot, roles: [...h!.grant!.roles].sort(), repos: [...h!.grant!.repos].sort() };
+}
+
 /** Capture before external I/O. The target peer may differ from the original; its branch is always its own lend branch. */
 export function captureReborrow2Facts(db: Database, taskId: string, target: Reborrow2Target) {
   const raw = readFacts(db, taskId);
@@ -138,10 +148,11 @@ export function captureReborrow2Facts(db: Database, taskId: string, target: Rebo
   assertNoSafetyRefusal(raw, previous);
   const end = oldSideEnd(previous, raw.events);
   if (!samePeer && !CROSS_PEER_ENDS.includes(end)) forbidden(`原单结束方式 ${end} 只有原提供方 journal 能证明已停且检查点保全，不能换 peer`);
+  const origin = samePeer ? null : originIdentity(db, ended);
   const meta = getMeta(db, task.project);
   const family = authorFamily(raw, previous, target.family, meta.pms, meta);
   return { task, lease: ended, previous, end, target: { ...target, branch: branch! }, samePeer, family: target.family,
-    originalFamily: family.original, epochSeq: family.epochSeq, fingerprint: digest(raw) };
+    originalFamily: family.original, epochSeq: family.epochSeq, origin, fingerprint: digest(raw) };
 }
 
 /** Must run inside the canonical writer's BEGIN IMMEDIATE; it only reads and compares. */
@@ -149,6 +160,13 @@ export function assertReborrow2Cas(db: Database, prepared: Reborrow2Facts): void
   if (!db.inTransaction) throw new LedgerError("invalid", "终态接续 CAS 必须在 canonical writer 的写事务内执行");
   const fresh = captureReborrow2Facts(db, prepared.task.id, { peer: prepared.target.peer, fp: prepared.target.fp, repo: prepared.target.repo, family: prepared.family });
   if (fresh.fingerprint !== prepared.fingerprint || digest(fresh) !== digest(prepared)) conflict("读取来源期间任务、材料、订单或租约发生变化");
+}
+
+/** Cross peer: the original instance must still be the captured authenticated one, freshly heard and still granted. */
+function assertOriginAuthority(db: Database, facts: Reborrow2Facts, now: number): void {
+  const fresh = originIdentity(db, facts.lease), h = getLendPeer(db, facts.lease.peer)!;
+  if (digest(fresh) !== digest(facts.origin)) conflict("原提供方实例身份或授权在准备后变化");
+  if (h.helloAt > now || now - h.helloAt > HELLO_FRESH_MS || h.grant!.until <= now) forbidden("原提供方失联（hello 过期）或授权到期，原侧存活 / 结果未知，拒绝换 peer");
 }
 
 /** Real PM, current borrow entry, the target peer's pinned instance, fresh hello, grant and capacity — re-read under the offer lock. */
@@ -165,7 +183,8 @@ export function assertReborrow2Authority(db: Database, facts: Reborrow2Facts, ac
   if (!pinnedFp || pinnedFp !== fp || (borrow!.fp && borrow!.fp !== fp) || !hello || hello.fp !== fp || !protocol ||
     hello.helloAt > now || now - hello.helloAt > HELLO_FRESH_MS) forbidden("当前认证 peer 实例身份失读、漂移或 hello 过期");
   if (!hello!.grant?.roles.includes("write") || !hello!.grant.repos.includes(repo) || hello!.grant.until <= now) forbidden("peer 未授权写角色或本仓库");
-  if (replay) return; // Returning the existing successor consumes no extra capacity.
+  if (replay) return; // Returning the existing successor consumes no extra capacity and issues nothing.
+  if (facts.origin) assertOriginAuthority(db, facts, now);
   const cap = peerCapacity(db, peer, borrow!.maxOpen, now, { exceptTask: task.id, enforce: true });
   if (cap.why || !(cooldownPeerSlots(db, peer, cap.slots, now)[facts.family] > 0)) forbidden(`peer 无可用授权或容量：${cap.why ?? facts.family}`);
 }

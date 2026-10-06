@@ -13,6 +13,7 @@ import { prepareReborrow2Context, type Reborrow2Context } from "../src/lib/lend-
 import { applyReborrow2 } from "../src/lib/lend-reborrow2-apply.js";
 import { runReborrow2, type Reborrow2CliPort } from "../src/lib/lend-reborrow2-cli.js";
 import { classifyReserved } from "../src/lib/lend-reborrow2-marker.js";
+import { HELLO_FRESH_MS } from "../src/lib/lend-wire-v2.js";
 import type { Reborrow2Remote } from "../src/lib/lend-reborrow2-source.js";
 import { absent, at, base, borrowOf, fakeProbe, fp, fp2, now, other, peer, pm, pushed, repo, rows, setupLedger, taskId,
   type EndKind } from "./lend-reborrow2-fixture.js";
@@ -112,6 +113,19 @@ test.each(["drift", "ancestry", "unreadable", "fp", "pr-changed"])("source %s re
   const before = rows(db);
   await expect(prepareReborrow2Context(f, fake.probe)).rejects.toThrow("终态接续来源未对账");
   expect(rows(db)).toBe(before);
+});
+
+test.each(["deleted", "stale", "revoked", "reboot"])("cross peer: original peer %s after preparation refuses inside the transaction, zero write", async (bad) => {
+  ({ db } = setupLedger("checkout"));
+  const c = await prepared("checkout", false);
+  if (bad === "deleted") db.run("DELETE FROM lend_peers WHERE peer = ?", [peer]);
+  if (bad === "stale") db.run("UPDATE lend_peers SET helloAt = ? WHERE peer = ?", [now - HELLO_FRESH_MS, peer]);
+  if (bad === "revoked") db.run("UPDATE lend_peers SET grant = NULL WHERE peer = ?", [peer]);
+  if (bad === "reboot") db.run("UPDATE lend_peers SET boot = 'mate-reboot' WHERE peer = ?", [peer]);
+  const before = rows(db);
+  expect(() => applyReborrow2(db, { ...pm, now: now + 1 }, c, input(c), fp2)).toThrow("原提供方");
+  expect(rows(db)).toBe(before);
+  expect(listLendOrders(db, taskId).filter((o) => o.supersedes)).toHaveLength(0);
 });
 
 test("cross peer refuses a new branch that already carries another head", async () => {

@@ -6,6 +6,7 @@ import { appendEvent } from "../src/lib/ledger-write.js";
 import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { readReborrowBinding } from "../src/lib/lend-reborrow-marker.js";
 import { classifyReserved, reborrow2Marker } from "../src/lib/lend-reborrow2-marker.js";
+import { HELLO_FRESH_MS } from "../src/lib/lend-wire-v2.js";
 import { assertReborrow2Authority, assertReborrow2Cas, captureReborrow2Facts } from "../src/lib/lend-reborrow2-facts.js";
 import { borrowOf, fp, fp2, now, other, peer, pm, repo, rows, setupLedger, switchFamily, taskId, type EndKind } from "./lend-reborrow2-fixture.js";
 
@@ -60,6 +61,41 @@ describe.each(["checkout", "push", "model400", "reclaim"] as EndKind[])("ended b
       assertReborrow2Authority(db, f, pm.actor, borrowOf(other), fp2, now);
     } else expect(() => cross()).toThrow("不能换 peer");
     expect(rows(db)).toBe(before);
+  });
+});
+
+describe("cross peer needs the original instance authenticated and authorised now", () => {
+  const before = () => { ({ db } = setupLedger("checkout")); return rows(db); };
+  test.each([
+    ["no hello row", () => db.run("DELETE FROM lend_peers WHERE peer = ?", [peer]), "没有经认证的 hello"],
+    ["instance changed", () => db.run("UPDATE lend_peers SET fp = 'ffff-ffff-ffff-ffff' WHERE peer = ?", [peer]), "实例指纹已变"],
+    ["grant revoked", () => db.run("UPDATE lend_peers SET grant = NULL WHERE peer = ?", [peer]), "撤销写授权"],
+  ])("%s refuses at capture, ledger untouched", (_n, mutate, why) => {
+    const b = before();
+    mutate();
+    expect(() => cross()).toThrow(why);
+    expect(rows(db)).toBe(b);
+  });
+  test("stale original hello or expired grant refuses at authority", () => {
+    before();
+    const f = cross();
+    expect(f.origin).toMatchObject({ peer, fp });
+    db.run("UPDATE lend_peers SET helloAt = ? WHERE peer = ?", [now - HELLO_FRESH_MS - 1, peer]);
+    expect(() => assertReborrow2Authority(db, f, pm.actor, borrowOf(other), fp2, now)).toThrow("hello 过期");
+    db.run("UPDATE lend_peers SET helloAt = ? WHERE peer = ?", [now, peer]);
+    db.run("UPDATE lend_peers SET grant = json_set(grant, '$.until', ?) WHERE peer = ?", [now, peer]);
+    expect(() => assertReborrow2Authority(db, f, pm.actor, borrowOf(other), fp2, now)).toThrow("授权到期");
+  });
+  test("original identity changing after preparation fails the CAS / authority", () => {
+    before();
+    const f = cross();
+    db.run("UPDATE lend_peers SET boot = 'mate-reboot' WHERE peer = ?", [peer]);
+    expect(() => db.transaction(() => assertReborrow2Cas(db, f)).immediate()).toThrow("变化");
+    expect(() => assertReborrow2Authority(db, f, pm.actor, borrowOf(other), fp2, now)).toThrow("原提供方实例身份或授权在准备后变化");
+  });
+  test("same peer does not consult the original row twice (the target is the original)", () => {
+    before();
+    expect(same().origin).toBeNull();
   });
 });
 

@@ -9,6 +9,8 @@ import type { OldSideEnd } from "./lend-reborrow2-facts.js";
 export interface Reborrow2Binding { orderId: string; gen: number; peer: "same" | "cross"; end: OldSideEnd; src: string; ended: number }
 
 const ENDS: readonly OldSideEnd[] = ["never_claimed", "not_started", "delivered", "stopped", "cancelled"];
+/** Ends where no worker ever ran on the original side (see lend-reborrow2-facts.ts); the only ones a different peer may take. */
+export const CROSS_PEER_ENDS: readonly OldSideEnd[] = ["never_claimed", "not_started"];
 const V2 = /^\[lend-reborrow2:v1 old=(lend:[\w.-]+:s\d+:r\d+:a\d+) gen=(0|[1-9]\d*) peer=(same|cross) end=([a-z_]+) src=(lend\/[\w.-]+) ended=([1-9]\d*)\]$/;
 const RESERVED = /lend-reborrow/i;
 const IS_V2 = /lend-reborrow2/i;
@@ -20,7 +22,7 @@ function parseV2(line: string): Reborrow2Binding | null {
   if (!m) return null;
   const gen = Number(m[2]), ended = Number(m[6]), end = m[4] as OldSideEnd;
   if (!Number.isSafeInteger(gen) || !Number.isSafeInteger(ended) || !ENDS.includes(end)) return null;
-  if (m[3] === "cross" && !["never_claimed", "not_started", "delivered"].includes(end)) return null;
+  if (m[3] === "cross" && !CROSS_PEER_ENDS.includes(end)) return null;
   return { orderId: m[1], gen, peer: m[3] as "same" | "cross", end, src: m[5], ended };
 }
 

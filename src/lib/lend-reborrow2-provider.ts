@@ -8,7 +8,7 @@ import { getOrder, orderOf, type LendRow } from "./lend-journal.js";
 import { workerName } from "./lend-worker-name.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
 import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow-provider.js";
-import { classifyReserved, type Reborrow2Binding } from "./lend-reborrow2-marker.js";
+import { classifyReserved, CROSS_PEER_ENDS, type Reborrow2Binding } from "./lend-reborrow2-marker.js";
 import { remoteBranchState } from "./lend-reborrow2-source.js";
 import { preserveReborrow2Git, Reborrow2Refusal } from "./lend-reborrow2-preserve.js";
 
@@ -57,6 +57,7 @@ async function sameJournal(next: LendRow, b: Reborrow2Binding, d: Reborrow2Provi
 async function crossSource(next: LendRow, b: Reborrow2Binding, d: Reborrow2ProviderPort): Promise<void> {
   const o = orderOf(next), head = String(o?.head), repo = String(o?.repo), branch = next.wire?.write?.branch;
   if (!branch || (b.peer === "cross" && b.src === branch) || (b.peer === "same" && b.src !== branch)) refuse("新旧分支关系不明确");
+  if (!CROSS_PEER_ENDS.includes(b.end)) refuse(`原侧结束方式 ${b.end} 可能留有未推检查点，只能由原提供方凭自己的 journal / 副本接续`);
   const read = d.reborrow2Remote ?? remoteBranchState;
   const src = await read(repo, b.src), dst = b.peer === "cross" ? await read(repo, branch!) : src;
   if (!src || !dst) refuse("原分支或新分支远端失读");

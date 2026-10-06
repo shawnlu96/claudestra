@@ -85,7 +85,7 @@ test("unpushed WIP (push timeout) is preserved separately, not merged into the s
 });
 
 test.each([
-  ["dirty", "未提交修改"], ["removed-unpushed", "未推送的提交不在远端"], ["removed-no-work", "无法证明检查点不丢"],
+  ["dirty", "未提交修改"], ["removed-unpushed", "原副本已清理"], ["removed-no-work", "原副本已清理"],
   ["remote-moved", "订单起点"], ["alive", "仍活"], ["unknown", "仍活"], ["failure", "失败"], ["missing", "journal 失读"],
   ["payload", "未知结果"], ["settle", "settle"], ["end-mismatch", "不符"], ["fp", "实例"], ["safety", "安全拒绝"], ["symlink", "符号链接"],
 ])("same peer %s refuses", async (bad, why) => {
@@ -116,6 +116,25 @@ test("a copy already removed after a never-started release is acceptable (nothin
   expect(await check()).toBeNull();
 });
 
+test("a removed copy is refused even when its recorded work head is pushed: other checkpoints are not provably kept", async () => {
+  const { h, check } = setup();
+  lab.git(oldDir, "checkout", "-q", "-b", "private");
+  const priv = lab.commit(oldDir, "private-checkpoint.txt");
+  lab.git(oldDir, "update-ref", "refs/checkpoints/private", priv);
+  lab.git(oldDir, "checkout", "-q", branch);
+  patchOrder(h.db, oldId, ["stopped"], { work: { head: pushed, summary: "s", selfCheck: "c" } });
+  rmSync(oldDir, { recursive: true, force: true });
+  expect(await check()).toContain("原副本已清理");
+  expect(existsSync(kept())).toBe(false);
+});
+
+test("cross peer: delivered / stopped / cancelled ends are refused even with a forged marker", async () => {
+  for (const end of ["delivered", "stopped", "cancelled"] as const) {
+    const bad = `[lend-reborrow2:v1 old=${oldId} gen=1 peer=cross end=${end} src=${branch} ended=50]`;
+    expect(await setup({ old: "none", acceptance: [bad], head: pushed }).check()).toContain("续借拒领");
+  }
+});
+
 test("cross peer: local absence of the old journal is never proof; the real remote source decides", async () => {
   lab.git(lab.root, "--git-dir", lab.bare, "branch", "-D", branch);
   const ok = setup({ old: "none", binding: { peer: "cross", end: "not_started" }, head: lab.main });
@@ -126,7 +145,7 @@ test("cross peer: local absence of the old journal is never proof; the real remo
 });
 
 test.each([["journal-present", "本机有原单"], ["head-mismatch", "起点"], ["unreadable", "失读"]])("cross peer %s refuses", async (bad, why) => {
-  const s = setup({ old: bad === "journal-present" ? "released" : "none", binding: { peer: "cross", end: "delivered" }, head: bad === "head-mismatch" ? lab.main : pushed });
+  const s = setup({ old: bad === "journal-present" ? "released" : "none", binding: { peer: "cross", end: "not_started" }, head: bad === "head-mismatch" ? lab.main : pushed });
   if (bad === "unreadable") rmSync(lab.bare, { recursive: true, force: true });
   expect(await s.check()).toContain(why);
 });
