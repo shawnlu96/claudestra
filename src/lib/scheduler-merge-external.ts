@@ -91,7 +91,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       if (proof.chain.length > maxHops()) {
         return { ok: false, reason: `新 head 经 ${proof.chain.length} 次纯 main 合并，mainCarry 策略未开只认单跳`, mainParent, mainHead };
       }
-      return { ok: true, reason, mainParent, mainHead, diffHash };
+      return { ok: true, reason, mainParent, mainHead, diffHash, chain: proof.chain }; // persisted by the merge step
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },
     async merge(prRef, expectedHead) {

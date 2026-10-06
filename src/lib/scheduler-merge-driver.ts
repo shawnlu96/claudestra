@@ -1,4 +1,5 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
+import { carryChainSuffix, type CarryHop } from "./review-main-carry-manual-auto.js";
 import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
@@ -19,7 +20,7 @@ export interface PrSnapshot {
 /** How far `head` lags the current main; a failed lookup throws, it never reads as "up to date". */
 export interface MainFreshness { behindBy: number; mainHead: string }
 /** Whether a head moved by update-branch only merged main in; `ok` needs both the parent shape and a byte-identical net diff. */
-export interface ReviewCarry { ok: boolean; reason: string; mainParent?: string; mainHead?: string; diffHash?: string }
+export interface ReviewCarry { ok: boolean; reason: string; mainParent?: string; mainHead?: string; diffHash?: string; chain?: readonly CarryHop[] }
 export interface MergeExternal {
   inspect(pr: string): Promise<PrSnapshot>;
   freshness(pr: string, head: string): Promise<MainFreshness>;
@@ -89,7 +90,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
   if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState) && !behind) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
   const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
-    mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
+    mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain), undefined, pr.head);
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
   return pr.mergeState === "DIRTY" || behind ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }

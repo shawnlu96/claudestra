@@ -64,7 +64,12 @@ beforeAll(async () => {
     CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: join(root, "singleton.lock"), token: singleton.token },
       maintenance: { path: join(root, "maintenance.lock"), token: maintenance.token } }) });
   ledgerPath = join(state, "ledger.sqlite");
+  // the CLI child re-reads both inside its write transaction (review-main-carry-manual-auto.ts autoCarryEvidence)
+  writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: false, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: work } } }));
+  policy("on");
 });
+const policy = (mode: "on" | "observe" | "off") =>
+  writeFileSync(join(state, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { mainCarry: mode } } } }));
 afterAll(() => { for (const l of locks) l.release(); closeLedger(ledgerPath); if (root) rmSync(root, { recursive: true, force: true }); });
 
 let cards = 0;
@@ -140,6 +145,10 @@ describe("MAINP2 auto carry through the production write port", () => {
       expect(getTask(db, c.id)!.headSHA).toBe(two);
       const carry = listEvents(db, { project: "p", target: c.id }).filter((e) => e.data.op === "review_carry");
       expect(carry).toEqual([expect.objectContaining({ actor: "scheduler", data: expect.objectContaining({ from: oldHead, to: two, mainParent: main2, mainHead: main2 }) })]);
+      // review r1 missing-chain: the full canonical chain and the PASS it carries are on the event written by the CLI child
+      const review = listEvents(db, { project: "p", target: c.id }).findLast((e) => e.kind === "review")!;
+      expect(carry[0]!.data).toMatchObject({ hops: 2, mainCarry: "on", sourceReviewSeq: review.seq,
+        chain: [{ previousHead: oldHead, head: one, mainParent: main1 }, { previousHead: one, head: two, mainParent: main2 }] });
       expect(listEvents(db, { project: "p", target: c.id }).filter((e) => e.kind === "decision")).toEqual([]); // not a PM carry
     } finally { closeLedger(ledgerPath); }
   }, 60_000);
@@ -150,6 +159,20 @@ describe("MAINP2 auto carry through the production write port", () => {
     const db = openLedger(ledgerPath);
     try { expect(listEvents(db, { project: "p", target: c.id }).filter((e) => e.data.op === "review_carry")).toEqual([]); }
     finally { closeLedger(ledgerPath); }
+  }, 60_000);
+  test("review r1 policy-drift: on when the proof ran, off before the CLI write → the write transaction refuses, zero writes", async () => {
+    const c = card();
+    await begin(c.intent);
+    const snap = () => {
+      const db = openLedger(ledgerPath);
+      try { return { task: getTask(db, c.id), n: listEvents(db, { project: "p", target: c.id }).length }; } finally { closeLedger(ledgerPath); }
+    };
+    const before = snap();
+    policy("off");
+    try {
+      await expect(drive(c.intent, two)).rejects.toThrow(/mainCarry 策略不是 on/); // the external still says 16: only the CLI re-read catches it
+    } finally { policy("on"); }
+    expect(snap()).toEqual(before);
   }, 60_000);
   test("an evil hop in the chain: back to review, nothing carried", async () => {
     const c = card();

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { autoCarryEvidence, carryChainOf, MAX_AUTO_HOPS, withCarryChain, type CarryHop } from "../src/lib/review-main-carry-manual-auto.js";
+import { autoCarryEvidence, carryChainOf, MAX_AUTO_HOPS, carryChainSuffix, type CarryHop } from "../src/lib/review-main-carry-manual-auto.js";
 import { carryReceipt, parseCarryReceipt } from "../src/lib/scheduler-merge.js";
 
 const h = (n: number) => n.toString(16).padStart(40, "0");
@@ -26,17 +26,17 @@ db.query("UPDATE tasks SET stage='merge', round=1, headSHA=? WHERE id='T2'").run
 /** n hops from OLD: heads 1000+i, main parents 2000+i */
 const chainOf = (n: number): CarryHop[] => Array.from({ length: n }, (_, i) => ({ previousHead: i ? h(1000 + i - 1) : OLD, head: h(1000 + i), mainParent: h(2000 + i) }));
 const evOf = (c: CarryHop[]) => ({ oldHead: OLD, newHead: c.at(-1)!.head, mainParent: c.at(-1)!.mainParent });
-const raw = (c: CarryHop[]) => carryChainOf(withCarryChain(carryReceipt({ ...evOf(c), mainHead: h(3000), diffHash: D }), c))!.raw;
+const raw = (c: CarryHop[]) => carryChainOf(carryReceipt({ ...evOf(c), mainHead: h(3000), diffHash: D }) + carryChainSuffix(c))!.raw;
 const task = (id = "T1") => getTask(db, id)!;
 
 describe("receipt: chain appended after the unchanged base", () => {
   test("round trip; the base still parses as before and fits the 600-char receipt check; no chain = no suffix", () => {
     const c = chainOf(MAX_AUTO_HOPS), base = carryReceipt({ ...evOf(c), mainHead: h(3000), diffHash: D });
-    const split = carryChainOf(withCarryChain(base, c))!;
+    const split = carryChainOf(base + carryChainSuffix(c))!;
     expect(split.base).toBe(base);
     expect(parseCarryReceipt(split.base)).toMatchObject({ oldHead: OLD, newHead: c.at(-1)!.head });
     expect(split.base.length).toBeLessThanOrEqual(600);
-    expect(withCarryChain(base, undefined)).toBe(base);
+    expect(carryChainSuffix(undefined)).toBe("");
     expect(carryChainOf(base)).toBeNull();
   });
 });

@@ -1,9 +1,16 @@
-/** MAINP2 验收线 7（审查 r1 audit-unwired）：audit 的 CI 来源按当前 head 现查必需检查；fake gh 记调用，读失败整项目 null。 */
+/** MAINP2 验收线 7（审查 r1 audit-unwired）：audit 的 CI 来源按当前 head 现查必需检查；fake gh 记调用，读失败整项目 null；经 `ledger audit` 写口跑真流程。 */
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AuditSnapshot } from "../src/lib/ledger-audit.js";
 import { collectMergeCi, type MergeCiDeps } from "../src/lib/ledger-audit-merge-ready.js";
 import type { EventKind, LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
+import { createTask } from "../src/lib/ledger-write.js";
 import type { Run } from "../src/lib/review-main-carry-manual-ci.js";
+import { runLedger } from "../src/manager/ledger.js";
 
 const H = "a".repeat(40), H2 = "b".repeat(40), NOW = 1_000_000, CHECKS = ["typecheck", "test", "build"];
 let seq = 0;
@@ -48,5 +55,36 @@ describe("collectMergeCi: the audit's live current-head CI source", () => {
     expect(await collectMergeCi("p", [card("T1")], NOW, deps(gh(() => ok()).run, null))).toBeNull();
     expect(await collectMergeCi("p", [card("T1")], NOW, deps(gh(() => ok()).run, []))).toBeNull();
     expect(await collectMergeCi("p", [card("T3", {}, "changes")], NOW, deps(gh(() => "fail").run))).toEqual({});
+  });
+});
+
+describe("collectAuditSnapshots → auditLedger → ledger audit write port, with the live CI source", () => {
+  test("green current head: finding opened through `ledger audit`; gh failing next round: skipped, the open finding stays", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mainp2-audit-flow-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
+    try {
+      const T0 = 1_000 * 60_000, NOW2 = T0 + 3 * 60 * 60_000;
+      db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'pms', '[\"agent-pm\"]')").run();
+      createTask(db, { actor: "owner", now: T0 }, { project: "p", id: "T1", title: "T1", kind: "code", agent: "a" });
+      db.query("UPDATE tasks SET stage='merge', round=1, headSHA=?, pr='https://github.com/o/r/pull/1' WHERE id='T1'").run(H);
+      insertEvent(db, { actor: "rv", now: T0 + 1 }, { project: "p", target: "T1", kind: "review", text: "", data: { round: 1, head: H, verdict: "pass",
+        reviewer: "rv", reviewerSessionId: "s", reviewerFamily: "codex", path: "r.md", findings: [], p0: 0, p1: 0, p2: 0 } }, false);
+      insertEvent(db, { actor: "pm", now: T0 + 2 }, { project: "p", target: "T1", kind: "stage", text: "", data: { from: "review", to: "merge" } }, false);
+      let down = false;
+      const g = gh(() => (down ? "fail" : ok()));
+      const auditSources = { registry: async () => [], windows: async () => ["master"], turn: async () => "idle" as const,
+        fileTimes: async () => ({ lastWriteAt: null, startedAt: null }), reviewers: () => [], heldPath: join(dir, "held.json"),
+        mergeCi: (p: string, t: AuditSnapshot["tasks"], n: number) => collectMergeCi(p, t, n, deps(g.run)) };
+      const audit = () => runLedger(["audit", "--project", "p", "--json"], { db, actor: "owner", projectIds: ["p"], now: () => NOW2, auditSources,
+        loadRegistry: async () => ({ agents: {} }) as never, saveRegistry: async () => {} }) as Promise<Record<string, any>>;
+      const first = await audit();
+      expect(first.ok).toBe(true);
+      expect(first.projects[0].open.map((f: { rule: string }) => f.rule)).toContain("merge_ready_idle");
+      expect(g.calls.map((c) => c[2])).toEqual([`repos/o/r/commits/${H}/check-runs?per_page=100`]);
+      down = true;
+      const second = await audit();
+      expect(second.projects[0].skipped).toContainEqual({ rule: "merge_ready_idle", reason: expect.stringContaining("CI") });
+      expect(second.projects[0].resolved).toBe(0);
+      expect(second.projects[0].open.map((f: { rule: string }) => f.rule)).toContain("merge_ready_idle");
+    } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
   });
 });

@@ -11,7 +11,8 @@ import { mainCarryMode } from "./recovery-main-carry-policy.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { carriedReview } from "./review-main-carry-manual.js";
 import { headChecks, type Run } from "./review-main-carry-manual-ci.js";
-import { parseRequiredChecks } from "./scheduler-config.js";
+import { runBounded } from "./run-bounded.js";
+import { parseRequiredChecks, readSchedulerConfig } from "./scheduler-config.js";
 
 const MIN = 60_000;
 export const MERGE_READY_RULES = ["merge_ready_idle"] as const;
@@ -93,3 +94,7 @@ export async function collectMergeCi(project: string, tasks: AuditSnapshot["task
   } catch { return null; }
 }
 
+
+/** Production source (ledger-audit-snapshot.ts realSources): gh through runBounded, required checks from the scheduler config read now. */
+export const liveMergeCi = (project: string, tasks: AuditSnapshot["tasks"], now: number): Promise<Record<string, MergeCiFact> | null> =>
+  collectMergeCi(project, tasks, now, { run: runBounded, checksOf: (p) => readSchedulerConfig().projects[p]?.requiredChecks });

@@ -1,5 +1,5 @@
 /**
- * MAINP2 auto 沿用的完整证据与权限（审查 r1 policy-drift / missing-chain）：driver 把 canonical 链拼在回执末尾（withCarryChain），
+ * MAINP2 auto 沿用的完整证据与权限（审查 r1 policy-drift / missing-chain）：driver 把 canonical 链拼在回执末尾（carryChainSuffix），
  * `ledger scheduler-merge-step` 写事务里 autoCarryEvidence 剥链、核连续 / 上限 / 末跳，并在事务内现读 mainCarry：多跳只在该 repoDir
  * 全部项目 on 时成立，否则 conflict 零写；同时记下来源 PASS seq 与完整链写进 review_carry。热点里只留薄调用。tests/review-main-carry-manual-auto*.test.ts。
  */
@@ -27,9 +27,9 @@ export function policyHops(project: ProjectSchedule, config: () => SchedulerConf
   } catch { return 1; }
 }
 
-/** The driver's receipt with the full chain appended as one JSON line (the base receipt is unchanged and parsed as before). */
-export const withCarryChain = (receipt: string, chain: readonly CarryHop[] | undefined): string =>
-  chain?.length ? `${receipt}${MARK}${JSON.stringify(chain.map((h) => [h.previousHead, h.head, h.mainParent]))}` : receipt;
+/** Appended by the driver to its carry receipt: the full chain as one JSON line (the base receipt is unchanged and parsed as before). */
+export const carryChainSuffix = (chain: readonly CarryHop[] | undefined): string =>
+  chain?.length ? `${MARK}${JSON.stringify(chain.map((h) => [h.previousHead, h.head, h.mainParent]))}` : "";
 
 /** Split a step receipt into the base (checked by the merge step as before) and the raw chain, if any. */
 export function carryChainOf(receipt: string | undefined): { base: string; raw: string } | null {
