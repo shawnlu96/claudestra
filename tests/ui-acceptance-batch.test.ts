@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { answerFromCard } from "../src/bridge/ask-entry.js";
 import { setAsksForTest } from "../src/bridge/asks.js";
-import { canonicalJson } from "../src/lib/ask-bind.js";
+import { bindHash, canonicalJson } from "../src/lib/ask-bind.js";
 import { getAsk, listAsks, openAskFull } from "../src/lib/ledger-asks.js";
 import { bindNode, rewriteDag } from "../src/lib/ledger-dag-write.js";
 import { effectiveNodes, getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
@@ -178,6 +178,48 @@ describe("project acceptance proof", () => {
     expect(listAsks(db, { project: P, states: ["open"] })).toHaveLength(1);
   });
 
+  test("owner rejection can retry the identical vector once, including after restart", async () => {
+    const rejected = batch.propose(ctx, 0, requests());
+    await answer(rejected.askId, false);
+    const before = getAsk(db, rejected.askId);
+    const conn = new Database(path);
+    let retry: ReturnType<UiAcceptanceBatch["propose"]>;
+    try { retry = new UiAcceptanceBatch(conn).propose(ctx, rejected.revision, requests()); }
+    finally { conn.close(); }
+    expect(retry.revision).toBe(rejected.revision + 1);
+    expect(retry.askId).not.toBe(rejected.askId);
+    expect(retry.vectorDigest).toBe(rejected.vectorDigest);
+    expect(batch.propose(ctx, retry.revision, requests()).askId).toBe(retry.askId);
+    expect(getAsk(db, rejected.askId)).toEqual(before);
+    expect(listAsks(db, { project: P, states: ["open"] }).map((a) => a.id)).toEqual([retry.askId]);
+    expect(() => batch.verify(ctx, rejected.revision, rejected.askId)).toThrow("取代");
+    expect(batch.check(ctx, "ab12-alpha").ok).toBe(false);
+    await answer(retry.askId);
+    expect(batch.propose(ctx, retry.revision, requests()).askId).toBe(retry.askId);
+    batch.verify(ctx, retry.revision, retry.askId);
+    expect(batch.check(ctx, "ab12-alpha")).toEqual({ ok: true });
+  });
+
+  test("whole-page evidence must reference a screenshot digest on a current UI task", () => {
+    const rs = requests();
+    rs[0]!.evidence.screenshotsHash = "d".repeat(64);
+    expect(() => batch.propose(ctx, 0, rs)).toThrow("截图摘要未关联");
+    expect(listAsks(db, { project: P })).toHaveLength(0);
+    taskPatch("U-alpha", { extra: { screenshotsDigest: rs[0]!.evidence.screenshotsHash } });
+    expect(batch.propose(ctx, 0, rs).entries[0]!.evidence!.screenshotsHash).toBe(rs[0]!.evidence.screenshotsHash);
+  });
+
+  test("a verified read can proceed while another WAL connection holds the write lock", async () => {
+    await accept();
+    const conn = new Database(path);
+    db.exec("PRAGMA busy_timeout = 0");
+    try {
+      conn.exec("BEGIN IMMEDIATE");
+      conn.query("UPDATE tasks SET title = 'uncommitted writer' WHERE id = 'U-alpha'").run();
+      expect(batch.check(ctx, "ab12-alpha")).toEqual({ ok: true });
+    } finally { conn.exec("ROLLBACK"); conn.close(); }
+  });
+
   test("non-manager, wrong caller/project/instance, rejected or expired approval cannot verify any member", async () => {
     expect(() => batch.propose({ ...ctx, actor: "agent-worker" }, 0, requests())).toThrow("PM");
     expect(() => batch.propose({ ...ctx, project: "other" }, 0, requests())).toThrow();
@@ -260,24 +302,48 @@ describe("project acceptance proof", () => {
     });
   }
 
-  test("legacy PAGEOK needs an explicit matching scope record; history stays unchanged", async () => {
+  test("raw legacy scope summaries cannot upgrade old PAGEOK to acceptance of a new head", () => {
     const f = getFeature(db, "ab12-alpha")!;
     createTask(db, { actor: "owner" }, { id: "PG", project: P, title: "legacy fixture", kind: "code" });
     bindNode(db, { actor: PM }, { id: f.id, rev: f.rev, key: PAGE_CHECK_KEY, taskId: "PG" });
     db.query("UPDATE tasks SET stage = 'verified' WHERE id = 'PG'").run();
     const rs = [{ featureId: f.id, legacyPageTask: "PG" }];
-    expect(() => batch.propose(ctx, 0, rs)).toThrow("历史摘要");
+    expect(() => batch.propose(ctx, 0, rs)).toThrow();
+    taskPatch("U-alpha", { headSHA: "c".repeat(40) });
+    expect(getTask(db, "PG")!.stage).toBe("verified");
     taskPatch("PG", { extra: { uiPageScopeDigest: digest(batch.snapshot(P, f.id)) } });
     const before = getTask(db, "PG");
-    const s = batch.propose(ctx, 0, rs);
-    expect(s.entries[0]).toMatchObject({ evidence: null, legacy: { taskId: "PG" } });
-    await answer(s.askId);
-    batch.verify(ctx, s.revision, s.askId);
-    expect(batch.check(ctx, f.id)).toEqual({ ok: true });
-    expect(getTask(db, "PG")).toEqual(before);
-    taskPatch("PG", { headSHA: H });
+    expect(() => batch.propose(ctx, 0, rs)).toThrow("UIACW");
     expect(batch.check(ctx, f.id).ok).toBe(false);
+    expect(listAsks(db, { project: P })).toHaveLength(0);
+    expect(getTask(db, "PG")).toEqual(before);
   });
+
+  for (const state of ["pending", "verified"] as const) {
+    test(`previous-release ${state} legacy vectors are retained but cannot approve a feature`, async () => {
+      const s = batch.propose(ctx, 0, requests());
+      // Seed the old release's persisted vector, then answer via the real owner API; this never creates production evidence.
+      const entries = structuredClone(s.entries);
+      entries[0]!.legacy = { taskId: "PG", head: H, specRev: 1, round: 0, digest: digest(entries[0]!.scope) };
+      entries[0]!.evidence = null;
+      const vectorDigest = digest(entries);
+      const a = getAsk(db, s.askId)!;
+      (a.bind!.params as Record<string, unknown>).vectorDigest = vectorDigest;
+      a.bind!.paramsHash = bindHash(a.bind!, PM);
+      db.query("UPDATE asks SET bind = ?, body = 'previous-release legacy fixture' WHERE id = ?").run(JSON.stringify(a.bind), s.askId);
+      db.query("UPDATE ui_page_vectors SET entries = ?, vectorDigest = ? WHERE askId = ?").run(JSON.stringify(entries), vectorDigest, s.askId);
+      expect((await answer(s.askId)).status).toBe(202);
+      if (state === "verified") {
+        db.query("UPDATE ui_page_vectors SET state = 'verified', verifiedAt = ? WHERE askId = ?").run(Date.now(), s.askId);
+        for (const e of entries) db.query("INSERT INTO ui_page_members VALUES (?, ?, ?, ?)").run(P, e.scope.featureId, s.sourceId, s.revision);
+      }
+      const before = db.query("SELECT * FROM ui_page_vectors WHERE askId = ?").get(s.askId);
+      if (state === "pending") expect(() => batch.verify(ctx, s.revision, s.askId)).toThrow("UIACW");
+      expect(batch.check(ctx, "ab12-alpha").ok).toBe(false);
+      if (state === "verified") expect(batch.check(ctx, "ab12-beta")).toEqual({ ok: true });
+      expect(db.query("SELECT * FROM ui_page_vectors WHERE askId = ?").get(s.askId)).toEqual(before);
+    });
+  }
 
   test("foreign authorize ask with same button cannot be used as acceptance source", async () => {
     const s = batch.propose(ctx, 0, requests());

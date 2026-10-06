@@ -13,7 +13,7 @@ import { requireManager } from "./ledger-feature-write.js";
 import { busyAsLedgerError, getMeta, getTask, LedgerError } from "./ledger-store.js";
 import { DIGEST_RE } from "./scheduler-ui-merge-refusal.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
-import { isUiNode, PAGE_CHECK_KEY, PAGE_CHECK_LIST, requirePageCheck, uiScope } from "./ui-acceptance.js";
+import { isUiNode, PAGE_CHECK_KEY, PAGE_CHECK_LIST, uiScope } from "./ui-acceptance.js";
 
 type Mode = "on" | "observe" | "off";
 type Scope = { featureId: string; dagVersion: number; ui: {
@@ -56,7 +56,7 @@ function scopeOf(db: Database, project: string, featureId: string): Scope {
   }) };
 }
 
-function checkEvidence(e: Evidence | undefined): Evidence {
+function checkEvidence(e: Evidence | undefined, scope: Scope): Evidence {
   if (!e || ![e.relay, e.productionData, e.basis, e.ledgerComparison].every(validText) || !DIGEST_RE.test(e.screenshotsHash)) {
     return fail("缺整页真实输入或截图摘要");
   }
@@ -64,20 +64,13 @@ function checkEvidence(e: Evidence | undefined): Evidence {
   if (!d || !Number.isSafeInteger(d.width) || !Number.isSafeInteger(d.height) || d.width <= 0 || d.height <= 0 || !validText(d.theme)) {
     return fail("缺 owner 设备尺寸 / 主题");
   }
+  // The whole-page reference must already belong to a current UI card. Private file resolution belongs to the consumer.
+  if (!scope.ui.some((n) => n.screenshotsHash === e.screenshotsHash)) return fail("整页截图摘要未关联当前 UI 任务");
   return JSON.parse(JSON.stringify(e)) as Evidence;
 }
 
-function legacyOf(db: Database, project: string, scope: Scope, taskId: string): Legacy {
-  const f = getFeature(db, scope.featureId)!;
-  requirePageCheck(db, f);
-  const page = effectiveNodes(db, getDagVersion(db, f.id, f.currentVersion)!).find((n) => n.key === PAGE_CHECK_KEY);
-  const t = getTask(db, taskId);
-  if (page?.taskId !== taskId || !t || t.project !== project || !["verified", "done"].includes(t.stage)) return fail("旧 PAGEOK 无有效验收证据");
-  // Old PAGEOKs without an exact recorded scope cannot be upgraded into head-bound evidence after the fact.
-  if (t.extra.uiPageScopeDigest !== hash(scope)) return fail("旧 PAGEOK 缺同范围历史摘要，不能追造验收证据");
-  return { taskId, head: t.headSHA, specRev: t.specRev, round: t.round,
-    digest: hash({ scope, extra: t.extra, spec: readTextSoft(specPathFor(t, getMeta(db, project).docsDir)) }) };
-}
+// PAGEOK task extras are mutable and cannot prove historical head-bound acceptance; UIACW must add a trusted record reader.
+const refuseLegacy = (): never => fail("旧 PAGEOK 历史证据接线待 UIACW，pureproof 不接受事后摘要");
 
 /** Explicit initialization in the proof adapter only; no ledger-store migration or production side effects on import. */
 function initialize(db: Database): void {
@@ -119,8 +112,8 @@ function binding(c: Context, sourceId: string, revision: number, vectorDigest: s
 function liveEntry(db: Database, project: string, e: Entry): void {
   const scope = scopeOf(db, project, e.scope.featureId);
   if (hash(scope) !== hash(e.scope)) return fail(`feature ${e.scope.featureId} 验收范围已漂移`);
-  if (e.legacy && hash(legacyOf(db, project, scope, e.legacy.taskId)) !== hash(e.legacy)) return fail("旧 PAGEOK 证据已漂移");
-  if (!e.legacy) checkEvidence(e.evidence ?? undefined);
+  if (e.legacy) refuseLegacy();
+  checkEvidence(e.evidence ?? undefined, scope);
 }
 
 /**
@@ -156,15 +149,14 @@ export class UiAcceptanceBatch {
       const entries: Entry[] = [...requests].sort((a, b) => a.featureId.localeCompare(b.featureId)).map((r) => {
         const scope = scopeOf(this.db, c.project, r.featureId);
         if (r.verdict !== undefined && r.verdict !== "approve" && r.verdict !== "reject") return fail("无效逐项结论");
-        if (r.legacyPageTask && (r.evidence || r.verdict === "reject")) return fail("旧验收只允许明确纳入，不能伪造新结论");
-        return { scope, verdict: r.verdict ?? "approve", evidence: r.legacyPageTask ? null : checkEvidence(r.evidence),
-          legacy: r.legacyPageTask ? legacyOf(this.db, c.project, scope, r.legacyPageTask) : null };
+        if (r.legacyPageTask !== undefined) refuseLegacy();
+        return { scope, verdict: r.verdict ?? "approve", evidence: checkEvidence(r.evidence, scope), legacy: null };
       });
       const vectorDigest = hash(entries);
       const old = prev ? sourceOf(this.db, prev.sourceId, prev.revision) : null;
       const oldAsk = old ? getAsk(this.db, old.askId) : null;
       if (old?.vectorDigest === vectorDigest && oldAsk?.fromAgent === c.actor && oldAsk.expiresAt > this.now(c) &&
-        ["open", "answered"].includes(oldAsk.state)) return old;
+        this.reusable(c, old, oldAsk)) return old;
       const sourceId = prev?.sourceId ?? `page_${crypto.randomUUID()}`;
       const revision = (prev?.revision ?? 0) + 1;
       const bind = binding(c, sourceId, revision, vectorDigest, entries);
@@ -206,7 +198,7 @@ export class UiAcceptanceBatch {
   check(c: Context, featureId: string): { ok: boolean; reason?: string } {
     if ((c.mode ?? "observe") !== "on") return { ok: false, reason: "使用原单 feature PAGEOK 闸" };
     try {
-      return this.transaction(() => {
+      return busyAsLedgerError("读取项目整页验收", () => this.db.transaction(() => {
         requireManager(this.db, c.actor, c.project);
         const p = current(this.db, c);
         if (!p) return fail("缺项目验收源");
@@ -222,10 +214,20 @@ export class UiAcceptanceBatch {
         this.authorized(c, s, row.verifiedAt, true);
         liveEntry(this.db, c.project, e);
         return { ok: true };
-      });
+      }).deferred());
     } catch (e) {
       if (!(e instanceof LedgerError)) throw e;
       return { ok: false, reason: e.message }; // Evidence refusal is a result; unexpected storage faults remain visible.
+    }
+  }
+
+  private reusable(c: Context, s: Source, a: Ask): boolean {
+    if (a.state === "open") return true;
+    if (a.state !== "answered") return false;
+    try { this.authorized(c, s, this.now(c)); return true; }
+    catch (e) {
+      if (!(e instanceof LedgerError)) throw e;
+      return false; // A declined or invalid answer needs a fresh owner card; storage faults must still surface.
     }
   }
 
