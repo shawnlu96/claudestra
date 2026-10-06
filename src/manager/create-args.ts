@@ -8,10 +8,12 @@ import {
   extractBoolFlag, extractEffortFlag, extractModeFlag, extractModelFlag, extractPermFlags, extractPurposeFlag, extractStringFlag, rejectFlagLikePositional,
 } from "./core.js";
 import { extractTeamFlags, type TeamFlags } from "./team.js";
+import { extractCardFlags, type CardFlags } from "./create-lifecycle.js";
 
 export const CREATE_USAGE =
   'create <name> <dir> [purpose|--purpose <text>] [--project <id>] [--runtime claude-code|pi] [--pi-base inherit|minimal] [--preset <preset>] ' +
-  '[--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external] [--parent <agent|master|none>] [--task "<text>"]';
+  '[--disallowed "..."] [--effort <level>] [--mode <permission-mode>] [--model <model>] [--external] [--parent <agent|master|none>] [--task "<text>"] ' +
+  '[--card <taskId> --card-role author|reviewer|other]';
 
 export interface CreateArgs {
   name: string;
@@ -30,6 +32,8 @@ export interface CreateArgs {
   /** --pi-preset <name>：能力档案预设（如 codemode） */
   piPresetFlag?: string;
   teamFlags: TeamFlags;
+  /** LIFE1 lifecycle registration (manager/create-lifecycle.ts) */
+  card?: CardFlags;
 }
 
 export function parseCreateArgs(args: string[]): CreateArgs | { error: string } {
@@ -43,7 +47,9 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
     else if (a.startsWith("--project=")) projectFlag = a.slice("--project=".length) || undefined;
     else afterProject.push(a);
   }
-  const { rest: afterTeam, flags: teamFlags, error: teamError } = extractTeamFlags(afterProject); // --parent / --task（manager/team.ts）
+  const { rest: afterCard, card, error: cardError } = extractCardFlags(afterProject); // --card / --card-role（manager/create-lifecycle.ts）
+  if (cardError) return { error: cardError };
+  const { rest: afterTeam, flags: teamFlags, error: teamError } = extractTeamFlags(afterCard); // --parent / --task（manager/team.ts）
   if (teamError) return { error: teamError };
   const { rest: afterExternal, value: external } = extractBoolFlag(afterTeam, "--external");
   const { rest: afterRuntime, value: runtimeFlag } = extractStringFlag(afterExternal, "--runtime");
@@ -67,6 +73,6 @@ export function parseCreateArgs(args: string[]): CreateArgs | { error: string } 
     dir,
     purpose: purposeFlag ?? purposeParts.join(" "),
     perms: { preset, disallowedRaw }, effort, mode, model, external, projectFlag, runtimeFlag, transportFlag,
-    piBaseFlag, piPresetFlag, teamFlags,
+    piBaseFlag, piPresetFlag, teamFlags, ...(card ? { card } : {}),
   };
 }

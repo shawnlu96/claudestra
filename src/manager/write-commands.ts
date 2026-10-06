@@ -59,9 +59,9 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
 const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack", "deps", "ask-check", "steps", "scheduler-diff", "lend-orders",
-  "feature-show", "dag-show", "merge-train-observe", "pm-status", "merge-queue", "memory-metrics", "memory-hygiene"]);
+  "feature-show", "dag-show", "merge-train-observe", "pm-status", "merge-queue", "memory-metrics", "memory-hygiene", "review-export"]);
 /** ledger 里始终走只读连接的子命令（不经 openLedger 建库 / 迁移 / 修数据）：认主守卫按读算，ledger.ts 给只读连接 */
-export const READER_ONLY_SUBS: ReadonlySet<string> = new Set(["merge-queue", "memory-metrics", "memory-hygiene"]);
+export const READER_ONLY_SUBS: ReadonlySet<string> = new Set(["merge-queue", "memory-metrics", "memory-hygiene", "review-export"]);
 /** ledger 里带 --dry-run 就只读的子命令：认主守卫按读算，ledger.ts 给只读连接 */
 export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate", "feature-split", "pm-switch", "memory-import"]);
 
@@ -93,7 +93,6 @@ export function needsWriteLock(cmd: string | undefined, args: readonly string[])
   if (cmd === "migrate") return false; // ACP 迁移也短锁改 registry，放锁后子进程逐个 restart
   return isWriteInvocation(cmd, args);
 }
-
 /** 这次调用会不会改状态（→ 认主守卫 + 命令级写锁） */
 export function isWriteInvocation(cmd: string | undefined, args: readonly string[]): boolean {
   if (!cmd) return false;
@@ -105,6 +104,7 @@ export function isWriteInvocation(cmd: string | undefined, args: readonly string
   const subs = WRITE_SUBCOMMANDS[cmd];
   if (subs) return subs.has(sub);
   if (cmd === "auto-update") return !AUTO_UPDATE_READ_SUBS.has(sub);
+  if (cmd === "ledger" && sub === "scheduler-file-scope") return args.includes("--apply");
   // 巡检默认把结果写进 audit_findings；feature-migrate 不带 --dry-run 就是正式迁移
   if (cmd === "ledger" && DRY_RUN_READS.has(sub)) return !args.includes("--dry-run");
   if (cmd === "ledger") return sub === "meta" ? args.slice(1).some((a) => /^--(pms|docs-dir|team|dispatcher)(=|$)/.test(a)) : !LEDGER_READ_SUBS.has(sub);
