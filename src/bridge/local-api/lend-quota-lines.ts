@@ -8,7 +8,8 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { canReadLedger } from "../../lib/devices.js";
-import { claudeLendSlots, cachedClaudeReadiness, noteClaudeReadiness } from "../../lib/lend-claude-worker-capacity.js";
+import { cachedClaudeReadiness } from "../../lib/lend-claude-worker-capacity.js";
+import { claudeJournalSlots } from "../../lib/lend-claude-pause.js";
 import { sharedClaudeReadiness } from "../../lib/lend-claude-ready.js";
 import { readLend, LEND_PATH, type LendEntry } from "../../lib/lend-config.js";
 import { pausedUntil } from "../../lib/lend-health.js";
@@ -60,24 +61,25 @@ export interface LendQuotaLinesDeps {
 
 /**
  * 与 helloBody 同一口径：Codex = 授权名额、QP1 暂停中为 0（hello 带 paused，借入方不派）；Claude = claudeLendSlots（登录 / 额度墙 / 运行时暂停）。
- * 出借循环把 Claude 就绪结论写在 journal meta：只读打开、比本进程新就认它（不写回、不探测），与出借循环报的对齐。journal 还没建 = 没暂停过。
+ * 出借循环把 Claude 就绪与运行暂停写在 journal meta：只读投影（不改运行缓存、不写回、不探测）。journal 还没建 = 没暂停过。
  */
-export function journalActualSlots(path = LEND_JOURNAL_PATH, claude: (e: LendEntry) => number = (e) => claudeLendSlots(e)): ActualSlots {
+export function journalActualSlots(path = LEND_JOURNAL_PATH, claude?: (e: LendEntry) => number): ActualSlots {
   return (entries, now) => {
     let paused: number | null = null;
-    if (existsSync(path)) {
-      const db = new Database(path, { readonly: true });
-      try {
+    const db = existsSync(path) ? new Database(path, { readonly: true }) : null;
+    try {
+      let ready = cachedClaudeReadiness();
+      if (db) {
         db.exec(`PRAGMA busy_timeout = ${READ_BUSY_MS}`);
         paused = pausedUntil(db, now);
         const theirs = sharedClaudeReadiness(db);
-        const mine = cachedClaudeReadiness();
-        if (theirs && (!mine || theirs.at >= mine.at)) noteClaudeReadiness(theirs);
-      } finally {
-        db.close();
+        if (theirs && (!ready || theirs.at >= ready.at)) ready = theirs;
       }
+      return entries.map((e) => ({ codex: paused === null ? Math.max(0, e.families.codex ?? 0) : 0,
+        claude: claude ? claude(e) : claudeJournalSlots(db, ready, e.families.claude ?? 0, now) }));
+    } finally {
+      db?.close();
     }
-    return entries.map((e) => ({ codex: paused === null ? Math.max(0, e.families.codex ?? 0) : 0, claude: claude(e) }));
   };
 }
 
