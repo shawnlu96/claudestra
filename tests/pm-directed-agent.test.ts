@@ -324,3 +324,66 @@ test("真 callerOf / admitCaller 端口（隔离 registry + 凭据存储）：B 
   expect(requestsAt(w, CB, CB)).toEqual([downgraded.meta.messageId]);
   expect(requestsAt(w, CA, CB)).toEqual([genuine.meta.messageId]);
 });
+
+test("押着时指针改指 A、同时 B 凭据被吊销：指针变化不掩盖来源失效——A 收件箱领不到，flush 零投递，直接重投拒收", async () => {
+  const w = await world(), env = sendToAgent(w, CB);
+  w.busy.add(CA);
+  await w.deliver(env);
+  w.point(A);
+  w.verified.delete(CB);
+  expect(ownedHeldItems(w.held, CA)).toEqual([]);
+  expect((await w.take(CA)).result?.n ?? 0).toBe(0);
+  w.busy.delete(CA);
+  await w.flush(CA);
+  await w.flush(CB);
+  expect(w.sent).toEqual([]);
+  expect(w.q(CA)).toEqual([]);
+  expect(w.q(CB)).toEqual([]);
+  expect((await w.deliver(env)).outcome).toMatchObject({ kind: "dropped" });
+  expect(w.sent).toEqual([]);
+  // 对照：未打标记的普通信（B 未验证）发给新当班 PM A 照常投 A
+  await w.deliver(sendToAgent(w, CB, { frame: null }));
+  expect(w.sent.map((s) => [s.channelId, s.content])).toEqual([[CA, "监工：请看一下 T1"]]);
+});
+
+test("押着时目标 A 从注册表消失（在线连接仍在）：核过的点名信拒收，不绕过目标重核——A 收件箱领不到，flush 零投递", async () => {
+  const w = await world(), env = sendToAgent(w, CB);
+  w.busy.add(CA);
+  await w.deliver(env);
+  w.agents.splice(w.agents.findIndex((a) => a.name === A), 1);
+  expect(ownedHeldItems(w.held, CA)).toEqual([]);
+  expect((await w.take(CA)).result?.n ?? 0).toBe(0);
+  w.busy.delete(CA);
+  await w.flush(CA);
+  await w.flush(CB);
+  expect(w.sent).toEqual([]);
+  expect(w.q(CA)).toEqual([]);
+  expect((await w.deliver(env)).outcome).toMatchObject({ kind: "dropped" });
+  expect(w.sent).toEqual([]);
+});
+
+test("真 callerOf 端口：B 的点名信投 A 后指针改指 A、B 凭据存储被删 → 同封重投拒收，零投递", async () => {
+  const w = await world();
+  for (const p of [REGISTRY_PATH, CALLER_CREDS_PATH]) {
+    const saved = existsSync(p) ? readFileSync(p, "utf8") : null;
+    cleanups.push(() => { saved === null ? existsSync(p) && unlinkSync(p) : writeFileSync(p, saved); });
+  }
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: Object.fromEntries(w.agents.filter((a) => a.channelId)
+    .map(({ name, ...v }) => [name, { ...v, status: "active" }])) }));
+  initFleet({ clients: w.clients as never, deliver: async () => undefined }, { lpMonitor: false });
+  const bWs = w.clients.get(CB)!.ws;
+  expect(admitCaller(bWs as never, { channelId: CB, callerCred: await issueCallerCred({ agent: B, family: "codex" }) }, undefined)).toBe(true);
+  const real = { ...w.facts, callerOf: undefined };
+  const send = async (env: Envelope, to: LocalEndpoint): Promise<Delivery> => {
+    w.sent.push({ channelId: to.channelId, content: env.content, messageId: env.meta.messageId, intent: env.intent });
+    return { envelope: env, outcome: { kind: "sent" } };
+  };
+  const env = sendToAgent(w, CB);
+  expect((await deliverPmLocal(env, env.to as LocalEndpoint, w.clients, w.book, w.receipts, send, real)).outcome.kind).toBe("sent");
+  w.point(A);
+  unlinkSync(CALLER_CREDS_PATH);
+  expect(realCallerOf(bWs, { type: "route_to_agent" }).identity.verified).toBe(false);
+  const r = await deliverPmLocal(env, env.to as LocalEndpoint, w.clients, w.book, w.receipts, send, real);
+  expect(r.outcome).toMatchObject({ kind: "dropped" });
+  expect(w.sent.map((s) => s.channelId)).toEqual([CA]);
+});

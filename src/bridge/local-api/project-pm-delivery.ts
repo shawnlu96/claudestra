@@ -22,8 +22,8 @@ export async function deliverPmLocal<P extends Receipt>(
   const { db, agents } = facts;
   const original = agents.find((a) => a.name === to.agentName || a.channelId === to.channelId);
   // The verified active PM naming an agent of its own project (e.g. its predecessor acting as supervisor) is never redirected back to itself.
-  // Checked before the no-project shortcut: a named letter whose target left the project is refused, not delivered as plain mail.
-  const directed = db && original ? pmDirectedVerdict(env, original, db, agents, facts.callerOf) : null;
+  // Checked before the no-project shortcut: a named letter whose target left the project / registry is refused, not delivered as plain mail.
+  const directed = pmDirectedVerdict(env, original, db, agents, facts.callerOf);
   if (directed === "refused") return { envelope: env, outcome: { kind: "dropped", reason: "sender is no longer the verified active PM that addressed it" } };
   if (!db || !original?.projectId) return send(env, to);
   // A retired PM still online finishes the conversations it started itself; offline, the active PM takes the answer over.
@@ -148,12 +148,12 @@ export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: En
     const { db, agents } = facts ?? { db: ledgerDb(), agents: readRegistryAgentsSync() };
     const original = agents.find((a) => a.channelId === channelId);
     return (env) => {
-      if (!db || !original || isHumanDirect(env) || isCallerPushback(env)) return null;
+      if (isHumanDirect(env) || isCallerPushback(env)) return null;
       try {
         const directed = pmDirectedVerdict(env, original, db, agents, facts?.callerOf);
         // Refused: never claimable from this inbox. Flush hands it to deliverPmLocal, which drops it without sending to anyone.
-        if (directed === "refused") return { agentName: original.name, channelId };
-        if (directed === "directed" || !original.projectId) return null; // stays with the named agent
+        if (directed === "refused") return { agentName: original?.name ?? ((env.to.kind === "local" && env.to.agentName) || channelId), channelId };
+        if (directed === "directed" || !db || !original?.projectId) return null; // stays with the named agent
         const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
         return name ? { agentName: name, channelId: agents.find((a) => a.name === name && a.projectId === original.projectId)?.channelId } : null;
       } catch (e) {

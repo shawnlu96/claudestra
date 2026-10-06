@@ -44,28 +44,39 @@ const sameTarget = (mark: PmDirected, original: Pick<RegistryAgent, "name" | "pr
   mark.projectId === original.projectId && mark.target === original.name && mark.targetChannelId === original.channelId
   && (mark.targetSessionId ?? null) === (original.sessionId ?? null);
 
-export function pmDirectedVerdict(env: Envelope, original: Pick<RegistryAgent, "name" | "projectId" | "channelId" | "sessionId">, db: Database,
-  agents: readonly RegistryAgent[], identityOf: CallerOf = (ws, frame) => callerOf(ws, { ...frame })): PmDirectedVerdict {
+export function pmDirectedVerdict(env: Envelope, original: Pick<RegistryAgent, "name" | "projectId" | "channelId" | "sessionId"> | undefined,
+  db: Database | null | undefined, agents: readonly RegistryAgent[], identityOf: CallerOf = (ws, frame) => callerOf(ws, { ...frame })): PmDirectedVerdict {
   const from = env.from;
   if (from.kind !== "local" || env.meta.triggerKind !== "agent_tool" || env.intent !== "request"
     || env.meta.forwarded || isCallerPushback(env) || isHumanDirect(env)) return null;
   const t = env as Marked, mark = t.pmDirected;
-  // 核过的点名信：目标换了项目 / 频道 / 会话，或项目已没有当班 PM 可核，就不再投（不回落成普通投递）
-  if (mark && !sameTarget(mark, original)) return "refused";
-  if (!original.projectId) return null;
+  // 核过的点名信：目标从注册表消失、换了项目 / 频道 / 会话，或项目已没有当班 PM 可核，就不再投（不回落成普通投递）
+  if (mark && (!original || !sameTarget(mark, original))) return "refused";
+  if (!original?.projectId) return null;
+  if (!db) return mark ? "refused" : null;
   const pointer = pmPointer(db, original.projectId);
   if (!pointer) return mark ? "refused" : null;
+  let caller: ReturnType<CallerOf> | undefined;
+  const identity = (): ReturnType<CallerOf> | undefined => {
+    if (caller) return caller;
+    const frame = entryFrames.get(env);
+    try {
+      caller = frame && from.ws && typeof from.ws === "object" ? identityOf(from.ws, frame) : undefined;
+    } catch (e) {
+      console.error("[pm-directed] caller identity check failed", (e as Error).message);
+    }
+    return caller;
+  };
+  /** 发信的那条连接此刻已验证、注册的正是信封上 bridge 填的发送频道、身份就是 agent */
+  const source = (agent: string): boolean => {
+    const c = identity();
+    return c?.channelId === from.channelId && !!c.identity.verified && c.identity.agent === agent;
+  };
+  // 核过的点名信先重核当初那位发信人：指针怎么变都不能掩盖它的凭据 / 会话失效（失效就拒收，不回落成普通投递或角色转交）
+  if (mark && !(mark.channelId === from.channelId && source(mark.by))) return "refused";
   if (pointer === original.name) return null;
   const sender = agents.find((a) => a.name === pointer && a.projectId === original.projectId);
-  const frame = entryFrames.get(env);
-  let caller: ReturnType<CallerOf> | undefined;
-  try {
-    caller = frame && from.ws && typeof from.ws === "object" ? identityOf(from.ws, frame) : undefined;
-  } catch (e) {
-    console.error("[pm-directed] caller identity check failed", (e as Error).message);
-  }
-  const verified = !!sender?.channelId && sender.channelId === from.channelId && caller?.channelId === from.channelId
-    && !!caller.identity.verified && caller.identity.agent === pointer && (!mark || (mark.by === pointer && mark.channelId === from.channelId));
+  const verified = !!sender?.channelId && sender.channelId === from.channelId && source(pointer) && (!mark || mark.by === pointer);
   if (verified) {
     t.pmDirected = { by: pointer, channelId: from.channelId, projectId: original.projectId, target: original.name,
       targetChannelId: original.channelId, targetSessionId: original.sessionId };
