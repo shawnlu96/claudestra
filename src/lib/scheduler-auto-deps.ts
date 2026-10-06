@@ -77,7 +77,7 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
   const r = await whileOwned(env.active, () => env.create("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
-    "--project", task.project, "--task", `${task.id} 审查`, ...runtime));
+    "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer", ...runtime));
   if (r.code === "lease-lost") throw new SchedulerStopped(`manager create: ${String(r.error)}`); // 服务在停，不是建失败：不交 PM
   if (r.ok !== true) return { kind: "unknown", reason: `建 ${name} 失败或结果不明：${String(r.error ?? "")}`.slice(0, 400) };
   for (let i = 0; i < 30; i++) {
