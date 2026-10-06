@@ -12,6 +12,7 @@ import { answerAsk, closeAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
 import { boundRef, schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
@@ -78,11 +79,13 @@ async function setup(mode: "on" | "observe" = "on", acp = false) {
   const manager: AutoTickDeps["manager"] = (...a) => a[1] === "scheduler-review-swap"
     ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()).catch((e: Error) => ({ ok: false, error: e.message }))
     : legacy.has(a[1]) ? Promise.resolve({ ok: false, code: "write_failed", error: "attempt to write a readonly database" }) : child(...a);
-  let refusal: string | null = null, skew = 0;
+  let refusal: string | null = null, skew = 0, beforeSubmit: (() => void) | null = null;
   const realWorker = f.tickDeps.worker;
   const deps: AutoTickDeps = { ...f.tickDeps, manager, now: () => Date.now() + skew, worker: (ref) => {
-    const w = realWorker(ref);
-    if ("manual" in w) return w;
+    const real = realWorker(ref);
+    if ("manual" in real) return real;
+    // 认领（submitted）已落账、真正发出之前：生产 driveDispatch 的同一个窗口
+    const w = { ...real, submit: (...a: Parameters<typeof real.submit>) => { const f = beforeSubmit; beforeSubmit = null; f?.(); return real.submit(...a); } };
     if (refusal !== null) return { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind: "error", message: refusal! } }) };
     // acp：observe 前按生产 acpPort.turnState 读这个会话的回合失败卡
     return !acp || ref.family !== "codex" ? w : { ...w, observe: async (r, o) => {
@@ -103,7 +106,8 @@ async function setup(mode: "on" | "observe" = "on", acp = false) {
   await f.tick();
   expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).ok).toBe(true);
   await f.tick();
-  return { f, tick, calls, ops, reviews, legacy, tags, refuse: (m: string | null) => { refusal = m; }, wait: (ms: number) => { skew += ms; } };
+  return { f, tick, calls, ops, reviews, legacy, tags, refuse: (m: string | null) => { refusal = m; },
+    onSubmit: (fn: () => void) => { beforeSubmit = fn; }, wait: (ms: number) => { skew += ms; } };
 }
 type Setup = Awaited<ReturnType<typeof setup>>;
 
@@ -121,6 +125,8 @@ function refusalCard(f: Fixture, o: { sessionId?: string; failedAt?: number; mes
 }
 
 const submittedAt = (f: Fixture, intentId: string): number => getEventByDedup(f.db, `scheduler:${intentId}:submitted`)!.ts;
+/** 唤醒的投递回执（submitted→done，worker.submit 返回之后才落账）：晚于它的失败才是唤醒送达之后的回合 */
+const deliveredAt = (f: Fixture, intentId: string): number => getEventByDedup(f.db, `scheduler:${intentId}:done`)!.ts;
 
 /** N3：旧代码派出的审查单（无快照），拒审后卡退人工，PM 交回 auto；交回后又以唤醒派出、没人领 */
 async function legacyCard(s: Setup) {
@@ -144,7 +150,7 @@ test("MODELXW2 旧红新绿（无快照 / N3）：已发唤醒、未领、绑定
   const s = await setup();
   const old = await legacyCard(s);
   expect(s.f.task().round).toBeGreaterThan(0);
-  refusalCard(s.f, { failedAt: submittedAt(s.f, old.id) + 1 });
+  refusalCard(s.f, { failedAt: deliveredAt(s.f, old.id) + 1 });
   s.wait(UNCLAIMED_ALARM_MS + 60_000); // N3：唤醒发出已过报警线
   const sends = s.f.sent.length;
   // 旧代码：这里只有未领单报警（step waiting），没有退休、没有新单
@@ -170,7 +176,7 @@ test("MODELXW2 旧红新绿（有快照）：领单前拒审 → refusal epoch �
   const first = s.reviews().at(-1)!;
   expect(getEventByDedup(s.f.db, snapshotKey(first.id))).not.toBeNull();
   approve(s.f);
-  refusalCard(s.f, { failedAt: submittedAt(s.f, first.id) + 1 });
+  refusalCard(s.f, { failedAt: deliveredAt(s.f, first.id) + 1 });
   // 旧代码：observe 归不到本单，只走未领单（未到报警线时 waiting），没有 epoch
   expect(await s.tick()).toMatchObject({ step: "refusal_epoch" });
   expect(s.ops("reviewer_swap")).toMatchObject([{ data: { intentId: first.id, sessionId: "s-rv", refusal: { executed: "exempt_review" } } }]);
@@ -189,13 +195,13 @@ test("MODELXW2 旧红新绿（有快照）：领单前拒审 → refusal epoch �
 
 for (const c of [
   { name: "拒审在唤醒之前", why: "拒审发生在唤醒之前", card: (s: Setup, id: string) => refusalCard(s.f, { failedAt: submittedAt(s.f, id) - 1 }) },
-  { name: "会话对不上", why: "拒审不在绑定的审查会话上", card: (s: Setup, id: string) => refusalCard(s.f, { sessionId: "s-other", failedAt: submittedAt(s.f, id) + 1 }) },
+  { name: "会话对不上", why: "拒审不在绑定的审查会话上", card: (s: Setup, id: string) => refusalCard(s.f, { sessionId: "s-other", failedAt: deliveredAt(s.f, id) + 1 }) },
   { name: "信号读不到（卡上没有失败时刻）", why: "卡上缺失败时刻或会话", card: (s: Setup) => {
     const a = refusalCard(s.f);
     s.f.db.run("UPDATE asks SET extra = json_remove(extra, '$.failedAt') WHERE id = ?", [a.id]);
   } },
   { name: "拒审之后已有正常回合（卡被关）", why: "拒审之后会话还有别的回合", card: (s: Setup, id: string) => {
-    const a = refusalCard(s.f, { failedAt: submittedAt(s.f, id) + 1 });
+    const a = refusalCard(s.f, { failedAt: deliveredAt(s.f, id) + 1 });
     closeAsk(s.f.db, a.id, "cancelled", "下一回合正常结束");
   } },
 ]) {
@@ -221,7 +227,7 @@ test("MODELXW2 其他情况不变：observe 下同样的领单前拒审只报未
   expect(await s.tick()).toMatchObject({ step: "sent" });
   const first = s.reviews().at(-1)!;
   approve(s.f);
-  refusalCard(s.f, { failedAt: submittedAt(s.f, first.id) + 1 });
+  refusalCard(s.f, { failedAt: deliveredAt(s.f, first.id) + 1 });
   s.wait(UNCLAIMED_ALARM_MS + 60_000);
   expect(await s.tick()).toMatchObject({ step: "waiting" });
   expect(s.ops("reviewer_swap")).toEqual([]);
@@ -235,7 +241,7 @@ test("MODELXW2 其他情况不变：非策略的回合失败卡（普通错误�
   const s = await setup();
   expect(await s.tick()).toMatchObject({ step: "sent" });
   const first = s.reviews().at(-1)!;
-  refusalCard(s.f, { failedAt: submittedAt(s.f, first.id) + 1, message: "context window exhausted" });
+  refusalCard(s.f, { failedAt: deliveredAt(s.f, first.id) + 1, message: "context window exhausted" });
   s.wait(UNCLAIMED_ALARM_MS + 60_000);
   expect(await s.tick()).toMatchObject({ step: "waiting" });
   expect(s.ops("reviewer_swap")).toEqual([]);
@@ -248,7 +254,7 @@ test("MODELXW2 读失败不猜：拒审卡读不到 → 不确认，返回疑似
   const s = await setup();
   expect(await s.tick()).toMatchObject({ step: "sent" });
   const sent = getIntent(s.f.db, s.reviews().at(-1)!.id)!;
-  refusalCard(s.f, { failedAt: submittedAt(s.f, sent.id) + 1 });
+  refusalCard(s.f, { failedAt: deliveredAt(s.f, sent.id) + 1 });
   const ref = boundRef(s.f.db, "T1", "reviewer")!;
   // 只让读拒审卡的那条查询失败，别的照常
   const db = new Proxy(s.f.db, { get: (t, k) => k === "query"
@@ -270,7 +276,7 @@ for (const c of [
     expect(await s.tick()).toMatchObject({ step: "sent" });
     const sent = getIntent(s.f.db, s.reviews().at(-1)!.id)!;
     approve(s.f);
-    const a = refusalCard(s.f, { failedAt: submittedAt(s.f, sent.id) + 1, message: c.message });
+    const a = refusalCard(s.f, { failedAt: deliveredAt(s.f, sent.id) + 1, message: c.message });
     s.f.db.run("UPDATE asks SET extra = json_remove(extra, '$.failedAt') WHERE id = ?", [a.id]);
     expect(codexFailure(s.f.db, "agent-rv-t1", "s-rv")).toMatchObject({ afterKey: null });
     s.wait(UNCLAIMED_ALARM_MS + 60_000);
@@ -283,3 +289,48 @@ for (const c of [
     else expect(alarm).toEqual([]);
   }, 120_000);
 }
+
+test("MODELXW2 认领与投递之间的旧回合拒审不算本单（复现 r2 wake-time）：只报未领单（疑似），不退休、不开 epoch", async () => {
+  const s = await setup();
+  approve(s.f);
+  // submitted 认领已写、worker.submit 之前，同绑定会话上旧回合的 cyber 拒审落账
+  s.onSubmit(() => { refusalCard(s.f); });
+  expect(await s.tick()).toMatchObject({ step: "sent" });
+  const first = s.reviews().at(-1)!;
+  s.wait(UNCLAIMED_ALARM_MS + 60_000);
+  // 旧代码：认领时刻当唤醒时刻 → confirmed → refusal_epoch，原审查绑定被退休
+  expect(await s.tick()).toMatchObject({ step: "waiting" });
+  expect(s.ops("reviewer_swap")).toEqual([]);
+  expect(s.ops("model_refusal_retry").length + s.ops("model_refusal_exempt").length).toBe(0);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+  expect(getEventByDedup(s.f.db, unclaimedKey(first.id))).not.toBeNull();
+  const alarm = s.f.notices.filter((n) => n.includes("还没人领"));
+  expect(alarm).toHaveLength(1);
+  expect(alarm[0]).toContain(`${SUSPECT_NOTE}（拒审落在认领与投递回执之间`);
+}, 120_000);
+
+test("MODELXW2 真实 codexFailure 链路（复现 r2 refusal-uncertain）：唤醒前开出、缺会话与时刻的旧拒审卡 → 不提前退人工，未领单报警带疑似", async () => {
+  const s = await setup("on", true);
+  expect(await s.tick()).toMatchObject({ step: "sent" });
+  const sent = getIntent(s.f.db, s.reviews().at(-1)!.id)!;
+  approve(s.f);
+  // 同一审查员此前派过的单（认领早于当前单）；旧拒审卡开在两次认领之间，宿主没报会话和时刻
+  const before = submittedAt(s.f, sent.id) - 60_000;
+  s.f.db.run(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, eventSeq, taskRev, specRev, head,
+    templateVersion, status, attempts, receipt, reason, createdAt, updatedAt) SELECT 'prior-review', taskId, project, node, action, recipient,
+    causalSeq, eventSeq - 1, taskRev, specRev, head, templateVersion, 'cancelled', attempts, receipt, reason, ?, ? FROM scheduler_intents WHERE id = ?`,
+  [before, before, sent.id]);
+  insertEvent(s.f.db, { actor: "scheduler", now: before, dedupKey: "scheduler:prior-review:submitted" },
+    { project: "p", target: "T1", kind: "scheduler", text: "调度意图 submitted", data: { op: "settle", id: "prior-review", to: "submitted" } }, true);
+  const a = refusalCard(s.f);
+  s.f.db.run("UPDATE asks SET createdAt = ?, extra = json_remove(extra, '$.failedAt', '$.sessionId') WHERE id = ?", [before + 1, a.id]);
+  expect(codexFailure(s.f.db, "agent-rv-t1", "s-rv")).toMatchObject({ afterKey: null });
+  s.wait(UNCLAIMED_ALARM_MS + 60_000);
+  // 旧代码：候选卡筛掉了这张卡，识别返回 null → 提前 manual，只通知退回人工
+  expect(await s.tick()).toMatchObject({ step: "waiting" });
+  expect(s.ops("reviewer_swap")).toEqual([]);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+  expect(s.f.notices.filter((n) => n.includes("退回人工"))).toEqual([]);
+  const alarm = s.f.notices.filter((n) => n.includes("还没人领"));
+  expect(alarm.map((n) => n.includes(`${SUSPECT_NOTE}（宿主报了归不到单的策略拒审）`))).toEqual([true]);
+}, 120_000);

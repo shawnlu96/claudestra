@@ -1,5 +1,5 @@
 /**
- * dispatch-recovery-MODELXW2：未领的审查单，绑定会话在唤醒之后的那一回合以策略拒审结束（会话 / head / 轮次 / specRev 都对得上）→ confirmed，
+ * dispatch-recovery-MODELXW2：未领的审查单，绑定会话在唤醒投递回执（done）之后的那一回合以策略拒审结束（会话 / head / 轮次 / specRev 都对得上）→ confirmed，
  * 交 watch() 现有失败分支。信号是 bridge 的回合失败卡（extra.failure / sessionId / failedAt），cyber 判定同监护，usage_policy 同 MODEL。
  * 关联不上或读不到 → suspected：不动，未领单报警正文带「疑似领单前拒审，未能确认」。observe 归不到单的同类拒审也先走这里，不提前退人工。
  * 只读；只在 modelOutcome on 下生效。tests/scheduler-refusal-unclaimed*.test.ts。
@@ -25,9 +25,12 @@ export const SUSPECT_NOTE = "；疑似领单前拒审，未能确认";
 const isPolicyRefusal = (message: string): boolean =>
   isCyberPolicy(message) || classifyModelOutcome({ failure: { kind: "error", message } })?.cls === "safety";
 
+/** observe 报了归不到单的策略拒审（真实 codexFailure 的 afterKey:null：卡缺会话或时刻） */
+const unattributedRefusal = (seen: WorkerObservation): boolean =>
+  seen.state === "unknown" && seen.failure?.kind === "error" && isPolicyRefusal(seen.failure.message);
+
 /** observe 报了归不到单的失败，但它是本卡管的策略拒审、且已做过关联识别：交给识别结果，不提前退人工；额度 / 登录 / 普通失败照旧 */
-export const awaitsAssociation = (seen: WorkerObservation, pre: UnclaimedRefusal | null): boolean =>
-  pre !== null && seen.state === "unknown" && seen.failure?.kind === "error" && isPolicyRefusal(seen.failure.message);
+export const awaitsAssociation = (seen: WorkerObservation, pre: UnclaimedRefusal | null): boolean => pre !== null && unattributedRefusal(seen);
 
 const cardMessage = (a: Ask): string => `${a.title}：${a.context}`;
 const roundOf = (intentId: string): number | null => {
@@ -43,11 +46,15 @@ function sentBefore(db: Database, agent: string, at: number): string | null {
 }
 
 /** 关联不上的原因；null = 这张卡就是本单唤醒之后、本会话最后一回合的策略拒审 */
-function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef, card: Ask, wokeAt: number, newest: Ask): string | null {
+function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef, card: Ask, claimedAt: number, newest: Ask): string | null {
   const { failedAt, sessionId } = card.extra;
   if (typeof failedAt !== "number" || !Number.isFinite(failedAt) || typeof sessionId !== "string" || !sessionId) return "卡上缺失败时刻或会话";
   if (sessionId !== ref.sessionId) return "拒审不在绑定的审查会话上";
-  if (failedAt < wokeAt) return "拒审发生在唤醒之前";
+  if (failedAt < claimedAt) return "拒审发生在唤醒之前";
+  // submitted 是发送前的认领；只有晚于投递回执（done）的失败才证明是唤醒送达之后的回合，夹在两者之间的分不清新旧
+  const delivered = getEventByDedup(db, `scheduler:${sent.id}:done`);
+  if (!delivered) return "唤醒的投递回执还没落账";
+  if (failedAt <= delivered.ts) return "拒审落在认领与投递回执之间，分不清是旧回合还是本单唤醒的回合";
   if (sentBefore(db, ref.agent, failedAt) !== sent.id) return "拒审属于别的单";
   if (card.state !== "open" || newest.id !== card.id) return "拒审之后会话还有别的回合";
   if (sent.head !== task.headSHA || sent.specRev !== task.specRev || roundOf(sent.id) !== task.round) return "head / specRev / 轮次和本单不符";
@@ -82,7 +89,8 @@ async function recognize(db: Database, task: LedgerTask, sent: SchedulerIntent, 
   // 唤醒之后开出的拒审卡，或绑定会话上还开着的拒审卡（bridge 同指纹不重开卡时，时刻停在唤醒之前）：都没有就照旧报警
   const refusals = cards.filter((a) => (a.createdAt >= woke.ts || (a.state === "open" && a.extra.sessionId === ref.sessionId)) &&
     isPolicyRefusal(cardMessage(a)));
-  if (!refusals.length) return null;
+  // 卡缺会话 / 时刻、又开在唤醒之前时进不了候选，但 observe 已带着这条拒审：关联不上，按疑似报警
+  if (!refusals.length) return unattributedRefusal(seen) ? { kind: "suspected", note: `${SUSPECT_NOTE}（宿主报了归不到单的策略拒审）` } : null;
   const newestOpen = cards.find((a) => a.state === "open");
   const card = refusals[0];
   const row = getSchedulerSession(db, task.id, "reviewer");
