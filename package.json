@@ -11,6 +11,7 @@
     "setup": "bun run src/setup.ts",
     "desktop-cli": "bun run src/desktop-cli.ts",
     "test": "bun test",
+    "test:shard": "bun scripts/ci-test-shard.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test && bun run guard",
     "guard": "bun scripts/guard/index.ts",

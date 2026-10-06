@@ -42,6 +42,8 @@ const Model = loose({
  * 只列已经确定要读的成员，其余工具类成员由事件转换那一步补进来并重新生成锁文件。
  */
 const ThreadItem = z.discriminatedUnion("type", [
+  /** clientId 是投递对账的键（turn/start、turn/steer 的 clientUserMessageId 原样落在这里，delivery.ts） */
+  loose({ type: z.literal("userMessage"), id: str, clientId: opt(str) }),
   loose({ type: z.literal("agentMessage"), id: str, text: str }),
   loose({
     type: z.literal("commandExecution"),
@@ -67,6 +69,8 @@ const ThreadItem = z.discriminatedUnion("type", [
 ]);
 const ItemEnvelope = loose({ ...turnScoped, item: loose({ type: str, id: str }) });
 const Delta = loose({ ...turnScoped, itemId: str, delta: str });
+/** thread/items/list 的一项：item 先按信封读，成员再按 ThreadItem 校验（同 item/* 通知） */
+const ItemEntry = loose({ turnId: str, item: loose({ type: str, id: str }), startedAtMs: opt(int) });
 
 // ---- 出站 ----
 
@@ -136,10 +140,16 @@ const client = {
   "thread/fork": call(["v2/ThreadForkParams", strict(OpenThread)], ["v2/ThreadForkResponse", ThreadOpened], "thread", 100_000),
   "thread/unsubscribe": call(["v2/ThreadUnsubscribeParams", strict({ threadId: str })], ["v2/ThreadUnsubscribeResponse", loose({})], "thread", 20_000),
   "thread/read": call(
-    ["v2/ThreadReadParams", strict({ threadId: str })],
+    ["v2/ThreadReadParams", strict({ threadId: str, includeTurns: z.literal(false) })],
     ["v2/ThreadReadResponse", loose({ thread: loose({ id: str, status: ThreadStatus }) })],
     "thread",
     20_000,
+  ),
+  "thread/items/list": call(
+    ["v2/ThreadItemsListParams", strict({ threadId: str, sortDirection: z.literal("desc"), limit: int.min(1).max(1000), cursor: str.nullable() })],
+    ["v2/ThreadItemsListResponse", loose({ data: z.array(ItemEntry), nextCursor: opt(str) })],
+    "thread",
+    10_000,
   ),
   "thread/compact/start": call(["v2/ThreadCompactStartParams", strict({ threadId: str })], ["v2/ThreadCompactStartResponse", loose({})], "thread", 30_000),
   "turn/start": call(
@@ -148,6 +158,7 @@ const client = {
       strict({
         threadId: str,
         input: z.array(UserText),
+        clientUserMessageId: str,
         approvalPolicy: z.enum(["on-request", "never"]),
         approvalsReviewer: z.enum(["user", "auto_review"]),
         sandboxPolicy: SandboxPolicy,
@@ -161,7 +172,7 @@ const client = {
     30_000,
   ),
   "turn/steer": call(
-    ["v2/TurnSteerParams", strict({ threadId: str, input: z.array(UserText), expectedTurnId: str })],
+    ["v2/TurnSteerParams", strict({ threadId: str, input: z.array(UserText), expectedTurnId: str, clientUserMessageId: str })],
     ["v2/TurnSteerResponse", loose({ turnId: str })],
     "turn",
     120_000,

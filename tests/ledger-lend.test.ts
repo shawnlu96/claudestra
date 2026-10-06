@@ -95,7 +95,7 @@ describe("lend-offer", () => {
     expect(await offer()).toMatchObject({ ok: false, code: "conflict" });
   });
 
-  // r1 P2-4 的「只借 Codex」被 dispatch-recovery-FAM1b 替代：审查单可显式借 Claude，缺省与写 / 修复单仍是 Codex
+  // r1 P2-4 的「只借 Codex」被 dispatch-recovery-FAM1b 替代：审查单可显式借 Claude，缺省仍是 Codex；Claude 写单另须作者与 v3 授权证明
   test("a manual card with no known author family refuses --family claude; an unknown family is refused; the default stays codex", async () => {
     expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
     expect(await offer("T9", "--family", "gemini")).toMatchObject({ ok: false, code: "invalid" });
@@ -163,7 +163,7 @@ describe("lend-offer --family（dispatch-recovery-FAM1b）", () => {
     expect(await run(["lend-reoffer", "T9", "--peer", "mate", "--repo", REPO, "--family", "codex", "--reason", "换家族"])).toMatchObject({ ok: false, code: "forbidden" });
   });
 
-  test("no review role in borrow, a security card, or a build / fix card refuse --family claude; nothing is pooled", async () => {
+  test("no review role in borrow, a security card, or a build / fix card without author evidence refuse --family claude; nothing is pooled", async () => {
     workflow("T9", "codex");
     borrow = [{ peer: "mate", projects: [P], roles: ["write"], maxOpen: 1 }];
     expect(await offer("T9", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden" });
@@ -173,10 +173,10 @@ describe("lend-offer --family（dispatch-recovery-FAM1b）", () => {
     expect(await offer("T13", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("security") });
     card("T14");
     db.run("UPDATE tasks SET stage = 'build', headSHA = NULL WHERE id = 'T14'");
-    expect(await offer("T14", "--family", "claude")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("只借 Codex") });
+    expect(await offer("T14", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("作者家族") });
     card("T15");
     db.run("UPDATE tasks SET stage = 'fix' WHERE id = 'T15'");
-    expect(await offer("T15", "--family", "claude")).toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("只借 Codex") });
+    expect(await offer("T15", "--family", "claude")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("作者家族") });
     for (const id of ["T9", "T13", "T14", "T15"]) expect(listLendOrders(db, id)).toEqual([]);
   });
 

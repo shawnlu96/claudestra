@@ -24,7 +24,7 @@ import { tailAppendedCount } from "../scroll-follow";
 import { useScrollFollow } from "./use-scroll-follow";
 import { devCount } from "../../devtools/dev-mode";
 import { ProgressNote } from "./progress-note";
-import { NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
+import { InboundBody, NarrationFoldBar, NarrationFolded, useNarrationFold } from "./narration-fold";
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
 import { HeldMark } from "../../quota-wall/held-mark";
@@ -293,7 +293,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
                   {userQuoted}
                 </div>
               )}
-              {isSelf ? userBody : <Domd initMd={userBody} bodyClassName="chat-domd" />}
+              {isSelf ? userBody : <InboundBody from={m.from} body={userBody} />}
             </div>
           </QuoteSwipe>
         )}

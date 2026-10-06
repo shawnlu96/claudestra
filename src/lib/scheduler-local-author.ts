@@ -73,7 +73,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
     if (failure) return { kind: "unknown", reason: failure };
     const flags = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
     const r = await whileOwned(guard, () => localCreateGuard(env.create)("create", p.agentName, p.worktree,
-      "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project, ...flags));
+      "--purpose", p.purpose, "--task", p.taskId, "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project, ...flags));
     if (r.code === "lease-lost") throw new SchedulerStopped(String(r.error));
     if (r.ok !== true) return { kind: "unknown", reason: `建 ${p.agent} 结果不明：${String(r.error ?? "")}` };
     for (let n = 0; n < 30; n++) {
