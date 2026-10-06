@@ -128,6 +128,31 @@ describe("review 已显式派出审查步骤（AUD1）", () => {
     expect(f.map((x) => [x.suggestion, x.key])).toEqual([["派审查员", `p|review_no_reviewer|T1|r1|${NOW - 60 * MIN}`]]);
     expect(rules(snap({ tasks: [t(null)] }))).toEqual(["review_no_reviewer"]);
   });
+  describe("初审 pass 之后同一轮又派终审（PR724-r1）", () => {
+    const POLICY = "Claude 审查员一轮；最后一轮对抗式";
+    /** 班子项目：常规派审、40 分钟前 pass，规格卡要求对抗式；终审在 assignedAt 派出 */
+    const s = (step: { executor: string; executorKind: "agent" | "peer" } | null, assignedAt: number, agents: AuditAgent[] = [], team = true) => snap({
+      pms: [PM, DISPATCH], ...(team ? { team: { dispatcher: DISPATCH } } : {}), agents: [agent(PM), agent(EXE), ...agents],
+      tasks: [{ ...t(step, assignedAt, [ev("T1", NOW - 41 * MIN, "dispatch", { reviewer: "regular", round: 1, head: null }),
+        ev("T1", NOW - 40 * MIN, "review", { round: 1, verdict: "pass" })]), specPolicy: POLICY }],
+    });
+    test("终审派给 peer：刚派不报；超过 2 小时报 review_assigned_stale 给 PM，不再报「派对抗式」", () => {
+      expect(rules(s(peer, NOW - 5 * MIN))).toEqual([]);
+      const f = auditLedger(s(peer, NOW - 5 * MIN), NOW + 180 * MIN).findings;
+      expect(f.map((x) => [x.rule, x.notify, x.since])).toEqual([["review_assigned_stale", PM, NOW - 5 * MIN]]);
+    });
+    test("终审派给本机 agent：主回合在跑不报；空闲照报 review_no_reviewer 并点名，从 pass 算", () => {
+      const local = { executor: REVIEWER, executorKind: "agent" as const };
+      expect(rules(s(local, NOW - 5 * MIN, [agent(REVIEWER, { turn: "busy" })]))).toEqual([]);
+      const f = only(s(local, NOW - 5 * MIN, [agent(REVIEWER)]), "review_no_reviewer");
+      expect(f.map((x) => [x.since, x.suggestion])).toEqual([[NOW - 40 * MIN, `核对 ${REVIEWER} 在不在审，不在就重派`]]);
+    });
+    test("没有 pass 之后的新指派（派在 pass 之前 = pass 的就是它）→ 照旧「派对抗式」；没开班子照旧「推进 merge」", () => {
+      expect(auditLedger(s(peer, NOW - 50 * MIN), NOW).findings.map((x) => [x.rule, x.suggestion])).toEqual([["review_no_reviewer", "还欠对抗式，派对抗式"]]);
+      expect(rules(s(peer, NOW - 50 * MIN, [], false))).toEqual(["review_passed_idle"]);
+      expect(rules(s(peer, NOW - 5 * MIN, [], false))).toEqual([]);
+    });
+  });
   test("派给 peer、这一轮已 pass → 走「审查已通过」，不报 review_assigned_stale", () => {
     const s = snap({ tasks: [t(peer, NOW - 60 * MIN, [ev("T1", NOW - 50 * MIN, "review", { round: 1, verdict: "pass" })])] });
     expect(rules(s, NOW + 61 * MIN)).toEqual(["review_passed_idle"]);

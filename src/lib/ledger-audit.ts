@@ -209,9 +209,11 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
     const { task, events, stageSince } = t;
     if (reviewing.has(task.id.toLowerCase())) continue;
     const lastReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
-    if (lastReview?.data.verdict === "pass" && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
+    // pass 之后同一轮又派了审查（初审 pass 再派终审）：按新派的那一步等结论，不当「已通过」；peer 结论不回写步骤行，只能按派出先后分
+    const passed = lastReview?.data.verdict === "pass" && !(t.reviewStep && t.reviewStep.at >= lastReview.ts);
+    if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
       owedAfterPass(t, lastReview, now, emit);
-    } else if (lastReview?.data.verdict === "pass") {
+    } else if (passed) {
       // 审查已通过：该推 merge 或等 owner 拍板，不是再派审查员；从 pass 算起，PM 写 note 不重开
       if (now - lastReview.ts > AUDIT_THRESHOLDS.reviewPassedIdleMs) {
         emit({ rule: "review_passed_idle", taskId: task.id, since: lastReview.ts, keyParts: [task.id, `r${task.round}`, lastReview.seq],
