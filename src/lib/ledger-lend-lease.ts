@@ -1,4 +1,6 @@
 import { reborrowMarker, type ReborrowBinding } from "./lend-reborrow-marker.js";
+import { reborrow2Marker, type Reborrow2Binding } from "./lend-reborrow2-marker.js";
+import { assertReborrow2Context, type Reborrow2Context } from "./lend-reborrow2-context.js";
 /**
  * 出借写代码单的 A 侧规矩（i28-R6）：写租约与开工 / 修复单的内容。
  * 写租约：一张卡第一次把开工单借给某个出借方时记下（held），之后直到合并（卡走到 merge 及以后）或 PM 收回，这张卡的开工 / 修复单
@@ -32,6 +34,8 @@ export interface WriteLease {
 export interface WriteOffer {
   /** Verified recovery keeps the ledger's reviewed head separate from the remote starting point. */
   reborrow?: ReborrowContext;
+  /** REBOR2: adopted terminal facts; the target peer may differ, its branch is always its own lend branch */
+  reborrow2?: Reborrow2Context;
   fp: string;
   /** 基线分支名（开工单从它切）与它此刻在远端的 head（开工单的 head）；修复单两者都不用 */
   base: string;
@@ -78,6 +82,12 @@ export function writeOfferBranch(db: Database, task: LedgerTask, step: LendStep,
   const branch = lendBranch(task.id, w.fp);
   if (!branch) throw new LedgerError("invalid", `任务 id ${task.id} 或出借方指纹不合格，拼不出出借分支名`);
   const lease = heldLease(db, task);
+  if (w.reborrow2) {
+    assertReborrow2Context(task, peer, w.reborrow2);
+    const t = w.reborrow2.facts.target;
+    if (w.reborrow || lease || t.fp !== w.fp || t.branch !== branch || w.base !== "main") throw new LedgerError("conflict", "终态接续上下文的指纹、分支、租约或 main base 不符");
+    return branch;
+  }
   if (w.reborrow) {
     assertReborrowContext(task, peer, w.reborrow);
     if (w.reborrow.facts.lease.fp !== w.fp || w.reborrow.facts.lease.branch !== branch || w.base !== "main") {
@@ -110,7 +120,7 @@ export function lastReviewOf(db: Database, task: LedgerTask): { path: string | n
 }
 
 export interface WriteOrderInput { orderId: string; step: LendStep; head: string; branch: string; base: string; spec: string; report: string | null;
-  resume?: boolean; reborrow?: ReborrowBinding;
+  resume?: boolean; reborrow?: ReborrowBinding; reborrow2?: Reborrow2Binding;
   findings: ReviewFinding[]; repo: string; pr: number | null; bounce?: ReturnType<typeof bounceWork> | null;
   /** 开工单：复述已交、PM 还没答时的复述原文（i28-RS1）——随单带上，答复之后由 ledger-lend-relay.ts 推送 */
   restate?: string | null }
@@ -133,7 +143,8 @@ export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: Inpu
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
     acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交；${scope.acceptance}`, `只动这一个分支：推送由出借服务做，只推 ${o.branch}，不推 ${o.base}、不改别的分支`,
       ...(bounce?.acceptance ?? [o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"]),
-      ...(restate ? [RESTATE_PENDING_LINE] : []), ...(o.reborrow ? [reborrowMarker(o.reborrow)] : [])],
+      ...(restate ? [RESTATE_PENDING_LINE] : []), ...(o.reborrow ? [reborrowMarker(o.reborrow)] : []),
+      ...(o.reborrow2 ? [reborrow2Marker(o.reborrow2)] : [])],
     writeBack: "提交后用 deliver（M2 前是 lend submit）交一行摘要和自查，单号见标题",
     findings: o.step === "fix" && !bounce ? o.findings : [],
   }, { repo: o.repo, pr: o.pr }), bounce, o.report);

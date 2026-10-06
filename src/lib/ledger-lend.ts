@@ -1,4 +1,6 @@
 import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js";
+import { readReborrow2Basis, type Reborrow2Basis } from "./lend-reborrow2-event.js";
+import { reborrow2Binding } from "./lend-reborrow2-context.js";
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
 /**
  * Lending-side CAS transitions under BEGIN IMMEDIATE; expired delivery becomes unknown, never automatically re-offered.
@@ -47,6 +49,8 @@ export interface LendOrder {
   /** write / fix only: the one branch the peer may push (lend/<task>-<fp4>) and the base it was cut from */
   branch: string | null; base: string | null;
   reborrowBasis?: ReborrowBasis | null;
+  /** REBOR2 successor: present only for a v2-marked order; null = damaged, rejected by cardMoved like a damaged v1 basis */
+  reborrow2Basis?: Reborrow2Basis | null;
 }
 /** Told to the card's PM after the transaction commits (the CLI sends it; a lost notice never undoes the state change). */
 export interface LendNotice { project: string; taskId: string; text: string }
@@ -66,6 +70,8 @@ export function getLendOrder(db: Database, orderId: string): LendOrder | null {
   const r = db.query("SELECT * FROM lend_orders WHERE orderId = ?").get(orderId) as Record<string, unknown> | null;
   if (!r) return null;
   const order = toOrder(r);
+  const v2 = readReborrow2Basis(db, order); // classifies every reserved line first: a v2, mixed or damaged marker never reaches the v1 reader
+  if (v2 !== undefined) return { ...order, reborrow2Basis: v2 };
   const basis = readReborrowBasis(db, order);
   return basis === undefined ? order : { ...order, reborrowBasis: basis };
 }
@@ -158,7 +164,8 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   if (step === "review") return { wire: reviewOrder(db, task, orderId, input), whole: reviewOrder(db, task, orderId, input, wholeInputs), branch: null, base: null };
   if (!input.write) throw new LedgerError("invalid", "写单缺出借方指纹与基线（CLI 备好再挂）");
   const branch = writeOfferBranch(db, task, step, input.peer, input.write);
-  const head = input.write.reborrow?.source.remoteHead ?? (step === "write" ? input.write.baseSha as string : task.headSHA as string);
+  if (input.write.reborrow && input.write.reborrow2) throw new LedgerError("invalid", "REBOR 与 REBOR2 接续不能同单混用");
+  const head = input.write.reborrow2?.source.startHead ?? input.write.reborrow?.source.remoteHead ?? (step === "write" ? input.write.baseSha as string : task.headSHA as string);
   const b = step === "fix" ? fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage) : null;
   // Peer free text cannot carry full SHAs (the secret gate rejects them); keep refs short, as in bounceReviewLine.
   const shortRef = (sha: string): string => sha.slice(0, 12);
@@ -168,7 +175,8 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const facts = step === "write" ? restateFacts(events, task.specRev) : null;
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings,
-    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? { orderId: input.write.reborrow.facts.previous.orderId,
+    repo: input.repo, pr: input.pr, bounce, restate, resume: !!(input.write.reborrow || input.write.reborrow2),
+    reborrow2: input.write.reborrow2 ? reborrow2Binding(input.write.reborrow2) : undefined, reborrow: input.write.reborrow ? { orderId: input.write.reborrow.facts.previous.orderId,
       gen: input.write.reborrow.facts.previous.leaseGen, reclaimSeq: input.write.reborrow.facts.reclaim.seq } : undefined };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
   if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
@@ -353,9 +361,11 @@ export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (
  * The card must still be what the order was cut from; otherwise the order is dead and the peer is told `cancelled`.
  * A build order's head is the base it starts from, not the card's head (the card has none yet); review / fix start from the card's head.
  */
-export const cardMoved = (task: LedgerTask, o: Pick<LendOrder, "step" | "head" | "specRev" | "round" | "reborrowBasis">): boolean =>
-  stepOfStage(task.stage) !== o.step || task.specRev !== o.specRev || task.round !== o.round ||
-  (o.reborrowBasis === null || (o.reborrowBasis ? task.headSHA !== o.reborrowBasis.ledgerHead : o.step !== "write" && task.headSHA !== o.head));
+export const cardMoved = (task: LedgerTask, o: Pick<LendOrder, "step" | "head" | "specRev" | "round" | "reborrowBasis" | "reborrow2Basis">): boolean => {
+  const basis = o.reborrow2Basis !== undefined ? o.reborrow2Basis : o.reborrowBasis; // REBOR2 orders never fall back to the v1 basis
+  return stepOfStage(task.stage) !== o.step || task.specRev !== o.specRev || task.round !== o.round ||
+    (basis === null || (basis ? task.headSHA !== basis.ledgerHead : o.step !== "write" && task.headSHA !== o.head));
+};
 
 /** What a claim hands the peer; a write order also names the one branch it may push and the base it was cut from. */
 const claimed = (o: LendOrder) => ({ order: o.wire, text: o.text, sha256: o.sha256, lease: lease(o),
