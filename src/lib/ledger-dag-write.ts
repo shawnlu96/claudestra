@@ -68,8 +68,11 @@ function applyVersion(db: Database, ctx: WriteCtx, f: Feature, c: ProposalConten
 function syncBoundScopes(db: Database, ctx: WriteCtx, cur: readonly DagNode[], next: readonly DagNode[]): void {
   for (const n of next) {
     const was = n.taskId ? cur.find((o) => o.taskId === n.taskId) : undefined;
-    const task = n.taskId && n.fileGlobs?.length ? getTask(db, n.taskId) : null;
-    if (task && was && [...(was.fileGlobs ?? [])].sort().join("\n") !== [...n.fileGlobs!].sort().join("\n")) syncCardFileScope(db, ctx, task, n.fileGlobs!);
+    const task = was && n.taskId ? getTask(db, n.taskId) : null;
+    if (!task || [...(was!.fileGlobs ?? [])].sort().join("\n") === [...(n.fileGlobs ?? [])].sort().join("\n")) continue;
+    // an empty scope would leave the card dispatching (and locking) by its old globs while the DAG shows none
+    if (!n.fileGlobs?.length) throw new LedgerError("invalid", `节点 ${n.key} 已绑 ${task.id}：不能省略 fileGlobs（卡和文件锁仍按原范围生效）`);
+    syncCardFileScope(db, ctx, task, n.fileGlobs);
   }
 }
 

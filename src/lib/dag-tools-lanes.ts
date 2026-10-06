@@ -64,9 +64,12 @@ export function globsOverlap(a: readonly string[] | undefined, b: readonly strin
 /** 占着文件的：已绑卡（含刚开工还在 spec 的）、没做完也没满足的节点，加上图外的忙卡 */
 function occupants(nodes: readonly LaneNode[], busy: readonly BusyCard[]): { id: string; globs: readonly string[] }[] {
   const live = nodes.filter((n) => n.taskId && (n.held?.length || (n.phase !== "done" && !n.satisfied && n.fileGlobs?.length)))
-    .map((n) => ({ id: n.key, globs: (n.held?.length ? n.held : n.fileGlobs) as readonly string[] }));
+    .map((n) => ({ id: n.key, globs: occupied(n) as readonly string[] }));
   return [...live, ...busy.map((b) => ({ id: b.taskId, globs: b.fileGlobs }))];
 }
+
+/** 一个节点按什么占文件：绑的卡实际拿着锁就按锁，否则按声明的 fileGlobs（startNow / waiting / lanes 同一口径） */
+const occupied = (n: LaneNode): readonly string[] | undefined => (n.held?.length ? n.held : n.fileGlobs);
 
 function groups(nodes: readonly LaneNode[]): string[][] {
   const open = nodes.filter((n) => n.phase !== "done" && !n.satisfied);
@@ -74,7 +77,7 @@ function groups(nodes: readonly LaneNode[]): string[][] {
   const find = (k: string): string => (parent.get(k) === k ? k : find(parent.get(k) as string));
   for (let i = 0; i < open.length; i++) {
     for (let j = i + 1; j < open.length; j++) {
-      if (globsOverlap(open[i].fileGlobs, open[j].fileGlobs)) parent.set(find(open[j].key), find(open[i].key));
+      if (globsOverlap(occupied(open[i]), occupied(open[j]))) parent.set(find(open[j].key), find(open[i].key));
     }
   }
   const out = new Map<string, string[]>();

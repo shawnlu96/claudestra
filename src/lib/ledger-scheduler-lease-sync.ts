@@ -84,6 +84,13 @@ export function syncCardFileScope(db: Database, ctx: WriteCtx, task: LedgerTask,
   if (keys(oldGlobs).join("\n") === keys(newGlobs).join("\n")) return;
   const now = ctx.now ?? Date.now();
   const held = cardFileLocks(db, task.id), next = syncedLocks(held, oldGlobs, newGlobs);
+  // a writer already sent may still be editing any file of the old scope: dropping its lock now lets another card write it too
+  const writing = held.some((h) => !next.includes(h.resource)) ? db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch'
+    AND status IN ('pending','submitted','unknown') LIMIT 1`).get(task.id) as { id: string; status: string } | null : null;
+  if (writing) {
+    throw new LedgerError("conflict", `${task.id} 有在途派单 ${writing.id}（${writing.status}），收窄会放掉 writer 可能还在改的文件：锁仍然生效，` +
+      "等它交付、意图结清后再收窄（加范围不受限）", { taskId: task.id, intent: writing.id });
+  }
   if (held.length) replaceCardFileLocks(db, task, held, next, now);
   const extra = { ...task.extra, fileGlobs: [...newGlobs] }, rev = task.rev + 1;
   db.prepare("UPDATE tasks SET extra = ?, rev = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(extra), rev, now, task.id);
