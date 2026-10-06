@@ -156,7 +156,7 @@ describe("the writer's hook (createTask / setTask) under the one policy port", (
     } finally { registerSpecPreflight(prev); }
   });
 
-  test("a spec file not written yet (start_node: task-new before the spec step) is unavailable(no_spec) with no note and no refusal", () => {
+  test("a new card whose spec file is not written yet (start_node: task-new before the spec step) is unavailable(no_spec) with no note and no refusal", () => {
     for (const m of ["observe", "on"] as const) {
       mode = m;
       const id = `T-${m}`;
@@ -166,6 +166,29 @@ describe("the writer's hook (createTask / setTask) under the one policy port", (
       expect(preflightSpecMaterial(db, getTask(db, id)!)).toEqual({ status: "unavailable", reason: "no_spec", ruleVersion: ruleVersion() });
       expect(listEvents(db, { target: id }).filter((e) => e.kind === "note")).toEqual([]);
     }
+  });
+
+  test("observe: an existing card's task-set to a spec file that is not there is not silent — one readable no_spec note, write kept", () => {
+    newCard(file("clean-set.md", CLEAN));
+    setTask(db, owner, { id: "T1", rev: 1, patch: { spec: join(dir, "typo-missing.md") } as never });
+    expect(getTask(db, "T1")!.rev).toBe(2);
+    const notes = listEvents(db, { target: "T1" }).filter((e) => e.kind === "note" && e.data.op === "spec_preflight_unavailable");
+    expect(notes.length).toBe(1);
+    expect(notes[0]!.data.preflight).toMatchObject({ status: "unavailable", reason: "no_spec", ruleVersion: ruleVersion() });
+    expect(notes[0]!.text).toContain("无收据");
+    expect(notes[0]!.text).not.toContain(dir);
+    expect(notes[0]!.text).not.toContain("typo-missing");
+    expect(observed()).toEqual([]);
+  });
+
+  test("on: an existing card's task-set to a spec file that is not there is refused; spec, rev and events unchanged", () => {
+    mode = "on";
+    const clean = file("clean-set-on.md", CLEAN);
+    newCard(clean);
+    const events = listEvents(db, { target: "T1" }).length;
+    expect(() => setTask(db, owner, { id: "T1", rev: 1, patch: { spec: join(dir, "typo-missing-on.md") } as never })).toThrow(/预检不可用（原因 no_spec/);
+    expect(getTask(db, "T1")).toMatchObject({ rev: 1, spec: clean });
+    expect(listEvents(db, { target: "T1" }).length).toBe(events);
   });
 
   test("observe: a spec that is there but cannot be read keeps the write and leaves one readable unavailable note (fixed words only)", () => {

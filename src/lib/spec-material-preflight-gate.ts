@@ -8,7 +8,8 @@
  * specRev stay as they were. A diagnostic carries only a fixed category, the material's index, the rule version, the content
  * digest and a fixed advice, never the refused text or the gate's message. A pass receipt holds for exactly that rule version,
  * content, specRev and target; it is never a pass for the offer, which runs the full gate again. A preflight that cannot run
- * (no spec file yet, an unexpected error) is "unavailable": no receipt; an error is refused by on, recorded by observe (see unavailable()). tests/spec-material-preflight*.test.ts.
+ * (no spec file, an unexpected error) is "unavailable": no receipt; refused by on, recorded by observe, except a new card whose
+ * spec file is not written yet (see unavailable()). tests/spec-material-preflight*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -168,13 +169,14 @@ function preflightLine(r: Extract<PreflightResult, { status: "blocked" }>): stri
 
 const UNAVAILABLE_OP = "spec_preflight_unavailable";
 /**
- * A preflight that could not run is never a pass (no receipt). A spec file that is not there yet (start_node writes task-new
- * before the spec file) has no material to send: unavailable(no_spec), old path, no note, no refusal; the offer checks again.
- * Otherwise (error) on refuses (the writer rolls back, nothing changes) and observe keeps the write but leaves one readable
- * note per card + specRev + material + reason + rules (fixed words, no foreign text), so the PM can see it was not preflighted.
+ * A preflight that could not run is never a pass (no receipt). Only two cases keep the old path with no note and no refusal:
+ * a card with no spec at all, and a new card whose spec file is not there yet (start_node writes task-new before the spec
+ * file; the offer checks again). Every other case, including an existing card pointed at a spec file that is not there
+ * (task-set), is never silent: on refuses (the writer rolls back, nothing changes) and observe keeps the write but leaves one
+ * readable note per card + specRev + material + reason + rules (fixed words, no foreign text), so the PM can see it was not preflighted.
  */
-function unavailable(db: Database, ctx: WriteCtx, act: boolean, after: LedgerTask, r: Extract<PreflightResult, { status: "unavailable" }>): PreflightResult {
-  if (r.reason === "no_spec") return r;
+function unavailable(db: Database, ctx: WriteCtx, act: boolean, before: LedgerTask | null, after: LedgerTask, r: Extract<PreflightResult, { status: "unavailable" }>): PreflightResult {
+  if (r.reason === "no_spec" && (!after.spec || !before)) return r;
   const line = `规格写入预检不可用（原因 ${r.reason}，规则版本 ${r.ruleVersion.slice(0, 16)}）：无收据、不放行任何外发`;
   console.error(`[spec-preflight] ${after.id} ${line}`);
   if (act) throw new LedgerError("invalid", `${line}；on 下不写，规格与版本不变。先让规格文件可读再写。`);
@@ -196,7 +198,7 @@ function preflightTaskWrite(db: Database, ctx: WriteCtx, before: LedgerTask | nu
   catch (e) { decision = { kind: "skip", reason: `恢复策略读取失败，按 off：${(e as Error).message}`.slice(0, 200) }; }
   if (decision.kind === "skip") return { status: "skipped", reason: decision.reason };
   const r = preflightSpecMaterial(db, after);
-  if (r.status === "unavailable") return unavailable(db, ctx, decision.kind === "act", after, r);
+  if (r.status === "unavailable") return unavailable(db, ctx, decision.kind === "act", before, after, r);
   if (r.status !== "blocked") return r;
   if (decision.kind === "act") throw new LedgerError("invalid", `${preflightLine(r)}；没写，规格与版本不变。${r.advice}`);
   recordObserved(db, { project: after.project, mechanism: MECHANISM, target: after.id, actionKey: `spec-preflight:${r.digest.slice(0, 24)}:${r.ruleVersion.slice(0, 12)}`,
