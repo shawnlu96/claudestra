@@ -15,6 +15,7 @@ import { runManagerProcess } from "./run-manager.js";
 import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import { CLAIM_LEASE_MS } from "./scheduler-dispatch.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { swapAuthorFamily } from "./lend-author-family.js";
 import { assertSchedulerLease, forwardSchedulerLease, SCHEDULER_LEASE_ENV } from "./scheduler-lease-env.js";
 import { localReviewerCount } from "./scheduler-pool-facts.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
@@ -143,7 +144,8 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return "本机另一家族审查名额已满，等待空位后自动续派";
   const lapse = refusal ? refusalEpochLapse(db, task, { check: reviewMaterialCheck(db) }) : null; // MODELX: hold / revoked approval / changed materials since the epoch
   if (lapse) throw new LedgerError("conflict", `不建豁免审查会话，退人工：${lapse}`);
-  const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily;
+  // A FAM1a epoch's toFamily is the author family it retired for (FAMW check); a MODELX refusal epoch's toFamily is the reviewer's target.
+  const wrote = refusal ? remoteHeadFamily(db, task) ?? workflow.authorFamily : swapAuthorFamily(db, task, workflow, swap);
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
   const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : undefined);
