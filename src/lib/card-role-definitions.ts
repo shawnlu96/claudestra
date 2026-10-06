@@ -25,7 +25,7 @@ import { SRC_DIR } from "./repo-root.js";
 
 export const CARD_ROLES = ["author", "reviewer", "adversarial-reviewer", "pm-reviewer"] as const;
 export type CardRole = (typeof CARD_ROLES)[number];
-export const isCardRole = (v: unknown): v is CardRole => CARD_ROLES.includes(v as CardRole);
+const isCardRole = (v: unknown): v is CardRole => CARD_ROLES.includes(v as CardRole);
 
 /** owner 10:29 决定：本机 Claude 卡片角色缺省钉这个模型（写在每个定义文件里，这里供测试与诊断对照） */
 export const CARD_DEFAULT_MODEL = "claude-opus-5-5";
@@ -52,7 +52,7 @@ export interface CardRoleDefinition {
 
 const fileOf = (role: CardRole, dir: string) => join(dir, `card-${role}.md`);
 
-export function parseCardRole(role: CardRole, file: string, md: string): CardRoleDefinition | { error: string } {
+function parseCardRole(role: CardRole, file: string, md: string): CardRoleDefinition | { error: string } {
   const bad = (why: string) => ({ error: `角色定义 ${file} 损坏：${why}` });
   const m = md.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!m) return bad("缺 frontmatter");

@@ -359,7 +359,7 @@ describe("runLocalStart + runStart (scheduler-local-runtime-start, start_node)",
     });
   }
 
-  for (const runtime of ["codex", "claude"] as const) test(`autostart (localAutostart pins ${runtime}) → runStart: ${runtime === "codex" ? "Codex argv, no Claude model" : "Claude model"}`, async () => {
+  for (const runtime of ["codex", "claude"] as const) test(`autostart (localAutostart pins ${runtime}) → runStart: model only for Claude`, async () => {
     const f = startFixture(runtime);
     let out: Awaited<ReturnType<typeof runStart>> | undefined;
     await localAutostart("p", async () => { out = await runStart(f.io, f.plan); }, f.opts);

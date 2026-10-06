@@ -145,7 +145,8 @@ describe("broken definitions stop the create with a diagnosis (no fallback model
       expect(r).toEqual({ error: expect.stringContaining(msg) });
       expect((r as { error: string }).error).toContain("没有建会话");
       const calls: string[][] = [];
-      expect(await cardRoleCreate(async (...a: string[]) => { calls.push(a); return { ok: true }; }, { dir })(...args))
+      const create = async (...a: string[]): Promise<Record<string, unknown>> => { calls.push(a); return { ok: true }; };
+      expect(await cardRoleCreate(create, { dir })(...args))
         .toEqual({ ok: false, error: (r as { error: string }).error });
       expect(await cardRoleManager(async (a: string[]) => { calls.push(a); return { ok: true }; }, { dir })(args)).toMatchObject({ ok: false });
       expect(calls).toEqual([]);
