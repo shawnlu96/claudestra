@@ -9,6 +9,7 @@ import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { holdWriteLease } from "../src/lib/ledger-lend-lease.js";
+import { bindSchedulerSession } from "../src/lib/scheduler-sessions.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const f of cleanups.splice(0)) f(); });
@@ -46,6 +47,18 @@ function fixture(ran = false, deliveredStep?: "write" | "fix") {
   const snapshot = () => ["tasks", "task_steps", "task_workflows", "scheduler_intents", "scheduler_resources", "scheduler_sessions", "lend_orders", "lend_write_leases", "events"]
     .map(table => db.query(`SELECT * FROM ${table} ORDER BY rowid`).all());
   return { db, dir, path, registryPath, ctx, scope, input, snapshot };
+}
+
+function bindElsewhere(f: ReturnType<typeof fixture>, agent: string, sessionId: string): void {
+  const taskId = `other-${sessionId}`, id = `create-${sessionId}`;
+  createTask(f.db, f.ctx, { project: "p", id: taskId, title: "other", kind: "code" });
+  setWorkflow(f.db, f.ctx, { taskId, taskRev: 1, mode: "auto", template: "code", templateVersion: 2, authorFamily: "claude", fallback: "wait" });
+  const causalSeq = (f.db.query("SELECT MAX(seq) AS seq FROM events").get() as { seq: number }).seq;
+  planIntent(f.db, f.ctx, { id, taskId, taskRev: 1, workflowRev: 1, causalSeq, action: "ensure_session", node: "write", reason: "new assignment" });
+  settleIntent(f.db, f.ctx, { id, from: "pending", to: "submitted" });
+  bindSchedulerSession(f.db, f.ctx, { taskId, role: "author", intentId: id, agent, sessionId,
+    family: "claude", transport: "tmux", registryPath: f.registryPath });
+  settleIntent(f.db, f.ctx, { id, from: "submitted", to: "done" });
 }
 
 test("pause, narrow, release all, restore registered scope and replay: only file claims change", () => {
@@ -168,13 +181,38 @@ test.each(["assigned", "unknown"])("explicit author step %s is not merely a hist
   expect(f.snapshot()).toEqual(before);
 });
 
-test.each(["active", undefined])("historical names alone do not bind a registry agent: %s", status => {
+test.each(["build-agent", "build-assignee", "delivered-write", "delivered-fix"])("registry live author: %s refuses even with a title label", source => {
+  const f = fixture(true, source === "delivered-write" ? "write" : source === "delivered-fix" ? "fix" : undefined);
+  const author = source === "delivered-fix" ? "agent-fixer" : source === "delivered-write" ? "writer@fake-peer" : "agent-w";
+  if (source.startsWith("build-")) {
+    moveStage(f.db, f.ctx, { taskId: "T", from: "spec", to: "restate" });
+    moveStage(f.db, f.ctx, { taskId: "T", from: "restate", to: "build" });
+    f.db.query(`UPDATE tasks SET ${source === "build-agent" ? "agent" : "assignee"} = ? WHERE id = 'T'`).run(author);
+    expect(f.db.query("SELECT * FROM task_steps").all()).toEqual([]);
+  }
+  f.scope([]);
+  expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
+  for (const task of ["paused", "unverified other label", undefined]) {
+    writeFileSync(f.registryPath, JSON.stringify({ agents: { [author]: { status: "active", task, sessionId: "live" } } }));
+    const before = f.snapshot();
+    expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false });
+    expect(f.snapshot()).toEqual(before);
+    expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
+    expect(f.snapshot()).toEqual(before);
+  }
+});
+
+test.each(["active", undefined])("historical names with proven other-card sessions or PM authority permit release: %s", status => {
   const f = fixture(true, "fix"); f.scope([]);
+  setMeta(f.db, f.ctx, { project: "p", key: "pms", value: ["agent-pm"] });
   setTask(f.db, f.ctx, { id: "T", rev: f.input().taskRev, patch: { assigneeKind: "agent", assignee: "agent-pm" } });
   writeFileSync(f.registryPath, JSON.stringify({ agents: {
-    w: { status, sessionId: "new-session", task: "other" }, pm: { status },
-    "agent-fixer": { status, task: "other" }, "writer@fake-peer": { status, task: "other" },
+    w: { status, sessionId: "new-session", task: "other" }, "agent-pm": { status },
+    "agent-fixer": { status, task: "other", sessionId: "fix-elsewhere" },
+    "writer@fake-peer": { status, task: "other", sessionId: "write-elsewhere" },
   } }));
+  bindElsewhere(f, "agent-fixer", "fix-elsewhere");
+  bindElsewhere(f, "writer@fake-peer", "write-elsewhere");
   const before = f.snapshot();
   expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: true });
   expect(f.snapshot()).toEqual(before);
@@ -190,6 +228,50 @@ test("registry session association survives a changed task label or agent name",
   expect(dry.reasons).toContain("registry 作者 renamed 仍可写或状态未知");
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
   expect(f.snapshot()).toEqual(before);
+});
+
+test.each(["wrong-session", "wrong-agent", "retired", "unknown", "current-card-label"])("other-card exception requires unambiguous current binding: %s", evidence => {
+  const f = fixture(true); f.scope([]);
+  setTask(f.db, f.ctx, { id: "T", rev: f.input().taskRev, patch: { agent: "agent-w" } });
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-w": {
+    status: "active", sessionId: "other-session", task: evidence === "current-card-label" ? "T" : "paused",
+  } } }));
+  bindElsewhere(f, "agent-w", "other-session");
+  if (evidence === "wrong-session") f.db.query("UPDATE scheduler_sessions SET sessionId = 'different'").run();
+  if (evidence === "wrong-agent") f.db.query("UPDATE scheduler_sessions SET agent = 'someone-else'").run();
+  if (evidence === "retired" || evidence === "unknown") {
+    f.db.exec("PRAGMA ignore_check_constraints = ON");
+    f.db.query("UPDATE scheduler_sessions SET state = ?").run(evidence);
+  }
+  const before = f.snapshot();
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: false });
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
+  expect(f.snapshot()).toEqual(before);
+});
+
+test.each(["active", "stopped", undefined])("named registry author with status %s still needs retirement facts", status => {
+  const f = fixture(true); f.scope([]);
+  setTask(f.db, f.ctx, { id: "T", rev: f.input().taskRev, patch: { agent: "agent-w" } });
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { w: { status, task: "paused" } } }));
+  const before = f.snapshot();
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
+  expect(f.snapshot()).toEqual(before);
+});
+
+test.each(["pm", "foreign-pm", "dispatcher"])("named registry %s uses canonical project configuration authority", role => {
+  const f = fixture(true); f.scope([]);
+  setTask(f.db, f.ctx, { id: "T", rev: f.input().taskRev, patch: { agent: "agent-pm" } });
+  setMeta(f.db, f.ctx, { project: role === "foreign-pm" ? "q" : "p", key: "pms", value: ["agent-pm"] });
+  if (role === "dispatcher") setMeta(f.db, f.ctx, { project: "p", key: "team", value: { dispatcher: "agent-pm", audit: true } });
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-pm": { status: "active", task: "paused" } } }));
+  const before = f.snapshot();
+  expect(reconcileFileScope(f.db, f.ctx, f.input())).toMatchObject({ executable: role === "pm" });
+  expect(f.snapshot()).toEqual(before);
+  if (role === "pm") expect(reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toMatchObject({ ok: true });
+  else {
+    expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/registry 作者/);
+    expect(f.snapshot()).toEqual(before);
+  }
 });
 
 test("lost claims cannot be silently reconstructed; a foreign overlapping claim blocks even release", () => {

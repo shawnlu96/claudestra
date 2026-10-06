@@ -9,6 +9,7 @@ import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { testChildEnv } from "./test-env.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
+import { bindSchedulerSession } from "../src/lib/scheduler-sessions.js";
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const f of cleanup.splice(0)) f(); });
@@ -163,6 +164,26 @@ test.each(["local", "peer", "peer-step", "registry-io", "conflict"])("real CLI %
   expect(f.snapshot()).toEqual(before);
 });
 
+test.each([false, true])("real CLI registry live author with title label: delivered=%j refuses without writes", async delivered => {
+  const f = cliFixture(true, delivered), owner = { actor: "owner" };
+  if (!delivered) {
+    moveStage(f.db, owner, { taskId: "MQ", from: "spec", to: "restate" });
+    moveStage(f.db, owner, { taskId: "MQ", from: "restate", to: "build" });
+    expect(f.db.query("SELECT * FROM task_steps").all()).toEqual([]);
+  }
+  setTask(f.db, owner, { id: "MQ", rev: getTask(f.db, "MQ")!.rev,
+    patch: { agent: "agent-w", extra: { fileGlobs: [] } } });
+  writeFileSync(join(f.state, "registry.json"), JSON.stringify({ agents: {
+    "agent-pm": { channelId: "111", projectId: "p" }, w: { status: "active", task: "paused fixture", sessionId: "live" },
+  } }));
+  expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
+  const flags = ["--rev", String(getTask(f.db, "MQ")!.rev)], before = f.snapshot();
+  expect(await f.cli(flags)).toMatchObject({ ok: true, executable: false, reasons: ["registry 作者 w 仍可写或状态未知"] });
+  expect(f.snapshot()).toEqual(before);
+  expect(await f.cli([...flags, "--apply"])).toMatchObject({ ok: false, code: "conflict" });
+  expect(f.snapshot()).toEqual(before);
+});
+
 test("real CLI releases and reacquires scope after dispatch with historical names but no session binding", async () => {
   const f = cliFixture(true, true);
   f.db.query("UPDATE tasks SET agent = 'agent-old', assignee = 'agent-w', assigneeKind = 'agent' WHERE id = 'MQ'").run();
@@ -170,11 +191,18 @@ test("real CLI releases and reacquires scope after dispatch with historical name
     .toEqual([{ step: "write", state: "delivered", executor: "writer@fake-peer" }]);
   writeFileSync(join(f.state, "registry.json"), JSON.stringify({ agents: {
     "agent-pm": { channelId: "111", projectId: "p" },
-    "agent-old": { status: "active", task: "other", sessionId: "unrelated" }, w: { status: "active" },
-    "writer@fake-peer": { status: "active", task: "other" },
+    "agent-old": { status: "active", task: "other", sessionId: "unrelated" },
   } }));
+  const owner = { actor: "owner" }, taskId = "other";
+  createTask(f.db, owner, { project: "p", id: taskId, title: "other", kind: "code", agent: "agent-old" });
+  setWorkflow(f.db, owner, { taskId, taskRev: 1, mode: "auto", template: "code", templateVersion: 2, authorFamily: "claude", fallback: "wait" });
+  const causalSeq = (f.db.query("SELECT MAX(seq) AS seq FROM events").get() as { seq: number }).seq;
+  planIntent(f.db, owner, { id: "create-other", taskId, taskRev: 1, workflowRev: 1, causalSeq, action: "ensure_session", node: "write", reason: "bind" });
+  settleIntent(f.db, owner, { id: "create-other", from: "pending", to: "submitted" });
+  bindSchedulerSession(f.db, owner, { taskId, role: "author", intentId: "create-other", agent: "agent-old", sessionId: "unrelated",
+    family: "claude", transport: "tmux", registryPath: join(f.state, "registry.json") });
   const before = f.snapshot();
-  expect(f.db.query("SELECT * FROM scheduler_sessions").all()).toEqual([]);
+  expect(f.db.query("SELECT * FROM scheduler_sessions WHERE taskId = 'MQ'").all()).toEqual([]);
   expect(await f.cli()).toMatchObject({ ok: true, executable: true, reasons: [], remove: ["old.ts"] });
   expect(f.snapshot()).toEqual(before);
   expect(await f.cli(["--apply"])).toMatchObject({ ok: true, duplicate: false });

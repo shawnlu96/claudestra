@@ -80,9 +80,18 @@ function writers(db: Database, task: LedgerTask, intents: SchedulerIntent[], eve
       bareCanonicalName(binding.agent) === bareCanonicalName(s.executor) && retired(binding))) p.reasons.push(`作者步骤未结：${s.step} / ${s.executor}`);
   const state = readJsonStateSync(input.registryPath ?? REGISTRY_PATH, v => object(v) && object(v.agents) && Object.values(v.agents).every(object));
   if (state.status !== "ok") { p.reasons.push(`registry 无法核实：${state.status}`); return; }
-  // Historical names may now work on other cards; only a current task or recorded session associates an entry.
+  const authorNames = new Set([task.agent, task.assignee, ...writingSteps.filter(s => !s.derived).map(s => s.executor)]
+    .filter((name): name is string => !!name).map(bareCanonicalName));
+  const elsewhere = db.query("SELECT * FROM scheduler_sessions WHERE taskId <> ? AND state = 'active'").all(task.id) as SchedulerSession[];
+  // registry.task is a display title, not a card ID. A different/missing label cannot clear a named author.
+  // Only manager authority or a matching active session on another card clears the historical-name fallback.
   for (const a of normalizeRegistryAgents(state.data)) {
-    if (a.task !== task.id && !sessions.some(s => !!a.sessionId && s.sessionId === a.sessionId)) continue;
+    const directlyBound = a.task === task.id || sessions.some(s => !!a.sessionId && s.sessionId === a.sessionId);
+    const namedAuthor = authorNames.has(bareCanonicalName(a.name));
+    const otherSession = !!a.sessionId && elsewhere.some(s => s.sessionId === a.sessionId &&
+      bareCanonicalName(s.agent) === bareCanonicalName(a.name) && ["author", "reviewer"].includes(s.role) &&
+      ["acp", "tmux", "peer"].includes(s.transport) && ["claude", "codex"].includes(s.family));
+    if (!directlyBound && (!namedAuthor || actorMayConfigure(db, a.name, task.project) || otherSession)) continue;
     if (!sessions.some(s => s.sessionId === a.sessionId && bareCanonicalName(s.agent) === bareCanonicalName(a.name) && retired(s)) ||
       !["dead", "stopped", "retired"].includes(a.status ?? "") || a.acpRestartPending) p.reasons.push(`registry 作者 ${a.name} 仍可写或状态未知`);
   }
