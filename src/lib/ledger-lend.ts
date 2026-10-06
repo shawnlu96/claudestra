@@ -28,6 +28,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.js";
 import { orderWireOf, parseOrderWire, type OrderWire } from "./order-wire.js";
 import { withDeliverScope } from "./order-deliver-scope.js";
+import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.js";
 import { assertFresh, materialsNote, MATERIALS_BLOCKED, sendsItems, withMaterials, type FixMaterials } from "./fix-materials.js";
 import type { WriteMaterial } from "./lend-write-materials.js";
@@ -98,8 +99,10 @@ export function lendBoundStep(db: Database): (s: StepKey) => boolean {
 const lease = (o: Pick<LendOrder, "leaseGen" | "leaseUntil" | "leaseMs">): LeaseState => ({ gen: o.leaseGen, expiresAt: o.leaseUntil ?? 0, ms: o.leaseMs });
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 
+/** CAS on the old status; a settled order (cancelled / released) closes its worker's open asks in the same transaction (order-ask-terminal.ts). */
 function setStatus(db: Database, o: LendOrder, to: LendOrderStatus, now: number, reason: string | null): void {
   db.prepare("UPDATE lend_orders SET status = ?, reason = ?, updatedAt = ? WHERE orderId = ? AND status = ?").run(to, reason, now, o.orderId, o.status);
+  closeSettledOrderAsks(db, o.orderId, now);
 }
 
 function note(db: Database, ctx: WriteCtx, o: Pick<LendOrder, "project" | "taskId" | "orderId" | "peer">, text: string, data: Record<string, unknown> = {}): void {
@@ -259,6 +262,7 @@ export function withdrawPooledLend(db: Database, ctx: WriteCtx, input: { orderId
     const now = ctx.now ?? Date.now();
     const r = db.prepare("UPDATE lend_orders SET status = 'cancelled', reason = ?, updatedAt = ? WHERE orderId = ? AND status = 'pooled'").run(input.reason, now, o.orderId);
     if (r.changes === 0) return { withdrawn: false, order: o };
+    closeSettledOrderAsks(db, o.orderId, now);
     if (isWriteStep(o.step)) endWriteLease(db, o.taskId, input.reason, now);
     note(db, ctx, o, `出借：撤单（原状态 pooled）：${input.reason}`, { op: "cancel", from: "pooled", withdrawnBy: ctx.actor });
     return { withdrawn: true, order: getLendOrder(db, o.orderId) as LendOrder };
