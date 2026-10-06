@@ -81,6 +81,10 @@ export interface LendDeps {
     pr(p: PrInput): Promise<PrResult>;
   };
   removeDir(orderId: string): void;
+  /** 删工作目录前回收它下面的残留进程（lend-proc-reap.ts，除失租外自己兜错只记日志）；不设 = 不回收 */
+  reapOrder?(orderId: string): Promise<unknown>;
+  /** 周期兜底扫孤儿进程（自带节流）；不设 = 不扫 */
+  reapOrphans?(): Promise<unknown>;
   worker: WorkerPort;
   /** 回执验签：A 钉在 peers.json 的完整公钥；验不过 = false */
   verifyReceipt(peer: string, r: Receipt): Promise<boolean>;
@@ -181,6 +185,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
   }
   if (row.settle!.removeDir) {
+    await d.reapOrder?.(row.orderId);
     try { d.removeDir(row.orderId); } catch (e) {
       if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
       d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`);
