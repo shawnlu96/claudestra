@@ -42,9 +42,11 @@ export function metricsOf(ov: Pick<LedgerOverview, "tasks" | "doneRest" | "unkno
   };
 }
 
-export const FILTERS = ["all", "runnable", "waiting", "done", "p0"] as const;
+export const FILTERS = ["undone", "all", "runnable", "waiting", "done", "p0"] as const;
 export type Filter = (typeof FILTERS)[number];
-export const FILTER_LABEL: Record<Filter, string> = { all: "全部", runnable: "可执行", waiting: "在等", done: "已完成", p0: "P0" };
+export const FILTER_LABEL: Record<Filter, string> = { undone: "未完成", all: "全部", runnable: "可执行", waiting: "在等", done: "已完成", p0: "P0" };
+/** 一进来只看在途的卡，二十多张已结案的不挡眼 */
+export const DEFAULT_FILTER: Filter = "undone";
 
 /** 筛选芯片上的数：总览里的 + 窗口外的 */
 export const filterCount = (ov: Pick<LedgerOverview, "tasks" | "doneRest">, f: Filter): number =>
@@ -52,6 +54,8 @@ export const filterCount = (ov: Pick<LedgerOverview, "tasks" | "doneRest">, f: F
 
 export function matchFilter(t: LedgerTaskView, f: Filter): boolean {
   if (f === "all") return t.stage !== "cancelled";
+  // = 全部 − 已完成（ops 卡也算：它不进可执行 / 在等只因没有执行链，不是做完了）
+  if (f === "undone") return t.stage !== "cancelled" && t.stage !== "done" && t.stage !== "verified";
   if (f === "runnable") return open(t) && !blocked(t);
   if (f === "waiting") return open(t) && blocked(t);
   if (f === "done") return t.stage === "done" || t.stage === "verified";

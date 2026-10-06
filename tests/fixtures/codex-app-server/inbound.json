@@ -33,6 +33,25 @@
         "object"
       ]
     },
+    "additionalPermissions": {
+      "keys": {
+        "fileSystem": false,
+        "network": false
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "AdditionalPermissionProfile",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
     "availableDecisions": {
       "nullable": true,
       "ours": {
@@ -85,6 +104,104 @@
         "string"
       ]
     },
+    "commandActions": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "array"
+        ]
+      },
+      "required": false,
+      "types": [
+        "array"
+      ]
+    },
+    "commandActions[]": {
+      "discriminator": "type",
+      "members": [
+        "listFiles",
+        "read",
+        "search",
+        "unknown"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/CommandAction",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "commandActions[].command": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "commandActions[].path": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "commandActions[].query": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "commandActions[].type": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "listFiles",
+        "read",
+        "search",
+        "unknown"
+      ]
+    },
     "cwd": {
       "nullable": true,
       "ours": {
@@ -112,6 +229,60 @@
       "required": true,
       "types": [
         "string"
+      ]
+    },
+    "networkApprovalContext": {
+      "keys": {
+        "host": true,
+        "protocol": true
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "NetworkApprovalContext",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "networkApprovalContext.host": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "networkApprovalContext.protocol": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/NetworkApprovalProtocol",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "http",
+        "https",
+        "socks5Tcp",
+        "socks5Udp"
       ]
     },
     "reason": {
@@ -1840,6 +2011,48 @@
         "object"
       ]
     },
+    "<type=commandExecution>.commandActions[].command": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.commandActions[].path": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.commandActions[].query": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
     "<type=commandExecution>.commandActions[].type": {
       "nullable": false,
       "ours": {
@@ -3305,6 +3518,90 @@
       "required": true,
       "types": [
         "object"
+      ]
+    },
+    "tokenUsage.last.cachedInputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.last.inputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.last.outputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.last.reasoningOutputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
       ]
     },
     "tokenUsage.last.totalTokens": {

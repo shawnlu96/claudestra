@@ -37,6 +37,11 @@ const Model = loose({
   supportedReasoningEfforts: z.array(loose({ reasoningEffort: str })),
 });
 
+/** CommandAction（read / listFiles / search / unknown）：只读标题和 kind 要的字段（path 在 read 里必有，其余可缺） */
+const CommandAction = loose({ type: str, command: opt(str), path: opt(str), query: opt(str) });
+/** TokenUsageBreakdown：usage_update 和 prompt 回包的 usage / _meta.quota 要的几项 */
+const TokenUsage = loose({ totalTokens: int, inputTokens: int, cachedInputTokens: int, outputTokens: int, reasoningOutputTokens: int });
+
 /**
  * ThreadItem 是开放联合：通知里先按信封（type、id）读，再按 type 查这里的成员 schema；不认识的 type 归 O 类忽略。
  * 只列已经确定要读的成员，其余工具类成员由事件转换那一步补进来并重新生成锁文件。
@@ -53,7 +58,7 @@ const ThreadItem = z.discriminatedUnion("type", [
     status: z.enum(["inProgress", "completed", "failed", "declined"]),
     exitCode: opt(int),
     aggregatedOutput: opt(str),
-    commandActions: z.array(loose({ type: str })),
+    commandActions: z.array(CommandAction),
   }),
   loose({
     type: z.literal("mcpToolCall"),
@@ -183,7 +188,20 @@ const client = {
 /** app-server 发给我们的请求（反向请求）；没登记的一律回 -32601 */
 const server = {
   "item/commandExecution/requestApproval": ask(
-    ["CommandExecutionRequestApprovalParams", loose({ ...turnScoped, itemId: str, availableDecisions: opt(z.array(z.unknown())), command: opt(str), cwd: opt(str), reason: opt(str) })],
+    [
+      "CommandExecutionRequestApprovalParams",
+      loose({
+        ...turnScoped,
+        itemId: str,
+        availableDecisions: opt(z.array(z.unknown())),
+        command: opt(str),
+        cwd: opt(str),
+        reason: opt(str),
+        commandActions: opt(z.array(CommandAction)),
+        networkApprovalContext: opt(loose({ host: str, protocol: str })),
+        additionalPermissions: opt(z.unknown()),
+      }),
+    ],
     ["CommandExecutionRequestApprovalResponse", strict({ decision: Decision })],
     "turn",
   ),
@@ -218,7 +236,7 @@ const notifications = {
   "turn/plan/updated": note("v2/TurnPlanUpdatedNotification", loose({ ...turnScoped, plan: z.array(loose({ step: str, status: z.enum(["pending", "inProgress", "completed"]) })) }), "turn", "C"),
   "thread/tokenUsage/updated": note(
     "v2/ThreadTokenUsageUpdatedNotification",
-    loose({ ...turnScoped, tokenUsage: loose({ last: loose({ totalTokens: int }), modelContextWindow: opt(int) }) }),
+    loose({ ...turnScoped, tokenUsage: loose({ last: TokenUsage, modelContextWindow: opt(int) }) }),
     "turn",
     "C",
   ),

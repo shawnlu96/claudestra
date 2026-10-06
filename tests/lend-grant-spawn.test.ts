@@ -163,7 +163,7 @@ describe("stopRevokedWorkers 细节", () => {
       stopReason: (n) => (n === "agent-lend-a" ? "收回" : null) });
     t.io.signal = (pid, sig) => { t.log.push(`${sig} ${pid}`); if (sig === "SIGKILL") t.live.delete(pid); };
     expect(await stopRevokedWorkers(t.io)).toEqual({ stopped: ["agent-lend-a"], unconfirmed: [] });
-    expect(t.log).toEqual(["SIGTERM 7", "SIGKILL 7", "kill agent-lend-a", "stopped agent-lend-a"]);
+    expect(t.log).toEqual(["SIGTERM 7", "SIGKILL 7", "stopped agent-lend-a", "kill agent-lend-a"]); // 关窗口前先置 stopped（LKN-1）
   });
 
   test("pid 已不是这次 create（退出 / 被复用）：不发信号，只按名字关窗口；关不掉、读不到 tmux 都报没确认", async () => {
@@ -171,7 +171,7 @@ describe("stopRevokedWorkers 细节", () => {
     t.io.killWindows = async (n) => void t.log.push(`kill ${n}`);
     t.io.probe = async (n): Promise<WorkerLiveness> => (n === "agent-lend-a" ? "running" : "unknown");
     const r = await stopRevokedWorkers(t.io);
-    expect(t.log).toEqual(["kill agent-lend-a", "kill agent-lend-b"]);
+    expect(t.log).toEqual(["stopped agent-lend-a", "kill agent-lend-a", "stopped agent-lend-b", "kill agent-lend-b"]);
     expect(r.stopped).toEqual([]);
     expect(r.unconfirmed.map((u) => u.why)).toEqual(["关窗口之后窗口还在", "读不到 tmux，没法确认已退出"]);
   });
