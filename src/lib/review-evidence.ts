@@ -75,7 +75,8 @@ export function modelFamily(id: string): string {
   return /^[a-z]+/i.exec(id.slice(id.lastIndexOf("/") + 1))?.[0].toLowerCase() ?? "unknown";
 }
 
-function modelClaim(rec: ModelRecord | null, sourceArtifact: string | null) {
+/** The manifest's model claim, derived only from the model record; the self-check recomputes it the same way. */
+export function modelClaim(rec: ModelRecord | null, sourceArtifact: string | null) {
   const only = rec && rec.models.length === 1 ? rec.models[0].model : null;
   const cut = only ? only.indexOf("/") : -1;
   return { provider: only && cut > 0 ? only.slice(0, cut) : null, id: only ? only.slice(cut + 1) : null,

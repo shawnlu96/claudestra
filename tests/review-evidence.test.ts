@@ -207,7 +207,16 @@ describe("unresolved findings", () => {
     twoRounds();
     const { root, m, check } = exportTo("badclose");
     retouch(root, "closures", (cl) => cl.map((c: any) => (c.findingId === "F2" && c.reviewId === m.rounds[0].reviewId ? { ...c, disposition: "closed" } : c)));
-    expect(problems(check())).toContain("not a later structured review that dropped it");
+    expect(problems(check())).toContain(`closure ${m.rounds[0].reviewId}/F2: ["closed"`);
+  });
+
+  test("a closure pointing at an unrelated fix commit is refused, closed or retained", () => {
+    twoRounds();
+    const { root, check } = exportTo("forgedfix");
+    retouch(root, "closures", (cl) => cl.map((c: any) => ({ ...c, fixCommit: "e".repeat(40) })));
+    const r = check();
+    expect(r.ok).toBe(false);
+    expect(problems(r).match(/does not match what the findings support/g)).toHaveLength(3);
   });
 
   test("a chain re-raised under the same id closes when a later round drops it", () => {
@@ -236,6 +245,32 @@ describe("identity", () => {
     session("sess-agent-y", codexLines(2_900, "claude-opus-5-5", "y1"));
     twoRounds();
     expect(problems(exportTo("same").check())).toContain("share model family claude");
+  });
+
+  test("a model family edited in the manifest is checked against the model record, not trusted", () => {
+    session("sess-agent-y", codexLines(2_900, "claude-opus-5-5", "y1"));
+    twoRounds();
+    const { root, check } = exportTo("forgedmodel");
+    editManifest(root, (m) => { m.rounds.at(-1).reviewer.model.family = "gpt"; });
+    const r = check();
+    expect(r.ok).toBe(false);
+    expect(problems(r)).toContain("does not follow from its model record");
+  });
+
+  test("verified, verdict and counts edited in the manifest must match the ledger records the package carries", () => {
+    verdict(1, H1, "changes", [finding("F1", "P1", { basis: "acceptance:1" })], 2_000);
+    nextRound(H2, 2_100);
+    writeFileSync(join(reviews, "T50-r2.md"), "# r2\n");
+    recordReview(db, { actor: "agent-pm", now: 3_000 }, { taskId: "T50", reviewer: "agent-y", verdict: "pass", p0: 0, p1: 0, p2: 0, path: join(reviews, "T50-r2.md"),
+      head: H2, reviewerSessionId: "sess-agent-y", reviewerFamily: "codex", findings: [] });
+    const { root, check } = exportTo("forgedid");
+    expect(problems(check())).toContain("final reviewer identity is not bridge-verified");
+    editManifest(root, (m) => { m.rounds[1].reviewer.verified = true; m.authors[0].verified = true; m.rounds[0].verdict = "pass"; });
+    const p = problems(check());
+    expect(p).not.toContain("final reviewer identity is not bridge-verified");
+    expect(p).toContain(`round ${JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")).rounds[1].reviewId}: verified true does not match its ledger record (false)`);
+    expect(p).toContain("author 1: verified true does not match its ledger record (false)");
+    expect(p).toContain("verdict does not match its review record");
   });
 
   test("no session records in the review window leaves the family unknown, never guessed from the runtime", () => {

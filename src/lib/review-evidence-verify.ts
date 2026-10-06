@@ -7,7 +7,8 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import { countOpen, openFindings, type Closure, type EvidenceRound } from "./review-evidence-closures.js";
+import { modelClaim, type ModelRecord } from "./review-evidence.js";
+import { computeClosures, countOpen, openFindings, type Closure, type EvidenceRound } from "./review-evidence-closures.js";
 import type { ReviewFinding } from "./scheduler-review.js";
 
 export interface VerifyResult { ok: boolean; problems: string[] }
@@ -15,6 +16,8 @@ export interface VerifyResult { ok: boolean; problems: string[] }
 type Obj = Record<string, unknown>;
 const SHA40 = /^[0-9a-f]{40}$/;
 const isObj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
+const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 const STATUSES = ["completed", "incomplete", "refused", "cancelled"];
 
 /** Relative, normalized, forward-slash path with no parent segments: anything else could point outside the package. */
@@ -84,13 +87,48 @@ function ref(c: Check, id: unknown, what: string, required: boolean): void {
   if (typeof id !== "string" || !c.bytes.has(id)) c.fail(`${what}: artifact ${String(id)} does not resolve to a verified file`);
 }
 
-function identity(c: Check, who: unknown, what: string): Obj | null {
-  if (!isObj(who)) { c.fail(`${what}: identity missing`); return null; }
+const modelRecord = (v: unknown): ModelRecord | null =>
+  isObj(v) && Array.isArray(v.models) && v.models.every((x) => isObj(x) && typeof x.model === "string") ? v as unknown as ModelRecord : null;
+
+/**
+ * The model claim must be exactly what its model record yields, and each identity field must equal the ledger record the
+ * package carries for it (expect): the cross-family and verified checks below read these fields, so they cannot be free text.
+ */
+function identity(c: Check, who: unknown, what: string, expect: Obj): void {
+  if (!isObj(who)) return c.fail(`${what}: identity missing`);
   ref(c, who.identityReceipt, `${what} identity receipt`, true);
-  const model = isObj(who.model) ? who.model : null;
-  if (!model) c.fail(`${what}: model missing`);
-  else ref(c, model.sourceArtifact, `${what} model source`, false);
-  return who;
+  const model = isObj(who.model) ? who.model : {};
+  ref(c, model.sourceArtifact, `${what} model source`, true);
+  const want = modelClaim(modelRecord(c.json(model.sourceArtifact, `${what} model`)), str(model.sourceArtifact));
+  const got = { provider: model.provider, id: model.id, family: model.family, sourceArtifact: model.sourceArtifact };
+  if (!same(got, want)) c.fail(`${what}: model claim ${JSON.stringify(got)} does not follow from its model record (${JSON.stringify(want)})`);
+  for (const [k, v] of Object.entries(expect)) {
+    if (!same(who[k], v)) c.fail(`${what}: ${k} ${JSON.stringify(who[k])} does not match its ledger record (${JSON.stringify(v)})`);
+  }
+}
+
+/** What an author's receipt supports: verified only for an MCP delivery of the subject head, session / family only from a bound session. */
+function authorRecord(c: Check, a: unknown, head: unknown, what: string): Obj {
+  const rec = isObj(a) ? c.json(a.identityReceipt, what) : undefined;
+  if (!isObj(rec)) return { agent: null, verified: false };
+  const bound = isObj(rec.schedulerSession) ? rec.schedulerSession : {};
+  const delivers = Array.isArray(rec.delivers) ? rec.delivers.filter(isObj) : [];
+  return { agent: rec.agent ?? null, sessionId: str(bound.sessionId), family: str(bound.family) ?? "unknown",
+    verified: delivers.some((e) => isObj(e.data) && e.data.headSHA === head && String(e.dedupKey ?? "").startsWith("mcp-deliver:")) };
+}
+
+/** The review record a round's submission carries; a completed round's verdict, counts, head and findings must be its copy. */
+function reviewRecord(c: Check, r: Obj, what: string, findings: ReviewFinding[] | null): Obj {
+  const sub = c.json(r.submissionArtifact, `${what} submission`);
+  const review = isObj(sub) && isObj(sub.review) && sub.review.kind === "review" ? sub.review : null;
+  if (r.status === "completed" && !review) c.fail(`${what}: submission holds no review record`);
+  if (r.status !== "completed" && review) c.fail(`${what}: a ${String(r.status)} round's submission holds a review record`);
+  const d = review && isObj(review.data) ? review.data : {};
+  if (review) {
+    for (const k of ["verdict", "p0", "p1", "p2"]) if (!same(r[k], d[k] ?? null)) c.fail(`${what}: ${k} does not match its review record`);
+    if (findings && (!same(findings, d.findings) || r.head !== d.head)) c.fail(`${what}: findings / head do not match its review record`);
+  }
+  return { ...(review ? { agent: str(d.reviewer) } : {}), sessionId: str(d.reviewerSessionId), family: str(d.reviewerFamily) ?? "unknown", verified: d.via === "mcp" };
 }
 
 function findingsOf(c: Check, r: Obj, what: string): ReviewFinding[] | null {
@@ -124,40 +162,47 @@ function rounds(c: Check, list: unknown): { rounds: Obj[]; evidence: EvidenceRou
     prev = typeof r.round === "number" ? r.round : prev;
     if (!STATUSES.includes(String(r.status))) c.fail(`${what}: unknown status ${String(r.status)}`);
     if (typeof r.head !== "string" || !SHA40.test(r.head)) c.fail(`${what}: head is not a full SHA`);
-    identity(c, r.reviewer, what);
     ref(c, r.submissionArtifact, `${what} submission`, true);
     for (const p of Array.isArray(r.probeArtifacts) ? r.probeArtifacts : [null]) ref(c, p, `${what} probe`, true);
     if (r.status !== "completed") {
       if (r.verdict !== null || r.findingsArtifact || r.reportArtifact) c.fail(`${what}: a ${String(r.status)} round carries a verdict or findings`);
+      identity(c, r.reviewer, what, reviewRecord(c, r, what, null));
       continue;
     }
     if (!["pass", "changes", "block"].includes(String(r.verdict))) c.fail(`${what}: completed without a pass / changes / block verdict`);
     ref(c, r.reportArtifact, `${what} report`, false);
     ref(c, r.findingsArtifact, `${what} findings`, false);
-    evidence.push({ reviewId: r.reviewId, round: r.round as number, head: String(r.head), findings: findingsOf(c, r, what),
+    const findings = findingsOf(c, r, what);
+    identity(c, r.reviewer, what, reviewRecord(c, r, what, findings));
+    evidence.push({ reviewId: r.reviewId, round: r.round as number, head: String(r.head), findings,
       findingsArtifact: r.findingsArtifact as string | null, reportArtifact: r.reportArtifact as string | null });
   }
   return { rounds: list.filter(isObj), evidence };
 }
 
+/**
+ * Closures are recomputed from the verified findings with the producer's own rule (review-evidence-closures.ts) and must match
+ * entry for entry: disposition, confirming review, fix commit (the confirming review's head, null on the same head or when
+ * retained) and evidence ids. Only the free-text explanation and a retained entry's followup are taken as written.
+ */
 function closures(c: Check, id: unknown, done: EvidenceRound[]): Closure[] {
   const raw = c.json(id, "closures");
   if (!Array.isArray(raw)) { c.fail("closures artifact missing or not an array"); return []; }
-  const at = (reviewId: unknown) => done.findIndex((r) => r.reviewId === reviewId);
+  const key = (x: Obj | Closure) => `${String(x.reviewId)}/${String(x.findingId)}`;
+  const facts = (x: Obj | Closure) => JSON.stringify([x.disposition, x.confirmingReviewId, x.fixCommit ?? null, x.evidenceArtifacts,
+    x.disposition === "closed" ? x.followup ?? null : "-"]);
+  const want = new Map(computeClosures(done).map((x) => [key(x), x]));
   const seen = new Set<string>();
-  for (const x of raw) {
-    const i = at(x?.reviewId), j = at(x?.confirmingReviewId), key = `${x?.reviewId}\u0000${x?.findingId}`;
-    const what = `closure ${String(x?.reviewId)}/${String(x?.findingId)}`;
-    if (i < 0 || !done[i].findings?.some((f) => f.findingId === x.findingId)) { c.fail(`${what}: no such finding`); continue; }
-    if (seen.has(key)) c.fail(`${what}: listed twice`);
-    seen.add(key);
-    for (const e of Array.isArray(x.evidenceArtifacts) ? x.evidenceArtifacts : [null]) ref(c, e, `${what} evidence`, true);
-    const by = done[j]?.findings?.find((f) => f.findingId === x.findingId);
-    if (x.disposition === "closed" && (j <= i || !done[j].findings || by)) c.fail(`${what}: the confirming review is not a later structured review that dropped it`);
-    else if (x.disposition === "retained" && (j < i || by?.severity !== "P2")) c.fail(`${what}: retained but the confirming review does not hold it as P2`);
-    else if (x.disposition !== "closed" && x.disposition !== "retained") c.fail(`${what}: unknown disposition`);
+  for (const x of raw.filter(isObj)) {
+    const k = key(x), w = want.get(k);
+    if (seen.has(k)) { c.fail(`closure ${k}: listed twice`); continue; }
+    seen.add(k);
+    for (const e of Array.isArray(x.evidenceArtifacts) ? x.evidenceArtifacts : [null]) ref(c, e, `closure ${k} evidence`, true);
+    if (!w) c.fail(`closure ${k}: the findings support no closure for it`);
+    else if (facts(x) !== facts(w)) c.fail(`closure ${k}: ${facts(x)} does not match what the findings support ${facts(w)}`);
   }
-  return raw as Closure[];
+  for (const [k, w] of want) if (!seen.has(k)) c.fail(`closure ${k}: missing (the findings support ${facts(w)})`);
+  return raw.filter(isObj) as unknown as Closure[];
 }
 
 function finalPass(c: Check, m: Obj, done: EvidenceRound[], rows: Obj[], cl: Closure[]): void {
@@ -204,7 +249,7 @@ export function verifyBundle(root: string): VerifyResult {
   ref(c, s.specArtifact, "spec", true);
   ref(c, s.acceptanceArtifact, "acceptance", true);
   ref(c, isObj(m.scope) ? m.scope.evidenceArtifact : null, "scope", true);
-  (Array.isArray(m.authors) ? m.authors : []).forEach((a, i) => identity(c, a, `author ${i + 1}`));
+  (Array.isArray(m.authors) ? m.authors : []).forEach((a, i) => identity(c, a, `author ${i + 1}`, authorRecord(c, a, s.head, `author ${i + 1}`)));
   const r = rounds(c, m.rounds);
   finalPass(c, m, r.evidence, r.rounds, closures(c, m.closuresArtifact, r.evidence));
   return { ok: c.problems.length === 0, problems: c.problems };
