@@ -6,9 +6,9 @@
  * - Placement: under on, configFailureV2 zeroes that family's slots on that peer before the planner sees them; other families
  *   and peers are untouched, live orders are never touched. observe / off return the facts unchanged (configFailureView
  *   shows the would-be pause). No notice is raised on A.
- * - Recovery only from the lender's own re-declaration: an applied hello from a boot this peer never used before that offers
- *   the family (total > 0, not paused for it), inside recordHello's transaction. It records `through` = the newest event seq,
- *   CAS on its generation; a later failure has a higher seq and stays active, a replayed old boot is not a re-declaration.
+ * - Recovery only from the lender's own re-declaration, never a restart or elapsed time: after the fault the lender's hello
+ *   withdraws the family (total 0 under a live grant), then a later hello (higher seq) offers it again. Under on only,
+ *   inside recordHello's transaction; it records `through` = the newest event seq, CAS on its generation; a later failure has a higher seq and needs its own withdrawal, a replayed old hello is not a re-declaration.
  * tests/lend-config-failure*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -22,11 +22,10 @@ import { CONFIG_FAILURE_CATEGORY, classifyConfigFailure, configFailureMode, type
 const START_FAILURE = "起 worker 失败：";
 
 export interface PeerConfigFailure { seq: number; at: number; orderId: string; family: LendFamily; category: typeof CONFIG_FAILURE_CATEGORY; text: string }
-interface Recovery { gen: number; through: number; boot: string; at: number }
+/** withdrawn = the lender withdrew the family (total 0) while fault `fault` (its event seq) was active; boot + seq of that hello. */
+interface Recovery { gen: number; through: number; boot: string; at: number; withdrawn?: { fault: number; boot: string; seq: number; at: number } | null }
 
 const recoveryKey = (peer: string, family: LendFamily): string => `lend:config-recovery:${JSON.stringify([peer, family])}`;
-const bootsKey = (peer: string): string => `lend:config-boots:${JSON.stringify([peer])}`;
-const BOOTS_MAX = 50;
 
 const hasTable = (db: Database, name: string): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 function metaRaw(db: Database, key: string): string | null {
@@ -76,23 +75,28 @@ const offers = (req: HelloRequest, f: LendFamily): boolean =>
   req.slots[f].total > 0 && !(req.paused && (req.paused.reason === `${f}_quota` || !req.paused.reason.endsWith("_quota")));
 
 /**
- * Inside recordHello's transaction, after the hello was applied: a boot this peer never used before is the lender's
- * re-declaration; each family it offers again with an active fault gets a recovery through the newest event (CAS).
+ * Inside recordHello's transaction, after the hello was applied; only under on (observe / off write nothing). A restart is
+ * not a recovery: the lender must first withdraw the family (slots total 0 under a live grant, its own declaration that it
+ * is unavailable) after the fault, then offer it again. The lender's hello seq only grows, across its restarts too, so each
+ * step must carry a seq above every hello seen before it: a delayed or replayed old hello never withdraws or re-declares.
+ * The withdrawal is bound to the fault's event seq, so a newer fault needs a newer withdrawal; each step is a CAS.
  */
 export function recoverOnRedeclare(db: Database, peer: string, prev: LendPeer | null, req: HelloRequest, now: number): void {
-  if (configFailureMode() === "off" || (prev && prev.boot === req.boot)) return;
-  const bootsRaw = metaRaw(db, bootsKey(peer));
-  let boots: string[] = [];
-  try { boots = bootsRaw ? (JSON.parse(bootsRaw) as string[]) : []; } catch { boots = []; }
-  if (boots.includes(req.boot)) return; // a delayed hello of an old boot is not a re-declaration
-  boots = [...boots, ...(prev && !boots.includes(prev.boot) ? [prev.boot] : []), req.boot].slice(-BOOTS_MAX);
-  db.run(`INSERT INTO meta (project, key, value) VALUES ('master', ?, ?) ON CONFLICT(project, key) DO UPDATE SET value = excluded.value`, [bootsKey(peer), JSON.stringify(boots)]);
+  if (configFailureMode() !== "on" || (prev && req.seq <= prev.seq)) return;
   const active = activeConfigFailures(db, peer);
-  const top = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number | null }).s ?? 0;
   for (const family of LEND_FAMILIES) {
-    if (!active[family] || !offers(req, family)) continue;
+    const fault = active[family];
+    if (!fault) continue;
     const { raw, r } = readRecovery(db, peer, family);
-    recoverCas(db, peer, family, raw, { gen: (r?.gen ?? 0) + 1, through: top, boot: req.boot, at: now });
+    const base: Recovery = r ?? { gen: 0, through: 0, boot: "", at: 0, withdrawn: null };
+    if (req.grant && req.slots[family].total <= 0) { // no grant = 0 slots for every family: a revoke is not a withdrawal
+      if (base.withdrawn?.fault !== fault.seq) recoverCas(db, peer, family, raw, { ...base, withdrawn: { fault: fault.seq, boot: req.boot, seq: req.seq, at: now } });
+      continue;
+    }
+    const w = base.withdrawn;
+    if (!w || w.fault !== fault.seq || req.seq <= w.seq || !offers(req, family)) continue;
+    const top = (db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number | null }).s ?? 0;
+    recoverCas(db, peer, family, raw, { gen: base.gen + 1, through: top, boot: req.boot, at: now, withdrawn: null });
   }
 }
 
