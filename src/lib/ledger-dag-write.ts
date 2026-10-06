@@ -22,6 +22,7 @@ import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import { dropPageCheck, planPageRewrite, withPageCheck } from "./ui-acceptance.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
+import { syncCardFileScope } from "./ledger-scheduler-lease-sync.js";
 
 const DAG_ACTION = "dag_rewrite";
 const APPROVE = "dag_rewrite_approve";
@@ -57,9 +58,19 @@ function applyVersion(db: Database, ctx: WriteCtx, f: Feature, c: ProposalConten
     insertEvent(db, ctx, { project: t.project, target: t.id, kind: "task", data: { op: "set", patch: { featureId: null }, rev: t.rev + 1 } }, false);
   }
   linkTasks(db, ctx, f, c.nodes);
+  syncBoundScopes(db, ctx, currentDag(db, f).nodes, c.nodes);
   const rev = f.rev + 1;
   db.prepare("UPDATE features SET currentVersion = ?, rev = ?, updatedAt = ? WHERE id = ?").run(c.version, rev, now, f.id);
   return rev;
+}
+
+/** A kept card whose node's fileGlobs changed: its extra.fileGlobs and held locks follow in this transaction (or the rewrite is refused) */
+function syncBoundScopes(db: Database, ctx: WriteCtx, cur: readonly DagNode[], next: readonly DagNode[]): void {
+  for (const n of next) {
+    const was = n.taskId ? cur.find((o) => o.taskId === n.taskId) : undefined;
+    const task = n.taskId && n.fileGlobs?.length ? getTask(db, n.taskId) : null;
+    if (task && was && [...(was.fileGlobs ?? [])].sort().join("\n") !== [...n.fileGlobs!].sort().join("\n")) syncCardFileScope(db, ctx, task, n.fileGlobs!);
+  }
 }
 
 function summary(cur: readonly DagNode[], c: ProposalContent): string {

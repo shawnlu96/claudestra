@@ -11,6 +11,7 @@ import { getWorkflow, type AuthorFamily, type TaskWorkflow, type WorkflowTemplat
 import { canTransition, nextTaskState, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
@@ -136,6 +137,8 @@ export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: s
     const carried = follow.carrySeq === null ? {} : { handedHead: follow.evidence.head, carrySeq: follow.carrySeq };
     insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: `仓库方已合并 ${input.mergeSha.slice(0, 12)}，进入 live`,
       data: { from: "merge", to: "live", round: next.round, specRev: next.specRev, head: follow.head, mergeSha: input.mergeSha, handoffSeq: follow.event.seq, ...carried } }, false);
+    // same release as every other move to live (ledger-write.ts): merged code no longer needs the card's file locks
+    releaseFinishedCardLeases(db, task.id);
     return mustTask(db, task.id);
   });
 }

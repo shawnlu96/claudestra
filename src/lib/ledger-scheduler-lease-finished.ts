@@ -122,6 +122,17 @@ export async function reconcileFinishedCardLeases(db: Database, projects: readon
   }
   await Promise.all(probes);
   assertActive();
+  releaseStrandedCardLocks(db, projects);
+}
+
+/**
+ * A finished card with no open intent still holding card locks: a move to live that skipped the release (the pre-LCK-1 merge
+ * handoff) left them until verify. Same rule as releaseFinishedCardLeases, swept each tick so such cards free up on their own.
+ */
+function releaseStrandedCardLocks(db: Database, projects: readonly string[]): void {
+  tx(db, () => db.query(`DELETE FROM scheduler_resources WHERE scope = 'card' AND taskId IN (SELECT t.id FROM tasks t
+    WHERE t.project IN (${projects.map(() => "?").join(",")}) AND t.stage IN ('live','verified','done','cancelled')
+    AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown')))`).run(...projects));
 }
 
 /** Reconciliation cancels only proven idle/absent writers. Retirement must not force its remaining writes closed. */
