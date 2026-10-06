@@ -15,14 +15,14 @@ import { answerAsk, closeAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
-import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
+import { boundRef, schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { informKey, snapshotKey } from "../src/lib/scheduler-model-wiring.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
-import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { UNCLAIMED_ALARM_MS, unclaimedKey } from "../src/lib/order-mark.js";
-import { SUSPECT_NOTE } from "../src/lib/scheduler-refusal-unclaimed.js";
+import { SUSPECT_NOTE, unclaimedRefusal } from "../src/lib/scheduler-refusal-unclaimed.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -238,4 +238,21 @@ test("MODELXW2 其他情况不变：非策略的回合失败卡（普通错误�
   const alarm = s.f.notices.filter((n) => n.includes("还没人领"));
   expect(alarm).toHaveLength(1);
   expect(alarm[0]).not.toContain("疑似");
+}, 120_000);
+
+test("MODELXW2 读失败不猜：拒审卡读不到 → 不确认，返回疑似（报警照发），observe 已给结果时一行不读", async () => {
+  const s = await setup();
+  expect(await s.tick()).toMatchObject({ step: "sent" });
+  const sent = getIntent(s.f.db, s.reviews().at(-1)!.id)!;
+  refusalCard(s.f, { failedAt: submittedAt(s.f, sent.id) + 1 });
+  const ref = boundRef(s.f.db, "T1", "reviewer")!;
+  // 只让读拒审卡的那条查询失败，别的照常
+  const db = new Proxy(s.f.db, { get: (t, k) => k === "query"
+    ? (sql: string) => { if (/FROM asks/.test(sql)) throw new Error("disk I/O error"); return t.query(sql); }
+    : (typeof t[k as keyof typeof t] === "function" ? (t[k as keyof typeof t] as (...a: unknown[]) => unknown).bind(t) : t[k as keyof typeof t]) });
+  const idle = { state: "running" as const, busy: false };
+  expect(await unclaimedRefusal(db, s.f.task(), sent, ref, idle)).toEqual({ kind: "suspected", note: `${SUSPECT_NOTE}（信号读不到：disk I/O error）` });
+  expect(await unclaimedRefusal(s.f.db, s.f.task(), sent, ref, idle)).toMatchObject({ kind: "confirmed" });
+  const failed = { state: "result" as const, outcome: "failed" as const, failure: { kind: "quota" as const, message: "q" } };
+  expect(await unclaimedRefusal(db, s.f.task(), sent, ref, failed)).toBeNull(); // 原失败不被吞
 }, 120_000);

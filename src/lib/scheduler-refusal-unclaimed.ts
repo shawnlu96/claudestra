@@ -16,6 +16,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import { orderTakenSeq } from "./order-mark.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { sentAsWake, type SessionRef, type WorkerObservation } from "./worker-session.js";
 
@@ -60,6 +61,17 @@ function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: Se
  */
 export async function unclaimedRefusal(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef,
   seen: WorkerObservation): Promise<UnclaimedRefusal | null> {
+  if (seen.state === "result") return null; // observe 已给出本单结果：一行不读，原失败分支照旧
+  try {
+    return await recognize(db, task, sent, ref, seen);
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    // 读失败不猜成确认，也不让这一轮丢掉未领单报警：照旧报警，正文写明疑似
+    return { kind: "suspected", note: `${SUSPECT_NOTE}（信号读不到：${(e as Error).message.slice(0, 120)}）` };
+  }
+}
+
+async function recognize(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef, seen: WorkerObservation): Promise<UnclaimedRefusal | null> {
   if (ref.role !== "reviewer" || sent.action !== "review" || seen.state === "result") return null;
   if (!sentAsWake(sent.receipt) || orderTakenSeq(db, sent.id) !== null) return null;
   const woke = getEventByDedup(db, `scheduler:${sent.id}:submitted`);
