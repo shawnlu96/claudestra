@@ -32,6 +32,7 @@ import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
+import { refusalEpochLapse } from "./scheduler-review-swap.js";
 import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { createRetryBackoff } from "./scheduler-create-retry.js";
@@ -224,6 +225,14 @@ class Card {
     if (stepOfNode(intent.node) === "review") await ensureDeliverScope(this.db, this.task, intent.head); // 派审前事务外补登记规格外文件（i28-ASK2）
     const order = workOrderFor(this.task, intent, plan, ref, checkout, this.db);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
+    const lapse = ref.role === "reviewer" && intent.status === "pending" ? await this.refusalLapse({ intent, plan }) : null; // MODELX：派单前再核
+    if (lapse) {
+      await this.settle(intent.id, "pending", "cancelled", `未投递：${lapse}`);
+      return this.escalate(lapse, intent.id);
+    }
+    if (ref.role === "reviewer" && intent.status === "pending") { // MODELX r4：正式派审前冻结材料快照，拒审接续只和它比
+      (await import("./scheduler-model-wiring.js")).freezeReviewMaterials(this.db, this.task, intent, plan, this.deps.now());
+    }
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
@@ -304,7 +313,9 @@ class Card {
     if (seen.state === "result" && seen.outcome === "failed") {
       const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
       const m = await import("./scheduler-model-wiring.js"); // MODELW：只多记一条，on 的计划附在原因后（长错误先截，计划不被截掉）
-      return this.escalate(m.failedReason(`${ref.agent} ${what}`, seen.failure.message, await m.modelOutcomeStep(this, sent, ref, seen.failure)), sent.id);
+      const plan = await m.modelOutcomeStep(this, sent, ref, seen.failure);
+      if (typeof plan !== "string") return this.out("refusal_epoch", plan.epoch); // MODELX：拒审已按豁免开新审查 epoch，不退人工
+      return this.escalate(m.failedReason(`${ref.agent} ${what}`, seen.failure.message, plan), sent.id);
     }
     const alarm = await this.unclaimed(sent, ref);
     if (alarm) return alarm;
@@ -360,9 +371,18 @@ class Card {
     return left > 0 ? `连续 ${streak} 次派单未投递（${oneLine(recent[0].receipt ?? "")}），${Math.ceil(left / 1000)}s 后再派` : null;
   }
 
+  /** MODELX: the round's refusal epoch in flight may no longer run (hold, revoked approval, changed materials, family no longer allowed). */
+  async refusalLapse(order?: { intent: SchedulerIntent; plan: Planned | null }): Promise<string | null> {
+    const lapse = refusalEpochLapse(this.db, getTask(this.db, this.task.id) ?? this.task, { check: (await import("./scheduler-model-wiring.js")).reviewMaterialCheck(this.db),
+      families: this.opts.pool?.remote.localFamilies ?? ["claude", "codex"], ...(order ? { order } : {}) });
+    return lapse && `豁免审查接续已失效，不再建会话 / 绑定 / 派单，退人工（已执行的效果留在台账）：${lapse}`;
+  }
+
   async step(): Promise<CardOutcome> {
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
+    const lapse = open?.action === "merge" ? null : await this.refusalLapse();
+    if (lapse) return this.escalate(lapse, open?.id);
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
