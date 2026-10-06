@@ -36,7 +36,12 @@ function boot(cardContext: any) {
       spawn: (cmd, e, cwd) => (procs.push(spawnAdapter(cmd, e, cwd, () => {})), procs[procs.length - 1]!),
       makeLink: (d) => ((onFrame = d.onFrame), {
         connect: () => void setTimeout(() => d.onRegistered(), 0),
-        send: (f: any) => (frames.push(f), true),
+        send: (f: any) => {
+          frames.push(f);
+          // 代理转上来的 reply：像 bridge 一样按 requestId 回包（不回，stub 那一轮会一直等 reply，等不到 Stop）
+          if (f.type === "reply") setTimeout(() => onFrame({ type: "response", requestId: f.requestId, result: { messageIds: ["fixture"] } }), 0);
+          return true;
+        },
         request: async (f: any) => (frames.push(f), f.type === "acp_entries" ? true : null),
         close: () => {},
         up: true,
@@ -62,7 +67,8 @@ function boot(cardContext: any) {
   return { stops, call, inbound, boundaries, ready: () => ready, advance: (ms: number) => (clock += ms) };
 }
 
-const identity = (st: any) => ({ card: "CTXA", expectedSessionId: st.sessionId, hostId: st.hostId, attachGen: st.attachGen, turnGen: st.turnGen, slotGen: st.slotGen });
+const binding = { card: "CTXA", sessionId: SID };
+const identity = (st: any) => ({ card: "CTXA", expectedSessionId: st.sessionId, hostId: st.hostId, attachGen: st.attachGen, turnGen: st.turnGen, slotGen: st.slotGen, binding });
 
 describe("CTXA 卡片压缩（真宿主 + stub）", () => {
   test("闲置线：闲置不满 3 分钟拒；满了受理，真的压缩完成后按 opId 查得到 done + compacted；旧 hostId 拒", async () => {
@@ -70,11 +76,12 @@ describe("CTXA 卡片压缩（真宿主 + stub）", () => {
     await until(h.ready, "宿主就绪");
     h.inbound("hello");
     await until(() => h.stops.length === 1, "第一轮 Stop");
-    const st = (await h.call({ op: "card_context" })).status;
+    const st = (await h.call({ op: "card_context", binding })).status;
     expect(st).toMatchObject({ cap: "card_compact_v1", mode: "on", sessionId: SID, usage: { state: "fresh" }, verdict: { ok: false, reason: "idle-wait" } });
     expect(await h.call({ op: "card_compact", opId: "early", ...identity(st) })).toMatchObject({ ok: false, reason: "idle-wait" });
     h.advance(3 * 60_000);
     expect(await h.call({ op: "card_compact", opId: "stale-host", ...identity(st), hostId: "000000000000" })).toMatchObject({ ok: false, reason: "old-host" });
+    expect(await h.call({ op: "card_compact", opId: "retired", ...identity(st), binding: null })).toMatchObject({ ok: false, reason: "not-bound" });
     expect(await h.call({ op: "card_compact", opId: "go", ...identity(st) })).toMatchObject({ ok: true, accepted: true, kind: "idle" });
     await until(() => h.stops.length === 2, "压缩那一轮 Stop");
     expect(h.boundaries()).toHaveLength(1);
@@ -91,6 +98,7 @@ describe("CTXA 卡片压缩（真宿主 + stub）", () => {
     h.inbound("second");
     await until(() => h.stops.length === 3, "压缩 + 第二轮 Stop");
     expect(h.boundaries()).toHaveLength(1);
+    expect(h.stops.map((s: any) => s.hook_event_name ?? s.event)).not.toContain("StopFailure");
   }, 30_000);
 
   test("没有卡片身份 / 启动会话不一致：no-capability / startup-mismatch；默认 observe 不动会话", async () => {

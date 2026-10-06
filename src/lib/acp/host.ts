@@ -143,7 +143,7 @@ export class AcpHost {
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       onSlotEnd: (e) => (this.card.onSlotEnd(e), deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`)),
-      admit: () => this.card.admit(),
+      admit: (h) => this.card.admit(h),
       now: deps.now,
       log: deps.log,
     });

@@ -45,14 +45,18 @@ export interface TurnIO {
   /** 带 opId 的槽结束（含排队时被撤）：在挑下一轮之前同步调用 */
   onSlotEnd?(e: SlotEnd): void;
   /**
-   * 新回合受理边界（CTXA 卡片硬线）：队首是普通 prompt 时先同步问一次；给了命令就先独占跑它，prompt 原位留着。
-   * 宿主保证同一份 usage 只给一次（压缩失败也照常放行，不会无限排队）；只在挑下一轮时调用，不碰在跑的回合。
+   * 新回合受理边界（CTXA 卡片硬线）：队首是任何还没开、会进模型的一轮（prompt / nudge / command / op）时先同步问一次；
+   * external（适配器里已经在跑）不问。给命令 = 先独占跑它，队首原位留着；给 block = 这一轮不开，按失败收尾（出卡 + StopFailure，
+   * 带 opId 的槽结局 failed），不排队等。宿主保证一段超线只压一次（压过仍超线就 block，不无限重试）；不碰在跑的回合。
    */
-  admit?(): { text: string; opId: string } | null;
+  admit?(head: AdmitHead): AdmitResult;
   /** 闲置起点的时钟（单测注入），缺省 Date.now */
   now?(): number;
   log(msg: string): void;
 }
+
+export interface AdmitHead { kind: "prompt" | "nudge" | "command" | "op"; text: string }
+export type AdmitResult = { text: string; opId: string } | { block: string } | null;
 
 /** 独占槽：command = 斜杠命令原样一轮；op = 编排器的一轮普通 prompt（如保存交接）。都不和相邻 prompt 拼，在跑时入站不 steer */
 type Owned = { kind: "command" | "op"; text: string; opId?: string; gen: number };
@@ -74,8 +78,12 @@ type Slot =
   | { kind: "external"; done: Promise<PromptOutcome> }
   | { kind: "nudge"; text: string };
 
-type Pick = { kind: "prompt" | "nudge"; text: string } | Owned | { kind: "external"; done: Promise<PromptOutcome> };
+type Unit = { kind: "prompt" | "nudge"; text: string } | Owned;
+/** blocked = 受理边界拒开的那一轮（of 是本来要开的）：不调模型，按失败收尾 */
+type Pick = Unit | { kind: "external"; done: Promise<PromptOutcome> } | { kind: "blocked"; reason: string; of: Unit };
 const owned = (s: Slot | Pick | null): s is Owned => s?.kind === "command" || s?.kind === "op";
+/** 这一轮结束要报结局的独占槽（拒开的也算） */
+const ownedOf = (p: Pick): Owned | null => (p.kind === "blocked" ? (owned(p.of) ? p.of : null) : owned(p) ? p : null);
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -179,15 +187,21 @@ export class AcpTurnLoop {
     return idle ? "prompt" : "queued";
   }
 
+  /** 调度器在跑这一轮的独占槽（拒开、正在收尾的也算） */
+  private curOwned(): Owned | null {
+    return this.current ? ownedOf(this.current) : null;
+  }
+
   private liveSlot(opId: string): Owned | undefined {
-    if (owned(this.current) && this.current.opId === opId) return this.current;
+    const cur = this.curOwned();
+    if (cur && cur.opId === opId) return cur;
     return this.slots.find((s): s is Owned => owned(s) && s.opId === opId);
   }
 
   /** 给了 gen 就只认这一代：在排 / 在跑的是别的代次时查它自己的结局，查不到回 gone */
   slotStatus(opId: string, gen?: number): SlotState {
     const live = this.liveSlot(opId);
-    if (live && (gen === undefined || live.gen === gen)) return { state: live === this.current ? "running" : "queued", opId, gen: live.gen };
+    if (live && (gen === undefined || live.gen === gen)) return { state: live === this.curOwned() ? "running" : "queued", opId, gen: live.gen };
     const e = this.ended.findLast((x) => x.opId === opId && (gen === undefined || x.gen === gen));
     return e ? { state: "ended", ...e } : { state: "gone", opId };
   }
@@ -206,7 +220,7 @@ export class AcpTurnLoop {
   cancelSlot(opId: string, gen?: number): CancelSlotResult {
     const live = this.liveSlot(opId);
     if (!live || (gen !== undefined && live.gen !== gen)) return "gone";
-    if (live === this.current) return "uncancellable";
+    if (live === this.curOwned()) return "uncancellable";
     this.slots.splice(this.slots.indexOf(live), 1);
     this.endSlot(live, "revoked");
     this.pump();
@@ -240,7 +254,7 @@ export class AcpTurnLoop {
 
   /** 收到一条入站消息。返回它怎么进的会话（日志 / 单测用）；messageId 记下来供叫停时对回作废的消息 */
   async submit(text: string, messageId?: string): Promise<"prompt" | "steer" | "queued"> {
-    const steering = this.io.steer && !owned(this.current) && (this.pumping || this.slots.some((s) => s.kind === "steer"));
+    const steering = this.io.steer && !owned(this.current) && this.current?.kind !== "blocked" && (this.pumping || this.slots.some((s) => s.kind === "steer"));
     if (!steering) {
       const idle = !this.busy;
       this.slots.push({ kind: "prompt", text });
@@ -268,24 +282,39 @@ export class AcpTurnLoop {
     if (this.suspended || !this.slots.length || this.slots.some((s) => s.kind === "steer")) return null;
     const ext = this.slots.findIndex((s) => s.kind === "external");
     if (ext >= 0) return this.slots.splice(ext, 1)[0] as Pick;
-    const head = this.slots[0];
-    if (head.kind === "nudge" || owned(head)) return this.slots.shift() as Pick;
-    const gate = this.admitted();
-    if (gate) return gate;
-    const n = this.slots.findIndex((s) => s.kind !== "prompt");
-    const batch = this.slots.splice(0, n < 0 ? this.slots.length : n) as { kind: "prompt"; text: string }[];
-    return { kind: "prompt", text: batch.map((b) => b.text).join("\n\n") };
+    const head = this.slots[0] as Unit;
+    const gate = this.io.admit && this.admitted({ kind: head.kind, text: owned(head) || head.kind === "nudge" ? head.text : this.promptRun().join("\n\n") });
+    if (gate && "kind" in gate) return gate;
+    const unit = this.takeHead();
+    return gate ? { kind: "blocked", reason: gate.block, of: unit } : unit;
   }
 
-  /** 受理边界给的命令：独占一轮，有代次、有结局（和 submitCommand 排的同形）；钩子抛错按放行 */
-  private admitted(): Owned | null {
-    let a: { text: string; opId: string } | null = null;
+  /** 队首连续的 prompt 正文（拼成一轮的那几条） */
+  private promptRun(): string[] {
+    const n = this.slots.findIndex((s) => s.kind !== "prompt");
+    return (this.slots.slice(0, n < 0 ? this.slots.length : n) as { kind: "prompt"; text: string }[]).map((s) => s.text);
+  }
+
+  /** 取下队首这一轮：nudge / command / op 单独，连续的 prompt 拼成一轮 */
+  private takeHead(): Unit {
+    const head = this.slots[0];
+    if (head.kind === "nudge" || owned(head)) return this.slots.shift() as Unit;
+    const texts = this.promptRun();
+    this.slots.splice(0, texts.length);
+    return { kind: "prompt", text: texts.join("\n\n") };
+  }
+
+  /** 受理边界：给的命令独占一轮，有代次、有结局（和 submitCommand 排的同形）；给 block 原样带回；钩子抛错按放行 */
+  private admitted(head: AdmitHead): Owned | { block: string } | null {
+    let a: AdmitResult = null;
     try {
-      a = this.io.admit?.() ?? null;
+      a = this.io.admit?.(head) ?? null;
     } catch (e) {
       this.log(`受理边界出错，放行：${errText(e)}`);
     }
-    if (!a || this.liveSlot(a.opId)) return null;
+    if (!a) return null;
+    if ("block" in a) return { block: a.block };
+    if (this.liveSlot(a.opId)) return null;
     return { kind: "command", text: a.text, opId: a.opId, gen: ++this.gen };
   }
 
@@ -308,10 +337,11 @@ export class AcpTurnLoop {
         // 单轮出意外（IO 实现抛错）只记日志：调度器停了，排着的消息就永远出不去
         for (let p: Pick | null = first; p; p = this.next()) {
           this.current = p;
-          this.turns++;
+          if (p.kind !== "blocked") this.turns++; // 拒开的没进模型，不算开过回合
           const kind = await this.run(p).catch((e) => (this.log(`回合调度出错：${errText(e)}`), "failed" as const));
           this.current = null;
-          if (owned(p)) this.endSlot(p, kind); // 先报结局、再挑下一轮：迟到的 cancelSlot 只会看到 ended，碰不到下一轮
+          const o = ownedOf(p);
+          if (o) this.endSlot(o, kind); // 先报结局、再挑下一轮：迟到的 cancelSlot 只会看到 ended，碰不到下一轮
         }
       } finally {
         this.current = null;
@@ -322,7 +352,9 @@ export class AcpTurnLoop {
   }
 
   private async run(p: Pick): Promise<PromptOutcome["kind"]> {
-    const outcome = await call(() => (p.kind === "external" ? p.done : this.io.prompt(p.text))).catch(failedOutcome);
+    const outcome = p.kind === "blocked"
+      ? ({ kind: "failed", failure: { kind: "error", key: `blocked:${++transportFailures}`, message: p.reason, retry: false } } as const)
+      : await call(() => (p.kind === "external" ? p.done : this.io.prompt(p.text))).catch(failedOutcome);
     if (outcome.kind === "failed") {
       // 出卡失败不能连带吞掉下面的上报：bridge 收不到 StopFailure，这个 agent 就一直显示「思考中」
       try {
@@ -331,7 +363,7 @@ export class AcpTurnLoop {
         this.log(`失败出卡出错：${errText(e)}`);
       }
     }
-    const nudge = p.kind === "nudge";
+    const nudge = p.kind === "nudge" || (p.kind === "blocked" && p.of.kind === "nudge");
     const report: StopReport =
       outcome.kind === "done"
         ? { event: "Stop", stopHookActive: nudge }

@@ -18,7 +18,7 @@ function snap(over: Partial<CardCtxSnapshot> = {}, used = 250_000, size: number 
   };
 }
 const req = (over: Partial<CardCompactRequest> = {}): CardCompactRequest =>
-  ({ opId: "op1", card: "CTXA", expectedSessionId: "s1", hostId: "h1", attachGen: 1, turnGen: 4, slotGen: 2, ...over });
+  ({ opId: "op1", card: "CTXA", expectedSessionId: "s1", hostId: "h1", attachGen: 1, turnGen: 4, slotGen: 2, binding: { card: "CTXA", sessionId: "s1" }, ...over });
 const verdict = (s: CardCtxSnapshot, r = req(), now = NOW) => cardCompactVerdict(s, r, now);
 
 describe("线：199999 / 200000 / 299999 / 300000", () => {
@@ -67,6 +67,9 @@ describe("强身份逐项核对（不重放、不降级）", () => {
     [{ identity: null }, {}, "no-capability"],
     [{ identity: { card: "CTXA", expectedSessionId: "s-boot" } }, {}, "startup-mismatch"],
     [{}, { card: "OTHER" }, "card-mismatch"],
+    [{}, { binding: null }, "not-bound"],
+    [{}, { binding: { card: "OTHER", sessionId: "s1" } }, "binding-revoked"],
+    [{}, { binding: { card: "CTXA", sessionId: "s-rebound" } }, "binding-revoked"],
     [{ registered: false }, {}, "not-registered"],
     [{}, { hostId: "h0" }, "old-host"],
     [{}, { attachGen: 0 }, "old-attach"],
@@ -88,8 +91,10 @@ describe("模式", () => {
     expect(verdict(snap({ mode: "off" }, 300_000))).toEqual({ ok: false, reason: "mode-off" });
   });
 
-  test("新回合受理边界：on 先压缩、observe 只报；没过硬线、usage 无效、身份不符都不管", () => {
-    expect(hardLineGate(snap({ running: true }, 300_000))).toBe("compact-first");
+  test("新回合受理边界：on 管、observe 只报；没过硬线、usage 无效、身份不符都不管；回合结束后的 usage 不因回合代次作废", () => {
+    expect(hardLineGate(snap({ running: true }, 300_000))).toBe("enforce");
+    expect(hardLineGate(snap({ usage: { ...snap().usage!, used: 300_000, turnGen: 1 } }))).toBe("enforce");
+    expect(hardLineGate(snap({ usage: { ...snap().usage!, used: 300_000, attachGen: 0 } }))).toBeNull();
     expect(hardLineGate(snap({ mode: "observe" }, 300_000))).toBe("observe");
     expect(hardLineGate(snap({ mode: "off" }, 300_000))).toBeNull();
     expect(hardLineGate(snap({}, 299_999))).toBeNull();
@@ -103,10 +108,13 @@ test("申请解析：缺字段 / opId 不合法 = null", () => {
   expect(parseCardCompactRequest({ ...req(), opId: "a b" })).toBeNull();
   expect(parseCardCompactRequest({ ...req(), turnGen: "4" })).toBeNull();
   expect(parseCardCompactRequest({ ...req(), hostId: "" })).toBeNull();
+  expect(parseCardCompactRequest({ ...req(), binding: undefined })).toEqual(req({ binding: null })); // 没带登记：解析成 null，受理时拒 not-bound
+  expect(parseCardCompactRequest({ ...req(), binding: { card: "CTXA" } })).toBeNull();
 });
 
 test("状态：回合中途预算固定 blocked-capability；结论用此刻身份算", () => {
-  const st = cardStatus(snap({}, 250_000), NOW);
+  const st = cardStatus(snap({}, 250_000), NOW, undefined, undefined, { card: "CTXA", sessionId: "s1" });
+  expect(cardStatus(snap({}, 250_000), NOW).verdict).toEqual({ ok: false, reason: "not-bound" });
   expect(st).toMatchObject({ cap: "card_compact_v1", busyBudget: "blocked-capability", idleMs: MIN3, verdict: { ok: true, kind: "idle" } });
   expect(st.usage).toEqual({ state: "fresh", used: 250_000, size: 1_000_000, idle: 200_000, hard: 300_000 });
 });

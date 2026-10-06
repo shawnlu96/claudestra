@@ -12,14 +12,17 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) 
   const prompts: string[] = [];
   const pending: ((o: PromptOutcome) => void)[] = [];
   const logs: string[] = [];
+  const failures: string[] = [];
+  const stops: string[] = [];
+  let stopVerdict: { block?: boolean; reason?: string } = {};
   const state: CardHostState = { sessionId: "s1", registered: true, capable: true, rotating: false, compacting: false, adapterRunning: false };
   let card!: CardContextHost;
   const loop = new AcpTurnLoop({
     prompt: (text) => (prompts.push(text), new Promise((r) => pending.push(r))),
-    reportStop: async () => ({}),
-    onFailure: () => {},
+    reportStop: async (r) => (stops.push(r.event), (() => { const v = stopVerdict; stopVerdict = {}; return v; })()),
+    onFailure: (f) => failures.push(f.message),
     onSlotEnd: (e) => card.onSlotEnd(e),
-    admit: () => card.admit(),
+    admit: (h) => card.admit(h),
     now: () => clock,
     log: (m) => logs.push(m),
   });
@@ -30,11 +33,12 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) 
   card.noteAttach();
   const usage = (tokens: number, window = 1_000_000) => card.noteEntries([{ type: "system", subtype: "context_usage", tokens, window }]);
   const finish = async (o: PromptOutcome = { kind: "done" }) => (pending.shift()!(o), await tick(), await tick());
-  const status = () => (card.call({ op: "card_context" }) as any).status;
+  const binding = { card: "CTXA", sessionId: "s1" };
+  const status = () => (card.call({ op: "card_context", binding }) as any).status;
   const ask = (opId: string, over: Record<string, unknown> = {}) => {
     const s = status();
     return card.call({ op: "card_compact", opId, card: "CTXA", expectedSessionId: s.sessionId, hostId: s.hostId,
-      attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen, ...over }) as any;
+      attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen, binding, ...over }) as any;
   };
   /** 跑完一轮普通回合，回合内报 tokens，然后闲置 idleMs */
   const turn = async (tokens: number, idleMs = MIN3) => {
@@ -43,7 +47,10 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) 
     await finish();
     clock += idleMs;
   };
-  return { loop, card, state, prompts, logs, usage, finish, status, ask, turn, advance: (ms: number) => (clock += ms) };
+  return {
+    loop, card, state, prompts, logs, failures, stops, usage, finish, status, ask, turn, advance: (ms: number) => (clock += ms),
+    blockNextStop: (reason: string) => void (stopVerdict = { block: true, reason }),
+  };
 }
 
 describe("受理", () => {
@@ -83,7 +90,8 @@ describe("受理", () => {
     const r = rig();
     await r.turn(250_000);
     const s = r.status();
-    const body = { op: "card_compact", card: "CTXA", expectedSessionId: "s1", hostId: s.hostId, attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen };
+    const body = { op: "card_compact", card: "CTXA", expectedSessionId: "s1", hostId: s.hostId, attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen,
+      binding: { card: "CTXA", sessionId: "s1" } };
     const a = r.card.call({ ...body, opId: "x1" }) as any;
     const b = r.card.call({ ...body, opId: "x2" }) as any;
     expect(a.accepted).toBe(true);
@@ -92,7 +100,30 @@ describe("受理", () => {
   });
 });
 
+test("完整记录淘汰之后同一个 opId 再来：op-expired，不重放（request-0..50 之后再请求 request-0）", async () => {
+  const r = rig();
+  for (let i = 0; i <= 50; i++) {
+    await r.turn(250_000);
+    expect(r.ask(`request-${i}`)).toMatchObject({ accepted: true });
+    await r.finish();
+    r.advance(MIN3);
+  }
+  await r.turn(250_000);
+  expect(r.ask("request-0")).toMatchObject({ ok: false, reason: "op-expired" });
+  expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(51);
+});
+
 describe("拒绝（不重放、不降级为普通 slash）", () => {
+  test("现行登记：台账里已退休（没带登记）/ 换卡 / 同会话换绑：拒，不受理旧卡压缩", async () => {
+    const r = rig();
+    await r.turn(250_000);
+    expect(r.ask("nb", { binding: null })).toMatchObject({ ok: false, reason: "not-bound" });
+    expect(r.ask("rc", { binding: { card: "T-other", sessionId: "s1" } })).toMatchObject({ ok: false, reason: "binding-revoked" });
+    expect(r.ask("rs", { binding: { card: "CTXA", sessionId: "s-new" } })).toMatchObject({ ok: false, reason: "binding-revoked" });
+    expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(0);
+    expect((r.card.call({ op: "card_context" }) as any).status.verdict).toMatchObject({ reason: "not-bound" });
+  });
+
   test("启动登记的会话和实际接上的不一致", async () => {
     const r = rig({ expected: "s-boot" });
     await r.turn(250_000);
@@ -115,7 +146,7 @@ describe("拒绝（不重放、不降级为普通 slash）", () => {
     const s = r.status();
     await r.turn(250_000);
     expect(r.card.call({ op: "card_compact", opId: "late", card: "CTXA", expectedSessionId: "s1", hostId: "h1",
-      attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen })).toMatchObject({ ok: false, reason: "turn-drift" });
+      attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen, binding: { card: "CTXA", sessionId: "s1" } })).toMatchObject({ ok: false, reason: "turn-drift" });
   });
 
   test("在跑 / 排队 / 适配器自发回合 / 正在压缩 / 未登记 / 能力缺失", async () => {
@@ -159,16 +190,78 @@ describe("拒绝（不重放、不降级为普通 slash）", () => {
 });
 
 describe("新回合受理边界（硬线）", () => {
-  test("on：过 30 万后下一轮前先独占压缩，原 prompt 原位留着；同一份 usage 只压一次，失败也放行", async () => {
+  test("on：过 30 万后下一轮前先独占压缩，原 prompt 原位留着；压缩完成（边界 + 线下 usage）后放行", async () => {
     const r = rig();
     await r.turn(300_000, 0);
     void r.loop.submit("next");
     await tick();
     expect(r.prompts.slice(-1)).toEqual(["/compact"]);
-    await r.finish({ kind: "failed", failure: { kind: "error", key: "k2", message: "compact failed" } });
-    expect(r.prompts.slice(-1)).toEqual(["next"]); // 没有第二次 /compact，不无限排队
+    r.card.noteEntries([{ type: "system", subtype: "compact_boundary" }]);
+    r.usage(40_000);
+    await r.finish();
+    expect(r.prompts.slice(-1)).toEqual(["next"]);
     await r.finish();
     expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(1);
+  });
+
+  test("压缩失败：不放行下一轮，按失败收尾给原因；不重试压缩、不排队等；手动 /compact 成功后恢复", async () => {
+    const r = rig();
+    await r.turn(300_000, 0);
+    void r.loop.submit("next");
+    await tick();
+    await r.finish({ kind: "failed", failure: { kind: "error", key: "k2", message: "compact failed" } });
+    await tick();
+    expect(r.prompts).toEqual(["hi", "/compact"]); // next 没进模型
+    expect(r.failures.at(-1)).toContain("卡片硬线");
+    expect(r.stops.at(-1)).toBe("StopFailure");
+    expect(r.loop.busy).toBe(false); // 不无限排队
+    expect((r.card.call({ op: "card_context" }) as any).status.admission.blocked).toContain("卡片硬线");
+    void r.loop.submit("again");
+    await tick();
+    expect(r.prompts).toEqual(["hi", "/compact"]); // 仍拒，不再压
+    r.loop.submitCommand("/compact"); // 预算恢复命令不拦
+    await tick();
+    expect(r.prompts.at(-1)).toBe("/compact");
+    r.card.noteEntries([{ type: "system", subtype: "compact_boundary" }]);
+    await r.finish();
+    void r.loop.submit("after");
+    await tick();
+    expect(r.prompts.at(-1)).toBe("after");
+  });
+
+  test("压缩那一轮 done 但没到完成边界、usage 仍超线：同样拒开", async () => {
+    const r = rig();
+    await r.turn(300_000, 0);
+    void r.loop.submit("next");
+    await tick();
+    r.usage(310_000);
+    await r.finish();
+    await tick();
+    expect(r.prompts).toEqual(["hi", "/compact"]);
+    expect(r.failures.at(-1)).toContain("没到压缩完成边界");
+  });
+
+  test("op 槽（交接 prompt）、补 reply 的 nudge 也先压缩；被拒的 op 槽结局 failed", async () => {
+    const a = rig();
+    await a.turn(300_000, 0);
+    a.loop.submitOp("handoff ordinary prompt", "handoff");
+    await tick();
+    expect(a.prompts).toEqual(["hi", "/compact"]);
+    await a.finish({ kind: "failed", failure: { kind: "error", key: "k3", message: "x" } });
+    await tick();
+    expect(a.prompts).toEqual(["hi", "/compact"]);
+    expect(a.loop.slotStatus("handoff")).toMatchObject({ state: "ended", outcome: "failed" });
+
+    const b = rig();
+    void b.loop.submit("first");
+    b.usage(300_000);
+    b.blockNextStop("reply needed");
+    await b.finish();
+    await tick();
+    expect(b.prompts).toEqual(["first", "/compact"]);
+    b.card.noteEntries([{ type: "system", subtype: "compact_boundary" }]);
+    await b.finish();
+    expect(b.prompts).toEqual(["first", "/compact", "<hook_prompt>reply needed</hook_prompt>"]);
   });
 
   test("observe：只记一次日志，不压缩；回合中途超线不取消在跑的回合", async () => {

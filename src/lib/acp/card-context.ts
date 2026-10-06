@@ -4,8 +4,14 @@
  * - 申请（card_compact）必须带上查询（card_context）时看到的强身份：expectedSessionId + hostId + attachGen（适配器接线代次）
  *   + turnGen / slotGen（回合与独占槽代次）+ card。宿主在受理动作的同一段同步代码里逐项核对，任何一项对不上都拒、给出原因，
  *   不重放、不降级成不带 opId 的普通 slash。
+ * - 现行登记：申请还要带 bridge 在发出前那一刻按 agent-lifecycle-store.ts cardWorkerIndex（唯一读取方）取的本 agent 当前链接
+ *   （binding = 卡号 + 链接记录的会话；bridge/acp-link.ts 填，调用方给不了）。没有链接 = 已退休 / 不是卡片 worker → not-bound；
+ *   卡号或会话和宿主启动身份 / 此刻会话对不上 = 换绑 → binding-revoked。宿主不读台账。
+ * - opId 永不重放：完整记录只留最近 50 个，更早的只留 opId，再来回 op-expired（不当新申请）。
  * - usage 只认当前会话、当前接线代次、当前回合代次之内报的、且之后没发生过压缩的那一份；否则 unknown / stale，一律拒。
- * - 忙时：ACP 没有回合中途的预算能力（runtime budget），回合中途超线只能 blocked-capability；新回合受理边界由宿主先压缩再放行（hardLineGate）。
+ * - 忙时：ACP 没有回合中途的预算能力（runtime budget），回合中途超线只能 blocked-capability。新回合受理边界（hardLineGate）：
+ *   任何还没开、会进模型的一轮之前，当前接线里最新一份 usage 过硬线就先压缩一次；压过仍过线（失败 / 取消 / 没到压缩完成边界、
+ *   且之后没有线下的 usage）就拒开这一轮、给明确原因，直到预算恢复（线下 usage、压缩完成边界、换会话 / 换接线）。
  * - 模式 on / observe / off，缺省 observe：observe 只算结论（wouldFire），不动会话。单测 tests/acp-card-context.test.ts。
  */
 import { policyBoundary } from "../ctx-boundary-decision.js";
@@ -59,8 +65,15 @@ export interface CardCtxSnapshot {
   usage: UsageSample | null;
 }
 
+/** bridge 按 cardWorkerIndex 取的本 agent 当前链接；null = 台账里没有（已退休 / 不是卡片 worker） */
+export interface CardBinding {
+  card: string;
+  sessionId: string;
+}
+
 export interface CardCompactRequest {
   opId: string;
+  binding: CardBinding | null;
   card: string;
   expectedSessionId: string;
   hostId: string;
@@ -70,13 +83,16 @@ export interface CardCompactRequest {
 }
 
 export type CardReject =
-  | "mode-off" | "bad-request" | "no-capability" | "startup-mismatch" | "card-mismatch" | "not-registered" | "old-host" | "old-attach"
+  | "mode-off" | "bad-request" | "op-expired" | "no-capability" | "startup-mismatch" | "card-mismatch" | "not-bound" | "binding-revoked" | "not-registered" | "old-host" | "old-attach"
   | "old-session" | "turn-drift" | "rotating" | "compacting" | "running" | "queued" | "usage-unknown" | "usage-stale" | "under" | "idle-wait"
   | "observe";
 
 export const CARD_REJECT_TEXT: Record<CardReject, string> = {
   "mode-off": "卡片上下文边界已关（off）",
   "bad-request": "申请缺字段或格式不对",
+  "op-expired": "这个 opId 以前受理过、记录已淘汰：不重放，换新 opId 重新查询后再申请",
+  "not-bound": "台账里这个 agent 没有当前卡片登记（已退休或不是卡片 worker）",
+  "binding-revoked": "台账里这个 agent 的当前登记已换卡 / 换会话，和宿主启动身份对不上",
   "no-capability": "宿主 / 运行时没有卡片压缩能力（没接上线程、协议被拒或没给卡片身份）",
   "startup-mismatch": "启动登记的会话和宿主实际接上的会话不一致",
   "card-mismatch": "申请的卡和宿主启动时登记的卡不一致",
@@ -129,6 +145,8 @@ function identityReject(s: CardCtxSnapshot, r: CardCompactRequest): CardReject |
   if (!s.capable || !s.identity) return "no-capability";
   if (s.identity.expectedSessionId !== s.sessionId) return "startup-mismatch";
   if (r.card !== s.identity.card) return "card-mismatch";
+  if (!r.binding) return "not-bound";
+  if (r.binding.card !== s.identity.card || r.binding.sessionId !== s.sessionId) return "binding-revoked";
   if (!s.registered) return "not-registered";
   if (r.hostId !== s.hostId) return "old-host";
   if (r.attachGen !== s.attachGen) return "old-attach";
@@ -163,11 +181,22 @@ export function cardCompactVerdict(s: CardCtxSnapshot, r: CardCompactRequest, no
   return { ok: true, kind: line.kind };
 }
 
-/** 新回合受理边界：硬线以上、usage 有效、身份一致时，先压缩再开这一轮。返回要做的事；observe 只报不做 */
-export function hardLineGate(s: CardCtxSnapshot, limits?: { idle?: number; hard?: number }): "compact-first" | "observe" | null {
+/**
+ * 新回合受理边界看的超线：当前会话、当前接线里最新的一份 usage（不看回合代次——回合结束后它就是这一刻的预算），之后没到过压缩完成边界。
+ * 返回过线的那份；null = 没过线或不知道（usage 缺失 / 换过会话或接线：不知道就没法挡，等新的 usage）。
+ */
+export function hardOver(s: CardCtxSnapshot, limits?: { idle?: number; hard?: number }): { used: number; hard: number } | null {
+  const u = s.usage;
+  if (!u || !(u.used > 0) || u.sessionId !== s.sessionId || u.attachGen !== s.attachGen || u.compacted) return null;
+  const { hard } = cardLines(u.size, limits);
+  return u.used >= hard ? { used: u.used, hard } : null;
+}
+
+/** 新回合受理边界：硬线以上、身份一致时要不要管；observe 只报不做。具体压一次还是拒开由宿主按这一段超线的尝试记录定 */
+export function hardLineGate(s: CardCtxSnapshot, limits?: { idle?: number; hard?: number }): "enforce" | "observe" | null {
   if (s.mode === "off" || !s.capable || !s.identity || s.identity.expectedSessionId !== s.sessionId || s.rotating || s.compacting) return null;
-  if (overLine(s, limits)?.kind !== "hard") return null;
-  return s.mode === "on" ? "compact-first" : "observe";
+  if (!hardOver(s, limits)) return null;
+  return s.mode === "on" ? "enforce" : "observe";
 }
 
 const OP_ID = /^[\w:.-]{1,128}$/;
@@ -176,10 +205,12 @@ const isGen = (v: unknown): v is number => Number.isInteger(v) && (v as number) 
 /** acp_call 里的 card_compact 申请；缺任何一项 = null（宿主回 bad-request） */
 export function parseCardCompactRequest(m: Record<string, unknown>): CardCompactRequest | null {
   const { opId, card, expectedSessionId, hostId, attachGen, turnGen, slotGen } = m;
+  const b = m.binding as Record<string, unknown> | null | undefined;
+  if (b != null && (typeof b !== "object" || typeof b.card !== "string" || !b.card || typeof b.sessionId !== "string" || !b.sessionId)) return null;
   if (typeof opId !== "string" || !OP_ID.test(opId)) return null;
   if (typeof card !== "string" || !card || typeof expectedSessionId !== "string" || !expectedSessionId || typeof hostId !== "string" || !hostId) return null;
   if (!isGen(attachGen) || !isGen(turnGen) || !isGen(slotGen)) return null;
-  return { opId, card, expectedSessionId, hostId, attachGen, turnGen, slotGen };
+  return { opId, card, expectedSessionId, hostId, attachGen, turnGen, slotGen, binding: b ? { card: b.card as string, sessionId: b.sessionId as string } : null };
 }
 
 /** 一次已受理的压缩：受理、槽结局、压缩是否真的完成分开记 */
@@ -214,10 +245,11 @@ export interface CardCtxStatus {
   op?: CardOpRecord | null;
 }
 
-export function cardStatus(s: CardCtxSnapshot, now: number, limits?: { idle?: number; hard?: number }, op?: CardOpRecord | null): CardCtxStatus {
+/** binding：查询时 bridge 带来的现行登记，结论按它算（不带 = not-bound） */
+export function cardStatus(s: CardCtxSnapshot, now: number, limits?: { idle?: number; hard?: number }, op?: CardOpRecord | null, binding: CardBinding | null = null): CardCtxStatus {
   const st = usageState(s);
   const line = s.usage ? cardLines(s.usage.size, limits) : null;
-  const probe = { opId: "probe", card: s.identity?.card ?? "", expectedSessionId: s.sessionId, hostId: s.hostId, attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen };
+  const probe = { opId: "probe", binding, card: s.identity?.card ?? "", expectedSessionId: s.sessionId, hostId: s.hostId, attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen };
   return {
     cap: CARD_COMPACT_CAP, mode: s.mode, card: s.identity?.card ?? null, hostId: s.hostId, attachGen: s.attachGen, sessionId: s.sessionId,
     turnGen: s.turnGen, slotGen: s.slotGen,

@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { acpCardCompact, acpCardContext, onAcpFrame, onAcpHostGone } from "../src/bridge/acp-link.ts";
+import { acpCardCompact, acpCardContext, onAcpFrame, onAcpHostGone, setCardBindingSourceForTest } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 
@@ -18,7 +18,9 @@ const lastCall = (s: { sent: any[] }) => s.sent.filter((f) => f.type === "acp_ca
 const answer = (ch: string, s: any, body: Record<string, unknown>) => onAcpFrame({ type: "acp_call_result", channelId: ch, id: lastCall(s).id, ...body }, s, discord);
 const STATUS = { cap: "card_compact_v1", hostId: "h1", attachGen: 1, sessionId: "s1", turnGen: 3, slotGen: 0, busyBudget: "blocked-capability" };
 
+const bindings = new Map<string, { card: string; sessionId: string }>();
 beforeAll(() => {
+  setCardBindingSourceForTest((ch) => bindings.get(ch) ?? null);
   setExtensionSocket((ch) => sockets.get(ch), {
     deliver: async () => undefined, ownerId: () => "", books: () => ({}) as any,
     hold: () => { throw new Error("card fixture must not queue"); },
@@ -48,6 +50,23 @@ describe("能力宣告", () => {
     expect(await acpCardContext("local-card-nowhere")).toMatchObject({ ok: false, reason: "not-acp" });
     noteAcpChannel("local-card-offline", "acp");
     expect(await acpCardContext("local-card-offline")).toMatchObject({ ok: false, reason: "offline" });
+  });
+});
+
+describe("现行登记（cardWorkerIndex）随帧带给宿主", () => {
+  test("查询 / 申请都在发帧那一刻带上本频道当前登记；台账里没有 = null（宿主拒 not-bound），换绑后带新的", async () => {
+    const ch = "local-card-bind";
+    const s = sock(ch);
+    void acpCardContext(ch);
+    expect(lastCall(s)).toMatchObject({ op: "card_context", binding: null });
+    bindings.set(ch, { card: "CTXA", sessionId: "s1" });
+    void acpCardCompact(ch, req("b1"));
+    expect(lastCall(s)).toMatchObject({ op: "card_compact", binding: { card: "CTXA", sessionId: "s1" } });
+    bindings.set(ch, { card: "T-next", sessionId: "s1" });
+    void acpCardCompact(ch, req("b2"));
+    expect(lastCall(s)).toMatchObject({ op: "card_compact", binding: { card: "T-next", sessionId: "s1" } });
+    bindings.delete(ch);
+    onAcpHostGone(ch, s);
   });
 });
 
@@ -107,3 +126,17 @@ test("宿主超时不回：结果不明，同一个 opId 不再发", async () =>
   expect(await acpCardCompact(ch, req("o6"))).toMatchObject({ ok: false, reason: "uncertain-prior" });
   expect(s.sent.filter((f) => f.op === "card_compact")).toHaveLength(1);
 }, 20_000);
+
+test("结果不明满 500 条且都指向当前宿主：不删旧的（lost-0 仍不重发），新申请拒 uncertain-full", async () => {
+  const ch = "local-card-flood";
+  const s = sock(ch);
+  for (let i = 0; i < 500; i++) {
+    const c = acpCardCompact(ch, req(`lost-${i}`));
+    await answer(ch, s, { ok: true, accepted: true, op: { opId: "wrong", hostId: "h1" } });
+    expect(await c).toMatchObject({ ok: false, reason: "bad-reply" });
+  }
+  expect(await acpCardCompact(ch, req("lost-0"))).toMatchObject({ ok: false, reason: "uncertain-prior" });
+  expect(await acpCardCompact(ch, req("fresh-op"))).toMatchObject({ ok: false, reason: "uncertain-full" });
+  expect(s.sent.filter((f) => f.op === "card_compact")).toHaveLength(500);
+  expect(s.sent.filter((f) => f.op === "card_compact" && f.opId === "lost-0")).toHaveLength(1);
+});
