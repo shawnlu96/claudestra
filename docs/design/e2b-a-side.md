@@ -50,6 +50,9 @@ B 用已经握手的 HTTP peer 把委托交给 A。请求级身份用现有的�
 | 6 | A 本机额度闸和 worker 槽 | 和本机派单同一个口径（`remote-capacity.md:385`） | 排队，回执 `queued`，原因写「额度 / 槽满」 |
 | 7 | 仓库：委托里的 `owner/repo` 在授权的仓库白名单里，并且就是 A 这个项目 `repoDir` 的 origin | 和 `merge-handoff.md:56-57` 的 origin 核对同一套 | 拒单，回执 `repo_mismatch` |
 | 8 | 规格大小有上限、能脱敏；正文按外来数据处理 | `remote-capacity.md:187-191` | 拒单，回执 `spec_invalid` |
+| 9 | **同一张 B 卡在 A 侧最多一份没关闭的委托**：按 `(B 完整指纹, B 卡号)` 查委托表，除了这个 `delegationId` 自己那一行，不能有状态不是 `closed` 的行（`queued`、`needs_owner` 等待中的也算）；新委托的 epoch 还必须大于这张 B 卡上一份委托的 epoch | §3.4「同一时刻只有一个调度器推进」 | 拒单，回执 `already_delegated`，附上 A 侧那份旧委托的 `delegationId` 和状态；**不排队** |
+
+第 9 条在第 3、6 条之前核，命中就直接拒：排队等补位会让两份委托先后都开出 A 卡。并发到达时靠同一个写事务加委托表上的部分唯一索引（`(B 完整指纹, B 卡号) WHERE state <> 'closed'`）保证只有一份能落库，另一份拿到 `already_delegated`。同一个 `delegationId` 的重发命中自己那一行，不算第二份。A 那一行只有在 B 确认正式收回（§6.3）之后才转 `closed`；B 已经收回、但 A 还没收到确认的，B 先补发收回确认，再重新委托。排队中、等 owner 中的委托被 B 撤回时，没有 A 卡要停，直接转 `closed`。
 
 第 5 条是 A 侧防越权的关键：**项目没配 `mergeHandoff` 的，一律不接。** 这样 A 的调度器对这张卡根本不会排合并意图、不会更新分支、也不会部署（`merge-handoff.md:72-77`），合并权在机制上留在 B。
 
@@ -62,7 +65,7 @@ B 用已经握手的 HTTP peer 把委托交给 A。请求级身份用现有的�
 回执统一是 B 签名可验、A 用实例钥匙签的 `{delegationId, outcome, reason, at}`，`outcome` 取下面几种：
 
 - `accepted`：落卡，进 §3。
-- `queued`：并发满或额度紧（第 3、6 条）。在 A 侧排队；有空位时按委托到达顺序补位，补位时把第 1–8 条全部重核一遍。排队期间 B 可以撤回。
+- `queued`：并发满或额度紧（第 3、6 条）。在 A 侧排队；有空位时按委托到达顺序补位，补位时把第 1–9 条全部重核一遍。排队期间 B 可以撤回。
 - `needs_owner`：没有常设授权，或者授权过期 / 被收回（第 2 条）。A 在自家 owner 频道发一张 authorize 卡，问的是「这一张接不接」，和 T46 第 2 步同一套（`peer-delegation.md` 流程第 2 步）。owner 点同意就当作 `accepted`；不同意、或 24 小时没人答，就回执 `rejected:owner_declined` / `rejected:owner_timeout`。
 - `rejected`：带原因码（上表最后一列）。拒单不落 A 卡，只记一条接收日志，这样 B 重发同一个 `delegationId` 时能拿到同一张回执。
 
@@ -79,7 +82,7 @@ A 侧的接单接口必须幂等：同一个 `delegationId`、同样的内容摘
   3. 哈希形式也被占用（实际不会发生，但要有结果）：拒单，回执 `rejected:id_collision`，交 A 的 PM。不加 `-2` 这类序号：序号取决于到达顺序，两边就对不出同一个结果了。
 - **同一张 B 卡重新委托：新建 A 卡，不复用。** 一份委托结束（撤回、退回、收回）后，A 卡已是终态 `cancelled`，台账不让终态卡重开；新委托也带着新的 `delegationId` 和新 epoch，旧卡上的轮次、P1 计数、审查 session 绑定都属于旧 epoch，沿用会让旧审查结论冒充新一轮。所以：
   - 同一个 `delegationId` 的重发（包括同 epoch 续租）命中同一行，用原 A 卡；
-  - 新的 `delegationId` 一定新建 A 卡。第一次委托用可读形式；可读形式已被这张 B 卡的上一份委托占了，就落到哈希形式（哈希里含 `delegationId`，所以每份委托都不同）；
+  - 新的 `delegationId` 只有在这张 B 卡的上一份委托已经 `closed` 之后才会被接（§2.2 第 9 条），接了就一定新建 A 卡。第一次委托用可读形式；可读形式已被这张 B 卡的上一份委托占了，就落到哈希形式（哈希里含 `delegationId`，所以每份委托都不同）；
   - 新 A 卡的 `extra.e2b.previous` 记上一份委托的 A 卡号，历史靠这个串起来；上一份留下的成果是否沿用，按 §6.3 的收回结论定，不自动带过来。
 - 回执和回写里同时带 B 卡号和 A 卡号，B 不需要知道 A 的分配规则。
 - A 卡 `extra.e2b = {peer, fp, remoteTask, remoteSpecRev, delegationId, epoch, remoteSpecSha256}`。负责人仍是 A 本机的执行者；B 卡在 B 侧显示的执行方是 `peer_agent`（`<A 指纹>/<A 卡号>`），这一点由 B 定。
@@ -279,6 +282,7 @@ A 侧要做的：导出证据时填 `surfaces[]`（§5），按文件路径标�
 | B 的 PM 手推 B 卡阶段 | 双端推进 | B 侧只观察模式下拒绝（B 实现）；A 发来的回写带 epoch，B 收到时核 |
 | A 撤回或过期之后仍在推 | 双端推进 | A 的效果闸核委托行状态 + epoch + 租约（§3.4），失租就自停（§6.2） |
 | A 重启后状态是旧的 | 旧 epoch 复活 | 委托行持久化；重启后先对账未结意图，再按现有对账规则续 |
+| B 对同一张卡发了两份委托（重试换了 `delegationId`、或者两个请求并发） | A 本机两套调度同时推同一张 B 卡 | 接单事务按 `(B 指纹, B 卡号)` 只允许一份没关闭的委托，其余回执 `already_delegated`，不排队（§2.2 第 9 条） |
 | 断网两端都以为自己是推进方 | 双端推进 | 只有 B 能增 epoch，而且必须拿到停止证据才增；A 过期就自停（§6.2） |
 | 联系不上 A 时凭 GitHub 没有新推送就收回 | 旧 worker 迟到的推送和 B 的新推进叠在一起 | GitHub 静态观测不算停止证据，没有 A 的停止证据就一直冻结；E2b 不提供强制收回（§6.3） |
 | 停止确认被自己的业务闸挡住 | 两边互等、永远收不回 | 控制面消息和积压回写不受业务闸限制，B 在收回前后都照收、只入历史（§3.4） |
@@ -294,7 +298,7 @@ A 侧要做的：导出证据时填 `surfaces[]`（§5），按文件路径标�
 都在双实例沙箱里跑（出借 R5 用的 `--lab --pair`，`remote-capacity.md:259`），不碰生产。
 
 1. **并发补位**：B 同时委托五张给 A，A 的授权上限是三：先起三组（执行者 + 跨族审查员），两张回执 `queued`；前面一张交回后补一张，再交回再补一张（`scheduler-engine.md:145` 的原场景，方向改成 B→A）。
-2. **无授权 / 超范围**：没有常设授权 → `needs_owner`，A owner 点同意后开工；security 模板 → `template_not_allowed`；项目没配 mergeHandoff → `not_configured`。
+2. **无授权 / 超范围**：没有常设授权 → `needs_owner`，A owner 点同意后开工；security 模板 → `template_not_allowed`；项目没配 mergeHandoff → `not_configured`；同一张 B 卡同时到达 `d1`、`d2` 两份委托（授权上限 ≥ 2、槽都空着）→ 只有一份 `accepted`，另一份 `already_delegated`，A 侧只起一张自动卡；`d1` 正式收回、A 那一行转 `closed` 之后再来 `d3`（epoch 更大），才新建 A 卡。
 3. **规格追加**：A 在 build 阶段时 B 发 `spec_update`，A 卡 specRev 跟着加一，P1 计数清零，旧意图按规则结清。
 4. **断网**：A 在 review 和 fix 之间断网十分钟。A 本机照常推进，outbox 积压；恢复后按 `aSeq` 补发，B 不收到重复、也没有缺口。交回要等 outbox 清空。
 5. **撤回**：B 在 fix 中途撤回。A 停掉新效果，发停止确认和在途成果清单；B 核对后增 epoch。之后 A 再发的**新业务回写**都被 `stale_epoch` 拒；单独验证：迟到的 `stop_confirm` 和积压回写（`aSeq` ≤ `lastSeq`）被 B 收下，只入历史，不推 B 卡阶段（§3.4）。
