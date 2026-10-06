@@ -10,7 +10,9 @@ import {
   classifyConfigFailure, configFailureMode, noteStartConfigFailure, providerConfigFailure, providerFamilyUnavailable,
   configFailureSlots, configRecoveredDecl, NOTICE_STALE_MS, recoverProviderConfigFailure, retryConfigNotices, setConfigFailurePolicy, startConfigRefusal,
 } from "../src/lib/lend-config-failure.js";
-import { recoveryPolicy } from "../src/lib/recovery-policy.js";
+import { openLedger } from "../src/lib/ledger-store.js";
+import { machineRecoveryPolicy, setMachineRecovery } from "../src/lib/recovery-machine-policy.js";
+import { tempLedgerPath } from "./ledger-test-helpers.js";
 import { helloBody } from "../src/lib/lend-hello.js";
 import { parseV2Request } from "../src/lib/lend-wire-v2.js";
 import { harness, polled, toStarted } from "./lend-harness.js";
@@ -62,28 +64,59 @@ test("classifier: only explicit model-not-enabled; quota, capacity, network, aut
   ]) expect(classifyConfigFailure(e)).toBeNull();
 });
 
-test("mode: the one recovery policy (lend / lendConfigFailure), default observe; illegal or throwing port answers off", () => {
+test("mode: the machine namespace (machine.lendConfigFailure), default observe; illegal or throwing port answers off", () => {
   expect(configFailureMode()).toBe("observe"); // test-guard state dir: no recovery-policy.json
   const reads: unknown[] = [];
-  setConfigFailurePolicy((project, key) => (reads.push([project, key]), { mode: "on", manualAfterMs: null, source: "config" }));
+  setConfigFailurePolicy((key) => (reads.push(key), { mode: "on", manualAfterMs: null, source: "config" }));
   expect(configFailureMode()).toBe("on");
-  expect(reads).toEqual([["lend", "lendConfigFailure"]]);
+  expect(reads).toEqual(["lendConfigFailure"]);
   setConfigFailurePolicy((() => ({ mode: "bogus" })) as never);
   expect(configFailureMode()).toBe("off");
   setConfigFailurePolicy(() => { throw new Error("x"); });
   expect(configFailureMode()).toBe("off");
   const dir = mkdtempSync(join(tmpdir(), "lcfg1-policy-"));
-  try { // the real file-backed reader knows the key: on / off per the file, a typo'd file stops (off)
+  try { // the real file-backed reader: machine section only; a project entry (even "lend") never answers; a typo'd file stops (off)
     const path = join(dir, "recovery-policy.json");
-    setConfigFailurePolicy((p, k) => recoveryPolicy(p, k, path));
+    setConfigFailurePolicy((k) => machineRecoveryPolicy(k, path));
     expect(configFailureMode()).toBe("observe");
-    writeFileSync(path, JSON.stringify({ projects: { lend: { keys: { lendConfigFailure: "on" } } } }));
+    writeFileSync(path, JSON.stringify({ projects: { lend: { mode: "on", keys: { lendConfigFailure: "on" } } } }));
+    expect(configFailureMode()).toBe("observe");
+    writeFileSync(path, JSON.stringify({ projects: { lend: { mode: "off" } }, machine: { lendConfigFailure: { mode: "on" } } }));
     expect(configFailureMode()).toBe("on");
-    writeFileSync(path, JSON.stringify({ projects: { lend: { mode: "on", keys: { lendConfigFailure: "off" } } } }));
+    writeFileSync(path, JSON.stringify({ projects: {}, machine: { lendConfigFailure: { mode: "off" } } }));
     expect(configFailureMode()).toBe("off");
-    writeFileSync(path, JSON.stringify({ projects: { lend: { keys: { lendConfigFailur: "on" } } } }));
+    writeFileSync(path, JSON.stringify({ projects: {}, machine: { lendConfigFailur: { mode: "on" } } }));
+    expect(configFailureMode()).toBe("off");
+    writeFileSync(path, JSON.stringify({ projects: {}, machine: { lendConfigFailure: { mode: "sometimes" } } }));
     expect(configFailureMode()).toBe("off");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("file-backed: owner's real machine write (setMachineRecovery) turns the consumer on; only model_not_enabled registers, one notice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lcfg1w-machine-"));
+  const path = join(dir, "recovery-policy.json"), ldb = openLedger(tempLedgerPath("lcfg1w-ledger-"));
+  try {
+    writeFileSync(path, JSON.stringify({ projects: { lend: { mode: "on" } } })); // an old pseudo project entry: ignored
+    setConfigFailurePolicy((k) => machineRecoveryPolicy(k, path));
+    const h = setup();
+    await failStart(h, "o1");
+    expect([configFailureMode(), providerConfigFailure(h.db, "team-a", "codex")]).toEqual(["observe", null]);
+    await setMachineRecovery(ldb, { actor: "owner", now: 1 }, { set: { key: "lendConfigFailure", mode: "on" }, reason: "owner 批准" }, { path });
+    expect(configFailureMode()).toBe("on"); // next read, no restart
+    for (const [i, e] of ["You've hit your usage limit", "429 Too Many Requests", "overloaded_error 529", "Authentication required, please login",
+      "fetch failed ECONNRESET", "request refused by safety system: model is not enabled"].entries()) {
+      const hq = setup(), c0 = creates;
+      await failStart(hq, `q${i}`, e); // a quota class may pause the lender on its own path; it never registers a config fault
+      expect([e, creates - c0, providerConfigFailure(hq.db, "team-a", "codex"), configNotices(hq)]).toEqual([e, 1, null, []]);
+    }
+    await failStart(h, "o2");
+    await failStart(h, "o3");
+    expect(providerConfigFailure(h.db, "team-a", "codex")).toMatchObject({ gen: 1, notice: { state: "sent" }, recoveredAt: null });
+    expect(configNotices(h)).toHaveLength(1);
+    expect(providerConfigFailure(h.db, "team-a", "claude")).toBeNull();
+    await setMachineRecovery(ldb, { actor: "owner", now: 2 }, { set: { key: "lendConfigFailure", mode: "inherit" }, reason: "回默认" }, { path });
+    expect(configFailureMode()).toBe("observe");
+  } finally { ldb.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("observe (default): would-pause logged, no registration, no notice; off: nothing", async () => {
