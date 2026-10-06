@@ -1,23 +1,19 @@
+import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../src/shared-ledger/store.js";
-import { LedgerService } from "../src/shared-ledger/service.js";
-import { startServer } from "../src/shared-ledger/server.js";
-import { createJoinCode } from "../src/shared-ledger/join.js";
 import { cmdSharedLedgerJoin, parseJoinArgs, readJoinCodeFile } from "../src/manager/shared-ledger-join-cmd.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 
-let root: string, store: Store, server: ReturnType<typeof startServer>, url: string;
+let root: string, responses: EnrollmentResponses, url: string;
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "sl-join-cmd-"));
-  store = new Store(join(root, "center.sqlite"));
-  server = startServer(new LedgerService(store));
-  url = `http://127.0.0.1:${server.port}/`;
+  root = mkdtempSync(join(tmpdir(), "sl-migration-http-"));
+  responses = new EnrollmentResponses();
+  url = responses.url;
 });
-afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { responses.close(); rmSync(root, { recursive: true, force: true }); });
 const stateFiles = ["shared-ledger-bindings.json", "shared-ledger-credentials.json"].map((name) => join(STATE_DIR, name));
 let savedState: { content: Buffer; mode: number }[];
 beforeEach(() => {
@@ -31,8 +27,8 @@ afterEach(() => {
     else rmSync(path, { force: true });
   }
 });
-const mint = (person: string) => createJoinCode(store, { teamId: "team-a", projectId: "project-a", personId: person, memberCode: person,
-  role: "member", actions: ["read"], ttlMs: 3_600_000 }).code;
+const mint = (person: string) => responses.invite({ personId: person, actions: ["read"] }).joinCode;
+
 async function run(args: string[], stdin = async () => "") {
   const out: string[] = [];
   const spies = (["log", "error", "warn"] as const).map((m) => spyOn(console, m).mockImplementation((...a) => { out.push(a.join(" ")); }));

@@ -1,12 +1,9 @@
+import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../src/shared-ledger/store.js";
-import { LedgerService } from "../src/shared-ledger/service.js";
-import { startServer } from "../src/shared-ledger/server.js";
-import { runAdmin } from "../scripts/shared-ledger-admin.js";
 import { joinSharedLedger } from "../src/lib/shared-ledger-join.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
@@ -21,22 +18,19 @@ const newKey = (): InstanceKey => {
 };
 const scrub = { identity: { username: "nobody-local", hostname: "nobody-host" } };
 const owner = { id: "owner:self", role: "owner", agents: ["*"], createdAt: "2026-10-02T00:00:00Z" } as Principal;
-let root: string, db: string, store: Store, server: ReturnType<typeof startServer>, url: string;
+let root: string, responses: EnrollmentResponses, url: string;
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "sl-gate-proxy-"));
-  db = join(root, "center.sqlite");
-  store = new Store(db);
-  server = startServer(new LedgerService(store));
-  url = `http://127.0.0.1:${server.port}/`;
+  root = mkdtempSync(join(tmpdir(), "sl-migration-http-"));
+  responses = new EnrollmentResponses();
+  url = responses.url;
 });
-afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { responses.close(); rmSync(root, { recursive: true, force: true }); });
 
 /** 本机 joins the given projects and creates one feature in each; returns the feature id per project. */
 async function enroll(dir: string, key: InstanceKey, person: string, projects: string[]): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const projectId of projects) {
-    const invite = runAdmin(["invite", "--db", db, "--team", "team-a", "--project", projectId, "--person", person, "--code", person,
-      "--role", "member", "--actions", "read,plan", "--ttl", "1h"]);
+    const invite = responses.invite({ projectId, personId: person });
     const joined = await joinSharedLedger({ url, code: String(invite.joinCode), key, subject: owner.id, stateDir: dir });
     const credential = resolveSharedLedgerCredential(owner.id, "person", joined.centerId, "team-a", projectId, "plan", dir)!;
     const created = await new SharedLedgerClient(credential, key, { scrub }).command({ type: "feature.new", projectId,
