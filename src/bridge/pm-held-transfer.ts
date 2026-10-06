@@ -131,6 +131,28 @@ export function roleHandoffs(held: HeldQueue, channelId: string, unresolved: Set
   return away;
 }
 
+/** 这一封此刻归哪位当班 PM（null = 留在原收件队）：handOver 在所有 await 之后、发送之前再判一次，切换 PM 的窗口里目标可能已变 */
+export function currentPmTarget(channelId: string, env: Envelope): PmTarget | null {
+  return staysWithAddressee(env) || env.to.kind !== "local" ? null : pmRoleRoute(channelId)(env);
+}
+
+/**
+ * flush 已按哪个频道核过分轮 / claim / 判忙才投这一封（只在进程内，不落盘）：deliverPmLocal 重新解析出的最终收件频道和它不一致
+ * （核完到发送之间 PM 又切了）就不发、留在原队重试——锁、分轮、发送必须是同一个目标（handoff-mixed-turn）
+ */
+const expectedTarget = new WeakMap<Envelope, string>();
+export function expectPmTarget(env: Envelope, channelId: string | undefined): void {
+  if (channelId) expectedTarget.set(env, channelId);
+  else expectedTarget.delete(env);
+}
+/** 最终收件频道和 flush 核过的不一致：返回要留队重试的结果 */
+export function pmTargetDrift(env: Envelope, finalChannelId: string): Delivery | null {
+  const want = expectedTarget.get(env);
+  if (!want || want === finalChannelId) return null;
+  console.warn(`[pm-held] ${env.meta.messageId}: PM changed during handover (checked ${want}, now ${finalChannelId}); keeping it queued`);
+  return retryLater({ envelope: env, outcome: { kind: "dropped", reason: "active PM changed during handover" } });
+}
+
 /** Inbox reads, acknowledgements and reply tallies must use the same ownership recovery as flush, including leased entries. */
 export function ownedHeldItems(held: HeldQueue, channelId: string): HeldItem[] {
   const unresolved = adoptStrandedTransfers(held);

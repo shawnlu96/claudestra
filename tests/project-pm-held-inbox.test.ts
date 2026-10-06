@@ -1,86 +1,12 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { AgentCallBook } from "../src/bridge/agent-calls.js";
-import { subscribeEvents } from "../src/bridge/event-bus.js";
-import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
-import { HeldQueue, INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
-import { initInbox, takeInbox } from "../src/bridge/inbox.js";
-import { deliverPmLocal, pmRoleRoute } from "../src/bridge/local-api/project-pm-delivery.js";
-import { setPmRoleRoute } from "../src/bridge/pm-held-transfer.js";
-import { takeApiWaiters, type ApiWaiter } from "../src/bridge/stop-settle.js";
+import { expect, test } from "bun:test";
+import { INBOX_LEASE_MS, type HeldItem } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
-import { switchProjectPm } from "../src/lib/pm-role-switch.js";
-import { A, B, P, pmFixture } from "./pm-role-fixture.test.js";
+import { A, B } from "./pm-role-fixture.test.js";
+import { BODY, CA, CB, HEADER, OTHER, inboxWorld, ownerLetter, peerRequest, preSwitchRole, stopB, target, useInboxWorld, ws, type World } from "./project-pm-held-world.test.js";
 
-const CA = "channel-a", CB = "channel-b", OTHER = "channel-other";
-const BODY = "[系统转交：原收件人 agent-alpha；当班 PM agent-beta]\n  我还有问题想问 A\n\n原文  ";
-const cleanups: (() => void)[] = [];
-beforeEach(clearOpenedBy);
-afterEach(() => { for (const close of cleanups.splice(0).reverse()) close(); });
-const ws = (id: string) => ({ id, send: () => {} }) as unknown as LocalEndpoint["ws"];
-const target = (channelId: string): LocalEndpoint => ({ kind: "local", channelId, agentName: channelId === CA ? A : B, ws: ws(channelId) });
+useInboxWorld();
 
-async function inboxWorld() {
-  const fixture = pmFixture();
-  cleanups.push(fixture.close);
-  await switchProjectPm(fixture.db, P, B, { actor: "owner" }, fixture.deps);
-  const state = await fixture.deps.read();
-  state.principals.push({ id: "token:tok_owner", role: "owner", agents: ["*"], createdAt: "2026-01-01" } as never);
-  const prev = setPmRoleRoute(pmRoleRoute({ db: fixture.db, agents: state.agents }));
-  cleanups.push(() => { setPmRoleRoute(prev); });
-  const dir = mkdtempSync(join(tmpdir(), "pm-held-inbox-")), path = join(dir, "held.json");
-  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-  let held = new HeldQueue(path);
-  const clients = new Map([CA, CB].map((c) => [c, { ws: ws(c) }]));
-  const calls = new AgentCallBook(null), busy = new Set<string>(), receipts = new Map<string, ApiWaiter[]>();
-  const opts = { busyOnSend: false };
-  const sent: { channel: string; text: string }[] = [], rendered: { channel: string; text: string }[] = [];
-  const mirrors: { channel: string; text: unknown }[] = [];
-  cleanups.push(subscribeEvents({}, (e) => { if (e.type === "chat_message") mirrors.push({ channel: e.chatId, text: e.data.text }); }));
-  const init = () => initInbox({
-    held, clients, calls, stoppedAt: () => undefined,
-    render: async (env) => { rendered.push({ channel: (env.to as LocalEndpoint).channelId, text: env.content }); return env.content; },
-    emitIn: (channel, env) => mirrors.push({ channel, text: env.content }),
-  });
-  init();
-  const take = async (channel: string, opts: Parameters<typeof takeInbox>[2] = {}, now = Date.now()) => {
-    const r = await takeInbox(clients.get(channel)!.ws, now, opts);
-    if ("error" in r) throw new Error(r.error);
-    return r.result;
-  };
-  const flush = (channel: string) => {
-    const d: FlushDeps = {
-      held, compacting: () => false, working: async (c) => busy.has(c), isHumanRequest: () => false,
-      client: (c) => clients.get(c), touch: (c, e) => calls.touchDelivered(c, e), settled: async () => true, now: () => 1000,
-      deliver: (env, to, wanted) => deliverPmLocal(env, to, clients, calls, receipts, async (e, t) => {
-        if (wanted && !wanted()) return { envelope: e, outcome: { kind: "dropped", reason: "removed" } };
-        if (busy.has(t.channelId)) {
-          held.holdEnv(e);
-          return { envelope: e, outcome: { kind: "sent", note: "queued" } };
-        }
-        sent.push({ channel: t.channelId, text: e.content });
-        if (opts.busyOnSend) busy.add(t.channelId); // 投进去就开了一轮
-        return { envelope: e, outcome: { kind: "sent" } };
-      }, { db: fixture.db, agents: state.agents, principals: async () => ({ principals: state.principals }) }),
-    };
-    return flushHeld(d, channel, "inbox-test");
-  };
-  const restart = () => { held = new HeldQueue(path); init(); };
-  const q = (c: string) => held.get(c) ?? [];
-  const scope = (agents: string[]) => { Object.assign(state.principals.find((p) => p.id === "token:tok_peer")!, { agents }); };
-  const principal = (p: Record<string, unknown>) => { state.principals.push(p as never); };
-  return { get held() { return held; }, take, flush, restart, q, scope, principal, opts, receipts, clients, calls, busy, sent, rendered, mirrors };
-}
 
-function ownerLetter(text = BODY): Envelope {
-  return {
-    from: { kind: "api", tokenId: "tok_owner", name: "owner", owner: true }, to: target(CB), intent: "request", content: text,
-    meta: { messageId: "same-button", threadId: "owner-thread", ts: "2026-10-01T00:00:00Z", triggerKind: "system" },
-  };
-}
-type World = Awaited<ReturnType<typeof inboxWorld>>;
 function dual(w: World, env = ownerLetter(), leases = false): void {
   w.held.set(CA, [{ env, to: target(CA), heldAt: 100, ...(leases ? { lease: { batchId: "inbox_A", at: Date.now() } } : {}) }]);
   w.held.set(CB, [{ env, to: target(CB), heldAt: 200, ...(leases ? { lease: { batchId: "inbox_B", at: Date.now() } } : {}) }]);
@@ -342,18 +268,6 @@ test("stranded-role-inbox: two legitimate same-messageId role clicks remain dist
 });
 
 // followup-reliability-PMSWR：切换前押进旧 PM A 队、信封仍指向 A 的角色消息（未转交过）；A 离线 / 忙 / 在线领收件箱
-function preSwitchRole(w: World, text = "  pre-switch role body\n\nunchanged  ", patch: (env: Envelope) => void = () => {}): HeldItem {
-  const env = ownerLetter(text);
-  env.intent = "notification";
-  env.to = target(CA);
-  env.from = { kind: "local", agentName: "agent-task-1", channelId: "executor", ws: ws("exec") };
-  patch(env);
-  w.held.set(CA, [...w.q(CA), { env, to: target(CA), heldAt: 100 }]);
-  w.restart(); // 旧数据从盘上读回
-  return w.q(CA).at(-1)!;
-}
-const HEADER = `[系统转交：原收件人 ${A}；当班 PM ${B}]`;
-
 for (const b of ["idle", "busy", "offline"] as const) {
   for (const evidence of ["pre-switch", "old-transfer"] as const) {
     test(`retired-offline-stranded: A offline, B ${b}, ${evidence} role letter follows the active PM`, async () => {
@@ -490,18 +404,6 @@ test("pre-switch-role-inbox: A's own direct chat and request answer stay takeabl
 });
 
 // followup-reliability-PMSWR r1 handoff-mixed-turn：转给当班 PM 也按它的分轮规则，两个 peer principal 不进同一轮、Stop 兜底不串答复
-function peerRequest(w: World, id: string, tokenId: string, peer: string): void {
-  preSwitchRole(w, `${id} body`, (env) => {
-    env.from = { kind: "api", tokenId, peer, name: peer };
-    env.intent = "request";
-    env.meta = { ...env.meta, messageId: id, threadId: `thread-${id}` };
-  });
-  w.receipts.set(`${tokenId}|${CA}`, [{ agentChannelId: CA, agentName: A, tokenId, messageId: id, threadId: `thread-${id}` }]);
-}
-const stopB = (w: World, text: string) => takeApiWaiters(w.receipts, {
-  cid: CB, stopChannelId: CB, stopWs: 1, candidateWs: 1, event: "Stop", drain: { text },
-}, true, new Set(), w.held.ids(CB)).map((s) => ({ peer: s.waiter.tokenId, reply: s.result.reply }));
-
 for (const a of ["online", "offline"] as const) {
   test(`handoff-mixed-turn: A ${a}, two peer principals handed to idle B one turn each; Stop settles only that peer`, async () => {
     const w = await inboxWorld();
@@ -552,6 +454,7 @@ test("handoff-mixed-turn: B's own flush running blocks A's handover until it rel
   await w.flush(CA);
   expect(w.sent).toEqual([{ channel: CB, text: `${HEADER}\nfirst-peer body` }]);
 });
+
 
 // followup-reliability-PMSWR r1 legacy-return-misroute：旧版 / 重试后信封已指向当班 PM 的前任本人回程，仍按原收件队留给前任
 function legacyReturn(w: World, marked: boolean): HeldItem {
