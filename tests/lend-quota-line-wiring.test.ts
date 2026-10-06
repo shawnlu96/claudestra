@@ -13,7 +13,9 @@ import type { InventoryQuota } from "../src/lib/ai-quota.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
-import { getOrder } from "../src/lib/lend-journal.js";
+import { setConfigFailurePolicy, recoverProviderConfigFailure } from "../src/lib/lend-config-failure.js";
+import { helloBody } from "../src/lib/lend-hello.js";
+import { getOrder, setMeta } from "../src/lib/lend-journal.js";
 import { pauseForQuota } from "../src/lib/lend-health.js";
 import { QUOTA_LINES_PATH, saveQuotaLines } from "../src/lib/lend-quota-line-config.js";
 import { QUOTA_LINE_FACTS_PATH, refreshQuotaFacts, resetQuotaFactsForTest, type QuotaFacts } from "../src/lib/lend-quota-line-facts.js";
@@ -224,4 +226,33 @@ describe("hello → 借入方生产解析 + 派单规划", () => {
     expect(Object.keys(body).every((k) => ["v", "boot", "grant", "paused", "proto", "quota", "seq", "slots"].includes(k))).toBe(true);
     expect(Object.keys(body.slots as object).sort()).toEqual(["claude", "codex"]);
   });
+});
+
+
+test("ordinary main merge keeps quota caps, config failure busy and explicit recovery in one hello", async () => {
+  setConfigFailurePolicy(() => ({ mode: "on", manualAfterMs: null, source: "config" }));
+  const h = harness({ entry: { families: { codex: 4, claude: 2 }, roles: ["review", "write"] } });
+  try {
+    await toStarted(h);
+    facts({ codex: 75, claude: 80 }, h.d.now() + WEEK, h.d.now());
+    const entry = h.lend.lend[0];
+    const now = h.d.now();
+    setMeta(h.db, `config-failure:${JSON.stringify([entry.peer, "codex"])}`, JSON.stringify({
+      gen: 1, peer: entry.peer, family: "codex", category: "model_not_enabled", firstAt: now, lastAt: now,
+      evidence: [{ orderId: "o1", at: now, category: "model_not_enabled", excerpt: "model_not_enabled" }],
+      notice: { state: "sent", at: now }, recoveredAt: null,
+    }));
+    expect(helloBody(h.db, entry, now).slots).toEqual({ codex: { total: 0, busy: 1 }, claude: { total: 0, busy: 0 } });
+    expect(recoverProviderConfigFailure(h.db, entry.peer, "codex", 1, now)).toBe(true);
+    const body = helloBody(h.db, entry, now);
+    expect(body.slots).toEqual({ codex: { total: 2, busy: 1 }, claude: { total: 0, busy: 0 } });
+    expect(body.configRecovered).toEqual({ codex: { gen: 1, orders: ["o1"] } });
+    facts({ codex: 80, claude: 69 }, now + WEEK, now);
+    expect(helloBody(h.db, entry, now).slots.codex).toEqual({ total: 0, busy: 1 });
+    expect(getOrder(h.db, "o1")!.state).toBe("started");
+    expect(h.log.killed).toEqual([]);
+    expect(h.log.removed).toEqual([]);
+  } finally {
+    setConfigFailurePolicy(null);
+  }
 });

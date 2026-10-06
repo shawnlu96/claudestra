@@ -32,6 +32,7 @@ import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr
 import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 import { resultReplayPending } from "./lend-result-retry.js";
+import { noteStartConfigFailure, startConfigRefusal } from "./lend-config-failure.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -81,6 +82,10 @@ export interface LendDeps {
     pr(p: PrInput): Promise<PrResult>;
   };
   removeDir(orderId: string): void;
+  /** 删工作目录前回收它下面的残留进程（lend-proc-reap.ts，除失租外自己兜错只记日志）；不设 = 不回收 */
+  reapOrder?(orderId: string): Promise<unknown>;
+  /** 周期兜底扫孤儿进程（自带节流）；不设 = 不扫 */
+  reapOrphans?(): Promise<unknown>;
   worker: WorkerPort;
   /** 回执验签：A 钉在 peers.json 的完整公钥；验不过 = false */
   verifyReceipt(peer: string, r: Receipt): Promise<boolean>;
@@ -181,6 +186,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
   }
   if (row.settle!.removeDir) {
+    await d.reapOrder?.(row.orderId);
     try { d.removeDir(row.orderId); } catch (e) {
       if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
       d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`);
@@ -222,11 +228,14 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const o = orderOf(row);
     let denied: string | null = null;
     const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    const cf = startConfigRefusal(d, row);
+    if (cf) return release(row, "cloned", cf, d);
     const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
     if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
     if (!found && !made.ok) {
       await pauseForStartFailure(d.db, row, made.error, d.codexQuota, d.now(), d.log);
+      await noteStartConfigFailure(d, row, made.error);
       return release(row, "cloned", `起 worker 失败：${made.error}`.slice(0, 400), d);
     }
   }
