@@ -4,9 +4,9 @@
  * 部署命令是临时目录里的模拟脚本(只往日志文件追加 enter/exit),状态目录 / HOME / TMPDIR 全是合成的。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { testChildEnv } from "./test-env.ts";
 import { main } from "../scripts/pm-deploy-lock.ts";
 
@@ -28,6 +28,14 @@ if (mode === "nest") {
     process.execPath, import.meta.path, log, name + "/inner", "30", "0"], { stdio: ["inherit", "inherit", "inherit"] });
   appendFileSync(log, "exit " + name + "\\n");
   process.exit(r.exitCode ?? 99);
+}
+if (mode === "nest-detached") {
+  // 嵌套 wrapper 起在新进程组(detached):仍是外层的后代,但不在外层监管的组里;card-merge 正常等它
+  const nested = Bun.spawn([process.execPath, wrapper, "run", "--label", "deploy-full", "--wait-sec", "0.3", "--",
+    process.execPath, import.meta.path, log, name + "/inner", holdMs, "0"], { stdio: ["inherit", "inherit", "inherit"], detached: true });
+  const code = await nested.exited;
+  appendFileSync(log, "exit " + name + "\\n");
+  process.exit(code);
 }
 if (mode === "tree" || mode === "tree-ignore" || mode === "bg") {
   // 部署脚本再起下一级命令(孙进程):tree 同步等它,bg 不等直接退出
@@ -51,9 +59,9 @@ process.exit(Number(mode) || 0);
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "pm-deploy-cli-"));
-  const state = join(root, "state");
-  mkdirSync(state);
-  mkdirSync(join(root, "tmp"));
+  // 共享 state 放在子进程 TMPDIR 之内:TMPDIR 不在 /tmp、/var/folders 时,子进程的 test-guard 也认它是测试目录,不会各换一个随机目录
+  const state = join(root, "tmp", "state");
+  mkdirSync(state, { recursive: true });
   log = join(root, "deploy.log");
   writeFileSync(log, "");
   fixture = join(root, "fake-deploy.ts");
@@ -95,7 +103,19 @@ function psShim(behavior: "sleep 1.5" | "exit 1"): { PATH: string; marker: strin
   return { PATH: `${dir}:${process.env.PATH}`, marker };
 }
 
+const effectiveLockPath = () => {
+  const s = Bun.spawnSync([BUN, WRAPPER, "status"], { env, stdout: "pipe", stderr: "pipe" });
+  const path = JSON.parse(s.stdout.toString()).path as string;
+  return join(realpathSync(dirname(path)), basename(path)); // 状态目录本身存在,锁文件此时还没有
+};
+
 describe("两份部署入口真实并发", () => {
+  test("各 wrapper 子进程实际用的是同一把合成锁(不被 test-guard 换成各自的随机状态目录)", () => {
+    const [a, b] = [effectiveLockPath(), effectiveLockPath()];
+    expect(a).toBe(b);
+    expect(a).toBe(join(realpathSync(join(root, "tmp", "state")), "pm-deploy.lock"));
+  });
+
   test("3 个独立 wrapper(两个 label)同时起:关键区严格串行,全部完成", async () => {
     const ps = [wrap("deploy-full", 20, deploy("A", 300)), wrap("card-merge", 20, deploy("B", 300)), wrap("deploy-full", 20, deploy("C", 300))];
     const res = await Promise.all(ps.map((p) => p.done));
@@ -273,6 +293,19 @@ describe("嵌套与冒用", () => {
     expect(r.err).toContain("受控重入");
     expect(lines()).toEqual(["enter merge", "enter merge/inner", "exit merge/inner", "exit merge"]);
     expect(lockHeld()).toBe(false);
+  }, 30_000);
+
+  test("嵌套 wrapper 起在别的进程组(detached):拒绝重入、零部署;外层被 SIGTERM 后第二份进关键区时不会与内层重叠", async () => {
+    const outer = wrap("card-merge", 1, deploy("merge", 1500, "nest-detached"));
+    await until(() => lines().includes("exit merge") || lines().includes("enter merge/inner"));
+    outer.proc.kill("SIGTERM");
+    const o = await outer.done;
+    expect(o.err).not.toContain("受控重入");
+    expect(o.err).toContain("不在外层监管的进程组");
+    expect((await wrap("deploy-full", 5, deploy("second", 10)).done).code).toBe(0);
+    await Bun.sleep(1700); // 内层若进了关键区,这时已写出 exit
+    expect(lines()).not.toContain("enter merge/inner");
+    expect(lines().slice(-2)).toEqual(["enter second", "exit second"]);
   }, 30_000);
 
   test("独立进程冒用 label 与持有者 token:不是后代 → 仍互斥、超时零部署", async () => {

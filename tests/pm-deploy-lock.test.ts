@@ -213,18 +213,45 @@ describe("死活判断与接管", () => {
 });
 
 describe("受控重入", () => {
-  test("没有 token / token 不对 / 持有者不是祖先(同进程自己)→ 不重入", async () => {
+  test("没有 token / token 不对 / 持有者不是祖先(同进程自己)→ 不重入,走正常取锁", async () => {
     const h = await held();
-    expect(reentrantHolder(undefined, { path: lock })).toBeNull();
-    expect(reentrantHolder("0".repeat(32), { path: lock })).toBeNull();
-    expect(reentrantHolder(h.record.token, { path: lock })).toBeNull();
+    expect(reentrantHolder(undefined, { path: lock }).kind).toBe("none");
+    expect(reentrantHolder("0".repeat(32), { path: lock }).kind).toBe("none");
+    expect(reentrantHolder(h.record.token, { path: lock }).kind).toBe("none");
     h.release();
   });
 
-  test("token 对且持有者是祖先 → 重入;ps 读不到 ppid → 不重入", () => {
+  // 外层 wrapper = 父进程,执行闸(组长)用本进程充当:本进程是闸的「后代」且在闸的组里
+  const nestedRecord = () => fakeRecord({
+    holder: { pid: process.ppid, startId: realProbe.startOf(process.ppid) },
+    child: { pid: 4242, startId: "gate", pgid: 4242 },
+  });
+  const gateProbe = (over: Partial<ProcProbe> = {}): ProcProbe => ({
+    ...realProbe,
+    signal0: (p) => (p === 4242 ? "alive" : realProbe.signal0(p)),
+    startOf: (p) => (p === 4242 ? "gate" : realProbe.startOf(p)),
+    ppidOf: (p) => (p === process.pid ? 4242 : p === 4242 ? process.ppid : realProbe.ppidOf(p)),
+    pgidOf: (p) => (p === process.pid ? 4242 : realProbe.pgidOf(p)),
+    ...over,
+  });
+  const token = "f".repeat(32);
+
+  test("token 对、持有者是祖先、本进程在外层监管的进程组里 → 重入;ps 读不到 ppid → 不重入", () => {
+    writeFileSync(lock, JSON.stringify(nestedRecord()));
+    const r = reentrantHolder(token, { path: lock, probe: gateProbe() });
+    expect(r.kind === "nested" && r.record.holder.pid).toBe(process.ppid);
+    expect(reentrantHolder(token, { path: lock, probe: gateProbe({ ppidOf: () => null }) }).kind).toBe("none");
+  });
+
+  test("持有者是祖先但本进程不在外层监管的进程组(detached / setsid)→ 明确拒绝,不放行也不当成独立取锁", () => {
+    writeFileSync(lock, JSON.stringify(nestedRecord()));
+    const other = reentrantHolder(token, { path: lock, probe: gateProbe({ pgidOf: (p) => (p === process.pid ? 9999 : realProbe.pgidOf(p)) }) });
+    expect(other.kind).toBe("rejected");
+    expect(reentrantHolder(token, { path: lock, probe: gateProbe({ pgidOf: () => null }) }).kind).toBe("rejected");
+    // 闸已不是祖先(从闸的组里逃出去再被别处收养)/ 记录里没有受监管的组 / 闸已死:同样拒绝
+    expect(reentrantHolder(token, { path: lock, probe: gateProbe({ ppidOf: (p) => (p === process.pid ? process.ppid : realProbe.ppidOf(p)) }) }).kind).toBe("rejected");
+    expect(reentrantHolder(token, { path: lock, probe: gateProbe({ signal0: (p) => (p === 4242 ? "dead" : realProbe.signal0(p)), groupSignal0: () => "dead" }) }).kind).toBe("rejected");
     writeFileSync(lock, JSON.stringify(fakeRecord({ holder: { pid: process.ppid, startId: realProbe.startOf(process.ppid) } })));
-    const token = "f".repeat(32);
-    expect(reentrantHolder(token, { path: lock })?.holder.pid).toBe(process.ppid);
-    expect(reentrantHolder(token, { path: lock, probe: { ...realProbe, ppidOf: () => null } })).toBeNull();
+    expect(reentrantHolder(token, { path: lock, probe: gateProbe() }).kind).toBe("rejected");
   });
 });
