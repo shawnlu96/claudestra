@@ -86,8 +86,18 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
   return attempted;
 }
 
+/** Processes left under a due checkout are reaped before sweepStoppedWork deletes it; same batch cap as the sweep. */
+async function reapDueStopped(d: LoopDeps, root: string): Promise<void> {
+  if (!d.reapOrder) return;
+  const now = d.now();
+  const due = stoppedRows(d.db).filter((r) => { const t = retention(d.db, r).stoppedAt; return Number.isFinite(t) && now - t >= STOPPED_RETENTION_MS; });
+  for (const r of due.filter((r) => hasCheckout(r.orderId, root)).slice(0, BATCH_SIZE)) await d.reapOrder(r.orderId);
+}
+
 /** Production entry and tests share the same once-per-pass cleanup, including an idle/disabled lender. */
 export async function lendTickWithRetention(d: LoopDeps, active: () => void, root = LEND_ROOT): Promise<TickResult> {
+  await reapDueStopped(d, root);
+  await d.reapOrphans?.();
   sweepStoppedWork(d.db, { root, now: d.now(), active, log: d.log });
   return (await import("./lend-loop.js")).lendTick(d);
 }
