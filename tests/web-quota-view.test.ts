@@ -3,7 +3,8 @@
  * 数据层与原因码的人话、「重试」只在用户重试才解除的状态出、本机缓存标账户归属未知。
  */
 import { describe, expect, test } from "bun:test";
-import { canRetry, entryRuntime, expiryParts, fmtAt, identityNote, layerLabel, meterLabel, quotaPanelData, reasonText } from "../web/features/chat/quota-view";
+import { codexResetAction, resetConfirmParams, resetOutcome } from "../web/features/chat/quota-reset";
+import { canRetry, entryRuntime, expiryParts, fmtAt, identityNote, layerLabel, meterLabel, quotaPanelData, reasonText, type EntryView } from "../web/features/chat/quota-view";
 
 const T = new Date(2026, 8, 28, 10, 0).getTime();
 const body = {
@@ -41,8 +42,13 @@ describe("quotaPanelData", () => {
     expect(JSON.stringify(d)).not.toContain("SHOULD-NOT-SURVIVE");
     expect(JSON.stringify(d)).not.toContain('"secret"');
     expect(d.entries[1].resetCredits).toEqual({
-      held: 2, applicableNow: 0, expiries: [{ at: T + 86400_000, left: null, requiresLimit: false }], stale: false, ineligibleReason: null,
+      held: 2, applicableNow: 0, expiries: [{ key: null, at: T + 86400_000, left: null, requiresLimit: false }], stale: false, ineligibleReason: null, limitReached: null,
     });
+    // 卡键只收 bridge 的 32 位 hex HMAC；limitReached 只收布尔
+    const keyed = quotaPanelData({ snapshot: { providers: [{ id: "codex", name: "Codex", source: { layer: "live" },
+      resetCredits: { held: 1, applicableNow: 1, limitReached: true, credits: [{ key: "f".repeat(32), expiresAtMs: T }, { key: "rlrc_raw", expiresAtMs: T }] } }] } })!;
+    expect(keyed.entries[0].resetCredits?.expiries?.map((x) => x.key)).toEqual(["f".repeat(32), null]);
+    expect(keyed.entries[0].resetCredits?.limitReached).toBe(true);
     const surface = quotaPanelData({ snapshot: { providers: [{ id: "claude", name: "Claude", source: { layer: "live" }, resetCredits: { held: 0, credits: [], ineligibleReason: "surface" } }] } })!;
     expect(surface.entries[0].resetCredits?.ineligibleReason).toBe("surface");
     expect(d.entries[4].source.layer).toBe("none");
@@ -106,20 +112,20 @@ describe("重置卡截止说明", () => {
     const at = new Date(2026, 9, 4, 22, 28).getTime();
     const keys = (x: Parameters<typeof expiryParts>[0]) => expiryParts(x).map((p) => p.key);
     withNow(T, () => {
-      expect(keys({ at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
-      expect(keys({ at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
-      expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
-      expect(keys({ at: null, left: 1, requiresLimit: true })).toEqual(["无截止日", "到限额才能用"]);
+      expect(keys({ key: null, at, left: 2, requiresLimit: true })).toEqual(["{at} 到期", "剩 {n} 次", "到限额才能用"]);
+      expect(keys({ key: null, at, left: 1, requiresLimit: false })).toEqual(["{at} 到期"]);
+      expect(expiryParts({ key: null, at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
+      expect(keys({ key: null, at: null, left: 1, requiresLimit: true })).toEqual(["无截止日", "到限额才能用"]);
     });
   });
 
   test("截止时刻和现在同一天只写时分，跨日带月-日", () => {
     const at = new Date(2026, 9, 4, 22, 28).getTime();
     withNow(new Date(2026, 9, 4, 9, 0).getTime(), () => {
-      expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("22:28");
+      expect(expiryParts({ key: null, at, left: null, requiresLimit: false })[0].params.at).toBe("22:28");
     });
     withNow(T, () => {
-      expect(expiryParts({ at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
+      expect(expiryParts({ key: null, at, left: null, requiresLimit: false })[0].params.at).toBe("10-04 22:28");
     });
   });
 });
@@ -128,5 +134,47 @@ describe("数据层标签", () => {
   test("Pi（按量接入商）的本机数据叫「本机记录」；订阅的本机兜底仍叫「本机缓存」", () => {
     const d = quotaPanelData(body)!;
     expect(d.entries.map(layerLabel).slice(0, 4)).toEqual(["实时", "实时过期", "本机缓存", "本机记录"]);
+  });
+});
+
+describe("Codex「使用一次重置」（quota-reset.ts）", () => {
+  const K = "c".repeat(32);
+  const codex = (rc: Partial<NonNullable<EntryView["resetCredits"]>>, id = "codex"): EntryView => ({
+    id, name: "Codex", kind: "subscription", plan: null, identity: "bound", meters: [], balance: null,
+    resetCredits: { held: 2, applicableNow: 1, expiries: [{ key: K, at: T, left: null, requiresLimit: false }], stale: false, ineligibleReason: null, limitReached: false, ...rc },
+    source: { layer: "live", observedAt: T, reason: null, needsUserRetry: false },
+  });
+
+  test("只有 Codex 账户卡、持有 ≥ 1 才出按钮；此刻可用为 0 置灰并按 limitReached 写原因；明细没到也不让点", () => {
+    expect(codexResetAction(codex({}))).toEqual({ enabled: true, key: K, at: T });
+    expect(codexResetAction(codex({}, "claude"))).toBeNull();
+    expect(codexResetAction(codex({}, "codex.local"))).toBeNull();
+    expect(codexResetAction(codex({ held: 0 }))).toBeNull();
+    expect(codexResetAction(codex({ applicableNow: 0 }))).toEqual({ enabled: false, why: "额度还没到上限，现在不需要重置" });
+    expect(codexResetAction(codex({ applicableNow: 0, limitReached: true }))).toEqual({ enabled: false, why: "接口说此刻没有能用的卡" });
+    expect(codexResetAction(codex({ applicableNow: 0, limitReached: null }))).toEqual({ enabled: false, why: "接口说此刻没有能用的卡" });
+    expect(codexResetAction(codex({ expiries: null }))).toEqual({ enabled: false, why: "重置卡明细还没拿到，稍后再试" });
+  });
+
+  test("二次确认写明到期时间（本机时区）；没有截止日照写", () => {
+    expect(resetConfirmParams({ enabled: true, key: K, at: T })).toEqual({ key: "会消耗 1 次重置卡（{at} 到期），不可撤销。确定使用？", params: { at: fmtAt(T) } });
+    expect(resetConfirmParams({ enabled: true, key: K, at: null }).key).toBe("会消耗 1 次重置卡（无截止日），不可撤销。确定使用？");
+  });
+
+  test("结果的人话：用掉 / 上游拒了没扣 / 核对没过没发 / 没确切答复按刷新为准 / 409 / 403 / 断网", () => {
+    const ok = (result: unknown) => resetOutcome(200, { ok: true, result });
+    expect(ok({ status: "done", code: "reset" })).toEqual({ tone: "success", key: "已使用 1 次重置，额度已补满", params: {} });
+    expect(ok({ status: "done", code: "already_redeemed" }).tone).toBe("success");
+    expect(ok({ status: "done", code: "no_credit" })).toMatchObject({ tone: "info", key: "这张卡已经不能用了，没有扣卡" });
+    expect(ok({ status: "refused", code: "not_applicable" })).toMatchObject({ tone: "info", key: "此刻没有可用的卡，没有发出使用请求" });
+    expect(ok({ status: "refused", code: "identity_changed" })).toMatchObject({ tone: "info", key: "账号或登录凭据刚变过，没有发出使用请求；刷新后重新确认" });
+    expect(ok({ status: "refused", code: "disabled" }).key).toBe("实时读取已关闭（或刚被关过），没有发出使用请求");
+    expect(ok({ status: "refused", code: "http_429" })).toEqual({ tone: "error", key: "核对数据失败（{why}），没有发出使用请求", params: { why: reasonText("http_429")! } });
+    expect(ok({ status: "failed", code: "network" })).toMatchObject({ tone: "error", params: { why: "网络不通" } });
+    expect(ok({ status: "done", code: "brand_new" }).key).toBe("请求没完成，扣没扣以刷新后的数字为准");
+    expect(resetOutcome(409, { ok: false })).toMatchObject({ tone: "info", key: "已有一个使用请求在进行中" });
+    expect(resetOutcome(403, { ok: false }).key).toBe("需要 owner 本人的设备才能使用重置卡");
+    expect(resetOutcome(0, null).key).toBe("请求没完成，扣没扣以刷新后的数字为准");
+    expect(resetOutcome(500, { ok: false, error: "x" }).key).toBe("请求没完成，扣没扣以刷新后的数字为准");
   });
 });
