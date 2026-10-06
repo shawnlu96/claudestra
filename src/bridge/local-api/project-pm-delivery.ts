@@ -21,14 +21,15 @@ export async function deliverPmLocal<P extends Receipt>(
 ): Promise<Delivery> {
   const { db, agents } = facts;
   const original = agents.find((a) => a.name === to.agentName || a.channelId === to.channelId);
+  // The verified active PM naming an agent of its own project (e.g. its predecessor acting as supervisor) is never redirected back to itself.
+  // Checked before the no-project shortcut: a named letter whose target left the project is refused, not delivered as plain mail.
+  const directed = db && original ? pmDirectedVerdict(env, original, db, agents, facts.callerOf) : null;
+  if (directed === "refused") return { envelope: env, outcome: { kind: "dropped", reason: "sender is no longer the verified active PM that addressed it" } };
   if (!db || !original?.projectId) return send(env, to);
   // A retired PM still online finishes the conversations it started itself; offline, the active PM takes the answer over.
   // A human who picked this agent keeps talking to it, online or not: the PM role never answers in its place.
   const pushback = isCallerPushback(env), own = original.channelId ? clients.get(original.channelId) : undefined;
   const direct = isHumanDirect(env);
-  // The verified active PM naming an agent of its own project (e.g. its predecessor acting as supervisor) is never redirected back to itself.
-  const directed = pmDirectedVerdict(env, original, db, agents, facts.callerOf);
-  if (directed === "refused") return { envelope: env, outcome: { kind: "dropped", reason: "sender is no longer the verified active PM that addressed it" } };
   const name = (pushback && own) || direct || directed ? null : pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
   if (!name) {
     // pmClientFor may have lent another PM's socket under an older pointer; never deliver this channel's message through it.
@@ -147,9 +148,12 @@ export function pmRoleRoute(facts?: RouteFacts): (channelId: string) => (env: En
     const { db, agents } = facts ?? { db: ledgerDb(), agents: readRegistryAgentsSync() };
     const original = agents.find((a) => a.channelId === channelId);
     return (env) => {
-      if (!db || !original?.projectId || isHumanDirect(env) || isCallerPushback(env)) return null;
+      if (!db || !original || isHumanDirect(env) || isCallerPushback(env)) return null;
       try {
-        if (pmDirectedVerdict(env, original, db, agents, facts?.callerOf)) return null; // stays with the named agent; a refusal is settled by deliverPmLocal
+        const directed = pmDirectedVerdict(env, original, db, agents, facts?.callerOf);
+        // Refused: never claimable from this inbox. Flush hands it to deliverPmLocal, which drops it without sending to anyone.
+        if (directed === "refused") return { agentName: original.name, channelId };
+        if (directed === "directed" || !original.projectId) return null; // stays with the named agent
         const name = pmRedirect(db, original.projectId, original.name, env.from.kind === "local" ? env.from.agentName : undefined);
         return name ? { agentName: name, channelId: agents.find((a) => a.name === name && a.projectId === original.projectId)?.channelId } : null;
       } catch (e) {

@@ -1,5 +1,6 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
 import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
+import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
  * Discord Bridge Service — 主入口
  *
@@ -2360,6 +2361,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }, env.meta.messageId);
         }
 
+        notePmDirectedFrame(env, msg); // PMDIR1：入口帧的代理降级随这封原信封走，定向例外据此用 callerOf(ws, frame) 重核
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
           if (fromChannelId && !oneShot) pendingAgentCalls.dropRequest(target.channelId, fromChannelId, env.meta.messageId); // 只撤这一条
