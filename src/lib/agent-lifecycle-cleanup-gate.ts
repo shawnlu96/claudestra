@@ -1,11 +1,9 @@
 /**
- * Quiets the pending-cleanup retries (agent-lifecycle-run.ts): a debt whose result does not change is neither written to the ledger
- * again nor reported as failed again, and it is retried with a growing back-off (BACKOFF_BASE_MS doubling up to BACKOFF_MAX_MS)
- * instead of every pass. A changed result (other files, other reason, cleanup finished) is recorded and reported once, and the debt
- * is due again on the next pass. The state is a small JSON file (survives restarts), keyed by agent + original session (or the
- * pending row's createdAt when the session is unknown), so a re-created name never shares a debt's state.
- * The gate only ever withholds noise: the first retire is always recorded, a finished cleanup always closes its row, and when the
- * state file cannot be read or written retries run and record as before (logged), never skipped for good.
+ * Quiets pending-cleanup retries (agent-lifecycle-run.ts): an unchanged result (or error) is neither recorded nor reported again and
+ * backs off (BACKOFF_BASE_MS doubling to BACKOFF_MAX_MS); a changed one is recorded and reported once. State: a JSON file keyed by
+ * agent + original session (or the pending row's createdAt), so it survives restarts and a re-created name never shares it.
+ * It only withholds noise: a first retire is always recorded, a finished cleanup always closes its row, an unreadable / malformed
+ * state means "no back-off" (retry and record), never a debt skipped for good.
  */
 import { createHash } from "node:crypto";
 import { readFile, rename } from "node:fs/promises";
@@ -33,7 +31,14 @@ function gateKey(a: Pick<Action, "agent" | "sessionId" | "regAt">): string | nul
   return typeof a.regAt === "number" ? `${a.agent}\0\0${a.regAt}` : null;
 }
 
-/** null = unreadable (the caller falls back to ungated). A file that does not parse is set aside and read as empty. */
+const finite = (v: unknown, min: number): boolean => typeof v === "number" && Number.isFinite(v) && v >= min;
+const isSlot = (v: unknown): v is Slot => !!v && typeof v === "object" && typeof (v as Slot).digest === "string"
+  && finite((v as Slot).n, 0) && Number.isInteger((v as Slot).n) && finite((v as Slot).nextAt, 0) && finite((v as Slot).at, 0);
+
+/**
+ * null = unreadable (the caller falls back to ungated). A file that does not parse, or holds any malformed slot (a slot without a
+ * number nextAt would never be due again), is set aside and read as empty: at worst one more record / report, never a lost debt.
+ */
 async function load(d: Pick<GateDeps, "cleanupStatePath" | "now">): Promise<State | null> {
   const p = path(d);
   let raw: string;
@@ -44,7 +49,7 @@ async function load(d: Pick<GateDeps, "cleanupStatePath" | "now">): Promise<Stat
   }
   try {
     const s = JSON.parse(raw) as unknown;
-    if (s && typeof s === "object" && !Array.isArray(s)) return s as State;
+    if (s && typeof s === "object" && !Array.isArray(s) && Object.values(s).every(isSlot)) return s as State;
   } catch { /* set aside below */ }
   const aside = `${p}.corrupt-${d.now()}`;
   await rename(p, aside).catch((e: Error) => console.error(`[lifecycle] 坏的补清退避状态挪不开：${e.message}`));
@@ -71,9 +76,11 @@ async function update(d: GateDeps, key: string, slot: Slot | null): Promise<void
 export async function dueRetries(actions: Action[], d: Pick<GateDeps, "cleanupStatePath" | "now">): Promise<Action[]> {
   const s = actions.length ? await load(d) : {};
   if (!s) return actions;
+  const now = d.now();
+  // a nextAt further out than the longest back-off (clock moved back, hand edit) is due now rather than parked
   return actions.filter((a) => {
     const k = gateKey(a);
-    return !k || !s[k] || s[k].nextAt <= d.now();
+    return !k || !s[k] || s[k].nextAt <= now || s[k].nextAt - now > BACKOFF_MAX_MS;
   });
 }
 

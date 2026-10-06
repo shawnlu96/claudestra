@@ -1,17 +1,13 @@
 /**
- * A retired agent's own checkout, end to end (LIFE3; called from agent-lifecycle-run.ts in place of a bare removeCleanWorktree):
- *   1. it is a real directory directly under the worktree root (no symlink, no outside path), a linked, unlocked worktree whose
- *      admin dir is the repo's, and no current agent (any name or session not stopped for good) works in it;
- *   2. tracked change (modified / staged / conflict), a submodule, hidden index flags or a HEAD on no branch: kept as it is, the
- *      reason names the files and kinds (agent-lifecycle-cleanup-gate.ts makes it one PM notice per state);
- *   3. only untracked / ignored files: all archived and verified (agent-lifecycle-cleanup-archive.ts), then holders and the whole
- *      survey are read again, and only when nothing changed are the archived untracked files unlinked (their verified copies are
- *      the move) and `git worktree remove` runs, without --force; git deletes the ignored ones it would delete anyway.
- * Any read failing (registry, tmux, git, the disk) keeps the checkout and returns why: a reason is never read as "done".
+ * A retired agent's own checkout (LIFE3, from agent-lifecycle-run.ts): only a linked, unlocked worktree directly under the root that no
+ * current agent works in and the ledger does not hold (agent-lifecycle-cleanup-hold.ts). Tracked change: kept as is, the reason names
+ * files and kinds. Untracked / ignored only: archived and verified, then holders, ledger and survey re-read; only when nothing changed
+ * are the archived untracked files unlinked and `git worktree remove` (no --force) run. Any read failure keeps it and returns why.
  */
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { archiveSurvey } from "./agent-lifecycle-cleanup-archive.js";
+import { readWriteHold } from "./agent-lifecycle-cleanup-hold.js";
 import { ownedPath, surveyCheckout, type Survey } from "./agent-lifecycle-cleanup-scan.js";
 import { ARCHIVE_ROOT } from "./paths.js";
 import { type LiveAgent, stopped, within } from "./scheduler-retire.js";
@@ -19,10 +15,11 @@ import type { Git } from "./scheduler-review-worktree.js";
 
 export { dueRetries, gatedCollect } from "./agent-lifecycle-cleanup-gate.js";
 
-/** Test seams for where archives and the retry state live (production: the state dir). */
-export interface CleanupOpts { cleanupArchiveRoot?: string; cleanupStatePath?: string }
+/** Test seams for where archives, the retry state and the ledger live (production: the state dir). */
+export interface CleanupOpts { cleanupArchiveRoot?: string; cleanupStatePath?: string; cleanupLedgerPath?: string }
 export interface WorktreeCleanupDeps extends CleanupOpts { git: Git; worktreeRoot: string; now(): number }
-export interface CheckoutOwner { agent: string; sessionId?: string; regAt?: number }
+/** The plan's action: who owned it (agent + session, a retry's createdAt), which card, which rule. */
+export interface CheckoutOwner { agent: string; sessionId?: string; regAt?: number; taskId?: string | null; rule?: string }
 
 const holderOf = (agents: readonly LiveAgent[], dir: string, real: string): LiveAgent | undefined =>
   agents.find((a) => !stopped(a) && a.cwd && (within(a.cwd, dir) || within(a.cwd, real)));
@@ -49,11 +46,13 @@ export async function retireWorktree(deps: WorktreeCleanupDeps, dir: string, own
   const { real } = where;
   const held = holderOf(agents, dir, real);
   if (held) return `${held.name} 还在这里工作（agent 没停）`;
+  const hold = readWriteHold(deps.cleanupLedgerPath, owner);
+  if (hold) return hold;
   const s = await surveyCheckout(deps.git, real);
   if (typeof s === "string") return s;
   if (s.tracked.length) return `有已跟踪改动，原样保留交 PM（不搬未跟踪文件）：${trackedSummary(s)}`;
   let archived: string | null = null;
-  if (s.entries.length) {
+  if (s.entries.length || s.excluded.length) {
     const r = await archiveSurvey(deps.cleanupArchiveRoot ?? ARCHIVE_ROOT, { agent: owner.agent, sessionId: owner.sessionId ?? null,
       regAt: owner.regAt ?? null, checkout: dir }, s, deps.now());
     if ("why" in r) return r.why;
@@ -62,16 +61,20 @@ export async function retireWorktree(deps: WorktreeCleanupDeps, dir: string, own
   // re-read everything the decision rests on: a holder that appeared, a file written since the survey → nothing is moved
   const again = holderOf(await reread(), dir, real);
   if (again) return `${again.name} 刚进了这个目录，没动${archived ? `（归档已在 ${archived}）` : ""}`;
+  const held2 = readWriteHold(deps.cleanupLedgerPath, owner);
+  if (held2) return `${held2}${archived ? `（归档已在 ${archived}）` : ""}`;
   const s2 = await surveyCheckout(deps.git, real);
   if (typeof s2 === "string" || !sameSurvey(s, s2)) {
-    return `复核时内容变了，这轮不动${archived ? `（这一版归档在 ${archived}）` : ""}：${typeof s2 === "string" ? s2 : s2.tracked.length ? trackedSummary(s2) : "未跟踪文件有变"}`;
+    const what = typeof s2 === "string" ? s2 : s2.tracked.length ? trackedSummary(s2) : "未跟踪文件有变";
+    return `复核时内容变了，这轮不动${archived ? `（这一版归档在 ${archived}）` : ""}：${what}`;
   }
   const moved = s.entries.filter((e) => !e.ignored && e.type !== "dir");
   for (const e of moved) {
     const err = await unlink(join(real, e.path)).then(() => null, (x: Error) => x.message);
     if (err) return `归档后移走 ${e.path} 失败，其余保留（归档在 ${archived}）：${err}`;
   }
-  if (archived) steps.push(`未跟踪资料 ${s.entries.length} 项已归档并核对 → ${archived}${s.excluded.length ? `；可再生目录不归档：${s.excluded.join(", ")}` : ""}`);
+  const skipped = s.excluded.length ? `；可再生目录不归档（清单里列名）：${s.excluded.join(", ")}` : "";
+  if (archived) steps.push(`未跟踪资料 ${s.entries.length} 项已归档并核对 → ${archived}${skipped}`);
   const rm = await deps.git(["-C", real, "worktree", "remove", real]);
   return rm.code === 0 ? null : `git worktree remove 失败${archived ? `（未跟踪资料已归档在 ${archived}）` : ""}：${rm.out}`;
 }

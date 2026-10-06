@@ -1,11 +1,8 @@
 /**
- * Read-only survey of a retired agent's checkout before it may go (agent-lifecycle-cleanup.ts): is it a linked worktree of the right
- * place, what tracked change it carries, and every file git would not keep (untracked, ignored, dotfiles, nested repos, symlinks).
- * The file list comes from our own lstat walk, not from git's lists: git only says which paths are tracked (`ls-files --stage`) and
- * which ignored roots are regenerable, so a file git does not mention is still archived. Nothing here writes.
- * Regenerable rule (REGENERABLE): an entry git reports ignored (`status --ignored`) whose own name is one of these is not archived
- * but listed in the manifest as excluded; anything else ignored (.env, logs, scratch output) is archived like untracked files.
- * Outputs are parsed from formats with no leading blank (status v2, ls-files --stage / -v): the git helper trims its output.
+ * Read-only survey of a retired agent's checkout (agent-lifecycle-cleanup.ts): linked worktree of the right place, its tracked change,
+ * and every path git would not keep, from our own lstat walk (git only says what is tracked and what is ignored). Nothing here writes.
+ * Excluded from the archive (REGENERABLE): only a real directory git reports ignored whose name is listed; an ignored file or symlink
+ * of that name, and every other ignored path, is archived. Git output is parsed from formats with no leading blank (status v2, ls-files).
  */
 import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, readlink, realpath } from "node:fs/promises";
@@ -21,7 +18,7 @@ export interface ArchiveEntry {
   /** path relative to the checkout */
   path: string;
   type: "file" | "symlink" | "dir";
-  /** permission bits (mode & 0o7777) */
+  /** permission bits (mode & 0o7777); a directory's are set after its children are in */
   mode: number;
   size: number;
   /** sha256 of the bytes (file) or of the link text (symlink); "" for a dir */
@@ -39,7 +36,7 @@ export interface Survey {
   dir: string;
   tracked: TrackedChange[];
   entries: ArchiveEntry[];
-  /** ignored regenerable roots left out of the archive */
+  /** ignored regenerable directories left out of the archive (REGENERABLE rule) */
   excluded: string[];
   /** content hash of entries + excluded: the stable attempt id */
   id: string;
@@ -89,19 +86,25 @@ function parseStatus(out: string): { tracked: TrackedChange[]; ignored: string[]
 
 const under = (p: string, roots: readonly string[]): boolean => roots.some((r) => p === r || p.startsWith(`${r}/`));
 
-/** lstat walk of everything not tracked; a fifo / socket / device cannot be archived faithfully and refuses the whole survey. */
+/** lstat walk of everything not tracked, parents first; a fifo / socket / device cannot be archived faithfully and refuses the survey. */
 async function walk(real: string, tracked: Set<string>, skip: readonly string[], ignored: readonly string[]): Promise<ArchiveEntry[] | string> {
   const out: ArchiveEntry[] = [];
   let bytes = 0;
   const visit = async (rel: string): Promise<string | null> => {
     const names = (await readdir(join(real, rel))).sort();
-    if (!names.length && rel) out.push({ path: rel, type: "dir", mode: (await lstat(join(real, rel))).mode & 0o7777, size: 0, sha: "", ignored: under(rel, ignored) });
     for (const n of names) {
       const p = rel ? `${rel}/${n}` : n;
       if ((!rel && n === ".git") || under(p, skip) || tracked.has(p)) continue;
       const st = await lstat(join(real, p));
       const base = { path: p, mode: st.mode & 0o7777, ignored: under(p, ignored) };
-      if (st.isDirectory()) { const why = await visit(p); if (why) return why; continue; }
+      if (st.isDirectory()) {
+        // listed before its children (its permission bits are archived too); dropped again when it held only tracked / excluded paths
+        const at = out.push({ ...base, type: "dir", size: 0, sha: "" });
+        const why = await visit(p);
+        if (why) return why;
+        if (out.length === at && (await readdir(join(real, p))).length) out.pop();
+        continue;
+      }
       if (st.isSymbolicLink()) {
         const link = await readlink(join(real, p));
         out.push({ ...base, type: "symlink", size: Buffer.byteLength(link), sha: sha(link), link });
@@ -140,7 +143,13 @@ export async function surveyCheckout(git: Git, real: string): Promise<Survey | s
   const st = await g("status", "--porcelain=v2", "-z", "--ignored=traditional", "--untracked-files=normal");
   if (st.code !== 0) return `读不了工作区状态：${st.out}`;
   const { tracked: changes, ignored } = parseStatus(st.out);
-  const excluded = ignored.filter((p) => REGENERABLE.includes(basename(p))).sort();
+  const excluded: string[] = [];
+  for (const p of ignored.filter((x) => REGENERABLE.includes(basename(x)))) {
+    const kind = await lstat(join(real, p)).then((x) => (x.isDirectory() ? "dir" : "other"), (e: Error) => e);
+    if (kind instanceof Error) return `读不了 ${p}：${kind.message}`;
+    if (kind === "dir") excluded.push(p);
+  }
+  excluded.sort();
   let entries: ArchiveEntry[] | string;
   try { entries = await walk(real, tracked, excluded, ignored); } catch (e) { return `列不全 worktree 里的文件：${(e as Error).message}`; }
   if (typeof entries === "string") return entries;

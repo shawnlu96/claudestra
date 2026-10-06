@@ -1,21 +1,21 @@
 /**
- * LIFE3 retired worktree cleanup on real temporary git worktrees: untracked-only checkouts are archived (bytes, permission bits,
- * symlink text, dotfiles, ignored files; regenerable dirs listed as excluded), verified and then `git worktree remove`d; tracked /
- * staged / conflicting changes are kept and reported once per state across ticks and restarts with a persistent back-off; a
- * failed archive, an occupied target, a symlinked / outside / main checkout, a holder and any read failure all delete nothing.
+ * LIFE3 retired worktree cleanup on real temporary git worktrees: untracked-only checkouts are archived (bytes, file and directory
+ * permission bits, symlink text, dotfiles, ignored files; only ignored regenerable directories excluded), verified, then removed;
+ * tracked changes are kept and reported once per state across ticks / restarts with a persistent back-off; a failed archive, an
+ * occupied or symlinked target, an outside / main checkout, a holder, an open write dispatch / lease and any read failure delete nothing.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
 import { archiveSurvey, archiveTarget } from "../src/lib/agent-lifecycle-cleanup-archive.js";
-import { BACKOFF_BASE_MS } from "../src/lib/agent-lifecycle-cleanup-gate.js";
+import { BACKOFF_BASE_MS, dueRetries } from "../src/lib/agent-lifecycle-cleanup-gate.js";
 import { surveyCheckout, type Survey } from "../src/lib/agent-lifecycle-cleanup-scan.js";
 import { retireWorktree, type WorktreeCleanupDeps } from "../src/lib/agent-lifecycle-cleanup.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
 import { cardWorkerIndex, pendingCleanups, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
-import { planLifecycle } from "../src/lib/agent-lifecycle.js";
+import { planLifecycle, type Action } from "../src/lib/agent-lifecycle.js";
 import { ledgerFacts } from "../src/lib/agent-lifecycle-deps.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -75,8 +75,45 @@ describe("untracked only: archive, verify, remove", () => {
     expect(existsSync(join(files, "node_modules"))).toBe(false);
     const m = JSON.parse(readFileSync(join(dirs![1], "manifest.json"), "utf8"));
     expect(m).toMatchObject({ agent: "agent-x", sessionId: "sess-1", regAt: 7, excluded: ["node_modules"] });
-    expect(m.entries.map((e: { path: string }) => e.path).sort()).toEqual([".env", ".hidden", "dangling", "empty", "notes/deep/wip.md", "rel-link", "run.log", "tool.sh"]);
-    expect(steps.join()).toContain("可再生目录不归档：node_modules");
+    expect(m.entries.map((e: { path: string }) => e.path).sort()).toEqual([".env", ".hidden", "dangling", "empty", "notes", "notes/deep", "notes/deep/wip.md",
+      "rel-link", "run.log", "tool.sh"]);
+    expect(steps.join()).toContain("可再生目录不归档（清单里列名）：node_modules");
+  });
+
+  test("an ignored ordinary file / symlink named like a regenerable dir is archived; only the real ignored directory is excluded", async () => {
+    const { repo, wt, deps } = fixture();
+    writeFileSync(join(repo, ".gitignore"), "build\ndist\ncoverage\nnode_modules\n"); sh(repo, "commit", "-qam", "ignore");
+    sh(wt, "checkout", "-q", "--detach", "main");
+    writeFileSync(join(wt, "build"), "irreplaceable evidence"); symlinkSync("/elsewhere", join(wt, "dist"));
+    mkdirSync(join(wt, "coverage"), { recursive: true }); writeFileSync(join(wt, "coverage/lcov"), "regenerable");
+    const steps: string[] = [];
+    expect(await retireWorktree(deps, wt, owner, [], none, steps)).toBeNull();
+    const dir = steps.join("\n").match(/→ ([^；\s]+)/)![1];
+    expect([readFileSync(join(dir, "files/build"), "utf8"), readlinkSync(join(dir, "files/dist"))]).toEqual(["irreplaceable evidence", "/elsewhere"]);
+    const m = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    expect([m.excluded, m.entries.map((e: { path: string }) => e.path).sort()]).toEqual([["coverage"], ["build", "dist"]]);
+    expect(m.excludedRule).toContain("真实目录");
+  });
+
+  test("only an excluded regenerable directory: still a manifest naming it before the worktree goes", async () => {
+    const { wt, deps } = fixture();
+    mkdirSync(join(wt, "node_modules/p"), { recursive: true }); writeFileSync(join(wt, "node_modules/p/i.js"), "x");
+    const steps: string[] = [];
+    expect(await retireWorktree(deps, wt, owner, [], none, steps)).toBeNull();
+    const dir = steps.join("\n").match(/→ ([^；\s]+)/)![1];
+    expect(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"))).toMatchObject({ entries: [], excluded: ["node_modules"] });
+    expect(existsSync(wt)).toBe(false);
+  });
+
+  test("non-empty directory permission bits are archived and verified (0700 stays 0700)", async () => {
+    const { wt, deps } = fixture();
+    mkdirSync(join(wt, "private/inner"), { recursive: true }); writeFileSync(join(wt, "private/inner/note"), "secret");
+    chmodSync(join(wt, "private/inner"), 0o750); chmodSync(join(wt, "private"), 0o700);
+    const steps: string[] = [];
+    expect(await retireWorktree(deps, wt, owner, [], none, steps)).toBeNull();
+    const files = join(steps.join("\n").match(/→ ([^；\s]+)/)![1], "files");
+    expect([lstatSync(join(files, "private")).mode & 0o7777, lstatSync(join(files, "private/inner")).mode & 0o7777]).toEqual([0o700, 0o750]);
+    expect(readFileSync(join(files, "private/inner/note"), "utf8")).toBe("secret");
   });
 
   test("clean checkout: removed with no archive folder", async () => {
@@ -164,6 +201,26 @@ describe("archive failures and restarts", () => {
     mkdirSync(join(target, "files"), { recursive: true }); writeFileSync(join(target, "files", "u.txt"), "older archive");
     expect(await retireWorktree(deps, wt, owner, [], none, [])).toContain("不覆盖");
     expect([readFileSync(join(target, "files", "u.txt"), "utf8"), existsSync(join(wt, "u.txt"))]).toEqual(["older archive", true]);
+    // the same files but no manifest: not accepted as this attempt's archive either
+    writeFileSync(join(target, "files", "u.txt"), "u");
+    expect(await retireWorktree(deps, wt, owner, [], none, [])).toContain("manifest");
+    expect(existsSync(join(wt, "u.txt"))).toBe(true);
+  });
+
+  test("a symlinked target (or ancestor) leading outside the archive root is never trusted or written through", async () => {
+    const { dir, wt, archive, deps } = fixture();
+    writeFileSync(join(wt, "u.txt"), "u");
+    const survey = await surveyCheckout(git, realpathSync(wt)) as Survey;
+    const o = { agent: "agent-x", sessionId: "sess-1", regAt: 7, checkout: wt };
+    const target = archiveTarget(archive, o, survey)!, outside = join(dir, "outside");
+    mkdirSync(join(outside, "files"), { recursive: true }); writeFileSync(join(outside, "files", "u.txt"), "u");
+    mkdirSync(join(target, ".."), { recursive: true }); symlinkSync(outside, target);
+    expect(await retireWorktree(deps, wt, owner, [], none, [])).toContain("软链");
+    rmSync(target); mkdirSync(join(archive, "elsewhere"), { recursive: true });
+    rmSync(join(archive, "agent-x"), { recursive: true }); symlinkSync(join(archive, "elsewhere"), join(archive, "agent-x"));
+    expect("why" in await archiveSurvey(archive, o, survey, NOW)).toBe(true); // a symlinked agent folder is refused too
+    expect(await retireWorktree(deps, wt, owner, [], none, [])).not.toBeNull();
+    expect([existsSync(join(wt, "u.txt")), readdirSync(join(archive, "elsewhere"))]).toEqual([true, []]);
   });
 });
 
@@ -173,11 +230,11 @@ describe("ledger: notify once, back off, survive restart", () => {
     cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
     createTask(db, { actor: "owner", now: 1 }, { project: "p", id: "C1", title: "C1", kind: "code" });
     db.query("UPDATE tasks SET stage = 'verified' WHERE id = 'C1'").run();
-    return db;
+    return { db, path };
   }
 
   test("tracked change: one worker_retire event and one failed report across ticks / restarts; a state change reports again; clean finishes", async () => {
-    const db = ledger();
+    const { db } = ledger();
     const { wt, root, deps: wd } = fixture();
     writeFileSync(join(wt, "a.txt"), "changed\n");
     registerWorker(db, { agent: "agent-c", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
@@ -212,7 +269,7 @@ describe("ledger: notify once, back off, survive restart", () => {
   });
 
   test("registry read failure: the pending row is not closed and the same error is not re-reported", async () => {
-    const db = ledger();
+    const { db } = ledger();
     const { wt, root, deps: wd } = fixture();
     writeFileSync(join(wt, "u.txt"), "u");
     registerWorker(db, { agent: "agent-r", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
@@ -228,5 +285,69 @@ describe("ledger: notify once, back off, survive restart", () => {
     t += 3 * H;
     expect((await tick()).failed).toEqual([]);
     expect([existsSync(join(wt, "u.txt")), pendingCleanups(db).length]).toEqual([true, 1]);
+  });
+
+  test("open write dispatch (unknown effect) or a card write lease: nothing archived or removed, pending row kept, re-checked before moving", async () => {
+    const { db, path } = ledger();
+    const { wt, root, archive, deps: wd } = fixture();
+    writeFileSync(join(wt, "u.txt"), "u");
+    registerWorker(db, { agent: "agent-w", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
+    recordWorkerRetire(db, "scheduler", { agent: "agent-w", sessionId: "s1", taskId: "C1", role: "author", rule: "card_finished", reason: "t", idleMs: 1,
+      bytesBefore: 1, bytesAfter: 1, steps: [], now: NOW, pending: [{ checkout: wt, tmp: null }], retry: false });
+    db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES ('i1', 'C1', 'p', 'write', 'dispatch', 1, 1, 1, 1, 'unknown', 't', 1, 1)`).run();
+    db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'src/**', 'C1', 'i1', 1, 'card')").run();
+    const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
+    const tick = (now: number) => runLifecycle(planLifecycle({ now, policy: on, agents: [], index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
+      master: new Set(), swapPct: 10, pending: pendingCleanups(db) }), on, { manager: async () => ({ ok: true }), git, exists: existsSync, worktreeRoot: root,
+      agents: none, du: async () => 0, swapPct: async () => 0, record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => now,
+      cleanupStatePath: wd.cleanupStatePath, cleanupArchiveRoot: archive, cleanupLedgerPath: path });
+    expect((await tick(NOW)).failed.length).toBe(1);
+    const steps = () => listEvents(db, { project: "p" }).filter((e) => (e.data as { retry?: boolean }).retry).map((e) => String((e.data as { steps: string[] }).steps));
+    expect(steps()[0]).toContain("写派单 i1（write / unknown）");
+    expect([existsSync(join(wt, "u.txt")), existsSync(archive), pendingCleanups(db).length]).toEqual([true, false, 1]);
+    db.query("UPDATE scheduler_intents SET status = 'done' WHERE id = 'i1'").run(); // effect settled, lease still held
+    expect((await tick(NOW + 3 * H)).failed.length).toBe(1);
+    expect(steps().at(-1)).toContain("调度资源 src/**");
+    expect([existsSync(join(wt, "u.txt")), pendingCleanups(db).length]).toEqual([true, 1]);
+    db.query("DELETE FROM scheduler_resources").run();
+    // a lease taken between the archive and the move: archived copy stays, nothing moved
+    const o = { agent: "agent-w", sessionId: "s1", regAt: pendingCleanups(db)[0].createdAt, taskId: "C1", rule: "cleanup_retry" };
+    const late = async () => { db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'x', 'C1', 'i1', 1, 'card')").run(); return []; };
+    expect(await retireWorktree({ ...wd, cleanupLedgerPath: path }, wt, o, [], late, [])).toContain("调度资源 x");
+    expect([existsSync(join(wt, "u.txt")), existsSync(archive)]).toEqual([true, true]);
+    db.query("DELETE FROM scheduler_resources").run();
+    expect((await tick(NOW + 9 * H)).done.map((d) => d.agent)).toEqual(["agent-w"]);
+    expect([existsSync(wt), pendingCleanups(db)]).toEqual([false, []]);
+  });
+
+  test("a retry whose pending row no longer matches (other createdAt / session) or an unreadable ledger touches nothing", async () => {
+    const { db, path } = ledger();
+    const { wt, deps } = fixture();
+    writeFileSync(join(wt, "u.txt"), "u");
+    registerWorker(db, { agent: "agent-v", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
+    recordWorkerRetire(db, "scheduler", { agent: "agent-v", sessionId: "s1", taskId: "C1", role: "author", rule: "card_finished", reason: "t", idleMs: 1,
+      bytesBefore: 1, bytesAfter: 1, steps: [], now: NOW, pending: [{ checkout: wt, tmp: null }], retry: false });
+    const d = { ...deps, cleanupLedgerPath: path }, base = { agent: "agent-v", taskId: "C1", rule: "cleanup_retry" };
+    expect(await retireWorktree(d, wt, { ...base, sessionId: "s1", regAt: 6 }, [], none, [])).toContain("核不上原登记");
+    expect(await retireWorktree(d, wt, { ...base, sessionId: "s2", regAt: 5 }, [], none, [])).toContain("核不上原登记");
+    const junk = join(deps.cleanupArchiveRoot!, "..", "junk.sqlite");
+    writeFileSync(junk, "not a database");
+    expect(await retireWorktree({ ...deps, cleanupLedgerPath: junk }, wt, { ...base, sessionId: "s1", regAt: 5 }, [], none, [])).toContain("台账读不了");
+    expect([existsSync(join(wt, "u.txt")), existsSync(deps.cleanupArchiveRoot!)]).toEqual([true, false]);
+  });
+});
+
+describe("back-off state", () => {
+  const act = (agent: string): Action => ({ agent, taskId: "C1", role: "author", rule: "cleanup_retry", idleMs: null, reason: "t", sessionId: "s", regAt: 1 });
+  test("a malformed slot (no nextAt) or a nextAt beyond the longest back-off never parks a debt for good", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "life3-gate-"));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    const p = join(dir, "cleanup.json");
+    writeFileSync(p, JSON.stringify({ "agent-a\0s": {}, "agent-b\0s": { digest: "d", n: 1, nextAt: NOW + BACKOFF_BASE_MS, at: NOW } }));
+    expect((await dueRetries([act("agent-a"), act("agent-b")], { cleanupStatePath: p, now: () => NOW })).map((a) => a.agent)).toEqual(["agent-a", "agent-b"]);
+    expect(readdirSync(dir).some((f) => f.startsWith("cleanup.json.corrupt-"))).toBe(true);
+    writeFileSync(p, JSON.stringify({ "agent-b\0s": { digest: "d", n: 1, nextAt: NOW + BACKOFF_BASE_MS, at: NOW }, "agent-c\0s": { digest: "d", n: 1, nextAt: NOW + 100 * H, at: NOW } }));
+    expect((await dueRetries([act("agent-b"), act("agent-c")], { cleanupStatePath: p, now: () => NOW })).map((a) => a.agent)).toEqual(["agent-c"]);
   });
 });
