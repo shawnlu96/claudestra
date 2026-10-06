@@ -27,7 +27,8 @@ type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
   agent: Manager;
   agents: RetireDeps["agents"];
-  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession): Promise<EnsureResult>;
+  /** tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX). */
+  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: string): Promise<EnsureResult>;
   active(): void;
   registryPath?: string;
 }
@@ -48,18 +49,18 @@ function productionDeps(db: Database): ReviewSwapDeps {
     assertSchedulerLease();
     return r;
   };
-  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old) => createReplacement(db, task, family, old, agent) };
+  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag) => createReplacement(db, task, family, old, agent, tag) };
 }
 
-async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager): Promise<EnsureResult> {
-  const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
+async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager, tag = ""): Promise<EnsureResult> {
+  const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}${tag}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
   if (existing && (existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
     return { kind: "unknown", reason: `${name} 被其他会话占用，不能覆盖` };
   }
   const author = getSchedulerSession(db, task.id, "author");
   const source = peerPrRepoDir(task) ?? rows.find((r) => r.name === (author?.agent ?? task.agent))?.cwd;
   if (!source) return { kind: "manual", reason: "找不到作者工作目录，无法建立新的审查 worktree" };
-  const dir = join(statePath("worktrees"), `rv-${task.id.toLowerCase()}`);
+  const dir = join(statePath("worktrees"), `rv-${task.id.toLowerCase()}${tag}`);
   assertSchedulerLease();
   const opened = await openReviewWorktree(source, dir, task.headSHA, async (args) => {
     assertSchedulerLease(); const result = await git(args); assertSchedulerLease(); return result;
@@ -125,7 +126,11 @@ async function stopOld(db: Database, ctx: WriteCtx, intent: SchedulerIntent, dep
 async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, maxWorkers: number, deps: ReviewSwapDeps): Promise<string | null> {
   const task = mustTask(db, intent.taskId), workflow = getWorkflow(db, task.id);
   const swap = latestReviewerSwap(listEvents(db, { project: task.project, target: task.id }));
-  if (!swap || typeof swap.data.intentId !== "string" || getIntent(db, swap.data.intentId)?.status !== "done") throw new LedgerError("conflict", "旧审查尚未完成换人");
+  // A refusal epoch has no review_swap intent: its own event is the completed retirement (scheduler-review-swap.ts).
+  const refusal = !!swap?.data.refusal;
+  if (!swap || typeof swap.data.intentId !== "string" || (!refusal && getIntent(db, swap.data.intentId)?.status !== "done")) {
+    throw new LedgerError("conflict", "旧审查尚未完成换人");
+  }
   if (getSchedulerSession(db, task.id, "reviewer")?.createIntentId === intent.id) return null;
   if (intent.status === "submitted") {
     if ((ctx.now ?? Date.now()) - intent.updatedAt < CLAIM_LEASE_MS) return "新的审查会话已认领创建，等待绑定回执";
@@ -137,7 +142,8 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return "本机另一家族审查名额已满，等待空位后自动续派";
   const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily;
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
-  const got = await deps.ensure(task, wrote === "claude" ? "codex" : "claude", swappedSession(db, swap.data.intentId));
+  const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
+  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : undefined);
   deps.active();
   if (got.kind !== "ready") {
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: oneLine(got.reason) });

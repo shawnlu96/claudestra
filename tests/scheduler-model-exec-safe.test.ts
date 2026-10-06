@@ -1,7 +1,8 @@
 /**
- * MODELX safe handling (PM spec dispatch-recovery-MODELX-safe-handling.md): a provider safety refusal under on is preserved,
- * paused and told once — never continued. Production tick path on a temp ledger with fake workers: zero session creates,
- * swaps or merges across ticks and replays, late refusals of an old head stay evidence only, a recorded result is untouched.
+ * MODELX evidence and dedup, kept from the safe-handling round under owner 10-06 14:45 (A): the refusal is preserved and told
+ * once, its continuation runs once as the exemption epoch (scheduler-model-exec.test.ts drives the rest). Production tick path on
+ * a temp ledger with fake workers: replays add no record, inform or epoch and never merge; late refusals of an old head stay
+ * evidence only; a recorded result is untouched; observe / off run nothing.
  */
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -58,20 +59,20 @@ function failWith(message: string) {
   };
 }
 
-test("on: two ticks and a restart replay keep one record, one inform, and zero create / swap / merge", async () => {
+test("on: the tick and a restart replay keep one record, one inform, one epoch, and zero create / merge", async () => {
   const before = effects(), sent = f.sent.length;
   failWith(CYBER);
-  expect(await f.tick()).toMatchObject({ step: "manual" });
-  await f.tick();
+  expect(await f.tick()).toMatchObject({ step: "refusal_epoch" });
   setModelOutcomeReader(CFG); // a restarted service reloads the policy and replays the same failed ticket
-  await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER });
+  const replay = await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER });
+  expect(typeof replay === "object" && replay.epoch.includes("已执行过")).toBe(true);
   expect(ops("model_refusal_retry")).toHaveLength(1);
   expect(ops("model_refusal_retry")[0].data).toMatchObject({ evidence: CYBER, intentId: first.id, agent: "agent-rv-t1", family: "codex",
     session: "s-rv", head: H1, specRev: f.task().specRev, round: f.task().round, noReport: true, verdict: null });
   expect(ops("refusal_owner_inform")).toHaveLength(1);
-  expect(effects()).toEqual(before);
+  expect(effects()).toEqual({ ...before, swaps: 1 });
   expect(f.sent.length).toBe(sent);
-  expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
+  expect(getWorkflow(f.db, "T1")!.mode).toBe("auto"); // not escalated: the exemption review is next
   expect(events().some((e) => e.kind === "review")).toBe(false); // no report is never a pass
 });
 
@@ -86,7 +87,7 @@ test("several signals on one ticket: the first refusal is the evidence, later on
   // the inform's dedup is card + refusal kind, so a usage-policy refusal of another ticket would be told separately
   expect([refusalKind(CYBER), refusalKind(USAGE)]).toEqual(["cyber_policy", "usage_policy"]);
   expect(ops("refusal_owner_inform")[0].dedupKey).toBe(informKey("T1", "cyber_policy"));
-  expect(ops("reviewer_swap")).toEqual([]);
+  expect(ops("reviewer_swap")).toHaveLength(1); // the replays re-run the same plan event: deduped by refusal-epoch:<seq>
 });
 
 test("a late refusal of an old head stays evidence of its own window: no hold or continuation on the current head", async () => {

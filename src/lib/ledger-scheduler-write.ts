@@ -21,6 +21,7 @@ import { templateFor } from "./scheduler-template.js";
 import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { exemptVerdict } from "./scheduler-review-swap.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 
@@ -44,7 +45,10 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     (read.facts.verdict === "changes" && !read.facts.findings.some((f) => f.severity === "P2"))) {
     throw new LedgerError("conflict", "合并前缺本轮同 head 的通过审查");
   }
-  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily)) throw new LedgerError("conflict", "合并前缺跨模型审查");
+  // MODELX: the author's own family passes only under this round's recorded, still-approved refusal exemption.
+  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) && !exemptVerdict(db, task, read.facts)) {
+    throw new LedgerError("conflict", "合并前缺跨模型审查");
+  }
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");

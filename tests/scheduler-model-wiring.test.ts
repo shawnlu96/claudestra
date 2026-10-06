@@ -10,7 +10,9 @@ import { pathToFileURL } from "node:url";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { listEvents } from "../src/lib/ledger-store.js";
-import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
+import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
+import { failedReason, setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
+import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const CYBER = "This request has been flagged for possible cybersecurity risk";
@@ -91,43 +93,33 @@ describe("observe (default)", () => {
 });
 
 describe("on", () => {
-  test("approved first refusal: MODEL's retry decision on the ledger, escalated once with the plan for PM; later ticks never stall", async () => {
+  test("approved first refusal (MODELX, owner 10-06 14:45): MODEL's record, then the exemption epoch instead of an escalate; later ticks never stall", async () => {
     setModelOutcomeReader(CFG);
     g.__modelwPolicy = mode("on");
     approve();
     failWith(CYBER);
-    const before = f.notices.length, sends = f.intents().length;
+    const before = f.notices.length;
     const { step, detail } = (await f.tick())!;
-    expect(step).toBe("manual");
-    expect(detail).toStartWith(`agent-rv-t1 回合失败：${CYBER}；MODEL 计划：retry_same（批准 `);
-    expect(detail).toContain("retry_same");
-    expect(detail).toContain("提供方安全拒绝保持暂停：不自动换会话 / 家族 / 提供方重试");
+    expect(step).toBe("refusal_epoch");
+    expect(detail).toContain("跨模型审查豁免:原审查模型策略拒审(批准 ");
+    expect(detail).toContain("owner 14:45 去掉同模型重试");
     expect(outcomes()).toMatchObject([{ kind: "note", data: { op: "model_refusal_retry", mode: "on" } }]);
-    expect(f.notices.slice(before)).toHaveLength(1);
-    expect(f.notices.at(-1)).toStartWith(today(CYBER));
-    expect(f.notices.at(-1)).toContain("retry_same");
-    // The card is PM's now: repeated ticks neither replay a "recovery" nor add records, notices or new orders.
-    for (let n = 0; n < 4; n++) expect((await f.tick())?.step).not.toBe("recovery");
+    expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "fallback_manual")).toBe(false);
+    expect(f.notices.slice(before)).toEqual([]); // PM is not asked; the owner inform is a ledger note
+    // The failed ticket belongs to the old epoch: the next plan is the new reviewer's session, not a replay of the record.
+    expect(planScheduler(autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2 })))
+      .toMatchObject({ kind: "intent", action: "ensure_session", sessionRole: "reviewer", sessionFamily: "claude" });
     expect(outcomes()).toHaveLength(1);
-    expect(f.notices.slice(before)).toHaveLength(1);
-    expect(f.intents()).toHaveLength(sends);
   });
 
-  test("a long host message is shortened, never the plan: PM notice, fallback_manual and detail all keep kind, approval and the pause", async () => {
-    setModelOutcomeReader(CFG);
-    g.__modelwPolicy = mode("on");
-    approve();
+  test("a long host message is shortened, never the plan: an unexecuted continuation keeps kind, approval and why", () => {
     const long = `${CYBER}. ${"Additional diagnostic context. ".repeat(20)}`;
+    const plan = "；MODEL 计划：retry_same（批准 ask_x，台账 #31）未执行：不执行拒审接续，退人工：批准已撤销";
+    const text = failedReason("agent-rv-t1 回合失败", long, plan);
     expect(long.length).toBeGreaterThan(560);
-    failWith(long);
-    const { step, detail } = (await f.tick())!;
-    expect(step).toBe("manual");
-    const fallback = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.data.op === "fallback_manual");
-    for (const text of [detail, f.notices.at(-1)!, String(fallback?.data.reason)]) {
-      expect(text).toContain(`agent-rv-t1 回合失败：${CYBER}`);
-      expect(text).toMatch(/MODEL 计划：retry_same（批准 [^，]+，台账 #\d+）——提供方安全拒绝保持暂停/);
-    }
-    expect(detail.length).toBeLessThanOrEqual(560);
+    expect(text).toStartWith(`agent-rv-t1 回合失败：${CYBER}`);
+    expect(text).toEndWith(plan);
+    expect(text.length).toBeLessThanOrEqual(560);
   });
 
   test("observe with a long host message: today's text and cut, untouched", async () => {

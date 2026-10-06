@@ -2,27 +2,29 @@
  * dispatch-recovery-MODELW: the one production caller of MODEL's recordModelOutcome — the auto tick's "turn failed" branch.
  * The record goes through createRecoveryRuntimePorts with REFA's ledger approval port and CFG's recoveryPolicy, loaded at
  * run time from CFG's frozen location (no file = no port, MODEL observes; a broken module = a throwing port, MODEL turns off).
- * The caller always escalates as before; this step only answers a suffix for its reason. "" = today's text exactly: observe /
- * off / none / manual plans and every wiring error (logged as one diagnostic line). Mode on with a redispatch plan appends
- * "MODEL 计划：redispatch …，执行路径待 MODELX" (no formal path re-sends an order yet). A retry_same / exempt_review plan follows a
- * provider safety refusal and is never executed automatically (MODELX boundary: no new session / family / provider to get past a
- * safety decision): the suffix says the card stays paused for PM / owner, and the owner gets one inform note per card and refusal
- * kind. failedReason shortens a long host message so the plan survives the cap. The record is deduped per intent by MODEL's key;
- * the escalate by its own; the inform by card + kind.
+ * The caller escalates as before unless a refusal continuation ran; this step answers a suffix for its reason. "" = today's text
+ * exactly: observe / off / none / manual plans and every wiring error (logged as one diagnostic line). Mode on with a redispatch
+ * plan appends "MODEL 计划：redispatch …，执行路径待 MODELX" (no formal path re-sends an order yet). A retry_same / exempt_review plan
+ * follows a provider policy refusal of a review: MODELX executes it as exempt_review (owner 10-06 14:45, A — no same-model retry)
+ * through beginRefusalEpoch (one transaction, in this service like MODEL's own record) and the card is not escalated; a refused
+ * execution escalates with why. The owner gets one inform note per card and refusal kind, and one action note when the exempt
+ * review is refused too (manual). failedReason shortens a long host message so the plan survives the cap. The record is deduped
+ * per intent by MODEL's key; the epoch by its plan seq; the escalate by its own; the inform by card + kind.
  * tests/scheduler-model-wiring*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup } from "./ledger-store.js";
+import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { createRecoveryRuntimePorts } from "./recovery-runtime-ports.js";
 import type { LocalFamilies } from "./scheduler-local-families-config.js";
+import { reviewMaterialDigest } from "./scheduler-review-swap.js";
+import { beginRefusalEpoch } from "./scheduler-sessions.js";
 import type { OutcomeInput, OutcomeSignal, RecoveryPolicyPort } from "./scheduler-model-outcome.js";
 import type { SessionRef } from "./worker-session.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js" with { type: "macro" };
@@ -67,15 +69,12 @@ function authorizedFor(card: ModelWiringCard, failed: Placement): Placement[] {
   return out;
 }
 
-/** Same ticket window and node = same review materials; a moved head or spec is a new digest (MODEL then holds). */
-const materialDigest = (task: LedgerTask, sent: SchedulerIntent): string =>
-  `sha256:${createHash("sha256").update(JSON.stringify([task.project, task.id, sent.node, sent.head ?? "", sent.specRev])).digest("hex")}`;
-
 /**
- * Record the failed turn with MODEL; answers the suffix for the caller's escalate reason ("" = unchanged). Under on, a redispatch
- * plan is named as pending, a refusal continuation as paused (never run), each with its ledger seq; a safety refusal informs the owner once.
+ * Record the failed turn with MODEL; answers the suffix for the caller's escalate reason ("" = unchanged), or { epoch } when the
+ * refusal continuation ran and the card goes on without escalating. Under on, a redispatch plan is named as pending; a safety
+ * refusal informs the owner once per card and kind.
  */
-export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure): Promise<string> {
+export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerIntent, ref: SessionRef, failure: Failure): Promise<string | { epoch: string }> {
   let r: ReturnType<ReturnType<typeof createRecoveryRuntimePorts>["recordModelOutcome"]>;
   try {
     const policy = await loadPolicy();
@@ -84,18 +83,25 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
     const failed = { family: ref.family, machine: machineOf(ref) };
     r = ports.recordModelOutcome(card.db, { actor: "scheduler", now: card.deps.now() }, { intentId: sent.id, signal: { failure },
       failed: { ...failed, agent: ref.agent }, authorized: authorizedFor(card, failed), ended: true,
-      ...(ref.role === "reviewer" ? { review: { sessionId: ref.sessionId, materialDigest: materialDigest(card.task, sent) } } : {}) });
+      ...(ref.role === "reviewer" ? { review: { sessionId: ref.sessionId, materialDigest: reviewMaterialDigest(card.task, sent) } } : {}) });
   } catch (e) {
     diag(`${card.task.id} 意图 ${sent.id} 记模型结果失败，照旧退人工：${e instanceof Error ? e.message : String(e)}`);
     return "";
   }
   if (r.kind === "off") { if (r.diag) diag(`${card.task.id} 模型结果按 off：${r.diag}`); return ""; }
   if (r.kind !== "recorded" || r.mode !== "on") return "";
-  if (r.cls === "safety") informOwnerOnce(card, r.event);
-  if (r.plan.kind === "manual") return "";
   const p = r.plan;
-  // MODELX boundary: a provider's safety refusal is never retried automatically in a new session, family or provider.
-  if (p.kind !== "redispatch") return `；MODEL 计划：${p.kind}（批准 ${p.approvalId}，台账 #${r.event.seq}）——提供方安全拒绝保持暂停：不自动换会话 / 家族 / 提供方重试，待 PM / owner 处置`;
+  if (p.kind === "retry_same" || p.kind === "exempt_review") {
+    const done = runEpoch(card, r.event.seq);
+    informOwnerOnce(card, r.event, "error" in done ? null : done.event);
+    if (!("error" in done)) return { epoch: `${done.event.text}（台账 #${done.event.seq}${done.duplicate ? "，已执行过" : ""}）` };
+    return `；MODEL 计划：${p.kind}（批准 ${p.approvalId}，台账 #${r.event.seq}）未执行：${done.error}`;
+  }
+  if (r.cls === "safety") {
+    informOwnerOnce(card, r.event, null);
+    ownerActionOnce(card, r.event);
+  }
+  if (p.kind === "manual") return "";
   return `；MODEL 计划：${p.kind}（→ ${p.to.machine}（${p.to.family}），无现成正式路径），执行路径待 MODELX（台账 #${r.event.seq}，未执行）：${p.reason}`;
 }
 
@@ -103,21 +109,44 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
 export const refusalKind = (evidence: string): "cyber_policy" | "usage_policy" => isCyberPolicy(evidence) ? "cyber_policy" : "usage_policy";
 export const informKey = (taskId: string, kind: string): string => `model-refusal-inform:${taskId}:${kind}`;
 
-/**
- * Under on, a safety refusal tells the owner once per card and refusal kind: an inform note (no push, no buttons) on the ledger,
- * deduped across retries, ticks and restarts. The card itself stays paused; a failed write is one diagnostic line, never a retry.
- */
-function informOwnerOnce(card: ModelWiringCard, record: LedgerEvent): void {
-  const kind = refusalKind(String(record.data.evidence ?? "")), key = informKey(card.task.id, kind);
+/** MODEL's recorded plan event → the refusal epoch, or why not (every guard re-read in the writer's transaction). */
+function runEpoch(card: ModelWiringCard, planSeq: number): { event: LedgerEvent; duplicate: boolean } | { error: string } {
+  try {
+    return beginRefusalEpoch(card.db, { actor: "scheduler", now: card.deps.now() }, card.task.id, planSeq);
+  } catch (e) {
+    if (!(e instanceof LedgerError)) diag(`${card.task.id} 拒审接续执行失败，退人工：${e instanceof Error ? e.message : String(e)}`);
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** One owner note per key (no push, no buttons), deduped across ticks and restarts; a failed write is one diagnostic line. */
+function ownerNoteOnce(card: ModelWiringCard, key: string, text: string, data: Record<string, unknown>): void {
   try {
     if (getEventByDedup(card.db, key)) return;
     appendEvent(card.db, { actor: "scheduler", now: card.deps.now(), dedupKey: key }, { project: card.task.project, target: card.task.id, kind: "note",
-      text: `[调度引擎] ${card.task.id} 被模型提供方安全策略拒绝（${kind}）：本卡暂停，不自动重试、不换会话 / 家族 / 提供方；原文已留证（台账 #${record.seq}），` +
-        "由 PM / owner 处置；要按卡挂起用 extra.refusalHold",
-      data: { op: "refusal_owner_inform", kind: "inform", audience: "owner", refusal: kind, recordSeq: record.seq } });
+      text, data: { audience: "owner", ...data } });
   } catch (e) {
     diag(`${card.task.id} 拒审告知 owner 没记上：${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/** Under on, a safety refusal tells the owner once per card and refusal kind (inform): what ran, or that the card is paused. */
+function informOwnerOnce(card: ModelWiringCard, record: LedgerEvent, epoch: LedgerEvent | null): void {
+  const kind = refusalKind(String(record.data.evidence ?? "")), id = card.task.id;
+  const what = epoch ? `已按 owner 规矩直接换家族审一次：${epoch.text}；提示词和材料不改，新审查员独立判断，它也拒就停人工`
+    : "本卡暂停，交 PM / owner 处置";
+  ownerNoteOnce(card, informKey(id, kind), `[调度引擎] ${id} 审查被模型提供方策略拒绝（${kind}）：${what}；原文已留证（台账 #${record.seq}）；` +
+    "要按卡挂起用 extra.refusalHold", { op: "refusal_owner_inform", kind: "inform", refusal: kind, recordSeq: record.seq, ...(epoch ? { epochSeq: epoch.seq } : {}) });
+}
+
+/** The exempt review was refused too: manual, and the owner gets one note to act on for the card (not per refusal). */
+function ownerActionOnce(card: ModelWiringCard, record: LedgerEvent): void {
+  const epoch = listEvents(card.db, { project: card.task.project, target: card.task.id })
+    .findLast((e) => e.kind === "scheduler" && e.data.op === "reviewer_swap" && !!e.data.refusal && e.seq < record.seq &&
+      e.data.head === record.data.head && e.data.specRev === record.data.specRev && e.data.round === record.data.round);
+  if (!epoch || (record.data.plan as { kind?: string } | undefined)?.kind !== "manual") return;
+  ownerNoteOnce(card, `model-refusal-manual:${card.task.id}`, `[调度引擎] ${card.task.id} 豁免审查也被拒（台账 #${record.seq}，豁免 #${epoch.seq}）：` +
+    "已停人工，不再换提供方，需要 owner 处理", { op: "refusal_owner_manual", kind: "action", recordSeq: record.seq, epochSeq: epoch.seq });
 }
 
 /** The auto tick's oneLine cap on an escalate reason (ledger event, PM notice, detail). */

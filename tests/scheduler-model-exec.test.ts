@@ -1,11 +1,12 @@
 /**
- * dispatch-recovery-MODELX under the safety boundary (PM 10-06 03:45): a provider's safety refusal is never retried
- * automatically in a new session, family or provider. MODEL's on-mode retry_same / exempt_review plans stay records: the card
- * pauses for PM / owner, the evidence stays, the owner hears once per card and refusal kind (inform note, no push), and no
- * exemption-looking ledger entry lets a same-family verdict through either merge gate. Real ledger, synthetic workers.
+ * dispatch-recovery-MODELX, owner 10-06 14:45 (A): a provider policy refusal of the review (cyber_policy included) goes straight to
+ * the other family under a recorded exemption — no same-model retry. The production tick path on a temp ledger with fake workers
+ * and a fake swap runtime: first refusal → refusal epoch (old binding retired, history kept) → new session of the author's family,
+ * marked with the exemption and approval id, crossModel false → same materials → its verdict passes both merge gates; a refusal of
+ * the exempt review → manual, no second epoch. Revoked approval / owner hold / digest / head drift → nothing runs; one run per plan.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
@@ -15,15 +16,19 @@ import { planIntent } from "../src/lib/ledger-scheduler-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
+import { createRefusalApprovalPort } from "../src/lib/recovery-refusal-approval.js";
+import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
-import { EXEMPTION_TEXT } from "../src/lib/scheduler-model-outcome.js";
-import { modelOutcomeStep, setModelOutcomeReader, type ModelWiringCard } from "../src/lib/scheduler-model-wiring.js";
-import { bindSchedulerSession, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
-import type { SessionRef } from "../src/lib/worker-session.js";
+import { EXEMPTION_TEXT, recordModelOutcome } from "../src/lib/scheduler-model-outcome.js";
+import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
+import { reviewMaterialDigest } from "../src/lib/scheduler-review-swap.js";
+import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
+import { beginRefusalEpoch, bindSchedulerSession, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 const CYBER = "This request has been flagged for possible cybersecurity risk";
 const USAGE = "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy";
+const EX = "agent-task-rv-t1-r1-ex";
 const dir = mkdtempSync(join(tmpdir(), "modelx-"));
 const g = globalThis as { __modelxMode?: string };
 const CFG = join(dir, "recovery-policy.ts");
@@ -32,10 +37,14 @@ writeFileSync(CFG, "export function recoveryPolicy() { return { mode: globalThis
 let f: ReturnType<typeof autoFixture>;
 let first: SchedulerIntent;
 let errors: ReturnType<typeof spyOn>;
+let created: { family: string; tag?: string }[];
+let askId: string;
+const real = new WeakMap<object, ReturnType<typeof autoFixture>["tickDeps"]["worker"]>();
 beforeEach(async () => {
   errors = spyOn(console, "error").mockImplementation(() => {});
   setModelOutcomeReader(CFG);
   g.__modelxMode = "on";
+  created = [];
   f = autoFixture();
   await toBuild(f);
   await f.tick();
@@ -43,159 +52,266 @@ beforeEach(async () => {
   await f.tick();
   expect(await f.tick()).toMatchObject({ step: "sent" });
   first = getIntent(f.db, f.intents().findLast((i) => i.action === "review")!.id)!;
+  askId = answer("policy_refusal_rule_go", 2000);
 });
 afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); delete g.__modelxMode; });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-function approve() {
-  const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule", askKey: "policy-refusal-rule" }, 1000);
-  answerAsk(f.db, ask.id, { choices: ["[button:policy_refusal_rule_go]"], labels: ["go"], text: "", principal: OWNER_PRINCIPAL_ID,
-    owner: true, via: "web_card", at: 2000, final: true });
+/** The owner's standing refusal rule (or a later answer that revokes it). */
+function answer(button: string, at: number): string {
+  const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule", askKey: "policy-refusal-rule" }, at - 1);
+  answerAsk(f.db, ask.id, { choices: [`[button:${button}]`], labels: ["x"], text: "", principal: OWNER_PRINCIPAL_ID, owner: true, via: "web_card", at, final: true });
+  return ask.id;
 }
-function failWith(message: string, kind: "error" | "quota" = "error") {
-  const real = f.tickDeps.worker;
-  f.tickDeps.worker = (ref) => {
-    const w = real(ref);
-    return "manual" in w ? w : { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind, message } }) };
+/** Every bound worker reports this failure for its turn; null restores the fixture's own worker. */
+function failWith(message: string | null) {
+  const worker = real.get(f) ?? f.tickDeps.worker;
+  real.set(f, worker);
+  f.tickDeps.worker = message === null ? worker : (ref) => {
+    const w = worker(ref);
+    return "manual" in w ? w : { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind: "error", message } }) };
   };
 }
-const events = () => listEvents(f.db, { project: "p", target: "T1" });
-const informs = () => events().filter((e) => e.data.op === "refusal_owner_inform");
-const swaps = () => events().filter((e) => e.data.op === "reviewer_swap");
-const reviewers = () => f.db.query("SELECT agent, sessionId, state FROM scheduler_sessions WHERE taskId = 'T1' AND role = 'reviewer'").all();
-const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { now: () => f.at("x").now! } });
-const rv = (sessionId: string, over: Partial<SessionRef> = {}): SessionRef =>
-  ({ taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId, family: "codex", transport: "acp", ...over });
-/** A formal new review ticket in the same window, as MODELW's tests make one. */
-function ticket(id: string): SchedulerIntent {
-  const t = f.task();
-  return planIntent(f.db, f.at("scheduler"), { id, taskId: t.id, taskRev: t.rev, workflowRev: getWorkflow(f.db, t.id)!.rev,
-    causalSeq: listEvents(f.db, { project: "p" }).at(-1)!.seq, action: "review", node: "adversarial_review", reason: "ticket" }).intent;
+const editRegistry = (fn: (r: { agents: Record<string, Record<string, unknown>> }) => void) => {
+  const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
+  fn(r);
+  writeFileSync(f.registryPath, JSON.stringify(r));
+};
+/** The swap runtime's lifecycle effects, faked: a new registry agent for the exempt reviewer, nothing else touched. */
+const swapDeps = (): ReviewSwapDeps => ({
+  registryPath: f.registryPath, active: () => {}, agents: async () => [], agent: async () => ({ ok: true }),
+  ensure: async (task, family, _old, tag) => {
+    created.push({ family, tag });
+    editRegistry((r) => { r.agents[EX] = { runtime: family === "codex" ? "codex" : "claude-code", sessionId: "s-ex", cwd: join(f.dir, "rv-ex") }; });
+    return { kind: "ready", created: true, ref: { taskId: task.id, role: "reviewer", agent: EX, sessionId: "s-ex", family, transport: "tmux" } };
+  },
+});
+async function tick() {
+  const manager = (...a: string[]) => a[1] === "scheduler-review-swap"
+    ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()) : f.tickDeps.manager(...a);
+  const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, { ...f.tickDeps, manager });
+  if (r.failed.length) throw new Error(JSON.stringify(r.failed));
+  return r.cards[0];
 }
+const events = () => listEvents(f.db, { project: "p", target: "T1" });
+const ops = (op: string) => events().filter((e) => e.data.op === op);
+const epochs = () => ops("reviewer_swap");
+const reviewers = () => f.db.query("SELECT agent, sessionId, family, state FROM scheduler_sessions WHERE taskId = 'T1' AND role = 'reviewer' ORDER BY rowid").all();
+const exemption = (id = askId) => `${EXEMPTION_TEXT}(批准 ${id})`;
+const verdict = (verdict: "pass" | "changes" = "pass") => {
+  const findings = join(f.dir, `ex-${Date.now()}.json`);
+  writeFileSync(findings, "[]");
+  return f.cliWith({ callerSession: "s-ex" }, EX, "review", "T1", "--reviewer", EX, "--verdict", verdict, "--p0", "0", "--p1", "0", "--p2", "0",
+    "--head", H1, "--session", "s-ex", "--family", "claude", "--findings", findings, "--path", "reviews/T1-r1/report.md");
+};
+/** First refusal through the tick: the epoch; then the new session is created, bound and sent the same order. */
+async function exempted() {
+  failWith(CYBER);
+  expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+  failWith(null);
+  expect(await tick()).toMatchObject({ step: "session" });
+  expect(await tick()).toMatchObject({ step: "sent" });
+}
+const mergePlan = () => {
+  const t = f.task();
+  return () => planIntent(f.db, f.at("scheduler"), { id: `merge-${t.rev}`, taskId: "T1", taskRev: t.rev, workflowRev: getWorkflow(f.db, "T1")!.rev,
+    causalSeq: listEvents(f.db, { project: "p" }).at(-1)!.seq, action: "merge", node: "merge_deploy", reason: "合并" });
+};
 
-describe("a safety refusal under on pauses the card; MODEL's continuation plan is never executed", () => {
-  test("approved first refusal: retry_same recorded with its evidence, escalated as paused, no epoch / new session / new order", async () => {
-    approve();
+describe("first policy refusal → straight to the exemption (test 1)", () => {
+  test("epoch: old binding retired with history, new author-family session marked exempt, same materials, crossModel false", async () => {
     failWith(CYBER);
-    const intents = f.intents().length;
-    const { step, detail } = (await f.tick())!;
-    expect(step).toBe("manual");
-    expect(detail).toContain("MODEL 计划：retry_same（批准 ");
-    expect(detail).toContain("提供方安全拒绝保持暂停：不自动换会话 / 家族 / 提供方重试");
-    expect(detail).not.toContain("执行路径待 MODELX");
-    expect(events().find((e) => e.data.op === "model_refusal_retry")).toMatchObject({ data: { evidence: CYBER, noReport: true, verdict: null, session: "s-rv" } });
-    for (let n = 0; n < 4; n++) await f.tick();
-    expect(f.intents()).toHaveLength(intents);
-    expect(f.intents().some((i) => i.action === "review_swap" || (i.action === "ensure_session" && i.node === "adversarial_review" && i.status === "pending"))).toBe(false);
-    expect(swaps()).toEqual([]);
-    expect(reviewers()).toEqual([{ agent: "agent-rv-t1", sessionId: "s-rv", state: "active" }]);
+    const { step, detail } = (await tick())!;
+    expect(step).toBe("refusal_epoch");
+    expect(detail).toContain(exemption());
+    expect(detail).toContain("owner 14:45 去掉同模型重试"); // MODEL still records retry_same; executed as exempt_review
+    const plan = ops("model_refusal_retry");
+    expect(plan).toHaveLength(1);
+    expect(epochs()).toMatchObject([{ dedupKey: `refusal-epoch:${plan[0].seq}`, data: { op: "reviewer_swap", intentId: first.id, fromFamily: "codex",
+      toFamily: "claude", agent: "agent-rv-t1", sessionId: "s-rv", head: H1, round: 1, refusal: { planSeq: plan[0].seq, planKind: "retry_same",
+        executed: "exempt_review", approvalId: askId, exemption: exemption(), crossModel: false, note: "owner 14:45 去掉同模型重试" } } }]);
+    expect(reviewers()).toEqual([{ agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", state: "retired" }]);
+    expect(ops("fallback_manual")).toEqual([]);
+
+    failWith(null);
+    expect(await tick()).toMatchObject({ step: "session" });
+    expect(created).toEqual([{ family: "claude", tag: "-ex" }]);
+    expect(reviewers()).toEqual([{ agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", state: "retired" },
+      { agent: EX, sessionId: "s-ex", family: "claude", state: "active" }]);
+    expect(ops("session_bind").at(-1)).toMatchObject({ data: { role: "reviewer", agent: EX, family: "claude", refusalEpoch: epochs()[0].seq,
+      approvalId: askId, exemption: exemption(), crossModel: false } });
+
+    const sentBefore = f.sent.length;
+    expect(await tick()).toMatchObject({ step: "sent" });
+    const second = f.intents().findLast((i) => i.action === "review")!;
+    expect(second).toMatchObject({ recipient: EX });
+    const orig = f.sent.find((s) => s.agent === "agent-rv-t1")!, again = f.sent.slice(sentBefore).find((s) => s.agent === EX)!;
+    const strip = (t: string, id: string, agent: string) => t.replaceAll(id, "<order>").replaceAll(agent, "<reviewer>");
+    expect(strip(again.text, second.id, EX)).toBe(strip(orig.text, first.id, "agent-rv-t1")); // the order is the same, word for word
+    const sent2 = getIntent(f.db, second.id)!;
+    expect(reviewMaterialDigest(f.task(), sent2)).toBe(String(plan[0].data.materialDigest));
   });
 
-  test("old path stays closed: a new reviewer session after the record is still a binding conflict", async () => {
-    approve();
-    expect(await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER })).toContain("保持暂停");
+  test("the exempt verdict goes through take_review / verdict as usual, then passes the planner and both merge gates", async () => {
+    await exempted();
+    expect(await verdict()).toMatchObject({ ok: true });
+    expect(events().findLast((e) => e.kind === "review")).toMatchObject({ data: { reviewer: EX, reviewerSessionId: "s-ex", reviewerFamily: "claude" } });
+    expect(await tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).not.toThrow();
+    expect(mergePlan()).not.toThrow();
+  });
+});
+
+describe("the exempt review refused too → manual (test 3)", () => {
+  test("no second epoch, no third provider; MODEL holds; the owner gets one inform per kind and one action note per card", async () => {
+    await exempted();
+    failWith(USAGE);
+    expect(await tick()).toMatchObject({ step: "manual" });
+    expect(epochs()).toHaveLength(1);
+    expect(ops("model_safety_hold")).toHaveLength(1);
+    expect(ops("refusal_owner_inform").map((e) => e.data.refusal)).toEqual(["cyber_policy", "usage_policy"]);
+    expect(ops("refusal_owner_inform")[0].text).toContain(exemption());
+    expect(ops("refusal_owner_manual")).toMatchObject([{ data: { kind: "action", audience: "owner", epochSeq: epochs()[0].seq } }]);
+    for (let n = 0; n < 3; n++) await tick();
+    expect(epochs()).toHaveLength(1);
+    expect(ops("refusal_owner_manual")).toHaveLength(1);
+    expect(created).toHaveLength(1);
+  });
+
+  test("an exempt_review plan in a window that already had its epoch is refused by the executor", async () => {
+    await exempted();
+    const sent = getIntent(f.db, f.intents().findLast((i) => i.action === "review")!.id)!;
+    const plan = insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "escalate", text: "x", data: {
+      op: "model_refusal_exempt", mode: "on", cls: "safety", role: "reviewer", stale: false, intentId: sent.id, head: H1, specRev: f.task().specRev,
+      round: 1, session: "s-ex", family: "claude", approvalId: askId, materialDigest: reviewMaterialDigest(f.task(), sent), plan: { kind: "exempt_review" } } }, true);
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq)).toThrow("本轮已做过豁免审查");
+  });
+});
+
+describe("guards: nothing runs, the card goes to PM (test 4)", () => {
+  /** MODEL's on-mode record only, as the wiring writes it, without running it. */
+  function record(digest = reviewMaterialDigest(f.task(), first)) {
+    const r = recordModelOutcome(f.db, f.at("scheduler"), { intentId: first.id, signal: { failure: { kind: "error", message: CYBER } },
+      failed: { family: "codex", machine: "local", agent: "agent-rv-t1" }, authorized: [{ family: "codex", machine: "local" }, { family: "claude", machine: "local" }],
+      ended: true, review: { sessionId: "s-rv", materialDigest: digest } },
+    () => ({ mode: "on", manualAfterMs: null }), createRefusalApprovalPort(f.db));
+    expect(r).toMatchObject({ kind: "recorded", plan: { kind: "retry_same" } });
+    return (r as { event: { seq: number } }).event.seq;
+  }
+  const untouched = () => {
+    expect(epochs()).toEqual([]);
+    expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+  };
+  for (const [name, change, why] of [
+    ["approval revoked", () => { answer("policy_refusal_rule_stop", 3000); }, "批准 id 与计划不一致"],
+    ["card held by the owner", () => f.db.run("UPDATE tasks SET extra = json_set(extra, '$.refusalHold', json('true')) WHERE id = 'T1'"), "extra.refusalHold"],
+    ["head moved", () => f.db.run("UPDATE tasks SET headSHA = ? WHERE id = 'T1'", ["e".repeat(40)]), "head / specRev / 轮次已变"],
+    ["spec moved", () => f.db.run("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'"), "head / specRev / 轮次已变"],
+  ] as const) {
+    test(`${name}: refused, no epoch, binding kept`, () => {
+      const seq = record();
+      change();
+      expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq)).toThrow(why);
+      untouched();
+    });
+  }
+
+  test("material digest differs from the order's: refused, no epoch, binding kept", () => {
+    const seq = record(`sha256:${"0".repeat(64)}`);
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq)).toThrow("材料摘要不一致");
+    untouched();
+  });
+
+  test("held or revoked before the refusal: MODEL itself holds, the tick escalates, nothing runs", async () => {
+    f.db.run("UPDATE tasks SET extra = json_set(extra, '$.refusalHold', json('true')) WHERE id = 'T1'");
+    failWith(CYBER);
+    expect(await tick()).toMatchObject({ step: "manual" });
+    untouched();
+    expect(ops("refusal_owner_inform")).toHaveLength(1);
+  });
+
+  test("only the scheduler runs it, and only MODEL's recorded continuation events", () => {
+    const seq = record();
+    expect(() => beginRefusalEpoch(f.db, f.at("pm"), "T1", seq)).toThrow("只由调度服务");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq - 1)).toThrow("不是 MODEL 记下的拒审接续计划");
+    untouched();
+  });
+
+  for (const mode of ["observe", "off"]) {
+    test(`${mode}: nothing executes, escalated as before`, async () => {
+      g.__modelxMode = mode;
+      failWith(CYBER);
+      expect(await tick()).toMatchObject({ step: "manual" });
+      untouched();
+      expect(ops("refusal_owner_inform")).toEqual([]);
+    });
+  }
+});
+
+describe("one run per plan event (test 5)", () => {
+  test("replayed writer calls and repeated ticks: one epoch, one new session", async () => {
+    failWith(CYBER);
+    await tick();
+    const seq = Number(epochs()[0].data.refusal && (epochs()[0].data.refusal as { planSeq: number }).planSeq);
+    expect(beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq)).toMatchObject({ duplicate: true, event: { seq: epochs()[0].seq } });
+    failWith(null);
+    for (let n = 0; n < 4; n++) await tick();
+    expect(epochs()).toHaveLength(1);
+    expect(created).toHaveLength(1);
+    expect(ops("model_refusal_retry")).toHaveLength(1);
+    expect(f.intents().filter((i) => i.action === "review" && i.recipient === EX)).toHaveLength(1);
+  });
+});
+
+describe("ordinary cards keep their continuity rules (test 6)", () => {
+  test("without an epoch a new reviewer session is still a binding conflict", () => {
     const t = f.task();
     const ensure = planIntent(f.db, f.at("scheduler"), { id: "manual-ensure", taskId: "T1", taskRev: t.rev, workflowRev: getWorkflow(f.db, "T1")!.rev,
       causalSeq: listEvents(f.db, { project: "p" }).at(-1)!.seq, action: "ensure_session", node: "adversarial_review", reason: "换新会话" }).intent;
     settleIntent(f.db, f.at("scheduler"), { id: ensure.id, from: "pending", to: "submitted", receipt: "claimed" });
     expect(() => bindSchedulerSession(f.db, f.at("scheduler"), { taskId: "T1", role: "reviewer", intentId: ensure.id, agent: "agent-rv-t1",
       sessionId: "s-rv-2", family: "codex", transport: "acp", registryPath: f.registryPath })).toThrow("本卡角色已绑定另一个 session");
-    expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
-  });
-
-  test("exempt_review plan (second refusal, new ticket) is paused the same way: no switch to the author's family", async () => {
-    approve();
-    await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER });
-    const exempt = await modelOutcomeStep(card(), ticket("t2"), rv("s-rv-2"), { kind: "error", message: CYBER });
-    expect(exempt).toContain("MODEL 计划：exempt_review（批准 ");
-    expect(exempt).toContain("保持暂停");
-    expect(swaps()).toEqual([]);
-    expect(f.intents().some((i) => i.action === "review_swap")).toBe(false);
   });
 });
 
-describe("the owner hears once per card and refusal kind (inform, no push)", () => {
-  test("one inform for repeated cyber refusals; a usage-policy refusal is its own kind; replayed ticks add nothing", async () => {
-    approve();
-    const before = f.notices.length;
-    await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER });
-    await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER });
-    const t2 = ticket("t2");
-    await modelOutcomeStep(card(), t2, rv("s-rv-2"), { kind: "error", message: CYBER });
-    settleIntent(f.db, f.at("scheduler"), { id: t2.id, from: "pending", to: "cancelled", receipt: "拒审，原单终止" });
-    expect(informs()).toHaveLength(1);
-    expect(informs()[0]).toMatchObject({ kind: "note", data: { kind: "inform", audience: "owner", refusal: "cyber_policy" } });
-    expect(informs()[0].text).toContain("不自动重试");
-    expect(informs()[0].text).toContain("refusalHold");
-    await modelOutcomeStep(card(), ticket("t3"), rv("s-claude", { agent: "agent-claude-rv", family: "claude", transport: "tmux" }), { kind: "error", message: USAGE });
-    expect(informs().map((e) => e.data.refusal)).toEqual(["cyber_policy", "usage_policy"]);
-    expect(f.notices.length).toBe(before); // an inform is a ledger note, never a push
-  });
-
-  test("no approval: MODEL's hold, still paused, still one inform", async () => {
-    failWith(CYBER);
-    expect(await f.tick()).toMatchObject({ step: "manual" });
-    expect(events().find((e) => e.data.op === "model_safety_hold")).toBeTruthy();
-    expect(informs()).toHaveLength(1);
-  });
-
-  test("card held by the owner (extra.refusalHold): MODEL holds, nothing runs, one inform", async () => {
-    approve();
-    f.db.run("UPDATE tasks SET extra = json_set(extra, '$.refusalHold', json('true')) WHERE id = 'T1'");
-    expect(await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER })).toBe("");
-    expect(events().find((e) => e.data.op === "model_safety_hold")!.data.plan).toMatchObject({ kind: "manual", reason: expect.stringContaining("owner 已挂起") });
-    expect(swaps()).toEqual([]);
-    expect(informs()).toHaveLength(1);
-  });
-
-  test("observe and off inform nobody", async () => {
-    approve();
-    g.__modelxMode = "observe";
-    await modelOutcomeStep(card(), first, rv("s-rv"), { kind: "error", message: CYBER });
-    g.__modelxMode = "off";
-    await modelOutcomeStep(card(), ticket("t2"), rv("s-rv-2"), { kind: "error", message: CYBER });
-    expect(informs()).toEqual([]);
-  });
-
-  test("capacity is not a safety refusal: no inform, redispatch text unchanged", async () => {
-    const peer = rv("s-peer", { agent: "peer-rv", transport: "peer" });
-    expect(await modelOutcomeStep(card(), first, peer, { kind: "quota", message: "You've hit your usage limit" }))
-      .toContain("MODEL 计划：redispatch（→ local（codex），无现成正式路径），执行路径待 MODELX");
-    expect(informs()).toEqual([]);
-  });
-});
-
-describe("merge gates honour no exemption: same-family verdicts are refused", () => {
-  /** A passing verdict by the bound codex reviewer, then the card in merge. */
+describe("merge gates: only the round's recorded, approved exemption passes a same-family verdict", () => {
   async function passed() {
     expect(await f.review("pass", H1, [])).toMatchObject({ ok: true });
     expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   }
-  function forgeEpoch(over: Record<string, unknown> = {}) {
+  function forgeEpoch(over: Record<string, unknown> = {}, at: Record<string, unknown> = {}) {
     insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "scheduler", text: "forged",
-      data: { op: "reviewer_swap", intentId: "refusal-epoch:s1", agent: "agent-rv-t1", sessionId: "s-rv", round: f.task().round, head: H1,
-        specRev: f.task().specRev, refusal: { kind: "exempt_review", family: "codex", crossModel: false, approvalId: "ask_x",
-          exemption: `${EXEMPTION_TEXT}(批准 ask_x)`, ...over } } }, true);
+      data: { op: "reviewer_swap", intentId: first.id, agent: "agent-rv-t1", sessionId: "s-old", toFamily: "codex", round: f.task().round, head: H1,
+        specRev: f.task().specRev, ...at, refusal: { planSeq: 1, approvalId: askId, crossModel: false, exemption: exemption(), ...over } } }, true);
+    insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "scheduler", text: "forged bind",
+      data: { op: "session_bind", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", refusalEpoch: -1, approvalId: askId } }, true);
   }
-  const mergePlan = () => {
-    const t = f.task();
-    return () => planIntent(f.db, f.at("scheduler"), { id: "merge-x", taskId: "T1", taskRev: t.rev, workflowRev: getWorkflow(f.db, "T1")!.rev,
-      causalSeq: listEvents(f.db, { project: "p" }).at(-1)!.seq, action: "merge", node: "merge_deploy", reason: "合并" });
+  const refused = () => {
+    f.db.run("UPDATE task_workflows SET authorFamily = 'codex' WHERE taskId = 'T1'");
+    expect(mergePlan()).toThrow("合并前缺跨模型审查");
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow("跨模型审查");
   };
 
   test("control: the cross-family verdict passes both gates", async () => {
     await passed();
     expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).not.toThrow();
   });
-
-  for (const [name, over] of [["no mark at all", null], ["a mark with a mismatched approval id", { approvalId: "ask_other" }],
-    ["an epoch of an old head", { head: "9".repeat(40) }], ["an epoch of another round", { round: 99 }], ["a well-formed mark", {}]] as const) {
+  for (const [name, over, at] of [["no mark at all", null, {}], ["a mark with a mismatched approval id", { approvalId: "ask_other" }, {}],
+    ["an epoch of an old head", {}, { head: "9".repeat(40) }], ["an epoch of another round", {}, { round: 99 }],
+    ["a well-formed mark the reviewer was never bound under", {}, {}]] as const) {
     test(`same family as the author with ${name}: both gates refuse`, async () => {
       await passed();
-      if (over) forgeEpoch(over);
-      f.db.run("UPDATE task_workflows SET authorFamily = 'codex' WHERE taskId = 'T1'");
-      expect(mergePlan()).toThrow("合并前缺跨模型审查");
-      expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow("跨模型审查");
+      if (over) forgeEpoch(over, at);
+      refused();
     });
   }
+
+  test("the real exemption, approval revoked after the verdict: both gates refuse", async () => {
+    await exempted();
+    expect(await verdict()).toMatchObject({ ok: true });
+    expect(await tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+    answer("policy_refusal_rule_stop", 3000);
+    expect(mergePlan()).toThrow("合并前缺跨模型审查");
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow("跨模型审查");
+  });
 });
