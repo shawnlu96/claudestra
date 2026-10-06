@@ -35,9 +35,9 @@ export function openProjectDir(id: string, target: string, index: number): Promi
   return api(`/projects/${encodeURIComponent(id)}/open`, { method: "POST", json: { with: target, index }, timeoutMs: 20_000 });
 }
 
-// ── 用量看板：?refresh=1 强制重抓账号 gauge（最长 ~20s）──
+// ── 用量看板：GET 只读缓存；用户点刷新才 POST /stats/refresh（独立临时会话探测，最长约 90 秒，失败后 30 分钟内不再探测）──
 export function stats<T>(refresh: boolean): Promise<T> {
-  return api<T>(`/stats${refresh ? "?refresh=1" : ""}`, { timeoutMs: refresh ? 30_000 : 8000 });
+  return refresh ? api<T>("/stats/refresh", { method: "POST", json: {}, timeoutMs: 120_000 }) : api<T>("/stats", { timeoutMs: 8000 });
 }
 
 // ── 中继（Peer 面板的中继卡）──
