@@ -1,12 +1,12 @@
 /**
  * 出借单结单 / stopped 到期 / 周期兜底时回收工作目录下的残留进程（沙箱 bridge、channel-server 等由 worker 或测试拉起、没人收的）。
  * 归属只认进程 cwd（lsof 读的系统事实），argv 里出现路径不算；只碰本机同 uid、cwd 落在 LEND_ROOT/work/<单目录> 下的进程。
- * 宁漏勿杀：根 / work / 单目录任一层是软链就拒；journal 读不到、目录名对不上单、写入时间拿不准都跳过并记一行。
+ * 宁漏勿杀：work / 单目录的路径里任何一层（含根的祖先）是软链就拒；journal 读不到、目录名对不上单、写入时间拿不准都跳过并记一行。
  * 日志只写命令名（basename），不写 argv（里面可能带凭据）。进程枚举与发信号都经 ProcPorts 注入，单测换假表。
  */
 import type { Database } from "bun:sqlite";
 import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, join, relative, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { LEND_ROOT, orderDirName } from "./lend-clone.js";
 import { getMeta, LIVE_STATES, setMeta, type LendState } from "./lend-journal.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -35,18 +35,22 @@ const REAP_GRACE_MS = 4_000;
 export const ORPHAN_IDLE_MS = 30 * 60_000;
 export const ORPHAN_EVERY_MS = 10 * 60_000;
 const ORPHAN_KEY = "procReap:lastAt";
-/** 判「30 分钟没写入」最多看这么多个条目，超了算拿不准 */
-const WALK_CAP = 50_000;
-const SKIP_WALK = new Set(["node_modules", "objects"]);
+/** 判「30 分钟没写入」最多看这么多个条目（带 node_modules 的副本约 4.5 万），超了算拿不准 */
+const WALK_CAP = 200_000;
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const isLink = (p: string) => lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() === true;
 
-/** LEND_ROOT/work 的真实路径；根或 work 是软链就抛，work 不存在 = null（没东西可收） */
+/** 路径的每一层都不是软链 = 真实路径就是它本身；否则抛 */
+function noLinks(p: string): string {
+  if (realpathSync(p) !== p) throw new Error(`${p} 路径里有软链，拒绝回收`);
+  return p;
+}
+
+/** LEND_ROOT/work 的绝对路径（每层都核过不是软链）；work 不存在 = null（没东西可收） */
 function workRoot(root: string): string | null {
-  const work = join(root, "work");
-  for (const p of [root, work]) if (isLink(p)) throw new Error(`${p} 是软链，拒绝回收`);
-  return existsSync(work) ? realpathSync(work) : null;
+  const work = resolve(root, "work");
+  return existsSync(work) ? noLinks(work) : null;
 }
 
 /** cwd 落在 work 的哪个一级目录下；不在 work 里 = null */
@@ -61,7 +65,7 @@ function line(p: Proc, order: string, sig: Sig, result: string): string {
   return `回收残留进程 pid=${p.pid} 命令=${basename(p.comm).slice(0, 40)} 单=${order} 存活=${age} 信号=${sig} 结果=${result}`;
 }
 
-/** TERM → 宽限 → 重新枚举、仍在原目录的才 KILL（防 pid 复用误杀）；返回回收个数 */
+/** TERM → 宽限 → 重新枚举、同 pid 仍在这个目录下才 KILL（pid 被别处的进程复用就不碰；同目录里的新进程本来就该收）；返回回收个数 */
 async function reap(real: string, owner: (dir: string) => string | null, o: ReapOptions): Promise<number> {
   const pick = (ps: Proc[]) => ps.flatMap((p) => {
     if (p.uid !== o.ports.uid || p.pid === o.ports.self || p.pid <= 1) return [];
@@ -87,8 +91,8 @@ export async function reapOrder(orderId: string, o: ReapOptions): Promise<number
     const root = o.root ?? LEND_ROOT;
     const real = workRoot(root);
     const name = orderDirName(orderId);
-    if (!real || !existsSync(join(root, "work", name))) return 0;
-    if (isLink(join(root, "work", name))) throw new Error(`work/${name} 是软链，拒绝回收`);
+    if (!real || !existsSync(join(real, name))) return 0;
+    noLinks(join(real, name));
     return await reap(real, (d) => (d === name ? orderId : null), o);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
@@ -97,7 +101,7 @@ export async function reapOrder(orderId: string, o: ReapOptions): Promise<number
   }
 }
 
-/** 目录里有没有 since 之后的写入：true / false；条目太多或读失败 = null（拿不准）。不跟软链，跳过 node_modules 与 .git/objects */
+/** 目录里有没有 since 之后的写入：true / false；条目太多或读失败 = null（拿不准）。不跟软链，不跳任何子树（跳过的子树里写已有文件不改父目录 mtime） */
 function recentWrite(dir: string, since: number): boolean | null {
   try {
     const stack = [dir];
@@ -108,7 +112,7 @@ function recentWrite(dir: string, since: number): boolean | null {
       for (const e of readdirSync(cur, { withFileTypes: true })) {
         if (++seen > WALK_CAP) return null;
         const p = join(cur, e.name);
-        if (e.isDirectory()) { if (!SKIP_WALK.has(e.name)) stack.push(p); continue; }
+        if (e.isDirectory()) { stack.push(p); continue; }
         if (lstatSync(p).mtimeMs >= since) return true;
       }
     }

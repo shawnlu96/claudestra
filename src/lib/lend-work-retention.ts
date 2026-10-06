@@ -50,23 +50,30 @@ interface SweepOptions {
   removeConfig?: typeof removeClaudeOrderConfig;
 }
 
+type Candidate = { row: Stopped; kept: Retention };
+const ordered = (db: Database): Candidate[] =>
+  stoppedRows(db).map((row) => ({ row, kept: retention(db, row) })).sort((a, b) => a.kept.stoppedAt - b.kept.stoppedAt);
+
+/** This pass's deletion batch, oldest first; reapDueStopped and the sweep share it so nothing is deleted unreaped. */
+function dueBatch(rows: Candidate[], now: number, root: string): Candidate[] {
+  const gone = (id: string) => { try { return !hasCheckout(id, root); } catch { return false; } }; // 读不了算还在：交给 sweep 去试并记日志
+  return rows.filter(({ row, kept }) => Number.isFinite(kept.stoppedAt) && now - kept.stoppedAt >= STOPPED_RETENTION_MS && !(kept.cleaned && gone(row.orderId)))
+    .slice(0, BATCH_SIZE);
+}
+
 /** One invocation per lend pass, even when there are no live orders or grants. Failed attempts count toward the cap. */
 export function sweepStoppedWork(db: Database, o: SweepOptions): number {
   const root = o.root ?? LEND_ROOT;
-  const now = o.now ?? Date.now();
-  const rows = stoppedRows(db).map((row) => ({ row, kept: retention(db, row) })).sort((a, b) => a.kept.stoppedAt - b.kept.stoppedAt);
-  let attempted = 0;
+  const rows = ordered(db);
   for (const { row, kept } of rows) {
     o.active?.();
     // Snapshot before this pass retries settlement; late receipts/notices must not keep extending retention.
     if (getMeta(db, keyOf(row.orderId)) === null) setMeta(db, keyOf(row.orderId), JSON.stringify(kept));
-    if (!Number.isFinite(kept.stoppedAt) || now - kept.stoppedAt < STOPPED_RETENTION_MS) continue;
-    if (attempted >= BATCH_SIZE) break;
-    let counted = false;
+  }
+  const batch = dueBatch(rows, o.now ?? Date.now(), root);
+  for (const { row, kept } of batch) {
     try {
-      if (kept.cleaned && !hasCheckout(row.orderId, root)) continue;
-      attempted++;
-      counted = true;
+      o.active?.();
       // Record the original time before deleting, so partial failures and later settlement cannot reset the clock.
       setMeta(db, keyOf(row.orderId), JSON.stringify({ stoppedAt: kept.stoppedAt }));
       checkPaths(row.orderId, root);
@@ -79,19 +86,16 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
       setMeta(db, keyOf(row.orderId), JSON.stringify({ stoppedAt: kept.stoppedAt, cleaned: true }));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
-      if (!counted) attempted++;
       o.log(`清理 stopped 单 ${row.orderId} 失败，下轮再试：${(e as Error).message}`);
     }
   }
-  return attempted;
+  return batch.length;
 }
 
-/** Processes left under a due checkout are reaped before sweepStoppedWork deletes it; same batch cap as the sweep. */
+/** Processes left under a due checkout are reaped before sweepStoppedWork deletes it (same batch, same order). */
 async function reapDueStopped(d: LoopDeps, root: string): Promise<void> {
   if (!d.reapOrder) return;
-  const now = d.now();
-  const due = stoppedRows(d.db).filter((r) => { const t = retention(d.db, r).stoppedAt; return Number.isFinite(t) && now - t >= STOPPED_RETENTION_MS; });
-  for (const r of due.filter((r) => hasCheckout(r.orderId, root)).slice(0, BATCH_SIZE)) await d.reapOrder(r.orderId);
+  for (const { row } of dueBatch(ordered(d.db), d.now(), root)) await d.reapOrder(row.orderId);
 }
 
 /** Production entry and tests share the same once-per-pass cleanup, including an idle/disabled lender. */

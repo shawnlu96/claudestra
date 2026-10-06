@@ -15,7 +15,7 @@ const cleanups: (() => void)[] = [];
 afterEach(() => { for (const c of cleanups.splice(0)) c(); });
 
 function fixture() {
-  const home = mkdtempSync(join(tmpdir(), "proc-reap-"));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "proc-reap-"))); // macOS 的 /var 是软链：根路径里有软链会被拒
   const root = join(home, "lend");
   const db = openLendJournal(join(root, "journal.sqlite"));
   cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
@@ -136,6 +136,49 @@ test("兜底：孤儿目录（非活单 + 30 分钟没写入）回收；活单�
   expect(lines.some((l) => l.includes("not-an-order：目录名对不上任何出借单"))).toBe(true);
   expect(await reapOrphans(f.db, { ...o, now: NOW + ORPHAN_EVERY_MS - 1 })).toBe(0);
   expect(sent).toHaveLength(2);
+});
+
+test("祖先目录是软链（/x/link -> /x/real，root=/x/link/lend）：拒绝回收", async () => {
+  const f = fixture();
+  const dir = f.add("x", "acked");
+  const { ports, sent } = fakePorts([proc(10, dir)]);
+  const lines: string[] = [];
+  const link = join(f.home, "..", `${f.home.split("/").pop()}-link`);
+  symlinkSync(f.home, link);
+  cleanups.push(() => rmSync(link));
+  expect(await reapOrder("x", { root: join(link, "lend"), ports, log: (m) => lines.push(m) })).toBe(0);
+  expect(await reapOrphans(f.db, { root: join(link, "lend"), ports, log: (m) => lines.push(m), now: NOW })).toBe(0);
+  expect(sent).toEqual([]);
+  expect(lines.every((l) => l.includes("软链"))).toBe(true);
+});
+
+test("兜底：node_modules 等任何子树里覆写已有文件也算新近写入，不回收", async () => {
+  const f = fixture();
+  const dir = f.add("old", "stopped");
+  for (const sub of ["node_modules", join(".git", "objects")]) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, "active.log"), "a");
+  }
+  age(dir);
+  writeFileSync(join(dir, "node_modules", "active.log"), "b"); // 只改文件 mtime，父目录不变
+  const { ports, sent } = fakePorts([proc(10, dir)]);
+  expect(await reapOrphans(f.db, { root: f.root, ports, log: () => {}, now: NOW })).toBe(0);
+  expect(sent).toEqual([]);
+});
+
+test("stopped 到期：回收批次与删除批次一致（库内顺序与停止时间相反、超过 5 张）", async () => {
+  const f = fixture();
+  for (let i = 0; i < 6; i++) f.add(`s${i}`, "stopped", NOW - DAY - i); // s5 最早停，库里最后插入
+  const h = harness();
+  cleanups.push(() => h.db.close());
+  h.lend.enabled = false;
+  h.lend.lend = [];
+  const reaped: string[] = [];
+  const d = { ...h.d, db: f.db, now: () => NOW, reapOrder: async (id: string) => void (existsSync(orderDir(id, f.root)) && reaped.push(id)) };
+  await lendTickWithRetention(d, () => {}, f.root);
+  const deleted = [0, 1, 2, 3, 4, 5].map((i) => `s${i}`).filter((id) => !existsSync(orderDir(id, f.root)));
+  expect(deleted).toHaveLength(5);
+  expect(reaped.sort()).toEqual(deleted.sort());
 });
 
 test("兜底：journal 读不到整轮跳过，记一行原因", async () => {
