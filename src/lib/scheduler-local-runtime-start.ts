@@ -1,4 +1,5 @@
 import { configuredAgentLimits } from "./scheduler-agent-pool-runtime.js";
+import { cardRoleIo } from "./card-role-definitions.js";
 /** Adapts the existing start pipeline, retaining its rollback and the runtime's canonical ACP manager launch. */
 import { queueLocalStart, type QueuedStart } from "./scheduler-local-runtime-queue.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -29,6 +30,7 @@ export type { QueuedStart } from "./scheduler-local-runtime-queue.js";
 export async function runLocalStart(io: StepIO, p: StartPlan, run: (io: StepIO, p: StartPlan) => Promise<StartOutcome | QueuedStart>,
   opts: LocalStartOptions = {}): Promise<StartOutcome | QueuedStart> {
   const runtime = selected(p.project, opts.configPath);
+  io = cardRoleIo(io, { family: runtime }); // ROLE1: the card create loads its role definition (card-role-definitions.ts)
   const slotOpts = { ...opts, project: p.project, family: runtime };
   if (p.peer || (runtime === "claude" && !configuredAgentLimits(slotOpts))) return run(io, p);
   const retry = (beforeStart?: () => Promise<void>) => withCodexSlot(async () => {

@@ -1,5 +1,6 @@
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
+import { cardRoleCreate } from "./card-role-definitions.js";
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
  * registry, the author taken from the card (or created locally when unassigned), and the per-card
@@ -76,7 +77,7 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const dir = opened.dir;
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-  const r = await whileOwned(env.active, () => env.create("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
+  const r = await whileOwned(env.active, () => cardRoleCreate(env.create)("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
     "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer", ...runtime));
   if (r.code === "lease-lost") throw new SchedulerStopped(`manager create: ${String(r.error)}`); // 服务在停，不是建失败：不交 PM
   if (r.ok !== true) return { kind: "unknown", reason: `建 ${name} 失败或结果不明：${String(r.error ?? "")}`.slice(0, 400) };
