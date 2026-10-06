@@ -8,10 +8,11 @@
  * specRev stay as they were. A diagnostic carries only a fixed category, the material's index, the rule version, the content
  * digest and a fixed advice, never the refused text or the gate's message. A pass receipt holds for exactly that rule version,
  * content, specRev and target; it is never a pass for the offer, which runs the full gate again. A preflight that cannot run
- * (no spec file, an unexpected error) is "unavailable": no receipt; on refuses it, observe records it (see unavailable()). tests/spec-material-preflight*.test.ts.
+ * (no spec file yet, an unexpected error) is "unavailable": no receipt; an error is refused by on, recorded by observe (see unavailable()). tests/spec-material-preflight*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import type { WriteCtx } from "./ledger-checks.js";
 import { restateFacts } from "./ledger-lend-relay.js";
 import { writeOrderWire } from "./ledger-lend-lease.js";
@@ -27,7 +28,7 @@ import { orderFileScope } from "./order-wire-file-scope.js";
 import { fold, OrderRenderError, peerTextRefusal, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 import { peerSecretHit } from "./peer-secret-gate.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { readTextSoft, specPathFor } from "./task-spec.js";
+import { specPathFor } from "./task-spec.js";
 import {
   registerSpecPreflight, type MaterialKind, type PreflightCategory, type PreflightReceipt, type PreflightResult,
 } from "./spec-material-preflight.js";
@@ -145,7 +146,11 @@ export function preflightSpecMaterial(db: Database, task: LedgerTask, readSpec =
 const blocked = (category: PreflightCategory, at: { material: number | null; kind: MaterialKind }, ruleVersion: string, digest: string): PreflightResult =>
   ({ status: "blocked", category, ...at, ruleVersion, digest, advice: PREFLIGHT_ADVICE });
 
-const defaultSpec = (db: Database) => (t: LedgerTask): string | null => readTextSoft(specPathFor(t, getMeta(db, t.project).docsDir));
+/** Not there yet → null (no_spec); there but unreadable → throws (error), so a broken file is never taken for "nothing to check". */
+const defaultSpec = (db: Database) => (t: LedgerTask): string | null => {
+  const p = specPathFor(t, getMeta(db, t.project).docsDir);
+  return p && existsSync(p) ? readFileSync(p, "utf-8") : null;
+};
 
 /** A receipt counts only for the same target, specRev, rule version and exact content as a fresh preflight of the card now. */
 export function receiptHolds(receipt: PreflightReceipt, now: PreflightResult): boolean {
@@ -163,12 +168,13 @@ function preflightLine(r: Extract<PreflightResult, { status: "blocked" }>): stri
 
 const UNAVAILABLE_OP = "spec_preflight_unavailable";
 /**
- * A preflight that could not run is never a pass and never silent: a card with no spec at all has nothing to check (old path);
- * otherwise on refuses (the writer rolls back, nothing changes) and observe keeps the write but leaves one readable note per
- * card + specRev + material + reason + rules (fixed words, no foreign text), so the PM can see this write was not preflighted.
+ * A preflight that could not run is never a pass (no receipt). A spec file that is not there yet (start_node writes task-new
+ * before the spec file) has no material to send: unavailable(no_spec), old path, no note, no refusal; the offer checks again.
+ * Otherwise (error) on refuses (the writer rolls back, nothing changes) and observe keeps the write but leaves one readable
+ * note per card + specRev + material + reason + rules (fixed words, no foreign text), so the PM can see it was not preflighted.
  */
 function unavailable(db: Database, ctx: WriteCtx, act: boolean, after: LedgerTask, r: Extract<PreflightResult, { status: "unavailable" }>): PreflightResult {
-  if (r.reason === "no_spec" && !after.spec) return r;
+  if (r.reason === "no_spec") return r;
   const line = `规格写入预检不可用（原因 ${r.reason}，规则版本 ${r.ruleVersion.slice(0, 16)}）：无收据、不放行任何外发`;
   console.error(`[spec-preflight] ${after.id} ${line}`);
   if (act) throw new LedgerError("invalid", `${line}；on 下不写，规格与版本不变。先让规格文件可读再写。`);
