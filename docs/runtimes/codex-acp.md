@@ -14,7 +14,7 @@ Codex agent 默认经 [Agent Client Protocol](https://agentclientprotocol.com) �
 - 进程多一层；
 - owner 不能再 attach 进 TUI 打字。
 
-Codex 的窗口仍承载宿主日志。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
+Codex 的窗口显示会话的只读视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断）；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
 
 ## 状态
 
@@ -60,7 +60,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| `interruptKeys` | `[]` | 窗口里只是宿主日志，一个键都不发 |
+| `interruptKeys` | `[]` | 窗口里只是会话的只读视图，宿主不读键盘，一个键都不发 |
 | `abortVia` | `"extension"` | 打断走宿主的 `session/cancel` |
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
 | `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
@@ -158,7 +158,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。
 - **流式条目按确认收尾。** 宿主的条目进有界出站队列，按序号一批批送；bridge 没挂好 watcher 时回 false，宿主退避重送，连续失败 8 次便记丢失并跳过这批。bridge 按 hostId + 序号跳过已处理前缀；单条坏记录和序号缺口按丢失计数确认，避免整批无限重送或重复正文。bridge 回包带累计丢失数，宿主在该轮按 StopFailure 报「可能丢了条目」。回合末等队列清空才报 Stop；90 秒等不到确认、bridge 重连、或队列超过 5000 条溢出也按 StopFailure 报。回合在适配器里接着跑，宿主按 channel-server 的退避重连。
 - **权限卡、额度卡的按钮带卡的代际。** 权限请求按频道排队、一次出一张；每张卡新生成代际，旧卡、答过的一律 409、不授权。作答先原子认领，再经宿主确认它还在等才算答上。宿主等 10 分钟没人答、适配器退出时按取消回适配器并撤卡；宿主断线撤卡，重连后把还在等的补发上来（新卡、新代际）。额度卡同理：同一个失败又报一次沿用这张卡，换了一次失败就是新卡，旧卡的按钮作废。
-- **排障。** 没有 TUI 可看了：看 agent 的 tmux 窗口（宿主日志：收到的消息、接上哪个线程、回合失败、适配器重起）和 `APP_SERVER_LOGS`（状态目录 `logs/acp/<agent>/`）。
+- **排障。** 没有 TUI 可看了：会话看 agent 的 tmux 窗口；宿主日志（接上哪个线程、bridge 连接、适配器重起）在 `logs/acp/<agent>/host.log`，适配器的在同目录 `APP_SERVER_LOGS`。
 
 ## 用法
 

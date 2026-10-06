@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { DICT } from "@/lib/i18n-dict";
 import { ACP_HOST_NOTICE, terminalNotice } from "../web/features/terminal/terminal-notice";
 
-test("transport=acp 才提示「只是宿主日志、Ctrl+C 会停掉宿主」；tmux / 缺省不提示", () => {
+test("transport=acp 才提示「会话只读、Ctrl+C 会停掉宿主」；tmux / 缺省不提示", () => {
   expect(terminalNotice({ transport: "acp" })).toBe(ACP_HOST_NOTICE);
   expect(ACP_HOST_NOTICE).toContain("Ctrl+C");
   for (const transport of ["tmux", null, undefined]) expect(terminalNotice({ transport })).toBeNull();
