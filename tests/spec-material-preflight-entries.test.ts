@@ -2,7 +2,7 @@
  * dispatch-recovery-SPECG1, who arms the writer's preflight: every process entry whose runtime import closure (the guard's own
  * import graph, scripts/guard/rules/deps.ts) reaches the ledger writer also loads the gate; bridge / launcher / scheduler arm it
  * with one literal import + one call, manager keeps its ledger-write-cmds path. In isolated `bun` processes on a temp ledger: a
- * writer-only process (the bridge ask-default shape without its entry) answers unavailable (unarmed) with a fixed log line, never
+ * writer-only process (the bridge ask-default shape without its entry) answers unavailable (unarmed), never
  * off and never a pass; armed the way the entries arm it, on refuses and observe records. Synthetic inputs only.
  */
 import { describe, expect, test } from "bun:test";
@@ -103,10 +103,9 @@ async function child(mode: "on" | "observe", arm: boolean) {
 }
 
 describe("isolated processes on a temp ledger", () => {
-  test("writer only (never armed): unavailable (unarmed) with a fixed, content-free log line; not off, not a pass", async () => {
+  test("writer only (never armed): unavailable (unarmed), content-free; not off, not a pass", async () => {
     const { r, err } = await child("on", false);
     expect(r).toEqual({ code: "ok", stored: true, hook: { status: "unavailable", reason: "unarmed" } });
-    expect(err).toContain("本进程没装规格预检：预检不可用");
     expect(err).not.toContain(SECRET);
   }, 60_000);
 

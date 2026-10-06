@@ -2,8 +2,8 @@
  * dispatch-recovery-SPECG1, the writer's side: createTask / setTask call runSpecPreflight inside their transaction. The check
  * itself (lend write-order builder, peer gate, RecoveryPolicyPort) lives in spec-material-preflight-gate.ts, which imports the
  * ledger writer, so it is injected here at the process edge (the `ledger` CLI loads it) instead of imported: a runtime import
- * would cycle. A process that never armed it answers "unavailable" (unarmed, with a fixed log line): never a pass, and never read
- * as the user's off. tests/spec-material-preflight*.test.ts.
+ * would cycle. A process that never armed it answers "unavailable" (unarmed): never a pass, and never read as the
+ * user's off; every process entry that writes the ledger arms it (tests/spec-material-preflight-entries.test.ts). tests/spec-material-preflight*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -30,7 +30,5 @@ export function registerSpecPreflight(fn: Preflight | null): Preflight | null {
 
 /** Called by the writer after the row is written, inside its transaction; a throw rolls the write back. */
 export function runSpecPreflight(db: Database, ctx: WriteCtx, before: LedgerTask | null, after: LedgerTask): PreflightResult {
-  if (armed) return armed(db, ctx, before, after);
-  console.error(`[spec-preflight] ${after.id} 本进程没装规格预检：预检不可用（无收据、不放行任何外发；不是 off）`);
-  return { status: "unavailable", reason: "unarmed", ruleVersion: "" };
+  return armed ? armed(db, ctx, before, after) : { status: "unavailable", reason: "unarmed", ruleVersion: "" };
 }
