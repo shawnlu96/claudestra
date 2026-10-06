@@ -30,6 +30,7 @@ export function sharedLedgerCenterUrl(baseUrl: string): URL {
 }
 /** A rejection parser may retain only validated public conflict fields, never the raw response. */
 export type SharedLedgerRejectionParser = (status: number, response: Response) => Promise<unknown>;
+type SharedLedgerSuccessParser = (status: number, body: unknown) => unknown;
 async function legacyRejection(_status: number, response: Response): Promise<unknown> {
   try { return parseSharedLedgerResponse("error", await response.json()); }
   catch { return { error: "shared ledger rejected" }; } // Invalid rejection bodies remain non-retryable, especially CAS 409.
@@ -37,7 +38,8 @@ async function legacyRejection(_status: number, response: Response): Promise<unk
 
 /** One signed attempt; callers decide whether a lost outcome may be retried. */
 export async function requestSharedLedger(connection: SharedLedgerConnection, key: InstanceKey, options: SharedLedgerTransportOptions,
-  method: string, path: string, payload?: unknown, signal?: AbortSignal, rejection: SharedLedgerRejectionParser = legacyRejection, encodeBody?: (nonce: string) => string): Promise<unknown> {
+  method: string, path: string, payload?: unknown, signal?: AbortSignal, rejection: SharedLedgerRejectionParser = legacyRejection,
+  encodeBody?: (nonce: string) => string, success?: SharedLedgerSuccessParser): Promise<unknown> {
   const controller = new AbortController();
   const abort = () => controller.abort();
   if (signal?.aborted) throw new SharedLedgerUnavailable();
@@ -64,7 +66,10 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     } catch { throw new SharedLedgerUnavailable(); } // Fetch implementations may throw errors carrying response bodies or credentials.
     if (response.status >= 500) throw new SharedLedgerUnavailable();
     if (!response.ok) throw new SharedLedgerRemoteError(response.status, await rejection(response.status, response));
-    try { return await response.json(); }
+    try {
+      const raw = await response.json();
+      return success ? success(response.status, raw) : raw;
+    }
     catch { throw new SharedLedgerUnavailable(); } // Body decoders can throw RemoteError too; only actual rejection handling may retain one.
   } catch (error) {
     if (error instanceof SharedLedgerRemoteError) throw error;

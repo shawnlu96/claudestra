@@ -4,11 +4,14 @@ import { SharedLedgerClient, SharedLedgerRemoteError, SharedLedgerUnavailable } 
 import { SharedLedgerProjectConflict } from "../src/lib/shared-ledger-client-projects.js";
 import { SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCredentialHash } from "../src/lib/shared-ledger-auth.js";
 import { verifyPurpose } from "../src/lib/instance-signature.js";
-import { envelope, invitationCode, key, owner, project, protocol } from "./shared-ledger-client-projects-fixture.test.js";
+import { V2_PROJECTS_SUCCESS_STATUS } from "../src/lib/shared-ledger-contract-v2-projects.js";
+import { fixtures, invitationCode, key, owner, protocol } from "./shared-ledger-client-projects-fixture.test.js";
 
-const create = { operationId: "fixture-operation", name: "Team Project", id: "project-b" };
-const recover = { operationId: create.operationId, fixtureVersion: 1 };
-const receipt = { operationId: create.operationId, fixtureVersion: 2, project, code: invitationCode };
+const f = fixtures();
+const create = { operationId: f.operation.operationId, name: f.project.name, id: f.identity.projectId };
+const recover = { operationId: create.operationId, rev: f.operation.rev };
+const update = { rev: f.project.rev, name: f.requests.update.name, status: "archived" as const };
+const invite = { personId: f.invite.personId };
 function client(body: unknown, status = 200) {
   let calls = 0;
   const fetcher = (async () => { calls++; return Response.json(body, { status }); }) as unknown as typeof fetch;
@@ -18,26 +21,27 @@ async function failure(action: Promise<unknown>): Promise<Error> {
   try { await action; } catch (error) { expect(error).toBeInstanceOf(Error); return error as Error; }
   throw new Error("expected failure");
 }
+function requests(c: SharedLedgerClient<typeof protocol>) {
+  return [() => c.projects(), () => c.createProject(create), () => c.updateProject(f.identity.projectId, update),
+    () => c.projectMembers(f.identity.projectId), () => c.inviteProjectMember(f.identity.projectId, invite),
+    () => c.removeProjectMember(f.identity.projectId, invite.personId), () => c.projectOperation(create.operationId),
+    () => c.recoverProjectCreatorCredential(f.identity.projectId, recover)];
+}
 
-describe("N3 project client injection boundary (not N1C wire integration)", () => {
-  test("all eight routes sign with the owner person credential and a fresh nonce", async () => {
+describe("N3 fixed public N1C producer with injected signed transport", () => {
+  test("all eight methods round-trip producer DTOs, HTTP statuses, signatures and fresh nonces", async () => {
     const signingKey = key();
+    const root = `/v1/projects/${f.identity.projectId}`;
     const cases = [
-      ["GET", "/v1/projects", envelope([project])],
-      ["POST", "/v1/projects", envelope(receipt)],
-      ["PATCH", "/v1/projects/project-b", envelope(project, { projectId: "project-b" })],
-      ["GET", "/v1/projects/project-b/members", envelope([], { projectId: "project-b" })],
-      ["POST", "/v1/projects/project-b/invites", envelope({ code: invitationCode }, { projectId: "project-b" })],
-      ["POST", "/v1/projects/project-b/members/fixture-member/remove",
-        envelope({ status: "removed" }, { projectId: "project-b", targetPersonId: "fixture-member" })],
-      ["GET", "/v1/projects/operations/fixture-operation", envelope({ fixtureVersion: 2, project }, { operationId: create.operationId })],
-      ["POST", "/v1/projects/project-b/creator-credential", envelope(receipt, { projectId: "project-b" })],
+      ["list", "GET", "/v1/projects"], ["create", "POST", "/v1/projects"], ["update", "PATCH", root],
+      ["members", "GET", `${root}/members`], ["invite", "POST", `${root}/invites`],
+      ["removeMember", "POST", `${root}/members/${invite.personId}/remove`],
+      ["operation", "GET", `/v1/projects/operations/${create.operationId}`], ["creatorCredential", "POST", `${root}/creator-credential`],
     ] as const;
     const nonces = new Set<string>();
-    const bodies: unknown[] = [];
     let calls = 0;
     const fetcher = (async (url: URL, init: RequestInit) => {
-      const [method, path, response] = cases[calls++]!;
+      const [endpoint, method, path] = cases[calls++]!;
       const headers = new Headers(init.headers);
       const h = SHARED_LEDGER_AUTH_HEADERS;
       expect(url.origin).toBe(owner.baseUrl);
@@ -54,79 +58,95 @@ describe("N3 project client injection boundary (not N1C wire integration)", () =
       expect(verifyPurpose(signingKey.publicKey, "claudestra-shared-ledger-v1", [method, path, headers.get(h.ts)!,
         sharedLedgerCredentialHash(body ?? ""), nonce, owner.instanceId, sharedLedgerCredentialHash(owner.bearer)], headers.get(h.sig)!)).toBe(true);
       if (method === "GET") expect(body).toBeUndefined();
-      else { expect(JSON.parse(body!).fixtureNonce).toBe(nonce); bodies.push(JSON.parse(body!)); }
-      return Response.json(response);
+      else expect(JSON.parse(body!)).toEqual({ attemptNonce: nonce, payload: f.requests[endpoint] });
+      return Response.json(f.responses[endpoint], { status: V2_PROJECTS_SUCCESS_STATUS[endpoint] });
     }) as unknown as typeof fetch;
     const c = new SharedLedgerClient(owner, signingKey, { fetch: fetcher, projectsProtocol: protocol });
-    expect(await c.projects()).toEqual([project]);
-    expect(await c.createProject(create)).toEqual(receipt);
-    expect(await c.updateProject("project-b", { rev: 1, name: "Team Project" })).toEqual(project);
-    expect(await c.projectMembers("project-b")).toEqual([]);
-    expect(await c.inviteProjectMember("project-b", { personId: "fixture-member" })).toEqual({ code: invitationCode });
-    expect(await c.removeProjectMember("project-b", "fixture-member")).toEqual({ status: "removed" });
-    expect(await c.projectOperation(create.operationId)).toEqual({ fixtureVersion: 2, project });
-    expect(await c.recoverProjectCreatorCredential("project-b", recover)).toEqual(receipt);
+    for (const [index, request] of requests(c).entries()) expect(await request()).toEqual(f.responses[cases[index]![0]]);
     expect(calls).toBe(8);
-    expect((bodies[0] as { fixtureInput: unknown }).fixtureInput).toEqual(create);
-    expect((bodies[4] as { fixtureInput: unknown }).fixtureInput).toEqual(recover);
   });
 
-  test("service grants, other local subjects and untagged connections never authorize project calls", async () => {
+  test("selection tags reject service/other subjects; missing or replacement protocols make no requests", async () => {
     let calls = 0;
     const fetcher = (async () => { calls++; return Response.json({}); }) as unknown as typeof fetch;
-    for (const change of [{ kind: "service", projects: [{ projectId: "project-b", actions: ["project", "import"] }] },
+    for (const change of [{ kind: "service", projects: [{ projectId: f.identity.projectId, actions: ["project", "import"] }] },
       { localSubject: "person:another" }, { kind: undefined }, { localSubject: undefined }]) {
       const c = new SharedLedgerClient({ ...owner, ...change }, key(), { fetch: fetcher, projectsProtocol: protocol });
-      for (const request of [() => c.projects(), () => c.createProject(create), () => c.updateProject("project-b", { rev: 1 }),
-        () => c.projectMembers("project-b"), () => c.inviteProjectMember("project-b", { personId: "fixture-member" }),
-        () => c.removeProjectMember("project-b", "fixture-member"), () => c.projectOperation(create.operationId),
-        () => c.recoverProjectCreatorCredential("project-b", recover)]) {
-        await expect(request()).rejects.toThrow("shared ledger projects require owner:self person credential");
-      }
+      for (const request of requests(c)) await expect(request()).rejects.toThrow("shared ledger projects require owner:self person credential");
     }
-    await expect(new SharedLedgerClient(owner, key(), { fetch: fetcher }).projects()).rejects.toThrow("shared ledger projects contract unavailable");
+    for (const projectsProtocol of [undefined, { ...protocol, parseV2ProjectsResponse: (() => f.responses.list) as typeof protocol.parseV2ProjectsResponse }]) {
+      const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol });
+      for (const request of requests(c)) await expect(request()).rejects.toThrow("shared ledger projects contract unavailable");
+    }
     expect(calls).toBe(0);
   });
 
-  test("bad route ids and rejected encoder input fail before fetch", async () => {
+  test("producer validates route ids, inputs and scope declarations before fetching", async () => {
     const c = client({});
     for (const projectId of ["../other", "project?x=1", "A", "a".repeat(33), "a/b"]) {
       await expect(c.client.projectMembers(projectId)).rejects.toThrow("invalid shared ledger project request");
     }
+    for (const body of [{ ...update, rev: -1 }, { rev: 1 }, { ...update, teamId: "other" },
+      { ...update, projectId: "other" }, { ...update, bearer: owner.bearer }]) {
+      await expect(c.client.updateProject(f.identity.projectId, body)).rejects.toThrow("invalid shared ledger project request");
+    }
     await expect(c.client.projectOperation("../operation")).rejects.toThrow("invalid shared ledger project request");
-    await expect(c.client.removeProjectMember("project-b", "person/other")).rejects.toThrow("invalid shared ledger project request");
-    await expect(c.client.updateProject("project-b", { rev: -1 })).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    await expect(c.client.removeProjectMember(f.identity.projectId, "person/other")).rejects.toThrow("invalid shared ledger project request");
+    await expect(c.client.inviteProjectMember(f.identity.projectId, { ...invite, code: "another" }))
+      .rejects.toThrow("invalid shared ledger project request");
     expect(c.calls()).toBe(0);
   });
 
-  test("409 exposes validated current privately; malformed conflicts stay 409 and never retry", async () => {
-    const c = client(envelope({ current: project }, { projectId: "project-b" }), 409);
-    const error = await failure(c.client.updateProject("project-b", { rev: 1 }));
-    expect(error).toBeInstanceOf(SharedLedgerProjectConflict);
-    expect((error as SharedLedgerProjectConflict).current).toEqual(project);
-    expect(JSON.stringify(error)).not.toContain(project.name);
-    expect(inspect(error)).not.toContain(project.name);
-    expect(c.calls()).toBe(1);
-    for (const body of [{ code: invitationCode }, envelope({ current: { ...project, codeSecret: invitationCode } }, { projectId: "project-b" }),
-      envelope({ current: project }, { projectId: "other" })]) {
-      const bad = client(body, 409);
-      const rejected = await failure(bad.client.updateProject("project-b", { rev: 1 }));
-      expect(rejected).toBeInstanceOf(SharedLedgerRemoteError);
-      expect((rejected as SharedLedgerRemoteError).status).toBe(409);
-      expect(rejected).not.toBeInstanceOf(SharedLedgerProjectConflict);
-      expect(inspect(rejected)).not.toContain(invitationCode);
-      expect(bad.calls()).toBe(1);
+  test("inviting by code binds the returned member to the requested code", async () => {
+    const input = { code: f.responses.invite.member.code };
+    expect(await client(f.responses.invite, 201).client.inviteProjectMember(f.identity.projectId, input)).toEqual(f.responses.invite);
+    await expect(client(f.responses.invite, 201).client.inviteProjectMember(f.identity.projectId, { code: "other-member" }))
+      .rejects.toBeInstanceOf(SharedLedgerUnavailable);
+  });
+
+  test("a recovered creation can already have issued its credential; operation queries return no invitations", async () => {
+    const operation = { ...f.operation, state: "credential_issued" as const, rev: 2 };
+    const response = { ...f.responses.create, operation, creatorInvite: null };
+    expect(await client(response, 201).client.createProject(create)).toEqual(response);
+    const query = { ...f.responses.operation, operation };
+    expect(await client(query).client.projectOperation(create.operationId)).toEqual(query);
+    await expect(client({ ...f.responses.creatorCredential, operation }).client.recoverProjectCreatorCredential(f.identity.projectId, recover))
+      .rejects.toBeInstanceOf(SharedLedgerUnavailable);
+  });
+
+  test("409 retains only typed current records; malformed conflicts keep fixed 409 and do not retry", async () => {
+    for (const [body, action] of [[f.errors.projectConflict, (c: SharedLedgerClient<typeof protocol>) => c.updateProject(f.identity.projectId, update)],
+      [f.errors.dedupMismatch, (c: SharedLedgerClient<typeof protocol>) => c.createProject(create)],
+      [f.errors.operationConflict, (c: SharedLedgerClient<typeof protocol>) => c.recoverProjectCreatorCredential(f.identity.projectId, recover)]] as const) {
+      const c = client(body, 409);
+      const error = await failure(action(c.client));
+      expect(error).toBeInstanceOf(SharedLedgerProjectConflict);
+      expect((error as SharedLedgerProjectConflict).current).toEqual(body.current);
+      expect(JSON.stringify(error)).not.toContain("current");
+      expect(inspect(error)).not.toContain("paramsDigest");
+      expect(c.calls()).toBe(1);
+    }
+    for (const body of [{ code: invitationCode }, { ...f.errors.projectConflict, current: "untyped" },
+      { ...f.errors.projectConflict, current: { ...f.project, bearer: owner.bearer } },
+      { ...f.errors.projectConflict, current: { ...f.project, projectId: "other" } },
+      { ...f.errors.projectConflict, current: { ...f.project, teamId: "other" } }]) {
+      const c = client(body, 409);
+      const error = await failure(c.client.updateProject(f.identity.projectId, update));
+      expect(error).toBeInstanceOf(SharedLedgerRemoteError);
+      expect(error).not.toBeInstanceOf(SharedLedgerProjectConflict);
+      expect((error as SharedLedgerRemoteError).status).toBe(409);
+      expect(inspect(error, { showHidden: true })).not.toContain(invitationCode);
+      expect(c.calls()).toBe(1);
     }
   });
 
-  test("invite codes appear only in successful return values, not logs or exceptions", async () => {
+  test("invitation codes are memory return values and never logs or exception fields", async () => {
     const logs = [spyOn(console, "log"), spyOn(console, "warn"), spyOn(console, "error"), spyOn(console, "info"), spyOn(console, "debug")];
     try {
-      const success = client(envelope({ code: invitationCode }, { projectId: "project-b" }));
-      expect(await success.client.inviteProjectMember("project-b", { personId: "fixture-member" })).toEqual({ code: invitationCode });
+      expect(await client(f.responses.invite, 201).client.inviteProjectMember(f.identity.projectId, invite)).toEqual(f.responses.invite);
       for (const status of [200, 400, 401, 403, 404, 409, 500, 503]) {
         const c = client({ error: invitationCode, bearer: owner.bearer }, status);
-        const error = await failure(c.client.inviteProjectMember("project-b", { personId: "fixture-member" }));
+        const error = await failure(c.client.inviteProjectMember(f.identity.projectId, invite));
         for (const output of [String(error), error.stack!, JSON.stringify(error), inspect(error, { showHidden: true })]) {
           expect(output).not.toContain(invitationCode);
           expect(output).not.toContain(owner.bearer);
@@ -138,7 +158,7 @@ describe("N3 project client injection boundary (not N1C wire integration)", () =
     } finally { for (const log of logs) log.mockRestore(); }
   });
 
-  test("403/404 bodies are never decoded; rejected parser text is discarded", async () => {
+  test("403/404 never decode raw bodies; successful envelopes must have the producer's exact HTTP status", async () => {
     for (const status of [403, 404]) {
       const response = Response.json({ code: invitationCode }, { status });
       const json = spyOn(response, "json");
@@ -146,76 +166,78 @@ describe("N3 project client injection boundary (not N1C wire integration)", () =
       await expect(c.projects()).rejects.toThrow(`shared ledger rejected (${status})`);
       expect(json).not.toHaveBeenCalled();
     }
-    const c = new SharedLedgerClient(owner, key(), { projectsProtocol: { ...protocol, responses: { ...protocol.responses,
-      invite: () => { throw new Error(invitationCode); } } }, fetch: (async () => Response.json({})) as unknown as typeof fetch });
-    expect(inspect(await failure(c.inviteProjectMember("project-b", { personId: "fixture-member" })))).not.toContain(invitationCode);
+    await expect(client(f.responses.create, 200).client.createProject(create)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    await expect(client(f.responses.list, 201).client.projects()).rejects.toBeInstanceOf(SharedLedgerUnavailable);
   });
 
-  test("response scope mismatch, extra bearer, and operation mismatch fail closed", async () => {
-    for (const selected of [{ centerId: "other" }, { teamId: "other" }, { personId: "other" }, { instanceId: "other" }]) {
-      await expect(client(envelope([project], selected)).client.projects()).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+  test("create, recovery and operation queries bind center/team/project/operation/person/instance", async () => {
+    for (const field of ["centerId", "teamId", "projectId", "operationId", "personId", "instanceId"] as const) {
+      for (const [response, status, action] of [
+        [f.responses.create, 201, (c: SharedLedgerClient<typeof protocol>) => c.createProject(create)],
+        [f.responses.creatorCredential, 200, (c: SharedLedgerClient<typeof protocol>) => c.recoverProjectCreatorCredential(f.identity.projectId, recover)],
+        [f.responses.operation, 200, (c: SharedLedgerClient<typeof protocol>) => c.projectOperation(create.operationId)],
+      ] as const) {
+        const changed = { ...response, operation: { ...response.operation, [field]: "other" } };
+        await expect(action(client(changed, status).client)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+      }
     }
-    await expect(client(envelope([{ ...project, teamId: "other" }])).client.projects()).rejects.toBeInstanceOf(SharedLedgerUnavailable);
-    await expect(client(envelope({ ...project, id: "other" }, { projectId: "project-b" })).client.updateProject("project-b", { rev: 1 }))
+    await expect(client({ ...f.responses.operation, creatorInvite: f.creatorInvite }).client.projectOperation(create.operationId))
       .rejects.toBeInstanceOf(SharedLedgerUnavailable);
-    await expect(client(envelope({ fixtureVersion: 2, project, bearer: owner.bearer }, { operationId: create.operationId }))
-      .client.projectOperation(create.operationId)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
-    await expect(client(envelope({ ...receipt, operationId: "other" })).client.createProject(create)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
-    await expect(client(envelope(receipt, { projectId: "other" })).client.recoverProjectCreatorCredential("project-b", recover))
+    await expect(client({ ...f.responses.create, project: { ...f.project, projectId: "other" },
+      operation: { ...f.operation, projectId: "other" }, creatorInvite: { ...f.creatorInvite, projectId: "other" } }, 201).client.createProject(create))
       .rejects.toBeInstanceOf(SharedLedgerUnavailable);
   });
 
-  test("lost mutation outcomes make one attempt; explicit retry preserves operation and refreshes nonce", async () => {
-    const nonces: string[] = [];
-    const inputs: unknown[] = [];
+  test("all public fixture negative responses reject through the client", async () => {
+    for (const probe of fixtures().invalidResponses) {
+      const c = client(probe.body, probe.status);
+      const index = ["list", "create", "update", "members", "invite", "removeMember", "operation", "creatorCredential"].indexOf(probe.endpoint);
+      const error = await failure(requests(c.client)[index]!());
+      expect(inspect(error, { showHidden: true })).not.toContain(invitationCode);
+      expect(c.calls()).toBe(1);
+    }
+  });
+
+  test("lost writes make one attempt; explicit retries preserve operation and refresh nonce", async () => {
+    const nonces: string[] = [], inputs: unknown[] = [];
     const fetcher = (async (_url: URL, init: RequestInit) => {
       const body = JSON.parse(init.body as string);
-      nonces.push(body.fixtureNonce); inputs.push(body.fixtureInput);
+      nonces.push(body.attemptNonce); inputs.push(body.payload);
       throw new Error(invitationCode);
     }) as unknown as typeof fetch;
     const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: protocol, attempts: 9 });
     for (let i = 0; i < 2; i++) await expect(c.createProject(create)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
-    expect(inputs).toEqual([create, create]);
+    expect(inputs).toEqual([f.requests.create, f.requests.create]);
     expect(new Set(nonces).size).toBe(2);
-    await expect(c.recoverProjectCreatorCredential("project-b", recover)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
-    expect(inputs).toEqual([create, create, recover]);
+    await expect(c.recoverProjectCreatorCredential(f.identity.projectId, recover)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
+    expect(inputs).toEqual([f.requests.create, f.requests.create, f.requests.creatorCredential]);
   });
 
-  test("a mutable caller draft cannot change the operation used to validate a pending response", async () => {
+  test("a mutable draft cannot change the operation while its response is pending", async () => {
     const draft = { ...create };
-    const fetcher = (async () => {
-      draft.operationId = "other";
-      return Response.json(envelope(receipt));
-    }) as unknown as typeof fetch;
-    const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: protocol });
-    expect((await c.createProject(draft)).operationId).toBe(create.operationId);
+    const c = new SharedLedgerClient(owner, key(), { projectsProtocol: protocol, fetch: (async () => {
+      draft.operationId = "other"; return Response.json(f.responses.create, { status: 201 });
+    }) as unknown as typeof fetch });
+    expect((await c.createProject(draft)).operation.operationId).toBe(create.operationId);
   });
 
-  test("transport and encoder errors cannot smuggle arbitrary RemoteError response fields", async () => {
-    const secretError = () => { throw new SharedLedgerRemoteError(403, { code: invitationCode, bearer: owner.bearer }); };
-    const fetcher = (async () => secretError()) as unknown as typeof fetch;
+  test("transport errors cannot smuggle RemoteError fields", async () => {
+    const fetcher = (async () => { throw new SharedLedgerRemoteError(403, { code: invitationCode, bearer: owner.bearer }); }) as unknown as typeof fetch;
     const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: protocol });
-    expect(inspect(await failure(c.projects()))).not.toContain(invitationCode);
-    const encoder = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: { ...protocol,
-      requests: { ...protocol.requests, create: (_input: Parameters<typeof protocol.requests.create>[0]) => secretError() } } });
-    const error = await failure(encoder.createProject(create));
-    expect(error).toBeInstanceOf(SharedLedgerUnavailable);
-    expect(inspect(error)).not.toContain(invitationCode);
+    expect(inspect(await failure(c.projects()), { showHidden: true })).not.toContain(invitationCode);
   });
 
-  test("abort and timeout release listeners and never retry a write", async () => {
+  test("abort/timeout release listeners and never retry a write", async () => {
     let calls = 0;
     const fetcher = (async (_url: URL, init: RequestInit) => {
       calls++;
       return new Promise<Response>((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(new Error(invitationCode)), { once: true }));
     }) as unknown as typeof fetch;
     const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol: protocol, timeoutMs: 10 });
-    const controller = new AbortController();
-    controller.abort();
+    const controller = new AbortController(); controller.abort();
     await expect(c.createProject(create, controller.signal)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
     expect(calls).toBe(0);
-    const active = new AbortController();
-    const remove = spyOn(active.signal, "removeEventListener");
+    const active = new AbortController(), remove = spyOn(active.signal, "removeEventListener");
     await expect(c.createProject(create, active.signal)).rejects.toBeInstanceOf(SharedLedgerUnavailable);
     expect(calls).toBe(1);
     expect(remove).toHaveBeenCalled();

@@ -4,9 +4,11 @@ import { SharedLedgerClient, SharedLedgerRemoteError, SharedLedgerUnavailable } 
 import { requestSharedLedger } from "../src/lib/shared-ledger-client-transport.js";
 import { SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCredentialHash } from "../src/lib/shared-ledger-auth.js";
 import { verifyPurpose } from "../src/lib/instance-signature.js";
-import { envelope, invitationCode, key, owner, project, protocol } from "./shared-ledger-client-projects-fixture.test.js";
+import { fixtures, invitationCode, key, owner, protocol } from "./shared-ledger-client-projects-fixture.test.js";
 
-describe("N3 injected transport security (synthetic protocol only)", () => {
+const f = fixtures();
+
+describe("N3 signed transport security with public synthetic fixtures", () => {
   test("body decoding errors cannot retain invitation codes as remote error fields", async () => {
     const response = Response.json({});
     Object.defineProperty(response, "json", { value: async () => {
@@ -38,7 +40,7 @@ describe("N3 injected transport security (synthetic protocol only)", () => {
 
   test("changing a connection after construction cannot bypass the HTTPS boundary", async () => {
     let calls = 0;
-    const fetcher = (async () => { calls++; return Response.json(envelope([project])); }) as unknown as typeof fetch;
+    const fetcher = (async () => { calls++; return Response.json(f.responses.list); }) as unknown as typeof fetch;
     const connection = { ...owner };
     const client = new SharedLedgerClient(connection, key(), { fetch: fetcher, projectsProtocol: protocol });
     for (const baseUrl of ["http://center.invalid", "ftp://center.invalid", `https://${invitationCode}@center.invalid/`,
@@ -73,7 +75,7 @@ describe("N3 injected transport security (synthetic protocol only)", () => {
       expect(verifyPurpose(signingKey.publicKey, "claudestra-shared-ledger-v1", ["GET", "/v1/projects", headers.get(h.ts)!,
         sharedLedgerCredentialHash(""), headers.get(h.nonce)!, owner.instanceId, sharedLedgerCredentialHash(owner.bearer)],
       headers.get(h.sig)!)).toBe(true);
-      return Response.json(envelope([project]));
+      return Response.json(f.responses.list);
     }) as unknown as typeof fetch;
     const client = new SharedLedgerClient(connection, signingKey, { fetch: fetcher, projectsProtocol: protocol, now: () => {
       connection.baseUrl = "http://other.invalid";
@@ -81,38 +83,48 @@ describe("N3 injected transport security (synthetic protocol only)", () => {
       connection.instanceId = "other-instance";
       return Date.now();
     } });
-    expect(await client.projects()).toEqual([project]);
+    expect(await client.projects()).toEqual(f.responses.list);
     expect(calls).toBe(1);
   });
 
-  test("encoder callbacks cannot substitute request identity, instance key or fetch port", async () => {
+  test("transport encoder callbacks cannot substitute destination, credentials, key or fetch port", async () => {
     const connection = { ...owner };
     const signingKey = key();
     const publicKey = signingKey.publicKey;
-    let calls = 0;
-    let otherCalls = 0;
-    const options = { projectsProtocol: { ...protocol, requests: { ...protocol.requests, create: (
-      input: Parameters<typeof protocol.requests.create>[0], scope: Parameters<typeof protocol.requests.create>[1], nonce: string,
-    ) => {
-      connection.baseUrl = "http://other.invalid";
-      connection.bearer = invitationCode;
-      connection.personId = "other-person";
-      connection.instanceId = "other-instance";
-      Object.assign(signingKey, key());
-      options.fetch = (async () => { otherCalls++; return Response.json({}); }) as unknown as typeof fetch;
-      return protocol.requests.create(input, scope, nonce);
-    } } }, fetch: (async (url: URL, init: RequestInit) => {
+    let calls = 0, otherCalls = 0;
+    const options = { fetch: (async (url: URL, init: RequestInit) => {
       calls++;
       const headers = new Headers(init.headers);
       expect(url.origin).toBe(owner.baseUrl);
       expect(headers.get("authorization")).toBe(`Bearer ${owner.bearer}`);
       expect(headers.get(SHARED_LEDGER_AUTH_HEADERS.instance)).toBe(owner.instanceId);
       expect(headers.get(SHARED_LEDGER_AUTH_HEADERS.key)).toBe(publicKey);
-      return Response.json(envelope({ operationId: "fixture-operation", fixtureVersion: 2, project, code: invitationCode }));
+      return Response.json(f.responses.create, { status: 201 });
     }) as unknown as typeof fetch };
-    const client = new SharedLedgerClient(connection, signingKey, options);
-    expect((await client.createProject({ operationId: "fixture-operation", name: project.name })).project).toEqual(project);
+    const encode = (nonce: string) => {
+      connection.baseUrl = "http://other.invalid";
+      connection.bearer = invitationCode;
+      connection.personId = "other-person";
+      connection.instanceId = "other-instance";
+      Object.assign(signingKey, key());
+      options.fetch = (async () => { otherCalls++; return Response.json({}); }) as unknown as typeof fetch;
+      return JSON.stringify({ attemptNonce: nonce, payload: f.requests.create });
+    };
+    expect(await requestSharedLedger(connection, signingKey, options, "POST", "/v1/projects", undefined,
+      undefined, undefined, encode)).toEqual(f.responses.create);
     expect(calls).toBe(1);
     expect(otherCalls).toBe(0);
+  });
+
+  test("a pending response is checked against the original connection, not later caller mutations", async () => {
+    const connection = { ...owner };
+    const client = new SharedLedgerClient(connection, key(), { projectsProtocol: protocol, fetch: (async () => {
+      connection.centerId = "other-center";
+      connection.teamId = "other-team";
+      connection.personId = "other-person";
+      connection.instanceId = "other-instance";
+      return Response.json(f.responses.create, { status: 201 });
+    }) as unknown as typeof fetch });
+    expect(await client.createProject({ operationId: f.operation.operationId, name: f.project.name })).toEqual(f.responses.create);
   });
 });
