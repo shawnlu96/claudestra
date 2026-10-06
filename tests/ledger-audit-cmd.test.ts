@@ -11,6 +11,7 @@ import { parseReviewDescription, runningReviewers } from "../src/lib/ledger-audi
 import { auditLedger } from "../src/lib/ledger-audit.js";
 import { collectAuditSnapshots, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
 import { addDep, setDep } from "../src/lib/ledger-deps-write.js";
+import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { AUDIT_SCHEMA_VERSION, closeLedger, LEDGER_MIGRATIONS, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, moveStage, recordReview, recordVerify, setFrozen, setMeta } from "../src/lib/ledger-write.js";
 import type { Stage } from "../src/lib/ledger-stages.js";
@@ -185,6 +186,24 @@ describe("取数", () => {
     const [s] = await collectAuditSnapshots(db, [P], NOW, sources({ reviewers: (a) => (a.name === PM ? { error: "读不了" } : []) }));
     expect(s.reviewers).toBeNull();
     expect(s.unavailable?.reviewers).toBe("读不了");
+  });
+
+  test("review 步骤：本轮显式派的带进快照，派给 peer 不再报 review_no_reviewer；上一轮派的、已记结论的不算；本机审查员会抓屏", async () => {
+    const owner = { actor: "owner", now: NOW - 29 * MIN };
+    const step = async () => (await collectAuditSnapshots(db, [P], NOW, sources()))[0];
+    assignStep(db, owner, { taskId: "T1", step: "review", round: 0, executor: "w@mate", executorKind: "peer" });
+    expect((await step()).tasks.find((t) => t.task.id === "T1")?.reviewStep).toBeNull(); // T1 在第 1 轮，第 0 轮派的不算
+    assignStep(db, owner, { taskId: "T1", step: "review", executor: "pm-codex@Shawn", executorKind: "peer" });
+    const s = await step();
+    expect(s.tasks.find((t) => t.task.id === "T1")?.reviewStep).toEqual({ executor: "pm-codex@Shawn", executorKind: "peer", at: NOW - 29 * MIN });
+    expect(auditLedger(s, NOW).findings.map((f) => f.rule)).toEqual([]);
+    assignStep(db, owner, { taskId: "T1", step: "review", executor: "agent-review-pi", executorKind: "agent" });
+    const asked: string[] = [];
+    await collectAuditSnapshots(db, [P], NOW, sources({ turn: async (a) => (asked.push(a.name), "idle"),
+      registry: async () => [{ name: PM, projectId: P }, { name: "agent-review-pi", projectId: P }] }));
+    expect(asked.sort()).toEqual(["agent-review-pi", PM].sort());
+    db.query("UPDATE task_steps SET state = 'done' WHERE taskId = 'T1' AND step = 'review'").run();
+    expect((await step()).tasks.find((t) => t.task.id === "T1")?.reviewStep).toBeNull();
   });
 
   test("合并队列冻结状态带进快照", async () => {
