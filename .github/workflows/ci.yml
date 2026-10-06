@@ -18,8 +18,9 @@ jobs:
   # 单元测试拆成 4 片并行（单片串行要 14 分钟左右）。scripts/ci-test-shard.ts 按耗时把测试文件分片，各片在同一 head、
   # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
   # 这些分片不是合并闸——必需检查是下面的 `typecheck + test + guard` 汇总作业。
+  # 作业名、步骤名里不能有「/」：日志压缩包里会被换成「_」，gh run view --log-failed 对不上步骤，只给 UNKNOWN STEP + 整个作业日志
   tests:
-    name: test shard ${{ matrix.shard }}/4
+    name: test shard ${{ matrix.shard }} of 4
     runs-on: ubuntu-latest
     strategy:
       # 一片红不取消其它片：每片的失败都看得到
@@ -82,22 +83,26 @@ jobs:
         run: |
           command -v tmux || sudo apt-get install -y -qq tmux || { sudo apt-get update -qq && sudo apt-get install -y -qq tmux; }
 
-      # 日志另存一份给汇总作业核对：开头记 head 和 bun 自己发现的测试文件总数（--shard=99999/99999 一个文件都不跑），
-      # 之后 Bun 在 Actions 里给每个跑过的文件打一行 `::group::<路径>:`。shell: bash 带 -o pipefail，tee 吞不掉退出码。
-      - name: Unit tests (shard ${{ matrix.shard }}/4)
+      # 日志另存一份给汇总作业核对（scripts/ci-test-shard.ts verifyShards）：开头三行记片号、head、bun 自己发现的测试文件总数
+      # （--shard=99999/99999 一个文件都不跑），之后 Bun 在 Actions 里给每个跑过的文件打一行 `::group::<路径>:`。
+      # shell: bash 带 -o pipefail，tee 吞不掉退出码；清单先落文件，分片脚本失败时这一步就失败，不会空着参数跑全部。
+      - name: Unit tests
         shell: bash
         run: |
           bun run --silent test:shard ${{ matrix.shard }}/4 > "$RUNNER_TEMP/files.txt"
           mapfile -t files < "$RUNNER_TEMP/files.txt"
           discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
-          printf 'head=%s\ndiscovered=%s\n' "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
+          printf 'shard=%s/4\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
           bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
 
+      # 红片、被取消的片也上传已有的日志（诊断用）。测试步骤之前就失败 / 被取消、根本没生成日志时只给一条警告、没有工件——
+      # 汇总作业照样因为这一片不是 success 而红，缺工件不会被当成通过。
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: test-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/shard.log
-          if-no-files-found: error
+          if-no-files-found: warn
           overwrite: true
           retention-days: 14
 
@@ -131,39 +136,29 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      # 这一行的措辞是调度器 CI 自动重跑认的固定结论（src/lib/scheduler-merge-ci-rerun-log.ts GATE_VERDICT），改了要一起改
+      # 作业名、这一步的名字和这一行的措辞是调度器 CI 自动重跑认的固定结论（src/lib/scheduler-merge-ci-rerun-log.ts GATE /
+      # GATE_VERDICT），改了要一起改
       - name: All shards succeeded
         run: |
           [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }
 
       - uses: actions/checkout@v4
 
+      # 只跑核对脚本（不 import 任何依赖），不用 bun install；版本与各片一致，脚本还核对各片的 Bun 版本行等于它
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
       - uses: actions/download-artifact@v4
         with:
           pattern: test-shard-*
           path: shards
 
-      # 不漏不重：各片同一 head、同一 Bun；bun 自己发现的总数 = 入库测试文件数（发现规则一致）；各片 `::group::` 文件行
-      # 合起来恰好等于入库的测试文件，没有一个文件被两片跑。Bun 改了输出格式会让这里整体对不上而变红，不会静默放行。
+      # 不漏不重（scripts/ci-test-shard.ts verifyShards，反例见 tests/ci-test-shard.test.ts）：工件恰好 test-shard-1..4；每片各自核对
+      # 开头的片号、head = $GITHUB_SHA、bun 自己发现的文件数 = 入库测试文件数、Bun 版本，且跑过的文件恰好是分给这一片的那些。
+      # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。
       - name: Shards cover every test file exactly once
-        shell: bash
-        run: |
-          fail() { echo "::error::$*"; exit 1; }
-          logs=(shards/*/shard.log)
-          [ -f "${logs[0]}" ] || fail "没有下载到任何分片日志"
-          heads=$(sed -n 's/^head=//p' "${logs[@]}" | sort -u)
-          [ "$heads" = "$GITHUB_SHA" ] || fail "各片应都跑在 $GITHUB_SHA 上，实际：$heads"
-          bunv=$(grep -h '^bun test v' "${logs[@]}" | sort -u)
-          [ "$(wc -l <<<"$bunv")" -eq 1 ] || fail "各片 Bun 版本不一致：$bunv"
-          git ls-files | grep -E '(\.|_)(test|spec)\.(c|m)?[jt]sx?$' | LC_ALL=C sort > "$RUNNER_TEMP/expected.txt"
-          want=$(grep -c "" "$RUNNER_TEMP/expected.txt")
-          disc=$(sed -n 's/^discovered=//p' "${logs[@]}" | sort -u)
-          [ "$disc" = "$want" ] || fail "bun 自己发现的测试文件数（$disc）与入库清单（$want）对不上：发现规则不一致"
-          sed -n 's/^::group::\(.*\):$/\1/p' "${logs[@]}" | LC_ALL=C sort > "$RUNNER_TEMP/ran.txt"
-          dup=$(uniq -d "$RUNNER_TEMP/ran.txt")
-          [ -z "$dup" ] || fail "这些测试文件被不止一片跑了：$dup"
-          diff "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/ran.txt" || fail "各片跑过的文件和入库的测试文件对不上（< 没跑到，> 不在入库清单里）"
-          echo "${#logs[@]} 片 · $bunv · head $heads · bun 发现 $disc 个 · 实跑 $(grep -c "" "$RUNNER_TEMP/ran.txt") 个测试文件，不漏不重"
+        run: bun run --silent test:shard verify shards 4 "$GITHUB_SHA"
 
   web:
     name: web typecheck + lint
