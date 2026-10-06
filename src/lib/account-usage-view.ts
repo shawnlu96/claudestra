@@ -54,7 +54,7 @@ function fromCache(nowMs: number, path: string): { usage: AccountUsage | null; h
 /** 后台读数：最新的真实读数（带 source / stale / 观测时刻），都没有 = 未知 */
 export function readAccountUsageView(nowMs = Date.now(), paths: ViewPaths = {}): AccountUsage {
   const { usage: cached, health } = fromCache(nowMs, paths.cache ?? USAGE_CACHE_PATH);
-  const manual = lastManualReading(paths.refresh ?? ACCOUNT_USAGE_REFRESH_PATH);
+  const manual = lastManualReading(paths.refresh ?? ACCOUNT_USAGE_REFRESH_PATH, nowMs);
   if (manual && (!cached || manual.scrapedAt > cached.scrapedAt)) {
     const fresh = nowMs - manual.scrapedAt <= USAGE_CACHE_MAX_AGE_MS;
     return { ...manual, raw: MANUAL_RAW, source: "manual", stale: !fresh, reason: fresh ? null : "expired" };

@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  handleStatuslineConsentButton, postStatuslineConsentCard, SLWRAP_PREFIX, statuslineConsentCard, statuslineConsentRoute,
+  handleStatuslineConsentButton, postStatuslineConsentCard, SLWRAP_PREFIX, startStatuslineConsent, statuslineConsentCard, statuslineConsentRoute,
 } from "../src/bridge/account-usage-statusline-consent.ts";
 import type { Delivery, Envelope } from "../src/bridge/router.ts";
 import type { Principal } from "../src/lib/principals.ts";
@@ -163,5 +163,28 @@ describe("bridge 贴批准卡", () => {
     expect(await postStatuslineConsentCard(deliver, { ...s.deps, chatId: "chan-fail" })).toBe("failed");
     fail = false;
     expect(await postStatuslineConsentCard(deliver, { ...s.deps, chatId: "chan-fail" })).toBe("posted");
+  });
+  test("复现 consent-tick-race：慢投递跨过多个 tick，同计划在途时不再投第二次；成功后不再贴，失败释放后重试", async () => {
+    const s = await setup("chan-slow");
+    let deliveries = 0;
+    let release: (ok: boolean) => void = () => {};
+    const deliver = (env: Envelope): Promise<Delivery> => {
+      deliveries++;
+      return new Promise((r) => (release = (ok) => r({ envelope: env, outcome: ok ? { kind: "sent", discordMessageIds: [] } : { kind: "dropped", reason: "x" } } as Delivery)));
+    };
+    const stop = startStatuslineConsent(deliver, { ...s.deps, chatId: "chan-slow", tickMs: 10, firstDelayMs: 0 });
+    try {
+      await new Promise((r) => setTimeout(r, 60));
+      expect(deliveries).toBe(1); // 在途：后续 tick 都不再投
+      release(false);
+      await new Promise((r) => setTimeout(r, 40));
+      expect(deliveries).toBe(2); // 失败释放 → 下一 tick 重试，且仍只一路在途
+      release(true);
+      await new Promise((r) => setTimeout(r, 60));
+      expect(deliveries).toBe(2); // 成功 → 同计划不再贴
+    } finally {
+      stop();
+    }
+    expect(readFileSync(s.settingsPath, "utf8")).toBe(CUSTOM);
   });
 });

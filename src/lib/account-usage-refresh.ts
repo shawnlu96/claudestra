@@ -63,12 +63,40 @@ const EMPTY: RefreshState = {
 
 const isObj = (d: unknown): d is Record<string, unknown> => !!d && typeof d === "object" && !Array.isArray(d);
 
-/** 读状态：不存在 = 空；损坏 = corrupt（调用方按失败处理：不探测、不覆盖） */
-function readRefreshState(path = ACCOUNT_USAGE_REFRESH_PATH): { state: RefreshState; corrupt: boolean } {
+const isTime = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+const isTimeOrNull = (v: unknown) => v === null || v === undefined || isTime(v);
+const isPct = (v: unknown) => v === null || (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100);
+const isStrOrNull = (v: unknown) => v === null || typeof v === "string";
+/** 观测时刻比现在还晚这么多 = 坏数据（钟差容忍） */
+const FUTURE_SKEW_MS = 5 * 60_000;
+
+/** 落盘读数逐字段校验（USCR1 审查 manual-cache-shape）：百分比 null 或 0-100 有限数、重置时间是文字、观测时刻是不在未来的有限正数 */
+function validReading(v: unknown, nowMs: number): v is StoredReading {
+  if (!isObj(v)) return false;
+  return isPct(v.sessionPct) && isPct(v.weekPct) && typeof v.sessionResets === "string" && typeof v.weekResets === "string"
+    && isStrOrNull(v.totalCost ?? null) && isStrOrNull(v.apiDuration ?? null) && isTime(v.scrapedAt) && v.scrapedAt <= nowMs + FUTURE_SKEW_MS;
+}
+
+const validProbe = (v: unknown) =>
+  v === null || (isObj(v) && typeof v.session === "string" && typeof v.id === "string" && typeof v.dir === "string");
+const validInFlight = (v: unknown) =>
+  v === null || v === undefined || (isObj(v) && isTime(v.startedAt) && Number.isInteger(v.pid) && (v.pid as number) > 0 && validProbe(v.probe ?? null));
+
+/**
+ * 读状态：不存在 = 空；JSON 坏 / 调度字段（退避时刻、在途记录）类型不对 = corrupt（调用方按失败处理：不探测、不覆盖、不按坏记录去收资源）。
+ * 只有 lastReading 坏：当没有手动读数（后台退回 statusline 缓存或显示未知），不当新鲜真实读数；下次手动成功会覆盖它。
+ */
+function readRefreshState(path = ACCOUNT_USAGE_REFRESH_PATH, nowMs = Date.now()): { state: RefreshState; corrupt: boolean } {
   const r = readJsonStateSync(path, isObj);
   if (r.status === "missing") return { state: { ...EMPTY }, corrupt: false };
   if (r.status !== "ok") return { state: { ...EMPTY }, corrupt: true };
-  return { state: { ...EMPTY, ...(r.data as Partial<RefreshState>) }, corrupt: false };
+  const d = r.data as Record<string, unknown>;
+  const sched = isTimeOrNull(d.lastAttemptAt) && isTimeOrNull(d.lastFailureAt) && isTimeOrNull(d.nextAllowedAt)
+    && (d.lastFailureReason === undefined || isStrOrNull(d.lastFailureReason)) && validInFlight(d.inFlight);
+  if (!sched) return { state: { ...EMPTY }, corrupt: true };
+  const state = { ...EMPTY, ...(d as Partial<RefreshState>) };
+  if (!validReading(state.lastReading, nowMs)) state.lastReading = null;
+  return { state, corrupt: false };
 }
 
 function save(path: string, s: RefreshState): void {
@@ -84,21 +112,22 @@ const asUsage = (r: StoredReading | null): AccountUsage | null =>
   r ? { ...r, raw: MANUAL_RAW, source: "manual", stale: true, reason: null } : null;
 
 /** 上次手动探测成功的读数（后台读取路径用；只读，绝不触发探测） */
-export function lastManualReading(path = ACCOUNT_USAGE_REFRESH_PATH): StoredReading | null {
-  const { state, corrupt } = readRefreshState(path);
+export function lastManualReading(path = ACCOUNT_USAGE_REFRESH_PATH, nowMs = Date.now()): StoredReading | null {
+  const { state, corrupt } = readRefreshState(path, nowMs);
   return corrupt ? null : state.lastReading;
 }
 
 /**
  * bridge 启动时调一次：上一进程探测到一半就没了（kill -9 / 崩溃，退出钩子没机会跑）→ 只按它落盘的记录回收那一份资源，
- * 并按失败记退避（从它开始探测的时刻算 30 分钟，重启绕不过）。本进程自己的在途探测不动；抢不到锁 = 别的进程正在探测，不动。
+ * 并按失败记退避（从它开始探测的时刻算 30 分钟，重启绕不过）。本进程自己的在途探测不动；抢不到锁 = 别的进程正在探测或硬杀遗留的锁还在租期内，
+ * 不动，返回 busy（启动方按间隔有界重试，bridge/account-usage-startup.ts）。
  */
 export async function recoverInterruptedRefresh(deps: RefreshDeps): Promise<"recovered" | "none" | "busy" | "corrupt"> {
   const path = deps.path ?? ACCOUNT_USAGE_REFRESH_PATH;
   const lock = await acquireLock(`${path}.lock`, 0, 5 * 60_000);
   if (!lock) return "busy";
   try {
-    const { state, corrupt } = readRefreshState(path);
+    const { state, corrupt } = readRefreshState(path, (deps.now ?? Date.now)());
     if (corrupt) return "corrupt";
     if (!state.inFlight || (state.inFlight.pid === process.pid && inProcess.has(path))) return "none";
     if (state.inFlight.probe) await deps.probe.cleanup(state.inFlight.probe);
@@ -126,11 +155,11 @@ async function gatedRefresh(path: string, deps: RefreshDeps): Promise<RefreshOut
   const now = deps.now ?? Date.now;
   const lock = await acquireLock(`${path}.lock`, 0, 5 * 60_000);
   if (!lock) {
-    const { state } = readRefreshState(path);
+    const { state } = readRefreshState(path, now());
     return { outcome: "busy", usage: asUsage(state.lastReading), nextAllowedAt: state.nextAllowedAt, reason: "probe_in_progress" };
   }
   try {
-    const { state, corrupt } = readRefreshState(path);
+    const { state, corrupt } = readRefreshState(path, now());
     if (corrupt) return { outcome: "failed", usage: null, nextAllowedAt: null, reason: "state_corrupt" };
     // 上一进程探测到一半就没了（崩溃 / 重启）：按失败记退避，并只回收它记下的那份资源
     if (state.inFlight) {

@@ -75,6 +75,8 @@ export async function handleStatuslineConsentButton(id: string, click: ConsentCl
 const FROM = "⚙️ statusline";
 /** 本进程已贴过的计划：tick 反复调用不刷屏；重启清空（旧卡按钮随密钥作废，新进程重贴一次） */
 const postedPlans = new Set<string>();
+/** 正在投递的计划：慢投递跨过 tick 时下一 tick 不再投第二张；成功转 posted，失败释放让下一 tick 重试（USCR1 审查 consent-tick-race） */
+const postingPlans = new Set<string>();
 
 /** bridge 自己贴批准卡片到控制频道。没有待批计划 / 已贴过 / 没有控制频道都不贴 */
 export async function postStatuslineConsentCard(
@@ -84,14 +86,20 @@ export async function postStatuslineConsentCard(
   const now = (deps.now ?? Date.now)();
   const plan = pendingWrapPlan(now, deps.planPath ?? WRAP_PLAN_PATH);
   if (!plan) return "none";
-  if (postedPlans.has(plan.planId)) return "duplicate";
+  if (postedPlans.has(plan.planId) || postingPlans.has(plan.planId)) return "duplicate";
   const chatId = deps.chatId ?? process.env.CONTROL_CHANNEL_ID ?? "";
   if (!chatId) return "no_channel";
   const card = statuslineConsentCard(chatId, deps)!;
   const meta = { messageId: newMessageId("slwrap"), triggerKind: "bridge_synth" as const, ts: new Date(now).toISOString(), threadId: newThreadId(),
     components: card.components };
-  const r = await deliver({ from: { kind: "bridge", label: "statusline-consent" }, to: { kind: "user", userId: "", channelId: chatId },
-    intent: "notification", content: card.text, meta });
+  postingPlans.add(plan.planId);
+  let r: Delivery;
+  try {
+    r = await deliver({ from: { kind: "bridge", label: "statusline-consent" }, to: { kind: "user", userId: "", channelId: chatId },
+      intent: "notification", content: card.text, meta });
+  } finally {
+    postingPlans.delete(plan.planId);
+  }
   if (r.outcome.kind !== "sent") return "failed";
   postedPlans.add(plan.planId);
   emitEvent({ agent: "master", chatId, type: "chat_message", data: { direction: "out", from: FROM, text: card.text, threadId: meta.threadId, components: card.components } });

@@ -62,6 +62,39 @@ describe("readAccountUsageView", () => {
   });
 });
 
+describe("复现 manual-cache-shape：手动读数字段级校验", () => {
+  const good = { sessionPct: 40, weekPct: 50, sessionResets: "3pm", weekResets: "Oct 9", totalCost: null, apiDuration: null };
+  const state = (lastReading: unknown) => ({ lastAttemptAt: NOW, lastFailureAt: null, lastFailureReason: null, nextAllowedAt: null, inFlight: null, lastReading });
+  const bad: [string, Record<string, unknown>][] = [
+    ["百分比是字符串 / 负数 / 数字重置时间", { sessionPct: "broken", weekPct: -5, sessionResets: 12 }],
+    ["百分比超出 0-100", { sessionPct: 140 }],
+    ["百分比非有限数（字符串 NaN）", { weekPct: "NaN" }],
+    ["重置时间是数字", { weekResets: 99 }],
+    ["观测时刻不是有限正数", { scrapedAt: "now" }],
+    ["观测时刻在未来", { scrapedAt: NOW + 3600_000 }],
+    ["cost 类型错", { totalCost: 3 }],
+  ];
+  for (const [name, patch] of bad) {
+    test(`${name}：没有缓存 → 明确未知，不当新鲜手动读数`, () => {
+      const u = readAccountUsageView(NOW, paths(undefined, state({ ...good, scrapedAt: NOW - 1000, ...patch })));
+      expect(u.source).toBe("none");
+      expect(u.sessionPct).toBeNull();
+      expect(u.weekPct).toBeNull();
+    });
+    test(`${name}：有有效缓存 → 退回缓存，不被坏手动读数覆盖`, () => {
+      const p = paths(cacheJson(60_000), state({ ...good, scrapedAt: NOW - 1000, ...patch }));
+      const u = readAccountUsageView(NOW, p);
+      expect(u.source).toBe("statusline");
+      expect(u.sessionPct).toBe(22);
+      expect(readUsageCacheStale(NOW, p.cache, p.refresh)?.sessionPct).toBe(22);
+    });
+  }
+  test("合法手动读数照常生效（null 百分比 = 未知也合法）", () => {
+    const u = readAccountUsageView(NOW, paths(undefined, state({ ...good, weekPct: null, scrapedAt: NOW - 1000 })));
+    expect(u).toMatchObject({ source: "manual", sessionPct: 40, weekPct: null, stale: false });
+  });
+});
+
 describe("额度消费者：未知不伪装 0", () => {
   test("缓存缺 weekPct：quota-layers 的本机条目 used 为 null", () => {
     const c = parseUsageCache(JSON.stringify({ sessionPct: 10, scrapedAt: NOW - 1000 }), NOW, Infinity);

@@ -125,4 +125,16 @@ describe("scripts/statusline-usage.sh --wrap", () => {
       expect(JSON.parse(readFileSync(cache, "utf8"))).toMatchObject({ sessionPct: 12, weekPct: 34 });
     }
   });
+  test("复现 wrap-input：原命令收到的 stdin 逐字节不变（含结尾多个换行），输出与直接跑原命令相同", () => {
+    const state = join(dir, "wrap-bytes");
+    mkdirSync(state);
+    const env = testChildEnv({ HOME: dir, CLAUDESTRA_STATE_DIR: state });
+    for (const input of ['{"rate_limits":{}}\n\n', '{"rate_limits":{"five_hour":{"used_percentage":5}}}\n', "  \n{}\r\n\n\n"]) {
+      const before = spawnSync("/bin/sh", ["-c", "cat"], { input, encoding: "utf8", env });
+      const after = spawnSync("/bin/bash", [join(ROOT, "scripts/statusline-usage.sh"), "--wrap", "cat"], { input, encoding: "utf8", env });
+      expect(before.stdout).toBe(input);
+      expect(after.stdout).toBe(before.stdout);
+      expect(after.status).toBe(0);
+    }
+  });
 });

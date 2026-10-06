@@ -8,7 +8,7 @@
  * fixture settings / 假 tmux / 假探测，零真实 tmux、零模型调用。
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { __resetAccountUsageStartupForTest, startAccountUsage } from "../src/bridge/account-usage-startup.ts";
@@ -106,6 +106,46 @@ describe("startAccountUsage", () => {
     expect(r.outcome).toBe("backoff");
     expect(runs).toBe(0);
     expect(cleaned).toHaveLength(1);
+    __resetAccountUsageStartupForTest();
+  });
+
+  test("复现 probe-shutdown：探测持锁的进程被 SIGKILL（锁与在途记录同时遗留）→ 启动清扫 busy 后有界重试，锁过租期即回收记录里那一份", async () => {
+    __resetAccountUsageStartupForTest();
+    const refreshPath = join(dir, `killed-${n++}.json`);
+    const child = join(dir, `holder-${n++}.ts`);
+    writeFileSync(child, `
+import { manualRefresh } from ${JSON.stringify(join(ROOT, "src/lib/account-usage-refresh.ts"))};
+void manualRefresh({ path: ${JSON.stringify(refreshPath)}, probe: {
+  run: (onCreated) => (onCreated({ session: "cstra-usage-probe-killed", id: "$9", dir: "/tmp/killed" }), console.log("CREATED"), new Promise(() => {})),
+  cleanup: async () => {},
+} });
+setInterval(() => {}, 1000);
+`);
+    const proc = Bun.spawn([process.execPath, child], { stdout: "pipe", stderr: "inherit" });
+    const reader = proc.stdout.getReader();
+    let out = "";
+    while (!out.includes("CREATED")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += new TextDecoder().decode(value);
+    }
+    expect(out).toContain("CREATED");
+    proc.kill("SIGKILL");
+    await proc.exited;
+    expect(existsSync(`${refreshPath}.lock`)).toBe(true); // 硬杀：锁和在途记录都留下了
+    const cleaned: ProbeResource[] = [];
+    const probe = { run: async () => ({ ok: false as const, reason: "x" }), cleanup: async (r: ProbeResource) => void cleaned.push(r) };
+    const stop = await startAccountUsage(async (env) => ({ envelope: env, outcome: { kind: "sent" } }) as Delivery,
+      { probe, refreshPath, recoverRetryMs: 15, consent: { planPath: join(dir, "none.json"), tickMs: 1000, firstDelayMs: 1000 } });
+    await wait(40);
+    expect(cleaned).toHaveLength(0); // 锁还在租期内：不越过它清理
+    const old = new Date(Date.now() - 6 * 60_000);
+    utimesSync(`${refreshPath}.lock`, old, old); // 原持有者已死、不再续租 → 过租期
+    await wait(80);
+    stop();
+    expect(cleaned).toEqual([{ session: "cstra-usage-probe-killed", id: "$9", dir: "/tmp/killed" }]);
+    expect(JSON.parse(readFileSync(refreshPath, "utf8"))).toMatchObject({ inFlight: null, lastFailureReason: "interrupted" });
+    expect(existsSync(`${refreshPath}.lock`)).toBe(false);
     __resetAccountUsageStartupForTest();
   });
 });

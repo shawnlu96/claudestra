@@ -108,7 +108,7 @@ export function readUsageCacheStale(
   try {
     cache = parseUsageCache(readFileSync(path, "utf8"), nowMs, Number.POSITIVE_INFINITY);
   } catch {}
-  const m = refreshPath ? lastManualReading(refreshPath) : null;
+  const m = refreshPath ? lastManualReading(refreshPath, nowMs) : null;
   if (!m || (m.sessionPct === null && m.weekPct === null) || (cache && cache.scrapedAt >= m.scrapedAt)) return cache;
   // 面板的重置时间是本地文字,换不成时刻:缓存记的重置时刻在手动读数之后 = 还是同一个窗口,沿用;否则未知
   const sameWindow = (at: number | null | undefined) => (at != null && at > m.scrapedAt ? at : null);

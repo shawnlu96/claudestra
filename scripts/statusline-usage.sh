@@ -15,14 +15,26 @@
 # 降级安全:输入缺 rate_limits(旧版 CC)→ 不落盘;python3 不在 → 状态栏空行,
 # 会话不受影响。
 
-input=$(cat)
-
 if [ "$1" = "--wrap" ]; then
-  printf '%s' "$input" | /bin/sh -c "$2"
-  rc=$?
-  printf '%s' "$input" | "$(dirname "${BASH_SOURCE[0]}")/usage-cache-write.sh"
+  # 原命令要逐字节拿到原 stdin:不用 $(cat)(会吃掉结尾换行),落临时文件再原样喂给它和缓存写入器。
+  # 临时文件建不出来时退回内存:哨兵字符保住结尾换行(USCR1 审查 wrap-input)
+  if tmp=$(mktemp "${TMPDIR:-/tmp}/cstra-statusline.XXXXXX" 2>/dev/null); then
+    trap 'rm -f "$tmp"' EXIT
+    cat >"$tmp"
+    /bin/sh -c "$2" <"$tmp"
+    rc=$?
+    "$(dirname "${BASH_SOURCE[0]}")/usage-cache-write.sh" <"$tmp"
+  else
+    input=$(cat; printf x)
+    input=${input%x}
+    printf '%s' "$input" | /bin/sh -c "$2"
+    rc=$?
+    printf '%s' "$input" | "$(dirname "${BASH_SOURCE[0]}")/usage-cache-write.sh"
+  fi
   exit $rc
 fi
+
+input=$(cat)
 
 # 状态栏渲染(只管显示;落盘在下面统一走 usage-cache-write.sh,契约单点)
 python3 - "$input" <<'PYEOF'
