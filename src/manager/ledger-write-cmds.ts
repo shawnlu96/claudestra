@@ -29,6 +29,7 @@ import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
 import { witnessMismatch } from "../lib/caller-witness.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
+import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -143,6 +144,7 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   if (!TASK_KINDS.includes(kind)) throw new LedgerError("invalid", `--kind 只能是 ${TASK_KINDS.join(" / ")}`);
   checkTaskRefs(c.p.flags);
   const fields = withBrief(c, fieldsFrom(c, TASK_FLAGS), {});
+  armSpecPreflight();
   const r = createTask(c.db, c.ctx(), { ...fields, project, id: c.p.pos[1] ?? "", title: c.need("title"), kind } as never);
   const link = r.row.agent ? await linkRegistry(c, r.row.agent, r.row.title) : {};
   return { ok: true, task: r.row, duplicate: r.duplicate, ...link };
@@ -194,6 +196,7 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   const rev = intFlag(c.p, "rev");
   if (rev === undefined) throw new LedgerError("invalid", "改任务要带 --rev（show 里看当前 rev）");
   checkTaskRefs(c.p.flags);
+  armSpecPreflight();
   const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: withBrief(c, fieldsFrom(c, TASK_FLAGS, cur.assigneeKind), cur.extra) as never });
   // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent / --assignee 就再挂一次（幂等）
   const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined || c.p.flags.assignee !== undefined : r.row.agent !== cur.agent);

@@ -28,7 +28,10 @@ interface Corr {
 type Cls = "L" | "C";
 /** 入站消息：过了校验带类型化的 params，没过带原因和原始内容 */
 type Checked<P> = { ok: true; params: P; corr: Corr } | { ok: false; problem: string; raw: unknown; corr: Corr };
-export type NotificationEvent = { [M in NotificationMethod]: { method: M; cls: Cls } & Checked<z.infer<(typeof USED.notifications)[M]["params"]["schema"]>> }[NotificationMethod];
+type Params<M extends NotificationMethod> = z.infer<(typeof USED.notifications)[M]["params"]["schema"]>;
+/** item/* 的 item 在信封合格后已按成员 schema 校验过（itemEvent），类型跟着收窄 */
+type ItemParams<M extends NotificationMethod> = M extends "item/started" | "item/completed" ? Omit<Params<M>, "item"> & { item: z.infer<typeof ITEM> } : Params<M>;
+export type NotificationEvent = { [M in NotificationMethod]: { method: M; cls: Cls } & Checked<ItemParams<M>> }[NotificationMethod];
 
 export interface AppServerOpts {
   log?: (msg: string) => void;

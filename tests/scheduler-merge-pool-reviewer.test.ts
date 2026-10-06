@@ -65,12 +65,14 @@ const run = (shape: Shape, check: (begin: () => unknown) => void) => {
 };
 
 describe("i28-N11 merge gate accepts the pooled reviewer", () => {
-  test("N10 shape: no reviewer row, done codex pool order this round/head, claude author, pass → begins", () => {
-    run({ order: {}, verdict: pooledVerdict }, (begin) => expect(begin()).toMatchObject({ run: { phase: "ready", reviewedHead: H } }));
+  // POOLRV1 supersedes these two positives: a hand-made done order with no claim / receipt tickets is no engine receipt.
+  // The ticketed path is tests/pool-review-proof-integration.test.ts and tests/scheduler-pool.test.ts.
+  test("N10 shape without tickets: done codex pool order this round/head, claude author, pass → refused (POOLRV1)", () => {
+    run({ order: {}, verdict: pooledVerdict }, (begin) => expect(begin).toThrow(/出借池审查回执不成立/));
   });
-  test("earlier round reviewed locally, this round pooled → this round's pool reviewer is used", () => {
+  test("earlier round reviewed locally, this round pooled without tickets → this round's pool reviewer is picked, then refused (POOLRV1)", () => {
     run({ local: { agent: "agent-review", sessionId: "review-session", family: "codex" }, order: {}, verdict: pooledVerdict },
-      (begin) => expect(begin()).toMatchObject({ run: { phase: "ready" } }));
+      (begin) => expect(begin).toThrow(/出借池审查回执不成立/));
   });
   for (const [why, order] of [["order not done", { status: "claimed" }], ["head differs", { head: OLD }], ["round differs", { round: 0 }]] as const) {
     test(`pool order ${why} → still refused`, () => {

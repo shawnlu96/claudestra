@@ -2688,6 +2688,93 @@
       ],
       "type": "string"
     },
+    "v2/ThreadItemsListAnchor": {
+      "description": "An exclusive item position within the requested visible turn.",
+      "oneOf": [
+        {
+          "properties": {
+            "itemId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "item"
+              ],
+              "title": "ItemThreadItemsListAnchorType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "itemId",
+            "type"
+          ],
+          "title": "ItemThreadItemsListAnchor",
+          "type": "object"
+        }
+      ]
+    },
+    "v2/ThreadItemsListCursor": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/v2/ThreadItemsListAnchor"
+        }
+      ],
+      "description": "Starting position for an item-history page."
+    },
+    "v2/ThreadItemsListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/v2/ThreadItemsListCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Opaque continuation cursor or an exclusive item anchor in the requested visible turn. An item anchor requires a non-empty `turnId`; ascending (the default) returns items after it, and descending returns items before it. Continue with the returned string cursor."
+        },
+        "limit": {
+          "description": "Optional item page size.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sortDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/v2/SortDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional item pagination direction; defaults to ascending."
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "description": "Optional turn id to filter by. When omitted, returns items across the thread.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadItemsListParams",
+      "type": "object"
+    },
     "v2/ThreadReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -3723,6 +3810,7 @@
     "model/list": "v2/ModelListParams",
     "thread/compact/start": "v2/ThreadCompactStartParams",
     "thread/fork": "v2/ThreadForkParams",
+    "thread/items/list": "v2/ThreadItemsListParams",
     "thread/read": "v2/ThreadReadParams",
     "thread/resume": "v2/ThreadResumeParams",
     "thread/start": "v2/ThreadStartParams",
@@ -4416,6 +4504,104 @@
         ]
       }
     },
+    "v2/ThreadItemsListParams": {
+      "": {
+        "keys": {
+          "cursor": false,
+          "limit": false,
+          "sortDirection": false,
+          "threadId": true,
+          "turnId": false
+        },
+        "nullable": false,
+        "ours": {
+          "nullable": false,
+          "required": true,
+          "types": [
+            "object"
+          ]
+        },
+        "ref": "v2/ThreadItemsListParams",
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "cursor": {
+        "nullable": true,
+        "ours": {
+          "nullable": true,
+          "required": true,
+          "types": [
+            "string"
+          ]
+        },
+        "ref": "v2/ThreadItemsListCursor",
+        "required": false,
+        "types": [
+          "object",
+          "string"
+        ]
+      },
+      "limit": {
+        "limits": {
+          "format": "uint32",
+          "minimum": 0
+        },
+        "nullable": true,
+        "ours": {
+          "limits": {
+            "maximum": 1000,
+            "minimum": 1
+          },
+          "nullable": false,
+          "required": true,
+          "types": [
+            "integer"
+          ]
+        },
+        "required": false,
+        "types": [
+          "integer"
+        ]
+      },
+      "sortDirection": {
+        "nullable": true,
+        "ours": {
+          "nullable": false,
+          "required": true,
+          "types": [
+            "string"
+          ],
+          "values": [
+            "desc"
+          ]
+        },
+        "ref": "v2/SortDirection",
+        "required": false,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "asc",
+          "desc"
+        ]
+      },
+      "threadId": {
+        "nullable": false,
+        "ours": {
+          "nullable": false,
+          "required": true,
+          "types": [
+            "string"
+          ]
+        },
+        "required": true,
+        "types": [
+          "string"
+        ]
+      }
+    },
     "v2/ThreadReadParams": {
       "": {
         "keys": {
@@ -4434,6 +4620,23 @@
         "required": true,
         "types": [
           "object"
+        ]
+      },
+      "includeTurns": {
+        "nullable": false,
+        "ours": {
+          "nullable": false,
+          "required": true,
+          "types": [
+            "boolean"
+          ],
+          "values": [
+            "false"
+          ]
+        },
+        "required": false,
+        "types": [
+          "boolean"
         ]
       },
       "threadId": {
@@ -4821,6 +5024,20 @@
           "auto_review",
           "guardian_subagent",
           "user"
+        ]
+      },
+      "clientUserMessageId": {
+        "nullable": true,
+        "ours": {
+          "nullable": false,
+          "required": true,
+          "types": [
+            "string"
+          ]
+        },
+        "required": false,
+        "types": [
+          "string"
         ]
       },
       "effort": {
@@ -5261,6 +5478,20 @@
         "required": true,
         "types": [
           "object"
+        ]
+      },
+      "clientUserMessageId": {
+        "nullable": true,
+        "ours": {
+          "nullable": false,
+          "required": true,
+          "types": [
+            "string"
+          ]
+        },
+        "required": false,
+        "types": [
+          "string"
         ]
       },
       "expectedTurnId": {
