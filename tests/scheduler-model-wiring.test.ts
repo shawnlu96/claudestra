@@ -101,7 +101,7 @@ describe("on", () => {
     expect(step).toBe("manual");
     expect(detail).toStartWith(`agent-rv-t1 回合失败：${CYBER}；MODEL 计划：retry_same（批准 `);
     expect(detail).toContain("retry_same");
-    expect(detail).toContain("执行路径待 MODELX");
+    expect(detail).toContain("提供方安全拒绝保持暂停：不自动换会话 / 家族 / 提供方重试");
     expect(outcomes()).toMatchObject([{ kind: "note", data: { op: "model_refusal_retry", mode: "on" } }]);
     expect(f.notices.slice(before)).toHaveLength(1);
     expect(f.notices.at(-1)).toStartWith(today(CYBER));
@@ -113,7 +113,7 @@ describe("on", () => {
     expect(f.intents()).toHaveLength(sends);
   });
 
-  test("a long host message is shortened, never the plan: PM notice, fallback_manual and detail all keep kind, approval and pending MODELX", async () => {
+  test("a long host message is shortened, never the plan: PM notice, fallback_manual and detail all keep kind, approval and the pause", async () => {
     setModelOutcomeReader(CFG);
     g.__modelwPolicy = mode("on");
     approve();
@@ -125,7 +125,7 @@ describe("on", () => {
     const fallback = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.data.op === "fallback_manual");
     for (const text of [detail, f.notices.at(-1)!, String(fallback?.data.reason)]) {
       expect(text).toContain(`agent-rv-t1 回合失败：${CYBER}`);
-      expect(text).toMatch(/MODEL 计划：retry_same（批准 [^）]+），执行路径待 MODELX（台账 #\d+，未执行）/);
+      expect(text).toMatch(/MODEL 计划：retry_same（批准 [^，]+，台账 #\d+）——提供方安全拒绝保持暂停/);
     }
     expect(detail.length).toBeLessThanOrEqual(560);
   });

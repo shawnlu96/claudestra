@@ -64,7 +64,8 @@ describe("on: the approved refusal sequence", () => {
     approve();
     const once = await step(first, rv("s-rv"));
     expect(once).toContain("MODEL 计划：retry_same（批准 ");
-    expect(once).toContain("执行路径待 MODELX");
+    expect(once).toContain("提供方安全拒绝保持暂停：不自动换会话 / 家族 / 提供方重试");
+    expect(once).not.toContain("执行路径待 MODELX");
     // A replayed tick on the same intent: MODEL's dedup key, no second record, the same suffix.
     expect(await step(first, rv("s-rv"))).toBe(once);
     expect(outcomes()).toHaveLength(1);
@@ -72,8 +73,8 @@ describe("on: the approved refusal sequence", () => {
     const second = ticket("refusal-retry-1");
     const exempt = await step(second, rv("s-rv-2"));
     expect(exempt).toContain("MODEL 计划：exempt_review（批准 ");
-    expect(exempt).toContain(EXEMPTION_TEXT);
-    expect(exempt).toContain("告知 owner");
+    expect(exempt).toContain("保持暂停");
+    expect(exempt).not.toContain("执行路径待 MODELX");
     expect(outcomes().at(-1)).toMatchObject({ kind: "escalate", data: { op: "model_refusal_exempt", attempt: 2, session: "s-rv-2", oldSession: "s-rv",
       plan: { kind: "exempt_review", to: { family: "claude", machine: "local" }, exemption: EXEMPTION_TEXT, notifyOwner: true } } });
 
