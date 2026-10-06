@@ -16,6 +16,7 @@ import { shellEscape } from "../lib/claude-launch.js";
 import { fetchLatestCodex, probeCodexInstall } from "../lib/codex-version.js";
 import { currentCodexAcp, installCodexAcp, reconcileCodexAcp } from "../lib/acp/install.js";
 import { fetchAcpReleases, pickAdapterFor, rangeAllows } from "../lib/acp/resolve.js";
+import { probeNpmCodexCompat, selectedCodexAdapter, type CodexCompat } from "../lib/acp/codex-compat.js";
 import { forgetInstalledCodex, forgetInstalledPi, isStableVersion } from "../lib/update-hints.js";
 import { apiJson, forbidden, isFullScope, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
@@ -48,7 +49,19 @@ const CODEX_DEPS = {
   installAdapter: (rel: Parameters<typeof installCodexAcp>[0]) => installCodexAcp(rel),
   /** 按磁盘上此刻的 Codex 对账适配器（npm 成功后调；并发的 acp-install 也走它，谁最后对账谁说了算） */
   reconcile: () => reconcileCodexAcp({ codexVersion: async () => (await probeCodexInstall())?.version }),
+  selected: selectedCodexAdapter,
+  /** 自研适配器生效时：把这个版本装进临时目录、按 app-server 协议判兼容（codex-compat.ts） */
+  compat: (version: string) => probeNpmCodexCompat(version, runInLoginShell),
 };
+
+/** 自研适配器只认协议判定：兼容才装；不兼容 / 判不出都 409 带原因。不对账上游指针：没有上游配套版本时那一步会失败、白白不重启 */
+async function gateBySelfAdapter(latest: string, command: string, compat: (v: string) => Promise<CodexCompat>): Promise<Prepared> {
+  const c = await compat(latest);
+  if (c.verdict === "compatible") return { command };
+  const why = c.verdict === "incompatible" ? "按 app-server 协议判定和自研 Codex 适配器不兼容" : "判不出和自研 Codex 适配器是否兼容";
+  const more = c.reasons.length > 5 ? `；另有 ${c.reasons.length - 5} 条` : "";
+  return { status: 409, error: `npm 上的 Codex ${latest} ${why}，没更新：${c.reasons.slice(0, 5).join("；")}${more}` };
+}
 
 /**
  * 装的是**这一刻查到的** latest 且钉死版本号，不写 @latest：查完到装之间 npm 发了新版，也不会装上没核对过配套的那个。
@@ -56,6 +69,7 @@ const CODEX_DEPS = {
  * npm 成功后都按磁盘上此刻的 Codex 对账（reconcileCodexAcp，在锁里切指针），对账失败回 500 不重启，成功才重启。对账前有一个很短的错配窗口（旧适配器 + 新 Codex），
  * 这期间别的 ACP agent 恰好重启会撞上，已知且可接受；其余在跑的 ACP agent 不动，下次重启自然用上新指针和新 Codex。
  * npm 上也找不到能配的适配器就 409（网页此时本来就不给按钮）。适配器状态 broken 也 409：不知道现在跑的是哪个，先 acp-install。
+ * 以上都是上游 codex-acp 生效时；自研适配器生效时改走 gateBySelfAdapter。
  */
 export async function prepareCodexUpdate(over: Partial<typeof CODEX_DEPS> = {}): Promise<Prepared> {
   const d = { ...CODEX_DEPS, ...over };
@@ -66,6 +80,7 @@ export async function prepareCodexUpdate(over: Partial<typeof CODEX_DEPS> = {}):
   if (!latest) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
   if (!isStableVersion(latest)) return { status: 409, error: `npm 上的 Codex ${latest.slice(0, 40)} 不是正式版，不替你装` };
   const command = `npm install -g @openai/codex@${latest}`;
+  if (d.selected() === "self") return gateBySelfAdapter(latest, command, d.compat);
   // npm 成功后一律按磁盘上的 Codex 对账：快速分支也要，npm 期间并发的 acp-install 可能按旧 Codex 切过指针。
   // 那一刻仍没装任何适配器就不对账（没有 ACP agent 能跑，不替 tmux-only 的机器下载适配器）
   const afterShell = async () => {

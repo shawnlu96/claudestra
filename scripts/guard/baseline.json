@@ -407,6 +407,12 @@
       "from": 0,
       "to": 0,
       "why": "TWINS 新增 src/lib/shell-end-line.ts ↔ web/lib/chat/shell-end-line.ts：后台 shell 终止行（[exited with code N] / [killed]）的解析规则 bridge 与网页各需一份，按防腐规则 5 登记成 twin（#685 审计 P2）"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "CXF-3：knip 入口加 scripts/codex-acp-compare.ts（自研 Codex 适配器与 codex-acp 2.1.0 的真 CLI 对照 / 冒烟脚本，直接 bun 运行、不被 import，同 scripts/codex-probe.ts）；只加入口，规则不变"
     }
   ]
 }
