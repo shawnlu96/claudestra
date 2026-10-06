@@ -453,7 +453,7 @@ describe("收件人与去重 key", () => {
   test("什么都正常 → 没有异常，所有取到数的规则都算跑过", () => {
     const r = auditLedger(snap({ tasks: [entered("T1", "build", NOW - MIN)] }), NOW);
     expect(r.findings).toEqual([]);
-    expect(r.evaluated.length).toBe(14);
+    expect(r.evaluated.length).toBe(16);
     expect(r.evaluated).toContain("dispatch_blocked"); // events-only rule: runs whatever sources were readable
     for (const rule of ["review_no_reviewer", "executor_idle", "ship_stalled", "merge_unknown", "review_witness_mismatch", "owner_inbox_stale"] as const) expect(r.evaluated).toContain(rule);
     expect(rules(snap({ agents: [agent(PM)] }))).toEqual([]);
