@@ -2,6 +2,8 @@
  * LCK-1 at the merge handoff: the card's file locks shrink to the PR's own files when handed over, go away as soon as the merged
  * PR moves it to live, and come back in full when it is sent back to fix. Stranded locks of already-live cards are swept per tick.
  */
+import { Database } from "bun:sqlite";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { reconcileFinishedCardLeases } from "../src/lib/ledger-scheduler-lease-finished.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -11,7 +13,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { ghPrState, handoffFiles, type HandoffPr } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { HANDOFF_POLL_MS } from "../src/lib/scheduler-merge-handoff-tick.js";
-import { narrowHandoffLocks } from "../src/lib/scheduler-merge-handoff-narrow.js";
+import { narrowHandoffLocks } from "../src/lib/scheduler-merge-handoff.js";
 import { autoFixture, H1, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 const PR = "https://github.com/example/repo/pull/7";
@@ -21,7 +23,7 @@ const GLOBS = ["src/lib/acp/*", "src/bridge/acp-link.ts", "src/lib/acp-turn.ts",
   "src/lib/acp-pool.ts", "src/lib/acp-log.ts", "tests/acp-*.test.ts", "docs/acp.md", "src/lib/acp-relay.ts", "src/lib/acp-codec.ts"];
 const PR_FILES = ["src/lib/acp/session.ts", "src/bridge/acp-link.ts", "README.md"];
 
-async function narrowFixture(files: string[] | null = PR_FILES) {
+async function narrowFixture(files: string[] | null = PR_FILES, reader = false) {
   const f = autoFixture();
   f.db.query("UPDATE tasks SET extra = ? WHERE id = 'T1'").run(JSON.stringify({ fileGlobs: GLOBS }));
   await toBuild(f);
@@ -32,15 +34,18 @@ async function narrowFixture(files: string[] | null = PR_FILES) {
   await f.review("pass", H1, [P2]);
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   let pr: HandoffPr = { state: "OPEN", head: H1, mergeSha: null };
+  // the daemon's pass reads through a query_only connection (ledger-read.ts); `reader` runs the handoff tick on one
+  const passDb = reader ? new Database(join(f.dir, "ledger.sqlite"), { readwrite: true, create: false }) : f.db;
+  if (reader) passDb.exec("PRAGMA query_only = ON");
   const hand = async () => {
-    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
+    const r = await schedulerAutoTick(passDb, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
       prState: async (_ref, _follow, handing) => (handing ? { ...pr, files } : pr) });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
   const locks = (taskId = "T1") => (f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = ? AND scope = 'card' AND resource NOT LIKE '%:%' ORDER BY resource")
     .all(taskId) as { resource: string }[]).map((r) => r.resource);
-  return { f, hand, locks, setPr: (p: HandoffPr) => { pr = p; } };
+  return { f, hand, locks, passDb, setPr: (p: HandoffPr) => { pr = p; } };
 }
 
 /**
@@ -102,6 +107,17 @@ describe("LCK-1 file locks at the merge handoff", () => {
         expect(locks()).toEqual([...GLOBS].sort());
       } finally { f.close(); }
     }
+  });
+
+  test("on the daemon's query_only connection the handoff still narrows and the sweep still frees (through a write connection)", async () => {
+    const { f, hand, locks, passDb } = await narrowFixture(PR_FILES, true);
+    try {
+      expect(await hand()).toMatchObject({ step: "handoff", detail: expect.stringContaining("文件锁收窄 12 → 2") });
+      f.db.query("UPDATE tasks SET stage = 'live' WHERE id = 'T1'").run();
+      await reconcileFinishedCardLeases(passDb, ["p"], () => {});
+      expect(locks()).toEqual([]);
+      await reconcileFinishedCardLeases(passDb, ["p"], () => {}); // nothing left: no write attempted on the reader
+    } finally { passDb.close(); f.close(); }
   });
 
   test("a card already live with stranded locks and no open intent is released by the next tick's sweep", async () => {

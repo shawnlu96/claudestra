@@ -37,7 +37,7 @@ the pass and is read again next pass; nothing is written.
 
 **File locks** (LCK-1). Right after the handoff record the card's file locks shrink to the PR's changed files (`git diff --name-only
 --no-renames origin/main...<head>` in the project's clone, same origin check as a carry) that its `fileGlobs` cover — one
-`merge_handoff_narrow` event per handoff (`lib/scheduler-merge-handoff-narrow.ts`). Anything uncertain (no repoDir, foreign origin, git
+`merge_handoff_narrow` event per handoff (`narrowHandoffLocks` in `lib/scheduler-merge-handoff.ts`). Anything uncertain (no repoDir, foreign origin, git
 failure, a path the scheduler cannot name, a list that may be truncated, an open intent) keeps the locks whole. A carry leaves them as
 they are; back in `fix`, the fix dispatch takes the full `fileGlobs` again. Landing on `live` releases them in the same transaction, and
 each tick sweeps any finished card still holding card locks with no open intent.

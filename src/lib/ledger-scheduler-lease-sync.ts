@@ -1,14 +1,12 @@
 /**
  * Keep a card's held file locks (scheduler_resources scope='card') in step with its declared scope: rewrite_dag changing a bound
- * node's fileGlobs, and the merge handoff narrowing to the PR's net diff (scheduler-merge-handoff-narrow.ts). Without this the
+ * node's fileGlobs (ledger-dag-write.ts), and the merge handoff narrowing to the PR's net diff (scheduler-merge-handoff.ts). Without this the
  * DAG and lanes said "free" while the old locks kept blocking other cards. tests/ledger-scheduler-lease-sync.test.ts.
  */
-import type { Database } from "bun:sqlite";
-import type { WriteCtx } from "./ledger-checks.js";
+import { Database } from "bun:sqlite";
 import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
 
 export interface FileLock { resource: string; intentId: string; acquiredAt: number }
 
@@ -32,7 +30,7 @@ export function coveredBy(inner: string, outer: string): boolean {
   return prefix(inner).startsWith(prefix(outer));
 }
 
-const keys = (globs: readonly string[]): string[] => [...new Set(globs.map((g) => resourceKey(g)).filter((k): k is string => !!k))].sort();
+export const globKeys = (globs: readonly string[]): string[] => [...new Set(globs.map((g) => resourceKey(g)).filter((k): k is string => !!k))].sort();
 
 /**
  * Replace the card's held file locks with `next`, in the caller's transaction. Added locks must not overlap another card's
@@ -65,35 +63,23 @@ export function replaceCardFileLocks(db: Database, task: LedgerTask, held: reado
  */
 export function syncedLocks(held: readonly FileLock[], oldGlobs: readonly string[], newGlobs: readonly string[]): string[] {
   if (!held.length) return [];
-  const next = keys(newGlobs), before = new Set(keys(oldGlobs));
+  const next = globKeys(newGlobs), before = new Set(globKeys(oldGlobs));
   const kept = held.map((h) => h.resource).filter((r) => next.some((g) => coveredBy(r, g)));
   const dropped = held.map((h) => h.resource).filter((r) => !kept.includes(r));
   const taken = next.filter((g) => !kept.some((r) => coveredBy(g, r)) && (dropped.some((r) => resourcesOverlap(g, r)) || !before.has(g)));
   return [...new Set([...kept, ...taken])].sort();
 }
 
-const globsOf = (task: LedgerTask): string[] =>
-  Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
-
 /**
- * rewrite_dag changed a bound card's node fileGlobs: write them to the card's extra.fileGlobs (what the scheduler dispatches by)
- * and move its held locks to match, in the rewrite's own transaction. A clash on a lock it would newly take refuses the rewrite.
+ * The scheduler daemon's pass reads through a query_only connection (ledger-read.ts); its few direct lock writes open a write
+ * connection on the same file for the one transaction, like the finished-card probe (ledger-scheduler-lease-finished.ts).
  */
-export function syncCardFileScope(db: Database, ctx: WriteCtx, task: LedgerTask, newGlobs: readonly string[]): void {
-  const oldGlobs = globsOf(task);
-  if (keys(oldGlobs).join("\n") === keys(newGlobs).join("\n")) return;
-  const now = ctx.now ?? Date.now();
-  const held = cardFileLocks(db, task.id), next = syncedLocks(held, oldGlobs, newGlobs);
-  // a writer already sent may still be editing any file of the old scope: dropping its lock now lets another card write it too
-  const writing = held.some((h) => !next.includes(h.resource)) ? db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch'
-    AND status IN ('pending','submitted','unknown') LIMIT 1`).get(task.id) as { id: string; status: string } | null : null;
-  if (writing) {
-    throw new LedgerError("conflict", `${task.id} 有在途派单 ${writing.id}（${writing.status}），收窄会放掉 writer 可能还在改的文件：锁仍然生效，` +
-      "等它交付、意图结清后再收窄（加范围不受限）", { taskId: task.id, intent: writing.id });
-  }
-  if (held.length) replaceCardFileLocks(db, task, held, next, now);
-  const extra = { ...task.extra, fileGlobs: [...newGlobs] }, rev = task.rev + 1;
-  db.prepare("UPDATE tasks SET extra = ?, rev = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(extra), rev, now, task.id);
-  insertEvent(db, ctx, { project: task.project, target: task.id, kind: "task", text: "子 DAG 改了文件范围，卡的范围与文件锁同步",
-    data: { op: "set", patch: { extra }, rev, fileScope: { from: oldGlobs, to: [...newGlobs], locks: { from: held.map((h) => h.resource), to: next } } } }, false);
+export function withLedgerWriter<T>(db: Database, fn: (writer: Database) => T): T {
+  const memory = !db.filename || db.filename === ":memory:";
+  const writer = memory ? db : new Database(db.filename, { readwrite: true, create: false });
+  try { return fn(writer); } finally { if (!memory) writer.close(); }
 }
+
+/** Open dispatch of the card: a writer that may still be editing files of its old scope. */
+export const openDispatch = (db: Database, taskId: string) => db.query(`SELECT id, status FROM scheduler_intents WHERE taskId = ? AND action = 'dispatch'
+  AND status IN ('pending','submitted','unknown') LIMIT 1`).get(taskId) as { id: string; status: string } | null;

@@ -10,8 +10,8 @@ import { ghEnv } from "./peer-pr-github.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
-import { handoffOf, type HandoffFollow } from "./scheduler-merge-handoff.js";
-import { narrowHandoffLocks } from "./scheduler-merge-handoff-narrow.js";
+import { handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
+import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 /**
@@ -168,7 +168,8 @@ function narrowAfterHandoff(c: HandoffCard<unknown>, files: string[] | null | un
   const { task } = c;
   if (!files || !task.pr || !task.headSHA) return "";
   try {
-    const r = narrowHandoffLocks(c.db, { actor: "scheduler", now: c.deps.now() }, { taskId: task.id, head: task.headSHA, pr: task.pr, files });
+    const input = { taskId: task.id, head: task.headSHA, pr: task.pr, files };
+    const r = withLedgerWriter(c.db, (db) => narrowHandoffLocks(db, { actor: "scheduler", now: c.deps.now() }, input));
     return r.narrowed ? `；文件锁收窄 ${r.from.length} → ${r.to.length}` : `；文件锁不收窄（${r.reason}）`;
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;

@@ -22,7 +22,8 @@ import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import { dropPageCheck, planPageRewrite, withPageCheck } from "./ui-acceptance.js";
 import { insertEvent, replay, tx } from "./ledger-tx.js";
-import { syncCardFileScope } from "./ledger-scheduler-lease-sync.js";
+import { cardFileLocks, globKeys, openDispatch, replaceCardFileLocks, syncedLocks } from "./ledger-scheduler-lease-sync.js";
+import type { LedgerTask } from "./ledger-stages.js";
 
 const DAG_ACTION = "dag_rewrite";
 const APPROVE = "dag_rewrite_approve";
@@ -74,6 +75,31 @@ function syncBoundScopes(db: Database, ctx: WriteCtx, cur: readonly DagNode[], n
     if (!n.fileGlobs?.length) throw new LedgerError("invalid", `节点 ${n.key} 已绑 ${task.id}：不能省略 fileGlobs（卡和文件锁仍按原范围生效）`);
     syncCardFileScope(db, ctx, task, n.fileGlobs);
   }
+}
+
+const globsOf = (task: LedgerTask): string[] =>
+  Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
+
+/**
+ * A bound card's node fileGlobs changed: write them to its extra.fileGlobs (what the scheduler dispatches by) and move its held
+ * locks to match (lib/ledger-scheduler-lease-sync.ts). Dropping a lock under an open dispatch, or a clash on a new one, refuses it.
+ */
+function syncCardFileScope(db: Database, ctx: WriteCtx, task: LedgerTask, newGlobs: readonly string[]): void {
+  const oldGlobs = globsOf(task);
+  if (globKeys(oldGlobs).join("\n") === globKeys(newGlobs).join("\n")) return;
+  const now = ctx.now ?? Date.now();
+  const held = cardFileLocks(db, task.id), next = syncedLocks(held, oldGlobs, newGlobs);
+  // a writer already sent may still be editing any file of the old scope: dropping its lock now lets another card write it too
+  const writing = held.some((h) => !next.includes(h.resource)) ? openDispatch(db, task.id) : null;
+  if (writing) {
+    throw new LedgerError("conflict", `${task.id} 有在途派单 ${writing.id}（${writing.status}），收窄会放掉 writer 可能还在改的文件：锁仍然生效，` +
+      "等它交付、意图结清后再收窄（加范围不受限）", { taskId: task.id, intent: writing.id });
+  }
+  if (held.length) replaceCardFileLocks(db, task, held, next, now);
+  const extra = { ...task.extra, fileGlobs: [...newGlobs] }, rev = task.rev + 1;
+  db.prepare("UPDATE tasks SET extra = ?, rev = ?, updatedAt = ? WHERE id = ?").run(JSON.stringify(extra), rev, now, task.id);
+  insertEvent(db, ctx, { project: task.project, target: task.id, kind: "task", text: "子 DAG 改了文件范围，卡的范围与文件锁同步",
+    data: { op: "set", patch: { extra }, rev, fileScope: { from: oldGlobs, to: [...newGlobs], locks: { from: held.map((h) => h.resource), to: next } } } }, false);
 }
 
 function summary(cur: readonly DagNode[], c: ProposalContent): string {
