@@ -13,6 +13,7 @@ import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpIncompatibleError } from "./protocol.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
+import { transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "./transcript.js";
 import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
 import { createAcpTranslator, type AcpTranslator } from "./updates.js";
 
@@ -43,6 +44,8 @@ export interface HostDeps {
   markReady(): Promise<void>;
   rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
   log(msg: string): void;
+  /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
+  show?(item: string): void;
 }
 
 const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
@@ -66,6 +69,7 @@ export class AcpHost {
   /** 起适配器 / 等不到会话的失败键用单调序号（同一毫秒两次失败不能被合成一张卡） */
   private startSeq = 0;
   private lastStartError: AcpFailure | null = null;
+  private lastStartErrorAt = 0;
   /** 适配器协议不兼容（protocol.ts）：重起换不来别的结果，不再重起、回合当场按失败收尾；换了适配器或宿主要 restart */
   private refused = false;
   private sessionWaiters: ((s: AcpSession | null) => void)[] = [];
@@ -129,7 +133,7 @@ export class AcpHost {
         this.compactCommand = COMPACT_COMMAND.test(text);
         return s.prompt(text).finally(() => (this.compactCommand = false));
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
+      steer: (text, deliveryId) => (this.session?.steering ? this.session.steer(text, deliveryId).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
       onSlotEnd: (e) => deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`),
@@ -179,6 +183,7 @@ export class AcpHost {
     } catch (e) {
       const f = classifyPromptError(e, `start#${++this.startSeq}`);
       this.lastStartError = f;
+      this.lastStartErrorAt = Date.now();
       this.refused = e instanceof AcpIncompatibleError;
       this.deps.log(`适配器接不上线程：${f.message}${this.refused ? "（不再重起；不标就绪，manager 按启动失败处理）" : ""}`);
       this.fail(f);
@@ -233,7 +238,7 @@ export class AcpHost {
   /** 在 bridge 登记上了（首次 / 重连 / bridge 重启）：还在等的权限请求补发出卡，拒起的卡补发一次（bridge 按题面去重），出站条目接着送 */
   private resync(): void {
     for (const p of this.permits.values()) this.link.send(p.frame);
-    if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError); // 拒起时 bridge 可能还没登记上，那一帧就丢了
+    if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError, this.lastStartErrorAt); // 拒起时 bridge 可能还没登记上，那一帧就丢了
     void this.pump();
   }
 
@@ -247,6 +252,17 @@ export class AcpHost {
       this.deps.log(`bridge 太久没确认，出站条目超过 ${ENTRY_OUTBOX_MAX} 条：丢掉最老的 ${over} 条`);
     }
     void this.pump();
+    for (const entry of entries) this.show(() => transcriptOfEntry(entry));
+  }
+
+  /** 窗口里的会话只是旁路：渲染出错（如工具入参形状不对）只记日志，不能挡住出站、出卡 */
+  private show(render: () => string | string[]): void {
+    if (!this.deps.show) return;
+    try {
+      for (const item of [render()].flat()) this.deps.show(item);
+    } catch (e) {
+      this.deps.log(`窗口会话渲染出错：${errText(e)}`);
+    }
   }
 
   /** 队首一批一批送，bridge 回 true 才出队；false / 断线 / 超时就停下退避重送（登记上了也会接着送） */
@@ -307,6 +323,7 @@ export class AcpHost {
     for (const id of [...this.permits.keys()]) this.endPermission(id, null, "回合已结束");
     const rest = this.translator.flush();
     if (rest.length) this.pushEntries(rest);
+    this.show(() => transcriptOfStop(r));
     // 这一轮的条目 bridge 全部确认处理完才报 Stop：Stop 的 drain 要看到收尾文字（ws 与 HTTP 两条路没有先后保证）。
     // 等不到确认、或 bridge 太久不在丢过条目：不能当成功报，按 StopFailure 报；没确认的留在队列里，连上了照样补送
     const ok = await this.drained(this.timing("drainMs"));
@@ -320,14 +337,17 @@ export class AcpHost {
   }
 
   private fail(f: AcpFailure): void {
+    this.show(() => transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
-    this.sendFailure(f);
+    this.sendFailure(f, Date.now());
   }
 
-  private sendFailure(f: AcpFailure): void {
-    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label });
+  /** sessionId / failedAt：出借停单据此认这张卡是不是当前会话、当前回合的（lend-turn-failure.ts）；failedAt 取失败那一刻，补发沿用原值，bridge 写卡的时刻不能代替它 */
+  private sendFailure(f: AcpFailure, failedAt: number): void {
+    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label,
+      sessionId: this.session?.sessionId || undefined, failedAt });
   }
 
   /** 权限请求：按 permId 交 bridge 出卡，等 owner 答（bridge 经 acp_call 回来）；到点按取消回适配器 */
@@ -371,6 +391,7 @@ export class AcpHost {
     const wrapped = wrapChannelContent(content, shown, this.cfg.mcpName, codexReplyHint(this.cfg.mcpName));
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
+    this.show(() => transcriptOfInbound(content, meta));
     const how = await this.loop.submit(text, meta.message_id);
     this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${INBOUND_HOW[how]}`);
   }

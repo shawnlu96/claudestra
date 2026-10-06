@@ -14,7 +14,7 @@ async function until(predicate: () => boolean) {
 }
 
 test("two isolated members: import visibility, next poll, CAS draft rebase, locked execution and permissions over HTTP", async () => {
-  const f = await c6Fixture(), stops: (() => void)[] = [];
+  const f = await c6Fixture("members"), stops: (() => void)[] = [];
   try {
     console.log(`C6 center temporary port ${f.port}; peer A / peer B have independent credential directories`);
     const prepared = await prepareSharedLedgerImport(f.db, f.options);

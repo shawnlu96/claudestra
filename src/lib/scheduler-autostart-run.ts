@@ -154,7 +154,7 @@ function adapter(env: StartTickEnv, c: AutostartClaim, p: StartPlan): StepIO["ma
   return async (args, timeoutMs) => {
     const [cmd, name] = args;
     if (cmd === "ledger") return env.ledger("ledger", "scheduler-autostart", "step", String(c.seq), ...args.slice(1));
-    if (cmd === "create" && `agent-${name}` === c.agent && args[2] === p.worktree) return env.plain(args, timeoutMs);
+    if (cmd === "create" && (name === c.agent || `agent-${name}` === c.agent) && args[2] === p.worktree) return env.plain(args, timeoutMs);
     if (cmd === "kill" && name === c.agent) return env.plain(args, timeoutMs);
     throw new Error(`自动开卡不代跑 manager ${args.slice(0, 2).join(" ")}`);
   };

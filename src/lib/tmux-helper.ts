@@ -19,6 +19,7 @@ import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; exp
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
 import { endsInModal, paneTail, trimTrailingBlank } from "./pane-tail.js";
+export { parseModalOptions, type ModalOption } from "./modal-numbered-options.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -598,39 +599,6 @@ export function detectSessionIdlePrompt(pane: string): string | null {
   const m = tail.match(/This session is ([\s\S]+?tokens?)\./i)
     || tail.match(/This session is ([^\n]+)/i);
   return m ? m[1].trim().slice(0, 150) : "Session 闲置提示";
-}
-
-/**
- * 解析 Claude Code TUI 里的数字选项 modal（/model 选择器、/mcp 菜单等）。
- * 返回所有可见选项 + 它们对应的按键。超过 25 项会截断（Discord select menu 上限）。
- * 没有检测到选项 modal 返回 null。
- */
-export interface ModalOption {
-  key: string;       // 发给 tmux 的字符（通常是 "1" / "2" ...）
-  label: string;     // ≤80 字符，喂给 Discord button/select 的显示文本
-  selected: boolean; // 是否当前高亮（❯ 前缀）
-}
-
-export function parseModalOptions(pane: string): ModalOption[] | null {
-  // 只看 pane 最后 30 行（modal 总在底部）
-  const tail = paneTail(pane, 30);
-  const seen = new Set<string>();
-  const options: ModalOption[] = [];
-  for (const raw of tail) {
-    // 匹配 "❯ 1. 文本" 或 "  1. 文本"
-    const m = raw.match(/^\s*(❯)?\s*(\d{1,2})\.\s+(.+?)\s*$/);
-    if (!m) continue;
-    const key = m[2];
-    if (seen.has(key)) continue;
-    const label = m[3].replace(/\s+/g, " ").trim().slice(0, 80);
-    if (!label) continue;
-    seen.add(key);
-    options.push({ key, label, selected: !!m[1] });
-  }
-  if (options.length < 2) return null;
-  // 关键：真 modal 一定有一个选中标记 ❯，否则就是 Claude 回复里普通的编号列表
-  if (!options.some((o) => o.selected)) return null;
-  return options.slice(0, 25);
 }
 
 /** 无编号选择弹窗的一个选项（没有可发送的按键：确认只能 Enter 默认项 / 方向键移动） */

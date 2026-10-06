@@ -36,7 +36,8 @@ interface ToolState {
   finished: boolean;
 }
 
-const OUTPUT_TAIL = 64 * 1024;
+/** 命令输出只留末尾这么多（transcript.ts 据此认出开头那行被截了一半） */
+export const OUTPUT_TAIL = 64 * 1024;
 /** 结束过的调用 id 记这么多个：迟到的 tool_call_update 不能让它再起一次头 */
 const DONE_CAP = 500;
 const TERMINAL = new Set(["completed", "failed"]);

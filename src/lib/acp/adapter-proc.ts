@@ -18,6 +18,7 @@ import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
+import { redactSecrets } from "../redact-secrets.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
 
@@ -111,6 +112,38 @@ export interface AdapterProc {
   pid?: number;
 }
 
+/** 超过这么长还没换行的 stderr 行：整段不记（只记一句占位），后面到换行为止都丢掉 */
+const STDERR_LINE_MAX = 16_384;
+
+/**
+ * stderr 字节流 → 完整的行：缓冲到换行 / EOF 再整行打码、截 300 字（流式 UTF-8 解码，多字节字符跨 chunk 也不乱）。
+ * 按 chunk 切会把一个密钥拆成两段日志，每段都匹配不上规则。超长行没结束就认不出值的边界（引号还没闭合），
+ * 打码靠不住：一个字都不吐，只记占位。tests/adapter-proc-stderr.test.ts
+ */
+export function stderrLines(emit: (line: string) => void, maxLine = STDERR_LINE_MAX): { push(c: Uint8Array): void; end(): void } {
+  const dec = new TextDecoder();
+  let pending = "";
+  let skipping = false; // 超长行已记过开头：到下一个换行之前的都丢
+  const out = (line: string) => void (line.trim() && emit(redactSecrets(line).slice(0, 300)));
+  return {
+    push(c) {
+      const parts = (pending + dec.decode(c, { stream: true })).split("\n");
+      pending = parts.pop()!;
+      for (const part of parts) skipping ? (skipping = false) : out(part);
+      if (pending.length <= maxLine) return;
+      if (!skipping) emit(`[一行超过 ${maxLine} 字还没换行，内容略去]`);
+      skipping = true;
+      pending = "";
+    },
+    end() {
+      const rest = pending + dec.decode();
+      if (!skipping) out(rest);
+      pending = "";
+      skipping = false;
+    },
+  };
+}
+
 /**
  * 起子进程；stderr 按行加 label 前缀交给 log（适配器自己的详细日志另在 APP_SERVER_LOGS）。Pi 适配器也用它起 pi。
  * detached：子进程自成一个进程组（setsid），收尾时可以按组连孙进程一起清掉；不传就和原来一样留在本进程组里。
@@ -132,10 +165,8 @@ export function spawnAdapter(
   };
   let dataCb: (c: Uint8Array) => void = () => {};
   void pump(proc.stdout, (c) => dataCb(c)).catch((e) => log(`适配器 stdout 读取出错：${e}`));
-  const dec = new TextDecoder();
-  void pump(proc.stderr, (c) => {
-    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[${label}] ${line.slice(0, 300)}`);
-  }).catch((e) => log(`适配器 stderr 读取出错：${e}`));
+  const errLines = stderrLines((line) => log(`[${label}] ${line}`));
+  void pump(proc.stderr, (c) => errLines.push(c)).catch((e) => log(`适配器 stderr 读取出错：${e}`)).finally(() => errLines.end());
   void proc.exited.then((code) => closeCbs.splice(0).forEach((cb) => cb(`exit ${code}`)));
   const stop = () => {
     try {

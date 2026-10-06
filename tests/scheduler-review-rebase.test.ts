@@ -201,7 +201,8 @@ describe("i28-RH1 the real adapter → driver → ledger → planner path", () =
   test("验收线 4: an ordinary round 3 still scopes the planner to last head → new head", () => {
     const at = (seq: number, kind: LedgerEvent["kind"], actor: string, data: Record<string, unknown>): LedgerEvent =>
       ({ seq, kind, data, actor, ts: seq, project: "p", target: "T1", text: "", dedupKey: null });
-    const [A, B] = ["4".repeat(40), "5".repeat(40)]; // own heads: fixDiffOf caches per process
+    // own heads: fixDiffOf caches per process, and ui-approve-fix generates "4"×40 / "5"×40 as round heads
+    const [A, B] = ["4a".repeat(20), "5b".repeat(20)];
     const events = [at(1, "deliver", author.agent, { round: 2, headSHA: A }), at(2, "review", "agent-review", reviewData(2, A, [P1])),
       at(3, "deliver", author.agent, { round: 3, headSHA: B }), at(4, "review", "agent-review", reviewData(3, B, [P1]))];
     const fixDiff = fixDiffOf({ id: "T1", round: 3 }, events, (_, from, to) => from === A && to === B ? ["src/lib/fix.ts"] : null, ["/fake"]);

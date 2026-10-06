@@ -17,7 +17,7 @@ import { airFailureOf, classifyAirFailure, classifyPromptError, classifyTurnEndF
 import { permissionCard, permissionResponse, CANCELLED, type PermissionCard } from "./permissions.js";
 import { ACP_PROTOCOL_VERSION, AcpIncompatibleError, checkInitialize, type AgentInfo } from "./protocol.js";
 import { createRpcPeer, RpcError, type RpcPeer, type RpcWire } from "./rpc.js";
-import type { PromptOutcome, SteerResult } from "./turn.js";
+import type { ClearedQueue, PromptOutcome, SteerResult } from "./turn.js";
 import { threadStatusOf, turnEndOf } from "./updates.js";
 
 /**
@@ -61,7 +61,7 @@ export class AcpSession {
   steering = false;
   /** 适配器在 initialize 回包里报的名字和版本（没报是 null）：宿主接上线程时记进日志 */
   agentInfo: AgentInfo | null = null;
-  /** 适配器的 cancel 会先清掉排队消息并把正文交回来（Pi 适配器 _claudestra/cancel）；codex-acp 没有，照旧发 session/cancel 通知 */
+  /** 适配器的 cancel 会先清掉排队消息并交回来（Pi 适配器 _claudestra/cancel）；codex-acp 没有，照旧发 session/cancel 通知，steer 也不带 deliveryId */
   private cancelReturnsQueue = false;
   private statusSeq = 0;
   private lastStatus: string | null = null;
@@ -156,9 +156,10 @@ export class AcpSession {
 
   /**
    * steering：startedNewTurn 的结束信号在回包那一刻同步登记（见文件头）。这一轮的 active 先于回包到、已经当自发回合交给宿主了
-   * （回合调度器在报上一轮 Stop 时插的话，codex-acp 可能先报 active）：同一轮不再跟第二次，按「插进了在跑的回合」答
+   * （回合调度器在报上一轮 Stop 时插的话，codex-acp 可能先报 active）：同一轮不再跟第二次，按「插进了在跑的回合」答。
+   * deliveryId 只发给会交回清掉队列的适配器（_meta.claudestra.deliveryId，叫停时它按身份报 clearedIds），codex-acp 的线路不变
    */
-  async steer(text: string): Promise<SteerResult> {
+  async steer(text: string, deliveryId?: string): Promise<SteerResult> {
     let done: Promise<PromptOutcome> | null = null;
     let tracked = false;
     const onResult = (res: any) => {
@@ -167,9 +168,10 @@ export class AcpSession {
       if (!tracked) done = this.waitEndAfter(this.statusSeq);
     };
     const unknown = (cause: string): SteerResult => ({ outcome: "deliveredUnknown", failure: deliveryUnknownFailure(`unknown:${this.sessionId}#${++this.turnSeq}`, cause, text) });
+    const meta = deliveryId && this.cancelReturnsQueue ? { _meta: { claudestra: { deliveryId } } } : {};
     let r: any;
     try {
-      r = await this.rpc.request("_session/steering", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, { onResult });
+      r = await this.rpc.request("_session/steering", { sessionId: this.sessionId, prompt: [{ type: "text", text }], ...meta }, { onResult });
     } catch (e) {
       const lost = deliveryUnknownCause(e);
       if (lost !== null) return unknown(lost);
@@ -183,22 +185,24 @@ export class AcpSession {
   }
 
   /**
-   * 打断当前回合，挂着的外部回合等待记成「被打断」。返回适配器清掉的排队消息正文（宿主据此在回执里列出作废的消息）：
-   * 适配器支持就发 _claudestra/cancel 等它清完队列（不等回合停下）；不支持（codex-acp）或出错就发 session/cancel 通知、回空。从不 reject
+   * 打断当前回合，挂着的外部回合等待记成「被打断」。返回适配器清掉的排队消息（宿主据此在回执里列出作废的消息）：
+   * 适配器支持就发 _claudestra/cancel 等它清完队列（不等回合停下）；不支持（codex-acp）或出错就发 session/cancel 通知、回空。从不 reject。
+   * clearedIds 只在适配器给了数组时才有：没有它宿主退回按正文对（老适配器）
    */
-  async cancel(): Promise<string[]> {
+  async cancel(): Promise<ClearedQueue> {
     for (const w of this.waiters) w.cancelled = true;
     const params = { sessionId: this.sessionId };
     if (this.cancelReturnsQueue) {
       try {
         const r = await this.rpc.request("_claudestra/cancel", params, { timeoutMs: CANCEL_TIMEOUT_MS });
-        return (Array.isArray(r?.cleared) ? r.cleared : []).filter((t: unknown): t is string => typeof t === "string");
+        const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : []);
+        return { cleared: strings(r?.cleared), ...(Array.isArray(r?.clearedIds) ? { clearedIds: strings(r.clearedIds) } : {}) };
       } catch (e) {
         this.deps.log(`_claudestra/cancel 没成（${e instanceof Error ? e.message : e}），改发 session/cancel`);
       }
     }
     this.rpc.notify("session/cancel", params);
-    return [];
+    return { cleared: [] };
   }
 
   /** 改会话配置（模型 / 推理强度…）：先把值对上选项（resolveConfigValue）再本地校验，再调 set_config_option，成功后更新缓存 */

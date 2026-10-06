@@ -12,6 +12,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { ResultRequest, LendReceipt } from "./lend-wire.js";
 import type { LendResultDeps } from "./ledger-lend-result.js";
 import { sanitizeForeign } from "./order-wire-render.js";
+import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 export { deliveryBranchMatches, assertConvergenceDeliveryLease } from "./fix-strategy-remote-branch.js";
 export { completeConvergenceDelivery } from "./fix-strategy-remote-deliver.js";
 
@@ -19,8 +20,11 @@ function receipt(db: Database, o: LendOrder, sha: string, seq: number, deps: Len
   const signature = deps.sign([o.orderId, sha, String(seq), o.taskId]);
   if (!signature) return refuse("invalid", "无法签出借回执");
   const value = { orderId: o.orderId, sha256: sha, eventSeq: seq, taskId: o.taskId, ...signature };
-  if (terminal) db.query("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ?")
-    .run(sha, JSON.stringify(value), seq, now, o.orderId);
+  if (terminal) {
+    db.query("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ?")
+      .run(sha, JSON.stringify(value), seq, now, o.orderId);
+    closeSettledOrderAsks(db, o.orderId, now); // 正式 done 才收尾；取消确认（terminal=false）不碰提问
+  }
   return value;
 }
 

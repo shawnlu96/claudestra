@@ -194,6 +194,10 @@ export function quota<T>(): Promise<T> {
 export function quotaRetry<T>(provider: "claude" | "codex"): Promise<T> {
   return api<T>("/quota/retry", { method: "POST", json: { provider }, timeoutMs: 15_000 });
 }
+/** 使用一张 Codex 重置卡（真实消费、不可逆；只给 owner 本人的设备）：409 = 已有一次在途。bridge 要先核对再 POST 再刷新，给足时间 */
+export function quotaCodexReset<T>(creditKey: string): Promise<T> {
+  return api<T>("/quota/codex/reset-credit", { method: "POST", json: { creditKey }, timeoutMs: 45_000 });
+}
 export function quotaSettings(): Promise<{ enabled: boolean }> {
   return api<{ enabled: boolean }>("/quota/settings", { timeoutMs: 8000 });
 }
