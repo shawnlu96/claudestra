@@ -85,8 +85,10 @@ v1 的 `subject.base` 来自 `--base`、`deliver_scope` 记录的 PR baseRefOid�
 
 | 链 | 环（按顺序） | 每环的现有产出 | 核验 | 缺一环 |
 |---|---|---|---|---|
-| 本机审查 | ① 派审意图 → ② 领单留痕 → ③ 交结论事件 | ① `scheduler_intents` 行（action=review）；② `order_taken` 事件 `{id: 意图 id, sessionId}`，bridge 在 take_review 返回后**异步尽力**记（`order-mark.ts:41-55` `markOrderTaken`、`:98-114` `recordTaken`；`takeReview` 本身只返回订单，`review-order.ts:147`）；③ review 事件 `{orderId, reviewerSessionId, reviewerFamily, via:"mcp"}`（`review-verdict.ts:135`） | ②③ 的 sessionId 与 ① 绑定的 reviewer session 一致；③ 的 orderId = ① 的 id | ① 或 ③ 缺 → 不算自动来源，退人工；② 是尽力留痕（写失败只记日志），缺 ② 不单独拒，但链上标 `take: missing`，B 按自己策略决定 |
+| 本机审查 | ① 派审意图 → ② 领单留痕 → ③ 交结论事件 | ① `scheduler_intents` 行（action=review）；② `order_taken` 事件 `{id: 意图 id, sessionId}`，bridge 在 take_review 返回后**异步尽力**记（`order-mark.ts:41-55` `markOrderTaken`、`:98-114` `recordTaken`；`takeReview` 本身只返回订单，`review-order.ts:147`）；③ review 事件 `{orderId, reviewerSessionId, reviewerFamily, via:"mcp"}`（`review-verdict.ts:135`） | ②③ 的 sessionId 与 ① 绑定的 reviewer session 一致；③ 的 orderId = ① 的 id | ① 或 ③ 缺 → 不算自动来源，退人工；② 是尽力留痕（写失败只记日志），但仍 **fail closed**：缺 ② 的轮次 `verification` 只能是 `claim_only`，不算完整自动来源；**最终轮缺 ② → 退人工**，历史轮缺只标 `take: missing` |
 | 出借池审查 | ① 派审意图 → ② 出借单 → ③ 领单事实 `TakeFact{orderId, gen, agent, session, at}` → ④ 签名票据 → ⑤ 入账回执 | ③ `recordTake`（`lend-journal.ts:210`，CAS 只记第一次）；④ `ReviewTicket`（`pool-review-proof-ticket.ts:15`，用途 `claudestra-lend-review-ticket-v1`）；⑤ `admitPoolEvidence`（`pool-review-proof-admit.ts:52`） | 票据用出借方钉住公钥 `ticketProblem` 验；逐环比对 orderId / gen / head / specRev / round / session | 任一环缺 → 退人工（同 `poolReviewRefusal` 口径） |
+
+留给后续卡：`order_taken` 现在是尽力留痕，若要让本机审查常态满足上面的 fail closed，需要把领单留痕改成可靠写入（或交结论时补核）。
 
 本机链没有 `gen`（租约代数只属于出借单），不能把本机领单写成 `TakeFact`。
 
@@ -204,7 +206,11 @@ R1 提案：
     "runHead": "<40-hex>", "compareBase": "<40-hex>", "compareBaseSource": "pr_base_ref",
     "specRev": 2, "taskId": "<A-task>", "specArtifact": "spec", "acceptanceArtifact": "acceptance"
   },
-  "familyMap": { "v": 1, "runtime": { "claude-code": "claude", "codex": "codex", "pi": null } },
+  "familyMap": {
+    "v": 1,
+    "runtime": { "claude-code": "claude", "codex": "codex", "pi": null },
+    "modelFamily": { "claude": "anthropic", "gpt": "openai", "<other-prefix>": "<vendor-or-unknown>" }
+  },
   "authors": [{
     "agent": "<author-agent>", "sessionId": "<session>", "runtime": "claude-code", "ledgerFamily": "claude",
     "model": { "provider": null, "id": "<model-id>", "family": "claude", "sourceArtifact": "author-1-model" },
@@ -215,7 +221,7 @@ R1 提案：
     "orderId": "<real-order-id>", "status": "completed", "verdict": "pass", "p0": 0, "p1": 0, "p2": 1,
     "reviewer": {
       "agent": "<reviewer-agent>", "sessionId": "<session>", "runtime": "codex", "ledgerFamily": "codex",
-      "instance": { "fingerprint": "<64-hex>" },
+      "instance": { "publicKey": "<reviewer-instance-ed25519-public-key-base64url>", "fingerprint": "<64-hex>" },
       "model": { "provider": null, "id": "<model-id>", "family": "gpt", "sourceArtifact": "r1-<seq>-model" },
       "verification": "mcp_bound_session",
       "provenance": { "chain": "local", "intent": "<intent-id>", "take": { "event": "<seq>", "sessionId": "<session>" }, "review": "<seq>" },

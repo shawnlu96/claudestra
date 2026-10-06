@@ -30,9 +30,9 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 | S4 | `active` | `auto`，restate → write → review → fix | `delegated` | 只观察，投影 A 的回写 | **A** | A：v3 自动卡（`scheduler-auto-tick.ts`）；效果闸紧贴效果（T68h 做法） |
 | S5 | `active` | `merge`，已记 `merge_handoff` | `delegated` + 已收交接（入场资格） | 只观察；B 开始核 R1 证据 | A 只跟随 PR；**合并由 B** | `recordMergeHandoff` / `handoffOf`（`scheduler-merge-handoff.ts`） |
 | S6 | `active` | `live`（PR 已在跟随的 head 合并） | `completed`（提案） | B 收尾 | 无 | `merge → live`（merge-handoff.md「Flow」末行） |
-| S7 | `stopping` | 原阶段，效果闸全关 | `delegated`（B 还不知道）或 `stopping` | 只观察 | **无人推进** | A：出借租约失效自停（`lend-watchdog.ts`） |
-| S8 | `stopped` | `cancelled`，worktree / 分支保留 | `stopping` / `待收回` | 冻结 | 无人推进 | A：保全同出借收尾（`lend-reclaim-stopped.ts`） |
-| S9 | `closed` | `cancelled`（终态） | `reclaimed`（epoch 已加一） | B 自己的模式 | B | — |
+| S7 | `stopping`（含「部分停止」：已发 `stop_confirm` 但 `notStopped` 非空） | 原阶段（**非终态**），效果闸全关 | `delegated`（B 还不知道）或 `stopping` | 只观察 | **无人推进** | A：出借租约失效自停（`lend-watchdog.ts`） |
+| S8 | `stopped`（在途 session **全部**确认停下，`stop_confirm.notStopped` 为空） | `cancelled`（终态，不可重开），worktree / 分支保留 | `stopping` / `待收回` | 冻结 | 无人推进 | A：保全同出借收尾（`lend-reclaim-stopped.ts`） |
+| S9 | `closed` | 终态：经 S8 收回的是 `cancelled`；经 S6 完成关闭的是 `live` | `reclaimed`（epoch 已加一）或 `completed` 已关闭 | B 自己的模式 | B | — |
 
 要点：
 
@@ -60,10 +60,12 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 | S5→S6 合并 | **B** 合并 PR | B 的合并（GitHub、B 台账）；A 卡 `merge → live` | A 发 `complete`（提案）；B 签关闭确认 | A 重发 `complete`；A 卡已终态，业务闸无事可放，丢确认不会双推 |
 | S4/S5→S7 撤回 | B 发 `revoke` | A 同一事务：委托行 → `stopping`，取消 pending 意图，submitted 意图照常对账 | A 签对 `revoke` 的应答 | B 重发 `revoke`；A 已是 `stopping`，回同一应答 |
 | S4/S5→S7 退回 | A 的 PM / owner 或 A 推不动 | 同上 | A 先发 `return_request{reason}` 再进停止流程 | `return_request` 走 outbox 重发；B 不确认就不算结束 |
-| S4/S5→S7 失租 | 租约到期未续上 | A 自停（同上），保留现场与 journal | 断网时**发不出**；恢复后补发 `stop_confirm` | 没有确认就一直停在 S7 / S8，B 停在 `待收回`，不自动收回 |
-| S7→S8 停稳 | 在途 session 全停 | A 卡 → `cancelled`；worktree、分支保留 | A 签 `stop_confirm{lastSeq, sessions[], notStopped[], unknownEffects[], artifacts[]}` | 在 S8 照样重发 `stop_confirm`（A 稿 §3.4 表）；`notStopped` 非空只算部分停止 |
+| S4/S5→S7 失租 | 租约到期未续上 | A 自停（同上），保留现场与 journal | 断网时**发不出**；恢复后补发 `stop_confirm` | 没有确认就一直停在 S7 / S8，B 停在 `待收回`，不自动收回；恢复后想续推进只能在进 S8 之前（见下方「续租」行） |
+| S7 内部分停止 | 有 session 停不下来 | 无（A 卡保持原阶段、非终态） | A 签 `stop_confirm`，`notStopped` 非空 = **部分停止**，B 不能据此收回 | **留在 S7**；A 的 PM / owner 手动停掉后再发一份（N15） |
+| S7→S8 停稳 | 在途 session **全部**确认停下 | A 卡 → `cancelled`（终态）；worktree、分支保留 | A 签 `stop_confirm`，`notStopped` 为空——**只有这一份**能作为收回依据 | 在 S8 照样重发 `stop_confirm`（A 稿 §3.4 表）；B 只看 `notStopped` 为空的那份 |
 | S8→S9 收回 | B 核清停止证据 | B 加 epoch、收回推进权（B 台账） | B 签收回确认 | A 停在 S8 继续占资源、重发 `stop_confirm`；同一张 B 卡的新委托被 A 稿 §2.2 第 9 条拒，直到 B 补发收回确认 |
-| S7/S8→S4 续租 | A 恢复联系（**待定**，A 稿 §6.3） | 无，直到 B 同意 | 先发完积压回写与 `stop_confirm`，再发 `renew_request`；B 签同意 | 没有同意就留在 S7 / S8 |
+| S6→S9 完成关闭 | B 确认 `complete` | B 加 epoch、关闭委托（B 台账）；A 委托行 → `closed`，A 卡保持 `live` | B 签关闭确认 | A 重发 `complete`（见 §4） |
+| S7→S4 续租 | A 恢复联系（**待定**，A 稿 §6.3），**只限 S7**（失租原因、A 卡还没进终态） | 无，直到 B 同意；同意后委托行回 `active`，原 A 卡继续 | 先发完积压回写，再发 `renew_request`；B 签同意 | 没有同意就留在 S7；**S8 不能续租**：A 卡已 `cancelled`，终态卡不可重开（A 稿 §3.1），只能收回后重新委托、新建 A 卡 |
 
 两条通用规矩：
 
@@ -97,10 +99,11 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 | N12 | B owner 想在没有停止证据时强制收回 | 不在 E2b 收回路径内，另立项批准 | A 稿 §6.3 第 4 条、§11 第 8 条 |
 | N13 | A 恢复联系后，在 `stopping` 下想发新的业务回写（`aSeq > lastSeq`） | A 的业务闸在生成时就拒；就算发出，B 回 `stale_epoch` | A 稿 §3.4 |
 | N14 | A 恢复联系后发积压回写（`aSeq ≤ lastSeq`）与 `stop_confirm` | B 收下，只入历史和停止核对，不推进 B 卡 | A 稿 §3.4 |
-| N15 | `stop_confirm.notStopped` 非空 | 只算部分停止，不能作为收回依据；A 的 PM 手动停掉后重发空的 `stop_confirm` | A 稿 §6.3 第 2 条 |
+| N15 | `stop_confirm.notStopped` 非空 | 只算部分停止：A **留在 S7**，B 不能据此收回；A 的 PM 手动停掉后重发 `notStopped` 为空的 `stop_confirm`，A 才进 S8 | A 稿 §6.3 第 2 条 |
 | N16 | 冻结期间旧 worker 推送成功 | B 不采纳、不推进；A 的停止清单（`git ls-remote` 核的 head）列出这次推送，B 收回时逐条处置 | A 稿 §6.3 第 3 条 |
 | N17 | B 已收回（epoch+1）之后才到的旧 `stop_confirm` | 收下，只作迟到历史，不改任何状态 | A 稿 §3.4 B 表 `reclaimed` 行 |
 | N18 | A 在 S7 重启 | 委托行仍是 `stopping`，继续停止流程，不回 `active` | 本文 §2 通用规矩 |
+| N18b | A 已在 S8（A 卡 `cancelled`）后发 `renew_request` | 拒：终态卡不可重开；只能等 B 收回后重新委托（新 `delegationId`、新 A 卡） | A 稿 §3.1；本文 §2「续租」行 |
 | N19 | B 的逐条回执丢了 | A 重发同键，B 回原回执；不跳号、不重编号 | A 稿 §4.2 |
 
 ### 3.3 撤回与合并并发
@@ -131,7 +134,7 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 | B 的收回确认 | A 没收到 | A 停在 S8 占资源；同卡新委托被拒（N4） | B 补发；A 收到后转 `closed` |
 | B 对 `complete` 的关闭确认 | A 没收到 | A 行留在 `active`，但 A 卡已 `live`，没有可放行的效果 | A 重发 `complete`；不影响合并结果 |
 
-## 5. 对应 A 稿的两句小修（只写在这里，不改 #773）
+## 5. 对应 A 稿的小修（只写在这里，不改 #773）
 
 1. **A 稿 §3.4 要回指 §2.2 第 9 条。** §3.4 讲「同一时刻只有一个调度器推进」靠 epoch，但 epoch 只挡「旧 epoch 的效果」，
    挡不住 A 本机**两份不同 `delegationId`** 同时是 `active`——那是 §2.2 第 9 条（同一张 B 卡在 A 侧最多一份没关闭的委托）挡的。
@@ -139,13 +142,14 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 2. **补「顺序到达的 d2 被拒」场景。** A 稿 §10 场景 2 只写了 `d1`、`d2` 同时到达。建议加一句：
    「`d1` 已 `accepted` 并在推进中，B 再发 `d2`（新的 `delegationId`，同一张 B 卡）→ `already_delegated`，附 `d1` 的 id 与状态，
    A 不排队、不建第二张卡；`d1` 在 `queued` / `needs_owner` / `stopped` 时同样被拒。」对应本文 N2、N3、N4。
+3. **（附带发现）A 稿 §6.1 第 5 步与 §6.3 续租待定项互相矛盾。** §6.1 在停止确认后把 A 卡转 `cancelled`，§3.1 说终态卡不可重开，§6.3 却设想「先发完 `stop_confirm` 再 `renew_request`，回到 `active`」。本文按 §3.1 取：续租只在发出 `notStopped` 为空的 `stop_confirm` 之前（S7）可行；若 P2 选续租方案 (a)，A 稿 §6.3 要改成「续租请求在完整停止确认之前发」。
 
 ## 6. 留给 P2 的问题（本文不决定）
 
 1. `offered`、`待收回`、`completed`、`complete` 消息是否进协议，B 侧的状态名用什么。
 2. N5、N9、N25、N26、N29 的原因码。
 3. N26：是否要求 A 在 review / fix 阶段也读 PR 状态，读频多少；还是只靠 B 侧闸挡住「未撤回就合并」。
-4. 续租（S7/S8→S4）用同一 epoch 还是一律重新委托（A 稿 §6.3 待定项）。
+4. 续租（S7→S4）用同一 epoch 还是一律重新委托（A 稿 §6.3 待定项）；本文已限定 S8 不能续租（§5 第 3 条）。
 
 接线点（留给后续实现卡）：A 侧委托表与效果闸（A 稿 §3.4 `e2b_delegations`）、outbox（仿 `peer-pr-push.ts` 的推送重试）、
 停止清单命令（A 稿 §6.1 提案的 `ledger e2b-stop-report`）、N26 的 PR 状态读取（`scheduler-merge-handoff-tick.ts` 旁）。
