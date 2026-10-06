@@ -13,6 +13,7 @@
 import { AUTHOR_FAMILIES } from "../lib/ledger-scheduler.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { writeLegacyReviewRetire, writeModelNote, writeModelOutcome, writeRefusalEpoch, writeReviewSnapshot, type OutcomeWrite } from "../lib/scheduler-model-wiring.js";
+import { beginLegacyReviewRetire } from "../lib/scheduler-sessions.js";
 import { intFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -104,7 +105,8 @@ export const MODEL_CMDS: Record<string, CommandSpec> = {
     valued: ["intent", "data"], bools: [],
     usage: "scheduler-legacy-review-retire <task> --intent I --data {evidence}（调度服务专用：on 下无材料快照的旧拒审单，事务内重核后退休旧审查绑定、不豁免；按单去重）",
     run: schedulerOnly(async (c) => {
-      const r = await writeLegacyReviewRetire(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("intent"), str(data(c).evidence, "evidence", 4000));
+      const r = await beginLegacyReviewRetire(c.db, c.p.pos[1] ?? "", c.need("intent"), (write) =>
+        writeLegacyReviewRetire(c.db, c.ctx(), c.p.pos[1] ?? "", c.need("intent"), str(data(c).evidence, "evidence", 4000), write));
       return { ok: true, duplicate: r.duplicate, event: r.event };
     }),
   },

@@ -19,7 +19,7 @@ import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { informKey, snapshotKey } from "../src/lib/scheduler-model-wiring.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
-import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
+import { beginLegacyReviewRetire, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { HOLD_OP, openRefusal } from "../src/lib/scheduler-review-swap.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
@@ -163,6 +163,19 @@ test("调度服务身份闸：别的身份跑四个子命令一律 forbidden", a
   // 调度身份也只能写本卡的告知键
   expect(await f.cli("scheduler", "scheduler-model-inform", "T1", "--key", informKey("T2", "cyber_policy"), "--text", "t", "--data", "{\"op\":\"refusal_owner_inform\"}"))
     .toMatchObject({ ok: false, code: "invalid" });
+});
+
+test("legacy writer boundary: injected action cannot write another card, ticket, actor or exemption", () => {
+  const f = autoFixture();
+  cleanup.push(() => f.close());
+  const event = { project: "p", target: "T1", kind: "scheduler" as const, text: "", data: { op: "reviewer_swap", legacy: true, intentId: "old" } };
+  for (const wrong of [{ ...event, target: "T2" }, { ...event, project: "other" }, { ...event, kind: "note" as const },
+    { ...event, data: { ...event.data, intentId: "other" } }, { ...event, data: { ...event.data, legacy: false } },
+    { ...event, data: { ...event.data, op: "unrelated" } }, { ...event, data: { ...event.data, refusal: false } }]) {
+    expect(() => beginLegacyReviewRetire(f.db, "T1", "old", (write) => write(f.at("scheduler"), wrong))).toThrow(/仅限本卡旧审查单退休/);
+  }
+  expect(() => beginLegacyReviewRetire(f.db, "T1", "old", (write) => write(f.at("pm"), event))).toThrow(/仅限本卡旧审查单退休/);
+  expect(listEvents(f.db, { project: "p", target: "T1" }).some((e) => e.data.op === "reviewer_swap")).toBe(false);
 });
 
 /** N3 / PR706 (10-06 23:19): the review went out under the old code — no snapshot; the refusal's MODEL record hit the read-only

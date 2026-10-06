@@ -42,7 +42,6 @@ import { beginRefusalEpoch } from "./scheduler-sessions.js";
 import { classifyModelOutcome, modelOutcomePolicy, type OutcomeInput, type OutcomeRecord, type OutcomeSignal, type RecoveryPolicyPort } from "./scheduler-model-outcome.js";
 import type { SessionRef, WorkerObservation } from "./worker-session.js";
 import { getWorkflow } from "./ledger-scheduler.js";
-import { insertEvent } from "./ledger-tx.js";
 import { preserveSessionHistory } from "./scheduler-sessions.js";
 import { approvalLapse, EXEMPT_OP, openSafetyHold, RETRY_OP, swapKey } from "./scheduler-review-swap.js";
 import { cfgReaderPath } from "./recovery-materials-wiring.js" with { type: "macro" };
@@ -381,7 +380,8 @@ function legacyFacts(db: Database, task: LedgerTask): { sent: SchedulerIntent; r
  * one transaction re-read every legacy fact, write the legacy reviewer_swap (dedup = the swap key of the old ticket, which the
  * reviewer bind accepts in place of a kill receipt) and retire the binding. The old session is left alone.
  */
-export async function writeLegacyReviewRetire(db: Database, ctx: WriteCtx, taskId: string, intentId: string, evidence: string): Promise<{ event: LedgerEvent; duplicate: boolean }> {
+export async function writeLegacyReviewRetire(db: Database, ctx: WriteCtx, taskId: string, intentId: string, evidence: string,
+  write: (ctx: WriteCtx, event: Pick<LedgerEvent, "project" | "target" | "kind" | "text" | "data">) => LedgerEvent): Promise<{ event: LedgerEvent; duplicate: boolean }> {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "旧拒审单退休只由调度服务执行");
   if (!isRefusal(evidence)) throw new LedgerError("invalid", "旧审查回合不是提供方策略拒审");
   const task0 = getTask(db, taskId);
@@ -402,11 +402,11 @@ export async function writeLegacyReviewRetire(db: Database, ctx: WriteCtx, taskI
       e.data.session === row.sessionId && e.data.head === sent.head && e.data.specRev === sent.specRev && e.data.round === task.round);
     const approvalId = createRefusalApprovalPort(db)(task.project, task.id)!.approvalId;
     preserveSessionHistory(db);
-    const event = insertEvent(db, { ...ctx, dedupKey: swapKey(sent.id) }, { project: task.project, target: task.id, kind: "scheduler",
+    const event = write({ ...ctx, dedupKey: swapKey(sent.id) }, { project: task.project, target: task.id, kind: "scheduler",
       text: `旧审查单 ${sent.id} 被提供方策略拒审且没有材料快照：不唤醒旧会话、不豁免，退休 ${row.agent} 的审查绑定，按当前 head 重派带快照的新审查单`,
       data: { op: LEGACY_OP, legacy: true, intentId: sent.id, fromFamily: row.family, agent: row.agent, sessionId: row.sessionId,
         round: task.round, head: task.headSHA, specRev: task.specRev, sentHead: sent.head, sentSpecRev: sent.specRev,
-        approvalId, ...(plan ? { replacedPlanSeq: plan.seq } : {}), evidence: flat(evidence).slice(0, 400) } }, true);
+        approvalId, ...(plan ? { replacedPlanSeq: plan.seq } : {}), evidence: flat(evidence).slice(0, 400) } });
     db.query("UPDATE scheduler_sessions SET state = 'retired', retireIntentId = ?, updatedAt = ? WHERE sessionId = ?").run(sent.id, ctx.now ?? Date.now(), row.sessionId);
     return { event, duplicate: false };
   });
