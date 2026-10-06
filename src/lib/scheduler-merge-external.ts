@@ -79,7 +79,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       repoOf(prRef);
       if (!SHA.test(oldHead) || !SHA.test(newHead)) return { ok: false, reason: "head 不是完整 SHA" };
       await git("fetch", "--no-tags", "--quiet", "origin", newHead, `+refs/heads/main:${MAIN_REF}`);
-      const proof = await singleMainCarryProof(cwd, oldHead, newHead, command === runBounded ? undefined : command);
+      const proof = await singleMainCarryProof(cwd, oldHead, newHead, command);
       if (!proof.ok) return proof;
       const { reason, mainParent, mainHead, diffHash } = proof;
       return { ok: true, reason, mainParent, mainHead, diffHash };

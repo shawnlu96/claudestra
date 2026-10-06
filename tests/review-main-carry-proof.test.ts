@@ -88,6 +88,38 @@ describe("MAINP1 local immutable main-carry proof", () => {
       }
     }
   });
+  test("multiple merge bases cannot hide rollback of main content", async () => {
+    await at(base); file("k", "main k\n"); const k = await commit("main k");
+    await at(base); file("s", "side s\n"); const side = await commit("side s");
+    await at(k); await sh("merge", "-q", "--no-edit", side); const main = await sh("rev-parse", "HEAD");
+    await at(oldHead); await sh("merge", "-q", "--no-edit", k); const first = await sh("rev-parse", "HEAD");
+    await sh("merge", "-q", "--no-edit", side); const joined = await sh("rev-parse", "HEAD");
+    const bases = (await sh("merge-base", "--all", main, joined)).split("\n");
+    expect(bases.sort()).toEqual([k, side].sort());
+    // Git may choose either base: remove the other base's content to reproduce the same hidden rollback.
+    const chosen = await sh("merge-base", main, joined);
+    await sh("rm", chosen === k ? "s" : "k");
+    const evil = await treeCommit(await sh("write-tree"), [first, side]);
+    expect(await sh("diff", "--name-status", main, evil)).toContain(`D\t${chosen === k ? "s" : "k"}`);
+    await actualMain(main);
+    try {
+      expect((await proof(evil, { mainHead: main })).ok).toBe(false);
+      const final = await treeCommit(await sh("rev-parse", `${joined}^{tree}`), [evil, main]);
+      expect(await proof(final, { mainHead: main, oldHead: evil })).toMatchObject({ ok: false, reason: expect.stringContaining("merge-base") });
+    } finally { await actualMain(main2); }
+  });
+  test("multi-hop main parents must advance on the actual main first-parent chain", async () => {
+    const backwards = await treeCommit(await sh("rev-parse", `${two}^{tree}`), [two, main1]);
+    expect((await proof(backwards)).ok).toBe(false);
+    await at(base); file("side-only", "side\n"); const side = await commit("side ancestor");
+    await at(main2); await sh("merge", "-q", "--no-edit", side); const main = await sh("rev-parse", "HEAD");
+    await at(oldHead); await sh("merge", "-q", "--no-edit", side); const merged = await sh("rev-parse", "HEAD");
+    await actualMain(main);
+    try {
+      expect((await proof(merged, { mainHead: main })).ok).toBe(false);
+      expect((await legacy(merged)).ok).toBe(true); // existing one-hop ancestry semantics are retained
+    } finally { await actualMain(main2); }
+  });
   test("multi-hop changed final diff is rejected", async () => {
     await at(two); file("feature", "hidden final change\n"); await sh("add", "-A");
     const evil = await treeCommit(await sh("write-tree"), [one, main2]);
@@ -138,7 +170,7 @@ describe("MAINP1 local immutable main-carry proof", () => {
     };
     try {
       expect(await proof(two, {}, move)).toMatchObject({ ok: false, reason: expect.stringContaining("漂移") });
-      expect(checks).toBe(2); expect(diffs).toBe(2);
+      expect(checks).toBe(2); expect(diffs).toBe(4);
     } finally { await actualMain(main2); }
   });
   test("missing old/new/main objects and command errors never yield proof", async () => {
@@ -173,6 +205,44 @@ describe("MAINP1 local immutable main-carry proof", () => {
     await expect(proof(two, {}, cut)).rejects.toThrow("读取不完整");
     const p = parseSchedulerConfig({ enabled: true, projects: { p: { repoDir: work, maxActiveWorkers: 2, requiredChecks: ["test"] } } }).projects.p;
     await expect(mergeExternal(p, cut).carryReview("https://github.com/example/proof/pull/1", oldHead, one)).rejects.toThrow("读取不完整");
+  });
+  test("complete byte reads cross the injected guard; a stopped guard cannot produce proof", async () => {
+    const reads: string[] = [];
+    const guarded: typeof runBounded = async (argv, opts) => {
+      const output = argv.find((arg) => arg.startsWith("--output="));
+      if (output) reads.push(argv.at(-1)!);
+      return gitCommand(argv, opts);
+    };
+    expect((await proof(two, {}, guarded)).ok).toBe(true);
+    expect(reads).toEqual([`${main2}...${oldHead}`, `${main2}...${two}`]);
+    const stopped: typeof runBounded = async (argv, opts) => {
+      if (argv.some((arg) => arg.startsWith("--output="))) throw new Error("maintenance lease lost");
+      return gitCommand(argv, opts);
+    };
+    await expect(proof(two, {}, stopped)).rejects.toThrow("maintenance lease lost");
+    const p = parseSchedulerConfig({ enabled: true, projects: { p: { repoDir: work, maxActiveWorkers: 2, requiredChecks: ["test"] } } }).projects.p;
+    await expect(mergeExternal(p, stopped).carryReview("https://github.com/example/proof/pull/1", oldHead, one)).rejects.toThrow("maintenance lease lost");
+  });
+  test("complete diff files, stderr warnings and merge-base mismatch fail closed", async () => {
+    for (const fault of ["missing", "large", "changed", "warning", "base"] as const) {
+      const failed: typeof runBounded = async (argv, opts) => {
+        if (fault === "base" && argv.includes("--all") && argv.at(-1) === two) {
+          return { code: 0, timedOut: false, stdout: `${main1}\n`, stderr: "" };
+        }
+        const output = argv.find((arg) => arg.startsWith("--output="));
+        if (output) {
+          if (fault === "missing") return { code: 0, timedOut: false, stdout: "", stderr: "" };
+          if (fault === "large" || fault === "changed") {
+            writeFileSync(output.slice("--output=".length), fault === "large" ? "x".repeat(900 * 1024) : "partial");
+            return { code: 0, timedOut: false, stdout: "", stderr: "" };
+          }
+        }
+        const result = await gitCommand(argv, opts);
+        return fault === "warning" && argv.includes("diff") ? { ...result, stderr: "warning: multiple merge bases" } : result;
+      };
+      if (fault === "base") expect((await proof(two, {}, failed)).ok).toBe(false);
+      else await expect(proof(two, {}, failed)).rejects.toThrow();
+    }
   });
   test("caller mutation during IO cannot switch bound heads or repository", async () => {
     const request = input();
@@ -222,7 +292,7 @@ describe("MAINP1 local immutable main-carry proof", () => {
       expect((await proof(heads.at(-2)!, { mainHead: main })).ok).toBe(true);
       expect(await proof(head, { mainHead: main })).toMatchObject({ ok: false, reason: expect.stringContaining("链长") });
     } finally { await actualMain(main2); }
-    const cyclic: typeof runBounded = async (argv, opts) => argv.includes("rev-list")
+    const cyclic: typeof runBounded = async (argv, opts) => argv.includes("--parents")
       ? { code: 0, timedOut: false, stdout: `${two} ${two} ${main2}\n`, stderr: "" } : gitCommand(argv, opts);
     expect(await proof(two, {}, cyclic)).toMatchObject({ ok: false, reason: expect.stringContaining("循环") });
   });
