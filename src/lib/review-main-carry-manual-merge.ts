@@ -9,7 +9,10 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import { LedgerError } from "./ledger-store.js";
 import { reviewGate } from "./review-main-carry-manual.js";
 
-/** `base` is the head the round's PASS was written for (the start of the formal carry chain): the only oldHead a pre-API proof may use. */
+/**
+ * `base` is the head the round's real PASS event was written for (`review.head`), before every carry — engine `review_carry` and
+ * formal PM `review_main_carry` alike: the only oldHead a pre-API proof may use (r4 merge-proof: not the PM chain's start).
+ */
 export interface MergeAuth { taskId: string; head: string; base: string; reviewSeq: number; carries: number; sourceKind: string }
 
 /** Read-only; any missing fact or failed gate is a refusal reason (never a pass). */
@@ -26,7 +29,7 @@ export function manualMergeAuth(db: Database | null, actor: string, req: { taskI
       return { ok: false, reason: `台账 head 是 ${task.headSHA?.slice(0, 12) ?? "空"}，不是 ${req.head.slice(0, 12)}：head 动过要先 \`ledger main-carry\`（mainCarry=on）写正式沿用；observe / off 不授权合并` };
     }
     const gate = reviewGate(db, task, now);
-    return { ok: true, auth: { taskId: task.id, head: req.head, base: gate.base, reviewSeq: gate.review.eventSeq, carries: gate.carries.length, sourceKind: gate.sourceKind } };
+    return { ok: true, auth: { taskId: task.id, head: req.head, base: gate.review.head, reviewSeq: gate.review.eventSeq, carries: gate.carries.length, sourceKind: gate.sourceKind } };
   } catch (e) {
     if (e instanceof LedgerError) return { ok: false, reason: `台账合并门：${e.message}` };
     return { ok: false, reason: `台账合并门读取失败：${(e as Error).message.slice(0, 200)}` };

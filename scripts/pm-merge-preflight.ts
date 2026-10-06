@@ -235,7 +235,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
       return a.ok ? { ok: true, base: a.auth.base, detail: `台账合并门通过：审查 #${a.auth.reviewSeq}（${a.auth.sourceKind}，经 ${a.auth.carries} 次正式沿用）` }
         : { ok: false, exit: 2, reason: a.reason };
     };
-    // r3 merge-proof: the proof's oldHead is the ledger's reviewed head, never a caller flag; read before any GitHub call
+    // r3/r4 merge-proof: the proof's oldHead is the real PASS event's head (before engine and PM carries), never a caller flag; read before any GitHub call
     const first = authorize(head);
     if (!first.ok) return { exit: first.exit, lines: [`${bools.has("update-branch") ? "更新分支未发出：" : tag}${first.reason}`] };
     const reviewed = first.base;
