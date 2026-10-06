@@ -10,8 +10,9 @@ import {
 } from "../src/lib/acp/codex-compat-switch.ts";
 import { checkAcpReady } from "../src/lib/acp/readiness.ts";
 import { selfAdapterChecks } from "../src/lib/doctor-acp.ts";
-import { applySwitch, cmdCodexAdapter, type SwitchDeps } from "../src/manager/acp-adapter.ts";
+import { applySwitch, cmdCodexAdapter, retireHost, type Retire, type SwitchDeps } from "../src/manager/acp-adapter.ts";
 import { needsWriteLock, isWriteInvocation } from "../src/manager/write-commands.ts";
+import { recordCodexRunning } from "../src/lib/codex-version.ts";
 import type { RegistryAgent } from "../src/lib/registry.ts";
 
 const dirs: string[] = [];
@@ -161,14 +162,15 @@ describe("doctor：自研组合身份 / 回退", () => {
   });
 });
 
-function fakeDeps(o: { agents?: { name: string; runtime?: string; transport?: string }[]; running?: Record<string, CodexAdapterId>; turns?: Record<string, string>; restartFails?: string[] } = {}) {
+type Row = { name: string; runtime?: string; transport?: string; status?: string };
+function fakeDeps(o: { agents?: Row[]; running?: Record<string, CodexAdapterId>; retire?: Record<string, Retire>; restartFails?: string[] } = {}) {
   let choice: AdapterChoice = { default: "upstream", agents: {} };
   const restarts: string[] = [];
-  const asked: string[][] = [];
+  const asked: string[] = [];
   const deps: SwitchDeps = {
     agents: async () => o.agents ?? [],
     running: (a) => o.running?.[a],
-    turns: async (names) => (asked.push(names), Object.fromEntries(names.map((n) => [n, o.turns?.[n] ?? "idle"]))),
+    retire: async (n) => (asked.push(n), o.retire?.[n] ?? "exited"),
     restart: async (n) => (restarts.push(n), o.restartFails?.includes(n) ? { ok: false, error: "boom" } : { ok: true }),
     update: async (change) => (choice = change(choice)),
     read: () => choice,
@@ -182,15 +184,21 @@ describe("manager codex-adapter：切换 / 切回只在空闲时重启", () => {
     const t = fakeDeps({ agents: [acp("agent-a"), acp("agent-b"), { name: "agent-c", runtime: "codex", transport: "tmux" }, { name: "agent-p", runtime: "pi", transport: "acp" }] });
     const r = await cmdCodexAdapter(["use", "self", "--agent", "a"], t.deps);
     expect(r).toMatchObject({ ok: true, default: "upstream", overrides: { "agent-a": "self" }, restarted: ["agent-a"], deferred: [] });
-    expect(t.asked).toEqual([["agent-a"]]);
+    expect(t.asked).toEqual(["agent-a"]);
   });
-  test("切换时宿主正好在回合中：开关照改，不重启、列进 deferred；查不到回合态同样不重启", async () => {
-    const t = fakeDeps({ agents: [acp("agent-a"), acp("agent-b"), acp("agent-c")], turns: { "agent-a": "busy", "agent-b": "unknown" } });
+  test("切换时宿主正好在回合中：开关照改，宿主不退就不重启、列进 deferred；老宿主（不认信号）也不重启；宿主不在了照常重启", async () => {
+    const retire: Record<string, Retire> = { "agent-a": "busy", "agent-b": "unknown", "agent-d": "absent" };
+    const t = fakeDeps({ agents: [acp("agent-a"), acp("agent-b"), acp("agent-c"), acp("agent-d")], retire });
     const r = await cmdCodexAdapter(["use", "self"], t.deps);
-    expect(r).toMatchObject({ ok: true, default: "self", restarted: ["agent-c"] });
-    expect(r.deferred).toEqual([{ agent: "agent-a", why: "回合在跑" }, { agent: "agent-b", why: "查不到回合态" }]);
-    expect(t.restarts).toEqual(["agent-c"]);
+    expect(r).toMatchObject({ ok: true, default: "self", restarted: ["agent-c", "agent-d"] });
+    expect(r.deferred).toEqual([{ agent: "agent-a", why: "回合在跑" }, { agent: "agent-b", why: expect.stringContaining("不认切换信号") }]);
+    expect(t.restarts).toEqual(["agent-c", "agent-d"]);
     expect(t.choice().default).toBe("self");
+  });
+  test("停着的 agent 不碰（不发信号、不重启，下次起来时按新开关）", async () => {
+    const t = fakeDeps({ agents: [{ ...acp("agent-a"), status: "stopped" }, acp("agent-b")] });
+    expect(await cmdCodexAdapter(["use", "self"], t.deps)).toMatchObject({ restarted: ["agent-b"], deferred: [] });
+    expect(t.asked).toEqual(["agent-b"]);
   });
   test("rollback 一条命令：全局上游、清掉覆盖；只重启实际在跑自研的（已退回上游的不重启）", async () => {
     const t = fakeDeps({ agents: [acp("agent-a"), acp("agent-b"), acp("agent-c")], running: { "agent-a": "self", "agent-b": "upstream" } });
@@ -215,5 +223,40 @@ describe("manager codex-adapter：切换 / 切回只在空闲时重启", () => {
     for (const sub of ["use", "clear", "rollback"]) expect(isWriteInvocation("codex-adapter", [sub])).toBe(true);
     expect(isWriteInvocation("codex-adapter", ["status"])).toBe(false);
     expect(needsWriteLock("codex-adapter", ["use"])).toBe(false);
+  });
+});
+
+describe("retireHost：只给认得出的新宿主发 SIGUSR2，宿主自己决定退不退", () => {
+  const fakeHost = (dir: string, mode: "idle" | "busy") => {
+    // 假宿主：文件名就叫 acp-host.ts（manager 按命令行认宿主）；idle 收到信号就退，busy 收到信号不退（同 host.ts retireIfIdle）
+    const f = join(dir, "acp-host.ts");
+    writeFileSync(f, `process.on("SIGUSR2", () => { if (process.argv[2] === "idle") process.exit(0); }); setInterval(() => {}, 1000); console.log("up");`);
+    return Bun.spawn([process.execPath, f, mode], { stdout: "pipe" });
+  };
+  const ready = async (p: ReturnType<typeof fakeHost>) => void (await p.stdout.getReader().read());
+  test("没运行记录（老宿主）= unknown，不发信号；记录里的 pid 不在了 = absent", async () => {
+    expect(await retireHost("agent-nobody")).toBe("unknown");
+    recordCodexRunning("agent-gone", "0.159.3", undefined, { adapter: "upstream", hostPid: 2 ** 22 + 12345 });
+    expect(await retireHost("agent-gone")).toBe("absent");
+  });
+  test("pid 被别的进程复用（命令行不是 acp-host.ts）= absent，不发信号", async () => {
+    const other = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"]);
+    recordCodexRunning("agent-reused", "0.159.3", undefined, { hostPid: other.pid });
+    expect(await retireHost("agent-reused", 300)).toBe("absent");
+    expect(other.exitCode).toBeNull();
+    other.kill();
+  });
+  test("空闲的宿主收到信号退出 = exited；在跑回合的不退 = busy（不掐）", async () => {
+    const d = tmp();
+    const idle = fakeHost(d, "idle");
+    await ready(idle);
+    recordCodexRunning("agent-idle", "0.159.3", undefined, { hostPid: idle.pid });
+    expect(await retireHost("agent-idle")).toBe("exited");
+    const busy = fakeHost(d, "busy");
+    await ready(busy);
+    recordCodexRunning("agent-busy", "0.159.3", undefined, { hostPid: busy.pid });
+    expect(await retireHost("agent-busy", 500)).toBe("busy");
+    expect(busy.exitCode).toBeNull();
+    busy.kill();
   });
 });

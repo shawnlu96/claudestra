@@ -87,9 +87,11 @@ bun src/manager.ts codex-adapter clear --agent <agent>            # 删掉这个
 bun src/manager.ts codex-adapter rollback                         # 一条命令切回：全局上游、清掉所有覆盖
 ```
 
-  改完只重启「宿主实际在跑的适配器 ≠ 新选择」的 transport=acp agent，走 `restart` 接旧线程那条路（session/resume，线程 id 不变）。
-  **回合在跑的不切**：先经 bridge `turn_status` 问宿主（和升级闸同一个问法），只有明确答空闲的才重启；在跑或查不到的列进 `deferred`，
-  开关已改，它下次重启时生效。`--no-restart` 只改开关。
+  改完只重启「宿主实际在跑的适配器 ≠ 新选择」、在跑的 transport=acp agent，走 `restart` 接旧线程那条路（session/resume，线程 id 不变）。
+  **回合在跑的不切**：先给宿主发 SIGUSR2，宿主在同一段同步代码里判空闲并停机（`host.ts retireIfIdle`），退了 manager 才 restart；
+  在跑回合就不退，列进 `deferred`。不用「先问回合态再 restart」：问完到 restart 掐宿主之间，新入站能开出一轮被掐掉。
+  宿主 pid 记在 `codex-running/<agent>.json`（`hostPid`），没记 pid 的老宿主不认这个信号（缺省动作是退出），不发、也列进 `deferred`；
+  开关已改，这些 agent 下次重启时生效。停着的 agent 不碰。`--no-restart` 只改开关。
 - **选了自研时宿主怎么起**（`acp-host.ts` → `codex-compat.ts pickCodexAdapter`）：
   1. 起之前按 app-server 协议判本机 codex（`selfAdapterVerdict`，readiness 用同一判据），兼容就把组合身份打进 host.log
      （`组合身份 <id>（自研适配器 <指纹> + codex <版本> + schema <指纹>）`）；

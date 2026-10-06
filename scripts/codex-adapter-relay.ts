@@ -2,7 +2,7 @@
 /**
  * CXF-S 上线门槛的真 CLI 组合实测：同一个 Codex 线程按 2.1.0 → 自研 → 2.1.0 来回切，每一段都是真的 ACP 宿主（lib/acp/host.ts）
  * 起真的适配器、按 session/resume 接回同一线程，跑真的 codex app-server 回合；切换走真的开关命令（manager/acp-adapter.ts applySwitch）
- * 和「停宿主 → 按开关重起宿主」的重启路径，回合在跑时切换要被推迟（deferred）。
+ * 和「宿主空闲时自己退出（retireIfIdle，生产里是 SIGUSR2）→ 按开关重起宿主」的重启路径，回合在跑时切换要被推迟（deferred）。
  * 每一轮发给模型的请求里要带着之前所有回合（历史没丢），线程 id 始终是同一个、rollout 只有一份（状态没丢）。
  * 隔离：一个 mkdtemp 根（HOME、CODEX_HOME、TMPDIR、cwd、开关文件都在里面），model provider 是只绑 127.0.0.1 的假 Responses，
  * 代理指到死端口；不读 ~/.codex、不需要登录，不连生产 bridge（bridge 一侧是进程内的假连接）。上游 2.1.0 只读本机已装的那份。
@@ -21,7 +21,7 @@ import { AcpSession } from "../src/lib/acp/session.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import type { StopReport } from "../src/lib/acp/turn.ts";
 import { stateDir } from "../src/lib/state-dir.ts";
-import { applySwitch } from "../src/manager/acp-adapter.ts";
+import { applySwitch, type Retire } from "../src/manager/acp-adapter.ts";
 import { ROLLBACK, updateAdapterChoice, withAgent, readAdapterChoice } from "../src/lib/acp/codex-compat-switch.ts";
 import { assertIsolatedHome } from "./codex-probe.ts";
 import { inputTexts, type Reply, startFakeResponses } from "../tests/helpers/fake-responses.ts";
@@ -154,14 +154,6 @@ async function until(cond: () => boolean, what: string, ms = 60_000): Promise<vo
   }
 }
 
-/** 宿主真答的回合态（acp_call op=turn，升级闸 / 切换命令问的就是它） */
-async function turnOf(leg: Leg): Promise<string> {
-  const id = `turn-${Date.now()}`;
-  leg.link.onFrame({ type: "acp_call", op: "turn", id });
-  await until(() => leg.sent.some((f) => f.type === "acp_call_result" && f.id === id), "turn 回包", 5_000);
-  return leg.sent.find((f) => f.id === id)!.busy ? "busy" : "idle";
-}
-
 let msg = 0;
 /** 一轮：入站一条，模型按 replies 回，等 Stop；返回这一轮发给模型的请求里看得到的全部文字 */
 async function turn(leg: Leg, content: string, replies: Reply[]): Promise<{ stop: StopReport; seen: string[] }> {
@@ -241,9 +233,9 @@ async function main(): Promise<void> {
   const deps = (l: () => Leg) => ({
     agents: async () => [{ name: AGENT, runtime: "codex", transport: "acp" }],
     running: () => l().adapter() as "upstream" | "self",
-    turns: async (names: string[]) => Object.fromEntries(await Promise.all(names.map(async (n) => [n, await turnOf(l())] as const))),
+    // 同 acp-host.ts 的 SIGUSR2：宿主自己判空闲并停机，同一段同步代码
+    retire: async (): Promise<Retire> => (l().host.retireIfIdle() ? (await stopHost(l()), "exited") : "busy"),
     restart: async () => {
-      await stopHost(l());
       leg = startHost(sid, `leg-${selectedCodexAdapter(AGENT, CHOICE)}`);
       await until(leg.ready, "重起后就绪");
       return { ok: true };
@@ -259,8 +251,9 @@ async function main(): Promise<void> {
   await Bun.sleep(300);
   const busySwitch = await applySwitch((c) => withAgent(c, AGENT, "self"), true, deps(() => leg));
   check("回合在跑时切到自研：不重启、列进 deferred", (busySwitch.deferred as Rec[]).some((d) => d.agent === AGENT) && !(busySwitch.restarted as string[]).length, busySwitch);
-  check("推迟期间宿主还是 2.1.0、没被重启", leg.adapter() === "upstream" && leg.proc()?.pid !== undefined);
   const stopsBefore = leg.stops.length;
+  await Bun.sleep(500);
+  check("推迟期间宿主还是 2.1.0、没被重启，那一轮还在跑（没被掐）", leg.adapter() === "upstream" && leg.stops.length === stopsBefore && leg.host.loop.busy);
   leg.link.onFrame({ type: "abort", id: "relay-abort" });
   await until(() => leg.stops.length > stopsBefore, "打断后的 Stop");
   check("打断后回合收尾", leg.stops.at(-1)!.event !== undefined, leg.stops.at(-1)!.event);

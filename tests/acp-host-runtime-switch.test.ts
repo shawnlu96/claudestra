@@ -74,7 +74,8 @@ function start(self: string[], selfEnv: Record<string, string> = {}, upstream: s
   );
   host.start();
   const inbound = (content: string) => link.onFrame({ type: "message", content, meta: { chat_id: "api:owner", message_id: `m${Date.now()}` } });
-  return { logs, sent, stops, spawned, pick, inbound, isReady: () => ready };
+  const assistant = () => sent.filter((f) => f.type === "acp_entries").flatMap((f) => f.entries).filter((e: any) => e.type === "assistant");
+  return { logs, sent, stops, spawned, pick, inbound, assistant, isReady: () => ready };
 }
 
 describe("宿主：自研起不来退回上游（故障竞争）", () => {
@@ -127,3 +128,34 @@ describe("宿主：自研起不来退回上游（故障竞争）", () => {
     expect(h.stops[1]!.event).toBe("Stop");
   }, 60_000);
 });
+
+describe("宿主：切换前的空闲退出（retireIfIdle，acp-host.ts 的 SIGUSR2）", () => {
+  test("回合在跑：不退、不掐——那一轮还在跑，宿主照常接后面的消息", async () => {
+    const h = start(STUB.slice());
+    await until(h.isReady);
+    h.inbound("[stub:slow] 慢慢来"); // stub 的慢回合一直等到被打断
+    await until(() => host!.loop.busy);
+    await Bun.sleep(300);
+    expect(host!.retireIfIdle()).toBe(false);
+    await Bun.sleep(500);
+    expect(h.stops).toHaveLength(0); // 没被掐
+    expect(host!.loop.busy).toBe(true);
+    host!.loop.submit("顺便一句"); // 宿主没停：插话照常进来
+    await Bun.sleep(300);
+    expect(h.spawned).toHaveLength(1);
+    expect(h.logs.some((l) => l.includes("断开适配器"))).toBe(false);
+  }, 45_000);
+
+  test("空闲：同一段同步代码里判完就停机——判完紧跟着到的入站开不出回合（审查 switch-turn-race 的复现）", async () => {
+    const h = start(STUB.slice());
+    await until(h.isReady);
+    expect(host!.retireIfIdle()).toBe(true);
+    h.inbound("刚好在判完之后到"); // 旧做法（先问回合态、再另起进程 restart）这里会开出一轮，随后被 restart 掐掉
+    await procs[0]!.exited;
+    await Bun.sleep(500);
+    expect(h.assistant()).toEqual([]);
+    expect(h.stops.some((s) => s.event === "Stop")).toBe(false);
+    expect(h.spawned).toHaveLength(1); // 停机中不再起适配器
+  }, 45_000);
+});
+

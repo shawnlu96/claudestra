@@ -73,7 +73,8 @@ const codexPath = process.env.CLAUDESTRA_CODEX_BIN?.trim() || undefined;
 const pick = runtime.id === "codex" ? pickCodexAdapter(agent, codexPath, log) : null;
 /** 每次起适配器前记一次（含退避重起）：app-server 跑的是那一刻磁盘上的 codex，网页「重启生效」提示读这条记录 */
 const warned = new Set<string>();
-const noteCodex = async () => void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned, adapter: pick?.adapter }));
+const noteCodex = async () =>
+  void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned, adapter: pick?.adapter, hostPid: process.pid }));
 
 const host = new AcpHost(
   {
@@ -141,6 +142,13 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     setTimeout(() => process.exit(0), 1_500);
   });
 }
+
+// 切换适配器（manager codex-adapter）：空闲才退出、manager 随后按新开关重起；在跑就不动，切换记成 deferred（manager/acp-adapter.ts）
+process.on("SIGUSR2", () => {
+  if (!host.retireIfIdle()) return void log("收到切换请求（SIGUSR2）：回合在跑，不退出");
+  log("收到切换请求（SIGUSR2）：空闲，退出让 manager 按新开关重起");
+  setTimeout(() => process.exit(0), 1_500);
+});
 
 // 出借 worker（干净环境）：scheduler 服务挂了也要按租约自停——宿主自己定时看 journal（lib/lend-watchdog.ts）
 if (process.env[CLEAN_ENV_FLAG] === "1") {

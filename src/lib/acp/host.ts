@@ -161,6 +161,16 @@ export class AcpHost {
     for (const w of this.sessionWaiters.splice(0)) w(null);
   }
 
+  /**
+   * 切换适配器前的空闲退出（acp-host.ts 收到 SIGUSR2 时调）：判空闲和停机在同一段同步代码里，判完到进程退出之间开不出新回合
+   * ——先问回合态再重启的做法中间有空档，新入站会在空档里开一轮、被重启掐掉。忙（含 /clear 轮换中）返回 false，什么都不动。
+   */
+  retireIfIdle(): boolean {
+    if (this.loop.busy || this.session?.running || this.rotating) return false;
+    this.stop();
+    return true;
+  }
+
   private async startAdapter(): Promise<void> {
     if (this.stopping) return;
     await this.deps.beforeSpawn?.().catch((e) => this.deps.log(`⚠️ 起适配器前的版本探测失败，按未知照常起：${String(e)}`));

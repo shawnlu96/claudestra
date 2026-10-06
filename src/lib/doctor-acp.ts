@@ -2,7 +2,7 @@
 import { checkAcpReady, probePiAcp, type AcpReady } from "./acp/readiness.js";
 import { identityLine } from "./acp/codex-compat.js";
 import { adapterFor, readAdapterChoice, type AdapterChoice, type CodexAdapterId } from "./acp/codex-compat-switch.js";
-import { readCodexRunningAdapter } from "./codex-version.js";
+import { readCodexRunningHost } from "./codex-version.js";
 import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { rangeAllows } from "./acp/resolve.js";
 import { probeClaudeVersion } from "./claude-binary.js";
@@ -95,7 +95,7 @@ async function checkCodexAcp(): Promise<Check[]> {
   const ready = await checkAcpReady(false, anySelf ? { selected: () => "self" } : {});
   const bin = ready.ok ? ready.codexBin : undefined; // 沙箱 stub 没有 codexBin：不探
   const version = bin ? await probeClaudeVersion(defaultRunner, bin).catch(() => null) : undefined; // 探失败 = 「读不出版本」照样报 warn
-  return [...acpDoctorChecks(agents, ready, version), ...selfAdapterChecks(agents, ready, choice, (a) => readCodexRunningAdapter(a))];
+  return [...acpDoctorChecks(agents, ready, version), ...selfAdapterChecks(agents, ready, choice, (a) => readCodexRunningHost(a).adapter)];
 }
 
 const isPiAcp = (a: RegistryAgent) => a.runtime === "pi" && a.transport === "acp";
