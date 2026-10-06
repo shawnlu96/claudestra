@@ -230,8 +230,8 @@ class Card {
       await this.settle(intent.id, "pending", "cancelled", `未投递：${lapse}`);
       return this.escalate(lapse, intent.id);
     }
-    if (ref.role === "reviewer" && intent.status === "pending") { // MODELX r4：正式派审前冻结材料快照，拒审接续只和它比
-      (await import("./scheduler-model-wiring.js")).freezeReviewMaterials(this.db, this.task, intent, plan, this.deps.now());
+    if (ref.role === "reviewer" && intent.status === "pending") { // MODELX r4：正式派审前冻结材料快照，拒审接续只和它比；经台账写口（MODELXW）
+      await (await import("./scheduler-model-wiring.js")).freezeReviewMaterials(this, intent, plan);
     }
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
