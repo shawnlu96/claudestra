@@ -73,13 +73,19 @@ function liveWriter(db: Database, task: LedgerTask, input: LiveExtendInput, even
   const lease = heldLease(db, task);
   if (!lease || lease.project !== task.project || lease.peer !== input.peer) return fail("写租约不在这个 peer 名下或已结束");
   if (!order.branch || lease.branch !== order.branch || lendBranch(task.id, lease.fp) !== lease.branch) return fail("写租约分支与出借单 / 指纹不符");
+  // The peer's current fingerprint (its pinned hello) is the identity proof; a missing one is unverifiable, not a pass.
   const known = getLendPeer(db, input.peer)?.fp;
-  if (known && known.toLowerCase() !== lease.fp.toLowerCase()) return fail("peer 当前指纹与写租约不符");
+  if (typeof known !== "string" || !known) return fail("peer 当前指纹缺失，无法核实写租约身份");
+  if (known.toLowerCase() !== lease.fp.toLowerCase()) return fail("peer 当前指纹与写租约不符");
   return { intent, orderId: order.orderId, peer: order.peer, worker: order.worker, gen: order.leaseGen, leaseUntil: order.leaseUntil as number,
     step: order.step, fp: lease.fp.toLowerCase(), branch: lease.branch, intentEventSeq: plan.seq, poolLinkSeq: link.seq, claimSeq: claim.seq };
 }
 
-/** Only the bound peer step writes: any other assigned author step, local author session or live registry author is unknown. */
+/**
+ * Only the bound peer step writes: any other assigned author step, local author session or possibly-live registry author is unknown.
+ * registry.task is a display title, so a registry agent also counts when the card names it (task.agent / assignee / author step),
+ * as in the paused reconciliation; stopped / dead / retired only clears it without a pending restart.
+ */
 function otherWriters(db: Database, task: LedgerTask, b: Binding, input: LiveExtendInput, reasons: string[]): void {
   const executor = `${b.worker}@${b.peer}`;
   const writing = stepsOf(db, task).filter(s => !s.derived && ["restate", "write", "fix"].includes(s.step) && s.state === "assigned");
@@ -92,13 +98,24 @@ function otherWriters(db: Database, task: LedgerTask, b: Binding, input: LiveExt
   const state = readJsonStateSync(input.registryPath ?? REGISTRY_PATH, v => object(v) && object(v.agents) && Object.values(v.agents).every(object));
   if (state.status !== "ok") { reasons.push(`registry 无法核实：${state.status}`); return; }
   const reviewers = new Set(sessions.filter(s => s.role === "reviewer").map(s => bareCanonicalName(s.agent)));
+  const authorNames = new Set([task.agent, task.assignee, ...stepsOf(db, task).filter(s => !s.derived && ["restate", "write", "fix"].includes(s.step))
+    .map(s => s.executor)].filter((name): name is string => !!name && name !== executor).map(bareCanonicalName));
+  const elsewhere = db.query("SELECT * FROM scheduler_sessions WHERE taskId <> ? AND state = 'active'").all(task.id) as SchedulerSession[];
   for (const a of normalizeRegistryAgents(state.data)) {
+    const name = bareCanonicalName(a.name);
+    const named = authorNames.has(name) && !actorMayConfigure(db, a.name, task.project) && !(!!a.sessionId && elsewhere.some(s =>
+      s.sessionId === a.sessionId && bareCanonicalName(s.agent) === name && ["author", "reviewer"].includes(s.role)));
     const bound = a.task === task.id || sessions.some(s => s.role === "author" && !!a.sessionId && s.sessionId === a.sessionId);
-    if (bound && !reviewers.has(bareCanonicalName(a.name)) && !["dead", "stopped", "retired"].includes(a.status ?? "")) {
-      reasons.push(`registry 里 ${a.name} 仍绑在本卡且可能在写`);
+    if ((named || (bound && !reviewers.has(name))) && (!["dead", "stopped", "retired"].includes(a.status ?? "") || a.acpRestartPending)) {
+      reasons.push(`registry 里 ${a.name} 仍绑在本卡或被本卡点名为作者，可能在写`);
     }
   }
 }
+
+const auditOf = (task: LedgerTask, input: LiveExtendInput, b: Binding, fileGlobs: string[], held: string[]): Omit<ScopeExtendAudit, "old" | "added"> => ({
+  op: SCOPE_EXTEND_OP, taskRev: task.rev, workflowRev: input.workflowRev, specRev: task.specRev, round: task.round, stage: task.stage,
+  intentId: b.intent.id, intentEventSeq: b.intentEventSeq, poolLinkSeq: b.poolLinkSeq, orderId: b.orderId, peer: b.peer, worker: b.worker, gen: b.gen,
+  claimSeq: b.claimSeq, fp: b.fp, branch: b.branch, fileGlobs, held });
 
 function inspect(db: Database, task: LedgerTask, input: LiveExtendInput, reason: string, now: number): LivePlan {
   const p: LivePlan = { old: [], target: [], added: [], retained: [], conflicts: [], reasons: [], binding: null, duplicateOf: null };
@@ -120,22 +137,25 @@ function inspect(db: Database, task: LedgerTask, input: LiveExtendInput, reason:
   for (const r of own) if (r.project !== task.project || expected.get(r.resource) !== r.intentId) p.reasons.push(`文件锁缺匹配来源：${r.resource}`);
   p.added = p.target.filter(r => !p.old.includes(r));
   p.retained = p.old.filter(r => !p.target.includes(r));
+  // Every claim the card keeps (old, retained) and every one it would add is rescanned; a duplicate receipt is no exception.
   for (const r of rows) {
     if (resourceKey(r.resource) !== r.resource || !["card", "intent"].includes(r.scope)) p.reasons.push("资源表存在未知状态");
-    for (const wanted of p.added) {
-      if ((r.taskId !== task.id || r.scope !== "card" || !file(r.resource)) && resourcesOverlap(wanted, r.resource)) {
+    for (const wanted of new Set([...p.old, ...p.target])) {
+      const foreign = r.taskId !== task.id || (p.added.includes(wanted) && (r.scope !== "card" || !file(r.resource)));
+      if (foreign && resourcesOverlap(wanted, r.resource)) {
         p.conflicts.push({ resource: wanted, held: r.resource, taskId: r.taskId });
       }
     }
   }
-  if (p.conflicts.length) p.reasons.push("追加范围与现存资源冲突");
+  if (p.conflicts.length) p.reasons.push("已持或追加范围与现存资源冲突");
   if (!p.added.length && p.binding && !p.reasons.length) {
     const b = p.binding;
     const same = events.findLast(e => e.kind === "decision" && e.data.op === SCOPE_EXTEND_OP);
-    const d = same?.data as Partial<ScopeExtendAudit> | undefined;
-    if (same && d && same.actor !== "scheduler" && same.text === reason && d.orderId === b.orderId && d.gen === b.gen && d.peer === b.peer &&
-      d.intentId === b.intent.id && d.taskRev === input.taskRev && d.workflowRev === input.workflowRev &&
-      JSON.stringify(d.fileGlobs) === JSON.stringify(p.target) && JSON.stringify(d.held) === JSON.stringify(p.old)) p.duplicateOf = same.seq;
+    // A receipt only for the identical audit this call would have written: every binding field, not just the order and gen.
+    const want: Omit<ScopeExtendAudit, "old" | "added"> = auditOf(task, input, b, p.target, p.old);
+    const d = same?.data as Record<string, unknown> | undefined;
+    if (same && d && same.actor !== "scheduler" && same.text === reason && Object.entries(want).every(([k, v]) => JSON.stringify(d[k]) === JSON.stringify(v)) &&
+      JSON.stringify([...(d.old as string[]), ...(d.added as string[])].sort()) === JSON.stringify(p.old)) p.duplicateOf = same.seq;
     else p.reasons.push("批准范围已全部持锁，没有可追加的文件（非同参数重放，不写空审计）");
   }
   return p;
@@ -174,9 +194,7 @@ export function extendLiveWriterScope(db: Database, ctx: WriteCtx, input: LiveEx
       if (result.changes !== 1) throw new LedgerError("conflict", `加锁 CAS 失败：${r}`);
     }
     const held = [...p.old, ...p.added].sort();
-    const audit: ScopeExtendAudit = { op: SCOPE_EXTEND_OP, taskRev: task.rev, workflowRev: input.workflowRev, specRev: task.specRev, round: task.round,
-      stage: task.stage, intentId: b.intent.id, intentEventSeq: b.intentEventSeq, poolLinkSeq: b.poolLinkSeq, orderId: b.orderId, peer: b.peer,
-      worker: b.worker, gen: b.gen, claimSeq: b.claimSeq, fp: b.fp, branch: b.branch, fileGlobs: p.target, old: p.old, added: p.added, held };
+    const audit: ScopeExtendAudit = { ...auditOf(task, input, b, p.target, held), old: p.old, added: p.added };
     const { event } = appendEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "decision", text: reason,
       data: { ...audit } });
     // The committed state must replay as an exact duplicate of what was just written, or the whole append rolls back.

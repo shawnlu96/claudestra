@@ -277,3 +277,67 @@ test("real CLI: explicit --live-extend previews, applies, replays; flags never l
   expect(await cli([...base(), ...live(), "--apply"])).toMatchObject({ ok: true, duplicate: true, auditSeq: applied.auditSeq });
   expect(f.snapshot()).toEqual(once);
 });
+
+const extendAudit = "json_extract(data, '$.op') = 'scheduler_file_scope_extend'";
+const widen = (f: ReturnType<typeof fixture>) => setTask(f.db, owner, { id: "WX", rev: getTask(f.db, "WX")!.rev,
+  patch: { extra: { fileGlobs: ["src/a.ts", "src/b/*", "tests/b.test.ts", "docs/x.md"] } } });
+
+test.each([
+  ["approved scope removed", "json_remove(data, '$.fileGlobs')"],
+  ["approved scope widened", "json_set(data, '$.fileGlobs', json('[\"docs/x.md\",\"src/a.ts\",\"src/b/*\",\"tests/b.test.ts\"]'))"],
+  ["fingerprint", "json_set(data, '$.fp', 'abcd-0000-0000-0000')"],
+  ["branch", "json_set(data, '$.branch', 'lend/WX-ffff')"],
+  ["CAS / stage removed", "json_remove(data, '$.taskRev', '$.workflowRev', '$.specRev', '$.round', '$.stage')"],
+  ["task rev", "json_set(data, '$.taskRev', 3)"],
+  ["stage", "json_set(data, '$.stage', 'fix')"],
+  ["worker", "json_set(data, '$.worker', 'w9')"],
+])("corrupt audit binding fails closed for the next extension and the paused replay: %s", (_, expression) => {
+  const f = fixture();
+  extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true });
+  tamper(f, `UPDATE events SET data = ${expression} WHERE ${extendAudit}`);
+  widen(f);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }));
+  expect(extendLiveWriterScope(f.db, pm, f.input()).reasons.some(r => r.startsWith("扩范围审计"))).toBe(true);
+});
+
+test("a corrupt audit never yields a duplicate receipt", () => {
+  const f = fixture();
+  extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true });
+  tamper(f, `UPDATE events SET data = json_set(data, '$.fp', 'different') WHERE ${extendAudit}`);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }));
+  expect(extendLiveWriterScope(f.db, pm, f.input())).toMatchObject({ executable: false, duplicate: false });
+});
+
+test("a registry author named by the card or pending restart is an unknown writer, whatever its display title", () => {
+  const f = fixture();
+  setTask(f.db, owner, { id: "WX", rev: getTask(f.db, "WX")!.rev, patch: { agent: "agent-local" } });
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-local": { channelId: "9", task: "writing this card", status: "active", sessionId: "local-session" } } }));
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "registry");
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-local": { channelId: "9", task: "writing this card", status: "stopped", acpRestartPending: true } } }));
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "registry");
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-x": { channelId: "9", task: "WX", status: "stopped", acpRestartPending: true } } }));
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "registry");
+  // A named author that really stopped (no pending restart) is not a writer.
+  writeFileSync(f.registryPath, JSON.stringify({ agents: { "agent-local": { channelId: "9", task: "writing this card", status: "stopped" } } }));
+  expect(extendLiveWriterScope(f.db, pm, { ...f.input(), taskRev: getTask(f.db, "WX")!.rev, apply: true })).toMatchObject({ duplicate: false });
+});
+
+test("a missing current peer fingerprint refuses", () => {
+  const f = fixture();
+  tamper(f, "UPDATE lend_peers SET fp = NULL");
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "指纹缺失");
+});
+
+test("a foreign glob over a kept (old) claim refuses, on a first append and on a duplicate retry", () => {
+  const f = fixture();
+  liveCard(f.db, "WY", ["lib/y.ts"], ["lib/y.ts"]);
+  setTask(f.db, owner, { id: "WX", rev: getTask(f.db, "WX")!.rev, patch: { extra: { fileGlobs: ["src/a.ts", "docs/x.md"] } } });
+  f.db.run("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'src/*', 'WY', 'WY-write', 1, 'card')");
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "冲突");
+  expect(extendLiveWriterScope(f.db, pm, f.input()).conflicts).toEqual([{ resource: "src/a.ts", held: "src/*", taskId: "WY" }]);
+  f.db.run("DELETE FROM scheduler_resources WHERE resource = 'src/*'");
+  expect(extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true })).toMatchObject({ duplicate: false, added: ["docs/x.md"] });
+  f.db.run("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'src/*', 'WY', 'WY-write', 1, 'card')");
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "冲突");
+  expect(extendLiveWriterScope(f.db, pm, f.input())).toMatchObject({ executable: false, duplicate: false });
+});
