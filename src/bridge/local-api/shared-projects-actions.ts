@@ -15,6 +15,7 @@ interface ProjectAction {
   selection?: ProjectSelection;
   choices?: ProjectChoice[];
   preflight?: BootstrapPreflight;
+  expectedDigest?: string;
 }
 const samePerson = (a: ProjectPerson, b: ProjectPerson) =>
   a.centerId === b.centerId && a.teamId === b.teamId && a.personId === b.personId && a.instanceId === b.instanceId;
@@ -48,22 +49,32 @@ function requireOperation(who: ProjectPerson, value: CreatorOperation, operation
   return { project: parsed.project, operation: parsed.operation };
 }
 
-async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operationId: string, selection?: ProjectSelection) {
-  const ask = openAction(d, { kind: "complete", who, operationId, ...(selection ? { selection } : {}) },
-    "继续完成项目", "中心操作结果或本机完成状态待确认；点击后查询同一操作并继续，不重复建项目。");
+async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operationId: string, selection?: ProjectSelection,
+  input?: ProjectCreate, expectedDigest?: string) {
+  const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, ...(selection ? { selection } : {}) },
+    "继续完成项目", `操作 ${operationId}；本人 ${who.personId}；实例 ${who.instanceId}
+`
+      + `原创建参数：${input ? `${input.name}（${input.id ?? "中心分配 ID"}）` : "沿用中心原操作"}
+`
+      + `本机选择：${selection ? selection.mode === "create" ? "新建本机项目" : selection.localProjectId : "尚未选择，后续显式确认"}
+`
+      + "查询同一操作并继续，不重复建项目。");
   return { ok: true, available: false, operationId, askId: ask.id };
 }
 
 /** The only success path reads the saved B credential, then binds, then reads B through the gate proxy. */
 async function completeSharedProject(who: ProjectPerson, operationId: string, selection: ProjectSelection | undefined,
-  d: SharedProjectsPorts, created?: CreatorOperation): Promise<Record<string, unknown>> {
+  d: SharedProjectsPorts, created?: CreatorOperation, input?: ProjectCreate, expectedDigest?: string): Promise<Record<string, unknown>> {
   try {
     const operation = requireOperation(who, created ?? await d.operation(who, operationId), operationId);
+    if ((input && (operation.project.name !== input.name || (input.id !== undefined && operation.project.projectId !== input.id)))
+      || (expectedDigest !== undefined && operation.operation.paramsDigest !== expectedDigest)) throw new SharedProjectsError(403, "operation_params_changed");
+    expectedDigest = operation.operation.paramsDigest;
     if (!await d.credentialSaved(who, operation.project)) await d.saveCreatorCredential(who, operation);
     if (!await d.credentialSaved(who, operation.project)) throw new SharedProjectsError(503, "credential_not_saved");
     if (!selection) {
       const select = projectChoices(operation.project, await d.eligible(), d.bindings());
-      const ask = openAction(d, { kind: "complete", who, operationId, choices: select.choices }, "选择本机项目", "本人凭据已保存；选择本机项目后继续完成。", select);
+      const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, choices: select.choices }, "选择本机项目", "本人凭据已保存；选择本机项目后继续完成。", select);
       return { ok: true, available: false, operationId, askId: ask.id };
     }
     const bound = d.bindings().filter(b => b.centerId === who.centerId && b.teamId === who.teamId && b.projectId === operation.project.projectId);
@@ -75,7 +86,7 @@ async function completeSharedProject(who: ProjectPerson, operationId: string, se
     return { ok: true, available: true, operationId, projectId: operation.project.projectId, localProjectId };
   } catch {
     // Center, credential and filesystem exceptions can contain bearer/code material; only the recovery card is public.
-    return recoveryCard(d, who, operationId, selection);
+    return recoveryCard(d, who, operationId, selection, input, expectedDigest);
   }
 }
 
@@ -84,11 +95,11 @@ export async function createSharedProject(input: ProjectCreate, d: SharedProject
   requireProjectPerson(who);
   try {
     const operation = await d.create(who, input);
-    return completeSharedProject(who, input.operationId, input.selection, d, operation);
+    return completeSharedProject(who, input.operationId, input.selection, d, operation, input);
   } catch (error) {
     if (error instanceof SharedProjectsError && error.status < 500) throw error;
     // A lost response may already have committed: recover by the original operationId rather than creating again.
-    return recoveryCard(d, who, input.operationId, input.selection);
+    return recoveryCard(d, who, input.operationId, input.selection, input);
   }
 }
 
@@ -152,5 +163,5 @@ export async function answerSharedProject(a: Ask, d: SharedProjectsPorts): Promi
   const selection = action.choices ? selectedProject(a.answer?.choices ?? [], action.choices) : action.selection;
   if (action.choices && !selection) throw new SharedProjectsError(400, "local_project_required");
   if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
-  return completeSharedProject(who, action.operationId, selection ?? undefined, d);
+  return completeSharedProject(who, action.operationId, selection ?? undefined, d, undefined, action.input, action.expectedDigest);
 }

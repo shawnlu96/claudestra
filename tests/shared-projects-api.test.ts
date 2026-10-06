@@ -144,7 +144,7 @@ describe("creator completion and recovery", () => {
   });
   test("create without selection persists credentials and asks before binding", async () => {
     const w = fixture();
-    await createSharedProject({ operationId, name: "B" }, w.d);
+    await createSharedProject({ operationId, name: "Project B" }, w.d);
     expect(w.calls).not.toContain("bind-b");
     expect(w.asks[0]!.extra.sharedProjectChoice).toEqual({ selectId: "shared_project_local", recommended: "local_local-b" });
     await expect(answerSharedProject(approve(w.asks[0]!), w.d)).rejects.toThrow();
@@ -297,4 +297,20 @@ test("N5 snapshot reads canonical members and actual local state; team authority
   const failed = await sharedProjectsSnapshot(w.d, local);
   expect(failed.projects[0]!.projectRole.available).toBe(false);
   expect(JSON.stringify(failed)).not.toContain("SECRET_RESPONSE");
+});
+
+
+test("recovery preserves original creation parameters, local selection and canonical operation digest", async () => {
+  const w = fixture(); w.d.gateRead = async () => false;
+  await createSharedProject(create, w.d);
+  const a = w.asks[0]!;
+  expect(a.context).toContain("Project B");
+  expect(a.context).toContain("新建本机项目");
+  const params = a.bind!.params as { input: unknown; selection: unknown; expectedDigest: unknown };
+  expect(params.input).toEqual(create); expect(params.selection).toEqual(create.selection);
+  expect(params.expectedDigest).toBe(operation.paramsDigest);
+  w.calls.length = 0;
+  w.d.operation = async () => ({ project, operation: { ...operation, paramsDigest: "c".repeat(64) } });
+  expect((await answerSharedProject(approve(a), w.d))!.available).toBe(false);
+  expect(w.calls).toEqual([]);
 });
