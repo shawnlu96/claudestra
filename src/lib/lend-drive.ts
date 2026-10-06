@@ -31,7 +31,7 @@ import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr
 import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 import { resultReplayPending } from "./lend-result-retry.js";
-import { noteStartConfigFailure } from "./lend-config-failure.js";
+import { noteStartConfigFailure, startConfigRefusal } from "./lend-config-failure.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -222,6 +222,8 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const o = orderOf(row);
     let denied: string | null = null;
     const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    const cf = startConfigRefusal(d, row);
+    if (cf) return release(row, "cloned", cf, d);
     const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
     if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾

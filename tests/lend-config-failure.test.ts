@@ -1,6 +1,6 @@
 /** dispatch-recovery-LCFG1, lender side: classification, mode, one notice per peer + family, explicit CAS recovery, live orders kept. */
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getOrder, openLendJournal } from "../src/lib/lend-journal.js";
@@ -8,16 +8,19 @@ import { pausedUntil } from "../src/lib/lend-health.js";
 import { noteClaudeReadiness } from "../src/lib/lend-claude-worker-capacity.js";
 import {
   classifyConfigFailure, configFailureMode, noteStartConfigFailure, providerConfigFailure, providerFamilyUnavailable,
-  recoverProviderConfigFailure, setConfigFailureMode,
+  configFailureSlots, recoverProviderConfigFailure, setConfigFailurePolicy, startConfigRefusal,
 } from "../src/lib/lend-config-failure.js";
+import { recoveryPolicy } from "../src/lib/recovery-policy.js";
+import { helloBody } from "../src/lib/lend-hello.js";
 import { harness, polled, toStarted } from "./lend-harness.js";
 
 const MODEL_400 = "创建失败: Codex（ACP）引导轮失败：400 Bad Request {\"error\":{\"code\":\"model_not_enabled\",\"message\":\"The model `gpt-9` is not enabled for this account.\"}}";
 
+const setMode = (mode: "on" | "observe" | "off") => setConfigFailurePolicy(() => ({ mode, manualAfterMs: null, source: "config" }));
 const journals: ReturnType<typeof harness>[] = [];
 afterEach(() => {
   for (const h of journals.splice(0)) h.db.close();
-  setConfigFailureMode(null);
+  setConfigFailurePolicy(null);
   noteClaudeReadiness(null);
 });
 function setup() {
@@ -48,14 +51,28 @@ test("classifier: only explicit model-not-enabled; quota, capacity, network, aut
   ]) expect(classifyConfigFailure(e)).toBeNull();
 });
 
-test("mode: default observe; illegal or throwing port answers off", () => {
-  expect(configFailureMode()).toBe("observe");
-  setConfigFailureMode(() => "on");
+test("mode: the one recovery policy (lend / lendConfigFailure), default observe; illegal or throwing port answers off", () => {
+  expect(configFailureMode()).toBe("observe"); // test-guard state dir: no recovery-policy.json
+  const reads: unknown[] = [];
+  setConfigFailurePolicy((project, key) => (reads.push([project, key]), { mode: "on", manualAfterMs: null, source: "config" }));
   expect(configFailureMode()).toBe("on");
-  setConfigFailureMode((() => "bogus") as never);
+  expect(reads).toEqual([["lend", "lendConfigFailure"]]);
+  setConfigFailurePolicy((() => ({ mode: "bogus" })) as never);
   expect(configFailureMode()).toBe("off");
-  setConfigFailureMode(() => { throw new Error("x"); });
+  setConfigFailurePolicy(() => { throw new Error("x"); });
   expect(configFailureMode()).toBe("off");
+  const dir = mkdtempSync(join(tmpdir(), "lcfg1-policy-"));
+  try { // the real file-backed reader knows the key: on / off per the file, a typo'd file stops (off)
+    const path = join(dir, "recovery-policy.json");
+    setConfigFailurePolicy((p, k) => recoveryPolicy(p, k, path));
+    expect(configFailureMode()).toBe("observe");
+    writeFileSync(path, JSON.stringify({ projects: { lend: { keys: { lendConfigFailure: "on" } } } }));
+    expect(configFailureMode()).toBe("on");
+    writeFileSync(path, JSON.stringify({ projects: { lend: { mode: "on", keys: { lendConfigFailure: "off" } } } }));
+    expect(configFailureMode()).toBe("off");
+    writeFileSync(path, JSON.stringify({ projects: { lend: { keys: { lendConfigFailur: "on" } } } }));
+    expect(configFailureMode()).toBe("off");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("observe (default): would-pause logged, no registration, no notice; off: nothing", async () => {
@@ -64,35 +81,84 @@ test("observe (default): would-pause logged, no registration, no notice; off: no
   expect(providerConfigFailure(h.db, "team-a", "codex")).toBeNull();
   expect(configNotices(h)).toEqual([]);
   expect(h.log.lines.some((l) => l.includes("配置故障观察（observe）"))).toBe(true);
-  setConfigFailureMode(() => "off");
+  setMode("off");
   const before = h.log.lines.length;
   await failStart(h, "o2");
   expect(providerConfigFailure(h.db, "team-a", "codex")).toBeNull();
   expect(h.log.lines.slice(before).some((l) => l.includes("配置故障"))).toBe(false);
 });
 
-test("on: two orders of one family → one registration with both evidences, exactly one owner notice, no quota pause", async () => {
-  setConfigFailureMode(() => "on");
+test("on: two orders of one family → one start, one registration, exactly one owner notice; the second is refused before create", async () => {
+  setMode("on");
   const h = setup();
   creates = 0;
   await failStart(h, "o1");
   await failStart(h, "o2");
-  expect(creates).toBe(2);
+  expect(creates).toBe(1);
+  expect(h.log.created).toEqual([]);
   const f = providerConfigFailure(h.db, "team-a", "codex")!;
   expect(f).toMatchObject({ gen: 1, category: "model_not_enabled", notice: { state: "sent" }, recoveredAt: null });
-  expect(f.evidence.map((e) => e.orderId)).toEqual(["o1", "o2"]);
+  expect(f.evidence.map((e) => e.orderId)).toEqual(["o1"]);
   expect(f.evidence[0].excerpt).toContain("model_not_enabled");
   expect(configNotices(h)).toHaveLength(1);
   const why = configNotices(h)[0].why!;
   expect(why).toContain("是否修改模型由你决定");
   expect(why).not.toMatch(/ledger |codex config|--model|点|按钮/);
   expect(pausedUntil(h.db, h.d.now())).toBeNull(); // not a quota pause
-  // The original release still goes to A with the raw start error.
-  expect(getOrder(h.db, "o2")?.reason).toContain("model_not_enabled");
+  // Both releases reach A as not_started with the original start error (the borrower's classifier sees one fault class).
+  const rels = h.calls.filter((c) => c.op === "lease" && c.body.action === "release");
+  expect(rels.map((c) => [c.body.orderId, c.body.reason])).toEqual([["o1", "not_started"], ["o2", "not_started"]]);
+  expect(getOrder(h.db, "o1")?.reason).toContain("model_not_enabled");
+  expect(getOrder(h.db, "o2")?.reason).toMatch(/^起 worker 失败：配置故障未恢复，没有再启动（第 1 代，单 o1）：.*model_not_enabled/);
+  expect(classifyConfigFailure(String(getOrder(h.db, "o2")?.reason).slice("起 worker 失败：".length))).toBe("model_not_enabled");
+});
+
+test("on: hello withdraws only the faulty family for that peer; restart keeps it; only the owner's explicit recovery re-offers", async () => {
+  setMode("on");
+  const h = setup();
+  const entry = h.lend.lend[0];
+  expect(helloBody(h.db, entry, h.d.now()).slots.codex.total).toBe(2);
+  await failStart(h, "o1");
+  const body = helloBody(h.db, entry, h.d.now());
+  expect(body.slots.codex.total).toBe(0);
+  expect(body.slots.claude).toEqual(helloBody(h.db, { ...entry, peer: "team-b" }, h.d.now()).slots.claude);
+  expect(helloBody(h.db, { ...entry, peer: "team-b" }, h.d.now()).slots.codex.total).toBe(2); // other peer untouched
+  expect(configFailureSlots(h.db, "team-a", { codex: { total: 3, busy: 2 }, claude: { total: 1, busy: 0 } }))
+    .toEqual({ codex: { total: 0, busy: 2 }, claude: { total: 1, busy: 0 } }); // busy (live orders) kept
+  h.advanceTime(3 * 86400_000); // time alone never recovers (the grant runs 6 days)
+  expect(helloBody(h.db, entry, h.d.now()).slots.codex.total).toBe(0);
+  setMode("observe");
+  expect(helloBody(h.db, entry, h.d.now()).slots.codex.total).toBe(2); // observe never withdraws
+  setMode("on");
+  expect(recoverProviderConfigFailure(h.db, "team-a", "codex", 1, h.d.now())).toBe(true);
+  expect(helloBody(h.db, entry, h.d.now()).slots.codex.total).toBe(2);
+  creates = 0;
+  h.d.worker.create = async (n, dir) => (creates++, h.registry.set(n, { sessionId: "thr-2", cwd: dir }), { ok: true });
+  h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o9")], pollAfterMs: 30_000 } });
+  h.advanceTime(60_000);
+  for (let i = 0; i < 4; i++) await h.tick();
+  expect(creates).toBe(1);
+  expect(getOrder(h.db, "o9")?.state).toBe("started");
+});
+
+test("observe: a registered fault refuses nothing (create runs) and only logs the would-be refusal; off logs nothing", async () => {
+  setMode("on");
+  const h = setup();
+  await failStart(h, "o1");
+  setMode("observe");
+  creates = 0;
+  await failStart(h, "o2");
+  expect(creates).toBe(1);
+  expect(h.log.lines.some((l) => l.includes("本会因 team-a 的 codex 配置故障（第 1 代）不起 o2"))).toBe(true);
+  setMode("off");
+  const row = getOrder(h.db, "o2")!;
+  const lines: string[] = [];
+  expect(startConfigRefusal({ db: h.db, log: (m) => lines.push(m) }, row)).toBeNull();
+  expect(lines).toEqual([]);
 });
 
 test("on: other family and other peer are independent", async () => {
-  setConfigFailureMode(() => "on");
+  setMode("on");
   const h = setup();
   await failStart(h, "o1");
   expect(providerFamilyUnavailable(h.db, "team-a", "codex")).toBe(true);
@@ -104,7 +170,7 @@ test("on: other family and other peer are independent", async () => {
 });
 
 test("on: concurrent failures send one notice; a failed send is retried by the next failure only", async () => {
-  setConfigFailureMode(() => "on");
+  setMode("on");
   const db = openLendJournal(":memory:");
   const sent: string[] = [];
   let ok = false;
@@ -128,7 +194,7 @@ test("on: concurrent failures send one notice; a failed send is retried by the n
 });
 
 test("on: restart keeps the registration and does not notify again", async () => {
-  setConfigFailureMode(() => "on");
+  setMode("on");
   const dir = mkdtempSync(join(tmpdir(), "lcfg1-"));
   try {
     const path = join(dir, "journal.sqlite");
@@ -147,7 +213,7 @@ test("on: restart keeps the registration and does not notify again", async () =>
 });
 
 test("explicit owner recovery is CAS on the generation; old generation / late notify result never clear a newer fault", async () => {
-  setConfigFailureMode(() => "on");
+  setMode("on");
   const db = openLendJournal(":memory:");
   let release: (() => void) | null = null;
   const sent: string[] = [];
@@ -175,7 +241,7 @@ test("explicit owner recovery is CAS on the generation; old generation / late no
 });
 
 test("on: a started order is not stopped by a later start failure of another order", async () => {
-  setConfigFailureMode(() => "on");
+  setMode("on");
   const h = setup();
   await toStarted(h);
   const live = getOrder(h.db, "o1")!;
@@ -186,7 +252,7 @@ test("on: a started order is not stopped by a later start failure of another ord
 });
 
 test("ordinary start failures stay out of the mechanism under on", async () => {
-  setConfigFailureMode(() => "on");
+  setMode("on");
   const h = setup();
   await failStart(h, "o1", "This content was flagged for possible cybersecurity risk; model_not_enabled");
   await failStart(h, "o2", "fetch failed: ETIMEDOUT");

@@ -15,6 +15,7 @@ import { LEND_ROLES, type LendEntry } from "./lend-config.js";
 import { liveGrant } from "./lend-grant.js";
 import type { LendDeps } from "./lend-drive.js";
 import { pausedUntil } from "./lend-health.js";
+import { configFailureSlots } from "./lend-config-failure.js";
 import { claudeHelloSlots } from "./lend-claude-worker-capacity.js";
 import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
@@ -117,7 +118,7 @@ export function helloBody(db: Database, entry: LendEntry | undefined, now: numbe
   const total = entry ? entry.families[LEND_FAMILY] ?? 0 : 0;
   const busy = entry ? openSlots(db, entry.peer, LEND_FAMILY) : 0;
   const pause = pausedUntil(db, now);
-  return { proto: LEND_PROTO, grant, slots: { codex: { total, busy: Math.min(busy, 100) }, claude: claudeHelloSlots(db, entry) },
+  return { proto: LEND_PROTO, grant, slots: configFailureSlots(db, entry?.peer, { codex: { total, busy: Math.min(busy, 100) }, claude: claudeHelloSlots(db, entry) }),
     paused: pause === null ? null : { reason: "codex_quota", until: pause } };
 }
 

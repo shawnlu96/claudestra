@@ -7,8 +7,10 @@
  *   and peers are untouched, live orders are never touched. observe / off return the facts unchanged (configFailureView
  *   shows the would-be pause). No notice is raised on A.
  * - Recovery only from the lender's own re-declaration, never a restart or elapsed time: after the fault the lender's hello
- *   withdraws the family (total 0 under a live grant), then a later hello (higher seq) offers it again. Under on only,
- *   inside recordHello's transaction; it records `through` = the newest event seq, CAS on its generation; a later failure has a higher seq and needs its own withdrawal, a replayed old hello is not a re-declaration.
+ *   withdraws the family (total 0 under a live grant; B does this itself while its fault stands, lend-hello.ts via
+ *   configFailureSlots), then a later hello (higher seq) offers it again — on B that only follows its owner's explicit
+ *   recovery. Under on only, inside recordHello's transaction; it records `through` = the newest event seq, CAS on its
+ *   generation; a later failure has a higher seq and needs its own withdrawal, a replayed old hello is not a re-declaration.
  * tests/lend-config-failure*.test.ts.
  */
 import type { Database } from "bun:sqlite";

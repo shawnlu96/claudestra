@@ -5,8 +5,9 @@
  * no buttons — whether to change the model is the owner's call). The borrower (A) side lives in lend-config-failure-pool.ts.
  * - Only that one class counts: quota, capacity, rate limit, network, login and safety / cyber refusals are never a
  *   configuration fault, so this path can never route around a safety decision.
- * - One mode for the whole mechanism (on / observe / off), default observe: observe only logs the would-be pause, off does
- *   nothing; neither writes a pause nor notifies. A throwing or illegal mode port answers off.
+ * - One mode for the whole mechanism (on / observe / off) from the one recovery policy (key lendConfigFailure, project lend),
+ *   default observe: observe only logs the would-be pause / refusal, off does nothing; neither writes a pause, refuses a start
+ *   nor notifies. A throwing port or an illegal mode answers off.
  * - Recovery is explicit (recoverProviderConfigFailure, CAS on the record's generation); never by elapsed time. A late
  *   notify result or an old generation can never touch a newer fault. Live orders are never stopped from here.
  * tests/lend-config-failure*.test.ts.
@@ -15,6 +16,7 @@ import type { Database } from "bun:sqlite";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { getMeta, setMeta, type LendRow } from "./lend-journal.js";
 import type { LendNoticeParams } from "./lend-notice.js";
+import { recoveryPolicy, type RecoveryKey, type RecoveryPolicyPort } from "./recovery-policy.js";
 
 export const CONFIG_FAILURE_CATEGORY = "model_not_enabled";
 export type ConfigFailureCategory = typeof CONFIG_FAILURE_CATEGORY;
@@ -35,14 +37,17 @@ export function classifyConfigFailure(error: string): ConfigFailureCategory | nu
   return MODEL_NOT_ENABLED.test(error) ? CONFIG_FAILURE_CATEGORY : null;
 }
 
-let modePort: () => unknown = () => "observe";
-/** Wiring / tests set the mechanism's mode source; null restores the default (observe). Read on every call. */
-export function setConfigFailureMode(port: (() => ConfigFailureMode) | null): void {
-  modePort = port ?? (() => "observe");
+/** The mechanism's key in the one recovery policy (recovery-policy.json), read for the lend project: one mode for B and A. */
+const CONFIG_FAILURE_KEY = "lendConfigFailure" satisfies RecoveryKey;
+const CONFIG_FAILURE_PROJECT = "lend";
+let policyPort: RecoveryPolicyPort = recoveryPolicy;
+/** Tests inject a RecoveryPolicyPort; null restores the file-backed recoveryPolicy. Read afresh on every call. */
+export function setConfigFailurePolicy(port: RecoveryPolicyPort | null): void {
+  policyPort = port ?? recoveryPolicy;
 }
 export function configFailureMode(): ConfigFailureMode {
   try {
-    const m = modePort();
+    const m = policyPort(CONFIG_FAILURE_PROJECT, CONFIG_FAILURE_KEY)?.mode;
     return MODES.includes(m) ? (m as ConfigFailureMode) : "off";
   } catch {
     return "off";
