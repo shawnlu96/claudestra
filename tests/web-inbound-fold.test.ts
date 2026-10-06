@@ -35,6 +35,8 @@ describe("foldsInbound", () => {
     expect(foldsInbound("peer-Shawn", "PR #715 我看了，P1 那条是误报，第二轮你直接合吧，有问题再找我。今晚我都在线，Discord 也能找到我，别等太久哈。")).toBe(false);
     expect(foldsInbound("peer-Shawn", "我转一下调度器刚发的：\n[Claudestra 调度器 · PR #715] 已合并\n第三行")).toBe(false);
     expect(foldsInbound("peer-Shawn", "[Claudestra] 我自己写的方括号\n第二行\n第三行")).toBe(false);
+    expect(foldsInbound("peer-Shawn", "[Claudestra 调度器 今天收到这个通知，我想问一下\n这不是代码生成的抬头\n请看我的问题")).toBe(false);
+    expect(foldsInbound("peer-Shawn", "[Claudestra 调度器· PR #715 我手打的\n第二行\n第三行")).toBe(false);
     expect(foldsInbound("peer-Shawn", renderMergedPush(715, "e".repeat(40), "agent-x"))).toBe(false);
   });
 

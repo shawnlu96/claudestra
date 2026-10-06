@@ -10,7 +10,7 @@ import { parseSource } from "./source-label";
 export const INBOUND_FOLD_MIN_CHARS = 80;
 
 /** 对方 bridge 自动发件的抬头：调度器 PR 推送（src/lib/peer-pr-message.ts）、扩围自动批准（src/lib/order-ask-default.ts tellText） */
-const PEER_MACHINE_HEAD = /^(\[Claudestra 调度器[ ·\]]|【自动定】)/;
+const PEER_MACHINE_HEAD = /^(\[Claudestra 调度器( ·|\])|【自动定】)/;
 
 /** from = 入站气泡的来源标签（本人的没有）；text = 去掉引用条后的正文 */
 export function foldsInbound(from: string | undefined, text: string): boolean {
