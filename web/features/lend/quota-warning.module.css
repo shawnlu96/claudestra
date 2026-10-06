@@ -1,6 +1,6 @@
 /*
  * 额度提醒条：顶栏下方居中、非模态（外层不吃点击，只有卡片本身可点）；两族上下叠放。
- * 层级比额度墙横幅（z 68）低一档：撞墙时墙的横幅在上面。窄屏（390px）左右各留 12px，不伸到输入框那边。
+ * Chat 通过 embedded 文流插槽预留实际空间，避免消息和旧墙被覆盖；独立展示仍使用 body portal。
  */
 .wrap {
   pointer-events: none;
@@ -13,6 +13,10 @@
   align-items: center;
   gap: 6px;
   padding-inline: 12px;
+}
+.embedded {
+  position: static;
+  padding-block: 6px;
 }
 .row {
   pointer-events: auto;

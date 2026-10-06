@@ -65,7 +65,7 @@ function Row({ it, onDismiss }: { it: WarnItem; onDismiss: () => void }) {
   );
 }
 
-export function QuotaWarningBanner() {
+export function QuotaWarningBanner({ embedded = false }: { embedded?: boolean }) {
   const { t } = useWarnT();
   const fp = useMachineFp();
   const [data, setData] = useState<{ fp: string; view: QuotaLinesView | null } | null>(null);
@@ -137,10 +137,10 @@ export function QuotaWarningBanner() {
 
   const items = warningItems(data?.fp === fp ? data.view : null, now).filter((it) => !isDismissed(dismissed, fp, it));
   if (items.length === 0 || typeof document === "undefined") return null;
-  return createPortal(
-    <div className={css.wrap} aria-label={t("出借额度提醒")} data-testid="quota-warning">
+  const banner = (
+    <div className={`${css.wrap} ${embedded ? css.embedded : ""}`} aria-label={t("出借额度提醒")} data-testid="quota-warning">
       {items.map((it) => <Row key={it.family} it={it} onDismiss={() => dismiss(it)} />)}
-    </div>,
-    document.body,
+    </div>
   );
+  return embedded ? banner : createPortal(banner, document.body);
 }

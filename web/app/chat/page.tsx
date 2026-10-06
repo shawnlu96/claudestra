@@ -6,9 +6,7 @@ import { QuotaWallBanner } from "@/features/quota-wall/quota-wall-banner";
 export default function ChatPage() {
   return (
     <MachineGate>
-      <Chat />
-      <QuotaWallBanner />
-      <QuotaWarningBanner />
+      <Chat notices={<><QuotaWallBanner embedded /><QuotaWarningBanner embedded /></>} />
     </MachineGate>
   );
 }
