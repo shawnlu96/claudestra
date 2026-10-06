@@ -4,11 +4,14 @@
  * 触发事件 T = 本卡最近一条「切 manual / 回 auto」的事件，只认「合并结清为 cancelled / failed」与「planner 因合并意图被取消退回人工」；
  * PM 接管、PM hold（带 hold 的 workflow 事件）、别的退回人工、已交回、开 auto 都排在后面就不交回。T 之后只改模板 / 退路的 manual→manual 不算拦。
  * 放在 auto tick 之前，交回的卡同一轮就能派审。V1 10-01 的事件序列是金样本：tests/scheduler-autostart-resume.test.ts。
+ * 第二个触发：真 PM 的一次性 resume_grant（order-local-deliver.ts grantVerdict）。它受恢复策略 port 管：off 不判、observe 只记日志、
+ * on 先自己 ls-remote 核 origin head，再交给注入的 resumeGrant 执行端（缺执行端 = 不动台账）；tests/order-local-deliver*.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
+import { grantVerdict, localDeliveryPolicy, RESUME_GRANT_OP, type LocalDeliveryPolicyPort } from "./order-local-deliver.js";
 import { readSwitch, switchOff, type ServiceFacts } from "./scheduler-autostart.js";
 import type { TickPace } from "./scheduler-yield.js";
 
@@ -19,7 +22,7 @@ const MODE_OPS = new Set(["merge_resolve", "deploy_resolve", "fallback_manual", 
 function modeEvent(e: LedgerEvent): boolean {
   if (e.kind !== "scheduler") return false;
   const op = String(e.data.op);
-  if (MODE_OPS.has(op)) return true;
+  if (MODE_OPS.has(op) || op === RESUME_GRANT_OP) return true;
   return op === "workflow" && (e.data.mode !== "manual" || !!e.data.takeover || !!e.data.hold);
 }
 
@@ -39,17 +42,22 @@ function revokedHead(db: Database, task: LedgerTask, t: LedgerEvent): string | n
   return row?.head ?? null;
 }
 
-interface ResumeFacts { trigger: number; deliver: number; head: string; revoked: string }
+/** grant 有值 = 授予分支（revoked 是授予时的 head，可能为空串） */
+interface ResumeFacts { trigger: number; deliver: number; head: string; revoked: string; grant?: string }
 export type ResumeVerdict = { ok: true; facts: ResumeFacts } | { ok: false; why: string };
 
 const no = (why: string): ResumeVerdict => ({ ok: false, why });
 
 /** 只看卡本身（开关、调度服务另判）：workflow manual、卡在 review、T 是合并撤销、之后执行者交付了不同的 head 且阶段停在那次交付 */
-export function resumeVerdict(db: Database, task: LedgerTask, workflow: TaskWorkflow | null): ResumeVerdict {
+export function resumeVerdict(db: Database, task: LedgerTask, workflow: TaskWorkflow | null, now = Date.now()): ResumeVerdict {
   if (workflow?.mode !== "manual") return no("workflow 不是 manual");
   if (task.stage !== "review") return no(`卡在 ${task.stage}，不在 review`);
   const events = listEvents(db, { project: task.project, target: task.id });
   const t = events.filter(modeEvent).at(-1);
+  if (t?.data.op === RESUME_GRANT_OP) {
+    const g = grantVerdict(db, task, workflow, events, t, now);
+    return g.ok ? { ok: true, facts: { trigger: g.facts.trigger, deliver: g.facts.deliver, head: g.facts.head, revoked: g.facts.prior ?? "", grant: g.facts.grant } } : g;
+  }
   if (!t || !isTrigger(t)) return no(t ? `最近一次切换是 ${String(t.data.op)}，不是合并撤销` : "没有切 manual 的事件");
   const revoked = revokedHead(db, task, t);
   if (!revoked) return no("找不到被撤销合并的 head");
@@ -78,6 +86,15 @@ export interface ResumeTickEnv {
   notifyPm(project: string, text: string): Promise<void>;
   /** 进程内去重：同一次交付被核心拒绝只通知一次 */
   memo: Set<string>;
+  /** CFG 的 recoveryPolicy（mechanism=localDelivery）；缺 = observe */
+  policy?: LocalDeliveryPolicyPort;
+  /** origin 上分支此刻的 head（授予分支 on 时才查） */
+  remoteHead?(project: string, branch: string): Promise<{ ok: true; head: string } | { ok: false; error: string }>;
+  /** 授予分支的执行端：事务里带同一 policy 与核过的 head 重判再交回（ledger-autostart-resume.ts autoResume 的 grant 入参）；缺 = 不写台账 */
+  resumeGrant?(taskId: string, a: { taskRev: number; workflowRev: number; maxWorkers: number; checkedHead: string }): Promise<Record<string, unknown>>;
+  log?(line: string): void;
+  /** 资格有效期按它判；缺 = Date.now */
+  now?(): number;
 }
 
 const QUIET = new Set(["raced", "not_eligible", "busy"]);
@@ -92,21 +109,45 @@ export async function autoResumeTick(env: ResumeTickEnv, pace?: TickPace): Promi
       const task = getTask(env.db, taskId);
       if (!task || serviceBlock(env.db, task, env.svc)) continue;
       const wf = getWorkflow(env.db, taskId);
-      const v = resumeVerdict(env.db, task, wf);
+      const v = resumeVerdict(env.db, task, wf, env.now?.() ?? Date.now());
       // 被核心拒过的这次交付不再重试（进程内记着；重启后最多再试、再通知一次）
       const key = `resume:${taskId}:${v.ok ? v.facts.deliver : 0}`;
       if (!v.ok || !wf || env.memo.has(key)) continue;
-      const r = await env.ledger("ledger", "scheduler-auto-resume", taskId, "--rev", String(task.rev), "--workflow-rev", String(wf.rev),
-        "--max-workers", String(env.svc.maxWorkers(project)));
-      if (r.ok === true || QUIET.has(String(r.code))) continue;
+      const args = { taskRev: task.rev, workflowRev: wf.rev, maxWorkers: env.svc.maxWorkers(project) };
+      const r = v.facts.grant ? await grantStep(env, task, v.facts.head, args)
+        : await env.ledger("ledger", "scheduler-auto-resume", taskId, "--rev", String(task.rev), "--workflow-rev", String(wf.rev), "--max-workers", String(args.maxWorkers));
+      if (!r || r.ok === true || QUIET.has(String(r.code))) continue;
       if (r.code !== "rejected") {
         failed.push({ taskId, error: `自动交回：${String(r.error ?? r.code)}` });
         continue;
       }
       env.memo.add(key);
-      await env.notifyPm(project, `[自动交回 ${taskId}] 合并撤销后执行者交付了新 head ${v.facts.head.slice(0, 12)}，交回调度被拒：${String(r.error)}。` +
+      const why = v.facts.grant ? `授予 ${v.facts.grant} 后执行者本人交付了新 head` : "合并撤销后执行者交付了新 head";
+      await env.notifyPm(project, `[自动交回 ${taskId}] ${why} ${v.facts.head.slice(0, 12)}，交回调度被拒：${String(r.error)}。` +
         "对完账后用 workflow-resume 手动交回。").catch((e) => failed.push({ taskId, error: `通知 PM 失败：${(e as Error).message}` }));
     }
   }
   return failed;
+}
+
+type StepArgs = { taskRev: number; workflowRev: number; maxWorkers: number };
+
+/**
+ * 授予分支一张卡：off 不动；observe 只记一次日志（不查远端、不写、不通知）；on 先核 origin head，不符按 rejected 通知 PM 一次，
+ * 符合才交执行端。返回 null = 这轮不处理。
+ */
+async function grantStep(env: ResumeTickEnv, task: LedgerTask, head: string, a: StepArgs): Promise<Record<string, unknown> | null> {
+  const pol = localDeliveryPolicy(env.policy, task.project);
+  const log = env.log ?? ((l: string) => console.log(l));
+  const once = (tag: string, line: string) => {
+    const k = `grant-${tag}:${task.id}:${task.rev}`;
+    if (!env.memo.has(k)) (env.memo.add(k), log(line));
+  };
+  if (pol.mode === "off") return null;
+  if (pol.mode === "observe") return (once("observe", `[localDelivery observe] ${task.id} would_resume head=${head.slice(0, 12)} remote: unchecked${pol.diag ? `（${pol.diag}）` : ""}`), null);
+  if (!env.remoteHead || !env.resumeGrant) return (once("unwired", `[localDelivery on] ${task.id} 授予分支执行端未接线，不交回`), null);
+  const remote = await env.remoteHead(task.project, task.branch as string);
+  if (!remote.ok) return { ok: false, code: "rejected", error: `查不到 origin 上 ${task.branch} 的 head：${remote.error}` };
+  if (remote.head !== head) return { ok: false, code: "rejected", error: `origin 上 ${task.branch} 是 ${remote.head.slice(0, 12)}，不是交付的 ${head.slice(0, 12)}` };
+  return env.resumeGrant(task.id, { ...a, checkedHead: head });
 }
