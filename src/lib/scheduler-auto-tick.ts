@@ -316,16 +316,18 @@ class Card {
     if (seen.state === "unknown" && seen.failure) {
       return this.escalate(`${ref.agent} 报了归不到派单上的失败（${seen.failure.kind}），本单可能也没跑：${seen.failure.message}`, sent.id);
     }
-    if (seen.state === "result" && seen.outcome === "failed") {
-      const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
+    const pre = await (await import("./scheduler-refusal-unclaimed.js")).unclaimedRefusal(this.db, this.task, sent, ref, seen); // MODELXW2：领单前的策略拒审
+    const failure = seen.state === "result" && seen.outcome === "failed" ? seen.failure : pre?.kind === "confirmed" ? pre.failure : null;
+    if (failure) {
+      const what = failure.kind === "quota" ? "撞额度" : failure.kind === "auth" ? "登录失效" : "回合失败";
       const m = await import("./scheduler-model-wiring.js"); // MODELW：只多记一条，on 的计划附在原因后（长错误先截，计划不被截掉）
-      const legacy = await m.legacyReviewStep(this, sent, ref, seen.failure); // MODELXW：无快照旧拒审单——退休旧绑定，重派带快照的新单
+      const legacy = await m.legacyReviewStep(this, sent, ref, failure); // MODELXW：无快照旧拒审单——退休旧绑定，重派带快照的新单
       if (legacy) return this.out("legacy_review", legacy);
-      const plan = await m.modelOutcomeStep(this, sent, ref, seen.failure);
+      const plan = await m.modelOutcomeStep(this, sent, ref, failure);
       if (typeof plan !== "string") return this.out("refusal_epoch", plan.epoch); // MODELX：拒审已按豁免开新审查 epoch，不退人工
-      return this.escalate(m.failedReason(`${ref.agent} ${what}`, seen.failure.message, plan), sent.id);
+      return this.escalate(m.failedReason(`${ref.agent} ${what}`, failure.message, plan), sent.id);
     }
-    const alarm = await this.unclaimed(sent, ref);
+    const alarm = await this.unclaimed(sent, ref, pre?.kind === "suspected" ? pre.note : "");
     if (alarm) return alarm;
     if (seen.state === "unknown") return this.out("held", `${wait.reason}；${seen.reason}`);
     return this.out("waiting", wait.reason);
@@ -337,7 +339,7 @@ class Card {
    * unclaimed_sent. Without that row a later tick resends the same text (every UNCLAIMED_RETRY_MS), so a bridge outage or a
    * crash between the two writes delays the warning instead of swallowing it. tests/scheduler-dispatch-wake.test.ts.
    */
-  async unclaimed(sent: SchedulerIntent, ref: SessionRef): Promise<CardOutcome | null> {
+  async unclaimed(sent: SchedulerIntent, ref: SessionRef, note = ""): Promise<CardOutcome | null> {
     if (!sentAsWake(sent.receipt) || orderTakenSeq(this.db, sent.id) !== null) return null;
     const waited = this.deps.now() - sent.updatedAt;
     if (waited < UNCLAIMED_ALARM_MS) return null;
@@ -349,7 +351,7 @@ class Card {
     let text = getEventByDedup(this.db, unclaimedKey(sent.id))?.text;
     if (!text) {
       const draft = `[调度引擎] ${this.task.id} 的单 ${sent.id} 唤醒已发给 ${ref.agent} ${Math.floor(waited / 60_000)} 分钟，还没人领` +
-        `（${sent.action === "review" ? "take_review" : "take_order"}）：看看会话在不在、有没有派单工具`;
+        `（${sent.action === "review" ? "take_review" : "take_order"}）：看看会话在不在、有没有派单工具${note}`;
       const r = await this.deps.manager("ledger", "scheduler-unclaimed", sent.id, "--text", draft);
       if (r.ok !== true) return this.out("held", `未领单报警没记上：${String(r.error)}`);
       text = typeof (r.event as { text?: unknown } | undefined)?.text === "string" ? (r.event as { text: string }).text : draft;
