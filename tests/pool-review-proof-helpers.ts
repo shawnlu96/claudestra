@@ -32,12 +32,13 @@ export function aResultDeps(dir: string, pinned: { publicKey: string; pinnedAt: 
 type Claimed = { order: Record<string, unknown>; text: string; lease: { gen: number } };
 type Send = (body: Record<string, unknown>) => Promise<Record<string, any>>;
 
-/** B: one journal and key; answer() runs an A claim response through take_review (unless skipped) and submit_verdict, sending to A via `send`. */
+/** B: one journal and key; answer() runs an A claim response through take_review (unless skipped) and submit_verdict (caller family codex unless overridden), sending to A via `send`. */
 export function lendSide(dir: string, aName = "home") {
   const key = instanceKeySync(mkdtempSync(join(dir, "b-key-")))!;
   const db = openLendJournal(":memory:");
   const pinned = { publicKey: key.publicKey, pinnedAt: new Date(0).toISOString() };
-  async function answer(claim: Claimed, verdict: { verdict: string; findings?: object[]; report?: string }, send: Send, o: { take?: boolean } = {}) {
+  type AnswerOpts = { take?: boolean; takeFamily?: string | null; submitFamily?: string | null };
+  async function answer(claim: Claimed, verdict: { verdict: string; findings?: object[]; report?: string }, send: Send, o: AnswerOpts = {}) {
     const orderId = String(claim.order.orderId);
     const work = mkdtempSync(join(dir, "b-work-"));
     writeFileSync(join(work, "report.md"), verdict.report ?? "## 结论");
@@ -45,7 +46,8 @@ export function lendSide(dir: string, aName = "home") {
     advance(db, orderId, "asked", "claimed", { wire: { order: claim.order, text: claim.text }, leaseGen: claim.lease.gen }, 1);
     advance(db, orderId, "claimed", "cloned", { dir: work }, 1);
     advance(db, orderId, "cloned", "started", { agent: B_WORKER, sessionId: "b-sess-1" }, 1);
-    const who = { agent: B_WORKER, sessionId: "b-sess-1", family: "codex", verified: true };
+    const who = (family: string | null | undefined) =>
+      ({ agent: B_WORKER, sessionId: "b-sess-1", family: family === undefined ? "codex" : family, verified: true });
     const sent: Record<string, unknown>[] = [];
     const deps = {
       db, log: () => {}, now: () => 2, signTicket: (f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f, key),
@@ -55,10 +57,10 @@ export function lendSide(dir: string, aName = "home") {
         return { status: r.ok ? 200 : 400, body: r };
       },
     };
-    if (o.take !== false) await routeLendTool("take_review", who, {}, deps as never);
+    if (o.take !== false) await routeLendTool("take_review", who(o.takeFamily), {}, deps as never);
     const findings = verdict.findings ?? [];
     const count = (s: string) => findings.filter((f) => (f as { severity: string }).severity === s).length;
-    const r = await routeLendTool("submit_verdict", who, { v: 1, orderId, head: claim.order.head, verdict: verdict.verdict, p0: count("P0"), p1: count("P1"),
+    const r = await routeLendTool("submit_verdict", who(o.submitFamily), { v: 1, orderId, head: claim.order.head, verdict: verdict.verdict, p0: count("P0"), p1: count("P1"),
       p2: count("P2"), findings, reportPath: "report.md" }, deps as never);
     return { r, sent };
   }

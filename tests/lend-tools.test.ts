@@ -278,6 +278,21 @@ describe("POOLRV1 take_review / submit_verdict tickets", () => {
     expect(getOrder(cli, other)!.payload).not.toHaveProperty("ticket");
   });
 
+  test("the verified caller must actually run the journal family: a mismatch at take records nothing; drift by submit commits and sends nothing", async () => {
+    const db = openLendJournal(":memory:");
+    const id = addStarted(db);
+    const { deps, sent } = fake(db);
+    for (const family of ["claude-code", "pi", null]) {
+      expect(await routeLendTool("take_review", who({ family }), {}, deps)).toMatchObject({ ok: false, code: "family_mismatch" });
+    }
+    expect(getOrder(db, id)!.take).toBeNull();
+    await take(deps);
+    expect(await routeLendTool("submit_verdict", who({ family: "claude-code" }), verdict(id), deps)).toMatchObject({ ok: false, code: "family_mismatch" });
+    expect(getOrder(db, id)!).toMatchObject({ state: "started", payload: null });
+    expect(sent).toHaveLength(0);
+    expect(await routeLendTool("ask", who({ family: "claude-code" }), { question: "q?" }, deps)).not.toMatchObject({ code: "family_mismatch" });
+  });
+
   test("no instance key → no ticket, never an unsigned one", async () => {
     const db = openLendJournal(":memory:");
     const id = addStarted(db);

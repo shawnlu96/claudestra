@@ -26,7 +26,7 @@ const REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutM
 const FINDING = { findingId: "note-1", family: "storage", severity: "P2", probe: "raw probe", description: "machine description" };
 const REPORT = "〔原始报告〕\r\nsecond line【通过】\n";
 
-type Opts = { pinned?: "b" | "other" | "late" | "none"; take?: boolean; legacy?: boolean; tamper?: boolean };
+type Opts = { pinned?: "b" | "other" | "late" | "none"; take?: boolean; legacy?: boolean; tamper?: boolean; takeFamily?: string | null; submitFamily?: string | null };
 
 /** An auto card whose round-1 review was pooled to mate and answered by B's real worker tools; the card sits in merge. */
 async function pooledReview(o: Opts = {}) {
@@ -62,7 +62,7 @@ async function pooledReview(o: Opts = {}) {
     if (o.tamper) out = { ...out, report: "## 改过的报告" };
     return peer("write", out);
   };
-  const answer = await b.answer(claim as never, { verdict: "changes", findings: [FINDING], report: REPORT }, send, { take: o.take });
+  const answer = await b.answer(claim as never, { verdict: "changes", findings: [FINDING], report: REPORT }, send, { take: o.take, takeFamily: o.takeFamily, submitFamily: o.submitFamily });
   const merges = () => (f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE action = 'merge'").get() as { n: number }).n;
   const facts = () => {
     const r = currentReviewFacts(f.task(), listEvents(f.db, { project: "p", target: "T1" }));
@@ -149,6 +149,25 @@ describe("POOLRV1 pool review proof on a real ledger and the production planner"
       expect(p.proof).toThrow();
     } finally { p.f.close(); }
   });
+
+  const callerFamily: [string, Opts][] = [
+    ["verified caller family claude-code at take and submit (journal still codex)", { takeFamily: "claude-code", submitFamily: "claude-code" }],
+    ["caller family drifts to claude-code between take and submit", { submitFamily: "claude-code" }],
+    ["caller family unknown (pi)", { takeFamily: "pi", submitFamily: "pi" }],
+    ["caller family missing", { takeFamily: null, submitFamily: null }],
+  ];
+  for (const [why, o] of callerFamily) {
+    test(`${why} → B refuses, no ticket sent, zero merge intents`, async () => {
+      const p = await pooledReview(o);
+      try {
+        expect(p.answer.r).toMatchObject({ ok: false, code: "family_mismatch" });
+        expect(p.answer.sent).toHaveLength(0);
+        for (let i = 0; i < 4; i++) await p.tick();
+        expect(p.merges()).toBe(0);
+        expect(p.proof).toThrow();
+      } finally { p.f.close(); }
+    });
+  }
 
   const archive: [string, (path: string) => void, RegExp][] = [
     ["archive deleted", (path) => unlinkSync(path), /原件缺失/],

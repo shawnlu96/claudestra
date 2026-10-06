@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite";
 import { readJsonCapped } from "./body-reader.js";
 import { IDENTITY_UNVERIFIED, requireVerified, type CallerIdentity } from "./caller-identity.js";
 import { roleOfStep } from "./lend-git.js";
+import { runtimeFamily } from "./scheduler-auto-review.js";
 import { notV2, peerProto } from "./lend-hello.js";
 import { getOrder, liveOrders, orderOf, recordTake, WORKER_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_ORDER_TOOLS } from "./lend-mcp-profile.js";
@@ -112,6 +113,10 @@ function boundOrder(db: Database | null, identity: CallerIdentity, tool: string,
   const write = role === "write";
   if (!(write ? WRITE_TOOLS : REVIEW_TOOLS).includes(tool)) return no("wrong_step", `${row.orderId} 是${write ? "开工 / 修复单" : "审查单"}，不能用 ${tool}`);
   if (write && tool !== "ask") return no("write_closed", WRITE_CLOSED);
+  // 票据署的是 journal 的家族：已验证调用方实际跑的 runtime 必须正是它（没有 / 认不出的 runtime 一律不算）
+  if (tool !== "ask" && (!identity.family || runtimeFamily(identity.family) !== row.family)) {
+    return no("family_mismatch", `${identity.agent} 实际运行的模型家族（${String(identity.family).slice(0, 40)}）不是这张单的 ${row.family}，不收`);
+  }
   return { ok: true, row, write };
 }
 
