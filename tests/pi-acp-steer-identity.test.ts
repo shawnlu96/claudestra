@@ -176,6 +176,7 @@ describe("Pi 叫停回执：voided 对上 pi 实际入队的那条", () => {
     const stuck = gate<string>();
     const h = await rig((text, n) => (n === 1 ? stuck.promise : Promise.resolve(text)), 50);
     expect(await h.submit("卡住的", "m-stuck")).toBe("unknown"); // 写出后超时 → 投递不明：宿主不重发、出卡（tests/pi-acp-steer-failure.test.ts）
+    expect(h.logs.some((l) => l.includes("steering 出错"))).toBe(false); // 没走改排队
     expect(h.failures.some((f) => f.kind === "error" && f.deliveryUnknown === true && f.message.includes("超时"))).toBe(true); // 超时文字进了投递不明卡
     expect(await h.submit("下一条", "m-next")).toBe("steer");
     expect(h.pi.queued()).toEqual([2]);
