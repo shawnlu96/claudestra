@@ -17,6 +17,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
 import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
+import { poolReviewRefusal } from "./pool-review-proof.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -89,6 +90,8 @@ export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskW
     review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) {
     throw new LedgerError("conflict", "当前 head 缺同卡跨模型审查通过结论或仍有 P0/P1");
   }
+  const pool = poolReviewRefusal(db, task, workflow, review.facts);
+  if (pool) throw new LedgerError("conflict", pool);
   return review.facts;
 }
 
