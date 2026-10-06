@@ -46,6 +46,11 @@ export interface HostDeps {
   log(msg: string): void;
   /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
   show?(item: string): void;
+  /**
+   * 本机正在主动收掉这个 agent（manager kill / 出借收 worker 关窗口前先把 registry 置 stopped）：关窗口的 SIGHUP 让适配器先退，
+   * 在途回合按失败收尾——这不是故障，不出卡、不写错误条目（否则 bridge 报「回合失败」、60s 续跑或问要不要重发）。不给 = 从不跳过
+   */
+  stopIntended?(): boolean;
 }
 
 const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
@@ -338,6 +343,7 @@ export class AcpHost {
 
   private fail(f: AcpFailure): void {
     this.show(() => transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
+    if (this.deps.stopIntended?.()) return void this.deps.log(`本机在收这个 agent：回合中断不报失败（${f.message.split("\n")[0]}）`);
     if (!this.dedup.admit(f)) return;
     const entry = failureEntry(f, new Date().toISOString());
     if (entry) this.pushEntries([entry]);
