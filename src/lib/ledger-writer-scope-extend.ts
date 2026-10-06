@@ -34,7 +34,7 @@ export interface LiveExtendInput {
   registryPath?: string;
 }
 
-interface Binding { intent: SchedulerIntent; orderId: string; peer: string; worker: string; gen: number; leaseUntil: number; step: string;
+interface Binding { intent: SchedulerIntent; orderId: string; peer: string; family: string; worker: string; gen: number; leaseUntil: number; step: string;
   fp: string; branch: string; intentEventSeq: number; poolLinkSeq: number; claimSeq: number }
 interface LivePlan {
   old: string[]; target: string[]; added: string[]; retained: string[];
@@ -77,8 +77,26 @@ function liveWriter(db: Database, task: LedgerTask, input: LiveExtendInput, even
   const known = getLendPeer(db, input.peer)?.fp;
   if (typeof known !== "string" || !known) return fail("peer 当前指纹缺失，无法核实写租约身份");
   if (known.toLowerCase() !== lease.fp.toLowerCase()) return fail("peer 当前指纹与写租约不符");
-  return { intent, orderId: order.orderId, peer: order.peer, worker: order.worker, gen: order.leaseGen, leaseUntil: order.leaseUntil as number,
+  return { intent, orderId: order.orderId, peer: order.peer, family: order.family, worker: order.worker, gen: order.leaseGen, leaseUntil: order.leaseUntil as number,
     step: order.step, fp: lease.fp.toLowerCase(), branch: lease.branch, intentEventSeq: plan.seq, poolLinkSeq: link.seq, claimSeq: claim.seq };
+}
+
+/**
+ * A surviving author session may only be the claimed worker itself: active, peer transport, agent = `<worker>@<peer>`, the order's
+ * family, created by a done ensure_session intent of this card whose one production session_bind event names exactly it and
+ * came after this claim. A peer name alone, a retiring row or a binding older than the claim is not proof.
+ */
+function peerAuthorGap(db: Database, task: LedgerTask, s: SchedulerSession, b: Binding, events: LedgerEvent[]): string | null {
+  if (s.state !== "active" || s.transport !== "peer" || s.agent !== `${b.worker}@${b.peer}` || s.family !== b.family) return "不是当前领单的 peer worker";
+  const intent = getIntent(db, s.createIntentId);
+  if (!intent || intent.taskId !== task.id || intent.project !== task.project || intent.action !== "ensure_session" ||
+    intent.node === "adversarial_review" || intent.status !== "done") return "缺本卡已完成的建 session 意图";
+  const binds = events.filter(e => e.kind === "scheduler" && e.data.op === "session_bind" && e.data.intentId === intent.id);
+  const bind = binds.length === 1 ? binds[0]! : null;
+  if (!bind || bind.dedupKey !== `scheduler:${intent.id}:bind` || bind.seq <= b.claimSeq || bind.data.role !== "author" ||
+    bind.data.agent !== s.agent || bind.data.sessionId !== s.sessionId || bind.data.transport !== "peer" || bind.data.family !== s.family ||
+    bind.data.source !== "peer_claim") return "缺本次领单之后的真实绑定记录";
+  return null;
 }
 
 /**
@@ -86,14 +104,15 @@ function liveWriter(db: Database, task: LedgerTask, input: LiveExtendInput, even
  * registry.task is a display title, so a registry agent also counts when the card names it (task.agent / assignee / author step),
  * as in the paused reconciliation; stopped / dead / retired only clears it without a pending restart.
  */
-function otherWriters(db: Database, task: LedgerTask, b: Binding, input: LiveExtendInput, reasons: string[]): void {
+function otherWriters(db: Database, task: LedgerTask, b: Binding, input: LiveExtendInput, events: LedgerEvent[], reasons: string[]): void {
   const executor = `${b.worker}@${b.peer}`;
   const writing = stepsOf(db, task).filter(s => !s.derived && ["restate", "write", "fix"].includes(s.step) && s.state === "assigned");
   if (writing.length !== 1 || writing[0]!.step !== b.step || writing[0]!.executor !== executor || writing[0]!.executorKind !== "peer" ||
     writing[0]!.round !== task.round) reasons.push("作者步骤绑定不是唯一的这个 peer worker");
   const sessions = db.query("SELECT * FROM scheduler_sessions WHERE taskId = ? AND state <> 'retired'").all(task.id) as SchedulerSession[];
-  for (const s of sessions) if (s.role === "author" && (s.transport !== "peer" || s.agent !== `peer:${b.peer}`)) {
-    reasons.push(`作者 session ${s.sessionId} 不是这个 peer`);
+  for (const s of sessions) if (s.role === "author") {
+    const gap = peerAuthorGap(db, task, s, b, events);
+    if (gap) reasons.push(`作者 session ${s.sessionId} ${gap}`);
   } else if (!["author", "reviewer"].includes(s.role)) reasons.push(`session ${s.sessionId} 角色不明`);
   const state = readJsonStateSync(input.registryPath ?? REGISTRY_PATH, v => object(v) && object(v.agents) && Object.values(v.agents).every(object));
   if (state.status !== "ok") { reasons.push(`registry 无法核实：${state.status}`); return; }
@@ -127,7 +146,7 @@ function inspect(db: Database, task: LedgerTask, input: LiveExtendInput, reason:
   if (!["build", "fix"].includes(task.stage)) p.reasons.push("只接 build / fix 阶段的卡");
   const events = listEvents(db, { project: task.project, target: task.id });
   p.binding = liveWriter(db, task, input, events, now, p.reasons);
-  if (p.binding) otherWriters(db, task, p.binding, input, p.reasons);
+  if (p.binding) otherWriters(db, task, p.binding, input, events, p.reasons);
   const rows = db.query("SELECT * FROM scheduler_resources WHERE project = ? OR taskId = ?").all(task.project, task.id) as Claim[];
   const own = rows.filter(r => r.taskId === task.id && r.scope === "card" && file(r.resource));
   p.old = own.map(r => r.resource).sort();

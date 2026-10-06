@@ -341,3 +341,73 @@ test("a foreign glob over a kept (old) claim refuses, on a first append and on a
   refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "冲突");
   expect(extendLiveWriterScope(f.db, pm, f.input())).toMatchObject({ executable: false, duplicate: false });
 });
+
+test("an altered historical workflow CAS is replayed against the card's workflow history and refused", () => {
+  const f = fixture();
+  expect(f.input().workflowRev).toBe(2); // setWorkflow = 1, claimAuthorFamily (claude → codex) = 2
+  extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true });
+  tamper(f, `UPDATE events SET data = json_set(data, '$.workflowRev', 1) WHERE ${extendAudit}`);
+  widen(f);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "workflow rev");
+});
+
+test("an author session is the claimed worker only with a done ensure_session and its real peer bind after the claim", () => {
+  const f = fixture();
+  f.db.run(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+    VALUES ('WX', 'author', 'peer:mate', 'obsolete-worker-session', 'codex', 'peer', 'retiring', ?, 1, 1)`, [f.card.intentId]);
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "作者 session");
+  f.db.run("DELETE FROM scheduler_sessions");
+  // The real peer bind: an ensure_session intent of this card, bound by the production writer after the claim, then settled done.
+  f.db.run("UPDATE scheduler_intents SET status = 'done' WHERE id = ?", [f.card.intentId]);
+  const causalSeq = (f.db.query("SELECT MAX(seq) AS n FROM events WHERE project = 'p'").get() as { n: number }).n;
+  planIntent(f.db, pm, { id: "ens", taskId: "WX", taskRev: getTask(f.db, "WX")!.rev, workflowRev: getWorkflow(f.db, "WX")!.rev, causalSeq,
+    node: "write", action: "ensure_session", reason: "peer session" });
+  settleIntent(f.db, pm, { id: "ens", from: "pending", to: "submitted" });
+  bindSchedulerSession(f.db, pm, { taskId: "WX", role: "author", intentId: "ens", agent: `w1@${peer}`, sessionId: "peer-w1", family: "codex",
+    transport: "peer", registryPath: f.registryPath });
+  settleIntent(f.db, pm, { id: "ens", from: "submitted", to: "done" });
+  f.db.run("UPDATE scheduler_intents SET status = 'submitted' WHERE id = ?", [f.card.intentId]);
+  expect(extendLiveWriterScope(f.db, pm, f.input())).toMatchObject({ executable: true, reasons: [] });
+  for (const sql of ["UPDATE scheduler_sessions SET state = 'retiring'", "UPDATE scheduler_sessions SET agent = 'w2@mate'",
+    "UPDATE scheduler_sessions SET sessionId = 'other'", "UPDATE scheduler_intents SET status = 'cancelled' WHERE id = 'ens'"]) {
+    f.db.run("SAVEPOINT probe");
+    f.db.run(sql);
+    refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "作者 session");
+    f.db.run("ROLLBACK TO probe");
+    f.db.run("RELEASE probe");
+  }
+  tamper(f, "DELETE FROM events WHERE json_extract(data, '$.op') = 'session_bind'");
+  refuses(f, () => extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true }), "绑定记录");
+});
+
+test("a legitimate reclaim + re-lend keeps past extension provenance for the new author and the paused narrowing", () => {
+  const f = fixture();
+  extendLiveWriterScope(f.db, pm, { ...f.input(), apply: true });
+  reclaimLend(f.db, pm, { taskId: "WX", reason: "PM ends former author" });
+  settleIntent(f.db, pm, { id: f.card.intentId, from: "submitted", to: "cancelled" });
+  const peer2 = "next", fp2 = "dcba-4321-5678-9000", borrow2 = { ...borrow, peer: peer2 };
+  recordHello(f.db, peer2, fp2, { v: 1, proto: 3, boot: "b", seq: 1, grant: { until: NOW * 10, repos: [repo], roles: ["write"], ordersPerDay: 9, ordersLeftToday: 9 },
+    slots: { codex: { total: 4, busy: 0 }, claude: { total: 4, busy: 0 } }, paused: null }, NOW);
+  const causalSeq = (f.db.query("SELECT MAX(seq) AS n FROM events WHERE project = 'p'").get() as { n: number }).n;
+  planIntent(f.db, pm, { id: "replacement", taskId: "WX", taskRev: getTask(f.db, "WX")!.rev, workflowRev: getWorkflow(f.db, "WX")!.rev, causalSeq,
+    node: "write", action: "dispatch", recipient: `peer:${peer2}`, reason: "new author after reclaim", resources: f.files().map(r => r.resource) });
+  const order = offerLendCore(f.db, sched, { taskId: "WX", peer: peer2, family: "codex", repo, pr: null, spec: "spec text", borrow: borrow2,
+    write: { fp: fp2, base: "main", baseSha: "b".repeat(40), report: null } });
+  insertEvent(f.db, { ...sched, dedupKey: poolLinkKey("replacement") }, { project: "p", target: "WX", kind: "scheduler", text: "pool",
+    data: { op: "pool_offer", id: "replacement", orderId: order.orderId, peer: peer2, family: "codex", round: order.round, head: null, step: order.step } }, true);
+  claimLend(f.db, owner, peer2, { v: 1, orderId: order.orderId, worker: "w2" }, () => borrow2);
+  settleIntent(f.db, sched, { id: "replacement", from: "pending", to: "submitted", receipt: "claimed" });
+  widen(f);
+  const next = extendLiveWriterScope(f.db, pm, { ...f.input({ orderId: order.orderId, peer: peer2 }), apply: true });
+  expect(next).toMatchObject({ duplicate: false, added: ["docs/x.md"], held: ["docs/x.md", "src/a.ts", "src/b/*", "tests/b.test.ts"],
+    lease: { peer: peer2, fp: fp2, branch: "lend/WX-dcba" } });
+  reclaimLend(f.db, pm, { taskId: "WX", reason: "PM ends replacement" });
+  settleIntent(f.db, pm, { id: "replacement", from: "submitted", to: "cancelled" });
+  setWorkflow(f.db, pm, { taskId: "WX", taskRev: getTask(f.db, "WX")!.rev, workflowRev: getWorkflow(f.db, "WX")!.rev,
+    template: "code", templateVersion: 2, mode: "manual", authorFamily: "codex", fallback: "manual", reason: "pause for reconciliation" });
+  setTask(f.db, owner, { id: "WX", rev: getTask(f.db, "WX")!.rev, patch: { extra: { fileGlobs: ["src/a.ts"] } } });
+  const paused = reconcileFileScope(f.db, pm, { taskId: "WX", project: "p", taskRev: getTask(f.db, "WX")!.rev,
+    workflowRev: getWorkflow(f.db, "WX")!.rev, reason: "narrow after finished", registryPath: f.registryPath, apply: true });
+  expect(paused).toMatchObject({ remove: ["docs/x.md", "src/b/*", "tests/b.test.ts"], reasons: [] });
+  expect(f.files().map(r => r.resource)).toEqual(["src/a.ts"]);
+});
