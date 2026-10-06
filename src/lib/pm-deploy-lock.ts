@@ -4,6 +4,8 @@
  * - 所有权:每次持有一个随机 token;释放 / 更新记录前核 token,旧句柄的释放删不掉新持有者的锁。
  * - 死活只看进程身份(pid + uid + ps lstart 代次),不看年龄 / mtime:活持有者永不被偷;pid 复用(代次不符)算死;
  *   EPERM / ps 读不到 / uid 不符 = 未知,按占用处理直到超时。接管者之间用 file-lock 的接管锁互斥,确认已死后重读仍是它才删。
+ * - 部署进程树:wrapper 把部署命令起在独立进程组(组长是执行闸),组号随子进程身份落盘;组里还有任何进程(含孙进程)= 仍持有。
+ *   身份落盘前执行闸不放行,身份查不到 / 不是组长都 fail-closed。
  * - 受控重入:只有拿着持有者 token、且持有者进程确是自己祖先的进程才放行(card-merge 嵌套调 deploy-full);光有 env 不够。
  * 持锁不是授权:这里不提供任何远程 / HTTP 入口,只在本机串行。
  */
@@ -27,6 +29,8 @@ interface ProcIdentity {
   pid: number;
   /** `ps -o lstart=`(C locale、空白归一):同一 pid 的不同进程代次;null = 记录时读不到 */
   startId: string | null;
+  /** 有值时 = 该进程是此进程组组长(pgid === pid):组里任何进程活着都算活 */
+  pgid?: number;
 }
 
 export interface DeployLockRecord {
@@ -47,6 +51,9 @@ export interface ProcProbe {
   signal0(pid: number): "alive" | "dead" | "unknown";
   startOf(pid: number): string | null;
   ppidOf(pid: number): number | null;
+  pgidOf(pid: number): number | null;
+  /** kill(-pgid, 0):组里还有进程 alive;ESRCH dead;其它 unknown */
+  groupSignal0(pgid: number): "alive" | "dead" | "unknown";
   uid(): number;
 }
 
@@ -60,30 +67,45 @@ function ps(field: string, pid: number): string | null {
   return out || null;
 }
 
+function signal0(target: number): "alive" | "dead" | "unknown" {
+  try {
+    process.kill(target, 0);
+    return "alive";
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown"; // EPERM 等:存在与否证明不了
+  }
+}
+
+function psInt(field: string, pid: number): number | null {
+  const v = ps(field, pid);
+  return v && /^\d+$/.test(v) ? +v : null;
+}
+
 export const realProbe: ProcProbe = {
-  signal0(pid) {
-    try {
-      process.kill(pid, 0);
-      return "alive";
-    } catch (e) {
-      return (e as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown"; // EPERM 等:存在与否证明不了
-    }
-  },
+  signal0,
   startOf: (pid) => ps("lstart", pid),
-  ppidOf(pid) {
-    const v = ps("ppid", pid);
-    return v && /^\d+$/.test(v) ? +v : null;
-  },
+  ppidOf: (pid) => psInt("ppid", pid),
+  pgidOf: (pid) => psInt("pgid", pid),
+  groupSignal0: (pgid) => signal0(-pgid),
   uid: () => process.getuid?.() ?? -1,
 };
 
+/**
+ * 进程组组长的组:组长 pid 还在 → 按代次判(代次不符 = pid 已被复用,而组号还被占用时内核不会复用该 pid,说明原组已空);
+ * 组长已不在 → 看组里还有没有进程(组号在用时 pid 不会被复用,所以这个组只能是原来那组)。
+ */
 function procState(p: ProcIdentity, probe: ProcProbe): Liveness {
   const s = probe.signal0(p.pid);
+  if (s === "dead" && p.pgid !== undefined) return groupState(probe.groupSignal0(p.pgid));
   if (s !== "alive") return s;
   if (!p.startId) return "unknown";
   const now = probe.startOf(p.pid);
   if (now === null) return "unknown";
   return now === p.startId ? "live" : "dead"; // 代次不符 = pid 已被复用,原持有者已死
+}
+
+function groupState(s: "alive" | "dead" | "unknown"): Liveness {
+  return s === "alive" ? "live" : s;
 }
 
 /** 持有者(及其部署子进程)死活:任何一个活着 = live;都证明已死才 dead;其余 unknown */
@@ -96,7 +118,7 @@ export function holderLiveness(rec: DeployLockRecord, probe: ProcProbe = realPro
 
 function validIdentity(p: unknown): p is ProcIdentity {
   const o = p as ProcIdentity;
-  return !!o && Number.isSafeInteger(o.pid) && o.pid > 1 && (o.startId === null || (typeof o.startId === "string" && o.startId.length > 0));
+  return !!o && Number.isSafeInteger(o.pid) && o.pid > 1 && (o.pgid === undefined || o.pgid === o.pid) && (o.startId === null || (typeof o.startId === "string" && o.startId.length > 0));
 }
 
 function validRecord(d: unknown): boolean {
@@ -159,8 +181,11 @@ export interface DeployLockHandle {
   readonly record: DeployLockRecord;
   /** 核 token 再删:旧句柄 / 已失租的句柄不会删掉新持有者的锁 */
   release(): "released" | "not-owner" | "gone";
-  /** 把部署子进程身份写进记录(token 核对后原子替换);写不进去抛错,调用方 fail-closed */
-  recordChild(pid: number): void;
+  /**
+   * 把部署子进程身份写进记录(token 核对后原子替换)。代次查不到、group 时不是组长、写不进去都抛错,调用方 fail-closed
+   * (wrapper 在这之前不放行执行闸,子进程一步部署都没做)。
+   */
+  recordChild(pid: number, opts?: { group?: boolean }): void;
 }
 
 function makeHandle(path: string, record: DeployLockRecord, probe: ProcProbe): DeployLockHandle {
@@ -178,8 +203,16 @@ function makeHandle(path: string, record: DeployLockRecord, probe: ProcProbe): D
       unlinkSync(path);
       return "released";
     },
-    recordChild(pid) {
-      const next: DeployLockRecord = { ...current, child: { pid, startId: probe.startOf(pid) } };
+    recordChild(pid, opts = {}) {
+      const startId = probe.startOf(pid);
+      if (!startId) throw new Error(`读不到部署子进程 ${pid} 的启动代次(ps lstart),身份不可核`);
+      const child: ProcIdentity = { pid, startId };
+      if (opts.group) {
+        const pgid = probe.pgidOf(pid);
+        if (pgid !== pid) throw new Error(`部署子进程 ${pid} 不是自己进程组的组长(pgid=${pgid ?? "读不到"})`);
+        child.pgid = pid;
+      }
+      const next: DeployLockRecord = { ...current, child };
       writeTextAtomicSync(path, JSON.stringify(next), { mode: 0o600, noFollow: true, commitIf: mine });
       current = next;
     },
@@ -265,6 +298,8 @@ export function reentrantHolder(envToken: string | undefined, opts: { path?: str
 /** 诊断行:持有者 label / pid / 代次 / 获取时间 / 死活判断 */
 export function describeHolder(rec: DeployLockRecord | null, state: Liveness | "corrupt"): string {
   if (!rec) return state === "corrupt" ? "锁记录内容异常(不自动删除:确认没有部署在跑后手动删锁文件)" : "持有者未知";
-  const child = rec.child ? ` child=${rec.child.pid}(${rec.child.startId ?? "代次未知"})` : "";
+  const child = rec.child
+    ? ` child=${rec.child.pid}(${rec.child.startId ?? "代次未知"}${rec.child.pgid !== undefined ? ` 进程组=${rec.child.pgid}` : ""})`
+    : "";
   return `label=${rec.label} pid=${rec.holder.pid} 代次=${rec.holder.startId ?? "未知"}${child} 获取于=${rec.acquiredAt} 判定=${state}`;
 }
