@@ -56,9 +56,23 @@ function offerNote(v: unknown): string | null | undefined {
   return v.trim() || undefined;
 }
 
-export interface JoinOffer { offerId: string; url: string; host: string; centerId: string; code: string; note?: string; expiresAt: number }
+export interface JoinOfferProject { teamId: string; projectId: string; name: string }
+
+/** Display data is untrusted; reject secret-shaped and control-bearing labels before any persistence or card rendering. */
+export function parseJoinOfferProject(value: unknown): JoinOfferProject | null {
+  const p = value as Record<string, unknown> | null;
+  if (!p || typeof p !== "object" || Array.isArray(p)
+    || Object.keys(p).some(k => !["teamId", "projectId", "name"].includes(k))) return null;
+  if (typeof p.teamId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(p.teamId)
+    || typeof p.projectId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(p.projectId)) return null;
+  if (typeof p.name !== "string" || !p.name.trim() || Array.from(p.name).length > 64
+    || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(p.name) || looksLikeSharedLedgerJoinCode(p.name)) return null;
+  return { teamId: p.teamId, projectId: p.projectId, name: p.name };
+}
+
+export interface JoinOffer { project?: JoinOfferProject; offerId: string; url: string; host: string; centerId: string; code: string; note?: string; expiresAt: number }
 export type JoinOfferRefusal = "invalid_offer" | "invalid_url" | "invalid_code" | "expired";
-const OFFER_KEYS = new Set(["v", "offerId", "url", "code", "note", "expiresAt"]);
+const OFFER_KEYS = new Set(["v", "offerId", "url", "code", "note", "expiresAt", "project"]);
 
 /** POST body → offer. Each refusal is a fixed code; nothing from the body is echoed back. */
 export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: JoinOffer } | { ok: false; error: JoinOfferRefusal } {
@@ -70,12 +84,14 @@ export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: J
   if (!center) return { ok: false, error: "invalid_url" };
   const code = typeof b.code === "string" && b.code === b.code.trim() ? parseSharedLedgerJoinCode(b.code) : null;
   if (!code) return { ok: false, error: "invalid_code" };
+  const project = b.project === undefined ? undefined : parseJoinOfferProject(b.project);
+  if (project === null) return { ok: false, error: "invalid_offer" };
   const note = offerNote(b.note);
-  if (note === null) return { ok: false, error: "invalid_offer" };
+  if (note === null || (note && note.includes(code.secret)) || (project && Object.values(project).some(v => v.includes(code.secret)))) return { ok: false, error: "invalid_offer" };
   if (b.expiresAt !== undefined && !Number.isSafeInteger(b.expiresAt)) return { ok: false, error: "invalid_offer" };
   const expiresAt = Math.min((b.expiresAt as number | undefined) ?? Infinity, now + JOIN_OFFER_MAX_TTL_MS);
   if (expiresAt <= now) return { ok: false, error: "expired" };
-  return { ok: true, offer: { offerId: b.offerId, ...center, centerId: code.centerId, code: b.code as string, ...(note ? { note } : {}), expiresAt } };
+  return { ok: true, offer: { offerId: b.offerId, ...center, centerId: code.centerId, code: b.code as string, ...(note ? { note } : {}), ...(project ? { project } : {}), expiresAt } };
 }
 
 /** Per-peer sliding window (5 per hour); in memory, so a bridge restart forgives — the pending-offer cap still holds. */
@@ -95,7 +111,12 @@ export class JoinOfferLimiter {
 
 // Pending credentials stay in process memory; only non-secret sender receipts are persisted.
 
-export interface PendingJoinOffer extends JoinOffer { peer: string; receivedAt: number; askId?: string; projectChoices?: SharedLedgerProjectChoice[]; sharedProjectId?: string }
+interface JoinProjectSelection { mode: "create" | "existing"; localProjectId?: string }
+interface JoinProjectOption { value: string; name: string; selection: JoinProjectSelection }
+export interface PendingJoinOffer extends JoinOffer {
+  projectOptions?: JoinProjectOption[]; recommended?: string; peer: string; receivedAt: number; askId?: string;
+  projectChoices?: SharedLedgerProjectChoice[]; sharedProjectId?: string;
+}
 export interface SentJoinOffer {
   offerId: string; peer: string; host: string; centerId: string; project: string; target: string; sentAt: number; expiresAt: number;
   status?: JoinOfferStatus; statusAt?: number;
@@ -192,16 +213,16 @@ export async function recordSentOfferStatus(stateDir: string, peer: string, offe
 
 const STATUS_ZH: Record<JoinOfferStatus, string> = { joined: "已入组", declined: "对方不加入", expired: "邀请已过期", failed: "入组失败" };
 
-export function joinOfferCard(p: Pick<PendingJoinOffer, "peer" | "host" | "centerId" | "note" | "expiresAt">): { title: string; context: string } {
+export function joinOfferCard(p: Pick<PendingJoinOffer, "peer" | "host" | "centerId" | "note" | "expiresAt" | "project">): { title: string; context: string } {
   const lines = [
     `邀请方（peer）：${p.peer}`,
     `中心主机：${p.host}`,
     `中心 ID：${p.centerId}`,
-    "团队 / 项目：入组后显示",
+    p.project ? `团队：${p.project.teamId}；项目：${p.project.name}（${p.project.projectId}）` : "团队 / 项目：入组后显示",
     ...(p.note ? [`对方附言：${p.note}`] : []),
     `有效至：${new Date(p.expiresAt).toISOString().slice(0, 16).replace("T", " ")} UTC`,
   ];
-  return { title: "加入共享台账？", context: lines.join("\n") };
+  return { title: p.project ? `加入团队项目 ${p.project.name}？` : "加入共享台账？", context: lines.join("\n") };
 }
 
 export function joinOfferOutcomeText(p: Pick<PendingJoinOffer, "peer" | "host">, status: JoinOfferStatus, joined?: { teamId: string; projectId: string }): string {
