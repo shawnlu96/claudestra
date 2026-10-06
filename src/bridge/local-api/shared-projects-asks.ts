@@ -15,6 +15,7 @@ export function sharedProjectAskPorts(database?: Database) {
         if (!current || current.createdBy !== "system:shared-projects" || approved.createdBy !== "system:shared-projects"
           || current.state !== "answered" || current.extra.sharedProjectExecuted || !current.bind || !approved.bind
           || current.bind.paramsHash !== approved.bind.paramsHash
+          || JSON.stringify(current.answer) !== JSON.stringify(approved.answer)
           || !ownerAnswered(current.answer)
           || !checkAsk({ ...current, fromAgent: current.createdBy }, current.bind.paramsHash, current.createdBy).ok
           || bindHash(current.bind, current.createdBy) !== bindHash(approved.bind, approved.createdBy)) return false;

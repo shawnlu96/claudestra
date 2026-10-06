@@ -22,7 +22,8 @@ function fixture() {
     now: () => Date.now(), person: async () => person, list: async () => [project],
     create: async () => { calls.push("create"); return { operation, project }; },
     patch: async (_who, id, b) => ({ ...project, projectId: id, ...b }),
-    invite: async (_who, _id, peers) => peers.map(peer => ({ peer, offerId: "a".repeat(32), accepted: true })),
+    invite: async () => ({ askId: "synthetic-invite" }), sendInvite: async () => [],
+    authorizeAnswer: async () => true,
     operation: async () => { calls.push("query"); return { operation, project }; },
     enrollCreator: async () => { calls.push("save-b", "bind-b"); saved = true; return "local-b"; },
     credentialSaved: async () => { calls.push("read-b"); return saved; },
@@ -355,4 +356,56 @@ test("changed approval title, identity context or option labels fail before proj
     await expect(answerSharedProject(a, w.d)).rejects.toThrow();
     expect(w.calls).toEqual([]);
   }
+});
+
+
+test("explicit recipient reaches invite adapter and invalid union shapes never do", async () => {
+  const w = fixture(), seen: unknown[] = [];
+  w.d.invite = async (...args) => { seen.push(args); return { askId: "synthetic-invite" }; };
+  for (const recipient of [{ personId: "alice" }, { code: "NewPerson" }]) {
+    expect((await w.request("POST", "/b/invite", { peers: ["transport"], note: "welcome", recipient }))!.status).toBe(202);
+    expect(seen.at(-1)).toEqual([person, "b", ["transport"], "welcome", recipient]);
+  }
+  for (const recipient of [undefined, {}, { personId: "" }, { personId: "alice", code: "Alice" },
+    { code: "NewPerson", caller: "owner:self" }]) {
+    expect((await w.request("POST", "/b/invite", { peers: ["transport"], recipient }))!.status).toBe(400);
+  }
+  expect(seen).toHaveLength(2);
+});
+
+test("lost request before center commit retries the original idempotent create on continue", async () => {
+  const w = fixture(), original = w.d.create, attempts: unknown[] = [];
+  w.d.create = async (...args) => {
+    attempts.push(args[1]);
+    if (attempts.length === 1) throw new SharedProjectsError(503, "center_unavailable");
+    return original(...args);
+  };
+  w.d.operation = async () => { throw new SharedProjectsError(404, "center_rejected"); };
+  expect((await createSharedProject(create, w.d)).available).toBe(false);
+  const a = approve(w.asks[0]!);
+  const response = await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id });
+  expect((await response!.json() as { available: boolean }).available).toBe(true);
+  expect(attempts).toEqual([create, create]);
+});
+
+test("HTTP continue rejects a narrowed original approver before claiming or querying", async () => {
+  const w = fixture();
+  w.d.gateRead = async () => false;
+  await createSharedProject(create, w.d);
+  const a = approve(w.asks[0]!);
+  Object.assign(w.d, { authorizeAnswer: async () => false });
+  w.calls.length = 0;
+  expect((await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id }))!.status).toBe(403);
+  expect(w.calls).toEqual([]);
+});
+
+test("proposal API opens bound approval without calling create", async () => {
+  const w = fixture();
+  const response = await w.request("POST", "/proposals", create);
+  expect(response!.status).toBe(202);
+  expect(w.calls).toEqual([]);
+  const result = await response!.json() as { askId: string };
+  expect(result.askId).toBe(w.asks[0]!.id);
+  await answerSharedProject(approve(w.asks[0]!), w.d);
+  expect(w.calls[0]).toBe("create");
 });

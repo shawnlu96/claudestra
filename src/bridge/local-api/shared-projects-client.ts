@@ -1,5 +1,11 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Principal } from "../../lib/principals.js";
+import { v2ObjectDigest } from "../../lib/shared-ledger-contract-v2-integrity.js";
+import { signedHeaders } from "../../lib/instance-key.js";
+import type { HttpPeer, PeersData } from "../../lib/peers.js";
+import { peerFetch } from "../relay-link.js";
+import { proposeSharedProjectInvite, sendApprovedSharedProjectInvite, type ProjectInvitePorts } from "./shared-projects-invite.js";
 import { STATE_DIR } from "../../lib/paths.js";
 import { SharedLedgerClient } from "../../lib/shared-ledger-client.js";
 import { SharedLedgerProjectConflict } from "../../lib/shared-ledger-client-projects.js";
@@ -19,7 +25,7 @@ import { SharedProjectsError, type ProjectPerson, type SharedProjectsPorts } fro
 
 /** Unavailable dependencies are explicit. A transport peer is not a center recipient; no local writer substitutes for N2 leave. */
 export const SHARED_PROJECTS_CAPABILITIES = {
-  invite: { available: false, reason: "trusted_peer_recipient_mapping_unavailable" },
+  invite: { available: true, reason: null },
   leave: { available: false, reason: "canonical_local_leave_writer_unavailable" },
   bootstrap: { available: false, reason: "controlled_deployment_executor_unavailable" },
 } as const;
@@ -52,7 +58,8 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
       throw new SharedProjectsError(503, "center_unavailable"); // Never propagate center or bearer text to cards and HTTP.
     }
   };
-  return {
+  const delivery = projectInvitePorts(stateDir, source, client, resolve, checked);
+  const ports: SharedProjectsPorts = {
     now: Date.now, ...sharedProjectAskPorts(), person: async () => person(), bindings: () => readSharedLedgerBindings(stateDir),
     list: who => checked(async () => (await client(who, "read").projects()).projects),
     create: (who, input) => checked(async () => {
@@ -67,7 +74,9 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
     patch: (who, id, input) => checked(async () => (await client(who, "project").updateProject(id, input)).project),
     members: (who, id) => checked(async () => (await client(who, "read").projectMembers(id)).members),
     remove: (who, id, personId) => checked(async () => { await client(who, "project").removeProjectMember(id, personId); }),
-    invite: async () => { throw new SharedProjectsError(503, SHARED_PROJECTS_CAPABILITIES.invite.reason); },
+    authorizeAnswer: async ask => !!await sharedProjectAnswerPrincipal(ask, stateDir),
+    invite: (who, id, peers, note, recipient) => proposeSharedProjectInvite(who, id, peers, note, recipient, ports, delivery),
+    sendInvite: (who, ask) => sendApprovedSharedProjectInvite(who, ask, ports, delivery),
     ...completionPorts(principal, stateDir, fetcher, invites, client, resolve, checked),
     eligible: async () => readSharedLedgerProjects(stateDir).projects.filter(p => !isPersonalProject(p)).map(p => ({ id: p.id, name: p.name })),
     setDirs: async (who, id, localId, dirs) => {
@@ -87,6 +96,7 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
     preflight: async () => { throw new SharedProjectsError(503, SHARED_PROJECTS_CAPABILITIES.bootstrap.reason); },
     confirmOwner: async () => { throw new SharedProjectsError(503, SHARED_PROJECTS_CAPABILITIES.bootstrap.reason); },
   };
+  return ports;
 }
 
 
@@ -132,6 +142,38 @@ function completionPorts(principal: Principal, stateDir: string, fetcher: typeof
         return new Response(null, { status: 200 });
       }, { stateDir, key: () => actual.key });
       return response?.status === 200;
+    },
+  };
+}
+
+/** N3 retains member+invite; the bridge's existing signed E2E/HTTPS transport is the only outbound path. */
+function projectInvitePorts(stateDir: string, source: SharedLedgerBinding,
+  client: (who: ProjectPerson, action: "read" | "project") => Client, resolve: (action: "read" | "project") => Resolve,
+  checked: <T>(request: () => Promise<T>) => Promise<T>): ProjectInvitePorts {
+  const project = async (who: ProjectPerson, id: string) => {
+    const result = await checked(() => client(who, "read").projects());
+    const matches = result.projects.filter(p => p.projectId === id);
+    if (matches.length !== 1) throw new SharedProjectsError(403, "project_required");
+    return matches[0]!;
+  };
+  const peers = async () => {
+    try { return (JSON.parse(await readFile(join(stateDir, "peers.json"), "utf8")) as PeersData).httpPeers ?? []; }
+    catch { throw new SharedProjectsError(503, "peer_state_unavailable"); } // Refuse missing/malformed state rather than guess transport recipients.
+  };
+  return {
+    now: Date.now, stateDir, receiptProject: source.localProjectId ?? source.projectId, peers,
+    project, members: async (who, id) => (await checked(() => client(who, "read").projectMembers(id))).members,
+    mint: async (who, id, recipient) => {
+      const result = await checked(() => client(who, "project").inviteProjectMember(id, recipient));
+      return { url: resolve("project").credential.baseUrl, member: result.member, invite: result.invite, project: await project(who, id) };
+    },
+    post: async (peer: HttpPeer, url, body) => {
+      const current = (await peers()).filter(p => p.name === peer.name);
+      if (current.length !== 1 || v2ObjectDigest(current[0]) !== v2ObjectDigest(peer)) throw new SharedProjectsError(403, "peer_changed");
+      const init = { method: "POST", body, redirect: "error" as const,
+        headers: { Authorization: `Bearer ${peer.outToken}`, "Content-Type": "application/json",
+          ...signedHeaders("POST", new URL(url).pathname, body, resolve("project").key) }, signal: AbortSignal.timeout(20000) };
+      return peerFetch(url, init, { e2eOnly: !!peer.e2e });
     },
   };
 }

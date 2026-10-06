@@ -15,7 +15,7 @@ export async function readSharedProjectsLocalSnapshot(): Promise<SharedProjectsL
   return {
     projects: local.projects.map(p => ({ id: p.id, name: p.name, dirs: [...p.dirs], personal: isPersonalProject(p) })),
     peers: (peerState.httpPeers ?? []).map(p => ({ name: p.name, enabled: !p.disabled,
-      invitable: false })),
+      invitable: !p.disabled && !!p.baseUrl && !!p.outToken && (!!p.e2e || p.baseUrl.startsWith("https://")) })),
   };
 }
 

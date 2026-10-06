@@ -14,7 +14,7 @@ import type { ProjectSelection } from "./local-api/shared-projects-ports.js";
 import { bindHash, checkAsk } from "../lib/ask-bind.js";
 import { instanceIdSync } from "../lib/instance-id.js";
 import { instanceKeySync, signedFor } from "../lib/instance-key.js";
-import { closeAsk, getAsk, MASTER_PROJECT, ownerAnswered, type Ask, type AskBind } from "../lib/ledger-asks.js";
+import { closeAsk, getAsk, listAsks, patchAsk, MASTER_PROJECT, ownerAnswered, type Ask, type AskBind } from "../lib/ledger-asks.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
 import { runManagerProcess } from "../lib/run-manager.js";
@@ -52,6 +52,10 @@ export interface JoinOfferDeps {
   openAsk: (input: CreateAskInput) => Ask;
   getAsk: (id: string) => Ask | null;
   closeAsk: (id: string) => void;
+  /** Durable cards only; credentials remain solely in the process memory store. */
+  listOrphanCandidates?: () => Ask[];
+  claimOrphan?: (ask: Ask) => boolean;
+  markSettled?: (askId: string) => void;
   projects: () => Promise<SharedLedgerLocalProject[]>;
   /** The shared project this offer explicitly names, when known; the card hint then needs an exact binding (none: old-offer inference). */
   sharedProject?: (centerId: string) => SharedLedgerOfferProject | string | undefined;
@@ -70,6 +74,7 @@ export interface JoinOfferDeps {
 }
 
 const limiter = new JoinOfferLimiter();
+const activeOffers = new Set<string>();
 const receiptLimiter = new JoinOfferLimiter(60);
 type Reply = { status: number; body: Record<string, unknown> };
 const refuse = (status: number, code: string): Reply => ({ status, body: { ok: false, code } });
@@ -153,6 +158,7 @@ function approved(a: Ask, p: PendingJoinOffer): boolean {
 
 /** Settle one claimed offer: tell the owner, tell the inviter. Neither failure undoes the outcome. */
 async function settle(p: PendingJoinOffer, status: JoinOfferStatus, d: JoinOfferDeps, joined?: SharedLedgerJoinResult): Promise<void> {
+  if (p.askId) d.markSettled?.(p.askId);
   if (status === "joined" && sharedProjectAudit) await sharedProjectAudit().catch(() => console.warn("shared project audit deferred"));
   console.log(`🤝 [join-offer] ${p.peer} 的邀请（中心 ${p.host}）：${status}`);
   await d.inform(joinOfferOutcomeText(p, status, joined)).catch((e: Error) => console.error(`⚠️ [join-offer] 通知 owner 失败: ${e.name}`));
@@ -175,8 +181,15 @@ export async function onJoinOfferAnswered(a: Ask, d: JoinOfferDeps = liveDeps): 
     return;
   }
   if (a.state !== "answered" || !isOfferId(offerId)) return;
-  const p = claimPendingOffer(d.stateDir(), offerId);
-  if (!p) return;
+  const stateDir = d.stateDir(), activeId = `${stateDir}:${offerId}`;
+  const p = claimPendingOffer(stateDir, offerId);
+  if (!p) { await sweepOrphanJoinCards(d, [a]); return; }
+  p.askId ??= a.id;
+  activeOffers.add(activeId);
+  try { await answerClaimedOffer(a, p, d); }
+  finally { activeOffers.delete(activeId); }
+}
+async function answerClaimedOffer(a: Ask, p: PendingJoinOffer, d: JoinOfferDeps): Promise<void> {
   if (p.project) return answerProjectOffer(a, p, d);
   if (!p.projectChoices) {
     const declined = (a.answer?.choices ?? []).includes(`[button:${DECLINE_BUTTON}]`);
@@ -222,6 +235,7 @@ async function answerProjectOffer(a: Ask, p: PendingJoinOffer, d: JoinOfferDeps)
 
 /** Every minute: expired offers (or ones whose card closed without an answer) are deleted; answered ones the hook missed are settled. */
 export async function sweepJoinOffers(d: JoinOfferDeps = liveDeps): Promise<void> {
+  await sweepOrphanJoinCards(d);
   for (const id of listPendingOfferIds(d.stateDir())) {
     const p = readPendingOffer(d.stateDir(), id);
     const a = p?.askId ? d.getAsk(p.askId) : null;
@@ -235,6 +249,24 @@ export async function sweepJoinOffers(d: JoinOfferDeps = liveDeps): Promise<void
     if (!claimed) continue;
     if (a?.state === "open") d.closeAsk(a.id);
     await settle(claimed, "expired", d);
+  }
+}
+
+/** Restart discards codes; retire their durable cards and send a fixed failure receipt using only bound routing metadata. */
+async function sweepOrphanJoinCards(d: JoinOfferDeps, candidates = d.listOrphanCandidates?.() ?? []): Promise<void> {
+  for (const a of candidates) {
+    const offerId = a.extra.joinOfferId;
+    if (a.createdBy !== JOIN_OFFER_CREATOR || !isOfferId(offerId) || a.extra.joinOfferOrphanSettled
+      || activeOffers.has(`${d.stateDir()}:${offerId}`) || readPendingOffer(d.stateDir(), offerId) || !a.bind || bindHash(a.bind, JOIN_OFFER_CREATOR) !== a.bind.paramsHash) continue;
+    const params = a.bind.params as { offerId?: unknown; peer?: unknown };
+    if (params.offerId !== offerId || typeof params.peer !== "string") continue;
+    const peer = await configuredPeer(params.peer, d);
+    if (readPendingOffer(d.stateDir(), offerId) || activeOffers.has(`${d.stateDir()}:${offerId}`) || !d.claimOrphan?.(a)) continue;
+    d.closeAsk(a.id);
+    await d.inform("邀请已失效，请邀请方重新发起。").catch(() => console.warn("join offer restart notice failed")); // A failed notice must not prevent the inviter receipt.
+    if (!peer) continue;
+    try { await d.sendReceipt(peer, JSON.stringify({ v: 1, offerId, status: "failed" })); }
+    catch { console.warn("join offer restart failure receipt deferred"); } // Retired cards cannot redeem; transport details may contain credentials.
   }
 }
 
@@ -262,6 +294,22 @@ const liveDeps: JoinOfferDeps = {
   getAsk: (id) => {
     const db = askReadDb();
     return db ? getAsk(db, id) : null;
+  },
+  listOrphanCandidates: () => {
+    const db = askReadDb();
+    return db ? listAsks(db, { source: "system", states: ["open"] }).filter(a => a.createdBy === JOIN_OFFER_CREATOR && !a.extra.joinOfferOrphanSettled) : [];
+  },
+  markSettled: id => { patchAsk(askDb(), id, { extra: { joinOfferOrphanSettled: true } }); },
+  claimOrphan: a => {
+    const db = askDb();
+    return db.transaction(() => {
+      const current = getAsk(db, a.id);
+      if (!current || current.extra.joinOfferOrphanSettled || !current.bind || !a.bind
+        || current.bind.paramsHash !== a.bind.paramsHash || bindHash(current.bind, JOIN_OFFER_CREATOR) !== current.bind.paramsHash
+        || !["open", "answered"].includes(current.state)) return false;
+      patchAsk(db, a.id, { extra: { joinOfferOrphanSettled: true } });
+      return true;
+    }).immediate();
   },
   closeAsk: (id) => {
     const a = closeAsk(askDb(), id, "cancelled", "join offer expired");

@@ -9,7 +9,7 @@ import { sharedProjectsSnapshot, readSharedProjectsLocalSnapshot, type SharedPro
 import { sharedProjectsClientPorts, SHARED_PROJECTS_CAPABILITIES } from "./shared-projects-client.js";
 import { SHARED_LEDGER_PROJECT_HEADER } from "../../lib/shared-ledger-gate-proxy.js";
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
-import { bootstrapSharedProject, createSharedProject, continueSharedProject } from "./shared-projects-actions.js";
+import { bootstrapSharedProject, createSharedProject, continueSharedProject, proposeSharedProject } from "./shared-projects-actions.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const ROOT = "/api/v1/shared-projects";
@@ -112,6 +112,10 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
     if (projects.some(p => p.centerId !== who.centerId || p.teamId !== who.teamId)) throw new SharedProjectsError(503, "invalid_center_response");
     return apiJson(200, { ok: true, projects: projects.map(p => publicProject(p, d)) });
   }
+  if (path === `${ROOT}/proposals` && req.method === "POST") {
+    const ask = await proposeSharedProject(createInput(b, who), d);
+    return apiJson(202, { ok: true, askId: ask.id });
+  }
   if (path === ROOT && req.method === "POST") return apiJson(200, await createSharedProject(createInput(b, who), d));
   if (path === `${ROOT}/owner-bootstrap` && req.method === "POST") {
     keys(b, ["operationId"]);
@@ -131,14 +135,20 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
     return apiJson(200, { ok: true, project: publicProject(p, d) });
   }
   if (match[2] && req.method === "POST") {
-    keys(b, ["peers", "note"]);
+    keys(b, ["peers", "note", "recipient"]);
     if (!Array.isArray(b.peers) || !b.peers.length || b.peers.length > 50 || new Set(b.peers).size !== b.peers.length
       || b.peers.some(p => typeof p !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(p))
       || (b.note !== undefined && (typeof b.note !== "string" || Array.from(b.note).length > 120 || /[\p{Cc}\p{Cf}]/u.test(b.note)))) {
       throw new SharedProjectsError(400, "invalid_body");
     }
-    const receipts = await d.invite(who, match[1]!, b.peers as string[], b.note as string | undefined);
-    return apiJson(202, { ok: true, offers: receipts.map(r => ({ peer: r.peer, offerId: r.offerId, accepted: r.accepted })) });
+    const recipient = record(b.recipient);
+    keys(recipient, ["personId", "code"]);
+    let parsed;
+    try { parsed = parseV2ProjectsRequest("invite", { centerId: who.centerId, teamId: who.teamId, projectId: match[1], ...recipient }); }
+    catch { throw new SharedProjectsError(400, "invalid_recipient"); } // Canonical union rejects empty or combined identities without echoing input.
+    const selected = "personId" in parsed ? { personId: parsed.personId } : { code: parsed.code };
+    const result = await d.invite(who, match[1]!, b.peers as string[], b.note as string | undefined, selected);
+    return apiJson(202, { ok: true, askId: result.askId });
   }
   return apiJson(405, { ok: false, code: "method_not_allowed" });
 }

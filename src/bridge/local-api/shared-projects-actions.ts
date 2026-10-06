@@ -3,12 +3,12 @@ import { bindHash, checkAsk } from "../../lib/ask-bind.js";
 import { MASTER_PROJECT, ownerAnswered, type Ask } from "../../lib/ledger-asks.js";
 import { projectChoices, selectedProject, sharedProjectCardDigest, type ProjectChoice } from "./shared-projects-choice.js";
 import { requireProjectPerson, SharedProjectsError, type BootstrapPreflight, type CreatorOperation,
-  type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
+  type ProjectInviteApproval, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const CREATOR = "system:shared-projects";
 const APPROVE = "shared_project_confirm";
-interface ProjectAction {
-  kind: "create" | "complete" | "bootstrap";
+export interface ProjectAction {
+  kind: "create" | "complete" | "bootstrap" | "invite";
   who: ProjectPerson;
   input?: ProjectCreate;
   operationId: string;
@@ -18,12 +18,13 @@ interface ProjectAction {
   expectedDigest?: string;
   completedLocalProjectId?: string;
   cardDigest?: string;
+  invitation?: ProjectInviteApproval;
 }
 const samePerson = (a: ProjectPerson, b: ProjectPerson) =>
   a.centerId === b.centerId && a.teamId === b.teamId && a.personId === b.personId && a.instanceId === b.instanceId && JSON.stringify(a.sourceBinding) === JSON.stringify(b.sourceBinding);
 const binding = (action: ProjectAction) => ({ action: "shared_project_action", params: action, approve: [APPROVE] });
 
-function openAction(d: SharedProjectsPorts, action: ProjectAction, title: string, context: string, select?: ReturnType<typeof projectChoices>) {
+export function openSharedProjectAction(d: SharedProjectsPorts, action: ProjectAction, title: string, context: string, select?: ReturnType<typeof projectChoices>) {
   context += `
 参数摘要：${bindHash(binding(action), CREATOR)}`;
   context += `
@@ -33,13 +34,13 @@ function openAction(d: SharedProjectsPorts, action: ProjectAction, title: string
   if (action.completedLocalProjectId) context += `
 已绑定本机项目：${action.completedLocalProjectId}`;
   const options: Ask["options"] = [...(select ? [select.row] : []), { type: "buttons", buttons: [
-    { id: APPROVE, label: action.kind === "create" ? "建" : action.kind === "bootstrap" ? "确认团队 owner" : "继续完成项目", style: "success" },
+    { id: APPROVE, label: action.kind === "create" ? "建" : action.kind === "bootstrap" ? "确认团队 owner" : action.kind === "invite" ? "发送邀请" : "继续完成项目", style: "success" },
     { id: "shared_project_cancel", label: "取消", style: "secondary" },
   ] }];
   action = { ...action, cardDigest: sharedProjectCardDigest({ title, context, options }) };
   const bind = binding(action);
   return d.openAsk({ source: "system", createdBy: CREATOR, project: MASTER_PROJECT, kind: "authorize", title, context, options,
-    allowText: false, blocking: true, expiresAt: action.preflight?.expiresAt ?? d.now() + 3600_000,
+    allowText: false, blocking: true, expiresAt: action.preflight?.expiresAt ?? (action.invitation ? Math.min(...action.invitation.invitations.map(i => i.expiresAt)) : d.now() + 3600_000),
     bind: { ...bind, paramsHash: bindHash(bind, CREATOR) }, extra: { sharedProjectAction: true,
       ...(select ? { sharedProjectChoice: { selectId: select.row.type === "select" ? select.row.id : "", recommended: select.recommended } } : {}) },
   });
@@ -49,7 +50,7 @@ function openAction(d: SharedProjectsPorts, action: ProjectAction, title: string
 export async function proposeSharedProject(input: ProjectCreate, d: SharedProjectsPorts): Promise<Ask> {
   const who = await d.person();
   requireProjectPerson(who);
-  return openAction(d, { kind: "create", who, input, operationId: input.operationId },
+  return openSharedProjectAction(d, { kind: "create", who, input, operationId: input.operationId },
     `建议新建团队项目 ${input.name}`, `原创建参数：${input.name}（${input.id ?? "中心分配 ID"}）；操作 ${input.operationId}
 `
       + `本机选择：${input.selection ? input.selection.mode === "create" ? "新建本机项目" : input.selection.localProjectId : "尚未选择，后续显式确认"}`);
@@ -64,7 +65,7 @@ function requireOperation(who: ProjectPerson, value: CreatorOperation, operation
 
 async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operationId: string, selection?: ProjectSelection,
   input?: ProjectCreate, expectedDigest?: string, completedLocalProjectId?: string) {
-  const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, completedLocalProjectId, ...(selection ? { selection } : {}) },
+  const ask = openSharedProjectAction(d, { kind: "complete", who, operationId, input, expectedDigest, completedLocalProjectId, ...(selection ? { selection } : {}) },
     "继续完成项目", `操作 ${operationId}；本人 ${who.personId}；实例 ${who.instanceId}
 `
       + `原创建参数：${input ? `${input.name}（${input.id ?? "中心分配 ID"}）` : "沿用中心原操作"}
@@ -75,17 +76,29 @@ async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operatio
   return { ok: true, available: false, operationId, askId: ask.id };
 }
 
+
+/** A missing operation means the original request may not have arrived; the center deduplicates the same approved input/id. */
+async function recoverOperation(who: ProjectPerson, operationId: string, input: ProjectCreate | undefined,
+  expectedDigest: string | undefined, d: SharedProjectsPorts): Promise<CreatorOperation> {
+  try { return await d.operation(who, operationId); }
+  catch (error) {
+    if (!(error instanceof SharedProjectsError) || error.status !== 404 || !input || input.operationId !== operationId
+      || expectedDigest !== undefined) throw error;
+    return d.create(who, input);
+  }
+}
+
 /** Selection precedes N2 atomic enrollment; success requires persisted credential readback and an actual B gate read. */
 async function completeSharedProject(who: ProjectPerson, operationId: string, selection: ProjectSelection | undefined,
   d: SharedProjectsPorts, created?: CreatorOperation, input?: ProjectCreate, expectedDigest?: string, completedLocalProjectId?: string): Promise<Record<string, unknown>> {
   try {
-    const operation = requireOperation(who, created ?? await d.operation(who, operationId), operationId);
+    const operation = requireOperation(who, created ?? await recoverOperation(who, operationId, input, expectedDigest, d), operationId);
     if ((input && (operation.project.name !== input.name || (input.id !== undefined && operation.project.projectId !== input.id)))
       || (expectedDigest !== undefined && operation.operation.paramsDigest !== expectedDigest)) throw new SharedProjectsError(403, "operation_params_changed");
     expectedDigest = operation.operation.paramsDigest;
     if (!selection) {
       const select = projectChoices(operation.project, await d.eligible(), d.bindings());
-      const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, choices: select.choices },
+      const ask = openSharedProjectAction(d, { kind: "complete", who, operationId, input, expectedDigest, choices: select.choices },
         "选择本机项目", `${operation.project.name}（${operation.project.projectId}）；操作 ${operationId}\n选择本机项目并批准后保存凭据、绑定和验证。`, select);
       return { ok: true, available: false, operationId, askId: ask.id };
     }
@@ -126,7 +139,7 @@ export async function bootstrapSharedProject(operationId: string, d: SharedProje
   requireProjectPerson(who);
   const p = await d.preflight(who, operationId);
   requirePreflight(who, operationId, p, d.now());
-  return openAction(d, { kind: "bootstrap", who, operationId, preflight: p }, "确认团队 owner",
+  return openSharedProjectAction(d, { kind: "bootstrap", who, operationId, preflight: p }, "确认团队 owner",
     `中心 ${p.centerId}；团队 ${p.teamId}；本人 ${p.personId}；实例 ${p.instanceId}\n实例公钥摘要 ${p.instanceKeyDigest}\n预检摘要 ${p.summaryDigest}`);
 }
 function requirePreflight(who: ProjectPerson, operationId: string, p: BootstrapPreflight, now: number) {
@@ -150,15 +163,17 @@ export async function answerSharedProject(a: Ask, d: SharedProjectsPorts): Promi
   if (!stored || stored.state !== "answered" || stored.createdBy !== CREATOR
     || !stored.bind || !a.bind || stored.bind.paramsHash !== a.bind.paramsHash
     || bindHash(stored.bind, CREATOR) !== bindHash(a.bind, CREATOR)) throw new SharedProjectsError(403, "ask_check_failed");
-  a = stored;
+  a = structuredClone(stored);
   const action = a.bind?.params as ProjectAction | undefined;
   if (!action || action.cardDigest !== sharedProjectCardDigest(a) || !a.bind || bindHash(a.bind, CREATOR) !== a.bind.paramsHash || !ownerAnswered(a.answer)
     || !checkAsk({ ...a, fromAgent: CREATOR }, bindHash(binding(action), CREATOR), CREATOR, d.now()).ok) {
     throw new SharedProjectsError(403, "ask_check_failed");
   }
+  if (!await d.authorizeAnswer(a)) throw new SharedProjectsError(403, "approver_required");
   const who = await d.person();
   requireProjectPerson(who);
   if (!samePerson(who, action.who)) throw new SharedProjectsError(403, "person_changed");
+  if (action.kind === "invite") return { ok: true, offers: await d.sendInvite(who, a) };
   if (action.kind === "bootstrap") {
     if (!await d.deploymentAuthorized() || !action.preflight) throw new SharedProjectsError(403, "deployment_authorization_required");
     requirePreflight(who, action.operationId, action.preflight, d.now());

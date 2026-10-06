@@ -17,6 +17,10 @@ export async function onSharedProjectAnswered(ask: Ask, inform?: (text: string) 
     const adapter = ports ?? await sharedProjectsAnswerPorts(ask);
     if (adapter) {
       const result = await answerSharedProject(ask, adapter);
+      if (Array.isArray(result?.offers) && inform) {
+        const accepted = result.offers.filter(offer => offer.accepted === true).length;
+        await inform(`对方接收邀请：${accepted}/${result.offers.length}；等待对方本人批准入组。`);
+      }
       if (result?.available === true && inform) await inform("团队项目凭据已保存，已通过本机代理读取，项目可用。");
     }
   }

@@ -72,3 +72,48 @@ test("a fresh process cannot recover the invitation secret from the same state d
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("fresh bridge closes a real durable orphan card and sends exactly one fixed failure receipt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "offer-durable-restart-"));
+  try {
+    const script = `
+      import assert from "node:assert/strict";
+      import { readdirSync, readFileSync } from "node:fs";
+      import { setAsksForTest, askDb } from "./src/bridge/asks.ts";
+      import { listAsks } from "./src/lib/ledger-asks.ts";
+      import { receiveJoinOffer, sweepJoinOffers, joinOfferLiveDeps } from "./src/bridge/shared-ledger-join-offer.ts";
+      import { listPendingOfferIds } from "./src/lib/shared-ledger-join-offer.ts";
+      const dir = process.env.CLAUDESTRA_STATE_DIR;
+      setAsksForTest({ path: dir + "/cards.sqlite" });
+      const peer = { name: "synthetic-restart-peer", baseUrl: "https://peer.example", outToken: "synthetic-token", addedAt: "" };
+      const receipts = [], informed = [];
+      const d = { ...joinOfferLiveDeps, stateDir: () => dir, peers: async () => [peer],
+        projects: async () => [{ id: "local", name: "Local", lastActivityAt: 0 }], bindings: () => [],
+        inform: async text => { informed.push(text); }, sendReceipt: async (_peer, body) => { receipts.push(JSON.parse(body)); return 200; } };
+      if (process.env.OFFER_FIRST === "1") {
+        const response = await receiveJoinOffer(peer, ${JSON.stringify({ v: 1, offerId: offer(99).offerId, url: offer(99).url, code: offer(99).code, expiresAt: offer(99).expiresAt })}, d);
+        assert.equal(response.status, 202);
+        assert.equal(listPendingOfferIds(dir).length, 1);
+        assert.equal(listAsks(askDb(), { states: ["open"] }).length, 1);
+        for (const name of readdirSync(dir)) assert.ok(!readFileSync(dir + "/" + name).includes(${JSON.stringify(offer(99).code)}));
+      } else {
+        assert.deepEqual(listPendingOfferIds(dir), []);
+        await sweepJoinOffers(d);
+        assert.equal(listAsks(askDb(), { states: ["open"] }).length, 0);
+        assert.deepEqual(receipts, [{ v: 1, offerId: ${JSON.stringify(offer(99).offerId)}, status: "failed" }]);
+        assert.deepEqual(informed, ["邀请已失效，请邀请方重新发起。"]);
+        await sweepJoinOffers(d);
+        assert.equal(receipts.length, 1);
+      }
+      console.log("durable-restart-passed");
+    `;
+    for (const first of ["1", "0"]) {
+      const child = Bun.spawn([process.execPath, "--no-env-file", "-e", script], { cwd: process.cwd(),
+        env: testChildEnv({ HOME: join(root, "home"), CLAUDESTRA_STATE_DIR: join(root, "state"),
+          CLAUDESTRA_RUNTIME_DIR: join(root, "runtime"), OFFER_FIRST: first }), stdout: "pipe", stderr: "pipe" });
+      const [exit, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+      expect(stdout).toContain("durable-restart-passed");
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

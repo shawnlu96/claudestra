@@ -26,6 +26,7 @@ async function world() {
   const f = createV2ProjectsFixtures(), instanceId = instanceIdSync(dir), key = instanceKeySync(dir)!;
   const source = { centerId: f.identity.centerId, teamId: f.identity.teamId, projectId: "original-a", localProjectId: "original-a" };
   writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: ["original-a", "existing-b"].map(id => ({ id, name: id, dirs: [] })) }));
+  writeFileSync(join(dir, "principals.json"), JSON.stringify({ principals: [owner] }));
   await setSharedLedgerBinding(source, dir);
   await writeSharedLedgerCredential({ ...source, localSubject: owner.id, kind: "person", baseUrl: "https://synthetic.example/",
     personId: f.person.personId, instanceId, bearer: "S".repeat(43), projects: [{ projectId: source.projectId, actions: ["read", "project"] }] }, dir);
@@ -140,7 +141,7 @@ test("wrong grant identity, display, instance and service grant preserve every l
   }
 });
 
-test("real list/members/CAS/local dirs work; absent peer identity, leave writer and deployment executor stay unavailable", async () => {
+test("real list/members/CAS/local dirs work; recipient is required and leave/deployment stay unavailable", async () => {
   const w = await world(), d = w.ports();
   expect((await request(d, "GET")).status).toBe(200);
   expect((await request(d, "GET", `/${w.f.project.projectId}/members`)).status).toBe(200);
@@ -148,7 +149,7 @@ test("real list/members/CAS/local dirs work; absent peer identity, leave writer 
   expect((await request(d, "POST", `/${w.f.project.projectId}/members/${w.f.invite.personId}/remove`, {})).status).toBe(200);
   expect((await request(d, "PATCH", "/original-a/dirs", { localProjectId: "original-a", dirs: ["/synthetic/a"] })).status).toBe(200);
   const before = [...w.calls];
-  expect((await request(d, "POST", "/original-a/invite", { peers: ["transport-peer"] })).status).toBe(503);
+  expect((await request(d, "POST", "/original-a/invite", { peers: ["transport-peer"] })).status).toBe(400);
   expect((await request(d, "POST", "/original-a/leave", { localProjectId: "original-a" })).status).toBe(503);
   expect((await request(d, "POST", "/owner-bootstrap", { operationId: w.f.operation.operationId })).status).toBe(403);
   expect(w.calls).toEqual(before);

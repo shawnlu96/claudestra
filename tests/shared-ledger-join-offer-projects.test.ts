@@ -6,11 +6,13 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Ask } from "../src/lib/ledger-asks.js";
 import type { HttpPeer } from "../src/lib/peers.js";
-import { parseJoinOffer, joinOfferCard } from "../src/lib/shared-ledger-join-offer.js";
+import { parseJoinOffer, joinOfferCard, claimPendingOffer } from "../src/lib/shared-ledger-join-offer.js";
 import { receiveJoinOffer, onJoinOfferAnswered, setSharedProjectAuditHook, sweepJoinOfferMaintenance,
-  type JoinOfferDeps, type JoinOfferExpectedProject } from "../src/bridge/shared-ledger-join-offer.js";
+  type JoinOfferDeps, type JoinOfferExpectedProject, sweepJoinOffers } from "../src/bridge/shared-ledger-join-offer.js";
+import { sharedProjectsClientPorts } from "../src/bridge/local-api/shared-projects-client.js";
+import { answerSharedProject } from "../src/bridge/local-api/shared-projects-actions.js";
 import { projectChoices } from "../src/bridge/local-api/shared-projects-choice.js";
-import { inviteSharedProject } from "../src/bridge/local-api/shared-projects-invite.js";
+import { proposeSharedProjectInvite, sendApprovedSharedProjectInvite, type ProjectInvitePorts } from "../src/bridge/local-api/shared-projects-invite.js";
 
 const centerId = "center-" + "c".repeat(32);
 const code = `sljoin1.${centerId}.${"a".repeat(32)}.${"M".repeat(43)}`;
@@ -109,28 +111,53 @@ test("N6 audit still runs if the invitation store fails; no old rebind implement
   expect(audited).toBe(1);
 });
 
-test("N3 code is only present in peer POST; sender files, logs and public result never contain secrets", async () => {
-  const dir = root(), p = peer(), bodies: string[] = [], logs: unknown[] = [];
+function senderWorld(p: HttpPeer) {
+  const dir = root(), f = createV2ProjectsFixtures();
+  const who = { subject: "owner:self", kind: "person", centerId, teamId: "team", personId: "owner-person", instanceId: "instance" } as const;
+  const record = { ...f.project, ...project, centerId };
+  const recipient = { ...f.responses.invite.member, centerId, teamId: "team", projectId: project.projectId, personId: "alice" };
+  const self = { ...recipient, personId: who.personId, code: "Owner", role: "owner" as const, status: "active" as const };
+  const asks: Ask[] = [], claimed = new Set<string>();
+  const actions = sharedProjectsClientPorts({ id: "owner:self", role: "owner", agents: ["*"], createdAt: "" }, null, dir, fetch,
+    { centerId, teamId: "team", projectId: "original" });
+  actions.person = async () => who;
+  actions.authorizeAnswer = async () => true;
+  actions.openAsk = input => { const a = { ...input, id: `sender_${asks.length}`, state: "open", answer: null,
+    fromAgent: null, extra: input.extra ?? {} } as Ask; asks.push(a); return a; };
+  actions.getAsk = id => asks.find(a => a.id === id) ?? null;
+  actions.claimAsk = a => { if (claimed.has(a.id)) return false; claimed.add(a.id); return true; };
+  const d: ProjectInvitePorts = { now: () => Date.now(), stateDir: dir, peers: async () => [p], receiptProject: "local-a",
+    project: async () => record, members: async () => [self, recipient],
+    mint: async () => ({ url: "https://center.example/", project: record, invite: projectInvite(), member: recipient }),
+    post: async () => new Response(null, { status: 202 }) };
+  actions.sendInvite = (person, a) => sendApprovedSharedProjectInvite(person, a, actions, d);
+  return { dir, who, asks, actions, d };
+}
+
+test("N3 member and invite remain in memory; only approved signed peer POST carries the secret", async () => {
+  const p = peer(), w = senderWorld(p), bodies: string[] = [], logs: unknown[] = [];
   const spies = (["log", "warn", "error"] as const).map(m => spyOn(console, m).mockImplementation((...args) => { logs.push(args); }));
   try {
-    const result = await inviteSharedProject({ subject: "owner:self", kind: "person", centerId, teamId: "team", personId: "alice", instanceId: "instance" },
-      "project-b", [p.name], "welcome", { now: () => Date.now(), stateDir: dir, peers: async () => [p], receiptProject: "local-a",
-        mint: async () => ({ url: "https://center.example/", project, invite: projectInvite() }),
-        post: async (_peer, _url, body) => { bodies.push(body); return new Response("SECRET_RESPONSE", { status: 202 }); } });
-    expect(result[0]!.accepted).toBe(true);
+    w.d.post = async (_peer, _url, body) => { bodies.push(body); return new Response("SECRET_RESPONSE", { status: 202 }); };
+    const result = await proposeSharedProjectInvite(w.who, "project-b", [p.name], "welcome", { personId: "alice" }, w.actions, w.d);
+    expect(bodies).toEqual([]);
+    const a = w.asks[0]!;
+    Object.assign(a, { state: "answered", answer: { choices: ["[button:shared_project_confirm]"], labels: [], text: "",
+      principal: "owner:self", owner: true, via: "web_card", at: Date.now() } });
+    const sent = await answerSharedProject(a, w.actions);
+    expect((sent!.offers as { accepted: boolean }[])[0]!.accepted).toBe(true);
     expect(JSON.parse(bodies[0]!).code).toBe(code); expect(JSON.parse(bodies[0]!).project).toEqual(project);
-    const files = readdirSync(join(dir, "shared-ledger-join-offers-sent")).map(f => readFileSync(join(dir, "shared-ledger-join-offers-sent", f), "utf8"));
-    const publicData = JSON.stringify([files, logs, result]);
+    const files = readdirSync(join(w.dir, "shared-ledger-join-offers-sent")).map(f => readFileSync(join(w.dir, "shared-ledger-join-offers-sent", f), "utf8"));
+    const publicData = JSON.stringify([files, logs, result, sent, w.asks]);
     for (const secret of [code, "M".repeat(43), "SECRET_RESPONSE"]) expect(publicData).not.toContain(secret);
   } finally { spies.forEach(s => s.mockRestore()); }
 });
 
-test("plaintext or unconfigured peers are rejected before minting", async () => {
+test("plaintext or unconfigured transport peers are rejected before minting", async () => {
   const p = peer(); p.baseUrl = "http://peer.example";
-  let minted = false;
-  await expect(inviteSharedProject({ subject: "owner:self", kind: "person", centerId, teamId: "team", personId: "alice", instanceId: "instance" },
-    "project-b", [p.name], undefined, { now: () => Date.now(), stateDir: root(), peers: async () => [p], receiptProject: "local-a",
-      mint: async () => { minted = true; throw new Error("must not run"); }, post: async () => { throw new Error("must not run"); } })).rejects.toThrow();
+  const w = senderWorld(p); let minted = false;
+  w.d.mint = async () => { minted = true; throw new Error("must not run"); };
+  await expect(proposeSharedProjectInvite(w.who, "project-b", [p.name], undefined, { personId: "alice" }, w.actions, w.d)).rejects.toThrow();
   expect(minted).toBe(false);
 });
 
@@ -179,4 +206,19 @@ test("changed invitation card identity text or selector labels produces failed r
     await onJoinOfferAnswered(a, w.d);
     expect(w.joined).toEqual([]); expect(w.receipts).toEqual(["failed"]);
   }
+});
+
+
+test("restart orphan card closes and emits one failed receipt without recovering secrets", async () => {
+  const w = world(), body = wire();
+  await receiveJoinOffer(w.p, body, w.d);
+  claimPendingOffer(w.dir, body.offerId); // Simulate the memory lost at restart, keeping the durable card.
+  Object.assign(w.d, { listOrphanCandidates: () => w.asks, claimOrphan: (a: Ask) => { if (a.extra.joinOfferOrphanSettled) return false; a.extra.joinOfferOrphanSettled = true; return true; } });
+  w.d.closeAsk = id => { w.asks.find(a => a.id === id)!.state = "cancelled"; };
+  await sweepJoinOffers(w.d);
+  expect(w.asks[0]!.state).toBe("cancelled");
+  expect(w.receipts).toEqual(["failed"]);
+  await sweepJoinOffers(w.d);
+  expect(w.receipts).toEqual(["failed"]);
+  expect(w.joined).toEqual([]);
 });

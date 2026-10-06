@@ -9,6 +9,16 @@ export interface ProjectPerson {
 }
 type SharedProjectRecord = V2ProjectRecord;
 export type ProjectSelection = { mode: "create" } | { mode: "existing"; localProjectId: string };
+export type ProjectRecipient = { personId: string } | { code: string };
+export interface ProjectInviteApproval {
+  project: V2ProjectRecord;
+  recipient: ProjectRecipient;
+  personId: string;
+  member: V2ProjectMember;
+  peers: { name: string; digest: string }[];
+  noteDigest: string;
+  invitations: { offerId: string; digest: string; expiresAt: number }[];
+}
 export interface ProjectCreate { operationId: string; id?: string; name: string; selection?: ProjectSelection }
 export interface CreatorOperation {
   operation: V2ProjectOperation; project: SharedProjectRecord;
@@ -25,7 +35,8 @@ export interface SharedProjectsPorts {
   create: (who: ProjectPerson, input: ProjectCreate) => Promise<CreatorOperation>;
   patch: (who: ProjectPerson, projectId: string, input: { rev: number; name?: string; status?: "active" | "archived" }) => Promise<SharedProjectRecord>;
   /** N3 mints and delivers in memory; output contains no code or response body. */
-  invite: (who: ProjectPerson, projectId: string, peers: string[], note?: string) => Promise<{ peer: string; offerId: string; accepted: boolean }[]>;
+  invite: (who: ProjectPerson, projectId: string, peers: string[], note: string | undefined, recipient: ProjectRecipient) => Promise<{ askId: string }>;
+  sendInvite: (who: ProjectPerson, ask: Ask) => Promise<{ peer: string; offerId: string; accepted: boolean }[]>;
   operation: (who: ProjectPerson, operationId: string) => Promise<CreatorOperation>;
   /** N3 obtains a creator invite in memory; N2 alone redeems and atomically saves the selected project and credential. */
   enrollCreator: (who: ProjectPerson, operation: CreatorOperation, selection: ProjectSelection) => Promise<string>;
@@ -42,6 +53,8 @@ export interface SharedProjectsPorts {
   getAsk: (id: string) => Ask | null;
   /** Durable, synchronous one-time claim after the stored card and its approval have been checked. */
   claimAsk: (ask: Ask) => boolean;
+  /** Re-resolve the stored approver device, including its full management authority. */
+  authorizeAnswer: (ask: Ask) => Promise<boolean>;
   /** Deployment authorization is separate from local owner authority, and cannot come from an agent. */
   deploymentAuthorized: () => Promise<boolean>;
   preflight: (who: ProjectPerson, operationId: string) => Promise<BootstrapPreflight>;
