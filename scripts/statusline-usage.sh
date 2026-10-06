@@ -7,14 +7,22 @@
 # 安装:~/.claude/settings.json 里
 #   "statusLine": { "type": "command", "command": "<repo>/scripts/statusline-usage.sh" }
 #
-# **已有自己 statusline 的用户不要用本文件**——在你自己的脚本末尾加一行(语言
-# 无关,字段契约由 usage-cache-write.sh 唯一实现,别手抄):
+# 已有自己 statusline 的用户:setup/update 不改你的配置,只生成包装计划,本机 owner
+# 批准后改成 `<本脚本> --wrap '<你的原命令>'`——原命令照样跑、输出与退出码原样透传,
+# 本脚本只多做一步落盘(lib/statusline-usage-install.ts)。也可以自己在脚本末尾加一行:
 #   printf '%s' "$input" | <repo>/scripts/usage-cache-write.sh
 #
 # 降级安全:输入缺 rate_limits(旧版 CC)→ 不落盘;python3 不在 → 状态栏空行,
 # 会话不受影响。
 
 input=$(cat)
+
+if [ "$1" = "--wrap" ]; then
+  printf '%s' "$input" | /bin/sh -c "$2"
+  rc=$?
+  printf '%s' "$input" | "$(dirname "${BASH_SOURCE[0]}")/usage-cache-write.sh"
+  exit $rc
+fi
 
 # 状态栏渲染(只管显示;落盘在下面统一走 usage-cache-write.sh,契约单点)
 python3 - "$input" <<'PYEOF'

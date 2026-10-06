@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { CenteredModal } from "./centered-modal";
 import { useChatStore, useChatStoreApi } from "../chat-store";
 import { ctxLevel, CTX_WINDOW } from "../ctx-level";
@@ -34,14 +34,9 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
   // 老 bridge 没有 quotas 字段 → 空数组，不画 Codex 卡
   const [quotas, setQuotas] = useState<QuotaView[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  // 上次点刷新的结果（bridge 的手动探测闸：失败后 30 分钟内再点也不探测，给下一可刷新时间）
+  const [refreshNote, setRefreshNote] = useState<RefreshNote | null>(null);
   const quotaState = useSubscriptionQuota(open);
-  // 冷启动自动补拉只试一次/每次打开(openRef 防面板已关还在拉)
-  const retriedRef = useRef(false);
-  const openRef = useRef(open);
-  // 同 composer：ref 的最新值在 effect 里同步，避免在可能被丢弃的 render 里写。
-  useEffect(() => {
-    openRef.current = open;
-  });
 
   const load = (force: boolean) => {
     if (force) void quotaState.reload();
@@ -49,19 +44,15 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
     // 上下文占用行的数据在 agents store 里——打开/手动刷新都顺带静默重拉，
     // 否则「刷新」只刷账号用量，ctx 行看起来点了没反应（2026-07-16 用户实报）
     store.refreshAgents();
-    stats<{ global?: GlobalStats; agents?: StatAgent[]; quotas?: unknown; machine?: unknown; window?: unknown }>(force)
+    // 打开面板只读缓存（后台从不抓 TUI）；没有读数时 global 的百分比是 null，卡片显示「?」而不是 0
+    stats<{ global?: GlobalStats & { source?: string; stale?: boolean; reason?: string | null }; agents?: StatAgent[]; quotas?: unknown;
+      machine?: unknown; window?: unknown; refresh?: RefreshNote }>(force)
       .then((j) => {
         setG(j.global ?? null);
         setUsage(usageTableData(j));
         setQuotas(codexQuotas(j.quotas));
-        // bridge 刚重启时账号 gauge 缓存为空——本次请求已在服务端触发后台抓取,
-        // ~6.5s 后静默重拉补上,不用用户手点刷新
-        if (!j.global && !retriedRef.current) {
-          retriedRef.current = true;
-          setTimeout(() => {
-            if (openRef.current) load(false);
-          }, 6500);
-        }
+        if (force) setRefreshNote(j.refresh ?? null);
+        else if (j.global?.source === "none") setRefreshNote({ outcome: "unknown", nextAllowedAt: null, reason: j.global.reason ?? null });
       })
       .catch(() => {})
       .finally(() => setRefreshing(false));
@@ -69,7 +60,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
 
   useEffect(() => {
     if (!open) return;
-    retriedRef.current = false;
+    setRefreshNote(null);
     load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -87,7 +78,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
           <button
             className="ml-auto flex size-7 items-center justify-center rounded-lg text-base-content/50 transition-colors hover:bg-base-200 hover:text-base-content disabled:opacity-40"
             aria-label={t("强制刷新账号用量")}
-            title={t("强制重抓账号用量（最长约 20 秒）")}
+            title={t("用独立临时会话读取账号用量（最长约 90 秒；失败后 30 分钟内不再读取）")}
             disabled={refreshing}
             onClick={() => load(true)}
           >
@@ -122,6 +113,7 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-5">
+          {refreshNote && <RefreshNoteLine note={refreshNote} />}
           <QuotaArea quota={quotaState} g={g} quotas={quotas} />
           {/* token 与花费按 runtime 分行（Claude Code / Codex / Pi 口径各不相同，混着看互相淹没） */}
           {(usage.agents.length > 0 || usage.machine) && <UsageTable {...usage} />}
@@ -164,5 +156,24 @@ export function StatsPanel({ open, onClose }: { open: boolean; onClose: () => vo
           </div>
         </div>
     </CenteredModal>
+  );
+}
+
+/** bridge POST /stats/refresh 的 refresh 字段；unknown = 打开面板时没有任何读数 */
+interface RefreshNote {
+  outcome: "refreshed" | "backoff" | "failed" | "busy" | "unknown";
+  nextAllowedAt: number | null;
+  reason: string | null;
+}
+
+function RefreshNoteLine({ note }: { note: RefreshNote }) {
+  const t = useT();
+  // busy = 别的请求正在读，结果很快就到；refreshed 卡片自己会显示新读数
+  if (note.outcome === "refreshed" || note.outcome === "busy") return null;
+  const time = note.nextAllowedAt ? new Date(note.nextAllowedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+  return (
+    <div className="mb-3 rounded-xl bg-base-200 p-3 text-xs text-base-content/60">
+      {note.outcome === "unknown" ? t("账号用量未知（没有状态栏缓存），可点右上角刷新读取一次") : t("读取账号用量失败，显示的是上次读数或未知；{time} 前不再重试", { time })}
+    </div>
   );
 }
