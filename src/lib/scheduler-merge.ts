@@ -14,6 +14,7 @@ import { canTransition, nextTaskState, type LedgerTask } from "./ledger-stages.j
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { exemptVerdict } from "./scheduler-review-swap.js";
 import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
 import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
@@ -85,7 +86,7 @@ export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskW
   const reviewer = currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
   if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
     review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
-    review.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) ||
+    (review.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) && !exemptVerdict(db, task, review.facts)) ||
     !["pass", "changes"].includes(review.facts.verdict) ||
     review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) {
     throw new LedgerError("conflict", "当前 head 缺同卡跨模型审查通过结论或仍有 P0/P1");

@@ -401,6 +401,12 @@
       "from": 0,
       "to": 0,
       "why": "CIS1（owner 10-06「让 Shawn 想办法提高 ci 效率」）：单元测试拆 4 片并行，必需检查 typecheck + test + guard 改成汇总闸（任一片失败/取消/跳过都红，并核对各片合起来恰好跑每个测试文件一次）；Guard 步骤与 GUARD_STRICT 原样保留在第 1 片，不放宽任何规则"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 新增 src/lib/shell-end-line.ts ↔ web/lib/chat/shell-end-line.ts：后台 shell 终止行（[exited with code N] / [killed]）的解析规则 bridge 与网页各需一份，按防腐规则 5 登记成 twin（#685 审计 P2）"
     }
   ]
 }
