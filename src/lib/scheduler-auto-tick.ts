@@ -313,10 +313,11 @@ class Card {
     const w = this.deps.worker(ref);
     if ("manual" in w) return this.out("held", `${wait.reason}；${w.manual}`);
     const seen = await w.observe(ref, { round: this.task.round, step, head: sent.head, dedupKey: sent.id });
-    if (seen.state === "unknown" && seen.failure) {
+    const ru = await import("./scheduler-refusal-unclaimed.js"); // MODELXW2：领单前的策略拒审，先做关联再决定退不退人工
+    const pre = await ru.unclaimedRefusal(this.db, this.task, sent, ref, seen);
+    if (seen.state === "unknown" && seen.failure && !ru.awaitsAssociation(seen, pre)) {
       return this.escalate(`${ref.agent} 报了归不到派单上的失败（${seen.failure.kind}），本单可能也没跑：${seen.failure.message}`, sent.id);
     }
-    const pre = await (await import("./scheduler-refusal-unclaimed.js")).unclaimedRefusal(this.db, this.task, sent, ref, seen); // MODELXW2：领单前的策略拒审
     const failure = seen.state === "result" && seen.outcome === "failed" ? seen.failure : pre?.kind === "confirmed" ? pre.failure : null;
     if (failure) {
       const what = failure.kind === "quota" ? "撞额度" : failure.kind === "auth" ? "登录失效" : "回合失败";

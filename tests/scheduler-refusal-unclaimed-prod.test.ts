@@ -1,12 +1,9 @@
 /**
- * dispatch-recovery-MODELXW2 · 领单前的策略拒审，按 src/scheduler.ts 的接法测：auto tick 读 query_only 的 LedgerReader，每笔写经真实台账
- * CLI 子进程（调度身份、租约、最小 env、临时 HOME / TMPDIR / 状态目录）。复现 N3：旧审查单已发唤醒、没人领，绑定会话最后一回合
- * 是 cyber 拒审（bridge 的回合失败卡，extra.failure = error / sessionId / failedAt），observe 归不到本单。
- * 旧代码：只有未领单报警，不退休、不派新单。新代码：无快照 → 正式退休旧绑定 → 派带快照的新单；有快照 → refusal epoch → 换家族 →
- * 豁免标记 → owner 只告知一次。关联不确定（唤醒之前、别的会话、已有后续回合）或 observe：不动，报警正文照旧 / 带「疑似」。
- * 换审查员那一步（它自己的 CLI 子命令）照 tests/scheduler-model-wiring-prod.test.ts 在进程内跑、建会话是桩。
- */
-import { afterEach, expect, spyOn, test } from "bun:test";
+ * dispatch-recovery-MODELXW2 · 领单前的策略拒审，按 src/scheduler.ts 的接法测：只读 LedgerReader + 真实台账 CLI 子进程（临时 HOME / TMPDIR / 状态目录）。
+ * N3：旧审查单已发唤醒、没人领，绑定会话最后一回合是 cyber 拒审卡，observe 归不到本单。无快照 → 退休旧绑定 → 派带快照的新单；
+ * 有快照 → refusal epoch → 换家族 → 豁免 → owner 只告知一次。关联不确定 / observe：不动，报警照旧（带「疑似」）。
+ * acp 变体让 observe 读真实 codexFailure()（生产 acpPort 同款）。换审查员一步照 scheduler-model-wiring-prod 在进程内跑、建会话是桩。
+ */import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
@@ -15,6 +12,7 @@ import { answerAsk, closeAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
+import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
 import { boundRef, schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { informKey, snapshotKey } from "../src/lib/scheduler-model-wiring.js";
@@ -34,7 +32,7 @@ afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
 type Fixture = ReturnType<typeof autoFixture>;
 
-async function setup(mode: "on" | "observe" = "on") {
+async function setup(mode: "on" | "observe" = "on", acp = false) {
   const errors = spyOn(console, "error").mockImplementation(() => {});
   const f = autoFixture();
   const reader = new LedgerReader(join(f.dir, "ledger.sqlite"));
@@ -84,7 +82,13 @@ async function setup(mode: "on" | "observe" = "on") {
   const realWorker = f.tickDeps.worker;
   const deps: AutoTickDeps = { ...f.tickDeps, manager, now: () => Date.now() + skew, worker: (ref) => {
     const w = realWorker(ref);
-    return refusal === null || "manual" in w ? w : { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind: "error", message: refusal! } }) };
+    if ("manual" in w) return w;
+    if (refusal !== null) return { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind: "error", message: refusal! } }) };
+    // acp：observe 前按生产 acpPort.turnState 读这个会话的回合失败卡
+    return !acp || ref.family !== "codex" ? w : { ...w, observe: async (r, o) => {
+      f.acpState.lastFailure = codexFailure(f.db, r.agent, r.sessionId);
+      try { return await w.observe(r, o); } finally { delete f.acpState.lastFailure; }
+    } };
   } };
   const tick = async () => {
     const ro = reader.get()!;
@@ -256,3 +260,26 @@ test("MODELXW2 读失败不猜：拒审卡读不到 → 不确认，返回疑似
   const failed = { state: "result" as const, outcome: "failed" as const, failure: { kind: "quota" as const, message: "q" } };
   expect(await unclaimedRefusal(db, s.f.task(), sent, ref, failed)).toBeNull(); // 原失败不被吞
 }, 120_000);
+
+for (const c of [
+  { name: "策略拒审卡缺失败时刻", message: CYBER, step: "waiting", suspect: true },
+  { name: "普通错误卡缺失败时刻（其他失败照旧退人工）", message: "context window exhausted", step: "manual", suspect: false },
+]) {
+  test(`MODELXW2 真实 codexFailure 链路：${c.name} → observe 为 unknown + failure`, async () => {
+    const s = await setup("on", true);
+    expect(await s.tick()).toMatchObject({ step: "sent" });
+    const sent = getIntent(s.f.db, s.reviews().at(-1)!.id)!;
+    approve(s.f);
+    const a = refusalCard(s.f, { failedAt: submittedAt(s.f, sent.id) + 1, message: c.message });
+    s.f.db.run("UPDATE asks SET extra = json_remove(extra, '$.failedAt') WHERE id = ?", [a.id]);
+    expect(codexFailure(s.f.db, "agent-rv-t1", "s-rv")).toMatchObject({ afterKey: null });
+    s.wait(UNCLAIMED_ALARM_MS + 60_000);
+    // 旧代码：两种都在识别之前提前退人工（step manual，只通知退回人工，没有未领单报警）
+    expect(await s.tick()).toMatchObject({ step: c.step });
+    expect(s.ops("reviewer_swap")).toEqual([]);
+    expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+    const alarm = s.f.notices.filter((n) => n.includes("还没人领"));
+    if (c.suspect) expect(alarm.map((n) => n.includes(`${SUSPECT_NOTE}（卡上缺失败时刻或会话）`))).toEqual([true]);
+    else expect(alarm).toEqual([]);
+  }, 120_000);
+}

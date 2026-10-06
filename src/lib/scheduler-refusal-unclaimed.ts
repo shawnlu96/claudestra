@@ -1,14 +1,9 @@
 /**
- * dispatch-recovery-MODELXW2：领单前的策略拒审也认成本单拒审。复用的旧审查会话带着之前被拒的上下文，一收到唤醒就被提供方拒了：
- * 这张单从没被领过，observe 归不到「本单回合失败」，auto tick 只会报未领单；而 MODELXW 验收线 3 下监护在 on 时又让开了，于是没人处理。
- * 这里只读台账，认出「本单已发唤醒、未领、绑定的审查会话在唤醒之后的那一回合以策略拒审结束、会话 / head / 轮次 / specRev 都对得上」，
- * 把那条拒审交给 watch() 现有的失败分支（无快照 legacyReviewStep，有快照 modelOutcomeStep）。信号是 bridge 开的「回合失败」卡
- * （bridge/acp-link.ts，extra.failure = error / sessionId / failedAt），判定与监护一致：cyber 用监护的 isCyberPolicy，usage_policy 用
- * MODEL 的安全拒绝分类（scheduler-model-wiring.ts legacyReviewStep 认的同一个）。只读，不改监护、不写台账。
- * 有拒审卡却关联不上（唤醒之前、别的单、别的会话、缺时刻或会话、已有后续回合、head / 轮次不符）：不动，未领单报警正文带上
- * 「疑似领单前拒审，未能确认」。不能猜。只在 modelOutcome on 下生效：observe / off 返回 null，行为不变。tests/scheduler-refusal-unclaimed*.test.ts。
- */
-import type { Database } from "bun:sqlite";
+ * dispatch-recovery-MODELXW2：未领的审查单，绑定会话在唤醒之后的那一回合以策略拒审结束（会话 / head / 轮次 / specRev 都对得上）→ confirmed，
+ * 交 watch() 现有失败分支。信号是 bridge 的回合失败卡（extra.failure / sessionId / failedAt），cyber 判定同监护，usage_policy 同 MODEL。
+ * 关联不上或读不到 → suspected：不动，未领单报警正文带「疑似领单前拒审，未能确认」。observe 归不到单的同类拒审也先走这里，不提前退人工。
+ * 只读；只在 modelOutcome on 下生效。tests/scheduler-refusal-unclaimed*.test.ts。
+ */import type { Database } from "bun:sqlite";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { listAsks, type Ask } from "./ledger-asks.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
@@ -27,8 +22,12 @@ export type UnclaimedRefusal =
 export const SUSPECT_NOTE = "；疑似领单前拒审，未能确认";
 
 /** 提供方策略拒审：监护认的 cyber_policy，或 MODEL 归为 safety 的（含 Claude usage_policy） */
-export const isPolicyRefusal = (message: string): boolean =>
+const isPolicyRefusal = (message: string): boolean =>
   isCyberPolicy(message) || classifyModelOutcome({ failure: { kind: "error", message } })?.cls === "safety";
+
+/** observe 报了归不到单的失败，但它是本卡管的策略拒审、且已做过关联识别：交给识别结果，不提前退人工；额度 / 登录 / 普通失败照旧 */
+export const awaitsAssociation = (seen: WorkerObservation, pre: UnclaimedRefusal | null): boolean =>
+  pre !== null && seen.state === "unknown" && seen.failure?.kind === "error" && isPolicyRefusal(seen.failure.message);
 
 const cardMessage = (a: Ask): string => `${a.title}：${a.context}`;
 const roundOf = (intentId: string): number | null => {
