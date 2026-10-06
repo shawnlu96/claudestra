@@ -1,7 +1,7 @@
 /**
  * team-parity-C 的纯逻辑部分（常跑，不开浏览器）：
  * ① 本机夹具是全量的（审查 pass / changes / block 各一、事件 data 完整、DAG 有两版）；
- * ② 团队一侧只经生产导出 → 真中心导入 → 真投影器 → 中心读口得到（web-team-parity-browser-center.test.ts），没有规则副本；
+ * ② 团队一侧消费固定迁移协议响应；私仓重放同一输入证明中心输出一致，没有规则副本；
  * ③ 旧「本机由团队模型生成」的喂法让 T3 / T5 / T7 的消费者全空，本机数据下都有内容（数据层旧红新绿）；
  * ④ 矩阵比对器的受控变异：缺口修好 → stale_gap，退回 → fail，期望只能往 present 走；
  * ⑤ team-parity-Cf1：只删了 P1-A 的 gap，恢复 A 之前的假值判 fail，其余 gap 修好仍判 stale_gap。
@@ -30,7 +30,7 @@ test("home fixture is a full home ledger: complete event data, every review verd
   expect(JSON.stringify(generateHomeFixture())).toBe(JSON.stringify(home));
 });
 
-test("team side comes from the production export → center import → mirror projector → center reads", async () => {
+test("team side consumes pinned export/import/mirror protocol responses", async () => {
   const home = generateHomeFixture(), team = await teamFromHome(home);
   expect(team.details.map((d) => team.localFeature[d.feature.id]).sort()).toEqual(home.features.map((f) => f.id).sort());
   const tasks = team.details.flatMap((d) => d.tasks), by = (id: string) => tasks.find((t) => t.sourceTaskId === id)!;
