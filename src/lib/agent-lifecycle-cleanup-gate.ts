@@ -1,10 +1,12 @@
 /**
  * Quiets pending-cleanup retries (agent-lifecycle-run.ts): an unchanged result (or error) is neither recorded nor reported again and
  * backs off (BACKOFF_BASE_MS doubling to BACKOFF_MAX_MS); a changed one is recorded and reported once. State: a JSON file keyed by
- * agent + original session (or the pending row's createdAt), so it survives restarts and a re-created name never shares it.
+ * agent + original session + the pending row's createdAt, so it survives restarts and a re-created name never shares it.
  * It only withholds noise: a first retire is always recorded, a finished cleanup always closes its row, an unreadable / malformed
  * state means "no back-off" (retry and record), never a debt skipped for good.
  */
+import { Database } from "bun:sqlite";
+import { LEDGER_PATH } from "./ledger-store.js";
 import { createHash } from "node:crypto";
 import { readFile, rename } from "node:fs/promises";
 import type { RetireRecord } from "./agent-lifecycle-store.js";
@@ -21,14 +23,13 @@ const FORGET_MS = 30 * 24 * 3_600_000;
 
 interface Slot { digest: string; n: number; nextAt: number; at: number }
 type State = Record<string, Slot>;
-export interface GateDeps { now(): number; record(r: RetireRecord): Promise<void>; cleanupStatePath?: string }
+export interface GateDeps { now(): number; record(r: RetireRecord): Promise<void>; cleanupStatePath?: string; cleanupLedgerPath?: string }
 type Outcome = { freed: number | null; left: number; quiet?: boolean } | { error: string };
 
 const path = (d: Pick<GateDeps, "cleanupStatePath">) => d.cleanupStatePath ?? statePath("lifecycle-cleanup.json");
 
 function gateKey(a: Pick<Action, "agent" | "sessionId" | "regAt">): string | null {
-  if (a.sessionId) return `${a.agent}\0${a.sessionId}`;
-  return typeof a.regAt === "number" ? `${a.agent}\0\0${a.regAt}` : null;
+  return typeof a.regAt === "number" ? `${a.agent}\0${a.sessionId ?? ""}\0${a.regAt}` : null;
 }
 
 const finite = (v: unknown, min: number): boolean => typeof v === "number" && Number.isFinite(v) && v >= min;
@@ -93,6 +94,20 @@ function digestOf(r: Pick<RetireRecord, "pending" | "steps">): string {
 
 const errorDigest = (msg: string) => createHash("sha256").update(`error:${msg}`).digest("hex");
 
+/** A first retire acquires its concrete pending identities only after the ledger writer creates or updates the rows. */
+function initialKeys(a: Action, d: GateDeps, pending: RetireRecord["pending"]): string[] {
+  let db: Database | null = null;
+  try {
+    db = new Database(d.cleanupLedgerPath ?? LEDGER_PATH, { readonly: true });
+    const rows = db.query(`SELECT sessionId, createdAt FROM worker_agents WHERE agent = ? AND sessionId = ?
+      AND state = 'active' AND reason = ?`).all(a.agent, a.sessionId ?? "", `cleanup_pending:${JSON.stringify(pending)}`) as { sessionId: string; createdAt: number }[];
+    return rows.map((r) => gateKey({ agent: a.agent, sessionId: r.sessionId, regAt: r.createdAt })!);
+  } catch (e) {
+    console.error(`[lifecycle] 首退待补清身份读不了，不预设退避：${(e as Error).message}`);
+    return [];
+  } finally { db?.close(); }
+}
+
 /**
  * Runs `collect` for one action. A first retire is recorded as always, and remembers its result when disk is left; a retry whose
  * result (or error) equals the last one is not recorded and comes back `quiet`, and backs off. A changed one is recorded, reported
@@ -100,11 +115,12 @@ const errorDigest = (msg: string) => createHash("sha256").update(`error:${msg}`)
  */
 export async function gatedCollect<D extends GateDeps>(a: Action, deps: D, collect: (a: Action, deps: D) => Promise<Outcome>): Promise<Outcome> {
   const key = gateKey(a);
-  if (!key) return collect(a, deps);
   const retry = a.rule === "cleanup_retry";
-  const prev = retry ? (await load(deps))?.[key] ?? null : null;
-  const seen: { digest: string | null; same: boolean } = { digest: null, same: false };
+  if (!key && retry) return collect(a, deps);
+  const prev = retry ? (await load(deps))?.[key!] ?? null : null;
+  const seen: { digest: string | null; same: boolean; pending: RetireRecord["pending"] } = { digest: null, same: false, pending: [] };
   const wrapped: D = { ...deps, record: async (r: RetireRecord) => {
+    seen.pending = r.pending;
     seen.digest = r.pending.length ? digestOf(r) : null;
     seen.same = !!seen.digest && prev?.digest === seen.digest;
     if (!seen.same) await deps.record(r);
@@ -117,12 +133,12 @@ export async function gatedCollect<D extends GateDeps>(a: Action, deps: D, colle
   try { out = await collect(a, wrapped); } catch (e) {
     if (e instanceof SchedulerStopped || !retry) throw e;
     const d = errorDigest((e as Error).message), unchanged = prev?.digest === d;
-    await update(deps, key, next(d, unchanged));
+    await update(deps, key!, next(d, unchanged));
     if (unchanged) return { freed: null, left: a.entries?.length ?? 1, quiet: true };
     throw e;
   }
   if ("error" in out) return out;
-  if (!out.left || !seen.digest) { if (retry) await update(deps, key, null); return out; }
-  await update(deps, key, next(seen.digest, seen.same));
+  if (!out.left || !seen.digest) { if (retry) await update(deps, key!, null); return out; }
+  for (const k of retry ? [key!] : initialKeys(a, deps, seen.pending)) await update(deps, k, next(seen.digest, seen.same));
   return seen.same ? { ...out, quiet: true } : out;
 }

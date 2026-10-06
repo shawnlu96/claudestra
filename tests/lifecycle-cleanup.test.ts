@@ -5,12 +5,12 @@
  * occupied or symlinked target, an outside / main checkout, a holder, an open write dispatch / lease and any read failure delete nothing.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
 import { archiveSurvey, archiveTarget } from "../src/lib/agent-lifecycle-cleanup-archive.js";
-import { BACKOFF_BASE_MS, dueRetries } from "../src/lib/agent-lifecycle-cleanup-gate.js";
+import { BACKOFF_BASE_MS, dueRetries, gatedCollect } from "../src/lib/agent-lifecycle-cleanup-gate.js";
 import { surveyCheckout, type Survey } from "../src/lib/agent-lifecycle-cleanup-scan.js";
 import { retireWorktree, type WorktreeCleanupDeps } from "../src/lib/agent-lifecycle-cleanup.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
@@ -42,7 +42,9 @@ function fixture(name = "w1") {
   writeFileSync(join(repo, "a.txt"), "tracked\n"); writeFileSync(join(repo, ".gitignore"), "node_modules\n.env\n*.log\n");
   sh(repo, "add", "."); sh(repo, "commit", "-q", "-m", "base");
   sh(repo, "worktree", "add", "-q", "--detach", wt);
-  const deps: WorktreeCleanupDeps = { git, worktreeRoot: root, now: () => NOW, cleanupArchiveRoot: archive, cleanupStatePath: join(dir, "cleanup.json") };
+  const ledgerPath = join(dir, "ledger.sqlite"); openLedger(ledgerPath);
+  cleanup.push(() => closeLedger(ledgerPath));
+  const deps: WorktreeCleanupDeps = { git, cleanupLedgerPath: ledgerPath, worktreeRoot: root, now: () => NOW, cleanupArchiveRoot: archive, cleanupStatePath: join(dir, "cleanup.json") };
   return { dir, repo, root, wt, archive, deps };
 }
 
@@ -234,7 +236,7 @@ describe("ledger: notify once, back off, survive restart", () => {
   }
 
   test("tracked change: one worker_retire event and one failed report across ticks / restarts; a state change reports again; clean finishes", async () => {
-    const { db } = ledger();
+    const { db, path } = ledger();
     const { wt, root, deps: wd } = fixture();
     writeFileSync(join(wt, "a.txt"), "changed\n");
     registerWorker(db, { agent: "agent-c", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
@@ -243,7 +245,7 @@ describe("ledger: notify once, back off, survive restart", () => {
     let t = NOW;
     const deps = (): LifecycleDeps => ({ manager: async () => ({ ok: true }), git, exists: existsSync, worktreeRoot: root, agents: none, du: async () => 0,
       swapPct: async () => 0, record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => t,
-      cleanupStatePath: wd.cleanupStatePath, cleanupArchiveRoot: wd.cleanupArchiveRoot }); // a fresh deps object = a restarted process
+      cleanupLedgerPath: path, cleanupStatePath: wd.cleanupStatePath, cleanupArchiveRoot: wd.cleanupArchiveRoot }); // a fresh deps object = a restarted process
     const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
     const tick = () => runLifecycle(planLifecycle({ now: t, policy: on, agents: [], index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
       master: new Set(), swapPct: 10, pending: pendingCleanups(db) }), on, deps());
@@ -269,7 +271,7 @@ describe("ledger: notify once, back off, survive restart", () => {
   });
 
   test("registry read failure: the pending row is not closed and the same error is not re-reported", async () => {
-    const { db } = ledger();
+    const { db, path } = ledger();
     const { wt, root, deps: wd } = fixture();
     writeFileSync(join(wt, "u.txt"), "u");
     registerWorker(db, { agent: "agent-r", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
@@ -280,7 +282,7 @@ describe("ledger: notify once, back off, survive restart", () => {
     const tick = () => runLifecycle(planLifecycle({ now: t, policy: on, agents: [], index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
       master: new Set(), swapPct: 10, pending: pendingCleanups(db) }), on, { manager: async () => ({ ok: true }), git, exists: existsSync, worktreeRoot: root,
       agents: async () => { throw new Error("registry 读不出来"); }, du: async () => 0, swapPct: async () => 0,
-      record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => t, cleanupStatePath: wd.cleanupStatePath, cleanupArchiveRoot: wd.cleanupArchiveRoot });
+      record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => t, cleanupLedgerPath: path, cleanupStatePath: wd.cleanupStatePath, cleanupArchiveRoot: wd.cleanupArchiveRoot });
     expect((await tick()).failed.map((f) => f.error)).toEqual(["registry 读不出来"]);
     t += 3 * H;
     expect((await tick()).failed).toEqual([]);
@@ -338,16 +340,101 @@ describe("ledger: notify once, back off, survive restart", () => {
   });
 });
 
+describe("r2 P1 regressions", () => {
+  test("write-lease: missing ledger keeps original pending checkout and evidence", async () => {
+    const { wt, dir, archive, deps } = fixture();
+    writeFileSync(join(wt, "evidence"), "keep");
+    expect(await retireWorktree({ ...deps, cleanupLedgerPath: join(dir, "missing.sqlite") }, wt,
+      { ...owner, rule: "cleanup_retry" }, [], none, [])).toContain("台账读不了");
+    expect(readFileSync(join(wt, "evidence"), "utf8")).toBe("keep");
+    expect(existsSync(archive)).toBe(false);
+  });
+
+  test("archive-link: symlinked archive root never writes outside or removes originals", async () => {
+    const { wt, dir, archive, deps } = fixture();
+    writeFileSync(join(wt, "note"), "keep");
+    const outside = join(dir, "outside"); mkdirSync(outside); symlinkSync(outside, archive);
+    expect(await retireWorktree(deps, wt, owner, [], none, [])).toContain("软链");
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readFileSync(join(wt, "note"), "utf8")).toBe("keep");
+  });
+
+  test("archive-link: replacing archive root after verification keeps the worktree", async () => {
+    const { wt, dir, archive, deps } = fixture();
+    writeFileSync(join(wt, "note"), "keep");
+    const replace = async () => {
+      renameSync(archive, join(dir, "original-archive")); mkdirSync(archive);
+      return [];
+    };
+    expect(await retireWorktree(deps, wt, owner, [], replace, [])).toContain("归档根身份变了");
+    expect(readFileSync(join(wt, "note"), "utf8")).toBe("keep");
+    expect(readdirSync(archive)).toEqual([]);
+  });
+
+  test("retry-identity: same session with two createdAt debts independently backs off", async () => {
+    const { dir, deps } = fixture();
+    const dbPath = join(dir, "identity.sqlite"), db = openLedger(dbPath);
+    cleanup.push(() => closeLedger(dbPath));
+    createTask(db, { actor: "owner", now: 1 }, { project: "p", id: "C2", title: "C2", kind: "code" });
+    const actions: Action[] = [];
+    for (const regAt of [10, 20]) {
+      registerWorker(db, { agent: "agent-x", sessionId: "same", taskId: "C2", role: "author", createdBy: "pm", now: regAt });
+      const pending = [{ checkout: join(dir, String(regAt)), tmp: null }];
+      recordWorkerRetire(db, "scheduler", { ...owner, sessionId: "same", taskId: "C2", role: "author", rule: "card_finished", reason: "t",
+        idleMs: null, bytesBefore: 0, bytesAfter: 0, steps: [], now: NOW, pending, retry: false });
+      actions.push({ agent: "agent-x", sessionId: "same", regAt, taskId: null, role: "author", rule: "cleanup_retry",
+        reason: "t", idleMs: null, entries: pending });
+    }
+    let records = 0;
+    const d = { ...deps, record: async (_r: import("../src/lib/agent-lifecycle-store.js").RetireRecord) => { records++; } };
+    for (let tick = 0; tick < 3; tick++) for (const a of await dueRetries(actions, d)) {
+      await gatedCollect(a, d, async (a, wrapped) => {
+        await wrapped.record({ ...owner, sessionId: a.sessionId!, regAt: a.regAt, taskId: null, role: "author", rule: a.rule, reason: "t",
+          idleMs: null, bytesBefore: 0, bytesAfter: 0, steps: [], now: NOW, pending: a.entries!, retry: true });
+        return { freed: 0, left: 1 };
+      });
+    }
+    expect(records).toBe(2);
+    expect(await dueRetries(actions, d)).toEqual([]);
+    expect(pendingCleanups(db).map((p) => p.createdAt)).toEqual([10, 20]);
+  });
+
+  test("tracked-summary: changing ninth path preserves complete names and triggers another report", async () => {
+    const { wt, deps } = fixture();
+    for (let i = 1; i <= 10; i++) writeFileSync(join(wt, `${i}.txt`), "base");
+    sh(wt, "add", "."); sh(wt, "commit", "-qm", "ten files"); sh(wt, "branch", "saved");
+    for (let i = 1; i <= 9; i++) writeFileSync(join(wt, `${i}.txt`), "changed");
+    let records = 0, t = NOW;
+    const a: Action = { agent: owner.agent, sessionId: owner.sessionId, regAt: owner.regAt, taskId: null,
+      role: "author", rule: "cleanup_retry", reason: "t", idleMs: null };
+    const d = { ...deps, now: () => t, record: async (_r: import("../src/lib/agent-lifecycle-store.js").RetireRecord) => { records++; } };
+    const collect = async (_a: Action, wrapped: typeof d) => {
+      const why = await retireWorktree(wrapped, wt, owner, [], none, []);
+      expect(why).toContain(t === NOW ? "9.txt" : "10.txt");
+      await wrapped.record({ ...owner, taskId: null, role: "author", rule: a.rule, reason: "t", idleMs: null,
+        bytesBefore: 0, bytesAfter: 0, steps: [`${wt}：${why}`], now: t, pending: [{ checkout: wt, tmp: null }], retry: true });
+      return { freed: 0, left: 1 };
+    };
+    await gatedCollect(a, d, collect);
+    writeFileSync(join(wt, "9.txt"), "base"); writeFileSync(join(wt, "10.txt"), "changed"); t += 3 * H;
+    expect(await gatedCollect(a, d, collect)).not.toHaveProperty("quiet");
+    expect(records).toBe(2);
+    expect(existsSync(wt)).toBe(true);
+  });
+});
+
 describe("back-off state", () => {
   const act = (agent: string): Action => ({ agent, taskId: "C1", role: "author", rule: "cleanup_retry", idleMs: null, reason: "t", sessionId: "s", regAt: 1 });
   test("a malformed slot (no nextAt) or a nextAt beyond the longest back-off never parks a debt for good", async () => {
     const dir = mkdtempSync(join(tmpdir(), "life3-gate-"));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
     const p = join(dir, "cleanup.json");
-    writeFileSync(p, JSON.stringify({ "agent-a\0s": {}, "agent-b\0s": { digest: "d", n: 1, nextAt: NOW + BACKOFF_BASE_MS, at: NOW } }));
+    writeFileSync(p, JSON.stringify({ ["agent-a\0s\0" + "1"]: {}, ["agent-b\0s\0" + "1"]: { digest: "d", n: 1, nextAt: NOW + BACKOFF_BASE_MS, at: NOW } }));
     expect((await dueRetries([act("agent-a"), act("agent-b")], { cleanupStatePath: p, now: () => NOW })).map((a) => a.agent)).toEqual(["agent-a", "agent-b"]);
     expect(readdirSync(dir).some((f) => f.startsWith("cleanup.json.corrupt-"))).toBe(true);
-    writeFileSync(p, JSON.stringify({ "agent-b\0s": { digest: "d", n: 1, nextAt: NOW + BACKOFF_BASE_MS, at: NOW }, "agent-c\0s": { digest: "d", n: 1, nextAt: NOW + 100 * H, at: NOW } }));
+    writeFileSync(p, JSON.stringify({
+      ["agent-b\0s\0" + "1"]: { digest: "d", n: 1, nextAt: NOW + BACKOFF_BASE_MS, at: NOW },
+      ["agent-c\0s\0" + "1"]: { digest: "d", n: 1, nextAt: NOW + 100 * H, at: NOW } }));
     expect((await dueRetries([act("agent-b"), act("agent-c")], { cleanupStatePath: p, now: () => NOW })).map((a) => a.agent)).toEqual(["agent-c"]);
   });
 });

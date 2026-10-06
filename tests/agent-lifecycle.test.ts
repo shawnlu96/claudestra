@@ -196,7 +196,7 @@ describe("run", () => {
     cleanup.push(() => rmSync(own, { recursive: true, force: true }));
     const deps: LifecycleDeps = { cleanupStatePath: join(own, "cleanup.json"), cleanupArchiveRoot: join(own, "archive"),
       manager: async (...args) => { calls.push(args); return args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: "done" }; },
-      git, exists: existsSync, worktreeRoot: root, agents: async () => live,
+      git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => live,
       du: async (paths) => paths.filter((p) => existsSync(p)).length * 4096,
       swapPct: async () => swaps.shift() ?? 0, record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => NOW,
     };

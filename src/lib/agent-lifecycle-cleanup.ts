@@ -4,7 +4,7 @@
  * files and kinds. Untracked / ignored only: archived and verified, then holders, ledger and survey re-read; only when nothing changed
  * are the archived untracked files unlinked and `git worktree remove` (no --force) run. Any read failure keeps it and returns why.
  */
-import { unlink } from "node:fs/promises";
+import { lstat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { archiveSurvey } from "./agent-lifecycle-cleanup-archive.js";
 import { readWriteHold } from "./agent-lifecycle-cleanup-hold.js";
@@ -29,7 +29,8 @@ function trackedSummary(s: Pick<Survey, "tracked">): string {
   const kinds = new Map<string, string[]>();
   for (const t of s.tracked) kinds.set(t.kind, [...(kinds.get(t.kind) ?? []), t.path]);
   const label: Record<string, string> = { conflict: "冲突", staged: "已暂存", modified: "已修改", "staged+modified": "暂存后又改" };
-  return [...kinds].map(([k, ps]) => `${label[k] ?? k} ${ps.length}：${ps.slice(0, 8).join(", ")}${ps.length > 8 ? " …" : ""}`).join("；");
+  const display = [...kinds].map(([k, ps]) => `${label[k] ?? k} ${ps.length}：${ps.join(", ")}`).join("；");
+  return `${display}；文件清单：${JSON.stringify(s.tracked)}`;
 }
 
 const sameSurvey = (a: Survey, b: Survey): boolean => a.id === b.id && !b.tracked.length;
@@ -51,12 +52,14 @@ export async function retireWorktree(deps: WorktreeCleanupDeps, dir: string, own
   const s = await surveyCheckout(deps.git, real);
   if (typeof s === "string") return s;
   if (s.tracked.length) return `有已跟踪改动，原样保留交 PM（不搬未跟踪文件）：${trackedSummary(s)}`;
-  let archived: string | null = null;
+  let archived: string | null = null, archiveRootId: string | null = null;
+  const archiveRoot = deps.cleanupArchiveRoot ?? ARCHIVE_ROOT;
   if (s.entries.length || s.excluded.length) {
-    const r = await archiveSurvey(deps.cleanupArchiveRoot ?? ARCHIVE_ROOT, { agent: owner.agent, sessionId: owner.sessionId ?? null,
+    const r = await archiveSurvey(archiveRoot, { agent: owner.agent, sessionId: owner.sessionId ?? null,
       regAt: owner.regAt ?? null, checkout: dir }, s, deps.now());
     if ("why" in r) return r.why;
     archived = r.dir;
+    archiveRootId = r.rootId;
   }
   // re-read everything the decision rests on: a holder that appeared, a file written since the survey → nothing is moved
   const again = holderOf(await reread(), dir, real);
@@ -67,6 +70,10 @@ export async function retireWorktree(deps: WorktreeCleanupDeps, dir: string, own
   if (typeof s2 === "string" || !sameSurvey(s, s2)) {
     const what = typeof s2 === "string" ? s2 : s2.tracked.length ? trackedSummary(s2) : "未跟踪文件有变";
     return `复核时内容变了，这轮不动${archived ? `（这一版归档在 ${archived}）` : ""}：${what}`;
+  }
+  if (archiveRootId) {
+    const root = await lstat(archiveRoot);
+    if (!root.isDirectory() || `${root.dev}:${root.ino}` !== archiveRootId) return "归档根身份变了，原文件没动";
   }
   const moved = s.entries.filter((e) => !e.ignored && e.type !== "dir");
   for (const e of moved) {

@@ -132,7 +132,7 @@ describe("disk (验收线 8)", () => {
     const measured: string[][] = [];
     const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
       manager: async (...args) => (args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: "done" }),
-      git, exists: existsSync, worktreeRoot: root, agents: async () => [], tmp: { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) },
+      git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => [], tmp: { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) },
       du: async (paths) => { measured.push(paths); return paths.filter((p) => existsSync(p)).length * 1000; },
       swapPct: async () => 0, record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW,
     });
@@ -158,7 +158,7 @@ describe("disk (验收线 8)", () => {
     const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
       manager: async (...args) => { calls.push(args); return args[0] === "archive"
         ? (args[1] === "agent-l" ? { ok: false, note: "subagents/x.jsonl: EACCES" } : { ok: true, archived: [] }) : { ok: true, message: "done" }; },
-      git, exists: existsSync, worktreeRoot: root, agents: async () => [], du: async () => 0, swapPct: async () => 0,
+      git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => [], du: async () => 0, swapPct: async () => 0,
       record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW,
     });
     expect(calls).toEqual([["archive", "agent-l"], ["archive", "agent-l2"], ["remove", "agent-l2"]]);
@@ -173,7 +173,7 @@ describe("disk (验收线 8)", () => {
       const again = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
         master: new Set(), swapPct: 10, agents: [], pending: pendingCleanups(db) });
       const rr = await runLifecycle(again, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
-        manager: async (...args) => { calls.push(args); return { ok: true }; }, git, exists: existsSync, worktreeRoot: root, agents: async () => [],
+        manager: async (...args) => { calls.push(args); return { ok: true }; }, git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => [],
         du: async () => 0, swapPct: async () => 0, record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW });
       expect(rr.failed.map((f) => f.agent)).toEqual([]);
     }

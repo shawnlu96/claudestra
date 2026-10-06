@@ -28,7 +28,7 @@ export function archiveTarget(root: string, o: ArchiveOwner, s: Survey): string 
 /** Every folder from below `root` down to `path` that exists is a real directory (a symlink would carry the archive elsewhere). */
 async function realChain(root: string, path: string): Promise<string | null> {
   let at = root;
-  for (const seg of relative(root, path).split(sep)) {
+  for (const seg of ["", ...relative(root, path).split(sep)]) {
     at = join(at, seg);
     const st = await lstat(at).catch((e: NodeJS.ErrnoException) => (e.code === "ENOENT" ? null : e));
     if (st === null) return null;
@@ -93,15 +93,19 @@ async function copyAll(src: string, files: string, entries: readonly ArchiveEntr
  * Archives the survey's entries; returns the archive folder, or why it could not be guaranteed (the originals are never touched here).
  * An existing folder for the same id counts only when its whole path is real directories and manifest + files match this survey.
  */
-export async function archiveSurvey(root: string, o: ArchiveOwner, s: Survey, now: number): Promise<{ dir: string } | { why: string }> {
+export async function archiveSurvey(root: string, o: ArchiveOwner, s: Survey, now: number): Promise<{ dir: string; rootId: string } | { why: string }> {
   const final = archiveTarget(root, o, s);
   if (!final) return { why: `agent 名 ${o.agent} 不能当归档目录名` };
   try {
     const chain = await realChain(root, join(final, "files"));
     if (chain) return { why: `归档路径不安全，不写也不认：${chain}` };
+    await mkdir(root, { recursive: true });
+    const rootStat = await lstat(root);
+    if (!rootStat.isDirectory()) return { why: "归档根不是真实目录，不跟软链" };
+    const rootId = `${rootStat.dev}:${rootStat.ino}`;
     if (await lstat(final).then(() => true, () => false)) {
       const bad = (await manifestMatches(final, o, s)) ?? (await verify(join(final, "files"), s.entries));
-      return bad ? { why: `归档目录 ${final} 已存在但和现状对不上（${bad}），不覆盖` } : { dir: final };
+      return bad ? { why: `归档目录 ${final} 已存在但和现状对不上（${bad}），不覆盖` } : { dir: final, rootId };
     }
     const partial = `${final}.partial-${process.pid}-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     await mkdir(join(partial, "files"), { recursive: true });
@@ -112,9 +116,11 @@ export async function archiveSurvey(root: string, o: ArchiveOwner, s: Survey, no
     if (bad) return { why: `归档核对没过（${bad}），原文件没动；半成品留在 ${partial}` };
     await writeJsonAtomic(join(partial, "manifest.json"), { agent: o.agent, sessionId: o.sessionId, regAt: o.regAt, checkout: o.checkout,
       archivedAt: now, id: s.id, entries: s.entries, excluded: s.excluded, excludedRule: EXCLUDED_RULE }, { noFollow: true });
+    const currentRoot = await lstat(root);
+    if (!currentRoot.isDirectory() || `${currentRoot.dev}:${currentRoot.ino}` !== rootId) return { why: "归档根身份变了，原文件没动" };
     await rename(partial, final);
     const after = (await realChain(root, join(final, "files"))) ?? (await manifestMatches(final, o, s)) ?? (await verify(join(final, "files"), s.entries));
-    return after ? { why: `归档放好后复核没过（${after}），原文件没动` } : { dir: final };
+    return after ? { why: `归档放好后复核没过（${after}），原文件没动` } : { dir: final, rootId };
   } catch (e) {
     return { why: `归档失败，原文件没动：${(e as Error).message}` };
   }

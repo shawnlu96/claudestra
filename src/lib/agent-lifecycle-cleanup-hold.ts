@@ -2,10 +2,9 @@
  * Ledger proof that a retired agent's checkout may be touched (agent-lifecycle-cleanup.ts asks before anything is copied and again right
  * before anything moves): its card has no write dispatch still open (pending / submitted / unknown effect) and holds no scheduler
  * resource (card write lease), and a retry's pending row is still that debt (agent + original session + createdAt, still pending).
- * Any read error is a refusal; only a ledger file that does not exist at all reads as "nothing holds it" (no ledger, no intents).
+ * Any read error, including a missing ledger, is a refusal: absence cannot prove that a write lease was released.
  */
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
 import { LEDGER_PATH } from "./ledger-store.js";
 
 export interface HoldSubject { agent: string; taskId?: string | null; sessionId?: string; regAt?: number; rule?: string }
@@ -31,7 +30,6 @@ function writeHold(db: Database, s: HoldSubject): string | null {
 /** writeHold read from the ledger file (read-only, its own short-lived connection); a read error is the reason. */
 export function readWriteHold(path: string | undefined, s: HoldSubject): string | null {
   const p = path ?? LEDGER_PATH;
-  if (!existsSync(p)) return null;
   let db: Database | null = null;
   try {
     db = new Database(p, { readonly: true });
