@@ -330,14 +330,21 @@ export function approvalLapse(db: Database, task: LedgerTask, approvalId: unknow
   return null;
 }
 
-/** Legacy replacement is an ordinary review, but the refusal authorization must still cover every in-flight effect. */
+/** Legacy guards end with their window; a changed approval needs a later formal resume before effects may restart. */
 function legacyReviewLapse(db: Database, task: LedgerTask, events: readonly LedgerEvent[], families?: readonly AuthorFamily[]): string | null {
   const swap = latestReviewerSwap(events);
   if (!swap || swap.data.legacy !== true || events.some((e) => e.seq > swap.seq && e.kind === "review")) return null;
-  if (!inWindow(swap, task)) return "旧单接续的 head / specRev / 轮次已变";
+  if (!inWindow(swap, task)) return null;
   const workflow = getWorkflow(db, task.id);
-  if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review") return "旧单接续已不在本轮自动审查";
-  const lapse = approvalLapse(db, task, swap.data.approvalId);
+  if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review") return null;
+  let approvalId = swap.data.approvalId;
+  const resumed = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow_resume" && e.seq > swap.seq && e.data.workflowRev === workflow.rev);
+  try {
+    const a = resumed && createRefusalApprovalPort(db)(task.project, task.id);
+    const decision = a && listEvents(db, { project: task.project }).findLast((e) => e.kind === "decision" && e.data.askId === a.approvalId && !e.data.partial);
+    if (resumed && decision && resumed.seq > decision.seq) approvalId = a!.approvalId;
+  } catch (e) { return `读恢复批准失败：${(e as Error).message}`; }
+  const lapse = approvalLapse(db, task, approvalId);
   if (lapse) return lapse;
   if (openRefusal(events)) return "本卡有未处置的模型安全拒绝";
   const family = otherFamily(remoteHeadFamily(db, task) ?? workflow.authorFamily);

@@ -20,9 +20,9 @@ import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { informKey, snapshotKey } from "../src/lib/scheduler-model-wiring.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { beginLegacyReviewRetire, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
-import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { HOLD_OP, openRefusal } from "../src/lib/scheduler-review-swap.js";
-import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
+import { autoFixture, H1, H2, toBuild } from "./scheduler-auto-helpers.js";
 import { testChildEnv } from "./test-env.js";
 
 const CYBER = "This request has been flagged for possible cybersecurity risk";
@@ -108,10 +108,10 @@ async function setup(mode: "on" | "observe" = "on", duringEnsure?: (f: ReturnTyp
   return { f, tick, calls, ops, reviews, readonlyLines, refuse: (m: string | null) => { refusal = m; }, legacy, tags };
 }
 
-function approve(f: ReturnType<typeof autoFixture>) {
-  const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule", askKey: "policy-refusal-rule" }, 1999);
+function approve(f: ReturnType<typeof autoFixture>, at = 2000) {
+  const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule", askKey: "policy-refusal-rule" }, at - 1);
   answerAsk(f.db, ask.id, { choices: ["[button:policy_refusal_rule_go]"], labels: ["x"], text: "", principal: OWNER_PRINCIPAL_ID, owner: true,
-    via: "web_card", at: 2000, final: true });
+    via: "web_card", at, final: true });
 }
 
 test("生产接线：只读句柄 + 真实台账 CLI——派审前写快照，首次策略拒审 → 模型结果 → epoch → 新会话 → 豁免单（带快照），全程无只读报错", async () => {
@@ -296,6 +296,60 @@ function revoke(f: ReturnType<typeof autoFixture>) {
   answerAsk(f.db, ask.id, { choices: ["[button:policy_refusal_rule_stop]"], labels: ["stop"], text: "", principal: OWNER_PRINCIPAL_ID, owner: true,
     via: "web_card", at: 2002, final: true });
 }
+
+async function resumeLegacy(s: Awaited<ReturnType<typeof setup>>) {
+  const w = getWorkflow(s.f.db, "T1")!;
+  expect(await s.f.cli("pm", "workflow-resume", "T1", "--rev", String(s.f.task().rev), "--workflow-rev", String(w.rev),
+    "--reason", "owner re-approved; resume ordinary review")).toMatchObject({ ok: true });
+}
+
+test("legacy-lapse-latch: real revoke then reapprove and workflow-resume sends a fresh ordinary review", async () => {
+  const s = await setup();
+  const old = await legacyCard(s);
+  expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+  revoke(s.f);
+  expect(await s.tick()).toMatchObject({ step: "manual" });
+  expect(s.tags).toEqual([]);
+  await resumeLegacy(s); // A resume preceding the new approval cannot authorize replacement effects.
+  approve(s.f, 2004);
+  s.refuse(null);
+  expect(await s.tick()).toMatchObject({ step: "manual" });
+  expect(s.tags).toEqual([]);
+  await resumeLegacy(s);
+  expect(await s.tick()).toMatchObject({ step: "session" });
+  expect(await s.tick()).toMatchObject({ step: "sent" });
+  const next = s.reviews().at(-1)!;
+  expect(next.id).not.toBe(old.id);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")?.sessionId).not.toBe("s-rv");
+  expect(getEventByDedup(s.f.db, snapshotKey(next.id))).not.toBeNull();
+  expect(s.ops("reviewer_swap").every((e) => !e.data.refusal)).toBe(true);
+}, 120_000);
+
+test("legacy-lapse-latch: a changed current approval without a later resume still blocks effects", async () => {
+  const s = await setup();
+  await legacyCard(s);
+  expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+  approve(s.f, 2004);
+  s.refuse(null);
+  expect(await s.tick()).toMatchObject({ step: "manual" });
+  expect(s.tags).toEqual([]);
+  expect(s.reviews()).toHaveLength(1);
+}, 120_000);
+
+test("legacy-lapse-latch: changed head and round leave the old window and dispatch with a new snapshot", async () => {
+  const s = await setup();
+  const old = await legacyCard(s);
+  expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+  s.f.db.run("UPDATE tasks SET headSHA = ?, round = round + 1, rev = rev + 1 WHERE id = 'T1'", [H2]);
+  s.refuse(null);
+  expect(await s.tick()).toMatchObject({ step: "session" });
+  expect(await s.tick()).toMatchObject({ step: "sent" });
+  const next = s.reviews().at(-1)!;
+  expect(getIntent(s.f.db, next.id)).toMatchObject({ head: H2 });
+  expect(next.id).not.toBe(old.id);
+  expect(getEventByDedup(s.f.db, snapshotKey(next.id))).toMatchObject({ data: { head: H2, round: s.f.task().round } });
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")?.sessionId).not.toBe("s-rv");
+}, 120_000);
 
 for (const boundary of ["before-retirement", "after-retirement", "during-ensure", "before-dispatch"] as const) {
   test(`legacy-owner-hold: ${boundary} revoked approval blocks binding and dispatch`, async () => {
