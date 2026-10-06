@@ -66,6 +66,24 @@ function fixture(opts: { verdicts?: { block?: boolean; reason?: string }[]; noSt
   return { loop: new AcpTurnLoop(io), io, prompts, stops, failures, steers, startExternal, endInAdapter, finish, maxLive: () => maxLive };
 }
 
+describe("AcpTurnLoop · 叫停作废按身份对（R18）", () => {
+  test("每条插话带不同的 deliveryId；有 clearedIds 只认身份（未知 / 空 = 不报），没有才按正文（老适配器，行为不变）", async () => {
+    const ids: string[] = [];
+    const loop = new AcpTurnLoop({
+      prompt: () => new Promise(() => {}), // 一直在跑：之后的消息都走 steer
+      steer: async (_text, deliveryId) => (ids.push(deliveryId), { outcome: "injected" }),
+      reportStop: async () => ({}), onFailure: () => {}, log: () => {},
+    });
+    await loop.submit("busy");
+    expect([await loop.submit("x", "m1"), await loop.submit("x", "m2")]).toEqual(["steer", "steer"]);
+    expect(new Set(ids).size).toBe(2);
+    expect(loop.voided({ cleared: ["x"] })).toEqual(["m1", "m2"]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: [ids[1]!] })).toEqual(["m2"]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: ["unknown"] })).toEqual([]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: [] })).toEqual([]);
+  });
+});
+
 describe("AcpTurnLoop · 基本", () => {
   test("空闲时直接开一轮；返回后按 Stop hook 契约上报，回到空闲", async () => {
     const f = fixture();
