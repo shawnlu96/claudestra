@@ -12,14 +12,14 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode, SharedLedgerJoinError } from "../lib/shared-ledger-join.js";
-import { centerOfferUrl, JOIN_OFFER_MAX_TTL_MS, JOIN_OFFER_PATH, saveSentOffer } from "../lib/shared-ledger-join-offer.js";
+import { centerOfferUrl, JOIN_OFFER_MAX_TTL_MS, JOIN_OFFER_PATH, parseJoinOfferProject, saveSentOffer } from "../lib/shared-ledger-join-offer.js";
 import { output } from "./core.js";
 import { peerCliFetch, peerE2eOnlyFetch } from "./relay.js";
 import { readJoinCodeFile } from "./shared-ledger-join-cmd.js";
 
 const USAGE = "usage: shared-ledger-offer --peer <peer 名> --url <中心根 URL> --code-file <0600 文件> [--project <本机项目>] [--task <任务>] "
-  + "[--expires-at <毫秒时间戳|ISO>] [--note <一句来源说明>]（入组码只从 0600 文件读）";
-const VALUED = new Set(["peer", "url", "code-file", "project", "task", "expires-at", "note"]);
+  + "[--expires-at <毫秒时间戳|ISO>] [--note <一句来源说明>] [--team <团队> --shared-project <中心项目> --name <显示名>]（入组码只从 0600 文件读）";
+const VALUED = new Set(["peer", "url", "code-file", "project", "task", "expires-at", "note", "team", "shared-project", "name"]);
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const DEFAULT_NOTE = "共享台账入组邀请";
 
@@ -77,6 +77,9 @@ const live = (): OfferDeps => ({
 });
 
 async function sendOffer(flags: Record<string, string>, d: OfferDeps): Promise<Record<string, unknown>> {
+  const hasProject = [flags.team, flags["shared-project"], flags.name].some(v => v !== undefined);
+  const sharedProject = hasProject ? parseJoinOfferProject({ teamId: flags.team, projectId: flags["shared-project"], name: flags.name }) : undefined;
+  if (sharedProject === null) return { ok: false, error: "团队项目信息不完整或不合法" };
   const center = centerOfferUrl(flags.url);
   if (!center) return { ok: false, error: "--url 要是中心根地址：https://<主机名>/（不带路径、查询、账号）" };
   const expiresAt = expiresAtOf(flags["expires-at"], d.now);
@@ -87,6 +90,9 @@ async function sendOffer(flags: Record<string, string>, d: OfferDeps): Promise<R
   const code = readJoinCodeFile(flags["code-file"]!).trim();
   const parsed = parseSharedLedgerJoinCode(code);
   if (!parsed) return { ok: false, error: "文件里不是合法的入组码" };
+  if (note.includes(parsed.secret) || (sharedProject && Object.values(sharedProject).some(v => v.includes(parsed.secret)))) {
+    return { ok: false, error: "邀请显示字段不能包含入组码" };
+  }
   const peer = await d.findPeer(flags.peer!);
   const bad = peerProblem(peer, flags.peer!);
   if (bad) return { ok: false, error: bad };
@@ -94,7 +100,7 @@ async function sendOffer(flags: Record<string, string>, d: OfferDeps): Promise<R
   const offerId = randomBytes(16).toString("hex");
   const sent = { offerId, peer: peer!.name, host: center.host, centerId: parsed.centerId, project, target: flags.task ?? "", sentAt: d.now, expiresAt };
   await saveSentOffer(d.stateDir, sent); // Before sending: a fast receipt must find it.
-  const body = JSON.stringify({ v: 1, offerId, url: center.url, code, note, expiresAt });
+  const body = JSON.stringify({ v: 1, offerId, url: center.url, code, note, expiresAt, ...(sharedProject ? { project: sharedProject } : {}) });
   let res: Response;
   try {
     res = await d.post(peer!, `${peer!.baseUrl!.replace(/\/+$/, "")}${JOIN_OFFER_PATH}`, body);

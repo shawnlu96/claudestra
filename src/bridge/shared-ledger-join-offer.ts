@@ -6,6 +6,11 @@
  * Every message here is fixed wording (lib joinOfferCard / joinOfferOutcomeText); the code and center responses never reach them.
  */
 import { createHash } from "node:crypto";
+import { readProjects } from "../lib/projects.js";
+import { isPersonalProject } from "../lib/lend-policy.js";
+import { projectChoices as makeProjectChoices, selectedProject } from "./local-api/shared-projects-choice.js";
+import type { ProjectChoice } from "./local-api/shared-projects-choice.js";
+import type { ProjectSelection } from "./local-api/shared-projects-ports.js";
 import { bindHash, checkAsk } from "../lib/ask-bind.js";
 import { instanceIdSync } from "../lib/instance-id.js";
 import { instanceKeySync, signedFor } from "../lib/instance-key.js";
@@ -18,12 +23,12 @@ import {
   type SharedLedgerOfferProject,
 } from "../lib/shared-ledger-local-project.js";
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
-import { sweepSharedLedgerRebinds, onSharedLedgerRebindAnswered, liveRebindDeps } from "./shared-ledger-rebind.js";
+import { onSharedProjectAnswered } from "./local-api/shared-projects-runtime.js";
 import { joinSharedLedger, type SharedLedgerJoinResult } from "../lib/shared-ledger-join.js";
 import {
   attachPendingOfferAsk, claimPendingOffer, isJoinOfferStatus, isOfferId, JOIN_OFFER_RECEIPT_PATH, JoinOfferLimiter, joinOfferCard, joinOfferOutcomeText,
   listPendingOfferIds, parseJoinOffer, readPendingOffer, receiptNoteText, recordSentOfferStatus, savePendingOffer,
-  type JoinOfferStatus, type PendingJoinOffer, type SentJoinOffer,
+  type JoinOfferProject, type JoinOfferStatus, type PendingJoinOffer, type SentJoinOffer,
 } from "../lib/shared-ledger-join-offer.js";
 import { askDb, askReadDb, asksDeps, createAsk, publishAsk, type CreateAskInput } from "./asks.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
@@ -47,6 +52,8 @@ export interface JoinOfferDeps {
   sharedProject?: (centerId: string) => SharedLedgerOfferProject | string | undefined;
   bindings?: () => SharedLedgerBinding[];
   join: (url: string, code: string, localProjectId: string) => Promise<SharedLedgerJoinResult>;
+  /** N2 must verify the displayed center/team/project before saving credentials or bindings. No old-join fallback. */
+  joinProject?: (url: string, code: string, selection: ProjectSelection, expected: JoinOfferProject & { centerId: string }) => Promise<SharedLedgerJoinResult>;
   /** The inform card: a notification to the owner (no buttons). */
   inform: (text: string) => Promise<void>;
   /** POST the receipt to the inviter; resolves with the HTTP status. */
@@ -67,9 +74,10 @@ export async function configuredPeer(name: string | undefined, d: Pick<JoinOffer
 }
 
 const bindOf = (p: PendingJoinOffer): Omit<AskBind, "paramsHash"> => ({
-  action: BIND_ACTION, approve: p.projectChoices?.map(c => c.button) ?? [JOIN_BUTTON],
+  action: BIND_ACTION, approve: p.project ? [JOIN_BUTTON] : p.projectChoices?.map(c => c.button) ?? [JOIN_BUTTON],
   params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt,
-    projectChoices: p.projectChoices, sharedProjectId: p.sharedProjectId, codeHash: createHash("sha256").update(p.code).digest("hex") },
+    project: p.project, projectOptions: p.projectOptions, recommended: p.recommended, projectChoices: p.projectChoices,
+    sharedProjectId: p.sharedProjectId, codeHash: createHash("sha256").update(p.code).digest("hex") },
 });
 
 /** POST /api/v1/shared-ledger-join-offer from peer `peerName` (already authenticated as a configured peer). */
@@ -81,7 +89,7 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
   let projects: SharedLedgerLocalProject[], bindings: SharedLedgerBinding[], hint: SharedLedgerBinding | undefined;
   try {
     bindings = d.bindings?.() ?? [];
-    const explicit = d.sharedProject?.(parsed.offer.centerId);
+    const explicit = parsed.offer.project ?? d.sharedProject?.(parsed.offer.centerId);
     hint = sharedLedgerOfferBinding(parsed.offer.centerId, bindings, typeof explicit === "string" ? { projectId: explicit } : explicit);
     projects = await d.projects();
   } catch (e) {
@@ -91,21 +99,25 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
   const sharedProjectId = hint?.projectId;
   const target = hint ? { centerId: hint.centerId, teamId: hint.teamId, projectId: hint.projectId } : undefined;
   const projectChoices = sharedLedgerProjectChoices(sharedLedgerEligibleProjects(projects, bindings, target), sharedProjectId, JOIN_BUTTON, JOIN_BUTTON);
-  if (!projectChoices.length) return refuse(409, "no_local_projects");
+  if (!parsed.offer.project && !projectChoices.length) return refuse(409, "no_local_projects");
   const pending: PendingJoinOffer = { ...parsed.offer, peer: peer.name, receivedAt: now, projectChoices, sharedProjectId };
+  const selection = pending.project ? makeProjectChoices(pending.project, projects, bindings) : undefined;
+  if (selection) { pending.projectOptions = selection.choices; pending.recommended = selection.recommended; }
   const saved = await savePendingOffer(d.stateDir(), pending);
   if (saved !== "ok") return refuse(saved === "exists" ? 409 : 429, saved === "exists" ? "duplicate_offer" : "too_many_pending");
   let ask: Ask;
   try {
     const bind = bindOf(pending), card = joinOfferCard(pending);
-    const context = `${card.context}\n${sharedProjectId ? `共享项目（根据已有绑定）：${sharedProjectId}` : "入组后才能确定团队 / 共享项目"}\n请选择要绑定的本机项目`;
+    const context = pending.project ? `${card.context}\n请选择新建或已有本机项目，然后点加入。` : `${card.context}\n${sharedProjectId ? `共享项目（根据已有绑定）：${sharedProjectId}` : "入组后才能确定团队 / 共享项目"}\n请选择要绑定的本机项目`;
     const buttons = projectChoices.map(c => ({ id: c.button,
       label: `加入并绑到 ${c.name.slice(0, 60)}${c.localProjectId === sharedProjectId ? "（同名）" : ""}`, style: "success" }));
     ask = d.openAsk({
       source: "system", createdBy: JOIN_OFFER_CREATOR, kind: "authorize", project: MASTER_PROJECT, ...card, context,
-      options: [{ type: "buttons", buttons: [...buttons, { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }],
+      options: [...(selection ? [selection.row] : []), { type: "buttons",
+        buttons: [...(selection ? [{ id: JOIN_BUTTON, label: "加入", style: "success" }] : buttons), { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }],
       allowText: false, blocking: true, expiresAt: pending.expiresAt, dedupKey: `sl-join-offer:${pending.offerId}`,
-      bind: { ...bind, paramsHash: bindHash(bind, JOIN_OFFER_CREATOR) }, extra: { joinOfferId: pending.offerId },
+      bind: { ...bind, paramsHash: bindHash(bind, JOIN_OFFER_CREATOR) }, extra: { joinOfferId: pending.offerId,
+        ...(selection ? { sharedProjectChoice: { selectId: "shared_project_local", recommended: selection.recommended } } : {}) },
     });
   } catch (e) {
     claimPendingOffer(d.stateDir(), pending.offerId);
@@ -124,11 +136,13 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
 /** "加入" counts only if ask-check passes for the card we opened (same params) and the owner — not a guest — answered. */
 function approved(a: Ask, p: PendingJoinOffer): boolean {
   const asked = { ...a, fromAgent: JOIN_OFFER_CREATOR };
-  return ownerAnswered(a.answer) && checkAsk(asked, bindHash(bindOf(p), JOIN_OFFER_CREATOR), JOIN_OFFER_CREATOR).ok;
+  return !!a.bind && bindHash(a.bind, JOIN_OFFER_CREATOR) === a.bind.paramsHash && ownerAnswered(a.answer)
+    && checkAsk(asked, bindHash(bindOf(p), JOIN_OFFER_CREATOR), JOIN_OFFER_CREATOR).ok;
 }
 
 /** Settle one claimed offer: tell the owner, tell the inviter. Neither failure undoes the outcome. */
 async function settle(p: PendingJoinOffer, status: JoinOfferStatus, d: JoinOfferDeps, joined?: SharedLedgerJoinResult): Promise<void> {
+  if (status === "joined") await sharedProjectAudit().catch(() => console.warn("shared project audit deferred"));
   console.log(`🤝 [join-offer] ${p.peer} 的邀请（中心 ${p.host}）：${status}`);
   await d.inform(joinOfferOutcomeText(p, status, joined)).catch((e: Error) => console.error(`⚠️ [join-offer] 通知 owner 失败: ${e.name}`));
   const peer = await configuredPeer(p.peer, d);
@@ -144,10 +158,11 @@ async function settle(p: PendingJoinOffer, status: JoinOfferStatus, d: JoinOffer
 /** Hook after any ask answer (ask-entry.ts commitNoticing): acts only on our own cards once they are answered. */
 export async function onJoinOfferAnswered(a: Ask, d: JoinOfferDeps = liveDeps): Promise<void> {
   const offerId = a.extra.joinOfferId;
-  if (a.createdBy !== JOIN_OFFER_CREATOR) return onSharedLedgerRebindAnswered(a, liveRebindDeps(d.inform));
+  if (a.createdBy !== JOIN_OFFER_CREATOR) return onSharedProjectAnswered(a);
   if (a.state !== "answered" || !isOfferId(offerId)) return;
   const p = claimPendingOffer(d.stateDir(), offerId);
   if (!p) return;
+  if (p.project) return answerProjectOffer(a, p, d);
   if (!p.projectChoices) {
     const declined = (a.answer?.choices ?? []).includes(`[button:${DECLINE_BUTTON}]`);
     return settle(p, declined ? "declined" : "failed", d);
@@ -165,6 +180,26 @@ export async function onJoinOfferAnswered(a: Ask, d: JoinOfferDeps = liveDeps): 
     return settle(p, "failed", d); // SharedLedgerJoinError text is fixed, but nothing of it is needed: the card says "failed" only.
   }
   return settle(p, "joined", d, joined);
+}
+
+/** New project offers never call the legacy join path, which could save a mismatched grant before we inspect it. */
+async function answerProjectOffer(a: Ask, p: PendingJoinOffer, d: JoinOfferDeps): Promise<void> {
+  const wires = a.answer?.choices ?? [];
+  if (wires.includes(`[button:${DECLINE_BUTTON}]`) && !wires.includes(`[button:${JOIN_BUTTON}]`)) return settle(p, "declined", d);
+  if (p.expiresAt <= d.now()) return settle(p, "expired", d);
+  const selection = selectedProject(wires, (p.projectOptions ?? []) as ProjectChoice[]);
+  if (!selection || !approved(a, p) || !d.joinProject) return settle(p, "failed", d);
+  try {
+    if (selection.mode === "existing" && (!(await d.projects()).some(c => c.id === selection.localProjectId)
+      || (d.bindings?.() ?? []).some(b => (b.localProjectId ?? b.projectId) === selection.localProjectId))) return settle(p, "failed", d);
+    const joined = await d.joinProject(p.url, p.code, selection, { ...p.project!, centerId: p.centerId });
+    if (joined.centerId !== p.centerId || joined.teamId !== p.project!.teamId || joined.projectId !== p.project!.projectId || joined.kind !== "person") {
+      return settle(p, "failed", d);
+    }
+    return settle(p, "joined", d, joined);
+  } catch {
+    return settle(p, "failed", d); // Grant/transport errors must never enter the card, log or receipt.
+  }
 }
 
 /** Every minute: expired offers (or ones whose card closed without an answer) are deleted; answered ones the hook missed are settled. */
@@ -214,7 +249,11 @@ const liveDeps: JoinOfferDeps = {
     const a = closeAsk(askDb(), id, "cancelled", "join offer expired");
     if (a) publishAsk(a);
   },
-  projects: () => readSharedLedgerLocalProjects(),
+  projects: async () => {
+    const [{ projects }, local] = await Promise.all([readProjects(), readSharedLedgerLocalProjects()]);
+    const eligible = new Set(projects.filter(p => !isPersonalProject(p)).map(p => p.id));
+    return local.filter(p => eligible.has(p.id));
+  },
   bindings: () => readSharedLedgerBindings(),
   join: (url, code, localProjectId) => {
     const key = instanceKeySync();
@@ -253,10 +292,12 @@ export function initJoinOffers(): void {
 }
 
 
-/** Each sweep must still run if the other store is unreadable; errors never include pending offer contents. */
-export async function sweepJoinOfferMaintenance(d: JoinOfferDeps = liveDeps, rebind = liveRebindDeps(d.inform)): Promise<void> {
-  const results = await Promise.allSettled([sweepJoinOffers(d), sweepSharedLedgerRebinds(rebind)]);
+/** N6 owns the audit and all replacement writes. N4 only triggers it after startup, periodically and on successful joins. */
+let sharedProjectAudit: () => Promise<void> = async () => {};
+export function setSharedProjectAuditHook(audit: () => Promise<void>): void { sharedProjectAudit = audit; }
+export async function sweepJoinOfferMaintenance(d: JoinOfferDeps = liveDeps, audit: () => Promise<void> = sharedProjectAudit): Promise<void> {
+  const results = await Promise.allSettled([sweepJoinOffers(d), audit()]);
   for (const r of results) if (r.status === "rejected") {
-    console.error(`⚠️ [join-offer] 扫描失败: ${(r.reason as Error).name}`);
+    console.error("⚠️ [join-offer] 扫描失败");
   }
 }
