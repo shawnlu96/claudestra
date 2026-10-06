@@ -166,7 +166,7 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName }); // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）
     const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId, at); // 监护在处置 / 派单会话由派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
-      failure: "error", instance: f.key, ...at, ...(quiet ? { quiet: true as const } : {}) });
+      failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });
   }
 }
 
