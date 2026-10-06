@@ -197,7 +197,7 @@ const pairEdges = (edges: readonly WaitEdge[], path: readonly string[], closed: 
 const sinceOf = (edges: readonly WaitEdge[]): number | null => (edges.length ? Math.max(...edges.map((e) => e.at)) : null);
 /** 指纹只用点与边类型（加资源对）：rev / seq 漂移不换 key，换了等待方式才算新的一条 */
 const signature = (edges: readonly WaitEdge[]): string =>
-  edges.map((e) => `${e.from}>${e.kind}${e.kind === "resource" ? `:${e.held}` : ""}>${e.to}`).join(",");
+  encodeURIComponent(JSON.stringify(edges.map((e) => [e.from, e.kind, e.kind === "resource" ? e.held : null, e.to])));
 
 function findCycles(ids: readonly string[], adj: ReadonlyMap<string, string[]>, edges: readonly WaitEdge[]): { cycles: WaitCycle[]; truncated: boolean } {
   const seen = new Map<string, WaitCycle>();
@@ -284,7 +284,7 @@ export interface WaitAudit { findings: WaitFindingDraft[]; evaluated: WaitRule[]
 
 /**
  * 等待图 → 巡检发现（ledger-audit.ts 薄调用，落库 / 去重 / 通知准入照旧走 audit 那一套）。
- * 图里有 unknown：已看到的照报，但两条规则都不进 evaluated，免得取数坏了把上一轮的环误标成已解开。
+ * 图里有 unknown 或截断：已看到的照报，但两条规则都不进 evaluated，免得取数坏了把上一轮的环误标成已解开。
  */
 export function waitAudit(g: WaitGraph | undefined, now: number): WaitAudit {
   if (!g) return { findings: [], evaluated: [], skipped: [] };
@@ -299,7 +299,12 @@ export function waitAudit(g: WaitGraph | undefined, now: number): WaitAudit {
     detail: `${m.origin} 在等还没建卡的 DAG 节点 ${m.feature} ${m.nodeKey}：${chainText(m.chain, m.edges, false)}`.slice(0, 600) + tail,
     suggestion: "给该节点建卡并 dag-bind，或改 DAG 去掉这条依赖",
   });
-  if (!g.unknown.length) return { findings, evaluated: [...WAIT_RULES], skipped: [] };
-  const reason = `等待图取数不完整：${g.unknown.join("；").slice(0, 300)}`;
+  if (!g.unknown.length && !g.truncated) return { findings, evaluated: [...WAIT_RULES], skipped: [] };
+  const reason = `等待图取数不完整：${[...g.unknown, ...(g.truncated ? ["环或缺卡链查找/报告已截断"] : [])].join("；").slice(0, 300)}`;
   return { findings, evaluated: [], skipped: WAIT_RULES.map((rule) => ({ rule, reason })) };
+}
+
+/** CLI 同时投影完整图，通知摘要可缩短，但诊断必须保留每条来源与闭环。 */
+export function waitDiagnostics(g: WaitGraph | undefined): { waitGraph?: WaitGraph } {
+  return g ? { waitGraph: g } : {};
 }

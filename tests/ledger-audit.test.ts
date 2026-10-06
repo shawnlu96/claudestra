@@ -476,7 +476,9 @@ describe("等待环（DLK1，ledger-deadlock.ts 薄调用）", () => {
     features: [{ id: "ab-f", version: 1, createdAt: 3, nodes: [{ key: "B", taskId: "B", deps: ["A"] }, { key: "A", taskId: "A", deps: [] }] }] });
   test("环推给 PM（不是调度助理），key = 项目|规则|环指纹，其余规则口径不变", () => {
     const r = auditLedger(snap({ pms: [PM, DISPATCH], waitGraph: g }), NOW);
-    expect(r.findings.filter((f) => f.rule.startsWith("wait_"))).toEqual([expect.objectContaining({ rule: "wait_cycle", taskId: "A", since: 3, notify: PM, key: "p|wait_cycle|A>dep>B,B>dag>A" })]);
+    expect(r.findings.filter((f) => f.rule.startsWith("wait_"))).toEqual([expect.objectContaining({
+      rule: "wait_cycle", taskId: "A", since: 3, notify: PM, key: `p|wait_cycle|${g.cycles[0].key}`,
+    })]);
     expect(r.evaluated).toEqual([...auditLedger(snap(), NOW).evaluated, "wait_cycle", "wait_missing_node"]);
     expect(r.skipped).toEqual([]);
   });
