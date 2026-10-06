@@ -35,6 +35,14 @@ Every other outcome gives the card to PM through `scheduler-fallback-manual` (wo
 A PR that cannot be read, a carry check whose git step fails, or a PR reported merged without its merge commit holds the card for
 the pass and is read again next pass; nothing is written.
 
+**File locks** (LCK-1). Right after the handoff record the card's file locks shrink to the PR's changed files (`git diff --name-only
+--no-renames origin/main...<head>` in the project's clone, same origin check as a carry) that its `fileGlobs` cover — one
+`merge_handoff_narrow` event per handoff (`narrowHandoffLocks` in `lib/scheduler-merge-handoff.ts`). Anything uncertain (no repoDir, foreign origin, git
+failure, a path the scheduler cannot name, a list that may be truncated, an open intent) keeps the locks whole. A failed read or a busy ledger is tried again on
+later polls; a reason no retry changes is recorded once (`skipped`) and the PR's files are no longer read for that handoff. A carry leaves them as
+they are; back in `fix`, the fix dispatch takes the full `fileGlobs` again. Landing on `live` releases them in the same transaction, and
+each tick sweeps any finished card still holding card locks with no open intent.
+
 ## Following the owner's update-branch (HOF1)
 
 The owner merges main into nearly every PR right before merging it, so the head almost always moves after the handoff. The PR

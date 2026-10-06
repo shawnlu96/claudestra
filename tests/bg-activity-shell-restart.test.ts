@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testChildEnv } from "./test-env";
 
+// running1 在第一个进程退出时还在跑（持久化成 unknown），退出行在两次进程之间才写完：第二个进程冷启动后要把它更正为 exit 0
 test("r2 refresh-result: two isolated Bun processes recover exit 1 without replaying baseline as new tasks", async () => {
   const root = mkdtempSync(join(tmpdir(), "bg-shell-restart-"));
   const watcher = new URL("../src/bridge/bg-activity-watcher.ts", import.meta.url).href;
@@ -22,9 +23,10 @@ test("r2 refresh-result: two isolated Bun processes recover exit 1 without repla
     if (process.argv[2] === "prepare") {
       const main = projectJsonlPath(agent.cwd, agent.sessionId);
       mkdirSync(join(main, ".."), { recursive: true });
-      writeFileSync(main, "Command running in background with ID: retained1\\n");
+      writeFileSync(main, "Command running in background with ID: retained1\\nCommand running in background with ID: running1\\n");
       await poll();
       writeFileSync(join(root, "tasks", "retained1.output"), "running\\n");
+      writeFileSync(join(root, "tasks", "running1.output"), "working\\n");
       await poll();
       appendFileSync(join(root, "tasks", "retained1.output"), "[exited with code 1]\\n");
       clock += 10000;
@@ -45,14 +47,17 @@ test("r2 refresh-result: two isolated Bun processes recover exit 1 without repla
     const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     console.log(`${mode}: ${stdout}${stderr}`);
     expect(code).toBe(0);
-    return { stdout, snapshots: JSON.parse(stdout.split("SNAPSHOT ")[1].trim()) as { id: string; end?: { exitCode: number } }[] };
+    return { stdout, snapshots: JSON.parse(stdout.split("SNAPSHOT ")[1].trim()) as { id: string; end?: { status: string; exitCode: number | null } }[] };
   };
   try {
     const before = await run("prepare");
     expect(before.snapshots.find((t) => t.id === "retained1")?.end?.exitCode).toBe(1);
+    expect(before.snapshots.find((t) => t.id === "running1")?.end).toBeUndefined();
+    appendFileSync(join(root, "tasks", "running1.output"), "[exited with code 0]\n");
     const after = await run("restart");
     expect(after.stdout).not.toContain("bg 活动开始");
     expect(after.snapshots.find((t) => t.id === "retained1")?.end?.exitCode).toBe(1);
+    expect(after.snapshots.find((t) => t.id === "running1")?.end).toMatchObject({ status: "done", exitCode: 0 });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

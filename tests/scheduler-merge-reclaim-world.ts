@@ -22,7 +22,7 @@ import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-drive
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import type { TrainEvent, TrainGh, TrainState, TrainStore } from "../src/lib/scheduler-merge-train.js";
 import { trainHolds } from "../src/lib/scheduler-merge-train-hold.js";
-import { fileTrainStore, mergeTrainTick, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
+import { fileTrainStore, mergeTrainTick, withMergeTrain, type FormFence } from "../src/lib/scheduler-merge-train-tick.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -163,16 +163,18 @@ export function reclaimWorld(opts: WorldOpts) {
   let cursor: Record<string, string | undefined> = {};
   /** A daemon restart: a new ledger connection and pass cursor; only the ledger file, the train store and fake GitHub carry over. */
   const restart = () => { closeLedger(path); db = openLedger(path); cursor = {}; };
-  /** `arrive` runs right after the in-pass train tick, where a card the train no longer holds would reach this pass's auto tick. */
-  const pass = async (o: { budgetMs?: number; arrive?: () => void } = {}) => {
+  /** `arrive` runs right after the in-pass train tick, where a card the train no longer holds would reach this pass's auto tick.
+   *  `afterManager` sees every ledger child call of the pass with its result, after it returned and before the pass goes on. */
+  const pass = async (o: { budgetMs?: number; arrive?: () => void; afterManager?: (args: string[], result: Record<string, unknown>) => void } = {}) => {
     const before = hub.calls.length;
-    const trainTick = async (d: typeof db, projects: readonly string[]) => {
-      await mergeTrainTick(d, projects, { now: Date.now, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
+    const mgr: typeof manager = o.afterManager ? async (...args) => { const r = await manager(...args); o.afterManager!(args, r); return r; } : manager;
+    const trainTick = async (d: typeof db, projects: readonly string[], _active: unknown, formFence?: FormFence) => {
+      await mergeTrainTick(d, projects, { now: Date.now, formFence, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
       o.arrive?.();
     };
-    const r = await schedulerPass(db, config, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
+    const r = await schedulerPass(db, config, { assertOwner: () => {}, manager: mgr, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
       external: () => withMergeTrain(base, { gh, store }), deployJobs, autoDeps: autoDeps as never, peerPr: noop,
-      autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [],
+      autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [], lifecycle: async () => [],
       ...(opts.store === "default" ? {} : { train: { gh, store } }) });
     if (r.failed.length) hub.calls.push(...r.failed.map((f) => `failed:${f.taskId}:${f.error}`));
     return hub.calls.slice(before);
