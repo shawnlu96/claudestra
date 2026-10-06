@@ -5,9 +5,11 @@
  *   不拿命令级写锁（write-commands.ts needsWriteLock）：自己锁住改 registry 那一下，放锁之后再起 restart——restart 要同一把锁，
  *   锁着起就要白等 20s 降级。
  * - `acp-install`：装能配本机已装 Codex 的最新 codex-acp 并切过去（lib/acp/install.ts：按 registry 公布的 integrity 验包）。
+ * - `codex-adapter`：Codex 适配器选择开关（自研 / 上游），在 acp-adapter.ts。
  * 生命周期本身（create / restart / resume / kill）走 manager 的通用流程，transport=acp 时选 lib/runtimes/codex-acp.ts / pi-acp.ts。
  */
 import { codexAcpInstalled, reconcileCodexAcp } from "../lib/acp/install.js";
+import { selectedCodexAdapter } from "../lib/acp/codex-compat.js";
 import { probeCodexInstall } from "../lib/codex-version.js";
 import { checkAcpReady, checkAcpReadyFor, probePiAcp, type AcpReady } from "../lib/acp/readiness.js";
 import { ACP_AGENT_ENV } from "../lib/acp/stub.js";
@@ -25,6 +27,7 @@ import { gracefulExitWindow } from "../lib/runtimes/graceful-exit.js";
 import { piAcpClash } from "../lib/runtimes/pi-acp.js";
 import { tmuxWindowOps } from "../lib/runtimes/window-ops.js";
 import { killPidsEscalating, listWindowIdsByName, MASTER_SESSION, sessionTarget, tmuxRaw, tmuxRawStrict, windowChildPids } from "../lib/tmux-helper.js";
+import { retireForSwitch } from "./acp-retire.js";
 import { assertCreatable, loadRegistry, output, patchRegistryAgent, saveRegistry } from "./core.js";
 
 const RESTART_TIMEOUT_MS = 240_000;
@@ -162,9 +165,10 @@ export async function prepareAcpResume(spec: LaunchSpec, adapter: ManagedRuntime
 
 /** 已记 acp 的 agent 若升级后丢了适配器或 CLI 太旧，restart 仍可从同一线程走 tmux。 */
 export async function managedForRestart(name: string, info: { runtime?: string; transport?: string }): Promise<ManagedRuntimeAdapter | null> {
+  await retireForSwitch(name, info); // 切适配器发起的重启：宿主空闲退出了才往下走（acp-retire.ts）
   if (info.runtime === "codex" && info.transport !== "acp" && isSandbox()) return null;
   if (info.runtime === "codex" && info.transport === "acp") {
-    const ready = await checkAcpReady(true);
+    const ready = await checkAcpReady(true, { selected: () => selectedCodexAdapter(name) });
     if (!ready.ok) {
       console.error(`[acp] ${name} 暂退 tmux：${ready.reason}`);
       info.transport = "tmux";
@@ -232,6 +236,7 @@ export async function recoverFailedAcpLaunch(
 }
 
 export async function cmdAcp(cmd: string, args: string[]): Promise<void> {
+  if (cmd === "codex-adapter") return (await import("./acp-adapter.js")).cmdCodexAdapterMain(args);
   if (cmd === "acp-install") {
     const r = await reconcileCodexAcp({ codexVersion: async () => (await probeCodexInstall())?.version });
     return output(r.ok ? { ok: true, version: r.version, codexRange: r.codexRange, path: r.path, reused: r.reused } : { ok: false, error: r.error });
@@ -275,7 +280,7 @@ export async function switchTransport(name: string, mode: string): Promise<Recor
   const bare = name.replace(/^agent-/, "");
   if (mode === "acp") { // 锁外探就绪（Codex 可能要装适配器）；按运行时分派，先不加锁读一眼它是谁
     const pre = (await loadRegistry()).agents;
-    const ready = await checkAcpReadyFor((pre[`agent-${bare}`] ?? pre[bare])?.runtime, true);
+    const ready = await checkAcpReadyFor((pre[`agent-${bare}`] ?? pre[bare])?.runtime, true, { selected: () => selectedCodexAdapter(bare) });
     if (!ready.ok) return { ok: false, error: ready.reason };
   }
   const lock = await acquireLock(statePath(".manager-write.lock"));

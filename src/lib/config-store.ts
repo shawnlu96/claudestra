@@ -33,6 +33,7 @@ export interface AppConfig {
    *  v2.21.3+ emergency:93% 救命线独立开关(缺省 true)——常规线关了它也在,
    *  只在快撞 CC 的 ~967K 裸压时兜底触发一次(owner 2026-09-03)。 */
   autoCompact?: {
+    cardWorkers?: "on" | "observe" | "off";
     idleHours?: number;
     window?: number;
     emergency?: boolean;
@@ -117,6 +118,7 @@ function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
     ...(typeof ac.window === "number" ? { window: ac.window } : {}),
     ...(typeof ac.emergency === "boolean" ? { emergency: ac.emergency } : {}),
     ...(typeof ac.inject === "boolean" ? { inject: ac.inject } : {}),
+    ...(ac.cardWorkers === "on" || ac.cardWorkers === "observe" || ac.cardWorkers === "off" ? { cardWorkers: ac.cardWorkers } : {}),
     ...(ac.policies !== undefined ? { policies: ac.policies } : {}),
   };
   return Object.keys(out).length ? out : undefined;

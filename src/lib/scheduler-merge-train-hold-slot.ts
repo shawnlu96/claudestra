@@ -18,6 +18,7 @@ import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 import type { TrainState, TrainStore } from "./scheduler-merge-train.js";
 import { fileTrainStore } from "./scheduler-merge-train-tick.js";
 import { holdReason, ridesTrain, SLOT_RECLAIM, SLOT_YIELD, trainHolds } from "./scheduler-merge-train-hold.js";
+import { requestSeqOf } from "./manual-merge-queue-facts.js";
 
 export const defaultTrainStore = (): TrainStore | null => (isTestProcess() ? null : fileTrainStore());
 /** A corrupt state file holds no one here: the train tick reports it, and the driver gate still guards every merge. */
@@ -66,6 +67,8 @@ export async function mergeSlotTurn(db: Database, run: MergeRun, advance: Advanc
     tell(store, s, run.taskId, why, now);
     return mine ? advance(run.phase, run.phase, run.rev, `${SLOT_YIELD}${why}`) : run;
   }
+  // A manual merge request may reserve the slot during the train's cleanup, but sends nothing until that train is done.
+  if (s?.phase === "cleanup" && requestSeqOf(run.intentId) !== null) return run;
   if (mine) return drive(run);
   if (holder) return run; // lent to a train member or taken by the next card: wait for it like any merge
   return drive(await advance(run.phase, run.phase, run.rev, SLOT_RECLAIM));
@@ -78,18 +81,26 @@ function slotOutsider(db: Database, project: string): boolean {
     LEFT JOIN scheduler_merges m ON m.intentId = i.id WHERE r.project = ? AND r.resource = ?`).get(project, `merge:${project}`) as
     { status: string; phase: string | null } | null;
   if (row && (row.status === "unknown" || (!!row.phase && !["ready", "updating", "await_ci"].includes(row.phase)))) return true;
-  return !!db.query(`SELECT 1 FROM scheduler_merges m JOIN scheduler_intents i ON i.id = m.intentId WHERE m.project = ? AND i.status = 'submitted'
-    AND m.phase IN ('ready','updating','await_ci') AND EXISTS (SELECT 1 FROM events e WHERE e.target = m.taskId AND e.kind = 'scheduler'
-    AND json_extract(e.data, '$.op') = 'merge_slot' AND json_extract(e.data, '$.intentId') = m.intentId)`).get(project);
+  return lentSlotPending(db, project);
 }
 
-/** The projects the train tick may look at this pass: any with a live train (to step it), else those with no outsider on the slot. */
-export function trainProjects(db: Database, projects: readonly string[], store: TrainStore | null = defaultTrainStore()): string[] {
-  if (!store) return [...projects];
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return [...projects];
+/** A run that lent its slot to an earlier train and has not merged yet (MTR1 gives it back before anyone else plans or claims). */
+export const lentSlotPending = (db: Database, project: string): boolean => !!db.query(`SELECT 1 FROM scheduler_merges m JOIN scheduler_intents i
+  ON i.id = m.intentId WHERE m.project = ? AND i.status = 'submitted' AND m.phase IN ('ready','updating','await_ci') AND EXISTS (SELECT 1 FROM events e
+  WHERE e.target = m.taskId AND e.kind = 'scheduler' AND json_extract(e.data, '$.op') = 'merge_slot' AND json_extract(e.data, '$.intentId') = m.intentId)`)
+  .get(project);
+
+/**
+ * The projects the train tick may look at this pass: any with a live train (to step it), else those with no outsider on the slot
+ * and whose manual merge queue does not block forming (`blocks`: the pass's manualTurn reading, manual-merge-queue.ts).
+ */
+export function trainProjects(db: Database, projects: readonly string[], store: TrainStore | null = defaultTrainStore(),
+  blocks: (project: string) => boolean = () => false): string[] {
+  if (!store) return projects.filter((p) => !blocks(p));
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return projects.filter((p) => !blocks(p));
   return projects.filter((p) => {
     let s: TrainState | null;
     try { s = store.load(p); } catch { return true; } // the train tick reports a corrupt file
-    return (!!s && s.phase !== "done") || !slotOutsider(db, p);
+    return (!!s && s.phase !== "done") || (!slotOutsider(db, p) && !blocks(p));
   });
 }

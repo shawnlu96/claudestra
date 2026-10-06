@@ -70,7 +70,7 @@ describe("重新授权 / 收回时关掉的窗口：在跑的停掉和已结束�
     expect(window).toBe(false);
     expect(status).toBe("stopped");
     expect(result).toEqual({ stopped: [name], unconfirmed: [] });
-    expect(calls).toEqual(["create committed and exited", "kill", "markStopped"]);
+    expect(calls).toEqual(["create committed and exited", "markStopped", "kill"]); // 关窗口前先置 stopped（LKN-1）
   });
 
   test("3 条 stopped 无窗口加 1 条有窗口：只报本次关闭的窗口，再授权不重复报告", async () => {
@@ -126,7 +126,7 @@ describe("重新授权 / 收回时关掉的窗口：在跑的停掉和已结束�
     io.markStopped = async () => void calls.push("markStopped");
     expect(await stopRevokedWorkers(io)).toEqual({ stopped: [],
       unconfirmed: [{ name, why: "读不到 tmux，没法确认已退出" }] });
-    expect(calls).toEqual(["probe", "kill", "probe"]);
+    expect(calls).toEqual(["probe", "markStopped", "kill", "probe"]);
   });
 
   test("只有已结束单的残留窗口：输出里不出现「停掉」", async () => {

@@ -4,6 +4,7 @@ import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
+import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -107,10 +108,11 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (trained && await external.train?.(run) !== "cleared") return run; // a train voided before the claim: no merge sent, retried next round
   const claimed = await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
   assertActive();
-  // The claim's transaction re-read the ledger, but another write (a PM revoking the UI approval) can commit before its receipt
-  // gets back here: re-read once more right before the irreversible call. Nothing was sent, which the receipt says.
-  const drift = recheck(claimed);
-  if (drift) return step("unknown", `合并未发出：${drift}`);
+  // The claim's transaction re-read the ledger, but another write (a PM revoking the UI approval, the manual queue policy going off)
+  // can commit before its receipt gets back here: re-read once more right before the irreversible call, marked as the one read that
+  // knows the claim is still unsent (a `merging` row seen after a restart may have sent). Nothing was sent, which the receipt says.
+  const drift = recheck({ ...claimed, beforeSend: true });
+  if (drift) return step("unknown", `${MERGE_NOT_SENT}：${drift}`);
   const mergeSha = await external.merge(run.prRef, run.reviewedHead);
   if (!/^[a-f0-9]{40}$/i.test(mergeSha)) return step("unknown", "merge API 未确认完整合并 SHA");
   const merged = await external.inspect(run.prRef);

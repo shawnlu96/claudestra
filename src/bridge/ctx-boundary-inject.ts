@@ -38,6 +38,8 @@ export interface InjectTarget {
   name: string;
   target: string;
   executor: boolean;
+  validate?: () => Promise<boolean>;
+  identity?: string;
 }
 
 /** agent 的 tmux 窗口名：大总管在 registry 里叫 agent-master，窗口却叫 master，直接拿 registry 名拼 windowTarget 永远读不到它的画面 */
@@ -61,6 +63,7 @@ export interface PaneCapture {
 type PaneRead = PaneQuotaState & { inputText: string };
 
 export interface InjectDeps {
+  validateIdentity?(target: string, identity: string): Promise<boolean | null>;
   now(): number;
   capture(target: string): Promise<PaneCapture | null>;
   readPane(plain: string, esc: string): PaneRead;
@@ -70,7 +73,7 @@ export interface InjectDeps {
   sleep(ms: number): Promise<void>;
 }
 
-type InjectSkip = PaneBlock | "pane-unknown" | "recent" | "window-small" | "busy";
+type InjectSkip = PaneBlock | "pane-unknown" | "recent" | "window-small" | "busy" | "session-changed";
 /** failed 且 leftover：敲进去的字没提交、还留在输入框里（调用方要告诉 owner）；note：窗口放不下、退了档 */
 export type InjectResult =
   | { status: "executed" | "queued"; line: string; note?: string }
@@ -82,11 +85,22 @@ interface Pending {
   text: string;
   at: number;
   inflight?: number;
+  identity?: string;
 }
 
 let injectedAt: Map<string, number> = new Map();
 /** 窗口 → 自己留在框里的字：之后每轮（自动注入开关关着也跑）看一眼，框里正好是它就删掉 */
 let pendingEcho: Map<string, Pending> = new Map();
+const boundSessions = new Map<string, string>();
+
+/** A reused window owns a new input buffer. Never erase an old session's pending echo in its replacement. */
+export function bindCompactSession(target: string, sessionId: string): void {
+  const previous = boundSessions.get(target);
+  if (previous !== undefined && previous !== sessionId) {
+    injectedAt.delete(windowKey(target));
+  }
+  boundSessions.set(target, sessionId);
+}
 
 /**
  * bridge 启动时 "live"：守卫和待删的字换成落盘的表（bridge 重启不丢）。manager 的 dry-run 进程用 "read-only"：
@@ -97,7 +111,9 @@ export function loadInjectState(mode: "live" | "read-only"): void {
   if (mode === "live") {
     injectedAt = new PersistedMap<number>(GUARD_FILE, "上下文边界注入守卫", isTs);
     const isPending = (v: unknown) =>
-      !!v && typeof (v as Pending).text === "string" && typeof (v as Pending).at === "number" && ["number", "undefined"].includes(typeof (v as Pending).inflight);
+      !!v && typeof (v as Pending).text === "string" && typeof (v as Pending).at === "number"
+      && ["number", "undefined"].includes(typeof (v as Pending).inflight)
+      && ["string", "undefined"].includes(typeof (v as Pending).identity);
     pendingEcho = new PersistedMap<Pending>(PENDING_FILE, "上下文边界待删的字", isPending);
     return;
   }
@@ -108,6 +124,7 @@ export function loadInjectState(mode: "live" | "read-only"): void {
 }
 
 export function resetInjectState(): void {
+  boundSessions.clear();
   injectedAt = new Map();
   pendingEcho = new Map();
 }
@@ -214,7 +231,7 @@ type Erased = { r: "erased" | "blocked" | "not-ours" | "failed"; left: string; i
  * 每批后核对框里剩下的正好是前半截（还没画完就再等一帧）：对不上（owner 动了、退格丢了）就停，不多删一个字；被对话框挡住也停。
  * 停下时 left 是这一批之前的那段、inflight 是这一批的个数：不知道生效了几个，下一轮按框里实际剩的算（lib ourRemainder）。
  */
-async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, inflight = 0): Promise<Erased> {
+async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, inflight = 0, validate?: () => Promise<boolean>): Promise<Erased> {
   let mine = "";
   for (let i = 0; i < 2; i++) {
     if (i) await deps.sleep(300);
@@ -230,6 +247,7 @@ async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, infl
     const n = left.length % ERASE_BATCH || ERASE_BATCH;
     const before = left.join("");
     try {
+      if (validate && !await validate()) return { r: "blocked", left: left.join("") };
       await deps.erase(target, n);
     } catch (e) {
       console.error(`🧭 上下文边界 删回显失败 ${target}:`, errText(e));
@@ -248,9 +266,10 @@ async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, infl
   return { r: "erased", left: "" };
 }
 
-function keepPending(target: string, e: { left: string; inflight?: number }, now: number): void {
+function keepPending(target: string, e: { left: string; inflight?: number }, now: number, identity?: string): void {
   const had = pendingEcho.get(target);
-  pendingEcho.set(target, { text: e.left, at: had?.at ?? now, ...(e.inflight ? { inflight: e.inflight } : {}) });
+  pendingEcho.set(target, { text: e.left, at: had && had.identity === identity ? had.at : now, ...(e.inflight ? { inflight: e.inflight } : {}),
+    ...(identity ?? had?.identity ? { identity: identity ?? had?.identity } : {}) });
 }
 
 /**
@@ -263,9 +282,19 @@ export async function sweepPendingEcho(deps: InjectDeps, log: (l: string) => voi
 }
 
 async function sweepOne(target: string, p: Pending, deps: InjectDeps, log: (l: string) => void): Promise<void> {
-  const e = deps.now() - p.at > PENDING_TTL_MS ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps, p.inflight ?? 0);
+  const validate = p.identity ? async () => await deps.validateIdentity?.(target, p.identity!) === true : undefined;
+  const identity = p.identity ? await deps.validateIdentity?.(target, p.identity) : boundSessions.has(target) ? null : true;
+  const expired = deps.now() - p.at > PENDING_TTL_MS;
+  if (!expired && identity !== true) {
+    if (identity === false) {
+      pendingEcho.delete(target);
+      log(`🧭 上下文边界 ${target} 原session已换，不删新session输入`);
+    }
+    return; // Unknown identity retains the persisted debt without any keys; a later trusted read can clean it.
+  }
+  const e = expired ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps, p.inflight ?? 0, validate);
   if (e.r === "blocked" || e.r === "failed") {
-    if (e.left !== p.text || e.inflight !== p.inflight) keepPending(target, e, deps.now());
+    if (e.left !== p.text || e.inflight !== p.inflight) keepPending(target, e, deps.now(), p.identity);
     return;
   }
   pendingEcho.delete(target);
@@ -290,11 +319,11 @@ const windowBusy = (who: string): InjectResult => ({ status: "skipped", reason: 
  */
 export function injectCompact(
   t: InjectTarget,
-  opts: { action: CompactAction; keep?: CompactKeep | null; pane?: PaneCapture | null },
+  opts: { action: CompactAction; keep?: CompactKeep | null; pane?: PaneCapture | null; validate?: () => Promise<boolean>; identity?: string },
   deps: InjectDeps = liveInjectDeps,
 ): Promise<InjectResult> {
   const pane = holdsWindow(t.target) ? opts.pane : undefined;
-  return withWindow(t.target, "另一次压缩注入", () => injectHeld(t, { ...opts, pane }, deps), windowBusy);
+  return withWindow(t.target, "另一次压缩注入", () => injectHeld(t, { ...opts, pane, identity: opts.identity ?? t.identity, validate: opts.validate ?? t.validate }, deps), windowBusy);
 }
 
 async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact>[1], deps: InjectDeps): Promise<InjectResult> {
@@ -309,7 +338,7 @@ async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact
   if (blocked) return skip(blocked);
   const { all, fit } = tiersThatFit(effectiveAction(t.executor, opts.action), k?.ok ? k.keep : null, pane.size ?? null);
   for (const [i, tier] of fit.entries()) {
-    const r = await typeAndSubmit(t.target, tier.line, deps);
+    const r = await typeAndSubmit(t.target, tier.line, deps, opts.validate, opts.identity);
     if (r === "cut") {
       if (i === fit.length - 1) return windowSmall(pane.size);
       continue;
@@ -324,33 +353,41 @@ async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact
 }
 
 /** 敲一档、核对、回车。只看得到后半截（窗口放不下）→ 删干净返回 "cut"，调用方敲下一档；删不干净就记待删、报 leftover */
-async function typeAndSubmit(target: string, line: string, deps: InjectDeps): Promise<InjectResult | "cut"> {
+async function typeAndSubmit(target: string, line: string, deps: InjectDeps, validate?: () => Promise<boolean>, identity?: string): Promise<InjectResult | "cut"> {
+  if (validate && !await validate()) return { status: "skipped", reason: "session-changed", text: "会话或usage快照已改变，没敲键" };
   try {
     await deps.type(target, line);
   } catch (e) {
     return { status: "failed", error: errText(e) };
   }
   const typed = await typedFrame(target, line, deps);
+  if (validate && !await validate()) return retainFailedEcho(target, line, deps, identity);
   if (typed.kind === "mismatch") return { status: "failed", error: "输入框里的字和敲进去的对不上（可能有人同时在打字），没按回车，也没删", leftover: true };
   if (typed.kind === "blocked") {
-    keepPending(target, { left: line }, deps.now());
+    keepPending(target, { left: line }, deps.now(), identity);
     return { status: "failed", error: `敲完字画面变了（${typed.why}），没按回车；字先留在输入框里，对话框关掉后自动删`, leftover: true };
   }
   if (typed.kind === "cut" || typed.kind === "abort") {
-    const e = await eraseOwnEcho(target, line, deps);
+    const e = await eraseOwnEcho(target, line, deps, 0, validate);
     if (e.r === "erased") return typed.kind === "cut" ? "cut" : skip("compacting");
-    keepPending(target, e, deps.now());
+    keepPending(target, e, deps.now(), identity);
     const why = typed.kind === "cut" ? "窗口放不下，敲进去的命令只显示得出后半截" : "敲完字发现已经在压缩 / 排队";
     return { status: "failed", error: `${why}，没按回车；删字没删干净，之后再删`, leftover: true };
   }
   try {
+    if (validate && !await validate()) return retainFailedEcho(target, line, deps, identity);
     await deps.enter(target);
   } catch (e) {
-    keepPending(target, { left: line }, deps.now());
+    keepPending(target, { left: line }, deps.now(), identity);
     return { status: "failed", error: errText(e), leftover: true };
   }
   noteCompactInjected(target, deps.now());
   return { status: paneLooksWorking(typed.pane.plain) ? "queued" : "executed", line };
+}
+
+function retainFailedEcho(target: string, line: string, deps: InjectDeps, identity?: string): InjectResult {
+  keepPending(target, { left: line }, deps.now(), identity);
+  return { status: "failed", error: "发送前保护失效，未提交；已保留原session输入残留，待可信身份复核后清理", leftover: true };
 }
 
 /** 全用 strict：tmuxRaw 吞非零退出，窗口不在时会拿到空串、发键也「成功」，后面就对着不存在的窗口报「已发送」 */

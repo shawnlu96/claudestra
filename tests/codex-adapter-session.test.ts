@@ -142,7 +142,7 @@ describe("会话代际（B56、I11、R24）", () => {
     await expect(rpc(h.session).request("session/new", NEW)).rejects.toMatchObject({ code: -32600 });
     await expect(rpc(h.session).request("session/resume", { sessionId: "C", ...NEW })).rejects.toMatchObject({ code: -32600 });
     h.f.thread = "A";
-    expect(await promptAs(h, "A")).toEqual({ stopReason: "end_turn" });
+    expect(await promptAs(h, "A")).toMatchObject({ stopReason: "end_turn" });
     expect(h.f.calls("turn/start").at(-1).threadId).toBe("A");
     expect(h.f.calls("thread/unsubscribe")).toEqual([{ threadId: "B" }]);
     await expect(rpc(h.session).request("session/new", NEW)).resolves.toMatchObject({ sessionId: "A" });
@@ -151,7 +151,7 @@ describe("会话代际（B56、I11、R24）", () => {
   test("R24⑥ 用新 id 确认：放掉 A；R24③ 之后会话变更失败带 previousSessionClosed", async () => {
     const h = await switched();
     quickTurns(h);
-    expect(await promptAs(h, "B")).toEqual({ stopReason: "end_turn" });
+    expect(await promptAs(h, "B")).toMatchObject({ stopReason: "end_turn" });
     expect(h.f.calls("thread/unsubscribe")).toEqual([{ threadId: "A" }]);
     h.f.on("thread/start", (_p, id) => void queueMicrotask(() => h.f.fail(id, -32603, "boom")));
     await expect(rpc(h.session).request("session/new", NEW)).rejects.toMatchObject({ code: -32603, data: { previousSessionClosed: true } });
@@ -219,7 +219,7 @@ describe("会话代际（B56、I11、R24）", () => {
       expect((await rpc(h.session).request("session/new", NEW)).sessionId).toBe("B");
       h.f.thread = "A";
       quickTurns(h);
-      expect(await promptAs(h, "A")).toEqual({ stopReason: "end_turn" });
+      expect(await promptAs(h, "A")).toMatchObject({ stopReason: "end_turn" });
       expect(h.f.calls("turn/start").at(-1)).toMatchObject({ threadId: "A", ...want });
     }
   });

@@ -49,7 +49,8 @@ describe("show", () => {
     const r = await run(EXEC, "a");
     expect(r).toMatchObject({ ok: true, project: "a", observed: [] });
     expect(r.policies.materials).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
-    expect(Object.keys(r.policies)).toHaveLength(11);
+    expect(Object.keys(r.policies)).toHaveLength(12);
+    expect(r.policies.manualMergeQueue).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect([snap(), decisions()]).toEqual([null, []]);
     expect((await run(EXEC, "zz")).code).toBe("not_found");
   });

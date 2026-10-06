@@ -29,6 +29,7 @@ import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
 import { witnessMismatch } from "../lib/caller-witness.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
+import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
@@ -232,16 +233,32 @@ const PATH_ONLY = (flag: string) => `${flag} 只收文件路径：字母数字�
 async function deliverCmd(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   c.requireOwnOrManager(task, "交付");
+  // mcp-deliver: 键只属于执行者本人的正式单交付（bridge 以调用方身份写），PM / 别人不能借它冒充本人交付去触发自动交回
+  if (c.p.flags.dedup?.startsWith("mcp-deliver:") && c.deps.actor !== task.agent) throw new LedgerError("forbidden", "正式单交付只能是卡的执行者本人");
   const moveFrom = c.p.flags.from === undefined ? undefined : stageFlag(c, "from");
   // 证据 / 结论只收路径：它们会进 bridge 通知和审查员 prompt（lib/quote-text.ts pathLike）
   if (c.p.flags.evidence !== undefined && !pathLike(c.p.flags.evidence)) throw new LedgerError("invalid", PATH_ONLY("--evidence"));
   checkTaskRefs({ head: c.p.flags.head });
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
-  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: c.p.flags.head, evidence: c.p.flags.evidence, text: c.p.flags.text, moveFrom, pr: c.p.flags.pr, expect, disputes: c.p.flags.disputes });
+  const f = c.p.flags;
+  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes });
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
+}
+
+/** 一次性「本人交付后自动交回派审」资格：只给真 PM（调度助理 / 调度服务 / 执行者都不行），事务在 lib/ledger-autostart-resume.ts、前置在 lib/order-local-deliver.ts */
+function resumeGrantCmd(c: LedgerCli): Result {
+  const task = c.task(c.p.pos[1]);
+  c.requireRealPm(task.project, "授予自动交回资格");
+  const need = (f: string): number => {
+    const v = intFlag(c.p, f);
+    if (v === undefined) throw new LedgerError("invalid", `要带 --${f}`);
+    return v;
+  };
+  const r = grantResume(c.db, c.ctx(), { taskId: task.id, taskRev: need("rev"), workflowRev: need("workflow-rev"), reason: c.need("reason"), ttlHours: intFlag(c.p, "ttl-h") });
+  return { ok: true, grant: r.grant, event: r.event, duplicate: r.duplicate };
 }
 
 async function review(c: LedgerCli): Promise<Result> {
@@ -348,6 +365,11 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
     usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
+  },
+  "resume-grant": {
+    valued: ["rev", "workflow-rev", "reason", "ttl-h", "dedup"],
+    usage: "resume-grant <task> --rev N --workflow-rev N --reason <r> [--ttl-h 1–72，默认 24]（真 PM：执行者本人经正式单交了新 head 后自动交回派审，只一次）",
+    run: resumeGrantCmd,
   },
   review: {
     valued: ["reviewer", "verdict", "p0", "p1", "p2", "path", "text", "to", "waive", "dedup", "head", "session", "family", "findings"],
