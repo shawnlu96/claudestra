@@ -15,6 +15,7 @@ import { advance, getOrder, JournalConflict, orderOf, type LendRow } from "./len
 import { parseVerdictWire, type VerdictWire } from "./order-wire.js";
 import { arbiterSubmit } from "./lend-arbiter-submit.js";
 import { lendVerdictForPeer } from "./memory-tools-wire.js";
+import { issueReviewTicket, logicalSha, parseReviewTicket, type ReviewTicket, type TicketSigner } from "./pool-review-proof-ticket.js";
 
 /** 报告正文与整个请求体的上限（T93 lend wire v1）：超了让 worker 自己精简，不截断 */
 const REPORT_MAX_BYTES = 64 * 1024;
@@ -38,6 +39,8 @@ interface LendResultPayload {
   verdict: VerdictWire;
   report: string;
   session: { id: string; family: string };
+  /** 只有 submit_verdict（lend-tools.ts）按 take_review 记下的事实签的票据；CLI 交的没有 */
+  ticket?: ReviewTicket;
 }
 
 export interface SubmitterDeps {
@@ -70,7 +73,7 @@ async function submitterProblem(row: LendRow, d: SubmitterDeps): Promise<string 
 }
 
 /** 按 journal 里的订单补上 orderId / head / 计数，再过一遍 order-wire 的严格校验 */
-function buildPayload(row: LendRow, input: SubmitInput): { ok: true; payload: LendResultPayload; sha: string } | { ok: false; error: string } {
+function buildPayload(row: LendRow, input: SubmitInput, sign?: TicketSigner): { ok: true; payload: LendResultPayload; sha: string } | { ok: false; error: string } {
   const order = orderOf(row);
   const head = typeof order?.head === "string" ? order.head : null;
   if (row.leaseGen === null || !row.sessionId) return { ok: false, error: `${row.orderId} 的 journal 缺租约代数或会话` };
@@ -84,11 +87,26 @@ function buildPayload(row: LendRow, input: SubmitInput): { ok: true; payload: Le
   const bytes = Buffer.byteLength(input.report);
   if (!input.report.trim()) return { ok: false, error: "报告正文不能为空" };
   if (bytes > REPORT_MAX_BYTES) return { ok: false, error: `报告正文 ${bytes} 字节，超过 ${REPORT_MAX_BYTES}，请精简后再交（不截断）` };
-  const payload: LendResultPayload = { v: 1, orderId: row.orderId, gen: row.leaseGen, verdict: lendVerdictForPeer(parsed.value), report: input.report,
+  const core: LendResultPayload = { v: 1, orderId: row.orderId, gen: row.leaseGen, verdict: lendVerdictForPeer(parsed.value), report: input.report,
     session: { id: row.sessionId, family: row.family } };
+  const signed = sign ? ticketOf(row, core, sign) : null;
+  const payload: LendResultPayload = signed ? { ...core, ticket: signed } : core;
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return { ok: false, error: `结论整体超过 ${BODY_MAX_BYTES} 字节，请精简报告或问题描述后再交` };
   return { ok: true, payload, sha: payloadSha(raw) };
+}
+
+/**
+ * submit_verdict 的票据：订单 / 代数 / head / specRev / 轮次 / 家族 / worker / 会话 / 结论逻辑摘要 + take 事实。
+ * 没 take 过、take 对不上、订单字段不全或签不出 = 不带票据（结论照旧交，A 照旧入账，只是不算自动合并来源），不补造。
+ */
+function ticketOf(row: LendRow, core: LendResultPayload, sign: TicketSigner): ReviewTicket | null {
+  const o = orderOf(row);
+  if (!row.take || !row.agent || !row.sessionId || row.leaseGen === null) return null;
+  const t = issueReviewTicket({ v: 1, orderId: row.orderId, gen: row.leaseGen, taskId: String(o?.taskId ?? ""), head: String(o?.head ?? ""),
+    specRev: Number(o?.specRev), round: Number(o?.round), family: row.family, worker: row.agent, session: row.sessionId,
+    payloadSha: logicalSha(core as unknown as Record<string, unknown>), take: row.take }, sign);
+  return t && parseReviewTicket(t) ? t : null; // a malformed one (order without specRev / round) would get the whole result refused by A
 }
 
 /** 请求体原始字节的 sha256：A 的幂等键，也是回执里要对上的那个值 */
@@ -141,12 +159,12 @@ function resultRefusal(row: LendRow): string | null {
 /**
  * 公共提交核心（CLI `lend submit` 与 bridge 的 submit_verdict 共用）：调用方已证明是这张单的 worker（CLI 靠目录 + 会话 + 进程祖先，
  * MCP 靠 T85 身份 + journal 绑定）。建 payload → started 推到 result_pending（CAS）；已交过同一份 = 幂等成功，换了内容 = 拒。
- * 两个入口同时交（CAS 输了）按重读后的那一行再判一次，不会写两次。
+ * 两个入口同时交（CAS 输了）按重读后的那一行再判一次，不会写两次。sign 只有 submit_verdict 给（POOLRV1 票据），CLI 不给。
  */
-export function commitLendResult(db: Database, row: LendRow, input: SubmitInput, now = Date.now()): SubmitOutcome {
+export function commitLendResult(db: Database, row: LendRow, input: SubmitInput, now = Date.now(), sign?: TicketSigner): SubmitOutcome {
   const refused = resultRefusal(row);
   if (refused) return { ok: false, error: refused };
-  const built = buildPayload(row, input);
+  const built = buildPayload(row, input, sign);
   if (!built.ok) return built;
   if (row.state === "started") {
     try {
