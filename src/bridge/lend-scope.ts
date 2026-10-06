@@ -3,14 +3,15 @@
  * 「替 A 跑着单的那个 worker」发一句话。只在 POST /agents/:name/messages 那一行调（api-routes.ts），其余路由一律不认它。
  * 全部满足才放行，每次请求现读、不缓存，任何一样读不了就拒（fail-closed）：
  *   调用方过 lendCallerRefusal（已兑换的 peer token、E2E、钉了钥、带签名）；名字是 agent-lend-<10 hex>；JSON 文本请求；
- *   journal 里这个 worker 的单属于这个 peer、正在 started，且领单时记的指纹就是对方此刻钉的那把钥匙；lend.json 对这个 peer 的授权还在。
- * 判定核心 judgeLendScope 依赖全注入（tests/lend-scope.test.ts）；路由行为 tests/lend-scope-route.test.ts。
+ *   journal 里这个 worker 的单属于这个 peer、处于 worker 在跑的状态（WORKER_STATES：started / result_pending），且领单时记的指纹就是对方此刻
+ *   钉的那把钥匙；lend.json 对这个 peer 的授权还在。worker 交了结论（result_pending）仍可能在等 A 对 ask 的答复，只认 started 会把晚到的答复拒掉。
+ * 判定核心 judgeLendScope 依赖全注入（tests/lend-scope.test.ts）；路由行为 tests/lend-scope-route.test.ts、tests/lend-scope-late-answer.test.ts。
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { keyFingerprint } from "../lib/instance-key.js";
 import { readLend } from "../lib/lend-config.js";
-import { LEND_JOURNAL_PATH } from "../lib/lend-journal.js";
+import { LEND_JOURNAL_PATH, LIVE_STATES, WORKER_STATES, type LendState } from "../lib/lend-journal.js";
 import { effectiveLend, readLendContext } from "../lib/lend-policy.js";
 import { isLendWorkerName } from "../lib/lend-workers-view.js";
 import type { Principal } from "../lib/principals.js";
@@ -21,8 +22,8 @@ export interface LendScopeDeps {
   callerRefusal: () => string | null;
   /** 对方此刻钉住的钥匙的指纹；没钉 = null */
   pinnedFp: (peer: string) => string | null;
-  /** journal 里 agent = 该名、peer = 该 peer、state = started 的那一行的指纹；没有这一行 = undefined。读不了就抛 */
-  startedFp: (agent: string, peer: string) => string | null | undefined;
+  /** journal 里 agent = 该名、peer = 该 peer 的最新一行（状态 + 领单时的指纹）；没有 = undefined。读不了就抛 */
+  workerOrder: (agent: string, peer: string) => { state: LendState; fp: string | null } | undefined;
   /** 此刻对这个 peer 的出借授权：还在且指纹对得上 = null，否则是原因。读不了就抛 */
   grantProblem: (peer: string, fp: string) => Promise<string | null>;
 }
@@ -48,24 +49,25 @@ export async function judgeLendScope(i: LendScopeInput, d: LendScopeDeps): Promi
   try {
     const pinned = d.pinnedFp(peer);
     if (!pinned) return "对方没有钉住的钥匙";
-    const fp = d.startedFp(agent, peer);
-    if (fp === undefined) return "journal 里没有这个 peer 正在跑的这张单";
-    if (!fp || fp.toLowerCase() !== pinned.toLowerCase()) return "领单时的指纹和对方现在钉的钥匙对不上";
-    return await d.grantProblem(peer, fp.toLowerCase());
+    const row = d.workerOrder(agent, peer);
+    if (!row) return "journal 里没有这个 peer 给这个 worker 的单";
+    if (!WORKER_STATES.includes(row.state)) return LIVE_STATES.includes(row.state) ? `这张单还在 ${row.state}，worker 还没起来` : `这张单已结束（${row.state}）`;
+    if (!row.fp || row.fp.toLowerCase() !== pinned.toLowerCase()) return "领单时的指纹和对方现在钉的钥匙对不上";
+    return await d.grantProblem(peer, row.fp.toLowerCase());
   } catch (e) {
     return `读不了出借状态：${(e as Error).message}`;
   }
 }
 
 /** 只读打开、等锁有上限（同 lib/lend-watchdog.ts）：不调 openLendJournal，它会跑迁移、建目录 */
-export function startedFpFromJournal(path = LEND_JOURNAL_PATH): LendScopeDeps["startedFp"] {
+export function workerOrderFromJournal(path = LEND_JOURNAL_PATH): LendScopeDeps["workerOrder"] {
   return (agent, peer) => {
     if (!existsSync(path)) throw new Error("出借 journal 不在");
     const db = new Database(path, { readonly: true });
     try {
       db.exec(`PRAGMA busy_timeout = ${JOURNAL_BUSY_MS}`);
-      const row = db.query("SELECT fp FROM lend_orders WHERE agent = ? AND peer = ? AND state = 'started' LIMIT 1").get(agent, peer) as { fp: string | null } | null;
-      return row ? row.fp : undefined;
+      const row = db.query("SELECT state, fp FROM lend_orders WHERE agent = ? AND peer = ? ORDER BY createdAt DESC LIMIT 1").get(agent, peer);
+      return (row as { state: LendState; fp: string | null } | null) ?? undefined;
     } finally {
       db.close();
     }
@@ -89,7 +91,7 @@ const realDeps = (req: Request, principal: Principal): LendScopeDeps => ({
     const k = peerSignatureState(peer)?.publicKey;
     return k ? keyFingerprint(k) : null;
   },
-  startedFp: startedFpFromJournal(),
+  workerOrder: workerOrderFromJournal(),
   grantProblem: grantFromLendFile,
 });
 
