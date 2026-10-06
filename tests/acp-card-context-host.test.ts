@@ -7,7 +7,7 @@ import { AcpTurnLoop, type PromptOutcome } from "../src/lib/acp/turn.ts";
 const MIN3 = 3 * 60_000;
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string; commitMs?: number } = {}) {
+function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string; commitMs?: number; lease?: false } = {}) {
   let clock = 1_000_000;
   const prompts: string[] = [];
   const pending: ((o: PromptOutcome) => void)[] = [];
@@ -27,7 +27,9 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string; commitM
     log: (m) => logs.push(m),
   });
   card = new CardContextHost({
-    hostId: "h1", loop, mode: opts.mode ?? "on", commitMs: opts.commitMs, identity: { card: "CTXA", expectedSessionId: opts.expected ?? "s1" }, now: () => clock,
+    hostId: "h1", loop, mode: opts.mode ?? "on", commitMs: opts.commitMs,
+    liveBinding: opts.lease === false ? undefined : "atomic", // 单测缺省接上租约 port，只为钉住两段受理；生产现状见 lease: false
+    identity: { card: "CTXA", expectedSessionId: opts.expected ?? "s1" }, now: () => clock,
     state: () => state, log: (m) => logs.push(m),
   });
   card.noteAttach();
@@ -231,7 +233,7 @@ describe("两段受理：prepared 占住调度器，确认时再核现行登记"
   });
 
   test("状态里照实报：现行登记的原子受理 blocked-capability", () => {
-    expect(rig().status().liveBinding).toBe("blocked-capability");
+    expect(rig({ lease: false }).status().liveBinding).toBe("blocked-capability");
   });
 });
 
@@ -397,4 +399,18 @@ describe("新回合受理边界（硬线）", () => {
     expect(r.prompts).toEqual(["long", "queued"]);
     expect(r.logs.filter((l) => l.includes("卡片硬线（observe）"))).toHaveLength(1);
   });
+});
+
+test("生产现状（没有现行登记租约 port）：过硬线不自动压缩，这一轮拒开、给原因；手动 /compact 照放行", async () => {
+  const r = rig({ lease: false });
+  await r.turn(320_000);
+  void r.loop.submit("next");
+  await tick();
+  await tick();
+  expect(r.prompts).toEqual(["hi"]);
+  expect(r.failures.at(-1)).toContain("blocked-capability");
+  expect(r.stops.at(-1)).toBe("StopFailure");
+  r.loop.submitCommand("/compact");
+  await tick();
+  expect(r.prompts.at(-1)).toBe("/compact");
 });

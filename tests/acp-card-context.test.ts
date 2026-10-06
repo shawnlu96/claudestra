@@ -13,7 +13,7 @@ function snap(over: Partial<CardCtxSnapshot> = {}, used = 250_000, size: number 
   return {
     mode: "on", identity: { card: "CTXA", expectedSessionId: "s1" }, hostId: "h1", attachGen: 1, sessionId: "s1", turnGen: 4, slotGen: 2,
     registered: true, capable: true, rotating: false, compacting: false, running: false, queued: 0, idleSince: NOW - MIN3,
-    usage: { used, size, sessionId: "s1", attachGen: 1, turnGen: 4, at: NOW - MIN3 },
+    usage: { used, size, sessionId: "s1", attachGen: 1, turnGen: 4, at: NOW - MIN3 }, liveBinding: "atomic",
     ...over,
   };
 }
@@ -117,4 +117,13 @@ test("状态：回合中途预算固定 blocked-capability；结论用此刻身�
   expect(cardStatus(snap({}, 250_000), NOW).verdict).toEqual({ ok: false, reason: "not-bound" });
   expect(st).toMatchObject({ cap: "card_compact_v1", busyBudget: "blocked-capability", idleMs: MIN3, verdict: { ok: true, kind: "idle" } });
   expect(st.usage).toEqual({ state: "fresh", used: 250_000, size: 1_000_000, idle: 200_000, hard: 300_000 });
+});
+
+test("现行登记租约 blocked-capability（生产现状）：判到最后一律 live-binding-blocked、只报 wouldFire；硬线 / 闲置线都不放行；状态照实报", () => {
+  const s = snap({ liveBinding: "blocked-capability" });
+  expect(verdict(s)).toEqual({ ok: false, reason: "live-binding-blocked", wouldFire: "idle" });
+  expect(verdict(snap({ liveBinding: "blocked-capability" }, 300_000))).toEqual({ ok: false, reason: "live-binding-blocked", wouldFire: "hard" });
+  expect(verdict(snap({ liveBinding: "blocked-capability" }, 199_999))).toEqual({ ok: false, reason: "under" });
+  expect(verdict(snap({ liveBinding: "blocked-capability", mode: "observe" }))).toEqual({ ok: false, reason: "observe", wouldFire: "idle" });
+  expect(cardStatus(s, NOW, undefined, undefined, { card: "CTXA", sessionId: "s1" })).toMatchObject({ liveBinding: "blocked-capability", verdict: { reason: "live-binding-blocked" } });
 });

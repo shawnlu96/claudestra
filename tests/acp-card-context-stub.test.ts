@@ -71,7 +71,8 @@ const binding = { card: "CTXA", sessionId: SID };
 const identity = (st: any) => ({ card: "CTXA", expectedSessionId: st.sessionId, hostId: st.hostId, attachGen: st.attachGen, turnGen: st.turnGen, slotGen: st.slotGen, binding });
 
 describe("CTXA 卡片压缩（真宿主 + stub）", () => {
-  test("闲置线：闲置不满 3 分钟拒；满了受理，真的压缩完成后按 opId 查得到 done + compacted；旧 hostId 拒", async () => {
+  // 真宿主不接现行登记租约 port（生产现状，PM 未批）：一切压缩 fail-closed，只报结论
+  test("闲置线：闲置不满 3 分钟拒；满了也只报 live-binding-blocked（wouldFire），不压缩；旧 hostId / 退休拒", async () => {
     const h = boot({ card: "CTXA", expectedSessionId: SID, mode: "on", limits: { idle: 1_000, hard: 100_000 } });
     await until(h.ready, "宿主就绪");
     h.inbound("hello");
@@ -82,24 +83,23 @@ describe("CTXA 卡片压缩（真宿主 + stub）", () => {
     h.advance(3 * 60_000);
     expect(await h.call({ op: "card_compact", opId: "stale-host", ...identity(st), hostId: "000000000000" })).toMatchObject({ ok: false, reason: "old-host" });
     expect(await h.call({ op: "card_compact", opId: "retired", ...identity(st), binding: null })).toMatchObject({ ok: false, reason: "not-bound" });
-    expect(await h.call({ op: "card_compact", opId: "go", ...identity(st) })).toMatchObject({ ok: true, prepared: true, kind: "idle" });
-    expect(await h.call({ op: "card_commit", opId: "go", hostId: st.hostId, binding })).toMatchObject({ ok: true, accepted: true, kind: "idle" });
-    await until(() => h.stops.length === 2, "压缩那一轮 Stop");
-    expect(h.boundaries()).toHaveLength(1);
-    expect((await h.call({ op: "card_context", opId: "go" })).status.op).toMatchObject({ opId: "go", outcome: "done", compacted: true });
-    expect(await h.call({ op: "card_compact", opId: "go", ...identity(st) })).toMatchObject({ ok: true, duplicate: true }); // 不重放
-    expect(h.stops).toHaveLength(2);
+    expect((await h.call({ op: "card_context", binding })).status).toMatchObject({ liveBinding: "blocked-capability", verdict: { reason: "live-binding-blocked", wouldFire: "idle" } });
+    expect(await h.call({ op: "card_compact", opId: "go", ...identity(st) })).toMatchObject({ ok: false, reason: "live-binding-blocked", wouldFire: "idle" });
+    expect(await h.call({ op: "card_commit", opId: "go", hostId: st.hostId, binding })).toMatchObject({ ok: false, reason: "not-prepared" });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(h.boundaries()).toHaveLength(0);
+    expect(h.stops).toHaveLength(1);
   }, 30_000);
 
-  test("硬线：on 模式下一轮前先压缩一次，再开这一轮", async () => {
+  test("硬线：on 模式下不自动压缩（fail-closed），超线这一轮拒开、给原因；不取消、不重启", async () => {
     const h = boot({ card: "CTXA", expectedSessionId: SID, mode: "on", limits: { idle: 1_000, hard: 1_000 } });
     await until(h.ready, "宿主就绪");
     h.inbound("first");
     await until(() => h.stops.length === 1, "第一轮 Stop");
     h.inbound("second");
-    await until(() => h.stops.length === 3, "压缩 + 第二轮 Stop");
-    expect(h.boundaries()).toHaveLength(1);
-    expect(h.stops.map((s: any) => s.hook_event_name ?? s.event)).not.toContain("StopFailure");
+    await until(() => h.stops.length === 2, "第二轮拒开的 StopFailure");
+    expect(h.boundaries()).toHaveLength(0);
+    expect(h.stops.map((s: any) => s.hook_event_name ?? s.event)).toEqual(["Stop", "StopFailure"]);
   }, 30_000);
 
   test("没有卡片身份 / 启动会话不一致：no-capability / startup-mismatch；默认 observe 不动会话", async () => {

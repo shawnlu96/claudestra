@@ -167,6 +167,8 @@ export interface LaunchSpec {
   permissionMode?: string;
   /** 运行时专属项（CC：disallowedPreset / disallowedRaw；Pi：piEnv）。不认得的键忽略 */
   extras?: Readonly<Record<string, unknown>>;
+  /** CTXA：create --card 的卡号 + prepareSession 后的实际会话（ACP 宿主的卡片启动身份，命令里两个 env）。不传 = 不是卡片会话 */
+  card?: { id: string; sessionId: string };
   /** T85 启动凭据的一次性文件（lib/caller-cred-launch.ts 签发时写好），命令里只放路径 */
   callerCredFile?: string;
 }

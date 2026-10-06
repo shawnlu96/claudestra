@@ -467,6 +467,7 @@ async function cmdCreate(
   piBaseFlag?: string,
   piPresetFlag?: string,
   teamFlags: import("./manager/team.js").TeamFlags = {},
+  cardId?: string, // CTXA：--card 卡号，prepareSession 后和实际会话一起进 LaunchSpec.card
 ) {
   const presetRes = resolveCreatePiEnv(piBaseFlag, piPresetFlag); // --pi-preset 展开 + --pi-base 覆盖（未知值在这里拒）
   if ("error" in presetRes) return output({ ok: false, error: presetRes.error });
@@ -593,6 +594,7 @@ async function cmdCreate(
       extras: { disallowedPreset: perms.preset, disallowedRaw: perms.disallowedRaw, piEnv, role: team.role },
     };
     if (adapter.prepareSession) spec.sessionId = (await adapter.prepareSession(spec)).sessionId;
+    if (cardId) spec.card = { id: cardId, sessionId: spec.sessionId }; // CTXA：实际会话定下后才绑卡片启动身份
     // 按窗口 id 操作，并经 gateOps：信号清理接手后不再往 tmux 发任何东西（按名字发可能落到别的窗口）
     const go = await (await import("./manager/acp-lifecycle.js")).launchWithPiFallback(adapter, (a) => launchInWindow(tmuxName, a, spec, { target: windowId, gate: (w) => gateOps(w, run) }),
       gateOps(tmuxWindowOps(tmuxName, windowId), run)); // Pi 的 ACP 起不来：同一窗口回退 tmux
@@ -2335,7 +2337,7 @@ switch (cmd) {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
     else await (await import("./manager/create-lifecycle.js")).withCardRegistration(c.name, c.card, c.teamFlags.role, () => // 卡 worker 登记（LIFE1）
-      cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags));
+      cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags, c.card?.taskId));
     break;
   }
 

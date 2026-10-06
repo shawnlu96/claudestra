@@ -169,7 +169,8 @@ test("换宿主：旧宿主条目索引还在、新宿主满 500 条结果不明
 
 describe("现行登记和宿主受理在同一段核对（真 bridge acpCardCompact + 真 CardContextHost / AcpTurnLoop）", () => {
   /** 宿主一侧：帧先进队列，deliver() 才交给真宿主处理，回包再经 onAcpFrame 回 bridge（模拟发帧到受理之间的窗口） */
-  function hostRig(ch: string) {
+  /** lease：宿主有没有接上现行登记租约 port（生产里没有 = undefined，fail-closed）；atomic 只为钉住 port 接上后的两段逻辑 */
+  function hostRig(ch: string, lease: "atomic" | null = "atomic") {
     const prompts: string[] = [];
     let card!: CardContextHost;
     const loop = new AcpTurnLoop({
@@ -177,7 +178,8 @@ describe("现行登记和宿主受理在同一段核对（真 bridge acpCardComp
       reportStop: async () => ({}), onFailure: () => {}, onSlotEnd: (e) => card.onSlotEnd(e), admit: (h) => card.admit(h), log: () => {},
     });
     const state: CardHostState = { sessionId: "s1", registered: true, capable: true, rotating: false, compacting: false, adapterRunning: false };
-    card = new CardContextHost({ hostId: "h1", loop, mode: "on", identity: { card: "CTXA", expectedSessionId: "s1" }, now: () => Date.now() + 10 * 60_000, state: () => state, log: () => {} });
+    card = new CardContextHost({
+      hostId: "h1", loop, mode: "on", liveBinding: lease ?? undefined, identity: { card: "CTXA", expectedSessionId: "s1" }, now: () => Date.now() + 10 * 60_000, state: () => state, log: () => {} });
     card.noteAttach();
     card.noteEntries([{ type: "system", subtype: "context_usage", tokens: 250_000, window: 1_000_000 }]);
     const inbox: any[] = [];
@@ -196,10 +198,43 @@ describe("现行登记和宿主受理在同一段核对（真 bridge acpCardComp
       const st = status();
       return { opId, card: "CTXA", expectedSessionId: st.sessionId, hostId: st.hostId, attachGen: st.attachGen, turnGen: st.turnGen, slotGen: st.slotGen };
     };
-    return { prompts, s, deliver, reqOf };
+    /** 只交一帧给宿主（处理后回包也交回 bridge） */
+    const deliverOne = async () => {
+      const f = inbox.shift();
+      if (f) await onAcpFrame({ type: "acp_call_result", channelId: ch, id: f.id, ...card.call(f)! }, s, discord);
+      await tick();
+    };
+    return { prompts, s, inbox, deliver, deliverOne, reqOf, status };
   }
 
-  test("发帧之后、宿主受理之前台账退休：不压缩（live-binding 复现）", async () => {
+  test("生产配置（没有现行登记租约 port）：登记一直有效也不压缩，live-binding-blocked；查询照实报 blocked-capability", async () => {
+    const ch = "local-card-live-noport";
+    const h = hostRig(ch, null);
+    bindings.set(ch, { card: "CTXA", sessionId: "s1" });
+    expect(h.status()).toMatchObject({ liveBinding: "blocked-capability", verdict: { ok: false, reason: "live-binding-blocked", wouldFire: "idle" } });
+    const c = acpCardCompact(ch, h.reqOf("live-0"));
+    for (let i = 0; i < 5; i++) await h.deliver();
+    expect(await c).toMatchObject({ ok: false, reason: "live-binding-blocked" });
+    await tick();
+    expect(h.prompts).toEqual([]);
+    expect(h.s.sent.map((f) => f.op)).toEqual(["card_compact"]); // 没有 card_commit，更没有 slash
+    bindings.delete(ch);
+  });
+
+  test("生产配置：审查复现的窗口（确认帧发出后才撤销登记）同样不压缩", async () => {
+    const ch = "local-card-live-noport-2";
+    const h = hostRig(ch, null);
+    bindings.set(ch, { card: "CTXA", sessionId: "s1" });
+    const c = acpCardCompact(ch, h.reqOf("live-00"));
+    await h.deliverOne();
+    bindings.delete(ch);
+    for (let i = 0; i < 5; i++) await h.deliver();
+    expect(await c).toMatchObject({ ok: false, reason: "live-binding-blocked" });
+    await tick();
+    expect(h.prompts).toEqual([]);
+  });
+
+  test("（port 接上后）发帧之后、宿主受理之前台账退休：不压缩（live-binding 复现）", async () => {
     const ch = "local-card-live-retire";
     const h = hostRig(ch);
     bindings.set(ch, { card: "CTXA", sessionId: "s1" });
@@ -211,7 +246,7 @@ describe("现行登记和宿主受理在同一段核对（真 bridge acpCardComp
     expect(h.prompts).toEqual([]);
   });
 
-  test("发帧之后、宿主受理之前换卡：不压缩", async () => {
+  test("（port 接上后）发帧之后、宿主受理之前换卡：不压缩", async () => {
     const ch = "local-card-live-swap";
     const h = hostRig(ch);
     bindings.set(ch, { card: "CTXA", sessionId: "s1" });
@@ -224,7 +259,7 @@ describe("现行登记和宿主受理在同一段核对（真 bridge acpCardComp
     bindings.delete(ch);
   });
 
-  test("登记一直有效：受理，压缩一次", async () => {
+  test("（port 接上后）登记一直有效：受理，压缩一次", async () => {
     const ch = "local-card-live-ok";
     const h = hostRig(ch);
     bindings.set(ch, { card: "CTXA", sessionId: "s1" });

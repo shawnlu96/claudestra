@@ -7,7 +7,7 @@
  * 两段受理（现行登记）：card_compact 核过后槽带 hold 占住调度器（prepared：不开别的回合；usage / 外部排队照收，状态并不冻住），回 bridge；
  * bridge 重读台账登记发 card_commit，这里把登记、接线、usage、代次、队列全部重核才放行 /compact，否则作废（槽结局 revoked，不进模型）。
  * 等不到确认 commitMs 后作废。登记撤销和确认之间没有共同序列 / 租约：live-binding 仍是 blocked-capability（见 card-context.ts）。
- * 新回合受理边界（admit）：任何还没开、会进模型的一轮之前（/compact 命令本身除外），硬线以上先压缩一次；这一段超线已经压过一次
+ * 新回合受理边界（admit）：任何还没开、会进模型的一轮之前（/compact 命令本身除外），硬线以上先压缩一次（现行登记租约缺失时不压、直接拒开）；这一段超线已经压过一次
  * 还在线上（压缩失败 / 取消 / 没到完成边界）就拒开、给原因，直到预算恢复（线下 usage、压缩完成边界、换会话 / 接线）。
  * 单测 tests/acp-card-context-host.test.ts。
  */
@@ -41,6 +41,11 @@ export interface CardHostDeps {
   identity: CardIdentity | null;
   mode: CardCtxMode;
   limits?: { idle?: number; hard?: number };
+  /**
+   * 受理与台账撤销 / 换绑的共同序列 / 租约 port 接上之后才给 atomic。现在没有这个 port：host.ts 不传 = blocked-capability，
+   * 一切压缩 fail-closed。单测给 atomic 只为钉住 port 接上后的两段受理逻辑
+   */
+  liveBinding?: "atomic";
   /** 单测注入：prepared 等确认的上限，缺省 COMMIT_MS */
   commitMs?: number;
   now(): number;
@@ -102,7 +107,7 @@ export class CardContextHost {
       mode: this.d.mode, identity: this.d.identity, hostId: this.d.hostId, attachGen: this.attachGen, sessionId: st.sessionId,
       turnGen: loop.turnGen, slotGen: loop.slotGen, registered: st.registered, capable: st.capable, rotating: st.rotating,
       compacting: st.compacting, running: loop.running || st.adapterRunning, queued: loop.queued,
-      idleSince: st.adapterRunning ? null : loop.idleSince, usage: this.usage,
+      idleSince: st.adapterRunning ? null : loop.idleSince, usage: this.usage, liveBinding: this.d.liveBinding ?? "blocked-capability",
     };
   }
 
@@ -173,6 +178,7 @@ export class CardContextHost {
   /** 确认时的重核：prepare 之后变了的任何一项都拒（fail-closed） */
   private commitReject(s: CardCtxSnapshot, binding: CardBinding | null, at: PreparedAt, r: CardOpRecord): CardReject | null {
     if (s.mode === "off") return "mode-off";
+    if (s.liveBinding !== "atomic") return "live-binding-blocked";
     const bound = bindingReject(s, binding);
     if (bound) return bound;
     if (!s.capable) return "no-capability";
@@ -231,6 +237,11 @@ export class CardContextHost {
     }
     if (this.attempt && this.attempt.attachGen === s.attachGen && this.attempt.sessionId === s.sessionId) {
       const block = this.blockText(s);
+      this.d.log(`${block}（拒开 ${head.kind}）`);
+      return { block };
+    }
+    if (s.liveBinding !== "atomic") { // 没有现行登记租约：不自动压缩（fail-closed），超线这一轮也不开
+      const block = `卡片硬线：上下文 ${this.usage!.used} tokens ≥ ${hardOver(s, this.d.limits)!.hard}；自动压缩受理 blocked-capability（现行登记没有共同租约），这一轮不开。发 /compact 压下来（或 /clear）后再发`;
       this.d.log(`${block}（拒开 ${head.kind}）`);
       return { block };
     }

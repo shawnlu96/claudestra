@@ -71,6 +71,8 @@ export function buildPiAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; rep
     [PI_ARGS_ENV, JSON.stringify(piAcpArgs(spec, agent, o.repoRoot, sandbox, mcpName(env)))],
     // 窗口不继承 manager 的 env（继承 tmux server 的）：沙箱里把上面核过的目录显式带过去，宿主起适配器前会再核一遍
     ["PI_CODING_AGENT_DIR", sandbox ? env.PI_CODING_AGENT_DIR : undefined],
+    ["CLAUDESTRA_ACP_CARD", spec.card?.id],
+    ["CLAUDESTRA_ACP_CARD_SESSION", spec.card?.sessionId],
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape);

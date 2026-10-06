@@ -61,6 +61,8 @@ export function buildAcpHostCommand(spec: LaunchSpec, o: { bunBin: string; repoR
     [ACP_AGENT_ENV, sandbox ? undefined : env[ACP_AGENT_ENV]?.trim() || undefined],
     ...(sandbox ? Object.entries(sandboxAcpHome(env[SANDBOX_ROOT_ENV])) : []),
     [CLEAN_ENV_FLAG, clean ? "1" : undefined],
+    ["CLAUDESTRA_ACP_CARD", spec.card?.id],
+    ["CLAUDESTRA_ACP_CARD_SESSION", spec.card?.sessionId],
   ];
   const prefix = pairs.filter(([, v]) => v).map(([k, v]) => `${k}=${shellEscape(v!)}`).join(" ");
   const cred = acpCallerCredAssignment(spec.callerCredFile, shellEscape); // T85：路径只给宿主这一条命令，宿主起适配器前读走即删
