@@ -124,6 +124,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 
 - **补 reply**：tmux 下 Stop hook 在 Codex 收尾前拦下，同一轮接着答。ACP 没有 hook，宿主在 prompt 返回后上报 Stop；bridge 判定没回复（`lib/reply-nudge.ts`）时，宿主另起一轮很短的 prompt 补发提示，只补一次。所以**网页上会多一个短回合**。提示包成 `<hook_prompt>`，rollout 里和 tmux 的 hook 回灌同形，历史面板照旧显示成系统提示。
 - **撞额度**：不再停在菜单上，所以 T63 的菜单护栏在 acp 下用不上。额度卡的选项是「等重置」加上 configOptions 里的其它模型，不做推荐（owner 的规矩，问题 d）；owner 点了才调 `set_config_option`，绝不自动选。重置时间照旧从 rollout 读（`codex-usage.ts`），ACP 不给这个。
+- **不可重试的回合失败**（策略拦截、请求被拒、上下文耗尽）：除了「<运行时> 回合失败」卡，这一轮的 StopFailure 到时 bridge 给开这一轮的 send_to_agent 请求方各推一条，带失败原文（`bridge/turn-failure.ts` → `stop-settle.ts failedTurn`）；它中途 reply 过一句、回程槽已被消化的也推。owner 开的一轮看卡；peer 开的由挂着的 API 请求带回 `API Error: <原文>`（它已经答过一句、请求结掉了就没有回推通道）；它自己续跑的一轮不推。
 - **思考**：`agent_thought_chunk` 不显示，和 tmux 下 rollout 的 reasoning 一致。
 - **子线程**：试点不声明 subagents 能力。子会话照旧写 rollout，历史扫描不变。
 
