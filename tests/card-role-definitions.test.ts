@@ -8,7 +8,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  applyCardRole, CARD_DEFAULT_MODEL, CARD_ROLE_DIR, CARD_ROLES, cardRoleCreate, cardRoleIo, cardRoleManager, loadCardRole, type CardRole,
+  applyCardRole, CARD_DEFAULT_MODEL, CARD_ROLE_DIR, CARD_ROLES, cardRoleCreate, cardRoleIo, cardRoleManager, DUTIES_LIMIT, loadCardRole, READ_ONLY_FLOOR,
+  type CardRole,
 } from "../src/lib/card-role-definitions.js";
 import { DISALLOWED_PRESETS, resolveDisallowed } from "../src/lib/claude-launch.js";
 import { parseCreateArgs, type CreateArgs } from "../src/manager/create-args.js";
@@ -32,6 +33,7 @@ const authorArgs = ["create", "task-ap-a", "/wt/ap-a", "--purpose", "ap-a 作者
   "--effort", "high", "--project", "p"];
 const reviewerArgs = ["create", "agent-rv-t1", "/wt/rv-t1", "--purpose", "T1 跨模型对抗式审查（调度引擎建）", "--project", "p", "--task", "T1 审查",
   "--card", "T1", "--card-role", "reviewer"];
+const otherArgs = reviewerArgs.map((a) => a === "reviewer" ? "other" : a);
 const parsed = (args: string[]): CreateArgs => {
   const c = parseCreateArgs(args.slice(1));
   if ("error" in c) throw new Error(c.error);
@@ -57,7 +59,7 @@ describe("repo definitions", () => {
     expect(by.author).toMatchObject({ readOnly: false, disallowedTools: [] });
     for (const r of ["reviewer", "adversarial-reviewer", "pm-reviewer"] as const) {
       expect(by[r].readOnly).toBe(true);
-      expect(by[r].disallowedTools).toEqual(expect.arrayContaining(["Edit(./**)", "Write(./**)", "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr merge:*)"]));
+      expect(by[r].disallowedTools).toEqual(expect.arrayContaining([...READ_ONLY_FLOOR]));
     }
   });
 
@@ -83,7 +85,7 @@ describe("applyCardRole → real manager create parser", () => {
     const c = parsed(applied(reviewerArgs));
     expect(c.model).toBe("claude-opus-5-5");
     const rules = resolveDisallowed({ preset: c.perms.preset, raw: c.perms.disallowedRaw });
-    expect(rules).toEqual(expect.arrayContaining([...DISALLOWED_PRESETS.default, "Edit(./**)", "Write(./**)", "Bash(git push:*)", "Bash(gh pr merge:*)"]));
+    expect(rules).toEqual(expect.arrayContaining([...DISALLOWED_PRESETS.default, ...READ_ONLY_FLOOR]));
     expect(c.purpose).toContain("【卡片角色 card-reviewer】");
     expect(c.card).toEqual({ taskId: "T1", role: "reviewer" });
   });
@@ -99,6 +101,17 @@ describe("applyCardRole → real manager create parser", () => {
   test("an explicit model is kept, in either spelling", () => {
     expect(parsed(applied([...authorArgs, "--model", "claude-sonnet-5"])).model).toBe("claude-sonnet-5");
     expect(parsed(applied([...authorArgs, "--model=haiku"])).model).toBe("haiku");
+  });
+
+  test("a blank or flag-like explicit model is refused, not taken as \"explicit\" (the launcher would drop it and fall back)", async () => {
+    for (const tail of [["--model", ""], ["--model", "  "], ["--model="], ["--model= "], ["--model"], ["--model", "--effort"]]) {
+      for (const args of [[...reviewerArgs, ...tail], [...authorArgs, ...tail]]) {
+        expect(applyCardRole(args)).toEqual({ error: expect.stringContaining("无效的 --model") });
+        const calls: string[][] = [];
+        expect(await cardRoleCreate(async (...a: string[]) => { calls.push(a); return { ok: true }; })(...args)).toMatchObject({ ok: false });
+        expect(calls).toEqual([]);
+      }
+    }
   });
 
   test("other families, non-card creates, non-create commands and an unnamed --card-role other pass unchanged", () => {
@@ -131,24 +144,34 @@ describe("broken definitions stop the create with a diagnosis (no fallback model
     ["non-Claude model", { reviewer: (md) => md.replace("model: claude-opus-5-5", "model: gpt-5.5") }, "完整的 Claude 模型 id"],
     ["empty model", { reviewer: (md) => md.replace("model: claude-opus-5-5", "model:") }, "完整的 Claude 模型 id"],
     ["wrong name", { reviewer: (md) => md.replace("name: card-reviewer", "name: card-author") }, "name 应为 card-reviewer"],
-    ["bad card-role", { reviewer: (md) => md.replace("card-role: reviewer", "card-role: pm") }, "card-role 只能是"],
+    ["bad card-role", { reviewer: (md) => md.replace("card-role: reviewer", "card-role: pm") }, "card-role 应为 reviewer"],
+    ["identity swap: adversarial registers as other", { "adversarial-reviewer": (md) => md.replace("card-role: reviewer", "card-role: other") }, "card-role 应为 reviewer"],
+    ["identity swap: pm-reviewer registers as reviewer", { "pm-reviewer": (md) => md.replace("card-role: other", "card-role: reviewer") }, "card-role 应为 other"],
     ["read-only missing floor", { reviewer: (md) => md.replace("Write(./**), ", "") }, "缺 Write(./**)"],
-    ["read-only unset", { reviewer: (md) => md.replace("read-only: true\n", "") }, "read-only 要写"],
-    ["bad rule", { reviewer: (md) => md.replace("Bash(git add:*)", "Bash(git add:*") }, "disallowedTools"],
+    ["read-only keeps Bash", { reviewer: (md) => md.replace("disallowedTools: Bash, ", "disallowedTools: ") }, "缺 Bash"],
+    ["read-only unset", { reviewer: (md) => md.replace("read-only: true\n", "") }, "read-only 应为 true"],
+    ["read-only flipped to false with the boundary deleted", { reviewer: (md) => md.replace("read-only: true", "read-only: false").replace(/^disallowedTools:.*\n/m, "") },
+      "read-only 应为 true"],
+    ["adversarial flipped to read-write", { "adversarial-reviewer": (md) => md.replace("read-only: true", "read-only: false") }, "read-only 应为 true"],
+    ["pm-reviewer boundary deleted", { "pm-reviewer": (md) => md.replace(/^disallowedTools:.*\n/m, "") }, "缺 Bash"],
+    ["author flipped to read-only", { author: (md) => md.replace("read-only: false", "read-only: true") }, "read-only 应为 false"],
+    ["bad rule", { reviewer: (md) => md.replace("NotebookEdit(./**)", "NotebookEdit(./**") }, "disallowedTools"],
+    ["duties too long to survive the launcher", { author: (md) => md.trimEnd() + "\n" + "长".repeat(DUTIES_LIMIT) + "\n" }, "启动时会被截断"],
     ["empty body", { author: (md) => md.replace(/\n---\n[\s\S]*$/, "\n---\n") }, "正文"],
   ];
   for (const [name, edit, msg] of cases) {
     test(name, async () => {
       const dir = defsDir(edit);
-      const args = edit.author ? authorArgs : reviewerArgs;
-      const r = applyCardRole(args, { dir });
+      const [args, role] = edit.author ? [authorArgs, undefined] : edit["pm-reviewer"] ? [otherArgs, "pm-reviewer" as const]
+        : [reviewerArgs, edit["adversarial-reviewer"] ? "adversarial-reviewer" as const : undefined];
+      const r = applyCardRole(args, { dir, role });
       expect(r).toEqual({ error: expect.stringContaining(msg) });
       expect((r as { error: string }).error).toContain("没有建会话");
       const calls: string[][] = [];
       const create = async (...a: string[]): Promise<Record<string, unknown>> => { calls.push(a); return { ok: true }; };
-      expect(await cardRoleCreate(create, { dir })(...args))
+      expect(await cardRoleCreate(create, { dir, role })(...args))
         .toEqual({ ok: false, error: (r as { error: string }).error });
-      expect(await cardRoleManager(async (a: string[]) => { calls.push(a); return { ok: true }; }, { dir })(args)).toMatchObject({ ok: false });
+      expect(await cardRoleManager(async (a: string[]) => { calls.push(a); return { ok: true }; }, { dir, role })(args)).toMatchObject({ ok: false });
       expect(calls).toEqual([]);
     });
   }

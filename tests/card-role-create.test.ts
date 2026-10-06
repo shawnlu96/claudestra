@@ -1,16 +1,17 @@
 /**
  * ROLE1: the card role definition really reaches the three formal create entries. Real createReviewer (autoTickDeps ensure), real
- * ensureLocalAuthor (scheduler tick) and real runLocalStart + runStart (start_node) over temp ledgers / registries; only the
- * `manager create` child is fake. It records the final argv, parses it with the real manager parser (manager/create-args.ts) and
- * writes the registry row the way cmdCreate does (model from that parse), so the assertions read the argv and the registry model.
+ * ensureLocalAuthor (scheduler tick) and real runLocalStart + runStart (start_node) over temp ledgers / registries. The `manager create`
+ * child is a stand-in (no bridge / tmux / model): it parses the final argv with the real parser and builds the launch command with the
+ * real Claude Code adapter the way cmdCreate does, so the assertions read the argv, the registry model and the command CC would get.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unknownQuota } from "../src/lib/ai-quota.js";
-import { CARD_DEFAULT_MODEL, CARD_ROLE_DIR, useCardRoleDir } from "../src/lib/card-role-definitions.js";
+import { applyCardRole, CARD_DEFAULT_MODEL, CARD_ROLE_DIR, dutiesOf, loadCardRole, READ_ONLY_FLOOR, useCardRoleDir, type CardRole } from "../src/lib/card-role-definitions.js";
 import { resolveDisallowed } from "../src/lib/claude-launch.js";
+import { claudeCodeAdapter } from "../src/lib/runtimes/index.js";
 import { preflightStart, type StartPlan } from "../src/lib/dag-tools-start.js";
 import { runStart, type StepIO } from "../src/lib/dag-tools-steps.js";
 import { claimNode, settleClaim } from "../src/lib/ledger-autostart.js";
@@ -56,13 +57,44 @@ function brokenDefs(file: string, edit: (md: string) => string | null): void {
   useCardRoleDir(dir);
 }
 
-/** What `manager create` would do with this argv: parse it for real, return the registry row it would save (model included). */
+/** The command cmdCreate hands tmux for this parsed create (same LaunchSpec fields, real claude-code adapter). */
+function launchOf(args: string[]): string {
+  const c = parseCreateArgs(args.slice(1));
+  if ("error" in c) throw new Error(c.error);
+  return claudeCodeAdapter.buildLaunchCommand({ mode: "new", channelId: "c1", bridgeUrl: "ws://127.0.0.1:9", sessionId: "s", agentName: c.name, cwd: c.dir,
+    purpose: c.purpose, model: c.model, effort: c.effort, permissionMode: c.mode ?? "bypassPermissions", extras: { disallowedPreset: c.perms.preset, disallowedRaw: c.perms.disallowedRaw } });
+}
+
+/** One shell word after `flag` in a launch command (POSIX single quotes undone). */
+function launchArg(cmd: string, flag: string): string | undefined {
+  const at = cmd.indexOf(` ${flag} `);
+  if (at < 0) return undefined;
+  let out = "", i = at + flag.length + 2;
+  while (i < cmd.length && cmd[i] !== " ") {
+    if (cmd[i] === "'") { const end = cmd.indexOf("'", i + 1); out += cmd.slice(i + 1, end); i = end + 1; } else if (cmd[i] === "\\") { out += cmd[i + 1]; i += 2; } else out += cmd[i++];
+  }
+  return out;
+}
+
+/** What `manager create` would do with this argv: parse it for real, return the registry row it would save and the CC launch command. */
 function managerRow(args: string[], sessionId: string): Record<string, unknown> {
   const c = parseCreateArgs(args.slice(1));
   if ("error" in c) throw new Error(c.error);
   const codex = c.runtimeFlag === "codex";
   return { cwd: c.dir, projectId: c.projectFlag, sessionId, status: "active", runtime: codex ? "codex" : "claude-code", transport: codex ? "acp" : "tmux",
-    ...(c.model ? { model: c.model } : {}), purpose: c.purpose, disallowed: c.perms.disallowedRaw ?? null };
+    ...(c.model ? { model: c.model } : {}), purpose: c.purpose, disallowed: c.perms.disallowedRaw ?? null, ...(codex ? {} : { launch: launchOf(args) }) };
+}
+
+/** The launched session's model, hard tool list and system prompt carry the role definition in full. */
+function expectLaunched(row: Record<string, unknown> | undefined, role: CardRole): void {
+  const def = loadCardRole(role);
+  if ("error" in def) throw new Error(def.error);
+  const cmd = String(row?.launch);
+  expect(launchArg(cmd, "--model")).toBe(CARD_DEFAULT_MODEL);
+  expect(launchArg(cmd, "--append-system-prompt")).toContain(dutiesOf(def));
+  const tools = launchArg(cmd, "--disallowedTools")!.split(" ");
+  if (def.readOnly) expect(tools).toEqual(expect.arrayContaining([...READ_ONLY_FLOOR]));
+  else expect(tools).not.toContain("Bash");
 }
 
 const flagOf = (args: string[], flag: string) => { const i = args.indexOf(flag); return i < 0 ? undefined : args[i + 1]; };
@@ -126,9 +158,10 @@ describe("createReviewer (scheduler-auto-deps)", () => {
     expect(flagOf(args, "--card-role")).toBe("reviewer");
     expect(flagOf(args, "--model")).toBe(CARD_DEFAULT_MODEL);
     expect(args).not.toContain("--runtime");
-    expect(resolveDisallowed({ raw: flagOf(args, "--disallowed") })).toEqual(expect.arrayContaining(["Edit(./**)", "Write(./**)", "Bash(git push:*)", "Bash(gh pr merge:*)"]));
+    expect(resolveDisallowed({ raw: flagOf(args, "--disallowed") })).toEqual(expect.arrayContaining([...READ_ONLY_FLOOR]));
     expect(flagOf(args, "--purpose")).toContain("【卡片角色 card-reviewer】");
     expect(row()).toMatchObject({ model: CARD_DEFAULT_MODEL, runtime: "claude-code" });
+    expectLaunched(JSON.parse(readFileSync(f.registryPath, "utf8")).agents["agent-rv-t1"], "reviewer");
   });
 
   test("a Codex reviewer for a Claude author: argv exactly as before (no Claude model, no Claude tool list)", async () => {
@@ -269,6 +302,7 @@ describe("ensureLocalAuthor (scheduler-local-author)", () => {
     expect(args).not.toContain("--disallowed");
     expect(flagOf(args, "--purpose")).toContain("【卡片角色 card-author】");
     expect(f.row()).toMatchObject({ model: CARD_DEFAULT_MODEL, runtime: "claude-code" });
+    expectLaunched(f.row(), "author");
     expect(f.task().agent).toBe("agent-task-ap-a");
   });
 
@@ -355,6 +389,7 @@ describe("runLocalStart + runStart (scheduler-local-runtime-start, start_node)",
       expect(flagOf(creates[0], "--model")).toBe(CARD_DEFAULT_MODEL);
       expect(flagOf(creates[0], "--purpose")).toStartWith("T 作者\n\n【卡片角色 card-author】");
       expect(f.row()).toMatchObject({ model: CARD_DEFAULT_MODEL });
+      expectLaunched(f.row(), "author");
       expect(f.calls.filter((c) => c[0] !== "create").every((c) => !c.includes("--model"))).toBe(true); // ledger steps untouched
     });
   }
@@ -396,5 +431,30 @@ describe("runLocalStart + runStart (scheduler-local-runtime-start, start_node)",
     const creates = f.calls.filter((c) => c[0] === "create");
     expect(creates).toHaveLength(1);
     expect(flagOf(creates[0], "--model")).toBe(CARD_DEFAULT_MODEL);
+  });
+});
+
+// ── the launched command for every role ─────────────────────────────────────────────────────────────────────────────
+
+describe("final launch command (real parser + real Claude Code adapter)", () => {
+  const base = (cardRole: string, purpose: string) => ["create", "agent-x", "/wt/x", "--purpose", purpose, "--project", "p", "--card", "T1", "--card-role", cardRole];
+  const shapes: [CardRole, string][] = [["author", "author"], ["reviewer", "reviewer"], ["adversarial-reviewer", "reviewer"], ["pm-reviewer", "other"]];
+  const longTitle = `T1 执行者（自动卡）：${"很长的标题".repeat(40)}。先读 /Users/someone/.claude-orchestrator/ledger/reviews/T1-exec-prompt.md`;
+  for (const [role, cardRole] of shapes) {
+    for (const [what, purpose] of [["short purpose", "T1 审查"], ["500-char purpose", "x".repeat(500)], ["start_node purpose with a long title", longTitle]] as const) {
+      test(`${role}, ${what}: model, read-only boundary and the whole duties reach the launch`, () => {
+        const r = applyCardRole(base(cardRole, purpose), { role });
+        if ("error" in r) throw new Error(r.error);
+        expectLaunched({ launch: launchOf(r.args) }, role);
+        expect(launchArg(launchOf(r.args), "--append-system-prompt")).toContain(purpose.slice(0, 40));
+      });
+    }
+  }
+
+  test("the registered purpose keeps the caller's head; a blank explicit model never reaches the launcher", () => {
+    const r = applyCardRole(base("reviewer", "T1 审查"), {});
+    if ("error" in r) throw new Error(r.error);
+    expect(flagOf(r.args, "--purpose")).toStartWith("T1 审查\n\n【卡片角色 card-reviewer】");
+    expect(applyCardRole([...base("reviewer", "T1"), "--model", " "], {})).toEqual({ error: expect.stringContaining("无效的 --model") });
   });
 });
