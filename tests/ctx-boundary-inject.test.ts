@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "fs";
 import {
-  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, loadInjectState, resetInjectState, sweepPendingEcho,
+  bindCompactSession, agentTarget, agentWindowName, compactInjectedRecently, injectCompact, loadInjectState, resetInjectState, sweepPendingEcho,
 } from "../src/bridge/ctx-boundary-inject.js";
 import { resetCtxBoundaryState } from "../src/bridge/ctx-boundary.js";
 import { DEFAULT_KEEP_LIST, normalizeCompactKeep, type CompactKeep } from "../src/lib/ctx-boundary-policy.js";
@@ -314,4 +314,44 @@ describe("窗口放不下（adv2 P2-1）：按宽高退档，估少了看后半�
     await sweepPendingEcho(h.deps, (l) => void logs.push(l));
     expect([calls, w.box, logs]).toEqual([[199, 200, 100], "", [expect.stringContaining("已删掉")]]);
   });
+});
+
+ test("session replacement clears the previous session injection guard", async () => {
+  const t = tgt("arbitrary-reviewer", true);
+  const h = harness([]);
+  bindCompactSession(t.target, "old");
+  expect((await injectCompact(t, {action: "compact", keep: null}, h.deps)).status).toBe("executed");
+  expect(compactInjectedRecently(t.target, h.now)).toBe(true);
+  bindCompactSession(t.target, "old");
+  expect(compactInjectedRecently(t.target, h.now)).toBe(true);
+  bindCompactSession(t.target, "replacement");
+  expect(compactInjectedRecently(t.target, h.now)).toBe(false);
+ });
+
+test("session fence is checked before typing and again before Enter", async () => {
+  const t = tgt("arbitrary-reviewer", true);
+  const h = harness([]);
+  const before = await injectCompact(t, { action: "compact", validate: async () => false }, h.deps);
+  expect(before.status).toBe("skipped");
+  expect(h.win(t.target).box).toBe("");
+  let calls = 0;
+  const after = await injectCompact(t, { action: "compact", validate: async () => ++calls === 1 }, h.deps);
+  expect(after.status).toBe("skipped");
+  expect(h.sent).toEqual([]);
+  expect(h.win(t.target).box).not.toBe("");
+});
+
+test("a pending card echo is discarded without erasing when its session fence fails", async () => {
+  const t = tgt("arbitrary-reviewer", true);
+  const h = harness([]);
+  let valid = true;
+  h.win(t.target).onType = (w) => { w.pane = "[menu]"; };
+  const result = await injectCompact(t, { action: "compact", validate: async () => valid }, h.deps);
+  expect(result.status).toBe("failed");
+  const text = h.win(t.target).box;
+  valid = false;
+  h.win(t.target).pane = "some output\n❯ \n";
+  await sweepPendingEcho(h.deps, () => {});
+  expect(h.win(t.target).box).toBe(text);
+  expect(h.sent).toEqual([]);
 });

@@ -38,6 +38,7 @@ export interface InjectTarget {
   name: string;
   target: string;
   executor: boolean;
+  validate?: () => Promise<boolean>;
 }
 
 /** agent 的 tmux 窗口名：大总管在 registry 里叫 agent-master，窗口却叫 master，直接拿 registry 名拼 windowTarget 永远读不到它的画面 */
@@ -70,7 +71,7 @@ export interface InjectDeps {
   sleep(ms: number): Promise<void>;
 }
 
-type InjectSkip = PaneBlock | "pane-unknown" | "recent" | "window-small" | "busy";
+type InjectSkip = PaneBlock | "pane-unknown" | "recent" | "window-small" | "busy" | "session-changed";
 /** failed 且 leftover：敲进去的字没提交、还留在输入框里（调用方要告诉 owner）；note：窗口放不下、退了档 */
 export type InjectResult =
   | { status: "executed" | "queued"; line: string; note?: string }
@@ -87,6 +88,21 @@ interface Pending {
 let injectedAt: Map<string, number> = new Map();
 /** 窗口 → 自己留在框里的字：之后每轮（自动注入开关关着也跑）看一眼，框里正好是它就删掉 */
 let pendingEcho: Map<string, Pending> = new Map();
+const boundSessions = new Map<string, string>();
+const pendingValidators = new Map<string, () => Promise<boolean>>();
+
+/** A reused window owns a new input buffer. Never erase an old session's pending echo in its replacement. */
+export function bindCompactSession(target: string, sessionId: string): void {
+  const previous = boundSessions.get(target);
+  // Legacy pending records carry no session authority after a bridge restart; leaving text is safer than erasing a new draft.
+  if (previous === undefined) pendingEcho.delete(target);
+  if (previous !== undefined && previous !== sessionId) {
+    pendingEcho.delete(target);
+    pendingValidators.delete(target);
+    injectedAt.delete(windowKey(target));
+  }
+  boundSessions.set(target, sessionId);
+}
 
 /**
  * bridge 启动时 "live"：守卫和待删的字换成落盘的表（bridge 重启不丢）。manager 的 dry-run 进程用 "read-only"：
@@ -108,6 +124,8 @@ export function loadInjectState(mode: "live" | "read-only"): void {
 }
 
 export function resetInjectState(): void {
+  boundSessions.clear();
+  pendingValidators.clear();
   injectedAt = new Map();
   pendingEcho = new Map();
 }
@@ -214,7 +232,7 @@ type Erased = { r: "erased" | "blocked" | "not-ours" | "failed"; left: string; i
  * 每批后核对框里剩下的正好是前半截（还没画完就再等一帧）：对不上（owner 动了、退格丢了）就停，不多删一个字；被对话框挡住也停。
  * 停下时 left 是这一批之前的那段、inflight 是这一批的个数：不知道生效了几个，下一轮按框里实际剩的算（lib ourRemainder）。
  */
-async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, inflight = 0): Promise<Erased> {
+async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, inflight = 0, validate?: () => Promise<boolean>): Promise<Erased> {
   let mine = "";
   for (let i = 0; i < 2; i++) {
     if (i) await deps.sleep(300);
@@ -230,6 +248,7 @@ async function eraseOwnEcho(target: string, text: string, deps: InjectDeps, infl
     const n = left.length % ERASE_BATCH || ERASE_BATCH;
     const before = left.join("");
     try {
+      if (validate && !await validate()) return { r: "not-ours", left: text };
       await deps.erase(target, n);
     } catch (e) {
       console.error(`🧭 上下文边界 删回显失败 ${target}:`, errText(e));
@@ -263,12 +282,15 @@ export async function sweepPendingEcho(deps: InjectDeps, log: (l: string) => voi
 }
 
 async function sweepOne(target: string, p: Pending, deps: InjectDeps, log: (l: string) => void): Promise<void> {
-  const e = deps.now() - p.at > PENDING_TTL_MS ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps, p.inflight ?? 0);
+  const validate = pendingValidators.get(target);
+  const expired = deps.now() - p.at > PENDING_TTL_MS || (validate && !await validate());
+  const e = expired ? { r: "expired" as const, left: p.text } : await eraseOwnEcho(target, p.text, deps, p.inflight ?? 0, validate);
   if (e.r === "blocked" || e.r === "failed") {
     if (e.left !== p.text || e.inflight !== p.inflight) keepPending(target, e, deps.now());
     return;
   }
   pendingEcho.delete(target);
+  pendingValidators.delete(target);
   const what = { erased: "已删掉", "not-ours": "输入框里已经不是它了，不动", expired: "一天都没删成，不再管" }[e.r];
   log(`🧭 上下文边界 ${target} 上次没提交的压缩命令：${what}`);
 }
@@ -290,14 +312,15 @@ const windowBusy = (who: string): InjectResult => ({ status: "skipped", reason: 
  */
 export function injectCompact(
   t: InjectTarget,
-  opts: { action: CompactAction; keep?: CompactKeep | null; pane?: PaneCapture | null },
+  opts: { action: CompactAction; keep?: CompactKeep | null; pane?: PaneCapture | null; validate?: () => Promise<boolean> },
   deps: InjectDeps = liveInjectDeps,
 ): Promise<InjectResult> {
   const pane = holdsWindow(t.target) ? opts.pane : undefined;
-  return withWindow(t.target, "另一次压缩注入", () => injectHeld(t, { ...opts, pane }, deps), windowBusy);
+  return withWindow(t.target, "另一次压缩注入", () => injectHeld(t, { ...opts, pane, validate: opts.validate ?? t.validate }, deps), windowBusy);
 }
 
 async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact>[1], deps: InjectDeps): Promise<InjectResult> {
+  if (opts.validate) pendingValidators.set(t.target, opts.validate);
   const left = guardLeftMs(t.target, deps.now());
   if (left > 0) return { status: "skipped", reason: "recent", text: `${SKIP_REASON_TEXT.recent}，还要等 ${Math.ceil(left / 60_000)} 分钟` };
   // 类型上只收 normalizeCompactKeep 产出的；运行时再过一遍，强转进来的也拦得住
@@ -309,7 +332,7 @@ async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact
   if (blocked) return skip(blocked);
   const { all, fit } = tiersThatFit(effectiveAction(t.executor, opts.action), k?.ok ? k.keep : null, pane.size ?? null);
   for (const [i, tier] of fit.entries()) {
-    const r = await typeAndSubmit(t.target, tier.line, deps);
+    const r = await typeAndSubmit(t.target, tier.line, deps, opts.validate);
     if (r === "cut") {
       if (i === fit.length - 1) return windowSmall(pane.size);
       continue;
@@ -324,26 +347,30 @@ async function injectHeld(t: InjectTarget, opts: Parameters<typeof injectCompact
 }
 
 /** 敲一档、核对、回车。只看得到后半截（窗口放不下）→ 删干净返回 "cut"，调用方敲下一档；删不干净就记待删、报 leftover */
-async function typeAndSubmit(target: string, line: string, deps: InjectDeps): Promise<InjectResult | "cut"> {
+async function typeAndSubmit(target: string, line: string, deps: InjectDeps, validate?: () => Promise<boolean>): Promise<InjectResult | "cut"> {
+  if (validate && !await validate()) return { status: "skipped", reason: "session-changed", text: "会话或usage快照已改变，没敲键" };
   try {
     await deps.type(target, line);
   } catch (e) {
     return { status: "failed", error: errText(e) };
   }
   const typed = await typedFrame(target, line, deps);
+  if (validate && !await validate()) return { status: "skipped", reason: "session-changed", text: "敲字后会话或usage已改变，不提交也不删字" };
   if (typed.kind === "mismatch") return { status: "failed", error: "输入框里的字和敲进去的对不上（可能有人同时在打字），没按回车，也没删", leftover: true };
   if (typed.kind === "blocked") {
     keepPending(target, { left: line }, deps.now());
     return { status: "failed", error: `敲完字画面变了（${typed.why}），没按回车；字先留在输入框里，对话框关掉后自动删`, leftover: true };
   }
   if (typed.kind === "cut" || typed.kind === "abort") {
-    const e = await eraseOwnEcho(target, line, deps);
+    const e = await eraseOwnEcho(target, line, deps, 0, validate);
     if (e.r === "erased") return typed.kind === "cut" ? "cut" : skip("compacting");
+    if (e.r === "not-ours" && validate) return { status: "skipped", reason: "session-changed", text: "输入框或会话已改变，不继续删字" };
     keepPending(target, e, deps.now());
     const why = typed.kind === "cut" ? "窗口放不下，敲进去的命令只显示得出后半截" : "敲完字发现已经在压缩 / 排队";
     return { status: "failed", error: `${why}，没按回车；删字没删干净，之后再删`, leftover: true };
   }
   try {
+    if (validate && !await validate()) return { status: "skipped", reason: "session-changed", text: "敲字后会话或usage已改变，没提交也不跨会话删字" };
     await deps.enter(target);
   } catch (e) {
     keepPending(target, { left: line }, deps.now());
