@@ -15,11 +15,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: typecheck + test + guard
+  # 单元测试拆成 4 片并行（单片串行要 14 分钟左右）。scripts/ci-test-shard.ts 按耗时把测试文件分片，各片在同一 head、
+  # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
+  # 这些分片不是合并闸——必需检查是下面的 `typecheck + test + guard` 汇总作业。
+  # 作业名、步骤名里不能有「/」：日志压缩包里会被换成「_」，gh run view --log-failed 对不上步骤，只给 UNKNOWN STEP + 整个作业日志
+  tests:
+    name: test shard ${{ matrix.shard }} of 4
     runs-on: ubuntu-latest
+    strategy:
+      # 一片红不取消其它片：每片的失败都看得到
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
-      # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史
+      # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史；有 6 个测试 `git show` 固定的历史提交，
+      # 所以各片也不能浅克隆
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -44,11 +54,18 @@ jobs:
       # 只查真正有意义的不同步：package.json 的依赖声明与锁文件根节点记的不一致（加了依赖没更新锁）。
       # 不比锁文件逐字——不同版本的 npm 排法本来就不一样（main 自己的锁在 CI 的 npm 10 下也会被重排），比了只剩噪音。
       - name: Web lockfile in sync with package.json (warning only)
+        if: matrix.shard == 1
         run: >-
           node -e "const p=require('./web/package.json'),l=require('./web/package-lock.json').packages[''];
           const k=(o)=>JSON.stringify(Object.entries(o||{}).sort());
           if(k(p.dependencies)!==k(l.dependencies)||k(p.devDependencies)!==k(l.devDependencies))
           console.log('::warning file=web/package-lock.json::web/package.json 的依赖与锁文件不一致（改了依赖没更新锁文件）——在 web/ 下执行 npm install --package-lock-only 后提交')"
+
+      # node_modules 按锁文件缓存，之后照样 npm install（缓存只省下载解包；锁文件一变 key 就变）
+      - uses: actions/cache@v4
+        with:
+          path: web/node_modules
+          key: web-node-modules-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
 
       # 用 npm install 而不是 npm ci：用户装网页走的就是 npm install（setup / update）；npm ci 会因为贡献者本机
       # npm 版本不同、重排了锁文件而整个作业失败（#29 / #31 实遇，代码一行没错）。
@@ -57,14 +74,37 @@ jobs:
         working-directory: web
 
       - name: Typecheck (tsc --noEmit)
+        if: matrix.shard == 1
         run: bun run typecheck
 
-      # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）
+      # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）。
+      # 先不 apt-get update（占这一步的大头），装不上再 update 重装
       - name: Install tmux
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux || { sudo apt-get update -qq && sudo apt-get install -y -qq tmux; }
 
+      # 日志另存一份给汇总作业核对（scripts/ci-test-shard.ts verifyShards）：开头三行记片号、head、bun 自己发现的测试文件总数
+      # （--shard=99999/99999 一个文件都不跑），之后 Bun 在 Actions 里给每个跑过的文件打一行 `::group::<路径>:`。
+      # shell: bash 带 -o pipefail，tee 吞不掉退出码；清单先落文件，分片脚本失败时这一步就失败，不会空着参数跑全部。
       - name: Unit tests
-        run: bun test
+        shell: bash
+        run: |
+          bun run --silent test:shard ${{ matrix.shard }}/4 > "$RUNNER_TEMP/files.txt"
+          mapfile -t files < "$RUNNER_TEMP/files.txt"
+          discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
+          printf 'shard=%s/4\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
+          bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
+
+      # 红片、被取消的片也上传已有的日志（诊断用）。测试步骤之前就失败 / 被取消、根本没生成日志时只给一条警告、没有工件——
+      # 汇总作业照样因为这一片不是 success 而红，缺工件不会被当成通过。
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard.log
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
 
       # 防腐棘轮（scripts/guard）：超 baseline 即红；baseline 变大、改闸门本身都必须在 raised[] 写理由。
       # 比较基准：PR 取 base.sha，push 取推送前的 before（新分支首推是全 0 / force push 取不到时，
@@ -72,6 +112,7 @@ jobs:
       # GUARD_STRICT：CI 是最后一道闸，knip / oxc-parser 缺席导致规则被跳过也算失败（本地才降级）。
       # 这一步和 GUARD_STRICT 由 guard 自己校验（scripts/guard/self.ts），删掉或改名会让 guard 失败。
       - name: Guard (ratchets)
+        if: matrix.shard == 1
         run: bun run guard
         env:
           GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -79,11 +120,45 @@ jobs:
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
       - name: Build entrypoints
+        if: matrix.shard == 1
         run: |
           for entry in bridge channel-server manager launcher cron setup relay scheduler; do
             echo "── building src/$entry.ts"
             bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
           done
+
+  # 合并闸（必需检查，名字不能改）：4 片全部成功、且合起来恰好覆盖全部测试文件才绿。
+  # if: always()——分片失败 / 取消 / 被跳过时这里照样跑并且变红；不加的话它会跟着被跳过，
+  # 而被跳过的必需检查在 GitHub 上算通过。
+  check:
+    name: typecheck + test + guard
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # 作业名、这一步的名字和这一行的措辞是调度器 CI 自动重跑认的固定结论（src/lib/scheduler-merge-ci-rerun-log.ts GATE /
+      # GATE_VERDICT），改了要一起改
+      - name: All shards succeeded
+        run: |
+          [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      # 只跑核对脚本（不 import 任何依赖），不用 bun install；版本与各片一致，脚本还核对各片的 Bun 版本行等于它
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-shard-*
+          path: shards
+
+      # 不漏不重（scripts/ci-test-shard.ts verifyShards，反例见 tests/ci-test-shard.test.ts）：工件恰好 test-shard-1..4；每片各自核对
+      # 开头的片号、head = $GITHUB_SHA、bun 自己发现的文件数 = 入库测试文件数、Bun 版本，且跑过的文件恰好是分给这一片的那些。
+      # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。
+      - name: Shards cover every test file exactly once
+        run: bun run --silent test:shard verify shards 4 "$GITHUB_SHA"
 
   web:
     name: web typecheck + lint
