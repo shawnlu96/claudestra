@@ -1,15 +1,8 @@
 /**
- * dispatch-recovery-POOLRV1: when a verdict that reached the merge gate came from the lend pool, it counts only as the engine's
- * own pool round, proven from the ledger's tickets: the scheduler's review intent and its pool link, the lend order (step review,
- * status done, this card's specRev / round / head), the peer's claim note (take_review: worker + lease generation), and the
- * signed receipt writeLendResult left on the order (submit_verdict: the review event's seq, dedup key and body digest). The
- * reviewer, session and family on the verdict must be the ones that order recorded, and the family must differ from the head's
- * actual author family. There is no same-family exemption here: MODEL's exemption plan has no MODELX execution record to read
- * (scheduler-model-wiring.ts), so a same-family pool verdict is refused like any other.
- * A CLI-recorded review, an order nobody offered (no_order), or a `peer:` reviewer the pool never answered is not a pool
- * receipt; it stays with the manual queue, and nothing here writes, re-reviews or backfills a ticket. Read-only: callers run it
- * inside their own BEGIN IMMEDIATE (planIntent, beginMergeRun), so checking and entering share one transaction.
- * tests/pool-review-proof*.test.ts.
+ * dispatch-recovery-POOLRV1: a lend-pool verdict counts as a merge source only when the ledger proves the engine's own pool round
+ * (scheduler intent → done review order on this head/specRev/round → peer claim → signed receipt) and a cross-family reviewer.
+ * No same-family exemption (no MODELX record). CLI / no_order / bare `peer:` verdicts stay manual; nothing is written or backfilled.
+ * Read-only; callers run it inside their own BEGIN IMMEDIATE. tests/pool-review-proof*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { TaskWorkflow } from "./ledger-scheduler.js";
