@@ -10,13 +10,13 @@ import { ghEnv } from "./peer-pr-github.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
-import { handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
+import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 /**
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
- * `files`: asked before the handoff (`handing`), the PR's changed paths at its head (null = could not tell; locks stay whole).
+ * `files`: asked while the handoff's narrowing is unsettled (`handing`), the PR's changed paths at its head (null = could not tell).
  */
 export interface HandoffPr { state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: MainMergeCarry; files?: string[] | null }
 /** `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. */
@@ -65,11 +65,11 @@ export function ghPrState(command: typeof runBounded = runBounded,
       throw new Error("gh pr view 输出不合规");
     }
     const pr: HandoffPr = { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha };
-    if (handing && pr.state === "OPEN") return { ...pr, files: await prFiles(filesOf(handing.project), prRef, pr.head) };
+    const read = handing && pr.state === "OPEN" ? { ...pr, files: await prFiles(filesOf(handing.project), prRef, pr.head) } : pr;
     // CLOSED goes to PM anyway; MERGED without its merge commit is read again next round
-    if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return pr;
+    if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return read;
     const carry = carryOf(follow.project);
-    return carry ? { ...pr, carry: await carry(prRef, follow.head, pr.head, pr.state === "MERGED" ? mergeSha : null) } : pr;
+    return carry ? { ...read, carry: await carry(prRef, follow.head, pr.head, pr.state === "MERGED" ? mergeSha : null) } : read;
   };
 }
 
@@ -190,7 +190,9 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS) return c.out("waiting", "已交仓库方合并，等 PR 结果");
   let pr: HandoffPr;
   try {
-    pr = await c.deps.prState(handed?.pr ?? task.pr, follow ? { project: task.project, head: follow.head } : undefined, follow ? undefined : { project: task.project });
+    // files until this handoff's narrowing is settled: a busy ledger or a failed git read is tried again on the next poll
+    const handing = follow && handoffNarrowSettled(c.db, task.id, follow.event.seq) ? undefined : { project: task.project };
+    pr = await c.deps.prState(handed?.pr ?? task.pr, follow ? { project: task.project, head: follow.head } : undefined, handing);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return c.out("held", `读 PR 状态失败，下轮再试：${(e as Error).message}`);
@@ -210,7 +212,9 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const moved = !same(pr.head, follow.head);
   const stop = moved ? await followMoved(c, follow, pr) : null;
   if (stop) return stop;
-  if (pr.state === "OPEN") return c.out("waiting", moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果");
+  if (pr.state === "OPEN") {
+    return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${narrowAfterHandoff(c, pr.files)}`);
+  }
   const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", follow.evidence.head, "--pr", task.pr, "--merged", pr.mergeSha!);
   if (r.ok !== true) return c.out("held", `合并结果没记上：${String(r.error)}`);
   const via = same(pr.head, follow.evidence.head) ? "" : `；交接后只合入过 main，合并时 head ${short(pr.head)}`;

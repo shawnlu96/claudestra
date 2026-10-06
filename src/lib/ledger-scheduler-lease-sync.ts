@@ -74,9 +74,12 @@ export function syncedLocks(held: readonly FileLock[], oldGlobs: readonly string
  * The scheduler daemon's pass reads through a query_only connection (ledger-read.ts); its few direct lock writes open a write
  * connection on the same file for the one transaction, like the finished-card probe (ledger-scheduler-lease-finished.ts).
  */
+const WRITER_BUSY_MS = 5000;
 export function withLedgerWriter<T>(db: Database, fn: (writer: Database) => T): T {
   const memory = !db.filename || db.filename === ":memory:";
   const writer = memory ? db : new Database(db.filename, { readwrite: true, create: false });
+  // same wait as every ledger connection (ledger-store.ts): a CLI write holding the lock for a moment is not a failure
+  if (!memory) writer.exec(`PRAGMA busy_timeout = ${WRITER_BUSY_MS}`);
   try { return fn(writer); } finally { if (!memory) writer.close(); }
 }
 

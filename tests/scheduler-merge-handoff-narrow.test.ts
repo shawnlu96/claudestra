@@ -14,6 +14,7 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { ghPrState, handoffFiles, type HandoffPr } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { HANDOFF_POLL_MS } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { narrowHandoffLocks } from "../src/lib/scheduler-merge-handoff.js";
+import { withLedgerWriter } from "../src/lib/ledger-scheduler-lease-sync.js";
 import { autoFixture, H1, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 const PR = "https://github.com/example/repo/pull/7";
@@ -23,7 +24,8 @@ const GLOBS = ["src/lib/acp/*", "src/bridge/acp-link.ts", "src/lib/acp-turn.ts",
   "src/lib/acp-pool.ts", "src/lib/acp-log.ts", "tests/acp-*.test.ts", "docs/acp.md", "src/lib/acp-relay.ts", "src/lib/acp-codec.ts"];
 const PR_FILES = ["src/lib/acp/session.ts", "src/bridge/acp-link.ts", "README.md"];
 
-async function narrowFixture(files: string[] | null = PR_FILES, reader = false) {
+async function narrowFixture(first: string[] | null = PR_FILES, reader = false) {
+  let files = first;
   const f = autoFixture();
   f.db.query("UPDATE tasks SET extra = ? WHERE id = 'T1'").run(JSON.stringify({ fileGlobs: GLOBS }));
   await toBuild(f);
@@ -34,18 +36,19 @@ async function narrowFixture(files: string[] | null = PR_FILES, reader = false) 
   await f.review("pass", H1, [P2]);
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   let pr: HandoffPr = { state: "OPEN", head: H1, mergeSha: null };
+  const asked: boolean[] = [];
   // the daemon's pass reads through a query_only connection (ledger-read.ts); `reader` runs the handoff tick on one
   const passDb = reader ? new Database(join(f.dir, "ledger.sqlite"), { readwrite: true, create: false }) : f.db;
   if (reader) passDb.exec("PRAGMA query_only = ON");
   const hand = async () => {
     const r = await schedulerAutoTick(passDb, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
-      prState: async (_ref, _follow, handing) => (handing ? { ...pr, files } : pr) });
+      prState: async (_ref, _follow, handing) => { asked.push(!!handing); return handing && pr.state === "OPEN" ? { ...pr, files } : pr; } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
   const locks = (taskId = "T1") => (f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = ? AND scope = 'card' AND resource NOT LIKE '%:%' ORDER BY resource")
     .all(taskId) as { resource: string }[]).map((r) => r.resource);
-  return { f, hand, locks, passDb, setPr: (p: HandoffPr) => { pr = p; } };
+  return { f, hand, locks, passDb, asked, setPr: (p: HandoffPr) => { pr = p; }, setFiles: (x: string[] | null) => { files = x; } };
 }
 
 /**
@@ -117,6 +120,33 @@ describe("LCK-1 file locks at the merge handoff", () => {
       await reconcileFinishedCardLeases(passDb, ["p"], () => {});
       expect(locks()).toEqual([]);
       await reconcileFinishedCardLeases(passDb, ["p"], () => {}); // nothing left: no write attempted on the reader
+    } finally { passDb.close(); f.close(); }
+  });
+
+  test("复现 handoff-narrow-busy-once: a narrowing that could not finish at handoff is tried again on later polls until settled", async () => {
+    const { f, hand, locks, asked, setFiles } = await narrowFixture(null); // e.g. git or the ledger was busy at handoff
+    try {
+      expect(await hand()).toMatchObject({ step: "handoff" });
+      expect(locks()).toHaveLength(12);
+      setFiles(PR_FILES);
+      f.advance(HANDOFF_POLL_MS);
+      expect(await hand()).toMatchObject({ step: "waiting", detail: expect.stringContaining("文件锁收窄 12 → 2") });
+      expect(locks()).toEqual(["src/bridge/acp-link.ts", "src/lib/acp/session.ts"]);
+      f.advance(HANDOFF_POLL_MS);
+      await hand();
+      expect(asked).toEqual([true, true, false]); // settled: the PR's files are not read again
+    } finally { f.close(); }
+  });
+
+  test("a skip no retry changes is recorded once and stops the file reads; the write connection waits like any ledger one", async () => {
+    const { f, hand, locks, asked, passDb } = await narrowFixture(["src/lib/acp/中文.ts"], true);
+    try {
+      expect(await hand()).toMatchObject({ detail: expect.stringContaining("文件锁不收窄（PR 改动里有调度器认不了的路径）") });
+      f.advance(HANDOFF_POLL_MS);
+      await hand();
+      expect(asked).toEqual([true, false]);
+      expect(locks()).toHaveLength(12);
+      expect(withLedgerWriter(passDb, (w) => w.query("PRAGMA busy_timeout").get())).toEqual({ timeout: 5000 });
     } finally { passDb.close(); f.close(); }
   });
 

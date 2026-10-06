@@ -158,6 +158,11 @@ export type NarrowResult = { narrowed: true; from: string[]; to: string[]; dupli
  * `files` = the PR's changed paths (both sides of a rename) at the handed head. Any path the scheduler cannot name as a resource,
  * an open intent, or a card no longer at this handoff keeps the locks whole: narrowing is an optimisation, never a guess.
  */
+const narrowKey = (taskId: string, handoffSeq: number): string => `scheduler:${NARROW_OP}:${taskId}:h${handoffSeq}`;
+
+/** This handoff's narrowing is settled (locks narrowed, or skipped for a reason no retry changes): the tick stops asking for files. */
+export const handoffNarrowSettled = (db: Database, taskId: string, handoffSeq: number): boolean => !!getEventByDedup(db, narrowKey(taskId, handoffSeq));
+
 export function narrowHandoffLocks(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; files: readonly string[] }): NarrowResult {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "交接收窄只由调度服务做");
   return tx(db, () => {
@@ -165,21 +170,31 @@ export function narrowHandoffLocks(db: Database, ctx: WriteCtx, input: { taskId:
     if (task.stage !== "merge" || !SHA.test(input.head) || task.headSHA !== input.head || follow?.evidence.head !== input.head || follow.evidence.pr !== input.pr) {
       return { narrowed: false, reason: "卡不在这次交接上（阶段、head 或 PR 已变）" };
     }
-    const key = `scheduler:${NARROW_OP}:${task.id}:h${follow.event.seq}`;
+    const key = narrowKey(task.id, follow.event.seq), now = ctx.now ?? Date.now();
     const prev = getEventByDedup(db, key);
-    if (prev) return { narrowed: true, from: prev.data.from as string[], to: prev.data.to as string[], duplicate: true };
+    if (prev) {
+      return prev.data.skipped ? { narrowed: false, reason: String(prev.data.skipped) }
+        : { narrowed: true, from: prev.data.from as string[], to: prev.data.to as string[], duplicate: true };
+    }
+    // an open intent settles on its own: no record, the next poll tries again
     if (db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(task.id)) {
       return { narrowed: false, reason: "卡还有未结调度意图" };
     }
+    // the rest hold for this whole handoff: recorded once so the tick stops reading the PR's files for it
+    const skip = (reason: string): NarrowResult => {
+      insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
+        text: `交接后文件锁不收窄：${reason}`, data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, skipped: reason } }, true);
+      return { narrowed: false, reason };
+    };
     const paths = input.files.map((f) => (f.includes("*") ? null : resourceKey(f)));
-    if (paths.includes(null)) return { narrowed: false, reason: "PR 改动里有调度器认不了的路径" };
+    if (paths.includes(null)) return skip("PR 改动里有调度器认不了的路径");
     const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.map((g) => (typeof g === "string" ? resourceKey(g) : null)) : [];
-    if (!globs.length || globs.includes(null)) return { narrowed: false, reason: "卡的 fileGlobs 缺失或不合规" };
+    if (!globs.length || globs.includes(null)) return skip("卡的 fileGlobs 缺失或不合规");
     const held = cardFileLocks(db, task.id);
-    if (!held.length) return { narrowed: false, reason: "卡没拿文件锁" };
+    if (!held.length) return skip("卡没拿文件锁");
     // PR ∩ fileGlobs, and never a lock the card does not already cover: narrowing only ever gives files back
     const to = [...new Set(paths as string[])].filter((p) => globs.some((g) => coveredBy(p, g!)) && held.some((h) => coveredBy(p, h.resource))).sort();
-    const from = held.map((h) => h.resource), now = ctx.now ?? Date.now();
+    const from = held.map((h) => h.resource);
     replaceCardFileLocks(db, task, held, to, now);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
       text: `交接后文件锁收窄到 PR 实际改动：${from.length} → ${to.length} 把`, data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, from, to, files: paths } }, true);
