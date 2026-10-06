@@ -23,7 +23,7 @@ export interface MergedFacts {
   pr: { state: string; baseRefName: string; headRefOid: string; mergeSha: string | null };
   actualMain: string; mainContainsMerge: boolean;
 }
-export type GitRead = (args: string[]) => Promise<{ code: number; stdout: string }>;
+type GitRead = (args: string[]) => Promise<{ code: number; stdout: string }>;
 export interface VerifyPorts {
   repoDir: string; git: GitRead; deployConfigured: boolean;
   /** 在钉住 mainHead 的库里跑 canonical 证明；默认 pinnedProof（临时 bare 库借原库对象，不联网） */

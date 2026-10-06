@@ -215,7 +215,10 @@ describe("review r1 · verify subcommand: GitHub facts live, ledger read-only", 
       throw new Error(JSON.stringify(argv));
     };
     const seen: unknown[] = [];
-    const verify: CliDeps["verify"] = async (_db, taskId, facts, ports) => { seen.push({ taskId, facts, deploy: ports.deployConfigured }); return { ok: false, carries: 0, mergeSha: MERGE, problems: ["x"] }; };
+    const verify: CliDeps["verify"] = async (_db, taskId, facts, ports) => {
+      seen.push({ taskId, facts, deploy: ports.deployConfigured });
+      return { ok: false, carries: 0, mergeSha: MERGE, problems: ["x"] };
+    };
     const r = await main(["verify", "--task", "T1", "--repo-dir", "/r"], run, undefined, { verify, deployConfigured: () => true });
     expect(r.exit).toBe(2);
     expect(seen).toEqual([{ taskId: "T1", deploy: true, facts: { pr: { state: "MERGED", baseRefName: "main", headRefOid: HEAD, mergeSha: MERGE }, actualMain: MAIN, mainContainsMerge: true } }]);

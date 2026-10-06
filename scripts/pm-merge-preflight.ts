@@ -21,7 +21,8 @@ export const USAGE = `用法：
   bun scripts/pm-merge-preflight.ts verify --task <卡号> --repo-dir <dir>   合入后只读核对（LedgerReader + GitHub 现查 + 每条沿用重跑证明 + 部署记录）
 必需 CI：卡所在项目 scheduler.json 的 requiredChecks（--task 读台账定项目，并核卡的 PR 就是 --pr）；不收 --checks。
 退出码：0 通过 / 已合并且各步成功 / 核对一致；2 拒绝（head / main 漂移、证明不成立、CI 失败 / 取消 / skipped / 缺、核对不一致）；
-  3 等待（CI 未完成、新 head 或新 run 没出现）；4 合并未确认；5 合并后某一步非 0（写明哪步与原 exit，之后不跑，stage live 只能在 exit 0 之后由 PM 做）。
+  3 等待（CI 未完成、新 head 或新 run 没出现）；4 合并未确认；
+  5 合并后某一步非 0（写明哪步与原 exit，之后不跑，stage live 只能在 exit 0 之后由 PM 做）。
 薄接线提案（PM 合后接进既有 card-merge / merge-queue；不含私有地址）：
   1) 合并前：head 有纯 main 合并时先 \`ledger main-carry <task> ...\` → 本脚本不带 --merge 跑一次，exit 0 才继续；
   2) 合并：本脚本带 --merge（替换不钉 head 的合并调用）；
