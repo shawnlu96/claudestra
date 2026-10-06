@@ -4,7 +4,7 @@
  * - 只有 warn / stop 出提醒；unknown（读不到、已过重置）不出肯定提醒，也不当 0 或「已恢复」；below 不出。
  * - 模式 off = 没有生效的线，不出；observe 照出但写明「只观察、未执行」。
  * - 两族各一条，互不顶替。
- * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记一个 key，key 里含周窗口世代（resetAt）、状态 + 收窄档、
+ * 关掉按「本设备（localStorage）+ 本实例（机器 fp）+ 家族」记关掉过的 key，key 里含周窗口世代（resetAt）、状态 + 收窄档、
  * 两条线（阈值版本）与模式：同一条线不再弹；提醒→停接、改线 / 改模式、新的一周 key 变了就再出现。tests/web-quota-warning.test.ts。
  */
 import type { FamilyLine, QuotaFamily, QuotaLinesView } from "./lend-quota-model";
@@ -58,8 +58,12 @@ export function warnTexts(it: WarnItem): { title: string; status: string } {
 
 export const DISMISS_KEY = "cstra_quota_warning_dismissed";
 const MAX_SCOPES = 32;
+/** 同实例同家族记几条关掉过的 key（一周里提醒 / 停接 / 改线最多几代，留余量） */
+const MAX_KEYS = 8;
 
-export type DismissMap = Record<string, string>;
+/** 实例|家族 → 关掉过的提醒 key（按关掉先后，旧的在前）。存多条而非只留最新一条：合并两份记录时取并集，
+ * 旧代（如本页存不下、只在内存的 warn）不会顶掉别的 tab 已落盘的新代（stop），反之亦然。 */
+export type DismissMap = Record<string, string[]>;
 
 const scopeOf = (instance: string, family: QuotaFamily) => `${instance}|${family}`;
 
@@ -68,17 +72,33 @@ export function parseDismissed(raw: string | null): DismissMap {
   try {
     const v = JSON.parse(raw) as unknown;
     if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-    return Object.fromEntries(Object.entries(v).filter((e): e is [string, string] => typeof e[1] === "string"));
+    const out: DismissMap = {};
+    for (const [scope, keys] of Object.entries(v)) {
+      const list = typeof keys === "string" ? [keys] // 旧格式（每 scope 一条）照认
+        : Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
+      if (list.length) out[scope] = list.slice(-MAX_KEYS);
+    }
+    return out;
   } catch {
-    return {};
+    return {}; // 记录损坏 = 当没关过：最多多弹一次提醒，不会把该出的提醒吞掉
   }
 }
 
-export const isDismissed = (m: DismissMap, instance: string, it: WarnItem): boolean => m[scopeOf(instance, it.family)] === it.key;
+export const isDismissed = (m: DismissMap, instance: string, it: WarnItem): boolean => m[scopeOf(instance, it.family)]?.includes(it.key) ?? false;
 
-/** 记下这一条被关掉（同实例同家族只留最新一个 key，总数封顶，旧的先丢） */
-export function withDismissed(m: DismissMap, instance: string, it: WarnItem): DismissMap {
-  const scope = scopeOf(instance, it.family);
-  const rest = Object.entries(m).filter(([k]) => k !== scope).slice(-(MAX_SCOPES - 1));
-  return { ...Object.fromEntries(rest), [scope]: it.key };
+const capScopes = (entries: [string, string[]][]): DismissMap => Object.fromEntries(entries.slice(-MAX_SCOPES));
+
+/** 两份关掉记录取并集（每个 scope 的 key 去重、保序，b 的新记录排后），总数封顶 */
+export function mergeDismissed(a: DismissMap, b: DismissMap): DismissMap {
+  const out = new Map<string, string[]>(Object.entries(a));
+  for (const [scope, keys] of Object.entries(b)) {
+    const prev = (out.get(scope) ?? []).filter((k) => !keys.includes(k));
+    out.delete(scope);
+    out.set(scope, [...prev, ...keys].slice(-MAX_KEYS));
+  }
+  return capScopes([...out.entries()]);
 }
+
+/** 记下这一条被关掉（追加到该实例该家族的记录，最近动过的 scope 排最后；每 scope / 总数封顶，旧的先丢） */
+export const withDismissed = (m: DismissMap, instance: string, it: WarnItem): DismissMap =>
+  mergeDismissed(m, { [scopeOf(instance, it.family)]: [it.key] });

@@ -2,7 +2,7 @@
  * QWARN1_BROWSER=1 bun test tests/web-quota-warning-browser.test.ts — 顶部额度提醒条的真实浏览器渲染（390px + 桌面），隔离夹具、不连真 bridge。
  * 页面骨架模拟聊天页（56px 顶栏 + 对话 + 底部输入框），挂的是真组件 QuotaWarningBanner，GET /api/v1/lend/quota-lines 由路由按场景回。
  * 覆盖：停接 + 提醒两族同时、unknown 不出、403 / 404 不出且不再拉、只读（零写请求）、关掉后刷新不再出、跨新线（提醒→停接）再出、
- * 跨 tab 同步关掉、英文与本地时区、移动端不遮输入框；读到后 401 清空、存储写不进时两族先后关掉都生效、慢的旧回包不覆盖新状态、portal 到 body。截图写到 .playwright-mcp/qwarn1/（已 gitignore，只私存）；有 web/.next 构建时用生产样式。
+ * 跨 tab 同步关掉、英文与本地时区、移动端不遮输入框；读到后 401 清空、存储写不进时两族先后关掉都生效、慢的旧回包不覆盖新状态、portal 到 body、存不下的旧代关掉不顶掉别的 tab 落盘的新代（dismiss-memory-1）。截图写到 .playwright-mcp/qwarn1/（已 gitignore，只私存）；有 web/.next 构建时用生产样式。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Server } from "node:http";
@@ -235,5 +235,35 @@ test.skipIf(!enabled)("回包乱序：慢的旧 GET（提醒）晚到，不覆�
   release(); await settle(p);
   expect(await bar(p, "claude").getAttribute("data-level")).toBe("stop");
   expect(await bar(p, "claude").innerText()).toContain("已停止接新单");
+  await d.ctx.close();
+}, 30_000);
+
+test.skipIf(!enabled)("dismiss-memory-1 跨代：A 存不下关掉 warn → 同周升停接 → B 落盘关掉 stop → A 恢复写入关掉另一族：两边 stop 都不再出", async () => {
+  const d = await device({ status: 200, json: view(WARN, WARN) });
+  const a = await d.open();
+  await a.evaluate(`{ const set = Storage.prototype.setItem; window.__failDismiss = true;
+    Storage.prototype.setItem = function (k, v) {
+      if (window.__failDismiss && k === "cstra_quota_warning_dismissed") throw new DOMException("full", "QuotaExceededError");
+      return set.call(this, k, v);
+    }; }`);
+  await bar(a, "codex").waitFor();
+  await bar(a, "codex").getByRole("button", { name: "关闭" }).click(); // 只在 A 的内存里（warn key）
+  expect(await bar(a, "codex").count()).toBe(0);
+  d.reply = { status: 200, json: view(STOP, WARN) }; // 同周窗口 / 阈值 / 实例，Codex 升停接
+  const b = await d.open();
+  await visible(a);
+  await bar(a, "codex").waitFor(); await bar(b, "codex").waitFor();
+  await bar(b, "codex").getByRole("button", { name: "关闭" }).click(); // B 落盘 stop key
+  expect(await bar(b, "codex").count()).toBe(0);
+  await bar(a, "codex").waitFor({ state: "detached", timeout: 3000 }); // A 经 storage 事件跟着收起
+  await visible(a); await settle(a);
+  expect(await bar(a, "codex").count()).toBe(0);
+  await a.evaluate(`window.__failDismiss = false`);
+  await bar(a, "claude").getByRole("button", { name: "关闭" }).click(); // A 写回共享存储
+  await settle(b); await visible(b); await settle(b);
+  expect(await bar(b, "codex").count()).toBe(0); // 不能被 A 旧的 warn key 撤销
+  expect(await bar(b, "claude").count()).toBe(0);
+  await b.reload(); await settle(b);
+  expect(await b.getByTestId("quota-warning").count()).toBe(0);
   await d.ctx.close();
 }, 30_000);

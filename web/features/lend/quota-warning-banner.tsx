@@ -16,7 +16,7 @@ import { fetchQuotaLines } from "./lend-quota-api";
 import { finishLoad, newLoadGate, startLoad } from "./lend-model";
 import type { QuotaLinesView } from "./lend-quota-model";
 import { useWarnT } from "./quota-warning-i18n";
-import { DISMISS_KEY, FAMILY_LABEL, isDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type DismissMap, type WarnItem } from "./quota-warning-model";
+import { DISMISS_KEY, FAMILY_LABEL, isDismissed, mergeDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type DismissMap, type WarnItem } from "./quota-warning-model";
 import css from "./quota-warning.module.css";
 
 const POLL_MS = 60_000;
@@ -104,17 +104,18 @@ export function QuotaWarningBanner() {
     return halt;
   }, [fp]);
 
-  /** 存储写不进去的关掉记录（只在本页内存里）：和持久记录合并时它们优先，不被下一次关掉 / 别的 tab 的 storage 事件抹掉 */
+  /** 存储写不进去的关掉记录（只在本页内存里）：和持久记录取并集（mergeDismissed），不被下一次关掉 / 别的 tab 的 storage 事件抹掉，
+   * 也不顶掉别的 tab 已落盘的新代关掉记录 */
   const unsaved = useRef<DismissMap>({});
 
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => { if (e.key === DISMISS_KEY || e.key === null) setDismissed({ ...readDismissed(), ...unsaved.current }); };
+    const onStorage = (e: StorageEvent) => { if (e.key === DISMISS_KEY || e.key === null) setDismissed(mergeDismissed(readDismissed(), unsaved.current)); };
     window.addEventListener("storage", onStorage); // 别的 tab 关掉的，这里也收起
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const dismiss = useCallback((it: WarnItem) => {
-    const next = withDismissed({ ...readDismissed(), ...unsaved.current }, fp, it);
+    const next = withDismissed(mergeDismissed(readDismissed(), unsaved.current), fp, it);
     try {
       localStorage.setItem(DISMISS_KEY, JSON.stringify(next));
       unsaved.current = {}; // 都已随 next 落盘

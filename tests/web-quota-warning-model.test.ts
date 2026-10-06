@@ -12,7 +12,7 @@ import { effectivePrincipal, type Grant } from "../src/lib/devices.js";
 import type { QuotaFacts } from "../src/lib/lend-quota-line-facts.js";
 import type { Principal } from "../src/lib/principals.js";
 import type { FamilyLine, QuotaLinesView } from "../web/features/lend/lend-quota-model";
-import { isDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type WarnItem } from "../web/features/lend/quota-warning-model";
+import { isDismissed, mergeDismissed, parseDismissed, warnTexts, warningItems, withDismissed, type WarnItem } from "../web/features/lend/quota-warning-model";
 
 const NOW = Date.parse("2026-10-06T06:00:00Z");
 const RESET = NOW + 3 * 86_400_000;
@@ -78,19 +78,35 @@ describe("关掉", () => {
     expect(isDismissed(m, "fp2", warn)).toBe(false);
     expect(isDismissed(m, "fp1", { ...warn, family: "claude" })).toBe(false);
   });
-  test("同实例同家族只留最新一个 key，总数封顶", () => {
+  test("同实例同家族记多代关掉的 key（各 scope、总数封顶）", () => {
     const m2 = withDismissed(m, "fp1", item(STOP));
     expect(Object.keys(m2)).toEqual(["fp1|codex"]);
+    expect(isDismissed(m2, "fp1", warn) && isDismissed(m2, "fp1", item(STOP))).toBe(true);
+    let many = m;
+    for (let i = 0; i < 20; i++) many = withDismissed(many, "fp1", item(f({ weekUsedPct: 72, warnPct: 30 + i, state: "warn", limit: "half" })));
+    expect(many["fp1|codex"]).toHaveLength(8);
+    expect(isDismissed(many, "fp1", warn)).toBe(false); // 最旧的先丢
     let big = {};
     for (let i = 0; i < 50; i++) big = withDismissed(big, `fp${i}`, warn);
     expect(Object.keys(big)).toHaveLength(32);
     expect(isDismissed(big, "fp49", warn)).toBe(true);
   });
+  test("dismiss-memory-1：合并取并集，旧代（内存里的 warn）不顶掉别处已落盘的新代（stop），反之亦然", () => {
+    const stop = item(STOP);
+    const persisted = withDismissed({}, "fp1", stop);
+    const unsaved = withDismissed({}, "fp1", warn);
+    for (const merged of [mergeDismissed(persisted, unsaved), mergeDismissed(unsaved, persisted)]) {
+      expect(isDismissed(merged, "fp1", stop)).toBe(true);
+      expect(isDismissed(merged, "fp1", warn)).toBe(true);
+    }
+    const written = withDismissed(mergeDismissed(persisted, unsaved), "fp1", { ...warn, family: "claude" });
+    expect(isDismissed(parseDismissed(JSON.stringify(written)), "fp1", stop)).toBe(true);
+  });
   test("存储里的坏数据当没关过", () => {
     expect(parseDismissed(null)).toEqual({});
     expect(parseDismissed("{bad")).toEqual({});
     expect(parseDismissed("[1]")).toEqual({});
-    expect(parseDismissed('{"a":1,"b":"k"}')).toEqual({ b: "k" });
+    expect(parseDismissed('{"a":1,"b":"k","c":["x",2],"d":[]}')).toEqual({ b: ["k"], c: ["x"] }); // 旧格式单条字符串照认
   });
 });
 
