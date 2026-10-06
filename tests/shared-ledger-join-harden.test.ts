@@ -41,7 +41,7 @@ test("missing choice and nonexistent/personal local projects never redeem or alt
   const code = responses.invite({ personId: "preflight" }).joinCode;
   for (const localProjectId of [undefined, "missing", "personal"]) {
     await expect(joinSharedLedger({ url, code, key, subject: "owner:self", stateDir: dir, localProjectId, fetch: fetcher,
-      expectedProject: { centerId: code.split(".")[1]!, teamId: "team-a", projectId: "project-a", name: "Project A" } })).rejects.toThrow();
+      expectedProject: { centerId: code.split(".")[1]!, teamId: "team-a", projectId: "project-a", name: "Project A", personId: "person-a" } })).rejects.toThrow();
     expect(readFileSync(file)).toEqual(before);
     expect(existsSync(join(dir, "shared-ledger-bindings.json"))).toBe(false);
   }

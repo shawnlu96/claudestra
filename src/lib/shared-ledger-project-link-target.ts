@@ -3,6 +3,7 @@ import { isPersonalProject } from "./lend-policy.js";
 import { readJsonStateSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 import { PROJECT_ID_RE, slugifyProjectId, type ProjectDef, type ProjectsData } from "./projects.js";
+import type { V2ProjectDisplay } from "./shared-ledger-contract-v2-projects-types.js";
 import type { SharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
 
 /** Security decisions use the current file, never the project reader's last-good cache. */
@@ -32,11 +33,10 @@ export const sameSharedLedgerProject = (a: SharedLedgerBinding, b: SharedLedgerB
   a.centerId === b.centerId && a.teamId === b.teamId && a.projectId === b.projectId;
 
 
-export interface SharedLedgerProjectDisplay { teamId: string; projectId: string; name: string }
+export type SharedLedgerProjectDisplay = V2ProjectDisplay;
 
 /** Allocate the local slug after the enrollment adapter verifies the center's display. */
 export function newSharedLedgerProject(project: SharedLedgerProjectDisplay, dir = STATE_DIR): ProjectDef {
-  if (!PROJECT_ID_RE.test(project.projectId) || !project.name.trim() || project.name.length > 64) throw new Error("invalid shared project display");
   return { id: slugifyProjectId(project.projectId, new Set(readSharedLedgerProjects(dir).projects.map(p => p.id))),
     name: project.name, dirs: [], createdAt: new Date().toISOString() };
 }

@@ -20,7 +20,7 @@ export async function withSharedLedgerProjectMutation<T>(action: () => Promise<T
 type Snapshot = { name: string; text: string | null; mode: number };
 const FILES = ["projects.json", "shared-ledger-bindings.json", "shared-ledger-credentials.json"];
 
-/** Stage through the canonical writers, then publish credentials last. Ordinary failures restore exact original bytes. */
+/** Stage through canonical writers; publish security files transactionally, then create through writeProjects last. */
 async function saveLocked(credential: SharedLedgerLocalCredential, binding: SharedLedgerBinding, display: SharedLedgerProjectDisplay | undefined,
   dir: string, locks: LockHandle[]): Promise<{ localProjectId: string; identities: number }> {
   const snapshots: Snapshot[] = FILES.map(name => {
