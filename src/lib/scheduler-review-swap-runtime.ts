@@ -18,7 +18,8 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { assertSchedulerLease, forwardSchedulerLease, SCHEDULER_LEASE_ENV } from "./scheduler-lease-env.js";
 import { localReviewerCount } from "./scheduler-pool-facts.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
-import { latestReviewerSwap, openRefusal, swappedSession } from "./scheduler-review-swap.js";
+import { reviewMaterialDigest } from "./scheduler-model-wiring.js";
+import { latestReviewerSwap, openRefusal, refusalEpochLapse, swappedSession } from "./scheduler-review-swap.js";
 import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
@@ -140,6 +141,8 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   if (intent.status !== "pending" || intent.node !== "adversarial_review" || task.stage !== "review" || task.headSHA !== intent.head ||
     task.specRev !== intent.specRev || task.rev !== intent.taskRev || workflow?.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "新审查会话的创建意图已过期");
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return "本机另一家族审查名额已满，等待空位后自动续派";
+  const lapse = refusal ? refusalEpochLapse(db, task, { digest: reviewMaterialDigest(db) }) : null; // MODELX: hold / revoked approval / changed materials since the epoch
+  if (lapse) throw new LedgerError("conflict", `不建豁免审查会话，退人工：${lapse}`);
   const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily;
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
@@ -149,7 +152,8 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "unknown", receipt: oneLine(got.reason) });
     return got.reason;
   }
-  bindSchedulerSession(db, ctx, { ...got.ref, taskId: task.id, role: "reviewer", intentId: intent.id, registryPath: deps.registryPath });
+  bindSchedulerSession(db, ctx, { ...got.ref, taskId: task.id, role: "reviewer", intentId: intent.id, registryPath: deps.registryPath,
+    ...(refusal ? { refusalDigest: reviewMaterialDigest(db) } : {}) });
   return null;
 }
 
@@ -163,6 +167,8 @@ function assertSwapCurrent(db: Database, intent: SchedulerIntent): void {
   if (openRefusal(events)) {
     throw new LedgerError("conflict", "本卡有未处置的模型安全拒绝，不自动更换审查员");
   }
+  const lapse = intent.action === "ensure_session" ? refusalEpochLapse(db, task, { digest: reviewMaterialDigest(db) }) : null; // after every async effect, before the next
+  if (lapse) throw new LedgerError("conflict", `豁免审查接续已失效，停止后续效果，退人工：${lapse}`);
 }
 
 /** Narrow manager command: no arbitrary lifecycle target; it comes only from a validated ledger intent. */

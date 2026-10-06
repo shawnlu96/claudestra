@@ -13,7 +13,8 @@
  * tests/scheduler-model-wiring*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
@@ -23,7 +24,9 @@ import { appendEvent } from "./ledger-write.js";
 import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { createRecoveryRuntimePorts } from "./recovery-runtime-ports.js";
 import type { LocalFamilies } from "./scheduler-local-families-config.js";
-import { reviewMaterialDigest } from "./scheduler-review-swap.js";
+import { reviewAfterBounce } from "./scheduler-merge-conflict.js";
+import type { MaterialDigest } from "./scheduler-review-swap.js";
+import { workOrderFor } from "./scheduler-work-order.js";
 import { beginRefusalEpoch } from "./scheduler-sessions.js";
 import type { OutcomeInput, OutcomeSignal, RecoveryPolicyPort } from "./scheduler-model-outcome.js";
 import type { SessionRef } from "./worker-session.js";
@@ -61,9 +64,12 @@ async function loadPolicy(): Promise<RecoveryPolicyPort | undefined> {
 /** The machine as MODEL's placements name it: this machine's own runtimes are "local", a peer session is its agent. */
 const machineOf = (ref: SessionRef): string => ref.transport === "peer" ? ref.agent : "local";
 
-/** Already authorized placements: the bound one first (retry_same needs it), then this machine's allowed families. */
+/** This machine's allowed families now (the auto tick's pool config; none configured = both, as MODEL has always read it). */
+const localFamiliesOf = (card: Pick<ModelWiringCard, "opts">): AuthorFamily[] => card.opts.pool?.remote.localFamilies ?? ["claude", "codex"];
+
+/** Already authorized placements: the bound one first (MODEL's first-refusal plan names it), then this machine's allowed families. */
 function authorizedFor(card: ModelWiringCard, failed: Placement): Placement[] {
-  const families: AuthorFamily[] = card.opts.pool?.remote.localFamilies ?? ["claude", "codex"];
+  const families = localFamiliesOf(card);
   const out = [failed];
   for (const family of families) if (!out.some((p) => p.family === family && p.machine === "local")) out.push({ family, machine: "local" });
   return out;
@@ -83,7 +89,7 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
     const failed = { family: ref.family, machine: machineOf(ref) };
     r = ports.recordModelOutcome(card.db, { actor: "scheduler", now: card.deps.now() }, { intentId: sent.id, signal: { failure },
       failed: { ...failed, agent: ref.agent }, authorized: authorizedFor(card, failed), ended: true,
-      ...(ref.role === "reviewer" ? { review: { sessionId: ref.sessionId, materialDigest: reviewMaterialDigest(card.task, sent) } } : {}) });
+      ...(ref.role === "reviewer" ? { review: { sessionId: ref.sessionId, materialDigest: reviewMaterialDigest(card.db)(card.task, sent) } } : {}) });
   } catch (e) {
     diag(`${card.task.id} 意图 ${sent.id} 记模型结果失败，照旧退人工：${e instanceof Error ? e.message : String(e)}`);
     return "";
@@ -92,7 +98,7 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
   if (r.kind !== "recorded" || r.mode !== "on") return "";
   const p = r.plan;
   if (p.kind === "retry_same" || p.kind === "exempt_review") {
-    const done = runEpoch(card, r.event.seq);
+    const done = runEpoch(card, r.event.seq, authorizedFor(card, { family: ref.family, machine: machineOf(ref) }));
     informOwnerOnce(card, r.event, "error" in done ? null : done.event);
     if (!("error" in done)) return { epoch: `${done.event.text}（台账 #${done.event.seq}${done.duplicate ? "，已执行过" : ""}）` };
     return `；MODEL 计划：${p.kind}（批准 ${p.approvalId}，台账 #${r.event.seq}）未执行：${done.error}`;
@@ -105,14 +111,39 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
   return `；MODEL 计划：${p.kind}（→ ${p.to.machine}（${p.to.family}），无现成正式路径），执行路径待 MODELX（台账 #${r.event.seq}，未执行）：${p.reason}`;
 }
 
+const PLACEHOLDER = { agent: "<reviewer>", sessionId: "<session>", family: "<family>" as AuthorFamily, checkout: "<checkout>", order: "<order>" };
+const pathsIn = (lines: readonly string[]): string[] => [...new Set(lines.flatMap((l) => l.match(/\/[^\s，。；：（）()]+/g) ?? []))].sort();
+
+/**
+ * MODELX: the review materials of a ticket, as the order would carry them now — the full review order (inputs, outputs,
+ * acceptance, write-back, findings) with only the ticket's own identity and address (order id, reviewer, session, family,
+ * checkout) replaced by placeholders, plus the bytes of every file its inputs name (fix_strategy's prior-report material and
+ * the like). Two tickets with equal digests are sent the same words over the same material bytes. plan: the dispatching
+ * plan's workOrder (a merge bounce); without it the planner's own rule rebuilds it from the ledger.
+ */
+export const reviewMaterialDigest = (db: Database): MaterialDigest => (task, sent, plan) => {
+  const bounce = plan === undefined ? reviewAfterBounce(listEvents(db, { project: task.project, target: task.id })) : null;
+  const facts = plan === undefined ? (bounce ? { workOrder: { reportPath: "", findings: [], fallbackWarning: null, bounce } } : null) : plan;
+  const order = workOrderFor(task, { ...sent, id: PLACEHOLDER.order }, facts as Parameters<typeof workOrderFor>[2],
+    { taskId: task.id, role: "reviewer", agent: PLACEHOLDER.agent, sessionId: PLACEHOLDER.sessionId, family: PLACEHOLDER.family, transport: "tmux" },
+    PLACEHOLDER.checkout, db);
+  const hash = createHash("sha256").update(JSON.stringify([task.project, task.id, order]));
+  for (const file of pathsIn(order?.inputs ?? [])) {
+    let bytes: Buffer | null = null;
+    try { if (statSync(file).isFile()) bytes = readFileSync(file); } catch { /* not a file: the line itself is the material */ }
+    if (bytes) hash.update(`\0${file}\0${bytes.length}\0`).update(bytes);
+  }
+  return `sha256:${hash.digest("hex")}`;
+};
+
 /** The refusal kind the owner hears about: Codex's cyber-policy cut vs any other usage-policy refusal. */
 export const refusalKind = (evidence: string): "cyber_policy" | "usage_policy" => isCyberPolicy(evidence) ? "cyber_policy" : "usage_policy";
 export const informKey = (taskId: string, kind: string): string => `model-refusal-inform:${taskId}:${kind}`;
 
 /** MODEL's recorded plan event → the refusal epoch, or why not (every guard re-read in the writer's transaction). */
-function runEpoch(card: ModelWiringCard, planSeq: number): { event: LedgerEvent; duplicate: boolean } | { error: string } {
+function runEpoch(card: ModelWiringCard, planSeq: number, authorized: Placement[]): { event: LedgerEvent; duplicate: boolean } | { error: string } {
   try {
-    return beginRefusalEpoch(card.db, { actor: "scheduler", now: card.deps.now() }, card.task.id, planSeq);
+    return beginRefusalEpoch(card.db, { actor: "scheduler", now: card.deps.now() }, card.task.id, planSeq, authorized, reviewMaterialDigest(card.db));
   } catch (e) {
     if (!(e instanceof LedgerError)) diag(`${card.task.id} 拒审接续执行失败，退人工：${e instanceof Error ? e.message : String(e)}`);
     return { error: e instanceof Error ? e.message : String(e) };

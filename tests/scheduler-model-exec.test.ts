@@ -20,8 +20,8 @@ import { createRefusalApprovalPort } from "../src/lib/recovery-refusal-approval.
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { EXEMPTION_TEXT, recordModelOutcome } from "../src/lib/scheduler-model-outcome.js";
-import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
-import { reviewMaterialDigest } from "../src/lib/scheduler-review-swap.js";
+import { modelOutcomeStep, reviewMaterialDigest, setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
+import { refusalEpochLapse } from "../src/lib/scheduler-review-swap.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { beginRefusalEpoch, bindSchedulerSession, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
@@ -29,6 +29,7 @@ import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 const CYBER = "This request has been flagged for possible cybersecurity risk";
 const USAGE = "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy";
 const EX = "agent-task-rv-t1-r1-ex";
+const AUTH = [{ family: "codex", machine: "local" }, { family: "claude", machine: "local" }] as const;
 const dir = mkdtempSync(join(tmpdir(), "modelx-"));
 const g = globalThis as { __modelxMode?: string };
 const CFG = join(dir, "recovery-policy.ts");
@@ -39,12 +40,14 @@ let first: SchedulerIntent;
 let errors: ReturnType<typeof spyOn>;
 let created: { family: string; tag?: string }[];
 let askId: string;
+let onEnsure: (() => void) | null = null;
 const real = new WeakMap<object, ReturnType<typeof autoFixture>["tickDeps"]["worker"]>();
 beforeEach(async () => {
   errors = spyOn(console, "error").mockImplementation(() => {});
   setModelOutcomeReader(CFG);
   g.__modelxMode = "on";
   created = [];
+  onEnsure = null;
   f = autoFixture();
   await toBuild(f);
   await f.tick();
@@ -82,13 +85,15 @@ const swapDeps = (): ReviewSwapDeps => ({
   registryPath: f.registryPath, active: () => {}, agents: async () => [], agent: async () => ({ ok: true }),
   ensure: async (task, family, _old, tag) => {
     created.push({ family, tag });
+    onEnsure?.();
     editRegistry((r) => { r.agents[EX] = { runtime: family === "codex" ? "codex" : "claude-code", sessionId: "s-ex", cwd: join(f.dir, "rv-ex") }; });
     return { kind: "ready", created: true, ref: { taskId: task.id, role: "reviewer", agent: EX, sessionId: "s-ex", family, transport: "tmux" } };
   },
 });
 async function tick() {
+  // As the manager CLI answers: a ledger refusal is { ok: false }, never a thrown tick.
   const manager = (...a: string[]) => a[1] === "scheduler-review-swap"
-    ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()) : f.tickDeps.manager(...a);
+    ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()).catch((e: Error) => ({ ok: false, error: e.message })) : f.tickDeps.manager(...a);
   const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, { ...f.tickDeps, manager });
   if (r.failed.length) throw new Error(JSON.stringify(r.failed));
   return r.cards[0];
@@ -149,7 +154,7 @@ describe("first policy refusal → straight to the exemption (test 1)", () => {
     const strip = (t: string, id: string, agent: string) => t.replaceAll(id, "<order>").replaceAll(agent, "<reviewer>");
     expect(strip(again.text, second.id, EX)).toBe(strip(orig.text, first.id, "agent-rv-t1")); // the order is the same, word for word
     const sent2 = getIntent(f.db, second.id)!;
-    expect(reviewMaterialDigest(f.task(), sent2)).toBe(String(plan[0].data.materialDigest));
+    expect(reviewMaterialDigest(f.db)(f.task(), sent2)).toBe(String(plan[0].data.materialDigest));
   });
 
   test("the exempt verdict goes through take_review / verdict as usual, then passes the planner and both merge gates", async () => {
@@ -183,14 +188,14 @@ describe("the exempt review refused too → manual (test 3)", () => {
     const sent = getIntent(f.db, f.intents().findLast((i) => i.action === "review")!.id)!;
     const plan = insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "escalate", text: "x", data: {
       op: "model_refusal_exempt", mode: "on", cls: "safety", role: "reviewer", stale: false, intentId: sent.id, head: H1, specRev: f.task().specRev,
-      round: 1, session: "s-ex", family: "claude", approvalId: askId, materialDigest: reviewMaterialDigest(f.task(), sent), plan: { kind: "exempt_review" } } }, true);
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq)).toThrow("本轮已做过豁免审查");
+      round: 1, session: "s-ex", family: "claude", approvalId: askId, materialDigest: reviewMaterialDigest(f.db)(f.task(), sent), plan: { kind: "exempt_review" } } }, true);
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq, AUTH, reviewMaterialDigest(f.db))).toThrow("本轮已做过豁免审查");
   });
 });
 
 describe("guards: nothing runs, the card goes to PM (test 4)", () => {
   /** MODEL's on-mode record only, as the wiring writes it, without running it. */
-  function record(digest = reviewMaterialDigest(f.task(), first)) {
+  function record(digest = reviewMaterialDigest(f.db)(f.task(), first)) {
     const r = recordModelOutcome(f.db, f.at("scheduler"), { intentId: first.id, signal: { failure: { kind: "error", message: CYBER } },
       failed: { family: "codex", machine: "local", agent: "agent-rv-t1" }, authorized: [{ family: "codex", machine: "local" }, { family: "claude", machine: "local" }],
       ended: true, review: { sessionId: "s-rv", materialDigest: digest } },
@@ -211,14 +216,14 @@ describe("guards: nothing runs, the card goes to PM (test 4)", () => {
     test(`${name}: refused, no epoch, binding kept`, () => {
       const seq = record();
       change();
-      expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq)).toThrow(why);
+      expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toThrow(why);
       untouched();
     });
   }
 
   test("material digest differs from the order's: refused, no epoch, binding kept", () => {
     const seq = record(`sha256:${"0".repeat(64)}`);
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq)).toThrow("材料摘要不一致");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toThrow("材料摘要不一致");
     untouched();
   });
 
@@ -232,8 +237,8 @@ describe("guards: nothing runs, the card goes to PM (test 4)", () => {
 
   test("only the scheduler runs it, and only MODEL's recorded continuation events", () => {
     const seq = record();
-    expect(() => beginRefusalEpoch(f.db, f.at("pm"), "T1", seq)).toThrow("只由调度服务");
-    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq - 1)).toThrow("不是 MODEL 记下的拒审接续计划");
+    expect(() => beginRefusalEpoch(f.db, f.at("pm"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toThrow("只由调度服务");
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq - 1, AUTH, reviewMaterialDigest(f.db))).toThrow("不是 MODEL 记下的拒审接续计划");
     untouched();
   });
 
@@ -253,7 +258,7 @@ describe("one run per plan event (test 5)", () => {
     failWith(CYBER);
     await tick();
     const seq = Number(epochs()[0].data.refusal && (epochs()[0].data.refusal as { planSeq: number }).planSeq);
-    expect(beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq)).toMatchObject({ duplicate: true, event: { seq: epochs()[0].seq } });
+    expect(beginRefusalEpoch(f.db, f.at("scheduler"), "T1", seq, AUTH, reviewMaterialDigest(f.db))).toMatchObject({ duplicate: true, event: { seq: epochs()[0].seq } });
     failWith(null);
     for (let n = 0; n < 4; n++) await tick();
     expect(epochs()).toHaveLength(1);
@@ -279,15 +284,20 @@ describe("merge gates: only the round's recorded, approved exemption passes a sa
     expect(await f.review("pass", H1, [])).toMatchObject({ ok: true });
     expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   }
-  function forgeEpoch(over: Record<string, unknown> = {}, at: Record<string, unknown> = {}) {
-    insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "scheduler", text: "forged",
-      data: { op: "reviewer_swap", intentId: first.id, agent: "agent-rv-t1", sessionId: "s-old", toFamily: "codex", round: f.task().round, head: H1,
-        specRev: f.task().specRev, ...at, refusal: { planSeq: 1, approvalId: askId, crossModel: false, exemption: exemption(), ...over } } }, true);
-    insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "scheduler", text: "forged bind",
-      data: { op: "session_bind", role: "reviewer", agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", refusalEpoch: -1, approvalId: askId } }, true);
+  /** A real exemption, bound and passed: both gates accept it. Each negative breaks exactly one field of that proof. */
+  async function exemptPassed() {
+    await exempted();
+    expect(await verdict()).toMatchObject({ ok: true });
+    expect(await tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).not.toThrow();
+  }
+  /** Fault injection on this private fixture only: the ledger's append-only trigger is lifted to rewrite one field. */
+  function corrupt(seq: number, path: string, value: unknown) {
+    f.db.run("DROP TRIGGER IF EXISTS events_no_update");
+    f.db.run(`UPDATE events SET data = ${value === undefined ? "json_remove(data, ?)" : "json_set(data, ?, json(?))"} WHERE seq = ?`,
+      value === undefined ? [path, seq] : [path, JSON.stringify(value), seq]);
   }
   const refused = () => {
-    f.db.run("UPDATE task_workflows SET authorFamily = 'codex' WHERE taskId = 'T1'");
     expect(mergePlan()).toThrow("合并前缺跨模型审查");
     expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow("跨模型审查");
   };
@@ -296,22 +306,172 @@ describe("merge gates: only the round's recorded, approved exemption passes a sa
     await passed();
     expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).not.toThrow();
   });
-  for (const [name, over, at] of [["no mark at all", null, {}], ["a mark with a mismatched approval id", { approvalId: "ask_other" }, {}],
-    ["an epoch of an old head", {}, { head: "9".repeat(40) }], ["an epoch of another round", {}, { round: 99 }],
-    ["a well-formed mark the reviewer was never bound under", {}, {}]] as const) {
+  test("control: the real exemption passes both gates", async () => {
+    await exemptPassed();
+    expect(mergePlan()).not.toThrow();
+  });
+  const bind = () => ops("session_bind").findLast((e) => e.data.agent === EX)!.seq;
+  for (const [name, at, path, value] of [
+    ["no exemption mark on the epoch", () => epochs()[0].seq, "$.refusal.exemption", undefined],
+    ["the epoch's approval id not the owner's current one", () => epochs()[0].seq, "$.refusal", "approval"],
+    ["an epoch of an old head", () => epochs()[0].seq, "$.head", "9".repeat(40)],
+    ["an epoch of another round", () => epochs()[0].seq, "$.round", 99],
+    ["an epoch of another spec", () => epochs()[0].seq, "$.specRev", 99],
+    ["a reviewer never bound under the epoch", bind, "$.refusalEpoch", -1],
+  ] as const) {
     test(`same family as the author with ${name}: both gates refuse`, async () => {
-      await passed();
-      if (over) forgeEpoch(over, at);
+      await exemptPassed();
+      const r = epochs()[0].data.refusal as Record<string, unknown>;
+      if (value === "approval") { // consistent everywhere but the owner's answer: only the current-approval check can refuse
+        corrupt(at(), path, { ...r, approvalId: "ask_other", exemption: exemption("ask_other") });
+        corrupt(bind(), "$.approvalId", "ask_other");
+      } else corrupt(at(), path, value);
       refused();
     });
   }
 
   test("the real exemption, approval revoked after the verdict: both gates refuse", async () => {
-    await exempted();
-    expect(await verdict()).toMatchObject({ ok: true });
-    expect(await tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+    await exemptPassed();
     answer("policy_refusal_rule_stop", 3000);
-    expect(mergePlan()).toThrow("合并前缺跨模型审查");
-    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!)).toThrow("跨模型审查");
+    refused();
+  });
+});
+
+describe("r3: the exemption runs only at an authorized placement", () => {
+  const card = (families: ("claude" | "codex")[]) => ({ db: f.db, task: f.task(), opts: { pool: { remote: { localFamilies: families } } }, deps: { now: () => f.at("x").now } });
+  const ref = { taskId: "T1", role: "reviewer" as const, agent: "agent-rv-t1", sessionId: "s-rv", family: "codex" as const, transport: "tmux" as const };
+
+  test("only codex allowed here: no claude epoch, binding kept, refused to manual with why", async () => {
+    const r = await modelOutcomeStep(card(["codex"]), first, ref, { kind: "error", message: CYBER });
+    expect(typeof r).toBe("string");
+    expect(r).toContain("已授权位置里没有另一家族");
+    expect(epochs()).toEqual([]);
+    expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: "s-rv", state: "active" });
+  });
+
+  test("an exempt_review plan to a peer placement: no formal path, refused", () => {
+    const plan = insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "escalate", text: "x", data: {
+      op: "model_refusal_exempt", mode: "on", cls: "safety", role: "reviewer", stale: false, intentId: first.id, head: H1, specRev: f.task().specRev,
+      round: 1, session: "s-rv", family: "codex", approvalId: askId, materialDigest: reviewMaterialDigest(f.db)(f.task(), first),
+      plan: { kind: "exempt_review", to: { family: "claude", machine: "agent-peer" } } } }, true);
+    const auth = [...AUTH, { family: "claude" as const, machine: "agent-peer" }];
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", plan.seq, auth, reviewMaterialDigest(f.db))).toThrow("不是本机");
+    expect(epochs()).toEqual([]);
+  });
+
+  test("the epoch records its placement; a family later dropped from this machine stops it before creation", async () => {
+    failWith(CYBER);
+    expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+    expect(epochs()[0].data.refusal).toMatchObject({ placement: { family: "claude", machine: "local" } });
+    expect(refusalEpochLapse(f.db, f.task(), { digest: reviewMaterialDigest(f.db), families: ["codex"] })).toContain("已不在本机授权配置内");
+    expect(refusalEpochLapse(f.db, f.task(), { digest: reviewMaterialDigest(f.db), families: ["codex", "claude"] })).toBeNull();
+  });
+});
+
+describe("r3: holds and revocations are re-read before every later effect", () => {
+  const hold = () => f.db.run("UPDATE tasks SET extra = json_set(extra, '$.refusalHold', json('true')) WHERE id = 'T1'");
+  const revoke = () => { answer("policy_refusal_rule_stop", 3000); };
+  const noExempt = () => {
+    expect(reviewers()).toEqual([{ agent: "agent-rv-t1", sessionId: "s-rv", family: "codex", state: "retired" }]);
+    expect(f.intents().filter((i) => i.action === "review" && i.recipient === EX)).toEqual([]);
+  };
+  for (const [name, change, why] of [["card held", hold, "extra.refusalHold"], ["approval revoked", revoke, "批准"]] as const) {
+    test(`${name} after the epoch, before creation: manual, nothing created / bound / sent`, async () => {
+      failWith(CYBER);
+      expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+      failWith(null);
+      change();
+      const r = await tick();
+      expect(r).toMatchObject({ step: "manual" });
+      expect(r!.detail).toContain(why);
+      expect(created).toEqual([]);
+      noExempt();
+      expect(epochs()).toHaveLength(1); // the executed epoch stays as audit
+      expect(getWorkflow(f.db, "T1")!.mode).toBe("manual");
+    });
+
+    test(`${name} while the reviewer is being created: not bound, then manual`, async () => {
+      failWith(CYBER);
+      expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+      failWith(null);
+      onEnsure = change;
+      expect(await tick()).toMatchObject({ step: "held" });
+      expect(created).toHaveLength(1);
+      noExempt();
+      expect(await tick()).toMatchObject({ step: "manual" });
+      noExempt();
+    });
+
+    test(`${name} after binding, before the order goes out: manual, nothing sent`, async () => {
+      failWith(CYBER);
+      expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+      failWith(null);
+      expect(await tick()).toMatchObject({ step: "session" });
+      change();
+      const sentBefore = f.sent.length;
+      expect(await tick()).toMatchObject({ step: "manual" });
+      expect(f.sent.slice(sentBefore).filter((x) => x.agent === EX)).toEqual([]);
+    });
+  }
+
+  test("the bind transaction itself refuses under a hold", async () => {
+    failWith(CYBER);
+    expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+    const t = f.task();
+    const ensure = planIntent(f.db, f.at("scheduler"), { id: "exempt-ensure", taskId: "T1", taskRev: t.rev, workflowRev: getWorkflow(f.db, "T1")!.rev,
+      causalSeq: listEvents(f.db, { project: "p" }).at(-1)!.seq, action: "ensure_session", node: "adversarial_review", reason: "豁免审查员" }).intent;
+    settleIntent(f.db, f.at("scheduler"), { id: ensure.id, from: "pending", to: "submitted", receipt: "claimed" });
+    editRegistry((r) => { r.agents[EX] = { runtime: "claude-code", sessionId: "s-ex", cwd: join(f.dir, "rv-ex") }; });
+    const bind = () => bindSchedulerSession(f.db, f.at("scheduler"), { taskId: "T1", role: "reviewer", intentId: ensure.id, agent: EX,
+      sessionId: "s-ex", family: "claude", transport: "tmux", registryPath: f.registryPath, refusalDigest: reviewMaterialDigest(f.db) });
+    hold();
+    expect(bind).toThrow("不绑定豁免审查员，退人工：owner 已按卡挂起");
+    noExempt();
+    f.db.run("UPDATE tasks SET extra = json_remove(extra, '$.refusalHold') WHERE id = 'T1'");
+    expect(bind()).toMatchObject({ duplicate: false, session: { sessionId: "s-ex", family: "claude" } }); // control: the same bind, unheld
+  });
+});
+
+describe("r3: the material digest covers the order's real material", () => {
+  const material = (text: string) => { const at = join(f.dir, "prior-reports.md"); writeFileSync(at, text); return at; };
+  const strategy = (at: string) => insertEvent(f.db, { actor: "scheduler", now: f.at("x").now }, { project: "p", target: "T1", kind: "scheduler",
+    text: "fix strategy", data: { op: "fix_strategy", specRev: f.task().specRev, round: f.task().round, material: at } }, true);
+
+  test("the same ticket identity with prior-report material added after the refusal: digest differs, refused", () => {
+    const before = reviewMaterialDigest(f.db)(f.task(), first);
+    const r = recordModelOutcome(f.db, f.at("scheduler"), { intentId: first.id, signal: { failure: { kind: "error", message: CYBER } },
+      failed: { family: "codex", machine: "local", agent: "agent-rv-t1" }, authorized: [...AUTH], ended: true,
+      review: { sessionId: "s-rv", materialDigest: before } }, () => ({ mode: "on", manualAfterMs: null }), createRefusalApprovalPort(f.db));
+    strategy(material("round 1 reports"));
+    expect(reviewMaterialDigest(f.db)(f.task(), first)).not.toBe(before);
+    expect(() => beginRefusalEpoch(f.db, f.at("scheduler"), "T1", (r as { event: { seq: number } }).event.seq, AUTH, reviewMaterialDigest(f.db))).toThrow("材料摘要不一致");
+    expect(epochs()).toEqual([]);
+  });
+
+  test("the digest hashes the referenced file's bytes, not just its path", () => {
+    const at = material("v1");
+    strategy(at);
+    const one = reviewMaterialDigest(f.db)(f.task(), first);
+    writeFileSync(at, "v2");
+    expect(reviewMaterialDigest(f.db)(f.task(), first)).not.toBe(one);
+    writeFileSync(at, "v1");
+    expect(reviewMaterialDigest(f.db)(f.task(), first)).toBe(one);
+  });
+
+  test("the digest ignores only the ticket's identity: another order id / reviewer / session gives the same digest", () => {
+    expect(reviewMaterialDigest(f.db)(f.task(), { ...first, id: "other-order" })).toBe(reviewMaterialDigest(f.db)(f.task(), first));
+    expect(reviewMaterialDigest(f.db)(f.task(), { ...first, head: "e".repeat(40) })).not.toBe(reviewMaterialDigest(f.db)(f.task(), first));
+  });
+
+  test("material changed after the epoch, before the order goes out: manual, nothing sent", async () => {
+    failWith(CYBER);
+    expect(await tick()).toMatchObject({ step: "refusal_epoch" });
+    failWith(null);
+    expect(await tick()).toMatchObject({ step: "session" });
+    strategy(material("late material"));
+    const r = await tick();
+    expect(r).toMatchObject({ step: "manual" });
+    expect(r!.detail).toContain("材料摘要不一致");
+    expect(f.intents().filter((i) => i.action === "review" && i.recipient === EX)).toEqual([]);
   });
 });
