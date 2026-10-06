@@ -123,6 +123,8 @@ describe("Pi 适配器 · 事件映射", () => {
     expect(u).toEqual({ sessionUpdate: "session_info_update", _meta: { claudestra: { notice: "请求出错：529 overloaded，2 秒后自动重试（1/3）" } } });
     expect(m.push({ type: "auto_retry_end", success: true, attempt: 2 })).toEqual([]);
     expect(m.push({ type: "auto_retry_end", success: false, attempt: 3, finalError: "529" })).toEqual([]);
+    const [long] = m.push({ type: "auto_retry_start", attempt: 1, errorMessage: `${"x".repeat(190)} sk-abcdefghijklmnopqrstuvwxyz123456` });
+    expect(JSON.stringify(long)).not.toContain("sk-abc"); // 先打码再截 200 字：截剩的半个密钥规则认不出
   });
 
   test("tool_execution_update 与 agent/turn 事件不产出 update", () => {
