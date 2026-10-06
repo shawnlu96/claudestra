@@ -54,7 +54,7 @@ describe("shared project presentation boundary", () => {
     expect(() => parseSharedProject({ ...project(), status: "deleted" })).toThrow(ProjectFailure);
   });
   test("member DTO only exposes display fields with validated states", () => {
-    const value = { personId: "person-b", code: "伙伴", role: "member", status: "invited" };
+    const value = { personId: "person-b", code: "伙伴", role: "member", status: "invited" } as const;
     expect(parseProjectMembers([{ ...value, bearer: "synthetic-token" }])).toEqual([value]);
     expect(() => parseProjectMembers([{ ...value, role: "service" }])).toThrow(ProjectFailure);
   });

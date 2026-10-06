@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ProjectFailure, projectErrorText, type ProjectMember, type ProjectSnapshot, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
@@ -10,13 +10,15 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
   const [removing, setRemoving] = useState<ProjectMember | null>(null);
   const [peers, setPeers] = useState<string[]>([]);
   const [note, setNote] = useState("");
+  const sequence = useRef(0);
   const { centerId, teamId, projectId } = project;
   const refresh = useCallback(async (signal: AbortSignal) => {
+    const seq = ++sequence.current;
     try {
       const next = await port.members({ centerId, teamId, projectId }, signal);
-      if (!signal.aborted) { setMembers(next); setLoadError(""); }
+      if (!signal.aborted && seq === sequence.current) { setMembers(next); setLoadError(""); }
     } catch (e) {
-      if (!signal.aborted) { setMembers([]); setLoadError(projectErrorText(e instanceof ProjectFailure ? e.status : 0)); }
+      if (!signal.aborted && seq === sequence.current) { setMembers([]); setLoadError(projectErrorText(e instanceof ProjectFailure ? e.status : 0)); }
     }
   }, [port, centerId, teamId, projectId]);
   useEffect(() => {
@@ -26,6 +28,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
     return () => { ctrl.abort(); clearInterval(timer); };
   }, [refresh]);
   const action = useProjectAction(refresh);
+  const validPeers = peers.filter(id => snapshot.peers.some(p => p.id === id));
   return <section className="space-y-3 border-t border-base-300 pt-4">
     <h3 className="font-semibold">成员</h3>
     {loadError && <p role="alert" className="text-sm text-error">{loadError}</p>}
@@ -41,13 +44,14 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
         <p>将 {removing.code} 移出项目 {project.name}？该成员将失去此项目的访问权限。</p>
         <div className="flex gap-2">
           <button type="button" className="btn btn-error btn-sm" disabled={action.busy} onClick={() => void action.run(async s => {
-            await port.remove(project, removing.personId, s); setRemoving(null);
+            await port.remove(project, removing.personId, s); if (!s.aborted) setRemoving(null);
           })}>确认移出</button>
           <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => setRemoving(null)}>取消</button>
         </div>
       </div>}
-      <form className="space-y-3" onSubmit={e => { e.preventDefault(); void action.run(async s => {
-        await port.invite(project, { peers, note: note.trim() }, s); setPeers([]); setNote("");
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!validPeers.length) return; void action.run(async s => {
+        await port.invite(project, { peers: validPeers, note: note.trim() }, s);
+        if (!s.aborted) { setPeers([]); setNote(""); }
       }, "邀请已发送，等待对方确认加入。"); }}>
         <fieldset disabled={action.busy} className="space-y-2">
           <legend className="mb-2 font-medium">邀请 peer</legend>
@@ -60,7 +64,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
           <label className="block text-sm">附言（可选）
             <input className="input mt-1 w-full" value={note} maxLength={500} onChange={e => setNote(e.target.value)} />
           </label>
-          <button className="btn btn-primary btn-sm" disabled={!peers.length}>邀请成员</button>
+          <button className="btn btn-primary btn-sm" disabled={!validPeers.length}>邀请成员</button>
         </fieldset>
       </form>
     </>}

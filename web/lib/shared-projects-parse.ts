@@ -31,7 +31,7 @@ export function parseSharedProject(value: unknown): SharedProject {
   const projectId = text(p.projectId, 32);
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(projectId)) throw new ProjectFailure(502);
   return { ...scope(p), projectId, name: text(p.name, 128), rev: p.rev as number,
-    status: choice(p.status, ["active", "archived"]), role: p.role === null ? null : choice(p.role, ["owner", "member"]),
+    status: choice(p.status, ["active", "archived"]), role: p.role === null ? null : choice(p.role, ["owner", "member"] as const),
     availability: choice(p.availability, ["ready", "pending"]),
     local: local ? { id: text(local.id, 32), name: text(local.name, 128), dirs: list(local.dirs, v => text(v, 4096)) } : null,
     ...(p.operationId === undefined ? {} : { operationId: text(p.operationId) }),

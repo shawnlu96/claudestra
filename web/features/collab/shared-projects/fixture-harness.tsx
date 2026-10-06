@@ -1,7 +1,8 @@
 /** Synthetic screenshot entry; production navigation never imports this module. */
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { SharedProjectsPanel } from "./projects-panel";
+import { ProjectChoice } from "./project-choice";
 import { ProjectFailure, type CreateProject, type SharedProject, type ProjectSnapshot, type SharedProjectsPort } from "@/lib/shared-projects-model";
 
 const params = new URLSearchParams(location.search);
@@ -21,10 +22,17 @@ let conflicted = false;
 let joined = false;
 const calls: string[] = [];
 const record = (name: string) => { calls.push(name); document.body.dataset.calls = JSON.stringify(calls); };
+let createdOperation: string | null = null;
 const port: SharedProjectsPort = {
   list: async () => structuredClone(snapshot),
-  create: async input => { record("create"); snapshot.projects.push(seed(input)); },
-  complete: async () => { record("complete"); },
+  create: async input => {
+    record("create"); createdOperation = input.operationId; snapshot.projects.push(seed(input));
+    if (params.get("fixture") === "recovery") throw new Error("synthetic-sensitive-sentinel");
+  },
+  complete: async input => {
+    record("complete");
+    if (createdOperation !== input.operationId) throw new Error("synthetic-operation-mismatch");
+  },
   patch: async (ref, patch) => {
     record("patch");
     const p = snapshot.projects.find(p => p.projectId === ref.projectId)!;
@@ -40,7 +48,22 @@ const port: SharedProjectsPort = {
   leave: async () => { record("leave"); snapshot = { ...snapshot, projects: [] }; },
 };
 
-createRoot(document.getElementById("root")!).render(
+function ChoiceFixture() {
+  const [cardId, setCardId] = useState(0);
+  const [recommended, setRecommended] = useState(params.get("recommended") === "none" ? "" : "create");
+  const [busy, setBusy] = useState(false);
+  return <main className="mx-auto max-w-md p-4">
+    <h1 className="mb-4 text-xl font-semibold">本机对应选择（合成卡）</h1>
+    <ProjectChoice cardId={`fixture-card-${cardId}`} choice={{ selectId: "fixture-binding", recommended, options: [
+      { value: "create", label: "新建本机项目" }, { value: "local-app", label: "绑定本机工作区" },
+    ] }} accept={{ id: "fixture-accept", label: "确认加入" }} decline={{ id: "fixture-decline", label: "不加入" }} busy={busy}
+      onAnswer={choices => { document.body.dataset.answers = JSON.stringify(choices); setBusy(true); }} />
+    <button type="button" className="btn btn-sm mt-4" onClick={() => setRecommended("local-app")}>替换合成卡</button>
+    <button type="button" className="btn btn-sm mt-4" onClick={() => setCardId(id => id + 1)}>相同选项的新卡</button>
+  </main>;
+}
+
+createRoot(document.getElementById("root")!).render(params.get("fixture") === "choice" ? <ChoiceFixture /> :
   <main className="mx-auto max-w-md p-4">
     <h1 className="mb-4 text-xl font-semibold">团队工作台</h1>
     <SharedProjectsPanel port={port} openFeatures={p => { document.body.dataset.opened = p.projectId; }} />

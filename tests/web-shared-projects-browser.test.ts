@@ -45,13 +45,21 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  await browser?.close(); server?.stop(true);
-  if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
-    head: await git("rev-parse", "HEAD"), fixture: "synthetic injected SharedProjectsPort, not N1-N4 integration",
-    dirty: !!(await git("status", "--porcelain", "--", "web", "tests")),
-    fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"), shots: manifest,
-  }, null, 2), { mode: 0o600 });
-  rmSync(scratch, { recursive: true, force: true });
+  try {
+    const [, head, dirty] = await Promise.all([
+      browser?.close(), git("rev-parse", "HEAD"), git("status", "--porcelain", "--", "web", "tests"),
+    ]);
+    if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
+      head, specRev: 1, round: 0,
+      fixture: "synthetic injected SharedProjectsPort and synthetic choice card; not N1-N4 integration",
+      summary: "Isolated forms, permissions, explicit CAS retry and explicit local selection; production combination pending dependencies and PM acceptance",
+      dirty: !!dirty,
+      fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"), shots: manifest,
+    }, null, 2), { mode: 0o600 });
+  } finally {
+    server?.stop(true);
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 async function screenshot(page: Page, name: string) {
@@ -121,6 +129,69 @@ test("ordinary member has no owner actions and no create form", async () => {
       expect(await page.getByRole("button", { name, exact: true }).count()).toBe(0);
     }
     await screenshot(page, "member-dark-390");
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
+test("recommendation is selected in the DOM and clearing it disables confirmation", async () => {
+  const { page, errors } = await newPage(390, "?fixture=choice");
+  try {
+    const select = page.getByLabel("加入后对应的本机项目", { exact: true });
+    const confirm = page.getByRole("button", { name: "确认加入", exact: true });
+    await select.waitFor();
+    expect(await select.inputValue()).toBe("create");
+    expect(await confirm.isEnabled()).toBe(true);
+    expect(await page.locator("body").getAttribute("data-answers")).toBeNull();
+    await screenshot(page, "choice-default-390");
+    await select.selectOption("");
+    expect(await confirm.isDisabled()).toBe(true);
+    expect(await page.getByText("推荐选项已选中；", { exact: false }).count()).toBe(0);
+    await screenshot(page, "choice-empty-390");
+    await page.getByRole("button", { name: "相同选项的新卡", exact: true }).click();
+    expect(await select.inputValue()).toBe("create");
+    expect(await page.locator("body").getAttribute("data-answers")).toBeNull();
+    await select.selectOption("local-app");
+    await confirm.click();
+    expect(JSON.parse((await page.locator("body").getAttribute("data-answers"))!)).toEqual([
+      "[button:fixture-accept]", "[select:fixture-binding:local-app]",
+    ]);
+    expect(await confirm.isDisabled()).toBe(true);
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
+test("a card with no recommendation starts disabled; a replacement card resets selection", async () => {
+  const { page, errors } = await newPage(390, "?fixture=choice&recommended=none&theme=dark");
+  try {
+    const select = page.getByLabel("加入后对应的本机项目", { exact: true });
+    const confirm = page.getByRole("button", { name: "确认加入", exact: true });
+    await select.waitFor();
+    expect(await select.inputValue()).toBe("");
+    expect(await confirm.isDisabled()).toBe(true);
+    await select.selectOption("create");
+    await page.getByRole("button", { name: "替换合成卡", exact: true }).click();
+    expect(await select.inputValue()).toBe("local-app");
+    expect(await page.locator("body").getAttribute("data-answers")).toBeNull();
+    await page.getByRole("button", { name: "不加入", exact: true }).click();
+    expect(JSON.parse((await page.locator("body").getAttribute("data-answers"))!)).toEqual(["[button:fixture-decline]"]);
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
+test("an uncertain create resumes the same operation without exposing the error or creating twice", async () => {
+  const { page, errors } = await newPage(390, "?fixture=recovery");
+  try {
+    await page.getByRole("button", { name: "项目设置", exact: true }).click();
+    await page.getByLabel("显示名", { exact: true }).fill("待恢复项目");
+    await page.getByRole("button", { name: "创建项目", exact: true }).click();
+    const resume = page.getByRole("button", { name: "继续完成项目", exact: true });
+    await resume.waitFor();
+    expect(await page.getByRole("button", { name: "创建项目", exact: true }).isDisabled()).toBe(true);
+    expect(await page.locator("body").innerText()).not.toContain("synthetic-sensitive-sentinel");
+    await resume.click();
+    await page.getByText("恢复已处理，请查看本机可用状态。", { exact: true }).waitFor();
+    expect(await page.getByLabel("显示名", { exact: true }).inputValue()).toBe("");
+    expect(JSON.parse((await page.locator("body").getAttribute("data-calls"))!)).toEqual(["create", "complete"]);
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
