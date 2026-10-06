@@ -4,18 +4,22 @@
  * 所以查询之后开的回合、排的槽、换的接线都会让申请按代次对不上被拒，两个申请最多受理一个（受理的那一刻循环就忙了）。
  * 受理只经 AcpTurnLoop.submitCommand 带 opId 排一个独占槽，不发 session/cancel、不重启、不改模型；同一个 opId 再来只回原记录，
  * 记录淘汰了也只回 op-expired（opId 本身一直留着），不重放。
+ * 两段受理（现行登记）：card_compact 核过后槽带 hold 占住调度器（prepared：不开别的回合，宿主状态冻住），回 bridge；bridge 重读台账登记
+ * 发 card_commit，这里再核登记 / 接线才放行 /compact，否则作废（槽结局 revoked，不进模型）。等不到确认 commitMs 后作废。
  * 新回合受理边界（admit）：任何还没开、会进模型的一轮之前（/compact 命令本身除外），硬线以上先压缩一次；这一段超线已经压过一次
  * 还在线上（压缩失败 / 取消 / 没到完成边界）就拒开、给原因，直到预算恢复（线下 usage、压缩完成边界、换会话 / 接线）。
  * 单测 tests/acp-card-context-host.test.ts。
  */
 import {
-  CARD_COMPACT_TEXT, CARD_REJECT_TEXT, cardCompactVerdict, cardStatus, hardLineGate, hardOver, parseCardCompactRequest,
-  type CardBinding, type CardCtxMode, type CardCtxSnapshot, type CardIdentity, type CardOpRecord, type UsageSample,
+  bindingReject, CARD_COMPACT_TEXT, CARD_REJECT_TEXT, cardCompactVerdict, cardStatus, hardLineGate, hardOver, parseBinding, parseCardCompactRequest,
+  type CardCtxMode, type CardReject, type CardCtxSnapshot, type CardIdentity, type CardOpRecord, type UsageSample,
 } from "./card-context.js";
 import type { AcpTurnLoop, AdmitHead, AdmitResult, SlotEnd } from "./turn.js";
 
-export const CARD_OPS = new Set(["card_context", "card_compact"]);
+export const CARD_OPS = new Set(["card_context", "card_compact", "card_commit"]);
 const OPS_KEPT = 50;
+/** prepared 之后等 bridge 确认的上限：bridge 回包 + 重读台账是毫秒级，超过就当确认丢了、作废 */
+const COMMIT_MS = 10_000;
 /** 预算恢复命令：用户 / 宿主自己的 /compact 不拦（拦了就永远恢复不了） */
 const isCompactCommand = (h: AdmitHead) => h.kind === "command" && /^\/compact(\s|$)/i.test(h.text.trim());
 
@@ -36,6 +40,8 @@ export interface CardHostDeps {
   identity: CardIdentity | null;
   mode: CardCtxMode;
   limits?: { idle?: number; hard?: number };
+  /** 单测注入：prepared 等确认的上限，缺省 COMMIT_MS */
+  commitMs?: number;
   now(): number;
   state(): CardHostState;
   log(msg: string): void;
@@ -50,6 +56,8 @@ export class CardContextHost {
   private readonly ops = new Map<string, CardOpRecord>();
   /** 受理过的全部 opId（完整记录淘汰了也留着）：防重放的依据，不随结果缓存一起删 */
   private readonly seen = new Set<string>();
+  /** prepared、等 bridge 确认的那一个（受理时调度器空闲，确认前占住调度器，所以最多一个） */
+  private pending: { r: CardOpRecord; release(ok: boolean): void; timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor(private readonly d: CardHostDeps) {}
 
@@ -93,13 +101,13 @@ export class CardContextHost {
   call(m: Record<string, unknown>): Record<string, unknown> | null {
     if (m.op === "card_context") {
       const opId = typeof m.opId === "string" ? m.opId : undefined;
-      const b = m.binding as CardBinding | null | undefined;
-      const binding = b && typeof b === "object" && typeof b.card === "string" && typeof b.sessionId === "string" ? { card: b.card, sessionId: b.sessionId } : null;
+      const binding = parseBinding(m.binding) ?? null;
       const s = this.snapshot();
       const status = cardStatus(s, this.d.now(), this.d.limits, opId === undefined ? undefined : this.ops.get(opId) ?? null, binding);
       return { ok: true, status: { ...status, admission: this.admission(s) } };
     }
     if (m.op === "card_compact") return this.request(m);
+    if (m.op === "card_commit") return this.commit(m);
     return null;
   }
 
@@ -114,11 +122,53 @@ export class CardContextHost {
     const now = this.d.now();
     const v = cardCompactVerdict(s, req, now, this.d.limits);
     if (!v.ok) return { ...reject(v.reason), ...(v.wouldFire ? { wouldFire: v.wouldFire } : {}), status: cardStatus(s, now, this.d.limits) };
-    const how = this.d.loop.submitCommand(CARD_COMPACT_TEXT, req.opId);
-    if (how !== "prompt") return reject(how === "duplicate" ? "queued" : "running"); // 判过空闲，到不了；防御：不留排队的压缩
+    let release!: (ok: boolean) => void;
+    const how = this.d.loop.submitCommand(CARD_COMPACT_TEXT, req.opId, new Promise<boolean>((res) => (release = res)));
+    if (how !== "prompt") { // 判过空闲，到不了；防御：排进去的那个轮到时作废，不留排队的压缩
+      release(false);
+      return reject(how === "duplicate" ? "queued" : "running");
+    }
     const r = this.record(req.opId, v.kind, s);
-    this.d.log(`卡片压缩已受理 ${req.opId}（${v.kind}，${s.usage?.used} tokens）`);
-    return { ok: true, accepted: true, kind: v.kind, op: { ...r } };
+    r.commit = "pending";
+    const timer = setTimeout(() => this.settle("commit-timeout"), this.d.commitMs ?? COMMIT_MS);
+    (timer as { unref?(): void }).unref?.();
+    this.pending = { r, release, timer };
+    this.d.log(`卡片压缩已占住调度器 ${req.opId}（${v.kind}，${s.usage?.used} tokens），等 bridge 按现行登记确认`);
+    return { ok: true, accepted: false, prepared: true, kind: v.kind, op: { ...r } };
+  }
+
+  /**
+   * 确认：bridge 收到 prepared 后在同一段同步代码里重读台账登记带来。宿主状态从 prepared 起冻住（调度器占着），这里再核登记、
+   * 接线 / 会话没换、适配器没自发开回合，才放行；任何一项不对就作废（不压缩）。同一个 opId 再确认只回已定的结论。
+   */
+  private commit(m: Record<string, unknown>): Record<string, unknown> {
+    const binding = parseBinding(m.binding);
+    if (typeof m.opId !== "string" || binding === undefined) return reject("bad-request");
+    if (m.hostId !== this.d.hostId) return reject("old-host");
+    const r = this.ops.get(m.opId);
+    if (!r || !r.commit) return reject(this.seen.has(m.opId) ? "op-expired" : "not-prepared");
+    if (r.commit === "committed") return { ok: true, accepted: true, duplicate: true, kind: r.kind, op: { ...r } };
+    if (r.commit !== "pending") return { ...reject(r.commit), op: { ...r } };
+    const s = this.snapshot();
+    const st = this.d.state();
+    const why: CardReject | null = s.mode === "off" ? "mode-off" : bindingReject(s, binding)
+      ?? (!s.capable ? "no-capability" : !s.registered ? "not-registered" : s.attachGen !== r.attachGen ? "old-attach"
+        : s.sessionId !== r.sessionId ? "old-session" : s.rotating ? "rotating" : st.adapterRunning ? "running" : null);
+    this.settle(why ?? "committed");
+    if (why) return { ...reject(why), op: { ...r } };
+    this.d.log(`卡片压缩已受理 ${r.opId}（${r.kind}）`);
+    return { ok: true, accepted: true, kind: r.kind, op: { ...r } };
+  }
+
+  /** 定下等确认的那一个：committed 放行 /compact，否则作废（槽结局 revoked） */
+  private settle(verdict: "committed" | CardReject): void {
+    const p = this.pending;
+    if (!p) return;
+    this.pending = null;
+    clearTimeout(p.timer);
+    p.r.commit = verdict;
+    if (verdict !== "committed") this.d.log(`卡片压缩 ${p.r.opId} 作废：${CARD_REJECT_TEXT[verdict]}`);
+    p.release(verdict === "committed");
   }
 
   /** 新回合受理边界的此刻状态（查询回包里给，供 bridge / 排障看）：blocked = 下一轮会被拒开的原因 */

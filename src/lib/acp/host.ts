@@ -33,10 +33,20 @@ export interface HostConfig {
   agentCmd: string[];
   env: Omit<AdapterEnvSpec, "channel">;
   runtime?: AcpRuntime; // 缺省 codex（host-runtime.ts）
-  /** CTXA 卡片会话：启动时由生命周期上下文给的强身份（卡号 + 启动登记的会话）与模式（缺省 observe）；不给 = 不是卡片会话，申请一律 no-capability */
+  /**
+   * CTXA 卡片会话：启动时由生命周期上下文给的强身份（卡号 + 启动登记的会话）与模式（缺省 observe）；不给就看启动环境
+   * （env.base 的 CLAUDESTRA_ACP_CARD / CLAUDESTRA_ACP_CARD_SESSION，由启动命令带进来，宿主不读台账）；都没有 = 不是卡片会话，申请一律 no-capability
+   */
   cardContext?: CardIdentity & { mode?: unknown; limits?: { idle?: number; hard?: number } };
   /** 单测注入：出站条目的重送退避、回合末等确认的上限、权限卡等多久（缺省用下面的 TIMINGS） */
   timings?: Partial<typeof TIMINGS>;
+}
+
+/** 启动环境里的卡片身份：卡号和启动登记的会话两项都有才算 */
+export function cardContextFromEnv(env: Record<string, string | undefined> | undefined): HostConfig["cardContext"] {
+  const card = env?.CLAUDESTRA_ACP_CARD?.trim();
+  const expectedSessionId = env?.CLAUDESTRA_ACP_CARD_SESSION?.trim();
+  return card && expectedSessionId ? { card, expectedSessionId } : undefined;
 }
 
 export interface HostDeps {
@@ -147,7 +157,7 @@ export class AcpHost {
       now: deps.now,
       log: deps.log,
     });
-    const cc = cfg.cardContext;
+    const cc = cfg.cardContext ?? cardContextFromEnv(cfg.env.base);
     this.card = new CardContextHost({
       hostId: this.hostId, loop: this.loop, mode: parseCardCtxMode(cc?.mode), limits: cc?.limits, now: () => deps.now?.() ?? Date.now(), log: deps.log,
       identity: cc?.card && cc.expectedSessionId ? { card: cc.card, expectedSessionId: cc.expectedSessionId } : null,

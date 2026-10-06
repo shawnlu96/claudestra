@@ -7,6 +7,8 @@
  * - 现行登记：申请还要带 bridge 在发出前那一刻按 agent-lifecycle-store.ts cardWorkerIndex（唯一读取方）取的本 agent 当前链接
  *   （binding = 卡号 + 链接记录的会话；bridge/acp-link.ts 填，调用方给不了）。没有链接 = 已退休 / 不是卡片 worker → not-bound；
  *   卡号或会话和宿主启动身份 / 此刻会话对不上 = 换绑 → binding-revoked。宿主不读台账。
+ *   发帧时的快照不够：两段受理——card_compact 核过一切后先占住调度器（prepared，宿主状态从此冻住），bridge 收到回包后在同一段同步代码里
+ *   重读登记、发 card_commit；宿主再核一次登记和接线才放行 /compact。受理的那一刻 = bridge 重读登记的那一刻，宿主状态与登记同时成立。
  * - opId 永不重放：完整记录只留最近 50 个，更早的只留 opId，再来回 op-expired（不当新申请）。
  * - usage 只认当前会话、当前接线代次、当前回合代次之内报的、且之后没发生过压缩的那一份；否则 unknown / stale，一律拒。
  * - 忙时：ACP 没有回合中途的预算能力（runtime budget），回合中途超线只能 blocked-capability。新回合受理边界（hardLineGate）：
@@ -85,7 +87,7 @@ export interface CardCompactRequest {
 export type CardReject =
   | "mode-off" | "bad-request" | "op-expired" | "no-capability" | "startup-mismatch" | "card-mismatch" | "not-bound" | "binding-revoked" | "not-registered" | "old-host" | "old-attach"
   | "old-session" | "turn-drift" | "rotating" | "compacting" | "running" | "queued" | "usage-unknown" | "usage-stale" | "under" | "idle-wait"
-  | "observe";
+  | "observe" | "not-prepared" | "commit-timeout";
 
 export const CARD_REJECT_TEXT: Record<CardReject, string> = {
   "mode-off": "卡片上下文边界已关（off）",
@@ -110,6 +112,8 @@ export const CARD_REJECT_TEXT: Record<CardReject, string> = {
   under: "没过线",
   "idle-wait": "过了闲置线但闲置还没满 3 分钟",
   observe: "observe 模式：只记结论，不压缩",
+  "not-prepared": "这个 opId 没有等确认的受理（没受理过、已确认或已作废）",
+  "commit-timeout": "受理后没等到 bridge 按现行登记确认：已作废，不压缩",
 };
 
 type CardKind = "idle" | "hard";
@@ -140,13 +144,26 @@ function overLine(s: CardCtxSnapshot, limits?: { idle?: number; hard?: number })
   return { kind: u.used >= l.hard ? "hard" : u.used >= l.idle ? "idle" : "under", used: u.used, ...l };
 }
 
+/** 现行登记核对：台账里有这个 agent 的链接，且卡号 = 启动身份的卡、会话 = 此刻接上的会话 */
+export function bindingReject(s: Pick<CardCtxSnapshot, "identity" | "sessionId">, binding: CardBinding | null): CardReject | null {
+  if (!binding) return "not-bound";
+  return binding.card !== s.identity?.card || binding.sessionId !== s.sessionId ? "binding-revoked" : null;
+}
+
+/** 帧里的 binding：缺 / null = null；形状不对 = undefined（bad-request） */
+export function parseBinding(b: unknown): CardBinding | null | undefined {
+  if (b == null) return null;
+  const x = b as Record<string, unknown>;
+  return typeof b === "object" && typeof x.card === "string" && x.card && typeof x.sessionId === "string" && x.sessionId ? { card: x.card, sessionId: x.sessionId } : undefined;
+}
+
 /** 身份核对：申请带的每一项都要和此刻的宿主一致 */
 function identityReject(s: CardCtxSnapshot, r: CardCompactRequest): CardReject | null {
   if (!s.capable || !s.identity) return "no-capability";
   if (s.identity.expectedSessionId !== s.sessionId) return "startup-mismatch";
   if (r.card !== s.identity.card) return "card-mismatch";
-  if (!r.binding) return "not-bound";
-  if (r.binding.card !== s.identity.card || r.binding.sessionId !== s.sessionId) return "binding-revoked";
+  const bound = bindingReject(s, r.binding);
+  if (bound) return bound;
   if (!s.registered) return "not-registered";
   if (r.hostId !== s.hostId) return "old-host";
   if (r.attachGen !== s.attachGen) return "old-attach";
@@ -205,12 +222,12 @@ const isGen = (v: unknown): v is number => Number.isInteger(v) && (v as number) 
 /** acp_call 里的 card_compact 申请；缺任何一项 = null（宿主回 bad-request） */
 export function parseCardCompactRequest(m: Record<string, unknown>): CardCompactRequest | null {
   const { opId, card, expectedSessionId, hostId, attachGen, turnGen, slotGen } = m;
-  const b = m.binding as Record<string, unknown> | null | undefined;
-  if (b != null && (typeof b !== "object" || typeof b.card !== "string" || !b.card || typeof b.sessionId !== "string" || !b.sessionId)) return null;
+  const binding = parseBinding(m.binding);
+  if (binding === undefined) return null;
   if (typeof opId !== "string" || !OP_ID.test(opId)) return null;
   if (typeof card !== "string" || !card || typeof expectedSessionId !== "string" || !expectedSessionId || typeof hostId !== "string" || !hostId) return null;
   if (!isGen(attachGen) || !isGen(turnGen) || !isGen(slotGen)) return null;
-  return { opId, card, expectedSessionId, hostId, attachGen, turnGen, slotGen, binding: b ? { card: b.card as string, sessionId: b.sessionId as string } : null };
+  return { opId, card, expectedSessionId, hostId, attachGen, turnGen, slotGen, binding };
 }
 
 /** 一次已受理的压缩：受理、槽结局、压缩是否真的完成分开记 */
@@ -225,6 +242,11 @@ export interface CardOpRecord {
   outcome: "done" | "cancelled" | "failed" | "revoked" | null;
   /** 这一槽期间到过压缩完成边界 */
   compacted: boolean;
+  /**
+   * 两段受理（只有 card_compact 申请有；宿主自己的 gate 压缩不经 bridge）：pending = 已占住调度器、等 bridge 按现行登记确认；
+   * committed = 确认、/compact 已放行；其它 = 作废原因（登记撤销 / 换绑 / 等确认超时 / 状态变了），不压缩
+   */
+  commit?: "pending" | "committed" | CardReject;
 }
 
 /** 查询回包里给 bridge 的那一份（申请要原样带回的身份 + 结论） */

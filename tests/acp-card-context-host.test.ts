@@ -7,7 +7,7 @@ import { AcpTurnLoop, type PromptOutcome } from "../src/lib/acp/turn.ts";
 const MIN3 = 3 * 60_000;
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) {
+function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string; commitMs?: number } = {}) {
   let clock = 1_000_000;
   const prompts: string[] = [];
   const pending: ((o: PromptOutcome) => void)[] = [];
@@ -27,7 +27,7 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) 
     log: (m) => logs.push(m),
   });
   card = new CardContextHost({
-    hostId: "h1", loop, mode: opts.mode ?? "on", identity: { card: "CTXA", expectedSessionId: opts.expected ?? "s1" }, now: () => clock,
+    hostId: "h1", loop, mode: opts.mode ?? "on", commitMs: opts.commitMs, identity: { card: "CTXA", expectedSessionId: opts.expected ?? "s1" }, now: () => clock,
     state: () => state, log: (m) => logs.push(m),
   });
   card.noteAttach();
@@ -35,10 +35,17 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) 
   const finish = async (o: PromptOutcome = { kind: "done" }) => (pending.shift()!(o), await tick(), await tick());
   const binding = { card: "CTXA", sessionId: "s1" };
   const status = () => (card.call({ op: "card_context", binding }) as any).status;
-  const ask = (opId: string, over: Record<string, unknown> = {}) => {
+  /** 只发第一段（card_compact）：受理成功是 prepared，调度器占住、等确认 */
+  const prepare = (opId: string, over: Record<string, unknown> = {}) => {
     const s = status();
     return card.call({ op: "card_compact", opId, card: "CTXA", expectedSessionId: s.sessionId, hostId: s.hostId,
       attachGen: s.attachGen, turnGen: s.turnGen, slotGen: s.slotGen, binding, ...over }) as any;
+  };
+  const commit = (opId: string, b: unknown = binding) => card.call({ op: "card_commit", opId, hostId: "h1", binding: b }) as any;
+  /** 两段一起（bridge acpCardCompact 的做法）：prepared 了就按同一份登记确认 */
+  const ask = (opId: string, over: Record<string, unknown> = {}) => {
+    const p = prepare(opId, over);
+    return p.prepared ? commit(opId) : p;
   };
   /** 跑完一轮普通回合，回合内报 tokens，然后闲置 idleMs */
   const turn = async (tokens: number, idleMs = MIN3) => {
@@ -48,7 +55,7 @@ function rig(opts: { mode?: "on" | "observe" | "off"; expected?: string } = {}) 
     clock += idleMs;
   };
   return {
-    loop, card, state, prompts, logs, failures, stops, usage, finish, status, ask, turn, advance: (ms: number) => (clock += ms),
+    loop, card, state, prompts, logs, failures, stops, usage, finish, status, ask, prepare, commit, turn, advance: (ms: number) => (clock += ms),
     blockNextStop: (reason: string) => void (stopVerdict = { block: true, reason }),
   };
 }
@@ -59,6 +66,7 @@ describe("受理", () => {
     await r.turn(200_000);
     const res = r.ask("op-a");
     expect(res).toMatchObject({ ok: true, accepted: true, kind: "idle", op: { opId: "op-a", outcome: null, compacted: false } });
+    await tick();
     expect(r.prompts.at(-1)).toBe("/compact");
     expect(r.loop.busy).toBe(true);
     r.card.noteEntries([{ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "manual" } }]);
@@ -71,6 +79,7 @@ describe("受理", () => {
     const r = rig();
     await r.turn(250_000);
     r.ask("op-f");
+    await tick();
     await r.finish({ kind: "failed", failure: { kind: "error", key: "k", message: "boom" } });
     expect((r.card.call({ op: "card_context", opId: "op-f" }) as any).status.op).toMatchObject({ outcome: "failed", compacted: false });
     expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(1);
@@ -81,6 +90,7 @@ describe("受理", () => {
     await r.turn(250_000);
     r.ask("op-d");
     expect(r.ask("op-d")).toMatchObject({ ok: true, duplicate: true, op: { opId: "op-d" } });
+    await tick();
     await r.finish();
     expect(r.ask("op-d")).toMatchObject({ ok: true, duplicate: true, op: { outcome: "done" } });
     expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(1);
@@ -94,8 +104,10 @@ describe("受理", () => {
       binding: { card: "CTXA", sessionId: "s1" } };
     const a = r.card.call({ ...body, opId: "x1" }) as any;
     const b = r.card.call({ ...body, opId: "x2" }) as any;
-    expect(a.accepted).toBe(true);
+    expect(a.prepared).toBe(true);
     expect(b).toMatchObject({ ok: false, reason: "turn-drift" });
+    expect(r.commit("x1")).toMatchObject({ ok: true, accepted: true });
+    await tick();
     expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(1);
   });
 });
@@ -105,12 +117,65 @@ test("完整记录淘汰之后同一个 opId 再来：op-expired，不重放（r
   for (let i = 0; i <= 50; i++) {
     await r.turn(250_000);
     expect(r.ask(`request-${i}`)).toMatchObject({ accepted: true });
+    await tick();
     await r.finish();
     r.advance(MIN3);
   }
   await r.turn(250_000);
   expect(r.ask("request-0")).toMatchObject({ ok: false, reason: "op-expired" });
   expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(51);
+});
+
+describe("两段受理：prepared 占住调度器，确认时再核现行登记", () => {
+  test("prepared 之后台账退休 / 换卡 / 换会话：作废，不进模型，槽结局 revoked；调度器放开，后面的消息照常", async () => {
+    for (const [b, why] of [[null, "not-bound"], [{ card: "T-next", sessionId: "s1" }, "binding-revoked"], [{ card: "CTXA", sessionId: "s2" }, "binding-revoked"]] as const) {
+      const r = rig();
+      await r.turn(250_000);
+      expect(r.prepare("p1")).toMatchObject({ ok: true, prepared: true, accepted: false, op: { commit: "pending" } });
+      void r.loop.submit("during hold");
+      await tick();
+      expect(r.prompts).toEqual(["hi"]); // 占住期间不开别的回合
+      expect(r.commit("p1", b)).toMatchObject({ ok: false, reason: why, op: { commit: why } });
+      await tick();
+      expect(r.prompts).toEqual(["hi", "during hold"]);
+      expect((r.card.call({ op: "card_context", opId: "p1" }) as any).status.op).toMatchObject({ outcome: "revoked", commit: why });
+      expect(r.commit("p1")).toMatchObject({ ok: false, reason: why }); // 再确认只回已定的结论
+      expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(0);
+    }
+  });
+
+  test("等不到确认：commitMs 后作废，之后再确认也不压缩", async () => {
+    const r = rig({ commitMs: 5 });
+    await r.turn(250_000);
+    expect(r.prepare("p2")).toMatchObject({ prepared: true });
+    await new Promise((res) => setTimeout(res, 20));
+    expect(r.commit("p2")).toMatchObject({ ok: false, reason: "commit-timeout" });
+    expect(r.prompts.filter((p) => p === "/compact")).toHaveLength(0);
+    expect(r.loop.busy).toBe(false);
+  });
+
+  test("prepared 之后适配器重接 / 自发开回合：作废；确认成功再确认回 duplicate；没 prepared 的 opId：not-prepared", async () => {
+    const r = rig();
+    await r.turn(250_000);
+    r.prepare("p3");
+    r.card.noteAttach();
+    expect(r.commit("p3")).toMatchObject({ ok: false, reason: "old-attach" });
+    const q = rig();
+    await q.turn(250_000);
+    q.prepare("p4");
+    q.state.adapterRunning = true;
+    expect(q.commit("p4")).toMatchObject({ ok: false, reason: "running" });
+    q.state.adapterRunning = false;
+    const o = rig();
+    await o.turn(250_000);
+    o.prepare("p5");
+    expect(o.commit("p5")).toMatchObject({ ok: true, accepted: true, op: { commit: "committed" } });
+    expect(o.commit("p5")).toMatchObject({ ok: true, accepted: true, duplicate: true });
+    await tick();
+    expect(o.prompts.filter((p) => p === "/compact")).toHaveLength(1);
+    expect(o.commit("nope")).toMatchObject({ ok: false, reason: "not-prepared" });
+    expect(o.card.call({ op: "card_commit", opId: "p5", hostId: "h-old", binding: { card: "CTXA", sessionId: "s1" } })).toMatchObject({ ok: false, reason: "old-host" });
+  });
 });
 
 describe("拒绝（不重放、不降级为普通 slash）", () => {

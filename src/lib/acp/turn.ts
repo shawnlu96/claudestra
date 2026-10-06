@@ -59,7 +59,7 @@ export interface AdmitHead { kind: "prompt" | "nudge" | "command" | "op"; text: 
 export type AdmitResult = { text: string; opId: string } | { block: string } | null;
 
 /** 独占槽：command = 斜杠命令原样一轮；op = 编排器的一轮普通 prompt（如保存交接）。都不和相邻 prompt 拼，在跑时入站不 steer */
-type Owned = { kind: "command" | "op"; text: string; opId?: string; gen: number };
+type Owned = { kind: "command" | "op"; text: string; opId?: string; gen: number; hold?: Promise<boolean> };
 export type SlotOutcome = PromptOutcome["kind"] | "revoked";
 export interface SlotEnd { opId: string; gen: number; outcome: SlotOutcome }
 export type SlotState =
@@ -169,9 +169,13 @@ export class AcpTurnLoop {
     return this.slots.length;
   }
 
-  /** 斜杠命令要独占一轮 session/prompt；steering 会把它变成普通文字。opId 已有在排 / 在跑的槽 = duplicate，不入队 */
-  submitCommand(text: string, opId?: string): "prompt" | "queued" | "duplicate" {
-    return this.submitOwned("command", text, opId);
+  /**
+   * 斜杠命令要独占一轮 session/prompt；steering 会把它变成普通文字。opId 已有在排 / 在跑的槽 = duplicate，不入队。
+   * hold（CTXA 两段受理）：轮到它时先占住调度器、等 hold 落定再决定——true 才发命令，false 不进模型、槽结局 revoked、不报 Stop；
+   * 占住期间不开别的回合（入站照常排队）。
+   */
+  submitCommand(text: string, opId?: string, hold?: Promise<boolean>): "prompt" | "queued" | "duplicate" {
+    return this.submitOwned("command", text, opId, hold);
   }
 
   /** 编排器的一轮普通 prompt（保存交接等）：独占一轮，不和前后的入站拼 */
@@ -179,10 +183,10 @@ export class AcpTurnLoop {
     return this.submitOwned("op", text, opId);
   }
 
-  private submitOwned(kind: Owned["kind"], text: string, opId?: string): "prompt" | "queued" | "duplicate" {
+  private submitOwned(kind: Owned["kind"], text: string, opId?: string, hold?: Promise<boolean>): "prompt" | "queued" | "duplicate" {
     if (opId && this.liveSlot(opId)) return "duplicate";
     const idle = !this.busy;
-    this.slots.push({ kind, text, gen: ++this.gen, ...(opId ? { opId } : {}) });
+    this.slots.push({ kind, text, gen: ++this.gen, ...(opId ? { opId } : {}), ...(hold ? { hold } : {}) });
     this.pump();
     return idle ? "prompt" : "queued";
   }
@@ -337,6 +341,11 @@ export class AcpTurnLoop {
         // 单轮出意外（IO 实现抛错）只记日志：调度器停了，排着的消息就永远出不去
         for (let p: Pick | null = first; p; p = this.next()) {
           this.current = p;
+          if (owned(p) && p.hold && !(await p.hold.catch((e) => (this.log(`两段受理等确认出错，按作废：${errText(e)}`), false)))) {
+            this.current = null; // 两段受理没确认：不进模型、不报 Stop，也不算开过回合
+            this.endSlot(p, "revoked");
+            continue;
+          }
           if (p.kind !== "blocked") this.turns++; // 拒开的没进模型，不算开过回合
           const kind = await this.run(p).catch((e) => (this.log(`回合调度出错：${errText(e)}`), "failed" as const));
           this.current = null;

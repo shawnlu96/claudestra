@@ -11,7 +11,8 @@
  * 权限卡、额度卡的按钮都带这张卡的代际（每张新卡新生成，不复用）：作答先按代际原子认领，旧卡、认领过的一律 409、零授权；
  * 权限还要经宿主确认它仍在等才算答上。只认这个频道当前登记的那条连接发来的帧。tests/acp-link.test.ts。
  * CTXA 卡片压缩（acpCardContext / acpCardCompact）走同一条 acp_call；旧宿主不认这两个 op = unavailable，绝不降级成普通 slash。
- * 每次发出前在同一段同步代码里按 cardWorkerIndex（唯一读取方）取本 agent 的现行登记带给宿主（binding），宿主受理时核对。
+ * 每次发出前在同一段同步代码里按 cardWorkerIndex（唯一读取方）取本 agent 的现行登记带给宿主（binding），宿主受理时核对；
+ * 申请分两段：宿主 prepared（占住调度器）后，这里收到回包的同一段同步代码里重读登记、发 card_commit，宿主再核一次才压缩。
  */
 import { randomBytes } from "node:crypto";
 import type { Client } from "discord.js";
@@ -261,34 +262,31 @@ export type CardUnavailable = {
   ok: false; reason: "offline" | "not-acp" | "old-host" | "bad-reply" | "uncertain-prior" | "uncertain-full" | "in-flight" | "uncertain"; error: string;
 };
 export type CardCompactResult =
-  | { ok: true; accepted: boolean; duplicate: boolean; op: CardOpRecord }
-  | { ok: false; reason: string; error: string; wouldFire?: string; status?: CardCtxStatus }
+  | { ok: true; accepted: boolean; duplicate: boolean; prepared?: true; op: CardOpRecord }
+  | { ok: false; reason: string; error: string; wouldFire?: string; status?: CardCtxStatus; op?: CardOpRecord }
   | CardUnavailable;
 
 /**
  * 结果不明（超时 / 断线 / 回包对不上）的申请：同一个 opId 永不再发（查到结局也不），只能按 opId 查；在途的也不发第二次。
- * 值是申请指向的 hostId。按频道计数，一个频道满了只清「指向的宿主已不是这个频道当前宿主」的（重发也会被新宿主按 old-host 拒，没有重放风险）；
- * 清完仍满就拒新申请（uncertain-full），绝不删仍可能被当前宿主受理的那几条。
+ * 不重发的标记永不删（bridge 认不出「当前宿主」是谁——条目索引、hostId 都可能是旧的，宿主也可能重连回来），
+ * 一个频道攒满 CARD_UNCERTAIN_KEPT 条就拒新申请（uncertain-full），不腾位置。
  */
-const cardUncertain = new Map<string, { channelId: string; hostId: string }>();
+const cardUncertain = new Map<string, number>();
 const cardInFlight = new Set<string>();
 const CARD_UNCERTAIN_KEPT = 500;
 const cardKey = (channelId: string, opId: string) => `${channelId}\0${opId}`;
 const unavailable = (reason: CardUnavailable["reason"], error: string): CardUnavailable => ({ ok: false, reason, error });
-/** 频道当前宿主的 hostId（最近一批出站条目带的）；不知道 = null */
-const currentHostOf = (channelId: string): string | null => entrySeqs.get(channelId)?.hostId ?? null;
-
-/** 这个频道还挂着几条结果不明的申请；满了先清指向旧宿主的 */
-function uncertainLeft(channelId: string): number {
-  const mine = [...cardUncertain].filter(([, v]) => v.channelId === channelId);
-  if (mine.length < CARD_UNCERTAIN_KEPT) return mine.length;
-  const cur = currentHostOf(channelId);
-  for (const [k, v] of mine) if (cur && cur !== v.hostId) cardUncertain.delete(k);
-  return [...cardUncertain.values()].filter((v) => v.channelId === channelId).length;
+const uncertainLeft = (channelId: string): number => cardUncertain.get(channelId) ?? 0;
+const cardUncertainKeys = new Set<string>();
+function markUncertain(channelId: string, key: string): void {
+  if (cardUncertainKeys.has(key)) return;
+  cardUncertainKeys.add(key);
+  cardUncertain.set(channelId, uncertainLeft(channelId) + 1);
 }
 
 /**
- * 本频道 agent 此刻在台账里的卡片登记（cardWorkerIndex，唯一读取方）：带卡号和会话的第一条链接；没有 = null（宿主拒 not-bound）。
+ * 本频道 agent 此刻在台账里的卡片登记（cardWorkerIndex，唯一读取方，只含有效登记）：带卡号和会话的链接恰好一组才算；
+ * 没有、或有几组不同的（冲突，不猜哪条是现行的）= null（宿主拒 not-bound）。
  * 同步读：调用方在发帧的同一段代码里调，中间没有 await。读不到台账也是 null（宁拒不放）。
  */
 function liveCardBinding(channelId: string): CardBinding | null {
@@ -297,8 +295,8 @@ function liveCardBinding(channelId: string): CardBinding | null {
   try {
     const db = ledgerDb();
     const w = db ? cardWorkerIndex(db).get(agent) : undefined;
-    const l = w?.links.find((x) => x.taskId && x.sessionId);
-    return l ? { card: l.taskId!, sessionId: l.sessionId! } : null;
+    const ls = new Map((w?.links ?? []).filter((x) => x.taskId && x.sessionId).map((x) => [`${x.taskId}\0${x.sessionId}`, { card: x.taskId!, sessionId: x.sessionId! }]));
+    return ls.size === 1 ? [...ls.values()][0] : null;
   } catch {
     return null;
   }
@@ -319,19 +317,28 @@ export async function acpCardContext(channelId: string, opId?: string): Promise<
   return { ok: true, status: st };
 }
 
-/** 申请卡片压缩：身份原样带上查询时看到的；宿主在受理动作的同一段里核对。不明的结局记下，同一个 opId 不再发 */
+/**
+ * 申请卡片压缩：身份原样带上查询时看到的；宿主在受理动作的同一段里核对、占住调度器回 prepared；这里收到回包的同一段同步代码里重读登记、
+ * 发 card_commit，宿主再核登记才压缩（登记在两帧之间退休 / 换绑 = 作废）。任何一段结果不明都记下，同一个 opId 不再发。
+ */
 export async function acpCardCompact(channelId: string, req: Omit<CardCompactRequest, "binding">): Promise<CardCompactResult> {
   if (!isAcpChannel(channelId)) return unavailable("not-acp", "不是 ACP 宿主登记的频道");
   const key = cardKey(channelId, req.opId);
   if (cardInFlight.has(key)) return unavailable("in-flight", `op ${req.opId} 还在等宿主回`);
-  if (cardUncertain.has(key)) return unavailable("uncertain-prior", `op ${req.opId} 上次结果不明：按 opId 查结局，不再发同一个申请`);
+  if (cardUncertainKeys.has(key)) return unavailable("uncertain-prior", `op ${req.opId} 上次结果不明：按 opId 查结局，不再发同一个申请`);
   if (uncertainLeft(channelId) >= CARD_UNCERTAIN_KEPT) return unavailable("uncertain-full", "结果不明的申请太多、都还指向当前宿主：先按 opId 查清，不再发新申请");
   cardInFlight.add(key);
   try {
+    const lost = (out: CardCompactResult) => {
+      if (out.ok === false && (out.reason === "uncertain" || out.reason === "bad-reply")) markUncertain(channelId, key);
+      return out;
+    };
     const r = await acpCall(channelId, { op: "card_compact", ...req, binding: cardBindingOf(channelId) }); // 读登记和发帧同一段同步代码
-    const out = cardCompactReply(r, req);
-    if (out.ok === false && (out.reason === "uncertain" || out.reason === "bad-reply")) cardUncertain.set(key, { channelId, hostId: req.hostId });
-    return out;
+    const prep = cardCompactReply(r, req);
+    if (!prep.ok || !prep.prepared) return lost(prep);
+    // 宿主已占住调度器：此刻重读的登记和宿主冻住的状态同时成立，就在这一刻受理（读登记和发帧同一段同步代码）
+    const c = await acpCall(channelId, { op: "card_commit", opId: req.opId, hostId: req.hostId, binding: cardBindingOf(channelId) });
+    return lost(cardCompactReply(c, req));
   } finally {
     cardInFlight.delete(key);
   }
@@ -341,11 +348,14 @@ function cardCompactReply(r: CallResult, req: Omit<CardCompactRequest, "binding"
   if (!r.card) return r.uncertain ? unavailable("uncertain", r.error ?? "结果未确认") : unavailable("offline", r.error ?? "宿主不在线");
   const m = r.card;
   if (!r.ok) return typeof m.reason === "string"
-    ? { ok: false, reason: m.reason, error: String(m.error ?? m.reason), ...(m.wouldFire ? { wouldFire: String(m.wouldFire) } : {}), ...(m.status ? { status: m.status } : {}) }
+    ? {
+      ok: false, reason: m.reason, error: String(m.error ?? m.reason),
+      ...(m.wouldFire ? { wouldFire: String(m.wouldFire) } : {}), ...(m.status ? { status: m.status } : {}), ...(m.op ? { op: m.op } : {}),
+    }
     : unavailable("old-host", "宿主没宣布卡片压缩能力（旧宿主）");
   const op = m.op as CardOpRecord | undefined;
   if (!op || op.opId !== req.opId || op.hostId !== req.hostId) return unavailable("bad-reply", "宿主回的受理记录和申请对不上");
-  return { ok: true, accepted: m.accepted === true, duplicate: m.duplicate === true, op };
+  return { ok: true, accepted: m.accepted === true, duplicate: m.duplicate === true, ...(m.prepared === true ? { prepared: true as const } : {}), op };
 }
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */

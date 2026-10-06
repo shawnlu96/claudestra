@@ -22,13 +22,13 @@ afterEach(() => {
   for (const p of procs.splice(0)) p.stop();
 });
 
-function boot(cardContext: any) {
+function boot(cardContext: any, envExtra: Record<string, string> = {}) {
   const frames: any[] = [];
   const stops: any[] = [];
   let onFrame: (m: any) => void = () => {};
   let ready = false;
   let clock = 5_000_000;
-  const env = { base: { ...process.env }, bunBin: process.execPath, channelServer: join(REPO, "src/channel-server.ts"), mcpName: "claudestra", logsDir: tmpdir() };
+  const env = { base: { ...process.env, ...envExtra }, bunBin: process.execPath, channelServer: join(REPO, "src/channel-server.ts"), mcpName: "claudestra", logsDir: tmpdir() };
   host = new AcpHost(
     { channelId: "local-acp-card", agentName: "agent-acp-card", sessionId: SID, cwd: REPO, mcpName: "claudestra",
       agentCmd: [process.execPath, join(REPO, "scripts/acp-stub.ts")], env, cardContext },
@@ -82,7 +82,8 @@ describe("CTXA 卡片压缩（真宿主 + stub）", () => {
     h.advance(3 * 60_000);
     expect(await h.call({ op: "card_compact", opId: "stale-host", ...identity(st), hostId: "000000000000" })).toMatchObject({ ok: false, reason: "old-host" });
     expect(await h.call({ op: "card_compact", opId: "retired", ...identity(st), binding: null })).toMatchObject({ ok: false, reason: "not-bound" });
-    expect(await h.call({ op: "card_compact", opId: "go", ...identity(st) })).toMatchObject({ ok: true, accepted: true, kind: "idle" });
+    expect(await h.call({ op: "card_compact", opId: "go", ...identity(st) })).toMatchObject({ ok: true, prepared: true, kind: "idle" });
+    expect(await h.call({ op: "card_commit", opId: "go", hostId: st.hostId, binding })).toMatchObject({ ok: true, accepted: true, kind: "idle" });
     await until(() => h.stops.length === 2, "压缩那一轮 Stop");
     expect(h.boundaries()).toHaveLength(1);
     expect((await h.call({ op: "card_context", opId: "go" })).status.op).toMatchObject({ opId: "go", outcome: "done", compacted: true });
@@ -114,3 +115,14 @@ describe("CTXA 卡片压缩（真宿主 + stub）", () => {
     expect(await bad.call({ op: "card_compact", opId: "x", ...identity(st2) })).toMatchObject({ ok: false, reason: "startup-mismatch" });
   }, 30_000);
 });
+
+test("启动环境带卡片身份（CLAUDESTRA_ACP_CARD / _SESSION）：真宿主不传 cfg.cardContext 也有身份，默认 observe；缺一项 = 不是卡片会话", async () => {
+  const { cardContextFromEnv } = await import("../src/lib/acp/host.ts");
+  expect(cardContextFromEnv({ CLAUDESTRA_ACP_CARD: "CTXA" })).toBeUndefined();
+  expect(cardContextFromEnv(undefined)).toBeUndefined();
+  const h = boot(undefined, { CLAUDESTRA_ACP_CARD: "CTXA", CLAUDESTRA_ACP_CARD_SESSION: SID });
+  await until(h.ready, "宿主就绪");
+  const st = (await h.call({ op: "card_context", binding })).status;
+  expect(st).toMatchObject({ card: "CTXA", mode: "observe", sessionId: SID });
+  expect(st.verdict.reason).not.toBe("no-capability");
+}, 30_000);
