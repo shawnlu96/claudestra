@@ -64,17 +64,22 @@ export async function probeTurnAt(
  * 宿主按 ws 顺序先收消息再答查询，刚投的消息会算进 busy；查询途中 bridge 这边又有任何非后台事件（新回合被点亮）也不收。见 tests/turn-probe-acp.test.ts。
  */
 async function settleByHost(first: TurnState, input: TurnInput, agent: string, chatId: string, hostBusy: HostBusy): Promise<TurnState> {
-  // 按事件计数、不比时间戳：时间戳只到毫秒，同一毫秒点亮的新回合会被漏掉、被这里收成 done
+  // 按事件计数、不比时间戳：时间戳只到毫秒，同一毫秒点亮的新回合会被漏掉、被这里收成 done。
+  // 订阅要盖住 await 恢复后的同步判定：退订早于判定（如 .finally(off)）会在两者之间留出微任务空隙，新回合落进去就被 done 盖掉
   let moved = false;
   const off = subscribeEvents({ agents: namesOf(agent) }, (e) => void (moved ||= !e.type.startsWith("bg_task_")));
-  const busy = await hostBusy(chatId).finally(off);
-  if (busy !== false || moved) return first;
-  const stuckName = namesOf(agent).find((n) => getAgentStatus(n) === "thinking");
-  if (stuckName) {
-    console.log(`🩹 ${agent} 事件态卡在 thinking，ACP 宿主说没有回合在途：以宿主为准，收成 done`);
-    emitEvent({ agent: stuckName, chatId, type: "agent_status", data: { status: "done", trigger: "acp_host_idle" } });
+  try {
+    const busy = await hostBusy(chatId);
+    if (busy !== false || moved) return first;
+    const stuckName = namesOf(agent).find((n) => getAgentStatus(n) === "thinking");
+    if (stuckName) {
+      console.log(`🩹 ${agent} 事件态卡在 thinking，ACP 宿主说没有回合在途：以宿主为准，收成 done`);
+      emitEvent({ agent: stuckName, chatId, type: "agent_status", data: { status: "done", trigger: "acp_host_idle" } });
+    }
+    return turnState({ ...input, status: statusOf(agent) });
+  } finally {
+    off();
   }
-  return turnState({ ...input, status: statusOf(agent) });
 }
 
 /** 频道 → 窗口和运行时：master 固定是 master:0，其余从 registry 找；查不到窗口 = null */

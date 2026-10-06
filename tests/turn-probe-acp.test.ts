@@ -4,7 +4,7 @@
  * 场景：Stop 收成 done 后宿主又推来晚于 done 的条目，jsonl-watcher 把事件态点回 thinking。
  */
 import { beforeEach, describe, expect, test } from "bun:test";
-import { __resetEventBusForTest, emitEvent, getAgentStatus, isPostTurnActivity } from "../src/bridge/event-bus.js";
+import { __resetEventBusForTest, emitEvent, getAgentStatus, isPostTurnActivity, subscribeEvents } from "../src/bridge/event-bus.js";
 import { clearOpenedBy, flushHeld, type FlushDeps } from "../src/bridge/held-flush.js";
 import { HeldQueue } from "../src/bridge/held-queue.js";
 import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
@@ -78,6 +78,24 @@ describe("probeTurnAt：ACP 事件态卡 thinking 时以宿主为准", () => {
       return false;
     });
     expect(t.main).toBe("busy");
+    expect(getAgentStatus(AGENT)).toBe("thinking");
+  });
+
+  /** 新活动隔 depth 层微任务才发出：1 层落在判定前，2、3 层落在宿主答完到判定之间或判定之后 */
+  const later = (depth: number, fn: () => void): void => queueMicrotask(depth > 1 ? () => later(depth - 1, fn) : fn);
+
+  test.each([1, 2, 3])("宿主答完前后排进来的新活动（微任务交错 %i 层）：done 不会落在新活动之后、盖掉新回合", async (depth) => {
+    replayIncident();
+    const triggers: string[] = [];
+    const off = subscribeEvents({ agents: [AGENT] }, (e) => void triggers.push(String(e.data?.trigger)));
+    const t = await probeTurnAt(null, "codex", AGENT, CH, async () => {
+      later(depth, () => status("thinking", "delivery"));
+      return false;
+    });
+    await Bun.sleep(0);
+    off();
+    // 新活动在判定前到 = 不收（busy）；在判定后到 = 先 done 再 thinking。两种都不能是「delivery 之后又来 done」
+    expect(triggers).toEqual(t.main === "busy" ? ["delivery"] : ["acp_host_idle", "delivery"]);
     expect(getAgentStatus(AGENT)).toBe("thinking");
   });
 
