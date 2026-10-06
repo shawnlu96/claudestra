@@ -3,8 +3,9 @@
  * that has really happened goes back to auto through the existing `ledger workflow-resume` only (resumeCore, its CAS, pool / intent
  * checks and event); this file adds no second writer. Liftable today: deps_not_live, released only when every predecessor is really
  * verified (code: verified, or done after verified; ops / investigate: done) — planned, CI green, merge, live, cancelled or a PM-pinned
- * edge state never count — and only for the nodes bound to the manual entry: its edges at entry (a removed one needs a new
- * authorization) and a custom `解除：` that names nothing but those ids; any other condition in it (an owner go-ahead, …) stays manual.
+ * edge state never count — and only for the nodes bound to the manual entry: its edges at entry (one removed after entry needs a new
+ * authorization, re-adding it does not revive the old one) and a custom `解除：` that names nothing but those ids; any other condition
+ * in it (an owner go-ahead, …) or a release long enough to have been cut at its stored limit stays manual.
  * Safety refusals, owner / PM holds, questionnaires, materials and every other code stay with people.
  * Mode comes from CFG's one RecoveryPolicyPort (key manualStall): off = old behaviour, observe = one would-resume note per state
  * version (recordObserved), on = the scheduler identity runs the workflow-resume transaction with an authorization fingerprint, which
@@ -59,8 +60,12 @@ function edgesAtEntry(events: readonly LedgerEvent[], entrySeq: number): Map<str
   return edges;
 }
 
-/** Task ids joined by 、/，/和/与/及/and, optionally followed by verified / 上线 and 后 — nothing else is a checkable release. */
-const RELEASE_IDS = /^([A-Za-z0-9][\w.-]*(?:\s*(?:、|,|，|和|与|及|以及|and|&)\s*[A-Za-z0-9][\w.-]*)*)\s*(?:都|均|全部)?\s*(?:已|真实)?\s*(?:main\s*\/\s*verified|verified|上线)?\s*(?:后)?$/i;
+/** Between two ids: 、/，/和/与/及/& anywhere, `and` only as a whole word (an id such as standard keeps its letters). */
+const RELEASE_SEP = String.raw`\s*(?:、|,|，|和|与|以及|及|&)\s*|\s+and\s+`;
+/** Task ids joined by RELEASE_SEP, optionally followed by verified / 上线 and 后 — nothing else is a checkable release. */
+const RELEASE_IDS = new RegExp(String.raw`^([A-Za-z0-9][\w.-]*(?:(?:${RELEASE_SEP})[A-Za-z0-9][\w.-]*)*)\s*(?:都|均|全部)?\s*(?:已|真实)?\s*(?:main\s*\/\s*verified|verified|上线)?\s*(?:后)?$`, "i");
+/** manual-reason.ts stores `release` cut to this many chars; a release that long may have lost a trailing condition. */
+const RELEASE_STORED_MAX = 200;
 
 /**
  * The release nodes the manual entry is bound to. The code's default release binds the entry's own blocks edges; a custom
@@ -71,9 +76,10 @@ function releaseNodes(db: Database, task: LedgerTask, rec: ManualReasonRecord, a
   { ok: true; ids: string[] } | { ok: false; why: string } {
   const bound = [...atEntry.keys()];
   if (rec.release === manualReasonRecord(db, task, `${rec.code}: -`, []).release) return { ok: true, ids: bound };
+  if (rec.release.length >= RELEASE_STORED_MAX) return { ok: false, why: `自定义解除条件达到存档上限 ${RELEASE_STORED_MAX} 字，可能被截断（后面的条件看不到），留人工` };
   const m = RELEASE_IDS.exec(rec.release.trim());
   if (!m) return { ok: false, why: `自定义解除条件「${rec.release}」含无法结构化核验的条件，留人工` };
-  const ids = m[1].split(/\s*(?:、|,|，|和|与|以及|及|and|&)\s*/i).filter(Boolean);
+  const ids = m[1].split(new RegExp(RELEASE_SEP, "i")).filter(Boolean);
   const stray = ids.filter((id) => !atEntry.has(id));
   if (stray.length) return { ok: false, why: `解除条件点名的 ${stray.join("、")} 进 manual 时不是本卡前置，交 PM 核对` };
   return { ok: true, ids };
@@ -91,7 +97,9 @@ function depsReleased(db: Database, task: LedgerTask, rec: ManualReasonRecord, e
   const nodes = releaseNodes(db, task, rec, atEntry);
   if (!nodes.ok) return nodes;
   const edges = listDeps(db, task.project).filter((d) => d.to === task.id);
-  const gone = [...atEntry.keys()].filter((id) => !edges.some((e) => e.from === id));
+  // removed since entry = revoked for good, even if the same edge is added back: only a new manual entry re-authorizes
+  const removed = new Set(events.filter((e) => e.seq > entrySeq && e.kind === "dep" && e.data.op === "rm").map((e) => e.data.from));
+  const gone = [...atEntry.keys()].filter((id) => removed.has(id) || !edges.some((e) => e.from === id));
   if (gone.length) return { ok: false, why: `进 manual 时的前置 ${gone.join("、")} 已被删边 / 替换，旧理由不再授权，需 PM 重新授权` };
   for (const id of nodes.ids) {
     const n = getTask(db, id);
@@ -126,6 +134,11 @@ function cardBlock(db: Database, task: LedgerTask, events: readonly LedgerEvent[
   const merges = db.query("SELECT intentId, phase FROM scheduler_merges WHERE taskId = ? AND phase NOT IN ('merged','resolved')").all(task.id) as
     { intentId: string; phase: string }[];
   if (merges.length) return `合并未正式结清（${merges.map((m) => `${m.intentId}:${m.phase}`).join("、")}）`;
+  // a deploy journal still claimed / running / unknown is settled only by resolveDeployRun, never by cancelling the intent or unfreezing
+  const deploys = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()
+    ? db.query("SELECT intentId, phase FROM scheduler_deploys WHERE taskId = ? AND phase NOT IN ('deployed','resolved')").all(task.id) as
+      { intentId: string; phase: string }[] : [];
+  if (deploys.length) return `部署未正式结清（${deploys.map((d) => `${d.intentId}:${d.phase}`).join("、")}）`;
   const stray = strayPoolOrders(db, task.id);
   if (stray.length) return `池单还在外面（${stray.map((o) => o.orderId).join("、")}）`;
   const fake = events.find((e) => e.seq > entrySeq && e.kind === "review"

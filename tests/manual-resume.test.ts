@@ -170,8 +170,8 @@ describe("on: the release is bound to the manual entry's own nodes and condition
     expect(manualResumeVerdict(f.db, f.task(), wf(f)).ok).toBe(false);
     removeDep(f.db, f.at("owner"), { from: "T0", to: "T1", rev: 1 });
     await refusesWithNothingWritten(f, "T0 已被删边");
-    addDep(f.db, f.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 verified" }); // re-added: still bound to T0, still in spec
-    await refusesWithNothingWritten(f, "T0 在 spec");
+    addDep(f.db, f.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 verified" }); // re-added: the removal still revoked the entry
+    await refusesWithNothingWritten(f, "需 PM 重新授权");
   }));
 
   test("a default release whose entry edge was removed after its node verified still needs a new authorization", () => run(autoFixture(), async (f) => {
@@ -199,6 +199,82 @@ describe("on: the release is bound to the manual entry's own nodes and condition
     expect(resumes(f.db)).toHaveLength(1);
     expect(resumes(f.db)[0].data.manualResume).toMatchObject({ deps: [{ id: "T0" }, { id: "T2" }, { id: "T3" }] });
     expect(wf(f)).toMatchObject({ mode: "auto" });
+  }));
+});
+
+describe("r2 repro: release binding survives truncation, edge revocation and ids containing `and`", () => {
+  /** `id` blocks T1; T1 goes manual with a deps reason carrying `解除：<release>`; `id` then really verified. */
+  async function oneDep(f: F, id: string, release: string): Promise<void> {
+    createTask(f.db, f.at("owner"), { project: "p", id, title: id, kind: "code" });
+    addDep(f.db, f.at("owner"), { from: id, to: "T1", kind: "blocks", when: "前置 verified" });
+    expect(await wfSet(f, ["--reason-code", "deps_not_live", "--reason", `等前置；解除：${release}`])).toMatchObject({ ok: true });
+    await policy(f, "on");
+    verify(f, id);
+  }
+  const refuses = async (f: F, why: string) => {
+    expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: false, why: expect.stringContaining(why) });
+    const before = state(f);
+    expect((await tick(f)).filter((o) => o.action === "resumed")).toEqual([]);
+    await f.tick();
+    expect(state(f)).toEqual(before);
+    expect(wf(f)).toMatchObject({ mode: "manual" });
+  };
+
+  test("a release cut at the stored 200-char limit (owner go-ahead dropped) is never lifted", () => run(autoFixture(), async (f) => {
+    const id = `T${"x".repeat(190)}`;
+    await oneDep(f, id, `${id} verified 后还须 owner 明确放行`);
+    const rec = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.data.manualReason)!.data.manualReason as { release: string };
+    expect([rec.release.length, rec.release.includes("owner")]).toEqual([200, false]);
+    await refuses(f, "可能被截断");
+  }));
+
+  test("an entry edge removed after entry stays revoked even when the same edge is re-added", () => run(autoFixture(), async (f) => {
+    await oneDep(f, "T0", "T0 verified");
+    removeDep(f.db, f.at("owner"), { from: "T0", to: "T1", rev: 1 });
+    await refuses(f, "需 PM 重新授权");
+    addDep(f.db, f.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 verified" });
+    await refuses(f, "需 PM 重新授权");
+    expect(await wfSet(f, ["--reason-code", "deps_not_live", "--reason", "PM 重新授权；解除：T0 verified"])).toMatchObject({ ok: true }); // new entry
+    await tick(f);
+    expect(resumes(f.db)).toHaveLength(1);
+  }));
+
+  for (const id of ["standard", "candy", "AND-1"]) {
+    test(`a task id containing "and" (${id}) is one release node`, () => run(autoFixture(), async (f) => {
+      await oneDep(f, id, `${id} verified`);
+      expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: true });
+      await tick(f);
+      expect(resumes(f.db)).toHaveLength(1);
+    }));
+  }
+
+  test("`and` between ids is still a separator", () => run(autoFixture(), async (f) => {
+    createTask(f.db, f.at("owner"), { project: "p", id: "T2", title: "T2", kind: "code" });
+    addDep(f.db, f.at("owner"), { from: "T2", to: "T1", kind: "blocks", when: "T2 verified" });
+    await oneDep(f, "T0", "T0 and T2 verified");
+    await refuses(f, "T2 在 spec");
+    verify(f, "T2");
+    await tick(f);
+    expect(resumes(f.db)).toHaveLength(1);
+  }));
+
+  test("an unsettled deploy journal (unknown / claimed / running) refuses until formally resolved", () => run(autoFixture(), async (f) => {
+    await depsManual(f);
+    await policy(f, "on");
+    verify(f);
+    f.db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
+      VALUES ('m1', 'T1', 'p', 'merge_deploy', 'merge', 1, 1, 1, 1, NULL, 2, 'cancelled', 'merge', 1, 1)`).run();
+    f.db.query(`INSERT INTO scheduler_merges (intentId, taskId, project, prRef, expectedBranch, reviewedHead, requiredChecks, phase, createdAt, updatedAt)
+      VALUES ('m1', 'T1', 'p', '1', 'b', 'h', '[]', 'merged', 1, 1)`).run();
+    f.db.query(`INSERT INTO scheduler_deploys (intentId, taskId, project, prRef, mergeSha, phase, outcome, liveness, createdAt, updatedAt)
+      VALUES ('m1', 'T1', 'p', '1', 'sha', 'unknown', 'unknown', 'dead', 1, 1)`).run();
+    await refuses(f, "部署未正式结清");
+    for (const phase of ["claimed", "running"]) {
+      f.db.query("UPDATE scheduler_deploys SET phase = ?, outcome = NULL, liveness = NULL WHERE intentId = 'm1'").run(phase);
+      expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: false, why: expect.stringContaining(`m1:${phase}`) });
+    }
+    f.db.query("UPDATE scheduler_deploys SET phase = 'resolved' WHERE intentId = 'm1'").run();
+    expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: true });
   }));
 });
 
