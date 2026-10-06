@@ -1,8 +1,8 @@
 /**
  * dispatch-recovery-MODELXW2：未领的审查单，绑定会话在唤醒投递回执（done）之后的那一回合以策略拒审结束（会话 / head / 轮次 / specRev 都对得上）→ confirmed，
  * 交 watch() 现有失败分支。信号是 bridge 的回合失败卡（extra.failure / sessionId / failedAt），cyber 判定同监护，usage_policy 同 MODEL。
- * 关联不上或读不到 → suspected：不动，未领单报警正文带「疑似领单前拒审，未能确认」。observe 归不到单的同类拒审也先走这里，不提前退人工。
- * 只读；只在 modelOutcome on 下生效。tests/scheduler-refusal-unclaimed*.test.ts。
+ * 关联不上或读不到 → suspected：不动，未领单报警正文带「疑似领单前拒审，未能确认」。observe 归不到单、或 ACP 按认领时刻归给本单的同类拒审也先过这里。
+ * 只读台账；只在 modelOutcome on 下生效。tests/scheduler-refusal-unclaimed*.test.ts。
  */import type { Database } from "bun:sqlite";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { listAsks, type Ask } from "./ledger-asks.js";
@@ -67,18 +67,37 @@ function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: Se
  */
 export async function unclaimedRefusal(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef,
   seen: WorkerObservation): Promise<UnclaimedRefusal | null> {
-  if (seen.state === "result") return null; // observe 已给出本单结果：一行不读，原失败分支照旧
+  if (seen.state === "result" && !hostRefusal(seen)) return null; // observe 已给出本单结果：一行不读，原失败分支照旧
+  let pre: UnclaimedRefusal | null;
   try {
-    return await recognize(db, task, sent, ref, seen);
+    pre = await recognize(db, task, sent, ref, seen);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     // 读失败不猜成确认，也不让这一轮丢掉未领单报警：照旧报警，正文写明疑似
-    return { kind: "suspected", note: `${SUSPECT_NOTE}（信号读不到：${(e as Error).message.slice(0, 120)}）` };
+    pre = { kind: "suspected", note: `${SUSPECT_NOTE}（信号读不到：${(e as Error).message.slice(0, 120)}）` };
   }
+  if (pre?.kind === "suspected") demote(seen);
+  return pre;
+}
+
+/** 宿主报的策略拒审失败（ACP codexFailure 按 submitted 认领时刻归单，认领与真正发送之间的旧回合也会算进来）：同样要过关联 */
+const hostRefusal = (seen: WorkerObservation): boolean =>
+  seen.state === "result" && seen.outcome === "failed" && seen.failure.kind === "error" && isPolicyRefusal(seen.failure.message);
+
+/**
+ * 关联不上的宿主拒审不能当本单失败：就地把这次观测降成「归不到单的失败」（observe 每轮新建的对象），watch 于是不进失败分支、
+ * 不提前退人工（awaitsAssociation），照旧走带疑似的未领单报警。
+ */
+function demote(seen: WorkerObservation): void {
+  if (seen.state !== "result" || seen.outcome !== "failed") return;
+  const { failure } = seen;
+  const target = seen as Record<string, unknown>;
+  for (const k of Object.keys(target)) delete target[k];
+  Object.assign(target, { state: "unknown", reason: `宿主把策略拒审归给了本单，但关联不上`, failure });
 }
 
 async function recognize(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef, seen: WorkerObservation): Promise<UnclaimedRefusal | null> {
-  if (ref.role !== "reviewer" || sent.action !== "review" || seen.state === "result") return null;
+  if (ref.role !== "reviewer" || sent.action !== "review") return null;
   if (!sentAsWake(sent.receipt) || orderTakenSeq(db, sent.id) !== null) return null;
   const woke = getEventByDedup(db, `scheduler:${sent.id}:submitted`);
   if (!woke) return null;

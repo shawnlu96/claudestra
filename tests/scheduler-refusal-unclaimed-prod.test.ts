@@ -290,15 +290,17 @@ for (const c of [
   }, 120_000);
 }
 
-test("MODELXW2 认领与投递之间的旧回合拒审不算本单（复现 r2 wake-time）：只报未领单（疑似），不退休、不开 epoch", async () => {
-  const s = await setup();
+for (const acp of [false, true]) test(`MODELXW2 认领与投递之间的旧回合拒审不算本单（复现 ${acp ? "r3 wake-time：真实 codexFailure 归给本单" : "r2 wake-time"}）：只报未领单（疑似），不退休、不开 epoch`, async () => {
+  const s = await setup("on", acp);
   approve(s.f);
   // submitted 认领已写、worker.submit 之前，同绑定会话上旧回合的 cyber 拒审落账
   s.onSubmit(() => { refusalCard(s.f); });
   expect(await s.tick()).toMatchObject({ step: "sent" });
   const first = s.reviews().at(-1)!;
   s.wait(UNCLAIMED_ALARM_MS + 60_000);
-  // 旧代码：认领时刻当唤醒时刻 → confirmed → refusal_epoch，原审查绑定被退休
+  // acp：生产 codexFailure 按 submitted 认领时刻把这张卡归给本单（observe 给 result/failed）
+  if (acp) expect(codexFailure(s.f.db, "agent-rv-t1", "s-rv")).toMatchObject({ afterKey: first.id });
+  // 旧代码：认领时刻当唤醒时刻 → confirmed → refusal_epoch，原审查绑定被退休（r3 前 acp 变体照样 refusal_epoch）
   expect(await s.tick()).toMatchObject({ step: "waiting" });
   expect(s.ops("reviewer_swap")).toEqual([]);
   expect(s.ops("model_refusal_retry").length + s.ops("model_refusal_exempt").length).toBe(0);
