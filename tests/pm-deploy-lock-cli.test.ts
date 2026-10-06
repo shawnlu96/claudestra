@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { testChildEnv } from "./test-env.ts";
+import { main } from "../scripts/pm-deploy-lock.ts";
 
 const WRAPPER = resolve(import.meta.dir, "../scripts/pm-deploy-lock.ts");
 const BUN = process.execPath;
@@ -15,6 +16,7 @@ let root = "";
 let log = "";
 let fixture = "";
 let lockFile = "";
+let paths: Record<string, string> = {};
 let env: Record<string, string> = {};
 
 const FIXTURE_SRC = `
@@ -43,14 +45,15 @@ beforeEach(() => {
   fixture = join(root, "fake-deploy.ts");
   writeFileSync(fixture, FIXTURE_SRC);
   lockFile = join(state, "pm-deploy.lock");
-  env = testChildEnv({ HOME: root, TMPDIR: join(root, "tmp"), CLAUDESTRA_STATE_DIR: state });
+  paths = { HOME: root, TMPDIR: join(root, "tmp"), CLAUDESTRA_STATE_DIR: state };
+  env = testChildEnv(paths);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 interface Proc { proc: ReturnType<typeof Bun.spawn>; done: Promise<{ code: number; err: string }> }
 function wrap(label: string, waitSec: number, cmd: string[], extraEnv: Record<string, string> = {}): Proc {
   const proc = Bun.spawn([BUN, WRAPPER, "run", "--label", label, "--wait-sec", String(waitSec), "--", ...cmd], {
-    env: { ...env, ...extraEnv }, stdout: "pipe", stderr: "pipe",
+    env: testChildEnv({ ...paths, ...extraEnv }), stdout: "pipe", stderr: "pipe",
   });
   const done = (async () => {
     const err = await new Response(proc.stderr as ReadableStream).text();
@@ -142,7 +145,7 @@ describe("退出 / 信号传播与释放", () => {
     await until(() => lines().includes("enter orphan") && lockHeld() && !!record().child);
     const childPid = record().child.pid as number;
     w.proc.kill("SIGKILL");
-    await w.done;
+    await w.proc.exited; // 不等 stderr 读完:孤儿子进程还开着那根管道
     const blocked = await wrap("card-merge", 0.3, deploy("blocked", 10)).done;
     expect(blocked.code).toBe(75);
     expect(blocked.err).toContain(`child=${childPid}`);
@@ -153,6 +156,8 @@ describe("退出 / 信号传播与释放", () => {
   }, 30_000);
 
   test("label 不合法 / 用法错误:不执行", async () => {
+    expect(await main(["bogus"])).toBe(64);
+    expect(await main(["run", "--label", "deploy-full", "--wait-sec", "99999", "--", "true"])).toBe(64);
     expect((await wrap("bad label", 1, deploy("x", 10)).done).code).toBe(70);
     const p = Bun.spawn([BUN, WRAPPER, "run", "--label", "deploy-full"], { env, stdout: "pipe", stderr: "pipe" });
     expect(await p.exited).toBe(64);
