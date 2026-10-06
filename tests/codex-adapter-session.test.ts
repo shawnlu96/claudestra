@@ -12,6 +12,7 @@ import { testChildEnv } from "./test-env.ts";
 
 const rpc = (s: AcpSession) => (s as unknown as { rpc: { request(m: string, p: unknown): Promise<any>; notify(m: string, p: unknown): void } }).rpc;
 const NEW = { cwd: "/w", mcpServers: [] };
+const OTHER = { ...MODEL, id: "gpt-y", model: "gpt-y", displayName: "GPT Y", isDefault: false, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }] };
 
 describe("启动环境（B13、B15、B38）", () => {
   test("B38 INITIAL_AGENT_MODE 只认 4 个名字，认不出拒起；不设时同 2.1.0 用 agent", () => {
@@ -175,6 +176,54 @@ describe("会话代际（B56、I11、R24）", () => {
     await expect(rpc(h2.session).request("session/new", NEW)).rejects.toMatchObject({ code: -32600 });
   });
 
+  test("PR756-r1 回合还在跑时 session/new / resume 回 -32600、不建线程；旧回合照常收尾，busy 不残留，之后能再 new", async () => {
+    const h = harness();
+    await h.open("A");
+    const old = h.session.prompt("old");
+    await until(() => h.f.turn !== null, "turn/start");
+    const turn = h.f.turn!;
+    h.f.thread = "B";
+    await expect(rpc(h.session).request("session/new", NEW)).rejects.toMatchObject({ code: -32600 });
+    await expect(rpc(h.session).request("session/resume", { sessionId: "B", ...NEW })).rejects.toMatchObject({ code: -32600 });
+    expect([h.f.calls("thread/start").length, h.f.calls("thread/resume")]).toEqual([1, []]);
+    h.f.thread = "A";
+    h.f.complete(turn);
+    expect(await old).toEqual({ kind: "done" });
+    expect(h.server.turns.busy).toBe(false);
+    h.f.thread = "B";
+    await expect(rpc(h.session).request("session/new", NEW)).resolves.toMatchObject({ sessionId: "B" });
+  });
+
+  test("PR756-r1 切换进行中（thread/start 还没回）来的 prompt 回 -32600，不在要被换掉的线程上开回合", async () => {
+    const h = harness();
+    await h.open("A");
+    let startId = 0;
+    h.f.on("thread/start", (_p, id) => void (startId = id));
+    h.f.thread = "B";
+    const switching = rpc(h.session).request("session/new", NEW);
+    await until(() => startId > 0, "thread/start");
+    await expect(promptAs(h, "A")).rejects.toMatchObject({ code: -32600 });
+    h.f.reply(startId, { thread: { id: "B" }, model: "gpt-x", modelProvider: "fake", reasoningEffort: null });
+    await expect(switching).resolves.toMatchObject({ sessionId: "B" });
+    expect(h.f.calls("turn/start")).toEqual([]);
+  });
+
+  test("PR756-r1 回滚连模型状态一起换回：A 上选的 effort / 模型，new 出 B（gpt-x / medium）再用 A 回滚，A 的 turn/start 照旧", async () => {
+    const cases = [["reasoning_effort", "high", { model: "gpt-x", effort: "high" }], ["model", "gpt-y", { model: "gpt-y", effort: "low" }]] as const;
+    for (const [id, value, want] of cases) {
+      const h = harness();
+      h.f.on("model/list", () => ({ data: [MODEL, OTHER], nextCursor: null }));
+      await h.open("A");
+      expect(await h.session.setConfig(id, value)).toEqual({ ok: true });
+      h.f.thread = "B";
+      expect((await rpc(h.session).request("session/new", NEW)).sessionId).toBe("B");
+      h.f.thread = "A";
+      quickTurns(h);
+      expect(await promptAs(h, "A")).toEqual({ stopReason: "end_turn" });
+      expect(h.f.calls("turn/start").at(-1)).toMatchObject({ threadId: "A", ...want });
+    }
+  });
+
   test("R24④ 换会话之后旧线程迟到的事件被丢弃，不会提交到新会话", async () => {
     const h = await switched();
     quickTurns(h);
@@ -203,8 +252,6 @@ describe("会话代际（B56、I11、R24）", () => {
 });
 
 describe("配置项（B40–B42）", () => {
-  const OTHER = { ...MODEL, id: "gpt-y", model: "gpt-y", displayName: "GPT Y", isDefault: false, defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }] };
-
   test("B40 B42 model 和 reasoning_effort 两项；模型目录读完所有分页；当前模型不在目录里也列出来", async () => {
     const f = fakeApp();
     f.on("model/list", (p) => (p.cursor ? { data: [OTHER], nextCursor: null } : { data: [MODEL], nextCursor: "p2" }));

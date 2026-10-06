@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reviewMainCarryProof, type MainCarryInput } from "../src/lib/review-main-carry-proof.js";
+import { reviewMainCarryProof, singleMainCarryProof, type MainCarryInput } from "../src/lib/review-main-carry-proof.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { runBounded } from "../src/lib/run-bounded.js";
@@ -269,6 +269,42 @@ describe("MAINP1 local immutable main-carry proof", () => {
       await sh("config", "--unset", "diff.ignoreSubmodules");
       await sh("config", "--unset", "diff.relative");
     }
+  });
+  test("diff.submodule=log cannot collapse missing gitlinks with one short prefix into equal evidence", async () => {
+    // Neither object exists, so Git abbreviates both to the same seven characters under the log format.
+    const [reviewedLink, swapped] = ["1", "2"].map((tail) => `c0ffee0${"0".repeat(32)}${tail}`);
+    await at(oldHead);
+    await sh("update-index", "--add", "--cacheinfo", `160000,${reviewedLink},module`);
+    await sh("commit", "-qm", "reviewed missing gitlink"); const reviewed = await sh("rev-parse", "HEAD");
+    await sh("merge", "-q", "--no-edit", main1); const pure1 = await sh("rev-parse", "HEAD");
+    await sh("merge", "-q", "--no-edit", main2); const pure2 = await sh("rev-parse", "HEAD");
+    const swap = async (head: string, parents: string[]) => {
+      await at(head); await sh("update-index", "--cacheinfo", `160000,${swapped},module`);
+      return treeCommit(await sh("write-tree"), parents);
+    };
+    const evil1 = await swap(pure2, [reviewed, main2]), evil2 = await swap(pure2, [pure1, main2]);
+    await sh("config", "diff.submodule", "log");
+    try {
+      const shown = await Promise.all([reviewed, evil1].map((head) => sh("diff", "--no-color", `${main2}...${head}`)));
+      expect(shown[0]).toBe(shown[1]); // the fixture really reproduces identical abbreviated text
+      expect(shown[0]).toContain("Submodule module");
+      for (const run of [undefined, gitCommand]) {
+        expect(await singleMainCarryProof(work, reviewed, evil1, run)).toMatchObject({ ok: false, reason: expect.stringContaining("净 diff"), mainParent: main2 });
+        for (const evil of [evil1, evil2]) {
+          expect(await proof(evil, { oldHead: reviewed }, run)).toMatchObject({ ok: false, reason: expect.stringContaining("净 diff"), mainParent: main2 });
+        }
+        expect((await legacy(evil1, reviewed)).ok).toBe(false);
+        const ok = await proof(pure2, { oldHead: reviewed }, run);
+        expect(ok).toMatchObject({ ok: true, chain: [{ head: pure1, mainParent: main1 }, { head: pure2, mainParent: main2 }] });
+        expect(await singleMainCarryProof(work, pure1, pure2, run)).toMatchObject({ ok: true, mainParent: main2 });
+        expect((await legacy(pure1, reviewed)).ok).toBe(true);
+        if (!ok.ok) throw new Error(ok.reason);
+        const full = await sh("-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
+          "--binary", "--full-index", "--submodule=short", `${main2}...${pure2}`);
+        expect(full).toContain(`+Subproject commit ${reviewedLink}`); expect(full).toContain("new file mode 160000");
+        expect(ok.diffHash).toBe(createHash("sha256").update(`${full}\n`).digest("hex"));
+      }
+    } finally { await sh("config", "--unset", "diff.submodule"); }
   });
   test("invalid UTF-8 text bytes cannot collapse to equal replacement characters", async () => {
     await at(oldHead); file("raw", Buffer.from([0xff, 10])); const reviewed = await commit("raw bytes");

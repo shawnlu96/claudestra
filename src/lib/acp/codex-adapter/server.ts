@@ -2,6 +2,7 @@
  * 自研 Codex ACP 适配器的 ACP 服务端（stdin/stdout 对宿主，app-server.ts 对 codex）。方法映射见设计 §2.1：
  * - initialize：握手只做一次（宿主 fork 前会再问一次能力），回 ACP v1、resume / fork、steering（B1、B2、B5）；
  * - session/new|resume|fork：共用会话变更闸（session-state.ts），new / resume 提交后进入待确认；失败带 previousSessionClosed（B56）；
+ *   new / resume 在回合没收尾时直接回 -32600、不自动停旧回合：换掉线程后旧回合的收尾事件被线程过滤丢掉，旧 prompt 永远兑现不了、busy 也清不掉；
  * - session/prompt / _session/steering：回包经 ctx 在收尾时写（turns.ts），处理器返回的 promise 等到写完才兑现；
  * - 其余 ACP 方法回 -32601（rpc 缺省）；app-server 的反向请求在 CX-3 接授权卡之前一律按拒绝答，绝不挂起。
  * 线程过滤（B51、I7）：threadId 不是当前会话的通知不进回合状态机；缺 threadId 作废连接（I10）。tests/codex-adapter-session.test.ts。
@@ -33,6 +34,7 @@ export interface ServerDeps {
 }
 
 const AUTH_REQUIRED = -32000;
+const INVALID_REQUEST = -32600;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
 const MODEL_PAGES_MAX = 20;
@@ -44,7 +46,6 @@ export class CodexAcpServer {
   private readonly acp: RpcPeer;
   private readonly session = new SessionState();
   private caps: HostCaps = { air: false, outputDelta: false, compaction: false };
-  private models: ModelState | null = null;
   private handshake: Promise<unknown> | null = null;
   private stopped = false;
   private warnedThreads = false;
@@ -53,7 +54,7 @@ export class CodexAcpServer {
     const acp = (this.acp = createRpcPeer(wire, { log: deps.log }));
     this.turns = new Turns({
       app: deps.app, session: this.session, caps: () => this.caps, emit: (u) => this.emit(u), fatal: deps.fatal, log: deps.log,
-      policy: () => ({ ...deps.cfg.policy, summary: "auto", effort: this.models?.effort ?? null, model: this.models?.model ?? "" }),
+      policy: () => ({ ...deps.cfg.policy, summary: "auto", effort: this.session.models?.effort ?? null, model: this.session.models?.model ?? "" }),
       reconcile: deps.reconcile, onCommand: deps.onCommand, timings: deps.timings,
     });
     acp.onRequest("initialize", (p: Rec) => this.initialize(p));
@@ -117,7 +118,8 @@ export class CodexAcpServer {
     if (Array.isArray(p?.mcpServers) && p.mcpServers.length) throw new RpcError(INVALID_PARAMS, "不接受 ACP 的 mcpServers：channel-server 走 CODEX_CONFIG（B14）");
     const source = str(p?.sessionId);
     if (kind !== "new" && !source) throw new RpcError(INVALID_PARAMS, `session/${kind} 缺 sessionId`);
-    const release = this.session.acquire();
+    if (kind !== "fork" && this.turns.busy) throw new RpcError(INVALID_REQUEST, `还有回合没收尾，不能 session/${kind}（先 cancel 并等它结束）`);
+    const release = this.session.acquire(kind !== "fork");
     try {
       const config = threadConfig(this.deps.cfg.overlay, cwd, this.deps.controlMark);
       if (kind === "new") {
@@ -141,8 +143,7 @@ export class CodexAcpServer {
   }
 
   private adopt(id: string, models: ModelState, withId: boolean): Rec {
-    this.session.commit(id);
-    this.models = models;
+    this.session.commit(id, models);
     return { ...(withId ? { sessionId: id } : {}), configOptions: configOptions(models) };
   }
 
@@ -180,6 +181,7 @@ export class CodexAcpServer {
     this.live();
     const blocks: unknown[] = Array.isArray(p?.prompt) ? p.prompt : [];
     if (!blocks.length || blocks.some((b: any) => b?.type !== "text" || typeof b.text !== "string")) throw new RpcError(INVALID_PARAMS, "只收 text 块");
+    if (this.session.switching) throw new RpcError(INVALID_REQUEST, "会话切换还在进行，等它回包再发");
     this.touch(p?.sessionId);
     const text = blocks.map((b: any) => b.text as string).join("\n");
     return new Promise((resolve) => run(text, { respond: (r) => (ctx.respond(r), resolve()), fail: (e) => (ctx.fail(e), resolve()) }));
@@ -194,10 +196,10 @@ export class CodexAcpServer {
   private setConfig(p: Rec): Rec {
     this.live();
     this.touch(p?.sessionId);
-    if (!this.models) throw new RpcError(INVALID_PARAMS, "还没有会话");
-    const next = applyConfig(this.models, p?.configId, p?.value);
+    if (!this.session.models) throw new RpcError(INVALID_PARAMS, "还没有会话");
+    const next = applyConfig(this.session.models, p?.configId, p?.value);
     if (typeof next === "string") throw new RpcError(INVALID_PARAMS, next);
-    this.models = next;
+    this.session.models = next;
     return { configOptions: configOptions(next) };
   }
 
