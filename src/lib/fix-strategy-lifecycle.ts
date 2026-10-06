@@ -103,7 +103,8 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
     const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
     const create = async () => {
       deps.active(); convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
-      const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`, ...runtime);
+      const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`,
+        "--card", task.id, "--card-role", role === "author" ? "author" : "other", ...runtime);
       deps.active(); return result;
     };
     const created = family === "codex" ? await withCodexSlot(create, { registryPath: deps.registryPath, lockPath: deps.slotLockPath, ledgerPath: db.filename }) : await create();

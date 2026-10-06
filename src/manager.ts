@@ -2334,7 +2334,8 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags);
+    else await (await import("./manager/create-lifecycle.js")).withCardRegistration(c.name, c.card, c.teamFlags.role, () => // 卡 worker 登记（LIFE1）
+      cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags));
     break;
   }
 
