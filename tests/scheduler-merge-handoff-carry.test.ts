@@ -5,7 +5,7 @@
  * that fails → held and read again. The carry check itself runs on real git, before and after the owner's merge.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -120,7 +120,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
         } finally { f.close(); }
       }
     }
-  });
+  }, 30_000); // six full fixtures in one case
 
   test("a hop after an accepted one that changes the PR still goes to PM; the first hop stays on the ledger", async () => {
     const h = await handed(), { f } = h;
@@ -189,6 +189,30 @@ describe("HOF1 ghPrState asks for a carry only when the followed head moved", ()
     }
     expect(await ghPrState(gh("OPEN", H2, null), () => { throw new Error("not asked before the handoff"); })(PR)).toEqual({ state: "OPEN", head: H2, mergeSha: null });
     expect(asked).toHaveLength(2);
+  });
+});
+
+describe("HOF1 handoffCarry vouches only with an origin on github.com itself", () => {
+  test("look-alike hosts, a path or userinfo naming github.com, other ports or schemes are refused before any fetch", async () => {
+    const tryOrigin = async (url: string) => {
+      const calls: string[][] = [];
+      const command: typeof runBounded = async (argv) => {
+        calls.push(argv);
+        if (argv.includes("config")) return { code: 0, stdout: `${url}\n`, stderr: "", timedOut: false };
+        throw new Error("fetch reached");
+      };
+      const r = await handoffCarry("/nonexistent", command)(PR, H1, H2, null).catch((e: Error) => e.message);
+      return { r, fetched: calls.some((a) => a.includes("fetch")) };
+    };
+    for (const url of ["git@notgithub.com:example/repo.git", "https://evilgithub.com/example/repo.git", "https://github.com@evil.com/example/repo.git",
+      "https://evil.com/github.com/example/repo.git", "git@evil.com:github.com/example/repo.git", "http://github.com/example/repo.git",
+      "https://github.com:8443/example/repo.git", "https://github.com/example/repo/extra.git", "https://github.com/example/other.git", "file:///github.com/example/repo"]) {
+      expect(await tryOrigin(url)).toEqual({ r: { ok: false, reason: "repoDir 的 origin 不是 PR 仓库 example/repo" }, fetched: false });
+    }
+    for (const url of ["git@github.com:Example/repo.git", "https://github.com/example/repo", "https://github.com/example/repo.git/",
+      "ssh://git@github.com/example/repo.git", "https://x-access-token@github.com/Example/Repo.git"]) {
+      expect(await tryOrigin(url)).toEqual({ r: "fetch reached", fetched: true });
+    }
   });
 });
 
@@ -321,5 +345,43 @@ describe("HOF1 handoffCarry against a real repository, before and after the owne
     const landed = await sh("rev-parse", "HEAD");
     await sh("push", "-q", "origin", "main");
     expect(await carry()(PR, pr, updated, landed)).toMatchObject({ ok: true, mainParent: main, mainHead: main, basis: "auto-merge" });
+  }, GIT_MS);
+  /** The owner's update-branch of `branch` with main, plus `smuggle` folded into the merge commit; returns the pushed head. */
+  const evilMerge = async (branch: string, main: string, smuggle: () => Promise<void>) => {
+    await sh("checkout", "-q", branch);
+    await sh("merge", "-q", "--no-commit", "--no-ff", main);
+    await smuggle();
+    await sh("commit", "-q", "--no-edit");
+    await sh("push", "-q", "origin", branch);
+    return sh("rev-parse", "HEAD");
+  };
+
+  test("a gitlink swapped in the merge commit is refused although the reviewed .gitmodules says ignore=all", async () => {
+    await sh("checkout", "-q", "main");
+    await sh("checkout", "-q", "-b", "dep-pr");
+    writeFileSync(join(work, ".gitmodules"), '[submodule "dep"]\n\tpath = dep\n\turl = ./dep\n\tignore = all\n');
+    await sh("add", ".gitmodules");
+    await sh("update-index", "--add", "--cacheinfo", `160000,${m1},dep`);
+    await sh("commit", "-q", "-m", "PR pins dep at m1");
+    const pr = await sh("rev-parse", "HEAD");
+    await sh("push", "-q", "origin", "dep-pr");
+    const main = await mainCommit("later.txt", "l\n");
+    const evil = await evilMerge("dep-pr", main, () => sh("update-index", "--cacheinfo", `160000,${m2},dep`).then(() => {}));
+    expect(await carry()(PR, pr, evil, null)).toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent: main });
+  }, GIT_MS);
+
+  test("diff.relative in a repoDir below the root cannot hide a change the merge commit made outside it", async () => {
+    await sh("checkout", "-q", "main");
+    mkdirSync(join(work, "sub"), { recursive: true });
+    await mainCommit("sub/a.txt", "a\n");
+    await sh("checkout", "-q", "-b", "rel-pr");
+    const pr = await commitFile("sub/a.txt", "a reviewed\n", "PR edits sub");
+    await sh("push", "-q", "origin", "rel-pr");
+    const main = await mainCommit("later2.txt", "x\n");
+    const evil = await evilMerge("rel-pr", main, async () => { writeFileSync(join(work, "outside.txt"), "smuggled\n"); await sh("add", "outside.txt"); });
+    await sh("config", "diff.relative", "true");
+    try {
+      expect(await handoffCarry(join(work, "sub"))(PR, pr, evil, null)).toMatchObject({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了" });
+    } finally { await sh("config", "--unset", "diff.relative"); }
   }, GIT_MS);
 });

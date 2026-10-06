@@ -19,10 +19,13 @@ export type MainMergeCarry = ReviewCarry & { basis?: "auto-merge" | "net-diff" }
 /** No retry changes this answer: the diff can never be compared byte by byte. */
 export class CarryUndecidable extends Error {}
 
-/** Net diff exactly as `git diff base...head` prints it, with every knob that could vary between calls pinned. */
-async function netDiff(git: Git, base: string, head: string): Promise<string> {
+/**
+ * Net diff exactly as `git diff base...head` prints it, with every knob that could vary between calls pinned. `whole` also stops
+ * repository config from leaving paths out (`.gitmodules` ignore=all hides a swapped gitlink, `diff.relative` all but one directory).
+ */
+async function netDiff(git: Git, base: string, head: string, whole = false): Promise<string> {
   const out = await git("-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
-    "--binary", "--full-index", `${base}...${head}`);
+    "--binary", "--full-index", ...(whole ? ["--ignore-submodules=none", "--no-relative"] : []), `${base}...${head}`);
   if (Buffer.byteLength(out) >= DIFF_LIMIT) throw new CarryUndecidable("净 diff 太大，无法逐字核对");
   return out;
 }
@@ -39,11 +42,11 @@ async function autoMergeTree(command: typeof runBounded, cwd: string, a: string,
  * `onMain`: what the other parent must already be an ancestor of. `diffBase`: what both net diffs are taken against; absent =
  * that main parent, which still isolates the PR's own change once main contains the PR (current main would then diff empty).
  * Each `git diff base...head` starts at its own merge base, so main touching a file the PR changed makes the two texts differ
- * though the PR did not change: `autoMerge` first accepts a new tree that is exactly git's clean merge of the old head and the
- * main parent (only main came in), and only then compares net diffs.
+ * though the PR did not change. `strict` (the handoff) first accepts a new tree that is exactly git's clean merge of the old head
+ * and the main parent (only main came in), and compares whole net diffs; the local driver keeps its form unchanged.
  */
 export async function mainMergeCarry(git: Git, command: typeof runBounded, cwd: string, oldHead: string, newHead: string,
-  o: { onMain: string; diffBase?: string; autoMerge?: boolean }): Promise<MainMergeCarry> {
+  o: { onMain: string; diffBase?: string; strict?: boolean }): Promise<MainMergeCarry> {
   const mainHead = (await git("rev-parse", "--verify", `${o.onMain}^{commit}`)).trim();
   const [self, ...parents] = (await git("rev-list", "--parents", "-n", "1", newHead)).trim().split(/\s+/);
   if (self?.toLowerCase() !== newHead.toLowerCase()) throw new Error("新 head 读不到");
@@ -55,12 +58,12 @@ export async function mainMergeCarry(git: Git, command: typeof runBounded, cwd: 
   if (onMain.timedOut || (onMain.code !== 0 && onMain.code !== 1)) throw new Error(`git merge-base 失败：${oneLine(onMain.stderr)}`);
   if (onMain.code !== 0) return { ok: false, reason: `另一个父提交 ${mainParent.slice(0, 12)} 不在 main 上` };
   const base = o.diffBase ?? mainParent;
-  const after = await netDiff(git, base, newHead);
+  const after = await netDiff(git, base, newHead, o.strict);
   const diffHash = createHash("sha256").update(after).digest("hex");
-  if (o.autoMerge && await autoMergeTree(command, cwd, oldHead, mainParent) === (await git("rev-parse", "--verify", `${newHead}^{tree}`)).trim()) {
+  if (o.strict && await autoMergeTree(command, cwd, oldHead, mainParent) === (await git("rev-parse", "--verify", `${newHead}^{tree}`)).trim()) {
     return { ok: true, reason: "新 head 就是原 head 与 main 父提交的自动合并", mainParent, mainHead, diffHash, basis: "auto-merge" };
   }
   // parents verified: scheduler-review-rebase.ts scopes the re-review on this main parent
-  if (await netDiff(git, base, oldHead) !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead };
-  return { ok: true, reason: "净 diff 一致", mainParent, mainHead, diffHash, ...(o.autoMerge ? { basis: "net-diff" as const } : {}) };
+  if (await netDiff(git, base, oldHead, o.strict) !== after) return { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead };
+  return { ok: true, reason: "净 diff 一致", mainParent, mainHead, diffHash, ...(o.strict ? { basis: "net-diff" as const } : {}) };
 }

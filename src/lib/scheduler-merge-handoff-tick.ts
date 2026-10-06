@@ -60,9 +60,21 @@ export function ghPrState(command: typeof runBounded = runBounded,
   };
 }
 
+/** `owner/repo` (lowercased) of an origin on exactly github.com — scp form `git@github.com:o/r`, `https://` or `ssh://` — else null. */
+function githubRepoOf(url: string): string | null {
+  const repo = /^([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/;
+  const scp = /^git@github\.com:(.+)$/i.exec(url);
+  if (scp) return repo.exec(scp[1]!)?.[1]?.toLowerCase() ?? null;
+  let u: URL;
+  try { u = new URL(url); } catch { return null; /* neither scp form nor a URL: names no repository to vouch for */ }
+  if (!["https:", "ssh:"].includes(u.protocol) || u.hostname.toLowerCase() !== "github.com" || u.port) return null;
+  return repo.exec(u.pathname.slice(1))?.[1]?.toLowerCase() ?? null;
+}
+
 /**
  * Local git in the project's clone, like the local merge driver's carry (scheduler-merge-external.ts), and only when its origin
- * as configured is the PR repository: another repository's main would vouch for nothing. Refusals no retry changes are `ok: false`.
+ * as configured is the PR repository on github.com itself (checked before any fetch): another repository's main vouches for
+ * nothing. Refusals no retry changes are `ok: false`.
  */
 export function handoffCarry(repoDir: string, command: typeof runBounded = runBounded): HandoffCarry {
   const git = async (...args: string[]) => {
@@ -73,11 +85,10 @@ export function handoffCarry(repoDir: string, command: typeof runBounded = runBo
   return async (prRef, oldHead, newHead, mergeSha) => {
     const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1]?.toLowerCase();
     if (!repo || ![oldHead, newHead, mergeSha ?? oldHead].every((s) => SHA.test(s))) return { ok: false, reason: "PR 或 head 不是完整的 URL / SHA" };
-    const origin = /github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/i.exec((await git("config", "--get", "remote.origin.url")).trim())?.[1]?.toLowerCase();
-    if (origin !== repo) return { ok: false, reason: `repoDir 的 origin 不是 PR 仓库 ${repo}` };
+    if (githubRepoOf((await git("config", "--get", "remote.origin.url")).trim()) !== repo) return { ok: false, reason: `repoDir 的 origin 不是 PR 仓库 ${repo}` };
     await git("fetch", "--no-tags", "--quiet", "origin", newHead, ...(mergeSha ? [mergeSha] : []), `+refs/heads/main:${MAIN_REF}`);
     try {
-      return await mainMergeCarry(git, command, repoDir, oldHead, newHead, { onMain: mergeSha ? `${mergeSha}^1` : MAIN_REF, autoMerge: true });
+      return await mainMergeCarry(git, command, repoDir, oldHead, newHead, { onMain: mergeSha ? `${mergeSha}^1` : MAIN_REF, strict: true });
     } catch (e) {
       if (e instanceof CarryUndecidable) return { ok: false, reason: e.message };
       throw e;
