@@ -73,8 +73,9 @@ export function taskIdInName(names: (string | null | undefined)[], id: string): 
 
 
 /**
- * 审查员行上的审查小标（GET /agents 的 ledgerReview）：在审 = 主色（它正在干活），通过 = 绿，要改 / 拦下 = 红；图标一律是眼睛，和执行者小标一眼分开。
- * 同一 agent 既执行又审查：执行者小标原样在前，审查小标跟在后面，两个都显示（agent-row.tsx）——各说各的卡，谁也不盖谁。
+ * 审查员在审 / 审完的卡（GET /agents 的 ledgerReview）→ 色调与整句：在审 = 主色（它正在干活），通过 = 绿，要改 / 拦下 = 红。
+ * 不上侧栏行（侧栏只放手建 agent 和 PM）；协作视图「团队」成员节点和长按菜单各显示一行（ledger-stage-chip.tsx LedgerReviewLine）。
+ * 同一 agent 既执行又审查：执行者小标照旧在侧栏，审查这一行在协作视图，两边各说各的卡。
  */
 const REVIEW_DEFS: Record<"reviewing" | NonNullable<LedgerReviewRef["verdict"]>, { short: Words; tone: StageTone }> = {
   reviewing: { short: w("在审", "Reviewing"), tone: "primary" },
@@ -84,24 +85,15 @@ const REVIEW_DEFS: Record<"reviewing" | NonNullable<LedgerReviewRef["verdict"]>,
 };
 
 export interface ReviewChipView {
-  id: string;
-  short: string;
   tone: StageTone;
-  icon: "review";
-  /** 第 0 轮（派审早于进 review）不在行上显示 */
-  round: number | null;
-  /** 审完才有：不为 0 的 P 数，行上紧凑显示（「P1·1 P2·3」）；全 0 = 空串 */
-  counts: string;
-  /** 悬停 / 长按 / 读屏的整句 */
+  /** 「在审 CLR1 · 第 3 轮」「审完 CLR1 · 第 2 轮 · 要改 · P0 0 / P1 1 / P2 3」 */
   sentence: string;
 }
 
 export function reviewChipView(r: LedgerReviewRef, lang: Lang, t: Translate): ReviewChipView {
   const def = REVIEW_DEFS[r.verdict ?? "reviewing"];
-  const short = def.short[lang];
-  const counts = r.verdict === null ? "" : (["p0", "p1", "p2"] as const).filter((k) => r[k] > 0).map((k) => `${k.toUpperCase()}·${r[k]}`).join(" ");
   const sentence = r.verdict === null
     ? t("在审 {id} · 第 {n} 轮", { id: r.id, n: r.round })
-    : t("审完 {id} · 第 {n} 轮 · {verdict} · P0 {p0} / P1 {p1} / P2 {p2}", { id: r.id, n: r.round, verdict: short, p0: r.p0, p1: r.p1, p2: r.p2 });
-  return { id: r.id, short, tone: def.tone, icon: "review", round: r.round >= 1 ? r.round : null, counts, sentence };
+    : t("审完 {id} · 第 {n} 轮 · {verdict} · P0 {p0} / P1 {p1} / P2 {p2}", { id: r.id, n: r.round, verdict: def.short[lang], p0: r.p0, p1: r.p1, p2: r.p2 });
+  return { tone: def.tone, sentence };
 }

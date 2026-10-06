@@ -102,18 +102,14 @@ describe("列表轮询签名", () => {
 
 describe("reviewChipView / parseLedgerReview", () => {
   const rv = (verdict: "pass" | "changes" | "block" | null, p = [0, 0, 0], round = 2) => ({ id: "CLR1", round, verdict, p0: p[0], p1: p[1], p2: p[2] });
-  test("在审：主色、带轮次、没有 P 数；整句「在审 CLR1 · 第 2 轮」", () => {
-    expect(reviewChipView(rv(null), "zh", zh)).toEqual({ id: "CLR1", short: "在审", tone: "primary", icon: "review", round: 2, counts: "", sentence: "在审 CLR1 · 第 2 轮" });
+  test("在审：主色；整句「在审 CLR1 · 第 2 轮」", () => {
+    expect(reviewChipView(rv(null), "zh", zh)).toEqual({ tone: "primary", sentence: "在审 CLR1 · 第 2 轮" });
     expect(reviewChipView(rv(null), "en", en).sentence).toBe("Reviewing CLR1 · round 2");
   });
-  test("审完：通过绿、要改 / 拦下红；行上只带不为 0 的 P 数，整句三个都写", () => {
-    expect(reviewChipView(rv("pass", [0, 0, 1]), "zh", zh)).toMatchObject({ short: "通过", tone: "success", counts: "P2·1" });
-    const c = reviewChipView(rv("changes", [0, 1, 3]), "zh", zh);
-    expect(c).toMatchObject({ short: "要改", tone: "error", counts: "P1·1 P2·3" });
-    expect(c.sentence).toBe("审完 CLR1 · 第 2 轮 · 要改 · P0 0 / P1 1 / P2 3");
-    expect(reviewChipView(rv("block", [1, 0, 0]), "en", en)).toMatchObject({ short: "Blocked", sentence: "Reviewed CLR1 · round 2 · Blocked · P0 1 / P1 0 / P2 0" });
-    expect(reviewChipView(rv("pass"), "zh", zh).counts).toBe("");
-    expect(reviewChipView(rv(null, [0, 0, 0], 0), "zh", zh).round).toBeNull(); // 进 review 前就派审：行上不挂 R0
+  test("审完：通过绿、要改 / 拦下红；整句带结论和三个 P 数", () => {
+    expect(reviewChipView(rv("pass", [0, 0, 1]), "zh", zh)).toEqual({ tone: "success", sentence: "审完 CLR1 · 第 2 轮 · 通过 · P0 0 / P1 0 / P2 1" });
+    expect(reviewChipView(rv("changes", [0, 1, 3]), "zh", zh)).toEqual({ tone: "error", sentence: "审完 CLR1 · 第 2 轮 · 要改 · P0 0 / P1 1 / P2 3" });
+    expect(reviewChipView(rv("block", [1, 0, 0]), "en", en)).toEqual({ tone: "error", sentence: "Reviewed CLR1 · round 2 · Blocked · P0 1 / P1 0 / P2 0" });
   });
   test("守卫：id 不是字符串当没有；认不出的 verdict 当在审；计数不是非负整数按 0", () => {
     expect(parseLedgerReview(null)).toBeNull();

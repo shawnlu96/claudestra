@@ -14,6 +14,7 @@
 .node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .nodeHead { display: flex; align-items: center; justify-content: space-between; font-size: 11px; }
 .source, .detail { font-size: 11px; opacity: .7; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.review { min-width: 0; font-size: 11px; font-weight: 500; }
 .badge { border-radius: 5px; padding: 1px 6px; background: var(--color-base-200); }
 .busy { background: var(--color-warning); color: var(--color-warning-content); }
 .idle { background: var(--color-success); color: var(--color-success-content); }
