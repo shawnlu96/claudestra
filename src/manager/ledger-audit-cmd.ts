@@ -3,6 +3,7 @@
  * bridge 每 15 分钟经 runManager 跑一次（bridge/ledger-audit-service.ts），把 pending 推给 PM / 调度助理后再 --ack；
  * 手动跑同一条命令，--dry-run 只算不写（LedgerReader 的 query_only 连接：不建库、不迁移，ledger.ts 的 realDeps）。输出一行 JSON；--json 带完整记录（bridge 用）。
  */
+import { waitDiagnostics } from "../lib/ledger-deadlock.js";
 import { auditLedger, auditRecipient, type AuditFinding } from "../lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings, type StoredFinding } from "../lib/ledger-audit-store.js";
 import { auditedProjects, collectAuditSnapshots, queuedMessageIds } from "../lib/ledger-audit-snapshot.js";
@@ -50,13 +51,14 @@ async function audit(c: LedgerCli): Promise<Result> {
   for (const s of snaps) {
     const r = auditLedger(s, now);
     if (dry) {
-      out.push({ project: s.project, open: r.findings.map(full ? (f) => f : brief), skipped: r.skipped });
+      out.push({ project: s.project, open: r.findings.map(full ? (f) => f : brief), skipped: r.skipped, ...waitDiagnostics(s.waitGraph) });
       continue;
     }
     const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true });
     pending.push(...rec.pending);
     const open = openFindings(c.db, s.project);
-    out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length, open: full ? open : open.map(brief), skipped: r.skipped });
+    out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length,
+      open: full ? open : open.map(brief), skipped: r.skipped, ...waitDiagnostics(s.waitGraph) });
   }
   return { ok: true, now, dryRun: dry, projects: out, ...(full && !dry ? { pending: pending.map((f) => withFallback(c, f)) } : {}) };
 }
