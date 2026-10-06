@@ -88,6 +88,8 @@ function takeoverWrites(args: readonly string[]): boolean {
 
 /** 要不要拿命令级写锁：写命令里只有只写台账 sqlite 的 ledger 子命令例外（认主守卫照旧按 isWriteInvocation） */
 export function needsWriteLock(cmd: string | undefined, args: readonly string[]): boolean {
+  // This leaf only reads metadata or reports blocked-capability; it has no retirement writer.
+  if (cmd === "archive-workflows" && args[0] === "--lend-worker") return false;
   if (cmd === "ledger") return LEDGER_REGISTRY_SUBS.has(args[0] ?? "");
   if (cmd === "transport") return false; // 自己锁住改 registry 那一下、放锁再重启（manager/acp-lifecycle.ts）；认主守卫照旧
   if (cmd === "migrate") return false; // ACP 迁移也短锁改 registry，放锁后子进程逐个 restart
@@ -96,6 +98,7 @@ export function needsWriteLock(cmd: string | undefined, args: readonly string[])
 /** 这次调用会不会改状态（→ 认主守卫 + 命令级写锁） */
 export function isWriteInvocation(cmd: string | undefined, args: readonly string[]): boolean {
   if (!cmd) return false;
+  if (cmd === "archive-workflows" && args[0] === "--lend-worker") return false;
   if (WRITE_COMMANDS.has(cmd)) return true;
   if (cmd === "takeover") return takeoverWrites(args);
   if (cmd === "repair") return args.includes("--apply"); // 不带 --apply 只列计划

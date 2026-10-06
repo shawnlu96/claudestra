@@ -1,125 +1,85 @@
-/** 出借 worker 结单后归档它的 Codex 会话（src/lib/lend-session-archive.ts）：结单触发、每日补漏、不碰 owner 的 agent。全在临时目录里造假会话与 journal */
+/** Exact settle hook and historical read-only scan use only temporary journals and session files. */
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archiveEndedWorker, sweepEndedLendThreads } from "../src/lib/lend-session-archive";
-import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal";
-import { workerName } from "../src/lib/lend-worker-name";
-import type { RegistryAgent } from "../src/lib/registry";
+import { archiveEndedWorker, sweepEndedLendThreads } from "../src/lib/lend-session-archive.js";
+import { advance, getOrder, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
+import { workerName } from "../src/lib/lend-worker-name.js";
 import { harness, sha, toStarted } from "./lend-harness.js";
 
-const base = mkdtempSync(join(tmpdir(), "lend-session-archive-"));
-afterAll(() => rmSync(base, { recursive: true, force: true }));
-const id = (n: number) => `019b0000-0000-7000-8000-${String(n).padStart(12, "0")}`;
-const W1 = workerName("o1");
-const W2 = workerName("o2");
-const OWNER = "agent-套利研究所";
-
+const root = mkdtempSync(join(tmpdir(), "lend-session-archive-"));
+afterAll(() => rmSync(root, { recursive: true, force: true }));
+const worker = workerName("o1");
 function world() {
-  const root = mkdtempSync(join(base, "w-"));
-  const day = join(root, ".codex", "sessions", "2026", "10", "01");
-  mkdirSync(day, { recursive: true });
-  const locksDir = join(root, ".codex", "thread-writer-locks");
-  mkdirSync(locksDir, { recursive: true });
-  const opts = { codexRoot: join(root, ".codex", "sessions"), locksDir, archiveRoot: join(root, "archived"), restoredIndex: join(root, "restored.json") };
-  const write = (n: number, payload: object) => {
-    const p = join(day, `rollout-2026-10-01T00-00-00-${id(n)}.jsonl`);
-    writeFileSync(p, JSON.stringify({ type: "session_meta", payload: { cwd: "/w", id: id(n), ...payload } }) + "\n");
-    return p;
-  };
-  const main = (n: number) => write(n, { session_id: id(n) });
-  const sub = (n: number, parent: number, root = parent) => write(n, { session_id: id(root), parent_thread_id: id(parent), thread_source: "subagent" });
-  return { root, opts, main, sub };
+  const dir = mkdtempSync(join(root, "w-")), session = join(dir, "session.jsonl");
+  writeFileSync(session, '{"sessionId":"session-1","history":"original"}\n', { mode: 0o640 });
+  const opts = { keep: new Set<string>(), codexRoot: dir, archiveRoot: join(dir, "archived"), locksDir: join(dir, "locks") };
+  mkdirSync(opts.locksDir);
+  const row = { orderId: "o1", family: "codex", agent: worker, sessionId: "session-1", leaseGen: 3, state: "acked" as const };
+  return { dir, session, opts, row };
 }
 
-const row = (o: Partial<{ family: string; agent: string | null; sessionId: string | null }> = {}) =>
-  ({ orderId: "o1", family: "codex", agent: W1, sessionId: id(1), ...o });
-
-describe("archiveEndedWorker：结单触发", () => {
-  test("收这个 worker 的主线程、子线程和孙线程，别人的一个不动；meta 记来由", async () => {
-    const w = world();
-    const mine = [w.main(1), w.sub(2, 1), w.sub(3, 2, 1)];
-    const others = [w.main(10), w.sub(11, 10), w.main(20), w.sub(21, 20)];
-    const lines: string[] = [];
-    await archiveEndedWorker(row(), (m) => lines.push(m), { keep: new Set(), ...w.opts });
-    for (const p of mine) expect(existsSync(p)).toBe(false);
-    for (const p of others) expect(existsSync(p)).toBe(true);
-    expect(lines).toEqual([`o1 结单：${W1} 的 3 个 Codex 会话收进归档区(archived/)`]);
-    const meta = JSON.parse(readFileSync(join(w.opts.archiveRoot, id(2), ".meta.json"), "utf8"));
-    expect(meta).toMatchObject({ kind: "unmanaged", runtime: "codex", sessionId: id(2), reason: "lend-worker-ended" });
-  });
-
-  test("Claude 单、没起过 worker、名字不是出借 worker 的：什么都不做", async () => {
-    const w = world();
-    const files = [w.main(1), w.sub(2, 1)];
-    for (const r of [row({ family: "claude" }), row({ sessionId: null }), row({ agent: OWNER })]) {
-      await archiveEndedWorker(r, () => {}, { keep: new Set(), ...w.opts });
-    }
-    for (const p of files) expect(existsSync(p)).toBe(true);
-  });
-
-  test("Codex 进程还锁着的线程不收；恢复清单坏了只记日志、不抛", async () => {
-    const w = world();
-    const files = [w.main(1), w.sub(2, 1)];
-    writeFileSync(join(w.opts.locksDir, `${id(1)}.lock`), "");
-    await archiveEndedWorker(row(), () => {}, { keep: new Set(), ...w.opts });
-    for (const p of files) expect(existsSync(p)).toBe(true); // 主线程被锁 = 子线程的父也算锁着
-
-    rmSync(join(w.opts.locksDir, `${id(1)}.lock`));
-    writeFileSync(w.opts.restoredIndex, "{坏");
-    const lines: string[] = [];
-    await archiveEndedWorker(row(), (m) => lines.push(m), { keep: new Set(), ...w.opts });
-    for (const p of files) expect(existsSync(p)).toBe(true);
-    expect(lines[0]).toContain("不影响结单");
-  });
+test.each(["acked", "cancelled", "released"] as const)("%s hook preserves history and propagates blocked-capability", async (state) => {
+  const w = world(), before = readFileSync(w.session, "utf8");
+  const calls: string[][] = [];
+  await expect(archiveEndedWorker({ ...w.row, state }, () => {}, w.opts, async (...args) => {
+    calls.push(args); return { ok: false, code: "blocked-capability", recoverable: true };
+  })).rejects.toThrow("blocked-capability");
+  expect(calls).toEqual([["archive-workflows", "--lend-worker", "settle", JSON.stringify({ orderId: "o1", agent: worker, sessionId: "session-1", leaseGen: 3 })]]);
+  expect(readFileSync(w.session, "utf8")).toBe(before);
+  expect(statSync(w.session).mode & 0o777).toBe(0o640);
+  expect(existsSync(w.opts.archiveRoot)).toBe(false);
 });
 
-describe("sweepEndedLendThreads：每日补漏", () => {
-  function journal(root: string) {
-    const path = join(root, "journal.sqlite");
-    const db = openLendJournal(path);
-    for (const [o, sid, to] of [["o1", id(1), "stopped"], ["o2", id(5), "started"]] as const) {
-      recordAsked(db, { orderId: o, peer: "team-a", fp: null, family: "codex", preview: {} });
-      advance(db, o, "asked", "claimed");
-      advance(db, o, "claimed", "cloned", { agent: workerName(o) });
-      advance(db, o, "cloned", "started", { sessionId: sid });
-      if (to !== "started") advance(db, o, "started", to);
-    }
-    db.close();
-    return path;
+test("stopped, active, unknown and unstarted orders cannot infer retirement or invoke manager", async () => {
+  const w = world();
+  let calls = 0;
+  const manager = async () => { calls++; return {}; };
+  for (const state of ["stopped", "started", "result_pending", "unknown", undefined]) {
+    await archiveEndedWorker({ ...w.row, state: state as typeof w.row.state }, () => {}, w.opts, manager);
   }
-  const agents = (w1Status = "stopped"): RegistryAgent[] => [
-    { name: W1, status: w1Status, sessionId: id(1) }, { name: W2, status: "active", sessionId: id(5) }, { name: OWNER, status: "stopped", sessionId: id(10) },
-  ];
-
-  test("只收已结单的出借 worker；在跑的单、owner 的 agent 不碰；收过的不重复处理", async () => {
-    const w = world();
-    const ended = [w.main(1), w.sub(2, 1)];
-    const kept = [w.main(5), w.sub(6, 5), w.main(10), w.sub(11, 10)];
-    const journalPath = journal(w.root);
-    expect(await sweepEndedLendThreads(agents(), { ...w.opts, journalPath })).toBe(2);
-    for (const p of ended) expect(existsSync(p)).toBe(false);
-    for (const p of kept) expect(existsSync(p)).toBe(true);
-    expect(await sweepEndedLendThreads(agents(), { ...w.opts, journalPath })).toBe(0);
-  });
-
-  test("单已结束但 registry 里这个 worker 还 active：不收", async () => {
-    const w = world();
-    const files = [w.main(1), w.sub(2, 1)];
-    expect(await sweepEndedLendThreads(agents("active"), { ...w.opts, journalPath: journal(w.root) })).toBe(0);
-    for (const p of files) expect(existsSync(p)).toBe(true);
-  });
-
-  test("journal 不在：什么都不收", async () => {
-    const w = world();
-    const files = [w.main(1), w.sub(2, 1)];
-    expect(await sweepEndedLendThreads(agents(), { ...w.opts, journalPath: join(w.root, "none.sqlite") })).toBe(0);
-    for (const p of files) expect(existsSync(p)).toBe(true);
-  });
+  await archiveEndedWorker({ ...w.row, agent: null, sessionId: null }, () => {}, w.opts, manager);
+  expect(calls).toBe(0);
+  await expect(archiveEndedWorker(w.row, () => {}, w.opts)).rejects.toThrow("blocked-capability");
+  await expect(archiveEndedWorker({ ...w.row, leaseGen: null }, () => {}, w.opts, manager)).rejects.toThrow("身份不完整");
+  expect(readFileSync(w.session, "utf8")).toContain("original");
 });
 
-describe("settleOrder 收尾之后才归档", () => {
+test.each(["stopped", "cancelled"] as const)("daily %s scan is metadata only and retains original history and journal bytes", async (state) => {
+  const w = world(), path = join(w.dir, "journal.sqlite"), db = openLendJournal(path);
+  recordAsked(db, { orderId: "o1", peer: "A", fp: "fp", family: "codex", preview: {} });
+  advance(db, "o1", "asked", "claimed", { leaseGen: 3, agent: worker, dir: w.dir });
+  advance(db, "o1", "claimed", "cloned");
+  advance(db, "o1", "cloned", "started", { sessionId: "session-1" });
+  advance(db, "o1", "started", state);
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  db.close();
+  const before = readFileSync(path);
+  for (const status of ["active", "unknown", "stopped"]) {
+    expect(await sweepEndedLendThreads([{ name: worker, status, sessionId: "session-1", kind: "worker", runtime: "codex", cwd: w.dir }],
+      { ...w.opts, journalPath: path })).toBe(0);
+  }
+  expect(readFileSync(w.session, "utf8")).toContain("original");
+  expect(readFileSync(path)).toEqual(before);
+  expect(existsSync(w.opts.archiveRoot)).toBe(false);
+});
+
+test("missing, corrupt and unreadable journal never causes archive or permission repair", async () => {
+  const w = world(), path = join(w.dir, "journal.sqlite");
+  const scan = () => sweepEndedLendThreads([{ name: worker, status: "stopped", sessionId: "session-1" }], { ...w.opts, journalPath: path });
+  expect(await scan()).toBe(0);
+  expect(existsSync(path)).toBe(false);
+  writeFileSync(path, "broken sqlite", { mode: 0o640 });
+  expect(await scan()).toBe(0);
+  expect(readFileSync(path, "utf8")).toBe("broken sqlite");
+  chmodSync(path, 0);
+  expect(await scan()).toBe(0);
+  expect(statSync(path).mode & 0o777).toBe(0);
+  expect(readFileSync(w.session, "utf8")).toContain("original");
+});
+
+describe("settleOrder preserves recoverable completion", () => {
   async function toAcked(h: ReturnType<typeof harness>) {
     await toStarted(h);
     const body = { v: 1, orderId: "o1", gen: 1, verdict: { v: 1 }, report: "r", session: { id: "thr-1", family: "codex" } };
@@ -127,23 +87,45 @@ describe("settleOrder 收尾之后才归档", () => {
     await h.tick();
   }
 
-  test("终态、收据写完才调一次，之后不再调", async () => {
-    const h = harness();
-    const seen: { state: string; receipts: number; agent: string | null }[] = [];
-    h.d.archiveSessions = async (r) => void seen.push({ state: r.state, receipts: h.log.receipts.length, agent: r.agent });
+  test("blocked real hook retains acked, receipt and settle across journal restart", async () => {
+    const original = harness();
+    original.db.close();
+    const disk = openLendJournal(join(mkdtempSync(join(root, "restart-")), "journal.sqlite"));
+    original.d.db = disk;
+    const h = { ...original, db: disk };
+    h.d.archiveSessions = (row) => archiveEndedWorker(row, () => {}, undefined, async () => ({ ok: false, code: "blocked-capability" }));
     await toAcked(h);
     await h.tick();
-    expect(seen).toEqual([{ state: "acked", receipts: 1, agent: W1 }]);
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: { notify: null, removeDir: false } });
+    expect(h.log.receipts.length).toBeGreaterThan(0);
+    const path = h.db.filename;
+    h.db.close();
+    h.d.db = openLendJournal(path);
+    try {
+      expect(getOrder(h.d.db, "o1")).toMatchObject({ state: "acked", settle: { notify: null, removeDir: false } });
+    } finally { h.d.db.close(); }
   });
 
-  test("归档抛错也不影响结单：仍是 acked、收尾清空、收据已写", async () => {
+  test("failed directory cleanup retains removeDir and never reaches receipt/archive", async () => {
     const h = harness();
     let calls = 0;
-    h.d.archiveSessions = async () => { calls++; throw new Error("磁盘满了"); };
+    h.d.archiveSessions = async () => { calls++; };
+    h.d.removeDir = () => { throw new Error("副本状态读不到"); };
     await toAcked(h);
     await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: { notify: null, removeDir: true } });
+    expect(calls).toBe(0);
+    expect(h.log.receipts).toHaveLength(0);
+  });
+
+  test("failed archiving retains settle; only a successful retirement can clear it", async () => {
+    const h = harness();
+    h.d.archiveSessions = async () => { throw new Error("blocked-capability"); };
+    await toAcked(h);
+    await h.tick();
+    expect(getOrder(h.db, "o1")?.settle).not.toBeNull();
+    h.d.archiveSessions = async () => {};
+    await h.tick();
     expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: null });
-    expect(h.log.receipts.map((r) => r.state)).toEqual(["acked"]);
-    expect(calls).toBe(1);
   });
 });

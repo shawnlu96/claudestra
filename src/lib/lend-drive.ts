@@ -183,6 +183,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     try { d.removeDir(row.orderId); } catch (e) {
       if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
       d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`);
+      throw e; // 未确认清理完成，保留 settle；归档不能把一次失败当作已经保全 / 清理。
     }
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { notify: null, removeDir: false } }, d.now());
   }
@@ -193,8 +194,8 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   const told = await flushEndNotice(row, d);
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
-  patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
   await d.archiveSessions?.(told);
+  patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
 }
 
 /**
