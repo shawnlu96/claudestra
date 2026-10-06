@@ -3,26 +3,33 @@
  * BEGIN IMMEDIATE) reconciles workflow.authorFamily to the order's family in that same transaction, so the claim and the
  * family land together or not at all; the next review goes across from it through FAM1a's existing reviewer_swap epoch.
  * Only the order row's family counts (the peer's session family is still checked at result intake), never names or spec text.
- * Review orders, cancelled / late / stale claims and non-auto workflows change nothing. tests/lend-author-family*.test.ts.
+ * Review orders, cancelled / late / stale claims and non-auto workflows change nothing; a scheduler-driven card whose workflow
+ * row is gone refuses the claim (family unreadable), while a legacy manual card that never had one keeps claiming as before. tests/lend-author-family*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { AUTHOR_FAMILIES, getWorkflow, type AuthorFamily, type TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, LedgerError } from "./ledger-store.js";
+import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 
 export const AUTHOR_FAMILY_OP = "lend_author_family";
 const isFamily = (f: unknown): f is AuthorFamily => AUTHOR_FAMILIES.includes(f as AuthorFamily);
 
-type ClaimedOrder = { orderId: string; taskId: string; project: string; peer: string; family: string; step: string; round: number; specRev: number };
+type ClaimedOrder = { orderId: string; taskId: string; project: string; peer: string; family: string; step: string; round: number; specRev: number;
+  createdBy: string };
+
+/** A card the scheduler ever drove (cut this order, or left scheduler events on the card): its missing workflow is an unreadable family. */
+const schedulerDriven = (db: Database, o: ClaimedOrder): boolean => o.createdBy === "scheduler" ||
+  listEvents(db, { project: o.project, target: o.taskId }).some((e) => e.kind === "scheduler" && e.actor === "scheduler");
 
 /** Called once, right after the pooled → claimed UPDATE; any throw rolls the claim back with it (no half-written state). */
 export function claimAuthorFamily(db: Database, ctx: WriteCtx, o: ClaimedOrder): void {
   if (o.step !== "write" && o.step !== "fix") return;
   if (!isFamily(o.family)) throw new LedgerError("conflict", `写单家族读不到（${String(o.family)}），不领这一单`);
   const workflow = getWorkflow(db, o.taskId);
+  if (!workflow && schedulerDriven(db, o)) throw new LedgerError("conflict", "自动卡的流程记录读不到，作者家族没法对账，不领这一单");
   if (!workflow || workflow.mode !== "auto" || workflow.authorFamily === o.family) return;
   if (!isFamily(workflow.authorFamily)) throw new LedgerError("conflict", "卡的作者家族读不到，不领这一单");
   const key = `lend-author-family:${o.orderId}`;

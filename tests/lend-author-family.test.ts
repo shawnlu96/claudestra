@@ -17,7 +17,7 @@ import type { LedgerEvent } from "../src/lib/ledger-stages.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { appendEvent } from "../src/lib/ledger-write.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { AUTHOR_FAMILY_OP, swapAuthorFamily } from "../src/lib/lend-author-family.js";
+import { AUTHOR_FAMILY_OP, claimAuthorFamily, swapAuthorFamily } from "../src/lib/lend-author-family.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
@@ -226,6 +226,41 @@ describe("a failed reconcile rolls the claim back: never claimed with the old fa
       p.f.db.run("UPDATE task_workflows SET authorFamily = 'gpt' WHERE taskId = 'T1'");
       await refusedClaim(p, o.orderId);
     } finally { p.close(); }
+  });
+
+  test("a scheduler-cut order whose workflow row is gone: family unreadable, refused (no claim, no step, no note)", async () => {
+    const p = await setup({ writeFamilies: ["codex"] });
+    try {
+      const o = await pooledWrite(p, "codex");
+      p.f.db.run("DELETE FROM task_workflows WHERE taskId = 'T1'");
+      await refusedClaim(p, o.orderId);
+      expect(p.notes()).toEqual([]);
+    } finally { p.close(); }
+  });
+
+  test("a card the scheduler drove keeps refusing even if the order was not cut by the scheduler", async () => {
+    const p = await setup({ writeFamilies: ["codex"] });
+    try {
+      const o = await pooledWrite(p, "codex");
+      p.f.db.run("DELETE FROM task_workflows WHERE taskId = 'T1'");
+      const order = { ...getLendOrder(p.f.db, o.orderId)!, createdBy: "owner" };
+      expect(() => claimAuthorFamily(p.f.db, { actor: "owner" }, order)).toThrow(/流程记录读不到/);
+    } finally { p.close(); }
+  });
+});
+
+describe("a legacy manual card that never had a workflow keeps claiming as before", () => {
+  test("no workflow, not scheduler-cut, no scheduler events: no-op", () => {
+    const f = autoFixture();
+    try {
+      f.db.run("DELETE FROM task_workflows WHERE taskId = 'T1'");
+      const scheduler = listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.kind === "scheduler" && e.actor === "scheduler");
+      expect(scheduler).toEqual([]);
+      const order = { orderId: "lend:T1:s1:r0:a0", taskId: "T1", project: "p", peer: "writer", family: "codex", step: "write", round: 0, specRev: 1, createdBy: "owner" };
+      expect(() => claimAuthorFamily(f.db, { actor: "owner" }, order)).not.toThrow();
+      expect(getWorkflow(f.db, "T1")).toBeNull();
+      expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === AUTHOR_FAMILY_OP)).toEqual([]);
+    } finally { f.close(); }
   });
 });
 
