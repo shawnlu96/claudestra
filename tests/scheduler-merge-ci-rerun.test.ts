@@ -321,6 +321,22 @@ describe("bun test failed-log parsing", () => {
       expect(parseFailedLog(log)).toBeNull();
     }
   });
+  test("sharded run: each red shard's bun step is read on its own, the gate's verdict step is skipped", () => {
+    const shard = (k: number, log: string) => log.replaceAll("ci\tRun tests\t", `test shard ${k}/4\tUnit tests (shard ${k}/4)\t`);
+    const gateStep = (step: string, lines: string[]) => lines.map((l) => `typecheck + test + guard\t${step}\t2026-10-02T11:09:00Z ${l}`).join("\n");
+    const verdict = gateStep("All shards succeeded", ['##[group]Run [ "failure" = success ] || { echo "::error::分片没有全部成功：failure"; exit 1; }',
+      "shell: /usr/bin/bash -e {0}", "##[endgroup]", "##[error]分片没有全部成功：failure", "##[error]Process completed with exit code 1."]);
+    const B = "tests/b.test.ts";
+    const third = shard(3, ciLog([at(`##[group]${B}:`), at("(fail) b > slow [5001.00ms]"), at("  ^ this test timed out after 5000ms."), at("##[endgroup]")]));
+    expect(parseFailedLog([shard(1, TIMEOUT_ONLY), third, verdict].join("\n"))).toEqual([
+      { file: SLOW, name: "本机 API last-seen > 过滤在 LIMIT 之前", timedOut: true }, { file: B, name: "b > slow", timedOut: true }]);
+    const tsc = shard(1, [at("src/x.ts(1,7): error TS2322: nope"), at("##[error]Process completed with exit code 2.")].join("\n"))
+      .replaceAll("Unit tests (shard 1/4)", "Typecheck (tsc --noEmit)");
+    for (const log of [verdict, `${third}\n${verdict.replace("##[endgroup]", "##[endgroup]\n##[error]并非分片结论")}`,
+      `${third}\n${gateStep("Shards cover every test file exactly once", ["##[error]各片跑过的文件和入库的测试文件对不上"])}`, `${third}\n${tsc}\n${verdict}`]) {
+      expect(parseFailedLog(log)).toBeNull();
+    }
+  });
   test("an error printed for a (fail) makes it a non-timeout even with the timeout marker", () => {
     const log = TIMEOUT_ONLY.replace(at("(fail) 本机"), `${at("error: write EPIPE")}\n${at("(fail) 本机")}`);
     expect(parseFailedLog(log)).toEqual([{ file: SLOW, name: "本机 API last-seen > 过滤在 LIMIT 之前", timedOut: false }]);
