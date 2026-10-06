@@ -79,7 +79,7 @@ export interface PlanInput {
   swapPct: number | null;
   /** pendingCleanups(db): disk earlier retires left behind */
   pending?: readonly (PendingCleanup & { error?: string })[];
-  /** registerFailures(db): creates whose registration failed (the agent was kept for PM) */
+  /** registerFailures(db): creates whose registration failed or never completed (the agent was kept for PM) */
   registerFailed?: readonly { agent: string; sessionId: string }[];
 }
 

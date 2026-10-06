@@ -4,13 +4,14 @@
  * when its card finishes. The registration is the one label every reader uses; names decide nothing. An executor (--role executor)
  * without --card is refused before anything is created; ordinary user agents are unaffected. tests/agent-lifecycle-create.test.ts.
  * Only the session this create started is registered: the create's own result must say ok with this agent and a session id the
- * registry now holds and did not hold before. Ledger row first, worker tag second, so a failure leaves the agent untagged.
+ * registry now holds and did not hold before. Ledger reservation first (inert: nothing collects it), worker tag second, and only then
+ * the CAS that activates exactly that reservation — so no step after the tag can leave a collectable half-registration behind.
  * A registration that fails at any step never removes, archives or kills anything: the agent is kept, create returns ok:false saying
- * it is left for PM, and one ledger event (agent, session, reason) records it — in the same transaction that closes a row the attempt
- * already inserted, so no active registration is left for the lifecycle to collect; doctor counts the unresolved ones as 登记失败 N.
+ * it is left for PM, and one ledger event (agent, session, reason) records it, closing the reservation in the same transaction. If
+ * that write fails too (ledger busy), the reservation stays as it was: still inert, still counted by doctor as 登记失败 N.
  * (An undo by name could not be made safe: between any check and the remove the name may come to run another session.)
  */
-import { isWorkerRole, checkCard, recordRegisterFailure, registerWorker, type RegisterFailure, type WorkerRole } from "../lib/agent-lifecycle-store.js";
+import { activateWorker, isWorkerRole, checkCard, recordRegisterFailure, reserveWorker, type RegisterFailure, type WorkerRole } from "../lib/agent-lifecycle-store.js";
 import { LEDGER_PATH, openLedger } from "../lib/ledger-store.js";
 import { SCHEDULER_LEASE_ENV } from "../lib/scheduler-lease-env.js";
 import { setWorkerKind } from "../lib/worker-kind.js";
@@ -66,17 +67,18 @@ const holdsSession = (reg: Registry, key: string, sessionId: string): boolean =>
   return !!info && !info.pending && info.sessionId === sessionId;
 };
 
-/** Ledger row, then kind=worker in the registry; null = registered, else why not (nothing is undone either way). */
+/** Ledger reservation, kind=worker in the registry, then activation; null = registered, else why not (nothing is undone either way). */
 async function register(key: string, sessionId: string, card: CardFlags, by: string, deps: RegisterDeps): Promise<string | null> {
   try {
     const reg = await deps.loadRegistry();
     if (!holdsSession(reg, key, sessionId)) return `registry 里 ${key} 现在不是本次建的会话 ${sessionId}（已被替换或没落地）`;
     const probe = { [key]: { ...reg.agents[key] } };
     if (!setWorkerKind(probe, key, "worker") || probe[key].kind !== "worker") return `${key} 是受保护的 agent（master / PM / kind=main），不能登记成卡 worker`;
-    registerWorker(openLedger(deps.ledgerPath), { agent: key, sessionId, taskId: card.taskId, role: card.role, createdBy: by });
+    const reserved = reserveWorker(openLedger(deps.ledgerPath), { agent: key, sessionId, taskId: card.taskId, role: card.role, createdBy: by });
     const now = await deps.loadRegistry(); // re-read: the ledger write took a moment, save only onto the registry as it is now
-    if (!holdsSession(now, key, sessionId) || !setWorkerKind(now.agents, key, "worker")) return `台账已登记，但 registry 里 ${key} 已不是本次建的会话，worker 标签没打`;
+    if (!holdsSession(now, key, sessionId) || !setWorkerKind(now.agents, key, "worker")) return `台账已预留登记，但 registry 里 ${key} 已不是本次建的会话，worker 标签没打`;
     await deps.saveRegistry(now);
+    activateWorker(openLedger(deps.ledgerPath), reserved);
     return null;
   } catch (e) {
     return (e as Error).message;

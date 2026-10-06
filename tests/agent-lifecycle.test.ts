@@ -13,6 +13,8 @@
  * the executor's temp folder step, also when the checkout is already gone; unresolved registration failures show as 登记失败 N.
  * r6 review fix: a registration failing after its INSERT (registry re-read / kind save) closes that row with the failure event, so a
  * full tick never archives / removes the kept agent and it counts as 登记失败 N.
+ * r8 review fix: a registration is reserved inert first and activated (CAS on agent / session / createdAt) only after the registry
+ * tag is saved, so a failure write that times out on a held ledger lock still leaves nothing collectable, counted as 登记失败 N.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -247,6 +249,44 @@ describe("run", () => {
       expect(calls).toEqual([]);
     }
   });
+
+  test("r8: INSERT ok, registry save fails and the failure write times out on a held ledger lock: still nothing to collect; 登记失败 +1", async () => {
+    for (const step of ["save-fails", "activate-locked"] as const) {
+      const { db, dir, card } = ledger();
+      card("L1", "verified");
+      const path = join(dir, "ledger.sqlite");
+      const other = new Database(path); // a second real connection (another process's writer), default busy_timeout on ours
+      cleanup.push(() => other.close());
+      const reg = { socket: "", agents: { "agent-probe": { sessionId: "s", channelId: "9" } } } as unknown as Registry;
+      const regDeps: RegisterDeps = { ledgerPath: path, createdBy: async () => "agent-pm", loadRegistry: async () => reg,
+        saveRegistry: async () => {
+          other.exec("BEGIN IMMEDIATE");
+          if (step === "save-fails") throw new Error("synthetic registry save failure");
+        },
+        recordFailure: (f) => recordRegisterFailure(openLedger(path), f) };
+      const out = await registerCreated("agent-probe", { taskId: "L1", role: "reviewer" }, { ok: true, agent: "agent-probe", sessionId: "s" }, null, regDeps);
+      other.exec("ROLLBACK");
+      expect(out).toMatchObject({ ok: false, registered: false, kept: true });
+      if (step === "save-fails") expect(String(out.error)).toContain("失败事件也没记上台账");
+      // the reservation is all that is left: not active, no register event, no failure event — and still counted
+      expect(activeWorkers(db)).toEqual([]);
+      expect(db.query("SELECT state, retiredAt, reason FROM worker_agents WHERE agent = 'agent-probe'").all()).toEqual([{ state: "retired", retiredAt: null, reason: "registering" }]);
+      expect(listEvents(db, { project: "p" }).filter((e) => String((e.data as { op?: string }).op).startsWith("worker_register"))).toEqual([]);
+      expect(registerFailures(db)).toEqual([{ agent: "agent-probe", sessionId: "s", taskId: "L1" }]);
+      // lock released, same session idle 1h past the recent-turn guard, card verified (tagged or not): a full tick leaves it alone
+      const facts = agent("agent-probe", 1, step === "activate-locked" ? { kind: "worker" } : {});
+      const plan = planLifecycle(input(db, [facts], { registerFailed: registerFailures(db) }));
+      expect([plan.actions, plan.memory, plan.registerFailed]).toEqual([[], [], 1]);
+      expect(lifecycleLine(plan, "on")).toContain("登记失败 1");
+      const { deps, calls } = fakeDeps(db, join(dir, "worktrees"));
+      expect(await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, deps)).toEqual({ done: [], failed: [] });
+      expect(calls).toEqual([]);
+      // PM registers that session again: the new registration completes, the old reservation stays inert, the failure resolves
+      registerWorker(db, { agent: "agent-probe", sessionId: "s", taskId: "L1", role: "reviewer", createdBy: "agent-pm", now: Date.now() + 1 });
+      const fixed = planLifecycle(input(db, [agent("agent-probe", 1, { kind: "worker" })], { registerFailed: registerFailures(db) }));
+      expect([fixed.registerFailed, fixed.actions.map((a) => a.agent)]).toEqual([0, ["agent-probe"]]);
+    }
+  }, 60_000);
 
   test("observe and off: no manager call, no ledger write", async () => {
     const { db, card } = ledger();

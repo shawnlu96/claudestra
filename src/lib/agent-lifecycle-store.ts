@@ -118,27 +118,57 @@ export function checkCard(db: Database, taskId: string): string | null {
 
 export interface RegisterInput { agent: string; sessionId: string; taskId: string; role: WorkerRole; createdBy: string; now?: number }
 
-/** A re-created name replaces its earlier active row: one agent name runs one session at a time. */
-export function registerWorker(db: Database, input: RegisterInput): WorkerRegistration {
+/**
+ * A registration in two steps, so it is never collectable before it is complete. reserveWorker writes the row as state 'retired'
+ * with no retiredAt and reason REGISTERING: every reader of registrations reads active rows only, so a reservation is inert — the
+ * index does not link it, the planner and runner cannot collect it — and registerFailures counts it as 登记失败 until it is
+ * activated. activateWorker is the one step that makes it active: a CAS on the exact (agent, sessionId, createdAt) reservation, in
+ * the transaction that closes the name's earlier active row and writes the register event. A create runs it only after the registry
+ * holds kind=worker; if anything in between fails — the failure record included — the reservation stays and the agent stays PM's.
+ */
+const REGISTERING = "registering";
+const RESERVED = `state = 'retired' AND retiredAt IS NULL AND reason = '${REGISTERING}'`;
+
+export function reserveWorker(db: Database, input: RegisterInput): { agent: string; sessionId: string; createdAt: number } {
   if (!isWorkerRole(input.role)) throw new LedgerError("invalid", `--card-role 只能是 ${WORKER_ROLES.join(" / ")}`);
   return tx(db, () => {
     const task = getTask(db, input.taskId);
     if (!task) throw new LedgerError("not_found", checkCard(db, input.taskId) ?? "");
     const now = input.now ?? Date.now();
-    db.prepare(`UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = '同名 agent 重建' WHERE agent = ? AND state = 'active' AND ${NOT_PENDING}`).run(now, input.agent);
-    db.prepare(`INSERT OR REPLACE INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state) VALUES (?, ?, ?, ?, ?, ?, 'active')`)
-      .run(input.agent, input.sessionId, task.id, input.role, input.createdBy, now);
-    insertEvent(db, { actor: input.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler", text: `登记 ${input.role} agent ${input.agent}`,
-      data: { op: "worker_register", agent: input.agent, sessionId: input.sessionId, role: input.role, createdBy: input.createdBy } }, false);
-    return db.query("SELECT * FROM worker_agents WHERE agent = ? AND createdAt = ?").get(input.agent, now) as WorkerRegistration;
+    db.prepare("INSERT INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state, retiredAt, reason) VALUES (?, ?, ?, ?, ?, ?, 'retired', NULL, ?)")
+      .run(input.agent, input.sessionId, task.id, input.role, input.createdBy, now, REGISTERING);
+    return { agent: input.agent, sessionId: input.sessionId, createdAt: now };
   });
+}
+
+export function activateWorker(db: Database, r: { agent: string; sessionId: string; createdAt: number }, at?: number): WorkerRegistration {
+  return tx(db, () => {
+    const row = db.query(`SELECT * FROM worker_agents WHERE agent = ? AND sessionId = ? AND createdAt = ? AND ${RESERVED}`)
+      .get(r.agent, r.sessionId, r.createdAt) as WorkerRegistration | null;
+    if (!row) throw new LedgerError("conflict", `${r.agent} 的登记预留（会话 ${r.sessionId}）不在了或已落定，不激活`);
+    const task = row.taskId ? getTask(db, row.taskId) : null;
+    if (!task) throw new LedgerError("not_found", checkCard(db, row.taskId ?? "") ?? "");
+    const now = at ?? Math.max(Date.now(), r.createdAt);
+    // a re-created name replaces its earlier active row: one agent name runs one session at a time
+    db.prepare(`UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = '同名 agent 重建' WHERE agent = ? AND state = 'active' AND ${NOT_PENDING}`).run(now, r.agent);
+    const hit = db.prepare(`UPDATE worker_agents SET state = 'active', reason = NULL WHERE agent = ? AND sessionId = ? AND createdAt = ? AND ${RESERVED}`)
+      .run(r.agent, r.sessionId, r.createdAt);
+    if (hit.changes !== 1) throw new LedgerError("conflict", `${r.agent} 的登记预留激活失败`);
+    insertEvent(db, { actor: row.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler", text: `登记 ${row.role} agent ${r.agent}`,
+      data: { op: "worker_register", agent: r.agent, sessionId: r.sessionId, role: row.role, createdBy: row.createdBy } }, false);
+    return { ...row, state: "active", reason: null };
+  });
+}
+
+/** Reserve and activate at once: a registration with no registry tag in between (ledger callers, tests). */
+export function registerWorker(db: Database, input: RegisterInput): WorkerRegistration {
+  return activateWorker(db, reserveWorker(db, input), input.now);
 }
 
 /**
  * A create whose registration failed at any step: the agent is kept (never undone by name) and left for PM; one event records it.
- * A row the failed attempt already inserted (registry re-read / kind save failed after the INSERT) is closed in the same
- * transaction as the event — state retired, reason REGISTER_FAILED — so no active registration outlives the failure: the planner
- * and runner only act on active rows, and the failure only counts as 登记失败 N until PM registers and tags the session again.
+ * The attempt's reservation (or, conservatively, an active row of that session) is closed in the same transaction as the event —
+ * reason REGISTER_FAILED. If this write fails too, the reservation stays: still inert, still counted as 登记失败 (registerFailures).
  */
 export interface RegisterFailure { agent: string; sessionId: string; taskId: string; role: WorkerRole; createdBy: string; reason: string; now?: number }
 
@@ -150,7 +180,8 @@ export function recordRegisterFailure(db: Database, f: RegisterFailure): void {
   const now = f.now ?? Date.now();
   tx(db, () => {
     if (hasTable(db, "worker_agents")) {
-      db.prepare(`UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = ? WHERE agent = ? AND sessionId = ? AND state = 'active' AND ${NOT_PENDING}`)
+      db.prepare(`UPDATE worker_agents SET state = 'retired', retiredAt = ?, reason = ? WHERE agent = ? AND sessionId = ?
+        AND ((state = 'active' AND ${NOT_PENDING}) OR (${RESERVED}))`)
         .run(now, `${REGISTER_FAILED} ${f.reason}`.slice(0, 300), f.agent, f.sessionId);
     }
     insertEvent(db, { actor: f.createdBy, now }, { project: task.project, target: task.id, kind: "scheduler",
@@ -159,14 +190,19 @@ export function recordRegisterFailure(db: Database, f: RegisterFailure): void {
   });
 }
 
-/** Every recorded registration failure (agent + the session the create started); the planner counts the ones still unresolved. */
+/**
+ * Every registration not completed: recorded failures (agent + the session the create started) and reservations never activated
+ * (the failure record itself could not be written, or a create is mid-registration). The planner counts the ones still unresolved.
+ */
 export function registerFailures(db: Database): { agent: string; sessionId: string; taskId: string }[] {
   const rows = db.query("SELECT target, data FROM events WHERE kind = 'scheduler' AND json_extract(data, '$.op') = 'worker_register_failed'").all() as
     { target: string; data: string }[];
-  return rows.flatMap((r) => {
+  const reserved = hasTable(db, "worker_agents")
+    ? db.query(`SELECT agent, sessionId, taskId FROM worker_agents WHERE ${RESERVED}`).all() as { agent: string; sessionId: string; taskId: string | null }[] : [];
+  return [...rows.flatMap((r) => {
     const d = JSON.parse(r.data) as { agent?: unknown; sessionId?: unknown };
     return typeof d.agent === "string" && typeof d.sessionId === "string" ? [{ agent: d.agent, sessionId: d.sessionId, taskId: r.target }] : [];
-  });
+  }), ...reserved.map((r) => ({ agent: r.agent, sessionId: r.sessionId, taskId: r.taskId ?? "" }))];
 }
 
 export interface RetireRecord {
