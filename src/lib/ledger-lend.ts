@@ -20,6 +20,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
 import { LedgerError, listEvents, type LedgerErrorCode } from "./ledger-store.js";
 import { claimConvergenceStep } from "./lend-arbiter-claim.js";
+import { claimAuthorFamily } from "./lend-author-family.js";
 import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -382,6 +383,7 @@ export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimR
     db.prepare(`UPDATE lend_orders SET status = 'claimed', reason = NULL, worker = ?, leaseGen = leaseGen + 1, leaseUntil = ?, updatedAt = ?
       WHERE orderId = ? AND status = 'pooled'`).run(req.worker, until, now, o.orderId);
     claimConvergenceStep(db, ctx, o, req.worker, peer);
+    claimAuthorFamily(db, ctx, o);
     note(db, ctx, o, `出借：${peer} 领了${LABEL[o.step]}（${req.worker}）`, { op: "claim", worker: req.worker, gen: o.leaseGen + 1 });
     return claimed((clearPeerCooldown(db, o.peer, o.family), getLendOrder(db, o.orderId) as LendOrder));
   });
