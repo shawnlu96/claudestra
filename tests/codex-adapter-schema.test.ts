@@ -22,7 +22,10 @@ function closureSchema(defs: Defs, root: string): z.ZodType {
 }
 
 const text = [{ type: "text", text: "hi", text_elements: [] }];
-const turnStart = { threadId: "th", input: text, approvalPolicy: "never", approvalsReviewer: "user", sandboxPolicy: { type: "dangerFullAccess" }, summary: "auto", effort: null, model: "m" };
+const turnStart = {
+  threadId: "th", input: text, clientUserMessageId: "cum-1", approvalPolicy: "never", approvalsReviewer: "user",
+  sandboxPolicy: { type: "dangerFullAccess" }, summary: "auto", effort: null, model: "m",
+};
 const workspace = { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
 const opened = { threadId: "th", cwd: "/w", config: { a: 1 }, excludeTurns: true, modelProvider: "openai" };
 /** 每个出站定义至少一个我们会构造的样子；判别联合每个分支都要有 */
@@ -35,14 +38,15 @@ const SAMPLES: Record<string, object[]> = {
   "v2/ThreadResumeParams": [opened],
   "v2/ThreadForkParams": [opened],
   "v2/ThreadUnsubscribeParams": [{ threadId: "th" }],
-  "v2/ThreadReadParams": [{ threadId: "th" }],
+  "v2/ThreadReadParams": [{ threadId: "th", includeTurns: false }],
+  "v2/ThreadItemsListParams": [{ threadId: "th", sortDirection: "desc", limit: 50, cursor: null }, { threadId: "th", sortDirection: "desc", limit: 50, cursor: "c2" }],
   "v2/ThreadCompactStartParams": [{ threadId: "th" }],
   "v2/TurnStartParams": [
     turnStart,
     { ...turnStart, approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, effort: "high", summary: "none" },
     { ...turnStart, approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandboxPolicy: workspace },
   ],
-  "v2/TurnSteerParams": [{ threadId: "th", input: text, expectedTurnId: "T1" }],
+  "v2/TurnSteerParams": [{ threadId: "th", input: text, expectedTurnId: "T1", clientUserMessageId: "cum-2" }],
   "v2/TurnInterruptParams": [{ threadId: "th", turnId: "T1" }],
   "CommandExecutionRequestApprovalResponse": ["accept", "acceptForSession", "decline", "cancel"].map((decision) => ({ decision })),
   "FileChangeRequestApprovalResponse": ["accept", "acceptForSession", "decline", "cancel"].map((decision) => ({ decision })),
