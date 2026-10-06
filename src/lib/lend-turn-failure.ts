@@ -9,29 +9,50 @@ import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Ask } from "./ledger-asks.js";
 import type { LendRow } from "./lend-journal.js";
 
-/** ponytail: 只看尾部 1 MiB，失败那一轮开头之后又写了超过 1 MiB 就找不到 task_started、按不认处理；真碰上再改成分块倒读 */
-const TAIL_BYTES = 1024 * 1024;
+/** 从尾部按块倒读：每次 read 不超过 CHUNK；回合开始之后 rollout 可能写好几 MiB（工具输出），整份读进内存不行，只看尾部 1 MiB 又会漏 */
+const CHUNK = 256 * 1024;
+/** 最多往前读这么多还没有 task_started 就按不认处理（卡留给人）；跨块残行也受它约束，内存最多占这么多 */
+const MAX_SCAN_BYTES = 64 * 1024 * 1024;
 
-/** rollout 尾部最后一个 task_started 的时刻；没有、读不了 = null */
-function lastTurnStartAt(path: string): number | null {
+/** rollout 最后一个 task_started 的时刻（只往前读 maxScan 字节）；没有、读不了、超出上限 = null。导出给测试压小上限 */
+export function lastTurnStartAt(path: string, maxScan = MAX_SCAN_BYTES): number | null {
   let fd: number;
   try { fd = openSync(path, "r"); } catch { return null; } // 文件没了 / 读不了：不知道最近一轮何时开的，调用方按不认处理
   try {
     const size = fstatSync(fd).size;
-    const len = Math.min(size, TAIL_BYTES);
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, size - len);
-    for (const line of buf.toString("utf8").split("\n").reverse()) {
-      if (!line.includes('"task_started"')) continue;
-      try {
-        const rec = JSON.parse(line);
-        if (rec?.type !== "event_msg" || rec.payload?.type !== "task_started") continue;
-        const at = Date.parse(rec.timestamp);
-        return Number.isFinite(at) ? at : null;
-      } catch { continue; } // 尾巴开头那行被截断、不是完整 JSON：跳过，再往前没有更早的行了
+    const floor = Math.max(0, size - maxScan);
+    let carry = Buffer.alloc(0); // 上一块（更靠后）开头那段不完整的行，接到这一块末尾
+    for (let end = size; end > floor;) {
+      const start = Math.max(floor, end - CHUNK);
+      const chunk = Buffer.alloc(end - start);
+      readSync(fd, chunk, 0, chunk.length, start);
+      const buf = Buffer.concat([chunk, carry]);
+      // 按 \n 字节切：UTF-8 多字节字符里不会出现 0x0A，切开不会坏字；第 0 段只有读到文件开头才是完整行
+      let hi = buf.length;
+      for (;;) {
+        const nl = hi > 0 ? buf.lastIndexOf(10, hi - 1) : -1; // hi = 0 时不能传 -1：负偏移会从尾部重新找
+        if (nl < 0 && start > 0) break;
+        const at = turnStartIn(buf.subarray(nl + 1, hi));
+        if (at !== undefined) return at;
+        if (nl < 0) break;
+        hi = nl;
+      }
+      carry = Buffer.from(buf.subarray(0, hi));
+      end = start;
     }
     return null;
   } finally { closeSync(fd); }
+}
+
+/** 一行是 task_started 就给它的时刻（时间戳坏 = null）；不是 = undefined，接着往前找 */
+function turnStartIn(line: Buffer): number | null | undefined {
+  if (!line.includes('"task_started"')) return undefined;
+  try {
+    const rec = JSON.parse(line.toString("utf8"));
+    if (rec?.type !== "event_msg" || rec.payload?.type !== "task_started") return undefined;
+    const at = Date.parse(rec.timestamp);
+    return Number.isFinite(at) ? at : null;
+  } catch { return undefined; } // 上限处被截断的行 / 工具输出里恰好带这个字样的坏行：不是回合开始记录，接着往前找
 }
 
 /** 这张回合失败卡为什么证明不了是本单当前回合的；null = 证明了 */
@@ -44,6 +65,6 @@ export function turnFailureDoubt(card: Pick<Ask, "extra">, row: Pick<LendRow, "s
   const path = sessionPath(row.sessionId);
   if (!path) return "找不到本单会话的 rollout";
   const turnAt = lastTurnStartAt(path);
-  if (turnAt === null) return "rollout 尾部找不到回合开始记录";
+  if (turnAt === null) return "rollout 末尾 64 MiB 内找不到回合开始记录";
   return turnAt > failedAt ? "失败之后会话又开过新回合" : null;
 }

@@ -385,3 +385,21 @@ test.each(["active", "retiring", "retired"])("reviewer binding %s needs formal r
   expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow(/退役/);
   expect(f.snapshot()).toEqual(before);
 });
+
+test.each([
+  ["PM audit without live binding", "owner", { intentId: "real-plan", orderId: "lend:T:s1:r0:a0", peer: "mate", worker: "w", fp: "abcd-ef01-2345-6789",
+    branch: "lend/T-abcd", gen: 1, intentEventSeq: 3, claimSeq: 4, poolLinkSeq: 4, old: ["a.ts", "b.ts", "c.ts"], added: ["d.ts"], held: ["a.ts", "b.ts", "c.ts", "d.ts"] }],
+  ["malformed audit", "owner", { added: "d.ts" }],
+  ["executor audit", "agent-outsider", { added: ["d.ts"] }],
+])("WEXT1: %s is never provenance for a missing claim", (_, actor, data) => {
+  const f = fixture(true);
+  f.db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', 'd.ts', 'T', 'real-plan', 1, 'card')").run();
+  f.db.query(`INSERT INTO events (ts, actor, project, target, kind, text, data) VALUES (1, ?, 'p', 'T', 'decision', 'forged', ?)`)
+    .run(actor, JSON.stringify({ op: "scheduler_file_scope_extend", ...data }));
+  f.scope(["a.ts", "b.ts", "c.ts", "d.ts"]);
+  const before = f.snapshot(), dry = reconcileFileScope(f.db, f.ctx, f.input());
+  expect(dry).toMatchObject({ executable: false });
+  expect(dry.reasons.some(r => r.startsWith("扩范围审计"))).toBe(true);
+  expect(() => reconcileFileScope(f.db, f.ctx, { ...f.input(), apply: true })).toThrow("扩范围审计");
+  expect(f.snapshot()).toEqual(before);
+});
