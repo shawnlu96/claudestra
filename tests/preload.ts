@@ -43,7 +43,7 @@ testSafeStateDir(process.env.CLAUDESTRA_STATE_DIR);
 
 // bridge 一律指向没人听的端口，无条件：agent 会话里本来就带着 BRIDGE_URL，没设时默认又是线上的 3847，
 // 漏注入依赖的用例会把消息真发给线上 bridge。频道号 / token 也清掉，免得身份被当成跑测试的那个 agent。
-// 需要这些值的用例自己显式设（子进程测试照样继承这里的值）。
+// 需要这些值的用例自己显式设（子进程测试照样继承这里的值）。CLAUDESTRA_AGENT 同理：Pi / Codex agent 的 shell 带着它，台账身份会认它。
 process.env.BRIDGE_URL = "ws://127.0.0.1:9";
 process.env.BRIDGE_PORT = "9";
-for (const k of ["CONTROL_CHANNEL_ID", "DISCORD_CHANNEL_ID", "DISCORD_BOT_TOKEN", "BRIDGE_CONTROL_TOKEN"]) delete process.env[k];
+for (const k of ["CONTROL_CHANNEL_ID", "DISCORD_CHANNEL_ID", "CLAUDESTRA_AGENT", "DISCORD_BOT_TOKEN", "BRIDGE_CONTROL_TOKEN"]) delete process.env[k];

@@ -14,7 +14,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import { CLAIM_LEASE_MS } from "./scheduler-dispatch.js";
-import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { swapAuthorFamily } from "./lend-author-family.js";
 import { assertSchedulerLease, forwardSchedulerLease, SCHEDULER_LEASE_ENV } from "./scheduler-lease-env.js";
 import { localReviewerCount } from "./scheduler-pool-facts.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
@@ -66,7 +66,8 @@ async function createReplacement(db: Database, task: LedgerTask, family: AuthorF
   });
   assertSchedulerLease();
   if ("manual" in opened) return { kind: "manual", reason: opened.manual };
-  const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--purpose", "作者家族变更后的独立复验"];
+  const args = ["create", name, opened.dir, "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer",
+    "--purpose", "作者家族变更后的独立复验"];
   if (family === "codex") args.push("--runtime", "codex", "--transport", "acp");
   const r = await agent(...args);
   if (r.ok !== true) return { kind: "unknown", reason: oneLine(`新审查会话创建未确认：${String(r.error)}`) };
@@ -134,7 +135,7 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   if (intent.status !== "pending" || intent.node !== "adversarial_review" || task.stage !== "review" || task.headSHA !== intent.head ||
     task.specRev !== intent.specRev || task.rev !== intent.taskRev || workflow?.mode !== "auto" || workflow.specRev !== task.specRev) throw new LedgerError("conflict", "新审查会话的创建意图已过期");
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return "本机另一家族审查名额已满，等待空位后自动续派";
-  const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily;
+  const wrote = swapAuthorFamily(db, task, workflow, swap);
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const got = await deps.ensure(task, wrote === "claude" ? "codex" : "claude", swappedSession(db, swap.data.intentId));
   deps.active();

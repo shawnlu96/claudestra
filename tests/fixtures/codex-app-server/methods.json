@@ -134,6 +134,12 @@
       "resultExists": true,
       "schemaParams": "v2/ThreadForkParams"
     },
+    "thread/items/list": {
+      "params": "v2/ThreadItemsListParams",
+      "result": "v2/ThreadItemsListResponse",
+      "resultExists": true,
+      "schemaParams": "v2/ThreadItemsListParams"
+    },
     "thread/read": {
       "params": "v2/ThreadReadParams",
       "result": "v2/ThreadReadResponse",
