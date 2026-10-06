@@ -42,6 +42,8 @@ function hostWith(registryPath: string, stopGraceMs = 3_000) {
   const frames: any[] = [];
   const logs: string[] = [];
   const shown: string[] = [];
+  /** 发给 bridge 的先后：ws 帧的 type，Stop hook 记成 hook:<event> */
+  const order: string[] = [];
   let onFrame!: (f: Record<string, any>) => void;
   let ready = false;
   host = new AcpHost({
@@ -52,11 +54,11 @@ function hostWith(registryPath: string, stopGraceMs = 3_000) {
     spawn: (cmd, env, cwd) => { const p = spawnAdapter(cmd, env, cwd, (m) => logs.push(m)); adapters.push(p); return p; },
     makeLink: (d) => {
       onFrame = d.onFrame;
-      return { connect: () => void setTimeout(() => d.onRegistered(), 0), send: (f: any) => (frames.push(f), true),
+      return { connect: () => void setTimeout(() => d.onRegistered(), 0), send: (f: any) => (frames.push(f), order.push(f.type), true),
         request: async (f: any) => (frames.push(f), f.type === "acp_entries" ? true : null), close: () => {}, up: true } as any;
     },
     startProxy: (d) => startToolProxy(d),
-    postHook: async () => ({}),
+    postHook: async (r: any) => (order.push(`hook:${r.event}`), {}),
     markReady: async () => void (ready = true),
     rotateSession: async () => ({ ok: true }),
     log: (m) => logs.push(m),
@@ -78,7 +80,7 @@ function hostWith(registryPath: string, stopGraceMs = 3_000) {
   };
   const failures = () => frames.filter((f) => f.type === "acp_failure");
   const apiErrors = () => frames.filter((f) => f.type === "acp_entries").flatMap((f) => f.entries).filter((e: any) => e.isApiErrorMessage === true);
-  return { midTurn, hangUpAdapter, failures, apiErrors, logs, shown };
+  return { midTurn, hangUpAdapter, failures, apiErrors, logs, shown, order };
 }
 
 describe("LKN-1 主动收 worker 时中断的回合", () => {
@@ -103,8 +105,10 @@ describe("LKN-1 主动收 worker 时中断的回合", () => {
     expect(h.failures()).toEqual([]);
     expect(h.apiErrors()).toEqual([]);
     expect(h.logs.some((l) => l.startsWith("本机在收这个 agent：回合中断不报失败"))).toBe(true);
-    expect(h.shown.some((s) => s.startsWith("❌ 回合失败"))).toBe(false); // 失败行换成中性一行（回合收尾的分隔线照旧）
+    await wait(() => h.order.includes("hook:StopFailure"));
+    expect(h.shown.filter((s) => s.includes("失败") && !s.includes("不算失败"))).toEqual([]); // 失败行和收尾分隔线都换成中性的
     expect(h.shown).toContain("⏹ 本机在收这个 agent：回合中断，不算失败");
+    expect(h.shown).toContain("── 本机在收：回合中断 ──");
   }, 30_000);
 
   test("对照：没有收 worker 的意图（registry 仍 active），适配器 exit 129 照旧报失败", async () => {
@@ -116,7 +120,7 @@ describe("LKN-1 主动收 worker 时中断的回合", () => {
     expect(h.logs.some((l) => l.startsWith("本机在收这个 agent"))).toBe(false);
   }, 30_000);
 
-  test("对照：撤单关窗没成（unconfirmed，registry 留着 stopped），之后适配器自己 exit 129：宿主没收到停止，过了宽限照旧报", async () => {
+  test("对照：撤单关窗没成（unconfirmed，registry 留着 stopped），之后适配器自己 exit 129：宿主没收到停止，过了宽限照旧报，且失败帧先于 Stop", async () => {
     const path = regFile({ socket: "s", agents: { [NAME]: ENTRY } });
     const h = hostWith(path, 300);
     await h.midTurn();
@@ -127,7 +131,10 @@ describe("LKN-1 主动收 worker 时中断的回合", () => {
     });
     expect(report.unconfirmed.map((u) => u.name)).toEqual([NAME]);
     expect(await h.hangUpAdapter()).toBe(129);
-    await wait(() => h.failures().length > 0);
+    await wait(() => h.order.includes("hook:StopFailure"));
+    // bridge 只在 Stop 当下取这一轮的失败（stop-settle.ts failedTurn）：失败帧晚到，请求方就收不到失败说明、回程被当空答消化
+    expect(h.order.filter((t) => t === "acp_failure" || t.startsWith("hook:"))).toEqual(["acp_failure", "hook:StopFailure"]);
+    expect(h.shown).toContain("── 回合失败 ──");
     expect(h.logs.some((l) => l.startsWith("本机在收这个 agent"))).toBe(false);
   }, 30_000);
 });

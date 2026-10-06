@@ -131,7 +131,7 @@ export async function stopRevokedWorkers(io: StopIo): Promise<StopReport> {
         await waitExit(w.createPid, w.name, io, KILL_WAIT_MS);
       }
     }
-    // 关窗口前置 stopped：ACP 宿主据此认出是本机在收、回合中断不报失败（acp-host.ts stopIntended）；也免得窗口没了被 restart 拉回来
+    // 关窗口前置 stopped：ACP 宿主据此（加上自己收到停止信号）认出是本机在收、回合中断不报失败（lib/acp/host.ts fail()）；也免得窗口没了被 restart 拉回来
     await io.markStopped(w.name);
     await archiveClaudeWorkerName(w.name);
     await io.killWindows(w.name);
