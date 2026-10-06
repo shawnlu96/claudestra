@@ -1,0 +1,38 @@
+/*
+ * 额度提醒条：顶栏下方居中、非模态（外层不吃点击，只有卡片本身可点）；两族上下叠放。
+ * 层级比额度墙横幅（z 68）低一档：撞墙时墙的横幅在上面。窄屏（390px）左右各留 12px，不伸到输入框那边。
+ */
+.wrap {
+  pointer-events: none;
+  position: fixed;
+  inset-inline: 0;
+  top: calc(env(safe-area-inset-top) + 56px);
+  z-index: 67;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 12px;
+}
+.row {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  max-width: 560px;
+  border-radius: 14px;
+  padding: 6px 6px 6px 12px;
+  font-size: 12px;
+  line-height: 1.35;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.14);
+}
+.icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+.text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
