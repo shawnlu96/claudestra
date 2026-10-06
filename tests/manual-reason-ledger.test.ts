@@ -3,7 +3,7 @@
  * the patrol (collectAuditSnapshots → auditLedger → reconcileFindings). A missing / unknown reason refuses the whole write (no pool,
  * intent or workflow change); the patrol only reports, and every scenario ends with zero actions on intents, workflow or events.
  */
-import { rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -187,6 +187,8 @@ describe("patrol: observe reports once, off is silent, nothing ever acts", () =>
   test("formal CFG policy via `ledger scheduler-recovery` + `ledger audit`: off and an unreadable policy file report nothing; default observe reports", async () => {
     // RECOVERY_POLICY_PATH sits in the test run's temp state dir (tests/preload.ts), never the real one
     expect(RECOVERY_POLICY_PATH.startsWith(join(homedir(), ".claude-orchestrator"))).toBe(false);
+    // the state dir is shared by the whole run: keep the exact bytes (or absence) of whatever policy file is there and put them back
+    const saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH) : null;
     const f = autoFixture();
     try {
       createTask(f.db, f.at("owner"), { project: "p", id: "T0", title: "前置", kind: "code" });
@@ -214,7 +216,11 @@ describe("patrol: observe reports once, off is silent, nothing ever acts", () =>
       expect(would(await auditCli(f))).toHaveLength(1);
       expect(state(f.db)).toEqual(before);
       expect(wfRow(f.db)).toMatchObject({ mode: "manual" });
-    } finally { rmSync(RECOVERY_POLICY_PATH, { force: true }); f.close(); }
+    } finally {
+      if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true });
+      else writeFileSync(RECOVERY_POLICY_PATH, saved);
+      f.close();
+    }
   });
 
   test("a sticky reason (owner hold) and an unknown merge never report would-resume, whatever else is clear", async () => {
