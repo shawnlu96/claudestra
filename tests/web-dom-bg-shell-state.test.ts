@@ -355,7 +355,9 @@ describe("后台 shell 全链路：静默不等于结束", () => {
       });
       expect(task("retained1")?.shellEnd).toEqual({ kind: "exited", code: 1 });
       expect(task("lost")).toMatchObject({ status: "running", shellUntracked: true });
-      expect(task("nogrowth")).toMatchObject({ status: "running", shellUntracked: true });
+      // 输出文件还在的 nogrowth：重启后的 bridge 接着跟它，回到运行中而不是「状态未知」；文件已删的 lost 仍是状态未知
+      expect(task("nogrowth")).toMatchObject({ status: "running" });
+      expect(task("nogrowth").shellUntracked).toBeUndefined();
       await expandDone(host);
       expect(rowText(host, "retained1")).toContain("exit 1");
       expect(rowText(host, "retained1")).not.toContain("✓");
