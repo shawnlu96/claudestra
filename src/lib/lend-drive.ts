@@ -11,6 +11,7 @@ import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow
 import type { Database } from "bun:sqlite";
 import { advance, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
 import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
+import { lendQuotaLineCap } from "./lend-quota-line.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
 import type { LendContact } from "./lend-policy.js";
 import type { ProjectDef } from "./projects.js";
@@ -124,7 +125,7 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
   if (!entry) return `已不再向 ${row.peer} 出借（lend.json 关了或删了这条）`;
   if (!entry.repos.includes(str(row.preview.repo))) return `仓库 ${str(row.preview.repo)} 已不在白名单`;
   if (!roleOfStep(str(row.preview.step))) return `不认识的订单阶段 ${str(row.preview.step)}，不领这一单`;
-  const slots = row.family === "claude" ? claudeLendSlots(entry) : row.family === "codex" ? entry.families.codex ?? 0 : 0;
+  const slots = lendQuotaLineCap(row.family, row.family === "claude" ? claudeLendSlots(entry) : row.family === "codex" ? entry.families.codex ?? 0 : 0, now);
   const busy = db.query(`SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND family = ? AND state IN (${LEASED_STATES.map(() => "?").join(",")})`)
     .get(row.peer, row.family, ...LEASED_STATES) as { n: number };
   if (busy.n >= slots) return "wait";
