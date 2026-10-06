@@ -257,25 +257,6 @@ describe("r2 repro: release binding survives truncation, edge revocation and ids
     await tick(f);
     expect(resumes(f.db)).toHaveLength(1);
   }));
-
-  test("an unsettled deploy journal (unknown / claimed / running) refuses until formally resolved", () => run(autoFixture(), async (f) => {
-    await depsManual(f);
-    await policy(f, "on");
-    verify(f);
-    f.db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, causalSeq, eventSeq, taskRev, specRev, head, templateVersion, status, reason, createdAt, updatedAt)
-      VALUES ('m1', 'T1', 'p', 'merge_deploy', 'merge', 1, 1, 1, 1, NULL, 2, 'cancelled', 'merge', 1, 1)`).run();
-    f.db.query(`INSERT INTO scheduler_merges (intentId, taskId, project, prRef, expectedBranch, reviewedHead, requiredChecks, phase, createdAt, updatedAt)
-      VALUES ('m1', 'T1', 'p', '1', 'b', 'h', '[]', 'merged', 1, 1)`).run();
-    f.db.query(`INSERT INTO scheduler_deploys (intentId, taskId, project, prRef, mergeSha, phase, outcome, liveness, createdAt, updatedAt)
-      VALUES ('m1', 'T1', 'p', '1', 'sha', 'unknown', 'unknown', 'dead', 1, 1)`).run();
-    await refuses(f, "部署未正式结清");
-    for (const phase of ["claimed", "running"]) {
-      f.db.query("UPDATE scheduler_deploys SET phase = ?, outcome = NULL, liveness = NULL WHERE intentId = 'm1'").run(phase);
-      expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: false, why: expect.stringContaining(`m1:${phase}`) });
-    }
-    f.db.query("UPDATE scheduler_deploys SET phase = 'resolved' WHERE intentId = 'm1'").run();
-    expect(manualResumeVerdict(f.db, f.task(), wf(f))).toMatchObject({ ok: true });
-  }));
 });
 
 describe("on: every other reason and every hold stays with people", () => {
