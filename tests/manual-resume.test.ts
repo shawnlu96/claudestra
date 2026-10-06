@@ -353,7 +353,7 @@ describe("the ledger gate: the scheduler identity re-checks everything in workfl
     await policy(f, "off");
     expect(await schedulerResume(f, reason)).toMatchObject({ ok: false, code: "forbidden" });
     await policy(f, "on");
-    expect(await schedulerResume(f, "随便交回")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("授权") });
+    expect(await schedulerResume(f, "随便交回")).toMatchObject({ ok: false, code: "forbidden", error: expect.stringContaining("只有项目 PM") }); // no authorization: old refusal
     f.db.query("UPDATE tasks SET round = round + 1 WHERE id = 'T1'").run(); // rev unchanged: only the authorization catches it
     expect(await schedulerResume(f, reason)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("授权已失效") });
     f.db.query("UPDATE tasks SET round = round - 1 WHERE id = 'T1'").run();

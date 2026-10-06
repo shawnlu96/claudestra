@@ -173,6 +173,9 @@ export function manualResumeReason(f: ManualResumeFacts): string {
   return `manual 自动恢复 授权 ${f.fingerprint}：${f.code} 解除条件已满足（前置 ${f.deps.map((d) => `${d.id}@${d.stage}`).join("、")}，进 manual #${f.entrySeq}）`;
 }
 
+/** Whether a workflow-resume reason claims MAN2's authorization; without one the scheduler identity keeps the old PM-only refusal. */
+export const claimsManualResume = (reason: string): boolean => AUTH.test(reason);
+
 /**
  * Inside resumeAutoWorkflow's transaction, for the scheduler identity only: the policy must say on right now and the verdict must hold
  * with the exact authorization the caller read. Throws (nothing written) otherwise; returns the event mark.

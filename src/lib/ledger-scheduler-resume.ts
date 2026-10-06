@@ -14,7 +14,7 @@ import { closePoolOrders } from "./ledger-scheduler-pool.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
-import { manualResumeGate } from "./manual-resume.js";
+import { claimsManualResume, manualResumeGate } from "./manual-resume.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
@@ -25,8 +25,9 @@ export interface ResumeResult { workflow: TaskWorkflow; fromSpecRev: number; nex
 export function resumeAutoWorkflow(db: Database, ctx: WriteCtx, input: ResumeInput, policy?: RecoveryPolicyPort): ResumeResult {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
-    // the scheduler identity only through MAN2's gate: policy on + the authorized release re-checked in this transaction
-    if (ctx.actor === "scheduler") return resumeCore(db, ctx, input, manualResumeGate(db, input, policy));
+    // the scheduler identity only through MAN2's gate (policy on + the authorized release re-checked in this transaction), and only
+    // when it claims that authorization; any other scheduler hand-back keeps the PM-only refusal below
+    if (ctx.actor === "scheduler" && claimsManualResume(input.reason)) return resumeCore(db, ctx, input, manualResumeGate(db, input, policy));
     if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能把任务交回自动");
     return resumeCore(db, ctx, input, { manual: true });
   });
