@@ -1,7 +1,7 @@
 import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InstanceKey } from "../src/lib/instance-key.js";
@@ -9,7 +9,7 @@ import type { Ask } from "../src/lib/ledger-asks.js";
 import type { HttpPeer } from "../src/lib/peers.js";
 import type { Principal } from "../src/lib/principals.js";
 import { joinSharedLedger, parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join.js";
-import { centerOfferUrl, pendingOfferDir, readPendingOffer, savePendingOffer } from "../src/lib/shared-ledger-join-offer.js";
+import { centerOfferUrl, pendingOfferDir, listPendingOfferIds, readPendingOffer, savePendingOffer } from "../src/lib/shared-ledger-join-offer.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { DECLINE_BUTTON, JOIN_BUTTON, onJoinOfferAnswered, sweepJoinOffers } from "../src/bridge/shared-ledger-join-offer.js";
 import { handleJoinOfferApi, type JoinOfferRouteDeps } from "../src/bridge/local-api/shared-ledger-join-offer.js";
@@ -103,7 +103,7 @@ async function post(w: World, token: string | null, body: unknown, path = "/api/
   if (center) w.centers.push(center.centerId);
   return (await handleJoinOfferApi(new Request(url.toString(), { method: "POST", headers, body: JSON.stringify(body) }), url, w.deps))!;
 }
-const pendingFiles = (w: World) => (existsSync(pendingOfferDir(w.dir)) ? readdirSync(pendingOfferDir(w.dir)) : []);
+const pendingFiles = (w: World) => listPendingOfferIds(w.dir);
 function answer(a: Ask, button: string, owner = true): Ask {
   return { ...a, state: "answered", answer: { choices: [`[button:${button}]`], labels: [button === JOIN_BUTTON ? "加入" : "不加入"], text: "",
     principal: owner ? "owner:self" : "guest:abc", via: "web_card", at: Date.now(), ...(owner ? { owner: true as const } : { external: true }) } };
@@ -115,15 +115,14 @@ const bindProjectA = (w: World, code: string, localProjectId = "project-a") => {
 const receiptStatus = (w: World) => w.receipts.map((r) => JSON.parse(r.body).status);
 
 describe("receiving a join offer (验收 1)", () => {
-  test("configured peer → 0600 pending file + authorize card with peer, center host and a marked same-id join / 不加入", async () => {
+  test("configured peer → memory-only pending offer + authorize card with peer, center host and a marked same-id join / 不加入", async () => {
     const w = world("peer-a1");
     const body = offerBody(markedCode());
     const res = await post(w, "in-peer", body);
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ ok: true, accepted: true, offerId: body.offerId });
-    const file = join(pendingOfferDir(w.dir), `${body.offerId}.json`);
-    expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(statSync(pendingOfferDir(w.dir)).mode & 0o777).toBe(0o700);
+    expect(existsSync(pendingOfferDir(w.dir))).toBe(false);
+    expect(readdirSync(w.dir)).toEqual([]);
     expect(readPendingOffer(w.dir, body.offerId as string)).toMatchObject({ peer: "peer-a1", host: "ledger-a.example", code: body.code, askId: "ask_1" });
     const [card] = w.asks;
     expect(card).toMatchObject({ kind: "authorize", source: "system", title: "加入共享台账？" });
@@ -156,7 +155,7 @@ describe("receiving a join offer (验收 1)", () => {
     expect((await post(other, "in-peer", offerBody(markedCode()))).status).toBe(202);
   });
 
-  test("the same offerId twice → 409, one file", async () => {
+  test("the same offerId twice → 409, one memory entry", async () => {
     const w = world("peer-a4");
     const body = offerBody(markedCode());
     expect((await post(w, "in-peer", body)).status).toBe(202);
@@ -249,7 +248,7 @@ describe("owner answers the card (验收 2)", () => {
     expect(w.joins).toEqual([]);
   });
 
-  test("expired → sweeper deletes the file, cancels the open card, receipt expired, joinSharedLedger not called", async () => {
+  test("expired → sweeper discards the credential, cancels the open card, receipt expired, joinSharedLedger not called", async () => {
     const w = world("peer-b3");
     expect((await post(w, "in-peer", offerBody(markedCode(), { expiresAt: w.clock.now + 60_000 }))).status).toBe(202);
     await sweepJoinOffers(w.deps);
@@ -284,7 +283,7 @@ describe("owner answers the card (验收 2)", () => {
     expect(receiptStatus(w)).toEqual(["failed", "failed"]);
   });
 
-  test("an answered card the hook missed (bridge restart) is settled by the sweeper", async () => {
+  test("an answered card the hook missed in this process is settled by the sweeper", async () => {
     const w = world("peer-b6");
     expect((await post(w, "in-peer", offerBody(markedCode()))).status).toBe(202);
     w.asks[0] = answer(w.asks[0]!, DECLINE_BUTTON);
@@ -294,7 +293,7 @@ describe("owner answers the card (验收 2)", () => {
   });
 });
 
-describe("no secret leaves the pending file (验收 3)", () => {
+describe("no secret is persisted or exposed (验收 3)", () => {
   test("code, bearer and center response body are absent from logs, cards, informs and receipts", async () => {
     const w = world("peer-c1");
     const code = mint("peer-c1");

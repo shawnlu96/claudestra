@@ -1,15 +1,16 @@
 /**
  * Shared-ledger join offers: one peer bridge hands a join code to another, whose owner approves it with one button.
  * The code is a one-time credential, so it travels only in the offer body over the configured peer channel and rests only in
- * a 0600 pending file on the receiving machine. Cards, receipts, logs and errors carry fixed wording plus the peer name,
+ * process memory on the receiving machine. A restart requires a fresh invitation. Cards, receipts, logs and errors carry
+ * fixed wording plus the peer name,
  * the center host and the centerId — never the code, a bearer or anything the center answered.
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode } from "./shared-ledger-join.js";
 import type { SharedLedgerProjectChoice } from "./shared-ledger-local-project.js";
-import { writeJsonAtomic, writeJsonAtomicSync } from "./state-file.js";
+import { writeJsonAtomic } from "./state-file.js";
 
 export const JOIN_OFFER_PATH = "/api/v1/shared-ledger-join-offer";
 export const JOIN_OFFER_RECEIPT_PATH = "/api/v1/shared-ledger-join-offer/receipt";
@@ -17,7 +18,7 @@ export const JOIN_OFFER_RECEIPT_PATH = "/api/v1/shared-ledger-join-offer/receipt
 export const JOIN_OFFER_MAX_TTL_MS = 24 * 3600_000;
 const RATE_LIMIT = 5;
 const RATE_WINDOW_MS = 3600_000;
-/** Disk cap across all peers: with 5/hour/peer this only bites when many peers flood at once. */
+/** Memory cap across all peers prevents invitation floods from retaining unbounded credentials. */
 const MAX_PENDING = 50;
 const NOTE_MAX = 120;
 const OFFER_ID_RE = /^[a-f0-9]{32}$/;
@@ -77,7 +78,7 @@ export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: J
   return { ok: true, offer: { offerId: b.offerId, ...center, centerId: code.centerId, code: b.code as string, ...(note ? { note } : {}), expiresAt } };
 }
 
-/** Per-peer sliding window (5 per hour); in memory, so a bridge restart forgives — the pending-file cap still holds. */
+/** Per-peer sliding window (5 per hour); in memory, so a bridge restart forgives — the pending-offer cap still holds. */
 export class JoinOfferLimiter {
   private hits = new Map<string, number[]>();
   constructor(private readonly limit = RATE_LIMIT, private readonly windowMs = RATE_WINDOW_MS) {}
@@ -92,7 +93,7 @@ export class JoinOfferLimiter {
   }
 }
 
-// ── 0600 files: pending offers (receiver) and sent offers (sender) ──
+// Pending credentials stay in process memory; only non-secret sender receipts are persisted.
 
 export interface PendingJoinOffer extends JoinOffer { peer: string; receivedAt: number; askId?: string; projectChoices?: SharedLedgerProjectChoice[]; sharedProjectId?: string }
 export interface SentJoinOffer {
@@ -127,11 +128,9 @@ function readPrivate<T>(dir: string, offerId: string, shape: (v: unknown) => v i
   }
 }
 
-const isPending = (v: unknown): v is PendingJoinOffer => {
-  const p = v as PendingJoinOffer;
-  return !!p && typeof p === "object" && isOfferId(p.offerId) && typeof p.peer === "string" && !!centerOfferUrl(p.url)
-    && !!parseSharedLedgerJoinCode(p.code) && Number.isSafeInteger(p.expiresAt) && Number.isSafeInteger(p.receivedAt);
-};
+// Key by state directory so isolated instances and tests cannot claim each other's invitations.
+const pendingOffers = new Map<string, Map<string, PendingJoinOffer>>();
+
 const isSent = (v: unknown): v is SentJoinOffer => {
   const s = v as SentJoinOffer;
   return !!s && typeof s === "object" && isOfferId(s.offerId) && typeof s.peer === "string" && typeof s.host === "string"
@@ -139,39 +138,39 @@ const isSent = (v: unknown): v is SentJoinOffer => {
 };
 
 export function listPendingOfferIds(stateDir: string): string[] {
-  const dir = pendingOfferDir(stateDir);
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => /^[a-f0-9]{32}\.json$/.test(f)).map((f) => f.slice(0, 32));
+  return [...(pendingOffers.get(stateDir)?.keys() ?? [])];
 }
 
-export const readPendingOffer = (stateDir: string, offerId: string): PendingJoinOffer | null =>
-  readPrivate(pendingOfferDir(stateDir), offerId, isPending);
+export function readPendingOffer(stateDir: string, offerId: string): PendingJoinOffer | null {
+  const p = pendingOffers.get(stateDir)?.get(offerId);
+  return p ? structuredClone(p) : null;
+}
 
-/** Refuses a second offer with the same id and enforces the disk cap; the caller turns false into 409 / 429. */
+/** No await between the cap/dedup check and insertion: concurrent arrivals cannot overfill the store. */
 export async function savePendingOffer(stateDir: string, p: PendingJoinOffer, opts: { replace?: boolean } = {}): Promise<"ok" | "exists" | "full"> {
-  const ids = listPendingOfferIds(stateDir);
-  if (!opts.replace && ids.includes(p.offerId)) return "exists";
-  if (!opts.replace && ids.length >= MAX_PENDING) return "full";
-  await writePrivate(pendingOfferDir(stateDir), p.offerId, p);
+  const offers = pendingOffers.get(stateDir) ?? new Map<string, PendingJoinOffer>();
+  const present = offers.has(p.offerId);
+  if (!opts.replace && present) return "exists";
+  if (!present && offers.size >= MAX_PENDING) return "full";
+  offers.set(p.offerId, structuredClone(p));
+  pendingOffers.set(stateDir, offers);
   return "ok";
 }
 
-/** No await between checking and attaching: answer claims cannot interleave or revive an already claimed offer. */
+/** An ask id is public metadata; the credential itself never enters the ask database. */
 export function attachPendingOfferAsk(stateDir: string, offerId: string, askId: string): void {
-  const pending = readPendingOffer(stateDir, offerId);
-  if (!pending) return;
-  writeJsonAtomicSync(join(pendingOfferDir(stateDir), `${offerId}.json`), { ...pending, askId }, { mode: 0o600 });
+  const pending = pendingOffers.get(stateDir)?.get(offerId);
+  if (pending) pending.askId = askId;
 }
 
-/** Take the offer out of the store; whoever unlinks it first owns it, so a double click or the sweeper cannot redeem twice. */
+/** Synchronous claim prevents double clicks and the sweeper from redeeming the same credential twice. */
 export function claimPendingOffer(stateDir: string, offerId: string): PendingJoinOffer | null {
-  if (!isOfferId(offerId)) return null;
-  const p = readPendingOffer(stateDir, offerId);
-  try {
-    unlinkSync(join(pendingOfferDir(stateDir), `${offerId}.json`));
-  } catch {
-    return null; // Already claimed (or never there): the other claimant handles it.
-  }
+  const offers = pendingOffers.get(stateDir);
+  if (!offers) return null;
+  const p = offers.get(offerId);
+  if (!p) return null;
+  offers.delete(offerId);
+  if (!offers.size) pendingOffers.delete(stateDir);
   return p;
 }
 

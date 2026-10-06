@@ -2,7 +2,7 @@
  * `manager shared-ledger-offer --peer <peer> --url <中心根 URL> --code-file <0600 文件> [--project <本机项目>] [--task <任务>] [--expires-at <ms|ISO>] [--note <一句话>]`
  * Hands a shared-ledger join code to a configured HTTP peer's bridge (POST /api/v1/shared-ledger-join-offer) with our outbound
  * peer token. The code is read from a 0600 file only — never argv, never stdout — and goes out only inside that one request body.
- * "accepted" means the peer stored it and asked its owner; the joined / declined / expired / failed receipt lands later as a
+ * "accepted" means the peer retained it in memory and asked its owner; the joined / declined / expired / failed receipt lands later as a
  * ledger note in --project (default: the calling agent's project).
  */
 import { randomBytes } from "node:crypto";
@@ -76,16 +76,16 @@ const live = (): OfferDeps => ({
   },
 });
 
-async function sendOffer(flags: Record<string, string>, d: OfferDeps): Promise<Record<string, unknown>> {
+/** The center-to-peer path calls this with an in-memory code; the CLI file reader is only an operational fallback. */
+export async function sendSharedLedgerOffer(flags: Record<string, string>, code: string, d: OfferDeps): Promise<Record<string, unknown>> {
   const center = centerOfferUrl(flags.url);
   if (!center) return { ok: false, error: "--url 要是中心根地址：https://<主机名>/（不带路径、查询、账号）" };
   const expiresAt = expiresAtOf(flags["expires-at"], d.now);
   if (typeof expiresAt === "string") return { ok: false, error: expiresAt };
   if (flags.task !== undefined && !ID_RE.test(flags.task)) return { ok: false, error: "--task 不是合法的任务 id" };
   const note = flags.note ?? DEFAULT_NOTE;
-  if (Array.from(note).length > 120 || /[\p{Cc}\p{Cf}]/u.test(note)) return { ok: false, error: "--note 只能是一行 120 字以内" };
-  const code = readJoinCodeFile(flags["code-file"]!).trim();
-  const parsed = parseSharedLedgerJoinCode(code);
+  if (Array.from(note).length > 120 || /[\p{Cc}\p{Cf}]/u.test(note) || looksLikeSharedLedgerJoinCode(note)) return { ok: false, error: "--note 只能是一行 120 字以内" };
+  const parsed = code === code.trim() ? parseSharedLedgerJoinCode(code) : null;
   if (!parsed) return { ok: false, error: "文件里不是合法的入组码" };
   const peer = await d.findPeer(flags.peer!);
   const bad = peerProblem(peer, flags.peer!);
@@ -112,7 +112,7 @@ export async function cmdSharedLedgerOffer(args: string[], deps: Partial<OfferDe
   const flags = parseOfferArgs(args);
   if (typeof flags === "string") return output({ ok: false, error: flags });
   try {
-    output(await sendOffer(flags, { ...live(), ...deps }));
+    output(await sendSharedLedgerOffer(flags, readJoinCodeFile(flags["code-file"]!).trim(), { ...live(), ...deps }));
   } catch (e) {
     // Only fixed or self-written messages leave: arbitrary errors could quote the code file's content.
     const own = e instanceof SharedLedgerJoinError || (e instanceof Error && /^(要带 --project|projects\.json 里没有项目)/.test(e.message));

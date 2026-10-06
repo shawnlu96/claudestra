@@ -1,7 +1,7 @@
 /**
  * Shared-ledger join offers inside the bridge (lib/shared-ledger-join-offer.ts holds the pure parts).
- *   Receiver: a configured peer POSTs an offer → 0600 pending file → authorize card for the owner. "加入" + ask-check →
- *   joinSharedLedger (subject owner:self) → inform the owner → receipt to the inviter. "不加入", expiry or failure delete the file.
+ *   Receiver: a configured peer POSTs an offer → memory pending offer → authorize card for the owner. "加入" + ask-check →
+ *   joinSharedLedger (subject owner:self) → inform the owner → receipt to the inviter. "不加入", expiry or failure discard the credential.
  *   Sender: the receipt from that same peer marks our sent record and becomes a ledger note.
  * Every message here is fixed wording (lib joinOfferCard / joinOfferOutcomeText); the code and center responses never reach them.
  */
