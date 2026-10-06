@@ -10,10 +10,13 @@
  * - acp_permission：权限请求按频道排队，一次出一张卡。宿主超时 / 适配器退出发 gone 撤卡，宿主断线（onAcpHostGone）撤它挂着的。
  * 权限卡、额度卡的按钮都带这张卡的代际（每张新卡新生成，不复用）：作答先按代际原子认领，旧卡、认领过的一律 409、零授权；
  * 权限还要经宿主确认它仍在等才算答上。只认这个频道当前登记的那条连接发来的帧。tests/acp-link.test.ts。
+ * CTXA 卡片压缩（acpCardContext / acpCardCompact）走同一条 acp_call；旧宿主不认这两个 op = unavailable，绝不降级成普通 slash。
  */
 import { randomBytes } from "node:crypto";
 import type { Client } from "discord.js";
 import { parseConfigOptions, quotaCardChoices, type ConfigOption, type QuotaChoice } from "../lib/acp/config.js";
+import { CARD_COMPACT_CAP, type CardCompactRequest, type CardCtxStatus, type CardOpRecord } from "../lib/acp/card-context.js";
+import { CARD_OPS } from "../lib/acp/card-context-host.js";
 import type { AcpFailure } from "../lib/acp/failures.js";
 import type { PermissionCard } from "../lib/acp/permissions.js";
 import { parseSlotReply, SLOT_OPS, type CancelSlotResult, type HostSlotState } from "../lib/acp/turn.js";
@@ -43,7 +46,9 @@ const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }
 const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
-type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean; slot?: HostSlotState; cancel?: CancelSlotResult };
+type CallResult = {
+  ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean; slot?: HostSlotState; cancel?: CancelSlotResult; card?: Record<string, any>;
+};
 type Call = { channelId: string; ws: Socket; op: unknown; opId?: string; gen?: number; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> };
 const calls = new Map<string, Call>();
 let nextCall = 0;
@@ -106,6 +111,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (!c || c.channelId !== channelId || c.ws !== ws) return;
       calls.delete(id);
       clearTimeout(c.timer);
+      if (CARD_OPS.has(String(c.op))) return void c.resolve({ ok: msg.ok === true, card: msg }); // 卡片调用的回包整份交给 acpCard*，在那里核形状
       if (msg.ok === true && c.opId !== undefined) return void c.resolve(slotResult(msg, c));
       c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, ...(msg.ok === true && typeof msg.busy === "boolean" ? { busy: msg.busy } : {}) } : {
         ok: false, error: String(msg.error ?? "宿主拒绝"),
@@ -244,6 +250,62 @@ export const acpCancelSlot = (channelId: string, opId: string, ref: SlotRef = {}
 function slotResult(msg: Record<string, any>, c: Call): CallResult {
   const r = parseSlotReply(msg, c.opId!, c.gen);
   return r ? { ok: true, ...r } : { ok: false, error: "宿主回的槽信息和请求对不上" };
+}
+
+// ── CTXA 卡片压缩 ──────────────────────────────────────────────────────
+
+export type CardUnavailable = { ok: false; reason: "offline" | "not-acp" | "old-host" | "bad-reply" | "uncertain-prior" | "in-flight" | "uncertain"; error: string };
+export type CardCompactResult =
+  | { ok: true; accepted: boolean; duplicate: boolean; op: CardOpRecord }
+  | { ok: false; reason: string; error: string; wouldFire?: string; status?: CardCtxStatus }
+  | CardUnavailable;
+
+/** 结果不明（超时 / 断线 / 回包对不上）的申请：同一个 opId 永不再发（查到结局也不），只能按 opId 查；在途的也不发第二次 */
+const cardUncertain = new Set<string>();
+const cardInFlight = new Set<string>();
+const CARD_UNCERTAIN_KEPT = 500;
+const cardKey = (channelId: string, opId: string) => `${channelId}\0${opId}`;
+const unavailable = (reason: CardUnavailable["reason"], error: string): CardUnavailable => ({ ok: false, reason, error });
+
+/** 宿主此刻的卡片状态（申请要带回的身份 + 结论）；opId 有值时带上那一次的受理记录。旧宿主 / 不在线 = unavailable */
+export async function acpCardContext(channelId: string, opId?: string): Promise<{ ok: true; status: CardCtxStatus } | CardUnavailable> {
+  if (!isAcpChannel(channelId)) return unavailable("not-acp", "不是 ACP 宿主登记的频道");
+  const r = await acpCall(channelId, { op: "card_context", ...(opId ? { opId } : {}) }, TURN_QUERY_MS);
+  if (!r.card) return unavailable(r.uncertain ? "uncertain" : "offline", r.error ?? "宿主没回");
+  const st = r.card.status as CardCtxStatus | undefined;
+  if (!r.ok || !st || st.cap !== CARD_COMPACT_CAP) return unavailable("old-host", "宿主没宣布卡片压缩能力（旧宿主）");
+  return { ok: true, status: st };
+}
+
+/** 申请卡片压缩：身份原样带上查询时看到的；宿主在受理动作的同一段里核对。不明的结局记下，同一个 opId 不再发 */
+export async function acpCardCompact(channelId: string, req: CardCompactRequest): Promise<CardCompactResult> {
+  if (!isAcpChannel(channelId)) return unavailable("not-acp", "不是 ACP 宿主登记的频道");
+  const key = cardKey(channelId, req.opId);
+  if (cardInFlight.has(key)) return unavailable("in-flight", `op ${req.opId} 还在等宿主回`);
+  if (cardUncertain.has(key)) return unavailable("uncertain-prior", `op ${req.opId} 上次结果不明：按 opId 查结局，不再发同一个申请`);
+  cardInFlight.add(key);
+  try {
+    const r = await acpCall(channelId, { op: "card_compact", ...req });
+    const out = cardCompactReply(r, req);
+    if (out.ok === false && (out.reason === "uncertain" || out.reason === "bad-reply")) {
+      cardUncertain.add(key);
+      for (const k of cardUncertain) if (cardUncertain.size > CARD_UNCERTAIN_KEPT) cardUncertain.delete(k);
+    }
+    return out;
+  } finally {
+    cardInFlight.delete(key);
+  }
+}
+
+function cardCompactReply(r: CallResult, req: CardCompactRequest): CardCompactResult {
+  if (!r.card) return r.uncertain ? unavailable("uncertain", r.error ?? "结果未确认") : unavailable("offline", r.error ?? "宿主不在线");
+  const m = r.card;
+  if (!r.ok) return typeof m.reason === "string"
+    ? { ok: false, reason: m.reason, error: String(m.error ?? m.reason), ...(m.wouldFire ? { wouldFire: String(m.wouldFire) } : {}), ...(m.status ? { status: m.status } : {}) }
+    : unavailable("old-host", "宿主没宣布卡片压缩能力（旧宿主）");
+  const op = m.op as CardOpRecord | undefined;
+  if (!op || op.opId !== req.opId || op.hostId !== req.hostId) return unavailable("bad-reply", "宿主回的受理记录和申请对不上");
+  return { ok: true, accepted: m.accepted === true, duplicate: m.duplicate === true, op };
 }
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */

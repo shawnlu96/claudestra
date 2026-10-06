@@ -44,6 +44,13 @@ export interface TurnIO {
   onFailure(f: AcpFailure): void;
   /** 带 opId 的槽结束（含排队时被撤）：在挑下一轮之前同步调用 */
   onSlotEnd?(e: SlotEnd): void;
+  /**
+   * 新回合受理边界（CTXA 卡片硬线）：队首是普通 prompt 时先同步问一次；给了命令就先独占跑它，prompt 原位留着。
+   * 宿主保证同一份 usage 只给一次（压缩失败也照常放行，不会无限排队）；只在挑下一轮时调用，不碰在跑的回合。
+   */
+  admit?(): { text: string; opId: string } | null;
+  /** 闲置起点的时钟（单测注入），缺省 Date.now */
+  now?(): number;
   log(msg: string): void;
 }
 
@@ -101,8 +108,37 @@ export class AcpTurnLoop {
   /** 最近结束的带 opId 槽（只留 50 个）：结局上报丢了，bridge 还能按 opId + gen 查到真实结局 */
   private ended: SlotEnd[] = [];
   private waiters = new Map<string, ((s: SlotState) => void)[]>();
+  /** 开过几轮（含适配器自发的 external、补 reply 的 nudge）：卡片申请据此认「查询之后有没有开过回合」 */
+  private turns = 0;
+  /** 最近一次调度器停下的时刻（构造时算起） */
+  private idleAt: number;
 
-  constructor(private readonly io: TurnIO) {}
+  constructor(private readonly io: TurnIO) {
+    this.idleAt = this.clock();
+  }
+
+  private clock(): number {
+    return this.io.now?.() ?? Date.now();
+  }
+
+  get turnGen(): number {
+    return this.turns;
+  }
+
+  /** 独占槽代次（每排一个 command / op 加一） */
+  get slotGen(): number {
+    return this.gen;
+  }
+
+  /** 调度器在跑一轮（不含排着的） */
+  get running(): boolean {
+    return this.pumping;
+  }
+
+  /** 完全空闲从什么时候开始；忙时 null */
+  get idleSince(): number | null {
+    return this.busy ? null : this.idleAt;
+  }
 
   /** 有一轮在跑、或者还有没落定 / 没开的槽 */
   get busy(): boolean {
@@ -234,9 +270,23 @@ export class AcpTurnLoop {
     if (ext >= 0) return this.slots.splice(ext, 1)[0] as Pick;
     const head = this.slots[0];
     if (head.kind === "nudge" || owned(head)) return this.slots.shift() as Pick;
+    const gate = this.admitted();
+    if (gate) return gate;
     const n = this.slots.findIndex((s) => s.kind !== "prompt");
     const batch = this.slots.splice(0, n < 0 ? this.slots.length : n) as { kind: "prompt"; text: string }[];
     return { kind: "prompt", text: batch.map((b) => b.text).join("\n\n") };
+  }
+
+  /** 受理边界给的命令：独占一轮，有代次、有结局（和 submitCommand 排的同形）；钩子抛错按放行 */
+  private admitted(): Owned | null {
+    let a: { text: string; opId: string } | null = null;
+    try {
+      a = this.io.admit?.() ?? null;
+    } catch (e) {
+      this.log(`受理边界出错，放行：${errText(e)}`);
+    }
+    if (!a || this.liveSlot(a.opId)) return null;
+    return { kind: "command", text: a.text, opId: a.opId, gen: ++this.gen };
   }
 
   /** 日志本身坏了也不能连带卡住调度（它在各个 catch 里被调用） */
@@ -258,6 +308,7 @@ export class AcpTurnLoop {
         // 单轮出意外（IO 实现抛错）只记日志：调度器停了，排着的消息就永远出不去
         for (let p: Pick | null = first; p; p = this.next()) {
           this.current = p;
+          this.turns++;
           const kind = await this.run(p).catch((e) => (this.log(`回合调度出错：${errText(e)}`), "failed" as const));
           this.current = null;
           if (owned(p)) this.endSlot(p, kind); // 先报结局、再挑下一轮：迟到的 cancelSlot 只会看到 ended，碰不到下一轮
@@ -265,6 +316,7 @@ export class AcpTurnLoop {
       } finally {
         this.current = null;
         this.pumping = false;
+        this.idleAt = this.clock();
       }
     })();
   }

@@ -2,6 +2,8 @@
 import { randomBytes } from "node:crypto";
 import { codexReplyHint, wrapChannelContent } from "../codex-thread.js";
 import { abortAcpTurn } from "./abort.js";
+import { parseCardCtxMode, type CardIdentity } from "./card-context.js";
+import { CARD_OPS, CardContextHost } from "./card-context-host.js";
 import type { AdapterEnvSpec, AdapterProc } from "./adapter-proc.js";
 import { applyAcpLaunchConfig } from "./apply-config.js";
 import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
@@ -31,6 +33,8 @@ export interface HostConfig {
   agentCmd: string[];
   env: Omit<AdapterEnvSpec, "channel">;
   runtime?: AcpRuntime; // 缺省 codex（host-runtime.ts）
+  /** CTXA 卡片会话：启动时由生命周期上下文给的强身份（卡号 + 启动登记的会话）与模式（缺省 observe）；不给 = 不是卡片会话，申请一律 no-capability */
+  cardContext?: CardIdentity & { mode?: unknown; limits?: { idle?: number; hard?: number } };
   /** 单测注入：出站条目的重送退避、回合末等确认的上限、权限卡等多久（缺省用下面的 TIMINGS） */
   timings?: Partial<typeof TIMINGS>;
 }
@@ -44,6 +48,8 @@ export interface HostDeps {
   markReady(): Promise<void>;
   rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
   log(msg: string): void;
+  /** 时钟（单测注入卡片闲置时长），缺省 Date.now */
+  now?(): number;
   /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
   show?(item: string): void;
 }
@@ -99,6 +105,7 @@ export class AcpHost {
   private readonly proxy: ToolProxy;
   private readonly link: ReturnType<HostDeps["makeLink"]>;
   readonly loop: AcpTurnLoop;
+  private readonly card: CardContextHost;
 
   constructor(private readonly cfg: HostConfig, private readonly deps: HostDeps) {
     this.preamblePending = cfg.preamble;
@@ -135,8 +142,20 @@ export class AcpHost {
       steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
-      onSlotEnd: (e) => deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`),
+      onSlotEnd: (e) => (this.card.onSlotEnd(e), deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`)),
+      admit: () => this.card.admit(),
+      now: deps.now,
       log: deps.log,
+    });
+    const cc = cfg.cardContext;
+    this.card = new CardContextHost({
+      hostId: this.hostId, loop: this.loop, mode: parseCardCtxMode(cc?.mode), limits: cc?.limits, now: () => deps.now?.() ?? Date.now(), log: deps.log,
+      identity: cc?.card && cc.expectedSessionId ? { card: cc.card, expectedSessionId: cc.expectedSessionId } : null,
+      state: () => ({
+        sessionId: this.session && this.session.sessionId === this.cfg.sessionId ? this.cfg.sessionId : "",
+        registered: this.registered, capable: !!this.session && !this.refused && !this.stopping, rotating: this.rotating,
+        compacting: this.compactCommand, adapterRunning: !!this.session?.running,
+      }),
     });
   }
 
@@ -173,6 +192,7 @@ export class AcpHost {
       await session.attach(this.cfg.sessionId, this.cfg.cwd, caps.resume);
       await applyAcpLaunchConfig(session, this.cfg.model, this.cfg.effort, false, this.deps.log);
       this.session = session;
+      this.card.noteAttach();
       this.lastStartError = null;
       const who = session.agentInfo ? `，${session.agentInfo.name} ${session.agentInfo.version}` : "";
       this.deps.log(`已接上线程 ${this.cfg.sessionId.slice(0, 8)}（${caps.resume ? "session/resume" : "session/load"}${session.steering ? "，支持 steering" : ""}${who}）`);
@@ -243,6 +263,7 @@ export class AcpHost {
 
   /** 流式条目进出站队列，按序号送（pump）；队列满了丢最老的并记数，这一轮结束按 StopFailure 报 */
   private pushEntries(entries: Record<string, unknown>[]): void {
+    this.card.noteEntries(entries);
     for (const entry of entries) this.outbox.push({ seq: ++this.entrySeq, entry });
     const over = this.outbox.length - ENTRY_OUTBOX_MAX;
     if (over > 0) {
@@ -400,6 +421,7 @@ export class AcpHost {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
     if (m.op === "clear") return void reply(await this.clearSession());
     if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
+    if (CARD_OPS.has(String(m.op))) return void reply(this.card.call(m)!); // CTXA 卡片查询 / 压缩申请（card-context-host.ts），同步受理
     const slot = acpSlotCall(this.loop, m, this.hostId); // slash / op_turn / slot_status / cancel_slot（turn.ts）
     if (slot) return void slot.then(reply);
     if (m.op === "permission") {
