@@ -108,6 +108,8 @@ export interface AdapterProc {
   /** 结束子进程：先关 stdin（codex-acp 会在 2s 内带走 app-server），再 SIGTERM */
   stop(): void;
   exited: Promise<number>;
+  /** 子进程 pid（detached 时也是它的进程组号）；单测的假进程可以不给 */
+  pid?: number;
 }
 
 /** 超过这么长还没换行的 stderr 行：整段不记（只记一句占位），后面到换行为止都丢掉 */
@@ -183,5 +185,6 @@ export function spawnAdapter(
     },
     stop,
     exited: proc.exited,
+    pid: proc.pid,
   };
 }

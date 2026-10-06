@@ -71,6 +71,28 @@ export function classifyNeutralFailure(kind: unknown, key: string, message: stri
   return null;
 }
 
+/** idle 终态信封 _meta.claudestra.turn.failure 的形状（字段都按对端可能乱给来读） */
+export interface TurnEndFailure {
+  kind?: unknown;
+  message?: unknown;
+  id?: unknown;
+  retry?: unknown;
+  newSession?: unknown;
+  deliveryUnknown?: unknown;
+}
+
+/**
+ * 终态信封里的失败 → 分类。Pi 只给 kind / message；自研 Codex 适配器另带 id（键改成 air:<id>，和 prompt 回包的 AIR 失败共用，
+ * FailureDedup 只出一张卡）、retry / newSession / deliveryUnknown（照原样带上，宿主据此决定续不续跑）。不带这些字段时结果和原来逐字相同。
+ */
+export function classifyTurnEndFailure(f: TurnEndFailure, key: string, message: string): AcpFailure {
+  const base = classifyNeutralFailure(f.kind, key, message) ?? { kind: "error", key, message };
+  const keyed: AcpFailure = typeof f.id === "string" && f.id ? { ...base, key: `air:${f.id}` } : base;
+  if (keyed.kind !== "error") return keyed;
+  const retry = typeof f.retry === "boolean" ? { retry: f.retry } : {};
+  return { ...keyed, ...retry, ...(f.newSession === true ? { newSession: true } : {}), ...(f.deliveryUnknown === true ? { deliveryUnknown: true as const } : {}) };
+}
+
 /** session/prompt（或 session/new|load）抛的错 → 分类；认不出的一律 error。turnKey = 宿主给这一轮的编号（同一回合只出一次） */
 export function classifyPromptError(e: unknown, turnKey: string): AcpFailure {
   if (e instanceof AcpIncompatibleError) return { kind: "error", key: "incompatible", message: e.message, retry: false };

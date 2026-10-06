@@ -90,3 +90,19 @@ function facts(db: Database, project: string): WaitFacts {
 export function readWaitGraph(db: Database, project: string): WaitGraph {
   return waitGraph(db.transaction(() => facts(db, project)).deferred());
 }
+
+/** 通知基线与等待图同一读快照；缺失/未知时先不推首轮积压，不能冒充已有基线。 */
+export function readWaitAuditSnapshot(db: Database, project: string): { waitGraph: WaitGraph; waitBaseline: string[] | null } {
+  return db.transaction(() => {
+    const graph = waitGraph(facts(db, project));
+    let baseline: string[] | null = null;
+    try {
+      baseline = hasTable(db, "audit_baseline")
+        ? (db.query("SELECT rule FROM audit_baseline WHERE project = ? AND rule IN ('wait_cycle', 'wait_missing_node')")
+          .all(project) as { rule: string }[]).map((r) => r.rule) : [];
+    } catch (e) {
+      console.warn(`等待通知基线读不了，未完整扫描的规则暂停通知：${(e as Error).message}`);
+    }
+    return { waitGraph: graph, waitBaseline: baseline };
+  }).deferred();
+}

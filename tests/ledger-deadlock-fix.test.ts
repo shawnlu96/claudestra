@@ -3,13 +3,14 @@ import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { collectAuditSnapshots } from "../src/lib/ledger-audit-snapshot.js";
 import { auditLedger } from "../src/lib/ledger-audit.js";
 import { reconcileFindings, openFindings } from "../src/lib/ledger-audit-store.js";
 import { readWaitGraph } from "../src/lib/ledger-deadlock-read.js";
 import { addDep } from "../src/lib/ledger-deps-write.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { LedgerDeps } from "../src/manager/ledger-context.js";
 
@@ -86,4 +87,48 @@ test("chain-cut: real CLI JSON preserves all 30 nodes and every edge source", as
   const projects = result.projects as { waitGraph?: typeof g }[];
   expect(projects[0].waitGraph).toEqual(g);
   expect(projects[0].waitGraph?.cycles[0].edges).toHaveLength(30);
+});
+
+async function snapshotAudit(now = 1000) {
+  const [s] = await collectAuditSnapshots(db, ["p"], now, deps().auditSources);
+  return auditLedger(s, now, () => ({ mode: "off", manualAfterMs: null, source: "default" }));
+}
+test("first-run-flood: truncated first scan stays silent and complete recovery establishes baseline", async () => {
+  for (let i = 0; i < 21; i++) pair(`X${String(i).padStart(2, "0")}`);
+  const first = await snapshotAudit();
+  expect(first.evaluated).not.toContain("wait_cycle");
+  expect(first.findings.filter(f => f.rule === "wait_cycle")).toHaveLength(20);
+  expect(reconcileFindings(db, "p", first.findings, first.evaluated, 1000).pending).toEqual([]);
+  expect(openFindings(db, "p").filter(f => f.rule === "wait_cycle")).toHaveLength(20);
+  expect(db.query("SELECT * FROM audit_baseline WHERE rule = 'wait_cycle'").all()).toEqual([]);
+  const repeat = await snapshotAudit(2000);
+  expect(reconcileFindings(db, "p", repeat.findings, repeat.evaluated, 2000).pending).toEqual([]);
+  moveStage(db, ctx, { taskId: "X20A", from: "build", to: "cancelled" });
+  const complete = await snapshotAudit(3000);
+  expect(complete.evaluated).toContain("wait_cycle");
+  const rec = reconcileFindings(db, "p", complete.findings, complete.evaluated, 3000);
+  expect(rec.pending).toEqual([]);
+  expect(rec.silenced).toHaveLength(20);
+  pair("A00");
+  const later = await snapshotAudit(4000);
+  expect(later.evaluated).not.toContain("wait_cycle");
+  expect(reconcileFindings(db, "p", later.findings, later.evaluated, 4000).pending).toHaveLength(1);
+});
+test("first-run-flood: unknown first scan stays silent, then complete recovery silences backlog", async () => {
+  pair("Z");
+  card("M");
+  dag("missing", [{ key: "M", taskId: "M", deps: ["planned"] }, { key: "planned", oneLine: "planned" }]);
+  dag("broken", [{ key: "planned", oneLine: "planned" }]);
+  db.run(`INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes)
+    VALUES ('ab12-broken', 2, 'new_issue', 'bad-source probe', 'pm', 'pm', 400, '{bad')`);
+  db.run("UPDATE features SET currentVersion = 2 WHERE id = 'ab12-broken'");
+  const first = await snapshotAudit();
+  expect(first.evaluated).not.toContain("wait_cycle");
+  expect(first.findings.filter(f => f.rule === "wait_cycle")).toHaveLength(1);
+  expect(first.findings.filter(f => f.rule === "wait_missing_node")).toHaveLength(1);
+  expect(reconcileFindings(db, "p", first.findings, first.evaluated, 1000).pending).toEqual([]);
+  db.run("UPDATE features SET currentVersion = 1 WHERE id = 'ab12-broken'");
+  const complete = await snapshotAudit(2000);
+  expect(complete.evaluated).toContain("wait_cycle");
+  expect(reconcileFindings(db, "p", complete.findings, complete.evaluated, 2000).silenced).toHaveLength(2);
 });

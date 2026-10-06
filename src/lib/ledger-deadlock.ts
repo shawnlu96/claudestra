@@ -308,3 +308,11 @@ export function waitAudit(g: WaitGraph | undefined, now: number): WaitAudit {
 export function waitDiagnostics(g: WaitGraph | undefined): { waitGraph?: WaitGraph } {
   return g ? { waitGraph: g } : {};
 }
+
+/** 未完整扫描过的规则不能推出首轮积压；仍保留诊断，完整扫描后由原 store 建基线。 */
+export function waitNotificationFindings<T extends { rule: string; notify: string | null }>(
+  findings: T[], graph: WaitGraph | undefined, baseline: readonly string[] | null | undefined,
+): T[] {
+  if (!graph || (!graph.truncated && !graph.unknown.length)) return findings;
+  return findings.map((f) => WAIT_RULES.some((r) => r === f.rule) && !baseline?.includes(f.rule) ? { ...f, notify: null } : f);
+}

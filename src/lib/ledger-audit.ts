@@ -11,7 +11,7 @@ import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-sta
 import { blockFindings } from "./scheduler-dispatch-block.js";
 import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { WAIT_RULES, waitAudit, type WaitGraph } from "./ledger-deadlock.js";
+import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 
 const MIN = 60_000;
 
@@ -111,6 +111,8 @@ export interface AuditSnapshot {
   ownerInbox: readonly AuditInboxEntry[] | null;
   /** 只读等待图（ledger-deadlock.ts）；没取 = 等待规则不跑也不列 skipped，图里有 unknown = 不进 evaluated */
   waitGraph?: WaitGraph;
+  /** 只有完整扫描建立过基线的等待规则，才可在不完整扫描时通知。 */
+  waitBaseline?: readonly string[] | null;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
   unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
@@ -435,7 +437,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   wait.findings.forEach(emit);
   evaluated.push(...wait.evaluated);
   skipped.push(...wait.skipped);
-  return { findings, evaluated, skipped, keep: kept };
+  return { findings: waitNotificationFindings(findings, s.waitGraph, s.waitBaseline), evaluated, skipped, keep: kept };
 }
 
 /** 推给 PM / 调度助理的一条通知（bridge/ledger-audit-service.ts 发）：一轮新出现的合成一条，每条一行「对象 · 建议 — 现象」 */
