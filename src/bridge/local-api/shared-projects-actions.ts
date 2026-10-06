@@ -1,7 +1,7 @@
 import { parseV2ProjectsResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { bindHash, checkAsk } from "../../lib/ask-bind.js";
 import { MASTER_PROJECT, ownerAnswered, type Ask } from "../../lib/ledger-asks.js";
-import { projectChoices, selectedProject, type ProjectChoice } from "./shared-projects-choice.js";
+import { projectChoices, selectedProject, sharedProjectCardDigest, type ProjectChoice } from "./shared-projects-choice.js";
 import { requireProjectPerson, SharedProjectsError, type BootstrapPreflight, type CreatorOperation,
   type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
@@ -16,21 +16,32 @@ interface ProjectAction {
   choices?: ProjectChoice[];
   preflight?: BootstrapPreflight;
   expectedDigest?: string;
+  completedLocalProjectId?: string;
+  cardDigest?: string;
 }
 const samePerson = (a: ProjectPerson, b: ProjectPerson) =>
-  a.centerId === b.centerId && a.teamId === b.teamId && a.personId === b.personId && a.instanceId === b.instanceId;
+  a.centerId === b.centerId && a.teamId === b.teamId && a.personId === b.personId && a.instanceId === b.instanceId && JSON.stringify(a.sourceBinding) === JSON.stringify(b.sourceBinding);
 const binding = (action: ProjectAction) => ({ action: "shared_project_action", params: action, approve: [APPROVE] });
 
 function openAction(d: SharedProjectsPorts, action: ProjectAction, title: string, context: string, select?: ReturnType<typeof projectChoices>) {
+  context += `
+参数摘要：${bindHash(binding(action), CREATOR)}`;
+  context += `
+中心 ${action.who.centerId}；团队 ${action.who.teamId}；本人 ${action.who.personId}；实例 ${action.who.instanceId}`;
+  if (action.who.sourceBinding) context += `
+原鉴权绑定：${action.who.sourceBinding.projectId} / ${action.who.sourceBinding.localProjectId ?? action.who.sourceBinding.projectId}`;
+  if (action.completedLocalProjectId) context += `
+已绑定本机项目：${action.completedLocalProjectId}`;
+  const options: Ask["options"] = [...(select ? [select.row] : []), { type: "buttons", buttons: [
+    { id: APPROVE, label: action.kind === "create" ? "建" : action.kind === "bootstrap" ? "确认团队 owner" : "继续完成项目", style: "success" },
+    { id: "shared_project_cancel", label: "取消", style: "secondary" },
+  ] }];
+  action = { ...action, cardDigest: sharedProjectCardDigest({ title, context, options }) };
   const bind = binding(action);
-  return d.openAsk({ source: "system", createdBy: CREATOR, project: MASTER_PROJECT, kind: "authorize", title, context,
+  return d.openAsk({ source: "system", createdBy: CREATOR, project: MASTER_PROJECT, kind: "authorize", title, context, options,
     allowText: false, blocking: true, expiresAt: action.preflight?.expiresAt ?? d.now() + 3600_000,
     bind: { ...bind, paramsHash: bindHash(bind, CREATOR) }, extra: { sharedProjectAction: true,
       ...(select ? { sharedProjectChoice: { selectId: select.row.type === "select" ? select.row.id : "", recommended: select.recommended } } : {}) },
-    options: [...(select ? [select.row] : []), { type: "buttons", buttons: [
-      { id: APPROVE, label: action.kind === "create" ? "建" : action.kind === "bootstrap" ? "确认团队 owner" : "继续完成项目", style: "success" },
-      { id: "shared_project_cancel", label: "取消", style: "secondary" },
-    ] }],
   });
 }
 
@@ -39,7 +50,9 @@ export async function proposeSharedProject(input: ProjectCreate, d: SharedProjec
   const who = await d.person();
   requireProjectPerson(who);
   return openAction(d, { kind: "create", who, input, operationId: input.operationId },
-    `建议新建团队项目 ${input.name}`, `中心 ${who.centerId}；团队 ${who.teamId}；本人 ${who.personId}；实例 ${who.instanceId}`);
+    `建议新建团队项目 ${input.name}`, `原创建参数：${input.name}（${input.id ?? "中心分配 ID"}）；操作 ${input.operationId}
+`
+      + `本机选择：${input.selection ? input.selection.mode === "create" ? "新建本机项目" : input.selection.localProjectId : "尚未选择，后续显式确认"}`);
 }
 
 function requireOperation(who: ProjectPerson, value: CreatorOperation, operationId: string): CreatorOperation {
@@ -50,8 +63,8 @@ function requireOperation(who: ProjectPerson, value: CreatorOperation, operation
 }
 
 async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operationId: string, selection?: ProjectSelection,
-  input?: ProjectCreate, expectedDigest?: string) {
-  const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, ...(selection ? { selection } : {}) },
+  input?: ProjectCreate, expectedDigest?: string, completedLocalProjectId?: string) {
+  const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, completedLocalProjectId, ...(selection ? { selection } : {}) },
     "继续完成项目", `操作 ${operationId}；本人 ${who.personId}；实例 ${who.instanceId}
 `
       + `原创建参数：${input ? `${input.name}（${input.id ?? "中心分配 ID"}）` : "沿用中心原操作"}
@@ -62,31 +75,34 @@ async function recoveryCard(d: SharedProjectsPorts, who: ProjectPerson, operatio
   return { ok: true, available: false, operationId, askId: ask.id };
 }
 
-/** The only success path reads the saved B credential, then binds, then reads B through the gate proxy. */
+/** Selection precedes N2 atomic enrollment; success requires persisted credential readback and an actual B gate read. */
 async function completeSharedProject(who: ProjectPerson, operationId: string, selection: ProjectSelection | undefined,
-  d: SharedProjectsPorts, created?: CreatorOperation, input?: ProjectCreate, expectedDigest?: string): Promise<Record<string, unknown>> {
+  d: SharedProjectsPorts, created?: CreatorOperation, input?: ProjectCreate, expectedDigest?: string, completedLocalProjectId?: string): Promise<Record<string, unknown>> {
   try {
     const operation = requireOperation(who, created ?? await d.operation(who, operationId), operationId);
     if ((input && (operation.project.name !== input.name || (input.id !== undefined && operation.project.projectId !== input.id)))
       || (expectedDigest !== undefined && operation.operation.paramsDigest !== expectedDigest)) throw new SharedProjectsError(403, "operation_params_changed");
     expectedDigest = operation.operation.paramsDigest;
-    if (!await d.credentialSaved(who, operation.project)) await d.saveCreatorCredential(who, operation);
-    if (!await d.credentialSaved(who, operation.project)) throw new SharedProjectsError(503, "credential_not_saved");
     if (!selection) {
       const select = projectChoices(operation.project, await d.eligible(), d.bindings());
-      const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, choices: select.choices }, "选择本机项目", "本人凭据已保存；选择本机项目后继续完成。", select);
+      const ask = openAction(d, { kind: "complete", who, operationId, input, expectedDigest, choices: select.choices },
+        "选择本机项目", `${operation.project.name}（${operation.project.projectId}）；操作 ${operationId}\n选择本机项目并批准后保存凭据、绑定和验证。`, select);
       return { ok: true, available: false, operationId, askId: ask.id };
     }
     const bound = d.bindings().filter(b => b.centerId === who.centerId && b.teamId === who.teamId && b.projectId === operation.project.projectId);
     if (bound.length > 1) throw new SharedProjectsError(409, "binding_conflict");
     const existing = bound[0] && (bound[0].localProjectId ?? bound[0].projectId);
+    if (completedLocalProjectId && existing !== completedLocalProjectId) throw new SharedProjectsError(409, "binding_changed");
     if (existing && selection.mode === "existing" && selection.localProjectId !== existing) throw new SharedProjectsError(409, "binding_conflict");
-    const localProjectId = existing ?? await d.bind(who, operation.project, selection);
+    const localProjectId = existing && await d.credentialSaved(who, operation.project) ? existing
+      : await d.enrollCreator(who, operation, existing ? { mode: "existing", localProjectId: existing } : selection);
+    completedLocalProjectId = localProjectId;
+    if (!await d.credentialSaved(who, operation.project)) throw new SharedProjectsError(503, "credential_not_saved");
     if (!await d.gateRead(who, operation.project, localProjectId)) throw new SharedProjectsError(503, "gate_read_failed");
     return { ok: true, available: true, operationId, projectId: operation.project.projectId, localProjectId };
   } catch {
     // Center, credential and filesystem exceptions can contain bearer/code material; only the recovery card is public.
-    return recoveryCard(d, who, operationId, selection, input, expectedDigest);
+    return recoveryCard(d, who, operationId, selection, input, expectedDigest, completedLocalProjectId);
   }
 }
 
@@ -136,7 +152,7 @@ export async function answerSharedProject(a: Ask, d: SharedProjectsPorts): Promi
     || bindHash(stored.bind, CREATOR) !== bindHash(a.bind, CREATOR)) throw new SharedProjectsError(403, "ask_check_failed");
   a = stored;
   const action = a.bind?.params as ProjectAction | undefined;
-  if (!action || !a.bind || bindHash(a.bind, CREATOR) !== a.bind.paramsHash || !ownerAnswered(a.answer)
+  if (!action || action.cardDigest !== sharedProjectCardDigest(a) || !a.bind || bindHash(a.bind, CREATOR) !== a.bind.paramsHash || !ownerAnswered(a.answer)
     || !checkAsk({ ...a, fromAgent: CREATOR }, bindHash(binding(action), CREATOR), CREATOR, d.now()).ok) {
     throw new SharedProjectsError(403, "ask_check_failed");
   }
@@ -163,5 +179,5 @@ export async function answerSharedProject(a: Ask, d: SharedProjectsPorts): Promi
   const selection = action.choices ? selectedProject(a.answer?.choices ?? [], action.choices) : action.selection;
   if (action.choices && !selection) throw new SharedProjectsError(400, "local_project_required");
   if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
-  return completeSharedProject(who, action.operationId, selection ?? undefined, d, undefined, action.input, action.expectedDigest);
+  return completeSharedProject(who, action.operationId, selection ?? undefined, d, undefined, action.input, action.expectedDigest, action.completedLocalProjectId);
 }

@@ -24,9 +24,8 @@ function fixture() {
     patch: async (_who, id, b) => ({ ...project, projectId: id, ...b }),
     invite: async (_who, _id, peers) => peers.map(peer => ({ peer, offerId: "a".repeat(32), accepted: true })),
     operation: async () => { calls.push("query"); return { operation, project }; },
-    saveCreatorCredential: async () => { calls.push("save-b"); saved = true; },
+    enrollCreator: async () => { calls.push("save-b", "bind-b"); saved = true; return "local-b"; },
     credentialSaved: async () => { calls.push("read-b"); return saved; },
-    bind: async () => { calls.push("bind-b"); return "local-b"; },
     gateRead: async () => { calls.push("gate-b"); return true; },
     members: async (_who, projectId) => [{ ...canonical.member, centerId: person.centerId, teamId: person.teamId, projectId, personId: "alice", code: "Alice", role: "owner", status: "active" }],
     remove: async () => { calls.push("remove"); }, setDirs: async () => { calls.push("dirs"); }, leave: async () => { calls.push("leave"); },
@@ -118,17 +117,17 @@ describe("creator completion and recovery", () => {
     const oldBindings = JSON.stringify(w.d.bindings());
     const result = await createSharedProject(create, w.d);
     expect(result.available).toBe(true);
-    expect(w.calls).toEqual(["create", "read-b", "save-b", "read-b", "bind-b", "gate-b"]);
+    expect(w.calls).toEqual(["create", "save-b", "bind-b", "read-b", "gate-b"]);
     expect(JSON.stringify(w.d.bindings())).toBe(oldBindings);
   });
   test("save failure never binds, and recovery queries the same operation without another create", async () => {
     const w = fixture();
-    const save = w.d.saveCreatorCredential;
-    w.d.saveCreatorCredential = async () => { throw new Error("SECRET_BEARER"); };
+    const save = w.d.enrollCreator;
+    w.d.enrollCreator = async () => { throw new Error("SECRET_BEARER"); };
     expect((await createSharedProject(create, w.d)).available).toBe(false);
     expect(w.calls).not.toContain("bind-b");
     expect(JSON.stringify(w.asks)).not.toContain("SECRET_BEARER");
-    w.d.saveCreatorCredential = save;
+    w.d.enrollCreator = save;
     expect((await answerSharedProject(approve(w.asks[0]!), w.d))!.available).toBe(true);
     expect(w.calls.filter(c => c === "create")).toHaveLength(1);
     expect(w.calls).toContain("query");
@@ -142,10 +141,10 @@ describe("creator completion and recovery", () => {
     expect(w.asks).toHaveLength(2);
     expect(w.asks[1]!.title).toBe("继续完成项目");
   });
-  test("create without selection persists credentials and asks before binding", async () => {
+  test("create without selection asks before redemption, persistence or binding", async () => {
     const w = fixture();
     await createSharedProject({ operationId, name: "Project B" }, w.d);
-    expect(w.calls).not.toContain("bind-b");
+    expect(w.calls).toEqual(["create"]);
     expect(w.asks[0]!.extra.sharedProjectChoice).toEqual({ selectId: "shared_project_local", recommended: "local_local-b" });
     await expect(answerSharedProject(approve(w.asks[0]!), w.d)).rejects.toThrow();
     const a = approve(w.asks[0]!);
@@ -227,7 +226,7 @@ test("members, remove, dirs and leave delegate only after explicit binding check
 
 test("HTTP continue queries the existing creator operation and never creates again", async () => {
   const w = fixture();
-  w.d.saveCreatorCredential = async () => { throw new Error("synthetic persistence failure"); };
+  w.d.enrollCreator = async () => { throw new Error("synthetic persistence failure"); };
   await createSharedProject(create, w.d);
   const a = approve(w.asks[0]!); w.asks[0] = a; w.calls.length = 0;
   const response = await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id });
@@ -240,7 +239,8 @@ test("retry after a successful bind and failed gate read reuses B's binding", as
   const w = fixture(); let bound = false;
   const bindings = w.d.bindings;
   w.d.bindings = () => [...bindings(), ...(bound ? [{ centerId: person.centerId, teamId: person.teamId, projectId: "b", localProjectId: "local-b" }] : [])];
-  w.d.bind = async () => { w.calls.push("bind-b"); bound = true; return "local-b"; };
+  const enroll = w.d.enrollCreator;
+  w.d.enrollCreator = async (...args) => { const id = await enroll(...args); bound = true; return id; };
   w.d.gateRead = async () => false;
   expect((await createSharedProject(create, w.d)).available).toBe(false);
   w.d.gateRead = async () => true;
@@ -334,4 +334,25 @@ test("adapter resolution failures never echo credential or transport data", asyn
     ports: async () => { throw new Error("SECRET_CREDENTIAL"); } });
   expect(response!.status).toBe(503);
   expect(await response!.text()).not.toContain("SECRET_CREDENTIAL");
+});
+
+test("recovery binds the completed local target and refuses a later replacement without another enrollment", async () => {
+  const w = fixture(); w.d.gateRead = async () => false;
+  await createSharedProject(create, w.d);
+  const a = w.asks[0]!;
+  expect((a.bind!.params as { completedLocalProjectId?: string }).completedLocalProjectId).toBe("local-b");
+  w.d.bindings = () => [{ centerId: person.centerId, teamId: person.teamId, projectId: project.projectId, localProjectId: "changed-target" }];
+  w.calls.length = 0;
+  expect((await answerSharedProject(approve(a), w.d))!.available).toBe(false);
+  expect(w.calls).toEqual(["query"]);
+});
+
+test("changed approval title, identity context or option labels fail before project creation", async () => {
+  for (const field of ["title", "context", "options"] as const) {
+    const w = fixture(), a = approve(await proposeSharedProject(create, w.d));
+    if (field === "options") a.options = [{ type: "buttons", buttons: [{ id: "shared_project_confirm", label: "different team", style: "success" }] }];
+    else a[field] = "different team, person, instance or digest";
+    await expect(answerSharedProject(a, w.d)).rejects.toThrow();
+    expect(w.calls).toEqual([]);
+  }
 });

@@ -161,3 +161,22 @@ test("person and fixed instance are bound before redemption; changing recipient 
   await onJoinOfferAnswered(answer(forged.asks[0]!), forged.d);
   expect(forged.joined).toEqual([]); expect(forged.receipts).toEqual(["failed"]);
 });
+
+test("invitation secret hidden in a hostname never reaches card or log metadata", () => {
+  const f = createV2ProjectsFixtures();
+  const body = { v: 1, offerId: "a".repeat(32), code: f.creatorInvite.code,
+    url: `https://${"F".repeat(43).toLowerCase()}.example/`, project: f.display,
+    projectInvite: { ...f.creatorInvite, expiresAt: Date.now() + 60000 } };
+  expect(parseJoinOffer(body, Date.now())).toEqual({ ok: false, error: "invalid_url" });
+});
+
+test("changed invitation card identity text or selector labels produces failed receipt without redemption", async () => {
+  for (const field of ["title", "context", "options"] as const) {
+    const w = world(); await receiveJoinOffer(w.p, wire(), w.d);
+    const a = answer(w.asks[0]!);
+    if (field === "options") a.options = [{ type: "buttons", buttons: [{ id: "sl_join_accept", label: "different recipient", style: "success" }] }];
+    else a[field] = "different team, person or instance";
+    await onJoinOfferAnswered(a, w.d);
+    expect(w.joined).toEqual([]); expect(w.receipts).toEqual(["failed"]);
+  }
+});

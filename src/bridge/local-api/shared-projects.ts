@@ -6,6 +6,8 @@ import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
 import { authenticateApi } from "../api-auth.js";
 import { apiJson } from "../api-respond.js";
 import { sharedProjectsSnapshot, readSharedProjectsLocalSnapshot, type SharedProjectsLocalSnapshot, type SharedProjectsSnapshot } from "./shared-projects-snapshot.js";
+import { sharedProjectsClientPorts, SHARED_PROJECTS_CAPABILITIES } from "./shared-projects-client.js";
+import { SHARED_LEDGER_PROJECT_HEADER } from "../../lib/shared-ledger-gate-proxy.js";
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
 import { bootstrapSharedProject, createSharedProject, continueSharedProject } from "./shared-projects-actions.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
@@ -19,7 +21,7 @@ export interface SharedProjectsRouteDeps {
   ports?: SharedProjectsPorts | ((principal: Principal) => Promise<SharedProjectsPorts | undefined>);
   localSnapshot?: () => Promise<SharedProjectsLocalSnapshot>;
 }
-/** Explicit seam until N1–N3 land. Never fabricate a person or call the old grant-writing join path as a fallback. */
+/** Actual authentication precedes original binding selection and canonical N2/N3 adapters. */
 const live: SharedProjectsRouteDeps = { auth: (req, url) => authenticateApi(req, url, { rateLimit: true }) };
 
 function record(v: unknown): Record<string, unknown> {
@@ -148,7 +150,8 @@ export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedP
   if (!sharedProjectOwnerPrincipal(p)) return apiJson(403, { ok: false, code: "owner_required" });
   let ports: SharedProjectsPorts | undefined;
   try {
-    ports = typeof d.ports === "function" ? await d.ports(p) : d.ports ?? sharedProjectsPorts();
+    ports = typeof d.ports === "function" ? await d.ports(p) : d.ports ?? sharedProjectsPorts()
+      ?? (d === live ? sharedProjectsClientPorts(p, req.headers.get(SHARED_LEDGER_PROJECT_HEADER)) : undefined);
     if (!ports) return apiJson(503, { ok: false, code: "shared_projects_adapter_unavailable" });
     if (url.search) throw new SharedProjectsError(400, "invalid_query");
     if (url.pathname === `${ROOT}/snapshot` && req.method === "GET") {
@@ -165,6 +168,8 @@ export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedP
       try { current = publicProject(error.current, ports); }
       catch { /* A malformed current value cannot be shown; preserve the conflict status without echoing the response. */ }
     }
-    return apiJson(status, { ok: false, ...(current ? { current } : {}), code: status === 403 ? "project_forbidden" : status === 409 ? "project_conflict" : "project_request_failed" });
+    const unavailable = error instanceof SharedProjectsError && Object.values(SHARED_PROJECTS_CAPABILITIES).some(c => c.reason === error.code);
+    const code = unavailable ? error.code : status === 403 ? "project_forbidden" : status === 409 ? "project_conflict" : "project_request_failed";
+    return apiJson(status, { ok: false, ...(current ? { current } : {}), code });
   }
 }

@@ -5,7 +5,7 @@ import type { V2ProjectRecord, V2ProjectMember, V2ProjectOperation } from "../..
 
 /** N1–N3 adapters must verify signatures and grants before exposing these secret-free records. */
 export interface ProjectPerson {
-  subject: "owner:self"; kind: "person"; centerId: string; teamId: string; personId: string; instanceId: string;
+  subject: "owner:self"; kind: "person"; centerId: string; teamId: string; personId: string; instanceId: string; sourceBinding?: SharedLedgerBinding;
 }
 type SharedProjectRecord = V2ProjectRecord;
 export type ProjectSelection = { mode: "create" } | { mode: "existing"; localProjectId: string };
@@ -19,7 +19,7 @@ export interface BootstrapPreflight {
 }
 export interface SharedProjectsPorts {
   now: () => number;
-  /** Resolve a signed/verified owner:self person, never from HTTP JSON or service grants. */
+  /** Resolve the authenticated owner’s original person credential, never HTTP JSON or a service grant. */
   person: () => Promise<ProjectPerson>;
   list: (who: ProjectPerson) => Promise<SharedProjectRecord[]>;
   create: (who: ProjectPerson, input: ProjectCreate) => Promise<CreatorOperation>;
@@ -27,10 +27,9 @@ export interface SharedProjectsPorts {
   /** N3 mints and delivers in memory; output contains no code or response body. */
   invite: (who: ProjectPerson, projectId: string, peers: string[], note?: string) => Promise<{ peer: string; offerId: string; accepted: boolean }[]>;
   operation: (who: ProjectPerson, operationId: string) => Promise<CreatorOperation>;
-  /** N3 recovery uses the canonical operation revision; N2 validates identity before saving B, without touching A. */
-  saveCreatorCredential: (who: ProjectPerson, operation: CreatorOperation) => Promise<void>;
+  /** N3 obtains a creator invite in memory; N2 alone redeems and atomically saves the selected project and credential. */
+  enrollCreator: (who: ProjectPerson, operation: CreatorOperation, selection: ProjectSelection) => Promise<string>;
   credentialSaved: (who: ProjectPerson, project: SharedProjectRecord) => Promise<boolean>;
-  bind: (who: ProjectPerson, project: SharedProjectRecord, selection: ProjectSelection) => Promise<string>;
   /** Must read B via the real gate proxy, after credential readback and binding. */
   gateRead: (who: ProjectPerson, project: SharedProjectRecord, localProjectId: string) => Promise<boolean>;
   members: (who: ProjectPerson, projectId: string) => Promise<V2ProjectMember[]>;

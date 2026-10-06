@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { readProjects } from "../lib/projects.js";
 import { isPersonalProject } from "../lib/lend-policy.js";
-import { projectChoices as makeProjectChoices, selectedProject } from "./local-api/shared-projects-choice.js";
+import { projectChoices as makeProjectChoices, selectedProject, sharedProjectCardDigest } from "./local-api/shared-projects-choice.js";
 import type { ProjectChoice } from "./local-api/shared-projects-choice.js";
 import type { ProjectSelection } from "./local-api/shared-projects-ports.js";
 import { bindHash, checkAsk } from "../lib/ask-bind.js";
@@ -25,6 +25,8 @@ import {
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
 import { sweepSharedLedgerRebinds, onSharedLedgerRebindAnswered, liveRebindDeps } from "./shared-ledger-rebind.js";
 import { onSharedProjectAnswered } from "./local-api/shared-projects-runtime.js";
+import { sharedProjectAnswerPrincipal } from "./local-api/shared-projects-auth.js";
+import { enrollSharedProject } from "./local-api/shared-projects-enrollment.js";
 import { joinSharedLedger, type SharedLedgerJoinResult } from "../lib/shared-ledger-join.js";
 import {
   attachPendingOfferAsk, claimPendingOffer, isJoinOfferStatus, isOfferId, JOIN_OFFER_RECEIPT_PATH, JoinOfferLimiter, joinOfferCard, joinOfferOutcomeText,
@@ -57,6 +59,8 @@ export interface JoinOfferDeps {
   join: (url: string, code: string, localProjectId: string) => Promise<SharedLedgerJoinResult>;
   /** N2 must verify displayed center/team/project/person and the signed receiving instance before saving credentials or bindings. No old-join fallback. */
   joinProject?: (url: string, code: string, selection: ProjectSelection, expected: JoinOfferExpectedProject) => Promise<SharedLedgerJoinResult>;
+  /** Runtime rechecks the stored answer and the actual effective owner credential, without requiring a prior center grant. */
+  authorizeProjectAnswer?: (ask: Ask) => Promise<boolean>;
   /** The inform card: a notification to the owner (no buttons). */
   inform: (text: string) => Promise<void>;
   /** POST the receipt to the inviter; resolves with the HTTP status. */
@@ -79,7 +83,8 @@ export async function configuredPeer(name: string | undefined, d: Pick<JoinOffer
 const bindOf = (p: PendingJoinOffer): Omit<AskBind, "paramsHash"> => ({
   action: BIND_ACTION, approve: p.project ? [JOIN_BUTTON] : p.projectChoices?.map(c => c.button) ?? [JOIN_BUTTON],
   params: { offerId: p.offerId, peer: p.peer, host: p.host, centerId: p.centerId, expiresAt: p.expiresAt,
-    project: p.project, recipient: p.recipient, inviteDigest: p.inviteDigest, projectOptions: p.projectOptions, recommended: p.recommended, projectChoices: p.projectChoices,
+    approvalCardDigest: p.approvalCardDigest, project: p.project, recipient: p.recipient, inviteDigest: p.inviteDigest,
+    projectOptions: p.projectOptions, recommended: p.recommended, projectChoices: p.projectChoices,
     sharedProjectId: p.sharedProjectId, codeHash: createHash("sha256").update(p.code).digest("hex") },
 });
 
@@ -110,14 +115,17 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
   if (saved !== "ok") return refuse(saved === "exists" ? 409 : 429, saved === "exists" ? "duplicate_offer" : "too_many_pending");
   let ask: Ask;
   try {
-    const bind = bindOf(pending), card = joinOfferCard(pending);
+    const card = joinOfferCard(pending);
     const context = pending.project ? `${card.context}\n请选择新建或已有本机项目，然后点加入。` : `${card.context}\n${sharedProjectId ? `共享项目（根据已有绑定）：${sharedProjectId}` : "入组后才能确定团队 / 共享项目"}\n请选择要绑定的本机项目`;
     const buttons = projectChoices.map(c => ({ id: c.button,
       label: `加入并绑到 ${c.name.slice(0, 60)}${c.localProjectId === sharedProjectId ? "（同名）" : ""}`, style: "success" }));
+    const options: Ask["options"] = [...(selection ? [selection.row] : []), { type: "buttons",
+        buttons: [...(selection ? [{ id: JOIN_BUTTON, label: "加入", style: "success" }] : buttons), { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }];
+    if (pending.project) pending.approvalCardDigest = sharedProjectCardDigest({ title: card.title, context, options });
+    const bind = bindOf(pending);
     ask = d.openAsk({
       source: "system", createdBy: JOIN_OFFER_CREATOR, kind: "authorize", project: MASTER_PROJECT, ...card, context,
-      options: [...(selection ? [selection.row] : []), { type: "buttons",
-        buttons: [...(selection ? [{ id: JOIN_BUTTON, label: "加入", style: "success" }] : buttons), { id: DECLINE_BUTTON, label: "不加入", style: "secondary" }] }],
+      options,
       allowText: false, blocking: true, expiresAt: pending.expiresAt, dedupKey: `sl-join-offer:${pending.offerId}`,
       bind: { ...bind, paramsHash: bindHash(bind, JOIN_OFFER_CREATOR) }, extra: { joinOfferId: pending.offerId,
         ...(selection ? { sharedProjectChoice: { selectId: "shared_project_local", recommended: selection.recommended } } : {}) },
@@ -131,7 +139,7 @@ export async function receiveJoinOffer(peer: HttpPeer, body: unknown, d: JoinOff
     claimPendingOffer(d.stateDir(), pending.offerId);
     return refuse(409, "duplicate_offer");
   }
-  attachPendingOfferAsk(d.stateDir(), pending.offerId, ask.id);
+  attachPendingOfferAsk(d.stateDir(), pending.offerId, ask.id, pending.approvalCardDigest);
   console.log(`🤝 [join-offer] 收到 ${peer.name} 的共享台账邀请（中心 ${pending.host}），已开授权卡 ${ask.id}`);
   return { status: 202, body: { ok: true, accepted: true, offerId: pending.offerId } };
 }
@@ -162,7 +170,7 @@ async function settle(p: PendingJoinOffer, status: JoinOfferStatus, d: JoinOffer
 export async function onJoinOfferAnswered(a: Ask, d: JoinOfferDeps = liveDeps): Promise<void> {
   const offerId = a.extra.joinOfferId;
   if (a.createdBy !== JOIN_OFFER_CREATOR) {
-    await onSharedProjectAnswered(a);
+    await onSharedProjectAnswered(a, d.inform);
     if (!sharedProjectAudit) await onSharedLedgerRebindAnswered(a, liveRebindDeps(d.inform));
     return;
   }
@@ -195,8 +203,10 @@ async function answerProjectOffer(a: Ask, p: PendingJoinOffer, d: JoinOfferDeps)
   if (wires.includes(`[button:${DECLINE_BUTTON}]`) && !wires.includes(`[button:${JOIN_BUTTON}]`)) return settle(p, "declined", d);
   if (p.expiresAt <= d.now()) return settle(p, "expired", d);
   const selection = selectedProject(wires, (p.projectOptions ?? []) as ProjectChoice[]);
+  if (p.approvalCardDigest !== sharedProjectCardDigest(a)) return settle(p, "failed", d);
   if (!selection || !p.recipient || !p.inviteDigest || !approved(a, p) || !d.joinProject) return settle(p, "failed", d);
   try {
+    if (d.authorizeProjectAnswer && !await d.authorizeProjectAnswer(a)) return settle(p, "failed", d);
     if (selection.mode === "existing" && (!(await d.projects()).some(c => c.id === selection.localProjectId)
       || (d.bindings?.() ?? []).some(b => (b.localProjectId ?? b.projectId) === selection.localProjectId))) return settle(p, "failed", d);
     const joined = await d.joinProject(p.url, p.code, selection, { ...p.project!, centerId: p.centerId, personId: p.recipient.personId,
@@ -263,6 +273,14 @@ const liveDeps: JoinOfferDeps = {
     return local.filter(p => eligible.has(p.id));
   },
   bindings: () => readSharedLedgerBindings(),
+  authorizeProjectAnswer: async a => {
+    const db = askReadDb(), stored = db ? getAsk(db, a.id) : null;
+    if (!stored || stored.state !== "answered" || stored.createdBy !== JOIN_OFFER_CREATOR || !stored.bind || !a.bind
+      || stored.bind.paramsHash !== a.bind.paramsHash || bindHash(stored.bind, JOIN_OFFER_CREATOR) !== bindHash(a.bind, JOIN_OFFER_CREATOR)
+      || JSON.stringify(stored.answer) !== JSON.stringify(a.answer)) return false;
+    return !!await sharedProjectAnswerPrincipal(stored, STATE_DIR);
+  },
+  joinProject: (url, code, selection, expected) => enrollSharedProject(url, code, selection, expected),
   join: (url, code, localProjectId) => {
     const key = instanceKeySync();
     const instanceId = instanceIdSync();

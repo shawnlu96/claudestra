@@ -1,3 +1,4 @@
+import { SHARED_PROJECTS_CAPABILITIES } from "./shared-projects-client.js";
 import { readProjects } from "../../lib/projects.js";
 import { readPeers } from "../../lib/peers.js";
 import { isPersonalProject } from "../../lib/lend-policy.js";
@@ -14,7 +15,7 @@ export async function readSharedProjectsLocalSnapshot(): Promise<SharedProjectsL
   return {
     projects: local.projects.map(p => ({ id: p.id, name: p.name, dirs: [...p.dirs], personal: isPersonalProject(p) })),
     peers: (peerState.httpPeers ?? []).map(p => ({ name: p.name, enabled: !p.disabled,
-      invitable: !p.disabled && !!p.baseUrl && !!p.outToken && (!!p.e2e || p.baseUrl.startsWith("https://")) })),
+      invitable: false })),
   };
 }
 
@@ -42,7 +43,7 @@ export async function sharedProjectsSnapshot(d: SharedProjectsPorts, local: Shar
       && b.teamId === project.teamId && b.projectId === project.projectId).map(b => b.localProjectId ?? b.projectId) };
   }));
   return {
-    v: 1 as const, identity: { ...who },
+    v: 1 as const, identity: { ...who }, capabilities: SHARED_PROJECTS_CAPABILITIES,
     teamRole: { available: false as const, reason: "center_team_role_read_contract_unavailable" }, projects,
     localProjects: local.projects.map(p => ({ id: p.id, name: p.name, dirs: [...p.dirs], personal: p.personal,
       eligible: !p.personal && !bindings.some(b => (b.localProjectId ?? b.projectId) === p.id) })),

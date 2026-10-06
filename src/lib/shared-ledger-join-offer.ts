@@ -89,6 +89,7 @@ export function parseJoinOffer(body: unknown, now: number): { ok: true; offer: J
   if (!center) return { ok: false, error: "invalid_url" };
   const code = typeof b.code === "string" && b.code === b.code.trim() ? parseSharedLedgerJoinCode(b.code) : null;
   if (!code) return { ok: false, error: "invalid_code" };
+  if (center.host.toLowerCase().includes(code.secret.toLowerCase())) return { ok: false, error: "invalid_url" };
   const project = b.project === undefined ? undefined : joinOfferProjectDisplay(b.project);
   if (project === null) return { ok: false, error: "invalid_offer" };
   let recipient: JoinOfferRecipient | undefined, inviteDigest: string | undefined, inviteExpires = Infinity;
@@ -133,7 +134,7 @@ export class JoinOfferLimiter {
 interface JoinProjectSelection { mode: "create" | "existing"; localProjectId?: string }
 interface JoinProjectOption { value: string; name: string; selection: JoinProjectSelection }
 export interface PendingJoinOffer extends JoinOffer {
-  projectOptions?: JoinProjectOption[]; recommended?: string; peer: string; receivedAt: number; askId?: string;
+  approvalCardDigest?: string; projectOptions?: JoinProjectOption[]; recommended?: string; peer: string; receivedAt: number; askId?: string;
   projectChoices?: SharedLedgerProjectChoice[]; sharedProjectId?: string;
 }
 export interface SentJoinOffer {
@@ -198,9 +199,9 @@ export async function savePendingOffer(stateDir: string, p: PendingJoinOffer, op
 }
 
 /** An ask id is public metadata; the credential itself never enters the ask database. */
-export function attachPendingOfferAsk(stateDir: string, offerId: string, askId: string): void {
+export function attachPendingOfferAsk(stateDir: string, offerId: string, askId: string, approvalCardDigest?: string): void {
   const pending = pendingOffers.get(stateDir)?.get(offerId);
-  if (pending) pending.askId = askId;
+  if (pending) { pending.askId = askId; pending.approvalCardDigest = approvalCardDigest; }
 }
 
 /** Synchronous claim prevents double clicks and the sweeper from redeeming the same credential twice. */
@@ -232,13 +233,14 @@ export async function recordSentOfferStatus(stateDir: string, peer: string, offe
 
 const STATUS_ZH: Record<JoinOfferStatus, string> = { joined: "已入组", declined: "对方不加入", expired: "邀请已过期", failed: "入组失败" };
 
-export function joinOfferCard(p: Pick<PendingJoinOffer, "peer" | "host" | "centerId" | "note" | "expiresAt" | "project" | "recipient">): { title: string; context: string } {
+export function joinOfferCard(p: Pick<PendingJoinOffer, "peer" | "host" | "centerId" | "note" | "expiresAt" | "project" | "recipient" | "inviteDigest">): { title: string; context: string } {
   const lines = [
     `邀请方（peer）：${p.peer}`,
     `中心主机：${p.host}`,
     `中心 ID：${p.centerId}`,
     p.project ? `团队：${p.project.teamId}；项目：${p.project.name}（${p.project.projectId}）` : "团队 / 项目：入组后显示",
     ...(p.recipient ? [`受邀本人：${p.recipient.personId}；实例：${p.recipient.instanceId ?? "由接收本机签名实例固定"}`] : []),
+    ...(p.inviteDigest ? [`邀请摘要：${p.inviteDigest}`] : []),
     ...(p.note ? [`对方附言：${p.note}`] : []),
     `有效至：${new Date(p.expiresAt).toISOString().slice(0, 16).replace("T", " ")} UTC`,
   ];

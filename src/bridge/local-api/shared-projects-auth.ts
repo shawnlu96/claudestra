@@ -29,3 +29,13 @@ export function resolveSharedProjectOwner(principal: Principal, original: Shared
     teamId: credential.teamId, personId: caller.personId, instanceId: caller.instanceId };
   return { person, credential, key };
 }
+
+/** Approval is a stored authenticated API answer; peer/guest and narrowed devices cannot authorize person enrollment. */
+export async function sharedProjectAnswerPrincipal(ask: import("../../lib/ledger-asks.js").Ask, stateDir: string) {
+  const { readPrincipalsStrict } = await import("../../lib/principals.js");
+  const { principalView } = await import("../../lib/devices.js");
+  const answer = ask.answer;
+  if (!answer?.owner || answer.external) return null;
+  const principal = principalView(await readPrincipalsStrict(`${stateDir}/principals.json`), answer.principal, answer.device);
+  return principal && sharedProjectOwnerPrincipal(principal) ? principal : null;
+}

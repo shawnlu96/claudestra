@@ -1,3 +1,4 @@
+import { v2ObjectDigest } from "../../lib/shared-ledger-contract-v2-integrity.js";
 import { PROJECT_ID_RE } from "../../lib/projects.js";
 import type { AskRow } from "../../lib/ask-options.js";
 import type { SharedLedgerBinding } from "../../lib/shared-ledger-gate-bindings.js";
@@ -27,4 +28,9 @@ export function selectedProject(wires: string[], choices: ProjectChoice[]): Proj
   const selected = wires.filter(w => w.startsWith(`[select:${PROJECT_SELECT}:`));
   if (selected.length !== 1) return null;
   return choices.find(c => selected[0] === `[select:${PROJECT_SELECT}:${c.value}]`)?.selection ?? null;
+}
+
+/** N4 binds the displayed approval surface as well as execution parameters; changing labels or identity text must fail closed. */
+export function sharedProjectCardDigest(card: Pick<import("../../lib/ledger-asks.js").Ask, "title" | "context" | "options">): string {
+  return v2ObjectDigest({ title: card.title, context: card.context ?? null, options: card.options });
 }
