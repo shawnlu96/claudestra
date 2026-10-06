@@ -1,6 +1,7 @@
 /** dispatch-recovery-LCFG1, borrower side: real ledger + pool planner + recordHello; per peer + family pause, explicit re-declaration recovery. */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import type { Database } from "bun:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,15 +37,43 @@ function hello(peer: string, boot = "boot-0001", opts: HelloOpts = {}) {
     grant: opts.noGrant ? null : { until: NOW + 7 * 86400_000, roles: ["write", "review"], repos: ["org/repo"], ordersPerDay: 50, ordersLeftToday: 50 } }, NOW);
 }
 let n = 0;
-function held(peer: string, family: "codex" | "claude" = "codex") {
-  const id = `T${++n}`;
+function buildTask(id = `T${++n}`) {
   createTask(db, ctx(), { id, project: "p", title: id, kind: "code", agent: "agent-dev" });
   db.run("UPDATE tasks SET stage = 'build' WHERE id = ?", [id]);
+  return id;
+}
+function offered(peer: string, family: "codex" | "claude" = "codex", id = buildTask()) {
   const input: OfferInput = { taskId: id, peer, family, repo: "org/repo", pr: null, spec: "Implement x; validate x", borrow: borrow(peer),
     write: { fp: "abcd-ef01-2345-6789", base: "main", baseSha: "b".repeat(40), report: null } };
-  const o = offerLend(db, ctx(), input);
-  claimLend(db, ctx(), peer, { v: 1, orderId: o.orderId, worker: "agent-worker" }, () => borrow(peer));
-  return o.orderId;
+  return offerLend(db, ctx(), input).orderId;
+}
+const claim = (peer: string, orderId: string) => (claimLend(db, ctx(), peer, { v: 1, orderId, worker: "agent-worker" }, () => borrow(peer)), orderId);
+const held = (peer: string, family: "codex" | "claude" = "codex") => claim(peer, offered(peer, family));
+/**
+ * Volume orders (r4): offerLend's outbound gate costs ~1ms an order, which 500 orders turn into most of the test. So one real offer is the
+ * template and each further order copies the rows that offer wrote (order + write lease) onto a fresh task; claim and release still run
+ * for real. "bulk copies equal real offers" pins that a copy is byte-for-byte what offerLend would have written.
+ */
+type OfferRows = { task: string; order: Record<string, unknown>; lease: Record<string, unknown> };
+function offerRows(orderId: string): OfferRows {
+  const order = db.query("SELECT * FROM lend_orders WHERE orderId = ?").get(orderId) as Record<string, unknown>;
+  const task = order.taskId as string;
+  return { task, order, lease: db.query("SELECT * FROM lend_write_leases WHERE taskId = ?").get(task) as Record<string, unknown> };
+}
+function rowsFor(t: OfferRows, task: string): Omit<OfferRows, "task"> {
+  const swap = (row: Record<string, unknown>): Record<string, unknown> => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === "string" ? v.split(t.task).join(task) : v]));
+  const order = swap(t.order);
+  return { order: { ...order, sha256: createHash("sha256").update(order.text as string, "utf8").digest("hex") }, lease: swap(t.lease) };
+}
+function insertRow(table: string, row: Record<string, unknown>) {
+  const cols = Object.keys(row);
+  db.prepare(`INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(...(cols.map((c) => row[c]) as SQLQueryBindings[]));
+}
+function heldCopy(peer: string, t: OfferRows) {
+  const rows = rowsFor(t, buildTask());
+  insertRow("lend_orders", rows.order);
+  insertRow("lend_write_leases", rows.lease);
+  return claim(peer, rows.order.orderId as string);
 }
 const release = (peer: string, orderId: string, detail = START) =>
   leaseLend(db, ctx(), peer, { v: 1, orderId, gen: 1, action: "release", reason: "not_started", detail });
@@ -362,15 +391,18 @@ test("r4 probe: 501 covered orders retain old recovery and refusal roots across 
     expect(first.codex!.orders).toEqual([root]);
     hello("mate", "boot-0001", { recovered: first });
     expect(activeConfigFailures(db, "mate")).toEqual({});
-    for (let gen = 2; gen <= 26; gen++) {
-      const orders: string[] = [];
-      for (let i = 0; i < 20; i++) {
-        const id = held("mate");
-        release("mate", id);
-        orders.push(id);
+    const template = offerRows(offered("mate"));
+    db.transaction(() => { // one commit for the 500-order fixture; each write inside keeps its own savepoint
+      for (let gen = 2; gen <= 26; gen++) {
+        const orders: string[] = [];
+        for (let i = 0; i < 20; i++) {
+          const id = gen === 2 && i === 0 ? claim("mate", template.order.orderId as string) : heldCopy("mate", template);
+          release("mate", id);
+          orders.push(id);
+        }
+        hello("mate", "boot-0001", { recovered: { codex: { gen, orders } } });
       }
-      hello("mate", "boot-0001", { recovered: { codex: { gen, orders } } });
-    }
+    })();
     expect(configRecoveryGen(db, "mate", "codex")).toBe(26);
     expect(activeConfigFailures(db, "mate")).toEqual({});
     expect(slots()?.codex).toBe(4);
@@ -387,4 +419,11 @@ test("r4 probe: 501 covered orders retain old recovery and refusal roots across 
     expect(activeConfigFailures(db, "mate").codex?.orderId).toBe(fresh);
     expect(slots()?.codex).toBe(0);
   } finally { closeLedger(path); bdb.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("bulk copies equal real offers: the r4 volume fixture writes exactly the rows offerLend would", () => {
+  const template = offerRows(offered("mate"));
+  const real = offerRows(offered("mate"));
+  expect(real.order.text).toContain(real.task);
+  expect(rowsFor(template, real.task)).toEqual({ order: real.order, lease: real.lease });
 });

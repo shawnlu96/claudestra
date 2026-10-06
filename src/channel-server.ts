@@ -18,7 +18,8 @@ import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/c
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
 import { typeIntoOwnPane } from "./lib/codex-tui-submit.js";
-import { CodexQueueSink, decodePreambleEnv, codexParentGone, codexQueueArgs, defaultRunner, heldThreadIds, isPidAlive, type InboundSink } from "./lib/codex-thread.js";
+import { CodexQueueSink, decodePreambleEnv, codexQueueArgs, defaultRunner, heldThreadIds, type InboundSink } from "./lib/codex-thread.js";
+import { watchParentGone, watchStdinEnd } from "./lib/channel-server-lifecycle.js";
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
 import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
@@ -421,18 +422,6 @@ async function discoverCodexSession(): Promise<void> {
   }
 }
 
-/** Codex 被强杀时 MCP 子进程会成孤儿（判据见 codexParentGone）：父进程没了就按 stdio 关闭处理 */
-function startCodexParentWatch() {
-  const parent = process.ppid;
-  const timer = setInterval(() => {
-    if (!codexParentGone(parent, process.ppid, isPidAlive)) return;
-    mcpClosed = true;
-    console.error(`👋 Codex 父进程 ${parent} 已退出，channel-server 随之退出`);
-    process.exit(0);
-  }, 2000);
-  timer.unref?.();
-}
-
 /** 就绪标记与 Pi 扩展同款：manager 等 @claudestra_ready=1，而不是嗅探会随版本变的 TUI 文案 */
 function markCodexReady() {
   const pane = process.env.TMUX_PANE;
@@ -786,7 +775,12 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await mcp.connect(transport);
-  if (IS_CODEX) startCodexParentWatch();
+  // SDK 不把 stdin EOF / 父进程消失当作关闭，自己补上，都走 mcp.close() → 上面的 onclose
+  watchStdinEnd(process.stdin, () => void mcp.close());
+  watchParentGone((parent) => {
+    console.error(`👋 父进程 ${parent} 已退出，按 stdio 关闭处理`);
+    void mcp.close();
+  });
 
   // 兜底：万一 SDK 没回调 oninitialized（版本差异 / 客户端跳过通知），30s 后
   // 仍未握手就照旧注册。宁可退回老行为，也不能让 agent 完全连不上 bridge。
