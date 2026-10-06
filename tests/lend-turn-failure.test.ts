@@ -16,10 +16,11 @@ import { lendDeps } from "../src/lib/lend-deps.js";
 import { keepLendEvidence } from "../src/lib/lend-evidence.js";
 import { getMeta, getOrder, type LendRow } from "../src/lib/lend-journal.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
-import { listAsks, openAsk } from "../src/lib/ledger-asks.js";
+import { listAsks, openAsk, type Ask } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { acpLogDir } from "../src/lib/log-paths.js";
 import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
+import { runLedger } from "../src/manager/ledger.js";
 import { harness, toStarted } from "./lend-harness.js";
 
 const W = workerName("o1");
@@ -139,6 +140,36 @@ test("额度 / 登录卡的原有行为不变：照旧停单、额度暂停借�
   expect(getOrder(auth.h.db, "o1")!.reason).toContain("没登录或登录失效");
   expect(getMeta(auth.h.db, "pause:codex")).toBeNull();
   expect(auth.kept).toEqual([]);
+});
+
+/** 出借收尾的真实关卡出口：调度服务身份跑 `ledger lend-close-asks`，关的就是这张临时台账（生产 closeAsks 经 manager 走同一条命令） */
+function realCloseAsks(h: ReturnType<typeof harness>, ledger: ReturnType<typeof openLedger>): void {
+  h.d.closeAsks = async (agent) => {
+    const r = (await runLedger(["lend-close-asks", "--agent", agent], {
+      db: ledger, actor: "scheduler", projectIds: [], now: () => Date.now(), loadRegistry: async () => ({ socket: "", agents: {} }) as never, saveRegistry: async () => {},
+    })) as Record<string, unknown>;
+    return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "lend-close-asks 失败") };
+  };
+}
+const QUOTA_CARD: Card = { kind: "decide", title: "Codex 额度用完了", context: "约 3 小时后恢复", extra: { quota: true, raw: "You've hit your usage limit." } };
+const cardStates = (ledger: ReturnType<typeof openLedger>, pick: (a: Ask) => boolean) => listAsks(ledger, { fromAgent: W, source: "codex" }).filter(pick).map((a) => a.state);
+
+test("投递结果不明的回合失败卡：照常停单，但出借收尾的真实关卡（lend-close-asks）不关它；同一个 worker 的额度卡照常 cancelled", async () => {
+  const unknown = turnFail("这条消息可能已经被执行，没有自动重发，需要人决定要不要重发（acp 连接断了）。消息原文：\n部署", { deliveryUnknown: true });
+  const { h, ledger } = await running({ ...QUOTA_CARD, at: CARD_AT - 10_000 }, unknown);
+  realCloseAsks(h, ledger);
+  await h.tick();
+  expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+  expect(cardStates(ledger, (a) => a.extra.deliveryUnknown === true)).toEqual(["open"]);
+  expect(cardStates(ledger, (a) => a.extra.quota === true)).toEqual(["cancelled"]);
+});
+
+test("对照：只有额度卡时照常停单，真实关卡把它 cancelled", async () => {
+  const { h, ledger } = await running(QUOTA_CARD);
+  realCloseAsks(h, ledger);
+  await h.tick();
+  expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+  expect(cardStates(ledger, () => true)).toEqual(["cancelled"]);
 });
 
 test("报错原文里的本机路径 / 凭据不出本机：release detail、journal reason、日志都只有类别，原文只进本机证据", async () => {

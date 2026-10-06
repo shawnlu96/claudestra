@@ -1,9 +1,7 @@
 /**
- * cloud-PP3 纯地址谓词：isPrivateAddr / isTailscaleAddr / isLoopbackAddress 搬进无 import 的叶子 address-predicates.ts，
- * 中心 artifacts/urls.ts 只依赖它，不再经 net-addr / same-host 把网卡查询（node:os）/ tailscale CLI（动态 import）带进闭包。
- * collectEdges 只给仓库内边，builtin / 包导入另行逐文件扫：闭包里非相对导入只许白名单（纯计算的 node:crypto）。
- * 图用 guard 的真实 import 边（scripts/guard/rules/deps.ts collectEdges，含 type-only 与动态 import）；
- * 同一规则在把 urls 改回旧 import 的合成图上判红，证明扫描器认得出；新旧谓词在固定语料上逐项相同；旧 import 路径仍可用。
+ * Public consumers keep the pure address predicates and legacy import compatibility.
+ * The import graph and isolated import checks reject local environment access.
+ * Center URL rejection and its graph mutations run in the private migration counterpart.
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,16 +11,10 @@ import { collectEdges, type Edge } from "../scripts/guard/rules/deps.js";
 import * as pure from "../src/lib/address-predicates.js";
 import * as legacy from "../src/lib/net-addr.js";
 import * as legacyHost from "../src/lib/same-host.js";
-import { withoutPublicWebLinks } from "../src/shared-ledger/artifacts/urls.js";
 import { testChildEnv } from "./test-env.js";
 
 const ROOT = resolve(import.meta.dir, "..");
 const ENTRY = "src/lib/address-predicates.ts";
-const URLS = "src/shared-ledger/artifacts/urls.ts";
-/** 网卡查询 / tailscale CLI / 本机状态 / 配置 / 中心 / bridge：纯谓词与中心 URL 规则的闭包里一个都不许有 */
-const FORBIDDEN_LIB = "net-addr|same-host|tailscale|paths|state-dir|registry|config-store|ledger-store|shared-ledger-client|shared-ledger-mode|bridge-[\\w-]+";
-const FORBIDDEN = new RegExp(`^src/(?:lib/(?:${FORBIDDEN_LIB})\\.ts|(?:bridge|manager)\\.ts|(?:bridge|manager)/)`);
-
 function loadSrc(): Map<string, string> {
   const files = new Map<string, string>();
   const walk = (d: string): void => {
@@ -43,19 +35,6 @@ function closure(edges: Edge[], entry: string): Set<string> {
   for (const f of seen) for (const to of out.get(f) ?? []) seen.add(to);
   return seen;
 }
-const violations = (edges: Edge[], entry: string): string[] => [...closure(edges, entry)].filter((f) => FORBIDDEN.test(f)).sort();
-
-/** 闭包里允许的非相对导入：只有纯计算、不碰本机环境的 builtin */
-const ALLOWED_EXTERNAL = new Set(["node:crypto"]);
-const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g;
-function externalEdges(files: Map<string, string>, edges: Edge[], entry: string): string[] {
-  const out: string[] = [];
-  for (const f of closure(edges, entry)) {
-    for (const m of (files.get(f) ?? "").matchAll(SPECIFIER)) if (!m[1]!.startsWith(".") && !ALLOWED_EXTERNAL.has(m[1]!)) out.push(`${f} -> ${m[1]}`);
-  }
-  return out.sort();
-}
-
 const FILES = loadSrc();
 const EDGES = collectEdges(FILES);
 
@@ -66,30 +45,7 @@ describe("import 图边界（runtime + type 闭包）", () => {
     expect(src.match(/^\s*(?:import|export)\b[^\n]*\bfrom\b|\bimport\(|\brequire\(|\bprocess\.|\bBun\./gm)).toBeNull();
   });
 
-  test("中心 urls.ts 闭包不再含 net-addr / same-host / tailscale / 本机状态", () => {
-    expect(closure(EDGES, URLS).has(ENTRY)).toBe(true);
-    expect(violations(EDGES, URLS)).toEqual([]);
-  });
 
-  test("中心 urls.ts 闭包里没有本机环境 builtin 边（node:os / child_process / fs 等）", () => {
-    expect(externalEdges(FILES, EDGES, URLS)).toEqual([]);
-    expect(externalEdges(FILES, EDGES, ENTRY)).toEqual([]);
-  });
-
-  test("规则不是摆设：旧 net-addr 闭包含 tailscale；把 urls 改回旧 import，同一规则立刻判红", () => {
-    expect(violations(EDGES, "src/lib/net-addr.ts")).toEqual(["src/lib/net-addr.ts", "src/lib/tailscale.ts"]);
-    const files = new Map(FILES);
-    files.set(URLS, FILES.get(URLS)!.replace('"../../lib/address-predicates.js"', '"../../lib/net-addr.js"'));
-    expect(violations(collectEdges(files), URLS)).toEqual(expect.arrayContaining(["src/lib/net-addr.ts", "src/lib/tailscale.ts"]));
-  });
-
-  test("规则不是摆设：把 urls 的环回谓词改回 same-host，禁用列表与 builtin 边检查都判红", () => {
-    const files = new Map(FILES);
-    files.set(URLS, `import { isLoopbackAddress as _legacyLoopback } from "../../lib/same-host.js";\n${FILES.get(URLS)!}`);
-    const edges = collectEdges(files);
-    expect(violations(edges, URLS)).toEqual(["src/lib/same-host.ts"]);
-    expect(externalEdges(files, edges, URLS)).toEqual(["src/lib/same-host.ts -> node:os"]);
-  });
 });
 
 describe("行为不变", () => {
@@ -138,29 +94,19 @@ describe("行为不变", () => {
     expect(legacyHost.isLoopbackAddress).toBe(pure.isLoopbackAddress);
   });
 
-  test("中心 URL 规则：公共放行，私有 / 环回 / 映射 / 控制字符 / 登录信息仍拒绝", () => {
-    for (const ok of ["https://example.invalid/docs", "http://172.32.0.1/docs", "https://192.169.1.1/docs", "http://100.128.0.1/x", "https://[2001:db8::1]/docs"]) {
-      expect({ ok, out: withoutPublicWebLinks(`see ${ok} end`) }).toEqual({ ok, out: "see  end" });
-    }
-    for (const bad of [
-      "http://10.0.0.1/x", "http://172.16.0.1/x", "http://192.168.1.1/x", "http://100.64.0.1/x", "http://100.127.0.1/x",
-      "http://127.0.0.1/x", "http://localhost/x", "http://[::1]/x", "http://[::ffff:192.168.1.1]/x", "http://[::ffff:100.64.0.1]/x",
-      "http://[::ffff:127.0.0.1]/x", "http://exa\u0000mple.invalid/x", "https://user:pw@example.invalid/x", "https://user@example.invalid/x",
-    ]) expect(() => withoutPublicWebLinks(bad)).toThrow();
-  });
+
 });
 
 describe("隔离 import", () => {
-  test("在临时 HOME / TMPDIR 里加载纯谓词与中心 URL 规则，不生成任何文件", () => {
+  test("在临时 HOME / TMPDIR 里加载纯谓词，不生成任何文件", () => {
     const home = mkdtempSync(join(tmpdir(), "pp3-home-"));
     const tmp = mkdtempSync(join(tmpdir(), "pp3-tmp-"));
     try {
       const script = `import * as p from ${JSON.stringify(resolve(ROOT, ENTRY))};
-import { withoutPublicWebLinks } from ${JSON.stringify(resolve(ROOT, URLS))};
-console.log(JSON.stringify({ ts: p.isTailscaleAddr("100.64.0.1"), lan: p.isPrivateAddr("10.0.0.1"), out: withoutPublicWebLinks("https://example.invalid/a") }));`;
+console.log(JSON.stringify({ ts: p.isTailscaleAddr("100.64.0.1"), lan: p.isPrivateAddr("10.0.0.1") }));`;
       const proc = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], { cwd: tmp, env: testChildEnv({ HOME: home, TMPDIR: tmp }) });
       expect(proc.stderr.toString()).toBe("");
-      expect(JSON.parse(proc.stdout.toString())).toEqual({ ts: true, lan: true, out: "" });
+      expect(JSON.parse(proc.stdout.toString())).toEqual({ ts: true, lan: true });
       expect(readdirSync(home)).toEqual([]);
       expect(readdirSync(tmp)).toEqual([]);
     } finally {

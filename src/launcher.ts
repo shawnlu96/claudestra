@@ -87,6 +87,8 @@ import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { busyAgentWindows } from "./lib/busy-windows.js";
 import { healSelfDirty } from "./lib/self-dirty.js";
 import { discardOneShotAfterReady, issueLaunchCred, sweepStaleOneShots, withOneShot } from "./lib/caller-cred-launch.js";
+import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
+armSpecPreflight();
 await assertPrimaryOrExit("launcher");
 
 // 默认 master 目录：仓库根 / master。允许 env 覆盖以支持自定义部署。
