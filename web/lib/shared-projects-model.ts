@@ -20,12 +20,14 @@ export interface ProjectSnapshot {
 }
 export interface CreateProject extends ProjectScope { name: string; id?: string; localProjectId?: string; operationId: string }
 export interface ProjectPatch { rev: number; name?: string; status?: "active" | "archived" }
+export type ProjectRecipient = { personId: string; code?: never } | { code: string; personId?: never };
+export interface ProjectInviteInput { peers: string[]; note: string; recipient: ProjectRecipient }
 export interface SharedProjectsPort {
   list(signal: AbortSignal): Promise<ProjectSnapshot>;
   create(input: CreateProject, signal: AbortSignal): Promise<void>;
   patch(ref: ProjectRef, patch: ProjectPatch, signal: AbortSignal): Promise<void>;
   members(ref: ProjectRef, signal: AbortSignal): Promise<ProjectMember[]>;
-  invite(ref: ProjectRef, input: { peers: string[]; note: string }, signal: AbortSignal): Promise<void>;
+  invite(ref: ProjectRef, input: ProjectInviteInput, signal: AbortSignal): Promise<void>;
   remove(ref: ProjectRef, personId: string, signal: AbortSignal): Promise<void>;
   directories(ref: ProjectRef, dirs: string[], signal: AbortSignal): Promise<void>;
   leave(ref: ProjectRef, signal: AbortSignal): Promise<void>;

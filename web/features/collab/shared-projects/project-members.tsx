@@ -1,7 +1,9 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ProjectFailure, projectErrorText, type ProjectMember, type ProjectSnapshot, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import { ProjectFailure, projectErrorText,
+  type ProjectMember, type ProjectRecipient, type ProjectSnapshot, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ActionStatus } from "./project-dialog";
+import { ProjectRecipientFields } from "./project-recipient";
 import { useProjectAction } from "./use-projects";
 
 export function ProjectMembers({ project, snapshot, port }: { project: SharedProject; snapshot: ProjectSnapshot; port: SharedProjectsPort }) {
@@ -10,6 +12,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
   const [removing, setRemoving] = useState<ProjectMember | null>(null);
   const [peers, setPeers] = useState<string[]>([]);
   const [note, setNote] = useState("");
+  const [recipient, setRecipient] = useState<ProjectRecipient | null>(null);
   const sequence = useRef(0);
   const { centerId, teamId, projectId } = project;
   const refresh = useCallback(async (signal: AbortSignal) => {
@@ -29,6 +32,8 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
   }, [refresh]);
   const action = useProjectAction(refresh);
   const validPeers = peers.filter(id => snapshot.peers.some(p => p.id === id));
+  const validRecipient = recipient && (recipient.personId !== undefined
+    ? members.some(m => m.personId === recipient.personId) : !!recipient.code.trim()) ? recipient : null;
   return <section className="space-y-3 border-t border-base-300 pt-4">
     <h3 className="font-semibold">成员</h3>
     {loadError && <p role="alert" className="text-sm text-error">{loadError}</p>}
@@ -49,12 +54,14 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
           <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => setRemoving(null)}>取消</button>
         </div>
       </div>}
-      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!validPeers.length) return; void action.run(async s => {
-        await port.invite(project, { peers: validPeers, note: note.trim() }, s);
-        if (!s.aborted) { setPeers([]); setNote(""); }
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!validPeers.length || !validRecipient) return; void action.run(async s => {
+        await port.invite(project, { peers: validPeers, note: note.trim(), recipient: validRecipient }, s);
+        if (!s.aborted) { setPeers([]); setNote(""); setRecipient(null); }
       }, "邀请已发送，等待对方确认加入。"); }}>
         <fieldset disabled={action.busy} className="space-y-2">
-          <legend className="mb-2 font-medium">邀请 peer</legend>
+          <legend className="mb-2 font-medium">邀请成员</legend>
+          <ProjectRecipientFields members={members} value={recipient} onChange={setRecipient} />
+          <p className="text-sm font-medium">发送到 peer</p>
           {!snapshot.peers.length && <p className="text-sm opacity-60">暂无已握手的 peer。</p>}
           {snapshot.peers.map(p => <label key={p.id} className="flex items-center gap-2 text-sm">
             <input type="checkbox" className="checkbox checkbox-sm" checked={peers.includes(p.id)} onChange={e => {
@@ -64,7 +71,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
           <label className="block text-sm">附言（可选）
             <input className="input mt-1 w-full" value={note} maxLength={500} onChange={e => setNote(e.target.value)} />
           </label>
-          <button className="btn btn-primary btn-sm" disabled={!validPeers.length}>邀请成员</button>
+          <button className="btn btn-primary btn-sm" disabled={!validPeers.length || !validRecipient}>邀请成员</button>
         </fieldset>
       </form>
     </>}

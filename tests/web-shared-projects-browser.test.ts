@@ -52,7 +52,7 @@ afterAll(async () => {
     if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
       head, specRev: 1, round: 0,
       fixture: "synthetic injected SharedProjectsPort and synthetic choice card; not N1-N4 integration",
-      summary: "Isolated forms, permissions, explicit CAS retry and explicit local selection; production combination pending dependencies and PM acceptance",
+      summary: "Isolated forms, permissions, explicit CAS/local/recipient choices; production combination pending frozen N4 and PM acceptance",
       dirty: !!dirty,
       fixtureSha256: createHash("sha256").update(readFileSync(entry)).digest("hex"), shots: manifest,
     }, null, 2), { mode: 0o600 });
@@ -96,8 +96,15 @@ for (const width of [390, 1200]) test(`project forms, explicit CAS retry, invite
     expect(JSON.parse((await page.locator("body").getAttribute("data-calls"))!).filter((v: string) => v === "patch")).toHaveLength(1);
     await page.getByRole("button", { name: "按当前版本重试", exact: true }).click();
     await page.getByText("协作伙伴的机器", { exact: true }).click();
+    expect(await page.getByRole("button", { name: "邀请成员", exact: true }).isDisabled()).toBe(true);
+    expect(await page.getByLabel("邀请对象", { exact: true }).inputValue()).toBe("");
+    await page.getByLabel("邀请对象类型", { exact: true }).selectOption("new");
+    await page.getByLabel("拟邀新成员代号", { exact: true }).fill("synthetic-new-person");
     await page.getByRole("button", { name: "邀请成员", exact: true }).click();
     await page.getByText("邀请已发送，等待对方确认加入。", { exact: true }).waitFor();
+    expect(JSON.parse((await page.locator("body").getAttribute("data-last-invite"))!)).toEqual({
+      peers: ["fixture-peer"], note: "", recipient: { code: "synthetic-new-person" },
+    });
     await page.getByText("邀请已发送，等待对方确认加入。", { exact: true }).scrollIntoViewIfNeeded();
     await screenshot(page, `invite-${width}`);
     await page.getByRole("button", { name: "移出 协作伙伴", exact: true }).click();
@@ -129,6 +136,43 @@ test("ordinary member has no owner actions and no create form", async () => {
       expect(await page.getByRole("button", { name, exact: true }).count()).toBe(0);
     }
     await screenshot(page, "member-dark-390");
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
+test("existing recipient requires an explicit member choice independent of the peer", async () => {
+  const { page, errors } = await newPage(390, "?role=owner");
+  try {
+    await page.getByRole("button", { name: "项目设置", exact: true }).click();
+    await page.getByLabel("显示名", { exact: true }).fill("邀请测试项目");
+    await page.getByRole("button", { name: "创建项目", exact: true }).click();
+    await page.getByRole("button", { name: "邀请测试项目", exact: true }).last().click();
+    const submit = page.getByRole("button", { name: "邀请成员", exact: true });
+    const recipient = page.getByLabel("邀请对象", { exact: true });
+    expect(await submit.isDisabled()).toBe(true);
+    await recipient.selectOption("fixture-existing-person");
+    expect(await submit.isDisabled()).toBe(true);
+    await page.getByText("协作伙伴的机器", { exact: true }).click();
+    expect(await submit.isEnabled()).toBe(true);
+    await page.getByLabel("邀请对象类型", { exact: true }).selectOption("new");
+    expect(await submit.isDisabled()).toBe(true);
+    await page.getByLabel("拟邀新成员代号", { exact: true }).fill("   ");
+    expect(await submit.isDisabled()).toBe(true);
+    await page.getByLabel("拟邀新成员代号", { exact: true }).fill("synthetic-new-person");
+    expect(await submit.isEnabled()).toBe(true);
+    await page.getByLabel("邀请对象类型", { exact: true }).selectOption("existing");
+    expect(await recipient.inputValue()).toBe("");
+    expect(await submit.isDisabled()).toBe(true);
+    expect(await page.locator("body").getAttribute("data-last-invite")).toBeNull();
+    await recipient.selectOption("fixture-existing-person");
+    await page.getByLabel("附言（可选）", { exact: true }).fill("合成邀请附言");
+    await submit.click();
+    await page.getByText("邀请已发送，等待对方确认加入。", { exact: true }).waitFor();
+    expect(JSON.parse((await page.locator("body").getAttribute("data-last-invite"))!)).toEqual({
+      peers: ["fixture-peer"], note: "合成邀请附言", recipient: { personId: "fixture-existing-person" },
+    });
+    expect(await submit.isDisabled()).toBe(true);
+    expect(await recipient.inputValue()).toBe("");
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });

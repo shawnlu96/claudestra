@@ -41,8 +41,13 @@ const port: SharedProjectsPort = {
     Object.assign(p, patch, { rev: p.rev + 1 });
   },
   members: async () => [{ personId: "fixture-owner", code: "项目创建人", role: "owner", status: "active" },
+    { personId: "fixture-existing-person", code: "fixture-existing-code", role: "member", status: "removed" },
     ...(joined ? [{ personId: "fixture-person", code: "协作伙伴", role: "member" as const, status: "invited" as const }] : [])],
-  invite: async () => { record("invite"); joined = true; },
+  invite: async (_, input) => {
+    if (Object.keys(input.recipient).length !== 1) throw new Error("synthetic-recipient-shape-mismatch");
+    document.body.dataset.lastInvite = JSON.stringify(input);
+    record("invite"); joined = true;
+  },
   remove: async () => { record("remove"); joined = false; },
   directories: async (_, dirs) => { record("directories"); snapshot.projects[0]!.local!.dirs = dirs; },
   leave: async () => { record("leave"); snapshot = { ...snapshot, projects: [] }; },
