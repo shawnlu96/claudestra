@@ -7,6 +7,7 @@
  *   legacy 的 usageLimitExceeded 错误），[stub:perm] = 跑命令前向宿主要权限（session/request_permission，答案写进回复），
  *   [stub:send:<目标>] = 回复后再调 send_to_agent 发给目标（沙箱 lab 的跨实例实测：<agent>@<peer>），[stub:whoami] = 先调 whoami、结果写进回复（T85）；
  *   [stub:call:<工具>:<base64url 的 JSON 参数>] = 先调这个 MCP 工具、结果写进回复（T96 派单工具实测，可写多个，按顺序调）；
+ *   [stub:policy] = reply 之后被提供方策略拦下（AIR 给 request 类、不带动作的 sessionFailure，没声明给 legacy 的 cyberPolicy 错误；ACPE1）；
  *   环境变量 STUB_AUTH_REQUIRED=1 = 没登录（接线程时回 -32000）；STUB_INITIALIZE=<JSON> = 按 JSON merge patch 改 initialize 回包
  *   （null 删键：{"protocolVersion":2}、{"protocolVersion":null} 测协议不兼容，{"_meta":{"steering":null}} 测可选能力降级，见 lib/acp/protocol.ts）。
  * - /compact：见 compact()，照 codex-acp 2.1.1 的形状（docs/runtimes/codex-acp.md「压缩完成信号」）。
@@ -190,6 +191,13 @@ async function turn(text: string): Promise<Rec> {
     const extra = `${perm}${who}${lend}${calls}${running.steered.length ? `（途中插话 ${running.steered.length} 条）` : ""}`;
     const reply = `stub 回复（${model} / ${config[1].currentValue}）${extra}：${text.replace(/<[^>]+>/g, "").trim().slice(0, 80)}`;
     if (chatId && !text.includes("[stub:noreply]")) await callMcp("reply", { chat_id: chatId, text: reply });
+    if (text.includes("[stub:policy]")) {
+      await sleep(2_000); // 现场是 reply 之后 4 秒才被拦：等那句回复把回程槽消化完再失败
+      const title = "This content was flagged for possible cybersecurity risk. (stub)";
+      const failure = { id: `${randomUUID()}:error`, revision: 1, category: "request", severity: "error", title, actions: [] };
+      if (air) return { stopReason: "end_turn", _meta: { jetbrains: { air: { version: 1, sessionFailure: failure } } } };
+      throw { code: -32603, message: "Internal error", data: { message: title, codexErrorInfo: "cyberPolicy" } };
+    }
     const sendTo = /\[stub:send:([^\]\s]+)\]/.exec(text)?.[1];
     if (sendTo) await callMcp("send_to_agent", { target: sendTo, text: `stub ${sessionId.slice(0, 8)} 跨实例问候（lab）` });
     update({ sessionUpdate: "usage_update", used: 1234 + text.length, size: 272000 });

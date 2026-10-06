@@ -335,14 +335,16 @@ describe("结论再长，修复单也领得到（单子整体不超 WIRE_MAX_BYT
 });
 
 describe("ACP 回合失败（cyber_policy 这类）不静默", () => {
-  async function reviewSent(openAt: "before" | "after") {
+  /** legacy = 老宿主的卡：没有宿主报的会话 / 失败时刻 */
+  async function reviewSent(openAt: "before" | "after", legacy = false) {
     const f = autoFixture();
     await toBuild(f);
     await f.tick();
     await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
     await f.tick(); // ensure reviewer
     const card = (at: number) => openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败",
-      context: "This request was blocked by cyber policy.", extra: { failure: "error" } }, at);
+      // 宿主报的会话 / 失败时刻（lib/acp/host.ts），codexFailure 按它归单
+      context: "This request was blocked by cyber policy.", extra: legacy ? { failure: "error" } : { failure: "error", sessionId: "s-rv", failedAt: at } }, at);
     if (openAt === "before") card(1);
     const send = async () => {
       const claimed = (f.db.query("SELECT updatedAt FROM scheduler_intents WHERE status = 'submitted'").get() as { updatedAt: number }).updatedAt;
@@ -360,6 +362,18 @@ describe("ACP 回合失败（cyber_policy 这类）不静默", () => {
     try {
       expect(codexFailure(f.db, "agent-rv-t1")).toMatchObject({ failure: { kind: "error" }, afterKey: lastIntent(f).id });
       expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("回合失败") });
+      expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
+      const ev = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "scheduler" && e.data.op === "fallback_manual");
+      expect(ev?.text).toContain("cyber policy");
+      expect(f.notices).toEqual([expect.stringContaining("cyber policy")]);
+    } finally { f.close(); }
+  });
+
+  test("老宿主的卡（没有会话 / 失败时刻）：不按写卡时刻猜成本单，unknown（afterKey null）交 PM，照样退人工、留事件、通知", async () => {
+    const f = await reviewSent("after", true);
+    try {
+      expect(codexFailure(f.db, "agent-rv-t1")).toMatchObject({ failure: { kind: "error" }, afterKey: null });
+      expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("归不到派单上的失败") });
       expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
       const ev = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "scheduler" && e.data.op === "fallback_manual");
       expect(ev?.text).toContain("cyber policy");
