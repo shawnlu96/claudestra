@@ -61,6 +61,8 @@ export interface TurnsDeps {
   reconcile?: Reconciler;
   /** 有命令开始执行：进程树马上补扫一次（proc-tree.ts） */
   onCommand?(): void;
+  /** 一轮收尾（turnId）：还在等宿主答复的审批按 cancel 答（approvals.ts） */
+  onFinish?(turnId: string): void;
   timings?: Partial<TurnTimings>;
 }
 
@@ -128,8 +130,8 @@ export class Turns {
   private stopped = false;
   private waiters = new Set<() => void>();
   private warnedThread = false;
-  /** 最近一次 thread/tokenUsage/updated 的 last（跨回合保留，同 2.1.0 的 sessionState.lastTokenUsage）：prompt 回包的 usage 用 */
-  private lastUsage: TokenUsage | null = null;
+  /** 最近一次 thread/tokenUsage/updated 的 last，记下所属会话代际：跨回合保留（同 2.1.0 sessionState.lastTokenUsage），换会话不带过去 */
+  private lastUsage: { epoch: number; last: TokenUsage } | null = null;
 
   constructor(private readonly deps: TurnsDeps) {
     this.t = { ...TIMINGS, ...deps.timings };
@@ -428,7 +430,7 @@ export class Turns {
       return;
     }
     if (ev.method === "item/started" && ev.params.item.type === "commandExecution") this.deps.onCommand?.();
-    if (ev.method === "thread/tokenUsage/updated") this.lastUsage = ev.params.tokenUsage.last;
+    if (ev.method === "thread/tokenUsage/updated") this.lastUsage = { epoch: t.epoch, last: ev.params.tokenUsage.last };
     for (const u of updatesFor(t.ev, ev, this.deps.caps())) this.emitFor(t, u);
   }
 
@@ -470,6 +472,7 @@ export class Turns {
     if (t.finished) return;
     t.finished = true;
     for (const x of t.timers) clearTimeout(x);
+    this.deps.onFinish?.(t.id);
     for (const u of closeTurn(t.ev, how.status)) this.emitFor(t, u);
     if (how.status === "interrupted") this.droppedSteerNotice(t);
     const stopped = how.status === "interrupted" || t.cancelRequested;
@@ -487,7 +490,8 @@ export class Turns {
   /** 回包都带 usage 和 _meta.quota（2.1.0 同款）；失败结果自己的 _meta（AIR sessionFailure）合在一起 */
   private reply(t: Turn, stopped: boolean, fail?: TurnFailure): void {
     if (!t.ctx) return;
-    const extra = promptUsage(this.lastUsage, this.deps.policy().model);
+    const usage = this.lastUsage?.epoch === this.deps.session.epoch ? this.lastUsage.last : null;
+    const extra = promptUsage(usage, this.deps.policy().model);
     const withUsage = (r: Rec) => ({ ...r, usage: extra.usage, _meta: { ...(extra._meta as Rec), ...(r._meta as Rec | undefined) } });
     if (stopped) return t.ctx.respond(withUsage({ stopReason: "cancelled" }));
     if (!fail) return t.ctx.respond(withUsage({ stopReason: "end_turn" }));

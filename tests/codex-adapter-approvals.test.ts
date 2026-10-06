@@ -109,6 +109,25 @@ describe("审批经授权卡（真宿主 AcpSession 在环）", () => {
     expect(cards).toHaveLength(0);
   });
 
+  test("approval-stale-accept：回合收尾时还没答的审批当场回 cancel；之后宿主迟到的允许不生效", async () => {
+    let answer: (v: string | null) => void = () => {};
+    const { h, turnId, done } = await running({ onPermission: () => new Promise((r) => (answer = r)) });
+    const pending = h.f.request("item/commandExecution/requestApproval", commandApproval(turnId));
+    await until(() => h.out().some((m) => m.method === "session/request_permission"), "出卡");
+    h.f.complete(turnId);
+    expect((await pending).result).toEqual({ decision: "cancel" });
+    answer("accept");
+    expect(await done).toEqual({ kind: "done" });
+  });
+
+  test("approval-hidden-extra-permissions：带 additionalPermissions 的命令审批卡上说不清范围，不出卡，直接 cancel", async () => {
+    const cards: PermissionCard[] = [];
+    const { h, turnId } = await running({ onPermission: async (c) => (cards.push(c), "accept") });
+    const extra = { additionalPermissions: { fileSystem: { write: ["/private"] }, network: { enabled: true } }, availableDecisions: ["accept", "cancel"] };
+    expect((await h.f.request("item/commandExecution/requestApproval", commandApproval(turnId, extra))).result).toEqual({ decision: "cancel" });
+    expect(cards).toHaveLength(0);
+  });
+
   test("其余反向请求照旧按「不给」答", async () => {
     const { h, turnId } = await running();
     const base = { threadId: "th-1", turnId, itemId: "x" };
@@ -133,6 +152,18 @@ describe("宿主答复的边界（Approvals 单独测）", () => {
     expect(await setup(async () => ({ nope: true })).ask()).toEqual({ decision: "cancel" });
     expect(await setup(async () => null).ask()).toEqual({ decision: "cancel" });
     expect(await setup(() => Promise.reject(new Error("boom"))).ask()).toEqual({ decision: "cancel" });
+  });
+
+  test("approval-stale-accept：出卡时属于当前回合，宿主答复前回合已经不是它了，答「允许」也回 cancel", async () => {
+    let owns = true;
+    const handlers = new Map<string, Handle>();
+    const app = { handle: (m: string, fn: Handle) => void handlers.set(m, fn) };
+    let answer: (v: unknown) => void = () => {};
+    new Approvals({ app: app as never, acp: { request: (() => new Promise((r) => (answer = r))) as never }, owns: () => owns, log: () => {} });
+    const p = handlers.get("item/commandExecution/requestApproval")!({ ok: true, params: commandApproval("T1"), corr: {} });
+    owns = false;
+    answer({ outcome: { outcome: "selected", optionId: "accept" } });
+    expect(await p).toEqual({ decision: "cancel" });
   });
 
   test("cancelAll 之后宿主才答：只回一次 cancel，迟到的允许不生效", async () => {

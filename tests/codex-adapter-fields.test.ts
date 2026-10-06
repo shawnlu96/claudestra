@@ -94,6 +94,27 @@ describe("用量", () => {
     expect(res._meta.quota.model_usage).toEqual([{ model: "gpt-x", token_count: { totalTokens: 120, inputTokens: 60, cachedInputTokens: 40, outputTokens: 15, reasoningOutputTokens: 5 } }]);
   });
 
+  test("stale-usage-across-session：切到新线程后首轮没有 tokenUsage，prompt 回包不带旧线程的用量", async () => {
+    const h = harness();
+    await h.open("A");
+    h.f.on("turn/start", (_p, id) => {
+      const turnId = (h.f.turn = h.f.nextTurn());
+      h.f.feed({ id, result: { turn: { id: turnId, items: [], status: "inProgress" } } });
+      h.f.started(turnId);
+      if (h.f.thread === "A") h.f.note("thread/tokenUsage/updated", { threadId: "A", turnId, tokenUsage: { last: LAST, total: LAST, modelContextWindow: 1000 } });
+      h.f.complete(turnId);
+      return undefined;
+    });
+    await h.session.prompt("A 上一轮");
+    h.f.thread = "B";
+    await h.session.create("/w");
+    await h.session.prompt("B 首轮");
+    const results = h.out().filter((m) => m.result?.stopReason === "end_turn").map((m) => m.result);
+    expect(results[0].usage.totalTokens).toBe(120);
+    expect(results[1].usage).toBeNull();
+    expect(results[1]._meta.quota).toEqual({ token_count: null, model_usage: [] });
+  });
+
   test("promptUsage：还没有用量时 usage 为 null、model_usage 为空；模型名去掉方括号后缀", () => {
     expect(promptUsage(null, "m")).toEqual({ usage: null, _meta: { quota: { token_count: null, model_usage: [] } } });
     expect((promptUsage(LAST, "gpt-x[1m]")._meta as Rec).quota.model_usage[0].model).toBe("gpt-x");

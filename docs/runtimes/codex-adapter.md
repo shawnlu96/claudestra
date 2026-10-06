@@ -40,7 +40,7 @@
 | `session/set_config_option` | 无 | 只改本地的 model / reasoning_effort，下一次 `turn/start` 生效 |
 | 其余 | 无 | -32601 |
 
-prompt 的回包都带 `usage` 和 `_meta.quota`（最近一次 `thread/tokenUsage/updated` 的 `last`，2.1.0 同款形状）。失败时另带 AIR sessionFailure
+prompt 的回包都带 `usage` 和 `_meta.quota`（当前会话最近一次 `thread/tokenUsage/updated` 的 `last`，换会话清空；2.1.0 同款形状）。失败时另带 AIR sessionFailure
 （宿主声明了 AIR），没声明 AIR 的宿主撞额度时收到带 `codexErrorInfo:"usageLimitExceeded"` 的 JSON-RPC 错误。
 
 ## 事件映射（`events.ts`）
@@ -93,16 +93,18 @@ prompt 的回包都带 `usage` 和 `_meta.quota`（最近一次 `thread/tokenUsa
 | `cancel` | `availableDecisions` 里有 | reject_once | **整轮被打断**（`turn/completed interrupted`） |
 
 带策略修订的对象决定（`acceptWithExecpolicyAmendment`、`applyNetworkPolicyAmendment`）不给：卡片答不出原样的修订内容。
-`availableDecisions` 里没有 accept / acceptForSession 时不出卡，直接 cancel。联网审批的卡片标题写成「联网：<协议>://<主机>」；
-带 `additionalPermissions` 的标题后面加「（并申请额外权限）」。
+`availableDecisions` 里没有 accept / acceptForSession 时不出卡，直接 cancel。联网审批的卡片标题写成「联网：<协议>://<主机>」。
+带 `additionalPermissions`（额外的文件系统 / 网络权限）的命令审批也不出卡，直接 cancel：卡片只有标题和命令，说不清要授的范围。
 
 **fail closed**：下列情况一律回 `cancel`（整轮停下），不默认放行，也不挂着不答：
 
 - 宿主回 `cancelled`（owner 取消、宿主 10 分钟没人答、出卡出错），或者选了不在卡上的 id、回包形状不对；
 - `session/request_permission` 请求失败（宿主断开、线路作废）；
 - 适配器自己的兜底时限到了（11 分钟，比宿主的 10 分钟长，正常由宿主先回 cancelled）；
-- 宿主发 `session/cancel`，或者适配器开始收尾：还在等的审批当场按 cancel 答，app-server 才停得下这一轮；
-- 审批不属于当前会话正在跑的那一轮（旧 turnId、别的线程），或者参数过不了校验：不出卡，直接 cancel。
+- 宿主发 `session/cancel`、这一轮收尾，或者适配器开始收尾：还在等的审批当场按 cancel 答，app-server 才停得下这一轮；
+- 审批不属于当前会话正在跑的那一轮（旧 turnId、别的线程），或者参数过不了校验：不出卡，直接 cancel；
+- 宿主答「允许」时这一轮已经不是当前在跑的那一轮（答复时再核对一次）：回 cancel；
+- 带 `additionalPermissions`：不出卡，直接 cancel。
 
 已知不足：session/cancel 之后宿主那张卡不会被撤掉（ACP v1 没有撤回请求的办法），卡留到 owner 点或宿主 10 分钟超时，那时的答复适配器已经不认了。
 

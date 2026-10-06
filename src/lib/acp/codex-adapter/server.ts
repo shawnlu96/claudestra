@@ -59,7 +59,7 @@ export class CodexAcpServer {
     this.turns = new Turns({
       app: deps.app, session: this.session, caps: () => this.caps, emit: (u) => this.emit(u), fatal: deps.fatal, log: deps.log,
       policy: () => ({ ...deps.cfg.policy, summary: "auto", effort: this.session.models?.effort ?? null, model: this.session.models?.model ?? "" }),
-      reconcile: deps.reconcile, onCommand: deps.onCommand, timings: deps.timings,
+      reconcile: deps.reconcile, onCommand: deps.onCommand, timings: deps.timings, onFinish: (turnId) => this.approvals.cancelTurn(turnId),
     });
     acp.onRequest("initialize", (p: Rec) => this.initialize(p));
     acp.onRequest("session/new", (p: Rec) => this.open("new", p));
