@@ -1,15 +1,11 @@
 /**
- * MAINP2 formal PM main-carry transaction: a card in `merge` whose PR head moved only by merging main in (at most 16 pure-main
- * merges, review-main-carry-proof.ts reviewMainCarryProof) keeps its real PASS. The proof is Git evidence only and never
- * authorizes anything: this module separately re-reads the real PASS at the old head (round / specRev / event seq / P0=P1=0 /
- * cross-family or the owner's exemption / pool receipt / UI evidence / owner hold / merge journal / freeze) and the task CAS,
- * and only under the `mainCarry` policy on (recovery-main-carry-policy.ts) writes, in one immediate transaction, the legal task
- * head move (setTask) and one `decision` event { op: review_main_carry } naming the source PASS, old/new/main heads, diffHash,
- * the full hop chain and the source kind. It never writes a review, submit, order or retire, and never a scheduler event:
- * the engine's own carries stay scheduler-merge.ts carryReview (actor scheduler, through `ledger scheduler-merge-step`).
- * observe reports the plan and proof only; off refuses. tests/review-main-carry-manual*.test.ts.
+ * MAINP2 formal PM main-carry transaction: a `merge` card whose head moved only by ≤16 pure-main merges (reviewMainCarryProof,
+ * Git evidence only) keeps its real PASS after this module re-reads the PASS, its report, family / exemption / pool receipt,
+ * UI / hold / journal / freeze and the task CAS, then (policy mainCarry=on) writes the head move + one `review_main_carry`
+ * decision in one transaction. Never a review / submit / order / retire, never a scheduler event. tests/review-main-carry-manual*.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
@@ -17,6 +13,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
 import { diagnoseManual } from "./manual-reason.js";
+import { readReviewReport } from "./peer-pr-tick.js";
 import { claimsPoolReview, poolReviewRefusal } from "./pool-review-proof.js";
 import { mainCarryMode } from "./recovery-main-carry-policy.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
@@ -40,7 +37,9 @@ type CarrySourceKind = "mcp" | "pool" | "cli";
 export interface ManualCarryRequest {
   taskId: string; oldHead: string; newHead: string; mainHead: string; specRev: number; round: number; reviewSeq: number; rev: number;
 }
-export interface CarryGate { task: LedgerTask; review: ReviewFacts; sourceKind: CarrySourceKind; base: string; carries: readonly LedgerEvent[]; repository: string }
+export interface CarryGate {
+  task: LedgerTask; review: ReviewFacts; sourceKind: CarrySourceKind; base: string; carries: readonly LedgerEvent[]; repository: string; reportSha256: string | null;
+}
 type Proof = MainCarryProof | Readonly<{ ok: false; reason: string }>;
 export type ProveCarry = (input: MainCarryInput) => Promise<Proof>;
 
@@ -97,6 +96,20 @@ function sourceKindOf(db: Database, task: LedgerTask, ev: LedgerEvent, facts: Re
   return "cli";
 }
 
+/**
+ * The PASS's own report, read where reports live (ledger/reviews, peer-pr-tick.ts readReviewReport). A local PASS (MCP ticket or
+ * CLI row) needs it readable and non-empty, and a CLI row's report must name the head it passed; the pool PASS is already bound
+ * to its report bytes by its signed receipt (poolReviewRefusal). Returns the report's sha256 for the carry event.
+ */
+function reportEvidence(facts: ReviewFacts, kind: CarrySourceKind): string | null {
+  if (kind === "pool") return null;
+  const r = readReviewReport(facts.reportPath);
+  if ("error" in r) return conflict(`来源审查 #${facts.eventSeq} 的报告原件：${r.error}`);
+  if (!r.text.trim()) conflict(`来源审查 #${facts.eventSeq} 的报告原件是空的`);
+  if (kind === "cli" && !r.text.toLowerCase().includes(facts.head.slice(0, 12))) conflict(`来源审查 #${facts.eventSeq} 的报告没写它审的 head ${facts.head.slice(0, 12)}`);
+  return createHash("sha256").update(r.text).digest("hex");
+}
+
 const ACTIVE_RUN = ["ready", "updating", "await_review", "await_ci", "merging", "unknown"];
 function mergeJournalRefusal(db: Database, taskId: string): string | null {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return null;
@@ -151,11 +164,12 @@ export function manualCarryGate(db: Database, actor: string, req: ManualCarryReq
   if (!author) conflict("缺作者模型家族证据（旧手工卡不回填历史）");
   if (facts.reviewerFamily === author && !exemptVerdict(db, at, facts)) conflict("审查员与作者同家族且没有 owner 当前有效的豁免");
   const sourceKind = sourceKindOf(db, at, ev, facts, { authorFamily: author! });
+  const reportSha256 = reportEvidence(facts, sourceKind);
   if (workflow?.template === "ui") {
     const ui = uiMergeRefusal(db, task, now);
     if (ui) conflict(`UI 截图验收：${ui}`);
   }
-  return { task, review: facts, sourceKind, base, carries, repository: repository! };
+  return { task, review: facts, sourceKind, base, carries, repository: repository!, reportSha256 };
 }
 
 /** The proof must be exactly for this request: same heads, the caller's actual main, a complete bounded chain. */
@@ -180,13 +194,13 @@ export type CarryOutcome =
 interface CarryPlan {
   taskId: string; from: string; to: string; mainHead: string; mainParent: string; diffHash: string; hops: number;
   chain: { head: string; previousHead: string; mainParent: string }[]; sourceReviewSeq: number; sourceKind: CarrySourceKind;
-  reviewer: string; reviewerFamily: string; round: number; specRev: number;
+  reportSha256: string | null; reviewer: string; reviewerFamily: string; round: number; specRev: number;
 }
 
 const planOf = (gate: CarryGate, proof: MainCarryProof): CarryPlan => ({
   taskId: gate.task.id, from: proof.oldHead, to: proof.newHead, mainHead: proof.mainHead, mainParent: proof.mainParent, diffHash: proof.diffHash,
   hops: proof.chain.length, chain: proof.chain.map((h) => ({ head: h.head, previousHead: h.previousHead, mainParent: h.mainParent })),
-  sourceReviewSeq: gate.review.eventSeq, sourceKind: gate.sourceKind, reviewer: gate.review.reviewer, reviewerFamily: gate.review.reviewerFamily,
+  sourceReviewSeq: gate.review.eventSeq, sourceKind: gate.sourceKind, reportSha256: gate.reportSha256, reviewer: gate.review.reviewer, reviewerFamily: gate.review.reviewerFamily,
   round: gate.task.round, specRev: gate.task.specRev,
 });
 
@@ -223,7 +237,7 @@ export function applyManualCarry(db: Database, ctx: WriteCtx, req: ManualCarryRe
     const ev = appendEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: gate.task.project, target: gate.task.id, kind: "decision",
       text: `PM 正式沿用审查：${req.oldHead.slice(0, 12)} → ${req.newHead.slice(0, 12)}（${plan.hops} 跳纯 main 合并，净 diff 一致，来源审查 #${plan.sourceReviewSeq}）`,
       data: { op: MAIN_CARRY_OP, carrySource: "pm", from: plan.from, to: plan.to, mainHead: plan.mainHead, mainParent: plan.mainParent,
-        diffHash: plan.diffHash, sourceReviewSeq: plan.sourceReviewSeq, sourceKind: plan.sourceKind, round: plan.round, specRev: plan.specRev,
+        diffHash: plan.diffHash, sourceReviewSeq: plan.sourceReviewSeq, sourceKind: plan.sourceKind, reportSha256: plan.reportSha256, round: plan.round, specRev: plan.specRev,
         chain: plan.chain, plan } });
     if (ev.duplicate || !samePlan(ev.event, plan)) throw new LedgerError("dedup_mismatch", `${key} 已被别的沿用用过`);
     return { status: "carried" as const, plan, eventSeq: ev.event.seq, taskRev: moved.row.rev, duplicate: false };
@@ -255,42 +269,4 @@ export async function runManualCarry(db: Database, ctx: WriteCtx, req: ManualCar
   checkProof(req, proof);
   if (mode.mode === "observe") return { status: "observe", plan: planOf(gate, proof) };
   return applyManualCarry(db, ctx, req, proof, { policy: deps.policy });
-}
-
-/** Git reads for the post-merge check; tests inject a fake, production runs local git with no GIT_* overrides. */
-export type GitRead = (args: string[]) => Promise<{ code: number; stdout: string }>;
-
-/**
- * After the real merge: the formal chain recorded for this card must end at the head GitHub merged, every recorded hop must
- * still be that exact two-parent merge, and the merged head must be on the fetched main. Read-only; problems are listed, never fixed.
- */
-export async function verifyManualCarry(db: Database, taskId: string, mergedHead: string, git: GitRead):
-  Promise<{ ok: boolean; carries: number; problems: string[] }> {
-  if (!SHA.test(mergedHead)) throw new LedgerError("invalid", "--merged-head 要是完整小写 SHA");
-  const task = mustTask(db, taskId);
-  const events = listEvents(db, { project: task.project, target: task.id });
-  const all = events.filter((e) => e.kind === "decision" && e.data.op === MAIN_CARRY_OP);
-  const problems: string[] = [];
-  if (task.headSHA !== mergedHead) problems.push(`台账 head ${task.headSHA?.slice(0, 12) ?? "空"} 不是合入的 head ${mergedHead.slice(0, 12)}`);
-  const chain: LedgerEvent[] = [];
-  let at = mergedHead, before = Infinity;
-  for (;;) {
-    const c = all.findLast((e) => e.seq < before && e.data.to === at);
-    if (!c) break;
-    chain.unshift(c);
-    [at, before] = [String(c.data.from), c.seq];
-  }
-  if (all.length && !chain.length) problems.push("有正式沿用记录，但没有一条走到合入的 head");
-  for (const c of chain) {
-    for (const hop of (Array.isArray(c.data.chain) ? c.data.chain : []) as { head: string; previousHead: string; mainParent: string }[]) {
-      const r = await git(["rev-list", "--parents", "-n", "1", hop.head]);
-      const [self, ...parents] = r.stdout.trim().toLowerCase().split(/\s+/);
-      if (r.code !== 0 || self !== hop.head || parents.length !== 2 || !parents.includes(hop.previousHead) || !parents.includes(hop.mainParent)) {
-        problems.push(`沿用 #${c.seq} 的一跳 ${hop.head.slice(0, 12)} 父链对不上`);
-      }
-    }
-  }
-  const on = await git(["merge-base", "--is-ancestor", mergedHead, "refs/remotes/origin/main"]);
-  if (on.code !== 0) problems.push(`合入的 head ${mergedHead.slice(0, 12)} 不在本地 origin/main 上（先 fetch，或并没合入）`);
-  return { ok: problems.length === 0, carries: chain.length, problems };
 }

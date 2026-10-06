@@ -7,6 +7,7 @@ import type { Database } from "bun:sqlite";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { statePath } from "../src/lib/paths.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -14,7 +15,7 @@ import { insertEvent } from "../src/lib/ledger-tx.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { applyManualCarry, carriedReview, formalCarries, MAIN_CARRY_OP, mainCarryKey, manualCarryGate, MAX_CARRY_HOPS,
-  runManualCarry, verifyManualCarry, type CarryOutcome, type ManualCarryRequest } from "../src/lib/review-main-carry-manual.js";
+  runManualCarry, type CarryOutcome, type ManualCarryRequest } from "../src/lib/review-main-carry-manual.js";
 import { reviewMainCarryProof } from "../src/lib/review-main-carry-proof.js";
 import { verdictKey } from "../src/lib/review-verdict.js";
 import { runBounded } from "../src/lib/run-bounded.js";
@@ -44,15 +45,17 @@ const treeCommit = (tree: string, parents: string[], m = "merge") => sh("commit-
 let cards = 0;
 /** A manual-workflow code card in merge at `head`, with this round's structured PASS by a codex reviewer (author claude). */
 function card(o: { head?: string; review?: Record<string, unknown>; actor?: string; dedupKey?: string; workflow?: false | "ui";
-  family?: "claude" | "codex"; pr?: string; reason?: string } = {}) {
+  family?: "claude" | "codex"; pr?: string; reason?: string; report?: string | null } = {}) {
   const id = `T${++cards}`, head = o.head ?? oldHead;
+  mkdirSync(statePath("ledger", "reviews"), { recursive: true }); // the PASS's own report, where reports live (null = never written)
+  if (o.report !== null) writeFileSync(statePath("ledger", "reviews", `${id}.md`), o.report ?? `# 审查 ${id}\n\nhead ${head}\n\nPASS\n`);
   createTask(db, { actor: "owner", now: ++clock }, { project: "p", id, title: id, kind: "code", agent: "agent-author" });
   if (o.workflow !== false) setWorkflow(db, { actor: "owner", now: ++clock }, { taskId: id, taskRev: 1, template: o.workflow === "ui" ? "ui" : "code",
     templateVersion: 2, mode: "manual", authorFamily: o.family ?? "claude", fallback: "人工",
     reason: o.reason ?? "pm_takeover: PM 手动推进合并" });
   db.query("UPDATE tasks SET stage='merge', round=1, headSHA=?, pr=?, branch=?, updatedAt=? WHERE id=?").run(head, o.pr ?? PR, `task/${id}`, ++clock, id);
   const reviewSeq = insertEvent(db, { actor: o.actor ?? "agent-rv", now: ++clock, dedupKey: o.dedupKey }, { project: "p", target: id, kind: "review", text: "",
-    data: { round: 1, head, verdict: "pass", reviewer: "agent-rv", reviewerSessionId: "rs-1", reviewerFamily: "codex", path: "reviews/r.md",
+    data: { round: 1, head, verdict: "pass", reviewer: "agent-rv", reviewerSessionId: "rs-1", reviewerFamily: "codex", path: `reviews/${id}.md`,
       findings: [], p0: 0, p1: 0, p2: 0, ...o.review } }, !!o.dedupKey).seq;
   const t = getTask(db, id)!;
   const req = (newHead: string, over: Partial<ManualCarryRequest> = {}): ManualCarryRequest =>
@@ -189,6 +192,18 @@ describe("MAINP2 formal PM carry: zero-write refusals", () => {
     const pmRecorded = card({ actor: "pm" });
     expect(await run(pmRecorded.req(two), "observe")).toMatchObject({ status: "observe", plan: { sourceKind: "cli" } });
   });
+  test("report original: missing, empty or not naming the passed head refuses (old manual PASS never back-filled)", async () => {
+    const missing = card({ report: null });
+    await zeroWrite(missing.id, () => run(missing.req(two)), /报告原件：报告读不了/);
+    await zeroWrite(missing.id, () => run(missing.req(two), "observe"), /报告原件/);
+    const empty = card({ report: "  \n" });
+    await zeroWrite(empty.id, () => run(empty.req(two)), /空的/);
+    const unbound = card({ report: "PASS, looks fine\n" });
+    await zeroWrite(unbound.id, () => run(unbound.req(two)), /没写它审的 head/);
+    const ok = card();
+    expect(await run(ok.req(two))).toMatchObject({ status: "carried", plan: { reportSha256: expect.stringMatching(/^[a-f0-9]{64}$/) } });
+    expect(listEvents(db, { project: "p", target: ok.id }).at(-1)!.data.reportSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
   test("source kind is read from the event: a real MCP verdict is mcp; a CLI row with via=mcp but no ticket key stays cli", async () => {
     const mcp = card({ review: { via: "mcp", orderId: "ord-1" }, dedupKey: verdictKey({ orderId: "ord-1", head: oldHead }) });
     expect(await run(mcp.req(two), "observe")).toMatchObject({ plan: { sourceKind: "mcp" } });
@@ -283,7 +298,7 @@ describe("MAINP2 formal PM carry: the canonical proof decides (real git)", () =>
   });
 });
 
-describe("MAINP2 CLI and post-merge verify", () => {
+describe("MAINP2 CLI", () => {
   const deps = (actor: string) => ({ db, actor, projectIds: ["p"], autoProjects: () => [], autoDispatch: () => false,
     loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => ++clock });
   const args = (c: ReturnType<typeof card>, newHead: string) => {
@@ -313,21 +328,5 @@ describe("MAINP2 CLI and post-merge verify", () => {
     expect(await cmd.run(new LedgerCli(deps("pm"), p2))).toMatchObject({ ok: false, status: "off" });
     expect(getTask(db, c2.id)!.headSHA).toBe(oldHead);
     rmSync(dir, { recursive: true, force: true });
-  });
-  test("verify: the recorded chain ends at the merged head, every hop's parents hold, the head is on fetched main", async () => {
-    const c = card();
-    expect(await run(c.req(two))).toMatchObject({ status: "carried" });
-    const git = async (a: string[]) => { const r = await runBounded(["git", ...a], { cwd: work, timeoutMs: 30_000 }); return { code: r.code ?? -1, stdout: r.stdout }; };
-    expect(await verifyManualCarry(db, c.id, two, git)).toMatchObject({ ok: false, problems: [expect.stringContaining("origin/main")] });
-    const merged = await treeCommit(await sh("rev-parse", `${two}^{tree}`), [main2, two], "merge PR");
-    await actualMain(merged);
-    try {
-      expect(await verifyManualCarry(db, c.id, two, git)).toEqual({ ok: true, carries: 1, problems: [] });
-      const wrong = await verifyManualCarry(db, c.id, one, git);
-      expect(wrong.ok).toBe(false);
-      expect(wrong.problems.join()).toContain("台账 head");
-      const r = await runLedger(["main-carry-verify", c.id, "--merged-head", two, "--repo-dir", work], deps("pm"));
-      expect(r).toMatchObject({ ok: true, carries: 1 });
-    } finally { await actualMain(main2); }
   });
 });
