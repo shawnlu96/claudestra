@@ -13,7 +13,7 @@ import { CYBER_RECOVERY_TEXT, HOUR_MS, refusalYieldsToModel, type WorkRef } from
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
-import { listEvents } from "../src/lib/ledger-store.js";
+import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
 import { boundRef, schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
@@ -56,17 +56,17 @@ async function reviewCut(): Promise<void> {
   await f.tick();
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
   await f.tick();
-  const send = async () => {
-    const claimed = (f.db.query("SELECT updatedAt FROM scheduler_intents WHERE status = 'submitted'").get() as { updatedAt: number }).updatedAt;
-    openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败", context: CYBER,
-      extra: { failure: "error", failedAt: claimed + 1, sessionId: "s-rv" } }, claimed + 1); // the bridge's card names the failed turn
-    return { ok: true as const, messageId: "m" };
-  };
+  const send = async () => ({ ok: true as const, messageId: "m" });
   f.tickDeps.worker = () => createAcpWorker({
     sessions: { bound: (t, role) => boundRef(f.db, t, role), create: async () => ({ ok: false, unknown: false, reason: "n/a" }), archive: async () => ({ ok: true, evidence: "x" }) },
     ledger: { result: (ref, probe) => ledgerResult(f.db, ref, probe) },
     port: { prompt: send, turnState: async (a) => ({ live: "idle", lastFailure: codexFailure(f.db, a) }), cancel: async () => ({ ok: true, evidence: "c" }) } });
   expect(await f.tick()).toMatchObject({ step: "sent", detail: "acp" });
+  // the woken turn fails after the delivery receipt; the bridge's card names the failed turn
+  const { id } = f.db.query("SELECT id FROM scheduler_intents WHERE action = 'review' ORDER BY rowid DESC").get() as { id: string };
+  const delivered = getEventByDedup(f.db, `scheduler:${id}:done`)!.ts;
+  openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败", context: CYBER,
+    extra: { failure: "error", failedAt: delivered + 1, sessionId: "s-rv" } }, delivered + 1);
   const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule", askKey: "policy-refusal-rule" }, 1999);
   answerAsk(f.db, ask.id, { choices: ["[button:policy_refusal_rule_go]"], labels: ["x"], text: "", principal: OWNER_PRINCIPAL_ID, owner: true,
     via: "web_card", at: 2000, final: true });
