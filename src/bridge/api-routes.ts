@@ -294,6 +294,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (pub) return pub;
   const joinOffer = await handleJoinOfferApi(req, url); // 共享台账入组码只收已配置 peer，其余一律 403（local-api/shared-ledger-join-offer.ts）
   if (joinOffer) return joinOffer;
+  { const r = await (await import("./local-api/shared-projects.js")).handleSharedProjectsApi(req, url); if (r) return r; }
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;

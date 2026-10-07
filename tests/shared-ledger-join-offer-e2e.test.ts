@@ -1,3 +1,4 @@
+import { testChildEnv } from "./test-env.ts";
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,8 +46,8 @@ test("production offer E2E transport signs the decrypted inner request", async (
         callerProject: async () => "local", projectExists: async () => true });
       console.log(JSON.stringify({ handled, valid, encrypted }));
     `;
-    const proc = Bun.spawn([process.execPath, "-e", script], {
-      cwd: process.cwd(), env: { ...process.env, CLAUDESTRA_STATE_DIR: dir }, stdout: "pipe", stderr: "pipe",
+    const proc = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
+      cwd: process.cwd(), env: testChildEnv({ HOME: dir, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: join(dir, "runtime"), DISCORD_CHANNEL_ID: "" }), stdout: "pipe", stderr: "pipe",
     });
     const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
