@@ -77,3 +77,15 @@ test("根内符号链接照认，返回未解析的入口路径", () => {
   writeFileSync(join(cli, "codex-package.json"), JSON.stringify({ entrypoint: "bin/codex" }));
   expect(appCodexBin(r)).toBe(join(cli, "bin", "codex"));
 });
+
+test("复现 opr2-parent-symlink-reentry：../x 经根外链接绕回根内也不认", () => {
+  const r = resources();
+  const cli = join(r, "codex-cli");
+  mkdirSync(join(cli, "bin"), { recursive: true });
+  writeFileSync(join(cli, "bin", "codex"), "#!/bin/sh\n");
+  symlinkSync(join(cli, "bin", "codex"), join(r, "x"));
+  writeFileSync(join(cli, "codex-package.json"), JSON.stringify({ entrypoint: "../x" }));
+  expect(appCodexBin(r)).toBeNull();
+  writeFileSync(join(r, "codex"), "#!/bin/sh\n");
+  expect(appCodexBin(r)).toBe(join(r, "codex"));
+});

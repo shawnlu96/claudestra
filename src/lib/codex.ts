@@ -34,6 +34,11 @@ export type CodexSandbox = (typeof CODEX_SANDBOXES)[number];
 const APP_RESOURCES = "/Applications/ChatGPT.app/Contents/Resources";
 export const CODEX_TIMEOUT_MS = 12 * 60 * 1000; // 单轮上限;channel-server 侧给 15min
 
+function isInside(root: string, p: string): boolean {
+  const rel = relative(root, p);
+  return !!rel && !isAbsolute(rel) && rel.split(sep)[0] !== "..";
+}
+
 /**
  * ChatGPT.app 自带的 codex。新版把 CLI 放进 codex-cli/，入口写在 codex-package.json 的 entrypoint（现为 bin/codex）；
  * 旧版是 Resources/codex。只认旧路径的话，App 一更新 ask_codex 就全部报「Codex CLI 不存在」（tests/codex-bin.test.ts）。
@@ -42,11 +47,10 @@ export function appCodexBin(resources = APP_RESOURCES): string | null {
   const dir = join(resources, "codex-cli");
   try {
     const entry = JSON.parse(readFileSync(join(dir, "codex-package.json"), "utf8"))?.entrypoint;
-    // 只认落在 codex-cli 之内的普通文件：空串、绝对路径、../ 与指向根外的符号链接都当新布局不可用
+    // 只认落在 codex-cli 之内的普通文件：字面路径与 realpath 都要在根内——只查后者的话 "../x" 经根外链接绕回也能过
     if (typeof entry === "string" && entry && !isAbsolute(entry)) {
       const bin = join(dir, entry);
-      const rel = relative(realpathSync(dir), realpathSync(bin));
-      if (rel && !isAbsolute(rel) && rel.split(sep)[0] !== ".." && statSync(bin).isFile()) return bin;
+      if (isInside(dir, bin) && isInside(realpathSync(dir), realpathSync(bin)) && statSync(bin).isFile()) return bin;
     }
   } catch {
     // 没有新布局（清单读不了 / 入口不存在）：退回旧路径，两个都没有才算没装
