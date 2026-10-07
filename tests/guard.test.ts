@@ -386,6 +386,16 @@ describe("棘轮语义", () => {
     expect(checkRaised(null, cur)).toEqual([]);
   });
 
+  test("删掉低于默认上限的 size 登记 = 放宽到上限：要 raised；文件真删了不要", () => {
+    const base: Baseline = { version: 1, limits: { "size:src/reg.ts": 635, "size:src/big.ts": 900 }, raised: [] };
+    const cur: Baseline = { version: 1, limits: {}, raised: [] };
+    const all = () => true;
+    expect(checkRaised(base, cur, all)).toEqual(["size:src/reg.ts 635 → 800"]);
+    cur.raised = [{ key: "size:src/reg.ts", from: 635, to: 800, why: "该文件不再按登记值约束，回到默认上限" }];
+    expect(checkRaised(base, cur, all)).toEqual([]);
+    expect(checkRaised(base, { ...cur, raised: [] }, (f) => f !== "src/reg.ts")).toEqual([]);
+  });
+
   test("--init：只记超上限的项，被跳过规则沿用旧条目；loosenings 列出变大的项", () => {
     const limits = initLimits({ "size:src/a.ts": 780, "size:src/b.ts": 900, "dup:total": 3 }, { "dead:x#y": 1 }, new Set(["dead"]));
     expect(limits).toEqual({ "dead:x#y": 1, "dup:total": 3, "size:src/b.ts": 900 });

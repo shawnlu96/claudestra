@@ -455,6 +455,12 @@
       "from": 0,
       "to": 0,
       "why": "GRS-1：size 规则对 baseline 已登记文件始终计数（不再只在超默认上限时计数），--update 保留仍存在文件的 size 条目；只收紧不放宽"
+    },
+    {
+      "key": "guard:scripts/guard/ratchet.ts",
+      "from": 0,
+      "to": 0,
+      "why": "GRS-1 追加（Shawn PR847-r1 P2 size-key-deletion-audit）：loosenings/checkRaised 按 base ∪ next 审计，删掉低于默认上限的 size 登记视作放宽到上限、需 raised，文件真删除的除外；只收紧不放宽"
     }
   ]
 }

@@ -52,11 +52,16 @@ export function initLimits(current: Counts, old: Counts, skipped: Set<string>): 
   return sortCounts(out);
 }
 
-/** baseline 相对比较基准变大的每一项（新增 key 按默认上限算 from）。 */
-export function loosenings(base: Counts, next: Counts): Raised[] {
+/**
+ * baseline 相对比较基准变大的每一项（新增 key 按默认上限算 from）。
+ * 删掉低于默认上限的 size 登记 = 放宽到默认上限，也算；文件真的删了（exists 为假）除外。
+ */
+export function loosenings(base: Counts, next: Counts, exists: (file: string) => boolean = () => true): Raised[] {
   const out: Raised[] = [];
-  for (const [key, to] of Object.entries(next)) {
+  for (const key of new Set([...Object.keys(next), ...Object.keys(base)])) {
     const from = limitOf(base, key);
+    if (!(key in next) && !(prefixOf(key) === "size" && exists(key.slice(5)))) continue;
+    const to = limitOf(next, key);
     if (to > from) out.push({ key, from, to, why: "" });
   }
   return out;
@@ -68,10 +73,10 @@ const MIN_WHY = 10;
  * 放宽审计：比较基准版本的 baseline（base）→ 当前 baseline，凡是变大的 key，
  * raised[] 里必须有 from 等于基准值、to 不小于当前值、why ≥10 字的条目。
  */
-export function checkRaised(base: Baseline | null, cur: Baseline): string[] {
+export function checkRaised(base: Baseline | null, cur: Baseline, exists?: (file: string) => boolean): string[] {
   if (!base) return [];
   const errs: string[] = [];
-  for (const l of loosenings(base.limits, cur.limits)) {
+  for (const l of loosenings(base.limits, cur.limits, exists)) {
     const ok = cur.raised.some(
       (r) => r.key === l.key && r.from === l.from && r.to >= l.to && [...(r.why ?? "").trim()].length >= MIN_WHY,
     );

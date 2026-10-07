@@ -189,7 +189,7 @@ async function cmdInit(args: string[], only: Set<string> | null): Promise<number
   const limits = initLimits(m.counts, old?.limits ?? {}, m.skipped);
   const date = new Date().toLocaleDateString("sv-SE");
   const raised = [...(old?.raised ?? [])];
-  const up = baseBaseline ? loosenings(baseBaseline.limits, limits) : [];
+  const up = baseBaseline ? loosenings(baseBaseline.limits, limits, (f) => existsSync(join(ROOT, f))) : [];
   if (up.length) {
     const why = (argValue(args, "--why") ?? "").trim();
     if ([...why].length < 10) {
@@ -279,7 +279,7 @@ async function main(): Promise<number> {
   const cmp = compare(cur.limits, m.counts, m.skipped);
   const v: Verdict = {
     ...cmp,
-    raisedErrs: checkRaised(baseBaseline, cur),
+    raisedErrs: checkRaised(baseBaseline, cur, (f) => existsSync(join(ROOT, f))),
     selfErrs: selfAudit(base, baseBaseline, cur, changed),
     wiringErrs: checkWiring(readText("package.json") ?? "", readText(".github/workflows/ci.yml")),
     strictErrs: STRICT ? m.notes : [],
