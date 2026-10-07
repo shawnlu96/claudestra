@@ -80,7 +80,8 @@ const pick = picked;
 /** 每次起适配器前记一次（含退避重起）：app-server 跑的是那一刻磁盘上的 codex，网页「重启生效」提示读这条记录 */
 const warned = new Set<string>();
 const noteCodex = async () =>
-  void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned, adapter: pick?.adapter, hostPid: process.pid }));
+  void (await noteAcpCodexRunning({ agent: agentName, codexPath: agent.stub ? undefined : codexPath, log, warned, adapter: pick?.adapter, hostPid: process.pid,
+    selfRefused: agent.adapter === "self" && pick?.adapter === "upstream" }));
 
 const host = new AcpHost(
   {

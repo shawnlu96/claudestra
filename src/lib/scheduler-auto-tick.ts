@@ -87,13 +87,16 @@ const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
 const PLAN_REJECT_TICKS = 3;
 export const PLAN_REJECT_MS = 5 * 60_000;
 interface Refusal { code: string; text: string; ticks: number; since: number; told: boolean }
-const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, { task: LedgerTask; text: string }>>();
+interface PendingNotice { task: LedgerTask; text: string; informed?: () => Promise<void> }
+const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, PendingNotice>>();
 const perDb = <V>(w: WeakMap<Database, Map<string, V>>, db: Database): Map<string, V> => w.get(db) ?? w.set(db, new Map()).get(db)!;
 /** Send one undelivered refused-plan notice; a failure is logged and the notice stays for the next pass. */
-async function sendNotice(db: Database, deps: AutoTickDeps, key: string): Promise<boolean> {
+export async function sendNotice(db: Database, deps: AutoTickDeps, key: string, pending?: PendingNotice): Promise<boolean> {
+  if (pending) perDb(unsent, db).set(key, pending);
   const n = unsent.get(db)?.get(key);
   if (!n) return true;
-  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下轮重发）")(e); return false; }
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); await n.informed?.(); }
+  catch (e) { noticeLost("计划拒收报警没发出去或回执未落盘（台账已记，下轮重试）")(e); return false; }
   unsent.get(db)?.delete(key);
   return true;
 }
@@ -269,7 +272,7 @@ class Card {
   }
 
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
-    const convergence = await driveConvergence(this, intent); if (convergence) return convergence;
+    const convergence = await driveConvergence(this, intent, sendNotice); if (convergence) return convergence;
     const swap = await driveReviewSwap(this, intent); if (swap) return swap;
     if (isPoolIntent(intent)) {
       const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,

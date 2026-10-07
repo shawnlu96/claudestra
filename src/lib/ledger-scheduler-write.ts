@@ -280,16 +280,24 @@ const planRejectedKey = (taskId: string, code: string, text: string): string =>
  * The auto tick's plan kept being refused for one reason: one scheduler event per card + reason so PM can see why the card stalls.
  * Scheduler-only; a second write for the same reason returns the first event (the notice itself is the tick's job).
  */
-export function recordPlanRejected(db: Database, ctx: WriteCtx, input: { taskId: string; code: string; text: string }): { event: LedgerEvent; duplicate: boolean } {
+export function recordPlanRejected(db: Database, ctx: WriteCtx, input: { taskId: string; code: string; text: string; informed?: boolean }):
+  { event: LedgerEvent; duplicate: boolean; informed: boolean } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "计划拒收报警只由调度服务写");
   const code = textOneLine(input.code, "错误码", 40), text = textOneLine(input.text, "拒收原因", 600);
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     const key = planRejectedKey(task.id, code, text);
     const prior = getEventByDedup(db, key);
-    if (prior) return { event: prior, duplicate: true };
-    const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, {
+    if (input.informed && !prior) throw new LedgerError("not_found", "通知回执缺原计划拒收报警");
+    const event = prior ?? insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, {
       project: task.project, target: task.id, kind: "scheduler", text: `调度计划被台账连续拒收：${text}`, data: { op: "plan_rejected", code, reason: text } }, true);
-    return { event, duplicate: false };
+    const informedKey = `${key}:informed`;
+    let receipt = getEventByDedup(db, informedKey);
+    if (input.informed && !receipt) {
+      receipt = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: informedKey }, {
+        project: task.project, target: task.id, kind: "scheduler", text: `计划拒收报警已通知 PM：${text}`,
+        data: { op: "plan_rejected_informed", alarmSeq: event.seq } }, true);
+    }
+    return { event, duplicate: prior !== null, informed: receipt !== null };
   });
 }
