@@ -150,10 +150,10 @@ describe("i28-M10 refused scheduler plans alarm PM once per reason", () => {
       expect((await f.cli("pm", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(wf.rev), "--template", "code",
         "--version", String(wf.templateVersion), "--author-family", "claude", "--fallback", "人工", "--mode", "manual", "--reason", "接管")).ok).toBe(true);
       down = false;
-      expect(await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).toEqual({ cards: [], failed: [] });
+      expect(await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps)).toEqual({ cards: [], failed: [] });
       expect(f.notices).toHaveLength(1);
       expect(f.notices[0]).toContain(`[conflict] ${FROZEN}`);
-      await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
+      await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps);
       expect(f.notices).toHaveLength(1);
     } finally { console.error = err; f.close(); }
   });
