@@ -12,7 +12,8 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
-import { UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
+import { projectPmUiGate, UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
+import { currentReviewFacts } from "./scheduler-review.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
 
 const NOTE_MAX = 2000;
@@ -38,7 +39,20 @@ function uiCard(db: Database, ctx: WriteCtx, taskId: string, what: string): Ledg
 export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInput): { event: LedgerEvent; duplicate: boolean } {
   const what = input.verdict === "approve" ? "截图验收" : "退回截图";
   const task = uiCard(db, ctx, input.taskId, what);
-  if (task.stage !== "review") throw new LedgerError("conflict", `${task.id} 当前在 ${task.stage}，${what}只在 review 阶段记`);
+  let carried: { carriedFrom: string; reviewCarrySeqs: number[] } | undefined;
+  if (task.stage === "merge" && input.verdict === "approve") {
+    const events = listEvents(db, { project: task.project, target: task.id }), pm = projectPmUiGate(db, task, events);
+    if (pm.state !== "approved" || pm.round !== task.round || pm.specRev !== task.specRev) {
+      throw new LedgerError("conflict", `${task.id} 本轮/规格最后一条 PM 截图结论不是 approved`);
+    }
+    if (pm.screenshotsDigest !== task.extra.screenshotsDigest) throw new LedgerError("conflict", `${task.id} PM 截图验收摘要已变`);
+    if (!pm.head || pm.head === task.headSHA) throw new LedgerError("conflict", `${task.id} PM 验收 head 没有发生审查沿用`);
+    const read = currentReviewFacts(task, events, (actor) => actorMayConfigure(db, actor, task.project));
+    if (read.kind !== "facts") throw new LedgerError("conflict", `${task.id} 当前 head 不在本轮审查沿用链上：${read.kind === "invalid" ? read.reason : "缺审查"}`);
+    if (read.facts.head !== pm.head) throw new LedgerError("conflict", `${task.id} PM 验收 head 与沿用审查原 head 不同`);
+    carried = { carriedFrom: pm.head, reviewCarrySeqs: events.filter((e) => e.seq > read.facts.eventSeq && e.kind === "scheduler" && e.actor === "scheduler" &&
+      e.data.op === "review_carry").map((e) => e.seq) };
+  } else if (task.stage !== "review") throw new LedgerError("conflict", `${task.id} 当前在 ${task.stage}，${what}只在 review 阶段记`);
   const digest = task.extra.screenshotsDigest;
   if (typeof digest !== "string" || !DIGEST_RE.test(digest) || !task.headSHA) throw new LedgerError("conflict", `${task.id} 还没有 head 或截图摘要`);
   if (input.verdict === "approve" && (!input.head || !input.digest)) throw new LedgerError("invalid", "ui-approve 要带 --head 和 --digest（你看的那一版）");
@@ -54,7 +68,7 @@ export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInp
   if (note.length > NOTE_MAX) throw new LedgerError("invalid", `意见不超过 ${NOTE_MAX} 字`);
   if (uiNoteBytes(note) > UI_NOTE_MAX_BYTES) throw new LedgerError("invalid", `意见按外发口径（NFKC 展开 + 脱敏）超过 ${UI_NOTE_MAX_BYTES} 字节，远端修复单装不下，请精简`);
   const data = { op: input.verdict === "approve" ? UI_APPROVED : UI_REJECTED, head: task.headSHA, specRev: task.specRev, round: task.round,
-    screenshotsDigest: digest, ...(note ? { note } : {}) };
+    screenshotsDigest: digest, ...carried, ...(note ? { note } : {}) };
   const text = input.verdict === "approve" ? "PM 通过前后截图" : "PM 未通过前后截图，退回修复";
   return appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text, data });
 }
