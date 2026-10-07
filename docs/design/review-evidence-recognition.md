@@ -1,10 +1,13 @@
 # E2b R1：可验证审查证据与互认分级
 
-> 状态：specRev 1 的设计初稿，待另一家族完整设计审、监工定验收及 owner 明确批准。
+> 状态：specRev 1 的设计稿（R1F 冻结前准确性修订），待另一家族设计复审、PM 复核及 owner 明确批准冻结。
 > 本文只定义证据导出、接收和判断；合入不启用生产互认，不授权实现接收器、免审或改变合并闸。
 > A 是执行实例，B 是仓库实例；第三实例的审查者也必须有自己的认证来源。
-> 正式协议以 [E2b 协议](./e2b-protocol.md) 和 [常设授权](./e2b-standing-authorization.md) 为约束。
-> P1 正式协议是本卡的前置约束；仓库现有协议稿标题为 P2，不表示本 R1 已获实现批准。
+> 协议引用：P1 是已完成的[入口盘点](./e2b-current-entry-inventory.md)（PR #780，提交 `55873e65`，源码基线 `08881b1f`），只提供现状事实，不是正式协议。
+> 正式协议约束是 E2b P2 的 [e2b-protocol.md](./e2b-protocol.md) 与 [e2b-standing-authorization.md](./e2b-standing-authorization.md)：
+> 引用其「设计冻结稿第 6 轮」，main 上最后修改提交 `8d6a85a5ff5e69777254f24199e49fb3aff83170`（经 PR #793 合入），
+> 文件 blob 分别为 `c2143324f2bda19962a954c55fa490b85c5f7e84`、`55b81b560fd4211359243de2a2b0361673ca8007`。两稿自述仍待另一家族定向复审；版本变化须重核本文引用。
+> 引用 P2 不表示本 R1 已获实现批准；两者冲突时以 P2 为准并先 ask，不在本文改写协议。
 > 全文仅用字段定义和合成标识；不附生产报告、私有台账、个人机器路径或真实密钥。
 
 ## 1. 目标、现状与权威
@@ -47,8 +50,10 @@ B 仍须信任钉住的实例来源，并做独立抽查；哈希相同只证明
 
 ### 2.2 Execution：探针运行或 replay 的上下文
 
-每次运行保存 `executionHead`、`executionBase`、`runtime`、`environmentArtifactId`、`purpose: original|replay`。
-这些值描述执行位置，不能替代 `subject.head/base`。运行的是另一个提交时必须列出差异、映射依据和限制。
+每次运行保存 `execution` 对象：`commit`（实际 checkout/执行的完整 OID）、`parents[]`、`ref`、`base`、
+`runtime`、`environmentArtifactId`、`purpose: original|replay`。
+这些值描述执行位置，不能替代 `subject.head/base`；`execution.commit` 与 `subject.head` 可以不同（如 §6.2 的 PR 合成 merge 提交）。
+运行的是另一个提交时必须列出差异、映射依据和限制；只有 §6.2 列明的映射可让该运行作为当前 head 的验证。
 replay 产生的是新证据，不能证明历史运行实际发生，也不能继承原审查者的签名或 PASS。
 
 历史包出现 `round.base == round.head`、同时 `subject.base` 不同，不能据此认定审查范围为空或完整。
@@ -108,13 +113,12 @@ v2 使用 B/owner 冻结的 `familyMapVersion` 和精确模型映射表，家族
 
 拟定格式 `claudestra.review-evidence`、`version:2`；不是对现有 v1 实现的改动承诺。
 包具有 bundleId、createdAt、expiresAt、producer、subject、scope、identities、rounds、closures、probes、ci、artifacts 和 producerCheck。
-manifest JSON 要求 UTF-8、无重复键、版本化严格字段；未知版本或字段语义不明则拒互认。
+manifest JSON 要求 UTF-8、无重复键、版本化严格字段（v2 拟新增的严格解析，见 §4.1.1）；未知版本或字段语义不明则拒互认。
 
 每项 artifact 必须有唯一 ID、规范相对路径、kind/mediaType、bytes、sha256、provenance 和必需角色。
 清单引用按 ID 解析，路径仅定位包内字节。manifest 不把自身列为 artifact，不留循环自哈希。
 另存 manifest 原始字节 SHA-256 与整包原始字节 SHA-256；包重压缩时生成新整包摘要，不能冒原包。
-逻辑对象摘要使用现有 [`canonical-json.ts`](../../src/lib/canonical-json.ts) 的版本化规则：对象键排序、数组顺序保留。
-只接受有限 JSON 值与安全整数，不允许 undefined/NaN 或重复键；规范对象摘要与原始传输字节摘要分列。
+manifest 原始字节摘要（`manifestSha256`）与规范对象摘要（`manifestCanonicalSha256`）分列，互不替代，见 §4.1.1。
 传输证明签绑定版本、bundleId、发收双方完整 keyId、subject、订单、epoch、manifestSha256、bundleSha256 及时间窗。
 签名用途与现有 lend review ticket、handoff 分开，不能拿一个用途的签名当另一个用途。
 新用途需正式协议和 owner 冻结；R1 不自行发行新终审票据。
@@ -123,6 +127,28 @@ manifest JSON 要求 UTF-8、无重复键、版本化严格字段；未知版本
 同 bundleId、同 subject、同摘要重试返回已有接收事实；同绑定换内容拒绝并保留冲突证据。
 旧 epoch、旧授权、旧订单、其他接收实例的有效签名不能用于当前资格。
 验签成功也须读取当前授权状态；历史证明可以留存，撤销或过期后不能用于开始新效果。
+
+#### 4.1.1 规范 JSON：现有能力与 v2 拟新增前置校验
+
+现有 [`canonical-json.ts`](../../src/lib/canonical-json.ts) 的 `canonicalJson` 只做：对象键排序、数组顺序保留、值为 undefined 的对象键省略。
+它不校验输入：NaN/±Infinity 及数组中的 undefined 被序列化成 `null`，超出安全整数的数在解析时已静默丢精度，
+BigInt 直接抛错；它拿到的是已解析对象，看不到原字节里的重复键（`JSON.parse` 取后者）。
+下表「v2」一列是 export v2 **拟新增**的前置校验，不是现有能力，本文也不改现有实现及其现有调用方的摘要。
+
+| 情形 | 现有 `canonicalJson` 行为 | export v2 拟定规则 |
+|---|---|---|
+| NaN、±Infinity | 输出 `null`，与真 null 同摘要 | 生产方对象含非有限数即拒绝导出；原字节无此字面量，`null` 只是 null |
+| null 与缺键 | null 输出 `null`；缺键不出现 | 两者语义不同、摘要不同；必需字段缺失拒绝，可空字段须显式 null 并带 notApplicable |
+| undefined | 对象键省略（等同缺键），数组元素变 `null` | 生产方对象出现 undefined 即拒绝导出，不静默等同缺键或 null |
+| 大整数 | 解析时已丢精度，BigInt 抛错 | 原字节数字字面量须为安全整数（±(2^53−1)），按字面量判断；小数、指数、-0 拒绝；更大值用字符串字段 |
+| 重复键 | 不可见，`JSON.parse` 后者覆盖 | 原字节严格解析时任一层重复键即拒（package_unsafe），不先 `JSON.parse` 再判断 |
+| 编码 | 不涉及 | 原字节须为合法 UTF-8、无 BOM、无孤立代理项；不做 Unicode 规范化 |
+
+处理分两步、两个摘要：
+1. 原字节严格解析：对下载的 manifest 原字节计算 `manifestSha256`，再用严格解析器按上表拒绝非法输入；失败即拒互认并保留 reason。
+2. 规范对象摘要：仅对通过严格解析的对象按版本化规则计算；摘要输入带版本域 `canonicalization: "claudestra.cjson/v2"`
+   （拟定标识），与现有授权绑定哈希、共享台账摘要的未带域用法分开，未知版本域拒互认。
+签名、去重和冲突比较须写明用的是哪个摘要；原字节相同不代表规范对象来自合法输入，规范对象相同也不代表传输字节相同。
 
 ### 4.2 原文与获准副本
 
@@ -184,11 +210,15 @@ finding.family 是问题分类，不是模型家族。结构化计数由 B 重�
 
 | 类型 | 能证明什么 | 不能证明什么 |
 |---|---|---|
-| humanReport | 原文/副本及其 SHA、署名声明、描述与本地测试结果 | 已领单、真实 SID、验签入账、跨家族自动资格 |
+| humanReport | 取回的原文/副本字节及其 SHA；报告中署名、描述和测试结果作为「声称值」的原文 | 测试实际通过、探针实际运行、已领单、真实 SID、验签入账、跨家族自动资格 |
 | mcpSubmissionRecord | 认证入口保存的原工具调用及其绑定 | 仅有 via:mcp 字段不能证明外部可验签票据 |
 | signedReviewTicket | 现有正式用途下签名与 payload、take、订单、session、gen 等字段一致 | 不能证明未覆盖的 base/specDigest/epoch；不能扩展它的权限 |
 | admissionReceipt | 对应实例正式入账事件及签名回执 | 不能代替 subject、材料和当前授权核验 |
 | consumerAssessment | B 独立证据核验及抽查结果 | 不是 submit_verdict，也不是生产 PASS 或合并许可 |
+
+humanReport 里的测试结果记为 `claimedResults`（声称值），不写成 verified/passed。
+真实结果只能经原始探针工件（§6.1）或运行来源（如 §6.2 的 GitHub run/check）独立核对后，记入 B 自己的核验记录；
+核不到原始工件或来源的声称值保留原文并列为 unverified claim，不计入覆盖，也不因署名或「已验证」字样升级。
 
 现有池票据依 [`pool-review-proof-ticket.ts`](../../src/lib/pool-review-proof-ticket.ts) 原字段与用途核验。
 必须取回原接收请求，重算去 ticket 的 logical payload 摘要，核 take、claim、gen、SID 和签名入账回执。
@@ -211,16 +241,41 @@ v1 ticket 未覆盖 base/specDigest/委托 epoch，v2 必须从认证派单和�
 
 ### 6.2 CI 绑定与新鲜度
 
-每个 CI 事实记录 repository、workflow ID/路径、workflow commit、event、runId、runAttempt、job/check ID、check 名称。
-还须记录 headSHA、base SHA（适用时）、开始/完成时间、status、conclusion、日志/工件摘要及可查询的来源引用。
+每个 CI 事实记录 repository、workflow ID/路径、workflow commit、event、runId、runAttempt、job/check-run ID、check 名称。
+还须分列 `subject.head`（被审 PR head）与 `execution.commit`（run 实际 checkout 并测试的 OID）、`execution.parents[]`、
+`execution.base`（适用时）、开始/完成时间、status、conclusion、日志/工件摘要及可查询的来源引用。
 B 从 GitHub 认证渠道重读实际 run/check，核可信 workflow 和必需检查集合，不能只信 A 的 CI 声明或徽章。
-只认当前 PR head 自身的 completed/success；base/main CI、别的 PR、旧 attempt、合成 merge ref 的绿灯不替当前 head。
+
+按本仓库 [CI workflow](../../.github/workflows/ci.yml) 的实际语义：`pull_request` 事件下 `actions/checkout` 取 GitHub
+为该 PR 生成的合成 merge 提交，`$GITHUB_SHA` 与各分片日志的 `head=`（`git rev-parse HEAD`）都是这个 merge 提交，
+汇总作业 `typecheck + test + guard` 以 `$GITHUB_SHA` 核四片；而 check-run 及 PR 页面展示的 head_sha 是 PR head。
+因此展示的 head_sha 只用于把 check 绑到 PR，不能记作 `execution.commit`；执行 OID 必须从 run 的实际执行记录读取。
+`push` 事件（main）的 run 执行的是 main 提交，与本 PR 无关。guard 比对基准取 `pull_request.base.sha`。
+
+当前 PR 的真实合成 merge CI 可以作为当前 `subject.head` 的验证，须全部满足：
+
+1. 认证绑定：B 经认证 API 读到 run 的 event 为 `pull_request`，关联 PR 编号等于 subject.pr，必需 check-run 的 head_sha 等于 subject.head。
+2. 执行 OID：从四片日志 `head=` 行及汇总作业核对值读出同一个 `execution.commit`；B 用 Git 读该提交，恰好两个父提交，
+   第一父为当时的 base（记为 `execution.base`，须是 main 上的提交），第二父为 subject.head；树内容由 GitHub 合成，不含额外提交。
+3. 可信 workflow：workflow 路径为 `.github/workflows/ci.yml`、来自本仓库；它取自 execution.commit，若 PR 改动 CI 文件即属 CI 门核心面，按 §7.1 完整审。
+4. 完整覆盖：三项必需检查取自同一 runId 的同一（最新）runAttempt，均 completed/success；四片工件齐全、片号/head/文件数核对通过，
+   且记录的执行 OID 与第 2 步一致，不能把某个 shard 绿或另一 attempt 的工件拼成总闸绿。
+5. base 漂移门：核验和消费时 B 重读 PR 当前 base 分支 OID；若与 `execution.base` 不同，该 run 只证明对旧 base 的合并结果，
+   判 `ci_base_drift`，须在新 base 上产生新 run（或现有合并闸认可的新运行），不能沿用旧绿。
+
+正例（合成值）：subject.head=`H`，run 触发时 main=`M1`；run event=pull_request、关联本 PR，check head_sha=`H`；
+四片 `head=X`，`X` 的父提交恰为 (`M1`,`H`)；三项检查同 run、同 attempt 成功，分片核对通过；核验时 main 仍为 `M1`。
+记录 subject.head=`H`、execution.commit=`X`、execution.parents=[`M1`,`H`]，可作为 `H` 的当前 CI。
+
+负例：`X` 的第二父不是 `H`（错 head）或第一父不是当时 main 提交（错亲：非 main 父、三父、父序颠倒）；
+check head_sha=`H` 但执行 OID 取自展示值或缺失；main 已前进到 `M2` 仍用 `M1` 上的 run（base 漂移）；
+其他 head、其他 PR、main push、base 上的 run；不同 run/attempt 拼三项或拼分片工件。均判 `ci_binding_invalid` 或 `ci_base_drift`。
 failed、cancelled、skipped、neutral、timed_out、action_required、missing、unknown 和未完成都挡资格。
-同名检查也须核其 workflow、runAttempt 和产生来源，不能拼不同 run/head 的工件充一份成功运行。
+同名检查也须核其 workflow、runAttempt 和产生来源。
 
 本仓库三项最终检查以当前 [CI workflow](../../.github/workflows/ci.yml) 为准：
 `typecheck + test + guard`、`web typecheck + lint`、`desktop typecheck + cargo test`。
-第一项还要求四个 shard 的 head、工件与覆盖对账通过，不能把某个 shard 绿视作总闸绿。
+第一项还要求四个 shard 记录的执行 OID、工件与覆盖对账通过（上面第 4 步）。
 最终必需集合由 B 的现有配置决定；本地 `bun run check` 是仓库自查，不能替代上述最终 head 的 CI。
 纯 main carry 后仍核新 head 自身 CI；本文不豁免 UI owner 截图验收。
 
@@ -288,10 +343,10 @@ MHO1 跟随与本地合并有各自 canonical 实现；只允许现有路径原�
 mode 不继承 MODELX 的开关，项目 on 也不授权所有卡。对已有卡追认默认拒，试行只限获批低风险新卡。
 off/observe 的 consumerReady 一律为 false；observe 可另列 wouldBeEligible 诊断，不得将它当可消费的资格。
 未来 on 也必须满足有效逐卡许可及全部核验要求，才可形成抽查候选；独立抽查仍须完成，核心面始终完整审。
-拟定 `RecognitionCardGrant` 由 B 受权入口签发，保存 approvalId、监工与 owner 批准引用、配置 revision、mode。
+拟定 `RecognitionCardGrant` 由 B 受权入口签发，保存 approvalId、PM 复核与 owner 批准引用、配置 revision、mode。
 它还绑定 A/B 完整 keyId、仓库、卡/PR、订单、delegation/registration、epoch、head/base、specRev/specDigest。
 许可列完整 scope/materialDigest、bundle/manifest SHA、风险面、允许核对/抽查动作、startsAt、expiresAt、revokedAt 和原因。
-不允许 wildcard 卡、无限有效期、自动续期或把模式更改当 owner 批准。监工定验收，owner 决定生效规则及范围。
+不允许 wildcard 卡、无限有效期、自动续期或把模式更改当 owner 批准。PM 复核验收，owner 决定生效规则及范围。
 任何必要绑定变更使旧许可失效，重核批准；许可只能缩小正式授权，不能放宽 excludeSurfaces 或现有权限。
 
 B 在每次开始核验/抽查以及消费结果前重读许可与配置；缓存 ready 不具有持续授权。
@@ -373,7 +428,9 @@ family 与 model.family 的分歧依 §3.2 映射核查；自报 family/verified
 | 换机器/agent 名但实际作者和审查同家族 | cross_family_missing；真实 SID 与所有作者家族核 |
 | MODELX 同家族例外写成跨族或用于池互认 | recognition_rejected；保留 crossModel:false，按原 MODELX |
 | 文档/UI 标签掩盖鉴权、CI 门或宿主效果 | full_review_required；完整 diff/依赖分类核心面 |
-| 旧/main/merge-ref CI、同名假 check、混 run 拼工件 | ci_binding_invalid；当前 head、自身 runAttempt 与可信 workflow 核 |
+| 旧 head/main/base CI、错亲或错 head 的 merge 提交、展示 head 当执行 OID、同名假 check、混 run 拼工件 | ci_binding_invalid；按 §6.2 核 PR/check 绑定、执行 OID 双亲、runAttempt 与可信 workflow |
+| 当前 PR 合成 merge CI 绿，但 main 已前进 | ci_base_drift；须新 base 上的新 run |
+| 人工报告署名写「测试全绿/已验证」，无原始工件或运行来源 | claim_unverified；声称值保留原文，不计覆盖 |
 | CI failure/cancel/skip/neutral 或 shard 缺失 | ci_not_success；现有三项检查与分片完整覆盖 |
 | head 更新，只改 manifest；净 diff 截断/submodule 漏项 | head_invalidated；重核 canonical 完整字节/父链 |
 | 无 handoff、撤回先到、unknown 未结却用 ready 激活 | handoff_ineligible；保持 pending，核墓碑及 P2 对账 |
@@ -381,18 +438,34 @@ family 与 model.family 的分歧依 §3.2 映射核查；自报 family/verified
 | off/observe 配置、许可撤销但沿用缓存 ready | mode_or_grant_invalid；现有完整审，新效果为零 |
 
 正例也必须有：完整合成包、真实验证的合成订单/签名链、明确异家族、全部工件、独立抽查及 head 自身 CI。
+正例里的测试结果来自原始探针工件或经核的 run 来源，不以人工报告的声称值或署名为证；
+其 CI 可以是满足 §6.2 全部条件的当前 PR 合成 merge run（execution.commit 与 subject.head 分列）。
 正例预期只到 eligible_for_spotcheck；在本设计阶段以及 off/observe 模式，生产路径仍完整审。
 另测 mixed 核心面始终完整审、合法 canonical carry 留原件且核新 head CI、有效交接仍不直接获得 PASS。
 
 ## 12. 设计验收与后续批准
 
-监工按本节定验收，执行者只起草；本卡不自行宣称另一家族审查或 owner 批准已完成。
+现无独立监工角色：PM 按本节复核，执行者只起草；本卡不自行宣称另一家族审查或 owner 批准已完成，也不能自签冻结。
 
 1. 另一家族在本设计最终 head 上完整审查：身份/来源、subject、关闭、包/签名、风险分级、失效/撤回与负例逐项核。
 2. 记录真实审查订单、SID、实际家族、报告原文/获准副本与 findings；修复复验沿用 findingId，不造票据或终审。
 3. 仓库自查跑 `bun run check`，检查文件范围、长度、Markdown 引用及无生产数据/个人路径/真实密钥。
 4. 最终提交的自身 CI 由现有合并闸核三项检查；旧 head 和本地 PASS 不能替代，CI 未完成不称验收通过。
-5. 监工明确确认验收，owner 明确批准最终规则；批准引用绑定最终 head、specRev/specDigest、范围及模式。
+5. PM 复核后提交 owner；最终冻结须 owner 针对固定的最终 head、specRev/specDigest 与规则全文明确批准，未答复不冻结。
+   批准冻结只冻结设计，不等于实现授权、生产 on、免审或扩大试行范围。
 6. 后续实现单另行授权，才能实现 export v2/receiver/配置；先完成负例、回退与撤销验收，再讨论生产开关。
 
-本设计合入后生产默认 off；有限试行依原受控批准执行。永久互认及任何免审、MODELX/材料闸或生产流程变更均未获授权。
+本设计合入或批准冻结后生产默认 off，当前互认仍按原生产规则；有限试行依原受控批准执行。永久互认及任何免审、MODELX/材料闸或生产流程变更均未获授权。
+
+## 13. R1F 修订记录（冻结前准确性修订）
+
+本节只说明本次修订对应的原 findingId；原审查报告与其结论原样保留在审查记录，本文不改写、不代为关闭，关闭由另一家族复审判定。
+
+| findingId | 修订位置 | 修订内容 |
+|---|---|---|
+| ci-merge-ref | §2.2、§6.2、§11 | 分列 subject.head 与 execution.commit；当前 PR 合成 merge CI 在认证绑定、双亲、可信 workflow、同 attempt 四片覆盖与 base 漂移门下可作当前 head 验证；补正负例 |
+| canonical-json-claim | §4.1、§4.1.1 | 严格有限 JSON/安全整数/拒 undefined、NaN、Infinity、重复键改为 export v2 拟新增前置校验与版本域；原字节严格解析与规范对象摘要分列，不改现有实现 |
+| human-report-proves | §5.2、§11 | 人工报告只证明取回字节及署名声明，测试结果为声称值，须经原始工件/运行来源核 |
+| （协议引用） | 文首、§8、§12 | P1 为入口盘点 #780；正式约束为 P2 两稿并记版本；无独立监工，owner 对固定最终稿批准冻结，冻结不等于实现/on/免审 |
+
+其余负例、权威边界与有限试行条件（§10 最多 3 卡）未放宽。
