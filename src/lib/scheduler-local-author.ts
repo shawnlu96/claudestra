@@ -109,7 +109,8 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
 
 export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}, rebuild?: Rebuild): Promise<EnsureResult> {
   const intent = claimed(env, task, rebuild?.replaces), name = rebuild && rebuildAgentName(task.id, rebuild.replaces);
-  if (!intent || name === null) return { kind: "manual", reason: intent ? `${rebuild?.replaces} 之后形成不了合法的新作者名` : "缺当前作者建会话意图，需 PM 指定执行者或由调度器重新计划" };
+  if (!intent) return { kind: "manual", reason: "缺当前作者建会话意图，需 PM 指定执行者或由调度器重新计划" };
+  if (name === null) return { kind: "manual", reason: `${rebuild?.replaces} 之后形成不了合法的新作者名` };
   const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, opts, name);
   if (typeof plan === "string") return { kind: "manual", reason: plan };
   const note = (args: string[]) => whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq),

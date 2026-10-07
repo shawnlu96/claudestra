@@ -171,7 +171,8 @@ async function fixture(opts: FixtureOpts = {}) {
   const mode = (m: "on" | "observe" | "off") => cli(false, "scheduler-recovery", "p", m, "--key", "authorRebuild", "--reason", "AREB1 测试");
   const events = (op: string) => listEvents(db, { target: "T1" }).filter((e) => e.data.op === op);
   return { db, repo, run, head, worktreeRoot, cli, bounce, tick, mode, creates, sent, events, agents, saveRegistry, cleanups, old,
-    setSwap: (v: number | null) => { swap = v; }, advance: (ms: number) => { now += ms; }, task: () => getTask(db, "T1")! };
+    policy: () => recoveryPolicy("p", "authorRebuild", join(state, "recovery-policy.json")), task: () => getTask(db, "T1")!,
+    setSwap: (v: number | null) => { swap = v; }, advance: (ms: number) => { now += ms; } };
 }
 
 type F = Awaited<ReturnType<typeof fixture>>;
@@ -189,7 +190,7 @@ async function settle(f: F, n = 6) {
 describe("AREB1 author rebuild after LIFE1 retired it (LOCAL1 shape, production wiring)", () => {
   test("off (= the old code): the merge ci_fail bounce stops the card for PM with 不在本机 registry", async () => {
     const f = await fixture();
-    expect(await f.mode("off")).toMatchObject({ ok: true });
+    await f.mode("off");
     await f.bounce();
     expect(f.task().stage).toBe("fix");
     const seen = await settle(f);
@@ -200,7 +201,7 @@ describe("AREB1 author rebuild after LIFE1 retired it (LOCAL1 shape, production 
 
   test("on: a new-named claude author on the current head, the card's agent rewritten by the step, the fix order sent", async () => {
     const f = await fixture();
-    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
     await f.bounce();
     expect(f.task().stage).toBe("fix");
     const seen = await settle(f, 8);
@@ -216,6 +217,7 @@ describe("AREB1 author rebuild after LIFE1 retired it (LOCAL1 shape, production 
     expect(f.events("local_author")).toEqual([expect.objectContaining({ actor: "scheduler", data: expect.objectContaining({ agent: NEW, family: "claude" }) })]);
     expect(f.events("worker_retire")).toHaveLength(1); // the old retire record stays as written
     expect(f.sent.map((r) => r.agent)).toContain(NEW);
+    expect(f.policy().mode).toBe("on"); // set through the real `ledger scheduler-recovery` CLI
   }, 60_000);
 
   test("observe (default): still manual with the old reason, plus one observe event naming the retire it relied on", async () => {
@@ -232,7 +234,7 @@ describe("AREB1 author rebuild after LIFE1 retired it (LOCAL1 shape, production 
 
 describe("AREB1 counter-examples (on)", () => {
   const manualWith = async (f: F, text: string) => {
-    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
     await f.bounce();
     const seen = await settle(f);
     expect(seen.join("\n")).toContain(text);
@@ -267,7 +269,7 @@ describe("AREB1 counter-examples (on)", () => {
 
   test("swap above LIFE1's line → waits with one note, builds nothing; builds once swap is back under", async () => {
     const f = await fixture();
-    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
     await f.bounce();
     f.setSwap(91);
     for (let i = 0; i < 3; i++) await settle(f);
@@ -284,7 +286,7 @@ describe("AREB1 counter-examples (on)", () => {
 
   test("no slot of the workflow's family (pool limit reached) → waits, not built, no family switch, not manual", async () => {
     const f = await fixture();
-    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
     const cfgPath = join(String(process.env.CLAUDESTRA_STATE_DIR), "scheduler.json");
     const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
     cfg.projects.p.agents = { claude: 1, codex: 2 }; // the claude slot is taken, codex has room: wait, never switch family
@@ -306,7 +308,7 @@ describe("AREB1 counter-examples (on)", () => {
 
 /** on, bounced, settled: exactly one create, of `name`, on the card's branch at its head; the card names it. */
 async function expectRebuilt(f: F, name: string) {
-  expect(await f.mode("on")).toMatchObject({ ok: true });
+  await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
   await f.bounce();
   await settle(f, 8);
   expect(f.creates.map((c) => c[1])).toEqual([name.slice("agent-".length)]);
@@ -315,7 +317,7 @@ async function expectRebuilt(f: F, name: string) {
 }
 /** on, bounced, settled: nothing created, the card keeps the old author, the branch is where it was, the outcome names `text`. */
 async function expectKept(f: F, text: string, branchAt?: string | (() => string)) {
-  expect(await f.mode("on")).toMatchObject({ ok: true });
+  await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
   await f.bounce();
   const seen = await settle(f);
   expect(seen.join("\n")).toContain(text);
@@ -335,7 +337,7 @@ describe("AREB1 names (on)", () => {
     const f = await fixture();
     f.agents[NEW] = { cwd: "/elsewhere", projectId: "p", task: "T9", sessionId: "s-someone", runtime: "claude-code", kind: "worker", status: "active" };
     f.saveRegistry();
-    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
     await f.bounce();
     const seen = await settle(f);
     expect(seen.join("\n")).toContain(`${NEW} 已存在但未绑定`);
@@ -413,7 +415,7 @@ describe("AREB1 the retired author's branch (on)", () => {
   }, 60_000);
   test("a clean create failure backs off, then the retry reuses its own checkout and builds once", async () => {
     const f = await fixture({ createFails: 1 });
-    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.mode("on"); // base code refuses the unknown key: the tick below then shows its own outcome
     await f.bounce();
     const first = await settle(f);
     expect(first.join("\n")).toContain("建会话失败，现场已清理");

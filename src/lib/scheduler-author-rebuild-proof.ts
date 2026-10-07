@@ -77,9 +77,10 @@ const absent = (path: string): boolean | string => {
  * the card's base, a parsed worktree list shows no holder, the target path provably does not exist and the old author owes no
  * cleanup. null = reusable; a reason = keep everything as is. Read only: never resets, prunes, forces or deletes.
  */
-export async function rebuildBranchHeld(db: Database, git: Git, p: { branch: string; base: string; worktree: string }, replaces: string): Promise<string | null> {
+async function rebuildBranchHeld(db: Database, git: Git, p: { branch: string; base: string; worktree: string }, replaces: string): Promise<string | null> {
   const ref = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${p.branch}^{commit}`]), base = await git(["rev-parse", "--verify", `${p.base}^{commit}`]);
-  if (ref.code !== 0 || base.code !== 0 || !/^[0-9a-f]{40,64}$/.test(ref.out.trim()) || ref.out.trim() !== base.out.trim()) return `分支 ${p.branch} 不在本卡起点 ${p.base}，保留并等待核对`;
+  const oid = ref.out.trim();
+  if (ref.code !== 0 || base.code !== 0 || !/^[0-9a-f]{40,64}$/.test(oid) || oid !== base.out.trim()) return `分支 ${p.branch} 不在本卡起点 ${p.base}，保留并等待核对`;
   const list = await git(["worktree", "list", "--porcelain"]);
   const lines = list.out.split("\n");
   if (list.code !== 0 || !lines.some((l) => l.startsWith("worktree "))) return "读不了 worktree 列表，保留并等待核对";
