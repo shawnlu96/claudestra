@@ -19,6 +19,7 @@ import { FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { chunkInputs } from "./order-wire-chunks.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
+import { explicitLocal } from "./scheduler-local-pin.js";
 
 type Material = { path: string; family: AuthorFamily };
 type MaterialReader = (db: Database, ctx: WriteCtx, intent: SchedulerIntent, source: string, deps: ConvergenceLifecycle) => Promise<Material>;
@@ -79,6 +80,10 @@ export async function remoteFixFallback(db: Database, ctx: WriteCtx, intent: Sch
   deps: ConvergenceLifecycle, localReason: string, supplied?: RemoteConvergenceContext) {
   if (remoteOrder(db, intent.id)) return syncFix(db, ctx, intent, deps);
   const task = mustTask(db, intent.taskId), context = supplied ?? await remoteContext(db, task, deps); deps.active();
+  if (explicitLocal(task.extra)) {
+    // A local-only card's convergence fix waits for this machine; a local refusal is never a reason to send it out.
+    return waitForPeer(db, ctx, intent, material.family, `${material.family} 修复等待：本机：${localReason}；本卡固定本机（placement=local / localAuthorOnly），不外派`, context, deps);
+  }
   const { facts, reasons } = convergencePlacement(db, task, context, material.family, "write", ctx.now ?? Date.now());
   const lease = heldLease(db, task);
   if (lease) facts.pin = `peer:${lease.peer}`;

@@ -19,13 +19,14 @@ import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { relayAway } from "./lend-fix-reassign.js";
 import { localFixOwner } from "./lend-fix-start.js";
+import { explicitLocal, LOCAL_LEASE_WAIT } from "./scheduler-local-pin.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
-/** The card's pin as start_node wrote it (`extra.placement`); anything but a `peer:<name>` string is no pin. */
+/** The card's peer pin as start_node wrote it (`extra.placement`); an explicit local card (localAuthorOnly wins) has none. */
 function cardPin(extra: Record<string, unknown> | undefined): string | null {
   const v = extra?.placement;
-  return typeof v === "string" && v.startsWith(PEER_PLACEMENT) && v.length > PEER_PLACEMENT.length ? v : null;
+  return !explicitLocal(extra) && typeof v === "string" && v.startsWith(PEER_PLACEMENT) && v.length > PEER_PLACEMENT.length ? v : null;
 }
 
 function locksFree(s: PlannerSnapshot): boolean {
@@ -120,7 +121,10 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   }
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
   const facts = snapshotPlacementFacts(s, since, role);
-  if (!facts.writeLeasePeer && !pinned && s.task.extra.placement === "local") {
+  if (!pinned && explicitLocal(s.task.extra)) {
+    if (facts.writeLeasePeer) return { code: "placement_pinned", wait: LOCAL_LEASE_WAIT(facts.writeLeasePeer) };
+    // This only requests identity reconciliation; ensure still gates an unproven author and dispatch remains unchanged.
+    if (s.task.agent && !s.author) return null;
     const local = placeFor({ ...facts, peers: [] }, role, s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
   }

@@ -2,6 +2,7 @@
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { PeerFacts, PlaceRole, Placement, PlacementFacts } from "./scheduler-placement.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
+import { LOCAL_PLACEMENT, pinnedPeer } from "./scheduler-local-pin.js";
 
 export interface AgentPoolLoad { running: AgentLimits; totals: AgentLimits }
 export const zeroAgentCounts = (): AgentLimits => ({ claude: 0, codex: 0 });
@@ -31,8 +32,10 @@ export function poolPeerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFami
 
 export function placeAgentPool(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
   if (role !== "review" && !f.locksFree) return { kind: "wait", reason: "文件锁被别的卡占着" };
-  const pin = role !== "review" ? f.pin?.slice(5) ?? (role === "fix" ? f.writeLeasePeer : null) : null;
-  const peers = f.peers.filter((p) => (!pin || p.peer === pin) && !f.tried.includes(p.peer));
+  // Review placement keeps its own cross-family rules; writing pinned "local" stays here, never a peer named "".
+  const local = role !== "review" && f.pin === LOCAL_PLACEMENT;
+  const pin = role !== "review" && !local ? pinnedPeer(f.pin) ?? (role === "fix" ? f.writeLeasePeer : null) : null;
+  const peers = local ? [] : f.peers.filter((p) => (!pin || p.peer === pin) && !f.tried.includes(p.peer));
   const families = role === "write" ? preferred : [family];
   for (const selected of families) {
     const rows = peers.filter((p) => !poolPeerRefusal(f, p, role, selected)).map((p, order) => ({
@@ -40,15 +43,15 @@ export function placeAgentPool(f: PlacementFacts, role: PlaceRole, family: Autho
         (p.v2?.familyTotals ? p.v2.slots[selected] : 0)), order,
     }));
     rows.sort((a, b) => a.load - b.load || a.order - b.order);
-    const local = !pin && (role === "review" || !f.local.family || f.local.family === selected) && localPoolRoom(f, selected);
+    const here = !pin && (role === "review" || !f.local.family || f.local.family === selected) && localPoolRoom(f, selected);
     const running = f.local.pool?.running[selected] ?? f.local.running;
-    if (rows[0] && (!local || rows[0].load <= running)) {
+    if (rows[0] && (!here || rows[0].load <= running)) {
       return { kind: "peer", peer: rows[0].peer, family: selected, reason: `${selected} 在跑 ${rows[0].load}，最少优先，平手 peer 先` };
     }
-    if (local) return { kind: "local", family: selected, reason: `${selected} 本机在跑 ${running}，有空位且负载最少` };
+    if (here) return { kind: "local", family: selected, reason: `${selected} 本机在跑 ${running}，有空位且负载最少` };
   }
   const waiting = role === "write" ? "claude / codex" : family;
-  return { kind: "wait", reason: `等 ${waiting} 空位${pin ? `（固定 ${pin}）` : ""}` };
+  return { kind: "wait", reason: `等 ${waiting} 空位${pin ? `（固定 ${pin}）` : local ? "（固定本机）" : ""}` };
 }
 
 /** Stable within each group, preserving the scheduler's rotation while finishing work before admitting more. */

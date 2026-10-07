@@ -13,6 +13,8 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, applyMove } from "./ledger-write.js";
 import { peerRestateSkip } from "./scheduler-spec-resume-text.js";
+import { explicitLocal } from "./scheduler-local-pin.js";
+import { manualAuthorTicket } from "./scheduler-manual-author.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { checkPreparedPeerPlacement, parsePlacementReservation } from "./scheduler-placement-reservations.js";
 
@@ -36,11 +38,13 @@ export function specPlaceBlock(db: Database, task: LedgerTask, wf: TaskWorkflow 
   if (!wf || wf.mode !== "auto") return "不是 auto 卡";
   if (task.stage !== "spec") return `卡在 ${task.stage}，不在 spec`;
   if (task.kind !== "code" || wf.specRev !== task.specRev) return "流程与规格版本不一致";
-  if (task.extra.placement === "local" || String(task.extra.placement ?? "").startsWith("peer:")) return "start_node 已固定放置";
+  if (explicitLocal(task.extra)) return "本卡固定本机（placement=local / localAuthorOnly）";
+  if (String(task.extra.placement ?? "").startsWith("peer:")) return "start_node 已固定放置";
   const author = getSchedulerSession(db, task.id, "author");
   if (author && author.transport !== "peer" && author.state !== "retired") return "已有本机作者绑定";
   if (!author && task.agent && db.query(`SELECT 1 FROM events WHERE target=? AND kind='task'
     AND json_extract(data,'$.op')='set' AND dedupKey LIKE 'dag-start:%:task-set' LIMIT 1`).get(task.id)) return "start_node 已创建本机作者";
+  if (!author && task.agent && manualAuthorTicket(db, task)) return "已有本机手动作者（PM 派的写步骤票据）";
   if (db.query("SELECT 1 FROM lend_write_leases WHERE taskId=? AND state='held'").get(task.id)) return "已有 peer 写租约";
   if (db.query("SELECT 1 FROM lend_orders WHERE taskId=? AND status IN ('claimed','unknown') LIMIT 1").get(task.id)) return "已有领取或结果不明的单";
   if (getMeta(db, task.project).queueFrozen.frozen) return "项目队列已冻结";
