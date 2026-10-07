@@ -6,7 +6,7 @@
  */
 import { createStampParts, STAMP_PAD } from "./transcript.js";
 
-export const NARROW_COLS = 80;
+const NARROW_COLS = 80;
 
 type Kind = "inbound" | "tool" | "text" | "result" | "error" | "fail" | "dim" | "plain";
 

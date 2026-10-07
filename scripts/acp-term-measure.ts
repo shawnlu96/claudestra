@@ -1,7 +1,7 @@
 /**
  * 网页终端量尺（ACPT-3）：无头 Chrome 按 iPhone 宽（390px，3x）开真的 xterm（WebGL），52 列铺满，写一行中文 + 一行英文，
  * 截图后逐像素量：每个汉字的两格里墨迹占多宽、汉字之间空多少；英文行右边留多少、溢没溢出。
- * 用法：bun scripts/acp-term-measure.ts [before|after…] [--shot <dir>]（取法在 web/scripts/acp-term-measure-page.ts）。
+ * 用法：bun run term-measure [before|after…] [--shot <dir>]（取法在 web/scripts/acp-term-measure-page.ts）。
  * --shot 时另拍整屏：同一批 ACP 会话夹具（tests/helpers）在 52×44 下，改前 = 旧排法 + 旧字号，改后 = tty-layout 窄屏排法 + 汉字补宽。
  * 需要本机装 Chrome（playwright-core channel chrome，或 CHROME_PATH）。
  */
@@ -54,7 +54,8 @@ async function main() {
       const ink = await page.evaluate((a) => (globalThis as any).__ink(a), { b64: png.toString("base64"), r, zh: ZH, width: WIDTH });
       if (shotDir) await screenShot(browser, fitJs, v, join(shotDir, `screen-${v}.png`));
       const f = (n: number) => n.toFixed(2);
-      console.log(`${v.padEnd(8)} 字号 ${f(r.fs)} 字距 ${f(r.ls)} 格宽 ${f(r.cell)} 画布 ${r.screenW}/${r.avail}px  字宽 ${f(ink.inkW)}px 汉字间隙 均 ${f(ink.gapMean)}px 最大 ${f(ink.gapMax)}px  墨迹占两格 ${(ink.inkRatio * 100).toFixed(0)}%  英文行右侧空白 ${f(ink.enRightBlank)}px`);
+      console.log(`${v.padEnd(8)} 字号 ${f(r.fs)} 字距 ${f(r.ls)} 格宽 ${f(r.cell)} 画布 ${r.screenW}/${r.avail}px  字宽 ${f(ink.inkW)}px`
+        + `  汉字间隙 均 ${f(ink.gapMean)}px 最大 ${f(ink.gapMax)}px  墨迹占两格 ${(ink.inkRatio * 100).toFixed(0)}%  英文行右侧空白 ${f(ink.enRightBlank)}px`);
       await page.close();
     }
   } finally {

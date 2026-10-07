@@ -42,7 +42,10 @@ export async function fitCjkGlyphs(term: Terminal, container: HTMLElement): Prom
  * rAF 多轮校验（估算与 renderer 实测有偏差）：溢出 → 先清字距 → 仍溢出缩字号；有空隙 → 实测反推字符宽把空隙摊进字距，上限 6 轮防振荡。
  * 收敛后给汉字补宽（fitCjkGlyphs）。⚠ 不做高度方向的字号约束：44 行塞进可用高会把字号压到看不清，超高由画布底锚裁顶处理。
  */
-export function adaptFontSize(term: Terminal, container: HTMLElement, cc: number, disposed: () => boolean): void {
+export function adaptFontSize(
+  term: Terminal, container: HTMLElement, cc: number, disposed: () => boolean,
+  settled: () => void = () => void fitCjkGlyphs(term, container), // 量尺传空函数 = 改前的样子（只调字号字距）
+): void {
   const avail = container.clientWidth;
   if (!cc || !avail) return;
   const fs0 = term.options.fontSize ?? 13;
@@ -56,7 +59,7 @@ export function adaptFontSize(term: Terminal, container: HTMLElement, cc: number
   if (fs !== fs0) term.options.fontSize = fs;
   term.options.letterSpacing = Math.max(0, Math.min(3, cellW - fs * ratio));
   const settle = (n: number) => {
-    if (n <= 0) return void fitCjkGlyphs(term, container);
+    if (n <= 0) return settled();
     requestAnimationFrame(() => {
       if (disposed()) return;
       const screen = container.querySelector(".xterm-screen") as HTMLElement | null;
@@ -71,7 +74,7 @@ export function adaptFontSize(term: Terminal, container: HTMLElement, cc: number
       const rawCell = screen.offsetWidth / cc - lsNow;
       if (rawCell <= 0) return;
       const lsT = Math.max(0, Math.min(4, (avail - 2) / cc - rawCell));
-      if (Math.abs(lsT - lsNow) <= 0.05) return void fitCjkGlyphs(term, container);
+      if (Math.abs(lsT - lsNow) <= 0.05) return settled();
       term.options.letterSpacing = lsT;
       settle(n - 1);
     });
