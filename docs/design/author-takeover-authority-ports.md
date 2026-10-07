@@ -1,6 +1,6 @@
 # PMLPORT1：已结 peer 作者的本机正规接管——权威端口冻结前设计
 
-> 状态：specRev 1 设计稿第 4 版（第 2 版按第 1 轮 6 条 P1 修订：凭据代次线性化、peer 派单投影、retention 保全入口、family 来源、工具定义接线、共用 writer 必选；第 3 版按第 2 轮 2 条 P1 修订：registry SID 轮转并入 ledger 接入代次（§2.3），A 侧 `lend_relays` 未结状态纳入前置与 CAS（§1.2 E3、§3.3）；第 4 版按第 3 轮 2 条 P1 修订：全部 registry 文件发布收拢到 ledger 写锁内按代次行覆盖 SID，挡住过时快照的整份写回（§2.3）；relay 解决改为按台账序号绑定 E1，删除与 `updatedAt` 比较的不等式（§3.3 前置 8）），仅文档。待另一家族完整设计审，再由 PM 定实施范围。涉及新增协议动作、签名用途或 MCP 工具的部分，还要 owner 另行批准。
+> 状态：specRev 1 设计稿第 5 版（第 2 版按第 1 轮 6 条 P1 修订：凭据代次线性化、peer 派单投影、retention 保全入口、family 来源、工具定义接线、共用 writer 必选；第 3 版按第 2 轮 2 条 P1 修订：registry SID 轮转并入 ledger 接入代次（§2.3），A 侧 `lend_relays` 未结状态纳入前置与 CAS（§1.2 E3、§3.3）；第 4 版按第 3 轮 2 条 P1 修订：全部 registry 文件发布收拢到 ledger 写锁内按代次行覆盖 SID，挡住过时快照的整份写回（§2.3）；relay 解决改为按台账序号绑定 E1，删除与 `updatedAt` 比较的不等式（§3.3 前置 8）；第 5 版按第 4 轮 P1/P2 修订：SID 轮转拆成只写 ledger 的 T-rot 与之后的 T-pub，删除失锁后的补偿写，新增 `publishedEpoch` 作为 T2 与 T-COMMIT 共核的权威阻断状态，`publishRegistry` 移到 `src/lib/`（§2.3、§4 P-B）），仅文档。待另一家族完整设计审，再由 PM 定实施范围。涉及新增协议动作、签名用途或 MCP 工具的部分，还要 owner 另行批准。
 > 本稿合入**不**授权：实现、启用新签名用途、真实接管任何卡、全局开关、模型额度，也不改变现有 take_order / deliver 门。
 > 来源是 PMLOCAL1 的正式 block 与 ports-v1 提案。ports-v1 原件只在提案机保全，本轮没有外发。本文不引用它的字节、行号或段落，下面的现状全部按当前仓库 head 独立核对。需要原提案某段时，先走正规材料需求和外发闸。
 > 全文只用字段名和合成标识，不含个人路径、生产记录、凭据、公钥或私钥材料，也不含会话正文。
@@ -104,7 +104,7 @@
 **A：本人接受。** 新作者本人通过一个新增的 MCP 派单工具 `accept_takeover`（暂名）接受。这个工具要经过 `routeOrderTool`。handler 检查：
 
 1. 调用方 `agent` 等于 `to.agent`。
-2. `call.sessionId` 等于 `to.sessionId`，**并且**在接受事务内等于 `caller_access_epochs` 中该 agent current 行的 `sessionId`（§2.3）。registry 只会落后于 ledger、不会领先（先 ledger 后文件），所以 bridge 在事务外读到的旧 SID 与事务内的新代次 SID 不等时必拒。
+2. `call.sessionId` 等于 `to.sessionId`，**并且**在接受事务内等于 `caller_access_epochs` 中该 agent current 行的 `sessionId`（§2.3）。registry 只会落后于 ledger、不会领先（先 ledger 后文件），所以 bridge 在事务外读到的旧 SID 与事务内的新代次 SID 不等时必拒。同一行还须 `publishedEpoch = epoch`（第 5 版新增，§2.3）：registry 尚未确认发布到当前代次时一律拒绝，不靠比对文件内容推断。
 3. 接入代次：调用连接所持凭据的代次标签 `credTag`（新增，见 §2.3 的接入代次表）等于 ledger 里该 agent current 行的 `credTag`，且该行的 `epoch` 推进时刻 `updatedAt` 早于授予时刻。授予后重签凭据或轮转 SID 都会推进代次，拒绝。
 4. 家族：`runtimeFamily(接入代次行登记的 family)`、`runtimeFamily(call.family)`（registry 当前 runtime）与 `to.family` 三者相等。`pi` 等映射为 null 的 runtime 一律拒绝。
 5. LIFE1 行就是 `to` 记录的那一行（`agent + lifeCreatedAt`），仍是 `active`，且不是 `cleanup_pending`。
@@ -127,25 +127,31 @@
 | T1：PM 授予 | 一次 CLI 调用，单 `tx` | 是 | CAS 失败就拒绝，不写任何东西 |
 | T2：新作者接受 | MCP 调用，先在 bridge 解析身份（读凭据文件和 registry，**在事务外**），再进入单 `tx` 写接受事件 | 身份读取在事务外，代次与授予判定在事务内 | 事务内读 ledger 接入代次表、LIFE1、授予。身份读和写之间如果凭据换代或 SID 轮转，代次表已先推进（见下），`credTag` 或 `sessionId` 对不上，事务内即拒 |
 | T3：提交前复核远端 | `git ls-remote` 核分支 head 等于授予时的 `headSHA`，与 `reclaimForFamilySwap` 的 `context.remoteHead` 做法相同。这一步是网络调用，**在事务外** | 否 | 不一致就停在“已接受、未提交”，不重试写入 |
-| T-COMMIT：canonical supersession | 单 `tx`。重算 §3.3 的全部 CAS 指纹并与 T1 比对；核 ledger 接入代次表中 `to.agent` 的 current 行：`epoch` 等于接受事件冻结的 `accessEpoch`，`sessionId` 等于冻结的 `sessionId`（即 `to.sessionId`）；在事务内重跑 `requireSessionIdentity` 只为复核家族、完整名与 worker 种类——它**不核 SID**，不能当 SID 依据 | 是。**不读凭据文件，也不以 registry 文件的 SID 为准**，接入代次（凭据与 SID）的权威在 ledger 里 | 任一漂移就整体回滚。零新绑定，接受事件保留但标记为未消费 |
+| T-COMMIT：canonical supersession | 单 `tx`。重算 §3.3 的全部 CAS 指纹并与 T1 比对；核 ledger 接入代次表中 `to.agent` 的 current 行：`epoch` 等于接受事件冻结的 `accessEpoch`，`sessionId` 等于冻结的 `sessionId`（即 `to.sessionId`），`publishedEpoch` 等于 `epoch`；在事务内重跑 `requireSessionIdentity` 只为复核家族、完整名与 worker 种类——它**不核 SID**，不能当 SID 依据 | 是。**不读凭据文件，也不以 registry 文件的 SID 为准**，接入代次（凭据与 SID）的权威在 ledger 里 | 任一漂移就整体回滚。零新绑定，接受事件保留但标记为未消费 |
 
 **接入代次的线性化（第 2 版修凭据，第 3 版并入 SID）。** 上一稿让 T-COMMIT 在事务里重读 `caller-creds.json`。这挡不住竞态：撤销与重签只拿文件锁（`caller-cred.ts:56-69`），该锁拿不到时还会降级放行（`file-lock.ts` 头注释），与 ledger 的 `BEGIN IMMEDIATE`（`ledger-tx.ts:13-14`）互不同步。提交进程重读成功之后，另一进程仍可完成撤销，前者再提交，等于换代后仍落新绑定。第 2 版改为把可撤销代次纳入 ledger，让同一把 SQLite 写锁定序。第 2 轮审查又指出同样的窗口在 SID 上也存在：`/clear` 经 `set-session` 只改 registry 的 `sessionId`（`set-session.ts:23-27`），不重签凭据、不改 LIFE1，第 2 版的代次不动，`requireSessionIdentity` 也不核 SID，于是接受 SID-a、轮转到 SID-b 之后 T-COMMIT 仍会把 SID-a 写成 active，之后真实调用报 SID-b，`bindingAllows`（`order-take.ts:58-62`）拒，新本人拿不到单。在 ledger 事务里重读 registry 文件同样挡不住文件写入的并发窗口。第 3 版把 SID 也并入同一代次：
 
-- 新表 `caller_access_epochs(agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL, credTag TEXT, family TEXT, sessionId TEXT, issuedAt INTEGER, updatedAt INTEGER NOT NULL)`。`credTag` 是凭据哈希再加域分隔的派生摘要（`sha256("claudestra-cred-epoch-v1:" + credHash)`），不存凭据明文，也不存原哈希；撤销后 `credTag = NULL`。`sessionId` 是该 agent 在 registry 里**将要**成为、或已经是的官方 SID。
+- 新表 `caller_access_epochs(agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL, credTag TEXT, family TEXT, sessionId TEXT, publishedEpoch INTEGER, issuedAt INTEGER, updatedAt INTEGER NOT NULL)`。`publishedEpoch` 是 registry 文件已确认发布到的代次（第 5 版新增，见下文 T-pub）。`credTag` 是凭据哈希再加域分隔的派生摘要（`sha256("claudestra-cred-epoch-v1:" + credHash)`），不存凭据明文，也不存原哈希；撤销后 `credTag = NULL`。`sessionId` 是该 agent 在 registry 里**将要**成为、或已经是的官方 SID。
 - 推进代次的事件有两类，`epoch + 1` 一律只在 ledger 里做：
   - **凭据**：签发、撤销（`caller-cred.ts` 的 `issueCallerCred` / `revokeCallerCreds`）。
   - **SID**：任何**有意**改写 registry 里某 agent `sessionId` 的路径。按当前源码逐个核对，全集是：`set-session.ts:25-26`（被 `bridge/clear-rotation.ts:40` 的 `/clear` 认领、`acp-host.ts:140` 的 ACP 线程轮转、`bridge/session-heal.ts` 的自愈调用）；`manager.ts` 的 `cmdAdopt`（`:1138`）；`restart` 的 fork 自愈回写（`:1392-1393`）；create/resume 整条重写 agent 记录（`:912-933`，同名换 SID 时）。这些路径改为都经一个新的薄 helper `commitRegistrySession(name, newSid, mutate)`，不再各自直接赋值。
 - **只管有意改 SID 的路径不够（第 4 版，修第 3 轮 sid-rotate）。** registry 是整份 JSON 文件，`saveRegistry`（`src/manager/core.ts:146-155`）的注释自己写明不消除跨进程读-改-写的 lost update。任何拿着旧快照整份写回的写者，都会在不赋 `sessionId` 的情况下把 SID 改回旧值，例如 `cmdAgentLabel`（`src/manager/agent-external.ts:31-35`）：先读到 SID-a，正式轮转把 ledger 与 registry 都改成 SID-b，label 写者再把整份旧快照写回，registry 回到 SID-a。之后接受与 T-COMMIT 冻结的都是 ledger 里的 SID-b，`requireSessionIdentity` 不核 SID，照样通过；落下 SID-b 绑定后，真实已验证调用报 SID-a（`caller-identity.ts:55`），新本人领不到单。这种写回在 `src/` 里有四十多处 `saveRegistry` / `patchRegistryAgent` 调用点，逐个改不现实，所以约束放在**发布层**：
   - 物理上把 registry 文件发布出去的只有三处：`saveRegistry` 的 `writeJsonLeased(REGISTRY_PATH, …)`（`core.ts:155`，`patchRegistryAgent` 与全部调用点都经它）、一次性迁移 `migrateWorkerToAgent` 的 `writeJsonLeased`（`core.ts:119`）、`state-backup` 的 `restoreSnapshot`（`src/lib/state-backup.ts:101-122`，`registry.json` 在其白名单内）。这三处改为都调用一个新的发布函数 `publishRegistry(reg)`。
-  - `publishRegistry` 在**一个 ledger `tx`（`BEGIN IMMEDIATE`）里**同步完成：读 `caller_access_epochs` → 对文件里每个有代次行的 agent，把待写快照的 `sessionId` **覆盖成代次行的 `sessionId`** → 写临时文件 → 现有租约复核（`writeJsonLeased` 的 `commitIf`）→ `rename`。中间没有 `await`。没有代次行的 agent 原样写（迁移前会话本来就不能接受，见下）。这是对过时快照的**合并**策略：SID 一律以 ledger 为准，其他字段仍按今天的最后写者生效（label 等非 SID 字段的 lost update 是现有行为，本稿不改，也不声称解决）。
-  - `commitRegistrySession` 用同一个 `tx`：推进代次（`epoch + 1`，写新 `sessionId`）→ 在事务内**重新读取文件**（不用调用方之前的快照），执行 `mutate` → 同样经 `publishRegistry` 的同步写出。
-  - 跨进程顺序：两类发布都在持有 ledger 写锁时才 `rename`，SQLite 写锁把所有 registry 发布与所有 SID 代次推进排成一个全序。上面的交错因此只有两种结果：label 写者的发布排在轮转之前，轮转在事务内重读文件后写 SID-b；排在轮转之后，它在事务内读到代次行 SID-b，把旧快照里的 SID-a 覆盖掉。两种情况下 registry 最终都是 SID-b，与 ledger 一致。
-  - 不同事务的地方照实写：文件 `rename` **不是** SQLite 事务的一部分，只是在写锁内执行。`commitRegistrySession` 若在 `rename` 之后 COMMIT 失败（磁盘满等），registry 会短暂领先 ledger（文件 SID-b、代次行 SID-a）。此时返回 `ok:false`，并在仍持锁的同一同步段里把文件按原内容写回，尽力回滚；写回也失败时，下一次任何 `publishRegistry` 都会按 ledger 把 SID 改回 SID-a。这与“轮转第 1 步失败”的状态相同（registry 落后于运行时，watcher 下次检测后重试轮转）。在这段窗口里，bridge 读到的 SID 与代次行不等，接受和 T-COMMIT 都拒绝，属于闭合失败。
+  - `publishRegistry` 在**一个 ledger `tx`（`BEGIN IMMEDIATE`）里**同步完成：读 `caller_access_epochs` → 对文件里每个有代次行的 agent，把待写快照的 `sessionId` **覆盖成代次行的 `sessionId`** → 写临时文件 → 现有租约复核（`writeJsonAtomicSync` 的 `commitIf` 调 `assertSchedulerLease`，与 `writeJsonLeased` 现有做法相同）→ `rename` → 对本次写出的每个有代次行的 agent 执行 `UPDATE … SET publishedEpoch = epoch` → COMMIT。中间没有 `await`。这个事务**不改** `epoch` 与 `sessionId`，只改 `publishedEpoch`。没有代次行的 agent 原样写（迁移前会话本来就不能接受，见下）。这是对过时快照的**合并**策略：SID 一律以 ledger 为准，其他字段仍按今天的最后写者生效（label 等非 SID 字段的 lost update 是现有行为，本稿不改，也不声称解决）。
+  - `commitRegistrySession(name, newSid, mutate)` 拆成**两个独立事务**（第 5 版，修第 4 轮 sid-rotate。第 4 版把代次推进与文件发布放在同一事务里，COMMIT 失败后无法安全补偿）：
+    1. **T-rot**：单 `tx`，只写 ledger，不碰文件。代次行的 `sessionId` 已等于 `newSid` 时不推进（幂等重试）；否则 `epoch + 1`、写 `sessionId = newSid`，`publishedEpoch` 保持旧值，因此必小于新 `epoch`。这次 COMMIT 是 SID 轮转的**线性化点**。COMMIT 失败时 SQLite 已回滚：代次行与 registry 文件都没变，返回 `ok:false`，与“第 1 步失败”相同。
+    2. **T-pub**：T-rot 提交之后，另开一个 `publishRegistry` 事务。在事务内**重新读取文件**（不用调用方之前的快照），执行 `mutate`，按上一条覆盖 SID 后发布，并把 `publishedEpoch` 推到 `epoch`。T-pub 失败（拿不到锁、`rename` 前出错、`rename` 后 COMMIT 失败或进程退出）时返回 `ok:false, rotated:true`，调用方现有的失败重试路径会再调一次 `commitRegistrySession`：T-rot 按幂等跳过，只重做 T-pub。`mutate` 必须幂等（现有调用方只做整条覆盖或字段赋值）。
+  - **COMMIT 失败后不做任何补偿写。** `tx()` 是 `db.transaction(fn).immediate()`（`ledger-tx.ts:13-15`），COMMIT 失败返回调用方之前，事务已经回滚，写锁已经释放，别的连接可以立刻拿锁发布。第 4 版“仍持锁把文件按原内容写回”的前提不成立，第 5 版整条删除：任何路径都不会在失锁后按旧内容覆盖文件，也就不会盖掉别的连接更新的发布。不补偿也安全，依据是两条不变量：
+    - **I1：文件里的 SID 只会是 ledger 已提交的值。** 改 `sessionId` 的只有 T-rot，而 T-rot 不写文件。写文件的只有 `publishRegistry`，它在写锁内读到的代次行全是已提交的值，自己也不改 `sessionId`。所以即使 T-pub 在 `rename` 之后 COMMIT 失败，文件里的 SID 仍是**已提交**的当前值。第 4 轮审查复现的“文件 SID-b、ledger 回到 SID-a”在新顺序下不可达：失败的 T-rot 从未写出 SID-b，失败的 T-pub 写出的 SID-b 已经提交。
+    - **I2：`publishedEpoch = epoch` 时，文件里该 agent 的 SID 等于代次行的 `sessionId`。** `publishedEpoch` 只由 COMMIT 成功的 `publishRegistry` 推进，它在同一写锁内刚把当前 SID 写进文件。此后直到下一次 T-rot，代次行不变，期间的任何发布（包括 COMMIT 失败的）写出的都是同一个 SID。T-rot 推进 `epoch` 时不动 `publishedEpoch`，两者立刻不等。绕开 `publishRegistry` 写文件的路径由守卫 ② 排除。
+  - **权威阻断状态**就是 `publishedEpoch < epoch`（含 NULL）。T2 与 T-COMMIT 都在事务内核这一列（§2.2 第 2 条、§3.3 前置 6），不读文件，安全性也不靠“下一次任意 save 自愈”。处于阻断状态时，registry 落后于 ledger：bridge 读到旧 SID，与代次行不等，接受被拒；已接受的单冻结的 `accessEpoch` 落后于新 `epoch`，T-COMMIT 回滚。下一次成功的 T-pub，或任意一次成功的 `publishRegistry`（同样会写出当前 SID 并推进 `publishedEpoch`），会结束这个状态。这只影响恢复能否完成，不影响安全。doctor 对 `publishedEpoch < epoch` 超过一个检测周期的行告警，manager 启动时对这些行各跑一次 `publishRegistry` 收敛。
+  - 进程在任一点退出：T-rot 之前退出或 T-rot 未提交，什么都没变；T-rot 已提交、T-pub 未提交，处于阻断状态，`rename` 可能已经发生，但按 I1，文件内容合法；T-pub 已提交，轮转完成。任何中间状态都不需要靠原锁回滚。
+  - 跨进程顺序：所有 registry 发布都在持有 ledger 写锁时才 `rename`，SQLite 写锁把所有 registry 发布与所有 SID 代次推进（T-rot）排成一个全序。审查给出的交错因此只有两种结果：label 写者的发布排在 T-rot 之前，之后的 T-pub 在事务内重读文件写出 SID-b；排在 T-rot 之后，它在事务内读到代次行 SID-b，把旧快照里的 SID-a 覆盖掉（并顺带推进 `publishedEpoch`）。两种情况下 registry 最终都是 SID-b，与 ledger 一致。
   - 拿不到 ledger 写锁（超过 busy_timeout）时，`publishRegistry` 抛错，本次 registry 写入失败，由调用方现有的错误路径处理。它不降级成不经 ledger 直接写，这样做会重新打开过时快照覆盖 SID 的窗口。这让所有 registry 写入多了一个“ledger 忙则失败”的失败面，列入 owner 批准项。库里还没有代次表时，`publishRegistry` 不开事务、照旧直接写，行为与今天相同，接管门因为没有代次行而关闭。
 - 顺序固定为**先 ledger、后文件**：
-  1. 凭据类：单 `tx` 把该 agent 的 `epoch + 1`，写入新 `credTag`/`family`/`issuedAt`（撤销则写 NULL）。SID 类：同上推进代次并写入新 `sessionId`（其余列不变），文件发布在同一持锁段内完成（上一条）。代次推进的 COMMIT 就是换代的**线性化点**。
+  1. 凭据类：单 `tx` 把该 agent 的 `epoch + 1`，写入新 `credTag`/`family`/`issuedAt`（撤销则写 NULL）。凭据换代不改 registry 文件，同一事务内 `publishedEpoch` 随之设为新 `epoch`，但只在旧行 `publishedEpoch` 已等于旧 `epoch` 时这样做，否则保持不变，不替尚未完成的 SID 发布解除阻断。SID 类即上文 T-rot，文件发布是之后独立的 T-pub。代次推进的 COMMIT 就是换代的**线性化点**。
   2. 凭据类在第 1 步提交之后，再按现有 `replaceAgentCreds` 改凭据文件。
-  - 推论：凭据文件只会**落后**于 ledger，不会领先。registry 的 SID 除上面 COMMIT 失败的窗口外，只会落后或等于 ledger；那个窗口里两者不等，按闭合失败处理。bridge 在事务外读到的 SID 或凭据与 ledger current 行不等时，事务内比对必拒。
+  - 推论：凭据文件只会**落后**于 ledger，不会领先。registry 的 SID 只会落后于或等于 ledger（I1），不存在领先的窗口；落后时 `publishedEpoch < epoch`，按闭合失败处理。bridge 在事务外读到的 SID 或凭据与 ledger current 行不等时，事务内比对必拒。
 - 防漏：P-B 加两条静态守卫测试。① `src/` 中给 registry agent 赋 `sessionId` 的语句只出现在 `commitRegistrySession` 里（新建 agent 的首条记录也经它写，代次行从 `epoch=1` 起）。② 写 registry 文件的语句（以 `REGISTRY_PATH` 或 `registry.json` 为目标的 `writeJson*` / `writeText*` / `rename`）只出现在 `publishRegistry` 里；`state-backup` 恢复 `registry.json` 时也必须转交给它。任何新增路径绕开这两点都会让测试失败。只按 `sessionId` 赋值做静态搜索挡不住整份旧快照写回，所以守卫 ② 是必需的。
 - 失败策略：签发时第 1 步失败，就不写文件、不发凭据，启动按现有失败路径重试（闭合失败）。SID 类第 1 步失败：不改 registry，路径返回 `ok:false`。现有调用方已按失败处理（`clear-rotation.ts`、`session-heal.ts:65` 记错并在下次检测时重试）。这会让 registry 的 SID 暂时落后于运行时，等同今天轮转被 watcher 检测到之前的状态；但 ledger 行与 registry 一致地停在旧值，轮转在本设计里定义为第 1 步 COMMIT 的那一刻发生，下面的时序推论照常成立。这改变了 `set-session` 等路径的失败面，列入 owner 批准项。撤销时第 1 步失败，照旧删掉文件里的记录（安全方向，旧连接立即 `verified=false`），并持续重试第 1 步。重试成功前，ledger 里的 current 代次仍是旧 `credTag`，而任何新连接都不可能出示它：文件里已没有它，bridge 认不出就是未验证，拿不到接受所需的已验证调用；已接受未提交的单如何处理见下面的时序推论。
 - 时序推论（与 SQLite 写锁串行化一致）：
@@ -154,7 +160,7 @@
   - 只轮转 SID 的 `/clear` 发生在 T2 之后、T-COMMIT 之前：其第 1 步 COMMIT 先于 T-COMMIT，T-COMMIT 读到 `epoch` 已推进、`sessionId` 已是 SID-b，回滚，零新绑定。PM 需按 SID-b 重新授予。
   - 撤销第 1 步失败、只删了文件的情形：代次的权威定义就是 ledger 行，文件只是 MCP 验证用的派生副本。这种撤销在第 1 步重试成功那一刻才算换代，线性化点仍是那次 COMMIT，与 T-COMMIT 由同一把写锁定序。提前删文件只会让持有旧凭据的连接更早失去验证，不会让旧代次多出任何写权。撤销第 1 步失败计入 doctor 告警，便于 PM 看到。
   - 因此“提交前换代零效果”在本设计里的精确含义是：换代（凭据或 SID）的 ledger COMMIT 先于 T-COMMIT 的 COMMIT，则 T-COMMIT 必回滚。比较 `issuedAt`、重读 registry 文件的 SID 或重跑 `requireSessionIdentity` 都不能替代这一同步，本稿不用它们做提交判据。
-  - T-COMMIT 提交之后，过时快照的整份写回也不能把 registry 的 SID 改回旧值：`publishRegistry` 在写锁内按代次行覆盖 SID（上文）。所以“ledger 冻结 SID-b、真实调用报 SID-a”只会出现在某次 `commitRegistrySession` 的 COMMIT 失败窗口里，并在下一次发布时收敛到 ledger 的值；窗口发生在接受或提交之前时，接受或提交被拒，不会落下新绑定。窗口发生在提交之后时，按上一条的提交后轮转处理。
+  - T-COMMIT 提交之后，过时快照的整份写回也不能把 registry 的 SID 改回旧值：`publishRegistry` 在写锁内按代次行覆盖 SID（上文）。所以“ledger 冻结 SID-b、真实调用报 SID-a”只能出现在 `publishedEpoch < epoch` 的阻断状态里。它发生在接受或提交之前时，T2 或 T-COMMIT 核到阻断而拒绝，不会落下新绑定；发生在提交之后时（即提交之后的 T-rot），按上一条的提交后轮转处理。T-rot 的 COMMIT 失败不构成轮转：代次行、文件、真实调用三者都还是 SID-a，此时提交 SID-a 绑定，与真实调用一致。
   - 本设计看不见“运行时已轮转、但还没有任何写路径提交第 1 步”的状态，今天的 registry 同样看不见；它不是本设计新开的窗口。
 - 迁移前已在跑的会话没有代次行，或代次行的 `credTag`、`sessionId` 任一为 NULL：接受一律拒，须重启拿新凭据与新的 SID 记录。库里还没有代次表（未迁移、只读打开）时，签发、撤销与 registry SID 改写都跳过第 1 步、照旧只改文件，启动与轮转行为不回退；此时任何会话都无法接受，接管门闭合。只有表已存在而第 1 步失败，才按上一条闭合失败。
 - 这改变共享的 `caller-cred.ts` 签发与撤销路径，以及上面列出的全部 registry SID 写路径，涉及凭据与会话身份的生命周期，需 **PM 精确扩围与 owner 批准**。不批准时 P-B 与 P-C 整体阻塞，不提供“事务内重读凭据文件或 registry”之类的降级实现。
@@ -231,7 +237,7 @@
 3. 卡在 build/fix；没有 `LEND_LIVE` 单；写租约已 `ended`，或由本 writer 在同一事务内 `endWriteLease`，原因写 `author_takeover:<id>`。
 4. 旧绑定行就是 `fromBinding`，且仍是 current（非 retired）。
 5. E1 的 `orderId/gen` 等于这张卡最后一张写单的 `orderId` 和 `leaseGen`，且 `terminal` 不是“未知”；E2 的 `remoteHead` 等于 `task.headSHA`。
-6. LIFE1 新作者行就是 `to.agent + to.lifeCreatedAt`，仍 active、非 `cleanup_pending`，`sessionId` 等于 `to.sessionId`；`caller_access_epochs` 中该 agent current 行的 `epoch` 等于接受事件冻结的 `accessEpoch`，且 `sessionId` 等于 `to.sessionId`、`credTag` 非 NULL（§2.3）。这是 SID 的唯一提交判据。
+6. LIFE1 新作者行就是 `to.agent + to.lifeCreatedAt`，仍 active、非 `cleanup_pending`，`sessionId` 等于 `to.sessionId`；`caller_access_epochs` 中该 agent current 行的 `epoch` 等于接受事件冻结的 `accessEpoch`，且 `sessionId` 等于 `to.sessionId`、`credTag` 非 NULL、`publishedEpoch` 等于 `epoch`（§2.3）。这是 SID 的唯一提交判据。
 7. 家族：`to.family` 等于 `workflow.authorFamily`，等于接受事件冻结的 `family`，且事务内重跑 `requireSessionIdentity`（`scheduler-session-identity.ts:10-21`，registry runtime 经同一映射得到的家族等于 `to.family`，完整名、worker 种类）通过。它不核 SID，SID 只看前置 6。换家族不在本稿范围，另需 CONV 规则。
 8. **A 侧 relay 已结**（第 3 版新增）。本卡所有出借单（不只最后一张写单）的 `lend_relays` 行逐行判定：
    - 已结、不挡：`sent`（对方 bridge 收下）、`refused`（外发闸拒，从未发出）、`dropped`（订单离开 `claimed` 后未发出即丢弃）、`failed`（`MAX_TRIES` 次都被明确拒收，确定未送达）。
@@ -350,13 +356,13 @@
 - **新模块**：
   - `src/lib/author-takeover-grant.ts`（授予、撤销与校验，≤110 行）
   - `src/lib/author-takeover-accept.ts`（接受 handler 的纯逻辑与事务，≤90 行）
-  - `src/lib/caller-access-epoch.ts`（代次表迁移、推进、读取，≤60 行）；`src/manager/registry-publish.ts`（`publishRegistry` 与 `commitRegistrySession`：在 ledger 写锁内按代次行覆盖 SID 后发布文件；推进 SID 代次后在事务内重读文件、执行调用方给的改写再发布；COMMIT 失败时写回原内容，≤70 行。它要 import `ledger-tx`，须同步加入 `tests/ledger-migrate.test.ts` 的写入模块白名单）
+  - `src/lib/caller-access-epoch.ts`（代次表迁移、推进、读取，≤60 行）；`src/lib/registry-publish.ts`（`publishRegistry(path, reg, opts)` 与 `commitRegistrySession`：在 ledger 写锁内按代次行覆盖 SID，同步发布文件并推进 `publishedEpoch`；T-rot 只推进代次，T-pub 在事务内重读文件、执行调用方给的改写再发布；没有任何失锁后的补偿写，≤70 行）。它放在 `src/lib/`（第 5 版，修第 4 轮 publish-layer），只依赖 lib 内模块：`lib/ledger-tx.ts` 的 `tx`、`lib/ledger-store.ts` 的 `openLedger`、`lib/state-file.ts` 的 `writeJsonAtomicSync`、`lib/scheduler-lease-env.ts` 的 `assertSchedulerLease`、`lib/registry.ts` 的 `REGISTRY_PATH`。这样 `lib/state-backup.ts` 调它是 lib→lib，`manager/core.ts` 调它是 manager→lib，都符合 `CLAUDE.md` 第 5 条与 `scripts/guard/rules/deps.ts:62` 的 `lib-only-lib`，不需要依赖注入。目标路径与 ledger 路径由参数传入（`restoreSnapshot` 的 `dir` 参数照传，测试可以用临时目录），`noFollow` 等写选项透传。它要 import `ledger-tx`，须同步加入 `tests/ledger-migrate.test.ts` 的写入模块白名单）
 - **薄接线**：
   - `lib/order-tools.ts`：`ORDER_TOOLS` 增加 `accept_takeover` 定义（`{v, grantId}` 两个参数，≤15 行）；`isOrderTool` 由 `ORDER_TOOLS` 派生，无需另改。`channel-server.ts` 展开 `ORDER_TOOLS`，不改；
   - `bridge/order-tools.ts`：`HANDLERS` 注册 handler（≤10 行）；
   - `lib/caller-identity.ts` 与 `bridge/caller-identity.ts`：`credTag` 字段（≤8 行）；`order-tool-route.ts` 的 `VerifiedCall` 透传（≤4 行）；
   - `lib/caller-cred.ts`：`issueCallerCred` / `revokeCallerCreds` 先推进 ledger 代次再改文件（≤20 行）；`caller-cred-launch.ts` 传入 ledger 句柄或路径（≤6 行）；
-  - registry 文件发布收拢到 `publishRegistry`：`manager/core.ts` 的 `saveRegistry`（`:146-155`）与 `migrateWorkerToAgent`（`:119`）改调它（≤8 行），`lib/state-backup.ts` 的 `restoreSnapshot` 对 `registry.json` 转交给它（≤8 行）。四十多处 `saveRegistry` / `patchRegistryAgent` 调用点不改；
+  - registry 文件发布收拢到 `publishRegistry`：`manager/core.ts` 的 `saveRegistry`（`:146-155`）与 `migrateWorkerToAgent`（`:119`）改调它（≤8 行），`lib/state-backup.ts` 的 `restoreSnapshot` 对 `registry.json` 先解析，再带 `noFollow` 转交给它（≤8 行，lib→lib）。`saveRegistry` 保持 async 签名，内部同步调用发布函数，四十多处调用方不受影响。四十多处 `saveRegistry` / `patchRegistryAgent` 调用点不改；
   - registry SID 写路径改走 `commitRegistrySession`：`manager/set-session.ts`（≤6 行）、`manager.ts` 的 `cmdAdopt`、restart fork 自愈回写、create/resume 整条记录（各 ≤6 行）。调用方 `clear-rotation.ts`、`session-heal.ts`、`acp-host.ts` 已处理 `ok:false`，不改；
   - `ledger-store.ts` 迁移列表（≤3 行）；manager 命令（≤30 行）。
   - `lend-mcp-profile.ts` 的 `LEND_ORDER_TOOLS` **不加**这个工具：出借 worker 看不到也调不到（`lend-tools.ts:101`、`acp/tool-proxy.ts:45` 已按白名单拒）。
@@ -369,8 +375,13 @@
   - 授予后凭据被重新签发；迁移前启动、没有代次行或代次行 `sessionId` 为 NULL 的会话；
   - SID 轮转：授予之后、接受之前经真实 `cmdSetSession`（`/clear` 路径）把 registry 改成 SID-b，接受被拒；`commitRegistrySession` 第 1 步已提交、registry 尚未写（注入暂停），bridge 读到旧 SID-a，接受事务内与代次行 SID-b 不等被拒；第 1 步注入失败时 `set-session` 返回 `ok:false` 且 registry 不变；
   - 过时快照整份写回（复现第 3 轮 sid-rotate）：临时 registry 加临时 ledger。先用真实 `loadRegistry` 取得 SID-a 快照，再经真实 `commitRegistrySession`（`cmdSetSession`）轮转到 SID-b，然后用这份旧快照调真实 `saveRegistry`（以及真实 `cmdAgentLabel` 的同形交错）。断言 registry 文件的 SID 仍是 SID-b，其他字段按最后写者生效。之后对同一 agent 跑真实 `resolveCallerIdentity`，得到的 SID 是 SID-b，与代次行一致。对照：绕开 `publishRegistry` 直接写文件会复现审查观测到的 `acceptedSID=sid-b`、`currentCallerSID=sid-a`，守卫 ② 必须对这种写法报红；
-  - 跨进程交错：两个子进程，一个在持有 ledger 写锁时执行 `commitRegistrySession`（注入暂停），另一个执行旧快照的 `saveRegistry`。后者被写锁挡住，直到前者 COMMIT 才发布，最终 SID 是 SID-b；交换启动顺序，结果相同；
-  - `commitRegistrySession` 在 `rename` 后注入 COMMIT 失败：返回 `ok:false`，文件恢复原内容；恢复也注入失败时，下一次任意 `saveRegistry` 都会把 SID 收敛回代次行的值；窗口内接受被拒；
+  - 跨进程交错：两个子进程，一个在 T-pub 持有 ledger 写锁时注入暂停，另一个执行旧快照的 `saveRegistry`。后者被写锁挡住，直到前者 COMMIT 才发布，最终 SID 是 SID-b；交换启动顺序，结果相同；
+  - T-rot 注入 COMMIT 失败（用延迟外键约束，让事务回调执行完、只在 COMMIT 时失败，沿用第 4 轮审查探针的形状）：断言 `inTransaction=false`，代次行仍是 SID-a，registry 文件逐字节不变，返回 `ok:false`。随后真实 `resolveCallerIdentity` 报 SID-a，按设计判据提交的绑定对这次真实调用 `bindingAllows` 为真；
+  - 已接受（SID-a，`accessEpoch=e`）之后 T-rot 成功，T-pub 在 `rename` 后注入 COMMIT 失败，重试也注入失败：断言文件 SID 是已提交的 SID-b，`publishedEpoch=e < epoch=e+1`；此时执行 T-COMMIT 回滚，零新绑定；以 SID-b 新开的接受也因阻断状态被拒。一次成功的 T-pub 之后 `publishedEpoch=epoch`，PM 按 SID-b 重新授予可以走通；
+  - 已接受之后 T-rot 成功，T-pub 执行前进程退出（kill 子进程）：同上，T-COMMIT 回滚；manager 启动收敛后阻断解除；
+  - COMMIT 失败释放锁后别的连接先发布：进程 X 的 T-pub 在 `rename` 后注入 COMMIT 失败，锁释放后进程 Y 立刻完成另一次 T-rot（SID-c）与 T-pub。断言 X 不再写文件（实现里没有补偿写），文件最终为 SID-c、`publishedEpoch=epoch`，Y 的发布没有被旧内容覆盖；
+  - 凭据在 SID 发布未完成时换代：T-rot 已提交、T-pub 未完成时签发新凭据，断言 `publishedEpoch` 仍小于 `epoch`，接受仍被拒；
+  - 守卫：`registry-publish.ts` 的失败分支里不得有文件写入（静态断言 `catch` 块内没有 `writeJson*` / `writeText*` / `rename`）；
   - ledger 写锁超时：`saveRegistry` 抛错，registry 文件逐字节不变（不降级直写）；
   - 静态守卫：① `src/` 中不经 `commitRegistrySession` 给 registry agent 赋 `sessionId` 即红；② 不经 `publishRegistry` 写 registry 文件（含 `state-backup` 恢复）即红；
   - 家族：凭据登记的 runtime 映射、registry 当前 runtime 映射、`to.family` 任一不等（含 `pi` 映射为 null）；body 里自报 `family`；
