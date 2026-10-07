@@ -32,7 +32,8 @@ function planOf(events: readonly LedgerEvent[], intent: SchedulerIntent): Ledger
   const plan = events.find((e) => e.seq === intent.eventSeq);
   if (!plan || plan.kind !== "scheduler" || plan.actor !== "scheduler" || plan.data.op !== "plan" || plan.data.id !== intent.id ||
     plan.data.action !== "merge" || plan.dedupKey !== `scheduler:${intent.id}` || typeof plan.data.template !== "string" ||
-    plan.data.version !== intent.templateVersion) return;
+    plan.data.version !== intent.templateVersion || plan.data.specRev !== intent.specRev || plan.data.head !== intent.head ||
+    plan.data.node !== intent.node || plan.data.causalSeq !== intent.causalSeq || plan.data.taskRev !== intent.taskRev) return;
   return plan;
 }
 
@@ -84,10 +85,19 @@ function pendingCancellation(task: LedgerTask, events: readonly LedgerEvent[], i
   return handedBack(events, intent, pause, pause.seq) ? pause : undefined;
 }
 
+/**
+ * The cancellation writer checks scheduler/PM/master/owner and emits settle + terminal in one transaction. Only its
+ * adjacent, same-actor settlement's manual marker proves a human writer; arbitrary non-scheduler prose cannot do so.
+ */
+function cancellationWriter(terminal: LedgerEvent, settled: LedgerEvent): boolean {
+  return terminal.actor === settled.actor && terminal.ts === settled.ts && settled.seq + 1 === terminal.seq &&
+    (terminal.actor === "scheduler" ? settled.data.manual === undefined : settled.data.manual === true);
+}
+
 /** Only the journal's terminal cancellation of a paused, unsent merge qualifies; receipt prose is not authority. */
 function pausedCancellation(task: LedgerTask, events: readonly LedgerEvent[], intent: SchedulerIntent): LedgerEvent | undefined {
   const terminal = events.findLast((e) => e.kind === "scheduler" && e.data.op === "merge_phase" && e.data.intentId === intent.id);
-  if (!terminal || terminal.actor !== "scheduler" || terminal.dedupKey !== `scheduler:${intent.id}:merge:cancelled` ||
+  if (!terminal || terminal.dedupKey !== `scheduler:${intent.id}:merge:cancelled` ||
     terminal.data.to !== "resolved" || terminal.data.outcome !== "cancelled" ||
     !["ready", "updating", "await_ci"].includes(String(terminal.data.from))) return;
   const own = events.filter((e) => e.seq >= intent.eventSeq && e.seq < terminal.seq);
@@ -98,13 +108,14 @@ function pausedCancellation(task: LedgerTask, events: readonly LedgerEvent[], in
   if (phases.some((e) => e.actor !== "scheduler" || (e !== ready && !["updating", "await_ci"].includes(String(e.data.to)))) ||
     (phases.at(-1)?.data.to ?? "ready") !== terminal.data.from) return;
   const settled = own.at(-1);
-  if (!settled || settled.kind !== "scheduler" || settled.actor !== "scheduler" || settled.data.op !== "settle" ||
+  if (!settled || settled.kind !== "scheduler" || !cancellationWriter(terminal, settled) || settled.data.op !== "settle" ||
     settled.dedupKey !== `scheduler:${intent.id}:cancelled` || settled.data.id !== intent.id ||
-    settled.data.from !== "submitted" || settled.data.to !== "cancelled" || settled.seq + 1 !== terminal.seq) return;
+    settled.data.from !== "submitted" || settled.data.to !== "cancelled") return;
   const plan = planOf(events, intent);
   if (!plan || !enteredThisRound(task, events, intent)) return;
   const pause = own.findLast(modeEvent);
   if (!pmPause(pause, intent, plan) || !handedBack(events, intent, pause, terminal.seq)) return;
+  if (terminal.actor !== "scheduler" && events.some((e) => e.seq > pause.seq && (e.kind === "task" || e.kind === "review"))) return;
   let head = intent.head;
   for (const c of own.filter((e) => e.kind === "scheduler" && e.data.op === "review_carry" && e.data.intentId === intent.id)) {
     const paired = phases.some((e) => e.seq === c.seq + 1 && e.data.carrySeq === c.seq && e.data.to === "await_ci");
