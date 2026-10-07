@@ -36,6 +36,7 @@ import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
 import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 import { lifecycleStep } from "./agent-lifecycle-deps.js";
+import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -70,6 +71,7 @@ export interface PassOpts {
   /** CFG's recovery policy read (manualMergeQueue key for the manual merge queue); default the recovery-policy.json reader. */
   recoveryPolicy?: RecoveryPolicyPort;
   lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
+  lockYield?: typeof lockYieldStep; // 停滞卡让锁（RLOCK2，scheduler-lock-yield-deps.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -147,6 +149,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
         const deps = supervising ? withSupervisorHold(base, db) : base;
+        failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
         const autoPace = pace.phase();
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
