@@ -222,7 +222,8 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
   const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap;
   const pe = epoch || legacy ? null : poolRefusalEpoch(s); // MODELXP2：池单审查被拒 → 按 epoch 的去处换家族重挂一次，带豁免
-  if (pe && (pe.redo || !pe.to || pe.to.machine === "local")) return escalate("model_safety_hold", `model_safety_hold：池单 ${String(pe.epoch.data.orderId)} 审查遭提供方策略拒审（台账 #${pe.epoch.seq}），${pe.redo ? "换家族重挂已用过" : pe.to ? "去处是本机（不改本机绑定）" : "另一家族暂无池位"}，交 PM / owner`);
+  const hold = pe && (pe.redo ? "换家族重挂已用过" : !pe.to ? "另一家族暂无池位" : pe.to.machine === "local" ? "去处是本机（不改本机绑定）" : null);
+  if (pe && hold) return escalate("model_safety_hold", `model_safety_hold：池单 ${String(pe.epoch.data.orderId)} 审查遭策略拒审（#${pe.epoch.seq}），${hold}，交 PM / owner`);
   if (pe) return makeIntent(s, node, "review", `${String(pe.epoch.data.exemption)}：${poolEpochTag(pe.epoch.seq)}，换 ${pe.to!.machine} 的 ${pe.to!.family} 独立审一次`,
     [taskResource(s)], { recipient: `${POOL_RECIPIENT}${pe.to!.machine}`, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
   const pool = epoch || legacy ? null : reviewPlacement(s, latestSeq(s.events, s.task));

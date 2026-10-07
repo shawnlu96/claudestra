@@ -19,6 +19,7 @@ import { failureReason } from "../src/lib/lend-health.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { poolReviewRefusal } from "../src/lib/pool-review-proof.js";
 import { reviewGate } from "../src/lib/review-main-carry-manual.js";
+import { approvalLapse } from "../src/lib/scheduler-review-swap.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
@@ -120,7 +121,7 @@ async function exemptPass() {
     let merge: string | null = null, carry: string | null = null;
     try { mergeReviewProof(f.db, task(), wf); } catch (e) { merge = (e as Error).message; }
     try { reviewGate(f.db, task(), Date.now()); } catch (e) { carry = (e as Error).message; }
-    return { proof, merge, carry, lapse: poolExemptLapse(f.db, task(), facts()) };
+    return { proof, merge, carry, lapse: poolExemptLapse(f.db, task(), facts(), approvalLapse) };
   };
   /** 改一条事件 / 行，跑完还原 */
   const patchEvent = (seq: number, path: string, value: unknown) => {

@@ -29,14 +29,14 @@ import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { approvalLapse } from "./scheduler-review-swap.js";
 import { poolExemptionText } from "./ledger-pool-refusal-gate.js";
 
-export const POOL_REFUSAL_CANCEL = "provider_policy_refusal";
-export const POOL_EPOCH_OP = "pool_refusal_epoch";
-export const poolEpochKey = (orderId: string): string => `pool-refusal-epoch:${orderId}`;
+const POOL_REFUSAL_CANCEL = "provider_policy_refusal";
+const POOL_EPOCH_OP = "pool_refusal_epoch";
+const poolEpochKey = (orderId: string): string => `pool-refusal-epoch:${orderId}`;
 const CLASSES: readonly LenderFailureClass[] = ["provider_policy", "usage", "auth", "network", "other"];
 const LABEL = { review: "审查", write: "开工", fix: "修复" } as const;
 
 /** release 带来的 failure 字段：类别枚举、会话、失败时刻都合格才算有；否则 null（= 旧对端 / 没有类别） */
-export function failureField(v: unknown): LenderFailure | null {
+function failureField(v: unknown): LenderFailure | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const f = v as Record<string, unknown>;
   if (!CLASSES.includes(f.class as LenderFailureClass) || typeof f.sessionId !== "string" || !f.sessionId || f.sessionId.length > 200 ||
@@ -73,7 +73,7 @@ function exemptOrder(db: Database, o: LendOrder): boolean {
 }
 
 /** 告知键：沿用 MODELXP1，用 release 原因文本分 cyber_policy / usage_policy（failureReason 对 cyber 写「内容策略拦截」）；分不出 = usage_policy */
-export const noticeKind = (detail: string): "cyber_policy" | "usage_policy" =>
+const noticeKind = (detail: string): "cyber_policy" | "usage_policy" =>
   detail.includes("内容策略拦截") || isCyberPolicy(detail) ? "cyber_policy" : "usage_policy";
 
 const cardNow = (t: LedgerTask): CardNow => ({ stage: t.stage, headSHA: t.headSHA, specRev: t.specRev, round: t.round });

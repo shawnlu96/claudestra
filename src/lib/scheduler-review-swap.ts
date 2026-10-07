@@ -292,7 +292,7 @@ export function exemptFacts(events: readonly LedgerEvent[], task: Window, f: Ver
  * verdict and the card) whose approval id is still the owner's current, unrevoked approval. Anything else stays refused.
  */
 export function exemptVerdict(db: Database, task: LedgerTask, f: VerdictFacts): boolean {
-  if (poolExemptVerdict(db, task, f)) return true; // MODELXP2：池单拒审豁免（ledger-pool-refusal-gate.ts，与池审查回执同一谓词）；不成立则下面原样
+  if (poolExemptVerdict(db, task, f, approvalLapse)) return true; // MODELXP2：池单拒审豁免（ledger-pool-refusal-gate.ts，与池审查回执同一谓词）；不成立则下面原样
   const events = listEvents(db, { project: task.project, target: task.id });
   if (!exemptFacts(events, task, f)) return false;
   const want = exemption(refusalEpoch(events, task)!)!.approvalId;

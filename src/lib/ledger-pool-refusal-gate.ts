@@ -11,7 +11,6 @@ import type { Database } from "bun:sqlite";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
-import { approvalLapse } from "./scheduler-review-swap.js";
 
 const EPOCH_OP = "pool_refusal_epoch";
 /** = EXEMPTION_TEXT（scheduler-model-outcome.ts）；那边经 scheduler-review-swap.ts 引回本模块，这里不 import 它免成环（同 review-swap 的 EXEMPT_MARK） */
@@ -24,7 +23,7 @@ export const poolExemptionText = (approvalId: string): string => `${EXEMPTION_TE
 export const poolEpochTag = (seq: number): string => `池单拒审 epoch #${seq}`;
 
 /** 本窗口（head / specRev / 轮次都与卡当前一致）最新的池单审查拒审 epoch；不一致 = 不认 */
-export function windowPoolEpoch(events: readonly LedgerEvent[], task: Window): LedgerEvent | null {
+function windowPoolEpoch(events: readonly LedgerEvent[], task: Window): LedgerEvent | null {
   const e = events.findLast((x) => x.actor === "scheduler" && x.kind === "scheduler" && x.data.op === EPOCH_OP && x.data.step === "review");
   return e && e.data.head === task.headSHA && e.data.specRev === task.specRev && e.data.round === task.round ? e : null;
 }
@@ -51,7 +50,9 @@ interface VerdictFacts { eventSeq: number; head: string | null; round: number; r
 interface Order { orderId: string; taskId: string; peer: string; family: string; step: string; head: string; specRev: number; round: number; text: string }
 
 /** 为什么这条结论不能按池单拒审豁免放行；null = 全部满足 */
-export function poolExemptLapse(db: Database, at: GateTask, f: VerdictFacts): string | null {
+/** lapse：scheduler-review-swap.ts approvalLapse，由调用方注入（那边引本模块，这里不反向 import） */
+type Lapse = (db: Database, task: LedgerTask, approvalId: unknown) => string | null;
+export function poolExemptLapse(db: Database, at: GateTask, f: VerdictFacts, approvalLapse: Lapse): string | null {
   const row = getTask(db, at.id);
   if (!row) return "没有任务";
   const task = { ...row, headSHA: at.headSHA, specRev: at.specRev, round: at.round }; // 闸给的窗口（沿用审查时 head 是审查的那个 head）
@@ -80,4 +81,4 @@ export function poolExemptLapse(db: Database, at: GateTask, f: VerdictFacts): st
 }
 
 /** 两道闸调用的谓词 */
-export const poolExemptVerdict = (db: Database, task: GateTask, facts: VerdictFacts): boolean => poolExemptLapse(db, task, facts) === null;
+export const poolExemptVerdict = (db: Database, task: GateTask, facts: VerdictFacts, lapse: Lapse): boolean => poolExemptLapse(db, task, facts, lapse) === null;
