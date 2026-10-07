@@ -18,6 +18,7 @@ import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
+import { handedInStay, handoffGateWait, type HandoffGateFacts } from "./handoff-gate-plan.js";
 
 export interface WorkerRef {
   agent: string;
@@ -70,6 +71,8 @@ export interface PlannerSnapshot {
   strayPoolOrders?: readonly string[];
   /** Last reviewed head → this round's head, from SCOPE_ROUND on (review-converge-scope.ts); absent = no scope demotion. */
   fixDiff?: FixDiff | null;
+  /** Handoff hold + feature batch facts, read for a card in `merge` (handoff-gate.ts); absent = no gate. */
+  handoffGate?: HandoffGateFacts | null;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -343,6 +346,8 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     if (cancelled && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;
+    const gate = s.handoffGate && !handedInStay(s.events) ? handoffGateWait(s.handoffGate) : null; // a recorded handoff is followed, never recalled
+    if (gate) return wait(gate.code, gate.reason);
   }
   if (node.gate === "pm_restate") {
     const approved = s.events.findLast((e) => e.kind === "decision" && e.seq > latestSeq(s.events, s.task) &&

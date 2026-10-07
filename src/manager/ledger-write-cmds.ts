@@ -31,6 +31,7 @@ import { witnessMismatch } from "../lib/caller-witness.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
+import { HANDOFF_HOLD_CMDS } from "./ledger-handoff-hold-cmds.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -382,4 +383,5 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   rollback: { valued: ["to", "text", "dedup"], usage: "rollback <task> [--to <version>] [--text]", run: rollback },
   freeze: { valued: ["reason", "project", "dedup"], usage: "freeze --reason <原因>", run: freeze(true) },
   unfreeze: { valued: ["text", "project", "dedup"], usage: "unfreeze [--text]", run: freeze(false) },
+  ...HANDOFF_HOLD_CMDS,
 };

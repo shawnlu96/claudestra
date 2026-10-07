@@ -14,6 +14,7 @@ import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from 
 import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { recordFeatureRegress } from "./handoff-gate-notice.js";
 
 /**
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
@@ -180,6 +181,17 @@ function narrowAfterHandoff(c: HandoffCard<unknown>, files: PrFiles | null | und
   }
 }
 
+/** A sibling of this card's feature batch fell back after the handoff: PM hears once, the handoff itself stays (HDG-1 #7). */
+async function regressNotice(c: HandoffCard<unknown>): Promise<void> {
+  let text: string | null;
+  try { text = recordFeatureRegress(c.db, c.task, c.deps.now()); } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    console.error(`⚠️ [scheduler] ${c.task.id} 同批退回的升级没记上，下轮再试：${(e as Error).message}`);
+    return;
+  }
+  if (text) await tell(c, text);
+}
+
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
 export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c;
@@ -188,6 +200,7 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const follow = handoffOf(c.db, task), handed = follow?.evidence;
   // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge
   if (handed && handed.pr !== task.pr) return c.escalate(`卡上的 PR 已不是交接的那个（${handed.pr} → ${task.pr}），交接证据不覆盖新 PR`);
+  if (follow) await regressNotice(c);
   const seen = polled.get(c.db) ?? polled.set(c.db, new Map()).get(c.db)!;
   const last = seen.get(task.id);
   if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS) return c.out("waiting", "已交仓库方合并，等 PR 结果");

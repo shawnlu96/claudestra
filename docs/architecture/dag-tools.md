@@ -111,3 +111,30 @@ Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes 
 UI specs need exact non-empty ## 复用对象 / ## 对照基准; no reuse or a new interface requires an owner-approved authorize ask for this project/card (src/lib/spec-lint.ts).
 New DAG writes opt into PAGEOK (src/lib/ui-acceptance.ts): all UI nodes need verified whole-page acceptance; late UI needs rewrite; changed UI resets acceptance; cancelled/spec checks can rebind.
 Autostart/start_node share the spec gate; UI reviews include 对照基准. dag-bind keeps its version; historical DAGs stay exempt. PM checks relay + owner device + production data against the baseline.
+
+## Handoff gates (交接闸, HDG-1)
+
+Two machine-readable gates sit between "review passed, card in `merge`" and the step out of `merge` — the repository-owner handoff
+(`merge_handoff`, mergeHandoff projects) or the local merge intent. The planner waits instead of planning (`scheduler-plan.ts`
+`stageStep`, facts from `lib/handoff-gate.ts`, pure judgement in `lib/handoff-gate-plan.ts`), and `recordMergeHandoff` rechecks
+both inside its write transaction.
+
+- **Project handoff hold** — `ledger handoff-hold <project> on|off --reason <文本>` (PM / master / owner; `--reason` required for
+  `on`). The project meta keeps `handoffHold {on, reason, by, since}`, visible in `ledger show`. While on, reviewed cards stay in
+  `merge` with wait code `handoff_hold` (the reason is in the text); restate / build / fix / review keep dispatching. That is the
+  difference from `ledger freeze` (`queueFrozen`), which stops new build / fix work too. Turning it off needs nothing per card:
+  the next tick plans the handoff again.
+- **Feature batch** — a card bound to a node of its feature's current DAG version waits (`feature_siblings_pending`, naming each
+  node key and card) until every node of its batch is either in `merge` reviewed at its current head with no P0 / P1 (an auto card
+  by the same proof as its own merge, a manual one by its structured verdict), already handed over in this merge stay, finished
+  (`live` / `verified` / `done`), cancelled, or no longer in the DAG. Which nodes form a batch is one pure function,
+  `batchWith`: since a successor starts only once its dependency is live (`docs/design/feature-dag.md`), a node something depends
+  on goes alone, and every other node goes with all nodes it has no dependency path to. Within what is ready, a dependency goes
+  first (`feature_handoff_order`). The handoff evidence carries `feature {id, version, batch: ["<card>@<head>", …]}`, dependencies
+  first. Unbound cards and one-node DAGs behave as before.
+- **Both together** — the stricter wins: the card waits while either holds, the text gives both reasons.
+- **Never recalled** — a handoff (or merge intent) already submitted is not taken back by either gate: a recorded handoff is
+  followed to the owner's merge as before. If part of a batch is out and a sibling of it falls back (to fix / review, or a node is
+  added), the rest keep waiting and PM gets one `escalate` (`op: feature_handoff_regress`, listing the cards handed out) per
+  regression, raised from the handed card's PR polling (`lib/handoff-gate-notice.ts`). Once every handed card has landed, no
+  further notice is raised: the fallen-back card goes through its own fix / review flow.

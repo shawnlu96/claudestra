@@ -16,6 +16,8 @@ import { cardFileLocks, coveredBy, replaceCardFileLocks } from "./ledger-schedul
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
+import { handoffGateFacts } from "./handoff-gate.js";
+import { featureBatch, handoffGateWait, mergeEntry } from "./handoff-gate-plan.js";
 
 /**
  * What goes with the PR (field list and meaning in the doc). Grouped by kind of proof so a later one (CI, owner acceptance,
@@ -31,6 +33,8 @@ interface HandoffEvidence {
   /** Family that wrote the head (a peer's delivery counts as its own family). */
   authorFamily: AuthorFamily;
   review: { round: number; verdict: "pass" | "changes"; reviewerFamily: AuthorFamily; reportPath: string; p2: number; reviewSeq: number };
+  /** A card on a feature DAG node goes out with its batch: every node in `merge` as card@head, dependencies first (handoff-gate.ts). */
+  feature?: { id: string; version: number; batch: string[] };
 }
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -38,9 +42,6 @@ const CARRY_OP = "merge_handoff_carry";
 /** How a carry was proved (scheduler-main-merge-carry.ts): the new tree is git's clean merge, or the net diff is byte-identical. */
 const CARRY_BASIS = ["auto-merge", "net-diff"] as const;
 const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/;
-
-/** The card's latest entry into `merge`: a handoff belongs to one stay there, a card that comes back hands over again. */
-const mergeEntry = (events: readonly LedgerEvent[]): number => events.findLast((e) => e.kind === "stage" && e.data.to === "merge")?.seq ?? 0;
 
 /** This stay's handoff and the PR head it follows now: the handed head, moved on by each carry recorded after it. */
 export interface HandoffFollow { event: LedgerEvent; evidence: HandoffEvidence; head: string; carrySeq: number | null }
@@ -80,6 +81,8 @@ export function recordMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId:
     const prev = getEventByDedup(db, key);
     if (prev) return { event: prev, duplicate: true };
     if (getMeta(db, task.project).queueFrozen.frozen) throw new LedgerError("conflict", "项目合并队列已冻结");
+    const gates = handoffGateFacts(db, task), held = handoffGateWait(gates); // a replay of a recorded handoff returned above
+    if (held) throw new LedgerError("conflict", `${held.code}：${held.reason}`);
     const now = ctx.now ?? Date.now();
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) throw new LedgerError("conflict", ui);
@@ -88,7 +91,8 @@ export function recordMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId:
     const evidence: HandoffEvidence = { v: 1, pr: input.pr, head: input.head, specRev: task.specRev, template: workflow.template,
       authorFamily: remoteHeadFamily(db, task) ?? workflow.authorFamily,
       review: { round: review.round, verdict: review.verdict as "pass" | "changes", reviewerFamily: review.reviewerFamily, reportPath: review.reportPath,
-        p2: review.findings.filter((f) => f.severity === "P2").length, reviewSeq: review.eventSeq } };
+        p2: review.findings.filter((f) => f.severity === "P2").length, reviewSeq: review.eventSeq },
+      ...(gates.feature ? { feature: { id: gates.feature.featureId, version: gates.feature.version, batch: featureBatch(gates.feature) } } : {}) };
     const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
       text: `合并交给仓库方：${input.pr} @ ${input.head.slice(0, 12)}`, data: { op: "merge_handoff", evidence } }, true);
     return { event, duplicate: false };

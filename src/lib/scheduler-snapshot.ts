@@ -20,6 +20,7 @@ import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
 import { ownerVisualOf, projectUiGate } from "./scheduler-ui-gate.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { newLocalWriteRoom, returnedFix } from "./scheduler-slot-hold.js";
+import { handoffGateFacts } from "./handoff-gate.js";
 
 export interface SnapshotOpts {
   registry: readonly RegistryAgent[];
@@ -101,5 +102,6 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
     author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
     pmUiGate: projectPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events),
+    handoffGate: task.stage === "merge" ? handoffGateFacts(db, task) : null,
   };
 }

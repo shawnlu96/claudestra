@@ -357,6 +357,14 @@ export interface QueueFrozen {
   since: number | null;
 }
 
+/** 暂停交接（handoff-gate.ts）：开着时审过的卡停在 merge，build / fix / review 照常 */
+export interface HandoffHold {
+  on: boolean;
+  reason: string;
+  by: string | null;
+  since: number | null;
+}
+
 export interface LedgerMeta {
   activePm?: string;
   /** 项目 PM 名单；只有 owner 能设 */
@@ -364,6 +372,7 @@ export interface LedgerMeta {
   /** 规格卡 / 报告所在目录；只有 owner 能设 */
   docsDir: string | null;
   queueFrozen: QueueFrozen;
+  handoffHold: HandoffHold;
   team: TeamConfig | null;
 }
 
@@ -378,8 +387,14 @@ export function getMeta(db: Database, project: string): LedgerMeta {
     pms: Array.isArray(pms) ? pms.filter((p): p is string => typeof p === "string") : [],
     docsDir: typeof docsDir === "string" ? docsDir : null,
     queueFrozen: frozen ?? { frozen: false, reason: "", since: null },
+    handoffHold: (kv.get("handoffHold") as HandoffHold | undefined) ?? { on: false, reason: "", by: null, since: null },
     team: toTeam(kv.get("team")),
   };
+}
+
+export function putHandoffHold(db: Database, project: string, hold: HandoffHold): void {
+  db.prepare("INSERT INTO meta (project, key, value) VALUES (?, 'handoffHold', ?) ON CONFLICT (project, key) DO UPDATE SET value = excluded.value")
+    .run(project, JSON.stringify(hold));
 }
 
 /** 各项目的 PM 名单（只列设过 pms 的项目）；fleet 按它认 PM 与其管辖的项目 */
