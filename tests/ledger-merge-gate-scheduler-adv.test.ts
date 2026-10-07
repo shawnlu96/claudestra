@@ -128,10 +128,16 @@ describe("回放 ACPT-3（10-07 真实事件，只读导出）", () => {
     expect(owesAdversarial(policy, other, 1)).toBe("unknown");
   });
 
-  test("sameFamily 没记时按作者家族（workflow authorFamily）比 reviewerFamily", () => {
-    const noFlag = (fam: string) => evs.map((e) => (e.kind === "review" ? { ...e, data: { ...e.data, sameFamily: null, reviewerFamily: fam } } : e));
-    expect(owesAdversarial(policy, noFlag("codex"), 1)).toBe(false);
-    expect(owesAdversarial(policy, noFlag("claude"), 1)).toBe("unknown");
+  test("sameFamily 没记 / null 不按家族重建（作者换族、事后改 workflow 都改不了结论）：仍按旧判定", () => {
+    const deliverSeq = (evs.find((e) => e.kind === "deliver") as LedgerEvent).seq;
+    const at = (seq: number, kind: LedgerEvent["kind"], data: Record<string, unknown>) => ({ ...evs[0], seq, kind, data }) as LedgerEvent;
+    const fam = (reviewerFamily: string, ...extra: LedgerEvent[]) =>
+      [...evs.map((e) => (e.kind === "review" ? { ...e, data: { ...e.data, sameFamily: null, reviewerFamily } } : e)), ...extra].sort((x, y) => x.seq - y.seq);
+    // 复现 A：交付前作者换成 codex（note local_author），codex 审查员仍是同家族
+    expect(owesAdversarial(policy, fam("codex", at(deliverSeq - 1, "note", { op: "local_author", family: "codex", previousFamily: "claude" })), 1)).toBe("unknown");
+    // 复现 B：review 之后才把 workflow authorFamily 改成 codex，不能倒改 claude 审查员那条结论
+    expect(owesAdversarial(policy, fam("claude", at(99_999, "scheduler", { op: "workflow", authorFamily: "codex" })), 1)).toBe("unknown");
+    expect(owesAdversarial(policy, fam("codex"), 1)).toBe("unknown");
   });
 
   test("巡检：pass 之后 31 分钟不再报 review_no_reviewer；去掉单号照旧报「说不清」", () => {

@@ -104,24 +104,16 @@ export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]
   return { kind: dispatchKindFor(events, review.seq, review.data.round), verdict, p0: num(review.data.p0), p1: num(review.data.p1) };
 }
 
-/** 作者家族：最近一次流程设置（scheduler workflow 事件）记的 authorFamily；没记为 null */
-const authorFamily = (events: readonly LedgerEvent[]): string | null => {
-  const w = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow" && typeof e.data.authorFamily === "string");
-  return w ? String(w.data.authorFamily) : null;
-};
-
 /**
  * 调度器派的跨族对抗审查单交回的结论（自动卡不写 dispatch 事件）：data.orderId 是本轮的 adversarial_review 单、
- * 审查员与作者不同家族（sameFamily=false；没记或记 null 时比 reviewerFamily 与作者家族），且审的 head 就是当时卡上的 head。
- * 同家族豁免轮（sameFamily=true）不算，否则 MODELX 豁免会被当成跨族对抗式放进 merge（tests/ledger-handler.test.ts）
+ * 写入时记下 sameFamily=false（审查员与作者不同家族），且审的 head 就是当时卡上的 head。
+ * 没记 / 记 null 不事后按家族重建：作者家族会被换族（note local_author）、之后的 workflow 改写，重建会把同家族判成跨族；
+ * 同家族豁免轮（sameFamily=true）也不算（tests/ledger-merge-gate-scheduler-adv.test.ts）
  */
 function schedulerAdversarial(e: LedgerEvent, events: readonly LedgerEvent[]): boolean {
   const m = typeof e.data.orderId === "string" ? /:r(\d+):adversarial_review:a\d+$/.exec(e.data.orderId) : null;
-  if (!m || Number(m[1]) !== e.data.round) return false;
-  const { sameFamily, reviewerFamily } = e.data;
-  const author = authorFamily(events);
-  const cross = sameFamily === false || (sameFamily == null && typeof reviewerFamily === "string" && !!author && reviewerFamily !== author);
-  return cross && typeof e.data.head === "string" && !!e.data.head && sameHead(e.data.head, headAt(events, e.seq));
+  if (!m || Number(m[1]) !== e.data.round || e.data.sameFamily !== false) return false;
+  return typeof e.data.head === "string" && !!e.data.head && sameHead(e.data.head, headAt(events, e.seq));
 }
 
 /**
