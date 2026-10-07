@@ -4,6 +4,9 @@ import type {
   V2ProjectOperation, V2ProjectInvite, V2ProjectDisplay, V2ProjectJoinGrant,
   V2ProjectsExpectedScope, V2ProjectsRequests, V2ProjectsSuccesses, V2ProjectsEndpoint,
 } from "./shared-ledger-contract-v2-projects-types.js";
+import type {
+  V2TeamRecord, V2TeamDirectoryMember, V2ProjectsTeamEndpoint, V2ProjectsTeamRequests, V2ProjectsTeamSuccesses,
+} from "./shared-ledger-contract-v2-projects-types.js";
 
 /** Fresh synthetic JSON for public consumers. No state, network, real invitations, keys or bearer issuance.
  * The recognizable repeated fake secret exists only in the returned objects, never in errors or operation queries.
@@ -87,4 +90,73 @@ export function createV2ProjectsFixtures() {
   ];
   return { identity, project, member, teamMember, person, service, operation, creatorInvite, invite, display, grant, operationScope,
     requests, responses, scopes, errors, invalidResponses };
+}
+
+/** Synthetic team-read samples (N9K) for the center and bridge: no real peer names or ids, no state or network.
+ * `invalidRequests`/`invalidResponses` must all fail closed; `invalidScopes` must fail against the valid `team` response.
+ */
+export function createV2ProjectsTeamFixtures() {
+  const team = { centerId: `center-${"1".repeat(32)}`, teamId: "team-demo" };
+  const record: V2TeamRecord = { ...team, code: "team-demo", name: "合成团队", rev: 1 };
+  const unnamed: V2TeamRecord = { ...record, name: null };
+  const self: V2TeamDirectoryMember = { ...team, personId: "person-demo", code: "demo-person", teamRole: "member" };
+  const owner: V2TeamDirectoryMember = { ...team, personId: "person-owner", code: "demo-owner", teamRole: "owner" };
+  const requests: V2ProjectsTeamRequests = { team, teamUpdate: { ...team, rev: 1, name: "合成团队改名" } };
+  const success = { ok: true, v: 2 } as const;
+  const responses: V2ProjectsTeamSuccesses = {
+    team: { ...success, team: record, self, members: [owner, self] },
+    teamUpdate: { ...success, team: { ...record, name: requests.teamUpdate.name, rev: 2 } },
+  };
+  const scopes: Record<V2ProjectsTeamEndpoint, V2ProjectsExpectedScope> = {
+    team: { ...team, personId: self.personId }, teamUpdate: team,
+  };
+  const errors = {
+    forbidden: { ok: false, v: 2, error: "forbidden", message: "forbidden" },
+    notFound: { ok: false, v: 2, error: "not_found", message: "not_found" },
+    teamConflict: { ok: false, v: 2, error: "conflict", message: "conflict", current: responses.teamUpdate.team },
+  } as const;
+  const invalidRequests: { label: string; endpoint: V2ProjectsTeamEndpoint; body: unknown }[] = [
+    { label: "extra key", endpoint: "team", body: { ...team, projectId: "demo-b" } },
+    { label: "request teamRole", endpoint: "team", body: { ...team, teamRole: "owner" } },
+    { label: "request personId", endpoint: "team", body: { ...team, personId: self.personId } },
+    { label: "update teamRole", endpoint: "teamUpdate", body: { ...requests.teamUpdate, teamRole: "owner" } },
+    { label: "update personId", endpoint: "teamUpdate", body: { ...requests.teamUpdate, personId: self.personId } },
+    { label: "blank name", endpoint: "teamUpdate", body: { ...requests.teamUpdate, name: " \t\n" } },
+    { label: "empty name", endpoint: "teamUpdate", body: { ...requests.teamUpdate, name: "" } },
+    { label: "long name", endpoint: "teamUpdate", body: { ...requests.teamUpdate, name: "中".repeat(65) } },
+    { label: "missing rev", endpoint: "teamUpdate", body: { ...team, name: "合成团队改名" } },
+  ];
+  const invalidResponses: { label: string; endpoint: V2ProjectsTeamEndpoint; status: number; body: unknown }[] = [
+    { label: "extra key", endpoint: "team", status: 200, body: { ...responses.team, path: "/not/a/real/path" } },
+    { label: "extra member key", endpoint: "team", status: 200,
+      body: { ...responses.team, members: [owner, { ...self, status: "active" }] } },
+    { label: "self not in members", endpoint: "team", status: 200, body: { ...responses.team, members: [owner] } },
+    { label: "self differs from member row", endpoint: "team", status: 200,
+      body: { ...responses.team, members: [owner, { ...self, teamRole: "owner" }] } },
+    { label: "cross-team member", endpoint: "team", status: 200,
+      body: { ...responses.team, members: [{ ...owner, teamId: "other-team" }, self] } },
+    { label: "cross-center member", endpoint: "team", status: 200,
+      body: { ...responses.team, members: [{ ...owner, centerId: `center-${"2".repeat(32)}` }, self] } },
+    { label: "duplicate personId", endpoint: "team", status: 200,
+      body: { ...responses.team, members: [owner, self, { ...self, code: "demo-person-2" }] } },
+    { label: "invalid teamRole", endpoint: "team", status: 200,
+      body: { ...responses.team, self: { ...self, teamRole: "admin" }, members: [owner, { ...self, teamRole: "admin" }] } },
+    { label: "blank team name", endpoint: "team", status: 200, body: { ...responses.team, team: { ...record, name: "  " } } },
+    { label: "long team name", endpoint: "team", status: 200, body: { ...responses.team, team: { ...record, name: "中".repeat(65) } } },
+    { label: "other team record", endpoint: "teamUpdate", status: 200,
+      body: { ...responses.teamUpdate, team: { ...responses.teamUpdate.team, teamId: "other-team" } } },
+    { label: "noninteger revision", endpoint: "teamUpdate", status: 200,
+      body: { ...responses.teamUpdate, team: { ...responses.teamUpdate.team, rev: 1.5 } } },
+    { label: "wrong success status", endpoint: "teamUpdate", status: 201, body: responses.teamUpdate },
+    { label: "read conflict", endpoint: "team", status: 409, body: errors.teamConflict },
+    { label: "invalid conflict current", endpoint: "teamUpdate", status: 409, body: { ...errors.teamConflict, current: "untyped" } },
+    { label: "wrong error status", endpoint: "teamUpdate", status: 404, body: errors.forbidden },
+  ];
+  const invalidScopes: { label: string; scope: V2ProjectsExpectedScope }[] = [
+    { label: "missing personId", scope: team },
+    { label: "other personId", scope: { ...team, personId: owner.personId } },
+    { label: "other team", scope: { ...team, teamId: "other-team", personId: self.personId } },
+    { label: "project scope", scope: { ...team, projectId: "demo-b", personId: self.personId } },
+  ];
+  return { team, record, unnamed, self, owner, requests, responses, scopes, errors, invalidRequests, invalidResponses, invalidScopes };
 }
