@@ -325,6 +325,11 @@ export const ccStatsFold: StatsFoldFactory = ({ runtime, floor }) => {
 };
 
 const READ_CHUNK_BYTES = 2 * 1024 * 1024;
+/**
+ * 看起来没动过的文件，多久强制复核一次已读区间的哈希（只读不解析，不会冲高内存）。ctime 写入方改不回去，但粗粒度时间戳的
+ * 文件系统上同一刻度内的等长改写连 ctime 也看不出；这里给「看不出来」的情况封个顶，最多沿用旧数这么久。
+ */
+const REVERIFY_MS = 5 * 60_000;
 /** 多久没被问到的文件扔掉续读状态（/clear 换会话、agent 被 kill 后旧文件不再有人问） */
 const TAIL_IDLE_MS = 60 * 60_000;
 
@@ -338,6 +343,10 @@ interface TailState {
   /** 已读的最后一行没有换行（EOF 处完整的 JSON 已计入）：续写必须以换行开头，否则那行其实没写完 */
   openLine: boolean;
   mtimeMs: number;
+  /** 状态变化时间：任何写入 / 改 mtime 都会刷新它，写入方没法复原（mtime 可以被 utimes 复原） */
+  ctimeMs: number;
+  /** 上次核过已读区间哈希（或整窗加载）的时刻 */
+  verifiedAt: number;
   /** 出过结果的最高回溯下界：比它更早的用量已被折叠丢掉，窗口往前挪就得整窗重读 */
   floor: number;
   fold: StatsFold;
@@ -401,7 +410,7 @@ function firstByteAt(fd: number, pos: number): number {
  * ⚠ 不在遇到早于周界的记录时提前停：sidechain / tool_result 可能轻微乱序，提前停会少算。
  * 每次扩窗换一个新折叠从新起点顺读；读是分块的，峰值内存只有一块，不随窗口变大。
  */
-function loadTail(fd: number, path: string, size: number, floor: number, tailStartBytes: number): Omit<TailState, "ino" | "mtimeMs" | "usedAt"> {
+function loadTail(fd: number, path: string, size: number, floor: number, tailStartBytes: number): Omit<TailState, "ino" | "mtimeMs" | "ctimeMs" | "verifiedAt" | "usedAt"> {
   const runtime = runtimeForSessionPath(path);
   const factory = statsFoldFor(runtime) ?? ccStatsFold;
   for (let win = Math.max(1, tailStartBytes); ; win *= 4) {
@@ -418,8 +427,8 @@ function loadTail(fd: number, path: string, size: number, floor: number, tailSta
 
 /**
  * 一个会话文件的上下文 + 今日 + 本周。按 (inode, 已读区间, 已读区间的 sha256) 续读：
- *   大小、mtime 都没动 → 不读；变大且已读区间哈希不变（纯追加）→ 已读区间只算哈希（不解码不解析），新增字节才解析；
- *   截断 / 轮转 / 已读部分被改过 / 没变大而 mtime 变了 / 窗口往前挪 → 整窗重读。
+ *   大小、mtime、ctime 都没动 → 不读（每 5 分钟复核一次哈希）；变大且已读区间哈希不变（纯追加）→ 已读区间只算哈希
+ *   （不解码不解析），新增字节才解析；截断 / 轮转 / 已读部分被改过 / 没变大而 mtime 或 ctime 变了 / 窗口往前挪 → 整窗重读。
  * 原先每次调用都把每个文件的尾窗重读一遍（只有 5 秒桶缓存）：每个 Stop hook 的看板刷新要读全部 active agent，
  * 29 个 agent 一次 276MB，bridge 的分配器区每次冲高 300MB 再回落（BML-2，证据 ledger/reviews/BML-2-evidence.md）。
  */
@@ -438,23 +447,31 @@ export async function readFileStats(
     const st = fstatSync(fd); // 与读的是同一个打开的文件：open 与 stat 之间被轮转也对得上
     let s = tails.get(path);
     const same = s && s.ino === st.ino && st.size >= s.offset && floor >= s.floor;
-    // 变大就喂新增字节（不看 mtime：保留时间戳的写入、粗粒度时间戳都会让追加时 mtime 不动），喂之前先验已读区间的哈希，
-    // 前面任何一处被改都不算纯追加。没变大而 mtime 动了 = 原地改写（大小可以不变），整窗重读
+    // 变大就喂新增字节（不看时间戳：保留时间戳的写入、粗粒度时间戳都会让追加时 mtime 不动），喂之前先验已读区间的哈希，
+    // 前面任何一处被改都不算纯追加。没变大而 mtime / ctime 动了 = 原地改写（大小可以不变），整窗重读；
+    // 时间戳都没动但太久没核过，也验一次哈希（见 REVERIFY_MS）
     const grew = same && st.size > s!.offset;
-    const rewritten = same && !grew && st.mtimeMs !== s!.mtimeMs;
-    const hasher = grew ? hashRange(fd, s!.start, s!.offset) : null;
+    const touched = same && (st.mtimeMs !== s!.mtimeMs || st.ctimeMs !== s!.ctimeMs);
+    const rewritten = !grew && touched;
+    const reverify = same && !grew && !touched && now - s!.verifiedAt >= REVERIFY_MS;
+    const hasher = grew || reverify ? hashRange(fd, s!.start, s!.offset) : null;
     const appendOnly = same && !rewritten && (!hasher || (hexOf(hasher) === s!.digest
-      && (!s!.openLine || firstByteAt(fd, s!.offset) === 10)));
+      && (!grew || !s!.openLine || firstByteAt(fd, s!.offset) === 10)));
     if (!s || !appendOnly) {
-      s = { ...loadTail(fd, path, st.size, floor, opts.tailStartBytes ?? STATS_TAIL_START_BYTES), ino: st.ino, mtimeMs: st.mtimeMs, usedAt: now };
+      const loaded = loadTail(fd, path, st.size, floor, opts.tailStartBytes ?? STATS_TAIL_START_BYTES);
+      s = { ...loaded, ino: st.ino, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, verifiedAt: now, usedAt: now };
       tails.set(path, s);
     } else if (hasher) {
-      const fed = feedRange(fd, s.fold, s.offset, st.size, hasher);
-      s.offset = fed.offset;
-      s.openLine = fed.openLine; // 原先没换行的末行：上面已确认续写以换行开头，必有进展，这里一律按新读到的末行算
-      s.digest = hexOf(hasher);
+      if (grew) {
+        const fed = feedRange(fd, s.fold, s.offset, st.size, hasher);
+        s.offset = fed.offset;
+        s.openLine = fed.openLine; // 原先没换行的末行：上面已确认续写以换行开头，必有进展，这里一律按新读到的末行算
+        s.digest = hexOf(hasher);
+      }
+      s.verifiedAt = now;
     }
     s.mtimeMs = st.mtimeMs;
+    s.ctimeMs = st.ctimeMs;
     s.usedAt = now;
     s.floor = Math.max(s.floor, floor);
     return s.fold.result(dayTs, weekTs);

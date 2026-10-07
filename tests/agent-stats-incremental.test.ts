@@ -229,6 +229,34 @@ describe("readFileStats 续读", () => {
     expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(1002); // 再问一次不重复计
   });
 
+  // 本地审查 r1 same-size-preserved-mtime-stale：等长改写 + 写入方把 mtime 复原，大小、mtime 都对得上
+  test("等长原地改写并复原 mtime：等于重新扫描", async () => {
+    const p = freshPath();
+    writeFileSync(p, lone(100, "m1") + "\n");
+    const pinned = new Date(NOW - 10 * H);
+    utimesSync(p, pinned, pinned);
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(101);
+    writeFileSync(p, lone(900, "m1") + "\n"); // 100 → 900，等长
+    utimesSync(p, pinned, pinned);
+    const warm = await readFileStats(p, { window: WIN });
+    expect(warm.week.tokens).toBe(901);
+    expectSame(warm, await cold(readFileSync(p, "utf8")));
+  });
+
+  test("时间戳都没动但超过复核时限：只核哈希，结果不变", async () => {
+    const p = freshPath();
+    writeFileSync(p, text(ccLines(30, NOW - 3 * 24 * H)));
+    const before = await readFileStats(p, { window: WIN, tailStartBytes: 512 });
+    const realNow = Date.now;
+    const later = realNow() + 6 * 60_000;
+    Date.now = () => later;
+    try {
+      expectSame(await readFileStats(p, { window: WIN, tailStartBytes: 512 }), before);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("大小不变、只有 mtime 变了：按改写整窗重读，结果不变", async () => {
     const p = freshPath();
     writeFileSync(p, text(ccLines(30, NOW - 3 * 24 * H)));
