@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { answerAcp, liveAcpButtons, onAcpFrame } from "../src/bridge/acp-link.ts";
 import { noteAcpChannel } from "../src/bridge/acp-state.ts";
 import { onAcpTerminal, TERMINAL_USER, type TerminalDeps } from "../src/bridge/acp-terminal.ts";
@@ -32,7 +32,9 @@ beforeAll(() => {
   noteAcpChannel(CH, "acp");
 });
 afterAll(() => {
+  // 原来没有 registry 也要删掉自己写的：留着会被同一分片后面的测试（fleet-routes 期望空 registry）读到
   if (savedRegistry !== null) writeFileSync(REGISTRY_PATH, savedRegistry);
+  else rmSync(REGISTRY_PATH, { force: true });
 });
 
 function deps(over: Partial<TerminalDeps> = {}) {
