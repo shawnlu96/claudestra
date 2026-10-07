@@ -80,6 +80,16 @@ describe("activeReviewsByAgent：调度器审查员会话", () => {
     expect(reviews()).toEqual({});
   });
 
+  test("远端会话（@ 名 + transport=peer）绑定后，同名派审意图也不进表；没有绑定的意图不靠名字认本机（PR855-r2）", () => {
+    card("A1");
+    bind("A1", "reviewer@remote", "reviewer", "peer");
+    dispatchReview("A1", "reviewer@remote", 1);
+    expect(reviews()).toEqual({});
+    card("A2");
+    dispatchReview("A2", "agent-rv-a2", 1);
+    expect(reviews()).toEqual({});
+  });
+
   test("本机审查员名带 @：bind / 派审意图照样在审（远端看 transport / 出借意图，不看名字）", () => {
     card("A1");
     bind("A1", "agent-rv@local");

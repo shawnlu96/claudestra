@@ -15,7 +15,6 @@ import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict,
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
-import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { RETIRE_STAGES, taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
@@ -218,20 +217,24 @@ const localReviewer = (who: unknown): who is string => typeof who === "string" &
 const inReview = (local: boolean, who: unknown, id: string, round: number): [string, LedgerReviewRef] | null =>
   local && typeof who === "string" && who ? [who, { id, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;
 
+/** 派审意图（plan）只有收件人名：它是不是本机，看同卡此前最近一次 reviewer bind（transport）/ 派审步骤（executorKind）给这个名字定的身份 */
+type ReviewerIdentity = { agent: unknown; local: boolean };
+const identityOf = (e: LedgerEvent): ReviewerIdentity | null =>
+  e.kind === "step" ? { agent: e.data.executor, local: e.data.executorKind === "agent" }
+    : e.kind === "scheduler" && e.data.op === "session_bind" ? { agent: e.data.agent, local: e.data.transport !== "peer" } : null;
+
 /**
  * 一条派审 / 结论 / 调度器审查员会话事件 → 本机审查员裸名 + 它对这张卡的状态；taskRound = 卡当前轮次（bind 事件不带轮次）。
  * 调度器：reviewer session_bind / 派审意图（plan action=review，轮次在意图 id 的 :rN:）→ 在审；reviewer session_retire → 不再显示。
+ * planBy = 派审意图之前这张卡最近的审查员身份；没有、名字对不上或是远端，意图都不算本机（不能从名字推）。
  */
-function reviewOf(e: LedgerEvent, taskRound: number): [string, LedgerReviewRef] | null {
+function reviewOf(e: LedgerEvent, taskRound: number, planBy: ReviewerIdentity | undefined): [string, LedgerReviewRef] | null {
   const d = e.data;
   const round = count(d.round);
   if (e.kind === "step") return inReview(d.executorKind === "agent", d.executor, e.target, round);
   if (e.kind === "scheduler") {
-    if (d.op === "session_bind") return inReview(d.transport !== "peer", d.agent, e.target, taskRound);
-    if (d.op === "plan") {
-      const local = !isPoolIntent({ action: "review", recipient: typeof d.recipient === "string" ? d.recipient : null });
-      return inReview(local, d.recipient, e.target, Number(/:r(\d+):/.exec(String(d.id))?.[1] ?? taskRound));
-    }
+    if (d.op === "session_bind") return inReview(identityOf(e)!.local, d.agent, e.target, taskRound);
+    if (d.op === "plan") return inReview(!!planBy?.local && planBy.agent === d.recipient, d.recipient, e.target, Number(/:r(\d+):/.exec(String(d.id))?.[1] ?? taskRound));
     return null; // session_retire
   }
   const verdict = (["pass", "changes", "block"] as const).find((v) => v === d.verdict);
@@ -252,12 +255,19 @@ export function activeReviewsByAgent(db: Database): Map<string, LedgerReviewRef>
       OR (e.kind = 'scheduler' AND (json_extract(e.data, '$.op') = 'plan' AND json_extract(e.data, '$.action') = 'review'
         OR json_extract(e.data, '$.op') IN ('session_bind', 'session_retire') AND json_extract(e.data, '$.role') = 'reviewer'))) ORDER BY e.seq`)
     .all(...RETIRE_STAGES) as Record<string, unknown>[];
-  const lastByTask = new Map<string, Record<string, unknown>>();
-  // 先删再设：Map 按首次插入排序，这样遍历顺序 = 各卡最后一条事件的 seq 顺序（「同类取最新」靠它）
-  for (const r of rows) (lastByTask.delete(String(r.target)), lastByTask.set(String(r.target), r));
+  const lastByTask = new Map<string, { e: LedgerEvent; taskRound: number; planBy?: ReviewerIdentity }>();
+  const identity = new Map<string, ReviewerIdentity>();
+  for (const r of rows) {
+    const e = toEvent(r);
+    // 先删再设：Map 按首次插入排序，这样遍历顺序 = 各卡最后一条事件的 seq 顺序（「同类取最新」靠它）
+    lastByTask.delete(e.target);
+    lastByTask.set(e.target, { e, taskRound: count(r.taskRound), planBy: identity.get(e.target) });
+    const id = identityOf(e);
+    if (id) identity.set(e.target, id);
+  }
   const out = new Map<string, LedgerReviewRef>();
-  for (const r of lastByTask.values()) {
-    const hit = reviewOf(toEvent(r), count(r.taskRound));
+  for (const { e, taskRound, planBy } of lastByTask.values()) {
+    const hit = reviewOf(e, taskRound, planBy);
     if (!hit) continue;
     const name = hit[0].replace(/^agent-/, "");
     const prev = out.get(name);
