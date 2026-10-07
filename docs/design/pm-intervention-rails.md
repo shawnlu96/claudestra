@@ -11,18 +11,9 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
 - **PM 的手动面其实没有收窄**。PM 在自动卡上仍能推阶段、结清意图、绑定会话、切 manual 后自己记审查。这些操作大多不标 manual，也不推送给 owner。
 - **引擎碰到没覆盖的情况就退给 PM**，由 PM 手工把流程走完，引擎本身的缺口没有被修。
 
-本稿按规格分 7 节：
-
-1. 盘点现在的干预面；
-2. 盘点引擎退回人工的位置；
-3. 给出目标模型；
-4. 说明对 Shawn 侧和跨实例的影响；
-5. 写迁移分期与验收测试；
-6. 列代价与风险；
-7. 列出待定问题。
+本稿按规格分 7 节：干预面盘点、引擎退回点盘点、目标模型、Shawn 侧与跨实例影响、迁移分期与验收测试、代价与风险、待定问题。
 
 记号说明：
-
 - **PM** 指 `isManager` 认的人，即 PM 名单（含调度助理）+ master + owner（`src/lib/ledger-checks.ts:220`、`src/lib/ledger-stages.ts:18`）。
 - **真 PM** 指 `requireRealPm` / `actorMayConfigure` 认的人，即排除调度助理（`src/manager/ledger-context.ts:107`、`src/lib/ledger-scheduler-settle.ts:17`）。
 - 下面所有路径都相对仓库根目录。
@@ -192,7 +183,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 - `paused`：引擎不派新单，在途的单照常收结果，PM 可以继续。
 - `stopped`：引擎碰到没覆盖的情况。卡不动，进 owner 收件箱。PM 只能重启、放弃或申请接管。
 - `takeover`：owner 批准的人工窗口。允许用 1.2 里的全部手工命令，每一步都推送给 owner。
-- 存量 `manual` 卡与旧卡：行为完全不变（见 4.3）。
+- 存量 `manual` 卡与旧卡：行为完全不变（见 4.6）。
 
 ### 3.3 四个有类型的动作
 
@@ -309,8 +300,19 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
    - 对方提的 P1 / CI 要求，按 3.6 (b1) 走「先落规格卡，再改规格」，和已有的约定一致（P1 先落规格卡，消息只当加速）。
    - 对方在交接前就合并了，按 (a4) 由引擎判断。
    - 对方实例上的卡（他的 PM 管他的卡）不受我方开关影响。
-4. **peer 角色写入**：`peer-write` 是受托方经 peer 台账写委托卡，只能做 PEER_STEP_MOVES 列出的阶段移动（`src/lib/ledger-stages.ts`），不属于 PM 干预，保持现状。
-5. **保持现状的范围**：
+4. **跨实例 intake 时机：仓库方只在收到交接后才 intake**。
+   - **现象**：仓库方调度器看到 PR 就自己 intake、审查，甚至排进自动合并，不等我方交接。#806、#851 交接前就被合并；#855 在 build 阶段被审了两轮；
+     #858（本卡）我方本地 r1 没过就被判通过、进了合并队列。
+   - **根因**：intake 只按 PR 推断。`classifyPr`（`src/lib/peer-pr-intake.ts:19`）对配置里的作者、非 draft、head 稳定的开着的 PR 直接收卡，只有 draft 才等（`:31`）。
+     我方的交接只在本机台账写 `merge_handoff` 事件并告诉本机 PM（`src/lib/scheduler-merge-handoff.ts:93`），**不发给仓库方**。
+   - **规则**：交接 = 我方台账的 `merge_handoff` 事件，经正式交接消息送达对方。按 PR 推断（开着、非 draft、CI 绿、有新提交）都**不算**交接。
+   - **我方要改**（默认做法）：① 执行者开 PR 一律用 draft（`gh pr create --draft`），交接时由引擎 `gh pr ready`，撤回交接（3.3④）时转回 draft；
+     ② 写 `merge_handoff` 的同时，向仓库方 PM 入口发一条正式交接消息：卡号、PR、交接 head、`handoffSeq`、本机审查证据摘要；撤回时也发一条，走 T48 outbox 保证重投。
+   - **对方要改**（默认做法）：① intake 的前置条件，从「开着的非 draft PR」改成「收到并入账的交接消息，且 PR head = 交接 head，或者是从交接 head 只合入 main 的 carry」；
+     没收到交接的 PR 一律 wait，不审、不排合并；② 收到撤回消息时，把卡移出合并队列；③ 过渡期，draft 已经会让 `classifyPr` 等待，我方先改 ① 就能挡住大部分情况。
+   - 双方都改完之前，我方 PM 对仓库方提前给出的结论（审过、进队列）**不认作交接**，照常发 hold（本卡 #858 就是这样处理的）。
+5. **peer 角色写入**：`peer-write` 是受托方经 peer 台账写委托卡，只能做 PEER_STEP_MOVES 列出的阶段移动（`src/lib/ledger-stages.ts`），不属于 PM 干预，保持现状。
+6. **保持现状的范围**：
    - workflow 是 `manual` 的卡、没有 workflow 行的旧卡、`investigate` / `ops` 卡，行为完全不变（带 `railsVersion` 的卡不会再变回 manual，见第 5 节 P2）；
    - 开关打开前已经是 auto 的在途卡，在 observe 期只记审计；
    - 到限权期，在途卡仍按卡上记录的开关版本执行，**不追溯**。新卡开卡时把 `railsVersion` 写进 workflow。
@@ -331,7 +333,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
   - 新增 `takeover-request` / `-begin` / `-end`。
   - 1.2 里的手工命令在 auto 卡上，除非处于接管期，否则一律拒绝，错误信息写明应走哪个动作或去申请接管。
   - **同期堵住退回口**：带 `railsVersion` 的卡，`fallbackToManual` 与 `workflow-set --mode manual` 一律转 `stopped`（P2 先只推 PM + owner inform，收件箱卡片在 P3），不再回到 manual 拿旧手工权限；manual 只能经接管进入。
-    做不到这一条就不开 P2：否则引擎一退回，卡按 4.5 恢复旧权限，P2 等于不提供完整约束。
+    做不到这一条就不开 P2：否则引擎一退回，卡按 4.6 恢复旧权限，P2 等于不提供完整约束。
 - **P3：停卡进收件箱**。
   - 停卡（含 P2 起的 `stopped`）与三种静默停住都进 owner 收件箱。
   - `workflow-resume` 在 auto / stopped 卡上被 `card-restart` 取代，仍保留给 manual 卡使用。
