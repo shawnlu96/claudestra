@@ -145,11 +145,15 @@ function realCarry(o: { mp: string; onMain?: boolean; sameDiff?: boolean }): Pro
   const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
     repoDir: "/tmp/project" } } }).projects.p;
   const ok = (stdout: string, code = 0) => ({ code, stdout, stderr: "", timedOut: false });
+  // MAINP2: the canonical multi-hop proof also reads origin (bound to the PR's repository), main's first-parent path and merge bases
   const command: typeof runBounded = async (argv) => {
     if (argv[0] !== "git") throw new Error(`unexpected ${argv.join(" ")}`);
     if (argv.includes("fetch")) return ok("");
+    if (argv.includes("get-url")) return ok("https://github.com/example/repo.git\n");
     if (argv.includes("rev-parse")) return ok(`${o.mp}\n`);
+    if (argv.includes("--first-parent")) return ok(o.onMain === false ? `${"8".repeat(40)}\n` : `${o.mp}\n${"9".repeat(40)}\n`);
     if (argv.includes("rev-list")) return ok(`${N} ${H} ${o.mp}\n`);
+    if (argv.includes("--all")) return ok(`${argv.at(-1) === H ? "9".repeat(40) : o.mp}\n`);
     if (argv.includes("merge-base")) return ok("", o.onMain === false ? 1 : 0);
     if (argv.includes("diff")) return ok(o.sameDiff || argv.at(-1)!.endsWith(H) ? "diff --git a/src/lib/x.ts\n" : "diff --git a/src/lib/x.ts\n+main moved\n");
     throw new Error(`unexpected ${argv.join(" ")}`);
