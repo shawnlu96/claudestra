@@ -7,6 +7,7 @@
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { ghEnv } from "./peer-pr-github.js";
+import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
@@ -18,11 +19,13 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
  * `files`: asked while the handoff's narrowing is unsettled (`handing`), the PR's changed paths at its head (null = could not tell).
  */
-export interface HandoffPr { state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: MainMergeCarry; files?: string[] | null }
+export interface HandoffPr { state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: MainMergeCarry; files?: PrFiles | null }
+/** `refused`: reading this head again gives the same answer (the list is too long to vouch for); recorded once, locks stay whole. */
+type PrFiles = string[] | { refused: string };
 /** `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. */
 export type ReadPr = (prRef: string, follow?: { project: string; head: string }, handing?: { project: string }) => Promise<HandoffPr>;
-/** The PR's net changed paths (merge-base with main → head, renames as both sides); null when the clone cannot vouch for them. */
-export type HandoffFiles = (prRef: string, head: string) => Promise<string[] | null>;
+/** The PR's net changed paths (merge-base with main → head, renames as both sides); null when the clone cannot tell this time. */
+export type HandoffFiles = (prRef: string, head: string) => Promise<PrFiles | null>;
 /** `mergeSha` set = the PR is merged: its main parent must be on main before that merge, not on the main that now holds the PR. */
 export type HandoffCarry = (prRef: string, oldHead: string, newHead: string, mergeSha: string | null) => Promise<MainMergeCarry>;
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -125,15 +128,15 @@ export function handoffFiles(repoDir: string, command: typeof runBounded = runBo
   return async (prRef, head) => {
     if (!SHA.test(head) || !(await prRepoIn(git, prRef))) return null;
     await git("fetch", "--no-tags", "--quiet", "origin", head, `+refs/heads/main:${MAIN_REF}`);
-    const out = await git("diff", "--name-only", "--no-renames", "-z", `${MAIN_REF}...${head}`);
+    const out = await git("diff", "--name-only", ...WHOLE_DIFF_ARGS, "-z", `${MAIN_REF}...${head}`);
     // runBounded cuts output at 1 MiB without saying so: a list that may be cut short would give away locks on files it lost
-    if (Buffer.byteLength(out) >= LIST_CAP || (out && !out.endsWith("\0"))) return null;
+    if (Buffer.byteLength(out) >= LIST_CAP || (out && !out.endsWith("\0"))) return { refused: "PR 改动文件列表太长，读不全" };
     return out.split("\0").filter(Boolean);
   };
 }
 
 /** Narrowing is optional: a clone that cannot answer leaves the card's locks whole, it never holds the handoff up. */
-async function prFiles(files: HandoffFiles | null, prRef: string, head: string): Promise<string[] | null> {
+async function prFiles(files: HandoffFiles | null, prRef: string, head: string): Promise<PrFiles | null> {
   if (!files) return null;
   try { return await files(prRef, head); } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
@@ -164,7 +167,7 @@ async function followMoved<O>(c: HandoffCard<O>, follow: HandoffFollow, pr: Hand
 }
 
 /** Locks down to the PR's own files right after the handoff record; any refusal keeps them whole and says why in the tick detail. */
-function narrowAfterHandoff(c: HandoffCard<unknown>, files: string[] | null | undefined): string {
+function narrowAfterHandoff(c: HandoffCard<unknown>, files: PrFiles | null | undefined): string {
   const { task } = c;
   if (!files || !task.pr || !task.headSHA) return "";
   try {
