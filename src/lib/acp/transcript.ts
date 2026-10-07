@@ -20,9 +20,19 @@ const SHOW_LINES = 2, FAIL_LINES = 4, RESULT_CHARS = 400, USER_CHARS = 2_000, TE
 const SCAN_CHARS = 16_000;
 const STAMP_WIDTH = "[00:00:00] ".length;
 
+/**
+ * 只扫开头 SCAN_CHARS：截在一个词中间时，那半个词可能是半个密钥、规则认不出，退到最后一个空白处。
+ * 摘要会剥掉命令前缀（cd … &&），扫描窗口的尾巴因此可能成为显示内容，不退回就会把半个密钥摆出来。
+ */
+function scanHead(raw: string): string {
+  if (raw.length <= SCAN_CHARS) return raw;
+  const s = raw.slice(0, SCAN_CHARS);
+  return s.slice(0, Math.max(0, s.search(/\s\S*$/)));
+}
+
 /** 截到 lines 行、chars 字；截了就注明原本多少行 */
 function clip(raw: string, lines: number, chars: number): string {
-  const s = redactSecrets(raw.slice(0, SCAN_CHARS)).trim();
+  const s = redactSecrets(scanHead(raw)).trim();
   const all = s.split("\n");
   let out = all.slice(0, lines).join("\n");
   if (out.length > chars) out = out.slice(0, chars);
@@ -33,7 +43,7 @@ const oneLine = (s: unknown): string => clip(String(s ?? "").replace(/\s*\n\s*/g
 
 /** 交给 formatTool 之前逐个字段先打码：它会在 80 / 200 字处截断，截剩的半个密钥匹配不上规则 */
 const redactDeep = (v: unknown): unknown =>
-  typeof v === "string" ? redactSecrets(v.slice(0, SCAN_CHARS))
+  typeof v === "string" ? redactSecrets(scanHead(v))
     : Array.isArray(v) ? v.map(redactDeep)
     : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x)])) : v;
 
@@ -41,7 +51,7 @@ const PLAN_MARK: Record<string, string> = { completed: "✓", in_progress: "▸"
 
 function toolLine(name: string, input: Rec): string {
   if (name === "reply" || name.endsWith("__reply")) return `💬 回复：${clip(String(input?.text ?? ""), TEXT_LINES, TEXT_CHARS)}`;
-  if (name === "Bash") return `💻 ${oneLine(summarizeCommand(redactSecrets(String(input?.command ?? "").slice(0, SCAN_CHARS))))}`;
+  if (name === "Bash") return `💻 ${oneLine(summarizeCommand(redactSecrets(scanHead(String(input?.command ?? "")))))}`;
   if (name === "update_plan") {
     const steps = (Array.isArray(input?.plan) ? input.plan : []).map((p: Rec) => `  ${PLAN_MARK[p?.status] ?? "·"} ${oneLine(p?.step)}`);
     return ["📋 计划", ...steps].join("\n");

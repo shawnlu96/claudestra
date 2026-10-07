@@ -65,6 +65,9 @@ describe("ACP 窗口可读性", () => {
     expect(summarizeCommand("echo \"$(date; whoami)\" | tee out")).toBe("echo \"$(date; whoami)\" | …");
     expect(summarizeCommand("python3 - <<'PY'\nprint(1)\nPY")).toBe("python3 - <<'PY'（3 行脚本）");
     expect(summarizeCommand("cat")).toBe("cat");
+    expect(summarizeCommand("rg --files src/lib")).toBe("列文件 src/lib");
+    expect(summarizeCommand("rg --files -g '*.ts' src")).toBe("列文件 src");
+    expect(summarizeCommand("rg --files")).toBe("列文件 .");
   });
 
   test("时间戳：段落起点必带、前面空一行；同一分钟的工具行不带，分钟变了再带", () => {
@@ -92,5 +95,8 @@ describe("ACP 窗口可读性", () => {
     const huge = run("cat big", `${"y".repeat(20_000)}${jwt}\nend`, true)[1]!; // 超过扫描窗口：截出来的半行整行不要
     expect(huge).not.toContain("eyJ");
     expect(huge).toContain("end");
+    // 命令超过扫描窗口、前缀又被摘要剥掉：窗口截在半个密钥上，那半个不能露出来
+    const cut = run(`cd /${"a".repeat(15_975)} && sk-abcdefghijklmnopqrstuvwxyz123456`, "")[0]!;
+    expect(cut).not.toContain("sk-abc");
   });
 });

@@ -207,6 +207,10 @@ function semanticOf(w: string[]): string | null {
     const colon = target.indexOf(":");
     return colon > 0 ? `读 ${target.slice(colon + 1)}（${target.slice(0, colon)}）` : `看提交 ${target}`;
   }
+  if (bin === "rg" && args.includes("--files")) {
+    const dirs = positional(args, SEARCH_VALUED);
+    return `列文件 ${dirs.length ? dirs.join(" ") : "."}`;
+  }
   if (["rg", "grep", "egrep"].includes(bin)) {
     const e = args.findIndex((a) => a === "-e" || a === "--regexp");
     const pos = positional(args, SEARCH_VALUED);
