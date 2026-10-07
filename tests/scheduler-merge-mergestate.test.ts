@@ -484,9 +484,10 @@ describe("i28-M12b gh pr checks: an empty answer is an empty list only while Git
   test("UNKNOWN / DIRTY with no checks → empty list", async () => {
     for (const s of ["UNKNOWN", "DIRTY"]) expect(await inspect(s, none)).toMatchObject({ mergeState: s, checks: [] });
   });
-  test("other states with no checks, a timeout, or broken output still throw (→ unknown)", async () => {
-    await expect(inspect("CLEAN", none)).rejects.toThrow(/gh pr checks 无结果/);
-    await expect(inspect("BLOCKED", none)).rejects.toThrow(/gh pr checks 无结果/);
+  test("MCHK1: other states with no checks reported wait as UNKNOWN; another error, a timeout, or broken output still throw (→ unknown)", async () => {
+    for (const s of ["CLEAN", "BLOCKED"]) expect(await inspect(s, none)).toMatchObject({ mergeState: "UNKNOWN", checks: [], noChecks: true });
+    await expect(inspect("BLOCKED", { ...none, stderr: "HTTP 502" })).rejects.toThrow(/gh pr checks 无结果/);
+    await expect(inspect("BLOCKED", { ...none, code: 4 })).rejects.toThrow(/gh pr checks 无结果/);
     await expect(inspect("UNKNOWN", { ...none, timedOut: true })).rejects.toThrow(/gh pr checks 无结果/);
     await expect(inspect("UNKNOWN", { code: 0, stdout: '[{"bucket":"weird"}]', stderr: "", timedOut: false })).rejects.toThrow(/输出无效/);
   });

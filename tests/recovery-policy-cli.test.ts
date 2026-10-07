@@ -49,7 +49,7 @@ describe("show", () => {
     const r = await run(EXEC, "a");
     expect(r).toMatchObject({ ok: true, project: "a", observed: [] });
     expect(r.policies.materials).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
-    expect(Object.keys(r.policies)).toHaveLength(13); // MQ1 manualMergeQueue + MAINP2 mainCarry
+    expect(Object.keys(r.policies)).toHaveLength(14); // MQ1 manualMergeQueue + MAINP2 mainCarry + RLOCK2 lockYield
     expect(r.policies.manualMergeQueue).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect([snap(), decisions()]).toEqual([null, []]);
     expect((await run(EXEC, "zz")).code).toBe("not_found");

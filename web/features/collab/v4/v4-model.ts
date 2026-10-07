@@ -6,7 +6,8 @@
 import { COLUMNS, columnOf, type LedgerDepView, type LedgerOverview, type LedgerTaskView, type Stage, type Tr } from "../collab-model";
 import { restCount, restSum } from "@/lib/api/ledger-done";
 
-const TERMINAL: ReadonlySet<Stage> = new Set(["done", "cancelled"]);
+/** verified 也算完成：「已完成」筛选、大纲绿点同一口径，在跑 / 可执行 / 在等 / 手机分组 / 阶段计数都不再数它 */
+const TERMINAL: ReadonlySet<Stage> = new Set(["verified", "done", "cancelled"]);
 const PAST_REVIEW: ReadonlySet<Stage> = new Set(["merge", "live", "verified", "done"]);
 const open = (t: LedgerTaskView) => !TERMINAL.has(t.stage) && t.kind !== "ops";
 const blocked = (t: LedgerTaskView) => (t.blockedBy?.length ?? 0) > 0;
@@ -55,7 +56,7 @@ export const filterCount = (ov: Pick<LedgerOverview, "tasks" | "doneRest">, f: F
 export function matchFilter(t: LedgerTaskView, f: Filter): boolean {
   if (f === "all") return t.stage !== "cancelled";
   // = 全部 − 已完成（ops 卡也算：它不进可执行 / 在等只因没有执行链，不是做完了）
-  if (f === "undone") return t.stage !== "cancelled" && t.stage !== "done" && t.stage !== "verified";
+  if (f === "undone") return !TERMINAL.has(t.stage);
   if (f === "runnable") return open(t) && !blocked(t);
   if (f === "waiting") return open(t) && blocked(t);
   if (f === "done") return t.stage === "done" || t.stage === "verified";
@@ -100,10 +101,9 @@ export function edgeBasis(d: LedgerDepView, tr: Tr): string {
 }
 export const STATE_WORD: Record<LedgerDepView["effective"], string> = { done: "已成立", active: "判定中", waiting: "还没到" };
 
-/** 项目概览：各阶段列（与 v3 同一套列）的任务数 */
-export function stageCounts(ov: Pick<LedgerOverview, "tasks" | "doneRest">): { label: string; n: number }[] {
+/** 项目概览：在途任务在各阶段列（与 v3 同一套列）的张数；窗口外只有已完成卡，不计 */
+export function stageCounts(ov: Pick<LedgerOverview, "tasks">): { label: string; n: number }[] {
   const n = COLUMNS.map(() => 0);
   for (const t of ov.tasks.filter(open)) n[columnOf(t.stage, t.stageBefore)]!++;
-  for (const stage of ["verified", "done", "cancelled"] as const) n[columnOf(stage)]! += restCount(ov, (t) => t.stage === stage && open(t));
   return COLUMNS.map((label, i) => ({ label, n: n[i]! })).filter((c) => c.n > 0);
 }

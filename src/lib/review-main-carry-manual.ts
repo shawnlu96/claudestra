@@ -32,8 +32,8 @@ const PR = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/;
 /** One key per (card, old head, new head): a replay or a concurrent twin finds it, a different carry never reuses it. */
 export const mainCarryKey = (taskId: string, from: string, to: string): string => `main-carry:${taskId}:${from}:${to}`;
 
-/** Where the PASS came from, read from the review event itself — never from a caller's claim. */
-type CarrySourceKind = "mcp" | "pool" | "cli";
+/** Where the PASS came from, read from the review event itself — never from a caller's claim. `lend` = a PM `lend-offer` pool order (MCRY1). */
+type CarrySourceKind = "mcp" | "pool" | "lend" | "cli";
 export interface ManualCarryRequest {
   taskId: string; oldHead: string; newHead: string; mainHead: string; specRev: number; round: number; reviewSeq: number; rev: number;
 }
@@ -86,8 +86,9 @@ export function carriedReview(task: LedgerTask, events: readonly LedgerEvent[]):
 function sourceKindOf(db: Database, task: LedgerTask, ev: LedgerEvent, facts: ReviewFacts, workflow: Pick<TaskWorkflow, "authorFamily">): CarrySourceKind {
   if (ev.data.lend !== undefined || claimsPoolReview({ reviewer: facts.reviewer, session: facts.reviewerSessionId })) {
     const pool = poolReviewRefusal(db, task, workflow, facts);
-    if (pool) conflict(pool);
-    return "pool";
+    if (!pool) return "pool";
+    const pm = poolReviewRefusal(db, task, workflow, facts, { pmOffered: true }); // the same proof for a PM-offered order; neither passes for the other
+    return pm ? conflict(`${pool}；按 PM 出借单核：${pm}`) : "lend";
   }
   const orderId = ev.data.orderId;
   if (ev.data.via === "mcp" && typeof orderId === "string" && ev.dedupKey === verdictKey({ orderId, head: facts.head }) && ev.actor === facts.reviewer) return "mcp";
@@ -99,7 +100,7 @@ function sourceKindOf(db: Database, task: LedgerTask, ev: LedgerEvent, facts: Re
 /**
  * The PASS's own report, read where reports live (ledger/reviews, peer-pr-tick.ts readReviewReport). A local PASS (MCP ticket or
  * CLI row) needs it readable and non-empty, and a CLI row's report must name the head it passed; the pool PASS is already bound
- * to its report bytes by its signed receipt (poolReviewRefusal). Returns the report's sha256 for the carry event.
+ * to its report bytes by its signed receipt (poolReviewRefusal); a PM lend order's report must also be on disk. Returns its sha256.
  */
 function reportEvidence(facts: ReviewFacts, kind: CarrySourceKind): string | null {
   if (kind === "pool") return null;

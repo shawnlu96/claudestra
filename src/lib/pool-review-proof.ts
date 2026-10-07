@@ -8,6 +8,7 @@
 import type { Database } from "bun:sqlite";
 import type { TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import type { ReviewFacts } from "./scheduler-review.js";
@@ -34,9 +35,13 @@ const hasLendTable = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite
 export const claimsPoolReview = (c: { reviewer?: string | null; session?: string | null }): boolean =>
   !!c.reviewer?.startsWith(POOL_RECIPIENT) || LEND_SESSION.test(c.session ?? "");
 
-/** null = proven (or not a pool verdict at all: the caller's local-session rules apply); otherwise why the pool verdict is refused. */
+/**
+ * null = proven (or not a pool verdict at all: the caller's local-session rules apply); otherwise why the pool verdict is refused.
+ * `pmOffered` (MCRY1, formal main-carry only): the order is instead one a project PM put up with `ledger lend-offer` (its offer note,
+ * its own id) and has no scheduler intent; every other check is the same. Each origin refuses the other's orders.
+ */
 export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "project" | "headSHA" | "round" | "specRev">,
-  workflow: Pick<TaskWorkflow, "authorFamily">, facts: ReviewFacts): string | null {
+  workflow: Pick<TaskWorkflow, "authorFamily">, facts: ReviewFacts, opts: { pmOffered?: boolean } = {}): string | null {
   const ev = db.query("SELECT seq, kind, target, dedupKey, data FROM events WHERE seq = ?").get(facts.eventSeq) as EventRow | null;
   const lend = obj(parse(ev?.data ?? null)?.lend);
   if (!lend && !claimsPoolReview({ reviewer: facts.reviewer, session: facts.reviewerSessionId })) return null;
@@ -48,7 +53,8 @@ export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "p
   if (!o || o.taskId !== task.id) return why(`没有本卡的出借单 ${orderId}`);
   if (o.step !== "review") return why(`出借单 ${orderId} 不是审查单（${o.step}）`);
   if (o.status !== "done") return why(`出借单 ${orderId} 状态是 ${o.status}，不是 done`);
-  if (o.createdBy !== "scheduler") return why(`出借单 ${orderId} 不是调度器派的（${o.createdBy}）`);
+  if (!opts.pmOffered && o.createdBy !== "scheduler") return why(`出借单 ${orderId} 不是调度器派的（${o.createdBy}）`);
+  if (opts.pmOffered && !pmOffer(db, task, o)) return why(`出借单 ${orderId} 不是项目 PM 用 lend-offer 挂的（${o.createdBy}）`);
   if (o.head !== task.headSHA || facts.head !== o.head || o.round !== task.round || facts.round !== o.round || o.specRev !== task.specRev) {
     return why(`出借单 ${orderId} 的 head / 轮次 / specRev 与卡上当前的不一致`);
   }
@@ -72,20 +78,26 @@ export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "p
     AND json_extract(data, '$.lend.op') = 'claim' AND json_extract(data, '$.lend.peer') = ? AND json_extract(data, '$.lend.worker') = ?
     AND json_extract(data, '$.lend.gen') = ? ORDER BY seq DESC LIMIT 1`).get(task.id, ev.seq, orderId, o.peer, o.worker, o.leaseGen) as { seq: number } | null;
   if (!claimed) return why(`出借单 ${orderId} 缺对方领单（${o.worker}，代数 ${o.leaseGen}）的记录`);
-  // The scheduler's own review intent that offered this order, sent before the claim.
-  const link = db.query(`SELECT json_extract(data, '$.id') AS id FROM events WHERE target = ? AND kind = 'scheduler'
+  // The scheduler's own review intent that offered this order, sent before the claim (a PM order's offer note was checked above).
+  const link = opts.pmOffered ? null : db.query(`SELECT json_extract(data, '$.id') AS id FROM events WHERE target = ? AND kind = 'scheduler'
     AND json_extract(data, '$.orderId') = ? AND dedupKey = 'scheduler:' || json_extract(data, '$.id') || ':pool' LIMIT 1`)
     .get(task.id, orderId) as { id: string } | null;
   const intent = link ? db.query("SELECT action, recipient, head, specRev, status, eventSeq FROM scheduler_intents WHERE id = ? AND taskId = ?")
     .get(link.id, task.id) as { action: string; recipient: string | null; head: string | null; specRev: number; status: string; eventSeq: number | null } | null : null;
-  if (!intent || intent.action !== "review" || intent.recipient !== `${POOL_RECIPIENT}${o.peer}` || intent.head !== o.head ||
-    intent.specRev !== o.specRev || !["submitted", "done"].includes(intent.status) || !intent.eventSeq || intent.eventSeq >= claimed.seq) {
+  if (!opts.pmOffered && (!intent || intent.action !== "review" || intent.recipient !== `${POOL_RECIPIENT}${o.peer}` || intent.head !== o.head ||
+    intent.specRev !== o.specRev || !["submitted", "done"].includes(intent.status) || !intent.eventSeq || intent.eventSeq >= claimed.seq)) {
     return why(`出借单 ${orderId} 没有对应的调度器派审意图`);
   }
   const author = remoteHeadFamily(db, task) ?? workflow.authorFamily;
   if (o.family === author) return why(`审查家族 ${o.family} 与实际作者家族相同（无正式 MODELX 豁免记录）`);
   return null;
 }
+
+/** A PM order (offerLend): its own id, made by a project PM / master / owner (not the dispatcher, never the scheduler), with that PM's offer note. */
+const pmOffer = (db: Database, task: Pick<LedgerTask, "id" | "project">, o: OrderRow): boolean => o.createdBy !== "scheduler" &&
+  actorMayConfigure(db, o.createdBy, task.project) && o.orderId.replace(/:a\d+$/, "") === `lend:${task.id}:s${o.specRev}:r${o.round}` &&
+  !!db.query(`SELECT 1 FROM events WHERE target = ? AND kind = 'note' AND actor = ? AND json_extract(data, '$.lend.orderId') = ?
+    AND json_extract(data, '$.lend.op') = 'offer' AND json_extract(data, '$.lend.step') = 'review'`).get(task.id, o.createdBy, o.orderId);
 
 /** B's submit_verdict ticket as the writer admitted it, re-checked against the archived received request (its bytes, ticket and digest). */
 function ticketEvidence(lend: Record<string, unknown>, o: OrderRow, task: Pick<LedgerTask, "id">): string | null {
