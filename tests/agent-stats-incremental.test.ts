@@ -214,6 +214,29 @@ describe("readFileStats 续读", () => {
     expect(s.week).toMatchObject({ tokens: 11, requests: 1 });
   });
 
+  // Shawn PR870-r2 append-same-mtime-skipped：保留时间戳的写入 / 粗粒度时间戳，追加后 mtime 不变
+  test("固定 mtime 追加一条（不推进 mtime）：等于重新扫描", async () => {
+    const p = freshPath();
+    writeFileSync(p, lone(100, "m1") + "\n");
+    const pinned = new Date(NOW - 10 * H);
+    utimesSync(p, pinned, pinned);
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(101);
+    appendFileSync(p, lone(900, "m2") + "\n");
+    utimesSync(p, pinned, pinned); // mtime 恢复原值
+    const warm = await readFileStats(p, { window: WIN });
+    expect(warm.week).toMatchObject({ tokens: 1002, requests: 2 });
+    expectSame(warm, await cold(readFileSync(p, "utf8")));
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(1002); // 再问一次不重复计
+  });
+
+  test("大小不变、只有 mtime 变了：按改写整窗重读，结果不变", async () => {
+    const p = freshPath();
+    writeFileSync(p, text(ccLines(30, NOW - 3 * 24 * H)));
+    const before = await readFileStats(p, { window: WIN, tailStartBytes: 512 });
+    utimesSync(p, new Date(NOW), new Date(NOW + 9000));
+    expectSame(await readFileStats(p, { window: WIN, tailStartBytes: 512 }), before);
+  });
+
   test("文件被删：返回空统计", async () => {
     const p = freshPath();
     writeFileSync(p, text(ccLines(5, NOW - H)));

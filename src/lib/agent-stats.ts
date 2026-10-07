@@ -418,8 +418,8 @@ function loadTail(fd: number, path: string, size: number, floor: number, tailSta
 
 /**
  * 一个会话文件的上下文 + 今日 + 本周。按 (inode, 已读区间, 已读区间的 sha256) 续读：
- *   大小、mtime 都没动 → 不读；纯追加 → 已读区间只算哈希（不解码不解析），新增字节才解析；
- *   截断 / 轮转 / 已读部分被改过 / 窗口往前挪 → 整窗重读。
+ *   大小、mtime 都没动 → 不读；变大且已读区间哈希不变（纯追加）→ 已读区间只算哈希（不解码不解析），新增字节才解析；
+ *   截断 / 轮转 / 已读部分被改过 / 没变大而 mtime 变了 / 窗口往前挪 → 整窗重读。
  * 原先每次调用都把每个文件的尾窗重读一遍（只有 5 秒桶缓存）：每个 Stop hook 的看板刷新要读全部 active agent，
  * 29 个 agent 一次 276MB，bridge 的分配器区每次冲高 300MB 再回落（BML-2，证据 ledger/reviews/BML-2-evidence.md）。
  */
@@ -438,14 +438,17 @@ export async function readFileStats(
     const st = fstatSync(fd); // 与读的是同一个打开的文件：open 与 stat 之间被轮转也对得上
     let s = tails.get(path);
     const same = s && s.ino === st.ino && st.size >= s.offset && floor >= s.floor;
-    // mtime 没动 = 没写过；动了就把已读区间重算一遍哈希：前面任何一处被改（大小可以不变），都不算纯追加
-    const hasher = same && s!.mtimeMs !== st.mtimeMs ? hashRange(fd, s!.start, s!.offset) : null;
-    const appendOnly = same && (!hasher || (hexOf(hasher) === s!.digest
-      && (!s!.openLine || st.size === s!.offset || firstByteAt(fd, s!.offset) === 10)));
+    // 变大就喂新增字节（不看 mtime：保留时间戳的写入、粗粒度时间戳都会让追加时 mtime 不动），喂之前先验已读区间的哈希，
+    // 前面任何一处被改都不算纯追加。没变大而 mtime 动了 = 原地改写（大小可以不变），整窗重读
+    const grew = same && st.size > s!.offset;
+    const rewritten = same && !grew && st.mtimeMs !== s!.mtimeMs;
+    const hasher = grew ? hashRange(fd, s!.start, s!.offset) : null;
+    const appendOnly = same && !rewritten && (!hasher || (hexOf(hasher) === s!.digest
+      && (!s!.openLine || firstByteAt(fd, s!.offset) === 10)));
     if (!s || !appendOnly) {
       s = { ...loadTail(fd, path, st.size, floor, opts.tailStartBytes ?? STATS_TAIL_START_BYTES), ino: st.ino, mtimeMs: st.mtimeMs, usedAt: now };
       tails.set(path, s);
-    } else if (hasher && st.size > s.offset) {
+    } else if (hasher) {
       const fed = feedRange(fd, s.fold, s.offset, st.size, hasher);
       s.offset = fed.offset;
       s.openLine = fed.openLine; // 原先没换行的末行：上面已确认续写以换行开头，必有进展，这里一律按新读到的末行算
