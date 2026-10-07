@@ -117,7 +117,7 @@ describe("MAINP1 local immutable main-carry proof", () => {
     await actualMain(main);
     try {
       expect((await proof(merged, { mainHead: main })).ok).toBe(false);
-      expect((await legacy(merged)).ok).toBe(true); // existing one-hop ancestry semantics are retained
+      expect((await legacy(merged)).ok).toBe(false); // MAINP2: the auto adapter now shares the first-parent main rule
     } finally { await actualMain(main2); }
   });
   test("multi-hop changed final diff is rejected", async () => {
