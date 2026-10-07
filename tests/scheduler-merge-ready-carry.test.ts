@@ -178,7 +178,7 @@ test("MCRY2 旧红新绿：PMDIR1 形态，a1 在 ready 沿用上一次尝试的
   await pmdir1(s);
   s.gh.checks = passing;
   await s.tick();
-  // 旧代码：a1 phase=unknown（「PR 状态、base 或审查 head 已变」），meta.queueFrozen 为真
+  // the moved head is carried at ready, so the run keeps going and the project queue stays open
   expect(s.state("a1")).toMatchObject({ phase: "await_ci", frozen: false, stage: "merge", head: merged });
   expect(getMergeRun(s.db, "a1")?.reviewedHead).toBe(merged);
   const carry = listEvents(s.db, { project: "p", target: ID }).findLast((e) => e.data.op === "review_carry")!;

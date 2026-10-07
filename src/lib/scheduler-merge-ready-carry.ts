@@ -1,9 +1,8 @@
 /**
- * MCRY2: a merge run still at `ready` finds the PR head moved. It may keep its review only when the move is the previous attempt's
- * own update-branch: that attempt's journal (scheduler identity) went ready → updating at this very reviewed head, it ended
- * unmerged (a PM resolve cancelled / failed, or the PM-switch cancellation), it was planned in this round and spec revision, and
- * nothing delivered or moved the card since. Read inside the merge step's write transaction (scheduler-merge.ts carryReview), from
- * the ledger only; the driver's word is never evidence. The canonical pure-main chain / hop limit stays autoCarryEvidence's.
+ * A ready run whose PR head moved keeps its review only on the previous attempt's own update-branch: that attempt (scheduler identity)
+ * went ready → updating at this reviewed head, ended unmerged (PM resolve cancelled / failed, or the PM-switch cancellation), shares
+ * this round and spec revision, and nothing delivered or moved the card since. Read from the ledger inside carryReview's write
+ * transaction (scheduler-merge.ts), never from the driver; the pure-main chain / hop limit stays autoCarryEvidence's.
  * tests/scheduler-merge-ready-carry*.test.ts.
  */
 import type { Database } from "bun:sqlite";

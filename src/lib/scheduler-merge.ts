@@ -232,7 +232,8 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
-    if (drift && input.to !== "unknown" && input.to !== "await_review") throw new LedgerError("conflict", `合并运行已失效：${drift}`);
+    // Only updating → await_review follows an update this attempt sent; from ready a drift (PM switch) is refused, so the driver's unknown cancels.
+    if (drift && input.to !== "unknown" && !(input.to === "await_review" && input.from === "updating")) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
     const chain = carryChainOf(input.receipt); if (chain) input = { ...input, receipt: chain.base }; // MAINP2 chain after the receipt
     const receipt = input.receipt ? text(input.receipt, "回执") : null;
     if (["await_ci", "merged", "unknown", "await_review"].includes(input.to) && !receipt) {

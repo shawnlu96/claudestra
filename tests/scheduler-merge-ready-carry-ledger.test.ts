@@ -208,3 +208,36 @@ test("MCRY2 driver at ready: moved head → carry (await_ci) / ledger refusal or
     expect(await drive(pr(change))).toMatchObject({ phase: "unknown", journal: ["ready→unknown"] });
   }
 });
+
+/** The PM takes the card over: auto → manual, as `ledger workflow` writes it. */
+function toManual(db: ReturnType<typeof openLedger>) {
+  const wf = db.query("SELECT rev FROM task_workflows WHERE taskId='T1'").get() as { rev: number };
+  setWorkflow(db, OWNER, { taskId: "T1", taskRev: getTask(db, "T1")!.rev, workflowRev: wf.rev, template: "code", templateVersion: 2,
+    mode: "manual", authorFamily: "claude", fallback: "manual", reason: "PM 接管" });
+}
+
+test("MCRY2 ledger + driver: the PM switches the card to manual during ready's inspect → the unsent run is cancelled, task untouched", async () => {
+  const w = world();
+  const a1 = w.a1();
+  const external: MergeExternal = {
+    inspect: async () => {
+      toManual(w.db);
+      return pr();
+    },
+    freshness: async () => ({ behindBy: 0, mainHead: MAIN }),
+    carryReview: async () => ({ ok: true, reason: "纯 main", mainParent: MAINP, mainHead: MAIN, diffHash: DIFF, chain: [{ previousHead: OLD, head: NEW, mainParent: MAINP }] }),
+    updateBranch: async () => { throw new Error("no update at ready"); }, merge: async () => { throw new Error("no merge"); },
+  };
+  const advance = async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number, receipt?: string, mergeSha?: string, newHead?: string) =>
+    advanceMergeRun(w.db, SCHED, { intentId: "a1", from, to, rev, receipt, mergeSha, newHead });
+  expect(await driveMerge(a1, external, advance)).toMatchObject({ phase: "resolved" });
+  expect(getTask(w.db, "T1")).toMatchObject({ stage: "merge", headSHA: OLD, round: 1 });
+  expect(getMeta(w.db, "p").queueFrozen.frozen).toBe(false);
+  expect(listEvents(w.db, { project: "p", target: "T1" }).some((e) => e.data.op === "review_carry")).toBe(false);
+  // the ledger itself refuses ready → await_review once the card left auto: only updating → await_review is past a sent update
+  const v = world();
+  v.a1();
+  toManual(v.db);
+  expect(() => v.step("a1", "await_review", { receipt: "update-branch 改了 head：x，旧审查失效", newHead: NEW })).toThrow(/合并运行已失效/);
+  expect(getTask(v.db, "T1")).toMatchObject({ stage: "merge", headSHA: OLD });
+});

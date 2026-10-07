@@ -93,7 +93,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
     if (pr.draft) return run; // re-checked next round on the same evidence
     // MCRY2: the ledger carries only on an earlier attempt's own update-branch (scheduler-merge-ready-carry.ts), judged before any
     // CI / mergeability gate so a refused head goes back to review instead of freezing the queue; await_ci gates a carried one.
-    const carried = await carrying().catch((e: unknown) => {
+    const carried = await carrying().catch((e: unknown) => { // a drift refuses back() too, which then ends in the driver's unknown
       if (stopped(e)) throw e;
       return back({ ...carry, ok: false, reason: `跨尝试沿用被台账拒绝：${(e as Error).message.replace(/\s+/g, " ").slice(0, 200)}` });
     });
@@ -156,8 +156,9 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch) {
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
-      // MCRY2: only the head moved (an earlier attempt's update-branch, or a push): carry or re-review, never a queue freeze
-      if (!sameHead(run, pr)) return movedHead(run, external, pr, step);
+      // MCRY2: only the head moved (an earlier attempt's update-branch, or a push): carry or re-review, never a queue freeze.
+      // Awaited so a refused fallback (the PM took the card over meanwhile) lands in the catch below and cancels via unknown.
+      if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
