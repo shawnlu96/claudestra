@@ -1,12 +1,8 @@
 /**
- * MCRY2 · PMDIR1 (10-07) wired as src/scheduler.ts runs it: mergeTick reads a read-only LedgerReader, every scheduler write is the
- * real ledger CLI in a child process (scheduler identity + lease, temp HOME / TMPDIR / state dir), the external is the production
- * mergeExternal with only gh faked (it records every call and the expected head of the merge); git runs for real on a local fixture.
- * a0: ready → updating (update-branch: the PR head becomes reviewed + a pure main merge) → inspect throws → unknown → PM resolves
- * cancelled → unfreeze → workflow-resume → a1.
- * Old code: a1 at ready reads the moved head → unknown, queue frozen again. New code: a1 writes review_carry (priorIntent a0) and
- * goes to await_ci; CI green → merged pinned to the new head; the queue is never frozen. Ledger-level rules:
- * tests/scheduler-merge-ready-carry-ledger.test.ts.
+ * MCRY2 · PMDIR1 (10-07) wired as src/scheduler.ts runs it: read-only LedgerReader, every write the real ledger CLI child (scheduler
+ * identity + lease, temp HOME / TMPDIR / state dir), production mergeExternal with only gh faked (calls and merge head recorded).
+ * a0: ready → updating → inspect throws → unknown → PM cancels, unfreezes, resumes → a1 carries the update-branch at ready, or
+ * goes back to review when the ledger refuses, never freezing the queue. Ledger rules: tests/scheduler-merge-ready-carry-ledger.test.ts.
  */
 import { afterAll, afterEach, beforeAll, expect, setSystemTime, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -73,6 +69,7 @@ let cleanup: (() => void)[] = [];
 afterEach(() => { setSystemTime(); for (const c of cleanup.splice(0).reverse()) c(); });
 
 const passing = { stdout: JSON.stringify([{ name: "check", bucket: "pass" }]), stderr: "", code: 0 };
+const failing = { stdout: JSON.stringify([{ name: "check", bucket: "fail" }]), stderr: "", code: 1 };
 const broken = { stdout: "", stderr: "HTTP 502: Bad Gateway\n", code: 1 }; // the read right after update-branch fails
 
 async function setup(updateTo: () => string) {
@@ -129,7 +126,7 @@ async function setup(updateTo: () => string) {
   };
 
   // Fake gh: GitHub's answers this tick, every call recorded. Git runs for real (fetch served from the local bare repo).
-  const gh = { head: reviewed, behind: 1, checks: passing, merged: false, calls: [] as string[] };
+  const gh = { head: reviewed, behind: 1, checks: passing, merged: false, mergeState: "CLEAN", calls: [] as string[] };
   const command: typeof runBounded = async (argv, opts) => {
     const ok = (stdout: unknown) => ({ code: 0, stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout), stderr: "", timedOut: false });
     if (argv[0] === "git") return runBounded(argv[1] === "fetch" ? argv.map((a) => (a === "origin" ? join(root, "origin.git") : a)) : argv, opts);
@@ -137,7 +134,7 @@ async function setup(updateTo: () => string) {
     gh.calls.push(a);
     if (a.startsWith("repo view")) return ok({ nameWithOwner: "example/repo" });
     if (a.startsWith("pr view")) return ok({ state: gh.merged ? "MERGED" : "OPEN", headRefOid: gh.head, headRefName: `task/${ID}`, baseRefName: "main",
-      isDraft: false, isCrossRepository: false, mergeStateStatus: gh.merged ? "UNKNOWN" : "CLEAN", mergeCommit: gh.merged ? { oid: M } : null });
+      isDraft: false, isCrossRepository: false, mergeStateStatus: gh.merged ? "UNKNOWN" : gh.mergeState, mergeCommit: gh.merged ? { oid: M } : null });
     if (a.startsWith("pr checks")) return { timedOut: false, ...gh.checks };
     if (a.startsWith("api repos/example/repo/compare/")) return ok({ behind: gh.head === reviewed ? gh.behind : 0, main });
     if (a === `pr update-branch ${PR}`) { gh.head = updateTo(); gh.checks = broken; return ok(""); }
@@ -216,3 +213,21 @@ test("MCRY2 反例：上一次尝试没走到 updating（PR 上的纯 main 合�
   expect(getMergeRun(s.db, "a1")?.reason).toMatch(/跨尝试沿用被台账拒绝.*没有由调度器从 ready 发出 update-branch/);
   expect(s.sent()).toEqual([]);
 }, 180_000);
+
+// The ledger's refusal is judged before any CI / mergeability gate, so a red, blocked or still-computing PR cannot freeze the queue.
+for (const [name, mergeState, checks] of [["UNSTABLE + 失败的 check", "UNSTABLE", failing], ["BLOCKED", "BLOCKED", failing],
+  ["UNKNOWN（mergeability 未算出）", "UNKNOWN", passing]] as const) {
+  test(`MCRY2 反例：别人推的纯 main 合并 + ${name} → 台账拒沿用在先，a1 回 review，不冻结、不合并`, async () => {
+    const s = await setup(() => merged);
+    await s.plan("a0");
+    s.gh.checks = broken;
+    await s.tick();
+    s.recover("a0");
+    await s.plan("a1");
+    Object.assign(s.gh, { head: merged, checks, mergeState });
+    await s.tick();
+    expect(s.state("a1")).toMatchObject({ phase: "await_review", frozen: false, stage: "review", head: merged });
+    expect(getMergeRun(s.db, "a1")?.reason).toMatch(/跨尝试沿用被台账拒绝.*没有由调度器从 ready 发出 update-branch/);
+    expect(s.sent()).toEqual([]);
+  }, 180_000);
+}
