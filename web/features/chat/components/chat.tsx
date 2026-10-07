@@ -1,6 +1,6 @@
 "use client";
 import { AgentTitle } from "./agent-title";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { closingCollab, CollabSwitch } from "@/features/collab/collab-switch";
 import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store";
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
@@ -218,12 +218,13 @@ function TopBar() {
 }
 
 /** 聊天主区（顶栏 + 对齐横幅 + 消息 + 输入框）套一层错误兜底：切会话即重试（components/boundaries.tsx） */
-function ChatMain() {
+function ChatMain({ notices }: { notices?: ReactNode }) {
   const active = useChatStore((s) => s.state.activeAgent);
   const { toList } = useChatNav();
   return (
     <ChatPaneBoundary resetKey={active} onBack={toList}>
       <TopBar />
+      <div className="shrink-0">{notices}</div>
       {/* 对齐横幅锚点:零高度 relative 壳,chip 绝对定位悬浮在消息区顶部,不产生布局位移。⚠ 不能 fixed——本容器在横滑 transform 内(规则 5b) */}
       <div className="relative">
         <SyncBanner />
@@ -235,7 +236,7 @@ function ChatMain() {
   );
 }
 
-function ChatInner() {
+function ChatInner({ notices }: { notices?: ReactNode }) {
   const store = useChatStoreApi();
   const agents = useChatStore((s) => s.state.agents);
   const activeAgent = useChatStore((s) => s.state.activeAgent);
@@ -615,7 +616,7 @@ function ChatInner() {
 
           <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
             <CollabSwitch />
-            <ChatMain />
+            <ChatMain notices={notices} />
           </main>
         </div>
         </div>
@@ -627,10 +628,10 @@ function ChatInner() {
   );
 }
 
-export function Chat() {
+export function Chat({ notices }: { notices?: ReactNode }) {
   return (
     <ChatStoreProvider>
-      <ChatInner />
+      <ChatInner notices={notices} />
       <DevToolsMount />
     </ChatStoreProvider>
   );
