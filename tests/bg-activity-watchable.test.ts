@@ -20,9 +20,10 @@ describe("isCcSessionAgent（bg-activity 与 model-drift 共用）", () => {
     expect(isCcSessionAgent({ ...base, runtime: "claude-code" })).toBe(true);
   });
 
-  test("pi / codex 排除", () => {
+  test("pi / codex / 未知的非空 runtime 排除", () => {
     expect(isCcSessionAgent({ ...base, runtime: "pi" })).toBe(false);
     expect(isCcSessionAgent({ ...base, runtime: "codex" })).toBe(false);
+    expect(isCcSessionAgent({ ...base, runtime: "future-runtime" })).toBe(false);
   });
 
   test("缺 channelId / sessionId / cwd 排除", () => {

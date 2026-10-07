@@ -166,18 +166,19 @@ const MISS_TTL_MS = 60_000;
 // 同时记 projects 根目录的 mtime：新建项目目录（会话搬进新 worktree）会改它，这时立刻重扫，不等 60 秒
 const misses = new Map<string, { until: number; rootMtime: number }>();
 
-function dirMtime(dir: string): number {
-  try { return statSync(dir).mtimeMs; } catch { return -1; /* 不存在 / 读不了：记 -1，之后出现即与之不等，触发重扫 */ }
+function dirMtime(dir: string): number | null {
+  try { return statSync(dir).mtimeMs; } catch { return null; /* 不存在 / 读不了：调用方当没找到、不进缓存，下轮重试（一次 stat，不 readdir） */ }
 }
 
 /** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session。没找到的 60 秒内直接返回 null，见 tests/jsonl-cost-miss-cache.test.ts */
 export function findJsonlBySessionId(sessionId: string, now = Date.now()): string | null {
   const root = join(process.env.HOME ?? "", ".claude", "projects");
   const rootMtime = dirMtime(root);
+  if (rootMtime === null) return null;
   const miss = misses.get(sessionId);
   if (miss && miss.until > now && miss.rootMtime === rootMtime) return null;
   let slugs: string[] = [];
-  try { slugs = rootMtime === -1 ? [] : readdirSync(root); } catch { return null; /* 读失败不进负缓存：可能是暂时性错误，下轮重试 */ }
+  try { slugs = readdirSync(root); } catch { return null; /* 读失败不进负缓存：可能是暂时性错误，下轮重试 */ }
   for (const slug of slugs) {
     const p = join(root, slug, sessionId + ".jsonl");
     if (existsSync(p)) { misses.delete(sessionId); return p; }

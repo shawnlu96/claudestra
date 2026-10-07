@@ -89,4 +89,13 @@ describe("findJsonlBySessionId 负缓存", () => {
     writeFileSync(join(dir, ".claude", "projects", "slug-b", `${sid}.jsonl`), "{}\n");
     expect(findJsonlBySessionId(sid, 6)).toBe(join(dir, ".claude", "projects", "slug-b", `${sid}.jsonl`));
   });
+
+  test("stat 失败（projects 不存在）不进缓存", () => {
+    dir = mkdtempSync(join(tmpdir(), "jsonl-miss-"));
+    mkdirSync(join(dir, ".claude"));
+    process.env.HOME = dir;
+    const before = jsonlMissCacheSizeForTest();
+    expect(findJsonlBySessionId(`stat-fail-${crypto.randomUUID()}`, 1000)).toBeNull();
+    expect(jsonlMissCacheSizeForTest()).toBe(before);
+  });
 });

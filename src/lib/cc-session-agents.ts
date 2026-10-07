@@ -1,4 +1,4 @@
-import { agentRuntime, readActiveAgents, type RegistryAgent } from "./registry.js";
+import { readActiveAgents, type RegistryAgent } from "./registry.js";
 
 export type CcSessionAgent = RegistryAgent & { cwd: string; sessionId: string; channelId: string };
 
@@ -7,7 +7,8 @@ export type CcSessionAgent = RegistryAgent & { cwd: string; sessionId: string; c
  * 全库扫描（Bun 1.3.14 下还漏原生内存，BML-1），所以按会话文件轮询的 watcher 只看这些。见 tests/bg-activity-watchable.test.ts
  */
 export function isCcSessionAgent(a: RegistryAgent): a is CcSessionAgent {
-  return Boolean(a.channelId && a.sessionId && a.cwd) && agentRuntime(a) === "claude-code";
+  // 不用 agentRuntime()：它把未知 runtime 也归成 claude-code，新运行时会被当成 CC 扫描、重走泄漏路径
+  return Boolean(a.channelId && a.sessionId && a.cwd) && (!a.runtime || a.runtime === "claude-code");
 }
 
 export async function readCcSessionAgents(registryPath?: string): Promise<CcSessionAgent[]> {
