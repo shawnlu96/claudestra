@@ -104,14 +104,35 @@ export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]
   return { kind: dispatchKindFor(events, review.seq, review.data.round), verdict, p0: num(review.data.p0), p1: num(review.data.p1) };
 }
 
+/** 作者家族：最近一次流程设置（scheduler workflow 事件）记的 authorFamily；没记为 null */
+const authorFamily = (events: readonly LedgerEvent[]): string | null => {
+  const w = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow" && typeof e.data.authorFamily === "string");
+  return w ? String(w.data.authorFamily) : null;
+};
+
 /**
- * 这条 review 还清了第 round 轮的对抗式：对抗式轮的 pass 或 PM 的豁免（review --waive adversarial），并且
+ * 调度器派的跨族对抗审查单交回的结论（自动卡不写 dispatch 事件）：data.orderId 是本轮的 adversarial_review 单、
+ * 审查员与作者不同家族（sameFamily=false；没记或记 null 时比 reviewerFamily 与作者家族），且审的 head 就是当时卡上的 head。
+ * 同家族豁免轮（sameFamily=true）不算，否则 MODELX 豁免会被当成跨族对抗式放进 merge（tests/ledger-handler.test.ts）
+ */
+function schedulerAdversarial(e: LedgerEvent, events: readonly LedgerEvent[]): boolean {
+  const m = typeof e.data.orderId === "string" ? /:r(\d+):adversarial_review:a\d+$/.exec(e.data.orderId) : null;
+  if (!m || Number(m[1]) !== e.data.round) return false;
+  const { sameFamily, reviewerFamily } = e.data;
+  const author = authorFamily(events);
+  const cross = sameFamily === false || (sameFamily == null && typeof reviewerFamily === "string" && !!author && reviewerFamily !== author);
+  return cross && typeof e.data.head === "string" && !!e.data.head && sameHead(e.data.head, headAt(events, e.seq));
+}
+
+/**
+ * 这条 review 还清了第 round 轮的对抗式：对抗式轮（dispatch 记的，或调度器的跨族对抗审查单）的 pass 或 PM 的豁免（review --waive adversarial），并且
  * ① 就在第 round 轮；② 之后的每次交付都带着同一个非空 head（不带 head 的交付说不清换没换代码，算重新欠）；
  * ③ 当前 head（之后 task-set 改过也算）还是它审的那个。
  */
 function settles(e: LedgerEvent, events: readonly LedgerEvent[], round: number): boolean {
   if (e.kind !== "review" || e.data.verdict !== "pass" || e.data.round !== round) return false;
-  if (e.data.waive !== "adversarial" && dispatchKindFor(events, e.seq, e.data.round) !== "adversarial") return false;
+  const adversarial = e.data.waive === "adversarial" || dispatchKindFor(events, e.seq, e.data.round) === "adversarial" || schedulerAdversarial(e, events);
+  if (!adversarial) return false;
   const head = headAt(events, e.seq);
   const later = deliveredBetween(events, e.seq, Infinity);
   if (later.some((d) => !head || typeof d.data.headSHA !== "string" || !d.data.headSHA || !sameHead(d.data.headSHA, head))) return false;

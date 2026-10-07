@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getMergeRun, advanceMergeRun, carryReceipt } from "../src/lib/scheduler-merge.js";
+import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 import { ciRerunGh } from "../src/lib/scheduler-merge-ci-rerun.js";
 import { BEHIND_SETTLE_MS, behindReceipt, ciBehindGh, parseBehindReceipt } from "../src/lib/scheduler-merge-ci-behind.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
@@ -63,7 +64,9 @@ const snapOf = (head: string, bucket: "fail" | "pending", link = RUN): PrSnapsho
 const CARRY_OK = { ok: true, reason: "净 diff 一致", mainParent: FIX, mainHead: FIX, diffHash: "9".repeat(64) };
 
 /** The deploy kit's card, put back to `await_ci` on its reviewed head before any merge was sent. */
-function card(over: Partial<Gh> = {}, carry: MergeExternal["carryReview"] = async () => CARRY_OK) {
+/** MAINP2: the carry the proof returns now carries its one-hop chain, which the merge step persists. */
+function card(over: Partial<Gh> = {}, carry: MergeExternal["carryReview"] = async (_pr, previousHead, head) =>
+  ({ ...CARRY_OK, chain: [{ previousHead, head, mainParent: FIX }] })) {
   const c = mergedCard();
   c.db.query("UPDATE scheduler_merges SET phase='await_ci', mergeSha=NULL WHERE intentId=?").run(c.intent);
   let snap = snapOf(HEAD, "fail");
@@ -224,7 +227,8 @@ describe("i28-CIF2 merge gate merges main in when CI is red only on tests main a
       expect([settling.phase, settling.rev]).toEqual(["updating", 5]);
       // Carried to the merged head, the run is back in await_ci; a fresh claim there is refused into the bounce.
       advanceMergeRun(c.db, sch, { intentId: c.intent, from: "updating", to: "await_ci", rev: 5, newHead: NEW,
-        receipt: carryReceipt({ oldHead: HEAD, newHead: NEW, mainParent: FIX, mainHead: FIX, diffHash: "9".repeat(64) }) });
+        receipt: carryReceipt({ oldHead: HEAD, newHead: NEW, mainParent: FIX, mainHead: FIX, diffHash: "9".repeat(64) })
+          + carryChainSuffix([{ previousHead: HEAD, head: NEW, mainParent: FIX }]) });
       const again = advanceMergeRun(c.db, sch, { intentId: c.intent, from: "await_ci", to: "resolved", rev: 6,
         receipt: behindReceipt({ prHead: NEW, mainHead: FIX, link: RUN2, checks: ["ci"], files: { [STALE]: ["fff"] } }) });
       expect(again.phase).toBe("resolved");
@@ -264,7 +268,8 @@ describe("i28-CIF2 the merged-in head keeps its review only when the PR side did
     work = join(root, "work");
     await runBounded(["git", "init", "-q", "--bare", "-b", "main", join(root, "origin.git")], { timeoutMs: 30_000 });
     await runBounded(["git", "init", "-q", "-b", "main", work], { timeoutMs: 30_000 });
-    await sh("remote", "add", "origin", join(root, "origin.git"));
+    await sh("remote", "add", "origin", "https://github.com/example/repo.git"); // MAINP2: the proof binds origin to the PR's repository
+    await sh("remote", "set-url", "--push", "origin", join(root, "origin.git"));
     await commitFile(STALE, "expect(window).toBe('2026-10-02T19:00')\n", "base");
     await sh("push", "-q", "origin", "main");
     await sh("checkout", "-q", "-b", "feature");
@@ -286,8 +291,11 @@ describe("i28-CIF2 the merged-in head keeps its review only when the PR side did
       FROM events WHERE target='T9' AND kind='review'`).run(reviewed); // events are append-only: the same review, on the real head
     c.setSnap(snapOf(reviewed, "fail"));
   };
+  /** The network fetch is served from the local bare repo; everything else is real local git. */
+  const localFetch: typeof runBounded = (argv, opts) =>
+    runBounded(argv[0] === "git" && argv[1] === "fetch" ? argv.map((a) => (a === "origin" ? join(root, "origin.git") : a)) : argv, opts);
   const carry: MergeExternal["carryReview"] = (pr, oldHead, newHead) =>
-    mergeExternal(parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: work } } }).projects.p!)
+    mergeExternal(parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["ci"], repoDir: work } } }).projects.p!, localFetch)
       .carryReview(pr, oldHead, newHead);
 
   test("first parent = reviewed head, only main merged in → no re-review, the run waits on the new head's CI", async () => {

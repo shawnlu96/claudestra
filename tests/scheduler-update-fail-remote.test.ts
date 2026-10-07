@@ -3,7 +3,8 @@
  * 父进程在模块顶层并行起两套子进程（外加改坏断言、setup 失败重启各一条）再逐条核结果，不碰本进程的 module cache / STATE。
  */
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditLedger } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
@@ -118,14 +119,16 @@ if (!child) {
   const neighborKey = crypto.randomUUID();
   neighbor.db.run("INSERT INTO meta (project, key, value) VALUES ('updtest', ?, ?)", [`nonce:${neighborKey}`, neighborKey]);
   const stateDir = process.env.CLAUDESTRA_STATE_DIR!;
-  const stateBefore = readdirSync(stateDir).sort();
+  // The process STATE is shared with every other test file in this bun process (and their delayed async writes), so it is no
+  // evidence of pollution. The children's launcher gets this run's own STATE instead: only this run can write it, so it must stay empty.
+  const parentState = mkdtempSync(join(tmpdir(), "updtest-parent-state-"));
   const envBefore = JSON.stringify(process.env);
-  afterAll(() => neighbor.close());
+  afterAll(() => { neighbor.close(); rmSync(parentState, { recursive: true, force: true }); });
   // Top level, not inside a test: the children's spawn time never counts against a test timeout.
-  const set = () => Promise.all(MODES.map((mode) => runChild(mode)));
-  const [setA, setB, corrupted] = await Promise.all([set(), set(), runChild("plain", "corrupt")]);
-  const failedSetup = await runChild("hex", "failSetup");
-  const restarted = await runChild("hex");
+  const set = () => Promise.all(MODES.map((mode) => runChild(mode, null, parentState)));
+  const [setA, setB, corrupted] = await Promise.all([set(), set(), runChild("plain", "corrupt", parentState)]);
+  const failedSetup = await runChild("hex", "failSetup", parentState);
+  const restarted = await runChild("hex", null, parentState);
 
   for (const [i, mode] of MODES.entries()) {
     test(`GitHub update refusal: ${mode}（私有子进程，两套并行）`, () => {
@@ -144,12 +147,13 @@ if (!child) {
       expect(x.nonces).toEqual([x.nonce]);
       expect(x.ledger.startsWith(neighbor.dir)).toBe(false);
       expect(x.state).not.toBe(stateDir);
+      expect(x.state).not.toBe(parentState);
     }
     const keys = (neighbor.db.query("SELECT value FROM meta WHERE project = 'updtest'").all() as { value: string }[]).map((r) => r.value);
     expect(keys).toEqual([neighborKey]);
     expect(neighbor.task()).toMatchObject({ id: "T1", stage: "spec" });
     expect(existsSync(neighbor.dir)).toBe(true);
-    expect(readdirSync(stateDir).sort()).toEqual(stateBefore);
+    expect(readdirSync(parentState)).toEqual([]);
     expect(JSON.stringify(process.env)).toBe(envBefore);
   });
 

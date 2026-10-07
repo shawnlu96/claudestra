@@ -6,6 +6,7 @@
  * and when main touched a file the PR changed. tests/scheduler-merge-handoff-carry.test.ts.
  */
 import { createHash } from "node:crypto";
+import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
 import type { runBounded } from "./run-bounded.js";
 import type { ReviewCarry } from "./scheduler-merge-driver.js";
 
@@ -27,8 +28,8 @@ export class CarryUndecidable extends Error {}
  * the patch, so every path's modes and full object ids are in the text whatever the patch format does or the decoding loses.
  */
 async function netDiff(git: Git, base: string, head: string): Promise<string> {
-  const out = await git("-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames", "--binary",
-    "--full-index", "--ignore-submodules=none", "--no-relative", "--submodule=short", "--raw", "--patch", "--no-abbrev", `${base}...${head}`);
+  const out = await git("-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--binary",
+    "--full-index", ...WHOLE_DIFF_ARGS, "--submodule=short", "--raw", "--patch", "--no-abbrev", `${base}...${head}`);
   if (Buffer.byteLength(out) >= DIFF_LIMIT) throw new CarryUndecidable("净 diff 太大，无法逐字核对");
   return out;
 }

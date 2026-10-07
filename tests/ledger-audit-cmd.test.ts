@@ -1,7 +1,7 @@
 /** 台账巡检的取数（lib/ledger-audit-snapshot.ts）、CLI（ledger audit）与 bridge 定时器（bridge/ledger-audit-service.ts） */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ledgerAuditTicker, type LedgerAuditDeps } from "../src/bridge/ledger-audit-service.js";
@@ -20,6 +20,7 @@ import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { isWriteInvocation } from "../src/manager/write-commands.js";
 import { baselineAudit, tempLedgerPath } from "./ledger-test-helpers.js";
+import { testChildEnv } from "./test-env.ts";
 
 const MIN = 60_000;
 const NOW = 1_000 * MIN;
@@ -336,17 +337,25 @@ describe("ledger audit 的权限与只读", () => {
 
   test("真实入口 --dry-run 用只读连接：巡检之前版本的库不被迁移（分支代码不会把线上库版本抬上去）", async () => {
     const state = mkdtempSync(join(tmpdir(), "ledger-audit-ro-"));
-    const raw = new Database(join(state, "ledger.sqlite"));
-    raw.exec("PRAGMA journal_mode = WAL");
-    // 用真实迁移建到「巡检之前」那一版（表齐、版本号对得上），只读侧才不会先撞上「版本号到了表却缺」
+    const file = join(state, "ledger.sqlite");
+    // 用真实迁移建到「巡检之前」那一版（表齐、版本号对得上），只读侧才不会先撞上「版本号到了表却缺」。
+    // 迁移函数 prepare 的语句不 finalize，建库连接 close() 关不掉：直接建在 file 上，本进程会一直连着子进程要读的库，
+    // 它延后真关（最后一个连接拿排它锁 checkpoint）撞上子进程只读连接 200ms 的 busy_timeout 就偶发 database is locked。
+    // 所以在内存库里迁移，VACUUM INTO 出一份本用例专用的副本，再用不留语句的连接切 WAL 并确认真关掉
+    const mem = new Database(":memory:");
     for (const step of LEDGER_MIGRATIONS.slice(0, AUDIT_SCHEMA_VERSION - 1)) {
-      if (typeof step === "function") step(raw);
-      else for (const sql of step) raw.prepare(sql).run();
+      if (typeof step === "function") step(mem);
+      else for (const sql of step) mem.prepare(sql).run();
     }
-    raw.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
-    raw.close();
-    const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
-    delete env.DISCORD_CHANNEL_ID;
+    mem.exec(`PRAGMA user_version = ${AUDIT_SCHEMA_VERSION - 1}`);
+    mem.prepare("VACUUM INTO ?").run(file);
+    const wal = new Database(file);
+    wal.exec("PRAGMA journal_mode = WAL");
+    wal.close(true);
+    // 本进程对库已经没有连接：最后一个连接关掉时 -wal 才会删
+    expect(existsSync(`${file}-wal`)).toBe(false);
+    // 子进程只拿本用例的目录与最小 env，不继承同进程别的测试文件改过的 process.env
+    const env = testChildEnv({ HOME: join(state, "home"), CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") });
     const proc = Bun.spawn([process.execPath, join(import.meta.dir, "../src/manager.ts"), "ledger", "audit", "--dry-run"], { env, stdout: "pipe", stderr: "pipe" });
     const out = JSON.parse((await new Response(proc.stdout).text()).trim().split("\n").at(-1) ?? "");
     expect(out).toMatchObject({ ok: true, dryRun: true });

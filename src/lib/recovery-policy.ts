@@ -20,12 +20,12 @@ import { statePath } from "./paths.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
 export const RECOVERY_POLICY_PATH = statePath("recovery-policy.json");
-type RecoveryMode = "on" | "observe" | "off";
+export type RecoveryMode = "on" | "observe" | "off";
 const RECOVERY_MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
 const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.includes(v as RecoveryMode);
 /** One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it. */
 export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit",
-  "placementReservations", "updateGap", "lendConfigFailure"] as const;
+  "placementReservations", "manualMergeQueue", "updateGap", "lendConfigFailure", "mainCarry", "lockYield", "authorRebuild"] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
 const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";
@@ -42,12 +42,13 @@ const publishedKey = (seq: number) => `${PUBLISHED_PREFIX}${seq}`;
 
 /** rev = seq of the audit whose change this entry is; written in the same atomic rename, so it is the proof of publish. */
 interface ProjectRecovery { mode?: RecoveryMode; manualStallHours?: number; keys?: Partial<Record<RecoveryKey, RecoveryMode>>; rev?: number }
-interface RecoveryFile { projects: Record<string, ProjectRecovery> }
+interface RecoveryFile { projects: Record<string, ProjectRecovery>; machine?: Record<string, unknown> }
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** Strict: unknown names and bad values make the whole file invalid, so a typo never silently means "observe". */
-function parseRecoveryFile(data: unknown): RecoveryFile {
-  if (!isObj(data) || !isObj(data.projects) || Object.keys(data).some((k) => k !== "projects")) throw new Error("顶层要是 { projects: {...} }");
+function parseRecoveryFile(data: unknown, parseMachine?: (m: Record<string, unknown>) => unknown): RecoveryFile {
+  if (!isObj(data) || !isObj(data.projects) || Object.keys(data).some((k) => k !== "projects" && k !== "machine")) throw new Error("顶层要是 { projects: {...}, machine?: {...} }");
+  if (data.machine !== undefined) { if (!isObj(data.machine)) throw new Error("machine 要是对象"); parseMachine?.(data.machine); } // LCFG1W: recovery-machine-policy.ts
   for (const [id, p] of Object.entries(data.projects)) {
     if (!isObj(p) || Object.keys(p).some((k) => !["mode", "manualStallHours", "keys", "rev"].includes(k))) throw new Error(`项目 ${id} 只能有 mode / manualStallHours / keys / rev`);
     if (p.rev !== undefined && !(Number.isSafeInteger(p.rev) && (p.rev as number) >= 1)) throw new Error(`项目 ${id} 的 rev 要是正整数`);
@@ -61,11 +62,11 @@ function parseRecoveryFile(data: unknown): RecoveryFile {
 }
 
 type FileRead = { status: "missing" } | { status: "ok"; data: RecoveryFile; raw: string } | { status: "corrupt"; error: string };
-function readRecoveryFile(path: string): FileRead {
+function readRecoveryFile(path: string, parseMachine?: (m: Record<string, unknown>) => unknown): FileRead {
   let raw: string;
   try { raw = readFileSync(path, "utf8"); }
   catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? { status: "missing" } : { status: "corrupt", error: (e as Error).message }; }
-  try { return { status: "ok", data: parseRecoveryFile(JSON.parse(raw)), raw }; }
+  try { return { status: "ok", data: parseRecoveryFile(JSON.parse(raw), parseMachine), raw }; }
   catch (e) { return { status: "corrupt", error: (e as Error).message }; }
 }
 
@@ -263,7 +264,7 @@ export async function setRecovery(db: Database, ctx: WriteCtx, input: { project:
       const ev = appendEvent(db, ctx, { project, target: "", kind: "decision", text: reason, data: { op: RECOVERY_OP, from, to, publish: "prepared" } });
       if (ev.duplicate) throw new LedgerError("dedup_mismatch", `dedupKey ${ctx.dedupKey} 已被别的动作用过`);
       if (!lock.held()) throw new LedgerError("busy", `提交前发现 ${path} 的锁已被别人回收，这次没改，重试即可`);
-      text = JSON.stringify({ projects: { ...doc.projects, [project]: { ...next, rev: ev.event.seq } } }, null, 2) + "\n";
+      text = JSON.stringify({ ...doc, projects: { ...doc.projects, [project]: { ...next, rev: ev.event.seq } } }, null, 2) + "\n";
       return { project, from, to, changed: true, duplicate: false, event: ev.event.seq, path };
     });
     if (text === null) return r;
@@ -305,3 +306,5 @@ export function observedRecent(db: Database, project: string, last: number) {
     return { seq: r.seq, at: new Date(r.ts).toISOString(), target: r.target, mechanism: d.mechanism ?? "", text: r.text };
   });
 }
+// LCFG1W wiring: the machine namespace (recovery-machine-policy.ts) reuses this file's reader, lock-checked writer and settle notes.
+export { commit as commitRecoveryFile, isRecoveryMode, publishedKey as recoveryPublishedKey, RECOVERY_MODES, readRecoveryFile, settleNote as settleRecoveryNote, voidKey as recoveryVoidKey };
