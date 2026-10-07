@@ -127,7 +127,10 @@ async function recognize(db: Database, task: LedgerTask, sent: SchedulerIntent, 
     isPolicyRefusal(cardMessage(a)));
   // 卡缺会话 / 时刻、又开在唤醒之前时进不了候选，但 observe 已带着这条拒审：关联不上，按疑似报警
   if (!refusals.length) return unattributedRefusal(seen) ? { kind: "suspected", note: `${SUSPECT_NOTE}（宿主报了归不到单的策略拒审）` } : null;
-  const card = refusals[0];
+  // 绑定会话上失败最晚的那张（按 failedAt，不按写卡先后：早失败晚写卡不能遮住真正最后一次拒审）；没有才退回最新写的卡
+  const failedAt = (a: Ask): number => typeof a.extra.failedAt === "number" && Number.isFinite(a.extra.failedAt) ? a.extra.failedAt : -Infinity;
+  const card = refusals.filter((a) => a.extra.sessionId === ref.sessionId && failedAt(a) > -Infinity)
+    .reduce<Ask | undefined>((m, a) => !m || failedAt(a) > failedAt(m) ? a : m, undefined) ?? refusals[0];
   const row = getSchedulerSession(db, task.id, "reviewer");
   const why = row?.state !== "active" || row.sessionId !== ref.sessionId ? "审查绑定已变"
     : seen.state === "running" && seen.busy ? "会话正在跑新的回合"

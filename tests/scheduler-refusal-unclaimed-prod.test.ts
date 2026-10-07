@@ -324,6 +324,26 @@ for (const c of CLOSED) test(`MODELXW3 旧红新绿（N3，拒审卡已关：${c
   expect(s.f.notices.filter((n) => n.includes("还没人领"))).toEqual([]);
 }, 120_000);
 
+test("MODELXW3 旧红新绿（r1 审查 latest-failure-created-earlier）：同会话早失败晚写卡不遮住最后一次拒审 → 按 failedAt 取卡，正式退休旧绑定", async () => {
+  const s = await setup();
+  const old = await legacyCard(s);
+  const done = deliveredAt(s.f, old.id);
+  const a = refusalCard(s.f, { failedAt: done + 100 });
+  closeAsk(s.f.db, a.id, "cancelled", "owner 在网页上删除");
+  const b = refusalCard(s.f, { failedAt: done + 50 });
+  s.f.db.run("UPDATE asks SET createdAt = ? WHERE id = ?", [a.createdAt + 100, b.id]); // 较早的失败晚到写卡
+  rollout(s.f, done + 99);
+  s.wait(UNCLAIMED_ALARM_MS + 60_000);
+  // 旧代码：按 createdAt 取到 B，被 A 的更晚 failedAt 否决 → 只有未领单报警（step waiting），reviewer_swap 为空
+  expect(await s.tick()).toMatchObject({ step: "legacy_review" });
+  expect(getEventByDedup(s.f.db, unclaimedKey(old.id))).toBeNull();
+  expect(s.ops("reviewer_swap")).toMatchObject([{ actor: "scheduler", data: { legacy: true, intentId: old.id, sessionId: RV } }]);
+  expect(s.ops("reviewer_swap")[0].data.refusal).toBeUndefined();
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ sessionId: RV, state: "retired" });
+  expect(s.f.db.query("SELECT id, state FROM asks WHERE source = 'codex' ORDER BY id").all())
+    .toEqual([{ id: a.id, state: "cancelled" }, { id: b.id, state: "open" }].sort((x, y) => x.id < y.id ? -1 : 1)); // 不改卡
+}, 120_000);
+
 for (const c of [
   { name: "rollout 在 failedAt 之后有 task_started", why: "拒审之后会话还有别的回合", prep: (s: Setup, failedAt: number, id: string) => {
     s.f.db.run("UPDATE asks SET state = 'cancelled' WHERE id = ?", [id]);
