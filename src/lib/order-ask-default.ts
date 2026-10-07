@@ -18,6 +18,7 @@ import { getMeta, getTask } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
 import { appendDefaultSpec, prepareDefaultSpec, SpecBusy, SpecReplan, testScopeFiles } from "./order-ask-default-spec.js";
 import { askNoticeText } from "./order-ask.js";
+import { agentName, isPmParentAsk } from "./order-ask-pm-reply.js";
 import { ASK_SCOPE_REASONS, type AskScopeReason } from "./order-wire.js";
 
 export const ASK_DEFAULT_MS = 15 * 60_000;
@@ -193,11 +194,10 @@ export async function sweepAskDefaults(db: Database, now = Date.now(), deps: Swe
   return count;
 }
 
-const agentName = (s: string | null): string | null => s && (s.startsWith("agent-") || s === "master" ? s : `agent-${s}`);
-
 /**
  * PM 用 send_to_agent 回了：发送方是 bridge 验证过的身份、是这张卡的 PM，目标是提问的执行者（ask 开出时已按当前的单核过），
- * 正文带 `ask <id>`，才把那一条记成「PM 已回复」。没带 id 不关任何 ask。在投递成功之后调；永不抛出，不连累消息本身。
+ * 正文带 `ask <id>`，才把那一条记成「PM 已回复」。认的提问：autoAsk 两类，加上执行者问本卡 PM 的 decide（ASKPM1，order-ask-pm-reply.ts）。
+ * 没带 id 不关任何 ask。在投递成功之后调；永不抛出，不连累消息本身。
  */
 export function recordDefaultPmReply(dbOf: () => Database | null, who: Pick<CallerIdentity, "verified" | "agent">,
   target: unknown, body: unknown, now = Date.now()): string[] {
@@ -210,7 +210,7 @@ export function recordDefaultPmReply(dbOf: () => Database | null, who: Pick<Call
       const closed: string[] = [];
       for (const id of ids) {
         const a = getAsk(db, id);
-        if (!a || a.state !== "open" || !autoAsk(db, a) || agentName(a.fromAgent) !== agentName(target)) continue;
+        if (!a || a.state !== "open" || !(autoAsk(db, a) || isPmParentAsk(a, who.agent as string)) || agentName(a.fromAgent) !== agentName(target)) continue;
         const task = a.taskId ? getTask(db, a.taskId) : null;
         if (!task || agentName(task.pm ?? getMeta(db, task.project).pms[0] ?? null) !== agentName(who.agent)) continue;
         answerAsk(db, a.id, { choices: [], labels: ["PM 已回复"], text: body, principal: who.agent as string, via: "terminal", at: now, final: true });
