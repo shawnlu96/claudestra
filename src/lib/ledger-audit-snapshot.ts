@@ -240,6 +240,15 @@ export function readLendGrantBaseline(db: Database, project: string): string[] |
     return null;
   }
 }
+/** LGR1：本项目已推过（notifiedAt / queuedAs）又已关掉的授权发现 key（只读）——同一次授权不重开重推；读不了 = null（规则这轮不跑） */
+export function readLendGrantTold(db: Database, project: string): string[] | null {
+  try {
+    return (db.query(`SELECT key FROM audit_findings WHERE project = ? AND resolvedAt IS NOT NULL AND (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL)
+      AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`).all(project, ...LEND_GRANT_RULES) as { key: string }[]).map((r) => r.key);
+  } catch {
+    return null;
+  }
+}
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
@@ -291,6 +300,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
       mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
+      lendGrantTold: readLendGrantTold(db, project),
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,

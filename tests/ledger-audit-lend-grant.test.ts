@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { auditLedger, type AuditSnapshot } from "../src/lib/ledger-audit.js";
 import { grantUntilOf, LEND_GRANT_RULES, localTime } from "../src/lib/ledger-audit-lend-grant.js";
-import { readLendGrantBaseline, readLendGrants, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
+import { readLendGrantBaseline, readLendGrants, readLendGrantTold, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
 import { ackFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
@@ -41,7 +41,8 @@ const order = (at: number, status = "claimed", project = P, peer = PEER) => db.p
   .run(`o${++n}`, `T${n}`, project, peer, status, at, at);
 
 const snap = (now: number, lendGrantBaseline: readonly string[] | null = readLendGrantBaseline(db, P)): AuditSnapshot => ({ project: P, pms: [PM], tasks: [],
-  agents: [], reviewers: [], held: [], ownerInbox: [], lendGrants: readLendGrants(db, P, now), lendGrantBaseline } as AuditSnapshot);
+  agents: [], reviewers: [], held: [], ownerInbox: [], lendGrants: readLendGrants(db, P, now), lendGrantBaseline,
+  lendGrantTold: readLendGrantTold(db, P) } as AuditSnapshot);
 /** 纯规则：基线按已建好算 */
 const grantFindings = (now: number) => auditLedger(snap(now, LEND_GRANT_RULES), now).findings.filter((f) => (LEND_GRANT_RULES as readonly string[]).includes(f.rule));
 /** 一轮巡检落库，返回这一轮要推的（推完 ack，同 bridge 的推送路径） */
@@ -71,15 +72,14 @@ describe("first run is not silenced (no pre-built baseline)", () => {
     ["until passed an hour ago", () => setPeer(NOW - HOUR, NOW - 30 * MIN), "lend_grant_gone"],
   ];
   for (const [name, seed, rule] of cases) {
-    test(`${name} on a ledger that never ran these rules → told once (one round later), not silenced`, async () => {
+    test(`${name} on a ledger that never ran these rules → told once on that very round, not silenced`, async () => {
       setMeta(db, { actor: "owner", now: 0 }, { project: P, key: "pms", value: [PM] });
       seed();
       order(NOW - 14 * HOUR, "done");
-      expect(await cli(NOW)).toEqual([]); // 这一轮只建基线，不出发现（也就没东西可被静默）
-      expect(db.query("SELECT COUNT(*) AS n FROM audit_findings WHERE rule LIKE 'lend_grant%'").get()).toEqual({ n: 0 });
-      const told = await cli(NOW + 15 * MIN);
+      const told = await cli(NOW); // 没有基线：发现照出、规则不进 evaluated，不会被首轮静默
       expect(told).toHaveLength(1);
       expect(told[0]).toMatchObject({ rule, notify: PM });
+      expect(await cli(NOW + 15 * MIN)).toEqual([]);
       expect(await cli(NOW + 30 * MIN)).toEqual([]);
     });
   }
