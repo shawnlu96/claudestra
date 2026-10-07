@@ -14,7 +14,7 @@ import {
   type SharedLedgerJoinGrant, type SharedLedgerJoinRequest,
 } from "./shared-ledger-join-protocol.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
-import { type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
+import { resolveSharedLedgerCredential, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 
 /** The pure protocol lives in shared-ledger-join-protocol.ts; these names stay importable from here. */
 export {
@@ -111,6 +111,8 @@ export async function joinSharedLedger(input: SharedLedgerJoinInput): Promise<Sh
   }
   let saved: { localProjectId: string; identities: number };
   try {
+    // Reject unreadable existing credentials before staging; the saver repeats this under its locks.
+    resolveSharedLedgerCredential(input.subject, credential.kind, credential.centerId, credential.teamId, project.projectId, "read", dir);
     saved = await saveSharedLedgerProjectJoin(credential, { centerId: credential.centerId, teamId: credential.teamId,
       projectId: project.projectId, localProjectId: input.localProjectId ?? project.projectId }, input.create ? display : undefined, dir);
   } catch { throw new SharedLedgerJoinError("local project enrollment failed; nothing was saved"); }

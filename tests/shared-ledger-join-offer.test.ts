@@ -10,6 +10,7 @@ import type { HttpPeer } from "../src/lib/peers.js";
 import type { Principal } from "../src/lib/principals.js";
 import { joinSharedLedger, parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join.js";
 import { centerOfferUrl, pendingOfferDir, readPendingOffer, savePendingOffer } from "../src/lib/shared-ledger-join-offer.js";
+import { writeProjects } from "../src/lib/projects.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { DECLINE_BUTTON, JOIN_BUTTON, onJoinOfferAnswered, sweepJoinOffers } from "../src/bridge/shared-ledger-join-offer.js";
 import { handleJoinOfferApi, type JoinOfferRouteDeps } from "../src/bridge/local-api/shared-ledger-join-offer.js";
@@ -85,6 +86,7 @@ function world(peerName: string, centerFetch?: typeof fetch): World {
     getAsk: (id) => asks.find((a) => a.id === id) ?? null,
     closeAsk: (id) => { const a = asks.find((x) => x.id === id); if (a) a.state = "cancelled"; },
     join: async (url, code, localProjectId) => {
+      await writeProjects({ projects: (await deps.projects()).map(p => ({ id: p.id, name: p.name, dirs: [], createdAt: "" })) }, join(joinDir, "projects.json"));
       joins.push({ url, code });
       return joinSharedLedger({ url, code, key, instanceId: `instance-${peerName}`, subject: "owner:self", localProjectId, stateDir: joinDir, fetch: centerFetch ?? rewrite });
     },

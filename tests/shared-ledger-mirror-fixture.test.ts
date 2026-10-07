@@ -1,3 +1,4 @@
+import { writeProjects } from "../src/lib/projects.js";
 /** PJ1 fixtures: 本机 home ledger + a local migration journal as scripts/shared-ledger-import.ts leaves it after commit. */
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ export const SCRUB = { identity: { username: "pj1-user", hostname: "pj1-host" } 
 
 /** Leaves the mode as an import commit does: {source, sharedPlanning:true}, journal phase verified / receipt staged. */
 export async function commitJournal(f: ReturnType<typeof integrationFixture>, batchId: string, phase: "verified" | "active" = "verified", dir = STATE_DIR) {
+  await writeProjects({ projects: [{ id: f.project, name: f.project, dirs: [], createdAt: "" }] }, join(dir, "projects.json"));
   await writeSharedLedgerMode(f.id, { authorityMode: "source", sharedPlanning: true }, dir, f.db.filename);
   const { payload } = previewSharedLedgerExport(f.db, { localProject: f.project, projectId: CENTER.projectId, sourceInstanceId: CENTER.instanceId,
     featureIds: [f.id], batchId, stateDir: dir, scrub: SCRUB, summaries: { "c5-existing": { summary: "Existing work", digest: null } } });
