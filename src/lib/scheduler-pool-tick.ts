@@ -6,6 +6,8 @@
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { DEFAULT_REMOTE, type RemotePolicy } from "./scheduler-config.js";
+import { LedgerReader } from "./ledger-read.js";
+import { poolRefusalStep } from "./ledger-pool-refusal-tick.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -14,7 +16,11 @@ export interface PoolTickDeps {
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   /** Called when a lost notice must be logged; SchedulerStopped is rethrown by the caller's handler. */
   lost(what: string): (e: unknown) => void;
+  /** MODELXP2 读池单拒审事实的只读句柄；不给 = 本模块自己的只读 LedgerReader（同 scheduler.ts 的默认台账） */
+  db?: import("bun:sqlite").Database | null;
 }
+let reader: LedgerReader | null = null;
+const readDb = () => { try { return (reader ??= new LedgerReader()).get(); } catch { return null; } }; // 读不了 = 照旧走老路
 
 /** A policy that no longer pools still syncs an order already out; only the offer re-checks the mode. */
 const OFF: RemotePolicy = { mode: "off", roles: [], poolTimeoutMin: DEFAULT_REMOTE.poolTimeoutMin };
@@ -22,6 +28,9 @@ const OFF: RemotePolicy = { mode: "off", roles: [], poolTimeoutMin: DEFAULT_REMO
 export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: SchedulerIntent, maxWorkers: number,
   remote: RemotePolicy | undefined): Promise<{ step: string; detail: string }> {
   const r = remote ?? OFF;
+  const db = deps.db !== undefined ? deps.db : readDb(); // MODELXP2：镜像成 unknown 之前先接池单拒审
+  const refused = db ? await poolRefusalStep({ db, manager: deps.manager, localFamilies: r.localFamilies }, task, intent) : null;
+  if (refused) return refused;
   const res = await deps.manager("ledger", "scheduler-pool", intent.id, "--max-workers", String(r.agents ? Math.min(32, maxWorkers) : maxWorkers), "--mode", r.mode,
     "--roles", r.roles.length ? r.roles.join(",") : "none", "--timeout-min", String(r.poolTimeoutMin),
     // The offer re-plans from these flags: a dropped reviewFirst / localPriority would pick another machine and cancel the intent.
