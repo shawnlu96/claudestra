@@ -88,12 +88,46 @@ describe("codexAutoUpdateTick", () => {
   });
   test("兼容且全空闲：跑一次升级，逐个重启；重启前复核到忙的跳过", async () => {
     let round = 0;
-    const { d, log, notes } = rig({ busy: async (names) => (round++ === 0 ? [] : names.filter((n) => n === "agent-b")) });
+    // 前两次（锁外、npm 前）全空闲，之后逐个复核时 agent-b 开始忙
+    const { d, log, notes } = rig({ busy: async (names) => (round++ < 2 ? [] : names.filter((n) => n === "agent-b")) });
     const r = await codexAutoUpdateTick(d);
     expect(r).toMatchObject({ outcome: "updated", restarted: ["agent-a", "agent-lend-x"], skipped: ["agent-b"] });
     expect(log).toEqual(["prepare", "shell:npm install -g @openai/codex@0.160.1", "restart:agent-a", "restart:agent-lend-x", "release"]);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("agent-b");
+  });
+  test("判闸期间有 agent 开始忙：不跑 npm，半小时后再试", async () => {
+    let started = false;
+    const { d, log, state } = rig({
+      prepare: async () => (log.push("prepare"), (started = true), { command: "npm i" }),
+      busy: async (names) => (started ? names.filter((n) => n === "agent-a") : []),
+    });
+    expect((await codexAutoUpdateTick(d)).outcome).toBe("busy");
+    expect(log).toEqual(["prepare", "release"]);
+    expect(state().nextAt).toBe(NOW + BUSY_RETRY_MS);
+  });
+  test("判闸期间新起了 ACP agent：名单重读，它忙也挡住", async () => {
+    let started = false;
+    const asked: string[][] = [];
+    const { d, log } = rig({
+      agents: async () => (started ? [...REG, ACP("agent-new")] : REG),
+      prepare: async () => ((started = true), { command: "npm i" }),
+      busy: async (names) => (asked.push(names), names.filter((n) => n === "agent-new")),
+    });
+    expect((await codexAutoUpdateTick(d)).outcome).toBe("busy");
+    expect(asked[1]).toContain("agent-new");
+    expect(log.filter((l) => l.startsWith("shell"))).toEqual([]);
+  });
+  test("「不兼容」通知没送到：不记已通知，半小时后重判重发", async () => {
+    const refuse = async () => ({ status: 409, error: "不兼容" });
+    const r1 = rig({ prepare: refuse, notify: async () => false });
+    expect((await codexAutoUpdateTick(r1.d)).outcome).toBe("refused");
+    expect(r1.state().refusedVersion).toBeUndefined();
+    expect(r1.state().nextAt).toBe(NOW + BUSY_RETRY_MS);
+    const r2 = rig({ prepare: refuse, now: () => NOW + BUSY_RETRY_MS }, r1.state());
+    await codexAutoUpdateTick(r2.d);
+    expect(r2.notes).toHaveLength(1);
+    expect(r2.state().refusedVersion).toBe("0.160.1");
   });
   test("afterShell（切上游适配器）失败：不重启任何 agent，通知", async () => {
     const { d, log, notes } = rig({ prepare: async () => ({ command: "npm i", afterShell: async () => { throw new Error("对账失败"); } }) });

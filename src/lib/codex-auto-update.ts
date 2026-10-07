@@ -107,7 +107,8 @@ export async function codexAutoUpdateTick(d: CodexAutoDeps): Promise<CodexAutoRe
 type Done = (o: CodexAutoOutcome, wait: number, patch?: CodexAutoState, extra?: Partial<CodexAutoResult>) => CodexAutoResult;
 type Target = { from: string; latest: string; key: string; gated: string[] };
 
-async function upgradeLocked(d: CodexAutoDeps, t: Target, st: CodexAutoState, done: Done): Promise<CodexAutoResult> {
+async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoState, done: Done): Promise<CodexAutoResult> {
+  let t = target;
   const fail = async (why: string) => {
     const failures = (st.failedVersion === t.latest ? st.failures ?? 0 : 0) + 1;
     const wait = backoffMs(failures);
@@ -117,9 +118,20 @@ async function upgradeLocked(d: CodexAutoDeps, t: Target, st: CodexAutoState, do
   const p = await d.prepare();
   if ("error" in p) {
     if (p.status >= 500) return fail(p.error); // 查不到 npm / 装配套适配器失败：和 npm 失败一样退避
-    if (st.refusedVersion !== t.latest) await d.notify(`ℹ️ Codex ${t.latest} 不自动更新（本机 ${t.from}，同一版本只说这一次）：${p.error}`);
-    return done("refused", CHECK_EVERY_MS, { refusedVersion: t.latest });
+    if (st.refusedVersion === t.latest) return done("refused", CHECK_EVERY_MS);
+    // 送到了才记「说过了」：#control 一时不通就半小时后重判重发，否则 owner 一次都收不到、之后同版本永远静默
+    const sent = await d.notify(`ℹ️ Codex ${t.latest} 不自动更新（本机 ${t.from}，同一版本只说这一次）：${p.error}`);
+    return sent ? done("refused", CHECK_EVERY_MS, { refusedVersion: t.latest }) : done("refused", BUSY_RETRY_MS);
   }
+  // 自研的闸要临时 npm 安装、生成 schema，能耗几分钟：期间有人开了回合 / 起了新 ACP agent，就别在它脚下换全局二进制。
+  // 名单重读（不用锁外的快照），本轮作罢，半小时后再逮空闲窗口
+  const gated = gatedAgents(await d.agents());
+  const busyNow = await d.busy(gated, t.key);
+  if (busyNow.length) {
+    d.log(`🆙 Codex ${t.from} → ${t.latest}：判闸期间 ${busyNow.join(", ")} 开始忙，本轮不升，半小时后再试`);
+    return done("busy", BUSY_RETRY_MS);
+  }
+  t = { ...t, gated };
   const r = await d.shell(p.command);
   if (!r.ok) return fail(`${p.command} 报错：${r.tail || "没有输出"}`);
   try { await p.afterShell?.(); } catch (e) {
