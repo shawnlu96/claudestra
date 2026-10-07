@@ -133,7 +133,7 @@ export async function runLifecycle(plan: Plan, policy: LifecyclePolicy, deps: Li
     try {
       const r = await gatedCollect(a, deps, collect);
       if ("error" in r) out.failed.push({ agent: a.agent, error: r.error });
-      else if (r.left) { if (!r.quiet) out.failed.push({ agent: a.agent, error: `${a.agent} 已停，但还有 ${r.left} 处落地物没清（已记待补清，下轮再试；原因见台账事件）` }); }
+      else if (r.left) { if (!r.quiet) out.failed.push({ agent: a.agent, error: r.notice ?? `${a.agent} 已停，但还有 ${r.left} 处落地物没清（已记待补清，下轮再试；原因见台账事件）` }); }
       else out.done.push({ agent: a.agent, rule: a.rule, freed: r.freed });
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;

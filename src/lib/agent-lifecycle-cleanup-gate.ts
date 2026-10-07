@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite";
 import { LEDGER_PATH } from "./ledger-store.js";
 import { createHash } from "node:crypto";
 import { readFile, rename } from "node:fs/promises";
+import { manualDueFor, manualOutcome, type ManualDeps, type ManualMark } from "./agent-lifecycle-backoff.js";
 import { reportRetireSteps } from "./agent-lifecycle-cleanup-report.js";
 import type { RetireRecord } from "./agent-lifecycle-store.js";
 import type { Action } from "./agent-lifecycle.js";
@@ -22,10 +23,10 @@ const BACKOFF_MAX_MS = 2 * 3_600_000;
 /** A key nobody touched for this long belongs to a debt that is gone. */
 const FORGET_MS = 30 * 24 * 3_600_000;
 
-interface Slot { digest: string; n: number; nextAt: number; at: number }
+interface Slot { digest: string; n: number; nextAt: number; at: number; manual?: ManualMark }
 type State = Record<string, Slot>;
-export interface GateDeps { now(): number; record(r: RetireRecord): Promise<void>; cleanupStatePath?: string; cleanupLedgerPath?: string }
-type Outcome = { freed: number | null; left: number; quiet?: boolean } | { error: string };
+export interface GateDeps extends ManualDeps { now(): number; record(r: RetireRecord): Promise<void>; cleanupStatePath?: string; cleanupLedgerPath?: string }
+type Outcome = { freed: number | null; left: number; quiet?: boolean; notice?: string } | { error: string };
 
 const path = (d: Pick<GateDeps, "cleanupStatePath">) => d.cleanupStatePath ?? statePath("lifecycle-cleanup.json");
 
@@ -75,14 +76,14 @@ async function update(d: GateDeps, key: string, slot: Slot | null): Promise<void
 }
 
 /** The retries due this pass: a debt in back-off is left out, so it does not take a slot of the pass's budget either. */
-export async function dueRetries(actions: Action[], d: Pick<GateDeps, "cleanupStatePath" | "now">): Promise<Action[]> {
+export async function dueRetries(actions: Action[], d: Pick<GateDeps, "cleanupStatePath" | "now" | "git">): Promise<Action[]> {
   const s = actions.length ? await load(d) : {};
   if (!s) return actions;
-  const now = d.now();
+  const now = d.now(), manual = await Promise.all(actions.map((a) => manualDueFor(s[gateKey(a) ?? ""]?.manual, a.entries ?? [], now, d.git)));
   // a nextAt further out than the longest back-off (clock moved back, hand edit) is due now rather than parked
-  return actions.filter((a) => {
+  return actions.filter((a, i) => {
     const k = gateKey(a);
-    return !k || !s[k] || s[k].nextAt <= now || s[k].nextAt - now > BACKOFF_MAX_MS;
+    return manual[i] ?? (!k || !s[k] || s[k].nextAt <= now || s[k].nextAt - now > BACKOFF_MAX_MS);
   });
 }
 
@@ -119,9 +120,9 @@ export async function gatedCollect<D extends GateDeps>(a: Action, deps: D, colle
   const retry = a.rule === "cleanup_retry";
   if (!key && retry) return collect(a, deps);
   const prev = retry ? (await load(deps))?.[key!] ?? null : null;
-  const seen: { digest: string | null; same: boolean; pending: RetireRecord["pending"] } = { digest: null, same: false, pending: [] };
+  const seen: { digest: string | null; same: boolean; pending: RetireRecord["pending"]; steps: string[] } = { digest: null, same: false, pending: [], steps: [] };
   const wrapped: D = { ...deps, record: async (r: RetireRecord) => {
-    seen.pending = r.pending;
+    seen.pending = r.pending; seen.steps = r.steps;
     seen.digest = r.pending.length ? digestOf(r) : null;
     seen.same = !!seen.digest && prev?.digest === seen.digest;
     if (!seen.same) await deps.record(await reportRetireSteps(r, path(deps)));
@@ -140,6 +141,7 @@ export async function gatedCollect<D extends GateDeps>(a: Action, deps: D, colle
   }
   if ("error" in out) return out;
   if (!out.left || !seen.digest) { if (retry) await update(deps, key!, null); return out; }
-  for (const k of retry ? [key!] : initialKeys(a, deps, seen.pending)) await update(deps, k, next(seen.digest, seen.same));
-  return seen.same ? { ...out, quiet: true } : out;
+  const m = await manualOutcome(deps, a.agent, seen, prev?.manual);
+  for (const k of retry ? [key!] : initialKeys(a, deps, seen.pending)) await update(deps, k, { ...next(seen.digest, seen.same), ...(m.mark ? { manual: m.mark } : {}) });
+  return seen.same || m.quiet ? { ...out, quiet: true } : m.notice ? { ...out, notice: m.notice } : out;
 }
