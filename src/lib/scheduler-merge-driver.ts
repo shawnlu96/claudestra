@@ -17,6 +17,7 @@ export interface PrSnapshot {
   mergeState: string;
   mergeSha: string | null;
   checks: readonly { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }[];
+  noChecks?: boolean; // MCHK1: gh said "no checks reported" for this head; mergeState is then UNKNOWN (a bounded wait)
 }
 /** How far `head` lags the current main; a failed lookup throws, it never reads as "up to date". */
 export interface MainFreshness { behindBy: number; mainHead: string }
@@ -51,10 +52,12 @@ type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: stri
 /** GitHub leaves mergeability UNKNOWN for seconds to minutes after main moves; an unbroken streak past this is an anomaly. */
 export const MERGE_STATE_UNKNOWN_LIMIT_MS = 10 * 60_000;
 export const UNKNOWN_LIMIT_REASON = `GitHub 合并状态 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟仍未算出`;
+export const NO_CHECKS_LIMIT_REASON = `CI 在 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟内没有登记`;
 /** Any inspect that reads something other than a non-draft UNKNOWN ends the streak, so only consecutive UNKNOWNs count. */
-function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step): MergeExternal {
+function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step, seen: (pr: PrSnapshot) => void): MergeExternal {
   return { ...external, inspect: async (prRef) => {
     const pr = await external.inspect(prRef);
+    seen(pr);
     const run = current();
     if ((pr.mergeState !== "UNKNOWN" || pr.draft) && run.unknownSince != null) await step(run.phase, MERGE_UNKNOWN_CLEAR);
     return pr;
@@ -126,12 +129,14 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}, recheck: Recheck = () => null): Promise<MergeRun> {
+  let noChecks = false; // the last read: a wait that expired on "no checks reported" says so
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
     assertActive();
+    if (to === "unknown" && receipt === UNKNOWN_LIMIT_REASON && noChecks) receipt = NO_CHECKS_LIMIT_REASON;
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
-  const external = watchUnknown(() => run, source, step);
+  const external = watchUnknown(() => run, source, step, (pr) => { noChecks = pr.noChecks === true; });
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {
