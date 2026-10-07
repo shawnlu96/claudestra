@@ -1,12 +1,12 @@
 /**
- * `ledger step` 给本机 agent 派正式单后叫醒执行者（auto 卡归调度器）。文案用调度器同一套函数（deliveryFor / workOrderFor / renderWorkOrder），
- * 单号取领单工具此刻现算的那张（take_order / take_review 领不到就不叫，推了阶段重跑 step 再叫）；restate 没有领单工具，发调度器那份复述单。
+ * `ledger step` 给本机 agent 派正式单后叫醒执行者（auto 卡归调度器）。文案是调度器 wake 行（renderWorkOrder 同一函数），只叫领单、不带正文，restate 也一样；
+ * 单号取领单工具此刻现算的那张（take_order / take_review 领不到就不叫，推了阶段重跑 step 再叫）。
  * 只发一次：按有效派单（同一步同一轮连续派给同一人的第一条 step 事件 seq）在投递前用 dedupKey 原子认领；换过人再派回来是新派单。
  * 送达 / 结果不明 / 认领了没结果都不再发，只有确定没发出去（rejected）重跑 step 才重试。tests/step-wake.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { bridgeSend } from "./bridge-client.js";
-import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
+import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, StepName } from "./ledger-stages.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
@@ -17,9 +17,8 @@ import { isMasterName } from "./registry.js";
 import { slotByOrderId } from "./review-order.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { setWorkerKind, type KindEvidence } from "./worker-kind.js";
-import { workOrderFor } from "./scheduler-work-order.js";
 import { renderWorkOrder } from "./worker-order.js";
-import { deliveryFor, type SessionRef, type WorkOrder } from "./worker-session.js";
+import type { WorkOrder } from "./worker-session.js";
 
 export const STEP_WAKE_OP = "step_wake";
 const WAKE_STEPS: Partial<Record<StepName, WorkOrder["step"]>> = { restate: "restate", write: "write", fix: "fix", review: "review", final_review: "review" };
@@ -58,7 +57,7 @@ export function wakeTarget(f: WakeFacts): WakeTarget | { skip: string } {
   }
   const p = f.pickup(agent, step, round);
   if ("none" in p) return { skip: p.none };
-  return { agent, step: p.step, round: p.round, orderId: p.orderId, text: wakeText(f.task, WAKE_STEPS[p.step]!, p.step, p.round, p.orderId, agent) };
+  return { agent, step: p.step, round: p.round, orderId: p.orderId, text: wakeText(f.task, WAKE_STEPS[p.step]!, p.step, p.round, p.orderId) };
 }
 
 /** 领单工具此刻给不给得出这张单：这一步要是当前阶段在干活的那一步，再按 take_order / take_review 同一函数现算单号 */
@@ -95,19 +94,12 @@ function assignSeqOf(db: Database, project: string, taskId: string, ev: WakeFact
 }
 
 /**
- * 调度器给 channel 会话（本机 registry 的 Claude Code / Pi）派单的同一份字：deliveryFor 定 wake / text，workOrderFor 出单，renderWorkOrder 渲染。
- * 手动卡没有调度意图，这里按手动单号拼一个只给 workOrderFor 读 id / node / specRev / head 的意图。
+ * 调度器 wake 行同一个函数（renderWorkOrder 的 wake 分支）：只说有新单、单号、用哪个工具领，不带单据正文（验收线 3）。
+ * restate 也发这一行，不走调度器复述单全文那条 text 分支。
  */
-function wakeText(task: WakeFacts["task"], as: WorkOrder["step"], step: StepName, round: number, orderId: string, agent: string): string {
-  const delivery = deliveryFor("channel", as);
-  const head = { taskId: task.id, step: as, round, dedupKey: orderId, delivery };
-  if (delivery.mode === "wake") { // wake 行只读这几项
-    return renderWorkOrder({ ...head, specRev: task.specRev, head: null, node: step, inputs: [], outputs: [], acceptance: [], writeBack: "" });
-  }
-  const intent = { id: orderId, taskId: task.id, node: step, specRev: task.specRev, head: task.headSHA } as SchedulerIntent;
-  const ref = { taskId: task.id, role: "author", agent, sessionId: "" } as SessionRef;
-  const order = workOrderFor({ ...task, round } as LedgerTask, intent, null, ref);
-  return renderWorkOrder({ ...order!, ...head });
+function wakeText(task: WakeFacts["task"], as: WorkOrder["step"], step: StepName, round: number, orderId: string): string {
+  return renderWorkOrder({ taskId: task.id, step: as, round, dedupKey: orderId, delivery: { mode: "wake" },
+    specRev: task.specRev, head: null, node: step, inputs: [], outputs: [], acceptance: [], writeBack: "" });
 }
 
 /** sent = 对方收下了；rejected = 确定没发出去，可以再发；unknown = 发出去了没回执，可能已收到，不能盲目重发 */

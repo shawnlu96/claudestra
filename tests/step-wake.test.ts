@@ -73,16 +73,18 @@ describe("step 之后唤醒本机执行者", () => {
     expect(sent[1]!.text).toContain("W1:final_review:r0");
   });
 
-  test("restate 没有领单工具：照调度器 deliveryFor 发复述单全文（只指向 ledger show，不带规格正文），不叫 take_order", async () => {
-    stageTo("spec");
+  test("restate 也只发调度器 wake 行：有新单 + take_order 领单，不带复述单全文", async () => {
+    stageTo("spec", "b".repeat(40));
     const r = await run("step", "W1", "restate", EXE, "--kind", "agent");
     expect(r).toMatchObject({ ok: true, wake: { sent: true, orderId: "W1:restate:r0" } });
-    expect(takeOrderResult(db, { agent: EXE, sessionId: "s", family: null, channelId: "" })).toMatchObject({ ok: true, order: null });
+    expect(sent).toEqual([{ agent: EXE, text: renderWorkOrder({ taskId: "W1", step: "restate", round: 0, dedupKey: "W1:restate:r0", delivery: { mode: "wake" },
+      specRev: 0, head: null, node: "restate", inputs: [], outputs: [], acceptance: [], writeBack: "" }) }]);
     const text = sent[0]!.text;
-    expect(text).not.toContain("take_order");
+    expect(text).toContain("take_order");
     expect(text).toContain("W1:restate:r0");
-    expect(text).toContain("show W1");
-    expect(text).toContain("--to restate");
+    expect(text).not.toContain("b".repeat(40));
+    expect(text).not.toContain("--to restate");
+    expect(text.split("\n")).toHaveLength(1);
   });
 
   test("重复执行同一个 step 不重发（每次是新 seq），note 也只有一条；同一条 step 事件重放也不重发", async () => {
