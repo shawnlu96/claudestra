@@ -16,7 +16,7 @@ import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
-import { getTask, listEvents } from "../src/lib/ledger-store.js";
+import { getMeta, getTask, listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { runBounded } from "../src/lib/run-bounded.js";
@@ -225,9 +225,11 @@ describe("MCRY4 e2e: a pooled PASS through two engine carries, merged at the new
     await w.newCards();
     w.gh.ci.set(merged2, "fail");
     await w.pass();
-    expect(w.run()).toMatchObject({ phase: "await_ci", reviewedHead: merged2 });
-    await w.pass();
-    expect(["unknown", "resolved"]).toContain(w.run().phase);
+    expect(w.run()).toMatchObject({ phase: "resolved", reviewedHead: merged2 }); // CIF3: the carried head's required red goes straight back to fix
+    expect(getTask(w.f.db, "T1")!.stage).toBe("fix");
+    expect(getMeta(w.f.db, "p").queueFrozen.frozen).toBe(false);
+    expect(listEvents(w.f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "merge_conflict").map((e) => [e.data.cause, e.data.prHead]))
+      .toEqual([["ci_fail", merged2]]);
     expect(w.carries()).toHaveLength(2);
     expect(w.sent()).toEqual([`pr update-branch ${PR}`, `pr update-branch ${PR}`]);
     expect(w.restated()).toEqual(["T2", "T3"]);
