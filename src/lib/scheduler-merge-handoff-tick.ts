@@ -147,7 +147,8 @@ async function prFiles(files: HandoffFiles | null, prRef: string, head: string):
 }
 
 /** Best effort: the ledger event is the durable record; a stop still ends the pass. */
-const tell = (c: HandoffCard<unknown>, text: string): Promise<void> => c.deps.notifyPm(c.task, text).catch((e) => {
+type Notify = Pick<HandoffCard<unknown>["deps"], "notifyPm" | "now">;
+const tell = (c: { task: LedgerTask; deps: Notify }, text: string): Promise<void> => c.deps.notifyPm(c.task, text).catch((e) => {
   if (e instanceof SchedulerStopped) throw e;
   console.error(`⚠️ [scheduler] ${c.task.id} 合并交接通知没发出去（台账已记）：${(e as Error).message}`);
 });
@@ -181,15 +182,20 @@ function narrowAfterHandoff(c: HandoffCard<unknown>, files: PrFiles | null | und
   }
 }
 
-/** A sibling of this card's feature batch fell back after the handoff: PM hears once, the handoff itself stays (HDG-1 #7). */
-async function regressNotice(c: HandoffCard<unknown>): Promise<void> {
+/** A card of this card's handed feature batch fell back: PM hears once, the handoff itself stays (HDG-1 #7). */
+async function regressNotice(db: Database, task: LedgerTask, deps: Notify): Promise<void> {
   let text: string | null;
-  try { text = recordFeatureRegress(c.db, c.task, c.deps.now()); } catch (e) {
+  try { text = recordFeatureRegress(db, task, deps.now()); } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
-    console.error(`⚠️ [scheduler] ${c.task.id} 同批退回的升级没记上，下轮再试：${(e as Error).message}`);
+    console.error(`⚠️ [scheduler] ${task.id} 同批退回的升级没记上，下轮再试：${(e as Error).message}`);
     return;
   }
-  if (text) await tell(c, text);
+  if (text) await tell({ task, deps }, text);
+}
+
+/** The auto tick's wait for a card held by its feature batch: a handed card of that batch sent back no longer polls, so ask here. */
+export async function raiseFeatureRegress(db: Database, task: LedgerTask, wait: { code: string }, deps: Notify): Promise<void> {
+  if (wait.code === "feature_siblings_pending") await regressNotice(db, task, deps);
 }
 
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
@@ -200,7 +206,7 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const follow = handoffOf(c.db, task), handed = follow?.evidence;
   // the evidence is bound to the PR it was handed with: a card whose PR was changed since then cannot borrow another PR's merge
   if (handed && handed.pr !== task.pr) return c.escalate(`卡上的 PR 已不是交接的那个（${handed.pr} → ${task.pr}），交接证据不覆盖新 PR`);
-  if (follow) await regressNotice(c);
+  if (follow) await regressNotice(c.db, task, c.deps);
   const seen = polled.get(c.db) ?? polled.set(c.db, new Map()).get(c.db)!;
   const last = seen.get(task.id);
   if (handed && last !== undefined && c.deps.now() - last < HANDOFF_POLL_MS) return c.out("waiting", "已交仓库方合并，等 PR 结果");

@@ -150,6 +150,24 @@ describe("B. feature batch at the tick", () => {
     } finally { f.close(); }
   });
 
+  test("#7 (r1 P1) a handed card itself sent back to fix: the sibling waiting in merge raises the notice", async () => {
+    const { f, hand, handoffs } = await inMerge();
+    try {
+      const id = bindFeature(f);
+      // T2 went out first in a batch with T1 (its handoff evidence names both), then came back to fix: it no longer polls its PR
+      insertEvent(f.db, { actor: "scheduler", now: 5_000 }, { project: "p", target: "T2", kind: "scheduler",
+        data: { op: "merge_handoff", evidence: { v: 1, pr: PR, head: H2, feature: { id, version: 1, batch: [`T1@${H1}`, `T2@${H2}`] } } } }, false);
+      sibling(f, "fix", 2);
+      expect(await hand()).toMatchObject({ step: "waiting", detail: `feature ${id} v1 同批还有节点没审过：B（T2 fix）` });
+      const esc = () => listEvents(f.db, { project: "p" }).filter((e) => e.kind === "escalate");
+      expect(esc()).toMatchObject([{ target: "T1", data: { op: "feature_handoff_regress", handed: [`T2@${H2}`], pending: ["T2"] } }]);
+      expect(f.notices.at(-1)).toContain(`已交出 T2@${H2.slice(0, 12)}`);
+      await hand();
+      expect(esc()).toHaveLength(1);
+      expect(handoffs()).toEqual([]);
+    } finally { f.close(); }
+  });
+
   test("#8 a one-node feature hands over as before, without a batch", async () => {
     const { f, hand, handoffs } = await inMerge();
     try {

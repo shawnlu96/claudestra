@@ -227,28 +227,33 @@ export function setHandoffHold(db: Database, ctx: WriteCtx, input: { project: st
 }
 
 /**
- * HDG-1 #7: part of a feature batch is already with the repository owner and a card of that batch — as the handoff evidence
- * recorded it, not as the DAG would batch it now — is no longer reviewed (back in fix / review). The rest keep waiting
- * (handoff-gate-plan.ts) and nothing handed is recalled; PM hears once per regression — the escalate event's dedup key names each
- * pending card at its stage and round. Returns the text the first time; null when nothing regressed or PM already heard of it.
- * tests/handoff-gate-tick.test.ts.
+ * HDG-1 #7: a card of a handed-over feature batch is no longer reviewed — a sibling, or a handed card itself sent back to fix /
+ * review. "The batch" is what the handoff evidence recorded, never the DAG as rewritten since. Asked from the handed card while it
+ * follows its PR and from a batch sibling waiting in `merge` (a handed card sent back no longer polls). Nothing is recalled; PM
+ * hears once per regression — the dedup key names each card not reviewed at its stage and round. Returns the notice text the
+ * first time, null otherwise. tests/handoff-gate-tick.test.ts.
  */
 export function recordFeatureRegress(db: Database, task: LedgerTask, now: number): string | null {
-  const feature = handoffOf(db, task)?.evidence.feature;
-  if (!feature) return null;
-  const cards = feature.batch.map((b) => b.slice(0, b.lastIndexOf("@"))).map((id) => ({ id, c: cardState(db, id) }));
-  const pending = cards.filter((x) => x.id !== task.id && x.c?.state !== "ready" && x.c?.state !== "handed" && x.c?.state !== "done");
-  const handed = cards.filter((x) => x.c?.state === "handed");
-  if (!pending.length || !handed.length) return null;
-  const label = (x: (typeof cards)[number]) => `${x.id}（${x.c?.task.stage ?? "找不到"}）`;
-  const key = `handoff-gate:regress:${feature.id}:${pending.map((x) => `${x.id}:${x.c?.task.stage ?? "missing"}:r${x.c?.task.round ?? 0}`).join(",")}`;
-  const text = `[调度引擎] feature ${feature.id} 已交出 ${handed.map((x) => `${x.id}@${(x.c!.task.headSHA ?? "").slice(0, 12)}`).join("、")}，` +
-    `同批的 ${pending.map(label).join("、")} 又没审过：同批其余的继续等，已交出的不自动撤回，要不要请仓库方暂缓合并由 PM 定`;
+  if (!task.featureId) return null;
+  const rows = db.query(`SELECT * FROM events WHERE project = ? AND kind = 'scheduler' AND json_extract(data, '$.op') = 'merge_handoff'
+    AND json_extract(data, '$.evidence.feature.id') = ? ORDER BY seq`).all(task.project, task.featureId) as Record<string, unknown>[];
+  const latest = new Map<string, { seq: number; evidence: HandoffEvidence }>(); // each card's latest handoff replaces its old batch
+  for (const r of rows) latest.set(String(r.target), { seq: Number(r.seq), evidence: (JSON.parse(String(r.data)) as { evidence: HandoffEvidence }).evidence });
+  const cardOf = (x: string) => x.slice(0, x.lastIndexOf("@"));
+  const batch = [...latest.values()].sort((a, b) => b.seq - a.seq).map((h) => h.evidence.feature!.batch).find((b) => b.some((x) => cardOf(x) === task.id));
+  if (!batch) return null;
+  const ids = batch.map(cardOf), handedHead = (id: string) => latest.get(id)!.evidence.head;
+  const out = ids.filter((id) => latest.get(id)?.evidence.feature?.batch.join() === batch.join());
+  const pending = ids.map((id) => ({ id, c: cardState(db, id) })).filter((x) => !x.c || x.c.state === "pending");
+  if (!out.length || !pending.length) return null;
+  const key = `handoff-gate:regress:${task.featureId}:${pending.map((x) => `${x.id}:${x.c?.task.stage ?? "missing"}:r${x.c?.task.round ?? 0}`).join(",")}`;
+  const text = `[调度引擎] feature ${task.featureId} 已交出 ${out.map((id) => `${id}@${handedHead(id).slice(0, 12)}`).join("、")}，` +
+    `同批的 ${pending.map((x) => `${x.id}（${x.c?.task.stage ?? "找不到"}）`).join("、")} 又没审过：同批其余的继续等，已交出的不自动撤回，要不要请仓库方暂缓合并由 PM 定`;
   return withLedgerWriter(db, (w) => tx(w, () => {
     if (getEventByDedup(w, key)) return null;
     insertEvent(w, { actor: "scheduler", now, dedupKey: key }, { project: task.project, target: task.id, kind: "escalate", text,
-      data: { to: "pm", reason: text, auto: true, op: "feature_handoff_regress", featureId: feature.id,
-        handed: handed.map((x) => `${x.id}@${x.c!.task.headSHA ?? ""}`), pending: pending.map((x) => x.id) } }, true);
+      data: { to: "pm", reason: text, auto: true, op: "feature_handoff_regress", featureId: task.featureId,
+        handed: out.map((id) => `${id}@${handedHead(id)}`), pending: pending.map((x) => x.id) } }, true);
     return text;
   }));
 }
