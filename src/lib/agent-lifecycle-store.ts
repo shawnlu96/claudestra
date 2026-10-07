@@ -11,7 +11,7 @@
  * collaboration view all import it instead of reading these tables themselves.
  */
 import type { Database } from "bun:sqlite";
-import { getTask, LedgerError } from "./ledger-store.js";
+import { getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 
 const WORKER_ROLES = ["author", "reviewer", "other"] as const;
@@ -257,4 +257,12 @@ export function recordWorkerRetire(db: Database, actor: string, r: RetireRecord)
         ...(r.retry ? { regAt: r.regAt } : {}),
         bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, bytesFreed: freed, steps: r.steps, pending: r.pending } }, false);
   });
+}
+
+/** AREB1: the card's worker_register / worker_retire events in ledger order (seq, actor, session, role kept as written); the one reader of them. */
+export interface WorkerHistoryEntry { seq: number; ts: number; actor: string; op: "worker_register" | "worker_retire"; agent: string; sessionId: string | null; role: string | null; retry: boolean }
+export function workerRetireHistory(db: Database, taskId: string): WorkerHistoryEntry[] {
+  return listEvents(db, { target: taskId }).filter((e) => e.kind === "scheduler" && (e.data.op === "worker_register" || e.data.op === "worker_retire"))
+    .map((e) => ({ seq: e.seq, ts: e.ts, actor: e.actor, op: e.data.op as WorkerHistoryEntry["op"], agent: String(e.data.agent ?? ""),
+      sessionId: typeof e.data.sessionId === "string" ? e.data.sessionId : null, role: typeof e.data.role === "string" ? e.data.role : null, retry: e.data.retry === true }));
 }

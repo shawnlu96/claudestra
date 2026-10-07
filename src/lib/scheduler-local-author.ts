@@ -16,6 +16,7 @@ import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
+import { rebuildAgentName, rebuildAllowed, rebuildBranchGate, rebuildCheckoutDrift } from "./scheduler-author-rebuild-proof.js";
 import type { EnsureResult } from "./worker-session.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -23,28 +24,34 @@ export interface LocalAuthorEnv {
   db: Database; registryRow: RegistryRow; worktreeRoot: string; active: () => void; git: Git; create: Manager; ledger: Manager; registryPath?: string;
 }
 
-function claimed(env: LocalAuthorEnv, task: LedgerTask): SchedulerIntent | null {
+/** AREB1: a rebuild replaces a formally retired author and keeps the workflow's author family (scheduler-author-rebuild-proof.ts). */
+type Rebuild = { replaces: string; family: "claude" | "codex" } | undefined;
+function claimed(env: LocalAuthorEnv, task: LedgerTask, replaces?: string): SchedulerIntent | null {
   env.active();
   const cur = getTask(env.db, task.id), w = getWorkflow(env.db, task.id);
-  if (!cur || cur.rev !== task.rev || cur.agent || !w || w.mode !== "auto" || w.specRev !== cur.specRev
+  if (!cur || cur.rev !== task.rev || (cur.agent || undefined) !== replaces || !w || w.mode !== "auto" || w.specRev !== cur.specRev
     || getMeta(env.db, task.project).queueFrozen.frozen || String(cur.extra.placement ?? "").startsWith("peer:")) return null;
   return env.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'ensure_session' AND node != 'adversarial_review'
     AND status = 'submitted' AND recipient IS NULL AND taskRev = ? AND specRev = ? ORDER BY eventSeq DESC LIMIT 1`)
     .get(task.id, task.rev, task.specRev) as SchedulerIntent | null;
 }
 
-async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => void): Promise<string | null> {
+async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => void, replaces?: string): Promise<string | null> {
   const git = (args: string[]) => whileOwned(guard, () => env.git(["-C", p.repo, ...args]));
   // A clean create failure's retry finds its own earlier worktree: reuse it only when untouched (scheduler-create-retry.ts).
   const left = existsSync(p.worktree) ? await reusableAuthorWorktree(git, p) : undefined;
   if (left) return left;
   if (left === undefined) {
-    if ((await git(["rev-parse", "--verify", "--quiet", `refs/heads/${p.branch}`])).code === 0) return `分支 ${p.branch} 已存在，保留并等待核对`;
+    const existing = (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${p.branch}`])).code === 0, gate = () => rebuildBranchGate(env.db, git, p, replaces, existing);
+    const held = await gate();
+    if (held) return held;
     const fetch = await git(["fetch", "-q", "origin"]);
     if (fetch.code !== 0) return `更新仓库失败：${fetch.out}`;
     if ((await git(["check-ref-format", "--branch", p.branch])).code !== 0) return "卡上分支名不合法";
-    const add = await addAuthorWorktree(git, p);
-    if (add.code !== 0) return `创建本机 worktree 失败：${add.out}`;
+    const add = (await gate()) ?? await addAuthorWorktree(git, p, existing); // AREB1: an existing branch is re-checked right before the add
+    if (typeof add === "string" || add.code !== 0) return typeof add === "string" ? add : `创建本机 worktree 失败：${add.out}`;
+    const drift = existing ? await rebuildCheckoutDrift(git, p) : null;
+    if (drift) return drift;
   }
   guard();
   for (const sub of ["node_modules", join("web", "node_modules")]) {
@@ -55,21 +62,23 @@ async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => vo
   return null;
 }
 
-async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan, opts: LocalStartOptions): Promise<EnsureResult> {
-  const intent = claimed(env, task);
+async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan, opts: LocalStartOptions, rebuild?: Rebuild): Promise<EnsureResult> {
+  const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "wait", reason: "作者建会话意图已改变，下一轮重算" };
   const policy = readSchedulerConfig(opts.configPath).projects[task.project];
-  const family = policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath);
+  const family = rebuild?.family ?? (policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath));
   const guard = () => {
     env.active();
-    if (claimed(env, task)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");
+    if (claimed(env, task, rebuild?.replaces)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");
+    const refused = rebuild && rebuildAllowed(env.db, getTask(env.db, task.id) ?? task, rebuild.replaces, rebuild.family);
+    if (refused) throw new Error(`作者重建条件已不成立：${refused}`);
     const config = readSchedulerConfig(opts.configPath);
     if (!config.enabled || !config.autoDispatch || !config.projects[task.project]) throw new Error("本机执行者配置已改变，停止本次创建");
   };
   const create = async (): Promise<EnsureResult> => {
     guard();
     if (env.registryRow(p.agent)) return { kind: "unknown", reason: `${p.agent} 已存在但未绑定，保留会话等待核对` };
-    const failure = await checkout(env, p, guard);
+    const failure = await checkout(env, p, guard, rebuild?.replaces);
     if (failure) return { kind: "unknown", reason: failure };
     const flags = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
     const r = await whileOwned(guard, () => localCreateGuard(env.create)("create", p.agentName, p.worktree,
@@ -84,7 +93,7 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
           return { kind: "unknown", reason: `${p.agent} 的目录、项目或运行时不符` };
         }
         const saved = await whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq), "local-author",
-          task.id, intent.id, `--rev=${task.rev}`, `--agent=${row.name}`, `--author-family=${family}`, `--dedup=local-author:${intent.id}`));
+          task.id, intent.id, `--rev=${task.rev}`, `--agent=${row.name}`, `--author-family=${family}`, `--dedup=local-author:${intent.id}`, ...(rebuild ? [`--replaces=${rebuild.replaces}`] : [])));
         if (saved.code === "lease-lost") throw new SchedulerStopped(String(saved.error));
         if (saved.ok !== true) return { kind: "unknown", reason: `本机会话已建，写回执行者失败：${String(saved.error)}` };
         return { kind: "ready", created: true, ref: { taskId: task.id, role: "author", agent: row.name, sessionId: row.sessionId,
@@ -98,12 +107,12 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
   return family === "codex" || configuredAgentLimits(slotOpts) ? withCodexSlot(create, { ...slotOpts, checkQuota: true }) : create();
 }
 
-export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}): Promise<EnsureResult> {
-  const intent = claimed(env, task);
-  if (!intent) return { kind: "manual", reason: "缺当前作者建会话意图，需 PM 指定执行者或由调度器重新计划" };
-  const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, opts);
+export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}, rebuild?: Rebuild): Promise<EnsureResult> {
+  const intent = claimed(env, task, rebuild?.replaces), name = rebuild && rebuildAgentName(task.id, rebuild.replaces);
+  if (!intent || name === null) return { kind: "manual", reason: intent ? `${rebuild?.replaces} 之后形成不了合法的新作者名` : "缺当前作者建会话意图，需 PM 指定执行者或由调度器重新计划" };
+  const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, opts, name);
   if (typeof plan === "string") return { kind: "manual", reason: plan };
   const note = (args: string[]) => whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq),
     "local-author-note", task.id, intent.id, `--text=${args[3]}`, `--dedup=local-author-queue:${intent.id}:${args[3]?.match(/排队 (\w+)/)?.[1]}`));
-  return queuedLocalAuthor(env.db, plan, opts, note, () => launch(env, task, plan, opts));
+  return queuedLocalAuthor(env.db, plan, opts, note, () => launch(env, task, plan, opts, rebuild));
 }
