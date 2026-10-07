@@ -96,7 +96,11 @@ export async function codexAutoUpdateTick(d: CodexAutoDeps): Promise<CodexAutoRe
   let why = "没返回版本号";
   const latest = await d.latest().catch((e) => ((why = String(e)), undefined));
   if (!latest) return latestFailed(d, st, why, done);
-  st = { ...st, latestFailures: undefined, latestNotified: undefined };
+  if (st.latestFailures) {
+    // 立刻落盘：后面占锁 / 判闸若抛错，不能让下一串查不到接着旧计数、继承旧的「已通知」
+    st = { ...st, latestFailures: undefined, latestNotified: undefined };
+    d.save(st);
+  }
   if (!isNewerVersion(latest, inst.version)) return done("up-to-date", CHECK_EVERY_MS);
   const key = `codex ${latest}`;
   const gated = gatedAgents(await d.agents());

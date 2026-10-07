@@ -196,6 +196,15 @@ describe("codexAutoUpdateTick", () => {
     expect(same.state()).toMatchObject({ nextAt: NOW + CHECK_EVERY_MS });
     expect(same.state().latestFailures).toBeUndefined();
   });
+  test("latest 恢复但下游抛错：清零已落盘，下次查不到从 1 计", async () => {
+    const r1 = rig({ lock: async () => { throw new Error("lock IO error"); } }, { latestFailures: LATEST_ALERT_AFTER, latestNotified: true });
+    await expect(codexAutoUpdateTick(r1.d)).rejects.toThrow("lock IO error");
+    expect(r1.state().latestFailures).toBeUndefined();
+    expect(r1.state().latestNotified).toBeUndefined();
+    const r2 = rig({ latest: async () => undefined }, r1.state());
+    await codexAutoUpdateTick(r2.d);
+    expect(r2.state().latestFailures).toBe(1);
+  });
   test("锁被占（网页按钮在更新）：不判闸、不升，半小时后再试", async () => {
     const { d, log } = rig({ lock: async () => ({ holder: "agent-a" }) });
     expect((await codexAutoUpdateTick(d)).outcome).toBe("locked");
