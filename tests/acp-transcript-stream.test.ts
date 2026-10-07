@@ -27,7 +27,7 @@ const pieces = (text: string, size: number) => Array.from({ length: Math.ceil(te
 describe("ACP 正文流式续写", () => {
   test("整行一到就显示，同一条消息续在下面；终稿只补最后半行", () => {
     const out = feed([chunk("m1", "第一行\n第"), chunk("m1", "二行\n\n第三"), chunk("m1", "行没完")]);
-    expect(out).toEqual(["● 第一行", "  第二行", "\n  第三行没完"]); // 行尾的空行先压着，后面有字了才跟着出来（终稿会剪掉结尾空行）
+    expect(out).toEqual(["● 第一行", "  第二行", "", "  第三行没完"]); // 空行等后面来了字才放出（终稿会剪掉结尾空行）
     expect(out.join("\n")).toBe(whole([chunk("m1", "第一行\n第二行\n\n第三行没完")]).join("\n"));
   });
 
@@ -46,12 +46,31 @@ describe("ACP 正文流式续写", () => {
     const texts = [
       Array.from({ length: 300 }, (_, i) => `第 ${i} 行`).join("\n"),
       "  开头有空白\n\n中间空行\n结尾换行\n\n",
+      "行尾两个空格  \n下一行  \n\n  \n最后  \n  ",
       `${"长".repeat(5_990)}\n超出 6000 字的这一行只在终稿里出现\n后面`,
     ];
     for (const text of texts) for (const size of [1, 3, 7, 64, 5_000]) {
       const updates = pieces(text, size).map((p) => chunk("m", p));
       expect(same(feed(updates))).toBe(whole(updates).join("\n"));
     }
+  });
+
+  test("R1 stream-trim-duplicate：行尾空格（Markdown 硬换行）跨 chunk 时不整段重显示", () => {
+    const updates = [chunk("m", "第一行  \n"), chunk("m", "第二行\n"), chunk("m", "结束")];
+    expect(feed(updates)).toEqual(["● 第一行  ", "  第二行", "  结束"]);
+    expect(feed(updates).join("\n")).toBe(whole(updates).join("\n"));
+    // 末尾那行的行尾空格要等后面来了字才定：没来就压着，终稿（剪掉结尾空白）来补
+    const tail = [chunk("m", "a  \n"), chunk("m", "  \n")];
+    expect(feed(tail)).toEqual(["● a"]);
+  });
+
+  test("R1 stream-unbounded-rescan：超过扫描上限后不再攒原文", () => {
+    const s = createTextStream();
+    const piece = `${"x".repeat(1023)}\n`;
+    s.chunk(chunk("m", piece.repeat(20)));
+    const t0 = performance.now();
+    for (let i = 0; i < 4096; i++) s.chunk(chunk("m", piece)); // 4 MiB
+    expect(performance.now() - t0).toBeLessThan(50);
   });
 
   test("密钥被切在任何位置都不出现在流出的行里", () => {
@@ -65,7 +84,8 @@ describe("ACP 正文流式续写", () => {
 
   test("流着时插进来的别的段照常显示；终稿对不上（不是这条的前缀）就整段重显示", () => {
     const s = createTextStream();
-    expect(s.chunk(chunk("m", "a\nb\n"))).toEqual(["● a", "  b"]);
+    expect(s.chunk(chunk("m", "a\nb\n"))).toEqual(["● a"]); // b 是眼下最后一行，行尾空白还没定
+    expect(s.chunk(chunk("m", "c"))).toEqual(["  b"]);
     expect(s.settle("> owner：插话")).toEqual(["> owner：插话"]);
     expect(s.settle("● x\n  y")).toEqual(["● x\n  y"]);
     expect(s.settle("● 下一段")).toEqual(["● 下一段"]); // 流已关：原样

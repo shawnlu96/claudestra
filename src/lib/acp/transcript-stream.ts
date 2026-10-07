@@ -1,7 +1,7 @@
 /**
  * TTY 窗口里 agent 正文的流式续写（tty-screen.ts 用；非 TTY 不走这里，照旧整条一段）。
  * 只吐攒齐的整行：半行可能是半个密钥，规则认不出（redact-secrets.ts 的值规则都不跨行，整行打码就够）。
- * 每次把攒到的整行连同前文整段打码、按 transcript.ts clipText 的上限逐行放出；超上限就停，剩下的等终稿。
+ * 每次把攒到的整行连同前文整段打码、按 transcript.ts clipText 的上限逐行放出；超上限就停（不再攒原文），剩下的等终稿。
  * 终稿（宿主按消息攒好的那条 ● 段）到了：和已放出的行逐行对上就只补没显示的部分，对不上（规则在长文里结果不同）
  * 退回整段重新显示——宁可重复一段，也不让窗口里留着和终稿不一样的字。tests/acp-transcript-stream.test.ts。
  */
@@ -29,14 +29,20 @@ export function createTextStream(): TextStream {
       const u = update as Rec | null;
       if (u?.sessionUpdate !== "agent_message_chunk" || u.content?.type !== "text" || typeof u.content.text !== "string") return [];
       if (!open || u.messageId !== id) reset(u.messageId);
+      if (full) return [];
       raw += u.content.text;
-      const done = raw.slice(0, Math.max(0, raw.lastIndexOf("\n")));
-      if (full || !done.trim()) return [];
-      if (done.length > TEXT_LIMITS.scan) return ((full = true), []);
+      // 超过扫描窗口就不攒了：剩下的全交给终稿（clip 也只扫这么多），后面再长的输出每块都是 O(1)
+      if (raw.length > TEXT_LIMITS.scan) return ((full = true), (raw = ""), []);
+      const cut = raw.lastIndexOf("\n");
+      const body = cut < 0 ? "" : redactSecrets(raw.slice(0, cut)).trimStart();
+      if (!body) return [];
+      const lines = body.split("\n");
+      // 终稿只剪整条消息首尾的空白：一行后面还有字，它的行尾空格（Markdown 硬换行）才算定了；末尾的空白行同理压着
+      const ready = /\S/.test(raw.slice(cut + 1)) ? lines.length : Math.max(0, lines.findLastIndex((l) => /\S/.test(l)));
       const out: string[] = [];
-      for (const line of redactSecrets(done).trim().split("\n").slice(shown.length)) {
+      for (const line of lines.slice(shown.length, ready)) {
         const add = (shown.length ? 1 : 0) + line.length;
-        if (shown.length >= TEXT_LIMITS.lines || chars + add > TEXT_LIMITS.chars) return ((full = true), out);
+        if (shown.length >= TEXT_LIMITS.lines || chars + add > TEXT_LIMITS.chars) return ((full = true), (raw = ""), out);
         out.push(lineOf(shown.length, line));
         shown.push(line);
         chars += add;
