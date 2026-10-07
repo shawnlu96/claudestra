@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { machines } from "@/lib/machines";
-import { bindingState, knownCenterKey, lostCenterKey, resolveCollabSource, staleCenterKeys, subscribeBindings, type BindingState,
+import { bindingState, lostCenterKey, machineCenterKey, resolveCollabSource, staleCenterKeys, subscribeBindings, type BindingState,
   type BlockedReason } from "@/lib/collab-source-binding";
 import { CollabEntry } from "./collab-entry";
 import { setLedgerAccess, useLedgerAccess } from "./collab-cache";
@@ -32,8 +32,8 @@ export function useCollabBindings(fp: string): BindingState {
 
 /**
  * 改绑关旧视图的宿主：入口挂在可折叠的项目组里，全部折叠时没有入口在订阅。
- * 这里单独起一个常驻的小根（不进页面 DOM），只要打开着的是本机 context 里出现过的中心 key，
- * 就持有该机 store 的订阅（15s / focus 刷新不停），key 过期（改绑 / 解绑 / 停用）即关掉视图
+ * 这里单独起一个常驻的小根（不进页面 DOM），只要打开着的是这台机器的中心 key（不论从项目组还是 N5 列表打开），
+ * 就持有该机 store 的订阅（15s / focus 刷新不停），每次回包都核对，key 过期（改绑 / 解绑 / 停用）即关掉视图
  */
 let guardMounted = false;
 function mountOpenViewGuard() {
@@ -45,7 +45,7 @@ function mountOpenViewGuard() {
 function OpenViewGuard() {
   const open = useCollabNav().project;
   const fp = useSyncExternalStore(subscribeMachines, currentFp, noFp);
-  return fp && open && knownCenterKey(fp, open) ? <CloseWhenStale key={fp} fp={fp} open={open} /> : null;
+  return fp && open && machineCenterKey(fp, open) ? <CloseWhenStale key={fp} fp={fp} open={open} /> : null;
 }
 
 function CloseWhenStale({ fp, open }: { fp: string; open: string }) {

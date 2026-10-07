@@ -6,7 +6,7 @@
 import { api, ApiError } from "./api/client";
 import { machines } from "./machines";
 import type { Identity } from "./api/shared-ledger";
-import { sharedCollabProject } from "@/features/collab/team-source-key";
+import { sharedCollabProject, sharedIdentity } from "@/features/collab/team-source-key";
 
 export interface ContextIdentity { center: string; team: string; person: string; project: string; localProjectId?: string; homeInstanceId: string }
 export type BlockedReason = "ambiguous" | "checking" | "revoked";
@@ -161,5 +161,8 @@ export function lostCenterKey(fp: string, localProjectId: string): string | null
   if (!ids || ids.some((i) => (i.localProjectId ?? i.project) === localProjectId)) return null;
   return s.last.get(localProjectId) ?? null;
 }
-/** 这台机器的 context 里出现过的中心 key（打开着的视图是不是本 store 管的） */
-export const knownCenterKey = (fp: string, key: string): boolean => storeOf(fp).seen.has(key);
+/**
+ * 打开着的视图是不是这台机器的中心 key（归本机 store 管）。只看 key 本身，不看 seen：
+ * N5 列表与本 store 各读各的 context，N5 先开时本 store 可能还没回包，seen 尚空
+ */
+export const machineCenterKey = (fp: string, key: string): boolean => sharedIdentity(key)?.machine === fp;

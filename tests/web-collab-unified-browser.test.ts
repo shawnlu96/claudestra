@@ -155,14 +155,14 @@ const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, ren
   onCommitFiberRoot(_id, root) { window.__fiberRoot = root; }, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {}, checkDCE() {} };`;
 const pages: Page[] = [];
 afterEach(async () => { await Promise.all(pages.splice(0).map((p) => p.close().catch(() => undefined))); }, 30_000);
-async function open(width: number, machine: Fp = "mac-a") {
+async function open(width: number, machine: Fp = "mac-a", extra: Record<string, string> = {}) {
   const page = await browser.newPage({ viewport: { width, height: width < 640 ? 844 : 900 } });
   pages.push(page);
   await page.addInitScript(HOOK);
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route(/^(?!http:\/\/127\.0\.0\.1)/, (r) => r.abort()); // 只许回环
-  const q = new URLSearchParams({ machine, projects: JSON.stringify(PROJECTS) });
+  const q = new URLSearchParams({ machine, projects: JSON.stringify(PROJECTS), ...extra });
   await page.goto(`${server.url}?${q}`);
   await page.locator("[data-machine]").first().waitFor();
   return { page, errors };
@@ -372,6 +372,25 @@ test("1280：全部项目组折叠（没有任何入口挂着）期间改绑 A�
   await group(page, "claudestra").locator("> button").click();
   await entryOf(page, "claudestra").click();
   expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
+}, 60_000);
+
+test("1280：N5 列表先打开中心视图、项目组入口的 context 后回包，再改绑 A→B：旧视图照样关闭（项目组全展开）", async () => {
+  reset();
+  world.center["demo-c"] = centerFixture("demo-c");
+  const { page } = await open(1280, "mac-a", { holdN8Context: "1" });
+  await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
+  await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
+  expect(await opened(page)).toBe(n5Key("mac-a"));
+  expect(await entryOf(page, "claudestra").count()).toBe(0); // 本节点 store 还没回包，项目组入口未出现
+  await page.evaluate("window.__releaseN8Context()");
+  await entryOf(page, "claudestra").waitFor();
+  expect(await opened(page)).toBe(n5Key("mac-a"));
+  world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a", { project: "demo-c" })] } };
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await page.waitForFunction("document.body.dataset.open === ''", undefined, { timeout: 20_000 });
+  await entryOf(page, "claudestra").click();
+  expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
+  expect(ledgerHits("claudestra")).toEqual([]);
 }, 60_000);
 
 test("1280：中心 403 → 绑定变成跨团队不可区分 → 身份消失：仍『团队权限已失效』，不回退本机", async () => {

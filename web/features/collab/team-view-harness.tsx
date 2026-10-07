@@ -6,6 +6,8 @@
 import React, { useEffect, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { machines } from "@/lib/machines";
+import { api } from "@/lib/api/client";
+import { setContextRequestForTest } from "@/lib/collab-source-binding";
 import { ChatStoreProvider } from "../chat/chat-store";
 import { ChatNavContext } from "../chat/components/nav-context";
 import { ProjectGroup } from "../chat/components/project-group";
@@ -18,6 +20,14 @@ document.documentElement.dataset.theme = params.get("theme") ?? "light";
 /** 每台机器的本机项目（本机 id 不同的两台绑定同一中心项目） */
 const PROJECTS: Record<string, { id: string; name: string; emoji: string }[]> = JSON.parse(params.get("projects") ?? "{}");
 const MACHINES = Object.keys(PROJECTS);
+
+// ?holdN8Context：本节点 store 的 context 先扣住（N5 列表那份照常），等测试调 __releaseN8Context 再放行——复现「N5 先开、N8 后回包」
+if (params.has("holdN8Context")) {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  (window as unknown as { __releaseN8Context: () => void }).__releaseN8Context = release;
+  setContextRequestForTest((fp, signal) => held.then(() => api("/shared-ledger/context", { signal }, { fp })));
+}
 
 const subscribe = (cb: () => void) => machines.subscribe(cb);
 const current = () => machines.currentFp();
