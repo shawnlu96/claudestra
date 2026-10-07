@@ -1,6 +1,7 @@
 # E2b 整卡委托：接收方（A 侧）设计稿
 
-> 状态：**设计稿（讨论用）**，还没实现。卡号 E2BA-1。协议主线以 B 侧（仓库方）的 P2 冻结稿为准：`docs/design/e2b-protocol.md` 和 `docs/design/e2b-standing-authorization.md`（P2 冻结稿第 6 轮，main `8d6a85a5`；协议稿 blob `c2143324`、授权稿 blob `55b81b56`；下称「P2」「P2 授权稿」），证据与互认以冻结的 `docs/design/review-evidence-recognition.md`（blob `8c8594c3`，下称「R1」）为准。本稿只写 A 侧怎么做：第 5 轮起按 P2 对齐，第 10 轮对齐到 P2 第 6 轮与 R1 `8c8594c3`。
+> 状态：**设计稿（讨论用）**，还没实现，不授权实现。卡号 E2BA-1。协议主线以 B 侧（仓库方）的 P2 冻结稿为准：`docs/design/e2b-protocol.md` 和 `docs/design/e2b-standing-authorization.md`（P2 冻结稿第 6 轮，main `8d6a85a5`；协议稿 blob `c2143324`、授权稿 blob `55b81b56`；下称「P2」「P2 授权稿」），证据与互认以冻结的 `docs/design/review-evidence-recognition.md`（下称「R1」，冻结记录见下一段）为准。本稿只写 A 侧怎么做：第 5 轮起按 P2 对齐，第 10 轮对齐到 P2 第 6 轮与 R1 `8c8594c3`。
+> **R1 冻结记录**：B 侧（Shawn）于 2026-10-07 14:16Z 正式通知冻结 R1。冻结对象：head `9a2052b83e3c4a233d3db450426074accdd4f37b`，specRev 1，R1 blob `8c8594c3193559b36dd2ed334ed3c6846101a33d`，sha256 `c8881904fc151093fb6a4f1f8409bf89151b50b7784e14b87648ed790ec3ee9d`；P2 的两个 blob `c2143324` / `55b81b56` 同批冻结。R1 文件开头写的「待…批准冻结」是冻结前的自述，字节冻结后不再改，不代表现在的状态。冻结只冻设计：不授权实现、不授权常设授权、不开 mode on、不免审；本稿仍是讨论输入。
 > 上一版写 `待定` 的地方，已按 P2 §11 的冻结结论改写为「已冻结（P2 §x）」，不再保留旧选项。和 P2 有分歧、或 A 侧做不到的地方，正文不改协议，统一列在 §12「对 P2 的意见」。
 
 **E2BR-1（#785）`e2b-a-side-states.md` 的内容去向**（#785 是给 P2 的讨论输入，本卡不改它）：
@@ -346,7 +347,7 @@ A 收到 `reopen` 后按自己的状态回执：
 - handoff 只引用 R1 证据包的 `bundleId` 和 manifest sha256。
 - 签名用途 `e2b` 已由 P2 §2.1 批准（只用于请求签名）。
 
-下面这张表是 A 侧交给 R1 的输入，最终字段以 R1 为准。R1 已冻结在 blob `8c8594c3`，导出按 R1 §4 的 export v2；实施包见本节末的「A4」。
+下面这张表是 A 侧交给 R1 的输入，最终字段以 R1 为准。R1 已冻结（B 侧 2026-10-07 14:16Z 冻结，head `9a2052b8`，blob `8c8594c3`，sha256 `c8881904…`，见开头「R1 冻结记录」），导出按 R1 §4 的 export v2；实施包见本节末的「A4」。
 
 基础是现有的 `ledger review-export` v1（`src/manager/ledger-review-export-cmd.ts:39-44`）。它的 manifest 已经有：`format / version / bundleId`、`origin.instanceFingerprint`、`subject{repo, pr, head, base, specRev, taskId}`、`scope`、`authors`、`rounds`、`closuresArtifact`、`final`、`artifacts`（`src/lib/review-evidence.ts:224-231`）。
 
@@ -414,7 +415,7 @@ A 收到 `reopen` 后按自己的状态回执：
     - PR774 那种残缺包，列出缺的 identity / submission / events。
 11. 任一待定项没定：`producerCheck.ready=false`，逐项列原因；输出里永远没有 `consumerReady` 字段；MODELX 例外原样带 `crossModel:false`（R1 §7、§8.1）。
 
-**依赖**：A3 依赖 A4，因为 handoff 要引用 A4 产出的 `bundleId` 和 `manifestSha256`。其他依赖等实施包统一核定，目前看到的有：R1（已冻结）；C1（完整 key id 工具、签名用途口径）；A1（只读委托行，取 `delegationId`、`epoch`、`homeTaskId`）。
+**依赖**：A3 依赖 A4，因为 handoff 要引用 A4 产出的 `bundleId` 和 `manifestSha256`。其他依赖等实施包统一核定，目前看到的有：R1（已冻结：B 侧 2026-10-07 14:16Z 冻结，head `9a2052b8`，blob `8c8594c3`，sha256 `c8881904…`，见开头「R1 冻结记录」）；C1（完整 key id 工具、签名用途口径）；A1（只读委托行，取 `delegationId`、`epoch`、`homeTaskId`）。
 
 **待定项**（定下之前 A4 一律 fail closed：`ready=false`，不输出 `consumerReady`，不凭现有票据声称可消费）：
 
@@ -655,7 +656,7 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
 
 ## 12. 对 P2 的意见
 
-本稿不替 P2 改协议。B 侧设计已冻结在第 6 轮 `8d6a85a5`（协议稿 `c2143324`、授权稿 `55b81b56`），R1 冻结在 `8c8594c3`，本稿已逐条对齐，下面记各轮意见的去向。
+本稿不替 P2 改协议。B 侧设计已冻结在第 6 轮 `8d6a85a5`（协议稿 `c2143324`、授权稿 `55b81b56`），R1 已冻结（B 侧 2026-10-07 14:16Z 冻结，head `9a2052b8`，blob `8c8594c3`，sha256 `c8881904…`，见开头「R1 冻结记录」），本稿已逐条对齐，下面记各轮意见的去向。
 
 **第 5 轮的 7 条已全部处理**（P2 §12.2）：
 - 第 1 条：停止一律 cancelled 与续租冲突 → 已采纳（P2 §3.2 第 3 条）；
@@ -683,4 +684,4 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
 - 第 5 轮新加的撤回绑定（`handoffASeq`、`evidenceSha256`）、撤回墓碑和 `rejected:withdraw_mismatch`（P2 §2.3、§3.2 第 5 条、§6.2、§6.4、§6.7，§8 第 43–47 行），A 侧要做的写在 §4.6、§4.7 第 3 条和 §10。
 - 唯一一处 A 侧补充、不需要 P2 改：实现上线之前就开着、从没登记过的 MHO1 卡，被 `mho_query` 问到时，A 也回 `mho_unregistered`，先生成 `registrationId` 再补登记（§4.7 第 4 条）。B 对 `mho_unregistered` 的处理不变。
 - 第 6 轮（`8d6a85a5`）只改 B 本机的 handed 写口（P2 §12.9），线上消息和 A 的义务不变；新增的 P2 §8 第 48、49 行见 §10。
-- 第 10 轮按冻结的 R1 `8c8594c3` 修订：§5 证据字段（`rounds[].records`、`transferProof`，删 `surfaces[]`）、§7 面分类与 `excludeSurfaces` 非空即命中、§8 出借单的第三方来源、§10 的 A4、A6–A8，新增 §5 的「A4」实施包拟议。和 R1、P2 都没有冲突。
+- 第 10 轮按冻结的 R1（B 侧 2026-10-07 14:16Z 冻结，head `9a2052b8`，blob `8c8594c3`，sha256 `c8881904…`，见开头「R1 冻结记录」）修订：§5 证据字段（`rounds[].records`、`transferProof`，删 `surfaces[]`）、§7 面分类与 `excludeSurfaces` 非空即命中、§8 出借单的第三方来源、§10 的 A4、A6–A8，新增 §5 的「A4」实施包拟议。和 R1、P2 都没有冲突。
