@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
 import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.js";
-import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
+import { LEND_ROOT, prepareClone, removeOrderDir, sweepTrash } from "./lend-clone.js";
 import { reapOrder, reapOrphans, systemProcPorts } from "./lend-proc-reap.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
@@ -24,7 +24,7 @@ import { ensurePr, probePush, pushWork } from "./lend-push.js";
 import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
 import { archiveEndedWorker } from "./lend-session-archive.js";
 import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
-import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
+import { claudeTrashDir, removeClaudeWorkerConfig } from "./lend-claude-worker.js";
 import { lendRuntimeArgs, removeClaudeOrderConfig } from "./lend-claude-worker-routing.js";
 import { LEND_ORDER_ENV, lendModelArgs } from "./lend-grant-spawn.js";
 import { getOrder, guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
@@ -77,13 +77,21 @@ const LEND_PROJECT = "lend";
  * 终态之后没写成的收据 / 没发出的通知也要补上：收尾不看出借开关），或者还欠哪个 A 一句收回的 hello
  */
 export async function lendWanted(journal = LEND_JOURNAL_PATH, lendPath?: string): Promise<boolean> {
+  takeHandoff()?.close(); // 上一轮 pass 没走到 lend 步（前面抛了）：留着的连接这里关
   const read = await readLend(lendPath);
   if (read.status === "ok" && read.file.enabled) return true;
   if (!existsSync(journal)) return false;
   const db = openLendJournal(journal);
+  let wanted = false;
   // 收回之后还欠 A 一句 grant:null（最近一次成功的 hello 带着授权、没过 180 秒）：总开关关了也要跑到说完
-  try { return liveOrders(db).length > 0 || unsettledOrders(db).length > 0 || owedPeers(db, Date.now()).length > 0; } finally { db.close(); }
+  try { return (wanted = liveOrders(db).length > 0 || unsettledOrders(db).length > 0 || owedPeers(db, Date.now()).length > 0); } finally {
+    if (wanted && journal === LEND_JOURNAL_PATH) handoff = db; else db.close();
+  }
 }
+
+/** lendWanted 判「要跑」时开着的 journal 连接，交给同一轮的 lendStep 接着用：一轮只开一次（每次开都要跑迁移检查、关时 checkpoint） */
+let handoff: Database | null = null;
+const takeHandoff = (): Database | null => { const db = handoff; handoff = null; return db; };
 
 /** 出借 worker 固定归到 lend 项目：不按目录落进别的项目，项目上下文里也就不会带上 B 自己的项目花名册 */
 async function ensureLendProject(m: Manager): Promise<void> {
@@ -275,10 +283,19 @@ function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined
   }
 }
 
+/** 本进程第一次进 lend 步时清回收目录：上个进程退出时没删完的副本 / worker 配置（lend-clone.ts trashAway） */
+let swept = false;
+function sweepTrashOnce(): void {
+  if (swept) return;
+  swept = true;
+  try { sweepTrash(join(LEND_ROOT, "trash")); sweepTrash(claudeTrashDir()); } catch (e) { console.error(`[lend] 清回收目录失败：${(e as Error).message}`); }
+}
+
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
 export const lendStep = (ledger: LedgerReader) => async (active: () => void, lease?: SchedulerLease) => {
   active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
-  const journal = openLendJournal();
+  sweepTrashOnce();
+  const journal = takeHandoff() ?? openLendJournal();
   guardJournalWrites(journal, active);
   try { return await (await import("./lend-work-retention.js")).lendTickWithRetention(lendDeps(journal, ledger, active, lease), active); } finally { journal.close(); }
 };
