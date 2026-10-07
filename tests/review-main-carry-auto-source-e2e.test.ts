@@ -1,0 +1,259 @@
+/**
+ * MCRY4 · the MRY1 shape end to end, wired as src/scheduler-pass.ts runs it: a real temp ledger, the real lend CLI on A and a real
+ * lending side B (pool-review-proof-helpers.ts) for the pooled PASS, then each scheduler pass = mergeTick over a query_only
+ * LedgerReader (every write a real `manager.ts ledger` child under the scheduler identity and lease, temp HOME / TMPDIR / state dir)
+ * followed by the auto tick. Git runs for real (canonical pure-main proof, fetch served from a local bare origin); only gh is faked
+ * (calls, CI per head, and the merge API's pinned sha recorded). pool PASS → update-branch → first carry → main moves → second
+ * carry (refused before MCRY4: no pooled reviewer on the carried head) → the new head's own CI → merge pinned to it, while two new
+ * cards keep being planned through restate. Negatives: red / pending CI, a revoked or re-pointed source order, an author delivery.
+ */
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { acquireLock } from "../src/lib/file-lock.js";
+import type { BorrowEntry } from "../src/lib/lend-config.js";
+import { listLendOrders } from "../src/lib/ledger-lend.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { getTask, listEvents } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
+import { createTask } from "../src/lib/ledger-write.js";
+import { runBounded } from "../src/lib/run-bounded.js";
+import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
+import { parseSchedulerConfig, type RemotePolicy } from "../src/lib/scheduler-config.js";
+import { encodeLease } from "../src/lib/scheduler-lease-env.js";
+import { getMergeRun } from "../src/lib/scheduler-merge.js";
+import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
+import { mergeTick } from "../src/lib/scheduler-service.js";
+import { aResultDeps, B_WORKER, lendSide } from "./pool-review-proof-helpers.js";
+import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
+import { testChildEnv } from "./test-env.js";
+
+const MANAGER = resolve("src/manager.ts"), PR = "https://github.com/o/r/pull/7", M = "e".repeat(40);
+const REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
+let root = "", work = "", bare = "", reviewed = "", merged1 = "", merged2 = "", main1 = "", main2 = "";
+
+const git = async (cwd: string, ...argv: string[]) => {
+  const r = await runBounded(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...argv], { cwd, timeoutMs: 30_000 });
+  if (r.code !== 0) throw new Error(`git ${argv.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+};
+const sh = (...argv: string[]) => git(work, ...argv);
+const commit = async (file: string, body: string) => {
+  mkdirSync(join(work, file, ".."), { recursive: true });
+  writeFileSync(join(work, file), body);
+  await sh("add", "-A");
+  await sh("commit", "-qm", file);
+  return sh("rev-parse", "HEAD");
+};
+/** origin's main, as GitHub would hold it */
+const originMain = (sha: string) => git(bare, "update-ref", "refs/heads/main", sha);
+
+/** reviewed = the pooled PASS's head; merged1 = update-branch's pure merge of main1 into it; merged2 = the next one, of main2. */
+beforeAll(async () => {
+  root = mkdtempSync(join(tmpdir(), "mcry4-e2e-"));
+  work = join(root, "work"); bare = join(root, "origin.git");
+  await runBounded(["git", "init", "-q", "--bare", "-b", "main", bare], { timeoutMs: 30_000 });
+  await runBounded(["git", "init", "-q", "-b", "main", work], { timeoutMs: 30_000 });
+  await sh("remote", "add", "origin", "https://github.com/o/r.git");
+  await sh("remote", "set-url", "--push", "origin", bare);
+  await commit("README.md", "base\n");
+  await sh("push", "-q", "origin", "main");
+  await sh("checkout", "-qb", "task/T1");
+  reviewed = await commit("src/lib/x.ts", "export const x = 1;\n");
+  await sh("checkout", "-q", "main"); main1 = await commit("docs/one.md", "main one\n");
+  await sh("checkout", "-q", "task/T1"); await sh("merge", "-q", "--no-edit", main1); merged1 = await sh("rev-parse", "HEAD");
+  await sh("checkout", "-q", "main"); main2 = await commit("docs/two.md", "main two\n");
+  await sh("checkout", "-q", "task/T1"); await sh("merge", "-q", "--no-edit", main2); merged2 = await sh("rev-parse", "HEAD");
+  await sh("push", "-q", "origin", `${merged2}:refs/heads/task/T1`); // every object on origin; main itself is moved by originMain
+});
+afterAll(() => { if (root) rmSync(root, { recursive: true, force: true }); });
+
+let cleanup: (() => void)[] = [];
+afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
+
+type CI = "pass" | "fail" | "pending";
+
+/** T1 auto, its round-1 PASS from the pool at `reviewed`, the merge intent planned; T2 / T3 fresh auto cards in spec. */
+async function world() {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  const f = autoFixture();
+  cleanup.push(() => { f.close(); errors.mockRestore(); });
+  const spec = join(f.dir, "T1.md");
+  writeFileSync(spec, "规格：只改 src/lib/x.ts\n验收：单测全绿");
+  f.db.run("UPDATE tasks SET spec = ?, pr = ?, branch = 'task/T1' WHERE id = 'T1'", [spec, PR]);
+  const borrow: BorrowEntry[] = [{ peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 1 }];
+  const b = lendSide(f.dir), a = aResultDeps(f.dir, b.pinned);
+  const lend = { borrow: async () => borrow, notifyPm: async () => {}, result: a.result };
+  const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
+  const autoDeps = { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow };
+  const autoTick = async (maxActiveWorkers: number) => {
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers, remote: REMOTE } }, autoDeps);
+    if (r.failed.length) throw new Error(JSON.stringify(r.failed));
+    return r.cards;
+  };
+  const peer = (ep: string, body: unknown) => cli("owner", `lend-${ep}`, "--", "mate", JSON.stringify(body));
+  await toBuild(f);
+  await f.tick();
+  await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", reviewed);
+  expect((await autoTick(0))[0]).toMatchObject({ step: "pool_pooled" });
+  const [order] = listLendOrders(f.db, "T1");
+  const claim = await peer("claim", { v: 1, orderId: order!.orderId, worker: B_WORKER });
+  expect((await b.answer(claim as never, { verdict: "pass", findings: [], report: "## 通过\n" }, (body) => peer("write", body))).r).toMatchObject({ ok: true });
+  expect((await autoTick(0))[0]).toMatchObject({ step: "pool_done" });
+  expect((await autoTick(0))[0]).toMatchObject({ step: "stage", detail: "review→merge" });
+  expect((await autoTick(0))[0]).toMatchObject({ step: "merge_queue" });
+  const intent = (f.db.query("SELECT id FROM scheduler_intents WHERE action = 'merge'").get() as { id: string }).id;
+  const reviewSeq = listEvents(f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "review")!.seq;
+
+  /** Two new auto cards the passes after the second carry must keep planning (MRY1: the refused carry stalled every pass after it). */
+  const newCards = async () => {
+    const registry = JSON.parse(await Bun.file(f.registryPath).text());
+    for (const id of ["T2", "T3"]) {
+      const agent = `agent-${id.toLowerCase()}`;
+      registry.agents[agent] = { runtime: "claude-code", sessionId: `s-${id}`, cwd: f.dir, channelId: `ch-${id}` };
+      createTask(f.db, { actor: "owner", now: Date.now() }, { project: "p", id, title: id, kind: "code", agent, extra: { fileGlobs: [`src/${id}.ts`] } });
+      setWorkflow(f.db, { actor: "owner", now: Date.now() }, { taskId: id, taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
+    }
+    writeFileSync(f.registryPath, JSON.stringify(registry));
+  };
+
+  // The scheduler service's write path: `manager.ts ledger …` children, scheduler identity, its lease, this state dir.
+  const singletonPath = join(f.dir, "scheduler.pid"), maintenancePath = join(f.dir, "maintenance.lock");
+  const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
+  const home = join(f.dir, "home"), tmp = join(f.dir, "tmp");
+  for (const d of [home, tmp]) mkdirSync(d);
+  const env = testChildEnv({ HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: f.dir, CLAUDESTRA_RUNTIME_DIR: join(f.dir, "run"), DISCORD_CHANNEL_ID: "",
+    CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
+      maintenance: { path: maintenancePath, token: maintenance.token } }) });
+  const children: string[] = [];
+  const manager = async (...args: string[]) => {
+    children.push(args[1]!);
+    const p = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", MANAGER, ...args], { env, stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    try { return JSON.parse(out.trim().split("\n").at(-1) ?? "") as Record<string, unknown>; } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
+  };
+  const reader = new LedgerReader(join(f.dir, "ledger.sqlite"));
+  cleanup.push(() => { reader.close(); singleton.release(); maintenance.release(); });
+
+  // Fake gh: the PR's head, each head's own CI, the merge API's pinned sha. git is real (fetch maps origin to the bare repo).
+  const gh = { head: reviewed, ci: new Map<string, CI>([[reviewed, "pass"]]), merged: false, calls: [] as string[] };
+  const next: Record<string, string> = { [reviewed]: merged1, [merged1]: merged2 }; // what update-branch produces against origin's main
+  const command: typeof runBounded = async (argv, opts) => {
+    const ok = (stdout: unknown) => ({ code: 0, stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout), stderr: "", timedOut: false });
+    if (argv[0] === "git") return runBounded(argv[1] === "fetch" ? argv.map((x) => (x === "origin" ? bare : x)) : argv, opts);
+    const cmd = argv.slice(1).join(" ");
+    gh.calls.push(cmd);
+    if (cmd.startsWith("repo view")) return ok({ nameWithOwner: "o/r" });
+    if (cmd.startsWith("pr view")) return ok({ state: gh.merged ? "MERGED" : "OPEN", headRefOid: gh.head, headRefName: "task/T1", baseRefName: "main",
+      isDraft: false, isCrossRepository: false, mergeStateStatus: gh.merged ? "UNKNOWN" : "CLEAN", mergeCommit: gh.merged ? { oid: M } : null });
+    if (cmd.startsWith("pr checks")) {
+      const ci = gh.ci.get(gh.head) ?? "pending";
+      return { code: ci === "pass" ? 0 : ci === "fail" ? 1 : 8, stdout: JSON.stringify([{ name: "check", bucket: ci }]), stderr: "", timedOut: false };
+    }
+    if (cmd.startsWith("api repos/o/r/compare/main...")) {
+      const main = await git(bare, "rev-parse", "main");
+      const r = await runBounded(["git", "merge-base", "--is-ancestor", main, gh.head], { cwd: bare, timeoutMs: 30_000 });
+      return ok({ behind: r.code === 0 ? 0 : 1, main });
+    }
+    if (cmd === `pr update-branch ${PR}`) { gh.head = next[gh.head]!; return ok(""); }
+    if (cmd.startsWith("api -X PUT repos/o/r/pulls/7/merge")) { gh.merged = true; return ok({ merged: true, sha: M }); }
+    return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };
+  };
+  const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 3, requiredChecks: ["check"], repoDir: work, remote: REMOTE } } });
+  /** One scheduler pass in production order: the merge driver, then the auto tick for every other card. */
+  const pass = async () => {
+    const ro = reader.get()!;
+    expect(() => ro.run("UPDATE meta SET value = value")).toThrow(/readonly/);
+    await mergeTick(ro, config, manager, (p) => mergeExternal(p, command), () => {});
+    await autoTick(3);
+  };
+  const run = () => getMergeRun(f.db, intent)!;
+  const carries = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "review_carry");
+  const sent = () => gh.calls.filter((c) => c.includes("update-branch") || c.includes("/merge "));
+  const restated = () => (f.db.query("SELECT DISTINCT taskId FROM scheduler_intents WHERE taskId IN ('T2','T3') AND node = 'restate' ORDER BY taskId")
+    .all() as { taskId: string }[]).map((r) => r.taskId);
+  return { f, order: order!, intent, reviewSeq, gh, pass, run, carries, sent, children, restated, newCards };
+}
+type World = Awaited<ReturnType<typeof world>>;
+
+/** pass 1 claims + updates against main1, pass 2 carries reviewed → merged1 (first carry), its CI goes green, main moves to main2,
+ * pass 3 refreshes (update-branch again) → merged2. */
+async function toSecondUpdate(w: World) {
+  await originMain(main1);
+  await w.pass();
+  expect(w.run()).toMatchObject({ phase: "updating", reviewedHead: reviewed });
+  expect(w.gh.head).toBe(merged1);
+  await w.pass();
+  expect(w.run()).toMatchObject({ phase: "await_ci", reviewedHead: merged1 });
+  expect(getTask(w.f.db, "T1")!.headSHA).toBe(merged1);
+  w.gh.ci.set(merged1, "pass");
+  await originMain(main2);
+  await w.pass();
+  expect(w.run()).toMatchObject({ phase: "updating", reviewedHead: merged1 });
+  expect(w.gh.head).toBe(merged2);
+}
+
+describe("MCRY4 e2e: a pooled PASS through two engine carries, merged at the new head after its own CI", () => {
+  test("旧红新绿：pool PASS → carry → main moves → second carry → new head's CI pending (no merge) → green → merge pinned to it; T2 / T3 keep restating", async () => {
+    const w = await world();
+    await toSecondUpdate(w);
+    await w.newCards();
+    expect(w.restated()).toEqual([]);
+    await w.pass(); // the second carry: before MCRY4 the in-transaction source gate found no pooled reviewer on merged1 and refused
+    expect(w.run()).toMatchObject({ phase: "await_ci", reviewedHead: merged2 });
+    expect(getTask(w.f.db, "T1")).toMatchObject({ headSHA: merged2, stage: "merge" });
+    expect(w.carries().map((e) => [e.actor, e.data.from, e.data.to, e.data.sourceReviewSeq, e.data.intentId])).toEqual([
+      ["scheduler", reviewed, merged1, w.reviewSeq, w.intent], ["scheduler", merged1, merged2, w.reviewSeq, w.intent]]);
+    expect(w.order).toMatchObject({ head: reviewed }); // the pool order, ticket and session stay bound to the reviewed head
+    expect(listLendOrders(w.f.db, "T1")[0]).toMatchObject({ head: reviewed, status: "done" });
+    await w.pass(); // merged2 has no CI result of its own yet: merged1's green does not count
+    expect(w.run()).toMatchObject({ phase: "await_ci", reviewedHead: merged2 });
+    expect(w.sent()).toEqual([`pr update-branch ${PR}`, `pr update-branch ${PR}`]);
+    w.gh.ci.set(merged2, "pass");
+    await w.pass();
+    expect(w.run()).toMatchObject({ phase: "merged", reviewedHead: merged2, mergeSha: M });
+    expect(w.sent()).toEqual([`pr update-branch ${PR}`, `pr update-branch ${PR}`, `api -X PUT repos/o/r/pulls/7/merge -f sha=${merged2} -f merge_method=merge`]);
+    expect(w.children.every((c) => c.startsWith("scheduler-"))).toBe(true);
+    expect(w.restated()).toEqual(["T2", "T3"]);
+  }, 240_000);
+
+  test("the new head's own CI red: no merge is sent and the run leaves the queue; both carries stand, T2 / T3 still restate", async () => {
+    const w = await world();
+    await toSecondUpdate(w);
+    await w.newCards();
+    w.gh.ci.set(merged2, "fail");
+    await w.pass();
+    expect(w.run()).toMatchObject({ phase: "await_ci", reviewedHead: merged2 });
+    await w.pass();
+    expect(["unknown", "resolved"]).toContain(w.run().phase);
+    expect(w.carries()).toHaveLength(2);
+    expect(w.sent()).toEqual([`pr update-branch ${PR}`, `pr update-branch ${PR}`]);
+    expect(w.restated()).toEqual(["T2", "T3"]);
+  }, 240_000);
+
+  const spoil: [string, (w: World) => void][] = [
+    ["the source order revoked (no longer done)", (w) => w.f.db.run("UPDATE lend_orders SET status = 'cancelled' WHERE orderId = ?", [w.order.orderId])],
+    ["the source order re-pointed at the carried head", (w) => w.f.db.run("UPDATE lend_orders SET head = ? WHERE orderId = ?", [merged1, w.order.orderId])],
+    ["the order's lease gen drifted", (w) => w.f.db.run("UPDATE lend_orders SET leaseGen = leaseGen + 3 WHERE orderId = ?", [w.order.orderId])],
+    ["the author delivered after the review", (w) => insertEvent(w.f.db, { actor: "agent-task-one", now: Date.now() },
+      { project: "p", target: "T1", kind: "deliver", text: "", data: { headSHA: merged1 } }, false)],
+  ];
+  for (const [name, change] of spoil) {
+    test(`second carry refused, zero carry writes, never merged: ${name}`, async () => {
+      const w = await world();
+      await toSecondUpdate(w);
+      change(w);
+      w.gh.ci.set(merged2, "pass");
+      const before = w.carries().map((e) => e.seq);
+      // The refusal itself is the ledger's (in-transaction source gate). How the driver reacts to it from `updating` is
+      // scheduler-merge-driver.ts's (outside this card): today the rejection escapes mergeTick, so either outcome is accepted here.
+      for (let i = 0; i < 2; i++) await w.pass().catch((e: Error) => expect(e.message).toMatch(/沿用时正式来源审查门不成立|审查结论已不合格|当前 head/));
+      expect(w.carries().map((e) => e.seq)).toEqual(before); // the first carry's evidence is untouched, no second one was written
+      expect(getTask(w.f.db, "T1")!.headSHA).toBe(merged1);
+      expect(["updating", "unknown", "await_review"]).toContain(w.run().phase);
+      expect(w.sent().some((c) => c.includes("/merge "))).toBe(false);
+    }, 240_000);
+  }
+});
