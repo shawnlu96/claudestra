@@ -4,7 +4,7 @@
  * 泄漏本身由 scripts/scheduler-memory-probe.ts 手动量（footprint，只在 macOS）。
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { describe as jscDescribe } from "bun:jsc";
+import * as jsc from "bun:jsc";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,8 @@ import { sourceFor } from "../src/lib/runtimes/index.ts";
 import { projectsSlug } from "../src/lib/jsonl-cost.ts";
 
 const SID = "23d59aac-59aa-475d-9d8e-2f084ed9d56e";
+// describe 是 bun:jsc 的运行时导出，类型声明里没有
+const jscDescribe = (jsc as unknown as { describe(v: unknown): string }).describe;
 const narrow = (s: string) => jscDescribe(s).includes("8Bit:(1)");
 
 /** registry 的样子：文件里有中文，JSON.parse 出来的 ASCII 字段也是 UTF-16 存储 */

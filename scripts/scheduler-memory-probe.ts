@@ -4,7 +4,7 @@
  * manager child, no network, no writes outside the snapshot). Session files are looked up under the real $HOME read-only,
  * because that lookup is the path being measured.
  *
- *   bun scripts/scheduler-memory-probe.ts snapshot --to DIR [--from ~/.claude-orchestrator]
+ *   bun scripts/scheduler-memory-probe.ts snapshot --to DIR [--from STATE_DIR (default: the production state dir, read only)]
  *   bun scripts/scheduler-memory-probe.ts run --state DIR [--root CHECKOUT] [--rounds 100] [--steps all|view,lifecycle,...] [--limit-mb 5]
  *
  * Each step prints one JSON line: WebKit malloc and phys footprint before / after `rounds` passes (after forced GC), the
@@ -16,6 +16,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stateDirIn } from "../src/lib/state-dir.ts";
 
 const STEPS = ["view", "lifecycle", "lockyield", "registry", "activity"] as const;
 type Step = typeof STEPS[number];
@@ -42,13 +43,15 @@ function snapshot(from: string, to: string): void {
 }
 
 /** macOS footprint(1): total phys footprint and the WebKit malloc dirty size, in MB */
-function footprint(): { physMb: number; webkitMb: number } {
-  const out = Bun.spawnSync(["footprint", "-p", String(process.pid)]).stdout.toString();
-  const mb = (n: string, u: string) => (u === "KB" ? Number(n) / 1024 : u === "GB" ? Number(n) * 1024 : u === "B" ? 0 : Number(n));
+/** footprint(1) output → total phys footprint and the WebKit malloc dirty size, in MB (NaN = line missing) */
+export function parseFootprint(out: string): { physMb: number; webkitMb: number } {
+  const mb = (n: string, u: string) => Number(n) * ({ B: 1 / 1048576, KB: 1 / 1024, MB: 1, GB: 1024 } as Record<string, number>)[u]!;
   const phys = /Footprint:\s+([\d.]+)\s+(B|KB|MB|GB)/.exec(out);
   const webkit = /^\s*([\d.]+)\s+(B|KB|MB|GB)\s+.*WebKit malloc\s*$/m.exec(out);
   return { physMb: phys ? mb(phys[1]!, phys[2]!) : NaN, webkitMb: webkit ? mb(webkit[1]!, webkit[2]!) : NaN };
 }
+
+const footprint = () => parseFootprint(Bun.spawnSync(["footprint", "-p", String(process.pid)]).stdout.toString());
 
 async function settle(): Promise<void> {
   for (let k = 0; k < 4; k++) { Bun.gc(true); await Bun.sleep(500); }
@@ -88,7 +91,7 @@ async function child(root: string, step: Step, rounds: number, limitMb: number):
 
 async function main(): Promise<void> {
   const cmd = process.argv[2];
-  if (cmd === "snapshot") return snapshot(resolve(arg("from", join(homedir(), ".claude-orchestrator"))!), resolve(arg("to")!));
+  if (cmd === "snapshot") return snapshot(resolve(arg("from", stateDirIn(homedir()))!), resolve(arg("to")!));
   if (cmd === "child") return child(arg("root")!, arg("step") as Step, Number(arg("rounds")), Number(arg("limit-mb")));
   if (cmd !== "run") throw new Error("usage: snapshot --to DIR | run --state DIR [--root CHECKOUT] [--rounds 100] [--steps all|a,b] [--limit-mb 5]");
   if (process.platform !== "darwin") throw new Error("macOS only (footprint)");
@@ -109,4 +112,4 @@ async function main(): Promise<void> {
   process.exit(ok ? 0 : 1);
 }
 
-await main();
+if (import.meta.main) await main();
