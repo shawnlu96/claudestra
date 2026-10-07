@@ -7,7 +7,7 @@
  * Driver / ledger cases: tests/scheduler-merge-ci-carried.test.ts.
  */
 import { afterAll, afterEach, beforeAll, expect, setSystemTime, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -131,14 +131,18 @@ async function setup(log = TIMEOUT_ONLY) {
   const env = () => testChildEnv({ CIF3_NOW: String(at), HOME: home, TMPDIR: dir, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
     CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
       maintenance: { path: maintenancePath, token: maintenance.token } }) });
-  const children: string[] = [];
+  const children: string[] = [], redirected: string[] = [];
+  const cli = async (over: Record<string, string>, args: string[]) => {
+    const p = Bun.spawn([process.execPath, "--no-env-file", "--preload", clock, MANAGER, ...args], { env: { ...env(), ...over }, stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    await p.exited;
+    redirected.push(...err.split("\n").filter((l) => l.startsWith("[test-guard]")));
+    try { return JSON.parse(out) as Record<string, unknown>; } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
+  };
   /** The real ledger CLI with the scheduler identity and lease, as schedulerPass's manager runs it. */
   const manager = async (...args: string[]) => {
     children.push(args[1]!);
-    const p = Bun.spawn([process.execPath, "--no-env-file", "--preload", clock, MANAGER, ...args], { env: env(), stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
-    await p.exited;
-    try { return JSON.parse(out) as Record<string, unknown>; } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
+    return cli({}, args);
   };
   const plan = async (taskId: string, id: string) => {
     const r = await manager("ledger", "scheduler-plan", taskId, "--id", id, "--rev", String(revs(taskId).task), "--workflow-rev", String(revs(taskId).wf),
@@ -198,7 +202,7 @@ async function setup(log = TIMEOUT_ONLY) {
   };
   /** Run 54368 ended: the gate went red after the shard. */
   const gateRed = () => { gh.run = { attempt: 1, status: "completed", conclusion: "failure" }; gh.prs[42]!.checks = checks("fail", "fail"); };
-  return { db, gh, plan, tick, state, sent, ops, toFlk2, gateRed, children };
+  return { db, gh, plan, tick, state, sent, ops, toFlk2, gateRed, children, cli, redirected, revs, seq };
 }
 
 test("CIF3 旧红新绿：FLK2 形态，调度器 update-branch 沿用后的 head 上分片超时红 → 不判 unknown、记一次重跑继续等，重跑绿后按沿用 head 钉 head 合并，队列始终没冻", async () => {
@@ -226,6 +230,7 @@ test("CIF3 旧红新绿：FLK2 形态，调度器 update-branch 沿用后的 hea
   await s.tick();
   expect(s.state("b0", B)).toMatchObject({ phase: "merged", frozen: false });
   expect(s.children.every((c) => c.startsWith("scheduler-"))).toBe(true);
+  expect(s.redirected).toEqual([]); // every child kept this fixture's state / runtime dirs (test-guard redirected none)
 }, 180_000);
 
 test("CIF3 反例：同一形态但断言失败 → 退 fix、不重跑、队列不冻", async () => {
@@ -239,3 +244,14 @@ test("CIF3 反例：同一形态但断言失败 → 退 fix、不重跑、队列
     checks: [{ name: GATE, link: RUN }] }) })]);
   expect(s.sent()).toEqual([`pr update-branch ${PRS[A]}`]);
 }, 180_000);
+
+test("CIF3 隔离反例：子进程状态目录不在它认可的临时根下 → test-guard 照旧改道到空台账，写不进本 fixture，也不碰那个目录", async () => {
+  const s = await setup();
+  const outside = resolve(`.cif3-not-temp-${process.pid}`);
+  const r = await s.cli({ CLAUDESTRA_STATE_DIR: outside }, ["ledger", "scheduler-plan", A, "--id", "a0", "--rev", String(s.revs(A).task),
+    "--workflow-rev", String(s.revs(A).wf), "--seq", String(s.seq()), "--node", "merge_deploy", "--action", "merge", "--reason", "merge", "--resources", "merge:p"]);
+  expect(r).toMatchObject({ ok: false });
+  expect(s.redirected).toEqual([expect.stringContaining(`CLAUDESTRA_STATE_DIR 指向 ${outside}`)]);
+  expect(existsSync(outside)).toBe(false);
+  expect(s.db.query("SELECT id FROM scheduler_intents").all()).toEqual([expect.objectContaining({ id: "rv-FLK2" }), expect.objectContaining({ id: "rv-FLK2B" })]);
+}, 60_000);
