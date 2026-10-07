@@ -138,8 +138,9 @@ hold (never recalled); a queued manual request is not an effect yet, so it is no
   first. Unbound cards and one-node DAGs behave as before.
 - **Both together** — the stricter wins: the card waits while either holds, the text gives both reasons.
 - **Never recalled** — a handoff (or merge intent) already submitted is not taken back by either gate: a recorded handoff is
-  followed to the owner's merge as before. If part of a batch is out and a sibling of it falls back (to fix / review, or a node is
-  added), the rest keep waiting and PM gets one `escalate` (`op: feature_handoff_regress`, listing the cards handed out) per
-  regression, raised from the handed card's PR polling (`recordFeatureRegress` in `lib/scheduler-merge-handoff.ts`). "Its batch"
-  is the batch the handoff evidence recorded, not the DAG as rewritten since. Once every handed card has landed, no
-  further notice is raised: the fallen-back card goes through its own fix / review flow.
+  followed to the owner's merge as before. If part of a batch is out and a card of it falls back (to fix / review), the
+  rest keep waiting and PM gets one `escalate` (`op: feature_handoff_regress`, listing the cards handed out) per
+  regression (`recordFeatureRegress` in `lib/scheduler-merge-handoff.ts`). "Its batch" is the batch the handoff evidence recorded,
+  not the DAG as rewritten since; a handed card sent back to fix / review counts too. It is asked from the handed card while it
+  follows its PR and from a batch sibling waiting in `merge` (the auto tick's wait for `feature_siblings_pending`), since a card
+  sent back no longer polls its PR.
