@@ -108,9 +108,9 @@ B 用已经握手的 HTTP peer 把委托交给 A，消息走结构化接口 `POS
 - 谁能签：只有 A 的 owner 本人在全权设备上点同意才生效。PM、master、peer、guest 都不能签，也不能代签；生效前要过 `ledger ask-check`。
 - 期限：`expiresAt` 从签发起最长 7 天，到期要重签，不自动续。
 - 改名：不沿用 `peer_accept_standing` 这个名字（P2 授权稿 §7）。现状是代码里只有逐卡的 `peer_accept`（`src/manager/peer-ledger-cli.ts:14-24`）。
-- 管辖范围：授权只管接单这一刻。到期或普通撤销后不再接新单，已经在途的委托照常推进到收回。例外有两个：
-  - owner「撤销并收回在途」时，A 发 `return_request`，走 §6（P2 授权稿 §5）；
-  - 推进中碰到 `excludeSurfaces` 的，见 §3.3。
+- 管辖范围：授权只管接单这一刻（P2 授权稿 §4、§5）。接单记录写上那份授权的 `id` 和 `rev`。到期或普通撤销后不再接新单，已经在途的委托照常推进到收回。在途委托只有两种情况会再碰授权：
+  - owner 主动选「撤销并收回在途」：A 发 `return_request`，走 §6（P2 授权稿 §5）。这是唯一会因为授权变化而停下在途委托的路；
+  - 规格更新：拿**接单时记下的那份授权**的 `excludeSurfaces` 和范围去评估新规格，不重核授权当前是否过期、是否被普通撤销（§3.3）。
 
 ### 2.3 接不下来怎么办
 
@@ -159,14 +159,20 @@ A 侧的接单接口必须幂等：同一个 `delegationId`、同样的内容摘
   - 旧 specRev 下结果未定的意图，先对账；
   - P1 连续轮数清零（`scheduler-engine.md:141`「换规格版本重新计数」）；
   - 改了规格的卡，按现有 `ledger workflow-resume` 重绑（`scheduler-engine.md:204` ③）。
-- **改规格时把 §2.2 第 2、4、7、8 条重核一遍。** 第 2 条要一起重核，因为入站授权的 `excludeSurfaces` 管的是规格碰到哪些面：只重核第 4、7、8 条的话，B 可以先用普通规格拿到授权，再用 `spec_update` 把排除面的需求加进来。重核结果分两种：
-  - **第 4、7、8 条不过**（换模板、换仓库、规格不合格）：按新委托处理，回执 `rejected:<码>`，规格不写入，A 卡照旧。
-  - **第 2 条不过**（新规格碰到了 `excludeSurfaces`，或者授权已不覆盖这份规格）：A 照写新规格，好让 specRev 和 B 对齐，但**暂停自动推进**：
+- **改规格时怎么核**：重核 §2.2 第 4、7、8 条，再拿**接单时那份授权**（委托行记着它的 `id` 和 `rev`）评估新规格。
+  - 只核新规格：碰没碰到那份授权的 `excludeSurfaces`，在不在它的范围里。第 4、7 条用到授权的部分（templates、repos 白名单），也拿这份授权来比。
+  - **不重核**授权当前是否过期、是否被普通撤销。授权只管接单那一刻（P2 授权稿 §4、§5），在途的卡不能因为授权自然到期，就在下一次规格更新时被卡住。owner 想停下在途的，走「撤销并收回在途」（§2.2 第 2 条的管辖范围）。
+  - 为什么要拿接单授权评估新规格：只核第 4、7、8 条的话，B 可以先用普通规格拿到授权，再用 `spec_update` 把排除面的需求加进来。
+
+  评估结果分三种：
+  - **都通过**：照常写入新规格，继续自动推进。授权已经到期或被普通撤销的，也一样。
+  - **第 4、7、8 条不过**（规格不合格，或模板、仓库不在接单授权里）：按新委托处理，回执 `rejected:<码>`，规格不写入，A 卡照旧。
+  - **新规格碰到接单授权的 `excludeSurfaces`，或超出它的范围**：A 照写新规格，好让 specRev 和 B 对齐，但**暂停自动推进**：
     1. A 卡转 manual；
     2. 回写 B 一条 `fallback`，原因码 `surface_excluded`；
     3. 回执 `needs_owner`；
     4. A 在 owner 频道发一张逐卡 authorize，问「这份规格超出了常设授权的范围，这张卡还接不接」。owner 同意，系统把 A 卡恢复成 auto；owner 不同意或 24 小时没人答，A 的 PM 发 `return_request`，走 §6。
-  - P2 §4.3 只写了重核第 4、7、8 条；它 §4.1 末段的「规格变化碰到 `excludeSurfaces`」让 PM 在收窄、继续、退回里选，没有走逐卡授权。这一处见 §12 第 1 条。
+  - 这个口径由 §12 第 1 条提出，P2 第 3 轮已采纳（按收窄后的口径：只用接单授权评估新规格，不重核有效期和普通撤销）。
 - **推进中改动碰到 `excludeSurfaces`**（规格没变，是 A 的作者改动碰到的；P2 §4.1 末段、P2 授权稿 §4）：A 卡转 manual，回写 B 一条 `fallback`（`surface_excluded`），由 A 的 PM 决定是收窄改动后继续，还是发 `return_request`；委托本身不自动停。交接时 B 还会按外发授权的 `excludeSurfaces` 把整份改动再核一遍（P2 §6.2 第 6 条）。
 - 委托行不是 `active` 时收到 `reopen`，同样回执 `rejected:not_active`。
 - **复述放行**：复述（包括规格改动后的重新复述）由 **A 侧 PM** 用 `ledger restate-approve` 放行，同时把复述正文回写 B（P2 §11 冻结为这一选项）。B 不同意时用 `spec_update` 或 `revoke` 纠正，不要求每次都跨实例等一轮。
@@ -268,7 +274,7 @@ A 的处理：
 - **收到 `complete{mergeSha, prHead, mergedAt}`**：A 先只读核实三件事：PR 状态是 merged；合并提交等于 `mergeSha`；PR head 等于 `prHead`。
   - 核实通过：委托行转 `closed`（completed），释放 §2.2 第 3 条的名额，触发排队补位；A 卡结束，进 MHO1 的交回完成态；清理 worktree。分支在 B 仓库里，由 B 按自己的规矩处理。
   - 核实不通过（PR 没合并、SHA 对不上）：A 不关闭，回执 `rejected:<码>`，交 A 的 PM；B 的 PM 收到后去对账。
-- handed 期间如果 A 的租约过期，P2 只写了 B 侧 handed 不变，A 侧怎么续租接不上，见 §12 第 3 条。
+- handed 期间 A 的租约过期：§12 第 3 条提出的问题，P2 第 3 轮已采纳，写法以 P2 第 3 轮为准。A 侧倾向是 handed 下 B 对 `renew_request` 照回 `renew_ack`。
 
 ### 4.7 非委托的 MHO1 自动卡（A 自己开的卡，已冻结，P2 §6.7）
 
@@ -283,7 +289,7 @@ A 的处理：
 3. **撤回**：和 §4.1 的 `handoff_withdraw` 一样，带 `registrationId`。卡离开 merge、本地出现 P1、CI 红、主动退回时发。A 的本地 P1 不会被 B 的旧 PASS 盖掉。
 4. **结束**：收到 `complete{registrationId, …}`，A 按 §4.6 只读核实之后，A 卡结束，登记关闭。PR 没合并就被关闭的，登记关闭，记一条事件。
 5. **迁移**：B 打开 `e2b.handoffIntake` 时，A 给已经开着的 MHO1 自动卡 PR 补发 `mho_register`；被回 `rejected:already_merged` 的，什么也不做。
-6. 去重键用 `mho:<registrationId>:…`（§4.2）。`registrationId` 由 A 生成，格式 P2 没定，见 §12 第 4 条。
+6. 去重键用 `mho:<registrationId>:…`（§4.2）。`registrationId` 由 A 生成，格式是 `mho_` + 26 位随机 base32，全局唯一、不复用（§12 第 4 条，P2 第 3 轮已采纳）。
 
 ## 5. 证据导出（交给 R1）
 
@@ -382,7 +388,7 @@ A 的处理：
 - **起因是 B 的 `revoke` 或 A 的 `return_request`**：同 epoch 不可能恢复，A 卡在发出 `stop_confirm` 之后转终态 `cancelled`，A 不发 `renew_request`。之后只能等 `reclaim_confirm`，再由 B 重新委托、新建 A 卡（§3.1）。
 - **起因是租约过期**：A 卡**暂停**，不进终态。
   - 暂停的样子：A 卡停在原阶段、原轮次，workflow 转 manual，原因码 `e2b_paused`。这期间 PM 手推也被业务闸挡住。
-  - A 侧把「收到 `stale_epoch` / `not_delegated` 而进的停止」也按这一类处理：A 分不清 B 那边是租约过期还是已经收回，先暂停是安全的，之后收到 `reclaim_confirm` 照样转 `cancelled`。P2 只写了租约过期，见 §12 第 2 条。
+  - A 侧把「收到 `stale_epoch` / `not_delegated` 而进的停止」也按这一类处理：A 分不清 B 那边是租约过期还是已经收回，先暂停是安全的，之后收到 `reclaim_confirm` 照样转 `cancelled`。这一条由 §12 第 2 条提出，P2 第 3 轮已采纳。
 - **续租流程**：
   1. A 先把积压回写和 `stop_confirm` 按控制闸发完，再发 `renew_request`。
   2. B 核对：B 卡仍在这个 epoch，委托没被撤回；B 状态是 `stopping`，而且起因只是租约过期（`frozen` 不能续租）；B 已按停止证据的要求核过这份 `stop_confirm`。
@@ -438,7 +444,8 @@ A 侧要做的：导出证据时填 `surfaces[]`（§5），按文件路径标�
 | 在 B 没指定的分支、或者已经存在的分支上写 | 越权 / 串卡 | §2.2 第 11 条，分支由 `delegationId` 推出且必须不存在，否则 `branch_conflict` |
 | A 本机合并或部署 | 越权 | 接单时要求项目是 `mergeHandoff: true`；这种项目不排合并意图，配了 deploy 直接判配置无效（`merge-handoff.md:14-15`、`:72-77`） |
 | B 通过规格让 A 做授权外的事 | 越权 | 规格是外来数据（§3.2），系统配置、安装、密钥类不在常设授权内 |
-| B 先拿到授权，再用 `spec_update` 把排除面加进规格 | 越权 | 改规格时重核第 2 条，碰到 `excludeSurfaces` 就暂停自动推进，转逐卡授权或退回（§3.3） |
+| B 先拿到授权，再用 `spec_update` 把排除面加进规格 | 越权 | 改规格时拿接单那份授权的 `excludeSurfaces` 评估新规格，碰到了就暂停自动推进，转逐卡授权或退回（§3.3） |
+| 授权到期或被普通撤销后，在途卡的规格更新被要求重新授权 | 在途委托被授权变化卡住，违背「授权只管接单」 | 规格更新不重核授权当前的有效期和撤销状态；只有「撤销并收回在途」会停下在途委托（§2.2 第 2 条、§3.3） |
 | B 把 security 卡塞给 A | 越权 / 审查降级 | §2.2 第 4 条一律拒；授权的 templates 里写了 security，整条授权不生效（P2 授权稿 §2） |
 | B 抬高并发 | 越权 | 上限只取 A owner 签的授权，B 报的值不算（P2 授权稿 §6） |
 | 换机器沿用同一个 peer 名 | 冒名 | 授权的 `peerKey` 是完整 key id；同名换实例当新主体，旧委托、旧授权都不继承（P2 §2.1） |
@@ -484,10 +491,15 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
   - 撤回引起的停止：A 卡发出 `stop_confirm` 后直接 `cancelled`，A 不发 `renew_request`。
 - **A4 拒审换家族**：A 的审查员（比如 Codex）拒审，换成另一家（比如 Pi 审查员）。证据包里如实记录换了家族，以及每一轮审查员的 `verification`。
 - **A5 `complete` 核实不通过**：B 发来的 `complete` 里 `mergeSha` 和 PR 实际的合并提交对不上，或者 PR 还没合并：A 不关闭委托行，不释放名额，不清现场，回执 `rejected`，交 A 的 PM。
-- **A6 规格更新碰到排除面（补 P2 第 29 行）**：入站授权 `excludeSurfaces=[鉴权]`；首次 offer 只改普通 UI，接单通过；随后 `spec_update` 加入登录鉴权的修改，模板、仓库、大小都不变。期望：
+- **A6 规格更新碰到排除面（补 P2 第 29 行）**：接单时那份入站授权 `excludeSurfaces=[鉴权]`；首次 offer 只改普通 UI，接单通过；随后 `spec_update` 加入登录鉴权的修改，模板、仓库、大小都不变。期望：
   - A 写入新规格，A 卡转 manual，回写 `fallback{surface_excluded}`，回执 `needs_owner`；
   - owner 同意前不派任何单；
   - owner 不同意 → A 发 `return_request`。
+- **A7 授权到期后的普通规格更新（对应第 6 轮审查探针）**：A owner 签了 7 天的入站授权，day 1 接下一张普通 UI 卡；day 8 授权自然到期；B 发 `spec_update`，只追加一条验收描述，同仓库、同模板，没碰排除面。期望：
+  - 回执 `applied`，A 卡 specRev 加一，**继续自动推进**；
+  - 不转 manual，不回 `needs_owner`，不发逐卡 authorize；
+  - 授权被普通撤销（不是「撤销并收回在途」）的，结果相同；
+  - 同一时刻 B 再发一份新的 offer，会因为授权已到期回 `needs_owner`。授权只管接单。
 
 ## 11. 待对齐（现有文档 / 代码里发现的出入，本卡不改，只记在这里）
 
@@ -513,12 +525,11 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
 - 第 6 条：「为空」怎么判 → P2 换了做法，分支按 `delegationId` 唯一、要求不存在（P2 §4.1 第 11 条），本稿已跟；
 - 第 7 条：hold 核清后用什么消息 → 已采纳（P2 §5.3）。
 
-**对 P2 第 2 轮（`b6526819`）的新意见**：
+**第 6 轮（对 P2 第 2 轮 `b6526819`）的 5 条：已全部采纳（P2 第 3 轮）**。P2 第 3 轮推上去后再逐条核节号。
+1. `spec_update` 要拿入站授权评估新规格 → 已采纳（P2 第 3 轮）。口径按第 7 轮收窄：只用**接单时那份授权**的 `excludeSurfaces` 和范围去评估新规格；不重核授权当前的有效期和普通撤销。碰到排除面时：A 照写规格，A 卡转 manual，回写 `fallback{surface_excluded}`，回执 `needs_owner`，走逐卡授权；owner 不同意或超时就 `return_request`（本稿 §3.3）。
+2. 收到 `stale_epoch` / `not_delegated` 而进的停止，按租约过期处理，A 卡暂停 → 已采纳（P2 第 3 轮）。
+3. handed 期间租约过期，A 回不了 `active`，`reopen` 会被拒 → 已采纳（P2 第 3 轮）。A 侧倾向 handed 下 B 照回 `renew_ack`，具体写法以 P2 第 3 轮为准。
+4. `registrationId` 由 A 生成，格式是 `mho_` + 26 位随机 base32 → 已采纳（P2 第 3 轮）。
+5. 登记生效时 PR 已在普通收审中，一律按迁移处理（`pm_hold`）→ 已采纳（P2 第 3 轮）。
 
-| # | 位置 | 问题 | 建议 |
-|---|---|---|---|
-| 1 | P2 §4.3，对照 §4.1 末段、P2 授权稿 §4 | §4.3 规格更新只重核第 4、7、8 条，没有重核第 2 条（入站授权的 `excludeSurfaces`、授权是否仍覆盖）。B 可以先用普通规格拿到授权，再用 `spec_update` 把排除面的需求加进来。§4.1 末段虽然写了「规格变化碰到排除面」，但给 PM 的选项是收窄改动、继续推进或退回；规格本身要求碰排除面时，没法「收窄」，也不该由 PM 绕过 owner 继续推进 | §4.3 改成重核第 2、4、7、8 条。第 2 条不过时：A 照写规格（让 specRev 和 B 对齐），A 卡转 manual，回写 `fallback{surface_excluded}`，回执 `needs_owner`，走 A owner 的逐卡 authorize；owner 不同意或超时，A 发 `return_request`。本稿 §3.3 已按这个写 |
-| 2 | P2 §3.2 第 3 条 | A 卡去向只分「revoke / return_request」和「租约过期」两种。A 收到 B 的 `stale_epoch` / `not_delegated` 而进的停止没有归类：A 分不清 B 那边是租约过期（还能续租），还是已经收回 | 写明这种停止按租约过期处理：A 卡暂停，收到 `reclaim_confirm` 才转 `cancelled`。暂停期间业务闸关着，不会多出效果。本稿 §6.3 已按这个写 |
-| 3 | P2 §3.1 handed 段、§4.4、§2.3 `reopen` | handed 期间租约过期，P2 只写了「B 侧 handed 不变」。可是 A 侧按状态机会进 `stopping`，`renew_request` 要求 B 是 `stopping`，所以 A 拿不到 `renew_ack`，委托行回不了 `active`；之后 B 发 `reopen` 也会被 A 回 `rejected:not_active`。结果是 B 只能撤回、收回、重新委托 | 二选一，A 侧倾向第一种：(a) handed 下 B 对 `renew_request` 照回 `renew_ack`，因为 handed 期间 A 本来就没有业务效果；(b) handed 期间 A 不计租约，不因过期进 `stopping` |
-| 4 | P2 §2.3 `mho_register`、§2.4 | `registrationId` 由谁生成、什么格式没写 | 由 A 生成，格式和 `delegationId` 同形：`mho_` + 26 位随机 base32，全局唯一、不复用 |
-| 5 | P2 §6.7 登记第 3 条、迁移段 | A 在登记拿到回执之前就开了 PR 的，B 的普通收审可能已经给它建了 `PR<n>` 卡；之后登记生效，要不要像迁移那样记一次 `pm_hold`，P2 只在「开关打开时的迁移」里写了 | 写明「登记生效时这个分支的 PR 已在普通收审中」一律按迁移处理：记 `pm_hold`、结清旧的合并意图、等有效 handoff。A 侧这边先拿到 `registered` 再开 PR（§4.7），正常情况下不会出现 |
+目前没有新的意见。
