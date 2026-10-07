@@ -14,7 +14,7 @@ Codex agent 默认经 [Agent Client Protocol](https://agentclientprotocol.com) �
 - 进程多一层；
 - owner 不能再 attach 进 TUI 打字。
 
-Codex 的窗口仍承载宿主日志。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
+Codex 的窗口显示会话的只读视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断）；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
 
 ## 状态
 
@@ -46,7 +46,8 @@ bridge ──ws（channel-server / Pi 扩展同一套协议，register 带 runti
   - 代理吞掉 register，只转发 channel-server 现有的请求类型，其它帧不转发。
 - **打断复用 Pi 扩展的 abort 帧协议**（`abortVia: "extension"`）：宿主收到 `abort` 时会话里有回合（调度器在跑 / 排着，或适配器报着 active）就取消，然后回 `abort_ack`（`lib/acp/abort.ts`）。
   - codex-acp：发 `session/cancel` 通知，`voided` 为空。
-  - Pi 适配器在 initialize 里声明 `_meta.claudestra.cancelReturnsQueue`，宿主改发 `_claudestra/cancel` 请求：适配器先 `clear_queue` 再 `abort`（pi 的 abort 会接着跑排队消息），清掉的正文交回宿主，宿主对回 steer 时记下的 message_id 填进 `voided`。叫停到 settle 之间（最多 60 秒）pi 续跑的轮再中止，这期间的插话不进 pi 的队列，停稳后另起一轮（同 `pi/abort-control.ts`）。
+  - Pi 适配器在 initialize 里声明 `_meta.claudestra.cancelReturnsQueue`，宿主改发 `_claudestra/cancel` 请求：适配器先 `clear_queue` 再 `abort`（pi 的 abort 会接着跑排队消息），清掉的交回宿主，宿主对回 steer 时记下的 message_id 填进 `voided`。叫停到 settle 之间（最多 60 秒）pi 续跑的轮再中止，这期间的插话不进 pi 的队列，停稳后另起一轮（同 `pi/abort-control.ts`）。
+  - 按身份对（R18）：对声明了 `cancelReturnsQueue` 的适配器，宿主每条 `_session/steering` 带 `_meta.claudestra.deliveryId`（宿主生成，每条不同）。适配器按代一条一条发插话（pi 入队前要 await input hook，并发时实际入队顺序可能和发出顺序相反；一条卡住到 steer 超时就放开下一条），pi 回 queued、且发出到回包之间 steering 正好新增一条（`queue_update` 每次入队各报一次）才记账，正文取那条（input hook / 模板展开改写后的）；新增不止一条（扩展在回包前塞的、超时那条晚到的）就认不出，不记身份、只记日志——宁可漏报，不把已执行的报成「不会执行」；handled / started 没入队、超时的都不记。账本里是排在 pi 队列里还没出现在上下文里的插话（pi 的 user `message_start` 按先后销掉），`_claudestra/cancel` 回 `{cleared, clearedIds}`：`cleared` 照旧是正文，`clearedIds` 是其中能对回 deliveryId 的那几条。宿主有 `clearedIds`（数组）就只按身份判作废——正文相同的两条一条已执行、一条被清掉时只报被清掉的；没有（老适配器）才按正文对，行为不变。对不上身份的清掉条目（扩展自己排的、超时后才入队的）不报作废，只在宿主日志记一句「可能没有执行」，发送方收不到提示（要提示得 bridge 侧加通知，另议）。codex-acp 没声明这项，steer 参数和叫停都不变。
 - **适配器自己开的回合**：线程从非 active 变 active 时宿主既没有 prompt 在途、也没有 steer 另起的回合在等，就当 external 槽跟到下一个 idle：期间升级闸答忙、叫停会取消，结束照常报 Stop / 补 reply（`session.ts` onSelfTurn → `turn.ts` track）。Pi 的扩展 `triggerTurn`、压缩后续跑走这条；codex-acp 只在宿主的 prompt / steer 期间变 active（它的 goal 续跑只经 `_session/goal`，宿主不调），行为不变。Pi 扩展的 notify / setStatus 脱敏后进宿主日志。
 
 ## 开关放在哪
@@ -60,24 +61,67 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| `interruptKeys` | `[]` | 窗口里只是宿主日志，一个键都不发 |
+| `interruptKeys` | `[]` | 窗口里只是会话的只读视图，宿主不读键盘，一个键都不发 |
 | `abortVia` | `"extension"` | 打断走宿主的 `session/cancel` |
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
 | `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
 | `modelEnforcement` | `"config-option"` | 经 `session/set_config_option` 改，不重启 |
 | `slashAsPrompt` | `true` | `/compact` 等当 prompt 文本发，由适配器转成 `thread/compact/start`（完成信号见「压缩完成信号」） |
 
+## 适配器选择开关：上游 codex-acp 还是自研（CXF-S）
+
+宿主起哪个 Codex 适配器由开关定：`upstream` = 上游 codex-acp（缺省，`acp-install` 装的那份），`self` = 仓库里的自研适配器
+（`src/lib/acp/codex-adapter/`，[codex-adapter.md](./codex-adapter.md)）。**缺省全体上游，不动开关行为和以前一样。**
+
+- **存在哪**：`<STATE_DIR>/codex-adapter.json`，`{ default, agents: { <agent>: upstream|self } }`；全局一处，单个 agent 覆盖（`lib/acp/codex-compat-switch.ts`）。
+  没文件 = 全体上游；文件坏了读者按全体上游、写者拒写。
+- **谁不归它管**：`CLAUDESTRA_ACP_AGENT` 手工覆盖仍最优先；沙箱永远是 stub；出借 worker 永远上游；create / fork 的引导轮固定用上游
+  （新线程两边都是 `thread/start`，建好后宿主按开关接回）。
+- **怎么切**（只在重启时生效：宿主启动时读一次）：
+
+```bash
+bun src/manager.ts codex-adapter                                  # 看全局、覆盖、每个 Codex agent 选中的和宿主上一次实际起的
+bun src/manager.ts codex-adapter use self --agent <agent>         # 只把一个 agent 切到自研（先报 PM）
+bun src/manager.ts codex-adapter use self                         # 全局切到自研（owner 拍板）
+bun src/manager.ts codex-adapter clear --agent <agent>            # 删掉这个 agent 的覆盖，跟随全局
+bun src/manager.ts codex-adapter rollback                         # 一条命令切回：全局上游、清掉所有覆盖
+```
+
+  改完只重启「宿主实际在跑的适配器 ≠ 新选择」、在跑的 transport=acp agent，走 `restart` 接旧线程那条路（session/resume，线程 id 不变）。
+  **回合在跑的不切**：restart 子进程（带 `CLAUDESTRA_RESTART_RETIRE_IDLE=1`）拿到该 agent 的重启锁后、碰窗口前，先给宿主发 SIGUSR2，
+  宿主在同一段同步代码里判空闲并停机（`host.ts retireIfIdle`），退了才重起；在跑回合就不退，列进 `deferred`（`manager/acp-retire.ts`）。
+  不用「先问回合态再 restart」，也不在锁外先让宿主退：问完 / 退完到 restart 掐窗口之间，新入站或另一个 restart 起的宿主都会被掐。
+  **只给认得出的宿主发**：agent 窗口 shell 的直接子进程里，pid 和启动代次（`codex-running/<agent>.json` 的 `hostPid` + `hostStart`，
+  宿主自己写的 ps lstart）都对得上才发。记录在宿主退出时不清：pid 被别的 agent 的宿主复用、记录比窗口里的宿主旧、
+  老宿主（没写记录，不认这个信号——缺省动作是退出）、同名窗口不止一个，都认不出，不发、不重启，也列进 `deferred`；窗口里没有进程才算宿主不在、直接重起。
+  开关已改，这些 agent 下次重启时生效。停着的 agent 不碰。`--no-restart` 只改开关。
+- **选了自研时宿主怎么起**（`acp-host.ts` → `codex-compat.ts pickCodexAdapter`）：
+  1. 起之前按 app-server 协议判本机 codex（`selfAdapterVerdict`，readiness 用同一判据），兼容就把组合身份打进 host.log
+     （`组合身份 <id>（自研适配器 <指纹> + codex <版本> + schema <指纹>）`）；
+  2. **不兼容和判不出（unknown）都不用自研**：装了上游就直接起上游，没装上游就拒起宿主（退出码 3，host.log 写原因）——判不过不硬起自研。和更新闸遇到 unknown 回 409 是同一个取舍：自研是没验证够的那一边，
+     判不出就回到一直在用的上游（readiness 也照此：选了自研但判不过时按上游判就绪，`selfRefused` 写原因，不会因此暂退 tmux）；
+  3. 起了自研但接不上线程（起来就退、initialize 被拒、resume 失败）→ 本宿主换上游再起一次（只换一次、不换回，没登录不换）；
+     （这一步没装上游时只告警、照旧重起自研——它已经过了起之前的协议判定）。接上之后崩溃（app-server 被杀把适配器带走）不算起不来，退避后重起的还是自研。
+  宿主每次起适配器前把实际起的那个记进 `codex-running/<agent>.json` 的 `adapter`；doctor 据此报「选了自研、实际在跑上游」。
+- **更新闸**：Codex 升级只看全局选择（单个 agent 的覆盖不改升级判据）；全局选了自研时按协议判 npm 候选，兼容才装。
+  选了自研的单个 agent 碰上不兼容的新 Codex，重启时按上面第 2 条自己退回上游。
+- **doctor**：有人选了自研才多两项——「自研适配器组合」（组合身份 + 协议判定；判不过时是 warn，带原因和 `rollback`），
+  「自研适配器回退」（选了自研、宿主上一次实际起的是上游的 agent）。
+
+上线门槛（独立契约、故障竞争、真 CLI 组合实测含 2.1.0 → 自研 → 2.1.0 线程接力、可撤回切换）的实测结果见
+[codex-adapter.md「切换上线实测」](./codex-adapter.md#切换上线实测cxf-s)。
+
 ## 库（`src/lib/acp/`）
 
 | 文件 | 职责 |
 |------|------|
-| `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。<br>• 没注册处理器的请求回 -32601，绝不悬着不答。<br>• 入站先分清 request / notification / response；畸形响应（缺 jsonrpc、result/error 不是恰好一个）让请求失败，不算成功。<br>• 单行和未收完的半行都有字节上限（缺省 32 MiB，可配）：超了整条连接作废，日志只留截断摘要。<br>• 流断了，在途请求全部失败 |
-| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、斜杠命令、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序；steer 不设短超时，超过 30 秒仍等待原请求，不因本地超时重复投递。<br>• 斜杠命令独占下一轮 prompt，不走 steering。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
+| `rpc.ts` | ndjson JSON-RPC 2.0 双向对端。手写，不加 SDK 依赖。<br>• 没注册处理器的请求回 -32601，绝不悬着不答。<br>• 入站先分清 request / notification / response；畸形响应（缺 jsonrpc、result/error 不是恰好一个）让请求失败，不算成功。<br>• 单行和未收完的半行都有字节上限（缺省 32 MiB，可配）：超了整条连接作废，日志只留截断摘要。<br>• 流断了，在途请求全部失败<br>• 失败带投递状态：已经尝试写出之后断线、超时、回包不合规、写入抛错是 `RpcLostError{sent:true}`，连接早就断了没写是 `sent:false` |
+| `turn.ts` | 统一调度器：prompt、steering、适配器另起的外部回合、斜杠命令、补 reply 都按到达顺序进同一个队列，同一时刻只有一轮。<br>• 有 steering 在途就不开新回合、也不算空闲：`startedNewTurn` 在新回合**开始**时就回，回包到之前那一轮已经在跑。<br>• 外部回合在适配器里已经在跑，先等它（它的结束信号由 IO 在处理回包的同一刻挂上，结束得再早也不漏）。<br>• 插不进的 steering 在原位置变回 prompt，并发失败也不乱序；steer 不设短超时，超过 30 秒仍等待原请求，不因本地超时重复投递。<br>• 例外：`deliveredUnknown`（已经写给适配器、拿不到可信结果）不变回 prompt，只出一张不可重试的卡，附原文，由人决定要不要重发。<br>• 斜杠命令独占下一轮 prompt，不走 steering。<br>• 回合结束按 Stop hook 契约上报；bridge 回 block 就排一轮 `<hook_prompt>`，仍排在在跑的外部回合之后 |
 | `updates.ts` | `session/update` 翻成 Claude Code 形状的条目，和 rollout 翻译同形 |
-| `failures.ts` | 两种失败形态：AIR `sessionFailure` 按 id 去重；legacy 的 `usageLimitExceeded` JSON-RPC 错误按回合去重。另外处理 `-32000` 未登录；失败会翻成错误条目 |
+| `failures.ts` | 两种失败形态：AIR `sessionFailure` 按 id 去重；legacy 的 `usageLimitExceeded` JSON-RPC 错误按回合去重。另外处理 `-32000` 未登录；失败会翻成错误条目。<br>• 用户输入写出后拿不到可信结果（`deliveryUnknownCause`）：`retry:false` + `deliveryUnknown`，不触发 60 秒自动续跑 |
 | `config.ts` | configOptions 的解析和本地校验，顶栏要的 `model_state`，额度卡的选项 |
 | `permissions.ts` | `session/request_permission` ↔「待你处理」卡。fail closed：取消、超时、答了不认识的 id，一律回 cancelled |
-| `session.ts` | 一条 ACP 会话：initialize（声明 AIR + 终端输出）、接线程、prompt / steer / cancel / 改配置、权限请求转宿主。线程状态按序号缓存，steer 回包那一刻（rpc 同步钩子）登记外部回合的结束；适配器退出时所有等待以失败结束 |
+| `session.ts` | 一条 ACP 会话：initialize（声明 AIR + 终端输出）、接线程、prompt / steer / cancel / 改配置、权限请求转宿主。线程状态按序号缓存，steer 回包那一刻（rpc 同步钩子）登记外部回合的结束；适配器退出时所有等待以失败结束。<br>• prompt / steer 的输入写出后断线、超时、回包不合规、写入抛错，或适配器回 `deliveredUnknown` / `data.deliveryUnknown`（Pi 适配器写给 pi 后超时）：prompt 以投递不明的失败收尾，steer 回 `deliveredUnknown`，都不 reject（reject 会被调度器改回 prompt 重发） |
 | `host.ts` | 宿主本体：连 bridge、起适配器（退出就退避重起、接回同一个线程）、入站渲染（与 CodexQueueSink 同款）、流式条目按序号送（确认才出队）、回合末全部确认才报 Stop、失败 / 权限转卡、改配置 |
 | `adapter-proc.ts` | 起哪个 ACP agent（codex-acp / 沙箱里固定的本仓 stub，见 `stub.ts`）、它的环境（CODEX_PATH、full access、CODEX_CONFIG 挂 channel-server）、stdio 接成线路 |
 | `bridge-link.ts` | 宿主到 bridge 的 ws：register 带 transport=acp、abort:true；断了退避重连，被顶替也不退出 |
@@ -124,6 +168,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 
 - **补 reply**：tmux 下 Stop hook 在 Codex 收尾前拦下，同一轮接着答。ACP 没有 hook，宿主在 prompt 返回后上报 Stop；bridge 判定没回复（`lib/reply-nudge.ts`）时，宿主另起一轮很短的 prompt 补发提示，只补一次。所以**网页上会多一个短回合**。提示包成 `<hook_prompt>`，rollout 里和 tmux 的 hook 回灌同形，历史面板照旧显示成系统提示。
 - **撞额度**：不再停在菜单上，所以 T63 的菜单护栏在 acp 下用不上。额度卡的选项是「等重置」加上 configOptions 里的其它模型，不做推荐（owner 的规矩，问题 d）；owner 点了才调 `set_config_option`，绝不自动选。重置时间照旧从 rollout 读（`codex-usage.ts`），ACP 不给这个。
+- **不可重试的回合失败**（策略拦截、请求被拒、上下文耗尽）：除了「<运行时> 回合失败」卡，这一轮的 StopFailure 到时 bridge 给开这一轮的 send_to_agent 请求方各推一条，带失败原文（`bridge/turn-failure.ts` → `stop-settle.ts failedTurn`）；它中途 reply 过一句、回程槽已被消化的也推。owner 开的一轮看卡；peer 开的由挂着的 API 请求带回 `API Error: <原文>`（它已经答过一句、请求结掉了就没有回推通道）；它自己续跑的一轮不推。
 - **思考**：`agent_thought_chunk` 不显示，和 tmux 下 rollout 的 reasoning 一致。
 - **子线程**：试点不声明 subagents 能力。子会话照旧写 rollout，历史扫描不变。
 
@@ -157,7 +202,7 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。
 - **流式条目按确认收尾。** 宿主的条目进有界出站队列，按序号一批批送；bridge 没挂好 watcher 时回 false，宿主退避重送，连续失败 8 次便记丢失并跳过这批。bridge 按 hostId + 序号跳过已处理前缀；单条坏记录和序号缺口按丢失计数确认，避免整批无限重送或重复正文。bridge 回包带累计丢失数，宿主在该轮按 StopFailure 报「可能丢了条目」。回合末等队列清空才报 Stop；90 秒等不到确认、bridge 重连、或队列超过 5000 条溢出也按 StopFailure 报。回合在适配器里接着跑，宿主按 channel-server 的退避重连。
 - **权限卡、额度卡的按钮带卡的代际。** 权限请求按频道排队、一次出一张；每张卡新生成代际，旧卡、答过的一律 409、不授权。作答先原子认领，再经宿主确认它还在等才算答上。宿主等 10 分钟没人答、适配器退出时按取消回适配器并撤卡；宿主断线撤卡，重连后把还在等的补发上来（新卡、新代际）。额度卡同理：同一个失败又报一次沿用这张卡，换了一次失败就是新卡，旧卡的按钮作废。
-- **排障。** 没有 TUI 可看了：看 agent 的 tmux 窗口（宿主日志：收到的消息、接上哪个线程、回合失败、适配器重起）和 `APP_SERVER_LOGS`（状态目录 `logs/acp/<agent>/`）。
+- **排障。** 没有 TUI 可看了：会话看 agent 的 tmux 窗口；宿主日志（接上哪个线程、bridge 连接、适配器重起）在 `logs/acp/<agent>/host.log`，适配器的在同目录 `APP_SERVER_LOGS`。
 
 ## 用法
 
@@ -167,6 +212,7 @@ bun src/manager.ts migrate --acp                                 # bridge 启动
 bun src/manager.ts doctor                                        # 看适配器、CLI、暂退与待重启
 bun src/manager.ts transport <agent> tmux                         # 一键回退、记住人工选择
 bun src/manager.ts transport <agent> acp                          # 条件恢复后手动切回（自动 restart）
+bun src/manager.ts codex-adapter rollback                         # 自研适配器出问题：一条命令全体切回上游 codex-acp
 ```
 
 模型 / 推理强度：网页设置里照常切，acp 下经宿主调 `set_config_option`，**不重启**、回合进行中也能改；registry 同时记一份，重启后照样生效。

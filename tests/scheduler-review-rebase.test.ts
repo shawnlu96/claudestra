@@ -145,11 +145,15 @@ function realCarry(o: { mp: string; onMain?: boolean; sameDiff?: boolean }): Pro
   const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
     repoDir: "/tmp/project" } } }).projects.p;
   const ok = (stdout: string, code = 0) => ({ code, stdout, stderr: "", timedOut: false });
+  // MAINP2: the canonical multi-hop proof also reads origin (bound to the PR's repository), main's first-parent path and merge bases
   const command: typeof runBounded = async (argv) => {
     if (argv[0] !== "git") throw new Error(`unexpected ${argv.join(" ")}`);
     if (argv.includes("fetch")) return ok("");
+    if (argv.includes("get-url")) return ok("https://github.com/example/repo.git\n");
     if (argv.includes("rev-parse")) return ok(`${o.mp}\n`);
+    if (argv.includes("--first-parent")) return ok(o.onMain === false ? `${"8".repeat(40)}\n` : `${o.mp}\n${"9".repeat(40)}\n`);
     if (argv.includes("rev-list")) return ok(`${N} ${H} ${o.mp}\n`);
+    if (argv.includes("--all")) return ok(`${argv.at(-1) === H ? "9".repeat(40) : o.mp}\n`);
     if (argv.includes("merge-base")) return ok("", o.onMain === false ? 1 : 0);
     if (argv.includes("diff")) return ok(o.sameDiff || argv.at(-1)!.endsWith(H) ? "diff --git a/src/lib/x.ts\n" : "diff --git a/src/lib/x.ts\n+main moved\n");
     throw new Error(`unexpected ${argv.join(" ")}`);
@@ -201,7 +205,8 @@ describe("i28-RH1 the real adapter → driver → ledger → planner path", () =
   test("验收线 4: an ordinary round 3 still scopes the planner to last head → new head", () => {
     const at = (seq: number, kind: LedgerEvent["kind"], actor: string, data: Record<string, unknown>): LedgerEvent =>
       ({ seq, kind, data, actor, ts: seq, project: "p", target: "T1", text: "", dedupKey: null });
-    const [A, B] = ["4".repeat(40), "5".repeat(40)]; // own heads: fixDiffOf caches per process
+    // own heads: fixDiffOf caches per process, and ui-approve-fix generates "4"×40 / "5"×40 as round heads
+    const [A, B] = ["4a".repeat(20), "5b".repeat(20)];
     const events = [at(1, "deliver", author.agent, { round: 2, headSHA: A }), at(2, "review", "agent-review", reviewData(2, A, [P1])),
       at(3, "deliver", author.agent, { round: 3, headSHA: B }), at(4, "review", "agent-review", reviewData(3, B, [P1]))];
     const fixDiff = fixDiffOf({ id: "T1", round: 3 }, events, (_, from, to) => from === A && to === B ? ["src/lib/fix.ts"] : null, ["/fake"]);

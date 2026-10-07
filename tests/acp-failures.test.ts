@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { airFailureOf, classifyAirFailure, classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "../src/lib/acp/failures.ts";
+import { airFailureOf, classifyAirFailure, classifyPromptError, deliveryUnknownFailure, failureEntry, FailureDedup, type AcpFailure } from "../src/lib/acp/failures.ts";
 import { RpcError } from "../src/lib/acp/rpc.ts";
 
 /** codex-acp 2.0.0 声明了 AIR sessionFailure 时 prompt 的返回（CodexAcpServer.ts / CodexEventHandler.ts 的策略表） */
@@ -101,5 +101,17 @@ describe("failureEntry（与 codex-session.ts codexTurnError 同形）", () => {
 
   test("没登录不出条目（只出卡）", () => {
     expect(failureEntry({ kind: "auth", key: "k", message: "Authentication required" }, ts)).toBeNull();
+  });
+});
+
+describe("投递结果不明的卡（CX-H）", () => {
+  test("原文附在卡上；太长时留尾（用户的消息在最后，前面可能是上下文前言）", () => {
+    expect(deliveryUnknownFailure("unknown:s#1", "exit 1", "hi")).toEqual({
+      kind: "error", key: "unknown:s#1", retry: false, deliveryUnknown: true, message: "这条消息可能已经被执行，没有自动重发，需要人决定要不要重发（exit 1）。消息原文：\nhi",
+    });
+    const long = `${"前".repeat(5_000)}<channel>真正的消息</channel>`;
+    const m = deliveryUnknownFailure("k", "c", long).message;
+    expect(m).toContain(`前面截掉了 ${long.length - 4_000} 字`);
+    expect(m.endsWith("<channel>真正的消息</channel>")).toBe(true);
   });
 });

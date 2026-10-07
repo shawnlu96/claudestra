@@ -11,9 +11,12 @@ import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
+import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
+import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
+import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -28,6 +31,7 @@ export interface SnapshotSources {
   fileTimes(agent: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }>;
   reviewers(agent: RegistryAgent, now: number): ReviewerRef[] | { error: string };
   heldPath: string;
+  mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
 }
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
@@ -209,7 +213,17 @@ function unknownDeploys(db: Database, project: string): NonNullable<AuditSnapsho
     .map((r) => ({ intentId: r.intentId, taskId: r.taskId, reason: `部署：${r.reason ?? ""}`, since: r.updatedAt }));
 }
 
+/**
+ * 本轮显式派了、还没记结论的审查那一步（初审 / 终审按轮次取）。只看库里的行：老卡推出来的 extra.reviewer 不当派过；
+ * 轮次对不上 = 上一轮派的；done = 已记结论（peer 写的结论不回写步骤行，靠轮次和 pass 分支兜住）
+ */
+function pendingReview(task: LedgerTask, rows: TaskStep[]): AuditSnapshot["tasks"][number]["reviewStep"] {
+  const s = currentReview(rows);
+  return s && s.round === task.round && s.state !== "done" ? { executor: s.executor, executorKind: s.executorKind, at: s.updatedAt } : null;
+}
+
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
+  const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
     const byTarget = new Map<string, LedgerEvent[]>();
     for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
@@ -218,22 +232,27 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
     const meta = getMeta(db, project);
     const tasks = all.map((task) => ({
       task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
+      reviewStep: task.stage === "review" ? pendingReview(task, steps.get(task.id) ?? []) : null,
       ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project) };
+    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project) };
   });
-  // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）和各项目 PM 名单（押后规则）
+  // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）、各项目 PM 名单（押后规则）、review 派给的本机审查员
   const want = new Set<string>();
   for (const p of perProject) {
     p.meta.pms.forEach((x) => want.add(x));
-    for (const { task } of p.tasks) if (task.agent && (task.stage === "build" || task.stage === "fix")) want.add(task.agent);
+    for (const { task, reviewStep } of p.tasks) {
+      if (task.agent && (task.stage === "build" || task.stage === "fix")) want.add(task.agent);
+      if (reviewStep?.executorKind === "agent") want.add(reviewStep.executor);
+    }
   }
   const got = await readAgents(src, want);
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
-  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown }) => {
+  const get = src.mergeCi ?? (src === realSources ? liveMergeCi : null), ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await get?.(p.project, p.tasks, now, db)] as const)));
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -252,9 +271,10 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown,
+      mergeUnknown, mergeCi: ci.get(project),
       held: held.value,
       ownerInbox: inbox.value,
+      ...wait,
       unavailable,
     };
   });

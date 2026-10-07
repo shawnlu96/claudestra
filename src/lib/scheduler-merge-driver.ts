@@ -1,9 +1,11 @@
 /** One bounded merge step per call. All external effects are preceded by a durable phase claim; `merged` is terminal. */
+import { carryChainSuffix, type CarryHop } from "./review-main-carry-manual-auto.js";
 import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
+import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -15,11 +17,12 @@ export interface PrSnapshot {
   mergeState: string;
   mergeSha: string | null;
   checks: readonly { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }[];
+  noChecks?: boolean; // MCHK1: gh said "no checks reported" for this head; mergeState is then UNKNOWN (a bounded wait)
 }
 /** How far `head` lags the current main; a failed lookup throws, it never reads as "up to date". */
 export interface MainFreshness { behindBy: number; mainHead: string }
 /** Whether a head moved by update-branch only merged main in; `ok` needs both the parent shape and a byte-identical net diff. */
-export interface ReviewCarry { ok: boolean; reason: string; mainParent?: string; mainHead?: string; diffHash?: string }
+export interface ReviewCarry { ok: boolean; reason: string; mainParent?: string; mainHead?: string; diffHash?: string; chain?: readonly CarryHop[] }
 export interface MergeExternal {
   inspect(pr: string): Promise<PrSnapshot>;
   freshness(pr: string, head: string): Promise<MainFreshness>;
@@ -49,10 +52,12 @@ type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: stri
 /** GitHub leaves mergeability UNKNOWN for seconds to minutes after main moves; an unbroken streak past this is an anomaly. */
 export const MERGE_STATE_UNKNOWN_LIMIT_MS = 10 * 60_000;
 export const UNKNOWN_LIMIT_REASON = `GitHub 合并状态 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟仍未算出`;
+export const NO_CHECKS_LIMIT_REASON = `CI 在 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟内没有登记`;
 /** Any inspect that reads something other than a non-draft UNKNOWN ends the streak, so only consecutive UNKNOWNs count. */
-function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step): MergeExternal {
+function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step, seen: (pr: PrSnapshot) => void): MergeExternal {
   return { ...external, inspect: async (prRef) => {
     const pr = await external.inspect(prRef);
+    seen(pr);
     const run = current();
     if ((pr.mergeState !== "UNKNOWN" || pr.draft) && run.unknownSince != null) await step(run.phase, MERGE_UNKNOWN_CLEAR);
     return pr;
@@ -89,7 +94,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
   if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState) && !behind) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
   const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
-    mainHead: carry.mainHead, diffHash: carry.diffHash }), undefined, pr.head);
+    mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain), undefined, pr.head);
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
   return pr.mergeState === "DIRTY" || behind ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }
@@ -107,10 +112,11 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (trained && await external.train?.(run) !== "cleared") return run; // a train voided before the claim: no merge sent, retried next round
   const claimed = await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
   assertActive();
-  // The claim's transaction re-read the ledger, but another write (a PM revoking the UI approval) can commit before its receipt
-  // gets back here: re-read once more right before the irreversible call. Nothing was sent, which the receipt says.
-  const drift = recheck(claimed);
-  if (drift) return step("unknown", `合并未发出：${drift}`);
+  // The claim's transaction re-read the ledger, but another write (a PM revoking the UI approval, the manual queue policy going off)
+  // can commit before its receipt gets back here: re-read once more right before the irreversible call, marked as the one read that
+  // knows the claim is still unsent (a `merging` row seen after a restart may have sent). Nothing was sent, which the receipt says.
+  const drift = recheck({ ...claimed, beforeSend: true });
+  if (drift) return step("unknown", `${MERGE_NOT_SENT}：${drift}`);
   const mergeSha = await external.merge(run.prRef, run.reviewedHead);
   if (!/^[a-f0-9]{40}$/i.test(mergeSha)) return step("unknown", "merge API 未确认完整合并 SHA");
   const merged = await external.inspect(run.prRef);
@@ -123,12 +129,14 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}, recheck: Recheck = () => null): Promise<MergeRun> {
+  let noChecks = false; // the last read: a wait that expired on "no checks reported" says so
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
     assertActive();
+    if (to === "unknown" && receipt === UNKNOWN_LIMIT_REASON && noChecks) receipt = NO_CHECKS_LIMIT_REASON;
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
-  const external = watchUnknown(() => run, source, step);
+  const external = watchUnknown(() => run, source, step, (pr) => { noChecks = pr.noChecks === true; });
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {

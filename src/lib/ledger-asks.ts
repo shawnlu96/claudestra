@@ -305,11 +305,16 @@ export function closeAsk(db: Database, id: string, state: "expired" | "cancelled
   });
 }
 
-/** 批量撤掉符合条件的 open ask（出借单结束时关 worker 开出的 Codex 卡）；beforeWrite 在拿到写锁之后、写入之前调，同 openAskFull */
+/**
+ * 批量撤掉符合条件的 open ask（出借单结束时关 worker 开出的 Codex 卡）；beforeWrite 在拿到写锁之后、写入之前调，同 openAskFull。
+ * 投递结果不明的回合失败卡（extra.deliveryUnknown，bridge/ask-runtime.ts）跳过：它说的是「这条消息可能已经执行、没有自动重发」，
+ * 停单、结单、撤销都不代表有人看过，只能由人结（tests/lend-turn-failure.test.ts「投递不明」）
+ */
 export function cancelAsksWhere(db: Database, q: AskQuery, reason: string, now = Date.now(), opts: { beforeWrite?: () => void } = {}): string[] {
   return tx(db, () => {
     opts.beforeWrite?.();
-    return listAsks(db, { ...q, states: ["open"] }).map((a) => closeAsk(db, a.id, "cancelled", reason, now)?.id).filter((id): id is string => !!id);
+    return listAsks(db, { ...q, states: ["open"] }).filter((a) => a.extra.deliveryUnknown !== true)
+      .map((a) => closeAsk(db, a.id, "cancelled", reason, now)?.id).filter((id): id is string => !!id);
   });
 }
 
