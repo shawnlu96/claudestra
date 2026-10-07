@@ -1,12 +1,17 @@
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey } from "node:crypto";
 import { readFileSync, statSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import { bindHash } from "../../lib/ask-bind.js";
 import { getAsk, patchAsk, ownerAnswered, type Ask } from "../../lib/ledger-asks.js";
+import { isInstanceId } from "../../lib/instance-id.js";
 import { STATE_DIR } from "../../lib/paths.js";
+import type { Principal } from "../../lib/principals.js";
+import { parseV2ProjectCaller } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "../../lib/shared-ledger-gate-bindings.js";
+import { resolveSharedLedgerCredential } from "../../lib/shared-ledger-mode.js";
 import { askDb, askReadDb } from "../asks.js";
+import { sharedProjectOwnerPrincipal } from "./shared-projects-auth.js";
 import type { ProjectPerson, SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const CREATOR = "system:shared-projects";
@@ -26,6 +31,12 @@ export type SharedProjectCompletionView =
   | { ok: true; operationId: string; state: "completed"; askId: string; projectId: string; localProjectId: string; paramsDigest: string; completedAt: number }
   | { ok: true; operationId: string; state: "pending"; openAskId?: string }
   | { ok: true; operationId: string; state: "stale" | "unknown" };
+/** Read-only owner identity for the completion GET, resolved from persisted state on every call. */
+export interface SharedProjectCompletionIdentity {
+  person: ProjectPerson;
+  /** Strong-identity readback of the target project's own credential against the persisted instance; false on any mismatch. */
+  credentialSaved: (target: { centerId: string; teamId: string; projectId: string }) => boolean;
+}
 /** Called by N4 completion only after credentialSaved and gateRead both succeed; false means the receipt was not stored. */
 export type SharedProjectCompletionHook = (facts: { projectId: string; localProjectId: string; paramsDigest: string }) => boolean;
 
@@ -118,14 +129,64 @@ export function sharedProjectCompletionStore(database?: Database, stateDir = STA
   };
 }
 
+/** Persisted instance id, read without the process cache and without creating the file; "" when missing or malformed. */
+function persistedInstanceId(dir: string): string {
+  try { const id = readFileSync(join(dir, "instance-id"), "utf8").trim(); return isInstanceId(id) ? id : ""; }
+  catch { return ""; }
+}
+/** The persisted signing key must exist and parse as Ed25519; never generated here. */
+function persistedInstanceKey(dir: string): boolean {
+  try { return createPrivateKey(readFileSync(join(dir, "instance-key.pem"), "utf8")).asymmetricKeyType === "ed25519"; }
+  catch { return false; }
+}
+
 /**
- * N5 read path. Only the current authenticated person's cards count. Success additionally requires the same instance; the
+ * Completion-only identity: unlike the action adapter's person(), it never creates instance-id/instance-key.pem and never
+ * trusts a process cache. Same original-binding selection as the action adapter. A missing key, missing/changed instance id
+ * or a credential for another instance yields null (read as unknown), so the GET writes nothing and guesses nothing.
+ */
+export function sharedProjectCompletionIdentity(principal: Principal, requested: string | null = null,
+  stateDir = STATE_DIR): () => SharedProjectCompletionIdentity | null {
+  const credential = (c: Pick<Who, "centerId" | "teamId">, projectId: string) =>
+    resolveSharedLedgerCredential(principal.id, "person", c.centerId, c.teamId, projectId, "read", stateDir);
+  return () => {
+    try {
+      if (!sharedProjectOwnerPrincipal(principal)) return null;
+      const instanceId = persistedInstanceId(stateDir);
+      if (!instanceId || !persistedInstanceKey(stateDir)) return null;
+      const sources = readSharedLedgerBindings(stateDir).filter(b => (requested === null || b.projectId === requested) && credential(b, b.projectId));
+      if (sources.length !== 1) return null;
+      const source = sources[0]!, c = credential(source, source.projectId);
+      if (!c || c.kind !== "person" || c.localSubject !== principal.id || c.instanceId !== instanceId) return null;
+      const caller = parseV2ProjectCaller({ kind: c.kind, personId: c.personId, instanceId });
+      if (caller.kind !== "person") return null;
+      const person: ProjectPerson = { subject: "owner:self", kind: "person", centerId: c.centerId, teamId: c.teamId,
+        personId: caller.personId, instanceId: caller.instanceId, sourceBinding: structuredClone(source) };
+      return {
+        person,
+        credentialSaved: target => {
+          if (target.centerId !== person.centerId || target.teamId !== person.teamId || persistedInstanceId(stateDir) !== instanceId) return false;
+          const t = credential(target, target.projectId);
+          return !!t && t.kind === "person" && t.localSubject === principal.id && t.personId === person.personId && t.instanceId === instanceId;
+        },
+      };
+    } catch { return null; } // Unreadable or corrupt identity state is unknown, never success.
+  };
+}
+
+/**
+ * N5 read path. Identity comes only from the read-only `completionIdentity` port (absent or unresolvable → unknown); only
+ * that current person's cards count. Success additionally requires the same instance; the
  * binding store still at the receipt's generation (a removed, replaced or re-added binding never revives an old receipt) and
  * being the store the adapter reads; exactly the receipt's local binding; and a strong-identity local readback of the target
  * project's own credential. Reading writes nothing and never calls center, enrollment, gate or continue.
  */
-export async function readSharedProjectCompletion(who: ProjectPerson, operationId: string,
-  d: Pick<SharedProjectsPorts, "bindings" | "completionAsks" | "bindingGeneration" | "credentialSaved">): Promise<SharedProjectCompletionView> {
+export async function readSharedProjectCompletion(operationId: string,
+  d: Pick<SharedProjectsPorts, "bindings" | "completionAsks" | "bindingGeneration" | "completionIdentity">): Promise<SharedProjectCompletionView> {
+  let id: SharedProjectCompletionIdentity | null = null;
+  try { id = d.completionIdentity?.() ?? null; } catch { /* Unresolvable identity is unknown. */ }
+  if (!id) return { ok: true, operationId, state: "unknown" };
+  const who = id.person;
   const mine = (d.completionAsks?.(operationId) ?? []).filter(a => intact(a, operationId) && sameWho(params(a)?.who, who, false));
   const receipts = mine.map(receiptOf).filter((r): r is SharedProjectCompletionReceipt => !!r).sort((a, b) => b.completedAt - a.completedAt);
   const r = receipts[0];
@@ -135,10 +196,8 @@ export async function readSharedProjectCompletion(who: ProjectPerson, operationI
     if (!snap || !sameBindings(snap.bindings, d.bindings())) return { ok: true, operationId, state: "unknown" };
     if (snap.generation !== r.bindingGeneration || !onlyBinding(snap.bindings, r, r)) return { ok: true, operationId, state: "stale" };
     let saved = false;
-    try {
-      // The adapter's readback keys on the target ids and checks person/instance against the local credential file only.
-      saved = await d.credentialSaved(who, { centerId: r.centerId, teamId: r.teamId, projectId: r.projectId } as Parameters<SharedProjectsPorts["credentialSaved"]>[1]);
-    } catch { /* Identity drift or an unreadable credential store is not success. */ }
+    try { saved = id.credentialSaved({ centerId: r.centerId, teamId: r.teamId, projectId: r.projectId }); }
+    catch { /* An unreadable credential store is not success. */ }
     if (!saved) return { ok: true, operationId, state: "stale" };
     return { ok: true, operationId, state: "completed", askId: r.askId, projectId: r.projectId, localProjectId: r.localProjectId,
       paramsDigest: r.paramsDigest, completedAt: r.completedAt };

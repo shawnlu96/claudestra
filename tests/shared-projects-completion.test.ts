@@ -51,6 +51,7 @@ function world() {
       return "local-b";
     },
     credentialSaved: async () => { calls.push("readback"); return saved; },
+    completionIdentity: () => ({ person: who, credentialSaved: () => { calls.push("readback"); return saved; } }),
     gateRead: async () => { calls.push("gate"); if (!gate) throw new Error(SECRET); return true; },
     members: async () => [], remove: async () => {}, setDirs: async () => {}, leave: async () => {},
     bindings: () => readSharedLedgerBindings(root), eligible: async () => [{ id: "local-b", name: "Project B" }],
@@ -106,8 +107,8 @@ test("original answered callback persists the result it used to discard, and a r
   expect(told.join()).toContain("项目可用");
   const restarted = new Database(join(root, "ledger.sqlite"), { readonly: true });
   try {
-    const view = await readSharedProjectCompletion(person, operationId,
-      { bindings: w.d.bindings, credentialSaved: w.d.credentialSaved, ...sharedProjectCompletionStore(restarted, root) });
+    const view = await readSharedProjectCompletion(operationId,
+      { bindings: w.d.bindings, completionIdentity: w.d.completionIdentity, ...sharedProjectCompletionStore(restarted, root) });
     expect(view).toMatchObject({ state: "completed", askId: a.id, localProjectId: "local-b" });
   } finally { restarted.close(); }
 });
@@ -225,7 +226,7 @@ test("target credential gone after completion reads stale; the read never re-enr
   expect(w.calls).toEqual(["readback"]);
   expect(changes()).toBe(before);
   // A throwing readback (identity drift in the adapter) is not success either.
-  w.d.credentialSaved = async () => { throw new Error(SECRET); };
+  w.d.completionIdentity = () => ({ person, credentialSaved: () => { throw new Error(SECRET); } });
   const view = await w.read();
   expect(view.state).toBe("stale");
   expect(JSON.stringify(view)).not.toContain(SECRET);
@@ -254,4 +255,17 @@ test("no consistent binding snapshot at completion stores no receipt and stays p
   const result = await answerSharedProject(w.approve(w.card()), w.d);
   expect(result!.available).toBe(false);
   expect((await w.read()).state).toBe("pending");
+});
+
+test("completion GET takes identity only from the read-only port: never d.person(); absent or unresolvable identity is unknown", async () => {
+  const w = world();
+  await answerSharedProject(w.approve(w.card()), w.d);
+  expect((await w.read()).state).toBe("completed");
+  w.d.person = async () => { throw new Error(SECRET); }; // The action identity (which may create/cache identity files) is never consulted.
+  expect((await w.read()).state).toBe("completed");
+  for (const identity of [undefined, () => null, () => { throw new Error(SECRET); }]) {
+    w.d.completionIdentity = identity as SharedProjectsPorts["completionIdentity"];
+    const view = await w.read();
+    expect(view).toEqual({ ok: true, operationId, state: "unknown" });
+  }
 });
