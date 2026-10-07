@@ -96,3 +96,123 @@ export function formatToolDetail(name: string, input: any): string {
   }
   return out;
 }
+
+/**
+ * Bash 命令 → 一行看得懂的摘要（ACP 窗口会话用；网页 / Discord 仍走 formatTool，不受影响）：剥开头的 `cd … &&` 和
+ * env 赋值；`;` / `&&` / `||` 串只留第一条加「＋N 条」；多行脚本 / heredoc 留第一行加「（N 行脚本）」；读文件、搜索类
+ * 认得出就写成「读 path」「搜 'pat'」，认不出退回原命令。不解析完整 shell 语法，只做引号 / 括号感知的切分。
+ * 调用方先脱敏再传进来。tests/acp-transcript-view.test.ts。
+ */
+export function summarizeCommand(raw: string): string {
+  const lines = unwrapShell(raw.trim()).split("\n").filter((l) => l.trim());
+  if (!lines.length) return "";
+  const cmds = splitTop(lines[0]!, ["&&", "||", ";"]).map(stripEnv).filter(Boolean);
+  while (cmds.length > 1 && /^(cd|pushd)(\s|$)/.test(cmds[0]!)) cmds.shift();
+  const extra = cmds.length > 1 ? ` ＋${cmds.length - 1} 条` : "";
+  return `${describeCommand(cmds[0] ?? lines[0]!)}${extra}${lines.length > 1 ? `（${lines.length} 行脚本）` : ""}`;
+}
+
+/** codex 有时把整条命令包在 `/bin/zsh -lc '…'` 里 */
+function unwrapShell(s: string): string {
+  const m = /^(?:\/\S*\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/.exec(s);
+  return m ? (m[1] === "'" ? m[2]!.replace(/'\\''/g, "'") : m[2]!) : s;
+}
+
+const stripEnv = (s: string): string => s.replace(/^(?:[A-Za-z_]\w*=(?:'[^']*'|"[^"]*"|\S*)\s+)+/, "").trim();
+
+/** 在不在引号 / 括号里的分隔符处切开（seps 长的在前） */
+function splitTop(s: string, seps: string[]): string[] {
+  const parts: string[] = [];
+  let quote = "", depth = 0, start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (quote) {
+      if (c === "\\" && quote === '"') i++;
+      else if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "\\") { i++; continue; }
+    if (c === "'" || c === '"' || c === "`") { quote = c; continue; }
+    if (c === "(") depth++;
+    else if (c === ")") depth = Math.max(0, depth - 1);
+    const sep = depth ? undefined : seps.find((x) => s.startsWith(x, i));
+    if (!sep) continue;
+    parts.push(s.slice(start, i));
+    i += sep.length - 1;
+    start = i + 1;
+  }
+  parts.push(s.slice(start));
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
+/** 按 shell 规则拆词、去引号（够摘要用：不展开变量、不认 $(…)） */
+function words(s: string): string[] {
+  const out: string[] = [];
+  let cur = "", quote = "", has = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (quote) {
+      if (c === quote) quote = "";
+      else if (c === "\\" && quote === '"' && i + 1 < s.length) cur += s[++i];
+      else cur += c;
+    } else if (c === "'" || c === '"') { quote = c; has = true; }
+    else if (c === "\\" && i + 1 < s.length) { cur += s[++i]; has = true; }
+    else if (/\s/.test(c)) { if (has) out.push(cur); cur = ""; has = false; }
+    else { cur += c; has = true; }
+  }
+  if (has) out.push(cur);
+  return out;
+}
+
+/** 管道后面只是翻页 / 截行的，不改变「读了什么」 */
+const VIEWERS = new Set(["nl", "sed", "head", "tail", "cat", "less", "more"]);
+
+function describeCommand(cmd: string): string {
+  const stages = splitTop(cmd, ["|"]);
+  const sem = semanticOf(words(stages[0] ?? ""));
+  if (!sem) return stages.length > 1 ? `${stages[0]} | …` : cmd;
+  const rest = stages.slice(1).every((st) => VIEWERS.has(words(st)[0]?.split("/").pop() ?? ""));
+  return rest ? sem : `${sem} | …`;
+}
+
+/** 位置参数（去掉选项；valued 里的选项吃掉下一个词） */
+function positional(args: string[], valued: RegExp): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return [...out, ...args.slice(i + 1)];
+    if (a.startsWith("-") && a.length > 1) { if (valued.test(a)) i++; }
+    else out.push(a);
+  }
+  return out;
+}
+
+const SEARCH_VALUED = /^(-[ABCefgtTmMj]|--(glob|type|type-not|max-count|context|after-context|before-context|regexp|file|max-columns|sort|replace|include|exclude))$/;
+
+function semanticOf(w: string[]): string | null {
+  const bin = w[0]?.split("/").pop() ?? "";
+  const args = w.slice(1);
+  if (bin === "sed") {
+    if (!args.includes("-n")) return null;
+    const [script, ...files] = positional(args, /^-[ef]$/);
+    const range = /^(\d+)(?:,(\d+))?p$/.exec(script ?? "");
+    return files.length ? `读 ${files.join(" ")}${range ? `:${range[1]}${range[2] ? `-${range[2]}` : ""}` : ""}` : null;
+  }
+  if (["cat", "nl", "head", "tail", "less", "bat"].includes(bin)) {
+    const files = positional(args, /^-[nc]$/);
+    return files.length ? `读 ${files.join(" ")}` : null;
+  }
+  if (bin === "git" && args[0] === "show") {
+    const target = positional(args.slice(1), /^--format$/)[0] ?? "HEAD";
+    const colon = target.indexOf(":");
+    return colon > 0 ? `读 ${target.slice(colon + 1)}（${target.slice(0, colon)}）` : `看提交 ${target}`;
+  }
+  if (["rg", "grep", "egrep"].includes(bin)) {
+    const e = args.findIndex((a) => a === "-e" || a === "--regexp");
+    const pos = positional(args, SEARCH_VALUED);
+    const pattern = e >= 0 ? args[e + 1] : pos.shift();
+    if (pattern === undefined) return null;
+    return `搜 '${pattern}'${pos.length ? ` 于 ${pos.join(" ")}` : ""}`;
+  }
+  return null;
+}

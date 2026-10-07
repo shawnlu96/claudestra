@@ -1,12 +1,13 @@
 /**
  * ACP 宿主窗口里的可读会话（只看）：tmux attach / 网页终端打开 ACP agent 时看到的就是这些行。输入是宿主推给 bridge 的
  * 同一批条目（updates.ts 翻好的，正文已按消息攒齐，不会一个 chunk 一行），这里只读不改，网页聊天流不受影响。
- * 一律先脱敏（redact-secrets.ts）再显示；工具结果只留开头几行。连接 / 生命周期日志不进这里，只进 host.log（src/acp-host.ts）。
- * tests/acp-transcript.test.ts。
+ * 一律先脱敏（redact-secrets.ts）再显示。成功的工具输出只报行数（满屏半截代码会把结论淹掉），失败的留末尾几行（错误在最后）；
+ * 命令压成一行人话（tool-display-format.ts summarizeCommand）。连接 / 生命周期日志不进这里，只进 host.log（src/acp-host.ts）。
+ * tests/acp-transcript.test.ts、tests/acp-transcript-view.test.ts。
  */
 import { hasInboundHeader, stripChannelHeader } from "../inbound-body.js";
 import { redactSecrets } from "../redact-secrets.js";
-import { formatTool } from "../tool-display-format.js";
+import { formatTool, summarizeCommand } from "../tool-display-format.js";
 import type { AcpFailure } from "./failures.js";
 import type { StopReport } from "./turn.js";
 import { OUTPUT_TAIL } from "./updates.js";
@@ -14,7 +15,7 @@ import { OUTPUT_TAIL } from "./updates.js";
 type Rec = Record<string, any>;
 
 /** 正文 / reply 也设上限：一条消息可以是几百 KB（长报告），整段灌进 pane 会挤爆历史 */
-const RESULT_LINES = 4, RESULT_CHARS = 400, USER_CHARS = 2_000, TEXT_LINES = 200, TEXT_CHARS = 6_000, ONE_LINE = 200;
+const SHOW_LINES = 2, FAIL_LINES = 4, RESULT_CHARS = 400, USER_CHARS = 2_000, TEXT_LINES = 200, TEXT_CHARS = 6_000, ONE_LINE = 200;
 /** 先脱敏再截断：只扫开头这么多，比最长的显示（6000 字）多出一条长 JWT 的余量，截断处不会留下半个密钥 */
 const SCAN_CHARS = 16_000;
 const STAMP_WIDTH = "[00:00:00] ".length;
@@ -40,7 +41,7 @@ const PLAN_MARK: Record<string, string> = { completed: "✓", in_progress: "▸"
 
 function toolLine(name: string, input: Rec): string {
   if (name === "reply" || name.endsWith("__reply")) return `💬 回复：${clip(String(input?.text ?? ""), TEXT_LINES, TEXT_CHARS)}`;
-  if (name === "Bash") return `💻 ${oneLine(input?.command)}`; // formatTool 只留第一个 && 之前，终端里要看整条命令的开头
+  if (name === "Bash") return `💻 ${oneLine(summarizeCommand(redactSecrets(String(input?.command ?? "").slice(0, SCAN_CHARS))))}`;
   if (name === "update_plan") {
     const steps = (Array.isArray(input?.plan) ? input.plan : []).map((p: Rec) => `  ${PLAN_MARK[p?.status] ?? "·"} ${oneLine(p?.step)}`);
     return ["📋 计划", ...steps].join("\n");
@@ -48,14 +49,28 @@ function toolLine(name: string, input: Rec): string {
   return oneLine(formatTool(redactSecrets(name), redactDeep(input)));
 }
 
+/** 留末尾 lines 行：先脱敏再截；扫描窗口截在半行上时那行整行不要（里面可能是半个密钥） */
+function tail(raw: string, lines: number, chars: number): string {
+  let s = redactSecrets(raw.slice(-SCAN_CHARS));
+  if (raw.length > SCAN_CHARS) s = s.includes("\n") ? s.slice(s.indexOf("\n") + 1) : "";
+  const out = s.trimEnd().split("\n").slice(-lines).join("\n");
+  return out.length > chars ? `…${out.slice(-chars)}` : out;
+}
+
 function resultLine(b: Rec): string[] {
   if (String(b.tool_use_id ?? "").startsWith("acp-plan-")) return []; // 计划工具的固定回执（updates.ts plan），没有信息量
   const c = b.content;
   const raw = typeof c === "string" ? c : Array.isArray(c) ? c.map((x: Rec) => (x?.type === "text" ? String(x.text ?? "") : "")).join("\n") : "";
-  // 只留了末尾的命令输出（updates.ts），开头那行是截出来的半行，里面可能是半个密钥、规则认不出：整行不显示
-  const text = raw.length >= OUTPUT_TAIL ? `（输出过长，前面截掉了）${raw.includes("\n") ? raw.slice(raw.indexOf("\n")) : ""}` : raw;
-  const body = text.trim() ? clip(text, RESULT_LINES, RESULT_CHARS) : "（无输出）";
-  return [`  ${b.is_error ? "✗" : "↳"} ${body.replace(/\n/g, "\n    ")}`];
+  // 只留了末尾的命令输出（updates.ts），开头那行是截出来的半行，里面可能是半个密钥、规则认不出：整行不要
+  const cut = raw.length >= OUTPUT_TAIL;
+  const text = (cut ? (raw.includes("\n") ? raw.slice(raw.indexOf("\n") + 1) : "") : raw).trim();
+  const n = text ? text.split("\n").length : 0, total = `${n}${cut ? "+" : ""}`;
+  const mark = b.is_error ? "✗" : "↳";
+  let body: string;
+  if (!n) body = cut ? "输出过长，前面截掉了" : "无输出";
+  else if (b.is_error) body = n > FAIL_LINES ? `（共 ${total} 行，末尾 ${FAIL_LINES} 行）\n${tail(text, FAIL_LINES, RESULT_CHARS)}` : tail(text, FAIL_LINES, RESULT_CHARS);
+  else body = n <= SHOW_LINES && !cut ? clip(text, SHOW_LINES, ONE_LINE) : `${total} 行输出`;
+  return [`  ${mark} ${body.replace(/\n/g, "\n    ")}`];
 }
 
 function blockLines(b: Rec): string[] {
@@ -97,7 +112,24 @@ export function transcriptOfStop(r: StopReport): string {
   return r.event === "Stop" ? "── 回合结束 ──" : r.interrupt ? "── 已打断 ──" : "── 回合失败 ──";
 }
 
-/** 一段 → 窗口里的行：首行带时间，续行缩进对齐。进窗口前最后再打一遍码（各段已在截断前打过；兜住以后新加的显示） */
-export function stampTranscript(item: string, at: Date = new Date()): string {
-  return `[${at.toTimeString().slice(0, 8)}] ${redactSecrets(item).replace(/\n/g, `\n${" ".repeat(STAMP_WIDTH)}`)}`;
+const PARAGRAPH = /^(🤖|💬|👤)/u;
+
+/**
+ * 一段 → 窗口里的行。正文 / 回复 / 收到的消息是段落起点：前面空一行、必带时间；其余行只在分钟变了时带时间，
+ * 不带的用等宽空白对齐，续行同样对齐。有状态（记上一行的分钟），一个窗口一个实例。
+ * 进窗口前最后再打一遍码（各段已在截断前打过；兜住以后新加的显示）
+ */
+export function createTranscriptStamper(): (item: string, at?: Date) => string {
+  let lastMinute = "", started = false;
+  return (item, at = new Date()) => {
+    const time = at.toTimeString().slice(0, 8), para = PARAGRAPH.test(item);
+    const head = para || time.slice(0, 5) !== lastMinute ? `[${time}] ` : " ".repeat(STAMP_WIDTH);
+    const gap = para && started ? "\n" : "";
+    lastMinute = time.slice(0, 5);
+    started = true;
+    return `${gap}${head}${redactSecrets(item).replace(/\n/g, `\n${" ".repeat(STAMP_WIDTH)}`)}`;
+  };
 }
+
+/** 宿主进程只有一个窗口：src/acp-host.ts 直接用这个实例 */
+export const stampTranscript = createTranscriptStamper();
