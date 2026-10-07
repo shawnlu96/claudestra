@@ -62,8 +62,7 @@ async function ownCheckout(git: Git, p: Plan): Promise<string | null> {
   const gone = absent(p.worktree);
   if (gone === true) return null;
   if (typeof gone === "string") return `${gone}，保留并等待核对`;
-  const kept = `目标 ${p.worktree} 不是本卡重建建的 checkout`;
-  const st = lstatSync(p.worktree);
+  const kept = `目标 ${p.worktree} 不是本卡重建建的 checkout`, st = lstatSync(p.worktree);
   if (st.isSymbolicLink() || !st.isDirectory()) return `${kept}（软链或非目录），保留并等待核对`;
   const list = await git(["worktree", "list", "--porcelain"]);
   if (list.code !== 0) return `读不了 worktree 列表，保留并等待核对`;
