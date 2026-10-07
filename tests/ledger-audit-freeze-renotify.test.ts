@@ -87,4 +87,30 @@ describe("AUDN1 冻结 / 解冻不重推同一张 merge 停放卡", () => {
     expect(round(snap(t, { queueFrozen: true }), T0 + 40 * MIN)).toEqual([]);
     expect(round(snap(t, { unfrozenAt: T0 + 45 * MIN }), T0 + 77 * MIN)).toHaveLength(1);
   });
+
+  test("真推进后错过巡检窗口（deploy 后 30 分钟内没巡检过）：旧 key 不被 keep 住，解冻后再停够照常推", () => {
+    const { db, round } = fresh();
+    expect(round(snap([merge(T0)]), T0 + 31 * MIN)).toHaveLength(1);
+    expect(round(snap([merge(T0)], { queueFrozen: true }), T0 + 40 * MIN)).toEqual([]);
+    const deployed = [merge(T0, [ev(T0 + 42 * MIN, "deploy")])];
+    expect(round(snap(deployed, { queueFrozen: true }), T0 + 75 * MIN)).toEqual([]);
+    const unfrozenAt = T0 + 80 * MIN;
+    expect(round(snap(deployed, { unfrozenAt }), T0 + 85 * MIN)).toEqual([]);
+    expect(round(snap(deployed, { unfrozenAt }), T0 + 111 * MIN)).toHaveLength(1);
+    expect(db.query("SELECT COUNT(*) AS n FROM audit_findings WHERE rule = 'ship_stalled' AND resolvedAt IS NULL").get()).toEqual({ n: 1 });
+  });
+
+  test("冻结前已发现但没推成（未 ack）：冻结期间与宽限期不推，解冻后停够推一次", () => {
+    const { db } = fresh();
+    const t = [merge(T0)];
+    const pend = (s: AuditSnapshot, now: number) => {
+      const r = auditLedger(s, now);
+      return reconcileFindings(db, "p", r.findings, r.evaluated, now, { keep: r.keep }).pending.filter((f) => f.rule === "ship_stalled").map((f) => f.key);
+    };
+    expect(pend(snap(t), T0 + 31 * MIN)).toHaveLength(1); // 发送失败，不 ack
+    expect(pend(snap(t, { queueFrozen: true }), T0 + 40 * MIN)).toEqual([]);
+    const unfrozenAt = T0 + 45 * MIN;
+    expect(pend(snap(t, { unfrozenAt }), T0 + 50 * MIN)).toEqual([]);
+    expect(pend(snap(t, { unfrozenAt }), T0 + 77 * MIN)).toHaveLength(1);
+  });
 });
