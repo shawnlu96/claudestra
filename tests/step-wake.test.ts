@@ -10,6 +10,10 @@ import { setStepWakeDeliver, STEP_WAKE_OP, wakeAfterStep, wakeTarget, type WakeF
 import { takeOrderResult } from "../src/lib/order-take.js";
 import { slotByOrderId } from "../src/lib/review-order.js";
 import { renderWorkOrder } from "../src/lib/worker-order.js";
+import { deliveryFor, type SessionRef } from "../src/lib/worker-session.js";
+import { workOrderFor } from "../src/lib/scheduler-work-order.js";
+import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
+import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
 
@@ -73,18 +77,29 @@ describe("step 之后唤醒本机执行者", () => {
     expect(sent[1]!.text).toContain("W1:final_review:r0");
   });
 
-  test("restate 也只发调度器 wake 行：有新单 + take_order 领单，不带复述单全文", async () => {
+  test("restate 没有领单工具：照调度器 deliveryFor 发它那张复述单，执行者照单 ledger show 拿到规格、ledger stage 回写成功", async () => {
     stageTo("spec", "b".repeat(40));
+    db.query("UPDATE tasks SET spec = ? WHERE id = 'W1'").run("规格正文-不该进唤醒");
     const r = await run("step", "W1", "restate", EXE, "--kind", "agent");
     expect(r).toMatchObject({ ok: true, wake: { sent: true, orderId: "W1:restate:r0" } });
-    expect(sent).toEqual([{ agent: EXE, text: renderWorkOrder({ taskId: "W1", step: "restate", round: 0, dedupKey: "W1:restate:r0", delivery: { mode: "wake" },
-      specRev: 0, head: null, node: "restate", inputs: [], outputs: [], acceptance: [], writeBack: "" }) }]);
+    const { specRev } = db.query("SELECT specRev FROM tasks WHERE id = 'W1'").get() as { specRev: number };
+    const intent = { id: "W1:restate:r0", taskId: "W1", node: "restate", specRev, head: null } as SchedulerIntent;
+    const order = workOrderFor({ id: "W1", round: 0 } as LedgerTask, intent, null, { taskId: "W1", role: "author", agent: EXE, sessionId: "" } as SessionRef)!;
+    expect(sent).toEqual([{ agent: EXE, text: renderWorkOrder({ ...order, delivery: deliveryFor("channel", "restate") }) }]);
     const text = sent[0]!.text;
-    expect(text).toContain("take_order");
-    expect(text).toContain("W1:restate:r0");
+    expect(text).not.toContain("take_order"); // take_order 只收 build / fix，叫它领只会领空
+    expect(takeOrderResult(db, { agent: EXE, sessionId: "s", family: null, channelId: "" })).toMatchObject({ ok: true, order: null });
+    expect(text).not.toContain("规格正文-不该进唤醒");
     expect(text).not.toContain("b".repeat(40));
-    expect(text).not.toContain("--to restate");
-    expect(text.split("\n")).toHaveLength(1);
+    // 单子指的领取与回写路径真走得通：执行者用 ledger show 拿到同一张卡的规格，按 writeBack 推 spec→restate
+    expect(text).toContain("show W1");
+    expect(text).toContain("stage W1 --from spec --to restate --text");
+    const asExe = (...args: string[]) => runLedger(args, {
+      db, actor: EXE, projectIds: [P], loadRegistry: async () => structuredClone(reg), saveRegistry: async () => {}, now: () => 3_000,
+    }) as Promise<Record<string, any>>;
+    expect(JSON.stringify(await asExe("show", "W1"))).toContain("规格正文-不该进唤醒");
+    expect(await asExe("stage", "W1", "--from", "spec", "--to", "restate", "--text", "复述")).toMatchObject({ ok: true });
+    expect(sent).toHaveLength(1);
   });
 
   test("重复执行同一个 step 不重发（每次是新 seq），note 也只有一条；同一条 step 事件重放也不重发", async () => {
