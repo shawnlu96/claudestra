@@ -10,8 +10,8 @@
  * Mode comes from CFG's one RecoveryPolicyPort (key manualStall): off = old behaviour, observe = one would-resume note per state
  * version (recordObserved), on = the scheduler identity runs the workflow-resume transaction with an authorization fingerprint, which
  * re-runs the whole check and the same port inside it (manualResumeGate) and refuses a drifted one; CAS + that re-check make two
- * passes or a restart resume once. In-process like ensureDeliverScope: the `ledger` CLI keeps workflow-resume PM-only for the
- * scheduler identity (shared-ledger-gate-cli-services.ts). tests/manual-resume*.test.ts.
+ * passes or a restart resume once. The service uses scheduler-manual-resume; workflow-resume stays PM-only at the CLI.
+ * Direct writer unit tests inject resume and may use recordObserved. tests/manual-resume*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -20,7 +20,7 @@ import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask, LedgerError, listDeps, listEvents } from "./ledger-store.js";
 import { manualEntry, manualReasonRecord, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
-import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { decideRecovery, recordObserved, recoveryPolicy, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSwitch, switchOff } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { strayPoolOrders } from "./scheduler-pool-facts.js";
@@ -201,6 +201,8 @@ type ResumeWorkflow = (db: Database, ctx: { actor: string; now: number },
 export interface ManualResumeDeps {
   /** The existing workflow-resume transaction; the scheduler identity passes manualResumeGate inside it. */
   resume: ResumeWorkflow;
+  /** Service wiring supplies the leased CLI; the default belongs to direct writer unit tests. */
+  observe?: (db: Database, action: ObservedAction, now: number) => { recorded: boolean } | Promise<{ recorded: boolean }>;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   now(): number;
   policy?: RecoveryPolicyPort;
@@ -227,13 +229,13 @@ export async function manualResumeTick(db: Database, projects: Record<string, { 
       if (!v.ok) { out.push({ project, taskId, mode, action: "none", why: v.why }); continue; }
       const reason = manualResumeReason(v.facts);
       if (mode === "observe") {
-        const r = recordObserved(db, { project, mechanism: "manualStall", target: taskId, actionKey: `resume.${v.facts.fingerprint}`,
+        const r = await (d.observe ?? recordObserved)(db, { project, mechanism: "manualStall", target: taskId, actionKey: `resume.${v.facts.fingerprint}`,
           action: `把 ${taskId} 交回自动：${reason}`, data: { manualResume: v.facts } }, d.now());
         out.push({ project, taskId, mode, action: r.recorded ? "would_resume" : "observed_before", why: reason });
         continue;
       }
       try {
-        d.resume(db, { actor: "scheduler", now: d.now() }, { taskId, taskRev: task.rev, workflowRev: wf.rev, reason, maxWorkers: cfg.maxActiveWorkers }, port);
+        await d.resume(db, { actor: "scheduler", now: d.now() }, { taskId, taskRev: task.rev, workflowRev: wf.rev, reason, maxWorkers: cfg.maxActiveWorkers }, port);
       } catch (e) {
         if (!(e instanceof LedgerError)) throw e;
         out.push({ project, taskId, mode, action: "refused", why: e.message });

@@ -6,16 +6,13 @@
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listEvents, toEvent } from "./ledger-store.js";
-import { insertEvent, tx } from "./ledger-tx.js";
 import { MAX_REVIEW_ROUND, ROUND_CAP_CODE } from "./review-converge.js";
-import { convergeReview } from "./review-converge.js";
-import { convergeFollowUp, escalationFollowUp } from "./review-converge-followup.js";
-import { fixDiffOf } from "./review-converge-scope.js";
+import { recoveryArgs, recoveryFence, recoveryWrite } from "./scheduler-recovery-ports.js";
 import { convergeNoticeKey, followUpFailureText, isFailedFollowUp } from "./review-converge-notice-write.js";
 import { createRetryDelay } from "./scheduler-create-retry.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { SchedulerLeaseLost } from "./scheduler-lease-env.js";
-import { countsAsP1, currentReviewFacts, type ReviewFinding } from "./scheduler-review.js";
+import { countsAsP1, type ReviewFinding } from "./scheduler-review.js";
 
 export const isRoundCap = (code: string): boolean => code === ROUND_CAP_CODE;
 const PER_ROUND = 6;
@@ -40,32 +37,24 @@ export function roundCapText(task: Pick<LedgerTask, "id" | "round">, events: rea
 }
 
 /** Tell PM once per capped verdict; returns the card outcome detail. */
-export async function roundCapNotice(db: Database, task: LedgerTask, notifyPm: (t: LedgerTask, text: string) => Promise<void>): Promise<string> {
+export async function roundCapNotice(db: Database, task: LedgerTask, deps: FollowUpNoticeDeps | FollowUpNoticeDeps["notifyPm"]): Promise<string> {
   let events = listEvents(db, { project: task.project, target: task.id });
-  const review = currentReviewFacts(task, events);
-  if (review.kind === "facts") {
-    const { downgrade } = convergeReview(events, review.facts, fixDiffOf(task, events));
-    // A capped verdict has no stage move to carry its nonblocking findings; keep their drafts here instead.
-    if (downgrade) tx(db, () => convergeFollowUp(db, { actor: "scheduler" }, task, downgrade));
-    events = listEvents(db, { project: task.project, target: task.id });
-  }
   const verdict = events.findLast((e) => e.kind === "review" && e.data.round === task.round)?.seq ?? 0;
   const key = `scheduler:review-cap:${task.id}:${verdict}`;
   if (getEventByDedup(db, key)) return `第 ${task.round} 轮到上限，等 PM 交回（已通知）`;
+  if (typeof deps === "function") throw new Error("轮次上限缺 manager 写口");
+  const args = [...recoveryArgs(recoveryFence(db, task)), "--review-seq", String(verdict)];
+  await recoveryWrite(deps.manager, "scheduler-review-hold", [...args, "--action", "prepare"]);
+  events = listEvents(db, { project: task.project, target: task.id });
   const text = roundCapText(task, events);
   try {
-    await notifyPm(task, text);
+    await deps.notifyPm(task, text);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // a lost lease ends the pass, like every other notice in scheduler-auto-tick.ts
     console.error(`⚠️ [scheduler] 轮次上限通知没发出去（下个 tick 重发）：${(e as Error).message}`);
     return `第 ${task.round} 轮到上限，通知 PM 没发出去，下个 tick 重发`;
   }
-  tx(db, () => {
-    if (!getEventByDedup(db, key)) insertEvent(db, { actor: "scheduler", dedupKey: key }, {
-      project: task.project, target: task.id, kind: "scheduler", text,
-      data: { op: "review_round_hold", round: task.round, reviewSeq: verdict, informed: true },
-    }, true);
-  });
+  await recoveryWrite(deps.manager, "scheduler-review-hold", [...args, "--action", "informed"]);
   return `第 ${task.round} 轮到上限，已通知 PM`;
 }
 
@@ -217,7 +206,8 @@ async function noticeSources(db: Database, task: LedgerTask, failed: readonly Le
 export async function escalationWithFollowUp<T>(db: Database, task: LedgerTask,
   plan: { code: string; reason: string; reviewSeq?: number; downgrade?: import("./review-converge.js").Downgrade },
   deps: FollowUpNoticeDeps, fallback: (reason: string) => Promise<T>): Promise<T> {
-  escalationFollowUp(db, task, plan);
+  if (plan.downgrade) await recoveryWrite(deps.manager, "scheduler-review-downgrade", [...recoveryArgs(recoveryFence(db, task)),
+    "--review-seq", String(plan.reviewSeq)]);
   await followUpFailureNotice(db, task, deps);
   return fallback(`${plan.code}：${plan.reason}`);
 }

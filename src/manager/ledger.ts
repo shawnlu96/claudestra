@@ -63,6 +63,7 @@ import { WORKER_CMDS } from "./ledger-worker-cmds.js";
 import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
 import { MODEL_CMDS } from "./ledger-model-cmds.js";
 import { POOL_REFUSAL_CMDS } from "./ledger-pool-refusal-cmds.js";
+import { SCHEDULER_RECOVERY_CMDS } from "./ledger-scheduler-recovery-cmds.js";
 import { LOCK_YIELD_CMDS, LOCK_YIELD_SERVICE_COMMANDS } from "./ledger-lock-yield-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
@@ -73,6 +74,7 @@ const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
+  ...SCHEDULER_RECOVERY_CMDS,
   ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
