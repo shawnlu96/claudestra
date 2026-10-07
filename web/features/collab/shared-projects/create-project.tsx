@@ -4,9 +4,10 @@ import { eligibleLocals, teamKey, type CreateProject, type ProjectSnapshot, type
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
 
-export function CreateProjectForm({ snapshot, port, refresh, pending, setPending }: {
+export function CreateProjectForm({ snapshot, port, refresh, pending, setPending, locked, setLocked }: {
   snapshot: ProjectSnapshot; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
-  pending: CreateProject | null; setPending: Dispatch<SetStateAction<CreateProject | null>>;
+  pending: CreateProject[]; setPending: Dispatch<SetStateAction<CreateProject[]>>;
+  locked: string | null; setLocked: Dispatch<SetStateAction<string | null>>;
 }) {
   const teams = snapshot.teams.filter(t => t.teamRole === "owner");
   const [team, setTeam] = useState(teams[0] ? teamKey(teams[0]) : "");
@@ -17,23 +18,23 @@ export function CreateProjectForm({ snapshot, port, refresh, pending, setPending
   const selected = teams.find(t => teamKey(t) === team);
   const locals = eligibleLocals(snapshot);
   const validLocal = !local || locals.some(p => p.id === local);
-  const canCreate = !!selected && validLocal && !!name.trim() && !action.busy && !pending;
+  const canCreate = !!selected && validLocal && !!name.trim() && !action.busy && !locked;
   if (!teams.length) return <p className="text-sm opacity-60">{snapshot.teams.some(t => t.teamRole === null)
     ? "中心暂未提供团队权限，创建项目暂不可用。" : "仅团队 owner 可以新建团队项目。"}</p>;
   const submit = () => {
     if (!selected || !canCreate) return;
     const input: CreateProject = { centerId: selected.centerId, teamId: selected.teamId, name: name.trim(),
       ...(id.trim() ? { id: id.trim() } : {}), ...(local ? { localProjectId: local } : {}), operationId: crypto.randomUUID() };
-    setPending(input);
+    setPending(previous => [...previous, input]); setLocked(input.operationId);
     void action.run(async signal => {
       await port.create(input, signal);
-      if (!signal.aborted) { setPending(null); setName(""); setId(""); setLocal(""); }
+      if (!signal.aborted) { setPending(previous => previous.filter(p => p.operationId !== input.operationId)); setLocked(null); setName(""); setId(""); setLocal(""); }
     }, "创建已处理，请查看本机可用状态。");
   };
   return <section className="space-y-3">
     <h3 className="font-semibold">新建团队项目</h3>
     <form className="space-y-3" onSubmit={e => { e.preventDefault(); submit(); }}>
-      <fieldset disabled={action.busy || !!pending} className="space-y-3">
+      <fieldset disabled={action.busy || !!locked} className="space-y-3">
         <label className="block text-sm">团队
           <select className="select mt-1 w-full" value={selected ? team : ""} onChange={e => setTeam(e.target.value)} required>
             <option value="">请选择团队</option>
@@ -56,14 +57,20 @@ export function CreateProjectForm({ snapshot, port, refresh, pending, setPending
         <button className="btn btn-primary" disabled={!canCreate}>创建项目</button>
       </fieldset>
     </form>
-    {pending && <div className="space-y-2 text-sm">
-      <p>创建结果待确认。继续将查询同一次创建操作，不会重复创建。</p>
-      <button type="button" className="btn btn-sm" disabled={action.busy || !teams.some(t => teamKey(t) === teamKey(pending))}
+    {pending.map(input => <div key={input.operationId} className="space-y-2 text-sm">
+      <p>「{input.name}」创建结果仍待可信读取；卡片结案和同名项目不能证明完成。</p>
+      <button type="button" className="btn btn-sm" disabled={action.busy || !teams.some(t => teamKey(t) === teamKey(input))}
         onClick={() => void action.run(async signal => {
-          await port.complete(pending, signal);
-          if (!signal.aborted) { setPending(null); setName(""); setId(""); setLocal(""); }
+          await port.complete(input, signal);
+          if (!signal.aborted) {
+            setPending(previous => previous.filter(p => p.operationId !== input.operationId));
+            if (locked === input.operationId) { setLocked(null); setName(""); setId(""); setLocal(""); }
+          }
       }, "恢复已处理，请查看本机可用状态。")}>继续完成项目</button>
-    </div>}
+      {locked === input.operationId && <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => {
+        setLocked(null); setName(""); setId(""); setLocal("");
+      }}>释放新建表单</button>}
+    </div>)}
     <ActionStatus {...action} />
   </section>;
 }

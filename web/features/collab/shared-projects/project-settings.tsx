@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ProjectFailure, projectKey, type ProjectPatch, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
@@ -10,6 +10,7 @@ export function ProjectSettings({ project, port, refresh }: {
   const [name, setName] = useState(project.name);
   const [rev, setRev] = useState(project.rev);
   const [conflict, setConflict] = useState<{ current: SharedProject; patch: ProjectPatch } | null>(null);
+  useEffect(() => { setName(project.name); setRev(project.rev); setConflict(null); }, [project.name, project.rev]);
   const action = useProjectAction(refresh);
   const update = async (patch: ProjectPatch, signal: AbortSignal) => {
     setConflict(null);
@@ -31,7 +32,7 @@ export function ProjectSettings({ project, port, refresh }: {
         <div className="flex flex-wrap gap-2">
           <button className="btn btn-sm" disabled={action.busy || !name.trim()}>保存名称</button>
           <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => void action.run(s => update({
-            rev: project.rev, status: project.status === "active" ? "archived" : "active",
+            rev, status: project.status === "active" ? "archived" : "active",
           }, s))}>{project.status === "active" ? "归档项目" : "恢复项目"}</button>
         </div>
       </form>

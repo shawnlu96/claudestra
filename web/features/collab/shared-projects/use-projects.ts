@@ -13,8 +13,10 @@ export function useProjects(port: SharedProjectsPort) {
       if (!signal.aborted && seq === sequence.current) { setSnapshot(next); setError(""); }
     } catch (e) {
       if (!signal.aborted && seq === sequence.current) {
-        setSnapshot(null); // Permission revocation must remove stale action buttons and bindings.
-        setError(projectErrorText(e instanceof ProjectFailure ? e.status : 0));
+        const status = e instanceof ProjectFailure ? e.status : 0;
+        // Keep the last verified display through transient reads; revoked or malformed authority removes all controls.
+        if ([401, 403, 404, 409, 502].includes(status)) setSnapshot(null);
+        setError(projectErrorText(status));
       }
     }
   }, [port]);

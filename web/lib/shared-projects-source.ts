@@ -12,13 +12,13 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
     const p = object(v), role = object(p.projectRole), ids = list(p.localProjectIds, v => text(v, 32));
     if (p.centerId !== centerId || p.teamId !== teamId || ids.length > 1) throw new ProjectFailure(502);
     const local = ids.length ? locals.filter(l => l.id === ids[0]) : [];
-    if (ids.length && local.length !== 1) throw new ProjectFailure(502);
+    if (local.length > 1) throw new ProjectFailure(502);
     return { centerId, teamId, projectId: p.projectId, name: p.name, rev: p.rev, status: p.status,
       role: role.available === true ? role.value : null, local: local[0] ?? null,
       availability: local.length && role.available === true ? "ready" : "pending" };
   });
   const role = object(data.teamRole), capabilities = object(data.capabilities);
-  const snapshot = parseProjectSnapshot({ teams: [{ centerId, teamId, personId, name: teamId,
+  const snapshot = parseProjectSnapshot({ teams: [{ centerId, teamId, personId, name: "团队（显示名未提供）",
     teamRole: role.available === true ? role.value : null }], projects,
     localProjects: locals.map(p => {
       if (typeof p.eligible !== "boolean") throw new ProjectFailure(502);
@@ -26,7 +26,9 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
     }),
     peers: list(data.peers, v => object(v)).filter(p => p.enabled === true && p.invitable === true).map(p => ({ id: p.name, name: p.name })),
   });
-  return { ...snapshot, projects: snapshot.projects.map(p => ({ ...p, personId, instanceId })),
+  return { ...snapshot,
+    teams: snapshot.teams.map(t => ({ ...t, name: `团队 ${t.teamId} · 中心 ${t.centerId}（显示名未提供）` })),
+    projects: snapshot.projects.map(p => ({ ...p, personId, instanceId })),
     capabilities: { invite: object(capabilities.invite).available === true, leave: object(capabilities.leave).available === true } };
 }
 

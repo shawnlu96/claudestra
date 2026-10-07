@@ -4,6 +4,7 @@ import { parseProjectMembers, parseProjectSnapshot, parseSharedProject } from ".
 import { projectChoice, projectChoiceWire } from "../web/lib/shared-projects-choice";
 import { projectSourceCards, projectSourceSnapshot } from "../web/lib/shared-projects-source";
 import { sharedProjectsApi, type ProjectRequest } from "../web/lib/shared-projects-api";
+import { sharedProjectsByBindings } from "../web/lib/shared-projects-bindings";
 import { ApiError } from "../web/lib/api/client";
 import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures";
 import { sharedProjectsSnapshot } from "../src/bridge/local-api/shared-projects-snapshot";
@@ -39,7 +40,11 @@ describe("N4 source consumption (synthetic canonical records, actual route)", ()
     expect(boundProjects(next)).toHaveLength(1);
     expect(next.capabilities).toEqual({ invite: true, leave: false });
     expect(JSON.stringify(next)).not.toContain("sourceBinding");
-    expect(() => projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], localProjectIds: ["missing"] }] })).toThrow(ProjectFailure);
+    const dangling = projectSourceSnapshot({ ...raw, projects: [raw.projects[0],
+      { ...raw.projects[0], projectId: "dangling", localProjectIds: ["missing"] }] });
+    expect(dangling.projects[1]).toMatchObject({ local: null, availability: "pending" });
+    expect(boundProjects(dangling).map(p => p.projectId)).toEqual([f.project.projectId]);
+    expect(dangling.teams[0]?.name).not.toBe(f.project.teamId);
     expect(() => projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], teamId: "other" }] })).toThrow(ProjectFailure);
     const unavailable = projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], projectRole: { available: false, reason: "missing" } }] });
     expect(unavailable.projects[0]?.role).toBeNull();
@@ -182,5 +187,87 @@ describe("shared project presentation boundary", () => {
     expect(projectChoice({ sharedProjectChoice: { selectId: "binding", recommended: "unknown" } }, rows)?.recommended).toBe("");
     expect(projectChoice(extra, null)).toBeNull();
     expect(projectChoice(extra, [{ ...rows[0], options: [{ value: "bad]wire", label: "bad" }] }])).toBeNull();
+  });
+});
+
+
+describe("multiple original binding sources", () => {
+  const signal = () => new AbortController().signal;
+  test("two same-team bindings are read explicitly and merge center names, without duplicate projects", async () => {
+    const { raw } = await n4Source();
+    const calls: { path: string; source?: string }[] = [];
+    const hints = [raw.projects[0]!.projectId, "new-project"].map(project => ({ center: raw.identity.centerId,
+      team: raw.identity.teamId, person: raw.identity.personId, homeInstanceId: raw.identity.instanceId, project }));
+    const port = sharedProjectsByBindings({ fp: "synthetic" }, async (path, init) => {
+      calls.push({ path, source: init.headers?.["x-shared-ledger-project"] });
+      if (path === "/shared-ledger/context") return { identities: hints };
+      return { ...raw, projects: [raw.projects[0], { ...raw.projects[0], projectId: "new-project", name: "新项目核验名", localProjectIds: [] }] };
+    });
+    const next = await port.list(signal());
+    expect(next.projects.map(p => p.name)).toEqual([raw.projects[0]!.name, "新项目核验名"]);
+    expect(next.teams).toHaveLength(1);
+    expect(calls.filter(c => c.path.endsWith("/snapshot")).map(c => c.source)).toEqual(hints.map(h => h.project));
+    expect(next.sourceWarnings).toEqual([]);
+  });
+  test("cross-team equal projectIds cannot select any ambiguous header and give the N4 dependency", async () => {
+    const { raw } = await n4Source();
+    const calls: string[] = [];
+    const port = sharedProjectsByBindings({ fp: "synthetic" }, async path => {
+      calls.push(path);
+      return { identities: ["team-a", "team-b"].map(team => ({ center: "center", team, person: "person", homeInstanceId: "instance",
+        project: raw.projects[0]!.projectId })) };
+    });
+    const next = await port.list(signal());
+    expect(next.projects).toEqual([]);
+    expect(next.sourceWarnings?.[0]).toContain("需要 N4 选择头带 center/team");
+    expect(calls).toEqual(["/shared-ledger/context"]);
+    await expect(port.members({ centerId: "center", teamId: "team-a", projectId: "demo-b" }, signal())).rejects.toMatchObject({ status: 403 });
+  });
+  test("distinct center/team scopes with equal display names stay distinct and route to their own source", async () => {
+    const { raw } = await n4Source();
+    const first = raw, second = { ...raw, identity: { ...raw.identity, centerId: "other-center", teamId: "other-team" },
+      projects: [{ ...raw.projects[0], centerId: "other-center", teamId: "other-team", projectId: "other-project", localProjectIds: [] }] };
+    const inputs = [first, second], calls: string[] = [];
+    const port = sharedProjectsByBindings({ fp: "synthetic" }, async (path, init) => {
+      if (path === "/shared-ledger/context") return { identities: inputs.map(r => ({ center: r.identity.centerId, team: r.identity.teamId,
+        person: r.identity.personId, homeInstanceId: r.identity.instanceId, project: r.projects[0]!.projectId })) };
+      const source = init.headers?.["x-shared-ledger-project"];
+      if (init.method === "PATCH") { calls.push(source!); return { ok: true }; }
+      return inputs.find(r => r.projects[0]!.projectId === source)!;
+    });
+    const next = await port.list(signal());
+    expect(next.teams).toHaveLength(2);
+    expect(next.projects.map(p => p.name)).toEqual([raw.projects[0]!.name, raw.projects[0]!.name]);
+    expect(new Set(next.projects.map(projectKey)).size).toBe(2);
+    expect(next.teams[0]?.name).not.toBe(next.teams[1]?.name);
+    await port.patch(next.projects[1]!, { rev: 1, name: "同名仍按绑定" }, signal());
+    expect(calls).toEqual(["other-project"]);
+  });
+  test("no binding sends no snapshot, and snapshot/context scope mismatches fail closed", async () => {
+    const { raw } = await n4Source();
+    const calls: string[] = [];
+    const empty = sharedProjectsByBindings({ fp: "synthetic" }, async path => { calls.push(path); return { identities: [] }; });
+    await expect(empty.list(signal())).rejects.toMatchObject({ status: 403 });
+    expect(calls).toEqual(["/shared-ledger/context"]);
+    const wrong = sharedProjectsByBindings({ fp: "synthetic" }, async path => path === "/shared-ledger/context"
+      ? { identities: [{ center: raw.identity.centerId, team: "wrong-team", person: raw.identity.personId,
+        homeInstanceId: raw.identity.instanceId, project: raw.projects[0]!.projectId }] } : raw);
+    await expect(wrong.list(signal())).rejects.toMatchObject({ status: 502 });
+  });
+  test("transient source failure preserves verified projects, revocation removes them", async () => {
+    const { raw } = await n4Source();
+    let status = 0;
+    const port = sharedProjectsByBindings({ fp: "synthetic" }, async path => {
+      if (path === "/shared-ledger/context") return { identities: [{ center: raw.identity.centerId, team: raw.identity.teamId,
+        person: raw.identity.personId, homeInstanceId: raw.identity.instanceId, project: raw.projects[0]!.projectId }] };
+      if (status) throw new ApiError("synthetic-sensitive-sentinel", status);
+      return raw;
+    });
+    await port.list(signal());
+    status = 429;
+    expect(boundProjects(await port.list(signal()))).toHaveLength(1);
+    status = 403;
+    await expect(port.list(signal())).rejects.toMatchObject({ status: 403 });
+    await expect(port.members(raw.projects[0]!, signal())).rejects.toMatchObject({ status: 403 });
   });
 });

@@ -8,6 +8,7 @@ import { useProjectAction } from "./use-projects";
 
 export function ProjectMembers({ project, snapshot, port }: { project: SharedProject; snapshot: ProjectSnapshot; port: SharedProjectsPort }) {
   const [members, setMembers] = useState<ProjectMember[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [removing, setRemoving] = useState<ProjectMember | null>(null);
   const [peers, setPeers] = useState<string[]>([]);
@@ -19,9 +20,9 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
     const seq = ++sequence.current;
     try {
       const next = await port.members({ centerId, teamId, projectId }, signal);
-      if (!signal.aborted && seq === sequence.current) { setMembers(next); setLoadError(""); }
+      if (!signal.aborted && seq === sequence.current) { setMembers(next); setLoaded(true); setLoadError(""); }
     } catch (e) {
-      if (!signal.aborted && seq === sequence.current) { setMembers([]); setLoadError(projectErrorText(e instanceof ProjectFailure ? e.status : 0)); }
+      if (!signal.aborted && seq === sequence.current) { setMembers([]); setLoaded(false); setLoadError(projectErrorText(e instanceof ProjectFailure ? e.status : 0)); }
     }
   }, [port, centerId, teamId, projectId]);
   useEffect(() => {
@@ -32,8 +33,11 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
   }, [refresh]);
   const action = useProjectAction(refresh);
   const validPeers = peers.filter(id => snapshot.peers.some(p => p.id === id));
-  const validRecipient = recipient && (recipient.personId !== undefined
-    ? members.some(m => m.personId === recipient.personId && m.status !== "removed") : !!recipient.code.trim()) ? recipient : null;
+  const self = project.personId ?? snapshot.teams.find(t => t.centerId === centerId && t.teamId === teamId)?.personId;
+  const personId = recipient?.personId?.trim();
+  const validRecipient = loaded && recipient && (personId !== undefined
+    ? !!personId && personId !== self && !members.some(m => m.personId === personId && m.status === "active")
+    : !!recipient.code?.trim()) ? (personId !== undefined ? { personId } : { code: recipient.code!.trim() }) : null;
   return <section className="space-y-3 border-t border-base-300 pt-4">
     <h3 className="font-semibold">成员</h3>
     {loadError && <p role="alert" className="text-sm text-error">{loadError}</p>}
@@ -60,7 +64,7 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
       }, port.cards ? "邀请确认卡已生成，请由本人核对后发送。" : "邀请已发送，等待对方确认加入。"); }}>
         <fieldset disabled={action.busy} className="space-y-2">
           <legend className="mb-2 font-medium">邀请成员</legend>
-          <ProjectRecipientFields members={members} value={recipient} onChange={setRecipient} />
+          <ProjectRecipientFields value={recipient} onChange={setRecipient} />
           <p className="text-sm font-medium">发送到 peer</p>
           {!snapshot.peers.length && <p className="text-sm opacity-60">暂无已握手的 peer。</p>}
           {snapshot.peers.map(p => <label key={p.id} className="flex items-center gap-2 text-sm">

@@ -15,6 +15,7 @@ export interface SharedProject extends ProjectRef {
 export interface ProjectTeam extends ProjectScope { name: string; personId: string; teamRole: "owner" | "member" | null }
 export interface ProjectMember { personId: string; code: string; role: "owner" | "member"; status: "invited" | "active" | "removed" }
 export interface ProjectSnapshot {
+  sourceWarnings?: string[];
   teams: ProjectTeam[];
   projects: SharedProject[];
   localProjects: { id: string; name: string; personal: boolean; bound: boolean }[];

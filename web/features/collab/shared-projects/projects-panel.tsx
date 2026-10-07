@@ -13,22 +13,25 @@ export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjec
   const { snapshot, error, refresh } = useProjects(port);
   const [opened, setOpened] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pending, setPending] = useState<CreateProject | null>(null);
+  const [locked, setLocked] = useState<string | null>(null);
+  const [pending, setPending] = useState<CreateProject[]>([]);
   const project = snapshot?.projects.find(p => projectKey(p) === selected);
+  if (!snapshot && !opened) return null;
   return <section className="my-2 space-y-1" aria-label="团队项目">
     <div className="flex items-center justify-between gap-2 px-2">
       <h2 className="text-xs font-semibold opacity-60">团队 · 全部 feature</h2>
-      <button type="button" className="btn btn-ghost btn-xs" onClick={() => setOpened(true)}>项目设置</button>
+      <button type="button" className="btn btn-ghost btn-xs" disabled={!snapshot?.teams.length} onClick={() => setOpened(true)}>项目设置</button>
     </div>
+    {snapshot?.sourceWarnings?.map(warning => <p key={warning} role="status" className="px-2 text-xs opacity-60">{warning}</p>)}
     {snapshot && boundProjects(snapshot).map(p => <button key={projectKey(p)} type="button"
-      className="block w-full truncate rounded-lg px-2 py-2 text-left text-sm hover:bg-base-300" onClick={() => openFeatures(p)} title={p.name}>
-      {p.name}{p.status === "archived" ? " · 已归档" : ""}
+      className="block w-full truncate rounded-lg px-2 py-2 text-left text-sm hover:bg-base-300" onClick={() => openFeatures(p)} aria-label={p.name} title={`${p.name} · ${p.centerId}/${p.teamId}`}>
+      <span>{p.name}</span><span className="block break-all whitespace-normal text-xs opacity-60">{`中心 ${p.centerId} / 团队 ${p.teamId}`}</span>{p.status === "archived" ? " · 已归档" : ""}
     </button>)}
     {opened && <ProjectDialog title="团队项目" close={() => setOpened(false)}>
       {error && <p role="alert" className="text-sm text-error">{error}</p>}
       {!snapshot && !error && <p role="status">正在读取团队项目…</p>}
       {snapshot && <>
-        <CreateProjectForm snapshot={snapshot} port={port} refresh={refresh} pending={pending} setPending={setPending} />
+        <CreateProjectForm snapshot={snapshot} port={port} refresh={refresh} pending={pending} setPending={setPending} locked={locked} setLocked={setLocked} />
         <section className="space-y-3 border-t border-base-300 pt-4">
           <h3 className="font-semibold">项目设置</h3>
           {!snapshot.projects.length && <p className="text-sm opacity-60">暂无团队项目。加入后会自动出现在这里。</p>}
