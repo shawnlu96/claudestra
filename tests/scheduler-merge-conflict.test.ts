@@ -105,7 +105,7 @@ describe("i28-M12 conflict goes back to fix without freezing the queue", () => {
     for (const [phase, change, expected] of [
       ["ready", { head: N }, "await_review"] /* MCRY2: carry refused → re-review, no freeze */, ["ready", { state: "CLOSED" as const }, "unknown"], ["ready", { crossRepository: true }, "unknown"],
       ["ready", { base: "dev" }, "unknown"], ["ready", { branch: "task/T9" }, "unknown"], ["ready", { draft: true }, "ready"],
-      ["await_ci", { head: N }, "unknown"], ["await_ci", { state: "CLOSED" as const }, "unknown"], ["await_ci", { crossRepository: true }, "unknown"],
+      ["await_ci", { head: N }, "await_review"] /* MCRY3 */, ["await_ci", { state: "CLOSED" as const }, "unknown"], ["await_ci", { crossRepository: true }, "unknown"],
       ["await_ci", { draft: true }, "await_ci"], ["updating", { state: "CLOSED" as const }, "unknown"], ["updating", { draft: true }, "updating"],
     ] as const) {
       await with_(phase, async (f) => {
@@ -158,7 +158,7 @@ describe("i28-M12 red required CI on the reviewed head goes back to fix", () => 
       await with_("await_ci", async (f) => {
         f.snaps = [pr(p)];
         await f.tick();
-        expect(stateOf(f)).toMatchObject({ run: "unknown", frozen: true, stage: "merge" });
+        expect(stateOf(f)).toMatchObject("head" in p ? { run: "await_review", frozen: false, stage: "review" } /* MCRY3 */ : { run: "unknown", frozen: true, stage: "merge" });
       });
     }
   });

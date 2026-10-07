@@ -37,6 +37,9 @@ const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase
 /** This run's own open, non-draft, same-repo PR on main at the reviewed head. */
 const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" && sameHead(run, pr) && pr.branch === run.expectedBranch &&
   pr.base === "main" && !pr.draft && !pr.crossRepository;
+/** MCRY3 at await_ci: only the head moved. No merge was sent (merging never returns here) and the scheduler's own update-branch was
+ * already carried into reviewedHead, so this is the author's push. */
+const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
 const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
@@ -196,6 +199,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.draft && pr.mergeState === "UNSTABLE") return step("unknown", "等 CI 时 PR 变成了 draft");
       const same = sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository && pr.base === "main" && pr.branch === run.expectedBranch;
       if (same && pr.draft) return run;
+      // MCRY3: void review, re-review, no freeze; before the train gate like a bounce (the train's own drift check voids it)
+      if (authorPush(run, pr)) return await step("await_review", `等 CI 时作者推了新 head：原 head ${run.reviewedHead} → 新 head ${pr.head}，旧审查失效`, undefined, pr.head);
       if (same && pr.mergeState === "UNKNOWN") return unknownWait(run, step);
       // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
       // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.

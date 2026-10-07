@@ -105,7 +105,7 @@ describe("i28-M7 merge driver treats UNSTABLE (CI still running) as waiting, not
     for (const [name, change] of changes) {
       const f = fixture("await_ci", running(change));
       await f.drive();
-      expect([name, f.row.phase]).toEqual([name, "unknown"]);
+      expect([name, f.row.phase]).toEqual([name, name === "head" ? "await_review" : "unknown"]); // MCRY3: an author push re-reviews
       expect(f.calls).not.toContain("merge");
     }
   });
