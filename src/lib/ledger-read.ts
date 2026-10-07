@@ -15,7 +15,7 @@ import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict,
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
-import { taskSessionLinks } from "./scheduler-sessions.js";
+import { RETIRE_STAGES, taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
 export { clipFirstLine } from "./ledger-read-cards.js";
@@ -211,36 +211,48 @@ export interface LedgerReviewRef {
 
 const count = (v: unknown): number => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0);
 
-/** 一条派审 / 结论事件 → 本机审查员裸名 + 它对这张卡的状态；派给 peer / 人的、审查员名字带 @ 或 local: 的不算 */
-function reviewOf(e: LedgerEvent): [string, LedgerReviewRef] | null {
+/** 审查员名是本机 agent 才算：派给 peer / 人的（带 @ 或 local:）不进表 */
+const localReviewer = (who: unknown): who is string => typeof who === "string" && !!who && !who.includes("@") && !who.startsWith("local:");
+const inReview = (who: unknown, id: string, round: number): [string, LedgerReviewRef] | null =>
+  localReviewer(who) ? [who, { id, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;
+
+/**
+ * 一条派审 / 结论 / 调度器审查员会话事件 → 本机审查员裸名 + 它对这张卡的状态；taskRound = 卡当前轮次（bind 事件不带轮次）。
+ * 调度器：reviewer session_bind / 派审意图（plan action=review，轮次在意图 id 的 :rN:）→ 在审；reviewer session_retire → 不再显示。
+ */
+function reviewOf(e: LedgerEvent, taskRound: number): [string, LedgerReviewRef] | null {
   const d = e.data;
   const round = count(d.round);
-  if (e.kind === "step") {
-    return d.executorKind === "agent" && typeof d.executor === "string" ? [d.executor, { id: e.target, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;
+  if (e.kind === "step") return d.executorKind === "agent" ? inReview(d.executor, e.target, round) : null;
+  if (e.kind === "scheduler") {
+    if (d.op === "session_bind") return inReview(d.agent, e.target, taskRound);
+    if (d.op === "plan") return inReview(d.recipient, e.target, Number(/:r(\d+):/.exec(String(d.id))?.[1] ?? taskRound));
+    return null; // session_retire
   }
-  const who = d.reviewer;
-  if (typeof who !== "string" || !who || who.includes("@") || who.startsWith("local:")) return null;
   const verdict = (["pass", "changes", "block"] as const).find((v) => v === d.verdict);
-  return verdict ? [who, { id: e.target, round, verdict, p0: count(d.p0), p1: count(d.p1), p2: count(d.p2) }] : null;
+  return verdict && localReviewer(d.reviewer) ? [d.reviewer, { id: e.target, round, verdict, p0: count(d.p0), p1: count(d.p1), p2: count(d.p2) }] : null;
 }
 
 /**
- * 审查员（裸名）→ 它在审 / 审完的卡。审查员不绑卡，关系只在事件里：派审（step assign review / final_review）与结论（review）。
- * 每张未结束的卡只看最后一条这类事件：派审 → 那个执行者「在审」；结论 → 那个审查员「审完」带结论。卡改派给别人或结束，旧的就不再显示。
- * 同一 agent 挂着几张：在审的优先于审完的，同类取最新。tests/ledger-read-reviews.test.ts
+ * 审查员（裸名）→ 它在审 / 审完的卡。审查员不绑卡，关系只在事件里：派审（step assign review / final_review）、结论（review），
+ * 自动卡另有调度器的 reviewer 会话绑定 / 派审意图 / 会话退役（kind=scheduler，作者那边的不收）。
+ * 每张没验收完（verified / done / cancelled 之外）的卡只看最后一条这类事件：派审 / 绑定 → 那个审查员「在审」；结论 → 「审完」带结论；退役 → 没人。卡改派给别人或结束，旧的就不再显示。
+ * 同一 agent 挂着几张：在审的优先于审完的，同类取最新。tests/ledger-read-reviews*.test.ts
  */
 export function activeReviewsByAgent(db: Database): Map<string, LedgerReviewRef> {
-  const marks = TERMINAL_STAGES.map(() => "?").join(", ");
+  const marks = RETIRE_STAGES.map(() => "?").join(", ");
   const rows = db
-    .query(`SELECT e.* FROM events e JOIN tasks t ON t.id = e.target WHERE t.stage NOT IN (${marks}) AND (e.kind = 'review'
-      OR (e.kind = 'step' AND json_extract(e.data, '$.op') = 'assign' AND json_extract(e.data, '$.step') IN ('review', 'final_review'))) ORDER BY e.seq`)
-    .all(...TERMINAL_STAGES) as Record<string, unknown>[];
-  const lastByTask = new Map<string, LedgerEvent>();
+    .query(`SELECT e.*, t.round AS taskRound FROM events e JOIN tasks t ON t.id = e.target WHERE t.stage NOT IN (${marks}) AND (e.kind = 'review'
+      OR (e.kind = 'step' AND json_extract(e.data, '$.op') = 'assign' AND json_extract(e.data, '$.step') IN ('review', 'final_review'))
+      OR (e.kind = 'scheduler' AND (json_extract(e.data, '$.op') = 'plan' AND json_extract(e.data, '$.action') = 'review'
+        OR json_extract(e.data, '$.op') IN ('session_bind', 'session_retire') AND json_extract(e.data, '$.role') = 'reviewer'))) ORDER BY e.seq`)
+    .all(...RETIRE_STAGES) as Record<string, unknown>[];
+  const lastByTask = new Map<string, Record<string, unknown>>();
   // 先删再设：Map 按首次插入排序，这样遍历顺序 = 各卡最后一条事件的 seq 顺序（「同类取最新」靠它）
-  for (const r of rows) (lastByTask.delete(String(r.target)), lastByTask.set(String(r.target), toEvent(r)));
+  for (const r of rows) (lastByTask.delete(String(r.target)), lastByTask.set(String(r.target), r));
   const out = new Map<string, LedgerReviewRef>();
-  for (const e of lastByTask.values()) {
-    const hit = reviewOf(e);
+  for (const r of lastByTask.values()) {
+    const hit = reviewOf(toEvent(r), count(r.taskRound));
     if (!hit) continue;
     const name = hit[0].replace(/^agent-/, "");
     const prev = out.get(name);
