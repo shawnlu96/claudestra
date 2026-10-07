@@ -4,12 +4,13 @@ import { join } from "node:path";
 import type { LockHandle } from "./file-lock.js";
 import { writeTextAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
-import { publishSharedLedgerProjectUnbinding, readSharedLedgerBindings, type SharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
+import { newSharedLedgerBindingGeneration, publishSharedLedgerProjectUnbinding, readSharedLedgerBindings, SHARED_LEDGER_BINDING_GENERATION,
+  type SharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
 import { resolveSharedLedgerCredential, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import { sameSharedLedgerProject, sharedLedgerBindingLocalId } from "./shared-ledger-project-link-target.js";
 import { snapshotSharedLedgerState, withSharedLedgerStateLocks, type SharedLedgerStateSnapshot } from "./shared-ledger-project-link-save.js";
 
-/** What the authenticated local owner approved on the exit card; version pins both security files' exact bytes. */
+/** What the authenticated local owner approved on the exit card; version pins the binding lifecycle generation and both security files' exact bytes. */
 export interface SharedLedgerProjectUnbindApproval {
   centerId: string; teamId: string; projectId: string; localProjectId: string; personId: string; instanceId: string; version: string;
 }
@@ -17,6 +18,7 @@ export interface SharedLedgerProjectUnbindResult { binding: SharedLedgerBinding;
 
 const OWNER = "owner:self";
 const BINDINGS = "shared-ledger-bindings.json", CREDENTIALS = "shared-ledger-credentials.json", JOURNAL = "shared-ledger-project-unbind.json";
+const GENERATION = SHARED_LEDGER_BINDING_GENERATION, JOURNALED = [BINDINGS, CREDENTIALS, GENERATION];
 const FIELDS = ["centerId", "teamId", "projectId", "localProjectId", "personId", "instanceId", "version"] as const;
 const ACTIONS = ["read", "plan", "import", "project"] as const;
 const validId = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(v);
@@ -25,12 +27,22 @@ const changed = () => new Error("shared binding changed; 绑定已变化，请�
 type Journal = { files: { name: string; before: string | null; after: string | null; mode: number }[] };
 type Located = { approval: SharedLedgerProjectUnbindApproval; binding: SharedLedgerBinding; credentials: string | null; revoked: number };
 
-function version(bindings: SharedLedgerStateSnapshot, credentials: SharedLedgerStateSnapshot): string {
-  return "v1:" + createHash("sha256").update(JSON.stringify([bindings.text, credentials.text])).digest("hex");
+/** Content alone repeats after A->B->A rebinding; the never-reused generation does not. Unknown generation bytes refuse. */
+function version(dir: string, bindings: SharedLedgerStateSnapshot, credentials: SharedLedgerStateSnapshot): string {
+  const generation = snapshotSharedLedgerState(GENERATION, dir);
+  if (generation.text !== null) {
+    const parsed = (() => { try { return JSON.parse(generation.text!) as unknown; } catch { return null; } })();
+    if (generation.mode !== 0o600 || !parsed || typeof parsed !== "object" || Object.keys(parsed).join() !== "generation"
+      || !/^[0-9a-f-]{36}$/.test(String((parsed as { generation: unknown }).generation))) {
+      throw new Error("invalid shared binding generation; nothing was changed");
+    }
+  }
+  return "v2:" + createHash("sha256").update(JSON.stringify([generation.text, bindings.text, credentials.text])).digest("hex");
 }
 
 /** Read-only: every check happens again under both locks; unknown or ambiguous state never produces a card. */
 function locate(localProjectId: string, dir: string): Located {
+  if (existsSync(join(dir, JOURNAL))) throw new Error("shared ledger unbind pending reconciliation; nothing was changed");
   const bindingsFile = snapshotSharedLedgerState(BINDINGS, dir), credentialsFile = snapshotSharedLedgerState(CREDENTIALS, dir);
   const rows = readSharedLedgerBindings(dir), local = rows.filter(b => sharedLedgerBindingLocalId(b) === localProjectId);
   if (local.length !== 1) throw new Error("local project is not bound to one shared project; nothing was changed");
@@ -53,7 +65,7 @@ function locate(localProjectId: string, dir: string): Located {
     return { ...c, projects: c.projects.filter(p => p.projectId !== binding.projectId) };
   }).filter(c => c.projects.length > 0);
   return { binding, revoked, credentials: JSON.stringify(state, null, 2), approval: { centerId: binding.centerId, teamId: binding.teamId,
-    projectId: binding.projectId, localProjectId, personId, instanceId, version: version(bindingsFile, credentialsFile) } };
+    projectId: binding.projectId, localProjectId, personId, instanceId, version: version(dir, bindingsFile, credentialsFile) } };
 }
 
 /** The exit card N4 shows to the authenticated local owner. Reads only; approval goes to unbindSharedLedgerProject unchanged. */
@@ -66,7 +78,7 @@ function readJournal(dir: string): Journal | null {
   const path = join(dir, JOURNAL);
   if (!existsSync(path)) return null;
   const journal = (() => { try { return JSON.parse(snapshotSharedLedgerState(JOURNAL, dir).text!) as Journal; } catch { return null; } })();
-  const valid = journal && Array.isArray(journal.files) && journal.files.length === 2 && journal.files.every((f, i) => f.name === [BINDINGS, CREDENTIALS][i]
+  const valid = journal && Array.isArray(journal.files) && journal.files.length === JOURNALED.length && journal.files.every((f, i) => f.name === JOURNALED[i]
     && [f.before, f.after].every(t => t === null || typeof t === "string") && (f.mode === 0o600));
   if (!valid) throw new Error("shared ledger unbind journal invalid; owner review required");
   return journal;
@@ -98,7 +110,7 @@ export async function recoverSharedLedgerProjectUnbind(dir = STATE_DIR): Promise
 function requireApproval(value: SharedLedgerProjectUnbindApproval): void {
   const keys = value && typeof value === "object" ? Object.keys(value) : [];
   if (keys.length !== FIELDS.length || !FIELDS.every(k => keys.includes(k)) || !FIELDS.slice(0, -1).every(k => validId(value[k]))
-    || !/^v1:[0-9a-f]{64}$/.test(String(value.version))) throw new Error("invalid unbind approval; nothing was changed");
+    || !/^v2:[0-9a-f]{64}$/.test(String(value.version))) throw new Error("invalid unbind approval; nothing was changed");
 }
 
 function credentialsPermit(binding: SharedLedgerBinding, dir: string): boolean {
@@ -108,8 +120,8 @@ function credentialsPermit(binding: SharedLedgerBinding, dir: string): boolean {
 async function unbindLocked(approval: SharedLedgerProjectUnbindApproval, dir: string, locks: LockHandle[]): Promise<SharedLedgerProjectUnbindResult> {
   const held = () => locks.every(lock => lock.held());
   recoverLocked(dir, held);
-  const before = [BINDINGS, CREDENTIALS].map(name => snapshotSharedLedgerState(name, dir));
-  if (version(before[0]!, before[1]!) !== approval.version) throw changed();
+  const before = JOURNALED.map(name => snapshotSharedLedgerState(name, dir));
+  if (version(dir, before[0]!, before[1]!) !== approval.version) throw changed();
   const located = locate(approval.localProjectId, dir);
   if (FIELDS.some(k => located.approval[k] !== approval[k])) throw changed();
   const { binding } = located, rest = readSharedLedgerBindings(dir).filter(b => sharedLedgerBindingLocalId(b) !== approval.localProjectId);
@@ -117,16 +129,17 @@ async function unbindLocked(approval: SharedLedgerProjectUnbindApproval, dir: st
   try {
     writeFileSync(join(stage, CREDENTIALS), located.credentials!, { mode: 0o600 });
     if (credentialsPermit(binding, stage)) throw new Error("local permission did not stage; nothing was changed");
-    const after = [JSON.stringify(rest, null, 2), located.credentials];
+    const generation = newSharedLedgerBindingGeneration(), after = [JSON.stringify(rest, null, 2), located.credentials, generation];
     const journal: Journal = { files: before.map((s, i) => ({ name: s.name, before: s.text, after: after[i]!, mode: 0o600 })) };
     writeTextAtomicSync(join(dir, JOURNAL), JSON.stringify(journal), { mode: 0o600, commitIf: held });
     try {
-      return await publishSharedLedgerProjectUnbinding(binding, dir, locks[0]!, async () => {
+      return await publishSharedLedgerProjectUnbinding(binding, generation, dir, locks[0]!, async () => {
         let published = false;
         try {
           writeTextAtomicSync(join(dir, CREDENTIALS), located.credentials!, { mode: 0o600, commitIf: held });
           published = true;
-          if (credentialsPermit(binding, dir) || JSON.stringify(readSharedLedgerBindings(dir)) !== JSON.stringify(rest)) {
+          if (credentialsPermit(binding, dir) || JSON.stringify(readSharedLedgerBindings(dir)) !== JSON.stringify(rest)
+            || snapshotSharedLedgerState(GENERATION, dir).text !== generation) {
             throw new Error("local exit did not read back");
           }
           unlinkSync(join(dir, JOURNAL));

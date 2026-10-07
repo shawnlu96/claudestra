@@ -12,7 +12,8 @@ import { readSharedLedgerBindings, replaceSharedLedgerBindings, setSharedLedgerB
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { recoverSharedLedgerProjectUnbind, sharedLedgerProjectUnbindCard, unbindSharedLedgerProject } from "../src/lib/shared-ledger-project-link-unbind.js";
 const CENTER = "center-" + "a".repeat(32);
-const FILES = ["projects.json", "shared-ledger-bindings.json", "shared-ledger-credentials.json", "shared-ledger-project-unbind.json"];
+const FILES = ["projects.json", "shared-ledger-bindings.json", "shared-ledger-credentials.json", "shared-ledger-project-unbind.json",
+  "shared-ledger-bindings-generation.json"];
 const roots: string[] = [];
 const cleanup = () => { for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }); };
 const credential = (localSubject: string, kind: "person" | "service", projectId: string, personId = "person") => ({ centerId: CENTER,
@@ -22,12 +23,18 @@ const credential = (localSubject: string, kind: "person" | "service", projectId:
 /** Real temp ledger: another bound project, another member and a service, then "shared" enrolled through the fixed fake center. */
 async function enrolled() {
   const dir = mkdtempSync(join(tmpdir(), "sl-unbind-")); roots.push(dir);
-  for (const id of ["existing", "keep"]) mkdirSync(join(dir, id));
-  writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: ["existing", "keep", "personal"].map(id =>
+  for (const id of ["existing", "keep", "spare"]) mkdirSync(join(dir, id));
+  writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: ["existing", "keep", "spare", "personal"].map(id =>
     ({ id, name: id, dirs: [join(dir, id)], personal: id === "personal" })) }));
   writeFileSync(join(dir, "shared-ledger-bindings.json"), JSON.stringify([{ centerId: CENTER, teamId: "team", projectId: "keep", localProjectId: "keep" }]), { mode: 0o600 });
   writeFileSync(join(dir, "shared-ledger-credentials.json"), JSON.stringify({ credentials: [credential("owner:self", "person", "keep"),
     credential("member:other", "person", "shared", "other-person"), credential("svc", "service", "shared")] }), { mode: 0o600 });
+  await enroll(dir);
+  return dir;
+}
+
+/** The formal N2 enrollment path through the fixed fake center; never a real center. */
+async function enroll(dir: string) {
   const pair = generateKeyPairSync("ed25519"), key = { privateKey: pair.privateKey, publicKey: String(pair.publicKey.export({ format: "jwk" }).x) };
   const grant: V2ProjectJoinGrant = { ...createV2ProjectsFixtures().grant, centerId: CENTER, teamId: "team", personId: "person", instanceId: "instance",
     role: "member", bearer: "b".repeat(43), expiresAt: Date.now() + 60_000, projects: [{ projectId: "shared", actions: ["read"] }],
@@ -37,7 +44,6 @@ async function enrolled() {
   await joinSharedLedger({ url: "https://center.example/", code: `sljoin1.${CENTER}.${"a".repeat(32)}.${"A".repeat(43)}`, key, subject: "owner:self",
     instanceId: "instance", stateDir: dir, fetch, localProjectId: "existing",
     expectedProject: { centerId: CENTER, teamId: "team", projectId: "shared", name: "团队项目", personId: "person" } });
-  return dir;
 }
 const bytes = (dir: string) => FILES.map(name => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : null);
 const mode = (dir: string, name: string) => statSync(join(dir, name)).mode & 0o777;
@@ -217,4 +223,55 @@ test("concurrent exits with one approval: exactly one wins, the other sees the c
   expect(readSharedLedgerBindings(dir).map(b => b.projectId)).toEqual(["keep"]);
   expect(() => sharedLedgerProjectUnbindCard("existing", dir)).toThrow("nothing was changed");
   expect(readFileSync(join(dir, "shared-ledger-credentials.json"), "utf8")).toContain("member:other");
+});
+
+test("ABA: an old approval is stale after replace moves the mapping away and back, even though both files' bytes match again", async () => {
+  const dir = await enrolled(), card = sharedLedgerProjectUnbindCard("existing", dir), original = bytes(dir).slice(0, 3);
+  const shared = readSharedLedgerBindings(dir).find(b => b.projectId === "shared")!;
+  await replaceSharedLedgerBindings({ expected: [shared], next: { ...shared, localProjectId: "spare" } }, dir);
+  await replaceSharedLedgerBindings({ expected: [{ ...shared, localProjectId: "spare" }], next: shared }, dir);
+  expect(bytes(dir).slice(0, 3)).toEqual(original); // content is genuinely back to A
+  const fresh = sharedLedgerProjectUnbindCard("existing", dir);
+  expect(fresh.version).not.toBe(card.version);
+  const before = bytes(dir);
+  await expect(unbindSharedLedgerProject(card, dir)).rejects.toThrow("绑定已变化");
+  expect(bytes(dir)).toEqual(before);
+  expect(permits(dir, "owner:self", "person", "shared")).toBe(true);
+  // The owner re-approves the current card; that one completes.
+  expect(await unbindSharedLedgerProject(fresh, dir)).toMatchObject({ revokedPermissions: 1 });
+});
+
+test("ABA: a used approval cannot exit again after the same identity re-enrolls the same mapping", async () => {
+  const dir = await enrolled(), card = sharedLedgerProjectUnbindCard("existing", dir);
+  await unbindSharedLedgerProject(card, dir);
+  await enroll(dir);
+  expect(readSharedLedgerBindings(dir).map(b => b.projectId)).toEqual(["keep", "shared"]);
+  expect(sharedLedgerProjectUnbindCard("existing", dir).version).not.toBe(card.version);
+  const before = bytes(dir);
+  await expect(unbindSharedLedgerProject(card, dir)).rejects.toThrow("绑定已变化");
+  expect(bytes(dir)).toEqual(before);
+  expect(permits(dir, "owner:self", "person", "shared")).toBe(true);
+});
+
+test("a no-op set or a refused replace keeps the generation; any idempotent re-enrollment advances it", async () => {
+  const dir = await enrolled(), card = sharedLedgerProjectUnbindCard("existing", dir);
+  const shared = readSharedLedgerBindings(dir).find(b => b.projectId === "shared")!;
+  await setSharedLedgerBinding(shared, dir);
+  await expect(replaceSharedLedgerBindings({ expected: [shared], next: { ...shared, localProjectId: "personal" } }, dir)).rejects.toThrow();
+  expect(sharedLedgerProjectUnbindCard("existing", dir).version).toBe(card.version);
+  await enroll(dir);
+  await expect(unbindSharedLedgerProject(card, dir)).rejects.toThrow("绑定已变化");
+});
+
+test("an unreadable generation or a pending journal never produces a card", async () => {
+  for (const m of ["corrupt", "0644", "journal"]) {
+    const dir = await enrolled(), card = sharedLedgerProjectUnbindCard("existing", dir), path = join(dir, "shared-ledger-bindings-generation.json");
+    if (m === "corrupt") writeFileSync(path, "{", { mode: 0o600 });
+    if (m === "0644") chmodSync(path, 0o644);
+    if (m === "journal") writeFileSync(journal(dir), "{broken", { mode: 0o600 });
+    const before = bytes(dir);
+    expect(() => sharedLedgerProjectUnbindCard("existing", dir)).toThrow("nothing was changed");
+    await expect(unbindSharedLedgerProject(card, dir)).rejects.toThrow();
+    expect(bytes(dir)).toEqual(before);
+  }
 });

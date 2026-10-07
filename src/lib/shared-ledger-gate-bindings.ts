@@ -34,6 +34,18 @@ function requireSharedLedgerBindingAddition(binding: SharedLedgerBinding, bindin
   }
 }
 
+/**
+ * Binding lifecycle generation: a fresh random token written by this sole writer before every binding change
+ * (set/replace/enroll/exit). Tokens are never reused, so content that returns to old bytes still carries a new
+ * generation and an approval taken against the old one goes stale. Writers never read it; only exit approval does.
+ */
+export const SHARED_LEDGER_BINDING_GENERATION = "shared-ledger-bindings-generation.json";
+export const newSharedLedgerBindingGeneration = (): string => JSON.stringify({ generation: randomUUID() });
+function writeGeneration(dir: string, text: string, held: () => boolean): void {
+  if (!held()) throw new Error("shared ledger binding lock unavailable");
+  writeTextAtomicSync(join(dir, SHARED_LEDGER_BINDING_GENERATION), text, { mode: 0o600, commitIf: held });
+}
+
 /** Both mutations use the same lock, atomic writer and read-back. Ordinary addition cannot rebind. */
 async function updateBindings(dir: string, update: (current: SharedLedgerBinding[]) => SharedLedgerBinding[], backup: boolean): Promise<{ backupPath: string | null }> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -49,6 +61,7 @@ async function updateBindings(dir: string, update: (current: SharedLedgerBinding
       backupPath = `${path}.bak-${Date.now()}-${randomUUID()}`;
       writeFileSync(backupPath, readFileSync(path), { flag: "wx", mode: 0o600 });
     }
+    writeGeneration(dir, newSharedLedgerBindingGeneration(), lock.held);
     publishBindings(next, dir, lock.held);
     return { backupPath };
   } finally { lock.release(); }
@@ -96,31 +109,37 @@ export async function publishSharedLedgerProjectBinding<T>(binding: SharedLedger
   requireSharedLedgerBindingAddition(binding, current, stageDir);
   const next = current.some(b => sameSharedLedgerProject(b, binding)) ? current : [...current, binding];
   if (JSON.stringify(staged) !== JSON.stringify(next)) throw new Error("staged binding changed; nothing was saved");
-  return publishWithRollback(current, next, original, dir, held, action);
+  // Enrollment is a lifecycle event even when the mapping row already exists (its credential may change).
+  return publishWithRollback(current, next, original, newSharedLedgerBindingGeneration(), dir, held, action);
 }
 
+/** Generation is published first; a rollback restores both its exact bytes and the bindings' (a fresh token is never reused). */
 async function publishWithRollback<T>(current: SharedLedgerBinding[], next: SharedLedgerBinding[], original: string | null,
-  dir: string, held: () => boolean, action: () => Promise<T>): Promise<T> {
-  const path = join(dir, "shared-ledger-bindings.json");
+  generation: string, dir: string, held: () => boolean, action: () => Promise<T>): Promise<T> {
+  const path = join(dir, "shared-ledger-bindings.json"), generationPath = join(dir, SHARED_LEDGER_BINDING_GENERATION);
+  const originalGeneration = existsSync(generationPath) ? readFileSync(generationPath, "utf8") : null;
   let changed = false;
   try {
+    writeGeneration(dir, generation, held);
     if (JSON.stringify(current) !== JSON.stringify(next)) {
       changed = true;
       publishBindings(next, dir, held);
     }
     return await action();
   } catch (error) {
+    if (!held()) throw new Error("shared ledger binding rollback lock lost");
     if (changed) {
-      if (!held()) throw new Error("shared ledger binding rollback lock lost");
       if (original === null) { if (existsSync(path)) unlinkSync(path); }
       else writeTextAtomicSync(path, original, { mode: 0o600, commitIf: held });
     }
+    if (originalGeneration === null) { if (existsSync(generationPath)) unlinkSync(generationPath); }
+    else writeTextAtomicSync(generationPath, originalGeneration, { mode: 0o600, commitIf: held });
     throw error;
   }
 }
 
-/** Exit removes exactly the approved row through the same writer; a failed later step restores the original bytes. */
-export async function publishSharedLedgerProjectUnbinding<T>(binding: SharedLedgerBinding, dir: string,
+/** Exit removes exactly the approved row through the same writer under the journaled generation; a failed later step restores the original bytes. */
+export async function publishSharedLedgerProjectUnbinding<T>(binding: SharedLedgerBinding, generation: string, dir: string,
   lock: LockHandle, action: () => Promise<T>): Promise<T> {
   const path = join(dir, "shared-ledger-bindings.json");
   const held = () => lock.held() && lockOwnedBy(`${path}.lock`, lock.token);
@@ -128,5 +147,5 @@ export async function publishSharedLedgerProjectUnbinding<T>(binding: SharedLedg
   const original = existsSync(path) ? readFileSync(path, "utf8") : null;
   const current = readSharedLedgerBindings(dir), related = current.filter(b => sameSharedLedgerProject(b, binding));
   if (related.length !== 1 || related[0]!.localProjectId !== binding.localProjectId) throw new Error("shared binding changed; 绑定已变化，请重新检查");
-  return publishWithRollback(current, current.filter(b => b !== related[0]), original, dir, held, action);
+  return publishWithRollback(current, current.filter(b => b !== related[0]), original, generation, dir, held, action);
 }
