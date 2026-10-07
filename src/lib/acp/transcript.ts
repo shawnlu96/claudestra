@@ -142,20 +142,39 @@ export function transcriptOfStop(r: StopReport): string {
 /** 段落起点：正文 / reply（● 后面不是「工具名(」）、收到的消息 */
 const PARAGRAPH = /^(● (?![\w/.:-]+\()|> )/u;
 
+/** 一段盖好时间的样子：gap = 前面空一行；head = 首行的时间或等宽空白；para = 段落起点（tty-layout.ts 窄屏只在这带时间） */
+export interface Stamped {
+  gap: boolean;
+  head: string;
+  para: boolean;
+  time: string;
+  lines: string[];
+}
+export const STAMP_PAD = " ".repeat(STAMP_WIDTH);
+
 /**
  * 一段 → 窗口里的行。正文 / 回复 / 收到的消息是段落起点：前面空一行、必带时间；其余行只在分钟变了时带时间，
  * 不带的用等宽空白对齐，续行同样对齐。有状态（记上一行的分钟），一个窗口一个实例。
  * 进窗口前最后再打一遍码（各段已在截断前打过；兜住以后新加的显示）
  */
-export function createTranscriptStamper(): (item: string, at?: Date) => string {
+export function createStampParts(): (item: string, at?: Date) => Stamped {
   let lastMinute = "", started = false;
   return (item, at = new Date()) => {
     const time = at.toTimeString().slice(0, 8), para = PARAGRAPH.test(item);
-    const head = para || time.slice(0, 5) !== lastMinute ? `[${time}] ` : " ".repeat(STAMP_WIDTH);
-    const gap = para && started ? "\n" : "";
+    const head = para || time.slice(0, 5) !== lastMinute ? `[${time}] ` : STAMP_PAD;
+    const gap = para && started;
     lastMinute = time.slice(0, 5);
     started = true;
-    return `${gap}${head}${redactSecrets(item).replace(/\n/g, `\n${" ".repeat(STAMP_WIDTH)}`)}`;
+    return { gap, head, para, time, lines: redactSecrets(item).split("\n") };
+  };
+}
+
+/** 纯文本窗口（非 TTY、测试快照）：createStampParts 拼成一串 */
+export function createTranscriptStamper(): (item: string, at?: Date) => string {
+  const parts = createStampParts();
+  return (item, at) => {
+    const p = parts(item, at);
+    return `${p.gap ? "\n" : ""}${p.head}${p.lines.join(`\n${STAMP_PAD}`)}`;
   };
 }
 
