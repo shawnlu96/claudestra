@@ -44,6 +44,18 @@ describe("size", () => {
     expect(r.counts["doc:CLAUDE.md"]).toBe(6);
   });
 
+  test("baseline 已登记的文件低于默认上限也计数；未登记的照旧不计", () => {
+    const reg = new Set(["size:src/reg.ts"]);
+    const r = measureSize(files({ "src/reg.ts": lines(640), "src/free.ts": lines(640) }), new Map(), reg);
+    expect(r.counts["size:src/reg.ts"]).toBe(640);
+    expect(r.counts["size:src/free.ts"]).toBeUndefined();
+    const limits = { "size:src/reg.ts": 635 };
+    expect(compare(limits, r.counts, none).failures).toEqual([{ key: "size:src/reg.ts", cur: 640, limit: 635 }]);
+    const shrunk = measureSize(files({ "src/reg.ts": lines(600) }), new Map(), reg).counts;
+    expect(compare(limits, shrunk, none).failures).toEqual([]);
+    expect(tighten(limits, shrunk, none)).toEqual({ "size:src/reg.ts": 600 });
+  });
+
   test("lineCount 不把末尾换行算成一行", () => {
     expect(lineCount("a\nb\n")).toBe(2);
     expect(lineCount("a\nb")).toBe(2);
@@ -334,10 +346,10 @@ describe("棘轮语义", () => {
     expect(v.failures).toEqual([]);
   });
 
-  test("--update 只收紧：取 min、降到上限内删除、永不新增", () => {
-    const limits = { "size:src/big.ts": 900, "size:src/shrunk.ts": 850, "dup:total": 10, "deps:a -> b": 1 };
+  test("--update 只收紧：取 min、降到上限内删除（size 文件还在则保留）、永不新增", () => {
+    const limits = { "size:src/big.ts": 900, "size:src/shrunk.ts": 850, "size:src/gone.ts": 820, "dup:total": 10, "deps:a -> b": 1 };
     const cur = { "size:src/big.ts": 920, "size:src/shrunk.ts": 790, "dup:total": 7, "size:src/new.ts": 1000 };
-    expect(tighten(limits, cur, none)).toEqual({ "dup:total": 7, "size:src/big.ts": 900 });
+    expect(tighten(limits, cur, none)).toEqual({ "dup:total": 7, "size:src/big.ts": 900, "size:src/shrunk.ts": 790 });
   });
 
   test("--update 不动被跳过规则的条目", () => {
@@ -372,6 +384,16 @@ describe("棘轮语义", () => {
     const cur: Baseline = { version: 1, limits: { "size:src/a.ts": 450 }, raised: [] };
     expect(checkRaised(base, cur)).toEqual([]);
     expect(checkRaised(null, cur)).toEqual([]);
+  });
+
+  test("删掉低于默认上限的 size 登记 = 放宽到上限：要 raised；文件真删了不要", () => {
+    const base: Baseline = { version: 1, limits: { "size:src/reg.ts": 635, "size:src/big.ts": 900 }, raised: [] };
+    const cur: Baseline = { version: 1, limits: {}, raised: [] };
+    const all = () => true;
+    expect(checkRaised(base, cur, all)).toEqual(["size:src/reg.ts 635 → 800"]);
+    cur.raised = [{ key: "size:src/reg.ts", from: 635, to: 800, why: "该文件不再按登记值约束，回到默认上限" }];
+    expect(checkRaised(base, cur, all)).toEqual([]);
+    expect(checkRaised(base, { ...cur, raised: [] }, (f) => f !== "src/reg.ts")).toEqual([]);
   });
 
   test("--init：只记超上限的项，被跳过规则沿用旧条目；loosenings 列出变大的项", () => {
