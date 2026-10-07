@@ -2334,7 +2334,8 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags);
+    else await (await import("./manager/create-lifecycle.js")).withCardRegistration(c.name, c.card, c.teamFlags.role, () => // 卡 worker 登记（LIFE1）
+      cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags));
     break;
   }
 
@@ -2344,7 +2345,7 @@ switch (cmd) {
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
-  case "transport": case "acp-install": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // T60 ACP：切 transport / 装适配器
+  case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {

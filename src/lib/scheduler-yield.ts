@@ -66,7 +66,9 @@ export function rotateAfter<T>(items: T[], key: (t: T) => string, after: string 
 /** Live cards of one workflow mode across the service's projects; with a pace, in rotation after where the last pass stopped. */
 export function paceCards<P>(db: Database, projects: Record<string, P>, mode: "observe" | "auto", pace?: TickPace): { project: string; policy: P; taskId: string }[] {
   const all = Object.entries(projects).flatMap(([project, policy]) => (db.query(`SELECT w.taskId FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
-    WHERE w.project = ? AND w.mode = ? AND t.stage NOT IN ('done','cancelled') ORDER BY w.taskId`).all(project, mode) as { taskId: string }[])
+    WHERE w.project = ? AND w.mode = ? AND t.stage NOT IN ('done','cancelled')
+    AND (t.stage != 'verified' OR EXISTS (SELECT 1 FROM scheduler_intents AS i
+      WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))) ORDER BY w.taskId`).all(project, mode) as { taskId: string }[])
     .map(({ taskId }) => ({ project, policy, taskId })));
   return pace ? rotateAfter(all, (c) => `${c.project}/${c.taskId}`, pace.cursor[mode]) : all;
 }

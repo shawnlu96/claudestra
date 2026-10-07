@@ -20,6 +20,8 @@ export interface AppConfig {
   autoUpdate: {
     claudestra: boolean;
     claudeCode: boolean;
+    /** Codex（npm 全局）：缺省（不写）= 关，别的安装不会被突然动到；开了由 launcher 轮询，兼容且全员空闲才升（lib/codex-auto-update.ts） */
+    codex?: boolean;
     /** v2.17 更新通道:release=只跟正式版(默认);beta=紧跟 origin/main 的
      *  每个 commit(未经 release 验证,尝鲜/急修场景自担风险)。 */
     channel?: UpdateChannel;
@@ -33,6 +35,7 @@ export interface AppConfig {
    *  v2.21.3+ emergency:93% 救命线独立开关(缺省 true)——常规线关了它也在,
    *  只在快撞 CC 的 ~967K 裸压时兜底触发一次(owner 2026-09-03)。 */
   autoCompact?: {
+    cardWorkers?: "on" | "observe" | "off";
     idleHours?: number;
     window?: number;
     emergency?: boolean;
@@ -85,6 +88,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     autoUpdate: {
       claudestra: typeof au.claudestra === "boolean" ? au.claudestra : base.autoUpdate.claudestra,
       claudeCode: typeof au.claudeCode === "boolean" ? au.claudeCode : base.autoUpdate.claudeCode,
+      ...(typeof au.codex === "boolean" ? { codex: au.codex } : {}),
       channel: au.channel === "beta" ? "beta" : "release",
     },
     lang: raw.lang === "en" || raw.lang === "zh" ? raw.lang : base.lang,
@@ -117,6 +121,7 @@ function mergeAutoCompact(ac: any): AppConfig["autoCompact"] | undefined {
     ...(typeof ac.window === "number" ? { window: ac.window } : {}),
     ...(typeof ac.emergency === "boolean" ? { emergency: ac.emergency } : {}),
     ...(typeof ac.inject === "boolean" ? { inject: ac.inject } : {}),
+    ...(ac.cardWorkers === "on" || ac.cardWorkers === "observe" || ac.cardWorkers === "off" ? { cardWorkers: ac.cardWorkers } : {}),
     ...(ac.policies !== undefined ? { policies: ac.policies } : {}),
   };
   return Object.keys(out).length ? out : undefined;
@@ -213,7 +218,7 @@ export async function setUpdateChannel(channel: UpdateChannel): Promise<AppConfi
   return cfg;
 }
 
-export async function setAutoUpdate(target: "claudestra" | "claudeCode", enabled: boolean): Promise<AppConfig> {
+export async function setAutoUpdate(target: "claudestra" | "claudeCode" | "codex", enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.autoUpdate[target] = enabled;
   await writeConfig(cfg);

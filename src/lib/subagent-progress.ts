@@ -126,3 +126,36 @@ export function subagentEndStatus(p: SubagentProgress, meta: SubagentMeta, silen
   if (quiet !== null && silentMs >= quiet) return "done";
   return silentMs > silentLimitMs ? "idle" : null;
 }
+
+/** 逐行 JSON.parse，坏行（半行 / 非 JSON）记 null：与 watcher 消费口径一致 */
+function parseLines(text: string): unknown[] {
+  return text.split("\n").filter((l) => l.trim()).map((l) => {
+    try {
+      return JSON.parse(l) as unknown;
+    } catch {
+      return null; // 坏行跳过：收尾信号只在完整记录里，半行等下次读到完整的再算
+    }
+  });
+}
+
+/** 一段 jsonl 文本折叠成进度——bridge 重启后首轮扫描判一个已有的 subagent 记录是不是已经收尾 */
+export function foldProgress(text: string, p: SubagentProgress = EMPTY_PROGRESS): SubagentProgress {
+  return parseLines(text).reduce<SubagentProgress>(nextProgress, p);
+}
+
+/** 新长出的记录里有 user 记录 = 被 SendMessage 续跑 / 工具结果回来了；只多了别的记录（attachment 等）不算续跑 */
+export function hasUserRecord(text: string): boolean {
+  return parseLines(text).some((r) => (r as { type?: unknown } | null)?.type === "user");
+}
+
+/** jsonl 首条记录（会话轮转后换绑前认身份用）；首行还没写完 = null（读失败同样当没写完，下轮再看）；坏首行 = 空对象 */
+export async function readFirstRecord(path: string): Promise<{ agentId?: unknown; timestamp?: unknown } | null> {
+  const head = await Bun.file(path).slice(0, 64_000).text().catch(() => ""); // 读失败当首行还没写完：调用方扣下，下轮再读
+  const nl = head.indexOf("\n");
+  if (nl < 0) return null;
+  try {
+    return (JSON.parse(head.slice(0, nl)) as { agentId?: unknown; timestamp?: unknown } | null) ?? {};
+  } catch {
+    return {}; // 坏首行：认不出身份，调用方不换绑、按原规则处理
+  }
+}

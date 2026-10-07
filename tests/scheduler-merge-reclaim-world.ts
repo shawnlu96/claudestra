@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { insertEvent, type EventDraft } from "../src/lib/ledger-tx.js";
@@ -22,7 +23,7 @@ import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-drive
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import type { TrainEvent, TrainGh, TrainState, TrainStore } from "../src/lib/scheduler-merge-train.js";
 import { trainHolds } from "../src/lib/scheduler-merge-train-hold.js";
-import { fileTrainStore, mergeTrainTick, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
+import { fileTrainStore, mergeTrainTick, withMergeTrain, type FormFence } from "../src/lib/scheduler-merge-train-tick.js";
 import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -96,6 +97,7 @@ export function reclaimWorld(opts: WorldOpts) {
   const REPO = `example/mtr1-${++worlds}`;
   const dir = mkdtempSync(join(tmpdir(), "mtr1-")), path = join(dir, "ledger.sqlite");
   let db = openLedger(path);
+  const reader = new LedgerReader(path);
   const config = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
     repoDir: "/tmp/p", ...(opts.deploy ? { deploy: { restartLabels: ["x.fake"], timeoutMs: 60_000 } } : {}), ...(opts.handoff ? { mergeHandoff: true } : {}) } } });
   const prNum = (prRef: string) => prRef.split("/").pop()!;
@@ -162,17 +164,19 @@ export function reclaimWorld(opts: WorldOpts) {
   /** One production pass; `budgetMs` small makes every phase yield after its first card (the pace keeps its cursor across passes). */
   let cursor: Record<string, string | undefined> = {};
   /** A daemon restart: a new ledger connection and pass cursor; only the ledger file, the train store and fake GitHub carry over. */
-  const restart = () => { closeLedger(path); db = openLedger(path); cursor = {}; };
-  /** `arrive` runs right after the in-pass train tick, where a card the train no longer holds would reach this pass's auto tick. */
-  const pass = async (o: { budgetMs?: number; arrive?: () => void } = {}) => {
+  const restart = () => { reader.close(); closeLedger(path); db = openLedger(path); cursor = {}; };
+  /** `arrive` runs right after the in-pass train tick, where a card the train no longer holds would reach this pass's auto tick.
+   *  `afterManager` sees every ledger child call of the pass with its result, after it returned and before the pass goes on. */
+  const pass = async (o: { budgetMs?: number; arrive?: () => void; afterManager?: (args: string[], result: Record<string, unknown>) => void } = {}) => {
     const before = hub.calls.length;
-    const trainTick = async (d: typeof db, projects: readonly string[]) => {
-      await mergeTrainTick(d, projects, { now: Date.now, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
+    const mgr: typeof manager = o.afterManager ? async (...args) => { const r = await manager(...args); o.afterManager!(args, r); return r; } : manager;
+    const trainTick = async (d: typeof db, projects: readonly string[], _active: unknown, formFence?: FormFence) => {
+      await mergeTrainTick(d, projects, { now: Date.now, formFence, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
       o.arrive?.();
     };
-    const r = await schedulerPass(db, config, { assertOwner: () => {}, manager, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
+    const r = await schedulerPass(reader.get()!, config, { assertOwner: () => {}, manager: mgr, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
       external: () => withMergeTrain(base, { gh, store }), deployJobs, autoDeps: autoDeps as never, peerPr: noop,
-      autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [],
+      autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [], lifecycle: async () => [],
       ...(opts.store === "default" ? {} : { train: { gh, store } }) });
     if (r.failed.length) hub.calls.push(...r.failed.map((f) => `failed:${f.taskId}:${f.error}`));
     return hub.calls.slice(before);
@@ -193,7 +197,7 @@ export function reclaimWorld(opts: WorldOpts) {
     if (r.ok !== true) throw new Error(String(r.error));
     return intent;
   };
-  const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(mstr, { recursive: true, force: true }); };
+  const close = () => { reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(mstr, { recursive: true, force: true }); };
   return { get db() { return db; }, hub, store, events, notices, manager, card, pass, restart, phase, slot, turns, begin, intentOf, close };
 }
 export type ReclaimWorld = ReturnType<typeof reclaimWorld>;

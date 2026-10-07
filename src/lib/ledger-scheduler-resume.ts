@@ -3,7 +3,8 @@
  * planner then escalates `workflow_drift` and the card falls back to manual, and `workflow-set` refuses auto once the card
  * is past spec. This is the one way back: the PM (not the scheduler) re-binds the workflow to the current specRev, the
  * planner is re-run on the new facts and its decision is recorded on the event. An intent whose outcome is still open
- * (submitted / unknown) must be reconciled first; plans made for the old spec (pending) are voided.
+ * (submitted / unknown) must be reconciled first; plans made for the old spec (pending) are voided. The scheduler identity
+ * gets in only for MAN2's reason-bound recovery (manual-resume.ts manualResumeGate, re-checked in this transaction).
  * Tests: tests/ledger-scheduler-resume.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -13,15 +14,20 @@ import { closePoolOrders } from "./ledger-scheduler-pool.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { claimsManualResume, manualResumeGate } from "./manual-resume.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
 
 export interface ResumeInput { taskId: string; taskRev: number; workflowRev: number; reason: string; maxWorkers: number }
 export interface ResumeResult { workflow: TaskWorkflow; fromSpecRev: number; next: Record<string, unknown> }
 
-export function resumeAutoWorkflow(db: Database, ctx: WriteCtx, input: ResumeInput): ResumeResult {
+export function resumeAutoWorkflow(db: Database, ctx: WriteCtx, input: ResumeInput, policy?: RecoveryPolicyPort): ResumeResult {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
+    // the scheduler identity only through MAN2's gate (policy on + the authorized release re-checked in this transaction), and only
+    // when it claims that authorization; any other scheduler hand-back keeps the PM-only refusal below
+    if (ctx.actor === "scheduler" && claimsManualResume(input.reason)) return resumeCore(db, ctx, input, manualResumeGate(db, input, policy));
     if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能把任务交回自动");
     return resumeCore(db, ctx, input, { manual: true });
   });

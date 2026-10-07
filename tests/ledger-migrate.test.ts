@@ -339,6 +339,9 @@ describe("写事件的底座只给写入模块", () => {
   //   事务内先核租约，再核本卡本轮 head 的降级事件，按原 dedupKey 去重，不推阶段（调度器读连接只读）
   // lend-fix-start.ts：修复单起点（i28-FB1）在挂池事务里记起点更新 / 报警 / 重挂事件，不推阶段
   // recovery-policy.ts：恢复策略（dispatch-recovery-CFG）的审计 / 已生效 / 作废 note 在自己的事务里核权限后写，不推阶段
+  // manual-merge-queue.ts：人工合并排队（MQ1）的请求 / 撤销 decision 与占槽 scheduler 事件在自己的事务里核权限、重判轮转后写，不推阶段
+  // recovery-machine-policy.ts：整机恢复策略（LCFG1W）的审计在自己的事务里核 owner / master 后写，已生效 / 作废 note 复用 recovery-policy.ts，不推阶段
+  // agent-lifecycle-store.ts：卡 worker 登记 / 收回（LIFE1）在自己的事务里写 worker_agents 与一条 scheduler 事件，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
     const tx: string[] = [];
@@ -355,7 +358,7 @@ describe("写事件的底座只给写入模块", () => {
       }
     };
     walk(root);
-    expect(tx.sort()).toEqual(["lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-remote-deliver.ts", "lib/fix-strategy-remote-order.ts", "lib/fix-strategy-remote.ts",
+    expect(tx.sort()).toEqual(["lib/agent-lifecycle-store.ts", "lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-remote-deliver.ts", "lib/fix-strategy-remote-order.ts", "lib/fix-strategy-remote.ts",
       "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
@@ -364,12 +367,13 @@ describe("写事件的底座只给写入模块", () => {
       "lib/ledger-scheduler-resume.ts", "lib/ledger-scheduler-settle.ts", "lib/ledger-scheduler-write.ts", "lib/ledger-steps-write.ts", "lib/ledger-write.ts",
       "lib/lend-arbiter-result.ts", "lib/lend-ask-auth.ts", "lib/lend-fix-reassign-pr.ts", "lib/lend-fix-reassign-start.ts",
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts",
-      "lib/memory-retrieve-order.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts", "lib/recovery-policy.ts",
-      "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts", "lib/review-converge-notice.ts",
+      "lib/manual-merge-queue.ts", "lib/memory-retrieve-order.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
+      "lib/recovery-machine-policy.ts", "lib/recovery-policy.ts",
+      "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge-handoff.ts",
       "lib/scheduler-merge-train-hold.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
-      "lib/scheduler-sessions.ts"]);
+      "lib/scheduler-recovery-write.ts", "lib/scheduler-sessions.ts", "lib/scheduler-ui-carry.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts", "lib/scheduler-spec-resume-write.ts"]);
   });
 });

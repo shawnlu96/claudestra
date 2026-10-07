@@ -11,7 +11,7 @@ import { depViews, reviewBranches, type DepView, type ReviewBranches } from "./l
 import { stageTimeline, type StageEntry } from "./ledger-metrics.js";
 import { compactStage, doneCard, eventsByTarget, liveCard, overviewCard, taskView, type OverviewItem, type OverviewTask, type TaskView } from "./ledger-read-cards.js";
 import { dayStartOf, doneWindow, type DoneRest } from "./ledger-read-done.js";
-import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
+import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict, type Stage } from "./ledger-stages.js";
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
@@ -196,6 +196,56 @@ export function activeTasksByAgent(db: Database): Map<string, LedgerTaskRef> {
     .all(...TERMINAL_STAGES) as { id: string; stage: Stage; round: number; agent: string }[];
   const out = new Map<string, LedgerTaskRef>();
   for (const r of rows) out.set(r.agent.replace(/^agent-/, ""), { id: r.id, stage: r.stage, round: r.round });
+  return out;
+}
+
+export interface LedgerReviewRef {
+  id: string;
+  round: number;
+  /** null = 已派审、还没交结论 */
+  verdict: ReviewVerdict | null;
+  p0: number;
+  p1: number;
+  p2: number;
+}
+
+const count = (v: unknown): number => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0);
+
+/** 一条派审 / 结论事件 → 本机审查员裸名 + 它对这张卡的状态；派给 peer / 人的、审查员名字带 @ 或 local: 的不算 */
+function reviewOf(e: LedgerEvent): [string, LedgerReviewRef] | null {
+  const d = e.data;
+  const round = count(d.round);
+  if (e.kind === "step") {
+    return d.executorKind === "agent" && typeof d.executor === "string" ? [d.executor, { id: e.target, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;
+  }
+  const who = d.reviewer;
+  if (typeof who !== "string" || !who || who.includes("@") || who.startsWith("local:")) return null;
+  const verdict = (["pass", "changes", "block"] as const).find((v) => v === d.verdict);
+  return verdict ? [who, { id: e.target, round, verdict, p0: count(d.p0), p1: count(d.p1), p2: count(d.p2) }] : null;
+}
+
+/**
+ * 审查员（裸名）→ 它在审 / 审完的卡。审查员不绑卡，关系只在事件里：派审（step assign review / final_review）与结论（review）。
+ * 每张未结束的卡只看最后一条这类事件：派审 → 那个执行者「在审」；结论 → 那个审查员「审完」带结论。卡改派给别人或结束，旧的就不再显示。
+ * 同一 agent 挂着几张：在审的优先于审完的，同类取最新。tests/ledger-read-reviews.test.ts
+ */
+export function activeReviewsByAgent(db: Database): Map<string, LedgerReviewRef> {
+  const marks = TERMINAL_STAGES.map(() => "?").join(", ");
+  const rows = db
+    .query(`SELECT e.* FROM events e JOIN tasks t ON t.id = e.target WHERE t.stage NOT IN (${marks}) AND (e.kind = 'review'
+      OR (e.kind = 'step' AND json_extract(e.data, '$.op') = 'assign' AND json_extract(e.data, '$.step') IN ('review', 'final_review'))) ORDER BY e.seq`)
+    .all(...TERMINAL_STAGES) as Record<string, unknown>[];
+  const lastByTask = new Map<string, LedgerEvent>();
+  // 先删再设：Map 按首次插入排序，这样遍历顺序 = 各卡最后一条事件的 seq 顺序（「同类取最新」靠它）
+  for (const r of rows) (lastByTask.delete(String(r.target)), lastByTask.set(String(r.target), toEvent(r)));
+  const out = new Map<string, LedgerReviewRef>();
+  for (const e of lastByTask.values()) {
+    const hit = reviewOf(e);
+    if (!hit) continue;
+    const name = hit[0].replace(/^agent-/, "");
+    const prev = out.get(name);
+    if (!prev || prev.verdict !== null || hit[1].verdict === null) out.set(name, hit[1]);
+  }
   return out;
 }
 
