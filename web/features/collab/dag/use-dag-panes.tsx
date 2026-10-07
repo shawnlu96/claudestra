@@ -58,7 +58,8 @@ export function useDagPanes(a: DagPanesArgs) {
   const rows = useMemo(() => progressRows(board?.agents ?? [], a.agents, a.project), [board, a.agents, a.project]);
   const cmp = useDagCompare(a.project, ui.compare, board, a.rev);
   const overlay = useMemo(() => (ui.compare && cmp ? compareOverlay(ui.compare.featureId, cmp.toNodes, cmp.fromNodes, cmp.diff) : null), [ui.compare, cmp]);
-  const shown = useMemo(() => product && ui.featureId ? features.filter(f => f.id === ui.featureId) : features, [product, ui.featureId, features]);
+  const hasProduct = product.status === "ok";
+  const shown = useMemo(() => hasProduct && ui.featureId ? features.filter(f => f.id === ui.featureId) : features, [hasProduct, ui.featureId, features]);
   const canvas = useMemo(() => layoutDag(shown, ui.open, ui.doneOpen, overlay), [shown, ui.open, ui.doneOpen, overlay]);
   const detail = useDagVersions(a.project, a.sel?.kind === "dver" ? a.sel.f : null, a.rev);
 
@@ -110,7 +111,7 @@ export function useDagPanes(a: DagPanesArgs) {
       onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
 
-  const paneProps = { board: product, featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
+  const paneProps = { board: hasProduct ? product.board : null, loading: product.status === "loading", featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
     onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
     <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={<div className={v.center}>{causal}</div>} />
