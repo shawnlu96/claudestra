@@ -444,7 +444,7 @@ describe("AREB1 the retired author's branch (on)", () => {
     const f = await fixture();
     mkdirSync(f.worktreeRoot, { recursive: true });
     symlinkSync(join(f.worktreeRoot, "nowhere"), join(f.worktreeRoot, "t1"));
-    await expectKept(f, "已存在，保留并等待核对");
+    await expectKept(f, "软链或非目录");
     expect(lstatSync(join(f.worktreeRoot, "t1")).isSymbolicLink()).toBe(true);
   }, 60_000);
   test("the branch moves between the first check and the add (race) → kept, the moved branch untouched", async () => {
@@ -474,4 +474,65 @@ describe("AREB1 the retired author's branch (on)", () => {
     expect(f.creates.map((c) => c[1])).toEqual([NEW.slice("agent-".length), NEW.slice("agent-".length)]);
     expect(f.task().agent).toBe(NEW);
   }, 90_000);
+});
+
+describe("AREB1 review r2: the checks hold at the edge of each effect (on)", () => {
+  const firstFetch = (args: string[]) => args.includes("fetch") && args.includes("origin");
+  test("the target is a live symlink to another clean worktree on the same branch/head → kept, never launched there", async () => {
+    const f = await fixture();
+    const other = join(f.worktreeRoot, "..", "someone-else");
+    await f.run(f.repo, "worktree", "add", "-q", other, BRANCH);
+    mkdirSync(f.worktreeRoot, { recursive: true });
+    symlinkSync(other, join(f.worktreeRoot, "t1"));
+    await expectKept(f, "软链或非目录");
+    expect(lstatSync(join(f.worktreeRoot, "t1")).isSymbolicLink()).toBe(true);
+    expect(f.sent).toEqual([]);
+  }, 60_000);
+  test("a real directory at the target that is not this rebuild's registered checkout → kept", async () => {
+    const f = await fixture();
+    mkdirSync(join(f.worktreeRoot, "t1"), { recursive: true });
+    await expectKept(f, "不在本仓库 worktree 列表");
+  }, 60_000);
+  test("swap rises above LIFE1's line after the first fetch → waits with the note before the add, nothing created", async () => {
+    let f!: F, raised = false;
+    f = await fixture({ afterGit: async (args) => { if (!raised && firstFetch(args)) { raised = true; f.setSwap(91); } } });
+    await f.mode("on");
+    await f.bounce();
+    const seen = await settle(f);
+    expect(raised).toBe(true);
+    expect(seen.join("\n")).toContain("高于收回线");
+    expect(f.creates).toEqual([]);
+    expect(f.events("author_rebuild_wait")).toHaveLength(1);
+    expect(existsSync(join(f.worktreeRoot, "t1"))).toBe(false);
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+  }, 60_000);
+  test("swap rises after the worktree add → waits right before create; back under, the retry reuses its own checkout", async () => {
+    let f!: F, raised = false;
+    f = await fixture({ afterGit: async (args) => { if (!raised && args.includes("worktree") && args.includes("add")) { raised = true; f.setSwap(91); } } });
+    await f.mode("on");
+    await f.bounce();
+    const seen = await settle(f);
+    expect(raised).toBe(true);
+    expect(seen.join("\n")).toContain("高于收回线");
+    expect(f.creates).toEqual([]);
+    expect(f.task().agent).toBe(OLD);
+    f.setSwap(40);
+    // the first tick after drops LC1's queued entry (its refusal does not know a rebuild card names its old author), the next builds
+    for (let i = 0; i < 3 && !f.creates.length; i++) await settle(f, 8);
+    expect(f.creates.map((c) => c[1])).toEqual([NEW.slice("agent-".length)]);
+    expect(f.task().agent).toBe(NEW);
+  }, 90_000);
+  test("the PR head moves after the first check (the checkout's fetch sees it) → manual, nothing created", async () => {
+    let f!: F, moved = "";
+    f = await fixture({ afterGit: async (args) => {
+      if (moved || !firstFetch(args)) return;
+      const bare = await f.run(f.repo, "remote", "get-url", "origin");
+      moved = await f.run(f.repo, "commit-tree", "-p", f.head, "-m", "pushed later", `${f.head}^{tree}`);
+      await f.run(f.repo, "push", "-q", bare, `${moved}:refs/heads/${BRANCH}`); // by URL: this repo's tracking ref stays old until the next fetch
+    } });
+    await expectKept(f, "PR 当前 head");
+    expect(moved).not.toBe("");
+    expect(await f.run(f.repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(moved);
+    expect(f.sent).toEqual([]);
+  }, 60_000);
 });

@@ -80,7 +80,7 @@ export function rebuildAllowed(db: Database, task: Pick<LedgerTask, "id" | "agen
 }
 
 /** true = provably nothing there (a dangling symlink is something); a string = could not tell. */
-const absent = (path: string): boolean | string => {
+export const absent = (path: string): boolean | string => {
   try { lstatSync(path); return false; }
   catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? true : `读不了 ${path}：${(e as Error).message}`; }
 };

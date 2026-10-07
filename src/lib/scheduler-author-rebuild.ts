@@ -6,18 +6,16 @@
  * after fetch) is the card's headSHA, and a peer write lease keeps the card the peer's. The new name, the family, the leftover
  * branch and the writer's re-check are the shared predicates of scheduler-author-rebuild-proof.ts.
  */
-import { DEFAULT_LIFECYCLE } from "./agent-lifecycle-config.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { heldLease } from "./ledger-lend-lease.js";
-import { appendEvent } from "./ledger-write.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { authorRetireProof } from "./scheduler-author-rebuild-proof.js";
-import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
+import { rebuildHooks, rebuildPrHead, rebuildPressure } from "./scheduler-author-rebuild-checkout.js";
+import { authorRetireProof, rebuildAgentName } from "./scheduler-author-rebuild-proof.js";
+import type { SchedulerConfig } from "./scheduler-config.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
 import { localAuthorPlan } from "./scheduler-local-author-plan.js";
 import type { LocalStartOptions } from "./scheduler-local-runtime-start.js";
-import { readMemory } from "./sys-memory.js";
 import type { EnsureResult } from "./worker-session.js";
 
 export interface AuthorRebuildDeps {
@@ -30,12 +28,6 @@ export interface AuthorRebuildDeps {
 }
 
 const manual = (reason: string): EnsureResult => ({ kind: "manual", reason });
-
-function waitNote(env: LocalAuthorEnv, task: LedgerTask, key: string, text: string, now: number): EnsureResult {
-  appendEvent(env.db, { actor: "scheduler", now, dedupKey: `author-rebuild-wait:${task.id}:${task.agent}:${key}` }, // own transaction, dedup replays
-    { project: task.project, target: task.id, kind: "note", text: `作者重建等待：${text}`, data: { op: "author_rebuild_wait", agent: task.agent, key } });
-  return { kind: "wait", reason: `作者重建等待：${text}` };
-}
 
 /** Called only when task.agent is set and absent from the registry; `gone` is the unchanged manual reason. */
 export async function rebuildRetiredAuthor(env: LocalAuthorEnv, task: LedgerTask, family: AuthorFamily, gone: string,
@@ -55,15 +47,15 @@ export async function rebuildRetiredAuthor(env: LocalAuthorEnv, task: LedgerTask
   }
   const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, deps.start ?? {}); // repo and branch only: the name is ensureLocalAuthor's
   if (typeof plan === "string") return manual(`${gone}；重建作者：${plan}`);
-  const line = (deps.readConfig ?? readSchedulerConfig)().lifecycle?.swapPct ?? DEFAULT_LIFECYCLE.swapPct;
-  const swap = await (deps.swapPct ?? (async () => (await readMemory()).swapPct))();
-  if (swap === null) return waitNote(env, task, "swap-unknown", "读不到系统 swap，不新建", now);
-  if (swap > line) return waitNote(env, task, "swap", `系统 swap ${Math.round(swap)}% 高于收回线 ${line}%，回落后再建`, now);
+  const wait = await rebuildPressure(env, task, deps); // read again at the add and right before create (scheduler-author-rebuild-checkout.ts)
+  if (wait) return wait;
   if (!task.headSHA) return manual(`${gone}；重建作者：卡上没有 head`);
   const git = (args: string[]) => env.git(["-C", plan.repo, ...args]);
   const fetch = await git(["fetch", "-q", "origin"]);
   if (fetch.code !== 0) return manual(`${gone}；重建作者：fetch 失败：${fetch.out}`.slice(0, 400));
-  const pr = await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${plan.branch}`]);
-  if (pr.code !== 0 || pr.out.trim() !== task.headSHA) return manual(`${gone}；重建作者：PR 当前 head ${pr.out.trim() || "（无）"} 与卡上 ${task.headSHA} 不一致`);
-  return ensureLocalAuthor(env, task, deps.start ?? {}, { replaces: old, family });
+  const head = await rebuildPrHead(git, plan.branch, task.headSHA);
+  if (head) return manual(`${gone}；重建作者：${head}`);
+  const name = rebuildAgentName(task.id, old);
+  if (!name) return manual(`${gone}；重建作者：${old} 之后形成不了合法的新作者名`);
+  return ensureLocalAuthor(env, task, deps.start ?? {}, rebuildHooks(env, task, deps, { replaces: old, family, name, gone }));
 }
