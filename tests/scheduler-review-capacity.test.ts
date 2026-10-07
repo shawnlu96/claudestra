@@ -17,6 +17,7 @@ import { localAgentPool, workingSeats } from "../src/lib/scheduler-agent-pool-le
 import { localReviewerCount } from "../src/lib/scheduler-pool-facts.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { finishSwap, scenario } from "./scheduler-review-swap.test.js";
+import { autoFixture, H1, P1, toBuild } from "./scheduler-auto-helpers.js";
 
 const OLD_STAGES = ["blocked", "fix", "merge", "live", "blocked", "fix", "merge"];
 
@@ -170,3 +171,73 @@ test("RVCAP1 review-swap：创建已认领 / 结果未知 / 错 head 都零重�
     expect(s.creates()).toEqual([]);
   } finally { s.p.f.close(); }
 }, 120_000);
+
+/** 已送达（done = 投递回执）的派审单；verdict 以台账 review 事件记（ledgerResult 的证据：同 head、同审查会话、在单之后）。 */
+function delivered(db: Database, id: string, taskId: string, recipient: string, head: string, eventSeq = 0) {
+  db.query(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, eventSeq, taskRev, specRev, head, templateVersion,
+    status, reason, createdAt, updatedAt) VALUES (?, ?, 'p', 'adversarial_review', 'review', ?, 0, ?, 1, 1, ?, 3, 'done', 't', 0, 0)`)
+    .run(id, taskId, recipient, eventSeq, head);
+}
+function verdictEvent(db: Database, taskId: string, head: string, session: string) {
+  db.query(`INSERT INTO events (ts, actor, project, target, kind, data) VALUES (0, 'x', 'p', ?, 'review', ?)`)
+    .run(taskId, JSON.stringify({ head, reviewerSessionId: session, verdict: "changes" }));
+  return (db.query("SELECT MAX(seq) AS n FROM events").get() as { n: number }).n;
+}
+
+test("RVCAP1 已送达未交卷的审查不因卡离开 review 释放名额；正常已结旧轮（同 head 同会话 verdict）不占位", () => ledger((db) => {
+  const H = "a".repeat(40);
+  // N3 正例：7 张旧卡各有已交 verdict 的旧轮 → 不算
+  OLD_STAGES.forEach((stage, i) => { reviewer(db, `old${i}`, stage); delivered(db, `rv-old${i}`, `old${i}`, `rv-old${i}`, H); verdictEvent(db, `old${i}`, H, `s-old${i}`); });
+  reviewer(db, "reviewing", "review");
+  expect(localReviewerCount(db, "p", null)).toBe(1);
+  // 负例：已送达、未交 verdict，PM 把卡转 blocked → 仍占位，AgentPool 同口径
+  reviewer(db, "taken", "blocked"); delivered(db, "rv-taken", "taken", "rv-taken", H);
+  expect(localReviewerCount(db, "p", null)).toBe(2);
+  expect(localAgentPool(db, "p", { claude: 8, codex: 8 }).running).toEqual({ claude: 0, codex: 2 });
+  // 别的会话 / 别的 head 的 verdict、或早于这张单的 verdict 都不是这张单的结果
+  verdictEvent(db, "taken", H, "s-other"); verdictEvent(db, "taken", "b".repeat(40), "s-taken");
+  expect(localReviewerCount(db, "p", null)).toBe(2);
+  const before = verdictEvent(db, "late", H, "s-late");
+  reviewer(db, "late", "fix"); delivered(db, "rv-late", "late", "rv-late", H, before);
+  expect(localReviewerCount(db, "p", null)).toBe(3);
+  // 发给前任审查员的单不算现任绑定的未结效果
+  reviewer(db, "swapped", "blocked"); delivered(db, "rv-swapped", "swapped", "rv-predecessor", H);
+  expect(localReviewerCount(db, "p", null)).toBe(3);
+  // 本会话同 head verdict 落账 → 结了，不再占位
+  verdictEvent(db, "taken", H, "s-taken");
+  expect(localReviewerCount(db, "p", null)).toBe(2);
+  expect(localReviewerCount(db, "p", null)).toBe(poolReviewers(db));
+}));
+
+test("RVCAP1 探针回归：经 schedulerAutoTick 派审、正式 order-taken 领单、不交 verdict，PM review→blocked 后仍占 1 个审查名额", async () => {
+  const f = autoFixture();
+  try {
+    await toBuild(f);
+    await f.tick();
+    expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).toMatchObject({ ok: true });
+    expect(await f.tick()).toMatchObject({ step: "session" });
+    expect(await f.tick()).toMatchObject({ step: "sent" });
+    const review = f.intents().findLast((i) => i.action === "review")!;
+    expect(review).toMatchObject({ status: "done", recipient: "agent-rv-t1" }); // done 只是投递回执
+    expect(await f.cli("agent-rv-t1", "order-taken", review.id, "--session", "s-rv")).toMatchObject({ ok: true });
+    expect(localReviewerCount(f.db, "p", null)).toBe(1);
+    expect(await f.cli("pm", "stage", "T1", "--from", "review", "--to", "blocked")).toMatchObject({ ok: true });
+    expect(localReviewerCount(f.db, "p", null)).toBe(1); // 改前 1→0
+    expect(localAgentPool(f.db, "p", { claude: 8, codex: 8 }).running).toEqual({ claude: 0, codex: 1 });
+  } finally { f.close(); }
+});
+
+test("RVCAP1 正例：审查员交了本轮 verdict、卡转 fix 后旧绑定不再占审查名额", async () => {
+  const f = autoFixture();
+  try {
+    await toBuild(f);
+    await f.tick();
+    expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).toMatchObject({ ok: true });
+    await f.tick();
+    expect(await f.tick()).toMatchObject({ step: "sent" });
+    expect(await f.review("changes", H1, [P1])).toMatchObject({ ok: true });
+    expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
+    expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ state: "active" });
+    expect(localReviewerCount(f.db, "p", null)).toBe(0);
+  } finally { f.close(); }
+});

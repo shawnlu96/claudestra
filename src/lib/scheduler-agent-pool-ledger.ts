@@ -23,7 +23,12 @@ export function workingSeats(db: Database, project: string, exceptTask: string |
     const had = seats.get(key);
     seats.set(key, { family: had?.family ?? family, reviewer: reviewer || !!had?.reviewer });
   };
-  const unsettledReview = intents ? ` OR EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId=t.id AND i.action='review' AND i.status IN ('submitted','unknown'))` : "";
+  // An unsettled review effect: a review order in flight / of unknown outcome, or delivered (done = receipt, not a verdict) to
+  // this reviewer without its same-head verdict from this session after it (ledgerResult's proof). Leaving review cancels nothing.
+  const unsettledReview = intents ? ` OR EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId=t.id AND i.action='review'
+    AND (i.status IN ('submitted','unknown') OR (i.status='done' AND i.recipient=s.agent AND NOT EXISTS (SELECT 1 FROM events e
+      WHERE e.project=t.project AND e.target=t.id AND e.kind='review' AND e.seq>i.eventSeq
+      AND json_extract(e.data,'$.head') IS i.head AND json_extract(e.data,'$.reviewerSessionId')=s.sessionId))))` : "";
   const rows = db.query(`SELECT DISTINCT s.agent, s.family, s.role FROM scheduler_sessions s JOIN tasks t ON t.id=s.taskId
     WHERE t.project=? AND t.id!=? AND s.transport!='peer' AND s.state!='retired'
     AND ((s.role='author' AND t.stage IN ('spec','restate','build','fix')) OR (s.role='reviewer' AND (t.stage='review'${unsettledReview})))`)
