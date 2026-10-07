@@ -10,7 +10,6 @@ import { DEFAULT_LIFECYCLE } from "./agent-lifecycle-config.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { heldLease } from "./ledger-lend-lease.js";
-import { tx } from "./ledger-tx.js";
 import { appendEvent } from "./ledger-write.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { authorRetireProof } from "./scheduler-author-rebuild-proof.js";
@@ -33,8 +32,8 @@ export interface AuthorRebuildDeps {
 const manual = (reason: string): EnsureResult => ({ kind: "manual", reason });
 
 function waitNote(env: LocalAuthorEnv, task: LedgerTask, key: string, text: string, now: number): EnsureResult {
-  tx(env.db, () => appendEvent(env.db, { actor: "scheduler", now, dedupKey: `author-rebuild-wait:${task.id}:${task.agent}:${key}` },
-    { project: task.project, target: task.id, kind: "note", text: `作者重建等待：${text}`, data: { op: "author_rebuild_wait", agent: task.agent, key } }));
+  appendEvent(env.db, { actor: "scheduler", now, dedupKey: `author-rebuild-wait:${task.id}:${task.agent}:${key}` }, // own transaction, dedup replays
+    { project: task.project, target: task.id, kind: "note", text: `作者重建等待：${text}`, data: { op: "author_rebuild_wait", agent: task.agent, key } });
   return { kind: "wait", reason: `作者重建等待：${text}` };
 }
 
