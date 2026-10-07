@@ -1,6 +1,6 @@
 # PMLPORT1：已结 peer 作者的本机正规接管——权威端口冻结前设计
 
-> 状态：specRev 1 设计稿，仅文档。待另一家族完整设计审，再由 PM 定实施范围。涉及新增协议动作、签名用途或 MCP 工具的部分，还要 owner 另行批准。
+> 状态：specRev 1 设计稿第 2 版（按第 1 轮审查 6 条 P1 修订：凭据代次线性化、peer 派单投影、retention 保全入口、family 来源、工具定义接线、共用 writer 必选），仅文档。待另一家族完整设计审，再由 PM 定实施范围。涉及新增协议动作、签名用途或 MCP 工具的部分，还要 owner 另行批准。
 > 本稿合入**不**授权：实现、启用新签名用途、真实接管任何卡、全局开关、模型额度，也不改变现有 take_order / deliver 门。
 > 来源是 PMLOCAL1 的正式 block 与 ports-v1 提案。ports-v1 原件只在提案机保全，本轮没有外发。本文不引用它的字节、行号或段落，下面的现状全部按当前仓库 head 独立核对。需要原提案某段时，先走正规材料需求和外发闸。
 > 全文只用字段名和合成标识，不含个人路径、生产记录、凭据、公钥或私钥材料，也不含会话正文。
@@ -76,8 +76,9 @@
 |---|---|---|
 | MCP 已验证调用 `VerifiedCall`（`src/lib/order-tool-route.ts:12-19`） | `agent` 是频道主人，凭据签给的就是他（`caller-identity.ts:47-58`） | **能**，只能经 `routeOrderTool` 的 `requireVerified` 进入 |
 | `VerifiedCall.sessionId` | 取自 **registry 当前值**（`caller-identity.ts:55`），不是凭据签发时的 SID | **不能单独用**：它不代表历史，也会被 `/clear` 或线程轮转改掉 |
-| `CredRecord.sessionId`（`caller-cred.ts:25-32`） | 启动时记录（fork 启动不记，见 `caller-cred-launch.ts:60`） | 能作为“本次接入代次”的锚，但**目前不进入 `CallerIdentity`**，是缺口 |
-| LIFE1 `worker_agents`（`agent-lifecycle-schema.ts:8-11`） | `agent, sessionId, taskId, role, state` | **能**：建会话时由 `activateWorker` CAS 落定（`agent-lifecycle-store.ts:144-161`）。但现有 order 门**不读**它，是缺口 |
+| `CredRecord.sessionId`（`caller-cred.ts:25-32`） | 启动时记录（fork 启动不记，见 `caller-cred-launch.ts:60`） | 只是旁证。凭据存储 `caller-creds.json` 是文件，撤销与重签只拿它自己的文件锁（`caller-cred.ts:56-69`），不参加 ledger 的 `BEGIN IMMEDIATE`，所以**不能**在 ledger 事务里当代次锚，见 §2.3 |
+| `CredRecord.family`（`caller-cred.ts:28-29`） | 签发时 registry 的 runtime：`claude-code` / `codex` / `pi` | **能作为家族来源之一**，经 `runtimeFamily`（`scheduler-auto-review.ts:20-21`：`claude-code` 或缺省 → `claude`，`codex` → `codex`，其余 → null）映射。`VerifiedCall.family` 是 registry **当前** runtime（`caller-identity.ts:55-56`），两者都要核 |
+| LIFE1 `worker_agents`（`agent-lifecycle-schema.ts:8-11`） | `agent, sessionId, taskId, role, createdAt, state, reason`，**没有 family 列** | **能，但只证明** SID、role、taskId 与注册代次（主键 `agent+createdAt`）。建会话时由 `activateWorker` CAS 落定（`agent-lifecycle-store.ts:144-161`）。现有 order 门**不读**它，是缺口。家族不从 LIFE1 取 |
 | body 里的 `verified:true`、自报 agent 或 SID、caller-witness | — | **一律不能**。witness 只是旁证（`caller-witness.ts` 头注释） |
 | 共享台账任意写权限，或别处 registry 的当前 SID | — | **不能**代替本人接受 |
 
@@ -89,7 +90,9 @@
 - 卡与版本：`taskId`、`task.rev`、`workflow.rev`、`specRev`、`stage`、`round`、`headSHA`、`branch`。
 - 旧作者：`fromBinding = {agent, sessionId, transport, createIntentId}`。
 - 终态来源：`source = {orderId, gen, terminalEventSeq, preservationDigest}`，即 §1 的 E1/E2 事件。
-- 新作者：`to = {agent, sessionId, family}`。三项都必须等于该 agent 当前 LIFE1 行，且 `role = 'author'`、`taskId` 等于本卡。
+- 新作者：`to = {agent, sessionId, lifeCreatedAt, family}`，各项来源分开核：
+  - `agent`、`sessionId`、`lifeCreatedAt`：等于该 agent 当前 active 的 LIFE1 行（`role = 'author'`、`taskId` 等于本卡、不是 `cleanup_pending`）。`lifeCreatedAt` 锁定注册代次，同名重建会换代。
+  - `family`：LIFE1 没有这一列，不从 LIFE1 取，也不从 body 补值。授予时由 PM 指定，取值只能是 `claude` 或 `codex`，并且必须等于 `workflow.authorFamily`（换家族不在本稿默认范围）。本人接受时再与凭据代次登记的家族、registry 当前 runtime 的映射比对（§2.2 A 第 4 条），三者一致才算数。
 - `expiresAt`：TTL 默认 1h，上限 24h。比 `resume-grant` 的 24h/72h 更短，因为接管窗口不应该长期开着。
 
 **R：撤销。** 撤销写 `op: author_takeover_revoke`，带 `grantId`，只有授予人或其他真实 PM 能写。下列情况视同撤销，不必另写事件：
@@ -101,38 +104,56 @@
 
 1. 调用方 `agent` 等于 `to.agent`。
 2. `call.sessionId` 等于 `to.sessionId`。
-3. 凭据代次锚 `credSessionId`（新增字段）等于 `to.sessionId`，并且凭据签发时刻 `credIssuedAt` 早于授予时刻（授予后重签视为断线换代）。
-4. LIFE1 行仍是 `active`，且不是 `cleanup_pending`。
-5. `grantId` 等于台账中最新的、未撤销、未过期的授予。
-6. 该授予还没有被接受过。
+3. 凭据代次：调用连接所持凭据的代次标签 `credTag`（新增，见 §2.3 的凭据代次表）等于 ledger 里该 agent 的 current 代次，且该代次的 `issuedAt` 早于授予时刻。授予后重签即断线换代，拒绝。
+4. 家族：`runtimeFamily(凭据代次登记的 family)`、`runtimeFamily(call.family)`（registry 当前 runtime）与 `to.family` 三者相等。`pi` 等映射为 null 的 runtime 一律拒绝。
+5. LIFE1 行就是 `to` 记录的那一行（`agent + lifeCreatedAt`），仍是 `active`，且不是 `cleanup_pending`。
+6. `grantId` 等于台账中最新的、未撤销、未过期的授予。
+7. 该授予还没有被接受过。
+
+第 3、5、6、7 条在接受的写事务内读 ledger 判定（凭据代次表也在 ledger 里）；第 1、2、4 条的调用方事实来自 bridge 的已验证身份。接受事件冻结 `{credEpoch, family, lifeCreatedAt}`。
 
 接受写事件 `op: author_takeover_accept`，dedup 键 `author-takeover:<grantId>:accept`，以 dedup 键唯一保证单用。重放同一 `grantId` 会命中 dedup 键，按“已接受”返回原结果，不产生第二次效果。用旧 nonce 一律拒绝。
 
-**断线代次。** 新作者在授予后重启或重新签发凭据，会让 `caller-cred` 顶掉旧凭据（`replaceAgentCreds`）。此后 `credIssuedAt` 或 `credSessionId` 变化，接受被拒，要求 PM 按新 SID 重新授予。接受之后、提交之前（§2.3 的 T3）发生断线的，提交同样拒绝。
+**断线代次。** 新作者在授予后重启或重新签发凭据，会先在 ledger 里推进凭据代次，再顶掉文件里的旧凭据（§2.3）。此后第 3 条不成立，接受被拒，要求 PM 按新 SID 重新授予。接受之后、提交之前发生的换代，由 T-COMMIT 在同一 ledger 事务里核代次并拒绝。
 
 ### 2.3 跨进程与异步窗口：哪些在同一事务，哪些不在
 
-这里不用“同事务”掩盖网络或验证步骤。现有 ledger 写入都走 `tx()`，即 `BEGIN IMMEDIATE`（`ledger-tx.ts:13-15`）。下表中只有 T-COMMIT 是单一 SQLite 写事务。
+这里不用“同事务”掩盖网络或验证步骤。现有 ledger 写入都走 `tx()`，即 `BEGIN IMMEDIATE`（`ledger-tx.ts:13-15`）。网络调用与 bridge 的身份解析都在事务外；T1、T2、T-COMMIT 各是一个**独立**的 SQLite 写事务，彼此之间只靠 CAS 指纹和 ledger 凭据代次衔接，不是同一事务。
 
 | 步骤 | 位置 | 是否在事务里 | 失败或漂移时 |
 |---|---|---|---|
 | T0：B 报终态与保全（R-a 请求） | 跨机网络，然后 A 侧单事务写事件 | 网络不在事务里。写事件用自己的 `tx`，并对 `orderId+gen` 做 dedup | 没收到就没有事实，接管门保持关闭 |
 | T1：PM 授予 | 一次 CLI 调用，单 `tx` | 是 | CAS 失败就拒绝，不写任何东西 |
-| T2：新作者接受 | MCP 调用，先在 bridge 解析身份（读凭据库和 registry，**在事务外**），再进入单 `tx` 写接受事件 | 身份读取在事务外，写入在事务内 | 写入时在事务内重读 LIFE1 和授予。身份读和写之间如果凭据被顶掉，由 T-COMMIT 再核一次 |
+| T2：新作者接受 | MCP 调用，先在 bridge 解析身份（读凭据文件和 registry，**在事务外**），再进入单 `tx` 写接受事件 | 身份读取在事务外，代次与授予判定在事务内 | 事务内读 ledger 凭据代次表、LIFE1、授予。身份读和写之间如果凭据换代，代次表已先推进（见下），事务内即拒 |
 | T3：提交前复核远端 | `git ls-remote` 核分支 head 等于授予时的 `headSHA`，与 `reclaimForFamilySwap` 的 `context.remoteHead` 做法相同。这一步是网络调用，**在事务外** | 否 | 不一致就停在“已接受、未提交”，不重试写入 |
-| T-COMMIT：canonical supersession | 单 `tx`。先重算 §3.3 的全部 CAS 指纹，与 T1 记录的指纹比对，再重读凭据库，确认 `credIssuedAt` 与 `credSessionId` 未变 | 是 | 任一漂移就整体回滚。零新绑定，接受事件保留但标记为未消费 |
+| T-COMMIT：canonical supersession | 单 `tx`。重算 §3.3 的全部 CAS 指纹并与 T1 比对；核 ledger 凭据代次表中 `to.agent` 的 current 代次仍等于接受事件冻结的 `credEpoch`；在事务内重跑 `requireSessionIdentity`（registry runtime 家族、完整名、worker 种类） | 是。**不读凭据文件**，凭据代次的权威在 ledger 里 | 任一漂移就整体回滚。零新绑定，接受事件保留但标记为未消费 |
 
-**凭据撤销时序**（只对本机旧作者适用，peer 旧作者在 A 侧没有凭据）：
+**凭据代次的线性化（修正上一稿）。** 上一稿让 T-COMMIT 在事务里重读 `caller-creds.json`。这挡不住竞态：撤销与重签只拿文件锁（`caller-cred.ts:56-69`），该锁拿不到时还会降级放行（`file-lock.ts` 头注释），与 ledger 的 `BEGIN IMMEDIATE`（`ledger-tx.ts:13-14`）互不同步。提交进程重读成功之后，另一进程仍可完成撤销，前者再提交，等于换代后仍落新绑定。本稿改为把可撤销代次纳入 ledger，让同一把 SQLite 写锁定序：
+
+- 新表 `caller_cred_epochs(agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL, credTag TEXT, family TEXT, issuedAt INTEGER, updatedAt INTEGER NOT NULL)`。`credTag` 是凭据哈希再加域分隔的派生摘要（`sha256("claudestra-cred-epoch-v1:" + credHash)`），不存凭据明文，也不存原哈希；撤销后 `credTag = NULL`。
+- 签发与撤销的顺序固定为**先 ledger、后文件**：
+  1. 单 `tx` 把该 agent 的 `epoch + 1`，写入新 `credTag`/`family`/`issuedAt`（撤销则写 NULL）。这一步的 COMMIT 就是换代的**线性化点**。
+  2. 第 1 步提交之后，再按现有 `replaceAgentCreds` 改文件。
+- 失败策略：签发时第 1 步失败，就不写文件、不发凭据，启动按现有失败路径重试（闭合失败）。撤销时第 1 步失败，照旧删掉文件里的记录（安全方向，旧连接立即 `verified=false`），并持续重试第 1 步。重试成功前，ledger 里的 current 代次仍是旧 `credTag`，而任何新连接都不可能出示它：文件里已没有它，bridge 认不出就是未验证，拿不到接受所需的已验证调用；已接受未提交的单如何处理见下面的时序推论。
+- 时序推论（与 SQLite 写锁串行化一致）：
+  - 换代的第 1 步早于 T2 或 T-COMMIT 提交：后者在事务内读到新代次，拒绝或回滚，零新绑定。
+  - 换代的第 1 步要等 T-COMMIT 释放写锁才能开始，也就晚于提交：它是提交之后的事件，按普通已绑定作者的重启处理（新凭据仍签给同一 agent，绑定按 SID 继续核）。
+  - 撤销第 1 步失败、只删了文件的情形：代次的权威定义就是 ledger 行，文件只是 MCP 验证用的派生副本。这种撤销在第 1 步重试成功那一刻才算换代，线性化点仍是那次 COMMIT，与 T-COMMIT 由同一把写锁定序。提前删文件只会让持有旧凭据的连接更早失去验证，不会让旧代次多出任何写权。撤销第 1 步失败计入 doctor 告警，便于 PM 看到。
+  - 因此“提交前换代零效果”在本设计里的精确含义是：换代的 ledger COMMIT 先于 T-COMMIT 的 COMMIT，则 T-COMMIT 必回滚。比较 `issuedAt` 或 SID 不能替代这一同步，本稿不再使用它们做提交判据。
+- 迁移前已在跑的会话没有代次行：接受一律拒，须重启拿新凭据。库里还没有代次表（未迁移、只读打开）时，签发与撤销跳过第 1 步、照旧只改文件，启动行为不回退；此时任何会话都无法接受，接管门闭合。只有表已存在而第 1 步失败，才按上一条闭合失败。
+- 这改变共享的 `caller-cred.ts` 签发与撤销路径，涉及凭据生命周期，需 **PM 精确扩围与 owner 批准**。不批准时 P-B 与 P-C 整体阻塞，不提供“事务内重读文件”之类的降级实现。
+
+**旧作者凭据撤销时序**（只对本机旧作者适用，peer 旧作者在 A 侧没有凭据）：
 
 1. 先在 T-COMMIT 中让旧绑定失去 current 地位。
-2. 提交之后再调用 `revokeCallerCreds(old.agent)`。
+2. 提交之后再撤销 `old.agent` 的凭据（按上面的先 ledger 后文件）。
 
-第 2 步是写文件，不在事务里。即使它失败，旧会话在 `bindingAllows` 上也已经被新的 active 绑定拒绝；撤销只是加固，失败会记录并重试，不回滚提交。反过来，先撤销凭据再提交是不允许的：提交失败时，旧作者会被无故断开。
+第 2 步不在 T-COMMIT 事务里。即使它失败，旧会话在 `bindingAllows` 上也已经被新的 active 绑定拒绝；撤销只是加固，失败会记录并重试，不回滚提交。反过来，先撤销凭据再提交是不允许的：提交失败时，旧作者会被无故断开。
 
 ### 2.4 原 take_order / deliver 门保持不变
 
-- 接管只改变门读到的**数据**：`task_steps` 的执行者、`tasks.agent`，以及唯一一条 active 作者绑定。门的**逻辑**不变。
-- 新作者通过既有 `scanOrders`（执行者加 `bindingAllows`）领单。
+- 接管只改变门读到的**数据**：`task_steps` 的执行者、`tasks.agent`、唯一一条 active 作者绑定，以及本阶段最新的那条派单意图。门的**逻辑**不变。
+- 新作者通过既有 `scanOrders`（执行者加 `bindingAllows`）领单。注意 `scanOrders` 之后还有 `lentAway`（`order-take.ts:67-71`）：`currentIntent`（`:52-57`）取本阶段最新的、非 `cancelled` 的 `dispatch` 意图，**包括 `done`**；它的 `recipient` 是 `peer:*` 时，本机会话只拿到“本卡代码由 peer 写”的说明，拿不到单。上一稿只新增 `action='author_takeover'` 意图，不会被 `currentIntent` 选中，原来已 `done` 的 peer 派单仍是最新，新作者照样被挡。本稿的投影见 §3.2、§3.3：提交时写一条**本机** `dispatch` 意图，`eventSeq` 晚于原 peer 派单，让它成为 `currentIntent`。原 peer 派单保持 `done` 原样，不改成 `cancelled`，历史不丢。
 - `deliver` 仍由 `currentOrders`（`order-deliver.ts:87`）和 `confirmOrderDelivery`（`ledger-autostart-resume.ts:92-106`，要求 active 绑定的 SID 等于调用方 SID）把关。
 - 旧 SID 被拒的原因：active 作者行已换成新 SID，旧 agent 也已不是步骤执行者。
 - 已知隐患：`bindingAllows` 把 retired 当作“没有绑定”。正因如此，接管提交必须**同时**写新的 active 行和新的执行者，不能只退役旧行。§4 的负例覆盖这一点。
@@ -161,8 +182,14 @@
 - 一条加性迁移，追加到 `LEDGER_MIGRATIONS` 末尾（`ledger-store.ts:144-147`），规矩同 `sqlite-migrate.ts`：每步可重跑，一条语句一次 `prepare().run()`。内容：
   - `CREATE TABLE IF NOT EXISTS author_supersessions (id TEXT PRIMARY KEY, taskId TEXT NOT NULL REFERENCES tasks(id), project TEXT NOT NULL, grantId TEXT NOT NULL UNIQUE, intentId TEXT NOT NULL REFERENCES scheduler_intents(id), fromAgent TEXT NOT NULL, fromSessionId TEXT NOT NULL, fromTransport TEXT NOT NULL, toAgent TEXT NOT NULL, toSessionId TEXT NOT NULL, toFamily TEXT NOT NULL, sourceOrderId TEXT NOT NULL, sourceGen INTEGER NOT NULL, sourceEventSeq INTEGER NOT NULL, preservationDigest TEXT NOT NULL, fingerprint TEXT NOT NULL, actor TEXT NOT NULL, createdAt INTEGER NOT NULL)`
   - 先查 `PRAGMA table_info`，没有该列时再执行 `ALTER TABLE scheduler_sessions ADD COLUMN supersededBy TEXT`。
+  - `CREATE TABLE IF NOT EXISTS caller_cred_epochs (...)`，列见 §2.3。属于 P-B，与上面两项分在两条迁移里，各自可重跑。
   - 同步更新 `REQUIRED_COLUMNS`、`SCHEDULER_COLUMNS`。
-- 新绑定行的 `createIntentId` 有外键约束，指向 `scheduler_intents`。T-COMMIT 在同一事务内插入一条接管意图，`action='author_takeover'`，`status` 直接为 `done`，`receipt` 填 supersession id。`action` 列没有 CHECK（`ledger-scheduler-schema.ts:19-28`）。意图以 `done` 落地，不会卡住 `captureReborrowFacts` 和收尾退役的“没有未结意图”判据。
+- 新绑定行的 `createIntentId` 有外键约束，指向 `scheduler_intents`。T-COMMIT 在同一事务内插入**一条**接管派单意图，同时充当绑定意图与本阶段的当前派单：
+  - `action='dispatch'`，`node` 为当前 `write|fix` 步，`recipient` 为新作者的本机完整名（不带 `peer:` 前缀，`isPoolIntent` 为假，见 `scheduler-pool-plan.ts:19-21`）；
+  - `status='done'`，`reason='author_takeover'`，`receipt` 填 supersession id；`specRev`、`taskRev`、`head` 取提交时的卡；
+  - `eventSeq` 填本次 `author_takeover` 事件的 seq（沿用 `ledger-scheduler-write.ts:241` 先插事件再回填 `eventSeq` 的做法），因此必大于原 peer 派单的 `eventSeq`，也大于进入本阶段的 stage 事件。
+  - 结果：`currentIntent` 选中它，`lentAway` 不再成立（前提是没有 `LEND_LIVE` 单，§3.3 前置 3），新作者的单号就是这条意图的 id。原 peer 派单保持 `done`，作为“这一阶段曾借出”的历史留在原处。
+  - 意图以 `done` 落地，不会卡住 `captureReborrowFacts` 和收尾退役的“没有未结意图”判据；`lend-fix-reassign.ts:48` 只看 `pending|submitted|unknown`，不受影响；`recovery-local-fallback-plan.ts:189` 会把它认作“已发出的本机派单”，语义正确。
 - 第一次替换前调用 `preserveSessionHistory`，把主键放宽到 `(taskId, role, sessionId)`，与 fix swap 和 reviewer swap 的做法相同。
 - 版本兼容：
   - 旧代码打开新库：多出的列和表被忽略。旧代码只会看到 `retired` 加一条新 active 行，判断依然正确。
@@ -175,9 +202,9 @@
 
 - 卡的完整行，工作流行，`task_steps`；
 - 本卡全部 `lend_orders`，`lend_write_leases`；
-- 本卡未结 `scheduler_intents`；
+- 本卡未结 `scheduler_intents`，以及**本阶段全部 `dispatch` 意图**（含 `done`，按 `id,status,recipient,eventSeq`）。T1 时 `currentIntent` 返回的那条必须就是原 peer 派单，漂移即拒；
 - 当前作者绑定行；
-- 新作者的 LIFE1 行；
+- 新作者的 LIFE1 行（`agent+createdAt`）与 `caller_cred_epochs` 行；
 - E1/E2 事件的 seq。
 
 **前置条件**（任一不满足就整体回滚）：
@@ -187,17 +214,18 @@
 3. 卡在 build/fix；没有 `LEND_LIVE` 单；写租约已 `ended`，或由本 writer 在同一事务内 `endWriteLease`，原因写 `author_takeover:<id>`。
 4. 旧绑定行就是 `fromBinding`，且仍是 current（非 retired）。
 5. E1 的 `orderId/gen` 等于这张卡最后一张写单的 `orderId` 和 `leaseGen`，且 `terminal` 不是“未知”；E2 的 `remoteHead` 等于 `task.headSHA`。
-6. LIFE1 新作者行仍 active，`sessionId` 等于 `to.sessionId`；凭据锚未变。
-7. `to.family` 等于 `workflow.authorFamily`，或者授予里显式写了换家族（换家族另需 CONV 规则，不在本稿默认范围）。
+6. LIFE1 新作者行就是 `to.agent + to.lifeCreatedAt`，仍 active、非 `cleanup_pending`，`sessionId` 等于 `to.sessionId`；`caller_cred_epochs` 中该 agent 的 `epoch` 等于接受事件冻结的 `credEpoch`（§2.3）。
+7. 家族：`to.family` 等于 `workflow.authorFamily`，等于接受事件冻结的 `family`，且事务内重跑 `requireSessionIdentity`（`scheduler-session-identity.ts:10-20`，registry runtime 经同一映射得到的家族等于 `to.family`，完整名、worker 种类）通过。换家族不在本稿范围，另需 CONV 规则。
 
 **效果**（与 `applyFixReplacement` 同一组投影，不另造 binding）：
 
 - 旧行：`state='retired'`、`supersededBy=id`、`retireIntentId=接管意图`，`updatedAt` 更新。
-- 插入新的 active 作者行（`transport` 取 `acp` 或 `tmux`，`createIntentId` 为接管意图）。
+- 插入新的 active 作者行（`transport` 取 `acp` 或 `tmux`，`createIntentId` 为接管派单意图）。
+- 插入 §3.2 的本机 `dispatch` 意图；原 peer 派单意图**不改**。
 - `updateTask`：`agent`、`assignee`、`assigneeKind` 改为新作者。
 - 当前 round 的 `write|fix` 步骤：执行者改为新作者，`executorKind='agent'`，状态 `assigned`。
 - 插入 `author_supersessions` 行。
-- 写事件 `op: author_takeover`，dedup 键 `scheduler:<intentId>:takeover`。
+- 写事件 `op: author_takeover`，dedup 键 `scheduler:<intentId>:takeover`，再回填意图的 `eventSeq`。
 
 **幂等与竞争：**
 
@@ -205,7 +233,11 @@
 - 两个并发提交由 `BEGIN IMMEDIATE` 串行化，后到者的指纹已经变化，被拒。
 - 部分唯一索引 `scheduler_sessions_current` 是最后一道防线：任何路径想再插一条非 retired 作者行，都会撞约束回滚。
 
-**不散抄 SQL。** 新 writer 放在 `scheduler-sessions.ts` 旁边，通过 `tx` 和 `insertEvent` 写入。旧行改写与新行插入的四条语句，应和 `applyFixReplacement` 抽成一个共用的内部函数（例如 `replaceAuthorRow`），两条路径共用。这要扩大到 `fix-strategy-session.ts`，属于 **PM 精确扩围**项；扩围没批时，新 writer 自带这四条语句，并在注释里指向对方，等后续合并。
+**不散抄 SQL（修正上一稿）。** 旧行改写、新行插入、`updateTask`、步骤执行者改写这四条投影，目前只在 `applyFixReplacement`（`fix-strategy-session.ts:30-42`）里。本稿要求先把它们抽成一个共用的 canonical 函数 `replaceAuthorRow(db, ctx, task, old, ref, intentId, receipts)`，放在 `fix-strategy-session.ts` 内或其旁的新模块，`applyFixReplacement` 改成调用它，`supersedeAuthor` 也只调用它；差异（旧行是否写 archive/kill 回执、是否写 `supersededBy`、是否改 `authorFamily`）作为参数，不复制语句。
+
+- 这是 P-C 的**实现前置**，不是可选项。它扩大到 `fix-strategy-session.ts`，需 **PM 精确扩围**。
+- 扩围没批时，P-C 整体阻塞，不提供“新 writer 自带同样语句、注释指向对方”的备选。上一稿的这条备选正是验收线禁止的散抄 SQL writer，本稿删除。
+- 抽取本身要求 `applyFixReplacement` 的现有测试原样通过（行为零变化），作为 P-C 的第一个提交。
 
 ### 3.4 需要改动的读口，以及范围
 
@@ -220,10 +252,12 @@
 | `scheduler-retire-owner.ts:71`（任何状态都算 session 管理） | 核对后不改 | 被替换的本机 agent 仍归 session 步骤收尾，语义正确；peer 行在本机没有进程 |
 | `RetireRun.run`、`retireCandidates`、`agentStillInUse`（`scheduler-retire.ts`） | 不改 | 只看非 retired，被替换行自然排除。本机被替换会话的真实收尾走 LIFE 生命周期，不由接管伪造 |
 | `bindingAllows`、`currentOrders`、`confirmOrderDelivery` | **不改**（验收 2 要求门不变） | 接管只改它们读到的数据 |
+| `currentIntent` / `lentAway`（`order-take.ts:52-71`） | **不改**，但列为投影的验收对象 | 取本阶段最新非 cancelled 的 `dispatch` 意图。§3.2 的本机派单意图 `eventSeq` 更大，被选中后 `isPoolIntent` 为假，`lentAway` 不成立。P-C 正例必须经这两个真实读口断言新作者拿到单、单号是接管意图 id |
+| 其余按 `action='dispatch'` 读意图处：`scheduler-placement-plan.ts`、`scheduler-auto-tick.ts`、`ledger-scheduler-lease-sync.ts`、`ledger-scheduler-lease-finished.ts`、`scheduler-dispatch-block.ts`、`agent-lifecycle-cleanup-hold.ts`、`scheduler-central-context.ts`、`ledger-resource-scope.ts`、`scheduler-spec-resume-write.ts` 等 | **核对**，预期不改 | 新意图是 `done`、非 pool，与 FB2 本机兜底已落地的本机派单同形（`recovery-local-fallback-plan.ts:189`）。实现时逐个核对“`done` 的本机 dispatch”在各处的含义，任何一处需要改就回到 PM 精确扩围，不在实现里顺手改 |
 | `getSchedulerSession` 排序、`taskWorkerRefs`、`cardWorkerIndex` | 不改 | 唯一 current 行由部分唯一索引保证 |
 | `mayRebindReviewer`、`swappedSession`（`scheduler-review-swap.ts`） | 不改 | 只看审查角色 |
 | `usage-attr.ts:205`（全部行） | 不改 | 按 SID 归因，历史行照常计入 |
-| 意图读口：`scheduler-agent-pool-ledger.ts:30` 等按 `action` 过滤处 | 核对 | 新 `action='author_takeover'` 生来就是 `done`，不进入任何“未结意图”集合；实现时用 grep 确认没有“未知 action 就报错”的读口 |
+| 意图读口：`scheduler-agent-pool-ledger.ts:30` 等按 `action` 过滤处 | 核对 | 本稿不再新增 action 取值（接管意图就是 `dispatch`），不存在“未知 action”问题；新意图生来就是 `done`，不进入任何“未结意图”集合 |
 
 ## 4. 三张实现前置卡（验收 4）
 
@@ -231,18 +265,34 @@
 
 ### P-A：provider 终态来源（E1 + E2 + E3）
 
+- **B 侧删除入口全集**（按当前源码逐个核对，上一稿漏了 retention）：
+  | 入口 | 何时删 | 本卡处理 |
+  |---|---|---|
+  | `settleOrder` → `d.removeDir`（`lend-drive.ts:192-198`，实现在 `lend-deps.ts:189-191`） | `acked`/`cancelled` 结算后立即删 work 与 push | 删除前过保全门 |
+  | `sweepStoppedWork`（`lend-work-retention.ts:67-95`），由 `lendTickWithRetention`（`:98-106`）每轮在 `lendTick` 之前调用 | `stopped` 满 24h 后删 work 与 push，**不看保全** | 删除前过同一保全门；门不放行就不删、不记 `cleaned` |
+  | `prepareClone` 开头的 `removeOrderDir`（`lend-clone.ts:74`） | 起 worker 之前重来 clone | 不改：此时没起过 worker，目录里没有 WIP（该函数头注释）。负例覆盖“journal 已有 worker 记录时不得走到这里” |
+  | `lend-push.ts:61` 删 push 区 | 推送用的临时 clone | 不改：push 区只放已提交、待推的内容，work 区才是 WIP；但若 work 区保全门未放行，push 区随 work 区一起保留 |
+  | `lend-claude-worker*.ts` 的 `rmSync` | worker 配置与 Claude 临时目录，不含源码 | 不改，列出以示已核 |
 - **内容**：
-  - B 侧在 `finish()` 与 `settleOrder` 的 `removeDir` **之前**插入保全：
-    - 写单或修复单在 `acked`/`cancelled` 时，复用 `preserveReborrowGit` 的快照、祖先和 bundle 逻辑，抽成通用的 `preserveOrderGit`。
-    - 工作区不干净或保全失败时，不删目录，并把终态报告标记为 `preservation: failed`。
+  - 新模块 `lend-order-preserve.ts` 提供唯一的**持久保全门** `preserveGate(journal, orderId, dir)`：
+    - 复用 `preserveReborrowGit` 的快照、祖先和 bundle 逻辑（抽出共用核心，续借路径改成薄调用）。
+    - 结果持久写入 provider journal 的 meta `preserve:<orderId>` = `{state: ok|failed|unknown, bundleSha256?, remoteHead?, checkpoints?, dirty?, at}`。先写 `unknown`，保全完成再改 `ok` 或 `failed`；进程中途死掉留下的就是 `unknown`。
+    - 只有 `state = ok` 才放行删除。`failed`（含工作区 dirty、快照漂移、祖先不符）与 `unknown` 都**不删**目录，work 与 push 一起保留为可恢复现场，并计入 `stoppedWorkSummary` 一类的 doctor 计数与告警；不设自动过期删除。
+  - `settleOrder` 和 `sweepStoppedWork` 在各自的删除语句前调用这个门。`sweepStoppedWork` 对未放行的单记日志，不写 `cleaned: true`，下轮再试保全（只重试保全，不重试删除）。
+  - 保全不成立时，终态报告标记 `preservation: failed|unknown`，A 侧不可接管。
+  - 已保留的现场如何最终释放（PM 人工核后放行）不在本卡范围，另立卡；本卡只保证不自动删。
   - 然后经 R-a 的新 `lease` 动作 `terminal` 向 A 报告 `{orderId, gen, terminal, workerAbsent, pendingPayload:false, preservation:{bundleSha256, remoteHead, checkpoints}}`。
   - A 侧租约端点校验 `gen === leaseGen`、peer 和 fp 匹配，按 `lend-terminal:<orderId>:<gen>` 去重，写 canonical 事件。
 - **新模块**：
   - `src/lib/lend-terminal-report.ts`（B 侧组装与发送，≤90 行）
   - `src/lib/ledger-lend-terminal.ts`（A 侧校验与入账，≤90 行）
-  - `src/lib/lend-order-preserve.ts`（从续借保全抽出的共用核心，≤70 行；`lend-reborrow-preserve.ts` 改成薄调用，净减行数）
-- **薄接线**：`lend-drive.ts` 的 `finish`/`settleOrder`（≤15 行）；A 侧租约路由加一个分支（≤10 行）。
-- **fileGlobs**：上述新文件、`src/lib/lend-drive.ts`、`src/lib/lend-reborrow-preserve.ts`、A 侧租约端点所在文件（实现前由 PM 精确点名），以及 `tests/lend-terminal-*.test.ts`。
+  - `src/lib/lend-order-preserve.ts`（保全门与共用核心、journal meta 读写，≤100 行；`lend-reborrow-preserve.ts` 改成薄调用，净减行数）
+- **薄接线**：
+  - `lend-drive.ts` 的 `finish`/`settleOrder`（≤15 行）；
+  - `lend-work-retention.ts` 的 `sweepStoppedWork` 删除前过门、未放行不记 `cleaned`，`stoppedWorkSummary` 计入保留现场（≤15 行）；
+  - `lend-deps.ts` 的 `removeDir` 依赖注入改为带门版本（≤5 行）；
+  - A 侧租约路由加一个分支（≤10 行）。
+- **fileGlobs**：上述新文件、`src/lib/lend-drive.ts`、`src/lib/lend-work-retention.ts`、`src/lib/lend-deps.ts`、`src/lib/lend-reborrow-preserve.ts`、A 侧租约端点所在文件（实现前由 PM 精确点名），以及 `tests/lend-terminal-*.test.ts`、`tests/lend-order-preserve*.test.ts`、`tests/lend-work-retention*.test.ts`（只加新用例）。
 - **依赖**：lend wire 协议升级需要 **owner 和协议批准**。不新增签名用途。
 - **负例**：
   - 工作区有未提交改动；保全前后快照漂移；远端 head 不符；
@@ -250,55 +300,77 @@
   - `submit==='sending'`，或待转 payload 存在；
   - worker 仍在运行或探测为 `unknown`；
   - 重复报告内容不一致（回 `dedup_mismatch`）。
-  - 以上都只产生“不可接管”的事实或拒绝，不产生 E1/E2 事件。
-- **正例**：干净 acked 写单 → 先保全、再删目录 → A 得到一条事件；同一报告重发结果相同，幂等。
+  - 到期 `stopped` 单的 work 区有未提交源码：真实 `sweepStoppedWork` 跑过后文件仍在，meta 为 `failed`，没写 `cleaned`。
+  - 保全进行中进程被杀（meta 停在 `unknown`）：`settleOrder` 与 `sweepStoppedWork` 都不删。
+  - 保全 `ok` 之后、删除之前工作区又被改动：删除前复核快照，漂移即改记 `failed`、不删。
+  - 以上都只产生“不可接管”的事实或拒绝，不产生 E1/E2 事件，且现场目录保留。
+- **正例**：干净 acked 写单 → 先保全、再删目录 → A 得到一条事件；同一报告重发结果相同，幂等。干净的到期 `stopped` 单经真实 `sweepStoppedWork` 先保全再删除，与现有 24h 行为一致。
 - **版本兼容**：旧 peer 不发 `terminal`，A 侧不会有事件，接管门保持关闭。旧 A 收到未知动作回 `invalid`，B 记日志，不重试降级。
 
 ### P-B：本人接受（G、R、A）
 
-- **内容**：PM CLI `ledger author-takeover-grant` / `--revoke`，新 MCP 派单工具 `accept_takeover`，`CallerIdentity` 增加 `credSessionId`、`credIssuedAt`（只读、取自凭据记录）。
+- **内容**：
+  - PM CLI `ledger author-takeover-grant` / `--revoke`；
+  - 新 MCP 派单工具 `accept_takeover`，**两侧都要接线**：channel-server 只公布 `ORDER_TOOLS` 里的定义（`channel-server.ts:589`），也只转发 `isOrderTool` 命中的调用（`:734`，`isOrderTool` 见 `lib/order-tools.ts:113-114`）；bridge 侧再按 `HANDLERS` 分派（`bridge/order-tools.ts` 头注释）。只做 bridge handler 的话，真实 MCP 客户端既看不到也调不到这个工具；
+  - §2.3 的凭据代次表与“先 ledger 后文件”的签发、撤销顺序；
+  - `CallerIdentity` / `VerifiedCall` 增加只读的 `credTag`（由 bridge 用连接出示的 `credHash` 派生，见 `caller-identity.ts:30` 的 `IdentityInput.credHash`），不暴露明文与原哈希。
 - **新模块**：
   - `src/lib/author-takeover-grant.ts`（授予、撤销与校验，≤110 行）
-  - `src/lib/author-takeover-accept.ts`（接受 handler 的纯逻辑，≤80 行）
+  - `src/lib/author-takeover-accept.ts`（接受 handler 的纯逻辑与事务，≤90 行）
+  - `src/lib/caller-cred-epoch.ts`（代次表迁移、推进、读取，≤60 行；它要 import `ledger-tx`，须同步加入 `tests/ledger-migrate.test.ts` 的写入模块白名单）
 - **薄接线**：
-  - `caller-identity.ts` 两个字段（≤8 行）；`order-tool-route.ts` 的 `VerifiedCall` 透传（≤4 行）；
-  - `bridge/order-tools.ts` 注册工具（≤10 行）；manager 命令（≤30 行）。
-- **fileGlobs**：上述文件、`src/lib/caller-identity.ts`、`src/lib/order-tool-route.ts`、`src/bridge/order-tools.ts`、对应 manager 命令文件，以及 `tests/author-takeover-*.test.ts`。
-- **依赖**：P-A 的事件格式（授予要绑定 `source`）。新增 MCP 工具会改变派单工具面，需 **PM 精确扩围**；如果要把工具开放给出借 worker，需 **owner 批准**。
+  - `lib/order-tools.ts`：`ORDER_TOOLS` 增加 `accept_takeover` 定义（`{v, grantId}` 两个参数，≤15 行）；`isOrderTool` 由 `ORDER_TOOLS` 派生，无需另改。`channel-server.ts` 展开 `ORDER_TOOLS`，不改；
+  - `bridge/order-tools.ts`：`HANDLERS` 注册 handler（≤10 行）；
+  - `lib/caller-identity.ts` 与 `bridge/caller-identity.ts`：`credTag` 字段（≤8 行）；`order-tool-route.ts` 的 `VerifiedCall` 透传（≤4 行）；
+  - `lib/caller-cred.ts`：`issueCallerCred` / `revokeCallerCreds` 先推进 ledger 代次再改文件（≤20 行）；`caller-cred-launch.ts` 传入 ledger 句柄或路径（≤6 行）；
+  - `ledger-store.ts` 迁移列表（≤3 行）；manager 命令（≤30 行）。
+  - `lend-mcp-profile.ts` 的 `LEND_ORDER_TOOLS` **不加**这个工具：出借 worker 看不到也调不到（`lend-tools.ts:101`、`acp/tool-proxy.ts:45` 已按白名单拒）。
+- **fileGlobs**：上述新文件、`src/lib/order-tools.ts`、`src/bridge/order-tools.ts`、`src/lib/caller-identity.ts`、`src/bridge/caller-identity.ts`、`src/lib/order-tool-route.ts`、`src/lib/caller-cred.ts`、`src/lib/caller-cred-launch.ts`、`src/lib/ledger-store.ts`、对应 manager 命令文件，以及 `tests/author-takeover-*.test.ts`、`tests/caller-cred-epoch*.test.ts`、`tests/order-tool-route.test.ts`、`tests/caller-cred.test.ts`、`tests/ledger-migrate.test.ts`（只加新用例或白名单项）。
+- **依赖**：P-A 的事件格式（授予要绑定 `source`）。新增 MCP 工具会改变派单工具面，需 **PM 精确扩围**；凭据签发与撤销顺序的改变涉及身份凭据生命周期，需 **owner 批准**；把工具开放给出借 worker 不在本稿范围，另需 owner 批准。任一未批，P-B 阻塞。
 - **负例**：
   - 非真实 PM 授予（含 dispatcher）；body 里写 `verified:true`；未验证调用；
   - 错误 agent、SID 或 family；LIFE1 行缺失、retired 或 `cleanup_pending`；`role` 不是 `author`，或 `taskId` 不符；
   - 授予过期或已撤销；旧 nonce，或第二次接受（第二次接受返回幂等结果，不产生新效果）；
-  - 授予后凭据被重新签发；`credSessionId` 为空（fork 启动）。
-- **正例**：真实 PM 授予 → 本人在 TTL 内经已验证调用接受 → 只出现一条接受事件。
-- **版本兼容**：旧 bridge 没有这个工具，接受无法进行，接管门保持关闭。`CallerIdentity` 新字段对旧调用方透明。
+  - 授予后凭据被重新签发；迁移前启动、没有代次行的会话；
+  - 家族：凭据登记的 runtime 映射、registry 当前 runtime 映射、`to.family` 任一不等（含 `pi` 映射为 null）；body 里自报 `family`；
+  - 凭据竞态：在接受事务持有写锁期间由另一进程调用真实撤销，撤销的 ledger 代次推进必须排在提交之后；反之代次先推进，接受必拒（复用审查探针的形状，用真实 `revokeCallerCreds`）；
+  - 撤销第 1 步失败：文件记录仍被删除，旧连接 `verified=false`；
+  - 工具面：出借 worker 调 `accept_takeover` 回 `lend_forbidden`；未知参数、缺 `v` 或 `grantId` 被 wire 校验拒绝。
+- **正例**：
+  - `ORDER_TOOLS` 公布 `accept_takeover`，`isOrderTool('accept_takeover')` 为真，channel-server 转发到 bridge（沿用 `tests/order-tool-route.test.ts` 对 channel-server 登记名单的覆盖方式）；
+  - 真实 PM 授予 → 本人在 TTL 内经已验证调用接受 → 只出现一条接受事件，冻结的 `credEpoch`、`family`、`lifeCreatedAt` 与来源一致。
+- **版本兼容**：旧 channel-server 不公布、旧 bridge 不认这个工具，接受无法进行，接管门保持关闭。`CallerIdentity` 新字段对旧调用方透明。旧库没有代次表时签发照旧写文件，但任何会话都无法接受（闭合失败）。
 
 ### P-C：canonical supersession（§3）
 
 - **内容**：迁移、`supersedeAuthor` writer、T3 远端核验加 T-COMMIT、§3.4 中标为“改”的读口、提交后的凭据撤销（只针对本机旧作者）。
+- **实现顺序**：第一个提交只做共用 canonical writer 抽取（§3.3 `replaceAuthorRow`），`applyFixReplacement` 行为零变化、现有测试原样通过；之后才写 `supersedeAuthor`。
 - **新模块**：
-  - `src/lib/author-supersession.ts`（writer 与指纹，≤140 行）
+  - `src/lib/author-supersession.ts`（writer、指纹、本机派单意图投影，≤150 行；只经 `replaceAuthorRow` 改作者行、任务与步骤）
   - `src/lib/author-supersession-schema.ts`（≤30 行）
 - **薄接线**：
+  - `fix-strategy-session.ts`：抽出 `replaceAuthorRow`，`applyFixReplacement` 改为调用（≤20 行净改，**必选前置**）；
   - `ledger-store.ts` 迁移列表与必需列（≤8 行）；
   - `scheduler-sessions.ts` 的 `taskSessionLinks`（≤6 行）；
   - `review-evidence-collect.ts`（≤8 行，核对后才动）；
-  - 可选扩围：与 `fix-strategy-session.ts` 共用 `replaceAuthorRow`（≤20 行净改）。
-- **fileGlobs**：上述文件，以及 `tests/author-supersession*.test.ts`、`tests/order-take*.test.ts`（只加新用例）。
-- **依赖**：P-A 与 P-B 合入。
+  - `tests/ledger-migrate.test.ts` 写入模块白名单加 `author-supersession.ts`（1 行）。
+- **fileGlobs**：上述文件（含 `src/lib/fix-strategy-session.ts`），以及 `tests/author-supersession*.test.ts`、`tests/order-take*.test.ts`、`tests/fix-strategy*.test.ts`（只加新用例）。
+- **依赖**：P-A 与 P-B 合入；`fix-strategy-session.ts` 的精确扩围获 PM 批准。扩围未批时 P-C 阻塞，没有自带 SQL 的备选。
 - **负例**（每条都断言零新绑定：作者行数不变、`tasks.agent` 不变、执行者不变、无 `author_takeover` 事件）：
   - 原 peer 单仍活或 `unknown`；B 结果待回执；错误 fp、gen 或 SID；
   - 有未交检查点（E2 缺失或 `preservation: failed`）；伪造的保全摘要与远端 head 不符；
   - 冒充的新作者、错误家族、过期授予、旧 nonce；
-  - 两个提交并发（第二个回滚）；授予后任一来源漂移（指纹不同）；
+  - 两个提交并发（第二个回滚）；授予后任一来源漂移（指纹不同），包括本阶段又出现一条更新的 `dispatch` 意图；
+  - 接受之后、提交之前凭据换代（ledger 代次推进）：提交回滚；registry runtime 被改成别的家族：`requireSessionIdentity` 在事务内拒绝；
   - 事务中途失败（注入抛错 → 全部回滚，包括接管意图和 `author_supersessions` 行）。
 - **正例**：必须是**真实的临时 canonical 集成**，用临时 ledger、真实迁移和真实 writer。依次执行：
-  1. 种一张 peer 作者卡，出借单 done，入账 E1/E2；
+  1. 种一张 peer 作者卡：本阶段有一条 `recipient='peer:*'`、`status='done'` 的派单意图，出借单 done，入账 E1/E2。提交前先断言现有 `takeOrderResult` 对新作者返回 `order=null` 加“由 peer 写”的说明（复现审查的 reader 反例）；
   2. PM 授予；
   3. 用 LIFE1 登记的新作者以已验证调用接受；
   4. 提交。
   - 断言：
-    - 现有 `takeOrderResult` 对新作者的 `VerifiedCall` 返回这张卡的单；
+    - 现有 `takeOrderResult` 对新作者的 `VerifiedCall` 返回这张卡的单，`orderId` 等于接管派单意图 id，没有“由 peer 写”的说明；
+    - 原 peer 派单意图仍是 `done`、字段不变（历史保留）；
     - 对旧 peer agent 的 SID 和对同名新 SID 以外的会话都返回空；
     - `deliver` 的 `currentOrders` 同样只认新 SID。
   - 不允许用专门写的测试 helper 直接改表来“证明”。
@@ -310,8 +382,10 @@
 
 - 接管不是换模型或换家族的通道。provider 的策略拒审（`refusal`，见 MODELX 的拒审纪元）不能借接管绕过：授予要求 `to.family === workflow.authorFamily`，换家族只能走 CONV 规则加对应批准。
 - 原作者仍活、`unknown`、结果待回执，或 fp、gen、SID 不符。
-- 有未交检查点、假保全，或保全失败后仍删了目录（P-A 改了顺序，先保全后删除）。
-- 冒充的新作者、错误家族、过期授予、旧 nonce、二次接受、授予后重启。
+- 有未交检查点、假保全，或保全失败/`unknown`/dirty 后仍删了目录：结算删除与 `stopped` 24h 清理（`sweepStoppedWork`）共用同一持久保全门，未放行一律保留现场。
+- 冒充的新作者、错误家族（凭据映射、registry 映射、授予三者任一不等）、过期授予、旧 nonce、二次接受、授予后重启。
+- 凭据换代与提交竞争：换代的 ledger 代次推进先于提交则提交回滚；不以读 `caller-creds.json` 或比较 `issuedAt`/SID 代替同步。
+- 只换绑定、不换派单投影：原 `done` 的 peer 派单仍是 `currentIntent` 时新作者拿不到单，因此提交必须同时落本机派单意图；正例经真实 `takeOrderResult` 断言。
 - 并发双 writer：`BEGIN IMMEDIATE`、指纹和部分唯一索引三层兜底。
 - 任一来源漂移：卡、工作流、步骤、出借单、租约、意图、绑定、LIFE1 行、E1/E2 事件。
 - 事务失败：整体回滚。外部效果（凭据撤销）只在提交之后做。
@@ -323,14 +397,17 @@
 | A 侧活单、unknown、未结意图的判据 | 有（`LEND_LIVE`、`captureReborrowFacts`） | 复用 |
 | 本机旧作者 archive/kill | 有（`stopConvergenceAuthor`） | 本稿不需要；后续本机→本机接管可复用 |
 | peer 已停的 A 侧证据 | 只有 CONV3 的 `cleanExit`，且只覆盖撤单和自报停 | P-A 补“已 done 单的退出加保全” |
-| 删除前保全 | 只有续借路径在 B 本地做 | P-A 推广到所有写单终态，并把摘要回传 A |
+| 删除前保全 | 只有续借路径在 B 本地做；`settleOrder` 与 `sweepStoppedWork` 都不看保全 | P-A 用一个持久保全门覆盖全部删除入口（§4 P-A 表），并把摘要回传 A |
 | PM 授予、TTL、单用 | `resume-grant` 有 TTL，单用是隐式的；`ask-bind` 被注明不是安全边界 | P-B 新建显式授予与接受 |
-| 新作者历史身份 | `VerifiedCall.sessionId` 是 registry 当前值；LIFE1 不进门 | P-B 加凭据锚，接受时核 LIFE1 |
+| 新作者历史身份 | `VerifiedCall.sessionId` 是 registry 当前值；LIFE1 不进门、没有 family；凭据文件与 ledger 不同步 | P-B 把凭据代次放进 ledger；LIFE1 只核 SID/role/task/注册代次；家族由凭据与 registry 经 `runtimeFamily` 核对后冻结 |
+| 新作者能领单 | `currentIntent` 会选中原 `done` 的 peer 派单，`lentAway` 挡住本机 | P-C 提交时落一条本机 `dispatch` 意图，原 peer 派单保留 |
+| 本人接受工具 | 无 | P-B 在 `ORDER_TOOLS` 与 bridge `HANDLERS` 两侧接线，出借 profile 不开放 |
+| 共用作者替换 writer | 只有 `applyFixReplacement` 内联语句 | P-C 先抽 `replaceAuthorRow`，两条路径共用；未批扩围则阻塞 |
 | 行政替换和退役分列 | 没有；fix swap 和 CONV3 回收都只写 `retired` | P-C 增加 `supersededBy` 和 `author_supersessions` |
-| 旧 WIP 不丢 | B 侧 `acked/cancelled` 直接删目录 | P-A 改顺序；历史上已删的不补造（REBOR2 仍 blocked） |
+| 旧 WIP 不丢 | B 侧 `acked/cancelled` 直接删目录，`stopped` 24h 后删目录 | P-A 两条路径都先过保全门；历史上已删的不补造（REBOR2 仍 blocked） |
 
 **验证边界。** 本稿合入前要做三件事：另一家族完整设计审、当前 head 的 CI 三项、`bun run check` / guard。本稿只是设计输入：
 
-- 最终实施范围（尤其 §3.3 的共用 writer 扩围和 §3.4 中“核对，可能要改”的读口）由 PM 精确核定。
-- §1.3 的协议升级和任何签名用途，以及 P-B 的工具开放范围，由 owner 另行批准。
+- 最终实施范围（尤其 §3.3 的共用 writer 扩围、§3.4 中“核对”的读口、P-A 的 retention 接线、P-B 的 `order-tools.ts` 与 `caller-cred.ts` 接线）由 PM 精确核定。共用 writer 是 P-C 的必选前置，不批则 P-C 阻塞。
+- §1.3 的协议升级和任何签名用途、§2.3 凭据签发与撤销顺序的改变，以及 P-B 的工具开放范围，由 owner 另行批准。
 - 本稿不自批任何一项。
