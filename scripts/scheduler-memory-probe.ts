@@ -5,13 +5,13 @@
  * because that lookup is the path being measured.
  *
  *   bun scripts/scheduler-memory-probe.ts snapshot --to DIR [--from STATE_DIR (default: the production state dir, read only)]
- *   bun scripts/scheduler-memory-probe.ts run --state DIR [--root CHECKOUT] [--rounds 100] [--steps all|view,lifecycle,...] [--limit-mb 5]
+ *   bun scripts/scheduler-memory-probe.ts run --state DIR [--root CHECKOUT] [--rounds 100] [--warmup 20] [--steps all|view,lifecycle,...] [--limit-mb 5]
  *
  * snapshot creates DIR 0700 (an existing DIR must be an empty 0700 dir of this user), writes every copy 0600 and refuses a
- * symlinked target path: the copies hold the whole private ledger and lend journal.
- * Each step prints one JSON line: WebKit malloc and phys footprint before / after `rounds` passes (after forced GC), the
- * JS heap size, and pass = growth < limit. Steps: see STEPS below. --root picks the checkout whose src/ is imported, so the
- * same snapshot can be replayed against the base and the fix.
+ * symlinked target path (any link, so give the real path: /private/tmp/…): the copies hold the whole private ledger and journal.
+ * Each step prints one JSON line: WebKit malloc and phys footprint before / after `rounds` passes (after `warmup` unmeasured
+ * passes and a forced GC), the JS heap size, and pass = total phys footprint growth < limit (verdict). Steps: see STEPS
+ * below. --root picks the checkout whose src/ is imported, so the same snapshot can be replayed against the base and the fix.
  */
 import { Database } from "bun:sqlite";
 import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
@@ -29,13 +29,13 @@ function arg(name: string, fallback?: string): string | undefined {
 }
 
 /**
- * A symlink anywhere on the target path could redirect the private copy; only root-owned links (macOS /var, /tmp → /private/…)
- * are system layout, not something another user can plant.
+ * A symlink anywhere on the target path could redirect the private copy: every link is refused, system ones included
+ * (macOS /tmp, /var → /private/…), so the target is given by its real path (e.g. /private/tmp/…).
  */
 function refuseSymlinks(p: string): void {
   for (let cur = resolve(p); ; cur = dirname(cur)) {
     const st = lstatSync(cur, { throwIfNoEntry: false });
-    if (st?.isSymbolicLink() && st.uid !== 0) throw new Error(`snapshot target path has a symlink: ${cur}`);
+    if (st?.isSymbolicLink()) throw new Error(`snapshot target path has a symlink: ${cur} (give the real path, e.g. /private/tmp/…)`);
     if (cur === dirname(cur)) return;
   }
 }
@@ -94,13 +94,23 @@ export function parseFootprint(out: string): { physMb: number; webkitMb: number 
   return { physMb: phys ? mb(phys[1]!, phys[2]!) : NaN, webkitMb: webkit ? mb(webkit[1]!, webkit[2]!) : NaN };
 }
 
+/**
+ * The pass line is the total phys footprint: a leak in any native region counts, not only WebKit malloc, so a WebKit drop
+ * cannot hide growth elsewhere. An unreadable footprint (NaN) fails.
+ */
+export function verdict(before: { physMb: number; webkitMb: number }, after: { physMb: number; webkitMb: number }, limitMb: number):
+  { growthMb: number; webkitGrowthMb: number; pass: boolean } {
+  const growth = after.physMb - before.physMb;
+  return { growthMb: +growth.toFixed(1), webkitGrowthMb: +(after.webkitMb - before.webkitMb).toFixed(1), pass: growth < limitMb };
+}
+
 const footprint = () => parseFootprint(Bun.spawnSync(["footprint", "-p", String(process.pid)]).stdout.toString());
 
 async function settle(): Promise<void> {
   for (let k = 0; k < 4; k++) { Bun.gc(true); await Bun.sleep(500); }
 }
 
-async function child(root: string, step: Step, rounds: number, limitMb: number): Promise<void> {
+async function child(root: string, step: Step, rounds: number, warmup: number, limitMb: number): Promise<void> {
   const lib = (m: string) => import(pathToFileURL(join(root, "src", "lib", m)).href);
   const db = new Database(join(process.env.CLAUDESTRA_STATE_DIR!, "ledger.sqlite"), { readonly: true });
   const config = (await lib("scheduler-config.ts")).readSchedulerConfig();
@@ -119,16 +129,16 @@ async function child(root: string, step: Step, rounds: number, limitMb: number):
       for (const a of normalizeRegistryAgents(await readJsonLenient(REGISTRY_PATH, null))) readActivity(a.name);
     },
   };
-  await run[step](); // warm-up: module load, JIT, caches
+  for (let i = 0; i < warmup; i++) await run[step](); // module load, JIT, sqlite page cache, allocator pools settle before the baseline
   await settle();
   const before = footprint(), t0 = performance.now();
   for (let i = 0; i < rounds; i++) await run[step]();
   const ms = Math.round((performance.now() - t0) / rounds);
   await settle();
-  const after = footprint(), growth = after.webkitMb - before.webkitMb;
+  const after = footprint();
   const { heapSize } = (await import("bun:jsc")).heapStats();
-  console.log(JSON.stringify({ step, rounds, msPerRound: ms, webkitMb: [before.webkitMb, after.webkitMb], physMb: [before.physMb, after.physMb],
-    growthMb: +growth.toFixed(1), heapMb: +(heapSize / 1048576).toFixed(1), rssMb: Math.round(process.memoryUsage().rss / 1048576), pass: growth < limitMb }));
+  console.log(JSON.stringify({ step, rounds, warmup, msPerRound: ms, webkitMb: [before.webkitMb, after.webkitMb], physMb: [before.physMb, after.physMb],
+    ...verdict(before, after, limitMb), heapMb: +(heapSize / 1048576).toFixed(1), rssMb: Math.round(process.memoryUsage().rss / 1048576) }));
   db.close();
 }
 
@@ -139,15 +149,15 @@ async function main(): Promise<void> {
     snapshot(resolve(arg("from", stateDirIn(homedir()))!), to);
     return console.log(JSON.stringify({ ok: true, snapshot: to }));
   }
-  if (cmd === "child") return child(arg("root")!, arg("step") as Step, Number(arg("rounds")), Number(arg("limit-mb")));
-  if (cmd !== "run") throw new Error("usage: snapshot --to DIR | run --state DIR [--root CHECKOUT] [--rounds 100] [--steps all|a,b] [--limit-mb 5]");
+  if (cmd === "child") return child(arg("root")!, arg("step") as Step, Number(arg("rounds")), Number(arg("warmup")), Number(arg("limit-mb")));
+  if (cmd !== "run") throw new Error("usage: snapshot --to DIR | run --state DIR [--root CHECKOUT] [--rounds 100] [--warmup 20] [--steps all|a,b] [--limit-mb 5]");
   if (process.platform !== "darwin") throw new Error("macOS only (footprint)");
   const state = resolve(arg("state")!), root = resolve(arg("root", resolve(import.meta.dir, ".."))!);
   const steps = (arg("steps", "all") === "all" ? [...STEPS] : arg("steps")!.split(",")) as Step[];
   let ok = true;
   for (const step of steps) {
     const p = Bun.spawnSync([process.execPath, "--no-env-file", import.meta.path, "child", "--root", root, "--step", step,
-      "--rounds", arg("rounds", "100")!, "--limit-mb", arg("limit-mb", "5")!], {
+      "--rounds", arg("rounds", "100")!, "--warmup", arg("warmup", "20")!, "--limit-mb", arg("limit-mb", "5")!], {
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin", HOME: homedir(), CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") },
       stdout: "pipe", stderr: "pipe",
     });

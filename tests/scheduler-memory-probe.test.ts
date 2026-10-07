@@ -1,10 +1,10 @@
 /** scripts/scheduler-memory-probe.ts 读 footprint(1) 的输出：读错单位或行，探针的通过 / 不通过就是假的 */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseFootprint, snapshot } from "../scripts/scheduler-memory-probe.ts";
+import { parseFootprint, snapshot, verdict } from "../scripts/scheduler-memory-probe.ts";
 
 const SAMPLE = `======================================================================
 bun [53917]: 64-bit    Footprint: 3626 MB (16384 bytes per page)
@@ -33,6 +33,8 @@ test("缺行 → NaN（不当成 0，免得把读不到算成没涨）", () => {
 
 /** 快照带着整份私有台账和出借 journal（Shawn PR863-r1 P1 snapshot-permissions）：只用合成数据 */
 describe("snapshot 权限", () => {
+  // macOS 的 tmpdir() 在 /var（→ /private/var 的系统链接）下：目标一律用真实路径
+  const realTmp = () => realpathSync(tmpdir());
   const mode = (p: string) => statSync(p).mode & 0o777;
   let oldMask = 0;
   beforeEach(() => { oldMask = process.umask(0o022); });
@@ -58,7 +60,7 @@ describe("snapshot 权限", () => {
   }
 
   test("umask 022 下：目录 0700、库与其余复制件 0600、源里的 symlink 不跟", () => {
-    const to = join(mkdtempSync(join(tmpdir(), "smp-dst-")), "snap");
+    const to = join(mkdtempSync(join(realTmp(), "smp-dst-")), "snap");
     snapshot(source(), to);
     for (const d of ["", "lend", "run", "acp-activity", join("lend", "claude-config"), join("lend", "claude-config", "agent-lend-x")])
       expect([d, mode(join(to, d))]).toEqual([d, 0o700]);
@@ -71,7 +73,7 @@ describe("snapshot 权限", () => {
   });
 
   test("已存在的目标：只收本用户的空 0700 目录", () => {
-    const from = source(), base = mkdtempSync(join(tmpdir(), "smp-dst-"));
+    const from = source(), base = mkdtempSync(join(realTmp(), "smp-dst-"));
     const open = join(base, "open"); mkdirSync(open); chmodSync(open, 0o755);
     expect(() => snapshot(from, open)).toThrow(/not an empty private directory/);
     const full = join(base, "full"); mkdirSync(full, { mode: 0o700 }); writeFileSync(join(full, "x"), "");
@@ -81,12 +83,39 @@ describe("snapshot 权限", () => {
     expect(mode(join(empty, "ledger.sqlite"))).toBe(0o600);
   });
 
-  test("目标本身或上级是（非 root 的）symlink：拒绝，什么都不写", () => {
-    const from = source(), base = mkdtempSync(join(tmpdir(), "smp-dst-")), real = join(base, "real");
+  test("目标本身或上级是 symlink：拒绝，什么都不写", () => {
+    const from = source(), base = mkdtempSync(join(realTmp(), "smp-dst-")), real = join(base, "real");
     mkdirSync(real, { mode: 0o700 });
     symlinkSync(real, join(base, "link"));
     expect(() => snapshot(from, join(base, "link"))).toThrow(/symlink/);
     expect(() => snapshot(from, join(base, "link", "snap"))).toThrow(/symlink/);
     expect(readdirSync(real)).toEqual([]);
+  });
+});
+
+describe("snapshot 拒绝系统 symlink", () => {
+  // macOS 的 /tmp 是 root 的链接（→ private/tmp）：系统链接也不放行，验收句是「上级是 symlink 就拒」
+  test.skipIf(!lstatSync("/tmp", { throwIfNoEntry: false })?.isSymbolicLink())("/tmp 下的目标被拒，/private/tmp 下的同一目录可以", () => {
+    const from = mkdtempSync(join(realpathSync(tmpdir()), "smp-src-"));
+    writeFileSync(join(from, "registry.json"), "{}");
+    const name = `smp-sys-${process.pid}-${Date.now()}`;
+    expect(() => snapshot(from, join("/tmp", name))).toThrow(/symlink: \/tmp/);
+    expect(existsSync(join("/private/tmp", name))).toBe(false);
+    try {
+      snapshot(from, join(realpathSync("/tmp"), name));
+      expect(statSync(join("/private/tmp", name)).mode & 0o777).toBe(0o700);
+    } finally { rmSync(join("/private/tmp", name), { recursive: true, force: true }); }
+  });
+});
+
+describe("verdict：按总 footprint 判", () => {
+  test("WebKit 降、总 footprint 涨超阈值 → 不通过", () => {
+    expect(verdict({ physMb: 57, webkitMb: 29 }, { physMb: 64, webkitMb: 28 }, 5)).toEqual({ growthMb: 7, webkitGrowthMb: -1, pass: false });
+  });
+  test("总 footprint 涨幅低于阈值 → 通过", () => {
+    expect(verdict({ physMb: 68, webkitMb: 32 }, { physMb: 66, webkitMb: 30 }, 5).pass).toBe(true);
+  });
+  test("footprint 读不到（NaN）→ 不通过", () => {
+    expect(verdict({ physMb: NaN, webkitMb: 1 }, { physMb: 1, webkitMb: 1 }, 5).pass).toBe(false);
   });
 });
