@@ -14,7 +14,6 @@ import { answerSharedProject } from "../src/bridge/local-api/shared-projects-act
 import { proposeSharedProjectInvite, sendApprovedSharedProjectInvite, type ProjectInvitePorts } from "../src/bridge/local-api/shared-projects-invite";
 import type { SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports";
 import type { Ask } from "../src/lib/ledger-asks";
-
 const scratch = mkdtempSync(join(tmpdir(), "cstra-test-project-ui-"));
 const shots = process.env.SHARED_PROJECTS_SHOTS_DIR ? resolve(process.env.SHARED_PROJECTS_SHOTS_DIR) : join(scratch, "shots");
 const entry = "web/features/collab/shared-projects/fixture-harness.tsx";
@@ -22,7 +21,6 @@ let browser: Browser;
 let server: ReturnType<typeof Bun.serve>;
 const manifest: { file: string; sha256: string }[] = [];
 const n4 = n4UiFixture();
-
 /** Actual N4 route/actions with public N1C fixtures and injected mint/transport; not a signed production center or N2 join. */
 function n4UiFixture() {
   const f = createV2ProjectsFixtures(), asks: Ask[] = [], sent: unknown[] = [];
@@ -63,14 +61,12 @@ function n4UiFixture() {
   };
   return { handle, sent };
 }
-
 async function git(...args: string[]) {
   const p = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(p.stdout).text();
   if (await p.exited) throw new Error(await new Response(p.stderr).text());
   return out.trim();
 }
-
 beforeAll(async () => {
   mkdirSync(shots, { recursive: true, mode: 0o700 }); chmodSync(shots, 0o700);
   const build = Bun.spawn([process.execPath, "build", entry, "--target", "browser", "--outdir", scratch,
@@ -94,13 +90,12 @@ beforeAll(async () => {
   } });
   browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
 }, 60_000);
-
 afterAll(async () => {
   try {
     // Persist private evidence even if the existing Chromium cleanup subsequently fails its unchanged hook timeout.
     const [head, dirty] = await Promise.all([git("rev-parse", "HEAD"), git("status", "--porcelain", "--", "web", "tests")]);
     if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
-      head, specRev: 1, round: 3,
+      head, specRev: 1, round: 4,
       fixture: "synthetic UI/cards and machine entry, actual N4 snapshot/route/actions with N1C fixtures, injected teamRole/create/mint/transport; no production center or N2 join",
       summary: "Forms, permissions, CAS/local/recipient choices and N4 invitation approval; production composition and PM acceptance unverified",
       dirty: !!dirty,
@@ -115,14 +110,12 @@ afterAll(async () => {
     finally { rmSync(scratch, { recursive: true, force: true }); }
   }
 });
-
 async function screenshot(page: Page, name: string) {
   const png = await page.screenshot({ path: join(shots, `${name}.png`), animations: "disabled" });
   chmodSync(join(shots, `${name}.png`), 0o600);
   manifest.push({ file: `${name}.png`, sha256: createHash("sha256").update(png).digest("hex") });
   expect(await shotIssues(page)).toEqual([]);
 }
-
 async function newPage(width: number, query = "", clock?: Date) {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
   if (clock) await page.clock.install({ time: clock });
@@ -135,7 +128,10 @@ async function newPage(width: number, query = "", clock?: Date) {
   await page.goto(`${server.url}${query}`);
   return { page, errors };
 }
-
+async function openSettings(page: Page) {
+  await page.getByRole("button", { name: "项目设置", exact: true }).click();
+  await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+}
 for (const [name, offset] of [
   ["expired project card buttons are disabled", -1],
   ["unexpired project card buttons require an explicit click", 60_000],
@@ -194,7 +190,6 @@ test("actual N4 source renders binding and invitation approval without claiming 
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 for (const width of [390, 1280]) test(`project forms, explicit CAS retry, invite and local actions at ${width}px`, async () => {
   const { page, errors } = await newPage(width);
   try {
@@ -243,7 +238,6 @@ for (const width of [390, 1280]) test(`project forms, explicit CAS retry, invite
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 }, 60_000);
-
 test("ordinary member has no owner actions and no create form", async () => {
   const { page, errors } = await newPage(390, "?role=member&theme=dark");
   try {
@@ -257,7 +251,6 @@ test("ordinary member has no owner actions and no create form", async () => {
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("existing recipient requires an explicit personId independent of the peer", async () => {
   const { page, errors } = await newPage(390, "?role=owner");
   try {
@@ -294,7 +287,6 @@ test("existing recipient requires an explicit personId independent of the peer",
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("recommendation is selected in the DOM and clearing it disables confirmation", async () => {
   const { page, errors } = await newPage(390, "?fixture=choice");
   try {
@@ -321,7 +313,6 @@ test("recommendation is selected in the DOM and clearing it disables confirmatio
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("a card with no recommendation starts disabled; a replacement card resets selection", async () => {
   const { page, errors } = await newPage(390, "?fixture=choice&recommended=none&theme=dark");
   try {
@@ -339,7 +330,6 @@ test("a card with no recommendation starts disabled; a replacement card resets s
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("an uncertain create resumes the same operation without exposing the error or creating twice", async () => {
   const { page, errors } = await newPage(390, "?fixture=recovery");
   try {
@@ -357,13 +347,10 @@ test("an uncertain create resumes the same operation without exposing the error 
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
-
 test("archive then rename and external refresh use the current revision", async () => {
   const { page, errors } = await newPage(390, "?fixture=settings");
   try {
-    await page.getByRole("button", { name: "项目设置", exact: true }).click();
-    await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+    await openSettings(page);
     await page.getByRole("button", { name: "归档项目", exact: true }).click();
     await page.getByRole("button", { name: "恢复项目", exact: true }).waitFor();
     await page.getByLabel("项目显示名", { exact: true }).fill("连续修改名称");
@@ -376,29 +363,48 @@ test("archive then rename and external refresh use the current revision", async 
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
-test("external refresh preserves a dirty draft while saving uses the latest revision", async () => {
-  const { page, errors } = await newPage(390, "?fixture=settings");
+for (const [scenario, title] of [
+  ["reject", "external refresh preserves a dirty draft and rejects saving its old base revision"],
+  ["clean", "external refresh follows the latest name and revision when the draft is clean"],
+  ["retry", "explicit current-version retry saves the preserved dirty draft"],
+  ["open-conflict", "direct save during a refreshed conflict cannot overwrite the center name"],
+] as const) test(title, async () => {
+  const { page, errors } = await newPage(390, `?fixture=${scenario === "open-conflict" ? "conflict-refresh" : "settings"}`);
   try {
-    await page.getByRole("button", { name: "项目设置", exact: true }).click();
-    await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+    await openSettings(page);
     const name = page.getByLabel("项目显示名", { exact: true });
-    await name.fill("我的修改意图");
+    const save = page.getByRole("button", { name: "保存名称", exact: true });
+    const retry = page.getByRole("button", { name: "按当前版本重试", exact: true });
+    if (scenario !== "clean") await name.fill("我的修改意图");
+    if (scenario === "open-conflict") {
+      await save.click();
+      await page.getByText("当前名称：同事更新的名称", { exact: true }).waitFor();
+    }
     await page.evaluate("[...document.querySelectorAll('button')].find(b => b.textContent === '合成外部更新').click()");
     await page.getByText("进行中 · 版本 10", { exact: true }).waitFor();
+    expect(await name.inputValue()).toBe(scenario === "clean" ? "外部更新名称" : "我的修改意图");
+    const accepted = scenario === "clean" || scenario === "retry";
+    if (scenario === "clean") {
+      expect(await retry.count()).toBe(0);
+      await name.fill("我的修改意图");
+    } else expect(await page.getByText("当前名称：外部更新名称", { exact: true }).isVisible()).toBe(true);
+    await (scenario === "retry" ? retry : save).click();
+    await page.getByText(accepted ? "进行中 · 版本 11" : "项目已被更新，请核对当前值后重试。", { exact: true }).waitFor();
+    expect(JSON.parse((await page.locator("body").getAttribute("data-patch-revisions"))!)).toEqual(
+      scenario === "open-conflict" ? [1, 1] : scenario === "reject" ? [1] : [10]);
     expect(await name.inputValue()).toBe("我的修改意图");
-    await page.getByRole("button", { name: "保存名称", exact: true }).click();
-    await page.getByText("进行中 · 版本 11", { exact: true }).waitFor();
-    expect(await page.getByRole("button", { name: "按当前版本重试", exact: true }).count()).toBe(0);
+    expect(await retry.count()).toBe(accepted ? 0 : 1);
+    if (!accepted) {
+      expect(await page.getByText("进行中 · 版本 11", { exact: true }).count()).toBe(0);
+      expect(await page.getByText("当前名称：外部更新名称", { exact: true }).isVisible()).toBe(true);
+    }
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("conflict survives focus refresh and newer center values keep the original retry intent", async () => {
   const { page, errors } = await newPage(390, "?fixture=conflict-refresh");
   try {
-    await page.getByRole("button", { name: "项目设置", exact: true }).click();
-    await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+    await openSettings(page);
     const name = page.getByLabel("项目显示名", { exact: true });
     await name.fill("保留的名称修改");
     await page.getByRole("button", { name: "保存名称", exact: true }).click();
@@ -419,7 +425,6 @@ test("conflict survives focus refresh and newer center values keep the original 
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("a transient read keeps the sidebar while revocation removes it", async () => {
   const { page, errors } = await newPage(390, "?fixture=resilience");
   try {
@@ -434,7 +439,6 @@ test("a transient read keeps the sidebar while revocation removes it", async () 
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 test("a machine with no binding has no unusable team entry", async () => {
   const { page, errors } = await newPage(390, "?fixture=no-binding");
   try {
@@ -443,7 +447,6 @@ test("a machine with no binding has no unusable team entry", async () => {
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 
 for (const width of [390, 1280]) test(`multiple bindings survive creating a project in the real entry at ${width}px`, async () => {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
@@ -498,8 +501,7 @@ for (const width of [390, 1280]) test(`multiple bindings survive creating a proj
 test("explicit existing personId rejects self and active members but accepts another team member", async () => {
   const { page, errors } = await newPage(390, "?fixture=settings");
   try {
-    await page.getByRole("button", { name: "项目设置", exact: true }).click();
-    await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+    await openSettings(page);
     await page.getByText("协作伙伴的机器", { exact: true }).click();
     const recipient = page.getByLabel("邀请对象", { exact: true });
     const submit = page.getByRole("button", { name: "邀请成员", exact: true });
@@ -513,7 +515,6 @@ test("explicit existing personId rejects self and active members but accepts ano
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 
 test("answered-looking create stays pending while explicit release unlocks a new form without another POST", async () => {
   const { page, errors } = await newPage(390, "?fixture=pending");
@@ -532,7 +533,6 @@ test("answered-looking create stays pending while explicit release unlocks a new
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });
-
 
 test("cross-team duplicate projectId disables its sources and shows the exact N4 dependency", async () => {
   const page = await browser.newPage({ viewport: { width: 390, height: 900 } });

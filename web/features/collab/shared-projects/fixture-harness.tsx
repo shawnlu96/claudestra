@@ -29,6 +29,7 @@ let readFailure = 0;
 let reads = 0;
 let joined = false;
 const calls: string[] = [];
+const patchRevisions: number[] = [];
 const record = (name: string) => { calls.push(name); document.body.dataset.calls = JSON.stringify(calls); };
 let createdOperation: string | null = null;
 const port: SharedProjectsPort = {
@@ -49,6 +50,7 @@ const port: SharedProjectsPort = {
   },
   patch: async (ref, patch) => {
     record("patch");
+    patchRevisions.push(patch.rev); document.body.dataset.patchRevisions = JSON.stringify(patchRevisions);
     const p = snapshot.projects.find(p => p.projectId === ref.projectId)!;
     if (!conflicted) { conflicted = true; p.rev++; p.name = "同事更新的名称"; throw new ProjectFailure(409, structuredClone(p)); }
     if (patch.rev !== p.rev) throw new ProjectFailure(409, structuredClone(p));

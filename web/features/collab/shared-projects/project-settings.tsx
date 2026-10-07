@@ -7,22 +7,27 @@ import { useProjectAction } from "./use-projects";
 export function ProjectSettings({ project, port, refresh }: {
   project: SharedProject; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
 }) {
-  const [editor, setEditor] = useState<{ source: SharedProject; name: string; rev: number; dirty: boolean;
-    conflict: { current: SharedProject; patch: ProjectPatch } | null }>({ source: project, name: project.name, rev: project.rev, dirty: false, conflict: null });
-  // Refresh advances CAS authority, but only an explicit edit/retry/success can discard the draft or conflict.
-  if (editor.source !== project) setEditor(previous => ({ ...previous, source: project,
-    name: previous.dirty || previous.conflict ? previous.name : project.name,
-    rev: Math.max(previous.rev, project.rev),
-    conflict: previous.conflict && project.rev > previous.conflict.current.rev ? { ...previous.conflict, current: project } : previous.conflict,
-  }));
-  const { name, rev, conflict } = editor;
+  const [editor, setEditor] = useState<{ source: SharedProject; draft: string; baseRev: number; baseName: string; dirty: boolean;
+    conflict: { current: SharedProject; patch: ProjectPatch } | null }>({ source: project, draft: project.name,
+    baseRev: project.rev, baseName: project.name, dirty: false, conflict: null });
+  // A dirty draft retains its original CAS authority until an explicit retry; refresh only exposes newer competing values.
+  if (editor.source !== project) setEditor(previous => {
+    const conflict = previous.conflict && project.rev > previous.conflict.current.rev
+      ? { ...previous.conflict, current: project } : previous.conflict;
+    return { ...previous, source: project,
+      ...(!previous.dirty ? { draft: project.name, baseRev: project.rev, baseName: project.name } : {}),
+      conflict: conflict ?? (previous.dirty && project.rev > previous.baseRev && project.name !== previous.baseName
+        ? { current: project, patch: { rev: previous.baseRev, name: previous.draft.trim() } } : null),
+    };
+  });
+  const { draft, baseRev, conflict } = editor;
   const action = useProjectAction(refresh);
   const update = async (patch: ProjectPatch, signal: AbortSignal) => {
     setEditor(previous => ({ ...previous, conflict: null }));
     try {
       await port.patch(project, patch, signal);
-      if (!signal.aborted) setEditor(previous => ({ ...previous, rev: Math.max(previous.rev, patch.rev + 1),
-        dirty: patch.name !== undefined && previous.name.trim() === patch.name ? false : previous.dirty }));
+      if (!signal.aborted) setEditor(previous => patch.name !== undefined && previous.draft.trim() === patch.name
+        ? { ...previous, baseRev: patch.rev + 1, baseName: patch.name, dirty: false } : previous);
     }
     catch (e) {
       if (!signal.aborted && e instanceof ProjectFailure && e.status === 409 && e.current && projectKey(e.current) === projectKey(project)) {
@@ -35,25 +40,26 @@ export function ProjectSettings({ project, port, refresh }: {
   return <section className="space-y-3">
     <p className="text-sm opacity-70">{project.status === "archived" ? "已归档" : "进行中"} · 版本 {project.rev}</p>
     {project.role === "owner" && <>
-      <form className="space-y-2" onSubmit={e => { e.preventDefault(); void action.run(s => update({ rev, name: name.trim() }, s)); }}>
+      <form className="space-y-2" onSubmit={e => { e.preventDefault(); void action.run(s => update({ rev: baseRev, name: draft.trim() }, s)); }}>
         <label className="block text-sm">项目显示名
-          <input className="input mt-1 w-full" value={name} required maxLength={64} onChange={e => {
-            const value = e.target.value; setEditor(previous => ({ ...previous, name: value, dirty: true, conflict: null }));
+          <input className="input mt-1 w-full" value={draft} required maxLength={64} onChange={e => {
+            const value = e.target.value; setEditor(previous => ({ ...previous, draft: value, dirty: true, conflict: null }));
           }} />
         </label>
         <div className="flex flex-wrap gap-2">
-          <button className="btn btn-sm" disabled={action.busy || !name.trim()}>保存名称</button>
+          <button className="btn btn-sm" disabled={action.busy || !draft.trim()}>保存名称</button>
           <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => void action.run(s => update({
-            rev, status: project.status === "active" ? "archived" : "active",
+            rev: baseRev, status: project.status === "active" ? "archived" : "active",
           }, s))}>{project.status === "active" ? "归档项目" : "恢复项目"}</button>
         </div>
       </form>
       {conflict && <div role="alert" className="rounded-lg border border-warning p-3 text-sm space-y-2">
         <p>当前名称：{conflict.current.name}</p>
         <p>当前状态：{conflict.current.status === "active" ? "进行中" : "已归档"} · 版本 {conflict.current.rev}</p>
-        <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => void action.run(s => update({
-          ...conflict.patch, rev: conflict.current.rev,
-        }, s))}>按当前版本重试</button>
+        <button type="button" className="btn btn-sm" disabled={action.busy} onClick={() => {
+          setEditor(previous => ({ ...previous, baseRev: conflict.current.rev, baseName: conflict.current.name }));
+          void action.run(s => update({ ...conflict.patch, rev: conflict.current.rev }, s));
+        }}>按当前版本重试</button>
       </div>}
     </>}
     <ActionStatus {...action} />
