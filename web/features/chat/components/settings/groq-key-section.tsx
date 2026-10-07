@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { useT } from "@/lib/i18n";
 import type { SharedBusy } from "./profile-section";
 import { Section } from "./section";
@@ -64,7 +64,7 @@ export function GroqKeySection({ groq, busy }: { groq: ReturnType<typeof useGroq
             placeholder="gsk_…"
             autoComplete="off"
             spellCheck={false}
-            style={{ WebkitTextSecurity: "disc" } as React.CSSProperties}
+            style={{ WebkitTextSecurity: "disc" } as CSSProperties}
             className="input input-bordered input-sm w-full text-sm"
           />
           <div className="mt-3 flex items-center justify-end gap-2.5">

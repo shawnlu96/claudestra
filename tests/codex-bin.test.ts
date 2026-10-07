@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { appCodexBin } from "../src/lib/codex.ts";
+import { appCodexBin, findCodexBin } from "../src/lib/codex.ts";
 
 const dirs: string[] = [];
 const resources = () => {
@@ -33,4 +33,18 @@ test("旧布局 Resources/codex 照认；清单坏了或入口不存在时也退
 
 test("两种布局都没有 → null", () => {
   expect(appCodexBin(resources())).toBeNull();
+});
+
+test("CODEX_BIN 指向存在的文件时优先于 App 自带的", () => {
+  const r = resources();
+  const bin = join(r, "my-codex");
+  writeFileSync(bin, "#!/bin/sh\n");
+  const prev = process.env.CODEX_BIN;
+  process.env.CODEX_BIN = bin;
+  try {
+    expect(findCodexBin()).toBe(bin);
+  } finally {
+    if (prev === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = prev;
+  }
 });
