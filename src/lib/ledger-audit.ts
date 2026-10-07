@@ -11,6 +11,8 @@ import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-sta
 import { blockFindings } from "./scheduler-dispatch-block.js";
 import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
+import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 
 const MIN = 60_000;
 
@@ -47,7 +49,7 @@ export const AUDIT_THRESHOLDS = {
 const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
-  "dispatch_blocked", "manual_reason_missing", "manual_would_resume",
+  "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -108,6 +110,10 @@ export interface AuditSnapshot {
   unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
+  /** 只读等待图（ledger-deadlock.ts）；没取 = 等待规则不跑也不列 skipped，图里有 unknown = 不进 evaluated */
+  waitGraph?: WaitGraph;
+  /** 只有完整扫描建立过基线的等待规则，才可在不完整扫描时通知。 */
+  waitBaseline?: readonly string[] | null;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
   unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
@@ -414,6 +420,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
+  mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
   const resume = manualResumeMode(policy, s.project);
   manualRules(s, ts, resume, now, emit);
@@ -428,7 +435,11 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
     ownerInbox(s.ownerInbox, now, emit);
     evaluated.push("owner_inbox_stale");
   } else skip(why("ownerInbox"), "owner_inbox_stale");
-  return { findings, evaluated, skipped, keep: kept };
+  const wait = waitAudit(s.waitGraph, now);
+  wait.findings.forEach(emit);
+  evaluated.push(...wait.evaluated);
+  skipped.push(...wait.skipped);
+  return { findings: waitNotificationFindings(findings, s.waitGraph, s.waitBaseline), evaluated, skipped, keep: kept };
 }
 
 /** 推给 PM / 调度助理的一条通知（bridge/ledger-audit-service.ts 发）：一轮新出现的合成一条，每条一行「对象 · 建议 — 现象」 */

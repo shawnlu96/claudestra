@@ -92,7 +92,7 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
       reason: `作者家族由 ${s.reviewer!.family === "claude" ? "codex" : "claude"} 变成 ${s.workflow!.authorFamily}，更换不独立的审查会话` };
   }
   if (!swap || s.reviewer) return null;
-  if (swap.data.refusal) return null; // a refusal epoch's reviewer is created locally by sessionGate, never placed in the pool
+  if (swap.data.refusal || swap.data.legacy === true) return null; // a refusal epoch's / legacy retirement's reviewer is created locally by sessionGate, never pooled
   const intent = s.intents.find((i) => i.id === swap.data.intentId);
   if (intent?.status !== "done") return { kind: "wait", code: "reviewer_swap", reason: "旧审查会话正在归档、停止，完成后再派跨家族审查" };
   const since = s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? 0;
@@ -107,6 +107,15 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
 export const HOLD_OP = "model_safety_hold", RESOLVE_OP = "model_safety_resolved";
 export const RETRY_OP = "model_refusal_retry", EXEMPT_OP = "model_refusal_exempt";
 
+/** Only the writer's exact old-ticket replacement closes a pending plan; safety holds remain separately resolved. */
+export function legacyReplacesPlan(events: readonly LedgerEvent[], plan: LedgerEvent): boolean {
+  return (plan.data.op === RETRY_OP || plan.data.op === EXEMPT_OP) && events.some((e) => e.seq > plan.seq &&
+    e.project === plan.project && e.target === plan.target &&
+    e.kind === "scheduler" && e.data.op === "reviewer_swap" && e.data.legacy === true && !e.data.refusal &&
+    e.data.replacedPlanSeq === plan.seq && e.data.intentId === plan.data.intentId && e.data.sessionId === plan.data.session &&
+    e.data.sentHead === plan.data.head && e.data.sentSpecRev === plan.data.specRev && e.data.round === plan.data.round);
+}
+
 /**
  * A hold, or an approved refusal continuation still waiting for its review: either way no automatic family switch. A continuation
  * the refusal epoch already executed is closed — the epoch's own ensure / bind / review run under it.
@@ -115,7 +124,8 @@ export function openRefusal(events: readonly LedgerEvent[]): LedgerEvent | null 
   const hold = openSafetyHold(events);
   if (hold) return hold;
   const cont = events.findLast((e) => e.data.op === RETRY_OP || e.data.op === EXEMPT_OP);
-  return cont && !events.some((e) => e.seq > cont.seq && (e.kind === "review" || refusalOf(e)?.planSeq === cont.seq)) ? cont : null;
+  return cont && !legacyReplacesPlan(events, cont) &&
+    !events.some((e) => e.seq > cont.seq && (e.kind === "review" || refusalOf(e)?.planSeq === cont.seq)) ? cont : null;
 }
 
 /** The task's unresolved model safety hold (scheduler-model-outcome.ts writes it), or null. Only a manager's resolve lifts it. */
@@ -125,7 +135,8 @@ export function openSafetyHold(events: readonly LedgerEvent[]): LedgerEvent | nu
   return events.some((e) => e.seq > hold.seq && e.data.op === RESOLVE_OP && e.data.holdSeq === hold.seq) ? null : hold;
 }
 
-const swapKey = (id: string): string => `scheduler:${id}:reviewer-swap`;
+/** Also the dedup key of MODELXW's legacy retirement (scheduler-model-wiring.ts writeLegacyReviewRetire), keyed by the old ticket. */
+export const swapKey = (id: string): string => `scheduler:${id}:reviewer-swap`;
 
 function swapIntent(db: Database, ctx: WriteCtx, id: string): SchedulerIntent {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "更换审查员只由调度服务执行");
@@ -202,8 +213,14 @@ export function applyReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string,
 export function mayRebindReviewer(db: Database, prior: SchedulerSession, intentId: string): boolean {
   if (prior.role !== "reviewer" || prior.state !== "retired" || !prior.retireIntentId) return false;
   const reused = prior.archiveReceipt === `reused_by_author:${prior.agent}`;
-  if (!prior.killReceipt && !reused) return false;
   const swap = getEventByDedup(db, swapKey(prior.retireIntentId));
+  if (swap?.data.legacy === true) {
+    const intent = getIntent(db, intentId), task = intent && mustTask(db, intent.taskId);
+    const lapse = task && legacyReviewLapse(db, task, listEvents(db, { project: task.project, target: task.id }));
+    if (lapse) throw new LedgerError("conflict", `不绑定旧单替代审查员：${lapse}`);
+  }
+  // MODELXW: a legacy refused ticket's reviewer is retired without being woken or killed (as under a refusal epoch)
+  if (!prior.killReceipt && !reused && swap?.data.legacy !== true) return false;
   const intent = getIntent(db, intentId);
   return !!swap && swap.data.sessionId === prior.sessionId && !!intent && intent.eventSeq > swap.seq &&
     getIntent(db, prior.retireIntentId)?.status === "done";
@@ -302,7 +319,7 @@ const materialAfter = (events: readonly LedgerEvent[], task: Window, sent: Pick<
 const refuseEpoch = (why: string): never => { throw new LedgerError("conflict", `不执行拒审接续，退人工：${why}`); };
 
 /** The owner's standing approval as of now, or why it no longer covers this card (same reading MODEL used to plan). */
-function approvalLapse(db: Database, task: LedgerTask, approvalId: unknown): string | null {
+export function approvalLapse(db: Database, task: LedgerTask, approvalId: unknown): string | null {
   if (task.extra.refusalHold === true) return "owner 已按卡挂起（extra.refusalHold）";
   let a: ReturnType<ReturnType<typeof createRefusalApprovalPort>>;
   try { a = createRefusalApprovalPort(db)(task.project, task.id); } catch (e) { return `读批准失败：${(e as Error).message}`; }
@@ -310,6 +327,28 @@ function approvalLapse(db: Database, task: LedgerTask, approvalId: unknown): str
   if (a.revoked !== false) return "批准已撤销";
   if (a.ownerHold !== false) return "owner 已挂起";
   if (a.content !== "allowed") return "内容未确认允许";
+  return null;
+}
+
+/** Legacy guards end with their window; a changed approval needs a later formal resume before effects may restart. */
+function legacyReviewLapse(db: Database, task: LedgerTask, events: readonly LedgerEvent[], families?: readonly AuthorFamily[]): string | null {
+  const swap = latestReviewerSwap(events);
+  if (!swap || swap.data.legacy !== true || events.some((e) => e.seq > swap.seq && e.kind === "review")) return null;
+  if (!inWindow(swap, task)) return null;
+  const workflow = getWorkflow(db, task.id);
+  if (workflow?.mode !== "auto" || workflow.specRev !== task.specRev || task.stage !== "review") return null;
+  let approvalId = swap.data.approvalId;
+  const resumed = events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow_resume" && e.seq > swap.seq && e.data.workflowRev === workflow.rev);
+  try {
+    const a = resumed && createRefusalApprovalPort(db)(task.project, task.id);
+    const decision = a && listEvents(db, { project: task.project }).findLast((e) => e.kind === "decision" && e.data.askId === a.approvalId && !e.data.partial);
+    if (resumed && decision && resumed.seq > decision.seq) approvalId = a!.approvalId;
+  } catch (e) { return `读恢复批准失败：${(e as Error).message}`; }
+  const lapse = approvalLapse(db, task, approvalId);
+  if (lapse) return lapse;
+  if (openRefusal(events)) return "本卡有未处置的模型安全拒绝";
+  const family = otherFamily(remoteHeadFamily(db, task) ?? workflow.authorFamily);
+  if (families && !families.includes(family)) return `旧单替代审查家族 ${family} 已不在本机授权配置内`;
   return null;
 }
 
@@ -385,6 +424,8 @@ export function applyRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, p
 export function refusalEpochLapse(db: Database, task: LedgerTask, opts: { check: MaterialCheck; families?: readonly AuthorFamily[];
   order?: { intent: SchedulerIntent; plan: OrderPlan } }): string | null {
   const events = listEvents(db, { project: task.project, target: task.id });
+  const legacy = legacyReviewLapse(db, task, events, opts.families);
+  if (legacy) return legacy;
   const epoch = refusalEpoch(events, task), r = refusalOf(epoch ?? undefined);
   if (!epoch || !r || events.some((e) => e.seq > epoch.seq && (e.kind === "review" || e.data.op === HOLD_OP))) return null;
   const workflow = getWorkflow(db, task.id);
