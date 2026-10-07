@@ -211,8 +211,9 @@ export interface LedgerReviewRef {
 
 const count = (v: unknown): number => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0);
 
-/** 结论事件只有审查员名、没有 kind：同卡没有给这个名字定过身份时，带 @（peer）或 local:（人）的不算本机审查员 */
-const localReviewer = (who: unknown): who is string => typeof who === "string" && !!who && !who.includes("@") && !who.startsWith("local:");
+/** 结论事件只有审查员名、没有 kind：同卡没有给这个名字定过身份时，带 @ 或 peer:（出借结论，ledger-lend-result.ts）的远端、local:（人）都不算本机审查员 */
+const localReviewer = (who: unknown): who is string =>
+  typeof who === "string" && !!who && !who.includes("@") && !who.startsWith("local:") && !who.startsWith("peer:");
 /** 派审 / 绑定已由调用方按 kind / transport / 出借意图判过本机：名字原样收（本机 agent 名可以带 @，见 ledger-steps.ts stepPeer） */
 const inReview = (local: boolean, who: unknown, id: string, round: number): [string, LedgerReviewRef] | null =>
   local && typeof who === "string" && who ? [who, { id, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;

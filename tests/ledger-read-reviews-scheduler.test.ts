@@ -122,6 +122,14 @@ describe("activeReviewsByAgent：调度器审查员会话", () => {
     expect(Object.keys(reviews())).toEqual(["rv@local"]);
   });
 
+  test("远端会话绑定后，出借结论写成 peer:<name>：不当本机审查员（验收追加 3 / peer-colon-review-result）", () => {
+    card("A1");
+    bind("A1", "reviewer@remote", "reviewer", "peer");
+    expect(reviews()).toEqual({});
+    review("A1", "peer:mate", "pass");
+    expect(reviews()).toEqual({});
+  });
+
   test("同一审查员先后审两张卡：取最新（在审优先于审完）", () => {
     card("A1");
     card("A2", "review", 3);
