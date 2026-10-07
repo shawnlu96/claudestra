@@ -1,10 +1,10 @@
 /**
- * i28-CIF3 · FLK2 (10-07) wired as src/scheduler.ts runs it: read-only LedgerReader, every write the real ledger CLI child (scheduler
- * identity + lease, temp HOME / TMPDIR / state dir), production mergeExternal plus the CIF1 / CIF2 gh layers on the same runner, with
- * only gh faked (calls, CI logs and the merge head recorded). Card A: ready → updating (the scheduler's update-branch) → carried →
- * await_ci → GitHub reports UNSTABLE with one shard red on a timeout in a test the PR does not touch, before the required gate ran.
- * Before CIF3 that froze the project queue (unknown); now the run waits for the gate, re-runs once, and merges pinned to the carried head.
- * Driver / ledger cases: tests/scheduler-merge-ci-carried.test.ts.
+ * Red CI on the scheduler's carried head, wired as src/scheduler.ts runs it: read-only LedgerReader, every write the real ledger CLI
+ * child (scheduler identity + lease, private HOME / TMPDIR / state dir), production mergeExternal plus the CIF1 / CIF2 gh layers on
+ * the same runner, with only gh faked (calls, CI logs and the merge head recorded). Card A: ready → updating (the scheduler's
+ * update-branch) → carried → await_ci → GitHub reports UNSTABLE with one shard red before the required gate ran. The run must wait
+ * for the gate, then take the CIF1 split (one rerun for a timeout in a test the PR does not touch, otherwise ci_fail back to fix),
+ * never unknown, never a frozen queue. Driver / ledger cases: tests/scheduler-merge-ci-carried.test.ts.
  */
 import { afterAll, afterEach, beforeAll, expect, setSystemTime, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -88,7 +88,8 @@ type Bucket = "pass" | "fail" | "pending";
 const checks = (shard: Bucket, gate: Bucket | null) => JSON.stringify([{ name: SHARD, bucket: shard, link: `${RUN}/job/1` },
   ...(gate ? [{ name: GATE, bucket: gate, link: `${RUN}/job/5` }] : [])]);
 
-async function setup(log = TIMEOUT_ONLY) {
+/** `log` null: `gh run view --log-failed` fails; `files`: the PR's changed files. */
+async function setup(log: string | null = TIMEOUT_ONLY, files = ["src/x.ts"]) {
   const errors = spyOn(console, "error").mockImplementation(() => {});
   const dir = mkdtempSync(join(tmpdir(), "cif3-ledger-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   const seq = () => (db.query("SELECT MAX(seq) AS seq FROM events WHERE project='p'").get() as { seq: number }).seq;
@@ -163,14 +164,14 @@ async function setup(log = TIMEOUT_ONLY) {
     gh.calls.push(a);
     const n = Number(/\/pull\/(\d+)/.exec(a)?.[1] ?? /pulls\/(\d+)\//.exec(a)?.[1]), p = gh.prs[n];
     if (a.startsWith("repo view")) return ok({ nameWithOwner: "example/repo" });
-    if (a === `pr view ${PRS[A]} --json files`) return ok({ files: [{ path: "src/x.ts" }] });
+    if (a === `pr view ${PRS[A]} --json files`) return ok({ files: files.map((path) => ({ path })) });
     if (a.startsWith("pr view") && p) return ok({ state: p.merged ? "MERGED" : "OPEN", headRefOid: p.head, headRefName: `task/${n === 42 ? A : B}`,
       baseRefName: "main", isDraft: false, isCrossRepository: false, mergeStateStatus: p.merged ? "UNKNOWN" : p.mergeState, mergeCommit: p.merged ? { oid: M } : null });
     if (a.startsWith("pr checks") && p) return { code: p.checks === passing ? 0 : 8, stdout: p.checks, stderr: "", timedOut: false };
     if (a.startsWith("api repos/example/repo/compare/main...")) return ok({ behind: a.includes(reviewed) ? 1 : 0, main });
     if (a.startsWith("api repos/example/repo/compare/")) return ok({ base: main, commits: [] }); // CIF2: the carried head is not behind main
     if (a === "run view 54368 --repo example/repo --json attempt,status,conclusion") return ok(gh.run);
-    if (a === "run view 54368 --repo example/repo --log-failed") return ok(gh.log);
+    if (a === "run view 54368 --repo example/repo --log-failed") return gh.log === null ? { code: 1, stdout: "", stderr: "HTTP 404", timedOut: false } : ok(gh.log);
     if (a === "run rerun 54368 --failed --repo example/repo") { gh.run = { attempt: 2, status: "queued", conclusion: "" }; return ok(""); }
     if (a === `pr update-branch ${PRS[A]}`) { Object.assign(gh.prs[42]!, { head: merged, checks: checks("pending", null), mergeState: "UNSTABLE" }); return ok(""); }
     const merge = /^api -X PUT repos\/example\/repo\/pulls\/(\d+)\/merge -f sha=([a-f0-9]{40}) -f merge_method=merge$/.exec(a);
@@ -208,7 +209,7 @@ async function setup(log = TIMEOUT_ONLY) {
 test("CIF3 旧红新绿：FLK2 形态，调度器 update-branch 沿用后的 head 上分片超时红 → 不判 unknown、记一次重跑继续等，重跑绿后按沿用 head 钉 head 合并，队列始终没冻", async () => {
   const s = await setup();
   await s.toFlk2();
-  expect(s.state("a0")).toEqual({ phase: "await_ci", frozen: false, stage: "merge", head: merged }); // before CIF3: unknown, frozen
+  expect(s.state("a0")).toEqual({ phase: "await_ci", frozen: false, stage: "merge", head: merged }); // not unknown, queue not frozen
   s.gateRed();
   await s.tick();
   expect(s.state("a0")).toEqual({ phase: "await_ci", frozen: false, stage: "merge", head: merged });
@@ -233,16 +234,42 @@ test("CIF3 旧红新绿：FLK2 形态，调度器 update-branch 沿用后的 hea
   expect(s.redirected).toEqual([]); // every child kept this fixture's state / runtime dirs (test-guard redirected none)
 }, 180_000);
 
-test("CIF3 反例：同一形态但断言失败 → 退 fix、不重跑、队列不冻", async () => {
-  const s = await setup(ASSERTED);
-  await s.toFlk2();
-  expect(s.state("a0")).toMatchObject({ phase: "await_ci", frozen: false });
-  s.gateRed();
-  await s.tick();
+/** The formal ci_fail receipt on the carried head, stage fix, queue open, every write a real CLI child kept in this fixture. */
+const bouncedToFix = (s: Awaited<ReturnType<typeof setup>>) => {
   expect(s.state("a0")).toEqual({ phase: "resolved", frozen: false, stage: "fix", head: merged });
   expect(s.ops("merge_conflict")).toEqual([expect.objectContaining({ data: expect.objectContaining({ cause: "ci_fail", prHead: merged,
     checks: [{ name: GATE, link: RUN }] }) })]);
-  expect(s.sent()).toEqual([`pr update-branch ${PRS[A]}`]);
+  expect(s.children.every((c) => c.startsWith("scheduler-"))).toBe(true);
+  expect(s.redirected).toEqual([]);
+};
+
+for (const [name, log, files] of [["断言失败", ASSERTED, undefined], ["失败文件在 PR 里", TIMEOUT_ONLY, ["src/x.ts", SLOW]],
+  ["日志拿不到（fail-closed）", null, undefined]] as const) {
+  test(`CIF3 反例：同一形态但${name} → 退 fix、不重跑、队列不冻`, async () => {
+    const s = await setup(log, files && [...files]);
+    await s.toFlk2();
+    expect(s.state("a0")).toMatchObject({ phase: "await_ci", frozen: false });
+    s.gateRed();
+    await s.tick();
+    bouncedToFix(s);
+    expect(s.ops("merge_ci_rerun")).toEqual([]);
+    expect(s.sent()).toEqual([`pr update-branch ${PRS[A]}`]);
+  }, 180_000);
+}
+
+test("CIF3 反例：重跑后同一沿用 head 仍红 → 退 fix、不第二次重跑、队列不冻", async () => {
+  const s = await setup();
+  await s.toFlk2();
+  s.gateRed();
+  await s.tick();
+  expect(s.state("a0")).toEqual({ phase: "await_ci", frozen: false, stage: "merge", head: merged });
+  expect(s.ops("merge_ci_rerun")).toHaveLength(1);
+  s.gh.run = { attempt: 2, status: "completed", conclusion: "failure" }; // attempt 2 ended red on the same timeout
+  s.gh.prs[42]!.checks = checks("fail", "fail");
+  await s.tick();
+  bouncedToFix(s);
+  expect(s.ops("merge_ci_rerun")).toHaveLength(1);
+  expect(s.sent()).toEqual([`pr update-branch ${PRS[A]}`, "run rerun 54368 --failed --repo example/repo"]);
 }, 180_000);
 
 test("CIF3 隔离反例：子进程状态目录不在它认可的临时根下 → test-guard 照旧改道到空台账，写不进本 fixture，也不碰那个目录", async () => {

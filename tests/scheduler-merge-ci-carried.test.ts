@@ -1,8 +1,8 @@
 /**
- * i28-CIF3 · FLK2 (10-07): after the scheduler's own update-branch the carried head's CI went red on one shard (not a required check)
- * while the required gate had not reported yet, and the driver froze the queue (unknown). Now the run waits for the gate; once it
- * is red, the CIF1 rule decides (timeouts in untouched tests → one rerun per head, anything else → back to fix). In-process ledger,
- * fake gh argv runner; the production-wiring case is tests/scheduler-merge-ci-carried-e2e.test.ts.
+ * Red CI on the carried head (after the scheduler's own update-branch): a shard (not a required check) red while the required gate
+ * has not reported yet must keep the run waiting, not unknown; once the gate is red, the CIF1 rule decides (timeouts in untouched
+ * tests → one rerun per head, anything else → back to fix). In-process ledger, fake gh argv runner; the production-wiring case is
+ * tests/scheduler-merge-ci-carried-e2e.test.ts.
  */
 import { describe, expect, test } from "bun:test";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";

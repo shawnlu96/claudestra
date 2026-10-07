@@ -1,10 +1,9 @@
 /**
- * Red CI on the run's own head before the required gate has a verdict (i28-CIF3, FLK2 10-07). The sharded workflow reports a
- * shard (not a required check) as failed minutes before its required gate (`typecheck + test + guard`, needs: tests) has run,
- * and GitHub already says UNSTABLE. The bounce / CIF1 / CIF2 path keys on required checks only, so that window used to fall
- * through to unknown and freeze the queue. Now the run keeps waiting there; once a required check fails, bounceStep takes it
- * (CIF1 rerun once per head, else back to fix). Red with every required check settled and none failed stays unknown.
- * tests/scheduler-merge-ci-carried*.test.ts.
+ * Red CI on the run's own head before the required gate has a verdict. The sharded workflow reports a shard (not a required check)
+ * as failed minutes before its required gate (`typecheck + test + guard`, needs: tests) has run, and GitHub already says UNSTABLE.
+ * The bounce / CIF1 / CIF2 path keys on required checks only, so the run keeps waiting in that window instead of falling through to
+ * unknown (which freezes the queue); once a required check fails, bounceStep takes it (CIF1 rerun once per head, else back to fix).
+ * Red with every required check settled and none failed stays unknown. tests/scheduler-merge-ci-carried*.test.ts.
  */
 import type { PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
