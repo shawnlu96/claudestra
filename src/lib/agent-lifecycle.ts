@@ -81,6 +81,8 @@ export interface PlanInput {
   pending?: readonly (PendingCleanup & { error?: string })[];
   /** registerFailures(db): creates whose registration failed or never completed (the agent was kept for PM) */
   registerFailed?: readonly { agent: string; sessionId: string }[];
+  /** askingAgents(db): agent → its own open, unexpired asks (ASKPM2: it idles waiting for the answer) */
+  asking?: ReadonlyMap<string, readonly { id: string; taskId: string }[]>;
 }
 
 type Rule = "card_finished" | "reviewer_done" | "author_idle" | "stock" | "memory" | "cleanup_retry";
@@ -199,6 +201,8 @@ export function planLifecycle(input: PlanInput): Plan {
     if (recent(w.facts)) continue;
     const conflict = usedElsewhere(w, cards) ?? sessionMismatch(w);
     if (conflict) { keep(w, conflict); continue; }
+    const ask = input.asking?.get(w.facts.name)?.find((x) => { const c = cards.get(x.taskId); return !!c && !FINISHED_STAGES.includes(c.stage); });
+    if (ask && !(card && FINISHED_STAGES.includes(card.stage))) { keep(w, `有未答提问 ${ask.id}，等答复`); continue; }
     const act = decide(input, w, card);
     if (act && w.bound) {
       // finished cards: scheduler-retire.ts is collecting it already, nothing to report

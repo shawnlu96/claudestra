@@ -84,8 +84,20 @@ async function carryOf(run: MergeRun, external: MergeExternal, head: string): Pr
 /** update-branch moved the head: keep the review only for a pure "merge main in" commit, else the old review is void. */
 async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
   const carry = await carryOf(run, external, pr.head);
-  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
-    return step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, carry), undefined, pr.head); // scheduler-review-rebase.ts
+  const back = (c: ReviewCarry) => step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, c), undefined, pr.head); // scheduler-review-rebase.ts
+  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return back(carry);
+  const receipt = carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
+    mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain);
+  const carrying = () => step("await_ci", receipt, undefined, pr.head);
+  if (run.phase === "ready") {
+    if (pr.draft) return run; // re-checked next round on the same evidence
+    // MCRY2: the ledger carries only on an earlier attempt's own update-branch (scheduler-merge-ready-carry.ts), judged before any
+    // CI / mergeability gate so a refused head goes back to review instead of freezing the queue; await_ci gates a carried one.
+    const carried = await carrying().catch((e: unknown) => { // a drift refuses back() too, which then ends in the driver's unknown
+      if (stopped(e)) throw e;
+      return back({ ...carry, ok: false, reason: `跨尝试沿用被台账拒绝：${(e as Error).message.replace(/\s+/g, " ").slice(0, 200)}` });
+    });
+    return carried.phase === "await_ci" && pr.mergeState === "DIRTY" ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
   }
   // i28-CIF2's own update: a non-draft new head already red (UNSTABLE, BLOCKED or BEHIND) is carried, then bounced below
   const behind = behindUpdating(run) && !pr.draft && pr.mergeState !== "UNKNOWN" && failed(pr.checks);
@@ -93,8 +105,8 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
   if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
   if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState) && !behind) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
-  const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
-    mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain), undefined, pr.head);
+  const carried = await carrying();
+  if (carried.phase !== "await_ci") return carried;
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
   return pr.mergeState === "DIRTY" || behind ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }
@@ -141,9 +153,12 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
   try {
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);
-      if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || !sameHead(run, pr)) {
+      if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch) {
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
+      // MCRY2: only the head moved (an earlier attempt's update-branch, or a push): carry or re-review, never a queue freeze.
+      // Awaited so a refused fallback (the PM took the card over meanwhile) lands in the catch below and cancels via unknown.
+      if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;

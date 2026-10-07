@@ -103,7 +103,7 @@ describe("i28-M12 conflict goes back to fix without freezing the queue", () => {
   }
   test("counterexamples: DIRTY with a moved head / closed / fork / draft / other base or branch is never a conflict", async () => {
     for (const [phase, change, expected] of [
-      ["ready", { head: N }, "unknown"], ["ready", { state: "CLOSED" as const }, "unknown"], ["ready", { crossRepository: true }, "unknown"],
+      ["ready", { head: N }, "await_review"] /* MCRY2: carry refused → re-review, no freeze */, ["ready", { state: "CLOSED" as const }, "unknown"], ["ready", { crossRepository: true }, "unknown"],
       ["ready", { base: "dev" }, "unknown"], ["ready", { branch: "task/T9" }, "unknown"], ["ready", { draft: true }, "ready"],
       ["await_ci", { head: N }, "unknown"], ["await_ci", { state: "CLOSED" as const }, "unknown"], ["await_ci", { crossRepository: true }, "unknown"],
       ["await_ci", { draft: true }, "await_ci"], ["updating", { state: "CLOSED" as const }, "unknown"], ["updating", { draft: true }, "updating"],
@@ -111,7 +111,8 @@ describe("i28-M12 conflict goes back to fix without freezing the queue", () => {
       await with_(phase, async (f) => {
         f.snaps = [dirty(change)];
         await f.tick();
-        expect([phase, JSON.stringify(change), stateOf(f).run, stateOf(f).stage]).toEqual([phase, JSON.stringify(change), expected, "merge"]);
+        expect([phase, JSON.stringify(change), stateOf(f).run, stateOf(f).stage]).toEqual([phase, JSON.stringify(change), expected, expected === "await_review" ? "review" : "merge"]);
+        if (expected === "await_review") expect([getTask(f.db, "T1")?.headSHA, stateOf(f).frozen]).toEqual([N, false]);
         expect(conflictEvents(f)).toEqual([]);
       });
     }

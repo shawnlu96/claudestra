@@ -13,8 +13,9 @@ import { secReviewNoRoom } from "./scheduler-sec-review.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { PEER_PLACEMENT, peerFamily, allowLegacyReview, type PeerFacts, type PlaceRole } from "./scheduler-family-pick.js";
+import { peerRefusal } from "./scheduler-placement.js";
 import { placementHistory, placeWithRetries as placeFor, type RetryPlacementFacts as PlacementFacts } from "./scheduler-placement-tried.js";
-import { isPoolIntent, POOL_RECIPIENT, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
+import { isPoolIntent, POOL_RECIPIENT, poolRefusalEpoch, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { relayAway } from "./lend-fix-reassign.js";
@@ -137,10 +138,17 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   return placed.kind === "wait" ? { code, wait: placed.reason } : null;
 }
 
+/** MODELXP2：池单拒审 epoch 的去处 peer 此刻还能不能接这次审查（安全卡只在本机审；remote / 借入名单 / 对方授权按现值核），不能则给原因 */
+export function epochPeerRefusal(s: PlannerSnapshot, since: number, peer: string, family: AuthorFamily): string | null {
+  if (!s.workflow || s.workflow.template === "security") return "安全卡只在本机审";
+  return peerRefusal(snapshotPlacementFacts(s, since, "review"), s.pool?.peers.map(peerFacts).find((x) => x.peer === peer), "review", family);
+}
+
 /** The family a pool intent's order runs in: review = across from the head's writer, writing = the peer's first free family. */
 export function orderFamily(s: PlannerSnapshot, peer: string, role: PlaceRole): AuthorFamily | null {
   if (!s.workflow) return null;
-  if (role === "review") return otherFamily(s.workflow.authorFamily);
+  const pe = role === "review" ? poolRefusalEpoch(s) : null; // MODELXP2：本窗口池单拒审 epoch 的去处 peer 用它的 toFamily（带豁免的换家族审查）
+  if (role === "review") return pe?.to?.machine === peer ? pe.to.family : otherFamily(s.workflow.authorFamily);
   const p = s.pool?.peers.find((x) => x.peer === peer);
   return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies, !!s.pool?.remote.agents) : null;
 }

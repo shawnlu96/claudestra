@@ -47,7 +47,7 @@ import { arbiterFooter, arbiterFullMessage, lendSubmitCmd } from "./lend-arbiter
 import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
-import { quotaViewOf, type LendWorkerFailure } from "./lend-health.js";
+import { quotaViewOf, type LendWorkerFailure, confirmedTurnFailure } from "./lend-health.js";
 import { keepLendEvidence } from "./lend-evidence.js";
 import { listAsks } from "./ledger-asks.js";
 import { turnFailureDoubt } from "./lend-turn-failure.js";
@@ -264,7 +264,7 @@ function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined
     const card = listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).sort((a, b) => b.createdAt - a.createdAt)[0];
     if (card?.extra.failure === "error" && row) {
       const doubt = turnFailureDoubt(card, row, (id) => findSessionJsonlBySessionId("codex", id));
-      if (!doubt) return { kind: "error", askId: card.id, message: card.context }; // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）
+      if (!doubt) return confirmedTurnFailure(card, doubt); // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）；带会话 / 失败时刻给 MODELXP2 类别
       if (!doubted.has(card.id)) doubted.add(card.id), console.error(`[lend] ${agent} 的回合失败卡 ${card.id} 不自动停单：${doubt}；卡留在看板上由人处理`);
     }
     const f = codexFailure(db, agent)?.failure;
