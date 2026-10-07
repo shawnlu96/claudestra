@@ -1,9 +1,8 @@
 /**
- * `ledger step` 给本机 agent 派正式单后叫醒执行者（auto 卡归调度器）。文案与投递方式用调度器同一套函数（deliveryFor / workOrderFor /
- * renderWorkOrder）：write / fix / review 发 wake 行让它领单，restate 没有领单工具，发调度器那份复述单（只指向 ledger show，不带正文）。
- * 只发一次：投递前用 appendEvent 的 dedupKey 原子认领（同单同执行者第 n 次尝试一个键），并发 step 只有一个认领得到；
- * 结果再记一条 note。送达 / 结果不明（bridge 已发出没回执）/ 认领了没结果都不再发，只有确定没发出去的（rejected）重跑 step 才重试。
- * tests/step-wake.test.ts。
+ * `ledger step` 给本机 agent 派正式单后叫醒执行者（auto 卡归调度器）。文案用调度器同一套函数（deliveryFor / workOrderFor / renderWorkOrder），
+ * 单号取领单工具此刻现算的那张（take_order / take_review 领不到就不叫，推了阶段重跑 step 再叫）；restate 没有领单工具，发调度器那份复述单。
+ * 只发一次：按有效派单（同一步同一轮连续派给同一人的第一条 step 事件 seq）在投递前用 dedupKey 原子认领；换过人再派回来是新派单。
+ * 送达 / 结果不明 / 认领了没结果都不再发，只有确定没发出去（rejected）重跑 step 才重试。tests/step-wake.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { bridgeSend } from "./bridge-client.js";
@@ -12,8 +11,12 @@ import type { LedgerEvent, LedgerTask, StepName } from "./ledger-stages.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import type { WriteCtx } from "./ledger-checks.js";
-import { manualOrderId } from "./order-take.js";
+import { stepAtStage, stepsOf } from "./ledger-steps.js";
+import { currentOrders, manualOrderId } from "./order-take.js";
 import { isMasterName } from "./registry.js";
+import { slotByOrderId } from "./review-order.js";
+import { getSchedulerSession } from "./scheduler-sessions.js";
+import { setWorkerKind, type KindEvidence } from "./worker-kind.js";
 import { workOrderFor } from "./scheduler-work-order.js";
 import { renderWorkOrder } from "./worker-order.js";
 import { deliveryFor, type SessionRef, type WorkOrder } from "./worker-session.js";
@@ -23,6 +26,8 @@ const WAKE_STEPS: Partial<Record<StepName, WorkOrder["step"]>> = { restate: "res
 
 /** registry 里一行里判定用得到的部分（manager/core.ts AgentInfo） */
 interface WakeAgentRow { kind?: string; role?: string }
+/** 执行者此刻用领单工具领得到的那张单（领单工具同一口径现算）；领不到给原因 */
+type Pickup = { orderId: string; step: StepName; round: number } | { none: string };
 export interface WakeFacts {
   task: Pick<LedgerTask, "id" | "specRev" | "headSHA">;
   event: Pick<LedgerEvent, "seq" | "data">;
@@ -31,6 +36,7 @@ export interface WakeFacts {
   pms: readonly string[];
   dispatcher: string | null;
   workflowMode: string | null;
+  pickup: (agent: string, step: StepName, round: number) => Pickup;
 }
 export type WakeTarget = { agent: string; step: StepName; round: number; orderId: string; text: string };
 
@@ -45,11 +51,47 @@ export function wakeTarget(f: WakeFacts): WakeTarget | { skip: string } {
   if (f.workflowMode === "auto") return { skip: "auto 卡由调度器唤醒" };
   const row = f.agents[agent];
   if (!row) return { skip: `${agent} 不在本机 registry` };
-  if (isMasterName(agent) || f.pms.includes(agent) || agent === f.dispatcher || row.role === "pm" || row.role === "dispatcher" || row.kind === "main") {
+  // 受保护判定与 worker-kind 同一口径（master / codex / role=pm 不能标成 worker），再加 kind=main、项目 PM / dispatcher
+  const guarded = !setWorkerKind({ [agent]: { ...row } as KindEvidence }, agent, "worker");
+  if (guarded || f.pms.includes(agent) || agent === f.dispatcher || row.role === "dispatcher" || row.kind === "main") {
     return { skip: `${agent} 是 PM / master / 受保护 agent` };
   }
-  const orderId = manualOrderId(f.task.id, step, round);
-  return { agent, step, round, orderId, text: wakeText(f.task, as, step, round, orderId, agent) };
+  const p = f.pickup(agent, step, round);
+  if ("none" in p) return { skip: p.none };
+  return { agent, step: p.step, round: p.round, orderId: p.orderId, text: wakeText(f.task, WAKE_STEPS[p.step]!, p.step, p.round, p.orderId, agent) };
+}
+
+/** 领单工具此刻给不给得出这张单：这一步要是当前阶段在干活的那一步，再按 take_order / take_review 同一函数现算单号 */
+function pickupOf(db: Database, task: LedgerTask, agent: string, step: StepName, round: number): Pickup {
+  const at = stepAtStage(stepsOf(db, task), task);
+  const later = `；推到对应阶段后重跑 step 再叫`;
+  if (!at || at.step !== step || at.round !== round || at.executorKind !== "agent" || at.executor !== agent) {
+    return { none: `卡在 ${task.stage}，这一步现在不是在干活的那一步，领单工具领不到${later}` };
+  }
+  if (step === "restate") {
+    return task.stage === "spec" || task.stage === "restate" ? { orderId: manualOrderId(task.id, step, round), step, round } : { none: `卡在 ${task.stage}，复述单领不到${later}` };
+  }
+  if (step === "review" || step === "final_review") {
+    const orderId = manualOrderId(task.id, step, round);
+    return slotByOrderId(db, orderId, { agent, sessionId: null, family: null }) ? { orderId, step, round } : { none: `卡在 ${task.stage}，take_review 领不到${later}` };
+  }
+  const bound = getSchedulerSession(db, task.id, "author");
+  const o = currentOrders(db, { agent, sessionId: bound?.agent === agent ? bound.sessionId : null, family: null, channelId: "" }).find((x) => x.task.id === task.id);
+  return o ? { orderId: o.orderId, step: o.step, round: o.task.round } : { none: `卡在 ${task.stage}，take_order 领不到这张单${later}` };
+}
+
+/** 有效派单：同一步同一轮连续派给同一执行者的那串 assign 事件里第一条的 seq（原样重跑 = 同一张；换过人再派回 = 新的） */
+function assignSeqOf(db: Database, project: string, taskId: string, ev: WakeFacts["event"]): number {
+  const d = ev.data;
+  const same = (e: LedgerEvent) => e.data.executor === d.executor && e.data.executorKind === d.executorKind;
+  const runs = listEvents(db, { project, target: taskId }).filter((e) => e.kind === "step" && e.data.op === "assign" && e.data.step === d.step
+    && Number(e.data.round) === Number(d.round) && e.seq <= ev.seq).sort((a, b) => b.seq - a.seq);
+  let anchor = ev.seq;
+  for (const e of runs) {
+    if (!same(e)) break;
+    anchor = e.seq;
+  }
+  return anchor;
 }
 
 /**
@@ -83,12 +125,11 @@ let override: WakeDeliver | null = null;
 export function setStepWakeDeliver(d: WakeDeliver | null): void { override = d; }
 export const stepWakeDeliver = (hasChannel: boolean): WakeDeliver | null => override ?? (hasChannel ? bridgeWake : null);
 
-const claimKey = (orderId: string, agent: string, attempt: number): string => `${STEP_WAKE_OP}:${orderId}:${agent}:${attempt}`;
+const claimKey = (taskId: string, assignSeq: number, attempt: number): string => `${STEP_WAKE_OP}:${taskId}:${assignSeq}:${attempt}`;
 
-/** 同单同执行者的下一次尝试号；上一次送达 / 结果不明 / 认领了没结果（进程中途没了）时给出不发的原因 */
-function nextAttempt(db: Database, project: string, taskId: string, t: WakeTarget): number | { blocked: string } {
-  const mine = listEvents(db, { project, target: taskId }).filter((e) => e.kind === "note" && e.data.op === STEP_WAKE_OP
-    && e.data.orderId === t.orderId && e.data.executor === t.agent);
+/** 同一有效派单的下一次尝试号；上一次送达 / 结果不明 / 认领了没结果（进程中途没了）时给出不发的原因 */
+function nextAttempt(db: Database, project: string, taskId: string, assignSeq: number): number | { blocked: string } {
+  const mine = listEvents(db, { project, target: taskId }).filter((e) => e.kind === "note" && e.data.op === STEP_WAKE_OP && e.data.assignSeq === assignSeq);
   const last = mine.filter((e) => e.data.phase === "claim").reduce((n, e) => Math.max(n, Number(e.data.attempt) || 0), 0);
   if (!last) return 1;
   const result = mine.find((e) => e.data.phase === "result" && e.data.attempt === last)?.data.status;
@@ -117,14 +158,16 @@ export async function wakeAfterStep(i: StepWakeInput): Promise<StepWakeResult> {
     if (!task) return { sent: false, why: `台账里没有卡 ${i.task.id}` };
     const meta = getMeta(i.db, i.project);
     const t = wakeTarget({ task, event: i.event, duplicate: i.duplicate, agents: i.duplicate ? {} : await i.agents(), pms: meta.pms,
-      dispatcher: meta.team?.dispatcher ?? null, workflowMode: getWorkflow(i.db, i.task.id)?.mode ?? null });
+      dispatcher: meta.team?.dispatcher ?? null, workflowMode: getWorkflow(i.db, i.task.id)?.mode ?? null,
+      pickup: (agent, step, round) => pickupOf(i.db, task, agent, step, round) });
     if ("skip" in t) return { sent: false, why: t.skip };
     const who = { agent: t.agent, orderId: t.orderId };
     if (!i.deliver) return { sent: false, ...who, why: "这个进程没有投递通道" };
-    const attempt = nextAttempt(i.db, i.project, task.id, t);
+    const assignSeq = assignSeqOf(i.db, i.project, task.id, i.event);
+    const attempt = nextAttempt(i.db, i.project, task.id, assignSeq);
     if (typeof attempt !== "number") return { sent: false, ...who, why: attempt.blocked };
-    const key = claimKey(t.orderId, t.agent, attempt);
-    const base = { op: STEP_WAKE_OP, stepSeq: i.event.seq, step: t.step, round: t.round, executor: t.agent, orderId: t.orderId, attempt };
+    const key = claimKey(task.id, assignSeq, attempt);
+    const base = { op: STEP_WAKE_OP, stepSeq: i.event.seq, assignSeq, step: t.step, round: t.round, executor: t.agent, orderId: t.orderId, attempt };
     i.assertLease?.();
     const claim = appendEvent(i.db, { ...i.ctx, dedupKey: key }, { project: i.project, target: task.id, kind: "note",
       text: `唤醒 ${t.agent} 领单 ${t.orderId}（第 ${attempt} 次）`, data: { ...base, phase: "claim" } });

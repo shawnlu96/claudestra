@@ -8,6 +8,7 @@ import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js"
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { setStepWakeDeliver, STEP_WAKE_OP, wakeAfterStep, wakeTarget, type WakeFacts } from "../src/lib/step-wake.js";
 import { takeOrderResult } from "../src/lib/order-take.js";
+import { slotByOrderId } from "../src/lib/review-order.js";
 import { renderWorkOrder } from "../src/lib/worker-order.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
@@ -26,6 +27,7 @@ const reg: Registry = {
 const run = (...args: string[]) => runLedger(args, {
   db, actor: PM, projectIds: [P], loadRegistry: async () => structuredClone(reg), saveRegistry: async () => {}, now: () => 2_000,
 }) as Promise<Record<string, any>>;
+const stageTo = (stage: string, head: string | null = null) => db.query("UPDATE tasks SET stage = ?, headSHA = COALESCE(?, headSHA) WHERE id = 'W1'").run(stage, head);
 const wakeNotes = (phase = "result") => listEvents(db, { project: P, target: "W1" }).filter((e) => e.kind === "note" && e.data.op === STEP_WAKE_OP && e.data.phase === phase);
 
 beforeEach(() => {
@@ -40,6 +42,7 @@ beforeEach(() => {
   });
   setMeta(db, { actor: "owner", now: 1_000 }, { project: P, key: "pms", value: [PM] });
   createTask(db, { actor: "owner", now: 1_000 }, { project: P, id: "W1", title: "唤醒", kind: "code" });
+  stageTo("build"); // 写单要卡在 build 才领得到
 });
 afterEach(() => {
   setStepWakeDeliver(null);
@@ -48,20 +51,22 @@ afterEach(() => {
 
 describe("step 之后唤醒本机执行者", () => {
   test("本机 agent 的 write：投递一次，文案就是调度器的 wake 行（手动单号、不带正文），记一条 note", async () => {
-    const r = await run("step", "W1", "write", EXE, "--kind", "agent", "--round", "2");
-    expect(r).toMatchObject({ ok: true, wake: { sent: true, agent: EXE, orderId: "W1:write:r2" } });
-    expect(sent).toEqual([{ agent: EXE, text: renderWorkOrder({ taskId: "W1", step: "write", round: 2, dedupKey: "W1:write:r2", delivery: { mode: "wake" },
+    const r = await run("step", "W1", "write", EXE, "--kind", "agent");
+    expect(r).toMatchObject({ ok: true, wake: { sent: true, agent: EXE, orderId: "W1:write:r0" } });
+    expect(sent).toEqual([{ agent: EXE, text: renderWorkOrder({ taskId: "W1", step: "write", round: 0, dedupKey: "W1:write:r0", delivery: { mode: "wake" },
       specRev: 0, head: null, node: "write", inputs: [], outputs: [], acceptance: [], writeBack: "" }) }]);
     expect(sent[0]!.text).toContain("take_order");
     const notes = wakeNotes();
     expect(notes).toHaveLength(1);
-    expect(notes[0]!.data).toMatchObject({ stepSeq: r.event.seq, status: "sent", executor: EXE, orderId: "W1:write:r2", attempt: 1 });
+    expect(notes[0]!.data).toMatchObject({ stepSeq: r.event.seq, status: "sent", executor: EXE, orderId: "W1:write:r0", attempt: 1 });
     expect(wakeNotes("claim")).toHaveLength(1);
   });
 
   test("review / final_review 叫 take_review；fix 叫 take_order", async () => {
+    stageTo("review", "a".repeat(40));
     await run("step", "W1", "review", EXE, "--kind", "agent");
     await run("step", "W1", "final_review", EXE, "--kind", "agent");
+    stageTo("fix");
     await run("step", "W1", "fix", EXE, "--kind", "agent");
     expect(sent.map((s) => s.text.includes("take_review"))).toEqual([true, true, false]);
     expect(sent[2]!.text).toContain("take_order");
@@ -69,6 +74,7 @@ describe("step 之后唤醒本机执行者", () => {
   });
 
   test("restate 没有领单工具：照调度器 deliveryFor 发复述单全文（只指向 ledger show，不带规格正文），不叫 take_order", async () => {
+    stageTo("spec");
     const r = await run("step", "W1", "restate", EXE, "--kind", "agent");
     expect(r).toMatchObject({ ok: true, wake: { sent: true, orderId: "W1:restate:r0" } });
     expect(takeOrderResult(db, { agent: EXE, sessionId: "s", family: null, channelId: "" })).toMatchObject({ ok: true, order: null });
@@ -179,6 +185,7 @@ describe("wakeTarget 判定", () => {
   const base: WakeFacts = {
     task: { id: "W1", specRev: 1, headSHA: null }, event: { seq: 9, data: { op: "assign", step: "write", round: 1, executor: EXE, executorKind: "agent" } }, duplicate: false,
     agents: { [EXE]: {} }, pms: [PM], dispatcher: "agent-disp", workflowMode: "manual",
+    pickup: (_a, step, round) => ({ orderId: `W1:${step}:r${round}`, step, round }),
   };
   test("auto 卡归调度器、dispatcher / role=pm 受保护", () => {
     expect(wakeTarget(base)).toMatchObject({ agent: EXE, orderId: "W1:write:r1" });
@@ -186,5 +193,63 @@ describe("wakeTarget 判定", () => {
     expect(wakeTarget({ ...base, agents: { [EXE]: { role: "pm" } } })).toHaveProperty("skip");
     expect(wakeTarget({ ...base, dispatcher: EXE })).toHaveProperty("skip");
     expect(wakeTarget({ ...base, duplicate: true })).toHaveProperty("skip");
+    expect(wakeTarget({ ...base, agents: { "agent-codex": {} }, event: { ...base.event, data: { ...base.event.data, executor: "agent-codex" } } })).toHaveProperty("skip");
+    expect(wakeTarget({ ...base, pickup: () => ({ none: "领不到" }) })).toEqual({ skip: "领不到" });
+  });
+});
+
+describe("第 2 轮复现：保护名单、换人、领不到不叫、单号与领单一致", () => {
+  const call = (agent: string) => ({ agent, sessionId: "s", family: null, channelId: "" });
+
+  test("protected-codex：registry 里没 kind / role 的 agent-codex 也是受保护 agent，不叫", async () => {
+    reg.agents["agent-codex"] = { status: "active" } as unknown as Registry["agents"][string];
+    try {
+      stageTo("build");
+      expect(await run("step", "W1", "write", "agent-codex", "--kind", "agent")).toMatchObject({ ok: true, wake: { sent: false, why: expect.stringContaining("受保护") } });
+      expect(sent).toEqual([]);
+    } finally { delete reg.agents["agent-codex"]; }
+  });
+
+  test("reassign-wake：同一步同一轮 A→B→A，三次都是新派单，各叫一次；A 原样重跑不重发", async () => {
+    const B = "agent-task-w2";
+    reg.agents[B] = { status: "active", projectId: P } as unknown as Registry["agents"][string];
+    try {
+      stageTo("build");
+      await run("step", "W1", "write", EXE, "--kind", "agent");
+      await run("step", "W1", "write", B, "--kind", "agent");
+      expect(await run("step", "W1", "write", EXE, "--kind", "agent")).toMatchObject({ ok: true, wake: { sent: true, agent: EXE } });
+      expect(await run("step", "W1", "write", EXE, "--kind", "agent")).toMatchObject({ ok: true, wake: { sent: false } });
+      expect(sent.map((s) => s.agent)).toEqual([EXE, B, EXE]);
+    } finally { delete reg.agents[B]; }
+  });
+
+  test("early-wake：spec 阶段先派 write 不叫（领不到）；推到 build 后重跑 step 才叫，叫完领得到", async () => {
+    stageTo("spec");
+    const early = await run("step", "W1", "write", EXE, "--kind", "agent");
+    expect(early).toMatchObject({ ok: true, wake: { sent: false, why: expect.stringContaining("领不到") } });
+    expect(sent).toEqual([]);
+    expect(wakeNotes("claim")).toEqual([]);
+    stageTo("build");
+    const r = await run("step", "W1", "write", EXE, "--kind", "agent");
+    expect(r).toMatchObject({ ok: true, wake: { sent: true } });
+    const took = takeOrderResult(db, call(EXE));
+    expect(took).toMatchObject({ ok: true, order: { orderId: r.wake.orderId } });
+    expect(sent).toHaveLength(1);
+  });
+
+  test("pull-round：--round 2 派给 round 0 的卡，提醒里的单号就是 take_order 领到的单号", async () => {
+    stageTo("build");
+    const r = await run("step", "W1", "write", EXE, "--kind", "agent", "--round", "2");
+    const took = takeOrderResult(db, call(EXE)) as { order: { orderId: string } };
+    expect(r.wake.orderId).toBe(took.order.orderId);
+    expect(sent[0]!.text).toContain(took.order.orderId);
+  });
+
+  test("review 阶段的审查单：提醒的单号就是 take_review 能领的；卡还没进 review 时不叫", async () => {
+    expect(await run("step", "W1", "review", EXE, "--kind", "agent")).toMatchObject({ wake: { sent: false } });
+    stageTo("review", "a".repeat(40));
+    const r = await run("step", "W1", "review", EXE, "--kind", "agent");
+    expect(r).toMatchObject({ wake: { sent: true } });
+    expect(slotByOrderId(db, r.wake.orderId, { agent: EXE, sessionId: null, family: null })).not.toBeNull();
   });
 });
