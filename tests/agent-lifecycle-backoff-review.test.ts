@@ -116,6 +116,28 @@ describe("pm-delivery: the notice goes through the PM channel, and only a delive
 });
 
 describe("notice-history: once per (agent, regAt, kind) across kind switches", () => {
+  test("dirty → exception → same dirty: persisted notice history prevents a second PM notification", async () => {
+    const { dir, wt } = fixture();
+    writeFileSync(join(wt, "a.txt"), "changed\n");
+    const a: Action = { agent: "agent-d", sessionId: "s1", regAt: 5, taskId: "C1", role: "author", rule: "cleanup_retry", reason: "t", idleMs: null,
+      entries: [{ checkout: wt, tmp: null }] };
+    let t = NOW, sent = 0;
+    const d = { now: () => t, git, du, cleanupStatePath: join(dir, "cleanup.json"), record: async (_r: RetireRecord) => {},
+      notifyPm: async () => { sent++; } };
+    const dirty = () => gatedCollect(a, d, async (action, wrapped) => {
+      await wrapped.record({ agent: action.agent, sessionId: "s1", regAt: 5, taskId: "C1", role: "author", rule: action.rule, reason: "t", idleMs: null,
+        bytesBefore: 0, bytesAfter: 0, steps: [`worktree 没删 ${wt}：有已跟踪改动`], now: t, pending: action.entries!, retry: true });
+      return { freed: 0, left: 1 };
+    });
+    await dirty();
+    expect(sent).toBe(1);
+    t += 60_000;
+    await expect(gatedCollect(a, d, async () => { throw new Error("registry unavailable"); })).rejects.toThrow("registry unavailable");
+    t += 60_000;
+    await dirty();
+    expect(sent).toBe(1);
+  });
+
   test("dirty → main repo → dirty → holder → dirty: one notice per kind, never a second dirty one", async () => {
     const { dir, wt } = fixture();
     const a: Action = { agent: "agent-d", sessionId: "s1", regAt: 5, taskId: "C1", role: "author", rule: "cleanup_retry", reason: "t", idleMs: null,

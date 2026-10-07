@@ -137,7 +137,7 @@ export async function gatedCollect<D extends GateDeps>(a: Action, deps: D, colle
   try { out = await collect(a, wrapped); } catch (e) {
     if (e instanceof SchedulerStopped || !retry) throw e;
     const d = errorDigest((e as Error).message), unchanged = prev?.digest === d;
-    await update(deps, key!, next(d, unchanged));
+    await update(deps, key!, { ...next(d, unchanged), ...(prev?.notified ? { notified: prev.notified } : {}) });
     if (unchanged) return { freed: null, left: a.entries?.length ?? 1, quiet: true };
     throw e;
   }
