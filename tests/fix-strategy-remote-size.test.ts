@@ -1,6 +1,6 @@
 /** Real manager/ledger subprocesses write; the convergence tick holds a query-only reader and injected notification port. */
 import { expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 import { remoteProbe, peerAuthor } from "./fix-strategy-remote-helpers.js";
@@ -22,7 +22,7 @@ const ROOT = join(import.meta.dir, ".."), MANAGER = join(ROOT, "src", "manager.t
 const report = (n: number) => "review evidence with a concrete assertion\n".repeat(n);
 const findings = Array.from({ length: 4 }, (_, i) => ({ ...P1, findingId: `race-${i}`, description: `Race ${i} loses a write` }));
 
-async function sizeFixture(currentLines = 180, extra: { omittedReview?: boolean; titles?: string[] } = {}) {
+async function sizeFixture(currentLines = 180, extra: { omittedReview?: boolean; skippedReview?: boolean; titles?: string[] } = {}) {
   const f = autoFixture(), reports = [report(610), report(currentLines)];
   const paths = [join(f.dir, "round1.md"), join(f.dir, "round2.md")];
   paths.forEach((p, i) => writeFileSync(p, reports[i]));
@@ -30,10 +30,13 @@ async function sizeFixture(currentLines = 180, extra: { omittedReview?: boolean;
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
   await f.tick(); await f.tick();
   let omittedSeq: number | undefined;
-  if (extra.omittedReview) {
-    const path = join(f.dir, "passing-review.md"); writeFileSync(path, "passing review absent from repair history");
-    omittedSeq = insertEvent(f.db, f.at("agent-rv-t1"), { project: "p", target: "T1", kind: "review", text: "pass",
-      data: { round: 1, head: H1, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], path,
+  const earlierPath = join(f.dir, "earlier-review.md"), earlierReport = report(300);
+  if (extra.omittedReview || extra.skippedReview) {
+    const path = extra.skippedReview ? earlierPath : join(f.dir, "passing-review.md");
+    writeFileSync(path, extra.skippedReview ? earlierReport : "passing review absent from repair history");
+    omittedSeq = insertEvent(f.db, f.at("agent-rv-t1"), { project: "p", target: "T1", kind: "review", text: "earlier review",
+      data: { round: 1, head: H1, verdict: extra.skippedReview ? "changes" : "pass", p0: 0, p1: extra.skippedReview ? 4 : 0,
+        p2: 0, findings: extra.skippedReview ? findings : [], path,
         reviewer: "agent-rv-t1", reviewerFamily: "codex", reviewerSessionId: "s-rv" } }, false).seq;
   }
   const historical = findings.map((row, i) => ({ ...row, description: extra.titles?.[i] ?? row.description }));
@@ -92,7 +95,7 @@ async function sizeFixture(currentLines = 180, extra: { omittedReview?: boolean;
   };
   const close = () => { reader.close(); singleton.release(); maintenance.release(); f.close(); };
   return { f, intent, reports, paths, get db() { return card.db; }, notices, calls, manager, card, tick, legacy, restart,
-    omittedSeq, remote: p.context.remote!, close };
+    modern: () => { entry = MANAGER; }, earlierPath, earlierReport, omittedSeq, remote: p.context.remote!, close };
 }
 
 test("legacy parser at the production offer boundary leaves the >32KB intent pending with zero events and notices", async () => {
@@ -150,6 +153,28 @@ test("production CLI skips an omitted same-round review and redacts complete tit
     expect(inputs.includes(`台账事件 seq ${p.omittedSeq}`)).toBe(false);
     expect(inputs).toContain(p.reports[1]);
     expect(order.wire.findings).toHaveLength(4);
+  } finally { p.close(); }
+});
+
+test("unreadable-blocks-all: production CLI preserves a missing cached report and fits the next readable report", async () => {
+  const p = await sizeFixture(180, { skippedReview: true });
+  try {
+    // The old parser persists the complete material snapshot without offering the oversized order.
+    p.legacy();
+    expect(await p.manager("ledger", "scheduler-convergence", p.intent.id, "--max-workers", "0")).toMatchObject({ ok: false, code: "invalid" });
+    p.modern();
+    renameSync(p.earlierPath, `${p.earlierPath}.unavailable`);
+    expect(await p.tick()).toMatchObject({ step: "pooled" });
+    const order = remoteOrder(p.db, p.intent.id)!;
+    expect(Buffer.byteLength(JSON.stringify(order.wire))).toBeLessThanOrEqual(WIRE_MAX_BYTES);
+    const inputs = order.wire.inputs.map((s) => s.replace(/^历轮报告、修复diff摘要、复现probe(?:\(第 \d+\/\d+ 段\))?:\n/, "")).join("");
+    expect(inputs).toContain(p.earlierReport);
+    expect(inputs).toContain(fitDigest(p.reports[0]).slice(0, 16));
+    expect(inputs).not.toContain(`台账事件 seq ${p.omittedSeq}`);
+    expect(inputs).toContain(p.reports[1]);
+    expect(order.wire.findings).toHaveLength(4);
+    expect(getIntent(p.db, p.intent.id)?.status).toBe("submitted");
+    expect(p.notices).toHaveLength(0);
   } finally { p.close(); }
 });
 

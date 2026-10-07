@@ -161,13 +161,57 @@ test("unverified or missing historical report bodies are never replaced by an in
   }
 });
 
+for (const skipped of ["unreadable", "missing round", "missing head", "mismatched body"] as const) {
+  test(`unreadable-blocks-all: ${skipped} history leaves only that section whole`, () => {
+    const reports = [source(1, long(300)), source(2, long(700)), source(3, "current report")];
+    const original = { ...wire(reports), round: 3 };
+    const first = { ...reports[0], event: { ...reports[0].event, data: { ...reports[0].event.data } } };
+    if (skipped === "unreadable") first.report = null;
+    if (skipped === "missing round") delete first.event.data.round;
+    if (skipped === "missing head") delete first.event.data.head;
+    if (skipped === "mismatched body") first.report = "different original report";
+    expect(orderWireBytes(original)).toBeGreaterThan(WIRE_MAX_BYTES);
+    const fitted = fitOrderWire(original, [first, ...reports.slice(1)], heads);
+    expect({ ok: fitted.ok, stage: fitted.stage }).toEqual({ ok: true, stage: "history" });
+    expect(parseOrderWire(fitted.order).ok).toBe(true);
+    const text = fitted.order.inputs.map((s) => s.replace(/^历轮报告、修复diff摘要、复现probe(?:\(第 \d+\/\d+ 段\))?:\n/, "")).join("");
+    expect(text).toContain(sanitizeForeign(body([reports[0]])));
+    expect(text).toContain("第 2 轮摘要");
+    expect(text).toContain(sanitizeForeign(body([reports[2]])));
+    expect(fitted.digests).toEqual([{ seq: 20, kind: "report", sha256: fitDigest(reports[1].report!) }]);
+    expect(fitted.order.findings).toEqual(original.findings);
+    expect(JSON.stringify(fitOrderWire(original, [first, ...reports.slice(1)], heads))).toBe(JSON.stringify(fitted));
+  });
+}
+
+test("unreadable-blocks-all: later verified history still reaches diff and probe truncation", () => {
+  const reports = [source(1, long(120)), source(2, long(250)), source(3, long(450))];
+  const material = body(reports).replace("current repair diff", long(600)).replace("current probe evidence", long(600));
+  const original = redactOrderForPeer({ ...wire(reports), round: 3,
+    inputs: chunkInputs([["规格原文", long(220)], [label, material]]) }, HEAD).order;
+  const fitted = fitOrderWire(original, [{ ...reports[0], report: null }, ...reports.slice(1)], heads);
+  expect({ ok: fitted.ok, stage: fitted.stage }).toEqual({ ok: true, stage: "probe" });
+  expect(fitted.measurements.map((m) => m.stage)).toEqual(["original", "history", "diff", "probe"]);
+  for (let i = 1; i < fitted.measurements.length; i++) {
+    expect(fitted.measurements[i].bytes).toBeLessThan(fitted.measurements[i - 1].bytes);
+  }
+  const text = fitted.order.inputs.map((s) => s.replace(/^历轮报告、修复diff摘要、复现probe(?:\(第 \d+\/\d+ 段\))?:\n/, "")).join("");
+  expect(text).toContain(sanitizeForeign(body([reports[0]])));
+  expect(text).toContain(sanitizeForeign(body([reports[2]])));
+  expect(text.match(/已截断/g)).toHaveLength(2);
+  expect(fitted.digests.map((d) => [d.seq, d.kind])).toEqual([[20, "report"], [20, "diff"], [20, "probe"]]);
+  expect(parseOrderWire(fitted.order).ok).toBe(true);
+});
+
 test("report delimiters and fake old round headers inside the current report cannot delete its text", () => {
   const old = source(1, long(850));
   const current = source(2, `current preamble\n\n${body([old])}\n\n修复 diff 摘要:\ncurrent tail`);
   const original = wire([current]);
-  const fitted = fitOrderWire(original, [old, current], heads);
-  expect(fitted.ok).toBe(false);
-  expect(JSON.stringify(fitted.order)).toBe(JSON.stringify(original));
+  for (const report of [current.report, null, "different original current report"]) {
+    const fitted = fitOrderWire(original, [old, { ...current, report }], heads);
+    expect(fitted.ok).toBe(false);
+    expect(JSON.stringify(fitted.order)).toBe(JSON.stringify(original));
+  }
 });
 
 test("unsafe historical text and unsafe summary titles cannot bypass the original peer gate", () => {

@@ -1,4 +1,4 @@
-/** Only verified report bodies define history boundaries; text inside a report cannot impersonate another round. */
+/** Verify each represented report independently; unavailable closed rounds must not block the later history. */
 import { createHash } from "node:crypto";
 import type { LedgerEvent } from "./ledger-stages.js";
 import type { OrderWire } from "./order-wire.js";
@@ -40,27 +40,36 @@ function peerSummary(wire: OrderWire, source: FitReport): string {
 function fitSections(text: string, wire: OrderWire, reports: readonly FitReport[], heads: ReadonlySet<string>): FitSection[] {
   const sections: FitSection[] = [];
   let cursor = 0;
-  for (const source of reports) {
-    const { event, report } = source;
-    if (report === null || typeof event.data.round !== "number" || typeof event.data.head !== "string") continue;
-    const header = `## 第 ${event.data.round} 轮 · ${event.data.head.slice(0, 12)}\n\n报告原文(`;
-    const start = text.indexOf(header, cursor);
-    if (start < 0) continue;
-    if (text.indexOf("## 第 ", cursor) !== start) return [];
-    const marker = text.indexOf("):\n", start + header.length);
-    if (marker < 0) return [];
-    if (typeof event.data.path === "string" && text.slice(start + header.length, marker) !== peerBody(wire, event.data.path, heads)) continue;
-    const reportStart = marker + 3, original = peerBody(wire, report, heads);
-    const body = text.startsWith(original + "\n\n修复 diff 摘要:\n", reportStart) ? original
-      : Number(event.data.round) < wire.round ? peerSummary(wire, source) : original;
-    const reportEnd = reportStart + body.length;
-    // Verify the entire report, not a regex delimiter that an external report could contain.
-    // Several reviewers can share a round/head; an omitted review must not consume the represented review's boundary.
-    if (text.slice(reportStart, reportEnd) !== body || !text.startsWith("\n\n修复 diff 摘要:\n", reportEnd)) continue;
-    const next = text.indexOf("\n\n## 第 ", reportEnd);
-    const end = next < 0 ? text.length : next;
-    sections.push({ start, reportStart, reportEnd, end, source });
-    cursor = end;
+  while (cursor < text.length) {
+    const start = text.indexOf("## 第 ", cursor);
+    if (start < 0) break;
+    const header = /^## 第 (\d+) 轮 · [^\n]+\n\n报告原文\(/.exec(text.slice(start));
+    if (!header) break;
+    const marker = text.indexOf("):\n", start + header[0].length);
+    if (marker < 0) break;
+    for (const source of reports) {
+      const { event, report } = source;
+      if (report === null || typeof event.data.round !== "number" || typeof event.data.head !== "string") continue;
+      if (header[0] !== `## 第 ${event.data.round} 轮 · ${event.data.head.slice(0, 12)}\n\n报告原文(`) continue;
+      if (typeof event.data.path === "string" && text.slice(start + header[0].length, marker) !== peerBody(wire, event.data.path, heads)) continue;
+      const reportStart = marker + 3, original = peerBody(wire, report, heads);
+      const body = text.startsWith(original + "\n\n修复 diff 摘要:\n", reportStart) ? original
+        : Number(event.data.round) < wire.round ? peerSummary(wire, source) : original;
+      const reportEnd = reportStart + body.length;
+      // Verify the entire body before moving past it, so embedded headers cannot impersonate other rounds.
+      if (text.slice(reportStart, reportEnd) !== body || !text.startsWith("\n\n修复 diff 摘要:\n", reportEnd)) continue;
+      const next = text.indexOf("\n\n## 第 ", reportEnd);
+      const end = next < 0 ? text.length : next;
+      sections.push({ start, reportStart, reportEnd, end, source });
+      cursor = end;
+      break;
+    }
+    if (cursor > start) continue;
+    // Only the unverified closed section stays whole; never scan inside an unverified current report.
+    if (Number(header[1]) >= wire.round) break;
+    const next = text.indexOf("\n\n## 第 ", start + header[0].length);
+    if (next < 0) break;
+    cursor = next + 2;
   }
   return sections;
 }
