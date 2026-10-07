@@ -29,6 +29,16 @@ export function windowPoolEpoch(events: readonly LedgerEvent[], task: Window): L
   return e && e.data.head === task.headSHA && e.data.specRev === task.specRev && e.data.round === task.round ? e : null;
 }
 
+/**
+ * 规划器那一侧（纯函数，只看事件；批准与单号绑定由合并闸的 poolExemptVerdict 核）：本窗口池单 epoch 的去处 peer 交的、家族 = toFamily、
+ * 晚于 epoch、head / 轮次与 epoch 一致的结论，算这一轮的豁免审查（同 exemptFacts 对本地会话）
+ */
+export function poolExemptFacts(events: readonly LedgerEvent[], task: Window, f: VerdictFacts & { reviewer: string; reviewerFamily: string }): boolean {
+  const e = windowPoolEpoch(events, task), to = e?.data.to as { machine?: string; family?: string } | null | undefined;
+  return !!e && !!to?.machine && to.family === f.reviewerFamily && e.data.toFamily === f.reviewerFamily && f.reviewer === `peer:${to.machine}` &&
+    f.eventSeq > e.seq && f.head === e.data.head && f.round === e.data.round && !!f.reviewerSessionId?.startsWith(`lend:${to.machine}:`);
+}
+
 /** B：按本窗口 epoch 挂向它去处（peer + 家族）的审查单，验收行带的豁免文本；不是这样一张单 = null */
 export function poolExemptionLine(db: Database, task: LedgerTask, peer: string, family: AuthorFamily): string | null {
   const e = windowPoolEpoch(listEvents(db, { project: task.project, target: task.id }), task);

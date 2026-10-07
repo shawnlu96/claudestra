@@ -5,7 +5,7 @@ import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, typ
 import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, poolRefusalEpoch, type PoolFacts } from "./scheduler-pool-plan.js";
-import { poolEpochTag } from "./ledger-pool-refusal-gate.js";
+import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { reviewPlacement } from "./scheduler-placement-plan.js";
 import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
@@ -286,7 +286,7 @@ function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean
 
 function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
   return !!s.reviewer && facts.reviewer === s.reviewer.agent && facts.reviewerSessionId === s.reviewer.sessionId &&
-    facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts)) &&
+    facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts) || poolExemptFacts(s.events, s.task, facts)) &&
     !(s.workflow?.template === "security" && s.reviewer.source !== "local");
 }
 
