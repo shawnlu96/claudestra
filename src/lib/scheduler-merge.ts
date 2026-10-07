@@ -11,7 +11,7 @@ import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { currentPooledReviewer } from "./scheduler-pool-facts.js";
 import { canTransition, nextTaskState, type LedgerTask } from "./ledger-stages.js";
-import { settleIntent } from "./ledger-scheduler-settle.js";
+import { actorMayConfigure, settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { exemptVerdict } from "./scheduler-review-swap.js";
@@ -74,7 +74,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
   if (task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
   if (getMeta(db, run.project).queueFrozen.frozen) return "项目合并队列已冻结";
   if (["ready", "updating", "await_ci", "merging"].includes(run.phase)) {
-    const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }));
+    const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }), (a) => actorMayConfigure(db, a, task.project));
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) return "当前 head 的审查结论已不合格";
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
@@ -89,7 +89,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
  * `merge`: the merge run (beginMergeRun) and the repository-owner handoff (scheduler-merge-handoff.ts).
  */
 export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskWorkflow, manual?: { intent: SchedulerIntent; now: number }): ReviewFacts {
-  const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
+  const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }), (a) => actorMayConfigure(db, a, task.project));
   // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
   const reviewer = manual ? manualRunReviewer(db, manual.intent, manual.now)
     : currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");

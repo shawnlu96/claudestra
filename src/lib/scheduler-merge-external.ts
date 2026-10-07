@@ -47,13 +47,16 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
         "state,headRefOid,headRefName,baseRefName,isDraft,isCrossRepository,mergeStateStatus,mergeCommit"), "gh pr view");
       const state = String(raw.state);
       if (!["OPEN", "MERGED", "CLOSED"].includes(state) || typeof raw.headRefOid !== "string") throw new Error("PR 状态或 head 无效");
-      let checks: PrSnapshot["checks"] = [];
+      let checks: PrSnapshot["checks"] = [], noChecks = false;
       if (state === "OPEN" && raw.isDraft !== true) {
         const checkRun = await command(["gh", "pr", "checks", prRef, "--json", "bucket,name,link"],
           { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
         // A conflicted PR gets no CI run, and right after main moves GitHub reports UNKNOWN before it knows; only those states
         // (seen in the same view) read "no checks" as an empty list. The driver bounces DIRTY and waits out UNKNOWN (bounded).
-        const noChecksYet = !checkRun.timedOut && !checkRun.stdout.trim() && ["DIRTY", "UNKNOWN"].includes(String(raw.mergeStateStatus));
+        // MCHK1: any empty answer must be gh saying outright "no checks reported" (else throws → unknown); outside DIRTY it reads as UNKNOWN.
+        const noChecksYet = !checkRun.timedOut && [0, 1, 8].includes(checkRun.code ?? -1) && !checkRun.stdout.trim() &&
+          /no checks reported/i.test(checkRun.stderr);
+        noChecks = noChecksYet && raw.mergeStateStatus !== "DIRTY";
         if (!noChecksYet && (checkRun.timedOut || !checkRun.stdout.trim())) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
         const list = noChecksYet ? [] : JSON.parse(checkRun.stdout) as unknown; // gh exits 8 for pending checks while still returning valid JSON
         if (!Array.isArray(list) || list.some((c) => !c || typeof c !== "object" ||
@@ -63,9 +66,9 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
         checks = list as PrSnapshot["checks"];
       }
       return { state: state as PrSnapshot["state"], head: raw.headRefOid, branch: String(raw.headRefName ?? ""), base: String(raw.baseRefName ?? ""),
-        draft: raw.isDraft === true, crossRepository: raw.isCrossRepository !== false, mergeState: String(raw.mergeStateStatus ?? ""),
+        draft: raw.isDraft === true, crossRepository: raw.isCrossRepository !== false, mergeState: noChecks ? "UNKNOWN" : String(raw.mergeStateStatus ?? ""),
         mergeSha: typeof (raw.mergeCommit as { oid?: unknown } | null)?.oid === "string" ? (raw.mergeCommit as { oid: string }).oid : null,
-        checks };
+        checks, ...(noChecks ? { noChecks } : {}) };
     },
     async freshness(prRef, head) {
       if (!SHA.test(head)) throw new Error("head 无效");
