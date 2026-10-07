@@ -4,6 +4,7 @@
  * 全部项目 on 时成立，否则 conflict 零写；来源 PASS 由调用方传入的正式审查门（mergeReviewProof：审查员会话 / 家族 / owner 当前豁免 / 池回执）
  * 在同一事务里现核（r2 exempt-drift），seq 与完整链写进 review_carry。来源门按本 run 的真实 intent 选（r6 manual-carry-1）：MQ1
  * manual_merge 的 run 读人工请求绑定的审查（manualRunReviewer），其余读自动池 / 会话；不看调用方声称的来源。热点里只留薄调用。
+ * MCRY4：来源门在当前 head 可信链核出的原审查固定 head 上重核（carrySourceTask），多次纯 main 沿用不因新 head 丢池审查员。
  * tests/review-main-carry-manual-auto*.test.ts、tests/review-main-carry-manual-mq1.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -12,6 +13,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { MANUAL_MERGE_NODE } from "./manual-merge-queue-facts.js";
 import { mainCarryMode } from "./recovery-main-carry-policy.js";
+import { carrySourceTask } from "./review-main-carry-auto-source.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 
@@ -85,7 +87,7 @@ export function autoCarryEvidence(db: Database, task: LedgerTask, ev: { oldHead:
   if (source && source.intent?.taskId !== task.id) throw new LedgerError("conflict", "沿用时找不到本 run 的合并意图，无法确定正式来源");
   const manual = source?.intent?.node === MANUAL_MERGE_NODE ? { intent: source.intent, now: source.now } : undefined;
   let facts: ReviewFacts;
-  try { facts = reviewProof(db, task, workflow, manual); } catch (e) {
+  try { facts = reviewProof(db, carrySourceTask(db, task), workflow, manual); } catch (e) {
     throw new LedgerError("conflict", `沿用时正式来源审查门不成立（来源 / 家族 / 豁免已变）：${(e as Error).message}`);
   }
   return { chain, hops: chain.length, sourceReviewSeq: facts.eventSeq, mainCarry: allowed > 1 ? "on" : "single" };
