@@ -12,9 +12,9 @@ Codex agent 默认经 [Agent Client Protocol](https://agentclientprotocol.com) �
 - 适配器几乎每周跟着 codex 发版；
 - 关键能力放在扩展里（JetBrains AIR、draft RFD）；
 - 进程多一层；
-- owner 不能再 attach 进 TUI 打字。
+- owner 不能再 attach 进 TUI 打字（窗口底部有宿主自己的输入行，见下面「窗口输入行」）。
 
-Codex 的窗口显示会话的只读视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断）；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
+Codex 的窗口显示会话视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断），底部是状态行和输入行；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
 
 ## 状态
 
@@ -61,7 +61,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| `interruptKeys` | `[]` | 窗口里只是会话的只读视图，宿主不读键盘，一个键都不发 |
+| `interruptKeys` | `[]` | bridge 一个键都不往窗口里发；窗口里的输入行是给人用的，打断走 abort 帧 |
 | `abortVia` | `"extension"` | 打断走宿主的 `session/cancel` |
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
 | `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
@@ -163,6 +163,19 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 | `promptCapabilities.image` | initialize 的 `agentCapabilities.promptCapabilities.image` | 附件只以本地路径（`[attachment: …]` 行）写进正文。有这项能力也一样：宿主还不发图片块 |
 
 共享契约测试 `tests/acp-contract/`：同一组场景（initialize 与协议检查、接回线程、一轮文字回复、叫停、失败上报）按驱动跑，现在有 stub 和 Pi 回放两个驱动；新驱动照 `drivers.ts` 的 `ContractDriver` 实现、加进 `DRIVERS` 即可。维护流程见 [acp-maintenance.md](./acp-maintenance.md)。
+
+## 窗口输入行（ACPT-2）
+
+stdin、stdout 都是 TTY 时（tmux attach、网页终端连 tmux 都是），宿主把终端设成 raw，底部两行：状态行 + 输入行（`lib/acp/tty-input.ts` 解释按键，`tty-screen.ts` 画；宽度变了两行一起擦掉重画）。不是 TTY 时没有输入行，行为同以前。出借 worker（干净环境）不开输入行，bridge 也不放它的 `acp_terminal` 帧（`lib/lend-tools.ts` 白名单外）。
+
+- **所有动作都经 bridge**（`acp_terminal` 帧 → `bridge/acp-terminal.ts`），宿主自己不调 `session/prompt`：
+  - 回车 = 发消息：和 owner 在频道里发消息同一个 Envelope 走 `deliver`，回合中插话 / 空闲开一轮 / 排队 / 额度闸押住都照旧；发信人是 owner（Discord 放行名单第一个 id），名字「owner（终端）」，网页实时气泡和历史都看得出来自终端；不 @ owner（他就在终端前）。一次来一大段（粘贴）时中间的回车留在正文里，最后一个回车才发。
+  - Esc：回合中 = 打断，和网页打断按钮同一个 `interruptAgentByName` → abort 帧 → `session/cancel`；空闲时清空输入行。
+  - Ctrl-C：raw 模式下不再变成 SIGINT。回合中 = 打断（同 Esc）；空闲时有字先清字，没字时 2 秒内连按两次才退出宿主（误按一次只提示）。
+  - 审批：宿主收到权限请求时窗口里显示一次卡片（标题、命令、编号选项），输入行为空时按 y（第一个允许类）/ n（第一个拒绝类）/ 数字作答；和网页卡片按钮同一个认领闸（`acp-link.ts answerAcpPermissionById` → `answerPermission`），谁先到算谁的，另一边 409、卡片收起；终端只能答卡上那张（队首）。
+- **斜杠命令**（终端本地解析，`/help` 列全）：`/model <名>`、`/effort <级>`（Pi 的 `/thinking` 同义）走设置页同一个 `acpSettings`（会话里 `set_config_option` + 写 registry，不重启）；`/clear` 走网页同一个 `acpClear`；`/compact` 走网页同一个 `acpSlash`；`/help` 只在本地打印。其它 `/xxx` 照普通消息发——和网页对不认识的斜杠一样，但网页会把 Codex / Pi 命令表里认得的命令直通给适配器，终端不直通（要用就到网页发）。Pi 的 `/new` `/reload` 也只在网页有。
+- **身份**：能在这个窗口打字 = 有这台机器上这个 agent 的终端（宿主 shell 级）权限，本来就能直接操作这个 agent，所以按 owner 算。bridge 只认这个频道当前登记的宿主连接发来的 `acp_terminal`（和 `acp_permission` 同一道闸）。同机进程能 `tmux send-keys` 往窗口里打字，和以前能直接操作 tmux 是同一个信任边界，不是新口子。
+- **退出**：manager 的 restart / kill / 切换收宿主改成给窗口 shell 的直接子进程发 SIGTERM（`runtimes/acp-control.ts acpExitPrelude`），不再按 C-c；老宿主收 SIGTERM 和收 SIGINT 走同一个收尾，所以两代宿主都这样收。读不到窗口子进程时才退回按 C-c（连按两下）。等不回 shell 照旧由 `stopAcpHost` 强杀兜底。宿主退出时把终端模式还原（`tty-input-attach.ts`）。
 
 ## 和 tmux 的行为差异
 

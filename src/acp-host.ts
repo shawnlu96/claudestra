@@ -1,6 +1,6 @@
 /**
- * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口只显示可读的会话
- * （lib/acp/transcript.ts；只看，owner 在这里打字不起作用；TTY 上多一行状态和正文流式续写，lib/acp/tty-screen.ts），连接 / 生命周期日志只写 host.log。
+ * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口显示可读的会话
+ * （lib/acp/transcript.ts；TTY 上多一行状态、一行输入和正文流式续写，lib/acp/tty-screen.ts / tty-input.ts），连接 / 生命周期日志只写 host.log。
  * 逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、接真实依赖、处理信号。
  * 启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；排障：连接日志看 host.log，会话看这个窗口（`tmux -S … attach`）。
  */
@@ -18,6 +18,7 @@ import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
 import { stampTranscript } from "./lib/acp/transcript.js";
 import { createTtyScreen } from "./lib/acp/tty-screen.js";
+import { attachTtyInput } from "./lib/acp/tty-input-attach.js";
 import type { TurnState } from "./lib/acp/tty-status.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { redactSecrets } from "./lib/redact-secrets.js";
@@ -49,8 +50,12 @@ const logsDir = acpLogDir(agentName);
 const hostLogFile = join(logsDir, "host.log");
 // 连接日志只落盘：窗口留给会话，日志进窗口会把会话淹掉；落盘也不怕窗口被 kill（出借 worker 自停的原因曾因此丢掉）
 // TTY（tmux 窗口）才画状态行；不是 TTY（测试、重定向到文件）照旧一段一行纯文本，不出任何控制序列
+// 输入行要 stdin 也是 TTY；出借 worker（干净环境）的窗口不给 owner 打字，bridge 那边也不放 acp_terminal 帧（lib/lend-tools.ts）
+const typing = !!process.stdout.isTTY && !!process.stdin.isTTY && process.env[CLEAN_ENV_FLAG] !== "1";
+let inputLine: ((cols: number) => string) | undefined;
 const tty = process.stdout.isTTY
-  ? createTtyScreen({ write: (s) => void process.stdout.write(s), columns: () => process.stdout.columns || 80 }, () => turnState())
+  ? createTtyScreen({ write: (s) => void process.stdout.write(s), columns: () => process.stdout.columns || 80 }, () => turnState(), Date.now,
+    typing ? (cols) => inputLine?.(cols) ?? "❯ " : undefined)
   : null;
 let turnState = (): TurnState => ({ busy: false, queued: 0, permissions: 0 }); // 宿主建好前（启动日志写不进盘时）按空闲画
 const out = (line: string) => (tty ? tty.print(line) : console.log(line));
@@ -157,13 +162,13 @@ if (tty) {
   process.on("exit", () => tty.close());
 }
 
-for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-  process.on(sig, () => {
-    log(`收到 ${sig}，收尾退出`);
-    host.stop();
-    setTimeout(() => process.exit(0), 1_500);
-  });
-}
+const shutdown = (why: string) => {
+  log(`${why}，收尾退出`);
+  host.stop();
+  setTimeout(() => process.exit(0), 1_500);
+};
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => shutdown(`收到 ${sig}`));
+if (tty && typing) inputLine = attachTtyInput(process.stdin, host, tty, () => shutdown("窗口里连按两次 Ctrl-C"));
 
 // 切换适配器（manager codex-adapter）：空闲才退出、manager 随后按新开关重起；在跑就不动，切换记成 deferred（manager/acp-adapter.ts）
 process.on("SIGUSR2", () => {
@@ -187,5 +192,5 @@ if (process.env[CLEAN_ENV_FLAG] === "1") {
 
 const adapterName = agent.stub ? `stub（${agent.cmd.join(" ")}）` : pick?.adapter === "self" ? "自研 Codex 适配器" : runtime.logLabel;
 log(`ACP 宿主启动：${agentName} · 线程 ${sessionId.slice(0, 8)} · ${adapterName} · bridge ${bridgeUrl.replace(/\?.*$/, "")}`); // 查询串里可能带 control_token，不进日志
-show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（只看；连接日志在 ${hostLogFile}）`);
+show(`ACP 会话 ${agentName} · 线程 ${sessionId.slice(0, 8)}（${typing ? "底部输入行可直接发消息，/help 看命令" : "只看"}；连接日志在 ${hostLogFile}）`);
 host.start();
