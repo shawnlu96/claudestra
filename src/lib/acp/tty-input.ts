@@ -51,7 +51,7 @@ const TERMINAL_HELP = [
   "  /help           本帮助",
   "  其它 /xxx 照普通消息发，和网页一样",
   "按键：回车发送（粘贴进来的换行留在正文里）· Esc 回合中打断、空闲时清空输入 · Ctrl-C 回合中打断、空闲时 2 秒内连按两次退出 · Ctrl-U 清空输入",
-  "审批：输入行为空时按 y 允许 / n 拒绝 / 数字选第几个（网页卡片也能答，谁先答算谁的）",
+  "审批：输入行为空时单独按一下 y 允许 / n 拒绝 / 数字选第几个（粘贴进来的字不算；网页卡片也能答，谁先答算谁的）",
 ].join("\n");
 
 type Parsed = TerminalOp | { help: true } | { error: string };
@@ -148,13 +148,14 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     if (deps.busy()) interrupt();
     else buf = "";
   };
-  const key = (ch: string) => {
+  /** single：这一下 data 只有这一个字符。审批快捷键只认单独一次按键——整块进来的（没有粘贴标记的粘贴、连打）一律是正文 */
+  const key = (ch: string, single: boolean) => {
     if (ch === "\x03") return ctrlC();
     if (ch === "\r" || ch === "\n") return submit(); // 每个回车都发：data 块边界不是按键边界，不能拿它猜粘贴
     if (ch === "\x7f" || ch === "\x08") return void (buf = [...buf].slice(0, -1).join(""));
     if (ch === "\x15") return void (buf = "");
     if (ch < " ") return; // 其它控制键不认
-    if (!answer(ch)) buf += ch;
+    if (!(single && answer(ch))) buf += ch;
   };
   const decode = createKeyDecoder({
     key,
@@ -176,7 +177,7 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
 }
 
 interface DecoderSink {
-  key(ch: string): void;
+  key(ch: string, single: boolean): void;
   /** bracketed paste 里的正文字符（回车也是正文） */
   paste(ch: string): void;
   pasteEnd(): void;
@@ -194,7 +195,7 @@ function createKeyDecoder(sink: DecoderSink, escMs: number): (data: string) => v
     if (seq === PASTE_ON) pasting = true;
     else if (seq === PASTE_OFF) (pasting = false), sink.pasteEnd();
   };
-  const step = (ch: string) => {
+  const step = (ch: string, single: boolean) => {
     if (esc === "esc") {
       if (ch === "[") return void ((esc = "csi"), (csi = ""));
       if (ch === "O") return void (esc = "ss3");
@@ -204,12 +205,13 @@ function createKeyDecoder(sink: DecoderSink, escMs: number): (data: string) => v
     if (esc === "csi") return /[@-~]/.test(ch) ? ((esc = ""), onCsi(csi + ch)) : void (csi += ch);
     if (esc === "ss3") return void (esc = "");
     if (ch === "\x1b") return void (esc = "esc");
-    if (!pasting) return sink.key(ch);
+    if (!pasting) return sink.key(ch, single);
     if (ch >= " " || "\r\n\t".includes(ch)) sink.paste(ch);
   };
   return (data) => {
     if (timer) clearTimeout(timer), (timer = null);
-    for (const ch of data) step(ch);
+    const chars = [...data];
+    for (const ch of chars) step(ch, chars.length === 1);
     if (esc !== "esc") return;
     timer = setTimeout(() => {
       timer = null;

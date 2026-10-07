@@ -191,6 +191,31 @@ describe("终端审批", () => {
     expect(r.ops).toHaveLength(1);
   });
 
+  test("审批挂起时粘贴（无粘贴标记）一段 y 开头的话：不批准，整段留在输入行（Shawn PR817-r1 paste-grants-permission 复现）", () => {
+    const r = rig({ permission: true });
+    r.input.feed("you should reject this command");
+    expect(r.ops).toEqual([]);
+    expect(r.input.line(100)).toBe("❯ you should reject this command");
+  });
+
+  test("审批挂起时数字开头的整块输入：不按序号选项", () => {
+    const r = rig({ permission: true });
+    r.input.feed("2 个问题先回答");
+    expect(r.ops).toEqual([]);
+    expect(r.input.line(100)).toBe("❯ 2 个问题先回答");
+  });
+
+  test("审批挂起时 bracketed paste 分 3 次进来（开始标记 / 正文 / 结束标记）：正文留输入行，不答卡", () => {
+    const r = rig({ permission: true });
+    r.input.feed("\x1b[200~");
+    r.input.feed("y");
+    r.input.feed("es, 1 more\x1b[201~");
+    expect(r.ops).toEqual([]);
+    expect(r.input.line(100)).toBe("❯ yes, 1 more");
+    r.input.feed("\r");
+    expect(r.ops).toEqual([{ op: "message", text: "yes, 1 more" }]);
+  });
+
   test("输入行有字时 y/n 照常是正文（在写消息，不是答卡）", () => {
     const r = rig({ permission: true });
     r.input.feed("hey\r");
