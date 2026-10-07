@@ -76,7 +76,8 @@ export async function stageProposal(rt: ProposalRuntime, draft: ProposalDraft, l
   return mutate(rt.stateDir, ops => {
     const now = rt.now();
     for (const [id, r] of Object.entries(ops)) if (TERMINAL.includes(r.state) && r.updatedAt + RETAIN_MS < now) delete ops[id];
-    const same = Object.values(ops).find(r => r.contentKey === contentKey && (r.state !== "unsynced" || r.expiresAt > now));
+    // A past-TTL unsynced record that may have been sent (attempts > 0) is still reused: sync asks the center first.
+    const same = Object.values(ops).find(r => r.contentKey === contentKey && (r.state !== "unsynced" || r.attempts > 0 || r.expiresAt > now));
     if (same) return same;
     const ttl = Math.min(rt.ttlMs, FEATURE_PROPOSAL_LIMITS.maxTtlMs);
     let operationId = rt.newOperationId();
@@ -148,7 +149,7 @@ async function syncOnce(rt: ProposalRuntime, operationId: string, opts: { queryF
     if (e instanceof FeatureProposalRejected) {
       const code = e.error?.code;
       if (e.status === 409 || code === "conflict") return patch(rt, operationId, { state: "conflict", issue: null });
-      if (code === "expired") return patch(rt, operationId, { state: "expired", issue: null });
+      // expired (401) also means a stale credential / signature: only the operation state or the TTL ends a proposal
       if (e.status === 404) return patch(rt, operationId, { issue: "unsupported" }); // center without the proposal route
       if (e.status === 401 || e.status === 403) return patch(rt, operationId, { issue: "forbidden" });
       return patch(rt, operationId, { issue: "rejected_request" });

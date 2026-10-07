@@ -1,14 +1,7 @@
-/**
- * N7B 本机提案通路：已绑定团队项目的「新建 feature」不写本机台账，改成 N7K FeatureProposal 交中心（N7C）等 owner 批准。
- * - plan_feature（bridge/dag-tools.ts planNew）先问 proposeBoundFeature：未绑定 / 个人项目回 null，原路径不变；已绑定就提案。
- * - project / center / team 只由本机绑定（readSharedLedgerBindings）定，调用方给的一律不认；MCP 用 owner:self 的 service 凭据，网页用 person。
- * - 本机只写一份 0600 待同步记录（lib/shared-ledger-feature-proposals-store.ts）；中心不可达 = 待同步、结果未确认，不报成功。
- * - 本地 API（给 N7W）：
- *   POST /api/v1/shared-feature-proposals                       提交 {localProjectId?, title, description?, ownerWords?, nodes, homeInstanceId?}
- *   GET  /api/v1/shared-feature-proposals                       列本机待同步 / 已提交记录
- *   GET  /api/v1/shared-feature-proposals/operations/{opId}     按 operationId 查中心状态（先查后交）
- *   POST /api/v1/shared-feature-proposals/decisions             owner 审批转发 {localProjectId?, proposalId, decision, proposalDigest, proposalRev, homeInstanceId?, reason}
- *   项目选择：body.localProjectId 或 x-shared-ledger-project 头（中心 projectId），只在本机绑定里选。
+/** N7B 本机提案通路：已绑定团队项目的「新建 feature」不写本机台账，改成 N7K FeatureProposal 交中心（N7C）等 owner 批准。
+ * plan_feature 先问 proposeBoundFeature：未绑定 / 个人项目回 null 走原路径；project / center / team 只由本机绑定定。
+ * MCP 用 owner:self 的 service 凭据，网页用 person；本机只写 0600 待同步记录，中心不可达 = 待同步、结果未确认。
+ * 本地 API（给 N7W）：ROOT 的 POST 提交 / GET 列记录，ROOT/operations/{opId} 按 operationId 查，ROOT/decisions 转发 owner 审批。
  */
 import { randomUUID } from "node:crypto";
 import type { Principal } from "../../lib/principals.js";

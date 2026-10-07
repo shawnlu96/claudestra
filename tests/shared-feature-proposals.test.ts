@@ -428,3 +428,31 @@ describe("第 1 轮审查回归", () => {
     } finally { stopFeatureProposalResume(); }
   });
 });
+
+describe("第 2 轮审查回归", () => {
+  test("expiry-query：中心已发布但回包丢失，跨过 TTL 原样重调 plan_feature → 先 GET 旧操作拿到 published，不换 operationId", async () => {
+    center.outcome = { state: "published", featureId: "feature-demo-new", version: 1 };
+    center.dropResponse = true;
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ code: "pending_sync" });
+    center.dropResponse = false;
+    center.seen = [];
+    configureFeatureProposals(runtime(dir, center, { now: () => fx.newProposal.expiresAt + 1 }));
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: true, state: "published", operationId: "op-demo-new", centerFeatureId: "feature-demo-new" });
+    expect(center.seen.map(s => s.method)).toEqual(["GET"]);
+    expect(center.received).toHaveLength(1);
+    expect(readPendingProposals(dir)).toHaveLength(1);
+  });
+  test("credential-expiry：GET 回 401 expired（凭据 / 签名过期）→ 可恢复问题，不记提案终态；续凭据后查回 published", async () => {
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: true, state: "pending_approval" });
+    center.rejectWith = { status: 401, body: featureProposalError("expired") };
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: false, code: "forbidden", cachedState: "pending_approval" });
+    expect(readPendingProposals(dir)[0]).toMatchObject({ state: "pending_approval", issue: "forbidden" });
+    center.rejectWith = null;
+    center.ops.set("op-demo-new", { ...center.ops.get("op-demo-new")!, state: "published", featureId: "feature-demo-new", version: 1 });
+    center.seen = [];
+    const [r] = await resumeProposals(runtime(dir, center));
+    expect(center.seen.map(s => s.method)).toEqual(["GET"]);
+    expect(r).toMatchObject({ state: "published", featureId: "feature-demo-new", issue: null });
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: true, state: "published", centerFeatureId: "feature-demo-new" });
+  });
+});
