@@ -3,7 +3,7 @@
  * （scheduler-pass.ts 的顺序，auto tick 套 withSupervisorHold），拒审走到 MODELX 的 epoch，不发恢复消息、不退人工；observe / off 监护照旧。
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSupervisor, type SuperviseDeps } from "../src/lib/agent-supervisor.js";
@@ -24,6 +24,8 @@ import { createAcpWorker } from "../src/lib/worker-acp.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
+/** 审查会话的 thread id：MODELXW3 起「拒审是最后一回合」由 Codex rollout 证明，rollout 按文件名里 36 位的 id 找，s-rv 那种短名找不到 */
+const RV = "0199c0de-0000-7000-8000-00000000b7f2";
 const CYBER = "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.";
 const CONFIG: SchedulerConfig = {
   enabled: true, pollMs: 5000, autoDispatch: true, supervise: { enabled: true, stuckMin: 20 },
@@ -31,7 +33,7 @@ const CONFIG: SchedulerConfig = {
 };
 const REGISTRY: RegistryAgent[] = [
   { name: "agent-task-one", channelId: "ch-one", sessionId: "s-one", projectId: "p", runtime: "claude-code", status: "active" },
-  { name: "agent-rv-t1", channelId: "ch-rv", sessionId: "s-rv", projectId: "p", runtime: "codex", transport: "acp", status: "active" },
+  { name: "agent-rv-t1", channelId: "ch-rv", sessionId: RV, projectId: "p", runtime: "codex", transport: "acp", status: "active" },
 ];
 
 const dir = mkdtempSync(join(tmpdir(), "modelxw-sup-"));
@@ -40,14 +42,23 @@ writeFileSync(CFG, "export function recoveryPolicy() { return { mode: globalThis
 const g = globalThis as { __modelxwSup?: string };
 let f: F;
 let errors: ReturnType<typeof spyOn>;
+let codexHome: string | undefined;
 beforeEach(() => {
   errors = spyOn(console, "error").mockImplementation(() => {});
   setModelOutcomeReader(CFG);
   f = autoFixture();
+  const reg = JSON.parse(readFileSync(f.registryPath, "utf8"));
+  reg.agents["agent-rv-t1"].sessionId = RV;
+  writeFileSync(f.registryPath, JSON.stringify(reg));
+  // rollout 按生产接法找（findSessionJsonlBySessionId → CODEX_HOME）：指到临时目录，不读真实 ~/.codex
+  codexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = join(f.dir, "codex");
   writeFileSync(join(f.dir, "T1.md"), "# T1\n");
   f.db.run("UPDATE tasks SET spec = ? WHERE id = 'T1'", [join(f.dir, "T1.md")]);
 });
-afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); delete g.__modelxwSup; });
+afterEach(() => {
+  if (codexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = codexHome;
+  f.close(); errors.mockRestore(); setModelOutcomeReader(); delete g.__modelxwSup; });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 /** The review goes out; the reviewer's Codex turn is cut by cyber_policy and the bridge opens its「Codex 回合失败」card. */
@@ -66,7 +77,13 @@ async function reviewCut(): Promise<void> {
   const { id } = f.db.query("SELECT id FROM scheduler_intents WHERE action = 'review' ORDER BY rowid DESC").get() as { id: string };
   const delivered = getEventByDedup(f.db, `scheduler:${id}:done`)!.ts;
   openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败", context: CYBER,
-    extra: { failure: "error", failedAt: delivered + 1, sessionId: "s-rv" } }, delivered + 1);
+    extra: { failure: "error", failedAt: delivered + 1, sessionId: RV } }, delivered + 1);
+  // 审查会话自己的记录：最后一个回合就是被拒的那一回合（task_started 不晚于 failedAt）
+  const rollouts = join(f.dir, "codex", "sessions", "2026", "10", "07");
+  mkdirSync(rollouts, { recursive: true });
+  const line = (at: number, payload: Record<string, unknown>, type = "event_msg") => JSON.stringify({ timestamp: new Date(at).toISOString(), type, payload });
+  writeFileSync(join(rollouts, `rollout-2026-10-07T00-00-00-${RV}.jsonl`),
+    [line(delivered - 5, { id: RV }, "session_meta"), line(delivered, { type: "task_started" })].join("\n") + "\n");
   const ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule", askKey: "policy-refusal-rule" }, 1999);
   answerAsk(f.db, ask.id, { choices: ["[button:policy_refusal_rule_go]"], labels: ["x"], text: "", principal: OWNER_PRINCIPAL_ID, owner: true,
     via: "web_card", at: 2000, final: true });
@@ -181,7 +198,7 @@ describe("MODELXW r2：observe 时监护留下的恢复认领，切 on 后不再
 
   test("绕过只限 on + 审查员回合 + 提供方策略拒审：作者回合、别的失败、observe / off 都照旧走监护 hold", async () => {
     g.__modelxwSup = "on";
-    const reviewer = { taskId: "T1", role: "reviewer" as const, agent: "agent-rv-t1", sessionId: "s-rv", family: "codex" as const, transport: "acp" as const };
+    const reviewer = { taskId: "T1", role: "reviewer" as const, agent: "agent-rv-t1", sessionId: RV, family: "codex" as const, transport: "acp" as const };
     const failed = (message: string) => ({ state: "result" as const, outcome: "failed" as const, failure: { kind: "error" as const, message } });
     expect(await refusalBypassesHold(f.db, reviewer, failed(CYBER))).toBe(true);
     expect(await refusalBypassesHold(f.db, reviewer, failed("This request violates our Usage Policy"))).toBe(true);
