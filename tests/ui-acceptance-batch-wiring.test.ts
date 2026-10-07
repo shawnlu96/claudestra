@@ -4,7 +4,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { answerFromCard } from "../src/bridge/ask-entry.js";
@@ -267,6 +267,52 @@ describe("UIACW 完成闸接线", () => {
     expect(await cli(["ui-page-mode", "maybe"])).toMatchObject({ ok: false, code: "invalid" });
     expect(listAsks(db, { project: P })).toHaveLength(0);
   });
+});
+
+describe("ui-page-mode 开关写入（审查 mode-race / mode-audit 回归）", () => {
+  const noteCount = () => (db.query("SELECT COUNT(*) AS n FROM events WHERE project = ? AND kind = 'note'").get(P) as { n: number }).n;
+
+  test("重试旧的 --dedup 开启请求：返回 duplicate，不撤销后来的关闭；同键换值 = dedup_mismatch", async () => {
+    expect(await cli(["ui-page-mode", "on", "--dedup", "first-on"])).toMatchObject({ ok: true, duplicate: false });
+    expect(await cli(["ui-page-mode", "off", "--dedup", "later-off"])).toMatchObject({ ok: true, duplicate: false, previous: "on" });
+    const n = noteCount();
+    expect(await cli(["ui-page-mode", "on", "--dedup", "first-on"])).toMatchObject({ ok: true, duplicate: true });
+    expect(readPageMode(P).mode).toBe("off");
+    expect(await cli(["ui-page-mode", "observe", "--dedup", "first-on"])).toMatchObject({ ok: false, code: "dedup_mismatch" });
+    expect(readPageMode(P).mode).toBe("off");
+    expect(noteCount()).toBe(n);
+  });
+
+  test("台账写锁被别的连接占着：返回 busy，事件与开关文件都不变", async () => {
+    await setMode("off");
+    const n = noteCount();
+    const other = new Database(path);
+    const conn = new Database(path);
+    conn.exec("PRAGMA busy_timeout = 1");
+    other.exec("BEGIN IMMEDIATE");
+    try {
+      expect(await cli(["ui-page-mode", "on"], PM, () => Date.now(), conn)).toMatchObject({ ok: false, code: "busy" });
+    } finally { other.exec("ROLLBACK"); other.close(); conn.close(); }
+    expect(readPageMode(P).mode).toBe("off");
+    expect(noteCount()).toBe(n);
+  });
+
+  test("16 个进程同时给不同项目切 on：锁内重读合并，一个都不丢", async () => {
+    writeFileSync(pageModePath(), JSON.stringify({ projects: { keep: "off" } }));
+    const code = `const { openLedger } = await import('./src/lib/ledger-store.ts');
+      const { writePageMode } = await import('./src/lib/ui-acceptance-batch-wiring.ts');
+      const db = openLedger(process.argv[1]);
+      writePageMode(db, process.argv[2], 'on', () => ({ duplicate: false }));`;
+    const procs = Array.from({ length: 16 }, (_, i) => Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", "-e", code, path, `p${i}`], {
+      cwd: process.cwd(), env: testChildEnv({ CLAUDESTRA_STATE_DIR: join(pageModePath(), "..") }), stdout: "pipe", stderr: "pipe",
+    }));
+    const codes = await Promise.all(procs.map(async (p) => [await p.exited, await new Response(p.stderr).text()]));
+    expect(codes.filter(([c]) => c !== 0)).toEqual([]);
+    const projects = JSON.parse(readFileSync(pageModePath(), "utf-8")).projects;
+    expect(Object.keys(projects)).toHaveLength(17);
+    expect(projects.keep).toBe("off");
+    for (let i = 0; i < 16; i++) expect(projects[`p${i}`]).toBe("on");
+  }, 30_000);
 });
 
 for (const first of ["lib/ledger-feature-write", "lib/ui-acceptance-batch-wiring", "lib/ui-acceptance-batch", "manager/ledger-ui-acceptance"]) {

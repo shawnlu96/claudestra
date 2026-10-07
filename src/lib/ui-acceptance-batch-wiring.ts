@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import { instanceIdSync } from "./instance-id.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import type { Feature } from "./ledger-feature.js";
-import { LedgerError } from "./ledger-store.js";
+import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import type { UiAcceptanceBatch } from "./ui-acceptance-batch.js";
@@ -45,15 +45,40 @@ export function readPageMode(project: string, path = pageModePath()): { mode: Pa
   return { mode: file?.projects[project] ?? "observe", ...(diagnostic ? { diagnostic } : {}) };
 }
 
-/** 改开关（调用方先核 PM / master / owner）；文件读坏时拒绝覆盖，免得冲掉别的项目的设置 */
-export function writePageMode(project: string, mode: PageMode, path = pageModePath()): PageMode {
+/**
+ * 改开关（调用方先核 PM / master / owner）：整个读改写与留痕在同一个台账 IMMEDIATE 事务里——
+ * 台账库与开关文件同在 state 目录，库写锁就是这份共享文件的跨进程互斥（各项目都经它，锁内重读再合并，不会拿旧快照覆盖）；
+ * record 先写留痕事件（--dedup 判重、拿写锁都在这一步），重复 / 失败就不碰文件；文件最后写，写失败事件随事务回滚。
+ * 提交失败（极少：写锁已在手）时在新事务里把本项目改回原值（期间没人改过才改）。文件读坏时拒绝覆盖，免得冲掉别的项目的设置。
+ */
+export function writePageMode<R extends { duplicate: boolean }>(
+  db: Database, project: string, mode: PageMode, record: (previous: PageMode) => R, path = pageModePath(),
+): R & { previous: PageMode } {
   if (!isMode(mode)) throw new LedgerError("invalid", "ui-page-mode 只收 on / observe / off");
-  const { file, diagnostic } = readModeFile(path);
-  if (!file) throw new LedgerError("conflict", `${diagnostic}；修好或删掉后重试`);
-  const previous = file.projects[project] ?? "observe";
-  file.projects[project] = mode;
-  writeJsonAtomicSync(path, file, { trailingNewline: true });
-  return previous;
+  let wrote: PageMode | null = null;
+  const locked = <T>(fn: () => T) => busyAsLedgerError("切项目整页验收开关", () => db.transaction(fn).immediate());
+  const swap = (from: PageMode | null, to: PageMode): PageMode => {
+    const { file, diagnostic } = readModeFile(path);
+    if (!file) throw new LedgerError("conflict", `${diagnostic}；修好或删掉后重试`);
+    const previous = file.projects[project] ?? "observe";
+    if (from !== null && previous !== from) return previous;
+    file.projects[project] = to;
+    writeJsonAtomicSync(path, file, { trailingNewline: true });
+    return previous;
+  };
+  try {
+    return locked(() => {
+      const previous = readModeFile(path).file?.projects[project] ?? "observe";
+      const r = record(previous);
+      if (r.duplicate) return { ...r, previous };
+      wrote = previous;
+      swap(null, mode);
+      return { ...r, previous };
+    });
+  } catch (e) {
+    if (wrote !== null) { const back = wrote; try { locked(() => swap(mode, back)); } catch { /* 原错误更要紧 */ } }
+    throw e;
+  }
 }
 
 type BatchCheck = (db: Database, c: Parameters<UiAcceptanceBatch["check"]>[0], featureId: string) => { ok: boolean; reason?: string };

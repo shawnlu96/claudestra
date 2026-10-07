@@ -58,9 +58,13 @@ export const UI_PAGE_BATCH_CMDS: Record<string, CommandSpec> = {
       if (!PAGE_MODES.includes(mode)) throw new LedgerError("invalid", "ui-page-mode on|observe|off");
       const project = c.project();
       c.requireManager(project, "切项目整页验收开关");
-      const previous = writePageMode(project, mode);
-      const r = appendEvent(c.db, c.ctx(), { project, target: "", kind: "note", text: `项目整页验收开关 ${previous} → ${mode}（ui-page-mode）` });
-      return { ok: true, project, mode, previous, event: r.event, duplicate: r.duplicate };
+      // 判重、拿写锁、留痕都先于改文件（wiring 同一事务）；同一 dedup 键换了开关值 = 别的动作，不当重复吞掉
+      const r = writePageMode(c.db, project, mode, (previous) => {
+        const w = appendEvent(c.db, c.ctx(), { project, target: "", kind: "note", text: `项目整页验收开关 ${previous} → ${mode}（ui-page-mode）`, data: { uiPageMode: mode } });
+        if (w.duplicate && w.event.data?.uiPageMode !== mode) throw new LedgerError("dedup_mismatch", `dedupKey 已用于把开关切到 ${String(w.event.data?.uiPageMode ?? "（非开关动作）")}`);
+        return w;
+      });
+      return { ok: true, project, mode, previous: r.previous, event: r.event, duplicate: r.duplicate };
     },
   },
   "ui-page-status": {
