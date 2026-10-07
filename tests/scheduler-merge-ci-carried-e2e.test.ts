@@ -121,12 +121,14 @@ async function setup(log = TIMEOUT_ONLY) {
   const singletonPath = join(dir, "singleton.lock"), maintenancePath = join(dir, "maintenance.lock");
   const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
   cleanup.push(() => { singleton.release(); maintenance.release(); });
-  const home = join(dir, "home"), tmp = join(dir, "tmp"), runtime = join(dir, "runtime");
-  for (const d of [home, tmp, runtime]) mkdirSync(d);
+  // The child's TMPDIR is `dir` itself: test-guard only keeps a state / runtime dir under the child's own temp roots, and the
+  // outer TMPDIR may sit anywhere (a workspace path), so a sibling tmp would get both redirected to an empty ledger.
+  const home = join(dir, "home"), runtime = join(dir, "runtime");
+  for (const d of [home, runtime]) mkdirSync(d);
   let at = T0;
   const clock = join(dir, "clock.ts");
   writeFileSync(clock, "const at = Number(process.env.CIF3_NOW); Date.now = () => at;\n");
-  const env = () => testChildEnv({ CIF3_NOW: String(at), HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
+  const env = () => testChildEnv({ CIF3_NOW: String(at), HOME: home, TMPDIR: dir, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
     CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
       maintenance: { path: maintenancePath, token: maintenance.token } }) });
   const children: string[] = [];
@@ -142,6 +144,7 @@ async function setup(log = TIMEOUT_ONLY) {
     const r = await manager("ledger", "scheduler-plan", taskId, "--id", id, "--rev", String(revs(taskId).task), "--workflow-rev", String(revs(taskId).wf),
       "--seq", String(seq()), "--node", "merge_deploy", "--action", "merge", "--reason", "merge", "--resources", "merge:p");
     expect(r).toMatchObject({ ok: true });
+    expect(db.query("SELECT id FROM scheduler_intents WHERE id=?").get(id)).toEqual({ id }); // the child wrote this fixture's ledger, not a redirected one
   };
 
   // Fake gh: GitHub's answers this tick, per PR, every call recorded. Git runs for real (fetch served from the local bare repo).
