@@ -21,23 +21,26 @@ export function lastTurnStartAt(path: string, maxScan = MAX_SCAN_BYTES): number 
   try {
     const size = fstatSync(fd).size;
     const floor = Math.max(0, size - maxScan);
-    let carry = Buffer.alloc(0); // 上一块（更靠后）开头那段不完整的行，接到这一块末尾
+    // 更靠后那几块里还没碰到换行的残行，按块存（不拷贝），碰到换行或读到文件开头才拼一次：每字节最多拷一次。
+    // 每块都把残行重拼一遍的话，没有换行的超长单行复制量是平方级（tests/lend-turn-failure-longline.test.ts）
+    let tail: Buffer[] = [];
     for (let end = size; end > floor;) {
       const start = Math.max(floor, end - CHUNK);
       const chunk = Buffer.alloc(end - start);
       readSync(fd, chunk, 0, chunk.length, start);
-      const buf = Buffer.concat([chunk, carry]);
       // 按 \n 字节切：UTF-8 多字节字符里不会出现 0x0A，切开不会坏字；第 0 段只有读到文件开头才是完整行
-      let hi = buf.length;
+      let hi = chunk.length;
       for (;;) {
-        const nl = hi > 0 ? buf.lastIndexOf(10, hi - 1) : -1; // hi = 0 时不能传 -1：负偏移会从尾部重新找
+        const nl = hi > 0 ? chunk.lastIndexOf(10, hi - 1) : -1; // hi = 0 时不能传 -1：负偏移会从尾部重新找
         if (nl < 0 && start > 0) break;
-        const at = turnStartIn(buf.subarray(nl + 1, hi));
+        const piece = chunk.subarray(nl + 1, hi);
+        const at = turnStartIn(tail.length > 0 ? Buffer.concat([piece, ...tail]) : piece);
+        tail = [];
         if (at !== undefined) return at;
         if (nl < 0) break;
         hi = nl;
       }
-      carry = Buffer.from(buf.subarray(0, hi));
+      if (hi > 0) tail = [chunk.subarray(0, hi), ...tail];
       end = start;
     }
     return null;
