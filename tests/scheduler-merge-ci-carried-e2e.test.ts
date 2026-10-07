@@ -128,12 +128,12 @@ async function setup(log = TIMEOUT_ONLY) {
   let at = T0;
   const clock = join(dir, "clock.ts");
   writeFileSync(clock, "const at = Number(process.env.CIF3_NOW); Date.now = () => at;\n");
-  const env = () => testChildEnv({ CIF3_NOW: String(at), HOME: home, TMPDIR: dir, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
+  const env = (over: Record<string, string> = {}) => testChildEnv({ CIF3_NOW: String(at), HOME: home, TMPDIR: dir, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
     CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
-      maintenance: { path: maintenancePath, token: maintenance.token } }) });
+      maintenance: { path: maintenancePath, token: maintenance.token } }), ...over });
   const children: string[] = [], redirected: string[] = [];
   const cli = async (over: Record<string, string>, args: string[]) => {
-    const p = Bun.spawn([process.execPath, "--no-env-file", "--preload", clock, MANAGER, ...args], { env: { ...env(), ...over }, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn([process.execPath, "--no-env-file", "--preload", clock, MANAGER, ...args], { env: env(over), stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     await p.exited;
     redirected.push(...err.split("\n").filter((l) => l.startsWith("[test-guard]")));
