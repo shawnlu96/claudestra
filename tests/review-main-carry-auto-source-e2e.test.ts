@@ -23,7 +23,7 @@ import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
-import { getTask, listEvents } from "../src/lib/ledger-store.js";
+import { getMeta, getTask, listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { runBounded } from "../src/lib/run-bounded.js";
@@ -158,9 +158,11 @@ async function world(modelx = false) {
   // The scheduler service's write path: `manager.ts ledger …` children, scheduler identity, its lease, this state dir.
   const singletonPath = join(f.dir, "scheduler.pid"), maintenancePath = join(f.dir, "maintenance.lock");
   const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
-  const home = join(f.dir, "home"), tmp = join(f.dir, "tmp");
-  for (const d of [home, tmp]) mkdirSync(d);
-  const env = testChildEnv({ HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: f.dir, CLAUDESTRA_RUNTIME_DIR: join(f.dir, "run"), DISCORD_CHANNEL_ID: "",
+  const home = join(f.dir, "home");
+  mkdirSync(home);
+  // TMPDIR covers the state / runtime dirs: under a private temp root the children's test-guard would otherwise redirect them (fixture-tmp-1)
+  const base = { HOME: home, TMPDIR: f.dir, CLAUDESTRA_STATE_DIR: f.dir, CLAUDESTRA_RUNTIME_DIR: join(f.dir, "run"), DISCORD_CHANNEL_ID: "" };
+  const env = testChildEnv({ ...base,
     CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
       maintenance: { path: maintenancePath, token: maintenance.token } }) });
   const children: string[] = [];
@@ -170,6 +172,9 @@ async function world(modelx = false) {
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     try { return JSON.parse(out.trim().split("\n").at(-1) ?? "") as Record<string, unknown>; } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
   };
+  /** MCRY7: an owner terminal `manager.ts ledger` child (no channel, no lease), run to completion inside the driver's synchronous assertActive */
+  const ownerSync = (...args: string[]): Record<string, unknown> => JSON.parse(new TextDecoder().decode(Bun.spawnSync([process.execPath, "--no-env-file",
+    "--config=/dev/null", MANAGER, "ledger", ...args], { env: testChildEnv(base) }).stdout).trim().split("\n").at(-1) ?? "");
   const reader = new LedgerReader(join(f.dir, "ledger.sqlite"));
   cleanup.push(() => { reader.close(); singleton.release(); maintenance.release(); });
 
@@ -211,7 +216,7 @@ async function world(modelx = false) {
   const sent = () => gh.calls.filter((c) => c.includes("update-branch") || c.includes("/merge "));
   const restated = () => (f.db.query("SELECT DISTINCT taskId FROM scheduler_intents WHERE taskId IN ('T2','T3') AND node = 'restate' ORDER BY taskId")
     .all() as { taskId: string }[]).map((r) => r.taskId);
-  return { f, order: order!, intent, reviewSeq, gh, pass, run, carries, sent, children, restated, newCards, ownerRule, cli };
+  return { f, order: order!, intent, reviewSeq, gh, pass, run, carries, sent, children, restated, newCards, ownerRule, cli, borrow, ownerSync };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -262,31 +267,37 @@ describe("MCRY4 e2e: a pooled PASS through two engine carries, merged at the new
     await w.newCards();
     w.gh.ci.set(merged2, "fail");
     await w.pass();
-    expect(w.run()).toMatchObject({ phase: "await_ci", reviewedHead: merged2 });
-    await w.pass();
-    expect(["unknown", "resolved"]).toContain(w.run().phase);
+    expect(w.run()).toMatchObject({ phase: "resolved", reviewedHead: merged2 }); // CIF3: the carried head's required red goes straight back to fix
+    expect(getTask(w.f.db, "T1")!.stage).toBe("fix");
+    expect(getMeta(w.f.db, "p").queueFrozen.frozen).toBe(false);
+    expect(listEvents(w.f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "merge_conflict").map((e) => [e.data.cause, e.data.prHead]))
+      .toEqual([["ci_fail", merged2]]);
     expect(w.carries()).toHaveLength(2);
     expect(w.sent()).toEqual([`pr update-branch ${PR}`, `pr update-branch ${PR}`]);
     expect(w.restated()).toEqual(["T2", "T3"]);
   }, 240_000);
 
-  const spoil: [string, (w: World) => void][] = [
-    ["the source order revoked (no longer done)", (w) => w.f.db.run("UPDATE lend_orders SET status = 'cancelled' WHERE orderId = ?", [w.order.orderId])],
-    ["the source order re-pointed at the carried head", (w) => w.f.db.run("UPDATE lend_orders SET head = ? WHERE orderId = ?", [merged1, w.order.orderId])],
-    ["the order's lease gen drifted", (w) => w.f.db.run("UPDATE lend_orders SET leaseGen = leaseGen + 3 WHERE orderId = ?", [w.order.orderId])],
-    ["the author delivered after the review", (w) => insertEvent(w.f.db, { actor: "agent-task-one", now: Date.now() },
+  const GATE = "advance merge run: 沿用时正式来源审查门不成立（来源 / 家族 / 豁免已变）：";
+  const noPass = new RegExp(`^${GATE}当前 head 缺同卡跨模型审查通过结论或仍有 P0/P1$`);
+  /** [name, the exact refusal every pass rejects with (null: the zero-exception path), the change] */
+  const spoil: [string, RegExp | null, (w: World) => void][] = [
+    ["the source order revoked (no longer done)", noPass, (w) => w.f.db.run("UPDATE lend_orders SET status = 'cancelled' WHERE orderId = ?", [w.order.orderId])],
+    ["the source order re-pointed at the carried head", noPass, (w) => w.f.db.run("UPDATE lend_orders SET head = ? WHERE orderId = ?", [merged1, w.order.orderId])],
+    ["the order's lease gen drifted", new RegExp(`^${GATE}出借池审查回执不成立：结论的提供方 / 会话 / 家族 / 租约代数与出借单 \\S+ 不一致`),
+      (w) => w.f.db.run("UPDATE lend_orders SET leaseGen = leaseGen + 3 WHERE orderId = ?", [w.order.orderId])],
+    ["the author delivered after the review", null, (w) => insertEvent(w.f.db, { actor: "agent-task-one", now: Date.now() },
       { project: "p", target: "T1", kind: "deliver", text: "", data: { headSHA: merged1 } }, false)],
   ];
-  for (const [name, change] of spoil) {
+  for (const [name, refusal, change] of spoil) {
     test(`second carry refused, zero carry writes, never merged: ${name}`, async () => {
       const w = await world();
       await toSecondUpdate(w);
       change(w);
       w.gh.ci.set(merged2, "pass");
       const before = w.carries().map((e) => e.seq);
-      // The refusal itself is the ledger's (in-transaction source gate). How the driver reacts to it from `updating` is
-      // scheduler-merge-driver.ts's (outside this card): today the rejection escapes mergeTick, so either outcome is accepted here.
-      for (let i = 0; i < 2; i++) await w.pass().catch((e: Error) => expect(e.message).toMatch(/沿用时正式来源审查门不成立|审查结论已不合格|当前 head/));
+      // The refusal is the ledger's in-transaction source gate; today it escapes mergeTick from `updating` (scheduler-merge-driver.ts),
+      // except the author delivery, which the driver ends without a throw. Each case pins its path: any other throw is red.
+      for (let i = 0; i < 2; i++) if (refusal) await expect(w.pass()).rejects.toThrow(refusal); else await w.pass();
       expect(w.carries().map((e) => e.seq)).toEqual(before); // the first carry's evidence is untouched, no second one was written
       expect(getTask(w.f.db, "T1")!.headSHA).toBe(merged1);
       expect(["updating", "unknown", "await_review"]).toContain(w.run().phase);
@@ -331,4 +342,57 @@ describe("MCRY6 e2e: the auto run re-proves its pinned MODELX source between the
     expect(await w.cli("owner", "scheduler-merge-resolve", w.intent, "--outcome", "cancelled", "--receipt", "GitHub 核对：PR 未合并"))
       .toMatchObject({ ok: true, run: { phase: "resolved" } });
   }, 240_000);
+});
+
+describe("MCRY7 e2e: what does not revoke the source leaves the historical PASS gate and the merge pinned to the current head", () => {
+  /** After both carries: merged2 green, one pass (`active` runs after the merging claim) → merged at merged2, the source orders untouched. */
+  const mergedAtNewHead = async (w: World, active?: () => void) => {
+    expect(w.carries().map((e) => [e.data.from, e.data.to, e.data.sourceReviewSeq])).toEqual([[reviewed, merged1, w.reviewSeq], [merged1, merged2, w.reviewSeq]]);
+    const orders = listLendOrders(w.f.db, "T1");
+    expect(orders.at(-1)).toMatchObject({ orderId: w.order.orderId, head: reviewed, status: "done" });
+    w.gh.ci.set(merged2, "pass");
+    await w.pass(active);
+    expect(w.run()).toMatchObject({ phase: "merged", reviewedHead: merged2, mergeSha: M });
+    expect(w.sent().filter((c) => c.includes("/merge "))).toEqual([`api -X PUT repos/o/r/pulls/7/merge -f sha=${merged2} -f merge_method=merge`]);
+    expect(listLendOrders(w.f.db, "T1")).toEqual(orders);
+  };
+
+  test("merging 认领返回后、merge API 之前真 CLI lend-cancel：已 done 的来源 not_found、零写入，原历史来源照钉 merged2 合并", async () => {
+    const w = await world();
+    await toSecondUpdate(w);
+    await w.pass();
+    const seqs = () => listEvents(w.f.db, { project: "p" }).map((e) => e.seq);
+    let cancel = null as Record<string, unknown> | null, before = [] as number[];
+    await mergedAtNewHead(w, () => {
+      if (cancel || w.run().phase !== "merging") return;
+      expect(w.sent().some((c) => c.includes("/merge "))).toBe(false); // the claim is journaled and returned; nothing was sent yet
+      before = seqs();
+      cancel = w.ownerSync("lend-cancel", "T1", "--reason", "认领后撤单");
+      expect(seqs()).toEqual(before);
+    });
+    expect(cancel).toMatchObject({ ok: false, code: "not_found", error: expect.stringContaining("没有未结的出借单") });
+  }, 240_000);
+
+  // Applied before the second carry, so both the in-transaction carry gate and the before-send re-proof read it.
+  const keep: [string, (w: World) => Promise<void>][] = [
+    ["borrow 授权自然到期（对方 hello 的 grant 过了 until，不是撤销）", async (w) => {
+      recordHello(w.f.db, "mate", null, { v: 1, proto: 2, boot: "mcry7", seq: 1, paused: null, slots: { codex: { total: 1, busy: 0 }, claude: { total: 0, busy: 0 } },
+        grant: { until: Date.now() + 30, roles: ["review"], repos: ["o/r"], ordersPerDay: 5, ordersLeftToday: 5 } }, Date.now());
+      await Bun.sleep(60);
+      const grant = (w.f.db.query("SELECT grant FROM lend_peers WHERE peer = 'mate'").get() as { grant: string }).grant;
+      expect(JSON.parse(grant).until).toBeLessThan(Date.now());
+    }],
+    ["删 borrow 配置（借入名单清空）", async (w) => { w.borrow.splice(0); }], // the children read no lend.json either
+    ["lend-pin 正式轮换（bridge 改钉对方公钥入账）", async (w) =>
+      expect(await w.cli("owner", "lend-pin", "--", "mate", "abcd-0123-4567-89ef", "repin")).toMatchObject({ ok: true, projects: ["p"] })],
+  ];
+  for (const [name, change] of keep) {
+    test(`not a revocation: the second carry and the before-send re-proof keep the historical source → merged at merged2: ${name}`, async () => {
+      const w = await world();
+      await toSecondUpdate(w);
+      await change(w);
+      await w.pass();
+      await mergedAtNewHead(w);
+    }, 240_000);
+  }
 });

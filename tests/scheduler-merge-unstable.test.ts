@@ -90,10 +90,11 @@ describe("i28-M7 merge driver treats UNSTABLE (CI still running) as waiting, not
       expect(f.calls).toEqual(["inspect"]);
     }
   });
-  test("await_ci: UNSTABLE with a failed or cancelled non-required check is unknown and never merges", async () => {
-    // A failed *required* check is a bounce back to fix since i28-M12 (tests/scheduler-merge-conflict.test.ts).
+  test("await_ci: UNSTABLE with a failed or cancelled non-required check and every required check settled is unknown and never merges", async () => {
+    // A failed *required* check is a bounce back to fix since i28-M12 (tests/scheduler-merge-conflict.test.ts); a red non-required
+    // check while a required one has not reported yet waits for its verdict since i28-CIF3 (tests/scheduler-merge-ci-carried.test.ts).
     for (const checks of [[{ name: "check", bucket: "pass" as const }, { name: "lint", bucket: "fail" as const }],
-      [{ name: "check", bucket: "pending" as const }, { name: "lint", bucket: "cancel" as const }]]) {
+      [{ name: "check", bucket: "skipping" as const }, { name: "lint", bucket: "cancel" as const }]]) {
       const f = fixture("await_ci", running({ checks }));
       await f.drive();
       expect(f.row.phase).toBe("unknown");

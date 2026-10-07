@@ -1,14 +1,9 @@
 /**
- * MCRY6: the auto run's last read before the merge API (scheduler-merge-driver.ts claimAndMerge, `beforeSend`) re-proves the PASS the
- * run is merging on, not just "the current head still reads a passing review". The owner may withdraw a MODELX same-family exemption
- * (or anything else the formal gate reads) after the `merging` claim committed; the claim's own transaction cannot see that.
- * - pinned: the source seq this run proved — its last `review_carry` (scheduler-written, this intent, ending on the run's head, same
- *   round / specRev), or with no carry its own `merge_phase ready` event at this head. Missing, malformed or off-head refuses; no
- *   search for any older PASS.
- * - re-proved: the unchanged formal gate (mergeReviewProof, injected: this leaf may not import scheduler-merge.ts back) on the task
- *   projected onto the source head by the trusted chain (carrySourceTask, MCRY4): order / gen / session / family / ticket / claim /
- *   the exemption's current approval. A throw or another seq refuses; a manual_merge run never comes here (mergeRunDrift).
- * tests/review-main-carry-before-send*.test.ts.
+ * MCRY6: the auto run's last read before the merge API (scheduler-merge-driver.ts claimAndMerge, `beforeSend`) re-proves the PASS it
+ * merges on: the pinned seq (its last scheduler `review_carry` of this intent ending on the run's head, same round / specRev, else its
+ * own `merge_phase ready` at this head; missing, malformed or off-head refuses, no older PASS is searched) through the unchanged formal
+ * gate (mergeReviewProof, injected) on the task projected by carrySourceTask (MCRY4). A throw or another seq refuses; manual_merge
+ * never comes here (mergeRunDrift). tests/review-main-carry-before-send*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { TaskWorkflow } from "./ledger-scheduler.js";
