@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ProjectFailure, projectKey, type ProjectPatch, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
@@ -7,15 +7,15 @@ import { useProjectAction } from "./use-projects";
 export function ProjectSettings({ project, port, refresh }: {
   project: SharedProject; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
 }) {
-  const [editor, setEditor] = useState<{ name: string; rev: number; dirty: boolean;
-    conflict: { current: SharedProject; patch: ProjectPatch } | null }>({ name: project.name, rev: project.rev, dirty: false, conflict: null });
-  const { name, rev, conflict } = editor;
+  const [editor, setEditor] = useState<{ source: SharedProject; name: string; rev: number; dirty: boolean;
+    conflict: { current: SharedProject; patch: ProjectPatch } | null }>({ source: project, name: project.name, rev: project.rev, dirty: false, conflict: null });
   // Refresh advances CAS authority, but only an explicit edit/retry/success can discard the draft or conflict.
-  useEffect(() => { setEditor(previous => ({ ...previous,
+  if (editor.source !== project) setEditor(previous => ({ ...previous, source: project,
     name: previous.dirty || previous.conflict ? previous.name : project.name,
     rev: Math.max(previous.rev, project.rev),
     conflict: previous.conflict && project.rev > previous.conflict.current.rev ? { ...previous.conflict, current: project } : previous.conflict,
-  })); }, [project]);
+  }));
+  const { name, rev, conflict } = editor;
   const action = useProjectAction(refresh);
   const update = async (patch: ProjectPatch, signal: AbortSignal) => {
     setEditor(previous => ({ ...previous, conflict: null }));

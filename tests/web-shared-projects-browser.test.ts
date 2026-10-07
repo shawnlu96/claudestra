@@ -100,7 +100,7 @@ afterAll(async () => {
     // Persist private evidence even if the existing Chromium cleanup subsequently fails its unchanged hook timeout.
     const [head, dirty] = await Promise.all([git("rev-parse", "HEAD"), git("status", "--porcelain", "--", "web", "tests")]);
     if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
-      head, specRev: 1, round: 2,
+      head, specRev: 1, round: 3,
       fixture: "synthetic UI/cards and machine entry, actual N4 snapshot/route/actions with N1C fixtures, injected teamRole/create/mint/transport; no production center or N2 join",
       summary: "Forms, permissions, CAS/local/recipient choices and N4 invitation approval; production composition and PM acceptance unverified",
       dirty: !!dirty,
@@ -123,8 +123,9 @@ async function screenshot(page: Page, name: string) {
   expect(await shotIssues(page)).toEqual([]);
 }
 
-async function newPage(width: number, query = "") {
+async function newPage(width: number, query = "", clock?: Date) {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
+  if (clock) await page.clock.install({ time: clock });
   const errors: string[] = [];
   page.on("pageerror", e => errors.push(e.message));
   await page.route("**/*", route => {
@@ -135,6 +136,32 @@ async function newPage(width: number, query = "") {
   return { page, errors };
 }
 
+for (const [name, offset] of [
+  ["expired project card buttons are disabled", -1],
+  ["unexpired project card buttons require an explicit click", 60_000],
+  ["project card expires while open and disables buttons on the next poll", 1000],
+] as const) test(name, async () => {
+  const now = new Date("2026-10-07T12:00:00Z");
+  const { page, errors } = await newPage(390, `?fixture=expiry&expiresAt=${now.getTime() + offset}`, now);
+  try {
+    const accept = page.getByRole("button", { name: "确认合成操作", exact: true });
+    const decline = page.getByRole("button", { name: "取消合成操作", exact: true });
+    await accept.waitFor();
+    expect(await accept.isDisabled()).toBe(offset < 0);
+    expect(await decline.isDisabled()).toBe(offset < 0);
+    expect(await page.locator("body").getAttribute("data-calls")).toBeNull();
+    if (offset === 1000) {
+      await page.clock.fastForward(2000);
+      await page.waitForFunction("Number(document.body.dataset.cardReads) >= 2");
+      expect(await accept.isDisabled()).toBe(true);
+      expect(await decline.isDisabled()).toBe(true);
+    } else if (offset > 0) {
+      await accept.click();
+      expect(JSON.parse((await page.locator("body").getAttribute("data-calls"))!)).toEqual(["answer"]);
+    }
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
 test("actual N4 source renders binding and invitation approval without claiming unavailable creation or exit", async () => {
   const { page, errors } = await newPage(390, "?fixture=n4-source");
   await page.clock.install();

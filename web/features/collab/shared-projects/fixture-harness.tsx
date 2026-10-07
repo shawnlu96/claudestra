@@ -5,7 +5,8 @@ import { SharedProjectsEntry } from "./projects-entry";
 import { machines } from "@/lib/machines";
 import { SharedProjectsPanel } from "./projects-panel";
 import { ProjectChoice } from "./project-choice";
-import { ProjectFailure, type CreateProject, type SharedProject, type ProjectSnapshot, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import { ProjectCards } from "./project-cards";
+import { ProjectFailure, type CreateProject, type ProjectCard, type SharedProject, type ProjectSnapshot, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { sharedProjectsApi } from "@/lib/shared-projects-api";
 
 const params = new URLSearchParams(location.search);
@@ -67,6 +68,18 @@ const port: SharedProjectsPort = {
   leave: async () => { record("leave"); snapshot = { ...snapshot, projects: [] }; },
 };
 
+// Reuse the same response so expiration must advance even when a poll brings no changed card data.
+const expiryCards: ProjectCard[] = [{ id: "expiry-card", project: "master", title: "合成过期卡", context: "仅用于过期按钮测试", canAnswer: true,
+  expiresAt: Number(params.get("expiresAt")), choice: null,
+  accept: { id: "expiry-accept", label: "确认合成操作" }, decline: { id: "expiry-decline", label: "取消合成操作" } }];
+const expiryPort: SharedProjectsPort = { ...port,
+  cards: async () => {
+    document.body.dataset.cardReads = String(Number(document.body.dataset.cardReads ?? 0) + 1);
+    return expiryCards;
+  },
+  answer: async () => { record("answer"); },
+};
+
 function ChoiceFixture() {
   const [cardId, setCardId] = useState(0);
   const [recommended, setRecommended] = useState(params.get("recommended") === "none" ? "" : "create");
@@ -83,6 +96,7 @@ function ChoiceFixture() {
 }
 
 const render = () => createRoot(document.getElementById("root")!).render(
+  params.get("fixture") === "expiry" ? <ProjectCards port={expiryPort} refresh={async () => {}} /> :
   params.get("fixture")?.startsWith("bindings") ? <SharedProjectsEntry /> : params.get("fixture") === "choice" ? <ChoiceFixture /> :
   <main className="mx-auto max-w-md p-4">
     <h1 className="mb-4 text-xl font-semibold">团队工作台</h1>
