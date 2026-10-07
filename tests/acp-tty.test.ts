@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { transcriptOfEntry } from "../src/lib/acp/transcript.ts";
+import { dim } from "../src/lib/acp/tty-layout.ts";
 import { createTtyScreen } from "../src/lib/acp/tty-screen.ts";
 import { elapsed, fitWidth, foldsOf, statusText, type TurnState } from "../src/lib/acp/tty-status.ts";
 import { createAcpTranslator } from "../src/lib/acp/updates.ts";
@@ -68,7 +69,7 @@ describe("ACP 窗口状态行", () => {
     s.resize();
     const folds = foldsOf(old, 12);
     expect(folds).toBeGreaterThan(1);
-    expect(st.out.slice(mark)).toBe(`\r\x1b[2K${"\x1b[1A\x1b[2K".repeat(folds)}${fitWidth(old, 12)}`);
+    expect(st.out.slice(mark)).toBe(`\r\x1b[2K${"\x1b[1A\x1b[2K".repeat(folds)}${dim(fitWidth(old, 12))}`);
     expect(Bun.stringWidth(fitWidth(old, 12))).toBeLessThan(12);
   });
 
