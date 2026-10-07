@@ -220,6 +220,9 @@ test("six real processes share canonical lock, capacity two, FIFO poll order and
   const two = { ...config, ownerApproval: { ...config.ownerApproval!, maxConcurrentFullChecks: 2 } };
   const values = clients.map((_, i) => ({ ...input(i % 2 ? alias : dir, `race-${i}`), config: two }));
   const results = await Promise.all(clients.map((client, i) => uncontended(client, values[i]!)));
+  // Attribution for CI: a non-retryable blocked/denied outcome is reported with its reason, never retried or dropped.
+  const outcomes = results.map((result, i) => `race-${i} pid=${clients[i]!.pid} ${result.status} ${result.reasonCode ?? "-"} ${result.reason ?? ""}`);
+  if (results.some((result) => result.status !== "granted" && result.status !== "queued")) throw new Error(`six-process outcomes:\n${outcomes.join("\n")}`);
   expect(results.filter((result) => result.status === "granted")).toHaveLength(2);
   expect(results.filter((result) => result.status === "queued")).toHaveLength(4);
   const entries = state(dir).entries as Array<{ id: string; status: string }>;

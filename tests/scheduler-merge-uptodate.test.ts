@@ -179,7 +179,7 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
       { branch: "task/T2" }, { crossRepository: true }, { state: "CLOSED" as const }]) {
       const f = fixture("await_ci", { snaps: [behind(p)] });
       await f.drive();
-      expect([f.row.phase, f.calls.includes("update")]).toEqual(["unknown", false]);
+      expect([f.row.phase, f.calls.includes("update")]).toEqual(["head" in p ? "await_review" : "unknown", false]); // MCRY3: an author push re-reviews
     }
     const draft = fixture("await_ci", { snaps: [behind({ draft: true })] });
     await draft.drive();

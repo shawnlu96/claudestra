@@ -14,6 +14,7 @@ import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
 import { readActivity } from "./agent-supervisor-activity.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { resolveBunPath } from "./bun-path.js";
+import { hasAsksTable } from "./ledger-asks.js";
 import { pmsByProject } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { notifyProjectPm } from "./pm-notify.js";
@@ -80,11 +81,16 @@ export function lendAgents(path = LEND_JOURNAL_PATH): Set<string> {
   } finally { db.close(); }
 }
 
+/** ASKPM2: an agent's open, unexpired asks on a card, by asker; a read error throws (the pass plans nothing, as with lendAgents) */
+export const askingAgents = (db: Database, now: number): Map<string, { id: string; taskId: string }[]> => !hasAsksTable(db) ? new Map()
+  : (db.query("SELECT id, taskId, fromAgent FROM asks WHERE state = 'open' AND expiresAt > ? AND taskId IS NOT NULL AND fromAgent IS NOT NULL ORDER BY createdAt, id")
+    .all(now) as { id: string; taskId: string; fromAgent: string }[]).reduce((m, r) => m.set(r.fromAgent, [...m.get(r.fromAgent) ?? [], { id: r.id, taskId: r.taskId }]), new Map());
+
 export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = DEFAULT_LIFECYCLE, now = Date.now()): Promise<Plan> {
   const [agents, memory] = await Promise.all([agentFacts(now), readMemory()]);
   const master = new Set(agents.filter((a) => isMasterName(a.name)).map((a) => a.name));
   return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master,
-    swapPct: memory.swapPct, pending: pendingCleanups(db), registerFailed: registerFailures(db) });
+    swapPct: memory.swapPct, pending: pendingCleanups(db), registerFailed: registerFailures(db), asking: askingAgents(db, now) });
 }
 
 async function du(paths: string[]): Promise<number | null> {
