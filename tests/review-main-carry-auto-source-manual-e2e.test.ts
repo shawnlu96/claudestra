@@ -92,9 +92,10 @@ async function world() {
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     try { return JSON.parse(out.trim().split("\n").at(-1) ?? ""); } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
   };
-  const home = join(state, "home"), tmp = join(state, "tmp");
-  for (const d of [home, tmp]) mkdirSync(d);
-  const base = { HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
+  const home = join(state, "home");
+  mkdirSync(home);
+  // TMPDIR covers the state / runtime dirs: under a private temp root the children's test-guard would otherwise redirect them (fixture-tmp-1)
+  const base = { HOME: home, TMPDIR: state, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
   const pmEnv = testChildEnv({ ...base, DISCORD_CHANNEL_ID: PM_CHANNEL });
   const pm = (...args: string[]) => spawn(pmEnv, ["ledger", ...args]);
   /** MCRY6: the same PM CLI child, run to completion inside the driver's synchronous assertActive */
@@ -200,7 +201,7 @@ test("MCRY4 manual run: the PM revokes the request before the second carry → n
   expect(Number.isSafeInteger(request)).toBe(true);
   expect(await w.pm("manual-merge-revoke", "T", "--request", String(request), "--reason", "撤回")).toMatchObject({ ok: true });
   w.gh.ci.set(three, "pass");
-  for (let i = 0; i < 2; i++) await w.pass().catch(() => {}); // how the driver ends a refused run is scheduler-merge-driver.ts's
+  for (let i = 0; i < 2; i++) await w.pass(); // zero-exception path: the refused run ends inside the driver, any throw is red
   expect(carries()).toHaveLength(1);
   expect(getTask(w.db, "T")!.headSHA).toBe(two);
   expect(run().phase).not.toBe("merged");
@@ -230,7 +231,7 @@ test("MCRY6 manual run: PM CLI manual-merge-revoke while three's CI runs → zer
   expect(run()).toMatchObject({ phase: "await_ci", reviewedHead: three });
   expect(await w.pm("manual-merge-revoke", "T", "--request", String(request), "--reason", "等 CI 时撤回")).toMatchObject({ ok: true });
   w.gh.ci.set(three, "pass");
-  for (let i = 0; i < 2; i++) await w.pass().catch(() => {});
+  for (let i = 0; i < 2; i++) await w.pass(); // zero-exception path
   expect(w.gh.calls.some((c) => c.includes("/merge "))).toBe(false);
   expect(run()).toMatchObject({ phase: "resolved", mergeSha: null });
   expect(run().reason).toMatch(/^cancelled: /);

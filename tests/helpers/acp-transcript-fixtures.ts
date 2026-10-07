@@ -43,9 +43,8 @@ const FIXTURES: Fixture[] = [
   ] },
 ];
 
-/** 整批夹具 → 窗口文本：updates 过真的翻译器，收到的消息走 transcriptOfInbound，同一个 stamper 盖时间 */
-export function renderFixtures(): string {
-  const stamp = createTranscriptStamper();
+/** 整批夹具 → 窗口文本：updates 过真的翻译器，收到的消息走 transcriptOfInbound，同一个 stamper 盖时间（TTY 排法传 tty-layout 进来） */
+export function renderFixtures(stamp: (item: string, at: Date) => string = createTranscriptStamper()): string {
   const t = createAcpTranslator(() => "T");
   const out = FIXTURES.flatMap((f) =>
     (f.inbound ? [transcriptOfInbound(f.inbound.content, { user: f.inbound.user })]

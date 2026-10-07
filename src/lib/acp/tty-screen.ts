@@ -1,10 +1,10 @@
 /**
  * ACP 窗口是 TTY 时的画法（src/acp-host.ts 接线；不是 TTY 就不用它，照旧一段一行纯文本，测试和日志靠那个）。
  * 不设滚动区：底栏（状态行，接了输入时再加一行输入行）永远在最后，光标停在最后一行行尾；要写内容就先擦掉底栏、写内容、再画回来。
- * tmux attach、网页终端（xterm 连 tmux）都只认这几个序列：\r、ESC[2K 擦行、ESC[1A 上移。tests/acp-tty.test.ts。
+ * 光标只用 \r、ESC[2K 擦行、ESC[1A 上移（tmux attach、网页终端都认）；颜色（SGR）每行自带复位。排法和颜色在 tty-layout.ts。tests/acp-tty.test.ts。
  */
 import { createTextStream } from "./transcript-stream.js";
-import { createTranscriptStamper } from "./transcript.js";
+import { createTtyLayout, dim } from "./tty-layout.js";
 import { fitWidth, foldsOf, statusText, type TurnState } from "./tty-status.js";
 
 export interface TtyIo {
@@ -31,7 +31,7 @@ const CLEAR = "\r\x1b[2K";
 
 /** input：给了就在状态行下面多画一行输入行（tty-input.ts 按宽度截好的内容） */
 export function createTtyScreen(io: TtyIo, state: () => TurnState, now: () => number = Date.now, input?: (cols: number) => string): TtyScreen {
-  const stamp = createTranscriptStamper(), stream = createTextStream();
+  const layout = createTtyLayout(), stream = createTextStream();
   let footer: string[] = [""], drawnCols = 0, busySince: number | null = null;
   const render = (): string[] => {
     const s = state(), cols = io.columns();
@@ -46,14 +46,14 @@ export function createTtyScreen(io: TtyIo, state: () => TurnState, now: () => nu
     return `${CLEAR}${"\x1b[1A\x1b[2K".repeat(footer.length - 1 + folds)}`;
   };
   const draw = (body: string, next: string[]) => {
-    io.write(`${erase()}${body}${next.join("\n")}`);
+    io.write(`${erase()}${body}${next.map((l, i) => (i ? l : dim(l))).join("\n")}`); // 底栏存纯文本：擦行按它算折数
     footer = next;
     drawnCols = io.columns();
   };
   const put = (body: string) => draw(`${body}\n`, render());
   return {
-    show: (item, at) => stream.settle(item).forEach((i) => put(stamp(i, at))),
-    update: (u, at) => stream.chunk(u).forEach((i) => put(stamp(i, at))),
+    show: (item, at) => stream.settle(item).forEach((i) => put(layout(i, io.columns(), at))),
+    update: (u, at) => stream.chunk(u).forEach((i) => put(layout(i, io.columns(), at))),
     print: put,
     tick() {
       const next = render();

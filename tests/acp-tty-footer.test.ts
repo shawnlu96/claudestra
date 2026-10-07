@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { dim } from "../src/lib/acp/tty-layout.ts";
 import { createTtyScreen } from "../src/lib/acp/tty-screen.ts";
 import { fitWidth, foldsOf, statusText, type TurnState } from "../src/lib/acp/tty-status.ts";
 import { termText } from "./helpers/acp-tty-term.ts";
@@ -37,7 +38,7 @@ test("变窄：状态行和输入行各自被折的行都擦掉，再画截短�
   const mark = st.out.length;
   s.resize();
   const up = 1 + foldsOf(fitWidth(oldStatus, 40), 12) + foldsOf(oldInput, 12);
-  expect(st.out.slice(mark)).toBe(`\r\x1b[2K${"\x1b[1A\x1b[2K".repeat(up)}${fitWidth(oldStatus, 12)}\n❯ xx`);
+  expect(st.out.slice(mark)).toBe(`\r\x1b[2K${"\x1b[1A\x1b[2K".repeat(up)}${dim(fitWidth(oldStatus, 12))}\n❯ xx`);
 });
 
 test("没接输入行（非交互 / 出借 worker）：底栏照旧一行", () => {
