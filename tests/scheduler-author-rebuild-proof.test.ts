@@ -59,7 +59,7 @@ describe("authorRetireProof / rebuildAllowed", () => {
   test("a scheduler retire of the registered author session, nothing after → retired; the history keeps seq / actor / session / role", () => {
     const l = ledger();
     expect(authorRetireProof(l.db, l.task)).toMatchObject({ kind: "retired", agent: OLD, sessionId: "s-old" });
-    expect(workerRetireHistory(l.db, "T1").map((h) => [h.op, h.actor, h.agent, h.sessionId, h.role])).toEqual([
+    expect(workerRetireHistory(l.db, { taskId: "T1" }).map((h) => [h.op, h.actor, h.agent, h.sessionId, h.role])).toEqual([
       ["worker_register", "agent-pm", OLD, "s-old", "author"], ["worker_retire", "scheduler", OLD, "s-old", "author"]]);
     expect(rebuildAllowed(l.db, l.task, OLD, "claude")).toBeNull();
   });

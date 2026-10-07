@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerWorker } from "../src/lib/agent-lifecycle-store.js";
+import { recordRegisterFailure, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
@@ -28,6 +28,7 @@ import { clearQueuedLocalStarts } from "../src/lib/scheduler-local-runtime-queue
 import { git } from "../src/lib/scheduler-review-worktree.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
+import { registerCreated } from "../src/manager/create-lifecycle.js";
 import { testChildEnv } from "./test-env.js";
 
 const MANAGER = join(import.meta.dir, "..", "src", "manager.ts");
@@ -46,6 +47,7 @@ interface FixtureOpts {
   /** runs after every git call of the service (the race window between its checks and its effects) */ afterGit?: (args: string[]) => Promise<void>;
   /** rewrites a git result of the service (fault injection) */ gitOut?: (args: string[], r: { code: number; out: string }) => { code: number; out: string };
   createFails?: number;
+  /** runs after the create registered its worker, before the scheduler reads it back */ afterCreate?: () => void;
 }
 const CAPACITY = { ok: false, cleanedUp: true, error: "Selected model is at capacity.\n（已清理：窗口已关；频道已删；占位已删）" };
 
@@ -158,8 +160,15 @@ async function fixture(opts: FixtureOpts = {}) {
       creates.push(args);
       if (creates.length <= (opts.createFails ?? 0)) return CAPACITY; // manager create cleaned its window, channel and placeholder
       const runtime = args.includes("codex") ? "codex" : "claude-code";
-      agents[`agent-${args[1]}`] = { cwd: args[2], projectId: "p", task: "T1", sessionId: `s-${args[1]}`, runtime, transport: runtime === "codex" ? "acp" : "tmux", kind: "worker", status: "active" };
-      saveRegistry(); return { ok: true };
+      const name = `agent-${args[1]}`, before = (agents[name]?.sessionId as string | undefined) ?? null;
+      agents[name] = { cwd: args[2], projectId: "p", task: "T1", sessionId: `s-${args[1]}`, runtime, transport: runtime === "codex" ? "acp" : "tmux", kind: "worker", status: "active" };
+      saveRegistry();
+      // manager create --card's own registration (reserve, worker tag, activate) on this fixture's ledger and registry
+      const r = await registerCreated(args[1], { taskId: "T1", role: "author" }, { ok: true, agent: name, sessionId: `s-${args[1]}` }, before, {
+        ledgerPath: dbPath, createdBy: async () => "scheduler", recordFailure: (fail) => recordRegisterFailure(db, fail),
+        loadRegistry: async () => JSON.parse(readFileSync(registryPath, "utf8")), saveRegistry: async (reg) => writeFileSync(registryPath, JSON.stringify(reg)) });
+      opts.afterCreate?.();
+      return r;
     },
     rebuild: { policy: (project, key) => recoveryPolicy(project, key, join(state, "recovery-policy.json")), swapPct: async () => swap, start } });
   let now = Date.now();
@@ -216,6 +225,8 @@ describe("AREB1 author rebuild after LIFE1 retired it (LOCAL1 shape, production 
     expect(getWorkflow(f.db, "T1")).toMatchObject({ mode: "auto", authorFamily: "claude" });
     expect(f.events("local_author")).toEqual([expect.objectContaining({ actor: "scheduler", data: expect.objectContaining({ agent: NEW, family: "claude" }) })]);
     expect(f.events("worker_retire")).toHaveLength(1); // the old retire record stays as written
+    // manager create --card registered the new author on the card; the guard and the writer accept exactly that registration
+    expect(f.events("worker_register").map((e) => [e.data.agent, e.data.sessionId])).toEqual([[OLD, "s-old"], [NEW, `s-${NEW.slice("agent-".length)}`]]);
     expect(f.sent.map((r) => r.agent)).toContain(NEW);
     expect(f.policy().mode).toBe("on"); // set through the real `ledger scheduler-recovery` CLI
   }, 60_000);
@@ -362,6 +373,44 @@ describe("AREB1 retire evidence (on)", () => {
     const f = await fixture();
     registerWorker(f.db, { agent: OLD, sessionId: "s-again", taskId: "T1", role: "author", createdBy: "agent-pm" });
     await expectKept(f, gone);
+  }, 60_000);
+  test("the old name registered again on another card after the retire, and retired there too → manual", async () => {
+    const f = await fixture();
+    registerWorker(f.db, { agent: OLD, sessionId: "s-t2", taskId: "T2", role: "author", createdBy: "agent-pm" });
+    recordWorkerRetire(f.db, "scheduler", { agent: OLD, sessionId: "s-t2", taskId: "T2", role: "author", rule: "card_done", reason: "T2 结束", idleMs: null,
+      bytesBefore: null, bytesAfter: null, steps: [], pending: [], retry: false, now: Date.now() });
+    await expectKept(f, gone);
+  }, 60_000);
+  const t2 = (f: F, pending: { checkout: string; tmp: null }[]) => {
+    registerWorker(f.db, { agent: NEW, sessionId: "s-new-t2", taskId: "T2", role: "author", createdBy: "agent-pm" });
+    recordWorkerRetire(f.db, "scheduler", { agent: NEW, sessionId: "s-new-t2", taskId: "T2", role: "author", rule: "card_done", reason: "T2 结束", idleMs: null,
+      bytesBefore: null, bytesAfter: null, steps: [], pending, retry: false, now: Date.now() });
+  };
+  test("the next name owes a cleanup (not in the registry) → manual before any create", async () => {
+    const f = await fixture();
+    t2(f, [{ checkout: "/tmp/areb1-left", tmp: null }]);
+    await expectKept(f, gone);
+  }, 60_000);
+  test("the next name was registered by another session after the retire (already retired) → manual", async () => {
+    const f = await fixture();
+    t2(f, []);
+    await expectKept(f, gone);
+  }, 60_000);
+  test("the next name has an unresolved registration failure → manual", async () => {
+    const f = await fixture();
+    recordRegisterFailure(f.db, { agent: NEW, sessionId: "s-lost", taskId: "T2", role: "author", createdBy: "agent-pm", reason: "registry 写失败" });
+    await expectKept(f, gone);
+  }, 60_000);
+  test("after create another session takes the new name on the card → the writer refuses, the card keeps the old author", async () => {
+    let f!: F;
+    f = await fixture({ afterCreate: () => registerWorker(f.db, { agent: NEW, sessionId: "s-hijack", taskId: "T1", role: "author", createdBy: "agent-pm" }) });
+    await f.mode("on");
+    await f.bounce();
+    const seen = await settle(f, 8);
+    expect(f.creates).toHaveLength(1);
+    expect(seen.join("\n")).not.toContain("sent");
+    expect(f.task().agent).toBe(OLD);
+    expect(f.sent).toEqual([]);
   }, 60_000);
   test("another live author registered on the card → manual", async () => {
     const f = await fixture();

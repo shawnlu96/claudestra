@@ -65,12 +65,12 @@ async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => vo
 async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan, opts: LocalStartOptions, rebuild?: Rebuild): Promise<EnsureResult> {
   const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "wait", reason: "作者建会话意图已改变，下一轮重算" };
-  const policy = readSchedulerConfig(opts.configPath).projects[task.project];
+  const policy = readSchedulerConfig(opts.configPath).projects[task.project], made: { agent?: string } = {}; // made: AREB1 Created
   const family = rebuild?.family ?? (policy?.agents ? poolAuthorRuntime(task.project, policy.agents, env.db.filename) : localAuthorRuntime(task.project, opts.configPath));
   const guard = () => {
     env.active();
     if (claimed(env, task, rebuild?.replaces)?.id !== intent.id) throw new Error("卡或建会话意图已改变，停止本次创建");
-    const refused = rebuild && rebuildAllowed(env.db, getTask(env.db, task.id) ?? task, rebuild.replaces, rebuild.family);
+    const refused = rebuild && rebuildAllowed(env.db, getTask(env.db, task.id) ?? task, rebuild.replaces, rebuild.family, made.agent ? { agent: made.agent } : undefined);
     if (refused) throw new Error(`作者重建条件已不成立：${refused}`);
     const config = readSchedulerConfig(opts.configPath);
     if (!config.enabled || !config.autoDispatch || !config.projects[task.project]) throw new Error("本机执行者配置已改变，停止本次创建");
@@ -81,8 +81,8 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
     const failure = await checkout(env, p, guard, rebuild?.replaces);
     if (failure) return { kind: "unknown", reason: failure };
     const flags = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-    const r = await whileOwned(guard, () => localCreateGuard(env.create)("create", p.agentName, p.worktree,
-      "--purpose", p.purpose, "--task", p.taskId, "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project, ...flags));
+    const r = await whileOwned(guard, () => { made.agent = p.agent; return localCreateGuard(env.create)("create", p.agentName, p.worktree,
+      "--purpose", p.purpose, "--task", p.taskId, "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project, ...flags); });
     if (r.code === "lease-lost") throw new SchedulerStopped(String(r.error));
     if (r.ok !== true) return { kind: "unknown", reason: `建 ${p.agent} 结果不明：${String(r.error ?? "")}` };
     for (let n = 0; n < 30; n++) {

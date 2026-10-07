@@ -27,7 +27,7 @@ export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, 
   }) };
   if (!config.enabled || !config.autoDispatch || !config.projects[task.project] || getMeta(db, task.project).queueFrozen.frozen
     || !workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev || (task.agent || undefined) !== input.flags.replaces
-    || (input.flags.replaces !== undefined && rebuildAllowed(db, task, input.flags.replaces, String(family)) !== null) // AREB1: formal retire, same family
+    || (input.flags.replaces !== undefined && rebuildAllowed(db, task, input.flags.replaces, String(family), { agent: String(agent), sessionId: String(row?.sessionId) }) !== null)
     || (task.assigneeKind && task.assigneeKind !== "agent") || !["spec", "build", "fix"].includes(task.stage)
     || task.rev !== Number(input.flags.rev) || String(task.extra.placement ?? "").startsWith("peer:")) {
     throw new LedgerError("conflict", "卡或自动调度配置已改变，不再补建本机执行者");

@@ -10,7 +10,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { lstatSync } from "node:fs";
-import { activeWorkers, pendingCleanups, workerRetireHistory } from "./agent-lifecycle-store.js";
+import { activeWorkers, pendingCleanups, registerFailures, workerRetireHistory } from "./agent-lifecycle-store.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
@@ -18,27 +18,41 @@ import type { Git } from "./scheduler-review-worktree.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 
 export type RetireProof = { kind: "retired"; agent: string; sessionId: string; retireSeq: number; registerSeq: number } | { kind: "none"; why: string };
+/** The worker this ensure itself created (after create): its name, and once the registry shows it, its session. Before create: none. */
+export type Created = { agent: string; sessionId?: string } | undefined;
 
-function proof(db: Database, taskId: string, agent: string): RetireProof {
-  const history = workerRetireHistory(db, taskId).filter((h) => h.agent === agent);
+function proof(db: Database, taskId: string, agent: string, created: Created): RetireProof {
+  const history = workerRetireHistory(db, { taskId }).filter((h) => h.agent === agent);
   const retire = history.filter((h) => h.op === "worker_retire" && !h.retry).at(-1);
   if (!retire) return { kind: "none", why: `本卡没有 ${agent} 的收回记录` };
   if (retire.role !== "author") return { kind: "none", why: `${agent} 的收回记录角色是 ${String(retire.role)}` };
   if (retire.actor !== "scheduler" || !retire.sessionId) return { kind: "none", why: `${agent} 的收回记录不是调度服务正式写的` };
   const reg = history.filter((h) => h.op === "worker_register" && h.seq < retire.seq).at(-1);
   if (!reg || reg.sessionId !== retire.sessionId || reg.role !== "author") return { kind: "none", why: `${agent} 的收回记录与本卡作者登记的会话对不上` };
-  if (history.some((h) => h.op === "worker_register" && h.seq > retire.seq)) return { kind: "none", why: `${agent} 收回后又登记过` };
-  if (activeWorkers(db).some((w) => w.agent === agent || (w.taskId === taskId && w.role === "author"))) return { kind: "none", why: `${agent} 或本卡另一作者仍在登记中` };
-  if (pendingCleanups(db).some((c) => c.agent === agent)) return { kind: "none", why: `${agent} 还有没补清的现场` };
+  // the name's history on every card: a later generation anywhere (even one already retired again) voids this retire
+  if (workerRetireHistory(db, { agent }).some((h) => h.op === "worker_register" && h.seq > retire.seq)) return { kind: "none", why: `${agent} 收回后又登记过` };
+  const target = rebuildAgentName(taskId, agent);
+  if (!target) return { kind: "none", why: `${agent} 之后形成不了合法的新作者名` };
+  // after create only this ensure's own new worker may stand on the card: its exact name, this card, author, and its session once known
+  const mine = (h: { agent: string; taskId: string | null; role: string | null; sessionId: string | null }) => !!created && created.agent === target
+    && h.agent === target && h.taskId === taskId && h.role === "author" && (created.sessionId === undefined || h.sessionId === created.sessionId);
+  if (activeWorkers(db).some((w) => !mine(w) && (w.agent === agent || w.agent === target || (w.taskId === taskId && w.role === "author")))) {
+    return { kind: "none", why: `${agent}、新名字 ${target} 或本卡另一作者仍在登记中` };
+  }
+  const taken = workerRetireHistory(db, { agent: target }).some((h) => h.op === "worker_register" && h.seq > retire.seq && !mine(h));
+  if (taken) return { kind: "none", why: `新名字 ${target} 在收回后已被别的会话登记` };
+  if (pendingCleanups(db).some((c) => c.agent === agent || c.agent === target)) return { kind: "none", why: `${agent} 或新名字 ${target} 还有没补清的现场` };
+  if (registerFailures(db).some((f) => f.agent === target)) return { kind: "none", why: `新名字 ${target} 有未了结的登记` };
   const bound = getSchedulerSession(db, taskId, "author");
   if (bound && bound.state !== "retired" && (bound.transport === "peer" || bound.agent !== agent)) return { kind: "none", why: `本卡作者绑定 ${bound.agent} 不是本机被收回的 ${agent}` };
   if (listEvents(db, { target: taskId, afterSeq: retire.seq }).some((e) => e.kind === "deliver")) return { kind: "none", why: `${agent} 收回后卡上又有交付` };
   return { kind: "retired", agent, sessionId: retire.sessionId, retireSeq: retire.seq, registerSeq: reg.seq };
 }
 
-export function authorRetireProof(db: Database, task: Pick<LedgerTask, "id" | "agent">): RetireProof {
+/** created: see Created — before create (and in the scheduler's first check) the new name must be entirely free. */
+export function authorRetireProof(db: Database, task: Pick<LedgerTask, "id" | "agent">, created?: Created): RetireProof {
   if (!task.agent) return { kind: "none", why: "卡上没有执行者" };
-  try { return proof(db, task.id, task.agent); }
+  try { return proof(db, task.id, task.agent, created); }
   catch (e) { return { kind: "none", why: `读不了收回记录：${String((e as Error).message ?? e).slice(0, 200)}` }; }
 }
 
@@ -56,12 +70,11 @@ export function rebuildAgentName(taskId: string, replaces?: string): string | nu
   return Number.isSafeInteger(n + 1) && name.length <= MAX_NAME && `agent-${name}` !== replaces ? `agent-${name}` : null;
 }
 
-/** Before create and inside the writer's transaction: the same formal retire, the card still names it, the workflow's family. */
-export function rebuildAllowed(db: Database, task: Pick<LedgerTask, "id" | "agent">, replaces: string, family: string): string | null {
-  const p = authorRetireProof(db, task);
+/** Before create, in the launch guard and inside the writer's transaction: the same formal retire, the card still names it, the workflow's family. */
+export function rebuildAllowed(db: Database, task: Pick<LedgerTask, "id" | "agent">, replaces: string, family: string, created?: Created): string | null {
+  const p = authorRetireProof(db, task, created);
   if (p.kind !== "retired") return p.why;
   if (p.agent !== replaces) return `卡上执行者已不是 ${replaces}`;
-  if (!rebuildAgentName(task.id, replaces)) return `${replaces} 之后形成不了合法的新作者名`;
   const wf = getWorkflow(db, task.id);
   return wf?.authorFamily === family ? null : `作者家族 ${family} 不是流程的 ${wf?.authorFamily ?? "（无）"}`;
 }
