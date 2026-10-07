@@ -113,4 +113,18 @@ describe("AUDN1 冻结 / 解冻不重推同一张 merge 停放卡", () => {
     expect(pend(snap(t, { unfrozenAt }), T0 + 50 * MIN)).toEqual([]);
     expect(pend(snap(t, { unfrozenAt }), T0 + 77 * MIN)).toHaveLength(1);
   });
+
+  test("pm_held 不受影响丢通知：闲时未推成 → PM 忙时 keep、本轮不推 → 再空闲恢复 pending", () => {
+    const { db } = fresh();
+    const agent = (turn: "idle" | "busy") => ({ name: PM, projectId: "p", windowAlive: true, turn, lastWriteAt: null, startedAt: 0 });
+    const held = [{ to: PM, from: "agent-t1", messageId: "m1", heldAt: T0, leaseAt: null }];
+    const pend = (turn: "idle" | "busy", now: number) => {
+      const r = auditLedger(snap([], { agents: [agent(turn)], held }), now);
+      return reconcileFindings(db, "p", r.findings, r.evaluated, now, { keep: r.keep }).pending.filter((f) => f.rule === "pm_held").map((f) => f.key);
+    };
+    expect(pend("idle", T0 + 11 * MIN)).toHaveLength(1); // 发送失败，不 ack
+    expect(pend("busy", T0 + 12 * MIN)).toEqual([]);
+    expect(db.query("SELECT resolvedAt, notifiedAt FROM audit_findings WHERE rule = 'pm_held'").get()).toEqual({ resolvedAt: null, notifiedAt: null });
+    expect(pend("idle", T0 + 13 * MIN)).toHaveLength(1);
+  });
 });
