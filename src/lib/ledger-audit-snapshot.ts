@@ -18,7 +18,7 @@ import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
-import { grantUntilOf, LEND_GRANT_RECENT_MS, type LendGrantFact } from "./ledger-audit-lend-grant.js";
+import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -231,6 +231,15 @@ export function readLendGrants(db: Database, project: string, now: number): Lend
     (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.status = 'claimed') AS running FROM lend_peers p ORDER BY p.peer`)
     .all(project, now - LEND_GRANT_RECENT_MS) as (Omit<LendGrantFact, "until"> & { grant: string | null })[]).map(({ grant, ...r }) => ({ ...r, until: grantUntilOf(grant) }));
 }
+/** LGR1：本项目已建 audit_baseline 的授权规则（只读）；读不了 = null（规则这轮不跑，不让首轮静默吞掉提醒） */
+export function readLendGrantBaseline(db: Database, project: string): string[] | null {
+  try {
+    return (db.query(`SELECT rule FROM audit_baseline WHERE project = ? AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`)
+      .all(project, ...LEND_GRANT_RULES) as { rule: string }[]).map((r) => r.rule);
+  } catch {
+    return null;
+  }
+}
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
@@ -281,7 +290,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now),
+      mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,

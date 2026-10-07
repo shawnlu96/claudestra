@@ -2,6 +2,8 @@
  * LGR1：出借方给本项目的授权（lend_peers.grant，最近一次 hello 存下的）快到期 / 已经没了，先告诉 PM——到期后 lend-peers 的 why
  * 只会说「hello 太久没更新」，看着像离线。纯函数：取数在 ledger-audit-snapshot.ts（readLendGrants），落库 / 去重同 ledger-audit-store.ts。
  * 只报最近 24 小时在本项目有过出借单的 peer；只读，不碰放置 / 容量 / 续借，也不给 peer 发任何消息。tests/ledger-audit-lend-grant.test.ts。
+ * 上线首轮不吞提醒：reconcileFindings 会把规则第一次 evaluated 那轮的发现直接记成已推（silenceFirstRun），而授权提醒恰恰要在首次满足时推——
+ * 所以某条规则在本项目还没有 audit_baseline 时，这一轮只进 evaluated 建基线、不出发现，下一轮（15 分钟）起照常报。
  */
 import type { AuditFinding, AuditRule, AuditSnapshot } from "./ledger-audit.js";
 
@@ -18,6 +20,8 @@ export interface LendGrantFact { peer: string; until: number | null; helloAt: nu
 export interface LendGrantInputs {
   /** undefined = 台账没有出借表（规则不跑） */
   lendGrants?: readonly LendGrantFact[];
+  /** audit_baseline 里本项目已有的授权规则；没有 = 这轮只建基线；null = 读不了（规则不跑，免得首轮被静默） */
+  lendGrantBaseline?: readonly string[] | null;
 }
 
 /** lend_peers.grant 原文（JSON 或 null）里的 until；坏了当没有授权 */
@@ -44,20 +48,22 @@ type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (
 interface Out { emit: Emit; evaluated: AuditRule[] }
 
 export function lendGrantAudit(s: Pick<AuditSnapshot, "project"> & LendGrantInputs, now: number, out: Out): void {
-  if (s.lendGrants === undefined) return;
+  if (s.lendGrants === undefined || s.lendGrantBaseline === null) return;
+  const ready = new Set(s.lendGrantBaseline ?? []);
+  out.evaluated.push(...LEND_GRANT_RULES);
   for (const g of s.lendGrants) {
     if (g.recent <= 0) continue;
     const state = grantState(g.until, now);
     if (state === "live" && g.until !== null && g.until - now <= LEND_GRANT_WARN_MS) {
+      if (!ready.has("lend_grant_expiring")) continue;
       out.emit({ rule: "lend_grant_expiring", taskId: null, since: g.until - LEND_GRANT_WARN_MS, keyParts: [g.peer, g.until],
         detail: `peer ${g.peer} 给本项目的出借授权 ${localTime(g.until)} 到期（还剩 ${Math.max(1, Math.floor((g.until - now) / MIN))} 分钟），当前在跑 ${g.running} 单`,
         suggestion: "请对方 owner 续授权" });
-    } else if (state !== "live") {
+    } else if (state !== "live" && ready.has("lend_grant_gone")) {
       const at = g.until ?? g.helloAt;
       out.emit({ rule: "lend_grant_gone", taskId: null, since: at, keyParts: [g.peer, at],
         detail: `peer ${g.peer} 的出借授权${state === "expired" ? "已到期" : "已到期 / 已收回"}（${localTime(at)}），调度器不会再往它派单；当前在跑 ${g.running} 单`,
         suggestion: "请对方 owner 续授权；这不是离线" });
     }
   }
-  out.evaluated.push(...LEND_GRANT_RULES);
 }

@@ -10,9 +10,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { auditLedger, type AuditSnapshot } from "../src/lib/ledger-audit.js";
 import { grantUntilOf, LEND_GRANT_RULES, localTime } from "../src/lib/ledger-audit-lend-grant.js";
-import { readLendGrants } from "../src/lib/ledger-audit-snapshot.js";
+import { readLendGrantBaseline, readLendGrants, type SnapshotSources } from "../src/lib/ledger-audit-snapshot.js";
 import { ackFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { setMeta } from "../src/lib/ledger-write.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const MIN = 60_000, HOUR = 60 * MIN, NOW = 20_000 * HOUR, PM = "agent-pm", P = "proj-x", PEER = "peer-alpha";
@@ -39,9 +40,10 @@ const order = (at: number, status = "claimed", project = P, peer = PEER) => db.p
   specRev, round, head, repo, wire, text, sha256, status, leaseMs, createdBy, createdAt, updatedAt) VALUES (?, ?, ?, ?, 'claude', 'write', 1, 0, 'h', 'o/r', 'w', 't', 's', ?, 1, 'scheduler', ?, ?)`)
   .run(`o${++n}`, `T${n}`, project, peer, status, at, at);
 
-const snap = (now: number): AuditSnapshot => ({ project: P, pms: [PM], tasks: [], agents: [], reviewers: [], held: [], ownerInbox: [],
-  lendGrants: readLendGrants(db, P, now) } as AuditSnapshot);
-const grantFindings = (now: number) => auditLedger(snap(now), now).findings.filter((f) => (LEND_GRANT_RULES as readonly string[]).includes(f.rule));
+const snap = (now: number, lendGrantBaseline: readonly string[] | null = readLendGrantBaseline(db, P)): AuditSnapshot => ({ project: P, pms: [PM], tasks: [],
+  agents: [], reviewers: [], held: [], ownerInbox: [], lendGrants: readLendGrants(db, P, now), lendGrantBaseline } as AuditSnapshot);
+/** 纯规则：基线按已建好算 */
+const grantFindings = (now: number) => auditLedger(snap(now, LEND_GRANT_RULES), now).findings.filter((f) => (LEND_GRANT_RULES as readonly string[]).includes(f.rule));
 /** 一轮巡检落库，返回这一轮要推的（推完 ack，同 bridge 的推送路径） */
 const round = (now: number) => {
   const r = auditLedger(snap(now), now);
@@ -51,6 +53,44 @@ const round = (now: number) => {
 };
 /** 上线首轮：规则基线静默，之后新出现的才推 */
 const baseline = () => round(NOW - 10 * HOUR);
+
+/** 审查 first-run-silent：不预热基线，走正式 CLI（ledger audit --json → collectAuditSnapshots → auditLedger → reconcileFindings），pending 就是 ticker 要推的 */
+describe("first run is not silenced (no pre-built baseline)", () => {
+  const sources = (): SnapshotSources => ({ registry: async () => [], windows: async () => [], turn: async () => "idle",
+    fileTimes: async () => ({ lastWriteAt: null, startedAt: null }), reviewers: () => [], heldPath: join(dir, "held.json") });
+  const cli = async (now: number) => {
+    const r = await runLedger(["audit", "--json"], { db, actor: "owner", actorProject: P, projectIds: [P], now: () => now, auditSources: sources(),
+      loadRegistry: async () => ({ agents: {} }), saveRegistry: async () => {} } as never) as { pending: { key: string; rule: string; notify: string }[] };
+    const mine = r.pending.filter((f) => (LEND_GRANT_RULES as readonly string[]).includes(f.rule));
+    ackFindings(db, mine.map((f) => f.key), now);
+    return mine;
+  };
+  const cases: [string, () => void, string][] = [
+    ["grant ends in 1.5 h", () => setPeer(NOW + 90 * MIN), "lend_grant_expiring"],
+    ["grant null, last hello 13 h ago", () => setPeer(null, NOW - 13 * HOUR), "lend_grant_gone"],
+    ["until passed an hour ago", () => setPeer(NOW - HOUR, NOW - 30 * MIN), "lend_grant_gone"],
+  ];
+  for (const [name, seed, rule] of cases) {
+    test(`${name} on a ledger that never ran these rules → told once (one round later), not silenced`, async () => {
+      setMeta(db, { actor: "owner", now: 0 }, { project: P, key: "pms", value: [PM] });
+      seed();
+      order(NOW - 14 * HOUR, "done");
+      expect(await cli(NOW)).toEqual([]); // 这一轮只建基线，不出发现（也就没东西可被静默）
+      expect(db.query("SELECT COUNT(*) AS n FROM audit_findings WHERE rule LIKE 'lend_grant%'").get()).toEqual({ n: 0 });
+      const told = await cli(NOW + 15 * MIN);
+      expect(told).toHaveLength(1);
+      expect(told[0]).toMatchObject({ rule, notify: PM });
+      expect(await cli(NOW + 30 * MIN)).toEqual([]);
+    });
+  }
+  test("baseline unreadable → rules neither run nor evaluated (nothing gets silenced)", () => {
+    setPeer(NOW + 90 * MIN);
+    order(NOW - HOUR);
+    const r = auditLedger(snap(NOW, null), NOW);
+    expect(r.evaluated).not.toContain("lend_grant_expiring");
+    expect(r.findings.filter((f) => f.rule.startsWith("lend_grant"))).toEqual([]);
+  });
+});
 
 describe("lend_grant_expiring", () => {
   test("grant ends in 1.5 h + a recent lend order → one notice to the PM; a second round does not repeat", () => {
