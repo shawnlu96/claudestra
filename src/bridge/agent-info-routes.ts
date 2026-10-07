@@ -15,9 +15,11 @@ import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
 import { heldAgentCounts } from "./held-queue.js";
 import { canReadLedger } from "../lib/devices.js";
-import { activeTasksByAgent, type LedgerTaskRef } from "../lib/ledger-read.js";
+import { activeReviewsByAgent, activeTasksByAgent, type LedgerReviewRef, type LedgerTaskRef } from "../lib/ledger-read.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { lpField } from "./fleet/lp-monitor.js";
+import { workerKind } from "../lib/worker-kind.js";
+import { pmsByProject } from "../lib/ledger-store.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -31,6 +33,10 @@ export interface AgentInfoIo {
   heldCounts?: () => Record<string, number>;
   /** 裸名 → 执行中的台账任务（lib/ledger-read.ts）；单测不给 = 台账里没有 */
   ledgerTasks?: () => Map<string, LedgerTaskRef>;
+  /** 裸名 → 它在审 / 审完的卡（审查员不绑卡，按事件推）；单测不给 = 没有 */
+  ledgerReviews?: () => Map<string, LedgerReviewRef>;
+  /** PM protection only; null/missing means unknown, not an empty PM list. */
+  protectedPms?: () => readonly string[] | null;
 }
 const defaultIo: AgentInfoIo = {
   readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals(), readMissions: () => readMissions(), heldCounts: () => heldAgentCounts(),
@@ -38,27 +44,38 @@ const defaultIo: AgentInfoIo = {
     const db = ledgerDb();
     return db ? activeTasksByAgent(db) : new Map();
   },
+  ledgerReviews: () => {
+    const db = ledgerDb();
+    return db ? activeReviewsByAgent(db) : new Map();
+  },
+  protectedPms: () => {
+    const db = ledgerDb();
+    return db ? [...pmsByProject(db).values()].flat() : [];
+  },
 };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
-export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "transport">) => Record<string, unknown>;
+export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "role" | "transport">) => Record<string, unknown>;
 
 /**
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
  * 不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。sharedPeers 对 peer / 受限 token 不给——谁在共享是 owner 的事。
  */
-export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks"> = defaultIo): Promise<AgentListExtras> {
+export async function agentListExtras(
+  principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks" | "ledgerReviews" | "protectedPms"> = defaultIo,
+): Promise<AgentListExtras> {
   const full = isFullScope(principal) && !principal.peer;
   const principals = full ? (await io.readPrincipals()).principals : [];
   const missions = principal.peer ? {} : ((await io.readMissions?.()) ?? {});
   const held = principal.peer ? {} : (io.heldCounts?.() ?? {}); // 排队几条：本机的事，不给 peer
   const ledger = canReadLedger(principal) ? readLedgerTasks(io) : null; // 台账同一道门：部分 scope / guest / peer 连库都不查
+  const pms = readProtectedPms(principal, io);
   const archived = (name: string) => existsSync(`${USER_ARCHIVE_ROOT}/${name.replace(/^agent-/, "")}`);
   return (name, r) => {
     const sharedWith = full ? peersSharingAgent(principals, name) : null;
     return {
       external: r?.external === true,
-      kind: r?.kind ?? null,
+      kind: workerKind(name, r ?? {}, pms),
       label: r?.label ?? null,
       ...(r?.transport === "acp" ? { transport: "acp" } : {}), // 网页终端据此提示「这里只是宿主日志」
       archived: archived(name),
@@ -74,6 +91,17 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
   };
 }
 
+/** Reuse the ledger's PM reader; never infer worker bindings or turn a failed read into permission to hide. */
+function readProtectedPms(principal: Principal, io: Pick<AgentInfoIo, "protectedPms">): readonly string[] | null {
+  if (!canReadLedger(principal)) return []; // No ledger access: honor registry tags without reading or disclosing PM identities.
+  try {
+    return io.protectedPms?.() ?? null;
+  } catch (e) {
+    console.error(`GET /agents PM protection unavailable; preserving visibility: ${(e as Error).message}`);
+    return null;
+  }
+}
+
 /**
  * 派发关系（manager/team.ts）：侧栏把执行者挂在派发者下面。parent 只在调用方 scope 里看得到派发者时给（裸名，大总管 = master），
  * 否则名字本身就泄露了 scope 外的 agent；peer 两项都不给（和 Autopilot 一样是本机的事）。展示用，不参与授权。
@@ -87,10 +115,15 @@ function teamField(principal: Principal, r?: Pick<RegistryAgent, "parent" | "tas
 /** 上一次读台账任务是否失败：日志只在「正常 → 出错」和恢复时各打一次，库坏着时每次刷列表不重复报 */
 let ledgerFailing = false;
 
-/** 执行者行尾的阶段小标（docs 10-ledger §4；与 T4 的 task 字符串不同名）。台账读不了只是少了小标，列表照常出 */
-function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks">): Map<string, LedgerTaskRef> | null {
+interface LedgerRows {
+  tasks: Map<string, LedgerTaskRef> | null;
+  reviews: Map<string, LedgerReviewRef> | null;
+}
+
+/** 执行者行尾的阶段小标（docs 10-ledger §4；与 T4 的 task 字符串不同名）+ 审查员的审查小标。台账读不了只是少了小标，列表照常出 */
+function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks" | "ledgerReviews">): LedgerRows | null {
   try {
-    const r = io.ledgerTasks?.() ?? null;
+    const r = { tasks: io.ledgerTasks?.() ?? null, reviews: io.ledgerReviews?.() ?? null };
     if (ledgerFailing) console.log("📒 GET /agents 读台账任务恢复");
     ledgerFailing = false;
     return r;
@@ -101,9 +134,12 @@ function readLedgerTasks(io: Pick<AgentInfoIo, "ledgerTasks">): Map<string, Ledg
   }
 }
 
-function ledgerField(ledger: Map<string, LedgerTaskRef> | null, name: string): { ledgerTask?: LedgerTaskRef } {
-  const t = ledger?.get(name.replace(/^agent-/, ""));
-  return t ? { ledgerTask: t } : {};
+/** 两个字段各管各的：同一 agent 既执行又审查时两个都给，怎么摆由网页定（features/chat/ledger-stage.ts） */
+function ledgerField(ledger: LedgerRows | null, name: string): { ledgerTask?: LedgerTaskRef; ledgerReview?: LedgerReviewRef } {
+  const bare = name.replace(/^agent-/, "");
+  const t = ledger?.tasks?.get(bare);
+  const r = ledger?.reviews?.get(bare);
+  return { ...(t ? { ledgerTask: t } : {}), ...(r ? { ledgerReview: r } : {}) };
 }
 
 /** 进行中的 Autopilot（侧栏 / 顶栏「Autopilot → 11:00」、菜单切换「开启 / 关闭 Autopilot」）；peer 看不到 */
@@ -143,7 +179,7 @@ export async function handleAgentInfoRoutes(
         sessionId: a.sessionId ?? null,
         channelId: a.channelId ?? null,
         projectId: a.projectId ?? null,
-        kind: a.kind ?? null,
+        kind: workerKind(a.name, a, readProtectedPms(principal, io)),
         runtime: a.runtime ?? "claude-code",
         model: a.model ?? null,
         effort: a.effort ?? null,

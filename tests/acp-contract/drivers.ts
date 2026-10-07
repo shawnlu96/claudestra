@@ -3,7 +3,8 @@
  * 并给出各场景要发的 prompt 和期望；场景本身不认识具体适配器。
  * - stub：真子进程 scripts/acp-stub.ts（照 codex-acp 的形状）；
  * - pi-replay：真 Pi 适配器 + 回放 pi 0.99.1 录制流（pi-replay.ts）；
- * - 以后的 Codex 回放驱动（录下的 app-server stdio 接真 codex-acp 产物）照 ContractDriver 实现、加进 DRIVERS，场景不用改。
+ * - codex-fake：自研 Codex 适配器（进程内）+ 假 app-server 剧本；
+ * - 以后的 Codex 回放驱动（录下的 app-server stdio）照 ContractDriver 实现、加进 DRIVERS，场景不用改。
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import type { RpcWire } from "../../src/lib/acp/rpc.ts";
 import { AcpSession } from "../../src/lib/acp/session.ts";
 import { repoStubPath } from "../../src/lib/acp/stub.ts";
 import { assistant, cmd, CWD, FIXTURE, harnessWith, ok, out, promptLine, type Line, type Rec } from "./pi-replay.ts";
+import { harness as codexHarness, type FakeApp } from "../helpers/codex-fake-app.ts";
 
 /** 场景：回放驱动按它挑录制流（每场一段），活的驱动用不上 */
 export type Scene = "initialize" | "attach" | "text" | "cancel" | "fail";
@@ -89,4 +91,34 @@ const piReplayDriver: ContractDriver = {
   },
 };
 
-export const DRIVERS: readonly ContractDriver[] = [stubDriver, piReplayDriver];
+/** 假 app-server 的剧本：按 prompt 正文出一轮（文字回复 / 跑命令直到被打断 / 额度用完） */
+function scriptCodexTurns(f: FakeApp): void {
+  f.on("turn/start", (p, id) => {
+    const t = (f.turn = f.nextTurn());
+    const text: string = p.input[0].text;
+    f.feed({ id, result: { turn: { id: t, items: [], status: "inProgress" } } });
+    f.started(t);
+    if (text.startsWith("[slow]")) {
+      const item = { type: "commandExecution", id: "c1", command: "sleep 30", cwd: "/w", status: "inProgress", commandActions: [] };
+      return void f.note("item/started", { threadId: f.thread, turnId: t, item });
+    }
+    if (text.startsWith("[quota]")) return void f.complete(t, "failed", { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" });
+    f.text(t, "m1", "codex 收到了");
+    f.complete(t);
+  });
+  f.on("turn/interrupt", (p) => (queueMicrotask(() => f.complete(p.turnId, "interrupted")), {}));
+}
+
+/** 自研 Codex 适配器（进程内）+ 假 codex app-server：协议面同真组合，app-server 的行为是剧本（真 CLI 的对照在 PR-C） */
+const codexFakeDriver: ContractDriver = {
+  name: "codex-fake（自研适配器 + 假 app-server）",
+  turns: { text: { prompt: "在吗", reply: "codex 收到了" }, slow: "[slow] 慢慢来", fail: { prompt: "[quota] 干活", kind: "quota" } },
+  async open(_scene, wrap) {
+    const h = codexHarness({ wrap });
+    h.f.thread = "th-contract";
+    scriptCodexTurns(h.f);
+    return { session: h.session, updates: h.updates, sessionId: "th-contract", cwd: "/w", problems: () => h.causes.map((c) => `${c.kind}：${c.why}`), close: async () => {} };
+  },
+};
+
+export const DRIVERS: readonly ContractDriver[] = [stubDriver, piReplayDriver, codexFakeDriver];

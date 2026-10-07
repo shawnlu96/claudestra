@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
 import type { runBounded } from "./run-bounded.js";
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -88,10 +89,12 @@ async function parentsOf(git: Git, head: string): Promise<string[]> {
   if (self !== head || parents.some((p) => !SHA.test(p))) throw new Error("head 父链读不到");
   return parents;
 }
-/** This is the sole net-diff implementation, shared by the existing single-hop gate and the new chain proof. */
+/** This is the sole net-diff implementation, shared by the existing single-hop gate and the new chain proof.
+ * Repo-local diff.submodule=log/diff prints abbreviated or object-dependent gitlink text; short plus --full-index
+ * always prints each gitlink path's mode and complete old/new OID, so distinct gitlinks never compare equal. */
 async function netDiff(git: Git, main: string, head: string, complete = false): Promise<Buffer> {
-  const r = await git(["-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
-    "--binary", "--full-index", "--no-relative", "--ignore-submodules=none", `${main}...${head}`], complete);
+  const r = await git(["-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+    "--binary", "--full-index", ...WHOLE_DIFF_ARGS, "--submodule=short", `${main}...${head}`], complete);
   if (r.code !== 0 || r.stderr.length) throw new Error("git 净 diff 失败或存在警告");
   const out = r.stdout;
   if (out.length >= DIFF_LIMIT) throw new Error("净 diff 太大，无法逐字核对");
