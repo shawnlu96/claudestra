@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { poolQuotaWait } from "../src/lib/scheduler-agent-pool-runtime.js";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -29,25 +30,39 @@ function fixture() {
   createTask(db, at("owner"), { project: "p", id: "T1", title: "local", kind: "code", agent: "agent-task-one", branch: "lend/t1",
     extra: { fileGlobs: ["src/x.ts"], localAuthorOnly: true } });
   setWorkflow(db, at("owner"), { taskId: "T1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
-  // The project's only Claude seat is held by another card's bound author: any new Claude session must wait.
+  // A real owner-written ticket holds the only seat; no scheduler history is fabricated for the competing card.
   createTask(db, at("owner"), { project: "p", id: "T9", title: "busy", kind: "code", agent: "agent-busy" });
-  db.run("PRAGMA foreign_keys=OFF");
-  db.query("UPDATE tasks SET stage='build' WHERE id='T9'").run();
-  db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
-    VALUES ('T9', 'author', 'agent-busy', 's-busy', 'claude', 'tmux', 'active', 'i9', 0, 0)`).run();
+  setWorkflow(db, at("owner"), { taskId: "T9", taskRev: 1, template: "code", templateVersion: 2,
+    mode: "manual", authorFamily: "claude", fallback: "report" });
+  assignStep(db, at("owner"), { taskId: "T9", step: "write", executor: "agent-busy", executorKind: "agent" });
   closeLedger(ledgerPath);
   writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: true, autoDispatch: true,
     projects: { p: { repoDir: repo, requiredChecks: ["check"], agents: { claude: 1, codex: 1 } } } }));
   const registryPath = join(state, "registry.json");
   const author = { runtime: "claude-code", sessionId: "s-one", cwd: repo, projectId: "p", task: "T1", status: "active" };
   const registry = (over: Record<string, unknown> = {}) => writeFileSync(registryPath, JSON.stringify({ agents: { "agent-task-one": { ...author, ...over } } }));
-  const ensure = async () => {
+  const ensure = async (corruptAfterFirst = false, tickTotal?: number) => {
     const script = `import { openLedger, getTask } from ${JSON.stringify(root + "src/lib/ledger-store.ts")};
       import { autoTickDeps } from ${JSON.stringify(root + "src/lib/scheduler-auto-deps.ts")};
       const db = openLedger(${JSON.stringify(ledgerPath)});
       let creates = 0;
       const deps = autoTickDeps(db, { registryPath: ${JSON.stringify(registryPath)}, create: async () => { creates++; return { ok: false, error: "no" }; } });
+      import { schedulerAutoTick } from ${JSON.stringify(root + "src/lib/scheduler-auto-tick.ts")};
+      import { runLedger } from ${JSON.stringify(root + "src/manager/ledger.ts")};
+      import { readFileSync } from "node:fs";
+      if (${tickTotal !== undefined}) {
+        const cliDeps = { db, actor: "scheduler", registryPath: ${JSON.stringify(registryPath)}, projectIds: ["p"],
+          now: () => 2000, autoProjects: () => ["p"], autoDispatch: () => true,
+          loadRegistry: async () => JSON.parse(readFileSync(${JSON.stringify(registryPath)}, "utf8")), saveRegistry: async () => {} };
+        const result = await schedulerAutoTick(db, { p: { maxActiveWorkers: 1,
+          remote: { mode: "balance", roles: [], poolTimeoutMin: 15, agents: { claude: ${tickTotal ?? 1}, codex: 1 } } } },
+          { ...deps, manager: async (...args) => runLedger(args.slice(1), cliDeps), borrow: async () => [], notifyPm: async () => {} });
+        const intents = db.query("SELECT action,status FROM scheduler_intents ORDER BY eventSeq").all();
+        console.log(JSON.stringify({ result, intents, creates }));
+        process.exit(0);
+      }
       const first = await deps.ensure(getTask(db, "T1"), "author", "claude");
+      ${corruptAfterFirst ? `await Bun.write(${JSON.stringify(registryPath)}, "{broken");` : ""}
       const again = await deps.ensure(getTask(db, "T1"), "author", "claude");
       console.log(JSON.stringify({ first, again, creates }));`;
     // Isolated HOME / state / runtime / tmp, and a bridge address nothing listens on: no production auth, registry or bridge.
@@ -56,7 +71,10 @@ function fixture() {
       stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     expect(code, err).toBe(0);
-    return JSON.parse(out.trim().split("\n").at(-1)!) as { first: Record<string, unknown>; again: Record<string, unknown>; creates: number };
+    return JSON.parse(out.trim().split("\n").at(-1)!) as {
+      first: Record<string, unknown>; again: Record<string, unknown>; creates: number;
+      result: { cards: { step: string }[]; failed: unknown[] }; intents: { action: string; status: string }[];
+    };
   };
   const sql = (q: string) => { const db = openLedger(ledgerPath); db.run("PRAGMA foreign_keys=OFF"); db.query(q).run(); closeLedger(ledgerPath); };
   const bindOther = () => sql(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
@@ -72,6 +90,31 @@ test("verified owner-created author is reconciled with the seat full: no gate, n
     const r = await f.ensure();
     expect(r.first).toMatchObject({ kind: "ready", created: false, ref: { agent: "agent-task-one", sessionId: "s-one", family: "claude" } });
     expect(r.again).toEqual(r.first);
+    expect(r.creates).toBe(0);
+  } finally { f.close(); }
+}, 30000);
+
+test("reconcile-capacity: isolated full tick binds the real Git / registry author at full and zero capacity", async () => {
+  for (const total of [1, 0]) {
+    const f = fixture();
+    try {
+      f.registry();
+      const r = await f.ensure(false, total);
+      expect(r.result.failed).toEqual([]);
+      expect(r.result.cards[0]).toMatchObject({ step: "session" });
+      expect(r.intents).toEqual([{ action: "ensure_session", status: "done" }]);
+      expect(r.creates).toBe(0);
+    } finally { f.close(); }
+  }
+}, 30000);
+
+test("registry-stale-proof: corruption after a fresh successful read stays unknown", async () => {
+  const f = fixture();
+  try {
+    f.registry();
+    const r = await f.ensure(true);
+    expect(r.first).toMatchObject({ kind: "ready", created: false });
+    expect(r.again).toMatchObject({ kind: "unknown", reason: expect.stringContaining("registry") });
     expect(r.creates).toBe(0);
   } finally { f.close(); }
 }, 30000);

@@ -24,15 +24,16 @@ export function localAgentPool(db: Database, project: string, totals: AgentLimit
   }
   // A submitted ensure has already begun creating. Reserve it until a binding or an explicit cancellation exists.
   if (hasTable(db, "scheduler_intents")) {
-    const creating = db.query(`SELECT i.taskId, i.node, i.receipt, w.authorFamily FROM scheduler_intents i
+    const creating = db.query(`SELECT i.taskId, i.node, i.receipt, t.agent, w.authorFamily FROM scheduler_intents i
       JOIN tasks t ON t.id=i.taskId JOIN task_workflows w ON w.taskId=t.id
       WHERE t.project=? AND t.id!=? AND i.action='ensure_session' AND i.status IN ('submitted','unknown')
       AND t.stage IN ('spec','restate','build','fix','review') AND NOT EXISTS
       (SELECT 1 FROM scheduler_sessions s WHERE s.createIntentId=i.id AND s.state!='retired')`)
-      .all(project, exceptTask ?? "") as { taskId: string; node: string; receipt: string | null; authorFamily: AuthorFamily }[];
+      .all(project, exceptTask ?? "") as { taskId: string; node: string; receipt: string | null; agent: string | null; authorFamily: AuthorFamily }[];
     for (const r of creating) {
       const family = r.receipt?.match(/ensure (?:author|reviewer) (claude|codex)/)?.[1] as AuthorFamily | undefined;
-      const key = `creating:${r.taskId}:${r.node}`;
+      // A named author and its ensure reservation are the same seat, including a retained unknown result.
+      const key = ["restate", "write", "fix"].includes(r.node) && r.agent ? r.agent : `creating:${r.taskId}:${r.node}`;
       if (!agents.has(key)) { agents.add(key); running[family ?? r.authorFamily]++; }
     }
   }

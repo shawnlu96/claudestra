@@ -33,6 +33,9 @@ export function agentPoolWork(s: PlannerSnapshot, since: number, role: Exclude<P
   if (!s.workflow) return null;
   const facts = agentPoolFacts(s, since, role, locksFree);
   const pinnedHere = facts.pin === LOCAL_PLACEMENT;
+  // Only an unbound named local author reaches ensure early. Ensure must prove fresh identity or keep every creation gate;
+  // once bound, placement and dispatch retain their capacity, lease and file checks.
+  if (s.task.agent && !s.author && !facts.writeLeasePeer && (pinnedHere || s.task.stage === "spec")) return null;
   if (s.task.stage === "spec") {
     const local = placeAgentPool({ ...facts, peers: [], pin: null }, "fix", s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;

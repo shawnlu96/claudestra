@@ -20,7 +20,7 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
-import { existingAuthorIdentity } from "./scheduler-existing-author.js";
+import { existingAuthorIdentity, freshExistingAuthor } from "./scheduler-existing-author.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
@@ -97,8 +97,11 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
  * or a proven conflict answer here; null = the row lacks identity fields and the full new-session gate still applies.
  */
 async function existingAuthor(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult | null> {
-  const row = task.agent ? env.registryRow(task.agent) : undefined;
-  if (!row || runtimeFamily(row.runtime) !== family) return ensure(env, task, "author", family);
+  const fresh = task.agent ? freshExistingAuthor(task.agent, env.registryPath) : {};
+  if (fresh.unreadable) return { kind: "unknown", reason: `既存作者身份失读，不猜绑定：${fresh.unreadable}` };
+  const row = fresh.row;
+  if (!row) return { kind: "manual", reason: `执行者 ${task.agent} 不在本机 registry` };
+  if (runtimeFamily(row.runtime) !== family) return refOf(task, "author", row, family);
   const bound = getSchedulerSession(env.db, task.id, "author");
   if (bound && bound.state !== "retired" && (bound.agent !== row.name || bound.sessionId !== row.sessionId)) {
     return { kind: "unknown", reason: `本卡已绑定另一个作者 session（${bound.agent}/${bound.sessionId}），不换会话` };

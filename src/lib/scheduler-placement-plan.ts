@@ -123,6 +123,8 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   const facts = snapshotPlacementFacts(s, since, role);
   if (!pinned && explicitLocal(s.task.extra)) {
     if (facts.writeLeasePeer) return { code: "placement_pinned", wait: LOCAL_LEASE_WAIT(facts.writeLeasePeer) };
+    // This only requests identity reconciliation; ensure still gates an unproven author and dispatch remains unchanged.
+    if (s.task.agent && !s.author) return null;
     const local = placeFor({ ...facts, peers: [] }, role, s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
   }

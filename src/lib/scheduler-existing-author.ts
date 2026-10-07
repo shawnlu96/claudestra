@@ -6,7 +6,8 @@
  */
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import type { RegistryAgent } from "./registry.js";
+import { normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
+import { readJsonStateSync } from "./state-file.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -35,4 +36,11 @@ export async function existingAuthorIdentity(task: Pick<LedgerTask, "id" | "proj
   if (head.code !== 0) return { kind: "conflict", reason: `读不出 ${name} 工作目录 ${row.cwd} 的分支：${head.out}`.slice(0, 400) };
   if (head.out !== task.branch) return { kind: "conflict", reason: `${name} 工作目录在分支 ${head.out}，不是本卡 ${task.branch}` };
   return { kind: "verified" };
+}
+
+/** Cached registry rows are useful to UI readers but cannot authorize session reconciliation. */
+export function freshExistingAuthor(agent: string, registryPath = REGISTRY_PATH): { row?: RegistryAgent; unreadable?: string } {
+  const read = readJsonStateSync(registryPath);
+  if (read.status !== "ok") return { unreadable: `registry ${read.status === "missing" ? "缺失" : read.error}` };
+  return { row: normalizeRegistryAgents(read.data).find((row) => row.name === agent) };
 }
