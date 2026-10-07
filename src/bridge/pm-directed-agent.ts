@@ -72,8 +72,11 @@ export function pmDirectedVerdict(env: Envelope, original: Pick<RegistryAgent, "
     const c = identity();
     return c?.channelId === from.channelId && !!c.identity.verified && c.identity.agent === agent;
   };
-  // 核过的点名信先重核当初那位发信人：指针怎么变都不能掩盖它的凭据 / 会话失效（失效就拒收，不回落成普通投递或角色转交）
-  if (mark && !(mark.channelId === from.channelId && source(mark.by))) return "refused";
+  /** 注册表里这位此刻仍在记下的项目、仍注册着这个频道（callerOf 只证明凭据和频道，不证明项目归属） */
+  const member = (agent: string, projectId: string | undefined, channelId: string): boolean =>
+    !!projectId && agents.some((a) => a.name === agent && a.projectId === projectId && a.channelId === channelId);
+  // 核过的点名信先重核当初那位发信人：指针怎么变都不能掩盖它的凭据 / 会话失效或已离开本项目（失效就拒收，不回落成普通投递或角色转交）
+  if (mark && !(mark.channelId === from.channelId && member(mark.by, mark.projectId, mark.channelId) && source(mark.by))) return "refused";
   if (pointer === original.name) return null;
   const sender = agents.find((a) => a.name === pointer && a.projectId === original.projectId);
   const verified = !!sender?.channelId && sender.channelId === from.channelId && source(pointer) && (!mark || mark.by === pointer);

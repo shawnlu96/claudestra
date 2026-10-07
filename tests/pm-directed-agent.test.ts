@@ -387,3 +387,58 @@ test("真 callerOf 端口：B 的点名信投 A 后指针改指 A、B 凭据存�
   expect(r.outcome).toMatchObject({ kind: "dropped" });
   expect(w.sent.map((s) => s.channelId)).toEqual([CA]);
 });
+
+test("押着时指针改指 A、同时 B 迁到别的项目（凭据 / 连接仍有效）：核过的点名信拒收——A 收件箱领不到，flush 零投递，直接重投拒收", async () => {
+  const w = await world(), env = sendToAgent(w, CB);
+  w.busy.add(CA);
+  await w.deliver(env);
+  w.point(A);
+  const b = w.agents.find((a) => a.name === B)!;
+  b.projectId = "project-two";
+  expect(ownedHeldItems(w.held, CA)).toEqual([]);
+  expect((await w.take(CA)).result?.n ?? 0).toBe(0);
+  w.busy.delete(CA);
+  await w.flush(CA);
+  await w.flush(CB);
+  expect(w.sent).toEqual([]);
+  expect(w.q(CA)).toEqual([]);
+  expect(w.q(CB)).toEqual([]);
+  expect((await w.deliver(env)).outcome).toMatchObject({ kind: "dropped" });
+  expect(w.sent).toEqual([]);
+  // 对照：只是指针改指 A（B 仍在本项目）照投 A
+  b.projectId = P;
+  const ok = sendToAgent(w, CB);
+  w.point(B);
+  await w.deliver(ok);
+  w.point(A);
+  expect((await w.deliver(ok)).outcome.kind).toBe("sent");
+  expect(w.sent.map((s) => s.channelId)).toEqual([CA, CA]);
+});
+
+test("真 callerOf 端口：B 的点名信投 A 后指针改指 A、B 迁到别的项目（凭据仍有效）→ 同封重投拒收，零投递", async () => {
+  const w = await world();
+  for (const p of [REGISTRY_PATH, CALLER_CREDS_PATH]) {
+    const saved = existsSync(p) ? readFileSync(p, "utf8") : null;
+    cleanups.push(() => { saved === null ? existsSync(p) && unlinkSync(p) : writeFileSync(p, saved); });
+  }
+  const writeRegistry = () => writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: Object.fromEntries(w.agents.filter((a) => a.channelId)
+    .map(({ name, ...v }) => [name, { ...v, status: "active" }])) }));
+  writeRegistry();
+  initFleet({ clients: w.clients as never, deliver: async () => undefined }, { lpMonitor: false });
+  const bWs = w.clients.get(CB)!.ws;
+  expect(admitCaller(bWs as never, { channelId: CB, callerCred: await issueCallerCred({ agent: B, family: "codex" }) }, undefined)).toBe(true);
+  const real = { ...w.facts, callerOf: undefined };
+  const send = async (env: Envelope, to: LocalEndpoint): Promise<Delivery> => {
+    w.sent.push({ channelId: to.channelId, content: env.content, messageId: env.meta.messageId, intent: env.intent });
+    return { envelope: env, outcome: { kind: "sent" } };
+  };
+  const env = sendToAgent(w, CB);
+  expect((await deliverPmLocal(env, env.to as LocalEndpoint, w.clients, w.book, w.receipts, send, real)).outcome.kind).toBe("sent");
+  w.point(A);
+  w.agents.find((a) => a.name === B)!.projectId = "project-two";
+  writeRegistry();
+  expect(realCallerOf(bWs, { type: "route_to_agent" }).identity).toMatchObject({ agent: B, verified: true });
+  const r = await deliverPmLocal(env, env.to as LocalEndpoint, w.clients, w.book, w.receipts, send, real);
+  expect(r.outcome).toMatchObject({ kind: "dropped" });
+  expect(w.sent.map((s) => s.channelId)).toEqual([CA]);
+});
