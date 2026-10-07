@@ -213,6 +213,15 @@ describe("wakeTarget 判定", () => {
     expect(wakeTarget({ ...base, agents: { "agent-codex": {} }, event: { ...base.event, data: { ...base.event.data, executor: "agent-codex" } } })).toHaveProperty("skip");
     expect(wakeTarget({ ...base, pickup: () => ({ none: "领不到" }) })).toEqual({ skip: "领不到" });
   });
+  test("PM 定 10-07：restate 唤醒文本与调度器 deliveryFor('channel', 'restate') 那张文字单逐字相同", () => {
+    const t = wakeTarget({ ...base, task: { id: "W1", specRev: 3, headSHA: "c".repeat(40) }, event: { ...base.event, data: { ...base.event.data, step: "restate", round: 2 } } });
+    // 调度器 scheduler-auto-tick 的同一条路：workOrderFor 出单，deliveryFor(route, order.step) 定投递，renderWorkOrder 渲染
+    const intent = { id: "W1:restate:r2", taskId: "W1", node: "restate", specRev: 3, head: null } as SchedulerIntent;
+    const order = workOrderFor({ id: "W1", round: 2, specRev: 3, headSHA: "c".repeat(40) } as LedgerTask, intent, null, { taskId: "W1", role: "author", agent: EXE, sessionId: "" } as SessionRef)!;
+    const delivery = deliveryFor("channel", order.step);
+    expect(delivery.mode).toBe("text");
+    expect(t).toEqual({ agent: EXE, step: "restate", round: 2, orderId: "W1:restate:r2", text: renderWorkOrder({ ...order, delivery }) });
+  });
 });
 
 describe("第 2 轮复现：保护名单、换人、领不到不叫、单号与领单一致", () => {
