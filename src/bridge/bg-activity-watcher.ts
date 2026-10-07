@@ -35,7 +35,7 @@ import { constants as fsConstants, existsSync } from "fs";
 import { access, lstat, readdir, stat } from "fs/promises";
 import { basename, dirname, join } from "path";
 import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
-import { agentRuntime, readActiveAgents, type RegistryAgent } from "../lib/registry.js";
+import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
 import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
@@ -172,19 +172,10 @@ async function isRealBgTask(agent: AgentLite, taskId: string): Promise<boolean> 
   }
 }
 
-/**
- * 只有 Claude Code 会话写 ~/.claude/projects；codex / pi 的路径推不出来，每轮都会落到 findJsonlBySessionId 全库扫描，
- * 在 Bun 1.3.14 下每次扫描都漏原生内存（BML-1，约 26MB/分钟）。见 tests/bg-activity-watchable.test.ts
- */
-export function isWatchableAgent(a: RegistryAgent): boolean {
-  return Boolean(a.channelId && a.sessionId && a.cwd) && agentRuntime(a) === "claude-code";
-}
-
-/** registryPath 只给测试换临时 registry（tests/bg-activity-watchable.test.ts） */
+/** 只含 Claude Code agent，原因见 lib/cc-session-agents.ts；registryPath 只给测试换临时 registry */
 export async function watchableAgents(registryPath?: string): Promise<AgentLite[]> {
-  return (await readActiveAgents(registryPath))
-    .filter(isWatchableAgent)
-    .map((a) => ({ name: a.name, channelId: a.channelId!, cwd: a.cwd!, sessionId: a.sessionId! }));
+  return (await readCcSessionAgents(registryPath))
+    .map((a) => ({ name: a.name, channelId: a.channelId, cwd: a.cwd, sessionId: a.sessionId }));
 }
 
 const deps: WatcherDeps = { now: () => Date.now(), agents: () => watchableAgents(), shellDir: shellTasksDirFor };
@@ -752,7 +743,7 @@ async function tickInner(): Promise<void> {
     reportedDirs.retain(agents.map((a) => projectJsonlPath(a.cwd, a.sessionId)));
     // baseline key 同步瘦身:按 registry 在册 agent 名过滤(不按 session,见 BaselineKeys.prune)
     try {
-      baseline.prune((await readActiveAgents()).map((a) => a.name));
+      baseline.prune((await watchableAgents()).map((a) => a.name));
     } catch { /* registry 读失败:下小时再试 */ }
   }
 }

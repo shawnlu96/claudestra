@@ -13,7 +13,7 @@
  * 重启前的陈旧记录误报。
  */
 
-import { agentRuntime, readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
+import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { projectJsonlPath } from "../lib/jsonl-cost.js";
 import { resolveModelAlias } from "../lib/claude-launch.js";
 import { sessionTailInfo } from "../lib/session-tail.js";
@@ -35,11 +35,6 @@ async function readGlobalModel(): Promise<string | null> {
   }
 }
 
-/** codex / pi 的会话不在 ~/.claude/projects，推路径会落到全库扫描（BML-1 泄漏路径）；它们也没有 CC 的模型降级。见 tests/bg-activity-watchable.test.ts */
-export function isDriftCheckable(r: RegistryAgent): r is RegistryAgent & { cwd: string; sessionId: string; channelId: string } {
-  return r.status === "active" && Boolean(r.cwd && r.sessionId && r.channelId) && agentRuntime(r) === "claude-code";
-}
-
 export function startModelDriftWatcher(
   notify: (channelId: string, text: string) => void
 ) {
@@ -50,8 +45,7 @@ export function startModelDriftWatcher(
     try {
       const gModel = await readGlobalModel();
       const gFamily = gModel ? [...modelFamilies(resolveModelAlias(gModel))][0] ?? null : null;
-      for (const r of await readRegistryAgents()) {
-        if (!isDriftCheckable(r)) continue;
+      for (const r of await readCcSessionAgents()) { // codex / pi 不看：会话不在 ~/.claude/projects（lib/cc-session-agents.ts）
         const info = await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId));
         if (!info?.model || !info.modelTs) continue;
         if (Date.now() - info.modelTs > MEASURED_FRESH_MS) continue;

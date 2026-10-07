@@ -6,7 +6,7 @@
  * cache_read_input_tokens, output_tokens }`。按 model 分类累加。
  */
 
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { realpathCached } from "./realpath-cache.js";
 import { runtimeForSessionPath, translateSessionLine } from "./session-source.js";
@@ -162,26 +162,33 @@ export function subagentsDir(cwd: string, sessionId: string): string {
 }
 
 const MISS_TTL_MS = 60_000;
-// sessionId → 下次允许重扫的时刻。全库扫描要 readdir 几百个目录，没找到的会话（还没生成 / 不是 CC 会话）每轮都来问（BML-1）
-const missUntil = new Map<string, number>();
+// sessionId → 没找到时的记录。全库扫描要 readdir 几百个目录，没找到的会话（还没生成 / 不是 CC 会话）每轮都来问（BML-1）。
+// 同时记 projects 根目录的 mtime：新建项目目录（会话搬进新 worktree）会改它，这时立刻重扫，不等 60 秒
+const misses = new Map<string, { until: number; rootMtime: number }>();
+
+function dirMtime(dir: string): number {
+  try { return statSync(dir).mtimeMs; } catch { return -1; /* 不存在 / 读不了：记 -1，之后出现即与之不等，触发重扫 */ }
+}
 
 /** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session。没找到的 60 秒内直接返回 null，见 tests/jsonl-cost-miss-cache.test.ts */
 export function findJsonlBySessionId(sessionId: string, now = Date.now()): string | null {
-  if ((missUntil.get(sessionId) ?? 0) > now) return null;
   const root = join(process.env.HOME ?? "", ".claude", "projects");
+  const rootMtime = dirMtime(root);
+  const miss = misses.get(sessionId);
+  if (miss && miss.until > now && miss.rootMtime === rootMtime) return null;
   let slugs: string[] = [];
-  try { slugs = existsSync(root) ? readdirSync(root) : []; } catch { return null; /* 读失败不进负缓存：可能是暂时性错误，下轮重试 */ }
+  try { slugs = rootMtime === -1 ? [] : readdirSync(root); } catch { return null; /* 读失败不进负缓存：可能是暂时性错误，下轮重试 */ }
   for (const slug of slugs) {
     const p = join(root, slug, sessionId + ".jsonl");
-    if (existsSync(p)) { missUntil.delete(sessionId); return p; }
+    if (existsSync(p)) { misses.delete(sessionId); return p; }
   }
-  for (const [id, until] of missUntil) if (until <= now) missUntil.delete(id); // 过期即清：条目数只到「60 秒内没找到的不同 id」
-  missUntil.set(sessionId, now + MISS_TTL_MS);
+  for (const [id, m] of misses) if (m.until <= now) misses.delete(id); // 过期即清：条目数只到「60 秒内没找到的不同 id」
+  misses.set(sessionId, { until: now + MISS_TTL_MS, rootMtime });
   return null;
 }
 
 /** 测试用：负缓存当前条目数 */
-export const jsonlMissCacheSizeForTest = (): number => missUntil.size;
+export const jsonlMissCacheSizeForTest = (): number => misses.size;
 
 /** 合并多条 ModelUsage（跨 agent sum） */
 export function mergeByModel(rows: ModelUsage[]): ModelUsage[] {

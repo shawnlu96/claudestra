@@ -6,37 +6,44 @@ import { afterAll, beforeAll, describe, test, expect } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { isWatchableAgent, pollBgActivitiesForTest, watchableAgents } from "../src/bridge/bg-activity-watcher.js";
+import { pollBgActivitiesForTest, watchableAgents } from "../src/bridge/bg-activity-watcher.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
-import { isDriftCheckable } from "../src/bridge/model-drift.js";
+import { isCcSessionAgent, readCcSessionAgents } from "../src/lib/cc-session-agents.js";
 import { jsonlMissCacheSizeForTest, projectJsonlPath, subagentsDir } from "../src/lib/jsonl-cost.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 
 const base: RegistryAgent = { name: "agent-x", status: "active", channelId: "1", sessionId: "s", cwd: "/tmp/x" };
 
-describe.each([
-  ["isWatchableAgent", isWatchableAgent],
-  ["isDriftCheckable", isDriftCheckable],
-] as const)("%s", (_name, pred) => {
+describe("isCcSessionAgent（bg-activity 与 model-drift 共用）", () => {
   test("没有 runtime（老 agent）与 claude-code 保留", () => {
-    expect(pred(base)).toBe(true);
-    expect(pred({ ...base, runtime: "claude-code" })).toBe(true);
+    expect(isCcSessionAgent(base)).toBe(true);
+    expect(isCcSessionAgent({ ...base, runtime: "claude-code" })).toBe(true);
   });
 
   test("pi / codex 排除", () => {
-    expect(pred({ ...base, runtime: "pi" })).toBe(false);
-    expect(pred({ ...base, runtime: "codex" })).toBe(false);
+    expect(isCcSessionAgent({ ...base, runtime: "pi" })).toBe(false);
+    expect(isCcSessionAgent({ ...base, runtime: "codex" })).toBe(false);
   });
 
   test("缺 channelId / sessionId / cwd 排除", () => {
-    expect(pred({ ...base, channelId: undefined })).toBe(false);
-    expect(pred({ ...base, sessionId: undefined })).toBe(false);
-    expect(pred({ ...base, cwd: undefined })).toBe(false);
+    expect(isCcSessionAgent({ ...base, channelId: undefined })).toBe(false);
+    expect(isCcSessionAgent({ ...base, sessionId: undefined })).toBe(false);
+    expect(isCcSessionAgent({ ...base, cwd: undefined })).toBe(false);
   });
 });
 
-test("model-drift 只看 active", () => {
-  expect(isDriftCheckable({ ...base, status: "stopped" })).toBe(false);
+test("readCcSessionAgents（model-drift 的数据源）：只要 active 的 CC agent", async () => {
+  const d = mkdtempSync(join(tmpdir(), "cc-agents-"));
+  try {
+    const registry = join(d, "registry.json");
+    const { name: _n, ...e } = base;
+    writeFileSync(registry, JSON.stringify({ agents: {
+      "agent-cc": e, "agent-off": { ...e, status: "stopped" }, "agent-pi": { ...e, runtime: "pi" }, "agent-codex": { ...e, runtime: "codex" },
+    } }));
+    expect((await readCcSessionAgents(registry)).map((a) => a.name)).toEqual(["agent-cc"]);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });
 
 describe("watchableAgents + 真 tick：CC agent 照常发现 subagent / 后台 shell，codex / pi 不进扫描", () => {

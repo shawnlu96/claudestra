@@ -3,7 +3,7 @@
  */
 import { describe, test, expect, afterEach, spyOn } from "bun:test";
 import * as fs from "fs";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { findJsonlBySessionId, jsonlMissCacheSizeForTest } from "../src/lib/jsonl-cost.js";
@@ -46,6 +46,17 @@ describe("findJsonlBySessionId 负缓存", () => {
     expect(findJsonlBySessionId(sid, 70_000)).toBe(join(slugDir, `${sid}.jsonl`));
   });
 
+  test("60 秒内新建了项目目录（会话搬进新 worktree）：立刻重扫找到", () => {
+    fakeHome();
+    const sid = `moved-${crypto.randomUUID()}`;
+    expect(findJsonlBySessionId(sid, 10_000)).toBeNull();
+    const fresh = join(dir, ".claude", "projects", "slug-new");
+    mkdirSync(fresh);
+    utimesSync(join(dir, ".claude", "projects"), 1_900_000_000, 1_900_000_000); // mtime 精度兜底：确保与缓存时不同
+    writeFileSync(join(fresh, `${sid}.jsonl`), "{}\n");
+    expect(findJsonlBySessionId(sid, 10_001)).toBe(join(fresh, `${sid}.jsonl`));
+  });
+
   test("找到的不进缓存", () => {
     const slugDir = fakeHome();
     const sid = `hit-${crypto.randomUUID()}`;
@@ -57,7 +68,7 @@ describe("findJsonlBySessionId 负缓存", () => {
 
   test("条目按 TTL 清理，不随 sessionId 个数无界增长", () => {
     fakeHome();
-    const t0 = 1_000_000_000;
+    const t0 = Date.now() + 365 * 86_400_000; // 晚于同进程其他测试文件留下的条目，让它们一起过期
     for (let i = 0; i < 50; i++) findJsonlBySessionId(`bound-${i}-${crypto.randomUUID()}`, t0);
     expect(jsonlMissCacheSizeForTest()).toBeGreaterThanOrEqual(50);
     findJsonlBySessionId(`bound-late-${crypto.randomUUID()}`, t0 + 60_000);
