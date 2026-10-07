@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { appCodexBin, findCodexBin } from "../src/lib/codex.ts";
@@ -47,4 +47,33 @@ test("CODEX_BIN 指向存在的文件时优先于 App 自带的", () => {
     if (prev === undefined) delete process.env.CODEX_BIN;
     else process.env.CODEX_BIN = prev;
   }
+});
+
+test("entrypoint 越界（空串 / 绝对路径 / ../ / 根外符号链接 / 目录）→ 不认新布局，退旧路径或 null", () => {
+  const r = resources();
+  const cli = join(r, "codex-cli");
+  mkdirSync(join(cli, "bin"), { recursive: true });
+  const outside = join(r, "outside");
+  writeFileSync(outside, "#!/bin/sh\n");
+  symlinkSync(outside, join(cli, "bin", "codex-link"));
+  const bad = ["", outside, "../outside", "bin/codex-link", "bin", 42];
+  const check = (want: string | null) => {
+    for (const entrypoint of bad) {
+      writeFileSync(join(cli, "codex-package.json"), JSON.stringify({ entrypoint }));
+      expect(appCodexBin(r)).toBe(want);
+    }
+  };
+  check(null);
+  writeFileSync(join(r, "codex"), "#!/bin/sh\n");
+  check(join(r, "codex"));
+});
+
+test("根内符号链接照认，返回未解析的入口路径", () => {
+  const r = resources();
+  const cli = join(r, "codex-cli");
+  mkdirSync(join(cli, "bin"), { recursive: true });
+  writeFileSync(join(cli, "real-codex"), "#!/bin/sh\n");
+  symlinkSync(join(cli, "real-codex"), join(cli, "bin", "codex"));
+  writeFileSync(join(cli, "codex-package.json"), JSON.stringify({ entrypoint: "bin/codex" }));
+  expect(appCodexBin(r)).toBe(join(cli, "bin", "codex"));
 });

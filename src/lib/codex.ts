@@ -17,12 +17,12 @@
  * Codex 上下文(特性,不是 bug:多 agent 问同一个「PM」)。
  */
 
-import { existsSync, readFileSync, rmSync } from "fs";
+import { existsSync, readFileSync, realpathSync, rmSync, statSync } from "fs";
 import { spawn } from "child_process";
 import { statePath } from "./paths.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 import { tmpdir } from "os";
-import { join } from "path";
+import { isAbsolute, join, relative, sep } from "path";
 import { sandboxDisabled } from "./sandbox.js";
 
 /** 沙箱白名单:read-only 缺省(纯问答/审阅);workspace-write 让它真改 cwd 里的
@@ -42,9 +42,14 @@ export function appCodexBin(resources = APP_RESOURCES): string | null {
   const dir = join(resources, "codex-cli");
   try {
     const entry = JSON.parse(readFileSync(join(dir, "codex-package.json"), "utf8"))?.entrypoint;
-    if (typeof entry === "string" && existsSync(join(dir, entry))) return join(dir, entry);
+    // 只认落在 codex-cli 之内的普通文件：空串、绝对路径、../ 与指向根外的符号链接都当新布局不可用
+    if (typeof entry === "string" && entry && !isAbsolute(entry)) {
+      const bin = join(dir, entry);
+      const rel = relative(realpathSync(dir), realpathSync(bin));
+      if (rel && !isAbsolute(rel) && rel.split(sep)[0] !== ".." && statSync(bin).isFile()) return bin;
+    }
   } catch {
-    // 没有新布局（或清单读不了）：退回旧路径，两个都没有才算没装
+    // 没有新布局（清单读不了 / 入口不存在）：退回旧路径，两个都没有才算没装
   }
   const legacy = join(resources, "codex");
   return existsSync(legacy) ? legacy : null;
