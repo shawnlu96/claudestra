@@ -9,13 +9,14 @@ import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "./agent-lifecycle-config.js";
 import { cardWorkerIndex, pendingCleanups, registerFailures } from "./agent-lifecycle-store.js";
-import { planLifecycle, lifecycleLine, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
+import { planLifecycle, lifecycleLine, type Action, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
 import { readActivity } from "./agent-supervisor-activity.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { resolveBunPath } from "./bun-path.js";
 import { pmsByProject } from "./ledger-store.js";
 import { statePath } from "./paths.js";
+import { notifyProjectPm } from "./pm-notify.js";
 import { isMasterName, normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
 import { LEND_JOURNAL_PATH } from "./lend-journal.js";
 import { SRC_DIR } from "./repo-root.js";
@@ -95,6 +96,11 @@ async function du(paths: string[]): Promise<number | null> {
   return out.split("\n").reduce((n, l) => n + (Number(l.split("\t")[0]) || 0), 0) * 1024;
 }
 
+/** LIFE4 PM notices: scheduler-retire-deps.ts's channel and liveness rule; the card's project, else the first configured one. */
+export const lifecycleNotifier = (db: Database, config: SchedulerConfig, active: () => void, send = notifyProjectPm) => (a: Action, text: string): Promise<void> =>
+  whileOwned(active, () => send(db, (db.query("SELECT project FROM tasks WHERE id = ?").get(a.taskId) as { project: string } | null)?.project
+    ?? Object.keys(config.projects)[0] ?? "", text, { fromName: "scheduler", stillActive: () => { try { active(); return true; } catch { return false; } } }));
+
 let lastObserved = "";
 
 /** The pass's lifecycle step (scheduler-pass.ts): failures are reported like other steps, never thrown past the pass. */
@@ -124,7 +130,7 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     return r;
   };
   const tmp = nodeTmpCleaner();
-  const result = await runLifecycle(plan, policy, {
+  const result = await runLifecycle(plan, policy, { notifyPm: lifecycleNotifier(db, config, active),
     manager, worktreeRoot: statePath("worktrees"), exists: existsSync, git: (args) => whileOwned(active, () => git(args)),
     tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) }, agents: () => whileOwned(active, () => readLiveAgents()),
     du, swapPct: async () => (await readMemory()).swapPct, now: Date.now, record: async (r) => {
