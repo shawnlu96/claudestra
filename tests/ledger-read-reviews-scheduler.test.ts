@@ -16,7 +16,8 @@ const toStage = (id: string, stage: string, round = 1) => db.run("UPDATE tasks S
 const card = (id: string, stage = "review", round = 1) => (createTask(db, OWNER, { project: P, id, title: id, kind: "code" }), toStage(id, stage, round));
 const sched = (target: string, data: Record<string, unknown>) =>
   db.run("INSERT INTO events (ts, actor, project, target, kind, data) VALUES (?, 'scheduler', ?, ?, 'scheduler', ?)", [OWNER.now, P, target, JSON.stringify(data)]);
-const bind = (id: string, agent: string, role = "reviewer", transport = "tmux") => sched(id, { op: "session_bind", role, agent, transport });
+const bind = (id: string, agent: string, role = "reviewer", transport = "tmux") =>
+  sched(id, { op: "session_bind", role, agent, transport, source: transport === "peer" ? "peer_claim" : "registry_runtime" });
 const retire = (id: string, role = "reviewer") => sched(id, { op: "session_retire", role, effect: "kill" });
 const dispatchReview = (id: string, agent: string, round: number) =>
   sched(id, { op: "plan", id: `t68:s1:r${round}:adversarial_review:a0`, node: "adversarial_review", action: "review", recipient: agent });
@@ -74,6 +75,8 @@ describe("activeReviewsByAgent：调度器审查员会话", () => {
     bind("A1", "agent-rv-old");
     bind("A1", "agent-rv-new");
     expect(Object.keys(reviews())).toEqual(["rv-new"]);
+    dispatchReview("A1", "pm-codex@Shawn", 1); // 原用例：派给 peer 审查员名
+    expect(reviews()).toEqual({});
     dispatchReview("A1", "peer:Shawn", 1);
     expect(reviews()).toEqual({});
     bind("A1", "agent-rv-remote", "reviewer", "peer");
@@ -90,7 +93,7 @@ describe("activeReviewsByAgent：调度器审查员会话", () => {
     expect(reviews()).toEqual({});
   });
 
-  test("本机审查员名带 @：bind / 派审意图照样在审（远端看 transport / 出借意图，不看名字）", () => {
+  test("本机审查员名带 @：bind / 派审意图照样在审（远端看绑定身份，不看名字）", () => {
     card("A1");
     bind("A1", "agent-rv@local");
     expect(reviews()).toEqual({ "rv@local": pending("A1", 1) });
