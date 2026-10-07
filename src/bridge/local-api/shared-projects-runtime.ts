@@ -6,8 +6,8 @@ import { answerSharedProject } from "./shared-projects-actions.js";
 
 let ports: SharedProjectsPorts | undefined;
 /** Controlled adapter injection; the default route resolves authenticated N2/N3 ports from the original binding. */
-export function configureSharedProjects(adapter: (Omit<SharedProjectsPorts, "openAsk" | "getAsk" | "claimAsk">
-  & Partial<Pick<SharedProjectsPorts, "openAsk" | "getAsk" | "claimAsk">>) | undefined): void {
+export function configureSharedProjects(adapter: (Omit<SharedProjectsPorts, "openAsk" | "getAsk" | "claimAsk" | "recordCompletion" | "completionAsks" | "bindingGeneration">
+  & Partial<Pick<SharedProjectsPorts, "openAsk" | "getAsk" | "claimAsk" | "recordCompletion" | "completionAsks" | "bindingGeneration">>) | undefined): void {
   ports = adapter ? { ...sharedProjectAskPorts(), ...adapter } : undefined;
 }
 export function sharedProjectsPorts(): SharedProjectsPorts | undefined { return ports; }

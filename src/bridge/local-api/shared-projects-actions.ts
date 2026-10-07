@@ -1,6 +1,7 @@
 import { parseV2ProjectsResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { bindHash, checkAsk } from "../../lib/ask-bind.js";
 import { MASTER_PROJECT, ownerAnswered, type Ask } from "../../lib/ledger-asks.js";
+import { sharedProjectCompletionHook, type SharedProjectCompletionHook } from "./shared-projects-completion.js";
 import { projectChoices, selectedProject, sharedProjectCardDigest, type ProjectChoice } from "./shared-projects-choice.js";
 import { requireProjectPerson, SharedProjectsError, type BootstrapPreflight, type CreatorOperation,
   type ProjectInviteApproval, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
@@ -88,9 +89,10 @@ async function recoverOperation(who: ProjectPerson, operationId: string, input: 
   }
 }
 
-/** Selection precedes N2 atomic enrollment; success requires persisted credential readback and an actual B gate read. */
+/** Selection precedes N2 atomic enrollment; success requires persisted credential readback, an actual B gate read and, for an approved card, its stored receipt. */
 async function completeSharedProject(who: ProjectPerson, operationId: string, selection: ProjectSelection | undefined,
-  d: SharedProjectsPorts, created?: CreatorOperation, input?: ProjectCreate, expectedDigest?: string, completedLocalProjectId?: string): Promise<Record<string, unknown>> {
+  d: SharedProjectsPorts, created?: CreatorOperation, input?: ProjectCreate, expectedDigest?: string, completedLocalProjectId?: string,
+  done?: SharedProjectCompletionHook): Promise<Record<string, unknown>> {
   try {
     const operation = requireOperation(who, created ?? await recoverOperation(who, operationId, input, expectedDigest, d), operationId);
     if ((input && (operation.project.name !== input.name || (input.id !== undefined && operation.project.projectId !== input.id)))
@@ -112,6 +114,10 @@ async function completeSharedProject(who: ProjectPerson, operationId: string, se
     completedLocalProjectId = localProjectId;
     if (!await d.credentialSaved(who, operation.project)) throw new SharedProjectsError(503, "credential_not_saved");
     if (!await d.gateRead(who, operation.project, localProjectId)) throw new SharedProjectsError(503, "gate_read_failed");
+    // An unstored receipt is not success: the owner gets the same re-verify card, never an automatic replay.
+    if (done && !done({ projectId: operation.project.projectId, localProjectId, paramsDigest: operation.operation.paramsDigest })) {
+      throw new SharedProjectsError(503, "completion_receipt_unavailable");
+    }
     return { ok: true, available: true, operationId, projectId: operation.project.projectId, localProjectId };
   } catch {
     // Center, credential and filesystem exceptions can contain bearer/code material; only the recovery card is public.
@@ -119,12 +125,12 @@ async function completeSharedProject(who: ProjectPerson, operationId: string, se
   }
 }
 
-export async function createSharedProject(input: ProjectCreate, d: SharedProjectsPorts): Promise<Record<string, unknown>> {
+export async function createSharedProject(input: ProjectCreate, d: SharedProjectsPorts, done?: SharedProjectCompletionHook): Promise<Record<string, unknown>> {
   const who = await d.person();
   requireProjectPerson(who);
   try {
     const operation = await d.create(who, input);
-    return completeSharedProject(who, input.operationId, input.selection, d, operation, input);
+    return completeSharedProject(who, input.operationId, input.selection, d, operation, input, undefined, undefined, done);
   } catch (error) {
     if (error instanceof SharedProjectsError && error.status < 500) throw error;
     // A lost response may already have committed: recover by the original operationId rather than creating again.
@@ -188,11 +194,12 @@ export async function answerSharedProject(a: Ask, d: SharedProjectsPorts): Promi
   }
   if (action.kind === "create" && action.input) {
     if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
-    return createSharedProject(action.input, d);
+    return createSharedProject(action.input, d, sharedProjectCompletionHook(a, who, action.operationId, d));
   }
   if (action.kind !== "complete") throw new SharedProjectsError(400, "invalid_action");
   const selection = action.choices ? selectedProject(a.answer?.choices ?? [], action.choices) : action.selection;
   if (action.choices && !selection) throw new SharedProjectsError(400, "local_project_required");
   if (!d.claimAsk(a)) throw new SharedProjectsError(409, "ask_already_executed");
-  return completeSharedProject(who, action.operationId, selection ?? undefined, d, undefined, action.input, action.expectedDigest, action.completedLocalProjectId);
+  return completeSharedProject(who, action.operationId, selection ?? undefined, d, undefined, action.input, action.expectedDigest, action.completedLocalProjectId,
+    sharedProjectCompletionHook(a, who, action.operationId, d));
 }
