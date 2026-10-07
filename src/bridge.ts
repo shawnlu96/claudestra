@@ -1,5 +1,6 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
 import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
+import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
  * Discord Bridge Service — 主入口
  *
@@ -585,6 +586,8 @@ initDaemonLogs("bridge");
 // v2.19.0 认主守卫：热备机器上的 launchd 自启 + rsync 来的配置 = 双响（见 lib/owner-guard.ts）
 import { assertPrimaryOrExit } from "./lib/owner-guard.js";
 import { saveDiscordDownload } from "./lib/media-outbound.js";
+import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
+armSpecPreflight();
 await assertPrimaryOrExit("bridge");
 
 // v2.6.0+ C2-4：Discord 前端 UI 归属模块（typing / status 消息 / 完成通知 / 按钮）
@@ -711,7 +714,7 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     // 推送通知标题就是一个问号）。registry 是持久的，不受连接状态影响。
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
-  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles });
+  const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
   const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
@@ -1150,7 +1153,7 @@ discord.once("ready", async () => {
   cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
 
   // v2.4.25+ 用量看板：启动后确保只读频道 + 常驻消息存在，并刷一次。延迟几秒等
-  // channel-server 重连、master TUI 稳定，再抓 /status。
+  // channel-server 重连再刷（只读缓存）。
   setTimeout(() => void initStatsDashboard(discord), 6000);
 
   // 扫 skill + 为已有 active agent 扫项目级
@@ -2358,6 +2361,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }, env.meta.messageId);
         }
 
+        notePmDirectedFrame(env, msg); // PMDIR1：入口帧的代理降级随这封原信封走，定向例外据此用 callerOf(ws, frame) 重核
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
           if (fromChannelId && !oneShot) pendingAgentCalls.dropRequest(target.channelId, fromChannelId, env.meta.messageId); // 只撤这一条
@@ -3289,6 +3293,7 @@ void import("./bridge/ledger-audit-service.js").then((m) => m.startLedgerAudit({
 sweepStaleTerminalSessions().catch(() => {});
 void import("./bridge/startup-migrations.js").then((m) => m.startStartupMigrations(runManager));
 void import("./bridge/ctx-boundary.js").then((m) => m.startCtxBoundary()); // 上下文边界自动压缩：每分钟一轮，Discord / web-only 都跑
+void import("./bridge/account-usage-startup.js").then((m) => m.startAccountUsage(deliver)); // statusLine 批准卡 + 遗留用量探测清扫：Discord / web-only 都跑
 // Web-only: 无 DISCORD_BOT_TOKEN → Web-only 模式：不连 Discord，只跑与平台无关的初始化子集。HTTP/ws/api/事件流在上面 Bun.serve 时已就绪。
 // 跳过的 Discord 专属项：cleanupStaleThinkingMessages / initStatsDashboard /
 // registerSlashCommands / startPermissionWatcher / startWedgeWatcher /

@@ -6,8 +6,13 @@
  */
 import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
+import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { blockFindings } from "./scheduler-dispatch-block.js";
+import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
+import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
+import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 
 const MIN = 60_000;
 
@@ -15,6 +20,8 @@ const MIN = 60_000;
 export const AUDIT_THRESHOLDS = {
   /** review 阶段没有审查员在跑、也没有 note / review 事件 */
   reviewNoReviewerMs: 20 * MIN,
+  /** 本轮审查已派给 peer / 人（看不到对方会话）还没有结论：从派出时算，note 不重置 */
+  reviewAssignedStaleMs: 120 * MIN,
   /** 本轮审查已 pass、任务还停在 review（等推 merge 或等拍板） */
   reviewPassedIdleMs: 30 * MIN,
   /** build / fix 阶段执行者主回合空闲、会话不再写入 */
@@ -35,12 +42,14 @@ export const AUDIT_THRESHOLDS = {
   orphanGraceMs: 15 * MIN,
   /** 画面认不出时，会话文件这么久内写过就当它在回合中（押后规则不报） */
   recentWriteMs: 3 * MIN,
+  /** 从自动进了 manual、却没有可用理由（manual-reason.ts）：只报警，不改模式 */
+  manualReasonMissingMs: 30 * MIN,
 } as const;
 
 const AUDIT_RULES = [
-  "review_no_reviewer", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
+  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
-  "dispatch_blocked",
+  "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -101,6 +110,10 @@ export interface AuditSnapshot {
   unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
+  /** 只读等待图（ledger-deadlock.ts）；没取 = 等待规则不跑也不列 skipped，图里有 unknown = 不进 evaluated */
+  waitGraph?: WaitGraph;
+  /** 只有完整扫描建立过基线的等待规则，才可在不完整扫描时通知。 */
+  waitBaseline?: readonly string[] | null;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
   unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
@@ -145,7 +158,11 @@ const mins = (ms: number) => `${Math.floor(ms / MIN)} 分钟`;
  * blockedBy = 依赖上还挡着它的前置任务；unblockedAt = 依赖最后一次放行的时刻（merge 停滞从它之后算）；
  * specPolicy = 规格卡的审查策略（task-spec.ts specPolicyOf），只在开了班子的项目里取，找不到规格卡记 null（与合并闸门一样不拦）
  */
-type AuditTask = { task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null; specPolicy?: SpecPolicy };
+type AuditTask = {
+  task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null; specPolicy?: SpecPolicy;
+  /** 本轮（step round = task.round）显式派了、还没记结论的审查那一步；at = 派出时刻（ledger-audit-snapshot.ts pendingReview） */
+  reviewStep?: { executor: string; executorKind: ExecutorKind; at: number } | null;
+};
 
 interface TaskFacts extends AuditTask {
   /** 进入当前阶段的时刻；导入推断的近似时间 = null（不拿它判超时） */
@@ -174,26 +191,46 @@ function owedAfterPass(t: TaskFacts, pass: LedgerEvent, now: number, emit: Emit)
     suggestion: owes === true ? "还欠对抗式，派对抗式" : "按规格卡核对还欠不欠对抗式，欠就派对抗式" });
 }
 
-function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, team: boolean, now: number, emit: Emit): void {
+/**
+ * review 还没结论：派给 peer / 人的看不到对方会话，从派出时按更长阈值报 review_assigned_stale；派给本机 agent 且它主回合在跑不报；
+ * 没派、或派的本机 agent 没在跑，照旧 20 分钟报 review_no_reviewer（note / review 推后计时）
+ */
+function reviewWaiting(t: TaskFacts, stageSince: number, agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
+  const { task, events, reviewStep: step } = t;
+  if (step && step.executorKind !== "agent") {
+    const since = Math.max(stageSince, step.at);
+    if (now - since <= AUDIT_THRESHOLDS.reviewAssignedStaleMs) return;
+    emit({ rule: "review_assigned_stale", taskId: task.id, since, keyParts: [task.id, `r${task.round}`, step.executor, step.at],
+      detail: `${task.id} 第 ${task.round} 轮审查派给了 ${step.executor}，已 ${mins(now - since)}没有结论`, suggestion: `问 ${step.executor} 审到哪了，不回就收回改派` });
+    return;
+  }
+  if (step && turnBusy(agents.get(step.executor), now)) return;
+  const since = Math.max(stageSince, lastOf(events, ["note", "review"], stageSince)?.ts ?? stageSince);
+  if (now - since <= AUDIT_THRESHOLDS.reviewNoReviewerMs) return;
+  const who = step ? `审查派给了 ${step.executor}，但它的会话没在跑` : "没有审查员在跑";
+  emit({ rule: "review_no_reviewer", taskId: task.id, since, keyParts: [task.id, `r${task.round}`, stageSince],
+    detail: `${task.id} 在 review（第 ${task.round} 轮）已 ${mins(now - since)}，${who}，也没有新的 note / review`,
+    suggestion: step ? `核对 ${step.executor} 在不在审，不在就重派` : "派审查员" });
+}
+
+function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, agents: ReadonlyMap<string, AuditAgent>, team: boolean, now: number, emit: Emit): void {
   const reviewing = new Set(reviewers.map((r) => r.taskId.toLowerCase()));
   for (const t of ts) {
     const { task, events, stageSince } = t;
     if (reviewing.has(task.id.toLowerCase())) continue;
     const lastReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
-    if (lastReview?.data.verdict === "pass" && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
+    // pass 之后同一轮又派了审查（初审 pass 再派终审）：按新派的那一步等结论，不当「已通过」；peer 结论不回写步骤行，只能按派出先后分
+    const passed = lastReview?.data.verdict === "pass" && !(t.reviewStep && t.reviewStep.at >= lastReview.ts);
+    if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
       owedAfterPass(t, lastReview, now, emit);
-    } else if (lastReview?.data.verdict === "pass") {
+    } else if (passed) {
       // 审查已通过：该推 merge 或等 owner 拍板，不是再派审查员；从 pass 算起，PM 写 note 不重开
       if (now - lastReview.ts > AUDIT_THRESHOLDS.reviewPassedIdleMs) {
         emit({ rule: "review_passed_idle", taskId: task.id, since: lastReview.ts, keyParts: [task.id, `r${task.round}`, lastReview.seq],
           detail: `${task.id} 第 ${task.round} 轮审查已通过 ${mins(now - lastReview.ts)}，还停在 review`, suggestion: "审查已通过，推进 merge 或等拍板" });
       }
     } else if (task.stage === "review" && stageSince !== null) {
-      const since = Math.max(stageSince, lastOf(events, ["note", "review"], stageSince)?.ts ?? stageSince);
-      if (now - since > AUDIT_THRESHOLDS.reviewNoReviewerMs) {
-        emit({ rule: "review_no_reviewer", taskId: task.id, since, keyParts: [task.id, `r${task.round}`, stageSince],
-          detail: `${task.id} 在 review（第 ${task.round} 轮）已 ${mins(now - since)}，没有审查员在跑，也没有新的 note / review`, suggestion: "派审查员" });
-      }
+      reviewWaiting(t, stageSince, agents, now, emit);
     }
     // 只管「交付记了、阶段没跟着进 review」：交付晚于进入当前 build / fix。PM 跳过审查直接 merge、退回 fix、blocked 都不算
     if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null) continue;
@@ -254,6 +291,31 @@ function witnessMismatches(ts: readonly TaskFacts[], emit: Emit): void {
       emit({ rule: "review_witness_mismatch", taskId: t.task.id, since: e.ts, keyParts: [t.task.id, e.seq],
         detail: `${t.task.id} 第 ${String(e.data.round)} 轮结论记在 ${String(e.data.reviewer)} 名下（${String(e.data.verdict)}），旁证对不上：${miss.map(String).join("；").slice(0, 300)}`,
         suggestion: "核对这条结论是不是审查员本人写的；不是就 workflow-set --mode manual --reason 接管，按人工重审" });
+    }
+  }
+}
+
+/**
+ * manual 理由与恢复观察（MAN1）：只产出巡检发现（落库去重 / 推 PM），不改流程、不派单、不碰容量或合并。
+ * 没有可用理由的 manual 超 30 分钟报一次；observe 下解除条件在只读事实上看似满足，按状态版本报一次 would-resume。
+ */
+function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], resume: ManualResumeMode, now: number, emit: Emit): void {
+  const unknown = s.mergeUnknown?.map((r) => r.taskId);
+  for (const t of ts) {
+    const d = diagnoseManual({ task: t.task, events: t.events, blockedBy: t.blockedBy, mergeUnknown: unknown });
+    if (!d) continue;
+    const entry = t.events.find((e) => e.seq === d.entrySeq);
+    const since = entry?.ts ?? now;
+    const gaps = d.gaps.join("；").slice(0, 300) || "无";
+    if (!d.code && now - since > AUDIT_THRESHOLDS.manualReasonMissingMs) {
+      emit({ rule: "manual_reason_missing", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq],
+        detail: `${t.task.id} 进 manual（#${d.entrySeq}）已 ${mins(now - since)}，理由：${d.text || "（空）"}；解除节点：${d.node}；证据缺口：${gaps}（只报警，不改模式、不派单）`,
+        suggestion: d.next });
+    }
+    if (d.wouldResume && resume !== "off") {
+      emit({ rule: "manual_would_resume", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq, d.fingerprint],
+        detail: `${t.task.id} manual（${d.label}：${d.text}）的解除条件「${d.release}」在只读事实上看似已满足（观察报告，本巡检不执行恢复）`,
+        suggestion: d.next });
     }
   }
 }
@@ -324,8 +386,8 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
   }
 }
 
-/** 一个项目一轮巡检 */
-export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
+/** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
+export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -339,9 +401,9 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   const ts = s.tasks.map((t) => facts(t, now));
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
-    reviewRules(ts, s.reviewers, !!s.team, now, emit);
-    evaluated.push("review_no_reviewer", "review_passed_idle", "deliver_not_in_review");
-  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_passed_idle", "deliver_not_in_review");
+    reviewRules(ts, s.reviewers, agents, !!s.team, now, emit);
+    evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "deliver_not_in_review");
+  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "deliver_not_in_review");
   if (s.agents) {
     executorIdle(ts, agents, now, emit);
     registryRules(s, ts, agents, now, emit);
@@ -358,6 +420,13 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
+  mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
+  // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
+  const resume = manualResumeMode(policy, s.project);
+  manualRules(s, ts, resume, now, emit);
+  evaluated.push("manual_reason_missing");
+  if (resume === "off") skip("manual 恢复观察为 off（恢复策略 manualStall 为 off 或读不了）", "manual_would_resume");
+  else evaluated.push("manual_would_resume");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);
     evaluated.push("pm_held");
@@ -366,7 +435,11 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
     ownerInbox(s.ownerInbox, now, emit);
     evaluated.push("owner_inbox_stale");
   } else skip(why("ownerInbox"), "owner_inbox_stale");
-  return { findings, evaluated, skipped, keep: kept };
+  const wait = waitAudit(s.waitGraph, now);
+  wait.findings.forEach(emit);
+  evaluated.push(...wait.evaluated);
+  skipped.push(...wait.skipped);
+  return { findings: waitNotificationFindings(findings, s.waitGraph, s.waitBaseline), evaluated, skipped, keep: kept };
 }
 
 /** 推给 PM / 调度助理的一条通知（bridge/ledger-audit-service.ts 发）：一轮新出现的合成一条，每条一行「对象 · 建议 — 现象」 */

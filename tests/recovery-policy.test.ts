@@ -43,6 +43,15 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("c", "manualStall", path)).toEqual({ mode: "observe", manualAfterMs: null, source: "config" });
   });
 
+  test("manualMergeQueue (MQ1): registered key; default observe, inherits the project mode, takes an override, unreadable file → off", () => {
+    expect(RECOVERY_KEYS).toContain("manualMergeQueue");
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { manualMergeQueue: "observe" } } } });
+    expect(recoveryPolicy("z", "manualMergeQueue", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "manualMergeQueue", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "manualMergeQueue", path).mode, recoveryPolicy("b", "audit", path).mode]).toEqual(["observe", "on"]);
+    expect(recoveryPolicy("a", "manualMergeQueue", file({ projects: { a: { keys: { manualMergeQueue: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+  });
+
   test("placementReservations (PLACE): registered key; inherits the project mode, takes an override, bad override value → off", () => {
     expect(RECOVERY_KEYS).toContain("placementReservations");
     const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { placementReservations: "off" } } } });

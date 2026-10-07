@@ -6,17 +6,17 @@
   },
   "cliVersion": "0.159.3",
   "files": {
-    "inbound.json": "1c14b65dd3ff4ff3c22e5f09ac877598f4a689502c6d13c2c6e5973cfb5509ed",
-    "methods.json": "45ed16a6ed950d04f6f956efc374ad3648c47e4196f8a9ed5dbbe64f89ea511c",
-    "outbound.json": "2e85ca20f97728e4d67426196fddd0bab6c67d43caaaf23d203200afa2f217e8"
+    "inbound.json": "f7e9ae139f4570e81e7f54d4767931b76197cea9a4cc944f2624a30a6aec7bc5",
+    "methods.json": "0b4d9bc1647c3f13ceab0f9b3b1940fbe42fa08ca1871a892e889f2e718224f2",
+    "outbound.json": "3022474ab9ddf510f62668e234a11c5d05b5b1ff40032504448bd0f9ade6b2c0"
   },
   "flags": [
     "--experimental"
   ],
   "generator": "scripts/codex-schema/lock.ts",
   "outboundClosure": {
-    "bytes": 53863,
-    "defs": 80
+    "bytes": 55313,
+    "defs": 83
   },
   "provenance": "由 codex-cli 的 `app-server generate-json-schema` 产物（openai/codex，Apache-2.0）投影、摘录而来；生成器见 generator",
   "schemaFullSha256": "345a8d9bb98a38f73e3d3b6238501da7f81a09f0ad87432a00b7fdcab8f37577"
