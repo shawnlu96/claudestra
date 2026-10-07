@@ -1,10 +1,13 @@
 /**
  * dispatch-recovery-MODELXW2：未领的审查单，绑定会话在唤醒投递回执（done）之后的那一回合以策略拒审结束（会话 / head / 轮次 / specRev 都对得上）→ confirmed，
  * 交 watch() 现有失败分支。信号是 bridge 的回合失败卡（extra.failure / sessionId / failedAt），cyber 判定同监护，usage_policy 同 MODEL。
+ * 卡开着还是关了（owner 删卡 / dialog closed / 过期）不参与判断；「之后没有别的回合」由会话自己的记录证明：Codex rollout 最后一个 task_started
+ * 不晚于 failedAt（MODELXW3），卡带 recoveredAt（stop-settle：下一个回合正常结束）不算。
  * 关联不上或读不到 → suspected：不动，未领单报警正文带「疑似领单前拒审，未能确认」。observe 归不到单、或 ACP 按认领时刻归给本单的同类拒审也先过这里。
  * 只读台账；只在 modelOutcome on 下生效。tests/scheduler-refusal-unclaimed*.test.ts。
  */import type { Database } from "bun:sqlite";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
+import { lastTurnStartAt } from "./lend-turn-failure.js";
 import { listAsks, type Ask } from "./ledger-asks.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -13,6 +16,7 @@ import { orderTakenSeq } from "./order-mark.js";
 import { classifyModelOutcome } from "./scheduler-model-outcome.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { findSessionJsonlBySessionId } from "./session-source.js";
 import { sentAsWake, type SessionRef, type WorkerObservation } from "./worker-session.js";
 
 export type UnclaimedRefusal =
@@ -45,8 +49,18 @@ function sentBefore(db: Database, agent: string, at: number): string | null {
   return r?.id ?? null;
 }
 
-/** 关联不上的原因；null = 这张卡就是本单唤醒之后、本会话最后一回合的策略拒审 */
-function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef, card: Ask, claimedAt: number, newest: Ask): string | null {
+/** 失败之后会话还开没开过回合，只认会话自己的记录；null = 拒审就是最后一回合，证明不了也给原因 */
+function laterTurn(ref: SessionRef, failedAt: number): string | null {
+  if (ref.family !== "codex") return "Claude 会话未接";
+  const path = findSessionJsonlBySessionId("codex", ref.sessionId);
+  if (!path) return "找不到会话的 rollout";
+  const turnAt = lastTurnStartAt(path);
+  if (turnAt === null) return "rollout 里读不到回合开始记录";
+  return turnAt > failedAt ? "拒审之后会话还有别的回合" : null;
+}
+
+/** 关联不上的原因；null = 这张卡就是本单唤醒之后、本会话最后一回合的策略拒审。cards = 这个 agent 全部回合失败卡，开着关了都算 */
+function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef, card: Ask, claimedAt: number, cards: Ask[]): string | null {
   const { failedAt, sessionId } = card.extra;
   if (typeof failedAt !== "number" || !Number.isFinite(failedAt) || typeof sessionId !== "string" || !sessionId) return "卡上缺失败时刻或会话";
   if (sessionId !== ref.sessionId) return "拒审不在绑定的审查会话上";
@@ -56,13 +70,16 @@ function mismatch(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: Se
   if (!delivered) return "唤醒的投递回执还没落账";
   if (failedAt <= delivered.ts) return "拒审落在认领与投递回执之间，分不清是旧回合还是本单唤醒的回合";
   if (sentBefore(db, ref.agent, failedAt) !== sent.id) return "拒审属于别的单";
-  if (card.state !== "open" || newest.id !== card.id) return "拒审之后会话还有别的回合";
+  if (card.extra.recoveredAt !== undefined) return "拒审之后会话还有别的回合（下一个回合正常结束）";
+  if (cards.some((a) => a.id !== card.id && a.extra.sessionId === sessionId && typeof a.extra.failedAt === "number" && a.extra.failedAt > failedAt)) {
+    return "拒审之后会话还有别的回合";
+  }
   if (sent.head !== task.headSHA || sent.specRev !== task.specRev || roundOf(sent.id) !== task.round) return "head / specRev / 轮次和本单不符";
-  return null;
+  return laterTurn(ref, failedAt);
 }
 
 /**
- * watch() 在 observe 没给出本单失败时调用。只看审查单：未领、以唤醒发出、绑定仍是这个会话；这个 agent 最新一张开着的回合失败卡是
+ * watch() 在 observe 没给出本单失败时调用。只看审查单：未领、以唤醒发出、绑定仍是这个会话；这个 agent 最新一张回合失败卡（不论开关）是
  * 策略拒审，并且关联得上 → confirmed（failure 交原分支）；有唤醒之后的拒审卡却关联不上 → suspected（只改报警正文）；否则 null（照旧）。
  */
 export async function unclaimedRefusal(db: Database, task: LedgerTask, sent: SchedulerIntent, ref: SessionRef,
@@ -110,13 +127,11 @@ async function recognize(db: Database, task: LedgerTask, sent: SchedulerIntent, 
     isPolicyRefusal(cardMessage(a)));
   // 卡缺会话 / 时刻、又开在唤醒之前时进不了候选，但 observe 已带着这条拒审：关联不上，按疑似报警
   if (!refusals.length) return unattributedRefusal(seen) ? { kind: "suspected", note: `${SUSPECT_NOTE}（宿主报了归不到单的策略拒审）` } : null;
-  const newestOpen = cards.find((a) => a.state === "open");
   const card = refusals[0];
   const row = getSchedulerSession(db, task.id, "reviewer");
-  const why = !newestOpen ? "拒审之后会话还有别的回合"
-    : row?.state !== "active" || row.sessionId !== ref.sessionId ? "审查绑定已变"
+  const why = row?.state !== "active" || row.sessionId !== ref.sessionId ? "审查绑定已变"
     : seen.state === "running" && seen.busy ? "会话正在跑新的回合"
-    : mismatch(db, task, sent, ref, card, woke.ts, newestOpen);
+    : mismatch(db, task, sent, ref, card, woke.ts, cards);
   if (why) return { kind: "suspected", note: `${SUSPECT_NOTE}（${why}）` };
   return { kind: "confirmed", failure: { kind: "error", message: cardMessage(card).slice(0, 4000) }, cardId: card.id };
 }
