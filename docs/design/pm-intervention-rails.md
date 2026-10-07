@@ -70,7 +70,7 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
 | `verify` | `src/manager/ledger-verify.ts:199` | PM；scheduler 只能验自己部署的卡，且不能豁免 | **verify**，live→verified | 否 | 台账 |
 | `step` | `src/manager/ledger-step-cmds.ts:44` | PM | 步骤接手人 | 否 | 唤醒执行者 |
 | `dispatch` / `escalate` | `src/manager/ledger-dispatch-cmds.ts:128` / `:144` | PM | 派审记录 / 升级 | 否 | 推 PM（`--to owner` 也是推 PM） |
-| `peer-pr-intake` | `src/manager/ledger-peer-pr-cmds.ts:43` | scheduler / 真 PM | 建 peer 卡（auto security） | ? | 台账 |
+| `peer-pr-intake` / `peer-pr-observe` | `src/manager/ledger-peer-pr-cmds.ts:43` / `:60` | scheduler / 真 PM | intake 建 peer 卡（auto security）；observe 把新的稳定 head 交给 auto peer 卡：fix 阶段直接 deliver，review 阶段已有结论时先 review→fix（`src/lib/peer-pr-ledger.ts:105-120`），改 **head / 阶段** | 否 | 台账 |
 | `peer-write` | `src/manager/ledger-peer.ts:71` | 只有 bridge（peer 角色） | **阶段** / **结论** / **head** | 否 | ? |
 | `dag-rewrite` / `dag-bind` | `src/manager/ledger-dag-cmds.ts:85` / `:93` | PM | 卡的 feature、fileGlobs、文件锁 | 否 | 只有 `--scope-change` 时推 owner ask |
 | `dag-approve` | `ledger-dag-cmds.ts:92`（处理入口 `:63-67`） | PM（`src/lib/ledger-dag-write.ts:254`），并且要求审批 ask 是 owner 本人批准的（`:218`） | 让待批的 DAG 提案生效，可能取消在途节点、改卡的 fileGlobs | 否 | owner 已批 |
@@ -82,13 +82,8 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
 
 - 所有 `ledger` 子命令都在 `src/manager/ledger.ts:76-106` 的 `COMMANDS` 注册表里，上表是 10-07 这一天按「能不能改 auto 卡」手工筛出来的。
 - 限权实现时**不按这张表逐条封口**，而是在注册表上给每个写命令标一个分类：
-  - `scheduler-only`：只有 scheduler 能用；
-  - `typed-action`：四个有类型的动作；
-  - `takeover-only`：auto 卡上只在接管期放行；
-  - `project-level`：不碰单卡状态，豁免，必须写明理由；
-  - `read`：只读。
-- **默认拒绝**：没有分类的写命令，在 auto 卡上一律拒绝。
-- 加一条测试，断言注册表里每个命令都有分类（见第 5 节 T21），这样以后新加的命令就不会成为绕行路径。
+  `scheduler-only`（只有 scheduler 能用）、`typed-action`（四个动作）、`takeover-only`（auto 卡上只在接管期放行）、`project-level`（不碰单卡，豁免须写理由）、`read`。
+- **默认拒绝**：没有分类的写命令在 auto 卡上一律拒绝；测试断言注册表里每个命令都有分类（第 5 节 T21），新命令不会成为绕行路径。
 
 ### 1.3 MCP 工具与 HTTP 入口
 
@@ -306,10 +301,14 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
    - **根因**：intake 只按 PR 推断。`classifyPr`（`src/lib/peer-pr-intake.ts:19`）对配置里的作者、非 draft、head 稳定的开着的 PR 直接收卡，只有 draft 才等（`:31`）。
      我方的交接只在本机台账写 `merge_handoff` 事件并告诉本机 PM（`src/lib/scheduler-merge-handoff.ts:93`），**不发给仓库方**。
    - **规则**：交接 = 我方台账的 `merge_handoff` 事件，经正式交接消息送达对方。按 PR 推断（开着、非 draft、CI 绿、有新提交）都**不算**交接。
+   - **证据格式**：`{v:1, kind:"merge_handoff"|"handoff_withdraw", instance, card, pr, head, handoffSeq, specRev, reviewDigest}`（`reviewDigest` = 本机跨模型审查报告与结论的 sha256），
+     经 HTTP peer 通道（`/api/v1`，对方给我方的 scoped token 认证）投递，不走 PR 评论或标签（同仓写权限的人都能伪造）。
    - **我方要改**（默认做法）：① 执行者开 PR 一律用 draft（`gh pr create --draft`），交接时由引擎 `gh pr ready`，撤回交接（3.3④）时转回 draft；
      ② 写 `merge_handoff` 的同时，向仓库方 PM 入口发一条正式交接消息：卡号、PR、交接 head、`handoffSeq`、本机审查证据摘要；撤回时也发一条，走 T48 outbox 保证重投。
    - **对方要改**（默认做法）：① intake 的前置条件，从「开着的非 draft PR」改成「收到并入账的交接消息，且 PR head = 交接 head，或者是从交接 head 只合入 main 的 carry」；
-     没收到交接的 PR 一律 wait，不审、不排合并；② 收到撤回消息时，把卡移出合并队列；③ 过渡期，draft 已经会让 `classifyPr` 等待，我方先改 ① 就能挡住大部分情况。
+     没收到交接的 PR 一律 wait，不审、不排合并；`peer-pr-intake`（`src/manager/ledger-peer-pr-cmds.ts:43-57`）加 `--handoff <对方台账里入账的交接事件号>` 必填，事务内复核 PR 号、head、未撤回；
+     ② 收到撤回消息时，把卡移出合并队列，回到 wait；③ 过渡期，draft 已经会让 `classifyPr` 等待，我方先改 ① 就能挡住大部分情况。
+   - **已越界的在途卡**：对方上线闸时，把没有交接记录、但已 intake 的卡统一转 wait（在途合并意图按其 merge 流程结清，不新排）；我方对这些 PR 先转 draft 并发 hold，交接后再按正常流程走。
    - 双方都改完之前，我方 PM 对仓库方提前给出的结论（审过、进队列）**不认作交接**，照常发 hold（本卡 #858 就是这样处理的）。
 5. **peer 角色写入**：`peer-write` 是受托方经 peer 台账写委托卡，只能做 PEER_STEP_MOVES 列出的阶段移动（`src/lib/ledger-stages.ts`），不属于 PM 干预，保持现状。
 6. **保持现状的范围**：
@@ -344,7 +343,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 
 | # | 期 | 测试（期望） |
 |---|---|---|
-| T1 | P0 | auto 卡上 PM `stage` / `task-set` / `freeze` / `scheduler-merge-step` 各写一次，每条都有 `manual:true` 和 `intervention` 并生成 owner inform；执行者 deliver、审查员 submit_verdict、peer 正常交付不标、不推 |
+| T1 | P0 | auto 卡上 PM `stage` / `task-set` / `freeze` / `scheduler-merge-step` 各写一次，每条都有 `manual:true` 和 `intervention` 并生成 owner inform；执行者交自己当前单的 deliver、绑定审查员 submit_verdict、peer 正常交付不标、不推；PM 代交 deliver 或代记 review 照样标 intervention 并推 |
 | T2 | P0 | 意图 unknown 停住超过阈值，推送 owner 一次；同一状态版本不重复推送 |
 | T3 | P1 | `card-pause` 撤掉 pending 意图，submitted 保留；规划器返回 wait；`card-continue` 后重新规划 |
 | T4 | P1 | 合并 run 处于 merging 时 `card-pause` / `card-cancel` 被拒 |
@@ -365,6 +364,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 | T18 | P2 | manual 卡、旧卡、investigate / ops 卡上的全部旧命令行为不变（回归） |
 | T19 | P3 | 每个退回点都转 stopped，并且一个卡加一个状态版本只开一张 owner_action ask；无法分类的理由也进收件箱 |
 | T20 | 全期 | `pmRails=off` 时以上行为都不出现；Shawn 侧开关独立 |
+| T22 | 对方 | 没有入账交接事件的 PR 不 intake（wait）；`--handoff` 指向的事件 PR/head 不符或已撤回被拒；收到撤回后卡移出合并队列；已越界在途卡上线后转 wait |
 | T21 | P2 | `src/manager/ledger.ts` 的 `COMMANDS` 注册表里每个命令都有限权分类（1.2 末）；新加一个没有分类的写命令时测试失败；没有分类的写命令在 auto 卡上被拒 |
 
 ## 6. 代价与风险
@@ -380,7 +380,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
   - 可以读 `.env` 拿到 bot token 伪造按钮（`docs/team/orchestration-team.md:54`）。
 
   所以这里的保证**只在工具面上成立**：
-  - **保证**：只用 Claudestra 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner。审计只覆盖正规写入口。
+  - **保证**（P2 起，且引擎退回口已同期堵上，见第 5 节；P0/P1 只有审计和推送）：只用 Claudestra 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner。审计只覆盖正规写入口。
   - **不保证**：直接写库不一定留下事件（UPDATE 可以不插事件，也能伪造带 `takeoverId` 的事件或改审计记录）；独立对账（台账状态 vs PR / registry / 意图）可能发现部分状态差异，但不保证发现直接写库；防不住铁了心的本机 agent；不能让 CLI 上的「owner」等于 owner 本人；不能阻止 GitHub 侧的人工操作（比如仓库方手动合并，这类只能由引擎识别和停卡）。
 - **规格变更被当成逃生口**。PM 可能为了把卡推回 fix 而去改规格。这一点由三条约束限制：规格卡必须真的有改动；delta 由服务端 diff 出来；每次规格变更都推给 owner。
 - **实现成本**：P1–P2 要动 `ledger-write-cmds.ts` 和 `ledger-scheduler-cmds.ts` 这两个在基线里的大文件。按防腐规则，逻辑放进新模块，大文件里只加一行调用。
