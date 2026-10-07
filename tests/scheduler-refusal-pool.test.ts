@@ -1,6 +1,6 @@
 /**
  * dispatch-recovery-MODELXP1 · 池单策略拒审的识别与计划（纯函数）+ 只读句柄上收台账事实。
- * PMDIR1 r2 形态：He 的池里 codex 审查单被 cyber 拒审 → 撤单、换 claude、带豁免、告知一次；豁免单再拒 → manual；额度失败 → 不动。
+ * 审查单首拒 → 撤单、换家族、带豁免、告知一次；写单 / 修复单首拒换作者；豁免单或同步骤已换过的再拒 → manual；额度失败 → 不动。
  */
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -23,7 +23,7 @@ const USAGE = "API Error: Claude Code is unable to respond to this request, whic
 const HEAD = "a".repeat(40);
 const order = (over: Partial<PoolOrderFacts> = {}): PoolOrderFacts => ({ orderId: "lend:T1:s1:r2:a0", taskId: "T1", step: "review", family: "codex",
   peer: "HedeMacBook-Pro", state: "started", head: HEAD, specRev: 1, round: 2, exempt: false, ...over });
-const card = { headSHA: HEAD, specRev: 1, round: 2 };
+const card = { stage: "review", headSHA: HEAD, specRev: 1, round: 2 };
 const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ mode: "on", order: order(), authorFamily: "claude", security: false,
   confirmed: { kind: "confirmed", refusal: "cyber_policy", message: CYBER },
   placements: [{ machine: "HedeMacBook-Pro", family: "codex", free: true }, { machine: "peer-b", family: "claude", free: true }, { machine: "local", family: "claude", free: true }],
@@ -70,9 +70,22 @@ test("关联不确定就不动：疑点 / 缺会话或时刻 / 已结清 / 未�
   expect(recognizePoolRefusal(order({ state: "done" }), card, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：单已结清（done）" });
   expect(recognizePoolRefusal(order({ state: "cancelled" }), card, declared()).kind).toBe("suspected");
   expect(recognizePoolRefusal(order({ state: "pooled" }), card, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：单不在已领单状态（pooled）" });
-  for (const c of [{ ...card, headSHA: "b".repeat(40) }, { ...card, specRev: 2 }, { ...card, round: 3 }]) {
+  for (const c of [{ ...card, headSHA: "b".repeat(40) }, { ...card, specRev: 2 }, { ...card, round: 3 }, { ...card, stage: "fix" }]) {
     expect(recognizePoolRefusal(order(), c, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：head / specRev / 轮次和本单不符" });
   }
+});
+
+test("初始写单：order.head 是基线、卡在 build 尚无 head → confirmed；过期写单（步骤 / specRev / 轮次变了）仍 suspected", () => {
+  const w = order({ step: "write", state: "claimed", round: 0 });
+  const build = { stage: "build", headSHA: null, specRev: 1, round: 0 };
+  expect(recognizePoolRefusal(w, build, declared())).toEqual({ kind: "confirmed", refusal: "cyber_policy", message: CYBER });
+  // 卡后来有了 head（如重借），写单仍从基线起，不因 head 不同而失配
+  expect(recognizePoolRefusal(w, { ...build, headSHA: "c".repeat(40) }, declared()).kind).toBe("confirmed");
+  for (const c of [{ ...build, stage: "review" }, { ...build, specRev: 2 }, { ...build, round: 1 }]) {
+    expect(recognizePoolRefusal(w, c, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：head / specRev / 轮次和本单不符" });
+  }
+  // 修复单从卡的 head 起：head 不符仍拦
+  expect(recognizePoolRefusal(order({ step: "fix" }), { ...card, stage: "fix", headSHA: "b".repeat(40) }, declared()).kind).toBe("suspected");
 });
 
 test("出借方疑点可以直接是 turnFailureDoubt 的结论：老宿主卡没有失败时刻 → suspected", () => {
@@ -116,6 +129,16 @@ test("豁免单再被拒 → manual（model_safety_hold），通知 PM，不再�
   const w = planPoolRefusal(facts({ order: order({ orderId: "lend:T1:s1:r2:a1", step: "write", family: "claude" }),
     prior: [{ seq: 9, orderId: "lend:T1:s1:r2:a0", step: "write", family: "codex", plan: "replace" }] }));
   expect(w).toMatchObject({ plan: { kind: "manual" } });
+  // review 首拒换过家族 → 审查交 changes 进 fix（同窗口）→ 修复单首拒：不是第二次，照样换作者
+  const fixFirst = planPoolRefusal(facts({ order: order({ orderId: "fix-first", step: "fix", family: "claude" }),
+    placements: [{ machine: "peer-b", family: "codex", free: true }],
+    prior: [{ seq: 9, orderId: "review-old", step: "review", family: "codex", plan: "replace" }] }));
+  expect(fixFirst).toMatchObject({ plan: { kind: "replace", step: "fix", to: { machine: "peer-b", family: "codex" }, nextReviewFamily: "claude" } });
+  // 修复单自己换过一次后新作者再拒 → manual
+  const fixAgain = planPoolRefusal(facts({ order: order({ orderId: "fix-second", step: "fix", family: "codex" }),
+    prior: [{ seq: 9, orderId: "review-old", step: "review", family: "codex", plan: "replace" },
+      { seq: 12, orderId: "fix-first", step: "fix", family: "claude", plan: "replace" }] }));
+  expect(fixAgain).toMatchObject({ plan: { kind: "manual" } });
   // 同一单的重放不算第二次
   const replay = planPoolRefusal(facts({ prior: [{ seq: 9, orderId: "lend:T1:s1:r2:a0", step: "review", family: "codex", plan: "replace" }] }));
   expect(replay).toMatchObject({ plan: { kind: "replace" } });

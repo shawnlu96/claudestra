@@ -1,19 +1,15 @@
 /**
- * dispatch-recovery-MODELXP1：出借池里的单遭提供方策略拒审，按 owner 规矩 A（decision 42710）换家族——识别与计划，纯函数，只读台账。
- * 识别（recognizePoolRefusal）：吃出借方的失败事实（结构化类别 provider_policy / usage / auth / network / other + sessionId + failedAt，
- * 来源标明）。只有「出借方声明」的 provider_policy、带会话与失败时刻、出借方没报疑点、单在已领单状态（claimed / started）、
- * head / specRev / 轮次与卡此刻相符 → confirmed；是拒审但任一条证明不了（含只有 release 原因文本）→ suspected，报警正文带
- * 「疑似池单拒审，未能确认：<原因>」，不撤单不换人；其余类别 → none，照旧。出借方按 turnFailureDoubt 归单、在 release 里带类别是 MODELXP2。
- * 计划（planPoolRefusal）：首次被拒 → 撤单（provider_policy_refusal，原件不删）→ 记模型结果 → 换另一家族重放（池里有空位的 peer 优先，
- * 其次本机，都没有就等并告知一次）；审查单带豁免标记、开 refusal epoch，写单 / 修复单不带豁免、下一轮审查跟着换家族；豁免单或本窗口
- * 已换过家族的单再被拒 → manual（MODELX 的 model_safety_hold），通知 PM，不做同模型重试。owner 告知每卡每类一次（informKey）。
- * observe 只给计划事件，不撤单不派单；off 什么都不做。写入不在这里：一律经 scheduler-only 台账子命令。tests/scheduler-refusal-pool*.test.ts。
+ * 出借池单遭提供方策略拒审：识别（recognizePoolRefusal）与下一步计划（planPoolRefusal），纯函数，只读台账。
+ * 只有「出借方声明」的 provider_policy、带会话与失败时刻、无疑点、已领单、窗口与卡相符才 confirmed；是拒审但证明不了 → suspected，
+ * 不撤单不换人。首次被拒换另一家族（审查单带豁免、开 epoch）；豁免单或同窗口同步骤已换过家族的再被拒 → manual，不做同模型重试。
+ * 写入不在这里：一律经 scheduler-only 台账子命令（scheduler.ts 只有只读句柄）。测试：tests/scheduler-refusal-pool.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
+import { stepOfStage } from "./lend-git.js";
 import { classifyModelOutcome, EXEMPTION_TEXT } from "./scheduler-model-outcome.js";
 import { informKey, refusalKind } from "./scheduler-model-wiring.js";
 
@@ -40,7 +36,8 @@ export interface PoolOrderFacts {
   /** 这一单是不是豁免审查单（派单时带了 EXEMPTION_TEXT） */
   exempt: boolean;
 }
-export interface CardNow { headSHA: string | null; specRev: number; round: number }
+/** 卡此刻：stage 用来认单是不是还在卡的当前步骤（build = write） */
+export interface CardNow { stage: string; headSHA: string | null; specRev: number; round: number }
 
 /** 出借方失败类别：provider_policy = 提供方策略拒审（cyber / usage_policy），usage = 额度，auth = 登录，network = 网络，other = 其余 */
 type LenderFailureCategory = "provider_policy" | "usage" | "auth" | "network" | "other";
@@ -71,6 +68,13 @@ export type PoolRecognition =
 const CLAIMED = new Set(["claimed", "started"]);
 const SETTLED = new Set(["done", "cancelled", "released", "acked", "stopped", "declined"]);
 
+/**
+ * 同 ledger-lend.ts cardMoved：写单的 head 是起点基线，卡在 build 还没有自己的 head，不比 head；审查 / 修复单从卡的 head 起，要比。
+ * 步骤 / specRev / 轮次一律要比——过期的写单靠这几条拦住。
+ */
+const cardMovedFrom = (o: PoolOrderFacts, c: CardNow): boolean =>
+  stepOfStage(c.stage) !== o.step || o.specRev !== c.specRev || o.round !== c.round || (o.step !== "write" && o.head !== c.headSHA);
+
 /** 验收线 1 / 5：全部证明了才 confirmed；是拒审但证明不了 → suspected；不是拒审 → none（照旧走现有路径） */
 export function recognizePoolRefusal(order: PoolOrderFacts, card: CardNow, f: LenderFailureFacts): PoolRecognition {
   if (f.category !== "provider_policy") return { kind: "none" };
@@ -79,7 +83,7 @@ export function recognizePoolRefusal(order: PoolOrderFacts, card: CardNow, f: Le
     : !CLAIMED.has(order.state) ? `单不在已领单状态（${order.state}）`
     : !f.sessionId || typeof f.failedAt !== "number" || !Number.isFinite(f.failedAt) ? "出借方声明缺会话或失败时刻"
     : f.doubt ? f.doubt
-    : order.head !== card.headSHA || order.specRev !== card.specRev || order.round !== card.round ? "head / specRev / 轮次和本单不符"
+    : cardMovedFrom(order, card) ? "head / specRev / 轮次和本单不符"
     : null;
   if (why) return { kind: "suspected", note: poolSuspectNote(why) };
   return { kind: "confirmed", refusal: refusalKind(f.message), message: f.message };
@@ -120,13 +124,20 @@ export type PoolDecision = { kind: "off" } | { kind: "plan"; mode: "on" | "obser
 const other = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 const STEP_LABEL: Record<PoolStep, string> = { review: "审查单", write: "写单", fix: "修复单" };
 
+/**
+ * 同窗口里同一步骤已有别的单换过家族 = 当前单就是那次换来的，再拒即第二次。只认同步骤：review→fix 不动 round / specRev / head，
+ * 审查的那次替换会和修复单落在同一窗口，不能算成修复已换过。
+ */
+const replacedBefore = (prior: readonly PriorPoolRefusal[], o: PoolOrderFacts): boolean =>
+  prior.some((p) => p.plan === "replace" && p.step === o.step && p.orderId !== o.orderId);
+
 /** 验收线 2–4、6：一次确认了的池单拒审的下一步。纯函数：不读库、不写库 */
 export function planPoolRefusal(f: PlanFacts): PoolDecision {
   if (f.mode === "off") return { kind: "off" };
   const o = f.order, key = informKey(o.taskId, f.confirmed.refusal);
   const inform = { key, first: !f.informed.has(key) };
   const label = STEP_LABEL[o.step];
-  const again = o.exempt ? "豁免审查单再被拒" : f.prior.some((p) => p.plan === "replace" && p.orderId !== o.orderId) ? `本窗口已换过一次家族的${label}再被拒` : null;
+  const again = o.exempt ? "豁免审查单再被拒" : replacedBefore(f.prior, o) ? `本窗口已换过一次家族的${label}再被拒` : null;
   const plan: Exclude<PoolPlan, { kind: "off" }> = again
     ? { kind: "manual", code: "model_safety_hold", notifyPm: true, inform,
         reason: `模型安全策略拒绝：${again}，不再换提供方、不做同模型重试，交 PM / owner 人工处置` }
