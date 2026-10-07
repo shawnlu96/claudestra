@@ -6,7 +6,7 @@
  * 升级前项目级 mode:on 不带上 lockYield（仍 observe）。
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { activityPath } from "../src/lib/agent-supervisor-activity.js";
 import { join, resolve } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -20,7 +20,13 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
+import { localAgents } from "../src/lib/scheduler-lock-yield-agents.js";
 import { lockYieldStep } from "../src/lib/scheduler-lock-yield-deps.js";
+import { lockYieldPolicy } from "../src/lib/scheduler-lock-yield-policy.js";
+import { readYieldFacts } from "../src/lib/scheduler-lock-yield-read.js";
+import { lockYieldWrite } from "../src/lib/scheduler-lock-yield-write.js";
+import { stallOf } from "../src/lib/scheduler-lock-yield.js";
+import { sessionJsonlPath } from "../src/lib/session-source.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -185,10 +191,10 @@ test("升级前项目级 mode:on、没有 lockYield 键 → 仍是 observe：只
 
 const OLD_AGENT = { runtime: "codex", transport: "acp", sessionId: "s-old", cwd: "/nonexistent/rlock2", status: "active" };
 /** agent-old 的 ACP 心跳：busy = 回合在跑；lastAt = 最近一次动静 */
-function heartbeat(busy: boolean, lastAt: number): void {
+function heartbeat(busy: boolean, lastAt: number, sessionId = "s-old"): void {
   const path = activityPath("agent-old");
   mkdirSync(join(path, ".."), { recursive: true });
-  writeFileSync(path, JSON.stringify({ v: 1, agent: "agent-old", sessionId: "s-old", hostPid: 1, busy, turnAt: lastAt, updateAt: lastAt, writtenAt: lastAt }));
+  writeFileSync(path, JSON.stringify({ v: 1, agent: "agent-old", sessionId, hostPid: 1, busy, turnAt: lastAt, updateAt: lastAt, writtenAt: lastAt }));
 }
 /** 跳过 tick、直接把一份「看着能让」的请求送进真实 CLI：写侧自己重核 */
 const forged = (s: Awaited<ReturnType<typeof setup>>, basis: "blocked" | "idle", since: number) =>
@@ -271,5 +277,51 @@ test("反例：冻结卡（extra.frozen）→ blocked 满 2 小时也不让；�
   const r = await forged(s, "blocked", since);
   expect(r).toMatchObject({ ok: false, code: "conflict" });
   expect(String(r.error)).toContain("冻结卡");
+  untouched(s);
+});
+
+/**
+ * 写事务前最后一道（activity-race）：生产 localAgents 已读完「agent-old 旧会话空闲 3 小时」，在进写事务前心跳变了（台账没有新事实）。
+ * 和 CLI 命令内部的窗口一样：localAgents 的 await / 读别的 agent 期间。直接调真实 lockYieldWrite（写库句柄），事务里要自己重读、看出变化就拒。
+ */
+for (const [name, change] of [
+  ["同一会话刚跑完一个短回合（busy=false、turnAt/updateAt=now）", () => heartbeat(false, Date.now())],
+  ["换了新会话、回合在跑（s-new busy=true）", () => heartbeat(true, Date.now() - 3 * HOUR, "s-new")],
+] as const) {
+  test(`反例（竞态）：重读之后、写事务之前 ${name} → 事务里重核拒，锁不变`, async () => {
+    const s = await setup("on", { stage: "fix", realAgents: true, registry: { agents: { "agent-old": OLD_AGENT } } });
+    heartbeat(false, Date.now() - 3 * HOUR);
+    const now = Date.now();
+    const fresh = await localAgents(s.f.db, now, 10 * MIN);
+    expect(fresh?.get("T0")).toMatchObject([{ name: "agent-old", recent: false }]);
+    const f = readYieldFacts(s.f.db, "p"), st = stallOf(f.cards.find((c) => c.id === "T0")!, f.held, fresh!.get("T0")!, now);
+    expect(st).toMatchObject({ kind: "stalled", basis: "idle" });
+    change();
+    const wire = { v: 1 as const, phase: "yield" as const, basis: "idle" as const, since: (st as { since: number }).since, resources: WIDE, recentMs: 10 * MIN };
+    expect(() => lockYieldWrite(s.f.db, { actor: "scheduler", now }, "T0", wire, lockYieldPolicy, fresh)).toThrow(/agent-old/);
+    untouched(s);
+  });
+}
+
+/** activity-unreadable：ACP 心跳文件在但读坏 → 不能退回旧会话文件的 mtime 判空闲 */
+test("反例：绑定 agent 的 ACP 心跳读坏（会话文件 3 小时前）→ 活动读不了，不让；伪造请求直送 CLI 也拒", async () => {
+  const agent = { ...OLD_AGENT, runtime: "claude-code", cwd: "/tmp/rlock2-cwd" };
+  const s = await setup("on", { stage: "fix", realAgents: true, registry: { agents: { "agent-old": agent } } });
+  const jsonl = sessionJsonlPath(agent.runtime, agent.cwd, agent.sessionId)!;
+  mkdirSync(join(jsonl, ".."), { recursive: true });
+  writeFileSync(jsonl, "{}\n");
+  const old = (Date.now() - 3 * HOUR) / 1000;
+  utimesSync(jsonl, old, old);
+  cleanup.push(() => rmSync(jsonl, { force: true }));
+  const path = activityPath("agent-old");
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, "{");
+  const fresh = await localAgents(s.f.db, Date.now(), 10 * MIN);
+  expect(fresh?.get("T0")?.[0]).toMatchObject({ name: "agent-old", unknown: expect.stringContaining("心跳") });
+  expect(await s.step()).toEqual([]);
+  expect(s.calls).toEqual([]);
+  const r = await forged(s, "idle", Date.now() - 3 * HOUR);
+  expect(r).toMatchObject({ ok: false, code: "conflict" });
+  expect(String(r.error)).toContain("活动读不了");
   untouched(s);
 });

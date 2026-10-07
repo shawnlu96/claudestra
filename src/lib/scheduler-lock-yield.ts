@@ -20,8 +20,11 @@ const RELOCK_STAGES: readonly string[] = ["build", "fix"];
 const FINISHED: readonly string[] = ["live", "verified", "done", "cancelled"];
 
 export interface YieldHeld { resource: string; taskId: string; intentId: string; acquiredAt: number; scope: string }
-/** 绑定到卡上的本机 agent：recent = LIFE1 的 recent 判定；lastAt = 最近一次活动时刻（读不到 = null）；sessionId 供写侧核 ACP 心跳 */
-export interface YieldAgent { name: string; recent: boolean; lastAt: number | null; sessionId?: string | null }
+/**
+ * 绑定到卡上的本机 agent：recent = LIFE1 的 recent 判定；lastAt = 最近一次活动时刻（读不到 = null）；sessionId 供写侧核 ACP 心跳；
+ * unknown = 活动数据在但读坏（不判）；sig = 读到的活动原料签名，写事务里重读比对
+ */
+export interface YieldAgent { name: string; recent: boolean; lastAt: number | null; sessionId?: string | null; unknown?: string; sig?: string }
 export interface YieldCard {
   id: string; project: string; stage: string; branch: string | null;
   /** null = tasks.extra 读不了 */
@@ -68,6 +71,8 @@ function idleStall(card: YieldCard, agents: readonly YieldAgent[] | null, mine: 
   if (card.liveIntents.length) return { kind: "skip", why: `有未结调度意图 ${card.liveIntents[0]}` };
   if (card.liveOrders.length) return { kind: "skip", why: `有活着的出借单 ${card.liveOrders[0]}` };
   if (agents === null) return { kind: "skip", why: "本机 agent 活动读不了" };
+  const bad = agents.find((a) => a.unknown);
+  if (bad) return { kind: "skip", why: `本机 agent 活动读不了（${bad.name} ${bad.unknown}）` };
   const busy = agents.find((a) => a.recent);
   if (busy) return { kind: "skip", why: `绑定的 ${busy.name} 有活动回合` };
   const since = maxOf([card.progressAt, card.intentAt, card.orderAt, ...agents.map((a) => a.lastAt), ...mine.map((h) => h.acquiredAt)]);
