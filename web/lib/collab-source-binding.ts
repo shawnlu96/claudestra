@@ -33,10 +33,11 @@ export function parseContext(body: unknown): ContextIdentity[] {
  * 同一中心 projectId 出现在多条绑定里：bridge 只凭 projectId 头选绑定会 409，按 ambiguous 停用（同 shared-projects-bindings.ts）。
  */
 export function resolveCollabSource(identities: readonly ContextIdentity[] | null, localProjectId: string, machine: string,
-  revoked: (key: string) => boolean = () => false): CollabSourceChoice {
+  revoked: (key: string) => boolean = () => false, lost: string | null = null): CollabSourceChoice {
   if (!identities) return { kind: "blocked", reason: "checking" };
   const bound = identities.filter((i) => (i.localProjectId ?? i.project) === localProjectId);
-  if (!bound.length) return { kind: "local" };
+  // 身份从 context 里消失（bridge 只列仍有读凭据的）而之前的中心 key 已确认 403：仍按撤权停用，不回退本机
+  if (!bound.length) return lost && revoked(lost) ? { kind: "blocked", reason: "revoked" } : { kind: "local" };
   const [b] = bound;
   if (bound.length > 1 || identities.filter((i) => i.project === b!.project).length > 1) return { kind: "blocked", reason: "ambiguous" };
   const identity: Identity = { machine, center: b!.center, team: b!.team, project: b!.project, person: b!.person, homeInstanceId: b!.homeInstanceId };
@@ -53,8 +54,23 @@ const defaultRequest: ContextRequest = (fp, signal) => api("/shared-ledger/conte
 /** 401/403/404：这台设备没有 / 读不了共享绑定 → 按未绑定走本机 */
 const unbound = (e: unknown) => e instanceof ApiError && [401, 403, 404].includes(e.status);
 
+/** 每个本机项目当前能打开的中心 key（ambiguous 的不算） */
+function centerKeys(identities: readonly ContextIdentity[] | null, fp: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const i of identities ?? []) {
+    const lp = i.localProjectId ?? i.project, r = resolveCollabSource(identities, lp, fp);
+    if (r.kind === "center") out.set(lp, r.key);
+  }
+  return out;
+}
+
 interface Store {
   state: BindingState;
+  /** 这台机器上出现过的中心 key；不在当前 context 里的 = 过期（改绑 / 解绑 / 停用），打开着就得关 */
+  seen: Set<string>;
+  stale: Set<string>;
+  /** 本机项目 → 身份消失前最后的中心 key（判断「撤权后身份被移除」用）；再次绑定或 context 401/403/404 时清掉 */
+  lost: Map<string, string>;
   subs: Set<() => void>;
   seq: number;
   inflight: AbortController | null;
@@ -73,12 +89,23 @@ export function setContextRequestForTest(next: ContextRequest | null): void {
 
 function storeOf(fp: string): Store {
   let s = stores.get(fp);
-  if (!s) stores.set(fp, (s = { state: { fp, identities: null, settled: false }, subs: new Set(), seq: 0, inflight: null, readAt: 0, stop: null }));
+  if (!s) stores.set(fp, (s = { state: { fp, identities: null, settled: false }, seen: new Set(), stale: new Set(), lost: new Map(), subs: new Set(), seq: 0, inflight: null, readAt: 0, stop: null }));
   return s;
 }
 
-function publish(s: Store, identities: ContextIdentity[] | null) {
-  s.state = { fp: s.state.fp, identities, settled: true };
+/** 过期 key 与撤权记忆在 store 里算，不随可折叠的入口组件卸载而丢 */
+function publish(s: Store, identities: ContextIdentity[] | null, forget = false) {
+  const fp = s.state.fp, prev = centerKeys(s.state.identities, fp), next = centerKeys(identities, fp);
+  for (const k of prev.values()) s.seen.add(k);
+  for (const k of next.values()) s.seen.add(k);
+  const live = new Set(next.values());
+  s.stale = new Set([...s.seen].filter((k) => !live.has(k)));
+  if (forget) s.lost.clear();
+  else if (identities) {
+    for (const [lp, key] of prev) if (!identities.some((i) => (i.localProjectId ?? i.project) === lp)) s.lost.set(lp, key);
+    for (const i of identities) s.lost.delete(i.localProjectId ?? i.project);
+  }
+  s.state = { fp, identities, settled: true };
   for (const cb of s.subs) cb();
 }
 
@@ -93,7 +120,7 @@ export function refreshBindings(fp: string): Promise<void> {
     (body) => { if (fresh()) { s.readAt = Date.now(); publish(s, parseContext(body)); } },
     (e) => {
       if (!fresh()) return;
-      if (unbound(e)) { s.readAt = Date.now(); return publish(s, []); }
+      if (unbound(e)) { s.readAt = Date.now(); return publish(s, [], true); }
       // 5xx / 网络错：成功过就保留上次解析结果，没成功过保持 checking，等下一轮
       console.warn(`[collab] 读共享绑定失败（${fp}）：${(e as Error).message}`);
       if (!s.state.settled) publish(s, null);
@@ -127,3 +154,7 @@ export function subscribeBindings(fp: string, cb: () => void): () => void {
 }
 
 export const bindingState = (fp: string): BindingState => storeOf(fp).state;
+/** 这台机器上已经不再对应任何当前绑定的中心 key */
+export const staleCenterKeys = (fp: string): ReadonlySet<string> => storeOf(fp).stale;
+/** 本机项目的身份已从 context 消失时，消失前最后的中心 key */
+export const lostCenterKey = (fp: string, localProjectId: string): string | null => storeOf(fp).lost.get(localProjectId) ?? null;

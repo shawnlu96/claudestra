@@ -316,7 +316,46 @@ for (const width of [1280, 390]) {
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     expect(centerHits().slice(before).every((l) => l.endsWith("[demo-c]"))).toBe(true);
   }, 90_000);
+
+  test(`${width}：中心 403 后 context 成功但不再列出该身份 → 仍『团队权限已失效』，不回退本机`, async () => {
+    reset({ centerStatus: 403 });
+    const { page } = await open(width);
+    const denied = page.waitForResponse((r) => r.url().includes("/shared-ledger/features") && r.status() === 403);
+    await entryOf(page, "claudestra").click();
+    await denied;
+    if (mobile) await page.evaluate("window.__systemBack()");
+    await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor({ timeout: 40_000 });
+    // 读凭据被移除：bridge 只列仍有读凭据的身份，context 200、identities 为空
+    world.context["mac-a"] = { status: 200, body: { identities: [] } };
+    const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
+    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    await refreshed;
+    await page.waitForFunction("document.body.dataset.open === ''");
+    await page.waitForTimeout(500); // 两个 context 读者（本 store / N5 列表）都落地
+    await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
+    expect(await entryOf(page, "claudestra").count()).toBe(0);
+    expect(ledgerHits("claudestra")).toEqual([]);
+  }, 120_000);
 }
+
+test("1280：打开它的项目组折叠期间改绑 A→B，旧视图照样关闭（其他项目组的入口仍订阅同一 store）", async () => {
+  reset();
+  world.center["demo-c"] = centerFixture("demo-c");
+  const { page } = await open(1280);
+  await entryOf(page, "claudestra").click();
+  await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
+  expect(await opened(page)).toBe(n5Key("mac-a"));
+  await group(page, "claudestra").locator("> button").click(); // 折叠：claudestra 的入口卸载
+  expect(await entryOf(page, "claudestra").count()).toBe(0);
+  world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a", { project: "demo-c" })] } };
+  const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await refreshed;
+  await page.waitForFunction("document.body.dataset.open === ''");
+  await group(page, "claudestra").locator("> button").click(); // 展开后新入口开 demo-c
+  await entryOf(page, "claudestra").click();
+  expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
+}, 60_000);
 
 test("390：移动端 菜单 → 入口 → 全屏视图 → 返回", async () => {
   reset();

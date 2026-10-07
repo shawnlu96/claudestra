@@ -4,9 +4,10 @@
  * 未绑定 / 个人项目 → 原样的本机 CollabEntry；已绑定 → 同一行、同一标签，打开中心 key（与侧栏 N5 列表同字节），不探本机台账；
  * 绑定不可区分 / 还没核对上 / 中心 403 → 一行禁用说明，不回退本机。
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { machines } from "@/lib/machines";
-import { bindingState, resolveCollabSource, subscribeBindings, type BindingState, type BlockedReason } from "@/lib/collab-source-binding";
+import { bindingState, lostCenterKey, resolveCollabSource, staleCenterKeys, subscribeBindings, type BindingState,
+  type BlockedReason } from "@/lib/collab-source-binding";
 import { CollabEntry } from "./collab-entry";
 import { setLedgerAccess, useLedgerAccess } from "./collab-cache";
 import { closeCollab, useCollabNav } from "./collab-nav";
@@ -36,24 +37,24 @@ export function UnifiedCollabEntry({ projectId }: { projectId: string }) {
 
 function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
   const t = useCollabT();
-  const { identities, settled } = useCollabBindings(fp);
+  const state = useCollabBindings(fp);
+  const { identities, settled } = state;
   const base = resolveCollabSource(identities, projectId, fp);
   const key = base.kind === "center" ? base.key : null;
-  const access = useLedgerAccess(key ?? projectId);
-  const choice = key ? resolveCollabSource(identities, projectId, fp, (k) => k === key && access === "no") : base;
+  // 身份已不在 context 里：看消失前的中心 key 是否已确认 403（撤权 ≠ 解绑）
+  const lost = base.kind === "local" ? lostCenterKey(fp, projectId) : null;
+  const access = useLedgerAccess(key ?? lost ?? projectId);
+  const choice = key || lost ? resolveCollabSource(identities, projectId, fp, (k) => k === (key ?? lost) && access === "no", lost) : base;
   const open = useCollabNav().project;
   // context 已证明有读凭据：预置可读，CollabEntry 就不会去探 `/ledger/<中心 key>`
   useLayoutEffect(() => {
     if (key && access === "unknown") setLedgerAccess(key, "yes");
   }, [key, access]);
-  // 绑定变了（A→B / 解绑 / 停用）而打开着的还是旧 key：关掉，旧视图的迟到回包随组件卸载作废
-  const prev = useRef(key);
+  // 打开着的中心 key 已不对应当前绑定（A→B / 解绑 / 停用）：关掉，旧视图的迟到回包随组件卸载作废。
+  // 过期集合在 store 里算，这台机器上任何一个挂着的入口都会核对——打开它的那个项目组折叠了也照关
   useEffect(() => {
-    const old = prev.current;
-    if (old === key) return;
-    prev.current = key;
-    if (old && open === old) closeCollab();
-  }, [key, open]);
+    if (open && staleCenterKeys(fp).has(open)) closeCollab();
+  }, [fp, open, state]);
   if (choice.kind === "local") return <CollabEntry projectId={projectId} />;
   if (choice.kind === "blocked") {
     if (!settled) return null;
