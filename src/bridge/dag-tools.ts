@@ -33,6 +33,7 @@ import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { writeTextAtomicSync } from "../lib/state-file.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
+import { proposeBoundFeature } from "./local-api/shared-feature-proposals.js";
 
 /** 注入点：bridge 用真实的（liveDeps），测试换成进程内的台账与假 IO */
 export interface DagToolDeps {
@@ -130,6 +131,7 @@ async function planNew(deps: DagToolDeps, db: Database, call: VerifiedCall, slug
   if (!project) return refuse("invalid", "认不出你所在的项目：带 project");
   const denied = gate(db, call, project);
   if (denied) return denied;
+  const proposed = await proposeBoundFeature(call, project, title, nodes, a); if (proposed) return proposed; // 已绑定团队项目：只交中心提案，不写本机台账（N7B）
   const bad = precheck(db, { id: slug, project }, nodes);
   if (bad) return bad;
   const words = typeof a.ownerWords === "string" ? a.ownerWords : "";
