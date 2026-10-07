@@ -104,7 +104,9 @@ export async function probeNpmCodexCompat(version: string, shell: Shell, base?: 
 }
 
 type Log = (m: string) => void;
-const consoleLog: Log = (m) => (m.startsWith("⚠️") ? console.warn(m) : console.log(m));
+// 只走 stderr：readiness 跑在 manager create / update / doctor 里，它们的 stdout 只放 JSON（调度器整体 JSON.parse）。
+// 宿主传自己的 log（acp-host.ts → pickCodexAdapter），host.log 不受影响。见 tests/codex-compat.test.ts「诊断行只走 stderr」
+const consoleLog: Log = (m) => console.error(m);
 
 /**
  * 选了自研时用不用它：兼容才用，组合身份打进日志。不兼容和判不出（unknown）一样不用、退回上游——和更新闸遇到 unknown 回 409
