@@ -7,14 +7,16 @@
  *   bun scripts/scheduler-memory-probe.ts snapshot --to DIR [--from STATE_DIR (default: the production state dir, read only)]
  *   bun scripts/scheduler-memory-probe.ts run --state DIR [--root CHECKOUT] [--rounds 100] [--steps all|view,lifecycle,...] [--limit-mb 5]
  *
+ * snapshot creates DIR 0700 (an existing DIR must be an empty 0700 dir of this user), writes every copy 0600 and refuses a
+ * symlinked target path: the copies hold the whole private ledger and lend journal.
  * Each step prints one JSON line: WebKit malloc and phys footprint before / after `rounds` passes (after forced GC), the
  * JS heap size, and pass = growth < limit. Steps: see STEPS below. --root picks the checkout whose src/ is imported, so the
  * same snapshot can be replayed against the base and the fix.
  */
 import { Database } from "bun:sqlite";
-import { copyFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stateDirIn } from "../src/lib/state-dir.ts";
 
@@ -26,20 +28,61 @@ function arg(name: string, fallback?: string): string | undefined {
   return i > 0 ? process.argv[i + 1] : fallback;
 }
 
-/** Copies only what the read paths need; sqlite files go through a read-only connection's serialize (never opened read-write). */
-function snapshot(from: string, to: string): void {
-  mkdirSync(join(to, "lend"), { recursive: true });
-  mkdirSync(join(to, "run"), { recursive: true });
-  for (const f of ["registry.json", "scheduler.json", "projects.json"]) if (existsSync(join(from, f))) copyFileSync(join(from, f), join(to, f));
-  for (const d of ["acp-activity", join("lend", "claude-config")]) if (existsSync(join(from, d))) cpSync(join(from, d), join(to, d), { recursive: true });
+/**
+ * A symlink anywhere on the target path could redirect the private copy; only root-owned links (macOS /var, /tmp → /private/…)
+ * are system layout, not something another user can plant.
+ */
+function refuseSymlinks(p: string): void {
+  for (let cur = resolve(p); ; cur = dirname(cur)) {
+    const st = lstatSync(cur, { throwIfNoEntry: false });
+    if (st?.isSymbolicLink() && st.uid !== 0) throw new Error(`snapshot target path has a symlink: ${cur}`);
+    if (cur === dirname(cur)) return;
+  }
+}
+
+/** A new 0700 dir; an existing one is accepted only if it is ours, private and empty (else something else could read or plant files) */
+function privateDir(p: string): void {
+  try { mkdirSync(p, { mode: 0o700 }); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    const st = lstatSync(p);
+    if (!st.isDirectory() || st.uid !== process.getuid!() || (st.mode & 0o077) !== 0 || readdirSync(p).length)
+      throw new Error(`snapshot target exists and is not an empty private directory of this user: ${p}`);
+  }
+  chmodSync(p, 0o700); // mkdir's mode is masked by umask; this makes the bit pattern exact either way
+}
+
+/** Copied files 0600, dirs 0700; symlinks in the source are skipped (chmod would follow them back into the source) */
+function copyPrivate(src: string, dst: string): void {
+  const st = lstatSync(src);
+  if (st.isSymbolicLink()) return;
+  if (st.isDirectory()) {
+    privateDir(dst);
+    for (const name of readdirSync(src)) copyPrivate(join(src, name), join(dst, name));
+  } else if (st.isFile()) {
+    copyFileSync(src, dst, constants.COPYFILE_EXCL);
+    chmodSync(dst, 0o600);
+  }
+}
+
+/**
+ * Copies only what the read paths need, private to this user (the ledger and journal hold the whole private ledger, not just
+ * scheduler facts: whole-file copies keep the replay faithful to every table the steps read). sqlite files go through a
+ * read-only connection's serialize, so the source is never opened read-write.
+ */
+export function snapshot(from: string, to: string): void {
+  refuseSymlinks(to);
+  privateDir(to);
+  for (const d of ["lend", "run"]) privateDir(join(to, d));
+  for (const f of ["registry.json", "scheduler.json", "projects.json", "acp-activity", join("lend", "claude-config")])
+    if (existsSync(join(from, f))) copyPrivate(join(from, f), join(to, f));
   for (const f of ["ledger.sqlite", join("lend", "journal.sqlite")]) {
     if (!existsSync(join(from, f))) continue;
     const db = new Database(join(from, f), { readonly: true });
-    try { writeFileSync(join(to, f), db.serialize()); } finally { db.close(); }
+    try { writeFileSync(join(to, f), db.serialize(), { mode: 0o600, flag: "wx" }); } finally { db.close(); }
+    chmodSync(join(to, f), 0o600);
     const copy = new Database(join(to, f)); // the copy only: a WAL header would make the child's read-only open need a -shm file
     try { copy.run("PRAGMA journal_mode = DELETE"); } finally { copy.close(); }
   }
-  console.log(JSON.stringify({ ok: true, snapshot: to }));
 }
 
 /** macOS footprint(1): total phys footprint and the WebKit malloc dirty size, in MB */
@@ -91,7 +134,11 @@ async function child(root: string, step: Step, rounds: number, limitMb: number):
 
 async function main(): Promise<void> {
   const cmd = process.argv[2];
-  if (cmd === "snapshot") return snapshot(resolve(arg("from", stateDirIn(homedir()))!), resolve(arg("to")!));
+  if (cmd === "snapshot") {
+    const to = resolve(arg("to")!);
+    snapshot(resolve(arg("from", stateDirIn(homedir()))!), to);
+    return console.log(JSON.stringify({ ok: true, snapshot: to }));
+  }
   if (cmd === "child") return child(arg("root")!, arg("step") as Step, Number(arg("rounds")), Number(arg("limit-mb")));
   if (cmd !== "run") throw new Error("usage: snapshot --to DIR | run --state DIR [--root CHECKOUT] [--rounds 100] [--steps all|a,b] [--limit-mb 5]");
   if (process.platform !== "darwin") throw new Error("macOS only (footprint)");
