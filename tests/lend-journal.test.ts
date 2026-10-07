@@ -1,14 +1,39 @@
 /** T94 出借 journal 状态机 + 收据（src/lib/lend-journal.ts、lend-receipts.ts） */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   advance, canMove, getOrder, isTerminal, JournalConflict, LIVE_STATES, liveOrders, localDay, openLendJournal, openSlots, ordersToday, patchOrder, recordAsked, unsettledOrders,
+  withReadOnlyLendJournal,
 } from "../src/lib/lend-journal.js";
 import { appendReceipt, receiptOf } from "../src/lib/lend-receipts.js";
 
 const NOW = new Date(2026, 8, 30, 12, 0, 0).getTime();
+
+test("readonly journal observes without creation, schema upgrades or leaked connections", () => {
+  const root = mkdtempSync(join(tmpdir(), "lend-readonly-")), path = join(root, "absent", "journal.sqlite");
+  const oldPath = join(root, "old.sqlite");
+  let captured: Database | undefined;
+  try {
+    expect(withReadOnlyLendJournal((db) => db, path)).toBeUndefined();
+    expect(existsSync(join(root, "absent"))).toBe(false);
+    const old = new Database(oldPath);
+    old.exec("CREATE TABLE lend_orders(agent TEXT); INSERT INTO lend_orders VALUES ('fixture'); PRAGMA user_version = 7");
+    old.close();
+    const before = readFileSync(oldPath);
+    withReadOnlyLendJournal((db) => {
+      expect(db!.query("SELECT agent FROM lend_orders").get()).toEqual({ agent: "fixture" });
+      expect(() => db!.exec("INSERT INTO lend_orders VALUES ('bad')")).toThrow();
+      expect(() => db!.query("SELECT sessionId FROM lend_orders").all()).toThrow();
+    }, oldPath);
+    expect(readFileSync(oldPath)).toEqual(before);
+    expect(() => withReadOnlyLendJournal((db) => { captured = db; throw new Error("callback failure"); }, oldPath)).toThrow("callback failure");
+    expect(() => captured!.query("SELECT agent FROM lend_orders").all()).toThrow();
+    expect(readFileSync(oldPath)).toEqual(before);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 const preview = { taskId: "T93", step: "review", repo: "shawnlu96/claudestra", pr: 270, head: "a".repeat(40) };
 const ask = (db: ReturnType<typeof openLendJournal>, orderId = "o1", peer = "team-a") =>
   recordAsked(db, { orderId, peer, fp: null, family: "codex", preview }, NOW).row;

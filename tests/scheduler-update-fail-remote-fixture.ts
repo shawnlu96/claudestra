@@ -62,8 +62,11 @@ export interface ChildRun {
 
 const count = (text: string, re: RegExp) => Number(re.exec(text)?.[1] ?? -1);
 
-/** 父进程侧：起一个私有子进程跑原入口里的一条原用例，await 退出后删临时根；不在这里判对错 */
-export async function runChild(mode: Mode, hook: Hook | null = null): Promise<ChildRun> {
+/**
+ * 父进程侧：起一个私有子进程跑原入口里的一条原用例，await 退出后删临时根；不在这里判对错。
+ * parentState：父入口专用的「父进程 STATE」，放进 env -i 启动器的外层 env——子进程要泄漏只能从这里继承，父入口跑完核它仍为空
+ */
+export async function runChild(mode: Mode, hook: Hook | null = null, parentState?: string): Promise<ChildRun> {
   const root = mkdtempSync(join(tmpdir(), "updtest-child-"));
   const dirs = Object.fromEntries(["home", "config", "state", "runtime", "tmp"].map((name) => [name, join(root, name)]));
   for (const dir of Object.values(dirs)) mkdirSync(dir);
@@ -74,7 +77,7 @@ export async function runChild(mode: Mode, hook: Hook | null = null): Promise<Ch
     GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0", [MODE_ENV]: mode, ...(hook ? { [HOOK_ENV]: hook } : {}),
   });
   const child = Bun.spawn(["env", "-i", ...Object.entries(env).map(([k, v]) => `${k}=${v}`), process.execPath, "--no-env-file", "test", ENTRY], {
-    cwd: join(import.meta.dir, ".."), env: testChildEnv(), stdout: "pipe", stderr: "pipe",
+    cwd: join(import.meta.dir, ".."), env: testChildEnv({ CLAUDESTRA_STATE_DIR: parentState }), stdout: "pipe", stderr: "pipe",
   });
   let out = "", err = "", code: number | null = null;
   try {

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testChildEnv } from "./test-env.js";
@@ -90,6 +90,32 @@ async function command(dir: string, args: string[]) {
   expect(await proc.exited).toBe(0);
   if (error) throw new Error(error);
   return JSON.parse(output);
+}
+
+for (const legacy of [false, true]) {
+  for (const target of ["personal", "umbrella", "umbrella-alias"]) {
+    test(`add-personal-bound: project-add rejects ${legacy ? "legacy" : "dangling"} binding to ${target} before writes`, async () => {
+      const dir = world("target"), id = legacy ? "shared" : "target";
+      writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: [] }));
+      writeFileSync(join(dir, "shared-ledger-bindings.json"), JSON.stringify([
+        { centerId: "center", teamId: "team", projectId: "shared", ...(legacy ? {} : { localProjectId: id }) }]), { mode: 0o600 });
+      writeFileSync(join(dir, "shared-ledger-credentials.json"), "synthetic credential bytes", { mode: 0o600 });
+      const alias = join(dir, "root-alias");
+      symlinkSync("/", alias);
+      const args = ["project-add", id, "--dirs", target === "personal" ? join(dir, "source") : target === "umbrella" ? "/" : alias];
+      if (target === "personal") args.push("--personal", "on");
+      const before = snapshot(dir), credentials = readFileSync(join(dir, "shared-ledger-credentials.json"));
+      expect(await command(dir, args)).toMatchObject({ ok: false, error: expect.stringContaining("已绑定共享项目") });
+      expect(snapshot(dir)).toEqual(before);
+      expect(readFileSync(join(dir, "shared-ledger-credentials.json"))).toEqual(credentials);
+      // Ordinary recovery of the missing project stays possible without changing its binding.
+      expect((await command(dir, ["project-add", id, "--dirs", join(dir, "source")])).ok).toBe(true);
+      expect(readFileSync(join(dir, "shared-ledger-bindings.json"), "utf8")).toBe(before[2]!);
+      writeFileSync(join(dir, "projects.json"), JSON.stringify({ projects: [] }));
+      writeFileSync(join(dir, "shared-ledger-bindings.json"), "[]", { mode: 0o600 });
+      expect((await command(dir, args)).ok).toBe(true);
+    });
+  }
 }
 
 test("bound edit to personal or umbrella and bound remove are rejected before any file write", async () => {

@@ -3,14 +3,15 @@ import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import {
   parseV2ProjectCaller, parseV2ProjectsRequest, parseV2ProjectsResponse,
   type V2ProjectOperation, type V2ProjectRecord, type V2ProjectsEndpoint, type V2ProjectsExpectedScope,
-  type V2ProjectsRequests, type V2ProjectsSuccesses,
+  type V2ProjectsOperationConflict, type V2ProjectsProjectConflict, type V2ProjectsRequests, type V2ProjectsSuccesses,
 } from "./shared-ledger-contract-v2-projects.js";
 import {
   requestSharedLedger, SharedLedgerRemoteError, SharedLedgerUnavailable, type SharedLedgerTransportOptions,
 } from "./shared-ledger-client-transport.js";
 
-/** Selection metadata only. N2/N4 must resolve this credential under their verified local caller context;
- * neither these tags nor the public caller DTO authenticate a person. The center verifies bearer and signature.
+/** Selection metadata only. N4 must authenticate the local Principal and use resolveSharedLedgerCredential
+ * for its original approved person binding before constructing this client. These tags and the public caller
+ * DTO do not authenticate a person; the center verifies bearer and signature.
  */
 export interface SharedLedgerProjectOwner extends SharedLedgerConnection { localSubject: "owner:self"; kind: "person" }
 export type SharedLedgerProjectsProtocol = Pick<typeof import("./shared-ledger-contract-v2-projects.js"),
@@ -22,13 +23,23 @@ export interface SharedLedgerProjectsOptions<P extends SharedLedgerProjectsProto
   /** Explicit opt-in to the fixed public producer, never a replacement codec or a declaration of verified identity. */
   projectsProtocol?: P;
 }
-/** Only producer-validated public records survive a conflict; no raw error envelope or invitation is retained. */
+export type SharedLedgerProjectConflictKind = "conflict" | "dedup_mismatch";
+/** Only producer-validated public records and the producer's fixed error enum survive a conflict; no raw error
+ * envelope, message, bearer or invitation is retained. `kind` is only a hint for N4: a `conflict` is a CAS race that
+ * may be recovered with the originally approved parameters, while `dedup_mismatch` means the operationId was already
+ * used with different parameters and must not be retried. This client never retries either; N4 still owns the
+ * owner, instance and original approval checks before any recovery.
+ */
 export class SharedLedgerProjectConflict<T extends V2ProjectRecord | V2ProjectOperation = V2ProjectRecord | V2ProjectOperation>
   extends SharedLedgerRemoteError {
+  declare readonly kind: SharedLedgerProjectConflictKind;
   declare readonly current: T;
-  constructor(current: T) {
+  constructor(conflict: V2ProjectsProjectConflict | V2ProjectsOperationConflict) {
     super(409, { error: "shared ledger rejected" });
-    Object.defineProperty(this, "current", { value: current, enumerable: false });
+    const kind = conflict.error;
+    if (kind !== "conflict" && kind !== "dedup_mismatch") throw new SharedLedgerRemoteError(409, { error: "shared ledger rejected" });
+    Object.defineProperty(this, "kind", { value: kind, enumerable: false });
+    Object.defineProperty(this, "current", { value: conflict.current, enumerable: false });
   }
 }
 
@@ -77,7 +88,7 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
         let parsed;
         try { parsed = parseV2ProjectsResponse(endpoint, status, await response.json(), expected); }
         catch { return { error: "shared ledger rejected" }; } // Malformed conflicts still reject as 409, without raw bodies or parser text.
-        if (!parsed.ok && "current" in parsed) throw new SharedLedgerProjectConflict(parsed.current);
+        if (!parsed.ok && "current" in parsed) throw new SharedLedgerProjectConflict(parsed);
       }
       return { error: "shared ledger rejected" };
     };

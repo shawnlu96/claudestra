@@ -17,12 +17,12 @@
  * Codex 上下文(特性,不是 bug:多 agent 问同一个「PM」)。
  */
 
-import { existsSync, readFileSync, rmSync } from "fs";
+import { existsSync, readFileSync, realpathSync, rmSync, statSync } from "fs";
 import { spawn } from "child_process";
 import { statePath } from "./paths.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 import { tmpdir } from "os";
-import { join } from "path";
+import { isAbsolute, join, relative, sep } from "path";
 import { sandboxDisabled } from "./sandbox.js";
 
 /** 沙箱白名单:read-only 缺省(纯问答/审阅);workspace-write 让它真改 cwd 里的
@@ -31,14 +31,38 @@ import { sandboxDisabled } from "./sandbox.js";
 export const CODEX_SANDBOXES = ["read-only", "workspace-write"] as const;
 export type CodexSandbox = (typeof CODEX_SANDBOXES)[number];
 
-const DEFAULT_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const APP_RESOURCES = "/Applications/ChatGPT.app/Contents/Resources";
 export const CODEX_TIMEOUT_MS = 12 * 60 * 1000; // 单轮上限;channel-server 侧给 15min
+
+function isInside(root: string, p: string): boolean {
+  const rel = relative(root, p);
+  return !!rel && !isAbsolute(rel) && rel.split(sep)[0] !== "..";
+}
+
+/**
+ * ChatGPT.app 自带的 codex。新版把 CLI 放进 codex-cli/，入口写在 codex-package.json 的 entrypoint（现为 bin/codex）；
+ * 旧版是 Resources/codex。只认旧路径的话，App 一更新 ask_codex 就全部报「Codex CLI 不存在」（tests/codex-bin.test.ts）。
+ */
+export function appCodexBin(resources = APP_RESOURCES): string | null {
+  const dir = join(resources, "codex-cli");
+  try {
+    const entry = JSON.parse(readFileSync(join(dir, "codex-package.json"), "utf8"))?.entrypoint;
+    // 只认落在 codex-cli 之内的普通文件：字面路径与 realpath 都要在根内——只查后者的话 "../x" 经根外链接绕回也能过
+    if (typeof entry === "string" && entry && !isAbsolute(entry)) {
+      const bin = join(dir, entry);
+      if (isInside(dir, bin) && isInside(realpathSync(dir), realpathSync(bin)) && statSync(bin).isFile()) return bin;
+    }
+  } catch {
+    // 没有新布局（清单读不了 / 入口不存在）：退回旧路径，两个都没有才算没装
+  }
+  const legacy = join(resources, "codex");
+  return existsSync(legacy) ? legacy : null;
+}
 
 export function findCodexBin(): string | null {
   const env = process.env.CODEX_BIN;
   if (env && existsSync(env)) return env;
-  if (existsSync(DEFAULT_BIN)) return DEFAULT_BIN;
-  return null;
+  return appCodexBin();
 }
 
 /* ── 命名线程注册表 ─────────────────────────────────────────────── */

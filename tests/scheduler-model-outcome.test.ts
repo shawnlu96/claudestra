@@ -192,6 +192,8 @@ describe("dispatch-recovery-MODEL outranks the automatic family switch (real tic
       resolveSafetyHold(f.db, f.at("pm"), { taskId: "T1", text: "PM 已人工改写规格，放行换审" });
       f.db.run("UPDATE task_workflows SET mode = 'auto' WHERE taskId = 'T1'"); // PM hands the card back to the scheduler
       expect(plan()).toMatchObject({ kind: "intent", action: "review_swap" });
+      f.reader.close();
+      Bun.gc(true); // sqlite3_close_v2 keeps the WAL connection until uncached prepare statements are collected.
       f.db.run("PRAGMA journal_mode = DELETE");
       const db = Database.deserialize(f.db.serialize());
       try {

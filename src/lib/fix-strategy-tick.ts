@@ -5,12 +5,23 @@ import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { listEvents } from "./ledger-store.js";
 import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import { arbiterBinding, arbiterOrder } from "./review-arbiter-runtime.js";
+type Notice = (db: Database, deps: AutoTickDeps, key: string, pending?: { task: LedgerTask; text: string; informed?: () => Promise<void> }) => Promise<boolean>;
 
 export async function driveConvergence(card: { db: Database; task: LedgerTask; deps: AutoTickDeps; opts: import("./scheduler-snapshot.js").SnapshotOpts },
-  intent: SchedulerIntent): Promise<{ taskId: string; step: string; detail: string } | null> {
+  intent: SchedulerIntent, notice: Notice): Promise<{ taskId: string; step: string; detail: string } | null> {
   if (intent.action !== "fix_swap" && intent.action !== "arbitrate") return null;
   const out = (step: string, detail: string) => ({ taskId: card.task.id, step, detail });
   const result = await card.deps.manager("ledger", "scheduler-convergence", intent.id, "--max-workers", String(card.opts.maxWorkers));
+  if (result.ok !== true && result.code === "too_large") {
+    const text = `收敛单缩短后仍超限：specRev ${intent.specRev}，第 ${card.task.round} 轮；PM 核对后手工接续`;
+    const args = ["ledger", "scheduler-plan-rejected", card.task.id, "--code", "too_large", "--text", text];
+    const rec = await card.deps.manager(...args);
+    if (rec.ok !== true) return out("held", `超限报警写入失败，下个 tick 重试：${String(rec.error)}`);
+    // Delivery and receipt are separate: a crash between them may resend; without a receipt, restart must retry.
+    if (rec.informed !== true) await notice(card.db, card.deps, `${card.task.id}\ntoo_large\n${text}`,
+      { task: card.task, text: `[调度引擎] ${card.task.id} ${text}。${String(result.error)}`,
+        informed: async () => { if ((await card.deps.manager(...args, "--informed")).ok !== true) throw new Error("超限通知回执写入失败，下个 tick 重试"); } });
+  }
   if (result.ok !== true) return out("held", String(result.error));
   if (intent.action === "fix_swap" || result.step !== "ready") return out(String(result.step), String(result.detail));
   const last = listEvents(card.db, { project: card.task.project, target: card.task.id }).findLast((e) => e.data.op === "arbiter_delivery" && e.data.intentId === intent.id);

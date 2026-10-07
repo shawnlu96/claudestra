@@ -1,6 +1,6 @@
 "use client";
 import { AgentTitle } from "./agent-title";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { closingCollab, CollabSwitch } from "@/features/collab/collab-switch";
 import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store";
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
@@ -28,6 +28,7 @@ import { leavePlan } from "@/lib/hash-nav";
 import { backGuard, isNarrow, stripHash } from "@/lib/hash-nav-browser";
 import { useBackSwipe } from "@/lib/use-back-swipe";
 import { asksStore } from "@/features/asks/asks-store";
+import { QuotaWarningSlot } from "@/features/lend/quota-warning-slot";
 
 /** 壳内排障打点 → /api/client-log(仅原生壳;PWA/桌面不发)。 */
 const shellLog = (msg: string) => postClientLog(`[shell] ${msg}`);
@@ -165,13 +166,13 @@ function TopBar() {
     else setShowManage(false);
   };
   return (
-    // 安全区顶部由面板自己垫（bg=base-100，条带与内容同色无缝）。@container：右侧操作组按顶栏
+    // 安全区由通知插槽或面板顶栏择一垫（bg=base-100，条带与内容同色无缝）。@container：右侧操作组按顶栏
     // 自身宽度折叠（topbar-actions.tsx）；部分浏览器的 container-type 带 layout containment，header
     // 会自成层叠上下文，里面弹出面板/下拉的 z 就只在 header 内比——所以显式 z-40：高于消息区的
     // sticky(z-10)、分享勾选(z-20)、同步横幅(z-30)，低于启动页(z-60)
     <header
       className="@container relative z-40 flex min-h-12 shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-3 sm:px-4"
-      style={{ paddingTop: "env(safe-area-inset-top)" }}
+      style={{ paddingTop: "var(--cstra-quota-pane-safe-top, env(safe-area-inset-top))" }}
     >
       {/* 移动端：返回会话列表（走 history.back 触发系统返回同款滑动）。桌面端双栏，隐藏 */}
       <button
@@ -235,7 +236,7 @@ function ChatMain() {
   );
 }
 
-function ChatInner() {
+function ChatInner({ notices }: { notices?: ReactNode }) {
   const store = useChatStoreApi();
   const agents = useChatStore((s) => s.state.agents);
   const activeAgent = useChatStore((s) => s.state.activeAgent);
@@ -584,8 +585,9 @@ function ChatInner() {
         onTouchStart={swipe.onTouchStart}
         onTouchEnd={swipe.onTouchEnd}
       >
-        {/* 内容层:两种模式都是铺满根的 flex 行(kb 钉扎已随 flow 模式废弃) */}
-        <div className="absolute inset-0 flex overflow-hidden">
+        {/* 额度通知在横滑区与聊天错误边界之外占位，列表/协作/兜底页也能看到同一份。 */}
+        <div className="absolute inset-0 flex flex-col overflow-hidden">
+        <QuotaWarningSlot>{notices}</QuotaWarningSlot>
         {/* 横滑容器：移动端 sidebar + main 各 w-full 并排溢出，showContent 时整体 -100% 切到内容；
             桌面端（sm+）sidebar 定宽 + main flex-1 双栏并存，位移恒 0。
             ⚠ transform 只在动画的 300ms 内出现,停稳态用 relative+left——常驻
@@ -627,10 +629,10 @@ function ChatInner() {
   );
 }
 
-export function Chat() {
+export function Chat({ notices }: { notices?: ReactNode }) {
   return (
     <ChatStoreProvider>
-      <ChatInner />
+      <ChatInner notices={notices} />
       <DevToolsMount />
     </ChatStoreProvider>
   );

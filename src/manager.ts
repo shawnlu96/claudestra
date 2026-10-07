@@ -2345,7 +2345,7 @@ switch (cmd) {
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
-  case "transport": case "acp-install": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // T60 ACP：切 transport / 装适配器
+  case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {

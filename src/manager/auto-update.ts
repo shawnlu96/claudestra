@@ -14,7 +14,7 @@ export async function cmdAutoUpdate(sub: string, ...rest: string[]) {
     output({
       ok: true,
       autoUpdate: cfg.autoUpdate,
-      message: `Claudestra: ${cfg.autoUpdate.claudestra ? "on" : "off"} · Claude Code: ${cfg.autoUpdate.claudeCode ? "on" : "off"} · 通道: ${chan}`,
+      message: `Claudestra: ${cfg.autoUpdate.claudestra ? "on" : "off"} · Claude Code: ${cfg.autoUpdate.claudeCode ? "on" : "off"} · Codex: ${cfg.autoUpdate.codex ? "on" : "off"} · 通道: ${chan}`,
     });
     return;
   }
@@ -37,14 +37,15 @@ export async function cmdAutoUpdate(sub: string, ...rest: string[]) {
     return;
   }
 
-  // auto-update claudestra on|off  |  auto-update claude on|off
-  const targetAlias: Record<string, "claudestra" | "claudeCode"> = {
+  // auto-update claudestra on|off  |  auto-update claude on|off  |  auto-update codex on|off
+  const targetAlias: Record<string, "claudestra" | "claudeCode" | "codex"> = {
     claudestra: "claudestra",
     self: "claudestra",
     claude: "claudeCode",
     "claude-code": "claudeCode",
     claudecode: "claudeCode",
     cc: "claudeCode",
+    codex: "codex",
   };
   const target = targetAlias[sub.toLowerCase()];
   const state = rest[0]?.toLowerCase();
@@ -52,7 +53,7 @@ export async function cmdAutoUpdate(sub: string, ...rest: string[]) {
   if (!target || (state !== "on" && state !== "off")) {
     output({
       ok: false,
-      error: `usage: auto-update <claudestra|claude> <on|off>  |  auto-update status`,
+      error: `usage: auto-update <claudestra|claude|codex> <on|off>  |  auto-update status`,
     });
     return;
   }
