@@ -75,17 +75,24 @@ async function setup(o: Opts = {}) {
   const singletonPath = join(f.dir, "singleton.lock"), maintenancePath = join(f.dir, "maintenance.lock");
   const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
   cleanup.push(() => { singleton.release(); maintenance.release(); });
-  const home = join(f.dir, "home"), tmp = join(f.dir, "tmp"), runtime = join(f.dir, "runtime");
-  for (const d of [home, tmp, runtime]) mkdirSync(d);
-  const env = testChildEnv({ HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
+  // TMPDIR 继承父进程：子进程的隔离闸按它认临时根，换成更深的目录时父进程的 STATE_DIR 不在其下，会被重定向到空台账
+  const home = join(f.dir, "home"), runtime = join(f.dir, "runtime");
+  for (const d of [home, runtime]) mkdirSync(d);
+  const env = testChildEnv({ HOME: home, CLAUDESTRA_STATE_DIR: STATE_DIR, CLAUDESTRA_RUNTIME_DIR: runtime, CLAUDESTRA_TEST: "1",
     CLAUDESTRA_SCHEDULER_SERVICE: "1", CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token },
       maintenance: { path: maintenancePath, token: maintenance.token } }) });
+  // 子进程按这份 env 求出的有效状态目录必须就是父进程放台账的 STATE_DIR
+  const probe = Bun.spawnSync([process.execPath, "--no-env-file", "-e", `console.log((await import(${JSON.stringify(resolve("src/lib/paths.ts"))})).STATE_DIR)`],
+    { env, stdout: "pipe", stderr: "pipe" });
+  expect({ dir: probe.stdout.toString().trim(), err: probe.stderr.toString() }).toEqual({ dir: STATE_DIR, err: "" });
   const calls: string[] = [];
   const child: AutoTickDeps["manager"] = async (...args) => {
     calls.push(args[1]);
     const p = Bun.spawn([process.execPath, "--no-env-file", MANAGER, ...args], { env, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     await p.exited;
+    // 子进程的状态目录被隔离闸改道 = 读的不是这份台账，直接判失败（不让有效 JSON 把 stderr 的改道提示吞掉）
+    if (err.includes("[test-guard]")) return { ok: false, code: "child_state_dir", error: err.trim() };
     try { return JSON.parse(out) as Record<string, unknown>; } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
   };
   // fake manager：create 照生产登记新会话（或结果未确认）；其余生命周期命令照收
