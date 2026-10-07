@@ -52,6 +52,10 @@ const boardOf = (title: string): ProductBoard => ({
   deps: [],
 });
 
+type Load = { status: "loading" } | { status: "absent" } | { status: "ok"; board: ProductBoard };
+/** use-dag-panes 里同样的接线：hook 三态 → ProductPanes 的 board + loading */
+const asPaneProps = (l: Load) => ({ board: l.status === "ok" ? l.board : null, loading: l.status === "loading" });
+
 /** 每次调用排一个待定的 promise，测试按顺序 resolve / reject */
 function controlledReader() {
   const calls: { project: string; resolve: (b: ProductBoard) => void; reject: (e: Error) => void }[] = [];
@@ -85,7 +89,7 @@ function watched() {
 function mount(read: Reader) {
   const source = { product: read };
   function Probe({ project, rev }: { project: string; rev: number }) {
-    return h(ui.ProductPanes, { ...paneBase(), product: ui.useProductBoard(project, rev) });
+    return h(ui.ProductPanes, { ...paneBase(), ...asPaneProps(ui.useProductBoard(project, rev) as Load) });
   }
   const w = watched();
   const render = (project: string, rev: number) => w.show(h(ui.CollabSourceContext.Provider, { value: source }, h(Probe, { project, rev })));
@@ -95,11 +99,11 @@ function mount(read: Reader) {
 
 test("ProductPanes 直接渲染：加载中 → 真 board，每一帧都没有「因果线」标签和兜底画布", async () => {
   const w = watched();
-  await w.show(h(ui.ProductPanes, { ...paneBase(), product: { status: "loading" } }));
+  await w.show(h(ui.ProductPanes, { ...paneBase(), board: null, loading: true }));
   expect(causal(w.el)).toBe(false);
   expect(tabs(w.el)[0]).toBe("产品 DAG");
   expect(w.el.querySelector('[role="status"]')?.textContent).toBe("加载中…");
-  await w.show(h(ui.ProductPanes, { ...paneBase(), product: { status: "ok", board: boardOf("真看板") } }));
+  await w.show(h(ui.ProductPanes, { ...paneBase(), board: boardOf("真看板"), loading: false }));
   expect(w.el.textContent).toContain("真看板");
   expect(w.el.querySelector('[role="status"]')).toBeNull();
   expect(w.flashed()).toBe(false);

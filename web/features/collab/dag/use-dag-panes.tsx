@@ -111,7 +111,7 @@ export function useDagPanes(a: DagPanesArgs) {
       onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
 
-  const paneProps = { product, featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
+  const paneProps = { board: hasProduct ? product.board : null, loading: product.status === "loading", featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
     onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
     <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={<div className={v.center}>{causal}</div>} />

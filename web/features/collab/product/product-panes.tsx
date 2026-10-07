@@ -4,7 +4,6 @@ import type { Tr } from '../collab-model';
 import type { DagTab } from '../dag/use-dag-ui';
 import type { DagBoard } from '../dag/dag-types';
 import { hasFeatureSnapshot } from './dag-availability';
-import type { ProductLoad } from './use-product-board';
 import { FeatureCards, FeatureTrail, ProductView } from './product-view';
 import v from '../v4/v4.module.css';
 import d from '../dag/dag.module.css';
@@ -12,7 +11,9 @@ import s from './product.module.css';
 
 const LABELS: Record<DagTab, string> = { product: '产品 DAG', dag: '子 DAG', progress: '谁在干活', team: '团队' };
 interface Props {
-  product: ProductLoad;
+  board: ProductBoard | null;
+  /** No answer yet: placeholder instead of the causal fallback (board null + !loading = definitely none). */
+  loading?: boolean;
   dagBoard: DagBoard | null;
   featureId: string | null;
   tab: DagTab;
@@ -35,8 +36,7 @@ interface Props {
  * fallback never flashes before the board arrives (tests/web-dom-product-panes-loading.test.ts).
  */
 export function ProductPanes(p: Props) {
-  const board: ProductBoard | null = p.product.status === 'ok' ? p.product.board : null;
-  const loading = p.product.status === 'loading';
+  const { board, loading = false } = p;
   const has = !!board || loading;
   const feature = board?.features.find(f => f.id === p.featureId);
   const tab = !has && p.tab === 'product' ? 'dag' : has && p.tab === 'dag' && !feature ? 'product' : p.tab;
