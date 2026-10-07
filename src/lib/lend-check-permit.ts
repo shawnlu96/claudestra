@@ -86,6 +86,10 @@ function openStore(directory: string): Database {
   for (const suffix of ["", "-journal", "-wal", "-shm"]) {
     try {
       const stat = lstatSync(path + suffix);
+      // A concurrent COMMIT is unlinking its rollback journal: contention, retried only as the existing store_busy.
+      if (suffix === "-journal" && stat.isFile() && stat.nlink === 0) {
+        throw Object.assign(new Error("rollback journal is being removed by a concurrent commit"), { code: "SQLITE_BUSY" });
+      }
       if (!stat.isFile() || stat.nlink !== 1) throw new Error("permit store must be a regular, unaliased file");
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
   }
