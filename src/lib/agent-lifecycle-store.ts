@@ -11,8 +11,9 @@
  * collaboration view all import it instead of reading these tables themselves.
  */
 import type { Database } from "bun:sqlite";
-import { getTask, LedgerError } from "./ledger-store.js";
+import { getTask, LedgerError, toEvent } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+export { cardWorkerMigrationEvidence, type WorkerMigrationEvidence } from "./agent-lifecycle-worker-history.js";
 
 const WORKER_ROLES = ["author", "reviewer", "other"] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
@@ -257,4 +258,14 @@ export function recordWorkerRetire(db: Database, actor: string, r: RetireRecord)
         ...(r.retry ? { regAt: r.regAt } : {}),
         bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, bytesFreed: freed, steps: r.steps, pending: r.pending } }, false);
   });
+}
+
+/** AREB1: worker_register / worker_retire events in ledger order (seq, actor, session, role as written), of one card or of one name on every card. */
+type Op = "worker_register" | "worker_retire";
+export interface WorkerHistoryEntry { seq: number; ts: number; actor: string; taskId: string; op: Op; agent: string; sessionId: string | null; role: string | null; retry: boolean }
+export function workerRetireHistory(db: Database, by: { taskId: string } | { agent: string }): WorkerHistoryEntry[] {
+  const [col, v] = "agent" in by ? ["json_extract(data, '$.agent')", by.agent] : ["target", by.taskId], str = (x: unknown) => (typeof x === "string" ? x : null);
+  return (db.query(`SELECT * FROM events WHERE kind = 'scheduler' AND json_extract(data, '$.op') IN ('worker_register', 'worker_retire') AND ${col} = ? ORDER BY seq`)
+    .all(v) as Parameters<typeof toEvent>[0][]).map(toEvent).map(({ seq, ts, actor, target, data: d }) => ({ seq, ts, actor, taskId: target, op: d.op as Op,
+      agent: String(d.agent ?? ""), sessionId: str(d.sessionId), role: str(d.role), retry: d.retry === true }));
 }

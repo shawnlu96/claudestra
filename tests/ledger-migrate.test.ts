@@ -369,11 +369,11 @@ describe("写事件的底座只给写入模块", () => {
       "lib/lend-fix-reassign-tick.ts", "lib/lend-fix-start.ts", "lib/lend-pr-takeover-ledger.ts", "lib/lend-reclaim-scheduler.ts",
       "lib/manual-merge-queue.ts", "lib/memory-retrieve-order.ts", "lib/order-gate-heads.ts", "lib/order-mark.ts",
       "lib/recovery-machine-policy.ts", "lib/recovery-policy.ts",
-      "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts", "lib/review-converge-notice.ts",
+      "lib/review-arbiter-deliver.ts", "lib/review-arbiter-runtime.ts", "lib/review-converge-followup.ts", "lib/review-converge-notice-write.ts",
       "lib/scheduler-apply.ts", "lib/scheduler-deploy.ts", "lib/scheduler-fallback.ts", "lib/scheduler-merge-conflict.ts", "lib/scheduler-merge-handoff.ts",
       "lib/scheduler-merge-train-hold.ts", "lib/scheduler-merge.ts",
       "lib/scheduler-observe.ts",
-      "lib/scheduler-sessions.ts", "lib/scheduler-ui-carry.ts"]);
+      "lib/scheduler-recovery-write.ts", "lib/scheduler-sessions.ts", "lib/scheduler-ui-carry.ts"]);
     expect(move.sort()).toEqual(["lib/ledger-autostart-step.ts", "lib/ledger-human.ts", "lib/scheduler-apply.ts", "lib/scheduler-spec-resume-write.ts"]);
   });
 });

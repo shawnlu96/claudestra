@@ -12,6 +12,10 @@ export const BASIS_LINE = "每条 P1 都要挂依据：逐项结论带 basis = \
   "没挂依据的 P1 按 P2 计：不挡合并，另开后续节点。示例：{findingId:\"lease-race\", family:\"concurrency\", severity:\"P1\", " +
   "basis:\"acceptance:2\", probe:\"src/lib/x.ts:40 两次 tick 抢同一意图\", description:\"…\"}";
 
+/** Reviewer free text reaches fix orders verbatim and the peer gate refuses long hex whole, so the reviewer writes short forms (RVHEX1). */
+export const HASH_LINE = "probe、说明和报告正文里，哈希、摘要、随机串一律只写前 16 位（git 提交号也写 12–16 位短号）；完整 head 只放订单的 head 字段；" +
+  "需要完整值时写本机文件路径。完整长十六进制会让修复单被外发闸整单拒收。";
+
 /** The scope line for a round ≥ SCOPE_ROUND order; null before that or when last round's head is unknown. */
 export function scopeLine(round: number, events: readonly LedgerEvent[], head: string): string | null {
   const from = round >= SCOPE_ROUND ? prevReviewedHead(events, round) : null;
@@ -22,10 +26,10 @@ export function scopeLine(round: number, events: readonly LedgerEvent[], head: s
     "diff 外新发现的 P1（probe 里的文件不在这次 diff 改动的文件里，且 basis 不是 regression）会自动降为 P2；probe 里写明文件路径。";
 }
 
-/** Lines a review order carries, in order: the basis rule, then (from SCOPE_ROUND) the scope. */
+/** Lines a review order carries, in order: the basis rule, the short-hash rule, then (from SCOPE_ROUND) the scope. */
 export function convergeOrderLines(round: number, events: readonly LedgerEvent[], head: string): string[] {
   const rebase = rebaseScopeLines(round, events, head); // merge driver moved the head: scope = PR vs main (i28-RH1)
-  if (rebase) return [BASIS_LINE, ...rebase];
+  if (rebase) return [BASIS_LINE, HASH_LINE, ...rebase];
   const scope = scopeLine(round, events, head);
-  return scope ? [BASIS_LINE, scope] : [BASIS_LINE];
+  return scope ? [BASIS_LINE, HASH_LINE, scope] : [BASIS_LINE, HASH_LINE];
 }

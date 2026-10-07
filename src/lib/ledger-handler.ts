@@ -105,13 +105,26 @@ export function lastReviewOf(review: LedgerEvent, events: readonly LedgerEvent[]
 }
 
 /**
- * 这条 review 还清了第 round 轮的对抗式：对抗式轮的 pass 或 PM 的豁免（review --waive adversarial），并且
+ * 调度器派的跨族对抗审查单交回的结论（自动卡不写 dispatch 事件）：data.orderId 是本轮的 adversarial_review 单、
+ * 写入时记下 sameFamily=false（审查员与作者不同家族），且审的 head 就是当时卡上的 head。
+ * 没记 / 记 null 不事后按家族重建：作者家族会被换族（note local_author）、之后的 workflow 改写，重建会把同家族判成跨族；
+ * 同家族豁免轮（sameFamily=true）也不算（tests/ledger-merge-gate-scheduler-adv.test.ts）
+ */
+function schedulerAdversarial(e: LedgerEvent, events: readonly LedgerEvent[]): boolean {
+  const m = typeof e.data.orderId === "string" ? /:r(\d+):adversarial_review:a\d+$/.exec(e.data.orderId) : null;
+  if (!m || Number(m[1]) !== e.data.round || e.data.sameFamily !== false) return false;
+  return typeof e.data.head === "string" && !!e.data.head && sameHead(e.data.head, headAt(events, e.seq));
+}
+
+/**
+ * 这条 review 还清了第 round 轮的对抗式：对抗式轮（dispatch 记的，或调度器的跨族对抗审查单）的 pass 或 PM 的豁免（review --waive adversarial），并且
  * ① 就在第 round 轮；② 之后的每次交付都带着同一个非空 head（不带 head 的交付说不清换没换代码，算重新欠）；
  * ③ 当前 head（之后 task-set 改过也算）还是它审的那个。
  */
 function settles(e: LedgerEvent, events: readonly LedgerEvent[], round: number): boolean {
   if (e.kind !== "review" || e.data.verdict !== "pass" || e.data.round !== round) return false;
-  if (e.data.waive !== "adversarial" && dispatchKindFor(events, e.seq, e.data.round) !== "adversarial") return false;
+  const adversarial = e.data.waive === "adversarial" || dispatchKindFor(events, e.seq, e.data.round) === "adversarial" || schedulerAdversarial(e, events);
+  if (!adversarial) return false;
   const head = headAt(events, e.seq);
   const later = deliveredBetween(events, e.seq, Infinity);
   if (later.some((d) => !head || typeof d.data.headSHA !== "string" || !d.data.headSHA || !sameHead(d.data.headSHA, head))) return false;

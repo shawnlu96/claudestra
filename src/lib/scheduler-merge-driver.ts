@@ -3,6 +3,7 @@ import { carryChainSuffix, type CarryHop } from "./review-main-carry-manual-auto
 import { carryReceipt, MERGE_UNKNOWN_WAIT, MERGE_UNKNOWN_CLEAR, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { bounceStep, updateOrBounce } from "./scheduler-merge-conflict.js";
 import { behindUpdating } from "./scheduler-merge-ci-behind.js";
+import { ciRed } from "./scheduler-merge-ci-carried.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
@@ -37,6 +38,9 @@ const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase
 /** This run's own open, non-draft, same-repo PR on main at the reviewed head. */
 const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" && sameHead(run, pr) && pr.branch === run.expectedBranch &&
   pr.base === "main" && !pr.draft && !pr.crossRepository;
+/** MCRY3 at await_ci: only the head moved. No merge was sent (merging never returns here) and the scheduler's own update-branch was
+ * already carried into reviewedHead, so this is the author's push. */
+const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
 const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
@@ -103,12 +107,13 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   const behind = behindUpdating(run) && !pr.draft && pr.mergeState !== "UNKNOWN" && failed(pr.checks);
   if ((pr.draft || pr.mergeState === "BEHIND") && !behind) return run; // re-checked next round on the same evidence
   if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
-  if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
+  // i28-CIF3: red on the scheduler's own update is carried, then bounced (required red) or waited out (gate not reported yet)
+  if (unstableWait(pr) === "failed" && !behind && !ciRed(run, pr.checks)) return step("unknown", "更新分支后 CI 失败或取消");
   if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState) && !behind) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
   const carried = await carrying();
   if (carried.phase !== "await_ci") return carried;
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
-  return pr.mergeState === "DIRTY" || behind ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
+  return pr.mergeState === "DIRTY" || behind || ciRed(carried, pr.checks) === "required" ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }
 
 /** The last read is taken before the irreversible `merging` claim, so a transient UNKNOWN there still waits and a conflict
@@ -196,6 +201,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.draft && pr.mergeState === "UNSTABLE") return step("unknown", "等 CI 时 PR 变成了 draft");
       const same = sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository && pr.base === "main" && pr.branch === run.expectedBranch;
       if (same && pr.draft) return run;
+      // MCRY3: void review, re-review, no freeze; before the train gate like a bounce (the train's own drift check voids it)
+      if (authorPush(run, pr)) return await step("await_review", `等 CI 时作者推了新 head：原 head ${run.reviewedHead} → 新 head ${pr.head}，旧审查失效`, undefined, pr.head);
       if (same && pr.mergeState === "UNKNOWN") return unknownWait(run, step);
       // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
       // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.
@@ -206,13 +213,14 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       };
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
+      const unsettled = ciRed(run, pr.checks) === "unsettled"; // i28-CIF3: a shard is red before the required gate ran; bounceStep takes its verdict
       const train = await external.train?.(run); // any member that got here (from ready or updating) obeys its train before update / merge
       if (train && train !== "cleared") return train === "wait" ? run : step("resolved", train.bounce);
       if (train !== "cleared" && pr.mergeState === "BEHIND" && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
-        pr.base === "main" && pr.branch === run.expectedBranch) return failed(pr.checks) ? step("unknown", "CI 失败或取消") : await refresh("等 CI 期间 GitHub 报 BEHIND");
+        pr.base === "main" && pr.branch === run.expectedBranch) return failed(pr.checks) ? unsettled ? run : step("unknown", "CI 失败或取消") : await refresh("等 CI 期间 GitHub 报 BEHIND");
       const unstable = unstableWait(pr); // The final pre-merge check below still demands CLEAN, so waiting here never merges early.
       if (unstable && sameHead(run, pr) && pr.state === "OPEN" && !pr.draft && !pr.crossRepository &&
-        pr.base === "main" && pr.branch === run.expectedBranch) return unstable === "wait" ? run : step("unknown", "CI 失败或取消");
+        pr.base === "main" && pr.branch === run.expectedBranch) return unstable === "wait" || unsettled ? run : step("unknown", "CI 失败或取消");
       if (!sameHead(run, pr) || pr.state !== "OPEN" || pr.draft || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || pr.mergeState !== "CLEAN") {
         return step("unknown", "CI 前 PR/head/base/mergeability 变了");
       }

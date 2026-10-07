@@ -9,10 +9,10 @@ type Plan = { repo: string; worktree: string; branch: string; base: string };
 const START_FILE = "scheduler-author-start.json";
 
 /** Record the resolved base in Git's private worktree directory, so a later fetch cannot redefine this card's start. */
-export async function addAuthorWorktree(git: Git, p: Plan): Promise<{ code: number; out: string }> {
+export async function addAuthorWorktree(git: Git, p: Plan, existing = false): Promise<{ code: number; out: string }> {
   const start = await git(["rev-parse", "--verify", `${p.base}^{commit}`]);
   if (start.code !== 0) return start;
-  const add = await git(["worktree", "add", "-b", p.branch, p.worktree, start.out]);
+  const add = await git(["worktree", "add", ...(existing ? [p.worktree, p.branch] : ["-b", p.branch, p.worktree, start.out])]); // existing: AREB1 rebuild, checked equal to start
   if (add.code !== 0) return add;
   const dir = await git(["-C", p.worktree, "rev-parse", "--absolute-git-dir"]);
   if (dir.code !== 0) return dir;

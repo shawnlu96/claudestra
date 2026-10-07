@@ -22,6 +22,7 @@ import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
+import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
@@ -82,6 +83,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) return `UI 截图验收已失效：${ui}`;
+    if (run.beforeSend && !manual) return sendSourceRefusal(db, run, task, workflow, mergeReviewProof); // MCRY6: the pinned source, re-proved
   }
   return null;
 }
@@ -149,7 +151,7 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
   ready: ["updating", "await_ci", "await_review", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
-  await_review: [], await_ci: ["merging", "updating", "unknown", "resolved"], merging: ["merged", "unknown"],
+  await_review: [], await_ci: ["merging", "updating", "await_review", "unknown", "resolved"], merging: ["merged", "unknown"],
   merged: [], unknown: [], resolved: [],
 };
 /** main moving during CI sends the run back to update-branch; past this many times it is someone else's race to settle. */
