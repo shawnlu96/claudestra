@@ -25,7 +25,10 @@ export function compare(limits: Counts, current: Counts, skipped: Set<string>) {
 
 const byKey = (a: Finding, b: Finding) => a.key.localeCompare(b.key);
 
-/** --update：每项取 min(旧, 当前)，降到默认上限以内的条目删除；永不新增、永不提高。 */
+/**
+ * --update：每项取 min(旧, 当前)，降到默认上限以内的条目删除；永不新增、永不提高。
+ * 例外：size 条目只要文件还在就保留（已登记文件只许缩小，删了就能涨回默认上限）；文件删了才删条目。
+ */
 export function tighten(limits: Counts, current: Counts, skipped: Set<string>): Counts {
   const out: Counts = {};
   for (const [key, limit] of Object.entries(limits)) {
@@ -34,7 +37,7 @@ export function tighten(limits: Counts, current: Counts, skipped: Set<string>): 
       continue;
     }
     const next = Math.min(limit, current[key] ?? 0);
-    if (next > capFor(key)) out[key] = next;
+    if (next > capFor(key) || (prefixOf(key) === "size" && key in current)) out[key] = next;
   }
   return sortCounts(out);
 }
