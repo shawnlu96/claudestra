@@ -259,10 +259,10 @@ describe("ledger: notify once, back off, survive restart", () => {
     expect(events().length).toBe(1);
     expect(String((events()[0].data as { steps: string[] }).steps)).toContain("已修改 1：a.txt");
     expect([existsSync(join(wt, "a.txt")), pendingCleanups(db).length]).toEqual([true, 1]);
-    // state change: another file staged → reported again once
+    // state change: another file staged → recorded again once; PM is not told twice of the same (agent, regAt, kind) (LIFE4)
     writeFileSync(join(wt, "b.ts"), "b"); sh(wt, "add", "b.ts");
     t += 3 * H;
-    expect((await tick()).failed.length).toBe(1);
+    expect((await tick()).failed.length).toBe(0);
     t += 3 * H;
     expect((await tick()).failed.length).toBe(0);
     expect(events().length).toBe(2);
@@ -311,7 +311,7 @@ describe("ledger: notify once, back off, survive restart", () => {
     const original = readFileSync(reportPath, "utf8");
     t += 3 * H; expect((await tick()).failed.length).toBe(0); expect(events().length).toBe(1);
     writeFileSync(join(wt, names[24]), "base"); t += 3 * H;
-    expect((await tick()).failed.length).toBe(1); expect(events().length).toBe(2);
+    expect((await tick()).failed.length).toBe(0); expect(events().length).toBe(2); // recorded, PM told once only (LIFE4)
     expect(readFileSync(reportPath, "utf8")).toBe(original);
     expect([existsSync(wt), pendingCleanups(db).length]).toEqual([true, 1]);
   });
