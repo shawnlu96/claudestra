@@ -35,7 +35,7 @@ export const SCHEDULER_RECOVERY_CMDS: Record<string, CommandSpec> = {
     usage: "scheduler-manual-resume <task> --rev N --workflow-rev N --head SHA|- --round N --spec-rev N --mode on|observe --reason R --max-workers N",
     run(c) {
       const f = fence(c), mode = c.need("mode"), maxWorkers = integer(c, "max-workers", 0);
-      if (!["on", "observe"].includes(mode) || maxWorkers > 32) throw new LedgerError("invalid", "mode 要 on/observe，max-workers 要 0..32");
+      if (!["on", "observe"].includes(mode) || maxWorkers > 64) throw new LedgerError("invalid", "mode 要 on/observe，max-workers 要 0..64（两家族各 0..32）");
       return writeManualResume(c.db, c.ctx(), { ...f, mode: mode as "on" | "observe", reason: c.need("reason"), maxWorkers }, active(c));
     },
   },

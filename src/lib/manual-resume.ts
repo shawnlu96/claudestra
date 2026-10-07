@@ -228,16 +228,17 @@ export async function manualResumeTick(db: Database, projects: Record<string, { 
       const v = manualResumeVerdict(db, task, wf);
       if (!v.ok) { out.push({ project, taskId, mode, action: "none", why: v.why }); continue; }
       const reason = manualResumeReason(v.facts);
-      if (mode === "observe") {
-        const r = await (d.observe ?? recordObserved)(db, { project, mechanism: "manualStall", target: taskId, actionKey: `resume.${v.facts.fingerprint}`,
-          action: `把 ${taskId} 交回自动：${reason}`, data: { manualResume: v.facts } }, d.now());
-        out.push({ project, taskId, mode, action: r.recorded ? "would_resume" : "observed_before", why: reason });
-        continue;
-      }
       try {
+        if (mode === "observe") {
+          const r = await (d.observe ?? recordObserved)(db, { project, mechanism: "manualStall", target: taskId, actionKey: `resume.${v.facts.fingerprint}`,
+            action: `把 ${taskId} 交回自动：${reason}`, data: { manualResume: v.facts } }, d.now());
+          out.push({ project, taskId, mode, action: r.recorded ? "would_resume" : "observed_before", why: reason });
+          continue;
+        }
         await d.resume(db, { actor: "scheduler", now: d.now() }, { taskId, taskRev: task.rev, workflowRev: wf.rev, reason, maxWorkers: cfg.maxActiveWorkers }, port);
       } catch (e) {
         if (!(e instanceof LedgerError)) throw e;
+        console.error(`⚠️ [scheduler] manual ${mode} 恢复拒绝 ${taskId}：${e.message}`);
         out.push({ project, taskId, mode, action: "refused", why: e.message });
         continue;
       }

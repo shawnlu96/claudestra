@@ -14,6 +14,7 @@ import { recoveryArgs, recoveryFence } from "../src/lib/scheduler-recovery-ports
 import { roundCapText } from "../src/lib/review-converge-notice.js";
 import { appendEvent } from "../src/lib/ledger-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { informKey, setModelOutcomeReader, snapshotKey } from "../src/lib/scheduler-model-wiring.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
@@ -265,15 +266,19 @@ for (const drift of [false, true]) test(`MAINP2 pass: two real main merges ${dri
   }
 }, 90_000);
 
+async function manualDependent(id: string) {
+  addDep(f.prepare.db, f.prepare.at("owner"), { from: "T0", to: id, kind: "blocks", when: "T0 上线后" });
+  const task = getTask(f.db(), id)!, w = getWorkflow(f.db(), id)!;
+  expect(await f.prepare.cli("pm", "workflow-set", id, "--rev", String(task.rev), "--workflow-rev", String(w.rev),
+    "--template", w.template, "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "only inform",
+    "--reason-code", "deps_not_live", "--reason", "wait T0")).toMatchObject({ ok: true });
+}
+
 async function manualCard(mode: "on" | "observe" | "off") {
   f = await readonlyFixture({ stateDir: STATE_DIR });
   writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: mode } } } }));
   createTask(f.prepare.db, f.prepare.at("owner"), { project: "p", id: "T0", title: "dependency", kind: "code" });
-  addDep(f.prepare.db, f.prepare.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" });
-  const w = getWorkflow(f.db(), "T1")!;
-  expect(await f.prepare.cli("pm", "workflow-set", "T1", "--rev", String(f.prepare.task().rev), "--workflow-rev", String(w.rev),
-    "--template", w.template, "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "only inform",
-    "--reason-code", "deps_not_live", "--reason", "wait T0")).toMatchObject({ ok: true });
+  await manualDependent("T1");
   for (const [from, to] of [["spec", "restate"], ["restate", "build"], ["build", "review"], ["review", "merge"], ["merge", "live"]] as const) {
     moveStage(f.prepare.db, f.prepare.at("owner"), { taskId: "T0", from, to });
   }
@@ -310,7 +315,7 @@ test("MAN2 CLI rereads mode/fingerprint and all task/workflow fences; refusals p
   const call = (a: string[]) => f.withMaintenance(() => f.manager("ledger", "scheduler-manual-resume", ...a));
   const changed = (flag: string, value: string) => args.map((a, i) => args[i - 1] === flag ? value : a);
   for (const [flag, value] of [["--rev", String(task.rev + 1)], ["--workflow-rev", String(wf!.rev + 1)], ["--head", H1], ["--round", "1"],
-    ["--spec-rev", "2"], ["--reason", "forged fingerprint"], ["--mode", "observe"]]) {
+    ["--spec-rev", "2"], ["--reason", "forged fingerprint"], ["--mode", "observe"], ["--max-workers", "65"]]) {
     expect(await call(changed(flag, value))).toMatchObject({ ok: false });
     expect(events()).toEqual(before);
     expect(f.prepare.task()).toEqual(task);
@@ -320,11 +325,72 @@ test("MAN2 CLI rereads mode/fingerprint and all task/workflow fences; refusals p
     if (a[1] === "scheduler-manual-resume") writeFileSync(join(f.root, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { manualStall: "off" } } } }));
   });
   const refused = await f.pass();
-  expect(refused.failed).toMatchObject([{ taskId: "manual-resume", error: expect.stringContaining("mode 与写入时策略不一致") }]);
+  expect(refused.failed).toEqual([]);
   expect(events()).toEqual(before);
   expect(getWorkflow(f.db(), "T1")).toEqual(wf);
   expect(f.prepare.notices).toEqual([]);
   expect(f.calls.at(-1)?.result).toMatchObject({ ok: false, code: "forbidden" });
+}, 30_000);
+
+for (const mode of ["on", "observe"] as const) for (const limit of [20, 32]) {
+  test(`MAN2 ${mode}: legal agents ${limit}+${limit} works through the real pass and CLI`, async () => {
+    await manualCard(mode);
+    writeFileSync(join(f.root, "scheduler.json"), JSON.stringify({ enabled: true, autoDispatch: true,
+      projects: { p: { agents: { claude: limit, codex: limit }, requiredChecks: ["ci"], repoDir: f.root } } }));
+    expect(await f.pass()).toEqual({ ran: true, failed: [] });
+    const writes = f.calls.filter((c) => c.args[1] === "scheduler-manual-resume");
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ code: 0, result: { ok: true } });
+    expect(writes[0].args.slice(-2)).toEqual(["--max-workers", String(limit * 2)]);
+    expect(getWorkflow(f.db(), "T1")?.mode).toBe(mode === "on" ? "auto" : "manual");
+    expect(events(mode === "on" ? "workflow_resume" : "recovery_observe")).toHaveLength(1);
+  }, 30_000);
+}
+
+for (const mode of ["on", "observe"] as const) test(`MAN2 ${mode}: one fenced refusal does not starve the next manual card`, async () => {
+  await manualCard(mode);
+  createTask(f.prepare.db, f.prepare.at("owner"), { project: "p", id: "T2", title: "next", kind: "code", agent: "agent-task-one" });
+  setWorkflow(f.prepare.db, f.prepare.at("owner"), { taskId: "T2", taskRev: 1, template: "code", templateVersion: 2,
+    mode: "auto", authorFamily: "claude", fallback: "only inform" });
+  await manualDependent("T2");
+  const before = events(), log = spyOn(console, "error").mockImplementation(() => {});
+  restores.push(() => log.mockRestore());
+  f.beforeChild((a) => {
+    if (a[1] === "scheduler-manual-resume" && a[2] === "T1") f.prepare.db.query("UPDATE tasks SET rev=rev+1 WHERE id='T1'").run();
+  });
+  expect(await f.pass()).toEqual({ ran: true, failed: [] });
+  expect(f.calls.filter((c) => c.args[1] === "scheduler-manual-resume").map((c) => [c.args[2], c.result.ok, c.result.code]))
+    .toEqual([["T1", false, "conflict"], ["T2", true, undefined]]);
+  expect(events()).toEqual(before);
+  expect(getWorkflow(f.db(), "T1")?.mode).toBe("manual");
+  expect(getWorkflow(f.db(), "T2")?.mode).toBe(mode === "on" ? "auto" : "manual");
+  expect(listEvents(f.db(), { project: "p", target: "T2" }).filter((e) => e.data.op === (mode === "on" ? "workflow_resume" : "recovery_observe")))
+    .toHaveLength(1);
+  expect(log.mock.calls.flat().join("\n")).toMatch(/T1.*conflict/);
+  expect(f.prepare.notices.filter((n) => n.startsWith("[manual 自动恢复]"))).toHaveLength(mode === "on" ? 1 : 0);
+}, 30_000);
+
+test("MAN2 real SQLite write failure remains reported rather than classified as a card refusal", async () => {
+  await manualCard("on");
+  const before = events(), wf = getWorkflow(f.db(), "T1");
+  f.prepare.db.exec("CREATE TRIGGER fail_resume BEFORE UPDATE ON task_workflows WHEN NEW.taskId='T1' BEGIN SELECT RAISE(ABORT, 'storage write failed'); END");
+  expect((await f.pass()).failed).toEqual([{ taskId: "manual-resume", error: "scheduler-manual-resume [invalid]: storage write failed" }]);
+  expect(f.calls.find((c) => c.args[1] === "scheduler-manual-resume")?.result).toMatchObject({ ok: false, code: "invalid" });
+  expect(f.diagnostics.join("\n")).toMatch(/storage write failed/);
+  expect(events()).toEqual(before);
+  expect(getWorkflow(f.db(), "T1")).toEqual(wf);
+  expect(f.prepare.notices).toEqual([]);
+}, 30_000);
+
+for (const mode of ["on", "observe"] as const) test(`MAN2 ${mode}: actual lease loss stops the pass with zero recovery writes`, async () => {
+  await manualCard(mode);
+  const before = events(), wf = getWorkflow(f.db(), "T1");
+  f.childEnv({ CLAUDESTRA_SCHEDULER_LEASE: "" });
+  await expect(f.pass()).rejects.toBeInstanceOf(SchedulerStopped);
+  expect(f.calls.at(-1)?.result).toMatchObject({ ok: false, code: "lease-lost" });
+  expect(events()).toEqual(before);
+  expect(getWorkflow(f.db(), "T1")).toEqual(wf);
+  expect(f.prepare.notices).toEqual([]);
 }, 30_000);
 
 async function recoveryReview(cap: boolean) {

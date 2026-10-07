@@ -74,8 +74,8 @@ export async function readonlyFixture(opts: { stateDir?: string } = {}) {
     try { return await fn(); } finally { lock.release(); }
   };
   const tick = () => withMaintenance(() => schedulerAutoTick(db(), { p: { maxActiveWorkers: 2 } }, deps));
-  const pass = (over: Partial<PassOpts> = {}, autoDispatch = true) => schedulerPass(db(), parseSchedulerConfig({ enabled: true, autoDispatch,
-    projects: { p: { maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: root } } }), {
+  const pass = (over: Partial<PassOpts> = {}, autoDispatch = true) => schedulerPass(db(), parseSchedulerConfig({
+    ...JSON.parse(readFileSync(join(root, "scheduler.json"), "utf8")), autoDispatch }), {
     assertOwner: active, singleton: { path: singletonPath, token: singleton.token }, maintenance, manager, autoDeps: () => deps,
     // These unrelated services would create workers or reach external tools; the tested pass / auto / merge still run for real.
     peerPr: async () => ({ failed: [] }), autostart: () => ({ resume: async () => [], start: async () => [] }),
