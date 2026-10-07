@@ -1,22 +1,24 @@
 /** A remote convergence order and its intent link are committed together, so a restart cannot offer the same effect twice. */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { SchedulerIntent, AuthorFamily } from "./ledger-scheduler.js";
 import { insertEvent } from "./ledger-tx.js";
-import { gateOfferTransaction } from "./order-gate-heads.js";
-import { getEventByDedup, LedgerError } from "./ledger-store.js";
+import { cardHeads, gateOfferTransaction } from "./order-gate-heads.js";
+import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { getLendOrder, type LendOrder } from "./ledger-lend.js";
 import { forPeer, heldLease, holdWriteLease } from "./ledger-lend-lease.js";
 import { getLendPeer } from "./ledger-lend-peers.js";
 import { LEASE_MS_DEFAULT } from "./lend-wire.js";
-import { parseOrderWire, type OrderWire } from "./order-wire.js";
+import { parseOrderWire, WIRE_MAX_BYTES, type OrderWire } from "./order-wire.js";
 import { redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import { convergencePlacement, type RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { peerRefusal } from "./scheduler-placement.js";
+import { fitOrderWire, orderWireBytes } from "./order-wire-fit.js";
 
 export const remoteOrder = (db: Database, id: string): LendOrder | null => {
   const orderId = getEventByDedup(db, `scheduler:${id}:remote-order`)?.data.orderId;
@@ -47,7 +49,18 @@ export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerI
       }
       holdWriteLease(db, task, { peer, fp: holder.fp, branch: task.branch, repo: facts.repo! }, now);
     }
-    const parsed = parseOrderWire(redactOrderForPeer(raw, task.headSHA).order);
+    const redacted = redactOrderForPeer(raw, task.headSHA).order;
+    const events = listEvents(db, { project: task.project, target: task.id });
+    const configured = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
+    const reports = orderWireBytes(redacted) > WIRE_MAX_BYTES ? events
+      .filter((event) => event.seq > configured && event.kind === "review" && typeof event.data.path === "string").map((event) => {
+        try { return { event, report: readFileSync(String(event.data.path), "utf8") }; }
+        catch { return { event, report: null }; } // Unavailable originals remain unabridged; fitting will refuse if they cannot fit.
+      }) : [];
+    const fit = fitOrderWire(redacted, reports, cardHeads(db, task));
+    if (!fit.ok) throw new LedgerError("too_large", `收敛单 ${fit.bytes} 字节 > ${fit.limit} 字节；缩短阶段 ${fit.stage}`,
+      { bytes: fit.bytes, limit: fit.limit, stage: fit.stage, specRev: task.specRev, round: task.round, measurements: fit.measurements });
+    const parsed = parseOrderWire(redactOrderForPeer(fit.order, task.headSHA).order);
     if (!parsed.ok) throw new LedgerError("invalid", parsed.error);
     const text = renderOrderWire(parsed.value, { audience: "peer", ledgerHead: task.headSHA });
     db.prepare(`INSERT INTO lend_orders
@@ -58,7 +71,8 @@ export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerI
         raw.step === "fix" ? task.branch : null, raw.step === "fix" ? "main" : null);
     if (current.status === "pending") settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; remote convergence" });
     insertEvent(db, { ...ctx, dedupKey: `scheduler:${intent.id}:remote-order` }, { project: task.project, target: task.id,
-      kind: "scheduler", text: `remote convergence ${peer}`, data: { op: "convergence_effect", intentId: intent.id, orderId, family, peer } }, true);
+      kind: "scheduler", text: `remote convergence ${peer}`, data: { op: "convergence_effect", intentId: intent.id, orderId, family, peer,
+        fit: { measurements: fit.measurements, digests: fit.digests } } }, true);
     return getLendOrder(db, orderId)!;
   });
 }

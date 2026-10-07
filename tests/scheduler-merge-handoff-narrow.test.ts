@@ -11,7 +11,7 @@ import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
-import { ghPrState, handoffFiles, type HandoffPr } from "../src/lib/scheduler-merge-handoff-tick.js";
+import { ghPrState, handoffFiles, type HandoffPr, type ReadPr } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { HANDOFF_POLL_MS } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { narrowHandoffLocks } from "../src/lib/scheduler-merge-handoff.js";
 import { withLedgerWriter } from "../src/lib/ledger-scheduler-lease-sync.js";
@@ -24,7 +24,7 @@ const GLOBS = ["src/lib/acp/*", "src/bridge/acp-link.ts", "src/lib/acp-turn.ts",
   "src/lib/acp-pool.ts", "src/lib/acp-log.ts", "tests/acp-*.test.ts", "docs/acp.md", "src/lib/acp-relay.ts", "src/lib/acp-codec.ts"];
 const PR_FILES = ["src/lib/acp/session.ts", "src/bridge/acp-link.ts", "README.md"];
 
-async function narrowFixture(first: string[] | null = PR_FILES, reader = false) {
+async function narrowFixture(first: string[] | null = PR_FILES, reader = false, read?: ReadPr) {
   let files = first;
   const f = autoFixture();
   f.db.query("UPDATE tasks SET extra = ? WHERE id = 'T1'").run(JSON.stringify({ fileGlobs: GLOBS }));
@@ -42,7 +42,11 @@ async function narrowFixture(first: string[] | null = PR_FILES, reader = false) 
   if (reader) passDb.exec("PRAGMA query_only = ON");
   const hand = async () => {
     const r = await schedulerAutoTick(passDb, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps,
-      prState: async (_ref, _follow, handing) => { asked.push(!!handing); return handing && pr.state === "OPEN" ? { ...pr, files } : pr; } });
+      prState: async (ref, follow, handing) => {
+        asked.push(!!handing);
+        if (read) return read(ref, follow, handing);
+        return handing && pr.state === "OPEN" ? { ...pr, files } : pr;
+      } });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
@@ -150,6 +154,47 @@ describe("LCK-1 file locks at the merge handoff", () => {
     } finally { passDb.close(); f.close(); }
   });
 
+  /** gh answers OPEN at H1; the clone's git counts fetch / diff and answers the diff with `diffOut` (code 1 = a transient failure). */
+  const counted = (diffOut: () => { code: number; stdout: string }) => {
+    const n = { fetch: 0, diff: 0 };
+    const command = async (argv: string[]) => {
+      if (argv[0] === "gh") return { code: 0, stdout: JSON.stringify({ state: "OPEN", headRefOid: H1, mergeCommit: null }), stderr: "", timedOut: false };
+      if (argv[1] === "fetch") n.fetch++;
+      if (argv[1] === "diff") { n.diff++; return { ...diffOut(), stderr: "busy", timedOut: false }; }
+      return { code: 0, stdout: argv[1] === "config" ? "git@github.com:example/repo.git\n" : "", stderr: "", timedOut: false };
+    };
+    return { n, read: ghPrState(command, () => null, () => handoffFiles("/repo", command)) };
+  };
+
+  test("LCK-2 a file list too long to vouch for is read once at a head, recorded once as skipped, and every lock stays", async () => {
+    const { n, read } = counted(() => ({ code: 0, stdout: "src/x.ts\0".repeat(64 * 1024) }));
+    const { f, hand, locks, asked } = await narrowFixture(null, false, read);
+    try {
+      expect(await hand()).toMatchObject({ step: "handoff", detail: expect.stringContaining("文件锁不收窄（PR 改动文件列表太长，读不全）") });
+      for (let i = 0; i < 2; i++) { f.advance(HANDOFF_POLL_MS); expect(await hand()).toMatchObject({ step: "waiting" }); }
+      expect(n).toEqual({ fetch: 1, diff: 1 });
+      expect(asked).toEqual([true, false, false]);
+      expect(listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "merge_handoff_narrow"))
+        .toMatchObject([{ data: { skipped: "PR 改动文件列表太长，读不全", head: H1 } }]);
+      expect(locks()).toEqual([...GLOBS].sort());
+    } finally { f.close(); }
+  });
+
+  test("LCK-2 a failing git read is not settled: the next poll reads again and narrows", async () => {
+    let fail = true;
+    const { n, read } = counted(() => (fail ? { code: 1, stdout: "" } : { code: 0, stdout: `${PR_FILES.join("\0")}\0` }));
+    const { f, hand, locks } = await narrowFixture(null, false, read);
+    try {
+      expect(await hand()).toMatchObject({ step: "handoff" });
+      expect(locks()).toHaveLength(12);
+      fail = false;
+      f.advance(HANDOFF_POLL_MS);
+      expect(await hand()).toMatchObject({ step: "waiting", detail: expect.stringContaining("文件锁收窄 12 → 2") });
+      expect(n).toEqual({ fetch: 2, diff: 2 });
+      expect(locks()).toEqual(["src/bridge/acp-link.ts", "src/lib/acp/session.ts"]);
+    } finally { f.close(); }
+  });
+
   test("a card already live with stranded locks and no open intent is released by the next tick's sweep", async () => {
     const { f, locks } = await narrowFixture();
     try {
@@ -168,11 +213,11 @@ describe("LCK-1 file locks at the merge handoff", () => {
       return { code: argv[1] === "diff" ? diffCode : 0, stdout: out, stderr: "boom", timedOut: false };
     };
     expect(await handoffFiles("/repo", git("git@github.com:example/repo.git"))(PR, H1)).toEqual(["src/a.ts", "src/old.ts", "src/new.ts"]);
-    expect(calls.at(-1)).toEqual(["git", "diff", "--name-only", "--no-renames", "-z", `refs/remotes/origin/main...${H1}`]);
+    expect(calls.at(-1)).toEqual(["git", "diff", "--name-only", "--no-renames", "--ignore-submodules=none", "--no-relative", "-z", `refs/remotes/origin/main...${H1}`]);
     expect(await handoffFiles("/repo", git("https://github.com/other/repo"))(PR, H1)).toBeNull();
     const cut = async (argv: string[]) => ({ code: 0, stdout: argv[1] === "config" ? "git@github.com:example/repo.git" : argv[1] === "diff" ? "src/a.ts\0src/b" : "",
       stderr: "", timedOut: false });
-    expect(await handoffFiles("/repo", cut)(PR, H1)).toBeNull();
+    expect(await handoffFiles("/repo", cut)(PR, H1)).toEqual({ refused: "PR 改动文件列表太长，读不全" });
     const view = async () => ({ code: 0, stdout: JSON.stringify({ state: "OPEN", headRefOid: H1, mergeCommit: null }), stderr: "", timedOut: false });
     const read = ghPrState(view, () => null, () => handoffFiles("/repo", git("git@github.com:example/repo.git", 1)));
     expect(await read(PR, undefined, { project: "p" })).toEqual({ state: "OPEN", head: H1, mergeSha: null, files: null });
