@@ -14,8 +14,8 @@ import { turnFailureDoubt } from "../src/lib/lend-turn-failure.js";
 import { EXEMPTION_TEXT } from "../src/lib/scheduler-model-outcome.js";
 import { informKey } from "../src/lib/scheduler-model-wiring.js";
 import {
-  isPoolPolicyRefusal, planPoolRefusal, poolLedgerFacts, poolPlanEventData, poolRefusalKey, POOL_REFUSAL_OP, recognizePoolRefusal,
-  type PlanFacts, type PoolOrderFacts,
+  isPoolPolicyRefusal, planPoolRefusal, poolLedgerFacts, poolPlanEventData, poolRefusalKey, POOL_REFUSAL_OP, recognizePoolRefusal, lenderFactsFromReleaseText,
+  type LenderFailureFacts, type PlanFacts, type PoolOrderFacts,
 } from "../src/lib/scheduler-refusal-pool.js";
 
 const CYBER = "This request has been flagged for possible cybersecurity risk";
@@ -24,47 +24,66 @@ const HEAD = "a".repeat(40);
 const order = (over: Partial<PoolOrderFacts> = {}): PoolOrderFacts => ({ orderId: "lend:T1:s1:r2:a0", taskId: "T1", step: "review", family: "codex",
   peer: "HedeMacBook-Pro", state: "started", head: HEAD, specRev: 1, round: 2, exempt: false, ...over });
 const card = { headSHA: HEAD, specRev: 1, round: 2 };
-const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ mode: "on", order: order(), refusal: "cyber_policy", authorFamily: "claude", security: false,
+const facts = (over: Partial<PlanFacts> = {}): PlanFacts => ({ mode: "on", order: order(), authorFamily: "claude", security: false,
+  confirmed: { kind: "confirmed", refusal: "cyber_policy", message: CYBER },
   placements: [{ machine: "HedeMacBook-Pro", family: "codex", free: true }, { machine: "peer-b", family: "claude", free: true }, { machine: "local", family: "claude", free: true }],
   prior: [], informed: new Set(), ...over });
 
 let cleanup: (() => void)[] = [];
 afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
-test("识别：只认策略拒审；额度 / 登录 / 普通失败 / 网络一律 none", () => {
+/** 出借方的结构化声明（MODELXP2 起由 release 带来；本卡测试里显式标「来源 = 出借方声明」） */
+const declared = (over: Partial<LenderFailureFacts> = {}): LenderFailureFacts => ({ source: "lender_declared", category: "provider_policy",
+  sessionId: "s-he-1", failedAt: 5_000, doubt: null, message: CYBER, ...over });
+
+test("识别：只认 provider_policy；usage（额度）/ auth / network / other 一律 none", () => {
   expect(isPoolPolicyRefusal(CYBER)).toBe(true);
   expect(isPoolPolicyRefusal(USAGE)).toBe(true);
-  for (const [kind, message] of [["quota", "You've hit your usage limit"], ["auth", "not logged in"], ["error", "stream disconnected: ECONNRESET"],
-    ["error", "429 rate limit"]] as const) {
-    expect(recognizePoolRefusal(order(), card, { kind, message, doubt: null })).toEqual({ kind: "none" });
+  for (const category of ["usage", "auth", "network", "other"] as const) {
+    expect(recognizePoolRefusal(order(), card, declared({ category, message: "You've hit your usage limit" }))).toEqual({ kind: "none" });
   }
 });
 
-test("识别：已领单 + 属于本单当前回合 + head / specRev / 轮次相符 → confirmed，分 cyber / usage", () => {
-  expect(recognizePoolRefusal(order(), card, { kind: "error", message: CYBER, doubt: null })).toEqual({ kind: "confirmed", refusal: "cyber_policy", message: CYBER });
-  expect(recognizePoolRefusal(order({ state: "claimed" }), card, { kind: "error", message: USAGE, doubt: null }))
+test("识别：出借方声明 + 已领单 + 有会话与失败时刻 + head / specRev / 轮次相符 → confirmed，分 cyber / usage_policy", () => {
+  expect(recognizePoolRefusal(order(), card, declared())).toEqual({ kind: "confirmed", refusal: "cyber_policy", message: CYBER });
+  expect(recognizePoolRefusal(order({ state: "claimed" }), card, declared({ message: USAGE })))
     .toEqual({ kind: "confirmed", refusal: "usage_policy", message: USAGE });
 });
 
-test("关联不确定就不动：疑点 / 已结清 / 未领 / head 不符 → suspected，正文带原因", () => {
-  const f = { kind: "error" as const, message: CYBER, doubt: null };
-  expect(recognizePoolRefusal(order(), card, { ...f, doubt: "失败之后会话又开过新回合" }))
+test("只有 release 原因文本（来源 = release_text）：最多 suspected，出不了执行计划", () => {
+  const text = "worker 回合失败（内容策略拦截；出借方不自动重试、不换家族），没交结论；报错原文只留在出借方本机";
+  const f = lenderFactsFromReleaseText(text);
+  expect(f).toMatchObject({ source: "release_text", category: "provider_policy", sessionId: null, failedAt: null });
+  expect(recognizePoolRefusal(order(), card, f)).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：只有 release 原因文本，没有出借方的结构化声明" });
+  // 带上会话 / 时刻也一样：来源不是出借方声明就不确认
+  expect(recognizePoolRefusal(order(), card, { ...f, sessionId: "s", failedAt: 1 }).kind).toBe("suspected");
+  expect(lenderFactsFromReleaseText("worker 撞了 Codex 额度，没交结论").category).toBe("other");
+  expect(recognizePoolRefusal(order(), card, lenderFactsFromReleaseText("worker 撞了 Codex 额度，没交结论"))).toEqual({ kind: "none" });
+});
+
+test("关联不确定就不动：疑点 / 缺会话或时刻 / 已结清 / 未领 / head 不符 → suspected，正文带原因", () => {
+  expect(recognizePoolRefusal(order(), card, declared({ doubt: "失败之后会话又开过新回合" })))
     .toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：失败之后会话又开过新回合" });
-  expect(recognizePoolRefusal(order({ state: "done" }), card, f)).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：单已结清（done）" });
-  expect(recognizePoolRefusal(order({ state: "cancelled" }), card, f).kind).toBe("suspected");
-  expect(recognizePoolRefusal(order({ state: "pooled" }), card, f)).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：单不在已领单状态（pooled）" });
+  for (const over of [{ sessionId: null }, { failedAt: null }, { failedAt: Number.NaN }]) {
+    expect(recognizePoolRefusal(order(), card, declared(over))).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：出借方声明缺会话或失败时刻" });
+  }
+  expect(recognizePoolRefusal(order({ state: "done" }), card, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：单已结清（done）" });
+  expect(recognizePoolRefusal(order({ state: "cancelled" }), card, declared()).kind).toBe("suspected");
+  expect(recognizePoolRefusal(order({ state: "pooled" }), card, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：单不在已领单状态（pooled）" });
   for (const c of [{ ...card, headSHA: "b".repeat(40) }, { ...card, specRev: 2 }, { ...card, round: 3 }]) {
-    expect(recognizePoolRefusal(order(), c, f)).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：head / specRev / 轮次和本单不符" });
+    expect(recognizePoolRefusal(order(), c, declared())).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：head / specRev / 轮次和本单不符" });
   }
 });
 
-test("识别吃的就是 turnFailureDoubt 的结论：老宿主卡没有失败时刻 → suspected", () => {
+test("出借方疑点可以直接是 turnFailureDoubt 的结论：老宿主卡没有失败时刻 → suspected", () => {
   const doubt = turnFailureDoubt({ extra: { failure: "error" } } as never, { sessionId: "s1", startedAt: 1 }, () => null);
-  expect(recognizePoolRefusal(order(), card, { kind: "error", message: CYBER, doubt })).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：卡上没有失败时刻（老宿主）" });
+  expect(recognizePoolRefusal(order(), card, declared({ doubt }))).toEqual({ kind: "suspected", note: "疑似池单拒审，未能确认：卡上没有失败时刻（老宿主）" });
 });
 
 test("PMDIR1 r2：审查单首次被拒 → 撤单、epoch、池里另一家族有空位的 peer、带豁免、告知 owner 一次", () => {
-  const d = planPoolRefusal(facts());
+  const r = recognizePoolRefusal(order(), card, declared());
+  if (r.kind !== "confirmed") throw new Error("应确认");
+  const d = planPoolRefusal(facts({ confirmed: r }));
   expect(d).toMatchObject({ kind: "plan", mode: "on", key: poolRefusalKey("lend:T1:s1:r2:a0", "on"), plan: {
     kind: "replace", cancel: "provider_policy_refusal", step: "review", from: { machine: "HedeMacBook-Pro", family: "codex" },
     to: { machine: "peer-b", family: "claude" }, epoch: true, exemption: EXEMPTION_TEXT, crossModel: false, nextReviewFamily: null,
