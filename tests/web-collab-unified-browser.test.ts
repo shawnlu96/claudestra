@@ -357,6 +357,43 @@ test("1280：打开它的项目组折叠期间改绑 A→B，旧视图照样关�
   expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
 }, 60_000);
 
+test("1280：全部项目组折叠（没有任何入口挂着）期间改绑 A→B，旧视图照样关闭", async () => {
+  reset();
+  world.center["demo-c"] = centerFixture("demo-c");
+  const { page } = await open(1280);
+  await entryOf(page, "claudestra").click();
+  await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
+  expect(await opened(page)).toBe(n5Key("mac-a"));
+  for (const p of PROJECTS["mac-a"]) await group(page, p.name).locator("> button").click(); // 全部折叠：所有入口卸载
+  expect(await page.locator("nav[aria-label='侧栏'] > ul").getByRole("button", { name: "协作视图" }).count()).toBe(0);
+  world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a", { project: "demo-c" })] } };
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await page.waitForFunction("document.body.dataset.open === ''", undefined, { timeout: 20_000 });
+  await group(page, "claudestra").locator("> button").click();
+  await entryOf(page, "claudestra").click();
+  expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
+}, 60_000);
+
+test("1280：中心 403 → 绑定变成跨团队不可区分 → 身份消失：仍『团队权限已失效』，不回退本机", async () => {
+  reset({ centerStatus: 403 });
+  const { page } = await open(1280);
+  const denied = page.waitForResponse((r) => r.url().includes("/shared-ledger/features") && r.status() === 403);
+  await entryOf(page, "claudestra").click();
+  await denied;
+  await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor({ timeout: 40_000 });
+  world.context["mac-a"] = { status: 200, body: { identities: [identity("mac-a"), identity("mac-a", { team: "team-other", localProjectId: "elsewhere" })] } };
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await group(page, "claudestra").getByText("绑定无法区分", { exact: false }).waitFor();
+  world.context["mac-a"] = { status: 200, body: { identities: [] } };
+  const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await refreshed;
+  await page.waitForTimeout(500);
+  await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
+  expect(await entryOf(page, "claudestra").count()).toBe(0);
+  expect(ledgerHits("claudestra")).toEqual([]);
+}, 120_000);
+
 test("390：移动端 菜单 → 入口 → 全屏视图 → 返回", async () => {
   reset();
   const { page } = await open(390);

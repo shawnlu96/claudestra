@@ -5,8 +5,9 @@
  * 绑定不可区分 / 还没核对上 / 中心 403 → 一行禁用说明，不回退本机。
  */
 import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
+import { createRoot } from "react-dom/client";
 import { machines } from "@/lib/machines";
-import { bindingState, lostCenterKey, resolveCollabSource, staleCenterKeys, subscribeBindings, type BindingState,
+import { bindingState, knownCenterKey, lostCenterKey, resolveCollabSource, staleCenterKeys, subscribeBindings, type BindingState,
   type BlockedReason } from "@/lib/collab-source-binding";
 import { CollabEntry } from "./collab-entry";
 import { setLedgerAccess, useLedgerAccess } from "./collab-cache";
@@ -29,7 +30,34 @@ export function useCollabBindings(fp: string): BindingState {
   return useSyncExternalStore(sub, get, get);
 }
 
+/**
+ * 改绑关旧视图的宿主：入口挂在可折叠的项目组里，全部折叠时没有入口在订阅。
+ * 这里单独起一个常驻的小根（不进页面 DOM），只要打开着的是本机 context 里出现过的中心 key，
+ * 就持有该机 store 的订阅（15s / focus 刷新不停），key 过期（改绑 / 解绑 / 停用）即关掉视图
+ */
+let guardMounted = false;
+function mountOpenViewGuard() {
+  if (guardMounted || typeof document === "undefined") return;
+  guardMounted = true;
+  createRoot(document.createElement("div")).render(<OpenViewGuard />);
+}
+
+function OpenViewGuard() {
+  const open = useCollabNav().project;
+  const fp = useSyncExternalStore(subscribeMachines, currentFp, noFp);
+  return fp && open && knownCenterKey(fp, open) ? <CloseWhenStale key={fp} fp={fp} open={open} /> : null;
+}
+
+function CloseWhenStale({ fp, open }: { fp: string; open: string }) {
+  const state = useCollabBindings(fp);
+  useEffect(() => {
+    if (staleCenterKeys(fp).has(open)) closeCollab();
+  }, [fp, open, state]);
+  return null;
+}
+
 export function UnifiedCollabEntry({ projectId }: { projectId: string }) {
+  useEffect(mountOpenViewGuard, []);
   const fp = useSyncExternalStore(subscribeMachines, currentFp, noFp);
   // 没选机器就没有共享绑定可言（同 N5 侧栏列表不出现）
   return fp ? <MachineEntry key={fp} fp={fp} projectId={projectId} /> : <CollabEntry projectId={projectId} />;
@@ -37,24 +65,17 @@ export function UnifiedCollabEntry({ projectId }: { projectId: string }) {
 
 function MachineEntry({ fp, projectId }: { fp: string; projectId: string }) {
   const t = useCollabT();
-  const state = useCollabBindings(fp);
-  const { identities, settled } = state;
+  const { identities, settled } = useCollabBindings(fp);
   const base = resolveCollabSource(identities, projectId, fp);
   const key = base.kind === "center" ? base.key : null;
   // 身份已不在 context 里：看消失前的中心 key 是否已确认 403（撤权 ≠ 解绑）
   const lost = base.kind === "local" ? lostCenterKey(fp, projectId) : null;
   const access = useLedgerAccess(key ?? lost ?? projectId);
   const choice = key || lost ? resolveCollabSource(identities, projectId, fp, (k) => k === (key ?? lost) && access === "no", lost) : base;
-  const open = useCollabNav().project;
   // context 已证明有读凭据：预置可读，CollabEntry 就不会去探 `/ledger/<中心 key>`
   useLayoutEffect(() => {
     if (key && access === "unknown") setLedgerAccess(key, "yes");
   }, [key, access]);
-  // 打开着的中心 key 已不对应当前绑定（A→B / 解绑 / 停用）：关掉，旧视图的迟到回包随组件卸载作废。
-  // 过期集合在 store 里算，这台机器上任何一个挂着的入口都会核对——打开它的那个项目组折叠了也照关
-  useEffect(() => {
-    if (open && staleCenterKeys(fp).has(open)) closeCollab();
-  }, [fp, open, state]);
   if (choice.kind === "local") return <CollabEntry projectId={projectId} />;
   if (choice.kind === "blocked") {
     if (!settled) return null;

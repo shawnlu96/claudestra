@@ -162,3 +162,20 @@ test("过期 key 与撤权记忆在 store 里算：改绑 A→B → A 过期；�
   await refreshBindings("mac-a");
   expect(lostCenterKey("mac-a", "claudestra")).toBeNull();
 });
+
+test("撤权记忆跨过 ambiguous 中间态：A → 跨团队不可区分 → 身份消失，仍记得 A；context 401 清掉", async () => {
+  const { lostCenterKey } = await import("../web/lib/collab-source-binding");
+  let body: unknown = { identities: [A] };
+  setContextRequestForTest(() => body instanceof ApiError ? Promise.reject(body) : Promise.resolve(body));
+  await refreshBindings("mac-a");
+  const r = resolveCollabSource([A], "claudestra", "mac-a"), keyA = r.kind === "center" ? r.key : "";
+  body = { identities: [A, { ...A, team: "team-other", localProjectId: "elsewhere" }] };
+  await refreshBindings("mac-a");
+  expect(lostCenterKey("mac-a", "claudestra")).toBeNull(); // 还在 context 里（只是不可区分）
+  body = { identities: [] };
+  await refreshBindings("mac-a");
+  expect(lostCenterKey("mac-a", "claudestra")).toBe(keyA);
+  body = new ApiError("x", 401);
+  await refreshBindings("mac-a");
+  expect(lostCenterKey("mac-a", "claudestra")).toBeNull();
+});
