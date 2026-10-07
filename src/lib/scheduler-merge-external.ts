@@ -53,10 +53,10 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
           { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
         // A conflicted PR gets no CI run, and right after main moves GitHub reports UNKNOWN before it knows; only those states
         // (seen in the same view) read "no checks" as an empty list. The driver bounces DIRTY and waits out UNKNOWN (bounded).
-        // MCHK1: gh saying outright "no checks reported" (new head, CI not registered yet) reads as UNKNOWN: the driver's bounded wait.
-        noChecks = !checkRun.timedOut && [0, 1, 8].includes(checkRun.code ?? -1) && !checkRun.stdout.trim() &&
-          /no checks reported/i.test(checkRun.stderr) && raw.mergeStateStatus !== "DIRTY";
-        const noChecksYet = noChecks || !checkRun.timedOut && !checkRun.stdout.trim() && ["DIRTY", "UNKNOWN"].includes(String(raw.mergeStateStatus));
+        // MCHK1: any empty answer must be gh saying outright "no checks reported" (else throws → unknown); outside DIRTY it reads as UNKNOWN.
+        const noChecksYet = !checkRun.timedOut && [0, 1, 8].includes(checkRun.code ?? -1) && !checkRun.stdout.trim() &&
+          /no checks reported/i.test(checkRun.stderr);
+        noChecks = noChecksYet && raw.mergeStateStatus !== "DIRTY";
         if (!noChecksYet && (checkRun.timedOut || !checkRun.stdout.trim())) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
         const list = noChecksYet ? [] : JSON.parse(checkRun.stdout) as unknown; // gh exits 8 for pending checks while still returning valid JSON
         if (!Array.isArray(list) || list.some((c) => !c || typeof c !== "object" ||

@@ -184,11 +184,13 @@ for (const c of [
   { name: "stderr 是别的错", checks: { stdout: "", stderr: "HTTP 502: Bad Gateway\n", code: 1 }, why: /gh pr checks 无结果：HTTP 502/ },
   { name: "gh 超时", checks: { stdout: "", stderr: NO_CHECKS, code: null, timedOut: true }, why: /gh pr checks 无结果/ },
   { name: "退出码异常（4 = 未认证）", checks: { stdout: "", stderr: NO_CHECKS, code: 4 }, why: /gh pr checks 无结果/ },
+  { name: "进程没退出码（被杀 / spawn 失败）", checks: { stdout: "", stderr: NO_CHECKS, code: null }, why: /gh pr checks 无结果/ },
   { name: "JSON 坏掉", checks: { stdout: "[{", stderr: "", code: 0 }, why: /外部步骤失败/ },
-]) {
-  test(`MCHK1 反例：${c.name} → 照旧 unknown、冻结`, async () => {
+] as const) for (const mergeState of ["BLOCKED", "UNKNOWN", "DIRTY"]) {
+  // UNKNOWN / DIRTY 曾经把任何空输出都当「没有检查」，审查 checks-error-1：同样必须照旧抛错
+  test(`MCHK1 反例：${mergeState} + ${c.name} → 照旧 unknown、冻结`, async () => {
     const s = await setup();
-    await s.tick(T0, { checks: c.checks });
+    await s.tick(T0, { mergeState, checks: c.checks });
     expect(s.state()).toMatchObject({ phase: "unknown", frozen: true });
     expect(s.state().reason).toMatch(c.why);
     expect(s.sent()).toEqual([]);
