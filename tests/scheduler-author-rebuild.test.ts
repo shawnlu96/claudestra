@@ -6,7 +6,7 @@
  * `manager create`, the swap reading, the PR snapshot and the order transport are stand-ins. No bridge, peer or GitHub.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerWorker } from "../src/lib/agent-lifecycle-store.js";
@@ -41,7 +41,16 @@ afterEach(() => {
   for (const c of cleanups.splice(0)) c();
 });
 
-async function fixture(opts: { retireTask?: string; retireRole?: string; retire?: boolean; binding?: { agent: string; transport: string; state: string } } = {}) {
+interface FixtureOpts {
+  old?: string; retire?: boolean; retireWire?: Record<string, unknown>; binding?: { agent: string; transport: string; state: string };
+  /** runs after every git call of the service (the race window between its checks and its effects) */ afterGit?: (args: string[]) => Promise<void>;
+  /** rewrites a git result of the service (fault injection) */ gitOut?: (args: string[], r: { code: number; out: string }) => { code: number; out: string };
+  createFails?: number;
+}
+const CAPACITY = { ok: false, cleanedUp: true, error: "Selected model is at capacity.\n（已清理：窗口已关；频道已删；占位已删）" };
+
+async function fixture(opts: FixtureOpts = {}) {
+  const old = opts.old ?? OLD;
   const root = realpathSync(mkdtempSync(join(tmpdir(), "areb1-")));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const state = join(root, "state"), runtime = join(root, "run"), home = join(root, "home"), tmp = join(root, "tmp");
@@ -85,7 +94,7 @@ async function fixture(opts: { retireTask?: string; retireRole?: string; retire?
   const spec = join(root, "T1.md");
   writeFileSync(spec, "# T1\n模板:code\n");
   const registryPath = join(state, "registry.json"), configPath = join(state, "scheduler.json"), projectsPath = join(state, "projects.json");
-  const agents: Record<string, Record<string, unknown>> = { [OLD]: { cwd: oldTree, projectId: "p", task: "T1", sessionId: "s-old", runtime: "claude-code", kind: "worker", status: "active" } };
+  const agents: Record<string, Record<string, unknown>> = { [old]: { cwd: oldTree, projectId: "p", task: "T1", sessionId: "s-old", runtime: "claude-code", kind: "worker", status: "active" } };
   const saveRegistry = () => writeFileSync(registryPath, JSON.stringify({ agents }));
   saveRegistry();
   // The project's configured author runtime is codex; the card's workflow family is claude: a rebuild keeps claude.
@@ -97,13 +106,13 @@ async function fixture(opts: { retireTask?: string; retireRole?: string; retire?
   cleanups.unshift(() => closeLedger(dbPath));
   const ctx = { actor: "owner", now: 100 };
   setMeta(db, ctx, { project: "p", key: "pms", value: ["pm"] });
-  createTask(db, ctx, { project: "p", id: "T1", title: "local author card", kind: "code", agent: OLD });
+  createTask(db, ctx, { project: "p", id: "T1", title: "local author card", kind: "code", agent: old });
   createTask(db, ctx, { project: "p", id: "T2", title: "another card", kind: "code" });
   setWorkflow(db, ctx, { taskId: "T1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "缩小范围" });
   db.query("UPDATE tasks SET stage='merge', round=1, rev=2, headSHA=?, pr='https://github.com/example/repo/pull/42', branch=?, spec=?, extra=? WHERE id='T1'").run(head, BRANCH, spec,
     JSON.stringify({ fileGlobs: ["a.ts"] }));
-  registerWorker(db, { agent: OLD, sessionId: "s-old", taskId: "T1", role: "author", createdBy: "agent-pm", now: 100 });
-  insertEvent(db, { actor: OLD, now: 110 }, { project: "p", target: "T1", kind: "deliver", text: "build 交付", data: { op: "deliver", step: "build", headTo: head } }, false);
+  registerWorker(db, { agent: old, sessionId: "s-old", taskId: "T1", role: "author", createdBy: "agent-pm", now: 100 });
+  insertEvent(db, { actor: old, now: 110 }, { project: "p", target: "T1", kind: "deliver", text: "build 交付", data: { op: "deliver", step: "build", headTo: head } }, false);
   insertEvent(db, { actor: "agent-review", now: 120 }, { project: "p", target: "T1", kind: "review", text: "", data: {
     round: 1, head, verdict: "pass", reviewer: "agent-review", reviewerSessionId: "rs-T1", reviewerFamily: "codex", path: "reviews/T1-r1/report.md", findings: [], p0: 0, p1: 0, p2: 0 } }, false);
   const intent = (id: string, node: string, action: string, status: string) => db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,
@@ -122,11 +131,11 @@ async function fixture(opts: { retireTask?: string; retireRole?: string; retire?
 
   // LIFE1 retires the idle author while the card waits in merge: the real ledger child, then the agent and its checkout go.
   if (opts.retire !== false) {
-    const wire = { agent: OLD, sessionId: "s-old", taskId: opts.retireTask ?? "T1", role: opts.retireRole ?? "author", rule: "memory",
-      reason: "swap 91% 超过 70%，闲置 0.5h", idleMs: 1_800_000, bytesBefore: 9000, bytesAfter: 1000, steps: ["已归档", "已移除"], pending: [], retry: false };
+    const wire = { agent: old, sessionId: "s-old", taskId: "T1", role: "author", rule: "memory", reason: "swap 91% 超过 70%，闲置 0.5h", idleMs: 1_800_000,
+      bytesBefore: 9000, bytesAfter: 1000, steps: ["已归档", "已移除"], pending: [], retry: false, ...opts.retireWire };
     expect(await cli(true, "scheduler-worker-retire", "--wire", JSON.stringify(wire))).toMatchObject({ ok: true });
   }
-  delete agents[OLD]; saveRegistry();
+  delete agents[old]; saveRegistry();
   await run(repo, "worktree", "remove", "--force", oldTree);
 
   // The merge queue sees the required check red on the reviewed head: ci_fail back to fix, written by real ledger children.
@@ -140,8 +149,14 @@ async function fixture(opts: { retireTask?: string; retireRole?: string; retire?
   let swap: number | null = 10;
   const start = { registryPath, configPath, projectsPath, lockPath: join(root, "codex.lock") };
   const prod = autoTickDeps(db, { registryPath, worktreeRoot, lease, readConfig: () => readSchedulerConfig(configPath),
+    git: async (args) => {
+      const r = await git(args);
+      await opts.afterGit?.(args);
+      return opts.gitOut ? opts.gitOut(args, r) : r;
+    },
     create: async (...args) => {
       creates.push(args);
+      if (creates.length <= (opts.createFails ?? 0)) return CAPACITY; // manager create cleaned its window, channel and placeholder
       const runtime = args.includes("codex") ? "codex" : "claude-code";
       agents[`agent-${args[1]}`] = { cwd: args[2], projectId: "p", task: "T1", sessionId: `s-${args[1]}`, runtime, transport: runtime === "codex" ? "acp" : "tmux", kind: "worker", status: "active" };
       saveRegistry(); return { ok: true };
@@ -155,8 +170,8 @@ async function fixture(opts: { retireTask?: string; retireRole?: string; retire?
   const tick = async () => (await schedulerAutoTick(db, readSchedulerConfig(configPath).projects, deps)).cards.find((c) => c.taskId === "T1");
   const mode = (m: "on" | "observe" | "off") => cli(false, "scheduler-recovery", "p", m, "--key", "authorRebuild", "--reason", "AREB1 测试");
   const events = (op: string) => listEvents(db, { target: "T1" }).filter((e) => e.data.op === op);
-  return { db, repo, run, head, worktreeRoot, cli, bounce, tick, mode, creates, sent, events, agents, saveRegistry, cleanups,
-    setSwap: (v: number | null) => { swap = v; }, task: () => getTask(db, "T1")! };
+  return { db, repo, run, head, worktreeRoot, cli, bounce, tick, mode, creates, sent, events, agents, saveRegistry, cleanups, old,
+    setSwap: (v: number | null) => { swap = v; }, advance: (ms: number) => { now += ms; }, task: () => getTask(db, "T1")! };
 }
 
 type F = Awaited<ReturnType<typeof fixture>>;
@@ -229,8 +244,8 @@ describe("AREB1 counter-examples (on)", () => {
   }, 60_000);
 
   test("the retire record is another card's, or a reviewer's → manual", async () => {
-    await manualWith(await fixture({ retireTask: "T2" }), `执行者 ${OLD} 不在本机 registry`);
-    await manualWith(await fixture({ retireRole: "reviewer" }), `执行者 ${OLD} 不在本机 registry`);
+    await manualWith(await fixture({ retireWire: { taskId: "T2" } }), `执行者 ${OLD} 不在本机 registry`);
+    await manualWith(await fixture({ retireWire: { role: "reviewer" } }), `执行者 ${OLD} 不在本机 registry`);
   }, 90_000);
 
   test("PR head moved away from the card's head → manual", async () => {
@@ -287,4 +302,125 @@ describe("AREB1 counter-examples (on)", () => {
     expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
     expect(existsSync(join(f.worktreeRoot, "t1"))).toBe(false);
   }, 60_000);
+});
+
+/** on, bounced, settled: exactly one create, of `name`, on the card's branch at its head; the card names it. */
+async function expectRebuilt(f: F, name: string) {
+  expect(await f.mode("on")).toMatchObject({ ok: true });
+  await f.bounce();
+  await settle(f, 8);
+  expect(f.creates.map((c) => c[1])).toEqual([name.slice("agent-".length)]);
+  expect(await f.run(f.creates[0][2], "rev-parse", "HEAD")).toBe(f.head);
+  expect(f.task().agent).toBe(name);
+}
+/** on, bounced, settled: nothing created, the card keeps the old author, the branch is where it was, the outcome names `text`. */
+async function expectKept(f: F, text: string, branchAt?: string | (() => string)) {
+  expect(await f.mode("on")).toMatchObject({ ok: true });
+  await f.bounce();
+  const seen = await settle(f);
+  expect(seen.join("\n")).toContain(text);
+  expect(f.creates).toEqual([]);
+  expect(f.task().agent).toBe(f.old);
+  expect(await f.run(f.repo, "rev-parse", `refs/heads/${BRANCH}`)).toBe((typeof branchAt === "function" ? branchAt() : branchAt) ?? f.head);
+}
+
+describe("AREB1 names (on)", () => {
+  test("the retired author had start_node's default name → the next generation, never the old name", async () => {
+    await expectRebuilt(await fixture({ old: "agent-task-t1" }), "agent-task-t1-r2");
+  }, 60_000);
+  test("the retired author was itself a rebuild (-r2) → -r3", async () => {
+    await expectRebuilt(await fixture({ old: "agent-task-t1-r2" }), "agent-task-t1-r3");
+  }, 60_000);
+  test("the next name is already a registry agent (another session) → kept for PM as unknown, never overwritten", async () => {
+    const f = await fixture();
+    f.agents[NEW] = { cwd: "/elsewhere", projectId: "p", task: "T9", sessionId: "s-someone", runtime: "claude-code", kind: "worker", status: "active" };
+    f.saveRegistry();
+    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.bounce();
+    const seen = await settle(f);
+    expect(seen.join("\n")).toContain(`${NEW} 已存在但未绑定`);
+    expect(f.creates).toEqual([]);
+    expect(f.agents[NEW]).toMatchObject({ sessionId: "s-someone", cwd: "/elsewhere" });
+    expect(f.task().agent).toBe(OLD);
+  }, 60_000);
+});
+
+describe("AREB1 retire evidence (on)", () => {
+  const gone = `执行者 ${OLD} 不在本机 registry`;
+  test("a retire written by someone other than the scheduler service → manual", async () => {
+    const f = await fixture({ retire: false });
+    insertEvent(f.db, { actor: "agent-pm", now: 140 }, { project: "p", target: "T1", kind: "scheduler", text: "fake", data: { op: "worker_retire",
+      agent: OLD, sessionId: "s-old", role: "author", rule: "memory", reason: "x", retry: false } }, false);
+    await expectKept(f, gone);
+  }, 60_000);
+  test("a retire of another session than the registered one → manual", async () => {
+    await expectKept(await fixture({ retireWire: { sessionId: "s-other" } }), gone);
+  }, 60_000);
+  test("the agent registered again after the retire → manual", async () => {
+    const f = await fixture();
+    registerWorker(f.db, { agent: OLD, sessionId: "s-again", taskId: "T1", role: "author", createdBy: "agent-pm" });
+    await expectKept(f, gone);
+  }, 60_000);
+  test("another live author registered on the card → manual", async () => {
+    const f = await fixture();
+    registerWorker(f.db, { agent: "agent-other", sessionId: "s-x", taskId: "T1", role: "author", createdBy: "agent-pm" });
+    await expectKept(f, gone);
+  }, 60_000);
+  test("the card is placed on a peer → never rebuilt here (the peer's author is not ours)", async () => {
+    const f = await fixture();
+    f.db.query("UPDATE tasks SET extra = ? WHERE id='T1'").run(JSON.stringify({ fileGlobs: ["a.ts"], placement: "peer:Sekai" }));
+    await expectKept(f, "peer:Sekai");
+  }, 60_000);
+});
+
+describe("AREB1 the retired author's branch (on)", () => {
+  test("the local branch carries unpushed work past the card's head → kept (unknown), branch untouched", async () => {
+    const f = await fixture();
+    const side = join(f.worktreeRoot, "..", "side");
+    await f.run(f.repo, "worktree", "add", "-q", side, BRANCH);
+    writeFileSync(join(side, "a.ts"), "wip\n");
+    await f.run(side, "commit", "-qam", "wip");
+    const wip = await f.run(side, "rev-parse", "HEAD");
+    await f.run(f.repo, "worktree", "remove", "--force", side);
+    await expectKept(f, `分支 ${BRANCH} 不在本卡起点`, wip);
+  }, 60_000);
+  test("another worktree holds the branch → kept", async () => {
+    const f = await fixture();
+    await f.run(f.repo, "worktree", "add", "-q", join(f.worktreeRoot, "..", "holder"), BRANCH);
+    await expectKept(f, `分支 ${BRANCH} 仍被 worktree 占用`);
+  }, 60_000);
+  test("the target path is a dangling symlink → kept, the link left as it was", async () => {
+    const f = await fixture();
+    mkdirSync(f.worktreeRoot, { recursive: true });
+    symlinkSync(join(f.worktreeRoot, "nowhere"), join(f.worktreeRoot, "t1"));
+    await expectKept(f, "已存在，保留并等待核对");
+    expect(lstatSync(join(f.worktreeRoot, "t1")).isSymbolicLink()).toBe(true);
+  }, 60_000);
+  test("the branch moves between the first check and the add (race) → kept, the moved branch untouched", async () => {
+    let moved = "";
+    const f: F = await fixture({ afterGit: async (args) => {
+      if (moved || !args.includes("fetch") || !args.includes("origin")) return;
+      const tree = await f.run(f.repo, "commit-tree", "-p", f.head, "-m", "race", `${f.head}^{tree}`);
+      await f.run(f.repo, "update-ref", `refs/heads/${BRANCH}`, tree);
+      moved = tree;
+    } });
+    await expectKept(f, `分支 ${BRANCH} 不在本卡起点`, () => moved);
+    expect(moved).not.toBe("");
+  }, 60_000);
+  test("saving the checkout's start record fails → kept (unknown), nothing created", async () => {
+    const f = await fixture({ gitOut: (args, r) => args.at(-1) === "--absolute-git-dir" ? { code: 0, out: "/nonexistent/areb1" } : r });
+    await expectKept(f, "保存 worktree 起点失败");
+  }, 60_000);
+  test("a clean create failure backs off, then the retry reuses its own checkout and builds once", async () => {
+    const f = await fixture({ createFails: 1 });
+    expect(await f.mode("on")).toMatchObject({ ok: true });
+    await f.bounce();
+    const first = await settle(f);
+    expect(first.join("\n")).toContain("建会话失败，现场已清理");
+    expect(f.task().agent).toBe(OLD);
+    f.advance(20 * 60_000);
+    await settle(f, 8);
+    expect(f.creates.map((c) => c[1])).toEqual([NEW.slice("agent-".length), NEW.slice("agent-".length)]);
+    expect(f.task().agent).toBe(NEW);
+  }, 90_000);
 });
