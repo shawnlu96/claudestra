@@ -311,14 +311,15 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
    - 对方实例上的卡（他的 PM 管他的卡）不受我方开关影响。
 4. **peer 角色写入**：`peer-write` 是受托方经 peer 台账写委托卡，只能做 PEER_STEP_MOVES 列出的阶段移动（`src/lib/ledger-stages.ts`），不属于 PM 干预，保持现状。
 5. **保持现状的范围**：
-   - workflow 是 `manual` 的卡、没有 workflow 行的旧卡、`investigate` / `ops` 卡，行为完全不变；
+   - workflow 是 `manual` 的卡、没有 workflow 行的旧卡、`investigate` / `ops` 卡，行为完全不变（带 `railsVersion` 的卡不会再变回 manual，见第 5 节 P2）；
    - 开关打开前已经是 auto 的在途卡，在 observe 期只记审计；
    - 到限权期，在途卡仍按卡上记录的开关版本执行，**不追溯**。新卡开卡时把 `railsVersion` 写进 workflow。
 
 ## 5. 迁移与分期
 
 - **P0：只读（审计 + 推送）**。
-  - 在 auto 卡上，所有非 scheduler 的写入都补上 `data.manual=true` 和 `intervention` 分类（stage / task-set / review / freeze / merge-step / ui / restate / dag 这些现在不标的，见 1.2）。
+  - 在 auto 卡上，按「操作 + 角色」分类：人工干预补上 `data.manual=true` 和 `intervention`（stage / task-set / review / freeze / merge-step / ui / restate / dag 这些现在不标的，见 1.2）。
+    正常订单结果提交**豁免**，不算干预：执行者交自己当前单的 `deliver`、绑定审查员的 `submit_verdict` / `review`、peer 在 PEER_STEP_MOVES 内的 `peer-write`、`lend-write` 回结果、`order-taken`、`ask`。
   - 每次写入同步以 `inform` 推给 owner，并在台账页显示「人工干预」徽标。
   - 引擎静默 held 超过 N 分钟时推 owner。
   - 不拒绝任何命令。
@@ -329,8 +330,10 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 - **P2：接管上线并限权**。
   - 新增 `takeover-request` / `-begin` / `-end`。
   - 1.2 里的手工命令在 auto 卡上，除非处于接管期，否则一律拒绝，错误信息写明应走哪个动作或去申请接管。
+  - **同期堵住退回口**：带 `railsVersion` 的卡，`fallbackToManual` 与 `workflow-set --mode manual` 一律转 `stopped`（P2 先只推 PM + owner inform，收件箱卡片在 P3），不再回到 manual 拿旧手工权限；manual 只能经接管进入。
+    做不到这一条就不开 P2：否则引擎一退回，卡按 4.5 恢复旧权限，P2 等于不提供完整约束。
 - **P3：停卡进收件箱**。
-  - `fallbackToManual` 改为 `stopped`，三种静默停住都进收件箱。
+  - 停卡（含 P2 起的 `stopped`）与三种静默停住都进 owner 收件箱。
   - `workflow-resume` 在 auto / stopped 卡上被 `card-restart` 取代，仍保留给 manual 卡使用。
 
 ### 验收测试清单
@@ -339,7 +342,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 
 | # | 期 | 测试（期望） |
 |---|---|---|
-| T1 | P0 | auto 卡上 PM `stage` / `task-set` / `freeze` / `scheduler-merge-step` 各写一次，每条事件都有 `manual:true` 和 `intervention`，每条都生成一条 owner inform |
+| T1 | P0 | auto 卡上 PM `stage` / `task-set` / `freeze` / `scheduler-merge-step` 各写一次，每条都有 `manual:true` 和 `intervention` 并生成 owner inform；执行者 deliver、审查员 submit_verdict、peer 正常交付不标、不推 |
 | T2 | P0 | 意图 unknown 停住超过阈值，推送 owner 一次；同一状态版本不重复推送 |
 | T3 | P1 | `card-pause` 撤掉 pending 意图，submitted 保留；规划器返回 wait；`card-continue` 后重新规划 |
 | T4 | P1 | 合并 run 处于 merging 时 `card-pause` / `card-cancel` 被拒 |
@@ -351,6 +354,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 | T10 | P1 | (a1) 复现：create 输出前面多一行日志，引擎自核后自己绑定，不需要人工 |
 | T11 | P1 | (a4) PR 已合并且包含审查 head，引擎推 live；不包含时转 stopped |
 | T12 | P1 | (a5) 两跳 main 合并在 `mainCarry=on` 时被认；含非 main 提交时转 stopped |
+| T13a | P2 | rails 卡上引擎退回与 PM `workflow-set --mode manual` 都落到 `stopped`，之后手工命令仍被拒（不经 manual 拿回权限） |
 | T13 | P2 | 不在接管期时，auto 卡上 PM 的 `stage`、`task-set --head`、`scheduler-settle`、`scheduler-session-bind`、`workflow-set manual`、`review`、`freeze`、`main-carry`、`manual-merge-request`、`lend-cancel` 逐条被拒，错误信息给出出口 |
 | T14 | P2 | `takeover-begin`：ask 没答 / 非 owner 作答（`external` 或缺少 `owner` 标记）/ 驳回 / 哈希不符 / 过期 / 调用方不是 grantee / 卡 rev 已变，逐条被拒 |
 | T15 | P2 | 接管期间 grantee 的每一条写入都带 `takeoverId`，并推送 owner；别的 PM 写入被拒 |
@@ -374,8 +378,8 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
   - 可以读 `.env` 拿到 bot token 伪造按钮（`docs/team/orchestration-team.md:54`）。
 
   所以这里的保证**只在工具面上成立**：
-  - **保证**：只用 Claudestra 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner；绕开工具直接写库会在审计里留下没有 `takeoverId` 的手工事件，可以被巡检发现。
-  - **不保证**：防不住铁了心的本机 agent；不能让 CLI 上的「owner」等于 owner 本人；不能阻止 GitHub 侧的人工操作（比如仓库方手动合并，这类只能由引擎识别和停卡）。
+  - **保证**：只用 Claudestra 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner。审计只覆盖正规写入口。
+  - **不保证**：直接写库不一定留下事件（UPDATE 可以不插事件，也能伪造带 `takeoverId` 的事件或改审计记录）；独立对账（台账状态 vs PR / registry / 意图）可能发现部分状态差异，但不保证发现直接写库；防不住铁了心的本机 agent；不能让 CLI 上的「owner」等于 owner 本人；不能阻止 GitHub 侧的人工操作（比如仓库方手动合并，这类只能由引擎识别和停卡）。
 - **规格变更被当成逃生口**。PM 可能为了把卡推回 fix 而去改规格。这一点由三条约束限制：规格卡必须真的有改动；delta 由服务端 diff 出来；每次规格变更都推给 owner。
 - **实现成本**：P1–P2 要动 `ledger-write-cmds.ts` 和 `ledger-scheduler-cmds.ts` 这两个在基线里的大文件。按防腐规则，逻辑放进新模块，大文件里只加一行调用。
 
