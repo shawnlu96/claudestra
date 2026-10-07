@@ -48,7 +48,7 @@ beforeAll(async () => {
   origin = `http://127.0.0.1:${server.port}`;
   browser = await chromium.launch({ headless: true,
     ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
-});
+}, 120_000);
 afterAll(async () => {
   await browser?.close(); server?.stop(true);
   if (enabled) expect(staticRequests.every((r) => r.startsWith("GET ")
@@ -64,13 +64,13 @@ const messages = Array.from({ length: 24 }, (_, i) => ({ seq: i + 1, ts: new Dat
   ...(i % 2 ? { replyText: `Synthetic reply ${i + 1}: real Chat layout evidence.\nSecond line for bubble sizing.` } : {}), fromId: "api:owner:self" }));
 interface Device { ctx: BrowserContext; page: Page; wall: boolean; codex: string; claude: string; warnPct: number; requests: string[]; forbidden: string[]; errors: string[] }
 
-async function device(width: number, wall = false): Promise<Device> {
+async function device(width: number, wall = false, list = false): Promise<Device> {
   const ctx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 800 }, locale: "zh-CN",
     timezoneId: "Asia/Shanghai", hasTouch: width === 390, serviceWorkers: "block" });
   await ctx.addInitScript(`(() => {
     if (location.protocol !== "http:") return;
     localStorage.setItem("cstra_invite_handler", "confirmed"); localStorage.setItem("cstra_lang", "zh");
-    localStorage.setItem("cstra_last_agent", "qwarn-evidence");
+    ${list ? "" : 'localStorage.setItem("cstra_last_agent", "qwarn-evidence");'}
     const raw = window.fetch.bind(window);
     window.fetch = (input, init) => {
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -81,6 +81,7 @@ async function device(width: number, wall = false): Promise<Device> {
     window.WebSocket = class { constructor() { throw new Error("Isolated capture refuses WebSockets"); } };
   })()`);
   const d: Device = { ctx, page: await ctx.newPage(), wall, codex: "stop", claude: "warn", warnPct: 70, requests: [], forbidden: [], errors: [] };
+  d.page.setDefaultTimeout(10_000);
   d.page.on("pageerror", (error) => d.errors.push(error.message));
   await ctx.route("**/*", async (route) => {
     const r = route.request(), u = new URL(r.url());
@@ -92,9 +93,12 @@ async function device(width: number, wall = false): Promise<Device> {
     const path = u.pathname.slice("/api/v1".length);
     if (path === "/whoami") return json({ ok: true, role: "owner", principalId: "owner:self", tokenId: "owner:self",
       ownerIds: [], agents: ["*"], grant: { agents: ["*"], manage: true, terminal: false }, manage: true });
-    if (path === "/agents") return json({ ok: true, agents: [{ name: "agent-qwarn-evidence", status: "active", purpose: "Synthetic evidence",
-      cwd: "", projectId: "synthetic", busy: false, runtime: "claude-code", lastActivityTs: Date.now() }] });
-    if (path === "/projects") return json({ projects: [{ id: "synthetic", name: "Isolated evidence", dirs: [] }] });
+    if (path === "/agents") return json({ ok: true, agents: ["qwarn-evidence", "qwarn-helper"].map(name => ({
+      name: `agent-${name}`, status: "active", purpose: "Synthetic evidence", cwd: "", projectId: "synthetic",
+      busy: false, runtime: "claude-code", lastActivityTs: Date.now() })) });
+    if (path === "/projects") return json({ ok: true, projects: [{ id: "synthetic", name: "Isolated evidence", dirs: [] }] });
+    if (path === "/ledger/synthetic") return json({ ok: true, exists: true, now: Date.now(),
+      meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } }, tasks: [], items: [], deps: [] });
     if (path === "/lend/quota-lines") return json({ ok: true, config: { status: "ok", error: null, mode: "on" }, at: Date.now(),
       families: [line("codex", d.codex, d.warnPct), line("claude", d.claude, d.warnPct)] });
     if (path === "/quota/wall") return json(d.wall ? { active: true, queued: 3, wall: { kind: "weekly", resetsAt: RESET, enteredAt: 1 } } : { active: false });
@@ -106,15 +110,79 @@ async function device(width: number, wall = false): Promise<Device> {
     if (path === "/events") return route.continue();
     return json({ error: "isolated_unconfigured" }, 404);
   });
-  await d.page.goto(`${origin}/chat?agent=qwarn-evidence#chat`);
-  await d.page.locator("[data-mid]").first().waitFor();
-  await d.page.locator('[data-quota-warning="codex"]').waitFor();
+  await d.page.goto(`${origin}/chat${list ? "" : "?agent=qwarn-evidence#chat"}`);
+  if (!list) await d.page.locator("[data-mid]").first().waitFor();
+  await d.page.locator('[data-quota-warning="codex"]').waitFor({ state: "attached" });
   await d.page.waitForTimeout(800);
   return d;
 }
 
 const scroller = (p: Page) => p.locator("div.touch-pan-y.overflow-y-auto").filter({ has: p.locator("[data-mid]") }).first();
 const poll = async (p: Page) => { await p.evaluate('document.dispatchEvent(new Event("visibilitychange"))'); await p.waitForTimeout(800); };
+
+/** Exercise the shipped boundary's fallback without adding a production fault-injection switch. */
+async function chatFallback(p: Page) {
+  await p.evaluate(`(() => {
+    const el = document.querySelector("textarea");
+    let fiber = el[Object.keys(el).find(k => k.startsWith("__reactFiber$"))];
+    while (fiber) {
+      const instance = fiber.stateNode;
+      if (instance?.props?.resetKey !== undefined && typeof instance.reset === "function") {
+        instance.setState({ error: new Error("Synthetic ChatPaneBoundary evidence") }); return;
+      }
+      fiber = fiber.return;
+    }
+    throw new Error("ChatPaneBoundary not found");
+  })()`);
+  await p.getByRole("alert").filter({ hasText: "这部分出错了" }).waitFor();
+}
+
+async function captureSurface(d: Device, label: string) {
+  const p = d.page;
+  const measurement = await p.evaluate(`(() => {
+    const warnings = [...document.querySelectorAll("[data-quota-warning]")];
+    const walls = [...document.querySelectorAll('[role="status"]')].filter(e => e.textContent.includes("Claude Code 周额度已用完"));
+    return [...warnings, ...walls].map(e => {
+      const r = e.getBoundingClientRect();
+      return { text: e.textContent, rect: r.toJSON(), visible: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight,
+        hit: e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
+    });
+  })()`) as { text: string; rect: { bottom: number; top: number }; visible: boolean; hit: boolean }[];
+  await p.screenshot({ path: join(out, `${label}.png`) });
+  await Bun.write(join(out, `${label}.json`), JSON.stringify({ measurement, requests: d.requests, errors: d.errors, forbidden: d.forbidden }, null, 2));
+  expect(d.errors).toEqual([]); expect(d.forbidden).toEqual([]);
+  expect(measurement).toHaveLength(3);
+  expect(await p.locator('[data-quota-warning="codex"]').count()).toBe(1);
+  expect(await p.locator('[data-quota-warning="claude"]').count()).toBe(1);
+  expect(measurement.every(m => m.visible && m.hit)).toBe(true);
+  for (let i = 1; i < measurement.length; i++) {
+    const a = measurement[i - 1].rect, b = measurement[i].rect;
+    expect(a.bottom <= b.top || b.bottom <= a.top).toBe(true);
+  }
+}
+
+for (const width of [390, 1280]) {
+  for (const surface of ["列表页", "协作视图", "兜底页"]) {
+    test.skipIf(!enabled)(`真实Chat ${width}：${surface}两族提醒和旧墙唯一且可读`, async () => {
+      const d = await device(width, true, surface !== "兜底页");
+      try {
+        if (surface === "协作视图") {
+          await d.page.getByRole("button", { name: "协作视图", exact: true }).click();
+          await d.page.getByRole("heading", { name: "这个项目还没有台账" }).waitFor();
+        } else if (surface === "兜底页") await chatFallback(d.page);
+        await d.page.waitForTimeout(800);
+        await captureSurface(d, `${width}-${surface}`);
+        // Switching surfaces must keep the same mounted readers; no remount/poll replay.
+        expect(d.requests.filter(r => r.includes("/lend/quota-lines"))).toHaveLength(1);
+        expect(d.requests.filter(r => r.endsWith("/quota/wall"))).toHaveLength(1);
+        for (const family of ["codex", "claude"]) await d.page.locator(`[data-quota-warning="${family}"] button`).click();
+        await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+        expect((await d.page.locator("#cstra-shell > div.absolute > div.shrink-0").boundingBox())!.height).toBe(0);
+        await d.page.screenshot({ path: join(out, `${width}-${surface}-dismissed.png`) });
+      } finally { await d.ctx.close(); }
+    }, 30_000);
+  }
+}
 
 interface Rect { x: number; y: number; width: number; height: number; top: number; bottom: number; left: number; right: number }
 interface Measurement {
