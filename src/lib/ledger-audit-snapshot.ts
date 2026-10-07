@@ -18,6 +18,7 @@ import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
+import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -223,6 +224,41 @@ function pendingReview(task: LedgerTask, rows: TaskStep[]): AuditSnapshot["tasks
   return s && s.round === task.round && s.state !== "done" ? { executor: s.executor, executorKind: s.executorKind, at: s.updatedAt } : null;
 }
 
+/** LGR1：各出借方最近一次存下的授权 + 本项目 24 小时内在它那儿的出借单数 / claimed 单数（只读）；没有出借表 = undefined（规则不跑） */
+export function readLendGrants(db: Database, project: string, now: number): LendGrantFact[] | undefined {
+  if ((db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('lend_peers','lend_orders')").get() as { n: number }).n < 2) return undefined;
+  return (db.query(`SELECT p.peer, p.grant, p.helloAt, (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.updatedAt >= ?2) AS recent,
+    (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.status = 'claimed') AS running FROM lend_peers p ORDER BY p.peer`)
+    .all(project, now - LEND_GRANT_RECENT_MS) as (Omit<LendGrantFact, "until"> & { grant: string | null })[]).map(({ grant, ...r }) => ({ ...r, until: grantUntilOf(grant) }));
+}
+/** LGR1：本项目已建 audit_baseline 的授权规则（只读）；读不了 = null（规则这轮不跑，不让首轮静默吞掉提醒） */
+export function readLendGrantBaseline(db: Database, project: string): string[] | null {
+  try {
+    return (db.query(`SELECT rule FROM audit_baseline WHERE project = ? AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`)
+      .all(project, ...LEND_GRANT_RULES) as { rule: string }[]).map((r) => r.rule);
+  } catch {
+    return null;
+  }
+}
+/** LGR1：本项目已推过（notifiedAt / queuedAs）又已关掉的授权发现 key（只读）——同一次授权不重开重推；读不了 = null（规则这轮不跑） */
+export function readLendGrantTold(db: Database, project: string): string[] | null {
+  try {
+    return (db.query(`SELECT key FROM audit_findings WHERE project = ? AND resolvedAt IS NOT NULL AND (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL)
+      AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`).all(project, ...LEND_GRANT_RULES) as { key: string }[]).map((r) => r.key);
+  } catch {
+    return null;
+  }
+}
+/** LGR1：本项目还开着的授权发现（只读）；读不了 = null（规则这轮不跑） */
+function readLendGrantOpen(db: Database, project: string): { key: string; rule: string; told: boolean }[] | null {
+  try {
+    return (db.query(`SELECT key, rule, (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL) AS told FROM audit_findings WHERE project = ? AND resolvedAt IS NULL
+      AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`).all(project, ...LEND_GRANT_RULES) as { key: string; rule: string; told: number }[])
+      .map((r) => ({ ...r, told: !!r.told }));
+  } catch {
+    return null;
+  }
+}
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
@@ -273,7 +309,8 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown, mergeCi: ci.get(project),
+      mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
+      lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,
