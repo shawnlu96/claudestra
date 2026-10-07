@@ -77,6 +77,13 @@ describe("activeReviewsByAgent", () => {
     expect(Object.keys(reviews())).toEqual(["codex"]);
   });
 
+  test("本机 agent 名带 @（executorKind=agent）照样在审：远端只看 executorKind，不看名字（PR855-r1）", () => {
+    card("A1");
+    toStage("A1", "review");
+    assign("A1", "agent-review@local");
+    expect(reviews()).toEqual({ "review@local": { id: "A1", round: 1, verdict: null, p0: 0, p1: 0, p2: 0 } });
+  });
+
   test("既是某卡执行者、又被派审别的卡：两张表各给各的，谁也不盖谁", () => {
     card("E1", "agent-dual");
     toStage("E1", "build", 0);

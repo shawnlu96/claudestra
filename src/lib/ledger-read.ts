@@ -15,6 +15,7 @@ import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask, type ReviewVerdict,
 import { auditChangedProjects, openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { listSteps, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { stepLineInfo, type StepLineInfo } from "./ledger-step-line.js";
+import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { RETIRE_STAGES, taskSessionLinks } from "./scheduler-sessions.js";
 import { getMeta, LEDGER_PATH, LEDGER_SCHEMA_VERSION, listDeps, listEvents, listItems, listTasks, getTask, toEvent, type LedgerMeta } from "./ledger-store.js";
 
@@ -211,10 +212,11 @@ export interface LedgerReviewRef {
 
 const count = (v: unknown): number => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0);
 
-/** 审查员名是本机 agent 才算：派给 peer / 人的（带 @ 或 local:）不进表 */
+/** 结论事件只有审查员名、没有 kind：带 @（peer）或 local:（人）的不算本机审查员 */
 const localReviewer = (who: unknown): who is string => typeof who === "string" && !!who && !who.includes("@") && !who.startsWith("local:");
-const inReview = (who: unknown, id: string, round: number): [string, LedgerReviewRef] | null =>
-  localReviewer(who) ? [who, { id, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;
+/** 派审 / 绑定已由调用方按 kind / transport / 出借意图判过本机：名字原样收（本机 agent 名可以带 @，见 ledger-steps.ts stepPeer） */
+const inReview = (local: boolean, who: unknown, id: string, round: number): [string, LedgerReviewRef] | null =>
+  local && typeof who === "string" && who ? [who, { id, round, verdict: null, p0: 0, p1: 0, p2: 0 }] : null;
 
 /**
  * 一条派审 / 结论 / 调度器审查员会话事件 → 本机审查员裸名 + 它对这张卡的状态；taskRound = 卡当前轮次（bind 事件不带轮次）。
@@ -223,10 +225,13 @@ const inReview = (who: unknown, id: string, round: number): [string, LedgerRevie
 function reviewOf(e: LedgerEvent, taskRound: number): [string, LedgerReviewRef] | null {
   const d = e.data;
   const round = count(d.round);
-  if (e.kind === "step") return d.executorKind === "agent" ? inReview(d.executor, e.target, round) : null;
+  if (e.kind === "step") return inReview(d.executorKind === "agent", d.executor, e.target, round);
   if (e.kind === "scheduler") {
-    if (d.op === "session_bind") return inReview(d.agent, e.target, taskRound);
-    if (d.op === "plan") return inReview(d.recipient, e.target, Number(/:r(\d+):/.exec(String(d.id))?.[1] ?? taskRound));
+    if (d.op === "session_bind") return inReview(d.transport !== "peer", d.agent, e.target, taskRound);
+    if (d.op === "plan") {
+      const local = !isPoolIntent({ action: "review", recipient: typeof d.recipient === "string" ? d.recipient : null });
+      return inReview(local, d.recipient, e.target, Number(/:r(\d+):/.exec(String(d.id))?.[1] ?? taskRound));
+    }
     return null; // session_retire
   }
   const verdict = (["pass", "changes", "block"] as const).find((v) => v === d.verdict);
