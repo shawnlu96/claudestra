@@ -4,7 +4,8 @@
  * 准备工作在进程内走（同 tests/scheduler-pool.test.ts）。复现 PMDIR1 r2 形态：池审查单在 HedeMacBook-Pro（codex）被提供方策略拒审，
  * 出借方 release 带 failure.class = provider_policy。
  * 旧代码：单变 unknown，交 PM。新代码：撤单 → 记结果 → epoch → 规划器下一轮换家族（peer-b 的 claude，带豁免）重挂 → owner 只收一次通知。
- * 反例：旧对端不带类别 / usage / auth / 畸形类别 → 不动；豁免单再拒 → manual；去处是本机 → manual（原因码 + 单号）；observe 只记计划。
+ * 反例：旧对端不带类别 / usage / auth / 畸形类别 → 不动；豁免单再拒 → manual；去处是本机 → manual（原因码 + 单号）；observe 只记计划；
+ * epoch 之后 remote 关了 / 卡改成安全卡 → 不按 epoch 外发，转 manual（r1 审查 pool-epoch-placement-bypass）。
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -121,7 +122,7 @@ async function setup(opts: { mode?: "on" | "observe"; peerB?: Slots } = {}) {
   expect(orders()[0]).toMatchObject({ peer: HE, family: "codex", status: "pooled" });
   await claim(HE);
   expect(await setupTick()).toMatchObject({ step: "pool_claimed" });
-  return { f, tick, calls, release, claim, orders, ops, owner, approvalId: ask.id, errors };
+  return { f, pol, tick, calls, release, claim, orders, ops, owner, approvalId: ask.id, errors };
 }
 
 const policyFailure = (over: Record<string, unknown> = {}) => ({ class: "provider_policy", sessionId: "thr-1", failedAt: 5_000, ...over });
@@ -215,3 +216,22 @@ test("开关 observe：只记计划事件（mode observe），不撤单、不开
   expect(s.orders()[0].status).toBe("unknown");
   expect(s.owner()).toEqual([]);
 });
+
+// r1 审查 pool-epoch-placement-bypass：epoch 只钉家族和豁免，去处仍按现行放置约束（remote.mode / roles、安全卡只在本机审）重核
+for (const [name, change] of [
+  ["epoch 之后 remote.mode=off / roles=[]", (s: Awaited<ReturnType<typeof setup>>) => { s.pol.p.remote = { ...REMOTE, mode: "off", roles: [] }; }],
+  ["epoch 之后卡改成安全卡", (s: Awaited<ReturnType<typeof setup>>) => { s.f.db.run("UPDATE task_workflows SET template = 'security' WHERE taskId = 'T1'"); }],
+] as const) {
+  test(`${name} → 不按 epoch 外发新池单，转 manual（model_safety_hold + 单号）`, async () => {
+    const s = await setup();
+    const first = s.orders()[0].orderId;
+    await s.release(HE, policyFailure());
+    expect(await s.tick()).toMatchObject({ step: "pool_refusal" });
+    change(s);
+    const next = await s.tick();
+    expect(JSON.stringify(next)).toContain("model_safety_hold");
+    expect(JSON.stringify(next)).toContain(first);
+    expect(s.orders()).toHaveLength(1);
+    expect(s.f.intents().filter((i) => i.action === "review" && i.status !== "cancelled")).toEqual([]);
+  });
+}

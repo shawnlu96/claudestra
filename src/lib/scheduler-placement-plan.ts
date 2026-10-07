@@ -13,6 +13,7 @@ import { secReviewNoRoom } from "./scheduler-sec-review.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily } from "./ledger-scheduler.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import { PEER_PLACEMENT, peerFamily, allowLegacyReview, type PeerFacts, type PlaceRole } from "./scheduler-family-pick.js";
+import { peerRefusal } from "./scheduler-placement.js";
 import { placementHistory, placeWithRetries as placeFor, type RetryPlacementFacts as PlacementFacts } from "./scheduler-placement-tried.js";
 import { isPoolIntent, POOL_RECIPIENT, poolRefusalEpoch, poolTarget, type PoolFacts } from "./scheduler-pool-plan.js";
 import { keepsReviewer } from "./scheduler-review-swap.js";
@@ -135,6 +136,12 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   if (pinned && s.task.stage === "spec") return { code, wait: placed.kind === "peer" ? "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" : placed.reason };
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：${role === "fix" ? "修复" : "开工"}单派给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` };
   return placed.kind === "wait" ? { code, wait: placed.reason } : null;
+}
+
+/** MODELXP2：池单拒审 epoch 的去处 peer 此刻还能不能接这次审查（安全卡只在本机审；remote / 借入名单 / 对方授权按现值核），不能则给原因 */
+export function epochPeerRefusal(s: PlannerSnapshot, since: number, peer: string, family: AuthorFamily): string | null {
+  if (!s.workflow || s.workflow.template === "security") return "安全卡只在本机审";
+  return peerRefusal(snapshotPlacementFacts(s, since, "review"), s.pool?.peers.map(peerFacts).find((x) => x.peer === peer), "review", family);
 }
 
 /** The family a pool intent's order runs in: review = across from the head's writer, writing = the peer's first free family. */
